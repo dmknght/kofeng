@@ -17,6 +17,8 @@
 #define KOFENG_KOFCORE_H
 
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #include <stddef.h>
 
 typedef struct {
@@ -159,6 +161,27 @@ static inline uint32_t kof_crc32(const void *data, uint64_t len)
 			crc = (crc >> 1) ^ ((crc & 1u) ? 0xEDB88320u : 0u);
 	}
 	return ~crc;
+}
+
+/*
+ * strdup, spelled out.
+ *
+ * POSIX has it and this tree builds as strict ISO C11 - the same reason the loaders use
+ * stat() rather than fstat(fileno()).
+ */
+static inline char *kof_strdup_n(const char *s, uint64_t n)
+{
+	char *p = malloc((size_t)n + 1);
+	if (p) {
+		memcpy(p, s, (size_t)n);
+		p[n] = 0;
+	}
+	return p;
+}
+
+static inline char *kof_strdup(const char *s)
+{
+	return kof_strdup_n(s, strlen(s));
 }
 
 #endif /* KOFENG_KOFCORE_H */

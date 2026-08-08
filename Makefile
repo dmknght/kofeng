@@ -21,11 +21,28 @@ endif
 
 BUILD   := build
 
-PARSER_SRC := libkofeng/kofparser/elf/elf_parse.c
+PARSER_SRC := libkofeng/kofparsers/elf/elf_parse.c
 PARSER_OBJ := $(BUILD)/elf_parse.o
 
-MATCH_SRC := libkofeng/kofmatch/kofmatch.c
-MATCH_OBJ := $(BUILD)/kofmatch.o
+MATCH_SRC := libkofeng/kofmatchers/kofmatch.c
+MATCH_OBJ := $(BUILD)/match.o
+
+DB_SRC := libkofeng/kofdb/kofdb.c
+DB_OBJ := $(BUILD)/db.o
+
+SCAN_SRC := libkofeng/kofscanners/scan.c
+SCAN_OBJ := $(BUILD)/scan.o
+
+SCANNERS_SRC := libkofeng/kofscanners/scanners.c
+SCANNERS_OBJ := $(BUILD)/scanners.o
+
+FACADE_SRC := libkofeng/kofeng.c
+FACADE_OBJ := $(BUILD)/kofeng.o
+
+# The library the tools link against. kofdump needs only the parser, so it is not
+# listed there: a tool linking less is a tool that cannot depend on more.
+LIB_OBJ := $(PARSER_OBJ) $(MATCH_OBJ) $(DB_OBJ) $(SCAN_OBJ) \
+           $(SCANNERS_OBJ) $(FACADE_OBJ)
 
 KOFDUMP_SRC := tools/kofdump/main.c
 KOFDUMP_OBJ := $(BUILD)/kofdump_main.o
@@ -38,7 +55,19 @@ KOFRUN_OBJ := $(BUILD)/kofrun_main.o
 KOFPAT_SRC := tools/kofpat/main.c
 KOFPAT_OBJ := $(BUILD)/kofpat_main.o
 
-all: $(BUILD)/kofdump $(BUILD)/kofrun $(BUILD)/kofpat
+all: $(BUILD)/kofscanner $(BUILD)/kofdump $(BUILD)/kofrun $(BUILD)/kofpat
+
+# The scanner. Built from the public header alone, which is what keeps that header
+# honest: anything it cannot express shows up here as a compile error rather than as a
+# quiet reach into an internal include.
+SCANNER_SRC := kofscanner/kofscanner.c
+SCANNER_OBJ := $(BUILD)/kofscanner.o
+
+$(SCANNER_OBJ): $(SCANNER_SRC) | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/kofscanner: $(SCANNER_OBJ) $(LIB_OBJ)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BUILD):
 	@mkdir -p $(BUILD)
@@ -47,6 +76,18 @@ $(PARSER_OBJ): $(PARSER_SRC) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(MATCH_OBJ): $(MATCH_SRC) | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(DB_OBJ): $(DB_SRC) | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(SCAN_OBJ): $(SCAN_SRC) | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(SCANNERS_OBJ): $(SCANNERS_SRC) | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(FACADE_OBJ): $(FACADE_SRC) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(KOFPAT_OBJ): $(KOFPAT_SRC) | $(BUILD)
@@ -64,7 +105,7 @@ $(BUILD)/kofdump: $(KOFDUMP_OBJ) $(PARSER_OBJ)
 $(KOFRUN_OBJ): $(KOFRUN_SRC) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/kofrun: $(KOFRUN_OBJ) $(PARSER_OBJ) $(MATCH_OBJ)
+$(BUILD)/kofrun: $(KOFRUN_OBJ) $(LIB_OBJ)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 # Signature blobs are built by their own script with their own flag set: they

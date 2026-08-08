@@ -26,7 +26,6 @@
 #define KOFENG_KOFSIG_H
 
 #include <stdint.h>
-#include <kofeng/kofpat.h>
 
 /*
  * ABI version. Append only: slots are never removed, reordered, or given new
@@ -289,6 +288,28 @@ struct kof_obj_ctx {
 void kof_scan(const struct kof_obj_ctx *ctx);
 
 /*
+ * Look for a declared string in a declared range.
+ *
+ *     if (kof_find_str(ctx, busybox, loaded)) ...
+ *
+ * Both names resolve through identifiers the generator defines from the
+ * KOF_DEFINE_STR and KOF_DEFINE_RANGE declarations, which the build injects. A name
+ * that was never declared is an undefined identifier at compile time rather than a
+ * lookup that quietly returns false - the failure mode to want, since a signature
+ * that silently never matches looks exactly like one that works.
+ *
+ * No search happens in the module: the host owns the literals and answers this,
+ * which is what allows one pass over the object to serve every module.
+ */
+#define KOF_PASTE2(a, b) a##b
+#define KOF_PASTE(a, b)  KOF_PASTE2(a, b)
+
+#define kof_find_str(ctx, str_name, range_name)                    \
+	((ctx)->content->find_str((ctx),                           \
+		KOF_PASTE(kof_strid_, str_name),                   \
+		KOF_PASTE(kof_rangeid_, range_name)))
+
+/*
  * Declare which object formats this module applies to.
  *
  *     KOF_TARGET(KOF_FMT_ELF);
@@ -420,7 +441,7 @@ enum kof_str_word {
  * rather than one pass per module. Nothing about a module holding its own pattern
  * bytes can be batched away.
  *
- * At most 64 strings and 64 ranges per module.
+ * At most KOF_MAX_STR_PER_MODULE strings and KOF_MAX_RANGE_PER_MODULE ranges.
  */
 #define KOF_DEFINE_STR(name, lit, casing, word)
 
@@ -462,5 +483,89 @@ enum kof_str_word {
 		(ctx)->cont((ctx));                                    \
 		return;                                                \
 	} while (0)
+
+/*
+ * ---------------------------------------------------------------------------
+ * Compiled pattern format.
+ *
+ * Here rather than in a header of its own because it is the vocabulary of what a
+ * declared pattern can be - literal now, hex with wildcards and gaps later - and that
+ * vocabulary is part of what a signature is written in. The generator writes this form
+ * and the matcher reads it; a module never sees it, because a module holds an index and
+ * the host owns the bytes.
+ *
+ * Nothing in a compiled set is a pointer: fragments refer to their bytes by offset from
+ * the start of the array. Today's generator emits only the simplest case. The rest is
+ * defined now because changing a format later means changing every built blob, and
+ * because multi-pattern search - one pass answering many strings - needs a shape to
+ * carry them in.
+ */
+
+#define KOF_PAT_FORMAT_VERSION 1
+
+/*
+ * Caps on what one module may declare.
+ *
+ * The reason is the host's search memo, which is n_str x n_rng bytes per module: a
+ * product, so both factors have to be bounded or one module with many of each costs
+ * more than the rest of the database. At 64 each that is 4KB in the worst case and two
+ * bytes in the common one.
+ *
+ */
+#define KOF_MAX_STR_PER_MODULE   64
+#define KOF_MAX_RANGE_PER_MODULE 64
+
+/* Per-pattern flags. */
+enum {
+	KOF_PATF_IGNORE_CASE = 1u << 0, /* fold ASCII case on both sides */
+	KOF_PATF_HAS_MASK    = 1u << 1, /* fragment data is val[] then mask[] */
+	KOF_PATF_NEGATE      = 1u << 2, /* reserved: see note below */
+	KOF_PATF_FULLWORD    = 1u << 3  /* neighbours must not be [A-Za-z0-9_] */
+};
+
+/*
+ * KOF_PATF_NEGATE is reserved, not implemented. Declaring a pattern as must-not-match
+ * lets the matcher stop the moment it finds one, which "!kof_find_str(...)" cannot
+ * express - that has to scan the whole region to prove absence. Reserved now so
+ * adding it later is not a format change.
+ */
+
+/*
+ * Layout, all little endian, offsets from the start of the array:
+ *
+ *   0   u8    version        KOF_PAT_FORMAT_VERSION
+ *   1   u8    npat           1 .. KOF_PAT_MAX_IN_SET
+ *   2   u16   total_len      size of the whole array, for a self-check
+ *   4   struct kof_pat_desc[npat]
+ *   ..  struct kof_pat_frag[sum of nfrag]
+ *   ..  fragment bytes
+ *
+ * Both tables are fixed size records so the matcher can index them without
+ * walking, and a truncated or forged array fails the bounds check rather than
+ * being followed.
+ */
+struct kof_pat_hdr {
+	uint8_t  version;
+	uint8_t  npat;
+	uint16_t total_len;
+};
+
+struct kof_pat_desc {
+	uint8_t  flags;      /* KOF_PATF_* */
+	uint8_t  nfrag;
+	uint16_t frag_off;   /* offset of this pattern's first kof_pat_frag */
+};
+
+/*
+ * gap_min/gap_max are the distance allowed between the end of the previous
+ * fragment and the start of this one. Both zero for the first fragment, and for
+ * a plain literal, which is one fragment with no gap.
+ */
+struct kof_pat_frag {
+	uint16_t gap_min;
+	uint16_t gap_max;
+	uint16_t data_off;   /* offset of this fragment's bytes */
+	uint16_t data_len;   /* bytes of val; doubled on disk if HAS_MASK */
+};
 
 #endif /* KOFENG_KOFSIG_H */

@@ -13,9 +13,9 @@
 #ifndef KOFENG_ELF_PARSE_H
 #define KOFENG_ELF_PARSE_H
 
-#include <kofeng/elf.h>
-#include <kofeng/kofsig.h>
-#include "../../core/kofcore.h"
+#include <kofmod/elf.h>
+#include <kofmod/kofsig.h>
+#include "../core/kofcore.h"
 
 /*
  * Returns non-zero if the object is ELF at all (magic matched), zero otherwise.

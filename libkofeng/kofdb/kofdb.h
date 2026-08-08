@@ -1,0 +1,149 @@
+/*
+ * kofdb.h - the loaded database.
+ *
+ * Turns whatever the database is on disk into a kof_engine: module code mapped
+ * executable, plus the tables the host needs to decide which modules to run and
+ * what to call a finding.
+ *
+ * Not scan logic. Nothing here looks at an object under scan; it only materialises
+ * the database. The split matters for two reasons:
+ *
+ *   - a kof_engine is immutable once loaded, so one can be shared by every thread.
+ *     Our modules make that genuinely safe rather than safe by convention: they
+ *     have no writable data and need no relocation, so the mapped code is read-only
+ *     and position independent.
+ *   - the mutable, expensive per-scan state - the presence table, the memo, the
+ *     match context - belongs to the scanner and is allocated per thread. Keeping
+ *     it out of here is what stops a 32MB table from being paid per file.
+ */
+
+#ifndef KOFENG_KOFDB_H
+#define KOFENG_KOFDB_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include <kofmod/kofsig.h>
+#include "../core/kofcore.h"   /* kof_strdup */
+
+typedef void (*kof_scan_fn)(const struct kof_obj_ctx *);
+
+/*
+ * One declared string, as the host needs it.
+ *
+ * The literal lives here and not in the blob, which is what allows the host to
+ * search on the module's behalf - and therefore to answer many modules' strings in
+ * one pass rather than each module scanning for itself.
+ */
+#define KOF_STR_MAX_LEN 512
+
+struct kof_str_ent {
+	uint8_t  icase;
+	uint8_t  fullword;
+	uint16_t len;
+	uint8_t  bytes[KOF_STR_MAX_LEN];
+};
+
+struct kof_name_ent {
+	uint32_t id;
+	char     text[192];
+};
+
+/*
+ * One loaded module.
+ *
+ * Everything except fn is a precondition or a table slice - that is, everything the
+ * host needs in order to decide *not* to call fn. At database scale the interesting
+ * number is how many modules can be ruled out per object without being entered, so
+ * the record has to carry enough to rule them out.
+ *
+ * The preconditions come from the build: target, size and arch are declared in the
+ * source, scan_mask is derived from the searches the module contains. None of them
+ * requires reading the blob.
+ *
+ * The slices index shared tables rather than owning arrays. Inline arrays were tried
+ * and were a mistake worth recording: at 64 name entries of 196 bytes each, the table
+ * cost 12.5KB per module whether or not the module had two names, so eight thousand
+ * modules would have spent 100MB on name storage alone - the dominant term in any
+ * memory measurement.
+ */
+struct kof_module {
+	kof_scan_fn fn;
+
+	uint32_t target_mask;
+	uint32_t scan_mask;   /* 0: names no region, so cannot be skipped that way */
+	uint64_t size_min;    /* 0: no minimum. No maximum by design - see
+			       * KOF_FILESIZE_MIN in kofsig.h. */
+	uint32_t arch_mask;   /* 0: any architecture */
+
+	uint32_t name_base, n_names;
+	uint32_t str_base,  n_str;
+	uint32_t rng_base,  n_rng;
+
+	/*
+	 * Where this module's search memo starts. Per module, because a string belongs
+	 * to exactly one module and can only be asked about that module's ranges - so
+	 * the reachable slots are n_str x n_rng of *this* module, a couple of bytes in
+	 * practice. Indexing one shared memo by global string and global range instead
+	 * is n_str x n_rng of the whole database, which at 4000 modules was 23.8MB
+	 * cleared per object and doubled the scan.
+	 */
+	uint32_t memo_base;
+};
+
+/*
+ * The database, materialised. Immutable once kof_db_load returns.
+ *
+ * The code arena is deliberately never unmapped: the module table holds function
+ * pointers into it for the life of the engine.
+ */
+struct kof_engine {
+	uint8_t *code;        /* arena base, mapped read + execute */
+	size_t   code_cap;
+
+	struct kof_module   *mods;
+	uint32_t             n_mods;
+
+	struct kof_str_ent  *str_tab;
+	uint32_t             n_str;
+
+	uint32_t            *rng_tab;   /* a range is just a region mask, but named */
+	uint32_t             n_rng;
+
+	struct kof_name_ent *name_tab;
+	uint32_t             n_name;
+
+	/* Sum of every module's memo slice; what the scanner allocates and clears. */
+	uint32_t memo_size;
+
+	/*
+	 * Every region any module names, OR-ed together.
+	 *
+	 * Lets the scanner resolve only the regions somebody asked about. Without it,
+	 * each object pays for every region the format defines - and one of them,
+	 * KOF_SCAN_ELF_UNCLAIMED, is a complement: it builds the whole claimed set and
+	 * sorts it. Paying for that on every object when no module names it is the kind
+	 * of cost that hides because it is spread evenly.
+	 */
+	uint32_t scan_mask;
+};
+
+/*
+ * Load from a single .blob or a directory of them.
+ *
+ * Loose files for now: <name>.blob plus the .meta, .strs and .names the build emits
+ * beside it. A packed container replaces this without changing anything above, which
+ * is why the format is not exposed here.
+ *
+ * Returns NULL if nothing loaded.
+ */
+struct kof_engine *kof_db_load(const char *path);
+void               kof_db_free(struct kof_engine *);
+
+/* Resolve a name id reported by a module. NULL if the table is out of step with the
+ * blob, which is the failure mode to want: "unknown" rather than another family's
+ * name. */
+const char *kof_db_name(const struct kof_engine *, const struct kof_module *,
+			uint32_t name_id);
+
+#endif /* KOFENG_KOFDB_H */
