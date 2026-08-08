@@ -1,0 +1,12 @@
+# Everything the build produces. Nothing under here is source: object files, the
+# host tools, signature blobs and their record files, and the synthetic population
+# the measurement scripts generate.
+build/
+abi/
+signature/
+tests/
+
+# Editor and OS droppings.
+*.swp
+*~
+.DS_Store
