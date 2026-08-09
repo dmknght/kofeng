@@ -94,7 +94,17 @@ static long arena_add(struct builder *b, const uint8_t *blob, size_t len)
 	return (long)off;
 }
 
-static uint8_t *read_whole(const char *path, size_t *out_len)
+/*
+ * Read a whole file, refusing one that is too big to be what we are reading.
+ *
+ * The cap is checked against the stat size, before the allocation rather than after
+ * the read: a database directory is a directory, and anything at all can be dropped
+ * into it under a name ending in .blob. Allocating first and judging the contents
+ * afterwards means an 8GB file named *.blob costs 8GB of address space to find out it
+ * was never a blob - measured, and it also doubles because the arena is sized from the
+ * same st_size. Deciding from the size alone costs a stat.
+ */
+static uint8_t *read_whole(const char *path, size_t cap, size_t *out_len)
 {
 	struct stat st;
 	uint8_t *buf;
@@ -104,6 +114,11 @@ static uint8_t *read_whole(const char *path, size_t *out_len)
 	 * strict ISO C11 so the library stays portable. */
 	if (stat(path, &st) != 0 || st.st_size <= 0)
 		return NULL;
+	if ((uint64_t)st.st_size > (uint64_t)cap) {
+		fprintf(stderr, "kofdb: %s: %llu bytes is too large for a blob\n",
+			path, (unsigned long long)st.st_size);
+		return NULL;
+	}
 	f = fopen(path, "rb");
 	if (!f)
 		return NULL;
@@ -289,16 +304,31 @@ static void strs_load(struct builder *b, struct kof_module *m, const char *bp)
 }
 
 /*
- * Preconditions.
+ * Preconditions, and the record that says these bytes are a module at all.
  *
- * A missing or empty field means unconstrained, and that is the safe direction: an
- * unconstrained module gets run, so a stale or absent record costs time rather than
- * detections. Defaulting to a constraint would silently stop running modules, which
- * no test would notice.
+ * Mandatory, and that is the whole point of it. The blob is raw code entered at
+ * offset 0, so the loader has no way to look at the bytes and tell a module from
+ * anything else - a stray 200 byte file named *.blob was copied into executable
+ * memory and called, which is a crash at best. The build emits .meta beside every
+ * blob it produces, so its absence means the build did not produce this file.
+ * Refusing then is not a policy choice, it is the only evidence available.
+ *
+ * `blob_len` is checked against what was actually read: it catches a truncated or
+ * half written blob paired with an intact record. It is an integrity check, not an
+ * authenticity one - anyone who can write the blob can write the record beside it,
+ * so the boundary here is the permissions on the database directory. Authenticity
+ * belongs to the signed container that replaces these loose files.
+ *
+ * Within a record that exists, a missing field still means unconstrained, and that
+ * is the safe direction: an unconstrained module gets run, so a stale field costs
+ * time rather than detections.
+ *
+ * Zero on refusal.
  */
-static void meta_load(struct kof_module *m, const char *bp)
+static int meta_load(struct kof_module *m, const char *bp, size_t blob_len)
 {
 	char path[4096], line[128];
+	uint64_t want_len = 0;
 	FILE *f;
 
 	m->target_mask = 0xffffffffu;
@@ -307,12 +337,12 @@ static void meta_load(struct kof_module *m, const char *bp)
 	m->arch_mask   = 0;
 
 	if (!sibling_path(bp, ".meta", path, sizeof path))
-		return;
+		return 0;
 	f = fopen(path, "r");
 	if (!f) {
-		fprintf(stderr, "kofdb: no precondition table at %s; assuming "
-				"the module applies to everything\n", path);
-		return;
+		fprintf(stderr, "kofdb: %s has no .meta beside it, so it is not "
+				"something the build produced; refused\n", bp);
+		return 0;
 	}
 	while (fgets(line, sizeof line, f)) {
 		if (strncmp(line, "target=", 7) == 0)
@@ -323,10 +353,26 @@ static void meta_load(struct kof_module *m, const char *bp)
 			m->size_min = strtoull(line + 9, 0, 10);
 		else if (strncmp(line, "arch_mask=", 10) == 0)
 			m->arch_mask = (uint32_t)strtoul(line + 10, 0, 10);
+		else if (strncmp(line, "blob_len=", 9) == 0)
+			want_len = strtoull(line + 9, 0, 10);
 	}
 	fclose(f);
+
+	if (want_len == 0) {
+		fprintf(stderr, "kofdb: %s: the record beside it declares no "
+				"blob_len; refused\n", bp);
+		return 0;
+	}
+	if (want_len != (uint64_t)blob_len) {
+		fprintf(stderr, "kofdb: %s: %zu bytes, but the record beside it "
+				"says %llu; refused\n", bp, blob_len,
+			(unsigned long long)want_len);
+		return 0;
+	}
+
 	if (m->target_mask == 0)
 		m->target_mask = 0xffffffffu;
+	return 1;
 }
 
 /* Collect *.blob from a directory so a whole set can be named at once. */
@@ -339,7 +385,7 @@ static int collect_blobs(struct builder *b, const char *dir)
 	if (!d)
 		return 0;
 	while ((de = readdir(d)) != NULL) {
-		size_t l = strlen(de->d_name);
+		size_t l = strlen(de->d_name), n;
 		char *p;
 		if (l < 6 || strcmp(de->d_name + l - 5, ".blob") != 0)
 			continue;
@@ -351,10 +397,14 @@ static int collect_blobs(struct builder *b, const char *dir)
 			b->paths = nv;
 			cap = nc;
 		}
-		p = malloc(strlen(dir) + l + 2);
+		/* snprintf with the size it was allocated from, not sprintf: the
+		 * arithmetic is exact today, and the point is that it stays checked
+		 * where it is written rather than in a separate line above it. */
+		n = strlen(dir) + l + 2;
+		p = malloc(n);
 		if (!p)
 			break;
-		sprintf(p, "%s/%s", dir, de->d_name);
+		snprintf(p, n, "%s/%s", dir, de->d_name);
 		b->paths[b->n_paths++] = p;
 	}
 	closedir(d);
@@ -392,8 +442,16 @@ struct kof_engine *kof_db_load(const char *path)
 		goto fail;
 	}
 
+	/*
+	 * Size the arena from the files, but only from the ones that could be blobs.
+	 * A file over the cap is going to be refused below, so counting it here would
+	 * reserve address space for a module that never loads - and since anyone can
+	 * drop anything into a database directory, that turns one large file into an
+	 * arbitrarily large mapping. The 64 is per-blob alignment slack.
+	 */
 	for (i = 0; i < b.n_paths; i++)
-		if (stat(b.paths[i], &sb) == 0)
+		if (stat(b.paths[i], &sb) == 0 && sb.st_size > 0 &&
+		    (uint64_t)sb.st_size <= (uint64_t)KOF_BLOB_MAX_CODE)
 			total += (size_t)sb.st_size + 64;
 	if (!arena_open(&b, total ? total : 4096)) {
 		fprintf(stderr, "kofdb: cannot reserve the code arena\n");
@@ -411,12 +469,19 @@ struct kof_engine *kof_db_load(const char *path)
 		size_t len;
 		long off;
 
-		blob = read_whole(b.paths[i], &len);
+		blob = read_whole(b.paths[i], KOF_BLOB_MAX_CODE, &len);
 		if (!blob) {
 			fprintf(stderr, "kofdb: cannot read %s\n", b.paths[i]);
 			continue;
 		}
-		if (!blob_plausible(blob, len, b.paths[i])) {
+		/*
+		 * Everything that can refuse these bytes runs before they reach
+		 * executable memory. The arena is made executable as a whole later,
+		 * so a blob copied in is a blob that will be entered; there is no
+		 * second chance to change our mind about it further down.
+		 */
+		if (!blob_plausible(blob, len, b.paths[i]) ||
+		    !meta_load(m, b.paths[i], len)) {
 			free(blob);
 			continue;
 		}
@@ -430,7 +495,6 @@ struct kof_engine *kof_db_load(const char *path)
 		/* Entry offset is zero within each blob; build.sh asserts it. */
 		m->fn = (kof_scan_fn)(void *)(b.e.code + off);
 		names_load(&b, m, b.paths[i]);
-		meta_load(m, b.paths[i]);
 		strs_load(&b, m, b.paths[i]);
 
 		/* Assigned after strs_load, which is what knows the counts. */
