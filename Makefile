@@ -113,7 +113,13 @@ $(BUILD)/ksigbuilder: ksigbuilder/ksigbuilder.c $(LIB)
 # depend on another, xargs already knows how to run N at a time, and a --jobs
 # flag in a C program would be a second implementation of one shell word.
 
-SIGDIR    ?= signature
+# signatures/ holds detections meant to run on somebody's machine; signature/ holds
+# the ones that exist to exercise the engine. The default is the real set, because a
+# default pointing at the test set is a default that ships wrong exactly once.
+#
+#   make db                     the real signatures
+#   make db SIGDIR=signature    the test set
+SIGDIR    ?= signatures
 SIGS      := $(wildcard $(SIGDIR)/*.c)
 JOBS      ?= 8
 ARTEFACTS ?= $(BUILD)/sig
