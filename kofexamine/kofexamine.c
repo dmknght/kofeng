@@ -116,7 +116,8 @@ static const uint32_t elf_regions[] = {
 };
 static const uint32_t pe_regions[] = {
 	KOF_SCAN_PE_HEADERS, KOF_SCAN_PE_CODE, KOF_SCAN_PE_DATA,
-	KOF_SCAN_PE_SIGNATURE, KOF_SCAN_PE_OVERLAY, KOF_SCAN_PE_UNCLAIMED
+	KOF_SCAN_PE_RESOURCE, KOF_SCAN_PE_SIGNATURE, KOF_SCAN_PE_OVERLAY,
+	KOF_SCAN_PE_UNCLAIMED
 };
 
 static int elf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)

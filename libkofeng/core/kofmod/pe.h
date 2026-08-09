@@ -83,14 +83,71 @@ enum kof_scan_pe {
 	KOF_SCAN_PE_HEADERS   = 1u << 1,  /* [0, e_lfanew) plus the PE signature,
 					   * COFF header, optional header with its
 					   * data directories, and section table */
+	/*
+	 * CODE and DATA keep the names a signature author already thinks in - the
+	 * string is in the data, the call is in the code - while the definition
+	 * below is what actually selects them. PE has no "code segment"; it has
+	 * sections, and this is the set of them the loader will execute.
+	 *
+	 * Selected by IMAGE_SCN_MEM_EXECUTE, never by name. A section called .text
+	 * with characteristics 0xc0000040 - writable, not executable - is in this
+	 * corpus, so the distinction is not hypothetical. Tier 1.
+	 */
 	KOF_SCAN_PE_CODE      = 1u << 2,  /* sections with MEM_EXECUTE */
-	KOF_SCAN_PE_DATA      = 1u << 3,  /* sections with file bytes, not executable */
+	KOF_SCAN_PE_DATA      = 1u << 3,  /* sections with file bytes, not executable,
+					   * less whatever RESOURCE takes */
 	KOF_SCAN_PE_SIGNATURE = 1u << 4,  /* the attribute certificate table */
 	KOF_SCAN_PE_OVERLAY   = 1u << 5,  /* past the last claimed byte */
-	KOF_SCAN_PE_UNCLAIMED = 1u << 6   /* the complement: alignment slack, gaps,
+	KOF_SCAN_PE_UNCLAIMED = 1u << 6,  /* the complement: alignment slack, gaps,
 					   * anything a directory points outside a
 					   * section */
+
+	/*
+	 * What DataDirectory[RESOURCE] covers, carved out of the non-executable
+	 * sections it normally sits inside.
+	 *
+	 * Appended rather than renumbered: a region bit ends up in the .meta
+	 * record of every blob already built, so changing an existing value would
+	 * silently repoint every signature that names one.
+	 *
+	 * This is the one region where narrowing changes the order of the cost
+	 * rather than trimming it. Measured on the corpus: resources are 61.3% of
+	 * a GUI binary's bytes and 0.5% of a console one's, and a single sample
+	 * (radmin.exe) is 87.5% resource. Scoping a search to the code of such a
+	 * file, or to the resources of it, is the difference between reading most
+	 * of the file and reading almost none.
+	 *
+	 * Tier 2 (see the note on anchors below): nothing has to read this
+	 * directory for the image to load, so a file can lie about it without
+	 * failing to run. When the range does not resolve, the region is empty and
+	 * the bytes stay with the section - never a guess.
+	 */
+	KOF_SCAN_PE_RESOURCE  = 1u << 7
 };
+
+/*
+ * WHAT A REGION BOUNDARY IS ANCHORED ON
+ *
+ * A boundary is worth exactly as much as the field that defines it, and fields
+ * differ enormously in how freely a file can lie about them. Three tiers, and
+ * every region below says which one it stands on:
+ *
+ *   tier 1  the loader must read it correctly or the file does not run.
+ *           e_lfanew, the COFF and optional headers, the section table with its
+ *           Characteristics. A lie here changes what executes.
+ *   tier 2  the system reads it later, or only for some feature. The data
+ *           directories. A lie breaks a feature, not the load.
+ *   tier 3  nothing is required to read it. Section names, and in ELF the
+ *           entire section header table. A lie is free.
+ *
+ * Demonstrated rather than asserted: removing the section header table from a
+ * working binary leaves it running, leaves CODE and DATA identical to the byte,
+ * and makes every tier 3 region vanish.
+ *
+ * Regions are built from tier 1 wherever possible. Tier 2 is used when the payoff
+ * is large and the structure unambiguous. Tier 3 is never a boundary - it is
+ * evidence, and evidence belongs in the view and the anomaly bits.
+ */
 
 /*
  * Every region except the complement.
@@ -101,8 +158,8 @@ enum kof_scan_pe {
  * and cannot be in it.
  */
 #define KOF_SCAN_PE_CLAIMED (KOF_SCAN_PE_HEADERS | KOF_SCAN_PE_CODE |	\
-			     KOF_SCAN_PE_DATA | KOF_SCAN_PE_SIGNATURE |	\
-			     KOF_SCAN_PE_OVERLAY)
+			     KOF_SCAN_PE_DATA | KOF_SCAN_PE_RESOURCE |	\
+			     KOF_SCAN_PE_SIGNATURE | KOF_SCAN_PE_OVERLAY)
 
 /* Section permissions, from IMAGE_SCN_MEM_*. Same bit meanings as the ELF view's
  * KOF_PERM_*, which is why they are spelled the same way. */
@@ -197,7 +254,17 @@ enum {
 	KOF_PE_ANOM_STUB_OVERSIZED    = 1ull << 22, /* the gap before the NT headers */
 	KOF_PE_ANOM_STUB_NONSTANDARD  = 1ull << 23,
 	KOF_PE_ANOM_SUMMARY_MISMATCH  = 1ull << 24, /* SizeOfCode against the sections */
-	KOF_PE_ANOM_DEBUG_OUTSIDE_SEC = 1ull << 25
+	KOF_PE_ANOM_DEBUG_OUTSIDE_SEC = 1ull << 25,
+
+	/*
+	 * The resource directory does not begin where a section does.
+	 *
+	 * In every file measured it starts exactly at the front of its section,
+	 * which is what lets the region be carved out by a front trim. One that
+	 * starts mid-section is describing bytes a section already owns; the
+	 * section keeps them, the region comes back empty, and this says why.
+	 */
+	KOF_PE_ANOM_RSRC_UNALIGNED    = 1ull << 26
 };
 
 struct kof_pe_sec {
@@ -292,6 +359,10 @@ struct kof_pe_info {
 
 	/* Past the last byte any section, header or certificate claimed. */
 	uint64_t overlay_off, overlay_len;
+
+	/* The resource directory as a file range, already resolved from its RVA.
+	 * Zero length when the directory is absent or does not resolve. */
+	uint64_t res_off, res_len;
 
 	uint64_t anomalies;
 

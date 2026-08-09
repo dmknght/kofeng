@@ -55,6 +55,32 @@ enum {
 			      KOF_SCAN_ELF_DATA | KOF_SCAN_ELF_NOLOAD)
 
 /*
+ * WHAT EACH REGION IS ANCHORED ON
+ *
+ * A boundary is worth what the field defining it is worth, and a file can lie
+ * about some fields for free. See the same note in pe.h for the three tiers.
+ *
+ *   CODE, DATA   tier 1. PT_LOAD and its permission bits; the kernel must read
+ *                these or the file does not run.
+ *   HEADERS      tier 1 for the ELF header and program header table; tier 3 for
+ *                the section header table it also covers.
+ *   NOLOAD       tier 3, entirely. It is defined by the section header table,
+ *                which nothing is required to read. A signature narrowed to
+ *                NOLOAD finds nothing on a binary whose section table was
+ *                stripped - and stripping it leaves the binary running.
+ *                Demonstrated: zeroing e_shoff, e_shentsize and e_shnum in
+ *                /bin/ls leaves it working, leaves CODE and DATA identical to
+ *                the byte, and takes NOLOAD from 7076 bytes to nothing.
+ *   UNCLAIMED    inherits the weakest tier of whatever it is the complement of.
+ *
+ * There is no resource region here and that is not an oversight. ELF has no
+ * structural equivalent of a data directory: GResource arrives as sections named
+ * .gresource.*, which is tier 3, and measures 1.4% of section bytes across 401
+ * binaries against 61.3% for resources in a GUI PE. Neither the anchor nor the
+ * payoff is there.
+ */
+
+/*
  * Region permissions. Not in kofsig.h because what carries them differs by
  * format: here it is a PT_LOAD segment, in PE it is a section.
  */

@@ -139,6 +139,9 @@ static uint32_t pe_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 				kof_rl_add(&l, ctx->obj_size, p->sec[i].claim_off,
 					   p->sec[i].claim_len);
 
+	if (mask & KOF_SCAN_PE_RESOURCE)
+		kof_rl_add(&l, ctx->obj_size, p->res_off, p->res_len);
+
 	if (mask & KOF_SCAN_PE_SIGNATURE)
 		kof_rl_add(&l, ctx->obj_size, p->cert_off, p->cert_len);
 
@@ -309,9 +312,45 @@ static void read_sections(kof_buf file, struct kof_pe_info *p, uint64_t sectab)
  *
  * Returns the first offset past everything claimed.
  */
+/*
+ * The resource directory as a file range.
+ *
+ * Its address is an RVA like every directory except the certificate one, so it
+ * needs the section table to become an offset - which is why this runs after the
+ * sections are read and before ownership is settled.
+ *
+ * Length is clipped to what the containing section actually holds. A directory
+ * declaring more than its section has is describing bytes that are not there, and
+ * following it would hand a scan a range past the end of the file.
+ */
+/* Tags outside the section index space, so a settled claim says what it was. */
+#define HDR_TAG (KOF_PE_MAX_SECTIONS)
+#define RES_TAG (KOF_PE_MAX_SECTIONS + 1)
+
+static void resolve_resource(struct kof_pe_info *p, uint64_t obj_size)
+{
+	uint64_t rva, len, off;
+
+	p->res_off = p->res_len = 0;
+	if (p->n_dirs <= KOF_PE_DIR_RESOURCE)
+		return;
+	rva = p->dir[KOF_PE_DIR_RESOURCE].rva;
+	len = p->dir[KOF_PE_DIR_RESOURCE].size;
+	if (!rva || !len)
+		return;
+
+	off = kof_pe_rva_to_off(p, rva);
+	if (off == KOF_BROKEN || off >= obj_size)
+		return;
+	if (len > obj_size - off)
+		len = obj_size - off;
+	p->res_off = off;
+	p->res_len = len;
+}
+
 static uint64_t settle_claims(struct kof_pe_info *p, uint64_t obj_size)
 {
-	struct kof_claim c[KOF_PE_MAX_SECTIONS + 1];
+	struct kof_claim c[KOF_PE_MAX_SECTIONS + 2];
 	const uint32_t cap = (uint32_t)(sizeof c / sizeof c[0]);
 	uint32_t n = 0, i;
 	uint64_t end = 0;
@@ -325,27 +364,64 @@ static uint64_t settle_claims(struct kof_pe_info *p, uint64_t obj_size)
 	c[n].off = 0;
 	c[n].len = p->header_end;
 	c[n].rank = 0;
-	c[n].tag = KOF_PE_MAX_SECTIONS;         /* not a section index */
+	c[n].tag = HDR_TAG;
 	n++;
+
+	/*
+	 * The resource directory outranks the section it sits in, so that at the
+	 * same offset the more specific claim takes the bytes and the section is
+	 * left with the alignment tail. Measured: it starts exactly at the front
+	 * of its section in every file here, which is what makes a front trim
+	 * enough to separate them.
+	 */
+	if (p->res_len) {
+		c[n].off = p->res_off;
+		c[n].len = p->res_len;
+		c[n].rank = 1;
+		c[n].tag = RES_TAG;
+		n++;
+	}
 
 	for (i = 0; i < p->sec_count && n < cap; i++) {
 		if (!p->sec[i].file_size)
 			continue;
 		c[n].off = p->sec[i].file_off;
 		c[n].len = p->sec[i].file_size;
-		c[n].rank = 1;
+		c[n].rank = 2;
 		c[n].tag = i;
 		n++;
 	}
 
 	kof_rl_settle(c, n, obj_size);
 
+	/*
+	 * kof_rl_settle leaves the array in offset order, so the claimant that
+	 * trimmed a given one is simply the one before it. That matters for the
+	 * anomaly: a section trimmed by the resource directory is the normal case
+	 * - the directory sits at the front of its own section - while a section
+	 * trimmed by another section or by the headers is a real collision.
+	 *
+	 * Flagging every trim was the first version and it fired on every file
+	 * carrying resources, which is the same way of being useless as an anomaly
+	 * that fires on half a clean corpus.
+	 */
 	for (i = 0; i < n; i++) {
 		uint64_t e = kof_sat_add(c[i].got_off, c[i].got_len);
+		int trimmed = c[i].got_len != c[i].len;
+		int by_resource = i > 0 && c[i - 1].tag == RES_TAG;
 
-		if (c[i].got_len && c[i].got_len != c[i].len)
-			p->anomalies |= KOF_PE_ANOM_SEC_OVERLAP;
-		if (c[i].tag < KOF_PE_MAX_SECTIONS) {
+		if (c[i].tag == RES_TAG) {
+			/* The directory did not begin where a section does, so a
+			 * section already owned the bytes. Recorded rather than
+			 * worked around. */
+			if (trimmed) {
+				p->anomalies |= KOF_PE_ANOM_RSRC_UNALIGNED;
+				p->res_off = c[i].got_off;
+				p->res_len = c[i].got_len;
+			}
+		} else if (c[i].tag < KOF_PE_MAX_SECTIONS) {
+			if (trimmed && c[i].got_len && !by_resource)
+				p->anomalies |= KOF_PE_ANOM_SEC_OVERLAP;
 			p->sec[c[i].tag].claim_off = c[i].got_off;
 			p->sec[c[i].tag].claim_len = c[i].got_len;
 		}
@@ -536,6 +612,7 @@ int kof_pe_parse(kof_buf file, struct kof_pe_info *info, struct kof_obj_ctx *ctx
 		info->anomalies |= KOF_PE_ANOM_SIZEOFHDR_ODD;
 
 	read_sections(file, info, sectab);
+	resolve_resource(info, file.n);
 	last_end = settle_claims(info, file.n);
 	resolve_entry(info, ctx);
 
@@ -608,6 +685,7 @@ const char *kof_pe_region_name(uint32_t bit)
 	case KOF_SCAN_PE_SIGNATURE: return "KOF_SCAN_PE_SIGNATURE";
 	case KOF_SCAN_PE_OVERLAY:   return "KOF_SCAN_PE_OVERLAY";
 	case KOF_SCAN_PE_UNCLAIMED: return "KOF_SCAN_PE_UNCLAIMED";
+	case KOF_SCAN_PE_RESOURCE:  return "KOF_SCAN_PE_RESOURCE";
 	default:                    return 0;
 	}
 }
@@ -621,7 +699,8 @@ const char *kof_pe_anomaly_name(unsigned index)
 		"SEC_ZERO_RAW", "SEC_WRITE_EXEC", "SECNAME_OBJFORM", "SIZEOFHDR_ODD",
 		"ENTRY_ZERO", "ENTRY_UNMAPPED", "ENTRY_NOT_EXEC", "ENTRY_ZEROFILL",
 		"CERT_PAST_EOF", "DIR_COUNT_ODD", "STUB_OVERSIZED",
-		"STUB_NONSTANDARD", "SUMMARY_MISMATCH", "DEBUG_OUTSIDE_SEC"
+		"STUB_NONSTANDARD", "SUMMARY_MISMATCH", "DEBUG_OUTSIDE_SEC",
+		"RSRC_UNALIGNED"
 	};
 
 	return index < sizeof n / sizeof n[0] ? n[index] : 0;
