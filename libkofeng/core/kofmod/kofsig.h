@@ -105,6 +105,43 @@ enum kof_arch {
 };
 
 /*
+ * Names for the two common enums, next to the enums themselves.
+ *
+ * Here because more than one place needs them and they are the only correct spelling:
+ * a finding is labelled with them and so is a fact dump, and two copies drift. They
+ * were duplicated in the scanner and in kofdump before this.
+ *
+ * Inline rather than a .c file: they are switch statements over an enum this header
+ * already declares, so anything that has the enum has all it needs.
+ */
+static inline const char *kof_format_name(uint8_t fmt)
+{
+	switch (fmt) {
+	case KOF_FMT_ELF:    return "ELF";
+	case KOF_FMT_PE:     return "PE";
+	case KOF_FMT_MACHO:  return "MachO";
+	case KOF_FMT_SCRIPT: return "Script";
+	case KOF_FMT_TEXT:   return "Text";
+	default:             return "Unknown";
+	}
+}
+
+static inline const char *kof_arch_name(uint8_t arch)
+{
+	switch (arch) {
+	case KOF_ARCH_X86:     return "x86";
+	case KOF_ARCH_X86_64:  return "x86_64";
+	case KOF_ARCH_ARM:     return "arm";
+	case KOF_ARCH_ARM64:   return "arm64";
+	case KOF_ARCH_RISCV64: return "riscv64";
+	case KOF_ARCH_MIPS:    return "mips";
+	case KOF_ARCH_PPC64:   return "ppc64";
+	case KOF_ARCH_ANY:     return "any";
+	default:               return "other";
+	}
+}
+
+/*
  * Which part of the object to search.
  *
  * A module names a region and never computes a range, which removes the class of bug
@@ -257,9 +294,6 @@ struct kof_obj_ctx {
 	 */
 	void (*report)(const struct kof_obj_ctx *ctx, uint32_t level,
 		       uint32_t name_id);
-
-	/* See KOF_CONTINUE_SCAN. */
-	void (*cont)(const struct kof_obj_ctx *ctx);
 
 	/* Host state the accessors need. Opaque, and no module has any reason to
 	 * touch it; it is here so the accessors can take the context rather than
@@ -465,22 +499,6 @@ enum kof_str_word {
 #define KOF_MATCH(ctx, name, level)                                    \
 	do {                                                           \
 		(ctx)->report((ctx), (uint32_t)(level), (uint32_t)__LINE__); \
-		return;                                                \
-	} while (0)
-
-/*
- * Hand back to the engine without concluding.
- *
- * For a module that decodes or normalises data rather than deciding anything: the
- * engine goes on to evaluate the record's own checks against what was produced.
- * One such module then serves many records, which is what keeps module count in
- * the hundreds while record count grows without bound.
- *
- * Not exercised by any module yet, and marked so rather than presented as tested.
- */
-#define KOF_CONTINUE_SCAN(ctx)                                         \
-	do {                                                           \
-		(ctx)->cont((ctx));                                    \
 		return;                                                \
 	} while (0)
 

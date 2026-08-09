@@ -33,8 +33,8 @@ DB_OBJ := $(BUILD)/db.o
 SCAN_SRC := libkofeng/kofscanners/scan.c
 SCAN_OBJ := $(BUILD)/scan.o
 
-SCANNERS_SRC := libkofeng/kofscanners/scanners.c
-SCANNERS_OBJ := $(BUILD)/scanners.o
+OBJCTX_SRC := libkofeng/kofscanners/objctx.c
+OBJCTX_OBJ := $(BUILD)/objctx.o
 
 FACADE_SRC := libkofeng/kofeng.c
 FACADE_OBJ := $(BUILD)/kofeng.o
@@ -42,7 +42,7 @@ FACADE_OBJ := $(BUILD)/kofeng.o
 # The library the tools link against. kofdump needs only the parser, so it is not
 # listed there: a tool linking less is a tool that cannot depend on more.
 LIB_OBJ := $(PARSER_OBJ) $(MATCH_OBJ) $(DB_OBJ) $(SCAN_OBJ) \
-           $(SCANNERS_OBJ) $(FACADE_OBJ)
+           $(OBJCTX_OBJ) $(FACADE_OBJ)
 
 KOFDUMP_SRC := tools/kofdump/main.c
 KOFDUMP_OBJ := $(BUILD)/kofdump_main.o
@@ -84,7 +84,7 @@ $(DB_OBJ): $(DB_SRC) | $(BUILD)
 $(SCAN_OBJ): $(SCAN_SRC) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(SCANNERS_OBJ): $(SCANNERS_SRC) | $(BUILD)
+$(OBJCTX_OBJ): $(OBJCTX_SRC) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(FACADE_OBJ): $(FACADE_SRC) | $(BUILD)

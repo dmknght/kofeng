@@ -15,10 +15,36 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Defined with the presence set further down; declared here because starting on a new
+ * object is the first thing in the file and restamping the table is part of it. */
+static struct kof_gram *gram_new(uint32_t n_patterns);
+static void             gram_free(struct kof_gram *);
+static uint64_t         gram_build(struct kof_gram *, kof_buf);
+static int              gram_may_contain(const struct kof_gram *, const uint8_t *,
+					 uint16_t len, int icase);
+
+/*
+ * Start on a new object.
+ *
+ * Keeps the state that is expensive to make and resets the state that is per object:
+ * the presence table survives and is restamped, the memo is cleared, the counters go
+ * back to zero.
+ */
 void kof_match_begin(struct kof_match_ctx *m, kof_buf data)
 {
+	struct kof_gram *gram = m->gram;
+	uint8_t *memo = m->memo;
+	uint32_t memo_len = m->memo_len;
+
 	memset(m, 0, sizeof *m);
 	m->data = data;
+	m->gram = gram;
+	m->memo = memo;
+	m->memo_len = memo_len;
+
+	if (memo)
+		memset(memo, KOF_MEMO_UNKNOWN, memo_len);
+	m->n_bytes_indexed = gram_build(gram, data);
 }
 
 static uint8_t fold(uint8_t c)
@@ -170,13 +196,13 @@ uint64_t kof_match_find_set(struct kof_match_ctx *m,
 	if (len > m->data.n - off)
 		len = m->data.n - off;
 
-	if (m->memo_valid && m->memo_pat == compiled &&
-	    m->memo_off == off && m->memo_len == len) {
+	if (m->set_valid && m->set_pat == compiled &&
+	    m->set_off == off && m->set_len == len) {
 		m->n_memo_hits++;
 		if (first_hit)
 			*first_hit = 0; /* not memoised; callers wanting the
 					 * offset should not rely on the cache */
-		return m->memo_hits;
+		return m->set_hits;
 	}
 
 	hdr = at(compiled, clen, 0, (uint32_t)sizeof(struct kof_pat_hdr));
@@ -230,11 +256,11 @@ uint64_t kof_match_find_set(struct kof_match_ctx *m,
 		}
 	}
 
-	m->memo_pat   = compiled;
-	m->memo_off   = off;
-	m->memo_len   = len;
-	m->memo_hits  = hits;
-	m->memo_valid = 1;
+	m->set_pat   = compiled;
+	m->set_off   = off;
+	m->set_len   = len;
+	m->set_hits  = hits;
+	m->set_valid = 1;
 
 	if (first_hit && hits)
 		*first_hit = earliest;
@@ -304,7 +330,7 @@ struct kof_gram {
 	uint16_t  gen;
 };
 
-struct kof_gram *kof_gram_new(uint32_t n_patterns)
+static struct kof_gram *gram_new(uint32_t n_patterns)
 {
 	struct kof_gram *g;
 
@@ -323,7 +349,7 @@ struct kof_gram *kof_gram_new(uint32_t n_patterns)
 	return g;
 }
 
-void kof_gram_free(struct kof_gram *g)
+static void gram_free(struct kof_gram *g)
 {
 	if (!g)
 		return;
@@ -341,7 +367,7 @@ static uint32_t gram_hash4(const uint8_t *p)
 	return (v * 2654435761u) >> (32 - GRAM_BITS);
 }
 
-uint64_t kof_gram_build(struct kof_gram *g, kof_buf b)
+static uint64_t gram_build(struct kof_gram *g, kof_buf b)
 {
 	uint64_t i;
 
@@ -360,8 +386,8 @@ uint64_t kof_gram_build(struct kof_gram *g, kof_buf b)
 	return b.n;
 }
 
-int kof_gram_may_contain(const struct kof_gram *g, const uint8_t *b, uint16_t len,
-			 int icase)
+static int gram_may_contain(const struct kof_gram *g, const uint8_t *b,
+			    uint16_t len, int icase)
 {
 	uint8_t letter[4], base[4];
 	int nl = 0, i, comb;
@@ -410,9 +436,9 @@ static int is_word_byte(uint8_t c)
 	       (c >= '0' && c <= '9') || c == '_';
 }
 
-int kof_match_str(struct kof_match_ctx *m, const struct kof_range *ext,
-		  uint32_t next, const uint8_t *bytes, uint16_t len, int icase,
-		  int fullword)
+static int match_ranges(struct kof_match_ctx *m, const struct kof_range *ext,
+			uint32_t next, const uint8_t *bytes, uint16_t len,
+			int icase, int fullword)
 {
 	uint32_t i;
 
@@ -437,4 +463,49 @@ int kof_match_str(struct kof_match_ctx *m, const struct kof_range *ext,
 		}
 	}
 	return 0;
+}
+
+/* ---- per-object search state ---------------------------------------------- */
+
+int kof_match_state_init(struct kof_match_ctx *m, uint32_t n_patterns,
+			 uint32_t memo_len)
+{
+	m->gram = gram_new(n_patterns);   /* NULL is a normal answer */
+	m->memo_len = memo_len;
+	m->memo = memo_len ? calloc(memo_len, 1) : NULL;
+	return !memo_len || m->memo != NULL;
+}
+
+void kof_match_state_free(struct kof_match_ctx *m)
+{
+	gram_free(m->gram);
+	free(m->memo);
+	m->gram = NULL;
+	m->memo = NULL;
+	m->memo_len = 0;
+}
+
+int kof_match_lookup(struct kof_match_ctx *m, uint32_t slot,
+		     const struct kof_range *ext, uint32_t next,
+		     const uint8_t *bytes, uint16_t len, int icase, int fullword,
+		     uint64_t *answered_without_scan)
+{
+	uint8_t *cell;
+	int found;
+
+	if (!m->memo || slot >= m->memo_len)
+		return 0;
+	cell = &m->memo[slot];
+	if (*cell != KOF_MEMO_UNKNOWN)
+		return *cell == KOF_MEMO_PRESENT;
+
+	if (!gram_may_contain(m->gram, bytes, len, icase)) {
+		if (answered_without_scan)
+			(*answered_without_scan)++;
+		*cell = KOF_MEMO_ABSENT;
+		return 0;
+	}
+	found = match_ranges(m, ext, next, bytes, len, icase, fullword);
+	*cell = found ? KOF_MEMO_PRESENT : KOF_MEMO_ABSENT;
+	return found;
 }

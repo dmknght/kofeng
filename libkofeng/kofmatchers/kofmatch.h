@@ -22,17 +22,30 @@
 struct kof_match_ctx {
 	kof_buf data;
 
-	/* Last find_set result, keyed by the three values that determine it. */
-	const uint8_t *memo_pat;
-	uint64_t       memo_off;
-	uint64_t       memo_len;
-	uint64_t       memo_hits;
-	int            memo_valid;
+	/*
+	 * Search state for one object, owned here because it is all searching: the
+	 * presence set that says a pattern cannot be here, and the memo that stops the
+	 * same question being asked twice. Neither is scan bookkeeping - the scanner
+	 * decides *which* ranges to ask about, the matcher decides how to answer.
+	 */
+	struct kof_gram *gram;
+	uint8_t         *memo;      /* engine sized; MEMO_* per (string, range) pair */
+	uint32_t         memo_len;
+
+	/* One-entry cache belonging to kof_match_find_set, named after it so it is not
+	 * mistaken for the per-pattern memo above. Never exercised yet: nothing calls
+	 * find_set, and the measured hit count is zero. */
+	const uint8_t *set_pat;
+	uint64_t       set_off;
+	uint64_t       set_len;
+	uint64_t       set_hits;
+	int            set_valid;
 
 	/* Counters, for measuring whether the memo is worth its complexity. */
 	uint64_t n_calls;
 	uint64_t n_memo_hits;
 	uint64_t n_bytes_scanned;
+	uint64_t n_bytes_indexed;   /* what building the presence set cost */
 };
 
 void kof_match_begin(struct kof_match_ctx *m, kof_buf data);
@@ -55,56 +68,42 @@ uint64_t kof_match_find_set(struct kof_match_ctx *m,
 			    const uint8_t *compiled, uint32_t clen,
 			    uint64_t *first_hit);
 
-/*
- * The presence set: which four-byte sequences occur in an object.
- *
- * Matcher-side because it is pattern-matching machinery, not scan bookkeeping: it
- * answers "could this pattern be here" over the same bytes the search runs on. What
- * stays with the scanner is deciding *which* ranges to look in and remembering the
- * answers.
- *
- * The point of it is what it is not: it does not grow with the database. One fixed
- * table answers for any number of patterns, built in a single pass over the object
- * rather than once per pattern - O(bytes + patterns) instead of O(patterns x bytes).
- * An automaton over every pattern would also collapse the passes and would be exact,
- * but its size is the database's size; this trades exactness for a fixed footprint.
- * A collision makes a pattern get searched for that need not have been, which costs
- * time. Absence is never wrong, and absence is what gets acted on.
- */
-struct kof_gram;
-
-/* NULL when n_patterns is below the point where building pays for itself. Not a
- * failure: every call below accepts NULL and answers as if there were no table. */
-struct kof_gram *kof_gram_new(uint32_t n_patterns);
-void             kof_gram_free(struct kof_gram *);
-
-/* Record every four-byte sequence of the object. Returns bytes covered. */
-uint64_t kof_gram_build(struct kof_gram *, kof_buf);
+/* Answers a memo slot can hold. */
+#define KOF_MEMO_UNKNOWN 0
+#define KOF_MEMO_ABSENT  1
+#define KOF_MEMO_PRESENT 2
 
 /*
- * Could a pattern beginning with these bytes occur?
+ * The presence set and the range search are internal to the matcher now.
  *
- * Takes the length and checks it here rather than trusting the caller: the table is
- * keyed on four bytes, so a shorter pattern cannot be looked up and the answer has to
- * be "maybe". Leaving that to the call site is a contract nobody can see, and it
- * becomes a real out of bounds read the day a pattern is stored without a fixed size
- * buffer behind it.
- *
- * `icase` looks up every case variant - at most sixteen probes into a warm table, so
- * folding does not cost the filter. Never a false negative.
+ * kof_match_lookup is the whole of what a caller wants - "is this pattern in these
+ * ranges" - and it is the only thing that needs both. Exporting the pieces invited a
+ * caller to assemble them differently and get the two-stage order wrong.
  */
-int kof_gram_may_contain(const struct kof_gram *, const uint8_t *bytes, uint16_t len,
-			 int icase);
 
 /*
- * Find a literal inside a set of ranges, honouring case and word options.
- *
- * Fullword is here and not in the scanner because it is part of what "matched" means.
- * It needs the range bounds, which is why they are passed rather than a single buffer:
- * the edge of a range counts as a word boundary, and without that rule the obvious
- * check reads outside the object at offset zero.
+ * Attach the per-object search state. `memo_len` is the whole engine's memo, cleared
+ * on each kof_match_begin; `gram` is reused across objects and rebuilt per object.
  */
-int kof_match_str(struct kof_match_ctx *, const struct kof_range *ext, uint32_t next,
-		  const uint8_t *bytes, uint16_t len, int icase, int fullword);
+int  kof_match_state_init(struct kof_match_ctx *, uint32_t n_patterns,
+			  uint32_t memo_len);
+void kof_match_state_free(struct kof_match_ctx *);
+
+/*
+ * Is a declared pattern present in these ranges? `slot` indexes the memo.
+ *
+ * Two stages, and the first is what makes it affordable: the presence set says whether
+ * the pattern's first four bytes occur in the object at all, and only then is a search
+ * run. A marker that is absent - nearly every marker for nearly every object - costs
+ * one table lookup and no scan. That stage does not depend on the ranges, so absence
+ * answers every range at once.
+ *
+ * `answered_without_scan` is incremented when the presence set settled it, so a caller
+ * can report what the filter earned.
+ */
+int kof_match_lookup(struct kof_match_ctx *, uint32_t slot,
+		     const struct kof_range *ext, uint32_t next,
+		     const uint8_t *bytes, uint16_t len, int icase, int fullword,
+		     uint64_t *answered_without_scan);
 
 #endif /* KOFENG_KOFMATCH_H */

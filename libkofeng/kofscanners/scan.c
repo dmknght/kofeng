@@ -1,57 +1,38 @@
 /*
- * scan.c - scan one object.
+ * scan.c - process objects.
  *
- * Order of work, and it is the order that matters:
+ * One job in three steps, and the order is the point:
  *
  *   parse         format facts, so the filter has something to filter on
- *   derive        regions, presence set, memo - paid once for all modules
+ *   derive        which regions exist - paid once for all modules
  *   filter + run  per module, cheapest test first
  *
- * The derive step is the same idea as InitCache in the old Kaspersky engine: pay a
- * small per-object precomputation so that each of very many records can be decided
- * with one instruction.
+ * The derive step is InitCache from the old Kaspersky engine: a small per-object
+ * precomputation so each of very many records can be decided with one instruction.
+ *
+ * Producing the objects is here too, because it is the same job seen from one step out.
+ * A file becomes one object; a directory yields many. When there is an unpacker, a
+ * container will yield many the same way, through the same stack. What is *not* here:
+ * the untrusted boundary a module reads through (objctx.c), and how a search is
+ * answered (the matcher).
  */
+
+/* lstat and the dirent walk are POSIX and the tree builds as strict ISO C11, so the
+ * feature level has to be asked for - and before any include, or it does nothing. */
+#define _POSIX_C_SOURCE 200809L
 
 #include "scan.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 
-#define MEMO_UNKNOWN 0
-#define MEMO_ABSENT  1
-#define MEMO_PRESENT 2
-
-/*
- * Everything mutable, one per thread.
- *
- * The engine it points at is immutable and shared. Splitting them is what keeps the
- * 32MB presence table out of the per-file path: it belongs to the thread, is allocated
- * once, and is reused for every object.
- */
-struct kof_scanner {
-	const struct kof_engine *eng;
-
-	struct kof_match_ctx m;
-	struct kof_elf_info *elf;          /* reused; 11.9KB, so not per object */
-
-	struct kof_gram *gram;             /* NULL below the point where it pays */
-
-	uint8_t  *memo;                    /* eng->memo_size bytes, cleared per object */
-
-	/* Set while a module runs: find_str is called from inside one, and the ids it
-	 * passes are module local, so the host has to know whose they are. */
-	const struct kof_module *cur_mod;
-
-	/* What the running module reported. A module cannot hold state, so a finding
-	 * has to land here. */
-	uint32_t rep_level, rep_name_id;
-	int      rep_valid, rep_cont;
-
-	struct kof_stats st;
-};
-
-static struct kof_scanner *sc_of(const struct kof_obj_ctx *ctx)
+struct kof_scanner *kof_scan_of(const struct kof_obj_ctx *ctx)
 {
 	return (struct kof_scanner *)(void *)(uintptr_t)ctx->priv;
 }
@@ -68,14 +49,10 @@ struct kof_scanner *kof_scan_new(const struct kof_engine *eng)
 	if (!sc->elf)
 		goto fail;
 
-	/* The matcher decides whether building it pays; NULL is a normal answer. */
-	sc->gram = kof_gram_new(eng->n_str);
-
-	if (eng->memo_size) {
-		sc->memo = calloc(eng->memo_size, 1);
-		if (!sc->memo)
-			goto fail;
-	}
+	/* The matcher owns the search state: the presence set and the memo are how a
+	 * search is answered, not how a scan is bookkept. */
+	if (!kof_match_state_init(&sc->m, eng->n_str, eng->memo_size))
+		goto fail;
 	return sc;
 
 fail:
@@ -87,13 +64,12 @@ void kof_scan_free(struct kof_scanner *sc)
 {
 	if (!sc)
 		return;
-	free(sc->memo);
-	kof_gram_free(sc->gram);
+	kof_match_state_free(&sc->m);
 	free(sc->elf);
 	free(sc);
 }
 
-void kof_scan_count_unreadable(struct kof_scanner *sc)
+static void count_unreadable(struct kof_scanner *sc)
 {
 	sc->st.unreadable++;
 }
@@ -105,140 +81,28 @@ const struct kof_stats *kof_scan_stats(const struct kof_scanner *sc)
 
 /* ---- the byte accessors handed to a module --------------------------------- */
 
-static struct kof_match_ctx *mc(const struct kof_obj_ctx *ctx)
+/*
+ * Turn a named range into extents.
+ *
+ * Here rather than in objctx.c because only the parse knows where a region is, and this
+ * is the file that ran it. KOF_SCAN_ALL needs no parse at all, which is what lets a
+ * module naming only that region run against input nothing identified.
+ */
+uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *ctx, uint32_t scan_mask,
+				struct kof_range *ext)
 {
-	return &sc_of(ctx)->m;
-}
-
-static uint8_t c_rd8(const struct kof_obj_ctx *ctx, uint64_t off)
-{
-	uint8_t v = 0;
-	kof_rd_u8(mc(ctx)->data, off, &v);
-	return v;
-}
-
-static uint16_t c_rd16(const struct kof_obj_ctx *ctx, uint64_t off)
-{
-	uint16_t v = 0;
-	kof_rd_u16(mc(ctx)->data, off, 0, &v);
-	return v;
-}
-
-static uint32_t c_rd32(const struct kof_obj_ctx *ctx, uint64_t off)
-{
-	uint32_t v = 0;
-	kof_rd_u32(mc(ctx)->data, off, 0, &v);
-	return v;
-}
-
-static uint64_t c_rd64(const struct kof_obj_ctx *ctx, uint64_t off)
-{
-	uint64_t v = 0;
-	kof_rd_u64(mc(ctx)->data, off, 0, &v);
-	return v;
-}
-
-static int c_memeq(const struct kof_obj_ctx *ctx, uint64_t off, const void *pat,
-		   uint32_t len)
-{
-	kof_buf s = kof_slice(mc(ctx)->data, off, len);
-	if (s.n != len)
-		return 0;
-	return memcmp(s.p, pat, len) == 0;
-}
-
-static uint32_t c_csum(const struct kof_obj_ctx *ctx, uint64_t off, uint32_t len)
-{
-	kof_buf s = kof_slice(mc(ctx)->data, off, len);
-	if (s.n != len)
-		return 0;
-	return kof_crc32(s.p, s.n);
-}
-
-static void c_report(const struct kof_obj_ctx *ctx, uint32_t level,
-		     uint32_t name_id)
-{
-	struct kof_scanner *sc = sc_of(ctx);
-	sc->rep_level   = level;
-	sc->rep_name_id = name_id;
-	sc->rep_valid   = 1;
-}
-
-static void c_cont(const struct kof_obj_ctx *ctx)
-{
-	sc_of(ctx)->rep_cont = 1;
-}
-
-/* ---- searching a declared string ------------------------------------------- */
-
-/* Resolve the range a call names into extents, then let the matcher search them. */
-static int search_str(const struct kof_obj_ctx *ctx, struct kof_scanner *sc,
-		      const struct kof_str_ent *e, uint32_t scan_mask)
-{
-	struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
-	uint32_t n = 0;
+	uint32_t n;
 
 	if (scan_mask & KOF_SCAN_ALL) {
 		ext[0].off = 0;
 		ext[0].len = ctx->obj_size;
-		n = ctx->obj_size ? 1 : 0;
-	} else if (ctx->resolve_scan) {
-		n = ctx->resolve_scan(ctx, scan_mask, ext, KOF_SCAN_MAX_EXTENTS);
-		if (n > KOF_SCAN_MAX_EXTENTS)
-			n = KOF_SCAN_MAX_EXTENTS;
+		return ctx->obj_size ? 1u : 0u;
 	}
-	return kof_match_str(&sc->m, ext, n, e->bytes, e->len, e->icase,
-			     e->fullword);
-}
-
-/*
- * The module facing search, in two stages.
- *
- * The presence set says whether the string's first four bytes occur anywhere in the
- * object; only then is a search run. So a marker that is absent - nearly every marker
- * for nearly every object - costs one table lookup and no scan. That first stage does
- * not depend on the range, so absence answers every range at once.
- *
- * Answers are memoised per (string, range), so a module asking twice pays once and a
- * batched pass can fill the same table ahead of time. That is where batching will go:
- * the surviving strings of every module about to run, searched together, one pass per
- * range.
- */
-static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
-		      uint32_t range_id)
-{
-	struct kof_scanner *sc = sc_of(ctx);
-	const struct kof_module *m = sc->cur_mod;
-	const struct kof_str_ent *e;
-	uint32_t si, ri;
-	uint8_t *slot;
-	int found;
-
-	if (!m || str_id >= m->n_str || range_id >= m->n_rng)
+	if (!ctx->resolve_scan)
 		return 0;
-	si = m->str_base + str_id;
-	ri = m->rng_base + range_id;
-	e = &sc->eng->str_tab[si];
-
-	/* Module local indexing: str_id and range_id are already bounded against this
-	 * module's counts above, so the result cannot leave its own slice. */
-	slot = &sc->memo[m->memo_base + str_id * m->n_rng + range_id];
-	if (*slot != MEMO_UNKNOWN)
-		return *slot == MEMO_PRESENT;
-
-	if (!kof_gram_may_contain(sc->gram, e->bytes, e->len, e->icase)) {
-		sc->st.gram_answers++;
-		*slot = MEMO_ABSENT;
-		return 0;
-	}
-	found = search_str(ctx, sc, e, sc->eng->rng_tab[ri]);
-	*slot = found ? MEMO_PRESENT : MEMO_ABSENT;
-	return found;
+	n = ctx->resolve_scan(ctx, scan_mask, ext, KOF_SCAN_MAX_EXTENTS);
+	return n > KOF_SCAN_MAX_EXTENTS ? KOF_SCAN_MAX_EXTENTS : n;
 }
-
-static const struct kof_content content_vtable = {
-	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_csum
-};
 
 /* ---- deriving per-object facts --------------------------------------------- */
 
@@ -318,32 +182,6 @@ static int prefilter(const struct kof_module *m, const struct kof_obj_ctx *ctx,
 
 /* ---- naming a finding ------------------------------------------------------ */
 
-static const char *fmt_str(uint8_t t)
-{
-	switch (t) {
-	case KOF_FMT_ELF:    return "ELF";
-	case KOF_FMT_PE:     return "PE";
-	case KOF_FMT_MACHO:  return "MachO";
-	case KOF_FMT_SCRIPT: return "Script";
-	case KOF_FMT_TEXT:   return "Text";
-	default:             return "Unknown";
-	}
-}
-
-static const char *arch_name(uint8_t a)
-{
-	switch (a) {
-	case KOF_ARCH_X86:     return "x86";
-	case KOF_ARCH_X86_64:  return "x86_64";
-	case KOF_ARCH_ARM:     return "arm";
-	case KOF_ARCH_ARM64:   return "arm64";
-	case KOF_ARCH_RISCV64: return "riscv64";
-	case KOF_ARCH_MIPS:    return "mips";
-	case KOF_ARCH_PPC64:   return "ppc64";
-	default:               return "any";
-	}
-}
-
 /*
  * <format>.<arch>.<authored family>.
  *
@@ -358,14 +196,14 @@ static void finding_str(const struct kof_scanner *sc,
 {
 	const char *nm = kof_db_name(sc->eng, m, sc->rep_name_id);
 
-	snprintf(out, cap, "%s.%s.%s", fmt_str(ctx->format),
-		 arch_name(ctx->arch), nm ? nm : "unknown");
+	snprintf(out, cap, "%s.%s.%s", kof_format_name(ctx->format),
+		 kof_arch_name(ctx->arch), nm ? nm : "unknown");
 }
 
 /* ---- the routine ---------------------------------------------------------- */
 
-uint32_t kof_scan_object(struct kof_scanner *sc, kof_buf buf, const char *name,
-			 struct kof_result *out)
+static uint32_t scan_object(struct kof_scanner *sc, kof_buf buf,
+			    const char *name, struct kof_result *out)
 {
 	struct kof_obj_ctx ctx;
 	uint32_t present, i, added = 0;
@@ -373,10 +211,7 @@ uint32_t kof_scan_object(struct kof_scanner *sc, kof_buf buf, const char *name,
 	(void)name;   /* recorded by the caller; the layer tree is its business */
 
 	memset(&ctx, 0, sizeof ctx);
-	ctx.content = &content_vtable;
-	ctx.report  = c_report;
-	ctx.cont    = c_cont;
-	ctx.priv    = sc;
+	kof_mod_attach(&ctx, sc);
 
 	kof_match_begin(&sc->m, buf);
 
@@ -388,10 +223,6 @@ uint32_t kof_scan_object(struct kof_scanner *sc, kof_buf buf, const char *name,
 	kof_elf_parse(buf, sc->elf, &ctx);
 
 	present = regions_present(&ctx, sc->eng->scan_mask);
-	sc->st.gram_bytes += kof_gram_build(sc->gram, buf);
-	if (sc->memo)
-		memset(sc->memo, MEMO_UNKNOWN, sc->eng->memo_size);
-
 	sc->st.objects++;
 	sc->st.object_bytes += buf.n;
 
@@ -402,7 +233,6 @@ uint32_t kof_scan_object(struct kof_scanner *sc, kof_buf buf, const char *name,
 			continue;
 
 		sc->rep_valid = 0;
-		sc->rep_cont  = 0;
 		sc->cur_mod   = m;
 		m->fn(&ctx);
 		sc->cur_mod   = NULL;
@@ -426,6 +256,261 @@ uint32_t kof_scan_object(struct kof_scanner *sc, kof_buf buf, const char *name,
 	/* Before the next kof_match_begin clears them. */
 	sc->st.searches       += sc->m.n_calls;
 	sc->st.bytes_searched += sc->m.n_bytes_scanned;
+	sc->st.gram_bytes     += sc->m.n_bytes_indexed;
 
 	return added;
+}
+
+/*
+ * Map a file read only.
+ *
+ * mmap rather than read: only the pages a scan actually touches are faulted in, so
+ * scoping a search to a region cuts I/O and not merely CPU. It is also what makes an
+ * embedded object free later - a child at an offset inside its parent is a window into
+ * the same mapping, needing no copy.
+ */
+struct mapping {
+	void    *map;
+	uint64_t len;
+};
+
+static int map_file(struct mapping *s, const char *path)
+{
+	struct stat sb;
+	int fd;
+
+	s->map = NULL;
+	s->len = 0;
+
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return KOF_ERR_OPEN;
+	if (fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode)) {
+		close(fd);
+		return KOF_ERR_OPEN;
+	}
+	if (sb.st_size > 0) {
+		s->map = mmap(NULL, (size_t)sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+		if (s->map == MAP_FAILED) {
+			s->map = NULL;
+			close(fd);
+			return KOF_ERR_READ;
+		}
+	}
+	close(fd);
+	s->len = (uint64_t)sb.st_size;
+	return 0;
+}
+
+static void unmap_file(struct mapping *s)
+{
+	if (s->map)
+		munmap(s->map, (size_t)s->len);
+	s->map = NULL;
+}
+
+/*
+ * Iterative, with its own stack of pending directories.
+ *
+ * Not recursive, and no depth ceiling: a filesystem may legally be deeper than any
+ * number picked here, and putting the limit on the C stack makes the failure mode a
+ * stack overflow - a crash, in a library, out of a directory tree. On the heap, running
+ * out is reported instead. max_depth is policy for callers who want it, not a safety
+ * net.
+ *
+ * Paths grow rather than living in a fixed buffer, so an over-long one fails visibly
+ * instead of being skipped without a word.
+ */
+struct pending {
+	char    *path;
+	uint32_t depth;
+};
+
+struct walk {
+	struct kof_scanner *sc;
+	const struct kof_policy *pol;
+	kof_on_object cb;
+	void *user;
+
+	struct pending *stack;
+	size_t          n, cap;
+
+	char   *path_buf;     /* reusable, holds the entry currently being examined */
+	size_t  path_cap;
+
+	int      aborted;
+	int      out_of_memory;
+	uint64_t objects;
+};
+
+static int push_dir(struct walk *w, const char *path, size_t len, uint32_t depth)
+{
+	if (w->n == w->cap) {
+		size_t nc = w->cap ? w->cap * 2 : 64;
+		struct pending *nv = realloc(w->stack, nc * sizeof *nv);
+		if (!nv) {
+			w->out_of_memory = 1;
+			return 0;
+		}
+		w->stack = nv;
+		w->cap = nc;
+	}
+	w->stack[w->n].path = kof_strdup_n(path, len);
+	if (!w->stack[w->n].path) {
+		w->out_of_memory = 1;
+		return 0;
+	}
+	w->stack[w->n].depth = depth;
+	w->n++;
+	return 1;
+}
+
+/* Grow the reusable buffer to hold at least `need` bytes including the terminator. */
+static int path_reserve(struct walk *w, size_t need)
+{
+	if (need <= w->path_cap)
+		return 1;
+	{
+		size_t nc = w->path_cap ? w->path_cap : 256;
+		char *nv;
+		while (nc < need)
+			nc *= 2;
+		nv = realloc(w->path_buf, nc);
+		if (!nv) {
+			w->out_of_memory = 1;
+			return 0;
+		}
+		w->path_buf = nv;
+		w->path_cap = nc;
+	}
+	return 1;
+}
+
+static void scan_file(struct walk *w, const char *path)
+{
+	struct kof_result res;
+	struct mapping src;
+
+	res.n = 0;
+	res.dropped = 0;
+
+	if (map_file(&src, path) != 0) {
+		count_unreadable(w->sc);
+		return;
+	}
+
+	/*
+	 * One layer. When there are archive children this becomes the same stack the
+	 * directory walk uses: scan the layer, then push each child a producer yields.
+	 */
+	scan_object(w->sc, kof_buf_make(src.map, src.len), path, &res);
+	unmap_file(&src);
+
+	w->objects++;
+	if (w->cb && w->cb(path, &res, w->user) != 0)
+		w->aborted = 1;
+}
+
+static void read_dir(struct walk *w, const char *dir, uint32_t depth)
+{
+	size_t dir_len = strlen(dir);
+	struct dirent *de;
+	DIR *d;
+
+	d = opendir(dir);
+	if (!d) {
+		/* Unreadable, or a path the system would not accept. Counted, because a
+		 * subtree that silently vanishes reads as a subtree with nothing in it. */
+		count_unreadable(w->sc);
+		return;
+	}
+	while (!w->aborted && !w->out_of_memory && (de = readdir(d)) != NULL) {
+		size_t nl, total;
+		struct stat sb;
+
+		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+			continue;
+
+		nl = strlen(de->d_name);
+		total = dir_len + 1 + nl + 1;
+		if (!path_reserve(w, total))
+			break;
+		memcpy(w->path_buf, dir, dir_len);
+		w->path_buf[dir_len] = '/';
+		memcpy(w->path_buf + dir_len + 1, de->d_name, nl + 1);
+
+		/* lstat, not stat: a symlink is not followed unless asked for, so a link
+		 * pointing at an ancestor cannot turn this into a loop. */
+		if ((w->pol->follow_symlinks ? stat : lstat)(w->path_buf, &sb) != 0) {
+			count_unreadable(w->sc);
+			continue;
+		}
+
+		if (S_ISDIR(sb.st_mode)) {
+			if (!w->pol->recurse_dirs)
+				continue;
+			if (w->pol->max_depth && depth + 1 > w->pol->max_depth)
+				continue;
+			push_dir(w, w->path_buf, dir_len + 1 + nl, depth + 1);
+		} else if (S_ISREG(sb.st_mode)) {
+			scan_file(w, w->path_buf);
+		}
+		/* anything else - socket, device, fifo - is not an object */
+	}
+	closedir(d);
+}
+
+int kof_scan_walk(struct kof_scanner *sc, const char *path,
+		  const struct kof_policy *pol, kof_on_object cb, void *user)
+{
+	struct walk w;
+	struct stat sb;
+	int rc;
+
+	memset(&w, 0, sizeof w);
+	w.sc   = sc;
+	w.pol  = pol;
+	w.cb   = cb;
+	w.user = user;
+
+	if ((pol->follow_symlinks ? stat : lstat)(path, &sb) != 0)
+		return KOF_ERR_OPEN;
+
+	if (!S_ISDIR(sb.st_mode)) {
+		scan_file(&w, path);
+		rc = w.objects ? (int)w.objects : KOF_ERR_OPEN;
+		free(w.path_buf);
+		return rc;
+	}
+
+	if (!pol->recurse_dirs) {
+		return KOF_ERR_OPEN;
+	}
+
+	{
+		/* A trailing slash would put "//" in every child path. */
+		size_t n = strlen(path);
+		while (n > 1 && path[n - 1] == '/')
+			n--;
+		if (!push_dir(&w, path, n, 0))
+			goto done;
+	}
+
+	/* Depth first, by taking from the end: a directory's children are examined
+	 * before its siblings, which keeps the pending set small and the page cache
+	 * warm. Breadth first would hold a whole level at once. */
+	while (!w.aborted && !w.out_of_memory && w.n > 0) {
+		struct pending p = w.stack[--w.n];
+		read_dir(&w, p.path, p.depth);
+		free(p.path);
+	}
+
+done:
+	while (w.n > 0)
+		free(w.stack[--w.n].path);
+	free(w.stack);
+	free(w.path_buf);
+	/* Running out of heap mid-walk is reported, not fatal: what was scanned before
+	 * it is still a result, and the caller can tell the walk was cut short. */
+	return (int)w.objects;
 }

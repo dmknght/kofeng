@@ -22,7 +22,9 @@
 #include "../libkofeng/kofeng.h"
 
 struct run {
-	uint64_t objects, infected, findings, dropped;
+	/* No object counter: the engine already keeps one, and a second copy is a
+	 * second thing that can disagree with it. */
+	uint64_t infected, findings, dropped;
 	int verbose;
 };
 
@@ -43,8 +45,6 @@ static int on_object(const char *name, const struct kof_result *res, void *user)
 	struct run *r = user;
 	uint32_t i;
 	int counted = 0;
-
-	r->objects++;
 
 	if (res->n == 0) {
 		if (r->verbose)
@@ -146,7 +146,7 @@ int main(int argc, char **argv)
 
 	printf("\n--- scan complete ---\n");
 	printf("scanned  %llu object(s), %.2f MB\n",
-	       (unsigned long long)r.objects,
+	       st ? (unsigned long long)st->objects : 0ull,
 	       st ? (double)st->object_bytes / 1048576.0 : 0.0);
 	printf("infected %llu object(s), %llu finding(s)\n",
 	       (unsigned long long)r.infected, (unsigned long long)r.findings);
