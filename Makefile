@@ -30,8 +30,7 @@ endif
 BUILD := build
 SDK   := $(BUILD)/sdk
 
-all: sdk $(BUILD)/kofscanner $(BUILD)/kofexamine $(BUILD)/ksigbuilder \
-     $(BUILD)/kofpat
+all: sdk $(BUILD)/kofscanner $(BUILD)/kofexamine $(BUILD)/ksigbuilder
 
 $(BUILD):
 	@mkdir -p $(BUILD)
@@ -107,14 +106,11 @@ $(BUILD)/kofexamine: kofexamine/kofexamine.c $(LIB) $(SDK_HDR)
 
 # ----------------------------------------------------- the database toolchain
 #
-# kofpat compiles the patterns written in a signature source; ksigbuilder packs
-# the artefacts into .ksig. Both are build-time only and are deliberately not
-# linked into anything that runs on an endpoint.
+# One binary with two modes: --extract reads the declarations out of a signature
+# source, and the default mode packs compiled artefacts into .ksig. Build-time
+# only, and deliberately not linked into anything that runs on an endpoint.
 
-$(BUILD)/kofpat: tools/kofpat/main.c | $(BUILD)
-	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
-
-$(BUILD)/ksigbuilder: ksigbuilder/ksigbuilder.c $(LIB)
+$(BUILD)/ksigbuilder: ksigbuilder/ksigbuilder.c $(LIB) $(SDK_HDR)
 	$(CC) $(CFLAGS) $< $(LIB) -o $@ $(LDFLAGS)
 
 # ------------------------------------------------------------- the database
@@ -137,7 +133,7 @@ JOBS      ?= 8
 ARTEFACTS ?= $(BUILD)/sig
 DB        ?= $(BUILD)/db
 
-sigs: $(BUILD)/kofpat $(SDK_HDR)
+sigs: $(BUILD)/ksigbuilder $(SDK_HDR)
 	@mkdir -p $(ARTEFACTS)
 	@echo "$(SIGS)" | tr ' ' '\n' | KOF_OUTDIR=$(abspath $(ARTEFACTS)) \
 		xargs -P $(JOBS) -n 1 ksigbuilder/ksigcompiler.sh >/dev/null

@@ -128,11 +128,12 @@ struct kof_engine {
 };
 
 /*
- * Load from a single .blob or a directory of them.
+ * Load from a single .ksig pack or a directory of them.
  *
- * Loose files for now: <name>.blob plus the .meta, .strs and .names the build emits
- * beside it. A packed container replaces this without changing anything above, which
- * is why the format is not exposed here.
+ * A database is one or more packs; kofpack.h defines what is in one. Given a
+ * directory, every *.ksig in it is loaded and the tables above are the concatenation
+ * of theirs - a pack that fails validation is refused on its own and the rest still
+ * load, so one corrupt file does not take the database with it.
  *
  * Returns NULL if nothing loaded.
  */

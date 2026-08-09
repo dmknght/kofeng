@@ -1,535 +1,509 @@
 /*
- * kofdb.c - load the database into an immutable engine.
+ * kofdb.c - load packed databases into an immutable engine.
  *
- * The tables grow while loading and are frozen when it returns. That is why the
- * growable state lives in a local builder rather than in the engine: the engine has
- * no capacity fields, so there is nothing in it that suggests it can still change.
+ * A database is one or more .ksig packs. Each is mapped read only, validated, and
+ * its tables copied into the engine's; the mapping is released once the copy is
+ * done, so nothing outlives the load but the engine itself.
+ *
+ * Copying rather than pointing into the mapping is a deliberate first step. The
+ * format is laid out so that a reader could use it in place - that is what the
+ * fixed strides are for - but doing so means the engine's tables become per pack
+ * and the scan path has to reach through one more level. That change is worth
+ * measuring before it is made; this one is not, because the cost it removes is
+ * already the whole of the problem:
+ *
+ *     4000 modules as loose artefacts: 16000 files, 83463 syscalls, 47ms per
+ *     process with a warm page cache - none of it I/O, all of it syscall and
+ *     parse, and all of it linear in the number of modules.
+ *
+ * Reading N packs is N opens and N mmaps whatever they contain.
+ *
+ * The validation order below is the one kofpack.h specifies, and the order is the
+ * point: every step runs before anything it checks is dereferenced, and no step
+ * trusts a value a later step has not yet bounded. Every bound comes from the
+ * length fstat reported, never from a length the file states about itself.
  */
 
-#include "../kofdb/kofdb.h"
+/* Before any include, not after: open, mmap and opendir are POSIX, and a feature
+ * test macro placed after the first include has no effect at all. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "kofdb.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <dirent.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 
-/*
- * A blob is raw code with no header, so there is nothing to validate properly; that
- * comes with the packed container, where a record has to carry length, entry offset
- * and integrity anyway. Until then, two guards for the mistake that actually happens:
- * handing over a build intermediate instead of the blob.
- */
-
-static int blob_plausible(const uint8_t *p, size_t len, const char *path)
-{
-	if (len == 0 || len > KOF_BLOB_MAX_CODE) {
-		fprintf(stderr, "kofdb: %s: implausible blob size %zu\n", path, len);
-		return 0;
-	}
-	/* The intermediates are an .o and a linked .elf. Copying either into
-	 * executable memory and jumping to offset 0 executes an ELF header. */
-	if (len >= 4 && memcmp(p, "\177ELF", 4) == 0) {
-		fprintf(stderr, "kofdb: %s looks like an ELF image, not a blob\n",
-			path);
-		return 0;
-	}
-	return 1;
-}
-
-/* Growable state, alive only while loading. */
-struct builder {
-	struct kof_engine e;
-	uint32_t cap_mods, cap_str, cap_rng, cap_name;
-	size_t   code_used;
-	char   **paths;
-	uint32_t n_paths;
-};
-
 static size_t page_size_of(void)
 {
 	long ps = sysconf(_SC_PAGESIZE);
+
 	return ps > 0 ? (size_t)ps : 4096u;
 }
 
+/* ---- validation ------------------------------------------------------------- */
+
 /*
- * Reserve the code arena writable, copy blobs in, then flip the whole arena to read
- * plus execute in one step. No page is ever writable and executable at once.
+ * Is this mapping a pack, and does every offset in it stay inside the mapping?
  *
- * One arena for every blob, not one per module: per-module mapping costs an mmap and
- * an mprotect each - measured at 3.35us - which at ten thousand modules is tens of
- * milliseconds of syscall before a byte is scanned.
+ * One function rather than checks scattered through the loader, so the rule that
+ * nothing is dereferenced before it is bounded can be read in one place instead
+ * of reconstructed from the order of statements.
  */
-static int arena_open(struct builder *b, size_t cap)
+static int pack_valid(const void *map, uint64_t len, const char *path)
+{
+	const struct kof_pack_hdr *h = map;
+	uint64_t i;
+
+#define REFUSE(...)                                                            \
+	do {                                                                   \
+		fprintf(stderr, "kofdb: %s: ", path);                          \
+		fprintf(stderr, __VA_ARGS__);                                  \
+		fputc('\n', stderr);                                           \
+		return 0;                                                      \
+	} while (0)
+
+	if (len < sizeof *h)
+		REFUSE("smaller than a pack header");
+	if (h->magic != KOF_PACK_MAGIC)
+		REFUSE("not a pack");
+	if (h->version != KOF_PACK_VERSION)
+		REFUSE("pack version %u, this engine reads %u", h->version,
+		       KOF_PACK_VERSION);
+	/* A pack holds native code, so one built for another machine is refused
+	 * loudly rather than entered. */
+	if (h->machine != KOF_PACK_MACH_HOST)
+		REFUSE("built for machine %u, this is %u", h->machine,
+		       (unsigned)KOF_PACK_MACH_HOST);
+	/* The kind is the ABI. kof_scan_fn is the only entry point this engine
+	 * knows how to call, so a pack of unpackers is refused here rather than
+	 * entered through the wrong signature - which is the point of one kind per
+	 * pack. */
+	if (h->kind != KOF_PACK_DETECT)
+		REFUSE("holds kind %u; this engine runs detectors only", h->kind);
+	/* Before any offset inside is believed: truncation is caught here. */
+	if (h->file_len != len)
+		REFUSE("declares %llu bytes, the file has %llu",
+		       (unsigned long long)h->file_len, (unsigned long long)len);
+	if (kof_crc32((const uint8_t *)map + KOF_PACK_CRC_FROM,
+		      len - KOF_PACK_CRC_FROM) != h->crc32)
+		REFUSE("checksum does not match its contents");
+
+	for (i = 0; i < KOF_SEC_COUNT; i++) {
+		uint64_t off = h->sec[i].off, n = h->sec[i].len;
+		uint64_t align = (i == KOF_SEC_CODE) ? KOF_PACK_CODE_ALIGN
+						     : KOF_PACK_SEC_ALIGN;
+
+		if (off > len || n > len - off)
+			REFUSE("section %llu runs outside the file",
+			       (unsigned long long)i);
+		if (off % align)
+			REFUSE("section %llu is misaligned",
+			       (unsigned long long)i);
+	}
+
+	/*
+	 * Exactly, not at most. A section longer than its count means the writer
+	 * and this reader disagree about the stride, and that is not a pack to
+	 * load however plausible the rest of it looks.
+	 *
+	 * The parameter is not called `sec`: it is substituted into h->sec[...],
+	 * and a macro parameter shadowing the member it indexes expands to
+	 * nonsense.
+	 */
+#define STRIDE(id_, count_, unit_)                                             \
+	if (h->sec[id_].len != (uint64_t)(count_) * (unit_))                   \
+		REFUSE("section %s is %llu bytes for %u entries of %u", #id_,  \
+		       (unsigned long long)h->sec[id_].len,                    \
+		       (unsigned)(count_), (unsigned)(unit_))
+
+	STRIDE(KOF_SEC_PRE_TARGET, h->n_mods,  4);
+	STRIDE(KOF_SEC_PRE_SCAN,   h->n_mods,  4);
+	STRIDE(KOF_SEC_PRE_ARCH,   h->n_mods,  4);
+	STRIDE(KOF_SEC_PRE_SIZE,   h->n_mods,  8);
+	STRIDE(KOF_SEC_MODS,       h->n_mods,  sizeof(struct kof_pack_mod));
+	STRIDE(KOF_SEC_STR_DESC,   h->n_str,   sizeof(struct kof_pack_str));
+	STRIDE(KOF_SEC_NAME_DESC,  h->n_names, sizeof(struct kof_pack_name));
+	STRIDE(KOF_SEC_RANGE,      h->n_rng,   4);
+#undef STRIDE
+
+	/*
+	 * Per module and per descriptor, arithmetic only: no syscall, no
+	 * allocation, a few compares each. This is the one per-module loop at load
+	 * and it is what lets the scan path do no bounds checking at all - that
+	 * path is hot and runs per object per module, so paying there for what can
+	 * be settled once here is the wrong trade.
+	 */
+	{
+		const uint8_t *base = map;
+		const struct kof_pack_mod *m =
+			(const void *)(base + h->sec[KOF_SEC_MODS].off);
+		const struct kof_pack_str *s =
+			(const void *)(base + h->sec[KOF_SEC_STR_DESC].off);
+		const struct kof_pack_name *nm =
+			(const void *)(base + h->sec[KOF_SEC_NAME_DESC].off);
+		const char *np = (const char *)base +
+				 h->sec[KOF_SEC_NAME_POOL].off;
+		uint64_t code_len = h->sec[KOF_SEC_CODE].len;
+		uint64_t spool = h->sec[KOF_SEC_STR_POOL].len;
+		uint64_t npool = h->sec[KOF_SEC_NAME_POOL].len;
+		uint32_t k;
+
+		for (k = 0; k < h->n_mods; k++) {
+			if ((uint64_t)m[k].code_off + m[k].code_len > code_len)
+				REFUSE("module %u names code outside the arena", k);
+			if ((uint64_t)m[k].str_first + m[k].n_str > h->n_str ||
+			    (uint64_t)m[k].rng_first + m[k].n_rng > h->n_rng ||
+			    (uint64_t)m[k].name_first + m[k].n_names > h->n_names)
+				REFUSE("module %u names a table slice that is "
+				       "not there", k);
+			if (m[k].code_off % KOF_PACK_BLOB_ALIGN)
+				REFUSE("module %u is not aligned for a call", k);
+		}
+		for (k = 0; k < h->n_str; k++) {
+			if ((uint64_t)s[k].off + s[k].len > spool)
+				REFUSE("string %u lies outside its pool", k);
+			if (s[k].len == 0 || s[k].len > KOF_STR_MAX_LEN)
+				REFUSE("string %u has length %u", k, s[k].len);
+		}
+		for (k = 0; k < h->n_names; k++) {
+			uint64_t o = nm[k].off, j;
+			int terminated = 0;
+
+			if (o >= npool)
+				REFUSE("name %u lies outside its pool", k);
+			for (j = o; j < npool; j++)
+				if (np[j] == 0) {
+					terminated = 1;
+					break;
+				}
+			if (!terminated)
+				REFUSE("name %u is not terminated inside its pool",
+				       k);
+		}
+	}
+	return 1;
+#undef REFUSE
+}
+
+/* ---- mapping ---------------------------------------------------------------- */
+
+/* A pack while it is being read. Alive only for the length of one load. */
+struct mapped {
+	void  *map;
+	size_t len;
+};
+
+static int map_pack(struct mapped *mp, const char *path)
+{
+	struct stat st;
+	void *map;
+	int fd;
+
+	mp->map = NULL;
+	mp->len = 0;
+
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		fprintf(stderr, "kofdb: cannot open %s\n", path);
+		return 0;
+	}
+	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+		close(fd);
+		return 0;
+	}
+	/* The descriptor is closed at once: a mapping keeps the file alive on its
+	 * own, and holding one open per pack would spend a descriptor per pack for
+	 * nothing. */
+	map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	close(fd);
+	if (map == MAP_FAILED) {
+		fprintf(stderr, "kofdb: cannot map %s\n", path);
+		return 0;
+	}
+	if (!pack_valid(map, (uint64_t)st.st_size, path)) {
+		munmap(map, (size_t)st.st_size);
+		return 0;
+	}
+	mp->map = map;
+	mp->len = (size_t)st.st_size;
+	return 1;
+}
+
+static void unmap_pack(struct mapped *mp)
+{
+	if (mp->map)
+		munmap(mp->map, mp->len);
+	mp->map = NULL;
+	mp->len = 0;
+}
+
+/* ---- the code arena --------------------------------------------------------- */
+
+/*
+ * One arena for every pack, not one per pack: per-pack mapping costs an mmap and
+ * an mprotect each, and the arena is written once then flipped to read plus
+ * execute in a single step, so no page is ever writable and executable at once.
+ */
+static int arena_open(struct kof_engine *e, size_t want)
 {
 	size_t ps = page_size_of();
-	b->e.code_cap = kof_round_up(cap, ps);
-	b->code_used = 0;
-	b->e.code = mmap(NULL, b->e.code_cap, PROT_READ | PROT_WRITE,
-			 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	if (b->e.code == MAP_FAILED) {
-		b->e.code = NULL;
+
+	e->code_cap = (want + ps - 1) / ps * ps;
+	if (e->code_cap == 0)
+		e->code_cap = ps;
+	e->code = mmap(NULL, e->code_cap, PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (e->code == MAP_FAILED) {
+		e->code = NULL;
+		e->code_cap = 0;
 		return 0;
 	}
 	return 1;
 }
 
-/* Blobs are kept 16 byte aligned so an entry point is never misaligned for the
- * target's calling convention. */
-static long arena_add(struct builder *b, const uint8_t *blob, size_t len)
+/* ---- collecting packs -------------------------------------------------------- */
+
+/* Collect *.ksig from a directory so a whole database can be named at once. */
+static char **collect_packs(const char *dir, uint32_t *out_n)
 {
-	size_t off = kof_round_up(b->code_used, 16);
-	if (off > b->e.code_cap || len > b->e.code_cap - off)
-		return -1;
-	memcpy(b->e.code + off, blob, len);
-	b->code_used = off + len;
-	return (long)off;
+	static const char ext[] = ".ksig";
+	DIR *d = opendir(dir);
+	struct dirent *de;
+	char **v = NULL;
+	uint32_t n = 0, cap = 0;
+
+	*out_n = 0;
+	if (!d)
+		return NULL;
+	while ((de = readdir(d)) != NULL) {
+		size_t l = strlen(de->d_name), need;
+		char *p;
+
+		if (l < sizeof ext ||
+		    strcmp(de->d_name + l - (sizeof ext - 1), ext) != 0)
+			continue;
+		if (n == cap) {
+			uint32_t nc = cap ? cap * 2 : 16;
+			char **nv = realloc(v, nc * sizeof *nv);
+			if (!nv)
+				break;
+			v = nv;
+			cap = nc;
+		}
+		need = strlen(dir) + l + 2;
+		p = malloc(need);
+		if (!p)
+			break;
+		snprintf(p, need, "%s/%s", dir, de->d_name);
+		v[n++] = p;
+	}
+	closedir(d);
+	*out_n = n;
+	return v;
 }
+
+/* ---- copying one pack into the engine ---------------------------------------- */
 
 /*
- * Read a whole file, refusing one that is too big to be what we are reading.
+ * Append a pack's tables to the engine's.
  *
- * The cap is checked against the stat size, before the allocation rather than after
- * the read: a database directory is a directory, and anything at all can be dropped
- * into it under a name ending in .blob. Allocating first and judging the contents
- * afterwards means an 8GB file named *.blob costs 8GB of address space to find out it
- * was never a blob - measured, and it also doubles because the arena is sized from the
- * same st_size. Deciding from the size alone costs a stat.
+ * Every index a module carries is rebased as it is copied: a module's string
+ * slice is written as an offset into the engine's table, not the pack's, so
+ * nothing on the scan path has to know which pack a module came from.
  */
-static uint8_t *read_whole(const char *path, size_t cap, size_t *out_len)
+static void absorb(struct kof_engine *e, const struct mapped *mp,
+		   size_t code_at)
 {
-	struct stat st;
-	uint8_t *buf;
-	FILE *f;
+	const uint8_t *base = mp->map;
+	const struct kof_pack_hdr *h = mp->map;
+	const uint32_t *pt = (const void *)(base + h->sec[KOF_SEC_PRE_TARGET].off);
+	const uint32_t *ps = (const void *)(base + h->sec[KOF_SEC_PRE_SCAN].off);
+	const uint32_t *pa = (const void *)(base + h->sec[KOF_SEC_PRE_ARCH].off);
+	const uint64_t *pz = (const void *)(base + h->sec[KOF_SEC_PRE_SIZE].off);
+	const struct kof_pack_mod *pm =
+		(const void *)(base + h->sec[KOF_SEC_MODS].off);
+	const struct kof_pack_str *pstr =
+		(const void *)(base + h->sec[KOF_SEC_STR_DESC].off);
+	const struct kof_pack_name *pname =
+		(const void *)(base + h->sec[KOF_SEC_NAME_DESC].off);
+	const uint8_t *spool = base + h->sec[KOF_SEC_STR_POOL].off;
+	const char *npool = (const char *)base + h->sec[KOF_SEC_NAME_POOL].off;
+	const uint32_t *prng = (const void *)(base + h->sec[KOF_SEC_RANGE].off);
 
-	/* stat() rather than fstat(fileno()): fileno is POSIX and this is built as
-	 * strict ISO C11 so the library stays portable. */
-	if (stat(path, &st) != 0 || st.st_size <= 0)
-		return NULL;
-	if ((uint64_t)st.st_size > (uint64_t)cap) {
-		fprintf(stderr, "kofdb: %s: %llu bytes is too large for a blob\n",
-			path, (unsigned long long)st.st_size);
-		return NULL;
+	uint32_t str0 = e->n_str, rng0 = e->n_rng, name0 = e->n_name;
+	uint32_t i;
+
+	memcpy(e->code + code_at, base + h->sec[KOF_SEC_CODE].off,
+	       (size_t)h->sec[KOF_SEC_CODE].len);
+
+	for (i = 0; i < h->n_str; i++) {
+		struct kof_str_ent *d = &e->str_tab[e->n_str++];
+
+		d->icase    = pstr[i].icase;
+		d->fullword = pstr[i].fullword;
+		d->len      = pstr[i].len;
+		memcpy(d->bytes, spool + pstr[i].off, pstr[i].len);
 	}
-	f = fopen(path, "rb");
-	if (!f)
-		return NULL;
-	buf = malloc((size_t)st.st_size);
-	if (!buf) {
-		fclose(f);
-		return NULL;
+	for (i = 0; i < h->n_rng; i++)
+		e->rng_tab[e->n_rng++] = prng[i];
+	for (i = 0; i < h->n_names; i++) {
+		struct kof_name_ent *d = &e->name_tab[e->n_name++];
+
+		d->id = pname[i].id;
+		snprintf(d->text, sizeof d->text, "%s", npool + pname[i].off);
 	}
-	if (fread(buf, 1, (size_t)st.st_size, f) != (size_t)st.st_size) {
-		free(buf);
-		fclose(f);
-		return NULL;
+
+	for (i = 0; i < h->n_mods; i++) {
+		struct kof_module *m = &e->mods[e->n_mods++];
+
+		/* Entry offset is zero within each blob; the compiler asserts it,
+		 * so the blob's place in the arena is the entry point. */
+		m->fn = (kof_scan_fn)(void *)(e->code + code_at + pm[i].code_off);
+
+		m->target_mask = pt[i];
+		m->scan_mask   = ps[i];
+		m->arch_mask   = pa[i];
+		m->size_min    = pz[i];
+
+		m->str_base  = str0  + pm[i].str_first;
+		m->n_str     = pm[i].n_str;
+		m->rng_base  = rng0  + pm[i].rng_first;
+		m->n_rng     = pm[i].n_rng;
+		m->name_base = name0 + pm[i].name_first;
+		m->n_names   = pm[i].n_names;
+
+		m->memo_base = e->memo_size;
+		e->memo_size += m->n_str * m->n_rng;
+
+		e->scan_mask |= m->scan_mask;
 	}
-	fclose(f);
-	*out_len = (size_t)st.st_size;
-	return buf;
 }
 
-#define GROW(field, count, cap, init)                                        \
-	do {                                                                 \
-		if ((count) == (cap)) {                                      \
-			uint32_t nc_ = (cap) ? (cap) * 2u : (init);           \
-			void *nv_ = realloc((field), nc_ * sizeof *(field));  \
-			if (!nv_)                                            \
-				return 0;                                    \
-			(field) = nv_;                                       \
-			(cap) = nc_;                                         \
-		}                                                            \
-	} while (0)
-
-static int name_push(struct builder *b, uint32_t id, const char *text)
-{
-	GROW(b->e.name_tab, b->e.n_name, b->cap_name, 256);
-	b->e.name_tab[b->e.n_name].id = id;
-	snprintf(b->e.name_tab[b->e.n_name].text,
-		 sizeof b->e.name_tab[b->e.n_name].text, "%s", text);
-	b->e.n_name++;
-	return 1;
-}
-
-static int str_push(struct builder *b, const struct kof_str_ent *s)
-{
-	GROW(b->e.str_tab, b->e.n_str, b->cap_str, 128);
-	b->e.str_tab[b->e.n_str++] = *s;
-	return 1;
-}
-
-static int rng_push(struct builder *b, uint32_t mask)
-{
-	GROW(b->e.rng_tab, b->e.n_rng, b->cap_rng, 128);
-	b->e.rng_tab[b->e.n_rng++] = mask;
-	return 1;
-}
+/* ---- the database ------------------------------------------------------------ */
 
 const char *kof_db_name(const struct kof_engine *e, const struct kof_module *m,
 			uint32_t name_id)
 {
 	uint32_t i;
+
 	for (i = 0; i < m->n_names; i++)
 		if (e->name_tab[m->name_base + i].id == name_id)
 			return e->name_tab[m->name_base + i].text;
 	return NULL;
 }
 
-/* Swap ".blob" for another extension. */
-static int sibling_path(const char *blob_path, const char *ext, char *out,
-			size_t cap)
-{
-	size_t n = strlen(blob_path);
-	if (n < 5 || n - 5 + strlen(ext) + 1 > cap)
-		return 0;
-	memcpy(out, blob_path, n - 5);
-	memcpy(out + n - 5, ext, strlen(ext) + 1);
-	return 1;
-}
-
-static void names_load(struct builder *b, struct kof_module *m, const char *bp)
-{
-	char path[4096], line[256];
-	FILE *f;
-
-	m->name_base = b->e.n_name;
-	m->n_names   = 0;
-
-	if (!sibling_path(bp, ".names", path, sizeof path))
-		return;
-	f = fopen(path, "r");
-	if (!f) {
-		fprintf(stderr, "kofdb: no name table at %s; detections will "
-				"report as unknown\n", path);
-		return;
-	}
-	while (fgets(line, sizeof line, f)) {
-		char *tab = strchr(line, '\t'), *nl;
-		if (!tab)
-			continue;
-		*tab++ = 0;
-		nl = strchr(tab, '\n');
-		if (nl)
-			*nl = 0;
-		if (!name_push(b, (uint32_t)strtoul(line, 0, 10), tab))
-			break;
-		m->n_names++;
-	}
-	fclose(f);
-}
-
-/*
- * Declared strings and ranges.
- *
- * Tab separated, kind in column one: 'r' for a range mask, 's' for a string with the
- * literal last so nothing in it has to be escaped to keep the columns parseable.
- */
-static void strs_load(struct builder *b, struct kof_module *m, const char *bp)
-{
-	char path[4096], line[KOF_STR_MAX_LEN + 128];
-	FILE *f;
-
-	m->str_base = b->e.n_str;
-	m->n_str    = 0;
-	m->rng_base = b->e.n_rng;
-	m->n_rng    = 0;
-
-	if (!sibling_path(bp, ".strs", path, sizeof path))
-		return;
-	f = fopen(path, "r");
-	if (!f)
-		return;                 /* a module may declare neither */
-
-	while (fgets(line, sizeof line, f)) {
-		char *p = line, *tab;
-
-		if (p[0] == 'r' && p[1] == '\t') {
-			unsigned long mask;
-			p += 2;
-			tab = strchr(p, '\t');
-			if (!tab)
-				continue;
-			mask = strtoul(tab + 1, 0, 10);
-			if (!rng_push(b, (uint32_t)mask))
-				break;
-			m->n_rng++;
-			continue;
-		}
-		if (p[0] == 's' && p[1] == '\t') {
-			struct kof_str_ent e;
-			unsigned long v[4];
-			int i;
-			size_t len;
-
-			memset(&e, 0, sizeof e);
-			p += 2;
-			for (i = 0; i < 4; i++) {
-				tab = strchr(p, '\t');
-				if (!tab)
-					break;
-				*tab = 0;
-				v[i] = strtoul(p, 0, 10);
-				p = tab + 1;
-			}
-			if (i != 4)
-				continue;   /* malformed row: skip it, not the file */
-
-			len = strlen(p);
-			while (len && (p[len - 1] == '\n' || p[len - 1] == '\r'))
-				p[--len] = 0;
-			/* The recorded length is authoritative: it is what the
-			 * generator measured, and trusting strlen would silently
-			 * truncate a literal containing a NUL once escapes exist. */
-			if (v[3] != len || len == 0 || len > KOF_STR_MAX_LEN)
-				continue;
-
-			e.icase    = (uint8_t)v[1];
-			e.fullword = (uint8_t)v[2];
-			e.len      = (uint16_t)len;
-			memcpy(e.bytes, p, len);
-			if (!str_push(b, &e))
-				break;
-			m->n_str++;
-		}
-	}
-	fclose(f);
-}
-
-/*
- * Preconditions, and the record that says these bytes are a module at all.
- *
- * Mandatory, and that is the whole point of it. The blob is raw code entered at
- * offset 0, so the loader has no way to look at the bytes and tell a module from
- * anything else - a stray 200 byte file named *.blob was copied into executable
- * memory and called, which is a crash at best. The build emits .meta beside every
- * blob it produces, so its absence means the build did not produce this file.
- * Refusing then is not a policy choice, it is the only evidence available.
- *
- * `blob_len` is checked against what was actually read: it catches a truncated or
- * half written blob paired with an intact record. It is an integrity check, not an
- * authenticity one - anyone who can write the blob can write the record beside it,
- * so the boundary here is the permissions on the database directory. Authenticity
- * belongs to the signed container that replaces these loose files.
- *
- * Within a record that exists, a missing field still means unconstrained, and that
- * is the safe direction: an unconstrained module gets run, so a stale field costs
- * time rather than detections.
- *
- * Zero on refusal.
- */
-static int meta_load(struct kof_module *m, const char *bp, size_t blob_len)
-{
-	char path[4096], line[128];
-	uint64_t want_len = 0;
-	FILE *f;
-
-	m->target_mask = 0xffffffffu;
-	m->scan_mask   = 0;
-	m->size_min    = 0;
-	m->arch_mask   = 0;
-
-	if (!sibling_path(bp, ".meta", path, sizeof path))
-		return 0;
-	f = fopen(path, "r");
-	if (!f) {
-		fprintf(stderr, "kofdb: %s has no .meta beside it, so it is not "
-				"something the build produced; refused\n", bp);
-		return 0;
-	}
-	while (fgets(line, sizeof line, f)) {
-		if (strncmp(line, "target=", 7) == 0)
-			m->target_mask = (uint32_t)strtoul(line + 7, 0, 10);
-		else if (strncmp(line, "scan_mask=", 10) == 0)
-			m->scan_mask = (uint32_t)strtoul(line + 10, 0, 10);
-		else if (strncmp(line, "size_min=", 9) == 0)
-			m->size_min = strtoull(line + 9, 0, 10);
-		else if (strncmp(line, "arch_mask=", 10) == 0)
-			m->arch_mask = (uint32_t)strtoul(line + 10, 0, 10);
-		else if (strncmp(line, "blob_len=", 9) == 0)
-			want_len = strtoull(line + 9, 0, 10);
-	}
-	fclose(f);
-
-	if (want_len == 0) {
-		fprintf(stderr, "kofdb: %s: the record beside it declares no "
-				"blob_len; refused\n", bp);
-		return 0;
-	}
-	if (want_len != (uint64_t)blob_len) {
-		fprintf(stderr, "kofdb: %s: %zu bytes, but the record beside it "
-				"says %llu; refused\n", bp, blob_len,
-			(unsigned long long)want_len);
-		return 0;
-	}
-
-	if (m->target_mask == 0)
-		m->target_mask = 0xffffffffu;
-	return 1;
-}
-
-/* Collect *.blob from a directory so a whole set can be named at once. */
-static int collect_blobs(struct builder *b, const char *dir)
-{
-	struct dirent *de;
-	DIR *d = opendir(dir);
-	uint32_t cap = 0;
-
-	if (!d)
-		return 0;
-	while ((de = readdir(d)) != NULL) {
-		size_t l = strlen(de->d_name), n;
-		char *p;
-		if (l < 6 || strcmp(de->d_name + l - 5, ".blob") != 0)
-			continue;
-		if (b->n_paths == cap) {
-			uint32_t nc = cap ? cap * 2 : 64;
-			char **nv = realloc(b->paths, nc * sizeof *nv);
-			if (!nv)
-				break;
-			b->paths = nv;
-			cap = nc;
-		}
-		/* snprintf with the size it was allocated from, not sprintf: the
-		 * arithmetic is exact today, and the point is that it stays checked
-		 * where it is written rather than in a separate line above it. */
-		n = strlen(dir) + l + 2;
-		p = malloc(n);
-		if (!p)
-			break;
-		snprintf(p, n, "%s/%s", dir, de->d_name);
-		b->paths[b->n_paths++] = p;
-	}
-	closedir(d);
-	return b->n_paths > 0;
-}
-
-static int one_path(struct builder *b, const char *path)
-{
-	b->paths = malloc(sizeof *b->paths);
-	if (!b->paths)
-		return 0;
-	b->paths[0] = kof_strdup(path);
-	if (!b->paths[0])
-		return 0;
-	b->n_paths = 1;
-	return 1;
-}
-
 struct kof_engine *kof_db_load(const char *path)
 {
-	struct builder b;
-	struct kof_engine *out;
+	struct kof_engine *e = NULL;
+	struct mapped *mp = NULL;
 	struct stat sb;
-	size_t total = 0;
-	uint32_t i;
+	char **paths = NULL, *single[1];
+	uint32_t n_paths = 0, n_ok = 0, i;
+	uint64_t n_mods = 0, n_str = 0, n_rng = 0, n_name = 0, code = 0;
+	size_t at = 0;
+	int owned = 0;
 
-	memset(&b, 0, sizeof b);
+	if (!path)
+		return NULL;
 
 	if (stat(path, &sb) == 0 && S_ISDIR(sb.st_mode)) {
-		if (!collect_blobs(&b, path)) {
-			fprintf(stderr, "kofdb: no .blob files in %s\n", path);
-			goto fail;
+		paths = collect_packs(path, &n_paths);
+		owned = 1;
+		if (!paths || n_paths == 0) {
+			fprintf(stderr, "kofdb: no .ksig packs in %s\n", path);
+			free(paths);
+			return NULL;
 		}
-	} else if (!one_path(&b, path)) {
-		goto fail;
+	} else {
+		single[0] = (char *)(uintptr_t)path;
+		paths = single;
+		n_paths = 1;
 	}
+
+	mp = calloc(n_paths, sizeof *mp);
+	if (!mp)
+		goto out;
 
 	/*
-	 * Size the arena from the files, but only from the ones that could be blobs.
-	 * A file over the cap is going to be refused below, so counting it here would
-	 * reserve address space for a module that never loads - and since anyone can
-	 * drop anything into a database directory, that turns one large file into an
-	 * arbitrarily large mapping. The 64 is per-blob alignment slack.
+	 * Map and validate everything first, then allocate once from the totals.
+	 * Growing the tables while reading would mean reallocating four arrays per
+	 * pack, and the counts are already in the headers - there is nothing to
+	 * discover by growing.
+	 *
+	 * A pack that will not load is refused and the rest are still read: one
+	 * corrupt file in a directory should not take the whole database with it.
 	 */
-	for (i = 0; i < b.n_paths; i++)
-		if (stat(b.paths[i], &sb) == 0 && sb.st_size > 0 &&
-		    (uint64_t)sb.st_size <= (uint64_t)KOF_BLOB_MAX_CODE)
-			total += (size_t)sb.st_size + 64;
-	if (!arena_open(&b, total ? total : 4096)) {
-		fprintf(stderr, "kofdb: cannot reserve the code arena\n");
-		goto fail;
-	}
+	for (i = 0; i < n_paths; i++) {
+		const struct kof_pack_hdr *h;
 
-	b.e.mods = calloc(b.n_paths, sizeof *b.e.mods);
-	if (!b.e.mods)
-		goto fail;
-	b.cap_mods = b.n_paths;
-
-	for (i = 0; i < b.n_paths; i++) {
-		struct kof_module *m = &b.e.mods[b.e.n_mods];
-		uint8_t *blob;
-		size_t len;
-		long off;
-
-		blob = read_whole(b.paths[i], KOF_BLOB_MAX_CODE, &len);
-		if (!blob) {
-			fprintf(stderr, "kofdb: cannot read %s\n", b.paths[i]);
+		if (!map_pack(&mp[n_ok], paths[i]))
 			continue;
-		}
-		/*
-		 * Everything that can refuse these bytes runs before they reach
-		 * executable memory. The arena is made executable as a whole later,
-		 * so a blob copied in is a blob that will be entered; there is no
-		 * second chance to change our mind about it further down.
-		 */
-		if (!blob_plausible(blob, len, b.paths[i]) ||
-		    !meta_load(m, b.paths[i], len)) {
-			free(blob);
-			continue;
-		}
-		off = arena_add(&b, blob, len);
-		free(blob);
-		if (off < 0) {
-			fprintf(stderr, "kofdb: arena full at %s\n", b.paths[i]);
-			break;
-		}
-
-		/* Entry offset is zero within each blob; build.sh asserts it. */
-		m->fn = (kof_scan_fn)(void *)(b.e.code + off);
-		names_load(&b, m, b.paths[i]);
-		strs_load(&b, m, b.paths[i]);
-
-		/* Assigned after strs_load, which is what knows the counts. */
-		m->memo_base = b.e.memo_size;
-		b.e.memo_size += m->n_str * m->n_rng;
-		b.e.scan_mask |= m->scan_mask;
-
-		b.e.n_mods++;
+		h = mp[n_ok].map;
+		n_mods += h->n_mods;
+		n_str  += h->n_str;
+		n_rng  += h->n_rng;
+		n_name += h->n_names;
+		/* Each pack's blobs keep the offsets its own header gives them, so
+		 * its code section is placed whole and aligned. */
+		code = (code + KOF_PACK_BLOB_ALIGN - 1) / KOF_PACK_BLOB_ALIGN
+		     * KOF_PACK_BLOB_ALIGN;
+		code += h->sec[KOF_SEC_CODE].len;
+		n_ok++;
+	}
+	if (n_ok == 0)
+		goto out;
+	if (n_mods > 0xffffffffu || n_str > 0xffffffffu ||
+	    n_rng > 0xffffffffu || n_name > 0xffffffffu) {
+		fprintf(stderr, "kofdb: %s: more entries than an index can hold\n",
+			path);
+		goto out;
 	}
 
-	if (b.e.n_mods == 0)
-		goto fail;
-
-	if (mprotect(b.e.code, b.e.code_cap, PROT_READ | PROT_EXEC) != 0) {
-		fprintf(stderr, "kofdb: cannot make the arena executable\n");
-		goto fail;
+	e = calloc(1, sizeof *e);
+	if (!e)
+		goto out;
+	e->mods     = calloc(n_mods ? n_mods : 1, sizeof *e->mods);
+	e->str_tab  = calloc(n_str  ? n_str  : 1, sizeof *e->str_tab);
+	e->rng_tab  = calloc(n_rng  ? n_rng  : 1, sizeof *e->rng_tab);
+	e->name_tab = calloc(n_name ? n_name : 1, sizeof *e->name_tab);
+	if (!e->mods || !e->str_tab || !e->rng_tab || !e->name_tab ||
+	    !arena_open(e, (size_t)code)) {
+		kof_db_free(e);
+		e = NULL;
+		goto out;
 	}
 
-	out = malloc(sizeof *out);
-	if (!out)
-		goto fail;
-	*out = b.e;
-	/* A path is only needed to find the files beside the blob. Nothing keeps one
-	 * afterwards, so the engine owns no strings and there is no ownership to get
-	 * wrong. */
-	for (i = 0; i < b.n_paths; i++)
-		free(b.paths[i]);
-	free(b.paths);
-	return out;
+	for (i = 0; i < n_ok; i++) {
+		const struct kof_pack_hdr *h = mp[i].map;
 
-fail:
-	if (b.e.code)
-		munmap(b.e.code, b.e.code_cap);
-	for (i = 0; i < b.n_paths; i++)
-		free(b.paths[i]);
-	free(b.paths);
-	free(b.e.mods);
-	free(b.e.str_tab);
-	free(b.e.rng_tab);
-	free(b.e.name_tab);
-	return NULL;
+		at = (at + KOF_PACK_BLOB_ALIGN - 1) / KOF_PACK_BLOB_ALIGN
+		   * KOF_PACK_BLOB_ALIGN;
+		absorb(e, &mp[i], at);
+		at += (size_t)h->sec[KOF_SEC_CODE].len;
+	}
+
+	/* Written once, then executable. */
+	if (mprotect(e->code, e->code_cap, PROT_READ | PROT_EXEC) != 0) {
+		fprintf(stderr, "kofdb: cannot make the code executable\n");
+		kof_db_free(e);
+		e = NULL;
+	}
+out:
+	for (i = 0; i < n_ok; i++)
+		unmap_pack(&mp[i]);
+	free(mp);
+	if (owned) {
+		for (i = 0; i < n_paths; i++)
+			free(paths[i]);
+		free(paths);
+	}
+	return e;
 }
 
 void kof_db_free(struct kof_engine *e)

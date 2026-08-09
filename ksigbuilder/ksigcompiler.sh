@@ -10,6 +10,10 @@
 # job. They live in the same directory because they are one toolchain, and apart
 # from signature/ because that holds inputs, not tools.
 #
+# The declarations in the source are read by ksigbuilder --extract rather than by
+# this script, because reading them is parsing and shell is not what parsing is
+# written in.
+#
 # Shell rather than C, and not for lack of ambition: compiling a module means a
 # specific set of freestanding flags, then ld, then nm and readelf and size to
 # prove the result needs no relocation and carries no state. That is a wrapper
@@ -68,9 +72,12 @@ elf=$tmp/$name.elf
 raw=$tmp/$name.raw
 
 CC=${CC:-gcc}
-kofpat=$root/build/kofpat
-if [ ! -x "$kofpat" ]; then
-	echo "build.sh: $kofpat missing (run: make)" >&2
+# The other half of the toolchain, in its --extract mode: it reads the declarations
+# out of the source. Same binary that packs the artefacts, so the region names it
+# accepts and the pack it later writes cannot disagree about anything.
+ksigbuilder=${KOF_KSIGBUILDER:-$root/build/ksigbuilder}
+if [ ! -x "$ksigbuilder" ]; then
+	echo "ksigcompiler.sh: $ksigbuilder missing (run: make)" >&2
 	exit 2
 fi
 
@@ -265,7 +272,7 @@ fi
 echo "== patterns"
 pat=$tmp/$name.pat.h
 pre=$tmp/$name.pre
-"$kofpat" "$src" "$pat" "$namefile" "$pre" "$strfile"
+"$ksigbuilder" --extract "$src" "$pat" "$namefile" "$pre" "$strfile"
 scan_mask=$(sed -n 's/^scan_mask=//p' "$pre")
 nstr=$(sed -n 's/^nstr=//p' "$pre")
 : "${scan_mask:=0}"
