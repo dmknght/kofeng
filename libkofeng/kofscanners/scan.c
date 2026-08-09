@@ -45,10 +45,6 @@ struct kof_scanner *kof_scan_new(const struct kof_engine *eng)
 		return NULL;
 	sc->eng = eng;
 
-	sc->elf = malloc(sizeof *sc->elf);
-	if (!sc->elf)
-		goto fail;
-
 	/* The matcher owns the search state: the presence set and the memo are how a
 	 * search is answered, not how a scan is bookkept. */
 	if (!kof_match_state_init(&sc->m, eng->n_str, eng->memo_size))
@@ -64,8 +60,11 @@ void kof_scan_free(struct kof_scanner *sc)
 {
 	if (!sc)
 		return;
+	uint32_t i;
+
 	kof_match_state_free(&sc->m);
-	free(sc->elf);
+	for (i = 0; i < KOF_FMT_COUNT; i++)
+		free(sc->view[i]);
 	free(sc);
 }
 
@@ -200,10 +199,79 @@ static void finding_str(const struct kof_scanner *sc,
 		 kof_arch_name(ctx->arch), nm ? nm : "unknown");
 }
 
+/* ---- identify -------------------------------------------------------------- */
+
+/*
+ * The format table.
+ *
+ * Each collector answers two questions separately: does this object look like
+ * mine, and - once a buffer exists - what does it say. The split is what lets the
+ * view be allocated only for formats actually met, and it is why sniff takes no
+ * buffer.
+ *
+ * Order is priority. It matters as soon as two formats can claim one object, and
+ * writing it down here is cheaper than discovering it is implied by the order of
+ * two if statements somewhere.
+ */
+struct parser {
+	uint8_t  format;                       /* enum kof_format */
+	uint32_t view_size;
+	int (*sniff)(kof_buf);
+	int (*parse)(kof_buf, void *view, struct kof_obj_ctx *);
+};
+
+static int elf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_elf_parse(b, (struct kof_elf_info *)v, c);
+}
+
+static int pe_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_pe_parse(b, (struct kof_pe_info *)v, c);
+}
+
+static const struct parser parsers[] = {
+	{ KOF_FMT_ELF, (uint32_t)sizeof(struct kof_elf_info),
+	  kof_elf_sniff, elf_parse_thunk },
+	{ KOF_FMT_PE,  (uint32_t)sizeof(struct kof_pe_info),
+	  kof_pe_sniff,  pe_parse_thunk  }
+};
+
+/*
+ * Decide what the object is and fill the matching view.
+ *
+ * Nothing is allocated for a format the sniff rejected, and a view once allocated
+ * is kept: a directory of ELF binaries allocates one view for the whole walk, and
+ * a scanner that never meets a PE never allocates a PE view.
+ *
+ * An allocation failure leaves the object unidentified rather than failing the
+ * scan. That is the same answer an unrecognised format gets, and it is the right
+ * one: the object still gets scanned by every module whose target covers unknown.
+ */
+static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx)
+{
+	uint32_t i;
+
+	for (i = 0; i < sizeof parsers / sizeof parsers[0]; i++) {
+		const struct parser *p = &parsers[i];
+
+		if (!p->sniff(buf))
+			continue;
+		if (!sc->view[p->format]) {
+			sc->view[p->format] = malloc(p->view_size);
+			if (!sc->view[p->format])
+				return;
+		}
+		if (p->parse(buf, sc->view[p->format], ctx))
+			return;
+	}
+}
+
 /* ---- the routine ---------------------------------------------------------- */
 
 static uint32_t scan_object(struct kof_scanner *sc, kof_buf buf,
-			    const char *name, struct kof_result *out)
+			    const char *name, const struct kof_scan_option *opt,
+			    struct kof_result *out)
 {
 	struct kof_obj_ctx ctx;
 	uint32_t present, i, added = 0;
@@ -215,12 +283,7 @@ static uint32_t scan_object(struct kof_scanner *sc, kof_buf buf,
 
 	kof_match_begin(&sc->m, buf);
 
-	/*
-	 * One parser wired in for now. This is where the format table goes: identify,
-	 * then dispatch. Until there is a second parser, a table would be a table with
-	 * one row and a switch with one case.
-	 */
-	kof_elf_parse(buf, sc->elf, &ctx);
+	identify(sc, buf, &ctx);
 
 	present = regions_present(&ctx, sc->eng->scan_mask);
 	sc->st.objects++;
@@ -251,6 +314,17 @@ static uint32_t scan_object(struct kof_scanner *sc, kof_buf buf,
 			out->dropped++;
 		}
 		added++;
+
+		/*
+		 * Stop unless the caller asked for everything. The remaining modules
+		 * can only lengthen a list that already says the object is not clean,
+		 * and on a database of any size that is most of the work.
+		 *
+		 * It saves nothing on a clean object, which is nearly every object -
+		 * this is a bound on the worst case, not a throughput win.
+		 */
+		if (!opt->all_matches)
+			break;
 	}
 
 	/* Before the next kof_match_begin clears them. */
@@ -328,7 +402,7 @@ struct pending {
 
 struct walk {
 	struct kof_scanner *sc;
-	const struct kof_policy *pol;
+	const struct kof_scan_option *opt;
 	kof_on_object cb;
 	void *user;
 
@@ -403,7 +477,7 @@ static void scan_file(struct walk *w, const char *path)
 	 * One layer. When there are archive children this becomes the same stack the
 	 * directory walk uses: scan the layer, then push each child a producer yields.
 	 */
-	scan_object(w->sc, kof_buf_make(src.map, src.len), path, &res);
+	scan_object(w->sc, kof_buf_make(src.map, src.len), path, w->opt, &res);
 	unmap_file(&src);
 
 	w->objects++;
@@ -441,15 +515,15 @@ static void read_dir(struct walk *w, const char *dir, uint32_t depth)
 
 		/* lstat, not stat: a symlink is not followed unless asked for, so a link
 		 * pointing at an ancestor cannot turn this into a loop. */
-		if ((w->pol->follow_symlinks ? stat : lstat)(w->path_buf, &sb) != 0) {
+		if ((w->opt->follow_symlinks ? stat : lstat)(w->path_buf, &sb) != 0) {
 			count_unreadable(w->sc);
 			continue;
 		}
 
 		if (S_ISDIR(sb.st_mode)) {
-			if (!w->pol->recurse_dirs)
+			if (!w->opt->recurse_dirs)
 				continue;
-			if (w->pol->max_depth && depth + 1 > w->pol->max_depth)
+			if (w->opt->max_depth && depth + 1 > w->opt->max_depth)
 				continue;
 			push_dir(w, w->path_buf, dir_len + 1 + nl, depth + 1);
 		} else if (S_ISREG(sb.st_mode)) {
@@ -461,7 +535,7 @@ static void read_dir(struct walk *w, const char *dir, uint32_t depth)
 }
 
 int kof_scan_walk(struct kof_scanner *sc, const char *path,
-		  const struct kof_policy *pol, kof_on_object cb, void *user)
+		  const struct kof_scan_option *opt, kof_on_object cb, void *user)
 {
 	struct walk w;
 	struct stat sb;
@@ -469,11 +543,11 @@ int kof_scan_walk(struct kof_scanner *sc, const char *path,
 
 	memset(&w, 0, sizeof w);
 	w.sc   = sc;
-	w.pol  = pol;
+	w.opt  = opt;
 	w.cb   = cb;
 	w.user = user;
 
-	if ((pol->follow_symlinks ? stat : lstat)(path, &sb) != 0)
+	if ((opt->follow_symlinks ? stat : lstat)(path, &sb) != 0)
 		return KOF_ERR_OPEN;
 
 	if (!S_ISDIR(sb.st_mode)) {
@@ -483,7 +557,7 @@ int kof_scan_walk(struct kof_scanner *sc, const char *path,
 		return rc;
 	}
 
-	if (!pol->recurse_dirs) {
+	if (!opt->recurse_dirs) {
 		return KOF_ERR_OPEN;
 	}
 

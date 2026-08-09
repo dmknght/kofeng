@@ -44,6 +44,17 @@ enum {
 };
 
 /*
+ * Every region except the complement.
+ *
+ * Here rather than in the collector because this is where a region is added, and
+ * a list of regions kept anywhere else is a list someone will forget to extend.
+ * UNCLAIMED is what is left when all of these are taken, so it is defined by this
+ * and cannot be in it.
+ */
+#define KOF_SCAN_ELF_CLAIMED (KOF_SCAN_ELF_HEADERS | KOF_SCAN_ELF_CODE |	\
+			      KOF_SCAN_ELF_DATA | KOF_SCAN_ELF_NOLOAD)
+
+/*
  * Region permissions. Not in kofsig.h because what carries them differs by
  * format: here it is a PT_LOAD segment, in PE it is a section.
  */
@@ -128,6 +139,10 @@ struct kof_elf_seg {
 	uint64_t mem_addr, mem_size;
 	uint32_t type;
 	uint32_t perm;       /* KOF_PERM_* */
+
+	/* The bytes this segment owns in the region partition. See the note on
+	 * the same pair in struct kof_elf_sec. */
+	uint64_t claim_off, claim_len;
 };
 
 struct kof_elf_sec {
@@ -137,6 +152,21 @@ struct kof_elf_sec {
 	uint32_t type;
 	uint32_t name_hash;  /* of the full name, so comparison survives truncation */
 	char     name[KOF_ELF_SECNAME_MAX];
+
+	/*
+	 * The bytes this section owns in the region partition, which is not
+	 * always what it declared.
+	 *
+	 * Nothing in ELF stops a segment and a section describing the same file
+	 * bytes - in a normal object they do, which is the point of having both -
+	 * so no assignment of bytes to regions can be faithful to every
+	 * declaration and disjoint at the same time. Ownership is settled once at
+	 * parse time in offset order, with the earlier claimant keeping the bytes.
+	 *
+	 * Modules reading what the file said want file_off and file_size. The scan
+	 * regions use these.
+	 */
+	uint64_t claim_off, claim_len;
 };
 
 /*
@@ -168,6 +198,11 @@ struct kof_elf_info {
 
 	uint64_t entry_addr;   /* virtual address, as declared */
 	uint32_t entry_perm;   /* KOF_PERM_* of the containing segment, 0 if none */
+
+	/* What the header structures own after settling: the front block, and the
+	 * section header table, which a hostile object can put inside a segment. */
+	uint64_t hdr_claim_off, hdr_claim_len;
+	uint64_t shtab_claim_off, shtab_claim_len;
 
 	uint64_t phoff;
 	uint16_t phentsize;

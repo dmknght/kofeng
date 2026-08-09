@@ -148,6 +148,86 @@ static inline int kof_rd_addr(kof_buf b, uint64_t off, int is64, int be,
  * This is an integrity check against corruption and wrong-file mistakes, not a
  * security boundary. Anything that must resist tampering gets signed instead.
  */
+/*
+ * Arithmetic on values that came out of a file.
+ *
+ * Every one of these was written inline several times before it was written once,
+ * and the copies were not all the same: the rounding in the database loader could
+ * overflow and could divide by zero, while the one in the PE collector could not.
+ * Two implementations of one idea is one implementation and one bug waiting for
+ * the input that tells them apart.
+ */
+static inline uint64_t kof_sat_add(uint64_t a, uint64_t b)
+{
+	return (a > UINT64_MAX - b) ? UINT64_MAX : a + b;
+}
+
+/* Round up to a multiple of `a`. An alignment of zero rounds to itself rather
+ * than dividing by it, because alignments are read from files too. */
+static inline uint64_t kof_round_up(uint64_t v, uint64_t a)
+{
+	uint64_t r;
+
+	if (a == 0)
+		return v;
+	r = v % a;
+	return r ? kof_sat_add(v, a - r) : v;
+}
+
+/*
+ * FNV-1a over bytes.
+ *
+ * Not a checksum and not a security property: it exists so a name can be compared
+ * and bucketed without keeping the string, and so a comparison stays right when
+ * the stored copy of the name was cut short. Split into a step so a caller reading
+ * a NUL terminated name out of a bounded buffer can feed it one byte at a time
+ * without first copying it somewhere.
+ */
+#define KOF_HASH_INIT 2166136261u
+
+static inline uint32_t kof_hash_step(uint32_t h, uint8_t c)
+{
+	return (h ^ c) * 16777619u;
+}
+
+static inline uint32_t kof_hash_bytes(const void *p, uint64_t n)
+{
+	const uint8_t *b = (const uint8_t *)p;
+	uint32_t h = KOF_HASH_INIT;
+	uint64_t i;
+
+	for (i = 0; i < n; i++)
+		h = kof_hash_step(h, b[i]);
+	return h;
+}
+
+/*
+ * How much of [off, off+len) is inside an object of `size` bytes. Zero if none.
+ *
+ * Clipping, not rejecting, and that is a decision rather than a convenience: a
+ * range is normally computed from header fields, and an expression like
+ * "sec->size - 0x40" underflows to something enormous on a small section.
+ * Clipping turns that into a wrongly sized range, which a fixture catches;
+ * rejecting turns it into a silent no-match, which nothing catches.
+ *
+ * kof_slice is the other half of the same question and answers it the other way:
+ * it refuses a range that is not wholly inside, because a caller asking for a
+ * struct wants the struct or nothing. Here the caller wants whatever is there.
+ *
+ * Saturating, since both arguments may be hostile and their sum may not fit.
+ */
+static inline uint64_t kof_clip_len(uint64_t size, uint64_t off, uint64_t len)
+{
+	uint64_t end;
+
+	if (len == 0 || off >= size)
+		return 0;
+	end = kof_sat_add(off, len);
+	if (end > size)
+		end = size;
+	return end - off;
+}
+
 static inline uint32_t kof_crc32(const void *data, uint64_t len)
 {
 	const uint8_t *p = (const uint8_t *)data;

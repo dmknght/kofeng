@@ -42,6 +42,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofdb/kofpackw.c \
            libkofeng/kofmatchers/kofmatch.c \
            libkofeng/kofparsers/elf/elf_parse.c \
+           libkofeng/kofparsers/pe/pe_parse.c \
            libkofeng/kofscanners/scan.c \
            libkofeng/kofscanners/objctx.c
 
@@ -70,7 +71,8 @@ $(LIB): $(LIB_OBJ)
 
 SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/kofsig.h \
-           $(SDK)/include/kofmod/elf.h
+           $(SDK)/include/kofmod/elf.h \
+           $(SDK)/include/kofmod/pe.h
 
 $(SDK)/include/kofeng.h: libkofeng/kofeng.h
 	@mkdir -p $(dir $@)
@@ -144,8 +146,10 @@ db: sigs $(BUILD)/ksigbuilder
 UNIT_SRC := $(wildcard tests/unit/*.c)
 UNIT_BIN := $(patsubst tests/unit/%.c,$(BUILD)/unit_%,$(UNIT_SRC))
 
-$(BUILD)/unit_%: tests/unit/%.c | $(BUILD)
-	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+# Linked against the library, so a unit test can exercise it rather than only
+# whatever it can compile in on its own.
+$(BUILD)/unit_%: tests/unit/%.c $(LIB) | $(BUILD)
+	$(CC) $(CFLAGS) $< $(LIB) -o $@ $(LDFLAGS)
 
 unit: $(UNIT_BIN)
 	@rc=0; for t in $(UNIT_BIN); do \

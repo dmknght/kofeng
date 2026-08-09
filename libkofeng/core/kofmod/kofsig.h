@@ -77,7 +77,11 @@ enum kof_format {
 	KOF_FMT_PE      = 2,
 	KOF_FMT_MACHO   = 3,
 	KOF_FMT_SCRIPT  = 4,
-	KOF_FMT_TEXT    = 5
+	KOF_FMT_TEXT    = 5,
+
+	/* One past the last, so a host can size a per-format table. Not a format:
+	 * nothing is ever this. */
+	KOF_FMT_COUNT   = 6
 };
 
 /*

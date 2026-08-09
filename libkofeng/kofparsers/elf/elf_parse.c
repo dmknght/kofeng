@@ -18,6 +18,7 @@
  */
 
 #include "elf_parse.h"
+#include "../rangelist.h"
 
 #include <string.h>
 
@@ -114,7 +115,7 @@ static uint8_t arch_from_machine(uint16_t m)
  * a name comparison survives the truncation applied to the stored copy. */
 static uint32_t name_hash(kof_buf strtab, uint64_t off, int *out_truncated)
 {
-	uint32_t h = 2166136261u;
+	uint32_t h = KOF_HASH_INIT;
 	uint64_t i;
 
 	*out_truncated = 0;
@@ -201,10 +202,8 @@ static int vaddr_overlap(const struct kof_elf_seg *a, const struct kof_elf_seg *
 	if (a->mem_size == 0 || b->mem_size == 0)
 		return 0;
 	/* mem_size is untrusted; saturate instead of wrapping. */
-	a_end = (a->mem_addr > UINT64_MAX - a->mem_size) ? UINT64_MAX
-							 : a->mem_addr + a->mem_size;
-	b_end = (b->mem_addr > UINT64_MAX - b->mem_size) ? UINT64_MAX
-							 : b->mem_addr + b->mem_size;
+	a_end = kof_sat_add(a->mem_addr, a->mem_size);
+	b_end = kof_sat_add(b->mem_addr, b->mem_size);
 	return a->mem_addr < b_end && b->mem_addr < a_end;
 }
 
@@ -316,74 +315,135 @@ static void parse_sections(kof_buf file, struct kof_elf_info *info,
  * byte twice, which is why coalescing is all the deduplication a union needs.
  */
 
-/* A range list under construction, bounded by the caller's buffer. */
-struct rlist {
-	struct kof_range *v;
-	uint32_t n;
-	uint32_t cap;
+static uint64_t front_end(const struct kof_elf_info *e);
+
+/*
+ * Settle which bytes each structure owns.
+ *
+ * The algorithm is kof_rl_settle; what is here is which structures get to claim
+ * and how authoritative each is. ELF guarantees overlap - segments and sections
+ * describe the same file twice, on purpose - and generated hostile headers found
+ * four distinct ways two regions could collide before this existed:
+ *
+ *   an executable load at offset zero          CODE against HEADERS
+ *   a non-allocated section inside a load      NOLOAD against CODE or DATA
+ *   a section header table inside a load       HEADERS against CODE or DATA
+ *   an executable and a data load overlapping  CODE against DATA
+ *
+ * What kept the property before was one trim of DATA against the header block:
+ * one of the four, and the only one real binaries exercise, which is why 846 of
+ * them passed while the other three sat there.
+ */
+
+/*
+ * Settle which bytes each structure owns.
+ *
+ * The regions have to be disjoint or they are not a partition, and ELF
+ * guarantees the opposite: segments and sections describe the same file twice,
+ * on purpose, and a normal object has them overlapping everywhere. What kept the
+ * property before was one trim of DATA against the header block - one of four
+ * ways two regions can collide, and generated hostile headers found the others
+ * within twenty thousand tries:
+ *
+ *   an executable load at offset zero        CODE against HEADERS
+ *   a non-allocated section inside a load    NOLOAD against CODE or DATA
+ *   a section header table inside a load     HEADERS against CODE or DATA
+ *   an executable and a data load overlapping   CODE against DATA
+ *
+ * So ownership is decided once, here, rather than by each region trimming
+ * against whichever neighbour someone remembered. Claimants are taken in offset
+ * order and the earlier one keeps the bytes; ties go to the more authoritative,
+ * which is why the header block outranks a segment that also starts at zero.
+ *
+ * Front trimming alone is enough to leave every claim contiguous: sorted by
+ * offset, a claimant can only ever collide with what is already behind it.
+ *
+ * What a structure declared stays in file_off and file_size for a module to read.
+ * What it owns goes in claim_off and claim_len.
+ */
+enum {
+	CL_HDR = 0,     /* the ELF header plus the program header table */
+	CL_SHTAB,       /* the section header table */
+	CL_SEG,         /* a PT_LOAD segment */
+	CL_SEC          /* a section not covered by any load */
 };
 
-/*
- * Append [o, o+n) clipped to the object. Saturating on the end, since both values
- * come from header fields that may be hostile.
- *
- * Order does not matter here; the caller sorts once at the end rather than keeping
- * the list ordered through every insert.
- */
-static void rl_add(struct rlist *l, uint64_t obj_size, uint64_t o, uint64_t n)
+/* Which structure a settled claim belongs to, packed into the tag the settler
+ * carries through: the kind in the low bits, the index above it. */
+#define CL_TAG(kind, idx) (((uint32_t)(idx) << 2) | (uint32_t)(kind))
+#define CL_KIND(tag)      ((tag) & 3u)
+#define CL_IDX(tag)       ((tag) >> 2)
+
+static void settle_claims(struct kof_elf_info *e, uint64_t obj_size)
 {
-	uint64_t e;
+	struct kof_claim c[2 + KOF_ELF_MAX_SEGMENTS + KOF_ELF_MAX_SECTIONS];
+	const uint32_t cap = (uint32_t)(sizeof c / sizeof c[0]);
+	uint32_t n = 0, i;
 
-	if (n == 0 || o >= obj_size || l->n >= l->cap)
-		return;
-	e = (o > UINT64_MAX - n) ? UINT64_MAX : o + n;
-	if (e > obj_size)
-		e = obj_size;
-	if (e <= o)
-		return;
-	l->v[l->n].off = o;
-	l->v[l->n].len = e - o;
-	l->n++;
-}
+	e->hdr_claim_off = e->hdr_claim_len = 0;
+	e->shtab_claim_off = e->shtab_claim_len = 0;
+	for (i = 0; i < e->seg_count; i++)
+		e->seg[i].claim_off = e->seg[i].claim_len = 0;
+	for (i = 0; i < e->sec_count; i++)
+		e->sec[i].claim_off = e->sec[i].claim_len = 0;
 
-/*
- * Sort by offset, then merge anything that touches or overlaps.
- *
- * Insertion sort on purpose: segments and sections are almost always already in
- * offset order, which makes this a linear scan, and the list is bounded by the
- * segment and section counts. A comparison sort with better worst case would be
- * slower on every real input.
- *
- * Merging on touch, not just on overlap, is what lets a pattern spanning the join
- * between two adjacent regions be found - if code ends exactly where data begins,
- * the union is one range.
- */
-static uint32_t rl_normalise(struct rlist *l)
-{
-	uint32_t i, j, w;
+	c[n].off = 0;
+	c[n].len = front_end(e);
+	c[n].rank = CL_HDR;
+	c[n].tag = CL_TAG(CL_HDR, 0);
+	n++;
 
-	for (i = 1; i < l->n; i++) {
-		struct kof_range t = l->v[i];
-		for (j = i; j > 0 && l->v[j - 1].off > t.off; j--)
-			l->v[j] = l->v[j - 1];
-		l->v[j] = t;
+	if (e->shnum && e->shentsize) {
+		c[n].off = e->shoff;
+		c[n].len = (uint64_t)e->shnum * e->shentsize;
+		c[n].rank = CL_SHTAB;
+		c[n].tag = CL_TAG(CL_SHTAB, 0);
+		n++;
+	}
+	for (i = 0; i < e->seg_count && n < cap; i++) {
+		if (e->seg[i].type != PT_LOAD || !e->seg[i].file_size)
+			continue;
+		c[n].off = e->seg[i].file_off;
+		c[n].len = e->seg[i].file_size;
+		c[n].rank = CL_SEG;
+		c[n].tag = CL_TAG(CL_SEG, i);
+		n++;
+	}
+	for (i = 0; i < e->sec_count && n < cap; i++) {
+		if (e->sec[i].type == SHT_NULL || e->sec[i].type == SHT_NOBITS ||
+		    (e->sec[i].flags & SHF_ALLOC) || !e->sec[i].file_size)
+			continue;
+		c[n].off = e->sec[i].file_off;
+		c[n].len = e->sec[i].file_size;
+		c[n].rank = CL_SEC;
+		c[n].tag = CL_TAG(CL_SEC, i);
+		n++;
 	}
 
-	w = 0;
-	for (i = 0; i < l->n; i++) {
-		if (w > 0) {
-			uint64_t we = l->v[w - 1].off + l->v[w - 1].len;
-			if (l->v[i].off <= we) {
-				uint64_t ie = l->v[i].off + l->v[i].len;
-				if (ie > we)
-					l->v[w - 1].len = ie - l->v[w - 1].off;
-				continue;
-			}
+	kof_rl_settle(c, n, obj_size);
+
+	for (i = 0; i < n; i++) {
+		uint32_t idx = CL_IDX(c[i].tag);
+
+		switch (CL_KIND(c[i].tag)) {
+		case CL_HDR:
+			e->hdr_claim_off = c[i].got_off;
+			e->hdr_claim_len = c[i].got_len;
+			break;
+		case CL_SHTAB:
+			e->shtab_claim_off = c[i].got_off;
+			e->shtab_claim_len = c[i].got_len;
+			break;
+		case CL_SEG:
+			e->seg[idx].claim_off = c[i].got_off;
+			e->seg[idx].claim_len = c[i].got_len;
+			break;
+		default:
+			e->sec[idx].claim_off = c[i].got_off;
+			e->sec[idx].claim_len = c[i].got_len;
+			break;
 		}
-		l->v[w++] = l->v[i];
 	}
-	l->n = w;
-	return w;
 }
 
 /* End of the front header structures: the ELF header plus the program header
@@ -403,38 +463,18 @@ static uint64_t front_end(const struct kof_elf_info *e)
 
 /* Everything a header table, segment or section accounts for. The complement of
  * this is UNCLAIMED. */
-static void claimed(struct rlist *l, const struct kof_elf_info *e,
-		    uint64_t obj_size)
-{
-	uint32_t i;
-
-	rl_add(l, obj_size, 0, front_end(e));
-	if (e->shnum && e->shentsize)
-		rl_add(l, obj_size, e->shoff, (uint64_t)e->shnum * e->shentsize);
-
-	/* Every segment, not only PT_LOAD: a PT_NOTE outside any load still
-	 * accounts for its bytes. */
-	for (i = 0; i < e->seg_count; i++)
-		rl_add(l, obj_size, e->seg[i].file_off, e->seg[i].file_size);
-
-	/* SHT_NOBITS occupies no file bytes, and SHT_NULL describes nothing, so
-	 * neither claims anything. */
-	for (i = 0; i < e->sec_count; i++)
-		if (e->sec[i].type != SHT_NULL && e->sec[i].type != SHT_NOBITS)
-			rl_add(l, obj_size, e->sec[i].file_off,
-			       e->sec[i].file_size);
-}
-
 /*
  * Resolve a mask to ranges. Reached through ctx->resolve_scan, so the host never
  * learns that any of this is ELF specific.
  */
 static uint32_t elf_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
+				 struct kof_range *out, uint32_t max_out);
+
+static uint32_t elf_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 				 struct kof_range *out, uint32_t max_out)
 {
 	const struct kof_elf_info *e = (const struct kof_elf_info *)ctx->file_header;
-	struct rlist l;
-	uint64_t hend;
+	struct kof_rlist l;
 	uint32_t i;
 
 	if (!e || !e->valid || !out || max_out == 0)
@@ -443,80 +483,64 @@ static uint32_t elf_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 	l.v = out;
 	l.n = 0;
 	l.cap = max_out;
-	hend = front_end(e);
 
 	if (mask & KOF_SCAN_ELF_HEADERS) {
-		rl_add(&l, ctx->obj_size, 0, hend);
-		if (e->shnum && e->shentsize)
-			rl_add(&l, ctx->obj_size, e->shoff,
-			       (uint64_t)e->shnum * e->shentsize);
+		kof_rl_add(&l, ctx->obj_size, e->hdr_claim_off, e->hdr_claim_len);
+		kof_rl_add(&l, ctx->obj_size, e->shtab_claim_off,
+			   e->shtab_claim_len);
 	}
 
 	if (mask & KOF_SCAN_ELF_CODE)
 		for (i = 0; i < e->seg_count; i++)
 			if (e->seg[i].type == PT_LOAD &&
 			    (e->seg[i].perm & KOF_PERM_X))
-				rl_add(&l, ctx->obj_size, e->seg[i].file_off,
-				       e->seg[i].file_size);
+				kof_rl_add(&l, ctx->obj_size, e->seg[i].claim_off,
+					   e->seg[i].claim_len);
 
-	if (mask & KOF_SCAN_ELF_DATA) {
-		for (i = 0; i < e->seg_count; i++) {
-			uint64_t o, n;
-			if (e->seg[i].type != PT_LOAD ||
-			    (e->seg[i].perm & KOF_PERM_X))
-				continue;
-			o = e->seg[i].file_off;
-			n = e->seg[i].file_size;
-			/* Trim the front load past the header structures: it
-			 * starts at offset 0 on a normal binary, and those bytes
-			 * are HEADERS. Without this the two regions overlap and
-			 * the partition property is lost. */
-			if (o < hend) {
-				if (o + n <= hend)
-					continue;
-				n -= hend - o;
-				o = hend;
-			}
-			rl_add(&l, ctx->obj_size, o, n);
-		}
-	}
+	if (mask & KOF_SCAN_ELF_DATA)
+		for (i = 0; i < e->seg_count; i++)
+			if (e->seg[i].type == PT_LOAD &&
+			    !(e->seg[i].perm & KOF_PERM_X))
+				kof_rl_add(&l, ctx->obj_size, e->seg[i].claim_off,
+					   e->seg[i].claim_len);
 
 	if (mask & KOF_SCAN_ELF_NOLOAD)
 		for (i = 0; i < e->sec_count; i++)
 			if (e->sec[i].type != SHT_NULL &&
 			    e->sec[i].type != SHT_NOBITS &&
 			    !(e->sec[i].flags & SHF_ALLOC))
-				rl_add(&l, ctx->obj_size, e->sec[i].file_off,
-				       e->sec[i].file_size);
+				kof_rl_add(&l, ctx->obj_size, e->sec[i].claim_off,
+					   e->sec[i].claim_len);
 
 	if (mask & KOF_SCAN_ELF_UNCLAIMED) {
 		/*
-		 * The complement, built in a scratch list and inverted into the
-		 * caller's buffer. Scratch is needed because the claimed set has
-		 * to be complete and normalised before it can be inverted, and it
-		 * is larger than the result.
+		 * The complement of every other region, obtained by asking for
+		 * them.
+		 *
+		 * Listing the claimants again here is what this used to do, and
+		 * it was a second description of the same thing: add a region,
+		 * forget to add it to the list, and it silently appears in
+		 * UNCLAIMED as well as in itself - two regions returning the same
+		 * offset, which is exactly what the partition forbids. Asking the
+		 * resolver makes UNCLAIMED the complement by construction.
+		 *
+		 * Scratch is needed because the claimed set has to be complete
+		 * and normalised before it can be inverted, and it is larger than
+		 * the result.
 		 */
 		struct kof_range cv[KOF_ELF_MAX_SEGMENTS + KOF_ELF_MAX_SECTIONS + 2];
-		struct rlist c;
-		uint64_t cursor = 0;
+		struct kof_rlist c;
 
-		c.v = cv;
-		c.n = 0;
-		c.cap = (uint32_t)(sizeof cv / sizeof cv[0]);
-		claimed(&c, e, ctx->obj_size);
-		rl_normalise(&c);
-
-		for (i = 0; i < c.n; i++) {
-			if (c.v[i].off > cursor)
-				rl_add(&l, ctx->obj_size, cursor,
-				       c.v[i].off - cursor);
-			cursor = c.v[i].off + c.v[i].len;
-		}
-		if (cursor < ctx->obj_size)
-			rl_add(&l, ctx->obj_size, cursor, ctx->obj_size - cursor);
+		kof_rl_init(&c, cv, (uint32_t)(sizeof cv / sizeof cv[0]));
+		c.n = elf_resolve_scan(ctx, KOF_SCAN_ELF_CLAIMED, cv, c.cap);
+		kof_rl_complement(&l, &c, ctx->obj_size);
 	}
+	return kof_rl_normalise(&l);
+}
 
-	return rl_normalise(&l);
+int kof_elf_sniff(kof_buf file)
+{
+	return file.n >= 4 && memcmp(file.p, "\177ELF", 4) == 0;
 }
 
 int kof_elf_parse(kof_buf file, struct kof_elf_info *info,
@@ -767,6 +791,10 @@ int kof_elf_parse(kof_buf file, struct kof_elf_info *info,
 
 	/* Regions are computed on demand from the tables just filled, not stored.
 	 * Attaching the resolver is the whole of it. */
+	/* After every structure has been read, and before any region can be
+	 * asked for: the regions are defined in terms of what settling decided. */
+	settle_claims(info, file.n);
+
 	ctx->resolve_scan = elf_resolve_scan;
 
 	info->anomalies = anom;

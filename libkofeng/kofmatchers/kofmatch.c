@@ -184,10 +184,9 @@ static uint64_t find_range(struct kof_match_ctx *m, uint64_t off, uint64_t len,
 	uint64_t at = 0;
 
 	m->n_calls++;
-	if (len == 0 || nbytes == 0 || off > m->data.n)
+	len = kof_clip_len(m->data.n, off, len);
+	if (len == 0 || nbytes == 0)
 		return 0;
-	if (len > m->data.n - off)
-		len = m->data.n - off;
 
 	m->n_bytes_scanned += len;
 	if (!find_lit(m->data.p + off, len, bytes, nbytes, nocase, &at))

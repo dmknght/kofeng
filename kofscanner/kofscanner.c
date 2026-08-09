@@ -79,7 +79,10 @@ static void usage(const char *argv0)
 		"  --max-depth N   directory depth limit\n"
 		"  --follow-links  follow symbolic links (off by default: a link into\n"
 		"                  an ancestor turns a walk into a loop)\n"
-		"  -v              also report objects that came back clean\n",
+		"  --all-matches   keep scanning an object after the first finding\n"
+		"  -v              also report objects that came back clean\n"
+		"\n"
+		"exit: 0 nothing found, 1 something found, 2 could not scan\n",
 		argv0);
 }
 
@@ -88,17 +91,17 @@ int main(int argc, char **argv)
 	const char *db = NULL, *target = NULL;
 	kof_engine *eng;
 	kof_scanner *sc;
-	struct kof_policy pol;
+	struct kof_scan_option opt;
 	struct run r;
 	const struct kof_stats *st;
 	int i, rc;
 
 	memset(&r, 0, sizeof r);
-	memset(&pol, 0, sizeof pol);
+	memset(&opt, 0, sizeof opt);
 	/* Scanning a named directory means scanning what is in it. The engine defaults
 	 * to not recursing so that a caller who says nothing gets less rather than a
 	 * surprise; a scanner is the caller that does want it. */
-	pol.recurse_dirs = 1;
+	opt.recurse_dirs = 1;
 
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--db") == 0 && i + 1 < argc)
@@ -106,9 +109,11 @@ int main(int argc, char **argv)
 		else if (strcmp(argv[i], "--scan-files") == 0 && i + 1 < argc)
 			target = argv[++i];
 		else if (strcmp(argv[i], "--max-depth") == 0 && i + 1 < argc)
-			pol.max_depth = (uint32_t)strtoul(argv[++i], NULL, 10);
+			opt.max_depth = (uint32_t)strtoul(argv[++i], NULL, 10);
 		else if (strcmp(argv[i], "--follow-links") == 0)
-			pol.follow_symlinks = 1;
+			opt.follow_symlinks = 1;
+		else if (strcmp(argv[i], "--all-matches") == 0)
+			opt.all_matches = 1;
 		else if (strcmp(argv[i], "-v") == 0)
 			r.verbose = 1;
 		else {
@@ -138,7 +143,7 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
-	rc = kof_scan_path(sc, target, &pol, on_object, &r);
+	rc = kof_scan_path(sc, target, &opt, on_object, &r);
 	if (rc < 0)
 		fprintf(stderr, "%s: cannot scan %s\n", argv[0], target);
 
@@ -159,6 +164,23 @@ int main(int argc, char **argv)
 
 	kof_scanner_free(sc);
 	kof_engine_close(eng);
-	/* Non-zero when something was found, so a shell can act on it. */
-	return r.infected ? 1 : 0;
+
+	/*
+	 * Three outcomes, not two, because "found nothing" and "could not look" are
+	 * different answers and a shell has to be able to tell them apart. Reporting
+	 * both as 0 meant a scan of a path that does not exist, or of files that could
+	 * not be opened, came back looking exactly like a clean scan.
+	 *
+	 *   0  scanned, nothing found
+	 *   1  something found
+	 *   2  could not scan, or could not scan all of it
+	 *
+	 * A finding outranks an error: if something was found, that is the answer,
+	 * whatever else was skipped alongside it.
+	 */
+	if (r.infected || r.findings)
+		return 1;
+	if (rc < 0 || (st && st->unreadable))
+		return 2;
+	return 0;
 }

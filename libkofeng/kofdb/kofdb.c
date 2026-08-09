@@ -48,11 +48,6 @@ struct builder {
 	uint32_t n_paths;
 };
 
-static size_t round_up(size_t v, size_t a)
-{
-	return (v + a - 1) / a * a;
-}
-
 static size_t page_size_of(void)
 {
 	long ps = sysconf(_SC_PAGESIZE);
@@ -70,7 +65,7 @@ static size_t page_size_of(void)
 static int arena_open(struct builder *b, size_t cap)
 {
 	size_t ps = page_size_of();
-	b->e.code_cap = round_up(cap, ps);
+	b->e.code_cap = kof_round_up(cap, ps);
 	b->code_used = 0;
 	b->e.code = mmap(NULL, b->e.code_cap, PROT_READ | PROT_WRITE,
 			 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -85,7 +80,7 @@ static int arena_open(struct builder *b, size_t cap)
  * target's calling convention. */
 static long arena_add(struct builder *b, const uint8_t *blob, size_t len)
 {
-	size_t off = round_up(b->code_used, 16);
+	size_t off = kof_round_up(b->code_used, 16);
 	if (off > b->e.code_cap || len > b->e.code_cap - off)
 		return -1;
 	memcpy(b->e.code + off, blob, len);

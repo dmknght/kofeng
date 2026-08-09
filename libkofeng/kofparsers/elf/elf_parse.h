@@ -32,4 +32,14 @@
 int kof_elf_parse(kof_buf file, struct kof_elf_info *info,
 		  struct kof_obj_ctx *ctx);
 
+/*
+ * Does this object look like ELF at all?
+ *
+ * Magic only, and deliberately separate from the parse: identifying an object
+ * must not need the view buffer, because the view is what gets allocated once the
+ * format is known. Reading four bytes to decide is what keeps a scanner that only
+ * ever sees one format from carrying every other format's view.
+ */
+int kof_elf_sniff(kof_buf file);
+
 #endif /* KOFENG_ELF_PARSE_H */

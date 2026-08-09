@@ -53,11 +53,11 @@ const struct kof_stats *kof_scanner_stats(const kof_scanner *sc)
 }
 
 int kof_scan_path(kof_scanner *sc, const char *path,
-		  const struct kof_policy *pol, kof_on_object cb, void *user)
+		  const struct kof_scan_option *opt, kof_on_object cb, void *user)
 {
-	static const struct kof_policy conservative;   /* all zero: no recursion */
+	static const struct kof_scan_option conservative;   /* all zero: no recursion */
 
 	if (!sc || !path)
 		return KOF_ERR_ARG;
-	return kof_scan_walk(sc, path, pol ? pol : &conservative, cb, user);
+	return kof_scan_walk(sc, path, opt ? opt : &conservative, cb, user);
 }

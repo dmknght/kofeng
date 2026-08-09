@@ -130,20 +130,40 @@ typedef int (*kof_on_object)(const char *name, const struct kof_result *res,
 			     void *user);
 
 /*
- * How a scan is allowed to spread.
+ * How a scan is allowed to spread, and how thorough it has to be.
  *
  * Data, and passed per scan rather than set on the engine: a limit is the caller's
- * policy, not a property of the database, and two callers in one process must be able
- * to differ.
+ * business, not a property of the database, and two callers in one process must be
+ * able to differ.
  *
  * Zeroing the struct gives the conservative answer everywhere - no recursion - so a
  * caller that forgets a field does not get a surprise, it gets less.
  */
-struct kof_policy {
+struct kof_scan_option {
 	int      recurse_dirs;     /* descend into directories */
 	uint32_t max_depth;        /* 0 -> a built-in ceiling applies */
 	int      follow_symlinks;  /* off is the only safe default: a link into an
 				    * ancestor turns a walk into a loop */
+
+	/*
+	 * Keep going after the first finding on an object.
+	 *
+	 * Off by default, which is both the cheap answer and the conservative one:
+	 * once an object has been named, running the rest of the database on it buys
+	 * a longer list and nothing else. An on-access hook only ever needs to know
+	 * whether to block.
+	 *
+	 * On costs the whole database per infected object and is what a report wants:
+	 * an object can belong to two families, and a list that stops at one is a
+	 * list that says nothing about the other.
+	 *
+	 * The trade to know about: with this off, which name is reported depends on
+	 * where the matching module happens to sit in the database, because the scan
+	 * stops at the first one that fires. Every scanner that stops early has this
+	 * property; naming it here is cheaper than rediscovering it from a bug report
+	 * about a sample that changed its name after a database update.
+	 */
+	int      all_matches;
 };
 
 /*
@@ -156,7 +176,7 @@ struct kof_policy {
  * Returns the number of objects scanned, or a KOF_ERR_*. Findings arrive through the
  * callback; zero findings on an object is a result and is still reported.
  */
-int kof_scan_path(kof_scanner *, const char *path, const struct kof_policy *,
+int kof_scan_path(kof_scanner *, const char *path, const struct kof_scan_option *,
 		  kof_on_object cb, void *user);
 
 #endif /* KOFENG_H */
