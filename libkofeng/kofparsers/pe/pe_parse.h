@@ -42,4 +42,25 @@ int kof_pe_parse(kof_buf file, struct kof_pe_info *info,
  */
 int kof_pe_sniff(kof_buf file);
 
+/*
+ * Names for the region bits and the anomaly bits.
+ *
+ * A region's name is its enum identifier, spelled out. It ends up as a filename
+ * when a tool dumps regions, and a name somebody can paste straight into grep
+ * finds the enum, the CLAIMED mask and the resolver branch at once. A shortened
+ * form would read better in a column and would cost a mental step exactly when
+ * somebody is trying to find out where a byte came from.
+ *
+ * Here rather than in kofmod/pe.h because a module cannot print: it has no libc
+ * and no output. These exist for tools that describe a file to a person, so they
+ * live with the collector, on the internal side.
+ *
+ * NULL for a bit with no name, which is the failure mode to want. A tool printing
+ * "bit19" for an anomaly somebody added and did not name is a tool that shows the
+ * omission; a table silently one entry short would print the wrong name for every
+ * bit above the gap.
+ */
+const char *kof_pe_region_name(uint32_t bit);
+const char *kof_pe_anomaly_name(unsigned index);
+
 #endif /* KOFENG_PE_PARSE_H */

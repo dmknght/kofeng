@@ -800,3 +800,32 @@ int kof_elf_parse(kof_buf file, struct kof_elf_info *info,
 	info->anomalies = anom;
 	return 1;
 }
+
+/* ---- names, for tools ------------------------------------------------------- */
+
+const char *kof_elf_region_name(uint32_t bit)
+{
+	switch (bit) {
+	case KOF_SCAN_ELF_HEADERS:   return "KOF_SCAN_ELF_HEADERS";
+	case KOF_SCAN_ELF_CODE:      return "KOF_SCAN_ELF_CODE";
+	case KOF_SCAN_ELF_DATA:      return "KOF_SCAN_ELF_DATA";
+	case KOF_SCAN_ELF_NOLOAD:    return "KOF_SCAN_ELF_NOLOAD";
+	case KOF_SCAN_ELF_UNCLAIMED: return "KOF_SCAN_ELF_UNCLAIMED";
+	default:                     return 0;
+	}
+}
+
+const char *kof_elf_anomaly_name(unsigned index)
+{
+	static const char *const n[] = {
+		"BAD_MAGIC", "BAD_CLASS", "BAD_ENDIAN", "BAD_VERSION",
+		"TRUNCATED_HEADER", "PHOFF_PAST_EOF", "PHENTSIZE_ODD",
+		"PHNUM_CLAMPED", "SHOFF_PAST_EOF", "SHNUM_CLAMPED", "SEG_PAST_EOF",
+		"SEG_FILESZ_GT_MEM", "SEG_OVERLAP", "NO_LOAD_SEGMENT", "ENTRY_ZERO",
+		"ENTRY_UNMAPPED", "ENTRY_ZEROFILL", "ENTRY_NOT_EXEC",
+		"SHENTSIZE_ODD", "SHSTRNDX_BAD", "SEC_PAST_EOF", "SECNAME_UNREAD",
+		"SECNAME_TRUNC", "SECTAB_MISSING"
+	};
+
+	return index < sizeof n / sizeof n[0] ? n[index] : 0;
+}

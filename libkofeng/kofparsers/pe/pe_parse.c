@@ -597,3 +597,32 @@ int kof_pe_parse(kof_buf file, struct kof_pe_info *info, struct kof_obj_ctx *ctx
 	ctx->resolve_scan = pe_resolve_scan;
 	return 1;
 }
+/* ---- names, for tools ------------------------------------------------------- */
+
+const char *kof_pe_region_name(uint32_t bit)
+{
+	switch (bit) {
+	case KOF_SCAN_PE_HEADERS:   return "KOF_SCAN_PE_HEADERS";
+	case KOF_SCAN_PE_CODE:      return "KOF_SCAN_PE_CODE";
+	case KOF_SCAN_PE_DATA:      return "KOF_SCAN_PE_DATA";
+	case KOF_SCAN_PE_SIGNATURE: return "KOF_SCAN_PE_SIGNATURE";
+	case KOF_SCAN_PE_OVERLAY:   return "KOF_SCAN_PE_OVERLAY";
+	case KOF_SCAN_PE_UNCLAIMED: return "KOF_SCAN_PE_UNCLAIMED";
+	default:                    return 0;
+	}
+}
+
+const char *kof_pe_anomaly_name(unsigned index)
+{
+	static const char *const n[] = {
+		"BAD_MZ", "LFANEW_PAST_EOF", "BAD_PE_SIG", "TRUNCATED_HEADER",
+		"BAD_OPT_MAGIC", "OPTSIZE_ODD", "NSEC_ZERO", "NSEC_CLAMPED",
+		"SECTAB_PAST_EOF", "SEC_PAST_EOF", "SEC_OVERLAP", "SEC_RAW_GT_VIRT",
+		"SEC_ZERO_RAW", "SEC_WRITE_EXEC", "SECNAME_OBJFORM", "SIZEOFHDR_ODD",
+		"ENTRY_ZERO", "ENTRY_UNMAPPED", "ENTRY_NOT_EXEC", "ENTRY_ZEROFILL",
+		"CERT_PAST_EOF", "DIR_COUNT_ODD", "STUB_OVERSIZED",
+		"STUB_NONSTANDARD", "SUMMARY_MISMATCH", "DEBUG_OUTSIDE_SEC"
+	};
+
+	return index < sizeof n / sizeof n[0] ? n[index] : 0;
+}

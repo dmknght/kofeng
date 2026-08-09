@@ -30,7 +30,8 @@ endif
 BUILD := build
 SDK   := $(BUILD)/sdk
 
-all: sdk $(BUILD)/kofscanner $(BUILD)/ksigbuilder $(BUILD)/kofpat
+all: sdk $(BUILD)/kofscanner $(BUILD)/kofexamine $(BUILD)/ksigbuilder \
+     $(BUILD)/kofpat
 
 $(BUILD):
 	@mkdir -p $(BUILD)
@@ -94,6 +95,15 @@ SCANNER_SRC := kofscanner/kofscanner.c
 
 $(BUILD)/kofscanner: $(SCANNER_SRC) $(LIB) $(SDK_HDR)
 	$(CC) $(CFLAGS) -I$(SDK)/include $(SCANNER_SRC) $(LIB) -o $@ $(LDFLAGS)
+
+# --------------------------------------------------------------- the examiner
+#
+# Unlike the scanner, this links the internal collectors: it prints the parsed
+# view, and no public surface offers one. The reason that is not a lapse is
+# written at the top of the file.
+
+$(BUILD)/kofexamine: kofexamine/kofexamine.c $(LIB) $(SDK_HDR)
+	$(CC) $(CFLAGS) -I$(SDK)/include $< $(LIB) -o $@ $(LDFLAGS)
 
 # ----------------------------------------------------- the database toolchain
 #

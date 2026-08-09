@@ -42,4 +42,9 @@ int kof_elf_parse(kof_buf file, struct kof_elf_info *info,
  */
 int kof_elf_sniff(kof_buf file);
 
+/* Names for the region and anomaly bits. See the note in pe_parse.h: a module
+ * cannot print, so these are for tools and live on the internal side. */
+const char *kof_elf_region_name(uint32_t bit);
+const char *kof_elf_anomaly_name(unsigned index);
+
 #endif /* KOFENG_ELF_PARSE_H */
