@@ -25,6 +25,7 @@
 
 #include <kofmod/kofsig.h>
 #include "../core/kofcore.h"   /* kof_strdup */
+#include "kofpack.h"       /* KOF_STR_MAX_LEN, KOF_BLOB_MAX_CODE */
 
 typedef void (*kof_scan_fn)(const struct kof_obj_ctx *);
 
@@ -35,8 +36,6 @@ typedef void (*kof_scan_fn)(const struct kof_obj_ctx *);
  * search on the module's behalf - and therefore to answer many modules' strings in
  * one pass rather than each module scanning for itself.
  */
-#define KOF_STR_MAX_LEN 512
-
 struct kof_str_ent {
 	uint8_t  icase;
 	uint8_t  fullword;

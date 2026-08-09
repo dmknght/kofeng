@@ -22,7 +22,6 @@
  * and integrity anyway. Until then, two guards for the mistake that actually happens:
  * handing over a build intermediate instead of the blob.
  */
-#define KOF_BLOB_MAX_CODE (4u * 1024u * 1024u)
 
 static int blob_plausible(const uint8_t *p, size_t len, const char *path)
 {

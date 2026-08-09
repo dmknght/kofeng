@@ -1,10 +1,18 @@
-# kofeng - build for host side libraries and tools.
+# kofeng - build the SDK, the scanner, and the database toolchain.
 #
-# Signature modules are NOT built here: they are freestanding, position
-# independent blobs produced by a separate toolchain step with its own flags,
-# and mixing the two sets of flags in one place is how they end up wrong.
+# Three products and nothing else:
+#
+#   sdk         libkofeng.a plus the two public headers, staged under build/sdk
+#   kofscanner  the scanner, built against that SDK and nothing else
+#   db          signatures compiled and packed into .ksig
+#
+# Signature modules are NOT built with these flags: they are freestanding,
+# position independent blobs produced by ksigbuilder/ksigcompiler.sh with its own
+# flag set, and mixing the two sets in one place is how they end up applied to the
+# wrong target.
 
 CC      ?= cc
+AR      ?= ar
 CFLAGS  ?= -O2 -g
 CFLAGS  += -std=c11 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
            -Wpointer-arith -Wstrict-prototypes -Wmissing-prototypes \
@@ -13,142 +21,120 @@ LDFLAGS ?=
 
 # Address and UB sanitizers are the default for development: the whole parser
 # runs on untrusted input, so the cheapest way to find the bug class that
-# matters is to make the corpus run trip over it.
+# matters is to make a corpus run trip over it.
 ifeq ($(SAN),1)
 CFLAGS  += -fsanitize=address,undefined -fno-omit-frame-pointer
 LDFLAGS += -fsanitize=address,undefined
 endif
 
-BUILD   := build
+BUILD := build
+SDK   := $(BUILD)/sdk
 
-PARSER_SRC := libkofeng/kofparsers/elf/elf_parse.c
-PARSER_OBJ := $(BUILD)/elf_parse.o
-
-MATCH_SRC := libkofeng/kofmatchers/kofmatch.c
-MATCH_OBJ := $(BUILD)/match.o
-
-DB_SRC := libkofeng/kofdb/kofdb.c
-DB_OBJ := $(BUILD)/db.o
-
-SCAN_SRC := libkofeng/kofscanners/scan.c
-SCAN_OBJ := $(BUILD)/scan.o
-
-OBJCTX_SRC := libkofeng/kofscanners/objctx.c
-OBJCTX_OBJ := $(BUILD)/objctx.o
-
-FACADE_SRC := libkofeng/kofeng.c
-FACADE_OBJ := $(BUILD)/kofeng.o
-
-# The library the tools link against. kofdump needs only the parser, so it is not
-# listed there: a tool linking less is a tool that cannot depend on more.
-LIB_OBJ := $(PARSER_OBJ) $(MATCH_OBJ) $(DB_OBJ) $(SCAN_OBJ) \
-           $(OBJCTX_OBJ) $(FACADE_OBJ)
-
-KOFDUMP_SRC := tools/kofdump/main.c
-KOFDUMP_OBJ := $(BUILD)/kofdump_main.o
-
-KOFRUN_SRC := tools/kofrun/main.c
-KOFRUN_OBJ := $(BUILD)/kofrun_main.o
-
-# Build-time only: compiles the patterns written in a signature source. Never
-# shipped, and deliberately not linked into anything that runs on an endpoint.
-KOFPAT_SRC := tools/kofpat/main.c
-KOFPAT_OBJ := $(BUILD)/kofpat_main.o
-
-all: $(BUILD)/kofscanner $(BUILD)/kofdump $(BUILD)/kofrun $(BUILD)/kofpat
-
-# The scanner. Built from the public header alone, which is what keeps that header
-# honest: anything it cannot express shows up here as a compile error rather than as a
-# quiet reach into an internal include.
-SCANNER_SRC := kofscanner/kofscanner.c
-SCANNER_OBJ := $(BUILD)/kofscanner.o
-
-$(SCANNER_OBJ): $(SCANNER_SRC) | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(BUILD)/kofscanner: $(SCANNER_OBJ) $(LIB_OBJ)
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+all: sdk $(BUILD)/kofscanner $(BUILD)/ksigbuilder $(BUILD)/kofpat
 
 $(BUILD):
 	@mkdir -p $(BUILD)
 
-$(PARSER_OBJ): $(PARSER_SRC) | $(BUILD)
+# ---------------------------------------------------------------- the library
+
+LIB_SRC := libkofeng/kofeng.c \
+           libkofeng/kofdb/kofdb.c \
+           libkofeng/kofdb/kofpackw.c \
+           libkofeng/kofmatchers/kofmatch.c \
+           libkofeng/kofparsers/elf/elf_parse.c \
+           libkofeng/kofscanners/scan.c \
+           libkofeng/kofscanners/objctx.c
+
+LIB_OBJ := $(patsubst libkofeng/%.c,$(BUILD)/lib_%.o,$(LIB_SRC))
+LIB     := $(SDK)/lib/libkofeng.a
+
+$(BUILD)/lib_%.o: libkofeng/%.c | $(BUILD)
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(MATCH_OBJ): $(MATCH_SRC) | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
+$(LIB): $(LIB_OBJ)
+	@mkdir -p $(dir $@)
+	$(AR) rcs $@ $^
 
-$(DB_OBJ): $(DB_SRC) | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
+# ------------------------------------------------------------------- the SDK
+#
+# Two public surfaces with different audiences, kept apart by path rather than by
+# a note asking people to be careful:
+#
+#   <kofeng.h>            a host that wants to scan things
+#   <kofmod/kofsig.h>     a signature module, which is a different ABI entirely
+#
+# Everything else under libkofeng is internal and is deliberately absent here, so
+# reaching for it is a compile error rather than a habit. That is the constraint
+# kofscanner is already built under, applied to anyone outside this tree.
 
-$(SCAN_OBJ): $(SCAN_SRC) | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
+SDK_HDR := $(SDK)/include/kofeng.h \
+           $(SDK)/include/kofmod/kofsig.h \
+           $(SDK)/include/kofmod/elf.h
 
-$(OBJCTX_OBJ): $(OBJCTX_SRC) | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
+$(SDK)/include/kofeng.h: libkofeng/kofeng.h
+	@mkdir -p $(dir $@)
+	@cp $< $@
 
-$(FACADE_OBJ): $(FACADE_SRC) | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
+$(SDK)/include/kofmod/%.h: libkofeng/core/kofmod/%.h
+	@mkdir -p $(dir $@)
+	@cp $< $@
 
-$(KOFPAT_OBJ): $(KOFPAT_SRC) | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
+sdk: $(LIB) $(SDK_HDR)
 
-$(BUILD)/kofpat: $(KOFPAT_OBJ)
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+# --------------------------------------------------------------- the scanner
+#
+# Built from the staged SDK, not from the source tree. That is what keeps the
+# public header honest: anything it cannot express shows up here as a compile
+# error instead of as a quiet reach into an internal include.
 
-$(KOFDUMP_OBJ): $(KOFDUMP_SRC) | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
+SCANNER_SRC := kofscanner/kofscanner.c
 
-$(BUILD)/kofdump: $(KOFDUMP_OBJ) $(PARSER_OBJ)
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+$(BUILD)/kofscanner: $(SCANNER_SRC) $(LIB) $(SDK_HDR)
+	$(CC) $(CFLAGS) -I$(SDK)/include $(SCANNER_SRC) $(LIB) -o $@ $(LDFLAGS)
 
-$(KOFRUN_OBJ): $(KOFRUN_SRC) | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
+# ----------------------------------------------------- the database toolchain
+#
+# kofpat compiles the patterns written in a signature source; ksigbuilder packs
+# the artefacts into .ksig. Both are build-time only and are deliberately not
+# linked into anything that runs on an endpoint.
 
-$(BUILD)/kofrun: $(KOFRUN_OBJ) $(LIB_OBJ)
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+$(BUILD)/kofpat: tools/kofpat/main.c | $(BUILD)
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
-# Signature blobs are built by their own script with their own flag set: they
-# are freestanding and position independent, the host tools are neither, and
-# keeping both flag sets in one place is how they end up applied to the wrong
-# target.
-SIGS := $(wildcard signature/*.c)
+$(BUILD)/ksigbuilder: ksigbuilder/ksigbuilder.c $(LIB)
+	$(CC) $(CFLAGS) $< $(LIB) -o $@ $(LDFLAGS)
 
-sigs: $(BUILD)/kofrun $(BUILD)/kofpat
-	@for s in $(SIGS); do signature/build.sh $$s || exit 1; done
+# ------------------------------------------------------------- the database
+#
+# Compile every signature, then pack the artefacts.
+#
+# Parallelism lives here rather than inside either tool: one compile does not
+# depend on another, xargs already knows how to run N at a time, and a --jobs
+# flag in a C program would be a second implementation of one shell word.
 
-# Run a blob over the corpus, one process per file, counting crashes separately
-# from verdicts. SIG picks which blob.
-SIG ?= $(BUILD)/sig/sig_entry_gt.blob
+SIGDIR    ?= signature
+SIGS      := $(wildcard $(SIGDIR)/*.c)
+JOBS      ?= 8
+ARTEFACTS ?= $(BUILD)/sig
+DB        ?= $(BUILD)/db
 
-run_sig: sigs
-	@tests/corpus/run_sig.sh $(SIG) $(CORPUS)
+sigs: $(BUILD)/kofpat $(SDK_HDR)
+	@mkdir -p $(ARTEFACTS)
+	@echo "$(SIGS)" | tr ' ' '\n' | KOF_OUTDIR=$(abspath $(ARTEFACTS)) \
+		xargs -P $(JOBS) -n 1 ksigbuilder/ksigcompiler.sh >/dev/null
 
-# Corpus run. Batched, so it is fast but a crash aborts the batch: use it as a
-# quick look. tests/corpus/measure.sh runs one process per file and is what
-# says whether the tool survived, which is the criterion that matters.
-CORPUS ?= /usr/bin /usr/lib
+db: sigs $(BUILD)/ksigbuilder
+	@mkdir -p $(DB)
+	@$(BUILD)/ksigbuilder $(ARTEFACTS) $(DB)
 
-corpus: $(BUILD)/kofdump
-	@find $(CORPUS) -maxdepth 2 -type f -print0 2>/dev/null \
-	  | xargs -0 -n 64 $(BUILD)/kofdump -1 > $(BUILD)/corpus.tsv
-	@echo "rows: $$(wc -l < $(BUILD)/corpus.tsv)"
-	@echo "elf:  $$(awk -F'\t' '$$2==1' $(BUILD)/corpus.tsv | wc -l)"
-	@echo "--- class ---"
-	@awk -F'\t' '$$2==1 {print $$3}' $(BUILD)/corpus.tsv | sort | uniq -c | sort -rn
-	@echo "--- anomalies (split) ---"
-	@awk -F'\t' '$$2==1 {print $$14}' $(BUILD)/corpus.tsv \
-	  | tr '|' '\n' | sort | uniq -c | sort -rn
+# ------------------------------------------------------------------- testing
+#
+# Exhaustive differential checks over small inputs, for the routines where a
+# corpus run would pass while the code is still wrong on an input the corpus does
+# not happen to contain. Each is a standalone program that exits non-zero on
+# failure, so this target is usable from CI. Not part of `all`.
 
-# Full measurement: isolates each file in its own process so a crash can be
-# attributed and does not lose the rest of the run.
-measure: $(BUILD)/kofdump
-	@tests/corpus/measure.sh $(CORPUS)
-
-# Unit tests. Exhaustive differential checks over small inputs, for the routines
-# where a corpus run would pass while the code is still wrong on an input the
-# corpus does not happen to contain. Each is a standalone program that exits
-# non-zero on failure, so this target is usable from CI.
 UNIT_SRC := $(wildcard tests/unit/*.c)
 UNIT_BIN := $(patsubst tests/unit/%.c,$(BUILD)/unit_%,$(UNIT_SRC))
 
@@ -164,4 +150,4 @@ unit: $(UNIT_BIN)
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all corpus measure sigs run_sig unit clean
+.PHONY: all sdk sigs db unit clean

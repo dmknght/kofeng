@@ -1,0 +1,449 @@
+/*
+ * kofpack.h - the on-disk pack format.
+ *
+ * A pack is one file holding a set of signature modules: their code, the strings
+ * they declare, the names they report, and the preconditions the host filters on.
+ * A database is one or more packs. This header defines the bytes only - no code
+ * reads or writes them here, so the format can be stated once and the loader and
+ * the packer can both be checked against this file rather than against each other.
+ *
+ *
+ * WHY A PACK AND NOT LOOSE FILES
+ *
+ * Measured on a synthetic population of 4000 modules, warm page cache:
+ *
+ *     16000 files, 83463 syscalls to load, 47ms per process
+ *
+ * Nothing about that is I/O; the cache was warm. It is syscall count and parse
+ * work, and both are linear in the number of modules, so 40000 modules is roughly
+ * half a second before a byte is scanned. For a scanner invoked once that is a
+ * nuisance. For an on-access hook invoked per file it is fatal.
+ *
+ * So the format is built around one idea: THE LAYOUT ON DISK IS THE LAYOUT IN
+ * MEMORY. Loading is mmap plus validation - no parsing, no allocation per module,
+ * no copying except the code. The cost stops depending on how many modules there
+ * are, and a second process pays almost nothing because the pages are already in
+ * the page cache and there is nothing to re-parse.
+ *
+ * That also answers a question that looked like it needed a loader algorithm -
+ * how to load only the signatures an object needs. It needs no algorithm. A pack
+ * ruled out by its header is a pack whose pages are never faulted in.
+ *
+ *
+ * WHAT THE FORMAT IS NOT
+ *
+ * Not portable, and deliberately so. A pack contains native code for one machine,
+ * so a byte order or a word size that differed from the host would be a fiction:
+ * the code could not run either way. Host order, host word size, and a `machine`
+ * field so that a pack built elsewhere is refused loudly instead of entered.
+ *
+ * Not authenticated. The checksum catches a truncated, corrupted or half written
+ * pack. It cannot catch a forged one, because whoever can write the pack can write
+ * the checksum in it. The boundary is the permissions on the database directory,
+ * exactly as it is for the loose files. Authenticity is a signature section added
+ * to this layout later, not a property this version claims.
+ *
+ *
+ * PARSE AND LOAD
+ *
+ * Order matters here: every step below runs before anything it validates is
+ * dereferenced, and no step trusts a value a later step has not yet bounded.
+ *
+ *   1. open, fstat -> the real file length. Everything is bounded against this
+ *      number and never against a length the file states about itself.
+ *   2. file length >= sizeof(struct kof_pack_hdr), or there is no header to read.
+ *   3. magic, version, machine. Refuse on any mismatch.
+ *   4. hdr.file_len == the real file length. Catches truncation before any offset
+ *      inside is believed.
+ *   5. checksum over [KOF_PACK_CRC_FROM, file_len). Integrity of the whole.
+ *   6. every section: off + len does not overflow and does not exceed file_len,
+ *      and off has the alignment its content requires.
+ *   7. every count against its section: n * stride == section length exactly. Not
+ *      "<=", because a section longer than its count means the packer and this
+ *      header disagree about the stride, and that is not a pack to load.
+ *   8. code section copied to an anonymous mapping, then made read+execute.
+ *   9. per module, arithmetic only: code_off + code_len within the code section,
+ *      and each table slice within its table. This is the one per-module loop at
+ *      load, and it is a few compares with no syscall and no allocation - about
+ *      four orders cheaper than the twenty syscalls per module it replaces.
+ *  10. per string and per name descriptor: off + len within its pool.
+ *
+ * Steps 9 and 10 are why a loaded pack needs no bounds check afterwards. The scan
+ * path is hot and runs per object per module; paying there for what can be settled
+ * once at load is the wrong trade.
+ *
+ *
+ * WHAT THE PACKER MUST GUARANTEE
+ *
+ * The loader's checks above are the specification. A packer that satisfies them
+ * produces a loadable pack; anything else is caught. Beyond correctness, the
+ * things the packer decides that the loader cannot:
+ *
+ *   - the pack-level precondition union (see kof_pack_hdr). Wrong values here are
+ *     not caught by any check and cost detections, so they are derived from the
+ *     modules, never authored.
+ *   - grouping. Which modules share a pack is the packer's whole design question,
+ *     and it is what makes the union above selective or useless.
+ *   - deduplication. Two modules declaring the same literal should share one run
+ *     of pool bytes; the descriptors are (offset, length) precisely so they can.
+ *
+ *
+ * CODE IS COPIED, EVERYTHING ELSE IS MAPPED
+ *
+ * The tables are used straight out of the mapping. The code section is not: a
+ * MAP_PRIVATE file mapping may reflect later writes to the file in any page that
+ * has not been copied on write yet, which for an executable mapping means the code
+ * can change under a running scan. The copy is 444KB at 4000 modules - nothing
+ * against removing that - and it is why the code section's alignment below is
+ * about the blobs inside it, not about mapping it directly.
+ */
+
+#ifndef KOFENG_KOFPACK_H
+#define KOFENG_KOFPACK_H
+
+#include <stdint.h>
+
+/* "KOFP", little end first. Byte order is the host's; this only has to differ
+ * from whatever else might be handed to the loader by mistake. */
+#define KOF_PACK_MAGIC   0x50464f4bu
+
+/* Bumped whenever a struct here changes shape. There is no compatibility range:
+ * a pack is a build artefact next to the engine that reads it, and a loader that
+ * accepts an older layout is a loader carrying two layouts. */
+#define KOF_PACK_VERSION 1u
+
+/*
+ * The machine the code in this pack was built for. Not an architecture the pack
+ * detects - the one it runs on. KOF_ARCH_* in kofsig.h is about objects under
+ * scan and is a different question with the same word in it.
+ */
+enum kof_pack_machine {
+	KOF_PACK_MACH_NONE    = 0,
+	KOF_PACK_MACH_X86_64  = 1,
+	KOF_PACK_MACH_ARM64   = 2,
+	KOF_PACK_MACH_RISCV64 = 3
+};
+
+#if defined(__x86_64__)
+#define KOF_PACK_MACH_HOST KOF_PACK_MACH_X86_64
+#elif defined(__aarch64__)
+#define KOF_PACK_MACH_HOST KOF_PACK_MACH_ARM64
+#elif defined(__riscv) && __riscv_xlen == 64
+#define KOF_PACK_MACH_HOST KOF_PACK_MACH_RISCV64
+#else
+#define KOF_PACK_MACH_HOST KOF_PACK_MACH_NONE
+#endif
+
+/*
+ * What the modules in this pack are for.
+ *
+ * A pack holds one kind, and the reason is dispatch rather than tidiness. The pack
+ * is the unit the engine iterates, and these two kinds are entered at different
+ * points: a detector runs while an object is being scanned, an unpacker runs after
+ * that, when the engine decides whether the object yields children. Mixing them
+ * means the scan loop walks records it must then reject, and the unpack decision
+ * walks the whole database to find the few records it wants. Separated, neither
+ * loop can see the other's records at all.
+ *
+ * One kind per pack rather than a kind per module, so the invariant is structural:
+ * there is no way to write a mixed pack, and the loader can refuse to enter a blob
+ * through the wrong ABI - the same principle as a module being unable to claim a
+ * format it was not run against.
+ *
+ * The kind is not declared in a signature source. It is derived from the entry
+ * point the module exports, because a declaration can disagree with the code and
+ * an exported symbol cannot.
+ *
+ * KOF_PACK_UNPACK is reserved, not implemented: an unpacker returns a child object
+ * rather than a verdict, and that ABI is its own design. Reserving the value now
+ * costs four bytes already spent on padding and means no pack ever exists without
+ * the field.
+ */
+enum kof_pack_kind {
+	KOF_PACK_DETECT = 0,      /* entry kof_scan; reports findings */
+	KOF_PACK_UNPACK = 1       /* entry kof_unpack; yields child objects */
+};
+
+/*
+ * Sections, indexed by this enum rather than named in a variable table: the set is
+ * known at compile time on both sides, and an index makes the loader's validation
+ * a loop over a fixed array instead of a search.
+ *
+ * The split is hot from cold. PRE_* is what the prefilter reads for every module
+ * on every object; MODS is read only for a module the prefilter did not rule out.
+ * Keeping them apart is the difference between a prefilter pass touching 80KB and
+ * one touching 224KB of strided records at 4000 modules.
+ */
+enum kof_pack_sec_id {
+	KOF_SEC_PRE_TARGET = 0,   /* uint32 x n_mods */
+	KOF_SEC_PRE_SCAN   = 1,   /* uint32 x n_mods */
+	KOF_SEC_PRE_ARCH   = 2,   /* uint32 x n_mods */
+	KOF_SEC_PRE_SIZE   = 3,   /* uint64 x n_mods */
+
+	KOF_SEC_MODS       = 4,   /* struct kof_pack_mod  x n_mods  */
+	KOF_SEC_STR_DESC   = 5,   /* struct kof_pack_str  x n_str   */
+	KOF_SEC_STR_POOL   = 6,   /* bytes                          */
+	KOF_SEC_NAME_DESC  = 7,   /* struct kof_pack_name x n_names */
+	KOF_SEC_NAME_POOL  = 8,   /* bytes, each name NUL terminated */
+	KOF_SEC_RANGE      = 9,   /* uint32 x n_rng                 */
+	KOF_SEC_CODE       = 10,  /* the blobs, concatenated        */
+
+	/*
+	 * The inverted index. Optional - both sections empty means the engine falls
+	 * back to asking each module in turn, which is correct and does not scale.
+	 * See the note on scale below.
+	 */
+	KOF_SEC_IDX_BITMAP = 11,  /* bytes, (1 << idx_bits) / 8     */
+	KOF_SEC_IDX_SLOT   = 12,  /* struct kof_pack_idx x n_idx_slots */
+
+	KOF_SEC_COUNT      = 13
+};
+
+/*
+ * Where a section is. Both fields are 64 bit so the format never needs a second
+ * version for the day a database outgrows 4GB; the whole table costs 176 bytes.
+ */
+struct kof_pack_sec {
+	uint64_t off;
+	uint64_t len;
+};
+
+/* Section start alignment. 64 puts each prefilter column on a cache line, which is
+ * the only reason any of them is aligned at all. Code is page aligned so that a
+ * future zero-copy mapping is a decision and not a re-layout. */
+#define KOF_PACK_SEC_ALIGN  64u
+#define KOF_PACK_CODE_ALIGN 4096u
+
+/* Each blob inside the code section, so an entry point is never misaligned for
+ * the target's calling convention. Same value the loose-file arena uses. */
+#define KOF_PACK_BLOB_ALIGN 16u
+
+/*
+ * Limits the format imposes, stated here because this is the file both the writer
+ * and the reader consult. They were previously one private constant in the loader
+ * and one in the loaded-database header, which is two places to change and one
+ * chance to change only one of them.
+ *
+ * A blob is a signature module, not a program; four megabytes of position
+ * independent code with no data section is already far past anything a signature
+ * has needed. The cap is what lets the loader refuse a file before allocating for
+ * it - see read_whole in kofdb.c.
+ *
+ * A declared literal has to fit a uint16 length by construction; the real limit is
+ * lower because a pattern that long is a file, not a string.
+ */
+#define KOF_BLOB_MAX_CODE (4u * 1024u * 1024u)
+#define KOF_STR_MAX_LEN   512u
+
+/*
+ * The header. Fixed size, first thing in the file, and the only structure whose
+ * position is known before anything has been validated.
+ */
+struct kof_pack_hdr {
+	uint32_t magic;
+	uint32_t version;
+
+	/*
+	 * Checksum over [KOF_PACK_CRC_FROM, file_len), so it covers the rest of
+	 * the header as well as the body. Integrity, not authenticity - see the
+	 * note at the top of this file.
+	 */
+	uint32_t crc32;
+
+	uint32_t machine;         /* enum kof_pack_machine */
+
+	/* What the file says its own length is, checked against what fstat says.
+	 * A truncated pack is caught here, before any offset inside it is used. */
+	uint64_t file_len;
+
+	uint32_t n_mods;
+	uint32_t n_str;
+	uint32_t n_rng;
+	uint32_t n_names;
+
+	/*
+	 * Preconditions for the pack as a whole: the union of what its modules
+	 * declare, so one test can rule out every module in the file.
+	 *
+	 * This is what makes packs worth grouping. The prefilter measurement on a
+	 * real corpus put target as the single most selective condition, and with
+	 * a pack per format that test moves up a level and costs one compare for
+	 * thousands of modules instead of one per module. A pack ruled out here is
+	 * a pack whose pages are never touched.
+	 *
+	 * Unions and a minimum, never authored: a value that claims more than its
+	 * modules do silently stops running them, and no test notices a detection
+	 * that did not happen.
+	 */
+	uint32_t any_target;      /* OR of every module's target_mask */
+	uint32_t any_scan;        /* OR of every module's scan_mask   */
+	uint32_t any_arch;        /* OR of every module's arch_mask; 0 -> any */
+
+	/* enum kof_pack_kind. Above the preconditions rather than beside them: a
+	 * pack of the wrong kind is not filtered out, it is never looked at by
+	 * that part of the pipeline in the first place. */
+	uint32_t kind;
+	uint64_t min_size_min;    /* smallest size_min in the pack; 0 -> no minimum */
+
+	/* Total memo slots the pack needs, summed over its modules. The engine
+	 * turns this into each pack's base when several are loaded; the file
+	 * stores only what is true about itself, so it stays immutable and
+	 * shareable between processes. */
+	uint32_t memo_slots;
+
+	/*
+	 * The inverted index, or zeroes if this pack has none.
+	 *
+	 * idx_bits sizes the bitmap: (1 << idx_bits) bits. Chosen by the packer by
+	 * measurement, not by this header, which is why it is a field and not a
+	 * constant - the right value depends on how many distinct grams the pack's
+	 * patterns actually have, and that is a property of a signature set.
+	 *
+	 * n_idx_slots is the open-addressed slot table, a power of two.
+	 */
+	uint32_t idx_bits;
+	uint32_t n_idx_slots;
+	uint32_t _pad1;
+
+	struct kof_pack_sec sec[KOF_SEC_COUNT];
+};
+
+/* The checksum covers everything after itself. */
+#define KOF_PACK_CRC_FROM ((uint64_t)(sizeof(uint32_t) * 3))
+
+/*
+ * One module, cold side: read only once the prefilter has decided to run it.
+ *
+ * Slices, not arrays. The loose-file loader learned this the expensive way: 64
+ * inline name slots of 196 bytes cost 12.5KB per module whether or not the module
+ * had two names, which at scale was the dominant memory term.
+ *
+ * memo_base is absent on purpose. It depends on which other packs are loaded
+ * beside this one, so it is engine state, not a fact about the file.
+ */
+struct kof_pack_mod {
+	uint32_t code_off;        /* from the start of KOF_SEC_CODE */
+	uint32_t code_len;
+
+	uint32_t str_first,  n_str;
+	uint32_t rng_first,  n_rng;
+	uint32_t name_first, n_names;
+};
+
+/*
+ * One declared string: where its bytes are, and how to match them.
+ *
+ * A pool with (offset, length) rather than an inline buffer. Measured on the
+ * generated population, literals average 12.7 bytes against a 512 byte inline
+ * slot - 41x. Real signature strings are longer than the synthetic ones so the
+ * real factor is smaller, but the shape of the waste is the same, and the pool
+ * also lets two modules declaring the same literal share one run of bytes.
+ *
+ * The bytes are not NUL terminated: a signature literal may contain zero bytes,
+ * and a terminator would make the length a second source of truth about where it
+ * ends. Length is the only source.
+ */
+struct kof_pack_str {
+	uint32_t off;             /* from the start of KOF_SEC_STR_POOL */
+	uint16_t len;
+	uint8_t  icase;
+	uint8_t  fullword;
+};
+
+/*
+ * One detection name. Pooled for the same reason as strings: names average 14.5
+ * bytes against a 196 byte slot.
+ *
+ * NUL terminated here, unlike a string literal: this one is text that gets printed
+ * and handed to a host as a C string, so the terminator is what it is for.
+ */
+struct kof_pack_name {
+	uint32_t id;              /* the id a module reports */
+	uint32_t off;             /* from the start of KOF_SEC_NAME_POOL */
+};
+
+/*
+ * One entry in the inverted index: a gram, and a string that contains it.
+ *
+ * Open addressing with linear probing, and duplicates allowed: several strings can
+ * share a gram, and they end up in adjacent slots, so a lookup reads forward while
+ * the gram matches. No chaining, no pointers - the table is used straight out of
+ * the mapping, and a pointer in a file is a relocation waiting to be applied.
+ *
+ * `str` is an index into KOF_SEC_STR_DESC. KOF_IDX_EMPTY marks a free slot; the
+ * marker is on `str` rather than on `gram` because four NUL bytes is a legitimate
+ * gram and a signature may well contain it.
+ */
+struct kof_pack_idx {
+	uint32_t gram;
+	uint32_t str;
+};
+
+#define KOF_IDX_EMPTY 0xffffffffu
+
+/*
+ * WHY THE INDEX EXISTS - THE SCALE ARGUMENT, WITH THE MEASUREMENT
+ *
+ * Measured on 4000 synthetic modules over 400 real objects:
+ *
+ *     1600000 prefilter evaluations
+ *     1292642 modules ran anyway     - the structural preconditions cut 19%
+ *     1101242 searches answered from the per-object presence set
+ *
+ * Per-object scan time was flat from 100 to 4000 modules (1.37 - 1.52 ms), so at
+ * this size the database walk is not the bottleneck. The shape of the numbers is
+ * what matters: four fifths of the modules are entered for every object, and that
+ * term is linear in the size of the database. At a million modules it is roughly
+ * 800k module entries and 700k random lookups per object - tens of milliseconds
+ * where there is now one and a half.
+ *
+ * Grouping does not fix this. Splitting packs by precondition is lossless and
+ * worth doing, but the measurement says target only removes 18%: the dominant
+ * class stays dominant however the files are divided.
+ *
+ * What fixes it is the direction. Today each module asks the object whether its
+ * strings are there, so the number of questions is the size of the database.
+ * Inverted, the object's own bytes select the candidates: walk the object once,
+ * and for each position ask whether any pattern in the pack starts with these
+ * bytes. That question is answered by a bitmap the packer built, so its cost is
+ * the size of the object and nothing else.
+ *
+ * Two levels, because one is not enough:
+ *
+ *   the bitmap    small enough to stay in L2, and answers "no" for almost every
+ *                 position, which is almost every position.
+ *   the slots     only touched when the bitmap says maybe. False positives cost
+ *                 a lookup and are the price of keeping the first level small.
+ *
+ * This also removes the 32MB presence table each scanner allocates today, and the
+ * per-object pass that fills it: the equivalent table now lives in the pack, is
+ * built once by the packer, is read-only, and is shared by every process that maps
+ * the pack rather than rebuilt per thread.
+ *
+ * Which gram to index for each pattern is the packer's decision and cannot be made
+ * anywhere else: the useful choice is the rarest gram in the pattern, and rarity
+ * is a property of the whole set. That single global decision is most of what
+ * separates a good index from a useless one.
+ */
+
+/*
+ * The layout is the format, so it is asserted rather than described.
+ *
+ * Every struct above is sized exactly by its fields with no implicit padding, and
+ * that is a property a later edit can break without any warning: insert a uint64
+ * after a uint32 and the compiler inserts four bytes that no packer writes and no
+ * reader expects. A pack written by one build and read by another would then
+ * disagree about where everything is, and the first symptom would be a module
+ * entered at the wrong offset. These fail the build instead.
+ */
+_Static_assert(sizeof(struct kof_pack_sec)  == 16,  "pack section entry grew padding");
+_Static_assert(sizeof(struct kof_pack_mod)  == 32,  "pack module record grew padding");
+_Static_assert(sizeof(struct kof_pack_str)  == 8,   "pack string descriptor grew padding");
+_Static_assert(sizeof(struct kof_pack_name) == 8,   "pack name descriptor grew padding");
+_Static_assert(sizeof(struct kof_pack_idx)  == 8,   "pack index slot grew padding");
+_Static_assert(sizeof(struct kof_pack_hdr)  == 288, "pack header changed size");
+
+/* The checksum has to start after itself and cover everything else. */
+_Static_assert(KOF_PACK_CRC_FROM == 12, "checksum no longer starts after the crc field");
+
+#endif /* KOFENG_KOFPACK_H */
