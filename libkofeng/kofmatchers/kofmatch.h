@@ -32,41 +32,13 @@ struct kof_match_ctx {
 	uint8_t         *memo;      /* engine sized; MEMO_* per (string, range) pair */
 	uint32_t         memo_len;
 
-	/* One-entry cache belonging to kof_match_find_set, named after it so it is not
-	 * mistaken for the per-pattern memo above. Never exercised yet: nothing calls
-	 * find_set, and the measured hit count is zero. */
-	const uint8_t *set_pat;
-	uint64_t       set_off;
-	uint64_t       set_len;
-	uint64_t       set_hits;
-	int            set_valid;
-
 	/* Counters, for measuring whether the memo is worth its complexity. */
 	uint64_t n_calls;
-	uint64_t n_memo_hits;
 	uint64_t n_bytes_scanned;
 	uint64_t n_bytes_indexed;   /* what building the presence set cost */
 };
 
 void kof_match_begin(struct kof_match_ctx *m, kof_buf data);
-
-/*
- * Search [off, off+len) for every pattern in the compiled set.
- *
- * Returns a bitmask of which patterns were found; bit i for pattern i. Stores
- * the offset of the earliest hit in first_hit when that is non-NULL and anything
- * matched.
- *
- * off and len are clamped rather than rejected: ranges are normally computed
- * from untrusted sizes, and an expression like "sec->file_size - 0x40" underflows
- * to something enormous on a small section. Clamping turns that into a wrongly
- * sized search, which a module's own fixtures will catch; rejecting would turn it
- * into a silent no-match, which they would not. len == 0 means "to the end".
- */
-uint64_t kof_match_find_set(struct kof_match_ctx *m,
-			    uint64_t off, uint64_t len,
-			    const uint8_t *compiled, uint32_t clen,
-			    uint64_t *first_hit);
 
 /* Answers a memo slot can hold. */
 #define KOF_MEMO_UNKNOWN 0
