@@ -88,10 +88,21 @@ static int hex_prog_valid(const uint8_t *p, uint32_t len)
 	if (h->anchor_before_max - h->anchor_before_min > KOF_HEX_MAX_GAP_TOTAL)
 		return 0;
 
-	if (h->steps_off < sizeof *h ||
+	/*
+	 * Each table has to start inside the program and fit in what is left.
+	 *
+	 * The "> len" half of every one of these is not redundant. Written as
+	 * "count > (len - off) / stride" alone, an off past the end makes the
+	 * subtraction wrap to something enormous and the test passes - which is how
+	 * a mutated pack got an alternative pointing into unmapped memory and the
+	 * mask scan below walked off the mapping. Establish "off <= len" first, then
+	 * subtract: the same rule kofcore.h states for every read of a file.
+	 */
+	if (h->steps_off < sizeof *h || h->steps_off > len ||
 	    h->n_steps > (len - h->steps_off) / sizeof *st)
 		return 0;
 	if (h->alts_off < h->steps_off + h->n_steps * sizeof *st ||
+	    h->alts_off > len ||
 	    h->n_alts > (len - h->alts_off) / sizeof *al)
 		return 0;
 	if (h->data_off < h->alts_off + h->n_alts * sizeof *al || h->data_off > len)
@@ -99,30 +110,6 @@ static int hex_prog_valid(const uint8_t *p, uint32_t len)
 
 	st = (const void *)(p + h->steps_off);
 	al = (const void *)(p + h->alts_off);
-
-	/* The anchor run has to lie inside the alternative it names, because the
-	 * matcher reads it from there without a further check. */
-	{
-		const struct kof_hex_step *as = &st[h->anchor_step];
-		const struct kof_hex_alt *aa;
-
-		if (as->alt_first >= h->n_alts)
-			return 0;
-		aa = &al[as->alt_first];
-		if (h->anchor_in_alt > aa->len ||
-		    h->anchor_len > (uint32_t)aa->len - h->anchor_in_alt)
-			return 0;
-		/* An anchor inside a masked alternative would be searched for as
-		 * concrete bytes that are not concrete. */
-		if (aa->flags & KOF_HEX_ALT_MASKED) {
-			const uint8_t *msk = p + aa->data_off + aa->len;
-			uint32_t b;
-
-			for (b = 0; b < h->anchor_len; b++)
-				if (msk[h->anchor_in_alt + b] != 0xff)
-					return 0;
-		}
-	}
 
 	for (i = 0; i < h->n_steps; i++) {
 		uint32_t j;
@@ -145,12 +132,44 @@ static int hex_prog_valid(const uint8_t *p, uint32_t len)
 				return 0;
 			if (a->flags & KOF_HEX_ALT_MASKED)
 				need += a->len;
-			if (a->data_off < h->data_off || need > len - a->data_off)
+			if (a->data_off < h->data_off || a->data_off > len ||
+			    need > len - a->data_off)
 				return 0;
 		}
 		seen_alts += st[i].n_alts;
 	}
-	return seen_alts == h->n_alts;
+	if (seen_alts != h->n_alts)
+		return 0;
+
+	/*
+	 * The anchor run has to lie inside the alternative it names, because the
+	 * matcher reads it from there without a further check.
+	 *
+	 * After the loop above and not before it. Checking the anchor first reads
+	 * that alternative's data_off and len while both are still whatever the
+	 * file said, so a mutated pack sent the mask scan off into unmapped memory
+	 * - which is what the loader is supposed to make impossible, and what the
+	 * pack fuzzer found within twenty thousand rounds.
+	 */
+	{
+		const struct kof_hex_step *as = &st[h->anchor_step];
+		const struct kof_hex_alt *aa = &al[as->alt_first];
+
+		if (h->anchor_in_alt > aa->len ||
+		    h->anchor_len > (uint32_t)aa->len - h->anchor_in_alt)
+			return 0;
+		/* An anchor inside a masked alternative would be searched for as
+		 * concrete bytes that are not concrete. */
+		if (aa->flags & KOF_HEX_ALT_MASKED) {
+			const uint8_t *msk = p + aa->data_off + aa->len;
+			uint32_t b;
+
+			for (b = 0; b < h->anchor_len; b++)
+				if (msk[h->anchor_in_alt + b] != 0xff)
+					return 0;
+		}
+	}
+	return 1;
 }
 
 /*

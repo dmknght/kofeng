@@ -29,9 +29,15 @@ LDFLAGS ?=
 # Address and UB sanitizers are the default for development: the whole parser
 # runs on untrusted input, so the cheapest way to find the bug class that
 # matters is to make a corpus run trip over it.
+# -fno-sanitize-recover is not optional here. UndefinedBehaviorSanitizer defaults
+# to printing a finding and carrying on, so a misaligned load or a signed overflow
+# showed up as noise on stderr while every test still reported success - a safety
+# net that reports green whatever it catches. Halting turns a finding into a failed
+# build, which is the only form of it anyone acts on.
 ifeq ($(SAN),1)
-CFLAGS  += -fsanitize=address,undefined -fno-omit-frame-pointer
-LDFLAGS += -fsanitize=address,undefined
+CFLAGS  += -fsanitize=address,undefined -fno-sanitize-recover=all \
+           -fno-omit-frame-pointer
+LDFLAGS += -fsanitize=address,undefined -fno-sanitize-recover=all
 endif
 
 BUILD := build
