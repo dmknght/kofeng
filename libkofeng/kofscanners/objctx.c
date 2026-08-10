@@ -479,7 +479,7 @@ static uint64_t c_inflate(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t 
 	 */
 	switch (kof_inflate(sc->inf, b.p + off, len, inflate_sink,
 			    (void *)ctx, NULL, &produced)) {
-	case KOF_INF_OK:
+	case KOF_DEC_OK:
 		break;
 	default:
 		sc->exhausted = 1;

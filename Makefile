@@ -79,7 +79,9 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/binaries/elf_parse.c \
            libkofeng/kofparsers/binaries/pe_parse.c \
            libkofeng/kofparsers/containers/gzip_parse.c \
+           libkofeng/kofdecomp/decomp.c \
            libkofeng/kofdecomp/inflate.c \
+           libkofeng/kofdecomp/nrv2.c \
            libkofeng/kofscanners/scan.c \
            libkofeng/kofscanners/objctx.c \
            libkofeng/kofscanners/objsrc.c

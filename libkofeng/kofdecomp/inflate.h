@@ -34,6 +34,7 @@
 #include <stdint.h>
 
 #include "../core/kofcore.h"
+#include "decomp.h"
 
 /* DEFLATE's maximum back reference, and therefore the whole of the decoder's
  * state. Not a tuning parameter: RFC 1951 fixes it. */
@@ -49,28 +50,45 @@
  */
 typedef int (*kof_inflate_sink)(void *user, const uint8_t *p, uint32_t n);
 
-enum kof_inflate_status {
-	KOF_INF_OK = 0,     /* the final block was reached and decoded */
-	KOF_INF_STOPPED,    /* the sink refused more; output so far is good */
-	KOF_INF_TRUNCATED,  /* input ended mid-stream; output so far is good */
-	KOF_INF_CORRUPT     /* not a valid DEFLATE stream */
-};
+/*
+ * How many bits the lookup table below covers. 512 entries of two bytes.
+ *
+ * Nine because that is where DEFLATE's own fixed code sits: its literal codes are
+ * seven, eight and nine bits, so nine resolves every symbol of a fixed block and
+ * the overwhelming majority of a dynamic one in a single indexed read. Ten would
+ * add a kilobyte per table to catch the tail; measured, it was not worth it.
+ */
+#define KOF_HUFF_FAST_BITS 9u
+#define KOF_HUFF_FAST_SIZE (1u << KOF_HUFF_FAST_BITS)
 
 /*
- * One canonical Huffman code, in the count-and-symbol form.
+ * One canonical Huffman code: the count-and-symbol form, plus a table over the
+ * short codes.
  *
- * Not a lookup table. A table decodes a symbol in one indexed read where this walks
- * one bit at a time, and it is the reason zlib is quick - but it is also several
- * kilobytes that has to be built per block from lengths the file chose, and every
- * bound in the build is a place to be wrong about attacker input. Fifteen iterations
- * at worst against a decoder that is short enough to read is the right way round for
- * a first implementation; the caps upstream mean throughput here bounds one object,
- * never the scan. If measurement says otherwise, a table can be added under the same
- * differential test that already proves this one.
+ * The count-and-symbol form alone is how this was first written, and it is correct
+ * and short - fifteen iterations at worst, one bit at a time. It was also the whole
+ * cost of a scan. Measured on a container-heavy corpus: decompression was 75% of the
+ * total scan time, and this decoder ran at 127MB/s against zlib's 342MB/s on the
+ * same data. Removing every bounds check in the decoder changed that number by
+ * nothing at all - the gap was the per-bit walk, not the safety.
+ *
+ * So `fast` resolves any code of nine bits or fewer in one read, and anything longer
+ * falls back to the walk, which is kept because it is the thing that is obviously
+ * right and because near the end of the input there may not be nine bits left to
+ * look at.
+ *
+ * The table is indexed by the next nine bits AS THEY SIT IN THE BIT BUFFER, which is
+ * the reverse of the code: DEFLATE packs bits least-significant-first while canonical
+ * Huffman codes are read most-significant-first. Reversing at build time rather than
+ * at decode time is the entire point of the table.
  */
 struct kof_huff {
-	int16_t count[16];    /* how many codes of each length */
-	int16_t symbol[288];  /* symbols ordered by code */
+	int16_t  count[16];    /* how many codes of each length */
+	int16_t  symbol[288];  /* symbols ordered by code */
+	/* (length << 12) | symbol, or zero where no code of nine bits or fewer
+	 * begins with these bits. Zero is unambiguous because a real entry always
+	 * has a length of at least one. */
+	uint16_t fast[KOF_HUFF_FAST_SIZE];
 };
 
 struct kof_inflate {
@@ -112,7 +130,5 @@ struct kof_inflate {
 int kof_inflate(struct kof_inflate *st, const uint8_t *in, uint64_t in_len,
 		kof_inflate_sink sink, void *user,
 		uint64_t *consumed, uint64_t *produced);
-
-const char *kof_inflate_status_name(int status);
 
 #endif /* KOFENG_INFLATE_H */

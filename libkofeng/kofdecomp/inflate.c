@@ -117,11 +117,71 @@ static int put(struct kof_inflate *s, uint8_t b, kof_inflate_sink sink, void *us
  * refused: the decoder below would otherwise return symbols from a table whose
  * entries were never assigned.
  */
+/*
+ * Reverse the low `len` bits of a code.
+ *
+ * Needed because the two orders disagree: a canonical code is defined
+ * most-significant-bit first, and DEFLATE hands bits over least-significant first.
+ * Doing it here, once per symbol per block, is what lets the decoder index the table
+ * with the raw bit buffer.
+ */
+static uint32_t rev_bits(uint32_t v, uint32_t len)
+{
+	uint32_t r = 0;
+
+	while (len--) {
+		r = (r << 1) | (v & 1u);
+		v >>= 1;
+	}
+	return r;
+}
+
+/*
+ * Fill the short-code table from the canonical assignment.
+ *
+ * Codes are assigned in the order the symbol array already holds - by length, then
+ * by symbol - which is the same walk the bit-at-a-time decoder performs, so the two
+ * cannot disagree about which code means what. Every index whose low `len` bits
+ * match the reversed code gets the entry, because the bits above the code are the
+ * next symbol's and are not ours to look at.
+ */
+static void build_fast(struct kof_huff *h)
+{
+	uint32_t code = 0, index = 0, len;
+
+	for (len = 1; len < 16; len++) {
+		uint32_t cnt = (uint32_t)h->count[len], k;
+
+		if (len <= KOF_HUFF_FAST_BITS) {
+			for (k = 0; k < cnt; k++) {
+				uint32_t sym = (uint32_t)h->symbol[index + k];
+				uint32_t at  = rev_bits(code + k, len);
+				uint32_t step = 1u << len;
+
+				for (; at < KOF_HUFF_FAST_SIZE; at += step)
+					h->fast[at] = (uint16_t)((len << 12) | sym);
+			}
+		}
+		index += cnt;
+		code = (code + cnt) << 1;
+	}
+}
+
 static int construct(struct kof_huff *h, const int16_t *length, int n)
 {
 	int symbol, len, left;
 	int16_t offs[16];
 
+	/*
+	 * Cleared here, before anything can return.
+	 *
+	 * construct() has an early exit for an over-subscribed code, and every
+	 * caller treats that as fatal - but a table left holding the PREVIOUS
+	 * block's symbols is a decoder that answers with another block's alphabet
+	 * if one ever does not. Clearing once at the top costs a kilobyte of store
+	 * per block and removes the question.
+	 */
+	memset(h->fast, 0, sizeof h->fast);
 	for (len = 0; len < 16; len++)
 		h->count[len] = 0;
 	for (symbol = 0; symbol < n; symbol++)
@@ -143,6 +203,7 @@ static int construct(struct kof_huff *h, const int16_t *length, int n)
 	for (symbol = 0; symbol < n; symbol++)
 		if (length[symbol])
 			h->symbol[offs[length[symbol]]++] = (int16_t)symbol;
+	build_fast(h);
 	return left;
 }
 
@@ -160,6 +221,25 @@ static int construct(struct kof_huff *h, const int16_t *length, int n)
 static int decode(struct kof_inflate *s, const struct kof_huff *h)
 {
 	int len, code = 0, first = 0, index = 0;
+
+	/*
+	 * The common case: nine bits are available and they begin a short code.
+	 *
+	 * need() failing is not an error here - the input may be nearly finished
+	 * while the buffer still holds a whole short code - so it simply falls
+	 * through to the walk, which handles running out properly.
+	 */
+	if (need(s, KOF_HUFF_FAST_BITS)) {
+		uint16_t e = h->fast[s->bitbuf & (KOF_HUFF_FAST_SIZE - 1u)];
+
+		if (e) {
+			uint32_t got = (uint32_t)e >> 12;
+
+			s->bitbuf >>= got;
+			s->bitcnt -= got;
+			return (int)(e & 0x0fffu);
+		}
+	}
 
 	for (len = 1; len < 16; len++) {
 		int b = getbit(s);
@@ -211,17 +291,17 @@ static int block_stored(struct kof_inflate *s, kof_inflate_sink sink, void *user
 	s->bitbuf = 0;              /* stored blocks start on a byte boundary */
 	s->bitcnt = 0;
 	if (!need(s, 32))
-		return KOF_INF_TRUNCATED;
+		return KOF_DEC_TRUNCATED;
 	len  = take(s, 16);
 	nlen = take(s, 16);
 	if (len != (~nlen & 0xffffu))
-		return KOF_INF_CORRUPT;
+		return KOF_DEC_CORRUPT;
 
 	while (len--) {
 		if (s->in_pos >= s->in_len)
-			return KOF_INF_TRUNCATED;
+			return KOF_DEC_TRUNCATED;
 		if (!put(s, s->in[s->in_pos++], sink, user))
-			return KOF_INF_STOPPED;
+			return KOF_DEC_STOPPED;
 	}
 	return -1;                  /* keep going */
 }
@@ -241,10 +321,10 @@ static int block_codes(struct kof_inflate *s, kof_inflate_sink sink, void *user)
 		int dsym;
 
 		if (sym < 0)
-			return sym == -1 ? KOF_INF_TRUNCATED : KOF_INF_CORRUPT;
+			return sym == -1 ? KOF_DEC_TRUNCATED : KOF_DEC_CORRUPT;
 		if (sym < 256) {
 			if (!put(s, (uint8_t)sym, sink, user))
-				return KOF_INF_STOPPED;
+				return KOF_DEC_STOPPED;
 			continue;
 		}
 		if (sym == 256)
@@ -254,18 +334,18 @@ static int block_codes(struct kof_inflate *s, kof_inflate_sink sink, void *user)
 		/* 286 and 287 can be given a code length by a hostile stream even
 		 * though no encoder may use them, so the table can decode them. */
 		if (sym >= 29)
-			return KOF_INF_CORRUPT;
+			return KOF_DEC_CORRUPT;
 		if (!need(s, len_extra[sym]))
-			return KOF_INF_TRUNCATED;
+			return KOF_DEC_TRUNCATED;
 		len = len_base[sym] + take(s, len_extra[sym]);
 
 		dsym = decode(s, &s->dist);
 		if (dsym < 0)
-			return dsym == -1 ? KOF_INF_TRUNCATED : KOF_INF_CORRUPT;
+			return dsym == -1 ? KOF_DEC_TRUNCATED : KOF_DEC_CORRUPT;
 		if (dsym >= 30)
-			return KOF_INF_CORRUPT;
+			return KOF_DEC_CORRUPT;
 		if (!need(s, dist_extra[dsym]))
-			return KOF_INF_TRUNCATED;
+			return KOF_DEC_TRUNCATED;
 		dist = dist_base[dsym] + take(s, dist_extra[dsym]);
 
 		/*
@@ -277,16 +357,45 @@ static int block_codes(struct kof_inflate *s, kof_inflate_sink sink, void *user)
 		 * rather than clamped, and the window is zeroed per stream as well.
 		 */
 		if (dist == 0 || (uint64_t)dist > s->produced)
-			return KOF_INF_CORRUPT;
+			return KOF_DEC_CORRUPT;
 
-		while (len--) {
-			uint8_t b = s->win[(s->wpos - dist) & (KOF_INF_WINDOW - 1u)];
+		/*
+		 * The copy, in runs rather than a byte at a time.
+		 *
+		 * Still a byte-wise loop inside, and that is not an oversight: a
+		 * length greater than the distance is how DEFLATE spells a repeat,
+		 * so the copy reads bytes it is itself writing and memcpy would be
+		 * wrong. What the batching removes is the per-byte work AROUND the
+		 * copy - the wrap mask, the pending count, the test for whether a
+		 * flush is due - by computing once how far it is safe to run.
+		 *
+		 * Three things end a run: the write reaching the end of the window,
+		 * the read reaching it, and the window filling. Each is at least one
+		 * byte away on entry, so the outer loop always advances.
+		 */
+		while (len) {
+			uint32_t src = (s->wpos - dist) & (KOF_INF_WINDOW - 1u);
+			uint32_t n = len, lim, i;
 
-			/* Byte at a time, and overlapping on purpose: a length
-			 * greater than the distance is how DEFLATE spells a run,
-			 * and it reads bytes this same loop is writing. */
-			if (!put(s, b, sink, user))
-				return KOF_INF_STOPPED;
+			lim = KOF_INF_WINDOW - s->wpos;
+			if (n > lim)
+				n = lim;
+			lim = KOF_INF_WINDOW - src;
+			if (n > lim)
+				n = lim;
+			lim = KOF_INF_WINDOW - s->wpend;
+			if (n > lim)
+				n = lim;
+
+			for (i = 0; i < n; i++)
+				s->win[s->wpos + i] = s->win[src + i];
+
+			s->wpos = (s->wpos + n) & (KOF_INF_WINDOW - 1u);
+			s->wpend += n;
+			s->produced += n;
+			len -= n;
+			if (s->wpend == KOF_INF_WINDOW && !flush(s, sink, user))
+				return KOF_DEC_STOPPED;
 		}
 	}
 }
@@ -330,24 +439,24 @@ static int build_dynamic(struct kof_inflate *s)
 	struct kof_huff clen;
 
 	if (!need(s, 14))
-		return KOF_INF_TRUNCATED;
+		return KOF_DEC_TRUNCATED;
 	nlen  = (int)take(s, 5) + 257;
 	ndist = (int)take(s, 5) + 1;
 	ncode = (int)take(s, 4) + 4;
 	/* 5 bits reach 31, so nlen reaches 288 and ndist 32 - both beyond what any
 	 * encoder may use, and both writable by a stream that means harm. */
 	if (nlen > 286 || ndist > 30)
-		return KOF_INF_CORRUPT;
+		return KOF_DEC_CORRUPT;
 
 	for (i = 0; i < ncode; i++) {
 		if (!need(s, 3))
-			return KOF_INF_TRUNCATED;
+			return KOF_DEC_TRUNCATED;
 		len[clen_order[i]] = (int16_t)take(s, 3);
 	}
 	for (; i < 19; i++)
 		len[clen_order[i]] = 0;
 	if (construct(&clen, len, 19) != 0)
-		return KOF_INF_CORRUPT;   /* the code-length code must be complete */
+		return KOF_DEC_CORRUPT;   /* the code-length code must be complete */
 
 	i = 0;
 	while (i < nlen + ndist) {
@@ -356,31 +465,31 @@ static int build_dynamic(struct kof_inflate *s)
 		int rep;
 
 		if (sym < 0)
-			return sym == -1 ? KOF_INF_TRUNCATED : KOF_INF_CORRUPT;
+			return sym == -1 ? KOF_DEC_TRUNCATED : KOF_DEC_CORRUPT;
 		if (sym < 16) {
 			len[i++] = (int16_t)sym;
 			continue;
 		}
 		if (sym == 16) {
 			if (i == 0)
-				return KOF_INF_CORRUPT;  /* nothing to repeat */
+				return KOF_DEC_CORRUPT;  /* nothing to repeat */
 			v = len[i - 1];
 			if (!need(s, 2))
-				return KOF_INF_TRUNCATED;
+				return KOF_DEC_TRUNCATED;
 			rep = 3 + (int)take(s, 2);
 		} else if (sym == 17) {
 			v = 0;
 			if (!need(s, 3))
-				return KOF_INF_TRUNCATED;
+				return KOF_DEC_TRUNCATED;
 			rep = 3 + (int)take(s, 3);
 		} else {
 			v = 0;
 			if (!need(s, 7))
-				return KOF_INF_TRUNCATED;
+				return KOF_DEC_TRUNCATED;
 			rep = 11 + (int)take(s, 7);
 		}
 		if (rep > nlen + ndist - i)
-			return KOF_INF_CORRUPT;  /* would run past the table */
+			return KOF_DEC_CORRUPT;  /* would run past the table */
 		while (rep--)
 			len[i++] = v;
 	}
@@ -388,11 +497,11 @@ static int build_dynamic(struct kof_inflate *s)
 	/* A literal table without an end-of-block symbol describes a block that
 	 * cannot end, which is a stream that never terminates. */
 	if (len[256] == 0)
-		return KOF_INF_CORRUPT;
+		return KOF_DEC_CORRUPT;
 
 	err = construct(&s->lit, len, nlen);
 	if (err != 0)
-		return KOF_INF_CORRUPT;   /* incomplete is as bad as over-subscribed
+		return KOF_DEC_CORRUPT;   /* incomplete is as bad as over-subscribed
 					   * here: a gap decodes to nothing */
 	err = construct(&s->dist, len + nlen, ndist);
 	/*
@@ -405,7 +514,7 @@ static int build_dynamic(struct kof_inflate *s)
 	 * can open. Over-subscribed is still refused.
 	 */
 	if (err < 0)
-		return KOF_INF_CORRUPT;
+		return KOF_DEC_CORRUPT;
 	return -1;
 }
 
@@ -415,7 +524,7 @@ int kof_inflate(struct kof_inflate *s, const uint8_t *in, uint64_t in_len,
 		kof_inflate_sink sink, void *user,
 		uint64_t *consumed, uint64_t *produced)
 {
-	int status = KOF_INF_OK, last = 0;
+	int status = KOF_DEC_OK, last = 0;
 
 	memset(s->win, 0, sizeof s->win);
 	s->wpos = s->wpend = 0;
@@ -429,7 +538,7 @@ int kof_inflate(struct kof_inflate *s, const uint8_t *in, uint64_t in_len,
 		int type, r;
 
 		if (!need(s, 3)) {
-			status = KOF_INF_TRUNCATED;
+			status = KOF_DEC_TRUNCATED;
 			break;
 		}
 		last = (int)take(s, 1);
@@ -445,7 +554,7 @@ int kof_inflate(struct kof_inflate *s, const uint8_t *in, uint64_t in_len,
 			if (r == -1)
 				r = block_codes(s, sink, user);
 		} else {
-			r = KOF_INF_CORRUPT;   /* type 3 is reserved */
+			r = KOF_DEC_CORRUPT;   /* type 3 is reserved */
 		}
 		if (r != -1) {
 			status = r;
@@ -461,8 +570,8 @@ int kof_inflate(struct kof_inflate *s, const uint8_t *in, uint64_t in_len,
 	 * to hand back its first megabyte because its last kilobyte is missing would
 	 * discard the part that identifies it. The status says the rest is unknown.
 	 */
-	if (status != KOF_INF_STOPPED && !flush(s, sink, user))
-		status = KOF_INF_STOPPED;
+	if (status != KOF_DEC_STOPPED && !flush(s, sink, user))
+		status = KOF_DEC_STOPPED;
 
 	/*
 	 * How much input was really used, in bytes.
@@ -478,13 +587,3 @@ int kof_inflate(struct kof_inflate *s, const uint8_t *in, uint64_t in_len,
 	return status;
 }
 
-const char *kof_inflate_status_name(int status)
-{
-	switch (status) {
-	case KOF_INF_OK:        return "ok";
-	case KOF_INF_STOPPED:   return "stopped";
-	case KOF_INF_TRUNCATED: return "truncated";
-	case KOF_INF_CORRUPT:   return "corrupt";
-	default:                return "?";
-	}
-}
