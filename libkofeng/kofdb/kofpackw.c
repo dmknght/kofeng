@@ -21,6 +21,7 @@
 
 #include "kofpackw.h"
 #include "kofpack.h"
+#include "../kofmatchers/hexprog.h"
 #include "../core/kofcore.h"
 
 /* A growable byte buffer, alive only while building. */
@@ -275,14 +276,54 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 		for (k = 0; k < m->n_str; k++, si++) {
 			const struct kof_pw_str *s = &m->str[k];
 			uint32_t off;
-			if (s->len == 0 || s->len > KOF_STR_MAX_LEN || !s->bytes)
+			/* Per kind: a compiled hex program is a header and two
+			 * tables, so its length is not comparable with a
+			 * literal's and the literal cap would refuse ordinary
+			 * patterns. */
+			if (!s->bytes || s->len == 0)
 				goto out;
-			if (!pool_intern(&ds, &b->str_pool, s->bytes, s->len, &off))
+			if (s->kind == KOF_STR_LITERAL) {
+				if (s->len > KOF_STR_MAX_LEN)
+					goto out;
+			} else if (s->kind == KOF_STR_HEX) {
+				if (s->len > KOF_HEX_MAX_PROG)
+					goto out;
+			} else {
 				goto out;
-			b->str[si].off      = off;
-			b->str[si].len      = s->len;
-			b->str[si].icase    = s->icase;
-			b->str[si].fullword = s->fullword;
+			}
+			/*
+			 * A compiled program is read as a struct, so it has to be
+			 * aligned - the matcher casts the pool bytes rather than
+			 * copying them out, which is the whole reason the strides
+			 * are fixed. UBSan on a real corpus is what found this;
+			 * on x86 the unaligned read merely works, and on the
+			 * architectures the pack format already names it does not.
+			 *
+			 * Interned without dedup for the same reason: a matching
+			 * run of bytes elsewhere in the pool is very unlikely to
+			 * be aligned, and reusing it would undo the padding. Hex
+			 * programs are few and the copy is bytes.
+			 */
+			if (s->kind == KOF_STR_HEX) {
+				static const uint8_t pad[4] = { 0 };
+				uint32_t dummy;
+
+				if (b->str_pool.len % KOF_HEX_PROG_ALIGN &&
+				    !buf_add(&b->str_pool, pad,
+					     KOF_HEX_PROG_ALIGN -
+					     b->str_pool.len % KOF_HEX_PROG_ALIGN,
+					     &dummy))
+					goto out;
+				if (!buf_add(&b->str_pool, s->bytes, s->len, &off))
+					goto out;
+			} else if (!pool_intern(&ds, &b->str_pool, s->bytes, s->len,
+						&off)) {
+				goto out;
+			}
+			b->str[si].off   = off;
+			b->str[si].len   = s->len;
+			b->str[si].kind  = s->kind;
+			b->str[si].flags = s->flags;
 		}
 		for (k = 0; k < m->n_rng; k++, ri++)
 			b->rng[ri] = m->rng[k];

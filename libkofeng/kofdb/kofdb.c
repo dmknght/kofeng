@@ -29,6 +29,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "kofdb.h"
+#include "../kofmatchers/hexprog.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,6 +48,110 @@ static size_t page_size_of(void)
 }
 
 /* ---- validation ------------------------------------------------------------- */
+
+/*
+ * Is a compiled hex program self consistent?
+ *
+ * Every table it names has to lie inside it and every alternative's bytes have to
+ * lie inside its data area. Checked here, once, so the matcher can walk the tables
+ * without a bounds test per step - the same trade the module slices get, and for
+ * the same reason: that walk runs per object per pattern.
+ *
+ * The caps come from hexprog.h and the compiler enforces them, but they are checked
+ * again because this arrives as bytes out of a file. A program that passes here
+ * cannot make the walk exceed its work bound.
+ */
+static int hex_prog_valid(const uint8_t *p, uint32_t len)
+{
+	const struct kof_hex_hdr *h = (const void *)p;
+	const struct kof_hex_step *st;
+	const struct kof_hex_alt *al;
+	uint32_t i, seen_alts = 0;
+
+	if (len < sizeof *h || h->total_len != len)
+		return 0;
+	if (h->n_steps == 0 || h->n_steps > KOF_HEX_MAX_STEPS)
+		return 0;
+	if (h->n_alts < h->n_steps || h->n_alts > KOF_HEX_MAX_STEPS * KOF_HEX_MAX_ALTS)
+		return 0;
+	if (h->anchor_len == 0 || h->anchor_step >= h->n_steps)
+		return 0;
+	if (h->min_span == 0 || h->max_span < h->min_span)
+		return 0;
+	if (h->anchor_before_max < h->anchor_before_min)
+		return 0;
+	if (h->anchor_before_max > h->max_span ||
+	    h->anchor_len > h->max_span - h->anchor_before_max)
+		return 0;
+	/* The window is what the matcher iterates, so it is what has to be bounded:
+	 * an unbounded one turns one anchor hit into an unbounded number of walks. */
+	if (h->anchor_before_max - h->anchor_before_min > KOF_HEX_MAX_GAP_TOTAL)
+		return 0;
+
+	if (h->steps_off < sizeof *h ||
+	    h->n_steps > (len - h->steps_off) / sizeof *st)
+		return 0;
+	if (h->alts_off < h->steps_off + h->n_steps * sizeof *st ||
+	    h->n_alts > (len - h->alts_off) / sizeof *al)
+		return 0;
+	if (h->data_off < h->alts_off + h->n_alts * sizeof *al || h->data_off > len)
+		return 0;
+
+	st = (const void *)(p + h->steps_off);
+	al = (const void *)(p + h->alts_off);
+
+	/* The anchor run has to lie inside the alternative it names, because the
+	 * matcher reads it from there without a further check. */
+	{
+		const struct kof_hex_step *as = &st[h->anchor_step];
+		const struct kof_hex_alt *aa;
+
+		if (as->alt_first >= h->n_alts)
+			return 0;
+		aa = &al[as->alt_first];
+		if (h->anchor_in_alt > aa->len ||
+		    h->anchor_len > (uint32_t)aa->len - h->anchor_in_alt)
+			return 0;
+		/* An anchor inside a masked alternative would be searched for as
+		 * concrete bytes that are not concrete. */
+		if (aa->flags & KOF_HEX_ALT_MASKED) {
+			const uint8_t *msk = p + aa->data_off + aa->len;
+			uint32_t b;
+
+			for (b = 0; b < h->anchor_len; b++)
+				if (msk[h->anchor_in_alt + b] != 0xff)
+					return 0;
+		}
+	}
+
+	for (i = 0; i < h->n_steps; i++) {
+		uint32_t j;
+
+		if (st[i].gap_max < st[i].gap_min ||
+		    st[i].gap_max > KOF_HEX_MAX_GAP_TOTAL)
+			return 0;
+		if (st[i].n_alts == 0 || st[i].n_alts > KOF_HEX_MAX_ALTS)
+			return 0;
+		if (st[i].alt_first != seen_alts ||
+		    (uint32_t)st[i].alt_first + st[i].n_alts > h->n_alts)
+			return 0;
+		for (j = 0; j < st[i].n_alts; j++) {
+			const struct kof_hex_alt *a = &al[st[i].alt_first + j];
+			uint32_t need = a->len;
+
+			if (a->len == 0 || a->len > KOF_HEX_MAX_ALT_LEN)
+				return 0;
+			if (a->flags & ~KOF_HEX_ALT_MASKED)
+				return 0;
+			if (a->flags & KOF_HEX_ALT_MASKED)
+				need += a->len;
+			if (a->data_off < h->data_off || need > len - a->data_off)
+				return 0;
+		}
+		seen_alts += st[i].n_alts;
+	}
+	return seen_alts == h->n_alts;
+}
 
 /*
  * Is this mapping a pack, and does every offset in it stay inside the mapping?
@@ -168,8 +273,25 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 		for (k = 0; k < h->n_str; k++) {
 			if ((uint64_t)s[k].off + s[k].len > spool)
 				REFUSE("string %u lies outside its pool", k);
-			if (s[k].len == 0 || s[k].len > KOF_STR_MAX_LEN)
-				REFUSE("string %u has length %u", k, s[k].len);
+			if (s[k].len == 0)
+				REFUSE("string %u is empty", k);
+			if (s[k].kind == KOF_STR_LITERAL) {
+				if (s[k].len > KOF_STR_MAX_LEN)
+					REFUSE("literal %u is %u bytes", k, s[k].len);
+			} else if (s[k].kind == KOF_STR_HEX) {
+				if (s[k].len > KOF_HEX_MAX_PROG)
+					REFUSE("hex program %u is %u bytes", k,
+					       s[k].len);
+				/* Read as a struct, so a misaligned one is not a
+				 * slow read, it is undefined behaviour. */
+				if (s[k].off % KOF_HEX_PROG_ALIGN)
+					REFUSE("hex program %u is misaligned", k);
+				if (!hex_prog_valid(base + h->sec[KOF_SEC_STR_POOL].off
+						    + s[k].off, s[k].len))
+					REFUSE("hex program %u is malformed", k);
+			} else {
+				REFUSE("string %u has kind %u", k, s[k].kind);
+			}
 		}
 		for (k = 0; k < h->n_names; k++) {
 			uint64_t o = nm[k].off, j;
@@ -318,7 +440,7 @@ static const char **collect_packs(const char *dir, uint32_t *out_n)
  * nothing on the scan path has to know which pack a module came from.
  */
 static void absorb(struct kof_engine *e, const struct mapped *mp,
-		   size_t code_at)
+		   size_t code_at, size_t pool_at)
 {
 	const uint8_t *base = mp->map;
 	const struct kof_pack_hdr *h = mp->map;
@@ -341,14 +463,18 @@ static void absorb(struct kof_engine *e, const struct mapped *mp,
 
 	memcpy(e->code + code_at, base + h->sec[KOF_SEC_CODE].off,
 	       (size_t)h->sec[KOF_SEC_CODE].len);
+	memcpy(e->str_pool + pool_at, spool, (size_t)h->sec[KOF_SEC_STR_POOL].len);
 
+	/* Descriptors are copied as they are and only the pool offset is rebased:
+	 * the engine's record is the pack's record, so nothing is reinterpreted on
+	 * the way in and there is no second layout to keep in step. */
 	for (i = 0; i < h->n_str; i++) {
 		struct kof_str_ent *d = &e->str_tab[e->n_str++];
 
-		d->icase    = pstr[i].icase;
-		d->fullword = pstr[i].fullword;
-		d->len      = pstr[i].len;
-		memcpy(d->bytes, spool + pstr[i].off, pstr[i].len);
+		d->off   = (uint32_t)pool_at + pstr[i].off;
+		d->len   = pstr[i].len;
+		d->kind  = pstr[i].kind;
+		d->flags = pstr[i].flags;
 	}
 	for (i = 0; i < h->n_rng; i++)
 		e->rng_tab[e->n_rng++] = prng[i];
@@ -407,6 +533,8 @@ struct kof_engine *kof_db_load(const char *path)
 	const char *single[1];
 	uint32_t n_paths = 0, n_ok = 0, i;
 	uint64_t n_mods = 0, n_str = 0, n_rng = 0, n_name = 0, code = 0, memo = 0;
+	uint64_t spool = 0;
+	size_t spool_at = 0;
 	size_t at = 0;
 	int owned = 0;
 
@@ -451,6 +579,11 @@ struct kof_engine *kof_db_load(const char *path)
 		n_rng  += h->n_rng;
 		n_name += h->n_names;
 		memo   += h->memo_slots;
+		/* Padded to the same boundary the packer used inside each pool, so
+		 * an aligned offset stays aligned once the pools are concatenated. */
+		spool  = (spool + KOF_HEX_PROG_ALIGN - 1) / KOF_HEX_PROG_ALIGN
+		       * KOF_HEX_PROG_ALIGN;
+		spool += h->sec[KOF_SEC_STR_POOL].len;
 		/* Each pack's blobs keep the offsets its own header gives them, so
 		 * its code section is placed whole and aligned. */
 		code = (code + KOF_PACK_BLOB_ALIGN - 1) / KOF_PACK_BLOB_ALIGN
@@ -470,7 +603,8 @@ struct kof_engine *kof_db_load(const char *path)
 	 * that loads, scans, and quietly detects nothing.
 	 */
 	if (n_mods > 0xffffffffu || n_str > 0xffffffffu ||
-	    n_rng > 0xffffffffu || n_name > 0xffffffffu || memo > 0xffffffffu) {
+	    n_rng > 0xffffffffu || n_name > 0xffffffffu || memo > 0xffffffffu ||
+	    spool > 0xffffffffu) {
 		fprintf(stderr, "kofdb: %s: more entries than an index can hold\n",
 			path);
 		goto out;
@@ -483,7 +617,9 @@ struct kof_engine *kof_db_load(const char *path)
 	e->str_tab  = calloc(n_str  ? n_str  : 1, sizeof *e->str_tab);
 	e->rng_tab  = calloc(n_rng  ? n_rng  : 1, sizeof *e->rng_tab);
 	e->name_tab = calloc(n_name ? n_name : 1, sizeof *e->name_tab);
-	if (!e->mods || !e->str_tab || !e->rng_tab || !e->name_tab ||
+	e->str_pool = calloc(spool ? (size_t)spool : 1, 1);
+	e->str_pool_len = (uint32_t)spool;
+	if (!e->mods || !e->str_tab || !e->rng_tab || !e->name_tab || !e->str_pool ||
 	    !arena_open(e, (size_t)code)) {
 		kof_db_free(e);
 		e = NULL;
@@ -495,8 +631,11 @@ struct kof_engine *kof_db_load(const char *path)
 
 		at = (at + KOF_PACK_BLOB_ALIGN - 1) / KOF_PACK_BLOB_ALIGN
 		   * KOF_PACK_BLOB_ALIGN;
-		absorb(e, &mp[i], at);
+		spool_at = (spool_at + KOF_HEX_PROG_ALIGN - 1) / KOF_HEX_PROG_ALIGN
+			 * KOF_HEX_PROG_ALIGN;
+		absorb(e, &mp[i], at, spool_at);
 		at += (size_t)h->sec[KOF_SEC_CODE].len;
+		spool_at += (size_t)h->sec[KOF_SEC_STR_POOL].len;
 	}
 
 	/* Written once, then executable. */
@@ -525,6 +664,7 @@ void kof_db_free(struct kof_engine *e)
 	free(e->str_tab);
 	free(e->rng_tab);
 	free(e->name_tab);
+	free(e->str_pool);
 	if (e->code)
 		munmap(e->code, e->code_cap);
 	free(e);

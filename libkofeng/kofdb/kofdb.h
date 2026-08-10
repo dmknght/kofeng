@@ -32,15 +32,22 @@ typedef void (*kof_scan_fn)(const struct kof_obj_ctx *);
 /*
  * One declared string, as the host needs it.
  *
- * The literal lives here and not in the blob, which is what allows the host to
+ * The content lives here and not in the blob, which is what allows the host to
  * search on the module's behalf - and therefore to answer many modules' strings in
  * one pass rather than each module scanning for itself.
+ *
+ * An offset into a shared pool, not an inline buffer, and the record is the pack's
+ * record unchanged. The inline form was 516 bytes per string against a measured
+ * 12.7 byte average literal - 8.25MB of table for sixteen thousand strings, nearly
+ * all of it padding. It also could not hold a compiled hex pattern at all: those run
+ * to kilobytes, and sizing every slot for the largest would have made the table
+ * 131MB.
  */
 struct kof_str_ent {
-	uint8_t  icase;
-	uint8_t  fullword;
+	uint32_t off;             /* into kof_engine.str_pool */
 	uint16_t len;
-	uint8_t  bytes[KOF_STR_MAX_LEN];
+	uint8_t  kind;            /* enum kof_pack_str_kind */
+	uint8_t  flags;           /* KOF_STR_ICASE | KOF_STR_FULLWORD; literal only */
 };
 
 struct kof_name_ent {
@@ -105,6 +112,10 @@ struct kof_engine {
 
 	struct kof_str_ent  *str_tab;
 	uint32_t             n_str;
+
+	/* Every pack's string pool, concatenated. str_tab entries index into it. */
+	uint8_t             *str_pool;
+	uint32_t             str_pool_len;
 
 	uint32_t            *rng_tab;   /* a range is just a region mask, but named */
 	uint32_t             n_rng;

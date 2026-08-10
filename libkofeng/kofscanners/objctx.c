@@ -4,7 +4,7 @@
  * Builds a kof_obj_ctx and serves every call made through it. That makes this the
  * entire untrusted boundary: module code comes out of a database and runs native, and
  * every byte it can reach it reaches through one of these functions - so each one
- * bounds checks, and an out of range read yields zero rather than faulting. Eight
+ * bounds checks, and an out of range read yields zero rather than faulting. Ten
  * functions audited once beats bounds arithmetic repeated in every module.
  *
  * It sits with the scanner rather than beside the ABI headers in core/kofmod because
@@ -92,28 +92,82 @@ static void c_report(const struct kof_obj_ctx *ctx, uint32_t level,
  * word boundaries. What is left here is the only part that needs the object's parse:
  * turning a named range into extents.
  */
+/*
+ * The string a module named, resolved against the running module's slice.
+ *
+ * NULL if the id is outside it. That is the only thing to check here: the id came
+ * from a build-assigned constant, but a wrong pack would make it index another
+ * module's string, and a signature reporting on somebody else's pattern is worse
+ * than one that reports nothing.
+ */
+static const struct kof_str_ent *str_of(const struct kof_scanner *sc, uint32_t id)
+{
+	const struct kof_module *m = sc->cur_mod;
+
+	if (!m || id >= m->n_str)
+		return NULL;
+	return &sc->eng->str_tab[m->str_base + id];
+}
+
 static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 		      uint32_t range_id)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	const struct kof_module *m = sc->cur_mod;
-	const struct kof_str_ent *e;
+	const struct kof_str_ent *e = str_of(sc, str_id);
 	struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
 	uint32_t n;
 
-	if (!m || str_id >= m->n_str || range_id >= m->n_rng)
+	if (!e || range_id >= m->n_rng)
 		return 0;
-	e = &sc->eng->str_tab[m->str_base + str_id];
 	n = kof_scan_resolve_range(ctx, sc->eng->rng_tab[m->rng_base + range_id], ext);
 
 	return kof_match_lookup(&sc->m,
 				m->memo_base + str_id * m->n_rng + range_id,
-				ext, n, e->bytes, e->len, e->icase, e->fullword,
-				&sc->st.gram_answers);
+				ext, n, sc->eng->str_pool + e->off, e->len,
+				e->kind, e->flags, &sc->st.gram_answers);
+}
+
+/*
+ * Compare at an offset the module computed.
+ *
+ * The offset is logic, not metadata: it comes from the entry point, from a field
+ * read out of the object, from arithmetic on either. That is why it is a parameter
+ * and not a declaration - the build cannot know it, and asking an author to declare
+ * a value that depends on the file would be asking for the wrong thing. The bytes
+ * stay metadata and stay in the database, which is what the two calls keep apart.
+ *
+ * The bound is the host's. Left to the module it would be a rule a signature has to
+ * remember, on the one path where forgetting it reads outside the mapping, so it is
+ * checked inside kof_match_at where it cannot be forgotten.
+ */
+static int c_find_str_at(const struct kof_obj_ctx *ctx, uint32_t str_id,
+			 uint64_t off)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	const struct kof_str_ent *e = str_of(sc, str_id);
+
+	if (!e)
+		return 0;
+	return kof_match_at(&sc->m, off, sc->eng->str_pool + e->off, e->len,
+			    e->kind, e->flags);
+}
+
+static int c_find_str_in(const struct kof_obj_ctx *ctx, uint32_t str_id,
+			 uint64_t off, uint64_t len)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	const struct kof_str_ent *e = str_of(sc, str_id);
+
+	if (!e)
+		return 0;
+	return kof_match_in(&sc->m, off, len, sc->eng->str_pool + e->off, e->len,
+			    e->kind, e->flags);
 }
 
 static const struct kof_content kof_mod_vtable = {
-	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_csum
+	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
+	c_find_str_in, c_csum
 };
 
 /*

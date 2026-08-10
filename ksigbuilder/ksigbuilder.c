@@ -72,6 +72,7 @@
 
 #include "../libkofeng/kofdb/kofpackw.h"
 #include "../libkofeng/kofdb/kofpack.h"
+#include "../libkofeng/kofmatchers/hexprog.h"
 
 /* ============================================================================
  * EXTRACT - read the declarations out of a signature source
@@ -97,10 +98,11 @@
 struct pat {
 	int      line;
 	char     name[64];
-	int      icase;
-	int      fullword;
-	uint32_t len;
-	uint8_t  bytes[MAX_LITERAL];
+	int      kind;              /* enum kof_pack_str_kind */
+	int      icase;             /* literal only */
+	int      fullword;          /* literal only */
+	uint32_t len;               /* bytes, or the compiled program length */
+	uint8_t  bytes[KOF_HEX_MAX_PROG];
 };
 
 static struct pat pats[MAX_PATTERNS];
@@ -193,19 +195,28 @@ static void err(int line, const char *msg)
 }
 
 /*
- * The macros a pattern can be written with. Order matters: the longer names must be
- * tested first, otherwise a shorter name that is a prefix of a longer one would
- * shadow it.
+ * The macros a declaration can be written with.
+ *
+ * Order matters: a shorter name that is a prefix of a longer one would shadow it,
+ * so KOF_DEFINE_HEXSTR has to be tested before KOF_DEFINE_STR would match inside
+ * it. Getting that wrong is silent - the hex text would be read as a literal.
  */
+enum decl_kind {
+	DECL_RANGE = 0,
+	DECL_STR,
+	DECL_HEXSTR
+};
+
 struct macro {
-	const char *name;
-	int nocase;
+	const char    *name;
+	enum decl_kind kind;
 };
 
 static const struct macro macros[] = {
-	{ "KOF_DEFINE_RANGE", 1 },   /* nocase field reused as "is a range" */
-	{ "KOF_DEFINE_STR",   0 },
-	{ NULL, 0 }
+	{ "KOF_DEFINE_RANGE",  DECL_RANGE  },
+	{ "KOF_DEFINE_HEXSTR", DECL_HEXSTR },
+	{ "KOF_DEFINE_STR",    DECL_STR    },
+	{ NULL, DECL_RANGE }
 };
 
 /*
@@ -399,6 +410,44 @@ static int read_mask(const char *p, int line, struct rng *out)
 	return 1;
 }
 
+/*
+ * Read the hex text, argument 2 of KOF_DEFINE_HEXSTR.
+ *
+ * Located at that position and nowhere else, for the same reason a literal is: a
+ * later argument may contain quotes, and scanning for the first one is how a
+ * pattern silently becomes the wrong bytes.
+ */
+static int read_hex_text(const char *p, int line, char *out, size_t cap)
+{
+	const char *q;
+	size_t n = 0;
+
+	q = nth_arg(p, 2, line);
+	if (!q)
+		return 0;
+	while (*q == ' ' || *q == '\t')
+		q++;
+	if (*q != '"') {
+		err(line, "second argument of KOF_DEFINE_HEXSTR must be a string "
+			  "literal holding the hex pattern");
+		return 0;
+	}
+	q++;
+	while (*q && *q != '"') {
+		if (n + 1 >= cap) {
+			err(line, "hex pattern too long");
+			return 0;
+		}
+		out[n++] = *q++;
+	}
+	if (*q != '"') {
+		err(line, "unterminated hex pattern");
+		return 0;
+	}
+	out[n] = 0;
+	return 1;
+}
+
 /* Read a single enum name from argument `which`, matched against a table. */
 static int read_enum(const char *p, int which, int line, const char *what,
 		     const char *n0, const char *n1, int *out)
@@ -569,8 +618,7 @@ static void scan_line(char *at, size_t line_len, int lineno)
 		return;
 	}
 
-	/* m->nocase is reused as "this is a range declaration". */
-	if (m->nocase) {
+	if (m->kind == DECL_RANGE) {
 		struct rng *r;
 		if (nrngs >= MAX_PATTERNS) {
 			err(lineno, "too many declared ranges");
@@ -606,6 +654,7 @@ static void scan_line(char *at, size_t line_len, int lineno)
 	}
 	{
 		struct pat *o = &pats[npats];
+
 		memset(o, 0, sizeof *o);
 		o->line = lineno;
 		if (!read_ident(p, lineno, o->name, sizeof o->name))
@@ -614,6 +663,41 @@ static void scan_line(char *at, size_t line_len, int lineno)
 			err(lineno, "a string with this name is already declared");
 			return;
 		}
+
+		if (m->kind == DECL_HEXSTR) {
+			/*
+			 * The hex text is read the same way a literal is - argument
+			 * two and nowhere else - and then compiled. Case and word
+			 * options do not apply: a hex pattern is bytes, and folding
+			 * case on a byte that may be a wildcard means nothing.
+			 */
+			char text[MAX_LITERAL];
+			struct kof_hex_stat st;
+
+			if (!read_hex_text(p, lineno, text, sizeof text))
+				return;
+			o->len = kof_hex_compile(text, o->bytes, sizeof o->bytes,
+						 &st);
+			if (o->len == 0) {
+				err(lineno, kof_hex_error());
+				return;
+			}
+			o->kind = KOF_STR_HEX;
+			/* The anchor length is printed because it is the number a
+			 * researcher can act on and the one nothing else would
+			 * surface: below four the presence set cannot rule this
+			 * pattern out, so it is searched on every object of its
+			 * format, forever. */
+			printf("   hex %-22s %u step(s) %u alt(s) span %u..%u "
+			       "anchor %u%s\n", o->name, st.n_steps, st.n_alts,
+			       st.min_span, st.max_span, st.anchor_len,
+			       st.anchor_len < 4 ? "  (too short for the presence "
+						   "set)" : "");
+			npats++;
+			return;
+		}
+
+		o->kind = KOF_STR_LITERAL;
 		if (!read_literal(p, lineno, o))
 			return;
 		if (!read_enum(p, 3, lineno, "the case option",
@@ -659,6 +743,21 @@ static void emit_rng_id(FILE *out, const struct rng *r, int idx)
  */
 static void emit_str_record(FILE *out, const struct pat *p, int idx)
 {
+	uint32_t i;
+
+	/*
+	 * A compiled hex program is arbitrary bytes, so it cannot go in the column
+	 * a literal uses - a newline in it would end the row. Hex digits cost twice
+	 * the space in a file that exists for one build step and are readable when
+	 * something goes wrong, which is what the sidecar is for.
+	 */
+	if (p->kind == KOF_STR_HEX) {
+		fprintf(out, "h\t%d\t%u\t", idx, p->len);
+		for (i = 0; i < p->len; i++)
+			fprintf(out, "%02x", p->bytes[i]);
+		fputc('\n', out);
+		return;
+	}
 	fprintf(out, "s\t%d\t%d\t%d\t%u\t%.*s\n", idx,
 		p->icase, p->fullword, p->len, (int)p->len,
 		(const char *)p->bytes);
@@ -1077,7 +1176,7 @@ out:
  */
 static int strs_load(struct artefact *a)
 {
-	char *path = sibling(a->stem, ".strs"), line[KOF_STR_MAX_LEN + 128];
+	char *path = sibling(a->stem, ".strs"), line[2 * KOF_HEX_MAX_PROG + 128];
 	FILE *f;
 	size_t bytes_cap = 0, bytes_len = 0;
 	uint32_t scap = 0, rcap = 0, i;
@@ -1169,10 +1268,76 @@ static int strs_load(struct artefact *a)
 				scap = nc;
 			}
 			memcpy(a->str_bytes + bytes_len, lit, len);
-			a->str[a->n_str].bytes    = (const uint8_t *)(uintptr_t)bytes_len;
-			a->str[a->n_str].len      = (uint16_t)len;
-			a->str[a->n_str].icase    = (uint8_t)icase;
-			a->str[a->n_str].fullword = (uint8_t)fullw;
+			a->str[a->n_str].bytes = (const uint8_t *)(uintptr_t)bytes_len;
+			a->str[a->n_str].len   = (uint16_t)len;
+			a->str[a->n_str].kind  = KOF_STR_LITERAL;
+			a->str[a->n_str].flags = (uint8_t)
+				((icase ? KOF_STR_ICASE : 0u) |
+				 (fullw ? KOF_STR_FULLWORD : 0u));
+			a->n_str++;
+			bytes_len += len;
+		/* h <id> <len> <program as hex digits> */
+		} else if (p[0] == 'h' && p[1] == '\t') {
+			unsigned long len;
+			char *end;
+			uint32_t k;
+
+			p += 2;
+			tab = strchr(p, '\t');       /* past the id column */
+			if (!tab)
+				continue;
+			p = tab + 1;
+			tab = strchr(p, '\t');
+			if (!tab)
+				continue;
+			len = strtoul(p, 0, 10);
+			p = tab + 1;                 /* the digits */
+			if (len == 0 || len > KOF_HEX_MAX_PROG) {
+				fprintf(stderr, "ksigbuilder: %s: hex program of "
+						"length %lu\n", a->stem, len);
+				goto out;
+			}
+			for (end = p; *end && *end != '\n' && *end != '\r'; end++)
+				;
+			if ((size_t)(end - p) != len * 2) {
+				fprintf(stderr, "ksigbuilder: %s: hex program says "
+						"%lu bytes but carries %zu digits\n",
+					a->stem, len, (size_t)(end - p));
+				goto out;
+			}
+			if (bytes_len + len > bytes_cap) {
+				size_t nc = bytes_cap ? bytes_cap * 2 : 1024;
+				uint8_t *nb;
+				while (nc < bytes_len + len)
+					nc *= 2;
+				nb = realloc(a->str_bytes, nc);
+				if (!nb)
+					goto out;
+				a->str_bytes = nb;
+				bytes_cap = nc;
+			}
+			if (a->n_str == scap) {
+				uint32_t nc = scap ? scap * 2 : 8;
+				struct kof_pw_str *nv = realloc(a->str,
+								nc * sizeof *nv);
+				if (!nv)
+					goto out;
+				a->str = nv;
+				scap = nc;
+			}
+			for (k = 0; k < (uint32_t)len; k++) {
+				unsigned v;
+				if (sscanf(p + k * 2, "%2x", &v) != 1) {
+					fprintf(stderr, "ksigbuilder: %s: malformed "
+							"hex program\n", a->stem);
+					goto out;
+				}
+				a->str_bytes[bytes_len + k] = (uint8_t)v;
+			}
+			a->str[a->n_str].bytes = (const uint8_t *)(uintptr_t)bytes_len;
+			a->str[a->n_str].len   = (uint16_t)len;
+			a->str[a->n_str].kind  = KOF_STR_HEX;
+			a->str[a->n_str].flags = 0;
 			a->n_str++;
 			bytes_len += len;
 		}

@@ -107,9 +107,17 @@
  * from whatever else might be handed to the loader by mistake. */
 #define KOF_PACK_MAGIC   0x50464f4bu
 
-/* Bumped whenever a struct here changes shape. There is no compatibility range:
- * a pack is a build artefact next to the engine that reads it, and a loader that
- * accepts an older layout is a loader carrying two layouts. */
+/*
+ * There is no compatibility range: a pack is a build artefact next to the engine
+ * that reads it, and a loader that accepts an older layout is a loader carrying two
+ * layouts. A pack whose version differs is refused, not converted.
+ *
+ * Still 1 while the format is pre-release. Nothing has shipped, every database in
+ * existence is rebuilt from source by `make db`, and a version that moves before
+ * anyone can be holding the old one is a number that records edits rather than
+ * compatibility. It gets bumped on the first release and on every shape change
+ * after that.
+ */
 #define KOF_PACK_VERSION 1u
 
 /*
@@ -231,9 +239,17 @@ struct kof_pack_sec {
  *
  * A declared literal has to fit a uint16 length by construction; the real limit is
  * lower because a pattern that long is a file, not a string.
+ *
+ * A compiled hex pattern gets its own, larger cap: it is a header plus two tables
+ * plus bytes and masks, so its length is not comparable with a literal's, and
+ * checking it against the literal cap would refuse patterns that are perfectly
+ * ordinary to write. Its real bounds are the ones in hexprog.h, which the compiler
+ * enforces on the parts rather than on the total.
  */
 #define KOF_BLOB_MAX_CODE (4u * 1024u * 1024u)
 #define KOF_STR_MAX_LEN   512u
+/* The hex program cap lives in hexprog.h with the rest of that encoding's bounds;
+ * a reader that validates one needs that header anyway. */
 
 /*
  * The header. Fixed size, first thing in the file, and the only structure whose
@@ -331,6 +347,24 @@ struct kof_pack_mod {
 };
 
 /*
+ * What a pool entry holds.
+ *
+ * The kind is on the descriptor and not in the pool, so the matcher knows which
+ * path to take before it reads a byte of content. A literal search is memchr and
+ * memcmp; a hex walk is neither, and deciding between them by peeking at the
+ * content would mean reading the pool to learn how to read the pool.
+ */
+enum kof_pack_str_kind {
+	KOF_STR_LITERAL = 0,      /* raw bytes; len is the pattern length */
+	KOF_STR_HEX     = 1       /* struct kof_hex_hdr and its tables, see hexprog.h */
+};
+
+/* Flags for a literal. Both were their own uint8 before; merging them freed the
+ * byte the kind needed and left the descriptor at eight. */
+#define KOF_STR_ICASE    (1u << 0)
+#define KOF_STR_FULLWORD (1u << 1)
+
+/*
  * One declared string: where its bytes are, and how to match them.
  *
  * A pool with (offset, length) rather than an inline buffer. Measured on the
@@ -345,9 +379,9 @@ struct kof_pack_mod {
  */
 struct kof_pack_str {
 	uint32_t off;             /* from the start of KOF_SEC_STR_POOL */
-	uint16_t len;
-	uint8_t  icase;
-	uint8_t  fullword;
+	uint16_t len;             /* bytes at off, whatever the kind */
+	uint8_t  kind;            /* enum kof_pack_str_kind */
+	uint8_t  flags;           /* KOF_STR_* ; literal only */
 };
 
 /*

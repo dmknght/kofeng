@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include <kofmod/kofsig.h>   /* struct kof_range */
 #include "../core/kofcore.h"
+#include "hexprog.h"
 
 struct kof_match_ctx {
 	kof_buf data;
@@ -71,7 +72,28 @@ void kof_match_state_free(struct kof_match_ctx *);
  */
 int kof_match_lookup(struct kof_match_ctx *, uint32_t slot,
 		     const struct kof_range *ext, uint32_t next,
-		     const uint8_t *bytes, uint16_t len, int icase, int fullword,
+		     const uint8_t *bytes, uint16_t len, uint8_t kind, uint8_t flags,
 		     uint64_t *answered_without_scan);
+
+/*
+ * Does the pattern match at exactly this offset? No search - one compare, or one
+ * bounded walk for a hex pattern.
+ *
+ * Separate from kof_match_lookup because it is a different operation with a
+ * different cost, and conflating them would route a comparison of eight bytes
+ * through range resolution and a memo. It is also not memoised: the offset is
+ * computed by the module at run time, so there is nothing constant to key on, and
+ * caching a memcmp would cost more than repeating it.
+ *
+ * The bound check is here rather than in the caller: a module supplies the offset,
+ * the offset comes from the file, and a compare that walks off the mapping is the
+ * one failure this layer exists to make impossible.
+ */
+int kof_match_at(struct kof_match_ctx *, uint64_t off,
+		 const uint8_t *bytes, uint16_t len, uint8_t kind, uint8_t flags);
+
+/* Search a single ad-hoc range, for the same reason: the module computed it. */
+int kof_match_in(struct kof_match_ctx *, uint64_t off, uint64_t len,
+		 const uint8_t *bytes, uint16_t plen, uint8_t kind, uint8_t flags);
 
 #endif /* KOFENG_KOFMATCH_H */

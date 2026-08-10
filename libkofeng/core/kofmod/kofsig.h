@@ -237,6 +237,23 @@ struct kof_content {
 	int (*find_str)(const struct kof_obj_ctx *, uint32_t str_id,
 			uint32_t range_id);
 
+	/*
+	 * The same declared string, at an offset the module worked out.
+	 *
+	 * A different operation from find_str and priced differently: find_str_at
+	 * is one comparison the length of the pattern, find_str_in searches an
+	 * ad-hoc window. Neither resolves a region and neither is memoised, because
+	 * the offset is a runtime value and there is nothing constant to key on.
+	 *
+	 * Both bounds check against the object. A module may hand over any offset -
+	 * one read out of the file, one computed from it - and a comparison that
+	 * walks off the mapping is the failure this layer exists to prevent.
+	 */
+	int (*find_str_at)(const struct kof_obj_ctx *, uint32_t str_id,
+			   uint64_t off);
+	int (*find_str_in)(const struct kof_obj_ctx *, uint32_t str_id,
+			   uint64_t off, uint64_t len);
+
 	uint32_t (*csum)(const struct kof_obj_ctx *, uint64_t off, uint32_t len);
 };
 
@@ -449,6 +466,89 @@ void kof_scan(const struct kof_obj_ctx *ctx);
 /* One string in one range. Non-zero if present. */
 #define kof_find_str(rng, s) KOF_FS_ONE(rng, s)
 
+/*
+ * AT AN OFFSET THE MODULE WORKED OUT
+ *
+ *     if (kof_find_str_at(ctx->entry_off, stub)) ...
+ *     if (kof_find_str_in(ctx->entry_off, 64, stub)) ...
+ *
+ * The offset is an ordinary expression, not a declaration, and that is the line the
+ * whole design rests on: the PATTERN is metadata and belongs in the database, where
+ * the host owns it, dedupes it and searches for many modules in one pass; the
+ * OFFSET is logic and belongs here, because it depends on the object - an entry
+ * point, a field read out of a header, arithmetic on either. Declaring a value that
+ * is computed from the file is not something a build can do.
+ *
+ *     uint64_t target = kof_u32(ep + 1) + ep + 5;   
+ *     if (kof_find_str_at(target, prologue)) ...    
+ *
+ * _at compares; _in searches. They are separate because they cost differently - one
+ * comparison against a window - and a single call that did both would hide which
+ * one a signature is paying for.
+ *
+ * Neither is memoised and neither consults the presence set. Both are bounds
+ * checked by the host, so an offset past the end of the object is a zero answer and
+ * never a read outside it.
+ */
+#define kof_find_str_at(off, s)                                            \
+	((ctx)->content->find_str_at((ctx), KOF_PASTE(kof_strid_, s),      \
+				     (uint64_t)(off)))
+
+#define kof_find_str_in(off, len, s)                                       \
+	((ctx)->content->find_str_in((ctx), KOF_PASTE(kof_strid_, s),      \
+				     (uint64_t)(off), (uint64_t)(len)))
+
+/*
+ * READING SCALARS OUT OF THE OBJECT
+ *
+ *     if (kof_u16(0) == 0x5a4d) ...
+ *     uint32_t rva = kof_u32(ep + 1);
+ *
+ * The byte accessors, spelled the way they are used. Reaching through the vtable by
+ * hand - ctx->content->rd32(ctx, off) - names the context twice and the mechanism
+ * once, for a read that is the most ordinary thing a module does.
+ *
+ * Little endian, because every format these parse is. A big endian ELF is read
+ * through the parsed view, which normalised it already.
+ *
+ * An out of range read yields zero rather than faulting, so a module that must tell
+ * "the bytes there are zero" from "there are no bytes there" asks first:
+ *
+ *     if (kof_in_obj(off, 4) && kof_u32(off) == 0) ...
+ */
+#define kof_u8(off)  ((ctx)->content->rd8 ((ctx), (uint64_t)(off)))
+#define kof_u16(off) ((ctx)->content->rd16((ctx), (uint64_t)(off)))
+#define kof_u32(off) ((ctx)->content->rd32((ctx), (uint64_t)(off)))
+#define kof_u64(off) ((ctx)->content->rd64((ctx), (uint64_t)(off)))
+
+/*
+ * Are n bytes at off inside the object?
+ *
+ * Written as "n <= size - off" after establishing "off <= size", so no addition
+ * happens and nothing can wrap - both arguments may be values the file chose.
+ *
+ * A function under the macro rather than the comparison inline, because a module
+ * asking about a constant offset - kof_in_obj(0, 4), which is how a magic check
+ * reads - would otherwise trip -Wtype-limits on "0 <= unsigned". The signature
+ * build treats warnings as errors, so that would make the natural spelling
+ * unwritable.
+ */
+static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
+{
+	return off <= obj_size && n <= obj_size - off;
+}
+
+#define kof_in_obj(off, n)                                                 \
+	kof_range_in_obj((ctx)->obj_size, (uint64_t)(off), (uint64_t)(n))
+
+/* Compare bytes the module built at run time. kof_find_str_at is the one to reach
+ * for when the bytes are a declared pattern; this is for bytes that are not. */
+#define kof_memeq(off, p, n)                                               \
+	((ctx)->content->memeq((ctx), (uint64_t)(off), (p), (uint32_t)(n)))
+
+#define kof_csum(off, n)                                                   \
+	((ctx)->content->csum((ctx), (uint64_t)(off), (uint32_t)(n)))
+
 /* Non-zero if at least one of them is present. Stops at the first hit. */
 #define kof_find_str_any(rng, ...) (KOF_FS_FOLD(||, rng, __VA_ARGS__))
 
@@ -588,6 +688,41 @@ enum kof_str_word {
  * At most KOF_MAX_STR_PER_MODULE strings and KOF_MAX_RANGE_PER_MODULE ranges.
  */
 #define KOF_DEFINE_STR(name, lit, casing, word)
+
+/*
+ * Declare a byte pattern with wildcards, jumps and alternatives.
+ *
+ *     KOF_DEFINE_HEXSTR(call32,  "E8 ?? ?? ?? ?? 5D C3");
+ *     KOF_DEFINE_HEXSTR(nibble,  "E8 ?4 4?");
+ *     KOF_DEFINE_HEXSTR(spaced,  "6A 40 [4-6] 8D 4D");
+ *     KOF_DEFINE_HEXSTR(anyjmp,  "6A 40 [-] 8D 4D");
+ *     KOF_DEFINE_HEXSTR(opcodes, "( E8 | E9 ) ?? ?? ?? ??");
+ *
+ * The syntax is YARA's, because it is the one researchers already write and it
+ * covers the cases that come up: "??" and "?4" are masks, "[4-6]" is a gap, and a
+ * group is a set of alternatives. Used with kof_find_str and its _any / _all /
+ * _multi forms exactly like a literal - the call site does not know which kind it
+ * named, which is the point.
+ *
+ * Compiled at build time, so a malformed pattern is a build error naming a line
+ * rather than a search that silently matches nothing. What the compiler refuses:
+ *
+ *   a gap inside an alternative      an alternative has to have a length
+ *   a leading or trailing gap        that is not a pattern, it is a shorter pattern
+ *   no concrete byte anywhere        it would match everything
+ *   more parts than the caps allow   see hexprog.h; the bound is what keeps
+ *                                    matching a hostile object affordable
+ *
+ * Case and word options do not apply. Folding case on a byte that may be a wildcard
+ * means nothing, and a word boundary is a property of text.
+ *
+ * One thing worth knowing when writing them: the compiler searches for the longest
+ * run of concrete bytes, and the presence set - which rules a pattern out for an
+ * object without touching it - keys on four. A pattern whose longest run is shorter
+ * than that is searched on every object of its format. The compiler prints the run
+ * length for each pattern so this is visible at build time rather than in a profile.
+ */
+#define KOF_DEFINE_HEXSTR(name, hex)
 
 /*
  * Report a finding and stop.

@@ -10,7 +10,8 @@
  * matches and never reads outside the array.
  */
 
-#include "../kofmatchers/kofmatch.h"
+#include "kofmatch.h"
+#include "../kofdb/kofpack.h"   /* KOF_STR_* */
 
 #include <stdlib.h>
 #include <string.h>
@@ -314,6 +315,156 @@ static int gram_may_contain(const struct kof_gram *g, const uint8_t *b,
 	return 0;
 }
 
+/* ---- hex patterns --------------------------------------------------------- */
+
+/*
+ * Does one alternative match at `at`?
+ *
+ * The unmasked path is a memcmp the compiler vectorises and is the common case by a
+ * wide margin; the masked path only runs for a pattern that actually has wildcards.
+ */
+static int alt_at(kof_buf d, uint64_t at, const uint8_t *prog,
+		  const struct kof_hex_alt *a)
+{
+	const uint8_t *b = prog + a->data_off;
+
+	if (!kof_in_range(d, at, a->len))
+		return 0;
+	if (!(a->flags & KOF_HEX_ALT_MASKED))
+		return memcmp(d.p + at, b, a->len) == 0;
+	{
+		const uint8_t *msk = b + a->len;
+		uint16_t i;
+
+		for (i = 0; i < a->len; i++)
+			if (((d.p[at + i] ^ b[i]) & msk[i]) != 0)
+				return 0;
+		return 1;
+	}
+}
+
+/*
+ * Walk the steps forward from `start`, carrying the set of positions still in play.
+ *
+ * The set is what makes this bounded. Recursing per gap offset and per alternative
+ * would multiply the branching factor at every step; carrying positions and
+ * deduplicating them adds them instead, so the work is the sum over steps of
+ * (positions x gap span x alternatives) rather than the product. Two paths that
+ * arrive at the same offset become one, which is the whole trick.
+ *
+ * The set is kept sorted so the dedup is a comparison against the last write, and
+ * so a caller could ask where the match ended.
+ */
+static int hex_walk(kof_buf d, uint64_t start, const uint8_t *prog)
+{
+	const struct kof_hex_hdr *h = (const void *)prog;
+	const struct kof_hex_step *steps = (const void *)(prog + h->steps_off);
+	const struct kof_hex_alt *alts = (const void *)(prog + h->alts_off);
+	uint64_t cur[KOF_HEX_MAX_REACH], next[KOF_HEX_MAX_REACH];
+	uint32_t n_cur = 1, i;
+
+	cur[0] = start;
+
+	for (i = 0; i < h->n_steps; i++) {
+		const struct kof_hex_step *st = &steps[i];
+		uint32_t n_next = 0, k;
+
+		for (k = 0; k < n_cur; k++) {
+			uint32_t g;
+
+			for (g = st->gap_min; g <= st->gap_max; g++) {
+				uint64_t at = kof_sat_add(cur[k], g);
+				uint32_t j;
+
+				if (at >= d.n)
+					break;
+				for (j = 0; j < st->n_alts; j++) {
+					const struct kof_hex_alt *a =
+						&alts[st->alt_first + j];
+					uint64_t end;
+
+					if (!alt_at(d, at, prog, a))
+						continue;
+					end = at + a->len;
+					/* Sorted insert-at-end with a dedup against
+					 * the last write: positions are produced in
+					 * non-decreasing order within a step, so one
+					 * comparison is enough. */
+					if (n_next && next[n_next - 1] == end)
+						continue;
+					if (n_next >= KOF_HEX_MAX_REACH)
+						break;
+					next[n_next++] = end;
+				}
+			}
+		}
+		if (n_next == 0)
+			return 0;
+		memcpy(cur, next, n_next * sizeof cur[0]);
+		n_cur = n_next;
+	}
+	return 1;
+}
+
+/*
+ * Find a hex pattern in [off, off+len).
+ *
+ * The anchor is what makes this a search rather than a walk from every position:
+ * the compiler recorded the longest run of concrete bytes and how far into a match
+ * it sits, so find_lit locates candidates at memchr speed and the walk only runs
+ * where the run actually appeared.
+ */
+static int hex_search(struct kof_match_ctx *m, uint64_t off, uint64_t len,
+		      const uint8_t *prog, uint64_t *hit)
+{
+	const struct kof_hex_hdr *h = (const void *)prog;
+	const struct kof_hex_step *steps = (const void *)(prog + h->steps_off);
+	const struct kof_hex_alt *alts = (const void *)(prog + h->alts_off);
+	const struct kof_hex_alt *aa = &alts[steps[h->anchor_step].alt_first];
+	const uint8_t *run = prog + aa->data_off + h->anchor_in_alt;
+	uint64_t at = 0, base = off;
+
+	m->n_calls++;
+	len = kof_clip_len(m->data.n, off, len);
+	if (len < h->min_span)
+		return 0;
+	m->n_bytes_scanned += len;
+
+	for (;;) {
+		uint64_t q, d;
+
+		if (!find_lit(m->data.p + base, len, run, h->anchor_len, 0, &at))
+			return 0;
+		q = base + at;
+
+		/*
+		 * Where the match would have to begin for the run to land here.
+		 * A window rather than a point, because a gap or an alternation of
+		 * unequal lengths before the anchor makes the distance vary; it is
+		 * one wide for a pattern whose concrete bytes come first.
+		 */
+		for (d = h->anchor_before_min; d <= h->anchor_before_max; d++) {
+			uint64_t start;
+
+			if (q < d)
+				break;
+			start = q - d;
+			if (start < off)
+				break;
+			if (hex_walk(m->data, start, prog)) {
+				if (hit)
+					*hit = start;
+				return 1;
+			}
+		}
+
+		if (at + 1 >= len)
+			return 0;
+		base += at + 1;
+		len -= at + 1;
+	}
+}
+
 /* ---- searching ranges ----------------------------------------------------- */
 
 static int is_word_byte(uint8_t c)
@@ -322,32 +473,53 @@ static int is_word_byte(uint8_t c)
 	       (c >= '0' && c <= '9') || c == '_';
 }
 
+/*
+ * Search one range for a pattern of either kind.
+ *
+ * One function rather than two because the kinds differ only in how a candidate is
+ * found and verified; the walk over extents, the restart after a rejected hit and
+ * the word-boundary rule around it are the same question either way.
+ */
+static int match_one(struct kof_match_ctx *m, uint64_t base, uint64_t span,
+		     const uint8_t *bytes, uint16_t len, uint8_t kind,
+		     uint8_t flags)
+{
+	uint64_t from = 0, hit;
+
+	while (span > from) {
+		if (kind == KOF_STR_HEX) {
+			if (!hex_search(m, base + from, span - from, bytes, &hit))
+				return 0;
+			return 1;      /* hex patterns carry no word option */
+		}
+		if (!find_range(m, base + from, span - from, bytes, len,
+				(flags & KOF_STR_ICASE) != 0, &hit))
+			return 0;
+		if (!(flags & KOF_STR_FULLWORD))
+			return 1;
+		{
+			uint64_t end = hit + len;
+			int lok = (hit == base) ||
+				  !is_word_byte(m->data.p[hit - 1]);
+			int rok = (end >= base + span) ||
+				  !is_word_byte(m->data.p[end]);
+			if (lok && rok)
+				return 1;
+		}
+		from = (hit - base) + 1;
+	}
+	return 0;
+}
+
 static int match_ranges(struct kof_match_ctx *m, const struct kof_range *ext,
 			uint32_t next, const uint8_t *bytes, uint16_t len,
-			int icase, int fullword)
+			uint8_t kind, uint8_t flags)
 {
 	uint32_t i;
 
-	for (i = 0; i < next; i++) {
-		uint64_t base = ext[i].off, span = ext[i].len, from = 0, hit;
-
-		while (span > from &&
-		       find_range(m, base + from, span - from, bytes, len,
-				  icase, &hit)) {
-			if (!fullword)
-				return 1;
-			{
-				uint64_t end = hit + len;
-				int lok = (hit == base) ||
-					  !is_word_byte(m->data.p[hit - 1]);
-				int rok = (end >= base + span) ||
-					  !is_word_byte(m->data.p[end]);
-				if (lok && rok)
-					return 1;
-			}
-			from = (hit - base) + 1;
-		}
-	}
+	for (i = 0; i < next; i++)
+		if (match_one(m, ext[i].off, ext[i].len, bytes, len, kind, flags))
+			return 1;
 	return 0;
 }
 
@@ -371,9 +543,34 @@ void kof_match_state_free(struct kof_match_ctx *m)
 	m->memo_len = 0;
 }
 
+/*
+ * What the presence set should be asked about.
+ *
+ * A literal is keyed on its own first four bytes. A hex pattern is keyed on its
+ * anchor run, which is the only part of it that is concrete - and only if that run
+ * reaches four bytes, since the table holds four-byte windows. A shorter run means
+ * the filter cannot speak for this pattern and it is searched.
+ */
+static int gram_admits(const struct kof_gram *g, const uint8_t *bytes, uint16_t len,
+		       uint8_t kind, uint8_t flags)
+{
+	if (kind == KOF_STR_HEX) {
+		const struct kof_hex_hdr *h = (const void *)bytes;
+		const struct kof_hex_step *steps = (const void *)(bytes + h->steps_off);
+		const struct kof_hex_alt *alts = (const void *)(bytes + h->alts_off);
+		const struct kof_hex_alt *aa = &alts[steps[h->anchor_step].alt_first];
+
+		if (h->anchor_len < 4)
+			return 1;
+		return gram_may_contain(g, bytes + aa->data_off + h->anchor_in_alt,
+					(uint16_t)h->anchor_len, 0);
+	}
+	return gram_may_contain(g, bytes, len, (flags & KOF_STR_ICASE) != 0);
+}
+
 int kof_match_lookup(struct kof_match_ctx *m, uint32_t slot,
 		     const struct kof_range *ext, uint32_t next,
-		     const uint8_t *bytes, uint16_t len, int icase, int fullword,
+		     const uint8_t *bytes, uint16_t len, uint8_t kind, uint8_t flags,
 		     uint64_t *answered_without_scan)
 {
 	uint8_t *cell;
@@ -385,13 +582,63 @@ int kof_match_lookup(struct kof_match_ctx *m, uint32_t slot,
 	if (*cell != KOF_MEMO_UNKNOWN)
 		return *cell == KOF_MEMO_PRESENT;
 
-	if (!gram_may_contain(m->gram, bytes, len, icase)) {
+	if (!gram_admits(m->gram, bytes, len, kind, flags)) {
 		if (answered_without_scan)
 			(*answered_without_scan)++;
 		*cell = KOF_MEMO_ABSENT;
 		return 0;
 	}
-	found = match_ranges(m, ext, next, bytes, len, icase, fullword);
+	found = match_ranges(m, ext, next, bytes, len, kind, flags);
 	*cell = found ? KOF_MEMO_PRESENT : KOF_MEMO_ABSENT;
 	return found;
+}
+
+/*
+ * Compare at exactly one offset.
+ *
+ * The bound is checked against the shortest a match can be, not the longest: a hex
+ * pattern with a gap may match well inside its maximum span, and refusing on the
+ * maximum would silently drop matches near the end of an object. Everything past
+ * that point is bounds checked as it is read.
+ *
+ * No memo, no presence set. The offset is whatever the module computed, so there is
+ * no constant to key a memo on, and the presence set answers "is it anywhere in the
+ * object" - a question strictly weaker than the one being asked here, and no
+ * cheaper than the comparison itself.
+ */
+int kof_match_at(struct kof_match_ctx *m, uint64_t off,
+		 const uint8_t *bytes, uint16_t len, uint8_t kind, uint8_t flags)
+{
+	m->n_calls++;
+
+	if (kind == KOF_STR_HEX) {
+		const struct kof_hex_hdr *h = (const void *)bytes;
+
+		if (!kof_in_range(m->data, off, h->min_span))
+			return 0;
+		m->n_bytes_scanned += h->min_span;
+		return hex_walk(m->data, off, bytes);
+	}
+
+	if (!kof_in_range(m->data, off, len))
+		return 0;
+	m->n_bytes_scanned += len;
+	if (flags & KOF_STR_ICASE) {
+		uint16_t i;
+
+		for (i = 0; i < len; i++)
+			if (fold(m->data.p[off + i]) != fold(bytes[i]))
+				return 0;
+		return 1;
+	}
+	return memcmp(m->data.p + off, bytes, len) == 0;
+}
+
+int kof_match_in(struct kof_match_ctx *m, uint64_t off, uint64_t len,
+		 const uint8_t *bytes, uint16_t plen, uint8_t kind, uint8_t flags)
+{
+	len = kof_clip_len(m->data.n, off, len);
+	if (len == 0)
+		return 0;
+	return match_one(m, off, len, bytes, plen, kind, flags);
 }

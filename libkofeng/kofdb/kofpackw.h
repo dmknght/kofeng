@@ -32,11 +32,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Mirrors struct kof_pack_str: `kind` selects how `bytes` is read, and `flags`
+ * is KOF_STR_ICASE / KOF_STR_FULLWORD and applies to a literal only. */
 struct kof_pw_str {
 	const uint8_t *bytes;
 	uint16_t       len;
-	uint8_t        icase;
-	uint8_t        fullword;
+	uint8_t        kind;
+	uint8_t        flags;
 };
 
 struct kof_pw_name {

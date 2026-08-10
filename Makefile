@@ -48,6 +48,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofdb/kofdb.c \
            libkofeng/kofdb/kofpackw.c \
            libkofeng/kofmatchers/kofmatch.c \
+           libkofeng/kofmatchers/hexcomp.c \
            libkofeng/kofparsers/elf/elf_parse.c \
            libkofeng/kofparsers/pe/pe_parse.c \
            libkofeng/kofscanners/scan.c \
