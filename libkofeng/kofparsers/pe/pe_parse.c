@@ -56,11 +56,15 @@ static uint32_t arch_from_machine(uint16_t m)
 	case 0x01c2:
 	case 0x01c4: return KOF_ARCH_ARM;
 	case 0xaa64: return KOF_ARCH_ARM64;
+	case 0x5032: return KOF_ARCH_RISCV32;
 	case 0x5064: return KOF_ARCH_RISCV64;
+	/* Every MIPS machine PE ever named is 32 bit. */
 	case 0x0166:
 	case 0x0266:
 	case 0x0366:
 	case 0x0466: return KOF_ARCH_MIPS;
+	case 0x01f0:
+	case 0x01f2: return KOF_ARCH_PPC;
 	default:     return KOF_ARCH_OTHER;
 	}
 }

@@ -39,6 +39,7 @@
 #define KOF_LEVEL_SUSPECT 0
 #define KOF_LEVEL_INFECT  1
 
+
 /*
  * Findings are accumulated, not overwritten: two families can match one object, and
  * keeping only the last silently drops one. Over the cap they are counted, because a
@@ -48,8 +49,10 @@
 
 struct kof_finding {
 	uint32_t level;                  /* KOF_LEVEL_* */
-	/* <format>.<arch>.<family>, composed by the engine. The prefix is not
-	 * authored, so a module cannot claim a format it was not run against. */
+
+	/* <target>.<family.variant>, composed by the engine - for example
+	 * "ELF-x64.Mirai.Gen". The target is not authored, so a module cannot claim
+	 * a format it was not run against. */
 	char     name[224];
 };
 

@@ -68,6 +68,7 @@
 /* e_machine values worth normalising. Anything else becomes KOF_ARCH_OTHER. */
 #define EM_386		3
 #define EM_MIPS		8
+#define EM_PPC		20
 #define EM_PPC64	21
 #define EM_ARM		40
 #define EM_X86_64	62
@@ -96,16 +97,22 @@ static uint32_t perm_from_pflags(uint32_t f)
  * Normalise e_machine. Only the common tier uses this; a module that needs the
  * exact value reads e_machine from the ELF view, where the constant it compares
  * against is an ELF constant and therefore comparable.
+ *
+ * MIPS and RISC-V name one machine for both widths, so the class decides which it
+ * is. PowerPC names two. Getting the width from the class rather than defaulting
+ * to 64 is what makes an m32 object report m32 instead of being filed with m64 -
+ * and a precondition on architecture is only worth declaring if it is that exact.
  */
-static uint8_t arch_from_machine(uint16_t m)
+static uint8_t arch_from_machine(uint16_t m, int is64)
 {
 	switch (m) {
 	case EM_386:     return KOF_ARCH_X86;
 	case EM_X86_64:  return KOF_ARCH_X86_64;
 	case EM_ARM:     return KOF_ARCH_ARM;
 	case EM_AARCH64: return KOF_ARCH_ARM64;
-	case EM_RISCV:   return KOF_ARCH_RISCV64;
-	case EM_MIPS:    return KOF_ARCH_MIPS;
+	case EM_RISCV:   return is64 ? KOF_ARCH_RISCV64 : KOF_ARCH_RISCV32;
+	case EM_MIPS:    return is64 ? KOF_ARCH_MIPS64  : KOF_ARCH_MIPS;
+	case EM_PPC:     return KOF_ARCH_PPC;
 	case EM_PPC64:   return KOF_ARCH_PPC64;
 	default:         return KOF_ARCH_OTHER;
 	}
@@ -623,7 +630,7 @@ int kof_elf_parse(kof_buf file, struct kof_elf_info *info,
 		kof_rd_u16(file, 50, be, &info->shstrndx);
 	}
 
-	ctx->arch = arch_from_machine(info->e_machine);
+	ctx->arch = arch_from_machine(info->e_machine, is64);
 
 	/*
 	 * A zero entry point is only anomalous for ET_EXEC. Measured over

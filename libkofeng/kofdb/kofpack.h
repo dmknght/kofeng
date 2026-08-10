@@ -248,6 +248,18 @@ struct kof_pack_sec {
  */
 #define KOF_BLOB_MAX_CODE (4u * 1024u * 1024u)
 #define KOF_STR_MAX_LEN   512u
+
+/*
+ * A detection name, terminator included.
+ *
+ * One number because there were three: the compiler accepted 511 characters, the
+ * packer read the record with a 256 byte line buffer, and the engine stored 192.
+ * A name longer than the smallest of those was cut twice on the way through and
+ * nothing said so - an author wrote "Family.Variant" and the scanner reported
+ * "Family" with the variant gone. The build now refuses what will not fit rather
+ * than delivering something else.
+ */
+#define KOF_NAME_MAX_LEN  192u
 /* The hex program cap lives in hexprog.h with the rest of that encoding's bounds;
  * a reader that validates one needs that header anyway. */
 

@@ -100,11 +100,14 @@ enum kof_arch {
 	KOF_ARCH_ANY     = 0,  /* does not apply: script, text, bytecode */
 	KOF_ARCH_X86     = 1,
 	KOF_ARCH_X86_64  = 2,
-	KOF_ARCH_ARM     = 3,
+	KOF_ARCH_ARM     = 3,  /* 32 bit */
 	KOF_ARCH_ARM64   = 4,
 	KOF_ARCH_RISCV64 = 5,
-	KOF_ARCH_MIPS    = 6,
+	KOF_ARCH_MIPS    = 6,  /* 32 bit */
 	KOF_ARCH_PPC64   = 7,
+	KOF_ARCH_MIPS64  = 8,
+	KOF_ARCH_PPC     = 9,  /* 32 bit */
+	KOF_ARCH_RISCV32 = 10,
 	KOF_ARCH_OTHER   = 255 /* recognised format, architecture not in this list */
 };
 
@@ -130,16 +133,27 @@ static inline const char *kof_format_name(uint8_t fmt)
 	}
 }
 
+/*
+ * Short, and systematic: a letter for the family and the width.
+ *
+ * These end up in a finding, which is read in a log next to a path, so they are
+ * kept to the width of the thing they describe rather than spelled out. x86 and x64
+ * keep their conventional spellings because those are what everyone already reads;
+ * the rest follow the same shape so the set can be scanned at a glance.
+ */
 static inline const char *kof_arch_name(uint8_t arch)
 {
 	switch (arch) {
 	case KOF_ARCH_X86:     return "x86";
-	case KOF_ARCH_X86_64:  return "x86_64";
-	case KOF_ARCH_ARM:     return "arm";
-	case KOF_ARCH_ARM64:   return "arm64";
-	case KOF_ARCH_RISCV64: return "riscv64";
-	case KOF_ARCH_MIPS:    return "mips";
-	case KOF_ARCH_PPC64:   return "ppc64";
+	case KOF_ARCH_X86_64:  return "x64";
+	case KOF_ARCH_ARM:     return "a32";
+	case KOF_ARCH_ARM64:   return "a64";
+	case KOF_ARCH_RISCV32: return "r32";
+	case KOF_ARCH_RISCV64: return "r64";
+	case KOF_ARCH_MIPS:    return "m32";
+	case KOF_ARCH_MIPS64:  return "m64";
+	case KOF_ARCH_PPC:     return "p32";
+	case KOF_ARCH_PPC64:   return "p64";
 	case KOF_ARCH_ANY:     return "any";
 	default:               return "other";
 	}

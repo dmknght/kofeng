@@ -188,21 +188,40 @@ static int prefilter(const struct kof_module *m, const struct kof_obj_ctx *ctx,
 /* ---- naming a finding ------------------------------------------------------ */
 
 /*
- * <format>.<arch>.<authored family>.
+ * <target>.<what the author wrote>
  *
- * The prefix is composed rather than authored: a module cannot claim a format it was
- * not run against, and one authored name covers every architecture. The operating
- * system is absent on purpose - ELF does not say it, so "Linux" would be a guess
- * wearing the clothes of a fact.
+ *     ELF-x64.Mirai.Gen
+ *     PE-x86.UPX.Gen
+ *     Script.Nemucod.Gen
+ *
+ * The target is composed and not authored: it is what the engine established by
+ * parsing, so a module cannot claim a format it was not run against or an
+ * architecture the object does not have. What is left for the author is the family
+ * and the variant, which is the part that needs a person.
+ *
+ * Format and architecture are one token joined by a dash rather than two parts.
+ * They answer one question - what does this run on - and splitting them made every
+ * name carry a separator that never told anyone anything.
+ *
+ * The operating system is absent on purpose. ELF does not say it, so "Linux" would
+ * be a guess wearing the clothes of a fact, which is also why this reads "ELF-x64"
+ * and not the "Linux/x64" other engines write.
+ *
+ * An object with no architecture - a script, or one nothing identified - gets the
+ * format alone. A "-any" suffix would be a field describing nothing.
  */
 static void finding_str(const struct kof_scanner *sc,
 			const struct kof_obj_ctx *ctx,
 			const struct kof_module *m, char *out, size_t cap)
 {
 	const char *nm = kof_db_name(sc->eng, m, sc->rep_name_id);
+	const char *fmt = kof_format_name(ctx->format);
 
-	snprintf(out, cap, "%s.%s.%s", kof_format_name(ctx->format),
-		 kof_arch_name(ctx->arch), nm ? nm : "unknown");
+	if (ctx->arch == KOF_ARCH_ANY || ctx->format == KOF_FMT_UNKNOWN)
+		snprintf(out, cap, "%s.%s", fmt, nm ? nm : "unknown");
+	else
+		snprintf(out, cap, "%s-%s.%s", fmt, kof_arch_name(ctx->arch),
+			 nm ? nm : "unknown");
 }
 
 /* ---- identify -------------------------------------------------------------- */
@@ -283,6 +302,19 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 
 	memset(&ctx, 0, sizeof ctx);
 	kof_mod_attach(&ctx, sc);
+
+	/*
+	 * How big the object is, before anything tries to identify it.
+	 *
+	 * It is a property of the bytes, not of the parse, and leaving it to the
+	 * collectors meant an object nothing recognised reported a size of zero.
+	 * Everything downstream reads that as an empty file: KOF_SCAN_ALL resolves
+	 * to no extents, so regions_present drops it, so the prefilter skips every
+	 * module that names it - which is precisely the modules written to run on
+	 * anything, the ones with no format header at all. They could not match an
+	 * unidentified object, ever, and nothing said so.
+	 */
+	ctx.obj_size = buf.n;
 
 	kof_match_begin(&sc->m, buf);
 

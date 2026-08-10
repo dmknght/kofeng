@@ -52,7 +52,7 @@ struct kof_str_ent {
 
 struct kof_name_ent {
 	uint32_t id;
-	char     text[192];
+	char     text[KOF_NAME_MAX_LEN];
 };
 
 /*

@@ -155,6 +155,7 @@ int main(int argc, char **argv)
 	const struct kof_stats *st;
 	struct timespec t0, t1;
 	double secs, mb;
+	uint64_t unreadable = 0;
 	int i, rc;
 
 	memset(&r, 0, sizeof r);
@@ -241,9 +242,16 @@ int main(int argc, char **argv)
 		printf("time      %.2f s (%.0f MB/s)\n", secs, mb / secs);
 	else
 		printf("time      %.3f s\n", secs);
-	if (st && st->unreadable)
+	/* Copied out while the scanner is alive. kof_scanner_stats hands back a
+	 * pointer INTO the scanner, and the exit decision below runs after the
+	 * scanner has been freed - reading it there was a use-after-free, reached
+	 * on exactly the scans that found nothing, which is why every run that
+	 * detected something hid it. */
+	if (st)
+		unreadable = st->unreadable;
+	if (unreadable)
 		printf("skipped   %llu object(s) that could not be read\n",
-		       (unsigned long long)st->unreadable);
+		       (unsigned long long)unreadable);
 	if (r.dropped)
 		printf("note      %llu finding(s) over the per-object cap\n",
 		       (unsigned long long)r.dropped);
@@ -268,7 +276,7 @@ int main(int argc, char **argv)
 	 */
 	if (r.infected || r.suspect)
 		return 1;
-	if (rc < 0 || (st && st->unreadable))
+	if (rc < 0 || unreadable)
 		return 2;
 	return 0;
 }

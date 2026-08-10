@@ -612,9 +612,21 @@ static void scan_line(char *at, size_t line_len, int lineno)
 			return;
 		}
 		names[nnames].line = lineno;
-		if (read_name(p, lineno, names[nnames].text,
-			      sizeof names[nnames].text))
-			nnames++;
+		if (!read_name(p, lineno, names[nnames].text,
+			       sizeof names[nnames].text))
+			return;
+		/* The engine's slot is the smallest thing on the way through, so
+		 * it is the limit. Refused here, where the message can name the
+		 * line, rather than cut silently in two places downstream. */
+		if (strlen(names[nnames].text) >= KOF_NAME_MAX_LEN) {
+			fprintf(stderr, "%s:%d: error: detection name is %zu "
+				"characters; the engine stores %u\n", src_name,
+				lineno, strlen(names[nnames].text),
+				KOF_NAME_MAX_LEN - 1u);
+			errors++;
+			return;
+		}
+		nnames++;
 		return;
 	}
 
@@ -1108,7 +1120,9 @@ out:
 /* id<TAB>text per line. Absent is allowed: a module may report nothing by name. */
 static int names_load(struct artefact *a)
 {
-	char *path = sibling(a->stem, ".names"), line[256];
+	/* Sized from the name limit plus the id column, so a legal name can never be
+	 * split across two reads - which is how ".Variant" used to disappear. */
+	char *path = sibling(a->stem, ".names"), line[KOF_NAME_MAX_LEN + 64];
 	FILE *f;
 	size_t text_cap = 0, text_len = 0;
 	uint32_t cap = 0, i;
