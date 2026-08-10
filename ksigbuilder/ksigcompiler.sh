@@ -27,7 +27,7 @@
 #   emit      link to raw bytes, so the database stores code and nothing else
 #
 # Intermediates go to a temporary directory that is removed on exit, and only
-# the packaged blob lands in build/sig. That is not tidiness: while developing
+# the packaged blob lands in the artefact directory. That is not tidiness: while developing
 # this, a stray .elf sitting next to the .blob got handed to the loader, which
 # happily copied an ELF header into executable memory and jumped to it. An
 # artifact that cannot be picked up by accident is worth more than a note in a
@@ -48,10 +48,14 @@ root=$(cd -- "$here/.." && pwd)
 incdir=${KOF_INCLUDE:-$root/build/sdk/include}
 
 name=$(basename "$src" .c)
-# Where the artefacts land. Overridable so a driver can give each run its own
-# work directory: without that, every caller shares one output directory and two
-# builds running at once overwrite each other's files.
-outdir=${KOF_OUTDIR:-$root/build/sig}
+# Where the artefacts land.
+#
+# Every driver sets this, and the default is deliberately a scratch directory that
+# no packer reads. ksigbuilder packs a DIRECTORY rather than a list of files, so a
+# shared default is a way for a signature compiled by hand to end up in the next
+# release database without anyone choosing that. The Makefile derives one directory
+# per signature set; a hand run gets its own.
+outdir=${KOF_OUTDIR:-$root/build/scratch/sig}
 blob=$outdir/$name.blob
 namefile=$outdir/$name.names
 metafile=$outdir/$name.meta

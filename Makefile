@@ -135,26 +135,42 @@ $(BUILD)/ksigbuilder: ksigbuilder/ksigbuilder.c $(LIB) $(SDK_HDR)
 # depend on another, xargs already knows how to run N at a time, and a --jobs
 # flag in a C program would be a second implementation of one shell word.
 
-# signatures/ holds detections meant to run on somebody's machine; signature/ holds
-# the ones that exist to exercise the engine. The default is the real set, because a
-# default pointing at the test set is a default that ships wrong exactly once.
+# signatures/ holds detections meant to run on somebody's machine, and it is the
+# only thing `make db` builds. Anything else - the engine's own test signatures in
+# signature/, or a researcher's working set anywhere - is built by naming its
+# directory:
 #
-#   make db                     the real signatures
-#   make db SIGDIR=signature    the test set
+#   make db                          the real signatures  -> build/signatures/db
+#   make db SIGDIR=signature         the engine test set  -> build/signature/db
+#   make db SIGDIR=~/work/mysigs     anywhere else        -> build/mysigs/db
+#
+# The work and output directories are DERIVED from SIGDIR rather than shared, and
+# the artefact directory is emptied before each build. Both matter for one reason:
+# ksigbuilder packs a DIRECTORY, not a list of files, so anything left in it from a
+# previous run is in the database. Sharing one directory meant a test signature
+# built five minutes ago was still in the next release build, and a detection
+# deleted from the source kept shipping because its blob was never removed. Neither
+# shows up as a failure - the build succeeds and the database is quietly wrong.
 SIGDIR    ?= signatures
+SIGSET    := $(notdir $(patsubst %/,%,$(SIGDIR)))
 SIGS      := $(wildcard $(SIGDIR)/*.c)
 JOBS      ?= 8
-ARTEFACTS ?= $(BUILD)/sig
-DB        ?= $(BUILD)/db
+ARTEFACTS ?= $(BUILD)/$(SIGSET)/sig
+DB        ?= $(BUILD)/$(SIGSET)/db
 
 sigs: $(BUILD)/ksigbuilder $(SDK_HDR)
+	@test -n "$(SIGS)" || { echo "make: no signature sources in $(SIGDIR)" >&2; \
+		exit 2; }
+	@rm -rf $(ARTEFACTS)
 	@mkdir -p $(ARTEFACTS)
 	@echo "$(SIGS)" | tr ' ' '\n' | KOF_OUTDIR=$(abspath $(ARTEFACTS)) \
 		xargs -P $(JOBS) -n 1 ksigbuilder/ksigcompiler.sh >/dev/null
 
 db: sigs $(BUILD)/ksigbuilder
+	@rm -rf $(DB)
 	@mkdir -p $(DB)
 	@$(BUILD)/ksigbuilder $(ARTEFACTS) $(DB)
+	@echo "   scan with: $(BUILD)/kofscanner --db $(DB) --scan-files <path>"
 
 # ------------------------------------------------------------------- testing
 #
