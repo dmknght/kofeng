@@ -76,10 +76,11 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofdb/kofpackw.c \
            libkofeng/kofmatchers/kofmatch.c \
            libkofeng/kofmatchers/hexcomp.c \
-           libkofeng/kofparsers/elf/elf_parse.c \
-           libkofeng/kofparsers/pe/pe_parse.c \
+           libkofeng/kofparsers/binaries/elf_parse.c \
+           libkofeng/kofparsers/binaries/pe_parse.c \
            libkofeng/kofscanners/scan.c \
-           libkofeng/kofscanners/objctx.c
+           libkofeng/kofscanners/objctx.c \
+           libkofeng/kofscanners/objsrc.c
 
 LIB_OBJ := $(patsubst libkofeng/%.c,$(BUILD)/lib_%.o,$(LIB_SRC))
 LIB     := $(SDK)/lib/libkofeng.a

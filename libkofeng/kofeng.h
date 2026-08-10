@@ -60,6 +60,18 @@ struct kof_result {
 	struct kof_finding v[KOF_MAX_FINDINGS];
 	uint32_t n;
 	uint32_t dropped;
+
+	/*
+	 * The engine stopped before it had finished with this object, because a
+	 * limit ran out - almost always the produced-bytes budget on something
+	 * that expands far beyond its own size.
+	 *
+	 * A separate field and not a level, because it is not a finding: the
+	 * verdict is "do not know", and it has to be distinguishable from "clean".
+	 * Reporting an exhausted budget as clean is what turns a decompression
+	 * bomb from a nuisance into a way of not being scanned.
+	 */
+	uint32_t incomplete;
 };
 
 /*
@@ -86,6 +98,16 @@ struct kof_stats {
 	uint64_t gram_answers;           /* searches answered without scanning */
 
 	uint64_t searches, bytes_searched;
+
+	/*
+	 * The most produced data alive at once, over the whole scan.
+	 *
+	 * The one number that says whether the memory ceiling actually held. Peak
+	 * rather than current, because the interesting question about a bomb is not
+	 * where it ended up but how high it got, and reported rather than merely
+	 * enforced: a limit nothing can observe is a limit nobody can show works.
+	 */
+	uint64_t peak_resident;
 };
 
 typedef struct kof_engine  kof_engine;
@@ -185,6 +207,41 @@ struct kof_scan_option {
 	 * about a sample that changed its name after a database update.
 	 */
 	int      all_matches;
+
+	/*
+	 * What producing children is allowed to cost.
+	 *
+	 * Two different limits, because they answer two different questions and
+	 * conflating them was a mistake worth recording. One bounds MEMORY AT ANY
+	 * INSTANT; the other bounds TOTAL WORK over the whole tree. A single number
+	 * cannot do both: made small enough to protect memory it refuses ordinary
+	 * archives, and made large enough for those it stops protecting memory.
+	 *
+	 * max_resident_bytes is the hard one, and the reason this engine exists in
+	 * the shape it does. Objects are mapped, not read, so a 12GB scan holds a
+	 * few megabytes; producing children is the only path that allocates, and it
+	 * must not throw that away. Default 128MB. Counted over everything produced
+	 * and still alive - the object being emitted plus every child not yet
+	 * scanned - and released as each child is finished with.
+	 *
+	 * It is counted even for output written to a temporary file. That looks
+	 * over-cautious and is not: a temporary directory is very often tmpfs, where
+	 * the "spill to disk" is still memory and is additionally capped by a mount
+	 * option this engine cannot see.
+	 *
+	 * max_produced_bytes is the bomb defence: total bytes a whole tree may
+	 * yield, not per child. Per-child limits are how a container full of entries
+	 * that are each individually reasonable adds up to something that is not.
+	 * A single layer of DEFLATE reaches about 1000:1, so a bomb needs no nesting
+	 * and a depth limit never sees it. Zero means max(64MB, object size x 64).
+	 *
+	 * A child that is a window into its parent costs neither: nothing was
+	 * produced and nothing is resident that was not already. Those are bounded
+	 * by max_children and max_depth.
+	 */
+	uint64_t max_resident_bytes;
+	uint64_t max_produced_bytes;
+	uint32_t max_children;     /* 0 -> a built-in ceiling applies */
 };
 
 /*

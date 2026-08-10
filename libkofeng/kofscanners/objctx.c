@@ -22,7 +22,9 @@
 
 #include "scan.h"
 
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static struct kof_match_ctx *mc(const struct kof_obj_ctx *ctx)
 {
@@ -165,9 +167,256 @@ static int c_find_str_in(const struct kof_obj_ctx *ctx, uint32_t str_id,
 			    e->kind, e->flags);
 }
 
-static const struct kof_content kof_mod_vtable = {
+/* ---- producing child objects ------------------------------------------------ */
+
+/*
+ * Where memory stops being the cheaper place to keep the answer.
+ *
+ * Below this a child is a malloc and a memcpy; above it the bytes go to an unnamed
+ * temporary file and are mapped back, so a scan faults in only the pages it reads.
+ * It is not a limit - the limits are the two budgets - only a change of storage.
+ */
+#define SINK_SPILL (1u << 20)
+
+/*
+ * Cut a produced object here and start another.
+ *
+ * A decompressed stream can be arbitrarily long, and one enormous child would be
+ * one enormous allocation no matter what the totals allow. Chunking turns it into a
+ * series of objects that are each finished with and released before the next
+ * matters, which is what keeps the resident ceiling reachable at all.
+ *
+ * The cost is a pattern lying across a cut, which is the same trade the region
+ * machinery already makes at an extent boundary. Chunks big enough that it is rare,
+ * small enough that several fit under the ceiling.
+ */
+#define SINK_CHUNK (32u << 20)
+
+/*
+ * The largest single emit accepted.
+ *
+ * A decompressor works from lengths written in the file it is decompressing, and a
+ * wrong one is the normal hostile case rather than a bug: an entry that declares a
+ * gigabyte and holds a kilobyte. The host cannot see how big the module's own
+ * buffer is, so it cannot check that the pointer is good for the length - but it
+ * can refuse a length no honest caller has, which turns "read a gigabyte from a
+ * kilobyte buffer" into a refusal at the first call.
+ *
+ * A module with more than this to hand over calls again. That is not a burden: a
+ * decompressor already works a window at a time.
+ */
+#define EMIT_MAX (1u << 20)
+
+static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
+{
+	if (!kid)
+		return 0;
+	if (sc->kids_left == 0) {
+		/* Refused, and recorded: a container that yields more children than
+		 * the caller allows has not been fully examined, and saying so is
+		 * the difference between "nothing else here" and "stopped looking". */
+		sc->exhausted = 1;
+		kof_src_unref(kid);
+		return 0;
+	}
+	if (sc->n_kids == sc->cap_kids) {
+		uint32_t nc = sc->cap_kids ? sc->cap_kids * 2 : 8;
+		struct kof_objsrc **nv = realloc(sc->kids, nc * sizeof *nv);
+
+		if (!nv) {
+			kof_src_unref(kid);
+			return 0;
+		}
+		sc->kids = nv;
+		sc->cap_kids = nc;
+	}
+	sc->kids[sc->n_kids++] = kid;
+	sc->kids_left--;
+	return 1;
+}
+
+void kof_scan_release(struct kof_scanner *sc, uint64_t produced)
+{
+	sc->resident = produced < sc->resident ? sc->resident - produced : 0;
+}
+
+/*
+ * A child that is already a contiguous range of this object.
+ *
+ * No copy and no budget: nothing was produced, the parent's mapping is simply seen
+ * through a different offset. What bounds it is the child count and the depth,
+ * because a window can still be a way of pointing an object at itself.
+ */
+static int c_window(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t len)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc->cur_src || sc->exhausted)
+		return 0;
+	return kid_push(sc, kof_src_window(sc->cur_src, off, len));
+}
+
+/* Move whatever is in memory out to the descriptor, and keep writing there. */
+static int sink_spill(struct kof_scanner *sc)
+{
+	if (sc->sink_fd < 0) {
+		sc->sink_fd = kof_src_tmpfile();
+		if (sc->sink_fd < 0)
+			return 0;
+	}
+	if (sc->sink_len) {
+		if (write(sc->sink_fd, sc->sink_mem, sc->sink_len) !=
+		    (ssize_t)sc->sink_len)
+			return 0;
+		sc->sink_spilled += sc->sink_len;
+		sc->sink_len = 0;
+	}
+	return 1;
+}
+
+/*
+ * Bytes that did not exist before.
+ *
+ * The budget is charged HERE, at the write, and that placement is the whole point.
+ * Checking a size after decompressing means the memory has already been spent, and
+ * a declared size cannot be checked instead because the file declares it. A module
+ * has no way to produce output except through this call, so it has no way to
+ * produce output without spending budget - the same reason the bounds check on
+ * find_str_at lives in the host.
+ */
+static int c_child(const struct kof_obj_ctx *ctx);
+
+static int c_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc->cur_src || sc->exhausted)
+		return 0;
+	if (n == 0)
+		return 1;
+	/* A length out of a file, refused before it is used to read anything. */
+	if (n > EMIT_MAX) {
+		sc->exhausted = 1;
+		return 0;
+	}
+	/* Total work over the whole tree: the bomb defence. Cuts rather than
+	 * discards, for the same reason the memory ceiling does - what has already
+	 * been decompressed is a real prefix and is worth scanning. */
+	if (n > sc->budget) {
+		c_child(ctx);
+		sc->exhausted = 1;
+		return 0;
+	}
+	/*
+	 * Memory right now: the hard one. Everything produced and still alive,
+	 * including what has been written to a temporary file, because that file is
+	 * very often on tmpfs and is memory there.
+	 *
+	 * Hitting it CUTS rather than discards. What has been decompressed so far is
+	 * a real prefix of a real object and is worth scanning; throwing it away to
+	 * refuse the next byte would mean a container slightly over the ceiling
+	 * yielded nothing at all, which is the worst of both - the work was done and
+	 * the answer was dropped. So the part in hand is closed as a child, and the
+	 * object is marked as not fully examined.
+	 *
+	 * Residency does not fall here. These children are still pending, and only
+	 * come off the count once the walk has scanned and released each of them -
+	 * by which time this module has returned. That is the whole reason a cut is
+	 * the right answer and "wait for room" is not.
+	 */
+	if (sc->resident + n > sc->resident_max) {
+		c_child(ctx);
+		sc->exhausted = 1;
+		return 0;
+	}
+	sc->budget -= n;
+	sc->resident += n;
+	if (sc->resident > sc->st.peak_resident)
+		sc->st.peak_resident = sc->resident;
+
+	if (sc->sink_len + n > SINK_SPILL && !sink_spill(sc)) {
+		sc->exhausted = 1;
+		return 0;
+	}
+	if (sc->sink_fd >= 0) {
+		if (write(sc->sink_fd, bytes, n) != (ssize_t)n) {
+			/* A short write is almost always a full tmpfs. Recorded, not
+			 * swallowed: silently keeping a truncated object would report
+			 * a prefix of a file as if it were the file. */
+			sc->exhausted = 1;
+			return 0;
+		}
+		sc->sink_spilled += n;
+	} else {
+		if (sc->sink_len + n > sc->sink_cap) {
+			size_t nc = sc->sink_cap ? sc->sink_cap : 4096;
+			uint8_t *nb;
+
+			while (nc < sc->sink_len + n)
+				nc *= 2;
+			nb = realloc(sc->sink_mem, nc);
+			if (!nb) {
+				sc->exhausted = 1;
+				return 0;
+			}
+			sc->sink_mem = nb;
+			sc->sink_cap = nc;
+		}
+		memcpy(sc->sink_mem + sc->sink_len, bytes, n);
+		sc->sink_len += n;
+	}
+
+	/*
+	 * Cut here rather than letting one object grow without end. The module is
+	 * not told and does not need to be: it goes on emitting, and what it is
+	 * emitting into simply becomes a new object.
+	 */
+	if (sc->sink_len + sc->sink_spilled >= sc->chunk)
+		return c_child(ctx);
+	return 1;
+}
+
+/* Close the object being emitted and start the next. */
+static int c_child(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	struct kof_objsrc *kid;
+
+	if (!sc->cur_src)
+		return 0;
+	if (sc->sink_fd >= 0) {
+		if (!sink_spill(sc))
+			return 0;
+		kid = kof_src_fd(sc->sink_fd, sc->sink_spilled);
+		sc->sink_fd = -1;
+		sc->sink_spilled = 0;
+	} else {
+		if (sc->sink_len == 0)
+			return 0;      /* nothing was emitted; not a child */
+		kid = kof_src_heap(sc->sink_mem, sc->sink_len);
+		sc->sink_mem = NULL;
+		sc->sink_cap = 0;
+	}
+	sc->sink_len = 0;
+	return kid_push(sc, kid);
+}
+
+/*
+ * Two vtables, differing only in whether the producer entries are there.
+ *
+ * A detector gets NULLs, so kof_emit and kof_child_window answer zero for it, and
+ * the rule that only an unpacker produces children is carried by the pointers
+ * rather than by a check somewhere that could be missed. Same shape as
+ * resolve_scan being NULL when nothing identified the object.
+ */
+static const struct kof_content kof_detect_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
-	c_find_str_in, c_csum
+	c_find_str_in, c_csum, NULL, NULL, NULL
+};
+
+static const struct kof_content kof_unpack_vtable = {
+	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
+	c_find_str_in, c_csum, c_window, c_emit, c_child
 };
 
 /*
@@ -178,7 +427,77 @@ static const struct kof_content kof_mod_vtable = {
  */
 void kof_mod_attach(struct kof_obj_ctx *ctx, struct kof_scanner *sc)
 {
-	ctx->content = &kof_mod_vtable;
+	ctx->content = &kof_detect_vtable;
 	ctx->report  = c_report;
 	ctx->priv    = sc;
+}
+
+/* Swap in the producing surface for the length of one unpacker. */
+void kof_mod_unpack_mode(struct kof_obj_ctx *ctx, int on)
+{
+	ctx->content = on ? &kof_unpack_vtable : &kof_detect_vtable;
+}
+
+/*
+ * The budget for one top level object, inherited by everything below it.
+ *
+ * Derived from the object rather than fixed: a ratio alone refuses a small archive
+ * that legitimately expands, and a constant alone gives a tiny file the same
+ * allowance as a large one. The floor and the ratio each cover the other's case.
+ *
+ * One budget for the whole tree. Per-child limits are how a container full of
+ * entries that are each individually reasonable adds up to something that is not.
+ */
+void kof_scan_budget(struct kof_scanner *sc, uint64_t obj_size,
+		     const struct kof_scan_option *opt)
+{
+	uint64_t want = opt->max_produced_bytes;
+
+	if (want == 0) {
+		/* A ratio, floored. Sixty-four rather than the thousand a single
+		 * DEFLATE layer can reach: this is the total a tree may do, and an
+		 * allowance that large on a large input is no allowance at all. */
+		want = obj_size > (UINT64_MAX / 64u) ? UINT64_MAX : obj_size * 64u;
+		if (want < (64ull << 20))
+			want = 64ull << 20;
+	}
+	sc->budget = want;
+	sc->kids_left = opt->max_children ? opt->max_children : 4096u;
+	sc->resident = 0;
+	sc->resident_max = opt->max_resident_bytes ? opt->max_resident_bytes
+						   : (128ull << 20);
+	/*
+	 * Half the ceiling, at most.
+	 *
+	 * Not the whole of it: while a child is being unpacked, that child is itself
+	 * resident, so a chunk the size of the ceiling leaves no room to produce
+	 * anything and the tree stops one level down. Half means the object in hand
+	 * and the object being built both fit, which is what lets a stream be cut,
+	 * scanned, released and continued.
+	 */
+	sc->chunk = sc->resident_max / 2 < SINK_CHUNK ? sc->resident_max / 2
+						      : SINK_CHUNK;
+	if (sc->chunk == 0)
+		sc->chunk = 1;
+	sc->exhausted = 0;
+}
+
+void kof_scan_kids_reset(struct kof_scanner *sc)
+{
+	uint32_t i;
+
+	for (i = 0; i < sc->n_kids; i++)
+		kof_src_unref(sc->kids[i]);
+	sc->n_kids = 0;
+
+	/* Whatever a module emitted and never closed is not an object, and the
+	 * memory it was holding stops being resident. */
+	kof_scan_release(sc, sc->sink_len + sc->sink_spilled);
+	free(sc->sink_mem);
+	sc->sink_mem = NULL;
+	sc->sink_len = sc->sink_cap = 0;
+	if (sc->sink_fd >= 0)
+		close(sc->sink_fd);
+	sc->sink_fd = -1;
+	sc->sink_spilled = 0;
 }

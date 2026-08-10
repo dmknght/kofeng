@@ -44,6 +44,7 @@ struct kof_scanner *kof_scan_new(const struct kof_engine *eng)
 	if (!sc)
 		return NULL;
 	sc->eng = eng;
+	sc->sink_fd = -1;   /* 0 is stdin; calloc would have made this a live fd */
 
 	/* The matcher owns the search state: the presence set and the memo are how a
 	 * search is answered, not how a scan is bookkept. */
@@ -63,6 +64,8 @@ void kof_scan_free(struct kof_scanner *sc)
 	if (!sc)
 		return;
 	kof_match_state_free(&sc->m);
+	kof_scan_kids_reset(sc);
+	free(sc->kids);
 	for (i = 0; i < KOF_FMT_COUNT; i++)
 		free(sc->view[i]);
 	free(sc);
@@ -294,6 +297,78 @@ static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ct
 
 /* ---- the routine ---------------------------------------------------------- */
 
+/*
+ * Run the unpackers, once the detectors have had their say.
+ *
+ * After, not before, and that ordering is a decision rather than a convenience. An
+ * archive whose entry names carry "../" is an exploit against whatever will open
+ * it, and it has already been named by the time this runs - so unless the caller
+ * asked for everything, there is nothing to gain from opening it and a budget to
+ * lose. The same policy that already decides whether to keep running detectors
+ * decides whether to open the container.
+ */
+static int unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+			 const struct kof_scan_option *opt,
+			 const struct kof_result *res)
+{
+	uint32_t i;
+	int applies = 0;
+
+	if (sc->eng->n_unp == 0)
+		return 0;
+	if (res->n && !opt->all_matches)
+		return 0;
+
+	/*
+	 * A fresh attempt for every object.
+	 *
+	 * Hitting a limit while unpacking one container does not mean the tree is
+	 * finished: the memory ceiling is about what is alive at this instant, and
+	 * by the time a child is being unpacked its siblings have been scanned and
+	 * released, so there is room again. What does carry across the whole tree
+	 * is `budget`, which is never reset - that is the bomb defence, and it is
+	 * the one that has to be cumulative.
+	 *
+	 * Sticky exhaustion looked harmless and quietly halved the engine: the
+	 * first container to reach the ceiling stopped every container after it.
+	 */
+	sc->exhausted = 0;
+
+	kof_mod_unpack_mode(ctx, 1);
+	for (i = 0; i < sc->eng->n_unp; i++) {
+		const struct kof_module *m = &sc->eng->unp[i];
+
+		/* The same preconditions a detector gets: an unpacker for PE has no
+		 * business being entered for an ELF. The region test is skipped -
+		 * an unpacker names no region to search. */
+		if (!(m->target_mask & (1u << ctx->format)))
+			continue;
+		if (ctx->obj_size < m->size_min)
+			continue;
+		if (m->arch_mask &&
+		    (ctx->arch >= 32 || !(m->arch_mask & (1u << ctx->arch))))
+			continue;
+
+		applies = 1;
+		if (sc->exhausted)
+			break;          /* nothing left to spend on this tree */
+
+		sc->cur_mod = m;
+		m->fn(ctx);
+		sc->cur_mod = NULL;
+	}
+	kof_mod_unpack_mode(ctx, 0);
+
+	/*
+	 * "Not fully examined" means both halves: something wanted to open this
+	 * object, and the budget was gone. The budget is shared by the whole tree,
+	 * so once it runs out every later object inherits the flag - and reporting
+	 * that on an object no unpacker would have touched anyway is noise that
+	 * makes the real case harder to see.
+	 */
+	return applies && sc->exhausted;
+}
+
 static void scan_object(struct kof_scanner *sc, kof_buf buf,
 			const struct kof_scan_option *opt, struct kof_result *out)
 {
@@ -365,54 +440,8 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	sc->st.searches       += sc->m.n_calls;
 	sc->st.bytes_searched += sc->m.n_bytes_scanned;
 	sc->st.gram_bytes     += sc->m.n_bytes_indexed;
-}
 
-/*
- * Map a file read only.
- *
- * mmap rather than read: only the pages a scan actually touches are faulted in, so
- * scoping a search to a region cuts I/O and not merely CPU. It is also what makes an
- * embedded object free later - a child at an offset inside its parent is a window into
- * the same mapping, needing no copy.
- */
-struct mapping {
-	void    *map;
-	uint64_t len;
-};
-
-static int map_file(struct mapping *s, const char *path)
-{
-	struct stat sb;
-	int fd;
-
-	s->map = NULL;
-	s->len = 0;
-
-	fd = open(path, O_RDONLY);
-	if (fd < 0)
-		return KOF_ERR_OPEN;
-	if (fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode)) {
-		close(fd);
-		return KOF_ERR_OPEN;
-	}
-	if (sb.st_size > 0) {
-		s->map = mmap(NULL, (size_t)sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-		if (s->map == MAP_FAILED) {
-			s->map = NULL;
-			close(fd);
-			return KOF_ERR_READ;
-		}
-	}
-	close(fd);
-	s->len = (uint64_t)sb.st_size;
-	return 0;
-}
-
-static void unmap_file(struct mapping *s)
-{
-	if (s->map)
-		munmap(s->map, (size_t)s->len);
-	s->map = NULL;
+	out->incomplete = unpack_object(sc, &ctx, opt, out) ? 1u : 0u;
 }
 
 /*
@@ -492,29 +521,121 @@ static int path_reserve(struct walk *w, size_t need)
 	return 1;
 }
 
+/*
+ * Scan one object and everything it turns out to contain.
+ *
+ * Iterative, with its own stack, for the same reason the directory walk is: the
+ * depth of an object tree is chosen by whoever built the file, and putting it on
+ * the C stack makes the failure mode a crash inside a library. It also keeps
+ * exactly one parsed view of each format in use at a time - a child parsed while
+ * its parent's view was still live would overwrite it, since there is one view per
+ * format per scanner.
+ *
+ * A child holds a reference to whatever its bytes live in, so the parent's mapping
+ * survives exactly as long as something still points into it and no longer.
+ */
+struct layer {
+	struct kof_objsrc *src;
+	char              *name;
+	uint32_t           depth;
+};
+
+static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
+{
+	struct layer *stack = NULL;
+	uint32_t n = 0, cap = 0;
+
+	/* The root is not copied into the stack; it is scanned first and its
+	 * children seed it. */
+	struct kof_objsrc *src = kof_src_ref(root);
+	char *name = kof_strdup_n(path, strlen(path));
+	uint32_t depth = 0;
+
+	kof_scan_budget(w->sc, kof_src_buf(root).n, w->opt);
+
+	for (;;) {
+		struct kof_result res;
+		uint32_t i;
+
+		res.n = 0;
+		res.dropped = 0;
+		res.incomplete = 0;
+
+		w->sc->cur_src = src;
+		kof_scan_kids_reset(w->sc);
+		scan_object(w->sc, kof_src_buf(src), w->opt, &res);
+		w->sc->cur_src = NULL;
+
+		w->objects++;
+		if (w->cb && name && w->cb(name, &res, w->user) != 0)
+			w->aborted = 1;
+
+		/* Take the children before anything else can reset them. */
+		if (!w->aborted && !w->out_of_memory &&
+		    (!w->opt->max_depth || depth + 1 <= w->opt->max_depth)) {
+			for (i = 0; i < w->sc->n_kids; i++) {
+				char kid[512];
+
+				if (n == cap) {
+					uint32_t nc = cap ? cap * 2 : 16;
+					struct layer *nv = realloc(stack,
+								   nc * sizeof *nv);
+					if (!nv) {
+						w->out_of_memory = 1;
+						break;
+					}
+					stack = nv;
+					cap = nc;
+				}
+				snprintf(kid, sizeof kid, "%s//%u",
+					 name ? name : "?", i);
+				stack[n].src = kof_src_ref(w->sc->kids[i]);
+				stack[n].name = kof_strdup_n(kid, strlen(kid));
+				stack[n].depth = depth + 1;
+				n++;
+			}
+		}
+		kof_scan_kids_reset(w->sc);
+
+		/*
+		 * This object is finished with, so whatever it cost to produce stops
+		 * counting against the memory ceiling. Released here and not in
+		 * kof_src_unref, because the ceiling is the scanner's and a source
+		 * knows nothing about scanners - and because it must be given back
+		 * exactly once, at the point the object stops being needed.
+		 */
+		kof_scan_release(w->sc, kof_src_produced(src));
+		kof_src_unref(src);
+		free(name);
+
+		if (w->aborted || n == 0)
+			break;
+		n--;
+		src = stack[n].src;
+		name = stack[n].name;
+		depth = stack[n].depth;
+	}
+
+	while (n > 0) {
+		n--;
+		kof_src_unref(stack[n].src);
+		free(stack[n].name);
+	}
+	free(stack);
+}
+
 static void scan_file(struct walk *w, const char *path)
 {
-	struct kof_result res;
-	struct mapping src;
+	struct kof_objsrc *src;
+	int err = 0;
 
-	res.n = 0;
-	res.dropped = 0;
-
-	if (map_file(&src, path) != 0) {
+	src = kof_src_file(path, &err);
+	if (!src) {
 		w->sc->st.unreadable++;
 		return;
 	}
-
-	/*
-	 * One layer. When there are archive children this becomes the same stack the
-	 * directory walk uses: scan the layer, then push each child a producer yields.
-	 */
-	scan_object(w->sc, kof_buf_make(src.map, src.len), w->opt, &res);
-	unmap_file(&src);
-
-	w->objects++;
-	if (w->cb && w->cb(path, &res, w->user) != 0)
-		w->aborted = 1;
+	scan_tree(w, src, path);
+	kof_src_unref(src);
 }
 
 static void read_dir(struct walk *w, const char *dir, uint32_t depth)

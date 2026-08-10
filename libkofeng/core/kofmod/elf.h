@@ -16,7 +16,7 @@
  * Values are normalised: every field is 64 bit regardless of ELF class, and in
  * host byte order. ELF32 and big endian objects are widened and swapped on read
  * by two small readers in the parser, so all logic above this line is written
- * once. Parsing lives in libkofeng/kofparsers/elf.
+ * once. Parsing lives in libkofeng/kofparsers/binaries.
  *
  * Layout rule: append only. New fields go at the end, existing fields never
  * move or change meaning.

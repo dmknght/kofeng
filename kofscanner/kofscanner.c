@@ -29,7 +29,7 @@
 struct run {
 	/* No object counter: the engine already keeps one, and a second copy is a
 	 * second thing that can disagree with it. */
-	uint64_t infected, suspect, dropped;
+	uint64_t infected, suspect, dropped, incomplete;
 	int verbose;
 	int stats;
 };
@@ -52,8 +52,19 @@ static int on_object(const char *name, const struct kof_result *res, void *user)
 	uint32_t i;
 	int worst = -1;
 
+	/*
+	 * An object the engine could not finish with is not clean, and is not a
+	 * finding either. Reported separately, because the two lead to different
+	 * decisions and collapsing them is how a decompression bomb stops being
+	 * scanned and starts being trusted.
+	 */
+	if (res->incomplete) {
+		r->incomplete++;
+		printf("%-10s %s: limit reached; the object was not fully examined\n",
+		       "PARTIAL", name);
+	}
 	if (res->n == 0) {
-		if (r->verbose)
+		if (r->verbose && !res->incomplete)
 			printf("%-10s %s\n", "OK", name);
 		return 0;
 	}
@@ -139,6 +150,7 @@ static void usage(const char *argv0)
 		"                  an ancestor turns a walk into a loop)\n"
 		"  --all-matches   keep scanning an object after the first finding\n"
 		"  --stats         report what the prefilter and the presence set earned\n"
+		"  --max-produced N  bytes an object may yield before the scan gives up\n"
 		"  -v              also report objects that came back clean\n"
 		"\n"
 		"exit: 0 nothing found, 1 something found, 2 could not scan\n",
@@ -176,6 +188,8 @@ int main(int argc, char **argv)
 			opt.follow_symlinks = 1;
 		else if (strcmp(argv[i], "--all-matches") == 0)
 			opt.all_matches = 1;
+		else if (strcmp(argv[i], "--max-produced") == 0 && i + 1 < argc)
+			opt.max_produced_bytes = strtoull(argv[++i], NULL, 10);
 		else if (strcmp(argv[i], "--stats") == 0)
 			r.stats = 1;
 		else if (strcmp(argv[i], "-v") == 0)
@@ -235,6 +249,9 @@ int main(int argc, char **argv)
 	       st ? (unsigned long long)st->objects : 0ull, mb);
 	printf("infected  %llu object(s)\n", (unsigned long long)r.infected);
 	printf("suspected %llu object(s)\n", (unsigned long long)r.suspect);
+	if (r.incomplete)
+		printf("partial   %llu object(s) the engine could not finish\n",
+		       (unsigned long long)r.incomplete);
 	/* Throughput beside the time it came from: on its own, a duration says nothing
 	 * without the size of what was scanned, and both are already here. Guarded
 	 * because a scan can finish inside the clock's resolution. */
@@ -276,7 +293,10 @@ int main(int argc, char **argv)
 	 */
 	if (r.infected || r.suspect)
 		return 1;
-	if (rc < 0 || unreadable)
+	/* "Could not finish" belongs with "could not look", not with "found
+	 * nothing": a caller that treats an exhausted budget as a clean scan has
+	 * been evaded rather than reassured. */
+	if (rc < 0 || unreadable || r.incomplete)
 		return 2;
 	return 0;
 }

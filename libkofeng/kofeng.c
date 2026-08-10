@@ -27,7 +27,9 @@ void kof_engine_close(kof_engine *e)
 
 uint32_t kof_engine_records(const kof_engine *e)
 {
-	return e ? e->n_mods : 0;
+	/* Both kinds: an unpacker is a signature somebody wrote and shipped, and a
+	 * count that omitted them would understate the database. */
+	return e ? e->n_mods + e->n_unp : 0;
 }
 
 uint32_t kof_engine_db_version(const kof_engine *e)

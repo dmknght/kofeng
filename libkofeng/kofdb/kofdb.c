@@ -204,12 +204,12 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 	if (h->machine != KOF_PACK_MACH_HOST)
 		REFUSE("built for machine %u, this is %u", h->machine,
 		       (unsigned)KOF_PACK_MACH_HOST);
-	/* The kind is the ABI. kof_scan_fn is the only entry point this engine
-	 * knows how to call, so a pack of unpackers is refused here rather than
-	 * entered through the wrong signature - which is the point of one kind per
-	 * pack. */
-	if (h->kind != KOF_PACK_DETECT)
-		REFUSE("holds kind %u; this engine runs detectors only", h->kind);
+	/* The kind decides which list the modules go into and which point they are
+	 * entered from, so a kind the engine has no list for is refused rather
+	 * than guessed at. */
+	if (h->kind != KOF_PACK_DETECT && h->kind != KOF_PACK_UNPACK)
+		REFUSE("holds kind %u, which this engine has no dispatch for",
+		       h->kind);
 	/* Before any offset inside is believed: truncation is caught here. */
 	if (h->file_len != len)
 		REFUSE("declares %llu bytes, the file has %llu",
@@ -479,6 +479,7 @@ static void absorb(struct kof_engine *e, const struct mapped *mp,
 
 	uint32_t str0 = e->n_str, rng0 = e->n_rng, name0 = e->n_name;
 	uint32_t i;
+	int unpack = (h->kind == KOF_PACK_UNPACK);
 
 	memcpy(e->code + code_at, base + h->sec[KOF_SEC_CODE].off,
 	       (size_t)h->sec[KOF_SEC_CODE].len);
@@ -505,7 +506,8 @@ static void absorb(struct kof_engine *e, const struct mapped *mp,
 	}
 
 	for (i = 0; i < h->n_mods; i++) {
-		struct kof_module *m = &e->mods[e->n_mods++];
+		struct kof_module *m = unpack ? &e->unp[e->n_unp++]
+					     : &e->mods[e->n_mods++];
 
 		/* Entry offset is zero within each blob; the compiler asserts it,
 		 * so the blob's place in the arena is the entry point. */
@@ -526,7 +528,11 @@ static void absorb(struct kof_engine *e, const struct mapped *mp,
 		m->memo_base = e->memo_size;
 		e->memo_size += m->n_str * m->n_rng;
 
-		e->scan_mask |= m->scan_mask;
+		/* Only a detector's regions go into the union the scanner resolves.
+		 * An unpacker runs after the searching is done, so a region it
+		 * names must not make every object pay for resolving it. */
+		if (!unpack)
+			e->scan_mask |= m->scan_mask;
 	}
 }
 
@@ -633,12 +639,14 @@ struct kof_engine *kof_db_load(const char *path)
 	if (!e)
 		goto out;
 	e->mods     = calloc(n_mods ? n_mods : 1, sizeof *e->mods);
+	e->unp      = calloc(n_mods ? n_mods : 1, sizeof *e->unp);
 	e->str_tab  = calloc(n_str  ? n_str  : 1, sizeof *e->str_tab);
 	e->rng_tab  = calloc(n_rng  ? n_rng  : 1, sizeof *e->rng_tab);
 	e->name_tab = calloc(n_name ? n_name : 1, sizeof *e->name_tab);
 	e->str_pool = calloc(spool ? (size_t)spool : 1, 1);
 	e->str_pool_len = (uint32_t)spool;
-	if (!e->mods || !e->str_tab || !e->rng_tab || !e->name_tab || !e->str_pool ||
+	if (!e->mods || !e->unp || !e->str_tab || !e->rng_tab || !e->name_tab ||
+	    !e->str_pool ||
 	    !arena_open(e, (size_t)code)) {
 		kof_db_free(e);
 		e = NULL;
@@ -680,6 +688,7 @@ void kof_db_free(struct kof_engine *e)
 	if (!e)
 		return;
 	free(e->mods);
+	free(e->unp);
 	free(e->str_tab);
 	free(e->rng_tab);
 	free(e->name_tab);

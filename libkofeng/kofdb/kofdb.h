@@ -27,6 +27,8 @@
 #include "../core/kofcore.h"   /* kof_strdup */
 #include "kofpack.h"       /* KOF_STR_MAX_LEN, KOF_BLOB_MAX_CODE */
 
+/* Both entry points have the same signature; which one a module exported is what
+ * its pack's kind records, and the engine keeps the two in separate lists. */
 typedef void (*kof_scan_fn)(const struct kof_obj_ctx *);
 
 /*
@@ -107,8 +109,20 @@ struct kof_engine {
 	uint8_t *code;        /* arena base, mapped read + execute */
 	size_t   code_cap;
 
+	/*
+	 * Detectors and unpackers, in separate arrays.
+	 *
+	 * Not one array with a kind field: the scan loop walks every detector for
+	 * every object, and the unpack decision walks every unpacker once the
+	 * object has a verdict. Mixed, each loop would step over records it must
+	 * then reject - the same argument kofpack.h makes for one kind per pack,
+	 * applied to the loaded form.
+	 */
 	struct kof_module   *mods;
 	uint32_t             n_mods;
+
+	struct kof_module   *unp;
+	uint32_t             n_unp;
 
 	struct kof_str_ent  *str_tab;
 	uint32_t             n_str;

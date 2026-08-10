@@ -269,6 +269,35 @@ struct kof_content {
 			   uint64_t off, uint64_t len);
 
 	uint32_t (*csum)(const struct kof_obj_ctx *, uint64_t off, uint32_t len);
+
+	/*
+	 * PRODUCING CHILD OBJECTS - unpack modules only.
+	 *
+	 * Both are NULL for a detector, the same way resolve_scan is NULL when
+	 * nothing identified the object. A detect module that calls one gets
+	 * nothing rather than a special case somewhere in the host, and the rule
+	 * that only an unpacker produces is a property of the pointers rather than
+	 * a check that could be forgotten.
+	 *
+	 * window() is the cheap one: a child that is already a contiguous range of
+	 * this object - an overlay, a stored archive entry - costs no copy and no
+	 * memory, because it is the parent's mapping seen through a different
+	 * offset. It spends no byte budget, since nothing was produced; depth and
+	 * the child count are what bound it.
+	 *
+	 * emit() is for bytes that did not exist before: decompressed output.
+	 * It returns zero once the budget is gone, and a module must stop when it
+	 * does. The budget is the host's and is checked here, at the write, rather
+	 * than after a buffer has already been filled - by then the memory has been
+	 * spent, which is the whole failure being prevented. Whether the output
+	 * ends up in memory or in an unnamed temporary file is decided here too,
+	 * and a module cannot tell.
+	 *
+	 * child() closes the object being emitted and starts the next.
+	 */
+	int (*window)(const struct kof_obj_ctx *, uint64_t off, uint64_t len);
+	int (*emit)(const struct kof_obj_ctx *, const void *bytes, uint32_t n);
+	int (*child)(const struct kof_obj_ctx *);
 };
 
 /*
@@ -352,6 +381,21 @@ struct kof_obj_ctx {
 void kof_scan(const struct kof_obj_ctx *ctx);
 
 /*
+ * The other entry point: yield the objects inside this one.
+ *
+ * A module exports exactly one of kof_scan and kof_unpack, and which one it is
+ * decides the kind of the pack it is built into - the build derives that from the
+ * exported symbol rather than from a declaration, because a declaration can
+ * disagree with the code and an exported symbol cannot.
+ *
+ * The two are dispatched from different points and never see each other's records:
+ * detectors run while an object is being scanned, unpackers afterwards, once the
+ * engine has a verdict on the container itself. That ordering is what lets an
+ * archive already identified as an exploit be left unopened.
+ */
+void kof_unpack(const struct kof_obj_ctx *ctx);
+
+/*
  * SEARCHING FOR DECLARED STRINGS
  *
  *     if (kof_find_str(loaded, busybox)) ...
@@ -418,6 +462,23 @@ void kof_scan(const struct kof_obj_ctx *ctx);
  * than one that fails to link.
  */
 #define KOF_DEFINE_SCAN void kof_scan(const struct kof_obj_ctx *ctx)
+
+/*
+ * Define an unpacker.
+ *
+ *     KOF_DEFINE_UNPACK
+ *     {
+ *             const struct kof_pe_info *pe = kof_pe(ctx);
+ *
+ *             if (pe->overlay_len)
+ *                     kof_child_window(pe->overlay_off, pe->overlay_len);
+ *     }
+ *
+ * Same shape as KOF_DEFINE_SCAN and the same reason: it is the only place the
+ * entry symbol is spelled, so a misspelling is a link error rather than a module
+ * that packs as the wrong kind.
+ */
+#define KOF_DEFINE_UNPACK void kof_unpack(const struct kof_obj_ctx *ctx)
 
 /*
  * One search, normalised to 0 or 1.
@@ -562,6 +623,39 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 
 #define kof_csum(off, n)                                                   \
 	((ctx)->content->csum((ctx), (uint64_t)(off), (uint32_t)(n)))
+
+/*
+ * YIELDING CHILD OBJECTS
+ *
+ *     kof_child_window(off, len)     a range of this object, no copy
+ *     kof_emit(bytes, n)             bytes that did not exist before
+ *     kof_child()                    close this child, start the next
+ *
+ * Every one returns zero when the engine will take no more - the budget is gone,
+ * or the tree is as deep or as wide as it is allowed to get. A module must stop
+ * when it sees that, and looping regardless costs nothing but achieves nothing:
+ * the host has already stopped accepting.
+ *
+ * A decompressor therefore looks like this, and cannot be written to allocate
+ * first and check afterwards:
+ *
+ *     while (more_input) {
+ *             n = inflate_some(buf, sizeof buf);
+ *             if (!kof_emit(buf, n))
+ *                     return;              // budget gone; the scan says so
+ *     }
+ *     kof_child();
+ */
+#define kof_child_window(off, len)                                         \
+	((ctx)->content->window ?                                          \
+	 (ctx)->content->window((ctx), (uint64_t)(off), (uint64_t)(len)) : 0)
+
+#define kof_emit(bytes, n)                                                 \
+	((ctx)->content->emit ?                                            \
+	 (ctx)->content->emit((ctx), (bytes), (uint32_t)(n)) : 0)
+
+#define kof_child()                                                        \
+	((ctx)->content->child ? (ctx)->content->child((ctx)) : 0)
 
 /* Non-zero if at least one of them is present. Stops at the first hit. */
 #define kof_find_str_any(rng, ...) (KOF_FS_FOLD(||, rng, __VA_ARGS__))

@@ -17,8 +17,9 @@
 #include "../kofeng.h"
 #include "../kofdb/kofdb.h"
 #include "../kofmatchers/kofmatch.h"
-#include "../kofparsers/elf/elf_parse.h"
-#include "../kofparsers/pe/pe_parse.h"
+#include "../kofparsers/binaries/elf_parse.h"
+#include "../kofparsers/binaries/pe_parse.h"
+#include "objsrc.h"
 
 /*
  * Everything mutable, one per thread.
@@ -56,8 +57,64 @@ struct kof_scanner {
 	uint32_t rep_level, rep_name_id;
 	int      rep_valid;
 
+	/*
+	 * PRODUCING CHILDREN
+	 *
+	 * Set only while an unpacker runs. `cur_src` is the object it is unpacking,
+	 * which a window child has to reference so the parent's mapping outlives
+	 * it; `kids` collects what it produced, and the caller drains that once the
+	 * module has returned.
+	 *
+	 * Collected rather than scanned as they arrive: a child cannot be scanned
+	 * while its parent's parsed view is live, because there is one view per
+	 * format per scanner and the child's parse would overwrite the parent's.
+	 * Draining afterwards keeps exactly one view of each format in use and
+	 * keeps the object tree off the C stack.
+	 */
+	struct kof_objsrc  *cur_src;
+	struct kof_objsrc **kids;
+	uint32_t            n_kids, cap_kids;
+
+	/* The object being emitted, before it becomes a child. Heap while it is
+	 * small, an unnamed temporary file once it is not - see objsrc.h. */
+	uint8_t  *sink_mem;
+	size_t    sink_len, sink_cap;
+	int       sink_fd;
+	uint64_t  sink_spilled;   /* bytes already written to sink_fd */
+
+	/*
+	 * What is left of the produced-bytes budget for this top level object, and
+	 * whether it ran out. Charged across the whole tree, not per child.
+	 */
+	uint64_t budget;        /* total bytes this tree may still produce */
+	uint32_t kids_left;
+
+	/*
+	 * Produced bytes alive right now: the object being emitted, plus every
+	 * child that has been produced and not yet finished with. This is the
+	 * number the 128MB ceiling is about, and the only one that bounds memory -
+	 * `budget` bounds work over time and would allow any amount of it at once.
+	 */
+	uint64_t resident, resident_max;
+
+	/* Where a produced object is cut and the next one begun. Never above
+	 * resident_max, or the cut could not be reached. */
+	uint64_t chunk;
+
+	int      exhausted;
+
 	struct kof_stats st;
 };
+
+/* Give a top level object its budget. Children inherit what is left. */
+void kof_scan_budget(struct kof_scanner *, uint64_t obj_size,
+		     const struct kof_scan_option *);
+
+/* Release anything a module left half-produced, and hand back what it finished. */
+void kof_scan_kids_reset(struct kof_scanner *);
+
+/* A produced child has been finished with: its bytes stop counting as resident. */
+void kof_scan_release(struct kof_scanner *, uint64_t produced);
 
 struct kof_scanner *kof_scan_new(const struct kof_engine *);
 void                 kof_scan_free(struct kof_scanner *);
@@ -71,6 +128,9 @@ const struct kof_stats *kof_scan_stats(const struct kof_scanner *);
  * checks, and nothing else in the tree lets module code near memory.
  */
 void kof_mod_attach(struct kof_obj_ctx *, struct kof_scanner *);
+
+/* Swap the producing surface in for the length of one unpacker, and out again. */
+void kof_mod_unpack_mode(struct kof_obj_ctx *, int on);
 
 /* Turn a named range into extents. objctx.c needs it; the parse is what knows. */
 uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *, uint32_t scan_mask,

@@ -86,8 +86,8 @@
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 
-#include "../libkofeng/kofparsers/elf/elf_parse.h"
-#include "../libkofeng/kofparsers/pe/pe_parse.h"
+#include "../libkofeng/kofparsers/binaries/elf_parse.h"
+#include "../libkofeng/kofparsers/binaries/pe_parse.h"
 
 /*
  * What one format offers a tool: how to recognise it, how to parse it, how big

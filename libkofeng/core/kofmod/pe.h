@@ -9,7 +9,7 @@
  *
  * Values are normalised: every field is 64 bit whether the image is PE32 or
  * PE32+, and in host byte order. All logic above this line is written once.
- * Parsing lives in libkofeng/kofparsers/pe.
+ * Parsing lives in libkofeng/kofparsers/binaries.
  *
  * Layout rule: append only. New fields go at the end, existing fields never move
  * or change meaning.
