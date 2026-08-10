@@ -214,6 +214,8 @@ static const struct macro macros[] = {
  * Picking a literal by scanning for the first quote was wrong in the worst way: a
  * call like kof_find_str(rgn_sec_named(ctx, ".comment"), "GCC: (GNU)") compiled and
  * searched for ".comment". No error, just a signature looking for the wrong bytes.
+ * That spelling is gone, but the hazard is not: any argument before the literal may
+ * itself contain quotes.
  *
  * So the argument list is walked properly: balance parentheses from the opening one,
  * split on commas at depth 1. Strings are skipped while balancing, since a pattern is
@@ -488,16 +490,16 @@ static int read_name(const char *p, int line, char *out, size_t cap)
 	const char *q;
 	size_t n = 0;
 
-	/* Argument 2 of KOF_MATCH(ctx, "name", LEVEL), located the same way as a
-	 * pattern rather than by scanning for a quote: the level argument is a macro
-	 * and could contain one. */
-	q = nth_arg(p, 2, line);
+	/* Argument 1 of KOF_MATCH("name", LEVEL), located the same way as a pattern
+	 * rather than by scanning for a quote: the level argument is a macro and
+	 * could contain one. */
+	q = nth_arg(p, 1, line);
 	if (!q)
 		return 0;
 	while (*q == ' ' || *q == '\t')
 		q++;
 	if (*q != '"') {
-		err(line, "second argument of KOF_MATCH must be a name literal");
+		err(line, "first argument of KOF_MATCH must be a name literal");
 		return 0;
 	}
 	q++;

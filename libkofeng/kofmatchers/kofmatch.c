@@ -161,25 +161,19 @@ static int find_lit(const uint8_t *hay, uint64_t hlen,
 }
 
 /*
- * Search a literal in a byte range of the object.
+ * Find a literal in [off, off+len), clamped to the object.
  *
- * The host side entry point, and now the one that matters: strings are declared and
- * the host owns the search, so there is no compiled array to walk. It clamps the
- * range and defers to find_lit, so every caller gets the same bounds handling rather
- * than repeating it.
+ * Kept apart from match_ranges because the range walk and the single-range search
+ * are different jobs, and because clamping in one place is what stops every caller
+ * repeating it.
  *
  * A len of 0 means the range is not present in this object and there is nothing to
  * search - not "search everything", which would turn an absent region into a scan of
  * the whole file.
  */
-/*
- * Find a literal in [off, off+len). Internal: kof_match_str is what callers use, and
- * it is the one that also honours the word option. Kept separate because the range
- * walk and the single-range search are different jobs.
- */
-static uint64_t find_range(struct kof_match_ctx *m, uint64_t off, uint64_t len,
-			const uint8_t *bytes, uint32_t nbytes, int nocase,
-			uint64_t *hit)
+static int find_range(struct kof_match_ctx *m, uint64_t off, uint64_t len,
+		      const uint8_t *bytes, uint32_t nbytes, int nocase,
+		      uint64_t *hit)
 {
 	uint64_t at = 0;
 
@@ -339,7 +333,7 @@ static int match_ranges(struct kof_match_ctx *m, const struct kof_range *ext,
 
 		while (span > from &&
 		       find_range(m, base + from, span - from, bytes, len,
-				      icase, &hit)) {
+				  icase, &hit)) {
 			if (!fullword)
 				return 1;
 			{

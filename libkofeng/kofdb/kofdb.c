@@ -270,12 +270,12 @@ static int arena_open(struct kof_engine *e, size_t want)
 /* ---- collecting packs -------------------------------------------------------- */
 
 /* Collect *.ksig from a directory so a whole database can be named at once. */
-static char **collect_packs(const char *dir, uint32_t *out_n)
+static const char **collect_packs(const char *dir, uint32_t *out_n)
 {
 	static const char ext[] = ".ksig";
 	DIR *d = opendir(dir);
 	struct dirent *de;
-	char **v = NULL;
+	const char **v = NULL;
 	uint32_t n = 0, cap = 0;
 
 	*out_n = 0;
@@ -290,7 +290,7 @@ static char **collect_packs(const char *dir, uint32_t *out_n)
 			continue;
 		if (n == cap) {
 			uint32_t nc = cap ? cap * 2 : 16;
-			char **nv = realloc(v, nc * sizeof *nv);
+			const char **nv = realloc(v, nc * sizeof *nv);
 			if (!nv)
 				break;
 			v = nv;
@@ -403,9 +403,10 @@ struct kof_engine *kof_db_load(const char *path)
 	struct kof_engine *e = NULL;
 	struct mapped *mp = NULL;
 	struct stat sb;
-	char **paths = NULL, *single[1];
+	const char **paths = NULL;
+	const char *single[1];
 	uint32_t n_paths = 0, n_ok = 0, i;
-	uint64_t n_mods = 0, n_str = 0, n_rng = 0, n_name = 0, code = 0;
+	uint64_t n_mods = 0, n_str = 0, n_rng = 0, n_name = 0, code = 0, memo = 0;
 	size_t at = 0;
 	int owned = 0;
 
@@ -421,7 +422,7 @@ struct kof_engine *kof_db_load(const char *path)
 			return NULL;
 		}
 	} else {
-		single[0] = (char *)(uintptr_t)path;
+		single[0] = path;
 		paths = single;
 		n_paths = 1;
 	}
@@ -449,6 +450,7 @@ struct kof_engine *kof_db_load(const char *path)
 		n_str  += h->n_str;
 		n_rng  += h->n_rng;
 		n_name += h->n_names;
+		memo   += h->memo_slots;
 		/* Each pack's blobs keep the offsets its own header gives them, so
 		 * its code section is placed whole and aligned. */
 		code = (code + KOF_PACK_BLOB_ALIGN - 1) / KOF_PACK_BLOB_ALIGN
@@ -458,8 +460,17 @@ struct kof_engine *kof_db_load(const char *path)
 	}
 	if (n_ok == 0)
 		goto out;
+	/*
+	 * In 64 bits, then refused if a total does not fit the engine's uint32.
+	 *
+	 * Not defensive politeness: every one of these is an index into a table
+	 * allocated from it. A wrapped memo total in particular allocates a memo
+	 * smaller than the slots the modules address, and the matcher's bounds check
+	 * turns that into every search past the wrap answering "absent" - a database
+	 * that loads, scans, and quietly detects nothing.
+	 */
 	if (n_mods > 0xffffffffu || n_str > 0xffffffffu ||
-	    n_rng > 0xffffffffu || n_name > 0xffffffffu) {
+	    n_rng > 0xffffffffu || n_name > 0xffffffffu || memo > 0xffffffffu) {
 		fprintf(stderr, "kofdb: %s: more entries than an index can hold\n",
 			path);
 		goto out;
@@ -500,7 +511,7 @@ out:
 	free(mp);
 	if (owned) {
 		for (i = 0; i < n_paths; i++)
-			free(paths[i]);
+			free((void *)(uintptr_t)paths[i]);
 		free(paths);
 	}
 	return e;

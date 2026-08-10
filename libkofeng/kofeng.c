@@ -25,14 +25,19 @@ void kof_engine_close(kof_engine *e)
 	kof_db_free(e);
 }
 
-uint32_t kof_engine_modules(const kof_engine *e)
+uint32_t kof_engine_records(const kof_engine *e)
 {
 	return e ? e->n_mods : 0;
 }
 
-uint32_t kof_engine_strings(const kof_engine *e)
+uint32_t kof_engine_db_version(const kof_engine *e)
 {
-	return e ? e->n_str : 0;
+	/* Not read back out of the engine: a pack whose version differs from this one
+	 * never became part of it, so the loaded version and this constant are the
+	 * same number by construction. Taking the argument anyway keeps the call
+	 * shaped like the rest, and keeps the answer meaningless without a database -
+	 * which is what it is. */
+	return e ? KOF_PACK_VERSION : 0;
 }
 
 kof_scanner *kof_scanner_new(const kof_engine *e)

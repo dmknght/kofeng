@@ -15,24 +15,27 @@ KOF_DEFINE_STR(mirai_2,  "31mip:%s",  KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(mirai_3,  "oanacroane",  KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 
 
-void kof_scan(const struct kof_obj_ctx *ctx)
+KOF_DEFINE_SCAN
 {
 	/*
-	 * Two markers, and the second is what makes the first worth acting on. The
-	 * busybox path alone appears in a great deal of legitimate embedded
-	 * software, so on its own it is a family of false positives rather than a
-	 * detection.
+	 * A threshold, written as one. Each call answers how many of the listed
+	 * strings are present - distinct strings, not occurrences, so a file that
+	 * repeats one marker forty times still counts one.
 	 *
-	 * Neither call holds pattern bytes: the host owns the literals and answers
-	 * these, so both markers can be looked for in one pass over the object -
-	 * together with every other module's markers.
+	 * None of the calls holds pattern bytes: the host owns the literals and
+	 * answers these, so every marker here is looked for in one pass over the
+	 * object, together with every other module's.
 	 */
-	int threshold_mirai_str = kof_find_str(ctx, mirai_1, scan_range_data) + kof_find_str(ctx, mirai_2, scan_range_data) + kof_find_str(ctx, mirai_3, scan_range_data);
-	if (threshold_mirai_str> 0) {
-		KOF_MATCH(ctx, "Mirai.Generic", KOF_LVL_INFECT);
-	} // else
-	int threshold_common_str = kof_find_str(ctx, common_botnet_1, scan_range_data) + kof_find_str(ctx, common_botnet_2, scan_range_data) + kof_find_str(ctx, common_botnet_3, scan_range_data) + kof_find_str(ctx, common_botnet_4, scan_range_data);
-	if (threshold_common_str > 0) {
-		KOF_MATCH(ctx, "Botnet.IRCCom", KOF_LVL_SUSPECT);
-	}
+	if (kof_find_str_any(scan_range_data, mirai_1, mirai_2, mirai_3))
+		KOF_MATCH("Mirai.Generic", KOF_LVL_INFECT);
+
+	/*
+	 * IRC command formats. Common to a great deal of legitimate software as well
+	 * as to botnets, which is why this is reported as suspicion rather than as a
+	 * family, and why raising the bar here is now the one character in this line
+	 * that says how many.
+	 */
+	if (kof_find_str_multi(scan_range_data, common_botnet_1, common_botnet_2,
+			       common_botnet_3, common_botnet_4) >= 3)
+		KOF_MATCH("Botnet.IRCCom", KOF_LVL_SUSPECT);
 }

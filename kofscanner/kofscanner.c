@@ -5,8 +5,8 @@
  *
  * Built on nothing but libkofeng/kofeng.h. That constraint is the point: if this needs
  * something the public header does not offer, the header is wrong and gets fixed, and
- * anyone else embedding the engine gets the fix too. tools/kofrun is the opposite - a
- * test harness that reaches into internal headers on purpose - and the two exist
+ * anyone else embedding the engine gets the fix too. kofexamine is the opposite - a
+ * diagnostic that reaches into the internal collectors on purpose - and the two exist
  * separately so neither has to compromise for the other.
  *
  * There is no directory walk here. A directory yielding files and an archive yielding
@@ -15,17 +15,23 @@
  * for: read the arguments, set the policy, print what comes back.
  */
 
+/* Before any include, not after: clock_gettime is POSIX, and a feature test macro
+ * placed after the first include has no effect at all. */
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "../libkofeng/kofeng.h"
 
 struct run {
 	/* No object counter: the engine already keeps one, and a second copy is a
 	 * second thing that can disagree with it. */
-	uint64_t infected, findings, dropped;
+	uint64_t infected, suspect, dropped;
 	int verbose;
+	int stats;
 };
 
 static const char *level_str(uint32_t level)
@@ -44,7 +50,7 @@ static int on_object(const char *name, const struct kof_result *res, void *user)
 {
 	struct run *r = user;
 	uint32_t i;
-	int counted = 0;
+	int worst = -1;
 
 	if (res->n == 0) {
 		if (r->verbose)
@@ -54,19 +60,71 @@ static int on_object(const char *name, const struct kof_result *res, void *user)
 	for (i = 0; i < res->n; i++) {
 		printf("%-10s %s: %s\n", level_str(res->v[i].level), name,
 		       res->v[i].name);
-		r->findings++;
-		/* An object is infected or it is not, however many modules named it. */
-		if (res->v[i].level == KOF_LEVEL_INFECT && !counted) {
-			r->infected++;
-			counted = 1;
-		}
+		if ((int)res->v[i].level > worst)
+			worst = (int)res->v[i].level;
 	}
+	/*
+	 * One object, one count, at its highest level.
+	 *
+	 * Two modules may both name an object, one certain and one not; counting each
+	 * finding would report more infected objects than there are objects, and
+	 * counting the object in both columns would report it twice. Neither is a
+	 * number anyone can act on.
+	 *
+	 * There is no third number for findings. Once an object is reported at its
+	 * level, the count of how many modules agreed is about the database rather
+	 * than about the disk, and it reads as a severity by anyone scanning the
+	 * summary - an object named by four modules is not worse than one named by
+	 * one. Every finding is printed above; the summary counts objects.
+	 */
+	if (worst == KOF_LEVEL_INFECT)
+		r->infected++;
+	else if (worst == KOF_LEVEL_SUSPECT)
+		r->suspect++;
 	if (res->dropped) {
 		printf("%-10s %s: %u further finding(s) not reported\n", "NOTE",
 		       name, res->dropped);
 		r->dropped += res->dropped;
 	}
 	return 0;
+}
+
+/*
+ * What the filtering earned.
+ *
+ * Behind a flag rather than always printed, and printed at all rather than merely
+ * collected: the engine counts every one of these on every module of every object,
+ * and a counter nothing can read is a counter nobody keeps honest. The whole design
+ * rests on ruling a module out being much cheaper than running it, and these are the
+ * numbers that say whether it does.
+ *
+ * `considered` must equal `ran` plus the four rejections - the prefilter has no
+ * other exit - so the two columns are also a check on each other.
+ */
+static void print_stats(const struct kof_stats *st)
+{
+	uint64_t skipped = st->by_target + st->by_size + st->by_arch + st->by_region;
+
+	printf("\n--- filtering ---\n");
+	printf("considered %llu module evaluation(s)\n",
+	       (unsigned long long)st->considered);
+	printf("  ran      %llu\n", (unsigned long long)st->ran);
+	printf("  target   %llu\n", (unsigned long long)st->by_target);
+	printf("  size     %llu\n", (unsigned long long)st->by_size);
+	printf("  arch     %llu\n", (unsigned long long)st->by_arch);
+	printf("  region   %llu\n", (unsigned long long)st->by_region);
+	if (st->ran + skipped != st->considered)
+		printf("  NOTE: ran + skipped is %llu, not %llu\n",
+		       (unsigned long long)(st->ran + skipped),
+		       (unsigned long long)st->considered);
+
+	printf("searches   %llu, %.2f MB read\n",
+	       (unsigned long long)st->searches,
+	       (double)st->bytes_searched / 1048576.0);
+	printf("  answered without scanning %llu\n",
+	       (unsigned long long)st->gram_answers);
+	printf("presence   %.2f MB indexed\n",
+	       (double)st->gram_bytes / 1048576.0);
 }
 
 static void usage(const char *argv0)
@@ -80,6 +138,7 @@ static void usage(const char *argv0)
 		"  --follow-links  follow symbolic links (off by default: a link into\n"
 		"                  an ancestor turns a walk into a loop)\n"
 		"  --all-matches   keep scanning an object after the first finding\n"
+		"  --stats         report what the prefilter and the presence set earned\n"
 		"  -v              also report objects that came back clean\n"
 		"\n"
 		"exit: 0 nothing found, 1 something found, 2 could not scan\n",
@@ -94,6 +153,8 @@ int main(int argc, char **argv)
 	struct kof_scan_option opt;
 	struct run r;
 	const struct kof_stats *st;
+	struct timespec t0, t1;
+	double secs, mb;
 	int i, rc;
 
 	memset(&r, 0, sizeof r);
@@ -114,6 +175,8 @@ int main(int argc, char **argv)
 			opt.follow_symlinks = 1;
 		else if (strcmp(argv[i], "--all-matches") == 0)
 			opt.all_matches = 1;
+		else if (strcmp(argv[i], "--stats") == 0)
+			r.stats = 1;
 		else if (strcmp(argv[i], "-v") == 0)
 			r.verbose = 1;
 		else {
@@ -133,8 +196,8 @@ int main(int argc, char **argv)
 		fprintf(stderr, "%s: cannot load a database from %s\n", argv[0], db);
 		return 2;
 	}
-	printf("database: %u module(s), %u string(s)\n",
-	       kof_engine_modules(eng), kof_engine_strings(eng));
+	printf("database: version %u, %u record(s)\n",
+	       kof_engine_db_version(eng), kof_engine_records(eng));
 
 	sc = kof_scanner_new(eng);
 	if (!sc) {
@@ -143,24 +206,49 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
+	/*
+	 * Wall clock, not CPU time, and around the scan alone.
+	 *
+	 * A scanner spends much of its time waiting for a disk, and CPU time hides
+	 * exactly that - it would report a cold scan as fast as a warm one. Wall clock
+	 * is also what the throughput below has to be derived from for the number to
+	 * mean anything.
+	 *
+	 * Loading the database is outside it: it happens once whatever is scanned, so
+	 * folding it in makes a scan of one file look slow and a scan of a filesystem
+	 * look faster than it is.
+	 */
+	clock_gettime(CLOCK_MONOTONIC, &t0);
 	rc = kof_scan_path(sc, target, &opt, on_object, &r);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
 	if (rc < 0)
 		fprintf(stderr, "%s: cannot scan %s\n", argv[0], target);
 
+	secs = (double)(t1.tv_sec - t0.tv_sec) +
+	       (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
 	st = kof_scanner_stats(sc);
+	mb = st ? (double)st->object_bytes / 1048576.0 : 0.0;
 
 	printf("\n--- scan complete ---\n");
-	printf("scanned  %llu object(s), %.2f MB\n",
-	       st ? (unsigned long long)st->objects : 0ull,
-	       st ? (double)st->object_bytes / 1048576.0 : 0.0);
-	printf("infected %llu object(s), %llu finding(s)\n",
-	       (unsigned long long)r.infected, (unsigned long long)r.findings);
+	printf("scanned   %llu object(s), %.2f MB\n",
+	       st ? (unsigned long long)st->objects : 0ull, mb);
+	printf("infected  %llu object(s)\n", (unsigned long long)r.infected);
+	printf("suspected %llu object(s)\n", (unsigned long long)r.suspect);
+	/* Throughput beside the time it came from: on its own, a duration says nothing
+	 * without the size of what was scanned, and both are already here. Guarded
+	 * because a scan can finish inside the clock's resolution. */
+	if (secs > 0.0005)
+		printf("time      %.2f s (%.0f MB/s)\n", secs, mb / secs);
+	else
+		printf("time      %.3f s\n", secs);
 	if (st && st->unreadable)
-		printf("skipped  %llu object(s) that could not be read\n",
+		printf("skipped   %llu object(s) that could not be read\n",
 		       (unsigned long long)st->unreadable);
 	if (r.dropped)
-		printf("note     %llu finding(s) over the per-object cap\n",
+		printf("note      %llu finding(s) over the per-object cap\n",
 		       (unsigned long long)r.dropped);
+	if (r.stats && st)
+		print_stats(st);
 
 	kof_scanner_free(sc);
 	kof_engine_close(eng);
@@ -175,10 +263,10 @@ int main(int argc, char **argv)
 	 *   1  something found
 	 *   2  could not scan, or could not scan all of it
 	 *
-	 * A finding outranks an error: if something was found, that is the answer,
+	 * A detection outranks an error: if something was found, that is the answer,
 	 * whatever else was skipped alongside it.
 	 */
-	if (r.infected || r.findings)
+	if (r.infected || r.suspect)
 		return 1;
 	if (rc < 0 || (st && st->unreadable))
 		return 2;

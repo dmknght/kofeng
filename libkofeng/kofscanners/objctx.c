@@ -4,7 +4,7 @@
  * Builds a kof_obj_ctx and serves every call made through it. That makes this the
  * entire untrusted boundary: module code comes out of a database and runs native, and
  * every byte it can reach it reaches through one of these functions - so each one
- * bounds checks, and an out of range read yields zero rather than faulting. Six
+ * bounds checks, and an out of range read yields zero rather than faulting. Eight
  * functions audited once beats bounds arithmetic repeated in every module.
  *
  * It sits with the scanner rather than beside the ABI headers in core/kofmod because
@@ -112,7 +112,7 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 				&sc->st.gram_answers);
 }
 
-const struct kof_content kof_mod_vtable = {
+static const struct kof_content kof_mod_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_csum
 };
 

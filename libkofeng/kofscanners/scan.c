@@ -58,19 +58,14 @@ fail:
 
 void kof_scan_free(struct kof_scanner *sc)
 {
-	if (!sc)
-		return;
 	uint32_t i;
 
+	if (!sc)
+		return;
 	kof_match_state_free(&sc->m);
 	for (i = 0; i < KOF_FMT_COUNT; i++)
 		free(sc->view[i]);
 	free(sc);
-}
-
-static void count_unreadable(struct kof_scanner *sc)
-{
-	sc->st.unreadable++;
 }
 
 const struct kof_stats *kof_scan_stats(const struct kof_scanner *sc)
@@ -123,13 +118,24 @@ static uint32_t regions_present(const struct kof_obj_ctx *ctx, uint32_t wanted)
 	if (!ctx->resolve_scan)
 		return present;
 
-	/* Only the regions some module names. A region nobody asks about does not need
-	 * an answer, and one of them is expensive enough that the difference shows. */
-	for (bit = 1; bit < 16; bit++) {
-		if (!(wanted & (1u << bit)))
+	/*
+	 * Only the regions some module names. A region nobody asks about does not
+	 * need an answer, and one of them is a complement - it builds and sorts the
+	 * whole claimed set to produce one range.
+	 *
+	 * Every bit, not the first sixteen. The ceiling used to be 16 because no
+	 * format defined a region above bit 7, which made adding one a silent loss:
+	 * the region would never be marked present, so the prefilter would skip
+	 * every module that named it, and a detection that does not happen is not
+	 * something a test notices. Thirty-one masked tests cost nothing.
+	 */
+	for (bit = 1; bit < 32; bit++) {
+		uint32_t m = 1u << bit;
+
+		if (!(wanted & m))
 			continue;
-		if (ctx->resolve_scan(ctx, 1u << bit, ext, KOF_SCAN_MAX_EXTENTS))
-			present |= 1u << bit;
+		if (ctx->resolve_scan(ctx, m, ext, KOF_SCAN_MAX_EXTENTS))
+			present |= m;
 	}
 	return present;
 }
@@ -269,14 +275,11 @@ static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ct
 
 /* ---- the routine ---------------------------------------------------------- */
 
-static uint32_t scan_object(struct kof_scanner *sc, kof_buf buf,
-			    const char *name, const struct kof_scan_option *opt,
-			    struct kof_result *out)
+static void scan_object(struct kof_scanner *sc, kof_buf buf,
+			const struct kof_scan_option *opt, struct kof_result *out)
 {
 	struct kof_obj_ctx ctx;
-	uint32_t present, i, added = 0;
-
-	(void)name;   /* recorded by the caller; the layer tree is its business */
+	uint32_t present, i;
 
 	memset(&ctx, 0, sizeof ctx);
 	kof_mod_attach(&ctx, sc);
@@ -313,7 +316,6 @@ static uint32_t scan_object(struct kof_scanner *sc, kof_buf buf,
 		} else {
 			out->dropped++;
 		}
-		added++;
 
 		/*
 		 * Stop unless the caller asked for everything. The remaining modules
@@ -331,8 +333,6 @@ static uint32_t scan_object(struct kof_scanner *sc, kof_buf buf,
 	sc->st.searches       += sc->m.n_calls;
 	sc->st.bytes_searched += sc->m.n_bytes_scanned;
 	sc->st.gram_bytes     += sc->m.n_bytes_indexed;
-
-	return added;
 }
 
 /*
@@ -469,7 +469,7 @@ static void scan_file(struct walk *w, const char *path)
 	res.dropped = 0;
 
 	if (map_file(&src, path) != 0) {
-		count_unreadable(w->sc);
+		w->sc->st.unreadable++;
 		return;
 	}
 
@@ -477,7 +477,7 @@ static void scan_file(struct walk *w, const char *path)
 	 * One layer. When there are archive children this becomes the same stack the
 	 * directory walk uses: scan the layer, then push each child a producer yields.
 	 */
-	scan_object(w->sc, kof_buf_make(src.map, src.len), path, w->opt, &res);
+	scan_object(w->sc, kof_buf_make(src.map, src.len), w->opt, &res);
 	unmap_file(&src);
 
 	w->objects++;
@@ -495,7 +495,7 @@ static void read_dir(struct walk *w, const char *dir, uint32_t depth)
 	if (!d) {
 		/* Unreadable, or a path the system would not accept. Counted, because a
 		 * subtree that silently vanishes reads as a subtree with nothing in it. */
-		count_unreadable(w->sc);
+		w->sc->st.unreadable++;
 		return;
 	}
 	while (!w->aborted && !w->out_of_memory && (de = readdir(d)) != NULL) {
@@ -516,7 +516,7 @@ static void read_dir(struct walk *w, const char *dir, uint32_t depth)
 		/* lstat, not stat: a symlink is not followed unless asked for, so a link
 		 * pointing at an ancestor cannot turn this into a loop. */
 		if ((w->opt->follow_symlinks ? stat : lstat)(w->path_buf, &sb) != 0) {
-			count_unreadable(w->sc);
+			w->sc->st.unreadable++;
 			continue;
 		}
 
@@ -557,9 +557,8 @@ int kof_scan_walk(struct kof_scanner *sc, const char *path,
 		return rc;
 	}
 
-	if (!opt->recurse_dirs) {
+	if (!opt->recurse_dirs)
 		return KOF_ERR_OPEN;
-	}
 
 	{
 		/* A trailing slash would put "//" in every child path. */

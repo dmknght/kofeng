@@ -123,8 +123,7 @@ static uint32_t name_hash(kof_buf strtab, uint64_t off, int *out_truncated)
 		uint8_t c;
 		if (!kof_rd_u8(strtab, off + i, &c) || c == 0)
 			break;
-		h ^= (uint32_t)c;
-		h *= 16777619u;
+		h = kof_hash_step(h, c);
 	}
 	if (i >= KOF_ELF_SECNAME_MAX)
 		*out_truncated = 1;
@@ -320,24 +319,6 @@ static uint64_t front_end(const struct kof_elf_info *e);
 /*
  * Settle which bytes each structure owns.
  *
- * The algorithm is kof_rl_settle; what is here is which structures get to claim
- * and how authoritative each is. ELF guarantees overlap - segments and sections
- * describe the same file twice, on purpose - and generated hostile headers found
- * four distinct ways two regions could collide before this existed:
- *
- *   an executable load at offset zero          CODE against HEADERS
- *   a non-allocated section inside a load      NOLOAD against CODE or DATA
- *   a section header table inside a load       HEADERS against CODE or DATA
- *   an executable and a data load overlapping  CODE against DATA
- *
- * What kept the property before was one trim of DATA against the header block:
- * one of the four, and the only one real binaries exercise, which is why 846 of
- * them passed while the other three sat there.
- */
-
-/*
- * Settle which bytes each structure owns.
- *
  * The regions have to be disjoint or they are not a partition, and ELF
  * guarantees the opposite: segments and sections describe the same file twice,
  * on purpose, and a normal object has them overlapping everywhere. What kept the
@@ -461,15 +442,13 @@ static uint64_t front_end(const struct kof_elf_info *e)
 	return h;
 }
 
-/* Everything a header table, segment or section accounts for. The complement of
- * this is UNCLAIMED. */
 /*
  * Resolve a mask to ranges. Reached through ctx->resolve_scan, so the host never
  * learns that any of this is ELF specific.
+ *
+ * Recursive for one region only: UNCLAIMED asks for the complement of everything
+ * else. C needs no forward declaration for that.
  */
-static uint32_t elf_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
-				 struct kof_range *out, uint32_t max_out);
-
 static uint32_t elf_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 				 struct kof_range *out, uint32_t max_out)
 {
@@ -480,9 +459,7 @@ static uint32_t elf_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 	if (!e || !e->valid || !out || max_out == 0)
 		return 0;
 
-	l.v = out;
-	l.n = 0;
-	l.cap = max_out;
+	kof_rl_init(&l, out, max_out);
 
 	if (mask & KOF_SCAN_ELF_HEADERS) {
 		kof_rl_add(&l, ctx->obj_size, e->hdr_claim_off, e->hdr_claim_len);
@@ -789,12 +766,12 @@ int kof_elf_parse(kof_buf file, struct kof_elf_info *info,
 
 	parse_sections(file, info, is64, be, &anom);
 
-	/* Regions are computed on demand from the tables just filled, not stored.
-	 * Attaching the resolver is the whole of it. */
-	/* After every structure has been read, and before any region can be
-	 * asked for: the regions are defined in terms of what settling decided. */
+	/* After every structure has been read, and before any region can be asked
+	 * for: the regions are defined in terms of what settling decided. */
 	settle_claims(info, file.n);
 
+	/* Regions are computed on demand from the tables just filled, never stored,
+	 * so attaching the resolver is the whole of publishing them. */
 	ctx->resolve_scan = elf_resolve_scan;
 
 	info->anomalies = anom;
@@ -803,17 +780,34 @@ int kof_elf_parse(kof_buf file, struct kof_elf_info *info,
 
 /* ---- names, for tools ------------------------------------------------------- */
 
+/*
+ * The regions, once. The bit list and the names are both generated from it, so
+ * they cannot disagree and adding a region is one line.
+ */
+#define ELF_REGIONS(X)          \
+	X(KOF_SCAN_ELF_HEADERS)   \
+	X(KOF_SCAN_ELF_CODE)      \
+	X(KOF_SCAN_ELF_DATA)      \
+	X(KOF_SCAN_ELF_NOLOAD)    \
+	X(KOF_SCAN_ELF_UNCLAIMED)
+
+#define X_BIT(b)  (b),
+#define X_CASE(b) case (b): return #b;
+
+const uint32_t kof_elf_region_bits[] = { ELF_REGIONS(X_BIT) };
+_Static_assert(sizeof kof_elf_region_bits / sizeof kof_elf_region_bits[0] ==
+	       KOF_ELF_REGION_COUNT, "region list and its count disagree");
+
 const char *kof_elf_region_name(uint32_t bit)
 {
 	switch (bit) {
-	case KOF_SCAN_ELF_HEADERS:   return "KOF_SCAN_ELF_HEADERS";
-	case KOF_SCAN_ELF_CODE:      return "KOF_SCAN_ELF_CODE";
-	case KOF_SCAN_ELF_DATA:      return "KOF_SCAN_ELF_DATA";
-	case KOF_SCAN_ELF_NOLOAD:    return "KOF_SCAN_ELF_NOLOAD";
-	case KOF_SCAN_ELF_UNCLAIMED: return "KOF_SCAN_ELF_UNCLAIMED";
-	default:                     return 0;
+	ELF_REGIONS(X_CASE)
+	default: return 0;
 	}
 }
+
+#undef X_BIT
+#undef X_CASE
 
 const char *kof_elf_anomaly_name(unsigned index)
 {

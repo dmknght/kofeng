@@ -21,11 +21,6 @@
 #include "../kofparsers/pe/pe_parse.h"
 
 /*
- * Why modules were not run. The measurement the whole precondition idea stands or
- * falls on: a filter that rules nothing out is overhead, and only counting says which.
- */
-
-/*
  * Everything mutable, one per thread.
  *
  * The engine it points at is immutable and shared. Splitting them is what keeps the
@@ -52,7 +47,6 @@ struct kof_scanner {
 	 */
 	void *view[KOF_FMT_COUNT];
 
-
 	/* Set while a module runs: find_str is called from inside one, and the ids it
 	 * passes are module local, so the host has to know whose they are. */
 	const struct kof_module *cur_mod;
@@ -71,10 +65,6 @@ void                 kof_scan_free(struct kof_scanner *);
 const struct kof_stats *kof_scan_stats(const struct kof_scanner *);
 
 /*
- * Scan whatever a path names, from the orchestrator. Returns a finding count or a
- * KOF_ERR_*. The facade in kofeng.c is the only intended caller.
- */
-/*
  * Present an object to a module: fills in every field a module can reach.
  *
  * Defined in objctx.c, which is the whole untrusted boundary - every entry bounds
@@ -89,8 +79,11 @@ uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *, uint32_t scan_mask,
 /* Recover the scanner from a context handed to a module. */
 struct kof_scanner *kof_scan_of(const struct kof_obj_ctx *);
 
+/*
+ * Scan whatever a path names. Returns the number of objects scanned or a KOF_ERR_*.
+ * The facade in kofeng.c is the only intended caller.
+ */
 int kof_scan_walk(struct kof_scanner *, const char *path,
-			  const struct kof_scan_option *, kof_on_object cb,
-			  void *user);
+		  const struct kof_scan_option *, kof_on_object cb, void *user);
 
 #endif /* KOFENG_SCAN_H */

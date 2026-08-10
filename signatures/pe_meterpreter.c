@@ -12,7 +12,7 @@ KOF_DEFINE_STR(str_data_2, "PAYLOAD:", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(str_code_1, "AXAX^YZAXAYAZH", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(str_code_2, "VirtualProtect", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 
-void kof_scan(const struct kof_obj_ctx *ctx)
+KOF_DEFINE_SCAN
 {
 	/*
 	 * Two markers, and the second is what makes the first worth acting on. The
@@ -24,12 +24,13 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 	 * these, so both markers can be looked for in one pass over the object -
 	 * together with every other module's markers.
 	 */
-	if (kof_find_str(ctx, str_data_1, pe_range_data) && kof_find_str(ctx, str_data_2, pe_range_data)) {
-		if (kof_find_str(ctx, str_code_1, pe_range_code) && kof_find_str(ctx, str_code_2, pe_range_code))
+	
+	if (kof_find_str_all(pe_range_data, str_data_1, str_data_2)) {
+		if (kof_find_str_all(pe_range_code, str_code_1, str_code_2))
 		{
-			KOF_MATCH(ctx, "Meter.Generic", KOF_LVL_INFECT);
+			KOF_MATCH("Meter.Generic", KOF_LVL_INFECT);
 		} else {
-			KOF_MATCH(ctx, "Meter.Generic", KOF_LVL_SUSPECT);
+			KOF_MATCH("Meter.Generic", KOF_LVL_SUSPECT);
 		}
 	}
 }

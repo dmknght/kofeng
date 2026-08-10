@@ -110,16 +110,6 @@ struct fmt {
 	void      (*print)(const void *, const struct kof_obj_ctx *);
 };
 
-static const uint32_t elf_regions[] = {
-	KOF_SCAN_ELF_HEADERS, KOF_SCAN_ELF_CODE, KOF_SCAN_ELF_DATA,
-	KOF_SCAN_ELF_NOLOAD, KOF_SCAN_ELF_UNCLAIMED
-};
-static const uint32_t pe_regions[] = {
-	KOF_SCAN_PE_HEADERS, KOF_SCAN_PE_CODE, KOF_SCAN_PE_DATA,
-	KOF_SCAN_PE_RESOURCE, KOF_SCAN_PE_SIGNATURE, KOF_SCAN_PE_OVERLAY,
-	KOF_SCAN_PE_UNCLAIMED
-};
-
 static int elf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
 	return kof_elf_parse(b, (struct kof_elf_info *)v, c);
@@ -233,13 +223,11 @@ static void print_pe(const void *view, const struct kof_obj_ctx *ctx)
 }
 
 static const struct fmt formats[] = {
-	{ (uint32_t)sizeof(struct kof_elf_info), kof_elf_sniff,
-	  elf_parse_thunk, elf_regions,
-	  (uint32_t)(sizeof elf_regions / sizeof elf_regions[0]),
+	{ (uint32_t)sizeof(struct kof_elf_info), kof_elf_sniff, elf_parse_thunk,
+	  kof_elf_region_bits, KOF_ELF_REGION_COUNT,
 	  kof_elf_region_name, kof_elf_anomaly_name, print_elf },
-	{ (uint32_t)sizeof(struct kof_pe_info), kof_pe_sniff,
-	  pe_parse_thunk, pe_regions,
-	  (uint32_t)(sizeof pe_regions / sizeof pe_regions[0]),
+	{ (uint32_t)sizeof(struct kof_pe_info), kof_pe_sniff, pe_parse_thunk,
+	  kof_pe_region_bits, KOF_PE_REGION_COUNT,
 	  kof_pe_region_name, kof_pe_anomaly_name, print_pe }
 };
 

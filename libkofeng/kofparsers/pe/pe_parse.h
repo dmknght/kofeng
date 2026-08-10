@@ -63,4 +63,9 @@ int kof_pe_sniff(kof_buf file);
 const char *kof_pe_region_name(uint32_t bit);
 const char *kof_pe_anomaly_name(unsigned index);
 
+/* Every region bit the format defines, in bit order. See the note on
+ * kof_elf_region_bits: one list, so a region added here cannot go untested. */
+extern const uint32_t kof_pe_region_bits[];
+#define KOF_PE_REGION_COUNT 7u   /* asserted against the array in the .c */
+
 #endif /* KOFENG_PE_PARSE_H */

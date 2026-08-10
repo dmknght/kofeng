@@ -17,6 +17,13 @@ CFLAGS  ?= -O2 -g
 CFLAGS  += -std=c11 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
            -Wpointer-arith -Wstrict-prototypes -Wmissing-prototypes \
            -fno-common -Ilibkofeng/core
+
+# Header dependencies, emitted as a side effect of every compile and included
+# below. Without them a header edit rebuilds nothing: the object files are newer
+# than the .c that did not change, so make has nothing to do and the tests run
+# against the previous header. That is not a theoretical failure - a deliberately
+# broken _Static_assert in a header was compiled away to a passing build here.
+CFLAGS  += -MMD -MP
 LDFLAGS ?=
 
 # Address and UB sanitizers are the default for development: the whole parser
@@ -162,6 +169,10 @@ unit: $(UNIT_BIN)
 		printf '%-28s ' "$$(basename $$t)"; \
 		if $$t; then :; else rc=1; echo "  FAILED"; fi; \
 	done; exit $$rc
+
+# Everything -MMD wrote. Missing on a clean tree, which is why it is a soft
+# include: nothing to rebuild yet, and the first compile creates them.
+-include $(shell find $(BUILD) -name '*.d' 2>/dev/null)
 
 clean:
 	rm -rf $(BUILD)

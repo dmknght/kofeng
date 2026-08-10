@@ -89,19 +89,37 @@ typedef struct kof_engine  kof_engine;
 typedef struct kof_scanner kof_scanner;
 
 /*
- * Open a database: a directory of modules, or a single one.
- *
- * Loose files today - <name>.blob plus the .meta, .strs and .names the build emits
- * beside it. A packed container replaces that without changing this call, which is
- * why no format appears here.
+ * Open a database: a directory of packs, or a single one.
  *
  * NULL if nothing could be loaded.
  */
 kof_engine *kof_engine_open(const char *db_path);
 void        kof_engine_close(kof_engine *);
 
-uint32_t    kof_engine_modules(const kof_engine *);
-uint32_t    kof_engine_strings(const kof_engine *);
+/*
+ * How many records the database holds. A record is one signature: the unit an
+ * author writes, the unit the engine decides whether to run, and the unit a
+ * database is counted in.
+ *
+ * Not the number of literals in it. That number is larger, moves when a signature
+ * is rewritten without any signature being added, and is a fact about the engine's
+ * internals rather than about the database - a host cannot act on it, and an
+ * operator reading it as "how much do I detect" would be reading it wrong.
+ */
+uint32_t    kof_engine_records(const kof_engine *);
+
+/*
+ * The database format version every loaded pack matched.
+ *
+ * A constant of this build rather than something read out of a file, and it is one
+ * precisely because the loader refuses any pack that disagrees with it: there is no
+ * state in which a loaded database has some other version. It is reported so that
+ * an operator looking at a scanner and a database directory can tell whether they
+ * belong together, which is the question this answers.
+ *
+ * The engine's own version belongs beside this and is not here yet.
+ */
+uint32_t    kof_engine_db_version(const kof_engine *);
 
 /* One scanner per thread. The engine it is made from must outlive it. */
 kof_scanner *kof_scanner_new(const kof_engine *);

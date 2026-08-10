@@ -12,7 +12,7 @@
  *
  * No external symbols means nothing to resolve at load time, so loading is a copy
  * and an mprotect. No writable data means one mapped copy serves every thread.
- * build.sh enforces all of it on the object.
+ * ksigcompiler.sh enforces all of it on the object.
  *
  * A consequence to know before writing a module: string literals are fine, arrays
  * of pointers to them are not - those land in .data.rel.ro with relocations against
@@ -113,7 +113,7 @@ enum kof_arch {
  *
  * Here because more than one place needs them and they are the only correct spelling:
  * a finding is labelled with them and so is a fact dump, and two copies drift. They
- * were duplicated in the scanner and in kofdump before this.
+ * were duplicated in the scanner and in the examiner before this.
  *
  * Inline rather than a .c file: they are switch statements over an enum this header
  * already declares, so anything that has the enum has all it needs.
@@ -306,46 +306,165 @@ struct kof_obj_ctx {
 };
 
 /*
- * Entry point. Defined by the module, called by the loader.
- *
- * The linker script places it first, so its offset inside the blob is zero and
- * the loader needs no symbol table at runtime. Other module roles will follow
- * the same pattern with their own header and their own entry: kof_unpack() from
- * kofunp.h, kof_cure() from kofcure.h.
- */
-/*
- * Entry point. Defined by the module, called by the loader.
+ * Entry point. Defined by the module, called by the loader - through
+ * KOF_DEFINE_SCAN below, which is what puts `ctx` in scope for the macros.
  *
  * Returns nothing. A module's output is what it reports, so there is no verdict
  * to return, and a module with nothing to say simply ends - which is why no
  * trailing "return clean" has to be written. Bailing out early is a bare return.
  *
  * The linker script places this first, so its offset inside the blob is zero and
- * the loader needs no symbol table at runtime.
+ * the loader needs no symbol table at runtime. Other module roles will follow the
+ * same pattern with their own header and their own entry: kof_unpack() from
+ * kofunp.h, kof_cure() from kofcure.h.
  */
 void kof_scan(const struct kof_obj_ctx *ctx);
 
 /*
- * Look for a declared string in a declared range.
+ * SEARCHING FOR DECLARED STRINGS
  *
- *     if (kof_find_str(ctx, busybox, loaded)) ...
+ *     if (kof_find_str(loaded, busybox)) ...
+ *     if (kof_find_str_all(code, prologue, marker)) ...
+ *     if (kof_find_str_any(data, irc_who, irc_pong, irc_nick)) ...
+ *     if (kof_find_str_multi(data, m1, m2, m3, m4) >= 2) ...
  *
- * Both names resolve through identifiers the generator defines from the
- * KOF_DEFINE_STR and KOF_DEFINE_RANGE declarations, which the build injects. A name
- * that was never declared is an undefined identifier at compile time rather than a
- * lookup that quietly returns false - the failure mode to want, since a signature
- * that silently never matches looks exactly like one that works.
+ * Range first, then the strings, because the range is the one thing every form
+ * shares and the strings are the part that varies in number. The other order
+ * cannot express the variadic forms at all: a trailing range after a list of
+ * strings is not something a macro can pick out.
  *
- * No search happens in the module: the host owns the literals and answers this,
- * which is what allows one pass over the object to serve every module.
+ * Every name resolves through an identifier the build defines from the
+ * KOF_DEFINE_STR and KOF_DEFINE_RANGE declarations in this source. A name that was
+ * never declared is an undefined identifier at compile time rather than a lookup
+ * that quietly returns false - the failure mode to want, since a signature that
+ * silently never matches looks exactly like one that works.
+ *
+ * No search happens in the module. The host owns the literals and answers these,
+ * which is what allows one pass over the object to serve every module, and what
+ * makes asking the same question twice free: an answer is memoised per (string,
+ * range) for the object, so a module may ask in whatever order reads best.
+ *
+ *
+ * WHERE ctx WENT
+ *
+ * These take no context argument. It is not passed by some hidden channel - the
+ * expansion simply names `ctx`, which is in scope because the entry point takes it
+ * and KOF_DEFINE_SCAN below names it that.
+ *
+ * That is a trade worth stating rather than discovering. What it buys is a call
+ * that says only what the author decided - a range and some strings - instead of
+ * repeating a parameter that is the same at every call site in the module and can
+ * never be anything else. What it costs is that a helper function inside a module
+ * must call its context parameter `ctx` too. That costs a compile error naming an
+ * undeclared identifier, not a wrong answer, which is the only kind of cost this
+ * layer is allowed to have.
+ *
+ * The C level accessors keep taking it: ctx->obj_size, kof_elf(ctx),
+ * ctx->content->rd32(ctx, off). Those are plain C reading a plain struct, and
+ * hiding the subject of a field access would be hiding the wrong thing. The line is
+ * between the declarative layer, which turns names the build assigned into a
+ * question about the object under scan, and the struct underneath it.
  */
 #define KOF_PASTE2(a, b) a##b
 #define KOF_PASTE(a, b)  KOF_PASTE2(a, b)
 
-#define kof_find_str(ctx, str_name, range_name)                    \
-	((ctx)->content->find_str((ctx),                           \
-		KOF_PASTE(kof_strid_, str_name),                   \
-		KOF_PASTE(kof_rangeid_, range_name)))
+/*
+ * Define the entry point.
+ *
+ *     KOF_DEFINE_SCAN
+ *     {
+ *             ...
+ *     }
+ *
+ * Expands to the prototype the loader calls, which is what guarantees `ctx` exists
+ * and is spelled the way the search macros expect. Writing that prototype by hand
+ * still works; this exists so the one name the DSL depends on is not a convention
+ * anybody has to remember.
+ *
+ * It is also the only place the entry symbol is spelled. The kind of a module - a
+ * detector or an unpacker - is derived at build time from which entry point it
+ * exports, so a misspelling here is a module that packs as the wrong kind rather
+ * than one that fails to link.
+ */
+#define KOF_DEFINE_SCAN void kof_scan(const struct kof_obj_ctx *ctx)
+
+/*
+ * One search, normalised to 0 or 1.
+ *
+ * The host already answers with 0 or 1, and the normalisation is here anyway
+ * because kof_find_str_multi adds these together: were find_str ever to return some
+ * other non-zero, a count would silently become a sum of arbitrary values, and a
+ * threshold written against it would be wrong in a way no test would show. The
+ * comparison costs nothing - it is folded at compile time - and it means the
+ * counting form does not depend on a convention held somewhere else.
+ */
+#define KOF_FS_ONE(rng, s)                                                 \
+	((ctx)->content->find_str((ctx),                                   \
+		KOF_PASTE(kof_strid_, s),                                  \
+		KOF_PASTE(kof_rangeid_, rng)) != 0)
+
+/*
+ * Fold one operator across a list of string names.
+ *
+ * An expression, not an array and a loop. A compound literal holding the ids would
+ * be the obvious shape and is the wrong one here: a module is freestanding position
+ * independent code that the build verifies has no relocations and no data sections,
+ * and an initialised array is exactly how one appears. Folding to `a || b || c`
+ * leaves nothing but calls.
+ *
+ * It also makes the short circuit the C operator's rather than something a helper
+ * would have to reimplement: kof_find_str_any stops at the first string present,
+ * kof_find_str_all at the first absent.
+ *
+ * Sixteen names in one call, which is well past readable; past that, write two
+ * calls and join them. The cap shows up as an undefined KOF_FS_<n>, so it is a
+ * compile error rather than a silently truncated list.
+ */
+#define KOF_FS_1(op, r, a)       KOF_FS_ONE(r, a)
+#define KOF_FS_2(op, r, a, ...) (KOF_FS_ONE(r, a) op KOF_FS_1(op, r, __VA_ARGS__))
+#define KOF_FS_3(op, r, a, ...) (KOF_FS_ONE(r, a) op KOF_FS_2(op, r, __VA_ARGS__))
+#define KOF_FS_4(op, r, a, ...) (KOF_FS_ONE(r, a) op KOF_FS_3(op, r, __VA_ARGS__))
+#define KOF_FS_5(op, r, a, ...) (KOF_FS_ONE(r, a) op KOF_FS_4(op, r, __VA_ARGS__))
+#define KOF_FS_6(op, r, a, ...) (KOF_FS_ONE(r, a) op KOF_FS_5(op, r, __VA_ARGS__))
+#define KOF_FS_7(op, r, a, ...) (KOF_FS_ONE(r, a) op KOF_FS_6(op, r, __VA_ARGS__))
+#define KOF_FS_8(op, r, a, ...) (KOF_FS_ONE(r, a) op KOF_FS_7(op, r, __VA_ARGS__))
+#define KOF_FS_9(op, r, a, ...) (KOF_FS_ONE(r, a) op KOF_FS_8(op, r, __VA_ARGS__))
+#define KOF_FS_10(op, r, a, ...) (KOF_FS_ONE(r, a) op KOF_FS_9(op, r, __VA_ARGS__))
+#define KOF_FS_11(op, r, a, ...) (KOF_FS_ONE(r, a) op KOF_FS_10(op, r, __VA_ARGS__))
+#define KOF_FS_12(op, r, a, ...) (KOF_FS_ONE(r, a) op KOF_FS_11(op, r, __VA_ARGS__))
+#define KOF_FS_13(op, r, a, ...) (KOF_FS_ONE(r, a) op KOF_FS_12(op, r, __VA_ARGS__))
+#define KOF_FS_14(op, r, a, ...) (KOF_FS_ONE(r, a) op KOF_FS_13(op, r, __VA_ARGS__))
+#define KOF_FS_15(op, r, a, ...) (KOF_FS_ONE(r, a) op KOF_FS_14(op, r, __VA_ARGS__))
+#define KOF_FS_16(op, r, a, ...) (KOF_FS_ONE(r, a) op KOF_FS_15(op, r, __VA_ARGS__))
+
+#define KOF_NARG_(_1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14,  \
+		  _15, _16, N, ...) N
+#define KOF_NARG(...) KOF_NARG_(__VA_ARGS__, 16, 15, 14, 13, 12, 11, 10, 9, 8,  \
+				7, 6, 5, 4, 3, 2, 1)
+
+#define KOF_FS_PICK(n, op, r, ...) KOF_PASTE(KOF_FS_, n)(op, r, __VA_ARGS__)
+#define KOF_FS_FOLD(op, r, ...)                                                 \
+	KOF_FS_PICK(KOF_NARG(__VA_ARGS__), op, r, __VA_ARGS__)
+
+/* One string in one range. Non-zero if present. */
+#define kof_find_str(rng, s) KOF_FS_ONE(rng, s)
+
+/* Non-zero if at least one of them is present. Stops at the first hit. */
+#define kof_find_str_any(rng, ...) (KOF_FS_FOLD(||, rng, __VA_ARGS__))
+
+/* Non-zero only if every one of them is present. Stops at the first miss. */
+#define kof_find_str_all(rng, ...) (KOF_FS_FOLD(&&, rng, __VA_ARGS__))
+
+/*
+ * How many of them are present: a threshold, written as one.
+ *
+ * Distinct strings, not occurrences. A marker appearing forty times in a file says
+ * the same thing as one appearing once, so counting occurrences would let a single
+ * repeated string clear a threshold meant to require several different ones - which
+ * is the difference between "this file has four traits of the family" and "this file
+ * mentions one thing a lot".
+ */
+#define kof_find_str_multi(rng, ...) (KOF_FS_FOLD(+, rng, __VA_ARGS__))
 
 /*
  * Declare which object formats this module applies to.
@@ -364,40 +483,21 @@ void kof_scan(const struct kof_obj_ctx *ctx);
 #define KOF_TARGET(mask)
 
 /*
- * Declared preconditions: things the host can check without running the module.
+ * Preconditions the host checks without running the module.
  *
  *     KOF_FILESIZE_MIN(1024);
- *     KOF_REQUIRE_ARCH(KOF_ARCH_X86_64 | KOF_ARCH_ARM_BIT);
+ *     KOF_REQUIRE_ARCH(KOF_ARCH_X86_64);
  *
- * Both expand to nothing and both work the same way KOF_TARGET does: the build
- * reads them out of the source into the record beside the blob, and the host
- * evaluates them against facts the collector already produced. A module whose
- * preconditions fail is never entered, so it costs a few integer comparisons
- * against an index entry instead of a call and a scan.
+ * Both expand to nothing and both work the way KOF_TARGET does: the build reads them
+ * out of the source into the record beside the blob, and the host evaluates them
+ * against facts the collector already produced. A module that fails one costs a few
+ * integer comparisons against that record instead of a call and a scan.
  *
  * Declaring rather than coding the check is what makes it a filter. The same test
- * written inside kof_scan is correct and useless for filtering: the host has to run
- * the module to reach it, which is the cost the filter exists to avoid. This is the
- * distinction between pre-use and in-use filtering, and it is the reason a
- * precondition has to live outside the code.
- *
- * The consequence is that a declared precondition must not also be written in the
- * body. Two copies of one condition are two things that can disagree, and the
- * declaration is the one the host trusts. The build rejects a body check that
- * duplicates a declaration where it can recognise one.
- *
- * Only cheap, always-available facts belong here - size, format, architecture.
- * Anything that needs bytes read or a decision made stays in kof_scan, where the
- * full language is available. A precondition language rich enough to express real
- * logic would be a second, worse programming language, which is the trap this whole
- * design exists to avoid.
- */
-/*
- * Preconditions the host checks without running the module, so a module that fails
- * one costs a few integer comparisons against an index entry instead of a call.
- * Declaring rather than coding the check is what makes it a filter: the same test
- * inside kof_scan is correct and useless, because reaching it costs what filtering
- * saves.
+ * written inside kof_scan is correct and useless for filtering, because reaching it
+ * costs exactly what filtering saves. It follows that a declared precondition must
+ * not also be written in the body: two copies of one condition are two things that
+ * can disagree, and the declaration is the one the host trusts.
  *
  * Both are optional, and declaring nothing constrains nothing. The default has to
  * fall that way: an unconstrained module runs, so a missing declaration costs time,
@@ -409,6 +509,12 @@ void kof_scan(const struct kof_obj_ctx *ctx);
  * way to have the module skipped entirely. A module that wants an upper bound writes
  * it against ctx->obj_size in its own body, where it reads as its own logic rather
  * than as engine level filtering.
+ *
+ * Only cheap, always-available facts belong here - size, format, architecture.
+ * Anything that needs bytes read or a decision made stays in kof_scan, where the full
+ * language is available. A precondition language rich enough to express real logic
+ * would be a second, worse programming language, which is the trap this whole design
+ * exists to avoid.
  */
 #define KOF_FILESIZE_MIN(min)
 #define KOF_REQUIRE_ARCH(mask)
@@ -486,7 +592,7 @@ enum kof_str_word {
 /*
  * Report a finding and stop.
  *
- *     KOF_MATCH(ctx, "Mirai.Generic", KOF_LVL_INFECT);
+ *     KOF_MATCH("Mirai.Generic", KOF_LVL_INFECT);
  *
  * The name id is the source line, which is why the string can be dropped from the
  * expansion: the build scans this source, reads the literal, and writes
@@ -498,12 +604,17 @@ enum kof_str_word {
  * "Mirai.Generic" is reported as "ELF.x86_64.Mirai.Generic" without this module
  * naming a format it cannot be sure of.
  *
+ * Takes no context, for the reason the search macros do not: it names `ctx`, which
+ * KOF_DEFINE_SCAN put in scope. Leaving it explicit here while the searches beside
+ * it are not would be the worst of both - a parameter that is sometimes required
+ * and never meaningful.
+ *
  * The report and the return are one statement so neither half can be forgotten.
  */
-#define KOF_MATCH(ctx, name, level)                                    \
-	do {                                                           \
+#define KOF_MATCH(name, level)                                              \
+	do {                                                                \
 		(ctx)->report((ctx), (uint32_t)(level), (uint32_t)__LINE__); \
-		return;                                                \
+		return;                                                     \
 	} while (0)
 
 /*

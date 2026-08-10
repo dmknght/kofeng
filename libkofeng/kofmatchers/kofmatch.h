@@ -46,14 +46,6 @@ void kof_match_begin(struct kof_match_ctx *m, kof_buf data);
 #define KOF_MEMO_PRESENT 2
 
 /*
- * The presence set and the range search are internal to the matcher now.
- *
- * kof_match_lookup is the whole of what a caller wants - "is this pattern in these
- * ranges" - and it is the only thing that needs both. Exporting the pieces invited a
- * caller to assemble them differently and get the two-stage order wrong.
- */
-
-/*
  * Attach the per-object search state. `memo_len` is the whole engine's memo, cleared
  * on each kof_match_begin; `gram` is reused across objects and rebuilt per object.
  */
@@ -72,6 +64,10 @@ void kof_match_state_free(struct kof_match_ctx *);
  *
  * `answered_without_scan` is incremented when the presence set settled it, so a caller
  * can report what the filter earned.
+ *
+ * This is the whole of what a caller wants, and the pieces underneath it are not
+ * exported: a caller assembling them differently is a caller that can get the
+ * two-stage order wrong.
  */
 int kof_match_lookup(struct kof_match_ctx *, uint32_t slot,
 		     const struct kof_range *ext, uint32_t next,

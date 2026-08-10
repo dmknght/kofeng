@@ -47,4 +47,17 @@ int kof_elf_sniff(kof_buf file);
 const char *kof_elf_region_name(uint32_t bit);
 const char *kof_elf_anomaly_name(unsigned index);
 
+/*
+ * Every region bit the format defines, in bit order.
+ *
+ * Exported because three separate callers had each written this list out by hand -
+ * the examiner, the partition test and the fuzzer - and a list written three times
+ * is a list where adding a region silently stops it being dumped and stops it being
+ * checked. The same shape of copy in the signature compiler once made every PE
+ * signature fail to compile. Here it is defined once, beside the name function, and
+ * both are generated from the same list.
+ */
+extern const uint32_t kof_elf_region_bits[];
+#define KOF_ELF_REGION_COUNT 5u   /* asserted against the array in the .c */
+
 #endif /* KOFENG_ELF_PARSE_H */

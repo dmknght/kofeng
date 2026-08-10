@@ -108,10 +108,10 @@ static uint64_t usable_file_align(const struct kof_pe_info *p)
 /*
  * Resolve a mask to ranges. Reached through ctx->resolve_scan, so the host never
  * learns that any of this is PE specific.
+ *
+ * Recursive for one region only: UNCLAIMED asks for the complement of everything
+ * else. C needs no forward declaration for that.
  */
-static uint32_t pe_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
-				struct kof_range *out, uint32_t max_out);
-
 static uint32_t pe_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 				struct kof_range *out, uint32_t max_out)
 {
@@ -219,7 +219,10 @@ static void read_sections(kof_buf file, struct kof_pe_info *p, uint64_t sectab)
 
 	for (i = 0; i < p->nsec; i++) {
 		uint64_t base = kof_sat_add(sectab, (uint64_t)i * SECHDR_SIZE);
+		uint32_t vsize = 0, vaddr = 0, rsize = 0, raddr = 0, ch = 0;
 		struct kof_pe_sec *s;
+		uint8_t raw[8];
+		uint32_t k;
 
 		/* nsec is clamped before this runs, so this cannot trip today.
 		 * It is here because the clamp and this write are in different
@@ -230,9 +233,6 @@ static void read_sections(kof_buf file, struct kof_pe_info *p, uint64_t sectab)
 			break;
 		}
 		s = &p->sec[p->sec_count];
-		uint32_t vsize = 0, vaddr = 0, rsize = 0, raddr = 0, ch = 0;
-		uint8_t raw[8];
-		uint32_t k;
 
 		if (!kof_in_range(file, base, SECHDR_SIZE)) {
 			p->anomalies |= KOF_PE_ANOM_SECTAB_PAST_EOF;
@@ -295,23 +295,10 @@ static void read_sections(kof_buf file, struct kof_pe_info *p, uint64_t sectab)
 	}
 }
 
-/*
- * Settle which bytes each structure owns.
- *
- * The regions have to be disjoint or they are not a partition, and nothing in the
- * format guarantees that: two sections may point at the same file bytes, a section
- * may start inside the headers, and the certificate directory may point anywhere
- * at all. Fuzzing found this immediately - a single flipped byte in a section
- * header was enough to make CODE and OVERLAY return the same offset.
- *
- * So ownership is decided once, here, in offset order with the earlier claimant
- * keeping the bytes. What a section declared stays in file_off and file_size for a
- * module to read; what it actually owns goes in claim_off and claim_len, and the
- * two differing sets an anomaly. Resolving each region independently and hoping
- * they did not collide is what produced the bug.
- *
- * Returns the first offset past everything claimed.
- */
+/* Tags outside the section index space, so a settled claim says what it was. */
+#define HDR_TAG (KOF_PE_MAX_SECTIONS)
+#define RES_TAG (KOF_PE_MAX_SECTIONS + 1)
+
 /*
  * The resource directory as a file range.
  *
@@ -323,10 +310,6 @@ static void read_sections(kof_buf file, struct kof_pe_info *p, uint64_t sectab)
  * declaring more than its section has is describing bytes that are not there, and
  * following it would hand a scan a range past the end of the file.
  */
-/* Tags outside the section index space, so a settled claim says what it was. */
-#define HDR_TAG (KOF_PE_MAX_SECTIONS)
-#define RES_TAG (KOF_PE_MAX_SECTIONS + 1)
-
 static void resolve_resource(struct kof_pe_info *p, uint64_t obj_size)
 {
 	uint64_t rva, len, off;
@@ -348,6 +331,23 @@ static void resolve_resource(struct kof_pe_info *p, uint64_t obj_size)
 	p->res_len = len;
 }
 
+/*
+ * Settle which bytes each structure owns.
+ *
+ * The regions have to be disjoint or they are not a partition, and nothing in the
+ * format guarantees that: two sections may point at the same file bytes, a section
+ * may start inside the headers, and the certificate directory may point anywhere
+ * at all. Fuzzing found this immediately - a single flipped byte in a section
+ * header was enough to make CODE and OVERLAY return the same offset.
+ *
+ * So ownership is decided once, here, in offset order with the earlier claimant
+ * keeping the bytes. What a section declared stays in file_off and file_size for a
+ * module to read; what it actually owns goes in claim_off and claim_len, and the
+ * two differing sets an anomaly. Resolving each region independently and hoping
+ * they did not collide is what produced the bug.
+ *
+ * Returns the first offset past everything claimed.
+ */
 static uint64_t settle_claims(struct kof_pe_info *p, uint64_t obj_size)
 {
 	struct kof_claim c[KOF_PE_MAX_SECTIONS + 2];
@@ -674,21 +674,36 @@ int kof_pe_parse(kof_buf file, struct kof_pe_info *info, struct kof_obj_ctx *ctx
 	ctx->resolve_scan = pe_resolve_scan;
 	return 1;
 }
+
 /* ---- names, for tools ------------------------------------------------------- */
+
+/* The regions, once: bit list and names generated from the same line each. */
+#define PE_REGIONS(X)           \
+	X(KOF_SCAN_PE_HEADERS)    \
+	X(KOF_SCAN_PE_CODE)       \
+	X(KOF_SCAN_PE_DATA)       \
+	X(KOF_SCAN_PE_RESOURCE)   \
+	X(KOF_SCAN_PE_SIGNATURE)  \
+	X(KOF_SCAN_PE_OVERLAY)    \
+	X(KOF_SCAN_PE_UNCLAIMED)
+
+#define X_BIT(b)  (b),
+#define X_CASE(b) case (b): return #b;
+
+const uint32_t kof_pe_region_bits[] = { PE_REGIONS(X_BIT) };
+_Static_assert(sizeof kof_pe_region_bits / sizeof kof_pe_region_bits[0] ==
+	       KOF_PE_REGION_COUNT, "region list and its count disagree");
 
 const char *kof_pe_region_name(uint32_t bit)
 {
 	switch (bit) {
-	case KOF_SCAN_PE_HEADERS:   return "KOF_SCAN_PE_HEADERS";
-	case KOF_SCAN_PE_CODE:      return "KOF_SCAN_PE_CODE";
-	case KOF_SCAN_PE_DATA:      return "KOF_SCAN_PE_DATA";
-	case KOF_SCAN_PE_SIGNATURE: return "KOF_SCAN_PE_SIGNATURE";
-	case KOF_SCAN_PE_OVERLAY:   return "KOF_SCAN_PE_OVERLAY";
-	case KOF_SCAN_PE_UNCLAIMED: return "KOF_SCAN_PE_UNCLAIMED";
-	case KOF_SCAN_PE_RESOURCE:  return "KOF_SCAN_PE_RESOURCE";
-	default:                    return 0;
+	PE_REGIONS(X_CASE)
+	default: return 0;
 	}
 }
+
+#undef X_BIT
+#undef X_CASE
 
 const char *kof_pe_anomaly_name(unsigned index)
 {
