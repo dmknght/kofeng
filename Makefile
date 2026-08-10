@@ -48,6 +48,27 @@ all: sdk $(BUILD)/kofscanner $(BUILD)/kofexamine $(BUILD)/ksigbuilder
 $(BUILD):
 	@mkdir -p $(BUILD)
 
+# ------------------------------------------------------------ the flag stamp
+#
+# An object file does not record the flags it was built with, and make compares
+# timestamps. So `make` followed by `make SAN=1` rebuilt nothing: every object was
+# newer than its source, and the "sanitizer" run was a release binary reporting
+# green. Same failure as missing header dependencies - a safety net that silently
+# is not there - and it was caught by checking `ldd` for the sanitizer runtime,
+# not by anything failing.
+#
+# Written by $(shell), which runs while the makefile is being read. That timing is
+# the whole point: make decides what is out of date before it runs any recipe, so a
+# stamp updated by a recipe updates it too late to matter.
+FLAGSIG := $(CC) $(CFLAGS) $(LDFLAGS)
+STAMP   := $(BUILD)/.flags
+
+$(shell mkdir -p $(BUILD); \
+	[ -f $(STAMP) ] && [ "$$(cat $(STAMP))" = "$(FLAGSIG)" ] || \
+	printf '%s' '$(FLAGSIG)' > $(STAMP))
+
+$(STAMP): ;
+
 # ---------------------------------------------------------------- the library
 
 LIB_SRC := libkofeng/kofeng.c \
@@ -63,7 +84,7 @@ LIB_SRC := libkofeng/kofeng.c \
 LIB_OBJ := $(patsubst libkofeng/%.c,$(BUILD)/lib_%.o,$(LIB_SRC))
 LIB     := $(SDK)/lib/libkofeng.a
 
-$(BUILD)/lib_%.o: libkofeng/%.c | $(BUILD)
+$(BUILD)/lib_%.o: libkofeng/%.c $(STAMP) | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -106,7 +127,7 @@ sdk: $(LIB) $(SDK_HDR)
 
 SCANNER_SRC := kofscanner/kofscanner.c
 
-$(BUILD)/kofscanner: $(SCANNER_SRC) $(LIB) $(SDK_HDR)
+$(BUILD)/kofscanner: $(SCANNER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 	$(CC) $(CFLAGS) -I$(SDK)/include $(SCANNER_SRC) $(LIB) -o $@ $(LDFLAGS)
 
 # --------------------------------------------------------------- the examiner
@@ -115,7 +136,7 @@ $(BUILD)/kofscanner: $(SCANNER_SRC) $(LIB) $(SDK_HDR)
 # view, and no public surface offers one. The reason that is not a lapse is
 # written at the top of the file.
 
-$(BUILD)/kofexamine: kofexamine/kofexamine.c $(LIB) $(SDK_HDR)
+$(BUILD)/kofexamine: kofexamine/kofexamine.c $(LIB) $(SDK_HDR) $(STAMP)
 	$(CC) $(CFLAGS) -I$(SDK)/include $< $(LIB) -o $@ $(LDFLAGS)
 
 # ----------------------------------------------------- the database toolchain
@@ -124,7 +145,7 @@ $(BUILD)/kofexamine: kofexamine/kofexamine.c $(LIB) $(SDK_HDR)
 # source, and the default mode packs compiled artefacts into .ksig. Build-time
 # only, and deliberately not linked into anything that runs on an endpoint.
 
-$(BUILD)/ksigbuilder: ksigbuilder/ksigbuilder.c $(LIB) $(SDK_HDR)
+$(BUILD)/ksigbuilder: ksigbuilder/ksigbuilder.c $(LIB) $(SDK_HDR) $(STAMP)
 	$(CC) $(CFLAGS) $< $(LIB) -o $@ $(LDFLAGS)
 
 # ------------------------------------------------------------- the database
@@ -184,7 +205,7 @@ UNIT_BIN := $(patsubst tests/unit/%.c,$(BUILD)/unit_%,$(UNIT_SRC))
 
 # Linked against the library, so a unit test can exercise it rather than only
 # whatever it can compile in on its own.
-$(BUILD)/unit_%: tests/unit/%.c $(LIB) | $(BUILD)
+$(BUILD)/unit_%: tests/unit/%.c $(LIB) $(STAMP) | $(BUILD)
 	$(CC) $(CFLAGS) $< $(LIB) -o $@ $(LDFLAGS)
 
 unit: $(UNIT_BIN)
