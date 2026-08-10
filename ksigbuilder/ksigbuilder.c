@@ -69,6 +69,7 @@
 #include <kofmod/kofsig.h>   /* KOF_SCAN_ALL, the per-module maxima */
 #include <kofmod/elf.h>      /* the ELF region names a range may be built from */
 #include <kofmod/pe.h>       /* and the PE ones */
+#include <kofmod/gzip.h>     /* and the gzip ones */
 
 #include "../libkofeng/kofdb/kofpackw.h"
 #include "../libkofeng/kofdb/kofpack.h"
@@ -183,6 +184,12 @@ static const struct rgn_name rgn_names[] = {
 	RGN(KOF_SCAN_PE_SIGNATURE),
 	RGN(KOF_SCAN_PE_OVERLAY),
 	RGN(KOF_SCAN_PE_UNCLAIMED),
+
+	RGN(KOF_SCAN_GZIP_HEADER),
+	RGN(KOF_SCAN_GZIP_NAME),
+	RGN(KOF_SCAN_GZIP_DATA),
+	RGN(KOF_SCAN_GZIP_TRAILER),
+	RGN(KOF_SCAN_GZIP_UNCLAIMED),
 
 	{ NULL, 0 }
 };

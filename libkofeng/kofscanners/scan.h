@@ -19,7 +19,9 @@
 #include "../kofmatchers/kofmatch.h"
 #include "../kofparsers/binaries/elf_parse.h"
 #include "../kofparsers/binaries/pe_parse.h"
+#include "../kofparsers/containers/gzip_parse.h"
 #include "objsrc.h"
+#include "../kofdecomp/inflate.h"
 
 /*
  * Everything mutable, one per thread.
@@ -97,9 +99,24 @@ struct kof_scanner {
 	 */
 	uint64_t resident, resident_max;
 
-	/* Where a produced object is cut and the next one begun. Never above
-	 * resident_max, or the cut could not be reached. */
-	uint64_t chunk;
+	/*
+	 * The most one produced object may hold. Past it the object is closed with
+	 * what it has and the rest of that entry is dropped - see KOF_OBJ_CAP.
+	 * Never above resident_max, or the cap could not be reached.
+	 */
+	uint64_t obj_cap;
+
+	/*
+	 * The DEFLATE decoder, allocated the first time one is needed.
+	 *
+	 * 32KB of sliding window, and it is per thread rather than per stream for
+	 * the same reason the parsed views are: an archive of a thousand entries
+	 * would otherwise be a thousand allocations of it, and a scanner that never
+	 * meets a compressed file never pays for it at all. Nothing carries over
+	 * between streams - kof_inflate resets every field, including zeroing the
+	 * window, which is what keeps one entry's bytes out of the next.
+	 */
+	struct kof_inflate *inf;
 
 	int      exhausted;
 

@@ -78,6 +78,8 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofmatchers/hexcomp.c \
            libkofeng/kofparsers/binaries/elf_parse.c \
            libkofeng/kofparsers/binaries/pe_parse.c \
+           libkofeng/kofparsers/containers/gzip_parse.c \
+           libkofeng/kofdecomp/inflate.c \
            libkofeng/kofscanners/scan.c \
            libkofeng/kofscanners/objctx.c \
            libkofeng/kofscanners/objsrc.c
@@ -108,7 +110,8 @@ $(LIB): $(LIB_OBJ)
 SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/kofsig.h \
            $(SDK)/include/kofmod/elf.h \
-           $(SDK)/include/kofmod/pe.h
+           $(SDK)/include/kofmod/pe.h \
+           $(SDK)/include/kofmod/gzip.h
 
 $(SDK)/include/kofeng.h: libkofeng/kofeng.h
 	@mkdir -p $(dir $@)
@@ -206,8 +209,14 @@ UNIT_BIN := $(patsubst tests/unit/%.c,$(BUILD)/unit_%,$(UNIT_SRC))
 
 # Linked against the library, so a unit test can exercise it rather than only
 # whatever it can compile in on its own.
+#
+# UNIT_LIBS_<name> adds what one test needs. Only the differential decompressor
+# test uses it: it links zlib as an ORACLE, to check our decoder against, which is
+# the one thing the library must never do itself.
+UNIT_LIBS_inflate_diff := -lz
+
 $(BUILD)/unit_%: tests/unit/%.c $(LIB) $(STAMP) | $(BUILD)
-	$(CC) $(CFLAGS) $< $(LIB) -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $< $(LIB) -o $@ $(LDFLAGS) $(UNIT_LIBS_$*)
 
 unit: $(UNIT_BIN)
 	@rc=0; for t in $(UNIT_BIN); do \

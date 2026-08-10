@@ -68,6 +68,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc->kids);
 	for (i = 0; i < KOF_FMT_COUNT; i++)
 		free(sc->view[i]);
+	free(sc->inf);
 	free(sc);
 }
 
@@ -258,11 +259,18 @@ static int pe_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 	return kof_pe_parse(b, (struct kof_pe_info *)v, c);
 }
 
+static int gzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_gzip_parse(b, (struct kof_gzip_info *)v, c);
+}
+
 static const struct parser parsers[] = {
-	{ KOF_FMT_ELF, (uint32_t)sizeof(struct kof_elf_info),
-	  kof_elf_sniff, elf_parse_thunk },
-	{ KOF_FMT_PE,  (uint32_t)sizeof(struct kof_pe_info),
-	  kof_pe_sniff,  pe_parse_thunk  }
+	{ KOF_FMT_ELF,  (uint32_t)sizeof(struct kof_elf_info),
+	  kof_elf_sniff,  elf_parse_thunk  },
+	{ KOF_FMT_PE,   (uint32_t)sizeof(struct kof_pe_info),
+	  kof_pe_sniff,   pe_parse_thunk   },
+	{ KOF_FMT_GZIP, (uint32_t)sizeof(struct kof_gzip_info),
+	  kof_gzip_sniff, gzip_parse_thunk }
 };
 
 /*

@@ -143,9 +143,9 @@ ntargets=0
 # module which really does apply to everything says so, and so that the count
 # still trips the format-header check below.
 case "$targets" in
-*KOF_FMT_ANY*) target_mask=63; ntargets=6 ;;
+*KOF_FMT_ANY*) target_mask=127; ntargets=7 ;;
 esac
-[ "$target_mask" -eq 0 ] && for t in UNKNOWN ELF PE MACHO SCRIPT TEXT; do
+[ "$target_mask" -eq 0 ] && for t in UNKNOWN ELF PE MACHO SCRIPT TEXT GZIP; do
 	case "$targets" in
 	*KOF_FMT_$t*)
 		case $t in
@@ -155,6 +155,7 @@ esac
 		MACHO)   bit=8  ;;
 		SCRIPT)  bit=16 ;;
 		TEXT)    bit=32 ;;
+		GZIP)    bit=64 ;;
 		esac
 		target_mask=$((target_mask | bit))
 		ntargets=$((ntargets + 1))
@@ -167,16 +168,34 @@ if [ "$target_mask" -eq 0 ]; then
 fi
 
 # A module may include exactly one format header. The reason is kof_elf() and
-# its siblings: they cast ctx->fmt, and the cast is sound only because the host
-# never invokes a module for a format its target does not cover. A module that
-# claims two formats has to branch correctly on every access, which is N places
-# that can forget instead of one that can be tested. Cross-format detections are
-# written as two modules and joined at the record layer, which also prefilters
-# better than one module that runs on both.
+# its siblings: they cast ctx->file_header, and the cast is sound only because
+# the host never invokes a module for a format its target does not cover. A
+# module that claims two formats has to branch correctly on every access, which
+# is N places that can forget instead of one that can be tested. Cross-format
+# detections are written as two modules and joined at the record layer, which
+# also prefilters better than one module that runs on both.
+#
+# The header a module includes and the target bit it must therefore declare, in
+# one list. It was three checks with the paths written out separately, and every
+# one of them looked for <kofeng/...> while modules have always included
+# <kofmod/...> - so nfmt was always zero, and NONE of the three rules below has
+# ever fired. They were not weak checks, they were absent ones, which is the
+# failure mode a check that cannot be seen to run always has. One list, so a
+# format added here cannot be half-added.
+fmt_hdrs="elf:2 pe:4 macho:8 gzip:64"
+
 nfmt=0
-for hdr in elf pe macho; do
-	grep -qE "^[[:space:]]*#[[:space:]]*include[[:space:]]*<kofeng/$hdr\.h>" "$src" \
-		&& nfmt=$((nfmt + 1))
+for pair in $fmt_hdrs; do
+	hdr=${pair%:*}
+	bit=${pair#*:}
+	grep -qE "^[[:space:]]*#[[:space:]]*include[[:space:]]*<kofmod/$hdr\\.h>" "$src" \
+		|| continue
+	nfmt=$((nfmt + 1))
+	if [ $((target_mask & bit)) -eq 0 ]; then
+		echo "FAIL: includes kofmod/$hdr.h but does not target that format" >&2
+		echo "      the view it gives is only sound for objects of that format" >&2
+		exit 1
+	fi
 done
 if [ "$nfmt" -gt 1 ]; then
 	echo "FAIL: module includes $nfmt format headers; exactly one is allowed" >&2
@@ -191,11 +210,6 @@ if [ "$nfmt" -eq 1 ] && [ "$ntargets" -gt 1 ]; then
 	echo "FAIL: a format header with $ntargets targets is unsound" >&2
 	echo "      kof_<fmt>() casts ctx->file_header; with more than one target" >&2
 	echo "      there is no single view it can return" >&2
-	exit 1
-fi
-if grep -qE '^[[:space:]]*#[[:space:]]*include[[:space:]]*<kofeng/elf\.h>' "$src" \
-   && [ $((target_mask & 2)) -eq 0 ]; then
-	echo "FAIL: includes elf.h but does not target KOF_FMT_ELF" >&2
 	exit 1
 fi
 echo "   target=$targets (mask $target_mask)"

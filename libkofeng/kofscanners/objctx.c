@@ -179,18 +179,32 @@ static int c_find_str_in(const struct kof_obj_ctx *ctx, uint32_t str_id,
 #define SINK_SPILL (1u << 20)
 
 /*
- * Cut a produced object here and start another.
+ * The most one produced object may hold. Past it, the object is closed with what it
+ * has and the REST OF THAT ENTRY IS DROPPED.
  *
- * A decompressed stream can be arbitrarily long, and one enormous child would be
- * one enormous allocation no matter what the totals allow. Chunking turns it into a
- * series of objects that are each finished with and released before the next
- * matters, which is what keeps the resident ceiling reachable at all.
+ * Truncation, not chunking, and the difference is the whole point. An entry in a
+ * container is a file: it has a header at offset zero and everything else in it is
+ * located relative to that header. Cutting it at a byte count and calling the
+ * remainder a second object produces something that was never a file - it begins
+ * mid-structure, nothing identifies it, so no format is recognised, no region is
+ * resolved, and every module that names a format is ruled out before it runs. A
+ * stream cut into ten pieces is one object that can be parsed and nine that can
+ * only be searched as raw bytes.
  *
- * The cost is a pattern lying across a cut, which is the same trade the region
- * machinery already makes at an extent boundary. Chunks big enough that it is rare,
- * small enough that several fit under the ceiling.
+ * Keeping the head is what makes the truncated object still worth having: a PE's
+ * header, imports, entry point and first sections are all at the front, and so is
+ * every structure a detector reads. The tail of an object this large is data.
+ *
+ * What is given up is real and is reported rather than hidden: an entry longer than
+ * this is scanned in part, and the object is marked incomplete. That is the honest
+ * trade at this size - an object of this size is almost never a packed executable
+ * but an installer or an embedded package, whose interesting parts are entries in
+ * their own right and are reached by unpacking it, not by scanning its tail.
+ *
+ * Clamped to half the resident ceiling below, so the object being built and the one
+ * being scanned both fit under it.
  */
-#define SINK_CHUNK (32u << 20)
+#define KOF_OBJ_CAP (64u << 20)
 
 /*
  * The largest single emit accepted.
@@ -342,7 +356,19 @@ static int c_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 	 * by which time this module has returned. That is the whole reason a cut is
 	 * the right answer and "wait for room" is not.
 	 */
-	if (sc->resident + n > sc->resident_max) {
+	/*
+	 * Two ceilings, one action. The object cap says this object has enough of
+	 * the entry to be worth scanning; the resident ceiling says there is no
+	 * memory to hold more of it. Either way what is in hand is closed as a
+	 * child and the module is told no.
+	 *
+	 * Telling it matters: a decompressor that gets a zero stops working on this
+	 * entry and moves to the next one, which is what should happen. A module
+	 * that ignores the answer and emits again simply gets another zero - the
+	 * sink is empty by then, and c_child makes no child out of nothing.
+	 */
+	if (sc->sink_len + sc->sink_spilled + n > sc->obj_cap ||
+	    sc->resident + n > sc->resident_max) {
 		c_child(ctx);
 		sc->exhausted = 1;
 		return 0;
@@ -391,14 +417,75 @@ static int c_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 	if (sc->resident > sc->st.peak_resident)
 		sc->st.peak_resident = sc->resident;
 
-	/*
-	 * Cut here rather than letting one object grow without end. The module is
-	 * not told and does not need to be: it goes on emitting, and what it is
-	 * emitting into simply becomes a new object.
-	 */
-	if (sc->sink_len + sc->sink_spilled >= sc->chunk)
-		return c_child(ctx);
 	return 1;
+}
+
+/*
+ * Decompression, as a host service.
+ *
+ * The decoder writes into the same sink an ordinary emit does, so nothing here
+ * enforces a limit: c_emit already refuses past the object cap, past the resident
+ * ceiling and past the total budget, and a refusal propagates back as a zero from
+ * the sink, which stops the decoder where it stands. That is the property worth
+ * stating plainly - a decompression bomb is not recognised, it is simply a stream
+ * whose sink stops accepting, and it costs the same as any other stream that is
+ * cut short.
+ */
+static int inflate_sink(void *user, const uint8_t *p, uint32_t n)
+{
+	const struct kof_obj_ctx *ctx = user;
+
+	return c_emit(ctx, p, n);
+}
+
+static uint64_t c_inflate(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t len)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	kof_buf b;
+	uint64_t produced = 0;
+
+	if (!sc->cur_src)
+		return 0;
+	b = kof_src_buf(sc->cur_src);
+	/*
+	 * Clipped to what the object holds, not refused.
+	 *
+	 * The length comes from a container's own metadata, and a compressed size
+	 * that runs past the end of the file is the ordinary hostile case rather
+	 * than an exceptional one - the same reasoning kof_clip_len is written for.
+	 * Decoding what is really there and reporting truncation is more useful
+	 * than declining to look.
+	 */
+	len = kof_clip_len(b.n, off, len);
+	if (!len)
+		return 0;
+
+	if (!sc->inf) {
+		sc->inf = malloc(sizeof *sc->inf);
+		if (!sc->inf) {
+			sc->exhausted = 1;
+			return 0;
+		}
+	}
+
+	/*
+	 * A truncated or corrupt stream is not an error here.
+	 *
+	 * Whatever was decoded before the failure is real output and is the part
+	 * worth scanning: archives inside malware are routinely damaged, and
+	 * discarding a megabyte of decoded payload because the last block is
+	 * missing throws away the part that identifies it. It is recorded as an
+	 * incomplete examination, not as a clean one.
+	 */
+	switch (kof_inflate(sc->inf, b.p + off, len, inflate_sink,
+			    (void *)ctx, NULL, &produced)) {
+	case KOF_INF_OK:
+		break;
+	default:
+		sc->exhausted = 1;
+		break;
+	}
+	return produced;
 }
 
 /* Close the object being emitted and start the next. */
@@ -452,12 +539,12 @@ static int c_child(const struct kof_obj_ctx *ctx)
  */
 static const struct kof_content kof_detect_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
-	c_find_str_in, c_csum, NULL, NULL, NULL
+	c_find_str_in, c_csum, NULL, NULL, NULL, NULL
 };
 
 static const struct kof_content kof_unpack_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
-	c_find_str_in, c_csum, c_window, c_emit, c_child
+	c_find_str_in, c_csum, c_window, c_emit, c_child, c_inflate
 };
 
 /*
@@ -511,15 +598,15 @@ void kof_scan_budget(struct kof_scanner *sc, uint64_t obj_size,
 	 * Half the ceiling, at most.
 	 *
 	 * Not the whole of it: while a child is being unpacked, that child is itself
-	 * resident, so a chunk the size of the ceiling leaves no room to produce
+	 * resident, so a cap the size of the ceiling leaves no room to produce
 	 * anything and the tree stops one level down. Half means the object in hand
-	 * and the object being built both fit, which is what lets a stream be cut,
-	 * scanned, released and continued.
+	 * and the object being built both fit, which is what lets a container be
+	 * unpacked one entry at a time.
 	 */
-	sc->chunk = sc->resident_max / 2 < SINK_CHUNK ? sc->resident_max / 2
-						      : SINK_CHUNK;
-	if (sc->chunk == 0)
-		sc->chunk = 1;
+	sc->obj_cap = sc->resident_max / 2 < KOF_OBJ_CAP ? sc->resident_max / 2
+							 : KOF_OBJ_CAP;
+	if (sc->obj_cap == 0)
+		sc->obj_cap = 1;
 	sc->exhausted = 0;
 }
 

@@ -85,9 +85,11 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
+#include <kofmod/gzip.h>
 
 #include "../libkofeng/kofparsers/binaries/elf_parse.h"
 #include "../libkofeng/kofparsers/binaries/pe_parse.h"
+#include "../libkofeng/kofparsers/containers/gzip_parse.h"
 
 /*
  * What one format offers a tool: how to recognise it, how to parse it, how big
@@ -113,6 +115,11 @@ struct fmt {
 static int elf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
 	return kof_elf_parse(b, (struct kof_elf_info *)v, c);
+}
+
+static int gzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_gzip_parse(b, (struct kof_gzip_info *)v, c);
 }
 
 static int pe_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
@@ -222,13 +229,55 @@ static void print_pe(const void *view, const struct kof_obj_ctx *ctx)
 	}
 }
 
+/*
+ * What a gzip wrapper says about the stream it holds, before anything decodes it.
+ *
+ * The declared ratio is printed beside the sizes rather than left to be worked
+ * out: it is the number worth looking at first on a container, and a file that
+ * admits to expanding a thousandfold is one to open deliberately.
+ */
+static void print_gzip(const void *v, const struct kof_obj_ctx *ctx)
+{
+	const struct kof_gzip_info *g = v;
+
+	(void)ctx;
+
+	printf("  method    %u%s\n", g->method,
+	       g->method == KOF_GZIP_DEFLATE ? " (deflate)" : " (not deflate)");
+	printf("  flags     0x%02x%s%s%s%s%s\n", g->flags,
+	       (g->flags & KOF_GZIP_FTEXT)    ? " TEXT"    : "",
+	       (g->flags & KOF_GZIP_FHCRC)    ? " HCRC"    : "",
+	       (g->flags & KOF_GZIP_FEXTRA)   ? " EXTRA"   : "",
+	       (g->flags & KOF_GZIP_FNAME)    ? " NAME"    : "",
+	       (g->flags & KOF_GZIP_FCOMMENT) ? " COMMENT" : "");
+	printf("  mtime     %u   os=%u xfl=%u\n", g->mtime, g->os, g->xfl);
+	printf("  stream    off=%llu len=%llu\n",
+	       (unsigned long long)g->data_off, (unsigned long long)g->data_len);
+	if (g->name_len)
+		printf("  name      off=%llu len=%llu\n",
+		       (unsigned long long)g->name_off,
+		       (unsigned long long)g->name_len);
+	if (g->comment_len)
+		printf("  comment   off=%llu len=%llu\n",
+		       (unsigned long long)g->comment_off,
+		       (unsigned long long)g->comment_len);
+	if (g->trailer_off)
+		printf("  trailer   off=%llu crc=0x%08x isize=%u%s\n",
+		       (unsigned long long)g->trailer_off, g->crc32, g->isize,
+		       g->data_len && g->isize / g->data_len >= 100u
+		       ? "   <- declared expansion is large" : "");
+}
+
 static const struct fmt formats[] = {
 	{ (uint32_t)sizeof(struct kof_elf_info), kof_elf_sniff, elf_parse_thunk,
 	  kof_elf_region_bits, KOF_ELF_REGION_COUNT,
 	  kof_elf_region_name, kof_elf_anomaly_name, print_elf },
 	{ (uint32_t)sizeof(struct kof_pe_info), kof_pe_sniff, pe_parse_thunk,
 	  kof_pe_region_bits, KOF_PE_REGION_COUNT,
-	  kof_pe_region_name, kof_pe_anomaly_name, print_pe }
+	  kof_pe_region_name, kof_pe_anomaly_name, print_pe },
+	{ (uint32_t)sizeof(struct kof_gzip_info), kof_gzip_sniff, gzip_parse_thunk,
+	  kof_gzip_region_bits, KOF_GZIP_REGION_COUNT,
+	  kof_gzip_region_name, kof_gzip_anomaly_name, print_gzip }
 };
 
 /*

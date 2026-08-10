@@ -78,10 +78,11 @@ enum kof_format {
 	KOF_FMT_MACHO   = 3,
 	KOF_FMT_SCRIPT  = 4,
 	KOF_FMT_TEXT    = 5,
+	KOF_FMT_GZIP    = 6,
 
 	/* One past the last, so a host can size a per-format table. Not a format:
 	 * nothing is ever this. */
-	KOF_FMT_COUNT   = 6
+	KOF_FMT_COUNT   = 7
 };
 
 /*
@@ -129,6 +130,7 @@ static inline const char *kof_format_name(uint8_t fmt)
 	case KOF_FMT_MACHO:  return "MachO";
 	case KOF_FMT_SCRIPT: return "Script";
 	case KOF_FMT_TEXT:   return "Text";
+	case KOF_FMT_GZIP:   return "Gzip";
 	default:             return "Unknown";
 	}
 }
@@ -294,10 +296,27 @@ struct kof_content {
 	 * and a module cannot tell.
 	 *
 	 * child() closes the object being emitted and starts the next.
+	 *
+	 * inflate() is emit() with a decoder in front of it: the module names a
+	 * DEFLATE stream inside this object and the host decodes it straight into
+	 * the sink. Output never crosses back into the module, so a bomb is refused
+	 * by the same code that refuses an ordinary emit and the decoder stops the
+	 * moment it is. Returns bytes produced.
+	 *
+	 * A host service for the reason find_str is one: the module supplies the
+	 * decision - THIS range, THIS format - and the host does the work over the
+	 * bytes. A decoder inside a module would pull its input one byte at a time
+	 * through rd8, an indirect call per byte of a compressed stream, and every
+	 * module that met a DEFLATE stream would carry its own copy of the decoder.
+	 *
+	 * Standard and shared belongs here; a transform peculiar to one family - an
+	 * XOR key, a bespoke run encoding, a packer's own scheme - is the module's
+	 * own business and is written with emit. That is why both exist.
 	 */
 	int (*window)(const struct kof_obj_ctx *, uint64_t off, uint64_t len);
 	int (*emit)(const struct kof_obj_ctx *, const void *bytes, uint32_t n);
 	int (*child)(const struct kof_obj_ctx *);
+	uint64_t (*inflate)(const struct kof_obj_ctx *, uint64_t off, uint64_t len);
 };
 
 /*
@@ -656,6 +675,25 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 
 #define kof_child()                                                        \
 	((ctx)->content->child ? (ctx)->content->child((ctx)) : 0)
+
+/*
+ * Decompress a DEFLATE stream at off into the object being produced.
+ *
+ * `len` bounds the input, not the output: the stream ends where DEFLATE says it
+ * does, which is usually sooner. Returns bytes produced - zero when nothing could
+ * be decoded, which is the answer for a corrupt stream and for a budget that was
+ * already gone.
+ *
+ * It does not close the child. A module may want to put more after the
+ * decompressed bytes, or decompress two streams into one object, so kof_child()
+ * stays the module's to call:
+ *
+ *     kof_unpack_deflate(gz->data_off, gz->data_len);
+ *     kof_child();
+ */
+#define kof_unpack_deflate(off, len)                                       \
+	((ctx)->content->inflate ?                                         \
+	 (ctx)->content->inflate((ctx), (uint64_t)(off), (uint64_t)(len)) : 0)
 
 /* Non-zero if at least one of them is present. Stops at the first hit. */
 #define kof_find_str_any(rng, ...) (KOF_FS_FOLD(||, rng, __VA_ARGS__))
