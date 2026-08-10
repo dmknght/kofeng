@@ -119,25 +119,6 @@ static inline int kof_rd_u64(kof_buf b, uint64_t off, int be, uint64_t *out)
 }
 
 /*
- * Read an address sized field: 4 bytes for a 32 bit object, 8 for a 64 bit
- * one, widened into a uint64_t. This is the only place class dependence is
- * allowed to appear, which is what lets every layer above be written once.
- */
-static inline int kof_rd_addr(kof_buf b, uint64_t off, int is64, int be,
-			      uint64_t *out)
-{
-	if (is64)
-		return kof_rd_u64(b, off, be, out);
-	{
-		uint32_t v;
-		if (!kof_rd_u32(b, off, be, &v))
-			return 0;
-		*out = v;
-		return 1;
-	}
-}
-
-/*
  * Arithmetic on values that came out of a file.
  *
  * Every one of these was written inline several times before it was written once,
@@ -321,10 +302,12 @@ static inline uint32_t kof_crc32(const void *data, uint64_t len)
 }
 
 /*
- * strdup, spelled out.
+ * strdup with an explicit length, spelled out.
  *
- * POSIX has it and this tree builds as strict ISO C11 - the same reason the loaders use
- * stat() rather than fstat(fileno()).
+ * POSIX has strdup and this tree builds as strict ISO C11 - the same reason the
+ * loaders use stat() rather than fstat(fileno()). The length is explicit because
+ * every caller already has it and the alternative was a second wrapper that only
+ * called strlen.
  */
 static inline char *kof_strdup_n(const char *s, uint64_t n)
 {
@@ -336,9 +319,5 @@ static inline char *kof_strdup_n(const char *s, uint64_t n)
 	return p;
 }
 
-static inline char *kof_strdup(const char *s)
-{
-	return kof_strdup_n(s, strlen(s));
-}
 
 #endif /* KOFENG_KOFCORE_H */

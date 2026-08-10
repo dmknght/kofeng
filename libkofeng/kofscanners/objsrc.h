@@ -81,15 +81,22 @@ void               kof_src_unref(struct kof_objsrc *);
 
 kof_buf kof_src_buf(const struct kof_objsrc *);
 
+
 /*
- * How many bytes this source cost to produce, or zero for a file or a window.
+ * Tell someone when these bytes are actually gone.
  *
- * The scanner charges this against its memory ceiling and gives it back when the
- * object is finished with. A window is free by construction - it is the parent's
- * mapping at a different offset - so accounting for it would double-count memory
- * that was never allocated.
+ * The scanner has a ceiling on how much produced data may be alive at once, and
+ * that count has to fall exactly when the memory is freed. Doing it at the place
+ * that seemed to be "finished with the object" looked equivalent and was not:
+ * a child abandoned because the walk was aborted, or one refused because the child
+ * cap was reached, or one whose allocation failed, all died on paths that never
+ * reached that place - and each of them shrank the ceiling for the rest of the
+ * scan by however much it had been charged.
+ *
+ * Hooked to destruction instead, the count cannot drift: it goes up in exactly one
+ * place and comes down in exactly one place, and the second is the free itself.
  */
-uint64_t kof_src_produced(const struct kof_objsrc *);
+void kof_src_on_free(struct kof_objsrc *, void (*fn)(void *, uint64_t), void *user);
 
 /*
  * An unnamed temporary file to write produced bytes into, or -1.

@@ -113,8 +113,6 @@ void kof_scan_budget(struct kof_scanner *, uint64_t obj_size,
 /* Release anything a module left half-produced, and hand back what it finished. */
 void kof_scan_kids_reset(struct kof_scanner *);
 
-/* A produced child has been finished with: its bytes stop counting as resident. */
-void kof_scan_release(struct kof_scanner *, uint64_t produced);
 
 struct kof_scanner *kof_scan_new(const struct kof_engine *);
 void                 kof_scan_free(struct kof_scanner *);

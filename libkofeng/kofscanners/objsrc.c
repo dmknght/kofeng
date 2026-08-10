@@ -41,6 +41,11 @@ struct kof_objsrc {
 	/* Non-zero only for bytes the engine produced, which are the only ones it
 	 * had to find memory for. */
 	uint64_t           produced;
+
+	/* Called with `produced` when this source is destroyed, so an owner can
+	 * give the memory back to whatever account it came from. */
+	void             (*on_free)(void *, uint64_t);
+	void              *on_free_arg;
 };
 
 static struct kof_objsrc *src_new(void)
@@ -171,11 +176,18 @@ void kof_src_unref(struct kof_objsrc *s)
 {
 	while (s && --s->refs == 0) {
 		struct kof_objsrc *parent = s->parent;
+		void (*on_free)(void *, uint64_t) = s->on_free;
+		void *arg = s->on_free_arg;
+		uint64_t produced = s->produced;
 
 		if (s->map)
 			munmap(s->map, s->map_len);
 		free(s->heap);
 		free(s);
+		/* After the free, not before: the account should reflect memory
+		 * that has already been handed back. */
+		if (on_free)
+			on_free(arg, produced);
 		/* Iterating rather than recursing: a chain of windows can be as deep
 		 * as the object tree, and releasing the root of one should not put
 		 * that depth on the C stack. */
@@ -188,9 +200,12 @@ kof_buf kof_src_buf(const struct kof_objsrc *s)
 	return s ? kof_buf_make(s->p, s->n) : kof_buf_make(NULL, 0);
 }
 
-uint64_t kof_src_produced(const struct kof_objsrc *s)
+void kof_src_on_free(struct kof_objsrc *s, void (*fn)(void *, uint64_t), void *user)
 {
-	return s ? s->produced : 0;
+	if (s) {
+		s->on_free = fn;
+		s->on_free_arg = user;
+	}
 }
 
 int kof_src_tmpfile(void)

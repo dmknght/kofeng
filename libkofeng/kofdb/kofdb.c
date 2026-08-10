@@ -395,7 +395,7 @@ static int arena_open(struct kof_engine *e, size_t want)
 {
 	size_t ps = page_size_of();
 
-	e->code_cap = (want + ps - 1) / ps * ps;
+	e->code_cap = kof_round_up(want, ps);
 	if (e->code_cap == 0)
 		e->code_cap = ps;
 	e->code = mmap(NULL, e->code_cap, PROT_READ | PROT_WRITE,
@@ -606,14 +606,12 @@ struct kof_engine *kof_db_load(const char *path)
 		memo   += h->memo_slots;
 		/* Padded to the same boundary the packer used inside each pool, so
 		 * an aligned offset stays aligned once the pools are concatenated. */
-		spool  = (spool + KOF_HEX_PROG_ALIGN - 1) / KOF_HEX_PROG_ALIGN
-		       * KOF_HEX_PROG_ALIGN;
-		spool += h->sec[KOF_SEC_STR_POOL].len;
+		spool = kof_round_up(spool, KOF_HEX_PROG_ALIGN) +
+			h->sec[KOF_SEC_STR_POOL].len;
 		/* Each pack's blobs keep the offsets its own header gives them, so
 		 * its code section is placed whole and aligned. */
-		code = (code + KOF_PACK_BLOB_ALIGN - 1) / KOF_PACK_BLOB_ALIGN
-		     * KOF_PACK_BLOB_ALIGN;
-		code += h->sec[KOF_SEC_CODE].len;
+		code = kof_round_up(code, KOF_PACK_BLOB_ALIGN) +
+		       h->sec[KOF_SEC_CODE].len;
 		n_ok++;
 	}
 	if (n_ok == 0)
@@ -656,10 +654,8 @@ struct kof_engine *kof_db_load(const char *path)
 	for (i = 0; i < n_ok; i++) {
 		const struct kof_pack_hdr *h = mp[i].map;
 
-		at = (at + KOF_PACK_BLOB_ALIGN - 1) / KOF_PACK_BLOB_ALIGN
-		   * KOF_PACK_BLOB_ALIGN;
-		spool_at = (spool_at + KOF_HEX_PROG_ALIGN - 1) / KOF_HEX_PROG_ALIGN
-			 * KOF_HEX_PROG_ALIGN;
+		at = (size_t)kof_round_up(at, KOF_PACK_BLOB_ALIGN);
+		spool_at = (size_t)kof_round_up(spool_at, KOF_HEX_PROG_ALIGN);
 		absorb(e, &mp[i], at, spool_at);
 		at += (size_t)h->sec[KOF_SEC_CODE].len;
 		spool_at += (size_t)h->sec[KOF_SEC_STR_POOL].len;

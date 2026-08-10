@@ -597,14 +597,10 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 		}
 		kof_scan_kids_reset(w->sc);
 
-		/*
-		 * This object is finished with, so whatever it cost to produce stops
-		 * counting against the memory ceiling. Released here and not in
-		 * kof_src_unref, because the ceiling is the scanner's and a source
-		 * knows nothing about scanners - and because it must be given back
-		 * exactly once, at the point the object stops being needed.
-		 */
-		kof_scan_release(w->sc, kof_src_produced(src));
+		/* Nothing to release by hand: a produced source gives its bytes back
+		 * when it is destroyed, so every path that drops one - here, the
+		 * child cap, an aborted walk - accounts for it without knowing that
+		 * it has to. */
 		kof_src_unref(src);
 		free(name);
 

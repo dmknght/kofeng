@@ -200,17 +200,9 @@ static int find_range(struct kof_match_ctx *m, uint64_t off, uint64_t len,
  */
 #define GRAM_BITS  24
 #define GRAM_SLOTS (1u << GRAM_BITS)
-
-/*
- * Below this many patterns the table is not built at all.
- *
- * It is an amortisation device: one pass over the object plus a scattered write per
- * byte, so that each of many queries is free. With two queries there is nothing to
- * amortise - measured on one module over one sample directory, building it
- * unconditionally cost 4.37s and 53MB against 2.74s and 5MB. The threshold is a guess
- * pending measurement of the crossover; that there *is* a crossover is not.
- */
-#define GRAM_MIN_PATTERNS 32
+#ifndef GRAM_MIN_PATTERNS
+#define GRAM_MIN_PATTERNS 140
+#endif
 
 struct kof_gram {
 	uint16_t *stamp;

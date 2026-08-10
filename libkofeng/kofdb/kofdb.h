@@ -24,7 +24,7 @@
 #include <stdint.h>
 
 #include <kofmod/kofsig.h>
-#include "../core/kofcore.h"   /* kof_strdup */
+#include "../core/kofcore.h"   /* kof_crc32, kof_round_up */
 #include "kofpack.h"       /* KOF_STR_MAX_LEN, KOF_BLOB_MAX_CODE */
 
 /* Both entry points have the same signature; which one a module exported is what

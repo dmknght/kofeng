@@ -88,13 +88,6 @@ static void c_report(const struct kof_obj_ctx *ctx, uint32_t level,
 /* ---- searching a declared string ------------------------------------------- */
 
 /*
- * The module facing search: resolve the range it named, then let the matcher answer.
- *
- * Everything about *how* to answer is the matcher's - the presence set, the memo, the
- * word boundaries. What is left here is the only part that needs the object's parse:
- * turning a named range into extents.
- */
-/*
  * The string a module named, resolved against the running module's slice.
  *
  * NULL if the id is outside it. That is the only thing to check here: the id came
@@ -111,6 +104,13 @@ static const struct kof_str_ent *str_of(const struct kof_scanner *sc, uint32_t i
 	return &sc->eng->str_tab[m->str_base + id];
 }
 
+/*
+ * The module facing search: resolve the range it named, then let the matcher answer.
+ *
+ * Everything about *how* to answer is the matcher's - the presence set, the memo,
+ * the word boundaries. What is left here is the only part that needs the object's
+ * parse: turning a named range into extents.
+ */
 static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 		      uint32_t range_id)
 {
@@ -235,9 +235,27 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 	return 1;
 }
 
-void kof_scan_release(struct kof_scanner *sc, uint64_t produced)
+/*
+ * Give produced bytes back to the memory ceiling.
+ *
+ * Hooked to the destruction of every produced source rather than called from the
+ * scan loop, so the count falls on every path a child can die on - scanned and
+ * released, refused by the child cap, abandoned by an aborted walk - and not only
+ * on the one that was remembered.
+ *
+ * Two spellings because kof_src_on_free takes a void *. Casting this function to
+ * that signature and calling through the cast is a call through an incompatible
+ * pointer type, which is undefined however reliably it works; a wrapper costs
+ * nothing and is simply correct.
+ */
+static void scan_release(struct kof_scanner *sc, uint64_t produced)
 {
 	sc->resident = produced < sc->resident ? sc->resident - produced : 0;
+}
+
+static void scan_release_cb(void *sc, uint64_t produced)
+{
+	scan_release(sc, produced);
 }
 
 /*
@@ -329,11 +347,6 @@ static int c_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 		sc->exhausted = 1;
 		return 0;
 	}
-	sc->budget -= n;
-	sc->resident += n;
-	if (sc->resident > sc->st.peak_resident)
-		sc->st.peak_resident = sc->resident;
-
 	if (sc->sink_len + n > SINK_SPILL && !sink_spill(sc)) {
 		sc->exhausted = 1;
 		return 0;
@@ -367,6 +380,18 @@ static int c_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 	}
 
 	/*
+	 * Charged only now, with the bytes actually stored.
+	 *
+	 * Charging before the write left the count standing when the write failed,
+	 * and the ceiling shrank a little for every failure - a limit that tightens
+	 * itself over a long scan is a limit nobody can predict.
+	 */
+	sc->budget -= n;
+	sc->resident += n;
+	if (sc->resident > sc->st.peak_resident)
+		sc->st.peak_resident = sc->resident;
+
+	/*
 	 * Cut here rather than letting one object grow without end. The module is
 	 * not told and does not need to be: it goes on emitting, and what it is
 	 * emitting into simply becomes a new object.
@@ -381,23 +406,39 @@ static int c_child(const struct kof_obj_ctx *ctx)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	struct kof_objsrc *kid;
+	uint64_t held;
 
 	if (!sc->cur_src)
 		return 0;
+	if (sc->sink_len + sc->sink_spilled == 0)
+		return 0;              /* nothing was emitted; not a child */
+
 	if (sc->sink_fd >= 0) {
 		if (!sink_spill(sc))
 			return 0;
+		held = sc->sink_spilled;
 		kid = kof_src_fd(sc->sink_fd, sc->sink_spilled);
 		sc->sink_fd = -1;
 		sc->sink_spilled = 0;
 	} else {
-		if (sc->sink_len == 0)
-			return 0;      /* nothing was emitted; not a child */
+		held = sc->sink_len;
 		kid = kof_src_heap(sc->sink_mem, sc->sink_len);
 		sc->sink_mem = NULL;
 		sc->sink_cap = 0;
 	}
 	sc->sink_len = 0;
+
+	/*
+	 * The bytes were charged to the sink and are now the child's. Ownership of
+	 * the debt moves with them: from here on the count falls when the child is
+	 * destroyed, wherever that happens - scanned and released, refused by the
+	 * child cap, or abandoned because the walk was aborted.
+	 */
+	if (!kid) {
+		scan_release(sc, held);
+		return 0;
+	}
+	kof_src_on_free(kid, scan_release_cb, sc);
 	return kid_push(sc, kid);
 }
 
@@ -492,7 +533,7 @@ void kof_scan_kids_reset(struct kof_scanner *sc)
 
 	/* Whatever a module emitted and never closed is not an object, and the
 	 * memory it was holding stops being resident. */
-	kof_scan_release(sc, sc->sink_len + sc->sink_spilled);
+	scan_release(sc, sc->sink_len + sc->sink_spilled);
 	free(sc->sink_mem);
 	sc->sink_mem = NULL;
 	sc->sink_len = sc->sink_cap = 0;

@@ -131,11 +131,6 @@ static int pool_intern(struct dedup *d, struct buf *pool, const void *data,
 	return 1;
 }
 
-static uint64_t align_up(uint64_t v, uint64_t a)
-{
-	return (v + a - 1) / a * a;
-}
-
 /*
  * Everything the first pass produces. Held together so the second pass has one
  * thing to read from and the failure path has one thing to release.
@@ -254,7 +249,7 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 		/* Each blob starts 16 byte aligned so its entry point is never
 		 * misaligned for the target's calling convention. */
 		{
-			uint64_t pad = align_up(b->code.len, KOF_PACK_BLOB_ALIGN)
+			uint64_t pad = kof_round_up(b->code.len, KOF_PACK_BLOB_ALIGN)
 				       - b->code.len;
 			static const uint8_t zero[KOF_PACK_BLOB_ALIGN] = { 0 };
 			uint32_t dummy;
@@ -406,11 +401,11 @@ uint8_t *kof_pack_build(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n
 	len[KOF_SEC_IDX_BITMAP] = 0;
 	len[KOF_SEC_IDX_SLOT]   = 0;
 
-	off = align_up(sizeof(struct kof_pack_hdr), KOF_PACK_SEC_ALIGN);
+	off = kof_round_up(sizeof(struct kof_pack_hdr), KOF_PACK_SEC_ALIGN);
 	for (i = 0; i < KOF_SEC_COUNT; i++) {
 		uint64_t a = (i == KOF_SEC_CODE) ? KOF_PACK_CODE_ALIGN
 						 : KOF_PACK_SEC_ALIGN;
-		off = align_up(off, a);
+		off = kof_round_up(off, a);
 		at[i] = off;
 		off += len[i];
 	}
