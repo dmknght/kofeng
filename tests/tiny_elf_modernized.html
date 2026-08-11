@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>Tiny ELF Files: Revisited in 2021</title>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <link rel="stylesheet" href="../../main.min.css" />
+<link rel="icon" type="image/webp" href="data:image/webp;base64,
+UklGRpIBAABXRUJQVlA4IIYBAABQCACdASogACAAPn0yk0ekoyGhN+gAkA+JbACdMoR1ZvM4EbG0
+Hd2mwIJnqIAzxON54zx1FTqH6e/avncgenKB4HlWC46qD9PaFAAA/QL/sraDsc2aEDnoAh6zuaPx
+NhxqgMf/Nw2Ot6n+2N5umwtBqbFs1BH2ASrul2cLdahia5B7kP1KgxGsX6/1FDIb7szzz2QJzmSP
+KJsg86hbieou4Pw330vgHQZHKdPV9I8OVW68mgHtQ7Wog9ffBefRE0ch2gKy6pf+WQRetZysb8t3
+6D/IoIvFFvGUhC0z7Tc813bT6IzaO7Hym+TbNj99SRlX7PRnkwPVTDLQjNpCLBblUuQwTDbKWqmK
+2e8RsN/RdK5Qphad9yhM6hCjqyISUpJ9iPc7ziASS3qyI/S978kqwJBco68GpZAJDl8ONXdiI5dn
+Quw0gW3ERNIiNgdyuN2g843RnLlXLl5ABm9esgCrwsd0eTlkqPnjoppbrENRVAwtEegy2/xOTSMm
+23gOPcNqUKqPQAA=" />
+</head>
+<body>
+<h1>Tiny ELF Files: Revisited in 2021</h1>
+<h4>October 11, 2021</h4>
+
+<small>
+  <p>
+  Quick edit: While I work on a proper update, I'll note here that
+  several posters on reddit and hackernews have pointed out ways to bring the
+  total size of the program down to 105 bytes while still printing the full
+  &quot;Hello, world!&quot;  Much credit goes to
+  <a href="https://twitter.com/josh_triplett">Josh Triplett</a>, who produced
+  the 105-byte version <a href="./hello_105.asm">which you can find here.</a>
+  I fully plan to include this in an updated version of the page!
+  </p>
+  <p>
+  Here are the tricks I wasn't aware of when
+  writing the article:
+  </p>
+  <ul>
+    <li><a href="https://old.reddit.com/r/programming/comments/q6mnz1/what_is_the_smallest_linux_elf_executable_2021/hgdpee0/">A shorter way to initialize registers</a></li>
+    <li><a href="https://news.ycombinator.com/item?id=28849680">Linux initializes register state to 0 at the start of execution.</a></li>
+    <li><a href="https://news.ycombinator.com/item?id=28849680">(Same post as before) The "size in file" program header field can be larger than the file, so long as it matches the size in memory.</a></li>
+    <li><a href="https://news.ycombinator.com/item?id=28849023">You can clobber the number of section headers, if the section-header size is set to 0.</a></li>
+    <li><a href="https://twitter.com/josh_triplett">Josh Triplett</a>, who found a couple of the previous improvements.
+  </ul>
+</small>
+
+<h2>The Inspiration</h2>
+<hr />
+<p>
+Many years ago, I came across
+<a href="http://www.muppetlabs.com/~breadbox/software/tiny/teensy.html">this famous article</a>,
+which I largely credit changing the trajectory of my career.  At the time, I
+was an intern working on a the build system for a fairly large Java code base,
+so I was particularly susceptible to an article attempting to do the polar
+opposite of &quot;enterprise Java:&quot; strip away all but the most essential
+components required to define a valid Linux program. (Before removing even more!)
+</p>
+
+<p>
+In short, the article walks through the creation of a 45 byte (!) Linux binary.
+While the resulting binary is arguably not an entirely &quot;valid&quot; ELF
+file, it was at least one that Linux could run.  Or at least at the time.
+Perhaps unfortunately, Linux has gotten more strict about ELF loading since
+the article's original publication (I haven't been able to track down the
+original date, but it was already around in the early 2000's), and the
+migration of many systems to 64-bit CPUs has rendered the older 32-bit ELF
+binary less relevant.
+</p>
+
+
+<h2>My Goals</h2>
+<hr />
+<p>
+Like the article I take for inspriation, I set out to create the smallest ELF
+file that runs on modern Linux (kernel 5.14 at the time of writing).  Like the
+original article, I will still use the
+<a href="https://nasm.us/">nasm assembler</a>, since it is easy to install,
+I love its syntax, and it remains one of the best x86 assemblers available.
+</p>
+
+<p>
+However, I have a few goals that aren't quite like the original article:
+</p>
+
+<ul>
+  <li>
+    I will target x64_64 (64-bit AMD/Intel) Linux, since it's a stretch to
+    claim that 32-bit Intel (used in the original article) is particularly
+    modern at this point.
+  </li>
+  <li>
+    As an added challenge, I figured I would try to make a &quot;Hello,
+    world!&quot; program (that writes &quot;Hello, world!&quot; followed by a
+    newline to stdout), rather than the original article's less-exciting
+    program that exits with a code of 42.  As I will discuss later, this ended
+    up costing very few bytes.
+  </li>
+  <li>My program must exit successfully, with a code of 0.</li>
+</ul>
+
+<h2>Background Information: The ELF64 File Format</h2>
+<hr />
+
+<p>
+ELF files are used everywhere in Linux (and plenty of other operating systems),
+and serve as plain executables, static libraries produced by compilers, dynamic
+libraries, and more.  Executable ELF files, the focus of this article,
+typically contain the following components:
+</p>
+
+<ul>
+  <li>The top-level ELF header.</li>
+  <li>
+    A <i>program header table</i>, which lists chunks of the ELF file
+    that need to be loaded into memory, and where they need to be loaded. This
+    is also sometimes called a <i>segment header table</i>.
+  </li>
+  <li>
+    A <i>section header table</i>, which list <i>sections</i> of the
+    ELF file.  This is <i>not</i> necessary for simply loading an executable
+    ELF, but section information is essential for other ELF functionality,
+    such as linking.
+  </li>
+  <li>Actual executable bytecode and any data it needs.</li>
+</ul>
+
+<p>
+The ELF format has remarkably few hard requirements on where the various
+pieces of metadata appear in the file, apart from the fact that the top-level
+ELF header must appear at the beginning.  The location of the program header
+table and section header table may be anywhere in the file, as the top-level
+ELF header will contain their offsets.
+</p>
+
+<p>
+If you want more details, the wikipedia article on the ELF format, and especially
+<a href="https://upload.wikimedia.org/wikipedia/commons/e/e4/ELF_Executable_and_Linkable_Format_diagram_by_Ange_Albertini.png">
+this accompanying graphic</a>, offers a sufficient summary that is not worth
+repeating here.
+</p>
+
+<h2>Starting Point: A Reasonably Valid, Minimal Hello-world ELF</h2>
+<hr />
+<p>
+Even those who haven't looked into it have likely figured out that typical
+gcc-produced executables are full of unecessary stuff for a simple hello-world.
+For those who need convincing, the
+<a href="http://www.muppetlabs.com/~breadbox/software/tiny/teensy.html">original article</a>
+covers several iterations of a C version, which does not need any updating to
+be relevant to modern times.
+</p>
+
+<p>
+So, rather than reproduce the entirety of the prior article, I'll skip straight
+to assembly code, and define a valid ELF in its entirety. Here's what I came up
+with:
+</p>
+
+<iframe src="./hello_world_long.html" title="The non-shortened hello world" style="width:80%; height: 500px; overflow:scroll; border: 1px solid black;"></iframe>
+<br />
+<small><a href="./hello_world_long_nocomments.html">Click here for a version without comments.</a></small>
+
+<p>
+If you need a quick primer on <code>nasm</code>'s syntax:
+</p>
+
+<ul>
+  <li>
+    Lines starting with <code>;</code> are comments.
+  </li>
+  <li>
+    <code>db</code>, <code>dw</code>, <code>dd</code>, and <code>dq</code>
+    are pseudo-instructions that output initialized <b>b</b>ytes, 2-byte
+    <b>w</b>ords, 4-byte <b>d</b>ouble words, and 8-byte <b>q</b>uad words,
+    respectively.
+  </li>
+  <li>
+    Labels appear at the start of a line and end with a <code>:</code>.
+    nasm allows using labels in simple arithmetic expressions anywhere in place
+    of numbers.
+  </li>
+  <li>
+    The <code>equ</code> directive is used to associate a label with an
+    arbitrary number, rather than a location in the file.
+  </li>
+  <li>
+    The <code>$</code> symbol can be used in expressions to represent the
+    current offset, in bytes, into the generated bytecode. (There are more
+    nuances to this, but they basically don't apply when producing a flat
+    binary.)
+  </li>
+  <li>
+    All code is written using Intel-format x86 assembly syntax.
+  </li>
+</ul>
+
+<p>
+This assembly directly defines the necessary metadata for an executable 64-bit
+Linux ELF, so you don't need to use a linker to obtain an executable. Instead,
+we'll just assemble it using <code>nasm</code>'s ability to output flat binary,
+and call <code>chmod</code> to mark it as executable.
+</p>
+
+<p>
+Assuming you save it as <code>hello_world.asm</code>, you can compile and run it
+using:
+</p>
+<pre><code>nasm -f bin -o hello_world hello_world.asm
+chmod +x hello_world
+./hello_world
+</code></pre>
+<p>
+Obviously, you'll need to be using 64-bit Linux and have <code>nasm</code>
+installed and available on your PATH for this to work.  <code>nasm</code> is
+small and lightweight, and I'd recommend it to anyone interested in writing
+a significant amount of x86 assembly.
+</p>
+
+<h3>What is included in this file?</h3>
+
+<p>
+This was basically the most minimal &quot;proper&quot; ELF file I could come up
+with. It contains a list of sections, including a <code>.text</code> section
+for executable code and a <code>.shstrtab</code> (<b>S</b>ection <b>H</b>eader
+<b>Str</b>ing <b>Tab</b>le) section, which contains the names of the sections
+(including its own).  The entire ELF file is 383 bytes when assembled, which
+is already decently small, though a far cry from what is possible.
+</p>
+
+<p>
+As this initial version was intended to be faithful to the ELF format, viewing
+its content using standard linux tools works correctly.  As we remove more
+content from it, we will gradually lose these abilities. For example,
+<code>readelf -SW</code> currently shows that our .text and .shstrtab sections
+are correctly defined:
+</p>
+
+<pre><code>There are 3 section headers, starting at offset 0x78:
+
+Section Headers:
+  [Nr] Name              Type            Address          Off    Size   ES Flg Lk Inf Al
+  [ 0]                   NULL            0000000000000000 000000 000000 00      0   0  0
+  [ 1] .text             PROGBITS        0000000000028138 000138 000027 00  AX  0   0 16
+  [ 2] .shstrtab         STRTAB          000000000002816e 00016e 000011 00      0   0  1
+</code></pre>
+
+<p>
+Similarly, <code>objdump -M intel -d</code> disassembles the code in the
+<code>.text</code> section without a problem:
+</p>
+
+<pre><code>Disassembly of section .text:
+
+0000000000028138 <.text>:
+   28138:	b8 01 00 00 00       	mov    eax,0x1
+   2813d:	bf 01 00 00 00       	mov    edi,0x1
+   28142:	48 be 5f 81 02 00 00 	movabs rsi,0x2815f
+   28149:	00 00 00 
+   2814c:	ba 0f 00 00 00       	mov    edx,0xf
+   28151:	0f 05                	syscall 
+   28153:	b8 3c 00 00 00       	mov    eax,0x3c
+   28158:	bf 00 00 00 00       	mov    edi,0x0
+   2815d:	0f 05
+</code></pre>
+
+<p>Before moving on, we can look at the actual bytes in the ELF, and annotate
+what they're used for in the file:
+</p>
+
+<img class="img-center" src="./annotated_elf_1.png" />
+
+<p>Even at a glance, the section-related information seems to be taking too
+much space.  As mentioned earlier, this should not be needed if we only care
+about loading the ELF into memory and running it.  But can it be simply taken
+out?</p>
+
+<h2>Removing Section Information</h2>
+<hr />
+
+<p>
+The answer is yes. We can just delete the section information.
+</p>
+
+<p>To do so, set the number of section headers to 0 and delete the sections.
+Here is the assembly afterwards. It can be assembled and run the same way as
+the previous version.  I've also taken out any comments, apart from those
+annotating the changed lines:
+</p>
+
+<iframe src="./hello_world_nosections.html" title="An ELF file with no section data." style="width:80%; height: 500px; overflow:scroll; border: 1px solid black;"></iframe>
+
+<p>Removing the section information brings the file size down to 173 bytes,
+saving over 200 bytes from our original attempt (which was already small)!
+Obviously, this means that our ELF loses some useful metadata, meaning that
+some utilities, like <code>objdump</code> now have trouble finding the code.
+But nothing is entirely <i>broken</i> yet.  For example, <code>readelf -SW</code>
+still works, and correctly points out that the ELF contains no sections.
+</p>
+
+<p>Once again, we can dump the actual bytes in the ELF to see where the space
+is going.  There's nothing too interesting here; it's like before, but the
+section information is gone:
+</p>
+
+<img class="img-center" src="./annotated_elf_2.png" />
+
+<p>So what's next? We can't simply delete any more information: we need the
+code, the &quot;Hello, world!&quot; string, the ELF header, and the program
+header. However, there's still one more thing that we can <i>shrink</i> without
+breaking anything: the code itself.
+</p>
+
+<h2>Reducing the Code Size</h2>
+<hr />
+
+<p>The x86 bytecode is certainly not the largest part of our file, but it still
+is not as size-optimized as it could be---accounting for 39 out of the 173
+bytes in the ELF.  Currently, our program's entire code is only eight
+instructions.  Not bad!  But we can replace them with shorter instructions.
+Since there are only eight to begin with, I'll just go through them one at a
+time:
+</p>
+
+<ul>
+  <li><code>mov rax, 1</code>: We start by setting the <code>rax</code>
+    register to hold the syscall number for the <code>write</code> syscall: 1.
+    (Check <a href="https://filippo.io/linux-syscall-table/">here</a> if you
+    aren't familiar with the Linux system call numbers. This is how
+    we request the Linux kernel to do some work on behalf of our program.)
+    If you looked at the disassembly earlier, you may have noticed that our
+    assembler automatically converted this to <code>mov eax, 1</code>, since
+    setting <code>eax</code> (the lower 32 bits of <code>rax</code>), will
+    automatically clear the upper 32 bits of <code>rax</code>. However,
+    <code>mov eax, 1</code> still takes 5 bytes. We can do a little better:
+    <ul>
+      <li><code>xor eax, eax</code>: Clear all bits in the eax register to
+        zero. This also clears the upper 32 bits of rax, and takes two bytes.
+      </li>
+      <li><code>inc eax</code>: Increment eax by 1. This takes two bytes.
+    </ul>
+    In conjunction, these two instructions take 4 bytes, saving us a single
+    byte over <code>mov eax, 1</code>.
+  </li>
+  <li><code>mov rdi, 1</code>: We next set the first argument to our syscall in
+    the <code>rax</code> register, as required by <a href="https://en.wikibooks.org/wiki/X86_Assembly/Interfacing_with_Linux#Via_dedicated_system_call_invocation_instruction">the
+      Linux x86_64 syscall interface</a>. The file descriptor for the stdout
+    &quot;file&quot; is 1, so we set <code>rdi</code> to 1.  Once again, our
+    assembler automatically replaced this with the equivalent
+    <code>mov edi, 1</code>, a 5-byte instruction.  However, we already have
+    <code>rax</code> set to 1, so we can instead use <code>mov edi, eax</code>
+    to copy the contents of <code>eax</code> to <code>edi</code> (and clear
+    the upper bits of <code>rdi</code>).  This new instruction takes two bytes:
+    a 3-byte reduction.
+  </li>
+  <li><code>mov rsi, file_load_va + message</code>: The next argument to the
+    syscall, the virtual address of the string to print, goes in the
+    <code>rsi</code> register.  We calculate it here based on the file's
+    arbitrary virtual address (which we choose ourselves), and the offset of
+    the string in the file.  This instruction ends up taking 10 bytes: two
+    bytes for the opcode, and a full 8 bytes for the address.  We can replace
+    this with <code>mov esi, file_load_va + message</code> to save 5 bytes:
+    switching to <code>esi</code> uses one fewer byte for the opcode, and uses
+    a four byte immediate.  (This trick obviously won't work if
+    <code>file_load_va</code> won't fit in 32 bits.)
+  </li>
+  <li><code>mov rdx, message_length</code>: The last argument to the syscall
+    is the length of the string to print. Here again, nasm automatically
+    replaced this with the equivalent <code>mov edx, message_length</code>.
+    However, this still requires 5 bytes, and we can do a bit better:
+    <ul>
+      <li><code>xor edx, edx</code>: Set <code>edx</code> (and in turn,
+        <code>rdx</code>) to 0. This takes two bytes.</li>
+      <li><code>mov dl, message_length</code>: Set the bottom 8 bits of rdx to
+        the message length. This takes two bytes, and works as long as the
+        length of the string is less than 256.
+      </li>
+    </ul>
+    So, we reduced this code from 5 bytes to 4 bytes.
+  </li>
+  <li><code>syscall</code>: This will invoke the <code>write</code> system call
+    to print our string.  This instruction takes two bytes. We can't do much
+    better, as far as I know.
+  </li>
+  <li><code>mov rax, 60</code>: Now that we've invoked the write system call,
+    we need to invoke the <code>exit</code> system call. Its number is 60. Once
+    again, this instruction is taking 5 bytes.  In this case, we can do much
+    better if we assumed our <code>write</code> syscall was successful: the
+    syscall's return value is written into the <code>rax</code> register, and
+    it should be 0 on success.  Assuming this is true, we won't need to zero
+    out the bits of rax, and can simply set its low byte to 60 using the
+    following instruction: <code>mov al, 60</code>.  This only takes two bytes,
+    saving three more bytes overall.
+  </li>
+  <li><code>mov rdi, 0</code>: The only argument to the exit syscall is the
+    exit code. This should be 0 to indicate a successful exit, so we'll set
+    <code>rdi</code> to 0.  Once again, nasm will emit a 5-byte instruction
+    here, which we can replace with <code>xor edi, edi</code>, taking only
+    two bytes and accomplishing the same thing.
+  </li>
+  <li><code>syscall</code>: We now invoke the exit syscall to end the program.
+    Once again, I don't know of a shorter replacement.
+  </li>
+</ul>
+
+<p>
+After making all of these changes, the assembly looks like this:
+</p>
+
+<iframe src="./hello_world_shortercode.html" title="Our hello world program with shorter code." style="width:80%; height: 500px; overflow:scroll; border: 1px solid black;"></iframe>
+
+<p>
+The code can be assembled and run in the same way as the previous examples, and
+shortening the executable bytecode won't have any impact on the ELF format.
+Making these changes reduces the file size to 157 bytes---a reduction by 16
+bytes, and still a reasonably valid Linux executable.  We went from eight
+instructions taking 39 bytes to ten instructions taking 23 bytes.  The hex dump
+of the bytes hasn't changed much from before:
+</p>
+
+<img class="img-center" src="./annotated_elf_3.png" />
+
+
+<p>
+The code has noticably shortened, and 157 bytes is a very tiny executable!
+Additionally, despite lacking plenty of metadata, there is nothing totally
+&quot;broken&quot; about this program---it has a full, correctly-populated
+ELF and program header, and small chunk of code to run.  In other words,
+there's no good reason for Linux to refuse to run this.  That's about to
+change.
+</p>
+
+<h2>Moving the Code</h2>
+<hr />
+
+<p>
+It turns out that shortening the code has another benefit: it uses shorter
+instructions, which we can break into fine-grained short chunks, and join
+them together with <code>jmp</code> instructions.  But why is this useful?
+</p>
+
+<p>
+If you've followed my previous suggestions and read
+<a href="http://www.muppetlabs.com/~breadbox/software/tiny/teensy.html">this article's inspriation</a>,
+you likely know where I'm going: several fields in the ELF and program header
+aren't validated by Linux's ELF loader, and we can overwrite these with our
+code.  This allows us to completely remove the bytes taken by code in our
+program by dual-purposing existing header bytes.
+</p>
+
+<p>
+But what header bytes can be clobbered and replaced? We can easily test
+this: replace them with random junk in the assembly, and see if the program
+still runs.  I actually did so, and recorded the results in a spreadsheet:
+</p>
+
+<img class="img-center" src="./spreadsheet.png" />
+
+<p>
+In this spreadsheet, each byte in the ELF and program header are shown on
+separate lines.  Fields that can be overwritten with junk are highlighted in
+green, and fields that are checked or required are highlighted in red.  We'll
+take advantage of this to pack our code (and even the &quot;Hello,
+world!\n&quot; string) into unused bytes (well, technically, <i>unvalidated</i>
+bytes).  The new assembly looks like this:
+</p>
+
+<iframe src="./hello_world_code_overlapped.html" title="Repurposing unvalidated header fields." style="width:80%; height: 500px; overflow:scroll; border: 1px solid black;"></iframe>
+
+<p>
+As before, this can be assembled and run the same way as all of the examples so
+far.  It now only takes 126 bytes: a reduction by a full 31 bytes due to
+removing all code bytes and 8 bytes from the &quot;Hello,
+world&quot; string.  Unfortunately, we can't pack the full string into any
+available gaps, since it requires 14 bytes, and no sequence of 14 clobber-able
+bytes exists in the headers.  As it stands, the ELF and program header require
+120 bytes, and the string &quot;sticks out&quot; past the end of the program
+header by an additional 6 bytes.
+</p>
+
+<p>
+At this point, several of the common tools we discussed earlier do not
+like the fact that we clobbered so many fields in the headers. For example,
+<code>readelf -WlS</code> now complains that the section header offset
+is nonzero.  The <code>objdump</code> utility simply gives a
+<code>File truncated</code> error when we try to use it on the file. While not
+very specific, I suspect this error is also due to the section header offset,
+since the other fields we clobbered were simply padding, the unused physical
+address, and the alignment of segment in memory.  While clobbering the
+alignment seems like it could be breaking <code>objdump</code>,
+I actually verified that it isn't: setting the segment's aligment back to 1
+(its value prior to clobbering it with the string) did not cause
+<code>objdump</code> to start working again.
+</p>
+
+<p>
+Finally, the hex dump of this current version has gotten pretty interesting,
+and is a good illustration of how we contorted the file:
+</p>
+
+<img class="img-center" src="./annotated_elf_4.png" />
+
+<p>
+However, we're not quite done yet!
+</p>
+
+<h2>The Final Version</h2>
+<hr />
+
+<p>
+There's still one thing we can do: just like we overlapped the code, we can
+also overlap the ELF and program headers themselves.
+</p>
+
+<p>
+The end of the ELF header contains the number of program headers, followed by
+the size and number of section headers, and ends with the index of the
+section containing the section name table.  We absolutely must leave the number
+of program headers as 1 and the number of section headers as 0, but it turns
+out the size of a section header and the index of the section-name table can
+be clobbered as long as we aren't defining any sections.  Individually, each of
+these fields is only two bytes.
+</p>
+
+<p>
+What happens if we start our first program header immediately after the number
+of program headers, though?  It turns out that this works perfectly: even
+though the program header starts with a four-byte <code>type</code> field that
+must not be zero, only the bottom byte of the field is set---the rest are zero.
+So, if we start our program header six bytes <i>before</i> the end of the ELF
+header, the <code>type</code> field overlaps with the clobber-able
+<code>section header size</code>; ELF header field, as well as the number of
+section headers.  However, the bytes overlapping the number of section headers
+are zero: just what we need.  Afterwards, the program header's
+<code>flags</code> field (which also can't be zero) overlaps the
+section-name-string-table field, which, as mentioned, seems to be unused so
+long as we don't have any sections.
+</p>
+
+<p>
+The assembly for this program hasn't changed very much, but it does happen to
+be our final version:
+</p>
+
+<iframe src="./hello_world_short.html" title="The shortened hello world" style="width:80%; height: 500px; overflow:scroll; border: 1px solid black;"></iframe>
+
+<p>
+As always, this code can be assembled and run in the same way as the first
+example.  After the six-byte overlap between headers, it is now down to 120
+bytes.  Ordinarily, this would be the same size as the sum of the ELF header
+and a single program header---the smallest you could expect for an executable
+ELF file containing no code at all!  For completeness, we can also look at the
+final bytecode we produced:
+</p>
+
+<img class="img-center" src="./annotated_elf_5.png" />
+
+<h3>Can we go farther?</h3>
+
+<p>120 bytes is quite a feat---it could fit in a single text message. It takes
+up less than 1/34th of a single 4kB page; far smaller than we have any reason
+to care about.  If we compromised our original goal of writing a full
+&quot;Hello, world!&quot; program, we could shave off six more bytes, for a
+total size of <i>114 bytes</i>.  Feel free to try this yourself, by modifying
+the assembly so that the &quot;Hello, world!\n&quot; string is exactly 8 bytes.
+For example, replacing the relevant line with <code>message: db `Hi!!!!!\n`</code>
+will produce a working 114-byte executable.
+</p>
+
+<p>
+Trying to shorten the string any farther will result in the program header
+being too short, producing an exectuable that Linux will refuse to run. This
+brings up an interesting point. This means that even if we decide to use the
+original article's &quot;return 42&quot; program rather than our hello-world,
+we wouldn't get below 114 bytes---the limiting factor is entirely our inability
+to further overlap the ELF header and single required program header.
+</p>
+
+<p>
+But <i>can we really not overlap the headers any more?</i> After all, the
+original article managed to shrink their ELF all the way down to 45 bytes.
+Sadly, this is simply no longer possible: it requires Linux to automatically
+pad the incomplete remainder of the ELF and program header with zeros, which
+it no longer does.  However, the original 45-byte version starts the program
+header immediately after the <code>0x7f, E, L, F</code> signature at the start
+of the file.  Is really impossible for us to find a better way to overlap our
+ELF header and program header?
+</p>
+
+<p>
+Unfortunately, it seems to me like we're doing the best that is currently
+possible. Refer back to the screenshot of the spreadsheet showing which
+bytes can be clobbered in the ELF header and program header.  The larger sizes
+of the 64-bit program header significantly limit any options for overlap, and
+after an exhaustive byte-by-byte check, I am confident that we can't do better,
+at least on modern, x86-64 Linux.  For completeness' sake, here are the steps
+I took to reach such a conclusion:
+</p>
+
+<ol>
+  <li>The <code>program header offset</code> in the ELF header and the
+    <code>size in file</code> field in the program header must both fit
+    within a single byte (as otherwise it would imply a file larger than
+    255 bytes). They can't be identical, either, so these two 8-byte fields
+    can't overlap at all.
+  </li>
+  <li>The size of the headers and the fact that the ELF header must start at
+    the start of the file, combined with the previous point, means that the
+    <code>size in file</code> field in the program header must come entirely
+    <i>after</i> the ELF header's <code>program header offset</code> field.
+  </li>
+  <li>If we try to address the previous point by placing the <code>size in
+    file</code> field immediately after the <code>program header offset</code>
+    field, then the program header's <code>type</code> and <code>flags</code>
+    fields (which can't be zero) end up in the <code>program header offset</code>
+    field instead, which, as mentioned, can't be clobbered.
+  </li>
+  <li>If we try to address the previous point by moving the program header's
+    <code>flags</code> and <code>type</code> fields immediately after the
+    <code>program header offset</code> field, then the <code>ELF header size</code>
+    and <code>program header entry size</code> fields of the ELF header end
+    up overlapping with the program header's <code>offset in file</code> field,
+    which must be at most a single byte, can't match the ELF header or
+    program header sizes, and therefore can't be clobbered.  Unfortunately,
+    these size fields <i>are</i> checked by the Linux kernel (which didn't seem
+    to be the case in the older article).
+  </li>
+  <li>If we move the program header's <code>flags</code> and <code>type</code>
+    fields so that they are immediately after the two aforementioned size
+    fields, then they overlap the ELF header's <code>number of program headers</code>
+    field, which must be 1.  Our program header's <code>type</code> is also 1, so
+    good news, right?  Unfortunately, it won't work... since this overlap would
+    cause the <code>flags</code> field to fall on the number of section
+    headers.  The number of section headers must be zero, and flags can't be
+    zero because the readable+executable bits must be set.
+  </li>
+  <li>Finally, if we move the program header's <code>flags</code> field past
+    program-header and ELF-header sizes, it will be overlapping the
+    <code>section header size</code> field in the ELF header.  This ends up
+    working, for the reasons discussed earlier, and is where our final version
+    stands.
+  </li>
+</ol>
+
+<h2>Conclusion</h2>
+<hr />
+
+<p>
+Even though it's not nearly as impressive as the 45-byte executable possible
+years ago, many of the extreme minimization tricks continue to be possible on
+modern 64-bit Linux. 120 bytes (or as low as 114 bytes) is an incredibly tiny
+program in days when software bloat is too often simply accepted.
+</p>
+
+<p>
+Obviously, plenty of what we did went far beyond eliminating &quot;bloat&quot;,
+but the message remains valuable: it may be possible to remove more software
+bloat than you think!  Whether that justifies the effort involved is another
+debate.
+</p>
+
+</body>
+</html>

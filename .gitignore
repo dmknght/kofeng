@@ -4,7 +4,6 @@
 build/
 abi/
 signature/
-tests/
 build_det/
 
 # Editor and OS droppings.
