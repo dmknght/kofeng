@@ -68,6 +68,10 @@ KOF_DEFINE_STR(upx_magic, "UPX!", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
  */
 #define L_INFO_LEN      12u
 #define L_INFO_MAGIC_AT  4u
+/* Within l_info: checksum, magic, lsize, version, format. Absolute offsets are
+ * taken from the magic, which is the only part that can be found. */
+#define L_INFO_VERSION   6u   /* magic_at + this */
+#define L_INFO_FORMAT    7u
 #define P_INFO_LEN      12u
 #define B_INFO_LEN      12u
 
@@ -125,6 +129,17 @@ KOF_DEFINE_UNPACK
 	 * against what the container says it packed is the only check that tells
 	 * a complete unpack from a partial one.
 	 */
+	/*
+	 * Which build of UPX wrote this, before anything is decided about it.
+	 *
+	 * The block chain's layout varies by version and by l_format, and this
+	 * module follows one shape of it - so when the walk below stops early, the
+	 * useful question is which shape it was looking at. Reported first, so it
+	 * arrives even on the samples that go on to fail.
+	 */
+	kof_debug("UPX.ELF.version", kof_u8(magic_at + L_INFO_VERSION));
+	kof_debug("UPX.ELF.format", kof_u8(magic_at + L_INFO_FORMAT));
+
 	at = (magic_at - L_INFO_MAGIC_AT) + L_INFO_LEN;
 	if (!kof_in_obj(at, P_INFO_LEN))
 		return;
@@ -162,6 +177,7 @@ KOF_DEFINE_UNPACK
 		if (decoder == 0)
 			break;          /* LZMA or unknown: stop, and say so */
 
+		kof_debug("UPX.ELF.method", method);
 		got += kof_unpack_at(decoder, at + B_INFO_LEN, sz_cpr, sz_unc);
 		if (got == 0)
 			break;          /* the host refused, or nothing decoded */
@@ -178,6 +194,11 @@ KOF_DEFINE_UNPACK
 	 * that begin mid-structure - the same thing the object cap was changed to
 	 * stop doing. Emitting them all and closing once yields the original ELF.
 	 */
+	kof_debug("UPX.ELF.blocks", blocks);
+	/* What the container said against what came out: the one number that says
+	 * whether this module followed the chain to its end. */
+	kof_debug("UPX.ELF.shortfall", want > got ? want - got : 0);
+
 	if (blocks)
 		kof_child();
 

@@ -154,6 +154,7 @@ static void usage(const char *argv0)
 		"  --all-matches   keep scanning an object after the first finding\n"
 		"  --stats         report what the prefilter and the presence set earned\n"
 		"  --max-produced N  bytes an object may yield before the scan gives up\n"
+		"  --max-resident N  bytes of produced data that may be alive at once\n"
 		"  -v              also report objects that came back clean\n"
 		"\n"
 		"exit: 0 nothing found, 1 something found, 2 could not scan\n",
@@ -193,6 +194,12 @@ int main(int argc, char **argv)
 			opt.all_matches = 1;
 		else if (strcmp(argv[i], "--max-produced") == 0 && i + 1 < argc)
 			opt.max_produced_bytes = strtoull(argv[++i], NULL, 10);
+		/* The memory ceiling, exposed because it is the limit that decides
+		 * how much of a container is examined and because a decoder that
+		 * cannot stream is sized from what is left under it - neither is
+		 * reachable from outside without being able to set it. */
+		else if (strcmp(argv[i], "--max-resident") == 0 && i + 1 < argc)
+			opt.max_resident_bytes = strtoull(argv[++i], NULL, 10);
 		else if (strcmp(argv[i], "--stats") == 0)
 			r.stats = 1;
 		else if (strcmp(argv[i], "-v") == 0)
