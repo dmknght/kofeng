@@ -43,13 +43,12 @@
 static uint64_t blocks, matched;
 
 /*
- * UPX's LZMA blocks start two bytes in, and those two bytes carry pb in their low
- * three bits. lc and lp were the same in every sample this was written against, so
- * they are constants here - the same statement bases/unp/upx_elf.c makes, and the
- * same reason: the declared length below is what would catch it being wrong.
+ * UPX's LZMA blocks start two bytes in; the first carries lc in its top bits and pb
+ * in its low three. lp was zero in every sample, so it is a constant here - the same
+ * statement bases/unp/upx_elf.c makes, and the declared length below is what would
+ * catch it being wrong.
  */
 #define LZMA_SKIP 2u
-#define LZMA_LC   3u
 #define LZMA_LP   0u
 static uint64_t bad_status, bad_length;
 static char first_bad[600];
@@ -57,6 +56,7 @@ static char first_bad[600];
 /* Tallied per method, because "52 blocks failed" and "every NRV2D block failed"
  * are different findings and only the second one names the bug. */
 static uint64_t seen_by[16], ok_by[16];
+static uint64_t be_blocks;
 
 /*
  * UPX method numbers, from its conf.h.
@@ -86,8 +86,17 @@ static int bits_of(unsigned method)
 	}
 }
 
-static uint32_t rd32(const uint8_t *p)
+/*
+ * UPX writes its own structures in the TARGET's byte order, so a big endian object
+ * carries big endian b_info. Reading them the wrong way round is not a subtle
+ * failure - every field is nonsense and the walk stops at the first block - which
+ * is how 203 of 920 samples went unopened until it was measured.
+ */
+static uint32_t rd32(const uint8_t *p, int be)
 {
+	if (be)
+		return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+		       ((uint32_t)p[2] << 8) | (uint32_t)p[3];
 	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
 	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
@@ -105,6 +114,8 @@ static uint32_t rd32(const uint8_t *p)
  */
 static void one_file(const char *path, const uint8_t *f, uint64_t n)
 {
+	/* EI_DATA, the fifth byte of any ELF: 2 is big endian. */
+	int be = n > 5 && f[5] == 2;
 	uint64_t at;
 	uint32_t lsize;
 	uint64_t i, magic_at = 0;
@@ -129,8 +140,8 @@ static void one_file(const char *path, const uint8_t *f, uint64_t n)
 	at = magic_at + 8 + 12;
 
 	while (at + 12 <= n) {
-		uint32_t sz_unc = rd32(f + at);
-		uint32_t sz_cpr = rd32(f + at + 4);
+		uint32_t sz_unc = rd32(f + at, be);
+		uint32_t sz_cpr = rd32(f + at + 4, be);
 		unsigned method  = f[at + 8];
 		uint8_t *out;
 		uint64_t produced = 0;
@@ -153,7 +164,7 @@ static void one_file(const char *path, const uint8_t *f, uint64_t n)
 		if (!out)
 			return;
 		if (method == 14)
-			st = kof_lzma_decode(LZMA_LC, LZMA_LP,
+			st = kof_lzma_decode(f[at + 12] >> 3, LZMA_LP,
 					     f[at + 12] & 7u,
 					     f + at + 12 + LZMA_SKIP,
 					     sz_cpr - LZMA_SKIP, out, sz_unc,
@@ -162,6 +173,7 @@ static void one_file(const char *path, const uint8_t *f, uint64_t n)
 			st = kof_nrv2_decode(variant, bits_of(method), f + at + 12,
 					     sz_cpr, out, sz_unc, &produced);
 		blocks++;
+		be_blocks += (uint64_t)(be != 0);
 		if (method < 16)
 			seen_by[method]++;
 		if (st != KOF_DEC_OK) {
@@ -245,8 +257,10 @@ int main(int argc, char **argv)
 		printf("upx blocks: no sample corpus found - nothing tested\n");
 		return 0;
 	}
-	printf("upx blocks: %llu block(s), %llu decoded to the declared length\n",
-	       (unsigned long long)blocks, (unsigned long long)matched);
+	printf("upx blocks: %llu block(s), %llu decoded to the declared length"
+	       " (%llu big endian)\n",
+	       (unsigned long long)blocks, (unsigned long long)matched,
+	       (unsigned long long)be_blocks);
 	{
 		static const char *const mname[16] = {
 			0,0,"NRV2B_LE32","NRV2B_8","NRV2B_LE16",

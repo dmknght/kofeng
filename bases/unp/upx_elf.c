@@ -117,38 +117,62 @@ static uint32_t method_of(unsigned m)
 #define UPX_M_LZMA 14u
 
 /*
- * UPX's LZMA blocks, and what is known about their parameters.
+ * UPX's LZMA blocks: the stream starts two bytes in, and those two bytes carry the
+ * parameters.
  *
- * The compressed data begins TWO BYTES into the block, and those two bytes carry
- * the parameters. What they carry was established by decoding real blocks with
- * every combination the specification allows and keeping the ones that produced
- * exactly the length the container declared - 13 blocks across packed ELF and PE:
+ * Worked out by decoding real blocks with every combination the specification
+ * allows and keeping the ones that produced exactly the length the container
+ * declared. 330 LZMA blocks across packed ELF and PE, three distinct headers:
  *
- *     1a 03   ->  lc=3 lp=0 pb=2      (12 blocks)
- *     18 03   ->  lc=3 lp=0 pb=0      (1 block)
+ *     18 03  ->  lc=3 pb=0        1a 03  ->  lc=3 pb=2        3c 07  ->  lc=7 pb=4
  *
- * So pb is the low three bits of the first byte, and that is the whole of what the
- * sample proves. Every block used lc=3 and lp=0, so where THOSE live is not
- * established and they are taken as constants - if a build using other values
- * turns up, this decodes it wrongly.
+ * so lc is the top of the first byte and pb the bottom three bits. Every block used
+ * lp=0, so where lp lives is still not established and it is taken as zero - if a
+ * build using another value appears, this decodes it wrongly.
  *
- * That is safe to be wrong about, and deliberately so: the container states the
- * uncompressed length, the host reports what it produced, and a mismatch is
- * reported as an object not fully examined. A wrong guess here costs a sample that
- * is marked incomplete, never one that is silently declared clean.
+ * Being wrong about that is safe and deliberately so: the container states the
+ * uncompressed length, the host reports what came out, and a mismatch is an object
+ * marked not fully examined. A wrong guess costs a sample reported incomplete,
+ * never one silently declared clean.
  */
 #define UPX_LZMA_SKIP  2u
-#define UPX_LZMA_LC    3u
 #define UPX_LZMA_LP    0u
 
 static uint32_t upx_lzma_method(unsigned first_byte)
 {
-	return KOF_UNP_LZMA_PROPS(UPX_LZMA_LC, UPX_LZMA_LP, first_byte & 7u);
+	unsigned lc = first_byte >> 3, pb = first_byte & 7u;
+
+	/* Both come from the file, and both size or shape the decoder's model.
+	 * Out of range is refused here so the module can say it did not finish,
+	 * rather than being refused inside the host with nothing to report. */
+	if (lc > KOF_LZMA_MAX_LC || pb > KOF_LZMA_MAX_PB)
+		return 0;
+	return KOF_UNP_LZMA_PROPS(lc, UPX_LZMA_LP, pb);
 }
 
 
+/*
+ * UPX's own structures are in the TARGET's byte order, not the host's.
+ *
+ * The engine's accessors are little endian and say so, on the grounds that a
+ * format's headers reach a module through a view that normalised them. l_info,
+ * p_info and b_info are not a format's headers - they are the packer's, written
+ * into the file as the target reads them - so on a big endian object every one of
+ * these fields is the wrong way round.
+ *
+ * Measured before this existed: of 920 UPX packed ELF samples across two
+ * collections, 240 could not be opened at all, and 203 of those were big endian
+ * MIPS and PowerPC. Every one of the 203 parses when the fields are swapped. It was
+ * not a second layout and not damaged files - it was the byte order, and the
+ * earlier conclusion that these were mostly small corrupt samples came from a
+ * 150-file subset in which they happened to be rare.
+ */
+#define RD32(off) (be ? kof_bswap32(kof_u32(off)) : kof_u32(off))
+
 KOF_DEFINE_UNPACK
 {
+	const struct kof_elf_info *elf = kof_elf(ctx);
+	int be = elf->valid && elf->elf_data == KOF_ELFDATA_BE;
 	uint64_t magic_at, at, want, got = 0;
 	uint32_t blocks = 0;
 
@@ -188,7 +212,7 @@ KOF_DEFINE_UNPACK
 	at = (magic_at - L_INFO_MAGIC_AT) + L_INFO_LEN;
 	if (!kof_in_obj(at, P_INFO_LEN))
 		return;
-	want = kof_u32(at + 4);
+	want = RD32(at + 4);
 	at += P_INFO_LEN;
 
 	for (;;) {
@@ -197,8 +221,8 @@ KOF_DEFINE_UNPACK
 
 		if (!kof_in_obj(at, B_INFO_LEN))
 			break;
-		sz_unc = kof_u32(at);
-		sz_cpr = kof_u32(at + 4);
+		sz_unc = RD32(at);
+		sz_cpr = RD32(at + 4);
 		method = kof_u8(at + 8);
 
 		/*
@@ -220,13 +244,18 @@ KOF_DEFINE_UNPACK
 
 		decoder = method_of(method);
 		if (decoder == 0 && method == UPX_M_LZMA) {
+			uint32_t lz;
+
 			if (sz_cpr <= UPX_LZMA_SKIP)
 				break;
+			lz = upx_lzma_method(kof_u8(at + B_INFO_LEN));
+			if (lz == 0) {
+				kof_incomplete();
+				break;
+			}
 			kof_debug("UPX.ELF.method", method);
-			got += kof_unpack_at(
-				upx_lzma_method(kof_u8(at + B_INFO_LEN)),
-				at + B_INFO_LEN + UPX_LZMA_SKIP,
-				sz_cpr - UPX_LZMA_SKIP, sz_unc);
+			got += kof_unpack_at(lz, at + B_INFO_LEN + UPX_LZMA_SKIP,
+					     sz_cpr - UPX_LZMA_SKIP, sz_unc);
 			blocks++;
 			at += B_INFO_LEN + sz_cpr;
 			continue;

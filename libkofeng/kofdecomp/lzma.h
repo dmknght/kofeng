@@ -40,17 +40,16 @@
 
 #include <stdint.h>
 
+#include <kofmod/kofsig.h>
+
 #include "decomp.h"
 
 /*
- * What the specification allows, and what this refuses beyond.
- *
- * lc + lp bounds the model, so it bounds an allocation made from numbers that came
- * out of a file - which is the reason it is checked here rather than trusted.
+ * The per-parameter maxima are in the module ABI, beside the method id that carries
+ * them: a module reads them out of a container and refuses what is out of range,
+ * and this decoder checks again on its own side. One definition, two checks - the
+ * limits are a property of the format, not of either caller.
  */
-#define KOF_LZMA_MAX_LC 8u
-#define KOF_LZMA_MAX_LP 4u
-#define KOF_LZMA_MAX_PB 4u
 
 /*
  * Decode a raw LZMA1 stream into a caller-owned buffer.

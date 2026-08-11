@@ -97,33 +97,37 @@ static uint32_t method_of(unsigned m)
 #define UPX_M_LZMA 14u
 
 /*
- * UPX's LZMA blocks, and what is known about their parameters.
+ * UPX's LZMA blocks: the stream starts two bytes in, and those two bytes carry the
+ * parameters.
  *
- * The compressed data begins TWO BYTES into the block, and those two bytes carry
- * the parameters. What they carry was established by decoding real blocks with
- * every combination the specification allows and keeping the ones that produced
- * exactly the length the container declared - 13 blocks across packed ELF and PE:
+ * Worked out by decoding real blocks with every combination the specification
+ * allows and keeping the ones that produced exactly the length the container
+ * declared. 330 LZMA blocks across packed ELF and PE, three distinct headers:
  *
- *     1a 03   ->  lc=3 lp=0 pb=2      (12 blocks)
- *     18 03   ->  lc=3 lp=0 pb=0      (1 block)
+ *     18 03  ->  lc=3 pb=0        1a 03  ->  lc=3 pb=2        3c 07  ->  lc=7 pb=4
  *
- * So pb is the low three bits of the first byte, and that is the whole of what the
- * sample proves. Every block used lc=3 and lp=0, so where THOSE live is not
- * established and they are taken as constants - if a build using other values
- * turns up, this decodes it wrongly.
+ * so lc is the top of the first byte and pb the bottom three bits. Every block used
+ * lp=0, so where lp lives is still not established and it is taken as zero - if a
+ * build using another value appears, this decodes it wrongly.
  *
- * That is safe to be wrong about, and deliberately so: the container states the
- * uncompressed length, the host reports what it produced, and a mismatch is
- * reported as an object not fully examined. A wrong guess here costs a sample that
- * is marked incomplete, never one that is silently declared clean.
+ * Being wrong about that is safe and deliberately so: the container states the
+ * uncompressed length, the host reports what came out, and a mismatch is an object
+ * marked not fully examined. A wrong guess costs a sample reported incomplete,
+ * never one silently declared clean.
  */
 #define UPX_LZMA_SKIP  2u
-#define UPX_LZMA_LC    3u
 #define UPX_LZMA_LP    0u
 
 static uint32_t upx_lzma_method(unsigned first_byte)
 {
-	return KOF_UNP_LZMA_PROPS(UPX_LZMA_LC, UPX_LZMA_LP, first_byte & 7u);
+	unsigned lc = first_byte >> 3, pb = first_byte & 7u;
+
+	/* Both come from the file, and both size or shape the decoder's model.
+	 * Out of range is refused here so the module can say it did not finish,
+	 * rather than being refused inside the host with nothing to report. */
+	if (lc > KOF_LZMA_MAX_LC || pb > KOF_LZMA_MAX_PB)
+		return 0;
+	return KOF_UNP_LZMA_PROPS(lc, UPX_LZMA_LP, pb);
 }
 
 
@@ -176,6 +180,10 @@ KOF_DEFINE_UNPACK
 			return;
 		}
 		decoder = upx_lzma_method(kof_u8(stream));
+		if (decoder == 0) {
+			kof_incomplete();
+			return;
+		}
 		stream += UPX_LZMA_SKIP;
 		c_len  -= UPX_LZMA_SKIP;
 	}

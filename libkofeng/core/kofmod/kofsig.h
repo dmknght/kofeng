@@ -391,6 +391,19 @@ enum kof_unp_method {
 	KOF_UNP_LZMA = 64
 };
 
+/*
+ * What the LZMA specification allows for each parameter.
+ *
+ * Module facing because a module is what reads them out of a container and has to
+ * refuse the ones that are out of range - they size the decoder's probability
+ * model, so an unchecked value is an allocation chosen by whoever wrote the file.
+ * The decoder checks them again on its own side; this is so a module can say it
+ * could not finish rather than being refused with nothing to report.
+ */
+#define KOF_LZMA_MAX_LC 8u
+#define KOF_LZMA_MAX_LP 4u
+#define KOF_LZMA_MAX_PB 4u
+
 #define KOF_UNP_LZMA_PROPS(lc, lp, pb)                                      \
 	((uint32_t)KOF_UNP_LZMA + (uint32_t)(lc) + 9u * (uint32_t)(lp) +    \
 	 45u * (uint32_t)(pb))
@@ -701,14 +714,38 @@ void kof_unpack(const struct kof_obj_ctx *ctx);
  * hand - ctx->content->rd32(ctx, off) - names the context twice and the mechanism
  * once, for a read that is the most ordinary thing a module does.
  *
- * Little endian, because every format these parse is. A big endian ELF is read
- * through the parsed view, which normalised it already.
+ * Little endian, and that is a statement about the accessors rather than about
+ * every structure a module reads. A big endian ELF's own headers arrive through the
+ * parsed view with the byte order already dealt with - but a PACKER'S structures do
+ * not: UPX writes its l_info and b_info in the target's byte order, into a file the
+ * collector has no reason to normalise, so a module reading them on a big endian
+ * object has to swap. kof_bswap* below is for exactly that, and it needs no second
+ * set of accessors: these hand over the bytes and the module says what they mean.
  *
  * An out of range read yields zero rather than faulting, so a module that must tell
  * "the bytes there are zero" from "there are no bytes there" asks first:
  *
  *     if (kof_in_obj(off, 4) && kof_u32(off) == 0) ...
  */
+/*
+ * Byte order, for the structures the accessors above cannot know about.
+ *
+ * A module that reads a packer's own header on a big endian object needs these; one
+ * that reads a format's header does not, because the collector normalised that
+ * already. Written out rather than taken from a system header, because a signature
+ * module has no libc and cannot include one.
+ */
+static inline uint16_t kof_bswap16(uint16_t v)
+{
+	return (uint16_t)((v >> 8) | (v << 8));
+}
+
+static inline uint32_t kof_bswap32(uint32_t v)
+{
+	return ((v & 0xff000000u) >> 24) | ((v & 0x00ff0000u) >> 8) |
+	       ((v & 0x0000ff00u) << 8)  | ((v & 0x000000ffu) << 24);
+}
+
 #define kof_u8(off)  ((ctx)->content->rd8 ((ctx), (uint64_t)(off)))
 #define kof_u16(off) ((ctx)->content->rd16((ctx), (uint64_t)(off)))
 #define kof_u32(off) ((ctx)->content->rd32((ctx), (uint64_t)(off)))
