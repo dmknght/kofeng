@@ -21,6 +21,7 @@
 #include "../kofparsers/binaries/pe_parse.h"
 #include "../kofunpack/pe_rebuild.h"
 #include "../kofparsers/containers/gzip_parse.h"
+#include "../kofparsers/containers/docole_parse.h"
 #include "objsrc.h"
 #include "../kofdecomp/inflate.h"
 #include "../kofdecomp/nrv2.h"

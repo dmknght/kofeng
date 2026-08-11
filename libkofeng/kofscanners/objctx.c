@@ -788,6 +788,59 @@ static int c_child(const struct kof_obj_ctx *ctx)
 }
 
 /*
+ * Join a named region into the object being produced.
+ *
+ * The whole of it is a resolve and a loop of emits, and that is the point: the
+ * bytes never leave the host, so a gather is charged, cut and refused by exactly
+ * the code that already does that for a decompression. There is no second budget
+ * and no path by which a module can assemble more than the ceiling allows.
+ *
+ * `cap` is the module's own limit and only ever tightens the host's. Applied to
+ * what THIS call produces rather than to the object being built, so a module
+ * gathering two regions into one child gets a limit per region - which is what a
+ * caller means by it, since the sizes it knows are per region.
+ *
+ * A short return is not an error and is not reported as one: the module asked for a
+ * region and got a prefix of it. Whether that is worth calling the object broken is
+ * the module's judgement, because only it knows whether the rest mattered.
+ */
+static uint64_t c_gather(const struct kof_obj_ctx *ctx, uint32_t mask, uint64_t cap)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
+	kof_buf b = mc(ctx)->data;
+	uint64_t done = 0;
+	uint32_t n, i;
+
+	if (!sc->cur_src || sc->broken)
+		return 0;
+
+	n = kof_scan_resolve_range(ctx, mask, ext);
+	for (i = 0; i < n; i++) {
+		kof_buf s = kof_slice(b, ext[i].off, ext[i].len);
+		uint64_t at = 0;
+
+		while (at < s.n) {
+			uint64_t want = s.n - at;
+
+			if (want > EMIT_MAX)
+				want = EMIT_MAX;
+			if (cap) {
+				if (done >= cap)
+					return done;
+				if (want > cap - done)
+					want = cap - done;
+			}
+			if (!c_emit(ctx, s.p + at, (uint32_t)want))
+				return done;
+			at += want;
+			done += want;
+		}
+	}
+	return done;
+}
+
+/*
  * Two vtables, differing only in whether the producer entries are there.
  *
  * A detector gets NULLs, so kof_emit and kof_child_window answer zero for it, and
@@ -798,13 +851,13 @@ static int c_child(const struct kof_obj_ctx *ctx)
 static const struct kof_content kof_detect_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, NULL, NULL, NULL, NULL, c_find_str_where,
-	c_incomplete
+	NULL, c_incomplete
 };
 
 static const struct kof_content kof_unpack_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, c_window, c_emit, c_child, c_unpack,
-	c_find_str_where, c_incomplete
+	c_find_str_where, c_gather, c_incomplete
 };
 
 /*

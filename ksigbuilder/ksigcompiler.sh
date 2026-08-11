@@ -163,7 +163,7 @@ ntargets=0
 case "$targets" in
 *KOF_FMT_ANY*) target_mask=127; ntargets=7 ;;
 esac
-[ "$target_mask" -eq 0 ] && for t in UNKNOWN ELF PE MACHO SCRIPT TEXT GZIP; do
+[ "$target_mask" -eq 0 ] && for t in UNKNOWN ELF PE MACHO SCRIPT TEXT GZIP DOCOLE DOCZIP; do
 	case "$targets" in
 	*KOF_FMT_$t*)
 		case $t in
@@ -174,6 +174,8 @@ esac
 		SCRIPT)  bit=16 ;;
 		TEXT)    bit=32 ;;
 		GZIP)    bit=64 ;;
+		DOCOLE)  bit=128 ;;
+		DOCZIP)  bit=256 ;;
 		esac
 		target_mask=$((target_mask | bit))
 		ntargets=$((ntargets + 1))
@@ -200,7 +202,7 @@ fi
 # ever fired. They were not weak checks, they were absent ones, which is the
 # failure mode a check that cannot be seen to run always has. One list, so a
 # format added here cannot be half-added.
-fmt_hdrs="elf:2 pe:4 macho:8 gzip:64"
+fmt_hdrs="elf:2 pe:4 macho:8 gzip:64 docole:128"
 
 nfmt=0
 for pair in $fmt_hdrs; do

@@ -80,9 +80,28 @@ enum kof_format {
 	KOF_FMT_TEXT    = 5,
 	KOF_FMT_GZIP    = 6,
 
+	/*
+	 * A document, and which encoding it arrived in.
+	 *
+	 * Two values rather than one with a sub-kind field, because the two are not
+	 * one format written two ways - they differ in where the document's own
+	 * structure lives. A DOCOLE holds its parts as streams INSIDE one object, so
+	 * the parts are regions of it. A DOCZIP holds its parts as separate archive
+	 * entries, so the parts are child objects and the discriminator is an entry
+	 * name. A module written for one cannot run against the other, and format is
+	 * what the prefilter rules on - so they are separate formats.
+	 *
+	 * DOCOLE is CFB, which is also what MSI and Outlook messages are. The name is
+	 * narrower than the container on purpose: a format id is a prefilter gate,
+	 * not the identity of a parser, so a future KOF_FMT_MSI can share every line
+	 * of the CFB parse and still be ruled in and out on its own.
+	 */
+	KOF_FMT_DOCOLE  = 7,
+	KOF_FMT_DOCZIP  = 8,
+
 	/* One past the last, so a host can size a per-format table. Not a format:
 	 * nothing is ever this. */
-	KOF_FMT_COUNT   = 7
+	KOF_FMT_COUNT   = 9
 };
 
 /*
@@ -131,6 +150,8 @@ static inline const char *kof_format_name(uint8_t fmt)
 	case KOF_FMT_SCRIPT: return "Script";
 	case KOF_FMT_TEXT:   return "Text";
 	case KOF_FMT_GZIP:   return "Gzip";
+	case KOF_FMT_DOCOLE: return "DocOLE";
+	case KOF_FMT_DOCZIP: return "DocZip";
 	default:             return "Unknown";
 	}
 }
@@ -338,6 +359,34 @@ struct kof_content {
 	/* Where a declared string is, rather than whether. KOF_BROKEN if absent. */
 	uint64_t (*find_str_where)(const struct kof_obj_ctx *, uint32_t str_id,
 				   uint64_t off, uint64_t len);
+
+	/*
+	 * Copy a named region into the object being produced, joined up.
+	 *
+	 * For the formats that scatter one logical thing across the file. A CFB
+	 * stream is a chain of sectors in whatever order the allocator left them, so
+	 * the region that names it is a list of extents rather than a range - and a
+	 * pattern lying across the join between two of them is in neither extent. The
+	 * only way to find it is to have the bytes contiguous, and the only way to
+	 * have them contiguous is to copy.
+	 *
+	 * The module supplies the decision - THIS region - and the host does the work,
+	 * for the same reason unpack() is shaped that way. Every byte goes through
+	 * emit(), so the copy is charged to the same budget and stopped by the same
+	 * ceiling as a decompression; there is no second pool and no way for a module
+	 * to gather more than the host allows.
+	 *
+	 * `cap` is the module's own limit, applied on top of the host's and never
+	 * above it: a format knows what an honest instance of it costs, and 4MB of
+	 * macros is already far past anything a document has a reason to hold. Zero
+	 * means the host's ceiling alone.
+	 *
+	 * Returns bytes emitted, which is short of the region when a cap bound. The
+	 * module closes it with kof_child() - gathering does not, because a module may
+	 * want more than one region in one child.
+	 */
+	uint64_t (*gather)(const struct kof_obj_ctx *, uint32_t region_mask,
+			   uint64_t cap);
 
 	/*
 	 * "I stopped before I was finished."
@@ -832,6 +881,20 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 
 #define kof_child()                                                        \
 	((ctx)->content->child ? (ctx)->content->child((ctx)) : 0)
+
+/*
+ * Join a scattered region into the object being produced. See `gather` above.
+ *
+ * Does not close the child: a module gathering two regions into one object is a
+ * legitimate thing to want, so where the object ends stays the module's decision.
+ */
+#define kof_gather_max(region_mask, cap)                                   \
+	((ctx)->content->gather ?                                          \
+	 (ctx)->content->gather((ctx), (uint32_t)(region_mask),            \
+				(uint64_t)(cap)) : 0)
+
+/* Bounded by the host's ceiling alone. */
+#define kof_gather(region_mask) kof_gather_max((region_mask), 0)
 
 /*
  * Decompress a DEFLATE stream at off into the object being produced.

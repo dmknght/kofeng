@@ -87,10 +87,12 @@
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 #include <kofmod/gzip.h>
+#include <kofmod/docole.h>
 
 #include "../libkofeng/kofparsers/binaries/elf_parse.h"
 #include "../libkofeng/kofparsers/binaries/pe_parse.h"
 #include "../libkofeng/kofparsers/containers/gzip_parse.h"
+#include "../libkofeng/kofparsers/containers/docole_parse.h"
 
 /*
  * What one format offers a tool: how to recognise it, how to parse it, how big
@@ -111,6 +113,16 @@ struct fmt {
 	const char *(*region_name)(uint32_t);
 	const char *(*anomaly_name)(unsigned);
 	void      (*print)(const void *, const struct kof_obj_ctx *);
+	/*
+	 * The anomaly word, fetched rather than reached for.
+	 *
+	 * This was a cast to whichever view the format was not - PE if the printer
+	 * was print_pe, ELF otherwise - and it read the right field only because
+	 * gzip happens to lay its header out like ELF's. The first format that did
+	 * not printed an anomaly it had never set. One line per format beats one
+	 * conditional that has to be right about every format at once.
+	 */
+	uint64_t  (*anomalies)(const void *);
 };
 
 static int elf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
@@ -121,6 +133,11 @@ static int elf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 static int gzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
 	return kof_gzip_parse(b, (struct kof_gzip_info *)v, c);
+}
+
+static int docole_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_docole_parse(b, (struct kof_docole_info *)v, c);
 }
 
 static int pe_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
@@ -269,16 +286,90 @@ static void print_gzip(const void *v, const struct kof_obj_ctx *ctx)
 		       ? "   <- declared expansion is large" : "");
 }
 
+/*
+ * What a compound file holds, before a byte of any stream is joined up.
+ *
+ * The four content sizes are the point of the display. They are what the directory
+ * DECLARED, which is available for free, and the question they answer is the one
+ * worth asking first about a document: how much of it is macros. A file whose
+ * macros outweigh its text is not a document that happens to have a macro.
+ *
+ * Runs are printed as a count per class rather than listed, because the number is
+ * the interesting part - it is how fragmented the stream is, and so how much a
+ * gather would have to join.
+ */
+static void print_docole(const void *v, const struct kof_obj_ctx *ctx)
+{
+	static const char *const cls_name[KOF_DOCOLE_CLS_COUNT] = {
+		"headers", "directory", "content_data", "content_macros",
+		"content_metadata", "resources"
+	};
+	const struct kof_docole_info *o = v;
+	uint32_t runs[KOF_DOCOLE_CLS_COUNT] = { 0 };
+	uint32_t i;
+
+	(void)ctx;
+
+	printf("  version   %u.%u   sector=%u mini=%u cutoff=%u\n",
+	       o->major, o->minor, o->sector_size, o->mini_sector_size,
+	       o->mini_cutoff);
+	printf("  directory %u entries: %u streams, %u storages%s\n",
+	       o->dir_count, o->stream_count, o->storage_count,
+	       o->has_macros ? ", macros present" : "");
+	printf("  declared  data=%llu macros=%llu metadata=%llu resources=%llu%s\n",
+	       (unsigned long long)o->data_bytes,
+	       (unsigned long long)o->macro_bytes,
+	       (unsigned long long)o->meta_bytes,
+	       (unsigned long long)o->resource_bytes,
+	       o->macro_bytes > KOF_DOCOLE_MACRO_SUSPECT
+	       ? "   <- macros are larger than any honest document" : "");
+
+	for (i = 0; i < o->n_runs; i++) {
+		if (o->run[i].cls >= KOF_DOCOLE_CLS_COUNT)
+			continue;
+		runs[o->run[i].cls]++;
+	}
+	for (i = 0; i < KOF_DOCOLE_CLS_COUNT; i++)
+		if (runs[i])
+			printf("  %-17s %llu bytes in %u run%s\n", cls_name[i],
+			       (unsigned long long)o->region_bytes[i], runs[i],
+			       runs[i] == 1 ? "" : "s");
+}
+
+static uint64_t anom_elf(const void *v)
+{
+	return ((const struct kof_elf_info *)v)->anomalies;
+}
+
+static uint64_t anom_pe(const void *v)
+{
+	return ((const struct kof_pe_info *)v)->anomalies;
+}
+
+static uint64_t anom_gzip(const void *v)
+{
+	return ((const struct kof_gzip_info *)v)->anomalies;
+}
+
+static uint64_t anom_docole(const void *v)
+{
+	return ((const struct kof_docole_info *)v)->anomalies;
+}
+
 static const struct fmt formats[] = {
 	{ (uint32_t)sizeof(struct kof_elf_info), kof_elf_sniff, elf_parse_thunk,
 	  kof_elf_region_bits, KOF_ELF_REGION_COUNT,
-	  kof_elf_region_name, kof_elf_anomaly_name, print_elf },
+	  kof_elf_region_name, kof_elf_anomaly_name, print_elf, anom_elf },
 	{ (uint32_t)sizeof(struct kof_pe_info), kof_pe_sniff, pe_parse_thunk,
 	  kof_pe_region_bits, KOF_PE_REGION_COUNT,
-	  kof_pe_region_name, kof_pe_anomaly_name, print_pe },
+	  kof_pe_region_name, kof_pe_anomaly_name, print_pe, anom_pe },
 	{ (uint32_t)sizeof(struct kof_gzip_info), kof_gzip_sniff, gzip_parse_thunk,
 	  kof_gzip_region_bits, KOF_GZIP_REGION_COUNT,
-	  kof_gzip_region_name, kof_gzip_anomaly_name, print_gzip }
+	  kof_gzip_region_name, kof_gzip_anomaly_name, print_gzip, anom_gzip },
+	{ (uint32_t)sizeof(struct kof_docole_info), kof_docole_sniff,
+	  docole_parse_thunk, kof_docole_region_bits, KOF_DOCOLE_REGION_COUNT,
+	  kof_docole_region_name, kof_docole_anomaly_name, print_docole,
+	  anom_docole }
 };
 
 /*
@@ -587,9 +678,7 @@ static int examine(const char *path, int dump)
 		       total == buf.n ? "" : " MISMATCH");
 
 		{
-			uint64_t anom = (f->print == print_pe)
-				      ? ((const struct kof_pe_info *)view)->anomalies
-				      : ((const struct kof_elf_info *)view)->anomalies;
+			uint64_t anom = f->anomalies(view);
 			if (anom) {
 				printf("  anomalies");
 				for (i = 0; i < 64; i++) {

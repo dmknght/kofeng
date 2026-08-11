@@ -40,6 +40,7 @@
 #include "../../libkofeng/kofparsers/binaries/elf_parse.h"
 #include "../../libkofeng/kofparsers/binaries/pe_parse.h"
 #include "../../libkofeng/kofparsers/containers/gzip_parse.h"
+#include "../../libkofeng/kofparsers/containers/docole_parse.h"
 
 struct tally {
 	uint64_t objects, failures;
@@ -117,12 +118,13 @@ static int check(const char *path, kof_buf buf, struct kof_obj_ctx *ctx,
 }
 
 static void one_file(const char *path, struct tally *elf, struct tally *pe,
-		     struct tally *gz)
+		     struct tally *gz, struct tally *ole)
 {
 	struct kof_obj_ctx ctx;
 	struct kof_elf_info *ei;
 	struct kof_pe_info *pi;
 	struct kof_gzip_info *gi;
+	struct kof_docole_info *oi;
 	struct stat st;
 	void *map;
 	int fd;
@@ -170,13 +172,22 @@ static void one_file(const char *path, struct tally *elf, struct tally *pe,
 					KOF_GZIP_REGION_COUNT, "gzip");
 			}
 			free(gi);
+		} else if (kof_docole_sniff(buf)) {
+			oi = malloc(sizeof *oi);
+			if (oi && kof_docole_parse(buf, oi, &ctx)) {
+				ole->objects++;
+				ole->failures += (uint64_t)check(path, buf, &ctx,
+					kof_docole_region_bits,
+					KOF_DOCOLE_REGION_COUNT, "docole");
+			}
+			free(oi);
 		}
 	}
 	munmap(map, (size_t)st.st_size);
 }
 
 static void walk(const char *dir, struct tally *elf, struct tally *pe,
-		 struct tally *gz)
+		 struct tally *gz, struct tally *ole)
 {
 	DIR *d = opendir(dir);
 	struct dirent *de;
@@ -190,7 +201,7 @@ static void walk(const char *dir, struct tally *elf, struct tally *pe,
 		if ((size_t)snprintf(path, sizeof path, "%s/%s", dir, de->d_name)
 		    >= sizeof path)
 			continue;
-		one_file(path, elf, pe, gz);
+		one_file(path, elf, pe, gz, ole);
 	}
 	closedir(d);
 }
@@ -212,27 +223,33 @@ int main(int argc, char **argv)
 		"build/test/fixtures", "/usr/bin",
 		"/usr/share/man/man1", "/usr/share/i18n/charmaps"
 	};
-	struct tally elf = { 0, 0 }, pe = { 0, 0 }, gz = { 0, 0 };
+	struct tally elf = { 0, 0 }, pe = { 0, 0 }, gz = { 0, 0 },
+		     ole = { 0, 0 };
 	int i;
 
 	if (argc > 1)
 		for (i = 1; i < argc; i++)
-			walk(argv[i], &elf, &pe, &gz);
+			walk(argv[i], &elf, &pe, &gz, &ole);
 	else
 		for (i = 0; i < (int)(sizeof defaults / sizeof defaults[0]); i++)
-			walk(defaults[i], &elf, &pe, &gz);
+			walk(defaults[i], &elf, &pe, &gz, &ole);
 
-	printf("partition: ELF %llu/%llu  PE %llu/%llu  gzip %llu/%llu",
+	printf("partition: ELF %llu/%llu  PE %llu/%llu  gzip %llu/%llu  "
+	       "docole %llu/%llu",
 	       (unsigned long long)(elf.objects - elf.failures),
 	       (unsigned long long)elf.objects,
 	       (unsigned long long)(pe.objects - pe.failures),
 	       (unsigned long long)pe.objects,
 	       (unsigned long long)(gz.objects - gz.failures),
-	       (unsigned long long)gz.objects);
-	if (elf.objects == 0 && pe.objects == 0 && gz.objects == 0) {
+	       (unsigned long long)gz.objects,
+	       (unsigned long long)(ole.objects - ole.failures),
+	       (unsigned long long)ole.objects);
+	if (elf.objects == 0 && pe.objects == 0 && gz.objects == 0 &&
+	    ole.objects == 0) {
 		printf("  (no objects found - nothing tested)\n");
 		return 0;
 	}
 	printf("\n");
-	return (elf.failures || pe.failures || gz.failures) ? 1 : 0;
+	return (elf.failures || pe.failures || gz.failures || ole.failures)
+	       ? 1 : 0;
 }

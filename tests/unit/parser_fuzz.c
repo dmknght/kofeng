@@ -37,6 +37,7 @@
 #include "../../libkofeng/kofparsers/binaries/elf_parse.h"
 #include "../../libkofeng/kofparsers/binaries/pe_parse.h"
 #include "../../libkofeng/kofparsers/containers/gzip_parse.h"
+#include "../../libkofeng/kofparsers/containers/docole_parse.h"
 
 #define OBJ_MAX 8192
 #define ROUNDS  20000
@@ -214,6 +215,73 @@ static uint64_t gen_elf(uint8_t *b)
  * equal to what is left, one more than that, and 0xffff. Terminators are omitted
  * on purpose about half the time.
  */
+/*
+ * A compound file, plausible in shape and wrong in the places that matter.
+ *
+ * The fields corrupted here are the ones that decide whether a walk ends. The
+ * sector shift decides where every structure is, so a wrong one must stop the parse
+ * rather than send it reading at computed nonsense; the chain heads and the
+ * directory's child and sibling links are what a cycle is made of, so they are
+ * drawn from a range that includes valid sectors, invalid sectors and markers.
+ *
+ * Directory entries get real structure names, because the class a stream lands in
+ * is decided by its name and a fuzzer that only writes noise never exercises that
+ * decision - it would test the walk and never the classification.
+ */
+static uint64_t gen_docole(uint8_t *b)
+{
+	static const char *const names[] = {
+		"Macros", "VBA", "ObjectPool", "WordDocument", "ThisDocument",
+		"\005SummaryInformation", "_VBA_PROJECT", "Data"
+	};
+	uint64_t n = 512u + (rnd() % 15u) * 512u;
+	uint64_t i, at;
+	uint32_t nsec;
+
+	memset(b, 0, OBJ_MAX);
+	for (i = 0; i < n; i++)
+		b[i] = (uint8_t)rnd();
+
+	memcpy(b, "\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", 8);
+	nsec = (uint32_t)(n / 512u);
+
+	put16(b, 0x18, 0x3e);
+	put16(b, 0x1a, (rnd() % 8u) ? 3u : (uint16_t)(rnd() % 6u));
+	put16(b, 0x1c, (rnd() % 8u) ? 0xfffeu : (uint16_t)rnd());
+	put16(b, 0x1e, (rnd() % 8u) ? 9u : (uint16_t)(rnd() % 20u));
+	put16(b, 0x20, (rnd() % 8u) ? 6u : (uint16_t)(rnd() % 20u));
+	put32(b, 0x38, (rnd() % 8u) ? 4096u : (uint32_t)rnd());
+
+	/* Chain heads: usually a sector this file has, sometimes one it does not. */
+	put32(b, 0x30, (rnd() % 4u) ? (uint32_t)(rnd() % nsec) : (uint32_t)rnd());
+	put32(b, 0x3c, (rnd() % 4u) ? (uint32_t)(rnd() % nsec) : (uint32_t)rnd());
+	put32(b, 0x44, (rnd() % 4u) ? 0xfffffffeu : (uint32_t)(rnd() % nsec));
+	for (i = 0; i < 109u; i++)
+		put32(b, 0x4c + i * 4u,
+		      (rnd() % 3u) ? (uint32_t)(rnd() % nsec) : 0xffffffffu);
+
+	for (at = 512u; at + 128u <= n; at += 128u) {
+		const char *nm = names[rnd() % (sizeof names / sizeof names[0])];
+		uint32_t k;
+
+		if (rnd() % 3u)
+			continue;              /* left as noise, which is also a case */
+		for (k = 0; nm[k]; k++)
+			put16(b, at + k * 2u, (uint16_t)(uint8_t)nm[k]);
+		put16(b, at + k * 2u, 0);
+		put16(b, at + 0x40u, (uint16_t)((k + 1u) * 2u));
+		b[at + 0x42u] = (uint8_t)((rnd() % 8u) ? ((rnd() % 2u) ? 1u : 2u)
+						       : (uint8_t)rnd());
+		put32(b, at + 0x44u, (uint32_t)(rnd() % 48u));
+		put32(b, at + 0x48u, (uint32_t)(rnd() % 48u));
+		put32(b, at + 0x4cu, (uint32_t)(rnd() % 48u));
+		put32(b, at + 0x74u, (uint32_t)(rnd() % nsec));
+		put32(b, at + 0x78u, (uint32_t)(rnd() % 70000u));
+		put32(b, at + 0x7cu, (rnd() % 8u) ? 0u : (uint32_t)rnd());
+	}
+	return n;
+}
+
 static uint64_t gen_gzip(uint8_t *b)
 {
 	uint64_t n = 4 + rnd() % 300;
@@ -276,16 +344,17 @@ int main(int argc, char **argv)
 	struct kof_elf_info *ei = malloc(sizeof *ei);
 	struct kof_pe_info *pi = malloc(sizeof *pi);
 	struct kof_gzip_info *gi = malloc(sizeof *gi);
+	struct kof_docole_info *oi = malloc(sizeof *oi);
 	struct pc_report rep = { 0, 0, 0 };
 	uint64_t rounds = ROUNDS, seed = 20240101u;
-	uint64_t r, pe_parsed = 0, elf_parsed = 0, gz_parsed = 0;
+	uint64_t r, pe_parsed = 0, elf_parsed = 0, gz_parsed = 0, ole_parsed = 0;
 	char what[64];
 
 	if (argc > 1)
 		seed = strtoull(argv[1], 0, 0);
 	if (argc > 2)
 		rounds = strtoull(argv[2], 0, 0);
-	if (!ei || !pi || !gi)
+	if (!ei || !pi || !gi || !oi)
 		return 1;
 
 	rng_state = seed ? seed : 1;
@@ -293,17 +362,18 @@ int main(int argc, char **argv)
 	for (r = 0; r < rounds; r++) {
 		struct kof_obj_ctx ctx;
 		uint64_t n;
-		int want = (int)(rnd() % 3);   /* 0: PE, 1: ELF, 2: gzip */
+		int want = (int)(rnd() % 4);   /* PE, ELF, gzip, docole */
 
 		memset(&ctx, 0, sizeof ctx);
 		n = want == 0 ? gen_pe(obj) : want == 1 ? gen_elf(obj)
-							: gen_gzip(obj);
+			: want == 2 ? gen_gzip(obj) : gen_docole(obj);
 		{
 			kof_buf buf = kof_buf_make(obj, n);
 
 			snprintf(what, sizeof what, "seed=%llu round=%llu %s",
 				 (unsigned long long)seed, (unsigned long long)r,
-				 want == 0 ? "PE" : want == 1 ? "ELF" : "gzip");
+				 want == 0 ? "PE" : want == 1 ? "ELF"
+				 : want == 2 ? "gzip" : "docole");
 
 			if (want == 0 && kof_pe_sniff(buf)) {
 				if (kof_pe_parse(buf, pi, &ctx)) {
@@ -323,6 +393,12 @@ int main(int argc, char **argv)
 					pc_check(what, &ctx, n, kof_gzip_region_bits,
 						 KOF_GZIP_REGION_COUNT, &rep);
 				}
+			} else if (want == 3 && kof_docole_sniff(buf)) {
+				if (kof_docole_parse(buf, oi, &ctx)) {
+					ole_parsed++;
+					pc_check(what, &ctx, n, kof_docole_region_bits,
+						 KOF_DOCOLE_REGION_COUNT, &rep);
+				}
 			}
 		}
 	}
@@ -330,10 +406,12 @@ int main(int argc, char **argv)
 	free(ei);
 	free(pi);
 	free(gi);
-	printf("hostile headers: %llu round(s), parsed ELF %llu PE %llu gzip %llu, "
-	       "partition %llu/%llu\n",
+	free(oi);
+	printf("hostile headers: %llu round(s), parsed ELF %llu PE %llu gzip %llu "
+	       "docole %llu, partition %llu/%llu\n",
 	       (unsigned long long)rounds, (unsigned long long)elf_parsed,
 	       (unsigned long long)pe_parsed, (unsigned long long)gz_parsed,
+	       (unsigned long long)ole_parsed,
 	       (unsigned long long)(rep.checked - rep.failed),
 	       (unsigned long long)rep.checked);
 	return rep.failed != 0;

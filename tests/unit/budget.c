@@ -31,6 +31,7 @@
 static int failures;
 static char root[256];
 static char obj_path[512];
+static char big_path[512];
 
 static void fail(const char *what, const char *why)
 {
@@ -63,6 +64,34 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 }
 
 /* ---- the modules ------------------------------------------------------------ */
+
+/*
+ * Gather a region, capped and uncapped.
+ *
+ * What is under test is not the region - KOF_SCAN_ALL is one extent and needs no
+ * parser - but the two things the gather path does on its own: cutting the copy
+ * into emits, and stopping exactly at a cap. Both are arithmetic with a boundary,
+ * which is where an off-by-one lives, and neither shows up in a region comparison
+ * because a wrong cap still produces correct BYTES, just too many or too few.
+ *
+ * Written so a wrong count produces a MISSING OBJECT rather than a wrong number:
+ * each gather is checked against what it must return and the child is only closed
+ * if it matched, so the assertion at the call site is a count of objects. A test
+ * that merely printed the byte totals would pass with either.
+ */
+#define GATHER_OBJ 3000000u
+#define GATHER_CAP 1500000u
+
+static void mod_gather(const struct kof_obj_ctx *ctx)
+{
+	if (kof_gather_max(KOF_SCAN_ALL, GATHER_CAP) != GATHER_CAP)
+		return;
+	kof_child();
+	if (kof_gather(KOF_SCAN_ALL) != ctx->obj_size)
+		return;
+	kof_child();
+}
+
 
 /*
  * Produce far more than it consumes, and keep going until the host refuses.
@@ -190,8 +219,9 @@ static void mod_dangling(const struct kof_obj_ctx *ctx)
 
 /* ---- driving the real scan path --------------------------------------------- */
 
-static void run(const char *what, void (*fn)(const struct kof_obj_ctx *),
-		const struct kof_scan_option *opt, struct seen *out)
+static void run_at(const char *path, const char *what,
+		   void (*fn)(const struct kof_obj_ctx *),
+		   const struct kof_scan_option *opt, struct seen *out)
 {
 	struct kof_engine eng;
 	struct kof_module m;
@@ -211,7 +241,7 @@ static void run(const char *what, void (*fn)(const struct kof_obj_ctx *),
 		fail(what, "out of memory");
 		return;
 	}
-	kof_scan_walk(sc, obj_path, opt, on_object, out);
+	kof_scan_walk(sc, path, opt, on_object, out);
 	{
 		const struct kof_stats *st = kof_scan_stats(sc);
 
@@ -219,6 +249,12 @@ static void run(const char *what, void (*fn)(const struct kof_obj_ctx *),
 		out->peak  = st ? st->peak_resident : 0;
 	}
 	kof_scan_free(sc);
+}
+
+static void run(const char *what, void (*fn)(const struct kof_obj_ctx *),
+		const struct kof_scan_option *opt, struct seen *out)
+{
+	run_at(obj_path, what, fn, opt, out);
 }
 
 static void expect(const char *what, int cond, const char *why)
@@ -257,6 +293,28 @@ int main(void)
 		return 1;
 	}
 	fwrite("a small file that produces a very large amount of nothing", 1, 57, f);
+	fclose(f);
+
+	/* A second object, large enough that a gather of it is more than one emit.
+	 * Separate from the one above because every other case here depends on that
+	 * one being small. */
+	snprintf(big_path, sizeof big_path, "%s/big", root);
+	f = fopen(big_path, "wb");
+	if (!f) {
+		printf("budget: cannot write the large object\n");
+		unlink(obj_path);
+		rmdir(root);
+		return 1;
+	}
+	{
+		static uint8_t pad[65536];
+		uint32_t k;
+
+		memset(pad, 'G', sizeof pad);
+		for (k = 0; k < GATHER_OBJ / sizeof pad; k++)
+			fwrite(pad, 1, sizeof pad, f);
+		fwrite(pad, 1, GATHER_OBJ % sizeof pad, f);
+	}
 	fclose(f);
 
 	memset(&opt, 0, sizeof opt);
@@ -423,10 +481,28 @@ int main(void)
 	expect("dangling", s.objects == 1,
 	       "bytes that were never closed into a child became one anyway");
 
+	/* --- gather: a cap that binds, and one that does not --- */
+	/*
+	 * Depth one, because this module targets every format and would otherwise
+	 * gather its own output forever. A real gathering module cannot: what comes
+	 * out has no container header, so nothing identifies it as the format the
+	 * module targets and the module is never entered for it. The regress here is
+	 * a property of a test module that claims every format, not of the call.
+	 */
+	opt.max_depth = 1;
+	opt.max_children = 0;
+	opt.max_produced_bytes = 64u << 20;
+	opt.max_resident_bytes = 32u << 20;
+	run_at(big_path, "gather", mod_gather, &opt, &s);
+	trace("gather", &s);
+	expect("gather", s.objects == 3,
+	       "a gather returned a length other than the cap and the region");
+
+	unlink(big_path);
 	unlink(obj_path);
 	rmdir(root);
 
-	printf("budget: bomb, stream, siblings, wide, window and dangling %s\n",
+	printf("budget: bomb, stream, siblings, wide, window, gather and dangling %s\n",
 	       failures ? "FAILED" : "ok");
 	return failures != 0;
 }
