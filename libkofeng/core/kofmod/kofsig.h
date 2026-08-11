@@ -373,8 +373,27 @@ enum kof_unp_method {
 
 	KOF_UNP_NRV2B_8 = 16, KOF_UNP_NRV2B_16, KOF_UNP_NRV2B_32,
 	KOF_UNP_NRV2D_8,      KOF_UNP_NRV2D_16, KOF_UNP_NRV2D_32,
-	KOF_UNP_NRV2E_8,      KOF_UNP_NRV2E_16, KOF_UNP_NRV2E_32
+	KOF_UNP_NRV2E_8,      KOF_UNP_NRV2E_16, KOF_UNP_NRV2E_32,
+
+	/*
+	 * LZMA carries three parameters, so the id carries them.
+	 *
+	 * lc, lp and pb decide the shape of the probability model and there is no
+	 * default that works - a stream decoded with the wrong three produces
+	 * plausible bytes that are not the file. They ride in the method id rather
+	 * than in a fourth argument because every other coding needs no parameters
+	 * and a parameter that is meaningless for eight of nine methods is worse
+	 * than an id that says what it is.
+	 *
+	 * Use KOF_UNP_LZMA_PROPS to build one. The packing is the specification's
+	 * own: lc + 9*lp + 45*pb, which fits 0..224 above the base.
+	 */
+	KOF_UNP_LZMA = 64
 };
+
+#define KOF_UNP_LZMA_PROPS(lc, lp, pb)                                      \
+	((uint32_t)KOF_UNP_LZMA + (uint32_t)(lc) + 9u * (uint32_t)(lp) +    \
+	 45u * (uint32_t)(pb))
 
 /*
  * Everything a module knows about the object it was asked about.

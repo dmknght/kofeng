@@ -1,5 +1,10 @@
 /*
- * nrv2_fuzz - drive the NRV2 decoders with input that is not a stream.
+ * decomp_fuzz - drive the buffered decoders with input that is not a stream.
+ *
+ * NRV2 and LZMA both decode into a caller's buffer rather than through a sink, and
+ * both are reachable from any ELF or PE handed to a scanner, so they are fuzzed
+ * together and against the same invariants. inflate has its own test because it
+ * streams and because zlib can be used as an oracle for it; neither is true here.
  *
  * nrv2_upx.c proves the decoders right on real UPX blocks, using the length each
  * block declares as an oracle. It proves nothing about what they do when the input
@@ -49,6 +54,7 @@
 #include <sys/stat.h>
 
 #include "../../libkofeng/kofdecomp/nrv2.h"
+#include "../../libkofeng/kofdecomp/lzma.h"
 
 #define OUT_CAP   (1u << 20)
 #define IN_MAX    8192u
@@ -184,10 +190,28 @@ static void harvest_dir(const char *dir)
 static uint8_t in[IN_MAX];
 static uint8_t out_a[OUT_CAP], out_b[OUT_CAP];
 
+/*
+ * One decode, whichever coding this round is about.
+ *
+ * Wrapped so the invariants below are written once: what is being asserted is a
+ * property of "a decoder that writes into a buffer the caller sized", not of any
+ * one format, and two copies of the checks would be two places for one of them to
+ * be dropped.
+ */
+static int decode_any(int lzma, int variant, int bits, unsigned lc, unsigned lp,
+		      unsigned pbits, const uint8_t *src, uint64_t n,
+		      uint8_t *dst, uint64_t cap, uint64_t *produced)
+{
+	if (lzma)
+		return kof_lzma_decode(lc, lp, pbits, src, n, dst, cap, produced);
+	return kof_nrv2_decode(variant, bits, src, n, dst, cap, produced);
+}
+
 static void one(uint64_t r)
 {
 	uint32_t n;
-	int variant, bits;
+	int variant, bits, lzma = 0;
+	unsigned lc = 3, lp = 0, pbits = 2;
 	uint64_t cap, pa = 0, pb = 0, i;
 	int sa, sb;
 
@@ -248,6 +272,18 @@ static void one(uint64_t r)
 			in[i] = (uint8_t)rnd();
 		variant = (int)(rnd() % 3);
 		bits = (int)((rnd() % 3) == 0 ? 8 : (rnd() % 2 ? 16 : 32));
+		/*
+		 * A third of the random rounds go to LZMA, with parameters drawn
+		 * over the whole legal range rather than the ones real files use:
+		 * lc and lp size the probability model, so they are the arguments
+		 * an attacker would reach for and the ones worth varying.
+		 */
+		if ((rnd() % 3) == 0) {
+			lzma = 1;
+			lc = (unsigned)(rnd() % (KOF_LZMA_MAX_LC + 2));
+			lp = (unsigned)(rnd() % (KOF_LZMA_MAX_LP + 2));
+			pbits = (unsigned)(rnd() % (KOF_LZMA_MAX_PB + 2));
+		}
 	}
 
 	/* Buffers of every scale, including ones far too small: where the receiver's
@@ -260,7 +296,7 @@ static void one(uint64_t r)
 	}
 
 	memset(out_a, MARKER, cap);
-	sa = kof_nrv2_decode(variant, bits, in, n, out_a, cap, &pa);
+	sa = decode_any(lzma, variant, bits, lc, lp, pbits, in, n, out_a, cap, &pa);
 	rounds_done++;
 
 	if (sa < 0 || sa > KOF_DEC_CORRUPT) {
@@ -282,7 +318,7 @@ static void one(uint64_t r)
 
 	/* Twice, into a different buffer: no state may carry between streams. */
 	memset(out_b, MARKER ^ 0xff, cap);
-	sb = kof_nrv2_decode(variant, bits, in, n, out_b, cap, &pb);
+	sb = decode_any(lzma, variant, bits, lc, lp, pbits, in, n, out_b, cap, &pb);
 	if (sa != sb || pa != pb || (pa && memcmp(out_a, out_b, (size_t)pa) != 0)) {
 		fail(r, "the same stream decoded differently the second time");
 		return;
@@ -300,7 +336,8 @@ static void one(uint64_t r)
 		uint64_t small = pa / 2, pc = 0;
 
 		memset(out_b, MARKER ^ 0xff, small);
-		kof_nrv2_decode(variant, bits, in, n, out_b, small, &pc);
+		decode_any(lzma, variant, bits, lc, lp, pbits, in, n, out_b, small,
+			   &pc);
 		if (pc > small) {
 			fail(r, "the smaller decode overran its buffer");
 			return;
@@ -361,7 +398,7 @@ int main(int argc, char **argv)
 	for (r = 0; r < rounds && failures == 0; r++)
 		one(r);
 
-	printf("nrv2 fuzz: %llu round(s), %llu real seed(s); ok %llu stopped %llu "
+	printf("decomp fuzz: %llu round(s), %llu real seed(s); ok %llu stopped %llu "
 	       "truncated %llu corrupt %llu\n",
 	       (unsigned long long)rounds_done, (unsigned long long)seeds,
 	       (unsigned long long)by_status[KOF_DEC_OK],

@@ -23,6 +23,7 @@
 #include "objsrc.h"
 #include "../kofdecomp/inflate.h"
 #include "../kofdecomp/nrv2.h"
+#include "../kofdecomp/lzma.h"
 
 /*
  * Everything mutable, one per thread.

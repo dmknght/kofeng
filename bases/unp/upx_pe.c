@@ -94,6 +94,39 @@ static uint32_t method_of(unsigned m)
 	}
 }
 
+#define UPX_M_LZMA 14u
+
+/*
+ * UPX's LZMA blocks, and what is known about their parameters.
+ *
+ * The compressed data begins TWO BYTES into the block, and those two bytes carry
+ * the parameters. What they carry was established by decoding real blocks with
+ * every combination the specification allows and keeping the ones that produced
+ * exactly the length the container declared - 13 blocks across packed ELF and PE:
+ *
+ *     1a 03   ->  lc=3 lp=0 pb=2      (12 blocks)
+ *     18 03   ->  lc=3 lp=0 pb=0      (1 block)
+ *
+ * So pb is the low three bits of the first byte, and that is the whole of what the
+ * sample proves. Every block used lc=3 and lp=0, so where THOSE live is not
+ * established and they are taken as constants - if a build using other values
+ * turns up, this decodes it wrongly.
+ *
+ * That is safe to be wrong about, and deliberately so: the container states the
+ * uncompressed length, the host reports what it produced, and a mismatch is
+ * reported as an object not fully examined. A wrong guess here costs a sample that
+ * is marked incomplete, never one that is silently declared clean.
+ */
+#define UPX_LZMA_SKIP  2u
+#define UPX_LZMA_LC    3u
+#define UPX_LZMA_LP    0u
+
+static uint32_t upx_lzma_method(unsigned first_byte)
+{
+	return KOF_UNP_LZMA_PROPS(UPX_LZMA_LC, UPX_LZMA_LP, first_byte & 7u);
+}
+
+
 KOF_DEFINE_UNPACK
 {
 	const struct kof_pe_info *pe = kof_pe(ctx);
@@ -129,16 +162,22 @@ KOF_DEFINE_UNPACK
 	kof_debug("UPX.PE.format", kof_u8(ph + PH_FORMAT));
 	kof_debug("UPX.PE.method", kof_u8(ph + PH_METHOD));
 
-	if (decoder == 0) {
-		/* A coding this engine does not have. The file is packed, the
-		 * payload is in there, and nothing here can reach it - which is a
-		 * verdict of "not examined", never of "clean". */
-		kof_incomplete();
-		return;
-	}
 	if (u_len == 0 || c_len == 0 || !kof_in_obj(stream, c_len)) {
 		kof_incomplete();
 		return;
+	}
+	if (decoder == 0) {
+		if (kof_u8(ph + PH_METHOD) != UPX_M_LZMA ||
+		    c_len <= UPX_LZMA_SKIP) {
+			/* A coding this engine does not have. The file is packed,
+			 * the payload is in there, and nothing here can reach it -
+			 * a verdict of "not examined", never of "clean". */
+			kof_incomplete();
+			return;
+		}
+		decoder = upx_lzma_method(kof_u8(stream));
+		stream += UPX_LZMA_SKIP;
+		c_len  -= UPX_LZMA_SKIP;
 	}
 
 	/*

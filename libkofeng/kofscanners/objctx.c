@@ -505,6 +505,29 @@ static int nrv2_of(uint32_t method, int *variant, int *bits)
 }
 
 /*
+ * The three LZMA parameters, back out of the method id.
+ *
+ * Refused rather than clamped when they are past what the specification allows:
+ * they size an allocation, and one that came out of a file is not a thing to round
+ * into range.
+ */
+static int lzma_props_of(uint32_t method, unsigned *lc, unsigned *lp, unsigned *pb)
+{
+	uint32_t v;
+
+	if (method < KOF_UNP_LZMA)
+		return 0;
+	v = method - KOF_UNP_LZMA;
+	if (v > 224u)
+		return 0;
+	*lc = v % 9u;
+	*lp = (v / 9u) % 5u;
+	*pb = v / 45u;
+	return *lc <= KOF_LZMA_MAX_LC && *lp <= KOF_LZMA_MAX_LP &&
+	       *pb <= KOF_LZMA_MAX_PB;
+}
+
+/*
  * Decoders that cannot stream, and what they cost.
  *
  * NRV2 places no bound on how far a match may reach back, so the whole of its
@@ -523,9 +546,9 @@ static int nrv2_of(uint32_t method, int *variant, int *bits)
  * declared value sizes a buffer and bounds nothing.
  */
 static uint64_t unpack_buffered(struct kof_scanner *sc,
-				const struct kof_obj_ctx *ctx, int variant,
-				int bits, const uint8_t *in, uint64_t in_len,
-				uint64_t out_hint)
+				const struct kof_obj_ctx *ctx, uint32_t method,
+				int variant, int bits, const uint8_t *in,
+				uint64_t in_len, uint64_t out_hint)
 {
 	uint64_t room, want, produced = 0, at;
 	uint8_t *buf;
@@ -556,7 +579,20 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 	if (sc->resident > sc->st.peak_resident)
 		sc->st.peak_resident = sc->resident;
 
-	st = kof_nrv2_decode(variant, bits, in, in_len, buf, want, &produced);
+	if (method >= KOF_UNP_LZMA) {
+		unsigned lc, lp, pb;
+
+		if (!lzma_props_of(method, &lc, &lp, &pb)) {
+			sc->resident -= want;
+			free(buf);
+			sc->exhausted = 1;
+			return 0;
+		}
+		st = kof_lzma_decode(lc, lp, pb, in, in_len, buf, want, &produced);
+	} else {
+		st = kof_nrv2_decode(variant, bits, in, in_len, buf, want,
+				     &produced);
+	}
 	if (st != KOF_DEC_OK)
 		sc->exhausted = 1;
 
@@ -625,7 +661,10 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 	}
 
 	if (nrv2_of(method, &variant, &bits))
-		return unpack_buffered(sc, ctx, variant, bits, b.p + off, len,
+		return unpack_buffered(sc, ctx, method, variant, bits, b.p + off,
+				       len, out_hint);
+	if (method >= KOF_UNP_LZMA)
+		return unpack_buffered(sc, ctx, method, 0, 0, b.p + off, len,
 				       out_hint);
 
 	return 0;      /* a method this engine does not have */

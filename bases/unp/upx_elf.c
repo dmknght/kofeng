@@ -116,6 +116,37 @@ static uint32_t method_of(unsigned m)
  */
 #define UPX_M_LZMA 14u
 
+/*
+ * UPX's LZMA blocks, and what is known about their parameters.
+ *
+ * The compressed data begins TWO BYTES into the block, and those two bytes carry
+ * the parameters. What they carry was established by decoding real blocks with
+ * every combination the specification allows and keeping the ones that produced
+ * exactly the length the container declared - 13 blocks across packed ELF and PE:
+ *
+ *     1a 03   ->  lc=3 lp=0 pb=2      (12 blocks)
+ *     18 03   ->  lc=3 lp=0 pb=0      (1 block)
+ *
+ * So pb is the low three bits of the first byte, and that is the whole of what the
+ * sample proves. Every block used lc=3 and lp=0, so where THOSE live is not
+ * established and they are taken as constants - if a build using other values
+ * turns up, this decodes it wrongly.
+ *
+ * That is safe to be wrong about, and deliberately so: the container states the
+ * uncompressed length, the host reports what it produced, and a mismatch is
+ * reported as an object not fully examined. A wrong guess here costs a sample that
+ * is marked incomplete, never one that is silently declared clean.
+ */
+#define UPX_LZMA_SKIP  2u
+#define UPX_LZMA_LC    3u
+#define UPX_LZMA_LP    0u
+
+static uint32_t upx_lzma_method(unsigned first_byte)
+{
+	return KOF_UNP_LZMA_PROPS(UPX_LZMA_LC, UPX_LZMA_LP, first_byte & 7u);
+}
+
+
 KOF_DEFINE_UNPACK
 {
 	uint64_t magic_at, at, want, got = 0;
@@ -188,13 +219,20 @@ KOF_DEFINE_UNPACK
 			break;
 
 		decoder = method_of(method);
-		if (decoder == 0) {
-			/* A coding this engine lacks means real data was skipped;
-			 * anything else means the chain ended. */
-			if (method == UPX_M_LZMA)
-				kof_incomplete();
-			break;
+		if (decoder == 0 && method == UPX_M_LZMA) {
+			if (sz_cpr <= UPX_LZMA_SKIP)
+				break;
+			kof_debug("UPX.ELF.method", method);
+			got += kof_unpack_at(
+				upx_lzma_method(kof_u8(at + B_INFO_LEN)),
+				at + B_INFO_LEN + UPX_LZMA_SKIP,
+				sz_cpr - UPX_LZMA_SKIP, sz_unc);
+			blocks++;
+			at += B_INFO_LEN + sz_cpr;
+			continue;
 		}
+		if (decoder == 0)
+			break;          /* not a coding at all: the chain ended */
 
 		kof_debug("UPX.ELF.method", method);
 		got += kof_unpack_at(decoder, at + B_INFO_LEN, sz_cpr, sz_unc);

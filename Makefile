@@ -104,6 +104,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/containers/gzip_parse.c \
            libkofeng/kofdecomp/decomp.c \
            libkofeng/kofdecomp/inflate.c \
+           libkofeng/kofdecomp/lzma.c \
            libkofeng/kofdecomp/nrv2.c \
            libkofeng/kofscanners/scan.c \
            libkofeng/kofscanners/objctx.c \

@@ -1,5 +1,5 @@
 /*
- * nrv2_upx - decode real UPX blocks and check the length the file declared.
+ * upx_blocks - decode real UPX blocks and check the length the file declared.
  *
  * There is no zlib for NRV2. The reference implementation is UPX's own stub, which
  * is machine code inside the samples, so the differential trick that proves inflate
@@ -38,8 +38,19 @@
 #include <sys/stat.h>
 
 #include "../../libkofeng/kofdecomp/nrv2.h"
+#include "../../libkofeng/kofdecomp/lzma.h"
 
-static uint64_t blocks, matched, skipped_lzma;
+static uint64_t blocks, matched;
+
+/*
+ * UPX's LZMA blocks start two bytes in, and those two bytes carry pb in their low
+ * three bits. lc and lp were the same in every sample this was written against, so
+ * they are constants here - the same statement bases/unp/upx_elf.c makes, and the
+ * same reason: the declared length below is what would catch it being wrong.
+ */
+#define LZMA_SKIP 2u
+#define LZMA_LC   3u
+#define LZMA_LP   0u
 static uint64_t bad_status, bad_length;
 static char first_bad[600];
 
@@ -133,17 +144,23 @@ static void one_file(const char *path, const uint8_t *f, uint64_t n)
 			break;                       /* not a plausible compression */
 
 		variant = variant_of(method);
-		if (variant < 0) {
-			if (method == 14)
-				skipped_lzma++;
+		if (variant < 0 && method != 14)
 			break;                       /* an unknown method ends the walk */
-		}
+		if (method == 14 && sz_cpr <= LZMA_SKIP)
+			break;
 
 		out = malloc(sz_unc);
 		if (!out)
 			return;
-		st = kof_nrv2_decode(variant, bits_of(method), f + at + 12, sz_cpr,
-				     out, sz_unc, &produced);
+		if (method == 14)
+			st = kof_lzma_decode(LZMA_LC, LZMA_LP,
+					     f[at + 12] & 7u,
+					     f + at + 12 + LZMA_SKIP,
+					     sz_cpr - LZMA_SKIP, out, sz_unc,
+					     &produced);
+		else
+			st = kof_nrv2_decode(variant, bits_of(method), f + at + 12,
+					     sz_cpr, out, sz_unc, &produced);
 		blocks++;
 		if (method < 16)
 			seen_by[method]++;
@@ -225,14 +242,11 @@ int main(int argc, char **argv)
 			walk(defaults[i]);
 
 	if (blocks == 0) {
-		printf("nrv2 upx: no sample corpus found - nothing tested\n");
+		printf("upx blocks: no sample corpus found - nothing tested\n");
 		return 0;
 	}
-	printf("nrv2 upx: %llu block(s), %llu decoded to the declared length",
+	printf("upx blocks: %llu block(s), %llu decoded to the declared length\n",
 	       (unsigned long long)blocks, (unsigned long long)matched);
-	if (skipped_lzma)
-		printf(", %llu lzma skipped", (unsigned long long)skipped_lzma);
-	printf("\n");
 	{
 		static const char *const mname[16] = {
 			0,0,"NRV2B_LE32","NRV2B_8","NRV2B_LE16",
