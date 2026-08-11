@@ -18,13 +18,13 @@
 
 /* No format view, so it may apply to everything - and now actually does, rather
  * than being excluded by a hardcoded ELF dispatch. */
-KOF_SIG_TARGET(KOF_FMT_ANY);
+KOF_TARGET_FORMAT(KOF_FMT_ANY);
 
 /* KOF_SCAN_ALL is the only region this module can name: it targets every format, so
  * there is no format whose region vocabulary it could use. The host answers this one
  * without a parser, which is what lets a module like this run against input nothing
  * identified. */
-KOF_DEFINE_RANGE(everything, KOF_SCAN_ALL);
+KOF_TARGET_RANGE(everything, KOF_SCAN_ALL);
 KOF_DEFINE_STR(gcc_comment, "GCC: (GNU)", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 
 KOF_DEFINE_SCAN
@@ -33,5 +33,5 @@ KOF_DEFINE_SCAN
 		return;
 
 	if (kof_find_str(everything, gcc_comment))
-		KOF_SIG_MATCH("Test.GccComment", KOF_LVL_INFECT);
+		KOF_SCAN_MATCH("Test.GccComment", KOF_LVL_INFECT);
 }

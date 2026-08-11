@@ -1,7 +1,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/pe.h>
 
-KOF_SIG_TARGET(KOF_FMT_PE);
+KOF_TARGET_FORMAT(KOF_FMT_PE);
 
 /*
  * A runtime packer, recognised by its shape rather than by its name.
@@ -58,7 +58,7 @@ KOF_DEFINE_SCAN
 	}
 
 	if (zero_raw && wx)
-		KOF_SIG_MATCH("Packed.Generic", KOF_LVL_INFECT);
+		KOF_SCAN_MATCH("Packed.Generic", KOF_LVL_INFECT);
 	if (zero_raw || wx)
-		KOF_SIG_MATCH("Packed.Suspect", KOF_LVL_SUSPECT);
+		KOF_SCAN_MATCH("Packed.Suspect", KOF_LVL_SUSPECT);
 }

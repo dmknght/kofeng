@@ -548,9 +548,9 @@ static int lzma_props_of(uint32_t method, unsigned *lc, unsigned *lp, unsigned *
 static uint64_t unpack_buffered(struct kof_scanner *sc,
 				const struct kof_obj_ctx *ctx, uint32_t method,
 				int variant, int bits, const uint8_t *in,
-				uint64_t in_len, uint64_t out_hint)
+				uint64_t in_len, uint64_t out_hint, uint32_t form)
 {
-	uint64_t room, want, produced = 0, at;
+	uint64_t room, want, produced = 0, decoded, at;
 	uint8_t *buf;
 	int st;
 
@@ -596,6 +596,47 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 	if (st != KOF_DEC_OK)
 		sc->exhausted = 1;
 
+	/*
+	 * An image becomes a file before anybody sees it.
+	 *
+	 * Done here rather than after the emit because this is the only place the
+	 * whole output is one contiguous buffer: past this point it is in a sink
+	 * that may already have spilled to a temporary file. The rebuild is bounded
+	 * by what is left under the ceiling for the same reason the decode was.
+	 */
+	/*
+	 * What the DECODER produced, kept before the rebuild changes it.
+	 *
+	 * This is what the call reports back, and the distinction matters: a module
+	 * compares the answer against the length its container declared, and that
+	 * length describes the image, not the file the host went on to assemble
+	 * from it. Returning the file's size made every rebuilt object look short
+	 * and every UPX packed PE was reported as not fully examined.
+	 */
+	decoded = produced;
+
+	if (form == KOF_FORM_PE_IMAGE && produced) {
+		uint8_t *rebuilt = NULL;
+		uint64_t rebuilt_len = 0;
+		uint64_t rebuild_cap = sc->resident < sc->resident_max
+				     ? sc->resident_max - sc->resident : 0;
+
+		if (kof_pe_rebuild(kof_buf_make(buf, produced), rebuild_cap, &rebuilt,
+				   &rebuilt_len)) {
+			sc->resident -= want;
+			free(buf);
+			buf = rebuilt;
+			want = rebuilt_len;
+			produced = rebuilt_len;
+			sc->resident += want;
+			if (sc->resident > sc->st.peak_resident)
+				sc->st.peak_resident = sc->resident;
+		}
+		/* A buffer that could not be rebuilt is emitted as it is: an image
+		 * is still worth searching, and saying nothing about it would be
+		 * worse than handing over something that does not identify. */
+	}
+
 	/* Whatever was decoded is real output and is worth scanning, whether or not
 	 * the stream ended cleanly - the same rule the gzip path follows. */
 	for (at = 0; at < produced; ) {
@@ -610,11 +651,18 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 
 	sc->resident -= want;
 	free(buf);
-	return at;
+	/*
+	 * Everything emitted means the decode is what to report; a short emit means
+	 * the sink refused and how far it got is the useful number. The two differ
+	 * only after a rebuild, where what was emitted is a file assembled from what
+	 * was decoded and is a different size by construction.
+	 */
+	return at == produced ? decoded : at;
 }
 
 static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
-			 uint64_t off, uint64_t len, uint64_t out_hint)
+			 uint64_t off, uint64_t len, uint64_t out_hint,
+			 uint32_t form)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	kof_buf b;
@@ -662,10 +710,10 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 
 	if (nrv2_of(method, &variant, &bits))
 		return unpack_buffered(sc, ctx, method, variant, bits, b.p + off,
-				       len, out_hint);
+				       len, out_hint, form);
 	if (method >= KOF_UNP_LZMA)
 		return unpack_buffered(sc, ctx, method, 0, 0, b.p + off, len,
-				       out_hint);
+				       out_hint, form);
 
 	return 0;      /* a method this engine does not have */
 }

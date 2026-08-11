@@ -102,6 +102,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/binaries/elf_parse.c \
            libkofeng/kofparsers/binaries/pe_parse.c \
            libkofeng/kofparsers/containers/gzip_parse.c \
+           libkofeng/kofunpack/pe_rebuild.c \
            libkofeng/kofdecomp/decomp.c \
            libkofeng/kofdecomp/inflate.c \
            libkofeng/kofdecomp/lzma.c \
@@ -276,7 +277,16 @@ UNIT_LIBS_inflate_diff := -lz
 $(TEST)/unit_%: tests/unit/%.c $(LIB) $(STAMP) | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) $< $(LIB) -o $@ $(LDFLAGS) $(UNIT_LIBS_$*)
 
-unit: fixtures $(UNIT_BIN)
+# The engine's own signature set is BUILT here, not merely present.
+#
+# It is not part of `make db`, so nothing else compiles it - and a rename that
+# missed it went unnoticed until somebody tried. A signature set that is never
+# built is a signature set that has already rotted; building it with the tests is
+# what keeps the module ABI's own examples honest about the ABI.
+test-sigs:
+	@$(MAKE) --no-print-directory db BASEDIR=tests/sigs >/dev/null
+
+unit: fixtures test-sigs $(UNIT_BIN)
 	@rc=0; for t in $(UNIT_BIN); do \
 		printf '%-28s ' "$$(basename $$t)"; \
 		if $$t; then :; else rc=1; echo "  FAILED"; fi; \
@@ -289,4 +299,4 @@ unit: fixtures $(UNIT_BIN)
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all sdk sigs db unit fixtures clean
+.PHONY: all sdk sigs db unit fixtures test-sigs clean

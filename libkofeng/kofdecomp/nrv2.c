@@ -52,6 +52,8 @@
 
 #include "nrv2.h"
 
+#include <string.h>
+
 /* ---- bits -------------------------------------------------------------------- */
 
 struct nrv_in {
@@ -398,9 +400,25 @@ int kof_nrv2_decode(int variant, int bits, const uint8_t *in, uint64_t in_len,
 			status = KOF_DEC_STOPPED;
 			goto done;
 		}
-		while (len--) {
-			out[at] = out[at - dist];
-			at++;
+		/*
+		 * Non-overlapping matches are a straight copy.
+		 *
+		 * A match whose distance is at least its length reads bytes that are
+		 * all already written and cannot reach the ones this copy is
+		 * producing, so the two ranges are disjoint and memcpy applies -
+		 * which on the data these formats carry is most matches. Where the
+		 * distance is shorter the overlap is the POINT: the format writes a
+		 * run that way, and it has to stay a byte at a time because each
+		 * byte read is one this loop just wrote.
+		 */
+		if ((uint64_t)dist >= (uint64_t)len) {
+			memcpy(out + at, out + at - dist, (size_t)len);
+			at += len;
+		} else {
+			while (len--) {
+				out[at] = out[at - dist];
+				at++;
+			}
 		}
 	}
 

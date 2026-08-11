@@ -401,11 +401,19 @@ int kof_lzma_decode(unsigned lc, unsigned lp, unsigned pb,
 			len = (uint32_t)(out_cap - at);
 			status = KOF_DEC_STOPPED;
 		}
-		/* Byte at a time and overlapping on purpose: a length greater than
-		 * the distance is how a run is written. */
-		while (len--) {
-			out[at] = out[at - rep0];
-			at++;
+		/*
+		 * Non-overlapping matches are a straight copy; a distance shorter
+		 * than the length is a run and has to stay byte at a time, because
+		 * each byte it reads is one this loop just wrote.
+		 */
+		if ((uint64_t)rep0 >= (uint64_t)len) {
+			memcpy(out + at, out + at - rep0, (size_t)len);
+			at += len;
+		} else {
+			while (len--) {
+				out[at] = out[at - rep0];
+				at++;
+			}
 		}
 		if (status == KOF_DEC_STOPPED)
 			break;

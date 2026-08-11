@@ -19,6 +19,7 @@
 #include "../kofmatchers/kofmatch.h"
 #include "../kofparsers/binaries/elf_parse.h"
 #include "../kofparsers/binaries/pe_parse.h"
+#include "../kofunpack/pe_rebuild.h"
 #include "../kofparsers/containers/gzip_parse.h"
 #include "objsrc.h"
 #include "../kofdecomp/inflate.h"

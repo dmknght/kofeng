@@ -332,7 +332,8 @@ struct kof_content {
 	 * ceiling allows, and a decode that stops when it fills.
 	 */
 	uint64_t (*unpack)(const struct kof_obj_ctx *, uint32_t method,
-			   uint64_t off, uint64_t len, uint64_t out_hint);
+			   uint64_t off, uint64_t len, uint64_t out_hint,
+			   uint32_t form);
 
 	/* Where a declared string is, rather than whether. KOF_BROKEN if absent. */
 	uint64_t (*find_str_where)(const struct kof_obj_ctx *, uint32_t str_id,
@@ -368,6 +369,22 @@ struct kof_content {
  * NRV2 carries its bit width in the id because the width is part of the coding
  * rather than a variant of it - see kof_nrv2_bits for what that cost to learn.
  */
+/*
+ * What the unpacked bytes are, so the host knows whether to reassemble them.
+ *
+ * RAW is the ordinary answer and means the output is already a file - a gzip
+ * member, a UPX packed ELF, anything the packer restores whole.
+ *
+ * PE_IMAGE means the output is a mapped image: it begins at the first section's
+ * virtual address and carries the original PE header somewhere inside. The host
+ * finds that header and writes the file the loader would have read. Without it the
+ * child of an unpacked PE is a buffer of code that nothing recognises.
+ */
+enum kof_unp_form {
+	KOF_FORM_RAW = 0,
+	KOF_FORM_PE_IMAGE = 1
+};
+
 enum kof_unp_method {
 	KOF_UNP_DEFLATE = 1,   /* RFC 1951; streams, needs no size hint */
 
@@ -827,10 +844,15 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
  *     kof_unpack_deflate(gz->data_off, gz->data_len);
  *     kof_child();
  */
-#define kof_unpack_at(method, off, len, out_hint)                          \
+#define kof_unpack_form(method, off, len, out_hint, form)                  \
 	((ctx)->content->unpack ?                                          \
 	 (ctx)->content->unpack((ctx), (uint32_t)(method), (uint64_t)(off),\
-				(uint64_t)(len), (uint64_t)(out_hint)) : 0)
+				(uint64_t)(len), (uint64_t)(out_hint),     \
+				(uint32_t)(form)) : 0)
+
+/* The output is already a file, which is the ordinary case. */
+#define kof_unpack_at(method, off, len, out_hint)                          \
+	kof_unpack_form((method), (off), (len), (out_hint), KOF_FORM_RAW)
 
 /* DEFLATE streams, so it needs no size: spelled out because a gzip or zip module
  * has nothing sensible to pass and should not have to invent one. */

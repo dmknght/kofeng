@@ -18,7 +18,7 @@
 
 /* Reads elf->sec_count, so it needs the ELF view and therefore exactly one
  * target: kof_elf() casts, and a cast needs a guaranteed format. */
-KOF_SIG_TARGET(KOF_FMT_ELF);
+KOF_TARGET_FORMAT(KOF_FMT_ELF);
 
 /*
  * A compiler comment lives in .comment, which carries no SHF_ALLOC and so is never
@@ -26,14 +26,14 @@ KOF_SIG_TARGET(KOF_FMT_ELF);
  * fraction of the file - looking for a toolchain trace anywhere else is both slower
  * and more likely to be an accident.
  */
-KOF_DEFINE_RANGE(toolchain, KOF_SCAN_ELF_NOLOAD);
+KOF_TARGET_RANGE(toolchain, KOF_SCAN_ELF_NOLOAD);
 KOF_DEFINE_STR(gcc_comment, "GCC: (GNU)", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 
 /* Case folded on purpose, to exercise that path. Note this still matches the symbol
  * version strings in .dynstr, which are inside a loaded segment and therefore in
  * DATA - a known false positive kept here as a reminder that a region is not a
  * section. */
-KOF_DEFINE_RANGE(loaded_data, KOF_SCAN_ELF_DATA);
+KOF_TARGET_RANGE(loaded_data, KOF_SCAN_ELF_DATA);
 KOF_DEFINE_STR(glibc, "gLiBc", KOF_CASE_ICASE, KOF_WORD_SUBSTRING);
 
 KOF_DEFINE_SCAN
@@ -47,10 +47,10 @@ KOF_DEFINE_SCAN
 		return;
 
 	if (kof_find_str(toolchain, gcc_comment))
-		KOF_SIG_MATCH("Test.GccComment", KOF_LVL_INFECT);
+		KOF_SCAN_MATCH("Test.GccComment", KOF_LVL_INFECT);
 
 	/* Suspicion carries a reason, not a name. The host composes the string from
 	 * the format and architecture it already knows plus this code. */
 	if (kof_find_str(loaded_data, glibc))
-		KOF_SIG_MATCH("Suspect.AnomCombo", KOF_LVL_SUSPECT);
+		KOF_SCAN_MATCH("Suspect.AnomCombo", KOF_LVL_SUSPECT);
 }

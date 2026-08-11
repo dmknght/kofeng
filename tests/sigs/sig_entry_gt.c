@@ -35,7 +35,7 @@
 
 /* entry_off is a common tier fact, meaningful for every executable format, so
  * this needs no format view and can apply to more than one format. */
-KOF_SIG_TARGET(KOF_FMT_ELF | KOF_FMT_PE);
+KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_PE);
 
 #define ENTRY_THRESHOLD 0x1234u
 
@@ -45,11 +45,11 @@ KOF_DEFINE_SCAN
 	 * a file that simply has none is unremarkable. The two sentinels exist so
 	 * this distinction can be made. */
 	if (ctx->entry_off == KOF_BROKEN)
-		KOF_SIG_MATCH("Suspect.EntryUnresolved", KOF_LVL_SUSPECT);
+		KOF_SCAN_MATCH("Suspect.EntryUnresolved", KOF_LVL_SUSPECT);
 	if (ctx->entry_off == KOF_NA)
 		return;
 
 	if (ctx->entry_off > ENTRY_THRESHOLD)
-		KOF_SIG_MATCH("Test.EntryAboveThreshold", KOF_LVL_INFECT);
+		KOF_SCAN_MATCH("Test.EntryAboveThreshold", KOF_LVL_INFECT);
 
 }
