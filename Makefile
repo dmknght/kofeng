@@ -71,7 +71,7 @@ INT   := $(BUILD)/temp
 TEST  := $(BUILD)/test
 SDK   := $(OUT)
 
-all: sdk tools
+all: sdk tools databases
 
 # ------------------------------------------------------- building one tool
 #
@@ -99,14 +99,15 @@ tools: kofscanner kofexamine ksigbuilder
 
 help:
 	@echo "targets:"
-	@echo "  all           the SDK and all three tools  (default)"
+	@echo "  all           the SDK, all three tools and the databases  (default)"
 	@echo "  sdk           libkofeng.a and the public headers"
 	@echo "  kofscanner    the scanner"
 	@echo "  kofexamine    the file examiner"
 	@echo "  ksigbuilder   the database builder"
 	@echo "  tools         all three of the above"
-	@echo "  db            compile bases/ into a database   -> $(OUT)/db"
-	@echo "  db BASEDIR=D  compile D instead                -> $(TEST)/db-<name>"
+	@echo "  databases     compile bases/ into the shipping databases"
+	@echo "                                                 -> $(OUT)/databases"
+	@echo "  databases BASEDIR=D   compile D instead        -> $(TEST)/databases-<name>"
 	@echo "  unit          build and run the tests"
 	@echo "  fixtures      build the binaries the tests parse"
 	@echo "  clean         remove $(BUILD)"
@@ -251,9 +252,9 @@ $(OUT)/bin/ksigbuilder: ksigbuilder/ksigbuilder.c $(LIB) $(SDK_HDR) $(STAMP)
 # entry. Same division Kaspersky shipped, where _nrv.c and _lzma.c live in the
 # unpacker kernel and the per-packer modules call into them.
 #
-#   make db                          the product        -> build/release/db
-#   make db BASEDIR=tests/sigs       the engine's tests -> build/test/db-sigs
-#   make db BASEDIR=~/work/mine      anywhere else      -> build/test/db-mine
+#   make databases                     the product        -> build/release/databases
+#   make databases BASEDIR=tests/sigs  the engine's tests -> build/test/databases-sigs
+#   make databases BASEDIR=~/work/mine anywhere else      -> build/test/databases-mine
 #
 # The work and output directories are DERIVED from BASEDIR rather than shared, and
 # the artefact directory is emptied before each build. Both matter for one reason:
@@ -273,8 +274,16 @@ JOBS      ?= 8
 # The product database goes to out/; anything else is a test or a working set and
 # goes to test/, so no experiment can overwrite what ships.
 ARTEFACTS ?= $(INT)/sig-$(BASESET)
-DB        ?= $(if $(filter bases,$(BASESET)),$(OUT)/db,$(TEST)/db-$(BASESET))
 
+# The product's databases ship, so they live with the binaries and are named for
+# what they are. Anything else is a test set or a working set and goes to test/,
+# where no experiment can overwrite what ships.
+DB        ?= $(strip $(if $(filter bases,$(BASESET)),$(OUT)/databases,\
+                                                     $(TEST)/databases-$(BASESET)))
+
+# The per-source chatter is dropped and a count is printed in its place. It used
+# to be dropped and nothing printed, so a compile of every base in the tree looked
+# exactly like a target that had decided there was nothing to do.
 sigs: $(OUT)/bin/ksigbuilder $(SDK_HDR)
 	@test -n "$(SIGS)" || { echo "make: no base sources in $(BASEDIR)" >&2; \
 		exit 2; }
@@ -283,8 +292,9 @@ sigs: $(OUT)/bin/ksigbuilder $(SDK_HDR)
 	@echo "$(SIGS)" | tr ' ' '\n' | KOF_OUTDIR=$(abspath $(ARTEFACTS)) \
 		KOF_BASEDIR=$(abspath $(BASEDIR)) \
 		xargs -P $(JOBS) -n 1 ksigbuilder/ksigcompiler.sh >/dev/null
+	@echo "  $(words $(SIGS)) source(s) from $(BASEDIR) -> $(ARTEFACTS)"
 
-db: sigs $(OUT)/bin/ksigbuilder
+databases: sigs $(OUT)/bin/ksigbuilder
 	@rm -rf $(DB)
 	@mkdir -p $(DB)
 	@$(OUT)/bin/ksigbuilder $(ARTEFACTS) $(DB)
@@ -328,7 +338,7 @@ $(TEST)/unit_%: tests/unit/%.c $(LIB) $(STAMP) | $(TEST)
 # built is a signature set that has already rotted; building it with the tests is
 # what keeps the module ABI's own examples honest about the ABI.
 test-sigs:
-	@$(MAKE) --no-print-directory db BASEDIR=tests/sigs >/dev/null
+	@$(MAKE) --no-print-directory databases BASEDIR=tests/sigs >/dev/null
 
 unit: fixtures test-sigs $(UNIT_BIN)
 	@rc=0; for t in $(UNIT_BIN); do \
@@ -343,5 +353,5 @@ unit: fixtures test-sigs $(UNIT_BIN)
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all sdk sigs db unit fixtures test-sigs clean \
+.PHONY: all sdk sigs databases unit fixtures test-sigs clean \
         kofscanner kofexamine ksigbuilder tools help
