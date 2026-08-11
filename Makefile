@@ -66,7 +66,45 @@ INT   := $(BUILD)/int
 TEST  := $(BUILD)/test
 SDK   := $(OUT)
 
-all: sdk $(OUT)/bin/kofscanner $(OUT)/bin/kofexamine $(OUT)/bin/ksigbuilder
+all: sdk tools
+
+# ------------------------------------------------------- building one tool
+#
+# Each tool by its own name, declared phony, and each with a recipe. All three
+# details are load bearing and each fixes a different half of the same problem.
+#
+# There is a DIRECTORY called kofscanner in this tree, and one called kofexamine,
+# and one called ksigbuilder. Without a rule, `make kofscanner` matched the
+# DIRECTORY, found nothing to do for it and said so - from a clean tree it built
+# no binary and reported success. Phony makes the name mean the tool.
+#
+# The recipe is what makes that visible. A target with prerequisites and no recipe
+# still prints "Nothing to be done" once its prerequisites are built, which is the
+# same sentence the broken version printed - so a working build and a build that
+# does nothing were indistinguishable from the outside. Saying what exists costs a
+# line and removes the ambiguity entirely.
+kofscanner:  $(OUT)/bin/kofscanner
+	@echo "  $<"
+kofexamine:  $(OUT)/bin/kofexamine
+	@echo "  $<"
+ksigbuilder: $(OUT)/bin/ksigbuilder
+	@echo "  $<"
+
+tools: kofscanner kofexamine ksigbuilder
+
+help:
+	@echo "targets:"
+	@echo "  all           the SDK and all three tools  (default)"
+	@echo "  sdk           libkofeng.a and the public headers"
+	@echo "  kofscanner    the scanner"
+	@echo "  kofexamine    the file examiner"
+	@echo "  ksigbuilder   the database builder"
+	@echo "  tools         all three of the above"
+	@echo "  db            compile bases/ into a database   -> $(OUT)/db"
+	@echo "  db BASEDIR=D  compile D instead                -> $(TEST)/db-<name>"
+	@echo "  unit          build and run the tests"
+	@echo "  fixtures      build the binaries the tests parse"
+	@echo "  clean         remove $(BUILD)"
 
 $(BUILD) $(OUT) $(INT) $(TEST):
 	@mkdir -p $@
@@ -149,6 +187,7 @@ $(SDK)/include/kofmod/%.h: libkofeng/core/kofmod/%.h
 	@cp $< $@
 
 sdk: $(LIB) $(SDK_HDR)
+	@echo "  $(LIB)"
 
 # --------------------------------------------------------------- the scanner
 #
@@ -299,4 +338,5 @@ unit: fixtures test-sigs $(UNIT_BIN)
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all sdk sigs db unit fixtures test-sigs clean
+.PHONY: all sdk sigs db unit fixtures test-sigs clean \
+        kofscanner kofexamine ksigbuilder tools help
