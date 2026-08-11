@@ -2,13 +2,13 @@
 #
 # ksigcompiler.sh - compile one signature source into a loadable blob.
 #
-#   ./ksigbuilder/ksigcompiler.sh signature/sig_entry_gt.c
-#   KEEP=1 ./ksigbuilder/ksigcompiler.sh signature/sig_entry_gt.c
+#   ./ksigbuilder/ksigcompiler.sh bases/signatures/mirai.c
+#   KEEP=1 ./ksigbuilder/ksigcompiler.sh bases/signatures/mirai.c
 #
 # One half of the toolchain; ksigbuilder is the other. This compiles a source into
 # an artefact, that packs artefacts into a database, and neither does the other's
 # job. They live in the same directory because they are one toolchain, and apart
-# from signature/ because that holds inputs, not tools.
+# from bases/ because that holds inputs, not tools.
 #
 # The declarations in the source are read by ksigbuilder --extract rather than by
 # this script, because reading them is parsing and shell is not what parsing is
@@ -45,9 +45,27 @@ here=$(cd -- "$(dirname -- "$0")" && pwd)
 root=$(cd -- "$here/.." && pwd)
 # Where the public headers live. Overridable so the script works against a
 # checkout or against an installed SDK without changing anything in it.
-incdir=${KOF_INCLUDE:-$root/build/sdk/include}
+incdir=${KOF_INCLUDE:-$root/build/out/include}
 
+# The artefact name, taken from the path BELOW the content tree rather than from
+# the file name alone.
+#
+# bases/decomp/gzip.c and bases/unp/gzip.c are both reasonable names for real
+# modules - one opens the container, one would unpack something else about it -
+# and with a bare basename the second silently overwrites the first's artefacts.
+# ksigbuilder packs a directory, so the loser simply is not in the database and
+# nothing reports it. Encoding the kind removes the collision and makes the
+# artefact directory say where each blob came from.
 name=$(basename "$src" .c)
+if [ -n "${KOF_BASEDIR:-}" ]; then
+	abs=$(cd -- "$(dirname -- "$src")" && pwd)/$(basename -- "$src")
+	case "$abs" in
+	"$KOF_BASEDIR"/*)
+		rel=${abs#"$KOF_BASEDIR"/}
+		name=$(printf '%s' "${rel%.c}" | tr '/' '_')
+		;;
+	esac
+fi
 # Where the artefacts land.
 #
 # Every driver sets this, and the default is deliberately a scratch directory that
@@ -55,7 +73,7 @@ name=$(basename "$src" .c)
 # shared default is a way for a signature compiled by hand to end up in the next
 # release database without anyone choosing that. The Makefile derives one directory
 # per signature set; a hand run gets its own.
-outdir=${KOF_OUTDIR:-$root/build/scratch/sig}
+outdir=${KOF_OUTDIR:-$root/build/int/sig-scratch}
 blob=$outdir/$name.blob
 namefile=$outdir/$name.names
 metafile=$outdir/$name.meta
@@ -79,7 +97,7 @@ CC=${CC:-gcc}
 # The other half of the toolchain, in its --extract mode: it reads the declarations
 # out of the source. Same binary that packs the artefacts, so the region names it
 # accepts and the pack it later writes cannot disagree about anything.
-ksigbuilder=${KOF_KSIGBUILDER:-$root/build/ksigbuilder}
+ksigbuilder=${KOF_KSIGBUILDER:-$root/build/out/bin/ksigbuilder}
 if [ ! -x "$ksigbuilder" ]; then
 	echo "ksigcompiler.sh: $ksigbuilder missing (run: make)" >&2
 	exit 2
