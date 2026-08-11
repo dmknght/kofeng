@@ -2,21 +2,26 @@
 #
 # Three products and nothing else:
 #
-#   sdk         libkofeng.a plus the public headers, staged under build/out
+#   sdk         libkofeng.a plus the public headers, staged under build/release
 #   kofscanner  the scanner, built against that SDK and nothing else
 #   db          bases compiled and packed into .ksig
 #
 #
 # WHERE THINGS LAND
 #
-#   build/out    the product. Everything shippable and nothing else, so packaging
-#                is a copy of one directory rather than a list of paths that has
-#                to be kept in step with this file.
-#   build/int    intermediates: object files, dependency files, compiled base
-#                artefacts. Disposable by definition - deleting it costs a rebuild
-#                and nothing else.
-#   build/test   test binaries and their working directories, kept out of the
-#                product so a test artefact cannot be shipped by accident.
+#   build/release  the product. Everything shippable and nothing else, so
+#                  packaging is a copy of one directory rather than a list of
+#                  paths that has to be kept in step with this file.
+#   build/temp     intermediates: object files, dependency files, compiled base
+#                  artefacts. Disposable by definition - deleting it costs a
+#                  rebuild and nothing else.
+#   build/test     test binaries and their working directories, kept out of the
+#                  product so a test artefact cannot be shipped by accident.
+#
+# One caveat about the name: SAN=1 builds into these same directories, so
+# build/release then holds sanitizer binaries. The flag stamp below makes sure they
+# are REBUILT rather than mixed, so nothing is ever half one and half the other -
+# but the directory is named after what it is for, not after how it was compiled.
 #
 # Signature modules are NOT built with these flags: they are freestanding,
 # position independent blobs produced by ksigbuilder/ksigcompiler.sh with its own
@@ -40,9 +45,9 @@ CFLAGS  += -MMD -MP
 # Where the dependency files go.
 #
 # -MMD writes the .d beside the -o output, which for a linked binary means beside
-# the PRODUCT. Intermediates in build/out defeat the only thing that directory is
-# for - being copyable as-is - so every link redirects its .d into build/int. The
-# library objects already compile into build/int and need no help.
+# the PRODUCT. Intermediates in build/release defeat the only thing that directory
+# is for - being copyable as-is - so every link redirects its .d into build/temp.
+# The library objects already compile into build/temp and need no help.
 DEPTO    = -MF $(INT)/dep-$(notdir $@).d
 LDFLAGS ?=
 
@@ -61,8 +66,8 @@ LDFLAGS += -fsanitize=address,undefined -fno-sanitize-recover=all
 endif
 
 BUILD := build
-OUT   := $(BUILD)/out
-INT   := $(BUILD)/int
+OUT   := $(BUILD)/release
+INT   := $(BUILD)/temp
 TEST  := $(BUILD)/test
 SDK   := $(OUT)
 
@@ -246,7 +251,7 @@ $(OUT)/bin/ksigbuilder: ksigbuilder/ksigbuilder.c $(LIB) $(SDK_HDR) $(STAMP)
 # entry. Same division Kaspersky shipped, where _nrv.c and _lzma.c live in the
 # unpacker kernel and the per-packer modules call into them.
 #
-#   make db                          the product        -> build/out/db
+#   make db                          the product        -> build/release/db
 #   make db BASEDIR=tests/sigs       the engine's tests -> build/test/db-sigs
 #   make db BASEDIR=~/work/mine      anywhere else      -> build/test/db-mine
 #

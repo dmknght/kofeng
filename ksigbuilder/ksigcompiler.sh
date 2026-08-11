@@ -45,7 +45,7 @@ here=$(cd -- "$(dirname -- "$0")" && pwd)
 root=$(cd -- "$here/.." && pwd)
 # Where the public headers live. Overridable so the script works against a
 # checkout or against an installed SDK without changing anything in it.
-incdir=${KOF_INCLUDE:-$root/build/out/include}
+incdir=${KOF_INCLUDE:-$root/build/release/include}
 
 # The artefact name, taken from the path BELOW the content tree rather than from
 # the file name alone.
@@ -73,7 +73,7 @@ fi
 # shared default is a way for a signature compiled by hand to end up in the next
 # release database without anyone choosing that. The Makefile derives one directory
 # per signature set; a hand run gets its own.
-outdir=${KOF_OUTDIR:-$root/build/int/sig-scratch}
+outdir=${KOF_OUTDIR:-$root/build/temp/sig-scratch}
 blob=$outdir/$name.blob
 namefile=$outdir/$name.names
 metafile=$outdir/$name.meta
@@ -97,7 +97,7 @@ CC=${CC:-gcc}
 # The other half of the toolchain, in its --extract mode: it reads the declarations
 # out of the source. Same binary that packs the artefacts, so the region names it
 # accepts and the pack it later writes cannot disagree about anything.
-ksigbuilder=${KOF_KSIGBUILDER:-$root/build/out/bin/ksigbuilder}
+ksigbuilder=${KOF_KSIGBUILDER:-$root/build/release/bin/ksigbuilder}
 if [ ! -x "$ksigbuilder" ]; then
 	echo "ksigcompiler.sh: $ksigbuilder missing (run: make)" >&2
 	exit 2
