@@ -181,8 +181,8 @@ KOF_DEFINE_UNPACK
 	kof_debug("UPX.PE.method", kof_u8(ph + PH_METHOD));
 
 	if (u_len == 0 || c_len == 0 || !kof_in_obj(stream, c_len)) {
-		kof_incomplete();
-		return;
+		/* The header contradicts the file it is in. */
+		KOF_UNP_BROKEN(KOF_UNP_DAMAGED);
 	}
 	if (decoder == 0) {
 		if (kof_u8(ph + PH_METHOD) != UPX_M_LZMA ||
@@ -190,13 +190,12 @@ KOF_DEFINE_UNPACK
 			/* A coding this engine does not have. The file is packed,
 			 * the payload is in there, and nothing here can reach it -
 			 * a verdict of "not examined", never of "clean". */
-			kof_incomplete();
-			return;
+			KOF_UNP_BROKEN(KOF_UNP_UNSUPPORTED);
 		}
 		decoder = upx_lzma_method(kof_u8(stream));
 		if (decoder == 0) {
-			kof_incomplete();
-			return;
+			/* LZMA parameters outside what the format allows. */
+			KOF_UNP_BROKEN(KOF_UNP_DAMAGED);
 		}
 		stream += UPX_LZMA_SKIP;
 		c_len  -= UPX_LZMA_SKIP;
@@ -219,13 +218,14 @@ KOF_DEFINE_UNPACK
 	 * targets PE is ruled out before it runs.
 	 */
 	got = kof_unpack_form(decoder, stream, c_len, u_len, KOF_FORM_PE_IMAGE);
-	if (got == 0) {
-		kof_incomplete();
-		return;
-	}
+	if (got == 0)
+		KOF_UNP_BROKEN(KOF_UNP_DAMAGED);
 
 	kof_child();
 
+	/* Short of what the container declared: the stream did not hold what it
+	 * said it held. The host records its own reason when a limit was what
+	 * stopped it, and the first reason recorded is the one kept. */
 	if (got < u_len)
-		kof_incomplete();
+		kof_unp_broken(KOF_UNP_DAMAGED);
 }

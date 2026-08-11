@@ -30,6 +30,7 @@ struct run {
 	/* No object counter: the engine already keeps one, and a second copy is a
 	 * second thing that can disagree with it. */
 	uint64_t infected, suspect, dropped, incomplete;
+	uint64_t by_reason[4];
 	int verbose;
 	int stats;
 };
@@ -61,13 +62,15 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	 * decisions and collapsing them is how a decompression bomb stops being
 	 * scanned and starts being trusted.
 	 */
-	if (res->incomplete) {
+	if (res->broken) {
 		r->incomplete++;
-		printf("%-10s %s: limit reached; the object was not fully examined\n",
-		       "PARTIAL", name);
+		if (res->broken < 4)
+			r->by_reason[res->broken]++;
+		printf("%-10s %s: %s\n", "BROKEN", name,
+		       kof_broken_name(res->broken));
 	}
 	if (res->n == 0) {
-		if (r->verbose && !res->incomplete)
+		if (r->verbose && !res->broken)
 			printf("%-10s %s\n", "OK", name);
 		return 0;
 	}
@@ -221,8 +224,9 @@ int main(int argc, char **argv)
 		fprintf(stderr, "%s: cannot load a database from %s\n", argv[0], db);
 		return 2;
 	}
-	printf("database: version %u, %u record(s)\n",
-	       kof_engine_db_version(eng), kof_engine_records(eng));
+	printf("database: version %u, %u record(s), %u unpacker(s)\n",
+	       kof_engine_db_version(eng), kof_engine_records(eng),
+	       kof_engine_unpackers(eng));
 
 	sc = kof_scanner_new(eng);
 	if (!sc) {
@@ -259,9 +263,23 @@ int main(int argc, char **argv)
 	       st ? (unsigned long long)st->objects : 0ull, mb);
 	printf("infected  %llu object(s)\n", (unsigned long long)r.infected);
 	printf("suspected %llu object(s)\n", (unsigned long long)r.suspect);
-	if (r.incomplete)
-		printf("partial   %llu object(s) the engine could not finish\n",
+	/*
+	 * Broken objects, split by reason. The three call for different actions -
+	 * raise a limit, report a gap in this build, or accept that the file is
+	 * damaged - so one total would say the least useful thing the numbers can
+	 * say.
+	 */
+	if (r.incomplete) {
+		uint32_t k;
+
+		printf("broken    %llu object(s) the engine could not finish\n",
 		       (unsigned long long)r.incomplete);
+		for (k = 1; k < 4; k++)
+			if (r.by_reason[k])
+				printf("            %-28s %llu\n",
+				       kof_broken_name(k),
+				       (unsigned long long)r.by_reason[k]);
+	}
 	/* Throughput beside the time it came from: on its own, a duration says nothing
 	 * without the size of what was scanned, and both are already here. Guarded
 	 * because a scan can finish inside the clock's resolution. */

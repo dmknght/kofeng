@@ -186,15 +186,39 @@ static uint64_t c_find_str_where(const struct kof_obj_ctx *ctx, uint32_t str_id,
 }
 
 /*
+ * Record why an object was not finished, keeping the first answer.
+ *
+ * First rather than worst, because the reasons arrive in causal order: a decoder
+ * that met an unsupported coding stops producing, and the budget it then fails to
+ * spend is a consequence rather than a second problem.
+ */
+static void scan_broken(struct kof_scanner *sc, uint32_t reason)
+{
+	if (!sc->broken)
+		sc->broken = reason;
+}
+
+/* A decoder's status, in the vocabulary the caller sees. Stopping is the
+ * receiver's limit; everything else is the stream failing. */
+static uint32_t broken_of_status(int st)
+{
+	return st == KOF_DEC_STOPPED ? KOF_BROKEN_LIMIT : KOF_BROKEN_DAMAGED;
+}
+
+/*
  * A module saying it did not finish.
  *
  * The same flag every host-side limit sets, reached from the other side. Available
  * to detectors as well: a detector that could not follow a structure has the same
  * thing to say, and the answer it must not give is "clean".
  */
-static void c_incomplete(const struct kof_obj_ctx *ctx)
+static void c_incomplete(const struct kof_obj_ctx *ctx, uint32_t reason)
 {
-	kof_scan_of(ctx)->exhausted = 1;
+	/* The module's vocabulary is the host's; a value outside it is recorded as
+	 * the least specific reason rather than stored and printed as a number. */
+	if (reason != KOF_BROKEN_UNSUPPORTED && reason != KOF_BROKEN_DAMAGED)
+		reason = KOF_BROKEN_LIMIT;
+	scan_broken(kof_scan_of(ctx), reason);
 }
 
 /*
@@ -279,7 +303,7 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 		/* Refused, and recorded: a container that yields more children than
 		 * the caller allows has not been fully examined, and saying so is
 		 * the difference between "nothing else here" and "stopped looking". */
-		sc->exhausted = 1;
+		scan_broken(sc, KOF_BROKEN_LIMIT);
 		kof_src_unref(kid);
 		return 0;
 	}
@@ -333,7 +357,7 @@ static int c_window(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t len)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
-	if (!sc->cur_src || sc->exhausted)
+	if (!sc->cur_src || sc->broken)
 		return 0;
 	return kid_push(sc, kof_src_window(sc->cur_src, off, len));
 }
@@ -372,13 +396,13 @@ static int c_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
-	if (!sc->cur_src || sc->exhausted)
+	if (!sc->cur_src || sc->broken)
 		return 0;
 	if (n == 0)
 		return 1;
 	/* A length out of a file, refused before it is used to read anything. */
 	if (n > EMIT_MAX) {
-		sc->exhausted = 1;
+		scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
 	/* Total work over the whole tree: the bomb defence. Cuts rather than
@@ -386,7 +410,7 @@ static int c_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 	 * been decompressed is a real prefix and is worth scanning. */
 	if (n > sc->budget) {
 		c_child(ctx);
-		sc->exhausted = 1;
+		scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
 	/*
@@ -420,11 +444,11 @@ static int c_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 	if (sc->sink_len + sc->sink_spilled + n > sc->obj_cap ||
 	    sc->resident + n > sc->resident_max) {
 		c_child(ctx);
-		sc->exhausted = 1;
+		scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
 	if (sc->sink_len + n > SINK_SPILL && !sink_spill(sc)) {
-		sc->exhausted = 1;
+		scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
 	if (sc->sink_fd >= 0) {
@@ -432,7 +456,7 @@ static int c_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 			/* A short write is almost always a full tmpfs. Recorded, not
 			 * swallowed: silently keeping a truncated object would report
 			 * a prefix of a file as if it were the file. */
-			sc->exhausted = 1;
+			scan_broken(sc, KOF_BROKEN_LIMIT);
 			return 0;
 		}
 		sc->sink_spilled += n;
@@ -445,7 +469,7 @@ static int c_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 				nc *= 2;
 			nb = realloc(sc->sink_mem, nc);
 			if (!nb) {
-				sc->exhausted = 1;
+				scan_broken(sc, KOF_BROKEN_LIMIT);
 				return 0;
 			}
 			sc->sink_mem = nb;
@@ -559,18 +583,18 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 	if (room > sc->obj_cap)
 		room = sc->obj_cap;
 	if (room == 0) {
-		sc->exhausted = 1;
+		scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
 	want = out_hint ? out_hint : room;
 	if (want > room) {
 		want = room;
-		sc->exhausted = 1;   /* the tail will not fit and will be dropped */
+		scan_broken(sc, KOF_BROKEN_LIMIT);   /* the tail will not fit and will be dropped */
 	}
 
 	buf = malloc((size_t)want);
 	if (!buf) {
-		sc->exhausted = 1;
+		scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
 	/* Charged while it is alive, so a module that unpacks inside an object that
@@ -585,7 +609,7 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 		if (!lzma_props_of(method, &lc, &lp, &pb)) {
 			sc->resident -= want;
 			free(buf);
-			sc->exhausted = 1;
+			scan_broken(sc, KOF_BROKEN_DAMAGED);
 			return 0;
 		}
 		st = kof_lzma_decode(lc, lp, pb, in, in_len, buf, want, &produced);
@@ -594,7 +618,7 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 				     &produced);
 	}
 	if (st != KOF_DEC_OK)
-		sc->exhausted = 1;
+		scan_broken(sc, broken_of_status(st));
 
 	/*
 	 * An image becomes a file before anybody sees it.
@@ -689,7 +713,7 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		if (!sc->inf) {
 			sc->inf = malloc(sizeof *sc->inf);
 			if (!sc->inf) {
-				sc->exhausted = 1;
+				scan_broken(sc, KOF_BROKEN_LIMIT);
 				return 0;
 			}
 		}
@@ -702,9 +726,13 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		 * the last block is missing throws away the part that identifies
 		 * it. It is recorded as an incomplete examination, not a clean one.
 		 */
-		if (kof_inflate(sc->inf, b.p + off, len, inflate_sink,
-				(void *)ctx, NULL, &produced) != KOF_DEC_OK)
-			sc->exhausted = 1;
+		{
+			int st = kof_inflate(sc->inf, b.p + off, len, inflate_sink,
+					     (void *)ctx, NULL, &produced);
+
+			if (st != KOF_DEC_OK)
+				scan_broken(sc, broken_of_status(st));
+		}
 		return produced;
 	}
 
@@ -840,7 +868,7 @@ void kof_scan_budget(struct kof_scanner *sc, uint64_t obj_size,
 							 : KOF_OBJ_CAP;
 	if (sc->obj_cap == 0)
 		sc->obj_cap = 1;
-	sc->exhausted = 0;
+	sc->broken = 0;
 }
 
 void kof_scan_kids_reset(struct kof_scanner *sc)

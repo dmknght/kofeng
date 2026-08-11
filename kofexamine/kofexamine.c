@@ -771,11 +771,12 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 		return 0;
 
 	u->produced++;
-	if (res->incomplete)
+	if (res->broken)
 		u->partial++;
 	kid_tag(tail, tag, sizeof tag);
-	printf("  recovered %-18s %10llu bytes%s\n", tag,
-	       (unsigned long long)len, res->incomplete ? "   (partial)" : "");
+	printf("  recovered %-18s %10llu bytes%s%s\n", tag,
+	       (unsigned long long)len, res->broken ? "   " : "",
+	       res->broken ? kof_broken_name(res->broken) : "");
 
 	if (!u->dump_dir)
 		return 0;

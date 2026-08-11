@@ -56,7 +56,9 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	(void)bytes;
 	(void)len;
 	s->objects++;
-	s->incomplete += res->incomplete;
+	/* Any reason counts here: what these cases assert is that the object was
+	 * not reported clean, not which of the three explanations applied. */
+	s->incomplete += res->broken ? 1u : 0u;
 	return 0;
 }
 

@@ -27,9 +27,29 @@ void kof_engine_close(kof_engine *e)
 
 uint32_t kof_engine_records(const kof_engine *e)
 {
-	/* Both kinds: an unpacker is a signature somebody wrote and shipped, and a
-	 * count that omitted them would understate the database. */
-	return e ? e->n_mods + e->n_unp : 0;
+	return e ? e->n_mods : 0;
+}
+
+uint32_t kof_engine_unpackers(const kof_engine *e)
+{
+	return e ? e->n_unp : 0;
+}
+
+/*
+ * A reason in words, for whoever has to read the scan.
+ *
+ * Here and not in the caller because the vocabulary is the engine's: a host that
+ * spelled these itself would drift from what the engine actually reports the day a
+ * reason is added.
+ */
+const char *kof_broken_name(uint32_t reason)
+{
+	switch (reason) {
+	case KOF_BROKEN_LIMIT:       return "a limit was reached";
+	case KOF_BROKEN_UNSUPPORTED: return "not supported by this build";
+	case KOF_BROKEN_DAMAGED:     return "the object is damaged";
+	default:                     return "unknown";
+	}
 }
 
 uint32_t kof_engine_db_version(const kof_engine *e)

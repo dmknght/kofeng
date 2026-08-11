@@ -70,9 +70,36 @@ struct kof_result {
 	 * verdict is "do not know", and it has to be distinguishable from "clean".
 	 * Reporting an exhausted budget as clean is what turns a decompression
 	 * bomb from a nuisance into a way of not being scanned.
+	 *
+	 * The VALUE says why, because the three reasons call for different actions
+	 * and a single bit made them one word. A limit is the caller's own setting
+	 * and can be raised; an unsupported coding is this engine's gap and a bug
+	 * report; a damaged object is the file's own problem and neither of those.
+	 * Telling somebody "not fully examined" when the answer is "this build has
+	 * no LZMA" wastes their afternoon.
 	 */
-	uint32_t incomplete;
+	uint32_t broken;      /* enum kof_broken, zero when the object was finished */
 };
+
+/*
+ * Why an object was not finished. Ordered by how specific the reason is, which is
+ * also the order they take precedence in: the first reason recorded is kept, since
+ * whatever stopped things first is what explains the rest.
+ */
+enum kof_broken {
+	KOF_BROKEN_NONE = 0,
+	/* A budget, a memory ceiling or a child count ran out. The caller set
+	 * these and can set them higher. */
+	KOF_BROKEN_LIMIT,
+	/* A compression method, packer version or format this build does not
+	 * implement. The object is fine; the engine is short of something. */
+	KOF_BROKEN_UNSUPPORTED,
+	/* The object's own structure does not hold together - a stream that does
+	 * not decode, a header that contradicts itself. */
+	KOF_BROKEN_DAMAGED
+};
+
+const char *kof_broken_name(uint32_t reason);
 
 /*
  * What a scan cost. Exposed because the design rests on a module being cheap for the
@@ -122,16 +149,20 @@ kof_engine *kof_engine_open(const char *db_path);
 void        kof_engine_close(kof_engine *);
 
 /*
- * How many records the database holds. A record is one signature: the unit an
- * author writes, the unit the engine decides whether to run, and the unit a
- * database is counted in.
+ * What the database holds, counted as two numbers because it is two things.
  *
- * Not the number of literals in it. That number is larger, moves when a signature
- * is rewritten without any signature being added, and is a fact about the engine's
- * internals rather than about the database - a host cannot act on it, and an
- * operator reading it as "how much do I detect" would be reading it wrong.
+ * A RECORD is one detection: something that names a family and can call an object
+ * bad. An UNPACKER opens containers and names nothing. Adding them gives a number
+ * that answers no question anybody has - "how much do I detect" is the records,
+ * and "what can I see inside" is the unpackers - and a database of ten unpackers
+ * and no detections would report ten and find nothing.
+ *
+ * Neither is the number of literals. That is larger, moves when a signature is
+ * rewritten without any signature being added, and is a fact about the engine's
+ * internals rather than about the database.
  */
 uint32_t    kof_engine_records(const kof_engine *);
+uint32_t    kof_engine_unpackers(const kof_engine *);
 
 /*
  * The database format version every loaded pack matched.

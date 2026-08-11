@@ -131,7 +131,13 @@ struct kof_scanner {
 	kof_on_debug debug_cb;
 	void        *debug_user;
 
-	int      exhausted;
+	/*
+	 * Why this object was not finished, or zero. The FIRST reason recorded is
+	 * kept: whatever stopped things first is what explains everything after it,
+	 * and a budget running out because a decoder had already given up is not
+	 * news about the budget.
+	 */
+	uint32_t broken;
 
 	struct kof_stats st;
 };

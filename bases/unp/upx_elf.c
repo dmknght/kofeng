@@ -250,7 +250,9 @@ KOF_DEFINE_UNPACK
 				break;
 			lz = upx_lzma_method(kof_u8(at + B_INFO_LEN));
 			if (lz == 0) {
-				kof_incomplete();
+				/* Recorded and NOT returned: the blocks already
+				 * decoded are real output and are kept. */
+				kof_unp_broken(KOF_UNP_DAMAGED);
 				break;
 			}
 			kof_debug("UPX.ELF.method", method);
@@ -299,5 +301,8 @@ KOF_DEFINE_UNPACK
 	if (blocks)
 		kof_child();
 	else
-		kof_incomplete();   /* opened it, recovered nothing */
+		/* Opened it and recovered nothing. The block chain did not begin
+		 * where this module looks, which on this corpus is a damaged file
+		 * far more often than a layout nobody has met. */
+		kof_unp_broken(KOF_UNP_DAMAGED);
 }

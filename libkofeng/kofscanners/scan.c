@@ -315,7 +315,7 @@ static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ct
  * lose. The same policy that already decides whether to keep running detectors
  * decides whether to open the container.
  */
-static int unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			 const struct kof_scan_option *opt,
 			 const struct kof_result *res)
 {
@@ -340,7 +340,7 @@ static int unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * Sticky exhaustion looked harmless and quietly halved the engine: the
 	 * first container to reach the ceiling stopped every container after it.
 	 */
-	sc->exhausted = 0;
+	sc->broken = 0;
 
 	kof_mod_unpack_mode(ctx, 1);
 	for (i = 0; i < sc->eng->n_unp; i++) {
@@ -358,7 +358,7 @@ static int unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			continue;
 
 		applies = 1;
-		if (sc->exhausted)
+		if (sc->broken)
 			break;          /* nothing left to spend on this tree */
 
 		sc->cur_mod = m;
@@ -374,7 +374,7 @@ static int unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * that on an object no unpacker would have touched anyway is noise that
 	 * makes the real case harder to see.
 	 */
-	return applies && sc->exhausted;
+	return applies ? sc->broken : 0;
 }
 
 static void scan_object(struct kof_scanner *sc, kof_buf buf,
@@ -449,7 +449,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	sc->st.bytes_searched += sc->m.n_bytes_scanned;
 	sc->st.gram_bytes     += sc->m.n_bytes_indexed;
 
-	out->incomplete = unpack_object(sc, &ctx, opt, out) ? 1u : 0u;
+	out->broken = unpack_object(sc, &ctx, opt, out);
 }
 
 /*
@@ -567,7 +567,7 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 
 		res.n = 0;
 		res.dropped = 0;
-		res.incomplete = 0;
+		res.broken = 0;
 
 		w->sc->cur_src = src;
 		kof_scan_kids_reset(w->sc);
