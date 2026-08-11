@@ -169,8 +169,23 @@ const struct kof_stats *kof_scanner_stats(const kof_scanner *);
  * tree, and a caller that had to poll for the next one would be reimplementing the
  * walk it just delegated.
  */
-typedef int (*kof_on_object)(const char *name, const struct kof_result *res,
-			     void *user);
+/*
+ * Called once per object, including the ones the engine produced itself.
+ *
+ * `bytes` and `len` are the object as it was scanned, and for a produced object -
+ * a decompressed archive entry, an unpacked executable - they are the only place
+ * it exists: it was never a file and it is gone once this returns. A host that
+ * wants to write out what an unpacker recovered has nothing else to write, which
+ * is why they are here rather than left to a second, richer callback that could
+ * disagree with this one.
+ *
+ * The pointer is valid for the duration of the call and no longer. Copy what you
+ * mean to keep.
+ *
+ * Return non-zero to abandon the walk.
+ */
+typedef int (*kof_on_object)(const char *name, const void *bytes, uint64_t len,
+			     const struct kof_result *res, void *user);
 
 /*
  * How a scan is allowed to spread, and how thorough it has to be.
@@ -243,6 +258,22 @@ struct kof_scan_option {
 	uint64_t max_produced_bytes;
 	uint32_t max_children;     /* 0 -> a built-in ceiling applies */
 };
+
+/*
+ * Told what a module worked out, as it works it out.
+ *
+ * `what` is the module's own name for what it worked out and `value` the one
+ * number it attached - a version, a count. Called during the module's run, so it
+ * arrives before any finding that module goes on to report, which is the order
+ * that makes it useful when the finding never comes.
+ *
+ * Diagnostics, not results: nothing here is a verdict and no scan depends on it.
+ * Set it and a debugging tool sees a module's reasoning; leave it unset, which is
+ * the default, and modules that emit notes cost a NULL test each.
+ */
+typedef void (*kof_on_debug)(const char *what, uint64_t value, void *user);
+
+void kof_scanner_on_debug(kof_scanner *, kof_on_debug, void *user);
 
 /*
  * Scan whatever `path` names.

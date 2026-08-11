@@ -1,9 +1,9 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/pe.h>
 
-KOF_TARGET(KOF_FMT_PE); // File format elf. Prefilter will use this
-KOF_DEFINE_RANGE(pe_range_data, KOF_SCAN_PE_DATA);
-KOF_DEFINE_RANGE(pe_range_code, KOF_SCAN_PE_CODE);
+KOF_TARGET_FORMAT(KOF_FMT_PE); // File format elf. Prefilter will use this
+KOF_TARGET_RANGE(pe_range_data, KOF_SCAN_PE_DATA);
+KOF_TARGET_RANGE(pe_range_code, KOF_SCAN_PE_CODE);
 
 /* The markers. Case and word handling belong to the literal; where to look does not,
  * so it is named at each use. */
@@ -28,9 +28,9 @@ KOF_DEFINE_SCAN
 	if (kof_find_str_all(pe_range_data, str_data_1, str_data_2)) {
 		if (kof_find_str_all(pe_range_code, str_code_1, str_code_2))
 		{
-			KOF_MATCH("Meter.Generic", KOF_LVL_INFECT);
+			KOF_SCAN_MATCH("Meter.Generic", KOF_LVL_INFECT);
 		} else {
-			KOF_MATCH("Meter.Generic", KOF_LVL_SUSPECT);
+			KOF_SCAN_MATCH("Meter.Generic", KOF_LVL_SUSPECT);
 		}
 	}
 }

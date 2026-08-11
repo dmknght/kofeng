@@ -220,7 +220,7 @@ struct macro {
 };
 
 static const struct macro macros[] = {
-	{ "KOF_DEFINE_RANGE",  DECL_RANGE  },
+	{ "KOF_TARGET_RANGE",  DECL_RANGE  },
 	{ "KOF_DEFINE_HEXSTR", DECL_HEXSTR },
 	{ "KOF_DEFINE_STR",    DECL_STR    },
 	{ NULL, DECL_RANGE }
@@ -348,7 +348,7 @@ static int read_literal(const char *p, int line, struct pat *out)
 }
 
 /*
- * Read the region mask, argument 2 of KOF_DEFINE_RANGE, and OR it into the module
+ * Read the region mask, argument 2 of KOF_TARGET_RANGE, and OR it into the module
  * total as well.
  *
  * Only an OR of the names in rgn_names is accepted. Anything else - a variable, a
@@ -546,7 +546,7 @@ static int read_name(const char *p, int line, char *out, size_t cap)
 	const char *q;
 	size_t n = 0;
 
-	/* Argument 1 of KOF_MATCH("name", LEVEL), located the same way as a pattern
+	/* Argument 1 of KOF_SCAN_MATCH("name", LEVEL), located the same way as a pattern
 	 * rather than by scanning for a quote: the level argument is a macro and
 	 * could contain one. */
 	q = nth_arg(p, 1, line);
@@ -555,7 +555,7 @@ static int read_name(const char *p, int line, char *out, size_t cap)
 	while (*q == ' ' || *q == '\t')
 		q++;
 	if (*q != '"') {
-		err(line, "first argument of KOF_MATCH must be a name literal");
+		err(line, "first argument of KOF_SCAN_MATCH must be a name literal");
 		return 0;
 	}
 	q++;
@@ -588,7 +588,11 @@ static void scan_line(char *at, size_t line_len, int lineno)
 	/* Find within the line; read arguments from the full buffer. Comments were
 	 * blanked before this ran, so anything found here is code. */
 	at[line_len] = 0;
-	p = strstr(at, "KOF_MATCH");
+	/* kof_debug names go in the same table and are keyed the same way: both use
+	 * __LINE__ as the id, so the host resolves either through one lookup. */
+	p = strstr(at, "KOF_SCAN_MATCH");
+	if (!p)
+		p = strstr(at, "kof_debug");
 	if (!p)
 		for (m = macros; m->name; m++) {
 			p = strstr(at, m->name);

@@ -28,7 +28,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/gzip.h>
 
-KOF_TARGET(KOF_FMT_GZIP);
+KOF_TARGET_FORMAT(KOF_FMT_GZIP);
 
 KOF_DEFINE_UNPACK
 {

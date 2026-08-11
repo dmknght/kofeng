@@ -81,7 +81,7 @@ struct kof_module {
 	uint32_t target_mask;
 	uint32_t scan_mask;   /* 0: names no region, so cannot be skipped that way */
 	uint64_t size_min;    /* 0: no minimum. No maximum by design - see
-			       * KOF_FILESIZE_MIN in kofsig.h. */
+			       * KOF_TARGET_SIZE_MIN in kofsig.h. */
 	uint32_t arch_mask;   /* 0: any architecture */
 
 	uint32_t name_base, n_names;

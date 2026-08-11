@@ -119,6 +119,16 @@ struct kof_scanner {
 	 */
 	struct kof_inflate *inf;
 
+	/*
+	 * Where notes go, when anybody wants them.
+	 *
+	 * NULL in every scan that did not ask, which is every scan that is not
+	 * somebody debugging a module - so the cost of a module leaving its notes
+	 * in is one NULL test at the call.
+	 */
+	kof_on_debug debug_cb;
+	void        *debug_user;
+
 	int      exhausted;
 
 	struct kof_stats st;

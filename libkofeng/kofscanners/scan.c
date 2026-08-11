@@ -575,8 +575,13 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 		w->sc->cur_src = NULL;
 
 		w->objects++;
-		if (w->cb && name && w->cb(name, &res, w->user) != 0)
-			w->aborted = 1;
+		{
+			kof_buf ob = kof_src_buf(src);
+
+			if (w->cb && name &&
+			    w->cb(name, ob.p, ob.n, &res, w->user) != 0)
+				w->aborted = 1;
+		}
 
 		/* Take the children before anything else can reset them. */
 		if (!w->aborted && !w->out_of_memory &&

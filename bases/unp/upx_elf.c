@@ -44,7 +44,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
 
-KOF_TARGET(KOF_FMT_ELF);
+KOF_TARGET_FORMAT(KOF_FMT_ELF);
 
 /*
  * The anchor. Declared rather than compared byte by byte, so the host searches

@@ -197,6 +197,26 @@ static void c_incomplete(const struct kof_obj_ctx *ctx)
 	kof_scan_of(ctx)->exhausted = 1;
 }
 
+/*
+ * A note on its way out.
+ *
+ * Resolved through the same name table a finding uses - a note and a detection are
+ * both authored text keyed by the line that wrote them - and dropped entirely when
+ * nobody is listening, which is the normal case.
+ */
+static void c_debug(const struct kof_obj_ctx *ctx, uint32_t name_id, uint64_t value)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	const char *text;
+
+	if (!sc->debug_cb || !sc->cur_mod)
+		return;
+	/* An id the table does not know is a stale table, and says so rather than
+	 * borrowing the neighbouring name - the same rule findings follow. */
+	text = kof_db_name(sc->eng, sc->cur_mod, name_id);
+	sc->debug_cb(text ? text : "unknown", value, sc->debug_user);
+}
+
 /* ---- producing child objects ------------------------------------------------ */
 
 /*
@@ -682,6 +702,7 @@ void kof_mod_attach(struct kof_obj_ctx *ctx, struct kof_scanner *sc)
 {
 	ctx->content = &kof_detect_vtable;
 	ctx->report  = c_report;
+	ctx->debug   = c_debug;
 	ctx->priv    = sc;
 }
 

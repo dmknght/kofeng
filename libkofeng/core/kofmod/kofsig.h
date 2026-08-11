@@ -243,7 +243,7 @@ struct kof_content {
 	 * Look for a declared string in a declared range. Non-zero if present.
 	 *
 	 * Both arguments are indices the build assigned to KOF_DEFINE_STR and
-	 * KOF_DEFINE_RANGE, so the pattern bytes are neither here nor in the blob:
+	 * KOF_TARGET_RANGE, so the pattern bytes are neither here nor in the blob:
 	 * the host holds them in the record beside it. Reached through kof_find_str.
 	 *
 	 * A call rather than a precomputed bit, so the host is free to answer from a
@@ -430,10 +430,33 @@ struct kof_obj_ctx {
 	 * some other family's name. The authored name is only the family part; the
 	 * host prefixes the format and architecture it already established.
 	 *
-	 * Called through KOF_MATCH, so reporting and returning cannot come apart.
+	 * Called through KOF_SCAN_MATCH, so reporting and returning cannot come apart.
 	 */
 	void (*report)(const struct kof_obj_ctx *ctx, uint32_t level,
 		       uint32_t name_id);
+
+	/*
+	 * The same thing said without deciding anything: what the module worked
+	 * out, for whoever is watching.
+	 *
+	 * A finding changes a verdict and ends the module. A note changes nothing
+	 * and the module carries on - "this is UPX 1.3 with NRV2E", "the block
+	 * chain stopped after four of them" - which is the difference between an
+	 * answer and the reasoning behind it. Nothing in a normal scan looks at
+	 * these; a host that wants them says so, and a host that does not pays one
+	 * NULL test per note.
+	 *
+	 * Named through the same table a finding uses, so note text never enters
+	 * the blob either, and a note carries one number because the interesting
+	 * ones are nearly always "which version" or "how many".
+	 *
+	 * Called through kof_debug, which does not return - and is spelled in lower
+	 * case for that reason. The upper case macros in this header are the ones
+	 * that change control flow; KOF_SCAN_MATCH reports AND returns, and a reader
+	 * should be able to tell the two apart without looking either of them up.
+	 */
+	void (*debug)(const struct kof_obj_ctx *ctx, uint32_t name_id,
+		      uint64_t value);
 
 	/* Host state the accessors need. Opaque, and no module has any reason to
 	 * touch it; it is here so the accessors can take the context rather than
@@ -485,7 +508,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx);
  * strings is not something a macro can pick out.
  *
  * Every name resolves through an identifier the build defines from the
- * KOF_DEFINE_STR and KOF_DEFINE_RANGE declarations in this source. A name that was
+ * KOF_DEFINE_STR and KOF_TARGET_RANGE declarations in this source. A name that was
  * never declared is an undefined identifier at compile time rather than a lookup
  * that quietly returns false - the failure mode to want, since a signature that
  * silently never matches looks exactly like one that works.
@@ -808,7 +831,7 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 /*
  * Declare which object formats this module applies to.
  *
- *     KOF_TARGET(KOF_FMT_ELF);
+ *     KOF_TARGET_FORMAT(KOF_FMT_ELF);
  *
  * Expands to nothing; the build reads it out of the source and the host will not
  * invoke a module for an object outside its target. That is what lets a module skip
@@ -819,15 +842,15 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
  * one format may be named only when no format header is included, because kof_elf()
  * casts ctx->file_header and a module that never casts has nothing to get wrong.
  */
-#define KOF_TARGET(mask)
+#define KOF_TARGET_FORMAT(mask)
 
 /*
  * Preconditions the host checks without running the module.
  *
- *     KOF_FILESIZE_MIN(1024);
- *     KOF_REQUIRE_ARCH(KOF_ARCH_X86_64);
+ *     KOF_TARGET_SIZE_MIN(1024);
+ *     KOF_TARGET_ARCH(KOF_ARCH_X86_64);
  *
- * Both expand to nothing and both work the way KOF_TARGET does: the build reads them
+ * Both expand to nothing and both work the way KOF_TARGET_FORMAT does: the build reads them
  * out of the source into the record beside the blob, and the host evaluates them
  * against facts the collector already produced. A module that fails one costs a few
  * integer comparisons against that record instead of a call and a scan.
@@ -855,8 +878,8 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
  * would be a second, worse programming language, which is the trap this whole design
  * exists to avoid.
  */
-#define KOF_FILESIZE_MIN(min)
-#define KOF_REQUIRE_ARCH(mask)
+#define KOF_TARGET_SIZE_MIN(min)
+#define KOF_TARGET_ARCH(mask)
 
 /*
  * How a declared string is compared.
@@ -896,14 +919,14 @@ enum kof_str_word {
 /*
  * Name a set of regions.
  *
- *     KOF_DEFINE_RANGE(loaded, KOF_SCAN_ELF_CODE | KOF_SCAN_ELF_DATA);
+ *     KOF_TARGET_RANGE(loaded, KOF_SCAN_ELF_CODE | KOF_SCAN_ELF_DATA);
  *
  * Named so the build can turn it into an index, which is what lets kof_find_str
  * paste both ids from identifiers - it could not do that from an expression like
  * "A | B". A plain #define would work and read as a local implementation detail
  * rather than part of the declared shape of the signature.
  */
-#define KOF_DEFINE_RANGE(name, scan_mask)
+#define KOF_TARGET_RANGE(name, scan_mask)
 
 /*
  * Declare a string this module looks for.
@@ -966,7 +989,7 @@ enum kof_str_word {
 /*
  * Report a finding and stop.
  *
- *     KOF_MATCH("Mirai.Generic", KOF_LVL_INFECT);
+ *     KOF_SCAN_MATCH("Mirai.Generic", KOF_LVL_INFECT);
  *
  * The name id is the source line, which is why the string can be dropped from the
  * expansion: the build scans this source, reads the literal, and writes
@@ -985,11 +1008,33 @@ enum kof_str_word {
  *
  * The report and the return are one statement so neither half can be forgotten.
  */
-#define KOF_MATCH(name, level)                                              \
+#define KOF_SCAN_MATCH(name, level)                                              \
 	do {                                                                \
 		(ctx)->report((ctx), (uint32_t)(level), (uint32_t)__LINE__); \
 		return;                                                     \
 	} while (0)
+
+/*
+ * Say what was worked out, without deciding anything.
+ *
+ * KOF_SCAN_MATCH reports and returns; this reports and carries on. It is for the cases
+ * where the useful information is not the verdict - which packer version was
+ * recognised, how far a block chain got, which coding a stream used - and where
+ * stopping would be wrong because the module has work left to do.
+ *
+ * The name is a literal, extracted at build time exactly as a detection name is,
+ * so it costs the blob nothing. `value` is one number the module computed; pass
+ * zero when there is nothing to say beyond the name.
+ *
+ *     kof_debug("UPX.PE.NRV2E", version);
+ *
+ * Invisible unless the host asked. Nothing in the scan path reads these and no
+ * verdict depends on one, so leaving them in a shipped module costs a NULL test
+ * per call - which is why they are meant to be left in.
+ */
+#define kof_debug(name, value)                                              \
+	((void)((ctx)->debug ?                                              \
+		((ctx)->debug((ctx), (uint32_t)__LINE__, (uint64_t)(value)), 0) : 0))
 
 /*
  * Caps on what one module may declare.

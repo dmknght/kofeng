@@ -46,11 +46,14 @@ static const char *level_str(uint32_t level)
  * different caller - an on-access hook that only needs to know whether to block -
  * returns non-zero at the first finding and the engine abandons the rest of the tree.
  */
-static int on_object(const char *name, const struct kof_result *res, void *user)
+static int on_object(const char *name, const void *bytes, uint64_t len,
+		     const struct kof_result *res, void *user)
 {
 	struct run *r = user;
 	uint32_t i;
 	int worst = -1;
+	(void)bytes;
+	(void)len;
 
 	/*
 	 * An object the engine could not finish with is not clean, and is not a

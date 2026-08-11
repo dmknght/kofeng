@@ -49,6 +49,20 @@ kof_scanner *kof_scanner_new(const kof_engine *e)
 	return kof_scan_new(e);
 }
 
+/*
+ * Ask to be told what modules work out.
+ *
+ * Per scanner rather than per engine: the engine is shared by every thread and is
+ * immutable, and one thread wanting diagnostics must not turn them on for the rest.
+ */
+void kof_scanner_on_debug(kof_scanner *sc, kof_on_debug cb, void *user)
+{
+	if (!sc)
+		return;
+	sc->debug_cb = cb;
+	sc->debug_user = user;
+}
+
 void kof_scanner_free(kof_scanner *sc)
 {
 	kof_scan_free(sc);

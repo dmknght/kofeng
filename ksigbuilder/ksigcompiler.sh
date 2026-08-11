@@ -134,24 +134,24 @@ CFLAGS=(
 
 # Target, and the two checks that keep it honest.
 #
-# The target has exactly one source: the KOF_TARGET declaration. Deriving it from
+# The target has exactly one source: the KOF_TARGET_FORMAT declaration. Deriving it from
 # the includes instead made a module that only searches bytes in ELF files carry
 # an include it never used, which reads as dead code because that is what it was.
 #
-# Multiple KOF_TARGET lines are rejected rather than merged. Merging would work,
+# Multiple KOF_TARGET_FORMAT lines are rejected rather than merged. Merging would work,
 # but "head -1" was taking the first and silently dropping the rest, and a rule
 # where a second declaration is either honoured or ignored depending on the
 # implementation is worse than one that says use a single declaration with "|".
-ndecl=$(grep -c 'KOF_TARGET(' "$src" || true)
+ndecl=$(grep -c 'KOF_TARGET_FORMAT(' "$src" || true)
 if [ "$ndecl" -gt 1 ]; then
-	echo "FAIL: $ndecl KOF_TARGET declarations; use one with '|'" >&2
-	echo "      e.g. KOF_TARGET(KOF_FMT_ELF | KOF_FMT_PE);" >&2
+	echo "FAIL: $ndecl KOF_TARGET_FORMAT declarations; use one with '|'" >&2
+	echo "      e.g. KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_PE);" >&2
 	exit 1
 fi
-targets=$(sed -n 's/.*KOF_TARGET(\([^)]*\)).*/\1/p' "$src")
+targets=$(sed -n 's/.*KOF_TARGET_FORMAT(\([^)]*\)).*/\1/p' "$src")
 if [ -z "$targets" ]; then
-	echo "FAIL: no KOF_TARGET(...) declaration" >&2
-	echo "      a module must say what it applies to, e.g. KOF_TARGET(KOF_FMT_ELF);" >&2
+	echo "FAIL: no KOF_TARGET_FORMAT(...) declaration" >&2
+	echo "      a module must say what it applies to, e.g. KOF_TARGET_FORMAT(KOF_FMT_ELF);" >&2
 	exit 1
 fi
 
@@ -181,7 +181,7 @@ esac
 	esac
 done
 if [ "$target_mask" -eq 0 ]; then
-	echo "FAIL: KOF_TARGET($targets) names no known format" >&2
+	echo "FAIL: KOF_TARGET_FORMAT($targets) names no known format" >&2
 	exit 1
 fi
 
@@ -249,18 +249,18 @@ arch_mask=0           # 0 == any architecture
 # Minimum object size. There is no maximum on purpose - see kofsig.h: an upper
 # bound is bypassed by appending padding, so declaring one would let a sample have
 # the module skipped rather than have it fail to match.
-nsz=$(grep -c 'KOF_FILESIZE_MIN(' "$src" || true)
+nsz=$(grep -c 'KOF_TARGET_SIZE_MIN(' "$src" || true)
 if [ "$nsz" -gt 1 ]; then
-	echo "FAIL: $nsz KOF_FILESIZE_MIN declarations; a module has one minimum" >&2
+	echo "FAIL: $nsz KOF_TARGET_SIZE_MIN declarations; a module has one minimum" >&2
 	exit 1
 fi
 if [ "$nsz" -eq 1 ]; then
-	szarg=$(sed -n 's/.*KOF_FILESIZE_MIN(\([^)]*\)).*/\1/p' "$src")
+	szarg=$(sed -n 's/.*KOF_TARGET_SIZE_MIN(\([^)]*\)).*/\1/p' "$src")
 	# Evaluated by the shell so an expression like 4 * 1024 reads naturally in the
 	# source instead of being written out as a literal.
 	size_min=$((szarg))
 	if [ "$size_min" -lt 1 ]; then
-		echo "FAIL: KOF_FILESIZE_MIN($szarg) constrains nothing; omit it" >&2
+		echo "FAIL: KOF_TARGET_SIZE_MIN($szarg) constrains nothing; omit it" >&2
 		exit 1
 	fi
 	echo "   require size>=$size_min"
@@ -270,19 +270,19 @@ if [ "$nsz" -eq 1 ]; then
 	# disagree, and the one the host cannot see is the one that wins silently.
 	if grep -qE 'ctx->obj_size[[:space:]]*<' "$src"; then
 		echo "FAIL: obj_size has a lower-bound test in the body and also a" >&2
-		echo "      KOF_FILESIZE_MIN declaration; the declaration is" >&2
+		echo "      KOF_TARGET_SIZE_MIN declaration; the declaration is" >&2
 		echo "      authoritative, so remove the check from kof_scan" >&2
 		exit 1
 	fi
 fi
 
-narch=$(grep -c 'KOF_REQUIRE_ARCH(' "$src" || true)
+narch=$(grep -c 'KOF_TARGET_ARCH(' "$src" || true)
 if [ "$narch" -gt 1 ]; then
-	echo "FAIL: $narch KOF_REQUIRE_ARCH declarations; use one with '|'" >&2
+	echo "FAIL: $narch KOF_TARGET_ARCH declarations; use one with '|'" >&2
 	exit 1
 fi
 if [ "$narch" -eq 1 ]; then
-	archnames=$(sed -n 's/.*KOF_REQUIRE_ARCH(\([^)]*\)).*/\1/p' "$src")
+	archnames=$(sed -n 's/.*KOF_TARGET_ARCH(\([^)]*\)).*/\1/p' "$src")
 	i=0
 	for a in ANY X86 X86_64 ARM ARM64 RISCV64 MIPS PPC64; do
 		case "$archnames" in
@@ -291,7 +291,7 @@ if [ "$narch" -eq 1 ]; then
 		i=$((i + 1))
 	done
 	if [ "$arch_mask" -eq 0 ]; then
-		echo "FAIL: KOF_REQUIRE_ARCH($archnames) names no known architecture" >&2
+		echo "FAIL: KOF_TARGET_ARCH($archnames) names no known architecture" >&2
 		exit 1
 	fi
 	echo "   require arch=$archnames (mask $arch_mask)"
@@ -368,7 +368,7 @@ echo "   no relocations, no undefined symbols, no unexpected sections"
 # recorded rather than declared. A KOF_KIND(...) in the source would be a second
 # statement of a fact the code already makes - and the copy the host cannot see is
 # the one that wins silently, which is the same reason a body check duplicating
-# KOF_FILESIZE_MIN is rejected above.
+# KOF_TARGET_SIZE_MIN is rejected above.
 #
 # The two entry points have different ABIs: a detector reports findings, an
 # unpacker yields a child object. So a module cannot be written for one and picked

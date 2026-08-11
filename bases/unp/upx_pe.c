@@ -48,7 +48,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/pe.h>
 
-KOF_TARGET(KOF_FMT_PE);
+KOF_TARGET_FORMAT(KOF_FMT_PE);
 
 /*
  * The PackHeader's magic. Declared, so the host searches with the machinery it
@@ -64,6 +64,8 @@ KOF_DEFINE_STR(upx_magic, "UPX!", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
  * the rest are checksums and a filter this does not yet reverse.
  */
 #define PH_LEN        32u
+#define PH_VERSION     4u
+#define PH_FORMAT      5u
 #define PH_METHOD      6u
 #define PH_U_LEN      16u
 #define PH_C_LEN      20u
@@ -114,6 +116,18 @@ KOF_DEFINE_UNPACK
 	decoder = method_of(kof_u8(ph + PH_METHOD));
 	u_len   = kof_u32(ph + PH_U_LEN);
 	c_len   = kof_u32(ph + PH_C_LEN);
+
+	/*
+	 * What was recognised, before anything is decided about it.
+	 *
+	 * These are the three numbers that decide whether a sample is one this
+	 * module handles, and when it does not the useful question is which
+	 * combination it was - so they are reported whatever happens next, and
+	 * before the branches below can return.
+	 */
+	kof_debug("UPX.PE.version", kof_u8(ph + PH_VERSION));
+	kof_debug("UPX.PE.format", kof_u8(ph + PH_FORMAT));
+	kof_debug("UPX.PE.method", kof_u8(ph + PH_METHOD));
 
 	if (decoder == 0) {
 		/* A coding this engine does not have. The file is packed, the

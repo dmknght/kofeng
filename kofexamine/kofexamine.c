@@ -81,6 +81,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 
+#include <kofeng.h>
 #include <kofcore.h>
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
@@ -685,31 +686,207 @@ out:
 	return rc;
 }
 
+/* ---- what the unpackers recover -------------------------------------------- */
+
+/*
+ * The one thing here that is not a parse.
+ *
+ * Everything else in this tool reads structure out of the file in front of it.
+ * Whether a file is packed is not structure - it is a verdict, and verdicts come
+ * from modules. So this runs the engine rather than answering on its own: a
+ * database is loaded, its unpackers are given the object, and what they produced
+ * is reported. A second implementation of "does this look like UPX" living in a
+ * tool would be a thing to keep in step with the modules, and it would disagree
+ * with them exactly when it mattered.
+ *
+ * It needs --db for that reason, and says so rather than guessing when it has none.
+ */
+/* Printed as it happens: a note that arrives before the module returns is a note
+ * about work in progress, and buffering it would lose that ordering. */
+static void on_debug(const char *what, uint64_t value, void *user)
+{
+	(void)user;
+	printf("  debug     %-18s %10llu\n", what, (unsigned long long)value);
+}
+
+struct unp_run {
+	const char *dump_dir;     /* NULL when not dumping */
+	uint32_t    produced;
+	uint32_t    partial;
+	int         err;
+};
+
+/* One recovered object, written whole. Separate from the region writer because a
+ * region is a slice of a mapping and this is a buffer the engine handed over. */
+static int write_whole(const char *path, const void *p, uint64_t n)
+{
+	FILE *f = fopen(path, "wb");
+
+	if (!f) {
+		fprintf(stderr, "kofexamine: cannot create %s: %s\n", path,
+			strerror(errno));
+		return 0;
+	}
+	if (n && fwrite(p, 1, (size_t)n, f) != (size_t)n) {
+		fprintf(stderr, "kofexamine: short write to %s\n", path);
+		fclose(f);
+		return 0;
+	}
+	fclose(f);
+	return 1;
+}
+
+/* "//0//1" becomes "0_1": a name that is a path component rather than a path. */
+static void kid_tag(const char *tail, char *out, size_t cap)
+{
+	size_t at = 0;
+
+	while (*tail && at + 1 < cap) {
+		if (*tail == '/') {
+			if (at && out[at - 1] != '_')
+				out[at++] = '_';
+			tail++;
+			continue;
+		}
+		out[at++] = name_char_ok((unsigned char)*tail) ? *tail : '_';
+		tail++;
+	}
+	while (at && out[at - 1] == '_')
+		at--;
+	out[at] = 0;
+	if (!out[0])
+		snprintf(out, cap, "0");
+}
+
+static int on_unpacked(const char *name, const void *bytes, uint64_t len,
+		       const struct kof_result *res, void *user)
+{
+	struct unp_run *u = user;
+	const char *tail = strstr(name, "//");
+	char tag[64], path[1024];
+
+	/* The first object is the file itself, which the rest of this tool has
+	 * already described in far more detail. */
+	if (!tail)
+		return 0;
+
+	u->produced++;
+	if (res->incomplete)
+		u->partial++;
+	kid_tag(tail, tag, sizeof tag);
+	printf("  recovered %-18s %10llu bytes%s\n", tag,
+	       (unsigned long long)len, res->incomplete ? "   (partial)" : "");
+
+	if (!u->dump_dir)
+		return 0;
+	if ((size_t)snprintf(path, sizeof path, "%s/unpacked.%s", u->dump_dir, tag)
+	    >= sizeof path) {
+		u->err = 1;
+		return 1;
+	}
+	if (!write_whole(path, bytes, len))
+		u->err = 1;
+	return 0;
+}
+
+/*
+ * Run the database's unpackers over one file and report what came out.
+ *
+ * all_matches is on, and that is not a detail: without it the engine stops at the
+ * first detection and never opens the container, which is right for scanning and
+ * wrong for a tool whose entire question is what is inside.
+ */
+static int unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
+		       int verbose)
+{
+	struct kof_scan_option opt;
+	struct unp_run u;
+	kof_scanner *sc;
+
+	memset(&opt, 0, sizeof opt);
+	memset(&u, 0, sizeof u);
+	opt.all_matches = 1;
+	u.dump_dir = dump_dir;
+
+	sc = kof_scanner_new(eng);
+	if (!sc) {
+		fprintf(stderr, "kofexamine: out of memory\n");
+		return 0;
+	}
+	if (verbose)
+		kof_scanner_on_debug(sc, on_debug, NULL);
+	kof_scan_path(sc, path, &opt, on_unpacked, &u);
+	kof_scanner_free(sc);
+
+	if (u.produced == 0)
+		printf("  unpacked  nothing - no unpacker in the database claimed it\n");
+	else
+		printf("  unpacked  %u object(s)%s\n", u.produced,
+		       u.partial ? "  (some only in part)" : "");
+	return !u.err;
+}
+
 static void usage(const char *argv0)
 {
 	fprintf(stderr,
-		"usage: %s [--dump] <file>...\n"
+		"usage: %s [--dump] [--db <dir>] <file>...\n"
 		"\n"
-		"  --dump  also write each region of each file into a directory\n"
-		"          beside it: <path>/_<name>_dump/<region enum name>\n",
+		"  --dump     also write each region of each file into a directory\n"
+		"             beside it: <path>/_<name>_dump/<region enum name>\n"
+		"  --db <dir> run that database's unpackers too, and report what\n"
+		"             they recovered. With --dump the recovered objects are\n"
+		"             written beside the regions as unpacked.<n>\n"
+		"  --debug    also print what modules worked out along the way -\n"
+		"             versions, methods, counts. Needs --db.\n",
 		argv0);
 }
 
 int main(int argc, char **argv)
 {
-	int dump = 0;
+	const char *db = NULL;
+	kof_engine *eng = NULL;
+	int dump = 0, verbose = 0;
 	int i, files = 0, bad = 0;
 
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--dump") == 0) {
 			dump = 1;
+		} else if (strcmp(argv[i], "--debug") == 0) {
+			verbose = 1;
+		} else if (strcmp(argv[i], "--db") == 0) {
+			if (++i >= argc) {
+				fprintf(stderr, "%s: --db needs a directory\n",
+					argv[0]);
+				return 2;
+			}
+			db = argv[i];
 		} else if (argv[i][0] == '-' && argv[i][1]) {
 			fprintf(stderr, "%s: unrecognised argument '%s'\n",
 				argv[0], argv[i]);
 			usage(argv[0]);
 			return 2;
 		} else {
-			int r = examine(argv[i], dump);
+			int r;
+
+			if (db && !eng) {
+				eng = kof_engine_open(db);
+				if (!eng) {
+					fprintf(stderr,
+						"%s: cannot load a database from %s\n",
+						argv[0], db);
+					return 2;
+				}
+			}
+			r = examine(argv[i], dump);
+			if (r >= 0 && eng) {
+				char dir[1024];
+				const char *d = NULL;
+
+				if (dump && dump_dir_for(argv[i], dir, sizeof dir))
+					d = dir;
+				if (!unpack_pass(eng, argv[i], d, verbose))
+					r = -1;
+			}
 
 			files++;
 			if (r < 0)
@@ -718,6 +895,7 @@ int main(int argc, char **argv)
 				bad = 1;
 		}
 	}
+	kof_engine_close(eng);
 	if (files == 0) {
 		usage(argv[0]);
 		return 2;

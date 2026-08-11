@@ -1,8 +1,8 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
 
-KOF_TARGET(KOF_FMT_ELF); // File format elf. Prefilter will use this
-KOF_DEFINE_RANGE(scan_range_data, KOF_SCAN_ELF_DATA); // define variable scan_ragne as elf_code and elf_data (structure from elf file). This will limit scan range
+KOF_TARGET_FORMAT(KOF_FMT_ELF); // File format elf. Prefilter will use this
+KOF_TARGET_RANGE(scan_range_data, KOF_SCAN_ELF_DATA); // define variable scan_ragne as elf_code and elf_data (structure from elf file). This will limit scan range
 
 /* The markers. Case and word handling belong to the literal; where to look does not,
  * so it is named at each use. */
@@ -27,7 +27,7 @@ KOF_DEFINE_SCAN
 	 * object, together with every other module's.
 	 */
 	if (kof_find_str_any(scan_range_data, mirai_1, mirai_2, mirai_3))
-		KOF_MATCH("Mirai.Generic", KOF_LVL_INFECT);
+		KOF_SCAN_MATCH("Mirai.Generic", KOF_LVL_INFECT);
 
 	/*
 	 * IRC command formats. Common to a great deal of legitimate software as well
@@ -37,5 +37,5 @@ KOF_DEFINE_SCAN
 	 */
 	if (kof_find_str_multi(scan_range_data, common_botnet_1, common_botnet_2,
 			       common_botnet_3, common_botnet_4) >= 3)
-		KOF_MATCH("Botnet.IRCCom", KOF_LVL_SUSPECT);
+		KOF_SCAN_MATCH("Botnet.IRCCom", KOF_LVL_SUSPECT);
 }
