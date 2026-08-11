@@ -22,6 +22,7 @@
 #include "../kofparsers/containers/gzip_parse.h"
 #include "objsrc.h"
 #include "../kofdecomp/inflate.h"
+#include "../kofdecomp/nrv2.h"
 
 /*
  * Everything mutable, one per thread.

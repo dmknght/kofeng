@@ -96,4 +96,16 @@ int kof_match_at(struct kof_match_ctx *, uint64_t off,
 int kof_match_in(struct kof_match_ctx *, uint64_t off, uint64_t len,
 		 const uint8_t *bytes, uint16_t plen, uint8_t kind, uint8_t flags);
 
+/*
+ * Where the pattern is, rather than whether it is there. KOF_BROKEN if absent.
+ *
+ * For unpackers. A packed executable is read relative to a marker its stub carries
+ * - UPX's l_info is found by its magic and every block offset follows from it - so
+ * "is it present" is not the question; "where" is. The search computes this either
+ * way, so reporting it costs nothing that whether does not already cost.
+ */
+uint64_t kof_match_where(struct kof_match_ctx *, uint64_t off, uint64_t len,
+			 const uint8_t *bytes, uint16_t plen, uint8_t kind,
+			 uint8_t flags);
+
 #endif /* KOFENG_KOFMATCH_H */

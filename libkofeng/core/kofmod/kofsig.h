@@ -316,7 +316,64 @@ struct kof_content {
 	int (*window)(const struct kof_obj_ctx *, uint64_t off, uint64_t len);
 	int (*emit)(const struct kof_obj_ctx *, const void *bytes, uint32_t n);
 	int (*child)(const struct kof_obj_ctx *);
-	uint64_t (*inflate)(const struct kof_obj_ctx *, uint64_t off, uint64_t len);
+
+	/*
+	 * `out_hint` is what the container SAYS the output will be, and it is a
+	 * hint in the strict sense: it sizes a buffer and bounds nothing. The
+	 * bounds are the host's budgets, which never read it.
+	 *
+	 * It exists because not every decoder can stream. DEFLATE bounds a back
+	 * reference at 32KB, so inflate runs in fixed memory and ignores this.
+	 * NRV2 bounds it at nothing - a match may reach any byte already produced
+	 * - so its output has to be addressable in full while it decodes, and
+	 * something has to decide how large that is before the first byte. A
+	 * container that states the size is the only party that knows; a container
+	 * that lies gets a buffer of the size it asked for, clamped to what the
+	 * ceiling allows, and a decode that stops when it fills.
+	 */
+	uint64_t (*unpack)(const struct kof_obj_ctx *, uint32_t method,
+			   uint64_t off, uint64_t len, uint64_t out_hint);
+
+	/* Where a declared string is, rather than whether. KOF_BROKEN if absent. */
+	uint64_t (*find_str_where)(const struct kof_obj_ctx *, uint32_t str_id,
+				   uint64_t off, uint64_t len);
+
+	/*
+	 * "I stopped before I was finished."
+	 *
+	 * Every other way an object becomes incomplete is something the host can
+	 * see: a budget spent, a ceiling reached, a decoder reporting a corrupt
+	 * stream. This is the one it cannot - a module that met a compression
+	 * method it does not implement, or a structure it stopped trusting, and
+	 * returned early. Without it that object is reported CLEAN, which is the
+	 * one verdict it must never get: the container was opened, part of it was
+	 * read, and the rest was never looked at.
+	 *
+	 * It is deliberately not an error and does not stop anything. A module says
+	 * what it managed and what it did not, and the host decides what that means
+	 * for the object.
+	 */
+	void (*incomplete)(const struct kof_obj_ctx *);
+};
+
+/*
+ * Which decoder kof_unpack_at should run.
+ *
+ * Named here rather than taken from each format's own numbering because the
+ * service is one call: a module that has read UPX's method byte maps it to one of
+ * these, and a module reading some other container's maps to the same set. The
+ * host does not learn a container's numbering, and a new container does not need a
+ * new entry point.
+ *
+ * NRV2 carries its bit width in the id because the width is part of the coding
+ * rather than a variant of it - see kof_nrv2_bits for what that cost to learn.
+ */
+enum kof_unp_method {
+	KOF_UNP_DEFLATE = 1,   /* RFC 1951; streams, needs no size hint */
+
+	KOF_UNP_NRV2B_8 = 16, KOF_UNP_NRV2B_16, KOF_UNP_NRV2B_32,
+	KOF_UNP_NRV2D_8,      KOF_UNP_NRV2D_16, KOF_UNP_NRV2D_32,
+	KOF_UNP_NRV2E_8,      KOF_UNP_NRV2E_16, KOF_UNP_NRV2E_32
 };
 
 /*
@@ -691,9 +748,45 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
  *     kof_unpack_deflate(gz->data_off, gz->data_len);
  *     kof_child();
  */
+#define kof_unpack_at(method, off, len, out_hint)                          \
+	((ctx)->content->unpack ?                                          \
+	 (ctx)->content->unpack((ctx), (uint32_t)(method), (uint64_t)(off),\
+				(uint64_t)(len), (uint64_t)(out_hint)) : 0)
+
+/* DEFLATE streams, so it needs no size: spelled out because a gzip or zip module
+ * has nothing sensible to pass and should not have to invent one. */
 #define kof_unpack_deflate(off, len)                                       \
-	((ctx)->content->inflate ?                                         \
-	 (ctx)->content->inflate((ctx), (uint64_t)(off), (uint64_t)(len)) : 0)
+	kof_unpack_at(KOF_UNP_DEFLATE, (off), (len), 0)
+
+/*
+ * Report that this object was not fully examined.
+ *
+ * For the case only the module knows about: a container it could open in part, a
+ * compression method it does not implement, a structure that stopped making sense
+ * part way through. Anything the host can see - budgets, ceilings, a corrupt
+ * stream - it already records on its own.
+ *
+ * Say it and carry on, or say it and return; it changes no control flow. What it
+ * changes is the verdict: the object is reported as not fully examined instead of
+ * as clean.
+ */
+#define kof_incomplete()                                                   \
+	((void)((ctx)->content->incomplete ?                               \
+		((ctx)->content->incomplete((ctx)), 0) : 0))
+
+/*
+ * Where a declared string is within a range the module computed.
+ *
+ * KOF_BROKEN when absent, the same "could not be determined" every other
+ * offset-valued accessor answers with. For locating a structure rather than
+ * detecting one: kof_find_str_in asks whether a marker is present, this asks where
+ * it is so the rest can be read relative to it.
+ */
+#define kof_find_str_where(off, len, s)                                    \
+	((ctx)->content->find_str_where ?                                  \
+	 (ctx)->content->find_str_where((ctx), KOF_PASTE(kof_strid_, s),   \
+					(uint64_t)(off), (uint64_t)(len))  \
+	 : KOF_BROKEN)
 
 /* Non-zero if at least one of them is present. Stops at the first hit. */
 #define kof_find_str_any(rng, ...) (KOF_FS_FOLD(||, rng, __VA_ARGS__))

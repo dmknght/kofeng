@@ -472,9 +472,19 @@ static int is_word_byte(uint8_t c)
  * found and verified; the walk over extents, the restart after a rejected hit and
  * the word-boundary rule around it are the same question either way.
  */
+/*
+ * `at` receives where the match began, and is the only reason this reports more
+ * than yes or no.
+ *
+ * The search already knows: find_range and hex_search both compute the hit and it
+ * was discarded at this line. An unpacker needs it - a UPX stub is located by its
+ * magic and everything after is read relative to that - and a module that had to
+ * find it itself would walk the object a byte at a time through the read vtable,
+ * which is an indirect call per byte to repeat a search the host just did.
+ */
 static int match_one(struct kof_match_ctx *m, uint64_t base, uint64_t span,
 		     const uint8_t *bytes, uint16_t len, uint8_t kind,
-		     uint8_t flags)
+		     uint8_t flags, uint64_t *at)
 {
 	uint64_t from = 0, hit;
 
@@ -482,21 +492,29 @@ static int match_one(struct kof_match_ctx *m, uint64_t base, uint64_t span,
 		if (kind == KOF_STR_HEX) {
 			if (!hex_search(m, base + from, span - from, bytes, &hit))
 				return 0;
+			if (at)
+				*at = hit;
 			return 1;      /* hex patterns carry no word option */
 		}
 		if (!find_range(m, base + from, span - from, bytes, len,
 				(flags & KOF_STR_ICASE) != 0, &hit))
 			return 0;
-		if (!(flags & KOF_STR_FULLWORD))
+		if (!(flags & KOF_STR_FULLWORD)) {
+			if (at)
+				*at = hit;
 			return 1;
+		}
 		{
 			uint64_t end = hit + len;
 			int lok = (hit == base) ||
 				  !is_word_byte(m->data.p[hit - 1]);
 			int rok = (end >= base + span) ||
 				  !is_word_byte(m->data.p[end]);
-			if (lok && rok)
+			if (lok && rok) {
+				if (at)
+					*at = hit;
 				return 1;
+			}
 		}
 		from = (hit - base) + 1;
 	}
@@ -510,7 +528,7 @@ static int match_ranges(struct kof_match_ctx *m, const struct kof_range *ext,
 	uint32_t i;
 
 	for (i = 0; i < next; i++)
-		if (match_one(m, ext[i].off, ext[i].len, bytes, len, kind, flags))
+		if (match_one(m, ext[i].off, ext[i].len, bytes, len, kind, flags, 0))
 			return 1;
 	return 0;
 }
@@ -632,5 +650,26 @@ int kof_match_in(struct kof_match_ctx *m, uint64_t off, uint64_t len,
 	len = kof_clip_len(m->data.n, off, len);
 	if (len == 0)
 		return 0;
-	return match_one(m, off, len, bytes, plen, kind, flags);
+	return match_one(m, off, len, bytes, plen, kind, flags, 0);
+}
+
+/*
+ * The same search, reporting where rather than whether.
+ *
+ * KOF_BROKEN for absent, which is the same "no answer" every other offset-valued
+ * accessor in the module ABI uses, so a module tests it the way it already tests
+ * kof_pe_rva_to_off.
+ */
+uint64_t kof_match_where(struct kof_match_ctx *m, uint64_t off, uint64_t len,
+			 const uint8_t *bytes, uint16_t plen, uint8_t kind,
+			 uint8_t flags)
+{
+	uint64_t at = 0;
+
+	len = kof_clip_len(m->data.n, off, len);
+	if (len == 0)
+		return KOF_BROKEN;
+	if (!match_one(m, off, len, bytes, plen, kind, flags, &at))
+		return KOF_BROKEN;
+	return at;
 }

@@ -167,6 +167,36 @@ static int c_find_str_in(const struct kof_obj_ctx *ctx, uint32_t str_id,
 			    e->kind, e->flags);
 }
 
+/*
+ * The same search, answering where instead of whether.
+ *
+ * Available to detectors as well as unpackers - it is a read, not a production -
+ * which is why it sits with the other content accessors rather than below.
+ */
+static uint64_t c_find_str_where(const struct kof_obj_ctx *ctx, uint32_t str_id,
+				 uint64_t off, uint64_t len)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	const struct kof_str_ent *e = str_of(sc, str_id);
+
+	if (!e)
+		return KOF_BROKEN;
+	return kof_match_where(&sc->m, off, len, sc->eng->str_pool + e->off,
+			       e->len, e->kind, e->flags);
+}
+
+/*
+ * A module saying it did not finish.
+ *
+ * The same flag every host-side limit sets, reached from the other side. Available
+ * to detectors as well: a detector that could not follow a structure has the same
+ * thing to say, and the answer it must not give is "clean".
+ */
+static void c_incomplete(const struct kof_obj_ctx *ctx)
+{
+	kof_scan_of(ctx)->exhausted = 1;
+}
+
 /* ---- producing child objects ------------------------------------------------ */
 
 /*
@@ -438,11 +468,102 @@ static int inflate_sink(void *user, const uint8_t *p, uint32_t n)
 	return c_emit(ctx, p, n);
 }
 
-static uint64_t c_inflate(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t len)
+/* NRV2's three codings and three bit widths, as the module ABI numbers them. */
+static int nrv2_of(uint32_t method, int *variant, int *bits)
+{
+	static const struct { int v, b; } tab[9] = {
+		{ KOF_NRV2B, 8 }, { KOF_NRV2B, 16 }, { KOF_NRV2B, 32 },
+		{ KOF_NRV2D, 8 }, { KOF_NRV2D, 16 }, { KOF_NRV2D, 32 },
+		{ KOF_NRV2E, 8 }, { KOF_NRV2E, 16 }, { KOF_NRV2E, 32 }
+	};
+
+	if (method < KOF_UNP_NRV2B_8 || method > KOF_UNP_NRV2E_32)
+		return 0;
+	*variant = tab[method - KOF_UNP_NRV2B_8].v;
+	*bits    = tab[method - KOF_UNP_NRV2B_8].b;
+	return 1;
+}
+
+/*
+ * Decoders that cannot stream, and what they cost.
+ *
+ * NRV2 places no bound on how far a match may reach back, so the whole of its
+ * output has to be addressable until the stream ends - there is no window size
+ * that makes it streamable, the buffer IS the window. So this allocates, decodes,
+ * and hands the result to the sink.
+ *
+ * That is TWICE the output alive at the moment of handover: the buffer, plus what
+ * the sink has taken from it. Halving the allowance is the honest way to keep the
+ * ceiling meaning what it says, and it is why a non-streaming decoder is a worse
+ * deal than a streaming one rather than merely a different one.
+ *
+ * The size comes from what the container declared, clamped to that allowance. A
+ * container that overstates gets the clamp; one that understates gets a decode
+ * that stops early and an object marked incomplete. Neither is trusted: the
+ * declared value sizes a buffer and bounds nothing.
+ */
+static uint64_t unpack_buffered(struct kof_scanner *sc,
+				const struct kof_obj_ctx *ctx, int variant,
+				int bits, const uint8_t *in, uint64_t in_len,
+				uint64_t out_hint)
+{
+	uint64_t room, want, produced = 0, at;
+	uint8_t *buf;
+	int st;
+
+	room = sc->resident < sc->resident_max
+	     ? (sc->resident_max - sc->resident) / 2u : 0;
+	if (room > sc->obj_cap)
+		room = sc->obj_cap;
+	if (room == 0) {
+		sc->exhausted = 1;
+		return 0;
+	}
+	want = out_hint ? out_hint : room;
+	if (want > room) {
+		want = room;
+		sc->exhausted = 1;   /* the tail will not fit and will be dropped */
+	}
+
+	buf = malloc((size_t)want);
+	if (!buf) {
+		sc->exhausted = 1;
+		return 0;
+	}
+	/* Charged while it is alive, so a module that unpacks inside an object that
+	 * is itself produced cannot exceed the ceiling between the two of them. */
+	sc->resident += want;
+	if (sc->resident > sc->st.peak_resident)
+		sc->st.peak_resident = sc->resident;
+
+	st = kof_nrv2_decode(variant, bits, in, in_len, buf, want, &produced);
+	if (st != KOF_DEC_OK)
+		sc->exhausted = 1;
+
+	/* Whatever was decoded is real output and is worth scanning, whether or not
+	 * the stream ended cleanly - the same rule the gzip path follows. */
+	for (at = 0; at < produced; ) {
+		uint64_t n = produced - at;
+
+		if (n > EMIT_MAX)
+			n = EMIT_MAX;
+		if (!c_emit(ctx, buf + at, (uint32_t)n))
+			break;
+		at += n;
+	}
+
+	sc->resident -= want;
+	free(buf);
+	return at;
+}
+
+static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
+			 uint64_t off, uint64_t len, uint64_t out_hint)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	kof_buf b;
 	uint64_t produced = 0;
+	int variant, bits;
 
 	if (!sc->cur_src)
 		return 0;
@@ -460,32 +581,34 @@ static uint64_t c_inflate(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t 
 	if (!len)
 		return 0;
 
-	if (!sc->inf) {
-		sc->inf = malloc(sizeof *sc->inf);
+	if (method == KOF_UNP_DEFLATE) {
 		if (!sc->inf) {
-			sc->exhausted = 1;
-			return 0;
+			sc->inf = malloc(sizeof *sc->inf);
+			if (!sc->inf) {
+				sc->exhausted = 1;
+				return 0;
+			}
 		}
+		/*
+		 * A truncated or corrupt stream is not an error here.
+		 *
+		 * Whatever was decoded before the failure is real output and is
+		 * the part worth scanning: archives inside malware are routinely
+		 * damaged, and discarding a megabyte of decoded payload because
+		 * the last block is missing throws away the part that identifies
+		 * it. It is recorded as an incomplete examination, not a clean one.
+		 */
+		if (kof_inflate(sc->inf, b.p + off, len, inflate_sink,
+				(void *)ctx, NULL, &produced) != KOF_DEC_OK)
+			sc->exhausted = 1;
+		return produced;
 	}
 
-	/*
-	 * A truncated or corrupt stream is not an error here.
-	 *
-	 * Whatever was decoded before the failure is real output and is the part
-	 * worth scanning: archives inside malware are routinely damaged, and
-	 * discarding a megabyte of decoded payload because the last block is
-	 * missing throws away the part that identifies it. It is recorded as an
-	 * incomplete examination, not as a clean one.
-	 */
-	switch (kof_inflate(sc->inf, b.p + off, len, inflate_sink,
-			    (void *)ctx, NULL, &produced)) {
-	case KOF_DEC_OK:
-		break;
-	default:
-		sc->exhausted = 1;
-		break;
-	}
-	return produced;
+	if (nrv2_of(method, &variant, &bits))
+		return unpack_buffered(sc, ctx, variant, bits, b.p + off, len,
+				       out_hint);
+
+	return 0;      /* a method this engine does not have */
 }
 
 /* Close the object being emitted and start the next. */
@@ -539,12 +662,14 @@ static int c_child(const struct kof_obj_ctx *ctx)
  */
 static const struct kof_content kof_detect_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
-	c_find_str_in, c_csum, NULL, NULL, NULL, NULL
+	c_find_str_in, c_csum, NULL, NULL, NULL, NULL, c_find_str_where,
+	c_incomplete
 };
 
 static const struct kof_content kof_unpack_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
-	c_find_str_in, c_csum, c_window, c_emit, c_child, c_inflate
+	c_find_str_in, c_csum, c_window, c_emit, c_child, c_unpack,
+	c_find_str_where, c_incomplete
 };
 
 /*
