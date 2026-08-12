@@ -160,10 +160,22 @@ ntargets=0
 # KOF_FMT_ANY is every format. Spelled out rather than left implicit so that a
 # module which really does apply to everything says so, and so that the count
 # still trips the format-header check below.
+#
+# The mask is derived from the enum rather than written as a number. It WAS 127,
+# which meant "every format" quietly stopped covering each format added after it -
+# a module declaring ANY would have been ruled out for compound files and archives
+# by the prefilter, and a detection that does not happen is not something a test
+# notices.
+fmt_count=$(sed -n 's/.*KOF_FMT_COUNT *= *\([0-9]*\).*/\1/p' \
+	"$(dirname "$0")/../libkofeng/core/kofmod/kofsig.h")
+[ -n "$fmt_count" ] || { echo "FAIL: cannot read KOF_FMT_COUNT" >&2; exit 1; }
 case "$targets" in
-*KOF_FMT_ANY*) target_mask=127; ntargets=7 ;;
+*KOF_FMT_ANY*)
+	target_mask=$(( (1 << fmt_count) - 1 ))
+	ntargets=$fmt_count
+	;;
 esac
-[ "$target_mask" -eq 0 ] && for t in UNKNOWN ELF PE MACHO SCRIPT TEXT GZIP DOCOLE DOCZIP; do
+[ "$target_mask" -eq 0 ] && for t in UNKNOWN ELF PE MACHO SCRIPT TEXT GZIP DOCOLE ZIP DOCZIP; do
 	case "$targets" in
 	*KOF_FMT_$t*)
 		case $t in
@@ -175,7 +187,8 @@ esac
 		TEXT)    bit=32 ;;
 		GZIP)    bit=64 ;;
 		DOCOLE)  bit=128 ;;
-		DOCZIP)  bit=256 ;;
+		ZIP)     bit=256 ;;
+		DOCZIP)  bit=512 ;;
 		esac
 		target_mask=$((target_mask | bit))
 		ntargets=$((ntargets + 1))
@@ -203,6 +216,10 @@ fi
 # failure mode a check that cannot be seen to run always has. One list, so a
 # format added here cannot be half-added.
 fmt_hdrs="elf:2 pe:4 macho:8 gzip:64 docole:128"
+# zip.h is deliberately absent: it is the one header two formats share, because a
+# zip and a zip that is a document differ in what is INSIDE them and not in how
+# they are read. The one-header-one-format rule below would refuse a module that
+# targets both, which is the ordinary case for an archive module.
 
 nfmt=0
 for pair in $fmt_hdrs; do

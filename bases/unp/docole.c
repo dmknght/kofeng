@@ -89,6 +89,21 @@ KOF_DEFINE_UNPACK
 	kof_debug("DocOLE.macro_bytes", o->macro_bytes);
 
 	/*
+	 * An encrypted document: nothing here can read it, and saying so is the
+	 * whole value of noticing.
+	 *
+	 * Returns rather than carrying on, because every byte of the content is
+	 * ciphertext - gathering it would spend budget to produce a child that no
+	 * pattern can match and that identifies as nothing.
+	 *
+	 * ENCRYPTED and not DAMAGED, because the file is exactly what it claims to
+	 * be; and not UNSUPPORTED, because what is missing is a key rather than a
+	 * decoder this build could later grow.
+	 */
+	if (o->encrypted)
+		KOF_UNP_BROKEN(KOF_UNP_ENCRYPTED);
+
+	/*
 	 * Structure that lost bytes, said BEFORE anything is gathered.
 	 *
 	 * These are the anomalies that mean a stream's bytes are not all there: a

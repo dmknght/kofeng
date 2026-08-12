@@ -269,6 +269,11 @@ static int docole_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 	return kof_docole_parse(b, (struct kof_docole_info *)v, c);
 }
 
+static int zip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_zip_parse(b, (struct kof_zip_info *)v, c);
+}
+
 static const struct parser parsers[] = {
 	{ KOF_FMT_ELF,  (uint32_t)sizeof(struct kof_elf_info),
 	  kof_elf_sniff,  elf_parse_thunk  },
@@ -277,7 +282,14 @@ static const struct parser parsers[] = {
 	{ KOF_FMT_GZIP, (uint32_t)sizeof(struct kof_gzip_info),
 	  kof_gzip_sniff, gzip_parse_thunk },
 	{ KOF_FMT_DOCOLE, (uint32_t)sizeof(struct kof_docole_info),
-	  kof_docole_sniff, docole_parse_thunk }
+	  kof_docole_sniff, docole_parse_thunk },
+	/*
+	 * One row, two formats. The parse decides between ZIP and DOCZIP from the
+	 * entry names and sets ctx->format itself, so the format named here is only
+	 * which VIEW to allocate - and both share one.
+	 */
+	{ KOF_FMT_ZIP, (uint32_t)sizeof(struct kof_zip_info),
+	  kof_zip_sniff, zip_parse_thunk }
 };
 
 /*

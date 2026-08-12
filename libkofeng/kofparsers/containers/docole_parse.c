@@ -60,7 +60,7 @@
  */
 
 #include "docole_parse.h"
-#include "../rangelist.h"
+#include "../runlist.h"
 
 #include <string.h>
 
@@ -105,15 +105,16 @@ static const uint8_t CFB_SIG[8] = {
  * Everything the walk needs that is not a fact about the file.
  *
  * Kept apart from the view on purpose: the view is what a module sees, and a step
- * counter is the host's business. `last` is the coalescing hint - the index, plus
- * one, of the most recent run of each class, so that a chain running through
- * consecutive sectors records one extent instead of one per sector.
+ * counter is the host's business. The run list is the shared machinery from
+ * runlist.h - the joining of consecutive sectors, the settling of overlaps and the
+ * per-class totals are the same job in every container format, and were written
+ * twice before they were written once.
  */
 struct ole {
 	kof_buf f;
 	struct kof_docole_info *o;
 	uint64_t steps, step_max;
-	uint32_t last[KOF_DOCOLE_CLS_COUNT];
+	struct kof_runs runs;
 };
 
 static uint64_t sec_off(const struct kof_docole_info *o, uint32_t sec)
@@ -137,37 +138,7 @@ static int step(struct ole *s)
 
 static void add_run(struct ole *s, uint64_t off, uint64_t len, uint32_t cls)
 {
-	struct kof_docole_info *o = s->o;
-	uint64_t got = kof_clip_len(s->f.n, off, len);
-
-	if (len == 0)
-		return;
-	if (got != len)
-		o->anomalies |= KOF_DOCOLE_ANOM_TRUNCATED;
-	if (got == 0)
-		return;
-
-	/* Consecutive sectors of one chain are one extent. Only the last run of this
-	 * class is tried: a chain lays its sectors down in order, so that is where a
-	 * join can be, and searching further back would cost more than it saves. */
-	if (s->last[cls]) {
-		struct kof_docole_run *r = &o->run[s->last[cls] - 1u];
-
-		if (r->off + r->len == off) {
-			r->len += got;
-			return;
-		}
-	}
-	if (o->n_runs >= KOF_DOCOLE_MAX_EXTENTS) {
-		o->anomalies |= KOF_DOCOLE_ANOM_EXTENTS_FULL;
-		return;
-	}
-	o->run[o->n_runs].off = off;
-	o->run[o->n_runs].len = got;
-	o->run[o->n_runs].cls = cls;
-	o->run[o->n_runs].reserved = 0;
-	o->n_runs++;
-	s->last[cls] = o->n_runs;
+	kof_runs_add(&s->runs, s->f.n, off, len, cls);
 }
 
 /* ---- the two allocation tables ----------------------------------------------- */
@@ -307,7 +278,15 @@ static uint32_t class_of_name(const char *nm)
 		{ "pictures",          KOF_DOCOLE_CLS_RESOURCES },
 		{ "\001ole",           KOF_DOCOLE_CLS_RESOURCES },
 		{ "\001ole10native",   KOF_DOCOLE_CLS_RESOURCES },
-		{ "\003objinfo",       KOF_DOCOLE_CLS_RESOURCES }
+		{ "\003objinfo",       KOF_DOCOLE_CLS_RESOURCES },
+		/*
+		 * An encrypted document. Both streams are opaque, so they are
+		 * resources rather than content: searching them is searching
+		 * ciphertext, and putting them in CONTENT_DATA would spend a gather
+		 * on bytes no pattern can match.
+		 */
+		{ "encryptedpackage",  KOF_DOCOLE_CLS_RESOURCES },
+		{ "encryptioninfo",    KOF_DOCOLE_CLS_RESOURCES }
 	};
 	uint32_t i;
 
@@ -520,6 +499,10 @@ static void walk_dir(struct ole *s, uint32_t root_child)
 		add_declared(o, cls, size);
 		if (cls == KOF_DOCOLE_CLS_MACROS)
 			o->has_macros = 1;
+		if (strcmp(nm, "encryptedpackage") == 0) {
+			o->encrypted = 1;
+			o->anomalies |= KOF_DOCOLE_ANOM_ENCRYPTED;
+		}
 
 		if (size == 0)
 			continue;
@@ -530,110 +513,35 @@ static void walk_dir(struct ole *s, uint32_t root_child)
 	}
 }
 
-/* ---- settling ----------------------------------------------------------------- */
-
-/*
- * Make the runs disjoint, so that the regions partition the object.
- *
- * Nothing in the format prevents two structures naming the same bytes, and a single
- * flipped sector number is enough to make it happen in a file nobody built to be
- * hostile. Sorted by offset with the class breaking ties, then front trimmed: taken
- * in order, a run can only collide with what is already behind it, so trimming the
- * front is all that is needed to leave every run contiguous.
- *
- * Insertion sort because the list is short - bounded by MAX_EXTENTS, and a real
- * document produces a few dozen - and because chains lay their runs down in order,
- * which makes this close to a linear pass on everything that is not trying to be
- * difficult.
- */
-static void settle_runs(struct kof_docole_info *o)
-{
-	uint64_t end = 0;
-	uint32_t i, j, w = 0;
-
-	for (i = 1; i < o->n_runs; i++) {
-		struct kof_docole_run t = o->run[i];
-
-		for (j = i; j > 0 && (o->run[j - 1].off > t.off ||
-		     (o->run[j - 1].off == t.off && o->run[j - 1].cls > t.cls)); j--)
-			o->run[j] = o->run[j - 1];
-		o->run[j] = t;
-	}
-
-	for (i = 0; i < o->n_runs; i++) {
-		uint64_t off = o->run[i].off, lim = off + o->run[i].len;
-
-		if (off < end)
-			off = end;
-		if (off >= lim)
-			continue;
-		end = lim;
-		o->run[w].off = off;
-		o->run[w].len = lim - off;
-		o->run[w].cls = o->run[i].cls;
-		o->run[w].reserved = 0;
-		if (o->run[w].cls < KOF_DOCOLE_CLS_COUNT)
-			o->region_bytes[o->run[w].cls] += o->run[w].len;
-		w++;
-	}
-	o->n_runs = w;
-}
-
 /* ---- regions ------------------------------------------------------------------ */
 
-static uint32_t cls_bit(uint32_t cls)
-{
-	static const uint32_t b[KOF_DOCOLE_CLS_COUNT] = {
-		KOF_SCAN_DOCOLE_HEADERS,
-		KOF_SCAN_DOCOLE_DIRECTORY,
-		KOF_SCAN_DOCOLE_CONTENT_DATA,
-		KOF_SCAN_DOCOLE_CONTENT_MACROS,
-		KOF_SCAN_DOCOLE_CONTENT_METADATA,
-		KOF_SCAN_DOCOLE_RESOURCES
-	};
-
-	return cls < KOF_DOCOLE_CLS_COUNT ? b[cls] : 0;
-}
+static const uint32_t docole_cls_bit[KOF_DOCOLE_CLS_COUNT] = {
+	KOF_SCAN_DOCOLE_HEADERS,
+	KOF_SCAN_DOCOLE_DIRECTORY,
+	KOF_SCAN_DOCOLE_CONTENT_DATA,
+	KOF_SCAN_DOCOLE_CONTENT_MACROS,
+	KOF_SCAN_DOCOLE_CONTENT_METADATA,
+	KOF_SCAN_DOCOLE_RESOURCES
+};
 
 static uint32_t docole_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 				    struct kof_range *out, uint32_t max_out)
 {
 	const struct kof_docole_info *o =
 		(const struct kof_docole_info *)ctx->file_header;
-	struct kof_rlist l;
-	uint32_t i;
 
 	if (!o || !o->valid || !out || max_out == 0)
 		return 0;
-
-	kof_rl_init(&l, out, max_out);
-
-	for (i = 0; i < o->n_runs; i++)
-		if (mask & cls_bit(o->run[i].cls))
-			kof_rl_add(&l, ctx->obj_size, o->run[i].off, o->run[i].len);
-
-	if (mask & KOF_SCAN_DOCOLE_UNCLAIMED) {
-		/*
-		 * The complement, and it is worth more here than in any format so
-		 * far: sectors the allocation table marks free still hold whatever
-		 * was in them before, and a deleted macro is one of them.
-		 *
-		 * The runs are already settled and in offset order, so the gaps
-		 * between them are the answer directly - no second resolve and no
-		 * second sort.
-		 */
-		uint64_t cursor = 0;
-
-		for (i = 0; i < o->n_runs; i++) {
-			if (o->run[i].off > cursor)
-				kof_rl_add(&l, ctx->obj_size, cursor,
-					   o->run[i].off - cursor);
-			cursor = o->run[i].off + o->run[i].len;
-		}
-		if (cursor < ctx->obj_size)
-			kof_rl_add(&l, ctx->obj_size, cursor, ctx->obj_size - cursor);
-	}
-	return kof_rl_normalise(&l);
+	/*
+	 * The cast is to the shared run shape, which docole.h spells out field for
+	 * field rather than including a host header from the ABI. A mismatch would be
+	 * a memory bug, so it is asserted at compile time rather than trusted.
+	 */
+	_Static_assert(sizeof o->run[0] == sizeof(struct kof_run),
+		       "the view's run and runlist.h's have drifted apart");
+	return kof_runs_resolve((const struct kof_run *)o->run, o->n_runs, mask,
+				docole_cls_bit, KOF_SCAN_DOCOLE_UNCLAIMED,
+				ctx->obj_size, out, max_out);
 }
 
 /* ---- the parse ---------------------------------------------------------------- */
@@ -664,6 +572,8 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	memset(&s, 0, sizeof s);
 	s.f = file;
 	s.o = o;
+	kof_runs_init(&s.runs, (struct kof_run *)o->run, KOF_DOCOLE_MAX_EXTENTS,
+		      KOF_DOCOLE_CLS_COUNT);
 	/*
 	 * How many sector steps an honest file can need.
 	 *
@@ -831,7 +741,14 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 		o->anomalies |= KOF_DOCOLE_ANOM_MACRO_OVERSIZE;
 
 done:
-	settle_runs(o);
+	kof_runs_settle(&s.runs, o->region_bytes);
+	o->n_runs = s.runs.n;
+	if (s.runs.full)
+		o->anomalies |= KOF_DOCOLE_ANOM_EXTENTS_FULL;
+	if (s.runs.clipped)
+		o->anomalies |= KOF_DOCOLE_ANOM_TRUNCATED;
+	if (s.runs.overlapped)
+		o->anomalies |= KOF_DOCOLE_ANOM_OVERLAP;
 
 	ctx->format = KOF_FMT_DOCOLE;
 	ctx->obj_size = file.n;
@@ -878,7 +795,7 @@ const char *kof_docole_anomaly_name(unsigned index)
 		"BAD_HEADER", "BAD_SECTOR", "TRUNCATED", "FAT_CYCLE", "DIR_CYCLE",
 		"DIR_DEPTH", "DIR_OVERFLOW", "BAD_DIR_ENTRY", "EXTENTS_FULL",
 		"FAT_UNMAPPED", "MINI_UNMAPPED", "STREAM_PAST_EOF",
-		"MACRO_OVERSIZE", "NO_STREAMS"
+		"MACRO_OVERSIZE", "NO_STREAMS", "ENCRYPTED", "OVERLAP"
 	};
 
 	return index < sizeof n / sizeof n[0] ? n[index] : 0;

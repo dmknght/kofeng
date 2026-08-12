@@ -97,11 +97,12 @@ enum kof_format {
 	 * of the CFB parse and still be ruled in and out on its own.
 	 */
 	KOF_FMT_DOCOLE  = 7,
-	KOF_FMT_DOCZIP  = 8,
+	KOF_FMT_ZIP     = 8,
+	KOF_FMT_DOCZIP  = 9,
 
 	/* One past the last, so a host can size a per-format table. Not a format:
 	 * nothing is ever this. */
-	KOF_FMT_COUNT   = 9
+	KOF_FMT_COUNT   = 10
 };
 
 /*
@@ -151,6 +152,7 @@ static inline const char *kof_format_name(uint8_t fmt)
 	case KOF_FMT_TEXT:   return "Text";
 	case KOF_FMT_GZIP:   return "Gzip";
 	case KOF_FMT_DOCOLE: return "DocOLE";
+	case KOF_FMT_ZIP:    return "Zip";
 	case KOF_FMT_DOCZIP: return "DocZip";
 	default:             return "Unknown";
 	}
@@ -948,7 +950,16 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 enum kof_unp_broken {
 	KOF_UNP_LIMIT = 1,       /* a budget or ceiling stopped it */
 	KOF_UNP_UNSUPPORTED = 2, /* a coding or version this build lacks */
-	KOF_UNP_DAMAGED = 3      /* the object's own structure is wrong */
+	KOF_UNP_DAMAGED = 3,     /* the object's own structure is wrong */
+	/*
+	 * The content is encrypted and there is no key.
+	 *
+	 * Apart from UNSUPPORTED because they end differently: a coding this build
+	 * lacks is a gap a later build closes, and this one never closes. Every
+	 * container that carries encryption uses this value, so the reason reads the
+	 * same whichever format noticed it.
+	 */
+	KOF_UNP_ENCRYPTED = 4
 };
 
 /*

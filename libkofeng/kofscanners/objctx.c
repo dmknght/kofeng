@@ -216,7 +216,8 @@ static void c_incomplete(const struct kof_obj_ctx *ctx, uint32_t reason)
 {
 	/* The module's vocabulary is the host's; a value outside it is recorded as
 	 * the least specific reason rather than stored and printed as a number. */
-	if (reason != KOF_BROKEN_UNSUPPORTED && reason != KOF_BROKEN_DAMAGED)
+	if (reason != KOF_BROKEN_UNSUPPORTED && reason != KOF_BROKEN_DAMAGED &&
+	    reason != KOF_BROKEN_ENCRYPTED)
 		reason = KOF_BROKEN_LIMIT;
 	scan_broken(kof_scan_of(ctx), reason);
 }

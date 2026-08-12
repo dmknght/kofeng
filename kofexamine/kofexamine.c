@@ -88,11 +88,13 @@
 #include <kofmod/pe.h>
 #include <kofmod/gzip.h>
 #include <kofmod/docole.h>
+#include <kofmod/zip.h>
 
 #include "../libkofeng/kofparsers/binaries/elf_parse.h"
 #include "../libkofeng/kofparsers/binaries/pe_parse.h"
 #include "../libkofeng/kofparsers/containers/gzip_parse.h"
 #include "../libkofeng/kofparsers/containers/docole_parse.h"
+#include "../libkofeng/kofparsers/containers/zip_parse.h"
 
 /*
  * What one format offers a tool: how to recognise it, how to parse it, how big
@@ -112,7 +114,13 @@ struct fmt {
 	uint32_t    n_regions;
 	const char *(*region_name)(uint32_t);
 	const char *(*anomaly_name)(unsigned);
-	void      (*print)(const void *, const struct kof_obj_ctx *);
+	/*
+	 * The bytes as well as the view, because a printer may need to show text
+	 * that lives in the object rather than in the parse - a zip keeps its entry
+	 * names in the file and the view only points at them. Every printer takes
+	 * it and most ignore it, which is cheaper than a second callback shape.
+	 */
+	void      (*print)(const void *, const struct kof_obj_ctx *, kof_buf);
 	/*
 	 * The anomaly word, fetched rather than reached for.
 	 *
@@ -140,6 +148,11 @@ static int docole_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 	return kof_docole_parse(b, (struct kof_docole_info *)v, c);
 }
 
+static int zip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_zip_parse(b, (struct kof_zip_info *)v, c);
+}
+
 static int pe_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
 	return kof_pe_parse(b, (struct kof_pe_info *)v, c);
@@ -165,10 +178,13 @@ static void put_perm(uint32_t p)
 	putchar((p & 1) ? 'X' : '-');
 }
 
-static void print_elf(const void *view, const struct kof_obj_ctx *ctx)
+static void print_elf(const void *view, const struct kof_obj_ctx *ctx,
+		      kof_buf buf)
 {
 	const struct kof_elf_info *e = view;
 	uint32_t i;
+
+	(void)buf;
 
 	printf("  class     %s %s  type=%u machine=%u\n",
 	       e->elf_class == KOF_ELFCLASS_64 ? "ELF64" : "ELF32",
@@ -195,10 +211,13 @@ static void print_elf(const void *view, const struct kof_obj_ctx *ctx)
 		       (unsigned long long)e->sec[i].file_size, e->sec[i].type);
 }
 
-static void print_pe(const void *view, const struct kof_obj_ctx *ctx)
+static void print_pe(const void *view, const struct kof_obj_ctx *ctx,
+		      kof_buf buf)
 {
 	const struct kof_pe_info *p = view;
 	uint32_t i;
+
+	(void)buf;
 
 	printf("  image     %s  machine=0x%04x characteristics=0x%04x\n",
 	       p->pe32_plus ? "PE32+" : "PE32", p->machine, p->characteristics);
@@ -254,11 +273,12 @@ static void print_pe(const void *view, const struct kof_obj_ctx *ctx)
  * out: it is the number worth looking at first on a container, and a file that
  * admits to expanding a thousandfold is one to open deliberately.
  */
-static void print_gzip(const void *v, const struct kof_obj_ctx *ctx)
+static void print_gzip(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 {
 	const struct kof_gzip_info *g = v;
 
 	(void)ctx;
+	(void)buf;
 
 	printf("  method    %u%s\n", g->method,
 	       g->method == KOF_GZIP_DEFLATE ? " (deflate)" : " (not deflate)");
@@ -298,7 +318,7 @@ static void print_gzip(const void *v, const struct kof_obj_ctx *ctx)
  * the interesting part - it is how fragmented the stream is, and so how much a
  * gather would have to join.
  */
-static void print_docole(const void *v, const struct kof_obj_ctx *ctx)
+static void print_docole(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 {
 	static const char *const cls_name[KOF_DOCOLE_CLS_COUNT] = {
 		"headers", "directory", "content_data", "content_macros",
@@ -309,13 +329,15 @@ static void print_docole(const void *v, const struct kof_obj_ctx *ctx)
 	uint32_t i;
 
 	(void)ctx;
+	(void)buf;
 
 	printf("  version   %u.%u   sector=%u mini=%u cutoff=%u\n",
 	       o->major, o->minor, o->sector_size, o->mini_sector_size,
 	       o->mini_cutoff);
-	printf("  directory %u entries: %u streams, %u storages%s\n",
+	printf("  directory %u entries: %u streams, %u storages%s%s\n",
 	       o->dir_count, o->stream_count, o->storage_count,
-	       o->has_macros ? ", macros present" : "");
+	       o->has_macros ? ", macros present" : "",
+	       o->encrypted ? ", CONTENT IS ENCRYPTED" : "");
 	printf("  declared  data=%llu macros=%llu metadata=%llu resources=%llu%s\n",
 	       (unsigned long long)o->data_bytes,
 	       (unsigned long long)o->macro_bytes,
@@ -356,6 +378,98 @@ static uint64_t anom_docole(const void *v)
 	return ((const struct kof_docole_info *)v)->anomalies;
 }
 
+/*
+ * What an archive states about itself, before a byte of any entry is decoded.
+ *
+ * The entry table is the display, not a summary of it: a zip's evidence IS its
+ * entries - what they are called, how they are packed, whether they can be read at
+ * all - and a total hides exactly the one row that matters. Capped, because an APK
+ * has hundreds and nobody reads those; the ones marked suspicious are printed
+ * whatever their position, so the cap can never hide the interesting one.
+ *
+ * Each row names the REGION its data landed in, and that column is there to stop
+ * this table and --dump from looking like two unrelated descriptions of one file.
+ * They describe different things on purpose - a table of entries is what the
+ * archive says it holds, and a dump of regions is what a signature would actually
+ * be searched over - and without the column there is nothing connecting them. With
+ * it, every byte of every row can be found in exactly one dumped file.
+ *
+ * What this tool does NOT show is the entries OPENED: decompressing them costs
+ * budget and belongs to an unpacker, which runs in the scanner and not here. The
+ * scanner is where the tree is - it names children as <file>//6//0 - and a .docm
+ * reaches its macros three layers down that way, through zip, then the compound
+ * file inside it, then the macro streams.
+ */
+#define ZIP_SHOW 12u
+
+static void print_zip(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
+{
+	const struct kof_zip_info *z = v;
+	uint32_t i, shown = 0;
+
+	(void)ctx;
+
+	printf("  kind      %s   %u entries", kof_zip_kind_name(z->kind),
+	       z->n_entries);
+	if (z->declared_entries != z->n_entries)
+		printf(" (%u declared)", z->declared_entries);
+	if (z->n_encrypted)
+		printf(", %u ENCRYPTED", z->n_encrypted);
+	printf("\n");
+	printf("  central   off=%llu size=%llu   eocd=%llu\n",
+	       (unsigned long long)z->cd_off, (unsigned long long)z->cd_size,
+	       (unsigned long long)z->eocd_off);
+	printf("  declared  packed=%llu unpacked=%llu",
+	       (unsigned long long)z->total_csize,
+	       (unsigned long long)z->total_usize);
+	if (z->total_csize)
+		printf("   ratio %.1fx",
+		       (double)z->total_usize / (double)z->total_csize);
+	printf("\n");
+	if (z->comment_len)
+		printf("  comment   off=%llu len=%llu\n",
+		       (unsigned long long)z->comment_off,
+		       (unsigned long long)z->comment_len);
+
+	for (i = 0; i < z->n_entries; i++) {
+		const struct kof_zip_entry *e = &z->entry[i];
+		uint32_t k;
+
+		if (shown >= ZIP_SHOW && !e->suspicious)
+			continue;
+		shown++;
+		printf("    [%3u] m=%-3u %9llu -> %-9llu @%-9llu %-6s ", i, e->method,
+		       (unsigned long long)e->csize, (unsigned long long)e->usize,
+		       (unsigned long long)e->data_off,
+		       !e->data_off ? "-" :
+		       (e->method == KOF_ZIP_M_STORE &&
+			!(e->suspicious & KOF_ZIP_ENT_ENCRYPTED))
+		       ? "STORED" : "PACKED");
+		for (k = 0; k < e->name_len && k < 60u &&
+		     kof_in_range(buf, e->name_off + k, 1); k++) {
+			uint8_t c = buf.p[e->name_off + k];
+
+			putchar(c >= 0x20 && c < 0x7f ? (int)c : '.');
+		}
+		if (e->suspicious & KOF_ZIP_ENT_TRAVERSAL)
+			printf("   <- ESCAPES THE EXTRACT ROOT");
+		if (e->suspicious & KOF_ZIP_ENT_ENCRYPTED)
+			printf("   <- encrypted");
+		if (e->suspicious & KOF_ZIP_ENT_NO_LOCAL)
+			printf("   <- no local header there");
+		if (e->suspicious & KOF_ZIP_ENT_RATIO)
+			printf("   <- declared expansion is absurd");
+		printf("\n");
+	}
+	if (z->n_entries > shown)
+		printf("    ... %u more\n", z->n_entries - shown);
+}
+
+static uint64_t anom_zip(const void *v)
+{
+	return ((const struct kof_zip_info *)v)->anomalies;
+}
+
 static const struct fmt formats[] = {
 	{ (uint32_t)sizeof(struct kof_elf_info), kof_elf_sniff, elf_parse_thunk,
 	  kof_elf_region_bits, KOF_ELF_REGION_COUNT,
@@ -369,7 +483,10 @@ static const struct fmt formats[] = {
 	{ (uint32_t)sizeof(struct kof_docole_info), kof_docole_sniff,
 	  docole_parse_thunk, kof_docole_region_bits, KOF_DOCOLE_REGION_COUNT,
 	  kof_docole_region_name, kof_docole_anomaly_name, print_docole,
-	  anom_docole }
+	  anom_docole },
+	{ (uint32_t)sizeof(struct kof_zip_info), kof_zip_sniff, zip_parse_thunk,
+	  kof_zip_region_bits, KOF_ZIP_REGION_COUNT,
+	  kof_zip_region_name, kof_zip_anomaly_name, print_zip, anom_zip }
 };
 
 /*
@@ -650,7 +767,7 @@ static int examine(const char *path, int dump)
 		printf("  format    %s %s  %llu bytes\n",
 		       kof_format_name(ctx.format), kof_arch_name(ctx.arch),
 		       (unsigned long long)buf.n);
-		f->print(view, &ctx);
+		f->print(view, &ctx, buf);
 
 		/* Regions last: they are the summary the rest explains, and with
 		 * --dump they are also the manifest of what was written. */

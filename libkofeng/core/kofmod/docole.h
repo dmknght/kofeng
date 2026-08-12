@@ -173,18 +173,10 @@ enum {
 	KOF_DOCOLE_ANOM_MINI_UNMAPPED = 1ull << 10, /* mini stream past MAX_MINI_SEC */
 	KOF_DOCOLE_ANOM_STREAM_PAST_EOF = 1ull << 11,
 	KOF_DOCOLE_ANOM_MACRO_OVERSIZE  = 1ull << 12, /* past MACRO_SUSPECT */
-	KOF_DOCOLE_ANOM_NO_STREAMS      = 1ull << 13  /* a directory with nothing in it */
-};
-
-/*
- * One run of bytes and what claims it. Kept as a flat pool rather than a list per
- * class so that the size of this view does not multiply by the number of classes,
- * and so a run recorded during the walk needs no idea of what came before it.
- */
-struct kof_docole_run {
-	uint64_t off, len;
-	uint32_t cls;         /* enum kof_docole_class */
-	uint32_t reserved;
+	KOF_DOCOLE_ANOM_NO_STREAMS      = 1ull << 13, /* a directory with nothing in it */
+	KOF_DOCOLE_ANOM_ENCRYPTED       = 1ull << 14, /* content is ciphertext */
+	KOF_DOCOLE_ANOM_OVERLAP         = 1ull << 15  /* two structures claimed the
+						       * same bytes */
 };
 
 struct kof_docole_info {
@@ -225,12 +217,32 @@ struct kof_docole_info {
 	uint64_t region_bytes[KOF_DOCOLE_CLS_COUNT];
 
 	uint32_t has_macros;      /* a VBA storage was found */
-	uint32_t reserved0;
 
-	/* Runs, classified, already joined where consecutive. */
+	/*
+	 * The document's content is encrypted.
+	 *
+	 * Office stores an encrypted document as an ordinary compound file holding one
+	 * opaque stream, so the container parses perfectly and everything inside it is
+	 * ciphertext. That is the case worth naming: without it the scan searches high
+	 * entropy bytes, finds nothing, and reports clean - which is the one verdict an
+	 * unreadable document must never get.
+	 *
+	 * A fact and not a verdict. Encrypting a document is ordinary; what a module
+	 * does about it is the module's decision.
+	 */
+	uint32_t encrypted;
+
+	/* Runs, classified, joined where consecutive and settled so that no byte is
+	 * in two of them. struct kof_run is the shared shape from runlist.h; it is
+	 * spelled out here rather than included because a module never walks these
+	 * and including a host header from the ABI would invert the dependency. */
 	uint32_t n_runs;
 	uint32_t reserved1;
-	struct kof_docole_run run[KOF_DOCOLE_MAX_EXTENTS];
+	struct {
+		uint64_t off, len;
+		uint32_t cls;         /* enum kof_docole_class */
+		uint32_t reserved;
+	} run[KOF_DOCOLE_MAX_EXTENTS];
 
 	/*
 	 * Host bookkeeping past this point.

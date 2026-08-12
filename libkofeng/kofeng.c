@@ -48,6 +48,7 @@ const char *kof_broken_name(uint32_t reason)
 	case KOF_BROKEN_LIMIT:       return "a limit was reached";
 	case KOF_BROKEN_UNSUPPORTED: return "not supported by this build";
 	case KOF_BROKEN_DAMAGED:     return "the object is damaged";
+	case KOF_BROKEN_ENCRYPTED:   return "the content is encrypted";
 	default:                     return "unknown";
 	}
 }

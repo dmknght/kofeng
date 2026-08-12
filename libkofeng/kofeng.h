@@ -96,7 +96,19 @@ enum kof_broken {
 	KOF_BROKEN_UNSUPPORTED,
 	/* The object's own structure does not hold together - a stream that does
 	 * not decode, a header that contradicts itself. */
-	KOF_BROKEN_DAMAGED
+	KOF_BROKEN_DAMAGED,
+	/*
+	 * The content is encrypted and no key was supplied.
+	 *
+	 * Its own reason rather than a kind of UNSUPPORTED, because the two lead
+	 * somewhere different. UNSUPPORTED is a gap in this build that a later one can
+	 * close; this cannot be closed by any amount of work on the engine, and an
+	 * operator reading it needs to know that the file will keep coming back the
+	 * same way. Every container format that carries encryption reports it with this
+	 * value, so a scan says the same thing whether the archive was a zip, a
+	 * document, a RAR or a 7z.
+	 */
+	KOF_BROKEN_ENCRYPTED
 };
 
 const char *kof_broken_name(uint32_t reason);
