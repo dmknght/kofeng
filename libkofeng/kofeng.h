@@ -108,7 +108,18 @@ enum kof_broken {
 	 * value, so a scan says the same thing whether the archive was a zip, a
 	 * document, a RAR or a 7z.
 	 */
-	KOF_BROKEN_ENCRYPTED
+	KOF_BROKEN_ENCRYPTED,
+
+	/*
+	 * One past the last, so a caller can size a table of reasons.
+	 *
+	 * Here because the alternative was a literal, and the literal was wrong the
+	 * moment a reason was added: the scanner counted reasons below 4 and printed
+	 * reasons below 4, so the first new one was tallied into the total and then
+	 * left out of the breakdown - 81 objects broken, 53 accounted for. A count
+	 * that does not add up is worse than no count.
+	 */
+	KOF_BROKEN_COUNT
 };
 
 const char *kof_broken_name(uint32_t reason);
@@ -131,7 +142,7 @@ struct kof_stats {
 	uint64_t unreadable;
 
 	uint64_t considered, ran;
-	uint64_t by_target, by_size, by_arch, by_region;
+	uint64_t by_target, by_size, by_arch, by_subtype, by_region;
 
 	uint64_t gram_bytes;             /* cost of building presence sets */
 	uint64_t gram_answers;           /* searches answered without scanning */

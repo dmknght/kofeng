@@ -30,7 +30,7 @@ struct run {
 	/* No object counter: the engine already keeps one, and a second copy is a
 	 * second thing that can disagree with it. */
 	uint64_t infected, suspect, dropped, incomplete;
-	uint64_t by_reason[4];
+	uint64_t by_reason[KOF_BROKEN_COUNT];
 	int verbose;
 	int stats;
 };
@@ -64,7 +64,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	 */
 	if (res->broken) {
 		r->incomplete++;
-		if (res->broken < 4)
+		if (res->broken < KOF_BROKEN_COUNT)
 			r->by_reason[res->broken]++;
 		printf("%-10s %s: %s\n", "BROKEN", name,
 		       kof_broken_name(res->broken));
@@ -120,7 +120,8 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
  */
 static void print_stats(const struct kof_stats *st)
 {
-	uint64_t skipped = st->by_target + st->by_size + st->by_arch + st->by_region;
+	uint64_t skipped = st->by_target + st->by_size + st->by_arch +
+			  st->by_subtype + st->by_region;
 
 	printf("\n--- filtering ---\n");
 	printf("considered %llu module evaluation(s)\n",
@@ -129,6 +130,7 @@ static void print_stats(const struct kof_stats *st)
 	printf("  target   %llu\n", (unsigned long long)st->by_target);
 	printf("  size     %llu\n", (unsigned long long)st->by_size);
 	printf("  arch     %llu\n", (unsigned long long)st->by_arch);
+	printf("  subtype  %llu\n", (unsigned long long)st->by_subtype);
 	printf("  region   %llu\n", (unsigned long long)st->by_region);
 	if (st->ran + skipped != st->considered)
 		printf("  NOTE: ran + skipped is %llu, not %llu\n",
@@ -274,7 +276,7 @@ int main(int argc, char **argv)
 
 		printf("broken    %llu object(s) the engine could not finish\n",
 		       (unsigned long long)r.incomplete);
-		for (k = 1; k < 4; k++)
+		for (k = 1; k < KOF_BROKEN_COUNT; k++)
 			if (r.by_reason[k])
 				printf("            %-28s %llu\n",
 				       kof_broken_name(k),

@@ -118,7 +118,7 @@
  * compatibility. It gets bumped on the first release and on every shape change
  * after that.
  */
-#define KOF_PACK_VERSION 1u
+#define KOF_PACK_VERSION 2u
 
 /*
  * The machine the code in this pack was built for. Not an architecture the pack
@@ -204,7 +204,13 @@ enum kof_pack_sec_id {
 	KOF_SEC_IDX_BITMAP = 11,  /* bytes, (1 << idx_bits) / 8     */
 	KOF_SEC_IDX_SLOT   = 12,  /* struct kof_pack_idx x n_idx_slots */
 
-	KOF_SEC_COUNT      = 13
+	/* Appended rather than slotted in beside the other preconditions: these ids
+	 * are indices into the section table, so inserting one would move every
+	 * section after it and silently change the meaning of an existing pack. The
+	 * version below is what refuses those instead. */
+	KOF_SEC_PRE_SUBTYPE = 13, /* uint32 x n_mods */
+
+	KOF_SEC_COUNT      = 14
 };
 
 /*
@@ -487,7 +493,14 @@ _Static_assert(sizeof(struct kof_pack_mod)  == 32,  "pack module record grew pad
 _Static_assert(sizeof(struct kof_pack_str)  == 8,   "pack string descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_name) == 8,   "pack name descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_idx)  == 8,   "pack index slot grew padding");
-_Static_assert(sizeof(struct kof_pack_hdr)  == 288, "pack header changed size");
+/* The fixed fields plus one entry per section. Written that way rather than as one
+ * number so that adding a section is a change in one place: the literal caught
+ * padding, which is what it is for, but it also failed every time the section table
+ * legitimately grew, which taught whoever hit it to update the number rather than to
+ * ask why it moved. */
+_Static_assert(sizeof(struct kof_pack_hdr) ==
+	       80 + KOF_SEC_COUNT * sizeof(struct kof_pack_sec),
+	       "pack header changed size");
 
 /* The checksum has to start after itself and cover everything else. */
 _Static_assert(KOF_PACK_CRC_FROM == 12, "checksum no longer starts after the crc field");

@@ -59,6 +59,22 @@ struct kof_scanner {
 	 * passes are module local, so the host has to know whose they are. */
 	const struct kof_module *cur_mod;
 
+	/*
+	 * Where a region resolve puts its extents.
+	 *
+	 * Here rather than on the stack of whoever asks, because KOF_SCAN_MAX_EXTENTS
+	 * is sized for an archive whose regions come apart into thousands of runs -
+	 * and a buffer that size in every frame that resolves a region is a stack
+	 * cost paid on every object to hold the worst archive anyone has seen.
+	 *
+	 * Two, not one, and they are never live at the same moment for the same
+	 * reason: `ext` answers a search, `ext_gather` feeds a copy, and a module doing
+	 * one is not doing the other. Kept apart anyway, because the day one calls the
+	 * other the failure would be silent.
+	 */
+	struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
+	struct kof_range ext_gather[KOF_SCAN_MAX_EXTENTS];
+
 	/* What the running module reported. A module cannot hold state, so a finding
 	 * has to land here. */
 	uint32_t rep_level, rep_name_id;

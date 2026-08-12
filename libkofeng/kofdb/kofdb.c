@@ -494,6 +494,7 @@ static void absorb(struct kof_engine *e, const struct mapped *mp,
 	const uint32_t *pt = (const void *)(base + h->sec[KOF_SEC_PRE_TARGET].off);
 	const uint32_t *ps = (const void *)(base + h->sec[KOF_SEC_PRE_SCAN].off);
 	const uint32_t *pa = (const void *)(base + h->sec[KOF_SEC_PRE_ARCH].off);
+	const uint32_t *pk = (const void *)(base + h->sec[KOF_SEC_PRE_SUBTYPE].off);
 	const uint64_t *pz = (const void *)(base + h->sec[KOF_SEC_PRE_SIZE].off);
 	const struct kof_pack_mod *pm =
 		(const void *)(base + h->sec[KOF_SEC_MODS].off);
@@ -544,6 +545,8 @@ static void absorb(struct kof_engine *e, const struct mapped *mp,
 		m->target_mask = pt[i];
 		m->scan_mask   = ps[i];
 		m->arch_mask   = pa[i];
+		m->subtype_mask = pk[i];
+		m->subtype_mask = pk[i];
 		m->size_min    = pz[i];
 
 		m->str_base  = str0  + pm[i].str_first;

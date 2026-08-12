@@ -306,6 +306,29 @@ struct kof_pe_dir {
  * every object and live in the common tier. entry_rva does stay, because an RVA
  * is only meaningful against this format's load layout.
  */
+/*
+ * What kind of image this is, as the prefilter's subtype axis.
+ *
+ * Unlike ELF's, these are composed rather than copied: PE has no single field that
+ * says what an image is for. The DLL characteristic separates a library from an
+ * executable, and the SUBSYSTEM separates a kernel driver from both - a .sys is
+ * flagged as a DLL and runs in the native subsystem, so the subsystem has to be
+ * tested first or every driver reads as a library.
+ *
+ * Composed, but not guessed: both inputs are header fields a loader acts on, so
+ * this says what Windows will do with the file rather than what the file is called.
+ * Measured over 5143 PE images: 4635 executables, 492 libraries, 16 drivers.
+ */
+enum kof_pe_image {
+	KOF_PE_EXE = 0,
+	KOF_PE_DLL = 1,
+	KOF_PE_SYS = 2    /* subsystem NATIVE: a kernel mode driver */
+};
+
+/* IMAGE_FILE_DLL, and the subsystem a driver runs in. */
+#define KOF_PE_CHAR_DLL      0x2000u
+#define KOF_PE_SUBSYS_NATIVE 1u
+
 struct kof_pe_info {
 	uint32_t version;      /* KOF_PE_INFO_VERSION the parser filled */
 	uint32_t valid;        /* non-zero if MZ and PE\0\0 both matched; facts may

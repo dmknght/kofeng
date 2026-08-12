@@ -231,7 +231,25 @@ struct kof_range {
  * This is the bound on that buffer. A resolver that would exceed it must coalesce,
  * never drop: overshooting a range loses precision, dropping one loses a detection.
  */
-#define KOF_SCAN_MAX_EXTENTS 256
+/*
+ * How many extents one region resolve may return.
+ *
+ * Sized from the worst real container rather than from what looked generous. It was
+ * 256, which is ample for an executable - an ELF's CODE is a handful of ranges -
+ * and nowhere near enough for an archive: a zip stores each entry's name between
+ * two pieces of header, twice over, so its NAMES and HEADERS regions fragment at
+ * roughly two runs per entry EACH. Measured over 280 archives the largest holds 991
+ * entries, which is about four thousand runs, and at 256 the regions of nineteen of
+ * them did not cover the file at all.
+ *
+ * The buffers this sizes live in the scanner rather than on the stack, which is what
+ * makes a number this large affordable - see kof_scanner.
+ *
+ * It is still a bound, and a hostile archive will still exceed it. That is handled
+ * rather than assumed away: a resolve that fills the buffer records a limit, so a
+ * region that could not be described in full is never quietly searched in part.
+ */
+#define KOF_SCAN_MAX_EXTENTS 4096
 
 /* The whole object. The host answers this without a parser, so a module naming only
  * this region works on input nothing has identified. */
@@ -492,7 +510,34 @@ enum kof_unp_method {
 struct kof_obj_ctx {
 	uint8_t  format;      /* enum kof_format */
 	uint8_t  arch;        /* enum kof_arch */
-	uint8_t  reserved[2];
+
+	/*
+	 * What KIND of thing this format holds, in the format's own vocabulary.
+	 *
+	 * A third prefilter axis beside format and architecture, and the reason it is
+	 * an axis rather than more format values is the test that separated DOCOLE
+	 * from DOCZIP: those are different formats because a document's parts live in
+	 * different PLACES in each, so a module written for one cannot run against the
+	 * other. A shared library and an executable are read identically - same
+	 * parser, same view, same regions - so they are one format and two kinds.
+	 *
+	 * Deliberately NOT normalised across formats, unlike arch. The value is
+	 * whatever the format's own header field says: for ELF it is e_type verbatim,
+	 * for PE it is composed from the DLL characteristic and the subsystem, and
+	 * those two are no more comparable than EM_AARCH64 is to
+	 * IMAGE_FILE_MACHINE_ARM64. So the values are declared in elf.h and pe.h and
+	 * the numbers COLLIDE between formats - KOF_ELF_REL and KOF_PE_DLL are both 1.
+	 *
+	 * That is safe rather than sloppy, because target_mask is tested first: the
+	 * subtype test is only ever reached for an object of a format the module
+	 * already declared. The build refuses a module that names one format's
+	 * subtypes while targeting another, so the collision cannot be reached by
+	 * accident.
+	 *
+	 * Zero for a format with no such notion, which is every container.
+	 */
+	uint8_t  subtype;
+	uint8_t  reserved;
 
 	uint64_t obj_size;
 	uint64_t entry_off;   /* KOF_NA if not applicable, KOF_BROKEN if unresolved */
@@ -1034,6 +1079,23 @@ enum kof_unp_broken {
  * casts ctx->file_header and a module that never casts has nothing to get wrong.
  */
 #define KOF_TARGET_FORMAT(mask)
+
+/*
+ * Which kinds of that format, as a mask over the format's own subtype values.
+ *
+ *     KOF_TARGET_FORMAT(KOF_FMT_ELF);
+ *     KOF_TARGET_SUBTYPE(KOF_ELF_REL);        - relocatable objects only
+ *
+ * Absent means unconstrained, so every module written before this existed keeps
+ * running against everything it used to. Expands to nothing, like the other
+ * declarations: the build reads it out of the source into the record beside the
+ * blob, and the host evaluates it against a fact the collector already produced.
+ *
+ * The values come from the format header the module includes, and naming one
+ * format's values while targeting another is refused at build time - see the note
+ * on ctx->subtype for why the numbers overlap.
+ */
+#define KOF_TARGET_SUBTYPE(mask)
 
 /*
  * Preconditions the host checks without running the module.

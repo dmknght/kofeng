@@ -470,6 +470,34 @@ static uint64_t anom_zip(const void *v)
 	return ((const struct kof_zip_info *)v)->anomalies;
 }
 
+/*
+ * The subtype's name, which only means anything alongside the format.
+ *
+ * Here rather than in a format header because it is a spelling for a person, and
+ * both enums are already the values the header field holds - elf.h and pe.h say
+ * what they mean, and this says how to print them.
+ */
+static const char *subtype_name(uint8_t fmt, uint8_t sub)
+{
+	if (fmt == KOF_FMT_ELF)
+		switch (sub) {
+		case KOF_ELF_NONE: return "ET_NONE";
+		case KOF_ELF_REL:  return "ET_REL";
+		case KOF_ELF_EXEC: return "ET_EXEC";
+		case KOF_ELF_DYN:  return "ET_DYN";
+		case KOF_ELF_CORE: return "ET_CORE";
+		default:           return "ET_?";
+		}
+	if (fmt == KOF_FMT_PE)
+		switch (sub) {
+		case KOF_PE_EXE: return "EXE";
+		case KOF_PE_DLL: return "DLL";
+		case KOF_PE_SYS: return "SYS";
+		default:         return "?";
+		}
+	return 0;
+}
+
 static const struct fmt formats[] = {
 	{ (uint32_t)sizeof(struct kof_elf_info), kof_elf_sniff, elf_parse_thunk,
 	  kof_elf_region_bits, KOF_ELF_REGION_COUNT,
@@ -619,7 +647,7 @@ struct layout_row {
 static int layout_file(const char *dir, const struct fmt *f,
 		       const struct kof_obj_ctx *ctx)
 {
-	struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
+	static struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
 	static struct layout_row row[KOF_SCAN_MAX_EXTENTS * 8];
 	char path[PATH_ROOM];
 	uint32_t nrow = 0, i, k, j;
@@ -676,7 +704,7 @@ static int dump_region(const char *dir, uint32_t rank, const char *region,
 		       const struct kof_obj_ctx *ctx, kof_buf buf, uint32_t bit,
 		       uint64_t *out_len)
 {
-	struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
+	static struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
 	char name[4096];
 	uint32_t n, i;
 	FILE *f;
@@ -764,8 +792,17 @@ static int examine(const char *path, int dump)
 			goto out;
 		}
 
-		printf("  format    %s %s  %llu bytes\n",
+		/*
+		 * The subtype spelled in the format's own vocabulary, because that is
+		 * what a module declares. A number would be no use: the same value
+		 * means REL for an ELF and DLL for a PE, and which one it is is
+		 * exactly what the reader is here to find out.
+		 */
+		printf("  format    %s %s%s%s  %llu bytes\n",
 		       kof_format_name(ctx.format), kof_arch_name(ctx.arch),
+		       subtype_name(ctx.format, ctx.subtype) ? " " : "",
+		       subtype_name(ctx.format, ctx.subtype)
+		       ? subtype_name(ctx.format, ctx.subtype) : "",
 		       (unsigned long long)buf.n);
 		f->print(view, &ctx, buf);
 
@@ -773,7 +810,7 @@ static int examine(const char *path, int dump)
 		 * --dump they are also the manifest of what was written. */
 		printf("  regions  ");
 		for (i = 0; i < f->n_regions; i++) {
-			struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
+			static struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
 			const char *rn = f->region_name(f->regions[i]);
 			uint64_t len = 0;
 			uint32_t n, k;
@@ -814,7 +851,7 @@ static int examine(const char *path, int dump)
 
 		if (dump) {
 			char dir[PATH_ROOM];
-			struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
+			static struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
 			uint64_t first[16];
 			uint32_t order[16], nord = 0;
 			uint64_t wrote = 0;

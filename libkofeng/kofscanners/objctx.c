@@ -117,7 +117,7 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	const struct kof_module *m = sc->cur_mod;
 	const struct kof_str_ent *e = str_of(sc, str_id);
-	struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
+	struct kof_range *ext = sc->ext;
 	uint32_t n;
 
 	if (!e || range_id >= m->n_rng)
@@ -808,7 +808,7 @@ static int c_child(const struct kof_obj_ctx *ctx)
 static uint64_t c_gather(const struct kof_obj_ctx *ctx, uint32_t mask, uint64_t cap)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
+	struct kof_range *ext = sc->ext_gather;
 	kof_buf b = mc(ctx)->data;
 	uint64_t done = 0;
 	uint32_t n, i;

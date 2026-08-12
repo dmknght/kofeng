@@ -25,7 +25,8 @@
  *
  * GROUPING
  *
- * One pack per (kind, target_mask, arch_mask). Every part of that key is derived
+ * One pack per (kind, target_mask, subtype_mask, arch_mask). Every part of that key
+ * is derived
  * from an artefact - kind from which entry point the module exported, the rest from
  * the .meta record - so nobody decides where a module goes and there is nowhere for
  * a decision to be wrong.
@@ -971,7 +972,7 @@ struct artefact {
 	uint32_t code_len;
 
 	uint32_t kind;
-	uint32_t target_mask, scan_mask, arch_mask;
+	uint32_t target_mask, scan_mask, arch_mask, subtype_mask;
 	uint64_t size_min;
 
 	struct kof_pw_str  *str;
@@ -1092,6 +1093,8 @@ static int meta_load(struct artefact *a)
 			a->size_min = strtoull(line + 9, 0, 10);
 		} else if (strncmp(line, "arch_mask=", 10) == 0) {
 			a->arch_mask = (uint32_t)strtoul(line + 10, 0, 10);
+		} else if (strncmp(line, "subtype_mask=", 13) == 0) {
+			a->subtype_mask = (uint32_t)strtoul(line + 13, 0, 10);
 		} else if (strncmp(line, "blob_len=", 9) == 0) {
 			blob_len = strtoull(line + 9, 0, 10);
 		} else if (strncmp(line, "kind=", 5) == 0) {
@@ -1406,7 +1409,7 @@ static int artefact_load(struct artefact *a, const char *blob_path)
 
 /* A set of artefacts sharing one grouping key, which is one pack. */
 struct group {
-	uint32_t  kind, target_mask, arch_mask;
+	uint32_t  kind, target_mask, arch_mask, subtype_mask;
 	uint32_t *member;                /* indices into the artefact array */
 	uint32_t  n, cap;
 };
@@ -1542,7 +1545,8 @@ int main(int argc, char **argv)
 		for (j = 0; j < n_groups; j++)
 			if (groups[j].kind == arts[a].kind &&
 			    groups[j].target_mask == arts[a].target_mask &&
-			    groups[j].arch_mask == arts[a].arch_mask) {
+			    groups[j].arch_mask == arts[a].arch_mask &&
+			    groups[j].subtype_mask == arts[a].subtype_mask) {
 				g = &groups[j];
 				break;
 			}
@@ -1560,6 +1564,7 @@ int main(int argc, char **argv)
 			g->kind        = arts[a].kind;
 			g->target_mask = arts[a].target_mask;
 			g->arch_mask   = arts[a].arch_mask;
+			g->subtype_mask = arts[a].subtype_mask;
 		}
 		if (!group_add(g, a))
 			goto done;
@@ -1584,6 +1589,7 @@ int main(int argc, char **argv)
 			pm[a].target_mask = s->target_mask;
 			pm[a].scan_mask   = s->scan_mask;
 			pm[a].arch_mask   = s->arch_mask;
+			pm[a].subtype_mask = s->subtype_mask;
 			pm[a].size_min    = s->size_min;
 			pm[a].str         = s->str;
 			pm[a].n_str       = s->n_str;
@@ -1602,8 +1608,16 @@ int main(int argc, char **argv)
 
 		/* The name states the key, so a directory listing says what is in
 		 * each file without opening any of them. */
-		snprintf(path, sizeof path, "%s/%s-t%u-a%u.ksig", outdir,
-			 kind_name(g->kind), g->target_mask, g->arch_mask);
+		/* The subtype is in the name only when it constrains anything, so the
+		 * ordinary pack keeps the name it always had and a directory listing
+		 * still reads at a glance. */
+		if (g->subtype_mask)
+			snprintf(path, sizeof path, "%s/%s-t%u-k%u-a%u.ksig", outdir,
+				 kind_name(g->kind), g->target_mask,
+				 g->subtype_mask, g->arch_mask);
+		else
+			snprintf(path, sizeof path, "%s/%s-t%u-a%u.ksig", outdir,
+				 kind_name(g->kind), g->target_mask, g->arch_mask);
 		if (!write_file(path, img, img_len)) {
 			free(img);
 			goto done;

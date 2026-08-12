@@ -51,7 +51,7 @@ static int pc_check(const char *what, const struct kof_obj_ctx *ctx,
 	/* Every region can independently reach the extent cap, so the pool has to
 	 * hold all of them at once or a full run would look like a gap. */
 	static struct kof_range all[KOF_SCAN_MAX_EXTENTS * 8];
-	struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
+	static struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
 	uint32_t n_all = 0, i, k;
 	uint64_t covered = 0, cursor = 0;
 	const char *why = 0;

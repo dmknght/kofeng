@@ -38,6 +38,7 @@
 #include "../../libkofeng/kofparsers/binaries/pe_parse.h"
 #include "../../libkofeng/kofparsers/containers/gzip_parse.h"
 #include "../../libkofeng/kofparsers/containers/docole_parse.h"
+#include "../../libkofeng/kofparsers/containers/zip_parse.h"
 
 #define OBJ_MAX 8192
 #define ROUNDS  20000
@@ -282,6 +283,91 @@ static uint64_t gen_docole(uint8_t *b)
 	return n;
 }
 
+/*
+ * A zip, plausible in shape and wrong where it counts.
+ *
+ * The fields corrupted are the ones two readers can disagree about, because that
+ * disagreement is the whole bug class this format has: the end record's declared
+ * directory offset and size, which decide where the walk starts and whether the
+ * archive is treated as shifted; each entry's local header offset, which decides
+ * where its data is looked for; and the two independent name lengths, which decide
+ * whether the two copies of a name line up.
+ *
+ * Sizes are drawn from a set that includes the saturated values, so the ZIP64 path
+ * is entered on roughly one archive in eight rather than never.
+ */
+static uint64_t gen_zip(uint8_t *b)
+{
+	uint64_t n = 200u + rnd() % 3000u;
+	uint64_t at = 0, cd, i;
+	uint32_t nent = 1u + (uint32_t)(rnd() % 6u);
+	uint32_t off[8], k;
+
+	memset(b, 0, OBJ_MAX);
+	for (i = 0; i < n; i++)
+		b[i] = (uint8_t)rnd();
+
+	/* Local headers with a little data after each. */
+	for (k = 0; k < nent && at + 64u < n; k++) {
+		uint32_t nlen = (uint32_t)(rnd() % 12u);
+		uint32_t xlen = (uint32_t)(rnd() % 8u);
+		uint32_t csz  = (uint32_t)(rnd() % 40u);
+
+		off[k] = (uint32_t)at;
+		put32(b, at, 0x04034b50u);
+		put16(b, at + 0x06, (uint16_t)((rnd() % 8u) ? 0 : rnd()));
+		put16(b, at + 0x08, (uint16_t)((rnd() % 3u) ? (rnd() % 2u ? 0 : 8)
+							    : rnd() % 100u));
+		put32(b, at + 0x12, csz);
+		put32(b, at + 0x16, csz);
+		put16(b, at + 0x1a, (uint16_t)nlen);
+		put16(b, at + 0x1c, (uint16_t)xlen);
+		for (i = 0; i < nlen && at + 30u + i < n; i++)
+			b[at + 30u + i] = (uint8_t)('a' + (rnd() % 26));
+		at += 30u + nlen + xlen + csz;
+	}
+	nent = k;
+	if (!nent || at + 64u >= n)
+		return n;
+
+	/* The central directory, whose copies of the lengths need not agree. */
+	cd = at;
+	for (k = 0; k < nent && at + 64u < n; k++) {
+		uint32_t nlen = (uint32_t)(rnd() % 12u);
+
+		put32(b, at, 0x02014b50u);
+		put16(b, at + 0x08, (uint16_t)((rnd() % 8u) ? 0 : 1));
+		put16(b, at + 0x0a, (uint16_t)((rnd() % 3u) ? (rnd() % 2u ? 0 : 8)
+							    : 99));
+		put32(b, at + 0x14, (uint32_t)((rnd() % 8u) ? rnd() % 60u
+							    : 0xffffffffu));
+		put32(b, at + 0x18, (uint32_t)((rnd() % 8u) ? rnd() % 900u
+							    : 0xffffffffu));
+		put16(b, at + 0x1c, (uint16_t)nlen);
+		put16(b, at + 0x1e, (uint16_t)(rnd() % 8u));
+		put16(b, at + 0x20, (uint16_t)(rnd() % 8u));
+		/* Usually where a local header is, sometimes anywhere at all. */
+		put32(b, at + 0x2a, (rnd() % 4u) ? off[rnd() % nent]
+						 : (uint32_t)rnd());
+		for (i = 0; i < nlen && at + 46u + i < n; i++)
+			b[at + 46u + i] = (uint8_t)((rnd() % 8u)
+						    ? 'a' + (rnd() % 26) :
+						    (rnd() % 2u ? '.' : '/'));
+		at += 46u + nlen;
+	}
+
+	if (at + 22u > n)
+		return n;
+	put32(b, at, 0x06054b50u);
+	put16(b, at + 0x0a, (uint16_t)((rnd() % 8u) ? nent : 0xffffu));
+	put32(b, at + 0x0c, (uint32_t)((rnd() % 8u) ? at - cd : 0xffffffffu));
+	put32(b, at + 0x10, (uint32_t)((rnd() % 4u) ? cd :
+				       (rnd() % 2u ? cd + 77u : 0xffffffffu)));
+	put16(b, at + 0x14, (uint16_t)((rnd() % 4u) ? n - at - 22u
+						    : rnd() % 200u));
+	return n;
+}
+
 static uint64_t gen_gzip(uint8_t *b)
 {
 	uint64_t n = 4 + rnd() % 300;
@@ -345,16 +431,18 @@ int main(int argc, char **argv)
 	struct kof_pe_info *pi = malloc(sizeof *pi);
 	struct kof_gzip_info *gi = malloc(sizeof *gi);
 	struct kof_docole_info *oi = malloc(sizeof *oi);
+	struct kof_zip_info *zi = malloc(sizeof *zi);
 	struct pc_report rep = { 0, 0, 0 };
 	uint64_t rounds = ROUNDS, seed = 20240101u;
-	uint64_t r, pe_parsed = 0, elf_parsed = 0, gz_parsed = 0, ole_parsed = 0;
+	uint64_t r, pe_parsed = 0, elf_parsed = 0, gz_parsed = 0, ole_parsed = 0,
+		 zip_parsed = 0;
 	char what[64];
 
 	if (argc > 1)
 		seed = strtoull(argv[1], 0, 0);
 	if (argc > 2)
 		rounds = strtoull(argv[2], 0, 0);
-	if (!ei || !pi || !gi || !oi)
+	if (!ei || !pi || !gi || !oi || !zi)
 		return 1;
 
 	rng_state = seed ? seed : 1;
@@ -362,18 +450,20 @@ int main(int argc, char **argv)
 	for (r = 0; r < rounds; r++) {
 		struct kof_obj_ctx ctx;
 		uint64_t n;
-		int want = (int)(rnd() % 4);   /* PE, ELF, gzip, docole */
+		int want = (int)(rnd() % 5);   /* PE, ELF, gzip, docole, zip */
 
 		memset(&ctx, 0, sizeof ctx);
 		n = want == 0 ? gen_pe(obj) : want == 1 ? gen_elf(obj)
-			: want == 2 ? gen_gzip(obj) : gen_docole(obj);
+			: want == 2 ? gen_gzip(obj)
+			: want == 3 ? gen_docole(obj) : gen_zip(obj);
 		{
 			kof_buf buf = kof_buf_make(obj, n);
 
 			snprintf(what, sizeof what, "seed=%llu round=%llu %s",
 				 (unsigned long long)seed, (unsigned long long)r,
 				 want == 0 ? "PE" : want == 1 ? "ELF"
-				 : want == 2 ? "gzip" : "docole");
+				 : want == 2 ? "gzip"
+				 : want == 3 ? "docole" : "zip");
 
 			if (want == 0 && kof_pe_sniff(buf)) {
 				if (kof_pe_parse(buf, pi, &ctx)) {
@@ -399,6 +489,12 @@ int main(int argc, char **argv)
 					pc_check(what, &ctx, n, kof_docole_region_bits,
 						 KOF_DOCOLE_REGION_COUNT, &rep);
 				}
+			} else if (want == 4 && kof_zip_sniff(buf)) {
+				if (kof_zip_parse(buf, zi, &ctx)) {
+					zip_parsed++;
+					pc_check(what, &ctx, n, kof_zip_region_bits,
+						 KOF_ZIP_REGION_COUNT, &rep);
+				}
 			}
 		}
 	}
@@ -407,11 +503,13 @@ int main(int argc, char **argv)
 	free(pi);
 	free(gi);
 	free(oi);
+	free(zi);
 	printf("hostile headers: %llu round(s), parsed ELF %llu PE %llu gzip %llu "
-	       "docole %llu, partition %llu/%llu\n",
+	       "docole %llu zip %llu, partition %llu/%llu\n",
 	       (unsigned long long)rounds, (unsigned long long)elf_parsed,
 	       (unsigned long long)pe_parsed, (unsigned long long)gz_parsed,
 	       (unsigned long long)ole_parsed,
+	       (unsigned long long)zip_parsed,
 	       (unsigned long long)(rep.checked - rep.failed),
 	       (unsigned long long)rep.checked);
 	return rep.failed != 0;

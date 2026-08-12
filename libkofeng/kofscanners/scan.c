@@ -99,7 +99,24 @@ uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *ctx, uint32_t scan_mas
 	if (!ctx->resolve_scan)
 		return 0;
 	n = ctx->resolve_scan(ctx, scan_mask, ext, KOF_SCAN_MAX_EXTENTS);
-	return n > KOF_SCAN_MAX_EXTENTS ? KOF_SCAN_MAX_EXTENTS : n;
+	if (n >= KOF_SCAN_MAX_EXTENTS) {
+		/*
+		 * The region did not fit, so what follows searches part of it.
+		 *
+		 * Said rather than swallowed. A buffer that filled exactly is
+		 * indistinguishable from one that filled and had more to write, and
+		 * the two lead to the same place: a search over some of a region,
+		 * reported as a search over the region. That is the one answer this
+		 * engine must never give quietly, so it is a limit like any other -
+		 * the caller set the size, and the caller can be told it bound.
+		 */
+		struct kof_scanner *sc = kof_scan_of(ctx);
+
+		if (!sc->broken)
+			sc->broken = KOF_BROKEN_LIMIT;
+		n = KOF_SCAN_MAX_EXTENTS;
+	}
+	return n;
 }
 
 /* ---- deriving per-object facts --------------------------------------------- */
@@ -114,7 +131,7 @@ uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *ctx, uint32_t scan_mas
  */
 static uint32_t regions_present(const struct kof_obj_ctx *ctx, uint32_t wanted)
 {
-	struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
+	struct kof_range *ext = kof_scan_of(ctx)->ext;
 	uint32_t present = 0, bit;
 
 	if (ctx->obj_size)
@@ -174,6 +191,21 @@ static int prefilter(const struct kof_module *m, const struct kof_obj_ctx *ctx,
 		 * a module that constrains architecture does not cover it. */
 		if (ctx->arch >= 32 || !(m->arch_mask & (1u << ctx->arch))) {
 			st->by_arch++;
+			return 0;
+		}
+	}
+	/*
+	 * What kind of that format, in the format's own vocabulary.
+	 *
+	 * Safe to test with no idea which format this is, because target_mask was
+	 * tested first: a module constraining subtype named one format's values, and
+	 * this line is only reached for an object of a format that module declared.
+	 * That is what lets KOF_ELF_REL and KOF_PE_DLL share the number 1.
+	 */
+	if (m->subtype_mask) {
+		if (ctx->subtype >= 32 ||
+		    !(m->subtype_mask & (1u << ctx->subtype))) {
+			st->by_subtype++;
 			return 0;
 		}
 	}

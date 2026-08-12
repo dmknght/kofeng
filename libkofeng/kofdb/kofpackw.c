@@ -388,6 +388,7 @@ uint8_t *kof_pack_build(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n
 	len[KOF_SEC_PRE_TARGET] = (uint64_t)b.n_mods * 4;
 	len[KOF_SEC_PRE_SCAN]   = (uint64_t)b.n_mods * 4;
 	len[KOF_SEC_PRE_ARCH]   = (uint64_t)b.n_mods * 4;
+	len[KOF_SEC_PRE_SUBTYPE] = (uint64_t)b.n_mods * 4;
 	len[KOF_SEC_PRE_SIZE]   = (uint64_t)b.n_mods * 8;
 	len[KOF_SEC_MODS]       = (uint64_t)b.n_mods * sizeof(struct kof_pack_mod);
 	len[KOF_SEC_STR_DESC]   = (uint64_t)b.n_str  * sizeof(struct kof_pack_str);
@@ -420,6 +421,8 @@ uint8_t *kof_pack_build(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n
 		((uint32_t *)(img + at[KOF_SEC_PRE_TARGET]))[i] = mods[i].target_mask;
 		((uint32_t *)(img + at[KOF_SEC_PRE_SCAN]))[i]   = mods[i].scan_mask;
 		((uint32_t *)(img + at[KOF_SEC_PRE_ARCH]))[i]   = mods[i].arch_mask;
+		((uint32_t *)(img + at[KOF_SEC_PRE_SUBTYPE]))[i] =
+			mods[i].subtype_mask;
 		((uint64_t *)(img + at[KOF_SEC_PRE_SIZE]))[i]   = mods[i].size_min;
 	}
 	if (len[KOF_SEC_MODS])

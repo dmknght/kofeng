@@ -147,7 +147,14 @@ enum {
  * a silent truncation.
  */
 #define KOF_ZIP_MAX_ENTRIES  2048u
-#define KOF_ZIP_MAX_EXTENTS  1024u   /* runs recorded, across all classes */
+/*
+ * Runs recorded, across all classes.
+ *
+ * Four per entry is the shape: a local header and a central record, each split by
+ * the name sitting inside it. 2048 entries is the cap above, so this is what
+ * describing all of them costs.
+ */
+#define KOF_ZIP_MAX_EXTENTS  8192u
 #define KOF_ZIP_NAME_MAX     256u    /* of a name kept for classification */
 
 /* How far back from the end the end-of-central-directory record is looked for: its

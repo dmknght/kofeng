@@ -59,6 +59,7 @@
  * of the process image, which is what separates KOF_SCAN_ELF_NOLOAD from the rest:
  * .comment, .debug_* and .symtab are all kept in the file without it. */
 #define SHF_ALLOC	0x2
+#define SHF_EXECINSTR	0x4
 
 /* p_flags bits */
 #define PF_X		1
@@ -398,8 +399,23 @@ static void settle_claims(struct kof_elf_info *e, uint64_t obj_size)
 		n++;
 	}
 	for (i = 0; i < e->sec_count && n < cap; i++) {
+		/*
+		 * A section that will be loaded is normally left to the segment that
+		 * loads it - two claims on the same bytes, and the segment is the one
+		 * a loader acts on.
+		 *
+		 * Unless there are no segments. A relocatable object has none: a
+		 * kernel module is ET_REL, its sections are the ONLY description of
+		 * it, and skipping the allocatable ones left .text and .data claimed
+		 * by nothing at all. On diamorphine.ko that put 6472 bytes - every
+		 * byte of the module's actual code - into UNCLAIMED, with CODE and
+		 * DATA empty, so the prefilter ruled out every module targeting ELF
+		 * code before it ran. A Linux rootkit is exactly this file shape.
+		 */
 		if (e->sec[i].type == SHT_NULL || e->sec[i].type == SHT_NOBITS ||
-		    (e->sec[i].flags & SHF_ALLOC) || !e->sec[i].file_size)
+		    !e->sec[i].file_size)
+			continue;
+		if (e->seg_count && (e->sec[i].flags & SHF_ALLOC))
 			continue;
 		c[n].off = e->sec[i].file_off;
 		c[n].len = e->sec[i].file_size;
@@ -474,19 +490,45 @@ static uint32_t elf_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 			   e->shtab_claim_len);
 	}
 
-	if (mask & KOF_SCAN_ELF_CODE)
+	/*
+	 * Code and data come from the segments, and from the sections when there are
+	 * no segments.
+	 *
+	 * Both describe the same file and the segment is normally the better source -
+	 * it is what a loader acts on, and a section name is a string somebody chose.
+	 * But a relocatable object has no segments at all, and then the section flags
+	 * are not a second opinion, they are the only one. SHF_EXECINSTR is the same
+	 * fact PF_X carries, stated by the other table.
+	 */
+	if (mask & KOF_SCAN_ELF_CODE) {
 		for (i = 0; i < e->seg_count; i++)
 			if (e->seg[i].type == PT_LOAD &&
 			    (e->seg[i].perm & KOF_PERM_X))
 				kof_rl_add(&l, ctx->obj_size, e->seg[i].claim_off,
 					   e->seg[i].claim_len);
+		if (!e->seg_count)
+			for (i = 0; i < e->sec_count; i++)
+				if ((e->sec[i].flags & SHF_EXECINSTR) &&
+				    (e->sec[i].flags & SHF_ALLOC))
+					kof_rl_add(&l, ctx->obj_size,
+						   e->sec[i].claim_off,
+						   e->sec[i].claim_len);
+	}
 
-	if (mask & KOF_SCAN_ELF_DATA)
+	if (mask & KOF_SCAN_ELF_DATA) {
 		for (i = 0; i < e->seg_count; i++)
 			if (e->seg[i].type == PT_LOAD &&
 			    !(e->seg[i].perm & KOF_PERM_X))
 				kof_rl_add(&l, ctx->obj_size, e->seg[i].claim_off,
 					   e->seg[i].claim_len);
+		if (!e->seg_count)
+			for (i = 0; i < e->sec_count; i++)
+				if ((e->sec[i].flags & SHF_ALLOC) &&
+				    !(e->sec[i].flags & SHF_EXECINSTR))
+					kof_rl_add(&l, ctx->obj_size,
+						   e->sec[i].claim_off,
+						   e->sec[i].claim_len);
+	}
 
 	if (mask & KOF_SCAN_ELF_NOLOAD)
 		for (i = 0; i < e->sec_count; i++)
@@ -606,6 +648,16 @@ int kof_elf_parse(kof_buf file, struct kof_elf_info *info,
 
 	/* Offsets 16..24 are class independent. */
 	kof_rd_u16(file, 16, be, &info->e_type);
+	/*
+	 * e_type verbatim, as the prefilter's subtype. Here and not beside
+	 * ctx->format above, because that runs before the header has been read.
+	 *
+	 * Clamped to what a 32 bit mask can name; a value above it is one no module
+	 * can have declared, so it matches nothing - the same treatment an
+	 * architecture outside the mask already gets. Two objects in a 7221 file
+	 * collection carry one.
+	 */
+	ctx->subtype = info->e_type < 32u ? (uint8_t)info->e_type : 0xffu;
 	kof_rd_u16(file, 18, be, &info->e_machine);
 	kof_rd_u32(file, 20, be, &info->e_version);
 

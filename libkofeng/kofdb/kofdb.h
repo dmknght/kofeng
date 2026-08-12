@@ -83,6 +83,7 @@ struct kof_module {
 	uint64_t size_min;    /* 0: no minimum. No maximum by design - see
 			       * KOF_TARGET_SIZE_MIN in kofsig.h. */
 	uint32_t arch_mask;   /* 0: any architecture */
+	uint32_t subtype_mask;/* 0: any kind of that format - see ctx->subtype */
 
 	uint32_t name_base, n_names;
 	uint32_t str_base,  n_str;

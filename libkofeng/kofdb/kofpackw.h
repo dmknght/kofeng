@@ -57,6 +57,7 @@ struct kof_pw_mod {
 	uint32_t target_mask;
 	uint32_t scan_mask;
 	uint32_t arch_mask;
+	uint32_t subtype_mask;
 	uint64_t size_min;
 
 	const struct kof_pw_str  *str;

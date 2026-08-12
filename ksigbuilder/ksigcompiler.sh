@@ -251,6 +251,73 @@ if [ "$nfmt" -eq 1 ] && [ "$ntargets" -gt 1 ]; then
 fi
 echo "   target=$targets (mask $target_mask)"
 
+# ---------------------------------------------------------- the subtype axis
+#
+# Which kinds of the declared format, in that format's own vocabulary. Absent
+# means unconstrained, which is what every module written before this axis existed
+# gets - so adding it changed no existing signature.
+#
+# The values of two formats deliberately collide: KOF_ELF_REL and KOF_PE_DLL are
+# both 1, because the prefilter tests the format first and can only reach the
+# subtype test for a format the module already declared. That is safe and it is
+# also exactly the kind of thing that stops being safe the moment somebody names
+# one format's values while targeting another - so that is refused here, where it
+# is a build error with a filename rather than a signature that quietly matches
+# the wrong things.
+subtype_mask=0        # 0 == any kind of the declared format
+
+nsub=$(grep -c 'KOF_TARGET_SUBTYPE(' "$src" || true)
+if [ "$nsub" -gt 1 ]; then
+	echo "FAIL: $nsub KOF_TARGET_SUBTYPE declarations; use one with '|'" >&2
+	exit 1
+fi
+if [ "$nsub" -eq 1 ]; then
+	subnames=$(sed -n 's/.*KOF_TARGET_SUBTYPE(\([^)]*\)).*/\1/p' "$src")
+	saw_elf=0
+	saw_pe=0
+	for pair in NONE:0 REL:1 EXEC:2 DYN:3 CORE:4; do
+		nm=${pair%:*}
+		bit=${pair#*:}
+		case "$subnames" in
+		*KOF_ELF_$nm*)
+			subtype_mask=$((subtype_mask | (1 << bit)))
+			saw_elf=1
+			;;
+		esac
+	done
+	for pair in EXE:0 DLL:1 SYS:2; do
+		nm=${pair%:*}
+		bit=${pair#*:}
+		case "$subnames" in
+		*KOF_PE_$nm*)
+			subtype_mask=$((subtype_mask | (1 << bit)))
+			saw_pe=1
+			;;
+		esac
+	done
+	if [ "$subtype_mask" -eq 0 ]; then
+		echo "FAIL: KOF_TARGET_SUBTYPE($subnames) names no known subtype" >&2
+		exit 1
+	fi
+	if [ "$saw_elf" -eq 1 ] && [ "$saw_pe" -eq 1 ]; then
+		echo "FAIL: KOF_TARGET_SUBTYPE mixes ELF and PE subtypes" >&2
+		echo "      their values collide on purpose and mean different" >&2
+		echo "      things; a module applies to one format's kinds" >&2
+		exit 1
+	fi
+	# 2 is the ELF target bit, 4 the PE one - the same numbers the format loop
+	# above assigns.
+	if [ "$saw_elf" -eq 1 ] && [ $((target_mask & 2)) -eq 0 ]; then
+		echo "FAIL: names KOF_ELF_* subtypes but does not target ELF" >&2
+		exit 1
+	fi
+	if [ "$saw_pe" -eq 1 ] && [ $((target_mask & 4)) -eq 0 ]; then
+		echo "FAIL: names KOF_PE_* subtypes but does not target PE" >&2
+		exit 1
+	fi
+	echo "   require subtype=$subnames (mask $subtype_mask)"
+fi
+
 # Patterns are compiled before the C is, so a malformed pattern fails with a file
 # and line rather than becoming an array that matches nothing. The generated
 # header is injected with -include so the source needs no generated include of
@@ -436,6 +503,7 @@ cp "$raw" "$blob"
 	printf 'scan_mask=%s\n' "$scan_mask"
 	printf 'size_min=%s\n'  "$size_min"
 	printf 'arch_mask=%s\n' "$arch_mask"
+	printf 'subtype_mask=%s\n' "$subtype_mask"
 	printf 'nstr=%s\n'      "$nstr"
 	printf 'blob_len=%s\n'  "$(stat -c%s "$blob")"
 	# Derived from the exported entry point, never authored - see above.

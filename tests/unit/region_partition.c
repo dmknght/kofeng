@@ -41,6 +41,7 @@
 #include "../../libkofeng/kofparsers/binaries/pe_parse.h"
 #include "../../libkofeng/kofparsers/containers/gzip_parse.h"
 #include "../../libkofeng/kofparsers/containers/docole_parse.h"
+#include "../../libkofeng/kofparsers/containers/zip_parse.h"
 
 struct tally {
 	uint64_t objects, failures;
@@ -65,8 +66,11 @@ static int cmp_range(const void *a, const void *b)
 static int check(const char *path, kof_buf buf, struct kof_obj_ctx *ctx,
 		 const uint32_t *regions, uint32_t n_regions, const char *fmt)
 {
-	struct kof_range all[KOF_SCAN_MAX_EXTENTS * 8];
-	struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
+	/* Static: KOF_SCAN_MAX_EXTENTS is sized for an archive with thousands of
+	 * runs, and eight times that on the stack is megabytes. One test, one
+	 * thread, so a single copy is all that is ever needed. */
+	static struct kof_range all[KOF_SCAN_MAX_EXTENTS * 8];
+	static struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
 	uint32_t n_all = 0, i, k;
 	uint64_t covered = 0, cursor = 0;
 	int bad = 0;
@@ -118,13 +122,14 @@ static int check(const char *path, kof_buf buf, struct kof_obj_ctx *ctx,
 }
 
 static void one_file(const char *path, struct tally *elf, struct tally *pe,
-		     struct tally *gz, struct tally *ole)
+		     struct tally *gz, struct tally *ole, struct tally *zip)
 {
 	struct kof_obj_ctx ctx;
 	struct kof_elf_info *ei;
 	struct kof_pe_info *pi;
 	struct kof_gzip_info *gi;
 	struct kof_docole_info *oi;
+	struct kof_zip_info *zi;
 	struct stat st;
 	void *map;
 	int fd;
@@ -181,13 +186,22 @@ static void one_file(const char *path, struct tally *elf, struct tally *pe,
 					KOF_DOCOLE_REGION_COUNT, "docole");
 			}
 			free(oi);
+		} else if (kof_zip_sniff(buf)) {
+			zi = malloc(sizeof *zi);
+			if (zi && kof_zip_parse(buf, zi, &ctx)) {
+				zip->objects++;
+				zip->failures += (uint64_t)check(path, buf, &ctx,
+					kof_zip_region_bits,
+					KOF_ZIP_REGION_COUNT, "zip");
+			}
+			free(zi);
 		}
 	}
 	munmap(map, (size_t)st.st_size);
 }
 
 static void walk(const char *dir, struct tally *elf, struct tally *pe,
-		 struct tally *gz, struct tally *ole)
+		 struct tally *gz, struct tally *ole, struct tally *zip)
 {
 	DIR *d = opendir(dir);
 	struct dirent *de;
@@ -201,7 +215,7 @@ static void walk(const char *dir, struct tally *elf, struct tally *pe,
 		if ((size_t)snprintf(path, sizeof path, "%s/%s", dir, de->d_name)
 		    >= sizeof path)
 			continue;
-		one_file(path, elf, pe, gz, ole);
+		one_file(path, elf, pe, gz, ole, zip);
 	}
 	closedir(d);
 }
@@ -224,18 +238,18 @@ int main(int argc, char **argv)
 		"/usr/share/man/man1", "/usr/share/i18n/charmaps"
 	};
 	struct tally elf = { 0, 0 }, pe = { 0, 0 }, gz = { 0, 0 },
-		     ole = { 0, 0 };
+		     ole = { 0, 0 }, zip = { 0, 0 };
 	int i;
 
 	if (argc > 1)
 		for (i = 1; i < argc; i++)
-			walk(argv[i], &elf, &pe, &gz, &ole);
+			walk(argv[i], &elf, &pe, &gz, &ole, &zip);
 	else
 		for (i = 0; i < (int)(sizeof defaults / sizeof defaults[0]); i++)
-			walk(defaults[i], &elf, &pe, &gz, &ole);
+			walk(defaults[i], &elf, &pe, &gz, &ole, &zip);
 
 	printf("partition: ELF %llu/%llu  PE %llu/%llu  gzip %llu/%llu  "
-	       "docole %llu/%llu",
+	       "docole %llu/%llu  zip %llu/%llu",
 	       (unsigned long long)(elf.objects - elf.failures),
 	       (unsigned long long)elf.objects,
 	       (unsigned long long)(pe.objects - pe.failures),
@@ -243,13 +257,15 @@ int main(int argc, char **argv)
 	       (unsigned long long)(gz.objects - gz.failures),
 	       (unsigned long long)gz.objects,
 	       (unsigned long long)(ole.objects - ole.failures),
-	       (unsigned long long)ole.objects);
+	       (unsigned long long)ole.objects,
+	       (unsigned long long)(zip.objects - zip.failures),
+	       (unsigned long long)zip.objects);
 	if (elf.objects == 0 && pe.objects == 0 && gz.objects == 0 &&
-	    ole.objects == 0) {
+	    ole.objects == 0 && zip.objects == 0) {
 		printf("  (no objects found - nothing tested)\n");
 		return 0;
 	}
 	printf("\n");
-	return (elf.failures || pe.failures || gz.failures || ole.failures)
-	       ? 1 : 0;
+	return (elf.failures || pe.failures || gz.failures || ole.failures ||
+		zip.failures) ? 1 : 0;
 }

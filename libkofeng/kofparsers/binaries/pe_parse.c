@@ -575,6 +575,20 @@ int kof_pe_parse(kof_buf file, struct kof_pe_info *info, struct kof_obj_ctx *ctx
 	kof_rd_u16(file, opt + 68, 0, &info->subsystem);
 	kof_rd_u16(file, opt + 70, 0, &info->dll_characteristics);
 
+	/*
+	 * What kind of image this is, for the prefilter.
+	 *
+	 * Here rather than beside ctx->format above, because the subsystem is read
+	 * from the optional header and that has only just happened - setting it
+	 * earlier would file every driver as whatever a zeroed field says.
+	 *
+	 * Subsystem before the DLL characteristic: a driver carries both, so testing
+	 * the flag first would make every driver read as a library.
+	 */
+	ctx->subtype = info->subsystem == KOF_PE_SUBSYS_NATIVE ? KOF_PE_SYS :
+		       (info->characteristics & KOF_PE_CHAR_DLL) ? KOF_PE_DLL :
+		       KOF_PE_EXE;
+
 	if (kof_rd_u32(file, opt + (is64 ? 108 : 92), 0, &tmp32))
 		info->n_dirs = tmp32;
 	if (info->n_dirs != KOF_PE_DIR_COUNT)

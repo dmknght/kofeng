@@ -171,6 +171,32 @@ struct kof_elf_seg {
 	uint64_t claim_off, claim_len;
 };
 
+/*
+ * e_type, as the prefilter's subtype axis.
+ *
+ * These ARE the values in the header - ET_NONE through ET_CORE - and not an
+ * interpretation of them. That distinction is the point of naming them this way: a
+ * shared library and a position independent executable are both ET_DYN and nothing
+ * in the header separates them, so an enum offering LIBRARY and EXECUTABLE would be
+ * offering a guess. Measured over 709 ET_DYN binaries, splitting them by whether a
+ * PT_INTERP is present gives 553 and 156 - a plausible split, and still a guess.
+ *
+ * A module wanting a distinction the header does not make reads the view and says
+ * so in its own code, where it is visible as reasoning rather than hidden in a
+ * constant. A kernel module is the case that matters and it needs nothing more
+ * from this axis: a .ko is ET_REL where an ordinary binary is ET_EXEC or ET_DYN,
+ * so REL alone takes 7221 objects down to 60. Whoever wants the 33 of those that
+ * are really modules tests for a section name in their own module, after the
+ * prefilter has already done the cheap part.
+ */
+enum kof_elf_type {
+	KOF_ELF_NONE = 0,
+	KOF_ELF_REL  = 1,
+	KOF_ELF_EXEC = 2,
+	KOF_ELF_DYN  = 3,
+	KOF_ELF_CORE = 4
+};
+
 struct kof_elf_sec {
 	uint64_t file_off, file_size;
 	uint64_t mem_addr;
@@ -221,6 +247,7 @@ struct kof_elf_info {
 	uint16_t e_type;
 	uint16_t e_machine;
 	uint32_t e_version;
+
 
 	uint64_t entry_addr;   /* virtual address, as declared */
 	uint32_t entry_perm;   /* KOF_PERM_* of the containing segment, 0 if none */
