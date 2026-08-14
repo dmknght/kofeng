@@ -127,12 +127,18 @@ static uint32_t name_hash(kof_buf strtab, uint64_t off, int *out_truncated)
 	uint64_t i;
 
 	*out_truncated = 0;
-	for (i = 0; ; i++) {
+	for (i = 0; i < KOF_ELF_SECNAME_SCAN; i++) {
 		uint8_t c;
 		if (!kof_rd_u8(strtab, off + i, &c) || c == 0)
 			break;
 		h = kof_hash_step(h, c);
 	}
+	/*
+	 * Truncated whether the name outran the stored copy or the scan bound: both
+	 * mean the printed name is shorter than the real one, and the second is also
+	 * how a hostile string table is stopped from being scanned end to end. See
+	 * KOF_ELF_SECNAME_SCAN.
+	 */
 	if (i >= KOF_ELF_SECNAME_MAX)
 		*out_truncated = 1;
 	return h;

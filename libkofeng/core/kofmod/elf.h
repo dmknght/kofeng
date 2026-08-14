@@ -121,6 +121,25 @@ enum {
 #define KOF_ELF_SECNAME_MAX 32
 
 /*
+ * How far name_hash will read before it stops, and why there has to be a stop.
+ *
+ * The hash covers the whole name so that two names sharing the first 32 bytes
+ * still differ - but "the whole name" is a run of the string table that ends at a
+ * NUL, and the string table's size is a field the file chose. A section whose name
+ * offset points into a megabytes-long table with no NUL makes the hash scan the
+ * whole table, once per section: measured, a 200MB file with 128 such sections
+ * took 22 seconds and 26 billion iterations to parse. That is a denial of service
+ * out of one malformed header, and it grows with the file.
+ *
+ * So the scan stops here, and a name that reaches it is marked truncated - the same
+ * anomaly a name longer than the stored copy already raises. The bound is far above
+ * anything real: the longest section name measured across /usr/bin and /usr/lib was
+ * 25 bytes, and this is ten times that. A name between 256 bytes and the size of a
+ * hostile string table is not a name.
+ */
+#define KOF_ELF_SECNAME_SCAN 256u
+
+/*
  * Anomalies.
  *
  * Facts, not failures. The parser never refuses to describe an object: it
