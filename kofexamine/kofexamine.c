@@ -393,6 +393,29 @@ static uint64_t anom_docole(const void *v)
 }
 
 /*
+ * An entry name, as it is safe to put on a line.
+ *
+ * The FULL name, path and all, unlike the label the scanner puts in a report - a
+ * report answers "which entry", and this answers "what does this archive hold",
+ * and the second one wants word/vbaProject.bin rather than vbaProject.bin.
+ *
+ * The filtering is the same either way and is here rather than at each printer
+ * because it was written twice, once for zip and once for tar, identically. Two
+ * copies of the rule that keeps a terminal escape out of the output is one copy too
+ * many: the name comes from the archive, and an ESC in it rewrites the line.
+ */
+static void print_entry_name(kof_buf buf, uint64_t off, uint32_t len, uint32_t cap)
+{
+	uint32_t k;
+
+	for (k = 0; k < len && k < cap && kof_in_range(buf, off + k, 1); k++) {
+		uint8_t c = buf.p[off + k];
+
+		putchar(c >= 0x20 && c < 0x7f ? (int)c : '.');
+	}
+}
+
+/*
  * What an archive states about itself, before a byte of any entry is decoded.
  *
  * The entry table is the display, not a summary of it: a zip's evidence IS its
@@ -447,7 +470,6 @@ static void print_zip(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 
 	for (i = 0; i < z->n_entries; i++) {
 		const struct kof_zip_entry *e = &z->entry[i];
-		uint32_t k;
 
 		if (shown >= ZIP_SHOW && !e->suspicious)
 			continue;
@@ -459,12 +481,7 @@ static void print_zip(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 		       (e->method == KOF_ZIP_M_STORE &&
 			!(e->suspicious & KOF_ZIP_ENT_ENCRYPTED))
 		       ? "STORED" : "PACKED");
-		for (k = 0; k < e->name_len && k < 60u &&
-		     kof_in_range(buf, e->name_off + k, 1); k++) {
-			uint8_t c = buf.p[e->name_off + k];
-
-			putchar(c >= 0x20 && c < 0x7f ? (int)c : '.');
-		}
+		print_entry_name(buf, e->name_off, e->name_len, 60u);
 		if (e->suspicious & KOF_ZIP_ENT_TRAVERSAL)
 			printf("   <- ESCAPES THE EXTRACT ROOT");
 		if (e->suspicious & KOF_ZIP_ENT_ENCRYPTED)
@@ -531,7 +548,6 @@ static void print_tar(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 
 	for (i = 0; i < t->n_entries; i++) {
 		const struct kof_tar_entry *e = &t->entry[i];
-		uint32_t k;
 
 		if (shown >= 12u && !e->suspicious)
 			continue;
@@ -540,12 +556,7 @@ static void print_tar(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 		       e->typeflag ? (char)e->typeflag : '0',
 		       (unsigned long long)e->size,
 		       (unsigned long long)e->data_off);
-		for (k = 0; k < e->name_len && k < 60u &&
-		     kof_in_range(buf, e->name_off + k, 1); k++) {
-			uint8_t c = buf.p[e->name_off + k];
-
-			putchar(c >= 0x20 && c < 0x7f ? (int)c : '.');
-		}
+		print_entry_name(buf, e->name_off, e->name_len, 60u);
 		if (e->suspicious & KOF_TAR_ENT_TRAVERSAL)
 			printf("   <- ESCAPES THE EXTRACT ROOT");
 		if (e->suspicious & KOF_TAR_ENT_PAST_EOF)
@@ -656,22 +667,6 @@ static const char *base_of(const char *path)
 }
 
 /*
- * A name may be used in a directory name if it cannot be mistaken for something
- * else on a command line or in a terminal.
- *
- * Not a security boundary - a basename cannot contain a slash, so there is no
- * traversal to prevent here. It is about the name being usable afterwards: a
- * directory whose name holds a newline, a quote or a control character is one
- * that every subsequent command has to quote correctly, and one that prints as
- * something other than what it is.
- */
-static int name_char_ok(unsigned char c)
-{
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-	       (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_';
-}
-
-/*
  * The directory one file's regions are written into.
  *
  * _<name>_dump when the name allows it. When it does not - too long for a
@@ -687,6 +682,14 @@ static int name_char_ok(unsigned char c)
 /* Room for a leading path plus a dump directory name. Refused rather than
  * truncated if an input needs more. */
 #define PATH_ROOM      (4096 + DUMP_NAME_MAX + 1)
+
+/* Bytes a dump name may carry as they are: anything else is replaced, so a name
+ * out of a file cannot become a separator or a parent reference. */
+static int name_char_ok(unsigned char c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+	       (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_';
+}
 
 static void dump_dir_name(const char *base, char *out, size_t cap)
 {
@@ -1109,34 +1112,12 @@ static int write_whole(const char *path, const void *p, uint64_t n)
 	return 1;
 }
 
-/* "//0//1" becomes "0_1": a name that is a path component rather than a path. */
-static void kid_tag(const char *tail, char *out, size_t cap)
-{
-	size_t at = 0;
-
-	while (*tail && at + 1 < cap) {
-		if (*tail == '/') {
-			if (at && out[at - 1] != '_')
-				out[at++] = '_';
-			tail++;
-			continue;
-		}
-		out[at++] = name_char_ok((unsigned char)*tail) ? *tail : '_';
-		tail++;
-	}
-	while (at && out[at - 1] == '_')
-		at--;
-	out[at] = 0;
-	if (!out[0])
-		snprintf(out, cap, "0");
-}
-
 static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 		       const struct kof_result *res, void *user)
 {
 	struct unp_run *u = user;
 	const char *tail = strstr(name, "//");
-	char tag[64], path[1024], sub[1152];
+	char tag[128], path[1024], sub[1152];
 
 	/* The first object is the file itself, which the rest of this tool has
 	 * already described in far more detail. */
@@ -1146,7 +1127,29 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	u->produced++;
 	if (res->broken)
 		u->partial++;
-	kid_tag(tail, tag, sizeof tag);
+	/*
+	 * <number>.<name>, or <number> alone.
+	 *
+	 * The number is what makes it unique and is the whole identity; the name is
+	 * there so a directory listing is readable, and it is the label the engine
+	 * already reduced to a bare basename of printable ASCII - so nothing here has
+	 * to decide what to do about a separator or a "..", because neither can have
+	 * survived. An entry called "../" arrives with no label at all and gets the
+	 * number by itself.
+	 *
+	 * snprintf into a buffer sized from KOF_SRC_LABEL_MAX is what bounds it. A
+	 * name is attacker chosen and archives carry long ones; the label is capped
+	 * when it is made, and this is capped again where it becomes a path, because
+	 * the two caps protect different things and only one of them is here.
+	 */
+	{
+		const char *lab = strchr(tail, ':');
+
+		if (lab)
+			snprintf(tag, sizeof tag, "%u.%s", u->produced, lab + 1);
+		else
+			snprintf(tag, sizeof tag, "%u", u->produced);
+	}
 	printf("  recovered %-18s %10llu bytes%s%s\n", tag,
 	       (unsigned long long)len, res->broken ? "   " : "",
 	       res->broken ? kof_broken_name(res->broken) : "");
