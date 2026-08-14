@@ -91,6 +91,7 @@
 #include <kofmod/zip.h>
 #include <kofmod/tar.h>
 #include <kofmod/sevenzip.h>
+#include <kofmod/rar.h>
 
 #include "../libkofeng/kofparsers/binaries/elf_parse.h"
 #include "../libkofeng/kofparsers/binaries/pe_parse.h"
@@ -99,6 +100,7 @@
 #include "../libkofeng/kofparsers/containers/zip_parse.h"
 #include "../libkofeng/kofparsers/containers/tar_parse.h"
 #include "../libkofeng/kofparsers/containers/sevenzip_parse.h"
+#include "../libkofeng/kofparsers/containers/rar_parse.h"
 
 /*
  * What one format offers a tool: how to recognise it, how to parse it, how big
@@ -160,6 +162,11 @@ static int zip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 static int tar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
 	return kof_tar_parse(b, (struct kof_tar_info *)v, c);
+}
+
+static int rar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_rar_parse(b, (struct kof_rar_info *)v, c);
 }
 
 static int sevenzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
@@ -597,6 +604,12 @@ static void print_7z(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 	if (z->hdr_coder)
 		printf("   coder=0x%06x", z->hdr_coder);
 	printf("\n");
+	if (z->hdr_pack_size)
+		printf("  coded at  %llu, %llu bytes -> %llu   lc=%u lp=%u pb=%u\n",
+		       (unsigned long long)z->hdr_pack_off,
+		       (unsigned long long)z->hdr_pack_size,
+		       (unsigned long long)z->hdr_unpack_size,
+		       z->hdr_lc, z->hdr_lp, z->hdr_pb);
 	if (z->header_kind == KOF_7Z_HDR_ENCRYPTED)
 		printf("  note      the file list itself is ciphertext: nothing in "
 		       "this archive is readable\n");
@@ -608,6 +621,73 @@ static void print_7z(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 static uint64_t anom_7z(const void *v)
 {
 	return ((const struct kof_7z_info *)v)->anomalies;
+}
+
+/*
+ * What a RAR states about itself, which for RAR3 is nearly everything except the
+ * content: every name, size and flag is in the clear.
+ */
+static void print_rar(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
+{
+	const struct kof_rar_info *r = v;
+	uint32_t i, shown = 0;
+
+	(void)ctx;
+
+	printf("  version   RAR%u   %u entries", r->rar_version, r->n_entries);
+	if (r->n_encrypted)
+		printf(", %u ENCRYPTED", r->n_encrypted);
+	if (r->n_stored)
+		printf(", %u stored", r->n_stored);
+	printf("\n");
+	printf("  declared  packed=%llu unpacked=%llu",
+	       (unsigned long long)r->total_csize,
+	       (unsigned long long)r->total_usize);
+	if (r->total_csize)
+		printf("   ratio %.1fx",
+		       (double)r->total_usize / (double)r->total_csize);
+	printf("\n");
+	if (r->anomalies & KOF_RAR_ANOM_UNSUPPORTED)
+		printf("  note      RAR5 is recognised but not walked by this "
+		       "build: no entries are listed\n");
+	if (r->anomalies & KOF_RAR_ANOM_SOLID)
+		printf("  note      solid: entries share one compression window, so "
+		       "none can be decoded alone\n");
+
+	for (i = 0; i < r->n_entries; i++) {
+		const struct kof_rar_entry *e = &r->entry[i];
+
+		if (shown >= ZIP_SHOW && !e->suspicious)
+			continue;
+		shown++;
+		printf("    [%3u] m=%02x %9llu -> %-9llu @%-9llu %-6s ", i,
+		       e->method, (unsigned long long)e->csize,
+		       (unsigned long long)e->usize,
+		       (unsigned long long)e->data_off,
+		       !e->data_off ? "-" :
+		       (e->method == KOF_RAR_M_STORE &&
+			!(e->suspicious & KOF_RAR_ENT_ENCRYPTED))
+		       ? "STORED" : "PACKED");
+		print_entry_name(buf, e->name_off, e->name_len, 60u);
+		if (e->suspicious & KOF_RAR_ENT_TRAVERSAL)
+			printf("   <- ESCAPES THE EXTRACT ROOT");
+		if (e->suspicious & KOF_RAR_ENT_ENCRYPTED)
+			printf("   <- encrypted");
+		if (e->suspicious & KOF_RAR_ENT_PAST_EOF)
+			printf("   <- data runs past the end");
+		if (e->suspicious & KOF_RAR_ENT_RATIO)
+			printf("   <- declared expansion is absurd");
+		if (e->suspicious & KOF_RAR_ENT_SPLIT)
+			printf("   <- split across volumes");
+		printf("\n");
+	}
+	if (r->n_entries > shown)
+		printf("    ... %u more\n", r->n_entries - shown);
+}
+
+static uint64_t anom_rar(const void *v)
+{
+	return ((const struct kof_rar_info *)v)->anomalies;
 }
 
 static const struct fmt formats[] = {
@@ -632,7 +712,10 @@ static const struct fmt formats[] = {
 	  kof_tar_region_name, kof_tar_anomaly_name, print_tar, anom_tar },
 	{ (uint32_t)sizeof(struct kof_7z_info), kof_7z_sniff, sevenzip_parse_thunk,
 	  kof_7z_region_bits, KOF_7Z_REGION_COUNT,
-	  kof_7z_region_name, kof_7z_anomaly_name, print_7z, anom_7z }
+	  kof_7z_region_name, kof_7z_anomaly_name, print_7z, anom_7z },
+	{ (uint32_t)sizeof(struct kof_rar_info), kof_rar_sniff, rar_parse_thunk,
+	  kof_rar_region_bits, KOF_RAR_REGION_COUNT,
+	  kof_rar_region_name, kof_rar_anomaly_name, print_rar, anom_rar }
 };
 
 /*

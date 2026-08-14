@@ -75,6 +75,7 @@
 #include <kofmod/zip.h>      /* and the zip ones, shared by ZIP and DOCZIP */
 #include <kofmod/tar.h>
 #include <kofmod/sevenzip.h>
+#include <kofmod/rar.h>
 
 #include "../libkofeng/kofdb/kofpackw.h"
 #include "../libkofeng/kofdb/kofpack.h"
@@ -227,6 +228,12 @@ static const struct rgn_name rgn_names[] = {
 	RGN(KOF_SCAN_7Z_HEADERS),
 	RGN(KOF_SCAN_7Z_PACKED),
 	RGN(KOF_SCAN_7Z_UNCLAIMED),
+
+	RGN(KOF_SCAN_RAR_HEADERS),
+	RGN(KOF_SCAN_RAR_NAMES),
+	RGN(KOF_SCAN_RAR_STORED),
+	RGN(KOF_SCAN_RAR_PACKED),
+	RGN(KOF_SCAN_RAR_UNCLAIMED),
 
 	{ NULL, 0 }
 };

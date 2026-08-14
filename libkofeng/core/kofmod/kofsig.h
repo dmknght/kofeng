@@ -121,9 +121,21 @@ enum kof_format {
 	 */
 	KOF_FMT_7Z      = 11,
 
+	/*
+	 * The largest container in this collection by bytes, and two formats behind
+	 * one magic.
+	 *
+	 * RAR keeps its file list in the clear the way a zip does - so names, sizes,
+	 * ratios and the encryption flag all cost nothing - but compresses content
+	 * with an algorithm this engine does not implement. RAR3 and RAR5 share the
+	 * first six bytes and nothing else; which one an object is sits in
+	 * ctx->subtype. See rar.h.
+	 */
+	KOF_FMT_RAR     = 12,
+
 	/* One past the last, so a host can size a per-format table. Not a format:
 	 * nothing is ever this. */
-	KOF_FMT_COUNT   = 12
+	KOF_FMT_COUNT   = 13
 };
 
 /*
@@ -177,6 +189,7 @@ static inline const char *kof_format_name(uint8_t fmt)
 	case KOF_FMT_DOCZIP: return "DocZip";
 	case KOF_FMT_TAR:    return "Tar";
 	case KOF_FMT_7Z:     return "7z";
+	case KOF_FMT_RAR:    return "RAR";
 	default:             return "Unknown";
 	}
 }

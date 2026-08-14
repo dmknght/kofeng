@@ -175,28 +175,28 @@ case "$targets" in
 	ntargets=$fmt_count
 	;;
 esac
-[ "$target_mask" -eq 0 ] && for t in UNKNOWN ELF PE MACHO SCRIPT TEXT GZIP DOCOLE ZIP DOCZIP TAR 7Z; do
-	case "$targets" in
-	*KOF_FMT_$t*)
-		case $t in
-		UNKNOWN) bit=1  ;;
-		ELF)     bit=2  ;;
-		PE)      bit=4  ;;
-		MACHO)   bit=8  ;;
-		SCRIPT)  bit=16 ;;
-		TEXT)    bit=32 ;;
-		GZIP)    bit=64 ;;
-		DOCOLE)  bit=128 ;;
-		ZIP)     bit=256 ;;
-		DOCZIP)  bit=512 ;;
-		TAR)     bit=1024 ;;
-		7Z)      bit=2048 ;;
+# Every other target is one bit, and WHICH bit comes from the enum rather than from
+# a copy of it kept here.
+#
+# There was a copy here, a list of twelve names each with its bit written out as a
+# number, and it was the same shape of mistake as the 127 above: a format added to
+# the header and not to this list compiles to a mask of zero and the build stops -
+# or worse, is added with the wrong number and every module targeting it is filtered
+# against something else. Reading the header is what makes those two impossible.
+if [ "$target_mask" -eq 0 ]; then
+	for def in $(sed -n 's/^[\t ]*KOF_FMT_\([A-Z0-9_]*\) *= *\([0-9]*\).*/\1:\2/p' \
+		"$(dirname "$0")/../libkofeng/core/kofmod/kofsig.h"); do
+		t=${def%%:*}
+		n=${def#*:}
+		[ "$t" = COUNT ] && continue
+		case "$targets" in
+		*KOF_FMT_$t*)
+			target_mask=$((target_mask | (1 << n)))
+			ntargets=$((ntargets + 1))
+			;;
 		esac
-		target_mask=$((target_mask | bit))
-		ntargets=$((ntargets + 1))
-		;;
-	esac
-done
+	done
+fi
 if [ "$target_mask" -eq 0 ]; then
 	echo "FAIL: KOF_TARGET_FORMAT($targets) names no known format" >&2
 	exit 1

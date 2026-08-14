@@ -36,6 +36,7 @@
 
 #include "sevenzip_parse.h"
 #include "../runlist.h"
+#include "../../kofdecomp/lzma.h"
 
 #include <string.h>
 
@@ -85,35 +86,45 @@ static uint64_t sz_num(kof_buf f, uint64_t *at, int *ok)
 }
 
 /*
- * The coder the header was put through, or zero if it could not be established.
+ * Everything the coded header states about itself, in the clear.
  *
- * Walks PackInfo (which sizes the coded header) and then the first folder's first
- * coder. Bounded by a step count as well as by the object: the sizes inside decide
- * how many times the loop reads, and a file can name a great many of them.
+ * A 7z opens its coded header with a PackInfo and an UnPackInfo describing how that
+ * header was stored, and those two cannot themselves be coded - they are what tells
+ * a reader how to decode. So this walk reads: where the coded bytes are, how many
+ * there are, what coder made them, its properties, and how long the result will be.
+ *
+ * That is exactly the set a decoder needs, which is why it is gathered here rather
+ * than in the module: the walk is fiddly and format specific, and a module that had
+ * to do it would be a second implementation of a variable length number decoder
+ * inside a blob with no writable data.
+ *
+ * Every step is bounded against the object and against a step count, because this is
+ * a structure read out of an untrusted file and the numbers in it decide how far the
+ * cursor moves.
  */
-static uint32_t hdr_coder(kof_buf f, uint64_t at, uint64_t end)
+static void hdr_probe(kof_buf f, uint64_t at, uint64_t end, struct kof_7z_info *z)
 {
-	uint64_t n_pack = 0;
-	uint32_t steps = 0;
+	uint64_t n_pack = 0, pack_pos = 0, pack_size = 0;
+	uint32_t steps = 0, coder = 0;
 	uint8_t id = 0, flags = 0;
 	int ok;
 
 	if (!kof_rd_u8(f, at, &id))
-		return 0;
+		return;
 	at++;
 
 	if (id == KOF_7Z_ID_PACKINFO) {
-		sz_num(f, &at, &ok);                  /* packPos */
+		pack_pos = sz_num(f, &at, &ok);
 		if (!ok)
-			return 0;
+			return;
 		n_pack = sz_num(f, &at, &ok);
-		if (!ok || n_pack > 4096u)
-			return 0;
+		if (!ok || n_pack == 0 || n_pack > 4096u)
+			return;
 		for (;;) {
 			if (++steps > HDR_PROBE_STEPS || at >= end)
-				return 0;
+				return;
 			if (!kof_rd_u8(f, at, &id))
-				return 0;
+				return;
 			at++;
 			if (id == KOF_7Z_ID_END)
 				break;
@@ -121,50 +132,104 @@ static uint32_t hdr_coder(kof_buf f, uint64_t at, uint64_t end)
 				uint64_t k;
 
 				for (k = 0; k < n_pack; k++) {
-					sz_num(f, &at, &ok);
+					uint64_t v = sz_num(f, &at, &ok);
+
 					if (!ok)
-						return 0;
+						return;
+					if (k == 0)
+						pack_size = v;
 				}
 			}
-			/* Anything else here is a property this does not need; its
-			 * body is skipped by the loop's own bound rather than by
-			 * trusting a length nobody checked. */
 		}
 		if (!kof_rd_u8(f, at, &id))
-			return 0;
+			return;
 		at++;
 	}
 
 	if (id != KOF_7Z_ID_UNPACK)
-		return 0;
+		return;
 	if (!kof_rd_u8(f, at, &id) || id != KOF_7Z_ID_FOLDER)
-		return 0;
+		return;
 	at++;
 
 	sz_num(f, &at, &ok);                          /* numFolders */
 	if (!ok)
-		return 0;
+		return;
 	at++;                                         /* external */
 	sz_num(f, &at, &ok);                          /* numCoders */
 	if (!ok)
-		return 0;
+		return;
 	if (!kof_rd_u8(f, at, &flags))
-		return 0;
+		return;
 	at++;
 
 	{
-		uint32_t len = flags & 0x0fu, i, v = 0;
+		uint32_t len = flags & 0x0fu, i;
 		uint8_t c;
 
 		if (len == 0 || len > 4u)
-			return 0;
+			return;
 		for (i = 0; i < len; i++) {
 			if (!kof_rd_u8(f, at + i, &c))
-				return 0;
-			v = (v << 8) | c;
+				return;
+			coder = (coder << 8) | c;
 		}
-		return v;
+		at += len;
 	}
+	z->hdr_coder = coder;
+
+	/*
+	 * The coder's properties. For LZMA that is one packed byte holding lc, lp and
+	 * pb, then a dictionary size this engine does not need - its decoder sizes its
+	 * own window from the output buffer.
+	 */
+	if (flags & 0x20u) {
+		uint64_t plen = sz_num(f, &at, &ok);
+		uint8_t d;
+
+		if (!ok)
+			return;
+		if (coder == KOF_7Z_CODER_LZMA && plen >= 1u &&
+		    kof_rd_u8(f, at, &d)) {
+			z->hdr_lc = (uint8_t)(d % 9u);
+			z->hdr_lp = (uint8_t)((d / 9u) % 5u);
+			z->hdr_pb = (uint8_t)(d / 45u);
+			if (z->hdr_lc > KOF_LZMA_MAX_LC ||
+			    z->hdr_lp > KOF_LZMA_MAX_LP ||
+			    z->hdr_pb > KOF_LZMA_MAX_PB) {
+				z->anomalies |= KOF_7Z_ANOM_UNKNOWN_CODER;
+				return;
+			}
+		}
+		at += plen;
+	}
+
+	/* kCodersUnPackSize: how long the decode will be. Bounded search, because
+	 * anything between here and it is a property this does not need. */
+	for (;;) {
+		if (++steps > HDR_PROBE_STEPS || at >= end)
+			return;
+		if (!kof_rd_u8(f, at, &id))
+			return;
+		at++;
+		if (id == KOF_7Z_ID_CODERS_SIZE)
+			break;
+		if (id == KOF_7Z_ID_END)
+			return;
+	}
+	z->hdr_unpack_size = sz_num(f, &at, &ok);
+	if (!ok) {
+		z->hdr_unpack_size = 0;
+		return;
+	}
+
+	/*
+	 * Where the coded bytes are. packPos is stated from the end of the signature
+	 * header, like everything else in this format, and both it and the size come
+	 * out of the file - so the sum saturates and the caller checks it.
+	 */
+	z->hdr_pack_off = kof_sat_add(KOF_7Z_SIG_LEN, pack_pos);
+	z->hdr_pack_size = pack_size;
 }
 
 /* ---- regions ------------------------------------------------------------------ */
@@ -174,12 +239,33 @@ static const uint32_t sz_cls_bit[KOF_7Z_CLS_COUNT] = {
 	KOF_SCAN_7Z_PACKED
 };
 
+/*
+ * The archive's whole layout, as settled runs.
+ *
+ * One function so the per-class totals the parse records and the ranges the resolve
+ * hands out can never describe the object differently.
+ */
+static void sz_runs(const struct kof_7z_info *z, uint64_t obj_size,
+		    struct kof_runs *l, struct kof_run *buf, uint64_t *bytes)
+{
+	kof_runs_init(l, buf, 3u, KOF_7Z_CLS_COUNT);
+	kof_runs_add(l, obj_size, 0, KOF_7Z_SIG_LEN, KOF_7Z_CLS_HEADERS);
+	if (z->next_hdr_size && z->next_hdr_off > KOF_7Z_SIG_LEN)
+		kof_runs_add(l, obj_size, KOF_7Z_SIG_LEN,
+			     z->next_hdr_off - KOF_7Z_SIG_LEN, KOF_7Z_CLS_PACKED);
+	if (z->next_hdr_size)
+		kof_runs_add(l, obj_size, z->next_hdr_off, z->next_hdr_size,
+			     KOF_7Z_CLS_HEADERS);
+	kof_runs_settle(l, bytes);
+}
+
 static uint32_t sz_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 				struct kof_range *out, uint32_t max_out)
 {
 	const struct kof_7z_info *z = (const struct kof_7z_info *)ctx->file_header;
 	struct kof_run run[3];
-	uint32_t n = 0;
+	struct kof_runs l;
+	uint64_t bytes[KOF_7Z_CLS_COUNT];
 
 	if (!z || !z->valid || !out || max_out == 0)
 		return 0;
@@ -189,28 +275,17 @@ static uint32_t sz_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 	 * The other containers store theirs because a walk discovered them one at a
 	 * time and there is no second chance to work them out; here the whole layout
 	 * is four numbers from the start header.
+	 *
+	 * They go through the same add-and-settle the parse uses, and that is not
+	 * ceremony for three runs. The offsets are fields a file chose, so nothing
+	 * stops a header claiming to live INSIDE the start header - and then the
+	 * third run overlaps the first, in an order the resolve's complement walk
+	 * reads as descending. Building them by hand skipped the settle, and a
+	 * hostile-header fuzz round found it: overlapping regions mean a pattern
+	 * matched twice in bytes that exist once.
 	 */
-	run[n].off = 0;
-	run[n].len = KOF_7Z_SIG_LEN;
-	run[n].cls = KOF_7Z_CLS_HEADERS;
-	run[n].reserved = 0;
-	n++;
-
-	if (z->next_hdr_size && z->next_hdr_off > KOF_7Z_SIG_LEN) {
-		run[n].off = KOF_7Z_SIG_LEN;
-		run[n].len = z->next_hdr_off - KOF_7Z_SIG_LEN;
-		run[n].cls = KOF_7Z_CLS_PACKED;
-		run[n].reserved = 0;
-		n++;
-	}
-	if (z->next_hdr_size) {
-		run[n].off = z->next_hdr_off;
-		run[n].len = z->next_hdr_size;
-		run[n].cls = KOF_7Z_CLS_HEADERS;
-		run[n].reserved = 0;
-		n++;
-	}
-	return kof_runs_resolve(run, n, mask, sz_cls_bit, KOF_SCAN_7Z_UNCLAIMED,
+	sz_runs(z, ctx->obj_size, &l, run, bytes);
+	return kof_runs_resolve(l.v, l.n, mask, sz_cls_bit, KOF_SCAN_7Z_UNCLAIMED,
 				ctx->obj_size, out, max_out);
 }
 
@@ -270,8 +345,17 @@ int kof_7z_parse(kof_buf file, struct kof_7z_info *z, struct kof_obj_ctx *ctx)
 	if (first == KOF_7Z_ID_HEADER) {
 		z->header_kind = KOF_7Z_HDR_PLAIN;
 	} else if (first == KOF_7Z_ID_ENCODED) {
-		z->hdr_coder = hdr_coder(file, z->next_hdr_off + 1,
-					 z->next_hdr_off + size);
+		hdr_probe(file, z->next_hdr_off + 1, z->next_hdr_off + size, z);
+		if (z->hdr_pack_size &&
+		    kof_clip_len(file.n, z->hdr_pack_off, z->hdr_pack_size) !=
+		    z->hdr_pack_size) {
+			/* The archive says its own header is somewhere the file does
+			 * not reach. Cleared rather than clamped: a module handed a
+			 * short range would decode whatever happens to be there. */
+			z->hdr_pack_off = 0;
+			z->hdr_pack_size = 0;
+			z->anomalies |= KOF_7Z_ANOM_HDR_PAST_EOF;
+		}
 		if (z->hdr_coder == KOF_7Z_CODER_AES) {
 			/*
 			 * Not merely compressed: the file list is ciphertext. No
@@ -293,17 +377,10 @@ int kof_7z_parse(kof_buf file, struct kof_7z_info *z, struct kof_obj_ctx *ctx)
 	}
 
 done:
-	/* The same three runs the resolve builds, settled once so the per-class
-	 * totals are available to a module without resolving anything. */
-	kof_runs_init(&l, run, 3u, KOF_7Z_CLS_COUNT);
-	kof_runs_add(&l, file.n, 0, KOF_7Z_SIG_LEN, KOF_7Z_CLS_HEADERS);
-	if (z->next_hdr_size && z->next_hdr_off > KOF_7Z_SIG_LEN)
-		kof_runs_add(&l, file.n, KOF_7Z_SIG_LEN,
-			     z->next_hdr_off - KOF_7Z_SIG_LEN, KOF_7Z_CLS_PACKED);
-	if (z->next_hdr_size)
-		kof_runs_add(&l, file.n, z->next_hdr_off, z->next_hdr_size,
-			     KOF_7Z_CLS_HEADERS);
-	kof_runs_settle(&l, z->region_bytes);
+	/* The same three runs the resolve builds - the same call, so they cannot
+	 * differ - settled once so the per-class totals are available to a module
+	 * without resolving anything. */
+	sz_runs(z, file.n, &l, run, z->region_bytes);
 	if (l.overlapped)
 		z->anomalies |= KOF_7Z_ANOM_OVERLAP;
 

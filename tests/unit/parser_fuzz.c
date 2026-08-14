@@ -40,6 +40,8 @@
 #include "../../libkofeng/kofparsers/containers/docole_parse.h"
 #include "../../libkofeng/kofparsers/containers/zip_parse.h"
 #include "../../libkofeng/kofparsers/containers/tar_parse.h"
+#include "../../libkofeng/kofparsers/containers/sevenzip_parse.h"
+#include "../../libkofeng/kofparsers/containers/rar_parse.h"
 
 #define OBJ_MAX 8192
 #define ROUNDS  20000
@@ -370,6 +372,146 @@ static uint64_t gen_zip(uint8_t *b)
 }
 
 /*
+ * A 7z, which is 32 bytes of start header and then whatever it points at.
+ *
+ * Everything that matters is in those 32 bytes: the offset and size of the real
+ * header, both stated relative to the end of the start header and both 64 bit. So
+ * they are drawn from a set built to break the addition - past the end, at the very
+ * end, and large enough that adding the two overflows.
+ *
+ * The bytes at the far end are then written as a header the probe will try to read:
+ * a coded-header marker and a coder id, sometimes truncated mid-field, which is what
+ * exercises reading LZMA properties out of a header that stops early.
+ */
+static void put64(uint8_t *b, uint64_t off, uint64_t v)
+{
+	uint32_t k;
+
+	if (off + 8 > OBJ_MAX)
+		return;
+	for (k = 0; k < 8u; k++)
+		b[off + k] = (uint8_t)(v >> (8u * k));
+}
+
+static uint64_t gen_7z(uint8_t *b)
+{
+	uint64_t n = 64u + (rnd() % (OBJ_MAX - 128u));
+	uint64_t off, size;
+	uint32_t k;
+
+	for (k = 0; k < n; k++)
+		b[k] = (uint8_t)((rnd() % 4u) ? 0 : rnd());
+
+	memcpy(b, "7z\xbc\xaf\x27\x1c", 6);
+	b[6] = (uint8_t)(rnd() % 4u);   /* major */
+	b[7] = (uint8_t)(rnd() % 8u);   /* minor */
+
+	switch (rnd() % 6u) {
+	case 0:  off = rnd() % n; break;
+	case 1:  off = n; break;                       /* exactly at the end */
+	case 2:  off = 0xffffffffffffff00ull; break;   /* overflows the addition */
+	case 3:  off = n - 32u; break;
+	case 4:  off = 0; break;
+	default: off = rnd(); break;
+	}
+	switch (rnd() % 5u) {
+	case 0:  size = rnd() % 256u; break;
+	case 1:  size = 0; break;
+	case 2:  size = 0xffffffffffffffffull; break;
+	case 3:  size = n; break;
+	default: size = rnd() % 64u; break;
+	}
+	put64(b, 12, off);
+	put64(b, 20, size);
+
+	/* Something at the far end that looks like a header worth probing. */
+	if (off < n - 16u) {
+		uint64_t at = 32u + off;
+
+		if (at + 16u <= n) {
+			b[at] = (uint8_t)((rnd() % 4u) ? KOF_7Z_ID_ENCODED
+						       : KOF_7Z_ID_HEADER);
+			b[at + 1] = KOF_7Z_ID_PACKINFO;
+			for (k = 2; k < 16u; k++)
+				b[at + k] = (uint8_t)rnd();
+		}
+	}
+	return n;
+}
+
+/*
+ * A RAR3, which is a chain: every block says how long its own header is and how much
+ * data follows, and adding the two is where the next block begins.
+ *
+ * So those two fields are the whole attack surface and both are made hostile. A
+ * HEAD_SIZE below the seven bytes it is part of would let the walk stand still; an
+ * ADD_SIZE near the 32 bit ceiling makes the addition overflow; a NAME_SIZE larger
+ * than the block it sits in points a name reader past the header. The LARGE flag is
+ * set at random on top, which turns two of those into 64 bit values read from
+ * further into a header that may not be that long.
+ */
+static uint64_t gen_rar(uint8_t *b)
+{
+	uint64_t n = 32u + (rnd() % 4096u);
+	uint64_t at;
+	uint32_t k;
+
+	for (k = 0; k < n; k++)
+		b[k] = (uint8_t)((rnd() % 4u) ? 0 : rnd());
+
+	memcpy(b, "Rar!\x1a\x07", 6);
+	b[6] = (uint8_t)((rnd() % 8u) ? 0x00 : 0x01);   /* mostly RAR3 */
+	if (b[6] == 0x01)
+		b[7] = (uint8_t)((rnd() % 2u) ? 0x00 : rnd());
+
+	at = 7;
+	while (at + 32u <= n) {
+		uint16_t flags = 0, size;
+		uint8_t typ = (uint8_t)("\x72\x73\x74\x74\x74\x7a\x75\x7b"[rnd() % 8]);
+		uint32_t add;
+
+		if (rnd() % 3u) flags |= KOF_RAR3_F_ADD_SIZE;
+		if (rnd() % 4u == 0) flags |= KOF_RAR3_F_LARGE;
+		if (rnd() % 6u == 0) flags |= KOF_RAR3_F_ENCRYPTED;
+		if (rnd() % 8u == 0) flags |= KOF_RAR3_F_SOLID;
+		if (rnd() % 8u == 0) flags |= KOF_RAR3_F_SPLIT_AFTER;
+
+		switch (rnd() % 6u) {
+		case 0:  size = (uint16_t)(rnd() % 7u); break;     /* below the base */
+		case 1:  size = 32u; break;
+		case 2:  size = (uint16_t)(32u + rnd() % 64u); break;
+		case 3:  size = 0xffffu; break;
+		case 4:  size = 7u; break;
+		default: size = (uint16_t)(rnd() % 512u); break;
+		}
+		switch (rnd() % 5u) {
+		case 0:  add = (uint32_t)(rnd() % 256u); break;
+		case 1:  add = 0; break;
+		case 2:  add = 0xfffffff0u; break;                 /* overflows */
+		case 3:  add = (uint32_t)n; break;
+		default: add = (uint32_t)(rnd() % 4096u); break;
+		}
+
+		put16(b, at + 0, (uint16_t)rnd());                 /* HEAD_CRC */
+		b[at + 2] = typ;
+		put16(b, at + 3, flags);
+		put16(b, at + 5, size);
+		put32(b, at + 7, add);                             /* PACK_SIZE */
+		put32(b, at + 11, (uint32_t)rnd());                /* UNP_SIZE */
+		b[at + 25] = (uint8_t)(0x30u + rnd() % 8u);        /* METHOD */
+		/* A name length that may or may not fit in the block that declared it. */
+		put16(b, at + 26, (uint16_t)((rnd() % 2u) ? rnd() % 64u : rnd()));
+		put32(b, at + 28, (uint32_t)rnd());
+		for (k = 32u; k < 64u && at + k < n; k++)
+			b[at + k] = (uint8_t)((rnd() % 3u) ? ("../\\ab" [rnd() % 6])
+							   : rnd());
+
+		at += (size < 7u ? 7u : size) + (rnd() % 2u ? 0 : add % 256u);
+	}
+	return n;
+}
+
+/*
  * A tar, with the fields that decide where the next header is made hostile.
  *
  * There is only one of those and it is the size: it moves the cursor, and every
@@ -501,17 +643,19 @@ int main(int argc, char **argv)
 	struct kof_docole_info *oi = malloc(sizeof *oi);
 	struct kof_zip_info *zi = malloc(sizeof *zi);
 	struct kof_tar_info *ti = malloc(sizeof *ti);
+	struct kof_7z_info *si = malloc(sizeof *si);
+	struct kof_rar_info *ri = malloc(sizeof *ri);
 	struct pc_report rep = { 0, 0, 0 };
 	uint64_t rounds = ROUNDS, seed = 20240101u;
 	uint64_t r, pe_parsed = 0, elf_parsed = 0, gz_parsed = 0, ole_parsed = 0,
-		 zip_parsed = 0, tar_parsed = 0;
+		 zip_parsed = 0, tar_parsed = 0, sz_parsed = 0, rar_parsed = 0;
 	char what[64];
 
 	if (argc > 1)
 		seed = strtoull(argv[1], 0, 0);
 	if (argc > 2)
 		rounds = strtoull(argv[2], 0, 0);
-	if (!ei || !pi || !gi || !oi || !zi || !ti)
+	if (!ei || !pi || !gi || !oi || !zi || !ti || !si || !ri)
 		return 1;
 
 	rng_state = seed ? seed : 1;
@@ -519,13 +663,16 @@ int main(int argc, char **argv)
 	for (r = 0; r < rounds; r++) {
 		struct kof_obj_ctx ctx;
 		uint64_t n;
-		int want = (int)(rnd() % 6);   /* PE, ELF, gzip, docole, zip, tar */
+		int want = (int)(rnd() % 8);   /* PE, ELF, gzip, docole, zip,
+						* tar, 7z, rar */
 
 		memset(&ctx, 0, sizeof ctx);
 		n = want == 0 ? gen_pe(obj) : want == 1 ? gen_elf(obj)
 			: want == 2 ? gen_gzip(obj)
 			: want == 3 ? gen_docole(obj)
-			: want == 4 ? gen_zip(obj) : gen_tar(obj);
+			: want == 4 ? gen_zip(obj)
+			: want == 5 ? gen_tar(obj)
+			: want == 6 ? gen_7z(obj) : gen_rar(obj);
 		{
 			kof_buf buf = kof_buf_make(obj, n);
 
@@ -534,7 +681,9 @@ int main(int argc, char **argv)
 				 want == 0 ? "PE" : want == 1 ? "ELF"
 				 : want == 2 ? "gzip"
 				 : want == 3 ? "docole"
-				 : want == 4 ? "zip" : "tar");
+				 : want == 4 ? "zip"
+				 : want == 5 ? "tar"
+				 : want == 6 ? "7z" : "rar");
 
 			if (want == 0 && kof_pe_sniff(buf)) {
 				if (kof_pe_parse(buf, pi, &ctx)) {
@@ -572,6 +721,18 @@ int main(int argc, char **argv)
 					pc_check(what, &ctx, n, kof_tar_region_bits,
 						 KOF_TAR_REGION_COUNT, &rep);
 				}
+			} else if (want == 6 && kof_7z_sniff(buf)) {
+				if (kof_7z_parse(buf, si, &ctx)) {
+					sz_parsed++;
+					pc_check(what, &ctx, n, kof_7z_region_bits,
+						 KOF_7Z_REGION_COUNT, &rep);
+				}
+			} else if (want == 7 && kof_rar_sniff(buf)) {
+				if (kof_rar_parse(buf, ri, &ctx)) {
+					rar_parsed++;
+					pc_check(what, &ctx, n, kof_rar_region_bits,
+						 KOF_RAR_REGION_COUNT, &rep);
+				}
 			}
 		}
 	}
@@ -582,13 +743,18 @@ int main(int argc, char **argv)
 	free(oi);
 	free(zi);
 	free(ti);
+	free(si);
+	free(ri);
 	printf("hostile headers: %llu round(s), parsed ELF %llu PE %llu gzip %llu "
-	       "docole %llu zip %llu tar %llu, partition %llu/%llu\n",
+	       "docole %llu zip %llu tar %llu 7z %llu rar %llu, "
+	       "partition %llu/%llu\n",
 	       (unsigned long long)rounds, (unsigned long long)elf_parsed,
 	       (unsigned long long)pe_parsed, (unsigned long long)gz_parsed,
 	       (unsigned long long)ole_parsed,
 	       (unsigned long long)zip_parsed,
 	       (unsigned long long)tar_parsed,
+	       (unsigned long long)sz_parsed,
+	       (unsigned long long)rar_parsed,
 	       (unsigned long long)(rep.checked - rep.failed),
 	       (unsigned long long)rep.checked);
 	return rep.failed != 0;

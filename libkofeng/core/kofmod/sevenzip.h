@@ -80,6 +80,7 @@ enum {
 	KOF_7Z_ID_UNPACK   = 0x07,
 	KOF_7Z_ID_SIZE     = 0x09,
 	KOF_7Z_ID_FOLDER   = 0x0b,
+	KOF_7Z_ID_CODERS_SIZE = 0x0c,
 	KOF_7Z_ID_ENCODED  = 0x17   /* the header itself is coded */
 };
 
@@ -135,6 +136,27 @@ struct kof_7z_info {
 	 * decoding anything: it sits in the clear at the front of the coded header. */
 	uint32_t hdr_coder;
 	uint32_t reserved1;
+
+	/*
+	 * Where the coded header's bytes are and what it takes to decode them.
+	 *
+	 * Everything here is stated in the clear at the front of the coded header -
+	 * it has to be, since it is what tells a reader how to decode the rest - so
+	 * the parse can hand it over without decompressing anything itself.
+	 *
+	 * This is the whole of what a module needs to recover the file list, and it
+	 * is deliberately not an entry table. A 7z archive in this collection holds a
+	 * median of 18 files and a maximum of 84644, with names up to 1361 characters
+	 * - so a table with names in it would either be megabytes of view or would cut
+	 * off the archives that most need reading. The decoded header is produced as a
+	 * child instead, and the names inside it are searched the way any other text
+	 * is, with no cap, no table, and no second convention for where a name lives.
+	 */
+	uint64_t hdr_pack_off;    /* absolute, of the coded bytes */
+	uint64_t hdr_pack_size;
+	uint64_t hdr_unpack_size; /* what the archive says the decode yields */
+	uint8_t  hdr_lc, hdr_lp, hdr_pb;
+	uint8_t  reserved2;
 
 	uint64_t region_bytes[KOF_7Z_CLS_COUNT];
 };

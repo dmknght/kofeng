@@ -44,6 +44,7 @@
 #include "../../libkofeng/kofparsers/containers/zip_parse.h"
 #include "../../libkofeng/kofparsers/containers/tar_parse.h"
 #include "../../libkofeng/kofparsers/containers/sevenzip_parse.h"
+#include "../../libkofeng/kofparsers/containers/rar_parse.h"
 
 struct tally {
 	uint64_t objects, failures;
@@ -125,7 +126,7 @@ static int check(const char *path, kof_buf buf, struct kof_obj_ctx *ctx,
 
 static void one_file(const char *path, struct tally *elf, struct tally *pe,
 		     struct tally *gz, struct tally *ole, struct tally *zip,
-		     struct tally *tar, struct tally *sz)
+		     struct tally *tar, struct tally *sz, struct tally *rar)
 {
 	struct kof_obj_ctx ctx;
 	struct kof_elf_info *ei;
@@ -135,6 +136,7 @@ static void one_file(const char *path, struct tally *elf, struct tally *pe,
 	struct kof_zip_info *zi;
 	struct kof_tar_info *ti;
 	struct kof_7z_info *si;
+	struct kof_rar_info *ri;
 	struct stat st;
 	void *map;
 	int fd;
@@ -209,6 +211,15 @@ static void one_file(const char *path, struct tally *elf, struct tally *pe,
 					KOF_TAR_REGION_COUNT, "tar");
 			}
 			free(ti);
+		} else if (kof_rar_sniff(buf)) {
+			ri = malloc(sizeof *ri);
+			if (ri && kof_rar_parse(buf, ri, &ctx)) {
+				rar->objects++;
+				rar->failures += (uint64_t)check(path, buf, &ctx,
+					kof_rar_region_bits,
+					KOF_RAR_REGION_COUNT, "rar");
+			}
+			free(ri);
 		} else if (kof_7z_sniff(buf)) {
 			si = malloc(sizeof *si);
 			if (si && kof_7z_parse(buf, si, &ctx)) {
@@ -225,7 +236,7 @@ static void one_file(const char *path, struct tally *elf, struct tally *pe,
 
 static void walk(const char *dir, struct tally *elf, struct tally *pe,
 		 struct tally *gz, struct tally *ole, struct tally *zip,
-		     struct tally *tar, struct tally *sz)
+		     struct tally *tar, struct tally *sz, struct tally *rar)
 {
 	DIR *d = opendir(dir);
 	struct dirent *de;
@@ -239,7 +250,7 @@ static void walk(const char *dir, struct tally *elf, struct tally *pe,
 		if ((size_t)snprintf(path, sizeof path, "%s/%s", dir, de->d_name)
 		    >= sizeof path)
 			continue;
-		one_file(path, elf, pe, gz, ole, zip, tar, sz);
+		one_file(path, elf, pe, gz, ole, zip, tar, sz, rar);
 	}
 	closedir(d);
 }
@@ -262,19 +273,20 @@ int main(int argc, char **argv)
 		"/usr/share/man/man1", "/usr/share/i18n/charmaps"
 	};
 	struct tally elf = { 0, 0 }, pe = { 0, 0 }, gz = { 0, 0 },
-		     ole = { 0, 0 }, zip = { 0, 0 }, tar = { 0, 0 },
+		     ole = { 0, 0 }, zip = { 0, 0 }, tar = { 0, 0 }, rar = { 0, 0 },
 		     sz = { 0, 0 };
 	int i;
 
 	if (argc > 1)
 		for (i = 1; i < argc; i++)
-			walk(argv[i], &elf, &pe, &gz, &ole, &zip, &tar, &sz);
+			walk(argv[i], &elf, &pe, &gz, &ole, &zip, &tar, &sz, &rar);
 	else
 		for (i = 0; i < (int)(sizeof defaults / sizeof defaults[0]); i++)
-			walk(defaults[i], &elf, &pe, &gz, &ole, &zip, &tar, &sz);
+			walk(defaults[i], &elf, &pe, &gz, &ole, &zip, &tar, &sz, &rar);
 
 	printf("partition: ELF %llu/%llu  PE %llu/%llu  gzip %llu/%llu  "
-	       "docole %llu/%llu  zip %llu/%llu  tar %llu/%llu  7z %llu/%llu",
+	       "docole %llu/%llu  zip %llu/%llu  tar %llu/%llu  7z %llu/%llu  "
+	       "rar %llu/%llu",
 	       (unsigned long long)(elf.objects - elf.failures),
 	       (unsigned long long)elf.objects,
 	       (unsigned long long)(pe.objects - pe.failures),
@@ -288,7 +300,9 @@ int main(int argc, char **argv)
 	       (unsigned long long)(tar.objects - tar.failures),
 	       (unsigned long long)tar.objects,
 	       (unsigned long long)(sz.objects - sz.failures),
-	       (unsigned long long)sz.objects);
+	       (unsigned long long)sz.objects,
+	       (unsigned long long)(rar.objects - rar.failures),
+	       (unsigned long long)rar.objects);
 	if (elf.objects == 0 && pe.objects == 0 && gz.objects == 0 &&
 	    ole.objects == 0 && zip.objects == 0 && tar.objects == 0 &&
 	    sz.objects == 0) {
@@ -297,5 +311,6 @@ int main(int argc, char **argv)
 	}
 	printf("\n");
 	return (elf.failures || pe.failures || gz.failures || ole.failures ||
-		zip.failures || tar.failures || sz.failures) ? 1 : 0;
+		zip.failures || tar.failures || sz.failures ||
+		rar.failures) ? 1 : 0;
 }
