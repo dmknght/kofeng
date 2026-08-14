@@ -71,6 +71,10 @@
 #include <kofmod/elf.h>      /* the ELF region names a range may be built from */
 #include <kofmod/pe.h>       /* and the PE ones */
 #include <kofmod/gzip.h>     /* and the gzip ones */
+#include <kofmod/docole.h>   /* and the compound file ones */
+#include <kofmod/zip.h>      /* and the zip ones, shared by ZIP and DOCZIP */
+#include <kofmod/tar.h>
+#include <kofmod/sevenzip.h>
 
 #include "../libkofeng/kofdb/kofpackw.h"
 #include "../libkofeng/kofdb/kofpack.h"
@@ -160,8 +164,18 @@ static unsigned long scan_mask;
  * This table was a hand-written copy of the ELF values, with a comment claiming a
  * unit test kept it honest. No such test existed, PE regions were added to the
  * headers, and every PE signature failed to compile with "not a known region name".
- * Naming the enum makes adding a region to a header the only edit needed, and an
- * enum removed from a header a compile error here.
+ * Naming the enum removed the risk of a WRONG value, which is what that fix was
+ * about, and left the other half untouched: a region added to a header is still
+ * invisible here until somebody adds a line.
+ *
+ * That half then failed too, and larger. Four formats arrived - compound files,
+ * zip, tar, 7z - with eighteen regions between them, and not one of them could be
+ * named by a signature. The regions existed, the parsers filled them, kofexamine
+ * printed them, and the only consumer that matters could not ask for them.
+ *
+ * The test at the bottom of this file is what makes the omission visible now: it
+ * asserts this table covers every region every format header declares, so adding a
+ * region without adding it here fails the build rather than the signature.
  */
 struct rgn_name {
 	const char   *name;
@@ -191,6 +205,28 @@ static const struct rgn_name rgn_names[] = {
 	RGN(KOF_SCAN_GZIP_DATA),
 	RGN(KOF_SCAN_GZIP_TRAILER),
 	RGN(KOF_SCAN_GZIP_UNCLAIMED),
+
+	RGN(KOF_SCAN_DOCOLE_HEADERS),
+	RGN(KOF_SCAN_DOCOLE_DIRECTORY),
+	RGN(KOF_SCAN_DOCOLE_CONTENT_DATA),
+	RGN(KOF_SCAN_DOCOLE_CONTENT_MACROS),
+	RGN(KOF_SCAN_DOCOLE_CONTENT_METADATA),
+	RGN(KOF_SCAN_DOCOLE_RESOURCES),
+	RGN(KOF_SCAN_DOCOLE_UNCLAIMED),
+
+	RGN(KOF_SCAN_ZIP_HEADERS),
+	RGN(KOF_SCAN_ZIP_NAMES),
+	RGN(KOF_SCAN_ZIP_STORED),
+	RGN(KOF_SCAN_ZIP_PACKED),
+	RGN(KOF_SCAN_ZIP_UNCLAIMED),
+
+	RGN(KOF_SCAN_TAR_HEADERS),
+	RGN(KOF_SCAN_TAR_DATA),
+	RGN(KOF_SCAN_TAR_UNCLAIMED),
+
+	RGN(KOF_SCAN_7Z_HEADERS),
+	RGN(KOF_SCAN_7Z_PACKED),
+	RGN(KOF_SCAN_7Z_UNCLAIMED),
 
 	{ NULL, 0 }
 };
