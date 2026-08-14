@@ -30,9 +30,12 @@ KOF_TARGET_RANGE(scan_elf_data, KOF_SCAN_ELF_DATA);
 
 KOF_DEFINE_STR(str_1, "kallsyms_lookup_name", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(str_2, "sys_call_table", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
-KOF_DEFINE_STR(str_x64, "x64_sys_call", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
-KOF_DEFINE_STR(str_a64_1, "update_mapping_prot", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
-KOF_DEFINE_STR(str_a64_2, "__start_rodata", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
+KOF_DEFINE_STR(str_diamorphine_x64, "x64_sys_call", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
+KOF_DEFINE_STR(str_diamorphine_a64_1, "update_mapping_prot", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
+KOF_DEFINE_STR(str_diamorphine_a64_2, "__start_rodata", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
+
+KOF_DEFINE_STR(str_hcrootkit_1, "sys_munmap", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
+KOF_DEFINE_STR(str_hcrootkit_2, "sys_mmap", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 
 
 KOF_DEFINE_SCAN
@@ -48,15 +51,19 @@ KOF_DEFINE_SCAN
 	 */
 	if (kof_find_str_all(scan_elf_data, str_1, str_2))
     {
-        if (kof_find_str_all(scan_elf_data, str_x64))
+        if (kof_find_str_all(scan_elf_data, str_diamorphine_x64))
         {
             KOF_SCAN_MATCH("Rootkit.Diamorphine-x64", KOF_LVL_INFECT);
         }
 
-        if (kof_find_str_all(scan_elf_data, str_a64_1, str_a64_2))
+        if (kof_find_str_all(scan_elf_data, str_diamorphine_a64_1, str_diamorphine_a64_2))
         {
             KOF_SCAN_MATCH("Rootkit.Diamorphine-a64", KOF_LVL_INFECT);
-        } 
+        }
+        if (kof_find_str_all(scan_elf_data, str_hcrootkit_1, str_hcrootkit_2))
+        {
+            KOF_SCAN_MATCH("Rootkit.HCRootkit-General", KOF_LVL_INFECT);
+        }
     }
 		
 }
