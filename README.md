@@ -1,6 +1,8 @@
-# KOFENG — Malware Scanner Engine Using COFF Objects
+# KOFENG — Malware Scanner Engine Using Executable Signature Modules
 
-KOFENG is an experimental malware scanning engine that uses **COFF object files as individual detection signatures**.
+KOFENG is an experimental malware scanning engine that uses **compiled code modules as individual detection signatures**.
+
+Each signature is compiled and linked into a **raw, headerless, position-independent blob**: no relocations, no undefined symbols, no writable data, and no object-file header of any kind. Loading a signature database is a `memcpy` into one arena followed by a single `mprotect` — there is no object format to parse at runtime, and the build refuses any module that would need one.
 
 The project explores an alternative approach to traditional signature database architectures, with a particular focus on **memory usage, signature scalability, and per-signature scanning logic**.
 
@@ -15,7 +17,7 @@ The design and ideas behind KOFENG were inspired by research and existing antivi
 
 KOFENG is an **independent implementation**. It does not contain Kaspersky source code or proprietary engine code.
 
-## Why COFF?
+## Why executable signatures?
 
 Popular malware scanning solutions such as **ClamAV** and **YARA** provide highly capable signature engines and have proven that large-scale pattern matching can be practical.
 
@@ -23,7 +25,7 @@ However, traditional signature engines commonly rely on centralized pattern-matc
 
 KOFENG experiments with a different model:
 
-> **Each signature is compiled into a COFF object containing its own scanning logic.**
+> **Each signature is compiled into its own code blob containing its own scanning logic.**
 
 Instead of building one large global matching structure containing every signature, signatures can remain independent compilation units.
 
@@ -38,9 +40,13 @@ This allows KOFENG to explore different trade-offs between:
 
 ## Design
 
-### COFF-Based Signatures
+### Executable Signature Modules
 
-The core idea is to represent each malware signature as a **COFF object** containing executable scanning logic.
+The core idea is to represent each malware signature as an **executable module** containing its own scanning logic.
+
+The build compiles the signature to an object file, links it with a linker script that places the entry point at offset zero, and emits the result as a raw binary. It then verifies on the linked image that there are no relocations, no undefined symbols, no unexpected sections and no `.data` or `.bss`. A module that fails any of those checks does not become a signature.
+
+Those constraints are what make the runtime cheap: with the entry point at offset zero the loader needs no symbol table, with no relocations there is nothing to resolve when a database is loaded, and with no writable data one mapped copy serves every thread.
 
 The architecture is inspired by techniques historically used in older antivirus engines, including Kaspersky's engine designs.
 
@@ -87,7 +93,7 @@ STRING malware_marker {
 }
 ```
 
-The string definitions can then be used to perform inexpensive filtering before invoking the full COFF-based detection logic.
+The string definitions can then be used to perform inexpensive filtering before invoking the module's full detection logic.
 
 This allows a signature to use a combination of:
 
@@ -96,7 +102,7 @@ String pre-filter
         ↓
 Additional conditions
         ↓
-COFF detection logic
+Module detection logic
         ↓
 Match / No Match
 ```
@@ -119,7 +125,7 @@ Signatures remain independent, allowing the engine to load and process them in s
 
 A signature is not limited to a static byte sequence.
 
-Because the signature is executable COFF code, it can potentially implement more complex detection logic.
+Because the signature is executable code, it can implement detection logic that a static pattern cannot express — following a header, resolving an offset out of the file, walking a structure.
 
 ### 3. Cheap Pre-Filtering
 
@@ -139,13 +145,13 @@ The project is primarily intended to explore:
 
 * Alternative antivirus engine architectures
 * Memory characteristics of large signature databases
-* COFF-based executable detection signatures
+* Executable detection signatures as position-independent code blobs
 * String-based pre-filtering
 * Malware scanning performance and trade-offs
 * Signature database scalability
 * The practical capabilities of LLM-assisted development
 
-The code that generates the COFF signature blobs was developed with assistance from **Claude Code**.
+The code that generates the signature blobs was developed with assistance from **Claude Code**.
 
 This project is also used as an experiment in evaluating how effectively an LLM can assist with implementing a relatively specialized malware-detection architecture.
 
@@ -155,7 +161,7 @@ KOFENG combines ideas from several existing technologies and research projects.
 
 In particular:
 
-* **Kaspersky** — inspiration for the concept of using COFF objects / executable modules as signatures.
+* **Kaspersky** — inspiration for the concept of using executable modules as signatures.
 * **YARA** — inspiration for expressive string definitions and matching attributes such as fullword and case-insensitive matching.
 * **ClamAV** — inspiration for practical antivirus signature matching and string-based pre-filtering.
 * **Objective-See / The Antivirus Hacker's Handbook / historical AV research** — background and research material.
