@@ -24,6 +24,7 @@
 #include "../kofparsers/containers/docole_parse.h"
 #include "../kofparsers/containers/zip_parse.h"
 #include "../kofparsers/containers/tar_parse.h"
+#include "../kofparsers/containers/sevenzip_parse.h"
 #include "objsrc.h"
 #include "../kofdecomp/inflate.h"
 #include "../kofdecomp/nrv2.h"

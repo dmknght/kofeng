@@ -90,6 +90,7 @@
 #include <kofmod/docole.h>
 #include <kofmod/zip.h>
 #include <kofmod/tar.h>
+#include <kofmod/sevenzip.h>
 
 #include "../libkofeng/kofparsers/binaries/elf_parse.h"
 #include "../libkofeng/kofparsers/binaries/pe_parse.h"
@@ -97,6 +98,7 @@
 #include "../libkofeng/kofparsers/containers/docole_parse.h"
 #include "../libkofeng/kofparsers/containers/zip_parse.h"
 #include "../libkofeng/kofparsers/containers/tar_parse.h"
+#include "../libkofeng/kofparsers/containers/sevenzip_parse.h"
 
 /*
  * What one format offers a tool: how to recognise it, how to parse it, how big
@@ -158,6 +160,11 @@ static int zip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 static int tar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
 	return kof_tar_parse(b, (struct kof_tar_info *)v, c);
+}
+
+static int sevenzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_7z_parse(b, (struct kof_7z_info *)v, c);
 }
 
 static int pe_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
@@ -558,6 +565,40 @@ static uint64_t anom_tar(const void *v)
 	return ((const struct kof_tar_info *)v)->anomalies;
 }
 
+/*
+ * What a 7z states about itself without anything being decoded.
+ *
+ * The header kind is the line worth reading: it is the difference between an
+ * archive this build cannot open yet and one that no build ever will.
+ */
+static void print_7z(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
+{
+	const struct kof_7z_info *z = v;
+
+	(void)ctx;
+	(void)buf;
+
+	printf("  version   %u.%u\n", z->major, z->minor);
+	printf("  header    %s at %llu, %llu bytes",
+	       kof_7z_header_kind_name(z->header_kind),
+	       (unsigned long long)z->next_hdr_off,
+	       (unsigned long long)z->next_hdr_size);
+	if (z->hdr_coder)
+		printf("   coder=0x%06x", z->hdr_coder);
+	printf("\n");
+	if (z->header_kind == KOF_7Z_HDR_ENCRYPTED)
+		printf("  note      the file list itself is ciphertext: nothing in "
+		       "this archive is readable\n");
+	else if (z->header_kind == KOF_7Z_HDR_CODED)
+		printf("  note      the file list is compressed: entries are not "
+		       "listed until it is decoded\n");
+}
+
+static uint64_t anom_7z(const void *v)
+{
+	return ((const struct kof_7z_info *)v)->anomalies;
+}
+
 static const struct fmt formats[] = {
 	{ (uint32_t)sizeof(struct kof_elf_info), kof_elf_sniff, elf_parse_thunk,
 	  kof_elf_region_bits, KOF_ELF_REGION_COUNT,
@@ -577,7 +618,10 @@ static const struct fmt formats[] = {
 	  kof_zip_region_name, kof_zip_anomaly_name, print_zip, anom_zip },
 	{ (uint32_t)sizeof(struct kof_tar_info), kof_tar_sniff, tar_parse_thunk,
 	  kof_tar_region_bits, KOF_TAR_REGION_COUNT,
-	  kof_tar_region_name, kof_tar_anomaly_name, print_tar, anom_tar }
+	  kof_tar_region_name, kof_tar_anomaly_name, print_tar, anom_tar },
+	{ (uint32_t)sizeof(struct kof_7z_info), kof_7z_sniff, sevenzip_parse_thunk,
+	  kof_7z_region_bits, KOF_7Z_REGION_COUNT,
+	  kof_7z_region_name, kof_7z_anomaly_name, print_7z, anom_7z }
 };
 
 /*
@@ -802,39 +846,31 @@ static int dump_region(const char *dir, uint32_t rank, const char *region,
 	return fclose(f) == 0;
 }
 
-static int examine(const char *path, int dump)
+/*
+ * Everything this tool does to one object's bytes.
+ *
+ * Split out from examine() so the same work can be done on bytes that never were a
+ * file: with --db the engine hands back what an unpacker produced, and the whole
+ * point of looking at those is that they get the identical treatment - identified,
+ * described, and dumped region by region. A second copy of this for children would
+ * be a second thing to keep in step.
+ *
+ * `dir` is where a dump goes, or NULL for no dump. The caller decides it, because
+ * where a child's dump belongs is a question about the tree and not about the bytes.
+ */
+static int examine_bytes(kof_buf buf, const char *display, const char *dir)
 {
 	struct kof_obj_ctx ctx;
-	struct stat st;
-	void *map, *view = 0;
+	void *view = 0;
 	const struct fmt *f = 0;
 	uint64_t total = 0;
 	uint32_t i;
-	int fd, rc = 0;
-
-	fd = open(path, O_RDONLY);
-	if (fd < 0) {
-		fprintf(stderr, "kofexamine: cannot open %s\n", path);
-		return 0;
-	}
-	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
-		fprintf(stderr, "kofexamine: %s is not a regular non-empty file\n",
-			path);
-		close(fd);
-		return 0;
-	}
-	map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-	close(fd);
-	if (map == MAP_FAILED) {
-		fprintf(stderr, "kofexamine: cannot map %s\n", path);
-		return 0;
-	}
+	int rc = 0;
+	const int dump = dir != 0;
 
 	{
-		kof_buf buf = kof_buf_make(map, (uint64_t)st.st_size);
-
 		memset(&ctx, 0, sizeof ctx);
-		printf("%s\n", path);
+		printf("%s\n", display);
 
 		for (i = 0; i < sizeof formats / sizeof formats[0]; i++) {
 			if (!formats[i].sniff(buf))
@@ -913,19 +949,12 @@ static int examine(const char *path, int dump)
 		}
 
 		if (dump) {
-			char dir[PATH_ROOM];
 			static struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
 			uint64_t first[16];
 			uint32_t order[16], nord = 0;
 			uint64_t wrote = 0;
 			uint32_t written = 0, k;
 
-			if (!dump_dir_for(path, dir, sizeof dir)) {
-				fprintf(stderr, "kofexamine: path too long to "
-						"place a dump beside %s\n", path);
-				rc = -1;
-				goto out;
-			}
 			if (mkdir(dir, 0777) != 0 && errno != EEXIST) {
 				fprintf(stderr, "kofexamine: cannot create %s: "
 						"%s\n", dir, strerror(errno));
@@ -988,6 +1017,44 @@ static int examine(const char *path, int dump)
 	}
 out:
 	free(view);
+	return rc;
+}
+
+/*
+ * The file on disk, mapped and handed to the same routine as everything else.
+ */
+static int examine(const char *path, int dump)
+{
+	struct stat st;
+	void *map;
+	char dir[PATH_ROOM];
+	int fd, rc;
+
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		fprintf(stderr, "kofexamine: cannot open %s\n", path);
+		return 0;
+	}
+	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+		fprintf(stderr, "kofexamine: %s is not a regular non-empty file\n",
+			path);
+		close(fd);
+		return 0;
+	}
+	map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	close(fd);
+	if (map == MAP_FAILED) {
+		fprintf(stderr, "kofexamine: cannot map %s\n", path);
+		return 0;
+	}
+	if (dump && !dump_dir_for(path, dir, sizeof dir)) {
+		fprintf(stderr, "kofexamine: path too long to place a dump beside "
+				"%s\n", path);
+		munmap(map, (size_t)st.st_size);
+		return -1;
+	}
+	rc = examine_bytes(kof_buf_make(map, (uint64_t)st.st_size), path,
+			   dump ? dir : 0);
 	munmap(map, (size_t)st.st_size);
 	return rc;
 }
@@ -1069,7 +1136,7 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 {
 	struct unp_run *u = user;
 	const char *tail = strstr(name, "//");
-	char tag[64], path[1024];
+	char tag[64], path[1024], sub[1152];
 
 	/* The first object is the file itself, which the rest of this tool has
 	 * already described in far more detail. */
@@ -1091,7 +1158,37 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 		u->err = 1;
 		return 1;
 	}
-	if (!write_whole(path, bytes, len))
+	if (!write_whole(path, bytes, len)) {
+		u->err = 1;
+		return 0;
+	}
+
+	/*
+	 * And then examine what came out, exactly as though it had been the file.
+	 *
+	 * Stopping at the raw bytes would leave the job half done for the one person
+	 * this tool is for. A signature is written against a REGION - the author has
+	 * to see what CODE and DATA are once the packer is off, and those are
+	 * properties of the recovered object, not of the packed one. Writing the
+	 * bytes and making somebody run the tool again on them would be handing over
+	 * the input to the question rather than the answer.
+	 *
+	 * Recursion is the engine's job and it has already done it: an object nested
+	 * two layers down arrives here as its own callback, so each one gets its own
+	 * directory and nothing here has to walk anything.
+	 */
+	if ((size_t)snprintf(sub, sizeof sub, "%s.regions", path) >= sizeof sub) {
+		u->err = 1;
+		return 0;
+	}
+	if (mkdir(sub, 0777) != 0 && errno != EEXIST) {
+		fprintf(stderr, "kofexamine: cannot create %s: %s\n", sub,
+			strerror(errno));
+		u->err = 1;
+		return 0;
+	}
+	printf("\n");
+	if (examine_bytes(kof_buf_make(bytes, len), name, sub) < 0)
 		u->err = 1;
 	return 0;
 }
@@ -1148,6 +1245,16 @@ static void usage(const char *argv0)
 		argv0);
 }
 
+/*
+ * Arguments in any order.
+ *
+ * Two passes, and the reason is a bug rather than a preference: with one pass a
+ * file was examined AT THE MOMENT IT WAS SEEN, so an option written after it had
+ * not been read yet. "kofexamine a.elf --dump" examined a.elf without dumping and
+ * then set a flag nothing went on to use - no error, no output missing, just
+ * silently the wrong thing. Collecting the options first makes where they sit stop
+ * mattering.
+ */
 int main(int argc, char **argv)
 {
 	const char *db = NULL;
@@ -1155,6 +1262,7 @@ int main(int argc, char **argv)
 	int dump = 0, verbose = 0;
 	int i, files = 0, bad = 0;
 
+	/* First pass: the options, wherever they are. */
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--dump") == 0) {
 			dump = 1;
@@ -1172,36 +1280,50 @@ int main(int argc, char **argv)
 				argv[0], argv[i]);
 			usage(argv[0]);
 			return 2;
-		} else {
-			int r;
-
-			if (db && !eng) {
-				eng = kof_engine_open(db);
-				if (!eng) {
-					fprintf(stderr,
-						"%s: cannot load a database from %s\n",
-						argv[0], db);
-					return 2;
-				}
-			}
-			r = examine(argv[i], dump);
-			if (r >= 0 && eng) {
-				char dir[1024];
-				const char *d = NULL;
-
-				if (dump && dump_dir_for(argv[i], dir, sizeof dir))
-					d = dir;
-				if (!unpack_pass(eng, argv[i], d, verbose))
-					r = -1;
-			}
-
-			files++;
-			if (r < 0)
-				return 2;   /* could not write: see above */
-			if (!r)
-				bad = 1;
 		}
 	}
+
+	if (db) {
+		eng = kof_engine_open(db);
+		if (!eng) {
+			fprintf(stderr, "%s: cannot load a database from %s\n",
+				argv[0], db);
+			return 2;
+		}
+	}
+
+	/* Second pass: everything that was not an option is a file, and by now every
+	 * option has been read whether it was written before or after it. */
+	for (i = 1; i < argc; i++) {
+		int r;
+
+		if (strcmp(argv[i], "--db") == 0) {
+			i++;               /* its value, already taken */
+			continue;
+		}
+		if (argv[i][0] == '-' && argv[i][1])
+			continue;
+
+		r = examine(argv[i], dump);
+		if (r >= 0 && eng) {
+			char dir[PATH_ROOM];
+			const char *d = NULL;
+
+			if (dump && dump_dir_for(argv[i], dir, sizeof dir))
+				d = dir;
+			if (!unpack_pass(eng, argv[i], d, verbose))
+				r = -1;
+		}
+
+		files++;
+		if (r < 0) {
+			kof_engine_close(eng);
+			return 2;          /* could not write: see above */
+		}
+		if (!r)
+			bad = 1;
+	}
+
 	kof_engine_close(eng);
 	if (files == 0) {
 		usage(argv[0]);

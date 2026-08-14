@@ -110,9 +110,20 @@ enum kof_format {
 	 */
 	KOF_FMT_TAR     = 10,
 
+	/*
+	 * The archive that compresses its own file list.
+	 *
+	 * Its own format because nothing about reading it resembles the others: the
+	 * layout is four numbers in a 32 byte header, the entries are described in a
+	 * second header at the far end of the file, and that second header is itself
+	 * put through a coder - so a parser can describe the container and not its
+	 * contents. See sevenzip.h.
+	 */
+	KOF_FMT_7Z      = 11,
+
 	/* One past the last, so a host can size a per-format table. Not a format:
 	 * nothing is ever this. */
-	KOF_FMT_COUNT   = 11
+	KOF_FMT_COUNT   = 12
 };
 
 /*
@@ -165,6 +176,7 @@ static inline const char *kof_format_name(uint8_t fmt)
 	case KOF_FMT_ZIP:    return "Zip";
 	case KOF_FMT_DOCZIP: return "DocZip";
 	case KOF_FMT_TAR:    return "Tar";
+	case KOF_FMT_7Z:     return "7z";
 	default:             return "Unknown";
 	}
 }

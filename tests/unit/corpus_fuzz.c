@@ -50,6 +50,7 @@
 #include "../../libkofeng/kofparsers/containers/docole_parse.h"
 #include "../../libkofeng/kofparsers/containers/zip_parse.h"
 #include "../../libkofeng/kofparsers/containers/tar_parse.h"
+#include "../../libkofeng/kofparsers/containers/sevenzip_parse.h"
 
 #define HEADER_ZONE (64u * 1024u)
 #define MAX_OBJ     (4u * 1024u * 1024u)
@@ -168,7 +169,7 @@ static void poke_accessors(const struct kof_obj_ctx *ctx, uint64_t obj_size,
 static void one(kof_buf buf, struct kof_elf_info *ei, struct kof_pe_info *pi,
 		struct kof_gzip_info *gi, struct kof_docole_info *oi,
 		struct kof_zip_info *zi, struct kof_tar_info *ti,
-		const char *what,
+		struct kof_7z_info *si, const char *what,
 		struct pc_report *rep, struct tally *t)
 {
 	struct kof_obj_ctx ctx;
@@ -211,6 +212,12 @@ static void one(kof_buf buf, struct kof_elf_info *ei, struct kof_pe_info *pi,
 		t->parsed++;
 		pc_check(what, &ctx, buf.n, kof_tar_region_bits,
 			 KOF_TAR_REGION_COUNT, rep);
+	} else if (kof_7z_sniff(buf)) {
+		if (!kof_7z_parse(buf, si, &ctx))
+			return;
+		t->parsed++;
+		pc_check(what, &ctx, buf.n, kof_7z_region_bits,
+			 KOF_7Z_REGION_COUNT, rep);
 	} else {
 		return;
 	}
@@ -227,6 +234,7 @@ static void fuzz_file(const char *path, uint32_t rounds, struct pc_report *rep,
 	struct kof_docole_info *oi = malloc(sizeof *oi);
 	struct kof_zip_info *zi = malloc(sizeof *zi);
 	struct kof_tar_info *ti = malloc(sizeof *ti);
+	struct kof_7z_info *si = malloc(sizeof *si);
 	struct stat st;
 	uint8_t *buf = NULL;
 	uint64_t n;
@@ -234,7 +242,7 @@ static void fuzz_file(const char *path, uint32_t rounds, struct pc_report *rep,
 	int fd;
 	char what[512];
 
-	if (!ei || !pi || !gi || !oi || !zi || !ti)
+	if (!ei || !pi || !gi || !oi || !zi || !ti || !si)
 		goto out;
 
 	fd = open(path, O_RDONLY);
@@ -256,7 +264,7 @@ static void fuzz_file(const char *path, uint32_t rounds, struct pc_report *rep,
 	/* The file as it is, first: a corpus file that does not hold the invariant
 	 * unmutated is a finding about the parser, not about the fuzzer. */
 	snprintf(what, sizeof what, "%s clean", path);
-	one(kof_buf_make(buf, n), ei, pi, gi, oi, zi, ti, what, rep, t);
+	one(kof_buf_make(buf, n), ei, pi, gi, oi, zi, ti, si, what, rep, t);
 
 	/*
 	 * Truncation, which is its own bug class: every length check in a parser
@@ -270,7 +278,7 @@ static void fuzz_file(const char *path, uint32_t rounds, struct pc_report *rep,
 		for (cut = 1; cut < n && cut < HEADER_ZONE; cut = cut * 3 / 2 + 1) {
 			snprintf(what, sizeof what, "%s cut@%llu", path,
 				 (unsigned long long)cut);
-			one(kof_buf_make(buf, cut), ei, pi, gi, oi, zi, ti, what, rep, t);
+			one(kof_buf_make(buf, cut), ei, pi, gi, oi, zi, ti, si, what, rep, t);
 		}
 	}
 
@@ -292,7 +300,7 @@ static void fuzz_file(const char *path, uint32_t rounds, struct pc_report *rep,
 		}
 
 		snprintf(what, sizeof what, "%s round=%u", path, r);
-		one(kof_buf_make(buf, n), ei, pi, gi, oi, zi, ti, what, rep, t);
+		one(kof_buf_make(buf, n), ei, pi, gi, oi, zi, ti, si, what, rep, t);
 
 		for (k = 0; k < nmut; k++)
 			buf[at[k]] = old[k];
@@ -305,6 +313,7 @@ out:
 	free(oi);
 	free(zi);
 	free(ti);
+	free(si);
 }
 
 /* Take the first `cap` regular files from a directory, in readdir order. */

@@ -52,27 +52,50 @@ struct kof_objsrc {
 };
 
 /*
- * Copy a name in, keeping only what is safe to print.
+ * Take a name in, and keep only the part that is a name.
  *
- * Printable ASCII survives; everything else becomes a dot. That covers the two
- * things that matter and it covers them by construction rather than by listing
- * them: a terminal escape sequence cannot survive because ESC is not printable,
- * and a newline cannot split a record because it is not either.
+ * Two reductions, in this order, and each closes a different hole:
+ *
+ *   THE LAST COMPONENT ONLY. An archive entry is called "dir/sub/file", and what a
+ *   report wants is "file". Taking the last component is also what makes a label
+ *   safe by CONSTRUCTION rather than by filtering: whatever the archive wrote, the
+ *   result cannot contain a separator, so it cannot be a relative path, cannot walk
+ *   upwards, and cannot be absolute. An entry called "../../../../etc/cron.d/x"
+ *   reduces to "x" before anything else looks at it.
+ *
+ *   PRINTABLE ASCII ONLY. Everything else becomes a dot. This is the reporting
+ *   half: an escape sequence cannot survive because ESC is not printable, and a
+ *   newline cannot split a log record because it is not either.
+ *
+ * A name that reduces to nothing, or to "." or "..", yields no label at all - the
+ * caller then falls back to the index, which is always unambiguous.
  */
 void kof_src_label(struct kof_objsrc *s, const uint8_t *p, uint64_t len)
 {
-	uint64_t i, n;
+	uint64_t i, base = 0, n;
 
 	if (!s)
 		return;
-	if (!p || !len) {
-		s->label[0] = 0;
+	s->label[0] = 0;
+	if (!p || !len)
 		return;
-	}
+
+	for (i = 0; i < len; i++)
+		if (p[i] == '/' || p[i] == '\\')
+			base = i + 1;
+	if (base >= len)
+		return;                 /* the name was all separators */
+
+	len -= base;
+	p += base;
 	n = len < KOF_SRC_LABEL_MAX - 1u ? len : KOF_SRC_LABEL_MAX - 1u;
 	for (i = 0; i < n; i++)
 		s->label[i] = (p[i] >= 0x20 && p[i] < 0x7f) ? (char)p[i] : '.';
 	s->label[n] = 0;
+
+	/* "." and ".." are directory references, not names. */
+	if (strcmp(s->label, ".") == 0 || strcmp(s->label, "..") == 0)
+		s->label[0] = 0;
 }
 
 const char *kof_src_label_of(const struct kof_objsrc *s)

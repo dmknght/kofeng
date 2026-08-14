@@ -33,7 +33,72 @@ struct run {
 	uint64_t by_reason[KOF_BROKEN_COUNT];
 	int verbose;
 	int stats;
+
+	/* Where produced objects are written, or NULL. See dump_object. */
+	const char *dump_dir;
+	uint64_t    dumped;
+	FILE       *manifest;
 };
+
+/*
+ * Write a produced object out, numbered.
+ *
+ * Named by a counter rather than by what the object is called, and that is the
+ * simplification rather than a compromise. A name out of an archive exists to be
+ * read in the report; turning one into a filename means answering what to do about
+ * separators, "..", duplicates and length, and every one of those answers is a way
+ * to write a file somewhere it was not meant to go. A number has none of those
+ * questions.
+ *
+ * The mapping is not lost, it is written down: MANIFEST holds the number against
+ * the full name the report printed, so the two are joined by looking rather than by
+ * guessing which mangled filename came from which line.
+ *
+ * The engine itself never creates a file from a name - the objects it produces have
+ * no filename at all, by construction (see objsrc.h). This is a debugging
+ * convenience, and it keeps that property.
+ */
+static void dump_object(struct run *r, const char *name, const void *bytes,
+			uint64_t len)
+{
+	char path[1024];
+	FILE *f;
+
+	if (!r->dump_dir || !bytes || !len)
+		return;
+	/* Only what the engine PRODUCED. A top level object is already a file on
+	 * disk and copying it would say nothing. */
+	if (!strstr(name, "//"))
+		return;
+
+	r->dumped++;
+	if ((size_t)snprintf(path, sizeof path, "%s/%06llu.raw", r->dump_dir,
+			     (unsigned long long)r->dumped) >= sizeof path) {
+		fprintf(stderr, "kofscanner: dump path too long, skipped\n");
+		return;
+	}
+	f = fopen(path, "wb");
+	if (!f) {
+		fprintf(stderr, "kofscanner: cannot write %s\n", path);
+		return;
+	}
+	if (fwrite(bytes, 1, (size_t)len, f) != (size_t)len)
+		fprintf(stderr, "kofscanner: short write to %s\n", path);
+	fclose(f);
+
+	if (!r->manifest) {
+		char mf[1024];
+
+		snprintf(mf, sizeof mf, "%s/MANIFEST", r->dump_dir);
+		r->manifest = fopen(mf, "w");
+		if (r->manifest)
+			fprintf(r->manifest, "# file          bytes  object\n");
+	}
+	if (r->manifest)
+		fprintf(r->manifest, "%06llu.raw  %10llu  %s\n",
+			(unsigned long long)r->dumped, (unsigned long long)len,
+			name);
+}
 
 static const char *level_str(uint32_t level)
 {
@@ -53,8 +118,8 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	struct run *r = user;
 	uint32_t i;
 	int worst = -1;
-	(void)bytes;
-	(void)len;
+
+	dump_object(r, name, bytes, len);
 
 	/*
 	 * An object the engine could not finish with is not clean, and is not a
@@ -157,6 +222,8 @@ static void usage(const char *argv0)
 		"  --follow-links  follow symbolic links (off by default: a link into\n"
 		"                  an ancestor turns a walk into a loop)\n"
 		"  --all-matches   keep scanning an object after the first finding\n"
+		"  --dump DIR      write every object the engine PRODUCED into DIR:\n"
+		"                  what came out of an unpacker, not what went in\n"
 		"  --stats         report what the prefilter and the presence set earned\n"
 		"  --max-produced N  bytes an object may yield before the scan gives up\n"
 		"  --max-resident N  bytes of produced data that may be alive at once\n"
@@ -205,6 +272,8 @@ int main(int argc, char **argv)
 		 * reachable from outside without being able to set it. */
 		else if (strcmp(argv[i], "--max-resident") == 0 && i + 1 < argc)
 			opt.max_resident_bytes = strtoull(argv[++i], NULL, 10);
+		else if (strcmp(argv[i], "--dump") == 0 && i + 1 < argc)
+			r.dump_dir = argv[++i];
 		else if (strcmp(argv[i], "--stats") == 0)
 			r.stats = 1;
 		else if (strcmp(argv[i], "-v") == 0)
@@ -257,6 +326,8 @@ int main(int argc, char **argv)
 
 	secs = (double)(t1.tv_sec - t0.tv_sec) +
 	       (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
+	if (r.manifest)
+		fclose(r.manifest);
 	st = kof_scanner_stats(sc);
 	mb = st ? (double)st->object_bytes / 1048576.0 : 0.0;
 

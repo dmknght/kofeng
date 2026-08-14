@@ -311,6 +311,11 @@ static int tar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 	return kof_tar_parse(b, (struct kof_tar_info *)v, c);
 }
 
+static int sevenzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_7z_parse(b, (struct kof_7z_info *)v, c);
+}
+
 static const struct parser parsers[] = {
 	{ KOF_FMT_ELF,  (uint32_t)sizeof(struct kof_elf_info),
 	  kof_elf_sniff,  elf_parse_thunk  },
@@ -328,7 +333,9 @@ static const struct parser parsers[] = {
 	{ KOF_FMT_ZIP, (uint32_t)sizeof(struct kof_zip_info),
 	  kof_zip_sniff, zip_parse_thunk },
 	{ KOF_FMT_TAR, (uint32_t)sizeof(struct kof_tar_info),
-	  kof_tar_sniff, tar_parse_thunk }
+	  kof_tar_sniff, tar_parse_thunk },
+	{ KOF_FMT_7Z, (uint32_t)sizeof(struct kof_7z_info),
+	  kof_7z_sniff, sevenzip_parse_thunk }
 };
 
 /*
