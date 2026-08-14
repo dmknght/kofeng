@@ -227,6 +227,7 @@ static void usage(const char *argv0)
 		"  --stats         report what the prefilter and the presence set earned\n"
 		"  --max-produced N  bytes an object may yield before the scan gives up\n"
 		"  --max-resident N  bytes of produced data that may be alive at once\n"
+		"  --max-object N    bytes any one produced object may reach\n"
 		"  -v              also report objects that came back clean\n"
 		"\n"
 		"exit: 0 nothing found, 1 something found, 2 could not scan\n",
@@ -272,6 +273,8 @@ int main(int argc, char **argv)
 		 * reachable from outside without being able to set it. */
 		else if (strcmp(argv[i], "--max-resident") == 0 && i + 1 < argc)
 			opt.max_resident_bytes = strtoull(argv[++i], NULL, 10);
+		else if (strcmp(argv[i], "--max-object") == 0 && i + 1 < argc)
+			opt.max_object_bytes = strtoull(argv[++i], NULL, 10);
 		else if (strcmp(argv[i], "--dump") == 0 && i + 1 < argc)
 			r.dump_dir = argv[++i];
 		else if (strcmp(argv[i], "--stats") == 0)

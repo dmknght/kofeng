@@ -304,12 +304,26 @@ struct kof_scan_option {
 	 * A single layer of DEFLATE reaches about 1000:1, so a bomb needs no nesting
 	 * and a depth limit never sees it. Zero means max(64MB, object size x 64).
 	 *
-	 * A child that is a window into its parent costs neither: nothing was
-	 * produced and nothing is resident that was not already. Those are bounded
-	 * by max_children and max_depth.
+	 * max_object_bytes is the third, and it is the one that decides how much
+	 * WORK a scan does rather than how much memory it holds. The other two are
+	 * reached only by an object that is trying; this one is reached constantly,
+	 * because inflating an entry is the expensive thing a scan does and most
+	 * entries are tiny while a few are enormous. Measured over 1352 real zip
+	 * entries: median 255 bytes, 95th percentile 92KB, and the handful above
+	 * 8MB accounted for 98.2% of every byte decoded.
+	 *
+	 * Zero means 16MB, which is as low as it goes without losing a detection -
+	 * 8MB was measured and drops one, because a UPX packed miner unpacking to
+	 * 13MB is a large object rather than a padded one. Raising it buys the tails
+	 * of large entries and costs decompression on every archive holding one.
+	 *
+	 * A child that is a window into its parent costs none of the three: nothing
+	 * was produced and nothing is resident that was not already. Those are
+	 * bounded by max_children and max_depth.
 	 */
 	uint64_t max_resident_bytes;
 	uint64_t max_produced_bytes;
+	uint64_t max_object_bytes;
 	uint32_t max_children;     /* 0 -> a built-in ceiling applies */
 };
 

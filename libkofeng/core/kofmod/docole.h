@@ -148,6 +148,22 @@ enum {
 #define KOF_DOCOLE_MAX_MINI_SEC  2048u  /* sectors of mini stream mapped */
 
 /*
+ * Streams described one by one, and the runs it takes to describe them.
+ *
+ * Separate from run[] above, which is settled: settling sorts by offset and trims
+ * overlaps, which is exactly what a region needs and exactly what destroys the
+ * association between a run and the stream it came from. A caller that wants ONE
+ * stream's bytes - to decompress it, which is a thing done to a stream and never to
+ * a region - needs the unsettled form, so both are kept.
+ *
+ * Sized from measurement over 50 macro-bearing documents: 1208 streams across them,
+ * so 24 per document, and a stream is one run 76.4% of the time because its sectors
+ * are consecutive. 256 and 1024 are an order of magnitude above that.
+ */
+#define KOF_DOCOLE_MAX_ENTRIES   256u
+#define KOF_DOCOLE_MAX_ENT_RUNS  1024u
+
+/*
  * The size past which a macro is worth saying something about.
  *
  * Not a limit and nothing enforces it: it is here so a module can flag a document
@@ -157,6 +173,23 @@ enum {
  * what is absurd rather than what is merely large.
  */
 #define KOF_DOCOLE_MACRO_SUSPECT (4u * 1024u * 1024u)
+
+enum {
+	KOF_DOCOLE_ENT_MINI     = 1u << 0,  /* lives in the mini stream */
+	KOF_DOCOLE_ENT_SHORT    = 1u << 1,  /* fewer bytes recorded than declared */
+	KOF_DOCOLE_ENT_RUNS_FULL = 1u << 2, /* the run pool bound before it ended */
+	/*
+	 * The bytes at data_off begin a compressed container.
+	 *
+	 * Checked by the parse rather than left for a caller to try, because
+	 * trying costs more than looking: a failed decode is reported as damage,
+	 * and a VBA storage is mostly streams that were never compressed - the
+	 * project record, the compiled p-code, the reference list. Without this
+	 * a module would report every document as damaged for reading the streams
+	 * that were never meant to decode.
+	 */
+	KOF_DOCOLE_ENT_OVBA     = 1u << 3
+};
 
 enum {
 	KOF_DOCOLE_ANOM_BAD_HEADER    = 1ull << 0,  /* byte order or version */
@@ -175,8 +208,10 @@ enum {
 	KOF_DOCOLE_ANOM_MACRO_OVERSIZE  = 1ull << 12, /* past MACRO_SUSPECT */
 	KOF_DOCOLE_ANOM_NO_STREAMS      = 1ull << 13, /* a directory with nothing in it */
 	KOF_DOCOLE_ANOM_ENCRYPTED       = 1ull << 14, /* content is ciphertext */
-	KOF_DOCOLE_ANOM_OVERLAP         = 1ull << 15  /* two structures claimed the
+	KOF_DOCOLE_ANOM_OVERLAP         = 1ull << 15, /* two structures claimed the
 						       * same bytes */
+	KOF_DOCOLE_ANOM_ENTRIES_FULL    = 1ull << 16, /* more streams than listed */
+	KOF_DOCOLE_ANOM_ENT_RUNS_FULL   = 1ull << 17  /* the per-entry run pool bound */
 };
 
 struct kof_docole_info {
@@ -232,6 +267,21 @@ struct kof_docole_info {
 	 */
 	uint32_t encrypted;
 
+	/*
+	 * The streams, named and locatable one at a time.
+	 *
+	 * A name here is a range in the OBJECT - a CFB stores directory names as
+	 * UTF-16 in the directory entry - so it is an offset and a length like every
+	 * other name in this engine, and not a copy. That is what a 7z entry could
+	 * not be, and it is why these exist and 7z's do not.
+	 *
+	 * `first_run` and `n_runs` index ent_run below, which is where the stream's
+	 * bytes actually are. Empty streams get no runs and are still listed: a
+	 * module deciding what a document contains cares that a stream is there.
+	 */
+	uint32_t n_entries;
+	uint32_t n_ent_runs;
+
 	/* Runs, classified, joined where consecutive and settled so that no byte is
 	 * in two of them. struct kof_run is the shared shape from runlist.h; it is
 	 * spelled out here rather than included because a module never walks these
@@ -243,6 +293,35 @@ struct kof_docole_info {
 		uint32_t cls;         /* enum kof_docole_class */
 		uint32_t reserved;
 	} run[KOF_DOCOLE_MAX_EXTENTS];
+
+	struct kof_docole_entry {
+		uint64_t name_off;    /* UTF-16 name, in the object */
+		uint32_t name_len;    /* bytes, so twice the character count */
+		uint32_t size_lo;     /* declared size, split so the struct packs */
+		uint32_t size_hi;
+		uint32_t first_run;   /* into ent_run */
+		uint32_t n_runs;
+		uint32_t cls;         /* enum kof_docole_class, or COUNT for none */
+		uint32_t flags;       /* KOF_DOCOLE_ENT_* */
+
+		/*
+		 * Where this stream's DECODABLE content starts, counted from the
+		 * start of the stream rather than of the object.
+		 *
+		 * Zero for every stream but one kind. A VBA module stream begins
+		 * with the compiled p-code and the compressed source follows it,
+		 * at an offset that is stated in the project's `dir` stream and
+		 * nowhere else - so the parse decompresses `dir` and puts the
+		 * answer here. Guessing instead was measured: scanning the stream
+		 * for something that looks like the start of a compressed
+		 * container finds the right place first only 57% of the time.
+		 */
+		uint32_t data_off;
+	} ent[KOF_DOCOLE_MAX_ENTRIES];
+
+	struct kof_docole_ent_run {
+		uint64_t off, len;
+	} ent_run[KOF_DOCOLE_MAX_ENT_RUNS];
 
 	/*
 	 * Host bookkeeping past this point.

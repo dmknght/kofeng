@@ -110,6 +110,15 @@ struct kof_scanner {
 	 * child that never appeared cannot drift onto the following one.
 	 */
 	char pend_label[KOF_SRC_LABEL_MAX];
+	/*
+	 * How long it is, rather than where its first NUL is.
+	 *
+	 * A name is a range of the object and the object chooses its bytes, so a NUL
+	 * inside one is the file's business and not a terminator. A compound file
+	 * puts one after every character - its names are UTF-16 - and measuring with
+	 * strlen turned "ThisDocument" into "T".
+	 */
+	uint32_t pend_label_len;
 
 	/* The object being emitted, before it becomes a child. Heap while it is
 	 * small, an unnamed temporary file once it is not - see objsrc.h. */

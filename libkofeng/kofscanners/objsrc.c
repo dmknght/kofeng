@@ -70,8 +70,35 @@ struct kof_objsrc {
  * A name that reduces to nothing, or to "." or "..", yields no label at all - the
  * caller then falls back to the index, which is always unambiguous.
  */
+/*
+ * Is this name UTF-16LE rather than bytes?
+ *
+ * A compound file stores its directory names that way and there is no ASCII copy
+ * anywhere in the object, so a name arriving from one is every other byte a NUL.
+ * Deciding by looking is what avoids a second naming convention: every other format
+ * hands over bytes, this one hands over bytes too, and the difference is noticed
+ * here rather than declared in an ABI field that ten formats would leave zero.
+ *
+ * Conservative on purpose. It wants an even length, at least one character, and
+ * EVERY odd byte zero - one non-zero high half and the name is treated as bytes,
+ * which is the right answer for a UTF-16 name outside the basic latin range and
+ * the right answer for a byte name that happens to contain a NUL.
+ */
+static int looks_utf16le(const uint8_t *p, uint64_t len)
+{
+	uint64_t i;
+
+	if (len < 2u || (len & 1u))
+		return 0;
+	for (i = 1; i < len; i += 2)
+		if (p[i])
+			return 0;
+	return 1;
+}
+
 void kof_src_label(struct kof_objsrc *s, const uint8_t *p, uint64_t len)
 {
+	uint8_t narrow[KOF_SRC_LABEL_MAX];
 	uint64_t i, base = 0, n;
 
 	if (!s)
@@ -79,6 +106,16 @@ void kof_src_label(struct kof_objsrc *s, const uint8_t *p, uint64_t len)
 	s->label[0] = 0;
 	if (!p || !len)
 		return;
+
+	if (looks_utf16le(p, len)) {
+		n = len / 2u;
+		if (n > sizeof narrow)
+			n = sizeof narrow;
+		for (i = 0; i < n; i++)
+			narrow[i] = p[i * 2u];
+		p = narrow;
+		len = n;
+	}
 
 	for (i = 0; i < len; i++)
 		if (p[i] == '/' || p[i] == '\\')

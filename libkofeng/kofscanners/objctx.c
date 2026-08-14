@@ -22,6 +22,8 @@
 
 #include "scan.h"
 
+#include "../kofdecomp/ovba.h"
+
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -279,7 +281,38 @@ static void c_debug(const struct kof_obj_ctx *ctx, uint32_t name_id, uint64_t va
  * Clamped to half the resident ceiling below, so the object being built and the one
  * being scanned both fit under it.
  */
-#define KOF_OBJ_CAP (64u << 20)
+/*
+ * Sixteen megabytes, and every part of that number was measured.
+ *
+ * It was 64MB, which is not a ceiling on anything real - it is a ceiling on
+ * padding. Across 1352 zip entries in 180 real archives the median entry is 255
+ * BYTES and the 95th percentile is 92KB, so 64MB is seven hundred times the
+ * percentile that matters and 98.4% of entries never come near it.
+ *
+ * What it was paying for is the case that dominated the corpus and that nobody
+ * would call an attack: a PE inflated with a repeated byte so a scanner with a size
+ * limit gives up. One measured sample holds 824KB of DEFLATE expanding to exactly
+ * 100MB, of which 95.75% is duplicate 4KB blocks - the whole real program is in the
+ * first 2.8MB. That is the shape of the problem, and it is not the bomb the budget
+ * was written for: no single object is impossibly expensive, they are each merely
+ * expensive enough, and there are thousands of them.
+ *
+ * WHY NOT LESS. 8MB was tried and it is wrong, which is the useful half of this.
+ * It decodes 205MB where 64MB decodes 11292MB and it runs the corpus in 6.70s
+ * against 11.42s - and it LOSES A DETECTION. A UPX packed miner of 3.9MB unpacks
+ * to 13.1MB, which is not padding: its declared expansion is 3.4x where the padded
+ * sample's is 127x. A fixed cap cannot tell those apart, so it has to clear the
+ * larger of them.
+ *
+ * At 16MB the corpus keeps all 52 findings, runs in 7.94s, and decodes 670MB of a
+ * document set where 64MB decoded 2542MB. That is the whole of the reasoning: as
+ * low as it goes without losing anything that was being found.
+ *
+ * Losing a tail is reported, never silent - an object cut here is marked as not
+ * fully examined with a limit as the reason. A caller who would rather have the
+ * whole of a large entry raises max_object_bytes and pays the decompression.
+ */
+#define KOF_OBJ_CAP (16u << 20)
 
 /*
  * The largest single emit accepted.
@@ -306,10 +339,11 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 	 * name that survived a refusal would be attached to the following child,
 	 * which is the one way this could report the wrong entry.
 	 */
-	if (sc->pend_label[0]) {
+	if (sc->pend_label_len) {
 		kof_src_label(kid, (const uint8_t *)sc->pend_label,
-			      strlen(sc->pend_label));
+			      sc->pend_label_len);
 		sc->pend_label[0] = 0;
+		sc->pend_label_len = 0;
 	}
 	if (sc->kids_left == 0) {
 		/* Refused, and recorded: a container that yields more children than
@@ -758,6 +792,72 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 	return 0;      /* a method this engine does not have */
 }
 
+/*
+ * Join one entry's chain and decode it, in that order.
+ *
+ * The joining has to happen first and into a buffer of its own, because every
+ * decoder here reads a contiguous input - and an entry's bytes are a chain that is
+ * not consecutive 23.6% of the time. The buffer is charged against the residency
+ * ceiling while it is alive, on the same account as a decoder's output, so a
+ * document full of large streams cannot walk past the limit one stream at a time.
+ */
+static uint64_t c_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
+			       uint32_t index, uint64_t out_hint)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	struct kof_range *ext = sc->ext_gather;
+	kof_buf b;
+	uint8_t *in;
+	uint64_t total = 0, at = 0, produced = 0, room;
+	uint32_t n, i;
+	int st;
+
+	(void)out_hint;
+	if (!sc->cur_src || sc->broken || !ctx->resolve_entry)
+		return 0;
+	if (method != KOF_UNP_OVBA)
+		return 0;              /* the only coding entries are decoded with */
+
+	b = kof_src_buf(sc->cur_src);
+	n = ctx->resolve_entry(ctx, index, ext, KOF_SCAN_MAX_EXTENTS);
+	for (i = 0; i < n; i++)
+		total += kof_clip_len(b.n, ext[i].off, ext[i].len);
+	if (!total)
+		return 0;
+
+	room = sc->resident < sc->resident_max
+	     ? sc->resident_max - sc->resident : 0;
+	if (total > room) {
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+		return 0;
+	}
+	in = malloc((size_t)total);
+	if (!in) {
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+		return 0;
+	}
+	sc->resident += total;
+	if (sc->resident > sc->st.peak_resident)
+		sc->st.peak_resident = sc->resident;
+
+	for (i = 0; i < n; i++) {
+		uint64_t len = kof_clip_len(b.n, ext[i].off, ext[i].len);
+
+		if (!len)
+			continue;
+		memcpy(in + at, b.p + ext[i].off, (size_t)len);
+		at += len;
+	}
+
+	st = kof_ovba_decode(in, at, inflate_sink, (void *)ctx, &produced);
+	if (st != KOF_DEC_OK)
+		scan_broken(sc, broken_of_status(st));
+
+	sc->resident -= total;
+	free(in);
+	return produced;
+}
+
 /* Close the object being emitted and start the next. */
 static int c_child(const struct kof_obj_ctx *ctx)
 {
@@ -869,11 +969,13 @@ static void c_name_next(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t le
 	uint64_t n;
 
 	sc->pend_label[0] = 0;
+	sc->pend_label_len = 0;
 	if (!s.n)
 		return;
 	n = s.n < KOF_SRC_LABEL_MAX - 1u ? s.n : KOF_SRC_LABEL_MAX - 1u;
 	memcpy(sc->pend_label, s.p, (size_t)n);
 	sc->pend_label[n] = 0;
+	sc->pend_label_len = (uint32_t)n;
 }
 
 /*
@@ -887,13 +989,13 @@ static void c_name_next(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t le
 static const struct kof_content kof_detect_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, NULL, NULL, NULL, NULL, c_find_str_where,
-	NULL, NULL, c_incomplete
+	NULL, NULL, c_incomplete, NULL
 };
 
 static const struct kof_content kof_unpack_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, c_window, c_emit, c_child, c_unpack,
-	c_find_str_where, c_gather, c_name_next, c_incomplete
+	c_find_str_where, c_gather, c_name_next, c_incomplete, c_unpack_entry
 };
 
 /*
@@ -917,6 +1019,7 @@ void kof_mod_unpack_mode(struct kof_obj_ctx *ctx, int on)
 	 * set it. Otherwise it would be waiting for the next module's first child and
 	 * would label it with an entry from a different object. */
 	kof_scan_of(ctx)->pend_label[0] = 0;
+	kof_scan_of(ctx)->pend_label_len = 0;
 	ctx->content = on ? &kof_unpack_vtable : &kof_detect_vtable;
 }
 
@@ -957,8 +1060,9 @@ void kof_scan_budget(struct kof_scanner *sc, uint64_t obj_size,
 	 * and the object being built both fit, which is what lets a container be
 	 * unpacked one entry at a time.
 	 */
-	sc->obj_cap = sc->resident_max / 2 < KOF_OBJ_CAP ? sc->resident_max / 2
-							 : KOF_OBJ_CAP;
+	sc->obj_cap = opt->max_object_bytes ? opt->max_object_bytes : KOF_OBJ_CAP;
+	if (sc->obj_cap > sc->resident_max / 2)
+		sc->obj_cap = sc->resident_max / 2;
 	if (sc->obj_cap == 0)
 		sc->obj_cap = 1;
 	sc->broken = 0;

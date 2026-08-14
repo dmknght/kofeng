@@ -154,6 +154,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofunpack/pe_rebuild.c \
            libkofeng/kofdecomp/decomp.c \
            libkofeng/kofdecomp/inflate.c \
+           libkofeng/kofdecomp/ovba.c \
            libkofeng/kofdecomp/lzma.c \
            libkofeng/kofdecomp/nrv2.c \
            libkofeng/kofscanners/scan.c \

@@ -33,7 +33,7 @@
  * own, which is why a module never has to check this itself - by the time it
  * runs, the guarantee already holds.
  */
-#define KOFSIG_ABI_VERSION 1
+#define KOFSIG_ABI_VERSION 2
 
 /*
  * How strongly a finding is asserted.
@@ -491,6 +491,26 @@ struct kof_content {
 	 * a packer used a compression method this build has never heard of.
 	 */
 	void (*incomplete)(const struct kof_obj_ctx *, uint32_t reason);
+
+	/*
+	 * Decode one entry of this object into the object being produced.
+	 *
+	 * Gather and decompress in one call, and the two are together because
+	 * neither half is usable alone: `unpack` reads a CONTIGUOUS range of the
+	 * object, and an entry's bytes are a chain - measured over 1322 streams in
+	 * real documents, 23.6% are not consecutive. Joining first and decoding
+	 * after would need somewhere to put the joined bytes, and the only place a
+	 * module has is the child it is building, which is the output.
+	 *
+	 * `index` is into the format's own entry table, so what it means is the
+	 * format's business; the host asks resolve_entry above and never reads a
+	 * view itself.
+	 *
+	 * Returns bytes produced, and does not close the child - a module joining
+	 * two entries into one object is a legitimate thing to want.
+	 */
+	uint64_t (*unpack_entry)(const struct kof_obj_ctx *, uint32_t method,
+				 uint32_t index, uint64_t out_hint);
 };
 
 /*
@@ -523,6 +543,16 @@ enum kof_unp_form {
 
 enum kof_unp_method {
 	KOF_UNP_DEFLATE = 1,   /* RFC 1951; streams, needs no size hint */
+
+	/*
+	 * MS-OVBA 2.4.1, the coding an Office document holds its macros in.
+	 *
+	 * Streams like DEFLATE and needs no size hint, for a reason worth stating:
+	 * a back reference is measured from the start of the current 4096 byte
+	 * chunk and cannot reach past it, so the window is fixed however long the
+	 * stream runs.
+	 */
+	KOF_UNP_OVBA = 2,
 
 	KOF_UNP_NRV2B_8 = 16, KOF_UNP_NRV2B_16, KOF_UNP_NRV2B_32,
 	KOF_UNP_NRV2D_8,      KOF_UNP_NRV2D_16, KOF_UNP_NRV2D_32,
@@ -617,6 +647,25 @@ struct kof_obj_ctx {
 	 */
 	uint32_t (*resolve_scan)(const struct kof_obj_ctx *ctx, uint32_t scan_mask,
 				 struct kof_range *out, uint32_t max_out);
+
+	/*
+	 * Where the bytes of ONE entry are, for a format that has entries.
+	 *
+	 * The same shape as resolve_scan and answering the other question. A region
+	 * is what a byte IS; an entry is what a byte BELONGS TO, and the two are not
+	 * interchangeable: a compound file's macro region is every VBA stream at
+	 * once, while decompressing is a thing done to one stream. Joining the region
+	 * gives a concatenation with no boundaries in it, which is why this exists.
+	 *
+	 * The ranges are in object coordinates and are NOT settled: a stream is a
+	 * chain and its sectors arrive in the order the chain gives, which is the
+	 * order its bytes go back together in. Sorting them would corrupt the stream.
+	 *
+	 * NULL for a format whose entries have no bytes of their own, and for every
+	 * format that has no entries.
+	 */
+	uint32_t (*resolve_entry)(const struct kof_obj_ctx *ctx, uint32_t index,
+				  struct kof_range *out, uint32_t max_out);
 
 	/*
 	 * The parsed structure for format, or NULL if the format has none.
@@ -1050,6 +1099,22 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
  * has nothing sensible to pass and should not have to invent one. */
 #define kof_unpack_deflate(off, len)                                       \
 	kof_unpack_at(KOF_UNP_DEFLATE, (off), (len), 0)
+
+/*
+ * Decode entry `index` of this object into the object being produced.
+ *
+ * For an entry whose bytes are scattered - a compound file stream is a chain, not
+ * a range - which is why this takes an index and not an offset. See `unpack_entry`.
+ *
+ *     kof_name_next(e->name_off, e->name_len);
+ *     if (kof_unpack_entry(KOF_UNP_OVBA, i, 0))
+ *             kof_child();
+ */
+#define kof_unpack_entry(method, index, out_hint)                          \
+	((ctx)->content->unpack_entry ?                                    \
+	 (ctx)->content->unpack_entry((ctx), (uint32_t)(method),            \
+				      (uint32_t)(index),                   \
+				      (uint64_t)(out_hint)) : 0)
 
 /*
  * Report that this object was not fully examined.
