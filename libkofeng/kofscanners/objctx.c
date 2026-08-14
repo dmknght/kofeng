@@ -300,6 +300,17 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 {
 	if (!kid)
 		return 0;
+	/*
+	 * The pending name belongs to this child and to no other. Consumed whatever
+	 * happens next - even if the child is then refused for a limit - because a
+	 * name that survived a refusal would be attached to the following child,
+	 * which is the one way this could report the wrong entry.
+	 */
+	if (sc->pend_label[0]) {
+		kof_src_label(kid, (const uint8_t *)sc->pend_label,
+			      strlen(sc->pend_label));
+		sc->pend_label[0] = 0;
+	}
 	if (sc->kids_left == 0) {
 		/* Refused, and recorded: a container that yields more children than
 		 * the caller allows has not been fully examined, and saying so is
@@ -842,6 +853,30 @@ static uint64_t c_gather(const struct kof_obj_ctx *ctx, uint32_t mask, uint64_t 
 }
 
 /*
+ * Name the next child, from bytes in the object being unpacked.
+ *
+ * A bounded copy and nothing else. Making the bytes safe to print is NOT done here:
+ * it happens once, in kof_src_label, which is the only way a label is ever set. Two
+ * places doing it would look like defence in depth and would be the opposite - with
+ * both present, breaking either one changes nothing observable, so neither is
+ * covered by a test and neither can be shown to work. One place, and the test that
+ * mutates it fails.
+ */
+static void c_name_next(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t len)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	kof_buf s = kof_slice(mc(ctx)->data, off, len);
+	uint64_t n;
+
+	sc->pend_label[0] = 0;
+	if (!s.n)
+		return;
+	n = s.n < KOF_SRC_LABEL_MAX - 1u ? s.n : KOF_SRC_LABEL_MAX - 1u;
+	memcpy(sc->pend_label, s.p, (size_t)n);
+	sc->pend_label[n] = 0;
+}
+
+/*
  * Two vtables, differing only in whether the producer entries are there.
  *
  * A detector gets NULLs, so kof_emit and kof_child_window answer zero for it, and
@@ -852,13 +887,13 @@ static uint64_t c_gather(const struct kof_obj_ctx *ctx, uint32_t mask, uint64_t 
 static const struct kof_content kof_detect_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, NULL, NULL, NULL, NULL, c_find_str_where,
-	NULL, c_incomplete
+	NULL, NULL, c_incomplete
 };
 
 static const struct kof_content kof_unpack_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, c_window, c_emit, c_child, c_unpack,
-	c_find_str_where, c_gather, c_incomplete
+	c_find_str_where, c_gather, c_name_next, c_incomplete
 };
 
 /*
@@ -878,6 +913,10 @@ void kof_mod_attach(struct kof_obj_ctx *ctx, struct kof_scanner *sc)
 /* Swap in the producing surface for the length of one unpacker. */
 void kof_mod_unpack_mode(struct kof_obj_ctx *ctx, int on)
 {
+	/* A name set for a child that was never produced dies with the module that
+	 * set it. Otherwise it would be waiting for the next module's first child and
+	 * would label it with an entry from a different object. */
+	kof_scan_of(ctx)->pend_label[0] = 0;
 	ctx->content = on ? &kof_unpack_vtable : &kof_detect_vtable;
 }
 

@@ -306,6 +306,11 @@ static int zip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 	return kof_zip_parse(b, (struct kof_zip_info *)v, c);
 }
 
+static int tar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_tar_parse(b, (struct kof_tar_info *)v, c);
+}
+
 static const struct parser parsers[] = {
 	{ KOF_FMT_ELF,  (uint32_t)sizeof(struct kof_elf_info),
 	  kof_elf_sniff,  elf_parse_thunk  },
@@ -321,7 +326,9 @@ static const struct parser parsers[] = {
 	 * which VIEW to allocate - and both share one.
 	 */
 	{ KOF_FMT_ZIP, (uint32_t)sizeof(struct kof_zip_info),
-	  kof_zip_sniff, zip_parse_thunk }
+	  kof_zip_sniff, zip_parse_thunk },
+	{ KOF_FMT_TAR, (uint32_t)sizeof(struct kof_tar_info),
+	  kof_tar_sniff, tar_parse_thunk }
 };
 
 /*
@@ -651,8 +658,29 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 					stack = nv;
 					cap = nc;
 				}
-				snprintf(kid, sizeof kid, "%s//%u",
-					 name ? name : "?", i);
+				/*
+				 * The index AND the name, not the name alone.
+				 *
+				 * An index on its own says nothing about which of
+				 * fifty entries was found, which is what this used
+				 * to print. A name on its own is not unique: an
+				 * archive may hold two entries with the same name,
+				 * and sanitising two different names can collapse
+				 * them into one string. Together they are always
+				 * exactly one entry.
+				 */
+				{
+					const char *lab =
+						kof_src_label_of(w->sc->kids[i]);
+
+					if (*lab)
+						snprintf(kid, sizeof kid,
+							 "%s//%u:%s",
+							 name ? name : "?", i, lab);
+					else
+						snprintf(kid, sizeof kid, "%s//%u",
+							 name ? name : "?", i);
+				}
 				stack[n].src = kof_src_ref(w->sc->kids[i]);
 				stack[n].name = kof_strdup_n(kid, strlen(kid));
 				stack[n].depth = depth + 1;

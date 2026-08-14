@@ -42,6 +42,7 @@
 #include "../../libkofeng/kofparsers/containers/gzip_parse.h"
 #include "../../libkofeng/kofparsers/containers/docole_parse.h"
 #include "../../libkofeng/kofparsers/containers/zip_parse.h"
+#include "../../libkofeng/kofparsers/containers/tar_parse.h"
 
 struct tally {
 	uint64_t objects, failures;
@@ -122,7 +123,8 @@ static int check(const char *path, kof_buf buf, struct kof_obj_ctx *ctx,
 }
 
 static void one_file(const char *path, struct tally *elf, struct tally *pe,
-		     struct tally *gz, struct tally *ole, struct tally *zip)
+		     struct tally *gz, struct tally *ole, struct tally *zip,
+		     struct tally *tar)
 {
 	struct kof_obj_ctx ctx;
 	struct kof_elf_info *ei;
@@ -130,6 +132,7 @@ static void one_file(const char *path, struct tally *elf, struct tally *pe,
 	struct kof_gzip_info *gi;
 	struct kof_docole_info *oi;
 	struct kof_zip_info *zi;
+	struct kof_tar_info *ti;
 	struct stat st;
 	void *map;
 	int fd;
@@ -195,13 +198,23 @@ static void one_file(const char *path, struct tally *elf, struct tally *pe,
 					KOF_ZIP_REGION_COUNT, "zip");
 			}
 			free(zi);
+		} else if (kof_tar_sniff(buf)) {
+			ti = malloc(sizeof *ti);
+			if (ti && kof_tar_parse(buf, ti, &ctx)) {
+				tar->objects++;
+				tar->failures += (uint64_t)check(path, buf, &ctx,
+					kof_tar_region_bits,
+					KOF_TAR_REGION_COUNT, "tar");
+			}
+			free(ti);
 		}
 	}
 	munmap(map, (size_t)st.st_size);
 }
 
 static void walk(const char *dir, struct tally *elf, struct tally *pe,
-		 struct tally *gz, struct tally *ole, struct tally *zip)
+		 struct tally *gz, struct tally *ole, struct tally *zip,
+		     struct tally *tar)
 {
 	DIR *d = opendir(dir);
 	struct dirent *de;
@@ -215,7 +228,7 @@ static void walk(const char *dir, struct tally *elf, struct tally *pe,
 		if ((size_t)snprintf(path, sizeof path, "%s/%s", dir, de->d_name)
 		    >= sizeof path)
 			continue;
-		one_file(path, elf, pe, gz, ole, zip);
+		one_file(path, elf, pe, gz, ole, zip, tar);
 	}
 	closedir(d);
 }
@@ -238,18 +251,18 @@ int main(int argc, char **argv)
 		"/usr/share/man/man1", "/usr/share/i18n/charmaps"
 	};
 	struct tally elf = { 0, 0 }, pe = { 0, 0 }, gz = { 0, 0 },
-		     ole = { 0, 0 }, zip = { 0, 0 };
+		     ole = { 0, 0 }, zip = { 0, 0 }, tar = { 0, 0 };
 	int i;
 
 	if (argc > 1)
 		for (i = 1; i < argc; i++)
-			walk(argv[i], &elf, &pe, &gz, &ole, &zip);
+			walk(argv[i], &elf, &pe, &gz, &ole, &zip, &tar);
 	else
 		for (i = 0; i < (int)(sizeof defaults / sizeof defaults[0]); i++)
-			walk(defaults[i], &elf, &pe, &gz, &ole, &zip);
+			walk(defaults[i], &elf, &pe, &gz, &ole, &zip, &tar);
 
 	printf("partition: ELF %llu/%llu  PE %llu/%llu  gzip %llu/%llu  "
-	       "docole %llu/%llu  zip %llu/%llu",
+	       "docole %llu/%llu  zip %llu/%llu  tar %llu/%llu",
 	       (unsigned long long)(elf.objects - elf.failures),
 	       (unsigned long long)elf.objects,
 	       (unsigned long long)(pe.objects - pe.failures),
@@ -259,13 +272,15 @@ int main(int argc, char **argv)
 	       (unsigned long long)(ole.objects - ole.failures),
 	       (unsigned long long)ole.objects,
 	       (unsigned long long)(zip.objects - zip.failures),
-	       (unsigned long long)zip.objects);
+	       (unsigned long long)zip.objects,
+	       (unsigned long long)(tar.objects - tar.failures),
+	       (unsigned long long)tar.objects);
 	if (elf.objects == 0 && pe.objects == 0 && gz.objects == 0 &&
-	    ole.objects == 0 && zip.objects == 0) {
+	    ole.objects == 0 && zip.objects == 0 && tar.objects == 0) {
 		printf("  (no objects found - nothing tested)\n");
 		return 0;
 	}
 	printf("\n");
 	return (elf.failures || pe.failures || gz.failures || ole.failures ||
-		zip.failures) ? 1 : 0;
+		zip.failures || tar.failures) ? 1 : 0;
 }

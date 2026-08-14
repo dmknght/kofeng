@@ -89,12 +89,14 @@
 #include <kofmod/gzip.h>
 #include <kofmod/docole.h>
 #include <kofmod/zip.h>
+#include <kofmod/tar.h>
 
 #include "../libkofeng/kofparsers/binaries/elf_parse.h"
 #include "../libkofeng/kofparsers/binaries/pe_parse.h"
 #include "../libkofeng/kofparsers/containers/gzip_parse.h"
 #include "../libkofeng/kofparsers/containers/docole_parse.h"
 #include "../libkofeng/kofparsers/containers/zip_parse.h"
+#include "../libkofeng/kofparsers/containers/tar_parse.h"
 
 /*
  * What one format offers a tool: how to recognise it, how to parse it, how big
@@ -151,6 +153,11 @@ static int docole_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 static int zip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
 	return kof_zip_parse(b, (struct kof_zip_info *)v, c);
+}
+
+static int tar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_tar_parse(b, (struct kof_tar_info *)v, c);
 }
 
 static int pe_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
@@ -498,6 +505,59 @@ static const char *subtype_name(uint8_t fmt, uint8_t sub)
 	return 0;
 }
 
+/*
+ * What a tar holds. The entry table is the display for the reason a zip's is: the
+ * evidence in an archive IS its entries, and a total hides the one row that matters.
+ */
+static void print_tar(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
+{
+	const struct kof_tar_info *t = v;
+	uint32_t i, shown = 0;
+
+	(void)ctx;
+
+	printf("  entries   %u: %u file(s), %u dir(s), %u link(s)\n",
+	       t->n_entries, t->n_files, t->n_dirs, t->n_links);
+	printf("  declared  %llu bytes of content%s\n",
+	       (unsigned long long)t->total_size,
+	       t->end_off ? "" : "   <- no end blocks: cut short");
+
+	for (i = 0; i < t->n_entries; i++) {
+		const struct kof_tar_entry *e = &t->entry[i];
+		uint32_t k;
+
+		if (shown >= 12u && !e->suspicious)
+			continue;
+		shown++;
+		printf("    [%3u] %c %9llu @%-9llu ", i,
+		       e->typeflag ? (char)e->typeflag : '0',
+		       (unsigned long long)e->size,
+		       (unsigned long long)e->data_off);
+		for (k = 0; k < e->name_len && k < 60u &&
+		     kof_in_range(buf, e->name_off + k, 1); k++) {
+			uint8_t c = buf.p[e->name_off + k];
+
+			putchar(c >= 0x20 && c < 0x7f ? (int)c : '.');
+		}
+		if (e->suspicious & KOF_TAR_ENT_TRAVERSAL)
+			printf("   <- ESCAPES THE EXTRACT ROOT");
+		if (e->suspicious & KOF_TAR_ENT_PAST_EOF)
+			printf("   <- content is not in this file");
+		if (e->suspicious & KOF_TAR_ENT_SLACK)
+			printf("   <- padding is not zeroes");
+		if (e->suspicious & KOF_TAR_ENT_BAD_SUM)
+			printf("   <- checksum disagrees");
+		printf("\n");
+	}
+	if (t->n_entries > shown)
+		printf("    ... %u more\n", t->n_entries - shown);
+}
+
+static uint64_t anom_tar(const void *v)
+{
+	return ((const struct kof_tar_info *)v)->anomalies;
+}
+
 static const struct fmt formats[] = {
 	{ (uint32_t)sizeof(struct kof_elf_info), kof_elf_sniff, elf_parse_thunk,
 	  kof_elf_region_bits, KOF_ELF_REGION_COUNT,
@@ -514,7 +574,10 @@ static const struct fmt formats[] = {
 	  anom_docole },
 	{ (uint32_t)sizeof(struct kof_zip_info), kof_zip_sniff, zip_parse_thunk,
 	  kof_zip_region_bits, KOF_ZIP_REGION_COUNT,
-	  kof_zip_region_name, kof_zip_anomaly_name, print_zip, anom_zip }
+	  kof_zip_region_name, kof_zip_anomaly_name, print_zip, anom_zip },
+	{ (uint32_t)sizeof(struct kof_tar_info), kof_tar_sniff, tar_parse_thunk,
+	  kof_tar_region_bits, KOF_TAR_REGION_COUNT,
+	  kof_tar_region_name, kof_tar_anomaly_name, print_tar, anom_tar }
 };
 
 /*

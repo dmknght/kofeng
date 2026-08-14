@@ -77,6 +77,10 @@ KOF_DEFINE_UNPACK
 		if (e->suspicious & KOF_ZIP_ENT_ENCRYPTED)
 			continue;      /* counted by the parse, reported below */
 
+		/* What this entry is called, for the report. The name is in the
+		 * archive; the host reads it and makes it safe to print. */
+		kof_name_next(e->name_off, e->name_len);
+
 		if (e->method == KOF_ZIP_M_STORE) {
 			/* Free: the child is a view of bytes that already exist. */
 			if (!kof_child_window(e->data_off, e->csize))

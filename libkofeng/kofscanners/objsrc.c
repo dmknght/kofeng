@@ -46,7 +46,39 @@ struct kof_objsrc {
 	 * give the memory back to whatever account it came from. */
 	void             (*on_free)(void *, uint64_t);
 	void              *on_free_arg;
+
+	/* What this object is called, sanitised, or empty. Reporting only. */
+	char               label[KOF_SRC_LABEL_MAX];
 };
+
+/*
+ * Copy a name in, keeping only what is safe to print.
+ *
+ * Printable ASCII survives; everything else becomes a dot. That covers the two
+ * things that matter and it covers them by construction rather than by listing
+ * them: a terminal escape sequence cannot survive because ESC is not printable,
+ * and a newline cannot split a record because it is not either.
+ */
+void kof_src_label(struct kof_objsrc *s, const uint8_t *p, uint64_t len)
+{
+	uint64_t i, n;
+
+	if (!s)
+		return;
+	if (!p || !len) {
+		s->label[0] = 0;
+		return;
+	}
+	n = len < KOF_SRC_LABEL_MAX - 1u ? len : KOF_SRC_LABEL_MAX - 1u;
+	for (i = 0; i < n; i++)
+		s->label[i] = (p[i] >= 0x20 && p[i] < 0x7f) ? (char)p[i] : '.';
+	s->label[n] = 0;
+}
+
+const char *kof_src_label_of(const struct kof_objsrc *s)
+{
+	return s && s->label[0] ? s->label : "";
+}
 
 static struct kof_objsrc *src_new(void)
 {

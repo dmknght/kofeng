@@ -35,7 +35,10 @@
  * filesystem without O_TMPFILE creates a name and unlinks it immediately, which
  * gets the same property one syscall later.
  *
- * The entry name from the archive is never used for anything but reporting.
+ * The entry name from the archive is never used for anything but reporting. It is
+ * carried on the source as a LABEL - already sanitised to printable ASCII by the
+ * host that read it - and the only thing that ever consumes it is the string a
+ * finding is printed with. Nothing opens it, joins it to a path, or compares it.
  */
 
 #ifndef KOFENG_OBJSRC_H
@@ -62,6 +65,23 @@ struct kof_objsrc *kof_src_file(const char *path, int *err);
  *
  * NULL if the range is empty after clipping - there is no object there.
  */
+/*
+ * How much of a child's name is kept for reporting.
+ *
+ * Names are short in practice - measured over 28316 tar entries the median is 26
+ * characters and the format's own field caps at 100 - so this holds nearly all of
+ * them whole. A longer one is cut rather than allowed to push the path it belongs
+ * to off the line.
+ */
+#define KOF_SRC_LABEL_MAX 96u
+
+/* Sanitise `len` bytes at `p` into the source's label. Non-printable bytes become
+ * '.', which is what keeps a terminal escape in an archive out of a report. */
+void kof_src_label(struct kof_objsrc *, const uint8_t *p, uint64_t len);
+
+/* The label, or "" when the source has none. Never NULL. */
+const char *kof_src_label_of(const struct kof_objsrc *);
+
 struct kof_objsrc *kof_src_window(struct kof_objsrc *parent, uint64_t off,
 				  uint64_t len);
 

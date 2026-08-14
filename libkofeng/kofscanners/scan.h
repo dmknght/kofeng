@@ -23,6 +23,7 @@
 #include "../kofparsers/containers/gzip_parse.h"
 #include "../kofparsers/containers/docole_parse.h"
 #include "../kofparsers/containers/zip_parse.h"
+#include "../kofparsers/containers/tar_parse.h"
 #include "objsrc.h"
 #include "../kofdecomp/inflate.h"
 #include "../kofdecomp/nrv2.h"
@@ -97,6 +98,16 @@ struct kof_scanner {
 	struct kof_objsrc  *cur_src;
 	struct kof_objsrc **kids;
 	uint32_t            n_kids, cap_kids;
+
+	/*
+	 * What the next child produced should be called, already sanitised.
+	 *
+	 * Held here rather than passed to each producer because there are two ways to
+	 * make a child and a module names them the same way whichever it uses. Cleared
+	 * as it is consumed, and cleared when a module returns, so a name set for a
+	 * child that never appeared cannot drift onto the following one.
+	 */
+	char pend_label[KOF_SRC_LABEL_MAX];
 
 	/* The object being emitted, before it becomes a child. Heap while it is
 	 * small, an unnamed temporary file once it is not - see objsrc.h. */

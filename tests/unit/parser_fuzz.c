@@ -39,6 +39,7 @@
 #include "../../libkofeng/kofparsers/containers/gzip_parse.h"
 #include "../../libkofeng/kofparsers/containers/docole_parse.h"
 #include "../../libkofeng/kofparsers/containers/zip_parse.h"
+#include "../../libkofeng/kofparsers/containers/tar_parse.h"
 
 #define OBJ_MAX 8192
 #define ROUNDS  20000
@@ -368,6 +369,73 @@ static uint64_t gen_zip(uint8_t *b)
 	return n;
 }
 
+/*
+ * A tar, with the fields that decide where the next header is made hostile.
+ *
+ * There is only one of those and it is the size: it moves the cursor, and every
+ * other field is inert. So the sizes are drawn from a set that includes an ordinary
+ * value, zero, a size that runs past the end, one with the leading-space padding
+ * that a first attempt at this parser read as zero, and the GNU binary form whose
+ * top bit turns it into a 64 bit number.
+ *
+ * The checksum is left wrong most of the time on purpose: it is recorded and not
+ * enforced, so a fuzzer that always wrote a correct one would never exercise the
+ * path where a block is treated as a header despite disagreeing with itself.
+ */
+static uint64_t gen_tar(uint8_t *b)
+{
+	uint64_t n = 512u + (rnd() % 12u) * 512u;
+	uint64_t at = 0;
+	uint32_t k;
+
+	memset(b, 0, OBJ_MAX);
+
+	while (at + 512u <= n) {
+		uint32_t sz;
+
+		for (k = 0; k < 512u; k++)
+			b[at + k] = (uint8_t)((rnd() % 4u) ? 0 : rnd());
+
+		memcpy(b + at + 257u, (rnd() % 8u) ? "ustar" : "usTar", 5);
+		for (k = 0; k < 12u && rnd() % 3u; k++)
+			b[at + k] = (uint8_t)('a' + (rnd() % 26));
+		b[at + 156u] = (uint8_t)("05122LxKZ"[rnd() % 9]);
+
+		switch (rnd() % 6u) {
+		case 0:  sz = 0; break;
+		case 1:  sz = (uint32_t)(rnd() % 2000u); break;
+		case 2:  sz = 0x7fffffffu; break;            /* past the end */
+		case 3:  sz = (uint32_t)(rnd() % 512u); break;
+		case 4:                                      /* GNU binary form */
+			b[at + 124u] = 0x80u;
+			b[at + 134u] = (uint8_t)rnd();
+			b[at + 135u] = (uint8_t)rnd();
+			sz = 0;
+			break;
+		default: sz = (uint32_t)(rnd() % 100u); break;
+		}
+		if (sz != 0 || (rnd() % 2u)) {
+			/* Left padded with spaces, which is the spelling that broke
+			 * this parser on real archives. */
+			char tmp[13];
+			int len = snprintf(tmp, sizeof tmp, "%11o ", sz);
+
+			if (len == 12 && !(b[at + 124u] & 0x80u))
+				memcpy(b + at + 124u, tmp, 12);
+		}
+		if (rnd() % 4u == 0)
+			memcpy(b + at + 148u, "011234\0 ", 8);  /* a plausible sum */
+
+		at += 512u + (uint64_t)sz;
+		at += (512u - (at % 512u)) % 512u;
+		if (at > n)
+			break;
+		if (rnd() % 5u == 0)
+			break;      /* stop early: an archive with no end blocks */
+	}
+	return n;
+}
+
 static uint64_t gen_gzip(uint8_t *b)
 {
 	uint64_t n = 4 + rnd() % 300;
@@ -432,17 +500,18 @@ int main(int argc, char **argv)
 	struct kof_gzip_info *gi = malloc(sizeof *gi);
 	struct kof_docole_info *oi = malloc(sizeof *oi);
 	struct kof_zip_info *zi = malloc(sizeof *zi);
+	struct kof_tar_info *ti = malloc(sizeof *ti);
 	struct pc_report rep = { 0, 0, 0 };
 	uint64_t rounds = ROUNDS, seed = 20240101u;
 	uint64_t r, pe_parsed = 0, elf_parsed = 0, gz_parsed = 0, ole_parsed = 0,
-		 zip_parsed = 0;
+		 zip_parsed = 0, tar_parsed = 0;
 	char what[64];
 
 	if (argc > 1)
 		seed = strtoull(argv[1], 0, 0);
 	if (argc > 2)
 		rounds = strtoull(argv[2], 0, 0);
-	if (!ei || !pi || !gi || !oi || !zi)
+	if (!ei || !pi || !gi || !oi || !zi || !ti)
 		return 1;
 
 	rng_state = seed ? seed : 1;
@@ -450,12 +519,13 @@ int main(int argc, char **argv)
 	for (r = 0; r < rounds; r++) {
 		struct kof_obj_ctx ctx;
 		uint64_t n;
-		int want = (int)(rnd() % 5);   /* PE, ELF, gzip, docole, zip */
+		int want = (int)(rnd() % 6);   /* PE, ELF, gzip, docole, zip, tar */
 
 		memset(&ctx, 0, sizeof ctx);
 		n = want == 0 ? gen_pe(obj) : want == 1 ? gen_elf(obj)
 			: want == 2 ? gen_gzip(obj)
-			: want == 3 ? gen_docole(obj) : gen_zip(obj);
+			: want == 3 ? gen_docole(obj)
+			: want == 4 ? gen_zip(obj) : gen_tar(obj);
 		{
 			kof_buf buf = kof_buf_make(obj, n);
 
@@ -463,7 +533,8 @@ int main(int argc, char **argv)
 				 (unsigned long long)seed, (unsigned long long)r,
 				 want == 0 ? "PE" : want == 1 ? "ELF"
 				 : want == 2 ? "gzip"
-				 : want == 3 ? "docole" : "zip");
+				 : want == 3 ? "docole"
+				 : want == 4 ? "zip" : "tar");
 
 			if (want == 0 && kof_pe_sniff(buf)) {
 				if (kof_pe_parse(buf, pi, &ctx)) {
@@ -495,6 +566,12 @@ int main(int argc, char **argv)
 					pc_check(what, &ctx, n, kof_zip_region_bits,
 						 KOF_ZIP_REGION_COUNT, &rep);
 				}
+			} else if (want == 5 && kof_tar_sniff(buf)) {
+				if (kof_tar_parse(buf, ti, &ctx)) {
+					tar_parsed++;
+					pc_check(what, &ctx, n, kof_tar_region_bits,
+						 KOF_TAR_REGION_COUNT, &rep);
+				}
 			}
 		}
 	}
@@ -504,12 +581,14 @@ int main(int argc, char **argv)
 	free(gi);
 	free(oi);
 	free(zi);
+	free(ti);
 	printf("hostile headers: %llu round(s), parsed ELF %llu PE %llu gzip %llu "
-	       "docole %llu zip %llu, partition %llu/%llu\n",
+	       "docole %llu zip %llu tar %llu, partition %llu/%llu\n",
 	       (unsigned long long)rounds, (unsigned long long)elf_parsed,
 	       (unsigned long long)pe_parsed, (unsigned long long)gz_parsed,
 	       (unsigned long long)ole_parsed,
 	       (unsigned long long)zip_parsed,
+	       (unsigned long long)tar_parsed,
 	       (unsigned long long)(rep.checked - rep.failed),
 	       (unsigned long long)rep.checked);
 	return rep.failed != 0;

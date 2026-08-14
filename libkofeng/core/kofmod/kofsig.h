@@ -100,9 +100,19 @@ enum kof_format {
 	KOF_FMT_ZIP     = 8,
 	KOF_FMT_DOCZIP  = 9,
 
+	/*
+	 * An archive with no compression in it at all.
+	 *
+	 * Its own format rather than a kind of ZIP because nothing about reading it
+	 * is shared: no central directory, no methods, no end record - a stream of
+	 * fixed blocks. It is here almost entirely because of what it arrives inside:
+	 * 268 of 295 gzip files in the measured collection hold one.
+	 */
+	KOF_FMT_TAR     = 10,
+
 	/* One past the last, so a host can size a per-format table. Not a format:
 	 * nothing is ever this. */
-	KOF_FMT_COUNT   = 10
+	KOF_FMT_COUNT   = 11
 };
 
 /*
@@ -154,6 +164,7 @@ static inline const char *kof_format_name(uint8_t fmt)
 	case KOF_FMT_DOCOLE: return "DocOLE";
 	case KOF_FMT_ZIP:    return "Zip";
 	case KOF_FMT_DOCZIP: return "DocZip";
+	case KOF_FMT_TAR:    return "Tar";
 	default:             return "Unknown";
 	}
 }
@@ -407,6 +418,33 @@ struct kof_content {
 	 */
 	uint64_t (*gather)(const struct kof_obj_ctx *, uint32_t region_mask,
 			   uint64_t cap);
+
+	/*
+	 * Name the NEXT child this module produces.
+	 *
+	 * Given as a range in THIS object, never as a string: the name is already in
+	 * the file - an archive entry name, a stored filename - so a module says
+	 * where it is and the host reads it, which is the same idiom unpack() and
+	 * find_str_where() use. A module has no writable data to build a string in
+	 * anyway.
+	 *
+	 * One call rather than a named variant of each producer, because there are
+	 * two ways to make a child - a window and an emit - and a format that stores
+	 * some entries and compresses others uses both for entries that are named the
+	 * same way. Stamping the next child covers both and covers whatever producer
+	 * is added later.
+	 *
+	 * The host SANITISES what it reads, and that is not decoration. The name was
+	 * written by whoever built the file and it ends up in a report, a log, maybe
+	 * a web page: a terminal escape inside it can forge an entire output line,
+	 * and a newline splits one record into two. A scanner that prints archive
+	 * names verbatim is a scanner whose report is written by the thing it is
+	 * scanning.
+	 *
+	 * Cleared once used, and cleared when the module returns - a name set for a
+	 * child that was never produced does not drift onto the next one.
+	 */
+	void (*name_next)(const struct kof_obj_ctx *, uint64_t off, uint64_t len);
 
 	/*
 	 * "I stopped before I was finished."
@@ -942,6 +980,21 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 
 /* Bounded by the host's ceiling alone. */
 #define kof_gather(region_mask) kof_gather_max((region_mask), 0)
+
+/*
+ * Name the next child, from bytes already in this object.
+ *
+ *     kof_name_next(e->name_off, e->name_len);
+ *     kof_child_window(e->data_off, e->size);
+ *
+ * Reporting only. Nothing in the engine reads a child's name back, and nothing
+ * ever opens a path built from one - see the note in objsrc.h on why the produced
+ * objects have no filename at all.
+ */
+#define kof_name_next(off, len)                                            \
+	((void)((ctx)->content->name_next ?                                \
+		((ctx)->content->name_next((ctx), (uint64_t)(off),         \
+					   (uint64_t)(len)), 0) : 0))
 
 /*
  * Decompress a DEFLATE stream at off into the object being produced.

@@ -46,17 +46,33 @@ struct seen {
 	uint64_t incomplete;
 	uint64_t bytes;      /* every object scanned, summed: what was produced */
 	uint64_t peak;       /* the most produced data alive at once */
+	int      unprintable;/* a reported name carried a byte it should not have */
 };
 
 static int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user)
 {
 	struct seen *s = user;
+	const char *c;
 
-	(void)name;
 	(void)bytes;
 	(void)len;
 	s->objects++;
+
+	/*
+	 * Nothing outside printable ASCII may reach a report.
+	 *
+	 * The name of a child comes from inside the object - an archive entry name -
+	 * so it is written by whoever built the file. A terminal escape in it forges
+	 * an entire output line and a newline splits one log record into two, which
+	 * makes this the one place where the thing being scanned could write the
+	 * scanner's output. Checked on EVERY object rather than only the case below,
+	 * so a future producer that forgets to sanitise fails here.
+	 */
+	for (c = name; c && *c; c++)
+		if ((unsigned char)*c < 0x20 || (unsigned char)*c >= 0x7f)
+			s->unprintable = 1;
+	
 	/* Any reason counts here: what these cases assert is that the object was
 	 * not reported clean, not which of the three explanations applied. */
 	s->incomplete += res->broken ? 1u : 0u;
@@ -81,6 +97,31 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
  */
 #define GATHER_OBJ 3000000u
 #define GATHER_CAP 1500000u
+
+/*
+ * A name no report should print as it stands: a terminal escape that would erase
+ * the line and write a different verdict, and a newline that would split the record.
+ * Placed at the front of the large object so a module can name it as a range.
+ */
+#define EVIL_OFF 0u
+#define EVIL_LEN 24u
+static const char evil_name[EVIL_LEN] =
+	"\033[2K\rOK  /etc/passwd\n\007x";
+
+/*
+ * Name a child from bytes that must not survive being printed.
+ *
+ * The module does what a real archive unpacker does - points at a name inside the
+ * object and produces a child - and the assertion is on what came out the other
+ * end, because sanitising is the host's job and a module cannot be trusted to do
+ * it. The check itself is in on_object, over every object.
+ */
+static void mod_evilname(const struct kof_obj_ctx *ctx)
+{
+	(void)ctx;
+	kof_name_next(EVIL_OFF, EVIL_LEN);
+	kof_child_window(0, 64);
+}
 
 static void mod_gather(const struct kof_obj_ctx *ctx)
 {
@@ -311,8 +352,11 @@ int main(void)
 		uint32_t k;
 
 		memset(pad, 'G', sizeof pad);
-		for (k = 0; k < GATHER_OBJ / sizeof pad; k++)
+		memcpy(pad, evil_name, EVIL_LEN);
+		for (k = 0; k < GATHER_OBJ / sizeof pad; k++) {
 			fwrite(pad, 1, sizeof pad, f);
+			memset(pad, 'G', EVIL_LEN);   /* only the first block */
+		}
 		fwrite(pad, 1, GATHER_OBJ % sizeof pad, f);
 	}
 	fclose(f);
@@ -498,11 +542,22 @@ int main(void)
 	expect("gather", s.objects == 3,
 	       "a gather returned a length other than the cap and the region");
 
+	/* --- a child name that must not be printable as it stands --- */
+	opt.max_depth = 1;
+	opt.max_children = 0;
+	opt.max_produced_bytes = 1u << 20;
+	run_at(big_path, "evil-name", mod_evilname, &opt, &s);
+	trace("evil-name", &s);
+	expect("evil-name", s.objects == 2,
+	       "the named child was not produced");
+	expect("evil-name", !s.unprintable,
+	       "a control byte from inside the object reached the report");
+
 	unlink(big_path);
 	unlink(obj_path);
 	rmdir(root);
 
-	printf("budget: bomb, stream, siblings, wide, window, gather and dangling %s\n",
+	printf("budget: bomb, stream, siblings, wide, window, gather, names and dangling %s\n",
 	       failures ? "FAILED" : "ok");
 	return failures != 0;
 }

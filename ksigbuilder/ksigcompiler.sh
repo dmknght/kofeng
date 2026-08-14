@@ -175,7 +175,7 @@ case "$targets" in
 	ntargets=$fmt_count
 	;;
 esac
-[ "$target_mask" -eq 0 ] && for t in UNKNOWN ELF PE MACHO SCRIPT TEXT GZIP DOCOLE ZIP DOCZIP; do
+[ "$target_mask" -eq 0 ] && for t in UNKNOWN ELF PE MACHO SCRIPT TEXT GZIP DOCOLE ZIP DOCZIP TAR; do
 	case "$targets" in
 	*KOF_FMT_$t*)
 		case $t in
@@ -189,6 +189,7 @@ esac
 		DOCOLE)  bit=128 ;;
 		ZIP)     bit=256 ;;
 		DOCZIP)  bit=512 ;;
+		TAR)     bit=1024 ;;
 		esac
 		target_mask=$((target_mask | bit))
 		ntargets=$((ntargets + 1))
@@ -215,7 +216,7 @@ fi
 # ever fired. They were not weak checks, they were absent ones, which is the
 # failure mode a check that cannot be seen to run always has. One list, so a
 # format added here cannot be half-added.
-fmt_hdrs="elf:2 pe:4 macho:8 gzip:64 docole:128"
+fmt_hdrs="elf:2 pe:4 macho:8 gzip:64 docole:128 tar:1024"
 # zip.h is deliberately absent: it is the one header two formats share, because a
 # zip and a zip that is a document differ in what is INSIDE them and not in how
 # they are read. The one-header-one-format rule below would refuse a module that
