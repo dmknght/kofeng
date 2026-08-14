@@ -196,6 +196,18 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 		REFUSE("smaller than a pack header");
 	if (h->magic != KOF_PACK_MAGIC)
 		REFUSE("not a pack");
+	/*
+	 * The ABI before anything else that reads the pack's contents.
+	 *
+	 * A pack whose modules expect a newer vtable than this host has would call
+	 * through a slot the host never filled. Nothing later in this function would
+	 * notice - the layout is fine, the checksum is fine, the code loads - and the
+	 * failure appears only when a module runs, as a call into whatever happens to
+	 * follow the struct.
+	 */
+	if (h->abi_version > KOFSIG_ABI_VERSION)
+		REFUSE("modules need ABI %u, this engine provides %u",
+		       h->abi_version, (unsigned)KOFSIG_ABI_VERSION);
 	if (h->version != KOF_PACK_VERSION)
 		REFUSE("pack version %u, this engine reads %u", h->version,
 		       KOF_PACK_VERSION);

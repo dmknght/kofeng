@@ -46,6 +46,7 @@
 
 #include "zip_parse.h"
 #include "../runlist.h"
+#include "../entryname.h"
 
 #include <string.h>
 
@@ -74,8 +75,6 @@
 #define C_LOCAL_OFF 0x2au
 
 /* Local file header. */
-#define L_FLAGS     0x06u
-#define L_METHOD    0x08u
 #define L_NAME_LEN  0x1au
 #define L_EXTRA_LEN 0x1cu
 
@@ -149,42 +148,6 @@ static int name_is(kof_buf f, uint64_t off, uint32_t len, const char *lit)
 	return 1;
 }
 
-/*
- * Does this name escape the directory it will be extracted into?
- *
- * Three ways, and all three are seen in the wild: an absolute path, a Windows drive
- * letter, and a ".." component. The last is checked as a COMPONENT rather than as a
- * substring, because a file honestly called "..config" contains ".." and escapes
- * nothing - matching the substring would make this fire on ordinary archives and
- * stop being read.
- *
- * Backslash counts as a separator as well as slash. The specification says names
- * use forward slashes, which is exactly why an attacker uses the other one: a
- * checker that only knows about "/" is bypassed by a name Windows still splits.
- */
-static int name_escapes(kof_buf f, uint64_t off, uint32_t len)
-{
-	uint32_t i, start = 0;
-
-	if (!len || !kof_in_range(f, off, len))
-		return 0;
-	if (f.p[off] == '/' || f.p[off] == '\\')
-		return 1;
-	if (len >= 2 && f.p[off + 1] == ':')
-		return 1;
-
-	for (i = 0; i <= len; i++) {
-		int sep = (i == len) || f.p[off + i] == '/' || f.p[off + i] == '\\';
-
-		if (!sep)
-			continue;
-		if (i - start == 2 && f.p[off + start] == '.' &&
-		    f.p[off + start + 1] == '.')
-			return 1;
-		start = i + 1;
-	}
-	return 0;
-}
 
 /*
  * What kind of archive this is, from the names it holds.
@@ -506,7 +469,7 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 			z->n_encrypted++;
 			z->anomalies |= KOF_ZIP_ANOM_ENCRYPTED;
 		}
-		if (name_escapes(file, e->name_off, nlen)) {
+		if (kof_name_escapes(file, e->name_off, nlen)) {
 			e->suspicious |= KOF_ZIP_ENT_TRAVERSAL;
 			z->anomalies |= KOF_ZIP_ANOM_TRAVERSAL;
 		}

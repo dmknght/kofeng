@@ -337,7 +337,30 @@ struct kof_pack_hdr {
 	 */
 	uint32_t idx_bits;
 	uint32_t n_idx_slots;
-	uint32_t _pad1;
+
+	/*
+	 * The module ABI the blobs in this pack were compiled against.
+	 *
+	 * Not the same as `version` above, and the difference is the whole reason
+	 * this field exists. `version` says how this FILE is laid out - where the
+	 * sections are, how the records are shaped - and a reader that gets it wrong
+	 * reads the wrong bytes. This says which struct kof_content the code inside
+	 * expects, and a reader that gets THAT wrong calls a function pointer that is
+	 * not there.
+	 *
+	 * The vtable is append only, so an old module in a new host is safe by
+	 * construction: every slot it knows is still where it was. The other
+	 * direction is not. A module built against a newer header calls a slot past
+	 * the end of the host's table, which is a wild call out of a file - the one
+	 * failure this whole design exists to make impossible, since the blob is
+	 * untrusted code that runs native.
+	 *
+	 * kofsig.h has always promised that the host refuses this. It did not: the
+	 * constant was defined and read by nothing, and the pack had nowhere to carry
+	 * it. Zero means a pack written before the field existed, which can only have
+	 * been ABI 1 because there has never been another.
+	 */
+	uint32_t abi_version;
 
 	struct kof_pack_sec sec[KOF_SEC_COUNT];
 };

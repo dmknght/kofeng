@@ -147,6 +147,75 @@ static inline void kof_runs_add(struct kof_runs *l, uint64_t obj_size,
 	l->last[cls] = l->n;
 }
 
+/* Ordered by where a run starts, and by class where two start together - the lower
+ * numbered class wins a tie, which is what makes the settle below deterministic. */
+static inline int kof_run_before(const struct kof_run *a, const struct kof_run *b)
+{
+	return a->off < b->off || (a->off == b->off && a->cls < b->cls);
+}
+
+/*
+ * Sort the runs, in a way an archive cannot make expensive.
+ *
+ * This was an insertion sort, chosen because a walk lays its runs down close to
+ * sorted and that makes it linear. The first half of that is still true and is why
+ * the sortedness check below comes first; the second half was only true of files
+ * nobody built to be difficult.
+ *
+ * A zip states the order of its own central directory, so an archive that lists its
+ * entries by DECREASING offset hands the insertion sort its worst case. Measured at
+ * the 8192 run cap that is 21.7ms of pure sorting for one object - so a few hundred
+ * such archives inside one tar is a scan that stops, from an input of a few tens of
+ * megabytes. Nothing about it looks like a bomb: no ratio to notice, no memory to
+ * refuse, just time.
+ *
+ * So: one pass to see whether there is anything to do, which keeps the ordinary
+ * file at O(n) and faster than it was; and heapsort when there is, which is
+ * O(n log n) with no worst case to find, in place, and needing no allocation on a
+ * path that must not fail.
+ */
+static inline void kof_runs_sift(struct kof_run *v, uint32_t root, uint32_t n)
+{
+	for (;;) {
+		uint32_t big = root, l = 2u * root + 1u, r = l + 1u;
+
+		if (l < n && kof_run_before(&v[big], &v[l]))
+			big = l;
+		if (r < n && kof_run_before(&v[big], &v[r]))
+			big = r;
+		if (big == root)
+			return;
+		{
+			struct kof_run t = v[root];
+
+			v[root] = v[big];
+			v[big] = t;
+		}
+		root = big;
+	}
+}
+
+static inline void kof_runs_sort(struct kof_run *v, uint32_t n)
+{
+	uint32_t i;
+
+	for (i = 1; i < n; i++)
+		if (kof_run_before(&v[i], &v[i - 1]))
+			break;
+	if (i >= n)
+		return;                 /* already ordered, which is the usual case */
+
+	for (i = n / 2u; i-- > 0; )
+		kof_runs_sift(v, i, n);
+	for (i = n; i-- > 1; ) {
+		struct kof_run t = v[0];
+
+		v[0] = v[i];
+		v[i] = t;
+		kof_runs_sift(v, 0, i);
+	}
+}
+
 /*
  * Make the runs disjoint and ordered, and total what each class ended up with.
  *
@@ -156,27 +225,19 @@ static inline void kof_runs_add(struct kof_runs *l, uint64_t obj_size,
  * having: a module that checked a gather against the declared size would report a
  * limit on a file that reached no limit, only damage.
  *
- * Insertion sort because the list is short and a walk lays its runs down close to
- * sorted already, which makes this a linear pass on everything that is not trying
- * to be difficult. Front trimming alone leaves every run contiguous: taken in
- * order, a run can only collide with what is already behind it.
+ * Front trimming alone leaves every run contiguous: taken in order, a run can only
+ * collide with what is already behind it. The ordering itself is kof_runs_sort's
+ * job, and the note there says why it is not the insertion sort this used to be.
  */
 static inline void kof_runs_settle(struct kof_runs *l, uint64_t *bytes)
 {
 	uint64_t end = 0;
-	uint32_t i, j, w = 0;
+	uint32_t i, w = 0;
 
 	for (i = 0; i < l->ncls; i++)
 		bytes[i] = 0;
 
-	for (i = 1; i < l->n; i++) {
-		struct kof_run t = l->v[i];
-
-		for (j = i; j > 0 && (l->v[j - 1].off > t.off ||
-		     (l->v[j - 1].off == t.off && l->v[j - 1].cls > t.cls)); j--)
-			l->v[j] = l->v[j - 1];
-		l->v[j] = t;
-	}
+	kof_runs_sort(l->v, l->n);
 
 	for (i = 0; i < l->n; i++) {
 		uint64_t off = l->v[i].off, lim = off + l->v[i].len;

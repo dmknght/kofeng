@@ -60,12 +60,63 @@ static inline void kof_rl_add(struct kof_rlist *l, uint64_t obj_size,
 }
 
 /*
- * Sort by offset, then merge anything that touches or overlaps.
+ * Ordering, and why it is not the insertion sort it was.
  *
- * Insertion sort on purpose: segments and sections are almost always already in
- * offset order, which makes this a linear scan, and the list is bounded by the
- * segment and section counts. A comparison sort with better worst case would be
- * slower on every real input.
+ * Both sorts here take their order from the file: a range list is built from the
+ * segment and section tables, and an object states those in whatever order it
+ * likes. An insertion sort is linear on a table already in order - which real ones
+ * are, and which is why it was chosen - and quadratic on one deliberately reversed.
+ * At the 4096 extent cap that is milliseconds per resolve, and a resolve happens
+ * per region per object, so the cost multiplies by everything.
+ *
+ * The check for "already ordered" keeps the ordinary case at one pass. Heapsort
+ * takes the rest: O(n log n) with no input that defeats it, in place, and with no
+ * allocation on a path that has nowhere to report a failure.
+ */
+static inline void kof_rl_sift(struct kof_range *v, uint32_t root, uint32_t n)
+{
+	for (;;) {
+		uint32_t big = root, l = 2u * root + 1u, r = l + 1u;
+
+		if (l < n && v[big].off < v[l].off)
+			big = l;
+		if (r < n && v[big].off < v[r].off)
+			big = r;
+		if (big == root)
+			return;
+		{
+			struct kof_range t = v[root];
+
+			v[root] = v[big];
+			v[big] = t;
+		}
+		root = big;
+	}
+}
+
+static inline void kof_rl_sort(struct kof_range *v, uint32_t n)
+{
+	uint32_t i;
+
+	for (i = 1; i < n; i++)
+		if (v[i].off < v[i - 1].off)
+			break;
+	if (i >= n)
+		return;
+
+	for (i = n / 2u; i-- > 0; )
+		kof_rl_sift(v, i, n);
+	for (i = n; i-- > 1; ) {
+		struct kof_range t = v[0];
+
+		v[0] = v[i];
+		v[i] = t;
+		kof_rl_sift(v, 0, i);
+	}
+}
+
+/*
+ * Sort by offset, then merge anything that touches or overlaps.
  *
  * Merging on touch, not just on overlap, is what lets a pattern spanning the join
  * between two adjacent regions be found - if code ends exactly where data begins,
@@ -73,14 +124,9 @@ static inline void kof_rl_add(struct kof_rlist *l, uint64_t obj_size,
  */
 static inline uint32_t kof_rl_normalise(struct kof_rlist *l)
 {
-	uint32_t i, j, w;
+	uint32_t i, w;
 
-	for (i = 1; i < l->n; i++) {
-		struct kof_range t = l->v[i];
-		for (j = i; j > 0 && l->v[j - 1].off > t.off; j--)
-			l->v[j] = l->v[j - 1];
-		l->v[j] = t;
-	}
+	kof_rl_sort(l->v, l->n);
 
 	w = 0;
 	for (i = 0; i < l->n; i++) {
@@ -141,6 +187,54 @@ struct kof_claim {
 	uint32_t tag;
 };
 
+static inline int kof_claim_before(const struct kof_claim *a,
+				  const struct kof_claim *b)
+{
+	return a->off < b->off || (a->off == b->off && a->rank < b->rank);
+}
+
+static inline void kof_claim_sift(struct kof_claim *v, uint32_t root, uint32_t n)
+{
+	for (;;) {
+		uint32_t big = root, l = 2u * root + 1u, r = l + 1u;
+
+		if (l < n && kof_claim_before(&v[big], &v[l]))
+			big = l;
+		if (r < n && kof_claim_before(&v[big], &v[r]))
+			big = r;
+		if (big == root)
+			return;
+		{
+			struct kof_claim t = v[root];
+
+			v[root] = v[big];
+			v[big] = t;
+		}
+		root = big;
+	}
+}
+
+static inline void kof_claim_sort(struct kof_claim *v, uint32_t n)
+{
+	uint32_t i;
+
+	for (i = 1; i < n; i++)
+		if (kof_claim_before(&v[i], &v[i - 1]))
+			break;
+	if (i >= n)
+		return;
+
+	for (i = n / 2u; i-- > 0; )
+		kof_claim_sift(v, i, n);
+	for (i = n; i-- > 1; ) {
+		struct kof_claim t = v[0];
+
+		v[0] = v[i];
+		v[i] = t;
+		kof_claim_sift(v, 0, i);
+	}
+}
+
 /*
  * Decide which claimant owns which bytes, so that the claims are disjoint.
  *
@@ -163,18 +257,12 @@ static inline void kof_rl_settle(struct kof_claim *c, uint32_t n,
 				 uint64_t obj_size)
 {
 	uint64_t end = 0;
-	uint32_t i, j;
+	uint32_t i;
 
-	/* Insertion sort by offset then rank: bounded by the segment and section
-	 * maxima, and a real object is already in order, so this is a linear scan
-	 * on everything that is not trying to be difficult. */
-	for (i = 1; i < n; i++) {
-		struct kof_claim t = c[i];
-		for (j = i; j > 0 && (c[j - 1].off > t.off ||
-		     (c[j - 1].off == t.off && c[j - 1].rank > t.rank)); j--)
-			c[j] = c[j - 1];
-		c[j] = t;
-	}
+	/* Ordered by offset, then by rank where two start together. Same reasoning as
+	 * kof_rl_sort: one pass when the table is already in order, heapsort when an
+	 * object states it in an order chosen to be expensive. */
+	kof_claim_sort(c, n);
 
 	for (i = 0; i < n; i++) {
 		uint64_t off = c[i].off;

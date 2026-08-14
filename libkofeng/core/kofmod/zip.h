@@ -155,7 +155,6 @@ enum {
  * describing all of them costs.
  */
 #define KOF_ZIP_MAX_EXTENTS  8192u
-#define KOF_ZIP_NAME_MAX     256u    /* of a name kept for classification */
 
 /* How far back from the end the end-of-central-directory record is looked for: its
  * own 22 bytes plus the largest comment a 16 bit length can describe. */

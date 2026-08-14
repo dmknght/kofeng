@@ -213,6 +213,25 @@ static void mut_version(uint8_t *img, size_t *len)
 	HDR(img)->version = KOF_PACK_VERSION + 1u;
 }
 
+/*
+ * A pack whose modules were compiled against a newer module ABI than this host.
+ *
+ * The one refusal here that is not about the FILE being wrong: the layout is
+ * perfect, the checksum matches, every offset is in range. What is wrong is that
+ * the code inside expects a bigger vtable than the host has, and calling it would
+ * be a call through a slot that was never filled - out of a file, into whatever
+ * follows the struct.
+ *
+ * This case exists because for a long time there was nothing to test: kofsig.h
+ * promised that the host refuses such a pack, the constant it promised it with was
+ * read by nothing, and the pack header had nowhere to carry the number.
+ */
+static void mut_abi(uint8_t *img, size_t *len)
+{
+	(void)len;
+	HDR(img)->abi_version = KOFSIG_ABI_VERSION + 1u;
+}
+
 static void mut_machine(uint8_t *img, size_t *len)
 {
 	(void)len;
@@ -634,6 +653,7 @@ int main(void)
 	} cases[] = {
 		{ "magic",         mut_magic,             1 },
 		{ "version",       mut_version,           1 },
+		{ "abi",           mut_abi,               1 },
 		{ "machine",       mut_machine,           1 },
 		{ "kind",          mut_kind,              1 },
 		{ "truncated",     mut_truncate,          1 },

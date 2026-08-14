@@ -40,6 +40,7 @@
 
 #include "tar_parse.h"
 #include "../runlist.h"
+#include "../entryname.h"
 
 #include <string.h>
 
@@ -52,12 +53,8 @@
 #define T_MTIME     136u
 #define T_CHKSUM    148u
 #define T_TYPEFLAG  156u
-#define T_LINKNAME  157u
-#define T_MAGIC     257u
-#define T_PREFIX    345u
 
 #define T_NAME_LEN    100u
-#define T_PREFIX_LEN  155u
 #define T_CHKSUM_LEN    8u
 
 /* ---- the walk's own state ---------------------------------------------------- */
@@ -175,36 +172,6 @@ static int block_is_zero(kof_buf f, uint64_t at)
 	return 1;
 }
 
-/*
- * Does this name escape the directory it will be extracted into?
- *
- * The same three ways zip_parse.c checks, and for the same reasons: an absolute
- * path, a drive letter, and a ".." COMPONENT rather than a ".." substring - a file
- * honestly called "..config" escapes nothing.
- */
-static int name_escapes(kof_buf f, uint64_t off, uint32_t len)
-{
-	uint32_t i, start = 0;
-
-	if (!len || !kof_in_range(f, off, len))
-		return 0;
-	if (f.p[off] == '/' || f.p[off] == '\\')
-		return 1;
-	if (len >= 2 && f.p[off + 1] == ':')
-		return 1;
-
-	for (i = 0; i <= len; i++) {
-		int sep = (i == len) || f.p[off + i] == '/' || f.p[off + i] == '\\';
-
-		if (!sep)
-			continue;
-		if (i - start == 2 && f.p[off + start] == '.' &&
-		    f.p[off + start + 1] == '.')
-			return 1;
-		start = i + 1;
-	}
-	return 0;
-}
 
 /* The length of a field that is NUL padded, which is how names are stored. */
 static uint32_t field_len(kof_buf f, uint64_t off, uint32_t cap)
@@ -362,7 +329,7 @@ int kof_tar_parse(kof_buf file, struct kof_tar_info *t, struct kof_obj_ctx *ctx)
 		e->name_off = name_off;
 		e->name_len = name_len;
 
-		if (name_escapes(file, name_off, name_len)) {
+		if (kof_name_escapes(file, name_off, name_len)) {
 			e->suspicious |= KOF_TAR_ENT_TRAVERSAL;
 			t->anomalies |= KOF_TAR_ANOM_TRAVERSAL;
 		}
