@@ -84,7 +84,8 @@ static const struct utarget utargets[] = {
 	{ "gzip",   seed_gzip,   f_gzip,   sizeof f_gzip   / sizeof f_gzip[0], 1 },
 	{ "7z",     seed_7z,     f_7z,     sizeof f_7z     / sizeof f_7z[0], 0 },
 	{ "elf",    seed_elf,    f_elf,    sizeof f_elf    / sizeof f_elf[0], 0 },
-	{ "pe",     seed_pe,     f_pe,     sizeof f_pe     / sizeof f_pe[0], 0 }
+	{ "pe",     seed_pe,     f_pe,     sizeof f_pe     / sizeof f_pe[0], 0 },
+	{ "xz",     seed_xz,     f_xz,     sizeof f_xz     / sizeof f_xz[0], 0 }
 };
 
 /* ---- the run ------------------------------------------------------------------ */

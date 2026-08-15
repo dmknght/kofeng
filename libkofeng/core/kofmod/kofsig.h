@@ -133,9 +133,18 @@ enum kof_format {
 	 */
 	KOF_FMT_RAR     = 12,
 
+	/*
+	 * The container that came free with a decoder written for another one.
+	 *
+	 * xz codes its blocks with LZMA2, which this engine grew in order to reach
+	 * 7z content - so what was missing was never the decoding, only the twelve
+	 * bytes at each end that say where the blocks are. See xz.h.
+	 */
+	KOF_FMT_XZ      = 13,
+
 	/* One past the last, so a host can size a per-format table. Not a format:
 	 * nothing is ever this. */
-	KOF_FMT_COUNT   = 13
+	KOF_FMT_COUNT   = 14
 };
 
 /*
@@ -190,6 +199,7 @@ static inline const char *kof_format_name(uint8_t fmt)
 	case KOF_FMT_TAR:    return "Tar";
 	case KOF_FMT_7Z:     return "7z";
 	case KOF_FMT_RAR:    return "RAR";
+	case KOF_FMT_XZ:     return "xz";
 	default:             return "Unknown";
 	}
 }

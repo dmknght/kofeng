@@ -57,6 +57,7 @@
 #include "../../libkofeng/kofparsers/containers/tar_parse.h"
 #include "../../libkofeng/kofparsers/containers/sevenzip_parse.h"
 #include "../../libkofeng/kofparsers/containers/rar_parse.h"
+#include "../../libkofeng/kofparsers/containers/xz_parse.h"
 #include "partition_check.h"
 
 
@@ -162,6 +163,7 @@ WRAP(w_zip,    struct kof_zip_info,    kof_zip_parse)
 WRAP(w_tar,    struct kof_tar_info,    kof_tar_parse)
 WRAP(w_7z,     struct kof_7z_info,     kof_7z_parse)
 WRAP(w_rar,    struct kof_rar_info,    kof_rar_parse)
+WRAP(w_xz,     struct kof_xz_info,     kof_xz_parse)
 
 struct target {
 	const char *name;
@@ -186,6 +188,8 @@ static uint32_t n_rar(const void *v)
 { return ((const struct kof_rar_info *)v)->n_entries; }
 static uint32_t n_docole(const void *v)
 { return ((const struct kof_docole_info *)v)->n_entries; }
+static uint32_t n_xz(const void *v)
+{ return ((const struct kof_xz_info *)v)->n_blocks; }
 static uint32_t n_tar(const void *v)
 { return ((const struct kof_tar_info *)v)->n_entries; }
 
@@ -214,7 +218,10 @@ static const struct target targets[] = {
 	{ "docole", seed_docole, f_docole,
 	  sizeof f_docole / sizeof f_docole[0],
 	  w_docole, (uint32_t)sizeof(struct kof_docole_info),
-	  kof_docole_region_bits, KOF_DOCOLE_REGION_COUNT, n_docole, 3u }
+	  kof_docole_region_bits, KOF_DOCOLE_REGION_COUNT, n_docole, 3u },
+	{ "xz",   seed_xz,   f_xz,   sizeof f_xz   / sizeof f_xz[0],
+	  w_xz,   (uint32_t)sizeof(struct kof_xz_info),
+	  kof_xz_region_bits,   KOF_XZ_REGION_COUNT, n_xz, 1u }
 };
 
 /* ---- the run ------------------------------------------------------------------ */

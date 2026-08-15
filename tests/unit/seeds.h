@@ -459,6 +459,67 @@ static const struct field f_rar[] = {
 	{ "file[*].flags",    R_FILE +  3, 2, R_STRIDE, R_NENT }
 };
 
+/*
+ * An xz stream: header, one LZMA2 block, an index and a footer.
+ *
+ * Small and exact, because every offset in it is derived from another. The index
+ * carries the block's unpadded size and the footer carries the index's, so a field
+ * poked here moves the thing that finds the thing that finds the blocks - which is
+ * the whole reason this format reads backwards and the reason it is worth fuzzing
+ * from both ends.
+ */
+#define X_BLOCK  12u
+#define X_HDRLEN 12u
+#define X_DATA   (X_BLOCK + X_HDRLEN)
+#define X_CLEN   16u
+#define X_INDEX  (X_DATA + X_CLEN)
+#define X_IDXLEN  8u
+#define X_FOOT   (X_INDEX + X_IDXLEN)
+
+static uint64_t seed_xz(uint8_t *b)
+{
+	memset(b, 0, SEED_MAX);
+	memcpy(b, "\xfd" "7zXZ", 6);
+	b[6] = 0;
+	b[7] = 0;                               /* check: none */
+	put32(b, 8, 0);
+
+	b[X_BLOCK]     = 2;                     /* header size: (2+1)*4 = 12 */
+	b[X_BLOCK + 1] = 0;                     /* one filter, no sizes present */
+	b[X_BLOCK + 2] = 0x21;                  /* LZMA2 */
+	b[X_BLOCK + 3] = 1;                     /* property size */
+	b[X_BLOCK + 4] = 0;                     /* dictionary size code */
+	memset(b + X_DATA, 0xa5, X_CLEN);
+
+	b[X_INDEX]     = 0;                     /* index indicator */
+	b[X_INDEX + 1] = 1;                     /* one record */
+	b[X_INDEX + 2] = X_HDRLEN + X_CLEN;     /* unpadded size */
+	b[X_INDEX + 3] = 32;                    /* uncompressed size */
+
+	put32(b, X_FOOT, 0);                    /* footer CRC */
+	put32(b, X_FOOT + 4, X_IDXLEN / 4u - 1u);
+	b[X_FOOT + 8]  = 0;
+	b[X_FOOT + 9]  = 0;
+	b[X_FOOT + 10] = 'Y';
+	b[X_FOOT + 11] = 'Z';
+	return X_FOOT + 12u;
+}
+
+static const struct field f_xz[] = {
+	{ "stream.check",  7, 1, 0, 0 },
+	{ "blk.hdrsize",   X_BLOCK,     1, 0, 0 },
+	{ "blk.flags",     X_BLOCK + 1, 1, 0, 0 },
+	{ "blk.filter",    X_BLOCK + 2, 1, 0, 0 },
+	{ "blk.propsize",  X_BLOCK + 3, 1, 0, 0 },
+	{ "idx.indicator", X_INDEX,     1, 0, 0 },
+	{ "idx.count",     X_INDEX + 1, 1, 0, 0 },
+	{ "idx.unpadded",  X_INDEX + 2, 1, 0, 0 },
+	{ "idx.uncomp",    X_INDEX + 3, 1, 0, 0 },
+	{ "foot.backward", X_FOOT + 4,  4, 0, 0 },
+	{ "foot.flags",    X_FOOT + 8,  2, 0, 0 },
+	{ "foot.magic",    X_FOOT + 10, 2, 0, 0 }
+};
+
 /* A compound file: header, one FAT sector, one directory sector. */
 #define O_SEC  512u
 

@@ -151,6 +151,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/containers/tar_parse.c \
            libkofeng/kofparsers/containers/sevenzip_parse.c \
            libkofeng/kofparsers/containers/rar_parse.c \
+           libkofeng/kofparsers/containers/xz_parse.c \
            libkofeng/kofunpack/pe_rebuild.c \
            libkofeng/kofdecomp/decomp.c \
            libkofeng/kofdecomp/inflate.c \
@@ -193,7 +194,8 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/zip.h \
            $(SDK)/include/kofmod/tar.h \
            $(SDK)/include/kofmod/sevenzip.h \
-           $(SDK)/include/kofmod/rar.h
+           $(SDK)/include/kofmod/rar.h \
+           $(SDK)/include/kofmod/xz.h
 
 $(SDK)/include/kofeng.h: libkofeng/kofeng.h
 	@mkdir -p $(dir $@)

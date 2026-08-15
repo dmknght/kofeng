@@ -92,6 +92,7 @@
 #include <kofmod/tar.h>
 #include <kofmod/sevenzip.h>
 #include <kofmod/rar.h>
+#include <kofmod/xz.h>
 
 #include "../libkofeng/kofparsers/binaries/elf_parse.h"
 #include "../libkofeng/kofparsers/binaries/pe_parse.h"
@@ -101,6 +102,7 @@
 #include "../libkofeng/kofparsers/containers/tar_parse.h"
 #include "../libkofeng/kofparsers/containers/sevenzip_parse.h"
 #include "../libkofeng/kofparsers/containers/rar_parse.h"
+#include "../libkofeng/kofparsers/containers/xz_parse.h"
 
 /*
  * What one format offers a tool: how to recognise it, how to parse it, how big
@@ -162,6 +164,11 @@ static int zip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 static int tar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
 	return kof_tar_parse(b, (struct kof_tar_info *)v, c);
+}
+
+static int xz_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_xz_parse(b, (struct kof_xz_info *)v, c);
 }
 
 static int rar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
@@ -690,6 +697,59 @@ static uint64_t anom_rar(const void *v)
 	return ((const struct kof_rar_info *)v)->anomalies;
 }
 
+/* What an xz says about itself, which is where its blocks are and what codes
+ * them - both of which come from the index rather than from the blocks. */
+static void print_xz(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
+{
+	const struct kof_xz_info *x = v;
+	uint32_t i, shown = 0;
+
+	(void)ctx;
+	(void)buf;
+
+	printf("  check     %u (%u byte(s))   %u block(s)", x->check,
+	       x->check_len, x->n_blocks);
+	if (x->declared_blocks != x->n_blocks)
+		printf(" (%u declared)", x->declared_blocks);
+	printf("\n");
+	printf("  index     off=%llu len=%llu   footer=%llu\n",
+	       (unsigned long long)x->index_off, (unsigned long long)x->index_len,
+	       (unsigned long long)x->footer_off);
+	printf("  declared  packed=%llu unpacked=%llu",
+	       (unsigned long long)x->total_comp,
+	       (unsigned long long)x->total_uncomp);
+	if (x->total_comp)
+		printf("   ratio %.1fx",
+		       (double)x->total_uncomp / (double)x->total_comp);
+	printf("\n");
+
+	for (i = 0; i < x->n_blocks; i++) {
+		const struct kof_xz_block *b = &x->block[i];
+
+		if (shown >= ZIP_SHOW && !b->suspicious)
+			continue;
+		shown++;
+		printf("    [%3u] filter=0x%02x x%u  %9llu -> %-9llu @%llu", i,
+		       b->filter, b->n_filters, (unsigned long long)b->comp_size,
+		       (unsigned long long)b->uncomp_size,
+		       (unsigned long long)b->data_off);
+		if (b->suspicious & KOF_XZ_BLK_CHAIN)
+			printf("   <- a filter runs in front of the coder");
+		if (b->suspicious & KOF_XZ_BLK_PAST_EOF)
+			printf("   <- data runs past the end");
+		if (b->suspicious & KOF_XZ_BLK_RATIO)
+			printf("   <- declared expansion is absurd");
+		printf("\n");
+	}
+	if (x->n_blocks > shown)
+		printf("    ... %u more\n", x->n_blocks - shown);
+}
+
+static uint64_t anom_xz(const void *v)
+{
+	return ((const struct kof_xz_info *)v)->anomalies;
+}
+
 static const struct fmt formats[] = {
 	{ (uint32_t)sizeof(struct kof_elf_info), kof_elf_sniff, elf_parse_thunk,
 	  kof_elf_region_bits, KOF_ELF_REGION_COUNT,
@@ -715,7 +775,10 @@ static const struct fmt formats[] = {
 	  kof_7z_region_name, kof_7z_anomaly_name, print_7z, anom_7z },
 	{ (uint32_t)sizeof(struct kof_rar_info), kof_rar_sniff, rar_parse_thunk,
 	  kof_rar_region_bits, KOF_RAR_REGION_COUNT,
-	  kof_rar_region_name, kof_rar_anomaly_name, print_rar, anom_rar }
+	  kof_rar_region_name, kof_rar_anomaly_name, print_rar, anom_rar },
+	{ (uint32_t)sizeof(struct kof_xz_info), kof_xz_sniff, xz_parse_thunk,
+	  kof_xz_region_bits, KOF_XZ_REGION_COUNT,
+	  kof_xz_region_name, kof_xz_anomaly_name, print_xz, anom_xz }
 };
 
 /*

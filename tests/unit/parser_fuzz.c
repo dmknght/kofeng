@@ -42,6 +42,7 @@
 #include "../../libkofeng/kofparsers/containers/tar_parse.h"
 #include "../../libkofeng/kofparsers/containers/sevenzip_parse.h"
 #include "../../libkofeng/kofparsers/containers/rar_parse.h"
+#include "../../libkofeng/kofparsers/containers/xz_parse.h"
 
 #define OBJ_MAX 8192
 #define ROUNDS  20000
@@ -512,6 +513,64 @@ static uint64_t gen_rar(uint8_t *b)
 }
 
 /*
+ * An xz stream, with the two ends made hostile.
+ *
+ * The parse reads BACKWARDS - the footer gives the index and the index gives the
+ * blocks - so the fields worth breaking are the backward size, the record counts
+ * and the per-block sizes, and breaking them has to leave the magic intact or the
+ * sniff refuses before anything is exercised.
+ */
+static uint64_t gen_xz(uint8_t *b)
+{
+	uint64_t n = 64u + (rnd() % (OBJ_MAX - 128u));
+	uint64_t foot, k;
+
+	for (k = 0; k < n; k++)
+		b[k] = (uint8_t)((rnd() % 4u) ? 0 : rnd());
+
+	memcpy(b, "\xfd" "7zXZ", 6);
+	b[6] = 0;
+	b[7] = (uint8_t)("\x00\x01\x04\x0a\x0f"[rnd() % 5]);   /* check id */
+	put32(b, 8, (uint32_t)rnd());
+
+	n &= ~(uint64_t)3u;
+	if (n < 32u)
+		n = 32u;
+	foot = n - 12u;
+	put32(b, (uint32_t)foot, (uint32_t)rnd());        /* footer CRC */
+	switch (rnd() % 5u) {                             /* backward size */
+	case 0:  put32(b, (uint32_t)foot + 4u, 0); break;
+	case 1:  put32(b, (uint32_t)foot + 4u, 0xffffffffu); break;
+	case 2:  put32(b, (uint32_t)foot + 4u, (uint32_t)(n / 4u)); break;
+	case 3:  put32(b, (uint32_t)foot + 4u, (uint32_t)(rnd() % 8u)); break;
+	default: put32(b, (uint32_t)foot + 4u, (uint32_t)rnd()); break;
+	}
+	b[foot + 8] = 0;
+	b[foot + 9] = b[7];
+	b[foot + 10] = 'Y';
+	b[foot + 11] = 'Z';
+
+	/* An index somewhere in the middle, with counts and sizes drawn hostile. */
+	{
+		uint64_t at = 12u + (rnd() % (n / 2u));
+
+		if (at + 16u < foot) {
+			b[at++] = 0;                      /* index indicator */
+			b[at++] = (uint8_t)(rnd() % 0x90u);
+			for (k = 0; k < 8u && at + 2u < foot; k++) {
+				b[at++] = (uint8_t)((rnd() % 3u) ? rnd() % 0x80u
+							        : 0xffu);
+				b[at++] = (uint8_t)(rnd() % 0x80u);
+			}
+		}
+	}
+	/* And a block header where one would begin. */
+	b[12] = (uint8_t)(rnd() % 8u);
+	b[13] = (uint8_t)(rnd() % 0xc4u);
+	return n;
+}
+
+/*
  * A tar, with the fields that decide where the next header is made hostile.
  *
  * There is only one of those and it is the size: it moves the cursor, and every
@@ -645,17 +704,18 @@ int main(int argc, char **argv)
 	struct kof_tar_info *ti = malloc(sizeof *ti);
 	struct kof_7z_info *si = malloc(sizeof *si);
 	struct kof_rar_info *ri = malloc(sizeof *ri);
+	struct kof_xz_info *xi = malloc(sizeof *xi);
 	struct pc_report rep = { 0, 0, 0 };
 	uint64_t rounds = ROUNDS, seed = 20240101u;
 	uint64_t r, pe_parsed = 0, elf_parsed = 0, gz_parsed = 0, ole_parsed = 0,
-		 zip_parsed = 0, tar_parsed = 0, sz_parsed = 0, rar_parsed = 0;
+		 zip_parsed = 0, tar_parsed = 0, sz_parsed = 0, rar_parsed = 0, xz_parsed = 0;
 	char what[64];
 
 	if (argc > 1)
 		seed = strtoull(argv[1], 0, 0);
 	if (argc > 2)
 		rounds = strtoull(argv[2], 0, 0);
-	if (!ei || !pi || !gi || !oi || !zi || !ti || !si || !ri)
+	if (!ei || !pi || !gi || !oi || !zi || !ti || !si || !ri || !xi)
 		return 1;
 
 	rng_state = seed ? seed : 1;
@@ -663,8 +723,8 @@ int main(int argc, char **argv)
 	for (r = 0; r < rounds; r++) {
 		struct kof_obj_ctx ctx;
 		uint64_t n;
-		int want = (int)(rnd() % 8);   /* PE, ELF, gzip, docole, zip,
-						* tar, 7z, rar */
+		int want = (int)(rnd() % 9);   /* PE, ELF, gzip, docole, zip,
+						* tar, 7z, rar, xz */
 
 		memset(&ctx, 0, sizeof ctx);
 		n = want == 0 ? gen_pe(obj) : want == 1 ? gen_elf(obj)
@@ -672,7 +732,8 @@ int main(int argc, char **argv)
 			: want == 3 ? gen_docole(obj)
 			: want == 4 ? gen_zip(obj)
 			: want == 5 ? gen_tar(obj)
-			: want == 6 ? gen_7z(obj) : gen_rar(obj);
+			: want == 6 ? gen_7z(obj)
+			: want == 7 ? gen_rar(obj) : gen_xz(obj);
 		{
 			kof_buf buf = kof_buf_make(obj, n);
 
@@ -683,7 +744,8 @@ int main(int argc, char **argv)
 				 : want == 3 ? "docole"
 				 : want == 4 ? "zip"
 				 : want == 5 ? "tar"
-				 : want == 6 ? "7z" : "rar");
+				 : want == 6 ? "7z"
+				 : want == 7 ? "rar" : "xz");
 
 			if (want == 0 && kof_pe_sniff(buf)) {
 				if (kof_pe_parse(buf, pi, &ctx)) {
@@ -733,6 +795,12 @@ int main(int argc, char **argv)
 					pc_check(what, &ctx, n, kof_rar_region_bits,
 						 KOF_RAR_REGION_COUNT, &rep);
 				}
+			} else if (want == 8 && kof_xz_sniff(buf)) {
+				if (kof_xz_parse(buf, xi, &ctx)) {
+					xz_parsed++;
+					pc_check(what, &ctx, n, kof_xz_region_bits,
+						 KOF_XZ_REGION_COUNT, &rep);
+				}
 			}
 		}
 	}
@@ -745,8 +813,9 @@ int main(int argc, char **argv)
 	free(ti);
 	free(si);
 	free(ri);
+	free(xi);
 	printf("hostile headers: %llu round(s), parsed ELF %llu PE %llu gzip %llu "
-	       "docole %llu zip %llu tar %llu 7z %llu rar %llu, "
+	       "docole %llu zip %llu tar %llu 7z %llu rar %llu xz %llu, "
 	       "partition %llu/%llu\n",
 	       (unsigned long long)rounds, (unsigned long long)elf_parsed,
 	       (unsigned long long)pe_parsed, (unsigned long long)gz_parsed,
@@ -755,6 +824,7 @@ int main(int argc, char **argv)
 	       (unsigned long long)tar_parsed,
 	       (unsigned long long)sz_parsed,
 	       (unsigned long long)rar_parsed,
+	       (unsigned long long)xz_parsed,
 	       (unsigned long long)(rep.checked - rep.failed),
 	       (unsigned long long)rep.checked);
 	return rep.failed != 0;
