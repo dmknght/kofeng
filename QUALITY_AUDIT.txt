@@ -1,0 +1,326 @@
+kofeng QUALITY CHECKLIST
+Tick each box, or write the finding beside it. "N/A" needs a reason.
+
+
+################################################################################
+PART I - WHAT EACH KIND OF COMPONENT MUST SATISFY
+################################################################################
+
+================================================================================
+I.A  CORE ENGINE  (loader, scanner, matcher, budgets)
+================================================================================
+[ ] Immutable after load: nothing the scan path writes lives in the engine.
+[ ] All mutable per-scan state belongs to the scanner, allocated per thread.
+[ ] No per-object cost is proportional to the size of the whole database.
+[ ] Per-object state is reset by generation stamp, not by clearing a table whose
+    size grows with the database.
+[ ] Every engine table has a recorded copy-or-map decision, justified on two
+    axes: how hot it is, and whether it is read on the way IN or only AFTER a
+    verdict. Read-after-verdict data stays mapped.
+[ ] Expensive fixed-size state is allocated lazily, on first use.
+[ ] Every budget is enforced by the host, never by the module: resident bytes,
+    produced bytes, per-object bytes, recursion depth.
+[ ] Budget exhaustion is REPORTED (broken/limit), never silently truncating.
+[ ] Every table index the scan path uses without a bounds check was bounds
+    checked at load. If the data stays mapped, it is re-checked at use.
+[ ] The engine never trusts a length a file states about itself; every bound
+    derives from what the OS reported.
+
+================================================================================
+I.B  A NEW PARSER  (a new file format)
+================================================================================
+Structure
+[ ] Defines its regions so that every byte of the object is in exactly one
+    region; an UNCLAIMED region exists and is the honest answer for the rest.
+[ ] Region ids are format-local and never reused across formats.
+[ ] Has a format id with a collector, or it will never run.
+[ ] Identifies by content, never by extension.
+
+Bounds
+[ ] Every field that becomes an offset, size or count is widened before use.
+[ ] Every structure walk has an iteration cap independent of the file's counts.
+[ ] Every walk strictly advances; a zero-size element ends the walk.
+[ ] Overlapping regions are detected and recorded, not silently merged.
+[ ] Truncated input yields a DAMAGED verdict, not a partial region set.
+
+Reporting
+[ ] Every anomaly bit it declares is actually raised somewhere.
+[ ] Reaching any internal cap is recorded as an anomaly.
+[ ] Unsupported-but-recognised constructs are recorded as UNSUPPORTED, not
+    ignored. (A format whose sibling records this and which does not is a bug.)
+
+Cost
+[ ] Worst-case parse time is bounded by object size, not by a file-supplied
+    count.
+[ ] Parsing a hostile file of size N does not allocate more than a stated
+    multiple of N.
+
+================================================================================
+I.C  A NEW UNPACKER / DECOMPRESSOR
+================================================================================
+[ ] Output size is bounded by a ratio cap, never by the declared size alone.
+[ ] The declared size is treated as a hint to reject by, not a size to allocate.
+[ ] Block/chunk count is capped.
+[ ] Each decode step must consume input or produce output; neither is optional.
+[ ] End-of-stream, truncation and corruption are distinguishable in the verdict.
+[ ] The decoder is validated differentially against an independent reference on
+    real samples, not only on hand-made vectors.
+[ ] A filter/transform in a chain that is not implemented causes the stream to
+    be recorded as unsupported - never decoded halfway and handed on as if it
+    were the file.
+[ ] Produced children are charged to the same budgets as the parent.
+[ ] Nothing about the decoder's state survives between objects.
+
+================================================================================
+I.D  A SIGNATURE MODULE
+================================================================================
+[ ] Declares its target format, and the range it searches.
+[ ] Patterns are declared, never embedded in the module's code, so the host can
+    answer many modules' patterns in one pass.
+[ ] Reports only on the presence of at least one declared pattern, or is
+    explicitly marked as always-run. (Reporting on ABSENCE is invisible to any
+    candidate-set filter and must be declared.)
+[ ] Names it can report are declared; no name is constructed at runtime.
+[ ] No writable data, no relocations - the blob must be position independent.
+[ ] The entry point is spelled once; the pack kind is derived from it.
+
+================================================================================
+I.E  THE DATABASE / PACK FORMAT
+================================================================================
+[ ] Append-only: new fields at the end, existing fields never move or change
+    meaning.
+[ ] Reserved fields are documented as reserved, with what they are reserved for.
+[ ] Every offset in a pack is validated against the mapping length before any
+    dereference, in the order the format document states.
+[ ] Output filenames are unique by construction, or unique by an explicit check
+    that stops the build.
+[ ] Same sources produce byte-identical packs on two machines.
+[ ] A corrupt pack in a directory is refused on its own; the rest still load.
+
+
+################################################################################
+PART II - SECURITY, BY WHAT THE ATTACKER IS TRYING TO DO
+################################################################################
+For each: what the attack is, WHERE IN THE DATA it enters, and what stops it.
+
+================================================================================
+II.1  DECOMPRESSION BOMB  (small input, enormous output)
+================================================================================
+Dangerous fields:
+  zip     uncompressed size, entry count
+  gzip    ISIZE trailer
+  7z      kCodersUnpackSize per output stream, folder/substream counts
+  rar     unpacked size per entry
+  xz      index uncompressed size, block count
+  upx     declared uncompressed length in the header, block count
+  lzma2   chunk uncompressed size, dictionary size
+  ole     FAT chain length, directory child pointers
+Defence:
+[ ] A ratio cap between declared output and actual input, applied BEFORE
+    allocating.
+[ ] An absolute per-object cap, independent of ratio.
+[ ] A session-wide produced-bytes budget, so many small bombs cost as much as
+    one big one.
+[ ] A resident-bytes budget, so what is alive at once is bounded even when the
+    total produced is allowed.
+[ ] Nesting depth is capped: an archive inside an archive inside an archive.
+[ ] Hitting any of these is reported as a LIMIT verdict, so a bomb is visible
+    rather than looking like a clean file.
+[ ] The caps are checked against measured real-world ratios, so they reject
+    bombs without rejecting ordinary files.
+
+================================================================================
+II.2  CPU DoS  (input that is cheap to make and expensive to parse)
+================================================================================
+Dangerous shapes:
+  - a count field that multiplies work (sections, entries, blocks, FAT links)
+  - a self-referential or cyclic chain (FAT/directory pointers, chained headers)
+  - a zero-advance element that makes a loop spin
+  - deeply nested structure (RTF groups, OLE storages, archive in archive)
+  - a pattern/window that turns one anchor hit into unbounded rescanning
+Defence:
+[ ] Every loop over file structure has a cap that does not come from the file.
+[ ] Every loop provably advances; zero-length elements terminate it.
+[ ] Chains are visited with a seen-set or a step budget, so a cycle ends.
+[ ] Nesting is iterative with an explicit stack, or depth-capped; never
+    unbounded recursion on the C stack.
+[ ] Cost per object is bounded by object SIZE, not by any count the file states.
+[ ] There is a test that measures parse time amplification for hostile field
+    values against a clean parse of the same file, and fails on a ratio.
+
+================================================================================
+II.3  MEMORY EXHAUSTION
+================================================================================
+Dangerous fields: any file-supplied value that reaches an allocator.
+Defence:
+[ ] No allocation is sized from a file field without a cap between them.
+[ ] Allocation size is computed in 64-bit and checked before the cast.
+[ ] Total live memory during a scan is bounded and measured, not assumed.
+[ ] Large intermediate results spill rather than growing in RAM, and the spill
+    itself is bounded.
+[ ] Failure to allocate is a verdict, not a crash.
+
+================================================================================
+II.4  INTEGER OVERFLOW / UNDERFLOW IN SIZE ARITHMETIC
+================================================================================
+Where it enters: every byte of the file that defines a size, an offset or a
+count - section headers, entry headers, index tables, block headers.
+Defence:
+[ ] Widen to 64-bit before arithmetic; never compute in the field's own width.
+[ ] Establish `off <= n` BEFORE computing `n - off`.
+[ ] Bound arrays as `count > (n - off) / stride`, never `count * stride > ...`
+    (the multiply overflows first).
+[ ] Guard every subtraction of two file-supplied values against wrap
+    (end - start, total - header - checksum, unpadded - overhead).
+[ ] A wrapped total that produces a too-small allocation is the worst case: it
+    loads, scans, and quietly finds nothing. Check totals, not just elements.
+
+================================================================================
+II.5  OUT-OF-BOUNDS READ / WRITE
+================================================================================
+Where it enters: any offset or length used to index the object, the mapping, or
+a decode window.
+Defence:
+[ ] Nothing is dereferenced before it has been bounded, and the order is stated
+    in one place rather than reconstructed from the order of statements.
+[ ] A validated-once table may be walked without per-step checks ONLY if the
+    validation is exhaustive and the data cannot change afterwards.
+[ ] Decoder windows/dictionaries are bounds-checked on every copy, including
+    the back-reference distance.
+[ ] Rebuilt/reconstructed images are bounded by the destination, not the source.
+[ ] Fuzzing exercises the accessor functions the scan path uses, not just the
+    tables it produced.
+
+================================================================================
+II.6  DATA THAT STAYS MAPPED  (time-of-check vs time-of-use)
+================================================================================
+Where it enters: anything read from a MAP_PRIVATE view of a file that another
+process can still write.
+Defence:
+[ ] Load-time validation is NOT sufficient for data that stays mapped.
+[ ] Re-check at use: index within the module's slice, section within the
+    mapping, offset within the section, terminator within the section.
+[ ] The check is on a path that runs rarely (after a decision), so it is
+    affordable; if it is on a hot path, copy instead.
+[ ] A failed check returns "no answer", never a pointer the caller will print.
+
+================================================================================
+II.7  NAME-BASED ATTACKS  (path traversal, spoofed type)
+================================================================================
+Dangerous fields: archive entry names, embedded-file names, stream names,
+declared extensions.
+Defence:
+[ ] Names are searched as a region in their own right, both copies where a
+    format stores two.
+[ ] Traversal patterns are detected on the raw bytes, before any normalisation.
+[ ] Wide/UTF-16 names use byte lengths; never strlen().
+[ ] Type is decided by content; a mismatch between declared extension and
+    content is itself worth recording.
+
+================================================================================
+II.8  TYPE CONFUSION  (the wrong view of an object)
+================================================================================
+Where it enters: format id vs the struct the accessor casts to.
+Defence:
+[ ] A format id is shared between two things only when they share a PARSE - the
+    same accessor struct and the same region meanings - not because they are
+    both "documents".
+[ ] An accessor for format X refuses when the object is not X.
+[ ] Where two layouts must agree for a cast to be sound, a compile-time
+    assertion enforces it.
+
+================================================================================
+II.9  SILENT FAILURE  (the detection that quietly never happens)
+================================================================================
+This class keeps returning in new shapes; treat every new mechanism as suspect.
+[ ] Can one output file overwrite another and the build still succeed?
+[ ] Can a module be packed as the wrong kind?
+[ ] Can a signature target something no object is ever labelled as?
+[ ] Can a table total wrap so that searches past the wrap answer "absent"?
+[ ] Can a filter skip a module that would have matched?
+[ ] Can a decoder produce plausible-looking wrong bytes rather than failing?
+[ ] For each: if this were wrong, what would tell me?
+
+================================================================================
+II.10  MEMORY LIFECYCLE
+================================================================================
+[ ] free() clears the pointer, or the owning struct is cleared.
+[ ] No pointer into an array is held across a realloc of it.
+[ ] Cleanup cannot run twice over the same object.
+[ ] Nothing is held past the object's lifetime; peak live memory is measured.
+
+
+################################################################################
+PART III - PERFORMANCE
+################################################################################
+[ ] No per-object cost proportional to database size.
+[ ] Every filter has a measured earn-versus-cost, not an assumed one.
+[ ] Every filter has an activation threshold (below it, pure overhead) and a
+    cutoff (above some input size, it stops paying).
+[ ] Results are identical with each filter on and off.
+[ ] The filter reduces what is LOADED, not only what is RUN.
+[ ] The cost model at the target scale is written down and re-measured.
+[ ] Hot loops state their measured throughput and the alternative they beat.
+[ ] Any claim that something is "worth it" cites the number.
+
+Numbers to keep current (last measured):
+    Private_Dirty per scan session, 4M records ....... 45.6 MB
+      of which: database 5.9 / presence table 32 / memo 8
+    ms per object, 4M records ........................ 135.9 ms
+    corpus scan ...................................... 12.0 s / 34312 objects
+    bytes per record, data-row shape ................. 4 B/rec
+
+
+################################################################################
+PART IV - CODE HYGIENE
+################################################################################
+[ ] Every declared anomaly bit is raised somewhere.
+[ ] Every format id has a collector; every vtable slot an implementation.
+[ ] Every written header field is read somewhere, or documented as reserved and
+    what for.
+[ ] Vocabulary offered to signature authors is not mistaken for dead code.
+[ ] No comment describes in the present tense a mechanism that is not wired.
+[ ] Every "measured" claim in a comment was measured, with the conditions.
+[ ] Nothing depends on readdir order.
+[ ] Builds clean with all warnings enabled.
+[ ] No duplicated adjacent statement.
+[ ] Tests leave no temp files; tools never write into the input corpus.
+
+
+################################################################################
+PART V - MEASUREMENT DISCIPLINE  (before trusting anything in PART III)
+################################################################################
+[ ] The measuring process did not build what it measures; the builder EXITED
+    first. Forking after the build is not enough.
+[ ] Mapped files are on disk, not tmpfs; which one is stated.
+[ ] Private_Dirty is reported separately from Rss.
+[ ] The computed figure is cross-checked against the raw kernel output.
+[ ] The workload exercises the thing measured: modules that run AND search, and
+    ranges declared so the memo exists.
+[ ] The binary was relinked after the change.
+[ ] The corpus is stationary; file count checked, not just modification times.
+[ ] Extrapolation only after the per-unit coefficient is stable at two sizes.
+[ ] For each passing test: would it fail if the feature were deleted?
+
+
+################################################################################
+PART VI - OPEN ITEMS
+################################################################################
+[ ] Aho-Corasick over all literals + a string->module reverse index, to turn
+    O(modules) per object into O(object bytes).
+    Blocked on a decision, not on code: a module may report on the ABSENCE of a
+    pattern, and must then run even when none of its patterns are present. That
+    cannot be derived from a compiled blob. Decide at compile time, validate at
+    load time, put nothing in the scan path. Free to settle now; an audit of
+    every signature once there are millions.
+[ ] KOF_FMT_MACHO / SCRIPT / TEXT declared with no collector.
+[ ] KOF_ZIP_ANOM_UNSUPPORTED never raised, while RAR's equivalent is.
+[ ] KOF_PE_ANOM_DEBUG_OUTSIDE_SEC never raised.
+[ ] KOF_ELF_ANOM_BAD_MAGIC unreachable by construction - remove or document.
+[ ] Pack-level prefilter fields are written and never read; wire them or state
+    the reservation in the code that writes them.
+[ ] hostile_fields is timing-flaky: it scores by ratio against a wall clock.
+[ ] db_scale module-per-record shape reports 470 B/rec against 365 before, in
+    the wrong direction, unexplained.
+[ ] RAR3 decompression: 10772 compressed entries in 152 archives, 85% of
+    everything reported as unsupported.
