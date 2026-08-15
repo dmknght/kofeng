@@ -37,7 +37,7 @@
 
 KOF_TARGET_FORMAT(KOF_FMT_RAR);
 
-KOF_DEFINE_UNPACK
+void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_rar_info *r = kof_rar(ctx);
 	uint32_t i, opened = 0, packed = 0;

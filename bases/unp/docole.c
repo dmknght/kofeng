@@ -70,7 +70,7 @@ KOF_TARGET_FORMAT(KOF_FMT_DOCOLE);
  */
 #define GATHER_CAP (4u * 1024u * 1024u)
 
-KOF_DEFINE_UNPACK
+void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_docole_info *o = kof_docole(ctx);
 	uint64_t got, raw;

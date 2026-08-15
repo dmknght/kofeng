@@ -31,7 +31,7 @@
 
 KOF_TARGET_FORMAT(KOF_FMT_7Z);
 
-KOF_DEFINE_UNPACK
+void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_7z_info *z = kof_7z(ctx);
 	uint32_t i, opened = 0, unreached = 0, method;

@@ -25,7 +25,7 @@
 
 KOF_TARGET_FORMAT(KOF_FMT_PE);
 
-KOF_DEFINE_UNPACK
+void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_pe_info *pe = kof_pe(ctx);
 

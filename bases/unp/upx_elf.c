@@ -268,7 +268,7 @@ static int shape_of(unsigned ver, unsigned fmt)
 	return -1;
 }
 
-KOF_DEFINE_UNPACK
+void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_elf_info *elf = kof_elf(ctx);
 	int be = elf->valid && elf->elf_data == KOF_ELFDATA_BE;

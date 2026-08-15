@@ -22,7 +22,7 @@
 
 KOF_TARGET_FORMAT(KOF_FMT_TAR);
 
-KOF_DEFINE_UNPACK
+void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_tar_info *t = kof_tar(ctx);
 	uint32_t i, opened = 0;
