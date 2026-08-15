@@ -361,6 +361,43 @@ unit: fixtures test-sigs $(UNIT_BIN)
 # include: nothing to rebuild yet, and the first compile creates them.
 -include $(shell find $(BUILD) -name '*.d' 2>/dev/null)
 
+#
+# The same tests, under AddressSanitizer and UndefinedBehaviorSanitizer.
+#
+# A separate target rather than the default because it is roughly ten times slower
+# and because the two answer different questions. `unit` asks whether the engine
+# gets the right answer; this asks whether it stayed inside its own memory getting
+# there - out of bounds reads and writes, use after free, double free, and the
+# signed overflow that a size calculation reaches before any of those.
+#
+# Sources are compiled here rather than linked against the release library, so the
+# sanitiser instruments the parsers and decoders themselves and not only the test.
+#
+ASAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer \
+              -fno-sanitize-recover=undefined
+ASAN_BIN := $(patsubst tests/unit/%.c,$(TEST)/asan_%,$(UNIT_SRC))
+
+ASAN_LIB := $(TEST)/libkofeng-asan.a
+
+$(ASAN_LIB): $(LIB_SRC) $(SDK_HDR) | $(TEST)
+	@rm -rf $(TEST)/asan-obj && mkdir -p $(TEST)/asan-obj
+	@for f in $(LIB_SRC); do \
+		o=$(TEST)/asan-obj/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
+		$(CC) $(CFLAGS) $(ASAN_FLAGS) -c $$f -o $$o || exit 1; \
+	done
+	@$(AR) rcs $@ $(TEST)/asan-obj/*.o
+
+$(TEST)/asan_%: tests/unit/%.c $(ASAN_LIB) $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) $< $(ASAN_LIB) -o $@ $(LDFLAGS) $(UNIT_LIBS_$*)
+
+unit-asan: fixtures test-sigs $(ASAN_BIN)
+	@rc=0; for t in $(ASAN_BIN); do \
+		printf '%-28s ' "$$(basename $$t)"; \
+		if ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 \
+		   UBSAN_OPTIONS=print_stacktrace=1 $$t >/dev/null 2>$(TEST)/$$(basename $$t).log; \
+		then echo "ok"; else rc=1; echo "FAILED - see $(TEST)/$$(basename $$t).log"; fi; \
+	done; exit $$rc
+
 clean:
 	rm -rf $(BUILD)
 
