@@ -23,6 +23,7 @@
 #include "scan.h"
 
 #include "../kofdecomp/ovba.h"
+#include "../kofdecomp/lzma.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -649,7 +650,9 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 	if (sc->resident > sc->st.peak_resident)
 		sc->st.peak_resident = sc->resident;
 
-	if (method >= KOF_UNP_LZMA) {
+	if (method == KOF_UNP_LZMA2) {
+		st = kof_lzma2_decode(in, in_len, buf, want, &produced);
+	} else if (method >= KOF_UNP_LZMA) {
 		unsigned lc, lp, pb;
 
 		if (!lzma_props_of(method, &lc, &lp, &pb)) {
@@ -782,6 +785,9 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		return produced;
 	}
 
+	if (method == KOF_UNP_LZMA2)
+		return unpack_buffered(sc, ctx, method, 0, 0, b.p + off, len,
+				       out_hint, form);
 	if (nrv2_of(method, &variant, &bits))
 		return unpack_buffered(sc, ctx, method, variant, bits, b.p + off,
 				       len, out_hint, form);

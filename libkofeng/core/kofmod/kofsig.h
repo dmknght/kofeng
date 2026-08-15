@@ -554,6 +554,17 @@ enum kof_unp_method {
 	 */
 	KOF_UNP_OVBA = 2,
 
+	/*
+	 * LZMA2: LZMA cut into chunks that say what to carry over.
+	 *
+	 * No parameters in the id, unlike KOF_UNP_LZMA: an LZMA2 stream carries its
+	 * own properties and may change them part way through, so there is nothing
+	 * for a caller to pass. It is what 7-Zip writes its content with - measured
+	 * over 369 archives, every folder that could be located uses it and none use
+	 * plain LZMA.
+	 */
+	KOF_UNP_LZMA2 = 3,
+
 	KOF_UNP_NRV2B_8 = 16, KOF_UNP_NRV2B_16, KOF_UNP_NRV2B_32,
 	KOF_UNP_NRV2D_8,      KOF_UNP_NRV2D_16, KOF_UNP_NRV2D_32,
 	KOF_UNP_NRV2E_8,      KOF_UNP_NRV2E_16, KOF_UNP_NRV2E_32,

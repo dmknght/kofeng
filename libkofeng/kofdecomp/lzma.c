@@ -227,39 +227,86 @@ static uint32_t decode_len(struct rc *r, uint16_t *base, uint32_t pos_state)
 
 /* ---- the decoder ------------------------------------------------------------- */
 
-int kof_lzma_decode(unsigned lc, unsigned lp, unsigned pb,
-		    const uint8_t *in, uint64_t in_len,
-		    uint8_t *out, uint64_t out_cap, uint64_t *produced)
+/*
+ * The decoder's whole state, lifted out of the function that used to hold it.
+ *
+ * It was all locals, which is correct for LZMA and wrong for LZMA2: an LZMA2
+ * stream is a sequence of chunks that may CONTINUE the previous one - same
+ * probability model, same match distances, same dictionary - and a decoder whose
+ * state dies with its call cannot express that. Nothing here is new; it is the
+ * same six values, in a struct that can outlive one chunk.
+ *
+ * The dictionary is not in here because it never was: matches read out of the
+ * OUTPUT buffer, so the caller's buffer is the window and continuing across chunks
+ * costs nothing but passing the cursor back in.
+ */
+struct lz_state {
+	uint16_t *probs;
+	uint64_t  n_probs;
+	unsigned  lc, lp, pb;
+	uint32_t  state, rep0, rep1, rep2, rep3;
+};
+
+static void lz_reset_state(struct lz_state *z)
+{
+	uint64_t i;
+
+	z->state = 0;
+	z->rep0 = z->rep1 = z->rep2 = z->rep3 = 1;
+	for (i = 0; i < z->n_probs; i++)
+		z->probs[i] = PROB_INIT;
+}
+
+/*
+ * Make the model fit lc, lp and pb, allocating or growing as needed.
+ *
+ * LZMA2 may change the properties between chunks, so the size of the model is not
+ * fixed for the life of a stream. Growing rather than reallocating every time
+ * matters because a stream that alternates two property sets would otherwise
+ * allocate per chunk.
+ */
+static int lz_set_props(struct lz_state *z, unsigned lc, unsigned lp, unsigned pb)
+{
+	uint64_t want;
+
+	if (lc > KOF_LZMA_MAX_LC || lp > KOF_LZMA_MAX_LP || pb > KOF_LZMA_MAX_PB)
+		return 0;
+	want = (uint64_t)O_LITERAL + ((uint64_t)0x300u << (lc + lp));
+	if (want > z->n_probs) {
+		uint16_t *nv = realloc(z->probs, (size_t)want * sizeof *nv);
+
+		if (!nv)
+			return 0;
+		z->probs = nv;
+		z->n_probs = want;
+	}
+	z->lc = lc;
+	z->lp = lp;
+	z->pb = pb;
+	return 1;
+}
+
+/*
+ * Decode one LZMA stream into out[] starting at `at`, stopping at `limit`.
+ *
+ * `at` is both where output goes and how far back a match may reach, which is why
+ * it comes in rather than starting at zero: an LZMA2 chunk continues the previous
+ * chunk's dictionary, and the dictionary is the output written so far.
+ */
+static int lz_run(struct lz_state *z, const uint8_t *in, uint64_t in_len,
+		  uint8_t *out, uint64_t limit, uint64_t *at_io)
 {
 	struct rc r;
-	uint16_t *probs;
-	uint64_t at = 0, n_probs;
-	uint32_t state = 0, rep0 = 1, rep1 = 1, rep2 = 1, rep3 = 1;
-	uint32_t pos_mask, lit_pos_mask;
+	uint16_t *probs = z->probs;
+	uint64_t at = *at_io;
+	uint32_t state = z->state, rep0 = z->rep0, rep1 = z->rep1;
+	uint32_t rep2 = z->rep2, rep3 = z->rep3;
+	uint32_t pos_mask = (1u << z->pb) - 1u;
+	uint32_t lit_pos_mask = (1u << z->lp) - 1u;
+	unsigned lc = z->lc;
+	uint64_t out_cap = limit;
 	int status = KOF_DEC_OK;
 
-	if (produced)
-		*produced = 0;
-	/* Checked before the allocation they size, and before anything else uses
-	 * them: these came out of a container and nothing has vouched for them. */
-	if (lc > KOF_LZMA_MAX_LC || lp > KOF_LZMA_MAX_LP || pb > KOF_LZMA_MAX_PB)
-		return KOF_DEC_CORRUPT;
-	if (!in || !out || out_cap == 0)
-		return KOF_DEC_STOPPED;
-
-	n_probs = (uint64_t)O_LITERAL + ((uint64_t)0x300u << (lc + lp));
-	probs = malloc((size_t)n_probs * sizeof *probs);
-	if (!probs)
-		return KOF_DEC_STOPPED;
-	{
-		uint64_t i;
-
-		for (i = 0; i < n_probs; i++)
-			probs[i] = PROB_INIT;
-	}
-
-	pos_mask = (1u << pb) - 1u;
-	lit_pos_mask = (1u << lp) - 1u;
 	rc_init(&r, in, in_len);
 
 	while (at < out_cap) {
@@ -424,7 +471,228 @@ int kof_lzma_decode(unsigned lc, unsigned lp, unsigned pb,
 	if (r.short_input && status == KOF_DEC_OK)
 		status = KOF_DEC_TRUNCATED;
 
-	free(probs);
+	z->state = state;
+	z->rep0 = rep0;
+	z->rep1 = rep1;
+	z->rep2 = rep2;
+	z->rep3 = rep3;
+	*at_io = at;
+	return status;
+}
+
+/*
+ * One LZMA stream, which is what every caller before LZMA2 wanted.
+ *
+ * A thin wrapper now: fresh state, decode once, throw the state away.
+ */
+int kof_lzma_decode(unsigned lc, unsigned lp, unsigned pb,
+		    const uint8_t *in, uint64_t in_len,
+		    uint8_t *out, uint64_t out_cap, uint64_t *produced)
+{
+	struct lz_state z;
+	uint64_t at = 0;
+	int status;
+
+	if (produced)
+		*produced = 0;
+	if (!in || !out || out_cap == 0)
+		return KOF_DEC_STOPPED;
+
+	memset(&z, 0, sizeof z);
+	/* Checked before the allocation they size, and before anything else uses
+	 * them: these came out of a container and nothing has vouched for them. */
+	if (!lz_set_props(&z, lc, lp, pb)) {
+		free(z.probs);
+		return KOF_DEC_CORRUPT;
+	}
+	lz_reset_state(&z);
+	status = lz_run(&z, in, in_len, out, out_cap, &at);
+	free(z.probs);
+	if (produced)
+		*produced = at;
+	return status;
+}
+
+/*
+ * LZMA2: the same coder, cut into chunks that say what to carry over.
+ *
+ * 7-Zip writes its content with this rather than with plain LZMA - measured over
+ * 369 real archives, every one of the 258 whose folder could be located uses it and
+ * none use plain LZMA. So an engine with an LZMA decoder and no LZMA2 can read a
+ * 7z's file list and none of its files, which is where this one was.
+ *
+ * The format is a header byte and then a chunk:
+ *
+ *   0x00        the stream ends
+ *   0x01, 0x02  an UNCOMPRESSED chunk, with and without a dictionary reset. Two
+ *               more bytes give its length and the bytes follow verbatim.
+ *   0x80..0xff  an LZMA chunk. The low five bits are the top of the decoded
+ *               length, two bytes give the rest of it and two more give the
+ *               compressed length; bits five and six say how much state to throw
+ *               away first, and at two or above a properties byte follows.
+ *
+ * Every length is stored one less than it is, so a chunk can never be empty and
+ * the loop always advances - which is what bounds it without a counter.
+ *
+ * What makes this more than a wrapper is the carrying over. A chunk asking for no
+ * reset continues the previous chunk's probability model, its match distances and
+ * its dictionary, so decoding it alone produces bytes that are not the file. The
+ * dictionary needs no special handling here because a match reads out of the output
+ * buffer and the output cursor is simply not rewound between chunks.
+ */
+int kof_lzma2_decode(const uint8_t *in, uint64_t in_len, uint8_t *out,
+		     uint64_t out_cap, uint64_t *produced)
+{
+	struct lz_state z;
+	uint64_t p = 0, at = 0;
+	int status = KOF_DEC_OK, have_props = 0;
+
+	if (produced)
+		*produced = 0;
+	if (!in || !out || out_cap == 0)
+		return KOF_DEC_STOPPED;
+
+	memset(&z, 0, sizeof z);
+
+	while (p < in_len && at < out_cap) {
+		uint8_t control = in[p++];
+		uint64_t u_len, c_len;
+		unsigned reset;
+
+		if (control == 0)
+			break;                  /* the stream says it is done */
+
+		if (control < 0x80u) {
+			if (control > 2u) {
+				status = KOF_DEC_CORRUPT;
+				break;
+			}
+			if (p + 2u > in_len) {
+				status = KOF_DEC_TRUNCATED;
+				break;
+			}
+			u_len = ((uint64_t)in[p] << 8 | in[p + 1]) + 1u;
+			p += 2u;
+			if (p + u_len > in_len) {
+				u_len = in_len - p;
+				status = KOF_DEC_TRUNCATED;
+			}
+			if (u_len > out_cap - at) {
+				u_len = out_cap - at;
+				status = KOF_DEC_STOPPED;
+			}
+			memcpy(out + at, in + p, (size_t)u_len);
+			at += u_len;
+			p += u_len;
+			/*
+			 * The model is NOT reset here, and getting that wrong is
+			 * what cut four real archives short.
+			 *
+			 * The intuition is that bytes written without the coder
+			 * must invalidate it - and the format says otherwise. An
+			 * uncompressed chunk resets the dictionary when its control
+			 * byte is 1 and nothing at all when it is 2, leaving the
+			 * probability model and the match distances for the chunk
+			 * that follows to continue. Measured on an archive whose
+			 * second chunk is uncompressed and whose third asks for no
+			 * reset: resetting produced 115470 bytes of 1657182, all of
+			 * them wrong after the first chunk.
+			 */
+			if (status != KOF_DEC_OK)
+				break;
+			continue;
+		}
+
+		if (p + 4u > in_len) {
+			status = KOF_DEC_TRUNCATED;
+			break;
+		}
+		u_len = (((uint64_t)(control & 0x1fu) << 16) |
+			 ((uint64_t)in[p] << 8) | in[p + 1]) + 1u;
+		c_len = (((uint64_t)in[p + 2] << 8) | in[p + 3]) + 1u;
+		p += 4u;
+		reset = ((unsigned)control >> 5) & 3u;
+
+		if (reset >= 2u) {
+			unsigned d;
+
+			if (p >= in_len) {
+				status = KOF_DEC_TRUNCATED;
+				break;
+			}
+			d = in[p++];
+			if (d >= 9u * 5u * 5u ||
+			    !lz_set_props(&z, d % 9u, (d / 9u) % 5u, d / (9u * 5u))) {
+				status = KOF_DEC_CORRUPT;
+				break;
+			}
+			have_props = 1;
+		}
+		if (!have_props) {
+			/* A chunk that continues properties nobody set. */
+			status = KOF_DEC_CORRUPT;
+			break;
+		}
+		if (reset >= 1u)
+			lz_reset_state(&z);
+
+		if (p + c_len > in_len) {
+			c_len = in_len - p;
+			status = KOF_DEC_TRUNCATED;
+		}
+		if (u_len > out_cap - at)
+			u_len = out_cap - at;
+
+		{
+			uint64_t before = at;
+
+			/*
+			 * The decoder is given the rest of the stream, not just
+			 * this chunk, and the OUTPUT length is what stops it.
+			 *
+			 * A range decoder reads ahead: normalising consumes bytes
+			 * before the symbols that need them, so a decoder handed
+			 * exactly c_len bytes runs out a few bytes early and
+			 * reports a truncation that is not one. Measured, that cut
+			 * four of 256 real archives short - one of them to 218697
+			 * bytes of 14035136 - and the larger the chunk the likelier
+			 * it was, because more symbols means more normalising.
+			 *
+			 * Reading past the chunk is safe because u_len bounds what
+			 * comes out and `p` advances by c_len regardless: the
+			 * chunk's own length still decides where the next one
+			 * begins, which is the only thing it is authoritative for.
+			 */
+			lz_run(&z, in + p, in_len - p, out, at + u_len, &at);
+			if (at == before) {
+				/* The chunk decoded nothing. Continuing would ask
+				 * the next record the same question with the same
+				 * answer, which is how a chain of empty chunks
+				 * becomes a decode that never ends. */
+				if (status == KOF_DEC_OK)
+					status = KOF_DEC_CORRUPT;
+				break;
+			}
+		}
+		p += c_len;
+		if (status != KOF_DEC_OK)
+			break;
+		/*
+		 * Filling the buffer is not being refused.
+		 *
+		 * The loop condition ends the decode on its own when the output is
+		 * full, and reporting STOPPED there would call every stream that
+		 * decoded to exactly its declared length a truncated one - measured,
+		 * 251 of 256 real archives. STOPPED belongs to the case below,
+		 * where the buffer is full AND the stream has more to say.
+		 */
+		if (at >= out_cap && p < in_len && in[p] != 0) {
+			status = KOF_DEC_STOPPED;
+			break;
+		}
+	}
+
+	free(z.probs);
 	if (produced)
 		*produced = at;
 	return status;

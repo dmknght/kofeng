@@ -64,4 +64,15 @@ int kof_lzma_decode(unsigned lc, unsigned lp, unsigned pb,
 		    const uint8_t *in, uint64_t in_len,
 		    uint8_t *out, uint64_t out_cap, uint64_t *produced);
 
+/*
+ * LZMA2, which is LZMA in chunks that may continue one another.
+ *
+ * No properties argument: they are in the stream, and may change part way through
+ * it. The dictionary is the output buffer, so out_cap bounds both how much is
+ * produced and how far a match may reach - the same arrangement plain LZMA uses
+ * here and for the same reason.
+ */
+int kof_lzma2_decode(const uint8_t *in, uint64_t in_len, uint8_t *out,
+		     uint64_t out_cap, uint64_t *produced);
+
 #endif /* KOFENG_LZMA_H */

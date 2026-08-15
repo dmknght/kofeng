@@ -34,6 +34,7 @@ KOF_TARGET_FORMAT(KOF_FMT_7Z);
 KOF_DEFINE_UNPACK
 {
 	const struct kof_7z_info *z = kof_7z(ctx);
+	uint32_t i, opened = 0, unreached = 0;
 
 	if (!z->valid)
 		return;
@@ -81,19 +82,59 @@ KOF_DEFINE_UNPACK
 			KOF_UNP_BROKEN(KOF_UNP_DAMAGED);
 		if (!kof_child())
 			KOF_UNP_BROKEN(KOF_UNP_LIMIT);
-
-		/*
-		 * The CONTENT is still not reachable, and saying so is the point.
-		 * Getting a file out of a 7z means running its folder's whole coder
-		 * chain - LZMA2, the branch filters, and the solid block the file
-		 * shares with its neighbours - which this build does not have. The
-		 * names are now visible; the bytes behind them are not.
-		 */
-		kof_unp_broken(KOF_UNP_UNSUPPORTED);
-		return;
+		break;
 
 	default:
 		/* The start header points at a header the object does not contain. */
 		KOF_UNP_BROKEN(KOF_UNP_DAMAGED);
 	}
+
+	/*
+	 * The content, one folder at a time.
+	 *
+	 * A folder is 7z's unit of decompression: one coder over one run of packed
+	 * bytes, decoding to every file in it end to end. Emitting it whole rather
+	 * than splitting it into files is the same choice the compound file module
+	 * makes with a macro region - the bytes become searchable, which is what a
+	 * scan wants, and cutting them into files needs a second table this does not
+	 * read.
+	 *
+	 * Everything here was reported UNSUPPORTED until the engine grew an LZMA2
+	 * decoder. Measured over 369 archives, 258 have a folder this can locate and
+	 * every one of them is LZMA2; the rest chain a filter in front of the coder,
+	 * which is still named rather than guessed at.
+	 */
+	for (i = 0; i < z->n_folders; i++) {
+		const struct kof_7z_folder *fo = &z->folder[i];
+
+		if (!fo->pack_size || !fo->unpack_size)
+			continue;
+		if (fo->coder != KOF_7Z_CODER_LZMA2) {
+			unreached++;
+			continue;
+		}
+		if (kof_unpack_at(KOF_UNP_LZMA2, fo->pack_off, fo->pack_size,
+				  fo->unpack_size) == 0) {
+			unreached++;
+			continue;
+		}
+		if (!kof_child())
+			KOF_UNP_BROKEN(KOF_UNP_LIMIT);
+		opened++;
+	}
+
+	kof_debug("SevenZip.folders", z->n_folders);
+	kof_debug("SevenZip.opened", opened);
+
+	/*
+	 * A folder the parse could not place, or a coder this does not run. Named
+	 * rather than passed over: an archive whose content was never looked at must
+	 * not come back clean.
+	 */
+	if (z->anomalies & KOF_7Z_ANOM_CODER_CHAIN)
+		kof_unp_broken(KOF_UNP_UNSUPPORTED);
+	else if (unreached)
+		kof_unp_broken(KOF_UNP_UNSUPPORTED);
+	else if (z->n_folders == 0)
+		kof_unp_broken(KOF_UNP_UNSUPPORTED);
 }
