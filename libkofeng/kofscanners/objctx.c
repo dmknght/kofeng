@@ -99,13 +99,10 @@ static void c_report(const struct kof_obj_ctx *ctx, uint32_t level,
  * module's string, and a signature reporting on somebody else's pattern is worse
  * than one that reports nothing.
  */
-static const struct kof_str_ent *str_of(const struct kof_scanner *sc, uint32_t id)
+static const struct kof_str_ent *str_of(const struct kof_scanner *sc, uint32_t id,
+					const uint8_t **bytes)
 {
-	const struct kof_module *m = sc->cur_mod;
-
-	if (!m || id >= m->n_str)
-		return NULL;
-	return &sc->eng->str_tab[m->str_base + id];
+	return kof_db_str(sc->eng, sc->cur_mod, id, bytes);
 }
 
 /*
@@ -120,7 +117,8 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	const struct kof_module *m = sc->cur_mod;
-	const struct kof_str_ent *e = str_of(sc, str_id);
+	const uint8_t *bytes;
+	const struct kof_str_ent *e = str_of(sc, str_id, &bytes);
 	struct kof_range *ext = sc->ext;
 	uint32_t n;
 
@@ -130,7 +128,7 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 
 	return kof_match_lookup(&sc->m,
 				m->memo_base + str_id * m->n_rng + range_id,
-				ext, n, sc->eng->str_pool + e->off, e->len,
+				ext, n, bytes, e->len,
 				e->kind, e->flags, &sc->st.gram_answers);
 }
 
@@ -151,11 +149,12 @@ static int c_find_str_at(const struct kof_obj_ctx *ctx, uint32_t str_id,
 			 uint64_t off)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	const struct kof_str_ent *e = str_of(sc, str_id);
+	const uint8_t *bytes;
+	const struct kof_str_ent *e = str_of(sc, str_id, &bytes);
 
 	if (!e)
 		return 0;
-	return kof_match_at(&sc->m, off, sc->eng->str_pool + e->off, e->len,
+	return kof_match_at(&sc->m, off, bytes, e->len,
 			    e->kind, e->flags);
 }
 
@@ -163,11 +162,12 @@ static int c_find_str_in(const struct kof_obj_ctx *ctx, uint32_t str_id,
 			 uint64_t off, uint64_t len)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	const struct kof_str_ent *e = str_of(sc, str_id);
+	const uint8_t *bytes;
+	const struct kof_str_ent *e = str_of(sc, str_id, &bytes);
 
 	if (!e)
 		return 0;
-	return kof_match_in(&sc->m, off, len, sc->eng->str_pool + e->off, e->len,
+	return kof_match_in(&sc->m, off, len, bytes, e->len,
 			    e->kind, e->flags);
 }
 
@@ -181,12 +181,13 @@ static uint64_t c_find_str_where(const struct kof_obj_ctx *ctx, uint32_t str_id,
 				 uint64_t off, uint64_t len)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	const struct kof_str_ent *e = str_of(sc, str_id);
+	const uint8_t *bytes;
+	const struct kof_str_ent *e = str_of(sc, str_id, &bytes);
 
 	if (!e)
 		return KOF_BROKEN;
-	return kof_match_where(&sc->m, off, len, sc->eng->str_pool + e->off,
-			       e->len, e->kind, e->flags);
+	return kof_match_where(&sc->m, off, len, bytes, e->len, e->kind,
+			       e->flags);
 }
 
 /*

@@ -52,9 +52,15 @@ struct kof_str_ent {
 	uint8_t  flags;           /* KOF_STR_ICASE | KOF_STR_FULLWORD; literal only */
 };
 
-struct kof_name_ent {
-	uint32_t id;
-	char     text[KOF_NAME_MAX_LEN];
+/*
+ * A pack, still mapped.
+ *
+ * Detection names are never copied out of it - see kof_db_name - so the mapping has
+ * to outlive the load that made it. Nothing else here points into a pack.
+ */
+struct kof_db_pack {
+	void  *map;
+	size_t len;
 };
 
 /*
@@ -85,6 +91,12 @@ struct kof_module {
 	uint32_t arch_mask;   /* 0: any architecture */
 	uint32_t subtype_mask;/* 0: any kind of that format - see ctx->subtype */
 
+	/*
+	 * name_base indexes THE PACK'S OWN name descriptors, not a table of the
+	 * engine's, because there is no longer a table of the engine's - so the
+	 * module has to say which pack as well as where in it.
+	 */
+	uint32_t pack_id;
 	uint32_t name_base, n_names;
 	uint32_t str_base,  n_str;
 	uint32_t rng_base,  n_rng;
@@ -125,18 +137,39 @@ struct kof_engine {
 	struct kof_module   *unp;
 	uint32_t             n_unp;
 
-	struct kof_str_ent  *str_tab;
+	/*
+	 * How many patterns the whole database declares. A COUNT AND NOT A TABLE:
+	 * the descriptors and the bytes both stay in the packs and are reached through
+	 * kof_db_str. The matcher needs the number to size its presence table, which
+	 * is the only thing left that wants it.
+	 */
 	uint32_t             n_str;
-
-	/* Every pack's string pool, concatenated. str_tab entries index into it. */
-	uint8_t             *str_pool;
-	uint32_t             str_pool_len;
 
 	uint32_t            *rng_tab;   /* a range is just a region mask, but named */
 	uint32_t             n_rng;
 
-	struct kof_name_ent *name_tab;
-	uint32_t             n_name;
+	/*
+	 * The packs, kept mapped for their names alone.
+	 *
+	 * THE NAME TABLE USED TO BE HERE and it was the largest thing in the engine:
+	 * an id and a text per record, resident from the first object to the last, to
+	 * serve a lookup that happens when a module reports a finding - a few dozen
+	 * times in a scan of thirty four thousand objects. Millions of entries held
+	 * for tens of uses.
+	 *
+	 * So they are not held. The pack already stores names as a pool with an id
+	 * and an offset beside it, which is a perfectly good on-disk index, and a
+	 * mapping costs address space rather than memory: a page of names is read the
+	 * first time a detection needs it and never before. Nothing is faulted in on
+	 * a clean scan, which is nearly every scan.
+	 *
+	 * The mappings are also why kof_db_name validates what it reads instead of
+	 * trusting the load time check. A copy could be trusted afterwards because
+	 * nothing could change it; a mapping is a view of a file that another process
+	 * may still write to.
+	 */
+	struct kof_db_pack  *packs;
+	uint32_t             n_packs;
 
 	/* Sum of every module's memo slice; what the scanner allocates and clears. */
 	uint32_t memo_size;
@@ -169,6 +202,21 @@ void               kof_db_free(struct kof_engine *);
 /* Resolve a name id reported by a module. NULL if the table is out of step with the
  * blob, which is the failure mode to want: "unknown" rather than another family's
  * name. */
+/*
+ * One of a module's declared patterns: its descriptor, and where its bytes are.
+ *
+ * Read from the pack rather than from a table of the engine's, for the reason
+ * kof_db_name gives and one more: a pattern is only touched when a module that
+ * declares it actually runs, so the pages of a database nobody matched are pages
+ * that never enter memory. Copying them in defeats every filter above it.
+ *
+ * NULL if anything does not hold, checked here rather than trusted from load time -
+ * see kof_db_name for why a mapping cannot be trusted afterwards.
+ */
+const struct kof_str_ent *kof_db_str(const struct kof_engine *,
+				     const struct kof_module *, uint32_t id,
+				     const uint8_t **bytes);
+
 const char *kof_db_name(const struct kof_engine *, const struct kof_module *,
 			uint32_t name_id);
 

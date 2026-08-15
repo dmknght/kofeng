@@ -510,6 +510,16 @@ cp "$raw" "$blob"
 	printf 'blob_len=%s\n'  "$(stat -c%s "$blob")"
 	# Derived from the exported entry point, never authored - see above.
 	printf 'kind=%s\n'      "$kind"
+	# What this module is called, as opposed to where its artefacts live.
+	#
+	# The artefact name above carries the directory in front of it so that two
+	# sources with the same basename cannot overwrite each other's blobs. That
+	# prefix is disambiguation and not identity: "unp_upx_elf" is the UPX ELF
+	# unpacker, and the "unp_" says only which tree it was found in. ksigbuilder
+	# names a pack after what is inside it, so it needs the identity - and the
+	# basename is known here and nowhere else, because the flattening above has
+	# already destroyed the boundary by the time the .meta is read.
+	printf 'label=%s\n'     "$(basename "$src" .c)"
 } > "$metafile"
 
 printf '== ok  %s  %s bytes  kind=%s  names=%s  strs=%s  target=%d scan=0x%x\n' \

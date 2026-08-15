@@ -29,9 +29,34 @@ struct kof_match_ctx {
 	 * same question being asked twice. Neither is scan bookkeeping - the scanner
 	 * decides *which* ranges to ask about, the matcher decides how to answer.
 	 */
-	struct kof_gram *gram;
-	uint8_t         *memo;      /* engine sized; MEMO_* per (string, range) pair */
-	uint32_t         memo_len;
+	struct kof_gram *gram;      /* owned; built lazily, see kof_match_begin */
+	/*
+	 * The presence table to USE for this object, which is the one above or
+	 * nothing. Separate from ownership because the filter is worth having on a
+	 * small object and worth skipping on a large one, and that is decided per
+	 * object while the table itself is kept.
+	 */
+	struct kof_gram *gram_use;
+	uint32_t         gram_patterns;   /* what the engine declared; 0 -> no table */
+
+	/*
+	 * The memo, one cell per (string, range) pair, STAMPED RATHER THAN CLEARED.
+	 *
+	 * A cell holds the generation that wrote it in its top bits and the answer in
+	 * its bottom two, and a cell whose generation is not the current one reads as
+	 * unknown. That is what makes starting an object O(1): clearing it instead is
+	 * work proportional to the whole database, paid on every object, including the
+	 * objects where the filters decide to run nothing at all. At four million
+	 * records that memset is megabytes per object and it defeats the purpose of
+	 * having a filter.
+	 *
+	 * The same trick the presence table already uses, for the same reason. Two
+	 * bytes a cell rather than one is the price, and it buys back far more than it
+	 * costs the moment the database stops being small.
+	 */
+	uint16_t        *memo;
+	uint32_t         memo_len;  /* cells, not bytes */
+	uint16_t         memo_gen;
 
 	/* Counters, for measuring whether the memo is worth its complexity. */
 	uint64_t n_calls;
@@ -41,14 +66,18 @@ struct kof_match_ctx {
 
 void kof_match_begin(struct kof_match_ctx *m, kof_buf data);
 
-/* Answers a memo slot can hold. */
+/* Answers a memo cell can hold, in its low two bits. */
 #define KOF_MEMO_UNKNOWN 0
 #define KOF_MEMO_ABSENT  1
 #define KOF_MEMO_PRESENT 2
 
+/* The generation occupies the rest. Zero is never a live generation, so a freshly
+ * allocated memo reads as entirely unknown without being written. */
+#define KOF_MEMO_GEN_MAX 0x3fffu
+
 /*
- * Attach the per-object search state. `memo_len` is the whole engine's memo, cleared
- * on each kof_match_begin; `gram` is reused across objects and rebuilt per object.
+ * Attach the per-object search state. `memo_len` counts cells; `gram` is built on
+ * first use and restamped per object.
  */
 int  kof_match_state_init(struct kof_match_ctx *, uint32_t n_patterns,
 			  uint32_t memo_len);

@@ -175,29 +175,71 @@ static void check_engine(const struct kof_engine *e, uint64_t round)
 		return;
 	}
 
-	for (i = 0; i < e->n_str; i++) {
-		const struct kof_str_ent *s = &e->str_tab[i];
+	/*
+	 * Patterns are reached per module through kof_db_str now, so that is what
+	 * has to hold: every id a module declares resolves, no id past its slice
+	 * does, and what comes back is something the matcher can walk. The pool
+	 * bound is inside the accessor - a descriptor that broke it comes back NULL
+	 * rather than as a pointer somebody has to check afterwards.
+	 */
+	for (i = 0; i < e->n_mods; i++) {
+		const struct kof_module *md = &e->mods[i];
+		uint32_t k;
 
-		if (s->kind != KOF_STR_LITERAL && s->kind != KOF_STR_HEX) {
-			fail(round, "a string has a kind the engine cannot walk");
-			return;
-		}
-		if ((uint64_t)s->off + s->len > e->str_pool_len) {
-			fail(round, "a string lies outside the pool");
-			return;
-		}
-		if (s->kind == KOF_STR_HEX && s->off % KOF_HEX_PROG_ALIGN) {
-			fail(round, "a hex program is misaligned");
-			return;
+		for (k = 0; k < md->n_str + 2u; k++) {
+			const struct kof_str_ent *s;
+			const uint8_t *b = NULL;
+
+			s = kof_db_str(e, md, k, &b);
+			if (k >= md->n_str) {
+				if (s) {
+					fail(round, "a pattern resolved outside "
+						    "its module's slice");
+					return;
+				}
+				continue;
+			}
+			if (!s) {
+				fail(round, "a declared pattern did not resolve");
+				return;
+			}
+			if (s->kind != KOF_STR_LITERAL && s->kind != KOF_STR_HEX) {
+				fail(round, "a string has a kind the engine "
+					    "cannot walk");
+				return;
+			}
+			if (s->kind == KOF_STR_HEX &&
+			    s->off % KOF_HEX_PROG_ALIGN) {
+				fail(round, "a hex program is misaligned");
+				return;
+			}
 		}
 	}
 
-	for (i = 0; i < e->n_name; i++)
-		if (memchr(e->name_tab[i].text, 0, sizeof e->name_tab[i].text)
-		    == NULL) {
-			fail(round, "a detection name is not terminated");
-			return;
+	/*
+	 * Names are not a table any more - they stay in the mapped pack and
+	 * kof_db_name reads them when a finding needs one. So the thing to check is
+	 * that function, on this engine, for every module in it: a mutated pack that
+	 * gets past the loader must still not be able to make it hand back a pointer
+	 * that runs off the mapping when something prints it.
+	 *
+	 * Ids the module does not have are asked for too. A lookup that misses walks
+	 * the whole slice, which is the path that reads every descriptor in it.
+	 */
+	for (i = 0; i < e->n_mods; i++) {
+		const struct kof_module *m = &e->mods[i];
+		uint32_t k;
+
+		for (k = 0; k < m->n_names + 4u; k++) {
+			const char *nm = kof_db_name(e, m, k);
+
+			if (nm && strnlen(nm, KOF_NAME_MAX_LEN + 1u) >
+					KOF_NAME_MAX_LEN) {
+				fail(round, "a detection name is not terminated");
+				return;
+			}
 		}
+	}
 
 	use_engine(e);
 }
@@ -211,9 +253,9 @@ static void check_mods(const struct kof_engine *e, const struct kof_module *mods
 		const struct kof_module *m = &mods[i];
 		const uint8_t *fn = (const uint8_t *)(void *)(uintptr_t)m->fn;
 
-		if ((uint64_t)m->str_base + m->n_str > e->n_str ||
+		if ((uint64_t)m->str_base + m->n_str > e->n_str ||   /* per pack now */
 		    (uint64_t)m->rng_base + m->n_rng > e->n_rng ||
-		    (uint64_t)m->name_base + m->n_names > e->n_name) {
+		    m->pack_id >= e->n_packs) {
 			fail(round, "a module names a table slice that is not there");
 			*bad = 1;
 			return;
@@ -257,13 +299,33 @@ static void use_engine(const struct kof_engine *e)
 	memset(&m, 0, sizeof m);
 	if (kof_match_state_init(&m, 0, 0)) {
 		kof_match_begin(&m, kof_buf_make(obj, 256));
-		for (i = 0; i < e->n_str; i++) {
-			const struct kof_str_ent *s = &e->str_tab[i];
-			const uint8_t *b = e->str_pool + s->off;
+		/*
+		 * Per module, through kof_db_str, because that is now the only way
+		 * in - and it is the function a mutated pack has to be unable to
+		 * walk off the mapping through. Ids past the module's slice are
+		 * asked for too: rejecting them is the check being tested.
+		 */
+		/* Every pattern the database declares, actually matched. What is
+		 * asserted about them is check_engine's job; this is the part that
+		 * walks a mutated program rather than only looking at it. */
+		for (i = 0; i < e->n_mods; i++) {
+			const struct kof_module *md = &e->mods[i];
+			uint32_t k;
 
-			(void)kof_match_in(&m, 0, 256, b, s->len, s->kind, s->flags);
-			(void)kof_match_at(&m, 0, b, s->len, s->kind, s->flags);
-			(void)kof_match_at(&m, 250, b, s->len, s->kind, s->flags);
+			for (k = 0; k < md->n_str; k++) {
+				const struct kof_str_ent *s;
+				const uint8_t *b = NULL;
+
+				s = kof_db_str(e, md, k, &b);
+				if (!s)
+					continue;
+				(void)kof_match_in(&m, 0, 256, b, s->len,
+						   s->kind, s->flags);
+				(void)kof_match_at(&m, 0, b, s->len, s->kind,
+						   s->flags);
+				(void)kof_match_at(&m, 250, b, s->len, s->kind,
+						   s->flags);
+			}
 		}
 		kof_match_state_free(&m);
 	}

@@ -423,8 +423,31 @@ static void check_good(const uint8_t *good, size_t good_len)
 
 	if (e->n_mods != 2)
 		fail("good", "wrong number of modules");
-	if (e->n_str != 3 || e->n_rng != 2 || e->n_name != 3)
+	if (e->n_str != 3 || e->n_rng != 2)
 		fail("good", "wrong table sizes");
+	if (e->n_packs != 1)
+		fail("good", "the pack was not kept mapped");
+
+	/*
+	 * The names, through the function that reads them.
+	 *
+	 * Not by inspecting a table, because there is no longer a table: they are
+	 * read from the mapping on demand, which makes kof_db_name the only thing
+	 * that can be checked and the only thing worth checking.
+	 */
+	if (e->n_mods == 2) {
+		const char *a = kof_db_name(e, &e->mods[0], 11);
+		const char *b = kof_db_name(e, &e->mods[0], 22);
+		const char *c = kof_db_name(e, &e->mods[1], 33);
+
+		if (!a || strcmp(a, "Test.Alpha") != 0 ||
+		    !b || strcmp(b, "Test.Beta") != 0 ||
+		    !c || strcmp(c, "Test.Gamma") != 0)
+			fail("good", "a detection name did not survive the load");
+		/* A module cannot be asked for another module's name. */
+		if (kof_db_name(e, &e->mods[0], 33) != NULL)
+			fail("good", "a name leaked across module slices");
+	}
 
 	/* The slices, which is what the loader rebases and therefore what it can get
 	 * wrong without any pointer being invalid. */
@@ -446,16 +469,30 @@ static void check_good(const uint8_t *good, size_t good_len)
 		if (kof_db_name(e, &e->mods[1], 11) != NULL)
 			fail("good", "a name resolved outside its module's slice");
 	}
-	if (e->n_str == 3 &&
-	    (e->str_tab[0].len != 17 ||
-	     !(e->str_tab[1].flags & KOF_STR_ICASE) ||
-	     !(e->str_tab[2].flags & KOF_STR_FULLWORD)))
-		fail("good", "string flags did not survive the load");
-	/* The pool is the part the descriptors index, so a load that got the
-	 * rebasing wrong shows up here rather than as a wrong match much later. */
-	if (e->n_str == 3 &&
-	    memcmp(e->str_pool + e->str_tab[0].off, "this-is-a-literal", 17) != 0)
-		fail("good", "a literal did not survive the load");
+	/*
+	 * The patterns, through the accessor, because there is no table any more:
+	 * descriptors and bytes both stay in the pack. A load that resolved the
+	 * wrong slice or the wrong pool offset shows up here rather than as a wrong
+	 * match much later.
+	 */
+	if (e->n_mods == 2) {
+		const struct kof_str_ent *s0, *s1, *s2;
+		const uint8_t *b0 = NULL, *b1 = NULL, *b2 = NULL;
+
+		s0 = kof_db_str(e, &e->mods[0], 0, &b0);
+		s1 = kof_db_str(e, &e->mods[0], 1, &b1);
+		s2 = kof_db_str(e, &e->mods[1], 0, &b2);
+
+		if (!s0 || !s1 || !s2 ||
+		    s0->len != 17 || !(s1->flags & KOF_STR_ICASE) ||
+		    !(s2->flags & KOF_STR_FULLWORD))
+			fail("good", "string flags did not survive the load");
+		if (s0 && memcmp(b0, "this-is-a-literal", 17) != 0)
+			fail("good", "a literal did not survive the load");
+		/* A module cannot reach past its own slice. */
+		if (kof_db_str(e, &e->mods[1], 1, &b2) != NULL)
+			fail("good", "a pattern leaked across module slices");
+	}
 	if (e->memo_size != 4)
 		fail("good", "memo total is not the sum of the slices");
 	if (e->scan_mask != ((1u << 2) | (1u << 3)))

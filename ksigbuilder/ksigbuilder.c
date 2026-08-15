@@ -25,8 +25,7 @@
  *
  * GROUPING
  *
- * One pack per (kind, target_mask, subtype_mask, arch_mask). Every part of that key
- * is derived
+ * One pack per (kind, target_mask, arch_mask). Every part of that key is derived
  * from an artefact - kind from which entry point the module exported, the rest from
  * the .meta record - so nobody decides where a module goes and there is nowhere for
  * a decision to be wrong.
@@ -41,6 +40,19 @@
  * A module targeting PE and ELF together therefore gets its own pack with
  * any_target = PE|ELF, which still rules out Mach-O, script and text. That is not
  * an exception to the rule; it is the rule applied to a mask with two bits set.
+ *
+ *
+ * WHY SUBTYPE IS NOT PART OF THE KEY
+ *
+ * It was, and it bought nothing, because the pack header has no field for it. There
+ * is any_target, any_scan and any_arch, and no any_subtype - so a pack can never be
+ * ruled out by subtype however it is grouped, and splitting by one only produced two
+ * files where one would do. ELF and ELF-relocatable were separate packs of four
+ * kilobytes each for a test that could not be performed.
+ *
+ * The filtering itself is untouched: every module carries its own subtype_mask into
+ * the pack and the per-module precondition test reads it there, exactly as before.
+ * What was dropped is a directory entry, not a check.
  *
  * Measured on 4004 modules, this produces 4 packs and skips almost nothing for an
  * ELF object. That is the honest result: grouping is a coarse cut and does not
@@ -1022,6 +1034,7 @@ static int extract_main(int argc, char **argv)
 /* Everything read out of one artefact set, owned until its pack is written. */
 struct artefact {
 	char    *stem;                   /* the path without the .blob */
+	char    *label;                  /* what the module is called; see below */
 	uint8_t *code;
 	uint32_t code_len;
 
@@ -1044,12 +1057,23 @@ struct artefact {
 static void artefact_free(struct artefact *a)
 {
 	free(a->stem);
+	free(a->label);
 	free(a->code);
 	free(a->str);
 	free(a->rng);
 	free(a->name);
 	free(a->str_bytes);
 	free(a->name_text);
+	/*
+	 * Cleared, so freeing twice is harmless rather than merely unreached.
+	 *
+	 * Today it is unreached: the one caller that frees a half loaded artefact
+	 * has not incremented the count yet, so the sweep at the end skips the slot
+	 * it freed. That is a fact about an index, not about this function, and the
+	 * next person to move an increment does not know it. Eight stores make the
+	 * question stop existing.
+	 */
+	memset(a, 0, sizeof *a);
 }
 
 /* <stem> + <ext> into a fresh string. */
@@ -1154,6 +1178,17 @@ static int meta_load(struct artefact *a)
 		} else if (strncmp(line, "kind=", 5) == 0) {
 			a->kind = (uint32_t)strtoul(line + 5, 0, 10);
 			have_kind = 1;
+		} else if (strncmp(line, "label=", 6) == 0) {
+			char *nl = strchr(line + 6, '\n');
+
+			if (nl)
+				*nl = 0;
+			free(a->label);
+			a->label = strdup(line + 6);
+			if (!a->label) {
+				fclose(f);
+				goto out;
+			}
 		}
 	}
 	fclose(f);
@@ -1166,6 +1201,15 @@ static int meta_load(struct artefact *a)
 	if (!have_kind) {
 		fprintf(stderr, "ksigbuilder: %s: record declares no kind\n",
 			a->stem);
+		goto out;
+	}
+	/* Required rather than defaulted. A missing label means the artefact was
+	 * written by an older compiler, and guessing one from the path would name a
+	 * pack after a guess - which is the one thing a name in a directory listing
+	 * must never be. Rebuilding the artefacts fixes it. */
+	if (!a->label || !a->label[0]) {
+		fprintf(stderr, "ksigbuilder: %s: record declares no label; "
+				"rebuild the artefacts\n", a->stem);
 		goto out;
 	}
 	if (a->kind != KOF_PACK_DETECT && a->kind != KOF_PACK_UNPACK) {
@@ -1463,10 +1507,24 @@ static int artefact_load(struct artefact *a, const char *blob_path)
 
 /* A set of artefacts sharing one grouping key, which is one pack. */
 struct group {
-	uint32_t  kind, target_mask, arch_mask, subtype_mask;
+	uint32_t  kind, target_mask, arch_mask;
 	uint32_t *member;                /* indices into the artefact array */
 	uint32_t  n, cap;
 };
+
+/* Every field of the key, so the order is total and no two packs can tie. */
+static int group_cmp(const void *pa, const void *pb)
+{
+	const struct group *a = pa, *b = pb;
+
+	if (a->kind != b->kind)
+		return a->kind < b->kind ? -1 : 1;
+	if (a->target_mask != b->target_mask)
+		return a->target_mask < b->target_mask ? -1 : 1;
+	if (a->arch_mask != b->arch_mask)
+		return a->arch_mask < b->arch_mask ? -1 : 1;
+	return 0;
+}
 
 static int group_add(struct group *g, uint32_t idx)
 {
@@ -1501,7 +1559,117 @@ static int write_file(const char *path, const uint8_t *data, size_t len)
 
 static const char *kind_name(uint32_t k)
 {
-	return k == KOF_PACK_UNPACK ? "unpack" : "detect";
+	return k == KOF_PACK_UNPACK ? "unpack" : "sigs";
+}
+
+/*
+ * NAMING A PACK SO A DIRECTORY LISTING IS READABLE.
+ *
+ * The name says WHAT IS IN THE PACK. It does not encode the key, and it used to:
+ * "detect-t768-a0" spelled the masks in decimal, which nobody reads off a number,
+ * and the numbers moved every time a format was added. Spelling the bits instead
+ * fixed the reading and left the deeper mistake in place - the masks are already in
+ * the pack header, per module and unioned, so a filename that repeats them is
+ * carrying the machine's copy of something the machine already has.
+ *
+ * What a filename is for is telling a person which database this is, in ONE SHORT
+ * GENERAL WORD. Not a list. A name assembled from its contents has no upper bound -
+ * "zip+doczip" is two and looks survivable, fifty formats in a filename is where the
+ * same rule ends up - and it churns every time a module is added to the pack.
+ *
+ * So: the general word is the format, and a label is used only where it is strictly
+ * more informative and cannot grow. That is a pack holding exactly one module -
+ * "upx-elf" says what "elf" does not, and there is nothing there to accumulate. The
+ * moment a pack holds two, the format is the honest general answer and the labels
+ * are not the filename's business; a reader who wants the roster opens the pack.
+ *
+ * The format word is likewise ONE format - the first the mask names, not the union.
+ * ZIP|DOCZIP is "zip", because a DOCZIP is a zip and the extra bit is a distinction
+ * the header already records exactly. The filename is the general answer; the pack
+ * header is the precise one, and only one of them has to be both.
+ *
+ * THE ONE RULE THAT CANNOT BEND is that the name stays unique: two groups sharing a
+ * filename means the second overwrites the first and half the database silently
+ * disappears. Deriving the name from the key made that true by construction, and
+ * that construction is exactly what produced names like "detect-t768-a0". Naming for
+ * a reader gives the guarantee up, so it is CHECKED instead - see the refusal in the
+ * write loop - and a collision stops the build rather than eating a pack.
+ *
+ * Deliberately in that order. A general name that collides is a build failure
+ * somebody fixes in a minute; a precise name that nobody can read is permanent.
+ *
+ * Collisions can really happen, and now more easily: two packs whose masks differ
+ * only in a bit past the first both want the same format word. That is a real
+ * possibility rather than a hypothetical one, and it is the price of the general
+ * name - paid at build time, loudly, by the person who can do something about it.
+ */
+#define PACK_NAME_MAX 64u
+
+/* Lowercased, with the word break a label carries turned into a hyphen and anything
+ * else dropped: this becomes a path component on whatever filesystem the caller
+ * chose. "upx_elf" is written "upx-elf"; a format name has no separator to convert. */
+static void name_append(char *out, size_t cap, size_t *at, const char *s)
+{
+	for (; *s && *at + 1u < cap; s++) {
+		char c = *s;
+
+		if (c >= 'A' && c <= 'Z')
+			c = (char)(c + ('a' - 'A'));
+		if (c == '_')
+			c = '-';
+		if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+		      c == '-'))
+			continue;
+		out[(*at)++] = c;
+	}
+	out[*at] = 0;
+}
+
+/*
+ * The formats a mask names, joined - or "any" when it names all of them.
+ *
+ * Returns zero when the list would not fit, and the caller falls back to the mask
+ * itself. Length rather than count is the test because format names differ in
+ * length and a fixed count would sometimes fit and sometimes not.
+ */
+static int format_list(uint32_t mask, char *out, size_t cap)
+{
+	uint32_t all = (uint32_t)((1ull << KOF_FMT_COUNT) - 1ull);
+	size_t at = 0;
+	uint32_t f;
+
+	out[0] = 0;
+	if ((mask & all) == all) {
+		name_append(out, cap, &at, "any");
+		return 1;
+	}
+	for (f = 0; f < KOF_FMT_COUNT; f++) {
+		if (!(mask & (1u << f)))
+			continue;
+		name_append(out, cap, &at, kof_format_name((uint8_t)f));
+		return at != 0;
+	}
+	return 0;
+}
+
+/*
+ * The label of a pack that holds exactly one module - which is its module's.
+ *
+ * Only one. A pack of two is not named by listing both: a name that grows with its
+ * contents is the same mistake as spelling the mask, and it ends at fifty formats in
+ * a filename. Two or more modules and the caller falls back to the format, which is
+ * the general word that stays one word however many modules arrive.
+ */
+static int label_one(const struct artefact *arts, const uint32_t *member,
+		     uint32_t n, char *out, size_t cap)
+{
+	size_t at = 0;
+
+	out[0] = 0;
+	if (n != 1u)
+		return 0;
+	name_append(out, cap, &at, arts[member[0]].label);
+	return at != 0;
 }
 
 static void usage(const char *argv0)
@@ -1527,6 +1695,10 @@ int main(int argc, char **argv)
 	uint32_t n_arts = 0, cap_arts = 0, a, j;
 	struct group *groups = NULL;
 	uint32_t n_groups = 0, cap_groups = 0;
+	/* Every path written so far this run, so a second pack cannot take a name a
+	 * first one already has. See the naming block above format_list. */
+	char **taken = NULL;
+	uint32_t n_taken = 0;
 	DIR *d = NULL;
 	struct dirent *de;
 
@@ -1599,8 +1771,7 @@ int main(int argc, char **argv)
 		for (j = 0; j < n_groups; j++)
 			if (groups[j].kind == arts[a].kind &&
 			    groups[j].target_mask == arts[a].target_mask &&
-			    groups[j].arch_mask == arts[a].arch_mask &&
-			    groups[j].subtype_mask == arts[a].subtype_mask) {
+			    groups[j].arch_mask == arts[a].arch_mask) {
 				g = &groups[j];
 				break;
 			}
@@ -1618,13 +1789,34 @@ int main(int argc, char **argv)
 			g->kind        = arts[a].kind;
 			g->target_mask = arts[a].target_mask;
 			g->arch_mask   = arts[a].arch_mask;
-			g->subtype_mask = arts[a].subtype_mask;
 		}
 		if (!group_add(g, a))
 			goto done;
 	}
 
+	/*
+	 * Order the packs by their key before any of them is named.
+	 *
+	 * Naming reads the names already taken, so which pack gets the plain
+	 * general name and which gets the mask suffix depends on the order they are
+	 * visited in - and that order was readdir's, which is the filesystem's and
+	 * not the same on two machines. Same sources, same modules, "sigs-elf.ksig"
+	 * holding different packs. Nothing would detect it: both databases load and
+	 * both scan correctly, because the loader takes every .ksig in the directory
+	 * and does not care what they are called.
+	 *
+	 * Sorting by the key makes it the key's order, which is the same everywhere.
+	 * It also decides the tie the right way round: the smallest mask is the most
+	 * specific pack, so the plain "elf" goes to the ELF pack and ELF|PE takes the
+	 * suffix, rather than the other way about.
+	 */
+	qsort(groups, n_groups, sizeof *groups, group_cmp);
+
 	printf("%u module(s) -> %u pack(s)\n", n_arts, n_groups);
+
+	taken = calloc(n_groups, sizeof *taken);
+	if (!taken)
+		goto done;
 
 	for (j = 0; j < n_groups; j++) {
 		struct group *g = &groups[j];
@@ -1660,18 +1852,104 @@ int main(int argc, char **argv)
 			goto done;
 		}
 
-		/* The name states the key, so a directory listing says what is in
-		 * each file without opening any of them. */
-		/* The subtype is in the name only when it constrains anything, so the
-		 * ordinary pack keeps the name it always had and a directory listing
-		 * still reads at a glance. */
-		if (g->subtype_mask)
-			snprintf(path, sizeof path, "%s/%s-t%u-k%u-a%u.ksig", outdir,
-				 kind_name(g->kind), g->target_mask,
-				 g->subtype_mask, g->arch_mask);
-		else
-			snprintf(path, sizeof path, "%s/%s-t%u-a%u.ksig", outdir,
-				 kind_name(g->kind), g->target_mask, g->arch_mask);
+		/*
+		 * The name says what is in the pack - the tools by label for an
+		 * unpack pack, the formats for a sigs pack. See the block above
+		 * format_list for why the two differ, and name_clash for what keeps
+		 * the result unique now that it no longer is by construction.
+		 *
+		 * The architecture is appended only when it constrains something: an
+		 * unconstrained one is the ordinary case and writing "-any" on every
+		 * pack would be noise in the place a reader looks first. It stays in
+		 * the name because it is the one part of the key a reader cannot
+		 * infer from the contents.
+		 */
+		{
+			char fmt[PACK_NAME_MAX], arch[PACK_NAME_MAX];
+			size_t aat = 0;
+
+			if (g->kind != KOF_PACK_UNPACK ||
+			    !label_one(arts, g->member, g->n, fmt, sizeof fmt))
+				if (!format_list(g->target_mask, fmt, sizeof fmt))
+					snprintf(fmt, sizeof fmt, "x%x",
+						 g->target_mask);
+
+			arch[0] = 0;
+			if (g->arch_mask) {
+				uint32_t ab;
+
+				for (ab = 0; ab < 32u; ab++) {
+					if (!(g->arch_mask & (1u << ab)))
+						continue;
+					if (aat && aat + 1u < sizeof arch)
+						arch[aat++] = '+';
+					name_append(arch, sizeof arch, &aat,
+						    kof_arch_name((uint8_t)ab));
+				}
+				if (!aat)
+					snprintf(arch, sizeof arch, "a%x",
+						 g->arch_mask);
+			}
+
+			snprintf(path, sizeof path, "%s/%s-%s%s%s.ksig",
+				 outdir, kind_name(g->kind), fmt,
+				 arch[0] ? "-" : "", arch);
+
+			/*
+			 * The general name, made specific only where it has to
+			 * be.
+			 *
+			 * A general name collides by design: "elf" is the name
+			 * of the ELF pack and of the ELF|PE pack, and both are
+			 * correct answers to what is in them. Refusing the build
+			 * would be refusing a legitimate database over a
+			 * filename, so the second one earns a suffix instead and
+			 * the common case stays short.
+			 *
+			 * The suffix is the target mask, which makes the name a
+			 * one to one image of the whole key - kind, formats,
+			 * architecture - so one retry is always enough and there
+			 * is no loop here. Ugly on purpose: it should read as a
+			 * pack that wanted a plain name and could not have one.
+			 */
+			for (a = 0; a < n_taken; a++) {
+				if (strcmp(taken[a], path) != 0)
+					continue;
+				snprintf(path, sizeof path,
+					 "%s/%s-%s-x%x%s%s.ksig", outdir,
+					 kind_name(g->kind), fmt,
+					 g->target_mask, arch[0] ? "-" : "",
+					 arch);
+				break;
+			}
+		}
+
+		/*
+		 * Refuse rather than overwrite.
+		 *
+		 * The retry above resolves a collision between two general names, and
+		 * a name that survives it is unique by construction. This catches the
+		 * case where that reasoning is wrong - because write_file would
+		 * happily replace the pack written a moment ago and the build would
+		 * succeed with one database missing, which is the failure this whole
+		 * file is arranged to make impossible.
+		 */
+		for (a = 0; a < n_taken; a++) {
+			if (strcmp(taken[a], path) != 0)
+				continue;
+			fprintf(stderr, "ksigbuilder: two packs would both be "
+					"%s; rename one of the modules in it\n",
+				path);
+			free(img);
+			goto done;
+		}
+		taken[n_taken] = strdup(path);
+		if (!taken[n_taken]) {
+			free(img);
+			goto done;
+		}
+		n_taken++;
+
 		if (!write_file(path, img, img_len)) {
 			free(img);
 			goto done;
@@ -1690,5 +1968,8 @@ done:
 	for (j = 0; j < n_groups; j++)
 		free(groups[j].member);
 	free(groups);
+	for (j = 0; j < n_taken; j++)
+		free(taken[j]);
+	free(taken);
 	return rc;
 }

@@ -18,11 +18,33 @@
 
 /* Defined with the presence set further down; declared here because starting on a new
  * object is the first thing in the file and restamping the table is part of it. */
+/*
+ * 24 bits of table, 16-bit generation stamps: 32MB, fixed whatever the database
+ * holds. Measured on 400 binaries, 22 bits saturated on the files above 1MB and cost
+ * 5x the wall time; 26 bits was slower again from TLB pressure.
+ */
+#define GRAM_BITS  24
+#define GRAM_SLOTS (1u << GRAM_BITS)
+#ifndef GRAM_MIN_PATTERNS
+#define GRAM_MIN_PATTERNS 140
+#endif
+
+/*
+ * The object size past which the presence table stops paying for itself.
+ *
+ * Occupancy after stamping an n byte object is about 1 - e^(-n/GRAM_SLOTS), so half
+ * full is at GRAM_SLOTS * ln 2 - a shade under 11.7MB with a 24 bit table. Past that
+ * the filter rejects less than it admits and still costs a pass over the object to
+ * build, so it is skipped and every search runs.
+ */
+#define GRAM_MAX_BYTES ((uint64_t)GRAM_SLOTS * 693u / 1000u)
+
 static struct kof_gram *gram_new(uint32_t n_patterns);
 static void             gram_free(struct kof_gram *);
 static uint64_t         gram_build(struct kof_gram *, kof_buf);
 static int              gram_may_contain(const struct kof_gram *, const uint8_t *,
 					 uint16_t len, int icase);
+static int              gram_ensure(struct kof_match_ctx *);
 
 /*
  * Start on a new object.
@@ -34,18 +56,50 @@ static int              gram_may_contain(const struct kof_gram *, const uint8_t 
 void kof_match_begin(struct kof_match_ctx *m, kof_buf data)
 {
 	struct kof_gram *gram = m->gram;
-	uint8_t *memo = m->memo;
+	uint16_t *memo = m->memo;
 	uint32_t memo_len = m->memo_len;
+	uint32_t patterns = m->gram_patterns;
+	uint16_t gen = m->memo_gen;
 
 	memset(m, 0, sizeof *m);
 	m->data = data;
 	m->gram = gram;
 	m->memo = memo;
 	m->memo_len = memo_len;
+	m->gram_patterns = patterns;
 
-	if (memo)
-		memset(memo, KOF_MEMO_UNKNOWN, memo_len);
-	m->n_bytes_indexed = gram_build(gram, data);
+	/*
+	 * A new generation instead of a new memo.
+	 *
+	 * The wrap is the only time anything is cleared, and after it every cell holds
+	 * a generation that cannot recur, so the zeroing has to be real. Once every
+	 * sixteen thousand objects.
+	 */
+	if (++gen > KOF_MEMO_GEN_MAX) {
+		if (memo)
+			memset(memo, 0, (size_t)memo_len * sizeof *memo);
+		gen = 1;
+	}
+	m->memo_gen = gen;
+
+	/*
+	 * Is the presence table worth building for THIS object?
+	 *
+	 * It is stamped from the object's own bytes, so its occupancy is set by the
+	 * object's size and not by the database's: an n byte object fills about
+	 * 1 - e^(-n/SLOTS) of it. Past half full the filter admits more than it
+	 * rejects while still costing a pass over every byte to build, which is the
+	 * one shape where it is pure loss - so past that size it is not built and the
+	 * searches run unfiltered.
+	 *
+	 * Conservative on real data: files repeat themselves, so the distinct grams in
+	 * an object are fewer than its length and the true occupancy is below the
+	 * estimate. The threshold errs towards keeping the filter.
+	 */
+	if (data.n <= GRAM_MAX_BYTES && gram_ensure(m))
+		m->gram_use = m->gram;
+
+	m->n_bytes_indexed = gram_build(m->gram_use, data);
 }
 
 static uint8_t fold(uint8_t c)
@@ -193,16 +247,6 @@ static int find_range(struct kof_match_ctx *m, uint64_t off, uint64_t len,
 
 /* ---- presence set --------------------------------------------------------- */
 
-/*
- * 24 bits of table, 16-bit generation stamps: 32MB, fixed whatever the database
- * holds. Measured on 400 binaries, 22 bits saturated on the files above 1MB and cost
- * 5x the wall time; 26 bits was slower again from TLB pressure.
- */
-#define GRAM_BITS  24
-#define GRAM_SLOTS (1u << GRAM_BITS)
-#ifndef GRAM_MIN_PATTERNS
-#define GRAM_MIN_PATTERNS 140
-#endif
 
 struct kof_gram {
 	uint16_t *stamp;
@@ -535,12 +579,33 @@ static int match_ranges(struct kof_match_ctx *m, const struct kof_range *ext,
 
 /* ---- per-object search state ---------------------------------------------- */
 
+/*
+ * Make the presence table if this database wants one and it is not made yet.
+ *
+ * Deferred rather than made at init because it is 32MB of scattered writes: a
+ * scanner that only ever sees objects too large for the filter, or that is created
+ * and never used, should not pay for a table it does not touch. Returns whether one
+ * is available.
+ */
+static int gram_ensure(struct kof_match_ctx *m)
+{
+	if (m->gram)
+		return 1;
+	if (m->gram_patterns < GRAM_MIN_PATTERNS)
+		return 0;
+	m->gram = gram_new(m->gram_patterns);
+	return m->gram != NULL;
+}
+
 int kof_match_state_init(struct kof_match_ctx *m, uint32_t n_patterns,
 			 uint32_t memo_len)
 {
-	m->gram = gram_new(n_patterns);   /* NULL is a normal answer */
+	m->gram = NULL;                   /* built on first object that wants it */
+	m->gram_use = NULL;
+	m->gram_patterns = n_patterns;
 	m->memo_len = memo_len;
-	m->memo = memo_len ? calloc(memo_len, 1) : NULL;
+	m->memo_gen = 0;
+	m->memo = memo_len ? calloc(memo_len, sizeof *m->memo) : NULL;
 	return !memo_len || m->memo != NULL;
 }
 
@@ -549,6 +614,7 @@ void kof_match_state_free(struct kof_match_ctx *m)
 	gram_free(m->gram);
 	free(m->memo);
 	m->gram = NULL;
+	m->gram_use = NULL;
 	m->memo = NULL;
 	m->memo_len = 0;
 }
@@ -583,23 +649,29 @@ int kof_match_lookup(struct kof_match_ctx *m, uint32_t slot,
 		     const uint8_t *bytes, uint16_t len, uint8_t kind, uint8_t flags,
 		     uint64_t *answered_without_scan)
 {
-	uint8_t *cell;
+	uint16_t *cell;
 	int found;
 
 	if (!m->memo || slot >= m->memo_len)
 		return 0;
 	cell = &m->memo[slot];
-	if (*cell != KOF_MEMO_UNKNOWN)
-		return *cell == KOF_MEMO_PRESENT;
+	/* Written by an earlier object is the same as not written. */
+	if ((*cell >> 2) == m->memo_gen) {
+		uint16_t state = *cell & 3u;
 
-	if (!gram_admits(m->gram, bytes, len, kind, flags)) {
+		if (state != KOF_MEMO_UNKNOWN)
+			return state == KOF_MEMO_PRESENT;
+	}
+
+	if (!gram_admits(m->gram_use, bytes, len, kind, flags)) {
 		if (answered_without_scan)
 			(*answered_without_scan)++;
-		*cell = KOF_MEMO_ABSENT;
+		*cell = (uint16_t)((m->memo_gen << 2) | KOF_MEMO_ABSENT);
 		return 0;
 	}
 	found = match_ranges(m, ext, next, bytes, len, kind, flags);
-	*cell = found ? KOF_MEMO_PRESENT : KOF_MEMO_ABSENT;
+	*cell = (uint16_t)((m->memo_gen << 2) |
+			   (found ? KOF_MEMO_PRESENT : KOF_MEMO_ABSENT));
 	return found;
 }
 
