@@ -34,7 +34,7 @@ KOF_TARGET_FORMAT(KOF_FMT_7Z);
 KOF_DEFINE_UNPACK
 {
 	const struct kof_7z_info *z = kof_7z(ctx);
-	uint32_t i, opened = 0, unreached = 0;
+	uint32_t i, opened = 0, unreached = 0, method;
 
 	if (!z->valid)
 		return;
@@ -113,7 +113,21 @@ KOF_DEFINE_UNPACK
 			unreached++;
 			continue;
 		}
-		if (kof_unpack_at(KOF_UNP_LZMA2, fo->pack_off, fo->pack_size,
+		/*
+		 * A filter in front of the coder is undone after it, and only the
+		 * one that appears in practice is undone at all. Measured here: 334
+		 * folders have no filter, 77 use the x86 branch transform, and the
+		 * two that use something else are named rather than guessed at -
+		 * running the coder without its transform yields bytes that look
+		 * like a program and are not one.
+		 */
+		if (fo->filter && fo->filter != KOF_7Z_CODER_BCJ_X86) {
+			kof_debug("SevenZip.filter", fo->filter);
+			unreached++;
+			continue;
+		}
+		method = fo->filter ? KOF_UNP_LZMA2_BCJ_X86 : KOF_UNP_LZMA2;
+		if (kof_unpack_at(method, fo->pack_off, fo->pack_size,
 				  fo->unpack_size) == 0) {
 			unreached++;
 			continue;

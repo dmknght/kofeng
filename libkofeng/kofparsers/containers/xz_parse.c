@@ -176,12 +176,19 @@ static void block_header(struct xw *s, struct kof_xz_block *bl)
 		if (!ok || psize > bl->hdr_len)
 			return;
 		at = kof_sat_add(at, psize);
-		/* The LAST filter is the one that produces the bytes; the ones
-		 * before it are transforms applied to its output. */
-		bl->filter = (uint32_t)id;
+		/*
+		 * Filters are listed in the order they were APPLIED, so the last is
+		 * the compressor and anything before it is a transform over the
+		 * bytes going in - which has to be undone after the decode.
+		 */
+		if (i + 1u == n)
+			bl->filter = (uint32_t)id;
+		else if (i == 0)
+			bl->transform = (uint32_t)id;
 	}
 
-	if (n > 1u) {
+	if (n > 2u) {
+		/* More than one transform is a chain this does not follow. */
 		bl->suspicious |= KOF_XZ_BLK_CHAIN;
 		s->x->anomalies |= KOF_XZ_ANOM_FILTER_CHAIN;
 	}

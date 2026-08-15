@@ -142,19 +142,29 @@ enum {
  *
  * The entry count is the one that matters and it is sized from measurement rather
  * than from the specification, which allows 65535 per disk and unbounded with
- * ZIP64. Across 280 archives the median holds 2 entries and the largest 991, so
- * 4096 is four times the worst observed - and reaching it is an anomaly rather than
- * a silent truncation.
+ * ZIP64.
+ *
+ * The first measurement was 280 archives with a median of 2 entries and a largest
+ * of 991, and it was drawn before this engine could tell a JAR or an APK from a
+ * plain zip. Those change the distribution completely: over 707 archives the median
+ * is 8, the 99th percentile is 4041 and the largest holds 41659 - an APK is a zip
+ * with every class file in it, and 5242 entries is an ordinary one.
+ *
+ * So 4096 covers 99% of them. It is not enough for the largest and nothing
+ * reasonable would be; what matters is that falling short is RECORDED - the entries
+ * beyond it are not scanned, and an archive that hit the cap says so rather than
+ * reporting the part it read as the whole.
  */
-#define KOF_ZIP_MAX_ENTRIES  2048u
+#define KOF_ZIP_MAX_ENTRIES  4096u
 /*
  * Runs recorded, across all classes.
  *
  * Four per entry is the shape: a local header and a central record, each split by
- * the name sitting inside it. 2048 entries is the cap above, so this is what
- * describing all of them costs.
+ * the name sitting inside it. The entry cap above is what this is derived from, so
+ * the two move together - a run pool that did not grow with the entries would make
+ * the extra entries describable and not locatable.
  */
-#define KOF_ZIP_MAX_EXTENTS  8192u
+#define KOF_ZIP_MAX_EXTENTS  (KOF_ZIP_MAX_ENTRIES * 4u)
 
 /* How far back from the end the end-of-central-directory record is looked for: its
  * own 22 bytes plus the largest comment a 16 bit length can describe. */

@@ -99,7 +99,7 @@ struct rc {
 /* A byte, or zero once the input is spent. Reading past the end is recorded and
  * decoding continues, so the caller learns it was truncated rather than getting a
  * decoder that stops mid-symbol in an unexamined state. */
-static uint8_t rc_byte(struct rc *r)
+static inline uint8_t rc_byte(struct rc *r)
 {
 	if (r->at >= r->n) {
 		r->short_input = 1;
@@ -124,7 +124,7 @@ static void rc_init(struct rc *r, const uint8_t *in, uint64_t n)
 		r->code = (r->code << 8) | rc_byte(r);
 }
 
-static void rc_normalise(struct rc *r)
+static inline void rc_normalise(struct rc *r)
 {
 	if (r->range < TOP_VALUE) {
 		r->range <<= 8;
@@ -138,7 +138,7 @@ static void rc_normalise(struct rc *r)
  * This is the whole of the compression: a bit that was likely costs almost no range
  * and a bit that was not costs most of it.
  */
-static uint32_t rc_bit(struct rc *r, uint16_t *p)
+static inline uint32_t rc_bit(struct rc *r, uint16_t *p)
 {
 	uint32_t bound = (r->range >> PROB_BITS) * *p;
 
@@ -156,7 +156,7 @@ static uint32_t rc_bit(struct rc *r, uint16_t *p)
 }
 
 /* `n` bits, most significant first, through a tree of 2^n probabilities. */
-static uint32_t rc_tree(struct rc *r, uint16_t *probs, unsigned n)
+static inline uint32_t rc_tree(struct rc *r, uint16_t *probs, unsigned n)
 {
 	uint32_t m = 1;
 	unsigned i;
@@ -170,7 +170,7 @@ static uint32_t rc_tree(struct rc *r, uint16_t *probs, unsigned n)
 }
 
 /* The same tree read the other way round, for the distance's low bits. */
-static uint32_t rc_tree_rev(struct rc *r, uint16_t *probs, unsigned n)
+static inline uint32_t rc_tree_rev(struct rc *r, uint16_t *probs, unsigned n)
 {
 	uint32_t m = 1, out = 0, i;
 
@@ -184,7 +184,7 @@ static uint32_t rc_tree_rev(struct rc *r, uint16_t *probs, unsigned n)
 }
 
 /* Bits with no model behind them, used for the middle of a large distance. */
-static uint32_t rc_direct(struct rc *r, unsigned n)
+static inline uint32_t rc_direct(struct rc *r, unsigned n)
 {
 	uint32_t out = 0;
 

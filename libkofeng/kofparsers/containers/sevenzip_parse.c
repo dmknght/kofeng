@@ -325,7 +325,7 @@ static int coder_read(kof_buf h, uint64_t *at, struct kof_7z_folder *fo)
  */
 static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 {
-	uint64_t at = 0, pack_pos = 0, n_pack = 0, n_folders = 0, i;
+	uint64_t at = 0, pack_pos = 0, n_pack = 0, n_folders = 0, i, n_out = 0;
 	uint64_t psize[KOF_7Z_MAX_FOLDERS];
 	uint32_t steps = 0;
 	uint8_t id = 0;
@@ -404,6 +404,8 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 		struct kof_7z_folder *fo = &z->folder[i];
 		uint64_t nc, k;
 
+		fo->out_first = (uint32_t)n_out;
+
 		nc = sz_num(h, &at, &ok);
 		if (!ok || nc == 0 || nc > 8u)
 			return;
@@ -419,9 +421,45 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 				fo->lc = tmp.lc;
 				fo->lp = tmp.lp;
 				fo->pb = tmp.pb;
+			} else if (k == 1u) {
+				/*
+				 * The second link, which for the shape this reads
+				 * is the transform run over the coder's output.
+				 * Recorded whatever it is; whether it can be undone
+				 * is the module's question, not the parse's.
+				 */
+				fo->filter = tmp.coder;
 			}
 		}
+		/*
+		 * Two links is the ordinary filtered folder and is followed. Longer
+		 * than that means bind pairs this does not read - BCJ2 takes four
+		 * input streams - and from there the walk no longer knows which
+		 * packed stream belongs to which folder.
+		 */
+		/*
+		 * Bind pairs, one per output stream past the first.
+		 *
+		 * They say which coder's output feeds which coder's input, and this
+		 * does not need to know - a two link chain has only one arrangement.
+		 * What it does need is to STEP OVER them, because the sizes that
+		 * follow are counted from here.
+		 */
 		if (nc > 1u) {
+			uint64_t bp;
+
+			for (bp = 0; bp + 1u < nc; bp++) {
+				sz_num(h, &at, &ok);
+				if (!ok)
+					return;
+				sz_num(h, &at, &ok);
+				if (!ok)
+					return;
+			}
+		}
+		n_out += nc;
+
+		if (nc > 2u) {
 			/*
 			 * Bind pairs and packed stream indices follow a chain, and
 			 * this does not read them - so from here the walk no longer
@@ -443,12 +481,32 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 	if (!kof_rd_u8(h, at, &id) || id != KOF_7Z_ID_CODERS_SIZE)
 		return;
 	at++;
-	for (i = 0; i < n_folders; i++) {
-		uint64_t v = sz_num(h, &at, &ok);
+	/*
+	 * One size per OUTPUT STREAM, not one per folder.
+	 *
+	 * A folder with a filter has two of them - what the coder produced and what
+	 * the filter produced from it - and only the second is the folder's own
+	 * output. Reading one per folder worked while every folder had a single
+	 * coder and silently took the wrong number the moment one did not.
+	 */
+	{
+		uint64_t seen = 0;
 
-		if (!ok)
-			return;
-		z->folder[i].unpack_size = v;
+		for (i = 0; i < n_folders; i++) {
+			struct kof_7z_folder *fo = &z->folder[i];
+			uint64_t k;
+
+			for (k = 0; k < fo->n_coders; k++) {
+				uint64_t v = sz_num(h, &at, &ok);
+
+				if (!ok)
+					return;
+				seen++;
+				/* The last of a folder's streams is its output. */
+				fo->unpack_size = v;
+			}
+		}
+		(void)seen;
 	}
 
 	/*

@@ -326,6 +326,11 @@ static int xz_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 	return kof_xz_parse(b, (struct kof_xz_info *)v, c);
 }
 
+static int rtf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_rtf_parse(b, (struct kof_rtf_info *)v, c);
+}
+
 static const struct parser parsers[] = {
 	{ KOF_FMT_ELF,  (uint32_t)sizeof(struct kof_elf_info),
 	  kof_elf_sniff,  elf_parse_thunk  },
@@ -349,7 +354,9 @@ static const struct parser parsers[] = {
 	{ KOF_FMT_RAR, (uint32_t)sizeof(struct kof_rar_info),
 	  kof_rar_sniff, rar_parse_thunk },
 	{ KOF_FMT_XZ, (uint32_t)sizeof(struct kof_xz_info),
-	  kof_xz_sniff, xz_parse_thunk }
+	  kof_xz_sniff, xz_parse_thunk },
+	{ KOF_FMT_RTF, (uint32_t)sizeof(struct kof_rtf_info),
+	  kof_rtf_sniff, rtf_parse_thunk }
 };
 
 /*
@@ -420,6 +427,15 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * first container to reach the ceiling stopped every container after it.
 	 */
 	sc->broken = 0;
+	/*
+	 * Cleared with it, and per OBJECT rather than per file.
+	 *
+	 * The two are set together and have to be cleared together: a ceiling that
+	 * stopped one object must not stop the next, because the next is scanned
+	 * after this one has been released and the room it held is back. Clearing
+	 * only at the root made one limit anywhere in a tree end the tree.
+	 */
+	sc->stop = 0;
 
 	kof_mod_unpack_mode(ctx, 1);
 	for (i = 0; i < sc->eng->n_unp; i++) {

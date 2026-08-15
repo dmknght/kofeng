@@ -27,6 +27,7 @@
 #include "../kofparsers/containers/sevenzip_parse.h"
 #include "../kofparsers/containers/rar_parse.h"
 #include "../kofparsers/containers/xz_parse.h"
+#include "../kofparsers/containers/rtf_parse.h"
 #include "objsrc.h"
 #include "../kofdecomp/inflate.h"
 #include "../kofdecomp/nrv2.h"
@@ -179,6 +180,14 @@ struct kof_scanner {
 	 * news about the budget.
 	 */
 	uint32_t broken;
+	/*
+	 * Production has stopped, which only a LIMIT causes.
+	 *
+	 * Separate from `broken` because the two answer different questions: broken
+	 * is what the caller is told about this object, stop is whether there is any
+	 * point continuing. Damage is worth reporting and worth carrying on from.
+	 */
+	uint32_t stop;
 
 	struct kof_stats st;
 };

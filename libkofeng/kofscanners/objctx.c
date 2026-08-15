@@ -24,6 +24,7 @@
 
 #include "../kofdecomp/ovba.h"
 #include "../kofdecomp/lzma.h"
+#include "../kofdecomp/bcj.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -199,6 +200,29 @@ static void scan_broken(struct kof_scanner *sc, uint32_t reason)
 {
 	if (!sc->broken)
 		sc->broken = reason;
+	if (reason == KOF_BROKEN_LIMIT)
+		sc->stop = 1;
+}
+
+/*
+ * Whether the object may still PRODUCE, which is not the same question as whether
+ * it is complete.
+ *
+ * A recorded reason used to stop everything, and that is wrong for three of the
+ * four reasons there are. DAMAGED, UNSUPPORTED and ENCRYPTED describe what was
+ * found; they are not instructions to stop looking. Only a limit is - past a
+ * ceiling there is nowhere to put what comes next, and asking again produces the
+ * same answer more slowly.
+ *
+ * Measured on a real workbook whose directory chain runs past the end of the file:
+ * the module reports the damage, carries on as the ABI says it may, and every
+ * extraction after that point returned nothing - so a document with three VBA
+ * modules in it came back with none, and the reason it came back with none was that
+ * it had said it was damaged.
+ */
+static int can_produce(const struct kof_scanner *sc)
+{
+	return sc->cur_src && !sc->stop;
 }
 
 /* A decoder's status, in the vocabulary the caller sees. Stopping is the
@@ -404,7 +428,7 @@ static int c_window(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t len)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
-	if (!sc->cur_src || sc->broken)
+	if (!can_produce(sc))
 		return 0;
 	return kid_push(sc, kof_src_window(sc->cur_src, off, len));
 }
@@ -443,7 +467,7 @@ static int c_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
-	if (!sc->cur_src || sc->broken)
+	if (!can_produce(sc))
 		return 0;
 	if (n == 0)
 		return 1;
@@ -559,6 +583,77 @@ static int inflate_sink(void *user, const uint8_t *p, uint32_t n)
 	return c_emit(ctx, p, n);
 }
 
+/*
+ * WHEN A STREAM'S OWN DECLARED EXPANSION SAYS NOT TO BOTHER.
+ *
+ * The object cap bounds how much one object may hold and says nothing about how it
+ * got there, so a stream that expands absurdly is decoded up to that cap like any
+ * other. Measured on this collection: 52 objects reach the cap and cost 3.75 of the
+ * scan's 9.17 seconds, and the worst is one zip entry declaring 839MB out of a
+ * 956KB file - one entry, nothing behind the name but padding.
+ *
+ * What separates those from real content is not the bytes, which have to be decoded
+ * to be seen, but the RATIO THE CONTAINER DECLARES, which is free. Measured over
+ * 12787 real zip entries of 4KB or more:
+ *
+ *     p50 2.8x  p95 6.5x  p99 21.4x  p99.5 29.9x  |  p99.9 654x  max 982x
+ *
+ * There is a gap and it is wide. Everything a real file does sits under thirty; the
+ * padding sits at six hundred and up, and 0.4% of entries are above 32x. So the line
+ * goes in the gap - chosen for where the two populations stop overlapping, not for
+ * how much time it saves.
+ *
+ * A stream over the line is decoded to the floor below and no further. Not a
+ * detection and not a verdict: the prefix is still scanned and the object is still
+ * reported as cut. It costs a bomb its tail and a real file nothing, because a real
+ * file is not on that side of the line.
+ *
+ * Only usable where the container SAYS what it expects. A decoder handed no size -
+ * a gzip member, whose length is in a trailer nobody has read yet - gets the object
+ * cap and nothing cleverer.
+ */
+#define KOF_DECLARED_RATIO_MAX 32u
+#define KOF_EXPAND_FLOOR (1u << 20)
+
+/*
+ * A sink that stops once the expansion bound is reached.
+ *
+ * Wrapping rather than checking inside c_emit because the bound depends on the
+ * INPUT to one decode, which c_emit has no way to see - it is handed bytes, not
+ * the stream they came from.
+ */
+struct expand_sink {
+	const struct kof_obj_ctx *ctx;
+	uint64_t left;
+};
+
+static int expand_sink_fn(void *user, const uint8_t *p, uint32_t n)
+{
+	struct expand_sink *e = user;
+
+	if (n > e->left)
+		n = (uint32_t)e->left;
+	if (n == 0)
+		return 0;              /* the receiver has had enough */
+	e->left -= n;
+	return c_emit(e->ctx, p, n);
+}
+
+/*
+ * What one decode is allowed to produce, given what the container declared.
+ *
+ * UINT64_MAX means "no opinion" - either nothing was declared, or what was declared
+ * is within reason - and the caller then falls back to the object cap.
+ */
+static uint64_t expand_limit(uint64_t in_len, uint64_t declared)
+{
+	if (!declared || !in_len)
+		return UINT64_MAX;
+	if (declared / in_len <= KOF_DECLARED_RATIO_MAX)
+		return UINT64_MAX;
+	return KOF_EXPAND_FLOOR;
+}
+
 /* NRV2's three codings and three bit widths, as the module ABI numbers them. */
 static int nrv2_of(uint32_t method, int *variant, int *bits)
 {
@@ -650,8 +745,24 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 	if (sc->resident > sc->st.peak_resident)
 		sc->st.peak_resident = sc->resident;
 
-	if (method == KOF_UNP_LZMA2) {
+	if (method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86) {
+		uint64_t lim = expand_limit(in_len, out_hint);
+
+		if (want > lim) {
+			want = lim;
+			scan_broken(sc, KOF_BROKEN_LIMIT);
+		}
 		st = kof_lzma2_decode(in, in_len, buf, want, &produced);
+		/*
+		 * The transform is undone here, over the whole decoded buffer,
+		 * because that is the only place it can be: it rewrites addresses
+		 * that are relative to a position in the OUTPUT, so it cannot run
+		 * on the compressed bytes and cannot run on a chunk of the output
+		 * without knowing where that chunk sits. A buffered decode has the
+		 * whole thing in hand and a streaming one never would.
+		 */
+		if (method == KOF_UNP_LZMA2_BCJ_X86 && produced)
+			kof_bcj_x86_decode(buf, produced, 0);
 	} else if (method >= KOF_UNP_LZMA) {
 		unsigned lc, lp, pb;
 
@@ -776,16 +887,136 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		 * it. It is recorded as an incomplete examination, not a clean one.
 		 */
 		{
-			int st = kof_inflate(sc->inf, b.p + off, len, inflate_sink,
-					     (void *)ctx, NULL, &produced);
+			struct expand_sink e;
+			int st;
 
+			e.ctx = ctx;
+			e.left = expand_limit(len, out_hint);
+			st = kof_inflate(sc->inf, b.p + off, len, expand_sink_fn,
+					 &e, NULL, &produced);
 			if (st != KOF_DEC_OK)
 				scan_broken(sc, broken_of_status(st));
+			else if (e.left == 0)
+				scan_broken(sc, KOF_BROKEN_LIMIT);
 		}
 		return produced;
 	}
 
-	if (method == KOF_UNP_LZMA2)
+	if (method == KOF_UNP_HEXTEXT) {
+		/*
+		 * Hex to bytes, streamed through the sink like DEFLATE.
+		 *
+		 * No output buffer of its own and no size hint needed: two input
+		 * characters are one output byte, so the length is known and the
+		 * bytes can leave as they are made. Whitespace between digits is
+		 * skipped - it is legal in RTF and is used to break a blob up so a
+		 * fixed prefix does not match.
+		 */
+		uint8_t out[512];
+		uint32_t n = 0;
+		int hi = -1;
+		uint64_t i;
+
+		for (i = 0; i < len; i++) {
+			uint8_t ch = b.p[off + i];
+			int v;
+
+			if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n')
+				continue;
+			/*
+			 * A nested group is skipped WHOLE, not just its braces.
+			 *
+			 * Its content is a different destination and is not this
+			 * object's data. Skipping only the braces decodes the junk
+			 * inside as if it were payload, which on a real document
+			 * produced 2875922 bytes against the correct 2875905 - the
+			 * right length to look plausible and wrong from the first
+			 * byte.
+			 */
+			if (ch == '{') {
+				uint32_t d = 0;
+
+				while (i < len) {
+					uint8_t g = b.p[off + i];
+
+					if (g == '\\') {
+						i += 2u;
+						continue;
+					}
+					if (g == '{') {
+						d++;
+					} else if (g == '}') {
+						d--;
+						if (d == 0)
+							break;
+					}
+					i++;
+				}
+				continue;
+			}
+			if (ch == '}')
+				continue;
+			if (ch == '\\') {
+				uint64_t k = i + 1u;
+				int alpha = 0;
+
+				/*
+				 * A control WORD is letters; a control SYMBOL is
+				 * one character that is not. Both have to be
+				 * stepped over and the second is the one that
+				 * catches a reader out - the ignorable destination
+				 * marker is written "\*", so a decoder that skips
+				 * only the backslash lands on the asterisk, finds
+				 * it is not a hex digit, and stops. Measured on a
+				 * real document that ended the decode after zero
+				 * bytes of a 2.8MB payload.
+				 */
+				while (k < len) {
+					uint8_t d = b.p[off + k];
+
+					if (!((d >= 'a' && d <= 'z') ||
+					      (d >= 'A' && d <= 'Z')))
+						break;
+					alpha = 1;
+					k++;
+				}
+				if (!alpha) {
+					i = k;            /* the symbol itself */
+					continue;
+				}
+				if (k < len && b.p[off + k] == '-')
+					k++;
+				while (k < len && b.p[off + k] >= '0' &&
+				       b.p[off + k] <= '9')
+					k++;
+				if (k < len && b.p[off + k] == ' ')
+					k++;
+				i = k - 1u;
+				continue;
+			}
+			if (ch >= '0' && ch <= '9')       v = ch - '0';
+			else if ((ch | 0x20) >= 'a' && (ch | 0x20) <= 'f')
+				v = (ch | 0x20) - 'a' + 10;
+			else
+				continue;                 /* skipped, as the parser does */
+			if (hi < 0) {
+				hi = v;
+				continue;
+			}
+			out[n++] = (uint8_t)((hi << 4) | v);
+			hi = -1;
+			if (n == sizeof out) {
+				if (!c_emit(ctx, out, n))
+					return produced;
+				produced += n;
+				n = 0;
+			}
+		}
+		if (n && c_emit(ctx, out, n))
+			produced += n;
+		return produced;
+	}
+	if (method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86)
 		return unpack_buffered(sc, ctx, method, 0, 0, b.p + off, len,
 				       out_hint, form);
 	if (nrv2_of(method, &variant, &bits))
@@ -819,7 +1050,7 @@ static uint64_t c_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 	int st;
 
 	(void)out_hint;
-	if (!sc->cur_src || sc->broken || !ctx->resolve_entry)
+	if (!can_produce(sc) || !ctx->resolve_entry)
 		return 0;
 	if (method != KOF_UNP_OVBA)
 		return 0;              /* the only coding entries are decoded with */
@@ -930,7 +1161,7 @@ static uint64_t c_gather(const struct kof_obj_ctx *ctx, uint32_t mask, uint64_t 
 	uint64_t done = 0;
 	uint32_t n, i;
 
-	if (!sc->cur_src || sc->broken)
+	if (!can_produce(sc))
 		return 0;
 
 	n = kof_scan_resolve_range(ctx, mask, ext);
@@ -1072,6 +1303,7 @@ void kof_scan_budget(struct kof_scanner *sc, uint64_t obj_size,
 	if (sc->obj_cap == 0)
 		sc->obj_cap = 1;
 	sc->broken = 0;
+	sc->stop = 0;
 }
 
 void kof_scan_kids_reset(struct kof_scanner *sc)

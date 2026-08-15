@@ -142,9 +142,20 @@ enum kof_format {
 	 */
 	KOF_FMT_XZ      = 13,
 
+	/*
+	 * The first format here that is syntax rather than structure.
+	 *
+	 * RTF has no offsets: where anything sits is decided by reading forward
+	 * through braces and control words. What makes it worth reading is what it
+	 * carries - an embedded object arrives hex encoded after \objdata, and
+	 * decoding it usually yields a compound file this engine already opens.
+	 * See rtf.h.
+	 */
+	KOF_FMT_RTF     = 14,
+
 	/* One past the last, so a host can size a per-format table. Not a format:
 	 * nothing is ever this. */
-	KOF_FMT_COUNT   = 14
+	KOF_FMT_COUNT   = 15
 };
 
 /*
@@ -200,6 +211,7 @@ static inline const char *kof_format_name(uint8_t fmt)
 	case KOF_FMT_7Z:     return "7z";
 	case KOF_FMT_RAR:    return "RAR";
 	case KOF_FMT_XZ:     return "xz";
+	case KOF_FMT_RTF:    return "RTF";
 	default:             return "Unknown";
 	}
 }
@@ -574,6 +586,27 @@ enum kof_unp_method {
 	 * plain LZMA.
 	 */
 	KOF_UNP_LZMA2 = 3,
+
+	/*
+	 * Hex text back into bytes, which is how RTF carries an embedded object.
+	 *
+	 * Not compression and named as a coding anyway, because it sits in exactly
+	 * the same place: a module points at a range and gets an object out. The
+	 * decoder skips whitespace, which is not politeness - splitting the hex
+	 * with spaces is how a blob is kept from matching a fixed prefix.
+	 */
+	KOF_UNP_HEXTEXT = 4,
+
+	/*
+	 * LZMA2 with the x86 branch transform undone afterwards.
+	 *
+	 * One method rather than a second argument, on the same reasoning that put
+	 * LZMA's properties in its id: a filter is meaningless for eight of nine
+	 * codings, and an argument that is ignored almost everywhere is worse than
+	 * an id that says what it is. Measured over the 7z archives here, 77 folders
+	 * need it and 334 do not.
+	 */
+	KOF_UNP_LZMA2_BCJ_X86 = 5,
 
 	KOF_UNP_NRV2B_8 = 16, KOF_UNP_NRV2B_16, KOF_UNP_NRV2B_32,
 	KOF_UNP_NRV2D_8,      KOF_UNP_NRV2D_16, KOF_UNP_NRV2D_32,

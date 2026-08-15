@@ -100,7 +100,16 @@ KOF_DEFINE_UNPACK
 		 * the header is a number the archive chose. The host's budget is what
 		 * bounds this, and it does not read that field either.
 		 */
-		if (kof_unpack_deflate(e->data_off, e->csize) == 0) {
+		/*
+		 * The declared size goes with the call, and it is not a hint the
+		 * decoder needs - DEFLATE knows where it ends. It is there so the
+		 * host can see the RATIO this entry claims before spending anything
+		 * on it: an entry declaring hundreds of times its own size is
+		 * padding, and the host cuts it short rather than inflating a
+		 * megabyte of it per megabyte of nothing.
+		 */
+		if (kof_unpack_at(KOF_UNP_DEFLATE, e->data_off, e->csize,
+				  e->usize) == 0) {
 			/* Either the stream is not deflate at all, or a limit bound.
 			 * The host records which; carrying on to the next entry is
 			 * right in both cases, because one bad entry says nothing

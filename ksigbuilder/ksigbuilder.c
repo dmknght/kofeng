@@ -77,6 +77,7 @@
 #include <kofmod/sevenzip.h>
 #include <kofmod/rar.h>
 #include <kofmod/xz.h>
+#include <kofmod/rtf.h>
 
 #include "../libkofeng/kofdb/kofpackw.h"
 #include "../libkofeng/kofdb/kofpack.h"
@@ -239,6 +240,11 @@ static const struct rgn_name rgn_names[] = {
 	RGN(KOF_SCAN_XZ_HEADERS),
 	RGN(KOF_SCAN_XZ_PACKED),
 	RGN(KOF_SCAN_XZ_UNCLAIMED),
+
+	RGN(KOF_SCAN_RTF_BODY),
+	RGN(KOF_SCAN_RTF_OBJDATA),
+	RGN(KOF_SCAN_RTF_BINARY),
+	RGN(KOF_SCAN_RTF_UNCLAIMED),
 
 	{ NULL, 0 }
 };

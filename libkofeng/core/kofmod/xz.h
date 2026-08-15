@@ -148,6 +148,15 @@ struct kof_xz_block {
 	uint64_t comp_size;      /* coded bytes, check and padding excluded */
 	uint64_t uncomp_size;    /* what the index says the decode yields */
 	uint32_t filter;         /* the LAST filter, which is the coder */
+	/*
+	 * The transform in front of it, zero when there is none.
+	 *
+	 * Same arrangement as a 7z folder's filter and for the same reason: the
+	 * bytes were changed before compression and have to be changed back after
+	 * decompression, and decoding without doing so yields something that looks
+	 * like a program and is not one.
+	 */
+	uint32_t transform;
 	uint32_t suspicious;     /* KOF_XZ_BLK_* */
 };
 

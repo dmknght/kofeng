@@ -19,7 +19,7 @@ KOF_TARGET_FORMAT(KOF_FMT_XZ);
 KOF_DEFINE_UNPACK
 {
 	const struct kof_xz_info *x = kof_xz(ctx);
-	uint32_t i, opened = 0, unreached = 0;
+	uint32_t i, opened = 0, unreached = 0, method;
 
 	if (!x->valid)
 		return;
@@ -44,7 +44,18 @@ KOF_DEFINE_UNPACK
 			unreached++;
 			continue;
 		}
-		if (kof_unpack_at(KOF_UNP_LZMA2, b->data_off, b->comp_size,
+		/*
+		 * A transform in front of the coder is undone after it, and only
+		 * the x86 one is undone at all - it is the only one this engine
+		 * has, and it is the only one that appears in practice.
+		 */
+		if (b->transform && b->transform != KOF_XZ_FILTER_X86) {
+			kof_debug("Xz.transform", b->transform);
+			unreached++;
+			continue;
+		}
+		method = b->transform ? KOF_UNP_LZMA2_BCJ_X86 : KOF_UNP_LZMA2;
+		if (kof_unpack_at(method, b->data_off, b->comp_size,
 				  b->uncomp_size) == 0) {
 			unreached++;
 			continue;

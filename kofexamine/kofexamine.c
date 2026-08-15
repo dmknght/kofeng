@@ -93,6 +93,7 @@
 #include <kofmod/sevenzip.h>
 #include <kofmod/rar.h>
 #include <kofmod/xz.h>
+#include <kofmod/rtf.h>
 
 #include "../libkofeng/kofparsers/binaries/elf_parse.h"
 #include "../libkofeng/kofparsers/binaries/pe_parse.h"
@@ -103,6 +104,7 @@
 #include "../libkofeng/kofparsers/containers/sevenzip_parse.h"
 #include "../libkofeng/kofparsers/containers/rar_parse.h"
 #include "../libkofeng/kofparsers/containers/xz_parse.h"
+#include "../libkofeng/kofparsers/containers/rtf_parse.h"
 
 /*
  * What one format offers a tool: how to recognise it, how to parse it, how big
@@ -164,6 +166,11 @@ static int zip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 static int tar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
 	return kof_tar_parse(b, (struct kof_tar_info *)v, c);
+}
+
+static int rtf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_rtf_parse(b, (struct kof_rtf_info *)v, c);
 }
 
 static int xz_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
@@ -750,6 +757,46 @@ static uint64_t anom_xz(const void *v)
 	return ((const struct kof_xz_info *)v)->anomalies;
 }
 
+/* What an RTF carries, which is embedded objects and how hard it worked to hide
+ * where they start. */
+static void print_rtf(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
+{
+	const struct kof_rtf_info *r = v;
+	uint32_t i;
+
+	(void)ctx;
+
+	printf("  groups    depth %u   %u control word(s)   %u \\bin run(s)\n",
+	       r->max_depth, r->n_controls, r->n_bin);
+	printf("  objects   %u embedded\n", r->n_objects);
+	for (i = 0; i < r->n_objects; i++) {
+		const struct kof_rtf_object *o = &r->obj[i];
+
+		printf("    [%2u] hex %llu byte(s) at %llu -> %llu decoded", i,
+		       (unsigned long long)o->data_len,
+		       (unsigned long long)o->data_off,
+		       (unsigned long long)o->hex_bytes);
+		if (o->class_len) {
+			printf("  class=");
+			print_entry_name(buf, o->class_off, o->class_len, 32u);
+		}
+		if (o->suspicious & KOF_RTF_OBJ_OLE)
+			printf("   <- a compound file");
+		if (o->suspicious & KOF_RTF_OBJ_OLE1)
+			printf("   <- an OLE1 package");
+		if (o->suspicious & KOF_RTF_OBJ_UPDATE)
+			printf("   <- OPENS WITHOUT BEING CLICKED");
+		if (o->suspicious & KOF_RTF_OBJ_BAD_HEX)
+			printf("   <- the hex does not pair up");
+		printf("\n");
+	}
+}
+
+static uint64_t anom_rtf(const void *v)
+{
+	return ((const struct kof_rtf_info *)v)->anomalies;
+}
+
 static const struct fmt formats[] = {
 	{ (uint32_t)sizeof(struct kof_elf_info), kof_elf_sniff, elf_parse_thunk,
 	  kof_elf_region_bits, KOF_ELF_REGION_COUNT,
@@ -778,7 +825,10 @@ static const struct fmt formats[] = {
 	  kof_rar_region_name, kof_rar_anomaly_name, print_rar, anom_rar },
 	{ (uint32_t)sizeof(struct kof_xz_info), kof_xz_sniff, xz_parse_thunk,
 	  kof_xz_region_bits, KOF_XZ_REGION_COUNT,
-	  kof_xz_region_name, kof_xz_anomaly_name, print_xz, anom_xz }
+	  kof_xz_region_name, kof_xz_anomaly_name, print_xz, anom_xz },
+	{ (uint32_t)sizeof(struct kof_rtf_info), kof_rtf_sniff, rtf_parse_thunk,
+	  kof_rtf_region_bits, KOF_RTF_REGION_COUNT,
+	  kof_rtf_region_name, kof_rtf_anomaly_name, print_rtf, anom_rtf }
 };
 
 /*

@@ -211,7 +211,18 @@ enum {
 	KOF_DOCOLE_ANOM_OVERLAP         = 1ull << 15, /* two structures claimed the
 						       * same bytes */
 	KOF_DOCOLE_ANOM_ENTRIES_FULL    = 1ull << 16, /* more streams than listed */
-	KOF_DOCOLE_ANOM_ENT_RUNS_FULL   = 1ull << 17  /* the per-entry run pool bound */
+	KOF_DOCOLE_ANOM_ENT_RUNS_FULL   = 1ull << 17, /* the per-entry run pool bound */
+	/*
+	 * The directory tree reached nothing and the directory was read straight
+	 * through instead.
+	 *
+	 * Worth its own bit rather than being folded into damage: the entries are
+	 * real and so is what they point at, but the parent-child structure that
+	 * says which storage a stream belongs to was not usable - so a caller
+	 * relying on "this stream is under the VBA storage" is relying on something
+	 * this file did not supply.
+	 */
+	KOF_DOCOLE_ANOM_DIR_RECOVERED   = 1ull << 18
 };
 
 struct kof_docole_info {

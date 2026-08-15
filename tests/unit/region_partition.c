@@ -46,6 +46,7 @@
 #include "../../libkofeng/kofparsers/containers/sevenzip_parse.h"
 #include "../../libkofeng/kofparsers/containers/rar_parse.h"
 #include "../../libkofeng/kofparsers/containers/xz_parse.h"
+#include "../../libkofeng/kofparsers/containers/rtf_parse.h"
 
 struct tally {
 	uint64_t objects, failures;
@@ -127,7 +128,7 @@ static int check(const char *path, kof_buf buf, struct kof_obj_ctx *ctx,
 
 static void one_file(const char *path, struct tally *elf, struct tally *pe,
 		     struct tally *gz, struct tally *ole, struct tally *zip,
-		     struct tally *tar, struct tally *sz, struct tally *rar, struct tally *xz)
+		     struct tally *tar, struct tally *sz, struct tally *rar, struct tally *xz, struct tally *rtf)
 {
 	struct kof_obj_ctx ctx;
 	struct kof_elf_info *ei;
@@ -139,6 +140,7 @@ static void one_file(const char *path, struct tally *elf, struct tally *pe,
 	struct kof_7z_info *si;
 	struct kof_rar_info *ri;
 	struct kof_xz_info *xi;
+	struct kof_rtf_info *fi;
 	struct stat st;
 	void *map;
 	int fd;
@@ -213,6 +215,15 @@ static void one_file(const char *path, struct tally *elf, struct tally *pe,
 					KOF_TAR_REGION_COUNT, "tar");
 			}
 			free(ti);
+		} else if (kof_rtf_sniff(buf)) {
+			fi = malloc(sizeof *fi);
+			if (fi && kof_rtf_parse(buf, fi, &ctx)) {
+				rtf->objects++;
+				rtf->failures += (uint64_t)check(path, buf, &ctx,
+					kof_rtf_region_bits,
+					KOF_RTF_REGION_COUNT, "rtf");
+			}
+			free(fi);
 		} else if (kof_xz_sniff(buf)) {
 			xi = malloc(sizeof *xi);
 			if (xi && kof_xz_parse(buf, xi, &ctx)) {
@@ -247,7 +258,7 @@ static void one_file(const char *path, struct tally *elf, struct tally *pe,
 
 static void walk(const char *dir, struct tally *elf, struct tally *pe,
 		 struct tally *gz, struct tally *ole, struct tally *zip,
-		     struct tally *tar, struct tally *sz, struct tally *rar, struct tally *xz)
+		     struct tally *tar, struct tally *sz, struct tally *rar, struct tally *xz, struct tally *rtf)
 {
 	DIR *d = opendir(dir);
 	struct dirent *de;
@@ -261,7 +272,7 @@ static void walk(const char *dir, struct tally *elf, struct tally *pe,
 		if ((size_t)snprintf(path, sizeof path, "%s/%s", dir, de->d_name)
 		    >= sizeof path)
 			continue;
-		one_file(path, elf, pe, gz, ole, zip, tar, sz, rar, xz);
+		one_file(path, elf, pe, gz, ole, zip, tar, sz, rar, xz, rtf);
 	}
 	closedir(d);
 }
@@ -284,20 +295,20 @@ int main(int argc, char **argv)
 		"/usr/share/man/man1", "/usr/share/i18n/charmaps"
 	};
 	struct tally elf = { 0, 0 }, pe = { 0, 0 }, gz = { 0, 0 },
-		     ole = { 0, 0 }, zip = { 0, 0 }, tar = { 0, 0 }, rar = { 0, 0 }, xz = { 0, 0 },
+		     ole = { 0, 0 }, zip = { 0, 0 }, tar = { 0, 0 }, rar = { 0, 0 }, xz = { 0, 0 }, rtf = { 0, 0 },
 		     sz = { 0, 0 };
 	int i;
 
 	if (argc > 1)
 		for (i = 1; i < argc; i++)
-			walk(argv[i], &elf, &pe, &gz, &ole, &zip, &tar, &sz, &rar, &xz);
+			walk(argv[i], &elf, &pe, &gz, &ole, &zip, &tar, &sz, &rar, &xz, &rtf);
 	else
 		for (i = 0; i < (int)(sizeof defaults / sizeof defaults[0]); i++)
-			walk(defaults[i], &elf, &pe, &gz, &ole, &zip, &tar, &sz, &rar, &xz);
+			walk(defaults[i], &elf, &pe, &gz, &ole, &zip, &tar, &sz, &rar, &xz, &rtf);
 
 	printf("partition: ELF %llu/%llu  PE %llu/%llu  gzip %llu/%llu  "
 	       "docole %llu/%llu  zip %llu/%llu  tar %llu/%llu  7z %llu/%llu  "
-	       "rar %llu/%llu  xz %llu/%llu",
+	       "rar %llu/%llu  xz %llu/%llu  rtf %llu/%llu",
 	       (unsigned long long)(elf.objects - elf.failures),
 	       (unsigned long long)elf.objects,
 	       (unsigned long long)(pe.objects - pe.failures),
@@ -315,7 +326,9 @@ int main(int argc, char **argv)
 	       (unsigned long long)(rar.objects - rar.failures),
 	       (unsigned long long)rar.objects,
 	       (unsigned long long)(xz.objects - xz.failures),
-	       (unsigned long long)xz.objects);
+	       (unsigned long long)xz.objects,
+	       (unsigned long long)(rtf.objects - rtf.failures),
+	       (unsigned long long)rtf.objects);
 	if (elf.objects == 0 && pe.objects == 0 && gz.objects == 0 &&
 	    ole.objects == 0 && zip.objects == 0 && tar.objects == 0 &&
 	    sz.objects == 0) {
@@ -325,5 +338,5 @@ int main(int argc, char **argv)
 	printf("\n");
 	return (elf.failures || pe.failures || gz.failures || ole.failures ||
 		zip.failures || tar.failures || sz.failures ||
-		rar.failures || xz.failures) ? 1 : 0;
+		rar.failures || xz.failures || rtf.failures) ? 1 : 0;
 }

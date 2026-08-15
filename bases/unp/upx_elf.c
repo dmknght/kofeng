@@ -186,6 +186,88 @@ static uint32_t upx_lzma_method(unsigned first_byte)
  */
 #define RD32(off) (be ? kof_bswap32(kof_u32(off)) : kof_u32(off))
 
+/*
+ * The shapes this module knows how to walk.
+ *
+ * One row today, and the table exists because the alternative is worse. A packer's
+ * layout varies by version and by target, so the honest question is not "does this
+ * decode" but "is this a layout I have seen" - and a module without the question
+ * answers the first by walking whatever it found and producing nothing, which looks
+ * identical to a file that had nothing in it.
+ *
+ * Measured over both collections on this machine: 28 UPX packed ELF objects across
+ * l_format 12, 22, 23, 30 and 137 at l_version 13 and 14, and every one of them
+ * walks with this single row. They differ in target architecture and therefore in
+ * byte order, which RD32 above already handles from the ELF header - the b_info
+ * layout itself is the same across all of them.
+ *
+ * So the row is wide on purpose and the table is one entry. What earns it its place
+ * is the ELSE: a version or format outside it is REPORTED rather than walked, so
+ * the first genuine variant appears in a scan's statistics instead of quietly
+ * yielding zero blocks. That is the signal that a second row is needed, and without
+ * it there is no way to know.
+ */
+struct upx_shape {
+	uint8_t ver_min, ver_max;
+	uint32_t formats;        /* bit per l_format, low bit is format 0 */
+	const char *what;
+};
+
+/*
+ * The ELF formats this row covers, in two pieces because one byte does not fit a
+ * mask: the low ones as bits, the high ones listed.
+ *
+ * OBSERVED to walk with this row: 12, 22, 23, 30, 42, 132 and 137, across 777
+ * objects. The neighbours in the low range are admitted with them because they are
+ * the same family and the same b_info layout, not because a sample of each was
+ * seen - and that distinction is why the high ones are listed individually rather
+ * than turned into a range.
+ *
+ * 42 and 132 are here because the table put them there. The first version of this
+ * list had neither, and the twenty one objects carrying them came back as
+ * unknown_shape on the next scan - so they were checked, they walked, and the list
+ * grew. That is the mechanism working: a format nobody had thought of becomes a
+ * number in a report rather than a silent zero.
+ */
+#define UPX_ELF_FORMATS                                                      \
+	((1u << 12) | (1u << 13) | (1u << 14) | (1u << 15) |                 \
+	 (1u << 22) | (1u << 23) | (1u << 24) | (1u << 25) |                 \
+	 (1u << 27) | (1u << 28) | (1u << 30) | (1u << 31))
+
+/* Above 31 and therefore not expressible in the mask. Listed, not ranged. */
+static int upx_elf_format_high(unsigned fmt)
+{
+	return fmt == 42u || fmt == 132u || fmt == 137u;
+}
+
+static const struct upx_shape shapes[] = {
+	{ 10, 20, UPX_ELF_FORMATS, "b_info chain, 12 byte records" }
+};
+
+/*
+ * Which row describes this stub, or -1.
+ *
+ * A -1 is the useful answer as much as a match is: it means either a layout this
+ * does not know or a magic that matched something which is not a stub, and from
+ * here those are the same thing - the twelve bytes after it would be read as a
+ * b_info either way.
+ */
+static int shape_of(unsigned ver, unsigned fmt)
+{
+	unsigned i;
+
+	for (i = 0; i < sizeof shapes / sizeof shapes[0]; i++) {
+		if (ver < shapes[i].ver_min || ver > shapes[i].ver_max)
+			continue;
+		if (fmt < 32u && !(shapes[i].formats & (1u << fmt)))
+			continue;
+		if (fmt >= 32u && !upx_elf_format_high(fmt))
+			continue;
+		return (int)i;
+	}
+	return -1;
+}
+
 KOF_DEFINE_UNPACK
 {
 	const struct kof_elf_info *elf = kof_elf(ctx);
@@ -223,8 +305,31 @@ KOF_DEFINE_UNPACK
 	 * useful question is which shape it was looking at. Reported first, so it
 	 * arrives even on the samples that go on to fail.
 	 */
-	kof_debug("UPX.ELF.version", kof_u8(magic_at + L_INFO_VERSION));
-	kof_debug("UPX.ELF.format", kof_u8(magic_at + L_INFO_FORMAT));
+	{
+		unsigned ver = kof_u8(magic_at + L_INFO_VERSION);
+		unsigned fmt = kof_u8(magic_at + L_INFO_FORMAT);
+		int shape;
+
+		kof_debug("UPX.ELF.version", ver);
+		kof_debug("UPX.ELF.format", fmt);
+
+		shape = shape_of(ver, fmt);
+		if (shape < 0) {
+			/*
+			 * Either a layout this does not know, or a magic that
+			 * matched something that is not a stub at all - and from
+			 * here the two are the same thing: the twelve bytes after
+			 * it would be read as a b_info either way.
+			 *
+			 * Reported as unsupported rather than returned silently,
+			 * because that is the difference between a variant that
+			 * shows up in a scan's numbers and one that never does.
+			 */
+			kof_debug("UPX.ELF.unknown_shape", (fmt << 8) | ver);
+			KOF_UNP_BROKEN(KOF_UNP_UNSUPPORTED);
+		}
+		kof_debug("UPX.ELF.shape", (unsigned)shape);
+	}
 
 	at = (magic_at - L_INFO_MAGIC_AT) + L_INFO_LEN;
 	if (!kof_in_obj(at, P_INFO_LEN))

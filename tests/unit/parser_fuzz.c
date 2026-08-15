@@ -43,6 +43,7 @@
 #include "../../libkofeng/kofparsers/containers/sevenzip_parse.h"
 #include "../../libkofeng/kofparsers/containers/rar_parse.h"
 #include "../../libkofeng/kofparsers/containers/xz_parse.h"
+#include "../../libkofeng/kofparsers/containers/rtf_parse.h"
 
 #define OBJ_MAX 8192
 #define ROUNDS  20000
@@ -571,6 +572,75 @@ static uint64_t gen_xz(uint8_t *b)
 }
 
 /*
+ * An RTF, which is the one format here with no offsets to break.
+ *
+ * So what is made hostile is the SYNTAX: unbalanced braces, control words longer
+ * than any reader accepts, \bin lengths that run past the end, hex runs with junk
+ * in them, and nesting deep enough to matter. The header has to stay intact or the
+ * sniff refuses before any of it is reached.
+ */
+static uint64_t gen_rtf(uint8_t *b)
+{
+	uint64_t n = 32u + (rnd() % (OBJ_MAX - 64u));
+	uint64_t at;
+	static const char *const words[] = {
+		"objdata", "objclass", "objupdate", "bin", "pict", "par", "b",
+		"objemb", "datastore", "fonttbl", "colortbl", "*"
+	};
+
+	memcpy(b, "{\\rtf1", 6);
+	at = 6;
+	while (at < n) {
+		switch (rnd() % 8u) {
+		case 0:
+			b[at++] = '{';
+			break;
+		case 1:
+			b[at++] = '}';
+			break;
+		case 2: {                       /* a control word, maybe absurd */
+			const char *w = words[rnd() % 12u];
+			uint32_t k = 0, len = (uint32_t)strlen(w);
+
+			b[at++] = '\\';
+			while (k < len && at < n)
+				b[at++] = (uint8_t)w[k++];
+			if (rnd() % 3u == 0) {  /* an over-long word */
+				uint32_t j = rnd() % 200u;
+
+				while (j-- && at < n)
+					b[at++] = (uint8_t)('a' + rnd() % 26);
+			}
+			if (rnd() % 2u) {       /* a parameter, sometimes huge */
+				char num[24];
+				int m = snprintf(num, sizeof num, "%u",
+						 (unsigned)((rnd() % 2u) ? rnd()
+							      : rnd() % 100u));
+				int q = 0;
+
+				while (q < m && at < n)
+					b[at++] = (uint8_t)num[q++];
+			}
+			break;
+		}
+		case 3: {                       /* hex, with junk in it */
+			uint32_t j = rnd() % 64u;
+
+			while (j-- && at < n)
+				b[at++] = (uint8_t)("0123456789abcdef \t\r\n"
+						    [rnd() % 20]);
+			break;
+		}
+		default:
+			b[at++] = (uint8_t)(rnd() % 4u ? ('a' + rnd() % 26)
+						       : rnd());
+			break;
+		}
+	}
+	return n;
+}
+
+/*
  * A tar, with the fields that decide where the next header is made hostile.
  *
  * There is only one of those and it is the size: it moves the cursor, and every
@@ -705,17 +775,18 @@ int main(int argc, char **argv)
 	struct kof_7z_info *si = malloc(sizeof *si);
 	struct kof_rar_info *ri = malloc(sizeof *ri);
 	struct kof_xz_info *xi = malloc(sizeof *xi);
+	struct kof_rtf_info *fi = malloc(sizeof *fi);
 	struct pc_report rep = { 0, 0, 0 };
 	uint64_t rounds = ROUNDS, seed = 20240101u;
 	uint64_t r, pe_parsed = 0, elf_parsed = 0, gz_parsed = 0, ole_parsed = 0,
-		 zip_parsed = 0, tar_parsed = 0, sz_parsed = 0, rar_parsed = 0, xz_parsed = 0;
+		 zip_parsed = 0, tar_parsed = 0, sz_parsed = 0, rar_parsed = 0, xz_parsed = 0, rtf_parsed = 0;
 	char what[64];
 
 	if (argc > 1)
 		seed = strtoull(argv[1], 0, 0);
 	if (argc > 2)
 		rounds = strtoull(argv[2], 0, 0);
-	if (!ei || !pi || !gi || !oi || !zi || !ti || !si || !ri || !xi)
+	if (!ei || !pi || !gi || !oi || !zi || !ti || !si || !ri || !xi || !fi)
 		return 1;
 
 	rng_state = seed ? seed : 1;
@@ -723,8 +794,8 @@ int main(int argc, char **argv)
 	for (r = 0; r < rounds; r++) {
 		struct kof_obj_ctx ctx;
 		uint64_t n;
-		int want = (int)(rnd() % 9);   /* PE, ELF, gzip, docole, zip,
-						* tar, 7z, rar, xz */
+		int want = (int)(rnd() % 10);  /* PE, ELF, gzip, docole, zip,
+						* tar, 7z, rar, xz, rtf */
 
 		memset(&ctx, 0, sizeof ctx);
 		n = want == 0 ? gen_pe(obj) : want == 1 ? gen_elf(obj)
@@ -733,7 +804,8 @@ int main(int argc, char **argv)
 			: want == 4 ? gen_zip(obj)
 			: want == 5 ? gen_tar(obj)
 			: want == 6 ? gen_7z(obj)
-			: want == 7 ? gen_rar(obj) : gen_xz(obj);
+			: want == 7 ? gen_rar(obj)
+			: want == 8 ? gen_xz(obj) : gen_rtf(obj);
 		{
 			kof_buf buf = kof_buf_make(obj, n);
 
@@ -745,7 +817,8 @@ int main(int argc, char **argv)
 				 : want == 4 ? "zip"
 				 : want == 5 ? "tar"
 				 : want == 6 ? "7z"
-				 : want == 7 ? "rar" : "xz");
+				 : want == 7 ? "rar"
+				 : want == 8 ? "xz" : "rtf");
 
 			if (want == 0 && kof_pe_sniff(buf)) {
 				if (kof_pe_parse(buf, pi, &ctx)) {
@@ -801,6 +874,12 @@ int main(int argc, char **argv)
 					pc_check(what, &ctx, n, kof_xz_region_bits,
 						 KOF_XZ_REGION_COUNT, &rep);
 				}
+			} else if (want == 9 && kof_rtf_sniff(buf)) {
+				if (kof_rtf_parse(buf, fi, &ctx)) {
+					rtf_parsed++;
+					pc_check(what, &ctx, n, kof_rtf_region_bits,
+						 KOF_RTF_REGION_COUNT, &rep);
+				}
 			}
 		}
 	}
@@ -814,8 +893,9 @@ int main(int argc, char **argv)
 	free(si);
 	free(ri);
 	free(xi);
+	free(fi);
 	printf("hostile headers: %llu round(s), parsed ELF %llu PE %llu gzip %llu "
-	       "docole %llu zip %llu tar %llu 7z %llu rar %llu xz %llu, "
+	       "docole %llu zip %llu tar %llu 7z %llu rar %llu xz %llu rtf %llu, "
 	       "partition %llu/%llu\n",
 	       (unsigned long long)rounds, (unsigned long long)elf_parsed,
 	       (unsigned long long)pe_parsed, (unsigned long long)gz_parsed,
@@ -825,6 +905,7 @@ int main(int argc, char **argv)
 	       (unsigned long long)sz_parsed,
 	       (unsigned long long)rar_parsed,
 	       (unsigned long long)xz_parsed,
+	       (unsigned long long)rtf_parsed,
 	       (unsigned long long)(rep.checked - rep.failed),
 	       (unsigned long long)rep.checked);
 	return rep.failed != 0;

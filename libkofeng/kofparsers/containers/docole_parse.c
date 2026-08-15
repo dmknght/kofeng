@@ -472,12 +472,37 @@ static void add_declared(struct kof_docole_info *o, uint32_t cls, uint64_t size)
  * right are peers inside the same storage, so a macro storage does not make its
  * neighbours macros. Only the child link carries a class downward.
  */
-static void walk_dir(struct ole *s, uint32_t root_child)
+/*
+ * Walk the directory, from the tree or straight through it.
+ *
+ * `linear` is the recovery path and it exists because the tree is an INDEX over an
+ * array rather than a substitute for it: every entry is physically there whether or
+ * not a pointer reaches it, so when the pointers do not hold, reading the array is
+ * still a complete answer.
+ *
+ * Measured on a real workbook: its directory chain runs through a sector at offset
+ * 109056 of a 106496 byte file and the root's child is the entry that would live
+ * there. From the tree the file has no streams at all; read straight through it has
+ * 24, including the Workbook and every VBA module in it.
+ *
+ * The entries found this way carry no parent, because the thing that would have
+ * said who their parent is is the thing that failed. So each is classified by its
+ * own name and nothing else - which loses the "under a VBA storage" inference and
+ * keeps everything that does not depend on it.
+ */
+static void walk_dir(struct ole *s, uint32_t root_child, int linear)
 {
 	struct kof_docole_info *o = s->o;
 	uint32_t sp = 0;
 
-	push(s, &sp, root_child, KOF_DOCOLE_CLS_COUNT, 0);
+	if (linear) {
+		uint32_t idx;
+
+		for (idx = 0; idx < o->dir_count && sp < KOF_DOCOLE_MAX_DIR; idx++)
+			push(s, &sp, idx, KOF_DOCOLE_CLS_COUNT, 0);
+	} else {
+		push(s, &sp, root_child, KOF_DOCOLE_CLS_COUNT, 0);
+	}
 
 	while (sp) {
 		uint32_t v = o->stack[--sp];
@@ -695,10 +720,25 @@ static void vba_module_offsets(struct ole *s)
 	if (!o->has_macros)
 		return;
 
-	for (i = 0; i < o->n_entries; i++)
-		if (o->ent[i].cls == KOF_DOCOLE_CLS_MACROS && o->ent[i].n_runs &&
-		    name_eq(s, &o->ent[i], (const uint8_t *)"dir", 3u))
+	/*
+	 * The project directory, found by name AND by shape.
+	 *
+	 * Not by class, and that matters when the tree failed: a recovered directory
+	 * has no parents, so a stream called "dir" is classified as document data
+	 * like anything else whose name says nothing. Requiring it to also BEGIN with
+	 * a compressed container is what makes the name safe to trust - "dir" is a
+	 * common enough name that the name alone is not evidence.
+	 */
+	for (i = 0; i < o->n_entries; i++) {
+		uint8_t head[3];
+
+		if (!o->ent[i].n_runs ||
+		    !name_eq(s, &o->ent[i], (const uint8_t *)"dir", 3u))
+			continue;
+		if (ent_bytes_at(s, &o->ent[i], 0, head, sizeof head) ==
+		    sizeof head && kof_ovba_plausible(head, sizeof head))
 			break;
+	}
 	if (i >= o->n_entries)
 		return;
 
@@ -775,11 +815,18 @@ static void vba_module_offsets(struct ole *s)
 					uint64_t size = ((uint64_t)e->size_hi << 32) |
 							e->size_lo;
 
-					if (e->cls != KOF_DOCOLE_CLS_MACROS ||
-					    !e->n_runs)
+					if (!e->n_runs)
 						continue;
 					if (!name_eq(s, e, d.p + name_at, name_len))
 						continue;
+					/*
+					 * The project's OWN directory named this
+					 * stream as a module, which outranks how
+					 * the tree classified it - and is the only
+					 * authority left when the tree did not
+					 * classify it at all.
+					 */
+					e->cls = KOF_DOCOLE_CLS_MACROS;
 					/* An offset past the stream is a document
 					 * describing a module it does not hold. */
 					if (off < size)
@@ -1080,7 +1127,32 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	if (o->n_mini == KOF_DOCOLE_MAX_MINI_SEC)
 		o->anomalies |= KOF_DOCOLE_ANOM_MINI_UNMAPPED;
 
-	walk_dir(&s, root_child);
+	walk_dir(&s, root_child, 0);
+
+	/*
+	 * The tree said nothing. Read the directory as an array instead.
+	 *
+	 * A compound file's directory is a red-black tree, so every entry is reached
+	 * through the one before it and a single bad pointer costs all of them. The
+	 * pointers are fields in the file, so one being wrong is ordinary rather than
+	 * exceptional - and the entries are still sitting in the sectors either way,
+	 * because the tree is an index over an array, not a substitute for it.
+	 *
+	 * Measured on a real workbook: the directory chain runs through a sector at
+	 * offset 109056 of a 106496 byte file, and the root's child is the entry that
+	 * would live there. The walk reached nothing, the file reported no streams at
+	 * all, and reading the same directory straight through finds 24 entries -
+	 * including the Workbook and every VBA module in it.
+	 *
+	 * Same shape of answer as the zip parser searching backwards for an end record
+	 * and the xz parser searching for its footer: trust the structure, and when the
+	 * structure does not hold, look at what is there.
+	 */
+	if (o->stream_count == 0 && o->dir_count) {
+		o->anomalies |= KOF_DOCOLE_ANOM_DIR_RECOVERED;
+		memset(o->seen, 0, sizeof o->seen);
+		walk_dir(&s, 0, 1);
+	}
 
 	if (o->stream_count == 0)
 		o->anomalies |= KOF_DOCOLE_ANOM_NO_STREAMS;
@@ -1146,7 +1218,7 @@ const char *kof_docole_anomaly_name(unsigned index)
 		"DIR_DEPTH", "DIR_OVERFLOW", "BAD_DIR_ENTRY", "EXTENTS_FULL",
 		"FAT_UNMAPPED", "MINI_UNMAPPED", "STREAM_PAST_EOF",
 		"MACRO_OVERSIZE", "NO_STREAMS", "ENCRYPTED", "OVERLAP",
-		"ENTRIES_FULL", "ENT_RUNS_FULL"
+		"ENTRIES_FULL", "ENT_RUNS_FULL", "DIR_RECOVERED"
 	};
 
 	return index < sizeof n / sizeof n[0] ? n[index] : 0;
