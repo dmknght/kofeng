@@ -38,7 +38,7 @@ KOF_DEFINE_STR(str_hcrootkit_1, "sys_munmap", KOF_CASE_EXACT, KOF_WORD_FULLWORD)
 KOF_DEFINE_STR(str_hcrootkit_2, "sys_mmap", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 
 
-KOF_DEFINE_SCAN
+void kof_scan(const struct kof_obj_ctx *ctx)
 {
 	/*
 	 * A threshold, written as one. Each call answers how many of the listed

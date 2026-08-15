@@ -12,7 +12,8 @@ KOF_DEFINE_STR(str_data_2, "PAYLOAD:", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(str_code_1, "AXAX^YZAXAYAZH", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(str_code_2, "VirtualProtect", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 
-KOF_DEFINE_SCAN
+
+void kof_scan(const struct kof_obj_ctx *ctx)
 {
 	/*
 	 * Two markers, and the second is what makes the first worth acting on. The

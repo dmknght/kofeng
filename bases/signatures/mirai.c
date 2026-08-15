@@ -13,7 +13,7 @@ KOF_DEFINE_STR(mirai_4,  "oanacroane",  KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(mirai_5,  "Tsunami successfully deployed!",  KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(mirai_6,  ".tsunami -l .t -g",  KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 
-KOF_DEFINE_SCAN
+void kof_scan(const struct kof_obj_ctx *ctx)
 {
 	/*
 	 * A threshold, written as one. Each call answers how many of the listed
