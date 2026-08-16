@@ -136,6 +136,11 @@ enum {
 	KOF_XZ_ANOM_MULTI_STREAM = 1ull << 12  /* more concatenated streams follow */
 };
 
+/* How many of the above there are, so the name table cannot fall behind
+ * them - three of 7z's bits went unnamed until a checklist pass found it. */
+#define KOF_XZ_ANOM_COUNT 13
+
+
 /* On the same reasoning as gzip's and zip's: far past anything not built to
  * expand. */
 #define KOF_XZ_RATIO_ABSURD 5000u

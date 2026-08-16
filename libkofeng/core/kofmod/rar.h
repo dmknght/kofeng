@@ -88,6 +88,35 @@ enum {
 	KOF_RAR3_BLK_END     = 0x7b
 };
 
+/*
+ * RAR5 block types and flags.
+ *
+ * A different vocabulary from RAR3 and a different encoding: every number is a
+ * variable length integer, seven bits to a byte, and every block states its own
+ * header size so a walk can step over a block it does not understand. That last
+ * property is why RAR5 is worth walking even without a decoder - the structure is
+ * self describing in a way RAR3's is not.
+ */
+enum {
+	KOF_RAR5_BLK_MAIN    = 1,
+	KOF_RAR5_BLK_FILE    = 2,
+	KOF_RAR5_BLK_SERVICE = 3,
+	KOF_RAR5_BLK_CRYPT   = 4,   /* the archive's headers are encrypted */
+	KOF_RAR5_BLK_END     = 5
+};
+
+enum {
+	KOF_RAR5_H_EXTRA = 0x0001,  /* an extra area follows the header */
+	KOF_RAR5_H_DATA  = 0x0002   /* a data area follows the block */
+};
+
+enum {
+	KOF_RAR5_F_DIR      = 0x0001,
+	KOF_RAR5_F_TIME     = 0x0002,  /* four bytes of mtime are present */
+	KOF_RAR5_F_CRC      = 0x0004,  /* four bytes of CRC32 are present */
+	KOF_RAR5_F_UNKNOWN  = 0x0008   /* the unpacked size is not stated */
+};
+
 /* RAR3 header flags. */
 enum {
 	KOF_RAR3_F_SPLIT_BEFORE = 1u << 0,
@@ -123,6 +152,11 @@ enum {
 	KOF_RAR_ANOM_SOLID        = 1ull << 9, /* entries share a compression window */
 	KOF_RAR_ANOM_UNSUPPORTED  = 1ull << 10 /* RAR5, which this build does not walk */
 };
+
+/* How many of the above there are, so the name table cannot fall behind
+ * them - three of 7z's bits went unnamed until a checklist pass found it. */
+#define KOF_RAR_ANOM_COUNT 11
+
 
 /* The ratio at which the bit above is set, on the same reasoning as gzip's and
  * zip's: far past anything that is not built to expand. */

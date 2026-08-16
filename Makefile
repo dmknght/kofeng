@@ -153,11 +153,14 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/containers/rar_parse.c \
            libkofeng/kofparsers/containers/xz_parse.c \
            libkofeng/kofparsers/containers/rtf_parse.c \
+           libkofeng/kofparsers/containers/pdf_parse.c \
            libkofeng/kofunpack/pe_rebuild.c \
            libkofeng/kofdecomp/decomp.c \
            libkofeng/kofdecomp/inflate.c \
            libkofeng/kofdecomp/ovba.c \
            libkofeng/kofdecomp/bcj.c \
+           libkofeng/kofdecomp/bcj2.c \
+           libkofeng/kofdecomp/rar3.c \
            libkofeng/kofdecomp/lzma.c \
            libkofeng/kofdecomp/nrv2.c \
            libkofeng/kofscanners/scan.c \

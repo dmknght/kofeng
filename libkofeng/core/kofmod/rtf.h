@@ -97,6 +97,11 @@ enum {
 	KOF_RTF_ANOM_OVERLAP      = 1ull << 9
 };
 
+/* How many of the above there are, so the name table cannot fall behind
+ * them - three of 7z's bits went unnamed until a checklist pass found it. */
+#define KOF_RTF_ANOM_COUNT 10
+
+
 struct kof_rtf_object {
 	uint64_t data_off;      /* first hex digit of \objdata */
 	uint64_t data_len;      /* bytes of hex, whitespace included */

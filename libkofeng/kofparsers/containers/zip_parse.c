@@ -578,6 +578,9 @@ const char *kof_zip_anomaly_name(unsigned index)
 		"UNSUPPORTED"
 	};
 
+
+	_Static_assert(sizeof n / sizeof n[0] == KOF_ZIP_ANOM_COUNT,
+		       "anomaly name table and its count disagree");
 	return index < sizeof n / sizeof n[0] ? n[index] : 0;
 }
 

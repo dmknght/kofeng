@@ -331,6 +331,11 @@ static int rtf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 	return kof_rtf_parse(b, (struct kof_rtf_info *)v, c);
 }
 
+static int pdf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_pdf_parse(b, (struct kof_pdf_info *)v, c);
+}
+
 static const struct parser parsers[] = {
 	{ KOF_FMT_ELF,  (uint32_t)sizeof(struct kof_elf_info),
 	  kof_elf_sniff,  elf_parse_thunk  },
@@ -356,7 +361,9 @@ static const struct parser parsers[] = {
 	{ KOF_FMT_XZ, (uint32_t)sizeof(struct kof_xz_info),
 	  kof_xz_sniff, xz_parse_thunk },
 	{ KOF_FMT_RTF, (uint32_t)sizeof(struct kof_rtf_info),
-	  kof_rtf_sniff, rtf_parse_thunk }
+	  kof_rtf_sniff, rtf_parse_thunk },
+	{ KOF_FMT_PDF, (uint32_t)sizeof(struct kof_pdf_info),
+	  kof_pdf_sniff, pdf_parse_thunk }
 };
 
 /*

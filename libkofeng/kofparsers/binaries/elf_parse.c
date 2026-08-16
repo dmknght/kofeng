@@ -886,5 +886,8 @@ const char *kof_elf_anomaly_name(unsigned index)
 		"SECNAME_TRUNC", "SECTAB_MISSING"
 	};
 
+
+	_Static_assert(sizeof n / sizeof n[0] == KOF_ELF_ANOM_COUNT,
+		       "anomaly name table and its count disagree");
 	return index < sizeof n / sizeof n[0] ? n[index] : 0;
 }

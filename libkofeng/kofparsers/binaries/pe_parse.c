@@ -736,5 +736,8 @@ const char *kof_pe_anomaly_name(unsigned index)
 		"RSRC_UNALIGNED"
 	};
 
+
+	_Static_assert(sizeof n / sizeof n[0] == KOF_PE_ANOM_COUNT,
+		       "anomaly name table and its count disagree");
 	return index < sizeof n / sizeof n[0] ? n[index] : 0;
 }

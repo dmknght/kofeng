@@ -73,6 +73,35 @@ static uint32_t rd32(kof_buf f, uint64_t off)
 	return v;
 }
 
+/*
+ * A RAR5 variable length integer.
+ *
+ * Seven bits a byte, low order first, the high bit saying another byte follows.
+ * Ten bytes is the most that can carry sixty four bits, and refusing the eleventh
+ * is what stops a run of 0x80 bytes from walking the object - the shape a hostile
+ * archive would use, since every byte of it is a legal continuation.
+ */
+static uint64_t rd_vint(kof_buf f, uint64_t *at, int *ok)
+{
+	uint64_t v = 0;
+	uint32_t i;
+
+	*ok = 0;
+	for (i = 0; i < 10u; i++) {
+		uint8_t b = 0;
+
+		if (!kof_rd_u8(f, *at, &b))
+			return 0;
+		(*at)++;
+		v |= (uint64_t)(b & 0x7fu) << (i * 7u);
+		if (!(b & 0x80u)) {
+			*ok = 1;
+			return v;
+		}
+	}
+	return 0;
+}
+
 /* ---- the walk's own state ----------------------------------------------------- */
 
 struct rw {
@@ -102,6 +131,201 @@ static uint32_t rar_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 	return kof_runs_resolve((const struct kof_run *)r->run, r->n_runs, mask,
 				rar_cls_bit, KOF_SCAN_RAR_UNCLAIMED,
 				ctx->obj_size, out, max_out);
+}
+
+/*
+ * The RAR5 block chain.
+ *
+ * Every block is a CRC, its own size, and then a header whose first two numbers say
+ * what it is and what follows it. That self description is the whole reason this is
+ * worth walking without a decoder: a block whose type this does not know is stepped
+ * over exactly, rather than ending the walk, so the file headers after it are still
+ * read - and file headers are where the names, the sizes and the stored entries are.
+ *
+ * What is NOT attempted is decompression. RAR5 entries are coded with a method this
+ * build has no decoder for, so a compressed entry is claimed as PACKED and reported;
+ * a STORED one is bytes in the clear and becomes a child like any other.
+ */
+static void rar5_walk(struct rw *s, kof_buf file)
+{
+	struct kof_rar_info *r = s->r;
+	uint64_t at = RAR5_MAGIC_LEN;
+	int saw_end = 0;
+
+	kof_runs_add(&s->runs, file.n, 0, RAR5_MAGIC_LEN, KOF_RAR_CLS_HEADERS);
+
+	while (at + 4u < file.n) {
+		uint64_t hdr_start, hsize, htype, hflags, extra = 0, dsize = 0;
+		uint64_t hdr_end, blk_end;
+		int ok;
+
+		at += 4u;                       /* the header's CRC32 */
+		hsize = rd_vint(file, &at, &ok);
+		if (!ok || hsize == 0) {
+			r->anomalies |= KOF_RAR_ANOM_BAD_BLOCK;
+			break;
+		}
+		hdr_start = at;
+		/* The size counts from here, so where the header ends is known before
+		 * a single field inside it is believed. */
+		if (hsize > file.n - hdr_start) {
+			r->anomalies |= KOF_RAR_ANOM_TRUNCATED;
+			kof_runs_add(&s->runs, file.n, at, file.n - at,
+				     KOF_RAR_CLS_HEADERS);
+			break;
+		}
+		hdr_end = hdr_start + hsize;
+
+		htype  = rd_vint(file, &at, &ok);
+		if (!ok) break;
+		hflags = rd_vint(file, &at, &ok);
+		if (!ok) break;
+		if (hflags & KOF_RAR5_H_EXTRA) {
+			extra = rd_vint(file, &at, &ok);
+			if (!ok) break;
+			(void)extra;            /* inside hsize already */
+		}
+		if (hflags & KOF_RAR5_H_DATA) {
+			dsize = rd_vint(file, &at, &ok);
+			if (!ok) break;
+		}
+
+		/*
+		 * An encryption header means every header AFTER it is ciphertext.
+		 *
+		 * Walking on reads noise as vints and claims whatever they say - on
+		 * the first encrypted archive tried, 139MB of a 139MB file as
+		 * "headers". The block itself is claimed and the walk stops, which
+		 * is the honest answer: the structure is not readable from here.
+		 */
+		if (htype == KOF_RAR5_BLK_CRYPT) {
+			r->anomalies |= KOF_RAR_ANOM_ENCRYPTED;
+			r->n_encrypted++;
+			kof_runs_add(&s->runs, file.n, hdr_start, hsize,
+				     KOF_RAR_CLS_HEADERS);
+			break;
+		}
+
+		if (htype == KOF_RAR5_BLK_FILE || htype == KOF_RAR5_BLK_SERVICE) {
+			uint64_t fflags, usize, attr, comp, host, nlen, name_off;
+			uint32_t method;
+
+			fflags = rd_vint(file, &at, &ok); if (!ok) break;
+			usize  = rd_vint(file, &at, &ok); if (!ok) break;
+			attr   = rd_vint(file, &at, &ok); if (!ok) break;
+			(void)attr;
+			if (fflags & KOF_RAR5_F_TIME) at += 4u;
+			if (fflags & KOF_RAR5_F_CRC)  at += 4u;
+			comp = rd_vint(file, &at, &ok); if (!ok) break;
+			host = rd_vint(file, &at, &ok); if (!ok) break;
+			(void)host;
+			nlen = rd_vint(file, &at, &ok); if (!ok) break;
+
+			name_off = at;
+			/* The name has to lie inside the header that declared it -
+			 * the same rule the RAR3 walk applies, and for the same
+			 * reason. */
+			if (nlen > hdr_end - name_off ||
+			    !kof_in_range(file, name_off, nlen)) {
+				r->anomalies |= KOF_RAR_ANOM_TRUNCATED;
+				nlen = 0;
+			}
+
+			/*
+			 * Bits 7..9 of the compression info are the method, and 0
+			 * is stored. Translated onto RAR3's 0x30..0x35 so that
+			 * every reader above - the module included - asks one
+			 * question about method and not two.
+			 */
+			method = (uint32_t)(KOF_RAR_M_STORE +
+					    ((comp >> 7) & 7u));
+
+			if (r->n_entries < KOF_RAR_MAX_ENTRIES &&
+			    htype == KOF_RAR5_BLK_FILE) {
+				struct kof_rar_entry *e =
+					&r->entry[r->n_entries++];
+
+				memset(e, 0, sizeof *e);
+				e->hdr_off  = hdr_start;
+				e->csize    = dsize;
+				e->usize    = (fflags & KOF_RAR5_F_UNKNOWN) ? 0
+									   : usize;
+				e->name_off = name_off;
+				e->name_len = (uint32_t)nlen;
+				e->method   = (uint8_t)method;
+				e->flags    = (uint16_t)fflags;
+				e->data_off = dsize ? hdr_end : 0;
+
+				if (nlen &&
+				    kof_name_escapes(file, name_off, (uint32_t)nlen)) {
+					e->suspicious |= KOF_RAR_ENT_TRAVERSAL;
+					r->anomalies |= KOF_RAR_ANOM_TRAVERSAL;
+				}
+				if (dsize &&
+				    !kof_in_range(file, hdr_end, dsize)) {
+					e->suspicious |= KOF_RAR_ENT_PAST_EOF;
+					r->anomalies |= KOF_RAR_ANOM_TRUNCATED;
+				}
+			} else if (htype == KOF_RAR5_BLK_FILE) {
+				r->anomalies |= KOF_RAR_ANOM_ENTRIES_FULL;
+			}
+
+			/* Header on either side of the name, so NAMES is a region
+			 * with bytes in it rather than one the header swallowed. */
+			if (nlen) {
+				kof_runs_add(&s->runs, file.n, name_off, nlen,
+					     KOF_RAR_CLS_NAMES);
+				kof_runs_add(&s->runs, file.n, hdr_start,
+					     name_off - hdr_start,
+					     KOF_RAR_CLS_HEADERS);
+				kof_runs_add(&s->runs, file.n, name_off + nlen,
+					     hdr_end - (name_off + nlen),
+					     KOF_RAR_CLS_HEADERS);
+			} else {
+				kof_runs_add(&s->runs, file.n, hdr_start, hsize,
+					     KOF_RAR_CLS_HEADERS);
+			}
+		} else {
+			kof_runs_add(&s->runs, file.n, hdr_start, hsize,
+				     KOF_RAR_CLS_HEADERS);
+		}
+
+		if (htype == KOF_RAR5_BLK_END)
+			saw_end = 1;
+
+		/* The data area, classified by whether it can be read where it lies. */
+		if (dsize) {
+			uint64_t have = kof_clip_len(file.n, hdr_end, dsize);
+
+			if (have) {
+				uint32_t cls = KOF_RAR_CLS_PACKED;
+
+				if (r->n_entries &&
+				    r->entry[r->n_entries - 1u].data_off == hdr_end &&
+				    r->entry[r->n_entries - 1u].method ==
+					    KOF_RAR_M_STORE)
+					cls = KOF_RAR_CLS_STORED;
+				kof_runs_add(&s->runs, file.n, hdr_end, have, cls);
+			}
+			if (have != dsize)
+				r->anomalies |= KOF_RAR_ANOM_TRUNCATED;
+		}
+
+		blk_end = kof_sat_add(hdr_end, dsize);
+		if (blk_end <= at || blk_end > file.n) {
+			if (blk_end > file.n)
+				r->anomalies |= KOF_RAR_ANOM_TRUNCATED;
+			else
+				r->anomalies |= KOF_RAR_ANOM_BAD_BLOCK;
+			break;
+		}
+		at = blk_end;
+		if (saw_end)
+			break;
+	}
+
+	if (!saw_end)
+		r->anomalies |= KOF_RAR_ANOM_NO_END;
 }
 
 /* ---- the parse ---------------------------------------------------------------- */
@@ -205,9 +429,20 @@ static int file_block(struct rw *s, uint64_t at, uint64_t size, uint16_t flags,
 	e->unp_ver  = s->f.p[at + F_UNP_VER];
 	e->data_off = csize ? at + size : 0;
 
+	/* Name first, then the header on either side of it, so the two regions are
+	 * disjoint and both are non-empty. */
 	if (name_len) {
 		kof_runs_add(&s->runs, s->f.n, name_off, name_len,
 			     KOF_RAR_CLS_NAMES);
+		kof_runs_add(&s->runs, s->f.n, at, name_off - at,
+			     KOF_RAR_CLS_HEADERS);
+		kof_runs_add(&s->runs, s->f.n, name_off + name_len,
+			     (at + size) - (name_off + name_len),
+			     KOF_RAR_CLS_HEADERS);
+	} else {
+		kof_runs_add(&s->runs, s->f.n, at, size, KOF_RAR_CLS_HEADERS);
+	}
+	if (name_len) {
 		/*
 		 * A name that escapes the directory it is extracted into. The
 		 * check is shared with zip and tar because the attack is: the
@@ -293,11 +528,30 @@ int kof_rar_parse(kof_buf file, struct kof_rar_info *r, struct kof_obj_ctx *ctx)
 		 * with this walk would produce confident nonsense. 78 of the 865
 		 * RAR files here are this, and they are reported as a gap.
 		 */
+		/*
+		 * RAR5, walked. It shares nothing with RAR3 below the magic -
+		 * variable length integers, a different block vocabulary, a
+		 * different place for every field - so it gets a walk of its own
+		 * rather than a branch inside this one.
+		 *
+		 * UNSUPPORTED is still recorded, and it now means what it says: the
+		 * structure is read, the names and stored entries are recovered, and
+		 * what is missing is a decoder for the compressed ones.
+		 */
 		r->rar_version = KOF_RAR_V5;
-		r->anomalies |= KOF_RAR_ANOM_UNSUPPORTED;
-		kof_runs_add(&s.runs, file.n, 0, RAR5_MAGIC_LEN,
-			     KOF_RAR_CLS_HEADERS);
-		at = file.n;
+		rar5_walk(&s, file);
+		if (r->n_entries) {
+			uint32_t q, packed = 0;
+
+			for (q = 0; q < r->n_entries; q++)
+				if (r->entry[q].method != KOF_RAR_M_STORE)
+					packed++;
+			if (packed)
+				r->anomalies |= KOF_RAR_ANOM_UNSUPPORTED;
+		} else {
+			r->anomalies |= KOF_RAR_ANOM_UNSUPPORTED;
+		}
+		goto settle;
 	} else {
 		r->rar_version = KOF_RAR_V3;
 		kof_runs_add(&s.runs, file.n, 0, RAR3_MAGIC_LEN,
@@ -347,8 +601,16 @@ int kof_rar_parse(kof_buf file, struct kof_rar_info *r, struct kof_obj_ctx *ctx)
 			data = rd32(file, at + B_BASE_LEN);
 		}
 
-		kof_runs_add(&s.runs, file.n, at, size, KOF_RAR_CLS_HEADERS);
-
+		/*
+		 * The FILE block claims its own header, because the name sits inside
+		 * it and has to be claimed first.
+		 *
+		 * Claiming the whole block as HEADERS here and adding the name
+		 * afterwards left NAMES empty on every RAR ever parsed - the run was
+		 * added, the bytes were already spoken for, and a region a signature
+		 * can target held nothing. zip splits the same way and gzip says so
+		 * in a comment; this was the one that did not.
+		 */
 		if (typ == KOF_RAR3_BLK_FILE || typ == KOF_RAR3_BLK_SUB) {
 			/*
 			 * A file block re-reads its own sizes, including the
@@ -358,7 +620,12 @@ int kof_rar_parse(kof_buf file, struct kof_rar_info *r, struct kof_obj_ctx *ctx)
 			 */
 			if (!file_block(&s, at, size, flags, &data))
 				break;
-		} else if (data && at + size < file.n) {
+		} else {
+			kof_runs_add(&s.runs, file.n, at, size,
+				     KOF_RAR_CLS_HEADERS);
+		}
+		if (typ != KOF_RAR3_BLK_FILE && typ != KOF_RAR3_BLK_SUB &&
+		    data && at + size < file.n) {
 			uint64_t have = at + size + data <= file.n
 						? data : file.n - (at + size);
 
@@ -387,6 +654,7 @@ int kof_rar_parse(kof_buf file, struct kof_rar_info *r, struct kof_obj_ctx *ctx)
 
 	if (r->rar_version == KOF_RAR_V3 && !saw_end)
 		r->anomalies |= KOF_RAR_ANOM_NO_END;
+settle:
 	if (s.runs.full)
 		r->anomalies |= KOF_RAR_ANOM_EXTENTS_FULL;
 	if (s.runs.overlapped)
@@ -438,5 +706,8 @@ const char *kof_rar_anomaly_name(unsigned index)
 		"SOLID", "UNSUPPORTED"
 	};
 
+
+	_Static_assert(sizeof n / sizeof n[0] == KOF_RAR_ANOM_COUNT,
+		       "anomaly name table and its count disagree");
 	return index < sizeof n / sizeof n[0] ? n[index] : 0;
 }

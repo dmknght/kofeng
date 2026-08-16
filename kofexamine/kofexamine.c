@@ -105,6 +105,7 @@
 #include "../libkofeng/kofparsers/containers/rar_parse.h"
 #include "../libkofeng/kofparsers/containers/xz_parse.h"
 #include "../libkofeng/kofparsers/containers/rtf_parse.h"
+#include "../libkofeng/kofparsers/containers/pdf_parse.h"
 
 /*
  * What one format offers a tool: how to recognise it, how to parse it, how big
@@ -662,8 +663,8 @@ static void print_rar(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 		       (double)r->total_usize / (double)r->total_csize);
 	printf("\n");
 	if (r->anomalies & KOF_RAR_ANOM_UNSUPPORTED)
-		printf("  note      RAR5 is recognised but not walked by this "
-		       "build: no entries are listed\n");
+		printf("  note      RAR5: structure walked; compressed entries need a\n"
+		       "            decoder this build does not have\n");
 	if (r->anomalies & KOF_RAR_ANOM_SOLID)
 		printf("  note      solid: entries share one compression window, so "
 		       "none can be decoded alone\n");
@@ -792,6 +793,41 @@ static void print_rtf(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 	}
 }
 
+static int pdf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_pdf_parse(b, (struct kof_pdf_info *)v, c);
+}
+
+static void print_pdf(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
+{
+	const struct kof_pdf_info *p = v;
+	uint32_t i, shown = 0;
+
+	(void)ctx; (void)buf;
+	printf("  version   PDF %u.%u   header at %llu\n", p->ver_major,
+	       p->ver_minor, (unsigned long long)p->header_off);
+	printf("  objects   %u (%u with a stream)   startxref=%llu\n",
+	       p->n_objects, p->n_streams, (unsigned long long)p->startxref);
+	for (i = 0; i < p->n_objects && shown < 12u; i++) {
+		const struct kof_pdf_object *o = &p->object[i];
+
+		if (!o->flags && !o->filters)
+			continue;
+		printf("    [%3u] %u %u obj  dict=%llu+%llu stream=%llu+%llu"
+		       "  flags=0x%x filters=0x%x\n", i, o->num, o->gen,
+		       (unsigned long long)o->dict_off,
+		       (unsigned long long)o->dict_len,
+		       (unsigned long long)o->stream_off,
+		       (unsigned long long)o->stream_len, o->flags, o->filters);
+		shown++;
+	}
+}
+
+static uint64_t anom_pdf(const void *v)
+{
+	return ((const struct kof_pdf_info *)v)->anomalies;
+}
+
 static uint64_t anom_rtf(const void *v)
 {
 	return ((const struct kof_rtf_info *)v)->anomalies;
@@ -828,7 +864,10 @@ static const struct fmt formats[] = {
 	  kof_xz_region_name, kof_xz_anomaly_name, print_xz, anom_xz },
 	{ (uint32_t)sizeof(struct kof_rtf_info), kof_rtf_sniff, rtf_parse_thunk,
 	  kof_rtf_region_bits, KOF_RTF_REGION_COUNT,
-	  kof_rtf_region_name, kof_rtf_anomaly_name, print_rtf, anom_rtf }
+	  kof_rtf_region_name, kof_rtf_anomaly_name, print_rtf, anom_rtf },
+	{ (uint32_t)sizeof(struct kof_pdf_info), kof_pdf_sniff, pdf_parse_thunk,
+	  kof_pdf_region_bits, KOF_PDF_REGION_COUNT,
+	  kof_pdf_region_name, kof_pdf_anomaly_name, print_pdf, anom_pdf }
 };
 
 /*

@@ -31,7 +31,16 @@ enum kof_decomp_status {
 	KOF_DEC_OK = 0,     /* the end of the stream was reached and decoded */
 	KOF_DEC_STOPPED,    /* the receiver refused more; output so far is good */
 	KOF_DEC_TRUNCATED,  /* input ended mid-stream; output so far is good */
-	KOF_DEC_CORRUPT     /* the stream is not valid for its format */
+	KOF_DEC_CORRUPT,    /* the stream is not valid for its format */
+	/*
+	 * The stream is well formed and uses a coding this build does not have.
+	 *
+	 * Distinct from CORRUPT because the two want opposite reactions: a corrupt
+	 * stream is a finding about the file, an unsupported one is a gap in this
+	 * engine. Output produced before the point of refusal is still valid and is
+	 * still reported.
+	 */
+	KOF_DEC_UNSUPPORTED
 };
 
 const char *kof_decomp_status_name(int status);

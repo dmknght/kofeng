@@ -190,6 +190,18 @@ Defence:
 [ ] Rebuilt/reconstructed images are bounded by the destination, not the source.
 [ ] Fuzzing exercises the accessor functions the scan path uses, not just the
     tables it produced.
+[ ] SAFE-BY-INVARIANT IS FLAGGED, NOT ACCEPTED. Where a write or an index is in
+    bounds only because of something established elsewhere - a clamp in another
+    function, a size expression written out twice, an emergent property of a
+    state machine - say so at the site and add the local guard anyway. The two
+    ways this hides:
+      - a guard constant that does not equal the array it protects
+        (an index bounded by 15 into an array of 8)
+      - a destination size computed by one expression and the copy length by an
+        identical expression somewhere else, so editing one is a heap overflow
+    Both are correct today and neither is defended. A local check costs a
+    comparison; reconstructing the invariant costs the next reader an afternoon,
+    and they may get it wrong.
 
 ================================================================================
 II.6  DATA THAT STAYS MAPPED  (time-of-check vs time-of-use)
@@ -242,12 +254,40 @@ This class keeps returning in new shapes; treat every new mechanism as suspect.
 [ ] For each: if this were wrong, what would tell me?
 
 ================================================================================
-II.10  MEMORY LIFECYCLE
+II.10  USE AFTER FREE / DOUBLE FREE / LEAK
 ================================================================================
-[ ] free() clears the pointer, or the owning struct is cleared.
-[ ] No pointer into an array is held across a realloc of it.
-[ ] Cleanup cannot run twice over the same object.
-[ ] Nothing is held past the object's lifetime; peak live memory is measured.
+Freeing
+[ ] free() is followed by clearing the pointer, OR the struct holding it is
+    itself freed or cleared in the same statement group.
+[ ] A destructor that frees the struct it was given leaves no way to call it
+    twice: the caller's pointer is dropped at the call site.
+[ ] Error paths free a partially built object exactly once. The counter or flag
+    that says "this slot is constructed" must not include the slot being freed.
+[ ] Ownership transfer nulls the source. If A hands its array to B, A's pointer
+    is set NULL so the cleanup path cannot free what B now owns.
+[ ] Every goto-cleanup label frees exactly the things constructed above it, and
+    the order of labels matches the order of construction.
+
+Borrowed pointers
+[ ] A pointer borrowed into long-lived state is cleared in the SAME scope that
+    set it, not left for a later path to clear.
+[ ] No pointer INTO an array is held across a realloc of that array.
+[ ] No pointer into a mapping is held across the unmap.
+[ ] Derived pointers (function pointers into a code arena, byte pointers into a
+    pool) do not outlive the arena or pool they point into, and the lifetime
+    rule is stated where the pointer is produced.
+[ ] Any cached pointer is invalidated when what it points into is rebuilt.
+
+Reuse
+[ ] Per-object state is reset between objects with no stale pointer surviving.
+[ ] A struct reused across iterations has every pointer field either freed or
+    deliberately carried, with which is which written down.
+
+Proof
+[ ] ASAN + UBSAN clean, and the fuzzer reaches the error paths, not only the
+    success path. A cleanup path no test reaches is a cleanup path nobody has
+    checked.
+[ ] Leak detection is ON in the sanitiser run, not disabled to keep it quiet.
 
 
 ################################################################################

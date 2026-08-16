@@ -1221,5 +1221,8 @@ const char *kof_docole_anomaly_name(unsigned index)
 		"ENTRIES_FULL", "ENT_RUNS_FULL", "DIR_RECOVERED"
 	};
 
+
+	_Static_assert(sizeof n / sizeof n[0] == KOF_DOCOLE_ANOM_COUNT,
+		       "anomaly name table and its count disagree");
 	return index < sizeof n / sizeof n[0] ? n[index] : 0;
 }

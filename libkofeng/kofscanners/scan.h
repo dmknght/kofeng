@@ -28,6 +28,7 @@
 #include "../kofparsers/containers/rar_parse.h"
 #include "../kofparsers/containers/xz_parse.h"
 #include "../kofparsers/containers/rtf_parse.h"
+#include "../kofparsers/containers/pdf_parse.h"
 #include "objsrc.h"
 #include "../kofdecomp/inflate.h"
 #include "../kofdecomp/nrv2.h"

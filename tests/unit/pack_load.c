@@ -460,8 +460,13 @@ static void check_good(const uint8_t *good, size_t good_len)
 			fail("good", "range slices did not survive the load");
 		if (e->mods[0].size_min != 64 || e->mods[1].size_min != 0)
 			fail("good", "preconditions did not survive the load");
-		if (e->mods[0].memo_base != 0 || e->mods[1].memo_base != 4)
-			fail("good", "memo bases are not consecutive");
+		/*
+		 * The memo is keyed by merged pattern id and mask, so what has to
+		 * hold is that every question a module can ask lands inside it -
+		 * not that the modules' slices tile it, which they no longer do.
+		 */
+		if ((uint64_t)e->n_uid * e->n_masks != e->memo_size)
+			fail("good", "memo size is not patterns times masks");
 
 		nm = kof_db_name(e, &e->mods[1], 33);
 		if (!nm || strcmp(nm, "Test.Gamma") != 0)
@@ -493,8 +498,13 @@ static void check_good(const uint8_t *good, size_t good_len)
 		if (kof_db_str(e, &e->mods[1], 1, &b2) != NULL)
 			fail("good", "a pattern leaked across module slices");
 	}
-	if (e->memo_size != 4)
-		fail("good", "memo total is not the sum of the slices");
+	/*
+	 * The memo is one cell per (merged pattern, region mask). It used to be the
+	 * sum of per-module slices; keying it by the pattern instead is what makes a
+	 * marker two families share cost one search rather than two.
+	 */
+	if ((uint64_t)e->n_uid * e->n_masks != e->memo_size)
+		fail("good", "memo is not patterns times masks");
 	if (e->scan_mask != ((1u << 2) | (1u << 3)))
 		fail("good", "scan mask is not the union of the modules'");
 

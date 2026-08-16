@@ -58,6 +58,8 @@ struct kof_match_ctx {
 	uint32_t         memo_len;  /* cells, not bytes */
 	uint16_t         memo_gen;
 
+
+
 	/* Counters, for measuring whether the memo is worth its complexity. */
 	uint64_t n_calls;
 	uint64_t n_bytes_scanned;
@@ -65,6 +67,8 @@ struct kof_match_ctx {
 };
 
 void kof_match_begin(struct kof_match_ctx *m, kof_buf data);
+
+
 
 /* Answers a memo cell can hold, in its low two bits. */
 #define KOF_MEMO_UNKNOWN 0

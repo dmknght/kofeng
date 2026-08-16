@@ -74,10 +74,11 @@ static int buf_add(struct buf *b, const void *data, size_t len, uint32_t *out_of
  */
 struct dedup {
 	struct {
-		uint32_t off, len;
+		uint32_t off, len, uid;
 		uint8_t  used;
 	} *slot;
 	uint32_t mask;
+	uint32_t next_uid;
 };
 
 static int dedup_init(struct dedup *d, uint32_t expect)
@@ -107,8 +108,16 @@ static void dedup_free(struct dedup *d)
  * The table is sized up front from the number of entries the caller will add, so
  * it never grows and a full table is a build error rather than an infinite probe.
  */
+/*
+ * Intern the bytes and hand back both where they landed and WHICH PATTERN THEY ARE.
+ *
+ * The offset is what the descriptor points at; the uid is what the memo is keyed by.
+ * They are produced together because they are the same fact - two modules that get
+ * the same offset are declaring the same pattern, and the uid is that stated in a
+ * form the scan path can index with.
+ */
 static int pool_intern(struct dedup *d, struct buf *pool, const void *data,
-		       uint32_t len, uint32_t *out_off)
+		       uint32_t len, uint32_t *out_off, uint32_t *out_uid)
 {
 	uint32_t h = kof_crc32(data, len) & d->mask;
 	uint32_t probes = 0;
@@ -117,6 +126,7 @@ static int pool_intern(struct dedup *d, struct buf *pool, const void *data,
 		if (d->slot[h].len == len &&
 		    memcmp(pool->p + d->slot[h].off, data, len) == 0) {
 			*out_off = d->slot[h].off;
+			*out_uid = d->slot[h].uid;
 			return 1;
 		}
 		h = (h + 1) & d->mask;
@@ -127,7 +137,9 @@ static int pool_intern(struct dedup *d, struct buf *pool, const void *data,
 		return 0;
 	d->slot[h].off  = *out_off;
 	d->slot[h].len  = len;
+	d->slot[h].uid  = d->next_uid++;
 	d->slot[h].used = 1;
+	*out_uid = d->slot[h].uid;
 	return 1;
 }
 
@@ -270,7 +282,7 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 
 		for (k = 0; k < m->n_str; k++, si++) {
 			const struct kof_pw_str *s = &m->str[k];
-			uint32_t off;
+			uint32_t off, uid = 0;
 			/* Per kind: a compiled hex program is a header and two
 			 * tables, so its length is not comparable with a
 			 * literal's and the literal cap would refuse ordinary
@@ -311,10 +323,15 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 					goto out;
 				if (!buf_add(&b->str_pool, s->bytes, s->len, &off))
 					goto out;
+				/* Compiled programs are not interned - they must stay
+				 * aligned - so each gets an id of its own and shares
+				 * with nothing. */
+				uid = ds.next_uid++;
 			} else if (!pool_intern(&ds, &b->str_pool, s->bytes, s->len,
-						&off)) {
+						&off, &uid)) {
 				goto out;
 			}
+			b->str[si].uid   = uid;
 			b->str[si].off   = off;
 			b->str[si].len   = s->len;
 			b->str[si].kind  = s->kind;
@@ -324,12 +341,15 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 			b->rng[ri] = m->rng[k];
 		for (k = 0; k < m->n_names; k++, ni++) {
 			const struct kof_pw_name *nm = &m->name[k];
-			uint32_t off, tlen;
+			uint32_t off, tlen, nuid;
 			if (!nm->text)
 				goto out;
 			tlen = (uint32_t)strlen(nm->text) + 1;   /* with the NUL */
-			if (!pool_intern(&dn, &b->name_pool, nm->text, tlen, &off))
+			/* Names share the pool too, but nothing keys on their id. */
+			if (!pool_intern(&dn, &b->name_pool, nm->text, tlen, &off,
+					 &nuid))
 				goto out;
+			(void)nuid;
 			b->name[ni].id  = nm->id;
 			b->name[ni].off = off;
 		}

@@ -259,7 +259,8 @@ static void hdr_probe(kof_buf f, uint64_t at, uint64_t end, struct kof_7z_info *
  * file already reads off the front of a coded header, and the reason the content
  * needs no decoder that is not here.
  */
-static int coder_read(kof_buf h, uint64_t *at, struct kof_7z_folder *fo)
+static int coder_read(kof_buf h, uint64_t *at, struct kof_7z_folder *fo,
+		      uint32_t *n_in, uint32_t *n_out)
 {
 	uint8_t flags = 0, idb = 0;
 	uint32_t idlen, i;
@@ -280,13 +281,27 @@ static int coder_read(kof_buf h, uint64_t *at, struct kof_7z_folder *fo)
 		fo->coder = (fo->coder << 8) | idb;
 	}
 
-	if (flags & 0x10u) {                    /* complex: in and out counts */
-		sz_num(h, at, &ok);
-		if (!ok)
+	/*
+	 * How many streams this coder joins.
+	 *
+	 * Simple coders are one in and one out and say nothing. A COMPLEX coder
+	 * states both, and that is the only way BCJ2 announces that it needs four
+	 * inputs - the counts used to be read and thrown away, which is exactly the
+	 * information the walk then lacked.
+	 */
+	*n_in = 1;
+	*n_out = 1;
+	if (flags & 0x10u) {
+		uint64_t vi, vo;
+
+		vi = sz_num(h, at, &ok);
+		if (!ok || vi == 0 || vi > 8u)
 			return 0;
-		sz_num(h, at, &ok);
-		if (!ok)
+		vo = sz_num(h, at, &ok);
+		if (!ok || vo == 0 || vo > 8u)
 			return 0;
+		*n_in = (uint32_t)vi;
+		*n_out = (uint32_t)vo;
 	}
 	if (flags & 0x20u) {                    /* attributes */
 		uint64_t n = sz_num(h, at, &ok);
@@ -326,6 +341,25 @@ static int coder_read(kof_buf h, uint64_t *at, struct kof_7z_folder *fo)
 static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 {
 	uint64_t at = 0, pack_pos = 0, n_pack = 0, n_folders = 0, i, n_out = 0;
+	/* Packed streams per folder. Local because kof_7z_folder's layout is what
+	 * modules compiled against this ABI already read; the table it feeds lives
+	 * after folder[] where adding it moves nothing. */
+	uint8_t npk[KOF_7Z_MAX_FOLDERS];
+	/*
+	 * Which of a folder's packed streams feeds which BCJ2 input.
+	 *
+	 * 0 main, 1 call, 2 jump, 3 the range coder - and 0xff for every stream of
+	 * every folder that is not BCJ2, which is nearly all of them. Local for the
+	 * same reason npk is: it lands in the pack table after folder[], where
+	 * adding it moves nothing a module already reads.
+	 */
+	uint8_t role[KOF_7Z_MAX_FOLDERS][8];
+	/* Which coder each packed stream feeds, so its properties and its own
+	 * output length can be attached to it once both are known. */
+	uint8_t pcod[KOF_7Z_MAX_FOLDERS][8];
+	uint32_t cprop[KOF_7Z_MAX_FOLDERS][8];   /* lc | lp<<8 | pb<<16 | id<<24 */
+	uint32_t cid[KOF_7Z_MAX_FOLDERS][8];
+	uint64_t osize[KOF_7Z_MAX_FOLDERS][8];
 	uint64_t psize[KOF_7Z_MAX_FOLDERS];
 	uint32_t steps = 0;
 	uint8_t id = 0;
@@ -398,11 +432,19 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 		z->anomalies |= KOF_7Z_ANOM_FOLDERS_FULL;
 		n_folders = KOF_7Z_MAX_FOLDERS;
 	}
+	memset(npk, 0, sizeof npk);
+	memset(role, 0xff, sizeof role);
+	memset(pcod, 0xff, sizeof pcod);
+	memset(cprop, 0, sizeof cprop);
+	memset(cid, 0, sizeof cid);
+	memset(osize, 0, sizeof osize);
 	at++;                                   /* external */
 
 	for (i = 0; i < n_folders; i++) {
 		struct kof_7z_folder *fo = &z->folder[i];
-		uint64_t nc, k;
+		uint64_t nc, k, tot_in = 0, tot_out = 0, n_bind, n_packed;
+		uint64_t bind_in[8], bind_out[8], pk_idx[8];
+		uint32_t cin[8], cout[8];
 
 		fo->out_first = (uint32_t)n_out;
 
@@ -412,70 +454,176 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 		fo->n_coders = (uint8_t)nc;
 		for (k = 0; k < nc; k++) {
 			struct kof_7z_folder tmp;
+			uint32_t ci = 0, co = 0;
 
 			memset(&tmp, 0, sizeof tmp);
-			if (!coder_read(h, &at, &tmp))
+			if (!coder_read(h, &at, &tmp, &ci, &co))
 				return;
+			cin[k] = ci;
+			cout[k] = co;
+			cid[i][k] = tmp.coder;
+			cprop[i][k] = (uint32_t)tmp.lc | ((uint32_t)tmp.lp << 8) |
+				      ((uint32_t)tmp.pb << 16);
+			tot_in += ci;
+			tot_out += co;
 			if (k == 0) {
 				fo->coder = tmp.coder;
 				fo->lc = tmp.lc;
 				fo->lp = tmp.lp;
 				fo->pb = tmp.pb;
-			} else if (k == 1u) {
+			} else {
 				/*
-				 * The second link, which for the shape this reads
-				 * is the transform run over the coder's output.
-				 * Recorded whatever it is; whether it can be undone
-				 * is the module's question, not the parse's.
+				 * A later link is a transform over what came before.
+				 * The LAST one wins because that is the one whose
+				 * output is the folder's, and for BCJ2 it is the coder
+				 * that has to be told apart from a plain filter.
 				 */
 				fo->filter = tmp.coder;
 			}
 		}
-		/*
-		 * Two links is the ordinary filtered folder and is followed. Longer
-		 * than that means bind pairs this does not read - BCJ2 takes four
-		 * input streams - and from there the walk no longer knows which
-		 * packed stream belongs to which folder.
-		 */
-		/*
-		 * Bind pairs, one per output stream past the first.
-		 *
-		 * They say which coder's output feeds which coder's input, and this
-		 * does not need to know - a two link chain has only one arrangement.
-		 * What it does need is to STEP OVER them, because the sizes that
-		 * follow are counted from here.
-		 */
-		if (nc > 1u) {
-			uint64_t bp;
 
-			for (bp = 0; bp + 1u < nc; bp++) {
-				sz_num(h, &at, &ok);
-				if (!ok)
-					return;
-				sz_num(h, &at, &ok);
+		/*
+		 * Bind pairs, one per output stream past the first, and now READ
+		 * rather than stepped over.
+		 *
+		 * A bind pair says an input is fed by another coder's output, which
+		 * is precisely how the inputs that are NOT packed streams are named.
+		 * What is left over is what the archive stores, and counting it is
+		 * the whole reason a four input coder can be located at all.
+		 */
+		if (tot_out == 0 || tot_in < tot_out - 1u)
+			return;
+		n_bind = tot_out - 1u;
+		if (n_bind > 8u)
+			return;
+		for (k = 0; k < n_bind; k++) {
+			bind_in[k] = sz_num(h, &at, &ok);
+			if (!ok)
+				return;
+			bind_out[k] = sz_num(h, &at, &ok);
+			if (!ok)
+				return;
+		}
+
+		n_packed = tot_in - n_bind;
+		if (n_packed == 0 || n_packed > 8u)
+			return;
+		/*
+		 * With one packed stream the format leaves the index out - it is the
+		 * only input no bind pair claimed. With more, each is named, and the
+		 * indices are stepped over: the streams arrive in this order anyway,
+		 * and reordering them is the coder's business, not the walk's.
+		 */
+		if (n_packed > 1u) {
+			for (k = 0; k < n_packed; k++) {
+				pk_idx[k] = sz_num(h, &at, &ok);
 				if (!ok)
 					return;
 			}
-		}
-		n_out += nc;
-
-		if (nc > 2u) {
+		} else {
 			/*
-			 * Bind pairs and packed stream indices follow a chain, and
-			 * this does not read them - so from here the walk no longer
-			 * knows which packed stream belongs to which folder.
-			 *
-			 * Nothing is reported rather than the folders seen so far,
-			 * and that correction matters: the sizes and offsets are
-			 * filled in AFTER this loop, so returning a count here
-			 * published folders whose location had never been written.
-			 * Measured over 369 archives, that was 84 folders claiming
-			 * to start at offset zero with no bytes in them.
+			 * With one packed stream the index is left out: it is the
+			 * only input no bind pair claimed, and finding it is the
+			 * same search the four stream case does.
 			 */
-			z->anomalies |= KOF_7Z_ANOM_CODER_CHAIN;
-			z->n_folders = 0;
-			return;
+			uint64_t q, b;
+
+			pk_idx[0] = 0;
+			for (q = 0; q < tot_in; q++) {
+				for (b = 0; b < n_bind; b++)
+					if (bind_in[b] == q)
+						break;
+				if (b == n_bind) {
+					pk_idx[0] = q;
+					break;
+				}
+			}
 		}
+		npk[i] = (uint8_t)n_packed;
+		{
+			uint64_t q, ib, c2;
+
+			for (q = 0; q < n_packed; q++) {
+				ib = 0;
+				for (c2 = 0; c2 < nc; c2++) {
+					if (pk_idx[q] < ib + cin[c2]) {
+						pcod[i][q] = (uint8_t)c2;
+						break;
+					}
+					ib += cin[c2];
+				}
+			}
+		}
+
+		/*
+		 * BCJ2's four inputs, traced back to the packed streams that reach
+		 * them.
+		 *
+		 * Three of them arrive through another coder - a bind pair says which
+		 * output feeds them, and that output's coder has a packed input of its
+		 * own. The fourth, the range coder's control bytes, is packed
+		 * directly. Following that chain is the whole difference between
+		 * knowing a folder is BCJ2 and being able to decode it, and guessing
+		 * the usual order instead would give a file of the right length whose
+		 * every branch is wrong.
+		 */
+		if (fo->filter == KOF_7Z_CODER_BCJ2 && nc >= 2u) {
+			uint64_t in_base = 0, out_base = 0, c, j;
+
+			/* Where the last coder's inputs start. */
+			for (c = 0; c + 1u < nc; c++) {
+				in_base += cin[c];
+				out_base += cout[c];
+			}
+			if (cin[nc - 1u] == 4u) {
+				for (j = 0; j < 4u; j++) {
+					uint64_t want = in_base + j, b, src = want;
+					int bound = 0;
+
+					for (b = 0; b < n_bind; b++)
+						if (bind_in[b] == want) {
+							bound = 1;
+							/* the coder whose output
+							 * this is, then its own
+							 * first input */
+							{
+								uint64_t o = bind_out[b];
+								uint64_t ci2 = 0, ib = 0, ob = 0;
+
+								for (ci2 = 0; ci2 < nc; ci2++) {
+									if (o < ob + cout[ci2])
+										break;
+									ib += cin[ci2];
+									ob += cout[ci2];
+								}
+								src = ib;
+							}
+							break;
+						}
+					(void)bound;
+					for (k = 0; k < n_packed; k++)
+						if (pk_idx[k] == src) {
+							role[i][k] = (uint8_t)j;
+							break;
+						}
+				}
+			}
+		}
+
+		n_out += tot_out;
+
+		/*
+		 * What this build can actually decode.
+		 *
+		 * One coder, or a coder and a filter, is the ordinary shape. BCJ2 is
+		 * four inputs and is followed too, now that its packed streams can be
+		 * located. Anything else is recorded and the folder is left with no
+		 * decodable shape rather than the whole archive being abandoned - the
+		 * offsets below are still assigned, so the folders that ARE readable
+		 * stay readable.
+		 */
+		if (nc > 2u && fo->filter != KOF_7Z_CODER_BCJ2)
+			z->anomalies |= KOF_7Z_ANOM_CODER_CHAIN;
 	}
 
 	if (!kof_rd_u8(h, at, &id) || id != KOF_7Z_ID_CODERS_SIZE)
@@ -502,6 +650,12 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 				if (!ok)
 					return;
 				seen++;
+				/* Every one of them, not only the last: a BCJ2
+				 * folder's first three are what its three LZMA
+				 * streams decode to, and each is needed to decode
+				 * that stream on its own. */
+				if (k < 8u)
+					osize[i][k] = v;
 				/* The last of a folder's streams is its output. */
 				fo->unpack_size = v;
 			}
@@ -517,14 +671,43 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 	 * so folder n starts where the sum of the sizes before it ends.
 	 */
 	{
-		uint64_t cur = base + pack_pos;
+		uint64_t cur = base + pack_pos, si = 0;
 
-		for (i = 0; i < n_folders && i < n_pack; i++) {
+		for (i = 0; i < n_folders; i++) {
+			uint32_t want = npk[i] ? npk[i] : 1u, j;
+
+			if (si + want > n_pack)
+				break;      /* the list ran out: stop where it did */
+
+			/* The first is the folder's own, which is what every
+			 * single-stream reader has always used. */
 			z->folder[i].pack_off = cur;
-			z->folder[i].pack_size = psize[i];
-			cur += psize[i];
+			z->folder[i].pack_size = psize[si];
+
+			for (j = 0; j < want; j++) {
+				if (z->n_pack < KOF_7Z_MAX_PACK) {
+					struct kof_7z_pack *pk =
+						&z->pack[z->n_pack++];
+
+					pk->off = cur;
+					pk->size = psize[si];
+					pk->folder = (uint32_t)i;
+					pk->role = role[i][j];
+					if (pcod[i][j] < 8u) {
+						uint32_t cc = pcod[i][j];
+
+						pk->coder = cid[i][cc];
+						pk->out_size = osize[i][cc];
+						pk->lc = (uint8_t)cprop[i][cc];
+						pk->lp = (uint8_t)(cprop[i][cc] >> 8);
+						pk->pb = (uint8_t)(cprop[i][cc] >> 16);
+					}
+				}
+				cur += psize[si];
+				si++;
+			}
 		}
-		z->n_folders = (uint32_t)(n_folders < n_pack ? n_folders : n_pack);
+		z->n_folders = (uint32_t)i;
 	}
 }
 
@@ -746,9 +929,12 @@ const char *kof_7z_anomaly_name(unsigned index)
 {
 	static const char *const n[] = {
 		"BAD_START", "HDR_PAST_EOF", "HDR_EMPTY", "ENCRYPTED",
-		"UNKNOWN_CODER", "BAD_VERSION", "OVERLAP"
+		"UNKNOWN_CODER", "BAD_VERSION", "OVERLAP", "FOLDERS_FULL",
+		"HDR_UNREAD", "CODER_CHAIN"
 	};
 
+	_Static_assert(sizeof n / sizeof n[0] == KOF_7Z_ANOM_COUNT,
+		       "anomaly name table and its count disagree");
 	return index < sizeof n / sizeof n[0] ? n[index] : 0;
 }
 

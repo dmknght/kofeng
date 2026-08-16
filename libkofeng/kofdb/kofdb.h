@@ -46,10 +46,11 @@ typedef void (*kof_scan_fn)(const struct kof_obj_ctx *);
  * 131MB.
  */
 struct kof_str_ent {
-	uint32_t off;             /* into kof_engine.str_pool */
+	uint32_t off;             /* into the pack's string pool */
 	uint16_t len;
 	uint8_t  kind;            /* enum kof_pack_str_kind */
 	uint8_t  flags;           /* KOF_STR_ICASE | KOF_STR_FULLWORD; literal only */
+	uint32_t uid;             /* shared by every module declaring these bytes */
 };
 
 /*
@@ -61,6 +62,17 @@ struct kof_str_ent {
 struct kof_db_pack {
 	void  *map;
 	size_t len;
+	/*
+	 * Where this pack's pattern ids start once every pack is loaded.
+	 *
+	 * Each pack numbers its own patterns from zero, because a pack is built
+	 * without knowing what it will be loaded beside. Adding the base makes the
+	 * id unique across the database, which is what the memo needs: two packs
+	 * must not share a slot by accident, and two modules in one pack must share
+	 * it on purpose.
+	 */
+	uint32_t uid_base;
+	uint32_t n_uid;
 };
 
 /*
@@ -101,15 +113,6 @@ struct kof_module {
 	uint32_t str_base,  n_str;
 	uint32_t rng_base,  n_rng;
 
-	/*
-	 * Where this module's search memo starts. Per module, because a string belongs
-	 * to exactly one module and can only be asked about that module's ranges - so
-	 * the reachable slots are n_str x n_rng of *this* module, a couple of bytes in
-	 * practice. Indexing one shared memo by global string and global range instead
-	 * is n_str x n_rng of the whole database, which at 4000 modules was 23.8MB
-	 * cleared per object and doubled the scan.
-	 */
-	uint32_t memo_base;
 };
 
 /*
@@ -149,6 +152,22 @@ struct kof_engine {
 	uint32_t             n_rng;
 
 	/*
+	 * The distinct region masks, densely numbered, and the id of each rng_tab
+	 * entry among them.
+	 *
+	 * The memo is keyed by (pattern, region mask) because those two decide the
+	 * answer and nothing else does. A mask is a bitfield with a handful of live
+	 * values across a whole database - one per way a module can name a region -
+	 * so numbering them densely turns the second half of the key into something
+	 * small enough to multiply by.
+	 */
+	uint32_t            *rng_uid;   /* parallel to rng_tab */
+	uint32_t             n_masks;
+
+	/* Patterns the whole database declares, after identical ones are merged. */
+	uint32_t             n_uid;
+
+	/*
 	 * The packs, kept mapped for their names alone.
 	 *
 	 * THE NAME TABLE USED TO BE HERE and it was the largest thing in the engine:
@@ -171,7 +190,18 @@ struct kof_engine {
 	struct kof_db_pack  *packs;
 	uint32_t             n_packs;
 
-	/* Sum of every module's memo slice; what the scanner allocates and clears. */
+	/*
+	 * Memo cells: one per (pattern, region mask), which is what decides an answer.
+	 *
+	 * It used to be one per (module, string, range), and that gave every module
+	 * its own slot for a question another module had already answered. Keying by
+	 * the merged pattern id instead means the table SHRINKS by the duplication
+	 * factor rather than growing - and it turns "usually not searched twice" into
+	 * "cannot be searched twice", because every pair has a slot of its own.
+	 *
+	 * The old objection to a shared memo was the cost of clearing it. That is
+	 * gone: the memo is stamped with a generation, so starting an object is O(1).
+	 */
 	uint32_t memo_size;
 
 	/*

@@ -225,6 +225,11 @@ enum {
 	KOF_DOCOLE_ANOM_DIR_RECOVERED   = 1ull << 18
 };
 
+/* How many of the above there are, so the name table cannot fall behind
+ * them - three of 7z's bits went unnamed until a checklist pass found it. */
+#define KOF_DOCOLE_ANOM_COUNT 19
+
+
 struct kof_docole_info {
 	uint32_t version;         /* KOF_DOCOLE_INFO_VERSION */
 	uint32_t valid;           /* the signature and the header agreed */

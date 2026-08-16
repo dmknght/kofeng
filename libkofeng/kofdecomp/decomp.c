@@ -16,6 +16,7 @@ const char *kof_decomp_status_name(int status)
 	case KOF_DEC_STOPPED:   return "stopped";
 	case KOF_DEC_TRUNCATED: return "truncated";
 	case KOF_DEC_CORRUPT:   return "corrupt";
+	case KOF_DEC_UNSUPPORTED: return "unsupported";
 	default:                return "?";
 	}
 }

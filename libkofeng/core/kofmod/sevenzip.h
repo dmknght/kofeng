@@ -99,6 +99,9 @@ enum {
  * Reaching this cap is recorded rather than silently truncating.
  */
 #define KOF_7Z_MAX_FOLDERS 64u
+/* Four inputs is the widest coder this format defines, so a folder cannot own more
+ * than four packed streams and sixty four folders cannot own more than this. */
+#define KOF_7Z_MAX_PACK   256u
 
 /*
  * How the header was stored.
@@ -137,6 +140,12 @@ enum {
 	KOF_7Z_ANOM_FOLDERS_FULL  = 1ull << 7,  /* more folders than listed */
 	KOF_7Z_ANOM_HDR_UNREAD    = 1ull << 8,  /* the coded header did not decode */
 	KOF_7Z_ANOM_CODER_CHAIN   = 1ull << 9   /* a folder chains coders: not decoded */
+};
+
+/* How many of the above there are, so the name table cannot silently fall behind
+ * them - three of these bits went unnamed until a checklist pass found it. */
+enum {
+	KOF_7Z_ANOM_COUNT = 10
 };
 
 struct kof_7z_info {
@@ -217,6 +226,54 @@ struct kof_7z_info {
 		uint32_t out_first;    /* index of this folder's first output stream */
 
 	} folder[KOF_7Z_MAX_FOLDERS];
+
+	/*
+	 * Every packed stream in the archive, and which folder owns it.
+	 *
+	 * APPENDED AFTER folder[] ON PURPOSE. A folder used to be one packed stream,
+	 * so pack_off and pack_size above said all there was to say. BCJ2 breaks that:
+	 * it takes FOUR inputs - the main stream, the call addresses, the jump
+	 * addresses, and the range coder's control bytes - and three of them are
+	 * themselves the output of other coders in the same folder. Only the ones not
+	 * fed by a bind pair are packed streams, and there are four of them.
+	 *
+	 * Widening kof_7z_folder would have moved every field after the one that grew
+	 * and changed the stride of the array, which is an ABI break for every module
+	 * compiled against the old layout. A table after the last member is not: the
+	 * offsets a module already reads stay where they were, and the struct simply
+	 * gets longer.
+	 *
+	 * pack_off and pack_size keep meaning the folder's FIRST packed stream, which
+	 * for every single-coder folder is still its only one.
+	 */
+	uint32_t n_pack;
+	uint32_t reserved4;
+	struct kof_7z_pack {
+		uint64_t off;          /* absolute, of the coded bytes */
+		uint64_t size;
+		uint32_t folder;       /* index into folder[] */
+		/*
+		 * Which BCJ2 input this stream feeds: 0 main, 1 call, 2 jump,
+		 * 3 the range coder. 0xffffffff when the folder is not BCJ2,
+		 * which is every folder with a single coder.
+		 */
+		uint32_t role;
+		/*
+		 * What this stream decodes to on its own, and with which settings.
+		 *
+		 * A BCJ2 folder is four coders, and three of them are separate LZMA
+		 * streams with separate properties and separate output lengths. The
+		 * folder record carries one of each because a folder used to be one
+		 * coder; carrying the rest here is what makes the three decodable
+		 * apart from one another.
+		 *
+		 * out_size is zero for a stream that is packed straight into its
+		 * consumer - the range coder's control bytes are not compressed.
+		 */
+		uint64_t out_size;
+		uint32_t coder;        /* KOF_7Z_CODER_* feeding this stream */
+		uint8_t  lc, lp, pb, reserved5;
+	} pack[KOF_7Z_MAX_PACK];
 };
 
 static inline const struct kof_7z_info *kof_7z(const struct kof_obj_ctx *ctx)

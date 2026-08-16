@@ -189,6 +189,11 @@ enum {
 	KOF_ZIP_ANOM_UNSUPPORTED    = 1ull << 13  /* a method this engine cannot decode */
 };
 
+/* How many of the above there are, so the name table cannot fall behind
+ * them - three of 7z's bits went unnamed until a checklist pass found it. */
+#define KOF_ZIP_ANOM_COUNT 14
+
+
 /* The ratio at which the bit above is set, on the same reasoning as gzip's: far
  * past anything that is not built to expand. */
 #define KOF_ZIP_RATIO_ABSURD 5000u

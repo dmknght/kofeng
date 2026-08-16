@@ -73,8 +73,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		if (e->suspicious & KOF_RAR_ENT_SPLIT)
 			continue;
 
-		if (e->method != KOF_RAR_M_STORE ||
-		    (e->suspicious & KOF_RAR_ENT_ENCRYPTED)) {
+		if (e->suspicious & KOF_RAR_ENT_ENCRYPTED) {
 			packed++;
 			continue;
 		}
@@ -82,8 +81,37 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		/* What this entry is called, for the report. */
 		kof_name_next(e->name_off, e->name_len);
 
-		if (!kof_child_window(e->data_off, e->csize))
-			break;                   /* a host limit bound: stop, do not spin */
+		if (e->method == KOF_RAR_M_STORE) {
+			/* Free: the child is a view of bytes that already exist. */
+			if (!kof_child_window(e->data_off, e->csize))
+				break;           /* a host limit bound: stop, do not spin */
+			opened++;
+			continue;
+		}
+
+		/*
+		 * Compressed, and only RAR3 is decoded.
+		 *
+		 * RAR5 keeps a different LZ layout entirely and version 20 an older
+		 * one; both are counted as out of reach rather than fed to a decoder
+		 * that would produce something shaped like a file. The RAR3 decoder
+		 * itself refuses a PPM block the same way, so an entry that starts LZ
+		 * and switches mid-stream comes back short and says so.
+		 *
+		 * The declared size goes with the call so the host can see the ratio
+		 * before spending on it; the decoder never reads it as a fact.
+		 */
+		if (r->rar_version != KOF_RAR_V3 || e->unp_ver != 29 || !e->usize) {
+			packed++;
+			continue;
+		}
+		if (kof_unpack_at(KOF_UNP_RAR3, e->data_off, e->csize,
+				  e->usize) == 0) {
+			packed++;
+			continue;
+		}
+		if (!kof_child())
+			break;
 		opened++;
 	}
 

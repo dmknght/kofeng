@@ -179,6 +179,11 @@ enum {
 	KOF_ELF_ANOM_SECTAB_MISSING   = 1ull << 23  /* stripped: no usable shdr */
 };
 
+/* How many of the above there are, so the name table cannot fall behind
+ * them - three of 7z's bits went unnamed until a checklist pass found it. */
+#define KOF_ELF_ANOM_COUNT 24
+
+
 struct kof_elf_seg {
 	uint64_t file_off, file_size;
 	uint64_t mem_addr, mem_size;

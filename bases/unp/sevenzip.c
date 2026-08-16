@@ -109,7 +109,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 		if (!fo->pack_size || !fo->unpack_size)
 			continue;
-		if (fo->coder != KOF_7Z_CODER_LZMA2) {
+		if (fo->coder != KOF_7Z_CODER_LZMA2 &&
+		    fo->filter != KOF_7Z_CODER_BCJ2) {
 			unreached++;
 			continue;
 		}
@@ -121,6 +122,23 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		 * running the coder without its transform yields bytes that look
 		 * like a program and are not one.
 		 */
+		if (fo->filter == KOF_7Z_CODER_BCJ2) {
+			/*
+			 * Four inputs, not one, so it goes by folder index: which
+			 * packed stream is the code, which the call targets, which
+			 * the jumps and which the range coder is in the folder's
+			 * bind pairs, and only the host can follow them.
+			 */
+			kof_name_next(0, 0);
+			if (kof_unpack_entry(KOF_UNP_BCJ2, i, fo->unpack_size)) {
+				if (!kof_child())
+					KOF_UNP_BROKEN(KOF_UNP_LIMIT);
+				opened++;
+			} else {
+				unreached++;
+			}
+			continue;
+		}
 		if (fo->filter && fo->filter != KOF_7Z_CODER_BCJ_X86) {
 			kof_debug("SevenZip.filter", fo->filter);
 			unreached++;

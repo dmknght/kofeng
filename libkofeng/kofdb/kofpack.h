@@ -118,7 +118,7 @@
  * compatibility. It gets bumped on the first release and on every shape change
  * after that.
  */
-#define KOF_PACK_VERSION 2u
+#define KOF_PACK_VERSION 3u
 
 /*
  * The machine the code in this pack was built for. Not an architecture the pack
@@ -423,6 +423,26 @@ struct kof_pack_str {
 	uint16_t len;             /* bytes at off, whatever the kind */
 	uint8_t  kind;            /* enum kof_pack_str_kind */
 	uint8_t  flags;           /* KOF_STR_* ; literal only */
+	/*
+	 * A dense id shared by every module that declared this exact pattern.
+	 *
+	 * THE DESCRIPTOR IS STILL DUPLICATED, on purpose: a module's strings are a
+	 * contiguous slice, and that is what lets the scan path address one without
+	 * a lookup. What is not duplicated is the IDENTITY - two modules declaring
+	 * the same bytes get the same uid, because the pool already gave them the
+	 * same offset and this is that fact written down where the scan path can
+	 * use it.
+	 *
+	 * It is what the memo is keyed by, so a pattern two families happen to
+	 * share is searched for once rather than once per family. Nobody can ask a
+	 * signature author to know which markers other authors picked, so the
+	 * engine has to make the collision free rather than forbidden.
+	 *
+	 * It is also, exactly, an Aho-Corasick output id: the set of modules that
+	 * name one uid is the output list a single automaton state would carry. The
+	 * index this engine still needs is built on top of this, not instead of it.
+	 */
+	uint32_t uid;
 };
 
 /*
@@ -513,7 +533,7 @@ struct kof_pack_idx {
  */
 _Static_assert(sizeof(struct kof_pack_sec)  == 16,  "pack section entry grew padding");
 _Static_assert(sizeof(struct kof_pack_mod)  == 32,  "pack module record grew padding");
-_Static_assert(sizeof(struct kof_pack_str)  == 8,   "pack string descriptor grew padding");
+_Static_assert(sizeof(struct kof_pack_str)  == 12,  "pack string descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_name) == 8,   "pack name descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_idx)  == 8,   "pack index slot grew padding");
 /* The fixed fields plus one entry per section. Written that way rather than as one

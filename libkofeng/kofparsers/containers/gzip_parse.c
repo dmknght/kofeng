@@ -285,5 +285,8 @@ const char *kof_gzip_anomaly_name(unsigned index)
 		"EMPTY_STREAM", "RATIO_ABSURD"
 	};
 
+
+	_Static_assert(sizeof n / sizeof n[0] == KOF_GZIP_ANOM_COUNT,
+		       "anomaly name table and its count disagree");
 	return index < sizeof n / sizeof n[0] ? n[index] : 0;
 }

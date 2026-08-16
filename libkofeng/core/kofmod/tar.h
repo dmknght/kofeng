@@ -139,6 +139,11 @@ enum {
 	KOF_TAR_ANOM_STRANGE_TYPE = 1ull << 11 /* a type flag the format does not define */
 };
 
+/* How many of the above there are, so the name table cannot fall behind
+ * them - three of 7z's bits went unnamed until a checklist pass found it. */
+#define KOF_TAR_ANOM_COUNT 12
+
+
 /*
  * One entry.
  *

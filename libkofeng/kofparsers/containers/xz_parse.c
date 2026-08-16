@@ -405,5 +405,8 @@ const char *kof_xz_anomaly_name(unsigned index)
 		"BAD_CHECK", "RATIO_ABSURD", "OVERLAP", "MULTI_STREAM"
 	};
 
+
+	_Static_assert(sizeof n / sizeof n[0] == KOF_XZ_ANOM_COUNT,
+		       "anomaly name table and its count disagree");
 	return index < sizeof n / sizeof n[0] ? n[index] : 0;
 }

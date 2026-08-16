@@ -311,6 +311,16 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 				REFUSE("module %u is not aligned for a call", k);
 		}
 		for (k = 0; k < h->n_str; k++) {
+			/*
+			 * A pack cannot hold more distinct patterns than it holds
+			 * patterns, so a uid at or past n_str is a number nobody
+			 * wrote. Bounding it here is what keeps n_uid - and the
+			 * memo sized from it - from being whatever a mutated file
+			 * says.
+			 */
+			if (s[k].uid >= h->n_str)
+				REFUSE("string %u has a pattern id outside the "
+				       "pack", k);
 			if ((uint64_t)s[k].off + s[k].len > spool)
 				REFUSE("string %u lies outside its pool", k);
 			if (s[k].len == 0)
@@ -551,8 +561,6 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		m->name_base = pm[i].name_first;    /* within that pack */
 		m->n_names   = pm[i].n_names;
 
-		m->memo_base = e->memo_size;
-		e->memo_size += m->n_str * m->n_rng;
 
 		/* Only a detector's regions go into the union the scanner resolves.
 		 * An unpacker runs after the searching is done, so a region it
@@ -779,6 +787,65 @@ struct kof_engine *kof_db_load(const char *path)
 	}
 
 	/*
+	 * Pattern ids, made unique across packs, and region masks made dense.
+	 *
+	 * Both are the memo's key, and both have to be settled before memo_size can
+	 * be known - so this runs after every pack has been absorbed and before the
+	 * scanner is ever made.
+	 */
+	{
+		uint32_t i2, j2;
+
+		e->n_uid = 0;
+		for (i2 = 0; i2 < n_ok; i2++) {
+			const struct kof_pack_hdr *ph = mp[i2].map;
+			const struct kof_pack_str *ps =
+				(const void *)((const uint8_t *)ph +
+					       ph->sec[KOF_SEC_STR_DESC].off);
+			uint32_t hi = 0;
+
+			for (j2 = 0; j2 < ph->n_str; j2++)
+				if (ps[j2].uid + 1u > hi)
+					hi = ps[j2].uid + 1u;
+			mp[i2].uid_base = e->n_uid;
+			mp[i2].n_uid = hi;
+			e->n_uid += hi;
+		}
+
+		e->rng_uid = calloc(e->n_rng ? e->n_rng : 1, sizeof *e->rng_uid);
+		if (!e->rng_uid) {
+			kof_db_free(e);
+			e = NULL;
+			goto out;
+		}
+		e->n_masks = 0;
+		for (i2 = 0; i2 < e->n_rng; i2++) {
+			for (j2 = 0; j2 < i2; j2++)
+				if (e->rng_tab[j2] == e->rng_tab[i2]) {
+					e->rng_uid[i2] = e->rng_uid[j2];
+					break;
+				}
+			if (j2 == i2)
+				e->rng_uid[i2] = e->n_masks++;
+		}
+		/*
+		 * The memo, keyed by (pattern, mask) instead of by (module, string,
+		 * range).
+		 *
+		 * The old key gave every module its own slots, so a pattern two
+		 * families happen to share was searched for twice. This one gives it
+		 * one slot however many modules name it - and because identical
+		 * patterns were merged at build time, the table SHRINKS by exactly the
+		 * duplication factor rather than growing.
+		 */
+		if (e->n_masks && e->n_uid &&
+		    (uint64_t)e->n_uid * e->n_masks <= 0xffffffffu)
+			e->memo_size = e->n_uid * e->n_masks;
+		else
+			e->memo_size = 0;
+	}
+
+	/*
 	 * Give back the unpacker table nobody filled.
 	 *
 	 * It was allocated for n_mods because which modules unpack is not known
@@ -852,6 +919,7 @@ void kof_db_free(struct kof_engine *e)
 	free(e->mods);
 	free(e->unp);
 	free(e->rng_tab);
+	free(e->rng_uid);
 	if (e->packs) {
 		uint32_t i;
 

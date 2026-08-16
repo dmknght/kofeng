@@ -25,6 +25,18 @@
 #include "../kofdecomp/ovba.h"
 #include "../kofdecomp/lzma.h"
 #include "../kofdecomp/bcj.h"
+#include "../kofdecomp/rar3.h"
+#include "../kofdecomp/bcj2.h"
+/*
+ * The one format header the scan path includes, and it is not a shortcut.
+ *
+ * BCJ2 is not a coding that happens to appear in 7z - it IS a 7z folder shape.
+ * Which packed stream carries the code, which carries the call targets, which the
+ * jump targets, and which the range coder is stated by the folder's bind pairs and
+ * nowhere else. A general "multi stream coding" hook in the module ABI would be an
+ * abstraction with exactly one user, invented to avoid naming the thing it is for.
+ */
+#include <kofmod/sevenzip.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -122,13 +134,26 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 	struct kof_range *ext = sc->ext;
 	uint32_t n;
 
-	if (!e || range_id >= m->n_rng)
-		return 0;
-	n = kof_scan_resolve_range(ctx, sc->eng->rng_tab[m->rng_base + range_id], ext);
+	uint32_t mask, slot, uid;
 
-	return kof_match_lookup(&sc->m,
-				m->memo_base + str_id * m->n_rng + range_id,
-				ext, n, bytes, e->len,
+	if (!e || range_id >= m->n_rng || m->rng_base + range_id >= sc->eng->n_rng)
+		return 0;
+	mask = sc->eng->rng_tab[m->rng_base + range_id];
+
+	/*
+	 * The memo slot is the QUESTION, not the asker.
+	 *
+	 * Two modules declaring the same marker get the same uid from the build, and
+	 * the same region mask resolves to the same extents - so they are asking one
+	 * question and it is answered once. Keying by module instead made the answer
+	 * private to whoever asked first, and nobody can ask a signature author to
+	 * know which markers other authors chose.
+	 */
+	uid = sc->eng->packs[m->pack_id].uid_base + e->uid;
+	slot = uid * sc->eng->n_masks + sc->eng->rng_uid[m->rng_base + range_id];
+
+	n = kof_scan_resolve_range(ctx, mask, ext);
+	return kof_match_lookup(&sc->m, slot, ext, n, bytes, e->len,
 				e->kind, e->flags, &sc->st.gram_answers);
 }
 
@@ -230,7 +255,13 @@ static int can_produce(const struct kof_scanner *sc)
  * receiver's limit; everything else is the stream failing. */
 static uint32_t broken_of_status(int st)
 {
-	return st == KOF_DEC_STOPPED ? KOF_BROKEN_LIMIT : KOF_BROKEN_DAMAGED;
+	if (st == KOF_DEC_STOPPED)
+		return KOF_BROKEN_LIMIT;
+	/* A coding this build lacks is a gap in the engine, not damage in the file,
+	 * and the two are reported apart because they lead different places. */
+	if (st == KOF_DEC_UNSUPPORTED)
+		return KOF_BROKEN_UNSUPPORTED;
+	return KOF_BROKEN_DAMAGED;
 }
 
 /*
@@ -746,7 +777,15 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 	if (sc->resident > sc->st.peak_resident)
 		sc->st.peak_resident = sc->resident;
 
-	if (method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86) {
+	if (method == KOF_UNP_RAR3) {
+		uint64_t lim = expand_limit(in_len, out_hint);
+
+		if (want > lim) {
+			want = lim;
+			scan_broken(sc, KOF_BROKEN_LIMIT);
+		}
+		st = kof_rar3_decode(in, in_len, buf, want, 0, &produced);
+	} else if (method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86) {
 		uint64_t lim = expand_limit(in_len, out_hint);
 
 		if (want > lim) {
@@ -1017,7 +1056,8 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 			produced += n;
 		return produced;
 	}
-	if (method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86)
+	if (method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86 ||
+	    method == KOF_UNP_RAR3)
 		return unpack_buffered(sc, ctx, method, 0, 0, b.p + off, len,
 				       out_hint, form);
 	if (nrv2_of(method, &variant, &bits))
@@ -1039,6 +1079,118 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
  * ceiling while it is alive, on the same account as a decoder's output, so a
  * document full of large streams cannot walk past the limit one stream at a time.
  */
+/*
+ * Decode one BCJ2 folder: three coded streams and a raw one, merged.
+ *
+ * Every buffer is charged to the resident budget before it is taken and released
+ * whatever happens after, because four allocations on one path is four ways to
+ * leak. The output length is the folder's, which the archive states and the ratio
+ * cap has already been applied to by the caller that chose to ask.
+ */
+static uint64_t decode_stream(const struct kof_7z_pack *pk, const uint8_t *in,
+			      uint8_t *out, uint64_t cap, uint64_t *got)
+{
+	uint64_t n = 0;
+	int st;
+
+	*got = 0;
+	if (pk->coder == KOF_7Z_CODER_LZMA2)
+		st = kof_lzma2_decode(in, pk->size, out, cap, &n);
+	else if (pk->coder == KOF_7Z_CODER_LZMA)
+		st = kof_lzma_decode(pk->lc, pk->lp, pk->pb, in, pk->size,
+				     out, cap, &n);
+	else
+		return 0;              /* a coder this build does not have */
+	*got = n;
+	return st == KOF_DEC_OK || n ? 1u : 0u;
+}
+
+static uint64_t unpack_bcj2(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
+			    uint32_t index)
+{
+	const struct kof_7z_info *z = kof_7z(ctx);
+	const struct kof_7z_pack *pk[4] = { 0, 0, 0, 0 };
+	uint8_t *buf[3] = { 0, 0, 0 };
+	uint64_t len[3] = { 0, 0, 0 }, charged = 0, out_len, produced = 0;
+	uint8_t *out = NULL;
+	kof_buf b;
+	uint32_t i;
+
+	if (ctx->format != KOF_FMT_7Z || !z || !z->valid ||
+	    index >= z->n_folders)
+		return 0;
+	out_len = z->folder[index].unpack_size;
+	if (!out_len)
+		return 0;
+
+	for (i = 0; i < z->n_pack; i++)
+		if (z->pack[i].folder == index && z->pack[i].role < 4u)
+			pk[z->pack[i].role] = &z->pack[i];
+	if (!pk[0] || !pk[1] || !pk[2] || !pk[3])
+		return 0;              /* the folder is not the shape BCJ2 needs */
+
+	b = kof_src_buf(sc->cur_src);
+	for (i = 0; i < 4u; i++)
+		if (kof_clip_len(b.n, pk[i]->off, pk[i]->size) != pk[i]->size)
+			return 0;      /* a stream the object does not hold */
+
+	/* The three coded streams, then the output. Charged together so a partial
+	 * failure gives the budget back in one place. */
+	charged = out_len;
+	for (i = 0; i < 3u; i++)
+		charged += pk[i]->out_size;
+	if (charged > (sc->resident < sc->resident_max
+		       ? sc->resident_max - sc->resident : 0)) {
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+		return 0;
+	}
+	sc->resident += charged;
+	if (sc->resident > sc->st.peak_resident)
+		sc->st.peak_resident = sc->resident;
+
+	for (i = 0; i < 3u; i++) {
+		if (pk[i]->out_size) {
+			buf[i] = malloc((size_t)pk[i]->out_size);
+			if (!buf[i])
+				goto done;
+			if (!decode_stream(pk[i], b.p + pk[i]->off, buf[i],
+					   pk[i]->out_size, &len[i]))
+				goto done;
+		}
+	}
+	out = malloc((size_t)out_len);
+	if (!out)
+		goto done;
+
+	produced = kof_bcj2_decode(buf[0], len[0], buf[1], len[1],
+				   buf[2], len[2],
+				   b.p + pk[3]->off, pk[3]->size,
+				   out, out_len);
+	if (produced != out_len)
+		scan_broken(sc, KOF_BROKEN_DAMAGED);
+	/* Emitted in bounded pieces: c_emit takes a uint32 length, and a folder can
+	 * decode to more than that. */
+	{
+		uint64_t at2 = 0;
+
+		while (at2 < produced) {
+			uint64_t chunk = produced - at2;
+
+			if (chunk > (1u << 20))
+				chunk = 1u << 20;
+			if (!c_emit(ctx, out + at2, (uint32_t)chunk))
+				break;
+			at2 += chunk;
+		}
+	}
+done:
+	free(out);
+	for (i = 0; i < 3u; i++)
+		free(buf[i]);
+	sc->resident -= charged;
+	return produced;
+}
+
 static uint64_t c_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 			       uint32_t index, uint64_t out_hint)
 {
@@ -1051,7 +1203,11 @@ static uint64_t c_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 	int st;
 
 	(void)out_hint;
-	if (!can_produce(sc) || !ctx->resolve_entry)
+	if (!can_produce(sc))
+		return 0;
+	if (method == KOF_UNP_BCJ2)
+		return unpack_bcj2(sc, ctx, index);
+	if (!ctx->resolve_entry)
 		return 0;
 	if (method != KOF_UNP_OVBA)
 		return 0;              /* the only coding entries are decoded with */

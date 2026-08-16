@@ -112,6 +112,11 @@ enum {
 	KOF_GZIP_ANOM_RATIO_ABSURD     = 1ull << 7
 };
 
+/* How many of the above there are, so the name table cannot fall behind
+ * them - three of 7z's bits went unnamed until a checklist pass found it. */
+#define KOF_GZIP_ANOM_COUNT 8
+
+
 /* The ratio at which the bit above is set. Deliberately far above what real data
  * reaches - text compresses about 3:1 and a disk image of zeroes reaches roughly
  * 1000:1, so this is past anything that is not built to expand. */

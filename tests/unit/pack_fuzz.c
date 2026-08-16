@@ -170,8 +170,15 @@ static void check_engine(const struct kof_engine *e, uint64_t round)
 	check_mods(e, e->unp,  e->n_unp,  &memo, round, &bad);
 	if (bad)
 		return;
-	if (memo != e->memo_size) {
-		fail(round, "the memo total is not the sum of the slices");
+	/*
+	 * The memo is one cell per (merged pattern, region mask), so the invariant
+	 * is not that the modules' slices tile it - they no longer have slices - but
+	 * that every slot a module can compute lands inside it. That is checked per
+	 * module in check_mods; here only the shape of the table itself.
+	 */
+	(void)memo;
+	if ((uint64_t)e->n_uid * e->n_masks != e->memo_size) {
+		fail(round, "the memo is not patterns times masks");
 		return;
 	}
 
@@ -260,8 +267,11 @@ static void check_mods(const struct kof_engine *e, const struct kof_module *mods
 			*bad = 1;
 			return;
 		}
-		if ((uint64_t)m->memo_base + (uint64_t)m->n_str * m->n_rng >
-		    e->memo_size) {
+		/* Every question this module can ask has to land in the memo. */
+		if (m->pack_id < e->n_packs && e->n_masks &&
+		    (uint64_t)(e->packs[m->pack_id].uid_base +
+			       e->packs[m->pack_id].n_uid) * e->n_masks >
+		    (uint64_t)e->memo_size + 0u) {
 			fail(round, "a module's memo slice is outside the memo");
 			*bad = 1;
 			return;

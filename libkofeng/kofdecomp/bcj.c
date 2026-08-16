@@ -107,7 +107,12 @@ uint64_t kof_bcj_x86_decode(uint8_t *buf, uint64_t n, uint32_t start)
 				if (mask == 0)
 					break;
 
-				i = MASK_BIT[mask >> 1];
+				/* Masked, like its sibling above. The reachable
+				 * mask values never exceed seven here - proved by
+				 * walking the state machine's closure - but that
+				 * is a fact about another function, and the guard
+				 * one line up already permits fifteen. */
+				i = MASK_BIT[(mask >> 1) & 7u];
 				b = (uint8_t)(dest >> (24u - i * 8u));
 				if (!top_is_sign(b))
 					break;

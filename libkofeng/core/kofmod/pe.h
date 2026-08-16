@@ -267,6 +267,11 @@ enum {
 	KOF_PE_ANOM_RSRC_UNALIGNED    = 1ull << 26
 };
 
+/* How many of the above there are, so the name table cannot fall behind
+ * them - three of 7z's bits went unnamed until a checklist pass found it. */
+#define KOF_PE_ANOM_COUNT 27
+
+
 struct kof_pe_sec {
 	uint64_t file_off, file_size;   /* PointerToRawData, SizeOfRawData */
 
