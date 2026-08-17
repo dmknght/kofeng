@@ -25,6 +25,18 @@
 
 struct pc_report {
 	uint64_t checked, failed;
+	/*
+	 * Objects where the question could not be asked.
+	 *
+	 * A region is resolved into a caller's buffer of KOF_SCAN_MAX_EXTENTS, and
+	 * a file with more extents than that gets the first of them and a
+	 * KOF_BROKEN_LIMIT on the scan - which the engine says out loud rather than
+	 * swallowing. What comes back is then PART of the region by design, so
+	 * checking it against the whole object reports a hole the parser did not
+	 * leave. Counted, so a run where most objects went unchecked cannot look
+	 * like a run where most objects passed.
+	 */
+	uint64_t capped;
 	int      quiet;          /* count failures without printing every one */
 };
 
@@ -64,6 +76,11 @@ static int pc_check(const char *what, const struct kof_obj_ctx *ctx,
 			   ? ctx->resolve_scan(ctx, regions[i], ext,
 					       KOF_SCAN_MAX_EXTENTS)
 			   : 0;
+		if (n == KOF_SCAN_MAX_EXTENTS) {
+			rep->checked--;
+			rep->capped++;
+			return 0;
+		}
 		for (k = 0; k < n; k++) {
 			if (n_all == sizeof all / sizeof all[0]) {
 				why = "more extents than the pool holds";

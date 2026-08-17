@@ -480,12 +480,12 @@ int kof_rtf_parse(kof_buf file, struct kof_rtf_info *r, struct kof_obj_ctx *ctx)
 	cut_body(&s, file.n);
 	if (depth)
 		r->anomalies |= KOF_RTF_ANOM_UNBALANCED;
+	/* After the settle: that is the pass that finds an overlap. */
+	kof_runs_settle(&s.runs, r->region_bytes);
 	if (s.runs.full)
 		r->anomalies |= KOF_RTF_ANOM_EXTENTS_FULL;
 	if (s.runs.overlapped)
 		r->anomalies |= KOF_RTF_ANOM_OVERLAP;
-
-	kof_runs_settle(&s.runs, r->region_bytes);
 	r->n_runs = s.runs.n;
 
 	ctx->obj_size     = file.n;

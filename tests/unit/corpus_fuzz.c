@@ -51,6 +51,10 @@
 #include "../../libkofeng/kofparsers/containers/zip_parse.h"
 #include "../../libkofeng/kofparsers/containers/tar_parse.h"
 #include "../../libkofeng/kofparsers/containers/sevenzip_parse.h"
+#include "../../libkofeng/kofparsers/containers/rar_parse.h"
+#include "../../libkofeng/kofparsers/containers/xz_parse.h"
+#include "../../libkofeng/kofparsers/containers/rtf_parse.h"
+#include "../../libkofeng/kofparsers/containers/pdf_parse.h"
 
 #define HEADER_ZONE (64u * 1024u)
 #define MAX_OBJ     (4u * 1024u * 1024u)
@@ -165,76 +169,80 @@ static void poke_accessors(const struct kof_obj_ctx *ctx, uint64_t obj_size,
 	}
 }
 
+/*
+ * The collectors, in the order the engine tries them, and one view between them.
+ *
+ * Eleven typed pointers threaded through every call was how this started, and every
+ * format added meant another parameter in three places. The view is one allocation
+ * sized for the largest because only one parse is ever in flight.
+ */
+typedef int (*cf_parse)(kof_buf, void *, struct kof_obj_ctx *);
+
+#define CF_WRAP(name, type, fn)                                            \
+	static int name(kof_buf b, void *v, struct kof_obj_ctx *c)         \
+	{ return fn(b, (type *)v, c); }
+
+CF_WRAP(c_elf,    struct kof_elf_info,    kof_elf_parse)
+CF_WRAP(c_pe,     struct kof_pe_info,     kof_pe_parse)
+CF_WRAP(c_gzip,   struct kof_gzip_info,   kof_gzip_parse)
+CF_WRAP(c_docole, struct kof_docole_info, kof_docole_parse)
+CF_WRAP(c_zip,    struct kof_zip_info,    kof_zip_parse)
+CF_WRAP(c_tar,    struct kof_tar_info,    kof_tar_parse)
+CF_WRAP(c_7z,     struct kof_7z_info,     kof_7z_parse)
+CF_WRAP(c_rar,    struct kof_rar_info,    kof_rar_parse)
+CF_WRAP(c_xz,     struct kof_xz_info,     kof_xz_parse)
+CF_WRAP(c_rtf,    struct kof_rtf_info,    kof_rtf_parse)
+CF_WRAP(c_pdf,    struct kof_pdf_info,    kof_pdf_parse)
+
+static const struct fmt {
+	int (*sniff)(kof_buf);
+	cf_parse parse;
+	size_t view_size;
+	const uint32_t *bits;
+	uint32_t n_bits;
+} fmts[] = {
+	{ kof_elf_sniff,    c_elf,    sizeof(struct kof_elf_info),    kof_elf_region_bits,    KOF_ELF_REGION_COUNT },
+	{ kof_pe_sniff,     c_pe,     sizeof(struct kof_pe_info),     kof_pe_region_bits,     KOF_PE_REGION_COUNT },
+	{ kof_gzip_sniff,   c_gzip,   sizeof(struct kof_gzip_info),   kof_gzip_region_bits,   KOF_GZIP_REGION_COUNT },
+	{ kof_docole_sniff, c_docole, sizeof(struct kof_docole_info), kof_docole_region_bits, KOF_DOCOLE_REGION_COUNT },
+	{ kof_zip_sniff,    c_zip,    sizeof(struct kof_zip_info),    kof_zip_region_bits,    KOF_ZIP_REGION_COUNT },
+	{ kof_tar_sniff,    c_tar,    sizeof(struct kof_tar_info),    kof_tar_region_bits,    KOF_TAR_REGION_COUNT },
+	{ kof_7z_sniff,     c_7z,     sizeof(struct kof_7z_info),     kof_7z_region_bits,     KOF_7Z_REGION_COUNT },
+	{ kof_rar_sniff,    c_rar,    sizeof(struct kof_rar_info),    kof_rar_region_bits,    KOF_RAR_REGION_COUNT },
+	{ kof_xz_sniff,     c_xz,     sizeof(struct kof_xz_info),     kof_xz_region_bits,     KOF_XZ_REGION_COUNT },
+	{ kof_rtf_sniff,    c_rtf,    sizeof(struct kof_rtf_info),    kof_rtf_region_bits,    KOF_RTF_REGION_COUNT },
+	{ kof_pdf_sniff,    c_pdf,    sizeof(struct kof_pdf_info),    kof_pdf_region_bits,    KOF_PDF_REGION_COUNT }
+};
+#define N_FMT (sizeof fmts / sizeof fmts[0])
+
 /* Parse one buffer and run every check over it. */
-static void one(kof_buf buf, struct kof_elf_info *ei, struct kof_pe_info *pi,
-		struct kof_gzip_info *gi, struct kof_docole_info *oi,
-		struct kof_zip_info *zi, struct kof_tar_info *ti,
-		struct kof_7z_info *si, const char *what,
+static void one(kof_buf buf, void *view, const char *what,
 		struct pc_report *rep, struct tally *t)
 {
 	struct kof_obj_ctx ctx;
+	uint32_t k;
 
 	memset(&ctx, 0, sizeof ctx);
 
-	if (kof_elf_sniff(buf)) {
-		if (!kof_elf_parse(buf, ei, &ctx))
+	for (k = 0; k < N_FMT; k++) {
+		if (!fmts[k].sniff(buf))
+			continue;
+		if (!fmts[k].parse(buf, view, &ctx))
 			return;
 		t->parsed++;
-		pc_check(what, &ctx, buf.n, kof_elf_region_bits,
-			 KOF_ELF_REGION_COUNT, rep);
-	} else if (kof_pe_sniff(buf)) {
-		if (!kof_pe_parse(buf, pi, &ctx))
-			return;
-		t->parsed++;
-		pc_check(what, &ctx, buf.n, kof_pe_region_bits,
-			 KOF_PE_REGION_COUNT, rep);
-	} else if (kof_gzip_sniff(buf)) {
-		if (!kof_gzip_parse(buf, gi, &ctx))
-			return;
-		t->parsed++;
-		pc_check(what, &ctx, buf.n, kof_gzip_region_bits,
-			 KOF_GZIP_REGION_COUNT, rep);
-	} else if (kof_docole_sniff(buf)) {
-		if (!kof_docole_parse(buf, oi, &ctx))
-			return;
-		t->parsed++;
-		pc_check(what, &ctx, buf.n, kof_docole_region_bits,
-			 KOF_DOCOLE_REGION_COUNT, rep);
-	} else if (kof_zip_sniff(buf)) {
-		if (!kof_zip_parse(buf, zi, &ctx))
-			return;
-		t->parsed++;
-		pc_check(what, &ctx, buf.n, kof_zip_region_bits,
-			 KOF_ZIP_REGION_COUNT, rep);
-	} else if (kof_tar_sniff(buf)) {
-		if (!kof_tar_parse(buf, ti, &ctx))
-			return;
-		t->parsed++;
-		pc_check(what, &ctx, buf.n, kof_tar_region_bits,
-			 KOF_TAR_REGION_COUNT, rep);
-	} else if (kof_7z_sniff(buf)) {
-		if (!kof_7z_parse(buf, si, &ctx))
-			return;
-		t->parsed++;
-		pc_check(what, &ctx, buf.n, kof_7z_region_bits,
-			 KOF_7Z_REGION_COUNT, rep);
-	} else {
+		pc_check(what, &ctx, buf.n, fmts[k].bits, fmts[k].n_bits, rep);
+		t->checked++;
+		poke_accessors(&ctx, buf.n, what, rep);
 		return;
 	}
-	t->checked++;
-	poke_accessors(&ctx, buf.n, what, rep);
 }
 
 static void fuzz_file(const char *path, uint32_t rounds, struct pc_report *rep,
 		      struct tally *t)
 {
-	struct kof_elf_info *ei = malloc(sizeof *ei);
-	struct kof_pe_info *pi = malloc(sizeof *pi);
-	struct kof_gzip_info *gi = malloc(sizeof *gi);
-	struct kof_docole_info *oi = malloc(sizeof *oi);
-	struct kof_zip_info *zi = malloc(sizeof *zi);
-	struct kof_tar_info *ti = malloc(sizeof *ti);
-	struct kof_7z_info *si = malloc(sizeof *si);
+	void *view = NULL;
+	size_t big = 0;
+	uint32_t f;
 	struct stat st;
 	uint8_t *buf = NULL;
 	uint64_t n;
@@ -242,7 +250,11 @@ static void fuzz_file(const char *path, uint32_t rounds, struct pc_report *rep,
 	int fd;
 	char what[512];
 
-	if (!ei || !pi || !gi || !oi || !zi || !ti || !si)
+	for (f = 0; f < N_FMT; f++)
+		if (fmts[f].view_size > big)
+			big = fmts[f].view_size;
+	view = malloc(big);
+	if (!view)
 		goto out;
 
 	fd = open(path, O_RDONLY);
@@ -264,7 +276,7 @@ static void fuzz_file(const char *path, uint32_t rounds, struct pc_report *rep,
 	/* The file as it is, first: a corpus file that does not hold the invariant
 	 * unmutated is a finding about the parser, not about the fuzzer. */
 	snprintf(what, sizeof what, "%s clean", path);
-	one(kof_buf_make(buf, n), ei, pi, gi, oi, zi, ti, si, what, rep, t);
+	one(kof_buf_make(buf, n), view, what, rep, t);
 
 	/*
 	 * Truncation, which is its own bug class: every length check in a parser
@@ -278,7 +290,7 @@ static void fuzz_file(const char *path, uint32_t rounds, struct pc_report *rep,
 		for (cut = 1; cut < n && cut < HEADER_ZONE; cut = cut * 3 / 2 + 1) {
 			snprintf(what, sizeof what, "%s cut@%llu", path,
 				 (unsigned long long)cut);
-			one(kof_buf_make(buf, cut), ei, pi, gi, oi, zi, ti, si, what, rep, t);
+			one(kof_buf_make(buf, cut), view, what, rep, t);
 		}
 	}
 
@@ -300,20 +312,14 @@ static void fuzz_file(const char *path, uint32_t rounds, struct pc_report *rep,
 		}
 
 		snprintf(what, sizeof what, "%s round=%u", path, r);
-		one(kof_buf_make(buf, n), ei, pi, gi, oi, zi, ti, si, what, rep, t);
+		one(kof_buf_make(buf, n), view, what, rep, t);
 
 		for (k = 0; k < nmut; k++)
 			buf[at[k]] = old[k];
 	}
 out:
 	free(buf);
-	free(ei);
-	free(pi);
-	free(gi);
-	free(oi);
-	free(zi);
-	free(ti);
-	free(si);
+	free(view);
 }
 
 /* Take the first `cap` regular files from a directory, in readdir order. */
@@ -348,7 +354,7 @@ static uint32_t collect(const char *dir, char **out, uint32_t cap)
 int main(int argc, char **argv)
 {
 	static const char *dirs[] = { "build/test/fixtures", "/usr/bin" };
-	struct pc_report rep = { 0, 0, 0 };
+	struct pc_report rep = { 0, 0, 0, 0 };
 	struct tally t = { 0, 0 };
 	char *files[64];
 	uint32_t n_files = 0;
@@ -394,9 +400,13 @@ int main(int argc, char **argv)
 		free(files[i]);
 	}
 
-	printf("corpus fuzz: %u file(s), %llu parse(s), partition %llu/%llu\n",
+	printf("corpus fuzz: %u file(s), %llu parse(s), partition %llu/%llu",
 	       n_files, (unsigned long long)t.parsed,
 	       (unsigned long long)(rep.checked - rep.failed),
 	       (unsigned long long)rep.checked);
+	if (rep.capped)
+		printf(" (+%llu past the extent cap, not checked)",
+		       (unsigned long long)rep.capped);
+	printf("\n");
 	return rep.failed != 0;
 }

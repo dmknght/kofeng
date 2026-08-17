@@ -27,6 +27,15 @@
 #include "../core/kofcore.h"   /* kof_crc32, kof_round_up */
 #include "kofpack.h"       /* KOF_STR_MAX_LEN, KOF_BLOB_MAX_CODE */
 
+/*
+ * How many distinct region masks a database may hold.
+ *
+ * A mask names regions of one format, and the formats define five or six each, so
+ * the live combinations across a whole database are dozens at most. The cap exists
+ * so the dedup below can scan a fixed array instead of the whole table.
+ */
+#define KOF_MAX_DISTINCT_MASKS 256u
+
 /* Both entry points have the same signature; which one a module exported is what
  * its pack's kind records, and the engine keeps the two in separate lists. */
 typedef void (*kof_scan_fn)(const struct kof_obj_ctx *);

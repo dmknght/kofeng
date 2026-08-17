@@ -85,7 +85,19 @@ static const struct utarget utargets[] = {
 	{ "7z",     seed_7z,     f_7z,     sizeof f_7z     / sizeof f_7z[0], 0 },
 	{ "elf",    seed_elf,    f_elf,    sizeof f_elf    / sizeof f_elf[0], 0 },
 	{ "pe",     seed_pe,     f_pe,     sizeof f_pe     / sizeof f_pe[0], 0 },
-	{ "xz",     seed_xz,     f_xz,     sizeof f_xz     / sizeof f_xz[0], 0 }
+	{ "xz",     seed_xz,     f_xz,     sizeof f_xz     / sizeof f_xz[0], 0 },
+	/*
+	 * Three that produce nothing, and are here for exactly that reason.
+	 *
+	 * RAR5 has no decompressor, and a PDF stream and an RTF hex object have no
+	 * unpacker yet. A format with no unpacker is still driven through the whole
+	 * scan by a hostile field, and "recovered nothing, refused cleanly, in the
+	 * time a clean parse takes" is the property that has to hold - a module
+	 * that unpacks a format it cannot unpack shows up here and nowhere else.
+	 */
+	{ "rar5",   seed_rar5,   f_rar5,   sizeof f_rar5   / sizeof f_rar5[0], 0 },
+	{ "pdf",    seed_pdf,    f_pdf,    sizeof f_pdf    / sizeof f_pdf[0], 0 },
+	{ "rtf",    seed_rtf,    f_rtf,    sizeof f_rtf    / sizeof f_rtf[0], 0 }
 };
 
 /* ---- the run ------------------------------------------------------------------ */

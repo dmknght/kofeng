@@ -58,6 +58,8 @@
 #include "../../libkofeng/kofparsers/containers/sevenzip_parse.h"
 #include "../../libkofeng/kofparsers/containers/rar_parse.h"
 #include "../../libkofeng/kofparsers/containers/xz_parse.h"
+#include "../../libkofeng/kofparsers/containers/pdf_parse.h"
+#include "../../libkofeng/kofparsers/containers/rtf_parse.h"
 #include "partition_check.h"
 
 
@@ -164,6 +166,8 @@ WRAP(w_tar,    struct kof_tar_info,    kof_tar_parse)
 WRAP(w_7z,     struct kof_7z_info,     kof_7z_parse)
 WRAP(w_rar,    struct kof_rar_info,    kof_rar_parse)
 WRAP(w_xz,     struct kof_xz_info,     kof_xz_parse)
+WRAP(w_pdf,    struct kof_pdf_info,    kof_pdf_parse)
+WRAP(w_rtf,    struct kof_rtf_info,    kof_rtf_parse)
 
 struct target {
 	const char *name;
@@ -192,6 +196,10 @@ static uint32_t n_xz(const void *v)
 { return ((const struct kof_xz_info *)v)->n_blocks; }
 static uint32_t n_tar(const void *v)
 { return ((const struct kof_tar_info *)v)->n_entries; }
+static uint32_t n_pdf(const void *v)
+{ return ((const struct kof_pdf_info *)v)->n_objects; }
+static uint32_t n_rtf(const void *v)
+{ return ((const struct kof_rtf_info *)v)->n_objects; }
 
 static const struct target targets[] = {
 	{ "elf",  seed_elf,  f_elf,  sizeof f_elf  / sizeof f_elf[0],
@@ -221,7 +229,19 @@ static const struct target targets[] = {
 	  kof_docole_region_bits, KOF_DOCOLE_REGION_COUNT, n_docole, 3u },
 	{ "xz",   seed_xz,   f_xz,   sizeof f_xz   / sizeof f_xz[0],
 	  w_xz,   (uint32_t)sizeof(struct kof_xz_info),
-	  kof_xz_region_bits,   KOF_XZ_REGION_COUNT, n_xz, 1u }
+	  kof_xz_region_bits,   KOF_XZ_REGION_COUNT, n_xz, 1u },
+	/* RAR5 is a second entry rather than a second seed: it shares the parser
+	 * and the region set with RAR3 and nothing else, so the seed, the field
+	 * list and the entry count all have to differ. */
+	{ "rar5", seed_rar5, f_rar5, sizeof f_rar5 / sizeof f_rar5[0],
+	  w_rar,  (uint32_t)sizeof(struct kof_rar_info),
+	  kof_rar_region_bits,  KOF_RAR_REGION_COUNT, n_rar, V_NENT },
+	{ "pdf",  seed_pdf,  f_pdf,  sizeof f_pdf  / sizeof f_pdf[0],
+	  w_pdf,  (uint32_t)sizeof(struct kof_pdf_info),
+	  kof_pdf_region_bits,  KOF_PDF_REGION_COUNT, n_pdf, P_NOBJ },
+	{ "rtf",  seed_rtf,  f_rtf,  sizeof f_rtf  / sizeof f_rtf[0],
+	  w_rtf,  (uint32_t)sizeof(struct kof_rtf_info),
+	  kof_rtf_region_bits,  KOF_RTF_REGION_COUNT, n_rtf, T_NOBJ }
 };
 
 /* ---- the run ------------------------------------------------------------------ */
@@ -393,7 +413,7 @@ int main(void)
 	void *view = NULL;
 	uint32_t view_cap = 0, ti, fi, vi;
 	struct tally t;
-	struct pc_report rep = { 0, 0, 0 };
+	struct pc_report rep = { 0, 0, 0, 0 };
 
 	if (!obj)
 		return 1;

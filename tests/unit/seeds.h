@@ -17,6 +17,8 @@
 #include <string.h>
 #include <stdio.h>
 
+#include <kofmod/rar.h>   /* RAR5 block types, for the vint seed below */
+
 /*
  * A megabyte, and the size is load bearing.
  *
@@ -621,5 +623,240 @@ static const struct field f_docole[] = {
 	{ "fat[*]",         O_SEC,             4, 4, 128 }
 };
 
+
+/* ---- pdf ---------------------------------------------------------------------- */
+
+/*
+ * A PDF of P_NOBJ identical objects, each with a filtered stream.
+ *
+ * Every number in a PDF is text, so the hostile values land on digits rather than on
+ * a little endian integer - which is exactly the case worth covering, because a
+ * parser that reads a length with strtoull has to decide what a length of 0xff bytes
+ * of binary means. The numbers are written to a fixed width so that one stride
+ * describes every object and the field list can poke all of them at once.
+ *
+ * The dictionary carries /Launch, /EmbeddedFile and /OpenAction because those drive
+ * the object flags, and the stream is filtered so STREAM_PACKED is a region with
+ * bytes in it rather than one that never appears.
+ */
+#define P_HDR_LEN     9u          /* "%PDF-1.7\n" */
+#define P_MAJOR       5u
+#define P_MINOR       7u
+#define P_OBJ         P_HDR_LEN
+#define P_STRIDE    137u
+#define P_NOBJ        8u
+#define P_O_NUM       0u          /* "0001", four digits */
+#define P_O_GEN       5u
+#define P_O_DICT     11u
+#define P_O_LENGTH   53u          /* the digits of "/Length 00000008" */
+#define P_O_STREAM  104u          /* the "stream" keyword */
+#define P_O_DATA    111u
+#define P_TAIL      (P_OBJ + P_STRIDE * P_NOBJ)
+#define P_T_XREFCNT   7u
+#define P_T_SIZE     29u
+#define P_T_STARTXREF 74u
+#define P_TAIL_LEN   89u
+
+static uint64_t seed_pdf(uint8_t *b)
+{
+	static const char obj[] =
+		"0001 0 obj\n"
+		"<< /Type /EmbeddedFile /S /Launch /Length 00000008 "
+		"/Filter /FlateDecode /OpenAction 2 0 R >>\n"
+		"stream\n"
+		"ABCDEFGH"
+		"\nendstream\nendobj\n";
+	static const char tail[] =
+		"xref\n0 0009\n"
+		"trailer\n<< /Size 0009 /Root 1 0 R /Encrypt 3 0 R >>\n"
+		"startxref\n00000009\n%%EOF\n";
+	uint32_t i;
+
+	memset(b, 0, P_TAIL + P_TAIL_LEN + 64u);
+	memcpy(b, "%PDF-1.7\n", P_HDR_LEN);
+	for (i = 0; i < P_NOBJ; i++) {
+		uint32_t o = P_OBJ + i * P_STRIDE;
+
+		memcpy(b + o, obj, P_STRIDE);
+		/* Distinct object numbers, so a walk that confuses two of them
+		 * produces a visible disagreement rather than a consistent lie. */
+		b[o + P_O_NUM + 3u] = (uint8_t)('1' + i);
+	}
+	memcpy(b + P_TAIL, tail, P_TAIL_LEN);
+	return P_TAIL + P_TAIL_LEN;
+}
+
+static const struct field f_pdf[] = {
+	{ "ver.major",      P_MAJOR, 1, 0, 0 },
+	{ "ver.minor",      P_MINOR, 1, 0, 0 },
+	{ "hdr.magic",            1, 4, 0, 0 },
+	{ "obj.num",        P_OBJ + P_O_NUM,    4, 0, 0 },
+	{ "obj.gen",        P_OBJ + P_O_GEN,    1, 0, 0 },
+	{ "obj.dict",       P_OBJ + P_O_DICT,   4, 0, 0 },
+	{ "obj.length",     P_OBJ + P_O_LENGTH, 8, 0, 0 },
+	{ "obj.stream_kw",  P_OBJ + P_O_STREAM, 4, 0, 0 },
+	{ "obj.data",       P_OBJ + P_O_DATA,   8, 0, 0 },
+	{ "obj[*].num",     P_OBJ + P_O_NUM,    4, P_STRIDE, P_NOBJ },
+	{ "obj[*].gen",     P_OBJ + P_O_GEN,    1, P_STRIDE, P_NOBJ },
+	{ "obj[*].length",  P_OBJ + P_O_LENGTH, 8, P_STRIDE, P_NOBJ },
+	{ "obj[*].stream_kw", P_OBJ + P_O_STREAM, 4, P_STRIDE, P_NOBJ },
+	{ "obj[*].dict",    P_OBJ + P_O_DICT,   4, P_STRIDE, P_NOBJ },
+	{ "xref.count",     P_TAIL + P_T_XREFCNT,   4, 0, 0 },
+	{ "trailer.size",   P_TAIL + P_T_SIZE,      4, 0, 0 },
+	{ "startxref",      P_TAIL + P_T_STARTXREF, 8, 0, 0 }
+};
+
+/* ---- rtf ---------------------------------------------------------------------- */
+
+/*
+ * An RTF with R_OBJ_N embedded objects and one \bin run.
+ *
+ * The two things a reader has to get right are the brace depth and the \bin count -
+ * the count is the only field in the format that says "the next N bytes are not
+ * text", so it is the one that can walk the cursor past the end or back onto itself.
+ * Both are in the field list, along with the hex of an \objdata blob so that a
+ * non-hex byte in a hex run is covered.
+ */
+#define T_HDR_LEN    17u          /* "{\rtf1\ansi\deff0" */
+#define T_VER         5u
+#define T_OBJ        T_HDR_LEN
+#define T_STRIDE     76u
+#define T_NOBJ        4u
+#define T_O_CLASS    29u
+#define T_O_DATA     50u
+#define T_O_HEX      58u
+#define T_PICT      (T_OBJ + T_STRIDE * T_NOBJ)
+#define T_P_BIN      21u          /* the digits of "\bin00000008" */
+#define T_P_DATA     30u
+#define T_PICT_LEN   39u
+#define T_TAIL      (T_PICT + T_PICT_LEN)
+#define T_TAIL_LEN   10u
+
+static uint64_t seed_rtf(uint8_t *b)
+{
+	static const char obj[] =
+		"{\\object\\objemb\\objupdate"
+		"{\\*\\objclass Package}"
+		"{\\*\\objdata 0105000002000000}}";
+	static const char pict[] = "{\\pict\\wmetafile8\\bin00000008 ABCDEFGH}";
+	uint32_t i;
+
+	memset(b, 0, T_TAIL + T_TAIL_LEN + 64u);
+	memcpy(b, "{\\rtf1\\ansi\\deff0", T_HDR_LEN);
+	for (i = 0; i < T_NOBJ; i++)
+		memcpy(b + T_OBJ + i * T_STRIDE, obj, T_STRIDE);
+	memcpy(b + T_PICT, pict, T_PICT_LEN);
+	memcpy(b + T_TAIL, "\\par done}", T_TAIL_LEN);
+	return T_TAIL + T_TAIL_LEN;
+}
+
+static const struct field f_rtf[] = {
+	{ "hdr.brace",             0, 1, 0, 0 },
+	{ "hdr.ctrl",              1, 4, 0, 0 },
+	{ "hdr.ver",           T_VER, 1, 0, 0 },
+	{ "obj.open",          T_OBJ, 1, 0, 0 },
+	{ "obj.class",     T_OBJ + T_O_CLASS, 8, 0, 0 },
+	{ "obj.objdata",   T_OBJ + T_O_DATA,  8, 0, 0 },
+	{ "obj.hex",       T_OBJ + T_O_HEX,   8, 0, 0 },
+	{ "obj[*].open",   T_OBJ,             1, T_STRIDE, T_NOBJ },
+	{ "obj[*].objdata",T_OBJ + T_O_DATA,  8, T_STRIDE, T_NOBJ },
+	{ "obj[*].hex",    T_OBJ + T_O_HEX,   8, T_STRIDE, T_NOBJ },
+	{ "obj[*].close",  T_OBJ + T_STRIDE - 1u, 1, T_STRIDE, T_NOBJ },
+	{ "pict.bin",      T_PICT + T_P_BIN,  8, 0, 0 },
+	{ "pict.data",     T_PICT + T_P_DATA, 8, 0, 0 },
+	{ "tail",          T_TAIL,            8, 0, 0 }
+};
+
+/* ---- rar5 --------------------------------------------------------------------- */
+
+/*
+ * RAR 5, which the existing rar seed does not reach: seed_rar builds a 1.5/2.0
+ * signature and the two formats share nothing but a name.
+ *
+ * Everything here is a variable length integer, and each one is written in its one
+ * byte form so a field poke can turn it into a continuation run - the value 0xff has
+ * the high bit set in every byte, which is the shape that makes a vint reader either
+ * run off the end or shift past the width of the result. hsize is the field the walk
+ * trusts to say where a header ends, so it and the two sizes get the full list.
+ */
+#define V_MAIN        8u          /* after the eight byte signature */
+#define V_MAIN_LEN    8u          /* crc(4) + hsize + type + flags */
+#define V_FILE       (V_MAIN + V_MAIN_LEN)
+#define V_STRIDE     26u
+#define V_NENT        6u
+#define V_HSIZE       4u
+#define V_TYPE        5u
+#define V_HFLAGS      6u
+#define V_DSIZE       7u
+#define V_FFLAGS      8u
+#define V_USIZE       9u
+#define V_ATTR       10u
+#define V_COMP       11u
+#define V_HOST       12u
+#define V_NLEN       13u
+#define V_NAME       14u
+#define V_END        (V_FILE + V_STRIDE * V_NENT)
+#define V_END_LEN     7u          /* crc(4) + hsize + type + flags */
+
+static uint64_t seed_rar5(uint8_t *b)
+{
+	uint32_t i;
+
+	memset(b, 0, V_END + V_END_LEN + 64u);
+	memcpy(b, "Rar!\x1a\x07\x01\x00", 8);
+
+	b[V_MAIN + 4] = 3;                 /* hsize: type, flags and itself */
+	b[V_MAIN + 5] = KOF_RAR5_BLK_MAIN;
+	b[V_MAIN + 6] = 0;
+
+	for (i = 0; i < V_NENT; i++) {
+		uint32_t o = V_FILE + i * V_STRIDE;
+
+		b[o + V_HSIZE]  = 13;      /* through the name, from here */
+		b[o + V_TYPE]   = KOF_RAR5_BLK_FILE;
+		b[o + V_HFLAGS] = KOF_RAR5_H_DATA;
+		b[o + V_DSIZE]  = 8;
+		b[o + V_FFLAGS] = 0;
+		b[o + V_USIZE]  = 8;
+		b[o + V_ATTR]   = 0;
+		b[o + V_COMP]   = 0;       /* method 0: stored */
+		b[o + V_HOST]   = 0;
+		b[o + V_NLEN]   = 4;
+		memcpy(b + o + V_NAME, "a.bi", 4);
+		memset(b + o + 18u, 'C', 8);
+	}
+
+	b[V_END + 4] = 2;
+	b[V_END + 5] = KOF_RAR5_BLK_END;
+	b[V_END + 6] = 0;
+	return V_END + V_END_LEN;
+}
+
+static const struct field f_rar5[] = {
+	{ "sig",                       4, 4, 0, 0 },
+	{ "main.hsize",  V_MAIN + V_HSIZE,  1, 0, 0 },
+	{ "main.type",   V_MAIN + V_TYPE,   1, 0, 0 },
+	{ "main.flags",  V_MAIN + V_HFLAGS, 1, 0, 0 },
+	{ "file.hsize",  V_FILE + V_HSIZE,  1, 0, 0 },
+	{ "file.type",   V_FILE + V_TYPE,   1, 0, 0 },
+	{ "file.hflags", V_FILE + V_HFLAGS, 1, 0, 0 },
+	{ "file.dsize",  V_FILE + V_DSIZE,  1, 0, 0 },
+	{ "file.fflags", V_FILE + V_FFLAGS, 1, 0, 0 },
+	{ "file.usize",  V_FILE + V_USIZE,  1, 0, 0 },
+	{ "file.comp",   V_FILE + V_COMP,   1, 0, 0 },
+	{ "file.nlen",   V_FILE + V_NLEN,   1, 0, 0 },
+	/* Eight bytes across the vint, which is how a continuation run is built. */
+	{ "file.hsize.run",  V_FILE + V_HSIZE, 8, 0, 0 },
+	{ "file.dsize.run",  V_FILE + V_DSIZE, 8, 0, 0 },
+	{ "file[*].hsize",  V_FILE + V_HSIZE,  1, V_STRIDE, V_NENT },
+	{ "file[*].hflags", V_FILE + V_HFLAGS, 1, V_STRIDE, V_NENT },
+	{ "file[*].dsize",  V_FILE + V_DSIZE,  1, V_STRIDE, V_NENT },
+	{ "file[*].fflags", V_FILE + V_FFLAGS, 1, V_STRIDE, V_NENT },
+	{ "file[*].usize",  V_FILE + V_USIZE,  1, V_STRIDE, V_NENT },
+	{ "file[*].nlen",   V_FILE + V_NLEN,   1, V_STRIDE, V_NENT },
+	{ "file[*].type",   V_FILE + V_TYPE,   1, V_STRIDE, V_NENT },
+	{ "end.hsize",   V_END + 4u, 1, 0, 0 },
+	{ "end.type",    V_END + 5u, 1, 0, 0 }
+};
 
 #endif /* KOFENG_TEST_SEEDS_H */

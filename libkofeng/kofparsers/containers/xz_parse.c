@@ -358,11 +358,12 @@ int kof_xz_parse(kof_buf file, struct kof_xz_info *x, struct kof_obj_ctx *ctx)
 		x->anomalies |= KOF_XZ_ANOM_BLOCKS_FULL;
 
 done:
+	/* After the settle: that is the pass that finds an overlap. */
+	kof_runs_settle(&s.runs, x->region_bytes);
 	if (s.runs.full)
 		x->anomalies |= KOF_XZ_ANOM_EXTENTS_FULL;
 	if (s.runs.overlapped)
 		x->anomalies |= KOF_XZ_ANOM_OVERLAP;
-	kof_runs_settle(&s.runs, x->region_bytes);
 	x->n_runs = s.runs.n;
 
 	ctx->obj_size     = file.n;

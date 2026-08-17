@@ -47,9 +47,10 @@
 #include "../../libkofeng/kofparsers/containers/rar_parse.h"
 #include "../../libkofeng/kofparsers/containers/xz_parse.h"
 #include "../../libkofeng/kofparsers/containers/rtf_parse.h"
+#include "../../libkofeng/kofparsers/containers/pdf_parse.h"
 
 struct tally {
-	uint64_t objects, failures;
+	uint64_t objects, failures, capped;
 };
 
 static int cmp_range(const void *a, const void *b)
@@ -68,6 +69,18 @@ static int cmp_range(const void *a, const void *b)
  * obvious way and would need memory proportional to the object, which is the one
  * thing this is meant to be able to run over a whole directory of them.
  */
+/*
+ * Returns 0 for a partition that holds, 1 for one that does not, and -1 for a file
+ * where the question cannot be asked.
+ *
+ * The third case is real and is not a failure: a region is resolved into a caller's
+ * buffer of KOF_SCAN_MAX_EXTENTS, and a file with more extents than that gets the
+ * first of them plus KOF_BROKEN_LIMIT on the scan. What comes back is then a PART of
+ * the region by design, so checking it against the whole object would report a hole
+ * the parser did not leave. Measured on this machine one benign 1.4MB PDF does it:
+ * four thousand objects with a stream each, and the objects and the gaps between
+ * them are each an extent.
+ */
 static int check(const char *path, kof_buf buf, struct kof_obj_ctx *ctx,
 		 const uint32_t *regions, uint32_t n_regions, const char *fmt)
 {
@@ -85,9 +98,12 @@ static int check(const char *path, kof_buf buf, struct kof_obj_ctx *ctx,
 			   ? ctx->resolve_scan(ctx, regions[i], ext,
 					       KOF_SCAN_MAX_EXTENTS)
 			   : 0;
-		if (n == KOF_SCAN_MAX_EXTENTS)
-			printf("  NOTE %s: region 0x%x hit the extent cap\n",
-			       path, regions[i]);
+		if (n == KOF_SCAN_MAX_EXTENTS) {
+			printf("  NOTE %s [%s]: region 0x%x has more extents "
+			       "than one resolve holds - partition not checked\n",
+			       path, fmt, regions[i]);
+			return -1;
+		}
 		for (k = 0; k < n; k++) {
 			if (n_all == sizeof all / sizeof all[0]) {
 				printf("  FAIL %s: more extents than the test holds\n",
@@ -126,23 +142,60 @@ static int check(const char *path, kof_buf buf, struct kof_obj_ctx *ctx,
 	return bad;
 }
 
-static void one_file(const char *path, struct tally *elf, struct tally *pe,
-		     struct tally *gz, struct tally *ole, struct tally *zip,
-		     struct tally *tar, struct tally *sz, struct tally *rar, struct tally *xz, struct tally *rtf)
+/*
+ * The collectors, in the order the engine tries them.
+ *
+ * The same order and not a convenient one: which format a polyglot is read as is
+ * decided by that order, so a test that used its own would be checking a partition
+ * the scanner never computes.
+ */
+typedef int (*rp_parse)(kof_buf, void *, struct kof_obj_ctx *);
+
+#define RP_WRAP(name, type, fn)                                            \
+	static int name(kof_buf b, void *v, struct kof_obj_ctx *c)         \
+	{ return fn(b, (type *)v, c); }
+
+RP_WRAP(q_elf,    struct kof_elf_info,    kof_elf_parse)
+RP_WRAP(q_pe,     struct kof_pe_info,     kof_pe_parse)
+RP_WRAP(q_gzip,   struct kof_gzip_info,   kof_gzip_parse)
+RP_WRAP(q_docole, struct kof_docole_info, kof_docole_parse)
+RP_WRAP(q_zip,    struct kof_zip_info,    kof_zip_parse)
+RP_WRAP(q_tar,    struct kof_tar_info,    kof_tar_parse)
+RP_WRAP(q_7z,     struct kof_7z_info,     kof_7z_parse)
+RP_WRAP(q_rar,    struct kof_rar_info,    kof_rar_parse)
+RP_WRAP(q_xz,     struct kof_xz_info,     kof_xz_parse)
+RP_WRAP(q_rtf,    struct kof_rtf_info,    kof_rtf_parse)
+RP_WRAP(q_pdf,    struct kof_pdf_info,    kof_pdf_parse)
+
+static const struct fmt {
+	const char *name;
+	int (*sniff)(kof_buf);
+	rp_parse parse;
+	size_t view_size;
+	const uint32_t *bits;
+	uint32_t n_bits;
+} fmts[] = {
+	{ "ELF",    kof_elf_sniff,    q_elf,    sizeof(struct kof_elf_info),    kof_elf_region_bits,    KOF_ELF_REGION_COUNT },
+	{ "PE",     kof_pe_sniff,     q_pe,     sizeof(struct kof_pe_info),     kof_pe_region_bits,     KOF_PE_REGION_COUNT },
+	{ "gzip",   kof_gzip_sniff,   q_gzip,   sizeof(struct kof_gzip_info),   kof_gzip_region_bits,   KOF_GZIP_REGION_COUNT },
+	{ "docole", kof_docole_sniff, q_docole, sizeof(struct kof_docole_info), kof_docole_region_bits, KOF_DOCOLE_REGION_COUNT },
+	{ "zip",    kof_zip_sniff,    q_zip,    sizeof(struct kof_zip_info),    kof_zip_region_bits,    KOF_ZIP_REGION_COUNT },
+	{ "tar",    kof_tar_sniff,    q_tar,    sizeof(struct kof_tar_info),    kof_tar_region_bits,    KOF_TAR_REGION_COUNT },
+	{ "7z",     kof_7z_sniff,     q_7z,     sizeof(struct kof_7z_info),     kof_7z_region_bits,     KOF_7Z_REGION_COUNT },
+	{ "rar",    kof_rar_sniff,    q_rar,    sizeof(struct kof_rar_info),    kof_rar_region_bits,    KOF_RAR_REGION_COUNT },
+	{ "xz",     kof_xz_sniff,     q_xz,     sizeof(struct kof_xz_info),     kof_xz_region_bits,     KOF_XZ_REGION_COUNT },
+	{ "rtf",    kof_rtf_sniff,    q_rtf,    sizeof(struct kof_rtf_info),    kof_rtf_region_bits,    KOF_RTF_REGION_COUNT },
+	{ "pdf",    kof_pdf_sniff,    q_pdf,    sizeof(struct kof_pdf_info),    kof_pdf_region_bits,    KOF_PDF_REGION_COUNT }
+};
+#define N_FMT (sizeof fmts / sizeof fmts[0])
+
+static void one_file(const char *path, struct tally *t)
 {
 	struct kof_obj_ctx ctx;
-	struct kof_elf_info *ei;
-	struct kof_pe_info *pi;
-	struct kof_gzip_info *gi;
-	struct kof_docole_info *oi;
-	struct kof_zip_info *zi;
-	struct kof_tar_info *ti;
-	struct kof_7z_info *si;
-	struct kof_rar_info *ri;
-	struct kof_xz_info *xi;
-	struct kof_rtf_info *fi;
 	struct stat st;
 	void *map;
+	kof_buf buf;
+	uint32_t k;
 	int fd;
 
 	fd = open(path, O_RDONLY);
@@ -157,108 +210,37 @@ static void one_file(const char *path, struct tally *elf, struct tally *pe,
 	if (map == MAP_FAILED)
 		return;
 
-	{
-		kof_buf buf = kof_buf_make(map, (uint64_t)st.st_size);
+	buf = kof_buf_make(map, (uint64_t)st.st_size);
+	for (k = 0; k < N_FMT; k++) {
+		void *view;
 
-		memset(&ctx, 0, sizeof ctx);
-		if (kof_elf_sniff(buf)) {
-			ei = malloc(sizeof *ei);
-			if (ei && kof_elf_parse(buf, ei, &ctx)) {
-				elf->objects++;
-				elf->failures += (uint64_t)check(path, buf, &ctx,
-					kof_elf_region_bits,
-					KOF_ELF_REGION_COUNT, "ELF");
+		if (!fmts[k].sniff(buf))
+			continue;
+		/* The view is allocated after the sniff and freed before the next
+		 * file, so a run over a large tree holds one of them and not
+		 * eleven. */
+		view = malloc(fmts[k].view_size);
+		if (view) {
+			memset(&ctx, 0, sizeof ctx);
+			if (fmts[k].parse(buf, view, &ctx)) {
+				int r = check(path, buf, &ctx, fmts[k].bits,
+					      fmts[k].n_bits, fmts[k].name);
+
+				if (r < 0)
+					t[k].capped++;
+				else {
+					t[k].objects++;
+					t[k].failures += (uint64_t)r;
+				}
 			}
-			free(ei);
-		} else if (kof_pe_sniff(buf)) {
-			pi = malloc(sizeof *pi);
-			if (pi && kof_pe_parse(buf, pi, &ctx)) {
-				pe->objects++;
-				pe->failures += (uint64_t)check(path, buf, &ctx,
-					kof_pe_region_bits,
-					KOF_PE_REGION_COUNT, "PE");
-			}
-			free(pi);
-		} else if (kof_gzip_sniff(buf)) {
-			gi = malloc(sizeof *gi);
-			if (gi && kof_gzip_parse(buf, gi, &ctx)) {
-				gz->objects++;
-				gz->failures += (uint64_t)check(path, buf, &ctx,
-					kof_gzip_region_bits,
-					KOF_GZIP_REGION_COUNT, "gzip");
-			}
-			free(gi);
-		} else if (kof_docole_sniff(buf)) {
-			oi = malloc(sizeof *oi);
-			if (oi && kof_docole_parse(buf, oi, &ctx)) {
-				ole->objects++;
-				ole->failures += (uint64_t)check(path, buf, &ctx,
-					kof_docole_region_bits,
-					KOF_DOCOLE_REGION_COUNT, "docole");
-			}
-			free(oi);
-		} else if (kof_zip_sniff(buf)) {
-			zi = malloc(sizeof *zi);
-			if (zi && kof_zip_parse(buf, zi, &ctx)) {
-				zip->objects++;
-				zip->failures += (uint64_t)check(path, buf, &ctx,
-					kof_zip_region_bits,
-					KOF_ZIP_REGION_COUNT, "zip");
-			}
-			free(zi);
-		} else if (kof_tar_sniff(buf)) {
-			ti = malloc(sizeof *ti);
-			if (ti && kof_tar_parse(buf, ti, &ctx)) {
-				tar->objects++;
-				tar->failures += (uint64_t)check(path, buf, &ctx,
-					kof_tar_region_bits,
-					KOF_TAR_REGION_COUNT, "tar");
-			}
-			free(ti);
-		} else if (kof_rtf_sniff(buf)) {
-			fi = malloc(sizeof *fi);
-			if (fi && kof_rtf_parse(buf, fi, &ctx)) {
-				rtf->objects++;
-				rtf->failures += (uint64_t)check(path, buf, &ctx,
-					kof_rtf_region_bits,
-					KOF_RTF_REGION_COUNT, "rtf");
-			}
-			free(fi);
-		} else if (kof_xz_sniff(buf)) {
-			xi = malloc(sizeof *xi);
-			if (xi && kof_xz_parse(buf, xi, &ctx)) {
-				xz->objects++;
-				xz->failures += (uint64_t)check(path, buf, &ctx,
-					kof_xz_region_bits,
-					KOF_XZ_REGION_COUNT, "xz");
-			}
-			free(xi);
-		} else if (kof_rar_sniff(buf)) {
-			ri = malloc(sizeof *ri);
-			if (ri && kof_rar_parse(buf, ri, &ctx)) {
-				rar->objects++;
-				rar->failures += (uint64_t)check(path, buf, &ctx,
-					kof_rar_region_bits,
-					KOF_RAR_REGION_COUNT, "rar");
-			}
-			free(ri);
-		} else if (kof_7z_sniff(buf)) {
-			si = malloc(sizeof *si);
-			if (si && kof_7z_parse(buf, si, &ctx)) {
-				sz->objects++;
-				sz->failures += (uint64_t)check(path, buf, &ctx,
-					kof_7z_region_bits,
-					KOF_7Z_REGION_COUNT, "7z");
-			}
-			free(si);
+			free(view);
 		}
+		break;
 	}
 	munmap(map, (size_t)st.st_size);
 }
 
-static void walk(const char *dir, struct tally *elf, struct tally *pe,
-		 struct tally *gz, struct tally *ole, struct tally *zip,
-		     struct tally *tar, struct tally *sz, struct tally *rar, struct tally *xz, struct tally *rtf)
+static void walk(const char *dir, struct tally *t)
 {
 	DIR *d = opendir(dir);
 	struct dirent *de;
@@ -272,7 +254,7 @@ static void walk(const char *dir, struct tally *elf, struct tally *pe,
 		if ((size_t)snprintf(path, sizeof path, "%s/%s", dir, de->d_name)
 		    >= sizeof path)
 			continue;
-		one_file(path, elf, pe, gz, ole, zip, tar, sz, rar, xz, rtf);
+		one_file(path, t);
 	}
 	closedir(d);
 }
@@ -292,51 +274,36 @@ int main(int argc, char **argv)
 	 */
 	static const char *defaults[] = {
 		"build/test/fixtures", "/usr/bin",
-		"/usr/share/man/man1", "/usr/share/i18n/charmaps"
+		"/usr/share/man/man1", "/usr/share/i18n/charmaps",
+		"/usr/share/xml/docbook/xml/xsl-stylesheets"
 	};
-	struct tally elf = { 0, 0 }, pe = { 0, 0 }, gz = { 0, 0 },
-		     ole = { 0, 0 }, zip = { 0, 0 }, tar = { 0, 0 }, rar = { 0, 0 }, xz = { 0, 0 }, rtf = { 0, 0 },
-		     sz = { 0, 0 };
+	struct tally t[N_FMT];
+	uint64_t seen = 0, failed = 0;
+	uint32_t k;
 	int i;
 
+	memset(t, 0, sizeof t);
 	if (argc > 1)
 		for (i = 1; i < argc; i++)
-			walk(argv[i], &elf, &pe, &gz, &ole, &zip, &tar, &sz, &rar, &xz, &rtf);
+			walk(argv[i], t);
 	else
 		for (i = 0; i < (int)(sizeof defaults / sizeof defaults[0]); i++)
-			walk(defaults[i], &elf, &pe, &gz, &ole, &zip, &tar, &sz, &rar, &xz, &rtf);
+			walk(defaults[i], t);
 
-	printf("partition: ELF %llu/%llu  PE %llu/%llu  gzip %llu/%llu  "
-	       "docole %llu/%llu  zip %llu/%llu  tar %llu/%llu  7z %llu/%llu  "
-	       "rar %llu/%llu  xz %llu/%llu  rtf %llu/%llu",
-	       (unsigned long long)(elf.objects - elf.failures),
-	       (unsigned long long)elf.objects,
-	       (unsigned long long)(pe.objects - pe.failures),
-	       (unsigned long long)pe.objects,
-	       (unsigned long long)(gz.objects - gz.failures),
-	       (unsigned long long)gz.objects,
-	       (unsigned long long)(ole.objects - ole.failures),
-	       (unsigned long long)ole.objects,
-	       (unsigned long long)(zip.objects - zip.failures),
-	       (unsigned long long)zip.objects,
-	       (unsigned long long)(tar.objects - tar.failures),
-	       (unsigned long long)tar.objects,
-	       (unsigned long long)(sz.objects - sz.failures),
-	       (unsigned long long)sz.objects,
-	       (unsigned long long)(rar.objects - rar.failures),
-	       (unsigned long long)rar.objects,
-	       (unsigned long long)(xz.objects - xz.failures),
-	       (unsigned long long)xz.objects,
-	       (unsigned long long)(rtf.objects - rtf.failures),
-	       (unsigned long long)rtf.objects);
-	if (elf.objects == 0 && pe.objects == 0 && gz.objects == 0 &&
-	    ole.objects == 0 && zip.objects == 0 && tar.objects == 0 &&
-	    sz.objects == 0) {
+	printf("partition:");
+	for (k = 0; k < N_FMT; k++) {
+		printf("  %s %llu/%llu", fmts[k].name,
+		       (unsigned long long)(t[k].objects - t[k].failures),
+		       (unsigned long long)t[k].objects);
+		if (t[k].capped)
+			printf("(+%llu capped)", (unsigned long long)t[k].capped);
+		seen += t[k].objects;
+		failed += t[k].failures;
+	}
+	if (!seen) {
 		printf("  (no objects found - nothing tested)\n");
 		return 0;
 	}
 	printf("\n");
-	return (elf.failures || pe.failures || gz.failures || ole.failures ||
-		zip.failures || tar.failures || sz.failures ||
-		rar.failures || xz.failures || rtf.failures) ? 1 : 0;
+	return failed != 0;
 }

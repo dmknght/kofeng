@@ -151,34 +151,53 @@ static const struct marker FILTERS[] = {
  * exact is high and what it buys, for the question "does this object mention
  * /Launch", is nothing. What it does buy is being fooled by /J#61vaScript, which is
  * recorded separately: a dictionary containing an escaped name is itself the finding.
+ *
+ * ONE PASS OVER THE NAMES, not one pass per name. Every string in both tables begins
+ * with '/', so the slashes in a dictionary are the only places any of them can start
+ * - and there are far fewer slashes than there are table entries. Searching each name
+ * separately meant twenty three passes over every dictionary in the document to
+ * answer a question the first pass already had the position for.
  */
 static void dict_scan(kof_buf f, uint64_t off, uint64_t len,
 		      struct kof_pdf_object *o, struct kof_pdf_info *p)
 {
-	uint64_t end = off + len;
-	uint32_t i;
+	uint64_t end = off + len, at = off;
+	uint32_t i, filter_seen = 0, known = 0;
 
 	if (!len || end > f.n)
 		return;
-	for (i = 0; i < sizeof MARKERS / sizeof MARKERS[0]; i++)
-		if (find_bytes(f, off, end, MARKERS[i].s, MARKERS[i].n)
-		    != KOF_BROKEN) {
-			o->flags |= MARKERS[i].bit;
-			p->anomalies |= MARKERS[i].anom;
-		}
-	if (find_bytes(f, off, end, "/Filter", 7u) != KOF_BROKEN) {
-		uint32_t known = 0;
 
+	while (at < end) {
+		const uint8_t *sl = memchr(f.p + at, '/', (size_t)(end - at));
+		uint64_t pos, left;
+
+		if (!sl)
+			break;
+		pos = (uint64_t)(sl - f.p);
+		left = end - pos;
+		at = pos + 1u;
+
+		for (i = 0; i < sizeof MARKERS / sizeof MARKERS[0]; i++)
+			if (MARKERS[i].n <= left &&
+			    memcmp(f.p + pos, MARKERS[i].s, MARKERS[i].n) == 0) {
+				o->flags |= MARKERS[i].bit;
+				p->anomalies |= MARKERS[i].anom;
+			}
 		for (i = 0; i < sizeof FILTERS / sizeof FILTERS[0]; i++)
-			if (find_bytes(f, off, end, FILTERS[i].s, FILTERS[i].n)
-			    != KOF_BROKEN) {
+			if (FILTERS[i].n <= left &&
+			    memcmp(f.p + pos, FILTERS[i].s, FILTERS[i].n) == 0) {
 				o->filters |= FILTERS[i].bit;
 				known++;
 			}
-		if (!known) {
-			o->filters |= KOF_PDF_F_OTHER;
-			p->anomalies |= KOF_PDF_ANOM_UNKNOWN_FILTER;
-		}
+		if (left >= 7u && memcmp(f.p + pos, "/Filter", 7u) == 0)
+			filter_seen = 1;
+	}
+
+	/* A filter this build does not know is recorded rather than assumed to be
+	 * Flate - the decision the unpacker makes rests on it. */
+	if (filter_seen && !known) {
+		o->filters |= KOF_PDF_F_OTHER;
+		p->anomalies |= KOF_PDF_ANOM_UNKNOWN_FILTER;
 	}
 }
 
@@ -311,7 +330,7 @@ int kof_pdf_parse(kof_buf file, struct kof_pdf_info *p, struct kof_obj_ctx *ctx)
 	while (at < file.n) {
 		uint64_t tok = find_bytes(file, at, file.n, "obj", 3u);
 		uint64_t start, end, dict_end, s_kw, s_end;
-		struct kof_pdf_object *o;
+		struct kof_pdf_object *o, spill;
 		uint32_t num = 0, gen = 0;
 
 		if (tok == KOF_BROKEN)
@@ -321,11 +340,6 @@ int kof_pdf_parse(kof_buf file, struct kof_pdf_info *p, struct kof_obj_ctx *ctx)
 		start = obj_header_start(file, tok, &num, &gen);
 		if (start == KOF_BROKEN)
 			continue;                /* "obj" inside something else */
-
-		if (p->n_objects >= KOF_PDF_MAX_OBJECTS) {
-			p->anomalies |= KOF_PDF_ANOM_OBJECTS_FULL;
-			break;
-		}
 
 		/* Where this object ends. A missing endobj is ordinary in a damaged
 		 * file, so the next object's header bounds it instead. */
@@ -337,7 +351,24 @@ int kof_pdf_parse(kof_buf file, struct kof_pdf_info *p, struct kof_obj_ctx *ctx)
 			end += 6u;
 		}
 
-		o = &p->object[p->n_objects];
+		/*
+		 * Past the cap the walk CONTINUES; what it stops producing is rows.
+		 *
+		 * Breaking out was the obvious thing and it cost two: the rest of
+		 * the document became one UNCLAIMED region, so a signature aimed at
+		 * an object dictionary could not reach anything past the four
+		 * thousandth object - and declared_objects, which this view promises
+		 * is what the walk found BEFORE any cap, could never differ from
+		 * n_objects because the walk stopped at the same moment the count
+		 * did. A row is written into `spill` and discarded, so the regions
+		 * and the count are still right when the table is not.
+		 */
+		if (p->n_objects >= KOF_PDF_MAX_OBJECTS) {
+			p->anomalies |= KOF_PDF_ANOM_OBJECTS_FULL;
+			o = &spill;
+		} else {
+			o = &p->object[p->n_objects];
+		}
 		memset(o, 0, sizeof *o);
 		o->off = start;
 		o->len = end - start;
@@ -398,18 +429,22 @@ int kof_pdf_parse(kof_buf file, struct kof_pdf_info *p, struct kof_obj_ctx *ctx)
 					     KOF_PDF_CLS_OBJECTS);
 		}
 
-		p->n_objects++;
+		if (o != &spill)
+			p->n_objects++;
 		p->declared_objects++;
 		if (end > at)
 			at = end;
 	}
 
+	/* Both bits are read AFTER the settle, because the settle is what finds an
+	 * overlap - it is the pass that sorts the runs and trims one against the
+	 * next. Read before it, the bit was always clear and a PDF whose objects
+	 * claimed each other's bytes was reported as an ordinary one. */
+	kof_runs_settle(&runs, p->region_bytes);
 	if (runs.full)
 		p->anomalies |= KOF_PDF_ANOM_EXTENTS_FULL;
 	if (runs.overlapped)
 		p->anomalies |= KOF_PDF_ANOM_OVERLAP;
-
-	kof_runs_settle(&runs, p->region_bytes);
 	p->n_runs = runs.n;
 
 	ctx->obj_size = file.n;

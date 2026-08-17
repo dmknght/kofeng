@@ -155,7 +155,7 @@ static void rar5_walk(struct rw *s, kof_buf file)
 	kof_runs_add(&s->runs, file.n, 0, RAR5_MAGIC_LEN, KOF_RAR_CLS_HEADERS);
 
 	while (at + 4u < file.n) {
-		uint64_t hdr_start, hsize, htype, hflags, extra = 0, dsize = 0;
+		uint64_t hdr_start, hsize, htype, hflags, dsize = 0;
 		uint64_t hdr_end, blk_end;
 		int ok;
 
@@ -180,10 +180,12 @@ static void rar5_walk(struct rw *s, kof_buf file)
 		if (!ok) break;
 		hflags = rd_vint(file, &at, &ok);
 		if (!ok) break;
+		/* The extra area's size is read to step the cursor over the field,
+		 * and then dropped: the area itself is inside hsize, so it needs no
+		 * run of its own and bounds nothing. */
 		if (hflags & KOF_RAR5_H_EXTRA) {
-			extra = rd_vint(file, &at, &ok);
+			rd_vint(file, &at, &ok);
 			if (!ok) break;
-			(void)extra;            /* inside hsize already */
 		}
 		if (hflags & KOF_RAR5_H_DATA) {
 			dsize = rd_vint(file, &at, &ok);
@@ -655,12 +657,12 @@ int kof_rar_parse(kof_buf file, struct kof_rar_info *r, struct kof_obj_ctx *ctx)
 	if (r->rar_version == KOF_RAR_V3 && !saw_end)
 		r->anomalies |= KOF_RAR_ANOM_NO_END;
 settle:
+	/* After the settle: that is the pass that finds an overlap. */
+	kof_runs_settle(&s.runs, r->region_bytes);
 	if (s.runs.full)
 		r->anomalies |= KOF_RAR_ANOM_EXTENTS_FULL;
 	if (s.runs.overlapped)
 		r->anomalies |= KOF_RAR_ANOM_OVERLAP;
-
-	kof_runs_settle(&s.runs, r->region_bytes);
 	r->n_runs = s.runs.n;
 
 	ctx->obj_size    = file.n;

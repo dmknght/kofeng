@@ -5,9 +5,12 @@
  * that fills both the common context and the format view, and a parse that never
  * fails - hostile or truncated input yields what was recovered plus anomaly bits.
  *
- * Only RAR3 is walked. A RAR5 is recognised, recorded as version 5, and left with
- * KOF_RAR_ANOM_UNSUPPORTED set so it is reported as a gap rather than as an archive
- * that turned out to be empty.
+ * RAR3 and RAR5 are both walked, and the two share nothing but a signature prefix -
+ * RAR3 blocks are fixed width little endian fields, RAR5 blocks are variable length
+ * integers - so there are two walks behind one entry point, and ctx->subtype says
+ * which one ran. An archive whose entries are compressed by a method this build has
+ * no decoder for is left with KOF_RAR_ANOM_UNSUPPORTED, so it is reported as a gap
+ * rather than as an archive that turned out to be empty.
  */
 
 #ifndef KOFENG_RAR_PARSE_H

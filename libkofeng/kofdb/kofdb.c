@@ -818,15 +818,36 @@ struct kof_engine *kof_db_load(const char *path)
 			e = NULL;
 			goto out;
 		}
-		e->n_masks = 0;
-		for (i2 = 0; i2 < e->n_rng; i2++) {
-			for (j2 = 0; j2 < i2; j2++)
-				if (e->rng_tab[j2] == e->rng_tab[i2]) {
-					e->rng_uid[i2] = e->rng_uid[j2];
-					break;
+		/*
+		 * Against the DISTINCT masks, not against every earlier entry.
+		 *
+		 * rng_tab holds one entry per module per range, so it is as long as the
+		 * database; the distinct values in it are one per way a module can name
+		 * a region, which is a handful. Comparing against the whole table was
+		 * quadratic in the database - two billion comparisons at sixty thousand
+		 * modules, on the load path, to find fewer than thirty answers.
+		 */
+		{
+			uint32_t seen[KOF_MAX_DISTINCT_MASKS];
+
+			e->n_masks = 0;
+			for (i2 = 0; i2 < e->n_rng; i2++) {
+				for (j2 = 0; j2 < e->n_masks; j2++)
+					if (seen[j2] == e->rng_tab[i2])
+						break;
+				if (j2 == e->n_masks) {
+					if (e->n_masks == KOF_MAX_DISTINCT_MASKS) {
+						/* More region vocabularies than any
+						 * set of formats defines: refuse
+						 * rather than share a slot. */
+						kof_db_free(e);
+						e = NULL;
+						goto out;
+					}
+					seen[e->n_masks++] = e->rng_tab[i2];
 				}
-			if (j2 == i2)
-				e->rng_uid[i2] = e->n_masks++;
+				e->rng_uid[i2] = j2;
+			}
 		}
 		/*
 		 * The memo, keyed by (pattern, mask) instead of by (module, string,

@@ -26,6 +26,21 @@
 #   PE64    x86_64-w64-mingw32-gcc      needs mingw-w64
 #   PE32    i686-w64-mingw32-gcc        needs mingw-w64
 #
+# The container fixtures are made the same way and for the same reason. PDF and RTF
+# are written out directly because both are text and a hand written one says what it
+# contains; the archives are made by the tool that owns the format, so what the
+# collectors are read against is what a real writer produces and not this script's
+# idea of it.
+#
+#   pdf     written here                always
+#   rtf     written here                always
+#   tar     tar                         nearly always present
+#   gz      gzip                        nearly always present
+#   xz      xz
+#   zip     zip
+#   7z      7z / 7za
+#   rar     rar                         rarely installed
+#
 # usage: tests/mkfixtures.sh <output-dir>
 
 set -eu
@@ -35,7 +50,9 @@ here=$(cd -- "$(dirname -- "$0")" && pwd)
 src=$here/fixtures
 
 mkdir -p "$out"
-rm -f "$out"/*.bin "$out"/*.exe "$out"/*.so "$out"/*.dll "$out"/*.ovl 2>/dev/null || true
+rm -f "$out"/*.bin "$out"/*.exe "$out"/*.so "$out"/*.dll "$out"/*.ovl \
+      "$out"/*.pdf "$out"/*.rtf "$out"/*.tar "$out"/*.gz "$out"/*.xz \
+      "$out"/*.zip "$out"/*.7z "$out"/*.rar 2>/dev/null || true
 
 built=0
 skipped=""
@@ -101,6 +118,60 @@ if can_build i686-w64-mingw32-gcc; then
 else
 	skipped="$skipped PE32(no-mingw-w64)"
 fi
+
+# ---- containers ---------------------------------------------------------------
+#
+# The payload every archive holds: an ELF if one was built, so an archive fixture
+# also exercises the path where a child object is a format in its own right.
+payload=$out/plain-elf64
+[ -f "$payload" ] || payload=$here/fixtures/plain.c
+
+# A PDF with the two halves a scan treats differently - a dictionary in the clear
+# that declares an action, and a stream that is opaque until a filter is undone.
+{
+	printf '%%PDF-1.7\n'
+	printf '1 0 obj\n<< /Type /Catalog /OpenAction 2 0 R >>\nendobj\n'
+	printf '2 0 obj\n<< /S /JavaScript /JS (app.alert\\(1\\)) >>\nendobj\n'
+	printf '3 0 obj\n<< /Length 26 /Filter /FlateDecode >>\nstream\n'
+	printf 'kofeng-fixture-stream-data\nendstream\nendobj\n'
+	printf 'xref\n0 4\ntrailer\n<< /Size 4 /Root 1 0 R >>\n'
+	printf 'startxref\n9\n%%%%EOF\n'
+} > "$out/sample.pdf"
+built=$((built + 1))
+
+# An RTF with an embedded object in hex, which is the shape the format is abused
+# through: \objupdate opens it without a click and \objdata carries the payload.
+{
+	printf '{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Arial;}}\n'
+	printf '{\\object\\objemb\\objupdate{\\*\\objclass Package}\n'
+	printf '{\\*\\objdata 0105000002000000060000006b6f66656e670000}}\n'
+	printf '{\\pict\\wmetafile8\\bin8 kofeng!}\\par done}\n'
+} > "$out/sample.rtf"
+built=$((built + 1))
+
+arc() {
+	_tool=$1 _name=$2
+	shift 2
+	command -v "$_tool" >/dev/null 2>&1 || { skipped="$skipped $_name"; return 0; }
+	if "$@" >/dev/null 2>&1; then
+		built=$((built + 1))
+	else
+		skipped="$skipped $_name(failed)"
+	fi
+}
+
+arc tar  tar  tar -cf "$out/sample.tar" -C "$(dirname "$payload")" "$(basename "$payload")"
+if [ -f "$out/sample.tar" ]; then
+	arc gzip gz  sh -c "gzip  -kf '$out/sample.tar' && mv '$out/sample.tar.gz' '$out/sample.gz'"
+	arc xz   xz  sh -c "xz    -kf '$out/sample.tar' && mv '$out/sample.tar.xz' '$out/sample.xz'"
+fi
+arc zip  zip  zip -qj "$out/sample.zip" "$payload"
+if command -v 7z >/dev/null 2>&1; then
+	arc 7z  7z  7z a -bso0 -bsp0 "$out/sample.7z" "$payload"
+else
+	arc 7za 7z  7za a -bso0 -bsp0 "$out/sample.7z" "$payload"
+fi
+arc rar  rar  rar a -inul "$out/sample.rar" "$payload"
 
 printf 'fixtures: %d file(s) in %s' "$built" "$out"
 if [ -n "$skipped" ]; then

@@ -44,8 +44,19 @@
 #include "../../libkofeng/kofparsers/containers/rar_parse.h"
 #include "../../libkofeng/kofparsers/containers/xz_parse.h"
 #include "../../libkofeng/kofparsers/containers/rtf_parse.h"
+#include "../../libkofeng/kofparsers/containers/pdf_parse.h"
 
-#define OBJ_MAX 8192
+/*
+ * Big enough to reach the caps.
+ *
+ * It was 8192, which is plenty of room for a hostile header and not enough for a
+ * hostile COUNT: an archive fills its entry table at 2048 entries and the fixed part
+ * of a RAR file block is 32 bytes, so no object under sixty four kilobytes could ever
+ * raise ENTRIES_FULL - and the anomaly report at the end read that as a bit the
+ * parser never sets. This is twice the largest table in the tree, which leaves room
+ * for the signature and for a swarm to start late.
+ */
+#define OBJ_MAX 131072
 #define ROUNDS  20000
 
 /* xorshift, so the sequence is the same on every machine and a seed is a
@@ -466,6 +477,31 @@ static uint64_t gen_rar(uint8_t *b)
 	if (b[6] == 0x01)
 		b[7] = (uint8_t)((rnd() % 2u) ? 0x00 : rnd());
 
+	/*
+	 * Sometimes an archive of nothing but minimal file blocks.
+	 *
+	 * The entry and extent tables are the two bounds a RAR can push on, and
+	 * they are not reached by a random walk: a block whose size field is
+	 * random averages hundreds of bytes, so a few dozen of them fill the
+	 * object long before two thousand of them fill the table.
+	 */
+	if (rnd() % 4u == 0) {
+		n = OBJ_MAX;            /* the table is the point, so use the room */
+		at = 7;
+		while (at + 32u <= n) {
+			put16(b, at + 0, (uint16_t)rnd());
+			b[at + 2] = 0x74;               /* file */
+			put16(b, at + 3, 0);            /* no ADD_SIZE */
+			put16(b, at + 5, 32u);
+			put32(b, at + 7, 0);
+			put32(b, at + 11, 0);
+			b[at + 25] = 0x30;
+			put16(b, at + 26, 0);
+			at += 32u;
+		}
+		return n;
+	}
+
 	at = 7;
 	while (at + 32u <= n) {
 		uint16_t flags = 0, size;
@@ -505,8 +541,9 @@ static uint64_t gen_rar(uint8_t *b)
 		put16(b, at + 26, (uint16_t)((rnd() % 2u) ? rnd() % 64u : rnd()));
 		put32(b, at + 28, (uint32_t)rnd());
 		for (k = 32u; k < 64u && at + k < n; k++)
-			b[at + k] = (uint8_t)((rnd() % 3u) ? ("../\\ab" [rnd() % 6])
-							   : rnd());
+			b[at + k] = (rnd() % 3u)
+				? (uint8_t)"../\\ab"[rnd() % 6]
+				: (uint8_t)rnd();
 
 		at += (size < 7u ? 7u : size) + (rnd() % 2u ? 0 : add % 256u);
 	}
@@ -590,6 +627,36 @@ static uint64_t gen_rtf(uint8_t *b)
 
 	memcpy(b, "{\\rtf1", 6);
 	at = 6;
+
+	/* Nesting, objects and runs are counted rather than sized, so each gets a
+	 * mode that produces nothing but the thing being counted. */
+	switch (rnd() % 8u) {
+	case 0:                                 /* depth */
+		while (at < n)
+			b[at++] = '{';
+		return n;
+	case 1:                                 /* objects */
+		while (at + 24u < n) {
+			memcpy(b + at, "{\\*\\objdata 41424344}", 21);
+			at += 21u;
+		}
+		return at;
+	case 2:                                 /* runs, alternating class */
+		while (at + 16u < n) {
+			memcpy(b + at, "x{\\bin4 ....}", 13);
+			at += 13u;
+		}
+		return at;
+	case 3:                                 /* a \bin that swallows what follows */
+		while (at + 40u < n) {
+			memcpy(b + at, "{\\bin4096 {\\*\\objdata 41424344}}", 32);
+			at += 32u;
+		}
+		return at;
+	default:
+		break;
+	}
+
 	while (at < n) {
 		switch (rnd() % 8u) {
 		case 0:
@@ -606,7 +673,7 @@ static uint64_t gen_rtf(uint8_t *b)
 			while (k < len && at < n)
 				b[at++] = (uint8_t)w[k++];
 			if (rnd() % 3u == 0) {  /* an over-long word */
-				uint32_t j = rnd() % 200u;
+				uint32_t j = (uint32_t)(rnd() % 200u);
 
 				while (j-- && at < n)
 					b[at++] = (uint8_t)('a' + rnd() % 26);
@@ -763,150 +830,347 @@ static uint64_t gen_gzip(uint8_t *b)
 	return n;
 }
 
+/*
+ * A PDF, whose hostile fields are all text.
+ *
+ * A PDF says how long things are in decimal, so the values that break it are not
+ * bit patterns but strings a reader has to convert: a /Length of twenty digits, a
+ * negative one, an object number that is not a number at all. Those go in as often
+ * as ordinary ones. The header stays intact, for the reason gen_rtf gives.
+ *
+ * The other half is structural - a stream with no endstream, an endobj with no
+ * object, a startxref pointing anywhere in the 64 bit range - because the walk
+ * looks for keywords and what matters is what it does when it finds them out of
+ * order.
+ */
+static uint64_t gen_pdf(uint8_t *b)
+{
+	uint64_t n = 64u + (rnd() % (OBJ_MAX - 128u));
+	uint64_t at = 0;
+	uint32_t obj = 1;
+
+	/* Readers accept junk in front of the header and malware uses that, so a
+	 * quarter of these are offset. */
+	if (rnd() % 4u == 0) {
+		uint32_t j = (uint32_t)(rnd() % 512u);
+
+		while (at < j && at + 16u < n)
+			b[at++] = (uint8_t)(rnd() % 4u ? ' ' : rnd());
+	}
+	memcpy(b + at, "%PDF-1.7\n", 9);
+	at += 9;
+
+	/*
+	 * Sometimes nothing but object headers.
+	 *
+	 * The object and extent tables are counted, not sized, and an object with a
+	 * dictionary and a stream averages eighty bytes - so a random document runs
+	 * out of file at a few hundred objects and the caps go untested.
+	 */
+	if (rnd() % 4u == 0) {
+		while (at + 16u < n) {
+			int m = snprintf((char *)b + at, 17u, "%u 0 obj\nendobj\n",
+					 (unsigned)(obj++ % 1000u));
+
+			if (m <= 0)
+				break;
+			at += (uint64_t)m;
+		}
+		return at;
+	}
+
+	/*
+	 * Sometimes a document whose objects claim each other's bytes.
+	 *
+	 * A stream is ended by the next "endstream" anywhere in the file, not by
+	 * the object that opened it - so an object that opens a stream and never
+	 * closes it swallows whatever follows, and the object inside then claims
+	 * the same bytes. That is the shape a PDF is built in to be read two ways,
+	 * and it is not one a random line generator arrives at.
+	 */
+	if (rnd() % 4u == 0) {
+		static const char pair[] =
+			"1 0 obj\n<< /Length 4 >>\nstream\nendobj\n"
+			"2 0 obj\n<< /Type /Action >>\nendstream\nendobj\n";
+
+		while (at + sizeof pair - 1u < n) {
+			memcpy(b + at, pair, sizeof pair - 1u);
+			at += sizeof pair - 1u;
+		}
+		return at;
+	}
+
+	while (at + 64u < n) {
+		char line[128];
+		int m;
+
+		switch (rnd() % 8u) {
+		case 0:                         /* an object header, sometimes junk */
+			m = snprintf(line, sizeof line,
+				     (rnd() % 4u) ? "%u 0 obj\n" : "%u -1 obj\n",
+				     (rnd() % 8u) ? obj++ : 0xffffffffu);
+			break;
+		case 1:                         /* a dictionary that declares things */
+			m = snprintf(line, sizeof line,
+				     "<< /Type /%s %s /Length %s /Filter /%s >>\n",
+				     (const char *[]){ "EmbeddedFile", "ObjStm",
+						       "Action", "Catalog" }
+					     [rnd() % 4u],
+				     /* The keys that say what happens when the
+				      * document is opened - what a signature for
+				      * a malicious PDF is actually looking at. */
+				     (const char *[]){ "/Launch (cmd.exe)",
+						       "/OpenAction 2 0 R",
+						       "/AA 3 0 R",
+						       "/JS (app.alert\\(1\\))",
+						       "/URI (http://x/)",
+						       "" }
+					     [rnd() % 6u],
+				     (const char *[]){ "8", "0", "-1",
+						       "99999999999999999999",
+						       "4294967295", "abc" }
+					     [rnd() % 6u],
+				     (const char *[]){ "FlateDecode", "LZWDecode",
+						       "Crypt", "NoSuchFilter" }
+					     [rnd() % 4u]);
+			break;
+		case 2:
+			m = snprintf(line, sizeof line, "stream\n");
+			break;
+		case 3:                         /* often missing its opener */
+			m = snprintf(line, sizeof line, "endstream\n");
+			break;
+		case 4:
+			m = snprintf(line, sizeof line, "endobj\n");
+			break;
+		case 5:
+			m = snprintf(line, sizeof line, "startxref\n%llu\n",
+				     (unsigned long long)((rnd() % 2u)
+					     ? rnd()
+					     : ((uint64_t)rnd() << 32) | rnd()));
+			break;
+		case 6:
+			m = snprintf(line, sizeof line,
+				     "trailer\n<< /Size %u /Encrypt 3 0 R >>\n",
+				     (unsigned)rnd());
+			break;
+		default: {
+			uint32_t j = (uint32_t)(rnd() % 96u);
+
+			m = 0;
+			while ((uint32_t)m < j && (size_t)m < sizeof line - 1u)
+				line[m++] = (rnd() % 4u)
+					? (char)('A' + (char)(rnd() % 26))
+					: (char)rnd();
+			break;
+		}
+		}
+		if (m < 0)
+			break;
+		if (at + (uint64_t)m > n)
+			break;
+		memcpy(b + at, line, (size_t)m);
+		at += (uint64_t)m;
+	}
+	if ((rnd() % 2u) && at + 6u <= n) {
+		memcpy(b + at, "%%EOF\n", 6);
+		at += 6u;
+	}
+	return at;
+}
+
+
+/*
+ * The formats, as a table.
+ *
+ * It used to be a chain of `want == N ?` written out three times - once to pick the
+ * generator, once for the label, once for the sniff and parse - and adding a format
+ * meant editing all three and getting the numbering right in each. One row is one
+ * format, and the counters are an array beside it.
+ */
+typedef int (*pf_parse)(kof_buf, void *, struct kof_obj_ctx *);
+
+#define PF_WRAP(name, type, fn)                                            \
+	static int name(kof_buf b, void *v, struct kof_obj_ctx *c)         \
+	{ return fn(b, (type *)v, c); }
+
+PF_WRAP(p_elf,    struct kof_elf_info,    kof_elf_parse)
+PF_WRAP(p_pe,     struct kof_pe_info,     kof_pe_parse)
+PF_WRAP(p_gzip,   struct kof_gzip_info,   kof_gzip_parse)
+PF_WRAP(p_docole, struct kof_docole_info, kof_docole_parse)
+PF_WRAP(p_zip,    struct kof_zip_info,    kof_zip_parse)
+PF_WRAP(p_tar,    struct kof_tar_info,    kof_tar_parse)
+PF_WRAP(p_7z,     struct kof_7z_info,     kof_7z_parse)
+PF_WRAP(p_rar,    struct kof_rar_info,    kof_rar_parse)
+PF_WRAP(p_xz,     struct kof_xz_info,     kof_xz_parse)
+PF_WRAP(p_rtf,    struct kof_rtf_info,    kof_rtf_parse)
+PF_WRAP(p_pdf,    struct kof_pdf_info,    kof_pdf_parse)
+
+/*
+ * The anomaly word of each view.
+ *
+ * One accessor per format rather than a cast to a common head: the container views
+ * do begin version, valid, anomalies, and ELF and PE do not - so a cast would have
+ * read a segment count as an anomaly mask and reported it as coverage. It did,
+ * until this replaced it.
+ */
+#define PF_ANOM(name, type)                                                \
+	static uint64_t name(const void *v)                                \
+	{ return ((const type *)v)->anomalies; }
+
+PF_ANOM(a_elf,    struct kof_elf_info)
+PF_ANOM(a_pe,     struct kof_pe_info)
+PF_ANOM(a_gzip,   struct kof_gzip_info)
+PF_ANOM(a_docole, struct kof_docole_info)
+PF_ANOM(a_zip,    struct kof_zip_info)
+PF_ANOM(a_tar,    struct kof_tar_info)
+PF_ANOM(a_7z,     struct kof_7z_info)
+PF_ANOM(a_rar,    struct kof_rar_info)
+PF_ANOM(a_xz,     struct kof_xz_info)
+PF_ANOM(a_rtf,    struct kof_rtf_info)
+PF_ANOM(a_pdf,    struct kof_pdf_info)
+
+static const struct fmt {
+	const char *name;
+	uint64_t (*gen)(uint8_t *);
+	int (*sniff)(kof_buf);
+	pf_parse parse;
+	size_t view_size;
+	const uint32_t *bits;
+	uint32_t n_bits;
+	uint64_t (*anom)(const void *);
+	const char *(*anom_name)(unsigned);
+	uint32_t n_anom;
+} fmts[] = {
+	{ "PE",     gen_pe,     kof_pe_sniff,     p_pe,     sizeof(struct kof_pe_info),     kof_pe_region_bits,     KOF_PE_REGION_COUNT, a_pe, kof_pe_anomaly_name, KOF_PE_ANOM_COUNT },
+	{ "ELF",    gen_elf,    kof_elf_sniff,    p_elf,    sizeof(struct kof_elf_info),    kof_elf_region_bits,    KOF_ELF_REGION_COUNT, a_elf, kof_elf_anomaly_name, KOF_ELF_ANOM_COUNT },
+	{ "gzip",   gen_gzip,   kof_gzip_sniff,   p_gzip,   sizeof(struct kof_gzip_info),   kof_gzip_region_bits,   KOF_GZIP_REGION_COUNT, a_gzip, kof_gzip_anomaly_name, KOF_GZIP_ANOM_COUNT },
+	{ "docole", gen_docole, kof_docole_sniff, p_docole, sizeof(struct kof_docole_info), kof_docole_region_bits, KOF_DOCOLE_REGION_COUNT, a_docole, kof_docole_anomaly_name, KOF_DOCOLE_ANOM_COUNT },
+	{ "zip",    gen_zip,    kof_zip_sniff,    p_zip,    sizeof(struct kof_zip_info),    kof_zip_region_bits,    KOF_ZIP_REGION_COUNT, a_zip, kof_zip_anomaly_name, KOF_ZIP_ANOM_COUNT },
+	{ "tar",    gen_tar,    kof_tar_sniff,    p_tar,    sizeof(struct kof_tar_info),    kof_tar_region_bits,    KOF_TAR_REGION_COUNT, a_tar, kof_tar_anomaly_name, KOF_TAR_ANOM_COUNT },
+	{ "7z",     gen_7z,     kof_7z_sniff,     p_7z,     sizeof(struct kof_7z_info),     kof_7z_region_bits,     KOF_7Z_REGION_COUNT, a_7z, kof_7z_anomaly_name, KOF_7Z_ANOM_COUNT },
+	{ "rar",    gen_rar,    kof_rar_sniff,    p_rar,    sizeof(struct kof_rar_info),    kof_rar_region_bits,    KOF_RAR_REGION_COUNT, a_rar, kof_rar_anomaly_name, KOF_RAR_ANOM_COUNT },
+	{ "xz",     gen_xz,     kof_xz_sniff,     p_xz,     sizeof(struct kof_xz_info),     kof_xz_region_bits,     KOF_XZ_REGION_COUNT, a_xz, kof_xz_anomaly_name, KOF_XZ_ANOM_COUNT },
+	{ "rtf",    gen_rtf,    kof_rtf_sniff,    p_rtf,    sizeof(struct kof_rtf_info),    kof_rtf_region_bits,    KOF_RTF_REGION_COUNT, a_rtf, kof_rtf_anomaly_name, KOF_RTF_ANOM_COUNT },
+	{ "pdf",    gen_pdf,    kof_pdf_sniff,    p_pdf,    sizeof(struct kof_pdf_info),    kof_pdf_region_bits,    KOF_PDF_REGION_COUNT, a_pdf, kof_pdf_anomaly_name, KOF_PDF_ANOM_COUNT }
+};
+#define N_FMT (sizeof fmts / sizeof fmts[0])
+
 int main(int argc, char **argv)
 {
 	static uint8_t obj[OBJ_MAX];
-	struct kof_elf_info *ei = malloc(sizeof *ei);
-	struct kof_pe_info *pi = malloc(sizeof *pi);
-	struct kof_gzip_info *gi = malloc(sizeof *gi);
-	struct kof_docole_info *oi = malloc(sizeof *oi);
-	struct kof_zip_info *zi = malloc(sizeof *zi);
-	struct kof_tar_info *ti = malloc(sizeof *ti);
-	struct kof_7z_info *si = malloc(sizeof *si);
-	struct kof_rar_info *ri = malloc(sizeof *ri);
-	struct kof_xz_info *xi = malloc(sizeof *xi);
-	struct kof_rtf_info *fi = malloc(sizeof *fi);
-	struct pc_report rep = { 0, 0, 0 };
-	uint64_t rounds = ROUNDS, seed = 20240101u;
-	uint64_t r, pe_parsed = 0, elf_parsed = 0, gz_parsed = 0, ole_parsed = 0,
-		 zip_parsed = 0, tar_parsed = 0, sz_parsed = 0, rar_parsed = 0, xz_parsed = 0, rtf_parsed = 0;
+	static uint64_t parsed[N_FMT];
+	static uint64_t anom[N_FMT];
+	struct pc_report rep = { 0, 0, 0, 0 };
+	uint64_t rounds = ROUNDS, seed = 20240101u, r;
+	size_t big = 0;
+	uint32_t k;
+	void *view;
 	char what[64];
 
 	if (argc > 1)
 		seed = strtoull(argv[1], 0, 0);
 	if (argc > 2)
 		rounds = strtoull(argv[2], 0, 0);
-	if (!ei || !pi || !gi || !oi || !zi || !ti || !si || !ri || !xi || !fi)
+
+	/* One view buffer, sized for the largest, rather than eleven live at
+	 * once: only one parse is in flight and the views run to megabytes. */
+	for (k = 0; k < N_FMT; k++)
+		if (fmts[k].view_size > big)
+			big = fmts[k].view_size;
+	view = malloc(big);
+	if (!view)
 		return 1;
 
 	rng_state = seed ? seed : 1;
 
 	for (r = 0; r < rounds; r++) {
+		const struct fmt *f = &fmts[rnd() % N_FMT];
 		struct kof_obj_ctx ctx;
+		kof_buf buf;
 		uint64_t n;
-		int want = (int)(rnd() % 10);  /* PE, ELF, gzip, docole, zip,
-						* tar, 7z, rar, xz, rtf */
 
 		memset(&ctx, 0, sizeof ctx);
-		n = want == 0 ? gen_pe(obj) : want == 1 ? gen_elf(obj)
-			: want == 2 ? gen_gzip(obj)
-			: want == 3 ? gen_docole(obj)
-			: want == 4 ? gen_zip(obj)
-			: want == 5 ? gen_tar(obj)
-			: want == 6 ? gen_7z(obj)
-			: want == 7 ? gen_rar(obj)
-			: want == 8 ? gen_xz(obj) : gen_rtf(obj);
-		{
-			kof_buf buf = kof_buf_make(obj, n);
+		n = f->gen(obj);
+		buf = kof_buf_make(obj, n);
 
-			snprintf(what, sizeof what, "seed=%llu round=%llu %s",
-				 (unsigned long long)seed, (unsigned long long)r,
-				 want == 0 ? "PE" : want == 1 ? "ELF"
-				 : want == 2 ? "gzip"
-				 : want == 3 ? "docole"
-				 : want == 4 ? "zip"
-				 : want == 5 ? "tar"
-				 : want == 6 ? "7z"
-				 : want == 7 ? "rar"
-				 : want == 8 ? "xz" : "rtf");
+		snprintf(what, sizeof what, "seed=%llu round=%llu %s",
+			 (unsigned long long)seed, (unsigned long long)r,
+			 f->name);
 
-			if (want == 0 && kof_pe_sniff(buf)) {
-				if (kof_pe_parse(buf, pi, &ctx)) {
-					pe_parsed++;
-					pc_check(what, &ctx, n, kof_pe_region_bits,
-						 KOF_PE_REGION_COUNT, &rep);
-				}
-			} else if (want == 1 && kof_elf_sniff(buf)) {
-				if (kof_elf_parse(buf, ei, &ctx)) {
-					elf_parsed++;
-					pc_check(what, &ctx, n, kof_elf_region_bits,
-						 KOF_ELF_REGION_COUNT, &rep);
-				}
-			} else if (want == 2 && kof_gzip_sniff(buf)) {
-				if (kof_gzip_parse(buf, gi, &ctx)) {
-					gz_parsed++;
-					pc_check(what, &ctx, n, kof_gzip_region_bits,
-						 KOF_GZIP_REGION_COUNT, &rep);
-				}
-			} else if (want == 3 && kof_docole_sniff(buf)) {
-				if (kof_docole_parse(buf, oi, &ctx)) {
-					ole_parsed++;
-					pc_check(what, &ctx, n, kof_docole_region_bits,
-						 KOF_DOCOLE_REGION_COUNT, &rep);
-				}
-			} else if (want == 4 && kof_zip_sniff(buf)) {
-				if (kof_zip_parse(buf, zi, &ctx)) {
-					zip_parsed++;
-					pc_check(what, &ctx, n, kof_zip_region_bits,
-						 KOF_ZIP_REGION_COUNT, &rep);
-				}
-			} else if (want == 5 && kof_tar_sniff(buf)) {
-				if (kof_tar_parse(buf, ti, &ctx)) {
-					tar_parsed++;
-					pc_check(what, &ctx, n, kof_tar_region_bits,
-						 KOF_TAR_REGION_COUNT, &rep);
-				}
-			} else if (want == 6 && kof_7z_sniff(buf)) {
-				if (kof_7z_parse(buf, si, &ctx)) {
-					sz_parsed++;
-					pc_check(what, &ctx, n, kof_7z_region_bits,
-						 KOF_7Z_REGION_COUNT, &rep);
-				}
-			} else if (want == 7 && kof_rar_sniff(buf)) {
-				if (kof_rar_parse(buf, ri, &ctx)) {
-					rar_parsed++;
-					pc_check(what, &ctx, n, kof_rar_region_bits,
-						 KOF_RAR_REGION_COUNT, &rep);
-				}
-			} else if (want == 8 && kof_xz_sniff(buf)) {
-				if (kof_xz_parse(buf, xi, &ctx)) {
-					xz_parsed++;
-					pc_check(what, &ctx, n, kof_xz_region_bits,
-						 KOF_XZ_REGION_COUNT, &rep);
-				}
-			} else if (want == 9 && kof_rtf_sniff(buf)) {
-				if (kof_rtf_parse(buf, fi, &ctx)) {
-					rtf_parsed++;
-					pc_check(what, &ctx, n, kof_rtf_region_bits,
-						 KOF_RTF_REGION_COUNT, &rep);
-				}
-			}
+		if (f->sniff(buf) && f->parse(buf, view, &ctx)) {
+			parsed[f - fmts]++;
+			anom[f - fmts] |= f->anom(view);
+			pc_check(what, &ctx, n, f->bits, f->n_bits, &rep);
+		}
+
+		/*
+		 * The refusal path, which is a contract of its own.
+		 *
+		 * Every collector answers a caller that parses WITHOUT sniffing
+		 * first, and what it answers is a view marked invalid with the bit
+		 * that says why - BAD_MAGIC, BAD_MZ, BAD_HEADER. The engine always
+		 * sniffs, so nothing else here ever reaches those bits, and the
+		 * anomaly report below read them as bits the parser never sets.
+		 *
+		 * It is also the one call in this file made on input nobody claims
+		 * is the format, which is where a parse that reads before it checks
+		 * would be caught.
+		 */
+		if (n) {
+			uint8_t save = obj[0];
+
+			obj[0] = (uint8_t)rnd();
+			memset(&ctx, 0, sizeof ctx);
+			if (!f->sniff(kof_buf_make(obj, n)))
+				f->parse(kof_buf_make(obj, n), view, &ctx);
+			anom[f - fmts] |= f->anom(view);
+			obj[0] = save;
 		}
 	}
 
-	free(ei);
-	free(pi);
-	free(gi);
-	free(oi);
-	free(zi);
-	free(ti);
-	free(si);
-	free(ri);
-	free(xi);
-	free(fi);
-	printf("hostile headers: %llu round(s), parsed ELF %llu PE %llu gzip %llu "
-	       "docole %llu zip %llu tar %llu 7z %llu rar %llu xz %llu rtf %llu, "
-	       "partition %llu/%llu\n",
-	       (unsigned long long)rounds, (unsigned long long)elf_parsed,
-	       (unsigned long long)pe_parsed, (unsigned long long)gz_parsed,
-	       (unsigned long long)ole_parsed,
-	       (unsigned long long)zip_parsed,
-	       (unsigned long long)tar_parsed,
-	       (unsigned long long)sz_parsed,
-	       (unsigned long long)rar_parsed,
-	       (unsigned long long)xz_parsed,
-	       (unsigned long long)rtf_parsed,
+	free(view);
+	printf("hostile headers: %llu round(s), parsed",
+	       (unsigned long long)rounds);
+	for (k = 0; k < N_FMT; k++)
+		printf(" %s %llu", fmts[k].name,
+		       (unsigned long long)parsed[k]);
+	printf(", partition %llu/%llu", 
 	       (unsigned long long)(rep.checked - rep.failed),
 	       (unsigned long long)rep.checked);
+	if (rep.capped)
+		printf(" (+%llu past the extent cap, not checked)",
+		       (unsigned long long)rep.capped);
+	printf("\n");
+
+	/*
+	 * Which declared anomalies this run never managed to raise.
+	 *
+	 * The checklist asks that every bit a parser declares is actually raised
+	 * somewhere, and the three times that was checked by grepping the source
+	 * the grep was wrong - table driven raises and bits whose name differs from
+	 * their macro both slipped through. This is the same question asked of the
+	 * running parser, where neither can hide.
+	 *
+	 * Reported and not failed: some bits need an input a random generator will
+	 * not stumble on - a file above four gigabytes, an archive that is
+	 * genuinely encrypted - and a test that failed on those would be a test
+	 * nobody could keep green.
+	 */
+	for (k = 0; k < N_FMT; k++) {
+		uint32_t b, first = 1;
+
+		for (b = 0; b < fmts[k].n_anom; b++) {
+			if (anom[k] & (1ull << b))
+				continue;
+			if (first) {
+				printf("  %s never raised:", fmts[k].name);
+				first = 0;
+			}
+			printf(" %s", fmts[k].anom_name(b));
+		}
+		if (!first)
+			printf("\n");
+	}
 	return rep.failed != 0;
 }
