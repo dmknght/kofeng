@@ -32,10 +32,15 @@
  * THE FILTERS
  *
  * RAR3 can attach a small program - RarVM bytecode - that post-processes a range of
- * the output, most often the x86 branch transform. Running it needs an interpreter;
- * not running it leaves those ranges holding pre-filter bytes. Both are recorded, so
- * a caller can tell a clean decode from one with unfiltered ranges in it, and neither
- * is presented as the other.
+ * the output. No archiver has ever emitted one outside a fixed set of seven, which
+ * RAR itself recognises by the CRC32 of the program and runs natively; the
+ * interpreter in RAR exists for code nobody writes. So the set is what is
+ * implemented here and there is no VM.
+ *
+ * Of the seven, the x86 branch transform (in both its forms) and the channel delta
+ * are carried out. Itanium, RGB, audio and upcase are recognised and refused,
+ * because no archive in the collection this was built against uses one and an
+ * unvalidated transform is worse than a stated gap - the same rule PPM gets above.
  */
 
 #ifndef KOFENG_RAR3_H
@@ -47,8 +52,11 @@
 /*
  * Decode one RAR3 entry into `out`.
  *
- * `dict` is the window size the entry's header declared, rounded up by the decoder
- * to what it can use; passing 0 asks for the largest RAR3 allows.
+ * `scratch` is working room for the filters, and only for them: the channel delta
+ * writes a permutation of its input and cannot do so in place. KOF_RAR3_SCRATCH is
+ * enough for any block RAR can declare. Passing NULL is allowed and costs only the
+ * entries that carry that filter, which come back UNSUPPORTED like any other
+ * transform this build will not run.
  *
  * Returns a KOF_DEC_* status. `*produced` is set in every case, including the
  * failures - a truncated or unsupported stream still yields the bytes that arrived
@@ -57,8 +65,13 @@
  * KOF_DEC_UNSUPPORTED means a PPM block or a filter this build does not run, and is
  * the honest answer for both: what came out is not the whole file.
  */
+/* The largest block a RAR3 filter can be attached to: the VM's own memory bound,
+ * which the format checks against before it runs one. */
+#define KOF_RAR3_SCRATCH 0x3c000u
+
 enum kof_decomp_status kof_rar3_decode(const uint8_t *in, uint64_t in_len,
 				       uint8_t *out, uint64_t out_cap,
-				       uint32_t dict, uint64_t *produced);
+				       uint8_t *scratch, uint64_t scratch_len,
+				       uint64_t *produced);
 
 #endif /* KOFENG_RAR3_H */

@@ -26,6 +26,7 @@
 #include "../kofdecomp/lzma.h"
 #include "../kofdecomp/bcj.h"
 #include "../kofdecomp/rar3.h"
+#include "../kofdecomp/rar5.h"
 #include "../kofdecomp/bcj2.h"
 /*
  * The one format header the scan path includes, and it is not a shortcut.
@@ -777,14 +778,48 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 	if (sc->resident > sc->st.peak_resident)
 		sc->st.peak_resident = sc->resident;
 
-	if (method == KOF_UNP_RAR3) {
+	if (method == KOF_UNP_RAR3 || method == KOF_UNP_RAR5) {
 		uint64_t lim = expand_limit(in_len, out_hint);
+		/*
+		 * Working room for the channel delta filter, which writes a
+		 * permutation of its input and so cannot work in place. Bounded by
+		 * the format rather than by the entry - the filter refuses a block
+		 * larger than this - and taken from the same budget as the output,
+		 * because a produced object is charged for what producing it costs.
+		 *
+		 * The two formats bound it differently, so the smaller decoder does
+		 * not pay for the larger one's room.
+		 */
+		uint64_t sn = method == KOF_UNP_RAR3 ? KOF_RAR3_SCRATCH
+						     : KOF_RAR5_SCRATCH;
+		uint8_t *scratch;
 
 		if (want > lim) {
 			want = lim;
 			scan_broken(sc, KOF_BROKEN_LIMIT);
 		}
-		st = kof_rar3_decode(in, in_len, buf, want, 0, &produced);
+		/*
+		 * No larger than the output, because a filter cannot cover more of
+		 * the entry than the entry holds. The format's bound is four
+		 * megabytes and most entries are a fraction of that; taking the
+		 * bound every time charged the budget for room nothing would use
+		 * and turned ordinary archives into ones that hit a ceiling.
+		 */
+		if (sn > want)
+			sn = want;
+		scratch = malloc((size_t)sn);
+		if (scratch)
+			sc->resident += sn;
+		if (method == KOF_UNP_RAR3)
+			st = kof_rar3_decode(in, in_len, buf, want, scratch,
+					     scratch ? sn : 0u, &produced);
+		else
+			st = kof_rar5_decode(in, in_len, buf, want, scratch,
+					     scratch ? sn : 0u, &produced);
+		if (scratch) {
+			sc->resident -= sn;
+			free(scratch);
+		}
 	} else if (method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86) {
 		uint64_t lim = expand_limit(in_len, out_hint);
 
@@ -1057,7 +1092,7 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		return produced;
 	}
 	if (method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86 ||
-	    method == KOF_UNP_RAR3)
+	    method == KOF_UNP_RAR3 || method == KOF_UNP_RAR5)
 		return unpack_buffered(sc, ctx, method, 0, 0, b.p + off, len,
 				       out_hint, form);
 	if (nrv2_of(method, &variant, &bits))

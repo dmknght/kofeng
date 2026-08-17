@@ -12,24 +12,36 @@
  * A stored entry costs no budget at all - it is a WINDOW onto the parent's own
  * mapping, the same as a tar entry, because the bytes are already sitting there
  * uncompressed. Measured over this collection, 23% of RAR entries are stored, and
- * they are disproportionately the interesting ones: an author who adds a already
+ * they are disproportionately the interesting ones: an author who adds an already
  * compressed payload to an archive gets a stored entry whether they meant to or not.
  *
+ * This holds for both versions, and for a while it did not: an early return for RAR5
+ * threw its stored entries away unread, from when RAR5 was recognised and not walked.
  *
- * WHAT IS NOT, AND WHY IT IS SAID RATHER THAN GUESSED
  *
- * The other 77% is RAR's own compression, which this engine does not implement -
- * and unlike deflate or LZMA it is not shared with any other format here, so it is
- * a decoder written for exactly one container. That is a real piece of work and it
- * is not pretended away: an archive whose content could not be reached is reported
- * broken, with the reason that distinguishes a gap in this build from a gap no
- * build closes.
+ * WHAT IS DECODED, AND WHAT IS STILL A GAP
  *
- * The three reasons this can give are not interchangeable:
+ * The other 77% is RAR's own compression, and it is two unrelated schemes behind one
+ * signature. Both have a decoder here: RAR3's LZ with its filter set, and RAR5's,
+ * which shares nothing with it. Neither is shared with any other format in this
+ * engine, so each is a decoder written for exactly one container.
+ *
+ * What is left is named rather than guessed at, because an archive read most of the
+ * way is not an archive read:
+ *
+ *   RAR3 PPMd     - RAR3 chooses between LZ and PPMd per block. A stream that turns
+ *                   to PPM comes back short and says so.
+ *   RAR 2.0       - unpack version 20, an older and incompatible LZ layout.
+ *   RAR 7         - compression version 1, a larger dictionary scheme.
+ *   solid entries - continue the window of the entry before them, so they cannot be
+ *                   decoded alone.
+ *
+ * The four reasons this can give are not interchangeable:
  *
  *   ENCRYPTED   - needs a key. No version of this engine will read it.
- *   UNSUPPORTED - RAR5, or RAR3 compression. A later build could.
+ *   UNSUPPORTED - one of the four above. A later build could.
  *   DAMAGED     - the archive does not contain what it says it does.
+ *   LIMIT       - a budget stopped it; what came out is a prefix of the archive.
  */
 
 #include <kofmod/kofsig.h>
@@ -49,14 +61,6 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	kof_debug("Rar.entries", r->n_entries);
 	kof_debug("Rar.stored", r->n_stored);
 
-	/*
-	 * RAR5 first, because there is nothing to loop over: the parse recognised
-	 * the format and did not walk it, so n_entries is zero and a silent return
-	 * would report a 30MB archive as an object with nothing in it.
-	 */
-	if (r->anomalies & KOF_RAR_ANOM_UNSUPPORTED)
-		KOF_UNP_BROKEN(KOF_UNP_UNSUPPORTED);
-
 	for (i = 0; i < r->n_entries; i++) {
 		const struct kof_rar_entry *e = &r->entry[i];
 
@@ -72,6 +76,16 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		 */
 		if (e->suspicious & KOF_RAR_ENT_SPLIT)
 			continue;
+		/*
+		 * A solid entry continues the window of the one before it, so its
+		 * first back reference points at bytes a decode starting here never
+		 * produced. It is refused rather than decoded into something that is
+		 * right at the front and quietly wrong after.
+		 */
+		if (e->suspicious & KOF_RAR_ENT_SOLID) {
+			packed++;
+			continue;
+		}
 
 		if (e->suspicious & KOF_RAR_ENT_ENCRYPTED) {
 			packed++;
@@ -90,23 +104,42 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		}
 
 		/*
-		 * Compressed, and only RAR3 is decoded.
+		 * Compressed, by whichever of the two the archive's version means.
 		 *
-		 * RAR5 keeps a different LZ layout entirely and version 20 an older
-		 * one; both are counted as out of reach rather than fed to a decoder
-		 * that would produce something shaped like a file. The RAR3 decoder
-		 * itself refuses a PPM block the same way, so an entry that starts LZ
-		 * and switches mid-stream comes back short and says so.
+		 * They are separate decoders because RAR5 shares nothing with RAR3
+		 * below the signature. Unpack version 20 - RAR 2.0, an older and
+		 * incompatible LZ layout - is counted as out of reach rather than
+		 * fed to a decoder that would produce something shaped like a file,
+		 * and so is a RAR3 stream that switches to PPM partway: the decoder
+		 * comes back short and says so rather than returning a fragment.
 		 *
 		 * The declared size goes with the call so the host can see the ratio
 		 * before spending on it; the decoder never reads it as a fact.
 		 */
-		if (r->rar_version != KOF_RAR_V3 || e->unp_ver != 29 || !e->usize) {
+		if (!e->usize) {
 			packed++;
 			continue;
 		}
-		if (kof_unpack_at(KOF_UNP_RAR3, e->data_off, e->csize,
-				  e->usize) == 0) {
+		if (r->rar_version == KOF_RAR_V5) {
+			/* Algorithm version 0 is RAR 5.0; version 1 is the larger
+			 * dictionary scheme RAR 7 added, which this decoder was
+			 * not written for. */
+			if (e->unp_ver != 0) {
+				packed++;
+				continue;
+			}
+			if (kof_unpack_at(KOF_UNP_RAR5, e->data_off, e->csize,
+					  e->usize) == 0) {
+				packed++;
+				continue;
+			}
+		} else if (r->rar_version == KOF_RAR_V3 && e->unp_ver == 29) {
+			if (kof_unpack_at(KOF_UNP_RAR3, e->data_off, e->csize,
+					  e->usize) == 0) {
+				packed++;
+				continue;
+			}
+		} else {
 			packed++;
 			continue;
 		}
@@ -114,6 +147,20 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			break;
 		opened++;
 	}
+
+	/*
+	 * What the PARSE could not offer, as opposed to what this loop refused.
+	 *
+	 * This used to be an early return at the top, from when RAR5 was recognised
+	 * and not walked: n_entries was zero, so returning was the same as running
+	 * the loop. It stopped being the same when the RAR5 walk landed, and the
+	 * cost was two answers rather than one. A RAR5 holding stored entries had
+	 * them thrown away unread - free bytes, no decoder involved - and an archive
+	 * with encrypted headers was reported UNSUPPORTED, which says a later build
+	 * could read it, instead of ENCRYPTED, which says none ever will.
+	 */
+	if (r->anomalies & KOF_RAR_ANOM_UNSUPPORTED)
+		packed++;
 
 	kof_debug("Rar.opened", opened);
 	kof_debug("Rar.unreachable", packed);

@@ -161,6 +161,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofdecomp/bcj.c \
            libkofeng/kofdecomp/bcj2.c \
            libkofeng/kofdecomp/rar3.c \
+           libkofeng/kofdecomp/rar5.c \
            libkofeng/kofdecomp/lzma.c \
            libkofeng/kofdecomp/nrv2.c \
            libkofeng/kofscanners/scan.c \

@@ -180,7 +180,8 @@ enum {
 	KOF_RAR_ENT_ENCRYPTED = 1u << 1,
 	KOF_RAR_ENT_PAST_EOF  = 1u << 2,
 	KOF_RAR_ENT_RATIO     = 1u << 3,
-	KOF_RAR_ENT_SPLIT     = 1u << 4   /* continues into or from another volume */
+	KOF_RAR_ENT_SPLIT     = 1u << 4,  /* continues into or from another volume */
+	KOF_RAR_ENT_SOLID     = 1u << 5   /* continues the previous entry's window */
 };
 
 struct kof_rar_info {

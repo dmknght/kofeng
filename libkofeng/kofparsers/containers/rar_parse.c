@@ -257,6 +257,26 @@ static void rar5_walk(struct rw *s, kof_buf file)
 				e->method   = (uint8_t)method;
 				e->flags    = (uint16_t)fflags;
 				e->data_off = dsize ? hdr_end : 0;
+				/*
+				 * The low six bits of the compression info are
+				 * the ALGORITHM version, not the format version:
+				 * 0 is RAR 5.0 and 1 is the larger-dictionary
+				 * scheme RAR 7 added. Recorded so a decoder can
+				 * refuse one it was not written for, the same way
+				 * unp_ver 20 is refused on the RAR3 side.
+				 */
+				e->unp_ver  = (uint8_t)(comp & 0x3fu);
+				/*
+				 * Bit 6 says this entry continues the window of
+				 * the one before it. A solid entry decoded alone
+				 * is right until its first back reference and
+				 * silently wrong after, which is why it is marked
+				 * here rather than discovered later.
+				 */
+				if (comp & 0x40u) {
+					e->suspicious |= KOF_RAR_ENT_SOLID;
+					r->anomalies |= KOF_RAR_ANOM_SOLID;
+				}
 
 				if (nlen &&
 				    kof_name_escapes(file, name_off, (uint32_t)nlen)) {
@@ -524,35 +544,20 @@ int kof_rar_parse(kof_buf file, struct kof_rar_info *r, struct kof_obj_ctx *ctx)
 
 	if (file.p[6] == 0x01) {
 		/*
-		 * RAR5. Recognised and not walked: it shares nothing with RAR3
-		 * below the magic - variable length integers, a different block
-		 * vocabulary, a different place for every field - so reading it
-		 * with this walk would produce confident nonsense. 78 of the 865
-		 * RAR files here are this, and they are reported as a gap.
-		 */
-		/*
 		 * RAR5, walked. It shares nothing with RAR3 below the magic -
 		 * variable length integers, a different block vocabulary, a
 		 * different place for every field - so it gets a walk of its own
 		 * rather than a branch inside this one.
 		 *
-		 * UNSUPPORTED is still recorded, and it now means what it says: the
-		 * structure is read, the names and stored entries are recovered, and
-		 * what is missing is a decoder for the compressed ones.
+		 * UNSUPPORTED here means only that the walk found nothing to offer.
+		 * It used to be raised for every compressed entry too, from when
+		 * there was no RAR5 decoder; leaving it there would report an
+		 * archive this build reads end to end as a gap.
 		 */
 		r->rar_version = KOF_RAR_V5;
 		rar5_walk(&s, file);
-		if (r->n_entries) {
-			uint32_t q, packed = 0;
-
-			for (q = 0; q < r->n_entries; q++)
-				if (r->entry[q].method != KOF_RAR_M_STORE)
-					packed++;
-			if (packed)
-				r->anomalies |= KOF_RAR_ANOM_UNSUPPORTED;
-		} else {
+		if (!r->n_entries)
 			r->anomalies |= KOF_RAR_ANOM_UNSUPPORTED;
-		}
 		goto settle;
 	} else {
 		r->rar_version = KOF_RAR_V3;

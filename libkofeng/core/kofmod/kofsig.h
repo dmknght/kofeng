@@ -630,6 +630,16 @@ enum kof_unp_method {
 	 */
 	KOF_UNP_BCJ2 = 7,
 
+	/*
+	 * RAR 5, which shares a name with RAR3 and no code.
+	 *
+	 * A separate id and not a parameter of the RAR3 one: the two formats agree
+	 * on nothing below the signature - different block framing, different table
+	 * encoding, different slot arithmetic, different filters - so the host picks
+	 * a decoder here rather than branching inside one.
+	 */
+	KOF_UNP_RAR5 = 8,
+
 	KOF_UNP_NRV2B_8 = 16, KOF_UNP_NRV2B_16, KOF_UNP_NRV2B_32,
 	KOF_UNP_NRV2D_8,      KOF_UNP_NRV2D_16, KOF_UNP_NRV2D_32,
 	KOF_UNP_NRV2E_8,      KOF_UNP_NRV2E_16, KOF_UNP_NRV2E_32,
