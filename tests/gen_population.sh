@@ -59,17 +59,19 @@ for i in $(seq 1 "$count"); do
 		if [ "$bucket" -ge 18 ]; then
 			# Whole-object search, applies to any format. The expensive shape.
 			echo "KOF_TARGET_FORMAT(KOF_FMT_ANY);"
+			echo "KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, \"Synth\");"
 			echo "KOF_TARGET_RANGE(all, KOF_SCAN_ALL);"
 			echo "KOF_DEFINE_STR(m, \"zqx-$tag-any-marker\", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);"
 			echo "KOF_DEFINE_SCAN"
 			echo "{"
 			echo "	if (kof_find_str(all, m))"
-			echo "		KOF_SCAN_MATCH(\"Synth.Any$i\", KOF_LVL_INFECT);"
+			echo "		KOF_SCAN_INFECT(\"Any$i\");"
 			echo "}"
 		elif [ "$bucket" -ge 15 ]; then
 			# Size-constrained: the precondition the host can act on.
 			echo "#include <kofmod/elf.h>"
 			echo "KOF_TARGET_FORMAT(KOF_FMT_ELF);"
+			echo "KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, \"Synth\");"
 			echo "KOF_TARGET_SIZE_MIN($(( (i % 7) * 4096 + 512 )));"
 			echo "KOF_TARGET_ARCH(KOF_ARCH_X86_64);"
 			echo "KOF_TARGET_RANGE(d, KOF_SCAN_ELF_DATA);"
@@ -77,34 +79,37 @@ for i in $(seq 1 "$count"); do
 			echo "KOF_DEFINE_SCAN"
 			echo "{"
 			echo "	if (kof_find_str(d, m))"
-			echo "		KOF_SCAN_MATCH(\"Synth.Sized$i\", KOF_LVL_INFECT);"
+			echo "		KOF_SCAN_INFECT(\"Sized$i\");"
 			echo "}"
 		elif [ "$bucket" -ge 12 ]; then
 			# Scalar only: no search, so nothing to skip it by region.
 			echo "#include <kofmod/elf.h>"
 			echo "KOF_TARGET_FORMAT(KOF_FMT_ELF);"
+			echo "KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, \"Synth\");"
 			echo "KOF_DEFINE_SCAN"
 			echo "{"
 			echo "	const struct kof_elf_info *e = kof_elf(ctx);"
 			echo "	if (e->e_machine == $(( i % 200 )) && e->seg_count == $(( i % 9 )))"
-			echo "		KOF_SCAN_MATCH(\"Synth.Struct$i\", KOF_LVL_SUSPECT);"
+			echo "		KOF_SCAN_SUSPECT(\"Struct$i\");"
 			echo "}"
 		elif [ "$bucket" -ge 8 ]; then
 			# Sections that are never loaded: absent on stripped objects, which is
 			# where the region precondition earns anything.
 			echo "#include <kofmod/elf.h>"
 			echo "KOF_TARGET_FORMAT(KOF_FMT_ELF);"
+			echo "KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, \"Synth\");"
 			echo "KOF_TARGET_RANGE(nl, KOF_SCAN_ELF_NOLOAD);"
 			echo "KOF_DEFINE_STR(m, \"zqx-$tag-noload\", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);"
 			echo "KOF_DEFINE_SCAN"
 			echo "{"
 			echo "	if (kof_find_str(nl, m))"
-			echo "		KOF_SCAN_MATCH(\"Synth.NoLoad$i\", KOF_LVL_INFECT);"
+			echo "		KOF_SCAN_INFECT(\"NoLoad$i\");"
 			echo "}"
 		else
 			# The common case: two searches over loaded content.
 			echo "#include <kofmod/elf.h>"
 			echo "KOF_TARGET_FORMAT(KOF_FMT_ELF);"
+			echo "KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, \"Synth\");"
 			echo "KOF_TARGET_RANGE(loaded, KOF_SCAN_ELF_CODE | KOF_SCAN_ELF_DATA);"
 			echo "KOF_TARGET_RANGE(d, KOF_SCAN_ELF_DATA);"
 			echo "KOF_DEFINE_STR(a, \"zqx-$tag-a\", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);"
@@ -113,7 +118,7 @@ for i in $(seq 1 "$count"); do
 			echo "{"
 			echo "	if (kof_find_str(loaded, a)) {"
 			echo "		if (kof_find_str(d, b))"
-			echo "			KOF_SCAN_MATCH(\"Synth.Pair$i\", KOF_LVL_INFECT);"
+			echo "			KOF_SCAN_INFECT(\"Pair$i\");"
 			echo "	}"
 			echo "}"
 		fi

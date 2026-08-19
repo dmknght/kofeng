@@ -89,11 +89,43 @@ else
 	trap 'rm -rf "$tmp"' EXIT
 fi
 
+# Which OS this blob is built for, decided once and used for every tool choice
+# below - never mixed, because an ELF validator run over a COFF object or the
+# reverse is not "no problems found", it is "wrong tool, so nothing was checked".
+#
+# Overridable rather than hardwired to uname: KOF_TARGET_OS is what lets a build
+# host produce the other platform's blob on purpose, and it is what a future CI
+# matrix sets instead of relying on where the runner happens to be.
+case "${KOF_TARGET_OS:-$(uname -s)}" in
+MINGW*|MSYS*|Windows*|windows) os=windows ;;
+*)                              os=linux ;;
+esac
+
 obj=$tmp/$name.o
-elf=$tmp/$name.elf
 raw=$tmp/$name.raw
 
-CC=${CC:-gcc}
+if [ "$os" = windows ]; then
+	# clang is a cross compiler by construction - one binary already
+	# targets x86_64-w64-windows-gnu regardless of which architecture the
+	# host itself is, which matters here because the host is not
+	# guaranteed to be x86_64. lld and llvm-objcopy/nm/readobj are the
+	# same story: format-aware, not host-arch-aware, and ship together with
+	# clang rather than as a separate binutils that would need its own
+	# per-target build.
+	CC=${CC:-clang}
+	LD=${LD:-ld.lld}
+	NM=${NM:-llvm-nm}
+	OBJDUMP=${OBJDUMP:-llvm-objdump}
+	OBJCOPY=${OBJCOPY:-llvm-objcopy}
+	READOBJ=${READOBJ:-llvm-readobj}
+	img=$tmp/$name.dll
+else
+	CC=${CC:-gcc}
+	LD=${LD:-ld}
+	NM=${NM:-nm}
+	READOBJ=${READOBJ:-readelf}
+	img=$tmp/$name.elf
+fi
 # The other half of the toolchain, in its --extract mode: it reads the declarations
 # out of the source. Same binary that packs the artefacts, so the region names it
 # accepts and the pack it later writes cannot disagree about anything.
@@ -108,7 +140,8 @@ fi
 #
 #   freestanding/nostdlib  no hosted-environment assumptions, no libc symbols
 #   fPIC                   self references become PC relative, so no absolute
-#                          relocation and the blob runs at any address
+#                          relocation and the blob runs at any address - ELF
+#                          only, see below
 #   no-unwind/no-ident/g0  strip the metadata that dwarfs the actual code
 #   no-jump-tables         a switch would otherwise emit a table in .rodata
 #                          referenced by absolute address
@@ -117,7 +150,6 @@ fi
 #   cf-protection=none     drops .note.gnu.property
 CFLAGS=(
 	-std=c11 -Os
-	-fPIC
 	-ffreestanding -fno-builtin -nostdlib
 	-fno-asynchronous-unwind-tables -fno-unwind-tables
 	-fno-ident -g0
@@ -131,6 +163,20 @@ CFLAGS=(
 	# error here rather than a habit that shows up in a signature later.
 	"-I$incdir"
 )
+if [ "$os" = windows ]; then
+	# No -fPIC: it is an ELF concept (GOT-indirect addressing) that this
+	# target does not have a matching flag for. x86_64 Windows code already
+	# has no other shape - every local reference clang emits is RIP
+	# relative by default - so the zero-relocation property comes for free
+	# once the linker below is told to lay .text and .rdata out as one
+	# contiguous region, the same job module.ld does for the ELF side.
+	# Verified against this exact flag set with clang 22.1.8: the linked
+	# image carries an empty relocation table and an empty base relocation
+	# directory.
+	CFLAGS+=(-target x86_64-w64-windows-gnu)
+else
+	CFLAGS+=(-fPIC)
+fi
 
 # Target, and the two checks that keep it honest.
 #
@@ -402,89 +448,225 @@ nstr=$(sed -n 's/^nstr=//p' "$pre")
 : "${scan_mask:=0}"
 : "${nstr:=0}"
 
+if [ "$os" = windows ]; then
+	# module.ld gives the ELF build one guarantee for free: the linker
+	# script lists .text.kof_scan/.text.kof_unpack first, so whichever one
+	# the source defines lands at offset 0 by construction. COFF has no
+	# equivalent script; what it has instead is section grouping by name -
+	# "name$suffix" sections sharing "name" are concatenated in ascending
+	# suffix order. A digit sorts before every letter a C identifier can
+	# start with, so re-declaring the two entry points into ".text$0" here
+	# forces whichever one the source goes on to define into that same
+	# leading slot, without the source ever seeing this file.
+	#
+	# Declared, not defined - the source still provides the only body, this
+	# only adds an attribute to a symbol the source is about to redeclare.
+	# kofsig.h's own declaration comes later in translation-unit order and
+	# carries no section attribute of its own, which is fine: an attribute
+	# from an earlier declaration of the same symbol still applies. Kept as
+	# a forward reference to an incomplete struct, same as the real
+	# prototype - the field layout is never used by name here.
+	{
+		echo 'struct kof_obj_ctx;'
+		echo '__attribute__((section(".text$0"))) void kof_scan(const struct kof_obj_ctx *);'
+		echo '__attribute__((section(".text$0"))) void kof_unpack(const struct kof_obj_ctx *);'
+	} >> "$pat"
+fi
+
 echo "== compile"
 "$CC" "${CFLAGS[@]}" -include "$pat" -c "$src" -o "$obj"
 
 echo "== validate object"
-# A module with writable data is not reentrant, and .bss in particular would
-# occupy no file bytes yet be expected to exist at runtime. Check the object,
-# where the sections are still visible and attributable.
-# size(1) prints: text data bss dec hex filename
-read -r text data bss _ < <(size "$obj" | tail -1)
-if [ "$data" != "0" ] || [ "$bss" != "0" ]; then
-	echo "FAIL: module has writable data (.data=$data .bss=$bss)" >&2
-	echo "      modules must hold no state; use locals or ask the host" >&2
-	exit 1
+if [ "$os" = windows ]; then
+	# COFF has no single writable/non-writable section pair the way ELF's
+	# .data/.bss read cleanly off size(1): .rdata is legitimately "DATA" by
+	# objdump's own Type column and must not trip this, only a section that
+	# is actually writable may. .data and .bss are emitted as empty stub
+	# sections even when nothing uses them, so a name match plus a nonzero
+	# size is the same "held no state" guarantee, read from the section
+	# table instead of size(1)'s triad. Verified against a module carrying
+	# a real global: it lands in .bss$<name> and this sum catches it.
+	datasz=$("$OBJDUMP" -h "$obj" \
+		| awk '$2 ~ /^\.(data|bss)/ {n += strtonum("0x" $3)} END {print n+0}')
+	if [ "$datasz" != "0" ]; then
+		echo "FAIL: module has writable data ($datasz byte(s) in .data/.bss)" >&2
+		echo "      modules must hold no state; use locals or ask the host" >&2
+		exit 1
+	fi
+	echo "   data+bss=$datasz"
+else
+	# A module with writable data is not reentrant, and .bss in particular would
+	# occupy no file bytes yet be expected to exist at runtime. Check the object,
+	# where the sections are still visible and attributable.
+	# size(1) prints: text data bss dec hex filename
+	read -r text data bss _ < <(size "$obj" | tail -1)
+	if [ "$data" != "0" ] || [ "$bss" != "0" ]; then
+		echo "FAIL: module has writable data (.data=$data .bss=$bss)" >&2
+		echo "      modules must hold no state; use locals or ask the host" >&2
+		exit 1
+	fi
+	echo "   text=$text data=$data bss=$bss"
 fi
-echo "   text=$text data=$data bss=$bss"
 
 echo "== link"
-ld -T "$here/module.ld" --gc-sections "$obj" -o "$elf"
+if [ "$os" = windows ]; then
+	# -dll -noentry: nothing here is ever loaded as a PE image, so the PE
+	# header's own entry field is never read by anything - the host copies
+	# raw bytes into its own arena and jumps in by offset, same as the ELF
+	# side. -dll is only what -noentry requires lld-link to be paired with;
+	# it changes a header bit nobody reads, not the code this emits.
+	#
+	# The three -merge flags are module.ld's job for this target: without
+	# them .rdata lands in its own, separately page-aligned section, and
+	# the RIP-relative loads clang emits to reach it are only correct at
+	# THAT gap - dumping .text and .rdata apart and concatenating them
+	# later would carry code whose data references point past the end of
+	# what got copied. Merging first makes the linker resolve every
+	# reference assuming byte-for-byte adjacency, so the single section
+	# that remains is self-contained at any load address, not just the one
+	# it was linked at.
+	"$LD" -flavor link -dll -noentry -subsystem:native -nodefaultlib \
+		-merge:.rdata=.text -merge:.data=.text -merge:.bss=.text \
+		"$obj" -out:"$img"
+else
+	ld -T "$here/module.ld" --gc-sections "$obj" -o "$img"
+fi
 
 echo "== validate image"
-if readelf -r "$elf" | grep -q "^Relocation section"; then
-	echo "FAIL: relocations remain:" >&2
-	readelf -r "$elf" >&2
-	exit 1
-fi
+if [ "$os" = windows ]; then
+	if "$READOBJ" -r "$img" | grep -q "IMAGE_REL"; then
+		echo "FAIL: relocations remain:" >&2
+		"$READOBJ" -r "$img" >&2
+		exit 1
+	fi
 
-undef=$(nm -u "$elf" 2>/dev/null || true)
-if [ -n "$undef" ]; then
-	echo "FAIL: undefined symbols (module reached outside its blob):" >&2
-	echo "$undef" >&2
-	exit 1
-fi
+	# Only .text should carry content once the merge above has run. Anything
+	# else means the merge and the compiler flags have drifted apart.
+	extra=$("$READOBJ" -S "$img" \
+		| sed -n 's/^ *Name: \([^ ]*\).*/\1/p' \
+		| grep -v '^\.text$' || true)
+	if [ -n "$extra" ]; then
+		echo "FAIL: unexpected sections in image: $extra" >&2
+		exit 1
+	fi
+	echo "   no relocations, no unexpected sections"
 
-# Only .blob should carry content. Anything else means the linker script and
-# the compiler flags have drifted apart.
-#
-# The name is pulled with sed rather than by field number: readelf writes the
-# index as "[ 1]" or "[10]", so the column the name lands in shifts once there
-# are ten sections.
-extra=$(readelf -S "$elf" \
-	| sed -n 's/^ *\[ *[0-9][0-9]*\] \([^ ][^ ]*\).*/\1/p' \
-	| grep -vE '^(\.blob|\.symtab|\.strtab|\.shstrtab)$' || true)
-if [ -n "$extra" ]; then
-	echo "FAIL: unexpected sections in image: $extra" >&2
-	exit 1
-fi
-echo "   no relocations, no undefined symbols, no unexpected sections"
+	# lld strips the symbol table from the linked image by default, so by
+	# the time $img exists there is no longer anything to ask which entry
+	# point it carries or at what offset - unlike readelf/nm on the ELF
+	# side, which read that off the linked file directly. The object still
+	# has full symbol visibility, and it is enough: nothing here depends
+	# on where the LINKER placed the entry section, only on what the
+	# COMPILER named it, and that is already decided by the time $obj
+	# exists.
+	undef=$("$NM" -u "$obj" 2>/dev/null | grep -vE 'kof_scan|kof_unpack' || true)
+	if [ -n "$undef" ]; then
+		echo "FAIL: undefined symbols (module reached outside its blob):" >&2
+		echo "$undef" >&2
+		exit 1
+	fi
 
-# Entry offset is zero by construction, but assert it rather than assume: the
-# loader is told where to enter, and a linker script edit could move it.
-# The kind of module this is comes from which entry point it exports, and is
-# recorded rather than declared. A KOF_KIND(...) in the source would be a second
-# statement of a fact the code already makes - and the copy the host cannot see is
-# the one that wins silently, which is the same reason a body check duplicating
-# KOF_TARGET_SIZE_MIN is rejected above.
-#
-# The two entry points have different ABIs: a detector reports findings, an
-# unpacker yields a child object. So a module cannot be written for one and picked
-# up as the other by mistake - it would not compile. Exactly one must be present.
-scan_hex=$(nm "$elf" | awk '$3 == "kof_scan" {print $1}')
-unp_hex=$(nm "$elf" | awk '$3 == "kof_unpack" {print $1}')
-if [ -n "$scan_hex" ] && [ -n "$unp_hex" ]; then
-	echo "FAIL: exports both kof_scan and kof_unpack; a module is one kind" >&2
-	exit 1
-fi
-if [ -n "$scan_hex" ]; then
-	entry_hex=$scan_hex; kind=0; kindname=detect
-elif [ -n "$unp_hex" ]; then
-	entry_hex=$unp_hex;  kind=1; kindname=unpack
+	# The two entry points have different ABIs: a detector reports findings, an
+	# unpacker yields a child object. So a module cannot be written for one and
+	# picked up as the other by mistake - it would not compile. Exactly one must
+	# be present. A symbol that is only declared and never referenced (the other
+	# of the pair) carries no entry in the object's symbol table at all, defined
+	# or undefined, so this needs no extra filtering.
+	scan_row=$("$NM" "$obj" | awk '$2 == "T" && $3 == "kof_scan" {print $1}')
+	unp_row=$("$NM" "$obj" | awk '$2 == "T" && $3 == "kof_unpack" {print $1}')
+	if [ -n "$scan_row" ] && [ -n "$unp_row" ]; then
+		echo "FAIL: exports both kof_scan and kof_unpack; a module is one kind" >&2
+		exit 1
+	fi
+	if [ -n "$scan_row" ]; then
+		entry_hex=$scan_row; kind=0; kindname=detect
+	elif [ -n "$unp_row" ]; then
+		entry_hex=$unp_row;  kind=1; kindname=unpack
+	else
+		echo "FAIL: no kof_scan or kof_unpack symbol; a module must export one" >&2
+		exit 1
+	fi
+	entry=$((16#$entry_hex))
+
+	# Zero by construction - see the .text$0 forcing above - and asserted
+	# rather than assumed for the same reason the ELF side asserts it: the
+	# guarantee lives in two places (the injected declaration here, the
+	# compiler's own section-per-symbol behaviour) and either one drifting
+	# should fail the build, not ship a blob nothing verified.
+	if [ "$entry" -ne 0 ]; then
+		echo "FAIL: kof_scan/kof_unpack is at section offset 0x$entry_hex, expected 0" >&2
+		echo "      check the .text\$0 forcing near the '== patterns' step" >&2
+		exit 1
+	fi
 else
-	echo "FAIL: no kof_scan or kof_unpack symbol; a module must export one" >&2
-	exit 1
-fi
-entry=$((16#$entry_hex))
+	if readelf -r "$img" | grep -q "^Relocation section"; then
+		echo "FAIL: relocations remain:" >&2
+		readelf -r "$img" >&2
+		exit 1
+	fi
 
-if [ "$entry" -ne 0 ]; then
-	echo "FAIL: entry point is at 0x$entry_hex, expected 0" >&2
-	echo "      the loader enters at offset 0; check module.ld" >&2
-	exit 1
+	undef=$(nm -u "$img" 2>/dev/null || true)
+	if [ -n "$undef" ]; then
+		echo "FAIL: undefined symbols (module reached outside its blob):" >&2
+		echo "$undef" >&2
+		exit 1
+	fi
+
+	# Only .blob should carry content. Anything else means the linker script and
+	# the compiler flags have drifted apart.
+	#
+	# The name is pulled with sed rather than by field number: readelf writes the
+	# index as "[ 1]" or "[10]", so the column the name lands in shifts once there
+	# are ten sections.
+	extra=$(readelf -S "$img" \
+		| sed -n 's/^ *\[ *[0-9][0-9]*\] \([^ ][^ ]*\).*/\1/p' \
+		| grep -vE '^(\.blob|\.symtab|\.strtab|\.shstrtab)$' || true)
+	if [ -n "$extra" ]; then
+		echo "FAIL: unexpected sections in image: $extra" >&2
+		exit 1
+	fi
+	echo "   no relocations, no undefined symbols, no unexpected sections"
+
+	# Entry offset is zero by construction, but assert it rather than assume: the
+	# loader is told where to enter, and a linker script edit could move it.
+	# The kind of module this is comes from which entry point it exports, and is
+	# recorded rather than declared. A KOF_KIND(...) in the source would be a second
+	# statement of a fact the code already makes - and the copy the host cannot see is
+	# the one that wins silently, which is the same reason a body check duplicating
+	# KOF_TARGET_SIZE_MIN is rejected above.
+	#
+	# The two entry points have different ABIs: a detector reports findings, an
+	# unpacker yields a child object. So a module cannot be written for one and picked
+	# up as the other by mistake - it would not compile. Exactly one must be present.
+	scan_hex=$(nm "$img" | awk '$3 == "kof_scan" {print $1}')
+	unp_hex=$(nm "$img" | awk '$3 == "kof_unpack" {print $1}')
+	if [ -n "$scan_hex" ] && [ -n "$unp_hex" ]; then
+		echo "FAIL: exports both kof_scan and kof_unpack; a module is one kind" >&2
+		exit 1
+	fi
+	if [ -n "$scan_hex" ]; then
+		entry_hex=$scan_hex; kind=0; kindname=detect
+	elif [ -n "$unp_hex" ]; then
+		entry_hex=$unp_hex;  kind=1; kindname=unpack
+	else
+		echo "FAIL: no kof_scan or kof_unpack symbol; a module must export one" >&2
+		exit 1
+	fi
+	entry=$((16#$entry_hex))
+
+	if [ "$entry" -ne 0 ]; then
+		echo "FAIL: entry point is at 0x$entry_hex, expected 0" >&2
+		echo "      the loader enters at offset 0; check module.ld" >&2
+		exit 1
+	fi
 fi
 
 echo "== emit"
-ld -T "$here/module.ld" --gc-sections --oformat binary "$obj" -o "$raw"
+if [ "$os" = windows ]; then
+	"$OBJCOPY" --dump-section .text="$raw" "$img" /dev/null
+else
+	ld -T "$here/module.ld" --gc-sections --oformat binary "$obj" -o "$raw"
+fi
 cp "$raw" "$blob"
 
 # The record the host filters on. Everything here is evaluable against facts the

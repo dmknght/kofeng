@@ -24,8 +24,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
+
+#include "../core/kofplatform.h"
 
 struct kof_objsrc {
 	const uint8_t *p;
@@ -170,9 +171,8 @@ struct kof_objsrc *kof_src_file(const char *path, int *err)
 		return NULL;
 	}
 	if (sb.st_size > 0) {
-		s->map = mmap(NULL, (size_t)sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-		if (s->map == MAP_FAILED) {
-			s->map = NULL;
+		s->map = kof_map_file_ro(fd, (uint64_t)sb.st_size);
+		if (!s->map) {
 			close(fd);
 			free(s);
 			*err = KOF_ERR_READ;
@@ -238,9 +238,8 @@ struct kof_objsrc *kof_src_fd(int fd, uint64_t len)
 		return NULL;
 	}
 	if (len > 0) {
-		s->map = mmap(NULL, (size_t)len, PROT_READ, MAP_PRIVATE, fd, 0);
-		if (s->map == MAP_FAILED) {
-			s->map = NULL;
+		s->map = kof_map_file_ro(fd, len);
+		if (!s->map) {
 			close(fd);
 			free(s);
 			return NULL;
@@ -272,8 +271,7 @@ void kof_src_unref(struct kof_objsrc *s)
 		void *arg = s->on_free_arg;
 		uint64_t produced = s->produced;
 
-		if (s->map)
-			munmap(s->map, s->map_len);
+		kof_unmap_file(s->map, s->map_len);
 		free(s->heap);
 		free(s);
 		/* After the free, not before: the account should reflect memory

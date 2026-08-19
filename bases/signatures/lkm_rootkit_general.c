@@ -6,6 +6,7 @@
 */
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
 KOF_TARGET_SUBTYPE(KOF_ELF_REL);
+KOF_TARGET_NAME(KOF_MALTYPE_ROOTKIT, "LKM");
 
 /*
     Data is exposed in KOF_SCAN_ELF_DATA. These are symbols that the rootkit uses to start hooking syscalls (particularly on x64).
@@ -53,16 +54,16 @@ void kof_scan(const struct kof_obj_ctx *ctx)
     {
         if (kof_find_str_all(scan_elf_data, str_diamorphine_x64))
         {
-            KOF_SCAN_MATCH("Rootkit.Diamorphine-x64", KOF_LVL_INFECT);
+            KOF_SCAN_INFECT("Diamorphine-x64");
         }
 
         if (kof_find_str_all(scan_elf_data, str_diamorphine_a64_1, str_diamorphine_a64_2))
         {
-            KOF_SCAN_MATCH("Rootkit.Diamorphine-a64", KOF_LVL_INFECT);
+            KOF_SCAN_INFECT("Diamorphine-a64");
         }
         if (kof_find_str_all(scan_elf_data, str_hcrootkit_1, str_hcrootkit_2))
         {
-            KOF_SCAN_MATCH("Rootkit.HCRootkit-General", KOF_LVL_INFECT);
+            KOF_SCAN_INFECT("HCRootkit-General");
         }
     }
 		

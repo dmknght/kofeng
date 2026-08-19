@@ -46,15 +46,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 
-static size_t page_size_of(void)
-{
-	long ps = sysconf(_SC_PAGESIZE);
-
-	return ps > 0 ? (size_t)ps : 4096u;
-}
+#include "../core/kofplatform.h"
 
 /* ---- validation ------------------------------------------------------------- */
 
@@ -389,14 +383,14 @@ static int map_pack(struct kof_db_pack *mp, const char *path)
 	/* The descriptor is closed at once: a mapping keeps the file alive on its
 	 * own, and holding one open per pack would spend a descriptor per pack for
 	 * nothing. */
-	map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	map = kof_map_file_ro(fd, (uint64_t)st.st_size);
 	close(fd);
-	if (map == MAP_FAILED) {
+	if (!map) {
 		fprintf(stderr, "kofdb: cannot map %s\n", path);
 		return 0;
 	}
 	if (!pack_valid(map, (uint64_t)st.st_size, path)) {
-		munmap(map, (size_t)st.st_size);
+		kof_unmap_file(map, (uint64_t)st.st_size);
 		return 0;
 	}
 	mp->map = map;
@@ -406,8 +400,7 @@ static int map_pack(struct kof_db_pack *mp, const char *path)
 
 static void unmap_pack(struct kof_db_pack *mp)
 {
-	if (mp->map)
-		munmap(mp->map, mp->len);
+	kof_unmap_file(mp->map, mp->len);
 	mp->map = NULL;
 	mp->len = 0;
 }
@@ -421,15 +414,13 @@ static void unmap_pack(struct kof_db_pack *mp)
  */
 static int arena_open(struct kof_engine *e, size_t want)
 {
-	size_t ps = page_size_of();
+	size_t ps = kof_page_size();
 
 	e->code_cap = kof_round_up(want, ps);
 	if (e->code_cap == 0)
 		e->code_cap = ps;
-	e->code = mmap(NULL, e->code_cap, PROT_READ | PROT_WRITE,
-		       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	if (e->code == MAP_FAILED) {
-		e->code = NULL;
+	e->code = kof_map_anon_rw(e->code_cap);
+	if (!e->code) {
 		e->code_cap = 0;
 		return 0;
 	}
@@ -900,7 +891,7 @@ struct kof_engine *kof_db_load(const char *path)
 	}
 
 	/* Written once, then executable. */
-	if (mprotect(e->code, e->code_cap, PROT_READ | PROT_EXEC) != 0) {
+	if (kof_mprotect_rx(e->code, e->code_cap) != 0) {
 		fprintf(stderr, "kofdb: cannot make the code executable\n");
 		kof_db_free(e);
 		e = NULL;
@@ -945,11 +936,9 @@ void kof_db_free(struct kof_engine *e)
 		uint32_t i;
 
 		for (i = 0; i < e->n_packs; i++)
-			if (e->packs[i].map)
-				munmap(e->packs[i].map, e->packs[i].len);
+			kof_unmap_file(e->packs[i].map, e->packs[i].len);
 		free(e->packs);
 	}
-	if (e->code)
-		munmap(e->code, e->code_cap);
+	kof_unmap_anon(e->code, e->code_cap);
 	free(e);
 }

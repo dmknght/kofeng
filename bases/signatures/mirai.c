@@ -2,6 +2,7 @@
 #include <kofmod/elf.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF); // File format elf. Prefilter will use this
+KOF_TARGET_NAME(KOF_MALTYPE_BOTNET, "Mirai");
 KOF_TARGET_RANGE(scan_range_data, KOF_SCAN_ELF_DATA); // define variable scan_ragne as elf_code and elf_data (structure from elf file). This will limit scan range
 
 /* The markers. Case and word handling belong to the literal; where to look does not,
@@ -26,9 +27,9 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 	 * object, together with every other module's.
 	 */
 	if (kof_find_str_any(scan_range_data, mirai_1, mirai_2, mirai_3))
-		KOF_SCAN_MATCH("Mirai.Generic", KOF_LVL_INFECT);
+		KOF_SCAN_INFECT(KOF_MALVAR_GENERIC);
 	if (kof_find_str_any(scan_range_data, mirai_4))
-		KOF_SCAN_MATCH("Mirai.Variant-4c36", KOF_LVL_INFECT);
+		KOF_SCAN_INFECT("Variant-4c36");
 	if (kof_find_str_all(scan_range_data, mirai_5, mirai_6))
-		KOF_SCAN_MATCH("Mirai.Variant-de1b", KOF_LVL_INFECT);
+		KOF_SCAN_INFECT("Variant-de1b");
 }

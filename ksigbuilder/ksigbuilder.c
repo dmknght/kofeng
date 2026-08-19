@@ -94,6 +94,9 @@
 #include "../libkofeng/kofdb/kofpackw.h"
 #include "../libkofeng/kofdb/kofpack.h"
 #include "../libkofeng/kofmatchers/hexprog.h"
+#include "../libkofeng/core/kofcore.h"   /* kof_hash_bytes/kof_hash_step - FNV-1a,
+					    reused for KOF_MALVAR_AUTO's suffix and
+					    for the whole-module duplicate check */
 
 /* ============================================================================
  * EXTRACT - read the declarations out of a signature source
@@ -278,7 +281,8 @@ static void err(int line, const char *msg)
 enum decl_kind {
 	DECL_RANGE = 0,
 	DECL_STR,
-	DECL_HEXSTR
+	DECL_HEXSTR,
+	DECL_NAME
 };
 
 struct macro {
@@ -288,10 +292,67 @@ struct macro {
 
 static const struct macro macros[] = {
 	{ "KOF_TARGET_RANGE",  DECL_RANGE  },
+	{ "KOF_TARGET_NAME",   DECL_NAME   },
 	{ "KOF_DEFINE_HEXSTR", DECL_HEXSTR },
 	{ "KOF_DEFINE_STR",    DECL_STR    },
 	{ NULL, DECL_RANGE }
 };
+
+/*
+ * enum kof_maltype (kofsig.h) as words a source may write, and the capitalised word
+ * ksigbuilder composes into a detection name from it. Two views of one table so a
+ * type added to the enum and not here fails loudly - see read_maltype - rather than
+ * compiling and never being reachable from a signature.
+ */
+struct maltype_name {
+	const char *word;
+	int         val;
+	const char *disp;
+};
+
+static const struct maltype_name maltype_names[] = {
+	{ "KOF_MALTYPE_VIRUS",    KOF_MALTYPE_VIRUS,    "Virus"    },
+	{ "KOF_MALTYPE_TROJAN",   KOF_MALTYPE_TROJAN,   "Trojan"   },
+	{ "KOF_MALTYPE_ROOTKIT",  KOF_MALTYPE_ROOTKIT,  "Rootkit"  },
+	{ "KOF_MALTYPE_BOTNET",   KOF_MALTYPE_BOTNET,   "Botnet"   },
+	{ "KOF_MALTYPE_RANSOM",   KOF_MALTYPE_RANSOM,   "Ransom"   },
+	{ "KOF_MALTYPE_MINER",    KOF_MALTYPE_MINER,    "Miner"    },
+	{ "KOF_MALTYPE_ADWARE",   KOF_MALTYPE_ADWARE,   "Adware"   },
+	{ "KOF_MALTYPE_EXPLOIT",  KOF_MALTYPE_EXPLOIT,  "Exploit"  },
+	{ "KOF_MALTYPE_DROPPER",  KOF_MALTYPE_DROPPER,  "Dropper"  },
+	{ "KOF_MALTYPE_HACKTOOL", KOF_MALTYPE_HACKTOOL, "Hacktool" },
+	{ NULL, 0, NULL }
+};
+
+static const char *maltype_disp(int v)
+{
+	int i;
+
+	for (i = 0; maltype_names[i].word; i++)
+		if (maltype_names[i].val == v)
+			return maltype_names[i].disp;
+	return "Malware";   /* unreachable while every use is gated by g_have_name */
+}
+
+/*
+ * KOF_TARGET_NAME's two fields, file scoped like target_mask and its siblings: one
+ * file, one family. Unlike those, read here rather than by ksigcompiler.sh, because
+ * composing a detection name is this program's job already - see read_variant.
+ */
+static char g_family[80];
+static int  g_maltype;
+static int  g_have_name;
+
+/*
+ * The most recently seen kof_find_str_any/all/multi(...) call, as normalised text -
+ * what KOF_MALVAR_AUTO hashes. Updated by capture_find_call on every line regardless
+ * of what else is on it, so by the time a KOF_SCAN_INFECT/SUSPECT(KOF_MALVAR_AUTO)
+ * line is reached this holds whichever call guards it, in the ordinary
+ * "if (kof_find_str_x(...)) KOF_SCAN_INFECT(...);" shape every signature in this
+ * tree already uses.
+ */
+static int  g_have_find;
+static char g_find_sig[600];
 
 /*
  * Find argument number `want` (1-based) of a macro invocation starting at p.
@@ -641,6 +702,314 @@ static int read_name(const char *p, int line, char *out, size_t cap)
 	return 1;
 }
 
+/* Argument 1 of KOF_TARGET_NAME(TYPE, "family") - one of the bare identifiers in
+ * maltype_names. An unknown one is a build error naming every type that IS known,
+ * the same courtesy read_mask gives an unknown region name. */
+static int read_maltype(const char *p, int line, int *out)
+{
+	const char *a = nth_arg(p, 1, line);
+	char tok[32];
+	size_t n = 0;
+	int i;
+
+	if (!a)
+		return 0;
+	while (*a == ' ' || *a == '\t' || *a == '\n' || *a == '\r')
+		a++;
+	while (*a && *a != ',' && *a != ')' && *a != ' ' && *a != '\t' &&
+	       *a != '\n' && *a != '\r') {
+		if (n + 1 >= sizeof tok) {
+			err(line, "malware type name too long");
+			return 0;
+		}
+		tok[n++] = *a++;
+	}
+	tok[n] = 0;
+	for (i = 0; maltype_names[i].word; i++)
+		if (strcmp(tok, maltype_names[i].word) == 0) {
+			*out = maltype_names[i].val;
+			return 1;
+		}
+	{
+		int k;
+		fprintf(stderr, "%s:%d: error: \"%s\" is not a known malware type. "
+				"Known:\n", src_name, line, tok);
+		for (k = 0; maltype_names[k].word; k++)
+			fprintf(stderr, "    %s\n", maltype_names[k].word);
+		errors++;
+	}
+	return 0;
+}
+
+/* Argument 2 of KOF_TARGET_NAME(TYPE, "family") - a plain literal, read the same
+ * restricted way read_hex_text and read_literal are: no escapes, quote to quote. */
+static int read_family(const char *p, int line, char *out, size_t cap)
+{
+	const char *q = nth_arg(p, 2, line);
+	size_t n = 0;
+
+	if (!q)
+		return 0;
+	while (*q == ' ' || *q == '\t')
+		q++;
+	if (*q != '"') {
+		err(line, "second argument of KOF_TARGET_NAME must be a family name "
+			  "literal");
+		return 0;
+	}
+	q++;
+	while (*q && *q != '"') {
+		if (n + 1 >= cap) {
+			err(line, "family name too long");
+			return 0;
+		}
+		out[n++] = *q++;
+	}
+	if (*q != '"' || n == 0) {
+		err(line, "malformed family name");
+		return 0;
+	}
+	out[n] = 0;
+	return 1;
+}
+
+/*
+ * Copy the argument text of a balanced-parenthesis call, starting right after
+ * `open` (which points at the '(') up to but not including the matching ')'.
+ * Quotes are honoured, same rule nth_arg applies when splitting arguments, so a
+ * comma or paren inside a pattern literal does not end the capture early.
+ */
+static size_t capture_balanced(const char *open, char *out, size_t cap)
+{
+	const char *p = open + 1;
+	int depth = 1;
+	size_t n = 0;
+
+	while (*p && depth > 0) {
+		if (*p == '"') {
+			if (n + 1 < cap) out[n++] = *p;
+			p++;
+			while (*p && *p != '"') {
+				if (*p == '\\' && p[1] && n + 1 < cap) {
+					out[n++] = *p++;
+				}
+				if (n + 1 < cap)
+					out[n++] = *p;
+				p++;
+			}
+			if (*p == '"') {
+				if (n + 1 < cap) out[n++] = *p;
+				p++;
+			}
+			continue;
+		}
+		if (*p == '(') {
+			depth++;
+		} else if (*p == ')') {
+			depth--;
+			if (depth == 0)
+				break;
+		}
+		if (n + 1 < cap)
+			out[n++] = *p;
+		p++;
+	}
+	out[n < cap ? n : cap - 1] = 0;
+	return n;
+}
+
+/* Collapse every run of whitespace to one space and trim both ends, so
+ * "a,  b"  and "a,\n\tb" hash identically. What this does NOT do is resolve an
+ * identifier to what it was declared as - renaming a KOF_DEFINE_STR changes this
+ * text and therefore changes KOF_MALVAR_AUTO's hash. Documented at KOF_SCAN_INFECT
+ * in kofsig.h; accepted here rather than solved, because solving it means resolving
+ * every identifier against the pats[] table instead of just capturing text. */
+static void normalize_ws(char *s)
+{
+	char *r = s, *w = s;
+	int sp = 1;
+
+	for (; *r; r++) {
+		if (*r == ' ' || *r == '\t' || *r == '\n' || *r == '\r') {
+			if (!sp) {
+				*w++ = ' ';
+				sp = 1;
+			}
+		} else {
+			*w++ = *r;
+			sp = 0;
+		}
+	}
+	while (w > s && w[-1] == ' ')
+		w--;
+	*w = 0;
+}
+
+/*
+ * Look for kof_find_str_any/all/multi(...) on this line and, if found, remember its
+ * region/pattern text and any trailing ">= N" threshold as g_find_sig - the input
+ * KOF_MALVAR_AUTO hashes. Independent of the macros[] table: these are real,
+ * compiled calls, not declarative macros that expand to nothing, so they are found
+ * by their own scan rather than routed through scan_line's macro dispatch.
+ */
+static void capture_find_call(const char *at)
+{
+	static const char *kinds[] = { "kof_find_str_multi", "kof_find_str_all",
+					"kof_find_str_any", NULL };
+	const char *best = NULL;
+	const char *best_kind = NULL;
+	const char *open, *after;
+	char args[500];
+	char thresh[16];
+	int k, depth;
+	size_t tn;
+
+	for (k = 0; kinds[k]; k++) {
+		const char *q = strstr(at, kinds[k]);
+		if (q && (!best || q < best)) {
+			best = q;
+			best_kind = kinds[k];
+		}
+	}
+	if (!best)
+		return;
+
+	open = strchr(best, '(');
+	if (!open)
+		return;
+	capture_balanced(open, args, sizeof args);
+	normalize_ws(args);
+
+	thresh[0] = 0;
+	depth = 0;
+	after = open;
+	while (*after) {
+		if (*after == '(') {
+			depth++;
+		} else if (*after == ')') {
+			depth--;
+			if (depth == 0) {
+				after++;
+				break;
+			}
+		}
+		after++;
+	}
+	while (*after == ' ' || *after == '\t')
+		after++;
+	tn = 0;
+	if (after[0] == '>' && after[1] == '=') {
+		after += 2;
+		while (*after == ' ' || *after == '\t')
+			after++;
+		while (*after >= '0' && *after <= '9' && tn + 1 < sizeof thresh)
+			thresh[tn++] = *after++;
+	}
+	thresh[tn] = 0;
+
+	snprintf(g_find_sig, sizeof g_find_sig, "%s(%s)%s%s", best_kind, args,
+		 thresh[0] ? ">=" : "", thresh);
+	g_have_find = 1;
+}
+
+/* Base36, fixed at 5 digits - long enough that a 4000 signature database has a
+ * negligible chance of two AUTO variants in the same family colliding, short enough
+ * to read as a tag rather than a hash dump. */
+static void auto_suffix(char out[6])
+{
+	static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+	uint32_t h = kof_hash_bytes(g_find_sig, strlen(g_find_sig));
+	int i;
+
+	for (i = 4; i >= 0; i--) {
+		out[i] = digits[h % 36];
+		h /= 36;
+	}
+	out[5] = 0;
+}
+
+/*
+ * Argument 1 of KOF_SCAN_INFECT/SUSPECT(variant): a quoted custom variant,
+ * KOF_MALVAR_GENERIC, or KOF_MALVAR_AUTO. Composes the full detection name with the
+ * KOF_TARGET_NAME this file already declared - see kofsig.h for why the three forms
+ * exist and what AUTO hashes.
+ */
+static int read_variant(const char *p, int line, char *out, size_t cap)
+{
+	const char *q;
+	char raw[128];
+	size_t rn = 0;
+	int n;
+
+	if (!g_have_name) {
+		err(line, "KOF_SCAN_INFECT/SUSPECT used before KOF_TARGET_NAME is "
+			  "declared; declare the type and family first");
+		return 0;
+	}
+
+	q = nth_arg(p, 1, line);
+	if (!q)
+		return 0;
+	while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')
+		q++;
+
+	if (*q == '"') {
+		q++;
+		while (*q && *q != '"') {
+			if (rn + 1 >= sizeof raw) {
+				err(line, "detection variant too long");
+				return 0;
+			}
+			raw[rn++] = *q++;
+		}
+		if (*q != '"' || rn == 0) {
+			err(line, "malformed detection variant");
+			return 0;
+		}
+		raw[rn] = 0;
+	} else {
+		while (*q && *q != ',' && *q != ')' && *q != ' ' && *q != '\t' &&
+		       *q != '\n' && *q != '\r') {
+			if (rn + 1 >= sizeof raw) {
+				err(line, "argument too long");
+				return 0;
+			}
+			raw[rn++] = *q++;
+		}
+		raw[rn] = 0;
+
+		if (strcmp(raw, "KOF_MALVAR_GENERIC") == 0) {
+			strcpy(raw, "Generic");
+		} else if (strcmp(raw, "KOF_MALVAR_AUTO") == 0) {
+			char suffix[6];
+
+			if (!g_have_find) {
+				err(line, "KOF_MALVAR_AUTO must directly guard a "
+					  "single kof_find_str_any/all/multi(...) "
+					  "condition");
+				return 0;
+			}
+			auto_suffix(suffix);
+			snprintf(raw, sizeof raw, "Generic-%s", suffix);
+		} else {
+			fprintf(stderr, "%s:%d: error: the argument to "
+					"KOF_SCAN_INFECT/SUSPECT must be a quoted "
+					"variant name, KOF_MALVAR_AUTO, or "
+					"KOF_MALVAR_GENERIC, not \"%s\"\n",
+				src_name, line, raw);
+			errors++;
+			return 0;
+		}
+	}
+
+	n = snprintf(out, cap, "%s.%s.%s", maltype_disp(g_maltype), g_family, raw);
+	if (n < 0 || (size_t)n >= cap) {
+		err(line, "composed detection name too long");
+		return 0;
+	}
+	return 1;
+}
+
 /*
  * Handle one source line: a macro is found within the line, but its arguments are
  * read from the full buffer, because an invocation may wrap onto the next line.
@@ -650,14 +1019,26 @@ static void scan_line(char *at, size_t line_len, int lineno)
 {
 	const struct macro *m = NULL;
 	char *p;
+	int is_variant = 0;
 	char saved = at[line_len];
 
 	/* Find within the line; read arguments from the full buffer. Comments were
 	 * blanked before this ran, so anything found here is code. */
 	at[line_len] = 0;
+
+	/* Independent of the dispatch below: a real, compiled call rather than a
+	 * declarative macro, so it is found by its own scan rather than routed
+	 * through it - see capture_find_call. Run on every line, whether or not the
+	 * line turns out to hold a macro this function also cares about. */
+	capture_find_call(at);
+
 	/* kof_debug names go in the same table and are keyed the same way: both use
 	 * __LINE__ as the id, so the host resolves either through one lookup. */
-	p = strstr(at, "KOF_SCAN_MATCH");
+	p = strstr(at, "KOF_SCAN_INFECT");
+	if (!p)
+		p = strstr(at, "KOF_SCAN_SUSPECT");
+	if (p)
+		is_variant = 1;
 	if (!p)
 		p = strstr(at, "kof_debug");
 	if (!p)
@@ -690,9 +1071,14 @@ static void scan_line(char *at, size_t line_len, int lineno)
 			return;
 		}
 		names[nnames].line = lineno;
-		if (!read_name(p, lineno, names[nnames].text,
-			       sizeof names[nnames].text))
+		if (is_variant) {
+			if (!read_variant(p, lineno, names[nnames].text,
+					  sizeof names[nnames].text))
+				return;
+		} else if (!read_name(p, lineno, names[nnames].text,
+				       sizeof names[nnames].text)) {
 			return;
+		}
 		/* The engine's slot is the smallest thing on the way through, so
 		 * it is the limit. Refused here, where the message can name the
 		 * line, rather than cut silently in two places downstream. */
@@ -705,6 +1091,23 @@ static void scan_line(char *at, size_t line_len, int lineno)
 			return;
 		}
 		nnames++;
+		return;
+	}
+
+	if (m->kind == DECL_NAME) {
+		int type_idx;
+
+		if (g_have_name) {
+			err(lineno, "KOF_TARGET_NAME declared more than once; a "
+				    "module has one family");
+			return;
+		}
+		if (!read_maltype(p, lineno, &type_idx))
+			return;
+		if (!read_family(p, lineno, g_family, sizeof g_family))
+			return;
+		g_maltype = type_idx;
+		g_have_name = 1;
 		return;
 	}
 
@@ -1041,6 +1444,12 @@ struct artefact {
 	uint32_t kind;
 	uint32_t target_mask, scan_mask, arch_mask, subtype_mask;
 	uint64_t size_min;
+
+	/* What this module fires on: preconditions plus the exact pattern/region
+	 * set, order independent. See artefact_fingerprint. Not a security hash and
+	 * not stored anywhere beyond this run - it exists only to warn when two
+	 * artefacts have it in common. */
+	uint32_t fp;
 
 	struct kof_pw_str  *str;
 	uint32_t            n_str;
@@ -1512,6 +1921,142 @@ struct group {
 	uint32_t  n, cap;
 };
 
+static int cmp_u32(const void *pa, const void *pb)
+{
+	uint32_t a = *(const uint32_t *)pa, b = *(const uint32_t *)pb;
+	return a < b ? -1 : (a > b ? 1 : 0);
+}
+
+/*
+ * A fingerprint of everything that decides whether this module fires: its
+ * preconditions, and the exact set of patterns and regions it searches for - not
+ * its code, so two modules that reach the same verdict by different logic are not
+ * "the same signature" and this does not claim they are. That is a real limitation,
+ * not an oversight: a module whose kof_scan body does something beyond calling
+ * kof_find_str_* is invisible to this check.
+ *
+ * Order independent by construction: each string and each range hashes to one
+ * number of its own, and the SORTED list of those numbers is what gets hashed
+ * again - so two artefacts differing only in which order their declarations were
+ * typed in still fingerprint the same, which is the case this exists to catch.
+ */
+static uint32_t artefact_fingerprint(const struct artefact *a)
+{
+	uint32_t *sh = NULL, *rh = NULL;
+	uint32_t i, precond[4], final = 0;
+	uint8_t *buf;
+	size_t buflen, w;
+
+	if (a->n_str) {
+		sh = malloc(a->n_str * sizeof *sh);
+		if (!sh)
+			return 0;
+	}
+	if (a->n_rng) {
+		rh = malloc(a->n_rng * sizeof *rh);
+		if (!rh) {
+			free(sh);
+			return 0;
+		}
+	}
+
+	for (i = 0; i < a->n_str; i++) {
+		uint32_t hh = KOF_HASH_INIT;
+		uint32_t j;
+
+		hh = kof_hash_step(hh, a->str[i].kind);
+		hh = kof_hash_step(hh, a->str[i].flags);
+		for (j = 0; j < a->str[i].len; j++)
+			hh = kof_hash_step(hh, a->str[i].bytes[j]);
+		sh[i] = hh;
+	}
+	for (i = 0; i < a->n_rng; i++)
+		rh[i] = a->rng[i];
+
+	if (a->n_str)
+		qsort(sh, a->n_str, sizeof *sh, cmp_u32);
+	if (a->n_rng)
+		qsort(rh, a->n_rng, sizeof *rh, cmp_u32);
+
+	precond[0] = a->target_mask;
+	precond[1] = a->subtype_mask;
+	precond[2] = a->arch_mask;
+	precond[3] = (uint32_t)a->size_min;   /* truncated on purpose - a size floor
+						* that differs only past 4GB is not
+						* worth splitting a fingerprint over */
+
+	buflen = sizeof precond + (size_t)a->n_str * sizeof *sh +
+		 (size_t)a->n_rng * sizeof *rh;
+	buf = malloc(buflen);
+	if (!buf) {
+		free(sh);
+		free(rh);
+		return 0;
+	}
+	w = 0;
+	memcpy(buf + w, precond, sizeof precond);
+	w += sizeof precond;
+	if (a->n_str) {
+		memcpy(buf + w, sh, (size_t)a->n_str * sizeof *sh);
+		w += (size_t)a->n_str * sizeof *sh;
+	}
+	if (a->n_rng)
+		memcpy(buf + w, rh, (size_t)a->n_rng * sizeof *rh);
+
+	final = kof_hash_bytes(buf, buflen);
+	free(buf);
+	free(sh);
+	free(rh);
+	return final;
+}
+
+struct fp_idx {
+	uint32_t fp;
+	uint32_t idx;
+};
+
+static int cmp_fp_idx(const void *pa, const void *pb)
+{
+	const struct fp_idx *a = pa, *b = pb;
+	return a->fp < b->fp ? -1 : (a->fp > b->fp ? 1 : 0);
+}
+
+/*
+ * Warn, do not refuse: a real collision means two artefacts declare the same
+ * target, region and pattern set, which is either a copy left behind or two
+ * families that genuinely share one detection - and only a person reading both
+ * files can tell which. Refusing the build over the second case would make a
+ * legitimate database impossible to build; staying quiet about the first lets a
+ * stale duplicate ride along indefinitely. A warning is the one answer that costs
+ * nothing when it is the second case and loses nothing when it is the first.
+ */
+static void warn_duplicate_patterns(struct artefact *arts, uint32_t n_arts)
+{
+	struct fp_idx *fps;
+	uint32_t i;
+
+	if (n_arts < 2)
+		return;
+	fps = malloc(n_arts * sizeof *fps);
+	if (!fps)
+		return;
+	for (i = 0; i < n_arts; i++) {
+		arts[i].fp = artefact_fingerprint(&arts[i]);
+		fps[i].fp = arts[i].fp;
+		fps[i].idx = i;
+	}
+	qsort(fps, n_arts, sizeof *fps, cmp_fp_idx);
+	for (i = 0; i + 1 < n_arts; i++) {
+		if (fps[i].fp != fps[i + 1].fp)
+			continue;
+		fprintf(stderr,
+			"ksigbuilder: warning: %s and %s declare the same target, "
+			"region and pattern set - one may be redundant\n",
+			arts[fps[i].idx].stem, arts[fps[i + 1].idx].stem);
+	}
+	free(fps);
+}
+
 /* Every field of the key, so the order is total and no two packs can tie. */
 static int group_cmp(const void *pa, const void *pb)
 {
@@ -1762,6 +2307,8 @@ int main(int argc, char **argv)
 		fprintf(stderr, "ksigbuilder: no .blob artefacts in %s\n", workdir);
 		goto done;
 	}
+
+	warn_duplicate_patterns(arts, n_arts);
 
 	/* Linear scan over the groups: the number of distinct precondition tuples
 	 * is small and does not grow with the number of signatures, which is the

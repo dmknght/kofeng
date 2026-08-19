@@ -2,6 +2,7 @@
 #include <kofmod/pe.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_PE); // File format elf. Prefilter will use this
+KOF_TARGET_NAME(KOF_MALTYPE_HACKTOOL, "Meterpreter");
 KOF_TARGET_RANGE(pe_range_data, KOF_SCAN_PE_DATA);
 KOF_TARGET_RANGE(pe_range_code, KOF_SCAN_PE_CODE);
 
@@ -29,9 +30,9 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 	if (kof_find_str_all(pe_range_data, str_data_1, str_data_2)) {
 		if (kof_find_str_all(pe_range_code, str_code_1, str_code_2))
 		{
-			KOF_SCAN_MATCH("Meter.Generic", KOF_LVL_INFECT);
+			KOF_SCAN_INFECT(KOF_MALVAR_GENERIC);
 		} else {
-			KOF_SCAN_MATCH("Meter.Generic", KOF_LVL_SUSPECT);
+			KOF_SCAN_SUSPECT(KOF_MALVAR_GENERIC);
 		}
 	}
 }

@@ -29,8 +29,9 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
+
+#include "../core/kofplatform.h"
 
 struct kof_scanner *kof_scan_of(const struct kof_obj_ctx *ctx)
 {
@@ -800,7 +801,7 @@ static void read_dir(struct walk *w, const char *dir, uint32_t depth)
 
 		/* lstat, not stat: a symlink is not followed unless asked for, so a link
 		 * pointing at an ancestor cannot turn this into a loop. */
-		if ((w->opt->follow_symlinks ? stat : lstat)(w->path_buf, &sb) != 0) {
+		if ((w->opt->follow_symlinks ? stat : kof_lstat)(w->path_buf, &sb) != 0) {
 			w->sc->st.unreadable++;
 			continue;
 		}
@@ -832,7 +833,7 @@ int kof_scan_walk(struct kof_scanner *sc, const char *path,
 	w.cb   = cb;
 	w.user = user;
 
-	if ((opt->follow_symlinks ? stat : lstat)(path, &sb) != 0)
+	if ((opt->follow_symlinks ? stat : kof_lstat)(path, &sb) != 0)
 		return KOF_ERR_OPEN;
 
 	if (!S_ISDIR(sb.st_mode)) {

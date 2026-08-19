@@ -19,6 +19,7 @@
 /* No format view, so it may apply to everything - and now actually does, rather
  * than being excluded by a hardcoded ELF dispatch. */
 KOF_TARGET_FORMAT(KOF_FMT_ANY);
+KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, "AnyFmtTest");
 
 /* KOF_SCAN_ALL is the only region this module can name: it targets every format, so
  * there is no format whose region vocabulary it could use. The host answers this one
@@ -33,5 +34,5 @@ KOF_DEFINE_SCAN
 		return;
 
 	if (kof_find_str(everything, gcc_comment))
-		KOF_SCAN_MATCH("Test.GccComment", KOF_LVL_INFECT);
+		KOF_SCAN_INFECT("GccComment");
 }

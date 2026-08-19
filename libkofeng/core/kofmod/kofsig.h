@@ -1294,6 +1294,31 @@ enum kof_unp_broken {
 #define kof_find_str_multi(rng, ...) (KOF_FS_FOLD(+, rng, __VA_ARGS__))
 
 /*
+ * What kind of malware a detection is, for the report string ksigbuilder composes -
+ * see KOF_TARGET_NAME below.
+ *
+ * Plain values, not a mask: a module names one type, never an OR of several, so
+ * there is nothing here for a bit to buy. Unlike KOF_FMT_* and KOF_ARCH_*, whose
+ * numbers are fixed because they are ORed into a mask stored in every pack, these are never
+ * combined and never stored as a mask - so a new value is appended at the end and
+ * costs nothing to add. Append only, though: an existing entry moving to a different
+ * number would be silent everywhere a database built before the move is still read
+ * against a build after it.
+ */
+enum kof_maltype {
+	KOF_MALTYPE_VIRUS,
+	KOF_MALTYPE_TROJAN,      /* covers spyware */
+	KOF_MALTYPE_ROOTKIT,
+	KOF_MALTYPE_BOTNET,
+	KOF_MALTYPE_RANSOM,
+	KOF_MALTYPE_MINER,
+	KOF_MALTYPE_ADWARE,
+	KOF_MALTYPE_EXPLOIT,
+	KOF_MALTYPE_DROPPER,     /* covers downloader */
+	KOF_MALTYPE_HACKTOOL
+};
+
+/*
  * Declare which object formats this module applies to.
  *
  *     KOF_TARGET_FORMAT(KOF_FMT_ELF);
@@ -1308,6 +1333,30 @@ enum kof_unp_broken {
  * casts ctx->file_header and a module that never casts has nothing to get wrong.
  */
 #define KOF_TARGET_FORMAT(mask)
+
+/*
+ * Declare what this module detects: a type from enum kof_maltype, and a family name
+ * this module's author picks.
+ *
+ *     KOF_TARGET_NAME(KOF_MALTYPE_BOTNET, "Mirai");
+ *
+ * Expands to nothing, like KOF_TARGET_FORMAT - ksigbuilder reads it out of the
+ * source and composes it into every detection name this file reports, so
+ * KOF_SCAN_INFECT/KOF_SCAN_SUSPECT below need only say the variant.
+ *
+ * Exactly one per file, and required before the first KOF_SCAN_INFECT/SUSPECT call -
+ * not merely before compile, but earlier in the source, because a module that never
+ * calls either never reports a name and this declaration would constrain nothing for
+ * it. That is also why this is not required for an unpack module: it has no findings
+ * to name, only bytes to produce.
+ *
+ * The family string is free text for now - no character restrictions enforced yet.
+ * That is a gap, not a decision: enforcing ASCII-only, no spaces, no separators is
+ * planned but not built. A "." in the family would be indistinguishable from the
+ * separator the composed name uses between type, family and variant, so avoid it
+ * until the check exists to refuse it.
+ */
+#define KOF_TARGET_NAME(type, family)
 
 /*
  * Which kinds of that format, as a mask over the format's own subtype values.
@@ -1469,30 +1518,51 @@ enum kof_str_word {
 #define KOF_DEFINE_HEXSTR(name, hex)
 
 /*
- * Report a finding and stop.
+ * Report a finding and stop. The level is the macro, not a parameter - so a reader
+ * sees what was decided without looking up a second argument.
  *
- *     KOF_SCAN_MATCH("Mirai.Generic", KOF_LVL_INFECT);
+ *     KOF_SCAN_INFECT("Variant-42bb");     custom variant, this module's own text
+ *     KOF_SCAN_INFECT(KOF_MALVAR_GENERIC); the family's one generic bucket
+ *     KOF_SCAN_INFECT(KOF_MALVAR_AUTO);    variant derived from the guarding pattern
+ *     KOF_SCAN_SUSPECT(...)                same three forms, KOF_LVL_SUSPECT instead
  *
- * The name id is the source line, which is why the string can be dropped from the
- * expansion: the build scans this source, reads the literal, and writes
- * "<line> <name>" into a table the host loads beside the blob. Same mechanism as
- * patterns, and the same failure mode - a table out of step with the blob shows up
- * as a missing name, never as a wrong one.
+ * The name id is the source line, which is why the argument can be dropped from the
+ * expansion below: the build scans this source, resolves whichever of the three
+ * forms was written, composes it with the KOF_TARGET_NAME this file declared, and
+ * writes "<line> <name>" into a table the host loads beside the blob. Same mechanism
+ * every declaration here uses, and the same failure mode - a table out of step with
+ * the blob shows up as a missing name, never as a wrong one.
  *
- * Write only the family part. The host prefixes format and architecture, so
- * "Mirai.Generic" is reported as "ELF.x86_64.Mirai.Generic" without this module
- * naming a format it cannot be sure of.
+ * KOF_MALVAR_GENERIC and KOF_MALVAR_AUTO need no #define to compile - the argument is
+ * never evaluated, only read as text by the build - but are given self-referential
+ * ones below so an editor does not flag them as undeclared.
+ *
+ * KOF_MALVAR_AUTO must directly guard - be the sole condition of the enclosing
+ * if (kof_find_str_any/all/multi(...)) - because the variant it produces is a hash of
+ * that call's region and patterns, not of anything KOF_SCAN_INFECT/SUSPECT itself is
+ * given. That is what makes it stable across rebuilds without a registry: the same
+ * patterns in the same region hash the same way every time, and a module compiled
+ * next to a hundred others does not need to know what they are named.
  *
  * Takes no context, for the reason the search macros do not: it names `ctx`, which
- * KOF_DEFINE_SCAN put in scope. Leaving it explicit here while the searches beside
- * it are not would be the worst of both - a parameter that is sometimes required
- * and never meaningful.
+ * KOF_DEFINE_SCAN put in scope. Leaving it explicit here while the searches beside it
+ * are not would be the worst of both - a parameter that is sometimes required and
+ * never meaningful.
  *
  * The report and the return are one statement so neither half can be forgotten.
  */
-#define KOF_SCAN_MATCH(name, level)                                              \
+#define KOF_MALVAR_AUTO    KOF_MALVAR_AUTO
+#define KOF_MALVAR_GENERIC KOF_MALVAR_GENERIC
+
+#define KOF_SCAN_INFECT(variant)                                            \
 	do {                                                                \
-		(ctx)->report((ctx), (uint32_t)(level), (uint32_t)__LINE__); \
+		(ctx)->report((ctx), (uint32_t)KOF_LVL_INFECT, (uint32_t)__LINE__); \
+		return;                                                     \
+	} while (0)
+
+#define KOF_SCAN_SUSPECT(variant)                                           \
+	do {                                                                \
+		(ctx)->report((ctx), (uint32_t)KOF_LVL_SUSPECT, (uint32_t)__LINE__); \
 		return;                                                     \
 	} while (0)
 

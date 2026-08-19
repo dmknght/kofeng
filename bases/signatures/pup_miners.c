@@ -2,6 +2,7 @@
 #include <kofmod/elf.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF); // File format elf. Prefilter will use this
+KOF_TARGET_NAME(KOF_MALTYPE_MINER, "CoinMiner");
 KOF_TARGET_RANGE(scan_range_data, KOF_SCAN_ELF_DATA); // define variable scan_ragne as elf_code and elf_data (structure from elf file). This will limit scan range
 
 /* The markers. Case and word handling belong to the literal; where to look does not,
@@ -31,11 +32,11 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 	 * object, together with every other module's.
 	 */
 	if (kof_find_str_any(scan_range_data, str_1, str_2, str_3))
-		KOF_SCAN_MATCH("Miner.Generic", KOF_LVL_SUSPECT);
+		KOF_SCAN_SUSPECT(KOF_MALVAR_GENERIC);
     if (kof_find_str_any(scan_range_data, str_4, str_5, str_6, str_7))
-        KOF_SCAN_MATCH("Miner.Generic", KOF_LVL_INFECT);
+        KOF_SCAN_INFECT(KOF_MALVAR_GENERIC);
     if (kof_find_str_any(scan_range_data, str_8))
-        KOF_SCAN_MATCH("Miner.XMRStak", KOF_LVL_INFECT);
+        KOF_SCAN_INFECT("XMRStak");
     if (kof_find_str_any(scan_range_data, str_9, str_10))
-        KOF_SCAN_MATCH("Miner.Xmrig", KOF_LVL_INFECT);
+        KOF_SCAN_INFECT("Xmrig");
 }

@@ -19,6 +19,7 @@
 /* Reads elf->sec_count, so it needs the ELF view and therefore exactly one
  * target: kof_elf() casts, and a cast needs a guaranteed format. */
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
+KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, "StrTest");
 
 /*
  * A compiler comment lives in .comment, which carries no SHF_ALLOC and so is never
@@ -47,10 +48,10 @@ KOF_DEFINE_SCAN
 		return;
 
 	if (kof_find_str(toolchain, gcc_comment))
-		KOF_SCAN_MATCH("Test.GccComment", KOF_LVL_INFECT);
+		KOF_SCAN_INFECT("GccComment");
 
 	/* Suspicion carries a reason, not a name. The host composes the string from
 	 * the format and architecture it already knows plus this code. */
 	if (kof_find_str(loaded_data, glibc))
-		KOF_SCAN_MATCH("Suspect.AnomCombo", KOF_LVL_SUSPECT);
+		KOF_SCAN_SUSPECT("AnomCombo");
 }

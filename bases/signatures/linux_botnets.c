@@ -2,6 +2,7 @@
 #include <kofmod/elf.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF); // File format elf. Prefilter will use this
+KOF_TARGET_NAME(KOF_MALTYPE_BOTNET, "Flooder");
 KOF_TARGET_RANGE(scan_range_data, KOF_SCAN_ELF_DATA); // define variable scan_ragne as elf_code and elf_data (structure from elf file). This will limit scan range
 
 /* The markers. Case and word handling belong to the literal; where to look does not,
@@ -26,5 +27,5 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 	 * object, together with every other module's.
 	 */
 	if (kof_find_str_any(scan_range_data, str_1, str_2, str_3, str_4, str_5, str_6))
-		KOF_SCAN_MATCH("Botnet.Generic", KOF_LVL_SUSPECT);
+		KOF_SCAN_SUSPECT(KOF_MALVAR_GENERIC);
 }
