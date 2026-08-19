@@ -48,6 +48,14 @@ static inline int kof_lstat(const char *path, struct stat *st)
 	return stat(path, st);
 }
 
+/* mingw-w64's mkdir takes no mode - NTFS permissions are not POSIX mode bits,
+ * and nothing here has ever depended on the mode surviving. */
+static inline int kof_mkdir(const char *path, int mode)
+{
+	(void)mode;
+	return mkdir(path);
+}
+
 static inline uint64_t kof_page_size(void)
 {
 	SYSTEM_INFO si;
@@ -108,6 +116,11 @@ static inline void kof_unmap_anon(void *p, uint64_t len)
 
 #include <sys/mman.h>
 #include <unistd.h>
+
+static inline int kof_mkdir(const char *path, int mode)
+{
+	return mkdir(path, (mode_t)mode);
+}
 
 static inline int kof_lstat(const char *path, struct stat *st)
 {

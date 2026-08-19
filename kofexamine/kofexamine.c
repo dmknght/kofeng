@@ -77,11 +77,11 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <errno.h>
 
 #include <kofeng.h>
+#include "../libkofeng/core/kofplatform.h"
 #include <kofcore.h>
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
@@ -1193,7 +1193,7 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir)
 			uint64_t wrote = 0;
 			uint32_t written = 0, k;
 
-			if (mkdir(dir, 0777) != 0 && errno != EEXIST) {
+			if (kof_mkdir(dir, 0777) != 0 && errno != EEXIST) {
 				fprintf(stderr, "kofexamine: cannot create %s: "
 						"%s\n", dir, strerror(errno));
 				rc = -1;
@@ -1279,21 +1279,21 @@ static int examine(const char *path, int dump)
 		close(fd);
 		return 0;
 	}
-	map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	map = kof_map_file_ro(fd, (uint64_t)st.st_size);
 	close(fd);
-	if (map == MAP_FAILED) {
+	if (!map) {
 		fprintf(stderr, "kofexamine: cannot map %s\n", path);
 		return 0;
 	}
 	if (dump && !dump_dir_for(path, dir, sizeof dir)) {
 		fprintf(stderr, "kofexamine: path too long to place a dump beside "
 				"%s\n", path);
-		munmap(map, (size_t)st.st_size);
+		kof_unmap_file(map, (uint64_t)st.st_size);
 		return -1;
 	}
 	rc = examine_bytes(kof_buf_make(map, (uint64_t)st.st_size), path,
 			   dump ? dir : 0);
-	munmap(map, (size_t)st.st_size);
+	kof_unmap_file(map, (uint64_t)st.st_size);
 	return rc;
 }
 
@@ -1419,7 +1419,7 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 		u->err = 1;
 		return 0;
 	}
-	if (mkdir(sub, 0777) != 0 && errno != EEXIST) {
+	if (kof_mkdir(sub, 0777) != 0 && errno != EEXIST) {
 		fprintf(stderr, "kofexamine: cannot create %s: %s\n", sub,
 			strerror(errno));
 		u->err = 1;

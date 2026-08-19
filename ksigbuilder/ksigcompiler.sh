@@ -129,7 +129,14 @@ fi
 # The other half of the toolchain, in its --extract mode: it reads the declarations
 # out of the source. Same binary that packs the artefacts, so the region names it
 # accepts and the pack it later writes cannot disagree about anything.
-ksigbuilder=${KOF_KSIGBUILDER:-$root/build/release/bin/ksigbuilder}
+#
+# .exe on Windows, unconditionally: the Makefile links every host tool with that
+# suffix there and never strips it, because PowerShell and cmd.exe both refuse to
+# start a program with no recognised extension at all - so the default here has to
+# name the file that is actually on disk, not the name Linux would have given it.
+ksigbin=ksigbuilder
+[ "$os" = windows ] && ksigbin=ksigbuilder.exe
+ksigbuilder=${KOF_KSIGBUILDER:-$root/build/release/bin/$ksigbin}
 if [ ! -x "$ksigbuilder" ]; then
 	echo "ksigcompiler.sh: $ksigbuilder missing (run: make)" >&2
 	exit 2

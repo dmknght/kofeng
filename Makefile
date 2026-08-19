@@ -35,6 +35,48 @@ CFLAGS  += -std=c11 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
            -Wpointer-arith -Wstrict-prototypes -Wmissing-prototypes \
            -fno-common -Ilibkofeng/core
 
+# Windows only: two problems neither POSIX convention nor this tree's own layout
+# solves by itself, both worth fixing once here rather than in every recipe.
+#
+# TMP/TEMP, not TMPDIR. A linked binary needs a place to put its intermediates,
+# and the native (non-MSYS) compiler that builds one on this target reads the
+# Windows convention for that, not the POSIX one - TMPDIR is invisible to it
+# however it is set. Worse, this shell's own TMP/TEMP do not reliably reach a
+# recipe's child process at all: verified by printing them from inside a plain
+# `bash -c` child spawned from a shell that had just exported them, empty on the
+# other side. Exporting a real Windows path here, once, is unaffected by
+# whatever the invoking shell did or did not pass through, because this
+# Makefile now owns setting it rather than inheriting it.
+#
+# EXE - the suffix a linked image on this target gets REGARDLESS of what -o
+# asked for: clang/lld-link append .exe to the file they write however $@ is
+# spelled, so a target that did not already expect it would build a file make
+# can never find and relink forever.
+#
+# Named here rather than papered over with a rename, because the far side of
+# that rename is worse than the problem it hides: PowerShell and cmd.exe both
+# refuse to start a program with no recognised extension at all - "cannot run
+# a document" - and this project's users are exactly as likely to invoke
+# kofscanner from a PowerShell prompt as from this Makefile. Every place in
+# this tree that names one of these binaries - the targets below,
+# ksigcompiler.sh's KOF_KSIGBUILDER default - spells $(EXE) after it instead.
+#
+# -pthread: clock_gettime is POSIX and every host tool that times a scan uses
+# it, but on this target it resolves through winpthreads' pthread_time.h, and
+# without this flag the link fails on an undefined clock_gettime64 rather than
+# on anything this tree's own code did wrong.
+ifneq (,$(findstring MINGW,$(shell uname -s 2>/dev/null))$(findstring MSYS,$(shell uname -s 2>/dev/null)))
+NATIVE_OS   := windows
+EXE         := .exe
+WINTMP      := $(shell cygpath -w "$(CURDIR)/build/temp" 2>/dev/null)
+export TMP  := $(WINTMP)
+export TEMP := $(WINTMP)
+CFLAGS      += -pthread
+else
+NATIVE_OS   := $(shell uname -s 2>/dev/null)
+EXE         :=
+endif
+
 # Header dependencies, emitted as a side effect of every compile and included
 # below. Without them a header edit rebuilds nothing: the object files are newer
 # than the .c that did not change, so make has nothing to do and the tests run
@@ -88,11 +130,11 @@ all: sdk tools databases
 # same sentence the broken version printed - so a working build and a build that
 # does nothing were indistinguishable from the outside. Saying what exists costs a
 # line and removes the ambiguity entirely.
-kofscanner:  $(OUT)/bin/kofscanner
+kofscanner:  $(OUT)/bin/kofscanner$(EXE)
 	@echo "  $<"
-kofexamine:  $(OUT)/bin/kofexamine
+kofexamine:  $(OUT)/bin/kofexamine$(EXE)
 	@echo "  $<"
-ksigbuilder: $(OUT)/bin/ksigbuilder
+ksigbuilder: $(OUT)/bin/ksigbuilder$(EXE)
 	@echo "  $<"
 
 tools: kofscanner kofexamine ksigbuilder
@@ -223,7 +265,7 @@ sdk: $(LIB) $(SDK_HDR)
 
 SCANNER_SRC := kofscanner/kofscanner.c
 
-$(OUT)/bin/kofscanner: $(SCANNER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
+$(OUT)/bin/kofscanner$(EXE): $(SCANNER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(SCANNER_SRC) $(LIB) -o $@ $(LDFLAGS)
 
@@ -233,7 +275,7 @@ $(OUT)/bin/kofscanner: $(SCANNER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 # view, and no public surface offers one. The reason that is not a lapse is
 # written at the top of the file.
 
-$(OUT)/bin/kofexamine: kofexamine/kofexamine.c $(LIB) $(SDK_HDR) $(STAMP)
+$(OUT)/bin/kofexamine$(EXE): kofexamine/kofexamine.c $(LIB) $(SDK_HDR) $(STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $< $(LIB) -o $@ $(LDFLAGS)
 
@@ -243,7 +285,7 @@ $(OUT)/bin/kofexamine: kofexamine/kofexamine.c $(LIB) $(SDK_HDR) $(STAMP)
 # source, and the default mode packs compiled artefacts into .ksig. Build-time
 # only, and deliberately not linked into anything that runs on an endpoint.
 
-$(OUT)/bin/ksigbuilder: ksigbuilder/ksigbuilder.c $(LIB) $(SDK_HDR) $(STAMP)
+$(OUT)/bin/ksigbuilder$(EXE): ksigbuilder/ksigbuilder.c $(LIB) $(SDK_HDR) $(STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPTO) $< $(LIB) -o $@ $(LDFLAGS)
 
@@ -304,7 +346,7 @@ DB        ?= $(strip $(if $(filter bases,$(BASESET)),$(OUT)/databases,\
 # The per-source chatter is dropped and a count is printed in its place. It used
 # to be dropped and nothing printed, so a compile of every base in the tree looked
 # exactly like a target that had decided there was nothing to do.
-sigs: $(OUT)/bin/ksigbuilder $(SDK_HDR)
+sigs: $(OUT)/bin/ksigbuilder$(EXE) $(SDK_HDR)
 	@test -n "$(SIGS)" || { echo "make: no base sources in $(BASEDIR)" >&2; \
 		exit 2; }
 	@rm -rf $(ARTEFACTS)
@@ -314,11 +356,11 @@ sigs: $(OUT)/bin/ksigbuilder $(SDK_HDR)
 		xargs -P $(JOBS) -n 1 ksigbuilder/ksigcompiler.sh >/dev/null
 	@echo "  $(words $(SIGS)) source(s) from $(BASEDIR) -> $(ARTEFACTS)"
 
-databases: sigs $(OUT)/bin/ksigbuilder
+databases: sigs $(OUT)/bin/ksigbuilder$(EXE)
 	@rm -rf $(DB)
 	@mkdir -p $(DB)
-	@$(OUT)/bin/ksigbuilder $(ARTEFACTS) $(DB)
-	@echo "   scan with: $(OUT)/bin/kofscanner --db $(DB) --scan-files <path>"
+	@$(OUT)/bin/ksigbuilder$(EXE) $(ARTEFACTS) $(DB)
+	@echo "   scan with: $(OUT)/bin/kofscanner$(EXE) --db $(DB) --scan-files <path>"
 
 # ------------------------------------------------------------------- testing
 #
@@ -338,7 +380,7 @@ fixtures: | $(TEST)
 	@tests/mkfixtures.sh $(FIXTURES)
 
 UNIT_SRC := $(wildcard tests/unit/*.c)
-UNIT_BIN := $(patsubst tests/unit/%.c,$(TEST)/unit_%,$(UNIT_SRC))
+UNIT_BIN := $(patsubst tests/unit/%.c,$(TEST)/unit_%$(EXE),$(UNIT_SRC))
 
 # Linked against the library, so a unit test can exercise it rather than only
 # whatever it can compile in on its own.
@@ -348,7 +390,7 @@ UNIT_BIN := $(patsubst tests/unit/%.c,$(TEST)/unit_%,$(UNIT_SRC))
 # the one thing the library must never do itself.
 UNIT_LIBS_inflate_diff := -lz
 
-$(TEST)/unit_%: tests/unit/%.c $(LIB) $(STAMP) | $(TEST)
+$(TEST)/unit_%$(EXE): tests/unit/%.c $(LIB) $(STAMP) | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) $< $(LIB) -o $@ $(LDFLAGS) $(UNIT_LIBS_$*)
 
 # The engine's own signature set is BUILT here, not merely present.
@@ -384,7 +426,7 @@ unit: fixtures test-sigs $(UNIT_BIN)
 #
 ASAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer \
               -fno-sanitize-recover=undefined
-ASAN_BIN := $(patsubst tests/unit/%.c,$(TEST)/asan_%,$(UNIT_SRC))
+ASAN_BIN := $(patsubst tests/unit/%.c,$(TEST)/asan_%$(EXE),$(UNIT_SRC))
 
 ASAN_LIB := $(TEST)/libkofeng-asan.a
 
@@ -396,7 +438,7 @@ $(ASAN_LIB): $(LIB_SRC) $(SDK_HDR) | $(TEST)
 	done
 	@$(AR) rcs $@ $(TEST)/asan-obj/*.o
 
-$(TEST)/asan_%: tests/unit/%.c $(ASAN_LIB) $(STAMP) | $(TEST)
+$(TEST)/asan_%$(EXE): tests/unit/%.c $(ASAN_LIB) $(STAMP) | $(TEST)
 	@$(CC) $(CFLAGS) $(ASAN_FLAGS) $< $(ASAN_LIB) -o $@ $(LDFLAGS) $(UNIT_LIBS_$*)
 
 unit-asan: fixtures test-sigs $(ASAN_BIN)
