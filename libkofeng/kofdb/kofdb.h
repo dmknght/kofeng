@@ -122,6 +122,11 @@ struct kof_module {
 	uint32_t str_base,  n_str;
 	uint32_t rng_base,  n_rng;
 
+	/* What KOF_TARGET_NAME declared - see struct kof_pack_mod in kofpack.h
+	 * and kof_db_family below. Meaningless and unread for an unpack-kind
+	 * module, same as on the pack record this is copied from. */
+	uint32_t family_off;
+	uint32_t maltype;     /* enum kof_maltype */
 };
 
 /*
@@ -258,5 +263,12 @@ const struct kof_str_ent *kof_db_str(const struct kof_engine *,
 
 const char *kof_db_name(const struct kof_engine *, const struct kof_module *,
 			uint32_t name_id);
+
+/* The family KOF_TARGET_NAME declared for this module, read from the pack the
+ * same way kof_db_name reads a finding's variant - out of the mapping, bounds
+ * checked on every call rather than trusted from load time, for the reason
+ * kof_db_name's own comment gives. NULL if the record does not hold together;
+ * "" (not NULL) for a module that legitimately declared none. */
+const char *kof_db_family(const struct kof_engine *, const struct kof_module *);
 
 #endif /* KOFENG_KOFDB_H */

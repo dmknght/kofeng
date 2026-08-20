@@ -1294,8 +1294,9 @@ enum kof_unp_broken {
 #define kof_find_str_multi(rng, ...) (KOF_FS_FOLD(+, rng, __VA_ARGS__))
 
 /*
- * What kind of malware a detection is, for the report string ksigbuilder composes -
- * see KOF_TARGET_NAME below.
+ * What kind of malware a detection is, for the report string the host composes at
+ * report time - see KOF_TARGET_NAME below for the declaration, and
+ * kof_maltype_name just after this enum for the word a finding shows.
  *
  * Plain values, not a mask: a module names one type, never an OR of several, so
  * there is nothing here for a bit to buy. Unlike KOF_FMT_* and KOF_ARCH_*, whose
@@ -1317,6 +1318,29 @@ enum kof_maltype {
 	KOF_MALTYPE_DROPPER,     /* covers downloader */
 	KOF_MALTYPE_HACKTOOL
 };
+
+/*
+ * The word a finding shows for one of the values above. Read at report time: the
+ * pack stores the enum value and the family text once per module, not composed
+ * into a string until a finding actually needs printing - see
+ * struct kof_pack_mod in kofpack.h and finding_str in scan.c.
+ */
+static inline const char *kof_maltype_name(uint32_t maltype)
+{
+	switch (maltype) {
+	case KOF_MALTYPE_VIRUS:    return "Virus";
+	case KOF_MALTYPE_TROJAN:   return "Trojan";
+	case KOF_MALTYPE_ROOTKIT:  return "Rootkit";
+	case KOF_MALTYPE_BOTNET:   return "Botnet";
+	case KOF_MALTYPE_RANSOM:   return "Ransom";
+	case KOF_MALTYPE_MINER:    return "Miner";
+	case KOF_MALTYPE_ADWARE:   return "Adware";
+	case KOF_MALTYPE_EXPLOIT:  return "Exploit";
+	case KOF_MALTYPE_DROPPER:  return "Dropper";
+	case KOF_MALTYPE_HACKTOOL: return "Hacktool";
+	default:                   return "Malware";
+	}
+}
 
 /*
  * Declare which object formats this module applies to.

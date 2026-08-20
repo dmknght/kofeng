@@ -551,6 +551,8 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		m->pack_id   = pack_id;
 		m->name_base = pm[i].name_first;    /* within that pack */
 		m->n_names   = pm[i].n_names;
+		m->family_off = pm[i].family_off;
+		m->maltype    = pm[i].maltype;
 
 
 		/* Only a detector's regions go into the union the scanner resolves.
@@ -676,6 +678,45 @@ const char *kof_db_name(const struct kof_engine *e, const struct kof_module *m,
 		return pool + d->off;
 	}
 	return NULL;
+}
+
+/*
+ * The family KOF_TARGET_NAME declared, read the same way kof_db_name reads a
+ * finding's variant - same pool, same mapping, same reason to check on every
+ * call instead of trusting the load time pass (see the comment on kof_db_name).
+ *
+ * Simpler than kof_db_name: family_off is not a table of candidates to search
+ * by id, it is the one offset this module's record carries, so there is no loop
+ * here - just the same two checks kof_db_name's loop body makes for whichever
+ * descriptor it found.
+ */
+const char *kof_db_family(const struct kof_engine *e, const struct kof_module *m)
+{
+	const struct kof_pack_hdr *h;
+	const uint8_t *base;
+	const char *pool;
+	uint64_t pool_off, pool_len;
+
+	if (!m || m->pack_id >= e->n_packs)
+		return NULL;
+	base = e->packs[m->pack_id].map;
+	if (!base)
+		return NULL;
+	h = (const void *)base;
+
+	pool_off = h->sec[KOF_SEC_NAME_POOL].off;
+	pool_len = h->sec[KOF_SEC_NAME_POOL].len;
+	if (pool_off > e->packs[m->pack_id].len ||
+	    pool_len > e->packs[m->pack_id].len - pool_off)
+		return NULL;
+
+	pool = (const char *)base + pool_off;
+	if (m->family_off >= pool_len)
+		return NULL;
+	if (memchr(pool + m->family_off, 0,
+		   (size_t)(pool_len - m->family_off)) == NULL)
+		return NULL;
+	return pool + m->family_off;
 }
 
 struct kof_engine *kof_db_load(const char *path)

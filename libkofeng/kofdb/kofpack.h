@@ -112,13 +112,22 @@
  * that reads it, and a loader that accepts an older layout is a loader carrying two
  * layouts. A pack whose version differs is refused, not converted.
  *
- * Still 1 while the format is pre-release. Nothing has shipped, every database in
+ * Still moving while the format is pre-release. Nothing has shipped, every database in
  * existence is rebuilt from source by `make db`, and a version that moves before
  * anyone can be holding the old one is a number that records edits rather than
  * compatibility. It gets bumped on the first release and on every shape change
  * after that.
+ *
+ * 4: struct kof_pack_mod grew family_off and maltype, and KOF_SEC_NAME_POOL's
+ * contract changed with it - a finding's name descriptor used to hold the whole
+ * composed string ("Botnet.Mirai.Generic"); now it holds only the variant, and
+ * the family text lives once per module instead of once per finding. A version 3
+ * reader would read a version 4 pack's name pool as full names and be
+ * technically not wrong, which is exactly the kind of not-wrong that is worse
+ * than a refusal - see KOF_TARGET_NAME and finding_str in scan.c for the shape
+ * this now matches.
  */
-#define KOF_PACK_VERSION 3u
+#define KOF_PACK_VERSION 4u
 
 /*
  * The machine the code in this pack was built for. Not an architecture the pack
@@ -377,6 +386,32 @@ struct kof_pack_hdr {
  *
  * memo_base is absent on purpose. It depends on which other packs are loaded
  * beside this one, so it is engine state, not a fact about the file.
+ *
+ * family_off and maltype are what KOF_TARGET_NAME declares, read here rather
+ * than composed into every finding's text. KOF_TARGET_NAME is one declaration
+ * per source file, and a module with several KOF_SCAN_INFECT/SUSPECT calls used
+ * to pay for that declaration again in every one of them - "Botnet.Mirai." typed
+ * into the name pool once per finding instead of once per module, because
+ * nothing kept the module-scoped fact apart from the per-finding one. Storing it
+ * here instead is the same move struct kof_pack_str's off/len already made for a
+ * literal: a fact shared by many records lives once, and what varies per record
+ * is what the record actually holds.
+ *
+ * family_off points into KOF_SEC_NAME_POOL, same pool a name descriptor's off
+ * does - a module's family and its findings' variants are both short, both
+ * author-chosen text, and interning them together is what lets "Mirai" declared
+ * by two different modules share bytes. NUL terminated, unlike a string
+ * literal's pool entry, for the same reason a name is: this is printed, not
+ * searched. maltype is enum kof_maltype (kofsig.h); the word a reader sees comes
+ * from kof_maltype_name, not from anything stored as text.
+ *
+ * Both are meaningless for an unpack-kind module - KOF_TARGET_NAME is not
+ * required there and an unpacker reports nothing by name - but never invalid:
+ * the packer interns an empty family for a module that declared none, so
+ * family_off is always a real offset to a real (possibly empty) string, and
+ * there is nothing here for the loader to reject. Nothing ever calls
+ * kof_maltype_name or reads the family pool for such a module; see the note on
+ * KOF_TARGET_NAME in kofsig.h for why the declaration is optional there.
  */
 struct kof_pack_mod {
 	uint32_t code_off;        /* from the start of KOF_SEC_CODE */
@@ -385,6 +420,9 @@ struct kof_pack_mod {
 	uint32_t str_first,  n_str;
 	uint32_t rng_first,  n_rng;
 	uint32_t name_first, n_names;
+
+	uint32_t family_off;      /* into KOF_SEC_NAME_POOL, NUL terminated */
+	uint32_t maltype;         /* enum kof_maltype */
 };
 
 /*
@@ -532,7 +570,7 @@ struct kof_pack_idx {
  * entered at the wrong offset. These fail the build instead.
  */
 _Static_assert(sizeof(struct kof_pack_sec)  == 16,  "pack section entry grew padding");
-_Static_assert(sizeof(struct kof_pack_mod)  == 32,  "pack module record grew padding");
+_Static_assert(sizeof(struct kof_pack_mod)  == 40,  "pack module record grew padding");
 _Static_assert(sizeof(struct kof_pack_str)  == 12,  "pack string descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_name) == 8,   "pack name descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_idx)  == 8,   "pack index slot grew padding");

@@ -299,40 +299,32 @@ static const struct macro macros[] = {
 };
 
 /*
- * enum kof_maltype (kofsig.h) as words a source may write, and the capitalised word
- * ksigbuilder composes into a detection name from it. Two views of one table so a
- * type added to the enum and not here fails loudly - see read_maltype - rather than
- * compiling and never being reachable from a signature.
+ * enum kof_maltype (kofsig.h) as words a source may write. Only the parse
+ * direction lives here now: the display word a finding shows comes from
+ * kof_maltype_name (kofsig.h) at report time, not from this table at build
+ * time - ksigbuilder stores the enum value on the module record and nothing
+ * else, see struct kof_pack_mod. A type added to the enum and not here still
+ * fails loudly, in read_maltype, rather than compiling and never being
+ * reachable from a signature.
  */
 struct maltype_name {
 	const char *word;
 	int         val;
-	const char *disp;
 };
 
 static const struct maltype_name maltype_names[] = {
-	{ "KOF_MALTYPE_VIRUS",    KOF_MALTYPE_VIRUS,    "Virus"    },
-	{ "KOF_MALTYPE_TROJAN",   KOF_MALTYPE_TROJAN,   "Trojan"   },
-	{ "KOF_MALTYPE_ROOTKIT",  KOF_MALTYPE_ROOTKIT,  "Rootkit"  },
-	{ "KOF_MALTYPE_BOTNET",   KOF_MALTYPE_BOTNET,   "Botnet"   },
-	{ "KOF_MALTYPE_RANSOM",   KOF_MALTYPE_RANSOM,   "Ransom"   },
-	{ "KOF_MALTYPE_MINER",    KOF_MALTYPE_MINER,    "Miner"    },
-	{ "KOF_MALTYPE_ADWARE",   KOF_MALTYPE_ADWARE,   "Adware"   },
-	{ "KOF_MALTYPE_EXPLOIT",  KOF_MALTYPE_EXPLOIT,  "Exploit"  },
-	{ "KOF_MALTYPE_DROPPER",  KOF_MALTYPE_DROPPER,  "Dropper"  },
-	{ "KOF_MALTYPE_HACKTOOL", KOF_MALTYPE_HACKTOOL, "Hacktool" },
-	{ NULL, 0, NULL }
+	{ "KOF_MALTYPE_VIRUS",    KOF_MALTYPE_VIRUS    },
+	{ "KOF_MALTYPE_TROJAN",   KOF_MALTYPE_TROJAN   },
+	{ "KOF_MALTYPE_ROOTKIT",  KOF_MALTYPE_ROOTKIT  },
+	{ "KOF_MALTYPE_BOTNET",   KOF_MALTYPE_BOTNET   },
+	{ "KOF_MALTYPE_RANSOM",   KOF_MALTYPE_RANSOM   },
+	{ "KOF_MALTYPE_MINER",    KOF_MALTYPE_MINER    },
+	{ "KOF_MALTYPE_ADWARE",   KOF_MALTYPE_ADWARE   },
+	{ "KOF_MALTYPE_EXPLOIT",  KOF_MALTYPE_EXPLOIT  },
+	{ "KOF_MALTYPE_DROPPER",  KOF_MALTYPE_DROPPER  },
+	{ "KOF_MALTYPE_HACKTOOL", KOF_MALTYPE_HACKTOOL },
+	{ NULL, 0 }
 };
-
-static const char *maltype_disp(int v)
-{
-	int i;
-
-	for (i = 0; maltype_names[i].word; i++)
-		if (maltype_names[i].val == v)
-			return maltype_names[i].disp;
-	return "Malware";   /* unreachable while every use is gated by g_have_name */
-}
 
 /*
  * KOF_TARGET_NAME's two fields, file scoped like target_mask and its siblings: one
@@ -979,18 +971,23 @@ static int read_variant(const char *p, int line, char *out, size_t cap)
 		raw[rn] = 0;
 
 		if (strcmp(raw, "KOF_MALVAR_GENERIC") == 0) {
+			/* Generic means exactly one thing: the family's one
+			 * undifferentiated bucket. Nothing is appended to it -
+			 * appending anything would make it stop meaning that. */
 			strcpy(raw, "Generic");
 		} else if (strcmp(raw, "KOF_MALVAR_AUTO") == 0) {
-			char suffix[6];
-
+			/* AUTO is the opposite of generic: a stable, SPECIFIC
+			 * identity for this exact pattern, distinguishable from
+			 * every other AUTO variant in the same family. Prefixing
+			 * it with "Generic-" said the opposite of what it is -
+			 * fixed after it was pointed out. The hash stands alone. */
 			if (!g_have_find) {
 				err(line, "KOF_MALVAR_AUTO must directly guard a "
 					  "single kof_find_str_any/all/multi(...) "
 					  "condition");
 				return 0;
 			}
-			auto_suffix(suffix);
-			snprintf(raw, sizeof raw, "Generic-%s", suffix);
+			auto_suffix(raw);
 		} else {
 			fprintf(stderr, "%s:%d: error: the argument to "
 					"KOF_SCAN_INFECT/SUSPECT must be a quoted "
@@ -1002,9 +999,18 @@ static int read_variant(const char *p, int line, char *out, size_t cap)
 		}
 	}
 
-	n = snprintf(out, cap, "%s.%s.%s", maltype_disp(g_maltype), g_family, raw);
+	/*
+	 * The variant only - not composed with family or type here anymore.
+	 * KOF_TARGET_NAME is one declaration per file; composing its family and
+	 * type into every finding's text repeated that declaration once per
+	 * finding in the name pool. The host composes the full string at
+	 * report time instead, from this variant plus the module's own
+	 * family_off/maltype record - see struct kof_pack_mod in kofpack.h and
+	 * finding_str in scan.c.
+	 */
+	n = snprintf(out, cap, "%s", raw);
 	if (n < 0 || (size_t)n >= cap) {
-		err(line, "composed detection name too long");
+		err(line, "detection variant too long");
 		return 0;
 	}
 	return 1;
@@ -1409,6 +1415,11 @@ static int extract_main(int argc, char **argv)
 	}
 	fprintf(out, "scan_mask=%lu\n", scan_mask);
 	fprintf(out, "nstr=%d\n", npats);
+	/* Empty when the source never declared one - an unpack-kind module,
+	 * where KOF_TARGET_NAME is not required. ksigcompiler.sh copies these
+	 * into .meta unchanged; see struct kof_pack_mod for where they end up. */
+	fprintf(out, "family=%s\n", g_have_name ? g_family : "");
+	fprintf(out, "maltype=%d\n", g_have_name ? g_maltype : 0);
 	fclose(out);
 
 	/* The strings and ranges, for the packer to put in the pack. */
@@ -1445,6 +1456,11 @@ struct artefact {
 	uint32_t target_mask, scan_mask, arch_mask, subtype_mask;
 	uint64_t size_min;
 
+	/* What KOF_TARGET_NAME declared - empty family / maltype 0 for an
+	 * unpack-kind module, where it is not required. */
+	char    *family;
+	uint32_t maltype;
+
 	/* What this module fires on: preconditions plus the exact pattern/region
 	 * set, order independent. See artefact_fingerprint. Not a security hash and
 	 * not stored anywhere beyond this run - it exists only to warn when two
@@ -1467,6 +1483,7 @@ static void artefact_free(struct artefact *a)
 {
 	free(a->stem);
 	free(a->label);
+	free(a->family);
 	free(a->code);
 	free(a->str);
 	free(a->rng);
@@ -1598,6 +1615,19 @@ static int meta_load(struct artefact *a)
 				fclose(f);
 				goto out;
 			}
+		} else if (strncmp(line, "family=", 7) == 0) {
+			char *nl = strchr(line + 7, '\n');
+
+			if (nl)
+				*nl = 0;
+			free(a->family);
+			a->family = strdup(line + 7);
+			if (!a->family) {
+				fclose(f);
+				goto out;
+			}
+		} else if (strncmp(line, "maltype=", 8) == 0) {
+			a->maltype = (uint32_t)strtoul(line + 8, 0, 10);
 		}
 	}
 	fclose(f);
@@ -1618,6 +1648,15 @@ static int meta_load(struct artefact *a)
 	 * must never be. Rebuilding the artefacts fixes it. */
 	if (!a->label || !a->label[0]) {
 		fprintf(stderr, "ksigbuilder: %s: record declares no label; "
+				"rebuild the artefacts\n", a->stem);
+		goto out;
+	}
+	/* Same reasoning as label just above: a detect-kind module always has a
+	 * KOF_TARGET_NAME (ksigcompiler.sh's --extract refuses the source
+	 * otherwise), so an empty family here means an artefact from before
+	 * this field existed, not a module that legitimately has none. */
+	if (a->kind == KOF_PACK_DETECT && (!a->family || !a->family[0])) {
+		fprintf(stderr, "ksigbuilder: %s: record declares no family; "
 				"rebuild the artefacts\n", a->stem);
 		goto out;
 	}
@@ -2390,6 +2429,8 @@ int main(int argc, char **argv)
 			pm[a].n_rng       = s->n_rng;
 			pm[a].name        = s->name;
 			pm[a].n_names     = s->n_names;
+			pm[a].family      = s->family;
+			pm[a].maltype     = s->maltype;
 		}
 
 		img = kof_pack_build(g->kind, pm, g->n, &img_len);

@@ -452,8 +452,11 @@ pre=$tmp/$name.pre
 "$ksigbuilder" --extract "$src" "$pat" "$namefile" "$pre" "$strfile"
 scan_mask=$(sed -n 's/^scan_mask=//p' "$pre")
 nstr=$(sed -n 's/^nstr=//p' "$pre")
+family=$(sed -n 's/^family=//p' "$pre")
+maltype=$(sed -n 's/^maltype=//p' "$pre")
 : "${scan_mask:=0}"
 : "${nstr:=0}"
+: "${maltype:=0}"
 
 if [ "$os" = windows ]; then
 	# module.ld gives the ELF build one guarantee for free: the linker
@@ -695,6 +698,11 @@ cp "$raw" "$blob"
 	printf 'size_min=%s\n'  "$size_min"
 	printf 'arch_mask=%s\n' "$arch_mask"
 	printf 'subtype_mask=%s\n' "$subtype_mask"
+	# What KOF_TARGET_NAME declared - empty/0 for an unpack-kind module, where
+	# it is not required. ksigbuilder's --extract already validated these; this
+	# is a straight copy through .pre, same as scan_mask above.
+	printf 'family=%s\n'    "$family"
+	printf 'maltype=%s\n'   "$maltype"
 	printf 'nstr=%s\n'      "$nstr"
 	printf 'blob_len=%s\n'  "$(stat -c%s "$blob")"
 	# Derived from the exported entry point, never authored - see above.

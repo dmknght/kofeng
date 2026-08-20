@@ -221,8 +221,12 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 	b->rng  = calloc(b->n_rng  ? b->n_rng  : 1, sizeof *b->rng);
 	if (!b->mod || !b->str || !b->name || !b->rng)
 		goto out;
+	/* dn now interns one family string per module as well as one entry per
+	 * finding (see the loop below), so it is sized for both up front - the
+	 * same reason dedup_init takes an expected count instead of growing:
+	 * a table that fills mid-build is a build error, not silently slow. */
 	if (!dedup_init(&ds, b->n_str ? b->n_str : 1) ||
-	    !dedup_init(&dn, b->n_name ? b->n_name : 1))
+	    !dedup_init(&dn, (b->n_name ? b->n_name : 1) + (n ? n : 1)))
 		goto out;
 
 	for (i = 0; i < n; i++) {
@@ -279,6 +283,27 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 		o->n_rng      = m->n_rng;
 		o->name_first = ni;
 		o->n_names    = m->n_names;
+
+		/*
+		 * What KOF_TARGET_NAME declared, once per module rather than once
+		 * per finding - see the comment on struct kof_pack_mod. Interned
+		 * into the same pool and the same dedup table a finding's variant
+		 * uses (dn), so two modules declaring the same family share the
+		 * bytes. Empty rather than skipped when a module declared none
+		 * (an unpack-kind module never does), so family_off is always a
+		 * real offset to a real string and the loader never has to treat
+		 * it as a special case.
+		 */
+		{
+			const char *fam = m->family ? m->family : "";
+			uint32_t flen = (uint32_t)strlen(fam) + 1;
+			uint32_t family_uid;
+
+			if (!pool_intern(&dn, &b->name_pool, fam, flen,
+					 &o->family_off, &family_uid))
+				goto out;
+		}
+		o->maltype = m->maltype;
 
 		for (k = 0; k < m->n_str; k++, si++) {
 			const struct kof_pw_str *s = &m->str[k];

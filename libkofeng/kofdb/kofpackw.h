@@ -66,6 +66,12 @@ struct kof_pw_mod {
 	uint32_t                  n_rng;
 	const struct kof_pw_name *name;
 	uint32_t                  n_names;
+
+	/* What KOF_TARGET_NAME declared - see struct kof_pack_mod in kofpack.h.
+	 * `family` may be NULL or empty for an unpack-kind module; the builder
+	 * interns whatever it is given either way. */
+	const char *family;
+	uint32_t    maltype;      /* enum kof_maltype */
 };
 
 /*

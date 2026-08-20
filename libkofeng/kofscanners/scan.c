@@ -225,16 +225,27 @@ static int prefilter(const struct kof_module *m, const struct kof_obj_ctx *ctx,
 /* ---- naming a finding ------------------------------------------------------ */
 
 /*
- * <target>.<what the author wrote>
+ * <target>/<what the author wrote>
  *
- *     ELF-x64.Mirai.Gen
- *     PE-x86.UPX.Gen
- *     Script.Nemucod.Gen
+ *     ELF-x64/Botnet:Mirai-04gix              (KOF_MALVAR_AUTO)
+ *     PE-x86/Hacktool:Meterpreter-Generic     (KOF_MALVAR_GENERIC)
+ *     Zip/Exploit:ZipSlip-CVE-2018-1002200    (a custom variant)
  *
  * The target is composed and not authored: it is what the engine established by
  * parsing, so a module cannot claim a format it was not run against or an
- * architecture the object does not have. What is left for the author is the family
- * and the variant, which is the part that needs a person.
+ * architecture the object does not have. Everything after the "/" is authored -
+ * a type from enum kof_maltype, a family, a variant - which is the part that
+ * needs a person, and the "/" marks exactly that boundary: computed fact on the
+ * left, human classification on the right.
+ *
+ * Three different separators past the "/", one per boundary, each chosen not to
+ * collide with what a variant already tends to contain: KOF_MALVAR_AUTO's own
+ * output and hand written variants like "CVE-2018-1002200" both use "-"
+ * internally, so "-" is spent on exactly one boundary (family/variant) and nowhere
+ * else, or "Mirai-CVE-2018-1002200" would read as a run of hyphens with no visible
+ * structure. ":" separates type from family, matching how a reader already parses
+ * "Category: Item" elsewhere; "." is avoided entirely here for the same collision
+ * reason "-" is only used once.
  *
  * Format and architecture are one token joined by a dash rather than two parts.
  * They answer one question - what does this run on - and splitting them made every
@@ -251,14 +262,21 @@ static void finding_str(const struct kof_scanner *sc,
 			const struct kof_obj_ctx *ctx,
 			const struct kof_module *m, char *out, size_t cap)
 {
-	const char *nm = kof_db_name(sc->eng, m, sc->rep_name_id);
+	const char *variant = kof_db_name(sc->eng, m, sc->rep_name_id);
+	const char *family  = kof_db_family(sc->eng, m);
+	const char *maltype = kof_maltype_name(m->maltype);
 	const char *fmt = kof_format_name(ctx->format);
+	char fmtarch[32];
 
 	if (ctx->arch == KOF_ARCH_ANY || ctx->format == KOF_FMT_UNKNOWN)
-		snprintf(out, cap, "%s.%s", fmt, nm ? nm : "unknown");
+		snprintf(fmtarch, sizeof fmtarch, "%s", fmt);
 	else
-		snprintf(out, cap, "%s-%s.%s", fmt, kof_arch_name(ctx->arch),
-			 nm ? nm : "unknown");
+		snprintf(fmtarch, sizeof fmtarch, "%s-%s", fmt,
+			 kof_arch_name(ctx->arch));
+
+	snprintf(out, cap, "%s/%s:%s-%s", fmtarch, maltype,
+		 (family && family[0]) ? family : "unknown",
+		 variant ? variant : "unknown");
 }
 
 /* ---- identify -------------------------------------------------------------- */
