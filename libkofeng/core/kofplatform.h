@@ -23,6 +23,21 @@
  *                          points before this is trusted on Windows; kof_lstat is a
  *                          placeholder for that decision, not a resolution of it.
  *
+ *   memmem                 mingw-w64 sits on MSVC's corecrt, which never carried
+ *                          this GNU/BSD extension the way glibc, the BSDs and musl
+ *                          do. The POSIX side of kof_memmem calls the real one -
+ *                          glibc's has used the Two-Way algorithm internally since
+ *                          2.9, worst case O(n) - and the Windows side is a plain
+ *                          Knuth-Morris-Pratt search, chosen over reimplementing
+ *                          Two-Way by hand for the same reason the rest of this
+ *                          file delegates instead of reimplementing: a matcher this
+ *                          project's own detections run through is not where a
+ *                          hand-rolled algorithm should be debuted. KMP gives the
+ *                          same worst-case bound with a much smaller surface to get
+ *                          wrong - a single failure-function loop - at the cost of
+ *                          the O(n*m)-avoiding case only, not memmem's average-case
+ *                          tuning.
+ *
  * The return convention for the mapping calls is NULL on failure, on both
  * platforms - POSIX's MAP_FAILED is ((void *)-1), a sentinel this header does not
  * forward, so a caller checks one pointer against one value regardless of which OS
@@ -40,6 +55,7 @@
 
 #include <windows.h>
 #include <io.h>
+#include <string.h>
 
 /* See the header comment: not a verified equivalent, only the closest
  * available primitive until reparse-point behaviour is checked for real. */
@@ -112,10 +128,82 @@ static inline void kof_unmap_anon(void *p, uint64_t len)
 		VirtualFree(p, 0, MEM_RELEASE);
 }
 
+/*
+ * Knuth-Morris-Pratt, worst case O(hlen + nlen), needle bytes matched at most
+ * twice each (once forward, at most once again via the failure link) - the
+ * property that makes this immune to the O(hlen*nlen) blowup a memchr-anchored
+ * scan hits on a haystack that repeats the anchor byte, which is exactly the
+ * case this function exists to close off.
+ *
+ * The failure table is a fixed stack array rather than a VLA or a malloc: this
+ * function's only caller (kofmatch.c) never passes a needle past KOF_STR_MAX_LEN
+ * (512), so 1024 is generous headroom, and a fixed array means no allocation can
+ * fail mid-search. A needle that somehow exceeds it is still answered correctly,
+ * by the loop below the table - just without the O(n) guarantee, since there is
+ * no bound here to size a table to and this is not the place to malloc one.
+ */
+#define KOF_MEMMEM_FAIL_MAX 1024
+
+static inline const void *kof_memmem(const void *hay_, size_t hlen,
+				      const void *needle_, size_t nlen)
+{
+	const uint8_t *hay = (const uint8_t *)hay_;
+	const uint8_t *needle = (const uint8_t *)needle_;
+	uint32_t fail[KOF_MEMMEM_FAIL_MAX];
+	size_t i, k;
+
+	if (nlen == 0)
+		return hay;
+	if (nlen > hlen)
+		return NULL;
+
+	if (nlen > KOF_MEMMEM_FAIL_MAX) {
+		size_t s;
+		for (s = 0; s + nlen <= hlen; s++)
+			if (memcmp(hay + s, needle, nlen) == 0)
+				return hay + s;
+		return NULL;
+	}
+
+	fail[0] = 0;
+	k = 0;
+	for (i = 1; i < nlen; i++) {
+		while (k > 0 && needle[i] != needle[k])
+			k = fail[k - 1];
+		if (needle[i] == needle[k])
+			k++;
+		fail[i] = (uint32_t)k;
+	}
+
+	k = 0;
+	for (i = 0; i < hlen; i++) {
+		while (k > 0 && hay[i] != needle[k])
+			k = fail[k - 1];
+		if (hay[i] == needle[k])
+			k++;
+		if (k == nlen)
+			return hay + (i + 1 - nlen);
+	}
+	return NULL;
+}
+
 #else /* POSIX */
 
 #include <sys/mman.h>
 #include <unistd.h>
+#include <string.h>
+
+/* The real one - see the header comment on why this side just calls it. Needs
+ * _GNU_SOURCE (or an equivalent *_SOURCE macro) defined before the including
+ * file's first system header, same as any other POSIX/GNU extension; this
+ * header does not define it, because a feature test macro belongs to the
+ * translation unit that needs it, not to a header included partway through
+ * one. */
+static inline const void *kof_memmem(const void *hay, size_t hlen,
+				      const void *needle, size_t nlen)
+{
+	return memmem(hay, hlen, needle, nlen);
+}
 
 static inline int kof_mkdir(const char *path, int mode)
 {

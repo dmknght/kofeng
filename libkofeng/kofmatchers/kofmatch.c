@@ -4,14 +4,27 @@
  * It builds nothing: no automaton, no per-scan preparation. Building a shared
  * structure over every pattern in a database is what forces that structure to be
  * resident and to grow with the database, which is the cost this design avoids.
+ * The same reasoning rules out a structure scoped to one module or one call, lazily
+ * built and cached, too - not because it grows with the whole database at once, but
+ * because a long, varied scan run eventually touches most modules that target a
+ * common format anyway, and a cache that has been touched by "most of the database"
+ * has paid the cost it was meant to avoid, just later. Every optimisation here
+ * therefore has to hold within a single call: no state that outlives it, so nothing
+ * it does can ever correlate with how large the database is.
  *
  * It trusts nothing in a compiled array either. Those arrive as bytes out of a
  * database, so every offset and length is bounds checked; a malformed set yields no
  * matches and never reads outside the array.
  */
 
+/* Before any include, not after: memmem is a GNU/BSD extension and a feature test
+ * macro placed after the first include has no effect at all - see kof_memmem in
+ * kofplatform.h for what it is and why the Windows side of it does not need this. */
+#define _GNU_SOURCE
+
 #include "kofmatch.h"
 #include "../kofdb/kofpack.h"   /* KOF_STR_* */
+#include "../core/kofplatform.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -110,8 +123,16 @@ static uint8_t fold(uint8_t c)
 /*
  * Literal search over [hay, hay+hlen) for needle.
  *
- * The case sensitive path leaves the skip to memchr and the compare to memcmp, both
- * vectorised in any real libc: 18.8 GB/s against 1.55 GB/s for a byte at a time loop.
+ * The case sensitive path is kof_memmem: on POSIX the real memmem, vectorised in
+ * any real libc and Two-Way internally on glibc, so it is both fast in the
+ * ordinary case and immune to the failure mode a memchr-anchored scan has on a
+ * haystack that repeats the needle's first byte - a run of one byte value turns
+ * every position into a candidate, and a naive verify-per-candidate loop pays
+ * O(hlen*nlen) for it. That case is not hypothetical for this engine: object
+ * padding, zero-filled sections and repeated bytes in packed data are ordinary,
+ * not adversarial, inputs. See kof_memmem in kofplatform.h for the Windows side,
+ * which does not have memmem and gets the same worst-case bound from
+ * Knuth-Morris-Pratt instead.
  */
 static int find_lit(const uint8_t *hay, uint64_t hlen,
 		    const uint8_t *needle, uint64_t nlen,
@@ -121,21 +142,11 @@ static int find_lit(const uint8_t *hay, uint64_t hlen,
 		return 0;
 
 	if (!nocase) {
-		const uint8_t *p = hay;
-		uint64_t left = hlen;
-
-		while (left >= nlen) {
-			const uint8_t *q = memchr(p, needle[0], left - nlen + 1);
-			if (!q)
-				return 0;
-			if (memcmp(q, needle, nlen) == 0) {
-				*found = (uint64_t)(q - hay);
-				return 1;
-			}
-			left -= (uint64_t)(q - p) + 1;
-			p = q + 1;
-		}
-		return 0;
+		const void *q = kof_memmem(hay, (size_t)hlen, needle, (size_t)nlen);
+		if (!q)
+			return 0;
+		*found = (uint64_t)((const uint8_t *)q - hay);
+		return 1;
 	}
 
 	/*
