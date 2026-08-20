@@ -65,13 +65,86 @@ CFLAGS  += -std=c11 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
 # it, but on this target it resolves through winpthreads' pthread_time.h, and
 # without this flag the link fails on an undefined clock_gettime64 rather than
 # on anything this tree's own code did wrong.
-ifneq (,$(findstring MINGW,$(shell uname -s 2>/dev/null))$(findstring MSYS,$(shell uname -s 2>/dev/null)))
+#
+# -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic: -pthread alone links libwinpthread-1.dll
+# in dynamically, which is only ever on PATH inside an MSYS2 install - anyone who
+# runs the built .exe from a plain PowerShell or cmd prompt gets no error and no
+# output at all, because Windows refuses to start a process whose DLL cannot be
+# found before main() ever runs; there is nothing to print if nothing started.
+# Static linking just this one library removes the dependency - `ldd` on the
+# result names only ntdll/KERNEL32/KERNELBASE/ucrtbase, which are already on
+# every Windows install - while leaving the rest of the flag ordinary, since a
+# tool is either fully dynamic or this is what breaks: -Bstatic/-Bdynamic are a
+# stack, not a toggle, so only what is between them is affected.
+#
+# Detected via $(OS), not `uname`: $(OS) is a real environment variable every
+# process on this platform inherits straight from the kernel, so it is there
+# whatever else is or is not on PATH. `uname` is itself a POSIX tool that has
+# to be found on PATH first - on a plain GNU Make install with no MSYS2/Git
+# POSIX tools anywhere near PATH, `$(shell uname -s ...)` silently returns
+# nothing, this whole block silently never activates, and every fix above
+# (TMP/TEMP, .exe, static winpthread) silently does not apply. A check that
+# depends on the exact class of tool this block exists to work around is not
+# a check that survives the case it is meant to catch.
+ifeq ($(OS),Windows_NT)
 NATIVE_OS   := windows
 EXE         := .exe
+# GNU Make's own documented fallback when it cannot find a POSIX shell is
+# cmd.exe - not a build failure, a different program entirely reading this
+# Makefile, understanding none of its syntax. Every recipe then fails with
+# cmd.exe's own error text ("The system cannot find the path specified",
+# "'printf' is not recognized as an internal or external command") which
+# names nothing about the real cause. This is exactly what a plain `make`
+# install with no bundled POSIX shell (e.g. the ezwinports.make WinGet
+# package) hits with zero MSYS2/Git-for-Windows tools on PATH. Checked once,
+# explicitly, so the failure is one clear message instead of a build log full
+# of recipe errors that look like unrelated bugs.
+ifneq ($(shell sh -c "echo ok" 2>&1),ok)
+$(error No working POSIX shell (sh.exe) found on PATH - this Makefile's \
+recipes need one to run, and GNU Make silently falls back to cmd.exe \
+without it, which cannot run them. Install MSYS2 (https://www.msys2.org/) \
+and add its usr\bin (e.g. C:\msys64\usr\bin) to PATH, then retry. A C \
+compiler also needs to be reachable the same way, e.g. \
+C:\msys64\clangarm64\bin or C:\msys64\mingw64\bin)
+endif
 WINTMP      := $(shell cygpath -w "$(CURDIR)/build/temp" 2>/dev/null)
 export TMP  := $(WINTMP)
 export TEMP := $(WINTMP)
-CFLAGS      += -pthread
+CFLAGS      += -pthread -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
+# Every signature blob this engine ever loads is x86_64 machine code, always,
+# on every host - deliberate, see ksigcompiler.sh, since a database has to be
+# one thing every scanner can load rather than a matrix of per-arch builds.
+# A host tool that is not ALSO x86_64 cannot run one: jumping into raw
+# x86_64 bytes from a differently-arched native process is an illegal
+# instruction, not a slow path or a wrong answer, so nothing short of
+# actually scanning a real object surfaces it - reproduced here as an
+# immediate STATUS_ILLEGAL_INSTRUCTION (0xC000001D) on the first object any
+# real scan reached, on a build that had linked and packed cleanly.
+#
+# Asked of the compiler itself (-dumpmachine), not the host CPU
+# ($(PROCESSOR_ARCHITECTURE)): that variable reflects the architecture of
+# the process reading it, and both this machine's own make.exe and the
+# ezwinports one are x86-64 (or x86) binaries running under Windows's own
+# emulation on ARM64 hardware - so from inside either one, PROCESSOR_ARCHITECTURE
+# reads "AMD64" even though the only compiler actually installed
+# (clangarm64) is genuinely ARM64-native and reports aarch64-w64-windows-gnu
+# from -dumpmachine regardless of what emulated make invoked it. The
+# compiler is the one thing here that cannot lie about what it targets.
+#
+# The fix is cross-compiling the host tools too, the same way
+# ksigcompiler.sh already cross-compiles every blob: clang is a cross
+# compiler by construction, so the only extra ingredient is an x86_64
+# mingw-w64 sysroot (headers/crt/import libs) alongside whatever native one
+# came with the compiler - KOF_X86_SYSROOT points at it, overridable for an
+# MSYS2 install anywhere other than the default C:\msys64. Verified end to
+# end on real ARM64 Windows hardware: a hosted hello-world built this way
+# ran correctly under Windows's x64 emulation, and so did the full scanner
+# against a real PE, where the native-ARM64 build had crashed instantly.
+CC_MACHINE := $(shell $(CC) -dumpmachine 2>/dev/null)
+ifeq ($(findstring x86_64,$(CC_MACHINE)),)
+KOF_X86_SYSROOT ?= C:/msys64/mingw64
+CFLAGS      += -target x86_64-w64-windows-gnu --sysroot=$(KOF_X86_SYSROOT) -fuse-ld=lld
+endif
 else
 NATIVE_OS   := $(shell uname -s 2>/dev/null)
 EXE         :=
