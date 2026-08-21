@@ -90,6 +90,7 @@ struct kof_touch {
 	 */
 	uint32_t                n_names;
 	const char            **name;       /* n_names of them, owned; entries are not */
+	uint32_t               *name_id;    /* the source line each was written on */
 
 	uint32_t                n_str;      /* markers the module declares */
 	uint32_t                n_present;  /* found anywhere in the object */

@@ -166,10 +166,12 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 
 		if (mod->n_names) {
 			t->name = calloc(mod->n_names, sizeof *t->name);
-			if (!t->name)
+			t->name_id = calloc(mod->n_names, sizeof *t->name_id);
+			if (!t->name || !t->name_id)
 				goto out;
 			for (j = 0; j < mod->n_names; j++)
-				t->name[j] = kof_db_name_at(eng, mod, j);
+				t->name[j] = kof_db_name_at(eng, mod, j,
+							    &t->name_id[j]);
 			t->n_names = mod->n_names;
 		}
 
@@ -223,8 +225,10 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 		if (t->n_present == 0) {
 			free(t->str);
 			free((void *)t->name);
+			free(t->name_id);
 			t->str = NULL;
 			t->name = NULL;
+			t->name_id = NULL;
 			continue;
 		}
 
@@ -266,6 +270,7 @@ void kof_touch_free(struct kof_touch *v, uint32_t n)
 	for (i = 0; i < n; i++) {
 		free(v[i].str);
 		free((void *)v[i].name);
+		free(v[i].name_id);
 	}
 	free(v);
 }

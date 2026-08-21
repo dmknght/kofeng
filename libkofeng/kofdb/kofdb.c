@@ -665,7 +665,7 @@ const struct kof_str_ent *kof_db_str(const struct kof_engine *e,
  */
 static const char *db_name_lookup(const struct kof_engine *e,
 				  const struct kof_module *m, uint32_t key,
-				  int by_index)
+				  int by_index, uint32_t *id_out)
 {
 	const struct kof_pack_hdr *h;
 	const struct kof_pack_name *pn;
@@ -704,6 +704,8 @@ static const char *db_name_lookup(const struct kof_engine *e,
 
 		if (by_index ? i != key : d->id != key)
 			continue;
+		if (id_out)
+			*id_out = d->id;
 		if (d->off >= pool_len)
 			return NULL;
 		/* Terminated inside the pool, or it is not a string this may hand
@@ -718,13 +720,14 @@ static const char *db_name_lookup(const struct kof_engine *e,
 const char *kof_db_name(const struct kof_engine *e, const struct kof_module *m,
 			uint32_t name_id)
 {
-	return db_name_lookup(e, m, name_id, 0);
+	return db_name_lookup(e, m, name_id, 0, NULL);
 }
 
 const char *kof_db_name_at(const struct kof_engine *e,
-			   const struct kof_module *m, uint32_t index)
+			   const struct kof_module *m, uint32_t index,
+			   uint32_t *id_out)
 {
-	return db_name_lookup(e, m, index, 1);
+	return db_name_lookup(e, m, index, 1, id_out);
 }
 
 /*

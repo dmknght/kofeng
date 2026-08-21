@@ -87,6 +87,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <errno.h>
 
 #include <kofeng.h>
@@ -117,6 +118,7 @@
 #include "../libkofeng/kofparsers/containers/pdf_parse.h"
 
 #include "kofinspect.h"
+#include "../libkofeng/kofmatchers/hexprog.h"
 
 /*
  * What one format offers a tool: how to recognise it, how to parse it, how big
@@ -208,7 +210,10 @@ static void colour_enable(int on)
 	C_BAD  = "\033[31m";
 	C_WARN = "\033[33m";
 	C_NOTE = "\033[36m";
-	C_DIM  = "\033[2m";
+	/* Bright black rather than SGR 2: "faint" is optional and a fair number
+	 * of terminals ignore it, which would silently lose the one distinction
+	 * an absent marker has. Grey is a colour and every terminal has it. */
+	C_DIM  = "\033[90m";
 	C_ID   = "\033[34m";
 	C_LOC  = "\033[35m";
 	C_SIZE = "\033[32m";
@@ -1317,6 +1322,256 @@ static int dump_region(const char *dir, uint32_t rank, const char *region,
  * where a child's dump belongs is a question about the tree and not about the bytes.
  */
 
+/*
+ * What a declared marker actually is, written the way its author wrote it.
+ *
+ * Two kinds and they are not the same question. A literal's bytes are in the
+ * pool and hex is the honest rendering - a marker is bytes, and half of them are
+ * not printable in the objects this looks at.
+ *
+ * A HEX pattern's bytes in the pool are NOT the pattern. They are the compiled
+ * program - a header, a step table, an alternative table and a byte/mask area -
+ * so hex-encoding them would print the matcher's internals and call them a
+ * signature. It is reconstructed instead, which is exact: the compiler throws
+ * away only whitespace, and every part it keeps has one spelling.
+ *
+ * Truncated at a width rather than printed whole. A pattern may be 512 bytes and
+ * this is a column in a table; the point of the column is recognising a marker,
+ * not carrying it, and the db id beside it is what identifies one exactly.
+ */
+#define VALUE_MAX_BYTES 20u
+
+static void put_hex_bytes(const uint8_t *b, uint32_t n)
+{
+	uint32_t i, show = n > VALUE_MAX_BYTES ? VALUE_MAX_BYTES : n;
+
+	for (i = 0; i < show; i++)
+		printf("%02X", b[i]);
+	if (show < n)
+		printf("...");
+}
+
+/* One byte of a compiled alternative, back to the spelling hex_byte() read. */
+static void put_prog_byte(uint8_t v, uint8_t m)
+{
+	if (m == 0xff)
+		printf("%02X", v);
+	else if (m == 0x00)
+		printf("??");
+	else if (m == 0xf0)
+		printf("%X?", (v >> 4) & 0xf);
+	else
+		printf("?%X", v & 0xf);
+}
+
+static void put_hex_program(const uint8_t *p, uint32_t len)
+{
+	const struct kof_hex_hdr *h = (const void *)p;
+	const struct kof_hex_step *st;
+	const struct kof_hex_alt *al;
+	uint32_t i, k, out = 0;
+
+	/* Read out of a database, so every offset is checked before it is used -
+	 * the same rule the matcher follows on the same bytes. */
+	if (len < sizeof *h || h->total_len > len ||
+	    h->steps_off + (uint32_t)h->n_steps * sizeof *st > len ||
+	    h->alts_off + (uint32_t)h->n_alts * sizeof *al > len) {
+		printf("(unreadable program)");
+		return;
+	}
+	st = (const void *)(p + h->steps_off);
+	al = (const void *)(p + h->alts_off);
+
+	for (i = 0; i < h->n_steps && out < VALUE_MAX_BYTES; i++) {
+		uint32_t lo = st[i].gap_min, hi = st[i].gap_max;
+
+		if (hi) {
+			if (!lo && hi >= KOF_HEX_GAP_OPEN)
+				printf("[-]");
+			else if (hi >= KOF_HEX_GAP_OPEN)
+				printf("[%u-]", lo);
+			else if (lo == hi)
+				printf("[%u]", lo);
+			else
+				printf("[%u-%u]", lo, hi);
+		}
+		if (st[i].n_alts > 1)
+			printf("(");
+		for (k = 0; k < st[i].n_alts; k++) {
+			const struct kof_hex_alt *a = &al[st[i].alt_first + k];
+			const uint8_t *d = p + a->data_off;
+			const uint8_t *msk = d + a->len;
+			uint32_t j;
+
+			if ((uint64_t)a->data_off + a->len > len)
+				break;
+			if (k)
+				printf("|");
+			for (j = 0; j < a->len && out < VALUE_MAX_BYTES; j++, out++)
+				put_prog_byte(d[j], (a->flags & KOF_HEX_ALT_MASKED)
+						    ? msk[j] : 0xff);
+		}
+		if (st[i].n_alts > 1)
+			printf(")");
+	}
+	if (out >= VALUE_MAX_BYTES)
+		printf("...");
+}
+
+static void put_value(const struct kof_touch_str *s, int plain)
+{
+	if (!plain)
+		printf("%s", C_SIZE);
+	if (s->kind == KOF_STR_HEX)
+		put_hex_program(s->bytes, s->len);
+	else
+		put_hex_bytes(s->bytes, s->len);
+	if (!plain)
+		printf("%s", C_OFF);
+}
+
+/* ---- back to the source ----------------------------------------------------
+ *
+ * A pack carries the line a detection was written on and not the file it was
+ * written in - struct kof_pack_mod has no room for a path and no need of one at
+ * scan time. So the thread back to the text is (family, line) plus a source tree
+ * to look in, which is what --sources is.
+ *
+ * Matched on the family alone. KOF_TARGET_NAME is one declaration per file by
+ * rule, so a family names a file; two files claiming one family is a mistake in
+ * the tree rather than a case to resolve, and it is reported as one.
+ *
+ * Text scanning rather than compiling: this wants the same two facts ksigbuilder
+ * --extract reads, and running a build to print a path would make an examiner
+ * depend on a toolchain it otherwise does not need.
+ */
+#define SRC_MAX       1024u
+#define SRC_MAX_LINES 64u
+
+struct src_ent {
+	char     family[80];
+	char     path[PATH_ROOM];
+	/* The lines this file writes a detection on. Needed because a family does
+	 * NOT name a file: bases/signatures/mirai.c and mirai_42bb.c both declare
+	 * "Mirai" on purpose - one generic, one for a variant - so the family alone
+	 * resolved to whichever the directory happened to list first and put a
+	 * confident wrong path next to every finding from the other. The line an id
+	 * carries belongs to exactly one of them, so family plus line is the key
+	 * that actually identifies a module. */
+	uint32_t line[SRC_MAX_LINES];
+	uint32_t n_line;
+};
+
+static struct src_ent  *g_src;
+static uint32_t         g_n_src;
+
+/*
+ * One source: the family it declares and the lines it reports on.
+ *
+ * Read the restricted way ksigbuilder reads them - KOF_TARGET_NAME's second
+ * argument quote to quote, and the line of every KOF_SCAN_INFECT/SUSPECT, which
+ * is the number ksigbuilder writes into the name table beside the blob.
+ */
+static int src_read(const char *path, struct src_ent *out)
+{
+	FILE *f = fopen(path, "r");
+	char line[1024];
+	uint32_t lineno = 0;
+
+	if (!f)
+		return 0;
+	out->family[0] = 0;
+	out->n_line = 0;
+	while (fgets(line, sizeof line, f)) {
+		char *p, *q;
+		size_t n = 0;
+
+		lineno++;
+		if (!out->family[0] &&
+		    (p = strstr(line, "KOF_TARGET_NAME(")) != NULL &&
+		    (p = strchr(p, ',')) != NULL &&
+		    (q = strchr(p, '"')) != NULL) {
+			for (q++; *q && *q != '"' &&
+			     n + 1 < sizeof out->family; q++)
+				out->family[n++] = *q;
+			out->family[n] = 0;
+		}
+		if ((strstr(line, "KOF_SCAN_INFECT(") ||
+		     strstr(line, "KOF_SCAN_SUSPECT(")) &&
+		    out->n_line < SRC_MAX_LINES)
+			out->line[out->n_line++] = lineno;
+	}
+	fclose(f);
+	return out->family[0] != 0;
+}
+
+static void src_add(const char *path)
+{
+	struct src_ent *e;
+
+	if (g_n_src >= SRC_MAX)
+		return;
+	e = &g_src[g_n_src];
+	if ((size_t)snprintf(e->path, PATH_ROOM, "%s", path) >= PATH_ROOM)
+		return;
+	if (src_read(path, e))
+		g_n_src++;
+}
+
+/* The tree, one level down as well as at the top - the same shape the Makefile
+ * globs, because that is the shape a content tree has. */
+static void src_scan(const char *dir, int depth)
+{
+	DIR *d = opendir(dir);
+	struct dirent *e;
+	char path[PATH_ROOM];
+
+	if (!d)
+		return;
+	while ((e = readdir(d)) != NULL) {
+		size_t n = strlen(e->d_name);
+
+		if (e->d_name[0] == '.')
+			continue;
+		if ((size_t)snprintf(path, sizeof path, "%s/%s", dir,
+				     e->d_name) >= sizeof path)
+			continue;
+		if (n > 2 && strcmp(e->d_name + n - 2, ".c") == 0)
+			src_add(path);
+		else if (depth > 0)
+			src_scan(path, depth - 1);
+	}
+	closedir(d);
+}
+
+static int src_open(const char *dir)
+{
+	g_src = calloc(SRC_MAX, sizeof *g_src);
+	if (!g_src)
+		return 0;
+	src_scan(dir, 1);
+	if (!g_n_src)
+		fprintf(stderr, "kofexamine: no signature sources under %s\n",
+			dir);
+	return 1;
+}
+
+/* The file that declares this family AND reports on this line. Both, for the
+ * reason struct src_ent gives. */
+static const char *src_path_of(const char *family, uint32_t line)
+{
+	uint32_t i, k;
+
+	for (i = 0; i < g_n_src; i++) {
+		if (strcmp(g_src[i].family, family) != 0)
+			continue;
+		for (k = 0; k < g_src[i].n_line; k++)
+			if (g_src[i].line[k] == line)
+				return g_src[i].path;
+	}
+	return NULL;
+}
+
 /* ---- what the database already knows -------------------------------------- */
 
 /*
@@ -1385,11 +1640,27 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
 				 kof_maltype_name(t->maltype),
 				 t->family[0] ? t->family : "?");
 
-		printf("     %s%-14s%s %s%-34s%s %u/%u marker(s)", c,
-		       kof_touch_kind_name(t->kind), C_OFF, C_ID, name, C_OFF,
-		       t->kind == KOF_TOUCH_INELIGIBLE ? t->n_present
-						       : t->n_in_rgn,
-		       t->n_str);
+		{
+			char head[48];
+
+			snprintf(head, sizeof head, "%s (%u/%u)",
+				 kof_touch_kind_name(t->kind),
+				 t->kind == KOF_TOUCH_INELIGIBLE ? t->n_present
+								: t->n_in_rgn,
+				 t->n_str);
+			printf("     %s%-22s%s %s%-34s%s", c, head, C_OFF,
+			       C_ID, name, C_OFF);
+		}
+		/* Where the logic is. Not what it is - that is compiled code -
+		 * but the line somebody can read to find out, which is the
+		 * question a row here raises and cannot answer on its own. */
+		if (g_n_src && t->family[0] && t->n_names) {
+			const char *sp = src_path_of(t->family, t->name_id[0]);
+
+			if (sp)
+				printf("  %s%s:%u%s", C_DIM, sp,
+				       t->name_id[0], C_OFF);
+		}
 		if (t->ruled_out)
 			printf("   %s", t->ruled_out);
 		else if (t->kind == KOF_TOUCH_ELSEWHERE)
@@ -1399,25 +1670,81 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
 		/* Titled, because four numbers in a row with inline labels reads
 		 * as prose and compares as neither. Dim: it is a legend and the
 		 * rows under it are the content. */
-		printf("        %skind   db id     size  at%s\n", C_DIM, C_OFF);
-		for (j = 0, shown = 0; j < t->n_str && shown < 8u; j++) {
+		printf("        %skind          db id     size  at          "
+		       "value%s\n", C_DIM, C_OFF);
+		/*
+		 * Every marker the module declares, present or not.
+		 *
+		 * The absent ones are the point of the whole section: a module
+		 * at four of five is a variant to write, and which one is
+		 * missing is the first thing its author needs. They were being
+		 * skipped, which left the row saying 4/5 and no way to see
+		 * which four.
+		 *
+		 * Three states, and they are not two: found where the module
+		 * looks, found somewhere else, not in the object at all. The
+		 * middle one already had a note; the last one is the whole row
+		 * dimmed, so a block of them reads as absence rather than as
+		 * data to compare.
+		 */
+		for (j = 0, shown = 0; j < t->n_str && shown < 16u; j++) {
 			const struct kof_touch_str *s = &t->str[j];
+			int miss = s->at == KOF_BROKEN;
+			const char *ci = miss ? "" : C_ID;
+			const char *cs = miss ? "" : C_SIZE;
+			const char *cl = miss ? "" : C_LOC;
+			const char *co = miss ? "" : C_OFF;
+			char kind[16];
 
-			if (s->at == KOF_BROKEN)
-				continue;
 			shown++;
+
+			/*
+			 * "hex" and "str" are the words the declarations use -
+			 * KOF_DEFINE_HEXSTR and KOF_DEFINE_STR - so the column
+			 * names what a source would have to write, and the two
+			 * are the same width so the column does not step.
+			 *
+			 * "fuw" for the same reason, against "sub": a word that
+			 * is one character shorter than its opposite moves
+			 * every field after it on half the rows.
+			 */
+			if (s->kind == KOF_STR_HEX)
+				snprintf(kind, sizeof kind, "hex");
+			else
+				/* Both rules always, never a default left
+				 * unwritten: "str" alone would mean substring
+				 * and case-sensitive to whoever remembers the
+				 * defaults and nothing to whoever does not. */
+				snprintf(kind, sizeof kind, "str: %s-%s",
+					 (s->flags & KOF_STR_FULLWORD) ? "fuw"
+								       : "sub",
+					 (s->flags & KOF_STR_ICASE) ? "i" : "c");
+
+			if (miss)
+				printf("%s", C_DIM);
+			printf("        %s%-11s%s %6u %s%8u%s  ",
+			       ci, kind, co, s->uid, cs, s->len, co);
+			if (miss)
+				printf("%-10s  ", "-");
+			else
+				printf("%s%-10llu%s  ", cl,
+				       (unsigned long long)s->at, co);
+			put_value(s, miss);
 			/* The note only means something when regions were
 			 * resolved at all. A module ruled out by its target
 			 * never had its regions looked at, so saying its marker
 			 * is outside them would be inventing a comparison. */
-			printf("        %s%-4s%s %6u %s%8u%s  %s%llu%s",
-			       C_ID, s->kind ? "hex" : "str", C_OFF, s->uid,
-			       C_SIZE, s->len, C_OFF,
-			       C_LOC, (unsigned long long)s->at, C_OFF);
-			if (t->kind != KOF_TOUCH_INELIGIBLE && !s->in_rgn)
+			if (!miss && t->kind != KOF_TOUCH_INELIGIBLE &&
+			    !s->in_rgn)
 				note_warn("outside its regions");
+			if (miss)
+				printf("%s", C_OFF);
 			printf("\n");
 		}
+		if (t->n_str > shown)
+			printf("        %s... %u more%s\n", C_DIM,
+			       t->n_str - shown, C_OFF);
+
 	}
 	kof_touch_free(v, n);
 }
@@ -1848,6 +2175,9 @@ static void usage(const char *argv0)
 		"             versions, methods, counts. Needs --db.\n"
 		"  --color    force colour on; --no-color forces it off. The default\n"
 		"             is colour when stdout is a terminal and NO_COLOR is unset.\n"
+		"  --sources  D  where the signature sources are, so a marker row can\n"
+		"             name the file and line its logic is written on. Needs\n"
+		"             --markers.\n"
 		"  --markers  list every database marker found in the file and whose\n"
 		"             it is, including modules that did not fire, with the\n"
 		"             reason each did not. Needs --db.\n",
@@ -1868,6 +2198,7 @@ int main(int argc, char **argv)
 {
 	const char *db = NULL;
 	kof_engine *eng = NULL;
+	const char *sources = NULL;
 	int dump = 0, verbose = 0, markers = 0, colour = -1;
 	int i, files = 0, bad = 0;
 
@@ -1879,6 +2210,13 @@ int main(int argc, char **argv)
 			verbose = 1;
 		} else if (strcmp(argv[i], "--markers") == 0) {
 			markers = 1;
+		} else if (strcmp(argv[i], "--sources") == 0) {
+			if (++i >= argc) {
+				fprintf(stderr, "%s: --sources needs a "
+						"directory\n", argv[0]);
+				return 2;
+			}
+			sources = argv[i];
 		} else if (strcmp(argv[i], "--color") == 0 ||
 			   strcmp(argv[i], "--colour") == 0) {
 			colour = 1;
@@ -1907,6 +2245,11 @@ int main(int argc, char **argv)
 		colour = stdout_is_tty() && getenv("NO_COLOR") == NULL;
 	colour_enable(colour);
 
+	if (sources && !src_open(sources)) {
+		fprintf(stderr, "%s: out of memory\n", argv[0]);
+		return 2;
+	}
+
 	if (db) {
 		eng = kof_engine_open(db);
 		if (!eng) {
@@ -1921,7 +2264,8 @@ int main(int argc, char **argv)
 	for (i = 1; i < argc; i++) {
 		int r;
 
-		if (strcmp(argv[i], "--db") == 0) {
+		if (strcmp(argv[i], "--db") == 0 ||
+		    strcmp(argv[i], "--sources") == 0) {
 			i++;               /* its value, already taken */
 			continue;
 		}
