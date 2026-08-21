@@ -250,7 +250,7 @@ struct kof_pack_sec {
  * A blob is a signature module, not a program; four megabytes of position
  * independent code with no data section is already far past anything a signature
  * has needed. The cap is what lets the loader refuse a file before allocating for
- * it - see read_whole in kofdb.c.
+ * it - see read_whole in ksigbuilder.c.
  *
  * A declared literal has to fit a uint16 length by construction; the real limit is
  * lower because a pattern that long is a file, not a string.

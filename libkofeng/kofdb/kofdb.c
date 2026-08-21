@@ -261,10 +261,17 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 		       (unsigned long long)h->sec[id_].len,                    \
 		       (unsigned)(count_), (unsigned)(unit_))
 
-	STRIDE(KOF_SEC_PRE_TARGET, h->n_mods,  4);
-	STRIDE(KOF_SEC_PRE_SCAN,   h->n_mods,  4);
-	STRIDE(KOF_SEC_PRE_ARCH,   h->n_mods,  4);
-	STRIDE(KOF_SEC_PRE_SIZE,   h->n_mods,  8);
+	STRIDE(KOF_SEC_PRE_TARGET,  h->n_mods,  4);
+	STRIDE(KOF_SEC_PRE_SCAN,    h->n_mods,  4);
+	STRIDE(KOF_SEC_PRE_ARCH,    h->n_mods,  4);
+	STRIDE(KOF_SEC_PRE_SIZE,    h->n_mods,  8);
+	/* Appended after the others, not slotted in - see kofpack.h - and missed
+	 * here for exactly that reason: absorb() reads h->n_mods entries from
+	 * this section unconditionally (pk[i] below), so without this check a
+	 * pack declaring a short PRE_SUBTYPE section still passes every other
+	 * validation and absorb() reads past the section - and potentially past
+	 * the mapping - on a merely corrupted or truncated pack file. */
+	STRIDE(KOF_SEC_PRE_SUBTYPE, h->n_mods,  4);
 	STRIDE(KOF_SEC_MODS,       h->n_mods,  sizeof(struct kof_pack_mod));
 	STRIDE(KOF_SEC_STR_DESC,   h->n_str,   sizeof(struct kof_pack_str));
 	STRIDE(KOF_SEC_NAME_DESC,  h->n_names, sizeof(struct kof_pack_name));

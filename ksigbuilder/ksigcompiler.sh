@@ -397,6 +397,21 @@ if [ "$nsz" -gt 1 ]; then
 fi
 if [ "$nsz" -eq 1 ]; then
 	szarg=$(sed -n 's/.*KOF_TARGET_SIZE_MIN(\([^)]*\)).*/\1/p' "$src")
+	# Checked before it is ever handed to $((...)), not after: shell arithmetic
+	# expansion recursively re-expands a bareword operand, which includes command
+	# substitution - a source file spelling KOF_TARGET_SIZE_MIN(`cmd`) would run
+	# cmd when this line evaluated szarg unchecked (backticks have no ')', so
+	# they survive the sed capture above intact, unlike $(...) which the capture
+	# already truncates at its first ')'). A signature is developer-authored, not
+	# attacker-authored, but this file's own convention is to fail loudly on
+	# anything that isn't the plain arithmetic expression it claims to be, and an
+	# expression is not plain if it can run a command.
+	case "$szarg" in
+	*[![:space:]0-9+*/\(\)-]*)
+		echo "FAIL: KOF_TARGET_SIZE_MIN($szarg) is not a plain arithmetic expression" >&2
+		exit 1
+		;;
+	esac
 	# Evaluated by the shell so an expression like 4 * 1024 reads naturally in the
 	# source instead of being written out as a literal.
 	size_min=$((szarg))

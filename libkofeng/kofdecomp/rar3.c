@@ -579,6 +579,21 @@ static int read_vm_code(struct rar3 *s)
 		blen = s->old_len[pos];
 	}
 
+	/*
+	 * Checked here, before the first write to s->use[s->n_uses] below, not
+	 * after: this slot is written unconditionally once a register mask is
+	 * present (r0/r1 default to 0 even when the mask bit is unset), so a
+	 * check placed after those writes - where it used to be, guarding only
+	 * the "commit" store at s->use[s->n_uses].start/.len/.type further down
+	 * - let s->n_uses == RAR3_MAX_USES write one struct f_use past the end
+	 * of the fixed s->use[RAR3_MAX_USES] array on the stack. r0/r1 there are
+	 * attacker-controlled (vm_read_data), and the array is immediately
+	 * followed in struct rar3 by n_uses, then the scratch pointer and its
+	 * length - so that out-of-bounds write could corrupt the scratch
+	 * pointer with attacker-chosen bits, not just overrun a counter.
+	 */
+	if (s->n_uses >= RAR3_MAX_USES)
+		return 0;
 	if (first & 0x10u) {
 		mask = vbr_take(&v, 7u);
 		for (i = 0; i < 7u; i++)
@@ -617,8 +632,6 @@ static int read_vm_code(struct rar3 *s)
 		return 1;
 	if (blen > VM_GLOBALMEMADDR)
 		return 0;                      /* larger than the VM could hold */
-	if (s->n_uses >= RAR3_MAX_USES)
-		return 0;
 
 	s->use[s->n_uses].start = s->at + start;
 	s->use[s->n_uses].len = blen;

@@ -226,8 +226,20 @@ static void rar5_walk(struct rw *s, kof_buf file)
 			name_off = at;
 			/* The name has to lie inside the header that declared it -
 			 * the same rule the RAR3 walk applies, and for the same
-			 * reason. */
-			if (nlen > hdr_end - name_off ||
+			 * reason.
+			 *
+			 * name_off > hdr_end checked before the subtraction, not
+			 * folded into it: every field above it is an attacker-chosen
+			 * vint length advancing `at`, none of them checked against
+			 * hdr_end as they're read, so name_off can already be past
+			 * hdr_end here. hdr_end - name_off would then underflow to a
+			 * huge value and let nlen > ... pass when the name has
+			 * already run past its own header - kof_in_range still
+			 * catches a read past the real file, but not a name that
+			 * lands inside the FILE's data or the next block instead of
+			 * its own header, which is what hdr_end was computed to
+			 * bound in the first place. */
+			if (name_off > hdr_end || nlen > hdr_end - name_off ||
 			    !kof_in_range(file, name_off, nlen)) {
 				r->anomalies |= KOF_RAR_ANOM_TRUNCATED;
 				nlen = 0;

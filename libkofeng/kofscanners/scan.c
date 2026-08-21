@@ -680,6 +680,14 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 	char *name = kof_strdup_n(path, strlen(path));
 	uint32_t depth = 0;
 
+	/* Every other allocation failure in this function sets out_of_memory so
+	 * the walk is reported incomplete rather than clean - this one didn't,
+	 * which meant an OOM here dropped the root's finding silently instead
+	 * (the callback guard below already tolerates a NULL name, so nothing
+	 * crashes; it just never gets called). */
+	if (!name)
+		w->out_of_memory = 1;
+
 	kof_scan_budget(w->sc, kof_src_buf(root).n, w->opt);
 
 	for (;;) {
@@ -746,6 +754,8 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 				}
 				stack[n].src = kof_src_ref(w->sc->kids[i]);
 				stack[n].name = kof_strdup_n(kid, strlen(kid));
+				if (!stack[n].name)
+					w->out_of_memory = 1;
 				stack[n].depth = depth + 1;
 				n++;
 			}

@@ -671,7 +671,14 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 	 * so folder n starts where the sum of the sizes before it ends.
 	 */
 	{
-		uint64_t cur = base + pack_pos, si = 0;
+		/* kof_sat_add, not +: pack_pos and every psize[] below are
+		 * unclamped sz_num() values off the stream, same as hdr_pack_off
+		 * a few lines above (which does saturate, with the same
+		 * reasoning) - a raw + here would let an attacker-chosen
+		 * pack_pos or psize wrap cur/pk->off to a small value instead of
+		 * pinning it past the file, undoing the point of computing a
+		 * bound to check rather than trusting the declared one. */
+		uint64_t cur = kof_sat_add(base, pack_pos), si = 0;
 
 		for (i = 0; i < n_folders; i++) {
 			uint32_t want = npk[i] ? npk[i] : 1u, j;
@@ -703,7 +710,7 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 						pk->pb = (uint8_t)(cprop[i][cc] >> 16);
 					}
 				}
-				cur += psize[si];
+				cur = kof_sat_add(cur, psize[si]);
 				si++;
 			}
 		}

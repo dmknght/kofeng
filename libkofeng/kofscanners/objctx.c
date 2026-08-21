@@ -1170,10 +1170,20 @@ static uint64_t unpack_bcj2(struct kof_scanner *sc, const struct kof_obj_ctx *ct
 			return 0;      /* a stream the object does not hold */
 
 	/* The three coded streams, then the output. Charged together so a partial
-	 * failure gives the budget back in one place. */
+	 * failure gives the budget back in one place.
+	 *
+	 * kof_sat_add, not +=: out_len and every out_size here is unclipped -
+	 * sevenzip_parse.c reads them as a bare 64-bit varint straight off the
+	 * stream, unlike the pack off/size pair checked against the real buffer
+	 * a few lines above. Four attacker-chosen values near 2^64/4 each would
+	 * otherwise wrap `charged` down to something small enough to slip past
+	 * the budget check below while the mallocs further down still see the
+	 * real, enormous sizes - the budget invariant this file otherwise
+	 * enforces everywhere else, bypassed by exactly the overflow it exists
+	 * to rule out. */
 	charged = out_len;
 	for (i = 0; i < 3u; i++)
-		charged += pk[i]->out_size;
+		charged = kof_sat_add(charged, pk[i]->out_size);
 	if (charged > (sc->resident < sc->resident_max
 		       ? sc->resident_max - sc->resident : 0)) {
 		scan_broken(sc, KOF_BROKEN_LIMIT);

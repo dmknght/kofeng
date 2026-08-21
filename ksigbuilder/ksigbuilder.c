@@ -191,9 +191,13 @@ static unsigned long scan_mask;
  * named by a signature. The regions existed, the parsers filled them, kofexamine
  * printed them, and the only consumer that matters could not ask for them.
  *
- * The test at the bottom of this file is what makes the omission visible now: it
- * asserts this table covers every region every format header declares, so adding a
- * region without adding it here fails the build rather than the signature.
+ * No build-time check catches this table falling behind a format header's region
+ * list - the coverage assert this comment used to claim existed here does not, on
+ * either count that made the earlier claim wrong: nothing in this file or under
+ * tests/ enumerates a format's declared regions and cross-checks them against
+ * rgn_names[]. A region added to a header today is invisible to every signature
+ * until someone remembers to add a line here, same failure this whole comment is
+ * the history of - just not yet caught a third time.
  */
 struct rgn_name {
 	const char   *name;

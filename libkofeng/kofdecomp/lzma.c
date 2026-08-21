@@ -645,6 +645,7 @@ int kof_lzma2_decode(const uint8_t *in, uint64_t in_len, uint8_t *out,
 
 		{
 			uint64_t before = at;
+			int r_status;
 
 			/*
 			 * The decoder is given the rest of the stream, not just
@@ -663,7 +664,15 @@ int kof_lzma2_decode(const uint8_t *in, uint64_t in_len, uint8_t *out,
 			 * chunk's own length still decides where the next one
 			 * begins, which is the only thing it is authoritative for.
 			 */
-			lz_run(&z, in + p, in_len - p, out, at + u_len, &at);
+			r_status = lz_run(&z, in + p, in_len - p, out, at + u_len, &at);
+			/* Not just the zero-progress case below: a chunk can produce
+			 * some bytes and still end short (r.short_input mid-stream),
+			 * and that status must survive past `p += c_len` too, or a
+			 * corrupt/truncated chunk that decoded partially reads as a
+			 * clean KOF_DEC_OK once the loop moves on to the next chunk
+			 * header. */
+			if (status == KOF_DEC_OK)
+				status = r_status;
 			if (at == before) {
 				/* The chunk decoded nothing. Continuing would ask
 				 * the next record the same question with the same
