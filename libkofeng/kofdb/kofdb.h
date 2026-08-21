@@ -264,6 +264,12 @@ const struct kof_str_ent *kof_db_str(const struct kof_engine *,
 const char *kof_db_name(const struct kof_engine *, const struct kof_module *,
 			uint32_t name_id);
 
+/* The same names, in the order the module declares them, for a caller that wants
+ * to list what a module can report rather than to resolve one it already has.
+ * NULL past the end, and NULL for a record that does not hold together. */
+const char *kof_db_name_at(const struct kof_engine *, const struct kof_module *,
+			   uint32_t index);
+
 /* The family KOF_TARGET_NAME declared for this module, read from the pack the
  * same way kof_db_name reads a finding's variant - out of the mapping, bounds
  * checked on every call rather than trusted from load time, for the reason

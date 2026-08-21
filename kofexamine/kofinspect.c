@@ -31,7 +31,10 @@
 const char *kof_touch_kind_name(enum kof_touch_kind k)
 {
 	switch (k) {
-	case KOF_TOUCH_COMPLETE:   return "every marker";
+	/* Not "every marker": the count beside it already says how many of how
+	 * many, so the word would be the same fact twice and the two would have
+	 * to agree. The kinds only have to name what a count cannot. */
+	case KOF_TOUCH_COMPLETE:   return "markers";
 	case KOF_TOUCH_PARTIAL:    return "some markers";
 	case KOF_TOUCH_ELSEWHERE:  return "wrong region";
 	case KOF_TOUCH_INELIGIBLE: return "did not run";
@@ -161,6 +164,15 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 			t->family = "";
 		t->n_str   = mod->n_str;
 
+		if (mod->n_names) {
+			t->name = calloc(mod->n_names, sizeof *t->name);
+			if (!t->name)
+				goto out;
+			for (j = 0; j < mod->n_names; j++)
+				t->name[j] = kof_db_name_at(eng, mod, j);
+			t->n_names = mod->n_names;
+		}
+
 		why = ruled_out_by(mod, ctx, buf.n);
 
 		/*
@@ -194,7 +206,7 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 			s->len   = e->len;
 			s->kind  = e->kind;
 			s->flags = e->flags;
-			s->uid   = e->uid;
+			s->uid   = eng->packs[mod->pack_id].uid_base + e->uid;
 
 			s->at = where_in(&m, whole, n_whole, s);
 			if (s->at != KOF_BROKEN)
@@ -210,6 +222,9 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 		/* Not evidence, and at database scale it would be the whole list. */
 		if (t->n_present == 0) {
 			free(t->str);
+			free((void *)t->name);
+			t->str = NULL;
+			t->name = NULL;
 			continue;
 		}
 
@@ -248,7 +263,9 @@ void kof_touch_free(struct kof_touch *v, uint32_t n)
 
 	if (!v)
 		return;
-	for (i = 0; i < n; i++)
+	for (i = 0; i < n; i++) {
 		free(v[i].str);
+		free((void *)v[i].name);
+	}
 	free(v);
 }

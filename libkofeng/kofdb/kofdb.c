@@ -650,8 +650,22 @@ const struct kof_str_ent *kof_db_str(const struct kof_engine *e,
  * with no name is reported by id, and a wrong answer here would be a name invented
  * out of whatever followed it in the file.
  */
-const char *kof_db_name(const struct kof_engine *e, const struct kof_module *m,
-			uint32_t name_id)
+/*
+ * One of a module's names, by id or by position.
+ *
+ * Two questions with one body of bounds checks between them. A finding reports an
+ * id and wants the text for it; a tool that lists what a module can report has no
+ * id to offer and wants them in order. Splitting the two would be two copies of
+ * the checks, which is the one thing this function is careful about - see the
+ * note on kof_db_name for why a mapping is re-validated on every call rather than
+ * trusted from load time.
+ *
+ * `by_index` picks which: non-zero and `key` is a position in the module's slice,
+ * zero and it is the id the module reports.
+ */
+static const char *db_name_lookup(const struct kof_engine *e,
+				  const struct kof_module *m, uint32_t key,
+				  int by_index)
 {
 	const struct kof_pack_hdr *h;
 	const struct kof_pack_name *pn;
@@ -688,7 +702,7 @@ const char *kof_db_name(const struct kof_engine *e, const struct kof_module *m,
 	for (i = 0; i < m->n_names; i++) {
 		const struct kof_pack_name *d = &pn[m->name_base + i];
 
-		if (d->id != name_id)
+		if (by_index ? i != key : d->id != key)
 			continue;
 		if (d->off >= pool_len)
 			return NULL;
@@ -699,6 +713,18 @@ const char *kof_db_name(const struct kof_engine *e, const struct kof_module *m,
 		return pool + d->off;
 	}
 	return NULL;
+}
+
+const char *kof_db_name(const struct kof_engine *e, const struct kof_module *m,
+			uint32_t name_id)
+{
+	return db_name_lookup(e, m, name_id, 0);
+}
+
+const char *kof_db_name_at(const struct kof_engine *e,
+			   const struct kof_module *m, uint32_t index)
+{
+	return db_name_lookup(e, m, index, 1);
 }
 
 /*

@@ -47,7 +47,13 @@ struct kof_touch_str {
 	uint16_t       len;
 	uint8_t        kind;     /* enum kof_pack_str_kind */
 	uint8_t        flags;    /* KOF_STR_ICASE | KOF_STR_FULLWORD */
-	uint32_t       uid;      /* shared by every module declaring these bytes */
+	/*
+	 * The pattern's identity across the WHOLE database, not within its pack -
+	 * pack-local ids plus the pack's base, the same number the engine's memo
+	 * is keyed by. Two rows carrying one uid are two modules that picked the
+	 * same bytes, which is worth being able to see.
+	 */
+	uint32_t       uid;
 
 	/*
 	 * Two answers, not one, and they are the reason this file exists.
@@ -72,6 +78,18 @@ struct kof_touch {
 	/* Set only for KOF_TOUCH_INELIGIBLE: the precondition that ruled it out,
 	 * as the word a reader needs rather than as a mask to decode. */
 	const char             *ruled_out;
+
+	/*
+	 * The variants this module can report, in declaration order.
+	 *
+	 * Listed rather than resolved, because which one a module WOULD report is
+	 * a property of its logic and its logic is compiled code. What can be said
+	 * is which names it holds, and that is worth saying: it is the string a
+	 * scanner would print, so a row here can be matched against a verdict by
+	 * eye instead of by guessing which family the family name belongs to.
+	 */
+	uint32_t                n_names;
+	const char            **name;       /* n_names of them, owned; entries are not */
 
 	uint32_t                n_str;      /* markers the module declares */
 	uint32_t                n_present;  /* found anywhere in the object */
