@@ -209,8 +209,10 @@ kofexamine:  $(OUT)/bin/kofexamine$(EXE)
 	@echo "  $<"
 ksigbuilder: $(OUT)/bin/ksigbuilder$(EXE)
 	@echo "  $<"
+kofviewer:   $(OUT)/bin/kofviewer$(EXE)
+	@echo "  $<"
 
-tools: kofscanner kofexamine ksigbuilder
+tools: kofscanner kofexamine ksigbuilder kofviewer
 
 help:
 	@echo "targets:"
@@ -219,7 +221,8 @@ help:
 	@echo "  kofscanner    the scanner"
 	@echo "  kofexamine    the file examiner"
 	@echo "  ksigbuilder   the database builder"
-	@echo "  tools         all three of the above"
+	@echo "  kofviewer     the file examiner, navigable"
+	@echo "  tools         all four of the above"
 	@echo "  databases     compile bases/ into the shipping databases"
 	@echo "                                                 -> $(OUT)/databases"
 	@echo "  databases BASEDIR=D   compile D instead        -> $(TEST)/databases-<name>"
@@ -357,6 +360,15 @@ EXAMINE_SRC := kofexamine/kofexamine.c kofexamine/kofinspect.c
 $(OUT)/bin/kofexamine$(EXE): $(EXAMINE_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(EXAMINE_SRC) $(LIB) -o $@ $(LDFLAGS)
+
+# The other front end onto the same layer. Two binaries from one directory, and
+# the directory is the toolchain rather than the tool: what they share is
+# kofinspect, and what differs is only how a pane and a line are drawn.
+VIEWER_SRC := kofexamine/kofviewer.c kofexamine/kofinspect.c
+
+$(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(VIEWER_SRC) $(LIB) -o $@ $(LDFLAGS)
 
 # ----------------------------------------------------- the database toolchain
 #
@@ -532,4 +544,4 @@ clean:
 	rm -rf $(BUILD)
 
 .PHONY: all sdk sigs databases unit fixtures test-sigs clean \
-        kofscanner kofexamine ksigbuilder tools help
+        kofscanner kofexamine ksigbuilder kofviewer tools help
