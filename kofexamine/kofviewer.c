@@ -340,7 +340,7 @@ struct view {
 	uint64_t    sel_a, sel_b;
 	int         dragging;
 
-	uint32_t    sel_touch;
+	uint32_t    sel_touch, list_off;
 	int         show_list;
 	int         pane;           /* 0 tree, 1 hex, 2 markers */
 	int         per;            /* bytes a hex row shows, for click mapping */
@@ -873,8 +873,8 @@ static void draw_marker_line(struct out *o, struct view *v)
 	/* Which pane has the keys. Not a hotkey - a hotkey list is a reminder of
 	 * what could be pressed, this says what pressing would do next, and that
 	 * changes. */
-	out_fmt(o, A_SEL " %s " A_OFF " ",
-		v->pane == 0 ? "tree" : v->pane == 1 ? "hex " : "sigs");
+	out_fmt(o, A_SEL " %-8s " A_OFF " ",
+		v->pane == 0 ? "obj tree" : v->pane == 1 ? "hex" : "marker");
 
 	/*
 	 * A selection displaces everything else on this line.
@@ -929,35 +929,77 @@ static void draw_marker_line(struct out *o, struct view *v)
  *
  * Beside it costs its height on every object including the many that touch
  * nothing; over it costs nothing until it is asked for. Clicking a row is what
- * changes which module the hex pane lights up, so the list is also the control
- * and not only the display.
+ * changes which signature the hex pane lights up, so the list is also the
+ * control and not only the display.
+ *
+ * Four rows and it scrolls. A dialog that grows with its contents covers the
+ * pane it is explaining as soon as the contents get interesting, and at database
+ * scale they will. Four is enough to compare the top of a ranked list against
+ * itself, which is what it is for.
  */
+#define LIST_ROWS 4u
+
+static uint32_t list_shown(struct view *v)
+{
+	uint32_t n = cur_obj(v)->n_touch;
+
+	return n < LIST_ROWS ? n : LIST_ROWS;
+}
+
+/* The header row; the entries follow it, and the last one sits directly on the
+ * bottom line - there is no spare row between them. */
 static int list_top(struct view *v)
 {
-	int h = (int)cur_obj(v)->n_touch + 2;
+	return g_rows - 2 - (int)list_shown(v);
+}
 
-	if (h > g_rows - 4)
-		h = g_rows - 4;
-	return g_rows - 1 - h;
+/* Keep the cursor inside the window rather than the window on the cursor: a list
+ * that jumps when it opens has lost the place it was opened to show. */
+static void list_scroll(struct view *v)
+{
+	uint32_t shown = list_shown(v), n = cur_obj(v)->n_touch;
+
+	if (!shown)
+		return;
+	if (v->sel_touch < v->list_off)
+		v->list_off = v->sel_touch;
+	if (v->sel_touch >= v->list_off + shown)
+		v->list_off = v->sel_touch - shown + 1u;
+	if (v->list_off + shown > n)
+		v->list_off = n - shown;
 }
 
 static void draw_list(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
-	int top = list_top(v), w = g_cols - 4;
-	uint32_t i;
+	int top, w = g_cols - 4;
+	uint32_t shown, i;
+	char more[40];
+
+	list_scroll(v);
+	shown = list_shown(v);
+	top = list_top(v);
+
+	/* A window of four over a list of thirty has to say so somewhere, or it
+	 * reads as a list of four. */
+	if (ob->n_touch > shown)
+		snprintf(more, sizeof more, "%u-%u of %u", v->list_off + 1u,
+			 v->list_off + shown, ob->n_touch);
+	else
+		snprintf(more, sizeof more, "where");
 
 	row_start(o, top, 3);
-	out_fmt(o, A_DIM "%-*.*s" A_OFF, w, w,
-		" module                          markers  where");
-	for (i = 0; i < ob->n_touch && top + 1 + (int)i < g_rows - 1; i++) {
-		const struct kof_touch *t = &ob->touch[i];
+	out_fmt(o, A_DIM " %-38s %-10s %-*.*s" A_OFF, "signature", "markers",
+		w - 52, w - 52, more);
+
+	for (i = 0; i < shown; i++) {
+		const struct kof_touch *t = &ob->touch[v->list_off + i];
 		char name[80], head[24];
 
 		touch_name(t, name, sizeof name);
 		touch_head(t, head, sizeof head);
 		row_start(o, top + 1 + (int)i, 3);
-		if (i == v->sel_touch)
+		if (v->list_off + i == v->sel_touch)
 			out_str(o, A_SEL);
 		out_fmt(o, " %-38.38s %-10s %-*.*s", name, head,
 			w - 52, w - 52,
@@ -1123,12 +1165,14 @@ static void click(struct view *v, int rclick)
 	struct object *ob = cur_obj(v);
 
 	if (v->show_list) {
-		uint32_t k = (uint32_t)(g_my - list_top(v) - 1);
+		uint32_t k = v->list_off + (uint32_t)(g_my - list_top(v) - 1);
 
 		/* Anywhere outside a row closes it: a list that can only be
 		 * dismissed by finding the right key is a list people leave
 		 * open. */
-		if (g_my > list_top(v) && k < ob->n_touch)
+		if (g_my > list_top(v) &&
+		    g_my <= list_top(v) + (int)list_shown(v) &&
+		    k < ob->n_touch)
 			v->sel_touch = k;
 		v->show_list = 0;
 		return;
