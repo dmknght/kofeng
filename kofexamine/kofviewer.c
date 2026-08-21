@@ -63,6 +63,32 @@
  * in raw mode after a crash is a tool people stop running, so the restore is
  * registered before the first change is made and is idempotent.
  */
+/*
+ * Everything this program puts on the terminal goes through one call.
+ *
+ * It used to be two - fputs for the mode changes, write for the frames - and
+ * that was a real bug rather than untidiness. stdout to a terminal is line
+ * buffered and a mode change carries no newline, so "turn the mouse on" sat in
+ * stdio's buffer for the whole session while every frame went straight out
+ * around it. The terminal was never asked to report a click, so it never did,
+ * and the viewer looked like a viewer whose mouse did not work.
+ *
+ * It also makes the restore path correct: write is async-signal-safe and
+ * fputs/fflush are not, and the restore runs from a signal handler.
+ */
+static void term_write(const char *s)
+{
+	size_t n = strlen(s), off = 0;
+
+	while (off < n) {
+		ssize_t k = write(STDOUT_FILENO, s + off, n - off);
+
+		if (k <= 0)
+			return;
+		off += (size_t)k;
+	}
+}
+
 static struct termios  g_saved_tty;
 static int             g_tty_raw;
 static int             g_rows = 24, g_cols = 80;
@@ -76,8 +102,7 @@ static void term_restore(void)
 	/* Cursor back, main screen back, in that order: the show has to happen
 	 * on the screen that is about to be left, or it applies to the one being
 	 * returned to and the user's shell gets it. */
-	fputs("\033[?1006l\033[?1002l\033[?1000l\033[?25h\033[?1049l", stdout);
-	fflush(stdout);
+	term_write("\033[?1006l\033[?1002l\033[?1000l\033[?25h\033[?1049l");
 }
 
 static void on_signal(int sig)
@@ -130,7 +155,7 @@ static int term_setup(void)
 	 * being selected. Holding shift still bypasses all of this and gives
 	 * back the terminal's copy, in every terminal that implements 1006.
 	 */
-	fputs("\033[?1049h\033[?25l\033[?1000h\033[?1002h\033[?1006h", stdout);
+	term_write("\033[?1049h\033[?25l\033[?1000h\033[?1002h\033[?1006h");
 	return 1;
 }
 
@@ -339,6 +364,7 @@ struct view {
 	 */
 	uint64_t    sel_a, sel_b;
 	int         dragging;
+	int         dragged;        /* the pointer moved off the pressed byte */
 
 	uint32_t    sel_touch, list_off;
 	int         show_list;
@@ -746,6 +772,39 @@ static int in_sel(const struct view *v, uint64_t at)
 	return at >= lo && at <= hi;
 }
 
+/*
+ * Which signature has a marker covering this file offset.
+ *
+ * Any of them, not just the one being lit: the point is to be able to click a
+ * highlighted run and find out whose it is. In-region markers win over
+ * elsewhere ones when two overlap, because that is the one that counts for its
+ * owner. -1 for none.
+ */
+static int hit_owner(struct view *v, uint64_t off)
+{
+	struct object *ob = cur_obj(v);
+	int best = -1;
+	uint32_t i, j;
+
+	for (i = 0; i < ob->n_touch; i++) {
+		const struct kof_touch *t = &ob->touch[i];
+
+		for (j = 0; j < t->n_str; j++) {
+			const struct kof_touch_str *st = &t->str[j];
+
+			if (st->at == KOF_BROKEN)
+				continue;
+			if (off < st->at || off >= st->at + st->len)
+				continue;
+			if (st->in_rgn)
+				return (int)i;
+			if (best < 0)
+				best = (int)i;
+		}
+	}
+	return best;
+}
+
 static int hit_kind(struct view *v, uint64_t off)
 {
 	struct object *ob = cur_obj(v);
@@ -989,8 +1048,8 @@ static void draw_list(struct out *o, struct view *v)
 		snprintf(more, sizeof more, "where");
 
 	row_start(o, top, 3);
-	out_fmt(o, A_DIM " %-38s %-10s %-*.*s" A_OFF, "signature", "markers",
-		w - 52, w - 52, more);
+	out_fmt(o, A_DIM " %-52s %-*.*s" A_OFF, "signature", w - 55, w - 55,
+		more);
 
 	for (i = 0; i < shown; i++) {
 		const struct kof_touch *t = &ob->touch[v->list_off + i];
@@ -1001,12 +1060,11 @@ static void draw_list(struct out *o, struct view *v)
 		row_start(o, top + 1 + (int)i, 3);
 		if (v->list_off + i == v->sel_touch)
 			out_str(o, A_SEL);
-		out_fmt(o, " %-38.38s %-10s %-*.*s", name, head,
-			w - 52, w - 52,
-			t->ruled_out ? t->ruled_out :
-			t->fired ? "fired" :
-			t->kind == KOF_TOUCH_ELSEWHERE ? "outside its regions"
-						       : "did not fire");
+		/* Name and count, and nothing else. Whether it fired is the
+		 * colour and why it did not is on the bottom line for the one
+		 * that is selected; a column repeating either in four words was
+		 * the widest thing here and the least read. */
+		out_fmt(o, " %-52.52s %-*.*s", name, w - 55, w - 55, head);
 		out_str(o, A_OFF);
 	}
 }
@@ -1023,7 +1081,18 @@ static void redraw(struct view *v)
 	if (v->show_list)
 		draw_list(&o, v);
 	if (o.n)
-		(void)!write(STDOUT_FILENO, o.p, o.n);
+		{
+			size_t off = 0;
+
+			while (off < o.n) {
+				ssize_t k = write(STDOUT_FILENO, o.p + off,
+						  o.n - off);
+
+				if (k <= 0)
+					break;
+				off += (size_t)k;
+			}
+		}
 	free(o.p);
 }
 
@@ -1080,6 +1149,39 @@ static int g_mx, g_my;          /* where the last click was, 1 based */
  * SGR is "ESC [ < b ; x ; y M" in plain digits with no ceiling, and every
  * terminal that reports a click at all has understood it for a decade.
  */
+/*
+ * The legacy encoding, for terminals that did not take the SGR request.
+ *
+ * "ESC [ M b x y", three bytes each biased by 32. It cannot express a column
+ * past 223 and it has no separate release code worth trusting, but it is what
+ * arrives when ?1006 was ignored - and a request being ignored is silent, so a
+ * viewer that only speaks SGR looks to its user like a viewer whose mouse does
+ * nothing at all. Which is exactly how it looked.
+ */
+static int read_mouse_x10(void)
+{
+	unsigned char t[3];
+	int b;
+
+	if (read(STDIN_FILENO, t, 1) != 1 || read(STDIN_FILENO, t + 1, 1) != 1 ||
+	    read(STDIN_FILENO, t + 2, 1) != 1)
+		return K_NONE;
+	b = t[0] - 32;
+	g_mx = t[1] - 32;
+	g_my = t[2] - 32;
+
+	if (b & 0x40)
+		return (b & 3) == 0 ? K_WHEEL_UP : K_WHEEL_DOWN;
+	if (b & 0x20)
+		return K_DRAG;
+	/* Button 3 in this encoding is "released", whichever was let go. */
+	if ((b & 3) == 3)
+		return K_RELEASE;
+	if ((b & 3) == 2)
+		return K_RCLICK;
+	return K_CLICK;
+}
+
 static int read_mouse(void)
 {
 	char t[32];
@@ -1131,6 +1233,8 @@ static int read_key(void)
 		return 27;
 	if (seq[1] == '<')
 		return read_mouse();
+	if (seq[1] == 'M')
+		return read_mouse_x10();
 	switch (seq[1]) {
 	case 'A': return K_UP;
 	case 'B': return K_DOWN;
@@ -1196,6 +1300,7 @@ static void click(struct view *v, int rclick)
 		if (byte_under(v, g_my, g_mx, &at)) {
 			v->sel_a = v->sel_b = at;
 			v->dragging = 1;
+			v->dragged = 0;
 		}
 		return;
 	}
@@ -1285,19 +1390,63 @@ static int handle(struct view *v, int k)
 	case K_DRAG: {
 		uint64_t at;
 
-		if (v->dragging && byte_under(v, g_my, g_mx, &at))
+		if (v->dragging && byte_under(v, g_my, g_mx, &at)) {
+			if (at != v->sel_a)
+				v->dragged = 1;
 			v->sel_b = at;
+		}
 		break;
 	}
 	case K_RELEASE:
+		/*
+		 * A press and a release on one byte is a click, not a selection
+		 * of length one - and on a lit byte the obvious thing to want
+		 * is to know whose marker it is. So it selects that signature,
+		 * which relights the pane around it. Anywhere else it is a
+		 * caret and stays as one.
+		 */
+		if (v->dragging && !v->dragged && v->sel_a != KOF_BROKEN) {
+			int who = hit_owner(v, view_map(v, v->sel_a, 0));
+
+			if (who >= 0) {
+				v->sel_touch = (uint32_t)who;
+				v->sel_a = v->sel_b = KOF_BROKEN;
+			}
+		}
 		v->dragging = 0;
 		break;
 	case 27:
 		v->sel_a = v->sel_b = KOF_BROKEN;
 		v->show_list = 0;
 		break;
-	case K_WHEEL_UP:   hex_step(v, -3); break;
-	case K_WHEEL_DOWN: hex_step(v,  3); break;
+	/*
+	 * The wheel turns whatever the pointer is over.
+	 *
+	 * It used to always scroll the hex pane, which meant scrolling a tree
+	 * that was under the cursor moved something else on the other side of
+	 * the screen. A wheel that ignores where it is pointing is a wheel
+	 * people stop using.
+	 */
+	case K_WHEEL_UP:
+	case K_WHEEL_DOWN: {
+		int down = k == K_WHEEL_DOWN, n;
+
+		if (v->show_list && g_my > list_top(v) &&
+		    g_my <= list_top(v) + (int)list_shown(v)) {
+			if (down && v->sel_touch + 1 < cur_obj(v)->n_touch)
+				v->sel_touch++;
+			else if (!down && v->sel_touch)
+				v->sel_touch--;
+		} else if (g_mx <= TREE_W && g_my >= hex_top() &&
+			   g_my <= hex_bot()) {
+			for (n = 0; n < 3; n++)
+				goto_node(v, down ? v->sel_node + 1u
+						  : v->sel_node - 1u);
+		} else {
+			hex_step(v, down ? 3 : -3);
+		}
+		break;
+	}
 	case 'j': case K_DOWN:
 		/* The list takes the keys while it is open, whatever pane has
 		 * focus underneath: it is in front, and a cursor that moves
