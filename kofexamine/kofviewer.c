@@ -76,9 +76,9 @@
  * It also makes the restore path correct: write is async-signal-safe and
  * fputs/fflush are not, and the restore runs from a signal handler.
  */
-static void term_write(const char *s)
+static void term_write_n(const char *s, size_t n)
 {
-	size_t n = strlen(s), off = 0;
+	size_t off = 0;
 
 	while (off < n) {
 		ssize_t k = write(STDOUT_FILENO, s + off, n - off);
@@ -87,6 +87,11 @@ static void term_write(const char *s)
 			return;
 		off += (size_t)k;
 	}
+}
+
+static void term_write(const char *s)
+{
+	term_write_n(s, strlen(s));
 }
 
 static struct termios  g_saved_tty;
@@ -182,6 +187,10 @@ static void term_size(void)
 struct out {
 	char  *p;
 	size_t n, cap;
+	/* Printable columns emitted since the last row_start, so a caller
+	 * laying out a line can record where its pieces landed. Escapes do not
+	 * count; nothing here needs more than that. */
+	size_t col_hint;
 };
 
 static void out_add(struct out *o, const char *s, size_t n)
@@ -202,7 +211,19 @@ static void out_add(struct out *o, const char *s, size_t n)
 
 static void out_str(struct out *o, const char *s)
 {
+	const char *p;
+
 	out_add(o, s, strlen(s));
+	for (p = s; *p; p++) {
+		if (*p == '\033') {
+			while (*p && *p != 'm' && *p != 'H' && *p != 'K')
+				p++;
+			if (!*p)
+				break;
+			continue;
+		}
+		o->col_hint++;
+	}
 }
 
 static void out_fmt(struct out *o, const char *fmt, ...)
@@ -217,8 +238,12 @@ static void out_fmt(struct out *o, const char *fmt, ...)
 	va_start(ap, fmt);
 	n = vsnprintf(t, sizeof t, fmt, ap);
 	va_end(ap);
-	if (n > 0)
-		out_add(o, t, (size_t)n < sizeof t ? (size_t)n : sizeof t - 1);
+	if (n > 0) {
+		size_t keep = (size_t)n < sizeof t ? (size_t)n : sizeof t - 1;
+
+		t[keep] = 0;
+		out_str(o, t);
+	}
 }
 
 static void out_at(struct out *o, int row, int col)
@@ -271,6 +296,29 @@ static const char *byte_colour(uint8_t c)
 #define A_SELB  "\033[44;97m"   /* the drag selection */
 #define A_HIT1  "\033[41;97m"   /* counted by the module */
 #define A_HIT2  "\033[43;30m"   /* present, but outside its regions */
+
+#define TREE_W   30
+
+/*
+ * Four fixed rows and everything else is the panes.
+ *
+ * The markers list used to own nine rows and usually put one line in them. It is
+ * a summary now - one line, above the status - and the list it summarises opens
+ * over the screen when it is asked for. Space spent on a pane that is empty most
+ * of the time is space the hex view could have had, and the hex view is what the
+ * tool is for.
+ */
+/*
+ * No title row.
+ *
+ * It held the full path, which is the one fact about an open file that does not
+ * change and does not fit - a sha256 filename with a directory in front of it
+ * fills a line and says nothing after the first second. What belongs there is a
+ * menu bar, and until there is one the row is better spent on the panes.
+ */
+static int hex_top(void)  { return 1; }
+static int hex_bot(void)  { return g_rows - 2; }
+static int mark_row(void) { return g_rows; }
 
 /* ---- the objects under view ------------------------------------------------
  *
@@ -368,6 +416,40 @@ struct view {
 
 	uint32_t    sel_touch, list_off;
 	int         show_list;
+	/* 0: the signatures. 1: the markers of the selected one. Two depths of
+	 * one dialog rather than two dialogs, because the second is only ever
+	 * reached from a row of the first. */
+	int         list_depth;
+	uint32_t    str_off, sel_str;
+
+	/*
+	 * Which signatures the dialog is showing: all of them, the ones that
+	 * fired, or the ones that did not. The status line says "hit 3 skip 5"
+	 * and both numbers are clickable, so the filter is the answer to which
+	 * of them was clicked.
+	 */
+	int         list_filter;    /* 0 all, 1 fired, 2 skipped */
+
+	/* Where the clickable words ended up on the status line. Recorded while
+	 * drawing rather than computed twice: the line is built from variable
+	 * length pieces and a second copy of that arithmetic would be a second
+	 * thing to keep right. */
+	int         hit_c0, hit_c1, skip_c0, skip_c1, name_c0, name_c1;
+
+	int         menu_open, menu_row, menu_col, menu_sel;
+
+	/*
+	 * How far each list is scrolled sideways.
+	 *
+	 * A deep tree spends its width on indentation and a signature name is
+	 * as long as its author made it, so on a narrow terminal both get cut
+	 * before they get useful. Vertical scrolling does not help with that -
+	 * the row is there, it is the row that is too wide - so the panes that
+	 * hold text keep a horizontal offset too. The hex pane has none by
+	 * design: it reflows, fitting fewer bytes per row rather than running
+	 * off the edge.
+	 */
+	uint32_t    tree_hoff, list_hoff;
 	int         pane;           /* 0 tree, 1 hex, 2 markers */
 	int         per;            /* bytes a hex row shows, for click mapping */
 };
@@ -570,6 +652,33 @@ static void tree_build(struct view *v)
 	}
 }
 
+/*
+ * The furthest the hex pane may be scrolled.
+ *
+ * Not rgn_len. Clamping the TOP of the view to the end of the data lets the pane
+ * scroll until every row is past the end and the screen is blank - which it did,
+ * and which is worse than not scrolling at all: an empty pane reads as a region
+ * with nothing in it rather than as a cursor parked past the last byte.
+ *
+ * The limit is the position that puts the LAST row of data on the bottom row of
+ * the pane. A region that fits entirely gets a limit of zero and does not scroll
+ * at all - a ten row header has nothing below it to scroll to.
+ */
+static uint64_t hex_max(const struct view *v)
+{
+	uint64_t per = (uint64_t)(v->per > 0 ? v->per : 16);
+	uint64_t rows = (uint64_t)(hex_bot() - hex_top() + 1);
+	uint64_t last, top;
+
+	if (!v->rgn_len)
+		return 0;
+	last = (v->rgn_len - 1u) / per * per;      /* where the last row starts */
+	if (!rows)
+		return last;
+	top = (rows - 1u) * per;
+	return last > top ? last - top : 0;
+}
+
 /* Resolve whichever region the cursor is on, and put the hex pane back where it
  * was the last time this row was looked at. */
 static void view_select(struct view *v)
@@ -593,9 +702,11 @@ static void view_select(struct view *v)
 	for (i = 0; i < v->n_ext; i++)
 		v->rgn_len += v->ext[i].len;
 
+	/* A remembered place is re-clamped rather than trusted: the pane may be
+	 * a different height than it was when the row was left. */
 	v->rgn_at = v->node[v->sel_node].at;
-	if (v->rgn_at > v->rgn_len)
-		v->rgn_at = 0;
+	if (v->rgn_at > hex_max(v))
+		v->rgn_at = hex_max(v);
 }
 
 /*
@@ -661,20 +772,6 @@ static uint64_t view_unmap(const struct view *v, uint64_t off)
 
 /* ---- panes ---------------------------------------------------------------- */
 
-#define TREE_W   30
-
-/*
- * Four fixed rows and everything else is the panes.
- *
- * The markers list used to own nine rows and usually put one line in them. It is
- * a summary now - one line, above the status - and the list it summarises opens
- * over the screen when it is asked for. Space spent on a pane that is empty most
- * of the time is space the hex view could have had, and the hex view is what the
- * tool is for.
- */
-static int hex_top(void)  { return 2; }
-static int hex_bot(void)  { return g_rows - 2; }
-static int mark_row(void) { return g_rows; }
 
 /* Erase to end of line rather than clearing the screen.
  *
@@ -686,14 +783,14 @@ static void row_start(struct out *o, int row, int col)
 {
 	out_at(o, row, col);
 	out_str(o, "\033[K");
+	o->col_hint = 0;
 }
 
 static void draw_frame(struct out *o, struct view *v)
 {
 	int i;
 
-	row_start(o, 1, 1);
-	out_fmt(o, A_BOLD "%.*s" A_OFF, g_cols - 2, v->path);
+	(void)v;
 
 	for (i = hex_top(); i <= hex_bot(); i++) {
 		out_at(o, i, TREE_W + 1);
@@ -728,19 +825,30 @@ static void draw_tree(struct out *o, struct view *v)
 		n = &v->node[k];
 		sel = k == v->sel_node;
 
-		if (sel)
-			out_str(o, v->pane == 0 ? A_SEL : A_BOLD);
-		out_fmt(o, "%*s", (int)n->depth, "");
-		/* An object row is a thing that can hold a signature; a region
-		 * row is a place inside one. Different colours because they are
-		 * different kinds of answer, not different rows of one kind. */
-		if (!sel)
-			out_str(o, n->mask ? A_ID : A_BOLD);
-		/* Truncated, not just padded: a label wider than its column runs
-		 * into the pane beside it, and the first file anyone opens has
-		 * a sha256 for a name. */
-		out_fmt(o, "%-*.*s", (int)(19 - n->depth), (int)(19 - n->depth),
-			n->label);
+		/* Indent and label as one string, so scrolling sideways moves
+		 * the whole row and not the label out from under its own
+		 * indentation. */
+		{
+			char row[96];
+			size_t off;
+
+			snprintf(row, sizeof row, "%*s%s", (int)n->depth, "",
+				 n->label);
+			off = v->tree_hoff < strlen(row) ? v->tree_hoff
+							 : strlen(row);
+			if (sel)
+				out_str(o, v->pane == 0 ? A_SEL : A_BOLD);
+			else
+				/* An object row can hold a signature; a region
+				 * row is a place inside one. Different colours
+				 * because they are different kinds of answer,
+				 * not different rows of one kind. */
+				out_str(o, n->mask ? A_ID : A_BOLD);
+			/* Truncated, not merely padded: a label wider than its
+			 * column runs into the pane beside it, and the first
+			 * file anyone opens has a sha256 for a name. */
+			out_fmt(o, "%-19.19s", row + off);
+		}
 		if (!sel)
 			out_str(o, A_OFF A_SIZE);
 		out_fmt(o, "%9llu", (unsigned long long)n->bytes);
@@ -977,9 +1085,31 @@ static void draw_marker_line(struct out *o, struct view *v)
 
 	touch_name(&ob->touch[v->sel_touch], name, sizeof name);
 	touch_head(&ob->touch[v->sel_touch], head, sizeof head);
-	out_fmt(o, "%shit %u" A_OFF A_DIM "  skip %u  |  " A_OFF "%s%s %s" A_OFF,
-		hit ? A_BAD : A_DIM, hit, ob->n_touch - hit,
-		touch_colour(&ob->touch[v->sel_touch]), name, head);
+
+	/* Three clickable words, and their columns recorded as they are laid
+	 * out. "hit" and "skip" open the dialog filtered to what they count;
+	 * the name opens that signature's markers directly. */
+	{
+		char hits[24], skips[24];
+		int c = 1;
+
+		c += (int)o->col_hint;              /* whatever preceded us */
+		snprintf(hits, sizeof hits, "hit %u", hit);
+		snprintf(skips, sizeof skips, "skip %u", ob->n_touch - hit);
+
+		v->hit_c0 = c;
+		v->hit_c1 = c + (int)strlen(hits) - 1;
+		c += (int)strlen(hits) + 2;
+		v->skip_c0 = c;
+		v->skip_c1 = c + (int)strlen(skips) - 1;
+		c += (int)strlen(skips) + 5;
+		v->name_c0 = c;
+		v->name_c1 = c + (int)strlen(name) - 1;
+
+		out_fmt(o, "%s%s" A_OFF A_DIM "  %s  |  " A_OFF "%s%s %s" A_OFF,
+			hit ? A_BAD : A_DIM, hits, skips,
+			touch_colour(&ob->touch[v->sel_touch]), name, head);
+	}
 }
 
 
@@ -998,9 +1128,47 @@ static void draw_marker_line(struct out *o, struct view *v)
  */
 #define LIST_ROWS 4u
 
+/* Does this signature belong in the dialog as it is filtered right now. */
+static int list_keep(struct view *v, const struct kof_touch *t)
+{
+	if (v->list_filter == 1)
+		return t->fired != 0;
+	if (v->list_filter == 2)
+		return t->fired == 0;
+	return 1;
+}
+
+/* The i-th signature under the filter, or n_touch when there is no such row. */
+static uint32_t list_nth(struct view *v, uint32_t i)
+{
+	struct object *ob = cur_obj(v);
+	uint32_t k, seen = 0;
+
+	for (k = 0; k < ob->n_touch; k++) {
+		if (!list_keep(v, &ob->touch[k]))
+			continue;
+		if (seen++ == i)
+			return k;
+	}
+	return ob->n_touch;
+}
+
+static uint32_t list_total(struct view *v)
+{
+	struct object *ob = cur_obj(v);
+	uint32_t k, n = 0;
+
+	if (v->list_depth)
+		return v->sel_touch < ob->n_touch
+		       ? ob->touch[v->sel_touch].n_str : 0;
+	for (k = 0; k < ob->n_touch; k++)
+		n += (uint32_t)list_keep(v, &ob->touch[k]);
+	return n;
+}
+
 static uint32_t list_shown(struct view *v)
 {
-	uint32_t n = cur_obj(v)->n_touch;
+	uint32_t n = list_total(v);
 
 	return n < LIST_ROWS ? n : LIST_ROWS;
 }
@@ -1016,10 +1184,15 @@ static int list_top(struct view *v)
  * that jumps when it opens has lost the place it was opened to show. */
 static void list_scroll(struct view *v)
 {
-	uint32_t shown = list_shown(v), n = cur_obj(v)->n_touch;
+	uint32_t shown = list_shown(v), n = list_total(v);
 
 	if (!shown)
 		return;
+	if (v->list_depth) {
+		if (v->str_off + shown > n)
+			v->str_off = n - shown;
+		return;
+	}
 	if (v->sel_touch < v->list_off)
 		v->list_off = v->sel_touch;
 	if (v->sel_touch >= v->list_off + shown)
@@ -1028,58 +1201,379 @@ static void list_scroll(struct view *v)
 		v->list_off = n - shown;
 }
 
+/*
+ * The selected row keeps its own colour.
+ *
+ * It used to be drawn in reverse video, which paints it white and takes the
+ * colour with it - so selecting a row was also hiding the one thing the row was
+ * colour-coded to say. A caret marks the selection instead and the colour
+ * survives, which matters most on exactly the row being looked at.
+ */
+static void list_row(struct out *o, int sel, const char *colour)
+{
+	out_str(o, colour);
+	if (sel)
+		out_str(o, "\033[1m");
+	out_str(o, sel ? ">" : " ");
+}
+
 static void draw_list(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
+	const struct kof_touch *t = v->sel_touch < ob->n_touch
+				   ? &ob->touch[v->sel_touch] : NULL;
 	int top, w = g_cols - 4;
-	uint32_t shown, i;
-	char more[40];
+	uint32_t shown, i, total;
+	char range[40];
 
 	list_scroll(v);
 	shown = list_shown(v);
 	top = list_top(v);
+	total = list_total(v);
 
 	/* A window of four over a list of thirty has to say so somewhere, or it
 	 * reads as a list of four. */
-	if (ob->n_touch > shown)
-		snprintf(more, sizeof more, "%u-%u of %u", v->list_off + 1u,
-			 v->list_off + shown, ob->n_touch);
-	else
-		snprintf(more, sizeof more, "where");
+	/*
+	 * The filter is named with the word that was clicked to set it.
+	 *
+	 * The header used to spell it out - "signatures that did not fire" -
+	 * which is a sentence where a label belongs, and a different sentence
+	 * from the "skip 5" that opened it. Echoing the word makes the dialog
+	 * the answer to the click rather than a restatement of it.
+	 */
+	/*
+	 * The note on the right says three things and has to stay unambiguous
+	 * when only some of them apply: which filter is on, how many rows there
+	 * are under it, and which of them are on screen. A bare "hit  1" said
+	 * none of that clearly - the 1 could have been a row number.
+	 */
+	{
+		const char *f = v->list_depth ? "" :
+				v->list_filter == 1 ? "hit: " :
+				v->list_filter == 2 ? "skip: " : "";
+		uint32_t off = v->list_depth ? v->str_off : v->list_off;
+
+		if (!total)
+			snprintf(range, sizeof range, "%snone", f);
+		else if (total > shown)
+			snprintf(range, sizeof range, "%s%u-%u of %u", f,
+				 off + 1u, off + shown, total);
+		else
+			snprintf(range, sizeof range, "%s%u", f, total);
+	}
 
 	row_start(o, top, 3);
-	out_fmt(o, A_DIM " %-52s %-*.*s" A_OFF, "signature", w - 55, w - 55,
-		more);
+	if (!v->list_depth)
+		out_fmt(o, A_DIM " %-52s %-10s%*s" A_OFF, "signatures",
+			"markers", w - 66, range);
+	else
+		out_fmt(o, A_DIM " %-14s %6s %8s  %-10s %-*s" A_OFF,
+			"marker", "db id", "size", "at", w - 46 > 0 ? w - 46 : 1,
+			range);
 
 	for (i = 0; i < shown; i++) {
-		const struct kof_touch *t = &ob->touch[v->list_off + i];
-		char name[80], head[24];
-
-		touch_name(t, name, sizeof name);
-		touch_head(t, head, sizeof head);
 		row_start(o, top + 1 + (int)i, 3);
-		if (v->list_off + i == v->sel_touch)
+
+		if (!v->list_depth) {
+			uint32_t idx = list_nth(v, v->list_off + i);
+			const struct kof_touch *e;
+
+			if (idx >= ob->n_touch)
+				continue;
+			e = &ob->touch[idx];
+			char name[80], head[24];
+
+			touch_name(e, name, sizeof name);
+			touch_head(e, head, sizeof head);
+			list_row(o, idx == v->sel_touch, touch_colour(e));
+			{
+				size_t off = v->list_hoff < strlen(name)
+					     ? v->list_hoff : strlen(name);
+
+				out_fmt(o, "%-52.52s %-10s", name + off, head);
+			}
+			out_str(o, A_OFF);
+			continue;
+		}
+
+		/* The markers of one signature, the way kofexamine prints them:
+		 * present ones in full, absent ones greyed with a dash where an
+		 * offset would be. */
+		if (t && v->str_off + i < t->n_str) {
+			const struct kof_touch_str *st =
+				&t->str[v->str_off + i];
+			int miss = st->at == KOF_BROKEN;
+			int sel = v->str_off + i == v->sel_str;
+			char kind[16];
+			uint32_t b;
+
+			if (st->kind == KOF_STR_HEX)
+				snprintf(kind, sizeof kind, "hex");
+			else
+				snprintf(kind, sizeof kind, "str: %s-%s",
+					 (st->flags & KOF_STR_FULLWORD) ? "fuw"
+									: "sub",
+					 (st->flags & KOF_STR_ICASE) ? "i" : "c");
+
+			out_str(o, miss ? A_DIM : (st->in_rgn ? A_OFF : A_WARN));
+			if (sel)
+				out_str(o, "\033[1m");
+			out_str(o, sel ? ">" : " ");
+			out_fmt(o, "%-14s %6u %8u  ", kind, st->uid, st->len);
+			if (miss)
+				out_fmt(o, "%-10s ", "-");
+			else
+				out_fmt(o, "%-10llu ",
+					(unsigned long long)st->at);
+			for (b = 0; b < st->len && b < 20u; b++)
+				out_fmt(o, "%02X", st->bytes[b]);
+			if (st->len > 20u)
+				out_str(o, "...");
+			out_str(o, A_OFF);
+		}
+	}
+}
+
+/* ---- the context menu -----------------------------------------------------
+ *
+ * What can be done with a selection, at the place it was made. A menu rather
+ * than more keys: two copies and two ways of declaring a marker are four things
+ * nobody will remember bindings for, and the reason this is a TUI rather than a
+ * printout is that a pointer beats a manual.
+ *
+ * Items that cannot apply are drawn and disabled rather than hidden. A menu
+ * whose shape changes has to be read every time; one that greys an item says
+ * what is missing - here, that nothing is selected.
+ */
+enum menu_action {
+	M_COPY_ASCII = 0,
+	M_COPY_HEX,
+	M_ADD_STR,
+	M_ADD_HEX,
+	M_COUNT
+};
+
+static const char *const menu_label[M_COUNT] = {
+	"Copy ASCII",
+	"Copy hex",
+	/*
+	 * "Declare", because that is the word the module language uses:
+	 * KOF_DEFINE_STR declares a string this module looks for, and what this
+	 * item does is write one of those. "Add hex to signature" described the
+	 * mechanics and was the longest thing in the menu; "Add hex" on its own
+	 * would not have said add it to WHAT.
+	 *
+	 * The ellipsis is the usual promise that a dialog follows rather than
+	 * the thing happening on the spot.
+	 */
+	"Declare as string...",
+	"Declare as hex..."
+};
+
+#define MENU_W 26
+
+static int menu_enabled(struct view *v, int a)
+{
+	if (a == M_COPY_ASCII || a == M_COPY_HEX)
+		return v->sel_a != KOF_BROKEN;
+	/* Not wired to anything yet. Shown because the menu is where they will
+	 * be, and disabled because a menu item that does nothing teaches people
+	 * not to trust the menu. */
+	return 0;
+}
+
+static void menu_open_at(struct view *v, int row, int col)
+{
+	int i;
+
+	v->menu_open = 1;
+	v->menu_row = row;
+	v->menu_col = col;
+	if (v->menu_row + M_COUNT > g_rows)
+		v->menu_row = g_rows - M_COUNT;
+	if (v->menu_row < 1)
+		v->menu_row = 1;
+	if (v->menu_col + MENU_W > g_cols)
+		v->menu_col = g_cols - MENU_W;
+	if (v->menu_col < 1)
+		v->menu_col = 1;
+
+	/* Open on something choosable, so Enter always does what is highlighted. */
+	v->menu_sel = 0;
+	for (i = 0; i < M_COUNT; i++)
+		if (menu_enabled(v, i)) {
+			v->menu_sel = i;
+			break;
+		}
+}
+
+static void menu_step(struct view *v, int d)
+{
+	int i, k = v->menu_sel;
+
+	for (i = 0; i < M_COUNT; i++) {
+		k += d;
+		if (k < 0 || k >= M_COUNT)
+			return;
+		if (menu_enabled(v, k)) {
+			v->menu_sel = k;
+			return;
+		}
+	}
+}
+
+static void draw_menu(struct out *o, struct view *v)
+{
+	int i;
+
+	for (i = 0; i < M_COUNT; i++) {
+		int on = menu_enabled(v, i);
+
+		out_at(o, v->menu_row + i, v->menu_col);
+		/*
+		 * Disabled keeps the menu's background and loses contrast, it
+		 * does not lose the text. It was 100;90 - bright black on
+		 * bright black - which is the same colour twice, so the items
+		 * were there and unreadable. A disabled item still has to say
+		 * what it would do; that is the whole reason it is shown.
+		 */
+		if (i == v->menu_sel && on)
 			out_str(o, A_SEL);
-		/* Name and count, and nothing else. Whether it fired is the
-		 * colour and why it did not is on the bottom line for the one
-		 * that is selected; a column repeating either in four words was
-		 * the widest thing here and the least read. */
-		out_fmt(o, " %-52.52s %-*.*s", name, w - 55, w - 55, head);
+		else if (!on)
+			out_str(o, "\033[47;90m");
+		else
+			out_str(o, "\033[47;30m");
+		out_fmt(o, " %-*.*s", MENU_W - 2, MENU_W - 2, menu_label[i]);
 		out_str(o, A_OFF);
 	}
 }
 
+/*
+ * Copy through the terminal, not through a clipboard this program can reach.
+ *
+ * OSC 52 hands the bytes to whatever is drawing the screen, which is the only
+ * thing that works when the screen is being drawn on another machine - and
+ * being usable over ssh is most of why this is a TUI. A terminal with the
+ * sequence disabled ignores it silently; there is no reply to wait for and
+ * nothing better to fall back to.
+ */
+static void copy_osc52(const char *bytes, size_t n)
+{
+	static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+				  "abcdefghijklmnopqrstuvwxyz0123456789+/";
+	struct out o = { NULL, 0, 0, 0 };
+	size_t i;
+
+	out_str(&o, "\033]52;c;");
+	for (i = 0; i < n; i += 3) {
+		unsigned long w = (unsigned long)(unsigned char)bytes[i] << 16;
+		char t[5];
+
+		if (i + 1 < n)
+			w |= (unsigned long)(unsigned char)bytes[i + 1] << 8;
+		if (i + 2 < n)
+			w |= (unsigned long)(unsigned char)bytes[i + 2];
+		t[0] = b64[(w >> 18) & 63];
+		t[1] = b64[(w >> 12) & 63];
+		t[2] = i + 1 < n ? b64[(w >> 6) & 63] : '=';
+		t[3] = i + 2 < n ? b64[w & 63] : '=';
+		t[4] = 0;
+		out_str(&o, t);
+	}
+	out_str(&o, "\a");
+	if (o.n)
+		term_write_n(o.p, o.n);
+	free(o.p);
+}
+
+static void menu_run(struct view *v, int a)
+{
+	struct object *ob = cur_obj(v);
+	uint64_t lo, hi, k, n;
+	struct out t = { NULL, 0, 0, 0 };
+
+	if (!menu_enabled(v, a))
+		return;
+	lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
+	hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
+	n = hi - lo + 1u;
+
+	for (k = 0; k < n; k++) {
+		uint8_t c = ob->buf.p[view_map(v, lo + k, 0)];
+
+		if (a == M_COPY_HEX) {
+			char x[3];
+
+			snprintf(x, sizeof x, "%02X", c);
+			out_add(&t, x, 2);
+		} else {
+			/* The bytes as they are, not as they print. A marker is
+			 * bytes, and turning the unprintable ones into dots
+			 * would put something in the clipboard that is not what
+			 * was selected. */
+			out_add(&t, (const char *)&c, 1);
+		}
+	}
+	if (t.n)
+		copy_osc52(t.p, t.n);
+	free(t.p);
+	v->menu_open = 0;
+}
+
+/*
+ * A number that changes exactly when the screen would.
+ *
+ * Button-event tracking reports motion continuously while a button is held, and
+ * every report used to repaint. Most of them move nothing - the pointer is still
+ * over the same byte - so most of the repaints were the screen being rewritten
+ * with what it already said, which is what a click looks like when it flickers.
+ */
+static uint64_t view_stamp(struct view *v)
+{
+	uint64_t h = 1469598103934665603ull;
+	uint64_t p[] = {
+		v->sel_node, v->tree_top, v->rgn_at, v->sel_a, v->sel_b,
+		v->sel_touch, v->list_off, (uint64_t)v->pane,
+		(uint64_t)v->list_depth, v->str_off, (uint64_t)v->list_filter,
+		v->sel_str,
+		(uint64_t)v->show_list, (uint64_t)v->menu_open,
+		(uint64_t)v->menu_sel, (uint64_t)v->menu_row,
+		(uint64_t)v->menu_col, v->tree_hoff, v->list_hoff,
+		(uint64_t)g_rows, (uint64_t)g_cols
+	};
+	size_t i;
+
+	for (i = 0; i < sizeof p / sizeof p[0]; i++) {
+		h ^= p[i];
+		h *= 1099511628211ull;
+	}
+	return h;
+}
+
 static void redraw(struct view *v)
 {
-	struct out o = { NULL, 0, 0 };
+	struct out o = { NULL, 0, 0, 0 };
 
 	term_size();
+
+	/*
+	 * Synchronised output, DEC mode 2026.
+	 *
+	 * A frame is one write, but a terminal is free to render what it has
+	 * received so far - so a screen rewritten row by row is briefly a screen
+	 * half old and half new. This asks it to hold the picture until the
+	 * frame is complete. Terminals that do not know the mode ignore it,
+	 * which is why it can be sent unconditionally.
+	 */
+	out_str(&o, "\033[?2026h");
 	draw_frame(&o, v);
 	draw_tree(&o, v);
 	draw_hex(&o, v);
 	draw_marker_line(&o, v);
 	if (v->show_list)
 		draw_list(&o, v);
+	if (v->menu_open)
+		draw_menu(&o, v);
 	if (o.n)
 		{
 			size_t off = 0;
@@ -1131,6 +1625,30 @@ static int byte_under(struct view *v, int row, int col, uint64_t *out)
 	return 1;
 }
 
+/*
+ * Put a file offset on screen, a few rows down rather than at the very top.
+ *
+ * Landing a jump on the first row leaves nothing above it, and what is above a
+ * marker is half of what says whether it is the right marker - the string before
+ * it, the padding, the structure it sits in. Two rows of lead-in costs nothing
+ * and is what a reader would have scrolled to anyway.
+ */
+#define JUMP_LEAD 2u
+
+static void view_show(struct view *v, uint64_t file_off)
+{
+	uint64_t r = view_unmap(v, file_off);
+	uint64_t per = (uint64_t)(v->per > 0 ? v->per : 16);
+	uint64_t row;
+
+	if (r == KOF_BROKEN)
+		return;
+	row = r / per;
+	v->rgn_at = row > JUMP_LEAD ? (row - JUMP_LEAD) * per : 0;
+	if (v->rgn_at > hex_max(v))
+		v->rgn_at = hex_max(v);
+}
+
 /* ---- input ---------------------------------------------------------------- */
 
 enum key {
@@ -1140,6 +1658,7 @@ enum key {
 };
 
 static int g_mx, g_my;          /* where the last click was, 1 based */
+static int g_mod_shift;         /* shift was held for it */
 
 /*
  * SGR mouse reporting, not the original X10 encoding.
@@ -1169,6 +1688,7 @@ static int read_mouse_x10(void)
 	b = t[0] - 32;
 	g_mx = t[1] - 32;
 	g_my = t[2] - 32;
+	g_mod_shift = (b & 0x04) != 0;
 
 	if (b & 0x40)
 		return (b & 3) == 0 ? K_WHEEL_UP : K_WHEEL_DOWN;
@@ -1206,6 +1726,7 @@ static int read_mouse(void)
 		if (release)
 			return K_RELEASE;
 	}
+	g_mod_shift = (b & 0x04) != 0;
 	if ((b & 0x20))                      /* motion, with a button held */
 		return K_DRAG;
 	if ((b & 0x40) && (b & 3) == 0)
@@ -1253,11 +1774,12 @@ static void hex_step(struct view *v, long lines)
 {
 	long per = v->per > 0 ? v->per : 16;
 	long long at = (long long)v->rgn_at + lines * per;
+	uint64_t max = hex_max(v);
 
 	if (at < 0)
 		at = 0;
-	if ((uint64_t)at > v->rgn_len)
-		at = (long long)v->rgn_len;
+	if ((uint64_t)at > max)
+		at = (long long)max;
 	v->rgn_at = (uint64_t)at;
 }
 
@@ -1268,21 +1790,95 @@ static void click(struct view *v, int rclick)
 {
 	struct object *ob = cur_obj(v);
 
-	if (v->show_list) {
-		uint32_t k = v->list_off + (uint32_t)(g_my - list_top(v) - 1);
+	/*
+	 * The right button is the hex pane's alone.
+	 *
+	 * Everywhere else it used to do whatever the left button does, which is
+	 * a mouse with one button pretending to have two: right-clicking a tree
+	 * row moved the cursor, right-clicking "hit" opened the dialog. A
+	 * button that duplicates another teaches nothing and surprises whoever
+	 * expected a menu.
+	 */
+	if (rclick && !(g_my >= hex_top() && g_my <= hex_bot() &&
+			g_mx > TREE_W && !v->show_list && !v->menu_open))
+		return;
 
-		/* Anywhere outside a row closes it: a list that can only be
-		 * dismissed by finding the right key is a list people leave
-		 * open. */
-		if (g_my > list_top(v) &&
-		    g_my <= list_top(v) + (int)list_shown(v) &&
-		    k < ob->n_touch)
-			v->sel_touch = k;
+	if (v->menu_open) {
+		int k = g_my - v->menu_row;
+
+		/* Anywhere off the menu dismisses it. A menu that only closes
+		 * on the right key is a menu people leave open. */
+		if (g_mx >= v->menu_col && g_mx < v->menu_col + MENU_W &&
+		    k >= 0 && k < M_COUNT && menu_enabled(v, k))
+			menu_run(v, k);
+		v->menu_open = 0;
+		return;
+	}
+	if (v->show_list) {
+		int row = g_my - list_top(v) - 1;
+		int on = g_my > list_top(v) &&
+			 g_my <= list_top(v) + (int)list_shown(v);
+
+		if (on && !v->list_depth) {
+			uint32_t k = list_nth(v, v->list_off + (uint32_t)row);
+
+			/* A signature row opens into its markers rather than
+			 * closing the dialog: the row was chosen to be looked
+			 * at, and its markers are what there is to look at. */
+			if (k < ob->n_touch) {
+				v->sel_touch = k;
+				v->list_depth = 1;
+				v->str_off = 0;
+				v->sel_str = 0;
+			}
+			return;
+		}
+		if (on) {
+			/* A marker row moves the hex pane to it. That is the
+			 * whole point of listing where each one is. */
+			const struct kof_touch *t = &ob->touch[v->sel_touch];
+			uint32_t k = v->str_off + (uint32_t)row;
+
+			if (v->sel_touch < ob->n_touch && k < t->n_str &&
+			    t->str[k].at != KOF_BROKEN) {
+				v->sel_str = k;
+				view_show(v, t->str[k].at);
+			}
+			return;
+		}
+		/* Anywhere off the dialog closes it - one that only closes on
+		 * the right key is one people leave open. */
 		v->show_list = 0;
+		v->list_depth = 0;
 		return;
 	}
 	if (g_my == mark_row()) {
-		v->show_list = ob->n_touch != 0;
+		if (!ob->n_touch)
+			return;
+		/* Three words, three answers. "hit" and "skip" open the dialog
+		 * filtered to what they just counted; the name opens that
+		 * signature's markers, which is the thing the name is about. */
+		if (g_mx >= v->hit_c0 && g_mx <= v->hit_c1) {
+			v->list_filter = 1;
+			v->list_depth = 0;
+			v->list_off = 0;
+		} else if (g_mx >= v->skip_c0 && g_mx <= v->skip_c1) {
+			v->list_filter = 2;
+			v->list_depth = 0;
+			v->list_off = 0;
+		} else if (g_mx >= v->name_c0 && g_mx <= v->name_c1) {
+			v->list_filter = 0;
+			v->list_depth = 1;
+			v->str_off = 0;
+			v->sel_str = 0;
+		} else {
+			/* The rest of the line is a readout, not a control. The
+			 * pane indicator lives there, and clicking it used to
+			 * open the signature dialog - which is not what the
+			 * word says and not what anyone would expect it to do. */
+			return;
+		}
+		v->show_list = 1;
 		return;
 	}
 	if (g_my >= hex_top() && g_my <= hex_bot() && g_mx > TREE_W) {
@@ -1290,11 +1886,7 @@ static void click(struct view *v, int rclick)
 
 		v->pane = 1;
 		if (rclick) {
-			/* Right button clears. The menu it will open is the
-			 * signature panel, which does not exist yet - and a
-			 * button that does nothing is worse than one that does
-			 * the obvious thing. */
-			v->sel_a = v->sel_b = KOF_BROKEN;
+			menu_open_at(v, g_my, g_mx);
 			return;
 		}
 		if (byte_under(v, g_my, g_mx, &at)) {
@@ -1373,9 +1965,23 @@ static int handle(struct view *v, int k)
 	}
 	case 'm':
 		v->show_list = !v->show_list && cur_obj(v)->n_touch;
+		v->list_depth = 0;
+		v->list_filter = 0;
 		break;
 	case '\r': case '\n':
+		if (v->menu_open) {
+			menu_run(v, v->menu_sel);
+			v->menu_open = 0;
+			break;
+		}
+		if (v->show_list && !v->list_depth) {
+			v->list_depth = 1;
+			v->str_off = 0;
+			v->sel_str = 0;
+			break;
+		}
 		v->show_list = 0;
+		v->list_depth = 0;
 		break;
 	case '\t':
 		v->pane = (v->pane + 1) % 3;
@@ -1398,6 +2004,8 @@ static int handle(struct view *v, int k)
 		break;
 	}
 	case K_RELEASE:
+		if (v->menu_open)
+			break;
 		/*
 		 * A press and a release on one byte is a click, not a selection
 		 * of length one - and on a lit byte the obvious thing to want
@@ -1416,8 +2024,18 @@ static int handle(struct view *v, int k)
 		v->dragging = 0;
 		break;
 	case 27:
+		if (v->menu_open) {
+			v->menu_open = 0;
+			break;
+		}
+		/* Back one depth before out: Esc in a sub-list means "up". */
+		if (v->show_list && v->list_depth) {
+			v->list_depth = 0;
+			break;
+		}
 		v->sel_a = v->sel_b = KOF_BROKEN;
 		v->show_list = 0;
+		v->list_depth = 0;
 		break;
 	/*
 	 * The wheel turns whatever the pointer is over.
@@ -1431,6 +2049,23 @@ static int handle(struct view *v, int k)
 	case K_WHEEL_DOWN: {
 		int down = k == K_WHEEL_DOWN, n;
 
+		/* Shift turns the wheel sideways, the way it does in every
+		 * other program that has both. */
+		if (g_mod_shift) {
+			uint32_t *h = (v->show_list && g_my > list_top(v) &&
+				       g_my <= list_top(v) +
+					       (int)list_shown(v))
+				      ? &v->list_hoff :
+				      (g_mx <= TREE_W) ? &v->tree_hoff : NULL;
+
+			if (h) {
+				if (down)
+					*h += 4u;
+				else
+					*h = *h > 4u ? *h - 4u : 0u;
+			}
+			break;
+		}
 		if (v->show_list && g_my > list_top(v) &&
 		    g_my <= list_top(v) + (int)list_shown(v)) {
 			if (down && v->sel_touch + 1 < cur_obj(v)->n_touch)
@@ -1448,10 +2083,24 @@ static int handle(struct view *v, int k)
 		break;
 	}
 	case 'j': case K_DOWN:
+		if (v->menu_open) {
+			menu_step(v, 1);
+			break;
+		}
 		/* The list takes the keys while it is open, whatever pane has
 		 * focus underneath: it is in front, and a cursor that moves
 		 * something behind an open list is a cursor nobody can see. */
-		if (v->show_list) {
+		if (v->show_list && v->list_depth) {
+			struct object *o2 = cur_obj(v);
+			const struct kof_touch *t2 = &o2->touch[v->sel_touch];
+
+			if (v->sel_str + 1 < list_total(v))
+				v->sel_str++;
+			if (v->sel_str >= v->str_off + list_shown(v))
+				v->str_off = v->sel_str - list_shown(v) + 1u;
+			if (t2->str[v->sel_str].at != KOF_BROKEN)
+				view_show(v, t2->str[v->sel_str].at);
+		} else if (v->show_list) {
 			if (v->sel_touch + 1 < cur_obj(v)->n_touch)
 				v->sel_touch++;
 		} else if (v->pane == 0 && v->sel_node + 1 < v->n_node) {
@@ -1464,7 +2113,21 @@ static int handle(struct view *v, int k)
 		}
 		break;
 	case 'k': case K_UP:
-		if (v->show_list) {
+		if (v->menu_open) {
+			menu_step(v, -1);
+			break;
+		}
+		if (v->show_list && v->list_depth) {
+			struct object *o2 = cur_obj(v);
+			const struct kof_touch *t2 = &o2->touch[v->sel_touch];
+
+			if (v->sel_str)
+				v->sel_str--;
+			if (v->sel_str < v->str_off)
+				v->str_off = v->sel_str;
+			if (t2->str[v->sel_str].at != KOF_BROKEN)
+				view_show(v, t2->str[v->sel_str].at);
+		} else if (v->show_list) {
 			if (v->sel_touch)
 				v->sel_touch--;
 		} else if (v->pane == 0 && v->sel_node) {
@@ -1478,7 +2141,7 @@ static int handle(struct view *v, int k)
 	case ' ': case K_PGDN: hex_step(v,  page); break;
 	case 'b': case K_PGUP: hex_step(v, -page); break;
 	case 'g': case K_HOME: v->rgn_at = 0; break;
-	case 'G': case K_END:  hex_step(v, (long)v->rgn_len); break;
+	case 'G': case K_END:  v->rgn_at = hex_max(v); break;
 	default:
 		break;
 	}
@@ -1601,12 +2264,18 @@ int main(int argc, char **argv)
 	redraw(&v);
 	for (;;) {
 		int k = read_key();
+		uint64_t was;
 
 		if (k == K_NONE)
 			break;
+		was = view_stamp(&v);
 		if (!handle(&v, k))
 			break;
-		redraw(&v);
+		/* Repaint only when something moved. term_size is read inside
+		 * redraw, so a resize still gets through: it changes the stamp. */
+		term_size();
+		if (view_stamp(&v) != was)
+			redraw(&v);
 	}
 	term_restore();
 
