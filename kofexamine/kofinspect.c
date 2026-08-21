@@ -28,6 +28,235 @@
 #include "../libkofeng/kofmatchers/kofmatch.h"
 #include "../libkofeng/kofscanners/scan.h"
 
+/*
+ * The parsers, by their internal headers.
+ *
+ * Same reach kofexamine's own comment defends and for the same reason: there is
+ * no public "parse this and hand me the view" surface, because no host has ever
+ * wanted one. What changed is that there are now two consumers of it in this
+ * tree rather than one, so the reach lives here once instead of in each.
+ */
+#include "../libkofeng/kofparsers/binaries/elf_parse.h"
+#include "../libkofeng/kofparsers/binaries/pe_parse.h"
+#include "../libkofeng/kofparsers/containers/gzip_parse.h"
+#include "../libkofeng/kofparsers/containers/docole_parse.h"
+#include "../libkofeng/kofparsers/containers/zip_parse.h"
+#include "../libkofeng/kofparsers/containers/tar_parse.h"
+#include "../libkofeng/kofparsers/containers/sevenzip_parse.h"
+#include "../libkofeng/kofparsers/containers/rar_parse.h"
+#include "../libkofeng/kofparsers/containers/xz_parse.h"
+#include "../libkofeng/kofparsers/containers/rtf_parse.h"
+#include "../libkofeng/kofparsers/containers/pdf_parse.h"
+
+/* ---- the formats, and how to get a view of one ---------------------------- */
+
+static int elf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_elf_parse(b, (struct kof_elf_info *)v, c);
+}
+
+static int gzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_gzip_parse(b, (struct kof_gzip_info *)v, c);
+}
+
+static int docole_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_docole_parse(b, (struct kof_docole_info *)v, c);
+}
+
+static int zip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_zip_parse(b, (struct kof_zip_info *)v, c);
+}
+
+static int tar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_tar_parse(b, (struct kof_tar_info *)v, c);
+}
+
+static int rtf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_rtf_parse(b, (struct kof_rtf_info *)v, c);
+}
+
+static int xz_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_xz_parse(b, (struct kof_xz_info *)v, c);
+}
+
+static int rar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_rar_parse(b, (struct kof_rar_info *)v, c);
+}
+
+static int sevenzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_7z_parse(b, (struct kof_7z_info *)v, c);
+}
+
+static int pe_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_pe_parse(b, (struct kof_pe_info *)v, c);
+}
+
+static int pdf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_pdf_parse(b, (struct kof_pdf_info *)v, c);
+}
+
+static uint64_t anom_elf(const void *v)
+{
+	return ((const struct kof_elf_info *)v)->anomalies;
+}
+
+static uint64_t anom_pe(const void *v)
+{
+	return ((const struct kof_pe_info *)v)->anomalies;
+}
+
+static uint64_t anom_gzip(const void *v)
+{
+	return ((const struct kof_gzip_info *)v)->anomalies;
+}
+
+static uint64_t anom_docole(const void *v)
+{
+	return ((const struct kof_docole_info *)v)->anomalies;
+}
+
+static uint64_t anom_zip(const void *v)
+{
+	return ((const struct kof_zip_info *)v)->anomalies;
+}
+
+static uint64_t anom_tar(const void *v)
+{
+	return ((const struct kof_tar_info *)v)->anomalies;
+}
+
+static uint64_t anom_7z(const void *v)
+{
+	return ((const struct kof_7z_info *)v)->anomalies;
+}
+
+static uint64_t anom_rar(const void *v)
+{
+	return ((const struct kof_rar_info *)v)->anomalies;
+}
+
+static uint64_t anom_xz(const void *v)
+{
+	return ((const struct kof_xz_info *)v)->anomalies;
+}
+
+static uint64_t anom_pdf(const void *v)
+{
+	return ((const struct kof_pdf_info *)v)->anomalies;
+}
+
+static uint64_t anom_rtf(const void *v)
+{
+	return ((const struct kof_rtf_info *)v)->anomalies;
+}
+
+const char *kof_inspect_subtype_name(uint8_t fmt, uint8_t sub)
+{
+	if (fmt == KOF_FMT_ELF)
+		switch (sub) {
+		case KOF_ELF_NONE: return "ET_NONE";
+		case KOF_ELF_REL:  return "ET_REL";
+		case KOF_ELF_EXEC: return "ET_EXEC";
+		case KOF_ELF_DYN:  return "ET_DYN";
+		case KOF_ELF_CORE: return "ET_CORE";
+		default:           return "ET_?";
+		}
+	if (fmt == KOF_FMT_PE)
+		switch (sub) {
+		case KOF_PE_EXE: return "EXE";
+		case KOF_PE_DLL: return "DLL";
+		case KOF_PE_SYS: return "SYS";
+		default:         return "?";
+		}
+	return 0;
+}
+
+static const struct kof_inspect_fmt formats[] = {
+	{ (uint32_t)sizeof(struct kof_elf_info), kof_elf_sniff, elf_parse_thunk,
+	  kof_elf_region_bits, KOF_ELF_REGION_COUNT,
+	  kof_elf_region_name, kof_elf_anomaly_name, anom_elf },
+	{ (uint32_t)sizeof(struct kof_pe_info), kof_pe_sniff, pe_parse_thunk,
+	  kof_pe_region_bits, KOF_PE_REGION_COUNT,
+	  kof_pe_region_name, kof_pe_anomaly_name, anom_pe },
+	{ (uint32_t)sizeof(struct kof_gzip_info), kof_gzip_sniff, gzip_parse_thunk,
+	  kof_gzip_region_bits, KOF_GZIP_REGION_COUNT,
+	  kof_gzip_region_name, kof_gzip_anomaly_name, anom_gzip },
+	{ (uint32_t)sizeof(struct kof_docole_info), kof_docole_sniff,
+	  docole_parse_thunk, kof_docole_region_bits, KOF_DOCOLE_REGION_COUNT,
+	  kof_docole_region_name, kof_docole_anomaly_name, anom_docole },
+	{ (uint32_t)sizeof(struct kof_zip_info), kof_zip_sniff, zip_parse_thunk,
+	  kof_zip_region_bits, KOF_ZIP_REGION_COUNT,
+	  kof_zip_region_name, kof_zip_anomaly_name, anom_zip },
+	{ (uint32_t)sizeof(struct kof_tar_info), kof_tar_sniff, tar_parse_thunk,
+	  kof_tar_region_bits, KOF_TAR_REGION_COUNT,
+	  kof_tar_region_name, kof_tar_anomaly_name, anom_tar },
+	{ (uint32_t)sizeof(struct kof_7z_info), kof_7z_sniff, sevenzip_parse_thunk,
+	  kof_7z_region_bits, KOF_7Z_REGION_COUNT,
+	  kof_7z_region_name, kof_7z_anomaly_name, anom_7z },
+	{ (uint32_t)sizeof(struct kof_rar_info), kof_rar_sniff, rar_parse_thunk,
+	  kof_rar_region_bits, KOF_RAR_REGION_COUNT,
+	  kof_rar_region_name, kof_rar_anomaly_name, anom_rar },
+	{ (uint32_t)sizeof(struct kof_xz_info), kof_xz_sniff, xz_parse_thunk,
+	  kof_xz_region_bits, KOF_XZ_REGION_COUNT,
+	  kof_xz_region_name, kof_xz_anomaly_name, anom_xz },
+	{ (uint32_t)sizeof(struct kof_rtf_info), kof_rtf_sniff, rtf_parse_thunk,
+	  kof_rtf_region_bits, KOF_RTF_REGION_COUNT,
+	  kof_rtf_region_name, kof_rtf_anomaly_name, anom_rtf },
+	{ (uint32_t)sizeof(struct kof_pdf_info), kof_pdf_sniff, pdf_parse_thunk,
+	  kof_pdf_region_bits, KOF_PDF_REGION_COUNT,
+	  kof_pdf_region_name, kof_pdf_anomaly_name, anom_pdf }
+};
+
+
+/*
+ * Identify the object and parse it.
+ *
+ * The first format whose sniff claims the bytes wins and no other is tried: a
+ * sniff that claims something is a claim, and asking a second parser what it
+ * thinks of an object the first recognised is how a tool ends up with two
+ * answers and a rule for picking between them.
+ *
+ * The view is the caller's to free. It is a plain malloc of the format's own
+ * info struct - there is nothing to tear down - so free() is the whole of the
+ * release and no kof_inspect_release exists to wrap it.
+ */
+const struct kof_inspect_fmt *kof_inspect_identify(kof_buf buf,
+						   struct kof_obj_ctx *ctx,
+						   void **view_out)
+{
+	uint32_t i;
+
+	*view_out = NULL;
+	memset(ctx, 0, sizeof *ctx);
+
+	for (i = 0; i < sizeof formats / sizeof formats[0]; i++) {
+		void *view;
+
+		if (!formats[i].sniff(buf))
+			continue;
+		view = malloc(formats[i].view_size);
+		if (view && formats[i].parse(buf, view, ctx)) {
+			*view_out = view;
+			return &formats[i];
+		}
+		free(view);
+		return NULL;
+	}
+	return NULL;
+}
+
+
+
 const char *kof_touch_kind_name(enum kof_touch_kind k)
 {
 	switch (k) {

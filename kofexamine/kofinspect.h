@@ -26,6 +26,39 @@
 #include "../libkofeng/core/kofcore.h"
 #include "../libkofeng/kofdb/kofdb.h"
 
+/* ---- what a format is ------------------------------------------------------
+ *
+ * Everything a consumer needs in order to see an object the way the engine does,
+ * and nothing about how to show it. Rendering is left out on purpose: the two
+ * front ends in this tree render nothing alike - one prints lines, one paints
+ * panes - and a print callback here would be the printer's shape imposed on
+ * both.
+ */
+struct kof_inspect_fmt {
+	uint32_t    view_size;
+	int       (*sniff)(kof_buf);
+	int       (*parse)(kof_buf, void *, struct kof_obj_ctx *);
+	const uint32_t *regions;
+	uint32_t    n_regions;
+	const char *(*region_name)(uint32_t);
+	const char *(*anomaly_name)(unsigned);
+	uint64_t  (*anomalies)(const void *);
+};
+
+/*
+ * Identify and parse. Returns the format, fills `ctx`, and hands back a view the
+ * caller frees with free(). NULL when nothing claimed the bytes, in which case
+ * `ctx` is zeroed and `*view_out` is NULL - and that is a real answer rather
+ * than a failure: an object nothing parses still has bytes and still has markers
+ * in it.
+ */
+const struct kof_inspect_fmt *kof_inspect_identify(kof_buf, struct kof_obj_ctx *,
+						   void **view_out);
+
+/* The subtype in the format's own vocabulary - ET_EXEC, DLL - or NULL. A number
+ * would be no use: the same value means REL for an ELF and DLL for a PE. */
+const char *kof_inspect_subtype_name(uint8_t fmt, uint8_t sub);
+
 /*
  * Why a module is on the list.
  *

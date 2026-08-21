@@ -153,6 +153,24 @@
  * terminal is: this tool's output is piped into grep and diffed against itself,
  * and escape sequences in either is a bug rather than a preference.
  */
+/*
+ * The format of the object most recently described.
+ *
+ * Read when a recovered object is announced, to say whether what produced it was
+ * a packer or an opener - and the two are not the same news. A zip yielding its
+ * entries is a zip doing its job; an ELF that had to be unpacked before anything
+ * could be read is a packed executable, which is worth looking at whatever came
+ * out of it.
+ *
+ * The engine cannot answer this - decomp and unp modules compile to one pack
+ * kind and it does not tell them apart, which the Makefile says in as many words
+ * - so it is derived from the object rather than asked of the module. And it is
+ * the PARENT's format that decides, which is what this holds: a recovered object
+ * is announced before it is itself examined, so at that moment this is still the
+ * format of the thing it came out of.
+ */
+static uint8_t g_parent_format;
+
 static const char *C_OFF  = "";
 static const char *C_NAME = "";
 static const char *C_BAD  = "";
@@ -168,7 +186,11 @@ static const char *C_DIM  = "";
  * a number somebody should look at. Three kinds is all a dump of this shape has:
  *
  *   id     what a thing IS   - class, region and section names, pattern kind
- *   loc    WHERE it is       - file offsets, virtual addresses, hit positions
+ *   loc    WHERE it is       - file offsets, virtual addresses, hit positions.
+ *          Cyan, the same ink the trouble scale uses for a fact carrying no
+ *          judgement, because an offset is exactly that. The two never appear in
+ *          one column, so sharing an ink costs nothing and keeps the palette at
+ *          the number of things a reader can actually hold.
  *   size   HOW MUCH of it    - lengths, byte counts
  *
  * The split is worth the colour because the columns interleave: "off=3316
@@ -215,7 +237,7 @@ static void colour_enable(int on)
 	 * an absent marker has. Grey is a colour and every terminal has it. */
 	C_DIM  = "\033[90m";
 	C_ID   = "\033[34m";
-	C_LOC  = "\033[35m";
+	C_LOC  = "\033[36m";
 	C_SIZE = "\033[32m";
 }
 
@@ -246,82 +268,18 @@ static void print_claimed(const char *label, uint32_t have, uint32_t claimed)
 		       claimed, C_OFF);
 }
 
-struct fmt {
-	uint32_t    view_size;
-	int       (*sniff)(kof_buf);
-	int       (*parse)(kof_buf, void *, struct kof_obj_ctx *);
-	const uint32_t *regions;
-	uint32_t    n_regions;
-	const char *(*region_name)(uint32_t);
-	const char *(*anomaly_name)(unsigned);
-	/*
-	 * The bytes as well as the view, because a printer may need to show text
-	 * that lives in the object rather than in the parse - a zip keeps its entry
-	 * names in the file and the view only points at them. Every printer takes
-	 * it and most ignore it, which is cheaper than a second callback shape.
-	 */
-	void      (*print)(const void *, const struct kof_obj_ctx *, kof_buf);
-	/*
-	 * The anomaly word, fetched rather than reached for.
-	 *
-	 * This was a cast to whichever view the format was not - PE if the printer
-	 * was print_pe, ELF otherwise - and it read the right field only because
-	 * gzip happens to lay its header out like ELF's. The first format that did
-	 * not printed an anomaly it had never set. One line per format beats one
-	 * conditional that has to be right about every format at once.
-	 */
-	uint64_t  (*anomalies)(const void *);
-};
 
-static int elf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_elf_parse(b, (struct kof_elf_info *)v, c);
-}
+/* In the order everyone writes them, not the order the bits happen to sit in. */
 
-static int gzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_gzip_parse(b, (struct kof_gzip_info *)v, c);
-}
 
-static int docole_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_docole_parse(b, (struct kof_docole_info *)v, c);
-}
 
-static int zip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_zip_parse(b, (struct kof_zip_info *)v, c);
-}
 
-static int tar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_tar_parse(b, (struct kof_tar_info *)v, c);
-}
 
-static int rtf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_rtf_parse(b, (struct kof_rtf_info *)v, c);
-}
 
-static int xz_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_xz_parse(b, (struct kof_xz_info *)v, c);
-}
 
-static int rar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_rar_parse(b, (struct kof_rar_info *)v, c);
-}
 
-static int sevenzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_7z_parse(b, (struct kof_7z_info *)v, c);
-}
 
-static int pe_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_pe_parse(b, (struct kof_pe_info *)v, c);
-}
+
 
 /* An offset that could not be resolved prints as what it is, not as a number
  * that would be mistaken for one. */
@@ -338,7 +296,30 @@ static void put_off(const char *label, uint64_t v)
 		       C_OFF);
 }
 
-/* In the order everyone writes them, not the order the bits happen to sit in. */
+/*
+ * A region name with its KOF_SCAN_<FMT>_ prefix skipped, for the summary column.
+ *
+ * The full identifier is what a file is named, because that is what somebody
+ * greps for. Six of them on one line is not something anybody reads, so the part
+ * that is the same on every one is dropped here rather than kept in a second
+ * table that could disagree with the first.
+ */
+static const char *short_region(const char *name)
+{
+	const char *p = name;
+	int underscores = 0;
+
+	if (!name)
+		return "?";
+	/* KOF_SCAN_<FMT>_NAME: past the third underscore. */
+	while (*p && underscores < 3) {
+		if (*p == '_')
+			underscores++;
+		p++;
+	}
+	return underscores == 3 ? p : name;
+}
+
 static void put_perm(uint32_t p)
 {
 	/* Writable and executable at once is the one combination on this line
@@ -617,25 +598,9 @@ static void print_docole(const void *v, const struct kof_obj_ctx *ctx, kof_buf b
 			       runs[i] == 1 ? "" : "s");
 }
 
-static uint64_t anom_elf(const void *v)
-{
-	return ((const struct kof_elf_info *)v)->anomalies;
-}
 
-static uint64_t anom_pe(const void *v)
-{
-	return ((const struct kof_pe_info *)v)->anomalies;
-}
 
-static uint64_t anom_gzip(const void *v)
-{
-	return ((const struct kof_gzip_info *)v)->anomalies;
-}
 
-static uint64_t anom_docole(const void *v)
-{
-	return ((const struct kof_docole_info *)v)->anomalies;
-}
 
 /*
  * An entry name, as it is safe to put on a line.
@@ -741,10 +706,6 @@ static void print_zip(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 		printf("    ... %u more\n", z->n_entries - shown);
 }
 
-static uint64_t anom_zip(const void *v)
-{
-	return ((const struct kof_zip_info *)v)->anomalies;
-}
 
 /*
  * The subtype's name, which only means anything alongside the format.
@@ -753,26 +714,6 @@ static uint64_t anom_zip(const void *v)
  * both enums are already the values the header field holds - elf.h and pe.h say
  * what they mean, and this says how to print them.
  */
-static const char *subtype_name(uint8_t fmt, uint8_t sub)
-{
-	if (fmt == KOF_FMT_ELF)
-		switch (sub) {
-		case KOF_ELF_NONE: return "ET_NONE";
-		case KOF_ELF_REL:  return "ET_REL";
-		case KOF_ELF_EXEC: return "ET_EXEC";
-		case KOF_ELF_DYN:  return "ET_DYN";
-		case KOF_ELF_CORE: return "ET_CORE";
-		default:           return "ET_?";
-		}
-	if (fmt == KOF_FMT_PE)
-		switch (sub) {
-		case KOF_PE_EXE: return "EXE";
-		case KOF_PE_DLL: return "DLL";
-		case KOF_PE_SYS: return "SYS";
-		default:         return "?";
-		}
-	return 0;
-}
 
 /*
  * What a tar holds. The entry table is the display for the reason a zip's is: the
@@ -818,10 +759,6 @@ static void print_tar(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 		printf("    ... %u more\n", t->n_entries - shown);
 }
 
-static uint64_t anom_tar(const void *v)
-{
-	return ((const struct kof_tar_info *)v)->anomalies;
-}
 
 /*
  * What a 7z states about itself without anything being decoded.
@@ -858,10 +795,6 @@ static void print_7z(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 		       "listed until it is decoded\n");
 }
 
-static uint64_t anom_7z(const void *v)
-{
-	return ((const struct kof_7z_info *)v)->anomalies;
-}
 
 /*
  * What a RAR states about itself, which for RAR3 is nearly everything except the
@@ -925,10 +858,6 @@ static void print_rar(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 		printf("    ... %u more\n", r->n_entries - shown);
 }
 
-static uint64_t anom_rar(const void *v)
-{
-	return ((const struct kof_rar_info *)v)->anomalies;
-}
 
 /* What an xz says about itself, which is where its blocks are and what codes
  * them - both of which come from the index rather than from the blocks. */
@@ -978,10 +907,6 @@ static void print_xz(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 		printf("    ... %u more\n", x->n_blocks - shown);
 }
 
-static uint64_t anom_xz(const void *v)
-{
-	return ((const struct kof_xz_info *)v)->anomalies;
-}
 
 /* What an RTF carries, which is embedded objects and how hard it worked to hide
  * where they start. */
@@ -1018,10 +943,6 @@ static void print_rtf(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 	}
 }
 
-static int pdf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_pdf_parse(b, (struct kof_pdf_info *)v, c);
-}
 
 static void print_pdf(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 {
@@ -1048,76 +969,8 @@ static void print_pdf(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 	}
 }
 
-static uint64_t anom_pdf(const void *v)
-{
-	return ((const struct kof_pdf_info *)v)->anomalies;
-}
 
-static uint64_t anom_rtf(const void *v)
-{
-	return ((const struct kof_rtf_info *)v)->anomalies;
-}
 
-static const struct fmt formats[] = {
-	{ (uint32_t)sizeof(struct kof_elf_info), kof_elf_sniff, elf_parse_thunk,
-	  kof_elf_region_bits, KOF_ELF_REGION_COUNT,
-	  kof_elf_region_name, kof_elf_anomaly_name, print_elf, anom_elf },
-	{ (uint32_t)sizeof(struct kof_pe_info), kof_pe_sniff, pe_parse_thunk,
-	  kof_pe_region_bits, KOF_PE_REGION_COUNT,
-	  kof_pe_region_name, kof_pe_anomaly_name, print_pe, anom_pe },
-	{ (uint32_t)sizeof(struct kof_gzip_info), kof_gzip_sniff, gzip_parse_thunk,
-	  kof_gzip_region_bits, KOF_GZIP_REGION_COUNT,
-	  kof_gzip_region_name, kof_gzip_anomaly_name, print_gzip, anom_gzip },
-	{ (uint32_t)sizeof(struct kof_docole_info), kof_docole_sniff,
-	  docole_parse_thunk, kof_docole_region_bits, KOF_DOCOLE_REGION_COUNT,
-	  kof_docole_region_name, kof_docole_anomaly_name, print_docole,
-	  anom_docole },
-	{ (uint32_t)sizeof(struct kof_zip_info), kof_zip_sniff, zip_parse_thunk,
-	  kof_zip_region_bits, KOF_ZIP_REGION_COUNT,
-	  kof_zip_region_name, kof_zip_anomaly_name, print_zip, anom_zip },
-	{ (uint32_t)sizeof(struct kof_tar_info), kof_tar_sniff, tar_parse_thunk,
-	  kof_tar_region_bits, KOF_TAR_REGION_COUNT,
-	  kof_tar_region_name, kof_tar_anomaly_name, print_tar, anom_tar },
-	{ (uint32_t)sizeof(struct kof_7z_info), kof_7z_sniff, sevenzip_parse_thunk,
-	  kof_7z_region_bits, KOF_7Z_REGION_COUNT,
-	  kof_7z_region_name, kof_7z_anomaly_name, print_7z, anom_7z },
-	{ (uint32_t)sizeof(struct kof_rar_info), kof_rar_sniff, rar_parse_thunk,
-	  kof_rar_region_bits, KOF_RAR_REGION_COUNT,
-	  kof_rar_region_name, kof_rar_anomaly_name, print_rar, anom_rar },
-	{ (uint32_t)sizeof(struct kof_xz_info), kof_xz_sniff, xz_parse_thunk,
-	  kof_xz_region_bits, KOF_XZ_REGION_COUNT,
-	  kof_xz_region_name, kof_xz_anomaly_name, print_xz, anom_xz },
-	{ (uint32_t)sizeof(struct kof_rtf_info), kof_rtf_sniff, rtf_parse_thunk,
-	  kof_rtf_region_bits, KOF_RTF_REGION_COUNT,
-	  kof_rtf_region_name, kof_rtf_anomaly_name, print_rtf, anom_rtf },
-	{ (uint32_t)sizeof(struct kof_pdf_info), kof_pdf_sniff, pdf_parse_thunk,
-	  kof_pdf_region_bits, KOF_PDF_REGION_COUNT,
-	  kof_pdf_region_name, kof_pdf_anomaly_name, print_pdf, anom_pdf }
-};
-
-/*
- * A region name with its KOF_SCAN_<FMT>_ prefix skipped, for the summary column.
- *
- * The full identifier is what a file is named, because that is what somebody
- * greps for. Six of them on one line is not something anybody reads, so the part
- * that is the same on every one is dropped here rather than kept in a second
- * table that could disagree with the first.
- */
-static const char *short_region(const char *name)
-{
-	const char *p = name;
-	int underscores = 0;
-
-	if (!name)
-		return "?";
-	/* KOF_SCAN_<FMT>_NAME: past the third underscore. */
-	while (*p && underscores < 3) {
-		if (*p == '_')
-			underscores++;
-		p++;
-	}
-	return underscores == 3 ? p : name;
-}
 
 static const char *base_of(const char *path)
 {
@@ -1214,7 +1067,34 @@ struct layout_row {
 	const char *name;
 };
 
-static int layout_file(const char *dir, const struct fmt *f,
+/*
+ * The printer for a format, chosen by what the parse said the object is.
+ *
+ * A switch rather than a column in the shared table: the table describes an
+ * object, and how this particular front end draws one is not a property of the
+ * object. It is also the whole of what stayed behind when the table moved.
+ */
+static void print_view(uint8_t format, const void *view,
+		       const struct kof_obj_ctx *ctx, kof_buf buf)
+{
+	switch (format) {
+	case KOF_FMT_ELF:    print_elf(view, ctx, buf);    break;
+	case KOF_FMT_PE:     print_pe(view, ctx, buf);     break;
+	case KOF_FMT_GZIP:   print_gzip(view, ctx, buf);   break;
+	case KOF_FMT_DOCOLE: print_docole(view, ctx, buf); break;
+	case KOF_FMT_ZIP:
+	case KOF_FMT_DOCZIP: print_zip(view, ctx, buf);    break;
+	case KOF_FMT_TAR:    print_tar(view, ctx, buf);    break;
+	case KOF_FMT_7Z:     print_7z(view, ctx, buf);     break;
+	case KOF_FMT_RAR:    print_rar(view, ctx, buf);    break;
+	case KOF_FMT_XZ:     print_xz(view, ctx, buf);     break;
+	case KOF_FMT_RTF:    print_rtf(view, ctx, buf);    break;
+	case KOF_FMT_PDF:    print_pdf(view, ctx, buf);    break;
+	default:                                           break;
+	}
+}
+
+static int layout_file(const char *dir, const struct kof_inspect_fmt *f,
 		       const struct kof_obj_ctx *ctx)
 {
 	static struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
@@ -1754,28 +1634,16 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 {
 	struct kof_obj_ctx ctx;
 	void *view = 0;
-	const struct fmt *f = 0;
+	const struct kof_inspect_fmt *f = 0;
 	uint64_t total = 0;
 	uint32_t i;
 	int rc = 0;
 	const int dump = dir != 0;
 
 	{
-		memset(&ctx, 0, sizeof ctx);
 		printf("%s%s%s\n", C_NAME, display, C_OFF);
-
-		for (i = 0; i < sizeof formats / sizeof formats[0]; i++) {
-			if (!formats[i].sniff(buf))
-				continue;
-			view = malloc(formats[i].view_size);
-			if (view && formats[i].parse(buf, view, &ctx))
-				f = &formats[i];
-			else {
-				free(view);
-				view = 0;
-			}
-			break;
-		}
+		f = kof_inspect_identify(buf, &ctx, &view);
+		g_parent_format = ctx.format;
 		if (!f) {
 			printf("  format    %sunrecognised%s, %s%llu%s bytes\n",
 			       C_WARN, C_OFF, C_SIZE,
@@ -1800,11 +1668,11 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 		printf("  format    %s %s%s%s%s%s  %s%llu%s bytes\n",
 		       kof_format_name(ctx.format),
 		       C_ID, kof_arch_name(ctx.arch),
-		       subtype_name(ctx.format, ctx.subtype) ? " " : "",
-		       subtype_name(ctx.format, ctx.subtype)
-		       ? subtype_name(ctx.format, ctx.subtype) : "",
+		       kof_inspect_subtype_name(ctx.format, ctx.subtype) ? " " : "",
+		       kof_inspect_subtype_name(ctx.format, ctx.subtype)
+		       ? kof_inspect_subtype_name(ctx.format, ctx.subtype) : "",
 		       C_OFF, C_SIZE, (unsigned long long)buf.n, C_OFF);
-		f->print(view, &ctx, buf);
+		print_view(ctx.format, view, &ctx, buf);
 
 		/* Regions last: they are the summary the rest explains, and with
 		 * --dump they are also the manifest of what was written. */
@@ -1979,16 +1847,38 @@ static int examine(const char *path, int dump, struct kof_engine *eng)
  *
  * It needs --db for that reason, and says so rather than guessing when it has none.
  */
-/* Printed as it happens: a note that arrives before the module returns is a note
- * about work in progress, and buffering it would lose that ordering. */
-static void on_debug(const char *what, uint64_t value, void *user)
-{
-	(void)user;
-	printf("  debug     %-18s %10llu\n", what, (unsigned long long)value);
-}
-
+/*
+ * What a module worked out, on its way to working it out.
+ *
+ * Two audiences and they want it differently, so it goes to both.
+ *
+ * --debug prints it as it happens, because a note that arrives before the module
+ * returns is a note about work in progress and buffering it would lose that
+ * ordering.
+ *
+ * The unpack report keeps it instead. "recovered 90796 bytes" does not say WHAT
+ * unpacked it, and that is not detail - a signature written against a recovered
+ * object only ever runs when that same unpacker still claims the sample, so the
+ * packer is part of what the object IS. The engine does not name the producing
+ * module on the callback, but the module names itself here, and it does so while
+ * running and therefore before the object it produces arrives. That ordering is
+ * what makes the association sound rather than a guess.
+ */
+/* What the last unpacker said about itself, for the object it is about to
+ * produce. See on_debug and on_unpacked. */
 struct unp_run {
 	const char *dump_dir;     /* NULL when not dumping */
+	/*
+	 * The producing module's name, and only that.
+	 *
+	 * A module reports "UPX.ELF.version 13", "UPX.ELF.method 14" - its own
+	 * name, a field, a value. The name is what a recovered object needs
+	 * beside it; the fields are detail and --debug already prints them as
+	 * they happen. Sticky rather than cleared per object, because a zip
+	 * opener says its piece once and then yields forty entries, and every
+	 * one of them came from it.
+	 */
+	char        via[64];
 	/* Carried so a recovered object gets the same treatment its parent got.
 	 * A marker inside an unpacked image is the case where "which module does
 	 * this belong to" is hardest to answer by eye, so leaving the recovered
@@ -1998,6 +1888,28 @@ struct unp_run {
 	uint32_t    partial;
 	int         err;
 };
+
+static int g_debug;
+
+
+static void on_debug(const char *what, uint64_t value, void *user)
+{
+	struct unp_run *u = user;
+
+	if (g_debug)
+		printf("  debug     %-18s %10llu\n", what,
+		       (unsigned long long)value);
+	if (u) {
+		const char *dot = strrchr(what, '.');
+		size_t n = dot ? (size_t)(dot - what) : strlen(what);
+
+		if (n >= sizeof u->via)
+			n = sizeof u->via - 1u;
+		memcpy(u->via, what, n);
+		u->via[n] = 0;
+	}
+}
+
 
 /* One recovered object, written whole. Separate from the region writer because a
  * region is a slice of a mapping and this is a buffer the engine handed over. */
@@ -2059,6 +1971,13 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	}
 	printf("  recovered %s%-18s%s %s%10llu%s bytes", C_ID, tag, C_OFF,
 	       C_SIZE, (unsigned long long)len, C_OFF);
+	if (u->via[0]) {
+		int packed = g_parent_format == KOF_FMT_ELF ||
+			     g_parent_format == KOF_FMT_PE ||
+			     g_parent_format == KOF_FMT_MACHO;
+
+		printf("   via %s%s%s", packed ? C_BAD : C_NOTE, u->via, C_OFF);
+	}
 	if (res->broken)
 		printf("   %s%s%s", C_BAD, kof_broken_name(res->broken), C_OFF);
 	printf("\n");
@@ -2142,14 +2061,14 @@ static int unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
 	opt.all_matches = 1;
 	u.dump_dir = dump_dir;
 	u.touch = markers ? eng : NULL;
+	g_debug = verbose;
 
 	sc = kof_scanner_new(eng);
 	if (!sc) {
 		fprintf(stderr, "kofexamine: out of memory\n");
 		return 0;
 	}
-	if (verbose)
-		kof_scanner_on_debug(sc, on_debug, NULL);
+	kof_scanner_on_debug(sc, on_debug, &u);
 	kof_scan_path(sc, path, &opt, on_unpacked, &u);
 	kof_scanner_free(sc);
 
