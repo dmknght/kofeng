@@ -70,7 +70,16 @@
  * here.
  */
 
-#define _POSIX_C_SOURCE 200809L
+/* _GNU_SOURCE, not _POSIX_C_SOURCE: this file includes kofplatform.h (below),
+ * whose POSIX branch defines kof_memmem by calling the real memmem - a
+ * GNU/BSD extension the compiler must still see declared to compile that
+ * inline function, whether or not this file itself calls it. _POSIX_C_SOURCE
+ * alone does not just omit memmem on glibc, it suppresses it (any of
+ * _POSIX_C_SOURCE/_XOPEN_SOURCE defined without _GNU_SOURCE/_DEFAULT_SOURCE
+ * opts into strict POSIX) - missed originally because every build so far ran
+ * on Windows, where kof_memmem never touches the real memmem. Before any
+ * include, not after: a feature test macro placed later has no effect. */
+#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>

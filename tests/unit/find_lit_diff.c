@@ -24,6 +24,15 @@
  * cannot silently drift from what actually runs.
  */
 
+/* Before any include, not after: this file includes kofmatch.c below, which
+ * includes kofplatform.h, whose POSIX branch needs the real memmem declared
+ * (a GNU/BSD extension) to compile kof_memmem's body - but by the time that
+ * nested #define _GNU_SOURCE in kofmatch.c itself would run, this file's own
+ * <string.h> a few lines down has already been processed and its include
+ * guard blocks memmem's declaration from ever appearing. Defined here, first,
+ * so it's in effect before <string.h> is seen at all, from either copy. */
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>

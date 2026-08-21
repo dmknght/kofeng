@@ -18,8 +18,20 @@
  */
 
 /* lstat and the dirent walk are POSIX and the tree builds as strict ISO C11, so the
- * feature level has to be asked for - and before any include, or it does nothing. */
-#define _POSIX_C_SOURCE 200809L
+ * feature level has to be asked for - and before any include, or it does nothing.
+ *
+ * _GNU_SOURCE, not _POSIX_C_SOURCE: this file includes kofplatform.h (below),
+ * whose POSIX branch defines kof_memmem by calling the real memmem - a
+ * GNU/BSD extension the compiler must still see declared to compile that
+ * inline function, whether or not scan.c itself calls it. _POSIX_C_SOURCE
+ * alone does not just omit memmem on glibc, it suppresses it (any of
+ * _POSIX_C_SOURCE/_XOPEN_SOURCE defined without _GNU_SOURCE/_DEFAULT_SOURCE
+ * opts into strict POSIX). Missed originally because this project's builds
+ * so far all ran on Windows, where kof_memmem never touches the real memmem
+ * - a real Linux build fails immediately with "implicit declaration of
+ * function 'memmem'". _GNU_SOURCE is a superset of _POSIX_C_SOURCE 200809L,
+ * so nothing else this file relied on changes. */
+#define _GNU_SOURCE
 
 #include "scan.h"
 

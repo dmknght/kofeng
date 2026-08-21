@@ -34,8 +34,22 @@
  */
 
 /* Before any include, not after: open, mmap and opendir are POSIX, and a feature
- * test macro placed after the first include has no effect at all. */
-#define _POSIX_C_SOURCE 200809L
+ * test macro placed after the first include has no effect at all.
+ *
+ * _GNU_SOURCE, not _POSIX_C_SOURCE: this file pulls in kofplatform.h (below),
+ * and that header's POSIX branch defines kof_memmem as a thin wrapper around
+ * the real memmem - a GNU/BSD extension, not POSIX. Whether or not this
+ * specific translation unit ever calls kof_memmem, the compiler still has to
+ * see memmem declared to compile that inline function's body at all, and on
+ * glibc, _POSIX_C_SOURCE alone does not just fail to enable memmem, it
+ * actively suppresses it (defining any of _POSIX_C_SOURCE/_XOPEN_SOURCE
+ * without _GNU_SOURCE/_DEFAULT_SOURCE opts into strict-POSIX mode). Missed
+ * here originally because every build so far ran on Windows, where
+ * kofplatform.h's kof_memmem never touches the real memmem at all - a real
+ * Linux build surfaces it immediately as "implicit declaration of function
+ * 'memmem'". _GNU_SOURCE is a superset of what _POSIX_C_SOURCE 200809L gave
+ * this file, so nothing else here changes. */
+#define _GNU_SOURCE
 
 #include "kofdb.h"
 #include "../kofmatchers/hexprog.h"
