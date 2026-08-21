@@ -26,5 +26,5 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 	 * object, together with every other module's.
 	 */
 	if (kof_find_str_multi(scan_range_code, mirai_1, mirai_2, mirai_3, mirai_4, mirai_5) >= 2)
-		KOF_SCAN_INFECT("Variant-42bb");
+		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
 }
