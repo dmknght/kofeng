@@ -230,6 +230,8 @@ struct view {
 
 	struct kof_touch *touch;
 	uint32_t          n_touch, sel_touch;
+	char            **finding;      /* what a scan reported for this object */
+	uint32_t          n_finding;
 
 	int pane;             /* 0 tree, 1 hex, 2 markers */
 };
@@ -430,9 +432,12 @@ static void draw_markers(struct out *o, struct view *v)
 	}
 	for (i = 0; i < v->n_touch && (int)i < MARK_H - 2; i++) {
 		const struct kof_touch *t = &v->touch[i];
-		const char *c = t->kind == KOF_TOUCH_COMPLETE  ? A_BAD  :
-				t->kind == KOF_TOUCH_PARTIAL   ? A_WARN :
-				t->kind == KOF_TOUCH_ELSEWHERE ? A_LOC  : A_DIM;
+		/* The verdict decides the colour, not the marker count: red is
+		 * "this module reported something", and that is the only row
+		 * here that is a finding. */
+		const char *c = t->fired                        ? A_BAD  :
+				t->kind == KOF_TOUCH_ELSEWHERE  ? A_LOC  :
+				t->kind == KOF_TOUCH_INELIGIBLE ? A_DIM  : A_WARN;
 
 		out_at(o, top + (int)i, 1);
 		if (i == v->sel_touch && v->pane == 2)
@@ -441,9 +446,10 @@ static void draw_markers(struct out *o, struct view *v)
 		 * engine's separators, the same way kofexamine spells it, so a
 		 * row here and a row there are the same string. */
 		{
-			char name[80];
-			const char *var = t->n_names && t->name[0] ? t->name[0]
-								   : NULL;
+			char name[80], head[32];
+			const char *var = t->fired_name ? t->fired_name :
+					  (t->n_names && t->name[0]
+					   ? t->name[0] : NULL);
 
 			if (var)
 				snprintf(name, sizeof name, "%s:%s-%s",
@@ -454,13 +460,20 @@ static void draw_markers(struct out *o, struct view *v)
 					 kof_maltype_name(t->maltype),
 					 t->family[0] ? t->family : "?");
 
-			out_fmt(o, "%s%-14s" A_OFF " %s%-32s" A_OFF " %u/%u", c,
-				kof_touch_kind_name(t->kind),
+			/* A module that declares no markers has no count worth
+			 * printing; it is a structural detection and saying so
+			 * is shorter and true. */
+			if (!t->n_str)
+				snprintf(head, sizeof head, "structural");
+			else
+				snprintf(head, sizeof head, "%s (%u/%u)",
+					 kof_touch_kind_name(t->kind),
+					 t->kind == KOF_TOUCH_INELIGIBLE
+					 ? t->n_present : t->n_in_rgn,
+					 t->n_str);
+			out_fmt(o, "%s%-20s" A_OFF " %s%-34s" A_OFF, c, head,
 				t->kind == KOF_TOUCH_INELIGIBLE ? A_DIM : A_ID,
-				name,
-				t->kind == KOF_TOUCH_INELIGIBLE ? t->n_present
-								: t->n_in_rgn,
-				t->n_str);
+				name);
 		}
 		if (t->ruled_out)
 			out_fmt(o, A_DIM "   %s" A_OFF, t->ruled_out);
@@ -579,6 +592,53 @@ static int handle(struct view *v, int k)
 	return 1;
 }
 
+/* ---- what a scan said ------------------------------------------------------
+ *
+ * Whether a module FIRED is a verdict, and a verdict is a scan's answer - the
+ * markers pane can see that every marker is present and still be looking at a
+ * module that decided nothing. So a scan runs at load and its findings for this
+ * object are kept, to be handed to kof_touch_object.
+ *
+ * Only the top-level object's findings are kept. Recovered objects are not in
+ * the tree yet; when they are, each will carry its own.
+ */
+static int verdict_collect(const char *name, const void *bytes, uint64_t len,
+			   const struct kof_result *res, void *user)
+{
+	struct view *v = user;
+	uint32_t i;
+
+	(void)bytes; (void)len;
+	if (strstr(name, "//"))
+		return 0;
+	for (i = 0; i < res->n; i++) {
+		char **g = realloc(v->finding, (v->n_finding + 1) * sizeof *g);
+
+		if (!g)
+			return 0;
+		v->finding = g;
+		v->finding[v->n_finding] = strdup(res->v[i].name);
+		if (!v->finding[v->n_finding])
+			return 0;
+		v->n_finding++;
+	}
+	return 0;
+}
+
+static void verdict_run(struct view *v, kof_engine *eng, const char *path)
+{
+	struct kof_scan_option opt;
+	kof_scanner *sc;
+
+	memset(&opt, 0, sizeof opt);
+	opt.all_matches = 1;
+	sc = kof_scanner_new(eng);
+	if (!sc)
+		return;
+	kof_scan_path(sc, path, &opt, verdict_collect, v);
+	kof_scanner_free(sc);
+}
+
 /* ---- main ----------------------------------------------------------------- */
 
 static void usage(void)
@@ -656,9 +716,13 @@ int main(int argc, char **argv)
 		if (!eng)
 			fprintf(stderr, "kofviewer: cannot load a database from "
 					"%s\n", db);
-		else if (!kof_touch_object(eng, v.buf, &v.ctx, &v.touch,
-					   &v.n_touch))
-			v.n_touch = 0;
+		else {
+			verdict_run(&v, eng, path);
+			if (!kof_touch_object(eng, v.buf, &v.ctx,
+					      (const char *const *)v.finding,
+					      v.n_finding, &v.touch, &v.n_touch))
+				v.n_touch = 0;
+		}
 	}
 
 	if (!term_setup()) {
@@ -678,6 +742,13 @@ int main(int argc, char **argv)
 	term_restore();
 
 out:
+	{
+		uint32_t k;
+
+		for (k = 0; k < v.n_finding; k++)
+			free(v.finding[k]);
+		free(v.finding);
+	}
 	kof_touch_free(v.touch, v.n_touch);
 	free(v.ext);
 	free(v.info);

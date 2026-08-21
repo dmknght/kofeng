@@ -108,6 +108,19 @@ struct kof_touch {
 	uint32_t                maltype;
 	enum kof_touch_kind     kind;
 
+	/*
+	 * Did this module actually report something on this object.
+	 *
+	 * A separate fact from every other one here, and the only one that is a
+	 * verdict. Every marker being present is not it: a module's conditions
+	 * are compiled code, and "all five markers are here" says nothing about
+	 * whether the module asked for all five, asked for two of them, or asked
+	 * for something else entirely alongside. Only a scan knows, so it is
+	 * the caller's scan result that fills this, handed to kof_touch_object.
+	 */
+	int                     fired;
+	const char             *fired_name;  /* the variant it reported, if any */
+
 	/* Set only for KOF_TOUCH_INELIGIBLE: the precondition that ruled it out,
 	 * as the word a reader needs rather than as a mask to decode. */
 	const char             *ruled_out;
@@ -134,8 +147,9 @@ struct kof_touch {
 /*
  * Every module the object touches at all, most interesting first.
  *
- * A module none of whose markers are present is not on the list: it is not
- * evidence, and at database scale it would be the whole list.
+ * A module none of whose markers are present and which reported nothing is not
+ * on the list: it is not evidence, and at database scale it would be the whole
+ * list - most of a database has no business with any given object.
  *
  * `ctx` must be the parsed context for `buf` - the regions come from the parse,
  * so a module's declared range cannot be resolved without it. An object nothing
@@ -144,11 +158,20 @@ struct kof_touch {
  *
  * Returns 0 on allocation failure, in which case nothing is written.
  */
+/*
+ * `finding` are the names a scan reported for THIS object, as the engine
+ * composes them - "ELF-a32/Botnet:Mirai-0i0bq". Passed in rather than applied
+ * afterwards because they change which modules belong on the list at all: a
+ * module that fired has to be there whether or not it declares a marker, and a
+ * structural detection declares none.
+ */
 int  kof_touch_object(struct kof_engine *eng, kof_buf buf,
 		      const struct kof_obj_ctx *ctx,
+		      const char *const *finding, uint32_t n_finding,
 		      struct kof_touch **out, uint32_t *n_out);
 
 void kof_touch_free(struct kof_touch *v, uint32_t n);
+
 
 /* The word for a kind, for a caller that prints one. */
 const char *kof_touch_kind_name(enum kof_touch_kind);

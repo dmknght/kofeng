@@ -171,6 +171,76 @@
  */
 static uint8_t g_parent_format;
 
+/* ---- what a scan said -----------------------------------------------------
+ *
+ * The markers report is printed while an object is being described, and whether
+ * a module FIRED is a thing only a scan knows. So a scan is run first and its
+ * findings are kept here, keyed by the object name the engine used - which is
+ * the same string the report prints as its heading, so the lookup is exact and
+ * needs no rule about which object is which.
+ *
+ * Flat and linear: a scan of one file yields a handful of objects and a handful
+ * of findings, and an index would be more code than the search it removes.
+ */
+struct verdict {
+	char *object;
+	char *name;
+};
+
+static struct verdict *g_verdict;
+static uint32_t        g_n_verdict;
+
+static int verdict_collect(const char *name, const void *bytes, uint64_t len,
+			   const struct kof_result *res, void *user)
+{
+	uint32_t i;
+
+	(void)bytes; (void)len; (void)user;
+	for (i = 0; i < res->n; i++) {
+		struct verdict *g = realloc(g_verdict,
+					    (g_n_verdict + 1) * sizeof *g);
+
+		if (!g)
+			return 0;
+		g_verdict = g;
+		g_verdict[g_n_verdict].object = strdup(name);
+		g_verdict[g_n_verdict].name = strdup(res->v[i].name);
+		if (!g_verdict[g_n_verdict].object || !g_verdict[g_n_verdict].name)
+			return 0;
+		g_n_verdict++;
+	}
+	return 0;
+}
+
+static void verdict_run(kof_engine *eng, const char *path)
+{
+	struct kof_scan_option opt;
+	kof_scanner *sc;
+
+	if (!eng)
+		return;
+	memset(&opt, 0, sizeof opt);
+	opt.all_matches = 1;
+	sc = kof_scanner_new(eng);
+	if (!sc)
+		return;
+	kof_scan_path(sc, path, &opt, verdict_collect, NULL);
+	kof_scanner_free(sc);
+}
+
+static void verdict_free(void)
+{
+	uint32_t i;
+
+	for (i = 0; i < g_n_verdict; i++) {
+		free(g_verdict[i].object);
+		free(g_verdict[i].name);
+	}
+	free(g_verdict);
+	g_verdict = NULL;
+	g_n_verdict = 0;
+}
+
 static const char *C_OFF  = "";
 static const char *C_NAME = "";
 static const char *C_BAD  = "";
@@ -1463,15 +1533,24 @@ static const char *src_path_of(const char *family, uint32_t line)
  * compiled code and were never evaluated - and the wording says so.
  */
 static void print_markers(struct kof_engine *eng, kof_buf buf,
-			  const struct kof_obj_ctx *ctx)
+			  const struct kof_obj_ctx *ctx, const char *display)
 {
 	struct kof_touch *v = NULL;
 	uint32_t n = 0, i, j, shown;
 
-	if (!kof_touch_object(eng, buf, ctx, &v, &n)) {
+	const char **names = calloc(g_n_verdict + 1, sizeof *names);
+	uint32_t m = 0, q;
+
+	for (q = 0; q < g_n_verdict && names; q++)
+		if (!strcmp(g_verdict[q].object, display))
+			names[m++] = g_verdict[q].name;
+
+	if (!kof_touch_object(eng, buf, ctx, names, m, &v, &n)) {
+		free(names);
 		printf("  markers   out of memory\n");
 		return;
 	}
+	free(names);
 	if (n == 0) {
 		printf("  markers   nothing in the database has a marker here\n");
 		kof_touch_free(v, n);
@@ -1487,9 +1566,20 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
 		 * without being read. Nothing here has fired - that is the
 		 * scanner's word - so even "every marker" is a warning about
 		 * where to look rather than a verdict. */
-		const char *c = t->kind == KOF_TOUCH_COMPLETE   ? C_BAD  :
-				t->kind == KOF_TOUCH_PARTIAL    ? C_WARN :
-				t->kind == KOF_TOUCH_ELSEWHERE  ? C_NOTE : C_DIM;
+		/*
+		 * The verdict decides the colour, not the marker count.
+		 *
+		 * Red is "this module reported something", which is the only
+		 * row on the screen that is a finding. Every marker of a module
+		 * being present is not that and was coloured as though it were:
+		 * a module asks for what its logic asks for, and five of five
+		 * markers present says nothing about whether that was the
+		 * question. Yellow is the honest colour for it - the bytes are
+		 * here, the module did not call it.
+		 */
+		const char *c = t->fired                        ? C_BAD  :
+				t->kind == KOF_TOUCH_ELSEWHERE  ? C_NOTE :
+				t->kind == KOF_TOUCH_INELIGIBLE ? C_DIM  : C_WARN;
 
 		/*
 		 * The name a scan would print, less the target - which is on the
@@ -1504,9 +1594,13 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
 		 * all would be offering a choice nothing here can resolve.
 		 */
 		char name[96];
-		const char *var = t->n_names && t->name[0] ? t->name[0] : NULL;
+		/* The one it reported, when it reported: a module with three
+		 * variants fired as exactly one of them, and naming a different
+		 * one would disagree with the scanner on the same object. */
+		const char *var = t->fired_name ? t->fired_name :
+				  (t->n_names && t->name[0] ? t->name[0] : NULL);
 
-		if (var && t->n_names > 1)
+		if (var && !t->fired_name && t->n_names > 1)
 			snprintf(name, sizeof name, "%s:%s-%s +%u",
 				 kof_maltype_name(t->maltype),
 				 t->family[0] ? t->family : "?", var,
@@ -1523,11 +1617,19 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
 		{
 			char head[48];
 
-			snprintf(head, sizeof head, "%s (%u/%u)",
-				 kof_touch_kind_name(t->kind),
-				 t->kind == KOF_TOUCH_INELIGIBLE ? t->n_present
-								: t->n_in_rgn,
-				 t->n_str);
+			/* A module that declares no markers has no count worth
+			 * printing, and "markers (0/0)" would invite the reader
+			 * to look for the zero. It is a structural detection -
+			 * scalars, not searches - and saying so is shorter and
+			 * true. */
+			if (!t->n_str)
+				snprintf(head, sizeof head, "structural");
+			else
+				snprintf(head, sizeof head, "%s (%u/%u)",
+					 kof_touch_kind_name(t->kind),
+					 t->kind == KOF_TOUCH_INELIGIBLE
+					 ? t->n_present : t->n_in_rgn,
+					 t->n_str);
 			printf("     %s%-22s%s %s%-34s%s", c, head, C_OFF,
 			       C_ID, name, C_OFF);
 		}
@@ -1653,7 +1755,7 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 			 * is a truthful answer and occasionally the useful one. */
 			if (eng) {
 				ctx.obj_size = buf.n;
-				print_markers(eng, buf, &ctx);
+				print_markers(eng, buf, &ctx, display);
 			}
 			rc = 1;
 			goto out;
@@ -1785,7 +1887,7 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 			       written, (unsigned long long)wrote, dir);
 		}
 		if (eng)
-			print_markers(eng, buf, &ctx);
+			print_markers(eng, buf, &ctx, display);
 		rc = 1;
 	}
 out:
@@ -2191,6 +2293,11 @@ int main(int argc, char **argv)
 		if (argv[i][0] == '-' && argv[i][1])
 			continue;
 
+		/* Verdicts first: the markers report says whether a module fired
+		 * and that is a scan's answer, so the scan has to have happened
+		 * by the time the report is drawn. */
+		if (markers && eng)
+			verdict_run(eng, argv[i]);
 		r = examine(argv[i], dump, markers ? eng : NULL);
 		if (r >= 0 && eng) {
 			char dir[PATH_ROOM];
@@ -2203,6 +2310,7 @@ int main(int argc, char **argv)
 		}
 
 		files++;
+		verdict_free();
 		if (r < 0) {
 			kof_engine_close(eng);
 			return 2;          /* could not write: see above */

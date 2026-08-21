@@ -21,6 +21,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -260,11 +261,12 @@ const struct kof_inspect_fmt *kof_inspect_identify(kof_buf buf,
 const char *kof_touch_kind_name(enum kof_touch_kind k)
 {
 	switch (k) {
-	/* Not "every marker": the count beside it already says how many of how
-	 * many, so the word would be the same fact twice and the two would have
-	 * to agree. The kinds only have to name what a count cannot. */
-	case KOF_TOUCH_COMPLETE:   return "markers";
-	case KOF_TOUCH_PARTIAL:    return "some markers";
+	/* One word for both, because the count beside it already says how many
+	 * of how many. "some markers (3/10)" spends a word saying what "(3/10)"
+	 * has just said, and the two would then have to agree. The kinds only
+	 * have to name what a count cannot. */
+	case KOF_TOUCH_COMPLETE:
+	case KOF_TOUCH_PARTIAL:    return "markers";
 	case KOF_TOUCH_ELSEWHERE:  return "wrong region";
 	case KOF_TOUCH_INELIGIBLE: return "did not run";
 	}
@@ -322,6 +324,8 @@ static int cmp_touch(const void *a, const void *b)
 {
 	const struct kof_touch *x = a, *y = b;
 
+	if (x->fired != y->fired)
+		return y->fired - x->fired;
 	if (x->kind != y->kind)
 		return (int)x->kind - (int)y->kind;
 	if (x->n_in_rgn != y->n_in_rgn)
@@ -331,8 +335,38 @@ static int cmp_touch(const void *a, const void *b)
 	return 0;
 }
 
+/*
+ * Did a scan report this module, and under which of its names.
+ *
+ * Matched on the composed name because struct kof_finding carries a name and no
+ * module id. The target prefix is the engine's and not the module's to claim,
+ * so the comparison starts after it.
+ */
+static const char *fired_as(const struct kof_touch *t,
+			    const char *const *finding, uint32_t n_finding)
+{
+	uint32_t j, k;
+
+	for (j = 0; j < t->n_names; j++) {
+		char want[224];
+
+		if (!t->name[j])
+			continue;
+		snprintf(want, sizeof want, "%s:%s-%s",
+			 kof_maltype_name(t->maltype), t->family, t->name[j]);
+		for (k = 0; k < n_finding; k++) {
+			const char *p = strchr(finding[k], '/');
+
+			if (strcmp(p ? p + 1 : finding[k], want) == 0)
+				return t->name[j];
+		}
+	}
+	return NULL;
+}
+
 int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 		     const struct kof_obj_ctx *ctx,
+		     const char *const *finding, uint32_t n_finding,
 		     struct kof_touch **out, uint32_t *n_out)
 {
 	struct kof_match_ctx m;
@@ -450,8 +484,20 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 			}
 		}
 
-		/* Not evidence, and at database scale it would be the whole list. */
-		if (t->n_present == 0) {
+		t->fired_name = fired_as(t, finding, n_finding);
+		t->fired = t->fired_name != NULL;
+
+		/*
+		 * Nothing present and nothing reported is not evidence, and at
+		 * database scale it would be the whole list - most of a database
+		 * is modules that have no business with any given object.
+		 *
+		 * A module that FIRED stays whatever its markers did. A
+		 * structural detection declares none at all, and leaving it out
+		 * would put a finding on the scanner's output that this pane
+		 * silently disagreed with.
+		 */
+		if (t->n_present == 0 && !t->fired) {
 			free(t->str);
 			free((void *)t->name);
 			free(t->name_id);
@@ -464,6 +510,13 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 		if (why) {
 			t->kind = KOF_TOUCH_INELIGIBLE;
 			t->ruled_out = why;
+		} else if (t->n_str == 0) {
+			/* Declares no markers at all - a structural detection,
+			 * reading scalars rather than searching. Every one of
+			 * its none are in the right place, vacuously; calling
+			 * that "wrong region" would be answering a question it
+			 * never asked. */
+			t->kind = KOF_TOUCH_COMPLETE;
 		} else if (t->n_in_rgn == 0) {
 			t->kind = KOF_TOUCH_ELSEWHERE;
 		} else if (t->n_in_rgn == t->n_str) {
@@ -489,6 +542,7 @@ out:
 	kof_match_state_free(&m);
 	return ok;
 }
+
 
 void kof_touch_free(struct kof_touch *v, uint32_t n)
 {
