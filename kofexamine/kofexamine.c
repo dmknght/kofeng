@@ -116,6 +116,8 @@
 #include "../libkofeng/kofparsers/containers/rtf_parse.h"
 #include "../libkofeng/kofparsers/containers/pdf_parse.h"
 
+#include "kofinspect.h"
+
 /*
  * What one format offers a tool: how to recognise it, how to parse it, how big
  * its view is, and the names of the things it can report.
@@ -126,6 +128,119 @@
  * The same shape as the scanner's parser table and for the same reason - adding a
  * format should be a row, not an edit spread over every consumer.
  */
+/* ---- colour ----------------------------------------------------------------
+ *
+ * Four roles and nothing else, because colour that does not answer a question is
+ * noise that makes the colour which does answer one harder to see. Numbers and
+ * offsets are deliberately left plain: they are most of the screen, and colouring
+ * them would drown the handful of places where a colour means something.
+ *
+ *   name   the object being described - bold, so a run over a directory can be
+ *          scrolled and the boundaries found without reading
+ *   bad    something is wrong with the file: an anomaly, a name that escapes its
+ *          root, a checksum that disagrees, a region sum that does not add up,
+ *          a module every one of whose markers is here
+ *   warn   something is unusual but not wrong: an encrypted entry, a declared
+ *          expansion that is large rather than absurd, a count that does not
+ *          match its claim, a module some of whose markers are here
+ *   note   a fact worth finding, carrying no judgement: a marker present in the
+ *          wrong region, a container kind
+ *   dim    what is almost always uninteresting - a module ruled out before it ran
+ *
+ * Off unless stdout is a terminal, and off when NO_COLOR is set whatever the
+ * terminal is: this tool's output is piped into grep and diffed against itself,
+ * and escape sequences in either is a bug rather than a preference.
+ */
+static const char *C_OFF  = "";
+static const char *C_NAME = "";
+static const char *C_BAD  = "";
+static const char *C_WARN = "";
+static const char *C_NOTE = "";
+static const char *C_DIM  = "";
+
+/*
+ * The second axis: what KIND of value this is, rather than whether it is trouble.
+ *
+ * Deliberately drawn from the colours the trouble scale does not use, so the two
+ * never have to be told apart by context. A blue number is a number; a red one is
+ * a number somebody should look at. Three kinds is all a dump of this shape has:
+ *
+ *   id     what a thing IS   - class, region and section names, pattern kind
+ *   loc    WHERE it is       - file offsets, virtual addresses, hit positions
+ *   size   HOW MUCH of it    - lengths, byte counts
+ *
+ * The split is worth the colour because the columns interleave: "off=3316
+ * size=0 vaddr=0x128cf4" is three different questions in one line, and reading
+ * which is which is most of the work of reading the line.
+ */
+static const char *C_ID   = "";
+static const char *C_LOC  = "";
+static const char *C_SIZE = "";
+
+static int stdout_is_tty(void)
+{
+#ifdef _WIN32
+	return _isatty(_fileno(stdout));
+#else
+	return isatty(1);
+#endif
+}
+
+static void colour_enable(int on)
+{
+	if (!on)
+		return;
+#ifdef _WIN32
+	/* A Windows console does not interpret escape sequences until asked, and
+	 * asking fails on the consoles that never will - so a failure here is a
+	 * console without colour rather than an error. */
+	{
+		HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+		DWORD m = 0;
+
+		if (h == INVALID_HANDLE_VALUE || !GetConsoleMode(h, &m) ||
+		    !SetConsoleMode(h, m | 0x0004u))
+			return;
+	}
+#endif
+	C_OFF  = "\033[0m";
+	C_NAME = "\033[1m";
+	C_BAD  = "\033[31m";
+	C_WARN = "\033[33m";
+	C_NOTE = "\033[36m";
+	C_DIM  = "\033[2m";
+	C_ID   = "\033[34m";
+	C_LOC  = "\033[35m";
+	C_SIZE = "\033[32m";
+}
+
+/* The two notes every parser prints, so a call site says which it is rather than
+ * spelling an escape twice. */
+static void note_bad(const char *what)
+{
+	printf("%s   <- %s%s", C_BAD, what, C_OFF);
+}
+
+static void note_warn(const char *what)
+{
+	printf("%s   <- %s%s", C_WARN, what, C_OFF);
+}
+
+static void note_note(const char *what)
+{
+	printf("%s   <- %s%s", C_NOTE, what, C_OFF);
+}
+
+/* "n of m declared", where a disagreement is the thing worth seeing. */
+static void print_claimed(const char *label, uint32_t have, uint32_t claimed)
+{
+	if (have == claimed)
+		printf("  %-9s %u of %u declared\n", label, have, claimed);
+	else
+		printf("  %-9s %s%u of %u%s declared\n", label, C_WARN, have,
+		       claimed, C_OFF);
+}
+
 struct fmt {
 	uint32_t    view_size;
 	int       (*sniff)(kof_buf);
@@ -207,20 +322,26 @@ static int pe_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
  * that would be mistaken for one. */
 static void put_off(const char *label, uint64_t v)
 {
+	/* "unresolved" is not a value, it is a parse that applies here and could
+	 * not finish - the one case on this line worth a second look. */
 	if (v == KOF_NA)
-		printf("%s=n/a", label);
+		printf("%s=%sn/a%s", label, C_DIM, C_OFF);
 	else if (v == KOF_BROKEN)
-		printf("%s=unresolved", label);
+		printf("%s=%sunresolved%s", label, C_WARN, C_OFF);
 	else
-		printf("%s=%llu", label, (unsigned long long)v);
+		printf("%s=%s%llu%s", label, C_LOC, (unsigned long long)v,
+		       C_OFF);
 }
 
 /* In the order everyone writes them, not the order the bits happen to sit in. */
 static void put_perm(uint32_t p)
 {
-	putchar((p & 4) ? 'R' : '-');
-	putchar((p & 2) ? 'W' : '-');
-	putchar((p & 1) ? 'X' : '-');
+	/* Writable and executable at once is the one combination on this line
+	 * worth seeing from across the room: nothing a compiler emits needs it. */
+	const char *c = ((p & 2) && (p & 1)) ? C_BAD : C_ID;
+
+	printf("%s%c%c%c%s", c, (p & 4) ? 'R' : '-', (p & 2) ? 'W' : '-',
+	       (p & 1) ? 'X' : '-', C_OFF);
 }
 
 static void print_elf(const void *view, const struct kof_obj_ctx *ctx,
@@ -231,29 +352,33 @@ static void print_elf(const void *view, const struct kof_obj_ctx *ctx,
 
 	(void)buf;
 
-	printf("  class     %s %s  type=%u machine=%u\n",
-	       e->elf_class == KOF_ELFCLASS_64 ? "ELF64" : "ELF32",
+	printf("  class     %s %s%s%s  type=%u machine=%u\n",
+	       e->elf_class == KOF_ELFCLASS_64 ? "ELF64" : "ELF32", C_ID,
 	       e->elf_data == KOF_ELFDATA_BE ? "big-endian" : "little-endian",
-	       e->e_type, e->e_machine);
-	printf("  entry     addr=0x%llx ", (unsigned long long)e->entry_addr);
+	       C_OFF, e->e_type, e->e_machine);
+	printf("  entry     addr=%s0x%llx%s ", C_LOC,
+	       (unsigned long long)e->entry_addr, C_OFF);
 	put_off("off", ctx->entry_off);
 	printf(" perm=");
 	put_perm(e->entry_perm);
 	printf("\n");
-	printf("  segments  %u of %u declared\n", e->phnum, e->phnum_claimed);
-	for (i = 0; i < e->seg_count; i++)
-		printf("     type=%-2u off=%-9llu size=%-9llu vaddr=0x%-10llx perm=%s%s%s\n",
-		       e->seg[i].type, (unsigned long long)e->seg[i].file_off,
-		       (unsigned long long)e->seg[i].file_size,
-		       (unsigned long long)e->seg[i].mem_addr,
-		       (e->seg[i].perm & KOF_PERM_R) ? "R" : "-",
-		       (e->seg[i].perm & KOF_PERM_W) ? "W" : "-",
-		       (e->seg[i].perm & KOF_PERM_X) ? "X" : "-");
-	printf("  sections  %u of %u declared\n", e->shnum, e->shnum_claimed);
+	print_claimed("segments", e->phnum, e->phnum_claimed);
+	for (i = 0; i < e->seg_count; i++) {
+		printf("     type=%-2u off=%s%-9llu%s size=%s%-9llu%s "
+		       "vaddr=%s0x%-10llx%s perm=", e->seg[i].type,
+		       C_LOC, (unsigned long long)e->seg[i].file_off, C_OFF,
+		       C_SIZE, (unsigned long long)e->seg[i].file_size, C_OFF,
+		       C_LOC, (unsigned long long)e->seg[i].mem_addr, C_OFF);
+		put_perm(e->seg[i].perm);
+		printf("\n");
+	}
+	print_claimed("sections", e->shnum, e->shnum_claimed);
 	for (i = 0; i < e->sec_count; i++)
-		printf("     %-20s off=%-9llu size=%-9llu type=%u\n",
-		       e->sec[i].name, (unsigned long long)e->sec[i].file_off,
-		       (unsigned long long)e->sec[i].file_size, e->sec[i].type);
+		printf("     %s%-20s%s off=%s%-9llu%s size=%s%-9llu%s type=%u\n",
+		       C_ID, e->sec[i].name, C_OFF,
+		       C_LOC, (unsigned long long)e->sec[i].file_off, C_OFF,
+		       C_SIZE, (unsigned long long)e->sec[i].file_size, C_OFF,
+		       e->sec[i].type);
 }
 
 static void print_pe(const void *view, const struct kof_obj_ctx *ctx,
@@ -290,7 +415,7 @@ static void print_pe(const void *view, const struct kof_obj_ctx *ctx,
 		printf("  overlay   off=%llu len=%llu\n",
 		       (unsigned long long)p->overlay_off,
 		       (unsigned long long)p->overlay_len);
-	printf("  sections  %u of %u declared\n", p->nsec, p->nsec_claimed);
+	print_claimed("sections", p->nsec, p->nsec_claimed);
 	for (i = 0; i < p->sec_count; i++) {
 		printf("     %-9s off=%-9llu raw=%-9llu rva=0x%-8llx vsz=0x%-8llx ",
 		       p->sec[i].name, (unsigned long long)p->sec[i].file_off,
@@ -344,11 +469,13 @@ static void print_gzip(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf
 		printf("  comment   off=%llu len=%llu\n",
 		       (unsigned long long)g->comment_off,
 		       (unsigned long long)g->comment_len);
-	if (g->trailer_off)
-		printf("  trailer   off=%llu crc=0x%08x isize=%u%s\n",
-		       (unsigned long long)g->trailer_off, g->crc32, g->isize,
-		       g->data_len && g->isize / g->data_len >= 100u
-		       ? "   <- declared expansion is large" : "");
+	if (g->trailer_off) {
+		printf("  trailer   off=%llu crc=0x%08x isize=%u",
+		       (unsigned long long)g->trailer_off, g->crc32, g->isize);
+		if (g->data_len && g->isize / g->data_len >= 100u)
+			note_warn("declared expansion is large");
+		printf("\n");
+	}
 }
 
 /*
@@ -387,9 +514,9 @@ static void print_docole(const void *v, const struct kof_obj_ctx *ctx, kof_buf b
 	       (unsigned long long)o->data_bytes,
 	       (unsigned long long)o->macro_bytes,
 	       (unsigned long long)o->meta_bytes,
-	       (unsigned long long)o->resource_bytes,
-	       o->macro_bytes > KOF_DOCOLE_MACRO_SUSPECT
-	       ? "   <- macros are larger than any honest document" : "");
+	       (unsigned long long)o->resource_bytes, "");
+	if (o->macro_bytes > KOF_DOCOLE_MACRO_SUSPECT)
+		note_warn("macros are larger than any honest document");
 
 	for (i = 0; i < o->n_runs; i++) {
 		if (o->run[i].cls >= KOF_DOCOLE_CLS_COUNT)
@@ -514,13 +641,13 @@ static void print_zip(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 		       ? "STORED" : "PACKED");
 		print_entry_name(buf, e->name_off, e->name_len, 60u);
 		if (e->suspicious & KOF_ZIP_ENT_TRAVERSAL)
-			printf("   <- ESCAPES THE EXTRACT ROOT");
+			note_bad("ESCAPES THE EXTRACT ROOT");
 		if (e->suspicious & KOF_ZIP_ENT_ENCRYPTED)
-			printf("   <- encrypted");
+			note_warn("encrypted");
 		if (e->suspicious & KOF_ZIP_ENT_NO_LOCAL)
-			printf("   <- no local header there");
+			note_bad("no local header there");
 		if (e->suspicious & KOF_ZIP_ENT_RATIO)
-			printf("   <- declared expansion is absurd");
+			note_bad("declared expansion is absurd");
 		printf("\n");
 	}
 	if (z->n_entries > shown)
@@ -573,9 +700,11 @@ static void print_tar(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 
 	printf("  entries   %u: %u file(s), %u dir(s), %u link(s)\n",
 	       t->n_entries, t->n_files, t->n_dirs, t->n_links);
-	printf("  declared  %llu bytes of content%s\n",
-	       (unsigned long long)t->total_size,
-	       t->end_off ? "" : "   <- no end blocks: cut short");
+	printf("  declared  %llu bytes of content",
+	       (unsigned long long)t->total_size);
+	if (!t->end_off)
+		note_bad("no end blocks: cut short");
+	printf("\n");
 
 	for (i = 0; i < t->n_entries; i++) {
 		const struct kof_tar_entry *e = &t->entry[i];
@@ -589,13 +718,13 @@ static void print_tar(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 		       (unsigned long long)e->data_off);
 		print_entry_name(buf, e->name_off, e->name_len, 60u);
 		if (e->suspicious & KOF_TAR_ENT_TRAVERSAL)
-			printf("   <- ESCAPES THE EXTRACT ROOT");
+			note_bad("ESCAPES THE EXTRACT ROOT");
 		if (e->suspicious & KOF_TAR_ENT_PAST_EOF)
-			printf("   <- content is not in this file");
+			note_bad("content is not in this file");
 		if (e->suspicious & KOF_TAR_ENT_SLACK)
-			printf("   <- padding is not zeroes");
+			note_bad("padding is not zeroes");
 		if (e->suspicious & KOF_TAR_ENT_BAD_SUM)
-			printf("   <- checksum disagrees");
+			note_bad("checksum disagrees");
 		printf("\n");
 	}
 	if (t->n_entries > shown)
@@ -694,15 +823,15 @@ static void print_rar(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 		       ? "STORED" : "PACKED");
 		print_entry_name(buf, e->name_off, e->name_len, 60u);
 		if (e->suspicious & KOF_RAR_ENT_TRAVERSAL)
-			printf("   <- ESCAPES THE EXTRACT ROOT");
+			note_bad("ESCAPES THE EXTRACT ROOT");
 		if (e->suspicious & KOF_RAR_ENT_ENCRYPTED)
-			printf("   <- encrypted");
+			note_warn("encrypted");
 		if (e->suspicious & KOF_RAR_ENT_PAST_EOF)
-			printf("   <- data runs past the end");
+			note_bad("data runs past the end");
 		if (e->suspicious & KOF_RAR_ENT_RATIO)
-			printf("   <- declared expansion is absurd");
+			note_bad("declared expansion is absurd");
 		if (e->suspicious & KOF_RAR_ENT_SPLIT)
-			printf("   <- split across volumes");
+			note_warn("split across volumes");
 		printf("\n");
 	}
 	if (r->n_entries > shown)
@@ -751,11 +880,11 @@ static void print_xz(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 		       (unsigned long long)b->uncomp_size,
 		       (unsigned long long)b->data_off);
 		if (b->suspicious & KOF_XZ_BLK_CHAIN)
-			printf("   <- a filter runs in front of the coder");
+			note_warn("a filter runs in front of the coder");
 		if (b->suspicious & KOF_XZ_BLK_PAST_EOF)
-			printf("   <- data runs past the end");
+			note_bad("data runs past the end");
 		if (b->suspicious & KOF_XZ_BLK_RATIO)
-			printf("   <- declared expansion is absurd");
+			note_bad("declared expansion is absurd");
 		printf("\n");
 	}
 	if (x->n_blocks > shown)
@@ -791,13 +920,13 @@ static void print_rtf(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 			print_entry_name(buf, o->class_off, o->class_len, 32u);
 		}
 		if (o->suspicious & KOF_RTF_OBJ_OLE)
-			printf("   <- a compound file");
+			note_note("a compound file");
 		if (o->suspicious & KOF_RTF_OBJ_OLE1)
-			printf("   <- an OLE1 package");
+			note_note("an OLE1 package");
 		if (o->suspicious & KOF_RTF_OBJ_UPDATE)
-			printf("   <- OPENS WITHOUT BEING CLICKED");
+			note_bad("OPENS WITHOUT BEING CLICKED");
 		if (o->suspicious & KOF_RTF_OBJ_BAD_HEX)
-			printf("   <- the hex does not pair up");
+			note_bad("the hex does not pair up");
 		printf("\n");
 	}
 }
@@ -1105,7 +1234,82 @@ static int dump_region(const char *dir, uint32_t rank, const char *region,
  * `dir` is where a dump goes, or NULL for no dump. The caller decides it, because
  * where a child's dump belongs is a question about the tree and not about the bytes.
  */
-static int examine_bytes(kof_buf buf, const char *display, const char *dir)
+
+/* ---- what the database already knows -------------------------------------- */
+
+/*
+ * The modules whose markers are in this object, and how close each one came.
+ *
+ * Printed rather than decided on: every line here is an observation, and the one
+ * verdict in this tool comes from the unpack pass below, which runs the engine.
+ * A module listed as holding every marker has NOT fired - its conditions are
+ * compiled code and were never evaluated - and the wording says so.
+ */
+static void print_markers(struct kof_engine *eng, kof_buf buf,
+			  const struct kof_obj_ctx *ctx)
+{
+	struct kof_touch *v = NULL;
+	uint32_t n = 0, i, j, shown;
+
+	if (!kof_touch_object(eng, buf, ctx, &v, &n)) {
+		printf("  markers   out of memory\n");
+		return;
+	}
+	if (n == 0) {
+		printf("  markers   nothing in the database has a marker here\n");
+		kof_touch_free(v, n);
+		return;
+	}
+
+	printf("  markers   %u module(s) have at least one marker in this "
+	       "object\n", n);
+
+	for (i = 0; i < n; i++) {
+		const struct kof_touch *t = &v[i];
+		/* The bucket already ranks these; the colour says the same thing
+		 * without being read. Nothing here has fired - that is the
+		 * scanner's word - so even "every marker" is a warning about
+		 * where to look rather than a verdict. */
+		const char *c = t->kind == KOF_TOUCH_COMPLETE   ? C_BAD  :
+				t->kind == KOF_TOUCH_PARTIAL    ? C_WARN :
+				t->kind == KOF_TOUCH_ELSEWHERE  ? C_NOTE : C_DIM;
+
+		printf("     %s%-14s%s %-24s %u/%u marker(s)", c,
+		       kof_touch_kind_name(t->kind), C_OFF,
+		       t->family[0] ? t->family : "(unnamed)",
+		       t->kind == KOF_TOUCH_INELIGIBLE ? t->n_present
+						       : t->n_in_rgn,
+		       t->n_str);
+		if (t->ruled_out)
+			printf("   %s", t->ruled_out);
+		else if (t->kind == KOF_TOUCH_ELSEWHERE)
+			printf("   present, but not where it looks");
+		printf("\n");
+
+		for (j = 0, shown = 0; j < t->n_str && shown < 8u; j++) {
+			const struct kof_touch_str *s = &t->str[j];
+
+			if (s->at == KOF_BROKEN)
+				continue;
+			shown++;
+			/* The note only means something when regions were
+			 * resolved at all. A module ruled out by its target
+			 * never had its regions looked at, so saying its marker
+			 * is outside them would be inventing a comparison. */
+			printf("        %s%-4s%s %s%6u%s bytes at %s%-10llu%s",
+			       C_ID, s->kind ? "hex" : "str", C_OFF,
+			       C_SIZE, s->len, C_OFF,
+			       C_LOC, (unsigned long long)s->at, C_OFF);
+			if (t->kind != KOF_TOUCH_INELIGIBLE && !s->in_rgn)
+				note_warn("outside its regions");
+			printf("\n");
+		}
+	}
+	kof_touch_free(v, n);
+}
+
+static int examine_bytes(kof_buf buf, const char *display, const char *dir,
+			 struct kof_engine *eng)
 {
 	struct kof_obj_ctx ctx;
 	void *view = 0;
@@ -1117,7 +1321,7 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir)
 
 	{
 		memset(&ctx, 0, sizeof ctx);
-		printf("%s\n", display);
+		printf("%s%s%s\n", C_NAME, display, C_OFF);
 
 		for (i = 0; i < sizeof formats / sizeof formats[0]; i++) {
 			if (!formats[i].sniff(buf))
@@ -1132,8 +1336,16 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir)
 			break;
 		}
 		if (!f) {
-			printf("  format    unrecognised, %llu bytes\n",
-			       (unsigned long long)buf.n);
+			printf("  format    %sunrecognised%s, %s%llu%s bytes\n",
+			       C_WARN, C_OFF, C_SIZE,
+			       (unsigned long long)buf.n, C_OFF);
+			/* Still worth asking. No format means every module is
+			 * ruled out and every marker is reported as such, which
+			 * is a truthful answer and occasionally the useful one. */
+			if (eng) {
+				ctx.obj_size = buf.n;
+				print_markers(eng, buf, &ctx);
+			}
 			rc = 1;
 			goto out;
 		}
@@ -1144,12 +1356,13 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir)
 		 * means REL for an ELF and DLL for a PE, and which one it is is
 		 * exactly what the reader is here to find out.
 		 */
-		printf("  format    %s %s%s%s  %llu bytes\n",
-		       kof_format_name(ctx.format), kof_arch_name(ctx.arch),
+		printf("  format    %s %s%s%s%s%s  %s%llu%s bytes\n",
+		       kof_format_name(ctx.format),
+		       C_ID, kof_arch_name(ctx.arch),
 		       subtype_name(ctx.format, ctx.subtype) ? " " : "",
 		       subtype_name(ctx.format, ctx.subtype)
 		       ? subtype_name(ctx.format, ctx.subtype) : "",
-		       (unsigned long long)buf.n);
+		       C_OFF, C_SIZE, (unsigned long long)buf.n, C_OFF);
 		f->print(view, &ctx, buf);
 
 		/* Regions last: they are the summary the rest explains, and with
@@ -1167,20 +1380,22 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir)
 			for (k = 0; k < n; k++)
 				len += ext[k].len;
 			total += len;
-			printf(" %s=%llu", short_region(rn),
-			       (unsigned long long)len);
+			printf(" %s%s%s=%s%llu%s", C_ID, short_region(rn), C_OFF,
+			       C_SIZE, (unsigned long long)len, C_OFF);
 		}
 		/* The partition, stated rather than assumed: if these do not add
 		 * up, every region-scoped search on this object is looking at the
 		 * wrong bytes and this is where it shows. */
-		printf("  (sum %llu of %llu%s)\n", (unsigned long long)total,
-		       (unsigned long long)buf.n,
-		       total == buf.n ? "" : " MISMATCH");
+		printf("  (sum %llu of %llu", (unsigned long long)total,
+		       (unsigned long long)buf.n);
+		if (total != buf.n)
+			printf("%s MISMATCH%s", C_BAD, C_OFF);
+		printf(")\n");
 
 		{
 			uint64_t anom = f->anomalies(view);
 			if (anom) {
-				printf("  anomalies");
+				printf("  anomalies%s", C_BAD);
 				for (i = 0; i < 64; i++) {
 					const char *an;
 					if (!(anom >> i & 1))
@@ -1191,7 +1406,7 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir)
 					else
 						printf(" bit%u", i);
 				}
-				printf("\n");
+				printf("%s\n", C_OFF);
 			}
 		}
 
@@ -1260,6 +1475,8 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir)
 			printf("  dumped    %u region(s), %llu byte(s) -> %s/\n",
 			       written, (unsigned long long)wrote, dir);
 		}
+		if (eng)
+			print_markers(eng, buf, &ctx);
 		rc = 1;
 	}
 out:
@@ -1270,7 +1487,7 @@ out:
 /*
  * The file on disk, mapped and handed to the same routine as everything else.
  */
-static int examine(const char *path, int dump)
+static int examine(const char *path, int dump, struct kof_engine *eng)
 {
 	struct stat st;
 	void *map;
@@ -1301,7 +1518,7 @@ static int examine(const char *path, int dump)
 		return -1;
 	}
 	rc = examine_bytes(kof_buf_make(map, (uint64_t)st.st_size), path,
-			   dump ? dir : 0);
+			   dump ? dir : 0, eng);
 	kof_unmap_file(map, (uint64_t)st.st_size);
 	return rc;
 }
@@ -1331,6 +1548,11 @@ static void on_debug(const char *what, uint64_t value, void *user)
 
 struct unp_run {
 	const char *dump_dir;     /* NULL when not dumping */
+	/* Carried so a recovered object gets the same treatment its parent got.
+	 * A marker inside an unpacked image is the case where "which module does
+	 * this belong to" is hardest to answer by eye, so leaving the recovered
+	 * objects out of it would omit the answer where it is worth most. */
+	struct kof_engine *touch;
 	uint32_t    produced;
 	uint32_t    partial;
 	int         err;
@@ -1394,12 +1616,32 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 		else
 			snprintf(tag, sizeof tag, "%u", u->produced);
 	}
-	printf("  recovered %-18s %10llu bytes%s%s\n", tag,
-	       (unsigned long long)len, res->broken ? "   " : "",
-	       res->broken ? kof_broken_name(res->broken) : "");
+	printf("  recovered %s%-18s%s %s%10llu%s bytes", C_ID, tag, C_OFF,
+	       C_SIZE, (unsigned long long)len, C_OFF);
+	if (res->broken)
+		printf("   %s%s%s", C_BAD, kof_broken_name(res->broken), C_OFF);
+	printf("\n");
 
-	if (!u->dump_dir)
+	/*
+	 * Writing is what needs a directory. Looking does not.
+	 *
+	 * These two were one branch, and that was the bug: a recovered object was
+	 * only ever examined as a side effect of being dumped. For a packed sample
+	 * the recovered object is the ONLY one that carries markers - the packed
+	 * parent carries compressed bytes and nothing else - so --markers went
+	 * silent on precisely the files it exists for, and said "nothing in the
+	 * database has a marker here" while the scanner reported the child
+	 * infected. Truthful about the parent and useless about the sample.
+	 */
+	if (!u->dump_dir) {
+		if (u->touch) {
+			printf("\n");
+			if (examine_bytes(kof_buf_make(bytes, len), name, 0,
+					  u->touch) < 0)
+				u->err = 1;
+		}
 		return 0;
+	}
 	if ((size_t)snprintf(path, sizeof path, "%s/unpacked.%s", u->dump_dir, tag)
 	    >= sizeof path) {
 		u->err = 1;
@@ -1435,7 +1677,7 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 		return 0;
 	}
 	printf("\n");
-	if (examine_bytes(kof_buf_make(bytes, len), name, sub) < 0)
+	if (examine_bytes(kof_buf_make(bytes, len), name, sub, u->touch) < 0)
 		u->err = 1;
 	return 0;
 }
@@ -1448,7 +1690,7 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
  * wrong for a tool whose entire question is what is inside.
  */
 static int unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
-		       int verbose)
+		       int verbose, int markers)
 {
 	struct kof_scan_option opt;
 	struct unp_run u;
@@ -1458,6 +1700,7 @@ static int unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
 	memset(&u, 0, sizeof u);
 	opt.all_matches = 1;
 	u.dump_dir = dump_dir;
+	u.touch = markers ? eng : NULL;
 
 	sc = kof_scanner_new(eng);
 	if (!sc) {
@@ -1488,7 +1731,12 @@ static void usage(const char *argv0)
 		"             they recovered. With --dump the recovered objects are\n"
 		"             written beside the regions as unpacked.<n>\n"
 		"  --debug    also print what modules worked out along the way -\n"
-		"             versions, methods, counts. Needs --db.\n",
+		"             versions, methods, counts. Needs --db.\n"
+		"  --color    force colour on; --no-color forces it off. The default\n"
+		"             is colour when stdout is a terminal and NO_COLOR is unset.\n"
+		"  --markers  list every database marker found in the file and whose\n"
+		"             it is, including modules that did not fire, with the\n"
+		"             reason each did not. Needs --db.\n",
 		argv0);
 }
 
@@ -1506,7 +1754,7 @@ int main(int argc, char **argv)
 {
 	const char *db = NULL;
 	kof_engine *eng = NULL;
-	int dump = 0, verbose = 0;
+	int dump = 0, verbose = 0, markers = 0, colour = -1;
 	int i, files = 0, bad = 0;
 
 	/* First pass: the options, wherever they are. */
@@ -1515,6 +1763,14 @@ int main(int argc, char **argv)
 			dump = 1;
 		} else if (strcmp(argv[i], "--debug") == 0) {
 			verbose = 1;
+		} else if (strcmp(argv[i], "--markers") == 0) {
+			markers = 1;
+		} else if (strcmp(argv[i], "--color") == 0 ||
+			   strcmp(argv[i], "--colour") == 0) {
+			colour = 1;
+		} else if (strcmp(argv[i], "--no-color") == 0 ||
+			   strcmp(argv[i], "--no-colour") == 0) {
+			colour = 0;
 		} else if (strcmp(argv[i], "--db") == 0) {
 			if (++i >= argc) {
 				fprintf(stderr, "%s: --db needs a directory\n",
@@ -1529,6 +1785,13 @@ int main(int argc, char **argv)
 			return 2;
 		}
 	}
+
+	/* Auto unless said otherwise, and NO_COLOR wins over the terminal: this
+	 * output gets piped into grep and diffed against itself, and an escape
+	 * sequence in either is a bug rather than a preference. */
+	if (colour < 0)
+		colour = stdout_is_tty() && getenv("NO_COLOR") == NULL;
+	colour_enable(colour);
 
 	if (db) {
 		eng = kof_engine_open(db);
@@ -1551,14 +1814,14 @@ int main(int argc, char **argv)
 		if (argv[i][0] == '-' && argv[i][1])
 			continue;
 
-		r = examine(argv[i], dump);
+		r = examine(argv[i], dump, markers ? eng : NULL);
 		if (r >= 0 && eng) {
 			char dir[PATH_ROOM];
 			const char *d = NULL;
 
 			if (dump && dump_dir_for(argv[i], dir, sizeof dir))
 				d = dir;
-			if (!unpack_pass(eng, argv[i], d, verbose))
+			if (!unpack_pass(eng, argv[i], d, verbose, markers))
 				r = -1;
 		}
 

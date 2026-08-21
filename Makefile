@@ -348,9 +348,15 @@ $(OUT)/bin/kofscanner$(EXE): $(SCANNER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 # view, and no public surface offers one. The reason that is not a lapse is
 # written at the top of the file.
 
-$(OUT)/bin/kofexamine$(EXE): kofexamine/kofexamine.c $(LIB) $(SDK_HDR) $(STAMP)
+# kofinspect is the half of this tool that is not printing: it asks the loaded
+# database what it already knows about an object. Separate because a second
+# consumer is coming - the viewer - and because the two halves reach for
+# different things: the printer wants the parse, this wants the engine.
+EXAMINE_SRC := kofexamine/kofexamine.c kofexamine/kofinspect.c
+
+$(OUT)/bin/kofexamine$(EXE): $(EXAMINE_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $< $(LIB) -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(EXAMINE_SRC) $(LIB) -o $@ $(LDFLAGS)
 
 # ----------------------------------------------------- the database toolchain
 #
