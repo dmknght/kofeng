@@ -37,6 +37,7 @@
 #define _GNU_SOURCE
 
 #include <stdio.h>
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -317,8 +318,268 @@ static const char *byte_colour(uint8_t c)
  * menu bar, and until there is one the row is better spent on the panes.
  */
 static int hex_top(void)  { return 1; }
-static int hex_bot(void)  { return g_rows - 2; }
+/*
+ * How many rows the draft panel is using.
+ *
+ * File scope so the geometry helpers stay parameterless - they are called from
+ * everywhere including the click routing, and threading a view pointer through
+ * them to ask one question would be worse than one number kept in step in one
+ * place. Updated at the top of every frame.
+ *
+ * Zero until there is a draft: an empty panel would cost the hex view its
+ * height on every file, including the many opened to be read rather than
+ * written about. It appears with the first declaration and leaves with the last.
+ */
+static int g_decl_rows;
+
+/*
+ * Bottom-up: the status bar owns the last row, the draft panel the rows above
+ * it, and the rule sits between the draft and the hex pane. They were one row
+ * short of each other - the rule was being drawn on the draft's header line -
+ * which made the two panels look like one.
+ */
+static int hex_bot(void)  { return g_rows - g_decl_rows - 2; }
+static int decl_top(void) { return g_rows - g_decl_rows; }
 static int mark_row(void) { return g_rows; }
+
+/* ---- the signature being drafted -------------------------------------------
+ *
+ * What the tool exists for. Everything else - the region tree, the offsets that
+ * count from the region rather than the file, the highlighting - is here to get
+ * a person to the moment where they can say "that, and that, are the marker",
+ * and this is where what they said is kept.
+ *
+ * A declaration remembers the region it came from as well as the bytes. That is
+ * the half a hand-written signature usually gets wrong: the bytes are easy to
+ * copy and the range they were found in is easy to forget, and a marker searched
+ * for in the wrong region is a signature that quietly never fires.
+ */
+#define MAX_DECL  32
+#define MAX_GROUP 8
+
+/* Every row the draft panel can ever hold, spelled from the limits rather than
+ * counted once: the panel grew three kinds of row after this array was sized,
+ * and a table that silently stops short is a panel whose bottom cannot be
+ * scrolled to. */
+#define MAX_PROW  (OPT_COUNT + 1 + 1 + MAX_DECL + 1 + 2 * MAX_GROUP + 1 + \
+		   2 * MAX_GROUP)
+#define MAX_RANGE 8
+
+/* A string that no condition uses yet. Declaring one must not invent a place to
+ * put it: the condition is the researcher's decision and making it for them is
+ * the kind of help that has to be undone before anything else can be done. */
+#define GRP_NONE  0xffffffffu
+
+/*
+ * The optional declarations.
+ *
+ * KOF_TARGET_FORMAT is required and comes from the parse. These three are not,
+ * and each one is a precondition the host checks without entering the module -
+ * so adding one is a decision about cost as much as about correctness, and it
+ * belongs where the other declarations are rather than being inferred.
+ *
+ * Their values are seeded from the object, because the object is where a true
+ * value comes from: the size of the sample, the architecture it was built for,
+ * the kind of file it is. A researcher widens them from there; nobody starts
+ * from zero.
+ */
+enum opt_kind {
+	OPT_SIZE_MIN = 0,
+	OPT_SIZE_MAX,
+	OPT_ARCH,
+	OPT_SUBTYPE,
+	OPT_COUNT
+};
+
+static const char *const opt_word[OPT_COUNT] = {
+	"size_min", "size_max", "arch", "subtype"
+};
+
+/*
+ * The architectures, as the enum spells them.
+ *
+ * All of them, not the one this object happens to be: a signature for a family
+ * that ships an arm build and an x86 one is written from whichever sample is to
+ * hand, and being offered only that sample's architecture is how a signature
+ * ends up narrower than the family it names.
+ */
+static const struct { const char *word; uint32_t val; } arch_word[] = {
+	{ "ANY",     0 }, { "X86",     1 }, { "X86_64",  2 }, { "ARM",     3 },
+	{ "ARM64",   4 }, { "RISCV64", 5 }, { "MIPS",    6 }, { "PPC64",   7 },
+	{ "MIPS64",  8 }, { "PPC",     9 }, { "RISCV32", 10 }
+};
+#define ARCH_N (sizeof arch_word / sizeof arch_word[0])
+
+/* The subtypes, per format. The values overlap between formats, which is why
+ * naming one format's values while targeting another is a build error. */
+static const char *const elf_sub[] = { "NONE", "REL", "EXEC", "DYN", "CORE" };
+static const char *const pe_sub[]  = { "EXE", "DLL", "SYS" };
+
+/*
+ * A declared range: KOF_TARGET_RANGE, exactly.
+ *
+ * Its own entity rather than a property of a condition, because that is what it
+ * is in the module language - a NAMED union of region bits that any number of
+ * searches can then name. Which is also what makes the one hard constraint
+ * workable: a search call takes one range, so a condition over markers from two
+ * regions is impossible until the two regions are one range. Merging them is
+ * how that is said, and it is a decision with a cost - a marker in a merged
+ * range may then match in either half - so it is a thing somebody does on
+ * purpose rather than something the tool arranges quietly.
+ */
+struct range {
+	uint32_t mask;              /* an OR of the format's region bits */
+	char     name[40];          /* what the source will call it */
+};
+
+/*
+ * A condition, and the markers it is about.
+ *
+ * The group is the thing that is created first: somebody decides "any of these"
+ * before deciding which these. What is NOT free is the region - kof_find_str_all
+ * and its siblings take ONE range for every string in the call, so a group is a
+ * condition over markers that share a region. "Two of these three, in the code
+ * section" is a sentence the engine can say; "two of these three, wherever they
+ * are" is not.
+ *
+ * So the region is not chosen, it is learnt: it is fixed by the first marker put
+ * into the group, and a marker from anywhere else has to go in a different one.
+ * Saying that at the moment of adding beats discovering it at build time.
+ */
+/*
+ * A matcher: one search call, and nothing else.
+ *
+ * find_all / find_any / find_multi over some markers in one range. It says
+ * whether those bytes are there and takes no position on what that means - so
+ * it carries no verdict, and the same matcher can be used by two different
+ * conclusions.
+ */
+struct group {
+	int      rule;              /* 0 ALL, 1 ANY, 2 threshold */
+	uint32_t thresh;
+	char     note[80];          /* the author's note, emitted as a comment */
+	/*
+	 * The range this matcher searches, as a mask.
+	 *
+	 * Not an index into a list of ranges, because there is no list to keep:
+	 * a range has no existence apart from a matcher naming it. Zero means
+	 * "the narrowest that holds what I have", recomputed as markers come
+	 * and go - which is the answer that is right until somebody decides
+	 * otherwise, and the only one that cannot go stale.
+	 */
+	uint32_t mask;
+};
+
+/*
+ * A condition: what some combination of matchers MEANS.
+ *
+ * This is where the flexibility lives, and where bases/signatures already puts
+ * it. lkm_rootkit_general.c is the shape: one matcher gates the file as a
+ * rootkit at all, and three more each name a different family inside that gate.
+ * Neither half of that is expressible if a verdict is welded to a search -
+ * the gate concludes nothing on its own, and the three share it.
+ *
+ * So a condition is an expression over matcher ids ("1", "1&2", "(1&2)|3"), a
+ * verdict, and optionally a parent it sits inside. A condition with children
+ * concludes nothing itself: it is the gate, and its children are what happens
+ * once it holds.
+ */
+struct cond {
+	char     expr[64];          /* over matcher ids */
+	/*
+	 * Why this condition says what it says, in the author's words.
+	 *
+	 * Written into the generated source as a comment above the branch. The
+	 * modules in bases/ all carry one - a marker set is a fact, but why
+	 * that set means Mirai and not a false positive is a judgement, and it
+	 * is the judgement the next reader needs and cannot recover from the
+	 * bytes.
+	 */
+	char     note[80];
+	int      level;             /* 0 INFECT, 1 SUSPECT */
+	int      var_kind;          /* 0 AUTO, 1 GENERIC, 2 custom */
+	char     variant[48];
+	int      parent;            /* -1 for a top level block */
+};
+
+struct decl {
+	uint8_t *bytes;
+	uint32_t len;
+	int      hex;               /* KOF_DEFINE_HEXSTR, else KOF_DEFINE_STR */
+	uint32_t obj;               /* which object it was taken from */
+	uint32_t mask;              /* the region it was taken from */
+	char     rgn[24];           /* that region's short name */
+	uint32_t grp;               /* which matcher uses it */
+
+	/*
+	 * How a literal is compared. Both are properties of KOF_DEFINE_STR and
+	 * neither exists for a hex pattern - kofsig.h says why: folding case on
+	 * a byte that may be a wildcard means nothing, and a word boundary is a
+	 * notion of text.
+	 */
+	int      fullword;
+	int      icase;
+};
+
+/*
+ * Can these bytes be the second argument of KOF_DEFINE_STR.
+ *
+ * ksigbuilder reads that argument quote to quote and refuses escapes, so the
+ * answer is the printable ASCII that needs none. "?" is excluded on top of that
+ * and not out of caution: signatures compile with -std=c11, which turns on
+ * trigraph replacement, and "??" followed by one of nine characters would become
+ * a different character before the compiler ever saw the literal.
+ */
+static int literal_safe(const uint8_t *b, uint32_t n)
+{
+	uint32_t i;
+
+	if (!n)
+		return 0;
+	for (i = 0; i < n; i++)
+		if (b[i] < 0x20u || b[i] > 0x7eu || b[i] == '"' ||
+		    b[i] == '\\' || b[i] == '?')
+			return 0;
+	return 1;
+}
+
+/* ---- a chooser ------------------------------------------------------------
+ *
+ * One overlay for every "pick one of these" in the draft panel: the condition's
+ * rule, its range, its verdict, the malware type. They are the same interaction
+ * four times, and four bespoke popups would be four places to get the click
+ * routing wrong.
+ */
+#define CH_ITEMS 16
+#define CH_W     26
+
+enum ch_what {
+	CH_NONE = 0,
+	CH_RULE,        /* find all / any / multi, for a new or existing group */
+	CH_RANGE,       /* which declared range a condition searches */
+	CH_LEVEL,       /* infect or suspect */
+	CH_VARIANT,     /* how the finding names itself */
+	CH_TYPE,        /* enum kof_maltype */
+	CH_MARKER,      /* which unused marker to put in a matcher */
+	CH_THRESH,      /* how many of the matcher's markers must be present */
+	CH_OPT,         /* which optional declaration to add */
+	CH_ARCH,        /* enum kof_arch, all of it */
+	CH_SUBTYPE,     /* the format's subtypes, all of them */
+	CH_WORD,        /* fullword or substring */
+	CH_CASE,        /* case sensitive or not */
+	CH_CMATCH       /* which matcher to put into a condition */
+};
+
+struct chooser {
+	int      open;
+	int      row, col;
+	int      what;
+	uint32_t arg;               /* which group it is about */
+	int      n, sel;
+	uint32_t arg2;              /* the narrowest range, for CH_RANGE */
+	char     item[CH_ITEMS][CH_W];
+};
+
 
 /* ---- the objects under view ------------------------------------------------
  *
@@ -395,6 +656,18 @@ struct view {
 
 	struct kof_range *ext;
 	uint32_t          n_ext;
+	/*
+	 * A second extent buffer, for asking about a region that is not the one
+	 * being looked at.
+	 *
+	 * `ext` describes the selected node and the hex pane maps every byte
+	 * through it. A lookup that resolved some other region into it left the
+	 * pane mapping through extents that belonged to nothing it was showing
+	 * - every offset came back as the start of the file, so declaring a
+	 * string turned the whole pane into byte zero repeated. A question
+	 * about another region gets its own paper.
+	 */
+	struct kof_range *probe;
 	uint64_t          rgn_len, rgn_at;
 
 	/*
@@ -451,6 +724,7 @@ struct view {
 	uint64_t    menu_off;       /* the row offset it was opened on */
 
 	int         menu_open, menu_row, menu_col, menu_sel;
+	struct chooser ch;
 
 	/*
 	 * How far each list is scrolled sideways.
@@ -464,6 +738,78 @@ struct view {
 	 * off the edge.
 	 */
 	uint32_t    tree_hoff, list_hoff;
+
+	struct decl  decl[MAX_DECL];
+	uint32_t     n_decl, sel_decl;
+
+	struct range rng[MAX_RANGE];
+	uint32_t     n_rng, cur_rng;
+
+	struct group grp[MAX_GROUP];       /* matchers */
+	uint32_t     n_grp, cur_grp;
+
+	struct cond  cnd[MAX_GROUP];
+	uint32_t     n_cnd, cur_cnd;
+	char         warn[120];     /* why the last add was refused */
+
+	/*
+	 * What the finished module will declare about itself.
+	 *
+	 * The type is cycled rather than typed because it is an enum the build
+	 * checks - ksigbuilder refuses a word that is not in its table, and a
+	 * text box that can produce a build error is a text box that should have
+	 * been a list. The other two are free text and belong to whoever is
+	 * writing the signature.
+	 */
+	int         opt_on[OPT_COUNT];
+	uint64_t    opt_val[OPT_COUNT];
+
+	char        family[64];
+	uint32_t    maltype;
+	char        basedir[256];
+
+	/*
+	 * How the conditions combine, written the way ClamAV writes it: numbers
+	 * for conditions, & and |, parentheses. Free text because the shapes
+	 * people want are not a menu - "1&2", "(1&2)|3" - and because an empty
+	 * one has an obvious meaning worth keeping as the default: every
+	 * condition, joined by &.
+	 */
+	char        expr[96];
+
+	int         edit;           /* 0 none, 1 family, 2 variant */
+	int         gen_ok;
+	char        gen_path[600];
+
+	/* Where the header's controls landed, recorded as they are drawn. */
+	int         f_c0, f_c1, t_c0, t_c1, v_c0, v_c1, g_c0, g_c1;
+	int         n_c0, n_c1;     /* the "+ condition" button */
+	int         rng_c0, rng_c1, m_c0, m_c1, s_c0, s_c1, e_c0, e_c1;
+	int         a_c0, a_c1, b_c0, b_c1, p_c0, p_c1, o_c0, o_c1;
+	int         opt_c0[OPT_COUNT], opt_c1[OPT_COUNT];
+
+	/*
+	 * The panel's rows, listed once and used twice.
+	 *
+	 * Drawing walked this shape and the click router walked it again, and
+	 * keeping two copies of one walk in step is a thing that fails quietly:
+	 * a row added to one and not the other sends every click below it to
+	 * the wrong control. Built once per frame, indexed by both.
+	 */
+	uint8_t     prow_kind[MAX_PROW];
+	uint32_t    prow_idx[MAX_PROW];
+	uint32_t    n_prow, prow_off;
+	char        num[24];        /* the size being typed */
+	int         num_fresh;      /* nothing typed into it yet */
+	int         row_cnd, row_str;
+	int         cnd_lv[MAX_GROUP][2], cnd_vr[MAX_GROUP][2];
+	int         cnd_nm[MAX_GROUP][2];
+	/* The comment boxes, and the condition's own "+ matcher". Recorded per
+	 * row as they are drawn, because a row that is scrolled out has no
+	 * columns and must not answer a click meant for the one in its place. */
+	int         cnd_nt[MAX_GROUP][2], grp_nt[MAX_GROUP][2];
+	int         cnd_mt[MAX_GROUP][2];
+	int         row_rng, row_grp;
 	int         pane;           /* 0 tree, 1 hex, 2 markers */
 	int         per;            /* bytes a hex row shows, for click mapping */
 };
@@ -850,9 +1196,12 @@ static void draw_tree(struct out *o, struct view *v)
 				 n->label);
 			off = v->tree_hoff < strlen(row) ? v->tree_hoff
 							 : strlen(row);
-			if (sel)
-				out_str(o, v->pane == 0 ? A_SEL : A_BOLD);
-			else
+			out_str(o, sel ? A_BOLD : "");
+			/* A star, not a chevron: "> " reads as a thing that
+			 * would open if it were pressed, and these rows are
+			 * already all open. */
+			out_str(o, sel ? "*" : " ");
+			if (!sel)
 				/* An object row can hold a signature; a region
 				 * row is a place inside one. Different colours
 				 * because they are different kinds of answer,
@@ -861,7 +1210,7 @@ static void draw_tree(struct out *o, struct view *v)
 			/* Truncated, not merely padded: a label wider than its
 			 * column runs into the pane beside it, and the first
 			 * file anyone opens has a sha256 for a name. */
-			out_fmt(o, "%-19.19s", row + off);
+			out_fmt(o, "%-18.18s", row + off);
 		}
 		if (!sel)
 			out_str(o, A_OFF A_SIZE);
@@ -1070,6 +1419,1420 @@ static void touch_head(const struct kof_touch *t, char *out, size_t cap)
  * the caret in that pane already says, and it was the first thing on the line
  * that nobody needed.
  */
+/*
+ * The draft, as it stands.
+ *
+ * Grouped visually by region rather than sorted, because the order markers were
+ * chosen in is information - it is the order somebody read the object - and a
+ * signature's declarations do not care about order at all.
+ */
+static const char *const maltype_word[] = {
+	"Virus", "Trojan", "Rootkit", "Botnet", "Ransom",
+	"Miner", "Adware", "Exploit", "Dropper", "Hacktool"
+};
+#define MALTYPE_N (sizeof maltype_word / sizeof maltype_word[0])
+
+/* How many markers are in this condition. */
+/* Markers not yet in any condition. */
+static uint32_t decl_free(struct view *v)
+{
+	uint32_t i, n = 0;
+
+	for (i = 0; i < v->n_decl; i++)
+		n += v->decl[i].grp == GRP_NONE;
+	return n;
+}
+
+/*
+ * Does a range hold bytes found in that region.
+ *
+ * KOF_SCAN_ALL is the whole object, so a range built on it holds everything - a
+ * bit test alone would say a marker found in the code section is not inside the
+ * whole file, which is the one answer that cannot be right.
+ */
+static int rng_holds(uint32_t rmask, uint32_t region)
+{
+	return (rmask & KOF_SCAN_ALL) || (region & KOF_SCAN_ALL) ||
+	       (rmask & region);
+}
+
+/* What this matcher searches: what it was told, or the narrowest that holds
+ * what it has. */
+/*
+ * Does this condition's expression name matcher `g`.
+ *
+ * Compared as a number rather than a character, because matcher 1 and matcher
+ * 12 share a digit and a substring test would report the wrong one - which
+ * would show up as a row listing matchers it does not use, and only on drafts
+ * big enough that nobody was checking by hand any more.
+ *
+ * An empty expression names all of them, which is what it generates.
+ */
+static int cnd_uses(const struct cond *c, uint32_t g)
+{
+	const char *p = c->expr;
+
+	while (*p) {
+		if (*p >= '0' && *p <= '9') {
+			unsigned long n = strtoul(p, (char **)&p, 10);
+
+			if (n == (unsigned long)g + 1ul)
+				return 1;
+			continue;
+		}
+		p++;
+	}
+	return 0;
+}
+
+static uint32_t grp_mask(struct view *v, uint32_t g)
+{
+	uint32_t i, need = 0;
+
+	if (v->grp[g].mask)
+		return v->grp[g].mask;
+	for (i = 0; i < v->n_decl; i++)
+		if (v->decl[i].grp == g)
+			need |= v->decl[i].mask;
+	return need ? need : KOF_SCAN_ALL;
+}
+
+static uint32_t grp_count(struct view *v, uint32_t g)
+{
+	uint32_t i, n = 0;
+
+	for (i = 0; i < v->n_decl; i++)
+		n += v->decl[i].grp == g;
+	return n;
+}
+
+
+static void grp_add(struct view *v)
+{
+	if (v->n_grp >= MAX_GROUP)
+		return;
+	memset(&v->grp[v->n_grp], 0, sizeof v->grp[0]);
+	v->cur_grp = v->n_grp++;
+	v->warn[0] = 0;
+}
+
+/*
+ * A new condition, inside the one that is selected when it has no expression of
+ * its own to lose - which is how a gate gets its branches without a separate
+ * "nest this" gesture: add a condition, give it the gate, then add the ones
+ * that live under it.
+ */
+static void cnd_add(struct view *v, int nested)
+{
+	struct cond *c;
+
+	if (v->n_cnd >= MAX_GROUP)
+		return;
+	c = &v->cnd[v->n_cnd];
+	memset(c, 0, sizeof *c);
+	c->parent = nested && v->n_cnd ? (int)v->cur_cnd : -1;
+	v->cur_cnd = v->n_cnd++;
+	v->warn[0] = 0;
+}
+
+/*
+ * Drop a condition.
+ *
+ * Its children are lifted to the top rather than deleted with it: they are
+ * separate conclusions that happened to share a gate, and taking the gate away
+ * is a reason to re-read them, not a reason to lose them.
+ */
+static void cnd_remove(struct view *v, uint32_t i)
+{
+	uint32_t k;
+
+	if (i >= v->n_cnd)
+		return;
+	for (k = 0; k < v->n_cnd; k++)
+		if (v->cnd[k].parent == (int)i)
+			v->cnd[k].parent = -1;
+	memmove(&v->cnd[i], &v->cnd[i + 1u],
+		(v->n_cnd - i - 1u) * sizeof v->cnd[0]);
+	v->n_cnd--;
+	for (k = 0; k < v->n_cnd; k++)
+		if (v->cnd[k].parent > (int)i)
+			v->cnd[k].parent--;
+	if (v->cur_cnd >= v->n_cnd && v->n_cnd)
+		v->cur_cnd = v->n_cnd - 1u;
+}
+
+static uint32_t cnd_children(struct view *v, uint32_t i)
+{
+	uint32_t k, n = 0;
+
+	for (k = 0; k < v->n_cnd; k++)
+		n += v->cnd[k].parent == (int)i;
+	return n;
+}
+
+/*
+ * The declared range that holds this region, made if there is not one.
+ *
+ * A region met for the first time becomes a range on its own; met again it
+ * finds the range it is already in, merged or not. So the list of ranges grows
+ * out of where markers were actually found, which is the only place a range
+ * has any business coming from.
+ */
+/*
+ * Does this range hold bytes found in that region.
+ *
+ * KOF_SCAN_ALL is the whole object, so a range built on it holds everything -
+ * a bit test alone would have said a marker found in the code section is not
+ * inside the whole file, which is the one answer that cannot be right.
+ */
+/*
+ * A mask, spelled with the format's own region words.
+ *
+ * Built on demand rather than stored: a range is whatever a matcher currently
+ * needs, and a name kept beside it would be one more thing to update when a
+ * marker is added or taken away.
+ */
+static void rng_name_of(const struct kof_inspect_fmt *fmt, uint32_t mask,
+			char *out, size_t cap)
+{
+	uint32_t b, k;
+	size_t at = 0;
+
+	out[0] = 0;
+	if (mask & KOF_SCAN_ALL) {
+		snprintf(out, cap, "WHOLE-FILE");
+		return;
+	}
+	for (b = 0; b < 32u && at + 1u < cap; b++) {
+		const char *w = NULL;
+
+		if (!(mask & (1u << b)))
+			continue;
+		if (fmt)
+			for (k = 0; k < fmt->n_regions; k++)
+				if (fmt->regions[k] == (1u << b))
+					w = fmt->region_name(1u << b);
+		if (!w)
+			continue;
+		{
+			const char *t = strrchr(w, '_');
+
+			at += (size_t)snprintf(out + at, cap - at, "%s%s",
+					       at ? "|" : "", t ? t + 1 : w);
+		}
+	}
+	if (!out[0])
+		snprintf(out, cap, "WHOLE-FILE");
+}
+
+/*
+ * Write one matcher as the call it is.
+ *
+ * _all and _any short-circuit and _multi cannot - kofsig.h says so at the fold -
+ * so the extremes get the macro that stops early rather than a threshold that
+ * happens to equal them.
+ */
+/*
+ * The C identifier for a range, spelled from the region words.
+ *
+ * Both the KOF_TARGET_RANGE that declares it and the search call that names it
+ * go through here, because a range that is declared under one name and searched
+ * under another is a build error found by the compiler rather than by this - and
+ * that used to happen, since the caller passed no format and got WHOLE_FILE for
+ * everything.
+ */
+static void rng_ident(const struct kof_inspect_fmt *fmt, uint32_t mask,
+		      char *out, size_t cap)
+{
+	char w[24];
+	size_t i;
+
+	/* Named the way bases/ names them - scan_range_data, not DATA. A bare
+	 * region word at file scope is a short lowercase-able identifier in a
+	 * translation unit that includes engine headers, which is how a draft
+	 * ends up colliding with something it never mentioned. */
+	rng_name_of(fmt, mask, w, sizeof w);
+	for (i = 0; w[i]; i++) {
+		if (w[i] == '|' || w[i] == '-')
+			w[i] = '_';
+		else if (w[i] >= 'A' && w[i] <= 'Z')
+			w[i] = (char)(w[i] - 'A' + 'a');
+	}
+	snprintf(out, cap, "scan_range_%s", w);
+}
+
+static void emit_matcher(FILE *f, struct view *v, uint32_t g)
+{
+	const struct group *q = &v->grp[g];
+	uint32_t i;
+
+	{
+		char nm[40];
+
+		rng_ident(cur_obj(v)->fmt, grp_mask(v, g), nm, sizeof nm);
+		fprintf(f, "kof_find_str_%s(%s",
+			q->rule == 1 ? "any" : q->rule == 2 ? "multi" : "all",
+			nm);
+	}
+	for (i = 0; i < v->n_decl; i++)
+		if (v->decl[i].grp == g)
+			fprintf(f, ", s%u", i);
+	fprintf(f, ")");
+	if (q->rule == 2)
+		fprintf(f, " >= %u", q->thresh);
+}
+
+/*
+ * The expression, with each matcher id replaced by its call.
+ *
+ * Anything that is not a digit, a space, "&", "|" or a bracket is dropped
+ * rather than passed through: this text becomes C, and the one thing it must
+ * not do is carry something the person typing did not mean as code.
+ */
+static void emit_expr(FILE *f, struct view *v, const char *e)
+{
+	int any = 0;
+
+	if (!e[0]) {
+		/* Nothing written means every matcher, joined - the reading
+		 * that makes an empty field a default rather than an error. */
+		uint32_t g;
+
+		for (g = 0; g < v->n_grp; g++) {
+			if (any)
+				fprintf(f, " && ");
+			emit_matcher(f, v, g);
+			any = 1;
+		}
+		if (!any)
+			fprintf(f, "1");
+		return;
+	}
+	while (*e) {
+		if (*e >= '0' && *e <= '9') {
+			uint32_t id = 0;
+
+			while (*e >= '0' && *e <= '9')
+				id = id * 10u + (uint32_t)(*e++ - '0');
+			if (id >= 1u && id <= v->n_grp)
+				emit_matcher(f, v, id - 1u);
+			else
+				fprintf(f, "0");
+			continue;
+		}
+		if (*e == '&')
+			fprintf(f, " && ");
+		else if (*e == '|')
+			fprintf(f, " || ");
+		else if (*e == '(' || *e == ')')
+			fputc(*e, f);
+		e++;
+	}
+}
+
+/*
+ * The author's note for a matcher or a condition, as a C comment.
+ *
+ * On its own line above the code it belongs to, indented with it, and only when
+ * there is one: a blank comment above every branch is noise, and noise in a
+ * generated file is what teaches people to stop reading generated files.
+ * Newlines cannot appear in these boxes and the text is bounded, so the only
+ * thing to guard is a sequence that would close the comment early.
+ */
+static void emit_note(FILE *f, const char *note, int depth)
+{
+	const char *p;
+	int d;
+
+	if (!note[0])
+		return;
+	for (d = 0; d < depth; d++)
+		fputc('\t', f);
+	fputs("/* ", f);
+	for (p = note; *p; p++)
+		fputc((*p == '*' && p[1] == '/') ? ' ' : *p, f);
+	fputs(" */\n", f);
+}
+
+static void emit_cond(FILE *f, struct view *v, uint32_t i, int depth)
+{
+	const struct cond *c = &v->cnd[i];
+	uint32_t k;
+	int d;
+
+	/*
+	 * A matcher's note goes above the branch that uses it, not beside the
+	 * call: the call is one term of an expression inside an if, and a
+	 * comment there would break the line that has to stay readable. Named
+	 * by number so it can be told from the condition's own note when a
+	 * branch carries several.
+	 */
+	for (k = 0; k < v->n_grp; k++) {
+		char t[120];
+
+		if (!v->grp[k].note[0])
+			continue;
+		if (c->expr[0] && !cnd_uses(c, k))
+			continue;
+		snprintf(t, sizeof t, "matcher %u: %s", k + 1u,
+			 v->grp[k].note);
+		emit_note(f, t, depth);
+	}
+	emit_note(f, c->note, depth);
+	for (d = 0; d < depth; d++)
+		fputc('\t', f);
+	fprintf(f, "if (");
+	emit_expr(f, v, c->expr);
+	fprintf(f, ")");
+
+	if (!cnd_children(v, i)) {
+		fprintf(f, "\n");
+		for (d = 0; d <= depth; d++)
+			fputc('\t', f);
+		fprintf(f, "KOF_SCAN_%s(", c->level ? "SUSPECT" : "INFECT");
+		if (c->var_kind == 2 && c->variant[0])
+			fprintf(f, "\"%s\"", c->variant);
+		else if (c->var_kind == 1)
+			fprintf(f, "KOF_MALVAR_GENERIC");
+		else
+			fprintf(f, "KOF_MALVAR_AUTO");
+		fprintf(f, ");\n");
+		return;
+	}
+
+	fprintf(f, " {\n");
+	for (k = 0; k < v->n_cnd; k++)
+		if (v->cnd[k].parent == (int)i)
+			emit_cond(f, v, k, depth + 1);
+	for (d = 0; d < depth; d++)
+		fputc('\t', f);
+	fprintf(f, "}\n");
+}
+
+/*
+ * Write the draft out as a signature source.
+ *
+ * One KOF_TARGET_RANGE per distinct region, one search call per range, and the
+ * calls joined with && - which is the shape every hand-written signature in
+ * bases/ already has. The range comes from where each marker was found, so the
+ * one thing a hand-written signature usually gets wrong is the one thing this
+ * cannot get wrong.
+ *
+ * Never into bases/. That directory is the content that ships, and a draft is
+ * not content until somebody has looked at it.
+ */
+static void generate(struct view *v)
+{
+	struct object *ob = &v->obj[v->decl[0].obj];
+	char path[400], safe[48];
+	uint32_t i, k;
+	FILE *f;
+	size_t j = 0;
+
+	v->gen_path[0] = 0;
+	v->gen_ok = 0;
+	if (!v->n_decl || !v->family[0])
+		return;
+
+	for (i = 0; v->family[i] && j + 1u < sizeof safe; i++)
+		if (isalnum((unsigned char)v->family[i]) || v->family[i] == '_')
+			safe[j++] = v->family[i];
+	safe[j] = 0;
+	if (!j)
+		return;
+
+	/*
+	 * One directory serves as both the source tree and the output, because
+	 * they are the same thing: what this writes IS a signature source.
+	 *
+	 * A content root and one of its kind-directories are both reasonable
+	 * things to be given. "bases" holds signatures/, decomp/ and unp/ and a
+	 * detection does not belong loose at its top; "bases/signatures" is
+	 * already the right place. So a signatures/ subdirectory, where one
+	 * exists, is where the file goes.
+	 */
+	{
+		char dir[300];
+		struct stat st;
+
+		snprintf(dir, sizeof dir, "%s/signatures", v->basedir);
+		if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
+			snprintf(dir, sizeof dir, "%s", v->basedir);
+		if (kof_mkdir(dir, 0777) != 0 && errno != EEXIST) {
+			snprintf(v->gen_path, sizeof v->gen_path,
+				 "cannot create %s", dir);
+			return;
+		}
+		snprintf(path, sizeof path, "%s/%s.c", dir, safe);
+	}
+	f = fopen(path, "w");
+	if (!f) {
+		snprintf(v->gen_path, sizeof v->gen_path, "cannot write %s",
+			 path);
+		return;
+	}
+
+	fprintf(f,
+		"/*\n"
+		" * Drafted with kofviewer.\n"
+		" *\n"
+		" * Authored against: %s\n", ob->name);
+	if (ob->packer[0])
+		fprintf(f, " * Reached via:      %s\n", ob->packer);
+	fprintf(f,
+		" *\n"
+		" * A signature written here only runs while whatever produced\n"
+		" * that object still produces it.\n"
+		" */\n\n"
+		"#include <kofmod/kofsig.h>\n\n");
+
+	/* The format the object actually is, so the host can rule the module
+	 * out without entering it - and so the regions above mean something. */
+	{
+		static const char *const fmtname[] = {
+			"KOF_FMT_ANY", "KOF_FMT_ELF", "KOF_FMT_PE",
+			"KOF_FMT_MACHO", "KOF_FMT_SCRIPT", "KOF_FMT_TEXT",
+			"KOF_FMT_GZIP", "KOF_FMT_DOCOLE", "KOF_FMT_ZIP",
+			"KOF_FMT_DOCZIP", "KOF_FMT_TAR", "KOF_FMT_7Z",
+			"KOF_FMT_RAR", "KOF_FMT_XZ", "KOF_FMT_RTF",
+			"KOF_FMT_PDF"
+		};
+
+		fprintf(f, "KOF_TARGET_FORMAT(%s);\n",
+			(ob->fmt && ob->ctx.format <
+			 sizeof fmtname / sizeof fmtname[0])
+			? fmtname[ob->ctx.format] : "KOF_FMT_ANY");
+	}
+	fprintf(f, "KOF_TARGET_NAME(KOF_MALTYPE_%s, \"%s\");\n\n",
+		v->maltype == 0 ? "VIRUS" :
+		v->maltype == 1 ? "TROJAN" :
+		v->maltype == 2 ? "ROOTKIT" :
+		v->maltype == 3 ? "BOTNET" :
+		v->maltype == 4 ? "RANSOM" :
+		v->maltype == 5 ? "MINER" :
+		v->maltype == 6 ? "ADWARE" :
+		v->maltype == 7 ? "EXPLOIT" :
+		v->maltype == 8 ? "DROPPER" : "HACKTOOL", safe);
+
+	/* One declaration per declared range, spelled as the OR of the region
+	 * names it holds - which is what a source has to write and what
+	 * somebody grepping for it will search for. */
+	if (v->opt_on[OPT_SIZE_MIN])
+		fprintf(f, "KOF_TARGET_SIZE_MIN(%llu);\n",
+			(unsigned long long)v->opt_val[OPT_SIZE_MIN]);
+	if (v->opt_on[OPT_ARCH])
+		fprintf(f, "KOF_TARGET_ARCH(KOF_ARCH_%s);\n",
+			arch_word[v->opt_val[OPT_ARCH] < ARCH_N
+				  ? v->opt_val[OPT_ARCH] : 0].word);
+	if (v->opt_on[OPT_SUBTYPE]) {
+		uint8_t fm = ob->ctx.format;
+
+		if (fm == KOF_FMT_ELF)
+			fprintf(f, "KOF_TARGET_SUBTYPE(KOF_ELF_%s);\n",
+				elf_sub[v->opt_val[OPT_SUBTYPE] <
+					sizeof elf_sub / sizeof elf_sub[0]
+					? v->opt_val[OPT_SUBTYPE] : 0]);
+		else if (fm == KOF_FMT_PE)
+			fprintf(f, "KOF_TARGET_SUBTYPE(KOF_PE_%s);\n",
+				pe_sub[v->opt_val[OPT_SUBTYPE] <
+				       sizeof pe_sub / sizeof pe_sub[0]
+				       ? v->opt_val[OPT_SUBTYPE] : 0]);
+	}
+	if (v->opt_on[OPT_SIZE_MIN] || v->opt_on[OPT_ARCH] ||
+	    v->opt_on[OPT_SUBTYPE])
+		fprintf(f, "\n");
+
+	/*
+	 * One declaration per distinct range the matchers actually search.
+	 *
+	 * Derived here rather than kept as a list, for the same reason the
+	 * panel derives the summary: a range has no existence apart from a
+	 * matcher naming one, and a kept list goes stale the moment a marker
+	 * moves between matchers. This used to walk a list that nothing filled
+	 * any more, so every generated module declared no range at all and then
+	 * searched one.
+	 */
+	{
+		uint32_t seen[MAX_GROUP], n_seen = 0, g2;
+
+		for (g2 = 0; g2 < v->n_grp; g2++) {
+			uint32_t m, b, q;
+			char nm[40];
+			int first = 1;
+
+			if (!grp_count(v, g2))
+				continue;
+			m = grp_mask(v, g2);
+			for (q = 0; q < n_seen; q++)
+				if (seen[q] == m)
+					break;
+			if (q < n_seen)
+				continue;
+			seen[n_seen++] = m;
+
+			rng_ident(ob->fmt, m, nm, sizeof nm);
+			fprintf(f, "KOF_TARGET_RANGE(%s, ", nm);
+			if (!(m & KOF_SCAN_ALL))
+				for (b = 0; b < 32u; b++) {
+					const char *w = NULL;
+
+					if (!(m & (1u << b)))
+						continue;
+					if (ob->fmt)
+						for (q = 0;
+						     q < ob->fmt->n_regions;
+						     q++)
+							if (ob->fmt->regions[q]
+							    == (1u << b))
+								w = ob->fmt->
+								  region_name(
+								    1u << b);
+					if (!w)
+						continue;
+					fprintf(f, "%s%s",
+						first ? "" : " | ", w);
+					first = 0;
+				}
+			if (first)
+				fprintf(f, "KOF_SCAN_ALL");
+			fprintf(f, ");\n");
+		}
+		if (n_seen)
+			fprintf(f, "\n");
+	}
+
+	for (i = 0; i < v->n_decl; i++) {
+		const struct decl *d = &v->decl[i];
+
+		if (d->hex) {
+			fprintf(f, "KOF_DEFINE_HEXSTR(s%u, \"", i);
+			for (j = 0; j < d->len; j++)
+				fprintf(f, "%02X", d->bytes[j]);
+			fprintf(f, "\");\n");
+		} else {
+			fprintf(f, "KOF_DEFINE_STR(s%u, \"", i);
+			for (j = 0; j < d->len; j++)
+				fputc(d->bytes[j], f);
+			fprintf(f, "\", %s, %s);\n",
+				d->icase ? "KOF_CASE_ICASE" : "KOF_CASE_EXACT",
+				d->fullword ? "KOF_WORD_FULLWORD"
+					    : "KOF_WORD_SUBSTRING");
+		}
+	}
+
+	fprintf(f, "\nKOF_DEFINE_SCAN\n{\n");
+	/*
+	 * A maximum size is a line in the body, not a declaration.
+	 *
+	 * kofsig.h refuses to have one at KOF_TARGET_SIZE_MIN and says why: an
+	 * upper bound declared to the host is escaped by appending bytes nothing
+	 * reads, which would turn padding into a way of not being scanned. In
+	 * the body it is the module's own logic and costs what any other check
+	 * costs.
+	 */
+	if (v->opt_on[OPT_SIZE_MAX])
+		fprintf(f, "\tif (ctx->obj_size > %lluull)\n\t\treturn;\n\n",
+			(unsigned long long)v->opt_val[OPT_SIZE_MAX]);
+	/*
+	 * Conditions, nested the way they were built.
+	 *
+	 * A condition with children is a gate: it concludes nothing itself and
+	 * its children are what happens once it holds. That is exactly the
+	 * shape bases/signatures/lkm_rootkit_general.c is written in, and it is
+	 * only sayable because a matcher carries no verdict of its own.
+	 */
+	for (k = 0; k < v->n_cnd; k++)
+		if (v->cnd[k].parent < 0)
+			emit_cond(f, v, k, 1);
+	fprintf(f, "}\n");
+
+	v->gen_ok = ferror(f) == 0;
+	fclose(f);
+	snprintf(v->gen_path, sizeof v->gen_path, "%s %s",
+		 v->gen_ok ? "wrote" : "failed", path);
+}
+
+/*
+ * The draft, laid out the way the source it becomes is laid out.
+ *
+ * Two areas. Above: what the module DECLARES - its name, its type, its ranges,
+ * its strings, each with the id the conditions below will refer to. Below: the
+ * conditions, which name ids rather than repeating bytes.
+ *
+ * That split is not decoration. A string declared once and used by a condition
+ * is exactly the shape of the file being written, and a panel that printed the
+ * bytes again under each condition would be describing a different file - and
+ * would make a string used twice look like two strings.
+ */
+static void ch_add(struct chooser *c, const char *t)
+{
+	if (c->n < CH_ITEMS)
+		snprintf(c->item[c->n++], CH_W, "%s", t);
+}
+
+/*
+ * Fill and place a chooser.
+ *
+ * The contents are built here rather than by each caller so that what a list
+ * offers stays next to what picking from it does - two halves of one decision,
+ * which drift apart the moment they live in different functions.
+ */
+static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
+{
+	struct chooser *c = &v->ch;
+	uint32_t i;
+
+	memset(c, 0, sizeof *c);
+	c->what = what;
+	c->arg = arg;
+
+	if (what == CH_RULE) {
+		ch_add(c, "find_all");
+		ch_add(c, "find_any");
+		ch_add(c, "find_multi (>=N)");
+	} else if (what == CH_RANGE) {
+		/*
+		 * The ranges this matcher COULD search, worked out from the
+		 * markers it holds rather than offered from a list.
+		 *
+		 * A marker was found in exactly one region - the regions of a
+		 * format partition the object, rangelist.h says so - but it
+		 * sits inside every range that covers that region, and there
+		 * are always at least two: its own, and the whole file. So the
+		 * question is never "which range is this string in", it is
+		 * "which ranges hold all of them", and that has one narrowest
+		 * answer and one widest.
+		 */
+		uint32_t need = 0;
+		char t[CH_W];
+
+		for (i = 0; i < v->n_decl; i++)
+			if (v->decl[i].grp == arg)
+				need |= v->decl[i].mask;
+		if (!need)
+			need = KOF_SCAN_ALL;
+
+		c->arg2 = need;
+		rng_name_of(cur_obj(v)->fmt, need, t, sizeof t);
+		ch_add(c, t);
+		if (need != KOF_SCAN_ALL)
+			ch_add(c, "WHOLE-FILE");
+	} else if (what == CH_LEVEL) {
+		/*
+		 * Two menus, not one of six.
+		 *
+		 * The level and the variant are independent - every level works
+		 * with every naming - so one list of their combinations makes
+		 * the reader find their own answer among products of two
+		 * questions, and grows by multiplication the moment either
+		 * side gains an option.
+		 */
+		ch_add(c, "INFECT");
+		ch_add(c, "SUSPECT");
+	} else if (what == CH_VARIANT) {
+		ch_add(c, "auto");
+		ch_add(c, "generic");
+		ch_add(c, "custom...");
+	} else if (what == CH_TYPE) {
+		for (i = 0; i < MALTYPE_N; i++)
+			ch_add(c, maltype_word[i]);
+	} else if (what == CH_MARKER) {
+		/*
+		 * Only the markers this condition could actually search for:
+		 * unused, and inside the range it names. Offering the rest and
+		 * refusing afterwards would be a list that lies about itself.
+		 */
+		char t[CH_W];
+		for (i = 0; i < v->n_decl; i++) {
+			if (v->decl[i].grp != GRP_NONE)
+				continue;
+			if (!rng_holds(grp_mask(v, arg), v->decl[i].mask))
+				continue;
+			snprintf(t, sizeof t, "%u  %s  %s", i + 1u,
+				 v->decl[i].hex ? "hex" : "str",
+				 v->decl[i].rgn);
+			ch_add(c, t);
+		}
+		if (!c->n)
+			return;
+	} else if (what == CH_CMATCH) {
+		/*
+		 * The matchers this condition does not already name.
+		 *
+		 * Same shape as picking a marker for a matcher, one level up:
+		 * a condition is written over matchers the way a matcher is
+		 * written over markers, and offering one that is already in
+		 * the expression would produce "1&1".
+		 */
+		char t[CH_W];
+
+		for (i = 0; i < v->n_grp; i++) {
+			if (cnd_uses(&v->cnd[arg], i))
+				continue;
+			snprintf(t, sizeof t, "%u  %s", i + 1u,
+				 v->grp[i].rule == 1 ? "find_any" :
+				 v->grp[i].rule == 2 ? "find_multi" :
+				 "find_all");
+			ch_add(c, t);
+		}
+		if (!c->n)
+			return;
+	} else if (what == CH_OPT) {
+		/* Only the ones this object can answer for, and only the ones
+		 * not already there: a list that offers what it will refuse is
+		 * a list that lies about itself. */
+		if (!v->opt_on[OPT_SIZE_MIN])
+			ch_add(c, opt_word[OPT_SIZE_MIN]);
+		if (!v->opt_on[OPT_SIZE_MAX])
+			ch_add(c, opt_word[OPT_SIZE_MAX]);
+		if (!v->opt_on[OPT_ARCH] && cur_obj(v)->ctx.arch)
+			ch_add(c, opt_word[OPT_ARCH]);
+		if (!v->opt_on[OPT_SUBTYPE] && cur_obj(v)->fmt &&
+		    cur_obj(v)->ctx.subtype)
+			ch_add(c, opt_word[OPT_SUBTYPE]);
+		if (!c->n)
+			return;
+	} else if (what == CH_ARCH) {
+		for (i = 0; i < ARCH_N; i++)
+			ch_add(c, arch_word[i].word);
+	} else if (what == CH_SUBTYPE) {
+		uint8_t fmt = cur_obj(v)->ctx.format;
+
+		if (fmt == KOF_FMT_ELF)
+			for (i = 0; i < sizeof elf_sub / sizeof elf_sub[0]; i++)
+				ch_add(c, elf_sub[i]);
+		else if (fmt == KOF_FMT_PE)
+			for (i = 0; i < sizeof pe_sub / sizeof pe_sub[0]; i++)
+				ch_add(c, pe_sub[i]);
+		if (!c->n)
+			return;
+	} else if (what == CH_WORD) {
+		ch_add(c, "substring");
+		ch_add(c, "fullword");
+	} else if (what == CH_CASE) {
+		ch_add(c, "exact-case");
+		ch_add(c, "ignore-case");
+	} else if (what == CH_THRESH) {
+		char t[CH_W];
+		uint32_t n = arg < v->n_grp ? grp_count(v, arg) : 0;
+
+		/* 1 is find_any and n is find_all, and both already have their
+		 * own entry in the rule list. */
+		for (i = 2; i + 1u <= n; i++) {
+			snprintf(t, sizeof t, ">= %u of %u", i, n);
+			ch_add(c, t);
+		}
+		if (!c->n)
+			return;
+	} else {
+		return;
+	}
+
+	/*
+	 * Above what was clicked, never on top of it.
+	 *
+	 * A list that covers its own control hides the thing being changed, and
+	 * the click that would dismiss it lands on the list instead - so the
+	 * next click goes into closing rather than doing, and the control below
+	 * looks broken. `row` is the row that was clicked; the list ends on the
+	 * one above it.
+	 */
+	c->open = 1;
+	c->row = row - c->n;
+	if (c->row + c->n > g_rows)
+		c->row = g_rows - c->n;
+	if (c->row < 1)
+		c->row = 1;
+	c->col = col;
+	if (c->col + CH_W > g_cols)
+		c->col = g_cols - CH_W;
+	if (c->col < 1)
+		c->col = 1;
+}
+
+/* What picking the highlighted item does. */
+static void ch_take(struct view *v)
+{
+	struct chooser *c = &v->ch;
+	struct group *q;
+
+	c->open = 0;
+	if (c->what == CH_TYPE) {
+		v->maltype = (uint32_t)c->sel;
+		return;
+	}
+	if (c->what == CH_ARCH) {
+		v->opt_val[OPT_ARCH] = arch_word[(size_t)c->sel % ARCH_N].val;
+		return;
+	}
+	if (c->what == CH_SUBTYPE) {
+		v->opt_val[OPT_SUBTYPE] = (uint32_t)c->sel;
+		return;
+	}
+	if (c->what == CH_OPT) {
+		struct object *ob = cur_obj(v);
+		int seen = 0, k;
+
+		for (k = 0; k < OPT_COUNT; k++) {
+			if (v->opt_on[k])
+				continue;
+			if (k == OPT_ARCH && !ob->ctx.arch)
+				continue;
+			if (k == OPT_SUBTYPE && (!ob->fmt || !ob->ctx.subtype))
+				continue;
+			if (seen++ != c->sel)
+				continue;
+			v->opt_on[k] = 1;
+			v->opt_val[k] = k == OPT_SIZE_MIN ? ob->buf.n :
+					k == OPT_SIZE_MAX ? ob->buf.n * 2u :
+					k == OPT_ARCH ? ob->ctx.arch
+						      : ob->ctx.subtype;
+			break;
+		}
+		return;
+	}
+	if (c->what == CH_WORD || c->what == CH_CASE) {
+		if (c->arg >= v->n_decl)
+			return;
+		if (c->what == CH_WORD)
+			v->decl[c->arg].fullword = c->sel;
+		else
+			v->decl[c->arg].icase = c->sel;
+		return;
+	}
+	if (c->what == CH_RULE && c->arg == MAX_GROUP) {
+		/* A new condition: the rule is chosen before there is anything
+		 * in it, which is the order somebody thinks in. */
+		grp_add(v);
+		if (!v->n_grp)
+			return;
+		q = &v->grp[v->n_grp - 1u];
+		q->rule = c->sel;
+		if (c->sel == 2)
+			q->thresh = 2;
+		return;
+	}
+	if (c->what == CH_CMATCH) {
+		struct cond *cc;
+		uint32_t i, n = 0;
+
+		if (c->arg >= v->n_cnd)
+			return;
+		cc = &v->cnd[c->arg];
+		for (i = 0; i < v->n_grp; i++) {
+			size_t l;
+
+			if (cnd_uses(cc, i))
+				continue;
+			if ((int)n++ != c->sel)
+				continue;
+			/*
+			 * Appended with & rather than replacing the text: the
+			 * expression is the author's, and a second matcher
+			 * usually narrows a condition. Anything else - an |, a
+			 * parenthesis - is still typed into the box, which is
+			 * why the box stays.
+			 */
+			l = strlen(cc->expr);
+			snprintf(cc->expr + l, sizeof cc->expr - l, "%s%u",
+				 l ? "&" : "", i + 1u);
+			break;
+		}
+		return;
+	}
+	if (c->what == CH_LEVEL || c->what == CH_VARIANT) {
+		struct cond *cc;
+
+		if (c->arg >= v->n_cnd)
+			return;
+		cc = &v->cnd[c->arg];
+		if (c->what == CH_LEVEL) {
+			cc->level = c->sel;
+		} else {
+			cc->var_kind = c->sel;
+			/* "custom" is a promise of a name, so the caret goes
+			 * where the name will be typed rather than leaving the
+			 * word "custom" standing in for one. */
+			if (c->sel == 2)
+				v->edit = 4 + (int)c->arg;
+		}
+		return;
+	}
+	if (c->arg >= v->n_grp)
+		return;
+	q = &v->grp[c->arg];
+
+	if (c->what == CH_MARKER) {
+		uint32_t i, n = 0;
+
+		for (i = 0; i < v->n_decl; i++) {
+			if (v->decl[i].grp != GRP_NONE)
+				continue;
+			if (!rng_holds(grp_mask(v, c->arg), v->decl[i].mask))
+				continue;
+			if ((int)n++ != c->sel)
+				continue;
+			v->decl[i].grp = c->arg;
+			break;
+		}
+	} else if (c->what == CH_THRESH) {
+		q->rule = 2;
+		q->thresh = (uint32_t)c->sel + 2u;
+	} else if (c->what == CH_RULE) {
+		q->rule = c->sel;
+		if (c->sel == 2 && q->thresh < 2u)
+			q->thresh = 2;
+	} else if (c->what == CH_RANGE) {
+		q->mask = c->sel ? KOF_SCAN_ALL : c->arg2;
+	}
+}
+
+static void draw_chooser(struct out *o, struct view *v)
+{
+	int i;
+
+	if (!v->ch.open)
+		return;
+	for (i = 0; i < v->ch.n; i++) {
+		out_at(o, v->ch.row + i, v->ch.col);
+		out_str(o, i == v->ch.sel ? A_SEL : "\033[47;30m");
+		out_fmt(o, " %-*.*s", CH_W - 2, CH_W - 2, v->ch.item[i]);
+		out_str(o, A_OFF);
+	}
+}
+
+/*
+ * The screen row for the next panel line, or -1 when it is scrolled out.
+ *
+ * `*r` counts panel rows whether or not they are drawn, so the two halves - the
+ * window and the position in the list - stay one number apart and a scrolled
+ * panel does not have to be laid out twice.
+ */
+/*
+ * Where a draft row lands once the panel is scrolled, and whether it lands on
+ * the screen at all.
+ *
+ * `r` counts rows of the draft whether or not they are visible, so one number
+ * serves both the layout and the scroll position, and a draft longer than its
+ * pane does not have to be laid out twice to find out what fits.
+ */
+#define PR(rr)     (decl_top() + 1 + (int)(rr) - (int)v->prow_off)
+#define PR_VIS(rr) ((int)(rr) >= (int)v->prow_off && \
+		    (int)(rr) - (int)v->prow_off < g_decl_rows - 1)
+
+enum prow_kind {
+	RW_OPT = 0, RW_RANGES, RW_STRHDR, RW_STR, RW_ADDM,
+	RW_MATCH, RW_MARKERS, RW_ADDC, RW_COND, RW_CMATCH
+};
+
+static void prow_add(struct view *v, int kind, uint32_t idx)
+{
+	if (v->n_prow >= sizeof v->prow_kind / sizeof v->prow_kind[0])
+		return;
+	v->prow_kind[v->n_prow] = (uint8_t)kind;
+	v->prow_idx[v->n_prow] = idx;
+	v->n_prow++;
+}
+
+/* Every row the panel would show, in order, before deciding which fit. */
+static void prow_build(struct view *v)
+{
+	uint32_t i;
+
+	v->n_prow = 0;
+	for (i = 0; i < (uint32_t)OPT_COUNT; i++)
+		if (v->opt_on[i])
+			prow_add(v, RW_OPT, i);
+	if (v->n_grp)
+		prow_add(v, RW_RANGES, 0);
+	if (v->n_decl) {
+		prow_add(v, RW_STRHDR, 0);
+		for (i = 0; i < v->n_decl; i++)
+			prow_add(v, RW_STR, i);
+	}
+	prow_add(v, RW_ADDM, 0);
+	for (i = 0; i < v->n_grp; i++) {
+		prow_add(v, RW_MATCH, i);
+		prow_add(v, RW_MARKERS, i);
+	}
+	prow_add(v, RW_ADDC, 0);
+	for (i = 0; i < v->n_cnd; i++) {
+		prow_add(v, RW_COND, i);
+		prow_add(v, RW_CMATCH, i);
+	}
+}
+
+static void draw_decl(struct out *o, struct view *v)
+{
+	int top = decl_top();
+	int r = 0;
+	uint32_t g, i;
+	int c;
+
+	if (!g_decl_rows)
+		return;
+
+	/*
+	 * Erase the whole area first.
+	 *
+	 * The panel changes height as it is built, and a row that stops being
+	 * drawn is a row nobody erases - so an old line survived under the new
+	 * layout and read as a duplicate of the row that had moved. Clearing
+	 * the area costs one escape per row and removes the whole class.
+	 */
+	for (r = 0; r < g_decl_rows; r++)
+		row_start(o, top + r, 1);
+	r = 0;
+
+	/* ---- what the module declares ---- */
+	row_start(o, top, 1);
+	out_fmt(o, A_DIM " define " A_OFF);
+
+	c = 1 + (int)o->col_hint;
+	out_fmt(o, A_DIM "family " A_OFF "%s[%s]" A_OFF,
+		v->edit == 1 ? A_SEL : A_ID, v->family[0] ? v->family : "?");
+	v->f_c0 = c; v->f_c1 = (int)o->col_hint;
+
+	c = 2 + (int)o->col_hint;
+	out_fmt(o, A_DIM "  type " A_OFF A_ID "[%s]" A_OFF,
+		maltype_word[v->maltype % MALTYPE_N]);
+	v->t_c0 = c; v->t_c1 = (int)o->col_hint;
+
+	c = 2 + (int)o->col_hint;
+	/* Disabled keeps the background and loses contrast, it does not lose the
+	 * text - 100;90 is bright black on bright black, the same colour twice,
+	 * which is a grey block where a label should be. */
+	out_fmt(o, "  " A_ID "[+ option]" A_OFF);
+	v->o_c0 = c; v->o_c1 = (int)o->col_hint;
+
+	c = 2 + (int)o->col_hint;
+	out_fmt(o, "  %s[ generate ]" A_OFF,
+		v->family[0] && v->n_cnd ? "\033[42;30m" : "\033[47;90m");
+	v->g_c0 = c; v->g_c1 = (int)o->col_hint;
+
+	if (v->warn[0])
+		out_fmt(o, "  %s%s" A_OFF, A_BAD, v->warn);
+	else if (v->gen_path[0])
+		out_fmt(o, "  %s%s" A_OFF, v->gen_ok ? A_SIZE : A_BAD,
+			v->gen_path);
+
+	/* The optional declarations, one per row, each removable. */
+	for (i = 0; i < (uint32_t)OPT_COUNT; i++) {
+		char val[40];
+		int y;
+
+		if (!v->opt_on[i])
+			continue;
+		if (!PR_VIS(r)) {
+			r++;
+			continue;
+		}
+		y = PR(r);
+		r++;
+		if (i == OPT_ARCH)
+			snprintf(val, sizeof val, "%s",
+				 arch_word[v->opt_val[i] < ARCH_N
+					   ? v->opt_val[i] : 0].word);
+		else if (i == OPT_SUBTYPE)
+			snprintf(val, sizeof val, "%s",
+				 kof_inspect_subtype_name(
+					 cur_obj(v)->ctx.format,
+					 (uint8_t)v->opt_val[i])
+				 ? kof_inspect_subtype_name(
+					   cur_obj(v)->ctx.format,
+					   (uint8_t)v->opt_val[i]) : "?");
+		else
+			snprintf(val, sizeof val, "%llu",
+				 (unsigned long long)v->opt_val[i]);
+		row_start(o, y, 1);
+		out_fmt(o, "   %s%-10s" A_OFF " ", A_DIM, opt_word[i]);
+		v->opt_c0[i] = 1 + (int)o->col_hint;
+		out_fmt(o, "%s%s" A_OFF,
+			v->edit == 200 + (int)i ? A_SEL : A_ID,
+			v->edit == 200 + (int)i ? v->num : val);
+		v->opt_c1[i] = (int)o->col_hint;
+		out_at(o, y, g_cols - 4);
+		out_str(o, A_BAD "[x]" A_OFF);
+	}
+
+	/*
+	 * What the finished source will declare, read only.
+	 *
+	 * A range has no existence apart from a matcher naming one, so there is
+	 * nothing here to add, rename or delete - and nothing that can be left
+	 * pointing at a marker that has gone. It is a summary, and its whole job
+	 * is answering "which ranges is this signature going to search", which
+	 * is the question that made a managed list look necessary.
+	 */
+	if (v->n_grp && PR_VIS(r)) {
+		uint32_t seen[MAX_GROUP], n_seen = 0, k;
+
+		row_start(o, PR(r), 1);
+		out_fmt(o, A_DIM " Scan ranges " A_OFF);
+		for (g = 0; g < v->n_grp; g++) {
+			uint32_t m;
+			char t[40];
+			int dup = 0;
+
+			/*
+			 * A matcher with no markers yet searches nothing, so it
+			 * has no range to report. It used to report WHOLE-FILE,
+			 * because that is what grp_mask falls back to when it
+			 * has nothing to derive from - which read as "this
+			 * signature will scan the whole file" beside strings
+			 * that had all been taken from one region.
+			 */
+			if (!grp_count(v, g))
+				continue;
+			m = grp_mask(v, g);
+			for (k = 0; k < n_seen; k++)
+				dup |= seen[k] == m;
+			if (dup)
+				continue;
+			seen[n_seen++] = m;
+			rng_name_of(cur_obj(v)->fmt, m, t, sizeof t);
+			out_fmt(o, " %s%s" A_OFF, A_LOC, t);
+		}
+		if (!n_seen)
+			out_str(o, A_DIM " none yet" A_OFF);
+	}
+	r += v->n_grp ? 1 : 0;
+
+	/*
+	 * The strings.
+	 *
+	 * "found in" rather than a bare region name: a string's region is where
+	 * it WAS, and a matcher's range is where it will be LOOKED FOR. The two
+	 * use the same words and are not the same fact, and the row that states
+	 * provenance should not read like the row that states a search.
+	 */
+	/* A column heading instead of a preposition on every row: "found in
+	 * CODE" said the same word once per string and read like a sentence
+	 * where a table belongs. */
+	if (v->n_decl && PR_VIS(r)) {
+		row_start(o, PR(r), 1);
+		out_fmt(o, A_DIM " Strings    word      case         region"
+			"       size  bytes" A_OFF);
+	}
+	r += v->n_decl ? 1 : 0;
+	v->row_str = PR(r);
+	for (i = 0; i < v->n_decl; i++, r++) {
+		const struct decl *d = &v->decl[i];
+		uint32_t k;
+
+		if (!PR_VIS(r))
+			continue;
+		row_start(o, PR(r), 1);
+		out_fmt(o, "   %s%u." A_OFF " %s%-4s" A_OFF " ",
+			i == v->sel_decl ? A_SEL : A_DIM, i + 1u,
+			A_ID, d->hex ? "hex" : "str");
+		if (d->hex)
+			out_fmt(o, A_DIM "%-21s" A_OFF, "");
+		else
+			out_fmt(o, A_WARN "%-9s %-11s" A_OFF,
+				d->fullword ? "fullword" : "substring",
+				d->icase ? "ignore-case" : "exact-case");
+		out_fmt(o, " %s%-12s" A_OFF " %s%5u" A_OFF "  ",
+			A_LOC, d->rgn, A_SIZE, d->len);
+		for (k = 0; k < d->len && k < 16u; k++)
+			out_fmt(o, "%02X", d->bytes[k]);
+		if (d->len > 16u)
+			out_str(o, "...");
+		out_at(o, PR(r), g_cols - 4);
+		out_str(o, A_BAD "[x]" A_OFF);
+	}
+
+	/* ---- the matchers: what to look for ---- */
+	if (PR_VIS(r)) {
+		row_start(o, PR(r), 1);
+		v->n_c0 = 2;
+		out_fmt(o, " " A_ID "[add matcher]" A_OFF);
+		v->n_c1 = (int)o->col_hint;
+		r++;
+	}
+
+	v->row_grp = PR(r);
+	for (g = 0; g < v->n_grp && PR_VIS(r + 1); g++) {
+		const struct group *q = &v->grp[g];
+		char rl[16];
+		int first = 1;
+
+		if (q->rule == 1)
+			snprintf(rl, sizeof rl, "find_any");
+		else if (q->rule == 2)
+			snprintf(rl, sizeof rl, "find_multi");
+		else
+			snprintf(rl, sizeof rl, "find_all");
+
+		if (PR_VIS(r)) {
+			char nm[40];
+
+			row_start(o, PR(r), 1);
+			/* Until it holds a marker there is nothing to derive a
+			 * range from, and naming one anyway claims a search
+			 * that has not been described yet. */
+			if (grp_count(v, g))
+				rng_name_of(cur_obj(v)->fmt, grp_mask(v, g), nm,
+					    sizeof nm);
+			else
+				snprintf(nm, sizeof nm, "-");
+			out_fmt(o, "%s %u. " A_OFF "%s%-11s" A_OFF A_DIM
+				"  in " A_OFF "%s%-16s" A_OFF,
+				g == v->cur_grp ? A_SEL : A_DIM, g + 1u,
+				A_WARN, rl, A_LOC, nm);
+			if (q->rule == 2)
+				out_fmt(o, A_DIM "  threshold " A_OFF A_ID
+					">= %u of %u" A_OFF, q->thresh,
+					grp_count(v, g));
+			out_str(o, A_DIM "  comment " A_OFF);
+			v->grp_nt[g][0] = 1 + (int)o->col_hint;
+			out_fmt(o, "%s[%s]" A_OFF,
+				v->edit == 300 + (int)g ? A_SEL : A_DIM,
+				q->note[0] ? q->note : "...");
+			v->grp_nt[g][1] = (int)o->col_hint;
+		}
+		r++;
+
+		/* The markers are the matcher's own row, because they are what
+		 * it searches for and not a separate thing that happens to be
+		 * nearby. */
+		if (!PR_VIS(r)) {
+			r++;
+			continue;
+		}
+		row_start(o, PR(r), 1);
+		out_fmt(o, A_DIM "     markers: " A_OFF);
+		for (i = 0; i < v->n_decl; i++) {
+			if (v->decl[i].grp != g)
+				continue;
+			out_fmt(o, "%s%s%u" A_OFF, first ? "" : ", ", A_ID,
+				i + 1u);
+			first = 0;
+		}
+		if (first)
+			out_str(o, A_DIM "none yet" A_OFF);
+		v->p_c0 = v->p_c1 = -1;
+		if (decl_free(v)) {
+			v->p_c0 = 1 + (int)o->col_hint;
+			out_fmt(o, "   " A_ID "[+ string]" A_OFF);
+			v->p_c1 = (int)o->col_hint;
+		}
+		r++;
+	}
+
+	/* ---- the conditions: what it means ---- */
+	if (PR_VIS(r)) {
+		row_start(o, PR(r), 1);
+		v->a_c0 = 2;
+		out_fmt(o, " %s[add condition]" A_OFF,
+			v->n_grp ? A_ID : A_DIM);
+		v->a_c1 = (int)o->col_hint;
+		v->b_c0 = 2 + (int)o->col_hint;
+		/* Names the parent, so the button says what it will do rather
+		 * than what it is called. */
+		out_fmt(o, "  %s[add inside %u]" A_OFF,
+			v->n_cnd ? A_ID : A_DIM, v->cur_cnd + 1u);
+		v->b_c1 = (int)o->col_hint;
+	}
+	r++;
+
+	v->row_cnd = PR(r);
+	for (g = 0; g < v->n_cnd; g++) {
+		const struct cond *c2 = &v->cnd[g];
+		int kids = (int)cnd_children(v, g);
+
+		if (!PR_VIS(r)) {
+			v->cnd_mt[g][0] = v->cnd_mt[g][1] = -1;
+			r += 2;
+			continue;
+		}
+		row_start(o, PR(r), 1);
+		out_fmt(o, "%s%s %u) " A_OFF "%s[%s]" A_OFF,
+			c2->parent >= 0 ? "   " : "",
+			g == v->cur_cnd ? A_SEL : A_DIM, g + 1u,
+			v->edit == 103 + (int)g ? A_SEL : A_ID,
+			c2->expr[0] ? c2->expr : "all matchers");
+		if (c2->parent >= 0)
+			out_fmt(o, A_DIM "  inside %u" A_OFF, c2->parent + 1);
+		if (kids)
+			out_fmt(o, A_DIM "  gate for %d" A_OFF, kids);
+		else {
+			out_str(o, A_DIM "  ->  " A_OFF);
+			v->cnd_lv[g][0] = 1 + (int)o->col_hint;
+			out_fmt(o, "%s%s" A_OFF, c2->level ? A_WARN : A_BAD,
+				c2->level ? "SUSPECT" : "INFECT");
+			v->cnd_lv[g][1] = (int)o->col_hint;
+			out_str(o, A_DIM "  variant " A_OFF);
+			v->cnd_vr[g][0] = 1 + (int)o->col_hint;
+			out_fmt(o, A_ID "%s" A_OFF,
+				c2->var_kind == 2 ? "custom" :
+				c2->var_kind == 1 ? "generic" : "auto");
+			v->cnd_vr[g][1] = (int)o->col_hint;
+			/* Custom is a promise of a name, so the box for it sits
+			 * beside the word rather than replacing it - the choice
+			 * stays visible while the name is typed. */
+			if (c2->var_kind == 2) {
+				out_str(o, " ");
+				v->cnd_nm[g][0] = 1 + (int)o->col_hint;
+				out_fmt(o, "%s[%s]" A_OFF,
+					v->edit == 4 + (int)g ? A_SEL : A_WARN,
+					c2->variant[0] ? c2->variant
+						       : "name...");
+				v->cnd_nm[g][1] = (int)o->col_hint;
+			} else {
+				v->cnd_nm[g][0] = v->cnd_nm[g][1] = -1;
+			}
+			out_str(o, A_DIM "  comment " A_OFF);
+			v->cnd_nt[g][0] = 1 + (int)o->col_hint;
+			out_fmt(o, "%s[%s]" A_OFF,
+				v->edit == 400 + (int)g ? A_SEL : A_DIM,
+				c2->note[0] ? c2->note : "...");
+			v->cnd_nt[g][1] = (int)o->col_hint;
+		}
+		out_at(o, PR(r), g_cols - 4);
+		out_str(o, A_BAD "[x]" A_OFF);
+		r++;
+
+		/*
+		 * The matchers this condition is written over, on its own row
+		 * with the control that adds one - the same shape a matcher
+		 * uses for its markers, because it is the same relationship one
+		 * level up. The expression box above stays editable for the
+		 * shapes a list cannot express: "(1&2)|3" is not a set.
+		 */
+		if (!PR_VIS(r)) {
+			v->cnd_mt[g][0] = v->cnd_mt[g][1] = -1;
+			r++;
+			continue;
+		}
+		row_start(o, PR(r), 1);
+		out_fmt(o, A_DIM "     matchers: " A_OFF);
+		if (v->n_grp) {
+			uint32_t m;
+			int first2 = 1;
+
+			for (m = 0; m < v->n_grp; m++) {
+				if (!cnd_uses(c2, m))
+					continue;
+				out_fmt(o, "%s%s%u" A_OFF, first2 ? "" : ", ",
+					A_ID, m + 1u);
+				first2 = 0;
+			}
+			if (first2)
+				out_str(o, A_DIM "all of them" A_OFF);
+		} else {
+			out_str(o, A_DIM "none defined yet" A_OFF);
+		}
+		v->cnd_mt[g][0] = v->cnd_mt[g][1] = -1;
+		if (v->n_grp) {
+			v->cnd_mt[g][0] = 1 + (int)o->col_hint;
+			out_fmt(o, "   " A_ID "[+ matcher]" A_OFF);
+			v->cnd_mt[g][1] = (int)o->col_hint;
+		}
+		r++;
+	}
+}
+
 static void draw_marker_line(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
@@ -1261,6 +3024,37 @@ static void list_row(struct out *o, int sel, const char *colour)
 	out_str(o, sel ? ">" : " ");
 }
 
+/*
+ * The frame around the dialog.
+ *
+ * Drawn after its contents, because every row inside clears to the end of the
+ * line and would take the right edge with it. It is worth having: the dialog
+ * opens over the hex and the draft, and without an edge the two run together -
+ * a row of the list and a row of whatever it covers look alike.
+ *
+ * Plain ASCII, like the pane divider: this is meant to be read over ssh on
+ * whatever terminal is at the other end.
+ */
+static void draw_list_box(struct out *o, struct view *v)
+{
+	int top = list_top(v) - 1, bot = g_rows - 1, i, y;
+
+	for (y = top; y <= bot; y++) {
+		out_at(o, y, 1);
+		out_str(o, A_DIM);
+		if (y == top || y == bot) {
+			out_str(o, "+");
+			for (i = 2; i < g_cols; i++)
+				out_str(o, "-");
+			out_str(o, "+" A_OFF);
+			continue;
+		}
+		out_str(o, "| " A_OFF);
+		out_at(o, y, g_cols - 1);
+		out_str(o, A_DIM " |" A_OFF);
+	}
+}
+
 static void draw_list(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
@@ -1376,7 +3170,9 @@ static void draw_list(struct out *o, struct view *v)
 			out_str(o, A_OFF);
 		}
 	}
+	draw_list_box(o, v);
 }
+
 
 /* ---- the context menu -----------------------------------------------------
  *
@@ -1442,6 +3238,26 @@ static int menu_enabled(struct view *v, int a)
 		return v->sel_a != KOF_BROKEN;
 	if (a == M_COPY_OFF_HEX || a == M_COPY_OFF_DEC)
 		return 1;
+	if (a == M_DECL_HEX)
+		return v->sel_a != KOF_BROKEN && v->n_decl < MAX_DECL;
+	if (a == M_DECL_STR) {
+		/* Greyed when the bytes cannot BE a literal, which is a
+		 * property of the bytes and not of the user - saying so here
+		 * beats a build error two steps later. */
+		uint64_t lo, hi, k;
+		uint8_t t[512];
+		uint32_t n = 0;
+
+		if (v->sel_a == KOF_BROKEN || v->n_decl >= MAX_DECL)
+			return 0;
+		lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
+		hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
+		if (hi - lo + 1u > sizeof t)
+			return 0;
+		for (k = lo; k <= hi; k++)
+			t[n++] = cur_obj(v)->buf.p[view_map(v, k, 0)];
+		return literal_safe(t, n);
+	}
 	/* Not wired to anything yet. Shown because the menu is where they will
 	 * be, and disabled because a menu item that does nothing teaches people
 	 * not to trust the menu. */
@@ -1618,6 +3434,105 @@ static void copy_offset(struct view *v, int hex)
 		 (unsigned long long)v->menu_off);
 	copy_osc52(t, strlen(t));
 }
+/*
+ * Take the selection into the draft.
+ *
+ * The region comes from the tree row rather than from anything about the bytes,
+ * because that is what the finished declaration will say: KOF_TARGET_RANGE names
+ * where to look, and where somebody was looking when they found it is the
+ * honest answer to that.
+ */
+
+static void decl_remove(struct view *v, uint32_t i)
+{
+	if (i >= v->n_decl)
+		return;
+	free(v->decl[i].bytes);
+	memmove(&v->decl[i], &v->decl[i + 1u],
+		(v->n_decl - i - 1u) * sizeof v->decl[0]);
+	v->n_decl--;
+	if (v->sel_decl >= v->n_decl && v->n_decl)
+		v->sel_decl = v->n_decl - 1u;
+}
+
+static uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off);
+
+static void decl_add(struct view *v, int hex)
+{
+	struct object *ob = cur_obj(v);
+	struct node *n = &v->node[v->sel_node];
+	struct decl *d;
+	uint64_t lo, hi, k;
+	uint32_t i = 0, g;
+
+	if (v->sel_a == KOF_BROKEN || v->n_decl >= MAX_DECL)
+		return;
+
+	lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
+	hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
+
+	d = &v->decl[v->n_decl];
+	memset(d, 0, sizeof *d);
+	d->len = (uint32_t)(hi - lo + 1u);
+	d->bytes = malloc(d->len);
+	if (!d->bytes)
+		return;
+	for (k = lo; k <= hi; k++)
+		d->bytes[i++] = ob->buf.p[view_map(v, k, 0)];
+	d->hex = hex;
+	/* Fullword by default. A marker is a name, a path, a format string -
+	 * something with edges - far more often than it is a fragment of one,
+	 * and the default that is usually right is the one worth having. */
+	d->fullword = 1;
+	d->obj = n->obj;
+	/*
+	 * The region the bytes are in, looked up from the bytes.
+	 *
+	 * It used to be whatever the tree cursor was on, which is a different
+	 * fact: the hex pane follows a marker into DATA while the cursor stays
+	 * on the object row, and a string taken there was recorded as
+	 * whole-file even though the status bar named its region correctly one
+	 * line below. Wanting to search the whole file is still sayable - the
+	 * matcher's own range setting says it - but it should be said, not
+	 * inherited from where a cursor happened to be.
+	 *
+	 * The object row remains the answer when nothing narrower claims the
+	 * offset, and the engine has a bit for that: storing zero made "whole"
+	 * the absence of a region rather than one of them, which is why a range
+	 * built on it contained nothing.
+	 */
+	{
+		/*
+		 * Mapped first: `lo` counts bytes along the region being
+		 * looked at, not bytes into the file, and the two differ by
+		 * the region's start. Handing the view coordinate to a
+		 * file-offset lookup named whichever region happens to sit at
+		 * that distance from zero - CODE for a string plainly inside
+		 * DATA - and then sent the pane there.
+		 */
+		uint64_t at = view_map(v, lo, 0);
+		uint32_t rk = at == KOF_BROKEN ? v->n_node
+					       : node_at(v, n->obj, at);
+		const struct node *rn = rk < v->n_node ? &v->node[rk] : n;
+
+		d->mask = rn->mask ? rn->mask : KOF_SCAN_ALL;
+		/* The column is narrow and a region word is short; a label
+		 * long enough to overrun it is one that would not have fit
+		 * on the row either. */
+		snprintf(d->rgn, sizeof d->rgn, "%.23s",
+			 rn->mask ? rn->label : "WHOLE-FILE");
+	}
+	d->grp = GRP_NONE;
+	(void)g;
+	v->warn[0] = 0;
+	v->sel_decl = v->n_decl;
+	v->n_decl++;
+
+	/* The selection has been taken; leaving it lit would invite taking it
+	 * twice. */
+	v->sel_a = v->sel_b = KOF_BROKEN;
+}
+
 static void menu_run(struct view *v, int a)
 {
 	struct object *ob = cur_obj(v);
@@ -1628,6 +3543,11 @@ static void menu_run(struct view *v, int a)
 		return;
 	if (a == M_COPY_OFF_HEX || a == M_COPY_OFF_DEC) {
 		copy_offset(v, a == M_COPY_OFF_HEX);
+		v->menu_open = 0;
+		return;
+	}
+	if (a == M_DECL_STR || a == M_DECL_HEX) {
+		decl_add(v, a == M_DECL_HEX);
 		v->menu_open = 0;
 		return;
 	}
@@ -1658,40 +3578,49 @@ static void menu_run(struct view *v, int a)
 }
 
 /*
- * A number that changes exactly when the screen would.
+ * The frame that is already on the screen.
  *
- * Button-event tracking reports motion continuously while a button is held, and
- * every report used to repaint. Most of them move nothing - the pointer is still
- * over the same byte - so most of the repaints were the screen being rewritten
- * with what it already said, which is what a click looks like when it flickers.
+ * Repainting is skipped when the new frame is byte for byte the last one, which
+ * is what stops button-event tracking from rewriting the screen with what it
+ * already says at every report of a pointer that has not left the byte it was
+ * on.
+ *
+ * This used to be a hand-kept list of the fields a frame depends on, and that
+ * list did what such lists do: a condition added to the draft moved nothing the
+ * list watched, so the screen did not repaint and the button looked dead while
+ * quietly working - the clicks landed, and several conditions appeared at once
+ * the moment something else moved. Comparing the picture instead cannot fall
+ * behind a field, because the picture is the only thing that has to be right.
  */
-static uint64_t view_stamp(struct view *v)
-{
-	uint64_t h = 1469598103934665603ull;
-	uint64_t p[] = {
-		v->sel_node, v->tree_top, v->rgn_at, v->sel_a, v->sel_b,
-		v->sel_touch, v->list_off, (uint64_t)v->pane,
-		(uint64_t)v->list_depth, v->str_off, (uint64_t)v->list_filter,
-		v->sel_str, (uint64_t)v->off_region, (uint64_t)v->menu_ctx,
-		(uint64_t)v->show_list, (uint64_t)v->menu_open,
-		(uint64_t)v->menu_sel, (uint64_t)v->menu_row,
-		(uint64_t)v->menu_col, v->tree_hoff, v->list_hoff,
-		(uint64_t)g_rows, (uint64_t)g_cols
-	};
-	size_t i;
-
-	for (i = 0; i < sizeof p / sizeof p[0]; i++) {
-		h ^= p[i];
-		h *= 1099511628211ull;
-	}
-	return h;
-}
+static char  *g_last;
+static size_t g_last_n;
 
 static void redraw(struct view *v)
 {
 	struct out o = { NULL, 0, 0, 0 };
 
 	term_size();
+	/* The panes are laid out around the draft, so its height is settled
+	 * before anything asks where it is. */
+	{
+		/* Groups and their markers, plus the header - capped so the
+		 * panel cannot eat the pane it is about. */
+		/* How tall the draft is, counted where it is drawn rather than
+		 * restated here: the two used to be separate sums, and the one
+		 * that fell behind was always this one. */
+		uint32_t want;
+
+		prow_build(v);
+		want = v->n_prow;
+
+		g_decl_rows = (v->n_decl || v->n_grp || v->n_cnd)
+			      ? (int)(want < 12u ? want : 12u) + 1 : 0;
+		if (g_decl_rows &&
+		    v->prow_off + (uint32_t)(g_decl_rows - 1) > v->n_prow)
+			v->prow_off = v->n_prow > (uint32_t)(g_decl_rows - 1)
+				      ? v->n_prow - (uint32_t)(g_decl_rows - 1)
+				      : 0u;
+	}
 
 	/*
 	 * Synchronised output, DEC mode 2026.
@@ -1706,11 +3635,29 @@ static void redraw(struct view *v)
 	draw_frame(&o, v);
 	draw_tree(&o, v);
 	draw_hex(&o, v);
+	draw_decl(&o, v);
 	draw_marker_line(&o, v);
 	if (v->show_list)
 		draw_list(&o, v);
 	if (v->menu_open)
 		draw_menu(&o, v);
+	draw_chooser(&o, v);
+	out_str(&o, "\033[?2026l");
+
+	/* Nothing moved: the frame is the one already on the screen. */
+	if (o.n && o.n == g_last_n && !memcmp(o.p, g_last, o.n)) {
+		free(o.p);
+		return;
+	}
+	if (o.n) {
+		char *keep = realloc(g_last, o.n);
+
+		if (keep) {
+			memcpy(keep, o.p, o.n);
+			g_last = keep;
+			g_last_n = o.n;
+		}
+	}
 	if (o.n)
 		{
 			size_t off = 0;
@@ -1772,14 +3719,68 @@ static int byte_under(struct view *v, int row, int col, uint64_t *out)
  */
 #define JUMP_LEAD 2u
 
+/*
+ * The region row of `obj` that contains `file_off`, or the object row when none
+ * does.
+ *
+ * A marker's region is a property of the bytes, not of what the tree cursor
+ * happened to be sitting on when they were taken: selecting a string that is
+ * plainly inside DATA and having it recorded as whole-file is the tree's state
+ * leaking into the draft. Prefers a region over the whole-object row, because
+ * the narrower answer is the one that makes the scan cheaper.
+ */
+static uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off)
+{
+	uint32_t k, best = v->n_node;
+
+	for (k = 0; k < v->n_node; k++) {
+		uint32_t n, j;
+
+		if (v->node[k].obj != obj)
+			continue;
+		if (!v->node[k].mask) {
+			if (best == v->n_node)
+				best = k;               /* the object row */
+			continue;
+		}
+		n = kof_scan_resolve_range(&v->obj[obj].ctx, v->node[k].mask,
+					   v->probe);
+		for (j = 0; j < n; j++)
+			if (file_off >= v->probe[j].off &&
+			    file_off < v->probe[j].off + v->probe[j].len)
+				return k;
+	}
+	return best;
+}
+
 static void view_show(struct view *v, uint64_t file_off)
 {
 	uint64_t r = view_unmap(v, file_off);
 	uint64_t per = (uint64_t)(v->per > 0 ? v->per : 16);
 	uint64_t row;
 
-	if (r == KOF_BROKEN)
-		return;
+	/*
+	 * The offset may not be in the region being looked at.
+	 *
+	 * A marker is chosen from a list that belongs to the OBJECT, and the
+	 * tree may be sitting on a region that does not contain it - in which
+	 * case there was nowhere to scroll to and the jump did nothing at all.
+	 * So the tree moves first, to a row of this object that holds the
+	 * offset, preferring a region over the whole-object row: the narrower
+	 * answer is the more useful place to land.
+	 */
+	if (r == KOF_BROKEN) {
+		uint32_t best = node_at(v, v->node[v->sel_node].obj, file_off);
+
+		if (best >= v->n_node)
+			return;
+		v->node[v->sel_node].at = v->rgn_at;
+		v->sel_node = best;
+		view_select(v);
+		r = view_unmap(v, file_off);
+		if (r == KOF_BROKEN)
+			return;
+	}
 	row = r / per;
 	v->rgn_at = row > JUMP_LEAD ? (row - JUMP_LEAD) * per : 0;
 	if (v->rgn_at > hex_max(v))
@@ -1790,8 +3791,10 @@ static void view_show(struct view *v, uint64_t file_off)
 
 enum key {
 	K_NONE = 0, K_UP = 256, K_DOWN, K_PGUP, K_PGDN, K_HOME, K_END,
-	K_CLICK, K_RCLICK, K_WHEEL_UP, K_WHEEL_DOWN, K_DRAG, K_RELEASE,
-	K_BACKTAB
+	/* Kept contiguous and last: handle() tests the range to let mouse
+	 * events past the modes that own the keyboard. */
+	K_BACKTAB,
+	K_CLICK, K_RCLICK, K_WHEEL_UP, K_WHEEL_DOWN, K_DRAG, K_RELEASE
 };
 
 static int g_mx, g_my;          /* where the last click was, 1 based */
@@ -1940,6 +3943,23 @@ static void click(struct view *v, int rclick)
 			g_mx > TREE_W && !v->show_list && !v->menu_open))
 		return;
 
+	/* Any click leaves whatever was being typed. The header branch below
+	 * puts the focus back if the click landed on a field, so this is the
+	 * whole of "click away to stop editing". */
+	v->edit = 0;
+
+	if (v->ch.open) {
+		int k = g_my - v->ch.row;
+
+		if (g_mx >= v->ch.col && g_mx < v->ch.col + CH_W &&
+		    k >= 0 && k < v->ch.n) {
+			v->ch.sel = k;
+			ch_take(v);
+		} else {
+			v->ch.open = 0;
+		}
+		return;
+	}
 	if (v->menu_open) {
 		int k = g_my - v->menu_row;
 
@@ -1991,6 +4011,195 @@ static void click(struct view *v, int rclick)
 		 * the right key is one people leave open. */
 		v->show_list = 0;
 		v->list_depth = 0;
+		return;
+	}
+	if (g_decl_rows && g_my == decl_top()) {
+		if (g_mx >= v->f_c0 && g_mx <= v->f_c1)
+			v->edit = 1;
+		else if (g_mx >= v->o_c0 && g_mx <= v->o_c1)
+			ch_open(v, CH_OPT, 0, g_my + 1, g_mx);
+		else if (g_mx >= v->t_c0 && g_mx <= v->t_c1)
+			ch_open(v, CH_TYPE, 0, g_my, g_mx);
+		else if (g_mx >= v->n_c0 && g_mx <= v->n_c1)
+			ch_open(v, CH_RULE, MAX_GROUP, g_my, g_mx);
+		else if (g_mx >= v->g_c0 && g_mx <= v->g_c1)
+			generate(v);
+		return;
+	}
+	if (g_decl_rows && g_my > decl_top() && g_my < mark_row()) {
+		/*
+		 * Which row is which is a walk, not arithmetic - and it is the
+		 * same walk that drew them. Two copies of that shape would be
+		 * two things to keep in step, and the one that drifts is the
+		 * one nobody is looking at.
+		 */
+		int want = g_my - decl_top() - 1 + (int)v->prow_off, r = 0;
+		uint32_t g, i;
+
+		for (i = 0; i < (uint32_t)OPT_COUNT; i++) {
+			if (!v->opt_on[i])
+				continue;
+			if (r == want) {
+				if (g_mx >= g_cols - 4)
+					v->opt_on[i] = 0;
+				else if (g_mx >= v->opt_c0[i] &&
+					 g_mx <= v->opt_c1[i]) {
+					if (i == OPT_ARCH)
+						ch_open(v, CH_ARCH, 0, g_my,
+							g_mx);
+					else if (i == OPT_SUBTYPE)
+						ch_open(v, CH_SUBTYPE, 0,
+							g_my, g_mx);
+					else {
+						/* A size is typed, so the
+						 * field starts from what it
+						 * says rather than empty. */
+						snprintf(v->num, sizeof v->num,
+							 "%llu",
+							 (unsigned long long)
+							 v->opt_val[i]);
+						/* Opened by a click, so it
+						 * starts selected: the first
+						 * digit replaces rather than
+						 * extends, which is what
+						 * clicking a number and typing
+						 * one means everywhere else. */
+						v->num_fresh = 1;
+						v->edit = 200 + (int)i;
+					}
+				}
+				return;
+			}
+			r++;
+		}
+		if (v->n_grp) {
+			if (r == want)
+				return;         /* the ranges summary */
+			r++;
+		}
+		if (v->n_decl) {
+			if (r == want)
+				return;         /* the "Strings" heading */
+			r++;
+			for (i = 0; i < v->n_decl; i++, r++) {
+				if (r != want)
+					continue;
+				v->sel_decl = i;
+				if (g_mx >= g_cols - 4)
+					decl_remove(v, i);
+				else if (!v->decl[i].hex && g_mx >= 12 &&
+					 g_mx <= 21)
+					ch_open(v, CH_WORD, i, g_my, g_mx);
+				else if (!v->decl[i].hex && g_mx >= 23 &&
+					 g_mx <= 33)
+					ch_open(v, CH_CASE, i, g_my, g_mx);
+				return;
+			}
+		}
+
+		if (r == want) {
+			if (g_mx >= v->n_c0 && g_mx <= v->n_c1)
+				ch_open(v, CH_RULE, MAX_GROUP, g_my, g_mx);
+			return;
+		}
+		r++;
+
+		for (g = 0; g < v->n_grp; g++) {
+			if (r == want) {
+				v->cur_grp = g;
+				v->warn[0] = 0;
+				if (g_mx >= 5 && g_mx <= 16)
+					ch_open(v, CH_RULE, g, g_my, g_mx);
+				else if (g_mx >= 18 && g_mx <= 33)
+					ch_open(v, CH_RANGE, g,
+						g_my, g_mx);
+				else if (v->grp_nt[g][0] > 0 &&
+					 g_mx >= v->grp_nt[g][0] &&
+					 g_mx <= v->grp_nt[g][1])
+					v->edit = 300 + (int)g;
+				else if (g_mx > 35 && v->grp[g].rule == 2)
+					ch_open(v, CH_THRESH, g, g_my - 2,
+						g_mx);
+				return;
+			}
+			r++;
+			if (r == want) {
+				int c2 = 15;
+
+				v->cur_grp = g;
+				if (v->p_c0 > 0 && g_mx >= v->p_c0 &&
+				    g_mx <= v->p_c1) {
+					ch_open(v, CH_MARKER, g, g_my - 3,
+						g_mx);
+					return;
+				}
+				/* An id on this row is a marker; clicking it
+				 * takes it back out of the matcher. */
+				for (i = 0; i < v->n_decl; i++) {
+					if (v->decl[i].grp != g)
+						continue;
+					if (g_mx >= c2 && g_mx < c2 + 3)
+						v->decl[i].grp = GRP_NONE;
+					c2 += 3;
+				}
+				return;
+			}
+			r++;
+		}
+
+		if (r == want) {
+			if (v->n_grp && g_mx >= v->a_c0 && g_mx <= v->a_c1)
+				cnd_add(v, 0);
+			else if (v->n_cnd && g_mx >= v->b_c0 &&
+				 g_mx <= v->b_c1)
+				cnd_add(v, 1);
+			return;
+		}
+		r++;
+
+		for (g = 0; g < v->n_cnd; g++) {
+			int off = v->cnd[g].parent >= 0 ? 3 : 0;
+
+			if (r + 1 == want) {
+				/* The matcher row. Its ids come back out the
+				 * way a matcher's markers do - by clicking the
+				 * one to remove. */
+				v->cur_cnd = g;
+				if (v->cnd_mt[g][0] > 0 &&
+				    g_mx >= v->cnd_mt[g][0] &&
+				    g_mx <= v->cnd_mt[g][1])
+					ch_open(v, CH_CMATCH, g, g_my - 3,
+						g_mx);
+				return;
+			}
+			if (r != want) {
+				r += 2;
+				continue;
+			}
+			r += 2;
+			v->cur_cnd = g;
+			if (g_mx >= g_cols - 4) {
+				cnd_remove(v, g);
+				return;
+			}
+			if (g_mx >= off + 5 && g_mx <= off + 20)
+				v->edit = 103 + (int)g;
+			else if (g_mx >= v->cnd_lv[g][0] &&
+				 g_mx <= v->cnd_lv[g][1])
+				ch_open(v, CH_LEVEL, g, g_my, g_mx);
+			else if (g_mx >= v->cnd_vr[g][0] &&
+				 g_mx <= v->cnd_vr[g][1])
+				ch_open(v, CH_VARIANT, g, g_my, g_mx);
+			else if (v->cnd_nm[g][0] > 0 &&
+				 g_mx >= v->cnd_nm[g][0] &&
+				 g_mx <= v->cnd_nm[g][1])
+				v->edit = 4 + (int)g;
+			else if (v->cnd_nt[g][0] > 0 &&
+				 g_mx >= v->cnd_nt[g][0] &&
+				 g_mx <= v->cnd_nt[g][1])
+				v->edit = 400 + (int)g;
+			return;
+		}
 		return;
 	}
 	if (g_my == mark_row()) {
@@ -2066,6 +4275,122 @@ static void click(struct view *v, int rclick)
 static int handle(struct view *v, int k)
 {
 	int page = hex_bot() - hex_top();
+
+	/*
+	 * A field being edited takes every printable key.
+	 *
+	 * Before the switch rather than inside it: while a name is being typed,
+	 * "q" is a letter and not a command, and a text field that quits the
+	 * program on one keystroke is the kind of thing people only find out
+	 * once.
+	 */
+	/*
+	 * A mode that takes the keyboard must not take the mouse.
+	 *
+	 * These two branches used to return for every event, mouse included, so
+	 * while a chooser was open no click reached the router that would have
+	 * dismissed it - and while a name was being typed, clicking anywhere
+	 * else left the focus where it was and every key stayed a letter. Both
+	 * looked like the mouse had stopped working.
+	 */
+	if (k >= K_CLICK && k <= K_RELEASE)
+		;                       /* fall through to the router below */
+	else if (v->ch.open) {
+		if (k == 'j' || k == K_DOWN) {
+			if (v->ch.sel + 1 < v->ch.n)
+				v->ch.sel++;
+		} else if (k == 'k' || k == K_UP) {
+			if (v->ch.sel)
+				v->ch.sel--;
+		} else if (k == '\r' || k == '\n') {
+			ch_take(v);
+		} else if (k == 27 || k == 'q') {
+			v->ch.open = 0;
+		}
+		return 1;
+	} else if (v->edit) {
+		/*
+		 * One editor, several fields. The code says which: 1 the
+		 * family, 4+i a condition's custom variant, 103+i a condition's
+		 * expression, 200+i an optional size, 300+i a matcher's
+		 * comment, 400+i a condition's comment.
+		 *
+		 * Each band is tested as a band, not as "at least". The size
+		 * editor used to claim everything from 200 up, so the comment
+		 * boxes added above it opened, took the caret, and then
+		 * silently dropped every key that was not a digit.
+		 */
+		if (v->edit >= 200 && v->edit < 200 + OPT_COUNT) {
+			/*
+			 * A size, typed as digits and nothing else.
+			 *
+			 * Bounded on the way in rather than checked on the way
+			 * out: a field that accepts a number it will refuse is
+			 * a field that wastes the typing. Sixteen digits is far
+			 * past any object this engine will be handed, and a
+			 * minus sign is simply not a character a size has.
+			 */
+			int oi = (v->edit - 200) % OPT_COUNT;
+			size_t nn = strlen(v->num);
+
+			if (k == 27 || k == '\r' || k == '\n') {
+				v->opt_val[oi] = strtoull(v->num, NULL, 10);
+				v->edit = 0;
+			} else if ((k == 127 || k == 8) && nn) {
+				v->num[nn - 1u] = 0;
+			} else if (k >= '0' && k <= '9' && nn < 16u) {
+				if (v->num_fresh) {
+					v->num[0] = 0;
+					nn = 0;
+				}
+				v->num[nn] = (char)k;
+				v->num[nn + 1u] = 0;
+			}
+			v->num_fresh = 0;
+			return 1;
+		}
+		{
+		/*
+		 * Which box the keys are going into, and how much it holds.
+		 *
+		 * The cap used to be one number for every field, which was the
+		 * smallest of them - so a comment stopped at the length of a
+		 * variant name for no reason a typist could see. Each field
+		 * carries its own now, taken from the array it is.
+		 */
+		char *buf;
+		size_t cap, n;
+
+		if (v->edit == 1) {
+			buf = v->family;
+			cap = sizeof v->family;
+		} else if (v->edit >= 400) {
+			buf = v->cnd[(v->edit - 400) % MAX_GROUP].note;
+			cap = sizeof v->cnd[0].note;
+		} else if (v->edit >= 300) {
+			buf = v->grp[(v->edit - 300) % MAX_GROUP].note;
+			cap = sizeof v->grp[0].note;
+		} else if (v->edit >= 103) {
+			buf = v->cnd[(v->edit - 103) % MAX_GROUP].expr;
+			cap = sizeof v->cnd[0].expr;
+		} else {
+			buf = v->cnd[(v->edit - 4) % MAX_GROUP].variant;
+			cap = sizeof v->cnd[0].variant;
+		}
+		n = strlen(buf);
+
+		if (k == 27 || k == '\r' || k == '\n') {
+			v->edit = 0;
+		} else if (k == 127 || k == 8) {
+			if (n)
+				buf[n - 1u] = 0;
+		} else if (k >= 0x20 && k < 0x7f && n + 2u < cap) {
+			buf[n] = (char)k;
+			buf[n + 1u] = 0;
+		}
+		return 1;
+		}
+	}
 
 	if (page < 1)
 		page = 1;
@@ -2235,6 +4560,18 @@ static int handle(struct view *v, int k)
 			for (n = 0; n < 3; n++)
 				goto_node(v, down ? v->sel_node + 1u
 						  : v->sel_node - 1u);
+		} else if (g_decl_rows && g_my > decl_top() &&
+			   g_my < mark_row()) {
+			/* The draft grows past its pane long before the object
+			 * does, so the wheel over it moves it and not the hex
+			 * behind it. The clamp is left to the next layout,
+			 * which is the only place that knows how tall the
+			 * panel ended up. */
+			if (down)
+				v->prow_off += 3u;
+			else
+				v->prow_off = v->prow_off > 3u
+					      ? v->prow_off - 3u : 0u;
 		} else {
 			hex_step(v, down ? 3 : -3);
 		}
@@ -2315,9 +4652,12 @@ static void usage(void)
 	"\n"
 	"  kofviewer [--db <dir>] <file>\n"
 	"\n"
-	"  --db D   load that database. Without it there is one object and no\n"
-	"           markers: unpacking is what modules do, and modules live in\n"
-	"           a database.\n");
+	"  --db D      load that database. Without it there is one object and\n"
+	"              no markers: unpacking is what modules do, and modules\n"
+	"              live in a database.\n"
+	"  --bases D   the signature source tree, which is also where a drafted\n"
+	"              signature is written. A content root or one of its kind\n"
+	"              directories both work. Default kofdraft/.\n");
 }
 
 static void view_free(struct view *v)
@@ -2339,7 +4679,7 @@ static void view_free(struct view *v)
 
 int main(int argc, char **argv)
 {
-	const char *path = NULL, *db = NULL;
+	const char *path = NULL, *db = NULL, *base = "kofdraft";
 	kof_engine *eng = NULL;
 	struct view v;
 	struct stat st;
@@ -2351,6 +4691,8 @@ int main(int argc, char **argv)
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--db") && i + 1 < argc)
 			db = argv[++i];
+		else if (!strcmp(argv[i], "--bases") && i + 1 < argc)
+			base = argv[++i];
 		else if (argv[i][0] == '-') {
 			usage();
 			return 2;
@@ -2383,9 +4725,26 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	v.path = path;
+	/*
+	 * The tree a drafted signature is written into.
+	 *
+	 * Checked here rather than at the moment of writing, because the moment
+	 * of writing is after the work: a researcher who has spent an hour on a
+	 * draft should not be told then that the directory they named does not
+	 * exist. A path that is not a directory is refused; one that does not
+	 * exist yet is accepted, since generate() creates it, and a researcher
+	 * naming a new tree means it.
+	 */
+	if (stat(base, &st) == 0 && !S_ISDIR(st.st_mode)) {
+		fprintf(stderr, "kofviewer: --bases %s is not a directory\n",
+			base);
+		return 1;
+	}
+	snprintf(v.basedir, sizeof v.basedir, "%s", base);
 
 	v.ext = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *v.ext);
-	if (!v.ext) {
+	v.probe = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *v.probe);
+	if (!v.ext || !v.probe) {
 		fprintf(stderr, "kofviewer: out of memory\n");
 		return 1;
 	}
@@ -2422,18 +4781,13 @@ int main(int argc, char **argv)
 	redraw(&v);
 	for (;;) {
 		int k = read_key();
-		uint64_t was;
 
 		if (k == K_NONE)
 			break;
-		was = view_stamp(&v);
 		if (!handle(&v, k))
 			break;
-		/* Repaint only when something moved. term_size is read inside
-		 * redraw, so a resize still gets through: it changes the stamp. */
-		term_size();
-		if (view_stamp(&v) != was)
-			redraw(&v);
+		/* redraw decides for itself whether anything changed. */
+		redraw(&v);
 	}
 	term_restore();
 
