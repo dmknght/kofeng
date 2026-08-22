@@ -2064,18 +2064,17 @@ static void emit_expr(FILE *f, struct view *v, const char *e)
 	int any = 0;
 
 	if (!e[0]) {
-		/* Nothing written means every matcher, joined - the reading
-		 * that makes an empty field a default rather than an error. */
-		uint32_t g;
-
-		for (g = 0; g < v->n_grp; g++) {
-			if (any)
-				fprintf(f, " && ");
-			emit_matcher(f, v, g);
-			any = 1;
-		}
-		if (!any)
-			fprintf(f, "1");
+		/*
+		 * Nothing to test.
+		 *
+		 * It used to mean every matcher ANDed together - a whole
+		 * signature's worth of meaning attached to an empty field. It
+		 * is unreachable now anyway: a branch that decides something is
+		 * refused until it names a matcher, and a grouping with none is
+		 * written as a block rather than as an if.
+		 */
+		(void)any;
+		fprintf(f, "1");
 		return;
 	}
 	while (*e) {
@@ -2198,9 +2197,22 @@ static void emit_cond(FILE *f, struct view *v, uint32_t i, int depth,
 	}
 	for (d = 0; d < depth; d++)
 		fputc('\t', f);
-	fprintf(f, "%sif (", chained ? "else " : "");
-	emit_expr(f, v, c->expr);
-	fprintf(f, ")");
+	if (!c->expr[0] && cnd_children(v, i)) {
+		/*
+		 * A grouping: no test of its own, so no if of its own.
+		 *
+		 * Written as a bare block rather than "if (1)", because that is
+		 * what it is - a brace around some branches so the statement
+		 * after them belongs to the group and not to whatever came
+		 * before it. Verdicts return, so that statement is reached
+		 * exactly when none of the branches inside concluded.
+		 */
+		fprintf(f, "{\n");
+	} else {
+		fprintf(f, "%sif (", chained ? "else " : "");
+		emit_expr(f, v, c->expr);
+		fprintf(f, ")");
+	}
 
 	if (!cnd_children(v, i)) {
 		if (c->level == LV_NONE) {
@@ -2216,7 +2228,8 @@ static void emit_cond(FILE *f, struct view *v, uint32_t i, int depth,
 		return;
 	}
 
-	fprintf(f, " {\n");
+	if (c->expr[0])
+		fprintf(f, " {\n");
 	{
 		uint32_t prev = v->n_cnd;
 
@@ -2659,6 +2672,47 @@ static int draft_from_source(struct view *v, const char *path)
 			v->opt_val[OPT_SIZE_MIN] = strtoull(p + 20, NULL, 0);
 			continue;
 		}
+		/*
+		 * The optional declarations are read back because they are
+		 * written out: a rule opened, changed in one place and saved
+		 * would otherwise come back without its arch or its subtype,
+		 * and a signature that quietly stops being prefiltered is a
+		 * signature that quietly starts running on everything.
+		 */
+		if ((p = strstr(line, "KOF_TARGET_ARCH(KOF_ARCH_")) != NULL) {
+			char w[32];
+			uint32_t k;
+
+			src_ident(p + 25, w, sizeof w);
+			for (k = 0; k < ARCH_N; k++)
+				if (!strcmp(arch_word[k].word, w)) {
+					v->opt_on[OPT_ARCH] = 1;
+					v->opt_val[OPT_ARCH] = k;
+				}
+			continue;
+		}
+		if ((p = strstr(line, "KOF_TARGET_SUBTYPE(")) != NULL) {
+			const char *const *tab = NULL;
+			const char *sub;
+			char w[32];
+			uint32_t n = 0, k;
+
+			if ((sub = strstr(p, "KOF_ELF_")) != NULL) {
+				tab = elf_sub;
+				n = sizeof elf_sub / sizeof elf_sub[0];
+				src_ident(sub + 8, w, sizeof w);
+			} else if ((sub = strstr(p, "KOF_PE_")) != NULL) {
+				tab = pe_sub;
+				n = sizeof pe_sub / sizeof pe_sub[0];
+				src_ident(sub + 7, w, sizeof w);
+			}
+			for (k = 0; tab && k < n; k++)
+				if (!strcmp(tab[k], w)) {
+					v->opt_on[OPT_SUBTYPE] = 1;
+					v->opt_val[OPT_SUBTYPE] = k;
+				}
+			continue;
+		}
 		if ((p = strstr(line, "KOF_DEFINE_STR(")) != NULL ||
 		    (p = strstr(line, "KOF_DEFINE_HEXSTR(")) != NULL) {
 			int hex = strstr(line, "KOF_DEFINE_HEXSTR(") != NULL;
@@ -2714,6 +2768,31 @@ static int draft_from_source(struct view *v, const char *path)
 		if (!body)
 			continue;
 
+		{
+			/*
+			 * A brace with nothing testing it is a grouping, and
+			 * has to come back as one: read as plain punctuation
+			 * its branches would surface as siblings of whatever
+			 * came before, which is a different signature.
+			 */
+			const char *t = line;
+
+			while (*t == ' ' || *t == '\t')
+				t++;
+			if (*t == '{' && body && depth >= 1 &&
+			    v->n_cnd < MAX_GROUP) {
+				struct cond *c = &v->cnd[v->n_cnd];
+
+				memset(c, 0, sizeof *c);
+				c->parent = parent;
+				c->level = LV_NONE;
+				if (cur >= 0 && v->cnd[cur].parent == parent)
+					v->cnd[cur].join = 1;
+				cur = (int)v->n_cnd;
+				pend_if = -1;
+				v->n_cnd++;
+			}
+		}
 		if (strstr(line, "if (") || strstr(line, "if(")) {
 			struct cond *c;
 
@@ -3120,9 +3199,19 @@ static const char *draft_missing(struct view *v)
 			return "every matcher needs a string";
 	if (!v->n_cnd)
 		return "add a condition";
-	for (i = 0; i < v->n_cnd; i++)
-		if (!v->cnd[i].expr[0])
+	for (i = 0; i < v->n_cnd; i++) {
+		/*
+		 * A condition with children and no matchers of its own is a
+		 * grouping, not an omission.
+		 *
+		 * It is how a shape like "(1) or (2 and 3)" gets written
+		 * without a free text expression: the outer one tests nothing
+		 * and exists to hold the two that do. Only a branch that has to
+		 * decide something needs something to decide it on.
+		 */
+		if (!v->cnd[i].expr[0] && !cnd_children(v, i))
 			return "every condition needs a matcher";
+	}
 	return NULL;
 }
 
@@ -4474,7 +4563,9 @@ static void draw_decl(struct out *o, struct view *v)
 					first2 = 0;
 				}
 				if (first2)
-					out_str(o, A_DIM "none yet" A_OFF);
+					out_fmt(o, A_DIM "%s" A_OFF,
+						cnd_children(v, ci)
+						? "group only" : "none yet");
 			} else {
 				out_str(o, A_DIM "none defined yet" A_OFF);
 			}
