@@ -436,6 +436,20 @@ struct view {
 	 * thing to keep right. */
 	int         hit_c0, hit_c1, skip_c0, skip_c1, name_c0, name_c1;
 
+	/*
+	 * Which numbering the offset column shows.
+	 *
+	 * Both are true and they answer different questions: the file offset is
+	 * where the bytes are on disk, the region offset is how far into what a
+	 * signature actually searches they are. Showing only one made the other
+	 * a subtraction the reader had to do by hand.
+	 */
+	int         off_region;
+
+	/* Which half of the hex pane the menu was opened on. */
+	int         menu_ctx;       /* 1 bytes, 2 the offset column */
+	uint64_t    menu_off;       /* the row offset it was opened on */
+
 	int         menu_open, menu_row, menu_col, menu_sel;
 
 	/*
@@ -956,7 +970,8 @@ static void draw_hex(struct out *o, struct view *v)
 		out_str(o, "\033[K");
 		if (at >= v->rgn_len)
 			continue;
-		out_fmt(o, A_LOC "%08llx" A_OFF "  ", (unsigned long long)off);
+		out_fmt(o, A_LOC "%08llx" A_OFF "  ",
+			(unsigned long long)(v->off_region ? at : off));
 		for (k = 0; k < per; k++) {
 			if (at + (uint64_t)k >= v->rgn_len) {
 				out_str(o, "   ");
@@ -998,13 +1013,27 @@ static void draw_hex(struct out *o, struct view *v)
 }
 
 /* The composed name a scan would print for this module, less the target. */
+/*
+ * The name to show, and only as much of it as is known.
+ *
+ * A variant is what a module REPORTED, so it exists only once it has fired.
+ * Showing the first declared one otherwise put "Rootkit:LKM-Diamorphine-x64"
+ * beside "hit 0", which reads as a detection that also says it did not detect -
+ * and the variant named was simply the first in the file, not one anything had
+ * concluded. Without a verdict the family is the whole of what can be said.
+ */
 static void touch_name(const struct kof_touch *t, char *out, size_t cap)
 {
-	const char *var = t->fired_name ? t->fired_name :
-			  (t->n_names && t->name[0] ? t->name[0] : NULL);
+	const char *fam = t->family[0] ? t->family : "?";
 
-	snprintf(out, cap, "%s:%s%s%s", kof_maltype_name(t->maltype),
-		 t->family[0] ? t->family : "?", var ? "-" : "", var ? var : "");
+	if (t->fired_name)
+		snprintf(out, cap, "%s:%s-%s", kof_maltype_name(t->maltype),
+			 fam, t->fired_name);
+	else if (t->n_names > 1u)
+		snprintf(out, cap, "%s:%s (%u variants)",
+			 kof_maltype_name(t->maltype), fam, t->n_names);
+	else
+		snprintf(out, cap, "%s:%s", kof_maltype_name(t->maltype), fam);
 }
 
 static const char *touch_colour(const struct kof_touch *t)
@@ -1029,74 +1058,44 @@ static void touch_head(const struct kof_touch *t, char *out, size_t cap)
  * One line: how many modules this object touched, and which one the hex pane is
  * lighting up. The rest is one keypress or one click away.
  */
+/*
+ * The bottom line: what is known about this object on the left, what is under
+ * the cursor on the right.
+ *
+ * They used to be the same space, so making a selection erased the marker
+ * counts - the two things a reader compares while choosing bytes. They are
+ * different questions with different lifetimes and they get different halves.
+ *
+ * The pane indicator is gone. It named the thing with the keyboard focus, which
+ * the caret in that pane already says, and it was the first thing on the line
+ * that nobody needed.
+ */
 static void draw_marker_line(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
-	char name[80], head[24];
+	char name[80], head[24], right[120];
 	uint32_t hit = 0, i;
 
 	row_start(o, mark_row(), 1);
 
-	/* Which pane has the keys. Not a hotkey - a hotkey list is a reminder of
-	 * what could be pressed, this says what pressing would do next, and that
-	 * changes. */
-	out_fmt(o, A_SEL " %-8s " A_OFF " ",
-		v->pane == 0 ? "obj tree" : v->pane == 1 ? "hex" : "marker");
-
-	/*
-	 * A selection displaces everything else on this line.
-	 *
-	 * While bytes are selected they are what the next action is about, and
-	 * the length and the first of them are what says whether the right ones
-	 * were caught. The markers are one keystroke away and are not going
-	 * anywhere.
-	 */
-	if (v->sel_a != KOF_BROKEN) {
-		struct object *so = cur_obj(v);
-		uint64_t lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
-		uint64_t hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
-		uint64_t k, n = hi - lo + 1u;
-
-		out_fmt(o, A_SELB " %llu byte(s) at %08llx " A_OFF "  ",
-			(unsigned long long)n,
-			(unsigned long long)view_map(v, lo, 0));
-		for (k = 0; k < n && k < 16; k++)
-			out_fmt(o, "%02X",
-				so->buf.p[view_map(v, lo + k, 0)]);
-		if (n > 16)
-			out_str(o, "...");
-		out_fmt(o, A_DIM "   right-click clears" A_OFF);
-		return;
-	}
-
-	/* What packed it, when something did. First on the line because it is a
-	 * property of the object rather than any module's opinion of it, and
-	 * because a signature written here only ever runs while that unpacker
-	 * still claims the sample. */
 	if (ob->packer[0])
 		out_fmt(o, A_BAD "%s" A_OFF A_DIM "  |  " A_OFF, ob->packer);
 
 	if (!ob->n_touch) {
 		out_str(o, A_DIM "no markers" A_OFF);
-		return;
-	}
-	for (i = 0; i < ob->n_touch; i++)
-		hit += (uint32_t)(ob->touch[i].fired != 0);
-
-	touch_name(&ob->touch[v->sel_touch], name, sizeof name);
-	touch_head(&ob->touch[v->sel_touch], head, sizeof head);
-
-	/* Three clickable words, and their columns recorded as they are laid
-	 * out. "hit" and "skip" open the dialog filtered to what they count;
-	 * the name opens that signature's markers directly. */
-	{
+	} else {
 		char hits[24], skips[24];
-		int c = 1;
+		int c;
 
-		c += (int)o->col_hint;              /* whatever preceded us */
+		for (i = 0; i < ob->n_touch; i++)
+			hit += (uint32_t)(ob->touch[i].fired != 0);
+		touch_name(&ob->touch[v->sel_touch], name, sizeof name);
+		touch_head(&ob->touch[v->sel_touch], head, sizeof head);
+
 		snprintf(hits, sizeof hits, "hit %u", hit);
 		snprintf(skips, sizeof skips, "skip %u", ob->n_touch - hit);
 
+		c = 1 + (int)o->col_hint;
 		v->hit_c0 = c;
 		v->hit_c1 = c + (int)strlen(hits) - 1;
 		c += (int)strlen(hits) + 2;
@@ -1109,6 +1108,51 @@ static void draw_marker_line(struct out *o, struct view *v)
 		out_fmt(o, "%s%s" A_OFF A_DIM "  %s  |  " A_OFF "%s%s %s" A_OFF,
 			hit ? A_BAD : A_DIM, hits, skips,
 			touch_colour(&ob->touch[v->sel_touch]), name, head);
+	}
+
+	/*
+	 * The right half.
+	 *
+	 * A selection is reported as its size and its two offsets, and not as
+	 * its contents: the contents are on the screen a few rows up, in colour,
+	 * and repeating twenty of them here says nothing the highlight has not.
+	 *
+	 * Both offsets, because a signature is written against one and a bug
+	 * report is written against the other, and which is which is exactly the
+	 * thing that gets confused.
+	 */
+	if (v->sel_a != KOF_BROKEN) {
+		uint64_t lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
+		uint64_t hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
+
+		/* One offset in front and the other in brackets after it: they
+		 * are the same place said twice, not two columns to line up. */
+		snprintf(right, sizeof right,
+			 "%llu B   offset %08llx (region: %08llx)",
+			 (unsigned long long)(hi - lo + 1u),
+			 (unsigned long long)view_map(v, lo, 0),
+			 (unsigned long long)lo);
+	} else if (v->off_region) {
+		/*
+		 * Only the unusual state is announced. File offsets are what
+		 * the column shows unless somebody changed it, so saying so
+		 * every time is a label for the expected case - the state worth
+		 * a word is the one that would otherwise be read wrong.
+		 */
+		snprintf(right, sizeof right, "region offsets");
+	} else {
+		right[0] = 0;
+	}
+
+	if (right[0]) {
+		int at = g_cols - (int)strlen(right) - 1;
+
+		if (at > (int)o->col_hint + 2) {
+			out_at(o, mark_row(), at);
+			out_fmt(o, "%s%s" A_OFF,
+				v->sel_a != KOF_BROKEN ? "\033[44;97m" : A_DIM,
+				right);
+		}
 	}
 }
 
@@ -1348,38 +1392,93 @@ static void draw_list(struct out *o, struct view *v)
 enum menu_action {
 	M_COPY_ASCII = 0,
 	M_COPY_HEX,
-	M_ADD_STR,
-	M_ADD_HEX,
+	M_COPY_OFF_HEX,
+	M_COPY_OFF_DEC,
+	M_DECL_STR,
+	M_DECL_HEX,
+	M_GOTO,
+	M_FIND_STR,
+	M_FIND_HEX,
 	M_COUNT
 };
 
-static const char *const menu_label[M_COUNT] = {
-	"Copy ASCII",
-	"Copy hex",
-	/*
-	 * "Declare", because that is the word the module language uses:
-	 * KOF_DEFINE_STR declares a string this module looks for, and what this
-	 * item does is write one of those. "Add hex to signature" described the
-	 * mechanics and was the longest thing in the menu; "Add hex" on its own
-	 * would not have said add it to WHAT.
-	 *
-	 * The ellipsis is the usual promise that a dialog follows rather than
-	 * the thing happening on the spot.
-	 */
-	"Declare as string...",
-	"Declare as hex..."
+/*
+ * A menu item, and which half of the pane it belongs to.
+ *
+ * Right-clicking the offset column and right-clicking a byte are two different
+ * questions - one is about a place, the other about contents - so they get two
+ * menus. One table rather than two keeps the order and the wording in one
+ * place; `ctx` is a mask, 1 for the bytes and 2 for the offset column, and the
+ * items that make sense on either carry both.
+ */
+static const struct {
+	const char *label;
+	int         ctx;
+	int         group;      /* a rule is drawn where this changes */
+} menu_item[M_COUNT] = {
+	{ "Copy ASCII",           1, 0 },
+	{ "Copy hex",             1, 0 },
+	{ "Copy offset (hex)",    2, 0 },
+	{ "Copy offset (dec)",    2, 0 },
+	{ "Declare as string",    1, 1 },
+	{ "Declare as hex",       1, 1 },
+	{ "Go to",                3, 2 },
+	{ "Find string",          3, 2 },
+	{ "Find hex",             3, 2 }
 };
 
-#define MENU_W 26
+#define MENU_W 24
+
+static int menu_shown(struct view *v, int a)
+{
+	return (menu_item[a].ctx & v->menu_ctx) != 0;
+}
 
 static int menu_enabled(struct view *v, int a)
 {
+	if (!menu_shown(v, a))
+		return 0;
 	if (a == M_COPY_ASCII || a == M_COPY_HEX)
 		return v->sel_a != KOF_BROKEN;
+	if (a == M_COPY_OFF_HEX || a == M_COPY_OFF_DEC)
+		return 1;
 	/* Not wired to anything yet. Shown because the menu is where they will
 	 * be, and disabled because a menu item that does nothing teaches people
 	 * not to trust the menu. */
 	return 0;
+}
+
+/* Rows including the rules between groups, which take a line each. */
+static int menu_rows(struct view *v)
+{
+	int i, n = 0, last = -1;
+
+	for (i = 0; i < M_COUNT; i++) {
+		if (!menu_shown(v, i))
+			continue;
+		if (last >= 0 && menu_item[i].group != last)
+			n++;
+		last = menu_item[i].group;
+		n++;
+	}
+	return n;
+}
+
+/* The action on a drawn row, or -1 for a rule or past the end. */
+static int menu_at_row(struct view *v, int row)
+{
+	int i, n = 0, last = -1;
+
+	for (i = 0; i < M_COUNT; i++) {
+		if (!menu_shown(v, i))
+			continue;
+		if (last >= 0 && menu_item[i].group != last)
+			n++;
+		last = menu_item[i].group;
+		if (n++ == row)
+			return i;
+	}
+	return -1;
 }
 
 static void menu_open_at(struct view *v, int row, int col)
@@ -1389,8 +1488,8 @@ static void menu_open_at(struct view *v, int row, int col)
 	v->menu_open = 1;
 	v->menu_row = row;
 	v->menu_col = col;
-	if (v->menu_row + M_COUNT > g_rows)
-		v->menu_row = g_rows - M_COUNT;
+	if (v->menu_row + menu_rows(v) > g_rows)
+		v->menu_row = g_rows - menu_rows(v);
 	if (v->menu_row < 1)
 		v->menu_row = 1;
 	if (v->menu_col + MENU_W > g_cols)
@@ -1422,14 +1521,35 @@ static void menu_step(struct view *v, int d)
 	}
 }
 
+
 static void draw_menu(struct out *o, struct view *v)
 {
-	int i;
+	int i, r = 0, last = -1;
 
 	for (i = 0; i < M_COUNT; i++) {
-		int on = menu_enabled(v, i);
+		int on;
 
-		out_at(o, v->menu_row + i, v->menu_col);
+		if (!menu_shown(v, i))
+			continue;
+		/* A rule where the kind of action changes: taking bytes out,
+		 * turning bytes into a declaration, and going somewhere are
+		 * three different intentions and the eye should not have to
+		 * read the labels to see that. */
+		if (last >= 0 && menu_item[i].group != last) {
+			int k;
+
+			out_at(o, v->menu_row + r++, v->menu_col);
+			out_str(o, "\033[47;90m");
+			/* One short of MENU_W: an item is a leading space plus
+			 * MENU_W - 2 of label, so the rule has to be the same
+			 * width or it steps out past the menu it divides. */
+			for (k = 0; k < MENU_W - 1; k++)
+				out_str(o, "-");
+			out_str(o, A_OFF);
+		}
+		last = menu_item[i].group;
+		on = menu_enabled(v, i);
+		out_at(o, v->menu_row + r++, v->menu_col);
 		/*
 		 * Disabled keeps the menu's background and loses contrast, it
 		 * does not lose the text. It was 100;90 - bright black on
@@ -1443,7 +1563,8 @@ static void draw_menu(struct out *o, struct view *v)
 			out_str(o, "\033[47;90m");
 		else
 			out_str(o, "\033[47;30m");
-		out_fmt(o, " %-*.*s", MENU_W - 2, MENU_W - 2, menu_label[i]);
+		out_fmt(o, " %-*.*s", MENU_W - 2, MENU_W - 2,
+			menu_item[i].label);
 		out_str(o, A_OFF);
 	}
 }
@@ -1486,6 +1607,17 @@ static void copy_osc52(const char *bytes, size_t n)
 	free(o.p);
 }
 
+/* Copying an offset is copying a number, so it has two spellings and both are
+ * worth having: hex to paste back into this tool, decimal for anything that
+ * counts bytes. */
+static void copy_offset(struct view *v, int hex)
+{
+	char t[32];
+
+	snprintf(t, sizeof t, hex ? "%llx" : "%llu",
+		 (unsigned long long)v->menu_off);
+	copy_osc52(t, strlen(t));
+}
 static void menu_run(struct view *v, int a)
 {
 	struct object *ob = cur_obj(v);
@@ -1494,6 +1626,11 @@ static void menu_run(struct view *v, int a)
 
 	if (!menu_enabled(v, a))
 		return;
+	if (a == M_COPY_OFF_HEX || a == M_COPY_OFF_DEC) {
+		copy_offset(v, a == M_COPY_OFF_HEX);
+		v->menu_open = 0;
+		return;
+	}
 	lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
 	hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
 	n = hi - lo + 1u;
@@ -1535,7 +1672,7 @@ static uint64_t view_stamp(struct view *v)
 		v->sel_node, v->tree_top, v->rgn_at, v->sel_a, v->sel_b,
 		v->sel_touch, v->list_off, (uint64_t)v->pane,
 		(uint64_t)v->list_depth, v->str_off, (uint64_t)v->list_filter,
-		v->sel_str,
+		v->sel_str, (uint64_t)v->off_region, (uint64_t)v->menu_ctx,
 		(uint64_t)v->show_list, (uint64_t)v->menu_open,
 		(uint64_t)v->menu_sel, (uint64_t)v->menu_row,
 		(uint64_t)v->menu_col, v->tree_hoff, v->list_hoff,
@@ -1809,8 +1946,12 @@ static void click(struct view *v, int rclick)
 		/* Anywhere off the menu dismisses it. A menu that only closes
 		 * on the right key is a menu people leave open. */
 		if (g_mx >= v->menu_col && g_mx < v->menu_col + MENU_W &&
-		    k >= 0 && k < M_COUNT && menu_enabled(v, k))
-			menu_run(v, k);
+		    k >= 0 && k < menu_rows(v)) {
+			int a = menu_at_row(v, k);
+
+			if (a >= 0 && menu_enabled(v, a))
+				menu_run(v, a);
+		}
 		v->menu_open = 0;
 		return;
 	}
@@ -1886,6 +2027,19 @@ static void click(struct view *v, int rclick)
 
 		v->pane = 1;
 		if (rclick) {
+			int per = v->per > 0 ? v->per : 16;
+			int base = TREE_W + 3;
+			uint64_t row0 = v->rgn_at +
+					(uint64_t)(g_my - hex_top()) *
+					(uint64_t)per;
+
+			/* The offset column is its own thing to right-click on:
+			 * it names a place, and the bytes name contents. */
+			v->menu_ctx = (g_mx >= base && g_mx < base + 8) ? 2 : 1;
+			v->menu_off = row0 < v->rgn_len
+				      ? (v->off_region ? row0
+						       : view_map(v, row0, 0))
+				      : 0;
 			menu_open_at(v, g_my, g_mx);
 			return;
 		}
@@ -1963,6 +2117,10 @@ static int handle(struct view *v, int k)
 								     : 16));
 		break;
 	}
+	case 'o':
+		/* Both numbers are true; this says which one the column means. */
+		v->off_region = !v->off_region;
+		break;
 	case 'm':
 		v->show_list = !v->show_list && cur_obj(v)->n_touch;
 		v->list_depth = 0;
