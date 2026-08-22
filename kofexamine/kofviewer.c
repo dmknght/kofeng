@@ -869,6 +869,7 @@ struct view {
 	int         f_c0, f_c1, t_c0, t_c1, v_c0, v_c1, g_c0, g_c1;
 	int         n_c0, n_c1;     /* the "+ condition" button */
 	int         sv_c0, sv_c1;   /* "Save As", when there is a file */
+	int         nt_c0, nt_c1;   /* the module's own note */
 	int         rng_c0, rng_c1, m_c0, m_c1, s_c0, s_c1, e_c0, e_c1;
 	int         a_c0, a_c1, b_c0, b_c1, p_c0, p_c1, o_c0, o_c1;
 	int         opt_c0[OPT_COUNT], opt_c1[OPT_COUNT];
@@ -951,7 +952,17 @@ struct view {
 	int         cnd_id0[MAX_GROUP];   /* where its matcher ids start */
 	int         cnd_mt[MAX_GROUP][2];
 	int         row_rng, row_grp;
-	int         pane;           /* 0 tree, 1 hex, 2 markers */
+	int         pane;           /* 0 tree, 1 hex, 2 markers, 3 draft */
+	/*
+	 * What the module says about itself, beside the family and the type.
+	 *
+	 * The two that are already there are a name and an enum; this is the
+	 * sentence neither can hold - which family this really belongs to, why
+	 * the type was chosen, what the sample was. Written into the generated
+	 * source above the declarations, where the next reader meets it before
+	 * any of the logic.
+	 */
+	char        note[200];
 	int         per;            /* bytes a hex row shows, for click mapping */
 };
 
@@ -2380,6 +2391,8 @@ static uint32_t draft_hash(struct view *v)
 			    h = (uint32_t)((uint64_t)h * 16777619u); } while (0)
 	for (i = 0; v->family[i]; i++)
 		MIX((uint8_t)v->family[i]);
+	for (i = 0; v->note[i]; i++)
+		MIX((uint8_t)v->note[i]);
 	MIX(v->maltype);
 	for (i = 0; i < (uint32_t)OPT_COUNT; i++) {
 		MIX(v->opt_on[i]);
@@ -3468,6 +3481,21 @@ static void generate(struct view *v, int as_new)
 	}
 	if (ob->packer[0])
 		fprintf(f, " * Unpacked by: %s\n", ob->packer);
+	/*
+	 * The author's own line about the module, above everything it declares.
+	 *
+	 * Guarded the way every other emitted comment is: the text cannot hold
+	 * a newline, so the only thing to stop is a sequence that would close
+	 * the comment early.
+	 */
+	if (v->note[0]) {
+		const char *q;
+
+		fprintf(f, " *\n * ");
+		for (q = v->note; *q; q++)
+			fputc((*q == '*' && q[1] == '/') ? ' ' : *q, f);
+		fputc('\n', f);
+	}
 	fprintf(f,
 		" */\n\n"
 		"#include <kofmod/kofsig.h>\n\n");
@@ -4276,21 +4304,25 @@ static void draw_decl(struct out *o, struct view *v)
 				? "\033[47;90m" : "\033[42;30m");
 			v->sv_c0 = c; v->sv_c1 = (int)o->col_hint;
 		}
-		/* One slot, and the most urgent thing in it: what is wrong,
-		 * then what is missing, then what would be a duplicate, then
-		 * where this draft lives. */
-		if (v->warn[0])
-			out_fmt(o, "  %s%s" A_OFF, A_BAD, v->warn);
-		else if (why)
-			out_fmt(o, "  %s%s" A_OFF, A_DIM, why);
-		else if (dup)
-			out_fmt(o, "  %s%s %s" A_OFF, near ? A_WARN : A_BAD,
-				near ? "all but one marker of"
-				     : "same markers as", dup);
-		else if (v->gen_path[0])
-			out_fmt(o, "  %s%s%s" A_OFF, A_DIM, v->gen_path,
-				changed ? "  (unsaved)" : "");
+		/*
+		 * What is wrong, what is missing, what would be a duplicate and
+		 * where this draft lives all moved to the status line.
+		 *
+		 * They are a running commentary on the draft, and that belongs
+		 * where the tool's other running commentary is. Beside the
+		 * button they pushed the controls sideways as they changed
+		 * length, on the row that already carries every declaration.
+		 */
+		(void)why; (void)dup; (void)near; (void)changed;
 	}
+
+	/* No label: the box says what it is, and the row is already a line of
+	 * labels. */
+	out_str(o, "  ");
+	c = 1 + (int)o->col_hint;
+	out_fmt(o, "%s[%-.28s]" A_OFF, v->edit == 501 ? A_SEL : A_DIM,
+		v->note[0] ? v->note : "Comment...");
+	v->nt_c0 = c; v->nt_c1 = (int)o->col_hint;
 
 
 	/* The optional declarations, one per row, each removable. */
@@ -4756,6 +4788,10 @@ static void draw_marker_line(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
 	char name[80], head[24], right[120];
+	/* The right hand text is not always a readout: while the draft has the
+	 * focus it can be a complaint, and a complaint in the colour of a
+	 * readout is one people scroll past. */
+	const char *rcol = NULL;
 	uint32_t hit = 0, i;
 
 	/* The rule that closes the draft panel, and so the one that separates
@@ -4820,6 +4856,44 @@ static void draw_marker_line(struct out *o, struct view *v)
 	 * report is written against the other, and which is which is exactly the
 	 * thing that gets confused.
 	 */
+	/*
+	 * The draft's own commentary, while the draft is what is being worked
+	 * on.
+	 *
+	 * Only then: it is about a panel, and shown while the hex pane has the
+	 * focus it would be answering a question nobody asked, in the space the
+	 * selection needs. Same order of urgency it had beside the button -
+	 * what is wrong, then what is missing, then what would be a duplicate,
+	 * then where this draft lives.
+	 */
+	if (v->pane == 3 && g_decl_rows) {
+		const char *why = draft_missing(v);
+		int near = 0;
+		const char *dup = why ? NULL : draft_dup(v, &near);
+
+		if (v->warn[0]) {
+			snprintf(right, sizeof right, "%s", v->warn);
+			rcol = A_BAD;
+		} else if (why) {
+			/* Something required is absent, which is why the
+			 * button is greyed - an error, and coloured as one. */
+			snprintf(right, sizeof right, "%s", why);
+			rcol = A_BAD;
+		} else if (dup) {
+			snprintf(right, sizeof right, "%s %s",
+				 near ? "all but one marker of"
+				      : "same markers as", dup);
+			rcol = near ? A_WARN : A_BAD;
+		}
+		else if (v->gen_path[0])
+			snprintf(right, sizeof right, "%.*s%s",
+				 (int)sizeof right - 12, v->gen_path,
+				 draft_dirty(v) ? "  (unsaved)" : "");
+		else
+			right[0] = 0;
+		if (right[0])
+			goto have_right;
+	}
 	if (v->sel_a != KOF_BROKEN) {
 		uint64_t lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
 		uint64_t hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
@@ -4855,12 +4929,14 @@ static void draw_marker_line(struct out *o, struct view *v)
 		right[0] = 0;
 	}
 
+have_right:
 	if (right[0]) {
 		int at = g_cols - (int)strlen(right) - 1;
 
 		if (at > (int)o->col_hint + 2) {
 			out_at(o, mark_row(), at);
 			out_fmt(o, "%s%s" A_OFF,
+				rcol ? rcol :
 				v->sel_a != KOF_BROKEN ? "\033[44;97m" : A_DIM,
 				right);
 		}
@@ -6343,7 +6419,14 @@ static int bar_under(struct view *v)
  * Regex is drawn and refused. Leaving it out would invite the question every
  * time; drawing it greyed answers it once and marks the place the work goes.
  */
-#define FIND_H 6
+/*
+ * Five rows: a top rule and four of content.
+ *
+ * No bottom rule. The status line already has one directly beneath, and two
+ * horizontal lines with nothing between them read as a mistake rather than as a
+ * frame.
+ */
+#define FIND_H 5
 
 static int find_top(void)
 {
@@ -6419,7 +6502,7 @@ static void draw_find(struct out *o, struct view *v)
 	for (y = top; y < top + FIND_H; y++) {
 		out_at(o, y, 1);
 		out_str(o, A_DIM);
-		if (y == top || y == top + FIND_H - 1) {
+		if (y == top) {
 			out_str(o, "+");
 			for (i = 2; i < g_cols; i++)
 				out_str(o, "-");
@@ -6592,6 +6675,8 @@ static void click(struct view *v, int rclick)
 		v->list_depth = 0;
 		return;
 	}
+	if (g_decl_rows && g_my >= decl_top() && g_my < mark_row())
+		v->pane = 3;
 	if (g_decl_rows && g_my == decl_top()) {
 		if (g_mx >= v->f_c0 && g_mx <= v->f_c1)
 			v->edit = 1;
@@ -6605,6 +6690,8 @@ static void click(struct view *v, int rclick)
 			generate(v, 0);
 		else if (v->sv_c0 > 0 && g_mx >= v->sv_c0 && g_mx <= v->sv_c1)
 			generate(v, 1);
+		else if (g_mx >= v->nt_c0 && g_mx <= v->nt_c1)
+			v->edit = 501;
 		return;
 	}
 	if (g_decl_rows && g_my > decl_top() && g_my < mark_row()) {
@@ -7038,7 +7125,10 @@ static int handle(struct view *v, int k)
 		char *buf;
 		size_t cap, n;
 
-		if (v->edit == 1) {
+		if (v->edit == 501) {
+			buf = v->note;
+			cap = sizeof v->note;
+		} else if (v->edit == 1) {
 			buf = v->family;
 			cap = sizeof v->family;
 		} else if (v->edit >= 300) {
