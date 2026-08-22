@@ -744,10 +744,21 @@ static int lzma_props_of(uint32_t method, unsigned *lc, unsigned *lp, unsigned *
  * that stops early and an object marked incomplete. Neither is trusted: the
  * declared value sizes a buffer and bounds nothing.
  */
+/*
+ * `peek_out` turns this from a producer into a reader.
+ *
+ * When it is set the decoded bytes are copied there and nothing is emitted -
+ * which is the whole difference between unpack and unpack_peek. They share this
+ * function rather than having one each because a second implementation of the
+ * same dispatch is a second thing to get right: the first attempt at peek did
+ * have its own, and on one architecture it decoded the same block to different
+ * bytes than this did. Two paths that must agree, and no mechanism making them.
+ */
 static uint64_t unpack_buffered(struct kof_scanner *sc,
 				const struct kof_obj_ctx *ctx, uint32_t method,
 				int variant, int bits, const uint8_t *in,
-				uint64_t in_len, uint64_t out_hint, uint32_t form)
+				uint64_t in_len, uint64_t out_hint, uint32_t form,
+				uint8_t *peek_out, uint32_t peek_cap)
 {
 	uint64_t room, want, produced = 0, decoded, at;
 	uint8_t *buf;
@@ -874,6 +885,17 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 	 */
 	decoded = produced;
 
+	if (peek_out) {
+		uint64_t n = produced < (uint64_t)peek_cap ? produced
+							  : (uint64_t)peek_cap;
+
+		if (n)
+			memcpy(peek_out, buf, (size_t)n);
+		sc->resident -= want;
+		free(buf);
+		return n;
+	}
+
 	if (form == KOF_FORM_PE_IMAGE && produced) {
 		uint8_t *rebuilt = NULL;
 		uint64_t rebuilt_len = 0;
@@ -917,6 +939,62 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 	 * was decoded and is a different size by construction.
 	 */
 	return at == produced ? decoded : at;
+}
+
+/*
+ * Decode the front of a stream into the caller's buffer.
+ *
+ * A read, not a production: nothing reaches a sink, nothing is charged against
+ * the object ceiling, and a short or damaged stream is the caller's to judge
+ * rather than something recorded against the object. What it is for is a
+ * container whose layout is written in a header the container compressed - see
+ * `unpack_peek` in kofsig.h.
+ *
+ * `cap` is the caller's buffer and the only size involved, so nothing a hostile
+ * object declares can size anything here. The decoders all take an output
+ * bound, and a back reference reaches only bytes already produced, so stopping
+ * at `cap` gives the same first `cap` bytes a full decode would.
+ */
+static uint32_t c_unpack_peek(const struct kof_obj_ctx *ctx, uint32_t method,
+			      uint64_t off, uint64_t len, void *out,
+			      uint32_t cap)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	int variant, bits;
+	kof_buf b;
+
+	if (!sc->cur_src || !out || !cap)
+		return 0;
+	b = kof_src_buf(sc->cur_src);
+	len = kof_clip_len(b.n, off, len);
+	if (!len)
+		return 0;
+
+	/*
+	 * Through the same decode as unpack, with the caller's buffer as the
+	 * destination. `cap` is also the output bound, which matters more than
+	 * it looks: NRV2 has no end marker and stops when the output is full,
+	 * so the size it is given is part of the decode rather than a limit
+	 * around it. A caller wanting the first N bytes of a block must pass
+	 * the block's own declared size, not the size of its buffer.
+	 */
+	if (method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86 ||
+	    method == KOF_UNP_RAR3 || method == KOF_UNP_RAR5)
+		return (uint32_t)unpack_buffered(sc, ctx, method, 0, 0,
+						 b.p + off, len, cap,
+						 KOF_FORM_RAW,
+						 (uint8_t *)out, cap);
+	if (nrv2_of(method, &variant, &bits))
+		return (uint32_t)unpack_buffered(sc, ctx, method, variant, bits,
+						 b.p + off, len, cap,
+						 KOF_FORM_RAW,
+						 (uint8_t *)out, cap);
+	if (method >= KOF_UNP_LZMA)
+		return (uint32_t)unpack_buffered(sc, ctx, method, 0, 0,
+						 b.p + off, len, cap,
+						 KOF_FORM_RAW,
+						 (uint8_t *)out, cap);
+	return 0;      /* a method this engine does not peek into */
 }
 
 static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
@@ -1094,13 +1172,13 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 	if (method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86 ||
 	    method == KOF_UNP_RAR3 || method == KOF_UNP_RAR5)
 		return unpack_buffered(sc, ctx, method, 0, 0, b.p + off, len,
-				       out_hint, form);
+				       out_hint, form, NULL, 0);
 	if (nrv2_of(method, &variant, &bits))
 		return unpack_buffered(sc, ctx, method, variant, bits, b.p + off,
-				       len, out_hint, form);
+				       len, out_hint, form, NULL, 0);
 	if (method >= KOF_UNP_LZMA)
 		return unpack_buffered(sc, ctx, method, 0, 0, b.p + off, len,
-				       out_hint, form);
+				       out_hint, form, NULL, 0);
 
 	return 0;      /* a method this engine does not have */
 }
@@ -1427,14 +1505,15 @@ static void c_name_next(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t le
  */
 static const struct kof_content kof_detect_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
-	c_find_str_in, c_csum, NULL, NULL, NULL, NULL, c_find_str_where,
+	c_find_str_in, c_csum, NULL, NULL, NULL, NULL, NULL, c_find_str_where,
 	NULL, NULL, c_incomplete, NULL
 };
 
 static const struct kof_content kof_unpack_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, c_window, c_emit, c_child, c_unpack,
-	c_find_str_where, c_gather, c_name_next, c_incomplete, c_unpack_entry
+	c_unpack_peek, c_find_str_where, c_gather, c_name_next, c_incomplete,
+	c_unpack_entry
 };
 
 /*

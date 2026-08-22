@@ -435,6 +435,31 @@ struct kof_content {
 			   uint64_t off, uint64_t len, uint64_t out_hint,
 			   uint32_t form);
 
+	/*
+	 * Decode the front of a stream into the module's own buffer.
+	 *
+	 * The same decoders as `unpack`, writing where the caller can read
+	 * instead of into the object being produced. It exists for the case
+	 * where a container's layout is described by a header the container
+	 * itself compressed: UPX writes a chain of blocks whose first one is
+	 * the original ELF header and its program headers, and where the later
+	 * blocks belong is written there and nowhere else. Without this a
+	 * module can produce those bytes but never read them, so it can only
+	 * lay the blocks end to end - which is wrong for every ELF whose
+	 * segments are not adjacent.
+	 *
+	 * Bounded by `cap`, which is the caller's own buffer: nothing is
+	 * allocated, so a length out of the object cannot size anything here.
+	 * A back reference reaches only bytes already produced, so the first
+	 * `cap` bytes decode the same whether or not the rest ever does.
+	 *
+	 * Returns bytes written - less than `cap` when the stream ends first,
+	 * zero when nothing could be decoded.
+	 */
+	uint32_t (*unpack_peek)(const struct kof_obj_ctx *, uint32_t method,
+				uint64_t off, uint64_t len,
+				void *out, uint32_t cap);
+
 	/* Where a declared string is, rather than whether. KOF_BROKEN if absent. */
 	uint64_t (*find_str_where)(const struct kof_obj_ctx *, uint32_t str_id,
 				   uint64_t off, uint64_t len);
@@ -1180,6 +1205,20 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 /* The output is already a file, which is the ordinary case. */
 #define kof_unpack_at(method, off, len, out_hint)                          \
 	kof_unpack_form((method), (off), (len), (out_hint), KOF_FORM_RAW)
+
+/*
+ * Decode the front of a stream into `buf`, for a header that is compressed.
+ *
+ *     uint8_t hdr[512];
+ *     n = kof_unpack_peek(KOF_UNP_NRV2E_8, off, len, hdr, sizeof hdr);
+ *
+ * Reads; produces nothing. See `unpack_peek` above for why it exists.
+ */
+#define kof_unpack_peek(method, off, len, buf, cap)                        \
+	((ctx)->content->unpack_peek ?                                     \
+	 (ctx)->content->unpack_peek((ctx), (uint32_t)(method),            \
+				     (uint64_t)(off), (uint64_t)(len),     \
+				     (buf), (uint32_t)(cap)) : 0u)
 
 /* DEFLATE streams, so it needs no size: spelled out because a gzip or zip module
  * has nothing sensible to pass and should not have to invent one. */

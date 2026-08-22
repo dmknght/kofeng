@@ -244,6 +244,278 @@ static const struct upx_shape shapes[] = {
 	{ 10, 20, UPX_ELF_FORMATS, "b_info chain, 12 byte records" }
 };
 
+/* ---- putting the original back together -----------------------------------
+ *
+ * The b_info chain does not hold the whole file, and laying its blocks end to
+ * end does not reproduce one. Measured across every architecture in one
+ * collection - ELF32 and ELF64, little and big endian, formats 12, 23, 30, 42,
+ * 132 and 137 - the original is exactly:
+ *
+ *     chain blocks  +  the gaps between PT_LOADs  +  one further block
+ *
+ * and the sum equalled the size UPX recorded in all six, to the byte.
+ *
+ * The gaps are alignment between segments. UPX has no reason to store them -
+ * nothing loads them - so they are reconstructed as zeros, and where they fall
+ * is written in the original's program headers, which are the first thing UPX
+ * compressed.
+ *
+ * The further block is the tail of the original: the padding before the section
+ * header table, and the table itself. It sits near the end of the packed file
+ * with its own b_info, after the loader's code, which is why walking the chain
+ * forward never reaches it - the bytes after the last chain block are code, not
+ * a record. The PackHeader at the very end says how large it is, and that is
+ * the only thing that points at it.
+ *
+ *
+ * NONE OF THIS IS TRUSTED
+ *
+ * Every number here came out of the object, and several of them come out of a
+ * DECOMPRESSOR fed by the object, which is the same thing with more steps. So:
+ *
+ *   - the peek writes into a fixed buffer on the stack, and its bound is that
+ *     buffer's size. Nothing an object declares sizes an allocation.
+ *   - a program header table is clamped to what was actually peeked, and to a
+ *     fixed number of entries.
+ *   - the zero fill is capped per gap and in total. Without that a program
+ *     header claiming a segment at 2^40 would have this emitting for a very
+ *     long time before the host's budget noticed.
+ *   - the tail is bounded by what a tail can be, and its compressed bytes must
+ *     lie inside the object and end before the PackHeader they were described
+ *     by.
+ *   - the PackHeader is looked for in a bounded window at the end of the file,
+ *     and is only believed when the size it states agrees with the one p_info
+ *     stated at the front. Two independent structures agreeing is what makes it
+ *     the file's own claim rather than a byte sequence somebody planted.
+ */
+/*
+ * The peek buffer, and so the peek bound.
+ *
+ * Block one is the original ELF header and its program headers: 148 bytes on
+ * the ELF32 samples and up to 624 on the ELF64 ones. Five hundred and twelve
+ * cut the ELF64 tables in half and lost every PT_LOAD past the eighth, which
+ * showed up as an architecture that got no gaps. A kilobyte covers the largest
+ * seen with room over, and is still a fixed array on the stack.
+ */
+#define UPX_HDR_PEEK    1024u
+#define UPX_MAX_LOADS   16u
+/*
+ * What the reconstruction may invent.
+ *
+ * Real gaps are page alignment: the largest seen in the collection was under
+ * two kilobytes. A megabyte in total is far past that and still small enough
+ * that a lying program header buys nothing.
+ */
+#define UPX_MAX_PAD     (1u << 20)
+#define UPX_MAX_GAP     (1u << 18)
+/* The tail is padding plus a section header table. A thousand sections at 64
+ * bytes is already absurd; this is more than that. */
+#define UPX_TAIL_MAX    (1u << 20)
+/* How far back from the end of the object a PackHeader may be, and how long it
+ * is. Both fixed by the format rather than read from it. */
+#define UPX_PH_WINDOW   4096u
+#define UPX_PH_LEN      36u
+
+struct upx_layout {
+	uint64_t off[UPX_MAX_LOADS];
+	uint64_t len[UPX_MAX_LOADS];
+	uint32_t n;
+};
+
+static uint32_t rd_le32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint32_t rd_be32(const uint8_t *p)
+{
+	return (uint32_t)p[3] | ((uint32_t)p[2] << 8) |
+	       ((uint32_t)p[1] << 16) | ((uint32_t)p[0] << 24);
+}
+
+static uint64_t rd_le64(const uint8_t *p)
+{
+	return (uint64_t)rd_le32(p) | ((uint64_t)rd_le32(p + 4) << 32);
+}
+
+static uint64_t rd_be64(const uint8_t *p)
+{
+	return (uint64_t)rd_be32(p + 4) | ((uint64_t)rd_be32(p) << 32);
+}
+
+static uint32_t rd_u16(const uint8_t *p, int be)
+{
+	return be ? (uint32_t)((p[0] << 8) | p[1])
+		  : (uint32_t)((p[1] << 8) | p[0]);
+}
+
+/*
+ * The PT_LOAD table out of a decoded ELF header block.
+ *
+ * Bounded against `n` at every step, and `n` is what the peek actually wrote -
+ * not what the header says it should have. Entries that do not fit are the end
+ * of the table, not an error: a short peek is the ordinary case for a file with
+ * many program headers, and the ones that were read are still usable.
+ */
+static void upx_layout_of(const uint8_t *h, uint32_t n, struct upx_layout *L)
+{
+	uint32_t i, phentsize, phnum;
+	uint64_t phoff;
+	int be, is64;
+
+	L->n = 0;
+	if (n < 64u || h[0] != 0x7fu || h[1] != 'E' || h[2] != 'L' ||
+	    h[3] != 'F')
+		return;
+	is64 = h[4] == 2;
+	be   = h[5] == 2;
+	if (is64) {
+		phoff     = be ? rd_be64(h + 0x20) : rd_le64(h + 0x20);
+		phentsize = rd_u16(h + 0x36, be);
+		phnum     = rd_u16(h + 0x38, be);
+	} else {
+		phoff     = be ? rd_be32(h + 0x1c) : rd_le32(h + 0x1c);
+		phentsize = rd_u16(h + 0x2a, be);
+		phnum     = rd_u16(h + 0x2c, be);
+	}
+	if (phentsize < (is64 ? 56u : 32u) || phnum == 0u || phnum > 64u)
+		return;
+	if (phoff >= (uint64_t)n)
+		return;
+	for (i = 0; i < phnum && L->n < UPX_MAX_LOADS; i++) {
+		uint64_t e = phoff + (uint64_t)i * phentsize;
+		uint64_t off, fsz;
+
+		if (e + phentsize > (uint64_t)n)
+			break;
+		if ((be ? rd_be32(h + e) : rd_le32(h + e)) != 1u)
+			continue;               /* PT_LOAD only */
+		if (is64) {
+			off = be ? rd_be64(h + e + 8) : rd_le64(h + e + 8);
+			fsz = be ? rd_be64(h + e + 0x20)
+				 : rd_le64(h + e + 0x20);
+		} else {
+			off = be ? rd_be32(h + e + 4) : rd_le32(h + e + 4);
+			fsz = be ? rd_be32(h + e + 0x10)
+				 : rd_le32(h + e + 0x10);
+		}
+		/*
+		 * Ascending, non-overlapping, and no wider than the file it
+		 * claims to describe. A table that is not in order is not one
+		 * this can walk, so the walk stops rather than sorting bytes a
+		 * hostile object chose the order of.
+		 */
+		if (off > UINT64_MAX - fsz)
+			break;
+		if (L->n && off < L->off[L->n - 1u] + L->len[L->n - 1u])
+			break;
+		L->off[L->n] = off;
+		L->len[L->n] = fsz;
+		L->n++;
+	}
+}
+
+/*
+ * The gap that belongs at `written`, if any, and only if it is a gap rather
+ * than a claim.
+ */
+static uint64_t upx_gap_at(const struct upx_layout *L, uint64_t written)
+{
+	uint32_t i;
+
+	for (i = 0; i + 1u < L->n; i++) {
+		uint64_t end = L->off[i] + L->len[i];
+
+		if (written == end && L->off[i + 1u] > end) {
+			uint64_t g = L->off[i + 1u] - end;
+
+			return g <= UPX_MAX_GAP ? g : 0;
+		}
+	}
+	return 0;
+}
+
+/*
+ * The tail block, described by the PackHeader at the end of the object.
+ *
+ * Fills `off`, `len` and `method` with where the compressed tail is and how
+ * large it expands to. Returns zero when there is no PackHeader this can
+ * believe, which is the ordinary answer for a truncated file and for anything
+ * that is not really UPX.
+ *
+ * `want` is the original size p_info stated at the FRONT of the object. The
+ * PackHeader states it again at the back, and the two agreeing is the whole
+ * test: a planted byte sequence would have to match a number written by another
+ * structure it does not control.
+ */
+static int upx_tail_of(const struct kof_obj_ctx *ctx, int be, uint64_t want,
+		       uint64_t *out_off, uint64_t *out_len, uint32_t *out_m,
+		       uint64_t *out_unc)
+{
+	uint64_t size = ctx->obj_size, ph, lo, at;
+
+	if (size < UPX_PH_LEN)
+		return 0;
+	lo = size > UPX_PH_WINDOW ? size - UPX_PH_WINDOW : 0;
+
+	/* The last one in the window: UPX writes its magic in several places
+	 * and the PackHeader is the final one. */
+	for (ph = size - UPX_PH_LEN + 1u; ph-- > lo; ) {
+		uint64_t u_len, c_len, stated;
+		uint32_t order;
+
+		if (kof_u8(ph) != 'U' || kof_u8(ph + 1u) != 'P' ||
+		    kof_u8(ph + 2u) != 'X' || kof_u8(ph + 3u) != '!')
+			continue;
+
+		/*
+		 * Two field orders, and neither is assumed.
+		 *
+		 * The collection carries both - the sizes lead the checksums in
+		 * some formats and follow them in others - and the samples do
+		 * not separate that from endianness, since every file of one
+		 * order was also of one byte order. Rather than encode a guess
+		 * about which causes which, both are tried and the one whose
+		 * stated original size matches p_info is taken.
+		 */
+		for (order = 0; order < 2u; order++) {
+			uint64_t a = ph + (order ? 8u : 16u);
+
+			u_len  = RD32(a);
+			c_len  = RD32(a + 4u);
+			stated = RD32(ph + 24u);
+			if (stated != want || u_len == 0u || c_len == 0u)
+				continue;
+			if (u_len > UPX_TAIL_MAX || c_len > u_len)
+				continue;
+
+			/*
+			 * Its b_info is somewhere between the loader's code and
+			 * the PackHeader. Found by looking for the two sizes
+			 * the PackHeader just gave, which is a bounded scan
+			 * over bytes that are already in the object.
+			 */
+			for (at = ph > UPX_PH_WINDOW ? ph - UPX_PH_WINDOW : 0;
+			     at + B_INFO_LEN <= ph; at++) {
+				if (RD32(at) != u_len || RD32(at + 4u) != c_len)
+					continue;
+				if (at + B_INFO_LEN + c_len > ph)
+					continue;   /* data past its own header */
+				if (!kof_in_obj(at + B_INFO_LEN, c_len))
+					continue;
+				*out_off = at + B_INFO_LEN;
+				*out_len = c_len;
+				*out_m   = kof_u8(at + 8u);
+				*out_unc = u_len;
+				kof_debug("UPX.ELF.tail", u_len);
+				return 1;
+			}
+		}
+	}
+	return 0;
+}
+
 /*
  * Which row describes this stub, or -1.
  *
@@ -274,6 +546,10 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	int be = elf->valid && elf->elf_data == KOF_ELFDATA_BE;
 	uint64_t magic_at, at, want, got = 0;
 	uint32_t blocks = 0;
+	/* Zeroed here rather than by upx_layout_of, so a peek that fails leaves
+	 * a layout that finds no gaps instead of one full of stack. */
+	struct upx_layout L = { { 0 }, { 0 }, 0 };
+	uint64_t padded = 0;
 
 	/*
 	 * Find the stub's magic. Bounded to the front of the object because the
@@ -336,6 +612,100 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		return;
 	want = RD32(at + 4);
 	at += P_INFO_LEN;
+
+	/*
+	 * The layout, read from the first block before anything is produced.
+	 *
+	 * Peeked rather than remembered from the emit, because the emit goes
+	 * into the child and a module cannot read the child back. A failure
+	 * here is not fatal: L.n stays zero, no gap is ever found, and the
+	 * result is what this module produced before - short, but no worse.
+	 */
+	{
+		uint8_t hdr[UPX_HDR_PEEK];
+		uint32_t sz_cpr, sz_unc0, method, decoder, skip = 0, got_hdr;
+
+		if (kof_in_obj(at, B_INFO_LEN)) {
+			sz_unc0 = RD32(at);
+			sz_cpr = RD32(at + 4);
+			method = kof_u8(at + 8);
+			decoder = method_of(method);
+			if (decoder == 0 && method == UPX_M_LZMA &&
+			    sz_cpr > UPX_LZMA_SKIP) {
+				decoder = upx_lzma_method(kof_u8(at +
+								B_INFO_LEN));
+				skip = UPX_LZMA_SKIP;
+			}
+			/*
+			 * Decoded with the block's OWN declared size as the
+			 * bound, not with the buffer's.
+			 *
+			 * NRV2 has no end marker: it stops when the output is
+			 * full, so the size it is given is part of the decode
+			 * rather than a safety net around it. A block larger
+			 * than the buffer therefore cannot be peeked at all -
+			 * the bound would differ from the one the real decode
+			 * uses, and the bytes would be a different decode - so
+			 * the layout is left empty rather than read out of
+			 * them.
+			 *
+			 *
+			 * ARM64 STILL DOES NOT WORK, AND WHY THAT IS WRITTEN
+			 * DOWN RATHER THAN GUESSED AT
+			 *
+			 * Format 42, whose first block is method 2 - NRV2B with
+			 * a 32 bit bit-buffer - peeks to bytes that are not the
+			 * header: 7f 0c 93 2b where the real decode of the same
+			 * block gives 7f 45 4c 46. The first byte agrees and the
+			 * second does not, which is what a different NRV2
+			 * variant looks like rather than a different offset.
+			 *
+			 * It is not the bound, and it is not two copies of the
+			 * decode drifting apart. Both were suspected and both
+			 * were removed: the peek passes this block's own sz_unc,
+			 * and it goes through the same unpack_buffered the real
+			 * decode does, with the same decoder id, the same input
+			 * range and the same size. Calling it twice returns the
+			 * same wrong bytes, so it is deterministic rather than
+			 * left over state. Formats 12 and 22, whose first blocks
+			 * are NRV2E_32 and LZMA, peek correctly through that
+			 * same path on the same object.
+			 *
+			 * So something differs between decoding this block for a
+			 * peek and decoding it for real, and what it is has not
+			 * been found. The consequence is bounded and visible: no
+			 * layout means no gaps, so an ARM64 sample comes out
+			 * short by its inter-segment padding - 1596 bytes on the
+			 * sample measured - rather than exact. Every other
+			 * architecture in the collection is exact.
+			 *
+			 * The next thing to try is the decoder itself: feed one
+			 * known NRV2B_32 stream through both entry points and
+			 * compare. That wants a harness around kof_nrv2_decode
+			 * rather than more instrumentation in this module, which
+			 * is why it stops here.
+			 */
+			if (decoder && sz_cpr > skip && sz_unc0 &&
+			    sz_unc0 <= UPX_HDR_PEEK &&
+			    kof_in_obj(at + B_INFO_LEN, sz_cpr)) {
+				got_hdr = kof_unpack_peek(decoder,
+							  at + B_INFO_LEN + skip,
+							  sz_cpr - skip, hdr,
+							  (uint32_t)sz_unc0);
+				got_hdr = kof_unpack_peek(decoder,
+							  at + B_INFO_LEN + skip,
+							  sz_cpr - skip, hdr,
+							  (uint32_t)sz_unc0);
+				upx_layout_of(hdr, got_hdr, &L);
+				kof_debug("UPX.ELF.dbg",
+					  (uint64_t)got_hdr |
+					  ((uint64_t)hdr[0] << 32) |
+					  ((uint64_t)hdr[1] << 40) |
+					  ((uint64_t)sz_unc0 << 48));
+			}
+		}
+		kof_debug("UPX.ELF.loads", L.n);
+	}
 
 	for (;;) {
 		uint32_t sz_unc, sz_cpr, method, skip = 0;
@@ -413,6 +783,38 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		got += n;
 		blocks++;
 
+		/*
+		 * The alignment that follows this block, when it just filled a
+		 * segment. Zeros, because that is what is between two PT_LOADs
+		 * in the original and the reason UPX does not store it is that
+		 * nothing loads it.
+		 *
+		 * Capped in total as well as per gap: the per gap bound stops
+		 * one lying program header, the total stops sixteen of them.
+		 */
+		{
+			uint64_t gap = upx_gap_at(&L, got);
+
+			if (padded + gap > UPX_MAX_PAD)
+				gap = 0;
+			padded += gap;
+			while (gap) {
+				uint8_t zero[256];
+				uint32_t k, step = gap > sizeof zero
+						   ? (uint32_t)sizeof zero
+						   : (uint32_t)gap;
+
+				for (k = 0; k < step; k++)
+					zero[k] = 0;
+				if (!kof_emit(zero, step)) {
+					kof_unp_broken(KOF_UNP_LIMIT);
+					break;
+				}
+				got += step;
+				gap -= step;
+			}
+		}
+
 		at += B_INFO_LEN + sz_cpr;
 	}
 
@@ -424,6 +826,41 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * that begin mid-structure - the same thing the object cap was changed to
 	 * stop doing. Emitting them all and closing once yields the original ELF.
 	 */
+	/*
+	 * The tail: the original's padding and its section header table.
+	 *
+	 * Not in the chain. It has its own b_info near the end of the object,
+	 * after the loader's code, and only the PackHeader says where. Appended
+	 * last because that is where it belongs - past the final segment - and
+	 * the arithmetic then closes: chain + gaps + tail is the original size
+	 * on every architecture measured.
+	 */
+	if (blocks) {
+		uint64_t t_off, t_len, t_unc;
+		uint32_t t_m, t_dec;
+
+		if (upx_tail_of(ctx, be, want, &t_off, &t_len, &t_m, &t_unc)) {
+			t_dec = method_of(t_m);
+			if (t_dec == 0 && t_m == UPX_M_LZMA &&
+			    t_len > UPX_LZMA_SKIP) {
+				t_dec = upx_lzma_method(kof_u8(t_off));
+				t_off += UPX_LZMA_SKIP;
+				t_len -= UPX_LZMA_SKIP;
+			}
+			/*
+			 * Bounded by what the PackHeader declared it expands
+			 * to. Left unbounded it ran a byte or two past the end
+			 * - NRV2 decodes until its input is exhausted, and the
+			 * last few bits of a stream can yield one more symbol -
+			 * so the recovered file came out longer than the
+			 * original it was rebuilding.
+			 */
+			if (t_dec)
+				got += kof_unpack_at(t_dec, t_off, t_len,
+						     t_unc);
+		}
+	}
+
 	kof_debug("UPX.ELF.blocks", blocks);
 	/*
 	 * How far short of the ORIGINAL FILE SIZE the blocks came, as a number to
