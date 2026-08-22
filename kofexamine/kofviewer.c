@@ -41,6 +41,8 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
@@ -294,6 +296,16 @@ static const char *byte_colour(uint8_t c)
  * pane uses to tell zeroes from text. A background keeps both: the class stays
  * the ink, the match becomes the block of colour.
  */
+/*
+ * A section bar in the draft panel, and the status line.
+ *
+ * Bright black behind bright white, so it reads as a rule with words on it
+ * whichever way round the terminal's palette is. Not A_SEL: reverse video means
+ * "this is selected" everywhere else in this file, and a heading that looks
+ * selected is a heading people click.
+ */
+#define A_HEAD  "\033[100;97m"
+
 #define A_SELB  "\033[44;97m"   /* the drag selection */
 #define A_HIT1  "\033[41;97m"   /* counted by the module */
 #define A_HIT2  "\033[43;30m"   /* present, but outside its regions */
@@ -361,8 +373,8 @@ static int mark_row(void) { return g_rows; }
  * counted once: the panel grew three kinds of row after this array was sized,
  * and a table that silently stops short is a panel whose bottom cannot be
  * scrolled to. */
-#define MAX_PROW  (OPT_COUNT + 1 + 1 + MAX_DECL + 1 + 2 * MAX_GROUP + 1 + \
-		   2 * MAX_GROUP)
+#define MAX_PROW  (OPT_COUNT + 1 + 2 + MAX_DECL + 2 + 2 * MAX_GROUP + 2 + \
+		   4 * MAX_GROUP)
 #define MAX_RANGE 8
 
 /* A string that no condition uses yet. Declaring one must not invent a place to
@@ -457,7 +469,7 @@ struct range {
 struct group {
 	int      rule;              /* 0 ALL, 1 ANY, 2 threshold */
 	uint32_t thresh;
-	char     note[80];          /* the author's note, emitted as a comment */
+	char     note[160];         /* the author's note, emitted as a comment */
 	/*
 	 * The range this matcher searches, as a mask.
 	 *
@@ -484,19 +496,33 @@ struct group {
  * concludes nothing itself: it is the gate, and its children are what happens
  * once it holds.
  */
+/*
+ * What a condition concludes.
+ *
+ * LV_NONE is not "undecided" - it is a branch that matched and reports nothing
+ * on purpose, which is the only way to say "these bytes are here and they are
+ * fine" in a chain of alternatives. It also lets a gate stay a gate.
+ */
+enum cnd_level { LV_INFECT = 0, LV_SUSPECT, LV_NONE, LV_COUNT };
+
+static const char *const lvl_word[LV_COUNT] = {
+	"INFECT", "SUSPECT", "No verdict"
+};
+
 struct cond {
 	char     expr[64];          /* over matcher ids */
 	/*
-	 * Why this condition says what it says, in the author's words.
+	 * Two different combinations, and they are not the same question.
 	 *
-	 * Written into the generated source as a comment above the branch. The
-	 * modules in bases/ all carry one - a marker set is a fact, but why
-	 * that set means Mirai and not a false positive is a judgement, and it
-	 * is the judgement the next reader needs and cannot recover from the
-	 * bytes.
+	 * `op` joins the matcher ids INSIDE this condition - "1 and 2" against
+	 * "1 or 2". `join` says how the next condition at this level attaches
+	 * to this one: as an alternative tried only when this one misses, or as
+	 * a separate test made anyway. A join has nothing to combine unless
+	 * there is a sibling below, so it exists only when there is one.
 	 */
-	char     note[80];
-	int      level;             /* 0 INFECT, 1 SUSPECT */
+	int      op;                /* 0 and, 1 or - between this one's ids */
+	int      join;              /* 0 alternative, 1 checked as well */
+	int      level;             /* enum cnd_level */
 	int      var_kind;          /* 0 AUTO, 1 GENERIC, 2 custom */
 	char     variant[48];
 	int      parent;            /* -1 for a top level block */
@@ -530,6 +556,15 @@ struct decl {
  * trigraph replacement, and "??" followed by one of nine characters would become
  * a different character before the compiler ever saw the literal.
  */
+/* A byte that reads as text. Wider than literal_safe on purpose: "?" and a
+ * backslash are part of a string a researcher is looking at even though they
+ * cannot go into a C literal unescaped, and what to do about that is the
+ * declaring step's problem, not the selecting step's. */
+static int byte_text(uint8_t c)
+{
+	return c >= 0x20u && c <= 0x7eu;
+}
+
 static int literal_safe(const uint8_t *b, uint32_t n)
 {
 	uint32_t i;
@@ -567,7 +602,9 @@ enum ch_what {
 	CH_SUBTYPE,     /* the format's subtypes, all of them */
 	CH_WORD,        /* fullword or substring */
 	CH_CASE,        /* case sensitive or not */
-	CH_CMATCH       /* which matcher to put into a condition */
+	CH_CMATCH,      /* which matcher to put into a condition */
+	CH_SWITCH,      /* what to do about unsaved work before switching */
+	CH_LOGIC        /* how the next condition at this level attaches */
 };
 
 struct chooser {
@@ -737,7 +774,7 @@ struct view {
 	 * design: it reflows, fitting fewer bytes per row rather than running
 	 * off the edge.
 	 */
-	uint32_t    tree_hoff, list_hoff;
+	uint32_t    tree_hoff, list_hoff, decl_hoff;
 
 	struct decl  decl[MAX_DECL];
 	uint32_t     n_decl, sel_decl;
@@ -784,6 +821,7 @@ struct view {
 	/* Where the header's controls landed, recorded as they are drawn. */
 	int         f_c0, f_c1, t_c0, t_c1, v_c0, v_c1, g_c0, g_c1;
 	int         n_c0, n_c1;     /* the "+ condition" button */
+	int         sv_c0, sv_c1;   /* "Save As", when there is a file */
 	int         rng_c0, rng_c1, m_c0, m_c1, s_c0, s_c1, e_c0, e_c1;
 	int         a_c0, a_c1, b_c0, b_c1, p_c0, p_c1, o_c0, o_c1;
 	int         opt_c0[OPT_COUNT], opt_c1[OPT_COUNT];
@@ -799,6 +837,21 @@ struct view {
 	uint8_t     prow_kind[MAX_PROW];
 	uint32_t    prow_idx[MAX_PROW];
 	uint32_t    n_prow, prow_off;
+	/*
+	 * How many draft rows the panel is allowed to show, and whether the
+	 * divider is being dragged.
+	 *
+	 * A cap rather than a height, because the panel still shrinks to fit a
+	 * short draft: a researcher who drags the divider down is saying how
+	 * much room the draft may take, not demanding that much blank space
+	 * while it is empty.
+	 */
+	uint64_t    last_click;     /* the byte a click landed on */
+	uint64_t    last_click_ms;  /* and when, so a second one can pair */
+	uint32_t    decl_cap;
+	uint32_t    prow_seen;      /* how tall the draft was last frame */
+	uint32_t    saved_hash;     /* what the draft was when it was written */
+	int         sizing;
 	char        num[24];        /* the size being typed */
 	int         num_fresh;      /* nothing typed into it yet */
 	int         row_cnd, row_str;
@@ -807,7 +860,15 @@ struct view {
 	/* The comment boxes, and the condition's own "+ matcher". Recorded per
 	 * row as they are drawn, because a row that is scrolled out has no
 	 * columns and must not answer a click meant for the one in its place. */
-	int         cnd_nt[MAX_GROUP][2], grp_nt[MAX_GROUP][2];
+	int         grp_nt[MAX_GROUP][2];
+	int         grp_rl[MAX_GROUP][2], grp_rg[MAX_GROUP][2];
+	int         grp_th[MAX_GROUP][2];
+	int         cnd_kid[MAX_GROUP][2];
+	int         cnd_jn[MAX_GROUP][2], cnd_op[MAX_GROUP][2];
+	uint8_t     cseq_kind[4 * MAX_GROUP];
+	uint32_t    cseq_idx[4 * MAX_GROUP];
+	uint32_t    n_cseq;
+	int         cnd_id0[MAX_GROUP];   /* where its matcher ids start */
 	int         cnd_mt[MAX_GROUP][2];
 	int         row_rng, row_grp;
 	int         pane;           /* 0 tree, 1 hex, 2 markers */
@@ -1150,16 +1211,22 @@ static void draw_frame(struct out *o, struct view *v)
 {
 	int i;
 
-	(void)v;
-
 	for (i = hex_top(); i <= hex_bot(); i++) {
 		out_at(o, i, TREE_W + 1);
 		out_str(o, A_DIM "|" A_OFF);
 	}
+	/*
+	 * The divider, which is also the handle that resizes the draft panel.
+	 *
+	 * Marked in the middle rather than announced in a legend: a row of
+	 * dashes with a grip drawn on it is a thing people try to drag, and the
+	 * ones who do not try lose nothing.
+	 */
 	row_start(o, hex_bot() + 1, 1);
-	out_str(o, A_DIM);
+	out_str(o, v->sizing ? A_WARN : A_DIM);
 	for (i = 0; i < g_cols; i++)
-		out_str(o, "-");
+		out_str(o, i >= g_cols / 2 - 3 && i <= g_cols / 2 + 3
+			   ? "=" : "-");
 	out_str(o, A_OFF);
 }
 
@@ -1522,6 +1589,104 @@ static void grp_add(struct view *v)
  * "nest this" gesture: add a condition, give it the gate, then add the ones
  * that live under it.
  */
+/*
+ * Is matcher `m` offerable to condition `c`.
+ *
+ * One predicate rather than two copies of the same three tests: the list that
+ * is shown and the code that acts on the choice used to filter differently -
+ * the list hid the parent's matchers and the action did not - so the nth row of
+ * the list and the nth matcher that passed the action's filter were different
+ * matchers, and picking "2" quietly added 1.
+ */
+static int cmatch_ok(struct view *v, uint32_t c, uint32_t m)
+{
+	if (cnd_uses(&v->cnd[c], m))
+		return 0;
+	/*
+	 * Nor the ones its parent already tests: control only reaches a nested
+	 * condition once the gate above it held, so repeating one of the gate's
+	 * matchers inside is a search that has already been decided.
+	 */
+	if (v->cnd[c].parent >= 0 && cnd_uses(&v->cnd[v->cnd[c].parent], m))
+		return 0;
+	return 1;
+}
+
+/*
+ * What a condition is called on screen: "1)" at the top level, "1-2)" for the
+ * second thing nested inside the first.
+ *
+ * Numbered by position among its siblings rather than by its index in the
+ * array, because the array is creation order and the screen is reading order.
+ * A child called "2)" because it happened to be added second read as a sibling
+ * of "1)" no matter how far it was indented.
+ */
+static void cnd_label(struct view *v, uint32_t i, char *out, size_t cap)
+{
+	uint32_t k, mine = 0, pos = 0;
+
+	if (v->cnd[i].parent < 0) {
+		for (k = 0; k < i; k++)
+			pos += v->cnd[k].parent < 0;
+		snprintf(out, cap, "%u.", pos + 1u);
+		return;
+	}
+	for (k = 0; k < v->n_cnd; k++) {
+		if (v->cnd[k].parent >= 0)
+			continue;
+		pos++;
+		if (k == (uint32_t)v->cnd[i].parent)
+			break;
+	}
+	for (k = 0; k < i; k++)
+		mine += v->cnd[k].parent == v->cnd[i].parent;
+	snprintf(out, cap, "%u.%u.", pos, mine + 1u);
+}
+
+/*
+ * The expression a plain list of ids would produce, for comparing against what
+ * is actually stored.
+ *
+ * The id row can add, remove and re-join, which covers every expression that is
+ * a list. Anything else - a parenthesis, a mix of & and | - was typed, and
+ * rendering that as a list would show a different condition from the one that
+ * will be generated. So when the two disagree, the typed text is what is shown.
+ */
+static void cnd_canon(struct view *v, uint32_t g, char *out, size_t cap)
+{
+	const struct cond *c = &v->cnd[g];
+	size_t at = 0;
+	uint32_t m;
+
+	out[0] = 0;
+	for (m = 0; m < v->n_grp; m++) {
+		if (!cnd_uses(c, m))
+			continue;
+		at += (size_t)snprintf(out + at, cap - at, "%s%u",
+				       at ? (c->op ? "|" : "&") : "", m + 1u);
+	}
+}
+
+/* Is another condition still to come at this one's level, under this parent.
+ * The connector below it is drawn or not drawn on the answer. */
+static int cnd_more_siblings(struct view *v, uint32_t i)
+{
+	uint32_t k;
+
+	for (k = i + 1u; k < v->n_cnd; k++)
+		if (v->cnd[k].parent == v->cnd[i].parent)
+			return 1;
+	return 0;
+}
+
+/* How deep a condition sits. Two levels is the whole of it: a third would be a
+ * tree to navigate, and the logic it would express is already sayable in one
+ * expression box. */
+static int cnd_depth(struct view *v, uint32_t i)
+{
+	return v->cnd[i].parent >= 0 ? 1 : 0;
+}
+
 static void cnd_add(struct view *v, int nested)
 {
 	struct cond *c;
@@ -1754,7 +1919,55 @@ static void emit_note(FILE *f, const char *note, int depth)
 	fputs(" */\n", f);
 }
 
-static void emit_cond(FILE *f, struct view *v, uint32_t i, int depth)
+/* The verdict a condition reports, or nothing when it reports none. */
+static void emit_verdict(FILE *f, const struct cond *c, int depth)
+{
+	int d;
+
+	for (d = 0; d < depth; d++)
+		fputc('\t', f);
+	if (c->level == LV_NONE) {
+		/*
+		 * Matched, reports nothing, and stops.
+		 *
+		 * The stop is the whole of it. Verdicts return, so everything
+		 * after a branch runs only when that branch declined - and a
+		 * branch that declines without returning declines nothing: the
+		 * gate's verdict below would fire anyway. Returning is what
+		 * makes this say "these bytes are here and they are fine".
+		 */
+		fprintf(f, "/* matched, and deliberately reports nothing */\n");
+		for (d = 0; d < depth; d++)
+			fputc('\t', f);
+		fprintf(f, "return;\n");
+		return;
+	}
+	fprintf(f, "KOF_SCAN_%s(", c->level == LV_SUSPECT ? "SUSPECT"
+							  : "INFECT");
+	if (c->var_kind == 2 && c->variant[0])
+		fprintf(f, "\"%s\"", c->variant);
+	else if (c->var_kind == 1)
+		fprintf(f, "KOF_MALVAR_GENERIC");
+	else
+		fprintf(f, "KOF_MALVAR_AUTO");
+	fprintf(f, ");\n");
+}
+
+/*
+ * One branch, and the ones nested under it.
+ *
+ * `chained` makes this an "else if" rather than an "if". Conditions nested
+ * under a gate are alternatives to each other - which variant of the thing the
+ * gate established - so they chain, and the gate's own verdict becomes the else
+ * that catches the case where the gate held and none of the alternatives did.
+ * Without that else a gate with children concluded nothing at all when its
+ * children all missed, which is the one outcome a gate is worth writing for.
+ *
+ * Top level conditions do not chain: they are separate detections that happen
+ * to live in one module, not alternatives to one another.
+ */
+static void emit_cond(FILE *f, struct view *v, uint32_t i, int depth,
+		      int chained)
 {
 	const struct cond *c = &v->cnd[i];
 	uint32_t k;
@@ -1778,32 +1991,60 @@ static void emit_cond(FILE *f, struct view *v, uint32_t i, int depth)
 			 v->grp[k].note);
 		emit_note(f, t, depth);
 	}
-	emit_note(f, c->note, depth);
 	for (d = 0; d < depth; d++)
 		fputc('\t', f);
-	fprintf(f, "if (");
+	fprintf(f, "%sif (", chained ? "else " : "");
 	emit_expr(f, v, c->expr);
 	fprintf(f, ")");
 
 	if (!cnd_children(v, i)) {
+		if (c->level == LV_NONE) {
+			fprintf(f, " {\n");
+			emit_verdict(f, c, depth + 1);
+			for (d = 0; d < depth; d++)
+				fputc('\t', f);
+			fprintf(f, "}\n");
+			return;
+		}
 		fprintf(f, "\n");
-		for (d = 0; d <= depth; d++)
-			fputc('\t', f);
-		fprintf(f, "KOF_SCAN_%s(", c->level ? "SUSPECT" : "INFECT");
-		if (c->var_kind == 2 && c->variant[0])
-			fprintf(f, "\"%s\"", c->variant);
-		else if (c->var_kind == 1)
-			fprintf(f, "KOF_MALVAR_GENERIC");
-		else
-			fprintf(f, "KOF_MALVAR_AUTO");
-		fprintf(f, ");\n");
+		emit_verdict(f, c, depth + 1);
 		return;
 	}
 
 	fprintf(f, " {\n");
-	for (k = 0; k < v->n_cnd; k++)
-		if (v->cnd[k].parent == (int)i)
-			emit_cond(f, v, k, depth + 1);
+	{
+		uint32_t prev = v->n_cnd;
+
+		for (k = 0; k < v->n_cnd; k++) {
+			if (v->cnd[k].parent != (int)i)
+				continue;
+			/*
+			 * Chained or not, as the rule between them says.
+			 *
+			 * It used to be decided by depth - nested siblings
+			 * always chained, top level ones never did - which made
+			 * the same two rows on screen mean two different things
+			 * depending on where they sat.
+			 */
+			emit_cond(f, v, k, depth + 1,
+				  prev < v->n_cnd && !v->cnd[prev].join);
+			prev = k;
+		}
+	}
+	/*
+	 * The gate's own verdict, after the children rather than as an else.
+	 *
+	 * Every KOF_SCAN_INFECT and KOF_SCAN_SUSPECT reports and returns, so a
+	 * child that concluded anything has already left the function - which
+	 * means the statement after the children is reached exactly when none
+	 * of them concluded, which is what a gate's own verdict means.
+	 *
+	 * Written as "else" it bound to the LAST child's if and nothing more:
+	 * with two children it fired whenever the second missed, whatever the
+	 * first had done.
+	 */
+	if (c->level != LV_NONE)
+		emit_verdict(f, c, depth + 1);
 	for (d = 0; d < depth; d++)
 		fputc('\t', f);
 	fprintf(f, "}\n");
@@ -1821,16 +2062,901 @@ static void emit_cond(FILE *f, struct view *v, uint32_t i, int depth)
  * Never into bases/. That directory is the content that ships, and a draft is
  * not content until somebody has looked at it.
  */
-static void generate(struct view *v)
+/*
+ * The draft, as one number.
+ *
+ * Compared against the number at the last save to answer "has this changed" -
+ * the same trick the frame repaint uses, and for the same reason: a flag set by
+ * hand at every place that mutates the draft is a flag that gets missed at the
+ * next place, and the one that gets missed is the one that loses somebody's
+ * work.
+ */
+static uint32_t draft_hash(struct view *v)
 {
+	uint32_t h = 2166136261u, i, j;
+
+	#define MIX(b) do { h ^= (uint32_t)((uint64_t)(b) & 0xffffffffu); \
+			    h = (uint32_t)((uint64_t)h * 16777619u); } while (0)
+	for (i = 0; v->family[i]; i++)
+		MIX((uint8_t)v->family[i]);
+	MIX(v->maltype);
+	for (i = 0; i < (uint32_t)OPT_COUNT; i++) {
+		MIX(v->opt_on[i]);
+		MIX(v->opt_val[i]);
+		MIX(v->opt_val[i] >> 32);
+	}
+	for (i = 0; i < v->n_decl; i++) {
+		const struct decl *d = &v->decl[i];
+
+		MIX(d->len); MIX(d->hex); MIX(d->mask);
+		MIX(d->grp); MIX(d->fullword); MIX(d->icase);
+		for (j = 0; j < d->len; j++)
+			MIX(d->bytes[j]);
+	}
+	for (i = 0; i < v->n_grp; i++) {
+		MIX(v->grp[i].rule); MIX(v->grp[i].thresh); MIX(v->grp[i].mask);
+		for (j = 0; v->grp[i].note[j]; j++)
+			MIX((uint8_t)v->grp[i].note[j]);
+	}
+	for (i = 0; i < v->n_cnd; i++) {
+		const struct cond *c = &v->cnd[i];
+
+		MIX(c->level); MIX(c->var_kind); MIX(c->parent);
+		MIX(c->op); MIX(c->join);
+		for (j = 0; c->expr[j]; j++)
+			MIX((uint8_t)c->expr[j]);
+		for (j = 0; c->variant[j]; j++)
+			MIX((uint8_t)c->variant[j]);
+	}
+	#undef MIX
+	return h;
+}
+
+static int draft_dirty(struct view *v)
+{
+	return draft_hash(v) != v->saved_hash;
+}
+
+/* Throw the draft away. Called before loading another signature into it, and
+ * only once whoever owns the unsaved work has said so. */
+static void draft_clear(struct view *v)
+{
+	uint32_t i;
+
+	for (i = 0; i < v->n_decl; i++)
+		free(v->decl[i].bytes);
+	memset(v->decl, 0, sizeof v->decl);
+	memset(v->grp, 0, sizeof v->grp);
+	memset(v->cnd, 0, sizeof v->cnd);
+	memset(v->opt_on, 0, sizeof v->opt_on);
+	memset(v->opt_val, 0, sizeof v->opt_val);
+	v->n_decl = v->n_grp = v->n_cnd = 0;
+	v->cur_grp = v->cur_cnd = v->sel_decl = 0;
+	v->family[0] = 0;
+	v->maltype = 0;
+	v->gen_path[0] = 0;
+	v->gen_ok = 0;
+	v->prow_off = 0;
+	v->prow_seen = 0;
+}
+
+/* ---- reading a signature back out of its source ---------------------------
+ *
+ * The pack has the strings and the names; it does not have the logic, because
+ * the logic is compiled code. So a rule shown in the panel has to come from the
+ * file it was written in, and the file has to be found: the family names it,
+ * except that a family may name several - bases/signatures/mirai.c and
+ * mirai_42bb.c both declare "Mirai" on purpose - so the line each detection
+ * carries is what settles it.
+ *
+ * Read the restricted way ksigbuilder reads them. Anything this cannot parse is
+ * left out of the draft rather than guessed at, and the panel says how much of
+ * the file it understood.
+ */
+#define SRC_MAX        512u
+#define SRC_MAX_LINES  64u
+
+struct src_ent {
+	char     family[80];
+	char     path[512];
+	uint32_t line[SRC_MAX_LINES];
+	uint32_t n_line;
+	/*
+	 * What this file searches for, independent of how it is written.
+	 *
+	 * A sum of per-string hashes, so reordering the declarations does not
+	 * change it - which is the point: two signatures that look different
+	 * only because their KOF_DEFINE_STRs are in another order are one
+	 * signature written twice, and the database pays for both.
+	 */
+	uint32_t pat;
+	uint32_t n_pat;
+};
+
+static uint32_t pat_of(const uint8_t *b, uint32_t n, int hex)
+{
+	uint32_t h = 2166136261u, i;
+
+	for (i = 0; i < n; i++) {
+		h ^= b[i];
+		h = (uint32_t)((uint64_t)h * 16777619u);
+	}
+	h ^= (uint32_t)hex;
+	return h ? h : 1u;
+}
+
+static struct src_ent *g_src;
+static uint32_t        g_n_src;
+static int             g_src_done;
+
+static int src_read(const char *path, struct src_ent *out)
+{
+	FILE *f = fopen(path, "r");
+	char line[1024];
+	uint32_t lineno = 0;
+
+	if (!f)
+		return 0;
+	out->family[0] = 0;
+	out->n_line = 0;
+	out->pat = 0;
+	out->n_pat = 0;
+	while (fgets(line, sizeof line, f)) {
+		char *p, *q;
+		size_t n = 0;
+
+		lineno++;
+		if (!out->family[0] &&
+		    (p = strstr(line, "KOF_TARGET_NAME(")) != NULL &&
+		    (p = strchr(p, ',')) != NULL &&
+		    (q = strchr(p, '"')) != NULL) {
+			for (q++; *q && *q != '"' &&
+			     n + 1 < sizeof out->family; q++)
+				out->family[n++] = *q;
+			out->family[n] = 0;
+		}
+		if ((strstr(line, "KOF_SCAN_INFECT(") ||
+		     strstr(line, "KOF_SCAN_SUSPECT(")) &&
+		    out->n_line < SRC_MAX_LINES)
+			out->line[out->n_line++] = lineno;
+		if ((p = strstr(line, "KOF_DEFINE_STR(")) != NULL ||
+		    (p = strstr(line, "KOF_DEFINE_HEXSTR(")) != NULL) {
+			int hex = strstr(line, "KOF_DEFINE_HEXSTR(") != NULL;
+			char text[512];
+
+			if ((q = strchr(p, '"')) != NULL) {
+				size_t m = 0;
+
+				for (q++; *q && *q != '"' &&
+				     m + 1 < sizeof text; q++)
+					text[m++] = *q;
+				text[m] = 0;
+				out->pat += pat_of((const uint8_t *)text,
+						   (uint32_t)m, hex);
+				out->n_pat++;
+			}
+		}
+	}
+	fclose(f);
+	return out->family[0] != 0;
+}
+
+static void src_scan(const char *dir, int depth)
+{
+	DIR *d = opendir(dir);
+	struct dirent *e;
+
+	if (!d || depth > 4)
+		return;
+	while ((e = readdir(d)) != NULL) {
+		char path[512];
+		struct stat st;
+		size_t n;
+
+		if (e->d_name[0] == '.')
+			continue;
+		if ((size_t)snprintf(path, sizeof path, "%s/%s", dir,
+				     e->d_name) >= sizeof path)
+			continue;
+		if (stat(path, &st) != 0)
+			continue;
+		if (S_ISDIR(st.st_mode)) {
+			src_scan(path, depth + 1);
+			continue;
+		}
+		n = strlen(e->d_name);
+		if (n < 3 || strcmp(e->d_name + n - 2, ".c") != 0)
+			continue;
+		if (g_n_src >= SRC_MAX)
+			break;
+		snprintf(g_src[g_n_src].path, sizeof g_src[0].path, "%s", path);
+		if (src_read(path, &g_src[g_n_src]))
+			g_n_src++;
+	}
+	closedir(d);
+}
+
+/* The file a fired module was written in, by family and by the line one of its
+ * detections sits on. NULL when the tree does not hold it. */
+static const char *src_of(struct view *v, const struct kof_touch *t)
+{
+	uint32_t i, j, k;
+
+	if (!g_src_done) {
+		g_src_done = 1;
+		g_src = calloc(SRC_MAX, sizeof *g_src);
+		if (g_src)
+			src_scan(v->basedir, 0);
+	}
+	if (!g_src || !t->family)
+		return NULL;
+	for (i = 0; i < g_n_src; i++) {
+		if (strcmp(g_src[i].family, t->family) != 0)
+			continue;
+		for (j = 0; j < t->n_names; j++)
+			for (k = 0; k < g_src[i].n_line; k++)
+				if (g_src[i].line[k] == t->name_id[j])
+					return g_src[i].path;
+	}
+	return NULL;
+}
+
+static uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off);
+
+/*
+ * Turn one signature source into a draft.
+ *
+ * Line oriented, and deliberately narrow: it reads the shapes ksigbuilder
+ * accepts and nothing else. A construct it does not recognise is skipped rather
+ * than approximated, because a draft that quietly differs from the file it came
+ * from is worse than one that is visibly short of it.
+ */
+struct sname { char id[40]; uint32_t idx; };
+
+static uint32_t src_mask_of(const struct kof_inspect_fmt *fmt, const char *e)
+{
+	uint32_t m = 0, k;
+
+	if (strstr(e, "KOF_SCAN_ALL"))
+		return KOF_SCAN_ALL;
+	if (!fmt)
+		return 0;
+	for (k = 0; k < fmt->n_regions; k++) {
+		const char *w = fmt->region_name(fmt->regions[k]);
+
+		if (w && strstr(e, w))
+			m |= fmt->regions[k];
+	}
+	return m;
+}
+
+/* The text between the first pair of quotes, unescaped only as far as
+ * ksigbuilder unescapes it - which is not at all. */
+static int src_quoted(const char *p, char *out, size_t cap)
+{
+	const char *q = strchr(p, '"');
+	size_t n = 0;
+
+	if (!q)
+		return 0;
+	for (q++; *q && *q != '"'; q++)
+		if (n + 1 < cap)
+			out[n++] = *q;
+	out[n] = 0;
+	return *q == '"';
+}
+
+static uint32_t src_str_idx(struct sname *tab, uint32_t n, const char *id)
+{
+	uint32_t i;
+
+	for (i = 0; i < n; i++)
+		if (!strcmp(tab[i].id, id))
+			return tab[i].idx;
+	return 0xffffffffu;
+}
+
+/* One identifier out of a comma list, trimmed. Returns where to carry on. */
+static const char *src_ident(const char *p, char *out, size_t cap)
+{
+	size_t n = 0;
+
+	while (*p == ' ' || *p == '\t' || *p == ',')
+		p++;
+	while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+	       (*p >= '0' && *p <= '9') || *p == '_') {
+		if (n + 1 < cap)
+			out[n++] = *p;
+		p++;
+	}
+	out[n] = 0;
+	return p;
+}
+
+static int draft_from_source(struct view *v, const char *path)
+{
+	FILE *f = fopen(path, "r");
+	char line[1024], pend[160];
+	struct sname str[MAX_DECL];
+	struct { char id[48]; uint32_t mask; } rng[8];
+	uint32_t n_str = 0, n_rng = 0, i;
+	const struct kof_inspect_fmt *fmt = cur_obj(v)->fmt;
+	/*
+	 * Which condition owns each brace depth, so a verdict lands on the one
+	 * whose body it is in.
+	 *
+	 * A bare KOF_SCAN_ line after the children is the enclosing condition's
+	 * own verdict; one that follows an if with no brace belongs to that if.
+	 * Attaching every verdict to the last condition seen put the gate's
+	 * fallback onto its final child, which reads as the wrong branch of the
+	 * wrong rule.
+	 */
+	int owner[8];
+	int depth = 0, body = 0, cur = -1, parent = -1, skipped = 0;
+	int pend_if = -1;
+
+	if (!f)
+		return 0;
+	pend[0] = 0;
+	for (i = 0; i < sizeof owner / sizeof owner[0]; i++)
+		owner[i] = -1;
+	while (fgets(line, sizeof line, f)) {
+		char *p;
+
+		/* A comment on its own line belongs to whatever comes next -
+		 * which is how the generator wrote it and how the modules in
+		 * bases/ are written by hand. */
+		if ((p = strstr(line, "/*")) != NULL &&
+		    strstr(line, "*/") != NULL) {
+			char *q = strstr(p, "*/");
+			size_t n = 0;
+
+			for (p += 2; p < q && n + 1 < sizeof pend; p++)
+				if (n || (*p != ' ' && *p != '\t'))
+					pend[n++] = *p;
+			while (n && (pend[n - 1] == ' ' || pend[n - 1] == '\t'))
+				n--;
+			pend[n] = 0;
+			continue;
+		}
+		if (strstr(line, "/*") || strstr(line, "*/") ||
+		    strstr(line, " * ")) {
+			continue;               /* a block comment; skip it */
+		}
+
+		if ((p = strstr(line, "KOF_TARGET_NAME(")) != NULL) {
+			char w[48];
+			uint32_t k;
+
+			src_ident(p + 16, w, sizeof w);
+			for (k = 0; k < MALTYPE_N; k++) {
+				char t[48];
+
+				snprintf(t, sizeof t, "KOF_MALTYPE_%s",
+					 maltype_word[k]);
+				if (!strcasecmp(t, w))
+					v->maltype = k;
+			}
+			src_quoted(p, v->family, sizeof v->family);
+			continue;
+		}
+		if ((p = strstr(line, "KOF_TARGET_RANGE(")) != NULL &&
+		    n_rng < sizeof rng / sizeof rng[0]) {
+			const char *q = src_ident(p + 17, rng[n_rng].id,
+						  sizeof rng[0].id);
+
+			rng[n_rng].mask = src_mask_of(fmt, q);
+			n_rng++;
+			continue;
+		}
+		if ((p = strstr(line, "KOF_TARGET_SIZE_MIN(")) != NULL) {
+			v->opt_on[OPT_SIZE_MIN] = 1;
+			v->opt_val[OPT_SIZE_MIN] = strtoull(p + 20, NULL, 0);
+			continue;
+		}
+		if ((p = strstr(line, "KOF_DEFINE_STR(")) != NULL ||
+		    (p = strstr(line, "KOF_DEFINE_HEXSTR(")) != NULL) {
+			int hex = strstr(line, "KOF_DEFINE_HEXSTR(") != NULL;
+			char text[512];
+			struct decl *d;
+
+			if (v->n_decl >= MAX_DECL || n_str >= MAX_DECL)
+				continue;
+			d = &v->decl[v->n_decl];
+			memset(d, 0, sizeof *d);
+			src_ident(strchr(p, '(') + 1, str[n_str].id,
+				  sizeof str[0].id);
+			if (!src_quoted(p, text, sizeof text))
+				continue;
+			if (hex) {
+				size_t n = strlen(text) / 2u, k;
+
+				d->bytes = malloc(n ? n : 1u);
+				if (!d->bytes)
+					continue;
+				for (k = 0; k < n; k++) {
+					char b[3];
+
+					b[0] = text[k * 2u];
+					b[1] = text[k * 2u + 1u];
+					b[2] = 0;
+					d->bytes[k] = (uint8_t)strtoul(b, NULL,
+								       16);
+				}
+				d->len = (uint32_t)n;
+				d->hex = 1;
+			} else {
+				d->len = (uint32_t)strlen(text);
+				d->bytes = malloc(d->len ? d->len : 1u);
+				if (!d->bytes)
+					continue;
+				memcpy(d->bytes, text, d->len);
+				d->icase = strstr(line, "KOF_CASE_ICASE") != 0;
+				d->fullword = strstr(line,
+						     "KOF_WORD_FULLWORD") != 0;
+			}
+			d->obj = v->node[v->sel_node].obj;
+			d->grp = GRP_NONE;
+			snprintf(d->rgn, sizeof d->rgn, "-");
+			str[n_str].idx = v->n_decl;
+			n_str++;
+			v->n_decl++;
+			continue;
+		}
+
+		if (strstr(line, "kof_scan(") || strstr(line, "KOF_DEFINE_SCAN"))
+			body = 1;
+		if (!body)
+			continue;
+
+		if (strstr(line, "if (") || strstr(line, "if(")) {
+			struct cond *c;
+
+			if (v->n_cnd >= MAX_GROUP) {
+				skipped++;
+				continue;
+			}
+			c = &v->cnd[v->n_cnd];
+			memset(c, 0, sizeof *c);
+			c->parent = parent;
+			c->level = LV_NONE;
+			c->op = strstr(line, "||") != NULL;
+			/*
+			 * How the previous condition at this level joins to
+			 * this one, read off the source rather than assumed:
+			 * "else if" chains, a fresh "if" does not. Assuming
+			 * one turned three independent branches into a chain
+			 * on the way back out - the same behaviour, since
+			 * verdicts return, but not the same file.
+			 */
+			if (cur >= 0 && v->cnd[cur].parent == parent)
+				v->cnd[cur].join = strstr(line, "else") == NULL;
+			cur = (int)v->n_cnd;
+			pend_if = cur;
+			v->n_cnd++;
+			/* `pend` is left alone: the comment above a branch
+			 * describes the search it makes, and the search is the
+			 * matcher on the same line. */
+		}
+		if ((p = strstr(line, "kof_find_str_")) != NULL) {
+			/*
+			 * One call is one matcher, which is exactly the rule
+			 * the panel is built on - a matcher is a single
+			 * find_all/find_any/find_multi over one range.
+			 */
+			const char *q = p + 13;
+			char id[48];
+			struct group *g;
+			int rule = 0;
+
+			if (!strncmp(q, "any", 3))
+				rule = 1;
+			else if (!strncmp(q, "multi", 5))
+				rule = 2;
+			if (v->n_grp >= MAX_GROUP || cur < 0) {
+				skipped++;
+				continue;
+			}
+			g = &v->grp[v->n_grp];
+			memset(g, 0, sizeof *g);
+			g->rule = rule;
+			q = strchr(p, '(');
+			if (!q)
+				continue;
+			q = src_ident(q + 1, id, sizeof id);
+			for (i = 0; i < n_rng; i++)
+				if (!strcmp(rng[i].id, id))
+					g->mask = rng[i].mask;
+			while (*q == ',' || *q == ' ') {
+				char sid[48];
+				uint32_t k;
+
+				q = src_ident(q, sid, sizeof sid);
+				if (!sid[0])
+					break;
+				k = src_str_idx(str, n_str, sid);
+				if (k < v->n_decl)
+					v->decl[k].grp = v->n_grp;
+				while (*q == ' ')
+					q++;
+			}
+			if (rule == 2) {
+				const char *ge = strstr(p, ">=");
+
+				g->thresh = ge ? (uint32_t)strtoul(ge + 2, NULL,
+								   10) : 2u;
+			}
+			if (pend[0]) {
+				snprintf(g->note, sizeof g->note, "%s", pend);
+				pend[0] = 0;
+			}
+			{
+				size_t l = strlen(v->cnd[cur].expr);
+
+				snprintf(v->cnd[cur].expr + l,
+					 sizeof v->cnd[0].expr - l, "%s%u",
+					 l ? (v->cnd[cur].op ? "|" : "&") : "",
+					 v->n_grp + 1u);
+			}
+			v->n_grp++;
+		}
+
+		if (strstr(line, "KOF_SCAN_INFECT(") ||
+		    strstr(line, "KOF_SCAN_SUSPECT(")) {
+			/*
+			 * An "else" on its own before it is the old shape this
+			 * tool used to write, where the gate's fallback was
+			 * bound to the last child's if. It was meant as the
+			 * gate's, so that is where it goes.
+			 */
+			int at = pend_if >= 0 ? pend_if
+				 : (depth > 0 && depth < 8 ? owner[depth] : -1);
+
+			if (at < 0)
+				at = cur;
+			if (at >= 0) {
+				struct cond *c = &v->cnd[at];
+
+				c->level = strstr(line, "SUSPECT")
+					   ? LV_SUSPECT : LV_INFECT;
+				if (strstr(line, "KOF_MALVAR_GENERIC"))
+					c->var_kind = 1;
+				else if (strchr(line, '"')) {
+					c->var_kind = 2;
+					src_quoted(line, c->variant,
+						   sizeof c->variant);
+				}
+			}
+			pend_if = -1;
+		}
+		for (p = line; *p; p++) {
+			if (*p == '{' && body) {
+				depth++;
+				if (depth < 8)
+					owner[depth] = cur;
+				if (depth > 1 && cur >= 0)
+					parent = cur;
+				pend_if = -1;   /* it opened a block */
+			} else if (*p == '}' && body) {
+				if (depth < 8 && depth >= 0)
+					owner[depth] = -1;
+				depth--;
+				if (depth <= 1)
+					parent = -1;
+			}
+		}
+	}
+	fclose(f);
+
+	/*
+	 * A string's region column, filled from the matcher that searches it.
+	 *
+	 * The source says where each matcher looks, not where each string is -
+	 * and where it looks is the fact the table is for. A string no matcher
+	 * claimed keeps its dash, which is the truthful answer.
+	 */
+	for (i = 0; i < v->n_decl; i++) {
+		struct decl *d = &v->decl[i];
+
+		if (d->grp == GRP_NONE || d->grp >= v->n_grp || d->mask)
+			continue;
+		d->mask = v->grp[d->grp].mask;
+		if (d->mask)
+			rng_name_of(fmt, d->mask, d->rgn, sizeof d->rgn);
+	}
+	return skipped ? -1 : 1;
+}
+
+/*
+ * Fill the draft from a signature that fired on this object.
+ *
+ * The point is a starting position, not a copy: a researcher writing a variant
+ * begins from what the existing rule already knows about the family, and typing
+ * its strings back in by hand is the tedious half of that.
+ *
+ * What comes across is everything the database holds - the family, the type,
+ * each declared string with its case and word handling, and the region each one
+ * was actually found in. What does not is the logic. A module's conditions are
+ * compiled code; the pack keeps the strings and the names, not which of them
+ * were required together or in what combination. So they all land in one
+ * find_all and the row says so, for the researcher to take apart.
+ */
+static void draft_from_touch(struct view *v, const struct kof_touch *t)
+{
+	uint32_t i;
+
+	if (!t)
+		return;
+	{
+		/* Through a local: the family may be a pointer into the very
+		 * object being written to, and snprintf may not overlap. */
+		char fam[64];
+
+		snprintf(fam, sizeof fam, "%s", t->family ? t->family : "");
+		snprintf(v->family, sizeof v->family, "%s", fam);
+	}
+	for (i = 0; i < MALTYPE_N; i++)
+		if (t->maltype == i)
+			v->maltype = i;
+
+	for (i = 0; i < t->n_str && v->n_decl < MAX_DECL; i++) {
+		const struct kof_touch_str *st = &t->str[i];
+		struct decl *d = &v->decl[v->n_decl];
+
+		if (!st->len)
+			continue;
+		memset(d, 0, sizeof *d);
+		d->bytes = malloc(st->len);
+		if (!d->bytes)
+			break;
+		memcpy(d->bytes, st->bytes, st->len);
+		d->len = st->len;
+		d->hex = st->kind == KOF_STR_HEX;
+		d->icase = (st->flags & KOF_STR_ICASE) != 0;
+		d->fullword = (st->flags & KOF_STR_FULLWORD) != 0;
+		d->obj = v->node[v->sel_node].obj;
+		/*
+		 * The region it is in, not the region the module named: the
+		 * module's range is not in the pack either, and where the bytes
+		 * turned out to be is a fact this can check.
+		 */
+		/*
+		 * Zero, not whole-file, when the string is not in this object.
+		 *
+		 * A marker that is absent has no region, and calling that
+		 * whole-file made one absent string widen the whole matcher's
+		 * range to the entire file - the opposite of what the range is
+		 * for. A zero contributes nothing to the derived range and the
+		 * row shows it as unknown.
+		 */
+		d->mask = 0;
+		snprintf(d->rgn, sizeof d->rgn, "-");
+		if (st->at != KOF_BROKEN) {
+			uint32_t k = node_at(v, d->obj, st->at);
+
+			if (k < v->n_node && v->node[k].mask) {
+				/* Both live in `v`, and snprintf may not be
+				 * given a source that overlaps its
+				 * destination. */
+				char lab[48];
+
+				d->mask = v->node[k].mask;
+				snprintf(lab, sizeof lab, "%s",
+					 v->node[k].label);
+				snprintf(d->rgn, sizeof d->rgn, "%.23s", lab);
+			}
+		}
+		d->grp = 0;
+		v->n_decl++;
+	}
+	if (!v->n_decl)
+		return;
+
+	memset(&v->grp[0], 0, sizeof v->grp[0]);
+	v->n_grp = 1;
+	v->cur_grp = 0;
+	snprintf(v->grp[0].note, sizeof v->grp[0].note,
+		 "from %s - the database keeps the strings, not the logic",
+		 t->family[0] ? t->family : "the database");
+
+	memset(&v->cnd[0], 0, sizeof v->cnd[0]);
+	snprintf(v->cnd[0].expr, sizeof v->cnd[0].expr, "1");
+	v->cnd[0].parent = -1;
+	v->cnd[0].level = LV_INFECT;
+	v->n_cnd = 1;
+	v->cur_cnd = 0;
+	snprintf(v->warn, sizeof v->warn,
+		 "loaded %u string(s) from %s - check the matcher, the logic is "
+		 "not in the database", v->n_decl,
+		 t->family[0] ? t->family : "the database");
+	v->saved_hash = draft_hash(v);
+}
+
+/*
+ * Show a signature that fired on this object, in place of whatever is in the
+ * panel.
+ *
+ * Refuses while there is unsaved work and says so instead; the caller asks
+ * again once that has been settled. Losing an hour of drafting to a click on a
+ * list is the kind of thing a tool only has to do once.
+ */
+static void draft_show(struct view *v, uint32_t idx)
+{
+	struct object *ob = cur_obj(v);
+
+	if (idx >= ob->n_touch)
+		return;
+	draft_clear(v);
+	v->sel_touch = idx;
+
+	/*
+	 * The source first, and the database only when there is no source.
+	 *
+	 * The database holds the strings and the names; the logic is compiled
+	 * code and is not in it. A rule shown from the database alone has every
+	 * marker in one find_all and one branch under it, which is a shape the
+	 * module may never have had - so it is the fallback, and it says so.
+	 */
+	{
+		const char *path = src_of(v, &ob->touch[idx]);
+		int rc = path ? draft_from_source(v, path) : 0;
+
+		if (rc) {
+			/*
+			 * A draft that came from a file belongs to that file:
+			 * generating writes it back rather than starting a
+			 * numbered copy beside it. Opening a signature in order
+			 * to change it is a deliberate act, which is the thing
+			 * the do-not-overwrite rule exists to tell apart from
+			 * a name that happened to collide.
+			 */
+			snprintf(v->gen_path, sizeof v->gen_path, "%.*s",
+				 (int)sizeof v->gen_path - 1, path);
+			v->gen_ok = 1;
+			v->saved_hash = draft_hash(v);
+			/* The path shows on its own; `warn` is for things that
+			 * are wrong, and a loaded file is not one. */
+			v->warn[0] = 0;
+			if (rc < 0)
+				snprintf(v->warn, sizeof v->warn,
+					 "only partly read - check it against "
+					 "the file");
+			return;
+		}
+		draft_from_touch(v, &ob->touch[idx]);
+	}
+}
+
+/*
+ * A signature in the tree that searches for the same thing as this draft.
+ *
+ * Order independent, and independent of the names and the comments, because a
+ * duplicate rarely looks like one: the usual way to make one is to write the
+ * same markers again from the same sample under a slightly different family.
+ * Its own file does not count as a duplicate of itself.
+ *
+ * Returns the path, or NULL. Also reports a near miss - the same patterns bar
+ * one - because that is a variant that should have been a branch of the
+ * existing rule rather than a second rule.
+ */
+static const char *draft_dup(struct view *v, int *near)
+{
+	uint32_t pat = 0, n = 0, i;
+
+	if (near)
+		*near = 0;
+	if (!g_src || !v->n_decl)
+		return NULL;
+	for (i = 0; i < v->n_decl; i++) {
+		pat += pat_of(v->decl[i].bytes, v->decl[i].len,
+			      v->decl[i].hex);
+		n++;
+	}
+	for (i = 0; i < g_n_src; i++) {
+		if (v->gen_path[0] && !strcmp(g_src[i].path, v->gen_path))
+			continue;
+		if (!g_src[i].n_pat)
+			continue;
+		if (g_src[i].pat == pat && g_src[i].n_pat == n)
+			return g_src[i].path;
+	}
+	/*
+	 * Nothing identical. A file with all but one of these patterns is worth
+	 * naming too, and is found by dropping each of ours in turn - cheap at
+	 * these sizes, and the answer a researcher wants before adding a rule
+	 * that mostly repeats one.
+	 */
+	for (i = 0; i < g_n_src && near; i++) {
+		uint32_t k;
+
+		if (v->gen_path[0] && !strcmp(g_src[i].path, v->gen_path))
+			continue;
+		if (g_src[i].n_pat + 1u != n && g_src[i].n_pat != n + 1u)
+			continue;
+		for (k = 0; k < v->n_decl; k++) {
+			uint32_t less = pat - pat_of(v->decl[k].bytes,
+						     v->decl[k].len,
+						     v->decl[k].hex);
+
+			if (g_src[i].pat == less &&
+			    g_src[i].n_pat + 1u == n) {
+				*near = 1;
+				return g_src[i].path;
+			}
+		}
+	}
+	return NULL;
+}
+
+/*
+ * Why the draft cannot be generated yet, or NULL when it can.
+ *
+ * Checked as a whole rather than at the button, because the answer is also the
+ * thing to say: a greyed control with no reason beside it is a control people
+ * click repeatedly. The order is the order the work is done in, so the message
+ * names the next thing to do rather than the last thing missing.
+ */
+static const char *draft_missing(struct view *v)
+{
+	uint32_t i;
+
+	if (!v->family[0])
+		return "name the family";
+	if (!v->n_decl)
+		return "declare a string";
+	if (!v->n_grp)
+		return "add a matcher";
+	for (i = 0; i < v->n_grp; i++)
+		if (!grp_count(v, i))
+			return "every matcher needs a string";
+	if (!v->n_cnd)
+		return "add a condition";
+	for (i = 0; i < v->n_cnd; i++)
+		if (!v->cnd[i].expr[0])
+			return "every condition needs a matcher";
+	return NULL;
+}
+
+static void generate(struct view *v, int as_new)
+{
+	{
+		/*
+		 * The button is greyed when this returns something, but the
+		 * key that also runs it is not - and a draft that is short of
+		 * a matcher would otherwise be written out as a module that
+		 * searches for nothing.
+		 */
+		const char *why = draft_missing(v);
+		int near = 0;
+		const char *dup;
+
+		if (why) {
+			snprintf(v->warn, sizeof v->warn, "%s first", why);
+			return;
+		}
+		dup = draft_dup(v, &near);
+		if (dup && !near) {
+			snprintf(v->warn, sizeof v->warn,
+				 "same markers as %s - edit that instead",
+				 dup);
+			return;
+		}
+		if (as_new && !draft_dirty(v)) {
+			snprintf(v->warn, sizeof v->warn,
+				 "nothing changed - a copy would be a "
+				 "duplicate");
+			return;
+		}
+	}
 	struct object *ob = &v->obj[v->decl[0].obj];
 	char path[400], safe[48];
 	uint32_t i, k;
 	FILE *f;
 	size_t j = 0;
 
-	v->gen_path[0] = 0;
-	v->gen_ok = 0;
+	/* Kept, not cleared: it is the answer to "which file is this draft's",
+	 * and clearing it here made every generate look like the first one -
+	 * so a draft opened from a file wrote a numbered copy beside it. */
 	if (!v->n_decl || !v->family[0])
 		return;
 
@@ -1863,7 +2989,38 @@ static void generate(struct view *v)
 				 "cannot create %s", dir);
 			return;
 		}
-		snprintf(path, sizeof path, "%s/%s.c", dir, safe);
+		/*
+		 * A file this session created, or a name nothing is using.
+		 *
+		 * Two families are often written from the same sample and a
+		 * researcher writes several drafts for one family, so a name
+		 * colliding is normal rather than exceptional - and silently
+		 * overwriting somebody's signature because the family matched
+		 * is not a thing to do quietly.
+		 *
+		 * So: whatever this draft has already been written to stays
+		 * its file, and generate keeps updating it. Otherwise the
+		 * first unused name of Mirai.c, Mirai_01.c, Mirai_02.c is
+		 * taken. Nothing this session did not create is touched.
+		 */
+		v->gen_ok = 0;
+		if (!as_new && v->gen_path[0] &&
+		    !strncmp(v->gen_path, dir, strlen(dir))) {
+			snprintf(path, sizeof path, "%.*s",
+				 (int)sizeof path - 1, v->gen_path);
+		} else {
+			unsigned n;
+
+			snprintf(path, sizeof path, "%s/%s.c", dir, safe);
+			for (n = 0; n < 100u; n++) {
+				struct stat es;
+
+				if (stat(path, &es) != 0)
+					break;
+				snprintf(path, sizeof path, "%s/%s_%02u.c",
+					 dir, safe, n);
+			}
+		}
 	}
 	f = fopen(path, "w");
 	if (!f) {
@@ -2020,7 +3177,11 @@ static void generate(struct view *v)
 		}
 	}
 
-	fprintf(f, "\nKOF_DEFINE_SCAN\n{\n");
+	/* Spelled out rather than through KOF_DEFINE_SCAN. The macro expands to
+	 * exactly this, and every module in bases/ writes it this way - a
+	 * generated file that does not look like the hand written ones is a
+	 * file people hesitate to edit. */
+	fprintf(f, "\nvoid kof_scan(const struct kof_obj_ctx *ctx)\n{\n");
 	/*
 	 * A maximum size is a line in the body, not a declaration.
 	 *
@@ -2041,9 +3202,17 @@ static void generate(struct view *v)
 	 * shape bases/signatures/lkm_rootkit_general.c is written in, and it is
 	 * only sayable because a matcher carries no verdict of its own.
 	 */
-	for (k = 0; k < v->n_cnd; k++)
-		if (v->cnd[k].parent < 0)
-			emit_cond(f, v, k, 1);
+	{
+		uint32_t prev = v->n_cnd;
+
+		for (k = 0; k < v->n_cnd; k++) {
+			if (v->cnd[k].parent >= 0)
+				continue;
+			emit_cond(f, v, k, 1,
+				  prev < v->n_cnd && !v->cnd[prev].join);
+			prev = k;
+		}
+	}
 	fprintf(f, "}\n");
 
 	v->gen_ok = ferror(f) == 0;
@@ -2127,12 +3296,21 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		 * questions, and grows by multiplication the moment either
 		 * side gains an option.
 		 */
-		ch_add(c, "INFECT");
-		ch_add(c, "SUSPECT");
+		ch_add(c, lvl_word[LV_INFECT]);
+		ch_add(c, lvl_word[LV_SUSPECT]);
+		/*
+		 * A branch that concludes nothing, on purpose.
+		 *
+		 * Reads as a gap in the list until it is needed, and then it is
+		 * the only thing that will do: a gate wants it so its children
+		 * are the whole answer, and a chain wants it so one case can be
+		 * ruled out before the else catches everything left.
+		 */
+		ch_add(c, lvl_word[LV_NONE]);
 	} else if (what == CH_VARIANT) {
-		ch_add(c, "auto");
-		ch_add(c, "generic");
-		ch_add(c, "custom...");
+		ch_add(c, "Auto");
+		ch_add(c, "Generic");
+		ch_add(c, "Custom");
 	} else if (what == CH_TYPE) {
 		for (i = 0; i < MALTYPE_N; i++)
 			ch_add(c, maltype_word[i]);
@@ -2167,7 +3345,7 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		char t[CH_W];
 
 		for (i = 0; i < v->n_grp; i++) {
-			if (cnd_uses(&v->cnd[arg], i))
+			if (!cmatch_ok(v, arg, i))
 				continue;
 			snprintf(t, sizeof t, "%u  %s", i + 1u,
 				 v->grp[i].rule == 1 ? "find_any" :
@@ -2177,6 +3355,21 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		}
 		if (!c->n)
 			return;
+	} else if (what == CH_LOGIC) {
+		/* The chooser is 26 wide; these have to say the difference
+		 * inside that. */
+		ch_add(c, "or   next only if miss");
+		ch_add(c, "and  next as well");
+	} else if (what == CH_SWITCH) {
+		/*
+		 * Three answers, and the one that loses work is not the first.
+		 *
+		 * Named by what happens rather than by yes and no: "discard"
+		 * is a word people read before clicking, "OK" is not.
+		 */
+		ch_add(c, "keep editing");
+		ch_add(c, "write it, then switch");
+		ch_add(c, "discard it and switch");
 	} else if (what == CH_OPT) {
 		/* Only the ones this object can answer for, and only the ones
 		 * not already there: a list that offers what it will refuse is
@@ -2312,6 +3505,19 @@ static void ch_take(struct view *v)
 			q->thresh = 2;
 		return;
 	}
+	if (c->what == CH_LOGIC) {
+		if (c->arg < v->n_cnd)
+			v->cnd[c->arg].join = c->sel;
+		return;
+	}
+	if (c->what == CH_SWITCH) {
+		if (c->sel == 0)
+			return;                 /* stay where the work is */
+		if (c->sel == 1)
+			generate(v, 0);
+		draft_show(v, c->arg);
+		return;
+	}
 	if (c->what == CH_CMATCH) {
 		struct cond *cc;
 		uint32_t i, n = 0;
@@ -2322,7 +3528,7 @@ static void ch_take(struct view *v)
 		for (i = 0; i < v->n_grp; i++) {
 			size_t l;
 
-			if (cnd_uses(cc, i))
+			if (!cmatch_ok(v, c->arg, i))
 				continue;
 			if ((int)n++ != c->sel)
 				continue;
@@ -2335,7 +3541,7 @@ static void ch_take(struct view *v)
 			 */
 			l = strlen(cc->expr);
 			snprintf(cc->expr + l, sizeof cc->expr - l, "%s%u",
-				 l ? "&" : "", i + 1u);
+				 l ? (cc->op ? "|" : "&") : "", i + 1u);
 			break;
 		}
 		return;
@@ -2418,11 +3624,60 @@ static void draw_chooser(struct out *o, struct view *v)
  */
 #define PR(rr)     (decl_top() + 1 + (int)(rr) - (int)v->prow_off)
 #define PR_VIS(rr) ((int)(rr) >= (int)v->prow_off && \
-		    (int)(rr) - (int)v->prow_off < g_decl_rows - 1)
+		    (int)(rr) - (int)v->prow_off < g_decl_rows - 2)
+
+/*
+ * The condition rows, in reading order.
+ *
+ * Built once and walked by everything that cares - the row table, the drawing,
+ * the click routing - because reading order is not array order: a nested
+ * condition is stored after its parent but drawn between the parent's own rows
+ * and whatever follows the parent's block. Walking the array instead put the
+ * rule that joins one top level condition to the next above that condition's
+ * children rather than below them, which is where it belonged.
+ */
+enum cseq_kind { CS_COND = 0, CS_MATCH, CS_JOIN, CS_ADD };
+
+static void cseq_put(struct view *v, int kind, uint32_t idx)
+{
+	if (v->n_cseq >= sizeof v->cseq_kind / sizeof v->cseq_kind[0])
+		return;
+	v->cseq_kind[v->n_cseq] = (uint8_t)kind;
+	v->cseq_idx[v->n_cseq] = idx;
+	v->n_cseq++;
+}
+
+static void cnd_seq(struct view *v)
+{
+	uint32_t t, c;
+
+	v->n_cseq = 0;
+	for (t = 0; t < v->n_cnd; t++) {
+		if (v->cnd[t].parent >= 0)
+			continue;
+		cseq_put(v, CS_COND, t);
+		cseq_put(v, CS_MATCH, t);
+		for (c = 0; c < v->n_cnd; c++) {
+			if (v->cnd[c].parent != (int)t)
+				continue;
+			cseq_put(v, CS_COND, c);
+			cseq_put(v, CS_MATCH, c);
+			if (cnd_more_siblings(v, c))
+				cseq_put(v, CS_JOIN, c);
+		}
+		/* The end of the block, and the way to extend it. Only where
+		 * there is a block to extend - a condition has to exist before
+		 * anything can be put inside it. */
+		cseq_put(v, CS_ADD, t);
+		if (cnd_more_siblings(v, t))
+			cseq_put(v, CS_JOIN, t);
+	}
+}
 
 enum prow_kind {
 	RW_OPT = 0, RW_RANGES, RW_STRHDR, RW_STR, RW_ADDM,
-	RW_MATCH, RW_MARKERS, RW_ADDC, RW_COND, RW_CMATCH
+	RW_MATCH, RW_MARKERS, RW_ADDC, RW_COND, RW_CMATCH,
+	RW_MATHDR, RW_CNDHDR, RW_CJOIN
 };
 
 static void prow_add(struct view *v, int kind, uint32_t idx)
@@ -2450,16 +3705,74 @@ static void prow_build(struct view *v)
 		for (i = 0; i < v->n_decl; i++)
 			prow_add(v, RW_STR, i);
 	}
+	prow_add(v, RW_MATHDR, 0);
 	prow_add(v, RW_ADDM, 0);
 	for (i = 0; i < v->n_grp; i++) {
 		prow_add(v, RW_MATCH, i);
 		prow_add(v, RW_MARKERS, i);
 	}
+	prow_add(v, RW_CNDHDR, 0);
 	prow_add(v, RW_ADDC, 0);
-	for (i = 0; i < v->n_cnd; i++) {
+	cnd_seq(v);
+	for (i = 0; i < v->n_cseq; i++)
 		prow_add(v, RW_COND, i);
-		prow_add(v, RW_CMATCH, i);
-	}
+}
+
+/*
+ * A heading that runs the width of the screen.
+ *
+ * The panel is four kinds of thing stacked with nothing between them, which is
+ * why it read as one long list. A bar per section costs the row the column
+ * headings were already taking and gives the eye somewhere to stop.
+ */
+static void sec_bar(struct out *o, struct view *v, int row, const char *text)
+{
+	int i, n = (int)strlen(text);
+
+	(void)v;
+	row_start(o, row, 1);
+	out_str(o, A_HEAD);
+	out_str(o, text);
+	for (i = n; i < g_cols; i++)
+		out_str(o, " ");
+	out_str(o, A_OFF);
+}
+
+/*
+ * A field slid by the panel's horizontal offset.
+ *
+ * Only the fields that can overrun their column take it - the comment on a
+ * matcher or a condition, and the byte dump of a string. Sliding the whole row
+ * would move the labels and the buttons out from under the pointer, which is a
+ * panel that scrolls away from the mouse that is scrolling it.
+ */
+static const char *hslide(struct view *v, const char *text)
+{
+	size_t n = strlen(text);
+
+	return text + (v->decl_hoff < n ? v->decl_hoff : n);
+}
+
+/*
+ * The left edge of a condition's rows.
+ *
+ * A condition's number sits at a column decided by its depth, and every row
+ * that belongs to it puts a bar in that same column - a tick under the number,
+ * not a bracket drawn around a block. Nesting is shown by the indent alone,
+ * which is what makes it possible to draw a child without any line art in front
+ * of it at all.
+ */
+static void cnd_rail(struct out *o, int depth, int bar)
+{
+	int i, at = depth ? 6 : 1;
+
+	out_str(o, A_DIM);
+	for (i = 0; i < at; i++)
+		out_str(o, " ");
+	out_str(o, bar ? "|" : " ");
+	for (i = 0; i < 5; i++)
+		out_str(o, " ");
+	out_str(o, A_OFF);
 }
 
 static void draw_decl(struct out *o, struct view *v)
@@ -2469,8 +3782,6 @@ static void draw_decl(struct out *o, struct view *v)
 	uint32_t g, i;
 	int c;
 
-	if (!g_decl_rows)
-		return;
 
 	/*
 	 * Erase the whole area first.
@@ -2486,15 +3797,13 @@ static void draw_decl(struct out *o, struct view *v)
 
 	/* ---- what the module declares ---- */
 	row_start(o, top, 1);
-	out_fmt(o, A_DIM " define " A_OFF);
-
-	c = 1 + (int)o->col_hint;
-	out_fmt(o, A_DIM "family " A_OFF "%s[%s]" A_OFF,
+	c = 2 + (int)o->col_hint;
+	out_fmt(o, A_DIM " Family " A_OFF "%s[%s]" A_OFF,
 		v->edit == 1 ? A_SEL : A_ID, v->family[0] ? v->family : "?");
 	v->f_c0 = c; v->f_c1 = (int)o->col_hint;
 
 	c = 2 + (int)o->col_hint;
-	out_fmt(o, A_DIM "  type " A_OFF A_ID "[%s]" A_OFF,
+	out_fmt(o, A_DIM "  Type " A_OFF A_ID "[%s]" A_OFF,
 		maltype_word[v->maltype % MALTYPE_N]);
 	v->t_c0 = c; v->t_c1 = (int)o->col_hint;
 
@@ -2502,19 +3811,58 @@ static void draw_decl(struct out *o, struct view *v)
 	/* Disabled keeps the background and loses contrast, it does not lose the
 	 * text - 100;90 is bright black on bright black, the same colour twice,
 	 * which is a grey block where a label should be. */
-	out_fmt(o, "  " A_ID "[+ option]" A_OFF);
+	out_fmt(o, "  " A_ID "[+ Option]" A_OFF);
 	v->o_c0 = c; v->o_c1 = (int)o->col_hint;
 
-	c = 2 + (int)o->col_hint;
-	out_fmt(o, "  %s[ generate ]" A_OFF,
-		v->family[0] && v->n_cnd ? "\033[42;30m" : "\033[47;90m");
-	v->g_c0 = c; v->g_c1 = (int)o->col_hint;
+	{
+		/*
+		 * Generate, or Save and Save As.
+		 *
+		 * A draft with no file behind it is being written; one loaded
+		 * from a file is being edited, and the two want different
+		 * words. Save As stays out of reach while nothing about the
+		 * patterns has changed - a second file holding the same
+		 * markers is a duplicate, and duplicates are made by accident
+		 * rather than on purpose.
+		 */
+		const char *why = draft_missing(v);
+		int near = 0;
+		const char *dup = why ? NULL : draft_dup(v, &near);
+		int changed = draft_dirty(v);
 
-	if (v->warn[0])
-		out_fmt(o, "  %s%s" A_OFF, A_BAD, v->warn);
-	else if (v->gen_path[0])
-		out_fmt(o, "  %s%s" A_OFF, v->gen_ok ? A_SIZE : A_BAD,
-			v->gen_path);
+		c = 2 + (int)o->col_hint;
+		if (!v->gen_path[0]) {
+			out_fmt(o, "  %s[ Generate ]" A_OFF,
+				(why || (dup && !near)) ? "\033[47;90m"
+						        : "\033[42;30m");
+			v->g_c0 = c; v->g_c1 = (int)o->col_hint;
+			v->sv_c0 = v->sv_c1 = -1;
+		} else {
+			out_fmt(o, "  %s[ Save ]" A_OFF,
+				why ? "\033[47;90m" : "\033[42;30m");
+			v->g_c0 = c; v->g_c1 = (int)o->col_hint;
+			c = 2 + (int)o->col_hint;
+			out_fmt(o, "  %s[ Save As ]" A_OFF,
+				(why || !changed || (dup && !near))
+				? "\033[47;90m" : "\033[42;30m");
+			v->sv_c0 = c; v->sv_c1 = (int)o->col_hint;
+		}
+		/* One slot, and the most urgent thing in it: what is wrong,
+		 * then what is missing, then what would be a duplicate, then
+		 * where this draft lives. */
+		if (v->warn[0])
+			out_fmt(o, "  %s%s" A_OFF, A_BAD, v->warn);
+		else if (why)
+			out_fmt(o, "  %s%s" A_OFF, A_DIM, why);
+		else if (dup)
+			out_fmt(o, "  %s%s %s" A_OFF, near ? A_WARN : A_BAD,
+				near ? "all but one marker of"
+				     : "same markers as", dup);
+		else if (v->gen_path[0])
+			out_fmt(o, "  %s%s%s" A_OFF, A_DIM, v->gen_path,
+				changed ? "  (unsaved)" : "");
+	}
+
 
 	/* The optional declarations, one per row, each removable. */
 	for (i = 0; i < (uint32_t)OPT_COUNT; i++) {
@@ -2610,9 +3958,9 @@ static void draw_decl(struct out *o, struct view *v)
 	 * CODE" said the same word once per string and read like a sentence
 	 * where a table belongs. */
 	if (v->n_decl && PR_VIS(r)) {
-		row_start(o, PR(r), 1);
-		out_fmt(o, A_DIM " Strings    word      case         region"
-			"       size  bytes" A_OFF);
+		sec_bar(o, v, PR(r),
+			" Strings     word      case         region"
+			"       size  bytes");
 	}
 	r += v->n_decl ? 1 : 0;
 	v->row_str = PR(r);
@@ -2634,25 +3982,34 @@ static void draw_decl(struct out *o, struct view *v)
 				d->icase ? "ignore-case" : "exact-case");
 		out_fmt(o, " %s%-12s" A_OFF " %s%5u" A_OFF "  ",
 			A_LOC, d->rgn, A_SIZE, d->len);
-		for (k = 0; k < d->len && k < 16u; k++)
-			out_fmt(o, "%02X", d->bytes[k]);
-		if (d->len > 16u)
-			out_str(o, "...");
+		{
+			uint32_t from = v->decl_hoff / 2u;
+
+			if (from > d->len)
+				from = d->len;
+			for (k = from; k < d->len && k < from + 16u; k++)
+				out_fmt(o, "%02X", d->bytes[k]);
+			if (d->len > from + 16u)
+				out_str(o, "...");
+		}
 		out_at(o, PR(r), g_cols - 4);
 		out_str(o, A_BAD "[x]" A_OFF);
 	}
 
 	/* ---- the matchers: what to look for ---- */
+	if (PR_VIS(r))
+		sec_bar(o, v, PR(r), " Matchers");
+	r++;
 	if (PR_VIS(r)) {
 		row_start(o, PR(r), 1);
 		v->n_c0 = 2;
-		out_fmt(o, " " A_ID "[add matcher]" A_OFF);
+		out_fmt(o, " " A_ID "[+ Matcher]" A_OFF);
 		v->n_c1 = (int)o->col_hint;
-		r++;
 	}
+	r++;
 
 	v->row_grp = PR(r);
-	for (g = 0; g < v->n_grp && PR_VIS(r + 1); g++) {
+	for (g = 0; g < v->n_grp; g++) {
 		const struct group *q = &v->grp[g];
 		char rl[16];
 		int first = 1;
@@ -2665,7 +4022,7 @@ static void draw_decl(struct out *o, struct view *v)
 			snprintf(rl, sizeof rl, "find_all");
 
 		if (PR_VIS(r)) {
-			char nm[40];
+			char nm[40], lead[16], th[24];
 
 			row_start(o, PR(r), 1);
 			/* Until it holds a marker there is nothing to derive a
@@ -2676,19 +4033,43 @@ static void draw_decl(struct out *o, struct view *v)
 					    sizeof nm);
 			else
 				snprintf(nm, sizeof nm, "-");
-			out_fmt(o, "%s %u. " A_OFF "%s%-11s" A_OFF A_DIM
-				"  in " A_OFF "%s%-16s" A_OFF,
-				g == v->cur_grp ? A_SEL : A_DIM, g + 1u,
-				A_WARN, rl, A_LOC, nm);
 			if (q->rule == 2)
-				out_fmt(o, A_DIM "  threshold " A_OFF A_ID
-					">= %u of %u" A_OFF, q->thresh,
-					grp_count(v, g));
-			out_str(o, A_DIM "  comment " A_OFF);
+				snprintf(th, sizeof th, ">= %u of %u",
+					 q->thresh, grp_count(v, g));
+			else
+				th[0] = 0;
+			/*
+			 * Named fields, not a table.
+			 *
+			 * The columns were the same width whether or not they
+			 * held anything, so every matcher that was not a
+			 * threshold carried an empty "threshold" column across
+			 * the row - a heading for a thing that was not there.
+			 * A field that does not apply is now simply absent.
+			 */
+			snprintf(lead, sizeof lead, "  %u.", g + 1u);
+			out_fmt(o, "%s%-6.6s" A_OFF,
+				g == v->cur_grp ? A_SEL : A_DIM, lead);
+			v->grp_rl[g][0] = 1 + (int)o->col_hint;
+			out_fmt(o, "%s%s" A_OFF, A_WARN, rl);
+			v->grp_rl[g][1] = (int)o->col_hint;
+			out_str(o, A_DIM " in " A_OFF);
+			v->grp_rg[g][0] = 1 + (int)o->col_hint;
+			out_fmt(o, "%s%s" A_OFF, A_LOC, nm);
+			v->grp_rg[g][1] = (int)o->col_hint;
+			v->grp_th[g][0] = v->grp_th[g][1] = -1;
+			if (th[0]) {
+				out_str(o, A_DIM "   Threshold: " A_OFF);
+				v->grp_th[g][0] = 1 + (int)o->col_hint;
+				out_fmt(o, "%s%s" A_OFF, A_ID, th);
+				v->grp_th[g][1] = (int)o->col_hint;
+			}
+			out_str(o, "   ");
 			v->grp_nt[g][0] = 1 + (int)o->col_hint;
-			out_fmt(o, "%s[%s]" A_OFF,
+			out_fmt(o, "%s[%-.40s]" A_OFF,
 				v->edit == 300 + (int)g ? A_SEL : A_DIM,
-				q->note[0] ? q->note : "...");
+				q->note[0] ? hslide(v, q->note)
+					   : "comment...");
 			v->grp_nt[g][1] = (int)o->col_hint;
 		}
 		r++;
@@ -2701,7 +4082,7 @@ static void draw_decl(struct out *o, struct view *v)
 			continue;
 		}
 		row_start(o, PR(r), 1);
-		out_fmt(o, A_DIM "     markers: " A_OFF);
+		out_fmt(o, A_DIM "     Markers: " A_OFF);
 		for (i = 0; i < v->n_decl; i++) {
 			if (v->decl[i].grp != g)
 				continue;
@@ -2714,123 +4095,213 @@ static void draw_decl(struct out *o, struct view *v)
 		v->p_c0 = v->p_c1 = -1;
 		if (decl_free(v)) {
 			v->p_c0 = 1 + (int)o->col_hint;
-			out_fmt(o, "   " A_ID "[+ string]" A_OFF);
+			out_fmt(o, "   " A_ID "[+ String]" A_OFF);
 			v->p_c1 = (int)o->col_hint;
 		}
 		r++;
 	}
 
 	/* ---- the conditions: what it means ---- */
+	if (PR_VIS(r))
+		sec_bar(o, v, PR(r), " Conditions");
+	r++;
 	if (PR_VIS(r)) {
 		row_start(o, PR(r), 1);
 		v->a_c0 = 2;
-		out_fmt(o, " %s[add condition]" A_OFF,
+		out_fmt(o, " %s[+ Condition]" A_OFF,
 			v->n_grp ? A_ID : A_DIM);
 		v->a_c1 = (int)o->col_hint;
-		v->b_c0 = 2 + (int)o->col_hint;
-		/* Names the parent, so the button says what it will do rather
-		 * than what it is called. */
-		out_fmt(o, "  %s[add inside %u]" A_OFF,
-			v->n_cnd ? A_ID : A_DIM, v->cur_cnd + 1u);
-		v->b_c1 = (int)o->col_hint;
+		/*
+		 * Nesting is added from the condition it nests inside, not from
+		 * here. "[add inside 1]" up here had to name its parent, which
+		 * meant reading a number off one row to know what a button on
+		 * another would do; the same button sitting on the parent's own
+		 * row needs no number at all.
+		 */
+		v->b_c0 = v->b_c1 = -1;
 	}
 	r++;
 
 	v->row_cnd = PR(r);
-	for (g = 0; g < v->n_cnd; g++) {
-		const struct cond *c2 = &v->cnd[g];
-		int kids = (int)cnd_children(v, g);
+	for (g = 0; g < v->n_cseq; g++) {
+		uint32_t ci = v->cseq_idx[g];
+		const struct cond *c2 = &v->cnd[ci];
+		int deep = cnd_depth(v, ci);
 
 		if (!PR_VIS(r)) {
-			v->cnd_mt[g][0] = v->cnd_mt[g][1] = -1;
-			r += 2;
-			continue;
-		}
-		row_start(o, PR(r), 1);
-		out_fmt(o, "%s%s %u) " A_OFF "%s[%s]" A_OFF,
-			c2->parent >= 0 ? "   " : "",
-			g == v->cur_cnd ? A_SEL : A_DIM, g + 1u,
-			v->edit == 103 + (int)g ? A_SEL : A_ID,
-			c2->expr[0] ? c2->expr : "all matchers");
-		if (c2->parent >= 0)
-			out_fmt(o, A_DIM "  inside %u" A_OFF, c2->parent + 1);
-		if (kids)
-			out_fmt(o, A_DIM "  gate for %d" A_OFF, kids);
-		else {
-			out_str(o, A_DIM "  ->  " A_OFF);
-			v->cnd_lv[g][0] = 1 + (int)o->col_hint;
-			out_fmt(o, "%s%s" A_OFF, c2->level ? A_WARN : A_BAD,
-				c2->level ? "SUSPECT" : "INFECT");
-			v->cnd_lv[g][1] = (int)o->col_hint;
-			out_str(o, A_DIM "  variant " A_OFF);
-			v->cnd_vr[g][0] = 1 + (int)o->col_hint;
-			out_fmt(o, A_ID "%s" A_OFF,
-				c2->var_kind == 2 ? "custom" :
-				c2->var_kind == 1 ? "generic" : "auto");
-			v->cnd_vr[g][1] = (int)o->col_hint;
-			/* Custom is a promise of a name, so the box for it sits
-			 * beside the word rather than replacing it - the choice
-			 * stays visible while the name is typed. */
-			if (c2->var_kind == 2) {
-				out_str(o, " ");
-				v->cnd_nm[g][0] = 1 + (int)o->col_hint;
-				out_fmt(o, "%s[%s]" A_OFF,
-					v->edit == 4 + (int)g ? A_SEL : A_WARN,
-					c2->variant[0] ? c2->variant
-						       : "name...");
-				v->cnd_nm[g][1] = (int)o->col_hint;
-			} else {
-				v->cnd_nm[g][0] = v->cnd_nm[g][1] = -1;
+			if (v->cseq_kind[g] == CS_COND) {
+				v->cnd_lv[ci][0] = v->cnd_lv[ci][1] = -1;
+				v->cnd_vr[ci][0] = v->cnd_vr[ci][1] = -1;
+			} else if (v->cseq_kind[g] == CS_MATCH) {
+				v->cnd_mt[ci][0] = v->cnd_mt[ci][1] = -1;
 			}
-			out_str(o, A_DIM "  comment " A_OFF);
-			v->cnd_nt[g][0] = 1 + (int)o->col_hint;
-			out_fmt(o, "%s[%s]" A_OFF,
-				v->edit == 400 + (int)g ? A_SEL : A_DIM,
-				c2->note[0] ? c2->note : "...");
-			v->cnd_nt[g][1] = (int)o->col_hint;
-		}
-		out_at(o, PR(r), g_cols - 4);
-		out_str(o, A_BAD "[x]" A_OFF);
-		r++;
-
-		/*
-		 * The matchers this condition is written over, on its own row
-		 * with the control that adds one - the same shape a matcher
-		 * uses for its markers, because it is the same relationship one
-		 * level up. The expression box above stays editable for the
-		 * shapes a list cannot express: "(1&2)|3" is not a set.
-		 */
-		if (!PR_VIS(r)) {
-			v->cnd_mt[g][0] = v->cnd_mt[g][1] = -1;
 			r++;
 			continue;
 		}
 		row_start(o, PR(r), 1);
-		out_fmt(o, A_DIM "     matchers: " A_OFF);
-		if (v->n_grp) {
-			uint32_t m;
-			int first2 = 1;
 
-			for (m = 0; m < v->n_grp; m++) {
-				if (!cnd_uses(c2, m))
-					continue;
-				out_fmt(o, "%s%s%u" A_OFF, first2 ? "" : ", ",
-					A_ID, m + 1u);
-				first2 = 0;
+		if (v->cseq_kind[g] == CS_COND) {
+			char lab[16], lead[24];
+
+			/*
+			 * A connector, not just an indent: two spaces of margin
+			 * is a difference the eye has to measure, a line drawn
+			 * from the parent to the child is one it reads.
+			 */
+			/*
+			 * One vertical rail and nothing else.
+			 *
+			 * The block used to be drawn with three characters -
+			 * "+-" opening a child, "|" continuing it, "`-"
+			 * closing it - plus rules of dashes between and under
+			 * them. Four kinds of line art to say one thing: these
+			 * rows are inside that one. A single bar in a fixed
+			 * column says it without being read as anything.
+			 */
+			cnd_label(v, ci, lab, sizeof lab);
+			out_fmt(o, "%*s", deep ? 6 : 1, "");
+			out_fmt(o, "%s%-6.6s" A_OFF,
+				ci == v->cur_cnd ? A_SEL : A_DIM, lab);
+			(void)lead;
+
+			out_str(o, A_DIM "Verdict: " A_OFF);
+			v->cnd_lv[ci][0] = 1 + (int)o->col_hint;
+			out_fmt(o, "%s%s" A_OFF,
+				c2->level == LV_SUSPECT ? A_WARN :
+				c2->level == LV_NONE ? A_DIM : A_BAD,
+				lvl_word[c2->level % LV_COUNT]);
+			v->cnd_lv[ci][1] = (int)o->col_hint;
+			v->cnd_vr[ci][0] = v->cnd_vr[ci][1] = -1;
+			v->cnd_nm[ci][0] = v->cnd_nm[ci][1] = -1;
+			if (c2->level != LV_NONE) {
+				out_str(o, A_DIM "   Variant name: " A_OFF);
+				v->cnd_vr[ci][0] = 1 + (int)o->col_hint;
+				out_fmt(o, "%s%s" A_OFF, A_ID,
+					c2->var_kind == 2 ? "Custom" :
+					c2->var_kind == 1 ? "Generic" : "Auto");
+				v->cnd_vr[ci][1] = (int)o->col_hint;
+				/* Custom is a promise of a name, so the box
+				 * for it sits beside the word rather than
+				 * replacing it. */
+				if (c2->var_kind == 2) {
+					out_str(o, " ");
+					v->cnd_nm[ci][0] = 1 +
+							   (int)o->col_hint;
+					out_fmt(o, "%s[%s]" A_OFF,
+						v->edit == 4 + (int)ci
+						? A_SEL : A_WARN,
+						c2->variant[0] ? c2->variant
+							       : "name...");
+					v->cnd_nm[ci][1] = (int)o->col_hint;
+				}
 			}
-			if (first2)
-				out_str(o, A_DIM "all of them" A_OFF);
-		} else {
-			out_str(o, A_DIM "none defined yet" A_OFF);
+			/* The comment lives on the row below, beside the
+			 * matchers it explains. Two boxes on two rows of one
+			 * condition was one box too many to look at. */
+			out_at(o, PR(r), g_cols - 4);
+			out_str(o, A_BAD "[x]" A_OFF);
+			r++;
+			continue;
 		}
-		v->cnd_mt[g][0] = v->cnd_mt[g][1] = -1;
-		if (v->n_grp) {
-			v->cnd_mt[g][0] = 1 + (int)o->col_hint;
-			out_fmt(o, "   " A_ID "[+ matcher]" A_OFF);
-			v->cnd_mt[g][1] = (int)o->col_hint;
+
+		if (v->cseq_kind[g] == CS_MATCH) {
+			/* Indented under the condition it belongs to, and
+			 * continuing the stroke while a sibling is still
+			 * below. */
+			cnd_rail(o, deep, 1);
+			out_str(o, A_DIM "Matchers: " A_OFF);
+			v->cnd_id0[ci] = 1 + (int)o->col_hint;
+			v->cnd_op[ci][0] = v->cnd_op[ci][1] = -1;
+			{
+				char canon[64];
+
+				cnd_canon(v, ci, canon, sizeof canon);
+				if (c2->expr[0] &&
+				    strcmp(c2->expr, canon) != 0) {
+					/* Typed, and not a list. Shown as
+					 * written, because rendering it as a
+					 * list would show a different
+					 * condition from the generated one. */
+					v->cnd_id0[ci] = -1;
+					out_fmt(o, "%s%s" A_OFF,
+						v->edit == 103 + (int)ci
+						? A_SEL : A_WARN, c2->expr);
+					goto ids_done;
+				}
+			}
+			if (v->n_grp) {
+				uint32_t m;
+				int first2 = 1;
+
+				for (m = 0; m < v->n_grp; m++) {
+					if (!cnd_uses(c2, m))
+						continue;
+					if (!first2) {
+						if (v->cnd_op[ci][0] < 0)
+							v->cnd_op[ci][0] = 2 +
+							  (int)o->col_hint;
+						out_fmt(o, A_WARN " %s " A_OFF,
+							c2->op ? "or" : "and");
+						v->cnd_op[ci][1] =
+							(int)o->col_hint - 1;
+					}
+					out_fmt(o, "%s%u" A_OFF, A_ID, m + 1u);
+					first2 = 0;
+				}
+				if (first2)
+					out_str(o, A_DIM "none yet" A_OFF);
+			} else {
+				out_str(o, A_DIM "none defined yet" A_OFF);
+			}
+ids_done:
+			v->cnd_mt[ci][0] = v->cnd_mt[ci][1] = -1;
+			if (v->n_grp) {
+				v->cnd_mt[ci][0] = 1 + (int)o->col_hint;
+				out_fmt(o, "   " A_ID "[+ Matcher]" A_OFF);
+				v->cnd_mt[ci][1] = (int)o->col_hint;
+			}
+			/*
+			 * No comment box here.
+			 *
+			 * A note written above a branch in the source is about
+			 * the search the branch makes - "matcher 1: Hooks" -
+			 * and the search belongs to the matcher. Two places to
+			 * put one remark meant the loader had to guess which,
+			 * and it guessed the condition.
+			 */
+			r++;
+			continue;
 		}
+
+		if (v->cseq_kind[g] == CS_JOIN) {
+			/*
+			 * How the next condition at this level attaches, as a
+			 * rule between the two it joins. A word and a switch -
+			 * the sentence that used to be here was a paragraph on
+			 * a row of dashes.
+			 */
+			/* Between two conditions, so it belongs to neither:
+			 * no bar, just their indent. */
+			out_fmt(o, "%*s", deep ? 6 : 1, "");
+			out_str(o, A_DIM "logic " A_OFF);
+			v->cnd_jn[ci][0] = 1 + (int)o->col_hint;
+			out_fmt(o, A_WARN "[%s]" A_OFF,
+				c2->join ? "and" : "or");
+			v->cnd_jn[ci][1] = (int)o->col_hint;
+			r++;
+			continue;
+		}
+
+		/* CS_ADD: the foot of the block, which is also where another
+		 * condition goes into it. */
+		v->cnd_kid[ci][0] = v->cnd_kid[ci][1] = -1;
+		out_fmt(o, "%*s", 6, "");
+		v->cnd_kid[ci][0] = 1 + (int)o->col_hint;
+		out_fmt(o, "%s[+ Condition]" A_OFF, v->n_grp ? A_ID : A_DIM);
+		v->cnd_kid[ci][1] = (int)o->col_hint;
 		r++;
 	}
+
 }
 
 static void draw_marker_line(struct out *o, struct view *v)
@@ -2838,6 +4309,20 @@ static void draw_marker_line(struct out *o, struct view *v)
 	struct object *ob = cur_obj(v);
 	char name[80], head[24], right[120];
 	uint32_t hit = 0, i;
+
+	/* The rule that closes the draft panel, and so the one that separates
+	 * the status line from whatever is above it. Drawn here rather than in
+	 * draw_decl because it is the status line's border as much as the
+	 * panel's, and it has to be there when there is no panel too. */
+	if (g_decl_rows) {
+		int c2;
+
+		row_start(o, mark_row() - 1, 1);
+		out_str(o, A_DIM);
+		for (c2 = 0; c2 < g_cols; c2++)
+			out_str(o, "-");
+		out_str(o, A_OFF);
+	}
 
 	row_start(o, mark_row(), 1);
 
@@ -3021,7 +4506,9 @@ static void list_row(struct out *o, int sel, const char *colour)
 	out_str(o, colour);
 	if (sel)
 		out_str(o, "\033[1m");
-	out_str(o, sel ? ">" : " ");
+	/* The same mark the object tree uses. Two cursors drawn two ways in one
+	 * program is two things to learn for one idea. */
+	out_str(o, sel ? "*" : " ");
 }
 
 /*
@@ -3156,7 +4643,7 @@ static void draw_list(struct out *o, struct view *v)
 			out_str(o, miss ? A_DIM : (st->in_rgn ? A_OFF : A_WARN));
 			if (sel)
 				out_str(o, "\033[1m");
-			out_str(o, sel ? ">" : " ");
+			out_str(o, sel ? "*" : " ");
 			out_fmt(o, "%-14s %6u %8u  ", kind, st->uid, st->len);
 			if (miss)
 				out_fmt(o, "%-10s ", "-");
@@ -3613,13 +5100,45 @@ static void redraw(struct view *v)
 		prow_build(v);
 		want = v->n_prow;
 
-		g_decl_rows = (v->n_decl || v->n_grp || v->n_cnd)
-			      ? (int)(want < 12u ? want : 12u) + 1 : 0;
-		if (g_decl_rows &&
-		    v->prow_off + (uint32_t)(g_decl_rows - 1) > v->n_prow)
-			v->prow_off = v->n_prow > (uint32_t)(g_decl_rows - 1)
-				      ? v->n_prow - (uint32_t)(g_decl_rows - 1)
-				      : 0u;
+		/*
+		 * A draft that just grew shows its new end.
+		 *
+		 * What was added is the thing being worked on, and it arrives
+		 * at the bottom. Keeping the top pinned meant the row you asked
+		 * for appeared off the bottom of a panel that looked unchanged,
+		 * which reads as the button having done nothing.
+		 */
+		if (v->n_prow > v->prow_seen)
+			v->prow_off = 0xffffffffu;      /* clamped below */
+		v->prow_seen = v->n_prow;
+
+		/* Two more than the rows it shows: the heading it starts with
+		 * and the rule it ends on, which is what puts a border between
+		 * the draft and the status line. */
+		/*
+		 * Always present, empty or not.
+		 *
+		 * The family, the type and the generate button live on its
+		 * first row, and hiding the whole panel until something had
+		 * been declared meant none of them could be reached until
+		 * after the first string was taken - the one order of work the
+		 * tool happened to be built around.
+		 */
+		g_decl_rows = (int)(want < v->decl_cap ? want : v->decl_cap)
+			      + 2;
+		if (g_decl_rows) {
+			/* The furthest it can be scrolled, computed before the
+			 * comparison rather than inside it: adding the window
+			 * to the offset overflows when the offset is the "show
+			 * me the end" sentinel, and an offset of minus one
+			 * draws every row one line too low. */
+			uint32_t vis = (uint32_t)(g_decl_rows - 2);
+			uint32_t max_off = v->n_prow > vis ? v->n_prow - vis
+							   : 0u;
+
+			if (v->prow_off > max_off)
+				v->prow_off = max_off;
+		}
 	}
 
 	/*
@@ -3799,6 +5318,7 @@ enum key {
 
 static int g_mx, g_my;          /* where the last click was, 1 based */
 static int g_mod_shift;         /* shift was held for it */
+static int g_mod_ctrl;          /* and control, which slides text sideways */
 
 /*
  * SGR mouse reporting, not the original X10 encoding.
@@ -3829,6 +5349,7 @@ static int read_mouse_x10(void)
 	g_mx = t[1] - 32;
 	g_my = t[2] - 32;
 	g_mod_shift = (b & 0x04) != 0;
+	g_mod_ctrl  = (b & 0x10) != 0;
 
 	if (b & 0x40)
 		return (b & 3) == 0 ? K_WHEEL_UP : K_WHEEL_DOWN;
@@ -3867,6 +5388,7 @@ static int read_mouse(void)
 			return K_RELEASE;
 	}
 	g_mod_shift = (b & 0x04) != 0;
+	g_mod_ctrl  = (b & 0x10) != 0;
 	if ((b & 0x20))                      /* motion, with a button held */
 		return K_DRAG;
 	if ((b & 0x40) && (b & 3) == 0)
@@ -3926,6 +5448,121 @@ static void hex_step(struct view *v, long lines)
 /* A click says which pane as well as which row, so it moves the focus too:
  * clicking a row nobody is looking at and having nothing happen is the one
  * behaviour a mouse must not have. */
+/* Milliseconds on a clock that does not go backwards; only differences are
+ * ever taken from it. */
+static uint64_t now_ms(void)
+{
+	struct timespec t;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &t) != 0)
+		return 0;
+	return (uint64_t)t.tv_sec * 1000u + (uint64_t)(t.tv_nsec / 1000000);
+}
+
+/*
+ * Grow a selection out to the whole printable run around it.
+ *
+ * What a double click means in every text editor, and what a researcher taking
+ * a marker actually wants: a string is a run of printable bytes between two
+ * that are not, and picking its ends by dragging is the fiddliest thing in this
+ * tool. Bounded by the region being looked at, so it cannot walk into bytes the
+ * pane is not showing.
+ */
+static void select_run(struct view *v)
+{
+	struct object *ob = cur_obj(v);
+	uint64_t a = v->sel_a, b;
+
+	if (a == KOF_BROKEN)
+		return;
+	b = a;
+	while (a > 0) {
+		uint64_t f = view_map(v, a - 1u, 0);
+
+		if (f == KOF_BROKEN || !byte_text(ob->buf.p[f]))
+			break;
+		a--;
+	}
+	while (b + 1u < v->rgn_len) {
+		uint64_t f = view_map(v, b + 1u, 0);
+
+		if (f == KOF_BROKEN || !byte_text(ob->buf.p[f]))
+			break;
+		b++;
+	}
+	v->sel_a = a;
+	v->sel_b = b;
+}
+
+/*
+ * Take one matcher out of a condition's expression.
+ *
+ * Rewritten from the ids that are left rather than edited in place, because
+ * removing "2" from "1&2|3" by deleting characters leaves "1&|3" - and an
+ * expression that has to be repaired by hand after every removal is one nobody
+ * will use the buttons on. Anything the author typed that is not a plain list -
+ * parentheses, a mix of & and | - is preserved only in so far as the join it
+ * was written with; that is the price of a list and a text box being the same
+ * field.
+ */
+static void cnd_drop_matcher(struct cond *c, uint32_t g)
+{
+	char out[64];
+	size_t at = 0;
+	const char *p = c->expr;
+	int first = 1;
+
+	while (*p) {
+		if (*p >= '0' && *p <= '9') {
+			unsigned long n = strtoul(p, (char **)&p, 10);
+
+			if (n == (unsigned long)g + 1ul)
+				continue;
+			at += (size_t)snprintf(out + at, sizeof out - at,
+					       "%s%lu", first ? "" : (c->op
+					       ? "|" : "&"), n);
+			first = 0;
+			continue;
+		}
+		p++;
+	}
+	out[at] = 0;
+	snprintf(c->expr, sizeof c->expr, "%s", out);
+}
+
+/*
+ * A matcher id on a condition's row, clicked to take it back out.
+ *
+ * The mirror of clicking a marker id inside a matcher, and it has to be the
+ * mirror: a list you can only add to is a list that gets rebuilt from scratch
+ * every time somebody changes their mind.
+ *
+ * The ids are laid out as "1, 2, 3", so the nth one starts at a known column
+ * and the click lands on a number rather than on an index into anything.
+ */
+static void cnd_id_click(struct view *v, uint32_t g)
+{
+	struct cond *c = &v->cnd[g];
+	int at = v->cnd_id0[g];
+	uint32_t m;
+
+	if (at <= 0)
+		return;
+	for (m = 0; m < v->n_grp; m++) {
+		char num[8];
+		int w;
+
+		if (!cnd_uses(c, m))
+			continue;
+		w = snprintf(num, sizeof num, "%u", m + 1u);
+		if (g_mx >= at && g_mx < at + w) {
+			cnd_drop_matcher(c, m);
+			return;
+		}
+		at += w + 2;            /* the ", " that follows it */
+	}
+}
+
 static void click(struct view *v, int rclick)
 {
 	struct object *ob = cur_obj(v);
@@ -3947,6 +5584,14 @@ static void click(struct view *v, int rclick)
 	 * puts the focus back if the click landed on a field, so this is the
 	 * whole of "click away to stop editing". */
 	v->edit = 0;
+
+	/* Pressing the divider starts a resize; the drag handler does the rest.
+	 * Tested before anything else claims the row, and only when there is a
+	 * panel to resize. */
+	if (g_decl_rows && g_my == hex_bot() + 1) {
+		v->sizing = 1;
+		return;
+	}
 
 	if (v->ch.open) {
 		int k = g_my - v->ch.row;
@@ -3983,14 +5628,20 @@ static void click(struct view *v, int rclick)
 		if (on && !v->list_depth) {
 			uint32_t k = list_nth(v, v->list_off + (uint32_t)row);
 
-			/* A signature row opens into its markers rather than
-			 * closing the dialog: the row was chosen to be looked
-			 * at, and its markers are what there is to look at. */
+			/*
+			 * A signature row shows that signature in the draft
+			 * panel, the way opening a file in an editor shows the
+			 * file. Its markers are reachable from the status bar,
+			 * which is where somebody looking for one goes.
+			 */
 			if (k < ob->n_touch) {
-				v->sel_touch = k;
-				v->list_depth = 1;
-				v->str_off = 0;
-				v->sel_str = 0;
+				v->show_list = 0;
+				v->list_depth = 0;
+				if (draft_dirty(v))
+					ch_open(v, CH_SWITCH, k,
+						g_rows - 6, 4);
+				else
+					draft_show(v, k);
 			}
 			return;
 		}
@@ -4023,7 +5674,9 @@ static void click(struct view *v, int rclick)
 		else if (g_mx >= v->n_c0 && g_mx <= v->n_c1)
 			ch_open(v, CH_RULE, MAX_GROUP, g_my, g_mx);
 		else if (g_mx >= v->g_c0 && g_mx <= v->g_c1)
-			generate(v);
+			generate(v, 0);
+		else if (v->sv_c0 > 0 && g_mx >= v->sv_c0 && g_mx <= v->sv_c1)
+			generate(v, 1);
 		return;
 	}
 	if (g_decl_rows && g_my > decl_top() && g_my < mark_row()) {
@@ -4097,6 +5750,9 @@ static void click(struct view *v, int rclick)
 			}
 		}
 
+		if (r == want)
+			return;                 /* the matchers heading */
+		r++;
 		if (r == want) {
 			if (g_mx >= v->n_c0 && g_mx <= v->n_c1)
 				ch_open(v, CH_RULE, MAX_GROUP, g_my, g_mx);
@@ -4108,18 +5764,22 @@ static void click(struct view *v, int rclick)
 			if (r == want) {
 				v->cur_grp = g;
 				v->warn[0] = 0;
-				if (g_mx >= 5 && g_mx <= 16)
+				if (g_mx >= v->grp_rl[g][0] &&
+				    g_mx <= v->grp_rl[g][1])
 					ch_open(v, CH_RULE, g, g_my, g_mx);
-				else if (g_mx >= 18 && g_mx <= 33)
+				else if (g_mx >= v->grp_rg[g][0] &&
+					 g_mx <= v->grp_rg[g][1])
 					ch_open(v, CH_RANGE, g,
 						g_my, g_mx);
+				else if (v->grp_th[g][0] > 0 &&
+					 g_mx >= v->grp_th[g][0] &&
+					 g_mx <= v->grp_th[g][1])
+					ch_open(v, CH_THRESH, g, g_my - 2,
+						g_mx);
 				else if (v->grp_nt[g][0] > 0 &&
 					 g_mx >= v->grp_nt[g][0] &&
 					 g_mx <= v->grp_nt[g][1])
 					v->edit = 300 + (int)g;
-				else if (g_mx > 35 && v->grp[g].rule == 2)
-					ch_open(v, CH_THRESH, g, g_my - 2,
-						g_mx);
 				return;
 			}
 			r++;
@@ -4147,57 +5807,77 @@ static void click(struct view *v, int rclick)
 			r++;
 		}
 
+		if (r == want)
+			return;                 /* the conditions heading */
+		r++;
 		if (r == want) {
 			if (v->n_grp && g_mx >= v->a_c0 && g_mx <= v->a_c1)
 				cnd_add(v, 0);
-			else if (v->n_cnd && g_mx >= v->b_c0 &&
-				 g_mx <= v->b_c1)
-				cnd_add(v, 1);
 			return;
 		}
 		r++;
 
-		for (g = 0; g < v->n_cnd; g++) {
-			int off = v->cnd[g].parent >= 0 ? 3 : 0;
+		for (g = 0; g < v->n_cseq; g++, r++) {
+			uint32_t ci = v->cseq_idx[g];
 
-			if (r + 1 == want) {
-				/* The matcher row. Its ids come back out the
-				 * way a matcher's markers do - by clicking the
-				 * one to remove. */
-				v->cur_cnd = g;
-				if (v->cnd_mt[g][0] > 0 &&
-				    g_mx >= v->cnd_mt[g][0] &&
-				    g_mx <= v->cnd_mt[g][1])
-					ch_open(v, CH_CMATCH, g, g_my - 3,
+			if (r != want)
+				continue;
+			v->cur_cnd = ci;
+
+			if (v->cseq_kind[g] == CS_JOIN) {
+				/*
+				 * Only on the word itself, and through a list.
+				 *
+				 * A whole row that flips the meaning of a
+				 * signature when it is clicked anywhere is a
+				 * row that gets flipped by accident, and the
+				 * accident leaves nothing behind to notice.
+				 */
+				if (v->cnd_jn[ci][0] > 0 &&
+				    g_mx >= v->cnd_jn[ci][0] &&
+				    g_mx <= v->cnd_jn[ci][1])
+					ch_open(v, CH_LOGIC, ci, g_my - 2,
 						g_mx);
 				return;
 			}
-			if (r != want) {
-				r += 2;
-				continue;
-			}
-			r += 2;
-			v->cur_cnd = g;
-			if (g_mx >= g_cols - 4) {
-				cnd_remove(v, g);
+			if (v->cseq_kind[g] == CS_ADD) {
+				if (v->n_grp && v->cnd_kid[ci][0] > 0 &&
+				    g_mx >= v->cnd_kid[ci][0] &&
+				    g_mx <= v->cnd_kid[ci][1])
+					cnd_add(v, 1);
 				return;
 			}
-			if (g_mx >= off + 5 && g_mx <= off + 20)
-				v->edit = 103 + (int)g;
-			else if (g_mx >= v->cnd_lv[g][0] &&
-				 g_mx <= v->cnd_lv[g][1])
-				ch_open(v, CH_LEVEL, g, g_my, g_mx);
-			else if (g_mx >= v->cnd_vr[g][0] &&
-				 g_mx <= v->cnd_vr[g][1])
-				ch_open(v, CH_VARIANT, g, g_my, g_mx);
-			else if (v->cnd_nm[g][0] > 0 &&
-				 g_mx >= v->cnd_nm[g][0] &&
-				 g_mx <= v->cnd_nm[g][1])
-				v->edit = 4 + (int)g;
-			else if (v->cnd_nt[g][0] > 0 &&
-				 g_mx >= v->cnd_nt[g][0] &&
-				 g_mx <= v->cnd_nt[g][1])
-				v->edit = 400 + (int)g;
+			if (v->cseq_kind[g] == CS_MATCH) {
+				if (v->cnd_mt[ci][0] > 0 &&
+				    g_mx >= v->cnd_mt[ci][0] &&
+				    g_mx <= v->cnd_mt[ci][1])
+					ch_open(v, CH_CMATCH, ci, g_my - 3,
+						g_mx);
+				else if (v->cnd_op[ci][0] > 0 &&
+					 g_mx >= v->cnd_op[ci][0] &&
+					 g_mx <= v->cnd_op[ci][1])
+					v->cnd[ci].op = !v->cnd[ci].op;
+				else
+					cnd_id_click(v, ci);
+				return;
+			}
+
+			/* CS_COND */
+			if (g_mx >= g_cols - 4) {
+				cnd_remove(v, ci);
+				return;
+			}
+			if (g_mx >= v->cnd_lv[ci][0] &&
+			    g_mx <= v->cnd_lv[ci][1])
+				ch_open(v, CH_LEVEL, ci, g_my, g_mx);
+			else if (v->cnd_vr[ci][0] > 0 &&
+				 g_mx >= v->cnd_vr[ci][0] &&
+				 g_mx <= v->cnd_vr[ci][1])
+				ch_open(v, CH_VARIANT, ci, g_my, g_mx);
+			else if (v->cnd_nm[ci][0] > 0 &&
+				 g_mx >= v->cnd_nm[ci][0] &&
+				 g_mx <= v->cnd_nm[ci][1])
+				v->edit = 4 + (int)ci;
 			return;
 		}
 		return;
@@ -4253,9 +5933,26 @@ static void click(struct view *v, int rclick)
 			return;
 		}
 		if (byte_under(v, g_my, g_mx, &at)) {
+			/*
+			 * A second click on the byte just clicked, soon after,
+			 * is a double click. Timed rather than counted because
+			 * a terminal reports two presses and nothing else - it
+			 * has no notion of a double click to pass on.
+			 */
+			uint64_t now = now_ms();
+			int again = at == v->last_click &&
+				    now - v->last_click_ms < 400u;
+
+			v->last_click = at;
+			v->last_click_ms = now;
 			v->sel_a = v->sel_b = at;
 			v->dragging = 1;
 			v->dragged = 0;
+			if (again) {
+				select_run(v);
+				v->dragging = 0;
+				v->dragged = 1;
+			}
 		}
 		return;
 	}
@@ -4364,9 +6061,6 @@ static int handle(struct view *v, int k)
 		if (v->edit == 1) {
 			buf = v->family;
 			cap = sizeof v->family;
-		} else if (v->edit >= 400) {
-			buf = v->cnd[(v->edit - 400) % MAX_GROUP].note;
-			cap = sizeof v->cnd[0].note;
 		} else if (v->edit >= 300) {
 			buf = v->grp[(v->edit - 300) % MAX_GROUP].note;
 			cap = sizeof v->grp[0].note;
@@ -4479,6 +6173,23 @@ static int handle(struct view *v, int k)
 	case K_DRAG: {
 		uint64_t at;
 
+		if (v->sizing) {
+			/*
+			 * The divider follows the pointer, and the panel takes
+			 * what is above it. Bounded at both ends: a panel taller
+			 * than the screen would leave no hex to take bytes from,
+			 * and one of zero rows would hide the draft while it was
+			 * still being written.
+			 */
+			int want = g_rows - g_my - 2;
+
+			if (want < 1)
+				want = 1;
+			if (want > g_rows - 8)
+				want = g_rows - 8 > 1 ? g_rows - 8 : 1;
+			v->decl_cap = (uint32_t)want;
+			break;
+		}
 		if (v->dragging && byte_under(v, g_my, g_mx, &at)) {
 			if (at != v->sel_a)
 				v->dragged = 1;
@@ -4487,6 +6198,7 @@ static int handle(struct view *v, int k)
 		break;
 	}
 	case K_RELEASE:
+		v->sizing = 0;
 		if (v->menu_open)
 			break;
 		/*
@@ -4534,11 +6246,23 @@ static int handle(struct view *v, int k)
 
 		/* Shift turns the wheel sideways, the way it does in every
 		 * other program that has both. */
-		if (g_mod_shift) {
+		if (g_mod_shift || g_mod_ctrl) {
+			/*
+			 * Sideways.
+			 *
+			 * The draft panel is columns of fixed width and one of
+			 * them - the comment - holds a sentence. Sliding it is
+			 * the only way to read the end of one without making
+			 * every other column narrower, so the panel takes the
+			 * modified wheel too.
+			 */
 			uint32_t *h = (v->show_list && g_my > list_top(v) &&
 				       g_my <= list_top(v) +
 					       (int)list_shown(v))
 				      ? &v->list_hoff :
+				      (g_decl_rows && g_my > decl_top() &&
+				       g_my < mark_row())
+				      ? &v->decl_hoff :
 				      (g_mx <= TREE_W) ? &v->tree_hoff : NULL;
 
 			if (h) {
@@ -4687,6 +6411,10 @@ int main(int argc, char **argv)
 
 	memset(&v, 0, sizeof v);
 	v.sel_a = v.sel_b = KOF_BROKEN;
+	v.decl_cap = 12;
+	/* An empty draft is a saved draft: whatever the hash of "nothing" turns
+	 * out to be, it must not read as unsaved work. */
+	v.saved_hash = draft_hash(&v);
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--db") && i + 1 < argc)
@@ -4773,6 +6501,25 @@ int main(int argc, char **argv)
 	objects_examine(&v, eng);
 	tree_build(&v);
 	view_select(&v);
+
+	/*
+	 * A file that already matches something opens showing what matched.
+	 *
+	 * That is nearly always the reason for opening it: a researcher looking
+	 * at a detected sample is there to see the rule that caught it, or to
+	 * write the one that should have. Starting on an empty panel makes them
+	 * go and find it first.
+	 */
+	{
+		struct object *o0 = &v.obj[0];
+		uint32_t k;
+
+		for (k = 0; k < o0->n_touch; k++)
+			if (o0->touch[k].fired) {
+				draft_show(&v, k);
+				break;
+			}
+	}
 
 	if (!term_setup()) {
 		rc = 1;
