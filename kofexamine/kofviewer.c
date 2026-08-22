@@ -309,6 +309,14 @@ static const char *byte_colour(uint8_t c)
 #define A_SELB  "\033[44;97m"   /* the drag selection */
 #define A_HIT1  "\033[41;97m"   /* counted by the module */
 #define A_HIT2  "\033[43;30m"   /* present, but outside its regions */
+/*
+ * A string the draft itself declares, lit where it sits in the object.
+ *
+ * A different colour from the database's markers on purpose: one is what the
+ * engine already knows, the other is what this draft is claiming, and the whole
+ * job of the pane is telling those two apart.
+ */
+#define A_HIT3  "\033[45;97m"
 
 #define TREE_W   30
 
@@ -366,6 +374,17 @@ static int mark_row(void) { return g_rows; }
  * copy and the range they were found in is easy to forget, and a marker searched
  * for in the wrong region is a signature that quietly never fires.
  */
+/*
+ * When a recovered object stops being held in memory, and when it stops being
+ * held at all.
+ *
+ * Eight megabytes is far past anything an unpacker normally hands back and far
+ * short of anything worth paging; the quarter gigabyte is the whole session's
+ * budget across every child.
+ */
+#define OBJ_SPILL   (8ull << 20)
+#define OBJ_BUDGET  (256ull << 20)
+
 #define MAX_DECL  32
 #define MAX_GROUP 8
 
@@ -536,6 +555,10 @@ struct decl {
 	uint32_t mask;              /* the region it was taken from */
 	char     rgn[24];           /* that region's short name */
 	uint32_t grp;               /* which matcher uses it */
+	/* Where these bytes are in the object, so the row can jump to them and
+	 * the pane can light them. KOF_BROKEN when they are not there at all -
+	 * a marker taken from one sample and carried to another. */
+	uint64_t at;
 
 	/*
 	 * How a literal is compared. Both are properties of KOF_DEFINE_STR and
@@ -636,6 +659,9 @@ struct chooser {
 struct object {
 	char      name[256];
 	uint8_t  *own;              /* the copy, NULL for the mapped top level */
+	void     *mapped;           /* or a spill file, mapped instead of copied */
+	uint64_t  mapped_len;
+	int       too_big;          /* kept nowhere: past the session's budget */
 	kof_buf   buf;
 	uint32_t  depth;            /* how many "//" its name carries */
 
@@ -851,6 +877,7 @@ struct view {
 	uint32_t    decl_cap;
 	uint32_t    prow_seen;      /* how tall the draft was last frame */
 	uint32_t    saved_hash;     /* what the draft was when it was written */
+	uint64_t    obj_held;       /* bytes of recovered objects being kept */
 	int         sizing;
 	char        num[24];        /* the size being typed */
 	int         num_fresh;      /* nothing typed into it yet */
@@ -861,6 +888,10 @@ struct view {
 	 * row as they are drawn, because a row that is scrolled out has no
 	 * columns and must not answer a click meant for the one in its place. */
 	int         grp_nt[MAX_GROUP][2];
+	/* Where a string row's word/case block and its bytes were drawn. Read
+	 * back rather than assumed: the columns move when a field widens, and
+	 * a click routed by a remembered number goes to the wrong control. */
+	int         str_wc[MAX_DECL][2], str_by[MAX_DECL][2];
 	int         grp_rl[MAX_GROUP][2], grp_rg[MAX_GROUP][2];
 	int         grp_th[MAX_GROUP][2];
 	int         cnd_kid[MAX_GROUP][2];
@@ -902,16 +933,54 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	for (p = name; (p = strstr(p, "//")) != NULL; p += 2)
 		o->depth++;
 
-	/* The top level is already mapped; anything else exists only inside this
-	 * call and has to be kept if it is to be looked at. */
+	/*
+	 * The top level is already mapped; anything else exists only inside
+	 * this call and has to be kept if it is to be looked at.
+	 *
+	 * Kept three ways, by size. Small children go on the heap, which is
+	 * every child in practice. A large one is spilled to a temporary file
+	 * and mapped, so the pages it is not being looked at cost nothing -
+	 * a hex pane shows twenty rows however big the object is, and holding
+	 * a decompressed installer resident to show twenty rows of it is how a
+	 * viewer gets killed by an archive somebody chose.
+	 *
+	 * Past a total budget nothing more is kept at all. Those objects were
+	 * still scanned - that happened before this is called - so nothing is
+	 * missed; they simply cannot be browsed, and the tree says so.
+	 */
 	if (o->depth == 0 && v->map && len == v->map_len) {
 		o->buf = kof_buf_make(v->map, len);
+	} else if (v->obj_held + len > OBJ_BUDGET) {
+		o->buf = kof_buf_make(NULL, 0);
+		o->too_big = 1;
+	} else if (len >= OBJ_SPILL) {
+		char tmp[] = "/tmp/kofviewerXXXXXX";
+		int fd = mkstemp(tmp);
+
+		if (fd < 0)
+			return 0;
+		unlink(tmp);            /* it lives only as long as the fd */
+		if (write(fd, bytes, (size_t)len) != (ssize_t)len) {
+			close(fd);
+			return 0;
+		}
+		o->mapped = kof_map_file_ro(fd, len);
+		close(fd);
+		if (!o->mapped) {
+			o->buf = kof_buf_make(NULL, 0);
+			o->too_big = 1;
+		} else {
+			o->mapped_len = len;
+			o->buf = kof_buf_make(o->mapped, len);
+			v->obj_held += len;
+		}
 	} else {
 		o->own = malloc((size_t)len);
 		if (!o->own)
 			return 0;
 		memcpy(o->own, bytes, (size_t)len);
 		o->buf = kof_buf_make(o->own, len);
+		v->obj_held += len;
 	}
 
 	for (i = 0; i < res->n; i++) {
@@ -1043,8 +1112,12 @@ static void tree_build(struct view *v)
 		if (o->depth == 0)
 			snprintf(label, sizeof label, "%s", what);
 		else
-			snprintf(label, sizeof label, "//%s %s",
-				 tail ? tail + 1 : o->name, what);
+			snprintf(label, sizeof label, "//%s %s%s",
+				 tail ? tail + 1 : o->name, what,
+				 /* Scanned, but not kept: there is nothing to
+				  * show and the row should not pretend there
+				  * is. */
+				 o->too_big ? "  (not kept)" : "");
 		tree_add(v, o->depth * 2u, i, 0, o->buf.n, label);
 
 		if (!o->fmt || !v->ext)
@@ -1363,6 +1436,60 @@ static int hit_kind(struct view *v, uint64_t off)
 	return 0;
 }
 
+/*
+ * Where a declared string sits in this object, searched for once.
+ *
+ * A string declared by selecting bytes already knows; one loaded from a
+ * database row knows too. One read out of a source file does not - the file
+ * says what to look for, not where it was found - and that is the case this is
+ * for. Case folding is honoured because the declaration honours it.
+ */
+static void decl_locate(struct view *v, struct decl *d)
+{
+	struct object *ob = &v->obj[d->obj < v->n_obj ? d->obj : 0];
+	uint64_t i;
+
+	d->at = KOF_BROKEN;
+	if (!d->len || d->len > ob->buf.n)
+		return;
+	for (i = 0; i + d->len <= ob->buf.n; i++) {
+		uint32_t k;
+
+		for (k = 0; k < d->len; k++) {
+			uint8_t a = ob->buf.p[i + k], b = d->bytes[k];
+
+			if (d->icase && !d->hex) {
+				if (a >= 'A' && a <= 'Z')
+					a = (uint8_t)(a - 'A' + 'a');
+				if (b >= 'A' && b <= 'Z')
+					b = (uint8_t)(b - 'A' + 'a');
+			}
+			if (a != b)
+				break;
+		}
+		if (k == d->len) {
+			d->at = i;
+			return;
+		}
+	}
+}
+
+/* Is this file offset inside a string the draft declares. */
+static int decl_kind(struct view *v, uint64_t off)
+{
+	uint32_t i;
+
+	for (i = 0; i < v->n_decl; i++) {
+		const struct decl *d = &v->decl[i];
+
+		if (d->at == KOF_BROKEN)
+			continue;
+		if (off >= d->at && off < d->at + d->len)
+			return 1;
+	}
+	return 0;
+}
+
 static void draw_hex(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
@@ -1407,6 +1534,7 @@ static void draw_hex(struct out *o, struct view *v)
 
 				out_str(o, in_sel(v, at + (uint64_t)k) ? A_SELB :
 					h ? (h == 1 ? A_HIT1 : A_HIT2)
+					  : decl_kind(v, fo) ? A_HIT3
 					  : byte_colour(bv));
 				out_fmt(o, "%02X", bv);
 				out_str(o, A_OFF);
@@ -1420,6 +1548,7 @@ static void draw_hex(struct out *o, struct view *v)
 
 			out_str(o, in_sel(v, at + (uint64_t)k) ? A_SELB :
 				h ? (h == 1 ? A_HIT1 : A_HIT2)
+				  : decl_kind(v, fo) ? A_HIT3
 				  : byte_colour(c));
 			out_fmt(o, "%c", (c >= 0x20 && c < 0x7f) ? c : '.');
 			out_str(o, A_OFF);
@@ -1685,6 +1814,62 @@ static int cnd_more_siblings(struct view *v, uint32_t i)
 static int cnd_depth(struct view *v, uint32_t i)
 {
 	return v->cnd[i].parent >= 0 ? 1 : 0;
+}
+
+/*
+ * Take a matcher out, and put every reference to it right.
+ *
+ * The one thing on this panel that could be added and not removed. Removing it
+ * is not just a shift: the conditions name matchers by number, so every
+ * expression has to be renumbered or a condition that said "2" starts meaning
+ * the matcher that used to be 3 - the kind of change nothing on screen shows
+ * and no one would look for.
+ */
+static void grp_remove(struct view *v, uint32_t g)
+{
+	uint32_t i, k;
+
+	if (g >= v->n_grp)
+		return;
+	for (i = 0; i < v->n_decl; i++) {
+		if (v->decl[i].grp == g)
+			v->decl[i].grp = GRP_NONE;
+		else if (v->decl[i].grp != GRP_NONE && v->decl[i].grp > g)
+			v->decl[i].grp--;
+	}
+	for (k = 0; k < v->n_cnd; k++) {
+		struct cond *c = &v->cnd[k];
+		char out[64];
+		size_t at = 0;
+		const char *p = c->expr;
+		int first = 1;
+
+		out[0] = 0;
+		while (*p) {
+			if (*p >= '0' && *p <= '9') {
+				unsigned long n = strtoul(p, (char **)&p, 10);
+
+				if (n == (unsigned long)g + 1ul)
+					continue;
+				if (n > (unsigned long)g + 1ul)
+					n--;
+				at += (size_t)snprintf(out + at,
+						       sizeof out - at, "%s%lu",
+						       first ? "" : (c->op
+						       ? "|" : "&"), n);
+				first = 0;
+				continue;
+			}
+			p++;
+		}
+		out[at] = 0;
+		snprintf(c->expr, sizeof c->expr, "%s", out);
+	}
+	memmove(&v->grp[g], &v->grp[g + 1u],
+		(v->n_grp - g - 1u) * sizeof v->grp[0]);
+	v->n_grp--;
+	if (v->cur_grp >= v->n_grp && v->n_grp)
+		v->cur_grp = v->n_grp - 1u;
 }
 
 static void cnd_add(struct view *v, int nested)
@@ -2664,6 +2849,9 @@ static int draft_from_source(struct view *v, const char *path)
 		if (d->mask)
 			rng_name_of(fmt, d->mask, d->rgn, sizeof d->rgn);
 	}
+	/* The source says what to look for, not where it was found. */
+	for (i = 0; i < v->n_decl; i++)
+		decl_locate(v, &v->decl[i]);
 	return skipped ? -1 : 1;
 }
 
@@ -2747,6 +2935,7 @@ static void draft_from_touch(struct view *v, const struct kof_touch *t)
 			}
 		}
 		d->grp = 0;
+		d->at = st->at;
 		v->n_decl++;
 	}
 	if (!v->n_decl)
@@ -3029,17 +3218,27 @@ static void generate(struct view *v, int as_new)
 		return;
 	}
 
-	fprintf(f,
-		"/*\n"
-		" * Drafted with kofviewer.\n"
-		" *\n"
-		" * Authored against: %s\n", ob->name);
+	{
+		/*
+		 * The sample's name, not the path it happened to be at.
+		 *
+		 * A path names a machine as much as a file - somebody's home
+		 * directory, a mount that will not exist next week - and none
+		 * of that helps whoever reads this file later. The name is the
+		 * part that identifies the sample.
+		 */
+		const char *base = strrchr(ob->name, '/');
+
+		base = base ? base + 1 : ob->name;
+		fprintf(f,
+			"/*\n"
+			" * Generated by KOFViewer.\n"
+			" *\n"
+			" * Test sample: %s\n", base);
+	}
 	if (ob->packer[0])
-		fprintf(f, " * Reached via:      %s\n", ob->packer);
+		fprintf(f, " * Unpacked by: %s\n", ob->packer);
 	fprintf(f,
-		" *\n"
-		" * A signature written here only runs while whatever produced\n"
-		" * that object still produces it.\n"
 		" */\n\n"
 		"#include <kofmod/kofsig.h>\n\n");
 
@@ -3784,16 +3983,16 @@ static void draw_decl(struct out *o, struct view *v)
 
 
 	/*
-	 * Erase the whole area first.
+	 * Rows that stop being drawn are erased at the end, not all of them at
+	 * the start.
 	 *
-	 * The panel changes height as it is built, and a row that stops being
-	 * drawn is a row nobody erases - so an old line survived under the new
-	 * layout and read as a duplicate of the row that had moved. Clearing
-	 * the area costs one escape per row and removes the whole class.
+	 * Every row this paints already clears itself to the end of the line,
+	 * so erasing the whole area up front only mattered for the rows that
+	 * fall off when the draft shrinks - and it cost a visible flash of an
+	 * empty panel on any terminal without synchronized output, which is
+	 * most of them. The flash showed up as the panel blinking on a click
+	 * that changed nothing but the highlighted row.
 	 */
-	for (r = 0; r < g_decl_rows; r++)
-		row_start(o, top + r, 1);
-	r = 0;
 
 	/* ---- what the module declares ---- */
 	row_start(o, top, 1);
@@ -3974,14 +4173,17 @@ static void draw_decl(struct out *o, struct view *v)
 		out_fmt(o, "   %s%u." A_OFF " %s%-4s" A_OFF " ",
 			i == v->sel_decl ? A_SEL : A_DIM, i + 1u,
 			A_ID, d->hex ? "hex" : "str");
+		v->str_wc[i][0] = 1 + (int)o->col_hint;
 		if (d->hex)
 			out_fmt(o, A_DIM "%-21s" A_OFF, "");
 		else
 			out_fmt(o, A_WARN "%-9s %-11s" A_OFF,
 				d->fullword ? "fullword" : "substring",
 				d->icase ? "ignore-case" : "exact-case");
+		v->str_wc[i][1] = (int)o->col_hint;
 		out_fmt(o, " %s%-12s" A_OFF " %s%5u" A_OFF "  ",
 			A_LOC, d->rgn, A_SIZE, d->len);
+		v->str_by[i][0] = 1 + (int)o->col_hint;
 		{
 			uint32_t from = v->decl_hoff / 2u;
 
@@ -3992,6 +4194,7 @@ static void draw_decl(struct out *o, struct view *v)
 			if (d->len > from + 16u)
 				out_str(o, "...");
 		}
+		v->str_by[i][1] = (int)o->col_hint;
 		out_at(o, PR(r), g_cols - 4);
 		out_str(o, A_BAD "[x]" A_OFF);
 	}
@@ -4071,6 +4274,8 @@ static void draw_decl(struct out *o, struct view *v)
 				q->note[0] ? hslide(v, q->note)
 					   : "comment...");
 			v->grp_nt[g][1] = (int)o->col_hint;
+			out_at(o, PR(r), g_cols - 4);
+			out_str(o, A_BAD "[x]" A_OFF);
 		}
 		r++;
 
@@ -4302,6 +4507,15 @@ ids_done:
 		r++;
 	}
 
+	/* Whatever the draft used to reach and no longer does. */
+	{
+		int y = PR(r), bot = top + g_decl_rows - 2;
+
+		for (; y <= bot; y++)
+			if (y > top)
+				row_start(o, y, 1);
+	}
+
 }
 
 static void draw_marker_line(struct out *o, struct view *v)
@@ -4340,8 +4554,11 @@ static void draw_marker_line(struct out *o, struct view *v)
 		touch_name(&ob->touch[v->sel_touch], name, sizeof name);
 		touch_head(&ob->touch[v->sel_touch], head, sizeof head);
 
-		snprintf(hits, sizeof hits, "hit %u", hit);
-		snprintf(skips, sizeof skips, "skip %u", ob->n_touch - hit);
+		/* Capitalised, because they are the labels of two controls
+		 * rather than words in a sentence - the same way every other
+		 * button on this screen is written. */
+		snprintf(hits, sizeof hits, "Hit %u", hit);
+		snprintf(skips, sizeof skips, "Skip %u", ob->n_touch - hit);
 
 		c = 1 + (int)o->col_hint;
 		v->hit_c0 = c;
@@ -4574,8 +4791,8 @@ static void draw_list(struct out *o, struct view *v)
 	 */
 	{
 		const char *f = v->list_depth ? "" :
-				v->list_filter == 1 ? "hit: " :
-				v->list_filter == 2 ? "skip: " : "";
+				v->list_filter == 1 ? "Hit: " :
+				v->list_filter == 2 ? "Skip: " : "";
 		uint32_t off = v->list_depth ? v->str_off : v->list_off;
 
 		if (!total)
@@ -4589,11 +4806,11 @@ static void draw_list(struct out *o, struct view *v)
 
 	row_start(o, top, 3);
 	if (!v->list_depth)
-		out_fmt(o, A_DIM " %-52s %-10s%*s" A_OFF, "signatures",
-			"markers", w - 66, range);
+		out_fmt(o, A_DIM " %-52s %-10s%*s" A_OFF, "Signatures",
+			"Markers", w - 66, range);
 	else
 		out_fmt(o, A_DIM " %-14s %6s %8s  %-10s %-*s" A_OFF,
-			"marker", "db id", "size", "at", w - 46 > 0 ? w - 46 : 1,
+			"Marker", "db id", "size", "at", w - 46 > 0 ? w - 46 : 1,
 			range);
 
 	for (i = 0; i < shown; i++) {
@@ -5010,6 +5227,7 @@ static void decl_add(struct view *v, int hex)
 			 rn->mask ? rn->label : "WHOLE-FILE");
 	}
 	d->grp = GRP_NONE;
+	d->at = view_map(v, lo, 0);
 	(void)g;
 	v->warn[0] = 0;
 	v->sel_decl = v->n_decl;
@@ -5738,14 +5956,34 @@ static void click(struct view *v, int rclick)
 				if (r != want)
 					continue;
 				v->sel_decl = i;
-				if (g_mx >= g_cols - 4)
+				if (g_mx >= g_cols - 4) {
 					decl_remove(v, i);
-				else if (!v->decl[i].hex && g_mx >= 12 &&
-					 g_mx <= 21)
+				} else if (!v->decl[i].hex &&
+					   g_mx >= v->str_wc[i][0] &&
+					   g_mx <= v->str_wc[i][0] + 8) {
 					ch_open(v, CH_WORD, i, g_my, g_mx);
-				else if (!v->decl[i].hex && g_mx >= 23 &&
-					 g_mx <= 33)
+				} else if (!v->decl[i].hex &&
+					   g_mx >= v->str_wc[i][0] + 10 &&
+					   g_mx <= v->str_wc[i][1]) {
 					ch_open(v, CH_CASE, i, g_my, g_mx);
+				} else if (g_mx >= v->str_by[i][0] &&
+					   g_mx <= v->str_by[i][1]) {
+					/*
+					 * The bytes are the one part of the row
+					 * that names a place, so clicking them
+					 * goes there - and the pane lights the
+					 * run, which is the confirmation that
+					 * it is the right one.
+					 */
+					if (v->decl[i].at != KOF_BROKEN)
+						view_show(v, v->decl[i].at);
+					else
+						snprintf(v->warn,
+							 sizeof v->warn,
+							 "string %u is not in "
+							 "this object",
+							 i + 1u);
+				}
 				return;
 			}
 		}
@@ -5764,8 +6002,10 @@ static void click(struct view *v, int rclick)
 			if (r == want) {
 				v->cur_grp = g;
 				v->warn[0] = 0;
-				if (g_mx >= v->grp_rl[g][0] &&
-				    g_mx <= v->grp_rl[g][1])
+				if (g_mx >= g_cols - 4)
+					grp_remove(v, g);
+				else if (g_mx >= v->grp_rl[g][0] &&
+					 g_mx <= v->grp_rl[g][1])
 					ch_open(v, CH_RULE, g, g_my, g_mx);
 				else if (g_mx >= v->grp_rg[g][0] &&
 					 g_mx <= v->grp_rg[g][1])
@@ -6202,19 +6442,22 @@ static int handle(struct view *v, int k)
 		if (v->menu_open)
 			break;
 		/*
-		 * A press and a release on one byte is a click, not a selection
-		 * of length one - and on a lit byte the obvious thing to want
-		 * is to know whose marker it is. So it selects that signature,
-		 * which relights the pane around it. Anywhere else it is a
-		 * caret and stays as one.
+		 * A press and a release on one byte is a click, and on a lit
+		 * byte it also says whose marker that byte is - the pane
+		 * relights around the signature it belongs to.
+		 *
+		 * What it does NOT do is drop the caret. It used to, and the
+		 * result was that the lit bytes - the ones a researcher is
+		 * most likely to want to take - were the only place in the
+		 * pane where clicking selected nothing: press, release,
+		 * selection gone. Identifying the marker and putting the caret
+		 * down are not alternatives.
 		 */
 		if (v->dragging && !v->dragged && v->sel_a != KOF_BROKEN) {
 			int who = hit_owner(v, view_map(v, v->sel_a, 0));
 
-			if (who >= 0) {
+			if (who >= 0)
 				v->sel_touch = (uint32_t)who;
-				v->sel_a = v->sel_b = KOF_BROKEN;
-			}
 		}
 		v->dragging = 0;
 		break;
@@ -6397,6 +6640,8 @@ static void view_free(struct view *v)
 		free(o->finding);
 		free(o->info);
 		free(o->own);
+		if (o->mapped)
+			kof_unmap_file(o->mapped, o->mapped_len);
 	}
 	free(v->ext);
 }
