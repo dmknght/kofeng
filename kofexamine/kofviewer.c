@@ -3212,6 +3212,44 @@ static const char *draft_missing(struct view *v)
 		if (!v->cnd[i].expr[0] && !cnd_children(v, i))
 			return "every condition needs a matcher";
 	}
+
+	/*
+	 * Nothing declared and then left out.
+	 *
+	 * A string in no matcher still gets a KOF_DEFINE_STR and is never
+	 * searched for; a matcher no condition names is never written into the
+	 * body at all, which quietly takes its strings with it. Both compile,
+	 * both look finished on screen, and neither does what the panel appears
+	 * to say - so they are caught here rather than found later by wondering
+	 * why a marker never fires.
+	 *
+	 * What is deliberately NOT checked is a matcher named more than once. It
+	 * reads like a redundancy and sometimes is, but "(M1|M2) & (M1|M3)" is a
+	 * real shape - the same search meaning different things on two branches
+	 * - and refusing it would cost more than the tidiness is worth.
+	 */
+	{
+		static char why[64];
+
+		for (i = 0; i < v->n_decl; i++)
+			if (v->decl[i].grp == GRP_NONE) {
+				snprintf(why, sizeof why,
+					 "string %u is in no matcher", i + 1u);
+				return why;
+			}
+		for (i = 0; i < v->n_grp; i++) {
+			uint32_t k, used = 0;
+
+			for (k = 0; k < v->n_cnd; k++)
+				used += (uint32_t)cnd_uses(&v->cnd[k], i);
+			if (!used) {
+				snprintf(why, sizeof why,
+					 "matcher %u is in no condition",
+					 i + 1u);
+				return why;
+			}
+		}
+	}
 	return NULL;
 }
 
