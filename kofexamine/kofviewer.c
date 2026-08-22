@@ -900,6 +900,34 @@ struct view {
 	uint32_t    saved_hash;     /* what the draft was when it was written */
 	uint64_t    obj_held;       /* bytes of recovered objects being kept */
 	int         sizing;
+	/*
+	 * Which scrollbar the pointer took hold of, so a drag keeps moving that
+	 * one after the pointer has left its column. A bar that only responds
+	 * while the pointer stays inside a single column is a bar nobody can
+	 * drag.
+	 */
+	int         bar_drag;       /* 0 none, 1 hex, 2 tree, 3 draft */
+	/*
+	 * What is being searched for, and where it was last found.
+	 *
+	 * `scope` is the one thing a terminal cannot give a modifier for:
+	 * Ctrl+Shift+F arrives as the same byte as Ctrl+F on every terminal
+	 * that does not implement the newer key protocols, so the choice
+	 * between this region and the whole object is made inside the prompt
+	 * with Tab rather than by a chord that most terminals cannot send.
+	 */
+	char        find[80];
+	int         find_open;      /* the dialog is up */
+	int         find_hex;       /* the text is hex digits, not bytes */
+	int         find_icase;     /* letters compare either way; text only */
+	int         find_regex;     /* declared, refused: see draw_find */
+	int         find_scope;     /* 0 this region, 1 the whole object */
+	uint64_t    find_at;        /* the last hit, in file offsets */
+	uint32_t    find_i, find_n; /* which hit it is, and how many there are */
+	/* Where each control landed, recorded as it is drawn. */
+	int         f_txt[2], f_mode[2], f_rx[2], f_ic[2], f_all[2];
+	int         f_next[2], f_back[2], f_cancel[2];
+
 	char        num[24];        /* the size being typed */
 	int         num_fresh;      /* nothing typed into it yet */
 	int         row_cnd, row_str;
@@ -1301,6 +1329,39 @@ static void row_start(struct out *o, int row, int col)
 	o->col_hint = 0;
 }
 
+/*
+ * A vertical scrollbar in one column.
+ *
+ * Drawn only when there is more than fits, because a bar that is always full
+ * height says nothing and costs a column of every pane it is in. The thumb is
+ * at least one row so a very long object still shows where it is - proportional
+ * alone would round it away and leave the track empty.
+ *
+ * ASCII, like the pane divider: this is read over ssh on whatever terminal is
+ * at the other end.
+ */
+static void scrollbar(struct out *o, int col, int top, int bot,
+		      uint64_t off, uint64_t total, uint64_t shown)
+{
+	int rows = bot - top + 1, i, t0, t1;
+	uint64_t max;
+
+	if (rows < 2 || !total || shown >= total)
+		return;
+	max = total - shown;
+	t1 = (int)((uint64_t)(rows - 1) * shown / total);
+	if (t1 < 1)
+		t1 = 1;
+	t0 = (int)((uint64_t)(rows - t1) * (off < max ? off : max) / max);
+	for (i = 0; i < rows; i++) {
+		out_at(o, top + i, col);
+		if (i >= t0 && i < t0 + t1)
+			out_str(o, A_ID "#" A_OFF);
+		else
+			out_str(o, A_DIM ":" A_OFF);
+	}
+}
+
 static void draw_frame(struct out *o, struct view *v)
 {
 	int i;
@@ -1378,6 +1439,10 @@ static void draw_tree(struct out *o, struct view *v)
 		out_fmt(o, "%9llu", (unsigned long long)n->bytes);
 		out_str(o, A_OFF);
 	}
+	/* The tree's own bar, in the two columns its rows never reach: a row is
+	 * a mark, eighteen of label and nine of size, and TREE_W is thirty. */
+	scrollbar(o, TREE_W, top, bot, v->tree_top, v->n_node,
+		  (uint64_t)(bot - top + 1));
 }
 
 /*
@@ -1587,6 +1652,12 @@ static void draw_hex(struct out *o, struct view *v)
 		out_str(o, "\033[K");
 		at += (uint64_t)per;
 	}
+	/* Only when the rows leave the column free. On a narrow terminal the
+	 * hex reaches the edge, and a bar drawn over the last ASCII column
+	 * would be a scrollbar that eats the thing it is scrolling. */
+	if (col + 8 + 2 + per * 3 + 2 + per <= g_cols)
+		scrollbar(o, g_cols, top, bot, v->rgn_at, v->rgn_len,
+			  (uint64_t)(bot - top + 1) * (uint64_t)per);
 }
 
 /* The composed name a scan would print for this module, less the target. */
@@ -4676,6 +4747,8 @@ ids_done:
 			if (y > top)
 				row_start(o, y, 1);
 	}
+	scrollbar(o, g_cols, top + 1, top + g_decl_rows - 2, v->prow_off,
+		  v->n_prow, (uint64_t)(g_decl_rows - 2));
 
 }
 
@@ -4753,11 +4826,23 @@ static void draw_marker_line(struct out *o, struct view *v)
 
 		/* One offset in front and the other in brackets after it: they
 		 * are the same place said twice, not two columns to line up. */
-		snprintf(right, sizeof right,
-			 "%llu B   offset %08llx (region: %08llx)",
-			 (unsigned long long)(hi - lo + 1u),
-			 (unsigned long long)view_map(v, lo, 0),
-			 (unsigned long long)lo);
+		/* And which hit it is, when the selection is one: after a
+		 * search the useful question is not only where this match is
+		 * but how many there are and how far through them you are. */
+		if (v->find_n && v->find_i)
+			snprintf(right, sizeof right,
+				 "hit %u/%u   %llu B   offset %08llx "
+				 "(region: %08llx)",
+				 v->find_i, v->find_n,
+				 (unsigned long long)(hi - lo + 1u),
+				 (unsigned long long)view_map(v, lo, 0),
+				 (unsigned long long)lo);
+		else
+			snprintf(right, sizeof right,
+				 "%llu B   offset %08llx (region: %08llx)",
+				 (unsigned long long)(hi - lo + 1u),
+				 (unsigned long long)view_map(v, lo, 0),
+				 (unsigned long long)lo);
 	} else if (v->off_region) {
 		/*
 		 * Only the unusual state is announced. File offsets are what
@@ -5417,6 +5502,16 @@ static void menu_run(struct view *v, int a)
 		v->menu_open = 0;
 		return;
 	}
+	if (a == M_FIND_STR || a == M_FIND_HEX) {
+		v->find_hex = a == M_FIND_HEX;
+		v->find[0] = 0;
+		v->find_at = KOF_BROKEN;
+		v->find_open = 1;
+		v->edit = 500;
+		v->menu_open = 0;
+		v->warn[0] = 0;
+		return;
+	}
 	lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
 	hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
 	n = hi - lo + 1u;
@@ -5460,6 +5555,8 @@ static void menu_run(struct view *v, int a)
  */
 static char  *g_last;
 static size_t g_last_n;
+
+static void draw_find(struct out *o, struct view *v);
 
 static void redraw(struct view *v)
 {
@@ -5552,6 +5649,8 @@ static void redraw(struct view *v)
 		draw_list(&o, v);
 	if (v->menu_open)
 		draw_menu(&o, v);
+	if (v->find_open)
+		draw_find(&o, v);
 	draw_chooser(&o, v);
 	out_str(&o, "\033[?2026l");
 
@@ -5696,6 +5795,186 @@ static void view_show(struct view *v, uint64_t file_off)
 	v->rgn_at = row > JUMP_LEAD ? (row - JUMP_LEAD) * per : 0;
 	if (v->rgn_at > hex_max(v))
 		v->rgn_at = hex_max(v);
+}
+
+/* ---- search --------------------------------------------------------------- */
+
+/* One hex digit, or -1. */
+static int hexval(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+/*
+ * The pattern as bytes.
+ *
+ * Hex is read two digits at a time and whitespace between them is ignored, so a
+ * pattern pasted out of a hex dump works without editing. An odd digit at the
+ * end is dropped rather than padded: half a byte is not a byte, and guessing
+ * which half would make the search quietly wrong.
+ */
+static uint32_t find_bytes(const struct view *v, uint8_t *out, uint32_t cap)
+{
+	uint32_t n = 0;
+	const char *p;
+
+	if (!v->find_hex) {
+		for (p = v->find; *p && n < cap; p++)
+			out[n++] = (uint8_t)*p;
+		return n;
+	}
+	for (p = v->find; *p && n < cap; ) {
+		int hi, lo;
+
+		while (*p == ' ' || *p == '\t')
+			p++;
+		hi = hexval(*p);
+		if (hi < 0)
+			break;
+		p++;
+		while (*p == ' ' || *p == '\t')
+			p++;
+		lo = hexval(*p);
+		if (lo < 0)
+			break;
+		p++;
+		out[n++] = (uint8_t)((hi << 4) | lo);
+	}
+	return n;
+}
+
+/*
+ * The next occurrence at or after `from`, as a file offset.
+ *
+ * Searched over the object's bytes rather than over the region being looked at,
+ * because the region is a view and the answer is a place in the file. Which of
+ * the two the caller wanted is `find_scope`: within one region the hits outside
+ * it are skipped, which is not the same as searching a copy of the region -
+ * a pattern lying across two extents of one region is in neither of them, and
+ * this reports it where it is rather than inventing a join.
+ */
+static uint64_t find_next(struct view *v, uint64_t from)
+{
+	struct object *ob = cur_obj(v);
+	uint8_t pat[64];
+	uint32_t n = find_bytes(v, pat, sizeof pat);
+	uint64_t i;
+
+	if (!n || n > ob->buf.n)
+		return KOF_BROKEN;
+	for (i = from; i + n <= ob->buf.n; i++) {
+		uint32_t k;
+
+		for (k = 0; k < n; k++) {
+			uint8_t a = ob->buf.p[i + k], b = pat[k];
+
+			/* Only for text: a hex pattern names bytes, and two
+			 * bytes are equal or they are not. */
+			if (v->find_icase && !v->find_hex) {
+				if (a >= 'A' && a <= 'Z')
+					a = (uint8_t)(a - 'A' + 'a');
+				if (b >= 'A' && b <= 'Z')
+					b = (uint8_t)(b - 'A' + 'a');
+			}
+			if (a != b)
+				break;
+		}
+		if (k != n)
+			continue;
+		if (v->find_scope == 0 && view_unmap(v, i) == KOF_BROKEN)
+			continue;       /* present, but not in this region */
+		return i;
+	}
+	return KOF_BROKEN;
+}
+
+/*
+ * The last occurrence strictly before `before`.
+ *
+ * Written as a forward scan that keeps the best answer rather than a reverse
+ * one: the match test is the same in both directions and only one of them has
+ * to be right.
+ */
+static uint64_t find_prev(struct view *v, uint64_t before)
+{
+	uint64_t at = 0, best = KOF_BROKEN, hit;
+
+	for (;;) {
+		hit = find_next(v, at);
+		if (hit == KOF_BROKEN || hit >= before)
+			break;
+		best = hit;
+		at = hit + 1u;
+	}
+	return best;
+}
+
+/* Run the search, wrapping once at whichever end it reaches. */
+static void find_run(struct view *v, int back)
+{
+	uint64_t at;
+
+	if (back) {
+		uint64_t before = v->find_at == KOF_BROKEN ? 0 : v->find_at;
+
+		at = before ? find_prev(v, before) : KOF_BROKEN;
+		if (at == KOF_BROKEN)
+			at = find_prev(v, cur_obj(v)->buf.n);   /* wrap */
+	} else {
+		uint64_t start = v->find_at == KOF_BROKEN ? 0
+							  : v->find_at + 1u;
+
+		at = find_next(v, start);
+		if (at == KOF_BROKEN && start)
+			at = find_next(v, 0);           /* wrap */
+	}
+	if (at == KOF_BROKEN) {
+		snprintf(v->warn, sizeof v->warn, "not found");
+		v->find_i = v->find_n = 0;
+		return;
+	}
+	v->warn[0] = 0;
+	v->find_at = at;
+	/*
+	 * Which hit this is, counted rather than tracked.
+	 *
+	 * Kept as a count over the whole object every time instead of a number
+	 * carried between searches: the scope, the case folding and the pattern
+	 * can all change between one search and the next, and a carried index
+	 * would then be counting something that no longer exists.
+	 */
+	{
+		uint64_t p = 0, h;
+
+		v->find_i = v->find_n = 0;
+		for (;;) {
+			h = find_next(v, p);
+			if (h == KOF_BROKEN)
+				break;
+			v->find_n++;
+			if (h == at)
+				v->find_i = v->find_n;
+			p = h + 1u;
+		}
+	}
+	view_show(v, at);
+	{
+		uint64_t r = view_unmap(v, at);
+
+		if (r != KOF_BROKEN) {
+			uint8_t pat[64];
+			uint32_t n = find_bytes(v, pat, sizeof pat);
+
+			v->sel_a = r;
+			v->sel_b = n ? r + n - 1u : r;
+		}
+	}
 }
 
 /* ---- input ---------------------------------------------------------------- */
@@ -5985,6 +6264,218 @@ static void cnd_id_click(struct view *v, uint32_t g)
 	}
 }
 
+/*
+ * Move whatever bar was taken hold of to where the pointer is.
+ *
+ * The row under the pointer names a fraction of the track, and the fraction
+ * names a position in the content. Clamped at both ends rather than checked,
+ * because a pointer dragged past the pane is an ordinary thing to do and
+ * stopping at the end is what it means.
+ */
+static void bar_to(struct view *v, int which)
+{
+	int top, bot;
+	uint64_t frac, max;
+
+	if (which == 1) {                       /* the hex pane */
+		uint64_t per = (uint64_t)(v->per > 0 ? v->per : 16);
+
+		top = hex_top(); bot = hex_bot();
+		if (bot <= top)
+			return;
+		max = hex_max(v);
+		frac = (uint64_t)(g_my < top ? 0 : g_my > bot ? bot - top
+							     : g_my - top);
+		v->rgn_at = frac * max / (uint64_t)(bot - top);
+		v->rgn_at = v->rgn_at / per * per;
+	} else if (which == 2) {                /* the object tree */
+		uint32_t rows;
+
+		top = hex_top(); bot = hex_bot();
+		if (bot <= top || !v->n_node)
+			return;
+		rows = (uint32_t)(bot - top + 1);
+		if (v->n_node <= rows)
+			return;
+		max = v->n_node - rows;
+		frac = (uint64_t)(g_my < top ? 0 : g_my > bot ? bot - top
+							     : g_my - top);
+		v->tree_top = (uint32_t)(frac * max / (uint64_t)(bot - top));
+	} else if (which == 3) {                /* the draft panel */
+		uint32_t vis;
+
+		if (g_decl_rows < 3)
+			return;
+		top = decl_top() + 1;
+		bot = decl_top() + g_decl_rows - 2;
+		vis = (uint32_t)(g_decl_rows - 2);
+		if (bot <= top || v->n_prow <= vis)
+			return;
+		max = v->n_prow - vis;
+		frac = (uint64_t)(g_my < top ? 0 : g_my > bot ? bot - top
+							     : g_my - top);
+		v->prow_off = (uint32_t)(frac * max / (uint64_t)(bot - top));
+	}
+}
+
+/* Is the pointer on a scrollbar, and which. 0 for none. */
+static int bar_under(struct view *v)
+{
+	if (g_my >= hex_top() && g_my <= hex_bot()) {
+		if (g_mx == g_cols && v->rgn_len)
+			return 1;
+		if (g_mx == TREE_W)
+			return 2;
+	}
+	if (g_decl_rows && g_mx == g_cols && g_my > decl_top() &&
+	    g_my < decl_top() + g_decl_rows - 1)
+		return 3;
+	return 0;
+}
+
+/*
+ * The find dialog.
+ *
+ * A box rather than a line, because searching has more than one setting and a
+ * line can only hold the one being typed. Every setting is a control that says
+ * its own state, so nothing has to be remembered between openings.
+ *
+ * Regex is drawn and refused. Leaving it out would invite the question every
+ * time; drawing it greyed answers it once and marks the place the work goes.
+ */
+#define FIND_H 6
+
+static int find_top(void)
+{
+	return g_rows - FIND_H - 1;
+}
+
+static void draw_find(struct out *o, struct view *v)
+{
+	int top = find_top(), y, i;
+
+	row_start(o, top + 1, 3);
+	out_fmt(o, A_DIM "Find " A_OFF);
+	v->f_txt[0] = 1 + (int)o->col_hint;
+	out_fmt(o, "%s[%-48.48s]" A_OFF, v->edit == 500 ? A_SEL : A_ID,
+		v->find[0] ? v->find : "");
+	v->f_txt[1] = (int)o->col_hint;
+
+	row_start(o, top + 2, 3);
+	out_fmt(o, A_DIM "as " A_OFF);
+	v->f_mode[0] = 1 + (int)o->col_hint;
+	out_fmt(o, "%s[%s]" A_OFF, A_WARN, v->find_hex ? "hex" : "text");
+	v->f_mode[1] = (int)o->col_hint;
+	out_str(o, "   ");
+	v->f_rx[0] = 1 + (int)o->col_hint;
+	/* Bright black on white, not on bright black: the same colour twice is
+	 * a grey block where a label should be. */
+	out_fmt(o, "\033[47;90m[ ] regex" A_OFF);
+	v->f_rx[1] = (int)o->col_hint;
+	out_str(o, "   ");
+	v->f_ic[0] = 1 + (int)o->col_hint;
+	if (v->find_hex)
+		out_fmt(o, "\033[47;90m[ ] ignore case" A_OFF);
+	else
+		out_fmt(o, "%s[%s] ignore case" A_OFF, A_ID,
+			v->find_icase ? "x" : " ");
+	v->f_ic[1] = (int)o->col_hint;
+
+	row_start(o, top + 3, 3);
+	v->f_all[0] = 1 + (int)o->col_hint;
+	out_fmt(o, "%s[%s] Search whole object" A_OFF, A_ID,
+		v->find_scope ? "x" : " ");
+	v->f_all[1] = (int)o->col_hint;
+
+	row_start(o, top + 4, 3);
+	v->f_next[0] = 1 + (int)o->col_hint;
+	out_fmt(o, "%s[ Find next ]" A_OFF, v->find[0] ? A_ID : A_DIM);
+	v->f_next[1] = (int)o->col_hint;
+	out_str(o, "  ");
+	v->f_back[0] = 1 + (int)o->col_hint;
+	out_fmt(o, "%s[ Find previous ]" A_OFF, v->find[0] ? A_ID : A_DIM);
+	v->f_back[1] = (int)o->col_hint;
+	out_str(o, "  ");
+	v->f_cancel[0] = 1 + (int)o->col_hint;
+	out_fmt(o, A_ID "[ Cancel ]" A_OFF);
+	v->f_cancel[1] = (int)o->col_hint;
+	/* The outcome shares the button row rather than taking one of its own:
+	 * a row that is empty until something goes wrong is a row of border
+	 * around nothing for most of the dialog's life. */
+	if (v->warn[0])
+		out_fmt(o, "   %s%s" A_OFF, A_BAD, v->warn);
+	else if (v->find_at != KOF_BROKEN)
+		out_fmt(o, A_DIM "   found at " A_OFF "%s%08llx" A_OFF, A_LOC,
+			(unsigned long long)v->find_at);
+
+	/*
+	 * The frame last, over the rows rather than under them.
+	 *
+	 * Every row above clears to the end of the line, so a border drawn
+	 * first is erased by the first row that follows it - and redrawn on the
+	 * next frame, which is the flicker that showed whenever anything in
+	 * here changed.
+	 */
+	for (y = top; y < top + FIND_H; y++) {
+		out_at(o, y, 1);
+		out_str(o, A_DIM);
+		if (y == top || y == top + FIND_H - 1) {
+			out_str(o, "+");
+			for (i = 2; i < g_cols; i++)
+				out_str(o, "-");
+			out_str(o, "+" A_OFF);
+			continue;
+		}
+		out_str(o, "| " A_OFF);
+		out_at(o, y, g_cols);
+		out_str(o, A_DIM "|" A_OFF);
+	}
+}
+
+/* Which control a click landed on. */
+static void find_click(struct view *v)
+{
+	int top = find_top();
+
+	if (g_my < top || g_my >= top + FIND_H) {
+		v->find_open = 0;       /* anywhere off the box closes it */
+		v->edit = 0;
+		return;
+	}
+	if (g_my == top + 1 && g_mx >= v->f_txt[0] && g_mx <= v->f_txt[1]) {
+		v->edit = 500;
+		return;
+	}
+	if (g_my == top + 2) {
+		if (g_mx >= v->f_mode[0] && g_mx <= v->f_mode[1]) {
+			v->find_hex = !v->find_hex;
+			v->find_at = KOF_BROKEN;
+		} else if (!v->find_hex && g_mx >= v->f_ic[0] &&
+			   g_mx <= v->f_ic[1]) {
+			v->find_icase = !v->find_icase;
+			v->find_at = KOF_BROKEN;
+		}
+		return;
+	}
+	if (g_my == top + 3 && g_mx >= v->f_all[0] && g_mx <= v->f_all[1]) {
+		v->find_scope = !v->find_scope;
+		v->find_at = KOF_BROKEN;
+		return;
+	}
+	if (g_my == top + 4) {
+		if (g_mx >= v->f_cancel[0] && g_mx <= v->f_cancel[1]) {
+			v->find_open = 0;
+			v->edit = 0;
+		} else if (!v->find[0]) {
+			;
+		} else if (g_mx >= v->f_next[0] && g_mx <= v->f_next[1]) {
+			find_run(v, 0);
+		} else if (g_mx >= v->f_back[0] && g_mx <= v->f_back[1]) {
+			find_run(v, 1);
+		}
+	}
+}
+
 static void click(struct view *v, int rclick)
 {
 	struct object *ob = cur_obj(v);
@@ -6002,10 +6493,25 @@ static void click(struct view *v, int rclick)
 			g_mx > TREE_W && !v->show_list && !v->menu_open))
 		return;
 
+	if (v->find_open) {
+		find_click(v);
+		return;
+	}
+
 	/* Any click leaves whatever was being typed. The header branch below
 	 * puts the focus back if the click landed on a field, so this is the
 	 * whole of "click away to stop editing". */
 	v->edit = 0;
+
+	{
+		int which = bar_under(v);
+
+		if (which) {
+			v->bar_drag = which;
+			bar_to(v, which);
+			return;
+		}
+	}
 
 	/* Pressing the divider starts a resize; the drag handler does the rest.
 	 * Tested before anything else claims the row, and only when there is a
@@ -6377,6 +6883,7 @@ static void click(struct view *v, int rclick)
 			return;
 		}
 		if (byte_under(v, g_my, g_mx, &at)) {
+			v->find_i = v->find_n = 0;
 			/*
 			 * A second click on the byte just clicked, soon after,
 			 * is a double click. Timed rather than counted because
@@ -6490,6 +6997,35 @@ static int handle(struct view *v, int k)
 			v->num_fresh = 0;
 			return 1;
 		}
+		if (v->edit == 500) {
+			/*
+			 * Typing into the find dialog.
+			 *
+			 * Enter searches forward and Shift is not consulted for
+			 * anything: the dialog has buttons for backwards and for
+			 * scope, which is why there is no chord for either. A
+			 * terminal cannot tell Ctrl+Shift+F from Ctrl+F without
+			 * one of the newer key protocols, and a control that
+			 * works on some terminals is worse than a button.
+			 */
+			size_t n = strlen(v->find);
+
+			if (k == 27) {
+				v->edit = 0;
+				v->find_open = 0;
+			} else if (k == '\r' || k == '\n') {
+				v->find_at = KOF_BROKEN;
+				find_run(v, 0);
+			} else if (k == 0x08 || k == 127) {
+				if (n)
+					v->find[n - 1u] = 0;
+			} else if (k >= 0x20 && k < 0x7f &&
+				   n + 2u < sizeof v->find) {
+				v->find[n] = (char)k;
+				v->find[n + 1u] = 0;
+			}
+			return 1;
+		}
 		{
 		/*
 		 * Which box the keys are going into, and how much it holds.
@@ -6534,6 +7070,29 @@ static int handle(struct view *v, int k)
 		page = 1;
 
 	switch (k) {
+	/*
+	 * The chords a text editor has taught everyone.
+	 *
+	 * Ctrl+Q leaves whatever is open; the bare q still closes a dialog and
+	 * still quits when nothing is open, because it was the only way out
+	 * before this and muscle memory is not worth breaking to make a point.
+	 */
+	case 0x11:                      /* Ctrl+Q */
+		return 0;
+	case 0x06:                      /* Ctrl+F */
+		v->find_open = 1;
+		v->edit = 500;
+		v->warn[0] = 0;
+		break;
+	case 0x0e:                      /* Ctrl+N, the next hit */
+		if (v->find[0])
+			find_run(v, 0);
+		break;
+	case 0x0f:                      /* Ctrl+O */
+		snprintf(v->warn, sizeof v->warn,
+			 "open: not built yet - pass the file on the command "
+			 "line");
+		break;
 	case 'q':
 		if (v->show_list) {
 			v->show_list = 0;
@@ -6619,6 +7178,10 @@ static int handle(struct view *v, int k)
 	case K_DRAG: {
 		uint64_t at;
 
+		if (v->bar_drag) {
+			bar_to(v, v->bar_drag);
+			break;
+		}
 		if (v->sizing) {
 			/*
 			 * The divider follows the pointer, and the panel takes
@@ -6645,6 +7208,7 @@ static int handle(struct view *v, int k)
 	}
 	case K_RELEASE:
 		v->sizing = 0;
+		v->bar_drag = 0;
 		if (v->menu_open)
 			break;
 		/*
@@ -6863,6 +7427,7 @@ int main(int argc, char **argv)
 
 	memset(&v, 0, sizeof v);
 	v.sel_a = v.sel_b = KOF_BROKEN;
+	v.find_at = KOF_BROKEN;
 	v.decl_cap = 12;
 	/* An empty draft is a saved draft: whatever the hash of "nothing" turns
 	 * out to be, it must not read as unsaved work. */
