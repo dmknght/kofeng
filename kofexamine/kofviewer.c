@@ -45,6 +45,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <poll.h>
 #include <signal.h>
 #include <termios.h>
 #include <sys/ioctl.h>
@@ -1529,10 +1530,20 @@ static void draw_hex(struct out *o, struct view *v)
 		uint64_t run = 0, off = view_map(v, at, &run);
 		int k;
 
+		/*
+		 * Overwrite, then clear the tail - not clear, then write.
+		 *
+		 * A hex row fills its width, so writing over the old one leaves
+		 * nothing to erase in front of it. Erasing first put every row
+		 * of the pane through a blank state before its bytes arrived,
+		 * and on a terminal that ignores synchronized output that blank
+		 * is on screen: holding page-down strobed the whole pane.
+		 */
 		out_at(o, row, col);
-		out_str(o, "\033[K");
-		if (at >= v->rgn_len)
+		if (at >= v->rgn_len) {
+			out_str(o, "\033[K");
 			continue;
+		}
 		out_fmt(o, A_LOC "%08llx" A_OFF "  ",
 			(unsigned long long)(v->off_region ? at : off));
 		for (k = 0; k < per; k++) {
@@ -1573,6 +1584,7 @@ static void draw_hex(struct out *o, struct view *v)
 			out_fmt(o, "%c", (c >= 0x20 && c < 0x7f) ? c : '.');
 			out_str(o, A_OFF);
 		}
+		out_str(o, "\033[K");
 		at += (uint64_t)per;
 	}
 }
@@ -5783,6 +5795,18 @@ static int read_mouse(void)
 	return K_CLICK;
 }
 
+/* Is there input already waiting. Used to collapse a burst of key repeats into
+ * one frame; never blocks. */
+static int key_pending(void)
+{
+	struct pollfd p;
+
+	p.fd = STDIN_FILENO;
+	p.events = POLLIN;
+	p.revents = 0;
+	return poll(&p, 1, 0) > 0 && (p.revents & POLLIN) != 0;
+}
+
 static int read_key(void)
 {
 	unsigned char c, seq[3];
@@ -6832,6 +6856,7 @@ int main(int argc, char **argv)
 {
 	const char *path = NULL, *db = NULL, *base = "kofdraft";
 	kof_engine *eng = NULL;
+	uint64_t last_paint = 0;
 	struct view v;
 	struct stat st;
 	int fd, i, rc = 0;
@@ -6952,6 +6977,7 @@ int main(int argc, char **argv)
 		rc = 1;
 		goto out;
 	}
+	last_paint = now_ms();
 	redraw(&v);
 	for (;;) {
 		int k = read_key();
@@ -6960,8 +6986,26 @@ int main(int argc, char **argv)
 			break;
 		if (!handle(&v, k))
 			break;
+		/*
+		 * One frame per batch of input, not one per key.
+		 *
+		 * A held page key repeats faster than a screen can be painted,
+		 * and painting every repeat means the terminal is always partway
+		 * through a frame - which is what the flash is. Skipping the
+		 * paint while more input is already waiting collapses a burst
+		 * into a single frame at the position it ends at, and the
+		 * intermediate positions were never worth drawing: nobody can
+		 * read a pane that is moving.
+		 *
+		 * The clock is the guard. Without it a key repeating forever
+		 * would postpone the frame forever, so anything older than a
+		 * frame time gets painted whether or not more is queued.
+		 */
+		if (key_pending() && now_ms() - last_paint < 33u)
+			continue;
 		/* redraw decides for itself whether anything changed. */
 		redraw(&v);
+		last_paint = now_ms();
 	}
 	term_restore();
 
