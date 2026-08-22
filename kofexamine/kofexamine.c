@@ -37,9 +37,15 @@
  *
  * It orders starts, not layout - regions interleave, and CODE and DATA alternate
  * section by section. The LAYOUT file in the directory has every extent in offset
- * order, which is the layout itself rather than a hint at it. Their sizes sum to the object because the regions
- * partition it - which is printed on the summary line so it can be read rather
- * than assumed.
+ * order, which is the layout itself rather than a hint at it. Their sizes sum to
+ * the object because the regions partition it - which is printed on the summary
+ * line so it can be read rather than assumed.
+ *
+ * 00.KOF_SCAN_ALL is the object entire, which is what the numbered files are
+ * parts of. It takes the number below all of them so it sorts first, and the
+ * engine's own name for the whole of an object so the directory speaks one
+ * vocabulary. For a recovered child it is the only copy that exists outside the
+ * scan, which is the case it is really there for.
  *
  * Two inputs with the same basename share a directory and the second overwrites
  * the first. That is the same thing binwalk does and the same thing a shell does
@@ -1213,6 +1219,47 @@ static int layout_file(const char *dir, const struct kof_inspect_fmt *f,
 }
 
 /*
+ * Write the whole object, beside the regions it was cut into.
+ *
+ * Numbered 00 so it sorts before them and reads as what it is: the thing the
+ * others are parts of. Named KOF_SCAN_ALL rather than "full" or the object's own
+ * filename because that is what the engine calls the whole of an object, and the
+ * region files are already named by their masks - one vocabulary in the
+ * directory rather than two.
+ *
+ * Worth having even though the caller already has the file: a dump is often
+ * taken of something that was never a file at all, and for a recovered child
+ * this is the only copy of it that exists outside the scan.
+ */
+static int dump_whole(const char *dir, kof_buf buf, uint64_t *out_len)
+{
+	char name[4096];
+	FILE *f;
+
+	*out_len = 0;
+	if (!buf.n)
+		return 1;
+	if ((size_t)snprintf(name, sizeof name, "%s/00.KOF_SCAN_ALL", dir)
+	    >= sizeof name) {
+		fprintf(stderr, "kofexamine: output path too long under %s\n",
+			dir);
+		return 0;
+	}
+	f = fopen(name, "wb");
+	if (!f) {
+		fprintf(stderr, "kofexamine: cannot write %s\n", name);
+		return 0;
+	}
+	if (fwrite(buf.p, 1, (size_t)buf.n, f) != (size_t)buf.n) {
+		fprintf(stderr, "kofexamine: short write to %s\n", name);
+		fclose(f);
+		return 0;
+	}
+	*out_len = buf.n;
+	return fclose(f) == 0;
+}
+
+/*
  * Write one region to its own file.
  *
  * The extents of a region are concatenated in offset order, which is what a
@@ -1825,7 +1872,7 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 			static struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
 			uint64_t first[16];
 			uint32_t order[16], nord = 0;
-			uint64_t wrote = 0;
+			uint64_t wrote = 0, whole = 0;
 			uint32_t written = 0, k;
 
 			if (kof_mkdir(dir, 0777) != 0 && errno != EEXIST) {
@@ -1861,6 +1908,14 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 				order[k] = oi;
 			}
 
+			{
+				uint64_t len;
+
+				if (!dump_whole(dir, buf, &len))
+					goto out;
+				whole = len;
+			}
+
 			for (i = 0; i < nord; i++) {
 				uint64_t len;
 				if (!dump_region(dir, i + 1,
@@ -1883,8 +1938,13 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 			if (!layout_file(dir, f, &ctx))
 				goto out;
 
-			printf("  dumped    %u region(s), %llu byte(s) -> %s/\n",
-			       written, (unsigned long long)wrote, dir);
+			/* The whole object is counted apart from the regions:
+			 * it is not one of them, and adding it to the total
+			 * would double every byte the regions cover. */
+			printf("  dumped    %u region(s), %llu byte(s)"
+			       " + whole %llu -> %s/\n",
+			       written, (unsigned long long)wrote,
+			       (unsigned long long)whole, dir);
 		}
 		if (eng)
 			print_markers(eng, buf, &ctx, display);
