@@ -122,6 +122,14 @@ static void on_signal(int sig)
 	raise(sig);
 }
 
+static volatile sig_atomic_t g_winch;
+
+static void on_winch(int sig)
+{
+	(void)sig;
+	g_winch = 1;
+}
+
 static int term_setup(void)
 {
 	struct termios raw;
@@ -163,6 +171,18 @@ static int term_setup(void)
 	 * being selected. Holding shift still bypasses all of this and gives
 	 * back the terminal's copy, in every terminal that implements 1006.
 	 */
+	{
+		/*
+		 * Without SA_RESTART on purpose: the point is for the blocked
+		 * read to come back so the loop can lay the screen out again.
+		 */
+		struct sigaction sa;
+
+		memset(&sa, 0, sizeof sa);
+		sa.sa_handler = on_winch;
+		sigemptyset(&sa.sa_mask);
+		sigaction(SIGWINCH, &sa, NULL);
+	}
 	term_write("\033[?1049h\033[?25l\033[?1000h\033[?1002h\033[?1006h");
 	return 1;
 }
@@ -5305,6 +5325,19 @@ static void redraw(struct view *v)
 	struct out o = { NULL, 0, 0, 0 };
 
 	term_size();
+	if (g_winch) {
+		/*
+		 * The cached frame describes a screen of the old size, and the
+		 * terminal has thrown away whatever was on it. Comparing
+		 * against it would let an unchanged frame skip the repaint and
+		 * leave the screen as the resize left it.
+		 */
+		g_winch = 0;
+		free(g_last);
+		g_last = NULL;
+		g_last_n = 0;
+		term_write("\033[2J");
+	}
 	/* The panes are laid out around the draft, so its height is settled
 	 * before anything asks where it is. */
 	{
@@ -5528,6 +5561,9 @@ static void view_show(struct view *v, uint64_t file_off)
 
 enum key {
 	K_NONE = 0, K_UP = 256, K_DOWN, K_PGUP, K_PGDN, K_HOME, K_END,
+	/* Not a key: the terminal changed size while nothing was being typed,
+	 * and the loop has to be told so it repaints. */
+	K_RESIZE,
 	/* Kept contiguous and last: handle() tests the range to let mouse
 	 * events past the modes that own the keyboard. */
 	K_BACKTAB,
@@ -5621,9 +5657,24 @@ static int read_mouse(void)
 static int read_key(void)
 {
 	unsigned char c, seq[3];
+	ssize_t n;
 
-	if (read(STDIN_FILENO, &c, 1) != 1)
+	/*
+	 * A read interrupted by a window change is not end of input.
+	 *
+	 * There was no handler at all before, so a terminal resized while this
+	 * was blocked here went unnoticed until the next keystroke: the screen
+	 * kept the layout it had been drawn for, which is what a panel that has
+	 * grown or shrunk on its own looks like. Locking a screen resizes the
+	 * terminal on most desktops, which is why it showed up after leaving it
+	 * alone rather than while working.
+	 */
+	n = read(STDIN_FILENO, &c, 1);
+	if (n != 1) {
+		if (n < 0 && errno == EINTR && g_winch)
+			return K_RESIZE;
 		return K_NONE;
+	}
 	if (c != 27)
 		return c;
 	if (read(STDIN_FILENO, seq, 1) != 1)
@@ -6408,6 +6459,8 @@ static int handle(struct view *v, int k)
 		 * negative one is negative. */
 		v->pane = (v->pane + 2) % 3;
 		break;
+	case K_RESIZE:
+		break;                  /* the loop redraws after every key */
 	case K_CLICK:  click(v, 0); break;
 	case K_RCLICK: click(v, 1); break;
 	case K_DRAG: {
