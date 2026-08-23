@@ -961,9 +961,9 @@ struct view {
 	int         bar_open;       /* which menu is down, -1 for none */
 	int         bar_sel;        /* the item under the pointer or the cursor */
 	int         help_open;      /* 0 none, 1 keyboard, 2 about */
-	int         dash_open;      /* the Analyse dashboard is up */
-	uint32_t    dash_off;       /* the first of its lines on screen */
-	int         dash_x0, dash_x1, dash_y;   /* its close control */
+	int         prop_open;      /* the properties page is up */
+	uint32_t    prop_off;       /* the first of its lines on screen */
+	int         prop_x0, prop_x1, prop_y;   /* its close control */
 	/*
 	 * What is being searched for, and where it was last found.
 	 *
@@ -5054,7 +5054,9 @@ static void draw_decl(struct out *o, struct view *v)
 		for (k = 0; k < v->n_decl; k++)
 			off += (uint32_t)(v->decl[k].off_rgn != 0);
 		out_at(o, PR(r), v->fix_c0);
-		out_str(o, off ? "\033[43;30m" : "\033[100;90m");
+		/* Not 100;90: fg 90 on bg 100 is one colour twice and the
+		 * label disappears rather than dims. See BAR_OFF. */
+		out_str(o, off ? "\033[43;30m" : "\033[100;37m");
 		out_str(o, STR_FIX);
 		out_str(o, A_OFF);
 	}
@@ -5568,6 +5570,19 @@ static void draw_marker_line(struct out *o, struct view *v)
 		rcol = A_WARN;
 		goto have_right;
 	}
+	/*
+	 * A word about the marker list, while the marker list is what is open.
+	 *
+	 * The panel's commentary below is scoped to the panel having focus,
+	 * which is right for it and wrong here: this dialog is over the panel
+	 * and the reader is not in it, so a note about the row they just
+	 * clicked had nowhere to appear at all.
+	 */
+	if (v->show_list && v->list_depth && v->warn[0]) {
+		snprintf(right, sizeof right, "%s", v->warn);
+		rcol = v->warn_bad ? A_BAD : A_WARN;
+		goto have_right;
+	}
 	if (v->pane == 3 && g_decl_rows) {
 		const char *why = draft_missing(v);
 		int near = 0;
@@ -5665,7 +5680,30 @@ have_right:
  * scale they will. Four is enough to compare the top of a ranked list against
  * itself, which is what it is for.
  */
-#define LIST_ROWS 4u
+/*
+ * How many rows the dialog offers, given the screen it is on.
+ *
+ * It was a flat four, whatever the terminal. On anything taller than a laptop
+ * split that is four rows of a six row list with the rest below the fold, and
+ * below the fold is where the interesting marker tends to be - the ones a rule
+ * fails on come first because they are declared first. Bounded at a third of
+ * the screen because it is an overlay: it is meant to answer a question about
+ * what is underneath, not to replace it.
+ */
+#define LIST_ROWS_MIN 4u
+#define LIST_ROWS_MAX 14u
+
+static uint32_t list_rows(void)
+{
+	int third = (g_rows - 4) / 3;
+	uint32_t n = third > 0 ? (uint32_t)third : LIST_ROWS_MIN;
+
+	if (n < LIST_ROWS_MIN)
+		n = LIST_ROWS_MIN;
+	if (n > LIST_ROWS_MAX)
+		n = LIST_ROWS_MAX;
+	return n;
+}
 
 /* Does this signature belong in the dialog as it is filtered right now. */
 static int list_keep(struct view *v, const struct kof_touch *t)
@@ -5709,7 +5747,7 @@ static uint32_t list_shown(struct view *v)
 {
 	uint32_t n = list_total(v);
 
-	return n < LIST_ROWS ? n : LIST_ROWS;
+	return n < list_rows() ? n : list_rows();
 }
 
 /* The header row; the entries follow it, and the last one sits directly on the
@@ -5839,9 +5877,9 @@ static void draw_list(struct out *o, struct view *v)
 		out_fmt(o, A_DIM " %-52s %-10s%*s" A_OFF, "Signatures",
 			"Markers", w - 66, range);
 	else
-		out_fmt(o, A_DIM " %-14s %6s %8s  %-10s %-*s" A_OFF,
-			"Marker", "db id", "size", "at", w - 46 > 0 ? w - 46 : 1,
-			range);
+		out_fmt(o, A_DIM " %-14s %6s %8s  %-10s %-12s %-*s" A_OFF,
+			"Marker", "db id", "size", "at", "region",
+			w - 59 > 0 ? w - 59 : 1, range);
 
 	for (i = 0; i < shown; i++) {
 		row_start(o, top + 1 + (int)i, 3);
@@ -5910,10 +5948,47 @@ static void draw_list(struct out *o, struct view *v)
 			out_str(o, sel ? "*" : " ");
 			out_fmt(o, "%-14s %6u %8u  ", kind, st->uid, st->len);
 			if (miss)
-				out_fmt(o, "%-10s ", "-");
+				/* The word, not a dash: in a column of
+				 * offsets a dash reads as "not applicable"
+				 * when what it means is "looked for it and it
+				 * is not in this object". */
+				out_fmt(o, "%-10s ", "absent");
 			else
 				out_fmt(o, "%-10llu ",
 					(unsigned long long)st->at);
+			/*
+			 * Where it turned out to be, and whether that is
+			 * anywhere this module looks.
+			 *
+			 * The engine works both facts out and hands them over
+			 * as `at` and `in_rgn`; this dialog was spending the
+			 * second one on the row's colour alone. Colour says
+			 * "something about this row is off", it does not say
+			 * WHAT, and the answer here is the whole reason a rule
+			 * with every marker present still cannot fire. The
+			 * panel says it as CODE>DATA and this now says the
+			 * same thing in the same words.
+			 */
+			{
+				char rgn[16];
+
+				if (miss) {
+					snprintf(rgn, sizeof rgn, "%s", "-");
+				} else {
+					uint32_t ob_i = v->node[v->sel_node].obj;
+					uint32_t nd = node_at(v, ob_i, st->at);
+					const char *lab = nd < v->n_node &&
+							  v->node[nd].mask
+							  ? v->node[nd].label
+							  : "?";
+
+					/* The bang is the finding: found, and
+					 * not where this module searches. */
+					snprintf(rgn, sizeof rgn, "%.10s%s",
+						 lab, st->in_rgn ? "" : " !");
+				}
+				out_fmt(o, "%-12.12s ", rgn);
+			}
 			for (b = 0; b < st->len && b < 20u; b++)
 				out_fmt(o, "%02X", st->bytes[b]);
 			if (st->len > 20u)
@@ -6381,10 +6456,10 @@ static size_t g_last_n;
 static void draw_find(struct out *o, struct view *v);
 static void draw_bar(struct out *o, struct view *v);
 static void draw_help(struct out *o, struct view *v);
-static void draw_dash(struct out *o, struct view *v);
+static void draw_prop(struct out *o, struct view *v);
 
-/* The dashboard was up on the frame before this one. */
-static int g_dash_drawn;
+/* The properties page was up on the frame before this one. */
+static int g_prop_drawn;
 
 static void redraw(struct view *v)
 {
@@ -6480,13 +6555,13 @@ static void redraw(struct view *v)
 	 * covers them. That is the flash, and it showed up while scrolling
 	 * because scrolling is when frames come fastest.
 	 *
-	 * So they are skipped while the dashboard is up, and drawn on the frame
+	 * So they are skipped while the page is up, and drawn on the frame
 	 * it OPENS on: that one still has to erase the menu the reader opened
 	 * it from, and nothing under a modal can change afterwards because the
 	 * modal has the keyboard.
 	 */
-	under = !v->dash_open || wiped || !g_dash_drawn;
-	g_dash_drawn = v->dash_open;
+	under = !v->prop_open || wiped || !g_prop_drawn;
+	g_prop_drawn = v->prop_open;
 
 	out_str(&o, "\033[?2026h");
 	if (under) {
@@ -6503,8 +6578,8 @@ static void redraw(struct view *v)
 		if (v->find_open)
 			draw_find(&o, v);
 	}
-	if (v->dash_open)
-		draw_dash(&o, v);
+	if (v->prop_open)
+		draw_prop(&o, v);
 	if (v->help_open)
 		draw_help(&o, v);
 	draw_chooser(&o, v);
@@ -6843,12 +6918,27 @@ static void find_run(struct view *v, int back)
  * nowhere else to be discovered. Nothing here is only reachable from here; the
  * chords still work, and the bar is where somebody finds out that they exist.
  */
-enum bar_menu { BM_FILE = 0, BM_EDIT, BM_ANALYSIS, BM_HELP, BM_COUNT };
+/*
+ * THERE IS NO ANALYSE MENU, AND THAT IS A DECISION.
+ *
+ * It held Strings and Symbols, and neither has anything behind it. The engine's
+ * parsers are shallow on purpose: for a PE they record the sixteen data
+ * directories as an RVA and a size and walk none of them, so IMPORT is an index
+ * rather than a table; for an ELF they record section names and never read
+ * .dynsym or resolve a string table. A symbol list would therefore not be a
+ * view of something the engine knows - it would be two new walkers over
+ * untrusted structures, written in the front end, duplicating the layer that
+ * deliberately stops short of them.
+ *
+ * What the tool CAN say about an object is what the engine already worked out,
+ * and that is one page rather than a menu of them. So it is one item, under
+ * File, next to the other things that are about the file in hand.
+ */
+enum bar_menu { BM_FILE = 0, BM_EDIT, BM_HELP, BM_COUNT };
 
 enum bar_item {
-	BI_OPEN = 0, BI_SAVE, BI_SAVE_AS, BI_QUIT,
+	BI_OPEN = 0, BI_SAVE, BI_SAVE_AS, BI_PROPS, BI_QUIT,
 	BI_FIND, BI_GOTO,
-	BI_DASHBOARD, BI_STRINGS, BI_SYMBOLS,
 	BI_KEYS, BI_ABOUT,
 	BI_COUNT
 };
@@ -6860,18 +6950,16 @@ static const struct {
 	{ "Open...",        BM_FILE },
 	{ "Save",           BM_FILE },
 	{ "Save As...",     BM_FILE },
+	{ "Properties",     BM_FILE },
 	{ "Quit",           BM_FILE },
 	{ "Find...",        BM_EDIT },
 	{ "Go to...",       BM_EDIT },
-	{ "Dashboard",      BM_ANALYSIS },
-	{ "Strings",        BM_ANALYSIS },
-	{ "Symbols",        BM_ANALYSIS },
 	{ "Keyboard",       BM_HELP },
 	{ "About",          BM_HELP }
 };
 
 static const char *const bar_name[BM_COUNT] = {
-	"File", "Edit", "Analysis", "Help"
+	"File", "Edit", "Help"
 };
 
 /*
@@ -6890,25 +6978,52 @@ static int bar_shown(struct view *v, int i)
 
 static int bar_enabled(struct view *v, int i)
 {
-	uint8_t fm = cur_obj(v)->ctx.format;
-	int exe = fm == KOF_FMT_ELF || fm == KOF_FMT_PE || fm == KOF_FMT_MACHO;
-
 	switch (i) {
 	case BI_OPEN:      return 0;            /* no way in yet */
 	case BI_SAVE:      return save_ok(v);
 	case BI_SAVE_AS:   return save_as_ok(v);
+	case BI_PROPS:     return 1;
 	case BI_QUIT:      return 1;
 	case BI_FIND:      return 1;
 	case BI_GOTO:      return 0;            /* the dialog is not built */
-	case BI_SYMBOLS:   return 0 && exe;     /* format gated, not built */
-	case BI_DASHBOARD: return 1;
-	case BI_STRINGS:   return 0;            /* not built */
 	case BI_KEYS:
 	case BI_ABOUT:     return 1;
 	default:           return 0;
 	}
 }
 
+
+/*
+ * The menu's three states, as one scheme rather than three unrelated choices.
+ *
+ * They were: enabled on a dark panel, disabled on a WHITE one, and the cursor
+ * as a bare reverse-video. So the drop-down had two background colours at once,
+ * the brighter of the two belonged to the items you cannot use - which made the
+ * dead entries the loudest thing on screen - and the cursor, being a reverse of
+ * whatever happened to be current, came out the same white as the disabled
+ * rows. Three states, two of them indistinguishable, and the emphasis backwards.
+ *
+ * One background for the whole panel, so it reads as one panel; disabled differs
+ * only in how bright its text is, which is what "disabled" should look like; and
+ * the cursor is the one row that inverts, stated explicitly instead of reversing
+ * whatever the terminal was left holding.
+ */
+#define BAR_ON   "\033[100;97m"    /* an item that can be used */
+#define BAR_OFF  "\033[100;37m"    /* the same panel, dimmer text */
+#define BAR_CUR  "\033[107;30m"    /* the row under the cursor */
+
+/*
+ * 37 and not 90 for the disabled row, which is the whole trick.
+ *
+ * 90 is bright black and 100 is bright black as a background - the same colour
+ * twice, so the label is not dim, it is GONE. The note on the Save button in
+ * this file says exactly that and this managed to walk into it anyway while
+ * fixing something else. 37 is the ordinary white: clearly weaker than the 97
+ * beside it, still ink on the panel rather than a hole in it.
+ *
+ * The rule this leaves behind: a foreground and a background from the same
+ * pair - 30/40, 37/47, 90/100, 97/107 - is never a colour, it is an erasure.
+ */
 
 #define BAR_W 18
 
@@ -6937,8 +7052,10 @@ static void draw_bar(struct out *o, struct view *v)
 	row_start(o, 1, 1);
 	out_str(o, A_HEAD " ");
 	for (m = 0; m < BM_COUNT; m++) {
+		/* The open menu's title wears the same highlight its panel
+		 * uses, so the two read as one control rather than two. */
 		if (m == v->bar_open)
-			out_fmt(o, "\033[7m %s \033[27m", bar_name[m]);
+			out_fmt(o, BAR_CUR " %s " A_HEAD, bar_name[m]);
 		else
 			out_fmt(o, " %s ", bar_name[m]);
 	}
@@ -6958,11 +7075,11 @@ static void draw_bar(struct out *o, struct view *v)
 			continue;
 		out_at(o, y, col);
 		if (i == v->bar_sel)
-			out_str(o, A_SEL);
+			out_str(o, BAR_CUR);
 		else if (!bar_enabled(v, i))
-			out_str(o, "\033[47;90m");
+			out_str(o, BAR_OFF);
 		else
-			out_str(o, "\033[100;97m");
+			out_str(o, BAR_ON);
 		out_fmt(o, " %-*s", BAR_W - 1, bar_item[i].label);
 		out_str(o, A_OFF);
 		y++;
@@ -7049,7 +7166,7 @@ static void draw_help(struct out *o, struct view *v)
 	out_fmt(o, A_DIM " press any key " A_OFF);
 }
 
-/* ---- the dashboard --------------------------------------------------------
+/* ---- the properties page --------------------------------------------------------
  *
  * What the engine knows about this object, on one scrollable page.
  *
@@ -7062,76 +7179,76 @@ static void draw_help(struct out *o, struct view *v)
  * Built as lines rather than drawn directly, because scrolling a page is a
  * window over a list and painting one is not. The per-format blocks are the
  * point of the whole thing - an ELF has segments and a zip has entries, and a
- * dashboard that shows neither because it shows only what they have in common
- * is a dashboard nobody opens twice.
+ * page that shows neither because it shows only what they have in common is a
+ * page nobody opens twice.
  */
-#define DASH_MAX  600
-#define DASH_W    200
+#define PROP_MAX  600
+#define PROP_W    200
 
-struct dash_line {
-	char        text[DASH_W];
+struct prop_line {
+	char        text[PROP_W];
 	const char *col;
 };
 
-static struct dash_line g_dash[DASH_MAX];
-static uint32_t         g_n_dash;
+static struct prop_line g_prop[PROP_MAX];
+static uint32_t         g_n_prop;
 
-static void dash_add(const char *col, const char *fmt, ...)
+static void prop_add(const char *col, const char *fmt, ...)
 {
 	va_list ap;
 
-	if (g_n_dash >= DASH_MAX)
+	if (g_n_prop >= PROP_MAX)
 		return;
 	va_start(ap, fmt);
-	vsnprintf(g_dash[g_n_dash].text, DASH_W, fmt, ap);
+	vsnprintf(g_prop[g_n_prop].text, PROP_W, fmt, ap);
 	va_end(ap);
-	g_dash[g_n_dash].col = col;
-	g_n_dash++;
+	g_prop[g_n_prop].col = col;
+	g_n_prop++;
 }
 
 /* A heading, with a blank line above it unless it opens the page. */
-static void dash_head(const char *w)
+static void prop_head(const char *w)
 {
-	if (g_n_dash)
-		dash_add(A_DIM, "%s", "");
-	dash_add(A_OFF, A_BOLD "%s" A_OFF, w);
+	if (g_n_prop)
+		prop_add(A_DIM, "%s", "");
+	prop_add(A_OFF, A_BOLD "%s" A_OFF, w);
 }
 
-static void dash_perm(char *out, size_t cap, unsigned p)
+static void prop_perm(char *out, size_t cap, unsigned p)
 {
 	snprintf(out, cap, "%c%c%c", (p & 4) ? 'R' : '-', (p & 2) ? 'W' : '-',
 		 (p & 1) ? 'X' : '-');
 }
 
 /* "9 of 9 declared", and the count that did not add up said as such. */
-static void dash_claimed(const char *label, uint32_t have, uint32_t claimed)
+static void prop_claimed(const char *label, uint32_t have, uint32_t claimed)
 {
-	dash_add(A_OFF, A_DIM "  %-11s " A_OFF "%s%u of %u" A_OFF A_DIM
+	prop_add(A_OFF, A_DIM "  %-11s " A_OFF "%s%u of %u" A_OFF A_DIM
 		 " declared" A_OFF, label,
 		 have == claimed ? A_SIZE : A_WARN, have, claimed);
 }
 
-static void dash_elf(const struct object *ob)
+static void prop_elf(const struct object *ob)
 {
 	const struct kof_elf_info *e = ob->info;
 	char perm[4];
 	uint32_t i;
 
-	dash_head("ELF");
-	dash_add(A_OFF, A_DIM "  %-11s " A_ID "%s %s" A_OFF A_DIM
+	prop_head("ELF");
+	prop_add(A_OFF, A_DIM "  %-11s " A_ID "%s %s" A_OFF A_DIM
 		 "   type=" A_OFF A_SIZE "%u" A_OFF A_DIM " machine=" A_OFF
 		 A_SIZE "%u" A_OFF, "class",
 		 e->elf_class == KOF_ELFCLASS_64 ? "ELF64" : "ELF32",
 		 e->elf_data == KOF_ELFDATA_BE ? "big-endian"
 					       : "little-endian",
 		 e->e_type, e->e_machine);
-	dash_perm(perm, sizeof perm, e->entry_perm);
-	dash_add(A_OFF, A_DIM "  %-11s " A_LOC "0x%llx" A_OFF A_DIM
+	prop_perm(perm, sizeof perm, e->entry_perm);
+	prop_add(A_OFF, A_DIM "  %-11s " A_LOC "0x%llx" A_OFF A_DIM
 		 "  file " A_OFF A_LOC "%llu" A_OFF "  " A_ID "%s" A_OFF,
 		 "entry", (unsigned long long)e->entry_addr,
 		 (unsigned long long)ob->ctx.entry_off, perm);
 
-	dash_claimed("segments", e->phnum, e->phnum_claimed);
+	prop_claimed("segments", e->phnum, e->phnum_claimed);
 	for (i = 0; i < e->seg_count; i++) {
 		const char *w = kof_inspect_ptype_name(e->seg[i].type);
 		char num[24];
@@ -7140,8 +7257,8 @@ static void dash_elf(const struct object *ob)
 			snprintf(num, sizeof num, "%u", e->seg[i].type);
 			w = num;
 		}
-		dash_perm(perm, sizeof perm, e->seg[i].perm);
-		dash_add(A_OFF, "     " A_ID "%-16s" A_OFF A_DIM " off=" A_OFF
+		prop_perm(perm, sizeof perm, e->seg[i].perm);
+		prop_add(A_OFF, "     " A_ID "%-16s" A_OFF A_DIM " off=" A_OFF
 			 A_LOC "%-9llu" A_OFF A_DIM "size=" A_OFF A_SIZE
 			 "%-9llu" A_OFF A_DIM "vaddr=" A_OFF A_LOC
 			 "0x%-10llx" A_OFF A_ID "%s" A_OFF,
@@ -7149,7 +7266,7 @@ static void dash_elf(const struct object *ob)
 			 (unsigned long long)e->seg[i].file_size,
 			 (unsigned long long)e->seg[i].mem_addr, perm);
 	}
-	dash_claimed("sections", e->shnum, e->shnum_claimed);
+	prop_claimed("sections", e->shnum, e->shnum_claimed);
 	for (i = 0; i < e->sec_count; i++) {
 		const char *w = kof_inspect_shtype_name(e->sec[i].type);
 		char num[24];
@@ -7158,7 +7275,7 @@ static void dash_elf(const struct object *ob)
 			snprintf(num, sizeof num, "%u", e->sec[i].type);
 			w = num;
 		}
-		dash_add(A_OFF, "     " A_ID "%-20s" A_OFF A_DIM " off=" A_OFF
+		prop_add(A_OFF, "     " A_ID "%-20s" A_OFF A_DIM " off=" A_OFF
 			 A_LOC "%-9llu" A_OFF A_DIM "size=" A_OFF A_SIZE
 			 "%-9llu" A_OFF A_DIM " %s" A_OFF,
 			 e->sec[i].name,
@@ -7167,34 +7284,34 @@ static void dash_elf(const struct object *ob)
 	}
 }
 
-static void dash_pe(const struct object *ob)
+static void prop_pe(const struct object *ob)
 {
 	const struct kof_pe_info *p = ob->info;
 	char perm[4];
 	uint32_t i;
 
-	dash_head("PE");
-	dash_add(A_OFF, A_DIM "  %-11s " A_ID "%s" A_OFF A_DIM "  machine="
+	prop_head("PE");
+	prop_add(A_OFF, A_DIM "  %-11s " A_ID "%s" A_OFF A_DIM "  machine="
 	 A_OFF A_LOC "0x%04x" A_OFF A_DIM " characteristics=" A_OFF A_LOC
 	 "0x%04x" A_OFF, "image", p->pe32_plus ? "PE32+" : "PE32", p->machine,
 	 p->characteristics);
-	dash_add(A_OFF, A_DIM "  %-11s lfanew=" A_OFF A_LOC "%llu" A_OFF A_DIM
+	prop_add(A_OFF, A_DIM "  %-11s lfanew=" A_OFF A_LOC "%llu" A_OFF A_DIM
 		 "  gap=" A_OFF A_SIZE "%llu" A_OFF, "stub",
 		 (unsigned long long)p->lfanew,
 		 (unsigned long long)p->stub_len);
-	dash_add(A_OFF, A_DIM "  %-11s end=" A_OFF A_LOC "%llu" A_OFF A_DIM
+	prop_add(A_OFF, A_DIM "  %-11s end=" A_OFF A_LOC "%llu" A_OFF A_DIM
 		 "  declared=" A_OFF A_SIZE "%llu" A_OFF, "headers",
 		 (unsigned long long)p->header_end,
 		 (unsigned long long)p->size_of_headers);
-	dash_perm(perm, sizeof perm, p->entry_perm);
-	dash_add(A_OFF, A_DIM "  %-11s rva=" A_OFF A_LOC "0x%llx" A_OFF A_DIM
+	prop_perm(perm, sizeof perm, p->entry_perm);
+	prop_add(A_OFF, A_DIM "  %-11s rva=" A_OFF A_LOC "0x%llx" A_OFF A_DIM
 		 "  file " A_OFF A_LOC "%llu" A_OFF A_DIM "  sec=" A_OFF A_ID
 		 "%s" A_OFF "  " A_ID "%s" A_OFF, "entry",
 		 (unsigned long long)p->entry_rva,
 		 (unsigned long long)ob->ctx.entry_off,
 		 p->entry_sec < p->sec_count ? p->sec[p->entry_sec].name
 					     : "none", perm);
-	dash_add(A_OFF, A_DIM "  %-11s code=" A_OFF A_SIZE "%llu" A_OFF A_DIM
+	prop_add(A_OFF, A_DIM "  %-11s code=" A_OFF A_SIZE "%llu" A_OFF A_DIM
 		 " init=" A_OFF A_SIZE "%llu" A_OFF A_DIM " uninit=" A_OFF
 		 A_SIZE "%llu" A_OFF, "summary",
 		 (unsigned long long)p->size_of_code,
@@ -7206,19 +7323,19 @@ static void dash_pe(const struct object *ob)
 	 * is missing, and an overlay is where a packer's payload usually is.
 	 */
 	if (p->cert_len)
-		dash_add(A_OFF, A_DIM "  %-11s off=" A_OFF A_LOC "%llu" A_OFF
+		prop_add(A_OFF, A_DIM "  %-11s off=" A_OFF A_LOC "%llu" A_OFF
 			 A_DIM "  len=" A_OFF A_SIZE "%llu" A_OFF, "signature",
 			 (unsigned long long)p->cert_off,
 			 (unsigned long long)p->cert_len);
 	if (p->overlay_len)
-		dash_add(A_OFF, A_WARN "  %-11s" A_OFF A_DIM " off=" A_OFF A_LOC
+		prop_add(A_OFF, A_WARN "  %-11s" A_OFF A_DIM " off=" A_OFF A_LOC
 			 "%llu" A_OFF A_DIM "  len=" A_OFF A_WARN "%llu" A_OFF,
 			 "overlay", (unsigned long long)p->overlay_off,
 			 (unsigned long long)p->overlay_len);
-	dash_claimed("sections", p->nsec, p->nsec_claimed);
+	prop_claimed("sections", p->nsec, p->nsec_claimed);
 	for (i = 0; i < p->sec_count; i++) {
-		dash_perm(perm, sizeof perm, p->sec[i].perm);
-		dash_add(A_OFF, "     " A_ID "%-9s" A_OFF A_DIM " off=" A_OFF
+		prop_perm(perm, sizeof perm, p->sec[i].perm);
+		prop_add(A_OFF, "     " A_ID "%-9s" A_OFF A_DIM " off=" A_OFF
 			 A_LOC "%-9llu" A_OFF A_DIM "raw=" A_OFF A_SIZE
 			 "%-9llu" A_OFF A_DIM "rva=" A_OFF A_LOC "0x%-8llx"
 			 A_OFF A_DIM "vsz=" A_OFF A_LOC "0x%-8llx" A_OFF A_ID
@@ -7230,45 +7347,45 @@ static void dash_pe(const struct object *ob)
 	}
 }
 
-static void dash_build(struct view *v)
+static void prop_build(struct view *v)
 {
 	struct object *ob = cur_obj(v);
 	const char *base = strrchr(ob->name, '/');
 	uint32_t i, hit = 0;
 	uint64_t total = 0;
 
-	g_n_dash = 0;
+	g_n_prop = 0;
 	base = base ? base + 1 : ob->name;
 
-	dash_head("Object");
-	dash_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF, "name", base);
-	dash_add(A_OFF, A_DIM "  %-11s " A_OFF A_SIZE "%llu" A_OFF A_DIM
+	prop_head("Object");
+	prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF, "name", base);
+	prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_SIZE "%llu" A_OFF A_DIM
 		 " bytes" A_OFF, "size", (unsigned long long)ob->buf.n);
 	{
 		const char *sub = ob->fmt
 			? kof_inspect_subtype_name(ob->ctx.format,
 						   ob->ctx.subtype) : NULL;
 
-		dash_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s%s%s" A_OFF,
+		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s%s%s" A_OFF,
 			 "format",
 			 ob->fmt ? kof_format_name(ob->ctx.format) : "raw",
 			 sub ? " " : "", sub ? sub : "");
 	}
 	if (ob->fmt)
-		dash_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF, "arch",
+		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF, "arch",
 			 kof_arch_name(ob->ctx.arch));
 	/* Where it came from, when it did not come from the disk. Everything
 	 * below describes bytes an unpacker produced, and reading it as the
 	 * file on disk would be reading it as the wrong object. */
 	if (ob->packer[0])
-		dash_add(A_OFF, A_DIM "  %-11s " A_OFF A_WARN "%s" A_OFF,
+		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_WARN "%s" A_OFF,
 			 "unpacked by", ob->packer);
 
 	if (ob->fmt && ob->info) {
 		if (ob->ctx.format == KOF_FMT_ELF)
-			dash_elf(ob);
+			prop_elf(ob);
 		else if (ob->ctx.format == KOF_FMT_PE)
-			dash_pe(ob);
+			prop_pe(ob);
 	}
 
 	/*
@@ -7277,7 +7394,7 @@ static void dash_build(struct view *v)
 	 * is there because that is how a packed file announces itself: one
 	 * region holding nearly all of it.
 	 */
-	dash_head("Regions");
+	prop_head("Regions");
 	{
 		uint32_t n = 0;
 
@@ -7290,7 +7407,7 @@ static void dash_build(struct view *v)
 		 * with no regions, and saying MISMATCH there invented a
 		 * problem. */
 		if (!n) {
-			dash_add(A_OFF, A_DIM "  %-11s no parser divides this "
+			prop_add(A_OFF, A_DIM "  %-11s no parser divides this "
 				 "object" A_OFF, "whole");
 			goto no_regions;
 		}
@@ -7304,13 +7421,13 @@ static void dash_build(struct view *v)
 
 		if (n->obj != v->node[v->sel_node].obj || !n->mask)
 			continue;
-		dash_add(A_OFF, "  " A_ID "%-11s" A_OFF A_SIZE "%-10llu" A_OFF
+		prop_add(A_OFF, "  " A_ID "%-11s" A_OFF A_SIZE "%-10llu" A_OFF
 			 A_LOC "%5.1f%%" A_OFF, n->label,
 			 (unsigned long long)n->bytes,
 			 total ? 100.0 * (double)n->bytes / (double)total : 0.0);
 	}
 	if (total != ob->buf.n)
-		dash_add(A_BAD, "  %-11s regions sum to %llu of %llu",
+		prop_add(A_BAD, "  %-11s regions sum to %llu of %llu",
 			 "MISMATCH", (unsigned long long)total,
 			 (unsigned long long)ob->buf.n);
 no_regions:
@@ -7321,12 +7438,12 @@ no_regions:
 	 * Said even when there is nothing, because "no anomalies" is a finding
 	 * and an absent section reads as a section that was not checked.
 	 */
-	dash_head("Anomalies");
+	prop_head("Anomalies");
 	if (ob->fmt && ob->info && ob->fmt->anomalies) {
 		uint64_t anom = ob->fmt->anomalies(ob->info);
 
 		if (!anom)
-			dash_add(A_DIM, "  none");
+			prop_add(A_DIM, "  none");
 		for (i = 0; i < 64; i++) {
 			const char *an;
 
@@ -7334,18 +7451,18 @@ no_regions:
 				continue;
 			an = ob->fmt->anomaly_name(i);
 			if (an)
-				dash_add(A_BAD, "  %s", an);
+				prop_add(A_BAD, "  %s", an);
 			else
-				dash_add(A_BAD, "  bit%u", i);
+				prop_add(A_BAD, "  bit%u", i);
 		}
 	} else {
-		dash_add(A_DIM, "  no parser claimed these bytes");
+		prop_add(A_DIM, "  no parser claimed these bytes");
 	}
 
-	dash_head("Signatures");
+	prop_head("Signatures");
 	for (i = 0; i < ob->n_touch; i++)
 		hit += (uint32_t)(ob->touch[i].fired != 0);
-	dash_add(A_OFF, "  %s%u" A_OFF A_DIM " fired, " A_OFF A_SIZE "%u"
+	prop_add(A_OFF, "  %s%u" A_OFF A_DIM " fired, " A_OFF A_SIZE "%u"
 		 A_OFF A_DIM " did not" A_OFF, hit ? A_BAD : A_SIZE, hit,
 		 ob->n_touch - hit);
 	for (i = 0; i < ob->n_touch; i++) {
@@ -7354,7 +7471,7 @@ no_regions:
 
 		touch_name(t, name, sizeof name);
 		touch_head(t, head, sizeof head);
-		dash_add(A_OFF, "  %s%-44s" A_OFF A_SIZE "%-10s" A_OFF A_WARN
+		prop_add(A_OFF, "  %s%-44s" A_OFF A_SIZE "%-10s" A_OFF A_WARN
 			 "%s" A_OFF, t->fired ? A_BAD : A_ID, name, head,
 			 t->kind == KOF_TOUCH_INELIGIBLE && t->ruled_out
 			 ? t->ruled_out : "");
@@ -7364,13 +7481,13 @@ no_regions:
 /*
  * One line onto the screen, colours and all.
  *
- * The lines carry their own SGR because a dashboard is a table of different
+ * The lines carry their own SGR because the page is a table of different
  * KINDS of fact - a name, an offset, a size - and one colour per row cannot say
  * which is which. printf's "%-.*s" cannot be used on them: it would count the
  * escape bytes as width and cut a line off in the middle of one, so the width
  * is counted here over printable columns only, the same way field_draw does it.
  */
-static void dash_put(struct out *o, const char *s, int room)
+static void prop_put(struct out *o, const char *s, int room)
 {
 	int n = 0;
 
@@ -7420,7 +7537,7 @@ static void dash_put(struct out *o, const char *s, int room)
  * of the page: a row spent telling you which keys work is a row not spent on
  * the file, and it says the same thing every time you open it.
  */
-static void draw_dash(struct out *o, struct view *v)
+static void draw_prop(struct out *o, struct view *v)
 {
 	int top = 2, left = 2, w = g_cols - 4, h = g_rows - 3, y, i;
 	int room, inner;
@@ -7430,29 +7547,29 @@ static void draw_dash(struct out *o, struct view *v)
 
 	if (w < 30 || h < 6)
 		return;
-	dash_build(v);
+	prop_build(v);
 	room = h - 2;
 	if (room < 1)
 		room = 1;
 	inner = w - 4;
-	if (g_n_dash > (uint32_t)room) {
-		if (v->dash_off > g_n_dash - (uint32_t)room)
-			v->dash_off = g_n_dash - (uint32_t)room;
+	if (g_n_prop > (uint32_t)room) {
+		if (v->prop_off > g_n_prop - (uint32_t)room)
+			v->prop_off = g_n_prop - (uint32_t)room;
 	} else {
-		v->dash_off = 0;
+		v->prop_off = 0;
 	}
-	shown = g_n_dash - v->dash_off;
+	shown = g_n_prop - v->prop_off;
 	if (shown > (uint32_t)room)
 		shown = (uint32_t)room;
 
 
 	/* The top rule: the title, then a run of rule, then the way out. */
 	out_at(o, top, left);
-	out_fmt(o, A_DIM "+- " A_OFF A_BOLD "Dashboard" A_OFF A_DIM " ");
-	v->dash_y = top;
-	v->dash_x1 = left + w - 3;
-	v->dash_x0 = v->dash_x1 - (int)sizeof close + 2;
-	for (i = left + 14; i < v->dash_x0 - 1; i++)
+	out_fmt(o, A_DIM "+- " A_OFF A_BOLD "Properties" A_OFF A_DIM " ");
+	v->prop_y = top;
+	v->prop_x1 = left + w - 3;
+	v->prop_x0 = v->prop_x1 - (int)sizeof close + 2;
+	for (i = left + 15; i < v->prop_x0 - 1; i++)
 		out_str(o, "-");
 	out_str(o, " " A_OFF);
 	out_str(o, "\033[47;30m");
@@ -7460,8 +7577,8 @@ static void draw_dash(struct out *o, struct view *v)
 	out_fmt(o, A_OFF A_DIM "-+" A_OFF);
 
 	/* The bottom rule: where in the page this window is. */
-	snprintf(pos, sizeof pos, "%u-%u of %u", v->dash_off + 1u,
-		 v->dash_off + shown, g_n_dash);
+	snprintf(pos, sizeof pos, "%u-%u of %u", v->prop_off + 1u,
+		 v->prop_off + shown, g_n_prop);
 	out_at(o, top + h - 1, left);
 	out_fmt(o, A_DIM "+- %s ", pos);
 	for (i = 4 + (int)strlen(pos); i < w - 1; i++)
@@ -7480,7 +7597,7 @@ static void draw_dash(struct out *o, struct view *v)
 		out_at(o, top + 1 + y, left);
 		out_str(o, A_DIM "|" A_OFF " ");
 		if (y < (int)shown)
-			dash_put(o, g_dash[v->dash_off + (uint32_t)y].text,
+			prop_put(o, g_prop[v->prop_off + (uint32_t)y].text,
 				 inner);
 		else
 			for (i = 0; i < inner; i++)
@@ -7503,7 +7620,7 @@ static void bar_run(struct view *v, int i)
 		v->edit = 500;
 		v->warn[0] = 0;
 		break;
-	case BI_DASHBOARD: v->dash_open = 1; v->dash_off = 0; break;
+	case BI_PROPS:   v->prop_open = 1; v->prop_off = 0; break;
 	case BI_KEYS:    v->help_open = 1; break;
 	case BI_ABOUT:   v->help_open = 2; break;
 	default: break;
@@ -8263,10 +8380,28 @@ static void click(struct view *v, int rclick)
 			const struct kof_touch *t = &ob->touch[v->sel_touch];
 			uint32_t k = v->str_off + (uint32_t)row;
 
-			if (v->sel_touch < ob->n_touch && k < t->n_str &&
-			    t->str[k].at != KOF_BROKEN) {
+			if (v->sel_touch < ob->n_touch && k < t->n_str) {
 				v->sel_str = k;
-				view_show(v, t->str[k].at);
+				if (t->str[k].at != KOF_BROKEN) {
+					v->warn[0] = 0;
+					view_show(v, t->str[k].at);
+				} else {
+					/*
+					 * A marker the module declares and
+					 * this object does not have.
+					 *
+					 * The row prints its bytes in full, so
+					 * it reads as present; the only thing
+					 * that said otherwise was a dash in a
+					 * numeric column, and clicking it did
+					 * nothing and said nothing. Silence is
+					 * the bug - there is a real answer
+					 * here and it is worth a line.
+					 */
+					say_note(v, "marker %u is not in this "
+						 "object - nowhere to jump to",
+						 k + 1u);
+				}
 			}
 			return;
 		}
@@ -8617,7 +8752,7 @@ static int handle(struct view *v, int k)
 	int page = hex_bot() - hex_top();
 
 	/*
-	 * The dashboard owns the keyboard while it is up.
+	 * The properties page owns the keyboard while it is up.
 	 *
 	 * Unlike the two help boxes it is a page rather than a card, so "any
 	 * key closes" is the wrong contract: the keys a reader reaches for are
@@ -8625,45 +8760,45 @@ static int handle(struct view *v, int k)
 	 * and everything else is swallowed so a keystroke meant for the page
 	 * does not land on the draft behind it.
 	 */
-	if (v->dash_open) {
+	if (v->prop_open) {
 		int room = g_rows - 6;
 
 		if (room < 1)
 			room = 1;
 		switch (k) {
 		case K_UP:
-			if (v->dash_off)
-				v->dash_off--;
+			if (v->prop_off)
+				v->prop_off--;
 			return 1;
 		case K_DOWN:
-			v->dash_off++;
+			v->prop_off++;
 			return 1;
 		case K_WHEEL_UP:
-			v->dash_off = v->dash_off > 3u ? v->dash_off - 3u : 0;
+			v->prop_off = v->prop_off > 3u ? v->prop_off - 3u : 0;
 			return 1;
 		case K_WHEEL_DOWN:
-			v->dash_off += 3u;
+			v->prop_off += 3u;
 			return 1;
 		case K_PGUP:
-			v->dash_off = v->dash_off > (uint32_t)room
-				      ? v->dash_off - (uint32_t)room : 0;
+			v->prop_off = v->prop_off > (uint32_t)room
+				      ? v->prop_off - (uint32_t)room : 0;
 			return 1;
 		case K_PGDN:
-			v->dash_off += (uint32_t)room;
+			v->prop_off += (uint32_t)room;
 			return 1;
 		case K_HOME:
-			v->dash_off = 0;
+			v->prop_off = 0;
 			return 1;
 		case K_END:
 			/* Clamped where it is drawn, which is the only place
 			 * that knows how many lines there are. */
-			v->dash_off = 0xffffffu;
+			v->prop_off = 0xffffffu;
 			return 1;
 		case 27:
 		case 'q':
 		case '\r':
 		case '\n':
-			v->dash_open = 0;
+			v->prop_open = 0;
 			return 1;
 		case K_CLICK:
 		case K_RCLICK:
@@ -8677,9 +8812,9 @@ static int handle(struct view *v, int k)
 			 * A window with a close button is closed by its close
 			 * button.
 			 */
-			if (g_my == v->dash_y && g_mx >= v->dash_x0 &&
-			    g_mx <= v->dash_x1)
-				v->dash_open = 0;
+			if (g_my == v->prop_y && g_mx >= v->prop_x0 &&
+			    g_mx <= v->prop_x1)
+				v->prop_open = 0;
 			return 1;
 		default:
 			return 1;
@@ -9216,10 +9351,47 @@ static int handle(struct view *v, int k)
 		}
 		if (v->show_list && g_my > list_top(v) &&
 		    g_my <= list_top(v) + (int)list_shown(v)) {
-			if (down && v->sel_touch + 1 < cur_obj(v)->n_touch)
+			/*
+			 * Which list the wheel is over, which is not always
+			 * the list of signatures.
+			 *
+			 * This branch only ever moved sel_touch, so over the
+			 * MARKERS of one signature the wheel quietly changed
+			 * which signature was selected - and the markers of a
+			 * six marker rule past the fourth row could not be
+			 * reached with a mouse at all. The arrow keys had the
+			 * depth case and the wheel did not, so the list looked
+			 * like it was hiding half its rows: the ones on screen
+			 * said absent, the one below the fold was the marker
+			 * that is actually there.
+			 */
+			if (v->list_depth) {
+				struct object *lo = cur_obj(v);
+				const struct kof_touch *lt =
+					v->sel_touch < lo->n_touch
+					? &lo->touch[v->sel_touch] : NULL;
+
+				if (lt) {
+					if (down && v->sel_str + 1 < lt->n_str)
+						v->sel_str++;
+					else if (!down && v->sel_str)
+						v->sel_str--;
+					if (v->sel_str < v->str_off)
+						v->str_off = v->sel_str;
+					if (v->sel_str >= v->str_off +
+							  list_shown(v))
+						v->str_off = v->sel_str -
+							list_shown(v) + 1u;
+					if (lt->str[v->sel_str].at != KOF_BROKEN)
+						view_show(v,
+							  lt->str[v->sel_str].at);
+				}
+			} else if (down && v->sel_touch + 1 <
+					   cur_obj(v)->n_touch) {
 				v->sel_touch++;
-			else if (!down && v->sel_touch)
+			} else if (!down && v->sel_touch) {
 				v->sel_touch--;
+			}
 		} else if (g_mx <= TREE_W && g_my >= hex_top() &&
 			   g_my <= hex_bot()) {
 			for (n = 0; n < 3; n++)
