@@ -6890,6 +6890,42 @@ static void click(struct view *v, int rclick)
 	 * whole of "click away to stop editing". */
 	v->edit = 0;
 
+	if (v->ch.open) {
+		int k = g_my - v->ch.row;
+
+		if (g_mx >= v->ch.col && g_mx < v->ch.col + CH_W &&
+		    k >= 0 && k < v->ch.n) {
+			v->ch.sel = k;
+			ch_take(v);
+		} else {
+			v->ch.open = 0;
+		}
+		return;
+	}
+	if (v->menu_open) {
+		int k = g_my - v->menu_row;
+
+		/* Anywhere off the menu dismisses it. A menu that only closes
+		 * on the right key is a menu people leave open. */
+		if (g_mx >= v->menu_col && g_mx < v->menu_col + MENU_W &&
+		    k >= 0 && k < menu_rows(v)) {
+			int a = menu_at_row(v, k);
+
+			if (a >= 0 && menu_enabled(v, a))
+				menu_run(v, a);
+		}
+		v->menu_open = 0;
+		return;
+	}
+	/*
+	 * The scrollbars and the divider come AFTER the overlays.
+	 *
+	 * They are painted underneath, so they have to be tested underneath: a
+	 * chooser item that happened to land on the divider row sent the click
+	 * to the divider and started a resize instead of choosing anything.
+	 * Anything drawn on top of the panes must have first refusal on a
+	 * click, which is the same order they are drawn in.
+	 */
 	{
 		int which = bar_under(v);
 
@@ -6941,33 +6977,6 @@ static void click(struct view *v, int rclick)
 		return;
 	}
 
-	if (v->ch.open) {
-		int k = g_my - v->ch.row;
-
-		if (g_mx >= v->ch.col && g_mx < v->ch.col + CH_W &&
-		    k >= 0 && k < v->ch.n) {
-			v->ch.sel = k;
-			ch_take(v);
-		} else {
-			v->ch.open = 0;
-		}
-		return;
-	}
-	if (v->menu_open) {
-		int k = g_my - v->menu_row;
-
-		/* Anywhere off the menu dismisses it. A menu that only closes
-		 * on the right key is a menu people leave open. */
-		if (g_mx >= v->menu_col && g_mx < v->menu_col + MENU_W &&
-		    k >= 0 && k < menu_rows(v)) {
-			int a = menu_at_row(v, k);
-
-			if (a >= 0 && menu_enabled(v, a))
-				menu_run(v, a);
-		}
-		v->menu_open = 0;
-		return;
-	}
 	if (v->show_list) {
 		int row = g_my - list_top(v) - 1;
 		int on = g_my > list_top(v) &&
