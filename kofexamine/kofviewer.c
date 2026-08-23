@@ -481,6 +481,16 @@ static const struct { const char *word; uint32_t val; } arch_word[] = {
 
 /* The subtypes, per format. The values overlap between formats, which is why
  * naming one format's values while targeting another is a build error. */
+static const char *const fmt_word[] = {
+	"KOF_FMT_ANY", "KOF_FMT_ELF", "KOF_FMT_PE",
+	"KOF_FMT_MACHO", "KOF_FMT_SCRIPT", "KOF_FMT_TEXT",
+	"KOF_FMT_GZIP", "KOF_FMT_DOCOLE", "KOF_FMT_ZIP",
+	"KOF_FMT_DOCZIP", "KOF_FMT_TAR", "KOF_FMT_7Z",
+	"KOF_FMT_RAR", "KOF_FMT_XZ", "KOF_FMT_RTF",
+	"KOF_FMT_PDF"
+};
+#define FMT_WORD_N (sizeof fmt_word / sizeof fmt_word[0])
+
 static const char *const elf_sub[] = { "NONE", "REL", "EXEC", "DYN", "CORE" };
 static const char *const pe_sub[]  = { "EXE", "DLL", "SYS" };
 
@@ -610,6 +620,19 @@ struct decl {
 	 */
 	int      fullword;
 	int      icase;
+
+	/*
+	 * The bytes are in the object, but not in the range that searches for
+	 * them.
+	 *
+	 * The one fact that explains a signature which cannot fire however
+	 * right it looks, and the panel had no way to say it: the region column
+	 * showed the range the matcher DECLARES, so a marker declared in DATA
+	 * and actually sitting in CODE read as "DATA, found" on both counts.
+	 */
+	int      off_rgn;
+	char     at_rgn[24];        /* the region it is really in */
+	uint32_t at_mask;           /* and that region's bits */
 };
 
 /*
@@ -856,6 +879,7 @@ struct view {
 	struct cond  cnd[MAX_GROUP];
 	uint32_t     n_cnd, cur_cnd;
 	char         warn[120];     /* why the last add was refused */
+	int          warn_bad;      /* 1 it failed, 0 it is only worth knowing */
 
 	/*
 	 * What the finished module will declare about itself.
@@ -894,6 +918,7 @@ struct view {
 	int         nt_len, nt_room;/* its length and the width it is shown in */
 	int         grp_len[MAX_GROUP], grp_room[MAX_GROUP];
 	int         rng_c0, rng_c1, m_c0, m_c1, s_c0, s_c1, e_c0, e_c1;
+	int         fix_c0, fix_c1; /* the strings table's refresh control */
 	int         a_c0, a_c1, b_c0, b_c1, p_c0, p_c1, o_c0, o_c1;
 	int         opt_c0[OPT_COUNT], opt_c1[OPT_COUNT];
 
@@ -1617,12 +1642,17 @@ static int hit_kind(struct view *v, uint64_t off)
  * says what to look for, not where it was found - and that is the case this is
  * for. Case folding is honoured because the declaration honours it.
  */
+static uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off);
+
 static void decl_locate(struct view *v, struct decl *d)
 {
 	struct object *ob = &v->obj[d->obj < v->n_obj ? d->obj : 0];
 	uint64_t i;
 
 	d->at = KOF_BROKEN;
+	d->off_rgn = 0;
+	d->at_rgn[0] = 0;
+	d->at_mask = 0;
 	if (!d->len || d->len > ob->buf.n)
 		return;
 	for (i = 0; i + d->len <= ob->buf.n; i++) {
@@ -1641,7 +1671,25 @@ static void decl_locate(struct view *v, struct decl *d)
 				break;
 		}
 		if (k == d->len) {
+			uint32_t nd;
+
 			d->at = i;
+			/*
+			 * Where it really is, against where it is looked for.
+			 *
+			 * Only a range that names regions can be contradicted:
+			 * an unset mask means nothing has been decided yet, and
+			 * KOF_SCAN_ALL cannot be missed.
+			 */
+			nd = node_at(v, d->obj, i);
+			if (nd < v->n_node && v->node[nd].mask) {
+				d->at_mask = v->node[nd].mask;
+				snprintf(d->at_rgn, sizeof d->at_rgn, "%s",
+					 v->node[nd].label);
+				if (d->mask && d->mask != KOF_SCAN_ALL &&
+				    !(d->mask & v->node[nd].mask))
+					d->off_rgn = 1;
+			}
 			return;
 		}
 	}
@@ -2459,6 +2507,40 @@ static void emit_cond(FILE *f, struct view *v, uint32_t i, int depth,
  * next place, and the one that gets missed is the one that loses somebody's
  * work.
  */
+/*
+ * The status line's two voices.
+ *
+ * Red is for something that went wrong and stopped what was asked for: a
+ * required field absent, a file that could not be written. Yellow is for
+ * something worth knowing that stopped nothing - a rule already in the tree
+ * carrying these markers, a draft that came back only partly read, a string
+ * that is not in this object.
+ *
+ * They shared one colour, and the case that showed it up is "same markers as
+ * HCRootkit.c": it appears AFTER a Save As that worked, because the file just
+ * written now has a sibling with the same patterns. Painted red it reads as
+ * the save having failed.
+ */
+static void say_err(struct view *v, const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(v->warn, sizeof v->warn, fmt, ap);
+	va_end(ap);
+	v->warn_bad = 1;
+}
+
+static void say_note(struct view *v, const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(v->warn, sizeof v->warn, fmt, ap);
+	va_end(ap);
+	v->warn_bad = 0;
+}
+
 static uint32_t draft_hash(struct view *v)
 {
 	uint32_t h = 2166136261u, i, j;
@@ -2566,7 +2648,59 @@ struct src_ent {
 	 */
 	uint32_t pat;
 	uint32_t n_pat;
+
+	/*
+	 * What this file targets, folded the same way.
+	 *
+	 * Separate from the patterns because it answers a different question.
+	 * Two modules can look for exactly the same bytes and still be two
+	 * modules: the rootkit itself is a relocatable object and the thing
+	 * that installs it is an executable, so the same five kernel symbol
+	 * names mean a different family, a different malware type and a
+	 * different subtype. Comparing patterns alone called that pair a
+	 * duplicate and greyed out Save As on the second one.
+	 */
+	uint32_t tgt;
 };
+
+/* One identifier out of a comma list, trimmed. Returns where to carry on. */
+static const char *src_ident(const char *p, char *out, size_t cap)
+{
+	size_t n = 0;
+
+	while (*p == ' ' || *p == '\t' || *p == ',')
+		p++;
+	while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+	       (*p >= '0' && *p <= '9') || *p == '_') {
+		if (n + 1 < cap)
+			out[n++] = *p;
+		p++;
+	}
+	out[n] = 0;
+	return p;
+}
+
+/*
+ * One target declaration into a fingerprint.
+ *
+ * Case folded, because the two sides spell these from different places - the
+ * panel holds "Rootkit" and the source says KOF_MALTYPE_ROOTKIT - and folded
+ * by addition so the order the declarations appear in does not matter.
+ */
+static uint32_t tgt_mix(uint32_t h, const char *tok)
+{
+	uint32_t k = 2166136261u;
+
+	for (; *tok; tok++) {
+		uint8_t c = (uint8_t)*tok;
+
+		if (c >= 'a' && c <= 'z')
+			c = (uint8_t)(c - 'a' + 'A');
+		k ^= c;
+		k = (uint32_t)((uint64_t)k * 16777619u);
+	}
+	return h + k;
+}
 
 static uint32_t pat_of(const uint8_t *b, uint32_t n, int hex)
 {
@@ -2596,6 +2730,7 @@ static int src_read(const char *path, struct src_ent *out)
 	out->n_line = 0;
 	out->pat = 0;
 	out->n_pat = 0;
+	out->tgt = 0;
 	while (fgets(line, sizeof line, f)) {
 		char *p, *q;
 		size_t n = 0;
@@ -2614,6 +2749,34 @@ static int src_read(const char *path, struct src_ent *out)
 		     strstr(line, "KOF_SCAN_SUSPECT(")) &&
 		    out->n_line < SRC_MAX_LINES)
 			out->line[out->n_line++] = lineno;
+		/* What it targets, as the identifiers the file actually
+		 * spells - no table lookup needed on this side, and none that
+		 * could drift out of step with the emitter's. */
+		{
+			static const char *const decl[] = {
+				"KOF_TARGET_FORMAT(", "KOF_TARGET_NAME(",
+				"KOF_TARGET_ARCH(", "KOF_TARGET_SUBTYPE("
+			};
+			size_t d;
+
+			for (d = 0; d < sizeof decl / sizeof decl[0]; d++)
+				if ((p = strstr(line, decl[d])) != NULL) {
+					char w[64];
+
+					src_ident(p + strlen(decl[d]), w,
+						  sizeof w);
+					if (w[0])
+						out->tgt = tgt_mix(out->tgt, w);
+				}
+			if ((p = strstr(line, "KOF_TARGET_SIZE_MIN(")) != NULL) {
+				char w[48];
+
+				snprintf(w, sizeof w, "SIZE_MIN=%llu",
+					 (unsigned long long)
+					 strtoull(p + 20, NULL, 0));
+				out->tgt = tgt_mix(out->tgt, w);
+			}
+		}
 		if ((p = strstr(line, "KOF_DEFINE_STR(")) != NULL ||
 		    (p = strstr(line, "KOF_DEFINE_HEXSTR(")) != NULL) {
 			int hex = strstr(line, "KOF_DEFINE_HEXSTR(") != NULL;
@@ -2749,23 +2912,6 @@ static uint32_t src_str_idx(struct sname *tab, uint32_t n, const char *id)
 		if (!strcmp(tab[i].id, id))
 			return tab[i].idx;
 	return 0xffffffffu;
-}
-
-/* One identifier out of a comma list, trimmed. Returns where to carry on. */
-static const char *src_ident(const char *p, char *out, size_t cap)
-{
-	size_t n = 0;
-
-	while (*p == ' ' || *p == '\t' || *p == ',')
-		p++;
-	while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
-	       (*p >= '0' && *p <= '9') || *p == '_') {
-		if (n + 1 < cap)
-			out[n++] = *p;
-		p++;
-	}
-	out[n] = 0;
-	return p;
 }
 
 /*
@@ -3318,7 +3464,7 @@ static void draft_from_touch(struct view *v, const struct kof_touch *t)
 	v->cnd[0].level = LV_INFECT;
 	v->n_cnd = 1;
 	v->cur_cnd = 0;
-	snprintf(v->warn, sizeof v->warn,
+	say_note(v,
 		 "loaded %u string(s) from %s - check the matcher, the logic is "
 		 "not in the database", v->n_decl,
 		 t->family[0] ? t->family : "the database");
@@ -3371,9 +3517,8 @@ static void draft_show(struct view *v, uint32_t idx)
 			 * are wrong, and a loaded file is not one. */
 			v->warn[0] = 0;
 			if (rc < 0)
-				snprintf(v->warn, sizeof v->warn,
-					 "only partly read - check it against "
-					 "the file");
+				say_note(v, "only partly read - check it "
+					    "against the file");
 			return;
 		}
 		draft_from_touch(v, &ob->touch[idx]);
@@ -3392,14 +3537,62 @@ static void draft_show(struct view *v, uint32_t idx)
  * one - because that is a variant that should have been a branch of the
  * existing rule rather than a second rule.
  */
+/*
+ * The same fingerprint for the draft, spelled from the same words the file
+ * would be written with - so a rule saved and then read back matches itself.
+ */
+static uint32_t draft_tgt(struct view *v)
+{
+	struct object *ob = &v->obj[v->n_decl && v->decl[0].obj < v->n_obj
+				    ? v->decl[0].obj : 0];
+	uint8_t fm = ob->ctx.format;
+	uint32_t h = 0;
+	char w[64];
+
+	h = tgt_mix(h, (ob->fmt && fm < FMT_WORD_N) ? fmt_word[fm]
+						    : "KOF_FMT_ANY");
+	snprintf(w, sizeof w, "KOF_MALTYPE_%s",
+		 v->maltype < MALTYPE_N ? maltype_word[v->maltype] : "VIRUS");
+	h = tgt_mix(h, w);
+	if (v->opt_on[OPT_ARCH]) {
+		snprintf(w, sizeof w, "KOF_ARCH_%s",
+			 arch_word[v->opt_val[OPT_ARCH] < ARCH_N
+				   ? v->opt_val[OPT_ARCH] : 0].word);
+		h = tgt_mix(h, w);
+	}
+	if (v->opt_on[OPT_SUBTYPE]) {
+		uint64_t k = v->opt_val[OPT_SUBTYPE];
+
+		if (fm == KOF_FMT_ELF)
+			snprintf(w, sizeof w, "KOF_ELF_%s",
+				 elf_sub[k < sizeof elf_sub / sizeof elf_sub[0]
+					 ? k : 0]);
+		else if (fm == KOF_FMT_PE)
+			snprintf(w, sizeof w, "KOF_PE_%s",
+				 pe_sub[k < sizeof pe_sub / sizeof pe_sub[0]
+					? k : 0]);
+		else
+			w[0] = 0;
+		if (w[0])
+			h = tgt_mix(h, w);
+	}
+	if (v->opt_on[OPT_SIZE_MIN]) {
+		snprintf(w, sizeof w, "SIZE_MIN=%llu",
+			 (unsigned long long)v->opt_val[OPT_SIZE_MIN]);
+		h = tgt_mix(h, w);
+	}
+	return h;
+}
+
 static const char *draft_dup(struct view *v, int *near)
 {
-	uint32_t pat = 0, n = 0, i;
+	uint32_t pat = 0, n = 0, i, tgt;
 
 	if (near)
 		*near = 0;
 	if (!g_src || !v->n_decl)
 		return NULL;
+	tgt = draft_tgt(v);
 	for (i = 0; i < v->n_decl; i++) {
 		pat += pat_of(v->decl[i].bytes, v->decl[i].len,
 			      v->decl[i].hex);
@@ -3409,6 +3602,11 @@ static const char *draft_dup(struct view *v, int *near)
 		if (v->gen_path[0] && !strcmp(g_src[i].path, v->gen_path))
 			continue;
 		if (!g_src[i].n_pat)
+			continue;
+		/* Same bytes AND the same thing to run them against. Same
+		 * bytes aimed at another format, another subtype or another
+		 * malware type is a sibling rule, not a copy of this one. */
+		if (g_src[i].tgt != tgt)
 			continue;
 		if (g_src[i].pat == pat && g_src[i].n_pat == n)
 			return g_src[i].path;
@@ -3567,13 +3765,12 @@ static void generate(struct view *v, int as_new)
 		const char *dup;
 
 		if (why) {
-			snprintf(v->warn, sizeof v->warn, "%s first", why);
+			say_err(v, "%s first", why);
 			return;
 		}
 		dup = draft_dup(v, &near);
 		if (dup && !near) {
-			snprintf(v->warn, sizeof v->warn,
-				 "same markers as %s - edit that instead",
+			say_note(v, "same markers as %s - edit that instead",
 				 dup);
 			return;
 		}
@@ -3586,7 +3783,7 @@ static void generate(struct view *v, int as_new)
 		 * happening.
 		 */
 		if (!draft_dirty(v) && v->gen_path[0]) {
-			snprintf(v->warn, sizeof v->warn,
+			say_note(v, "%s",
 				 as_new ? "nothing changed - a copy would be a "
 					  "duplicate"
 					: "nothing changed since the last save");
@@ -3630,8 +3827,7 @@ static void generate(struct view *v, int as_new)
 		if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
 			snprintf(dir, sizeof dir, "%s", v->basedir);
 		if (kof_mkdir(dir, 0777) != 0 && errno != EEXIST) {
-			snprintf(v->warn, sizeof v->warn, "cannot create %.90s",
-				 dir);
+			say_err(v, "cannot create %.90s", dir);
 			return;
 		}
 		/*
@@ -3669,7 +3865,7 @@ static void generate(struct view *v, int as_new)
 	}
 	f = fopen(path, "w");
 	if (!f) {
-		snprintf(v->warn, sizeof v->warn, "cannot write %.90s", path);
+		say_err(v, "cannot write %.90s", path);
 		return;
 	}
 
@@ -3721,21 +3917,9 @@ static void generate(struct view *v, int as_new)
 
 	/* The format the object actually is, so the host can rule the module
 	 * out without entering it - and so the regions above mean something. */
-	{
-		static const char *const fmtname[] = {
-			"KOF_FMT_ANY", "KOF_FMT_ELF", "KOF_FMT_PE",
-			"KOF_FMT_MACHO", "KOF_FMT_SCRIPT", "KOF_FMT_TEXT",
-			"KOF_FMT_GZIP", "KOF_FMT_DOCOLE", "KOF_FMT_ZIP",
-			"KOF_FMT_DOCZIP", "KOF_FMT_TAR", "KOF_FMT_7Z",
-			"KOF_FMT_RAR", "KOF_FMT_XZ", "KOF_FMT_RTF",
-			"KOF_FMT_PDF"
-		};
-
-		fprintf(f, "KOF_TARGET_FORMAT(%s);\n",
-			(ob->fmt && ob->ctx.format <
-			 sizeof fmtname / sizeof fmtname[0])
-			? fmtname[ob->ctx.format] : "KOF_FMT_ANY");
-	}
+	fprintf(f, "KOF_TARGET_FORMAT(%s);\n",
+		(ob->fmt && ob->ctx.format < FMT_WORD_N)
+		? fmt_word[ob->ctx.format] : "KOF_FMT_ANY");
 	fprintf(f, "KOF_TARGET_NAME(KOF_MALTYPE_%s, \"%s\");\n\n",
 		v->maltype == 0 ? "VIRUS" :
 		v->maltype == 1 ? "TROJAN" :
@@ -3906,7 +4090,7 @@ static void generate(struct view *v, int as_new)
 	snprintf(v->gen_path, sizeof v->gen_path, "%.*s",
 		 (int)sizeof v->gen_path - 1, path);
 	if (!v->gen_ok) {
-		snprintf(v->warn, sizeof v->warn, "could not write the file");
+		say_err(v, "could not write the file");
 		return;
 	}
 	v->warn[0] = 0;
@@ -4507,14 +4691,31 @@ static void field_draw(struct out *o, const char *text, uint32_t caret,
 		room = 1;
 	if (caret > len)
 		caret = len;
-	if (!editing) {
-		if (*off > len)
-			*off = len ? len - 1u : 0;
-	} else {
+	if (editing) {
 		if (caret < *off)
 			*off = caret;
 		if (caret >= *off + (uint32_t)room)
 			*off = caret - (uint32_t)room + 1u;
+	}
+	/*
+	 * And never scrolled further right than the text needs.
+	 *
+	 * Keeping the caret in view is only half the rule; the other half is
+	 * that scrolling right is pointless once what remains would fit. They
+	 * were not both applied, so clearing a long comment and typing again
+	 * left the window where the long text had pushed it: the caret was on
+	 * screen at the left edge and the character just typed sat one column
+	 * off it. Every field goes through here, so every field did it.
+	 *
+	 * The caret may sit one past the last character, which is why the text
+	 * this has to fit is len + 1 while editing and len when not.
+	 */
+	{
+		uint32_t want = editing ? len + 1u : len;
+
+		if (*off + (uint32_t)room > want)
+			*off = want > (uint32_t)room
+			       ? want - (uint32_t)room : 0;
 	}
 	for (i = 0; i < (uint32_t)room; i++) {
 		uint32_t at = *off + i;
@@ -4546,6 +4747,73 @@ static void field_draw(struct out *o, const char *text, uint32_t caret,
 		}
 	}
 }
+
+/*
+ * Point every marker at the region it is actually in, here.
+ *
+ * A family's markers do not keep one address across its own files: the same
+ * five kernel symbol names sit in a data section in the rootkit object and in
+ * .rodata - which is CODE, because that segment executes - in the loader that
+ * installs it. A rule carried from one to the other looks right on every row
+ * and cannot fire, and switching five strings one at a time to find that out is
+ * work nobody should do by hand.
+ *
+ * A marker that is not in this object at all is LEFT ALONE and counted. It may
+ * well be a real marker of the family taken from another sample, and deleting a
+ * declaration because the file in front of us does not happen to contain it
+ * would throw away the researcher's work to tidy up a column.
+ */
+static void draft_refresh(struct view *v)
+{
+	uint32_t i, g, moved = 0, gone = 0;
+
+	for (i = 0; i < v->n_decl; i++) {
+		struct decl *d = &v->decl[i];
+
+		decl_locate(v, d);
+		if (d->at == KOF_BROKEN) {
+			gone++;
+			continue;
+		}
+		if (!d->at_mask)
+			continue;
+		if (d->mask != d->at_mask)
+			moved++;
+		d->mask = d->at_mask;
+		snprintf(d->rgn, sizeof d->rgn, "%.23s", d->at_rgn);
+		d->off_rgn = 0;
+	}
+	/*
+	 * And the matchers follow, because a range is not an independent fact:
+	 * it is the union of the regions its markers are in, which is how one
+	 * gets built in the first place. Leaving them behind would move every
+	 * string and still search the old place.
+	 */
+	for (g = 0; g < v->n_grp; g++) {
+		uint32_t m = 0;
+
+		for (i = 0; i < v->n_decl; i++)
+			if (v->decl[i].grp == g)
+				m |= v->decl[i].mask;
+		if (m)
+			v->grp[g].mask = m;
+	}
+	if (!moved && !gone)
+		say_note(v, "every marker is already in the region it is "
+			    "searched for");
+	else if (!gone)
+		say_note(v, "%u marker(s) moved to the region they are in",
+			 moved);
+	else
+		say_note(v, "%u moved, %u not in this object - left as "
+			    "declared", moved, gone);
+}
+
+/* Where the strings table's refresh control sits, taken from the heading that
+ * is actually drawn rather than counted out by hand. */
+static const char str_hdr[] =
+	" Strings     word      case         region [fix] size  bytes";
+#define STR_FIX "[fix]"
 
 static void draw_decl(struct out *o, struct view *v)
 {
@@ -4759,9 +5027,24 @@ static void draw_decl(struct out *o, struct view *v)
 	 * CODE" said the same word once per string and read like a sentence
 	 * where a table belongs. */
 	if (v->n_decl && PR_VIS(r)) {
-		sec_bar(o, v, PR(r),
-			" Strings     word      case         region"
-			"       size  bytes");
+		const char *b = strstr(str_hdr, STR_FIX);
+		uint32_t k, off = 0;
+
+		sec_bar(o, v, PR(r), str_hdr);
+		v->fix_c0 = (int)(b - str_hdr) + 1;
+		v->fix_c1 = v->fix_c0 + (int)strlen(STR_FIX) - 1;
+		/*
+		 * Lit only when it would change something. It is drawn over
+		 * the bar rather than inside it because the bar is one colour
+		 * by construction, and a control that is always the colour of
+		 * its heading is a control nobody finds.
+		 */
+		for (k = 0; k < v->n_decl; k++)
+			off += (uint32_t)(v->decl[k].off_rgn != 0);
+		out_at(o, PR(r), v->fix_c0);
+		out_str(o, off ? "\033[43;30m" : "\033[100;90m");
+		out_str(o, STR_FIX);
+		out_str(o, A_OFF);
 	}
 	r += v->n_decl ? 1 : 0;
 	v->row_str = PR(r);
@@ -4783,8 +5066,42 @@ static void draw_decl(struct out *o, struct view *v)
 				d->fullword ? "fullword" : "substring",
 				d->icase ? "ignore-case" : "exact-case");
 		v->str_wc[i][1] = (int)o->col_hint;
-		out_fmt(o, " %s%-12s" A_OFF " %s%5u" A_OFF "  ",
-			A_LOC, d->rgn, A_SIZE, d->len);
+		/*
+		 * The declared range, or - when the bytes are somewhere else
+		 * entirely - both, in the colour that says look at this.
+		 *
+		 * "DATA" alone is what this said for a marker whose bytes are
+		 * in CODE, and it is why a rule that cannot possibly fire read
+		 * as correct on every row. The arrow is the whole diagnosis:
+		 * searched there, found here.
+		 */
+		if (d->at == KOF_BROKEN) {
+			/*
+			 * Declared, and not in this object.
+			 *
+			 * Said plainly rather than removed. The marker may be
+			 * a real one for the family, taken from a sample that
+			 * is not the one on screen - so this is the researcher's
+			 * call, and all this row owes them is the fact. The
+			 * declared region stays beside it, because that is
+			 * still what the module will search.
+			 */
+			char both[26];
+
+			snprintf(both, sizeof both, "%s? absent", d->rgn);
+			out_fmt(o, " %s%-12.12s" A_OFF " %s%5u" A_OFF "  ",
+				A_BAD, both, A_SIZE, d->len);
+		} else if (d->off_rgn) {
+			char both[26];
+
+			snprintf(both, sizeof both, "%s>%s", d->rgn,
+				 d->at_rgn);
+			out_fmt(o, " %s%-12.12s" A_OFF " %s%5u" A_OFF "  ",
+				A_WARN, both, A_SIZE, d->len);
+		} else {
+			out_fmt(o, " %s%-12s" A_OFF " %s%5u" A_OFF "  ",
+				A_LOC, d->rgn, A_SIZE, d->len);
+		}
 		v->str_by[i][0] = 1 + (int)o->col_hint;
 		{
 			uint32_t from = v->decl_hoff / 2u;
@@ -5246,17 +5563,21 @@ static void draw_marker_line(struct out *o, struct view *v)
 
 		if (v->warn[0]) {
 			snprintf(right, sizeof right, "%s", v->warn);
-			rcol = A_BAD;
+			rcol = v->warn_bad ? A_BAD : A_WARN;
 		} else if (why) {
 			/* Something required is absent, which is why the
 			 * button is greyed - an error, and coloured as one. */
 			snprintf(right, sizeof right, "%s", why);
 			rcol = A_BAD;
 		} else if (dup) {
+			/* Both readings are the same kind of thing: a rule in
+			 * the tree worth looking at before writing another.
+			 * Neither is a failure, and the exact-match one is the
+			 * reading that follows a Save As that worked. */
 			snprintf(right, sizeof right, "%s %s",
 				 near ? "all but one marker of"
 				      : "same markers as", dup);
-			rcol = near ? A_WARN : A_BAD;
+			rcol = A_WARN;
 		}
 		else if (v->gen_path[0])
 			snprintf(right, sizeof right, "%.*s%s",
@@ -7541,8 +7862,14 @@ static void click(struct view *v, int rclick)
 			r++;
 		}
 		if (v->n_decl) {
-			if (r == want)
-				return;         /* the "Strings" heading */
+			if (r == want) {
+				/* The heading carries one control; the rest of
+				 * it is a label. */
+				if (v->fix_c0 > 0 && g_mx >= v->fix_c0 &&
+				    g_mx <= v->fix_c1)
+					draft_refresh(v);
+				return;
+			}
 			r++;
 			for (i = 0; i < v->n_decl; i++, r++) {
 				if (r != want)
@@ -7570,10 +7897,8 @@ static void click(struct view *v, int rclick)
 					if (v->decl[i].at != KOF_BROKEN)
 						view_show(v, v->decl[i].at);
 					else
-						snprintf(v->warn,
-							 sizeof v->warn,
-							 "string %u is not in "
-							 "this object",
+						say_note(v, "string %u is "
+							 "not in this object",
 							 i + 1u);
 				}
 				return;
@@ -8131,9 +8456,8 @@ static int handle(struct view *v, int k)
 			find_run(v, 0);
 		break;
 	case 0x0f:                      /* Ctrl+O */
-		snprintf(v->warn, sizeof v->warn,
-			 "open: not built yet - pass the file on the command "
-			 "line");
+		say_note(v, "open: not built yet - pass the file on the "
+			    "command line");
 		break;
 	case 'q':
 		if (v->show_list) {
