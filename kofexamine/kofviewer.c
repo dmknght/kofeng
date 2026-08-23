@@ -56,6 +56,8 @@
 #include "../libkofeng/core/kofplatform.h"
 #include <kofcore.h>
 #include <kofmod/kofsig.h>
+#include <kofmod/elf.h>
+#include <kofmod/pe.h>
 
 #include "kofinspect.h"
 #include "../libkofeng/kofscanners/scan.h"
@@ -959,6 +961,9 @@ struct view {
 	int         bar_open;       /* which menu is down, -1 for none */
 	int         bar_sel;        /* the item under the pointer or the cursor */
 	int         help_open;      /* 0 none, 1 keyboard, 2 about */
+	int         dash_open;      /* the Analyse dashboard is up */
+	uint32_t    dash_off;       /* the first of its lines on screen */
+	int         dash_x0, dash_x1, dash_y;   /* its close control */
 	/*
 	 * What is being searched for, and where it was last found.
 	 *
@@ -1908,7 +1913,11 @@ static int cnd_uses(const struct cond *c, uint32_t g)
 
 	while (*p) {
 		if (*p >= '0' && *p <= '9') {
-			unsigned long n = strtoul(p, (char **)&p, 10);
+			char *end;
+			unsigned long n;
+
+			n = strtoul(p, &end, 10);
+			p = end;
 
 			if (n == (unsigned long)g + 1ul)
 				return 1;
@@ -2085,7 +2094,11 @@ static void grp_remove(struct view *v, uint32_t g)
 		out[0] = 0;
 		while (*p) {
 			if (*p >= '0' && *p <= '9') {
-				unsigned long n = strtoul(p, (char **)&p, 10);
+				char *end;
+				unsigned long n;
+
+				n = strtoul(p, &end, 10);
+				p = end;
 
 				if (n == (unsigned long)g + 1ul)
 					continue;
@@ -2859,7 +2872,6 @@ static const char *src_of(struct view *v, const struct kof_touch *t)
 	return NULL;
 }
 
-static uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off);
 
 /*
  * Turn one signature source into a draft.
@@ -6216,7 +6228,6 @@ static void decl_remove(struct view *v, uint32_t i)
 		v->sel_decl = v->n_decl - 1u;
 }
 
-static uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off);
 
 static void decl_add(struct view *v, int hex)
 {
@@ -6370,10 +6381,15 @@ static size_t g_last_n;
 static void draw_find(struct out *o, struct view *v);
 static void draw_bar(struct out *o, struct view *v);
 static void draw_help(struct out *o, struct view *v);
+static void draw_dash(struct out *o, struct view *v);
+
+/* The dashboard was up on the frame before this one. */
+static int g_dash_drawn;
 
 static void redraw(struct view *v)
 {
 	struct out o = { NULL, 0, 0, 0 };
+	int wiped = 0, under;
 
 	term_size();
 	if (g_winch) {
@@ -6388,6 +6404,7 @@ static void redraw(struct view *v)
 		g_last = NULL;
 		g_last_n = 0;
 		term_write("\033[2J");
+		wiped = 1;
 	}
 	/* The panes are laid out around the draft, so its height is settled
 	 * before anything asks where it is. */
@@ -6452,19 +6469,42 @@ static void redraw(struct view *v)
 	 * frame is complete. Terminals that do not know the mode ignore it,
 	 * which is why it can be sent unconditionally.
 	 */
+	/*
+	 * A full-screen modal paints alone.
+	 *
+	 * The three panes underneath are 15KB of a 16KB frame and every byte of
+	 * them is overdrawn by the box a moment later. Synchronised output is
+	 * supposed to make that invisible and does, on a terminal that honours
+	 * mode 2026 - on one that does not, a write that large is rendered in
+	 * pieces and the pieces are the panes being painted before the box
+	 * covers them. That is the flash, and it showed up while scrolling
+	 * because scrolling is when frames come fastest.
+	 *
+	 * So they are skipped while the dashboard is up, and drawn on the frame
+	 * it OPENS on: that one still has to erase the menu the reader opened
+	 * it from, and nothing under a modal can change afterwards because the
+	 * modal has the keyboard.
+	 */
+	under = !v->dash_open || wiped || !g_dash_drawn;
+	g_dash_drawn = v->dash_open;
+
 	out_str(&o, "\033[?2026h");
-	draw_frame(&o, v);
-	draw_tree(&o, v);
-	draw_hex(&o, v);
-	draw_decl(&o, v);
-	draw_marker_line(&o, v);
-	if (v->show_list)
-		draw_list(&o, v);
-	if (v->menu_open)
-		draw_menu(&o, v);
-	draw_bar(&o, v);
-	if (v->find_open)
-		draw_find(&o, v);
+	if (under) {
+		draw_frame(&o, v);
+		draw_tree(&o, v);
+		draw_hex(&o, v);
+		draw_decl(&o, v);
+		draw_marker_line(&o, v);
+		if (v->show_list)
+			draw_list(&o, v);
+		if (v->menu_open)
+			draw_menu(&o, v);
+		draw_bar(&o, v);
+		if (v->find_open)
+			draw_find(&o, v);
+	}
+	if (v->dash_open)
+		draw_dash(&o, v);
 	if (v->help_open)
 		draw_help(&o, v);
 	draw_chooser(&o, v);
@@ -6861,7 +6901,7 @@ static int bar_enabled(struct view *v, int i)
 	case BI_FIND:      return 1;
 	case BI_GOTO:      return 0;            /* the dialog is not built */
 	case BI_SYMBOLS:   return 0 && exe;     /* format gated, not built */
-	case BI_DASHBOARD:
+	case BI_DASHBOARD: return 1;
 	case BI_STRINGS:   return 0;            /* not built */
 	case BI_KEYS:
 	case BI_ABOUT:     return 1;
@@ -7009,6 +7049,446 @@ static void draw_help(struct out *o, struct view *v)
 	out_fmt(o, A_DIM " press any key " A_OFF);
 }
 
+/* ---- the dashboard --------------------------------------------------------
+ *
+ * What the engine knows about this object, on one scrollable page.
+ *
+ * The same facts kofexamine prints, and deliberately the same facts: a
+ * researcher who has read one should recognise the other, and two tools over
+ * one engine disagreeing about what a file is would be worse than either of
+ * them missing something. What differs is only that this one can be scrolled
+ * and the other one scrolls past.
+ *
+ * Built as lines rather than drawn directly, because scrolling a page is a
+ * window over a list and painting one is not. The per-format blocks are the
+ * point of the whole thing - an ELF has segments and a zip has entries, and a
+ * dashboard that shows neither because it shows only what they have in common
+ * is a dashboard nobody opens twice.
+ */
+#define DASH_MAX  600
+#define DASH_W    200
+
+struct dash_line {
+	char        text[DASH_W];
+	const char *col;
+};
+
+static struct dash_line g_dash[DASH_MAX];
+static uint32_t         g_n_dash;
+
+static void dash_add(const char *col, const char *fmt, ...)
+{
+	va_list ap;
+
+	if (g_n_dash >= DASH_MAX)
+		return;
+	va_start(ap, fmt);
+	vsnprintf(g_dash[g_n_dash].text, DASH_W, fmt, ap);
+	va_end(ap);
+	g_dash[g_n_dash].col = col;
+	g_n_dash++;
+}
+
+/* A heading, with a blank line above it unless it opens the page. */
+static void dash_head(const char *w)
+{
+	if (g_n_dash)
+		dash_add(A_DIM, "%s", "");
+	dash_add(A_OFF, A_BOLD "%s" A_OFF, w);
+}
+
+static void dash_perm(char *out, size_t cap, unsigned p)
+{
+	snprintf(out, cap, "%c%c%c", (p & 4) ? 'R' : '-', (p & 2) ? 'W' : '-',
+		 (p & 1) ? 'X' : '-');
+}
+
+/* "9 of 9 declared", and the count that did not add up said as such. */
+static void dash_claimed(const char *label, uint32_t have, uint32_t claimed)
+{
+	dash_add(A_OFF, A_DIM "  %-11s " A_OFF "%s%u of %u" A_OFF A_DIM
+		 " declared" A_OFF, label,
+		 have == claimed ? A_SIZE : A_WARN, have, claimed);
+}
+
+static void dash_elf(const struct object *ob)
+{
+	const struct kof_elf_info *e = ob->info;
+	char perm[4];
+	uint32_t i;
+
+	dash_head("ELF");
+	dash_add(A_OFF, A_DIM "  %-11s " A_ID "%s %s" A_OFF A_DIM
+		 "   type=" A_OFF A_SIZE "%u" A_OFF A_DIM " machine=" A_OFF
+		 A_SIZE "%u" A_OFF, "class",
+		 e->elf_class == KOF_ELFCLASS_64 ? "ELF64" : "ELF32",
+		 e->elf_data == KOF_ELFDATA_BE ? "big-endian"
+					       : "little-endian",
+		 e->e_type, e->e_machine);
+	dash_perm(perm, sizeof perm, e->entry_perm);
+	dash_add(A_OFF, A_DIM "  %-11s " A_LOC "0x%llx" A_OFF A_DIM
+		 "  file " A_OFF A_LOC "%llu" A_OFF "  " A_ID "%s" A_OFF,
+		 "entry", (unsigned long long)e->entry_addr,
+		 (unsigned long long)ob->ctx.entry_off, perm);
+
+	dash_claimed("segments", e->phnum, e->phnum_claimed);
+	for (i = 0; i < e->seg_count; i++) {
+		const char *w = kof_inspect_ptype_name(e->seg[i].type);
+		char num[24];
+
+		if (!w) {
+			snprintf(num, sizeof num, "%u", e->seg[i].type);
+			w = num;
+		}
+		dash_perm(perm, sizeof perm, e->seg[i].perm);
+		dash_add(A_OFF, "     " A_ID "%-16s" A_OFF A_DIM " off=" A_OFF
+			 A_LOC "%-9llu" A_OFF A_DIM "size=" A_OFF A_SIZE
+			 "%-9llu" A_OFF A_DIM "vaddr=" A_OFF A_LOC
+			 "0x%-10llx" A_OFF A_ID "%s" A_OFF,
+			 w, (unsigned long long)e->seg[i].file_off,
+			 (unsigned long long)e->seg[i].file_size,
+			 (unsigned long long)e->seg[i].mem_addr, perm);
+	}
+	dash_claimed("sections", e->shnum, e->shnum_claimed);
+	for (i = 0; i < e->sec_count; i++) {
+		const char *w = kof_inspect_shtype_name(e->sec[i].type);
+		char num[24];
+
+		if (!w) {
+			snprintf(num, sizeof num, "%u", e->sec[i].type);
+			w = num;
+		}
+		dash_add(A_OFF, "     " A_ID "%-20s" A_OFF A_DIM " off=" A_OFF
+			 A_LOC "%-9llu" A_OFF A_DIM "size=" A_OFF A_SIZE
+			 "%-9llu" A_OFF A_DIM " %s" A_OFF,
+			 e->sec[i].name,
+			 (unsigned long long)e->sec[i].file_off,
+			 (unsigned long long)e->sec[i].file_size, w);
+	}
+}
+
+static void dash_pe(const struct object *ob)
+{
+	const struct kof_pe_info *p = ob->info;
+	char perm[4];
+	uint32_t i;
+
+	dash_head("PE");
+	dash_add(A_OFF, A_DIM "  %-11s " A_ID "%s" A_OFF A_DIM "  machine="
+	 A_OFF A_LOC "0x%04x" A_OFF A_DIM " characteristics=" A_OFF A_LOC
+	 "0x%04x" A_OFF, "image", p->pe32_plus ? "PE32+" : "PE32", p->machine,
+	 p->characteristics);
+	dash_add(A_OFF, A_DIM "  %-11s lfanew=" A_OFF A_LOC "%llu" A_OFF A_DIM
+		 "  gap=" A_OFF A_SIZE "%llu" A_OFF, "stub",
+		 (unsigned long long)p->lfanew,
+		 (unsigned long long)p->stub_len);
+	dash_add(A_OFF, A_DIM "  %-11s end=" A_OFF A_LOC "%llu" A_OFF A_DIM
+		 "  declared=" A_OFF A_SIZE "%llu" A_OFF, "headers",
+		 (unsigned long long)p->header_end,
+		 (unsigned long long)p->size_of_headers);
+	dash_perm(perm, sizeof perm, p->entry_perm);
+	dash_add(A_OFF, A_DIM "  %-11s rva=" A_OFF A_LOC "0x%llx" A_OFF A_DIM
+		 "  file " A_OFF A_LOC "%llu" A_OFF A_DIM "  sec=" A_OFF A_ID
+		 "%s" A_OFF "  " A_ID "%s" A_OFF, "entry",
+		 (unsigned long long)p->entry_rva,
+		 (unsigned long long)ob->ctx.entry_off,
+		 p->entry_sec < p->sec_count ? p->sec[p->entry_sec].name
+					     : "none", perm);
+	dash_add(A_OFF, A_DIM "  %-11s code=" A_OFF A_SIZE "%llu" A_OFF A_DIM
+		 " init=" A_OFF A_SIZE "%llu" A_OFF A_DIM " uninit=" A_OFF
+		 A_SIZE "%llu" A_OFF, "summary",
+		 (unsigned long long)p->size_of_code,
+		 (unsigned long long)p->size_of_init_data,
+		 (unsigned long long)p->size_of_uninit_data);
+	/*
+	 * Both are worth a line only when they exist, and both matter when
+	 * they do: a certificate is what an unsigned copy of a signed program
+	 * is missing, and an overlay is where a packer's payload usually is.
+	 */
+	if (p->cert_len)
+		dash_add(A_OFF, A_DIM "  %-11s off=" A_OFF A_LOC "%llu" A_OFF
+			 A_DIM "  len=" A_OFF A_SIZE "%llu" A_OFF, "signature",
+			 (unsigned long long)p->cert_off,
+			 (unsigned long long)p->cert_len);
+	if (p->overlay_len)
+		dash_add(A_OFF, A_WARN "  %-11s" A_OFF A_DIM " off=" A_OFF A_LOC
+			 "%llu" A_OFF A_DIM "  len=" A_OFF A_WARN "%llu" A_OFF,
+			 "overlay", (unsigned long long)p->overlay_off,
+			 (unsigned long long)p->overlay_len);
+	dash_claimed("sections", p->nsec, p->nsec_claimed);
+	for (i = 0; i < p->sec_count; i++) {
+		dash_perm(perm, sizeof perm, p->sec[i].perm);
+		dash_add(A_OFF, "     " A_ID "%-9s" A_OFF A_DIM " off=" A_OFF
+			 A_LOC "%-9llu" A_OFF A_DIM "raw=" A_OFF A_SIZE
+			 "%-9llu" A_OFF A_DIM "rva=" A_OFF A_LOC "0x%-8llx"
+			 A_OFF A_DIM "vsz=" A_OFF A_LOC "0x%-8llx" A_OFF A_ID
+			 "%s" A_OFF, p->sec[i].name,
+			 (unsigned long long)p->sec[i].file_off,
+			 (unsigned long long)p->sec[i].file_size,
+			 (unsigned long long)p->sec[i].mem_rva,
+			 (unsigned long long)p->sec[i].mem_size, perm);
+	}
+}
+
+static void dash_build(struct view *v)
+{
+	struct object *ob = cur_obj(v);
+	const char *base = strrchr(ob->name, '/');
+	uint32_t i, hit = 0;
+	uint64_t total = 0;
+
+	g_n_dash = 0;
+	base = base ? base + 1 : ob->name;
+
+	dash_head("Object");
+	dash_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF, "name", base);
+	dash_add(A_OFF, A_DIM "  %-11s " A_OFF A_SIZE "%llu" A_OFF A_DIM
+		 " bytes" A_OFF, "size", (unsigned long long)ob->buf.n);
+	{
+		const char *sub = ob->fmt
+			? kof_inspect_subtype_name(ob->ctx.format,
+						   ob->ctx.subtype) : NULL;
+
+		dash_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s%s%s" A_OFF,
+			 "format",
+			 ob->fmt ? kof_format_name(ob->ctx.format) : "raw",
+			 sub ? " " : "", sub ? sub : "");
+	}
+	if (ob->fmt)
+		dash_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF, "arch",
+			 kof_arch_name(ob->ctx.arch));
+	/* Where it came from, when it did not come from the disk. Everything
+	 * below describes bytes an unpacker produced, and reading it as the
+	 * file on disk would be reading it as the wrong object. */
+	if (ob->packer[0])
+		dash_add(A_OFF, A_DIM "  %-11s " A_OFF A_WARN "%s" A_OFF,
+			 "unpacked by", ob->packer);
+
+	if (ob->fmt && ob->info) {
+		if (ob->ctx.format == KOF_FMT_ELF)
+			dash_elf(ob);
+		else if (ob->ctx.format == KOF_FMT_PE)
+			dash_pe(ob);
+	}
+
+	/*
+	 * The regions, which is the engine's own division of the file and the
+	 * thing every range in every signature is written against. The share
+	 * is there because that is how a packed file announces itself: one
+	 * region holding nearly all of it.
+	 */
+	dash_head("Regions");
+	{
+		uint32_t n = 0;
+
+		for (i = 0; i < v->n_node; i++)
+			if (v->node[i].obj == v->node[v->sel_node].obj &&
+			    v->node[i].mask)
+				n++;
+		/* No parser claimed the bytes, so nothing divided them. That
+		 * is not a file whose regions fail to add up - it is a file
+		 * with no regions, and saying MISMATCH there invented a
+		 * problem. */
+		if (!n) {
+			dash_add(A_OFF, A_DIM "  %-11s no parser divides this "
+				 "object" A_OFF, "whole");
+			goto no_regions;
+		}
+	}
+	for (i = 0; i < v->n_node; i++)
+		if (v->node[i].obj == v->node[v->sel_node].obj &&
+		    v->node[i].mask)
+			total += v->node[i].bytes;
+	for (i = 0; i < v->n_node; i++) {
+		const struct node *n = &v->node[i];
+
+		if (n->obj != v->node[v->sel_node].obj || !n->mask)
+			continue;
+		dash_add(A_OFF, "  " A_ID "%-11s" A_OFF A_SIZE "%-10llu" A_OFF
+			 A_LOC "%5.1f%%" A_OFF, n->label,
+			 (unsigned long long)n->bytes,
+			 total ? 100.0 * (double)n->bytes / (double)total : 0.0);
+	}
+	if (total != ob->buf.n)
+		dash_add(A_BAD, "  %-11s regions sum to %llu of %llu",
+			 "MISMATCH", (unsigned long long)total,
+			 (unsigned long long)ob->buf.n);
+no_regions:
+
+	/*
+	 * What the parser thought was wrong with it.
+	 *
+	 * Said even when there is nothing, because "no anomalies" is a finding
+	 * and an absent section reads as a section that was not checked.
+	 */
+	dash_head("Anomalies");
+	if (ob->fmt && ob->info && ob->fmt->anomalies) {
+		uint64_t anom = ob->fmt->anomalies(ob->info);
+
+		if (!anom)
+			dash_add(A_DIM, "  none");
+		for (i = 0; i < 64; i++) {
+			const char *an;
+
+			if (!(anom >> i & 1))
+				continue;
+			an = ob->fmt->anomaly_name(i);
+			if (an)
+				dash_add(A_BAD, "  %s", an);
+			else
+				dash_add(A_BAD, "  bit%u", i);
+		}
+	} else {
+		dash_add(A_DIM, "  no parser claimed these bytes");
+	}
+
+	dash_head("Signatures");
+	for (i = 0; i < ob->n_touch; i++)
+		hit += (uint32_t)(ob->touch[i].fired != 0);
+	dash_add(A_OFF, "  %s%u" A_OFF A_DIM " fired, " A_OFF A_SIZE "%u"
+		 A_OFF A_DIM " did not" A_OFF, hit ? A_BAD : A_SIZE, hit,
+		 ob->n_touch - hit);
+	for (i = 0; i < ob->n_touch; i++) {
+		const struct kof_touch *t = &ob->touch[i];
+		char name[80], head[24];
+
+		touch_name(t, name, sizeof name);
+		touch_head(t, head, sizeof head);
+		dash_add(A_OFF, "  %s%-44s" A_OFF A_SIZE "%-10s" A_OFF A_WARN
+			 "%s" A_OFF, t->fired ? A_BAD : A_ID, name, head,
+			 t->kind == KOF_TOUCH_INELIGIBLE && t->ruled_out
+			 ? t->ruled_out : "");
+	}
+}
+
+/*
+ * One line onto the screen, colours and all.
+ *
+ * The lines carry their own SGR because a dashboard is a table of different
+ * KINDS of fact - a name, an offset, a size - and one colour per row cannot say
+ * which is which. printf's "%-.*s" cannot be used on them: it would count the
+ * escape bytes as width and cut a line off in the middle of one, so the width
+ * is counted here over printable columns only, the same way field_draw does it.
+ */
+static void dash_put(struct out *o, const char *s, int room)
+{
+	int n = 0;
+
+	while (*s && n < room) {
+		if (*s == '\033') {
+			const char *e = s;
+			char t[32];
+			size_t l;
+
+			while (*e && *e != 'm')
+				e++;
+			if (*e)
+				e++;
+			l = (size_t)(e - s);
+			if (l < sizeof t) {
+				memcpy(t, s, l);
+				t[l] = 0;
+				out_str(o, t);
+			}
+			s = e;
+			continue;
+		}
+		{
+			char t[2];
+
+			t[0] = *s++;
+			t[1] = 0;
+			out_str(o, t);
+			n++;
+		}
+	}
+	out_str(o, A_OFF);
+	while (n++ < room)
+		out_str(o, " ");
+}
+
+/*
+ * The page, as a window over the lines.
+ *
+ * Near full screen on purpose: the sections below the fold are the ones a
+ * reader has to go looking for, and a small box would put every section but the
+ * first one there.
+ *
+ * The chrome carries what the chrome is for. Which lines are on screen goes on
+ * the bottom rule, where a reader looks for their position in a document; the
+ * way out goes top right, where a window's close control is. Neither is a line
+ * of the page: a row spent telling you which keys work is a row not spent on
+ * the file, and it says the same thing every time you open it.
+ */
+static void draw_dash(struct out *o, struct view *v)
+{
+	int top = 2, left = 2, w = g_cols - 4, h = g_rows - 3, y, i;
+	int room, inner;
+	uint32_t shown;
+	char pos[48];
+	static const char close[] = "[ Close ]";
+
+	if (w < 30 || h < 6)
+		return;
+	dash_build(v);
+	room = h - 2;
+	if (room < 1)
+		room = 1;
+	inner = w - 4;
+	if (g_n_dash > (uint32_t)room) {
+		if (v->dash_off > g_n_dash - (uint32_t)room)
+			v->dash_off = g_n_dash - (uint32_t)room;
+	} else {
+		v->dash_off = 0;
+	}
+	shown = g_n_dash - v->dash_off;
+	if (shown > (uint32_t)room)
+		shown = (uint32_t)room;
+
+
+	/* The top rule: the title, then a run of rule, then the way out. */
+	out_at(o, top, left);
+	out_fmt(o, A_DIM "+- " A_OFF A_BOLD "Dashboard" A_OFF A_DIM " ");
+	v->dash_y = top;
+	v->dash_x1 = left + w - 3;
+	v->dash_x0 = v->dash_x1 - (int)sizeof close + 2;
+	for (i = left + 14; i < v->dash_x0 - 1; i++)
+		out_str(o, "-");
+	out_str(o, " " A_OFF);
+	out_str(o, "\033[47;30m");
+	out_str(o, close);
+	out_fmt(o, A_OFF A_DIM "-+" A_OFF);
+
+	/* The bottom rule: where in the page this window is. */
+	snprintf(pos, sizeof pos, "%u-%u of %u", v->dash_off + 1u,
+		 v->dash_off + shown, g_n_dash);
+	out_at(o, top + h - 1, left);
+	out_fmt(o, A_DIM "+- %s ", pos);
+	for (i = 4 + (int)strlen(pos); i < w - 1; i++)
+		out_str(o, "-");
+	out_fmt(o, "+" A_OFF);
+
+	/*
+	 * One pass per row: the left rule, the line, the right rule.
+	 *
+	 * It used to blank every interior row and then draw the content over
+	 * the blanks, which painted the whole box twice per frame for no
+	 * visible difference - and the frame is the thing that has to stay
+	 * small, because a large one is what tears.
+	 */
+	for (y = 0; y < h - 2; y++) {
+		out_at(o, top + 1 + y, left);
+		out_str(o, A_DIM "|" A_OFF " ");
+		if (y < (int)shown)
+			dash_put(o, g_dash[v->dash_off + (uint32_t)y].text,
+				 inner);
+		else
+			for (i = 0; i < inner; i++)
+				out_str(o, " ");
+		out_str(o, " " A_DIM "|" A_OFF);
+	}
+}
+
 static void bar_run(struct view *v, int i)
 {
 	if (!bar_enabled(v, i))
@@ -7023,6 +7503,7 @@ static void bar_run(struct view *v, int i)
 		v->edit = 500;
 		v->warn[0] = 0;
 		break;
+	case BI_DASHBOARD: v->dash_open = 1; v->dash_off = 0; break;
 	case BI_KEYS:    v->help_open = 1; break;
 	case BI_ABOUT:   v->help_open = 2; break;
 	default: break;
@@ -7317,7 +7798,11 @@ static void cnd_drop_matcher(struct cond *c, uint32_t g)
 
 	while (*p) {
 		if (*p >= '0' && *p <= '9') {
-			unsigned long n = strtoul(p, (char **)&p, 10);
+			char *end;
+			unsigned long n;
+
+			n = strtoul(p, &end, 10);
+			p = end;
 
 			if (n == (unsigned long)g + 1ul)
 				continue;
@@ -8131,6 +8616,75 @@ static int handle(struct view *v, int k)
 {
 	int page = hex_bot() - hex_top();
 
+	/*
+	 * The dashboard owns the keyboard while it is up.
+	 *
+	 * Unlike the two help boxes it is a page rather than a card, so "any
+	 * key closes" is the wrong contract: the keys a reader reaches for are
+	 * the ones that move down it. Only the three that mean "done" close it,
+	 * and everything else is swallowed so a keystroke meant for the page
+	 * does not land on the draft behind it.
+	 */
+	if (v->dash_open) {
+		int room = g_rows - 6;
+
+		if (room < 1)
+			room = 1;
+		switch (k) {
+		case K_UP:
+			if (v->dash_off)
+				v->dash_off--;
+			return 1;
+		case K_DOWN:
+			v->dash_off++;
+			return 1;
+		case K_WHEEL_UP:
+			v->dash_off = v->dash_off > 3u ? v->dash_off - 3u : 0;
+			return 1;
+		case K_WHEEL_DOWN:
+			v->dash_off += 3u;
+			return 1;
+		case K_PGUP:
+			v->dash_off = v->dash_off > (uint32_t)room
+				      ? v->dash_off - (uint32_t)room : 0;
+			return 1;
+		case K_PGDN:
+			v->dash_off += (uint32_t)room;
+			return 1;
+		case K_HOME:
+			v->dash_off = 0;
+			return 1;
+		case K_END:
+			/* Clamped where it is drawn, which is the only place
+			 * that knows how many lines there are. */
+			v->dash_off = 0xffffffu;
+			return 1;
+		case 27:
+		case 'q':
+		case '\r':
+		case '\n':
+			v->dash_open = 0;
+			return 1;
+		case K_CLICK:
+		case K_RCLICK:
+			/*
+			 * Only the close control closes it.
+			 *
+			 * A click anywhere used to dismiss the page, which
+			 * meant every attempt to scroll it by grabbing at it,
+			 * or to click a line to read it more closely, threw
+			 * the page away and put the tool back where it was.
+			 * A window with a close button is closed by its close
+			 * button.
+			 */
+			if (g_my == v->dash_y && g_mx >= v->dash_x0 &&
+			    g_mx <= v->dash_x1)
+				v->dash_open = 0;
+			return 1;
+		default:
+			return 1;
+		}
+	}
 	/*
 	 * A field being edited takes every printable key.
 	 *

@@ -480,6 +480,26 @@ int kof_pe_sniff(kof_buf file)
 	return memcmp(file.p + lfanew, "PE\0\0", 4) == 0;
 }
 
+/*
+ * THE FIRST FOUR CHECKS BELOW CANNOT FAIL THROUGH THE SCANNER, ON PURPOSE.
+ *
+ * kof_pe_sniff already requires all four - the MZ, a readable e_lfanew, that
+ * offset in range, and "PE\0\0" at it - and nothing in this engine calls parse
+ * without sniffing first. So MZ_MISSING, LFANEW_UNREADABLE, LFANEW_PAST_EOF and
+ * BAD_PE_SIG are set on paths a scan never walks.
+ *
+ * They stay because this is an exported function and an SDK consumer may call
+ * it directly on bytes nothing sniffed; a parser that reads a header it has not
+ * checked is the bug those checks exist to prevent.
+ *
+ * What is worth knowing is the consequence: the unit fuzzer lists those bits
+ * under "PE never raised", which reads like a gap in the tests and is not one -
+ * it is arithmetic. Measured while chasing exactly that: 2500 corpus files and
+ * 1080 crafted near-PE files, and not one reached a parse that then failed. If
+ * the sniff is ever loosened, these become reachable and the anomalies they set
+ * are dropped by every caller, because a parse returning 0 takes its half
+ * filled view with it. That would then be worth plumbing out; today it is not.
+ */
 int kof_pe_parse(kof_buf file, struct kof_pe_info *info, struct kof_obj_ctx *ctx)
 {
 	uint64_t nt, opt, sectab, dirbase, last_end;

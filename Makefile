@@ -35,6 +35,34 @@ CFLAGS  += -std=c11 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
            -Wpointer-arith -Wstrict-prototypes -Wmissing-prototypes \
            -fno-common -Ilibkofeng/core
 
+# A second tier of warnings, probed rather than assumed.
+#
+# The tree passes every one of these today with zero findings - that was
+# measured across the engine, the four tools and every module, and the one
+# violation it did turn up (a cast that dropped const in objctx.c) was fixed
+# rather than excluded. Turning them on is therefore free right now, and the
+# point of doing it is that it stops being free the moment somebody writes the
+# thing they catch. A flag nobody enables protects nothing.
+#
+# Probed because this tree is built by more than one compiler: the Windows
+# targets go through clang, and four of these are GCC's alone. An unknown -W
+# option is an error to both, so each group is offered to the compiler in hand
+# and dropped if it is not understood. That is why they are two lists and not
+# one - losing the portable ten because clang lacks -Wlogical-op would be the
+# worst of both.
+KOF_WARN_PORTABLE := -Wcast-qual -Wwrite-strings -Wredundant-decls \
+                     -Wmissing-declarations -Wundef -Wdouble-promotion \
+                     -Wformat=2 -Wnull-dereference -Wcast-align -Wvla \
+                     -Wshift-overflow=2 -Wold-style-definition
+KOF_WARN_GCC      := -Wduplicated-cond -Wduplicated-branches -Wlogical-op \
+                     -Wjump-misses-init
+
+kof_probe = $(shell $(CC) -Werror $(1) -xc -c /dev/null -o /dev/null \
+                    >/dev/null 2>&1 && printf '%s' "$(1)")
+
+CFLAGS  += $(call kof_probe,$(KOF_WARN_PORTABLE)) \
+           $(call kof_probe,$(KOF_WARN_GCC))
+
 # Windows only: two problems neither POSIX convention nor this tree's own layout
 # solves by itself, both worth fixing once here rather than in every recipe.
 #

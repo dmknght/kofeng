@@ -161,6 +161,62 @@ static uint64_t anom_rtf(const void *v)
 	return ((const struct kof_rtf_info *)v)->anomalies;
 }
 
+/*
+ * The names of an ELF's program and section header types.
+ *
+ * Here rather than in a front end because both front ends need them and neither
+ * owns them: they are the file format's vocabulary, the same way the subtype
+ * names below are. NULL for a value with no name, so the caller can print the
+ * number instead and say something true rather than nothing.
+ */
+const char *kof_inspect_ptype_name(uint32_t t)
+{
+	switch (t) {
+	case 0:          return "PT_NULL";
+	case 1:          return "PT_LOAD";
+	case 2:          return "PT_DYNAMIC";
+	case 3:          return "PT_INTERP";
+	case 4:          return "PT_NOTE";
+	case 5:          return "PT_SHLIB";
+	case 6:          return "PT_PHDR";
+	case 7:          return "PT_TLS";
+	case 0x6474e550: return "PT_GNU_EH_FRAME";
+	case 0x6474e551: return "PT_GNU_STACK";
+	case 0x6474e552: return "PT_GNU_RELRO";
+	case 0x6474e553: return "PT_GNU_PROPERTY";
+	case 0x65a3dbe6: return "PT_OPENBSD_RANDOMIZE";
+	default:         return NULL;
+	}
+}
+
+const char *kof_inspect_shtype_name(uint32_t t)
+{
+	switch (t) {
+	case 0:          return "SHT_NULL";
+	case 1:          return "SHT_PROGBITS";
+	case 2:          return "SHT_SYMTAB";
+	case 3:          return "SHT_STRTAB";
+	case 4:          return "SHT_RELA";
+	case 5:          return "SHT_HASH";
+	case 6:          return "SHT_DYNAMIC";
+	case 7:          return "SHT_NOTE";
+	case 8:          return "SHT_NOBITS";
+	case 9:          return "SHT_REL";
+	case 10:         return "SHT_SHLIB";
+	case 11:         return "SHT_DYNSYM";
+	case 14:         return "SHT_INIT_ARRAY";
+	case 15:         return "SHT_FINI_ARRAY";
+	case 16:         return "SHT_PREINIT_ARRAY";
+	case 17:         return "SHT_GROUP";
+	case 18:         return "SHT_SYMTAB_SHNDX";
+	case 0x6ffffff6: return "SHT_GNU_HASH";
+	case 0x6ffffffd: return "SHT_GNU_VERDEF";
+	case 0x6ffffffe: return "SHT_GNU_VERNEED";
+	case 0x6fffffff: return "SHT_GNU_VERSYM";
+	default:         return NULL;
+	}
+}
+
 const char *kof_inspect_subtype_name(uint8_t fmt, uint8_t sub)
 {
 	if (fmt == KOF_FMT_ELF)

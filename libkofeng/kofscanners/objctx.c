@@ -609,11 +609,25 @@ static int c_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
  * whose sink stops accepting, and it costs the same as any other stream that is
  * cut short.
  */
+/*
+ * What the sinks below carry.
+ *
+ * The sink signature hands back a void *, and what this one needs on the other
+ * side is a pointer that is const - the two other sinks in this engine write
+ * through theirs, so the typedef cannot be tightened for all of them. Passing
+ * the const pointer as void * meant casting the const away and casting it
+ * straight back, a promise no compiler can check and the engine's only such
+ * cast. A one field carrier keeps the promise in the type instead.
+ */
+struct sink_carry {
+	const struct kof_obj_ctx *ctx;
+};
+
 static int inflate_sink(void *user, const uint8_t *p, uint32_t n)
 {
-	const struct kof_obj_ctx *ctx = user;
+	const struct sink_carry *c = user;
 
-	return c_emit(ctx, p, n);
+	return c_emit(c->ctx, p, n);
 }
 
 /*
@@ -1366,7 +1380,11 @@ static uint64_t c_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 		at += len;
 	}
 
-	st = kof_ovba_decode(in, at, inflate_sink, (void *)ctx, &produced);
+	{
+		struct sink_carry carry = { ctx };
+
+		st = kof_ovba_decode(in, at, inflate_sink, &carry, &produced);
+	}
 	if (st != KOF_DEC_OK)
 		scan_broken(sc, broken_of_status(st));
 

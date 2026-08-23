@@ -422,54 +422,6 @@ static void put_perm(uint32_t p)
  * and PT_ARM_EXIDX and PT_MIPS_REGINFO are the same number, so naming one would
  * be wrong half the time.
  */
-static const char *elf_ptype_name(uint32_t t)
-{
-	switch (t) {
-	case 0:          return "PT_NULL";
-	case 1:          return "PT_LOAD";
-	case 2:          return "PT_DYNAMIC";
-	case 3:          return "PT_INTERP";
-	case 4:          return "PT_NOTE";
-	case 5:          return "PT_SHLIB";
-	case 6:          return "PT_PHDR";
-	case 7:          return "PT_TLS";
-	case 0x6474e550: return "PT_GNU_EH_FRAME";
-	case 0x6474e551: return "PT_GNU_STACK";
-	case 0x6474e552: return "PT_GNU_RELRO";
-	case 0x6474e553: return "PT_GNU_PROPERTY";
-	case 0x65a3dbe6: return "PT_OPENBSD_RANDOMIZE";
-	default:         return NULL;
-	}
-}
-
-static const char *elf_shtype_name(uint32_t t)
-{
-	switch (t) {
-	case 0:          return "SHT_NULL";
-	case 1:          return "SHT_PROGBITS";
-	case 2:          return "SHT_SYMTAB";
-	case 3:          return "SHT_STRTAB";
-	case 4:          return "SHT_RELA";
-	case 5:          return "SHT_HASH";
-	case 6:          return "SHT_DYNAMIC";
-	case 7:          return "SHT_NOTE";
-	case 8:          return "SHT_NOBITS";
-	case 9:          return "SHT_REL";
-	case 10:         return "SHT_SHLIB";
-	case 11:         return "SHT_DYNSYM";
-	case 14:         return "SHT_INIT_ARRAY";
-	case 15:         return "SHT_FINI_ARRAY";
-	case 16:         return "SHT_PREINIT_ARRAY";
-	case 17:         return "SHT_GROUP";
-	case 18:         return "SHT_SYMTAB_SHNDX";
-	case 0x6ffffff6: return "SHT_GNU_HASH";
-	case 0x6ffffffd: return "SHT_GNU_VERDEF";
-	case 0x6ffffffe: return "SHT_GNU_VERNEED";
-	case 0x6fffffff: return "SHT_GNU_VERSYM";
-	default:         return NULL;
-	}
-}
-
 /* The name when there is one, the number when there is not, colour either way -
  * both answer the same question and the column should not change meaning. */
 static void put_type(const char *(*name)(uint32_t), uint32_t t, int width)
@@ -505,7 +457,7 @@ static void print_elf(const void *view, const struct kof_obj_ctx *ctx,
 	print_claimed("segments", e->phnum, e->phnum_claimed);
 	for (i = 0; i < e->seg_count; i++) {
 		printf("     ");
-		put_type(elf_ptype_name, e->seg[i].type, 16);
+		put_type(kof_inspect_ptype_name, e->seg[i].type, 16);
 		printf(" off=%s%-9llu%s size=%s%-9llu%s "
 		       "vaddr=%s0x%-10llx%s perm=",
 		       C_LOC, (unsigned long long)e->seg[i].file_off, C_OFF,
@@ -520,7 +472,7 @@ static void print_elf(const void *view, const struct kof_obj_ctx *ctx,
 		       C_ID, e->sec[i].name, C_OFF,
 		       C_LOC, (unsigned long long)e->sec[i].file_off, C_OFF,
 		       C_SIZE, (unsigned long long)e->sec[i].file_size, C_OFF);
-		put_type(elf_shtype_name, e->sec[i].type, 0);
+		put_type(kof_inspect_shtype_name, e->sec[i].type, 0);
 		printf("\n");
 	}
 }
