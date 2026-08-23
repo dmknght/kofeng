@@ -676,12 +676,14 @@ static int literal_safe(const uint8_t *b, uint32_t n)
  * routing wrong.
  */
 #define CH_ITEMS 16
-#define CH_W     26
+#define CH_W     38
 
 enum ch_what {
 	CH_NONE = 0,
 	CH_RULE,        /* find all / any / multi, for a new or existing group */
 	CH_RANGE,       /* which declared range a condition searches */
+	CH_RANGE2,      /* what to do to the scan ranges */
+	CH_RANGE3,      /* and which of them, when there are several */
 	CH_LEVEL,       /* infect or suspect */
 	CH_VARIANT,     /* how the finding names itself */
 	CH_TYPE,        /* enum kof_maltype */
@@ -920,7 +922,28 @@ struct view {
 	int         nt_len, nt_room;/* its length and the width it is shown in */
 	int         grp_len[MAX_GROUP], grp_room[MAX_GROUP];
 	int         rng_c0, rng_c1, m_c0, m_c1, s_c0, s_c1, e_c0, e_c1;
-	int         fix_c0, fix_c1; /* the strings table's refresh control */
+	int         rgs_c0, rgs_c1; /* "Update scan range"     - where it looks */
+	int         rgf_c0, rgf_c1; /* "Update string regions" - where they are */
+	uint32_t    rng_mask;       /* the region the range menu was built on */
+	/*
+	 * Ranges the draft declares that no matcher names yet.
+	 *
+	 * A range normally has no existence apart from a matcher naming one,
+	 * which is why the summary row derives itself. "Add CODE to scan
+	 * ranges" breaks that for as long as it takes to give the range a
+	 * matcher - so it is held here, listed as unused, and refused at save
+	 * time rather than turned into an empty matcher nobody asked for.
+	 */
+	uint32_t    rng_add[MAX_GROUP];
+	uint32_t    n_rng_add;
+	/*
+	 * The list a submenu came out of, kept so it can stay on screen.
+	 *
+	 * A submenu that replaces its parent is not beside it, it is instead of
+	 * it - and the reader loses the line they were acting on at the moment
+	 * they are asked to qualify it.
+	 */
+	struct chooser ch_up;
 	int         a_c0, a_c1, b_c0, b_c1, p_c0, p_c1, o_c0, o_c1;
 	int         opt_c0[OPT_COUNT], opt_c1[OPT_COUNT];
 
@@ -1940,6 +1963,15 @@ static uint32_t grp_mask(struct view *v, uint32_t g)
 	return need ? need : KOF_SCAN_ALL;
 }
 
+/*
+ * Has this matcher a range worth naming.
+ *
+ * Holding markers is one way - the range is derived from where they are - and
+ * being given one outright is the other. Only the first used to count, so a
+ * matcher handed a range and no markers yet drew as having no range at all.
+ */
+static int grp_has_range(struct view *v, uint32_t g);
+
 static uint32_t grp_count(struct view *v, uint32_t g)
 {
 	uint32_t i, n = 0;
@@ -1949,6 +1981,11 @@ static uint32_t grp_count(struct view *v, uint32_t g)
 	return n;
 }
 
+
+static int grp_has_range(struct view *v, uint32_t g)
+{
+	return grp_count(v, g) != 0 || v->grp[g].mask != 0;
+}
 
 static void grp_add(struct view *v)
 {
@@ -2218,8 +2255,17 @@ static void rng_name_of(const struct kof_inspect_fmt *fmt, uint32_t mask,
 		{
 			const char *t = strrchr(w, '_');
 
+			/*
+			 * "&" and not "|" for the reader.
+			 *
+			 * The mask is a union of region bits, so the operator
+			 * that BUILDS it is or - and the generated source says
+			 * so, spelling it "CODE | DATA" in C. This string is
+			 * not that: it answers "where does this matcher look",
+			 * and the answer is both places.
+			 */
 			at += (size_t)snprintf(out + at, cap - at, "%s%s",
-					       at ? "|" : "", t ? t + 1 : w);
+					       at ? "&" : "", t ? t + 1 : w);
 		}
 	}
 	if (!out[0])
@@ -2252,9 +2298,20 @@ static void rng_ident(const struct kof_inspect_fmt *fmt, uint32_t mask,
 	 * region word at file scope is a short lowercase-able identifier in a
 	 * translation unit that includes engine headers, which is how a draft
 	 * ends up colliding with something it never mentioned. */
+	/*
+	 * Every separator the display name can hold becomes an underscore.
+	 *
+	 * This turns a string meant for a person into a C identifier, so it has
+	 * to survive that string being reworded. It did not: the join moved
+	 * from "|" to "&" and this still mapped only "|", so a range over two
+	 * regions was declared as scan_range_code&data - a name no compiler
+	 * accepts, in a file the tool reported as written.
+	 */
 	rng_name_of(fmt, mask, w, sizeof w);
 	for (i = 0; w[i]; i++) {
-		if (w[i] == '|' || w[i] == '-')
+		if (!((w[i] >= 'A' && w[i] <= 'Z') ||
+		      (w[i] >= 'a' && w[i] <= 'z') ||
+		      (w[i] >= '0' && w[i] <= '9')))
 			w[i] = '_';
 		else if (w[i] >= 'A' && w[i] <= 'Z')
 			w[i] = (char)(w[i] - 'A' + 'a');
@@ -2565,6 +2622,8 @@ static uint32_t draft_hash(struct view *v)
 	for (i = 0; v->note[i]; i++)
 		MIX((uint8_t)v->note[i]);
 	MIX(v->maltype);
+	for (i = 0; i < v->n_rng_add; i++)
+		MIX(v->rng_add[i]);
 	for (i = 0; i < (uint32_t)OPT_COUNT; i++) {
 		MIX(v->opt_on[i]);
 		MIX(v->opt_val[i]);
@@ -2616,6 +2675,7 @@ static void draft_clear(struct view *v)
 	memset(v->opt_on, 0, sizeof v->opt_on);
 	memset(v->opt_val, 0, sizeof v->opt_val);
 	v->n_decl = v->n_grp = v->n_cnd = 0;
+	v->n_rng_add = 0;
 	v->cur_grp = v->cur_cnd = v->sel_decl = 0;
 	v->family[0] = 0;
 	v->maltype = 0;
@@ -3724,6 +3784,29 @@ static const char *draft_missing(struct view *v)
 				return why;
 			}
 		}
+		/*
+		 * A range nothing searches.
+		 *
+		 * Same rule as the two above and for the same reason: a
+		 * KOF_TARGET_RANGE no kof_find_str names compiles, reads as
+		 * part of the signature, and does nothing.
+		 */
+		for (i = 0; i < v->n_rng_add; i++) {
+			uint32_t k, used = 0;
+			char nm[24];
+
+			for (k = 0; k < v->n_grp; k++)
+				used += (uint32_t)(grp_has_range(v, k) &&
+						   grp_mask(v, k) ==
+						   v->rng_add[i]);
+			if (used)
+				continue;
+			rng_name_of(cur_obj(v)->fmt, v->rng_add[i], nm,
+				    sizeof nm);
+			snprintf(why, sizeof why,
+				 "scan range %.12s is in no matcher", nm);
+			return why;
+		}
 	}
 	return NULL;
 }
@@ -4175,8 +4258,130 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		c->arg2 = need;
 		rng_name_of(cur_obj(v)->fmt, need, t, sizeof t);
 		ch_add(c, t);
+		/*
+		 * And any range the draft has declared that nothing searches.
+		 *
+		 * Without this, "Add CODE to scan ranges" is a dead end: the
+		 * range exists, the save refuses until a matcher names it, and
+		 * there is nowhere to name it from. This is that place.
+		 */
+		for (i = 0; i < v->n_rng_add; i++) {
+			uint32_t k, used = 0;
+
+			for (k = 0; k < v->n_grp; k++)
+				used += (uint32_t)(grp_has_range(v, k) &&
+						   grp_mask(v, k) ==
+						   v->rng_add[i]);
+			if (used || v->rng_add[i] == need)
+				continue;
+			rng_name_of(cur_obj(v)->fmt, v->rng_add[i], t,
+				    sizeof t);
+			ch_add(c, t);
+		}
 		if (need != KOF_SCAN_ALL)
 			ch_add(c, "WHOLE-FILE");
+	} else if (what == CH_RANGE2) {
+		/*
+		 * Four assignments, and one region to make them with.
+		 *
+		 * The region is not browsed for: it is where this draft's
+		 * markers actually are, which the tool worked out when it
+		 * located them and which is the reason anyone opens this menu
+		 * - the rule says DATA, the bytes are in CODE.
+		 *
+		 * Every line reads the same way and one word carries the
+		 * difference: Switch replaces, Extend keeps and adds, Add
+		 * declares a range of its own, and the last is the same
+		 * assignment to everything. Written as assignments and not as
+		 * verbs like "Scan WHOLE-FILE", which read as an order to go
+		 * and scan rather than as a range being set.
+		 *
+		 * How many ranges the draft has decides how three of them can
+		 * be worded at all: with one there is nothing to disambiguate
+		 * and the line names it, with several it cannot and says "a
+		 * scan range" with an ellipsis - this tool's existing promise
+		 * that a choice is still coming, the way File spells Open and
+		 * Save As.
+		 */
+		uint32_t here = 0, k, many = 0;
+		uint32_t seen[MAX_GROUP], g;
+		char add[40], one[40], t[CH_W];
+
+		one[0] = 0;
+		for (k = 0; k < v->n_decl; k++)
+			if (v->decl[k].grp != GRP_NONE)
+				here |= v->decl[k].at_mask;
+		c->arg2 = here;
+		v->rng_mask = here;
+
+		for (g = 0; g < v->n_grp; g++) {
+			uint32_t mm;
+			int dup = 0;
+
+			if (!grp_has_range(v, g))
+				continue;
+			mm = grp_mask(v, g);
+			for (k = 0; k < many; k++)
+				dup |= seen[k] == mm;
+			if (!dup)
+				seen[many++] = mm;
+		}
+		if (many == 1)
+			rng_name_of(cur_obj(v)->fmt, seen[0], one, sizeof one);
+
+		if (here) {
+			rng_name_of(cur_obj(v)->fmt, here, add, sizeof add);
+			if (many > 1) {
+				snprintf(t, sizeof t,
+					 "Switch a scan range to %.11s...",
+					 add);
+				ch_add(c, t);
+				snprintf(t, sizeof t,
+					 "Extend a scan range with %.9s...",
+					 add);
+				ch_add(c, t);
+			} else {
+				snprintf(t, sizeof t,
+					 "Switch scan range to %.15s", add);
+				ch_add(c, t);
+				snprintf(t, sizeof t, "Extend %.12s with %.12s",
+					 one, add);
+				ch_add(c, t);
+			}
+			snprintf(t, sizeof t, "Add %.15s to scan ranges", add);
+			ch_add(c, t);
+		}
+		ch_add(c, many > 1 ? "Switch a scan range to WHOLE-FILE..."
+				   : "Switch scan range to WHOLE-FILE");
+	} else if (what == CH_RANGE3) {
+		/*
+		 * Which of the draft's ranges the line applies to.
+		 *
+		 * Only when there is more than one - a list offering a single
+		 * answer is a question nobody asked - and opened to the RIGHT
+		 * of the line that raised it, the way a submenu belongs beside
+		 * its parent rather than on top of it.
+		 */
+		uint32_t seen[MAX_GROUP], n_seen = 0, k, g;
+
+		for (g = 0; g < v->n_grp; g++) {
+			uint32_t mm;
+			char t[CH_W];
+			int dup = 0;
+
+			if (!grp_has_range(v, g))
+				continue;
+			mm = grp_mask(v, g);
+			for (k = 0; k < n_seen; k++)
+				dup |= seen[k] == mm;
+			if (dup)
+				continue;
+			seen[n_seen++] = mm;
+			rng_name_of(cur_obj(v)->fmt, mm, t, sizeof t);
+			ch_add(c, t);
+		}
+		if (!c->n)
+			return;
 	} else if (what == CH_LEVEL) {
 		/*
 		 * Two menus, not one of six.
@@ -4350,6 +4555,96 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		c->col = 1;
 }
 
+/*
+ * Give every matcher searching `was` the mask `now`.
+ *
+ * By range rather than by matcher because that is what the summary row edits:
+ * the row lists distinct ranges, and two matchers sharing one are two names for
+ * the same decision - changing what DATA covers changes it for both.
+ */
+static void rng_retarget(struct view *v, uint32_t was, uint32_t now)
+{
+	uint32_t g, i;
+
+	for (g = 0; g < v->n_grp; g++) {
+		if (!grp_has_range(v, g) || grp_mask(v, g) != was)
+			continue;
+		v->grp[g].mask = now;
+		/* The strings follow, or their row would keep claiming a
+		 * region the matcher no longer searches. */
+		for (i = 0; i < v->n_decl; i++)
+			if (v->decl[i].grp == g) {
+				v->decl[i].mask = now;
+				rng_name_of(cur_obj(v)->fmt, now,
+					    v->decl[i].rgn,
+					    sizeof v->decl[i].rgn);
+				decl_locate(v, &v->decl[i]);
+			}
+	}
+}
+
+/*
+ * Carry out one line of the scan range menu.
+ *
+ * `target` is the range being acted on - the only one, or the one picked from
+ * the second list. `here` is where this draft's markers actually are, which is
+ * what every line but the last is made of. The verbs are the menu's own order,
+ * so the two cannot drift apart: whatever line n says, this does.
+ */
+static void rng_apply(struct view *v, int verb, uint32_t target, uint32_t here)
+{
+	switch (verb) {
+	case 0:
+		rng_retarget(v, target, here);
+		say_note(v, "%s", "scan range switched");
+		break;
+	case 1:
+		rng_retarget(v, target, target | here);
+		say_note(v, "%s", "scan range extended");
+		break;
+	case 2: {
+		/*
+		 * The range and nothing else.
+		 *
+		 * It used to create the matcher that would name it, which put
+		 * a matcher on the panel nobody had asked for and which could
+		 * not be wanted yet - it has no markers, and which markers
+		 * belong in it is a decision only the researcher can make. A
+		 * declared range with no matcher is an ordinary half-finished
+		 * state; it is listed as unused and it stops the save, which
+		 * is what a half-finished state should do.
+		 */
+		uint32_t k;
+
+		for (k = 0; k < v->n_grp; k++)
+			if (grp_has_range(v, k) && grp_mask(v, k) == here) {
+				say_note(v, "%s", "a matcher already searches "
+					 "that range");
+				return;
+			}
+		for (k = 0; k < v->n_rng_add; k++)
+			if (v->rng_add[k] == here) {
+				say_note(v, "%s", "that range is already "
+					 "declared");
+				return;
+			}
+		if (v->n_rng_add >= MAX_GROUP) {
+			say_err(v, "%s", "no room for another range");
+			return;
+		}
+		v->rng_add[v->n_rng_add++] = here;
+		say_note(v, "%s", "scan range added - give it a matcher");
+		break;
+	}
+	case 3:
+		rng_retarget(v, target, KOF_SCAN_ALL);
+		say_note(v, "%s", "scan range is now the whole file");
+		break;
+	default:
+		break;
+	}
+}
+
 /* What picking the highlighted item does. */
 static void ch_take(struct view *v)
 {
@@ -4357,6 +4652,7 @@ static void ch_take(struct view *v)
 	struct group *q;
 
 	c->open = 0;
+	v->ch_up.open = 0;
 	if (c->what == CH_TYPE) {
 		v->maltype = (uint32_t)c->sel;
 		return;
@@ -4410,6 +4706,59 @@ static void ch_take(struct view *v)
 		q->rule = c->sel;
 		if (c->sel == 2)
 			q->thresh = 2;
+		return;
+	}
+	if (c->what == CH_RANGE2) {
+		uint32_t seen[MAX_GROUP], ns = 0, g, k;
+		int verb;
+
+		for (g = 0; g < v->n_grp; g++) {
+			uint32_t mm;
+			int dup = 0;
+
+			if (!grp_has_range(v, g))
+				continue;
+			mm = grp_mask(v, g);
+			for (k = 0; k < ns; k++)
+				dup |= seen[k] == mm;
+			if (!dup)
+				seen[ns++] = mm;
+		}
+		/* With no located marker the list holds WHOLE-FILE alone, so
+		 * the row picked is the last verb whatever its index. */
+		verb = c->n == 1 ? 3 : c->sel;
+		/* "Add" makes a range rather than changing one, so it never
+		 * has to ask which. The other three do, and only when the
+		 * draft holds more than one. */
+		if (verb != 2 && ns > 1) {
+			struct chooser up = *c;
+
+			up.open = 1;
+			ch_open(v, CH_RANGE3, (uint32_t)verb,
+				up.row + up.sel + 1, up.col + CH_W);
+			v->ch_up = up;
+			return;
+		}
+		rng_apply(v, verb, ns ? seen[0] : 0, c->arg2);
+		return;
+	}
+	if (c->what == CH_RANGE3) {
+		uint32_t seen[MAX_GROUP], ns = 0, g, k;
+
+		for (g = 0; g < v->n_grp; g++) {
+			uint32_t mm;
+			int dup = 0;
+
+			if (!grp_has_range(v, g))
+				continue;
+			mm = grp_mask(v, g);
+			for (k = 0; k < ns; k++)
+				dup |= seen[k] == mm;
+			if (!dup)
+				seen[ns++] = mm;
+		}
+		if ((uint32_t)c->sel < ns)
+			rng_apply(v, (int)c->arg, seen[c->sel], v->rng_mask);
 		return;
 	}
 	if (c->what == CH_LOGIC) {
@@ -4496,22 +4845,61 @@ static void ch_take(struct view *v)
 		if (c->sel == 2 && q->thresh < 2u)
 			q->thresh = 2;
 	} else if (c->what == CH_RANGE) {
-		q->mask = c->sel ? KOF_SCAN_ALL : c->arg2;
+		/*
+		 * Row 0 is the range derived from this matcher's markers, the
+		 * last is WHOLE-FILE, and anything between is a range the
+		 * draft declared and nothing uses. Resolved by walking the
+		 * same list the chooser was built from rather than by an index
+		 * into it - the two would drift the moment one gained a row.
+		 */
+		if (c->sel == 0) {
+			q->mask = c->arg2;
+		} else {
+			uint32_t i, n = 1;
+
+			q->mask = KOF_SCAN_ALL;
+			for (i = 0; i < v->n_rng_add; i++) {
+				uint32_t k, used = 0;
+
+				for (k = 0; k < v->n_grp; k++)
+					used += (uint32_t)(grp_has_range(v, k)
+							   && grp_mask(v, k) ==
+							   v->rng_add[i]);
+				if (used || v->rng_add[i] == c->arg2)
+					continue;
+				if ((int)n == c->sel) {
+					q->mask = v->rng_add[i];
+					break;
+				}
+				n++;
+			}
+		}
+	}
+}
+
+static void draw_one_chooser(struct out *o, const struct chooser *c, int live)
+{
+	int i;
+
+	for (i = 0; i < c->n; i++) {
+		out_at(o, c->row + i, c->col);
+		/* The parent keeps its highlight so the line the submenu is
+		 * qualifying stays pointed at, but in a colour that says the
+		 * keyboard is not there any more. */
+		out_str(o, i == c->sel ? (live ? A_SEL : "\033[100;97m")
+				       : "\033[47;30m");
+		out_fmt(o, " %-*.*s", CH_W - 2, CH_W - 2, c->item[i]);
+		out_str(o, A_OFF);
 	}
 }
 
 static void draw_chooser(struct out *o, struct view *v)
 {
-	int i;
-
 	if (!v->ch.open)
 		return;
-	for (i = 0; i < v->ch.n; i++) {
-		out_at(o, v->ch.row + i, v->ch.col);
-		out_str(o, i == v->ch.sel ? A_SEL : "\033[47;30m");
-		out_fmt(o, " %-*.*s", CH_W - 2, CH_W - 2, v->ch.item[i]);
-		out_str(o, A_OFF);
-	}
+	if (v->ch_up.open)
+		draw_one_chooser(o, &v->ch_up, 0);
+	draw_one_chooser(o, &v->ch, 1);
 }
 
 /*
@@ -4821,11 +5209,16 @@ static void draft_refresh(struct view *v)
 			    "declared", moved, gone);
 }
 
-/* Where the strings table's refresh control sits, taken from the heading that
- * is actually drawn rather than counted out by hand. */
+/*
+ * Wide enough for the longest thing the region cell can say.
+ *
+ * It was twelve, which fitted one region name exactly - and then a range became
+ * able to cover two, so the cell had to hold "CODE&DATA>HEADERS" and printed
+ * half of it. A column sized to the shortest case truncates silently, and a
+ * truncated word reads as a bug in the data rather than in the layout.
+ */
 static const char str_hdr[] =
-	" Strings     word      case         region [fix] size  bytes";
-#define STR_FIX "[fix]"
+	" Strings     word      case         region             size  bytes";
 
 static void draw_decl(struct out *o, struct view *v)
 {
@@ -5011,7 +5404,7 @@ static void draw_decl(struct out *o, struct view *v)
 			 * signature will scan the whole file" beside strings
 			 * that had all been taken from one region.
 			 */
-			if (!grp_count(v, g))
+			if (!grp_has_range(v, g))
 				continue;
 			m = grp_mask(v, g);
 			for (k = 0; k < n_seen; k++)
@@ -5022,8 +5415,52 @@ static void draw_decl(struct out *o, struct view *v)
 			rng_name_of(cur_obj(v)->fmt, m, t, sizeof t);
 			out_fmt(o, " %s%s" A_OFF, A_LOC, t);
 		}
+		/* Declared and not yet used by anything. Named so it can be
+		 * seen, marked so it cannot be mistaken for a range that is
+		 * doing work. */
+		for (g = 0; g < v->n_rng_add; g++) {
+			char t[40];
+			uint32_t q;
+			int used = 0;
+
+			for (q = 0; q < n_seen; q++)
+				used |= seen[q] == v->rng_add[g];
+			if (used)
+				continue;
+			rng_name_of(cur_obj(v)->fmt, v->rng_add[g], t,
+				    sizeof t);
+			out_fmt(o, " %s%s (unused)" A_OFF, A_WARN, t);
+			n_seen++;
+		}
 		if (!n_seen)
 			out_str(o, A_DIM " none yet" A_OFF);
+		/*
+		 * The row's two controls, named for the distinction the panel
+		 * already draws between its columns: a matcher's range is
+		 * where it will be LOOKED FOR, a string's region is where it
+		 * WAS FOUND. One button per fact, in the row about both. They
+		 * live here rather than beside the strings because both act on
+		 * the whole draft.
+		 */
+		{
+			uint32_t d2, off = 0;
+			int c0;
+
+			for (d2 = 0; d2 < v->n_decl; d2++)
+				off += (uint32_t)(v->decl[d2].off_rgn != 0);
+
+			c0 = 2 + (int)o->col_hint;
+			out_fmt(o, "  %s[Update scan range]" A_OFF,
+				n_seen ? "\033[100;97m" : "\033[100;37m");
+			v->rgs_c0 = c0;
+			v->rgs_c1 = (int)o->col_hint;
+
+			c0 = 2 + (int)o->col_hint;
+			out_fmt(o, "  %s[Update string regions]" A_OFF,
+				off ? "\033[43;30m" : "\033[100;37m");
+			v->rgf_c0 = c0;
+			v->rgf_c1 = (int)o->col_hint;
+		}
 	}
 	r += v->n_grp ? 1 : 0;
 
@@ -5038,28 +5475,8 @@ static void draw_decl(struct out *o, struct view *v)
 	/* A column heading instead of a preposition on every row: "found in
 	 * CODE" said the same word once per string and read like a sentence
 	 * where a table belongs. */
-	if (v->n_decl && PR_VIS(r)) {
-		const char *b = strstr(str_hdr, STR_FIX);
-		uint32_t k, off = 0;
-
+	if (v->n_decl && PR_VIS(r))
 		sec_bar(o, v, PR(r), str_hdr);
-		v->fix_c0 = (int)(b - str_hdr) + 1;
-		v->fix_c1 = v->fix_c0 + (int)strlen(STR_FIX) - 1;
-		/*
-		 * Lit only when it would change something. It is drawn over
-		 * the bar rather than inside it because the bar is one colour
-		 * by construction, and a control that is always the colour of
-		 * its heading is a control nobody finds.
-		 */
-		for (k = 0; k < v->n_decl; k++)
-			off += (uint32_t)(v->decl[k].off_rgn != 0);
-		out_at(o, PR(r), v->fix_c0);
-		/* Not 100;90: fg 90 on bg 100 is one colour twice and the
-		 * label disappears rather than dims. See BAR_OFF. */
-		out_str(o, off ? "\033[43;30m" : "\033[100;37m");
-		out_str(o, STR_FIX);
-		out_str(o, A_OFF);
-	}
 	r += v->n_decl ? 1 : 0;
 	v->row_str = PR(r);
 	for (i = 0; i < v->n_decl; i++, r++) {
@@ -5093,27 +5510,23 @@ static void draw_decl(struct out *o, struct view *v)
 			/*
 			 * Declared, and not in this object.
 			 *
-			 * Said plainly rather than removed. The marker may be
-			 * a real one for the family, taken from a sample that
-			 * is not the one on screen - so this is the researcher's
-			 * call, and all this row owes them is the fact. The
-			 * declared region stays beside it, because that is
-			 * still what the module will search.
+			 * The colour is the whole message - red on a row whose
+			 * neighbours are not red. Spelling "absent" beside the
+			 * region cost more width than the column had and got
+			 * truncated to a stray letter. The region stays because
+			 * that is still where the module will look.
 			 */
-			char both[26];
-
-			snprintf(both, sizeof both, "%s? absent", d->rgn);
-			out_fmt(o, " %s%-12.12s" A_OFF " %s%5u" A_OFF "  ",
-				A_BAD, both, A_SIZE, d->len);
+			out_fmt(o, " %s%-18.18s" A_OFF " %s%5u" A_OFF "  ",
+				A_BAD, d->rgn, A_SIZE, d->len);
 		} else if (d->off_rgn) {
-			char both[26];
+			char both[40];
 
 			snprintf(both, sizeof both, "%s>%s", d->rgn,
 				 d->at_rgn);
-			out_fmt(o, " %s%-12.12s" A_OFF " %s%5u" A_OFF "  ",
+			out_fmt(o, " %s%-18.18s" A_OFF " %s%5u" A_OFF "  ",
 				A_WARN, both, A_SIZE, d->len);
 		} else {
-			out_fmt(o, " %s%-12s" A_OFF " %s%5u" A_OFF "  ",
+			out_fmt(o, " %s%-18s" A_OFF " %s%5u" A_OFF "  ",
 				A_LOC, d->rgn, A_SIZE, d->len);
 		}
 		v->str_by[i][0] = 1 + (int)o->col_hint;
@@ -5161,10 +5574,10 @@ static void draw_decl(struct out *o, struct view *v)
 			char nm[40], lead[16], th[24];
 
 			row_start(o, PR(r), 1);
-			/* Until it holds a marker there is nothing to derive a
-			 * range from, and naming one anyway claims a search
-			 * that has not been described yet. */
-			if (grp_count(v, g))
+			/* Nothing to name only when there is neither a marker
+			 * to derive a range from nor a range that was
+			 * chosen. */
+			if (grp_has_range(v, g))
 				rng_name_of(cur_obj(v)->fmt, grp_mask(v, g), nm,
 					    sizeof nm);
 			else
@@ -8271,6 +8684,7 @@ static void click(struct view *v, int rclick)
 			ch_take(v);
 		} else {
 			v->ch.open = 0;
+			v->ch_up.open = 0;
 		}
 		return;
 	}
@@ -8477,19 +8891,20 @@ static void click(struct view *v, int rclick)
 			r++;
 		}
 		if (v->n_grp) {
-			if (r == want)
-				return;         /* the ranges summary */
-			r++;
-		}
-		if (v->n_decl) {
 			if (r == want) {
-				/* The heading carries one control; the rest of
-				 * it is a label. */
-				if (v->fix_c0 > 0 && g_mx >= v->fix_c0 &&
-				    g_mx <= v->fix_c1)
+				/* The summary carries the draft's two range
+				 * controls; the rest of it is a readout. */
+				if (g_mx >= v->rgs_c0 && g_mx <= v->rgs_c1)
+					ch_open(v, CH_RANGE2, 0, g_my, g_mx);
+				else if (g_mx >= v->rgf_c0 && g_mx <= v->rgf_c1)
 					draft_refresh(v);
 				return;
 			}
+			r++;
+		}
+		if (v->n_decl) {
+			if (r == want)
+				return;         /* the "Strings" heading */
 			r++;
 			for (i = 0; i < v->n_decl; i++, r++) {
 				if (r != want)
