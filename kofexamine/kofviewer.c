@@ -525,7 +525,11 @@ struct range {
 struct group {
 	int      rule;              /* 0 ALL, 1 ANY, 2 threshold */
 	uint32_t thresh;
-	char     note[160];         /* the author's note, emitted as a comment */
+	char     note[512];         /* the author's note, emitted as a comment */
+	/* How far it is scrolled inside its own box, for the same reason the
+	 * module's comment has one: sliding the whole panel to read the end of
+	 * a sentence takes the controls beside it off the screen. */
+	uint32_t note_off;
 	/*
 	 * The range this matcher searches, as a mask.
 	 *
@@ -886,6 +890,8 @@ struct view {
 	int         n_c0, n_c1;     /* the "+ condition" button */
 	int         sv_c0, sv_c1;   /* "Save As", when there is a file */
 	int         nt_c0, nt_c1;   /* the module's own note */
+	int         nt_len, nt_room;/* its length and the width it is shown in */
+	int         grp_len[MAX_GROUP], grp_room[MAX_GROUP];
 	int         rng_c0, rng_c1, m_c0, m_c1, s_c0, s_c1, e_c0, e_c1;
 	int         a_c0, a_c1, b_c0, b_c1, p_c0, p_c1, o_c0, o_c1;
 	int         opt_c0[OPT_COUNT], opt_c1[OPT_COUNT];
@@ -941,6 +947,12 @@ struct view {
 	int         find_scope;     /* 0 this region, 1 the whole object */
 	uint64_t    find_at;        /* the last hit, in file offsets */
 	uint32_t    find_i, find_n; /* which hit it is, and how many there are */
+	uint32_t    find_off;       /* how far the field is scrolled */
+	/* One offset per field that can hold more than it shows. Separate
+	 * because they scroll independently: a caret in one says nothing about
+	 * where another is being read from. */
+	uint32_t    fam_off, num_off;
+	uint32_t    cnd_off[MAX_GROUP], cnd_eoff[MAX_GROUP];
 	/* The search's own message. Shared with the draft panel's it produced
 	 * a bare "not found" beside the Generate button, which is an answer to
 	 * a question that panel never asked. */
@@ -982,7 +994,27 @@ struct view {
 	 * source above the declarations, where the next reader meets it before
 	 * any of the logic.
 	 */
-	char        note[200];
+	char        note[512];
+	/*
+	 * How far the comment is scrolled inside its own box.
+	 *
+	 * Its own, not the panel's: the box is one field on a row of fields and
+	 * sliding the whole row to read the end of it would take the buttons
+	 * off the screen. Follows the caret while the field is being typed
+	 * into, so what is being written is always the part on show.
+	 */
+	uint32_t    note_off;
+	/*
+	 * Where the caret is in whatever field is being typed into, and which
+	 * field that was last time round.
+	 *
+	 * One caret because only one field is ever open. Comparing the field
+	 * against last frame's is how it gets placed at the end of the text
+	 * when a field is opened, without every place that opens one having to
+	 * remember to say so.
+	 */
+	uint32_t    caret;
+	int         edit_prev;
 	int         per;            /* bytes a hex row shows, for click mapping */
 };
 
@@ -4278,12 +4310,6 @@ static void sec_bar(struct out *o, struct view *v, int row, const char *text)
  * would move the labels and the buttons out from under the pointer, which is a
  * panel that scrolls away from the mouse that is scrolling it.
  */
-static const char *hslide(struct view *v, const char *text)
-{
-	size_t n = strlen(text);
-
-	return text + (v->decl_hoff < n ? v->decl_hoff : n);
-}
 
 /*
  * The left edge of a condition's rows.
@@ -4305,6 +4331,68 @@ static void cnd_rail(struct out *o, int depth, int bar)
 	for (i = 0; i < 5; i++)
 		out_str(o, " ");
 	out_str(o, A_OFF);
+}
+
+/*
+ * One line of text inside a box, with the caret shown and the view following it.
+ *
+ * `*off` is how far the text is scrolled inside the box and is adjusted here
+ * rather than by the caller: the only thing that should move it is the caret
+ * leaving the box, and the caret is what this draws. That is also why there is
+ * no wheel binding for it - a field that scrolls under the pointer would fight
+ * the panel the pointer is over.
+ *
+ * The caret is an underline on the character it sits on, and a space when it is
+ * past the end. A block cursor would hide the character; this is the same thing
+ * every terminal editor does.
+ */
+static void field_draw(struct out *o, const char *text, uint32_t caret,
+		       uint32_t *off, int room, int editing, const char *ph)
+{
+	uint32_t len = (uint32_t)strlen(text), i;
+
+	if (!text[0] && !editing) {
+		out_fmt(o, "%-.*s", room, ph);
+		return;
+	}
+	if (room < 1)
+		room = 1;
+	if (caret > len)
+		caret = len;
+	if (!editing) {
+		if (*off > len)
+			*off = len ? len - 1u : 0;
+	} else {
+		if (caret < *off)
+			*off = caret;
+		if (caret >= *off + (uint32_t)room)
+			*off = caret - (uint32_t)room + 1u;
+	}
+	for (i = 0; i < (uint32_t)room; i++) {
+		uint32_t at = *off + i;
+		char t[2];
+
+		/*
+		 * Through out_str, never out_add.
+		 *
+		 * Only out_str counts printable columns, and the count is what
+		 * every click range on the panel is recorded from. Emitting the
+		 * characters with out_add drew them correctly and told the
+		 * bookkeeping nothing, so a box holding a long string reported
+		 * itself as ending where it began - and clicking the right hand
+		 * part of it hit nothing, which looked like a field that had
+		 * stopped accepting the caret.
+		 */
+		t[0] = at < len ? text[at] : ' ';
+		t[1] = 0;
+		if (editing && at == caret) {
+			out_str(o, "\033[4m");
+			out_str(o, t);
+			out_str(o, "\033[24m");
+		} else {
+			out_str(o, t);
+		}
+	}
 }
 
 static void draw_decl(struct out *o, struct view *v)
@@ -4330,8 +4418,12 @@ static void draw_decl(struct out *o, struct view *v)
 	/* ---- what the module declares ---- */
 	row_start(o, top, 1);
 	c = 2 + (int)o->col_hint;
-	out_fmt(o, A_DIM " Family " A_OFF "%s[%s]" A_OFF,
-		v->edit == 1 ? A_SEL : A_ID, v->family[0] ? v->family : "?");
+	out_fmt(o, A_DIM " Family " A_OFF "%s[", v->edit == 1 ? A_SEL : A_ID);
+	field_draw(o, v->family, v->caret, &v->fam_off,
+		   v->edit == 1 ? 24 : (int)strlen(v->family[0] ? v->family
+								: "?"),
+		   v->edit == 1, "?");
+	out_str(o, "]" A_OFF);
 	v->f_c0 = c; v->f_c1 = (int)o->col_hint;
 
 	c = 2 + (int)o->col_hint;
@@ -4395,8 +4487,26 @@ static void draw_decl(struct out *o, struct view *v)
 	 * labels. */
 	out_str(o, "  ");
 	c = 1 + (int)o->col_hint;
-	out_fmt(o, "%s[%-.28s]" A_OFF, v->edit == 501 ? A_SEL : A_DIM,
-		v->note[0] ? v->note : "Comment...");
+	{
+		/*
+		 * As wide as the row has left, and scrolled within that.
+		 *
+		 * A fixed width would either waste the space on a wide terminal
+		 * or cut the text short on a narrow one; what is actually
+		 * available is known here and nowhere else.
+		 */
+		size_t len = strlen(v->note);
+		int room = g_cols - c - 3;
+		uint32_t off;
+
+		if (room < 8)
+			room = 8;
+		(void)len; (void)off;
+		out_fmt(o, "%s[", v->edit == 501 ? A_SEL : A_DIM);
+		field_draw(o, v->note, v->caret, &v->note_off, room,
+			   v->edit == 501, "Comment...");
+		out_str(o, "]" A_OFF);
+	}
 	v->nt_c0 = c; v->nt_c1 = (int)o->col_hint;
 
 
@@ -4431,9 +4541,13 @@ static void draw_decl(struct out *o, struct view *v)
 		row_start(o, y, 1);
 		out_fmt(o, "   %s%-20s" A_OFF " ", A_DIM, opt_word[i]);
 		v->opt_c0[i] = 1 + (int)o->col_hint;
-		out_fmt(o, "%s%s" A_OFF,
-			v->edit == 200 + (int)i ? A_SEL : A_ID,
-			v->edit == 200 + (int)i ? v->num : val);
+		if (v->edit == 200 + (int)i) {
+			out_str(o, A_SEL);
+			field_draw(o, v->num, v->caret, &v->num_off, 18, 1, "");
+			out_str(o, A_OFF);
+		} else {
+			out_fmt(o, "%s%s" A_OFF, A_ID, val);
+		}
 		v->opt_c1[i] = (int)o->col_hint;
 		out_at(o, y, g_cols - 4);
 		out_str(o, A_BAD "[x]" A_OFF);
@@ -4606,10 +4720,22 @@ static void draw_decl(struct out *o, struct view *v)
 			}
 			out_str(o, "   ");
 			v->grp_nt[g][0] = 1 + (int)o->col_hint;
-			out_fmt(o, "%s[%-.40s]" A_OFF,
-				v->edit == 300 + (int)g ? A_SEL : A_DIM,
-				q->note[0] ? hslide(v, q->note)
-					   : "comment...");
+			{
+				/* Up to the remove control, which keeps the
+				 * right hand end of every matcher row. */
+				int room = g_cols - v->grp_nt[g][0] - 7;
+
+				if (room < 8)
+					room = 8;
+				out_fmt(o, "%s[",
+					v->edit == 300 + (int)g ? A_SEL
+								: A_DIM);
+				field_draw(o, q->note, v->caret,
+					   &v->grp[g].note_off, room,
+					   v->edit == 300 + (int)g,
+					   "comment...");
+				out_str(o, "]" A_OFF);
+			}
 			v->grp_nt[g][1] = (int)o->col_hint;
 			out_at(o, PR(r), g_cols - 4);
 			out_str(o, A_BAD "[x]" A_OFF);
@@ -4729,11 +4855,20 @@ static void draw_decl(struct out *o, struct view *v)
 					out_str(o, " ");
 					v->cnd_nm[ci][0] = 1 +
 							   (int)o->col_hint;
-					out_fmt(o, "%s[%s]" A_OFF,
+					out_fmt(o, "%s[",
 						v->edit == 4 + (int)ci
-						? A_SEL : A_WARN,
-						c2->variant[0] ? c2->variant
-							       : "name...");
+						? A_SEL : A_WARN);
+					field_draw(o, c2->variant, v->caret,
+						   &v->cnd_off[ci],
+						   v->edit == 4 + (int)ci
+						   ? 20
+						   : (int)strlen(
+							c2->variant[0]
+							? c2->variant
+							: "name..."),
+						   v->edit == 4 + (int)ci,
+						   "name...");
+					out_str(o, "]" A_OFF);
 					v->cnd_nm[ci][1] = (int)o->col_hint;
 				}
 			}
@@ -4765,9 +4900,16 @@ static void draw_decl(struct out *o, struct view *v)
 					 * list would show a different
 					 * condition from the generated one. */
 					v->cnd_id0[ci] = -1;
-					out_fmt(o, "%s%s" A_OFF,
-						v->edit == 103 + (int)ci
-						? A_SEL : A_WARN, c2->expr);
+					out_str(o, v->edit == 103 + (int)ci
+						   ? A_SEL : A_WARN);
+					field_draw(o, c2->expr, v->caret,
+						   &v->cnd_eoff[ci],
+						   v->edit == 103 + (int)ci
+						   ? 24
+						   : (int)strlen(c2->expr),
+						   v->edit == 103 + (int)ci,
+						   "");
+					out_str(o, A_OFF);
 					goto ids_done;
 				}
 			}
@@ -6158,7 +6300,8 @@ static void find_run(struct view *v, int back)
 /* ---- input ---------------------------------------------------------------- */
 
 enum key {
-	K_NONE = 0, K_UP = 256, K_DOWN, K_PGUP, K_PGDN, K_HOME, K_END,
+	K_NONE = 0, K_UP = 256, K_DOWN, K_LEFT, K_RIGHT, K_PGUP, K_PGDN,
+	K_HOME, K_END,
 	/* Not a key: the terminal changed size while nothing was being typed,
 	 * and the loop has to be told so it repaints. */
 	K_RESIZE,
@@ -6347,6 +6490,8 @@ static int read_key(void)
 	switch (seq[1]) {
 	case 'A': return K_UP;
 	case 'B': return K_DOWN;
+	case 'C': return K_RIGHT;
+	case 'D': return K_LEFT;
 	case 'H': return K_HOME;
 	case 'F': return K_END;
 	/* Shift+Tab. CSI Z, not a tab with a modifier: the terminal has one
@@ -6603,8 +6748,9 @@ static void draw_find(struct out *o, struct view *v)
 	find_row(o, top + 1);
 	out_fmt(o, A_DIM "Find " A_OFF);
 	v->f_txt[0] = 1 + (int)o->col_hint;
-	out_fmt(o, "%s[%-40.40s]" A_OFF, v->edit == 500 ? A_SEL : A_ID,
-		v->find[0] ? v->find : "");
+	out_fmt(o, "%s[", v->edit == 500 ? A_SEL : A_ID);
+	field_draw(o, v->find, v->caret, &v->find_off, 40, v->edit == 500, "");
+	out_str(o, "]" A_OFF);
 	v->f_txt[1] = (int)o->col_hint;
 	out_fmt(o, A_DIM "  as " A_OFF);
 	v->f_mode[0] = 1 + (int)o->col_hint;
@@ -7288,6 +7434,12 @@ static int handle(struct view *v, int k)
 			 */
 			size_t n = strlen(v->find);
 
+			if (v->edit != v->edit_prev) {
+				v->edit_prev = v->edit;
+				v->caret = (uint32_t)n;
+			}
+			if (v->caret > n)
+				v->caret = (uint32_t)n;
 			if (k == 0x03) {
 				copy_osc52(v->find, n);
 				return 1;
@@ -7304,24 +7456,43 @@ static int handle(struct view *v, int k)
 
 					if (c2 < 0x20 || c2 >= 0x7f)
 						continue;
-					v->find[n++] = c2;
+					memmove(v->find + v->caret + 1u,
+						v->find + v->caret,
+						n - v->caret + 1u);
+					v->find[v->caret++] = c2;
+					n++;
 				}
-				v->find[n] = 0;
 				return 1;
 			}
-			if (k == 27) {
+			if (k == K_LEFT) {
+				if (v->caret)
+					v->caret--;
+			} else if (k == K_RIGHT) {
+				if (v->caret < n)
+					v->caret++;
+			} else if (k == K_HOME) {
+				v->caret = 0;
+			} else if (k == K_END) {
+				v->caret = (uint32_t)n;
+			} else if (k == 27) {
 				v->edit = 0;
 				v->find_open = 0;
 			} else if (k == '\r' || k == '\n') {
 				v->find_at = KOF_BROKEN;
 				find_run(v, 0);
 			} else if (k == 0x08 || k == 127) {
-				if (n)
-					v->find[n - 1u] = 0;
+				if (v->caret) {
+					memmove(v->find + v->caret - 1u,
+						v->find + v->caret,
+						n - v->caret + 1u);
+					v->caret--;
+				}
 			} else if (k >= 0x20 && k < 0x7f &&
 				   n + 2u < sizeof v->find) {
-				v->find[n] = (char)k;
-				v->find[n + 1u] = 0;
+				memmove(v->find + v->caret + 1u,
+					v->find + v->caret,
+					n - v->caret + 1u);
+				v->find[v->caret++] = (char)k;
 			}
 			return 1;
 		}
@@ -7354,6 +7525,14 @@ static int handle(struct view *v, int k)
 			cap = sizeof v->cnd[0].variant;
 		}
 		n = strlen(buf);
+		/* A field just opened puts the caret at the end of what is
+		 * already in it, which is where typing continues from. */
+		if (v->edit != v->edit_prev) {
+			v->edit_prev = v->edit;
+			v->caret = (uint32_t)n;
+		}
+		if (v->caret > n)
+			v->caret = (uint32_t)n;
 
 		/*
 		 * Copy and paste, with the keys everything else uses.
@@ -7376,19 +7555,38 @@ static int handle(struct view *v, int k)
 
 				if (c2 < 0x20 || c2 >= 0x7f)
 					continue;   /* a field holds a line */
-				buf[n++] = c2;
+				memmove(buf + v->caret + 1u, buf + v->caret,
+					n - v->caret + 1u);
+				buf[v->caret++] = c2;
+				n++;
 			}
-			buf[n] = 0;
 			return 1;
 		}
-		if (k == 27 || k == '\r' || k == '\n') {
+		if (k == K_LEFT) {
+			if (v->caret)
+				v->caret--;
+		} else if (k == K_RIGHT) {
+			if (v->caret < n)
+				v->caret++;
+		} else if (k == K_HOME) {
+			v->caret = 0;
+		} else if (k == K_END) {
+			v->caret = (uint32_t)n;
+		} else if (k == 27 || k == '\r' || k == '\n') {
 			v->edit = 0;
 		} else if (k == 127 || k == 8) {
-			if (n)
-				buf[n - 1u] = 0;
+			/* Deletes what is BEFORE the caret, which is what
+			 * backspace means; the character under it is what
+			 * a delete key would take. */
+			if (v->caret) {
+				memmove(buf + v->caret - 1u, buf + v->caret,
+					n - v->caret + 1u);
+				v->caret--;
+			}
 		} else if (k >= 0x20 && k < 0x7f && n + 2u < cap) {
-			buf[n] = (char)k;
-			buf[n + 1u] = 0;
+			memmove(buf + v->caret + 1u, buf + v->caret,
+				n - v->caret + 1u);
+			buf[v->caret++] = (char)k;
 		}
 		return 1;
 		}
@@ -7587,6 +7785,14 @@ static int handle(struct view *v, int k)
 
 		/* Shift turns the wheel sideways, the way it does in every
 		 * other program that has both. */
+		/*
+		 * No wheel binding for the text fields.
+		 *
+		 * They scroll by following their caret, which is the only thing
+		 * that should move them - and a field that also moved under the
+		 * pointer would fight the panel the pointer is over, which is
+		 * exactly what it did.
+		 */
 		if (g_mod_shift || g_mod_ctrl) {
 			/*
 			 * Sideways.
