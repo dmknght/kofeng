@@ -111,7 +111,7 @@ static void term_restore(void)
 	/* Cursor back, main screen back, in that order: the show has to happen
 	 * on the screen that is about to be left, or it applies to the one being
 	 * returned to and the user's shell gets it. */
-	term_write("\033[?1006l\033[?1002l\033[?1000l\033[?25h\033[?1049l");
+	term_write("\033[?2004l\033[?1006l\033[?1002l\033[?1000l\033[?25h\033[?1049l");
 }
 
 static void on_signal(int sig)
@@ -184,7 +184,14 @@ static int term_setup(void)
 		sigemptyset(&sa.sa_mask);
 		sigaction(SIGWINCH, &sa, NULL);
 	}
-	term_write("\033[?1049h\033[?25l\033[?1000h\033[?1002h\033[?1006h");
+	/*
+	 * ?2004h is bracketed paste. Without it a paste arrives as the keys it
+	 * spells, so pasting a path into a field runs whatever those letters
+	 * are bound to; with it the run is delimited and can be put where the
+	 * caret is.
+	 */
+	term_write("\033[?1049h\033[?25l\033[?1000h\033[?1002h\033[?1006h"
+		   "\033[?2004h");
 	return 1;
 }
 
@@ -443,8 +450,17 @@ enum opt_kind {
 	OPT_COUNT
 };
 
+/*
+ * What each declaration is called on screen.
+ *
+ * Not the macro's name. KOF_TARGET_SIZE_MIN is what gets written to the file
+ * and is the right name there, where the reader is looking at C; on a panel it
+ * is a token to decode, and "size_min" does not say whether it is a minimum
+ * this module requires or a minimum it refuses.
+ */
 static const char *const opt_word[OPT_COUNT] = {
-	"size_min", "size_max", "arch", "subtype"
+	"Smallest file size", "Largest file size",
+	"Architecture", "File subtype"
 };
 
 /*
@@ -925,6 +941,10 @@ struct view {
 	int         find_scope;     /* 0 this region, 1 the whole object */
 	uint64_t    find_at;        /* the last hit, in file offsets */
 	uint32_t    find_i, find_n; /* which hit it is, and how many there are */
+	/* The search's own message. Shared with the draft panel's it produced
+	 * a bare "not found" beside the Generate button, which is an answer to
+	 * a question that panel never asked. */
+	char        find_msg[64];
 	/* Where each control landed, recorded as it is drawn. */
 	int         f_txt[2], f_mode[2], f_rx[2], f_ic[2], f_all[2];
 	int         f_next[2], f_back[2], f_cancel[2];
@@ -1351,19 +1371,31 @@ static void row_start(struct out *o, int row, int col)
  * ASCII, like the pane divider: this is read over ssh on whatever terminal is
  * at the other end.
  */
-static void scrollbar(struct out *o, int col, int top, int bot,
-		      uint64_t off, uint64_t total, uint64_t shown)
+static int bar_thumb(int top, int bot, uint64_t off, uint64_t total,
+		     uint64_t shown, int *out_len)
 {
-	int rows = bot - top + 1, i, t0, t1;
+	int rows = bot - top + 1, t0, t1;
 	uint64_t max;
 
 	if (rows < 2 || !total || shown >= total)
-		return;
+		return -1;
 	max = total - shown;
 	t1 = (int)((uint64_t)(rows - 1) * shown / total);
 	if (t1 < 1)
 		t1 = 1;
 	t0 = (int)((uint64_t)(rows - t1) * (off < max ? off : max) / max);
+	*out_len = t1;
+	return t0;
+}
+
+static void scrollbar(struct out *o, int col, int top, int bot,
+		      uint64_t off, uint64_t total, uint64_t shown)
+{
+	int rows = bot - top + 1, i, t0, t1;
+
+	t0 = bar_thumb(top, bot, off, total, shown, &t1);
+	if (t0 < 0)
+		return;
 	for (i = 0; i < rows; i++) {
 		out_at(o, top + i, col);
 		if (i >= t0 && i < t0 + t1)
@@ -3373,10 +3405,19 @@ static void generate(struct view *v, int as_new)
 				 dup);
 			return;
 		}
-		if (as_new && !draft_dirty(v)) {
+		/*
+		 * Nothing to write either way.
+		 *
+		 * For Save As a copy would be a duplicate; for Save the file
+		 * on disk already says this. Repeated clicks used to rewrite
+		 * it each time, which was harmless and looked like nothing was
+		 * happening.
+		 */
+		if (!draft_dirty(v) && v->gen_path[0]) {
 			snprintf(v->warn, sizeof v->warn,
-				 "nothing changed - a copy would be a "
-				 "duplicate");
+				 as_new ? "nothing changed - a copy would be a "
+					  "duplicate"
+					: "nothing changed since the last save");
 			return;
 		}
 	}
@@ -3417,8 +3458,8 @@ static void generate(struct view *v, int as_new)
 		if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
 			snprintf(dir, sizeof dir, "%s", v->basedir);
 		if (kof_mkdir(dir, 0777) != 0 && errno != EEXIST) {
-			snprintf(v->gen_path, sizeof v->gen_path,
-				 "cannot create %s", dir);
+			snprintf(v->warn, sizeof v->warn, "cannot create %.90s",
+				 dir);
 			return;
 		}
 		/*
@@ -3456,8 +3497,7 @@ static void generate(struct view *v, int as_new)
 	}
 	f = fopen(path, "w");
 	if (!f) {
-		snprintf(v->gen_path, sizeof v->gen_path, "cannot write %s",
-			 path);
+		snprintf(v->warn, sizeof v->warn, "cannot write %.90s", path);
 		return;
 	}
 
@@ -3674,8 +3714,27 @@ static void generate(struct view *v, int as_new)
 
 	v->gen_ok = ferror(f) == 0;
 	fclose(f);
-	snprintf(v->gen_path, sizeof v->gen_path, "%s %s",
-		 v->gen_ok ? "wrote" : "failed", path);
+	/*
+	 * The PATH, not a sentence about it.
+	 *
+	 * This used to hold "wrote /some/file.c", which reads well on the
+	 * status line and is not a path - so the next Save could not recognise
+	 * the file it had just written, fell through to "pick a name nothing is
+	 * using", and produced a new numbered copy on every click. Save now
+	 * overwrites, which is what Save has always meant; Save As is the one
+	 * that starts a new file.
+	 */
+	snprintf(v->gen_path, sizeof v->gen_path, "%.*s",
+		 (int)sizeof v->gen_path - 1, path);
+	if (!v->gen_ok) {
+		snprintf(v->warn, sizeof v->warn, "could not write the file");
+		return;
+	}
+	v->warn[0] = 0;
+	/* What was written is now what is saved. Without this the draft stayed
+	 * dirty forever: the panel kept saying "(unsaved)" and the guard that
+	 * refuses a pointless Save never fired. */
+	v->saved_hash = draft_hash(v);
 }
 
 /*
@@ -3835,11 +3894,24 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 			ch_add(c, opt_word[OPT_SIZE_MIN]);
 		if (!v->opt_on[OPT_SIZE_MAX])
 			ch_add(c, opt_word[OPT_SIZE_MAX]);
-		if (!v->opt_on[OPT_ARCH] && cur_obj(v)->ctx.arch)
-			ch_add(c, opt_word[OPT_ARCH]);
-		if (!v->opt_on[OPT_SUBTYPE] && cur_obj(v)->fmt &&
-		    cur_obj(v)->ctx.subtype)
-			ch_add(c, opt_word[OPT_SUBTYPE]);
+		/*
+		 * Architecture and subtype belong to executables and to nothing
+		 * else: a zip has no machine and a PDF has no ET_DYN. Offered
+		 * on the object in hand rather than from a fixed list, so the
+		 * menu answers for the file being looked at.
+		 */
+		{
+			uint8_t fm = cur_obj(v)->ctx.format;
+			int exe = fm == KOF_FMT_ELF || fm == KOF_FMT_PE ||
+				  fm == KOF_FMT_MACHO;
+
+			if (exe && !v->opt_on[OPT_ARCH] && cur_obj(v)->ctx.arch)
+				ch_add(c, opt_word[OPT_ARCH]);
+			if (exe && !v->opt_on[OPT_SUBTYPE] &&
+			    kof_inspect_subtype_name(fm,
+						     cur_obj(v)->ctx.subtype))
+				ch_add(c, opt_word[OPT_SUBTYPE]);
+		}
 		if (!c->n)
 			return;
 	} else if (what == CH_ARCH) {
@@ -3868,8 +3940,11 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 
 		/* 1 is find_any and n is find_all, and both already have their
 		 * own entry in the rule list. */
+		/* The number, and only the number. How many there are to
+		 * choose from is not a choice - it is shown beside the field
+		 * and follows the markers as they are added. */
 		for (i = 2; i + 1u <= n; i++) {
-			snprintf(t, sizeof t, ">= %u of %u", i, n);
+			snprintf(t, sizeof t, ">= %u", i);
 			ch_add(c, t);
 		}
 		if (!c->n)
@@ -4354,7 +4429,7 @@ static void draw_decl(struct out *o, struct view *v)
 			snprintf(val, sizeof val, "%llu",
 				 (unsigned long long)v->opt_val[i]);
 		row_start(o, y, 1);
-		out_fmt(o, "   %s%-10s" A_OFF " ", A_DIM, opt_word[i]);
+		out_fmt(o, "   %s%-20s" A_OFF " ", A_DIM, opt_word[i]);
 		v->opt_c0[i] = 1 + (int)o->col_hint;
 		out_fmt(o, "%s%s" A_OFF,
 			v->edit == 200 + (int)i ? A_SEL : A_ID,
@@ -4866,6 +4941,11 @@ static void draw_marker_line(struct out *o, struct view *v)
 	 * what is wrong, then what is missing, then what would be a duplicate,
 	 * then where this draft lives.
 	 */
+	if (v->find_msg[0]) {
+		snprintf(right, sizeof right, "%s", v->find_msg);
+		rcol = A_WARN;
+		goto have_right;
+	}
 	if (v->pane == 3 && g_decl_rows) {
 		const char *why = draft_missing(v);
 		int near = 0;
@@ -4903,9 +4983,11 @@ static void draw_marker_line(struct out *o, struct view *v)
 		/* And which hit it is, when the selection is one: after a
 		 * search the useful question is not only where this match is
 		 * but how many there are and how far through them you are. */
+		/* The wording an editor uses. "hit 1/1" reads as a ratio of
+		 * something, and the thing it was a ratio of was never said. */
 		if (v->find_n && v->find_i)
 			snprintf(right, sizeof right,
-				 "hit %u/%u   %llu B   offset %08llx "
+				 "match %u of %u   %llu B   offset %08llx "
 				 "(region: %08llx)",
 				 v->find_i, v->find_n,
 				 (unsigned long long)(hi - lo + 1u),
@@ -5420,6 +5502,25 @@ static void draw_menu(struct out *o, struct view *v)
  * sequence disabled ignores it silently; there is no reply to wait for and
  * nothing better to fall back to.
  */
+/*
+ * The viewer's own clipboard.
+ *
+ * OSC 52 asks the TERMINAL to set the system clipboard, and most terminals
+ * refuse by default - a program that can write the clipboard can also read a
+ * password out of it, so VTE and others ship with it off. Nothing here can
+ * change that, and a copy that silently does nothing is worse than no copy at
+ * all. So the bytes are kept here as well: the system clipboard is attempted,
+ * and Ctrl+V inside this program works whether or not the terminal allowed it.
+ */
+static char   g_clip[8192];
+static size_t g_clip_n;
+
+static void copy_take(const char *bytes, size_t n)
+{
+	g_clip_n = n < sizeof g_clip ? n : sizeof g_clip;
+	memcpy(g_clip, bytes, g_clip_n);
+}
+
 static void copy_osc52(const char *bytes, size_t n)
 {
 	static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -5447,6 +5548,7 @@ static void copy_osc52(const char *bytes, size_t n)
 	if (o.n)
 		term_write_n(o.p, o.n);
 	free(o.p);
+	copy_take(bytes, n);
 }
 
 /* Copying an offset is copying a number, so it has two spellings and both are
@@ -6011,11 +6113,11 @@ static void find_run(struct view *v, int back)
 			at = find_next(v, 0);           /* wrap */
 	}
 	if (at == KOF_BROKEN) {
-		snprintf(v->warn, sizeof v->warn, "not found");
+		snprintf(v->find_msg, sizeof v->find_msg, "no match");
 		v->find_i = v->find_n = 0;
 		return;
 	}
-	v->warn[0] = 0;
+	v->find_msg[0] = 0;
 	v->find_at = at;
 	/*
 	 * Which hit this is, counted rather than tracked.
@@ -6060,11 +6162,16 @@ enum key {
 	/* Not a key: the terminal changed size while nothing was being typed,
 	 * and the loop has to be told so it repaints. */
 	K_RESIZE,
+	/* A bracketed paste, whose bytes are in g_paste. */
+	K_PASTE,
 	/* Kept contiguous and last: handle() tests the range to let mouse
 	 * events past the modes that own the keyboard. */
 	K_BACKTAB,
 	K_CLICK, K_RCLICK, K_WHEEL_UP, K_WHEEL_DOWN, K_DRAG, K_RELEASE
 };
+
+static char   g_paste[4096];    /* the last bracketed paste */
+static size_t g_paste_n;
 
 static int g_mx, g_my;          /* where the last click was, 1 based */
 static int g_mod_shift;         /* shift was held for it */
@@ -6193,6 +6300,48 @@ static int read_key(void)
 		return 27;
 	if (seq[1] == '<')
 		return read_mouse();
+	if (seq[1] == '2') {
+		/*
+		 * Bracketed paste: ESC [ 200 ~ ... ESC [ 201 ~
+		 *
+		 * Read whole and handed over as one thing, because that is what
+		 * it is. Fed through the key handler byte by byte it would be
+		 * indistinguishable from someone typing very fast, which is
+		 * exactly the confusion the brackets exist to remove.
+		 */
+		unsigned char t[4];
+		size_t pn = 0;
+
+		if (read(STDIN_FILENO, t, 1) != 1 || t[0] != '0')
+			return 27;
+		if (read(STDIN_FILENO, t, 1) != 1)
+			return 27;
+		if (read(STDIN_FILENO, t, 1) != 1 || t[0] != '~')
+			return 27;
+		g_paste_n = 0;
+		for (;;) {
+			unsigned char c2;
+
+			if (read(STDIN_FILENO, &c2, 1) != 1)
+				break;
+			if (c2 == 27) {
+				unsigned char e[5];
+				size_t k = 0;
+
+				while (k < 5 && read(STDIN_FILENO, e + k, 1)
+				       == 1) {
+					k++;
+					if (e[k - 1] == '~')
+						break;
+				}
+				break;          /* the closing bracket */
+			}
+			if (pn + 1 < sizeof g_paste)
+				g_paste[pn++] = (char)c2;
+		}
+		g_paste_n = pn;
+		return K_PASTE;
+	}
 	if (seq[1] == 'M')
 		return read_mouse_x10();
 	switch (seq[1]) {
@@ -6420,57 +6569,71 @@ static int bar_under(struct view *v)
  * time; drawing it greyed answers it once and marks the place the work goes.
  */
 /*
- * Five rows: a top rule and four of content.
+ * Four rows: a top rule and three of content.
  *
  * No bottom rule. The status line already has one directly beneath, and two
  * horizontal lines with nothing between them read as a mistake rather than as a
  * frame.
  */
-#define FIND_H 5
+#define FIND_H 4
 
 static int find_top(void)
 {
 	return g_rows - FIND_H - 1;
 }
 
+/*
+ * A row of the dialog: positioned, written, then cleared to the edge.
+ *
+ * Not cleared first. Every row here used to erase to the end of the line before
+ * anything was written into it, so each keystroke put the whole dialog through
+ * a blank state before it came back - which is what the flicker while typing
+ * was.
+ */
+static void find_row(struct out *o, int y)
+{
+	out_at(o, y, 3);
+	o->col_hint = 0;
+}
+
 static void draw_find(struct out *o, struct view *v)
 {
 	int top = find_top(), y, i;
 
-	row_start(o, top + 1, 3);
+	find_row(o, top + 1);
 	out_fmt(o, A_DIM "Find " A_OFF);
 	v->f_txt[0] = 1 + (int)o->col_hint;
-	out_fmt(o, "%s[%-48.48s]" A_OFF, v->edit == 500 ? A_SEL : A_ID,
+	out_fmt(o, "%s[%-40.40s]" A_OFF, v->edit == 500 ? A_SEL : A_ID,
 		v->find[0] ? v->find : "");
 	v->f_txt[1] = (int)o->col_hint;
-
-	row_start(o, top + 2, 3);
-	out_fmt(o, A_DIM "as " A_OFF);
+	out_fmt(o, A_DIM "  as " A_OFF);
 	v->f_mode[0] = 1 + (int)o->col_hint;
-	out_fmt(o, "%s[%s]" A_OFF, A_WARN, v->find_hex ? "hex" : "text");
+	out_fmt(o, "%s[%s]" A_OFF, A_WARN, v->find_hex ? "Hex" : "Text");
 	v->f_mode[1] = (int)o->col_hint;
-	out_str(o, "   ");
+	out_str(o, "\033[K");
+
+	find_row(o, top + 2);
 	v->f_rx[0] = 1 + (int)o->col_hint;
 	/* Bright black on white, not on bright black: the same colour twice is
 	 * a grey block where a label should be. */
-	out_fmt(o, "\033[47;90m[ ] regex" A_OFF);
+	out_fmt(o, "\033[47;90m[ ] Regex" A_OFF);
 	v->f_rx[1] = (int)o->col_hint;
 	out_str(o, "   ");
 	v->f_ic[0] = 1 + (int)o->col_hint;
 	if (v->find_hex)
-		out_fmt(o, "\033[47;90m[ ] ignore case" A_OFF);
+		out_fmt(o, "\033[47;90m[ ] Ignore case" A_OFF);
 	else
-		out_fmt(o, "%s[%s] ignore case" A_OFF, A_ID,
+		out_fmt(o, "%s[%s] Ignore case" A_OFF, A_ID,
 			v->find_icase ? "x" : " ");
 	v->f_ic[1] = (int)o->col_hint;
-
-	row_start(o, top + 3, 3);
+	out_str(o, "   ");
 	v->f_all[0] = 1 + (int)o->col_hint;
 	out_fmt(o, "%s[%s] Search whole object" A_OFF, A_ID,
 		v->find_scope ? "x" : " ");
 	v->f_all[1] = (int)o->col_hint;
+	out_str(o, "\033[K");
 
-	row_start(o, top + 4, 3);
+	find_row(o, top + 3);
 	v->f_next[0] = 1 + (int)o->col_hint;
 	out_fmt(o, "%s[ Find next ]" A_OFF, v->find[0] ? A_ID : A_DIM);
 	v->f_next[1] = (int)o->col_hint;
@@ -6482,23 +6645,10 @@ static void draw_find(struct out *o, struct view *v)
 	v->f_cancel[0] = 1 + (int)o->col_hint;
 	out_fmt(o, A_ID "[ Cancel ]" A_OFF);
 	v->f_cancel[1] = (int)o->col_hint;
-	/* The outcome shares the button row rather than taking one of its own:
-	 * a row that is empty until something goes wrong is a row of border
-	 * around nothing for most of the dialog's life. */
-	if (v->warn[0])
-		out_fmt(o, "   %s%s" A_OFF, A_BAD, v->warn);
-	else if (v->find_at != KOF_BROKEN)
-		out_fmt(o, A_DIM "   found at " A_OFF "%s%08llx" A_OFF, A_LOC,
-			(unsigned long long)v->find_at);
+	/* Where the hit is belongs on the status line, which says it already.
+	 * Saying it twice made the dialog a row taller for no new fact. */
+	out_str(o, "\033[K");
 
-	/*
-	 * The frame last, over the rows rather than under them.
-	 *
-	 * Every row above clears to the end of the line, so a border drawn
-	 * first is erased by the first row that follows it - and redrawn on the
-	 * next frame, which is the flicker that showed whenever anything in
-	 * here changed.
-	 */
 	for (y = top; y < top + FIND_H; y++) {
 		out_at(o, y, 1);
 		out_str(o, A_DIM);
@@ -6516,36 +6666,45 @@ static void draw_find(struct out *o, struct view *v)
 }
 
 /* Which control a click landed on. */
-static void find_click(struct view *v)
+/*
+ * Which control a click landed on, and whether the dialog wanted it at all.
+ *
+ * A click outside the box is NOT a close. The dialog is a tool for looking
+ * through the object, so moving the tree to another region while it is open is
+ * an ordinary thing to do - and the next search then runs in the region that is
+ * now current, which is the whole point of it staying. Cancel and Esc are what
+ * close it, because those are the two things that mean "I am done".
+ */
+static int find_click(struct view *v)
 {
 	int top = find_top();
 
 	if (g_my < top || g_my >= top + FIND_H) {
-		v->find_open = 0;       /* anywhere off the box closes it */
-		v->edit = 0;
-		return;
+		v->edit = 0;            /* the field loses the caret, not the
+					 * dialog its place */
+		return 0;
 	}
 	if (g_my == top + 1 && g_mx >= v->f_txt[0] && g_mx <= v->f_txt[1]) {
 		v->edit = 500;
-		return;
+		return 1;
+	}
+	if (g_my == top + 1 && g_mx >= v->f_mode[0] &&
+	    g_mx <= v->f_mode[1]) {
+		v->find_hex = !v->find_hex;
+		v->find_at = KOF_BROKEN;
+		return 1;
 	}
 	if (g_my == top + 2) {
-		if (g_mx >= v->f_mode[0] && g_mx <= v->f_mode[1]) {
-			v->find_hex = !v->find_hex;
-			v->find_at = KOF_BROKEN;
-		} else if (!v->find_hex && g_mx >= v->f_ic[0] &&
-			   g_mx <= v->f_ic[1]) {
+		if (!v->find_hex && g_mx >= v->f_ic[0] && g_mx <= v->f_ic[1]) {
 			v->find_icase = !v->find_icase;
 			v->find_at = KOF_BROKEN;
+		} else if (g_mx >= v->f_all[0] && g_mx <= v->f_all[1]) {
+			v->find_scope = !v->find_scope;
+			v->find_at = KOF_BROKEN;
 		}
-		return;
+		return 1;
 	}
-	if (g_my == top + 3 && g_mx >= v->f_all[0] && g_mx <= v->f_all[1]) {
-		v->find_scope = !v->find_scope;
-		v->find_at = KOF_BROKEN;
-		return;
-	}
-	if (g_my == top + 4) {
+	if (g_my == top + 3) {
 		if (g_mx >= v->f_cancel[0] && g_mx <= v->f_cancel[1]) {
 			v->find_open = 0;
 			v->edit = 0;
@@ -6557,6 +6716,7 @@ static void find_click(struct view *v)
 			find_run(v, 1);
 		}
 	}
+	return 1;
 }
 
 static void click(struct view *v, int rclick)
@@ -6576,10 +6736,8 @@ static void click(struct view *v, int rclick)
 			g_mx > TREE_W && !v->show_list && !v->menu_open))
 		return;
 
-	if (v->find_open) {
-		find_click(v);
+	if (v->find_open && find_click(v))
 		return;
-	}
 
 	/* Any click leaves whatever was being typed. The header branch below
 	 * puts the focus back if the click landed on a field, so this is the
@@ -6590,8 +6748,41 @@ static void click(struct view *v, int rclick)
 		int which = bar_under(v);
 
 		if (which) {
+			/*
+			 * On the thumb, take hold of it where it is; on the
+			 * track, jump.
+			 *
+			 * A bar that recentres under the pointer every time it
+			 * is touched cannot be dragged - the first press throws
+			 * the view somewhere else and the drag continues from
+			 * there, which is what "sometimes lands in the wrong
+			 * place" is. One row of track is many bytes of a large
+			 * object, so the jump will never be exact; taking hold
+			 * of the thumb is how a fine adjustment is made.
+			 */
+			int top, bot, t0, t1 = 0;
+			uint64_t total = 0, shown = 0, off = 0;
+
+			if (which == 1) {
+				uint64_t per = (uint64_t)(v->per > 0 ? v->per
+								    : 16);
+				top = hex_top(); bot = hex_bot();
+				total = v->rgn_len; off = v->rgn_at;
+				shown = (uint64_t)(bot - top + 1) * per;
+			} else if (which == 2) {
+				top = hex_top(); bot = hex_bot();
+				total = v->n_node; off = v->tree_top;
+				shown = (uint64_t)(bot - top + 1);
+			} else {
+				top = decl_top() + 1;
+				bot = decl_top() + g_decl_rows - 2;
+				total = v->n_prow; off = v->prow_off;
+				shown = (uint64_t)(g_decl_rows - 2);
+			}
+			t0 = bar_thumb(top, bot, off, total, shown, &t1);
 			v->bar_drag = which;
-			bar_to(v, which);
+			if (t0 < 0 || g_my < top + t0 || g_my >= top + t0 + t1)
+				bar_to(v, which);
 			return;
 		}
 	}
@@ -7097,6 +7288,27 @@ static int handle(struct view *v, int k)
 			 */
 			size_t n = strlen(v->find);
 
+			if (k == 0x03) {
+				copy_osc52(v->find, n);
+				return 1;
+			}
+			if (k == 0x16 || k == K_PASTE) {
+				const char *src = k == K_PASTE ? g_paste
+							       : g_clip;
+				size_t sn = k == K_PASTE ? g_paste_n
+							 : g_clip_n, i;
+
+				for (i = 0; i < sn && n + 2u < sizeof v->find;
+				     i++) {
+					char c2 = src[i];
+
+					if (c2 < 0x20 || c2 >= 0x7f)
+						continue;
+					v->find[n++] = c2;
+				}
+				v->find[n] = 0;
+				return 1;
+			}
 			if (k == 27) {
 				v->edit = 0;
 				v->find_open = 0;
@@ -7143,6 +7355,32 @@ static int handle(struct view *v, int k)
 		}
 		n = strlen(buf);
 
+		/*
+		 * Copy and paste, with the keys everything else uses.
+		 *
+		 * A terminal keeps Ctrl+Shift+C and Ctrl+Shift+V for itself and
+		 * passes the unshifted pair straight through, so these are free
+		 * to take - and taking them is what makes a text field here
+		 * behave like a text field anywhere else.
+		 */
+		if (k == 0x03) {                /* Ctrl+C */
+			copy_osc52(buf, n);
+			return 1;
+		}
+		if (k == 0x16 || k == K_PASTE) {        /* Ctrl+V, or a paste */
+			const char *src = k == K_PASTE ? g_paste : g_clip;
+			size_t sn = k == K_PASTE ? g_paste_n : g_clip_n, i;
+
+			for (i = 0; i < sn && n + 2u < cap; i++) {
+				char c2 = src[i];
+
+				if (c2 < 0x20 || c2 >= 0x7f)
+					continue;   /* a field holds a line */
+				buf[n++] = c2;
+			}
+			buf[n] = 0;
+			return 1;
+		}
 		if (k == 27 || k == '\r' || k == '\n') {
 			v->edit = 0;
 		} else if (k == 127 || k == 8) {
