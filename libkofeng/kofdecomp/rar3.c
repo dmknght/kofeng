@@ -21,8 +21,12 @@
  */
 
 #include "rar3.h"
+#include "ppmd.h"
+
 
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 #include "../core/kofcore.h"   /* kof_crc32, to name a filter by its code */
 
@@ -458,6 +462,19 @@ struct rar3 {
 
 	uint8_t *scratch;
 	uint64_t scratch_len;
+
+	/*
+	 * The other compressor.
+	 *
+	 * RAR picks between LZ and PPM per block, so both have to be live at
+	 * once: a stream can run PPM, hand back an escape that starts a new
+	 * block, and that block can be LZ. The model is kept across blocks
+	 * because a block that does not set the reset bit continues the one
+	 * already built.
+	 */
+	struct kof_ppmd *ppm;
+	int ppm_block;
+	int ppm_esc;
 	/*
 	 * Why the loop stopped, when it stopped for a reason the caller must not
 	 * read as success.
@@ -513,12 +530,14 @@ static int copy_string(struct rar3 *s, uint32_t len, uint32_t dist)
  * range left holding pre-filter bytes is a file that is the right length and the
  * wrong contents, and that is the one result worth less than none.
  */
+static int apply_vm_code(struct rar3 *, uint32_t, const uint8_t *,
+			 uint32_t);
+
+/* The declaration as an LZ block sends it: a run of bits. */
 static int read_vm_code(struct rar3 *s)
 {
 	uint8_t code[RAR3_VMCODE_MAX];
-	struct vbr v;
-	uint32_t first, len, i, pos, start, blen, mask = 0;
-	int fresh;
+	uint32_t first, len, i;
 
 	first = br_take(&s->b, 8u);
 	len = (first & 7u) + 1u;
@@ -532,10 +551,70 @@ static int read_vm_code(struct rar3 *s)
 		code[i] = (uint8_t)br_take(&s->b, 8u);
 	if (s->b.out_of_input)
 		return 0;
+	return apply_vm_code(s, first, code, len);
+}
+
+/*
+ * And as a PPM block sends it: a run of symbols out of the model.
+ *
+ * The length is coded the same way in both, which is the point of reading it
+ * here rather than letting the model hand over an opaque run - a length this
+ * misreads leaves the model out of step with the stream for good, and every
+ * byte after it is wrong in a way nothing downstream can notice.
+ */
+static int read_vm_code_ppm(struct rar3 *s)
+{
+	uint8_t code[RAR3_VMCODE_MAX];
+	uint32_t len, i;
+	int first, b1, b2;
+
+	first = kof_ppmd_next(s->ppm);
+	if (first < 0)
+		return 0;
+	len = ((uint32_t)first & 7u) + 1u;
+	if (len == 7u) {
+		b1 = kof_ppmd_next(s->ppm);
+		if (b1 < 0)
+			return 0;
+		len = (uint32_t)b1 + 7u;
+	} else if (len == 8u) {
+		b1 = kof_ppmd_next(s->ppm);
+		b2 = kof_ppmd_next(s->ppm);
+		if (b1 < 0 || b2 < 0)
+			return 0;
+		len = (uint32_t)b1 * 256u + (uint32_t)b2;
+	}
+	if (len == 0u || len > RAR3_VMCODE_MAX)
+		return 0;
+	for (i = 0; i < len; i++) {
+		int c = kof_ppmd_next(s->ppm);
+
+		if (c < 0)
+			return 0;
+		code[i] = (uint8_t)c;
+	}
+	return apply_vm_code(s, (uint32_t)first, code, len);
+}
+
+/*
+ * A filter declaration, once its bytes are in hand.
+ *
+ * Split from the reading because the same declaration arrives two ways: an LZ
+ * block sends it as a run of bits, a PPM block sends it as a run of symbols
+ * through the model. What it MEANS is identical, and one copy of that meaning
+ * is one fewer place for the two paths to drift.
+ */
+static int apply_vm_code(struct rar3 *s, uint32_t first, const uint8_t *code,
+			 uint32_t len)
+{
+	struct vbr v;
+	uint32_t pos, start, blen, i, mask = 0;
+	int fresh;
 
 	memset(&v, 0, sizeof v);
 	v.p = code;
 	v.n = len;
+	(void)0;
 
 	if (first & 0x80u) {
 		pos = vm_read_data(&v);
@@ -710,8 +789,51 @@ static int read_tables(struct rar3 *s)
 
 	br_align(&s->b);
 	field = br_peek(&s->b);
-	if (field & 0x8000u)
-		return -1;                    /* PPM */
+	if (field & 0x8000u) {
+		/*
+		 * A PPM block. The header is three bytes at most and the first
+		 * of them is the one just peeked - the flag bit is bit 7 of
+		 * MaxOrder, not a bit of its own, which is why nothing was
+		 * consumed above.
+		 */
+		uint32_t max_order = br_take(&s->b, 8);
+		uint32_t max_mb = 0;
+		int reset = (max_order & 0x20u) != 0;
+
+		if (reset)
+			max_mb = br_take(&s->b, 8);
+		if (max_order & 0x40u)
+			s->ppm_esc = (int)br_take(&s->b, 8);
+		if (s->b.out_of_input)
+			return 0;
+
+		if (!s->ppm) {
+			s->ppm = kof_ppmd_new();
+			if (!s->ppm) {
+				return -1;
+			}
+		}
+		if (reset) {
+			int order = (int)(max_order & 0x1fu) + 1;
+
+			if (order > 16)
+				order = 16 + (order - 16) * 3;
+			if (order == 1) {
+				return -1;
+			}
+			if (!kof_ppmd_start(s->ppm, order,
+					    kof_ppmd_arena_want((uint8_t)max_mb),
+					    s->b.p, s->b.n, s->b.byte)) {
+				return -1;
+			}
+		} else if (!kof_ppmd_resume(s->ppm, s->b.p, s->b.n,
+					    s->b.byte)) {
+			return -1;
+		}
+		s->ppm_block = 1;
+		return 2;
+	}
+	s->ppm_block = 0;
 	/* The second bit says whether the previous tables are the base this one is
 	 * a delta against. Cleared, the delta is against zero. */
 	if (!(field & 0x4000u))
@@ -775,6 +897,82 @@ static int read_tables(struct rar3 *s)
 	return 1;
 }
 
+
+/*
+ * One PPM block, until it ends or the caller's buffer is full.
+ *
+ * RAR's escape symbol is not output: it introduces a control code, and only
+ * three of the six are bytes at all. The rest are a back reference, a filter, or
+ * the end of the stream - which is why the model hands back symbols rather than
+ * writing them, and why this loop and not the model decides what a symbol means.
+ *
+ * Returns 1 to carry on with whatever block follows, 0 at end of stream, and -1
+ * for a stream that cannot be read.
+ */
+static int ppm_run(struct rar3 *s)
+{
+	while (s->at < s->cap) {
+		int ch = kof_ppmd_next(s->ppm);
+
+		if (ch < 0) {
+			return -1;
+		}
+		if (ch == s->ppm_esc) {
+			int next = kof_ppmd_next(s->ppm);
+
+			if (next < 0)
+				return -1;
+			if (next == 0) {
+				/* A new block header follows, and it may be
+				 * either compressor. The bit reader picks up
+				 * where the model left the byte cursor. */
+				s->b.byte = kof_ppmd_at(s->ppm);
+				s->b.bit = 0;
+				return 1;
+			}
+			if (next == 2) {
+				return 0;
+			}
+			if (next == 3) {
+				if (!read_vm_code_ppm(s)) {
+					return -1;
+				}
+				continue;
+			}
+			if (next == 4) {
+				uint32_t dist = 0, len, i;
+				int c;
+
+				for (i = 0; i < 3u; i++) {
+					c = kof_ppmd_next(s->ppm);
+					if (c < 0)
+						return -1;
+					dist = (dist << 8) | (uint32_t)c;
+				}
+				c = kof_ppmd_next(s->ppm);
+				if (c < 0)
+					return -1;
+				len = (uint32_t)c + 32u;
+				if (!copy_string(s, len, dist + 2u))
+					return -1;
+				continue;
+			}
+			if (next == 5) {
+				int c = kof_ppmd_next(s->ppm);
+
+				if (c < 0)
+					return -1;
+				if (!copy_string(s, (uint32_t)c + 4u, 1u))
+					return -1;
+				continue;
+			}
+			/* any other value is the escape byte itself */
+		}
+		s->out[s->at++] = (uint8_t)ch;
+	}
+	return 1;
+}
+
 enum kof_decomp_status kof_rar3_decode(const uint8_t *in, uint64_t in_len,
 				       uint8_t *out, uint64_t out_cap,
 				       uint8_t *scratch, uint64_t scratch_len,
@@ -791,6 +989,7 @@ enum kof_decomp_status kof_rar3_decode(const uint8_t *in, uint64_t in_len,
 	 */
 	struct rar3 s;
 	int t, corrupt = 0;
+	enum kof_decomp_status early = KOF_DEC_OK;
 
 	if (produced)
 		*produced = 0;
@@ -805,16 +1004,44 @@ enum kof_decomp_status kof_rar3_decode(const uint8_t *in, uint64_t in_len,
 	s.scratch = scratch;
 	s.scratch_len = scratch_len;
 
+	s.ppm_esc = 2;
 	t = read_tables(&s);
+	/*
+	 * Both of these leave through the exit below rather than returning here.
+	 *
+	 * read_tables can build the PPM model before it decides it cannot go on
+	 * - a block header names an order this build refuses, or an arena it
+	 * cannot fit - and by then the model owns a megabyte-scale allocation.
+	 * Returning on the spot dropped it: one leak per refused entry, which
+	 * over a corpus of archives is not a leak but an out of memory kill.
+	 */
 	if (t < 0) {
-		if (produced)
-			*produced = 0;
-		return KOF_DEC_UNSUPPORTED;
+		early = KOF_DEC_UNSUPPORTED;
+		goto done;
 	}
-	if (t == 0)
-		return KOF_DEC_CORRUPT;
+	if (t == 0) {
+		early = KOF_DEC_CORRUPT;
+		goto done;
+	}
 
 	while (s.at < out_cap) {
+		if (s.ppm_block) {
+			int r = ppm_run(&s);
+
+			if (r < 0)
+				goto corrupt;
+			if (r == 0)
+				break;
+			t = read_tables(&s);
+			if (t < 0) {
+				s.gave_up = 1;
+				break;
+			}
+			if (t == 0)
+				break;
+			continue;
+		}
+	{
 		uint32_t num, len, dist, bits;
 
 		if (br_done(&s.b) || s.b.out_of_input)
@@ -890,7 +1117,7 @@ enum kof_decomp_status kof_rar3_decode(const uint8_t *in, uint64_t in_len,
 			 * ends here. */
 			t = read_tables(&s);
 			if (t < 0) {
-				s.gave_up = 1;        /* PPM from here on */
+				s.gave_up = 1;
 				break;
 			}
 			if (t == 0)
@@ -948,6 +1175,7 @@ enum kof_decomp_status kof_rar3_decode(const uint8_t *in, uint64_t in_len,
 				goto corrupt;
 		}
 	}
+	}
 
 	goto done;
 
@@ -966,6 +1194,17 @@ corrupt:
 	corrupt = 1;
 
 done:
+	/* The model owns a megabyte-scale arena; it does not outlive the call
+	 * that built it. */
+	kof_ppmd_free(s.ppm);
+	s.ppm = NULL;
+	if (early != KOF_DEC_OK) {
+		/* Nothing was decoded, so there is nothing to filter and
+		 * nothing to hand back. */
+		if (produced)
+			*produced = 0;
+		return early;
+	}
 	apply_filters(&s);
 	if (produced)
 		*produced = s.at;
