@@ -71,6 +71,38 @@ const char *kof_inspect_ptype_name(uint32_t t);
 const char *kof_inspect_shtype_name(uint32_t t);
 
 /*
+ * A HEX MARKER IS NOT ITS BYTES.
+ *
+ * The pack's pool holds a literal's bytes literally, and for a hex pattern it
+ * holds a COMPILED PROGRAM instead - a header, a step table, an alternative
+ * table and a data area. The two arrive through the same (bytes, len) pair on a
+ * touch, and reading a hex one as though it were a literal is wrong twice over:
+ * the length is the program's, not the pattern's, and the "bytes" are the
+ * program's header. Measured: the ten byte pattern 2F62696E2F7368002D63 reports
+ * as 74 bytes of 010001000A000000...
+ *
+ * These two turn a program back into what a person declared. `span` is the
+ * number of object bytes a match covers - one number when the pattern is fixed,
+ * a range when a gap varies. `text` renders the pattern: hex digits for concrete
+ * bytes, '?' for a masked nibble, '??' per byte of gap, and (a|b) for a choice.
+ *
+ * Both are bounds checked against `n` because a program in a pack is a file's
+ * word about itself. They answer 0 for anything they cannot read.
+ */
+/*
+ * `span` is written as text rather than as numbers because there are three
+ * shapes and only one of them is a number. A fixed pattern covers exactly n
+ * bytes. A bounded gap covers a range. A pattern with an OPEN gap - [-] or [4-]
+ * - has no upper bound at all: the compiler carries KOF_HEX_GAP_OPEN as a
+ * sentinel in gap_max, so adding it up yields a number that looks like an answer
+ * and is not. Reported as "8+", never as "8-260".
+ */
+void     kof_inspect_hex_span(const uint8_t *prog, uint32_t n,
+			      char *out, uint32_t cap);
+uint32_t kof_inspect_hex_text(const uint8_t *prog, uint32_t n,
+			      char *out, uint32_t cap);
+
+/*
  * Why a module is on the list.
  *
  * Ordered by how much attention it deserves, so sorting by this value is sorting

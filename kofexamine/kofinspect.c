@@ -217,6 +217,157 @@ const char *kof_inspect_shtype_name(uint32_t t)
 	}
 }
 
+/* ---- reading a compiled hex pattern back ---------------------------------- */
+
+/* Little endian by hand: the program is written that way whatever the host is,
+ * which is the point of a pack being portable. */
+static uint32_t hx_u32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint32_t hx_u16(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+}
+
+/* Every offset in a program is from its own start, and every one of them came
+ * out of a file, so each is checked against the length the caller vouches for
+ * rather than against the program's own claim about itself. */
+static int hx_ok(uint32_t n, uint32_t off, uint32_t need)
+{
+	return off <= n && need <= n - off;
+}
+
+/* Does any gap in this program run without an upper bound. */
+static int hx_open(const uint8_t *prog, uint32_t n)
+{
+	uint32_t n_steps = hx_u16(prog + 0);
+	uint32_t steps_off = hx_u32(prog + 32), s;
+
+	if (!hx_ok(n, steps_off, n_steps * 8u))
+		return 0;
+	for (s = 0; s < n_steps; s++)
+		if (hx_u16(prog + steps_off + s * 8u + 2) >= KOF_HEX_GAP_OPEN)
+			return 1;
+	return 0;
+}
+
+void kof_inspect_hex_span(const uint8_t *prog, uint32_t n, char *out,
+			  uint32_t cap)
+{
+	uint32_t lo, hi;
+
+	if (!out || cap == 0)
+		return;
+	out[0] = 0;
+	if (!prog || n < 48u)
+		return;
+	lo = hx_u32(prog + 4);
+	hi = hx_u32(prog + 8);
+	/*
+	 * An open gap makes max_span a sum that includes a sentinel, so the
+	 * only true thing left to say is the floor.
+	 */
+	if (hx_open(prog, n))
+		snprintf(out, cap, "%u+", lo);
+	else if (lo != hi)
+		snprintf(out, cap, "%u-%u", lo, hi);
+	else
+		snprintf(out, cap, "%u", lo);
+}
+
+static void hx_put(char *out, uint32_t cap, uint32_t *at, const char *s)
+{
+	while (*s && *at + 1u < cap)
+		out[(*at)++] = *s++;
+	out[*at] = 0;
+}
+
+uint32_t kof_inspect_hex_text(const uint8_t *prog, uint32_t n,
+			      char *out, uint32_t cap)
+{
+	static const char dig[] = "0123456789ABCDEF";
+	uint32_t n_steps, steps_off, at = 0, s;
+
+	if (!out || cap == 0)
+		return 0;
+	out[0] = 0;
+	if (!prog || n < 48u)
+		return 0;
+	n_steps   = hx_u16(prog + 0);
+	steps_off = hx_u32(prog + 32);
+	if (!hx_ok(n, steps_off, n_steps * 8u))
+		return 0;
+
+	for (s = 0; s < n_steps && at + 1u < cap; s++) {
+		const uint8_t *st = prog + steps_off + s * 8u;
+		uint32_t gap_min = hx_u16(st + 0), gap_max = hx_u16(st + 2);
+		uint32_t alt_first = hx_u16(st + 4), n_alts = hx_u16(st + 6);
+		uint32_t alts_off = hx_u32(prog + 36);
+		uint32_t a;
+
+		/*
+		 * The gap before this step, in the same brackets the pattern
+		 * was written with - and the same ones kofexamine already
+		 * prints, so one pattern reads the same in both tools.
+		 *
+		 * The open forms matter most: gap_max carries KOF_HEX_GAP_OPEN
+		 * as a sentinel for "no limit", and printing it as a number
+		 * says 256 where the pattern says "however far it takes".
+		 */
+		if (gap_max) {
+			char t[32];
+
+			if (!gap_min && gap_max >= KOF_HEX_GAP_OPEN)
+				snprintf(t, sizeof t, "[-]");
+			else if (gap_max >= KOF_HEX_GAP_OPEN)
+				snprintf(t, sizeof t, "[%u-]", gap_min);
+			else if (gap_min == gap_max)
+				snprintf(t, sizeof t, "[%u]", gap_min);
+			else
+				snprintf(t, sizeof t, "[%u-%u]", gap_min,
+					 gap_max);
+			hx_put(out, cap, &at, t);
+		}
+		if (!hx_ok(n, alts_off, (alt_first + n_alts) * 8u))
+			return at;
+		if (n_alts > 1u)
+			hx_put(out, cap, &at, "(");
+		for (a = 0; a < n_alts && at + 1u < cap; a++) {
+			const uint8_t *al = prog + alts_off + (alt_first + a) * 8u;
+			uint32_t len = hx_u16(al + 0), flags = hx_u16(al + 2);
+			uint32_t doff = hx_u32(al + 4), b;
+			int masked = (flags & 1u) != 0;
+
+			if (a)
+				hx_put(out, cap, &at, "|");
+			if (!hx_ok(n, doff, masked ? len * 2u : len))
+				return at;
+			for (b = 0; b < len && at + 2u < cap; b++) {
+				uint8_t byte = prog[doff + b];
+				uint8_t mask = masked ? prog[doff + len + b]
+						      : 0xffu;
+				char t[3];
+
+				/* A nibble the mask does not cover is a
+				 * wildcard, and saying so per nibble is the
+				 * only faithful rendering of a half masked
+				 * byte. */
+				t[0] = (mask & 0xf0u) ? dig[(byte >> 4) & 15]
+						      : '?';
+				t[1] = (mask & 0x0fu) ? dig[byte & 15] : '?';
+				t[2] = 0;
+				hx_put(out, cap, &at, t);
+			}
+		}
+		if (n_alts > 1u)
+			hx_put(out, cap, &at, ")");
+	}
+	return at;
+}
+
 const char *kof_inspect_subtype_name(uint8_t fmt, uint8_t sub)
 {
 	if (fmt == KOF_FMT_ELF)

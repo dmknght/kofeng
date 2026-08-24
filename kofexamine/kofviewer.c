@@ -47,6 +47,7 @@
 #include <unistd.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -883,6 +884,8 @@ struct view {
 	struct cond  cnd[MAX_GROUP];
 	uint32_t     n_cnd, cur_cnd;
 	char         warn[120];     /* why the last add was refused */
+	char         copy_msg[120]; /* where the last copy's bytes went */
+	int          copy_ok;       /* and whether anything outside took it */
 	int          warn_bad;      /* 1 it failed, 0 it is only worth knowing */
 
 	/*
@@ -3935,9 +3938,18 @@ static void generate(struct view *v, int as_new)
 		 * is not a thing to do quietly.
 		 *
 		 * So: whatever this draft has already been written to stays
-		 * its file, and generate keeps updating it. Otherwise the
-		 * first unused name of Mirai.c, Mirai_01.c, Mirai_02.c is
-		 * taken. Nothing this session did not create is touched.
+		 * its file, and generate keeps updating it. Otherwise a new
+		 * one is numbered.
+		 *
+		 * ALWAYS NUMBERED, even when the bare name is free.
+		 *
+		 * A family is written more than once - a variant, a second
+		 * sample, a rule for the loader beside the rule for the payload
+		 * - so Mirai.c is not the name of a signature, it is the name
+		 * of the first one somebody happened to write. Numbering from
+		 * the start means the second file is not a special case, the
+		 * set reads as a set, and no name has to be renamed later to
+		 * make room. Nothing this session did not create is touched.
 		 */
 		v->gen_ok = 0;
 		if (!as_new && v->gen_path[0] &&
@@ -3945,16 +3957,44 @@ static void generate(struct view *v, int as_new)
 			snprintf(path, sizeof path, "%.*s",
 				 (int)sizeof path - 1, v->gen_path);
 		} else {
-			unsigned n;
+			/*
+			 * The first number nothing is using, and the number
+			 * gets WIDER rather than running out.
+			 *
+			 * Two digits is the everyday width and reads well: a
+			 * family with a handful of rules gets _00 to _09. A
+			 * family with more than a hundred is not an error to
+			 * refuse, it is a family somebody has worked on, so the
+			 * width grows instead. Falling off the end of a fixed
+			 * width would leave the last name - which exists -
+			 * about to be overwritten, and not overwriting is the
+			 * whole reason these are numbered.
+			 */
+			static const unsigned wide[] = { 2u, 4u, 5u };
+			unsigned lim[] = { 100u, 10000u, 100000u };
+			size_t w;
+			int free_one = 0;
 
-			snprintf(path, sizeof path, "%s/%s.c", dir, safe);
-			for (n = 0; n < 100u; n++) {
-				struct stat es;
+			for (w = 0; w < sizeof wide / sizeof wide[0] &&
+				    !free_one; w++) {
+				unsigned n;
 
-				if (stat(path, &es) != 0)
-					break;
-				snprintf(path, sizeof path, "%s/%s_%02u.c",
-					 dir, safe, n);
+				for (n = 0; n < lim[w]; n++) {
+					struct stat es;
+
+					snprintf(path, sizeof path,
+						 "%s/%s_%0*u.c", dir, safe,
+						 (int)wide[w], n);
+					if (stat(path, &es) != 0) {
+						free_one = 1;
+						break;
+					}
+				}
+			}
+			if (!free_one) {
+				say_err(v, "%.40s has no free number left",
+					safe);
+				return;
 			}
 		}
 	}
@@ -5984,6 +6024,19 @@ static void draw_marker_line(struct out *o, struct view *v)
 		goto have_right;
 	}
 	/*
+	 * What the last copy did, wherever it was made from.
+	 *
+	 * Its own slot rather than the panel's commentary below, because that
+	 * one only shows while the draft panel has focus and a copy is almost
+	 * always made from the hex pane. Put there, the one message that exists
+	 * to stop a silent failure was itself silent.
+	 */
+	if (v->copy_msg[0]) {
+		snprintf(right, sizeof right, "%s", v->copy_msg);
+		rcol = v->copy_ok ? A_SIZE : A_WARN;
+		goto have_right;
+	}
+	/*
 	 * A word about the marker list, while the marker list is what is open.
 	 *
 	 * The panel's commentary below is scoped to the panel having focus,
@@ -6347,7 +6400,27 @@ static void draw_list(struct out *o, struct view *v)
 			char kind[16];
 			uint32_t b;
 
-			if (st->kind == KOF_STR_HEX)
+			/*
+			 * A hex marker's pool entry is a compiled program,
+			 * not its bytes - so both its size and its content
+			 * have to be read back out of that program. Taken at
+			 * face value, the ten byte pattern 2F62696E2F7368002D63
+			 * showed as 74 bytes of the program's own header.
+			 */
+			char hx[128], span[16];
+			int is_hex = st->kind == KOF_STR_HEX;
+
+			hx[0] = 0;
+			if (is_hex) {
+				kof_inspect_hex_span(st->bytes, st->len,
+						     span, sizeof span);
+				kof_inspect_hex_text(st->bytes, st->len,
+						     hx, sizeof hx);
+			} else {
+				snprintf(span, sizeof span, "%u", st->len);
+			}
+
+			if (is_hex)
 				snprintf(kind, sizeof kind, "hex");
 			else
 				snprintf(kind, sizeof kind, "str: %s-%s",
@@ -6359,7 +6432,7 @@ static void draw_list(struct out *o, struct view *v)
 			if (sel)
 				out_str(o, "\033[1m");
 			out_str(o, sel ? "*" : " ");
-			out_fmt(o, "%-14s %6u %8u  ", kind, st->uid, st->len);
+			out_fmt(o, "%-14s %6u %8s  ", kind, st->uid, span);
 			if (miss)
 				/* The word, not a dash: in a column of
 				 * offsets a dash reads as "not applicable"
@@ -6402,10 +6475,18 @@ static void draw_list(struct out *o, struct view *v)
 				}
 				out_fmt(o, "%-12.12s ", rgn);
 			}
-			for (b = 0; b < st->len && b < 20u; b++)
-				out_fmt(o, "%02X", st->bytes[b]);
-			if (st->len > 20u)
-				out_str(o, "...");
+			if (is_hex) {
+				/* The pattern as it was written, wildcards and
+				 * all - not the program that implements it. */
+				out_fmt(o, "%.40s", hx);
+				if (strlen(hx) > 40u)
+					out_str(o, "...");
+			} else {
+				for (b = 0; b < st->len && b < 20u; b++)
+					out_fmt(o, "%02X", st->bytes[b]);
+				if (st->len > 20u)
+					out_str(o, "...");
+			}
 			out_str(o, A_OFF);
 		}
 	}
@@ -6647,11 +6728,105 @@ static void draw_menu(struct out *o, struct view *v)
  */
 static char   g_clip[8192];
 static size_t g_clip_n;
+/* Which helper took the last copy, or NULL when only this program has it. */
+static const char *g_clip_via;
 
 static void copy_take(const char *bytes, size_t n)
 {
 	g_clip_n = n < sizeof g_clip ? n : sizeof g_clip;
 	memcpy(g_clip, bytes, g_clip_n);
+}
+
+/*
+ * The system clipboard through a helper program, when the terminal will not.
+ *
+ * OSC 52 is the right primary because it is the only one that crosses ssh, but
+ * it asks the TERMINAL for a favour and the common ones refuse: VTE - so
+ * gnome-terminal and xfce4-terminal - ships with clipboard writes disabled, and
+ * there is no reply, so the copy fails silently and a clipboard manager never
+ * sees a thing. Measured rather than assumed: the sequence goes out correctly
+ * with the right bytes in it and nothing arrives at the other end.
+ *
+ * So a local session gets a local answer. This is the only place this program
+ * starts another process, and it is written to be unable to disturb the one
+ * thing a TUI cannot afford to lose: the child's output goes to /dev/null and
+ * its input is a pipe, so it can never write to the terminal this is drawing on.
+ *
+ * Returns the helper's name, or NULL when none of them is installed.
+ */
+static const char *copy_extern(const char *bytes, size_t n)
+{
+	static const char *const helper[][4] = {
+		{ "wl-copy", NULL, NULL, NULL },
+		{ "xclip", "-selection", "clipboard", NULL },
+		{ "xsel", "-i", "-b", NULL }
+	};
+	size_t h;
+
+	for (h = 0; h < sizeof helper / sizeof helper[0]; h++) {
+		int fds[2];
+		pid_t pid;
+		int status = 0;
+		void (*old)(int);
+
+		if (pipe(fds) != 0)
+			return NULL;
+		pid = fork();
+		if (pid < 0) {
+			close(fds[0]);
+			close(fds[1]);
+			return NULL;
+		}
+		if (pid == 0) {
+			int devnull = open("/dev/null", O_WRONLY);
+
+			dup2(fds[0], STDIN_FILENO);
+			if (devnull >= 0) {
+				dup2(devnull, STDOUT_FILENO);
+				dup2(devnull, STDERR_FILENO);
+			}
+			close(fds[0]);
+			close(fds[1]);
+			/*
+			 * execvp wants char *const[] and is documented not to
+			 * modify what it points at - a signature older than
+			 * const itself. The copy is made here rather than
+			 * casting the table, so the strings stay const
+			 * everywhere they are actually read.
+			 */
+			{
+				char *argv[4];
+				size_t a;
+
+				for (a = 0; a < 4u; a++)
+					argv[a] = helper[h][a]
+						  ? strdup(helper[h][a]) : NULL;
+				execvp(argv[0], argv);
+			}
+			_exit(127);
+		}
+		close(fds[0]);
+		/* A helper that is not installed exits before reading, and the
+		 * write would then take this process down with SIGPIPE. */
+		old = signal(SIGPIPE, SIG_IGN);
+		{
+			size_t at = 0;
+
+			while (at < n) {
+				ssize_t w = write(fds[1], bytes + at, n - at);
+
+				if (w <= 0)
+					break;
+				at += (size_t)w;
+			}
+		}
+		close(fds[1]);
+		signal(SIGPIPE, old);
+		if (waitpid(pid, &status, 0) == pid &&
+		    WIFEXITED(status) && WEXITSTATUS(status) == 0)
+			return helper[h][0];
+	}
+	return NULL;
 }
 
 static void copy_osc52(const char *bytes, size_t n)
@@ -6682,6 +6857,28 @@ static void copy_osc52(const char *bytes, size_t n)
 		term_write_n(o.p, o.n);
 	free(o.p);
 	copy_take(bytes, n);
+	g_clip_via = copy_extern(bytes, n);
+}
+
+/*
+ * Say where the bytes went.
+ *
+ * A copy that reports nothing cannot be told from a copy that did nothing, and
+ * this one really does fail on the common terminals - so the difference has to
+ * be on the screen. Naming the helper when one took it is not decoration: it is
+ * how the next person knows whether the clipboard they are about to paste from
+ * has been written at all.
+ */
+static void copy_said(struct view *v, size_t n)
+{
+	v->copy_ok = g_clip_via != NULL;
+	if (g_clip_via)
+		snprintf(v->copy_msg, sizeof v->copy_msg,
+			 "copied %u byte(s) via %s", (unsigned)n, g_clip_via);
+	else
+		snprintf(v->copy_msg, sizeof v->copy_msg,
+			 "copied %u byte(s) - this program only, the terminal "
+			 "refused the clipboard", (unsigned)n);
 }
 
 /* Copying an offset is copying a number, so it has two spellings and both are
@@ -6694,6 +6891,7 @@ static void copy_offset(struct view *v, int hex)
 	snprintf(t, sizeof t, hex ? "%llx" : "%llu",
 		 (unsigned long long)v->menu_off);
 	copy_osc52(t, strlen(t));
+	copy_said(v, strlen(t));
 }
 /*
  * Take the selection into the draft.
@@ -6842,8 +7040,10 @@ static void menu_run(struct view *v, int a)
 			out_add(&t, (const char *)&c, 1);
 		}
 	}
-	if (t.n)
+	if (t.n) {
 		copy_osc52(t.p, t.n);
+		copy_said(v, t.n);
+	}
 	free(t.p);
 	v->menu_open = 0;
 }
@@ -9334,6 +9534,7 @@ static int handle(struct view *v, int k)
 			}
 			if (k == 0x03) {
 				copy_osc52(v->find, n);
+				copy_said(v, n);
 				return 1;
 			}
 			if (v->field_all && (k == 127 || k == 8 || k == 0x16 ||
@@ -9455,6 +9656,7 @@ static int handle(struct view *v, int k)
 		}
 		if (k == 0x03) {                /* Ctrl+C */
 			copy_osc52(buf, n);
+			copy_said(v, n);
 			return 1;
 		}
 		/*

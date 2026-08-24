@@ -1701,10 +1701,26 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
 								       : "sub",
 					 (s->flags & KOF_STR_ICASE) ? "i" : "c");
 
-			if (miss)
-				printf("%s", C_DIM);
-			printf("        %s%-11s%s %6u %s%8u%s  ",
-			       ci, kind, co, s->uid, cs, s->len, co);
+			/*
+			 * A hex marker's size is what a match COVERS, not
+			 * how big the program that finds it is. The pool
+			 * entry for 2F62696E2F7368002D63 is 74 bytes of
+			 * compiled steps and tables; the pattern is ten.
+			 */
+			{
+				char span[16];
+
+				if (s->kind == KOF_STR_HEX)
+					kof_inspect_hex_span(s->bytes, s->len,
+							     span, sizeof span);
+				else
+					snprintf(span, sizeof span, "%u",
+						 s->len);
+				if (miss)
+					printf("%s", C_DIM);
+				printf("        %s%-11s%s %6u %s%8s%s  ",
+				       ci, kind, co, s->uid, cs, span, co);
+			}
 			if (miss)
 				printf("%-10s  ", "-");
 			else
