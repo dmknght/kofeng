@@ -19,13 +19,19 @@
  * silent wrong answer here. The ad-hoc entry points have no such dependency.
  */
 
-#define _POSIX_C_SOURCE 200809L
+/* _GNU_SOURCE, not _POSIX_C_SOURCE: this file includes kofplatform.h, whose
+ * kof_memmem calls memmem() from an inline function whether or not anything
+ * here does. _POSIX_C_SOURCE alone hides it and the inline stops compiling -
+ * the same reason kofexamine.c and kofviewer.c both say _GNU_SOURCE. */
+#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 #include "kofinspect.h"
+#include "../libkofeng/core/kofplatform.h"
 #include "../libkofeng/kofmatchers/kofmatch.h"
 #include "../libkofeng/kofscanners/scan.h"
 
@@ -763,4 +769,288 @@ void kof_touch_free(struct kof_touch *v, uint32_t n)
 		free(v[i].name_id);
 	}
 	free(v);
+}
+
+
+/* ---- writing an object out ------------------------------------------------ */
+
+#define DUMP_NAME_MAX  255            /* what a filesystem component usually holds */
+#define DUMP_KEEP_MAX  48             /* readable prefix retained when shortening */
+
+/* Bytes a dump name may carry as they are: anything else is replaced, so a name
+ * out of a file cannot become a separator or a parent reference. */
+static int name_char_ok(unsigned char c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+	       (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_';
+}
+
+static const char *base_of(const char *path)
+{
+	const char *s = strrchr(path, '/');
+
+	return s ? s + 1 : path;
+}
+
+static void dump_dir_name(const char *base, char *out, size_t cap)
+{
+	size_t n = strlen(base), i, keep = 0;
+	int clean = 1;
+
+	for (i = 0; i < n; i++)
+		if (!name_char_ok((unsigned char)base[i])) {
+			clean = 0;
+			break;
+		}
+
+	if (clean && n + sizeof "__dump" - 1 <= DUMP_NAME_MAX &&
+	    n + sizeof "__dump" < cap) {
+		snprintf(out, cap, "_%s_dump", base);
+		return;
+	}
+
+	/* Dropping to a bare checksum would be simpler and would make every
+	 * result unrecognisable. */
+	while (keep < n && keep < DUMP_KEEP_MAX &&
+	       name_char_ok((unsigned char)base[keep]))
+		keep++;
+	snprintf(out, cap, "_%.*s%s%08x_dump", (int)keep, base, keep ? "-" : "",
+		 kof_crc32(base, n));
+}
+
+int kof_dump_dir_for(const char *path, char *out, uint32_t cap)
+{
+	const char *base = base_of(path);
+	size_t lead = (size_t)(base - path);
+	char name[DUMP_NAME_MAX + 1];
+
+	dump_dir_name(base, name, sizeof name);
+	if (lead + strlen(name) + 1 > cap)
+		return 0;
+	memcpy(out, path, lead);
+	memcpy(out + lead, name, strlen(name) + 1);
+	return 1;
+}
+
+/* One sentence for the caller to show, and 0, in one statement at every site
+ * that has something to say. */
+static int dump_fail(char *err, uint32_t cap, const char *what, const char *at)
+{
+	if (err && cap)
+		snprintf(err, cap, "%s %.200s", what, at);
+	return 0;
+}
+
+static int dump_write(const char *path, const void *bytes, uint64_t len,
+		      char *err, uint32_t err_cap)
+{
+	FILE *f = fopen(path, "wb");
+
+	if (!f)
+		return dump_fail(err, err_cap, "cannot write", path);
+	if (len && fwrite(bytes, 1, (size_t)len, f) != (size_t)len) {
+		fclose(f);
+		return dump_fail(err, err_cap, "short write to", path);
+	}
+	if (fclose(f) != 0)
+		return dump_fail(err, err_cap, "cannot write", path);
+	return 1;
+}
+
+/*
+ * Every extent of every region, in file order.
+ *
+ * The numbered files say where each region begins; this says where each run of
+ * each region is, which is the layout itself. It is also where the partition
+ * claim becomes checkable line by line: consecutive rows are adjacent, the first
+ * starts at zero and the last ends at the object size, or one of those is not
+ * true and the row it breaks on says which region got it wrong.
+ */
+struct layout_row {
+	uint64_t    off, len;
+	const char *name;
+};
+
+static int dump_layout(const char *dir, const struct kof_inspect_fmt *f,
+		       const struct kof_obj_ctx *ctx, char *err, uint32_t err_cap)
+{
+	static struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
+	static struct layout_row row[KOF_SCAN_MAX_EXTENTS * 8];
+	char path[KOF_DUMP_PATH_ROOM];
+	uint32_t nrow = 0, i, k, j;
+	FILE *out;
+
+	for (i = 0; i < f->n_regions; i++) {
+		const char *rn = f->region_name(f->regions[i]);
+		uint32_t n = ctx->resolve_scan
+			   ? ctx->resolve_scan(ctx, f->regions[i], ext,
+					       KOF_SCAN_MAX_EXTENTS) : 0;
+		for (k = 0; k < n && nrow < sizeof row / sizeof row[0]; k++) {
+			row[nrow].off = ext[k].off;
+			row[nrow].len = ext[k].len;
+			row[nrow].name = rn ? rn : "?";
+			nrow++;
+		}
+	}
+	for (i = 1; i < nrow; i++) {
+		struct layout_row t = row[i];
+		for (j = i; j > 0 && row[j - 1].off > t.off; j--)
+			row[j] = row[j - 1];
+		row[j] = t;
+	}
+
+	if ((size_t)snprintf(path, sizeof path, "%s/LAYOUT", dir) >= sizeof path)
+		return dump_fail(err, err_cap, "path too long under", dir);
+	out = fopen(path, "w");
+	if (!out)
+		return dump_fail(err, err_cap, "cannot write", path);
+	fprintf(out, "%-12s %-12s %s\n", "offset", "length", "region");
+	for (i = 0; i < nrow; i++)
+		fprintf(out, "%-12llu %-12llu %s\n",
+			(unsigned long long)row[i].off,
+			(unsigned long long)row[i].len, row[i].name);
+	if (fclose(out) != 0)
+		return dump_fail(err, err_cap, "cannot write", path);
+	return 1;
+}
+
+static int dump_region(const char *dir, uint32_t rank, const char *region,
+		       const struct kof_obj_ctx *ctx, kof_buf buf, uint32_t bit,
+		       uint64_t *out_len, char *err, uint32_t err_cap)
+{
+	static struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
+	char name[KOF_DUMP_PATH_ROOM];
+	uint32_t n, i;
+	FILE *f;
+
+	*out_len = 0;
+	n = ctx->resolve_scan ? ctx->resolve_scan(ctx, bit, ext,
+						  KOF_SCAN_MAX_EXTENTS) : 0;
+	if (n == 0)
+		return 1;                /* an empty region is not a failure */
+
+	/* The directory already names the object, and the region's enum identifier
+	 * already names the format, so the file is just the region. */
+	if ((size_t)snprintf(name, sizeof name, "%s/%02u.%s", dir, rank, region)
+	    >= sizeof name)
+		return dump_fail(err, err_cap, "path too long under", dir);
+	f = fopen(name, "wb");
+	if (!f)
+		return dump_fail(err, err_cap, "cannot write", name);
+	for (i = 0; i < n; i++) {
+		if (fwrite(buf.p + ext[i].off, 1, (size_t)ext[i].len, f)
+		    != (size_t)ext[i].len) {
+			fclose(f);
+			return dump_fail(err, err_cap, "short write to", name);
+		}
+		*out_len += ext[i].len;
+	}
+	if (fclose(f) != 0)
+		return dump_fail(err, err_cap, "cannot write", name);
+	return 1;
+}
+
+int kof_dump_object(const char *dir, kof_buf buf,
+		    const struct kof_inspect_fmt *f,
+		    const struct kof_obj_ctx *ctx,
+		    struct kof_dump_stat *st, char *err, uint32_t err_cap)
+{
+	static struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
+	char path[KOF_DUMP_PATH_ROOM];
+	uint64_t first[16];
+	uint32_t order[16], nord = 0, i, k;
+
+	if (st)
+		memset(st, 0, sizeof *st);
+	if (err && err_cap)
+		err[0] = 0;
+	if (kof_mkdir(dir, 0777) != 0 && errno != EEXIST)
+		return dump_fail(err, err_cap, "cannot create", dir);
+
+	/*
+	 * The whole object, numbered 00 so it sorts before the regions and reads
+	 * as what it is: the thing the others are parts of. Named KOF_SCAN_ALL
+	 * rather than "full" or the object's own filename because that is what
+	 * the engine calls the whole of an object - one vocabulary in the
+	 * directory rather than two.
+	 *
+	 * Worth having even though the caller usually has the file, because a
+	 * dump is often taken of something that never was a file: for a
+	 * recovered child this is the only copy outside the scan.
+	 */
+	if (buf.n) {
+		if ((size_t)snprintf(path, sizeof path, "%s/00.KOF_SCAN_ALL", dir)
+		    >= sizeof path)
+			return dump_fail(err, err_cap, "path too long under", dir);
+		if (!dump_write(path, buf.p, buf.n, err, err_cap))
+			return 0;
+		if (st)
+			st->whole_bytes = buf.n;
+	}
+
+	if (!f || !ctx)
+		return 1;
+
+	/* Ordered by where each one begins. A region with no extents is not
+	 * written and does not take a number, so the numbers are contiguous over
+	 * what is actually there. */
+	for (i = 0; i < f->n_regions && nord < 16; i++) {
+		uint32_t n = ctx->resolve_scan
+			   ? ctx->resolve_scan(ctx, f->regions[i], ext,
+					       KOF_SCAN_MAX_EXTENTS) : 0;
+		if (n == 0)
+			continue;
+		first[nord] = ext[0].off;
+		order[nord] = i;
+		nord++;
+	}
+	for (i = 1; i < nord; i++) {
+		uint64_t fo = first[i];
+		uint32_t oi = order[i];
+
+		for (k = i; k > 0 && first[k - 1] > fo; k--) {
+			first[k] = first[k - 1];
+			order[k] = order[k - 1];
+		}
+		first[k] = fo;
+		order[k] = oi;
+	}
+
+	for (i = 0; i < nord; i++) {
+		uint64_t len;
+
+		if (!dump_region(dir, i + 1,
+				 f->region_name(f->regions[order[i]]),
+				 ctx, buf, f->regions[order[i]], &len,
+				 err, err_cap))
+			return 0;
+		if (len && st) {
+			st->regions++;
+			st->region_bytes += len;
+		}
+	}
+
+	return dump_layout(dir, f, ctx, err, err_cap);
+}
+
+int kof_dump_child(const char *dir, const char *tag,
+		   const void *bytes, uint64_t len,
+		   char *sub, uint32_t sub_cap, char *err, uint32_t err_cap)
+{
+	char path[KOF_DUMP_PATH_ROOM];
+
+	if (err && err_cap)
+		err[0] = 0;
+	if ((size_t)snprintf(path, sizeof path, "%s/unpacked.%s", dir, tag)
+	    >= sizeof path)
+		return dump_fail(err, err_cap, "path too long under", dir);
+	if (!dump_write(path, bytes, len, err, err_cap))
+		return 0;
+	if (!sub || !sub_cap)
+		return 1;
+	if ((size_t)snprintf(sub, sub_cap, "%s.regions", path) >= sub_cap)
+		return dump_fail(err, err_cap, "path too long under", dir);
+	if (kof_mkdir(sub, 0777) != 0 && errno != EEXIST)
+		return dump_fail(err, err_cap, "cannot create", sub);
+	return 1;
 }

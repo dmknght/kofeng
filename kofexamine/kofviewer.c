@@ -742,6 +742,29 @@ struct object {
 	char            **finding;
 	uint32_t          n_finding;
 	char              packer[48];   /* the module that opened or unpacked it */
+	/*
+	 * The version that module read out of the object, or -1 for none.
+	 *
+	 * Signed and not a flag beside a uint, because 0 is a version a container
+	 * can carry and "it never said" has to be a different answer from "it
+	 * said zero".
+	 *
+	 * It is the FORMAT version the module found in the file - UPX's l_info
+	 * byte, RAR's archive version - and not the packer's release. The two get
+	 * confused, so nothing here pretends to know that a UPX l_info of 13
+	 * means UPX 3.9x: the module reported a field called version and this
+	 * shows the field.
+	 */
+	long long         packer_ver;
+	/*
+	 * Whether the engine got to the end of THIS object, and what stopped it.
+	 *
+	 * Kept per object rather than for the file, because it is per object: a
+	 * container that opened may hold one entry it could not, and the packed
+	 * parent being incomplete says nothing about the child that came out of
+	 * it. enum kof_broken, KOF_BROKEN_NONE when it finished.
+	 */
+	uint32_t          broken;
 	struct kof_touch *touch;
 	uint32_t          n_touch;
 };
@@ -783,6 +806,7 @@ struct view {
 	uint32_t      n_obj;
 
 	char        pending[48];    /* the unpacker that has just spoken */
+	long long   pending_ver;    /* and the version it reported, or -1 */
 
 	struct node node[MAX_TREE];
 	uint32_t    n_node, sel_node, tree_top;
@@ -884,8 +908,20 @@ struct view {
 	struct cond  cnd[MAX_GROUP];
 	uint32_t     n_cnd, cur_cnd;
 	char         warn[120];     /* why the last add was refused */
-	char         copy_msg[120]; /* where the last copy's bytes went */
-	int          copy_ok;       /* and whether anything outside took it */
+	/*
+	 * What the last ACTION did, wherever it was asked for.
+	 *
+	 * Its own slot rather than `warn`, which is scoped to the draft panel
+	 * having focus. A copy is almost always made from the hex pane and a
+	 * dump is asked for from the menu bar, so put in `warn` the one message
+	 * that exists to prove something happened was itself invisible.
+	 *
+	 * One slot for both because they are one thing to a reader - the last
+	 * thing I asked for, and how it went - and two would mean deciding which
+	 * of them wins on a screen that can only show one.
+	 */
+	char         act_msg[160];
+	int          act_ok;        /* whether it did what was asked */
 	int          warn_bad;      /* 1 it failed, 0 it is only worth knowing */
 
 	/*
@@ -1106,9 +1142,13 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	o = &v->obj[v->n_obj];
 	memset(o, 0, sizeof *o);
 	snprintf(o->name, sizeof o->name, "%s", name);
+	o->packer_ver = -1;
+	o->broken = res->broken;
 	if (v->pending[0]) {
 		snprintf(o->packer, sizeof o->packer, "%s", v->pending);
+		o->packer_ver = v->pending_ver;
 		v->pending[0] = 0;
+		v->pending_ver = -1;
 	}
 	for (p = name; (p = strstr(p, "//")) != NULL; p += 2)
 		o->depth++;
@@ -1197,11 +1237,26 @@ static void on_debug(const char *what, uint64_t value, void *user)
 	const char *dot = strrchr(what, '.');
 	size_t n = dot ? (size_t)(dot - what) : strlen(what);
 
-	(void)value;
 	if (n >= sizeof v->pending)
 		n = sizeof v->pending - 1u;
+	/*
+	 * A different module speaking drops the version the last one gave, so a
+	 * version can never be shown against a name that did not report it.
+	 */
+	if (strlen(v->pending) != n || memcmp(v->pending, what, n) != 0)
+		v->pending_ver = -1;
 	memcpy(v->pending, what, n);
 	v->pending[n] = 0;
+	/*
+	 * One field is picked out of everything a module says, and it is the one
+	 * spelled "version". Three modules across two formats report it -
+	 * UPX.ELF, UPX.PE and Rar - and it is the field a reader looking at a
+	 * packed sample asks for first, because it decides which layout the rest
+	 * of the numbers belong to. The others are detail and kofexamine --debug
+	 * prints all of them.
+	 */
+	if (dot && strcmp(dot + 1, "version") == 0)
+		v->pending_ver = (long long)value;
 }
 
 static void objects_collect(struct view *v, kof_engine *eng)
@@ -1211,6 +1266,9 @@ static void objects_collect(struct view *v, kof_engine *eng)
 
 	memset(&opt, 0, sizeof opt);
 	opt.all_matches = 1;
+	/* -1 rather than the zeroed view's 0, because 0 is a version a container
+	 * can carry. Set here so the first module to speak cannot inherit it. */
+	v->pending_ver = -1;
 	sc = kof_scanner_new(eng);
 	if (!sc)
 		return;
@@ -5939,7 +5997,9 @@ ids_done:
 static void draw_marker_line(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
-	char name[80], head[24], right[120];
+	/* Wide enough for the action slot, which is the longest thing that lands
+	 * here: a dump reports counts, a byte total and a directory name. */
+	char name[80], head[24], right[200];
 	/* The right hand text is not always a readout: while the draft has the
 	 * focus it can be a complaint, and a complaint in the colour of a
 	 * readout is one people scroll past. */
@@ -5962,8 +6022,24 @@ static void draw_marker_line(struct out *o, struct view *v)
 
 	row_start(o, mark_row(), 1);
 
-	if (ob->packer[0])
-		out_fmt(o, A_BAD "%s" A_OFF A_DIM "  |  " A_OFF, ob->packer);
+	/*
+	 * Which module opened this object, and which version of the format it
+	 * found - the left hand end, where it has been, because it is a property
+	 * of the object rather than of what is being done to it.
+	 *
+	 * The version earns its place beside the name: "UPX.ELF" says a packer
+	 * was recognised, and the version is what decides whether the layout the
+	 * module walked is the one this file actually uses. When they disagree
+	 * the recovered bytes are short and nothing else on the screen says why.
+	 */
+	if (ob->packer[0]) {
+		if (ob->packer_ver >= 0)
+			out_fmt(o, A_BAD "%s" A_OFF A_DIM " v%lld" A_OFF,
+				ob->packer, ob->packer_ver);
+		else
+			out_fmt(o, A_BAD "%s" A_OFF, ob->packer);
+		out_str(o, A_DIM "  |  " A_OFF);
+	}
 
 	if (!ob->n_touch) {
 		out_str(o, A_DIM "no markers" A_OFF);
@@ -6031,9 +6107,9 @@ static void draw_marker_line(struct out *o, struct view *v)
 	 * always made from the hex pane. Put there, the one message that exists
 	 * to stop a silent failure was itself silent.
 	 */
-	if (v->copy_msg[0]) {
-		snprintf(right, sizeof right, "%s", v->copy_msg);
-		rcol = v->copy_ok ? A_SIZE : A_WARN;
+	if (v->act_msg[0]) {
+		snprintf(right, sizeof right, "%s", v->act_msg);
+		rcol = v->act_ok ? A_SIZE : A_WARN;
 		goto have_right;
 	}
 	/*
@@ -6114,6 +6190,27 @@ static void draw_marker_line(struct out *o, struct view *v)
 		 * a word is the one that would otherwise be read wrong.
 		 */
 		snprintf(right, sizeof right, "region offsets");
+	} else if (ob->broken) {
+		/*
+		 * The engine did not finish this object, said here because
+		 * nothing else on the screen would say it.
+		 *
+		 * It is on the RIGHT and it is LAST. Right, because it is a
+		 * fault and the left hand end is where the object describes
+		 * itself; last, because it is a standing condition rather than
+		 * a reply - it is true for as long as the object is open, and a
+		 * selection or a search the reader just made is the thing they
+		 * are waiting on. It comes back the moment they let go.
+		 *
+		 * Why it matters on this screen in particular: an unpack that
+		 * stopped part way still yields an object, and that object
+		 * looks entirely ordinary. A signature written against the
+		 * CODE of half a recovered image is a signature written against
+		 * a coincidence.
+		 */
+		snprintf(right, sizeof right, "not finished: %s",
+			 kof_broken_name(ob->broken));
+		rcol = A_BAD;
 	} else {
 		right[0] = 0;
 	}
@@ -6871,12 +6968,12 @@ static void copy_osc52(const char *bytes, size_t n)
  */
 static void copy_said(struct view *v, size_t n)
 {
-	v->copy_ok = g_clip_via != NULL;
+	v->act_ok = g_clip_via != NULL;
 	if (g_clip_via)
-		snprintf(v->copy_msg, sizeof v->copy_msg,
+		snprintf(v->act_msg, sizeof v->act_msg,
 			 "copied %u byte(s) via %s", (unsigned)n, g_clip_via);
 	else
-		snprintf(v->copy_msg, sizeof v->copy_msg,
+		snprintf(v->act_msg, sizeof v->act_msg,
 			 "copied %u byte(s) - this program only, the terminal "
 			 "refused the clipboard", (unsigned)n);
 }
@@ -7549,8 +7646,24 @@ static void find_run(struct view *v, int back)
  */
 enum bar_menu { BM_FILE = 0, BM_EDIT, BM_HELP, BM_COUNT };
 
+/*
+ * Dump, next to them, because it is about this file too.
+ *
+ * The same directory kofexamine --dump writes, from the same code - see
+ * kof_dump_object. Here because the viewer is where the question comes up: a
+ * region is what the parse decided rather than anything on disk, so the way to
+ * check what a rule will actually search is to have the bytes of that region in
+ * a file. Reaching for a second tool to get them, on the object already open and
+ * already parsed, was the gap.
+ *
+ * It writes the WHOLE tree - the file and everything the unpackers recovered
+ * from it - not the selected node, and that is deliberate. The objects are
+ * already collected and already parsed, so dumping one of them and making
+ * somebody come back for the next is a menu item that has to be used repeatedly
+ * to do one thing.
+ */
 enum bar_item {
-	BI_OPEN = 0, BI_SAVE, BI_SAVE_AS, BI_PROPS, BI_QUIT,
+	BI_OPEN = 0, BI_SAVE, BI_SAVE_AS, BI_DUMP, BI_PROPS, BI_QUIT,
 	BI_FIND, BI_GOTO,
 	BI_KEYS, BI_ABOUT,
 	BI_COUNT
@@ -7563,6 +7676,7 @@ static const struct {
 	{ "Open...",        BM_FILE },
 	{ "Save",           BM_FILE },
 	{ "Save As...",     BM_FILE },
+	{ "Dump regions",   BM_FILE },
 	{ "Properties",     BM_FILE },
 	{ "Quit",           BM_FILE },
 	{ "Find...",        BM_EDIT },
@@ -7595,6 +7709,10 @@ static int bar_enabled(struct view *v, int i)
 	case BI_OPEN:      return 0;            /* no way in yet */
 	case BI_SAVE:      return save_ok(v);
 	case BI_SAVE_AS:   return save_as_ok(v);
+	/* Off for a viewer that has no file behind it, which is the one case
+	 * where there is nowhere for a dump to go: the directory is named after
+	 * the file and placed beside it. */
+	case BI_DUMP:      return v->path && v->path[0];
 	case BI_PROPS:     return 1;
 	case BI_QUIT:      return 1;
 	case BI_FIND:      return 1;
@@ -8219,6 +8337,91 @@ static void draw_prop(struct out *o, struct view *v)
 	}
 }
 
+/*
+ * Write the file and everything recovered from it, the way kofexamine --dump
+ * would have.
+ *
+ * The objects are the ones already collected and already parsed, so nothing is
+ * scanned again: object 0 is the file and gets the dump directory itself; every
+ * other one is something an unpacker produced and gets unpacked.<n>[.<label>]
+ * beside it, plus a .regions directory of its own. That numbering is
+ * kofexamine's, and it is the same because a researcher who dumps from both
+ * should not have to learn where the same bytes went twice.
+ *
+ * An object the session could not keep - past the budget, so `too_big` - has no
+ * bytes here to write. It is counted and named rather than skipped silently,
+ * because a dump missing one of its objects looks exactly like a dump of an
+ * object that was never there.
+ */
+/* The status bar has one line and a dump directory sits beside a path that can
+ * be any length, so the message names the directory and not the road to it. */
+static const char *base_name(const char *path)
+{
+	const char *s = strrchr(path, '/');
+
+	return s ? s + 1 : path;
+}
+
+static void dump_all(struct view *v)
+{
+	char dir[KOF_DUMP_PATH_ROOM], sub[KOF_DUMP_PATH_ROOM], why[256];
+	struct kof_dump_stat ds;
+	uint32_t i, files = 0, kids = 0, skipped = 0;
+	uint64_t bytes = 0;
+
+	v->act_ok = 0;
+	if (!kof_dump_dir_for(v->path, dir, sizeof dir)) {
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "no dump: path too long to place one beside the file");
+		return;
+	}
+	for (i = 0; i < v->n_obj; i++) {
+		struct object *o = &v->obj[i];
+		const char *into = dir;
+
+		if (o->too_big || !o->buf.n) {
+			skipped++;
+			continue;
+		}
+		if (i) {
+			/* <number>.<label>, or the number alone. The number is
+			 * the identity; the label is there so a directory
+			 * listing reads, and the engine already reduced it to a
+			 * printable basename - so nothing here has to decide
+			 * what to do about a separator or a "..". */
+			const char *lab = strrchr(o->name, ':');
+			char tag[80];
+
+			if (lab && lab[1])
+				snprintf(tag, sizeof tag, "%u.%s", i, lab + 1);
+			else
+				snprintf(tag, sizeof tag, "%u", i);
+			if (!kof_dump_child(dir, tag, o->buf.p, o->buf.n, sub,
+					    sizeof sub, why, sizeof why)) {
+				snprintf(v->act_msg, sizeof v->act_msg,
+					 "dump stopped: %.120s", why);
+				return;
+			}
+			kids++;
+			into = sub;
+		}
+		if (!kof_dump_object(into, o->buf, o->fmt, &o->ctx, &ds, why,
+				     sizeof why)) {
+			snprintf(v->act_msg, sizeof v->act_msg,
+				 "dump stopped: %.120s", why);
+			return;
+		}
+		files += ds.regions;
+		bytes += ds.region_bytes;
+	}
+
+	v->act_ok = 1;
+	snprintf(v->act_msg, sizeof v->act_msg,
+		 "dumped %u region(s), %llu B, %u recovered -> %.60s%s",
+		 files, (unsigned long long)bytes, kids, base_name(dir),
+		 skipped ? "  (some too large to hold)" : "");
+}
+
 static void bar_run(struct view *v, int i)
 {
 	if (!bar_enabled(v, i))
@@ -8233,6 +8436,7 @@ static void bar_run(struct view *v, int i)
 		v->edit = 500;
 		v->warn[0] = 0;
 		break;
+	case BI_DUMP:    dump_all(v); break;
 	case BI_PROPS:   v->prop_open = 1; v->prop_off = 0; break;
 	case BI_KEYS:    v->help_open = 1; break;
 	case BI_ABOUT:   v->help_open = 2; break;

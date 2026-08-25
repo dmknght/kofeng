@@ -102,6 +102,94 @@ void     kof_inspect_hex_span(const uint8_t *prog, uint32_t n,
 uint32_t kof_inspect_hex_text(const uint8_t *prog, uint32_t n,
 			      char *out, uint32_t cap);
 
+/* ---- writing an object out -------------------------------------------------
+ *
+ * What a dump is, and why it is here rather than in the tool that first grew it.
+ *
+ * A signature is written against a REGION, and a region is not a thing anybody
+ * can point at on disk: it is what the parse decided, a set of extents that need
+ * not be contiguous and need not be a section. So the way to check what a rule
+ * will actually see is to write those extents out and look at them - and the way
+ * to check a packed sample is to do the same to what the unpacker recovered,
+ * because CODE and DATA of the recovered image are nothing like CODE and DATA of
+ * the packed one.
+ *
+ * Both front ends want it and it must be the SAME dump from both. Two
+ * implementations would be two answers to "what is in CODE", and the whole use of
+ * the thing is that a directory listing and a signature agree.
+ *
+ * The layout, unchanged from when only kofexamine wrote it:
+ *
+ *     _<name>_dump/
+ *         00.KOF_SCAN_ALL          the whole object
+ *         01.<REGION>              one file per region, in offset order
+ *         02.<REGION>
+ *         LAYOUT                   every extent of every region, in file order
+ *         unpacked.1.<label>       a recovered child, whole
+ *         unpacked.1.<label>.regions/   and the same treatment applied to it
+ *
+ * Nothing here prints. Both callers report differently - one to a terminal, one
+ * into a status bar - and a printf in here would be one of them borrowing the
+ * other's voice. A failure comes back as 0 with a sentence in `err`.
+ */
+
+/* A path plus a dump directory name. An input needing more is refused rather
+ * than truncated: a truncated path names a DIFFERENT directory, and creating it
+ * would put one object's regions where another object's regions can also land. */
+#define KOF_DUMP_PATH_ROOM (4096 + 256)
+
+/*
+ * The directory an object's dump belongs in: `_<name>_dump` beside the file.
+ *
+ * The leading part of the path is kept verbatim - it names a directory that
+ * already exists and is not ours to rename - and only the last component is
+ * turned into a dump name. A name too long for a filesystem component, or one
+ * carrying characters that would make the result awkward to use, keeps its
+ * readable prefix and gains a checksum of the whole original, so two files that
+ * differ only past the cut still get different directories.
+ *
+ * 0 when the result would not fit.
+ */
+int kof_dump_dir_for(const char *path, char *out, uint32_t cap);
+
+/* What one dump wrote, for a caller that wants to say so. */
+struct kof_dump_stat {
+	uint32_t regions;      /* region files written; an empty region gets none */
+	uint64_t region_bytes; /* summed across them */
+	uint64_t whole_bytes;  /* the 00.KOF_SCAN_ALL file, counted apart because
+				* it is not a region and adding it in would count
+				* every byte twice */
+};
+
+/*
+ * Write one object: the whole of it, each region that has extents, and LAYOUT.
+ *
+ * Creates `dir`. `f` and `ctx` are what kof_inspect_identify handed back for
+ * these bytes; a NULL `f` writes the whole object and nothing else, which is the
+ * truthful dump of something no parser claimed.
+ *
+ * The extents of a region are concatenated in offset order, which is what a
+ * module searching that region sees as one logical run of bytes. Two extents that
+ * are not adjacent in the file are adjacent in the file written, and that is the
+ * honest representation: a pattern spanning the join is one a module would find.
+ */
+int kof_dump_object(const char *dir, kof_buf buf,
+		    const struct kof_inspect_fmt *f,
+		    const struct kof_obj_ctx *ctx,
+		    struct kof_dump_stat *st, char *err, uint32_t err_cap);
+
+/*
+ * One recovered child, written whole into an existing dump directory, and the
+ * directory its own regions go in.
+ *
+ * `tag` is the caller's name for it - "1.upx", "2" - and becomes
+ * unpacked.<tag>. `sub` comes back holding <that>.regions, created and ready to
+ * be passed to kof_dump_object; pass NULL for sub_cap 0 to skip making it.
+ */
+int kof_dump_child(const char *dir, const char *tag,
+		   const void *bytes, uint64_t len,
+		   char *sub, uint32_t sub_cap, char *err, uint32_t err_cap);
+
 /*
  * Why a module is on the list.
  *
