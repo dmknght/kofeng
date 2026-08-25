@@ -5669,7 +5669,7 @@ static void draw_decl(struct out *o, struct view *v)
 			snprintf(rl, sizeof rl, "find_all");
 
 		if (PR_VIS(r)) {
-			char nm[40], lead[16], th[24];
+			char nm[40], lead[16];
 
 			row_start(o, PR(r), 1);
 			/* Nothing to name only when there is neither a marker
@@ -5680,11 +5680,6 @@ static void draw_decl(struct out *o, struct view *v)
 					    sizeof nm);
 			else
 				snprintf(nm, sizeof nm, "-");
-			if (q->rule == 2)
-				snprintf(th, sizeof th, ">= %u of %u",
-					 q->thresh, grp_count(v, g));
-			else
-				th[0] = 0;
 			/*
 			 * Named fields, not a table.
 			 *
@@ -5704,12 +5699,31 @@ static void draw_decl(struct out *o, struct view *v)
 			v->grp_rg[g][0] = 1 + (int)o->col_hint;
 			out_fmt(o, "%s%s" A_OFF, A_LOC, nm);
 			v->grp_rg[g][1] = (int)o->col_hint;
+			/*
+			 * TWO THINGS, AND ONLY ONE OF THEM IS A CONTROL.
+			 *
+			 * ">= N" is the threshold: it is what the author sets,
+			 * and clicking it opens the menu of values. "of N" is
+			 * how many markers the matcher currently holds - a
+			 * fact about the matcher, changed by adding or removing
+			 * a marker and by nothing else.
+			 *
+			 * The clickable span used to cover both, so clicking
+			 * the total - the half that reads most like a number
+			 * somebody would want to change - opened the menu for
+			 * the other one. The span now ends where the control
+			 * does, and the total is text: highlighted, because it
+			 * is the number the threshold has to make sense
+			 * against, but not a thing to press.
+			 */
 			v->grp_th[g][0] = v->grp_th[g][1] = -1;
-			if (th[0]) {
+			if (q->rule == 2) {
 				out_str(o, A_DIM "   Threshold: " A_OFF);
 				v->grp_th[g][0] = 1 + (int)o->col_hint;
-				out_fmt(o, "%s%s" A_OFF, A_ID, th);
+				out_fmt(o, "%s>= %u" A_OFF, A_ID, q->thresh);
 				v->grp_th[g][1] = (int)o->col_hint;
+				out_fmt(o, A_DIM " of " A_OFF "%s%u" A_OFF,
+					A_SIZE, grp_count(v, g));
 			}
 			out_str(o, "   ");
 			v->grp_nt[g][0] = 1 + (int)o->col_hint;
