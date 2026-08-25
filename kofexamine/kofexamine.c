@@ -2016,6 +2016,21 @@ struct unp_run {
 	struct kof_engine *touch;
 	uint32_t    produced;
 	uint32_t    partial;
+	/*
+	 * Whether the FILE ITSELF was finished, which is a different fact from
+	 * `partial` and was the one missing.
+	 *
+	 * `partial` counts recovered children whose own scan broke. An unpack that
+	 * stopped part way through is not that: the child it produced is intact and
+	 * was scanned to the end - it is simply not all of the original. The reason
+	 * for that lives on the parent's result, because the parent is the object
+	 * the unpacker was working on.
+	 *
+	 * Without this a file cut in half reported "unpacked 1 object(s)" with
+	 * nothing to say the recovery was a fragment, and the only clue was a
+	 * shortfall printed under --debug.
+	 */
+	uint32_t    root_broken;
 	int         err;
 };
 
@@ -2069,9 +2084,12 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	char tag[128], path[1024], sub[1152];
 
 	/* The first object is the file itself, which the rest of this tool has
-	 * already described in far more detail. */
-	if (!tail)
+	 * already described in far more detail - except for one thing, which is
+	 * only on this result: whether the engine got to the end of it. */
+	if (!tail) {
+		u->root_broken = res->broken;
 		return 0;
+	}
 
 	u->produced++;
 	if (res->broken)
@@ -2202,10 +2220,22 @@ static int unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
 	kof_scan_path(sc, path, &opt, on_unpacked, &u);
 	kof_scanner_free(sc);
 
-	if (u.produced == 0)
+	if (u.produced == 0 && !u.root_broken)
 		printf("  unpacked  nothing - no unpacker in the database claimed it\n");
+	else if (u.produced == 0)
+		printf("  unpacked  nothing - %s\n", kof_broken_name(u.root_broken));
 	else
-		printf("  unpacked  %u object(s)%s\n", u.produced,
+		/*
+		 * Three facts on one line, and each is only worth printing when it
+		 * is true: how many objects came out, whether the original was
+		 * fully recovered, and whether any of what came out was itself
+		 * unfinished. The middle one is the file being short of bytes the
+		 * unpacker needed; the last is a recovered object that broke on
+		 * its own account.
+		 */
+		printf("  unpacked  %u object(s)%s%s%s\n", u.produced,
+		       u.root_broken ? "  - not all of it: " : "",
+		       u.root_broken ? kof_broken_name(u.root_broken) : "",
 		       u.partial ? "  (some only in part)" : "");
 	return !u.err;
 }

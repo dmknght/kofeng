@@ -721,19 +721,50 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		/*
 		 * Is this a b_info at all, or the bytes that follow the last one?
 		 *
-		 * Four things say no, and each is a property of the object rather
-		 * than a limit invented here: a block with no data, a block whose
-		 * data runs past the end of the file, a block claiming to expand to
-		 * nothing, and a block whose compressed form is larger than what it
-		 * expands to - which is not compression and not something UPX
-		 * writes.
+		 * Three things say no, and each is a property of the object rather
+		 * than a limit invented here: a block with no data, a block claiming
+		 * to expand to nothing, and a block whose compressed form is larger
+		 * than what it expands to - which is not compression and not
+		 * something UPX writes.
 		 */
 		if (sz_cpr == 0 || sz_unc == 0)
 			break;
-		if (!kof_in_obj(at + B_INFO_LEN, sz_cpr))
-			break;
 		if (sz_cpr > sz_unc)
 			break;
+
+		/*
+		 * A FOURTH CASE THAT IS NOT THE CHAIN ENDING: THE FILE ENDING.
+		 *
+		 * A record whose data runs past the end of the object used to be
+		 * grouped with the three above and left silently, and that is the
+		 * one of the four that is not "these bytes were never a b_info".
+		 * The other three are decided by the record's own contents; this
+		 * one is decided by how much file there is, and a well formed
+		 * record naming a coding this module decodes, with self consistent
+		 * sizes and no bytes behind it, is a truncated file rather than the
+		 * end of a chain.
+		 *
+		 * Worth telling apart because the results differ completely. The
+		 * chain ending is a finished unpack. A truncated file is a partial
+		 * one - real output, correct as far as it goes, and short - and
+		 * reported as a finished unpack it reads as though the original had
+		 * been recovered. Measured on 251816206c8d..., a sample cut to
+		 * 1198103 of the 2528130 bytes its own program header declares:
+		 * blocks 0 and 1 decode exactly, block 2 wants 1837562 compressed
+		 * bytes with 1111611 left in the file, and 393216 of 6154376 bytes
+		 * came out. Reference upx 4.2.4 refuses the file outright.
+		 *
+		 * DAMAGED rather than LIMIT: nothing here ran out of budget, the
+		 * object is missing bytes it says it has. The method byte is the
+		 * only thing read to decide it, and it was read in bounds above -
+		 * the compressed data deliberately is not touched, because the
+		 * whole finding is that it is not there.
+		 */
+		if (!kof_in_obj(at + B_INFO_LEN, sz_cpr)) {
+			if (method_of(method) || method == UPX_M_LZMA)
+				kof_unp_broken(KOF_UNP_DAMAGED);
+			break;
+		}
 
 		decoder = method_of(method);
 		/*
