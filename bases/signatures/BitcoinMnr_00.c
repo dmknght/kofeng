@@ -19,6 +19,9 @@ KOF_DEFINE_STR(s4, "src/rpcmining.cpp", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
-	if (kof_find_str_multi(scan_range_code, s0, s1, s2, s3, s4) >= 3)
+	int result = kof_find_str_multi(scan_range_code, s0, s1, s2, s3, s4);
+	if (result >= 3)
 		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+	else if (result >= 1)
+		KOF_SCAN_SUSPECT(KOF_MALVAR_AUTO);
 }
