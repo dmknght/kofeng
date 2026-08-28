@@ -6384,6 +6384,47 @@ static void draft_refresh(struct view *v)
 			    "declared", moved, gone);
 }
 
+/*
+ * What the heuristic makes of this object.
+ *
+ * One place, because two would drift: the dashboard and the status line show
+ * the same verdict and a reader who saw them disagree would have no way to tell
+ * which was lying. Scored here rather than read back from the scan, because the
+ * scan may have had the heuristic switched off, and a screen that showed
+ * nothing then would be reporting the option rather than the object.
+ *
+ * Returns 0 when no model covers this format, which is not the same as a score
+ * of zero and must not be shown as one.
+ */
+static int heur_of(const struct object *ob, struct kof_heur_facts *out,
+		   int32_t *score, const char **guess)
+{
+	const struct kof_heur_model *hm = kof_heur_default();
+
+	memset(out, 0, sizeof *out);
+	out->format    = ob->ctx.format;
+	out->anomalies = ob->fmt ? ob->fmt->anomalies(ob->info) : 0;
+	if (ob->depth)
+		out->flags |= KOF_HEUR_FL(KOF_HEUR_F_PACKED);
+	if (ob->broken == KOF_BROKEN_DAMAGED)
+		out->flags |= KOF_HEUR_FL(KOF_HEUR_F_UNPACK_PARTIAL);
+	out->packer_depth = ob->depth > 255u ? 255u : (uint8_t)ob->depth;
+	*score = 0;
+	*guess = "Unknown";
+	return kof_heur_score(hm, out, score, guess);
+}
+
+/* Would a scan report this object on the heuristic alone. */
+static int heur_reports(const struct object *ob, int32_t *score,
+			const char **guess)
+{
+	struct kof_heur_facts hf;
+
+	if (!heur_of(ob, &hf, score, guess))
+		return 0;
+	return *score >= kof_heur_default()->bar_centinats;
+}
+
 static void draw_decl(struct out *o, struct view *v)
 {
 	int top = decl_top();
@@ -7216,7 +7257,27 @@ static void draw_marker_line(struct out *o, struct view *v)
 	}
 
 	if (!ob->n_touch) {
-		out_str(o, A_DIM "no markers" A_OFF);
+		int32_t hsc = 0;
+		const char *hguess = "Unknown";
+
+		/*
+		 * NO MARKER IS NOT THE SAME AS NOTHING TO SAY.
+		 *
+		 * "no markers" was the whole of this line for an object no
+		 * signature knows, and on an object the heuristic would report
+		 * that reads as an all clear - the one reading it must never
+		 * have. A scan of the same file prints a finding; this said the
+		 * database is quiet, which is true and beside the point.
+		 *
+		 * Spelled the way the scanner spells it, because it is the same
+		 * verdict and a reader should be able to match the two by eye
+		 * rather than by working out that they are about one thing.
+		 */
+		if (heur_reports(ob, &hsc, &hguess))
+			out_fmt(o, A_BAD "Heur:%s#s%d" A_OFF A_DIM
+				"  no marker" A_OFF, hguess, hsc);
+		else
+			out_str(o, A_DIM "no markers" A_OFF);
 	} else {
 		char hits[24], skips[24];
 		int c;
@@ -9607,17 +9668,8 @@ no_regions:
 		int32_t sc = 0;
 		uint32_t k;
 
-		memset(&hf, 0, sizeof hf);
-		hf.format    = ob->ctx.format;
-		hf.anomalies = ob->fmt ? ob->fmt->anomalies(ob->info) : 0;
-		if (ob->depth)
-			hf.flags |= KOF_HEUR_FL(KOF_HEUR_F_PACKED);
-		if (ob->broken == KOF_BROKEN_DAMAGED)
-			hf.flags |= KOF_HEUR_FL(KOF_HEUR_F_UNPACK_PARTIAL);
-		hf.packer_depth = ob->depth > 255u ? 255u : (uint8_t)ob->depth;
-
 		prop_head("Heuristic");
-		if (!kof_heur_score(hm, &hf, &sc, &guess)) {
+		if (!heur_of(ob, &hf, &sc, &guess)) {
 			prop_add(A_DIM, "  no model for this format - not scored");
 		} else {
 			prop_add(A_OFF, "  %-11s %s%d" A_OFF A_DIM
