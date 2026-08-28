@@ -882,6 +882,28 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 		st = kof_nrv2_decode(variant, bits, in, in_len, buf, want,
 				     &produced);
 	}
+	/*
+	 * STOPPED IS NOT A LIMIT WHEN THE CALLER GOT WHAT IT ASKED FOR.
+	 *
+	 * KOF_DEC_STOPPED means the output buffer filled. Whether that is a
+	 * failure depends entirely on who chose the buffer's size, and until now
+	 * this did not ask.
+	 *
+	 * Several formats carry no end marker in the stream at all - 7z writes
+	 * its LZMA that way, and UPX's NRV2 blocks likewise - so the length comes
+	 * out of the container and the decode ENDS by filling exactly that many
+	 * bytes. Every one of those reported "a limit was reached", on a decode
+	 * that had delivered the whole stream. A 1042 byte 7z came back broken
+	 * for it, which is what made this visible.
+	 *
+	 * So: if the buffer was the size the module asked for and it filled,
+	 * nothing was refused and there is nothing to report. If it was smaller
+	 * than the module asked for, the clamp that made it smaller has already
+	 * recorded the limit above - this is not the place that knows about it,
+	 * and saying so twice was never what carried the message.
+	 */
+	if (st == KOF_DEC_STOPPED && out_hint && want == out_hint)
+		st = KOF_DEC_OK;
 	if (st != KOF_DEC_OK)
 		scan_broken(sc, broken_of_status(st));
 
