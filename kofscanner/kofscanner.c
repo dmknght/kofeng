@@ -246,8 +246,14 @@ static void usage(const char *argv0)
 		"  --follow-links  follow symbolic links (off by default: a link into\n"
 		"                  an ancestor turns a walk into a loop)\n"
 		"  --all-matches   keep scanning an object after the first finding\n"
-		"  --heur          also report objects whose structure is unlike\n"
-		"                  anything clean: SUSPECT only, never a family\n"
+		"  --heur N        how hard to look for what no signature names,\n"
+		"                  default 1:\n"
+		"                    0  off - nothing gathered, nothing scored\n"
+		"                    1  the object's own structure and what the\n"
+		"                       unpackers made of it. Costs no extra pass\n"
+		"                    2  also markers no rule reached (costs a pass\n"
+		"                       over every object; not implemented yet)\n"
+		"                  It reports a level of its own and never a family\n"
 		"  --dump DIR      write every object the engine PRODUCED into DIR:\n"
 		"                  what came out of an unpacker, not what went in\n"
 		"  --stats         report what the prefilter and the presence set earned\n"
@@ -258,6 +264,42 @@ static void usage(const char *argv0)
 		"\n"
 		"exit: 0 nothing found, 1 something found, 2 could not scan\n",
 		argv0);
+}
+
+/*
+ * --heur, as a level rather than as two switches.
+ *
+ * The engine keeps "should this run" and "how far may it look" in separate
+ * fields, and it is right to: a zeroed kof_scan_option has to mean the
+ * heuristic RUNS, so the off state cannot be the zero of a ladder. A command
+ * line has no such constraint, so the mapping is done here, once, and the
+ * ladder stays a ladder where a person reads it.
+ */
+static int heur_arg(const char *v, struct kof_scan_option *opt)
+{
+	char *end;
+	unsigned long n;
+
+	if (!*v)
+		return 0;
+	n = strtoul(v, &end, 10);
+	if (*end)
+		return 0;               /* trailing junk: not a level */
+	switch (n) {
+	case 0: opt->heur_off = 1; opt->heur_level = 0; return 1;
+	case 1: opt->heur_off = 0; opt->heur_level = 0; return 1;
+	case 2: opt->heur_off = 0; opt->heur_level = 1; return 1;
+	default: return 0;
+	}
+}
+
+/* Refused rather than clamped. A level this build does not have is a request
+ * that was not carried out, and a scan that quietly did less than it was told
+ * to is the one result worth never producing. */
+static int heur_bad(const char *argv0, const char *v)
+{
+	fprintf(stderr, "%s: --heur takes 0, 1 or 2, not '%s'\n", argv0, v);
+	return 2;
 }
 
 int main(int argc, char **argv)
@@ -292,13 +334,25 @@ int main(int argc, char **argv)
 		else if (strcmp(argv[i], "--all-matches") == 0)
 			opt.all_matches = 1;
 		/*
-		 * Off by default, and off means nothing is gathered - see
-		 * kof_scan_option.heur_level. A heuristic reports SUSPECT on
-		 * evidence that cannot name a family, so it is the operator's
-		 * call whether to hear it.
+		 * One number, because the three settings are a ladder and an
+		 * operator picking a rung should not have to work out which of
+		 * two switches to reach for. It is 1 unless said otherwise - the
+		 * facts level 1 scores are produced by the parse and the
+		 * unpackers whether anybody asks or not, so refusing to score
+		 * them saved nothing.
+		 *
+		 * Both spellings, because the rest of this parser takes its
+		 * values as a separate word and the request that produced this
+		 * wrote --heur=N. Neither is worth being wrong about at a
+		 * prompt.
 		 */
-		else if (strcmp(argv[i], "--heur") == 0)
-			opt.heur_level = 1;
+		else if (strncmp(argv[i], "--heur=", 7) == 0) {
+			if (!heur_arg(argv[i] + 7, &opt))
+				return heur_bad(argv[0], argv[i] + 7);
+		} else if (strcmp(argv[i], "--heur") == 0 && i + 1 < argc) {
+			if (!heur_arg(argv[++i], &opt))
+				return heur_bad(argv[0], argv[i]);
+		}
 		else if (strcmp(argv[i], "--max-produced") == 0 && i + 1 < argc)
 			opt.max_produced_bytes = strtoull(argv[++i], NULL, 10);
 		/* The memory ceiling, exposed because it is the limit that decides
@@ -381,7 +435,7 @@ int main(int argc, char **argv)
 	 * two are the difference between a quiet scan and a scan that did not
 	 * look.
 	 */
-	if (opt.heur_level)
+	if (!opt.heur_off)
 		printf("heuristic %llu object(s) by structure, no family named\n",
 		       (unsigned long long)r.heur);
 	/*

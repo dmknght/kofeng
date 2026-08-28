@@ -288,24 +288,40 @@ struct kof_scan_option {
 	int      all_matches;
 
 	/*
-	 * HOW HARD TO LOOK FOR THINGS NO SIGNATURE NAMES.
+	 * THE HEURISTIC'S OFF SWITCH, AND WHY IT IS AN OFF SWITCH.
 	 *
-	 * 0 - off, and off means nothing is gathered. Not "gathered and ignored":
-	 *     the collector is not entered, so a scanner built for scanning pays
-	 *     nothing at all for a feature it was not asked for.
-	 * 1 - score what the parse and the unpackers already worked out. No extra
-	 *     searching, no extra passes over the object; the facts exist by the
-	 *     time this runs.
+	 * Zero - the default a memset gives - RUNS the heuristic. It used to be
+	 * the other way round and that was wrong: the evidence level 0 scores is
+	 * evidence the parse and the unpackers have already produced by the time
+	 * this is reached, so having to ask for it meant paying for the facts and
+	 * then throwing them away. A caller who wants nothing but named families
+	 * sets this, and then nothing is gathered and nothing is scored - the
+	 * collector is not entered at all.
 	 *
-	 * Higher levels are reserved for evidence that costs something to gather -
-	 * asking the presence set about markers no module's logic reached, and
-	 * locating them - and are not implemented. The number is here now so that
-	 * adding them later is not an ABI change.
+	 * What a heuristic reports is always its own level and never INFECT. It
+	 * works from traces that cannot establish identity, only that something
+	 * is worth a look, and a verdict that named a family from this evidence
+	 * would be claiming more than it measured.
+	 */
+	uint32_t heur_off;
+
+	/*
+	 * HOW MUCH EVIDENCE THE HEURISTIC MAY GO AND FETCH.
 	 *
-	 * What a heuristic reports is always SUSPECT and never INFECT. It works
-	 * from traces that cannot establish identity, only that something is worth
-	 * a look, and a verdict that named a family from this evidence would be
-	 * claiming more than it measured.
+	 * 0 - the default. Structure only: what the format parse found wrong with
+	 *     the object, and what the unpackers made of it. No extra searching
+	 *     and no extra pass; every fact at this level already exists.
+	 * 1 - also marker evidence: asking the presence set about markers that no
+	 *     module's logic reached, and locating them. NOT IMPLEMENTED yet, and
+	 *     behind its own number rather than folded into the default because
+	 *     it is the level that costs a pass over the object - the reason the
+	 *     free level runs for everybody and this one does not.
+	 *
+	 * Separate from heur_off so that "should this run" and "how far should it
+	 * look" stay separate questions. Rolling them into one number would make
+	 * the value that means off sit at one end of a ladder whose other end is
+	 * the most expensive setting, and every caller would have to know which
+	 * end was which.
 	 */
 	uint32_t heur_level;
 

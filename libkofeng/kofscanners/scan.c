@@ -525,13 +525,15 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
  *
  * Everything below already exists by the time this runs: the anomaly word came
  * out of the parse, the depth came down the walk, and whether an unpacker gave up
- * is the value unpack_object just returned. Nothing is searched for, no pass is
- * made over the object, and with heur_level 0 the function is not called at all.
+ * is the value unpack_object just returned. Nothing is searched for and no pass is
+ * made over the object, which is why this runs unless the caller switched it off
+ * rather than only when the caller asked for it.
  *
- * The marker-derived facts are deliberately absent. Knowing that a family has two
- * markers present but did not fire means asking about markers whose module's
- * logic never reached them, and that is a cost - so it belongs to a level that
- * says it costs something, not to the free one.
+ * The marker-derived facts are deliberately absent, and that is the whole reason
+ * heur_level exists beside heur_off. Knowing that a family has two markers present
+ * but did not fire means asking about markers whose module's logic never reached
+ * them - a pass over the object that would otherwise not happen. Free evidence is
+ * on for everybody; evidence that costs a pass is asked for.
  */
 static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 			const struct kof_scan_option *opt, uint32_t depth,
@@ -542,7 +544,7 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	const char *guess = "Unknown";
 	int32_t score = 0;
 
-	if (!opt->heur_level || out->n >= KOF_MAX_FINDINGS)
+	if (opt->heur_off || out->n >= KOF_MAX_FINDINGS)
 		return;
 
 	memset(&f, 0, sizeof f);
@@ -553,6 +555,14 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		f.flags |= KOF_HEUR_FL(KOF_HEUR_F_PACKED);
 	if (partial)
 		f.flags |= KOF_HEUR_FL(KOF_HEUR_F_UNPACK_PARTIAL);
+	/*
+	 * KOF_HEUR_F_MARKER_OUTSIDE and KOF_HEUR_F_FAMILY_PARTIAL belong here,
+	 * under opt->heur_level >= 1, and are not set: the facts are not gathered
+	 * anywhere in this path yet. The model already carries their measured
+	 * values, so wiring them is adding the collector rather than retuning
+	 * anything, and until it exists a raised level costs nothing and changes
+	 * no verdict.
+	 */
 
 	if (!kof_heur_score(m, &f, &score, &guess))
 		return;                 /* no model for this format - say nothing */
