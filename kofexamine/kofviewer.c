@@ -41,6 +41,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pwd.h>
 #include <time.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -418,6 +419,10 @@ static int mark_row(void) { return g_rows; }
 #define OBJ_BUDGET  (256ull << 20)
 
 #define MAX_DECL  32
+/* How many samples and authors one rule's history holds. Past this the oldest
+ * are dropped rather than the file growing without bound - a rule tested against
+ * forty samples is a rule whose first ten no longer say much. */
+#define MAX_META  16
 #define MAX_GROUP 8
 
 /* Every row the draft panel can ever hold, spelled from the limits rather than
@@ -431,7 +436,6 @@ static int mark_row(void) { return g_rows; }
 /* A string that no condition uses yet. Declaring one must not invent a place to
  * put it: the condition is the researcher's decision and making it for them is
  * the kind of help that has to be undone before anything else can be done. */
-#define GRP_NONE  0xffffffffu
 
 /*
  * The optional declarations.
@@ -631,7 +635,18 @@ struct decl {
 	uint32_t obj;               /* which object it was taken from */
 	uint32_t mask;              /* the region it was taken from */
 	char     rgn[24];           /* that region's short name */
-	uint32_t grp;               /* which matcher uses it */
+	/*
+	 * WHICH MATCHERS USE IT - a bit each, not a number.
+	 *
+	 * It was one matcher per marker, and that made "at least three of these
+	 * five, otherwise at least two" impossible to express: the second
+	 * matcher had to search the same markers as the first, and they could
+	 * only be owned once. A marker is a thing to look for; how many
+	 * matchers ask about it is their business, not its.
+	 *
+	 * Zero means no matcher uses it - what GRP_NONE used to say.
+	 */
+	uint32_t grp;
 	/* Where these bytes are in the object, so the row can jump to them and
 	 * the pane can light them. KOF_BROKEN when they are not there at all -
 	 * a marker taken from one sample and carried to another. */
@@ -850,6 +865,39 @@ struct view {
 
 	struct object obj[MAX_OBJ];
 	uint32_t      n_obj;
+
+	/*
+	 * THE GENERATED BLOCK'S CONTENTS, CARRIED ACROSS A LOAD AND A SAVE.
+	 *
+	 * A rule is written once and then tested again, against a second sample
+	 * and a third. The block used to hold one "Test sample" line and the
+	 * save rewrote it, so testing an existing rule against a new file
+	 * ERASED the record of what it had been tested against before - the one
+	 * fact in the file that cannot be recovered from anywhere else. The
+	 * samples accumulate now, and so do the names of the people who wrote
+	 * them.
+	 *
+	 * `made` is the date the block was first written, kept from whatever is
+	 * already in the file; a save only ever sets the "updated" date. Empty
+	 * means this rule is new and today is both.
+	 */
+	/* 128, because samples are routinely named by their hash: a 64 character
+	 * digest plus the collection's suffix is 82, and 80 cut it mid word. */
+	char        meta_sample[MAX_META][128];
+	uint32_t    n_meta_sample;
+	char        meta_who[MAX_META][48];
+	uint32_t    n_meta_who;
+	char        meta_made[24];
+
+	/*
+	 * Lines of kof_scan this panel cannot hold - see body_modelled.
+	 *
+	 * Not an error and not a parse failure: the file is a valid module, and
+	 * the draft beside it is a truthful view of the part that IS modelled.
+	 * What it costs is the right to write the file back, because writing it
+	 * back would write only that part.
+	 */
+	uint32_t    foreign;
 
 	char        pending[48];    /* the unpacker that has just spoken */
 	long long   pending_ver;    /* and the version it reported, or -1 */
@@ -2012,7 +2060,7 @@ static uint32_t decl_free(struct view *v)
 	uint32_t i, n = 0;
 
 	for (i = 0; i < v->n_decl; i++)
-		n += v->decl[i].grp == GRP_NONE;
+		n += v->decl[i].grp == 0;
 	return n;
 }
 
@@ -2069,7 +2117,7 @@ static uint32_t grp_mask(struct view *v, uint32_t g)
 	if (v->grp[g].mask)
 		return v->grp[g].mask;
 	for (i = 0; i < v->n_decl; i++)
-		if (v->decl[i].grp == g)
+		if (v->decl[i].grp & (1u << g))
 			need |= v->decl[i].mask;
 	return need ? need : KOF_SCAN_ALL;
 }
@@ -2088,7 +2136,7 @@ static uint32_t grp_count(struct view *v, uint32_t g)
 	uint32_t i, n = 0;
 
 	for (i = 0; i < v->n_decl; i++)
-		n += v->decl[i].grp == g;
+		n += (v->decl[i].grp >> g) & 1u;
 	return n;
 }
 
@@ -2227,10 +2275,12 @@ static void grp_remove(struct view *v, uint32_t g)
 	if (g >= v->n_grp)
 		return;
 	for (i = 0; i < v->n_decl; i++) {
-		if (v->decl[i].grp == g)
-			v->decl[i].grp = GRP_NONE;
-		else if (v->decl[i].grp != GRP_NONE && v->decl[i].grp > g)
-			v->decl[i].grp--;
+		uint32_t lo = v->decl[i].grp & ((1u << g) - 1u);
+		uint32_t hi = v->decl[i].grp >> (g + 1u);
+
+		/* Its bit goes and every matcher above it moves down one -
+		 * the same renumbering the matcher array itself gets. */
+		v->decl[i].grp = lo | (hi << g);
 	}
 	for (k = 0; k < v->n_cnd; k++) {
 		struct cond *c = &v->cnd[k];
@@ -2430,23 +2480,161 @@ static void rng_ident(const struct kof_inspect_fmt *fmt, uint32_t mask,
 	snprintf(out, cap, "scan_range_%s", w);
 }
 
+/*
+ * TWO MATCHERS, ONE SCAN.
+ *
+ * "at least three of these five, otherwise at least two" is one question asked
+ * once, not two questions. Written as two matchers it used to compile to two
+ * kof_find_str_multi calls over the same markers in the same region - the same
+ * work twice, and the second one only to compare its answer against a smaller
+ * number.
+ *
+ * So matchers that ASK THE SAME THING - same kind of call, same range, same
+ * markers - share one call in the generated body, and each keeps its own
+ * threshold to compare against it:
+ *
+ *     uint32_t m1 = kof_find_str_multi(scan_range_code, s0, s1, s2, s3, s4);
+ *
+ *     if (m1 >= 3)
+ *             KOF_SCAN_INFECT("Strong");
+ *     else if (m1 >= 2)
+ *             KOF_SCAN_SUSPECT("Weak");
+ *
+ * Only find_multi shares. all and any carry no threshold, so two of them that
+ * asked the same thing would be the same matcher written twice - which is a
+ * mistake the panel refuses rather than a shape to optimise.
+ */
+/*
+ * WHAT A MATCHER'S THRESHOLD REALLY IS.
+ *
+ * The three kinds are three spellings of one comparison against a count:
+ * find_any is "at least one", find_all is "all of them", find_multi says the
+ * number itself. Measured rather than argued - a rule written each way over the
+ * same four markers agrees on every sample, including the one where none are
+ * present.
+ *
+ * What differs is the WORK, not the answer, and that is the whole constraint on
+ * folding them together: kofsig.h folds any to `a || b || c` and all to
+ * `a && b && c`, so they stop at the first marker that settles the question,
+ * while multi has to look for all of them to produce a count. Turning an any
+ * into a count would therefore make a rule slower - unless the count is already
+ * being computed for something else, which is exactly and only when this folds.
+ */
+static uint32_t grp_thresh_eff(struct view *v, uint32_t g)
+{
+	if (v->grp[g].rule == 1)
+		return 1u;                      /* any: at least one */
+	if (v->grp[g].rule == 2)
+		return v->grp[g].thresh;
+	return grp_count(v, g);                 /* all: every one of them */
+}
+
+/* The same question - same range, same markers - whatever it is spelled as. */
+static int grp_same_set(struct view *v, uint32_t a, uint32_t b)
+{
+	uint32_t i;
+
+	if (a == b)
+		return 1;
+	if (grp_mask(v, a) != grp_mask(v, b))
+		return 0;
+	/* The same markers, and no others. Order is not part of the question:
+	 * a matcher is a set. */
+	for (i = 0; i < v->n_decl; i++) {
+		int in_a = (v->decl[i].grp >> a) & 1u;
+		int in_b = (v->decl[i].grp >> b) & 1u;
+
+		if (in_a != in_b)
+			return 0;
+	}
+	return 1;
+}
+
+/* Same question AND same answer to it: a copy, whatever the two are spelled as. */
+static int grp_same_call(struct view *v, uint32_t a, uint32_t b)
+{
+	return grp_same_set(v, a, b) &&
+	       grp_thresh_eff(v, a) == grp_thresh_eff(v, b);
+}
+
+/*
+ * The lowest numbered matcher asking the same thing as this one - the one whose
+ * number names the shared variable, so the name does not move when a later
+ * matcher is removed.
+ */
+static uint32_t grp_lead(struct view *v, uint32_t g)
+{
+	uint32_t i;
+
+	for (i = 0; i < g; i++)
+		if (grp_same_set(v, i, g))
+			return i;
+	return g;
+}
+
+/* Does this matcher's call get a variable: multi, and asked more than once. */
+static int grp_shared(struct view *v, uint32_t g)
+{
+	uint32_t i, n = 0, multi = 0;
+
+	for (i = 0; i < v->n_grp; i++) {
+		if (!grp_same_set(v, i, g))
+			continue;
+		n++;
+		multi += v->grp[i].rule == 2;
+	}
+	/*
+	 * At least two asking it, and at least one of them a find_multi - that
+	 * second half is what keeps the fold honest. A group of any/all
+	 * matchers alone short circuits today; giving them a count would be
+	 * work they currently avoid. Once ANY of them needs the number, every
+	 * other one in the group gets to compare against it for free.
+	 */
+	return n > 1u && multi > 0u;
+}
+
+/* The call itself, without whatever is compared against it. `force_multi` asks
+ * for the counting form whatever the matcher is spelled as, which is what a
+ * shared call has to be. */
+static void emit_call_as(FILE *f, struct view *v, uint32_t g, int force_multi)
+{
+	const struct group *q = &v->grp[g];
+	char nm[40];
+	uint32_t i;
+
+	rng_ident(cur_obj(v)->fmt, grp_mask(v, g), nm, sizeof nm);
+	fprintf(f, "kof_find_str_%s(%s",
+		force_multi ? "multi"
+			    : q->rule == 1 ? "any" : q->rule == 2 ? "multi"
+							         : "all", nm);
+	for (i = 0; i < v->n_decl; i++)
+		if (v->decl[i].grp & (1u << g))
+			fprintf(f, ", s%u", i);
+	fprintf(f, ")");
+}
+
+static void emit_call(FILE *f, struct view *v, uint32_t g)
+{
+	emit_call_as(f, v, g, 0);
+}
+
+static void emit_call_multi(FILE *f, struct view *v, uint32_t g)
+{
+	emit_call_as(f, v, g, 1);
+}
+
 static void emit_matcher(FILE *f, struct view *v, uint32_t g)
 {
 	const struct group *q = &v->grp[g];
-	uint32_t i;
 
-	{
-		char nm[40];
-
-		rng_ident(cur_obj(v)->fmt, grp_mask(v, g), nm, sizeof nm);
-		fprintf(f, "kof_find_str_%s(%s",
-			q->rule == 1 ? "any" : q->rule == 2 ? "multi" : "all",
-			nm);
+	/* The call happened once, above; this is only the comparison - and any
+	 * and all become comparisons here too, which is what they are. */
+	if (grp_shared(v, g)) {
+		fprintf(f, "m%u >= %u", grp_lead(v, g) + 1u,
+			grp_thresh_eff(v, g));
+		return;
 	}
-	for (i = 0; i < v->n_decl; i++)
-		if (v->decl[i].grp == g)
-			fprintf(f, ", s%u", i);
-	fprintf(f, ")");
+	emit_call(f, v, g);
 	if (q->rule == 2)
 		fprintf(f, " >= %u", q->thresh);
 }
@@ -2773,8 +2961,41 @@ static uint32_t draft_hash(struct view *v)
 	return h;
 }
 
+/* The sample in front of the reader, as the metadata block names it. */
+static const char *draft_sample(struct view *v)
+{
+	const char *n = cur_obj(v)->name;
+	const char *s = strrchr(n, '/');
+
+	return s ? s + 1 : n;
+}
+
+/* Is this sample already in the rule's history. */
+static int meta_has_sample(struct view *v)
+{
+	const char *w = draft_sample(v);
+	uint32_t i;
+
+	for (i = 0; i < v->n_meta_sample; i++)
+		if (!strcmp(v->meta_sample[i], w))
+			return 1;
+	return 0;
+}
+
 static int draft_dirty(struct view *v)
 {
+	/*
+	 * A RULE TESTED AGAINST A NEW SAMPLE HAS CHANGED.
+	 *
+	 * Not its logic - not one byte of what it matches - but the file on
+	 * disk does not yet record that this rule was checked against this
+	 * sample, and that is the fact the metadata block exists to keep. Left
+	 * out, Save stayed greyed on exactly the case worth saving: open a rule,
+	 * confirm it fires on a second sample, and there was no way to write
+	 * that down.
+	 */
+	if (!meta_has_sample(v))
+		return 1;
 	return draft_hash(v) != v->saved_hash;
 }
 
@@ -2801,6 +3022,10 @@ static void draft_clear(struct view *v)
 	 * written into that one's file on the next save. */
 	v->note[0] = 0;
 	v->note_off = 0;
+	v->foreign = 0;
+	v->n_meta_sample = 0;
+	v->n_meta_who = 0;
+	v->meta_made[0] = 0;
 	v->gen_path[0] = 0;
 	v->gen_ok = 0;
 	v->prow_off = 0;
@@ -3184,6 +3409,184 @@ static void head_put(char *dst, size_t cap, size_t *n, const char *s, size_t len
  */
 #define HEAD_BANNER "Generated by KOFViewer"
 
+/* ---- the generated block's metadata ---------------------------------------
+ *
+ * What a rule records about its own making: which samples it was tested
+ * against, who wrote it, when, and against which engine and database. The same
+ * facts a YARA rule keeps in `meta`, and for the same reason - months later the
+ * question about a rule is never "what does it match", which the code says, but
+ * "what was this checked against and by whom", which nothing else records.
+ *
+ * Accumulated rather than replaced. See view.meta_sample.
+ */
+
+/* Add one entry unless it is already there, dropping the oldest at the cap.
+ * Deduplicated because re-testing the same sample is the common case and a list
+ * of one name repeated is not a history. */
+static void meta_add(char tab[][128], uint32_t *n, uint32_t cap, const char *w)
+{
+	uint32_t i;
+
+	if (!w || !w[0])
+		return;
+	for (i = 0; i < *n; i++)
+		if (!strcmp(tab[i], w))
+			return;
+	if (*n == cap) {
+		memmove(tab[0], tab[1], (cap - 1u) * 128u);
+		(*n)--;
+	}
+	snprintf(tab[*n], 128, "%.127s", w);
+	(*n)++;
+}
+
+static void meta_add_who(char tab[][48], uint32_t *n, uint32_t cap,
+			 const char *w)
+{
+	uint32_t i;
+
+	if (!w || !w[0])
+		return;
+	for (i = 0; i < *n; i++)
+		if (!strcmp(tab[i], w))
+			return;
+	if (*n == cap) {
+		memmove(tab[0], tab[1], (cap - 1u) * 48u);
+		(*n)--;
+	}
+	snprintf(tab[*n], 48, "%.47s", w);
+	(*n)++;
+}
+
+/*
+ * Who is at this machine.
+ *
+ * The account name, because it is the one identifier that is already there and
+ * already means a person to the team that shares the machine. Not a real name:
+ * this tool has no way to know one and inventing a field for somebody to fill in
+ * would leave it empty in every file.
+ */
+static const char *meta_user(void)
+{
+	const char *u = getenv("USER");
+
+	if (!u || !u[0])
+		u = getenv("LOGNAME");
+	if (!u || !u[0]) {
+		struct passwd *pw = getpwuid(getuid());
+
+		u = pw && pw->pw_name ? pw->pw_name : "";
+	}
+	return u ? u : "";
+}
+
+/* Today, as the one date format that sorts and cannot be read two ways. */
+static void meta_today(char *out, uint32_t cap)
+{
+	time_t now = time(NULL);
+	struct tm tmv;
+
+	if (localtime_r(&now, &tmv))
+		strftime(out, cap, "%Y-%m-%d", &tmv);
+	else
+		snprintf(out, cap, "unknown");
+}
+
+/*
+ * One line of an existing generated block, back into the fields it came from.
+ *
+ * Only the lines this writes are read back; anything else in the block is a
+ * line an older build wrote or a person added, and it is dropped rather than
+ * guessed at. Returns 1 when the line was one of ours.
+ */
+static int meta_take(struct view *v, const char *t)
+{
+	static const struct { const char *tag; int what; } tab[] = {
+		{ "Test sample:", 0 }, { "Researcher:", 1 }, { "Created", 2 }
+	};
+	uint32_t i;
+
+	for (i = 0; i < sizeof tab / sizeof tab[0]; i++) {
+		size_t n = strlen(tab[i].tag);
+
+		if (strncmp(t, tab[i].tag, n))
+			continue;
+		t += n;
+		while (*t == ' ' || *t == '\t')
+			t++;
+		if (!*t)
+			return 1;
+		if (tab[i].what == 0)
+			meta_add(v->meta_sample, &v->n_meta_sample, MAX_META,
+				 t);
+		else if (tab[i].what == 1)
+			meta_add_who(v->meta_who, &v->n_meta_who, MAX_META, t);
+		else {
+			/* "Created <date>, updated <date>" - the first date is
+			 * the one worth keeping; the second is rewritten on
+			 * every save and is read back only to be discarded. */
+			uint32_t k = 0;
+
+			while (t[k] && t[k] != ',' &&
+			       k + 1u < sizeof v->meta_made)
+				k++;
+			snprintf(v->meta_made, sizeof v->meta_made, "%.*s",
+				 (int)k, t);
+		}
+		return 1;
+	}
+	return 0;
+}
+
+
+
+/*
+ * IS THIS LINE OF kof_scan SOMETHING THE EDITOR CAN ACTUALLY HOLD.
+ *
+ * The panel models one shape: matchers made of kof_find_str_* calls, conditions
+ * made of ifs, and verdicts. That is most rules and it is not all of them - a
+ * hand written module may compute something, loop, call a parser accessor, or
+ * do arithmetic on an offset, and none of that has a control on the panel.
+ *
+ * The old behaviour on such a file was the dangerous one: the unrecognised
+ * lines were ignored, a draft was built from whatever was left, `gen_path` was
+ * pointed at the original, and Save was offered - so saving a rule the editor
+ * had only partly understood REPLACED it with the editor's reduced version.
+ * The custom logic was gone and nothing had said so.
+ *
+ * So the line is checked instead. Punctuation, else, return and the three
+ * modelled constructs are accounted for; anything else means this file holds
+ * logic the panel does not carry, and the rule opens read only.
+ *
+ * Deliberately conservative in the safe direction: a construct this does not
+ * know costs a save that has to be done in an editor, and the opposite mistake
+ * costs somebody's work.
+ */
+static int body_modelled(const char *line)
+{
+	const char *t = line;
+
+	if (strstr(line, "kof_find_str") || strstr(line, "KOF_SCAN_") ||
+	    strstr(line, "if (") || strstr(line, "if("))
+		return 1;
+	for (; *t; t++) {
+		if (*t == ' ' || *t == '\t' || *t == '\r' || *t == '\n')
+			continue;
+		if (*t == '{' || *t == '}' || *t == ';')
+			continue;
+		if (!strncmp(t, "else", 4)) {
+			t += 3;
+			continue;
+		}
+		if (!strncmp(t, "return", 6)) {
+			t += 5;
+			continue;
+		}
+		return 0;
+	}
+	return 1;
+}
+
 static int draft_from_source(struct view *v, const char *path)
 {
 	FILE *f = fopen(path, "r");
@@ -3204,6 +3607,19 @@ static int draft_from_source(struct view *v, const char *path)
 	 */
 	int owner[8];
 	int depth = 0, body = 0, cur = -1, parent = -1, skipped = 0;
+	int just_opened = 0;
+	/*
+	 * THE SHARED CALLS, READ BACK.
+	 *
+	 * The generator writes "at least three, otherwise at least two" as one
+	 * call into a variable and two comparisons against it. Reading that
+	 * back needs the variable remembered: the call says what to look for
+	 * and where, and each "m1 >= N" is a matcher over exactly that with its
+	 * own threshold. Without this the ifs referred to a name that meant
+	 * nothing here and the rule came back with no matchers at all.
+	 */
+	struct { char id[16]; int rule; uint32_t mask, decls; } shc[8];
+	uint32_t n_shc = 0;
 	int pend_if = -1;
 	char head[sizeof v->note];
 	size_t head_n = 0;
@@ -3258,6 +3674,12 @@ static int draft_from_source(struct view *v, const char *path)
 				     t[n - 1] == ' ' || t[n - 1] == '\t'))
 				n--;
 			if (n) {
+				/* Cut here, not just measured: what follows is
+				 * stored and compared, and a trailing newline
+				 * made every entry differ from the same entry
+				 * read back - so nothing deduplicated and the
+				 * block grew a blank line per item. */
+				t[n] = 0;
 				/* The banner only counts as one where it is
 				 * written - opening the block. A line of prose
 				 * quoting it further down is prose. */
@@ -3265,7 +3687,13 @@ static int draft_from_source(struct view *v, const char *path)
 				    !strncmp(t, HEAD_BANNER,
 					     sizeof HEAD_BANNER - 1))
 					mine = 1;
-				if (!mine)
+				/* Inside our own block the recognised lines
+				 * are the rule's history and are kept; the
+				 * author's block is prose and goes to the
+				 * note. */
+				if (mine)
+					meta_take(v, t);
+				else
 					head_put(head, sizeof head, &head_n,
 						 t, n);
 			}
@@ -3449,7 +3877,7 @@ no_head:
 						     "KOF_WORD_FULLWORD") != 0;
 			}
 			d->obj = v->node[v->sel_node].obj;
-			d->grp = GRP_NONE;
+			d->grp = 0;
 			snprintf(d->rgn, sizeof d->rgn, "-");
 			str[n_str].idx = v->n_decl;
 			n_str++;
@@ -3457,10 +3885,24 @@ no_head:
 			continue;
 		}
 
-		if (strstr(line, "kof_scan(") || strstr(line, "KOF_DEFINE_SCAN"))
-			body = 1;
-		if (!body)
-			continue;
+		{
+			/*
+			 * The line that opens the body is not IN the body.
+			 *
+			 * It trips the foreign test otherwise - it is a
+			 * function signature, which is code and is none of the
+			 * three modelled constructs - so every ordinary rule
+			 * came back read only.
+			 */
+			int opens = strstr(line, "kof_scan(") != NULL ||
+				    strstr(line, "KOF_DEFINE_SCAN") != NULL;
+
+			if (opens)
+				body = 1;
+			if (!body)
+				continue;
+			just_opened = opens;
+		}
 
 		{
 			/*
@@ -3516,6 +3958,104 @@ no_head:
 			 * describes the search it makes, and the search is the
 			 * matcher on the same line. */
 		}
+		/*
+		 * "uint32_t mN = <call>;" - the call, kept under its name. It
+		 * is not a matcher on its own: nothing is compared against it
+		 * yet, and the comparisons below are what carry the thresholds.
+		 */
+		if ((p = strstr(line, "kof_find_str_")) != NULL &&
+		    memchr(line, '=', (size_t)(p - line)) != NULL &&
+		    !strstr(line, "if (") && !strstr(line, "if(")) {
+			const char *q;
+			char id[48];
+
+			if (n_shc >= sizeof shc / sizeof shc[0])
+				goto shc_done;
+			memset(&shc[n_shc], 0, sizeof shc[0]);
+			shc[n_shc].rule = !strncmp(p + 13, "any", 3) ? 1
+					: !strncmp(p + 13, "multi", 5) ? 2 : 0;
+			/* The variable's own name, the identifier before "=". */
+			{
+				const char *e = memchr(line, '=',
+						       (size_t)(p - line));
+				const char *b2 = e;
+
+				while (b2 > line && (b2[-1] == ' ' ||
+						     b2[-1] == '\t'))
+					b2--;
+				{
+					const char *st2 = b2;
+
+					while (st2 > line &&
+					       (isalnum((unsigned char)st2[-1])
+						|| st2[-1] == '_'))
+						st2--;
+					snprintf(shc[n_shc].id,
+						 sizeof shc[0].id, "%.*s",
+						 (int)(b2 - st2), st2);
+				}
+			}
+			q = strchr(p, '(');
+			if (!q)
+				goto shc_done;
+			q = src_ident(q + 1, id, sizeof id);
+			for (i = 0; i < n_rng; i++)
+				if (!strcmp(rng[i].id, id))
+					shc[n_shc].mask = rng[i].mask;
+			while (*q == ',' || *q == ' ') {
+				char sid[48];
+				uint32_t k;
+
+				q = src_ident(q, sid, sizeof sid);
+				if (!sid[0])
+					break;
+				k = src_str_idx(str, n_str, sid);
+				if (k < v->n_decl && k < 32u)
+					shc[n_shc].decls |= 1u << k;
+				while (*q == ' ')
+					q++;
+			}
+			if (shc[n_shc].id[0])
+				n_shc++;
+shc_done:
+			continue;
+		}
+		/* "mN >= K" - one matcher over the remembered call. */
+		if (cur >= 0 && n_shc && !strstr(line, "kof_find_str_")) {
+			uint32_t si;
+
+			for (si = 0; si < n_shc; si++) {
+				const char *at = strstr(line, shc[si].id);
+				const char *ge;
+				struct group *g;
+				uint32_t k;
+
+				if (!at)
+					continue;
+				ge = strstr(at, ">=");
+				if (!ge || v->n_grp >= MAX_GROUP)
+					continue;
+				g = &v->grp[v->n_grp];
+				memset(g, 0, sizeof *g);
+				g->rule = shc[si].rule;
+				g->mask = shc[si].mask;
+				g->thresh = (uint32_t)strtoul(ge + 2, NULL, 10);
+				for (k = 0; k < v->n_decl && k < 32u; k++)
+					if (shc[si].decls & (1u << k))
+						v->decl[k].grp |= 1u << v->n_grp;
+				{
+					size_t l = strlen(v->cnd[cur].expr);
+
+					snprintf(v->cnd[cur].expr + l,
+						 sizeof v->cnd[0].expr - l,
+						 "%s%u",
+						 l ? (v->cnd[cur].op ? "|" : "&")
+						   : "", v->n_grp + 1u);
+				}
+				v->n_grp++;
+				break;
+			}
+		}
 		if ((p = strstr(line, "kof_find_str_")) != NULL) {
 			/*
 			 * One call is one matcher, which is exactly the rule
@@ -3554,7 +4094,7 @@ no_head:
 					break;
 				k = src_str_idx(str, n_str, sid);
 				if (k < v->n_decl)
-					v->decl[k].grp = v->n_grp;
+					v->decl[k].grp |= 1u << v->n_grp;
 				while (*q == ' ')
 					q++;
 			}
@@ -3607,6 +4147,10 @@ no_head:
 			}
 			pend_if = -1;
 		}
+		/* Whatever this line was, was it something the panel can hold. */
+		if (body && !just_opened && !body_modelled(line))
+			v->foreign++;
+
 		for (p = line; *p; p++) {
 			if (*p == '{' && body) {
 				depth++;
@@ -3636,9 +4180,14 @@ no_head:
 	for (i = 0; i < v->n_decl; i++) {
 		struct decl *d = &v->decl[i];
 
-		if (d->grp == GRP_NONE || d->grp >= v->n_grp || d->mask)
+		uint32_t g2;
+
+		if (!d->grp || d->mask)
 			continue;
-		d->mask = v->grp[d->grp].mask;
+		/* Every matcher that searches for it contributes its range. */
+		for (g2 = 0; g2 < v->n_grp; g2++)
+			if (d->grp & (1u << g2))
+				d->mask |= v->grp[g2].mask;
 		if (d->mask)
 			rng_name_of(fmt, d->mask, d->rgn, sizeof d->rgn);
 	}
@@ -3756,7 +4305,7 @@ static void draft_from_touch(struct view *v, const struct kof_touch *t)
 				snprintf(d->rgn, sizeof d->rgn, "%.23s", lab);
 			}
 		}
-		d->grp = 0;
+		d->grp = 1u;             /* matcher 1, the only one here */
 		d->at = st->at;
 		v->n_decl++;
 	}
@@ -3975,6 +4524,21 @@ static const char *draft_missing(struct view *v)
 {
 	uint32_t i;
 
+	/*
+	 * LOGIC THIS PANEL DOES NOT CARRY MAKES THE RULE READ ONLY.
+	 *
+	 * First, before anything about the draft's completeness, because it is
+	 * not a complaint about the draft: the draft is fine and is a truthful
+	 * view of the modelled part. It is a statement about the FILE - it
+	 * holds more than this can write back, so writing it back would delete
+	 * the rest.
+	 *
+	 * Both buttons go, not just Save. Save As would write a new file that
+	 * claims to be this rule and is not, which is the same loss one
+	 * directory entry along.
+	 */
+	if (v->foreign)
+		return "custom logic - read only, edit the file directly";
 	if (!v->family[0])
 		return "name the family";
 	/*
@@ -4002,9 +4566,51 @@ static const char *draft_missing(struct view *v)
 		return "declare a string";
 	if (!v->n_grp)
 		return "add a matcher";
+	/*
+	 * TWO MATCHERS THAT ASK THE SAME THING, INCLUDING THE THRESHOLD.
+	 *
+	 * Sharing a call is what makes two thresholds over one marker set
+	 * cheap, and it is exactly what makes an accidental copy invisible:
+	 * a duplicate no longer costs a second scan, so nothing about the
+	 * generated code would look wrong. It is still a matcher that decides
+	 * nothing the other one has not already decided, and the condition
+	 * naming it is dead weight - so it is refused here rather than found
+	 * later by wondering which of the two a branch meant.
+	 *
+	 * The threshold is part of the comparison on purpose: differing there
+	 * is the whole point of the shape, and only matchers that agree on it
+	 * too are copies.
+	 *
+	 * Compared as questions rather than as spellings - see grp_thresh_eff.
+	 * find_any over a set and find_multi >= 1 over the same set are one
+	 * matcher written two ways, and the generated body makes that plain by
+	 * emitting "m1 >= 1" twice: the second branch is unreachable. The old
+	 * test compared the rule kinds first and so let that pair through.
+	 */
+	for (i = 0; i < v->n_grp; i++) {
+		uint32_t j;
+
+		for (j = i + 1u; j < v->n_grp; j++)
+			if (grp_same_call(v, i, j))
+				return "two matchers ask the same thing - "
+				       "remove one or change a threshold";
+	}
 	for (i = 0; i < v->n_grp; i++)
 		if (!grp_count(v, i))
 			return "every matcher needs a string";
+	/*
+	 * What one call can hold.
+	 *
+	 * KOF_FS_FOLD stops at sixteen names and the cap shows up as an
+	 * undefined KOF_FS_17 - a compile error, which is the right place for
+	 * it in a hand written module and the wrong place for one this tool
+	 * generated. Refused here so the failure lands where the decision was
+	 * made rather than in a build log.
+	 */
+	for (i = 0; i < v->n_grp; i++)
+		if (grp_count(v, i) > 16u)
+			return "a matcher holds at most 16 markers - "
+			       "split it in two";
 	if (!v->n_cnd)
 		return "add a condition";
 	for (i = 0; i < v->n_cnd; i++) {
@@ -4040,7 +4646,7 @@ static const char *draft_missing(struct view *v)
 		static char why[64];
 
 		for (i = 0; i < v->n_decl; i++)
-			if (v->decl[i].grp == GRP_NONE) {
+			if (v->decl[i].grp == 0) {
 				snprintf(why, sizeof why,
 					 "string %u is in no matcher", i + 1u);
 				return why;
@@ -4283,18 +4889,46 @@ static void generate(struct view *v, int as_new)
 		 * of that helps whoever reads this file later. The name is the
 		 * part that identifies the sample.
 		 */
-		const char *base = strrchr(ob->name, '/');
+		const char *base = draft_sample(v);
+		char today[24];
+		uint32_t m;
 
-		base = base ? base + 1 : ob->name;
-		fprintf(f,
-			"/*\n"
-			" * Generated by KOFViewer.\n"
-			" *\n"
-			" * Test sample: %s\n", base);
+		/*
+		 * This sample and this author join what the file already
+		 * recorded rather than replacing it - the list was read back
+		 * out of the block when the rule was opened. Testing a rule
+		 * against a second sample used to erase the first.
+		 */
+		meta_add(v->meta_sample, &v->n_meta_sample, MAX_META, base);
+		meta_add_who(v->meta_who, &v->n_meta_who, MAX_META,
+			     meta_user());
+		meta_today(today, sizeof today);
+		if (!v->meta_made[0])
+			snprintf(v->meta_made, sizeof v->meta_made, "%s",
+				 today);
+
+		fprintf(f, "/*\n * Generated by KOFViewer.\n *\n");
+		for (m = 0; m < v->n_meta_sample; m++)
+			fprintf(f, " * Test sample: %s\n", v->meta_sample[m]);
+		if (ob->packer[0])
+			fprintf(f, " * Unpacked by: %s\n", ob->packer);
+		for (m = 0; m < v->n_meta_who; m++)
+			fprintf(f, " * Researcher:  %s\n", v->meta_who[m]);
+		fprintf(f, " * Created %s, updated %s\n", v->meta_made, today);
+		/*
+		 * The two version numbers that exist and that decide whether
+		 * this file still works: the pack format a database must be in
+		 * for this build to load it, and the module ABI the compiled
+		 * signature must present. The engine has no version string of
+		 * its own yet - kofeng.h says so beside kof_engine_db_version -
+		 * and inventing one here would put a number in every file that
+		 * nothing else in the tree could confirm.
+		 */
+		fprintf(f, " * Engine:      db format %u, module ABI %u\n",
+			(unsigned)KOF_PACK_VERSION,
+			(unsigned)KOFSIG_ABI_VERSION);
+		fprintf(f, " */\n");
 	}
-	if (ob->packer[0])
-		fprintf(f, " * Unpacked by: %s\n", ob->packer);
-	fprintf(f, " */\n");
 	/*
 	 * The author's own line about the module, in a block of its own.
 	 *
@@ -4472,6 +5106,39 @@ static void generate(struct view *v, int as_new)
 	 * shape bases/signatures/lkm_rootkit_general.c is written in, and it is
 	 * only sayable because a matcher carries no verdict of its own.
 	 */
+	/*
+	 * The shared calls, once each, before anything tests them.
+	 *
+	 * Named by the matcher that leads the group - see grp_same_call - so
+	 * the name does not move when a later matcher is removed.
+	 */
+	{
+		uint32_t g, wrote = 0;
+
+		for (g = 0; g < v->n_grp; g++) {
+			if (!grp_shared(v, g) || grp_lead(v, g) != g)
+				continue;
+			/* The shared call always counts: the group's members
+			 * compare against a number, so the leader's own
+			 * spelling does not decide the call's kind. */
+			/*
+			 * uint8_t, because the value cannot exceed 16: the
+			 * count is a sum of 0/1 terms and KOF_FS_FOLD takes
+			 * at most sixteen names in one call. Measured rather
+			 * than assumed - the same module built both ways came
+			 * out 165 bytes with uint32_t and 159 with uint8_t,
+			 * the 8 bit form comparing in %al instead of loading
+			 * and zero extending. Small, and it is also the type
+			 * that states the bound.
+			 */
+			fprintf(f, "\tuint8_t m%u = ", g + 1u);
+			emit_call_multi(f, v, g);
+			fprintf(f, ";\n");
+			wrote++;
+		}
+		if (wrote)
+			fprintf(f, "\n");
+	}
 	{
 		uint32_t prev = v->n_cnd;
 
@@ -4565,7 +5232,7 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		char t[CH_W];
 
 		for (i = 0; i < v->n_decl; i++)
-			if (v->decl[i].grp == arg)
+			if (v->decl[i].grp & (1u << arg))
 				need |= v->decl[i].mask;
 		if (!need)
 			need = KOF_SCAN_ALL;
@@ -4624,7 +5291,7 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 
 		one[0] = 0;
 		for (k = 0; k < v->n_decl; k++)
-			if (v->decl[k].grp != GRP_NONE)
+			if (v->decl[k].grp != 0)
 				here |= v->decl[k].at_mask;
 		c->arg2 = here;
 		v->rng_mask = here;
@@ -4733,7 +5400,10 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		 */
 		char t[CH_W];
 		for (i = 0; i < v->n_decl; i++) {
-			if (v->decl[i].grp != GRP_NONE)
+			/* Already in THIS matcher is what disqualifies it -
+			 * being in another one does not. A marker two matchers
+			 * ask about is the whole point of the shape. */
+			if (v->decl[i].grp & (1u << arg))
 				continue;
 			if (!rng_holds(grp_mask(v, arg), v->decl[i].mask))
 				continue;
@@ -4833,12 +5503,27 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		char t[CH_W];
 		uint32_t n = arg < v->n_grp ? grp_count(v, arg) : 0;
 
-		/* 1 is find_any and n is find_all, and both already have their
-		 * own entry in the rule list. */
+		/*
+		 * WHERE THE LIST STARTS DEPENDS ON WHETHER THE CALL IS SHARED.
+		 *
+		 * On its own, ">= 1" is find_any spelled the long way and n is
+		 * find_all - both already have their own entry in the rule
+		 * list, so offering them here would be two ways to say one
+		 * thing.
+		 *
+		 * Sharing a call changes that. "at least three, otherwise at
+		 * least one" is a real pair of thresholds over ONE scan, and
+		 * writing the weaker half as a second find_any matcher would
+		 * scan the same markers in the same region again - the cost
+		 * this shape exists to remove. So when another matcher asks the
+		 * same thing, 1 becomes a threshold like any other.
+		 */
+		uint32_t lo = (arg < v->n_grp && grp_shared(v, arg)) ? 1u : 2u;
+
 		/* The number, and only the number. How many there are to
 		 * choose from is not a choice - it is shown beside the field
 		 * and follows the markers as they are added. */
-		for (i = 2; i + 1u <= n; i++) {
+		for (i = lo; i + 1u <= n; i++) {
 			snprintf(t, sizeof t, ">= %u", i);
 			ch_add(c, t);
 		}
@@ -5143,18 +5828,23 @@ static void ch_take(struct view *v)
 		uint32_t i, n = 0;
 
 		for (i = 0; i < v->n_decl; i++) {
-			if (v->decl[i].grp != GRP_NONE)
+			if (v->decl[i].grp & (1u << c->arg))
 				continue;
 			if (!rng_holds(grp_mask(v, c->arg), v->decl[i].mask))
 				continue;
 			if ((int)n++ != c->sel)
 				continue;
-			v->decl[i].grp = c->arg;
+			v->decl[i].grp |= 1u << c->arg;
 			break;
 		}
 	} else if (c->what == CH_THRESH) {
+		/* The same lower bound the list was built with - see
+		 * CH_THRESH there. Hard coding 2 here picked the wrong entry
+		 * the moment a shared call made the list start at 1. */
+		uint32_t lo = grp_shared(v, c->arg) ? 1u : 2u;
+
 		q->rule = 2;
-		q->thresh = (uint32_t)c->sel + 2u;
+		q->thresh = (uint32_t)c->sel + lo;
 	} else if (c->what == CH_RULE) {
 		q->rule = c->sel;
 		if (c->sel == 2 && q->thresh < 2u)
@@ -5508,7 +6198,7 @@ static void draft_refresh(struct view *v)
 		uint32_t m = 0;
 
 		for (i = 0; i < v->n_decl; i++)
-			if (v->decl[i].grp == g)
+			if (v->decl[i].grp & (1u << g))
 				m |= v->decl[i].mask;
 		if (m)
 			v->grp[g].mask = m;
@@ -5986,7 +6676,7 @@ static void draw_decl(struct out *o, struct view *v)
 		row_start(o, PR(r), 1);
 		out_fmt(o, A_DIM "     Markers: " A_OFF);
 		for (i = 0; i < v->n_decl; i++) {
-			if (v->decl[i].grp != g)
+			if (!(v->decl[i].grp & (1u << g)))
 				continue;
 			out_fmt(o, "%s%s%u" A_OFF, first ? "" : ", ", A_ID,
 				i + 1u);
@@ -7307,7 +7997,7 @@ static void decl_add(struct view *v, int hex)
 		snprintf(d->rgn, sizeof d->rgn, "%.23s",
 			 rn->mask ? rn->label : "WHOLE-FILE");
 	}
-	d->grp = GRP_NONE;
+	d->grp = 0;
 	d->at = view_map(v, lo, 0);
 	(void)g;
 	v->warn[0] = 0;
@@ -8751,8 +9441,21 @@ static void dump_all(struct view *v)
 
 static void bar_run(struct view *v, int i)
 {
-	if (!bar_enabled(v, i))
+	if (!bar_enabled(v, i)) {
+		/*
+		 * A greyed item that does nothing when clicked teaches nothing.
+		 * The two that can be greyed for a reason worth reading say it.
+		 */
+		if (i == BI_SAVE || i == BI_SAVE_AS) {
+			const char *why = draft_missing(v);
+
+			if (why)
+				say_err(v, "%s", why);
+			else
+				say_note(v, "nothing to write");
+		}
 		return;
+	}
 	v->bar_open = -1;
 	v->bar_sel = -1;
 	switch (i) {
@@ -9731,10 +10434,10 @@ static void click(struct view *v, int rclick)
 				/* An id on this row is a marker; clicking it
 				 * takes it back out of the matcher. */
 				for (i = 0; i < v->n_decl; i++) {
-					if (v->decl[i].grp != g)
+					if (!(v->decl[i].grp & (1u << g)))
 						continue;
 					if (g_mx >= c2 && g_mx < c2 + 3)
-						v->decl[i].grp = GRP_NONE;
+						v->decl[i].grp &= ~(1u << g);
 					c2 += 3;
 				}
 				return;
