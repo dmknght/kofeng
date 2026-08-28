@@ -287,7 +287,16 @@ static void finding_str(const struct kof_scanner *sc,
 		snprintf(fmtarch, sizeof fmtarch, "%s-%s", fmt,
 			 kof_arch_name(ctx->arch));
 
-	snprintf(out, cap, "%s/%s:%s-%s", fmtarch, maltype,
+	/*
+	 * "#" between the family and the variant, not "-".
+	 *
+	 * A family name may contain a hyphen and several in bases/ do, so the
+	 * old separator could not be told from the name around it by eye or by
+	 * anything reading the string back. "#" appears in no family and in no
+	 * variant, and it is the character a reader already associates with "the
+	 * part within" from every other place identifiers are written this way.
+	 */
+	snprintf(out, cap, "%s/%s:%s#%s", fmtarch, maltype,
 		 (family && family[0]) ? family : "unknown",
 		 variant ? variant : "unknown");
 }
@@ -575,7 +584,7 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		else
 			snprintf(fmtarch, sizeof fmtarch, "%s-%s", fmt,
 				 kof_arch_name(ctx->arch));
-		snprintf(fi->name, sizeof fi->name, "%s/Heur:%s:s%d",
+		snprintf(fi->name, sizeof fi->name, "%s/Heur:%s#s%d",
 			 fmtarch, guess, score);
 	}
 	(void)sc;
