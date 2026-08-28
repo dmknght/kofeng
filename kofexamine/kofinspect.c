@@ -481,7 +481,7 @@ const char *kof_touch_kind_name(enum kof_touch_kind k)
 	case KOF_TOUCH_COMPLETE:
 	case KOF_TOUCH_PARTIAL:    return "markers";
 	case KOF_TOUCH_ELSEWHERE:  return "wrong region";
-	case KOF_TOUCH_INELIGIBLE: return "did not run";
+	case KOF_TOUCH_INELIGIBLE: return "skipped";
 	}
 	return "?";
 }

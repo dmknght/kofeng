@@ -62,6 +62,7 @@
 #include <kofmod/pe.h>
 
 #include "kofinspect.h"
+#include "../libkofeng/kofheur/kofheur.h"
 #include "../libkofeng/kofscanners/scan.h"
 
 /* ---- the terminal ---------------------------------------------------------
@@ -1120,6 +1121,31 @@ struct view {
 	int         prop_open;      /* the properties page is up */
 	uint32_t    prop_off;       /* the first of its lines on screen */
 	int         prop_x0, prop_x1, prop_y;   /* its close control */
+	/*
+	 * WHAT IS SELECTED ON THE PAGE, WHICH IS NOT THE SAME AS WHAT WAS CLICKED.
+	 *
+	 * Clicking used to copy outright, and that is the wrong gesture: a reader
+	 * clicks to look, and a click that reaches outside the program and changes
+	 * the clipboard is a side effect nobody asked for. Selecting shows what
+	 * would be taken and lets it be adjusted; Ctrl+C is when they say to take
+	 * it. Same two steps the hex pane already uses, for the same reason.
+	 *
+	 * Columns index the line's PLAIN text - what prop_plain produces - so the
+	 * range means the same thing to the painter and to the copier.
+	 */
+	int32_t     prop_sel_row;               /* -1 when nothing is selected */
+	int32_t     prop_sel_a, prop_sel_b;     /* inclusive, may be reversed */
+	/*
+	 * Where the mouse went DOWN, which is not where the selection starts.
+	 *
+	 * A click selects the whole word under it, so the selection's ends are
+	 * the word's ends. Dragging must grow from the point that was clicked,
+	 * not from whichever end the word happened to put there - otherwise
+	 * pulling back over the word does nothing until the pointer passes its
+	 * far edge, which is what made dragging feel broken.
+	 */
+	int32_t     prop_anchor;
+	int         prop_dragging;
 	/*
 	 * What is being searched for, and where it was last found.
 	 *
@@ -2989,6 +3015,22 @@ static int meta_has_sample(struct view *v)
 	return 0;
 }
 
+/*
+ * HAS THE READER CHANGED ANYTHING.
+ *
+ * Narrower than draft_dirty, and the two are not interchangeable. draft_dirty
+ * also answers yes when the draft is fine but this sample is not yet recorded in
+ * it - which is a reason to offer Save, and NOT a reason to say there is work to
+ * lose. Opening a file loads the signature that matched it, so on any detected
+ * sample draft_dirty is true before the reader has touched a key, and using it to
+ * guard "move on" made Next file dead on exactly the files somebody is stepping
+ * through.
+ */
+static int draft_edited(struct view *v)
+{
+	return draft_hash(v) != v->saved_hash;
+}
+
 static int draft_dirty(struct view *v)
 {
 	/*
@@ -3001,7 +3043,15 @@ static int draft_dirty(struct view *v)
 	 * confirm it fires on a second sample, and there was no way to write
 	 * that down.
 	 */
-	if (!meta_has_sample(v))
+	/*
+	 * An EMPTY draft is not dirty, whatever the metadata says.
+	 *
+	 * The test below asks whether this sample has been recorded, and on a
+	 * draft with nothing in it the answer is no and always will be - there
+	 * is nothing to record it against. Read as dirty it made a viewer that
+	 * had written nothing refuse to move on, which is how this was found.
+	 */
+	if (v->n_decl && !meta_has_sample(v))
 		return 1;
 	return draft_hash(v) != v->saved_hash;
 }
@@ -8571,7 +8621,7 @@ static void find_run(struct view *v, int back)
  * and that is one page rather than a menu of them. So it is one item, under
  * File, next to the other things that are about the file in hand.
  */
-enum bar_menu { BM_FILE = 0, BM_EDIT, BM_HELP, BM_COUNT };
+enum bar_menu { BM_FILE = 0, BM_EDIT, BM_ANALYSIS, BM_HELP, BM_COUNT };
 
 /*
  * Dump, next to them, because it is about this file too.
@@ -8590,8 +8640,15 @@ enum bar_menu { BM_FILE = 0, BM_EDIT, BM_HELP, BM_COUNT };
  * to do one thing.
  */
 enum bar_item {
-	BI_OPEN = 0, BI_SAVE, BI_SAVE_AS, BI_DUMP, BI_PROPS, BI_QUIT,
+	BI_OPEN = 0, BI_SAVE, BI_SAVE_AS, BI_QUIT,
 	BI_FIND, BI_GOTO,
+	/*
+	 * Analysis is what the tool does TO an object, as against File which is
+	 * what it does to the draft. Dashboard and Dump both answer questions
+	 * about the bytes in front of the reader and neither writes a signature,
+	 * so they belong together and not beside Save.
+	 */
+	BI_DASH, BI_DUMP, BI_NEXT,
 	BI_KEYS, BI_ABOUT,
 	BI_COUNT
 };
@@ -8603,17 +8660,18 @@ static const struct {
 	{ "Open...",        BM_FILE },
 	{ "Save",           BM_FILE },
 	{ "Save As...",     BM_FILE },
-	{ "Dump regions",   BM_FILE },
-	{ "Properties",     BM_FILE },
 	{ "Quit",           BM_FILE },
 	{ "Find...",        BM_EDIT },
 	{ "Go to...",       BM_EDIT },
+	{ "Dashboard",      BM_ANALYSIS },
+	{ "Dump",           BM_ANALYSIS },
+	{ "Next file",      BM_ANALYSIS },
 	{ "Keyboard",       BM_HELP },
 	{ "About",          BM_HELP }
 };
 
 static const char *const bar_name[BM_COUNT] = {
-	"File", "Edit", "Help"
+	"File", "Edit", "Analysis", "Help"
 };
 
 /*
@@ -8640,7 +8698,10 @@ static int bar_enabled(struct view *v, int i)
 	 * where there is nowhere for a dump to go: the directory is named after
 	 * the file and placed beside it. */
 	case BI_DUMP:      return v->path && v->path[0];
-	case BI_PROPS:     return 1;
+	case BI_DASH:      return 1;
+	/* Needs a file to step from, and nothing the reader typed that would be
+	 * lost - moving on is the one action here that throws work away. */
+	case BI_NEXT:      return v->path && v->path[0] && !draft_edited(v);
 	case BI_QUIT:      return 1;
 	case BI_FIND:      return 1;
 	case BI_GOTO:      return 0;            /* the dialog is not built */
@@ -9117,11 +9178,74 @@ no_regions:
 		prop_add(A_DIM, "  no parser claimed these bytes");
 	}
 
+	/*
+	 * WHAT THE HEURISTIC WOULD SAY, SHOWN BESIDE WHAT THE SIGNATURES SAID.
+	 *
+	 * Scored here rather than read back from a scan, because the scan the
+	 * viewer ran may have had the heuristic switched off - and a page that
+	 * showed nothing in that case would be reporting the option rather than
+	 * the object. The model is the engine's own, so the number on this page
+	 * is the number a scanner would produce.
+	 *
+	 * The traces are listed under it with their values. A score with no
+	 * breakdown is a number to be believed rather than read, and this page
+	 * exists to be read.
+	 */
+	{
+		const struct kof_heur_model *hm = kof_heur_default();
+		struct kof_heur_facts hf;
+		const char *guess = "Unknown";
+		int32_t sc = 0;
+		uint32_t k;
+
+		memset(&hf, 0, sizeof hf);
+		hf.format    = ob->ctx.format;
+		hf.anomalies = ob->fmt ? ob->fmt->anomalies(ob->info) : 0;
+		if (ob->depth)
+			hf.flags |= KOF_HEUR_FL(KOF_HEUR_F_PACKED);
+		if (ob->broken == KOF_BROKEN_DAMAGED)
+			hf.flags |= KOF_HEUR_FL(KOF_HEUR_F_UNPACK_PARTIAL);
+		hf.packer_depth = ob->depth > 255u ? 255u : (uint8_t)ob->depth;
+
+		prop_head("Heuristic");
+		if (!kof_heur_score(hm, &hf, &sc, &guess)) {
+			prop_add(A_DIM, "  no model for this format - not scored");
+		} else {
+			prop_add(A_OFF, "  %-11s %s%d" A_OFF A_DIM
+				 "  of %d to report" A_OFF, "score",
+				 sc >= hm->bar_centinats ? A_BAD : A_SIZE,
+				 sc, hm->bar_centinats);
+			if (sc >= hm->bar_centinats)
+				prop_add(A_BAD, "  %-11s %s", "verdict", guess);
+			for (k = 0; k < hm->n_anom; k++)
+				if (hm->anom[k].format == hf.format &&
+				    (hf.anomalies & hm->anom[k].mask))
+					prop_add(A_OFF, "     %s+%-6d" A_OFF
+						 A_DIM " %s" A_OFF, A_WARN,
+						 hm->anom[k].centinats,
+						 hm->anom[k].guess);
+			for (k = 0; k < hm->n_flag; k++)
+				if (hf.flags & KOF_HEUR_FL(hm->flag[k].fact))
+					prop_add(A_OFF, "     %s+%-6d" A_OFF
+						 A_DIM " %s" A_OFF, A_WARN,
+						 hm->flag[k].centinats,
+						 hm->flag[k].guess);
+		}
+	}
+
 	prop_head("Signatures");
 	for (i = 0; i < ob->n_touch; i++)
 		hit += (uint32_t)(ob->touch[i].fired != 0);
-	prop_add(A_OFF, "  %s%u" A_OFF A_DIM " fired, " A_OFF A_SIZE "%u"
-		 A_OFF A_DIM " did not" A_OFF, hit ? A_BAD : A_SIZE, hit,
+	/*
+	 * "matched" and "skipped", not "fired" and "did not".
+	 *
+	 * The old pair said what happened to the MODULE; these say what happened
+	 * to the object, which is what a reader of this page is asking. "did not"
+	 * was worse still - it ended mid-sentence and left the reader to guess
+	 * whether the module ran and declined, or never ran at all.
+	 */
+	prop_add(A_OFF, "  %s%u" A_OFF A_DIM " matched, " A_OFF A_SIZE "%u"
+		 A_OFF A_DIM " skipped" A_OFF, hit ? A_BAD : A_SIZE, hit,
 		 ob->n_touch - hit);
 	for (i = 0; i < ob->n_touch; i++) {
 		const struct kof_touch *t = &ob->touch[i];
@@ -9158,6 +9282,24 @@ no_regions:
  * character this writes at index N. Two walks that disagreed would put the word
  * under the cursor one place away from the word that gets copied.
  */
+/*
+ * WHERE ONE VALUE ENDS AND THE NEXT BEGINS ON THIS PAGE.
+ *
+ * Not whitespace alone. The page is written as key=value pairs packed on one
+ * line - "off=624 size=28 vaddr=0x400270 perm=R--" - so a word bounded only by
+ * spaces is the whole pair, and clicking the number handed back "size=28" when
+ * the number was the point. Breaking on "=" as well makes each half selectable
+ * on its own, which is what a reader clicking a number means.
+ *
+ * The comma is here for the same reason and the colon is NOT: an offset written
+ * "0x400270" has no colon, but a name might, and splitting a name is worse than
+ * making somebody drag.
+ */
+static int prop_break(char c)
+{
+	return c == ' ' || c == '\t' || c == '=' || c == ',';
+}
+
 static uint32_t prop_plain(const char *s, char *out, uint32_t cap)
 {
 	uint32_t n = 0;
@@ -9180,50 +9322,9 @@ static uint32_t prop_plain(const char *s, char *out, uint32_t cap)
 	return n;
 }
 
-/*
- * What a click on a property line means to copy.
- *
- * The word under the cursor, and when that word is a key=value - which is how
- * most of this page is written: off=360448, vaddr=0x58000, perm=R-X - the value
- * alone, because the value is the thing anyone reaches for. Clicking past the
- * end of the text takes the whole line instead, so the row is still available
- * whole without a second gesture to learn.
- *
- * Whitespace delimited, which is a rule with no exceptions rather than a
- * tokeniser that has to know what each format writes. A section name with a
- * space in it would come out as one word cut short, and that is a visible,
- * correctable answer rather than a wrong one.
- */
-static uint32_t prop_pick(const char *line, uint32_t n, int col,
-			  char *out, uint32_t cap)
+static void prop_put(struct out *o, const char *s, int room, int sa, int sb)
 {
-	int a, b;
-
-	if (col < 0 || (uint32_t)col >= n || line[col] == ' ') {
-		snprintf(out, cap, "%.*s", (int)(cap - 1u), line);
-		return (uint32_t)strlen(out);
-	}
-	for (a = col; a > 0 && line[a - 1] != ' '; a--)
-		;
-	for (b = col; (uint32_t)b < n && line[b] != ' '; b++)
-		;
-	{
-		const char *w = line + a;
-		int len = b - a;
-		const char *eq = memchr(w, '=', (size_t)len);
-
-		if (eq && eq + 1 < w + len) {
-			len -= (int)(eq + 1 - w);
-			w = eq + 1;
-		}
-		snprintf(out, cap, "%.*s", len, w);
-	}
-	return (uint32_t)strlen(out);
-}
-
-static void prop_put(struct out *o, const char *s, int room)
-{
-	int n = 0;
+	int n = 0, inv = 0;
 
 	while (*s && n < room) {
 		if (*s == '\033') {
@@ -9246,7 +9347,16 @@ static void prop_put(struct out *o, const char *s, int room)
 		}
 		{
 			char t[2];
+			int want = sa >= 0 && n >= sa && n <= sb;
 
+			/* The reverse is turned on and off around the run
+			 * rather than per character: the line carries its own
+			 * colours and re-emitting them inside a reversed span
+			 * would cancel it halfway. */
+			if (want != inv) {
+				out_str(o, want ? A_SEL : A_OFF);
+				inv = want;
+			}
 			t[0] = *s++;
 			t[1] = 0;
 			out_str(o, t);
@@ -9351,9 +9461,18 @@ static void draw_prop(struct out *o, struct view *v)
 	for (y = 0; y < h - 2; y++) {
 		out_at(o, top + 1 + y, left);
 		out_str(o, A_DIM "|" A_OFF " ");
-		if (y < (int)shown)
-			prop_put(o, g_prop[v->prop_off + (uint32_t)y].text,
-				 inner);
+		if (y < (int)shown) {
+			uint32_t idx = v->prop_off + (uint32_t)y;
+			int sa = -1, sb = -1;
+
+			if ((int32_t)idx == v->prop_sel_row) {
+				sa = v->prop_sel_a < v->prop_sel_b
+				   ? v->prop_sel_a : v->prop_sel_b;
+				sb = v->prop_sel_a < v->prop_sel_b
+				   ? v->prop_sel_b : v->prop_sel_a;
+			}
+			prop_put(o, g_prop[idx].text, inner, sa, sb);
+		}
 		else
 			for (i = 0; i < inner; i++)
 				out_str(o, " ");
@@ -9446,6 +9565,102 @@ static void dump_all(struct view *v)
 		 skipped ? "  (some too large to hold)" : "");
 }
 
+/*
+ * THE NEXT FILE IN THE SAME DIRECTORY, BY RE-EXEC.
+ *
+ * Reading a directory of samples one after another is how this tool is used, and
+ * quitting and retyping a path between each one is most of the work. This is that
+ * loop.
+ *
+ * Re-exec rather than tearing the view down and rebuilding it, and that is a
+ * deliberate trade. Every pointer in the view - the mapping, the object tree, the
+ * touch lists, the draft - belongs to one file, and unwinding them in the right
+ * order to load another is a page of code whose bugs would all be use-after-free.
+ * exec hands the problem to the kernel: the process is replaced, nothing leaks,
+ * and every option the viewer was started with survives because argv does.
+ *
+ * The cost is honest and small: the database is loaded again. That is a second on
+ * a large one, against a rewrite that could lose somebody's draft.
+ */
+static char **g_argv;           /* what this process was started with */
+
+static void open_next(struct view *v)
+{
+	char dir[KOF_DUMP_PATH_ROOM], best[KOF_DUMP_PATH_ROOM];
+	const char *base = base_name(v->path);
+	size_t lead = (size_t)(base - v->path);
+	DIR *d;
+	struct dirent *e;
+	int found = 0;
+
+	if (lead + 1 >= sizeof dir)
+		return;
+	if (lead) {
+		memcpy(dir, v->path, lead);
+		dir[lead ? lead - 1 : 0] = 0;   /* drop the separator */
+	}
+	if (!lead || !dir[0])
+		snprintf(dir, sizeof dir, ".");
+
+	d = opendir(dir);
+	if (!d) {
+		v->act_ok = 0;
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "cannot read %.60s", dir);
+		return;
+	}
+	/*
+	 * The smallest name greater than this one, so the order is the same
+	 * every time and does not depend on how the filesystem hands entries
+	 * back. Directories and anything unreadable are skipped rather than
+	 * stopping the walk.
+	 */
+	while ((e = readdir(d)) != NULL) {
+		char cand[KOF_DUMP_PATH_ROOM];
+		struct stat st;
+
+		if (strcmp(e->d_name, base) <= 0)
+			continue;
+		if (found && strcmp(e->d_name, base_name(best)) >= 0)
+			continue;
+		if ((size_t)snprintf(cand, sizeof cand, "%s/%s", dir,
+				     e->d_name) >= sizeof cand)
+			continue;
+		if (stat(cand, &st) != 0 || !S_ISREG(st.st_mode) ||
+		    st.st_size <= 0)
+			continue;
+		snprintf(best, sizeof best, "%s", cand);
+		found = 1;
+	}
+	closedir(d);
+
+	if (!found) {
+		v->act_ok = 0;
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "%.50s is the last file here", base);
+		return;
+	}
+	if (!g_argv) {
+		v->act_ok = 0;
+		snprintf(v->act_msg, sizeof v->act_msg, "cannot restart");
+		return;
+	}
+	/*
+	 * The path is the last argument, which is where the option parser
+	 * expects it and where this process received its own.
+	 */
+	{
+		uint32_t n = 0;
+
+		while (g_argv[n]) n++;
+		if (n) g_argv[n - 1] = best;
+	}
+	term_restore();
+	execv("/proc/self/exe", g_argv);
+	/* Only here if exec failed; the terminal is already back. */
+	_exit(1);
+}
+
 static void bar_run(struct view *v, int i)
 {
 	if (!bar_enabled(v, i)) {
@@ -9474,12 +9689,15 @@ static void bar_run(struct view *v, int i)
 		v->warn[0] = 0;
 		break;
 	case BI_DUMP:    dump_all(v); break;
-	case BI_PROPS:
+	case BI_NEXT:    open_next(v); break;
+	case BI_DASH:
 		/* Whatever the last copy or dump said belongs to the screen
 		 * it was said on, not to a page opened afterwards. */
 		v->prop_open = 1;
 		v->prop_off = 0;
 		v->act_msg[0] = 0;
+		v->prop_sel_row = -1;
+		v->prop_dragging = 0;
 		break;
 	case BI_KEYS:    v->help_open = 1; break;
 	case BI_ABOUT:   v->help_open = 2; break;
@@ -10662,6 +10880,44 @@ static int handle(struct view *v, int k)
 			 * that knows how many lines there are. */
 			v->prop_off = 0xffffffu;
 			return 1;
+		case K_DRAG:
+			if (v->prop_dragging && v->prop_sel_row >= 0) {
+				char plain[PROP_W];
+				uint32_t pn = prop_plain(
+					g_prop[v->prop_sel_row].text,
+					plain, sizeof plain);
+				int col = g_mx - 4;
+
+				if (col < 0) col = 0;
+				if ((uint32_t)col >= pn && pn)
+					col = (int)pn - 1;
+				/* From where the button went down, so pulling
+				 * either way from the click grows the run. */
+				v->prop_sel_a = v->prop_anchor;
+				v->prop_sel_b = col;
+			}
+			return 1;
+		case K_RELEASE:
+			v->prop_dragging = 0;
+			return 1;
+		case 0x03:                      /* Ctrl+C */
+			if (v->prop_sel_row >= 0) {
+				char plain[PROP_W];
+				uint32_t pn = prop_plain(
+					g_prop[v->prop_sel_row].text,
+					plain, sizeof plain);
+				int a2 = v->prop_sel_a < v->prop_sel_b
+				       ? v->prop_sel_a : v->prop_sel_b;
+				int b2 = v->prop_sel_a < v->prop_sel_b
+				       ? v->prop_sel_b : v->prop_sel_a;
+
+				if (pn && a2 >= 0 && (uint32_t)b2 < pn) {
+					copy_osc52(plain + a2,
+						   (size_t)(b2 - a2 + 1));
+					copy_said(v, (size_t)(b2 - a2 + 1));
+				}
+			}
+			return 1;
 		case 27:
 		case 'q':
 		case '\r':
@@ -10686,24 +10942,20 @@ static int handle(struct view *v, int k)
 				return 1;
 			}
 			/*
-			 * A click on a line copies what it points at.
+			 * A click SELECTS; Ctrl+C copies. See view.prop_sel_row.
 			 *
-			 * The page is facts about the object and the reason to
-			 * open it is usually to put one of them somewhere else
-			 * - a search box, a bug report, a signature. Reading a
-			 * number off the screen and typing it back in is where
-			 * an offset gets a digit wrong.
-			 *
-			 * The geometry is draw_prop's: the box starts at row 2
-			 * and column 2, its first text row is one below the
-			 * top rule, and the text begins two columns in past
-			 * "| ".
+			 * The word under the cursor to start with, because that
+			 * is what a reader means by clicking on a number, and
+			 * dragging widens it. Clicking past the end of the text
+			 * takes the whole line - the row is still reachable
+			 * whole without a second gesture to learn.
 			 */
 			{
 				int line = g_my - 3;    /* top(2) + rule(1) */
 				uint32_t idx = v->prop_off + (uint32_t)line;
-				char plain[PROP_W], want[PROP_W];
+				char plain[PROP_W];
 				uint32_t pn;
+				int col = g_mx - 4;
 
 				if (line < 0 || g_my >= g_rows - 2 ||
 				    idx >= g_n_prop)
@@ -10712,12 +10964,26 @@ static int handle(struct view *v, int k)
 						sizeof plain);
 				if (!pn)
 					return 1;
-				prop_pick(plain, pn, g_mx - 4, want,
-					  sizeof want);
-				if (want[0]) {
-					copy_osc52(want, strlen(want));
-					copy_said(v, strlen(want));
+				v->prop_sel_row = (int32_t)idx;
+				v->prop_anchor = col < 0 ? 0
+					       : ((uint32_t)col >= pn
+						  ? (int32_t)pn - 1 : col);
+				if (col < 0 || (uint32_t)col >= pn ||
+				    prop_break(plain[col])) {
+					v->prop_sel_a = 0;
+					v->prop_sel_b = (int32_t)pn - 1;
+				} else {
+					int a = col, b = col;
+
+					while (a > 0 && !prop_break(plain[a - 1]))
+						a--;
+					while ((uint32_t)b + 1u < pn &&
+					       !prop_break(plain[b + 1]))
+						b++;
+					v->prop_sel_a = a;
+					v->prop_sel_b = b;
 				}
+				v->prop_dragging = 1;
 			}
 			return 1;
 		default:
@@ -11442,7 +11708,9 @@ int main(int argc, char **argv)
 	struct stat st;
 	int fd, i, rc = 0;
 
+	g_argv = argv;
 	memset(&v, 0, sizeof v);
+	v.prop_sel_row = -1;
 	v.sel_a = v.sel_b = KOF_BROKEN;
 	v.find_at = KOF_BROKEN;
 	v.bar_open = -1;
