@@ -73,6 +73,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -1398,6 +1399,259 @@ static char *slurp(const char *path, size_t *len_out)
 	return buf;
 }
 
+/* ---- the performance lint ------------------------------------------------- */
+
+/*
+ * WHAT THE BUILD CAN SEE, AND WHY IT SHOULD SAY SO.
+ *
+ * Every cost in this engine that a signature author can accidentally double is
+ * visible in the source. The author cannot see it: the extents a range resolves
+ * to, whether the presence set can rule a marker out, which memo cell a call
+ * lands in - none of that is in front of them while they are writing a rule.
+ * The build has all of it, so the build is where it gets said.
+ *
+ * These are WARNINGS. Every one of them describes a rule that works and costs
+ * more than it needs to, and a build that refused them would be refusing correct
+ * signatures over a judgement about speed.
+ *
+ * TWO OPTIMISATIONS ARE ALREADY DONE AND ARE NOT REPEATED HERE, because knowing
+ * they exist is what stops a third being invented:
+ *
+ *   - Two ranges with the same MASK share one memo column, across the whole
+ *     database, not just within a module (kofdb.c gives each distinct mask a
+ *     uid). Declaring the same region twice costs a name and nothing else.
+ *   - The same marker declared by two modules is one uid and one answer.
+ *
+ * So what is left for a lint is the thing neither can fix: a rule that asks for
+ * the same bytes twice in two different shapes.
+ */
+static int warnings;
+
+static void lwarn(int line, const char *fmt, ...)
+{
+	va_list ap;
+
+	fprintf(stderr, "%s:%d: warning: ", src_name, line);
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	fputc('\n', stderr);
+	warnings++;
+}
+
+/* Which ranges each declared marker is searched in, and where. */
+struct use {
+	/* Searched for without naming a region - kof_find_str_where and its
+	 * kind. Not a range, and still a use. */
+	int      used_unranged;
+	uint32_t n_rng;
+	int      rng[KOF_MAX_RANGE_PER_MODULE];
+	int      line[KOF_MAX_RANGE_PER_MODULE];
+};
+
+static struct use uses[MAX_PATTERNS];
+static int rng_used[MAX_PATTERNS];
+
+static int ident_at(const char *p, char *out, size_t cap)
+{
+	size_t n = 0;
+
+	while (*p == ' ' || *p == '\t' || *p == '\n')
+		p++;
+	while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+	       (*p >= '0' && *p <= '9') || *p == '_') {
+		if (n + 1 < cap)
+			out[n++] = *p;
+		p++;
+	}
+	out[n] = 0;
+	return n != 0;
+}
+
+static int pat_index(const char *name)
+{
+	int i;
+
+	for (i = 0; i < npats; i++)
+		if (strcmp(pats[i].name, name) == 0)
+			return i;
+	return -1;
+}
+
+static int rng_index(const char *name)
+{
+	int i;
+
+	for (i = 0; i < nrngs; i++)
+		if (strcmp(rngs[i].name, name) == 0)
+			return i;
+	return -1;
+}
+
+static void use_add(int pi, int ri, int line)
+{
+	struct use *u = &uses[pi];
+	uint32_t k;
+
+	if (ri < 0)
+		return;
+	for (k = 0; k < u->n_rng; k++)
+		if (u->rng[k] == ri)
+			return;
+	if (u->n_rng >= KOF_MAX_RANGE_PER_MODULE)
+		return;
+	u->line[u->n_rng] = line;
+	u->rng[u->n_rng++] = ri;
+}
+
+/*
+ * Walk the call sites.
+ *
+ * A text scan, deliberately: the declarations were parsed properly above because
+ * they become data in a pack, and a call site becomes nothing - it is compiled
+ * code. What is wanted here is which names appear together inside one
+ * kof_find_str_*(...), and that survives a scan intact. Anything this misreads
+ * produces a warning that is wrong, never a pack that is.
+ */
+static void lint_calls(const char *src, size_t len)
+{
+	size_t i;
+	int line = 1;
+
+	for (i = 0; i < len; i++) {
+		const char *at = src + i;
+		const char *open, *close, *p;
+		char first[64];
+		int ri = -1, ranged;
+
+		if (src[i] == '\n') {
+			line++;
+			continue;
+		}
+		if (strncmp(at, "kof_find_str", 12) != 0)
+			continue;
+		open = strchr(at, '(');
+		if (!open)
+			continue;
+		close = strchr(open, ')');
+		if (!close)
+			continue;
+		/*
+		 * The ranged forms take a range first; the offset forms take
+		 * numbers. Both USE their markers - which is what "declared and
+		 * never searched for" is about - and only the ranged ones say
+		 * anything about regions. Treating _where as no use at all was
+		 * this lint's own first false positive: it reported the UPX
+		 * magic as dead in a module that searches for it on every
+		 * object.
+		 */
+		ranged = !(strncmp(at, "kof_find_str_at", 15) == 0 ||
+			   strncmp(at, "kof_find_str_in", 15) == 0 ||
+			   strncmp(at, "kof_find_str_where", 18) == 0);
+		if (ranged && ident_at(open + 1, first, sizeof first)) {
+			ri = rng_index(first);
+			if (ri >= 0)
+				rng_used[ri] = 1;
+		}
+		/* Every identifier inside this call that names a declared
+		 * marker, whichever position it is in. */
+		for (p = open + 1; p < close; p++) {
+			char sname[64];
+			int pi;
+
+			if (!((*p >= 'A' && *p <= 'Z') ||
+			      (*p >= 'a' && *p <= 'z') || *p == '_'))
+				continue;
+			if (p > open + 1 &&
+			    ((p[-1] >= 'A' && p[-1] <= 'Z') ||
+			     (p[-1] >= 'a' && p[-1] <= 'z') ||
+			     (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_'))
+				continue;       /* mid identifier */
+			if (!ident_at(p, sname, sizeof sname))
+				continue;
+			pi = pat_index(sname);
+			if (pi >= 0) {
+				if (ri >= 0)
+					use_add(pi, ri, line);
+				else
+					uses[pi].used_unranged = 1;
+			}
+			p += strlen(sname) - 1u;
+		}
+	}
+}
+
+static void lint_report(void)
+{
+	int i;
+	uint32_t k;
+
+	for (i = 0; i < npats; i++) {
+		struct use *u = &uses[i];
+
+		if (u->n_rng == 0 && !u->used_unranged) {
+			lwarn(pats[i].line,
+			      "'%s' is declared and never searched for; it costs "
+			      "space in the pack and can never match",
+			      pats[i].name);
+			continue;
+		}
+		/*
+		 * THE ONE THAT COSTS REAL TIME.
+		 *
+		 * Measured over 13426 objects with one marker in .rodata: one
+		 * range covering CODE|DATA read 185 MB, two calls over CODE then
+		 * DATA read 869 MB - 4.7x - and found the same 1567 objects. The
+		 * extents of one range are walked in FILE ORDER and the search
+		 * stops at the first hit; two ranges must exhaust the first
+		 * region before the second is looked at.
+		 */
+		if (u->n_rng > 1) {
+			uint32_t both = 0;
+
+			for (k = 0; k < u->n_rng; k++)
+				both |= rngs[u->rng[k]].mask;
+			char list[256];
+			size_t at = 0;
+
+			for (k = 0; k < u->n_rng; k++)
+				at += (size_t)snprintf(list + at,
+						       sizeof list - at,
+						       k ? ", %s" : "%s",
+						       rngs[u->rng[k]].name);
+			lwarn(u->line[0],
+			      "'%s' is searched in %u ranges (%s)",
+			      pats[i].name, u->n_rng, list);
+			for (k = 1; k < u->n_rng; k++)
+				fprintf(stderr, "%s:%d: note:  also here\n",
+					src_name, u->line[k]);
+			fprintf(stderr, "%s:%d: note:  one range over mask "
+				"0x%x would read the object once instead of "
+				"%u times; the extents of a range are walked "
+				"in file order and the search stops at the "
+				"first hit\n", src_name, u->line[0], both,
+				u->n_rng);
+		}
+		/*
+		 * Below the presence set's key width.
+		 *
+		 * gram_may_contain admits everything shorter than four bytes, so
+		 * a marker this short can never be ruled out without reading the
+		 * object - it is scanned for in every eligible file, forever.
+		 */
+		if (pats[i].kind == KOF_STR_LITERAL && pats[i].len < 4u)
+			lwarn(pats[i].line,
+			      "'%s' is %u bytes; under four the presence set "
+			      "cannot rule it out, so every eligible object is "
+			      "scanned for it", pats[i].name, pats[i].len);
+	}
+	for (i = 0; i < nrngs; i++)
+		if (!rng_used[i])
+			lwarn(rngs[i].line,
+			      "range '%s' is declared and never used",
+			      rngs[i].name);
+}
+
 static int extract_main(int argc, char **argv)
 {
 	FILE *out;
@@ -1431,6 +1685,11 @@ static int extract_main(int argc, char **argv)
 		free(src);
 		return 1;
 	}
+
+	/* Diagnosis, after the declarations are known and before anything is
+	 * written: a warning about a pack that was never produced is noise. */
+	lint_calls(src, src_len);
+	lint_report();
 
 	out = fopen(argv[3], "w");
 	if (!out) {
