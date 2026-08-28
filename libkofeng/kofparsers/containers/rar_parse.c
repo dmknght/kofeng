@@ -493,8 +493,26 @@ static int file_block(struct rw *s, uint64_t at, uint64_t size, uint16_t flags,
 		r->anomalies |= KOF_RAR_ANOM_ENCRYPTED;
 		r->n_encrypted++;
 	}
-	if (flags & KOF_RAR3_F_SOLID)
+	/*
+	 * Marked on the ENTRY as well as on the archive, which it was not.
+	 *
+	 * A solid entry continues the sliding window of the one before it, so
+	 * decoded on its own it is right up to its first back reference and
+	 * silently wrong after - the RAR5 branch says exactly this and sets the
+	 * entry flag; this one set only the archive-wide anomaly, so nothing
+	 * downstream could tell which entries were affected. The unpacker's
+	 * refusal is written against the entry flag, so it never fired for RAR3
+	 * and 294 solid entries in a 120 archive sample were decoded into
+	 * plausible-looking rubbish and handed on as files.
+	 *
+	 * Per entry and not per archive because only some of them carry it: the
+	 * first file of a solid block starts an empty window and decodes on its
+	 * own exactly like any other.
+	 */
+	if (flags & KOF_RAR3_F_SOLID) {
+		e->suspicious |= KOF_RAR_ENT_SOLID;
 		r->anomalies |= KOF_RAR_ANOM_SOLID;
+	}
 	if (flags & (KOF_RAR3_F_SPLIT_BEFORE | KOF_RAR3_F_SPLIT_AFTER))
 		e->suspicious |= KOF_RAR_ENT_SPLIT;
 

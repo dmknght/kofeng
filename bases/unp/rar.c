@@ -53,6 +53,17 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_rar_info *r = kof_rar(ctx);
 	uint32_t i, opened = 0, packed = 0;
+	/*
+	 * WHY an entry was not opened, one counter per reason.
+	 *
+	 * `packed` alone said how many entries were out of reach and nothing
+	 * about what would bring them in. The four reasons lead to completely
+	 * different work - a decoder that gave up mid-stream is a bug or a
+	 * missing coder, an entry that is solid needs the one before it, a
+	 * version this build predates needs a different layout entirely - and
+	 * telling them apart from outside meant guessing.
+	 */
+	uint32_t n_solid = 0, n_enc = 0, n_nosize = 0, n_ver = 0, n_dec = 0;
 
 	if (!r->valid)
 		return;
@@ -84,11 +95,13 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		 */
 		if (e->suspicious & KOF_RAR_ENT_SOLID) {
 			packed++;
+			n_solid++;
 			continue;
 		}
 
 		if (e->suspicious & KOF_RAR_ENT_ENCRYPTED) {
 			packed++;
+			n_enc++;
 			continue;
 		}
 
@@ -118,6 +131,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		 */
 		if (!e->usize) {
 			packed++;
+			n_nosize++;
 			continue;
 		}
 		if (r->rar_version == KOF_RAR_V5) {
@@ -126,21 +140,27 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			 * not written for. */
 			if (e->unp_ver != 0) {
 				packed++;
+				n_ver++;
+				kof_debug("Rar.unp_ver", e->unp_ver);
 				continue;
 			}
 			if (kof_unpack_at(KOF_UNP_RAR5, e->data_off, e->csize,
 					  e->usize) == 0) {
 				packed++;
+				n_dec++;
 				continue;
 			}
 		} else if (r->rar_version == KOF_RAR_V3 && e->unp_ver == 29) {
 			if (kof_unpack_at(KOF_UNP_RAR3, e->data_off, e->csize,
 					  e->usize) == 0) {
 				packed++;
+				n_dec++;
 				continue;
 			}
 		} else {
 			packed++;
+			n_ver++;
+			kof_debug("Rar.unp_ver", e->unp_ver);
 			continue;
 		}
 		if (!kof_child())
@@ -164,6 +184,18 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 	kof_debug("Rar.opened", opened);
 	kof_debug("Rar.unreachable", packed);
+	/* Only when there is something to say: a clean archive should not print
+	 * five zeroes, and a reason at zero is not a fact worth a line. */
+	if (n_solid)
+		kof_debug("Rar.skip_solid", n_solid);
+	if (n_enc)
+		kof_debug("Rar.skip_encrypted", n_enc);
+	if (n_nosize)
+		kof_debug("Rar.skip_nosize", n_nosize);
+	if (n_ver)
+		kof_debug("Rar.skip_version", n_ver);
+	if (n_dec)
+		kof_debug("Rar.skip_decoder", n_dec);
 
 	/*
 	 * The order below is the order of severity, and only the first reason a
