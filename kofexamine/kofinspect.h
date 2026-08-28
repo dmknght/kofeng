@@ -207,9 +207,57 @@ enum kof_touch_kind {
 
 /* One declared marker, and where it turned out to be. */
 struct kof_touch_str {
-	const uint8_t *bytes;    /* into the pack's string pool, not owned */
-	uint16_t       len;
+	/*
+	 * THE POOL ENTRY, WHICH IS NOT THE PATTERN.
+	 *
+	 * Named `pool` and not `bytes` on purpose, and renamed after the same
+	 * mistake was made three times in two front ends. For a literal these
+	 * are the marker's bytes. For a HEX marker they are the COMPILED
+	 * PROGRAM - a header, a step table, an alternative table and a data
+	 * area - and its length, so reading them as a marker is wrong twice
+	 * over: the length is the program's and the "bytes" are its header.
+	 * Measured: the three byte pattern 2E2E5C arrives here as 67 bytes.
+	 *
+	 * Every consumer that wanted "the marker" wanted `text` and `span`
+	 * below, which are filled once here so no caller has to know a program
+	 * exists. Reach for these two only to walk the program itself.
+	 */
+	const uint8_t *pool;     /* into the pack's string pool, not owned */
+	uint16_t       pool_len;
 	uint8_t        kind;     /* enum kof_pack_str_kind */
+
+	/*
+	 * The marker as a person wrote it, and how much of the object one match
+	 * covers - the two questions every display actually asks.
+	 *
+	 * `text` is the hex spelling: plain digits for concrete bytes, '?' for
+	 * a masked nibble, [N-M] for a gap, (a|b) for a choice. A literal gets
+	 * its bytes hex encoded, so one field answers for both kinds.
+	 *
+	 * `span` is text and not a number because there are three shapes and
+	 * only one is a number: a fixed pattern covers exactly n bytes, a
+	 * bounded gap a range ("8-12"), and an open gap has no upper bound at
+	 * all ("8+") - the compiler carries a sentinel there, and adding it up
+	 * yields a number that looks like an answer and is not.
+	 */
+	char           text[96];
+	char           span[16];
+	/*
+	 * The same span as a number, for the one caller that needs arithmetic
+	 * rather than a label: the hex pane, deciding which bytes of the object
+	 * belong to this marker.
+	 *
+	 * The MINIMUM, because a highlight has to commit to a length and the
+	 * shortest match is the only one that is always right - a pattern with
+	 * an open gap has no longest. Exact whenever the pattern is fixed,
+	 * which is nearly always.
+	 *
+	 * This is the field whose absence caused the bug the rename exists for:
+	 * the pane used the pool length, so ZipSlip's three byte 2E2E5C lit up
+	 * 67 bytes of the object - the marker plus sixty-four bytes of whatever
+	 * followed it.
+	 */
+	uint32_t       span_min;
 	uint8_t        flags;    /* KOF_STR_ICASE | KOF_STR_FULLWORD */
 	/*
 	 * The pattern's identity across the WHOLE database, not within its pack -

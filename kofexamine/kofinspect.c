@@ -523,8 +523,10 @@ static uint64_t where_in(struct kof_match_ctx *m, const struct kof_range *ext,
 	uint32_t i;
 
 	for (i = 0; i < n_ext; i++) {
+		/* The pool, deliberately: the matcher is the one caller that
+		 * wants the compiled program rather than the spelling. */
 		uint64_t at = kof_match_where(m, ext[i].off, ext[i].len,
-					      s->bytes, s->len, s->kind,
+					      s->pool, s->pool_len, s->kind,
 					      s->flags);
 		if (at != KOF_BROKEN)
 			return at;
@@ -680,9 +682,37 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 				s->at = KOF_BROKEN;
 				continue;
 			}
-			s->bytes = bytes;
-			s->len   = e->len;
-			s->kind  = e->kind;
+			s->pool     = bytes;
+			s->pool_len = e->len;
+			s->kind     = e->kind;
+			/*
+				 * Filled once, here, so no display has to know
+				 * that a hex marker is a compiled program.
+				 * Every consumer that reached into the pool
+				 * itself got this wrong at least once.
+				 */
+			if (e->kind == KOF_STR_HEX) {
+				kof_inspect_hex_span(bytes, e->len, s->span,
+						     sizeof s->span);
+				kof_inspect_hex_text(bytes, e->len, s->text,
+						     sizeof s->text);
+				/* "3", "8-12" and "8+" all lead with the
+				 * minimum, which is what a highlight wants. */
+				s->span_min = (uint32_t)strtoul(s->span, NULL,
+								10);
+			} else {
+				uint32_t b2, w = 0;
+
+				snprintf(s->span, sizeof s->span, "%u", e->len);
+				for (b2 = 0; b2 < e->len &&
+					     w + 3u < sizeof s->text; b2++)
+					w += (uint32_t)snprintf(s->text + w,
+								sizeof s->text - w,
+								"%02X",
+								bytes[b2]);
+				s->text[w] = 0;
+				s->span_min = e->len;
+			}
 			s->flags = e->flags;
 			s->uid   = eng->packs[mod->pack_id].uid_base + e->uid;
 

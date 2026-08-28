@@ -606,6 +606,28 @@ struct decl {
 	uint8_t *bytes;
 	uint32_t len;
 	int      hex;               /* KOF_DEFINE_HEXSTR, else KOF_DEFINE_STR */
+
+	/*
+	 * A HEX PATTERN AS IT WAS WRITTEN, WHICH `bytes` CANNOT HOLD.
+	 *
+	 * `bytes` is a byte sequence. A hex pattern is not one: DEAD??BEEF has a
+	 * wildcard, 41[4-8]43 has a gap, 41(42|43)44 has a choice, and none of
+	 * the three survives being flattened into bytes. So the spelling is kept
+	 * beside them, and it is what gets shown and what gets written back.
+	 *
+	 * Empty for a literal, and empty for a hex pattern declared from a
+	 * selection in this session - those really are concrete bytes and
+	 * printing them from `bytes` is exact.
+	 *
+	 * The bug this exists for: a signature opened WITHOUT its source - the
+	 * database keeps strings, not logic - arrived through draft_from_touch,
+	 * which copied the pack's (bytes, len) verbatim. For a hex marker those
+	 * are the COMPILED PROGRAM and its total length, so ZipSlip's three byte
+	 * "2E2E5C" showed as 67 bytes of 010001000300... and, far worse,
+	 * Generate wrote that program back out as the pattern. Opening a rule
+	 * and saving it replaced it with a different rule.
+	 */
+	char     hexs[512];         /* the pattern, when bytes cannot say it */
 	uint32_t obj;               /* which object it was taken from */
 	uint32_t mask;              /* the region it was taken from */
 	char     rgn[24];           /* that region's short name */
@@ -641,16 +663,21 @@ struct decl {
 /*
  * Can these bytes be the second argument of KOF_DEFINE_STR.
  *
- * ksigbuilder reads that argument quote to quote and refuses escapes, so the
- * answer is the printable ASCII that needs none. "?" is excluded on top of that
- * and not out of caution: signatures compile with -std=c11, which turns on
- * trigraph replacement, and "??" followed by one of nine characters would become
- * a different character before the compiler ever saw the literal.
+ * Printable ASCII, and that is the whole rule. Three of those bytes cannot be
+ * written raw into a C literal - a quote and a backslash end it, and a pair of
+ * question marks becomes a trigraph under -std=c11 - so decl_put_literal writes
+ * them as \" \\ \?, which ksigbuilder now reads back as themselves.
+ *
+ * It used to REFUSE those three, and the effect was not a smaller set of
+ * literals, it was the wrong kind of marker. A researcher declaring
+ * "POST /GponForm/diag_Form?images/ HTTP/1.1" or realm="HuaweiHomeGateway" was
+ * offered hex only - a compiled matcher program in place of bytes, unreadable
+ * as the string it is in every tool that shows markers - because of one "?" and
+ * one quote.
  */
-/* A byte that reads as text. Wider than literal_safe on purpose: "?" and a
- * backslash are part of a string a researcher is looking at even though they
- * cannot go into a C literal unescaped, and what to do about that is the
- * declaring step's problem, not the selecting step's. */
+/* A byte that reads as text. The same set literal_safe accepts, kept separate
+ * because they answer different questions: this one is about what a person is
+ * looking at, that one about what can be written down. */
 static int byte_text(uint8_t c)
 {
 	return c >= 0x20u && c <= 0x7eu;
@@ -663,10 +690,29 @@ static int literal_safe(const uint8_t *b, uint32_t n)
 	if (!n)
 		return 0;
 	for (i = 0; i < n; i++)
-		if (b[i] < 0x20u || b[i] > 0x7eu || b[i] == '"' ||
-		    b[i] == '\\' || b[i] == '?')
+		if (b[i] < 0x20u || b[i] > 0x7eu)
 			return 0;
 	return 1;
+}
+
+/*
+ * One marker's bytes, as the inside of a C string literal.
+ *
+ * Only the three that have to be: a quote and a backslash because C would
+ * otherwise read the literal differently, and "?" because two of them in a row
+ * form a trigraph. Escaping every "?" rather than only the pairs keeps this a
+ * property of the byte instead of a property of its neighbour - the pair rule is
+ * the kind that is right until somebody edits the string next to it.
+ */
+static void decl_put_literal(FILE *f, const uint8_t *b, uint32_t n)
+{
+	uint32_t i;
+
+	for (i = 0; i < n; i++) {
+		if (b[i] == '"' || b[i] == '\\' || b[i] == '?')
+			fputc('\\', f);
+		fputc(b[i], f);
+	}
 }
 
 /* ---- a chooser ------------------------------------------------------------
@@ -1692,7 +1738,11 @@ static int hit_owner(struct view *v, uint64_t off)
 
 			if (st->at == KOF_BROKEN)
 				continue;
-			if (off < st->at || off >= st->at + st->len)
+			/* span_min, not the pool length: for a hex marker the
+			 * pool holds a compiled program, and lighting its
+			 * length lit the marker plus whatever followed it in
+			 * the object. */
+			if (off < st->at || off >= st->at + st->span_min)
 				continue;
 			if (st->in_rgn)
 				return (int)i;
@@ -1717,7 +1767,7 @@ static int hit_kind(struct view *v, uint64_t off)
 
 		if (st->at == KOF_BROKEN)
 			continue;
-		if (off >= st->at && off < st->at + st->len)
+		if (off >= st->at && off < st->at + st->span_min)
 			return st->in_rgn ? 1 : 2;
 	}
 	return 0;
@@ -2695,8 +2745,14 @@ static uint32_t draft_hash(struct view *v)
 
 		MIX(d->len); MIX(d->hex); MIX(d->mask);
 		MIX(d->grp); MIX(d->fullword); MIX(d->icase);
-		for (j = 0; j < d->len; j++)
-			MIX(d->bytes[j]);
+		/* The spelling when there is one - it is what would be
+		 * written, and `bytes` may be NULL beside it. */
+		if (d->hexs[0])
+			for (j = 0; d->hexs[j]; j++)
+				MIX((uint8_t)d->hexs[j]);
+		else
+			for (j = 0; j < d->len; j++)
+				MIX(d->bytes[j]);
 	}
 	for (i = 0; i < v->n_grp; i++) {
 		MIX(v->grp[i].rule); MIX(v->grp[i].thresh); MIX(v->grp[i].mask);
@@ -3023,6 +3079,58 @@ static uint32_t src_mask_of(const struct kof_inspect_fmt *fmt, const char *e)
 
 /* The text between the first pair of quotes, unescaped only as far as
  * ksigbuilder unescapes it - which is not at all. */
+/*
+ * The inside of a C string literal, back to the bytes it stands for.
+ *
+ * The three escapes decl_put_literal writes - \" \\ \? - and no others, which is
+ * the same set ksigbuilder accepts. An escaped quote in particular has to be
+ * understood here or it ends the literal: reading realm=\"X\" quote to quote
+ * yields realm= and drops the rest of the marker silently.
+ *
+ * Anything else after a backslash is passed through as written rather than
+ * refused. This is a viewer: a file it cannot fully account for should be shown
+ * as nearly as it can be, and the build is where a bad escape is an error.
+ */
+static int hexval(char c);
+
+/*
+ * A hex pattern's concrete leading bytes, for locating it in the object.
+ *
+ * Whitespace is skipped, because the spelling in a file has it: bases/ writes
+ * "2E 2E 5C" and reading that two characters at a time gives 2E 02 0E 5C - four
+ * bytes, none of them the marker, so the row said "4" and reported the pattern
+ * as absent from an object it is in.
+ *
+ * Stops at the first character that is not a hex digit, which is how a wildcard
+ * or a gap ends the concrete part. Short is the honest answer there: there is no
+ * byte a "??" is equal to, and inventing a 00 would be a marker the rule never
+ * had. What the pattern IS remains in decl.hexs; this is only what can be
+ * searched for.
+ */
+static uint32_t hexs_bytes(const char *t, uint8_t *out, uint32_t cap)
+{
+	uint32_t n = 0;
+
+	while (*t && n < cap) {
+		int hi, lo;
+
+		while (*t == ' ' || *t == '\t')
+			t++;
+		hi = hexval(*t);
+		if (hi < 0)
+			break;
+		t++;
+		while (*t == ' ' || *t == '\t')
+			t++;
+		lo = hexval(*t);
+		if (lo < 0)
+			break;
+		t++;
+		out[n++] = (uint8_t)((hi << 4) | lo);
+	}
+	return n;
+}
+
 static int src_quoted(const char *p, char *out, size_t cap)
 {
 	const char *q = strchr(p, '"');
@@ -3030,9 +3138,13 @@ static int src_quoted(const char *p, char *out, size_t cap)
 
 	if (!q)
 		return 0;
-	for (q++; *q && *q != '"'; q++)
+	for (q++; *q && *q != '"'; q++) {
+		if (*q == '\\' &&
+		    (q[1] == '"' || q[1] == '\\' || q[1] == '?'))
+			q++;
 		if (n + 1 < cap)
 			out[n++] = *q;
+	}
 	out[n] = 0;
 	return *q == '"';
 }
@@ -3166,6 +3278,48 @@ no_head:
 		/* A comment on its own line belongs to whatever comes next -
 		 * which is how the generator wrote it and how the modules in
 		 * bases/ are written by hand. */
+		/*
+		 * A COMMENT AFTER CODE DOES NOT MAKE THE LINE A COMMENT.
+		 *
+		 * The two branches below treat any line holding a comment opener
+		 * as one, and that dropped whole declarations. bases/ has them:
+		 * ZipSlip writes its Windows marker as
+		 * KOF_DEFINE_HEXSTR(path_on_ntwin, "2E 2E 5C") with a trailing
+		 * comment spelling out the three bytes.
+		 *
+		 * That marker was never declared when the rule was opened, its
+		 * matcher came up with no markers, and the comment text became
+		 * the pending note that attached to the NEXT matcher - so the
+		 * panel showed a rule that was not the rule in the file.
+		 *
+		 * So: code before the opener means the code is the line, and
+		 * the comment is cut off it. Only a line that begins with the
+		 * comment is a comment, which is what the branches below now
+		 * see. The trailing text is dropped rather than kept, because
+		 * the only place this model has to put it is "the next thing",
+		 * and the next thing is not what it was written about.
+		 */
+		{
+			char *c = strstr(line, "/*");
+			char *t;
+			int code = 0;
+
+			for (t = line; c && t < c; t++)
+				if (*t != ' ' && *t != '\t') {
+					code = 1;
+					break;
+				}
+			if (code) {
+				char *e = strstr(c, "*/");
+
+				/* One that does not close here takes the rest
+				 * of the line with it. */
+				if (e)
+					memmove(c, e + 2, strlen(e + 2) + 1);
+				else
+					*c = 0;
+			}
+		}
 		if ((p = strstr(line, "/*")) != NULL &&
 		    strstr(line, "*/") != NULL) {
 			char *q = strstr(p, "*/");
@@ -3272,19 +3426,17 @@ no_head:
 			if (hex) {
 				size_t n = strlen(text) / 2u, k;
 
+				/* Verbatim, because the file already holds the
+				 * pattern in the one form that can express it -
+				 * and the byte conversion below turns a "??"
+				 * into a 00, which is a different pattern. */
+				snprintf(d->hexs, sizeof d->hexs, "%s", text);
 				d->bytes = malloc(n ? n : 1u);
 				if (!d->bytes)
 					continue;
-				for (k = 0; k < n; k++) {
-					char b[3];
-
-					b[0] = text[k * 2u];
-					b[1] = text[k * 2u + 1u];
-					b[2] = 0;
-					d->bytes[k] = (uint8_t)strtoul(b, NULL,
-								       16);
-				}
-				d->len = (uint32_t)n;
+				d->len = hexs_bytes(text, d->bytes,
+						    (uint32_t)n);
+				(void)k;
 				d->hex = 1;
 			} else {
 				d->len = (uint32_t)strlen(text);
@@ -3534,15 +3686,42 @@ static void draft_from_touch(struct view *v, const struct kof_touch *t)
 		const struct kof_touch_str *st = &t->str[i];
 		struct decl *d = &v->decl[v->n_decl];
 
-		if (!st->len)
+		if (!st->pool_len)
 			continue;
 		memset(d, 0, sizeof *d);
-		d->bytes = malloc(st->len);
-		if (!d->bytes)
-			break;
-		memcpy(d->bytes, st->bytes, st->len);
-		d->len = st->len;
 		d->hex = st->kind == KOF_STR_HEX;
+		if (d->hex) {
+			/*
+			 * The pack holds a hex marker as a COMPILED PROGRAM.
+			 * Turned back into what its author wrote, because that
+			 * is the only form a person can read and the only one
+			 * that can be written back out - see decl.hexs.
+			 *
+			 * And then read the same way the source loader reads
+			 * the same spelling out of a file, deliberately: a
+			 * signature opened without its source and the same
+			 * signature opened with it must produce the same draft,
+			 * or "is this a duplicate of a rule in the tree" gets
+			 * two answers for one rule.
+			 */
+			size_t hn, k;
+
+			snprintf(d->hexs, sizeof d->hexs, "%s", st->text);
+			if (!d->hexs[0])
+				continue;
+			hn = strlen(d->hexs) / 2u;
+			d->bytes = malloc(hn ? hn : 1u);
+			if (!d->bytes)
+				break;
+			d->len = hexs_bytes(d->hexs, d->bytes, (uint32_t)hn);
+			(void)k;
+		} else {
+			d->bytes = malloc(st->pool_len);
+			if (!d->bytes)
+				break;
+			memcpy(d->bytes, st->pool, st->pool_len);
+			d->len = st->pool_len;
+		}
 		d->icase = (st->flags & KOF_STR_ICASE) != 0;
 		d->fullword = (st->flags & KOF_STR_FULLWORD) != 0;
 		d->obj = v->node[v->sel_node].obj;
@@ -3780,12 +3959,45 @@ static const char *draft_dup(struct view *v, int *near)
  * click repeatedly. The order is the order the work is done in, so the message
  * names the next thing to do rather than the last thing missing.
  */
+/* The vocabulary a family or variant name is allowed to be spelled in. Empty is
+ * not this function's business - a name that has not been typed yet is a
+ * different message from one typed wrongly. */
+static int name_chars_ok(const char *s)
+{
+	for (; *s; s++)
+		if (!isalnum((unsigned char)*s) && *s != '.' && *s != '-' &&
+		    *s != '_')
+			return 0;
+	return 1;
+}
+
 static const char *draft_missing(struct view *v)
 {
 	uint32_t i;
 
 	if (!v->family[0])
 		return "name the family";
+	/*
+	 * A NAME, AND ONLY THE CHARACTERS A NAME HAS.
+	 *
+	 * The family and every custom variant become part of a detection string
+	 * - "ELF-x64/Botnet:Mirai-0i0bq" - and the variant is also written into
+	 * the generated C as a quoted literal. Written straight, a quote in it
+	 * ends that literal and everything after it is code the build compiles:
+	 *
+	 *     KOF_SCAN_INFECT("x", 0); system("id"); //");
+	 *
+	 * Refused here rather than escaped, because escaping would preserve a
+	 * name nobody can have meant. ksigbuilder refuses the same set for the
+	 * same reason, so a file written by hand is stopped too - this is the
+	 * early, legible half of that check, not the whole of it.
+	 */
+	if (!name_chars_ok(v->family))
+		return "family: letters, digits, . - _ only";
+	for (i = 0; i < v->n_cnd; i++)
+		if (v->cnd[i].var_kind == 2 && v->cnd[i].variant[0] &&
+		    !name_chars_ok(v->cnd[i].variant))
+			return "variant: letters, digits, . - _ only";
 	if (!v->n_decl)
 		return "declare a string";
 	if (!v->n_grp)
@@ -4216,13 +4428,18 @@ static void generate(struct view *v, int as_new)
 
 		if (d->hex) {
 			fprintf(f, "KOF_DEFINE_HEXSTR(s%u, \"", i);
-			for (j = 0; j < d->len; j++)
-				fprintf(f, "%02X", d->bytes[j]);
+			/* The spelling, when the pattern has one that bytes
+			 * cannot hold. Otherwise the bytes, which for a
+			 * pattern declared from a selection is exact. */
+			if (d->hexs[0])
+				fputs(d->hexs, f);
+			else
+				for (j = 0; j < d->len; j++)
+					fprintf(f, "%02X", d->bytes[j]);
 			fprintf(f, "\");\n");
 		} else {
 			fprintf(f, "KOF_DEFINE_STR(s%u, \"", i);
-			for (j = 0; j < d->len; j++)
-				fputc(d->bytes[j], f);
+			decl_put_literal(f, d->bytes, d->len);
 			fprintf(f, "\", %s, %s);\n",
 				d->icase ? "KOF_CASE_ICASE" : "KOF_CASE_EXACT",
 				d->fullword ? "KOF_WORD_FULLWORD"
@@ -5584,7 +5801,10 @@ static void draw_decl(struct out *o, struct view *v)
 		if (!PR_VIS(r))
 			continue;
 		row_start(o, PR(r), 1);
-		out_fmt(o, "   %s%u." A_OFF " %s%-4s" A_OFF " ",
+		/* Right aligned in a fixed width, so the columns after it do
+		 * not step sideways when the list reaches ten. Two digits is
+		 * the whole range: MAX_DECL is 32. */
+		out_fmt(o, "  %s%2u." A_OFF " %s%-4s" A_OFF " ",
 			i == v->sel_decl ? A_SEL : A_DIM, i + 1u,
 			A_ID, d->hex ? "hex" : "str");
 		v->str_wc[i][0] = 1 + (int)o->col_hint;
@@ -5628,7 +5848,14 @@ static void draw_decl(struct out *o, struct view *v)
 				A_LOC, d->rgn, A_SIZE, d->len);
 		}
 		v->str_by[i][0] = 1 + (int)o->col_hint;
-		{
+		if (d->hexs[0]) {
+			uint32_t n = (uint32_t)strlen(d->hexs);
+			uint32_t from = v->decl_hoff > n ? n : v->decl_hoff;
+
+			out_fmt(o, "%.32s", d->hexs + from);
+			if (n > from + 32u)
+				out_str(o, "...");
+		} else {
 			uint32_t from = v->decl_hoff / 2u;
 
 			if (from > d->len)
@@ -6509,27 +6736,22 @@ static void draw_list(struct out *o, struct view *v)
 			int miss = st->at == KOF_BROKEN;
 			int sel = v->str_off + i == v->sel_str;
 			char kind[16];
-			uint32_t b;
 
 			/*
-			 * A hex marker's pool entry is a compiled program,
-			 * not its bytes - so both its size and its content
-			 * have to be read back out of that program. Taken at
-			 * face value, the ten byte pattern 2F62696E2F7368002D63
-			 * showed as 74 bytes of the program's own header.
+			 * Neither the size nor the content is read out of the
+			 * pool here any more. A hex marker's pool entry is a
+			 * compiled program, and every place that reached into
+			 * it got that wrong at least once - so the spelling
+			 * and the span are filled where the pool IS read, and
+			 * this row just prints them.
 			 */
 			char hx[128], span[16];
 			int is_hex = st->kind == KOF_STR_HEX;
 
-			hx[0] = 0;
-			if (is_hex) {
-				kof_inspect_hex_span(st->bytes, st->len,
-						     span, sizeof span);
-				kof_inspect_hex_text(st->bytes, st->len,
-						     hx, sizeof hx);
-			} else {
-				snprintf(span, sizeof span, "%u", st->len);
-			}
+			/* Both prefilled where the pool is read, so this row
+			 * never has to know a program exists. */
+			snprintf(hx, sizeof hx, "%s", st->text);
+			snprintf(span, sizeof span, "%s", st->span);
 
 			if (is_hex)
 				snprintf(kind, sizeof kind, "hex");
@@ -6586,18 +6808,12 @@ static void draw_list(struct out *o, struct view *v)
 				}
 				out_fmt(o, "%-12.12s ", rgn);
 			}
-			if (is_hex) {
-				/* The pattern as it was written, wildcards and
-				 * all - not the program that implements it. */
-				out_fmt(o, "%.40s", hx);
-				if (strlen(hx) > 40u)
-					out_str(o, "...");
-			} else {
-				for (b = 0; b < st->len && b < 20u; b++)
-					out_fmt(o, "%02X", st->bytes[b]);
-				if (st->len > 20u)
-					out_str(o, "...");
-			}
+			/* The marker as it was written - a literal's bytes in
+			 * hex, a pattern with its wildcards and gaps intact,
+			 * and never the program that implements one. */
+			out_fmt(o, "%.40s", hx);
+			if (strlen(hx) > 40u)
+				out_str(o, "...");
 			out_str(o, A_OFF);
 		}
 	}
@@ -8232,6 +8448,82 @@ no_regions:
  * escape bytes as width and cut a line off in the middle of one, so the width
  * is counted here over printable columns only, the same way field_draw does it.
  */
+/*
+ * One property line without its colours, so it can be copied.
+ *
+ * The stored line carries the escapes it is painted with, and those are the
+ * reason a page full of facts was a page you had to retype: a selection made
+ * with the terminal's own mouse takes the box rules and the neighbouring column
+ * with it, and the escapes are invisible until they are pasted somewhere.
+ *
+ * Column for column with prop_put, deliberately - it is the same walk with
+ * out_str replaced by a store - so a click at screen column N lands on the
+ * character this writes at index N. Two walks that disagreed would put the word
+ * under the cursor one place away from the word that gets copied.
+ */
+static uint32_t prop_plain(const char *s, char *out, uint32_t cap)
+{
+	uint32_t n = 0;
+
+	while (*s) {
+		if (*s == '\033') {
+			while (*s && *s != 'm')
+				s++;
+			if (*s)
+				s++;
+			continue;
+		}
+		if (n + 1u < cap)
+			out[n++] = *s;
+		s++;
+	}
+	out[n] = 0;
+	while (n && out[n - 1u] == ' ')
+		out[--n] = 0;
+	return n;
+}
+
+/*
+ * What a click on a property line means to copy.
+ *
+ * The word under the cursor, and when that word is a key=value - which is how
+ * most of this page is written: off=360448, vaddr=0x58000, perm=R-X - the value
+ * alone, because the value is the thing anyone reaches for. Clicking past the
+ * end of the text takes the whole line instead, so the row is still available
+ * whole without a second gesture to learn.
+ *
+ * Whitespace delimited, which is a rule with no exceptions rather than a
+ * tokeniser that has to know what each format writes. A section name with a
+ * space in it would come out as one word cut short, and that is a visible,
+ * correctable answer rather than a wrong one.
+ */
+static uint32_t prop_pick(const char *line, uint32_t n, int col,
+			  char *out, uint32_t cap)
+{
+	int a, b;
+
+	if (col < 0 || (uint32_t)col >= n || line[col] == ' ') {
+		snprintf(out, cap, "%.*s", (int)(cap - 1u), line);
+		return (uint32_t)strlen(out);
+	}
+	for (a = col; a > 0 && line[a - 1] != ' '; a--)
+		;
+	for (b = col; (uint32_t)b < n && line[b] != ' '; b++)
+		;
+	{
+		const char *w = line + a;
+		int len = b - a;
+		const char *eq = memchr(w, '=', (size_t)len);
+
+		if (eq && eq + 1 < w + len) {
+			len -= (int)(eq + 1 - w);
+			w = eq + 1;
+		}
+		snprintf(out, cap, "%.*s", len, w);
+	}
+	return (uint32_t)strlen(out);
+}
+
 static void prop_put(struct out *o, const char *s, int room)
 {
 	int n = 0;
@@ -8321,12 +8613,33 @@ static void draw_prop(struct out *o, struct view *v)
 	out_str(o, close);
 	out_fmt(o, A_OFF A_DIM "-+" A_OFF);
 
-	/* The bottom rule: where in the page this window is. */
+	/*
+	 * The bottom rule: where in the page this window is, and what the last
+	 * click on it copied.
+	 *
+	 * The copy note is HERE and not in the status bar, and that is forced
+	 * rather than chosen: while this page is up the rows under it are not
+	 * repainted - see `under` in draw() - so a message written to the status
+	 * line would not appear until the page was closed, by which time it is
+	 * about something the reader can no longer see.
+	 */
 	snprintf(pos, sizeof pos, "%u-%u of %u", v->prop_off + 1u,
 		 v->prop_off + shown, g_n_prop);
 	out_at(o, top + h - 1, left);
 	out_fmt(o, A_DIM "+- %s ", pos);
-	for (i = 4 + (int)strlen(pos); i < w - 1; i++)
+	i = 4 + (int)strlen(pos);
+	if (v->act_msg[0]) {
+		int fit = w - 3 - i - 2;
+
+		if (fit > 12) {
+			out_fmt(o, A_OFF "%s%.*s" A_OFF A_DIM " ",
+				v->act_ok ? A_SIZE : A_WARN, fit,
+				v->act_msg);
+			i += (int)strlen(v->act_msg) > fit
+			   ? fit + 1 : (int)strlen(v->act_msg) + 1;
+		}
+	}
+	for (; i < w - 1; i++)
 		out_str(o, "-");
 	out_fmt(o, "+" A_OFF);
 
@@ -8451,7 +8764,13 @@ static void bar_run(struct view *v, int i)
 		v->warn[0] = 0;
 		break;
 	case BI_DUMP:    dump_all(v); break;
-	case BI_PROPS:   v->prop_open = 1; v->prop_off = 0; break;
+	case BI_PROPS:
+		/* Whatever the last copy or dump said belongs to the screen
+		 * it was said on, not to a page opened afterwards. */
+		v->prop_open = 1;
+		v->prop_off = 0;
+		v->act_msg[0] = 0;
+		break;
 	case BI_KEYS:    v->help_open = 1; break;
 	case BI_ABOUT:   v->help_open = 2; break;
 	default: break;
@@ -8468,6 +8787,11 @@ enum key {
 	K_RESIZE,
 	/* A bracketed paste, whose bytes are in g_paste. */
 	K_PASTE,
+	/* Forward delete - CSI 3 ~, which is a different key from backspace and
+	 * arrives as a different sequence. It used to fall through the CSI
+	 * decoder's default and come back as 27, so pressing Delete in a field
+	 * did what Escape does: dropped the focus, leaving the text alone. */
+	K_DEL,
 	/* Kept contiguous and last: handle() tests the range to let mouse
 	 * events past the modes that own the keyboard. */
 	K_BACKTAB,
@@ -8658,6 +8982,7 @@ static int read_key(void)
 	/* Shift+Tab. CSI Z, not a tab with a modifier: the terminal has one
 	 * code for it and this is the one. */
 	case 'Z': return K_BACKTAB;
+	case '3': if (read(STDIN_FILENO, seq + 2, 1) != 1) return 27; return K_DEL;
 	case '5': if (read(STDIN_FILENO, seq + 2, 1) != 1) return 27; return K_PGUP;
 	case '6': if (read(STDIN_FILENO, seq + 2, 1) != 1) return 27; return K_PGDN;
 	default:  return 27;
@@ -9646,8 +9971,44 @@ static int handle(struct view *v, int k)
 			 * button.
 			 */
 			if (g_my == v->prop_y && g_mx >= v->prop_x0 &&
-			    g_mx <= v->prop_x1)
+			    g_mx <= v->prop_x1) {
 				v->prop_open = 0;
+				return 1;
+			}
+			/*
+			 * A click on a line copies what it points at.
+			 *
+			 * The page is facts about the object and the reason to
+			 * open it is usually to put one of them somewhere else
+			 * - a search box, a bug report, a signature. Reading a
+			 * number off the screen and typing it back in is where
+			 * an offset gets a digit wrong.
+			 *
+			 * The geometry is draw_prop's: the box starts at row 2
+			 * and column 2, its first text row is one below the
+			 * top rule, and the text begins two columns in past
+			 * "| ".
+			 */
+			{
+				int line = g_my - 3;    /* top(2) + rule(1) */
+				uint32_t idx = v->prop_off + (uint32_t)line;
+				char plain[PROP_W], want[PROP_W];
+				uint32_t pn;
+
+				if (line < 0 || g_my >= g_rows - 2 ||
+				    idx >= g_n_prop)
+					return 1;
+				pn = prop_plain(g_prop[idx].text, plain,
+						sizeof plain);
+				if (!pn)
+					return 1;
+				prop_pick(plain, pn, g_mx - 4, want,
+					  sizeof want);
+				if (want[0]) {
+					copy_osc52(want, strlen(want));
+					copy_said(v, strlen(want));
+				}
+			}
 			return 1;
 		default:
 			return 1;
@@ -9755,14 +10116,16 @@ static int handle(struct view *v, int k)
 				copy_said(v, n);
 				return 1;
 			}
-			if (v->field_all && (k == 127 || k == 8 || k == 0x16 ||
-					     k == K_PASTE ||
+			/* K_DEL belongs with backspace here: with the whole
+			 * field selected, either one means "get rid of it". */
+			if (v->field_all && (k == 127 || k == 8 || k == K_DEL ||
+					     k == 0x16 || k == K_PASTE ||
 					     (k >= 0x20 && k < 0x7f))) {
 				v->find[0] = 0;
 				n = 0;
 				v->caret = 0;
 				v->field_all = 0;
-				if (k == 127 || k == 8)
+				if (k == 127 || k == 8 || k == K_DEL)
 					return 1;
 			}
 			if (v->field_all && (k == K_LEFT || k == K_RIGHT ||
@@ -9812,6 +10175,11 @@ static int handle(struct view *v, int k)
 						n - v->caret + 1u);
 					v->caret--;
 				}
+			} else if (k == K_DEL) {
+				if (v->caret < n)
+					memmove(v->find + v->caret,
+						v->find + v->caret + 1u,
+						n - v->caret);
 			} else if (k >= 0x20 && k < 0x7f &&
 				   n + 2u < sizeof v->find) {
 				memmove(v->find + v->caret + 1u,
@@ -9884,14 +10252,14 @@ static int handle(struct view *v, int k)
 		 * a field that is shown as selected and then appends is worse
 		 * than one that never offered selection.
 		 */
-		if (v->field_all && (k == 127 || k == 8 || k == 0x16 ||
-				     k == K_PASTE ||
+		if (v->field_all && (k == 127 || k == 8 || k == K_DEL ||
+				     k == 0x16 || k == K_PASTE ||
 				     (k >= 0x20 && k < 0x7f))) {
 			buf[0] = 0;
 			n = 0;
 			v->caret = 0;
 			v->field_all = 0;
-			if (k == 127 || k == 8)
+			if (k == 127 || k == 8 || k == K_DEL)
 				return 1;
 		}
 		if (v->field_all && (k == K_LEFT || k == K_RIGHT ||
@@ -9929,12 +10297,16 @@ static int handle(struct view *v, int k)
 		} else if (k == 127 || k == 8) {
 			/* Deletes what is BEFORE the caret, which is what
 			 * backspace means; the character under it is what
-			 * a delete key would take. */
+			 * a delete key takes, below. */
 			if (v->caret) {
 				memmove(buf + v->caret - 1u, buf + v->caret,
 					n - v->caret + 1u);
 				v->caret--;
 			}
+		} else if (k == K_DEL) {
+			if (v->caret < n)
+				memmove(buf + v->caret, buf + v->caret + 1u,
+					n - v->caret);
 		} else if (k >= 0x20 && k < 0x7f && n + 2u < cap) {
 			memmove(buf + v->caret + 1u, buf + v->caret,
 				n - v->caret + 1u);

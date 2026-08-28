@@ -75,6 +75,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <stdint.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -424,9 +425,26 @@ static const char *nth_arg(const char *p, int want, int line)
  * quotes, and because being lenient here is what produced the silent wrong-pattern
  * bug above. Anything else is an error that stops the build.
  *
- * Escapes are rejected rather than interpreted: deciding what "\x41" and "\n" mean
- * in a language that also has hex bytes is a decision to make when hex patterns
- * exist, not to guess now.
+ * THREE ESCAPES, AND ONLY THREE.
+ *
+ * \\  \"  \?  - exactly the ones needed to write a printable ASCII byte into a C
+ * string literal, and nothing else. \n, \x41, \0 stay rejected for the reason they
+ * always were: this language has hex patterns, and deciding what a numeric escape
+ * means in a pattern language that already spells bytes as bytes is a second way
+ * to say one thing.
+ *
+ * They are here because without them three characters could not appear in a
+ * marker at all. A quote and a backslash cannot be written raw - the reader ends
+ * the literal on the first and C ends it on the second - and "?" cannot be
+ * written in pairs, because signatures compile with -std=c11 and "??" followed by
+ * one of nine characters is replaced by a trigraph in translation phase 1, before
+ * the compiler ever sees a literal. \? breaks the pair without changing the byte.
+ *
+ * The cost of not having them was measured on real markers: a GPON exploit's
+ * "POST /GponForm/diag_Form?images/ HTTP/1.1" and a Huawei one's
+ * realm="HuaweiHomeGateway" could only be declared as hex - which compiles to a
+ * matcher program rather than bytes, so the marker no longer reads as the string
+ * it is anywhere the tools show it.
  */
 static int read_literal(const char *p, int line, struct pat *out)
 {
@@ -449,15 +467,26 @@ static int read_literal(const char *p, int line, struct pat *out)
 	q = p;
 	q++;
 	while (*q && *q != '"') {
-		if (*q == '\\') {
-			err(line, "escape sequences are not supported in patterns");
-			return 0;
+		char c = *q;
+
+		if (c == '\\') {
+			/* The escape's own character, not a value: these three
+			 * stand for themselves and that is the whole set. */
+			if (q[1] != '\\' && q[1] != '"' && q[1] != '?') {
+				err(line, "only \\\\, \\\" and \\? are supported in "
+					  "patterns - use a hex pattern for "
+					  "anything else");
+				return 0;
+			}
+			c = q[1];
+			q++;
 		}
 		if (n >= MAX_LITERAL) {
 			err(line, "pattern literal too long");
 			return 0;
 		}
-		out->bytes[n++] = (uint8_t)*q++;
+		out->bytes[n++] = (uint8_t)c;
+		q++;
 	}
 	if (*q != '"') {
 		err(line, "unterminated string literal");
@@ -954,6 +983,27 @@ static int read_variant(const char *p, int line, char *out, size_t cap)
 		while (*q && *q != '"') {
 			if (rn + 1 >= sizeof raw) {
 				err(line, "detection variant too long");
+				return 0;
+			}
+			/*
+			 * A NAME, AND ONLY THE CHARACTERS A NAME HAS.
+			 *
+			 * This becomes part of a detection string a scanner
+			 * prints - "ELF-x64/Botnet:Mirai-0i0bq" - so letters,
+			 * digits and . - _ are the whole of it. Anything else
+			 * is refused rather than carried, and the reason is
+			 * what a quote does on the way IN to a file rather
+			 * than out of it: a tool that generates signatures
+			 * writes this variant back as a quoted literal, and a
+			 * quote inside it ends that literal early, leaving
+			 * whatever follows as C the build compiles. Checking
+			 * here rather than only in the generator means a file
+			 * written by hand is checked too.
+			 */
+			if (!isalnum((unsigned char)*q) && *q != '.' &&
+			    *q != '-' && *q != '_') {
+				err(line, "detection variant may hold letters, "
+					  "digits and . - _ only");
 				return 0;
 			}
 			raw[rn++] = *q++;

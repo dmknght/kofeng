@@ -1067,91 +1067,19 @@ static void print_view(uint8_t format, const void *view,
  */
 #define VALUE_MAX_BYTES 20u
 
-static void put_hex_bytes(const uint8_t *b, uint32_t n)
-{
-	uint32_t i, show = n > VALUE_MAX_BYTES ? VALUE_MAX_BYTES : n;
-
-	for (i = 0; i < show; i++)
-		printf("%02X", b[i]);
-	if (show < n)
-		printf("...");
-}
-
-/* One byte of a compiled alternative, back to the spelling hex_byte() read. */
-static void put_prog_byte(uint8_t v, uint8_t m)
-{
-	if (m == 0xff)
-		printf("%02X", v);
-	else if (m == 0x00)
-		printf("??");
-	else if (m == 0xf0)
-		printf("%X?", (v >> 4) & 0xf);
-	else
-		printf("?%X", v & 0xf);
-}
-
-static void put_hex_program(const uint8_t *p, uint32_t len)
-{
-	const struct kof_hex_hdr *h = (const void *)p;
-	const struct kof_hex_step *st;
-	const struct kof_hex_alt *al;
-	uint32_t i, k, out = 0;
-
-	/* Read out of a database, so every offset is checked before it is used -
-	 * the same rule the matcher follows on the same bytes. */
-	if (len < sizeof *h || h->total_len > len ||
-	    h->steps_off + (uint32_t)h->n_steps * sizeof *st > len ||
-	    h->alts_off + (uint32_t)h->n_alts * sizeof *al > len) {
-		printf("(unreadable program)");
-		return;
-	}
-	st = (const void *)(p + h->steps_off);
-	al = (const void *)(p + h->alts_off);
-
-	for (i = 0; i < h->n_steps && out < VALUE_MAX_BYTES; i++) {
-		uint32_t lo = st[i].gap_min, hi = st[i].gap_max;
-
-		if (hi) {
-			if (!lo && hi >= KOF_HEX_GAP_OPEN)
-				printf("[-]");
-			else if (hi >= KOF_HEX_GAP_OPEN)
-				printf("[%u-]", lo);
-			else if (lo == hi)
-				printf("[%u]", lo);
-			else
-				printf("[%u-%u]", lo, hi);
-		}
-		if (st[i].n_alts > 1)
-			printf("(");
-		for (k = 0; k < st[i].n_alts; k++) {
-			const struct kof_hex_alt *a = &al[st[i].alt_first + k];
-			const uint8_t *d = p + a->data_off;
-			const uint8_t *msk = d + a->len;
-			uint32_t j;
-
-			if ((uint64_t)a->data_off + a->len > len)
-				break;
-			if (k)
-				printf("|");
-			for (j = 0; j < a->len && out < VALUE_MAX_BYTES; j++, out++)
-				put_prog_byte(d[j], (a->flags & KOF_HEX_ALT_MASKED)
-						    ? msk[j] : 0xff);
-		}
-		if (st[i].n_alts > 1)
-			printf(")");
-	}
-	if (out >= VALUE_MAX_BYTES)
-		printf("...");
-}
+/* The two printers that walked a compiled hex program used to live here. They
+ * are gone: kof_touch_str now carries the pattern's spelling, filled once where
+ * the pool is read, so no front end reconstructs one. */
 
 static void put_value(const struct kof_touch_str *s, int plain)
 {
 	if (!plain)
 		printf("%s", C_SIZE);
-	if (s->kind == KOF_STR_HEX)
-		put_hex_program(s->bytes, s->len);
-	else
-		put_hex_bytes(s->bytes, s->len);
+	/* One field for both kinds, filled where the pool is read. A printer
+	 * does not have to know a hex marker is a program. */
+	printf("%.*s", (int)VALUE_MAX_BYTES * 2, s->text);
+	if (strlen(s->text) > (size_t)VALUE_MAX_BYTES * 2)
+		printf("...");
 	if (!plain)
 		printf("%s", C_OFF);
 }
@@ -1485,18 +1413,10 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
 			 * compiled steps and tables; the pattern is ten.
 			 */
 			{
-				char span[16];
-
-				if (s->kind == KOF_STR_HEX)
-					kof_inspect_hex_span(s->bytes, s->len,
-							     span, sizeof span);
-				else
-					snprintf(span, sizeof span, "%u",
-						 s->len);
 				if (miss)
 					printf("%s", C_DIM);
 				printf("        %s%-11s%s %6u %s%8s%s  ",
-				       ci, kind, co, s->uid, cs, span, co);
+				       ci, kind, co, s->uid, cs, s->span, co);
 			}
 			if (miss)
 				printf("%-10s  ", "-");
