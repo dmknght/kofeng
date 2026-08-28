@@ -299,6 +299,10 @@ static const struct upx_shape shapes[] = {
  */
 #define UPX_HDR_PEEK    1024u
 #define UPX_MAX_LOADS   16u
+/* An ELF with more program headers than this is not one UPX packed: the largest
+ * in the collection has nine. Shared so the table walk and the magic repair
+ * agree on what a plausible table is. */
+#define UPX_MAX_PHNUM   64u
 /*
  * What the reconstruction may invent.
  *
@@ -351,12 +355,38 @@ static uint32_t rd_u16(const uint8_t *p, int be)
 }
 
 /*
+ * Is the rest of e_ident what an ELF's would be?
+ *
+ * Everything except the three magic bytes, because those are the ones a packed
+ * sample is found to have had scribbled on and the point of this is to judge a
+ * header without them. Class and byte order each have two legal values and the
+ * ident version has exactly one, which is nine bits of agreement that a run of
+ * arbitrary bytes does not produce by accident - and the caller adds the
+ * program header table's own arithmetic on top of it.
+ */
+static int upx_ident_ok(const uint8_t *h)
+{
+	return h[0] == 0x7fu &&
+	       (h[4] == 1u || h[4] == 2u) &&
+	       (h[5] == 1u || h[5] == 2u) &&
+	       h[6] == 1u;
+}
+
+/*
  * The PT_LOAD table out of a decoded ELF header block.
  *
  * Bounded against `n` at every step, and `n` is what the peek actually wrote -
  * not what the header says it should have. Entries that do not fit are the end
  * of the table, not an error: a short peek is the ordinary case for a file with
  * many program headers, and the ones that were read are still usable.
+ *
+ * THE MAGIC IS NOT REQUIRED HERE. It used to be, and that is what made an
+ * ARM64 sample come out short: two of the six format 42 samples measured store
+ * a first block whose e_ident[1..3] is not "ELF" - 7f 0c 93 2b in one, 7f bc
+ * 24 0d in another - so this returned an empty table for them, no gap was ever
+ * found, and the object was missing its inter-segment padding. The bytes this
+ * function actually reads are the program header table, and whether that table
+ * can be walked has nothing to do with the three bytes at the front.
  */
 static void upx_layout_of(const uint8_t *h, uint32_t n, struct upx_layout *L)
 {
@@ -365,8 +395,7 @@ static void upx_layout_of(const uint8_t *h, uint32_t n, struct upx_layout *L)
 	int be, is64;
 
 	L->n = 0;
-	if (n < 64u || h[0] != 0x7fu || h[1] != 'E' || h[2] != 'L' ||
-	    h[3] != 'F')
+	if (n < 64u || !upx_ident_ok(h))
 		return;
 	is64 = h[4] == 2;
 	be   = h[5] == 2;
@@ -379,7 +408,7 @@ static void upx_layout_of(const uint8_t *h, uint32_t n, struct upx_layout *L)
 		phentsize = rd_u16(h + 0x2a, be);
 		phnum     = rd_u16(h + 0x2c, be);
 	}
-	if (phentsize < (is64 ? 56u : 32u) || phnum == 0u || phnum > 64u)
+	if (phentsize < (is64 ? 56u : 32u) || phnum == 0u || phnum > UPX_MAX_PHNUM)
 		return;
 	if (phoff >= (uint64_t)n)
 		return;
@@ -414,6 +443,94 @@ static void upx_layout_of(const uint8_t *h, uint32_t n, struct upx_layout *L)
 		L->len[L->n] = fsz;
 		L->n++;
 	}
+}
+
+/*
+ * Has this first block's ELF magic been scribbled on, and is putting it back
+ * a repair rather than a guess?
+ *
+ *
+ * WHAT WAS MEASURED
+ *
+ * Six format 42 (ARM64) samples in the collection. Four store a first block
+ * whose compressed stream begins, in clear, 7f 45 4c 46. Two do not:
+ *
+ *     433d25d45026...   7f 0c 93 2b
+ *     4fc702ad3feb...   7f bc 24 0d
+ *
+ * Two samples, two different values, so it is not a constant and not a cipher
+ * anybody could undo. The first byte survives in both and everything after the
+ * fourth is a correct e_ident - ELFCLASS64, little endian, version 1 - which is
+ * the shape of three bytes overwritten rather than of a decode gone wrong.
+ * Nothing else about those files is unusual: the same UPX version, the same
+ * l_format, the same method, a compressed block a handful of bytes longer than
+ * its neighbours, which is what compressing three fewer repeated bytes costs.
+ *
+ * It works because UPX's own runtime never reads them. The stub maps the
+ * original's PT_LOADs from the program header table it just decompressed; the
+ * magic is checked by loaders and by tools, not by the thing that starts this
+ * program. So three bytes can be removed for free, and what they cost is every
+ * tool downstream: the recovered image does not sniff as an ELF, so it is not
+ * parsed, so no region exists, so nothing scoped to a region can match it.
+ *
+ *
+ * WHY PUTTING THEM BACK IS NOT INVENTING EVIDENCE
+ *
+ * The claim being made is "this block is an ELF header", and it is settled
+ * before the magic is touched, by arithmetic the tamperer did not get to
+ * choose:
+ *
+ *   - the rest of e_ident is legal on all nine of its constrained bits;
+ *   - e_phoff is exactly where the program header table goes for this class,
+ *     and e_phentsize is exactly the size of one entry for it;
+ *   - e_phoff + e_phnum * e_phentsize is exactly this block's uncompressed
+ *     size, so the block is a header and its table and nothing else;
+ *   - and that table walks: it has at least one PT_LOAD.
+ *
+ * For the sample above that is 64 + 9 * 56 = 568 = sz_unc, to the byte. A run
+ * of bytes that was not an ELF header does not land on that.
+ *
+ * The repair is still reported. It is recorded as damage, because the object
+ * WAS tampered with and that is a fact worth carrying, and it is named in the
+ * debug stream so that a reader looking at the recovered image knows three of
+ * its bytes came from here rather than from the file.
+ */
+static int upx_magic_tampered(const uint8_t *h, uint32_t n, uint32_t sz_unc)
+{
+	struct upx_layout L;
+	uint32_t phentsize, phnum;
+	uint64_t phoff;
+	int be, is64;
+
+	/* The whole block, not a truncated peek: the size test below is the
+	 * evidence, and it means nothing against a partial buffer. */
+	if (n < 64u || n != sz_unc || !upx_ident_ok(h))
+		return 0;
+	if (h[1] == 'E' && h[2] == 'L' && h[3] == 'F')
+		return 0;               /* nothing to put back */
+
+	is64 = h[4] == 2;
+	be   = h[5] == 2;
+	if (is64) {
+		phoff     = be ? rd_be64(h + 0x20) : rd_le64(h + 0x20);
+		phentsize = rd_u16(h + 0x36, be);
+		phnum     = rd_u16(h + 0x38, be);
+	} else {
+		phoff     = be ? rd_be32(h + 0x1c) : rd_le32(h + 0x1c);
+		phentsize = rd_u16(h + 0x2a, be);
+		phnum     = rd_u16(h + 0x2c, be);
+	}
+	if (phoff != (is64 ? 64u : 52u))
+		return 0;
+	if (phentsize != (is64 ? 56u : 32u))
+		return 0;
+	if (phnum == 0u || phnum > UPX_MAX_PHNUM)
+		return 0;
+	if (phoff + (uint64_t)phnum * phentsize != (uint64_t)sz_unc)
+		return 0;
+
+	upx_layout_of(h, n, &L);
+	return L.n != 0;
 }
 
 /*
@@ -550,6 +667,17 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * a layout that finds no gaps instead of one full of stack. */
 	struct upx_layout L = { { 0 }, { 0 }, 0 };
 	uint64_t padded = 0;
+	/*
+	 * The first block, kept because it may have to be written out from here
+	 * rather than decoded into the child.
+	 *
+	 * hdr_len is non-zero only when the block was peeked whole AND its ELF
+	 * magic had been scribbled on and has been put back; in every other case
+	 * this is unused and block 0 goes down the ordinary decode path, byte for
+	 * byte as it always did.
+	 */
+	uint8_t hdr[UPX_HDR_PEEK];
+	uint32_t hdr_len = 0;
 
 	/*
 	 * Find the stub's magic. Bounded to the front of the object because the
@@ -622,7 +750,6 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * result is what this module produced before - short, but no worse.
 	 */
 	{
-		uint8_t hdr[UPX_HDR_PEEK];
 		uint32_t sz_cpr, sz_unc0, method, decoder, skip = 0, got_hdr;
 
 		if (kof_in_obj(at, B_INFO_LEN)) {
@@ -650,40 +777,23 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			 * them.
 			 *
 			 *
-			 * ARM64 STILL DOES NOT WORK, AND WHY THAT IS WRITTEN
-			 * DOWN RATHER THAN GUESSED AT
+			 * FORMAT 42 AND THE THREE BYTES THAT ARE NOT THERE
 			 *
-			 * Format 42, whose first block is method 2 - NRV2B with
-			 * a 32 bit bit-buffer - peeks to bytes that are not the
-			 * header: 7f 0c 93 2b where the real decode of the same
-			 * block gives 7f 45 4c 46. The first byte agrees and the
-			 * second does not, which is what a different NRV2
-			 * variant looks like rather than a different offset.
+			 * This peek used to be blamed for ARM64 coming out
+			 * short. It reads 7f 0c 93 2b on one format 42 sample
+			 * where an ELF header should start, and the conclusion
+			 * drawn was that the decode was wrong.
 			 *
-			 * It is not the bound, and it is not two copies of the
-			 * decode drifting apart. Both were suspected and both
-			 * were removed: the peek passes this block's own sz_unc,
-			 * and it goes through the same unpack_buffered the real
-			 * decode does, with the same decoder id, the same input
-			 * range and the same size. Calling it twice returns the
-			 * same wrong bytes, so it is deterministic rather than
-			 * left over state. Formats 12 and 22, whose first blocks
-			 * are NRV2E_32 and LZMA, peek correctly through that
-			 * same path on the same object.
-			 *
-			 * So something differs between decoding this block for a
-			 * peek and decoding it for real, and what it is has not
-			 * been found. The consequence is bounded and visible: no
-			 * layout means no gaps, so an ARM64 sample comes out
-			 * short by its inter-segment padding - 1596 bytes on the
-			 * sample measured - rather than exact. Every other
-			 * architecture in the collection is exact.
-			 *
-			 * The next thing to try is the decoder itself: feed one
-			 * known NRV2B_32 stream through both entry points and
-			 * compare. That wants a harness around kof_nrv2_decode
-			 * rather than more instrumentation in this module, which
-			 * is why it stops here.
+			 * It is not. Those bytes are in the file: the block is
+			 * NRV2B and its first literals appear in clear in the
+			 * compressed stream, where they read 7f 0c 93 2b. Four
+			 * of the six format 42 samples have 7f 45 4c 46 in the
+			 * same place and decode to a header the walk below
+			 * accepts; two have had their magic scribbled on before
+			 * packing, with a different value each, and the walk
+			 * rejected them for it. The peek was right the whole
+			 * time and the magic test was the bug - see
+			 * upx_magic_tampered above for what replaced it.
 			 */
 			if (decoder && sz_cpr > skip && sz_unc0 &&
 			    sz_unc0 <= UPX_HDR_PEEK &&
@@ -692,16 +802,22 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 							  at + B_INFO_LEN + skip,
 							  sz_cpr - skip, hdr,
 							  (uint32_t)sz_unc0);
-				got_hdr = kof_unpack_peek(decoder,
-							  at + B_INFO_LEN + skip,
-							  sz_cpr - skip, hdr,
-							  (uint32_t)sz_unc0);
 				upx_layout_of(hdr, got_hdr, &L);
-				kof_debug("UPX.ELF.dbg",
-					  (uint64_t)got_hdr |
-					  ((uint64_t)hdr[0] << 32) |
-					  ((uint64_t)hdr[1] << 40) |
-					  ((uint64_t)sz_unc0 << 48));
+				if (upx_magic_tampered(hdr, got_hdr,
+						       sz_unc0)) {
+					hdr[1] = 'E';
+					hdr[2] = 'L';
+					hdr[3] = 'F';
+					hdr_len = got_hdr;
+					kof_debug("UPX.ELF.magic_repaired",
+						  got_hdr);
+					/* The object really was tampered with,
+					 * and a caller deciding how much to
+					 * trust this child should be told so
+					 * rather than handed a clean-looking
+					 * ELF that this module assembled. */
+					kof_unp_broken(KOF_UNP_DAMAGED);
+				}
 			}
 		}
 		kof_debug("UPX.ELF.loads", L.n);
@@ -793,8 +909,21 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		}
 
 		kof_debug("UPX.ELF.method", method);
-		n = kof_unpack_at(decoder, at + B_INFO_LEN + skip,
-				  sz_cpr - skip, sz_unc);
+		/*
+		 * The first block, when its magic was repaired, is written from
+		 * the buffer that holds the repair instead of being decoded a
+		 * second time. Same bytes and the same count - it is the peek
+		 * of this block, produced by this decoder with this block's own
+		 * sz_unc - with three of them put back.
+		 */
+		if (blocks == 0 && hdr_len && hdr_len == sz_unc) {
+			n = kof_emit(hdr, hdr_len) ? hdr_len : 0;
+			if (!n)
+				kof_unp_broken(KOF_UNP_LIMIT);
+		} else {
+			n = kof_unpack_at(decoder, at + B_INFO_LEN + skip,
+					  sz_cpr - skip, sz_unc);
+		}
 		/*
 		 * THIS block's output, not the running total.
 		 *
