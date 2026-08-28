@@ -993,16 +993,6 @@ struct view {
 	 * thing to keep right. */
 	int         hit_c0, hit_c1, skip_c0, skip_c1, name_c0, name_c1;
 
-	/*
-	 * Which numbering the offset column shows.
-	 *
-	 * Both are true and they answer different questions: the file offset is
-	 * where the bytes are on disk, the region offset is how far into what a
-	 * signature actually searches they are. Showing only one made the other
-	 * a subtraction the reader had to do by hand.
-	 */
-	int         off_region;
-
 	/* Which half of the hex pane the menu was opened on. */
 	int         menu_ctx;       /* 1 bytes, 2 the offset column */
 	uint64_t    menu_off;       /* the row offset it was opened on */
@@ -2031,7 +2021,7 @@ static void draw_hex(struct out *o, struct view *v)
 			continue;
 		}
 		out_fmt(o, A_LOC "%08llx" A_OFF "  ",
-			(unsigned long long)(v->off_region ? at : off));
+			(unsigned long long)off);
 		for (k = 0; k < per; k++) {
 			if (at + (uint64_t)k >= v->rgn_len) {
 				out_str(o, "   ");
@@ -7417,14 +7407,6 @@ static void draw_marker_line(struct out *o, struct view *v)
 				 (unsigned long long)(hi - lo + 1u),
 				 (unsigned long long)view_map(v, lo, 0),
 				 (unsigned long long)lo);
-	} else if (v->off_region) {
-		/*
-		 * Only the unusual state is announced. File offsets are what
-		 * the column shows unless somebody changed it, so saying so
-		 * every time is a label for the expected case - the state worth
-		 * a word is the one that would otherwise be read wrong.
-		 */
-		snprintf(right, sizeof right, "region offsets");
 	} else if (ob->broken) {
 		/*
 		 * The engine did not finish this object, said here because
@@ -9258,17 +9240,21 @@ static int bar_item_at(struct view *v, int row, int col)
 /* The two Help dialogs. Drawn like the find box: content, then the frame. */
 static void draw_help(struct out *o, struct view *v)
 {
+	/*
+	 * Only what somebody would not think to try.
+	 *
+	 * The arrows, the click, the double click, the right click and the
+	 * wheel were listed here and have been taken out: they do what they do
+	 * everywhere else, and a help page that spends half its rows on them
+	 * buries the four or five things that are actually particular to this
+	 * program.
+	 */
 	static const char *const keys[] = {
 		"Ctrl+F     find",            "Ctrl+N     next match",
 		"Ctrl+C     copy the field",  "Ctrl+V     paste",
 		"Ctrl+O     open a file",     "Ctrl+Q     quit",
-		"Tab        next pane",       "n          next marker",
-		"o          file or region offsets",
-		"arrows     move, and move the caret in a field",
-		"click      select a byte; drag selects a run",
-		"double     select the whole printable run",
-		"right      the byte menu",
-		"wheel      scrolls whatever is under the pointer"
+		"Ctrl+]     next file",       "Ctrl+\\     previous file",
+		"Tab        next pane",       "m          the marker list"
 	};
 	static const char *const about[] = {
 		"KOFViewer - the engine's view of a file, navigable.",
@@ -11467,9 +11453,7 @@ static void click(struct view *v, int rclick)
 			 * it names a place, and the bytes name contents. */
 			v->menu_ctx = (g_mx >= base && g_mx < base + 8) ? 2 : 1;
 			v->menu_off = row0 < v->rgn_len
-				      ? (v->off_region ? row0
-						       : view_map(v, row0, 0))
-				      : 0;
+				      ? view_map(v, row0, 0) : 0;
 			menu_open_at(v, g_my, g_mx);
 			return;
 		}
@@ -12028,6 +12012,37 @@ static int handle(struct view *v, int k)
 	 */
 	case 0x11:                      /* Ctrl+Q */
 		return 0;
+	/*
+	 * STEPPING THROUGH A DIRECTORY WITHOUT REACHING FOR THE MENU.
+	 *
+	 * Ctrl+] is the next file and Ctrl+\ the one before it.
+	 *
+	 * Ctrl+[ WOULD HAVE BEEN THE OBVIOUS PARTNER AND CANNOT BE USED. A
+	 * terminal sends Ctrl+[ as 0x1B, which is the Escape key, byte for
+	 * byte - and 0x1B is also how every arrow, function key and mouse
+	 * report begins. Binding it here would mean Escape opened a file:
+	 * every closed dialog, every abandoned text field, every timed-out
+	 * escape sequence. So the pair is the two keys next to it, which are
+	 * distinct bytes (0x1C and 0x1D) and reach this loop unaltered because
+	 * ISIG is off - see term_setup.
+	 *
+	 * Guarded by the same test the menu items use rather than a copy of it:
+	 * they are one action asked for two ways, and an action that is
+	 * available from the keyboard but greyed in the menu is a bug waiting
+	 * to be reported.
+	 */
+	case 0x1d:                      /* Ctrl+] */
+		if (bar_enabled(v, BI_NEXT))
+			open_step(v, +1);
+		else
+			say_note(v, "finish or undo the draft first");
+		break;
+	case 0x1c:                      /* Ctrl+\ */
+		if (bar_enabled(v, BI_PREV))
+			open_step(v, -1);
+		else
+			say_note(v, "finish or undo the draft first");
+		break;
 	case 0x06:                      /* Ctrl+F */
 		v->find_open = 1;
 		v->edit = 500;
@@ -12047,50 +12062,6 @@ static int handle(struct view *v, int k)
 			break;
 		}
 		return 0;
-	case 'n': {
-		/* Scrolling a region hunting for a highlight is the one thing
-		 * the marker offsets make unnecessary. */
-		struct object *ob = cur_obj(v);
-		uint64_t best = KOF_BROKEN;
-		uint32_t j;
-
-		if (v->sel_touch < ob->n_touch) {
-			const struct kof_touch *t = &ob->touch[v->sel_touch];
-
-			for (j = 0; j < t->n_str; j++) {
-				uint64_t r;
-
-				if (t->str[j].at == KOF_BROKEN)
-					continue;
-				r = view_unmap(v, t->str[j].at);
-				if (r == KOF_BROKEN || r <= v->rgn_at)
-					continue;
-				if (best == KOF_BROKEN || r < best)
-					best = r;
-			}
-			/* Nothing after the cursor means wrap, not stop: the
-			 * key is for cycling through them. */
-			if (best == KOF_BROKEN)
-				for (j = 0; j < t->n_str; j++) {
-					uint64_t r;
-
-					if (t->str[j].at == KOF_BROKEN)
-						continue;
-					r = view_unmap(v, t->str[j].at);
-					if (r != KOF_BROKEN &&
-					    (best == KOF_BROKEN || r < best))
-						best = r;
-				}
-		}
-		if (best != KOF_BROKEN)
-			v->rgn_at = best - (best % (uint64_t)(v->per ? v->per
-								     : 16));
-		break;
-	}
-	case 'o':
-		/* Both numbers are true; this says which one the column means. */
-		v->off_region = !v->off_region;
-		break;
 	case 'm':
 		v->show_list = !v->show_list && cur_obj(v)->n_touch;
 		v->list_depth = 0;
@@ -12463,7 +12434,6 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	struct kof_range *ext   = v->ext;
 	struct kof_range *probe = v->probe;
 	uint32_t          cap   = v->decl_cap;
-	int               offr  = v->off_region;
 	char basedir[sizeof v->basedir];
 	char dbdir[sizeof v->dbdir];
 	char keep[KOF_DUMP_PATH_ROOM];
@@ -12501,7 +12471,6 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	v->ext   = ext;
 	v->probe = probe;
 	v->decl_cap = cap;
-	v->off_region = offr;
 	snprintf(v->basedir, sizeof v->basedir, "%s", basedir);
 	snprintf(v->dbdir, sizeof v->dbdir, "%s", dbdir);
 
