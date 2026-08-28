@@ -34,6 +34,7 @@
 #define _GNU_SOURCE
 
 #include "scan.h"
+#include "../kofheur/kofheur.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -510,8 +511,79 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	return applies ? sc->broken : 0;
 }
 
+/*
+ * WHAT THE HEURISTIC IS ALLOWED TO SEE, AND WHY IT IS GATHERED HERE.
+ *
+ * Everything below already exists by the time this runs: the anomaly word came
+ * out of the parse, the depth came down the walk, and whether an unpacker gave up
+ * is the value unpack_object just returned. Nothing is searched for, no pass is
+ * made over the object, and with heur_level 0 the function is not called at all.
+ *
+ * The marker-derived facts are deliberately absent. Knowing that a family has two
+ * markers present but did not fire means asking about markers whose module's
+ * logic never reached them, and that is a cost - so it belongs to a level that
+ * says it costs something, not to the free one.
+ */
+static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
+			const struct kof_scan_option *opt, uint32_t depth,
+			uint32_t partial, struct kof_result *out)
+{
+	const struct kof_heur_model *m = kof_heur_default();
+	struct kof_heur_facts f;
+	const char *guess = "Unknown";
+	int32_t score = 0;
+
+	if (!opt->heur_level || out->n >= KOF_MAX_FINDINGS)
+		return;
+
+	memset(&f, 0, sizeof f);
+	f.format       = ctx->format;
+	f.packer_depth = depth > 255u ? 255u : (uint8_t)depth;
+	f.anomalies    = kof_heur_anomalies(ctx);
+	if (depth)
+		f.flags |= KOF_HEUR_FL(KOF_HEUR_F_PACKED);
+	if (partial)
+		f.flags |= KOF_HEUR_FL(KOF_HEUR_F_UNPACK_PARTIAL);
+
+	if (!kof_heur_score(m, &f, &score, &guess))
+		return;                 /* no model for this format - say nothing */
+	if (score < m->bar_centinats)
+		return;
+
+	{
+		struct kof_finding *fi = &out->v[out->n++];
+
+		fi->level = KOF_LEVEL_HEUR;
+		/*
+		 * <target>/Heur:<what it looks like>:<how strongly>.
+		 *
+		 * Three parts because a reader asks three things and a bare
+		 * number answers none of them: which population it was judged
+		 * against, what the evidence suggests, and how far past the bar
+		 * it went. The middle word comes from the model's own table -
+		 * the engine does not know these words - so a heuristic
+		 * authored elsewhere names its own findings.
+		 *
+		 * Heur is not a family and never becomes one. It is the engine
+		 * saying it recognised a shape, not a thing.
+		 */
+		char fmtarch[32];
+		const char *fmt = kof_format_name(ctx->format);
+
+		if (ctx->arch == KOF_ARCH_ANY || ctx->format == KOF_FMT_UNKNOWN)
+			snprintf(fmtarch, sizeof fmtarch, "%s", fmt);
+		else
+			snprintf(fmtarch, sizeof fmtarch, "%s-%s", fmt,
+				 kof_arch_name(ctx->arch));
+		snprintf(fi->name, sizeof fi->name, "%s/Heur:%s:s%d",
+			 fmtarch, guess, score);
+	}
+	(void)sc;
+}
+
 static void scan_object(struct kof_scanner *sc, kof_buf buf,
-			const struct kof_scan_option *opt, struct kof_result *out)
+			const struct kof_scan_option *opt, struct kof_result *out,
+			uint32_t depth)
 {
 	struct kof_obj_ctx ctx;
 	uint32_t present, i;
@@ -583,6 +655,9 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	sc->st.gram_bytes     += sc->m.n_bytes_indexed;
 
 	out->broken = unpack_object(sc, &ctx, opt, out);
+
+	/* Last, because the unpack result is one of the facts. */
+	heur_object(sc, &ctx, opt, depth, out->broken == KOF_BROKEN_DAMAGED, out);
 }
 
 /*
@@ -712,7 +787,7 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 
 		w->sc->cur_src = src;
 		kof_scan_kids_reset(w->sc);
-		scan_object(w->sc, kof_src_buf(src), w->opt, &res);
+		scan_object(w->sc, kof_src_buf(src), w->opt, &res, depth);
 		w->sc->cur_src = NULL;
 
 		w->objects++;

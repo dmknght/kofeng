@@ -38,6 +38,16 @@
  * host must not have to include the module ABI to read a result. */
 #define KOF_LEVEL_SUSPECT 0
 #define KOF_LEVEL_INFECT  1
+/*
+ * Decided by structure rather than by a signature, and counted apart from both.
+ *
+ * Its own level and not a kind of SUSPECT, because the two answer differently to
+ * an operator: a SUSPECT came from a module that names a family and chose the
+ * weaker verdict, while this came from traces that name nothing. Folding them
+ * together meant a heuristic could not be measured, tuned or switched off in the
+ * report - which is most of what anyone wants to do with one.
+ */
+#define KOF_LEVEL_HEUR    2
 
 
 /*
@@ -278,6 +288,28 @@ struct kof_scan_option {
 	int      all_matches;
 
 	/*
+	 * HOW HARD TO LOOK FOR THINGS NO SIGNATURE NAMES.
+	 *
+	 * 0 - off, and off means nothing is gathered. Not "gathered and ignored":
+	 *     the collector is not entered, so a scanner built for scanning pays
+	 *     nothing at all for a feature it was not asked for.
+	 * 1 - score what the parse and the unpackers already worked out. No extra
+	 *     searching, no extra passes over the object; the facts exist by the
+	 *     time this runs.
+	 *
+	 * Higher levels are reserved for evidence that costs something to gather -
+	 * asking the presence set about markers no module's logic reached, and
+	 * locating them - and are not implemented. The number is here now so that
+	 * adding them later is not an ABI change.
+	 *
+	 * What a heuristic reports is always SUSPECT and never INFECT. It works
+	 * from traces that cannot establish identity, only that something is worth
+	 * a look, and a verdict that named a family from this evidence would be
+	 * claiming more than it measured.
+	 */
+	uint32_t heur_level;
+
+	/*
 	 * What producing children is allowed to cost.
 	 *
 	 * Two different limits, because they answer two different questions and
@@ -339,7 +371,39 @@ struct kof_scan_option {
  * Set it and a debugging tool sees a module's reasoning; leave it unset, which is
  * the default, and modules that emit notes cost a NULL test each.
  */
-typedef void (*kof_on_debug)(const char *what, uint64_t value, void *user);
+/*
+ * A NOTE, WITH A NUMBER TO MATCH ON RATHER THAN A NAME TO PARSE.
+ *
+ * `what` is the authored text - "UPX.ELF.version", "Rar.entries" - and is for
+ * showing. `fact` is a stable id for the FIELD part of it, the text after the
+ * last dot, so a consumer that wants "the version, whoever said it" compares one
+ * integer instead of finding a dot and running strcmp.
+ *
+ * Stable by construction: it is a hash of the field text, so the same field from
+ * a later build or a different module is the same id, and a module adding a new
+ * field needs no registry and no allocation. Two modules that choose the same
+ * field word do collide - which is the same thing that was true when consumers
+ * matched on that word, and the module name is right there to tell them apart.
+ *
+ * Costs nothing to ignore. It exists because the note channel is turning into
+ * something a scan path may read per object, and finding a dot in a string per
+ * fact per object is the wrong shape for that.
+ */
+typedef void (*kof_on_debug)(uint32_t fact, const char *what, uint64_t value,
+			     void *user);
+
+/*
+ * The id for a field name, so a caller can compute the handful it cares about
+ * once and then compare integers:
+ *
+ *     static uint32_t f_version;
+ *     if (!f_version) f_version = kof_fact_id("version");
+ *     if (fact == f_version) ...
+ *
+ * Takes the field alone, not the full name - kof_fact_id("version"), not
+ * kof_fact_id("UPX.ELF.version").
+ */
+uint32_t kof_fact_id(const char *field);
 
 void kof_scanner_on_debug(kof_scanner *, kof_on_debug, void *user);
 

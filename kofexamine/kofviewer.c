@@ -1325,11 +1325,18 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
  * announced - which is the one that was being opened, the packed one. That is
  * the object somebody is looking at when the question occurs to them.
  */
-static void on_debug(const char *what, uint64_t value, void *user)
+static void on_debug(uint32_t fact, const char *what, uint64_t value, void *user)
 {
 	struct view *v = user;
 	const char *dot = strrchr(what, '.');
 	size_t n = dot ? (size_t)(dot - what) : strlen(what);
+	/* Computed once. The engine hands the field's id with every note, so
+	 * picking the one field this cares about is an integer compare rather
+	 * than finding a dot and running strcmp per note per object. */
+	static uint32_t f_version;
+
+	if (!f_version)
+		f_version = kof_fact_id("version");
 
 	if (n >= sizeof v->pending)
 		n = sizeof v->pending - 1u;
@@ -1349,7 +1356,7 @@ static void on_debug(const char *what, uint64_t value, void *user)
 	 * of the numbers belong to. The others are detail and kofexamine --debug
 	 * prints all of them.
 	 */
-	if (dot && strcmp(dot + 1, "version") == 0)
+	if (fact == f_version)
 		v->pending_ver = (long long)value;
 }
 

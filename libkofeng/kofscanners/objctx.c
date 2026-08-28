@@ -299,7 +299,12 @@ static void c_debug(const struct kof_obj_ctx *ctx, uint32_t name_id, uint64_t va
 	/* An id the table does not know is a stale table, and says so rather than
 	 * borrowing the neighbouring name - the same rule findings follow. */
 	text = kof_db_name(sc->eng, sc->cur_mod, name_id);
-	sc->debug_cb(text ? text : "unknown", value, sc->debug_user);
+	if (!text)
+		text = "unknown";
+	/* The field, not the whole name: consumers ask "which version" without
+	 * caring which module answered, the same way they always did - only
+	 * without finding the dot themselves once per fact per object. */
+	sc->debug_cb(kof_fact_id(text), text, value, sc->debug_user);
 }
 
 /* ---- producing child objects ------------------------------------------------ */
@@ -1623,4 +1628,24 @@ void kof_scan_kids_reset(struct kof_scanner *sc)
 		close(sc->sink_fd);
 	sc->sink_fd = -1;
 	sc->sink_spilled = 0;
+}
+
+/*
+ * The id for a field name. See kof_on_debug.
+ *
+ * The text after the last dot when there is one, the whole string when there is
+ * not, hashed. Here rather than in a header so the hash has exactly one
+ * definition: two of them drifting apart would be an id that means one thing to
+ * the engine and another to the tool comparing against it.
+ */
+uint32_t kof_fact_id(const char *field)
+{
+	const char *dot;
+
+	if (!field || !*field)
+		return 0;
+	dot = strrchr(field, '.');
+	if (dot && dot[1])
+		field = dot + 1;
+	return kof_crc32(field, (uint64_t)strlen(field));
 }

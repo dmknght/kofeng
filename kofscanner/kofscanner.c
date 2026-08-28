@@ -29,7 +29,7 @@
 struct run {
 	/* No object counter: the engine already keeps one, and a second copy is a
 	 * second thing that can disagree with it. */
-	uint64_t infected, suspect, dropped, incomplete;
+	uint64_t infected, suspect, heur, dropped, incomplete;
 	uint64_t by_reason[KOF_BROKEN_COUNT];
 	int verbose;
 	int stats;
@@ -102,7 +102,21 @@ static void dump_object(struct run *r, const char *name, const void *bytes,
 
 static const char *level_str(uint32_t level)
 {
-	return level == KOF_LEVEL_INFECT ? "INFECTED" : "SUSPECT";
+	if (level == KOF_LEVEL_INFECT)
+		return "INFECTED";
+	return level == KOF_LEVEL_HEUR ? "HEURISTIC" : "SUSPECT";
+}
+
+/* How loudly a level speaks, which is not the order the constants were given.
+ * -1 for "nothing reported yet", so an object with no findings ranks below all. */
+static int rank_of(int level)
+{
+	switch (level) {
+	case KOF_LEVEL_INFECT:  return 3;
+	case KOF_LEVEL_SUSPECT: return 2;
+	case KOF_LEVEL_HEUR:    return 1;
+	default:                return 0;
+	}
 }
 
 /*
@@ -142,7 +156,15 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	for (i = 0; i < res->n; i++) {
 		printf("%-10s %s: %s\n", level_str(res->v[i].level), name,
 		       res->v[i].name);
-		if ((int)res->v[i].level > worst)
+		/*
+		 * Ranked, not compared as numbers.
+		 *
+		 * KOF_LEVEL_HEUR is 2 and INFECT is 1, so ">" made a heuristic
+		 * outrank a named detection - the weakest answer presented as
+		 * the strongest. The values are identifiers; the order they are
+		 * reported in is a separate fact and belongs here.
+		 */
+		if (rank_of((int)res->v[i].level) > rank_of(worst))
 			worst = (int)res->v[i].level;
 	}
 	/*
@@ -163,6 +185,8 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		r->infected++;
 	else if (worst == KOF_LEVEL_SUSPECT)
 		r->suspect++;
+	else if (worst == KOF_LEVEL_HEUR)
+		r->heur++;
 	if (res->dropped) {
 		printf("%-10s %s: %u further finding(s) not reported\n", "NOTE",
 		       name, res->dropped);
@@ -222,6 +246,8 @@ static void usage(const char *argv0)
 		"  --follow-links  follow symbolic links (off by default: a link into\n"
 		"                  an ancestor turns a walk into a loop)\n"
 		"  --all-matches   keep scanning an object after the first finding\n"
+		"  --heur          also report objects whose structure is unlike\n"
+		"                  anything clean: SUSPECT only, never a family\n"
 		"  --dump DIR      write every object the engine PRODUCED into DIR:\n"
 		"                  what came out of an unpacker, not what went in\n"
 		"  --stats         report what the prefilter and the presence set earned\n"
@@ -265,6 +291,14 @@ int main(int argc, char **argv)
 			opt.follow_symlinks = 1;
 		else if (strcmp(argv[i], "--all-matches") == 0)
 			opt.all_matches = 1;
+		/*
+		 * Off by default, and off means nothing is gathered - see
+		 * kof_scan_option.heur_level. A heuristic reports SUSPECT on
+		 * evidence that cannot name a family, so it is the operator's
+		 * call whether to hear it.
+		 */
+		else if (strcmp(argv[i], "--heur") == 0)
+			opt.heur_level = 1;
 		else if (strcmp(argv[i], "--max-produced") == 0 && i + 1 < argc)
 			opt.max_produced_bytes = strtoull(argv[++i], NULL, 10);
 		/* The memory ceiling, exposed because it is the limit that decides
@@ -339,6 +373,17 @@ int main(int argc, char **argv)
 	       st ? (unsigned long long)st->objects : 0ull, mb);
 	printf("infected  %llu object(s)\n", (unsigned long long)r.infected);
 	printf("suspected %llu object(s)\n", (unsigned long long)r.suspect);
+	/*
+	 * Its own line, and printed even at zero when the heuristic ran.
+	 *
+	 * A number that appears only when it is non-zero cannot be read as "the
+	 * heuristic found nothing" - it reads as "the heuristic was off", and the
+	 * two are the difference between a quiet scan and a scan that did not
+	 * look.
+	 */
+	if (opt.heur_level)
+		printf("heuristic %llu object(s) by structure, no family named\n",
+		       (unsigned long long)r.heur);
 	/*
 	 * Broken objects, split by reason. The three call for different actions -
 	 * raise a limit, report a gap in this build, or accept that the file is

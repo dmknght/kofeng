@@ -287,6 +287,7 @@ $(STAMP): ;
 LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofdb/kofdb.c \
            libkofeng/kofdb/kofpackw.c \
+           libkofeng/kofheur/kofheur.c \
            libkofeng/kofmatchers/kofmatch.c \
            libkofeng/kofmatchers/hexcomp.c \
            libkofeng/kofparsers/binaries/elf_parse.c \

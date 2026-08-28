@@ -1674,10 +1674,12 @@ struct unp_run {
 static int g_debug;
 
 
-static void on_debug(const char *what, uint64_t value, void *user)
+static void on_debug(uint32_t fact, const char *what, uint64_t value,
+		     void *user)
 {
 	struct unp_run *u = user;
 
+	(void)fact;             /* this one prints; it does not match */
 	if (g_debug)
 		printf("  debug     %-18s %10llu\n", what,
 		       (unsigned long long)value);
