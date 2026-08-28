@@ -303,6 +303,15 @@ static const struct upx_shape shapes[] = {
  * in the collection has nine. Shared so the table walk and the magic repair
  * agree on what a plausible table is. */
 #define UPX_MAX_PHNUM   64u
+
+/*
+ * The least of a cut-off block worth decoding.
+ *
+ * Below this there is no stream to speak of - LZMA alone spends two bytes on
+ * UPX's parameter pair and five more initialising its range coder - and a
+ * handful of bytes of output is not worth a decode or a child.
+ */
+#define UPX_MIN_CUT     32u
 /*
  * What the reconstruction may invent.
  *
@@ -827,6 +836,9 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		uint32_t sz_unc, sz_cpr, method, skip = 0;
 		uint64_t n;
 		uint32_t decoder;
+		/* Set when this block's compressed data is cut off by the end of
+		 * the object and only its front is being decoded. */
+		int cut = 0;
 
 		if (!kof_in_obj(at, B_INFO_LEN))
 			break;
@@ -871,15 +883,47 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		 * came out. Reference upx 4.2.4 refuses the file outright.
 		 *
 		 * DAMAGED rather than LIMIT: nothing here ran out of budget, the
-		 * object is missing bytes it says it has. The method byte is the
-		 * only thing read to decide it, and it was read in bounds above -
-		 * the compressed data deliberately is not touched, because the
-		 * whole finding is that it is not there.
+		 * object is missing bytes it says it has.
+		 *
+		 *
+		 * AND THE PART THAT IS THERE IS STILL DECODED.
+		 *
+		 * This used to stop here and keep only the blocks behind it, on
+		 * the reasoning that the finding is that the data is not there.
+		 * That is right about the finding and wrong about the bytes: what
+		 * is missing is the TAIL of the block, and the front of it is
+		 * sitting in the file. Measured over 916 packed samples, 35 have
+		 * a block cut off by the end of the file, and those cut blocks
+		 * hold 6849668 of the 12796628 compressed bytes they declare -
+		 * 53.5% of the payload, thrown away.
+		 *
+		 * On 06ed8158a168... the difference is the whole sample: the
+		 * first block is the ELF header and the second is the program,
+		 * cut at 245311 of 1020709 bytes. Stopping here recovered 624
+		 * bytes - a header describing a file with nothing in it - and
+		 * every string, every symbol and every marker in that sample sat
+		 * in the block being discarded.
+		 *
+		 * Decoding a truncated stream is what the decoders are for: none
+		 * of these codings needs an end marker, they stop when the input
+		 * runs out and the host reports what came out. So the length is
+		 * cut down to what the object holds, the block is decoded, and
+		 * the walk stops after it - there is nothing behind a block that
+		 * reaches the end of the file.
 		 */
 		if (!kof_in_obj(at + B_INFO_LEN, sz_cpr)) {
-			if (method_of(method) || method == UPX_M_LZMA)
-				kof_unp_broken(KOF_UNP_DAMAGED);
-			break;
+			uint64_t have = ctx->obj_size > at + B_INFO_LEN
+					? ctx->obj_size - (at + B_INFO_LEN) : 0;
+
+			/* Not a coding this module runs: these bytes were never
+			 * a b_info, so nothing is wrong and nothing is said. */
+			if (!method_of(method) && method != UPX_M_LZMA)
+				break;
+			kof_unp_broken(KOF_UNP_DAMAGED);
+			if (have < UPX_MIN_CUT)
+				break;
+			sz_cpr = (uint32_t)have;
+			cut = 1;
 		}
 
 		decoder = method_of(method);
@@ -974,6 +1018,9 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 				gap -= step;
 			}
 		}
+
+		if (cut)
+			break;          /* the object ended inside that block */
 
 		at += B_INFO_LEN + sz_cpr;
 	}
