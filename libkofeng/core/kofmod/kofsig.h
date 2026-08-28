@@ -952,6 +952,34 @@ void kof_unpack(const struct kof_obj_ctx *ctx);
 #define KOF_DEFINE_UNPACK void kof_unpack(const struct kof_obj_ctx *ctx)
 
 /*
+ * WHAT SORT OF UNPACKER THIS IS.
+ *
+ *     KOF_UNPACK_KIND(KOF_UNP_PACKER);      - UPX, Ezuri: it hid a program
+ *     KOF_UNPACK_KIND(KOF_UNP_CONTAINER);   - zip, tar, rar: it carried files
+ *
+ * Required of every unpack module and meaningless on a detector.
+ *
+ * The distinction is not tidiness, it is EVIDENCE. A file that was wrapped in an
+ * executable packer is saying something about itself: the wrapping exists to stop
+ * the file being read, and a heuristic that weighs "this was packed" is weighing
+ * that. A file that arrived inside a zip is saying nothing at all - archives are
+ * how software is shipped - and counting a zip as a layer of packing is how a
+ * heuristic ends up scoring an installer like a dropper.
+ *
+ * It also decides what "two layers deep" means. Depth through packers is a thing
+ * worth multiplying by; depth through containers is a directory tree.
+ *
+ * DECLARED RATHER THAN GUESSED, and the guesses were tried. Naming children looked
+ * like it separated the two - packers do not name what they produce - and it does
+ * not: xz and overlay are containers by any reading and name nothing either. A
+ * property that happens to correlate on today's eleven modules is a property that
+ * misclassifies the twelfth silently, and this one feeds a score.
+ */
+#define KOF_UNP_CONTAINER 0
+#define KOF_UNP_PACKER    1
+#define KOF_UNPACK_KIND(k)
+
+/*
  * One search, normalised to 0 or 1.
  *
  * The host already answers with 0 or 1, and the normalisation is here anyway

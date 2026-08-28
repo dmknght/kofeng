@@ -80,6 +80,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	kof_match_state_free(&sc->m);
 	kof_scan_kids_reset(sc);
 	free(sc->kids);
+	free(sc->kid_packer);
 	for (i = 0; i < KOF_FMT_COUNT; i++)
 		free(sc->view[i]);
 	free(sc->inf);
@@ -475,6 +476,9 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * first container to reach the ceiling stopped every container after it.
 	 */
 	sc->broken = 0;
+	/* Per object, like sc->broken: whether a packer opened the LAST object
+	 * says nothing about this one. */
+	sc->packed_here = 0;
 	/*
 	 * Cleared with it, and per OBJECT rather than per file.
 	 *
@@ -536,7 +540,7 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
  * on for everybody; evidence that costs a pass is asked for.
  */
 static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
-			const struct kof_scan_option *opt, uint32_t depth,
+			const struct kof_scan_option *opt, uint32_t pdepth,
 			uint32_t partial, struct kof_result *out)
 {
 	const struct kof_heur_model *m = kof_heur_default();
@@ -544,14 +548,30 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	const char *guess = "Unknown";
 	int32_t score = 0;
 
-	if (opt->heur_off || out->n >= KOF_MAX_FINDINGS)
+	if (opt->heur_off)
 		return;
 
 	memset(&f, 0, sizeof f);
 	f.format       = ctx->format;
-	f.packer_depth = depth > 255u ? 255u : (uint8_t)depth;
+	/*
+	 * PACKER layers, not tree depth.
+	 *
+	 * A file three directories down inside a tar is not three layers of
+	 * packing, it is a directory tree - and depth counted every child the
+	 * same way, so an ordinary archive of archives scored like something
+	 * that had been wrapped to be hidden. Only a module that declared itself
+	 * KOF_UNP_PACKER adds a layer now.
+	 */
+	f.packer_depth = pdepth > 255u ? 255u : (uint8_t)pdepth;
 	f.anomalies    = kof_heur_anomalies(ctx);
-	if (depth)
+	/*
+	 * The object that WAS packed, not the one that came out.
+	 *
+	 * See kof_scanner.packed_here. Both are true of a packed sample and they
+	 * are different objects: this marks the file on disk, and packer_depth
+	 * above marks what was inside it.
+	 */
+	if (sc->packed_here)
 		f.flags |= KOF_HEUR_FL(KOF_HEUR_F_PACKED);
 	if (partial)
 		f.flags |= KOF_HEUR_FL(KOF_HEUR_F_UNPACK_PARTIAL);
@@ -566,7 +586,22 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 
 	if (!kof_heur_score(m, &f, &score, &guess))
 		return;                 /* no model for this format - say nothing */
-	if (score < m->bar_centinats)
+
+	/*
+	 * Published before the bar is consulted.
+	 *
+	 * The bar decides whether this becomes a FINDING; it does not decide
+	 * whether the caller is allowed to know the number. An examiner wants
+	 * the score on every object precisely so it can show how far short of
+	 * the bar something came.
+	 */
+	out->heur_scored    = 1;
+	out->heur_score     = score;
+	out->heur_flags     = f.flags;
+	out->heur_anomalies = f.anomalies;
+	out->heur_depth     = f.packer_depth;
+
+	if (score < m->bar_centinats || out->n >= KOF_MAX_FINDINGS)
 		return;
 
 	{
@@ -597,16 +632,16 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		snprintf(fi->name, sizeof fi->name, "%s/Heur:%s#s%d",
 			 fmtarch, guess, score);
 	}
-	(void)sc;
 }
 
 static void scan_object(struct kof_scanner *sc, kof_buf buf,
 			const struct kof_scan_option *opt, struct kof_result *out,
-			uint32_t depth)
+			uint32_t pdepth, int from_packer)
 {
 	struct kof_obj_ctx ctx;
 	uint32_t present, i;
 
+	out->from_packer = (uint8_t)(from_packer != 0);
 	memset(&ctx, 0, sizeof ctx);
 	kof_mod_attach(&ctx, sc);
 
@@ -676,7 +711,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	out->broken = unpack_object(sc, &ctx, opt, out);
 
 	/* Last, because the unpack result is one of the facts. */
-	heur_object(sc, &ctx, opt, depth, out->broken == KOF_BROKEN_DAMAGED, out);
+	heur_object(sc, &ctx, opt, pdepth, out->broken == KOF_BROKEN_DAMAGED, out);
 }
 
 /*
@@ -772,7 +807,17 @@ static int path_reserve(struct walk *w, size_t need)
 struct layer {
 	struct kof_objsrc *src;
 	char              *name;
-	uint32_t           depth;
+	uint32_t           depth;    /* in the object tree, for max_depth */
+	/*
+	 * PACKER layers only.
+	 *
+	 * Separate from `depth` because the two answer different questions and
+	 * conflating them was the bug: max_depth bounds how far the walk goes and
+	 * must count every child, while the heuristic weighs how many times this
+	 * program was wrapped to be hidden and must count none of the containers.
+	 */
+	uint32_t           pdepth;
+	int                from_packer;  /* its producer was a packer */
 };
 
 static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
@@ -784,7 +829,8 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 	 * children seed it. */
 	struct kof_objsrc *src = kof_src_ref(root);
 	char *name = kof_strdup_n(path, strlen(path));
-	uint32_t depth = 0;
+	uint32_t depth = 0, pdepth = 0;
+	int from_packer = 0;            /* the root came off the disk */
 
 	/* Every other allocation failure in this function sets out_of_memory so
 	 * the walk is reported incomplete rather than clean - this one didn't,
@@ -800,13 +846,21 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 		struct kof_result res;
 		uint32_t i;
 
-		res.n = 0;
-		res.dropped = 0;
-		res.broken = 0;
+		/*
+		 * Cleared WHOLE, not field by field.
+		 *
+		 * It was three assignments, and that is a shape that goes stale
+		 * the moment the struct grows: the heuristic fields were added
+		 * and every object carried whatever the stack happened to hold,
+		 * so a zip reported itself packed. A memset cannot forget a
+		 * field, which is the only property worth having here.
+		 */
+		memset(&res, 0, sizeof res);
 
 		w->sc->cur_src = src;
 		kof_scan_kids_reset(w->sc);
-		scan_object(w->sc, kof_src_buf(src), w->opt, &res, depth);
+		scan_object(w->sc, kof_src_buf(src), w->opt, &res, pdepth,
+			    from_packer);
 		w->sc->cur_src = NULL;
 
 		w->objects++;
@@ -863,6 +917,10 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 				if (!stack[n].name)
 					w->out_of_memory = 1;
 				stack[n].depth = depth + 1;
+				stack[n].from_packer = w->sc->kid_packer &&
+						       w->sc->kid_packer[i];
+				stack[n].pdepth = pdepth +
+					(stack[n].from_packer ? 1u : 0u);
 				n++;
 			}
 		}
@@ -881,6 +939,8 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 		src = stack[n].src;
 		name = stack[n].name;
 		depth = stack[n].depth;
+		pdepth = stack[n].pdepth;
+		from_packer = stack[n].from_packer;
 	}
 
 	while (n > 0) {

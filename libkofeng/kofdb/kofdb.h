@@ -127,6 +127,10 @@ struct kof_module {
 	 * module, same as on the pack record this is copied from. */
 	uint32_t family_off;
 	uint32_t maltype;     /* enum kof_maltype */
+
+	/* KOF_UNP_CONTAINER or KOF_UNP_PACKER; see KOF_UNPACK_KIND in kofsig.h.
+	 * Meaningless and unread for a detector. */
+	uint32_t unp_kind;
 };
 
 /*

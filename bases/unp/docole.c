@@ -52,6 +52,8 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/docole.h>
 
+KOF_UNPACK_KIND(KOF_UNP_CONTAINER);
+
 KOF_TARGET_FORMAT(KOF_FMT_DOCOLE);
 
 /*

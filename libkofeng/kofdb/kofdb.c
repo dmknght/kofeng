@@ -574,6 +574,7 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		m->n_names   = pm[i].n_names;
 		m->family_off = pm[i].family_off;
 		m->maltype    = pm[i].maltype;
+		m->unp_kind   = pm[i].unp_kind;
 
 
 		/* Only a detector's regions go into the union the scanner resolves.

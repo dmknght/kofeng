@@ -14,6 +14,8 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/xz.h>
 
+KOF_UNPACK_KIND(KOF_UNP_CONTAINER);
+
 KOF_TARGET_FORMAT(KOF_FMT_XZ);
 
 void kof_unpack(const struct kof_obj_ctx *ctx)

@@ -1507,7 +1507,7 @@ struct artefact {
 	uint32_t code_len;
 
 	uint32_t kind;
-	uint32_t target_mask, scan_mask, arch_mask, subtype_mask;
+	uint32_t target_mask, scan_mask, arch_mask, subtype_mask, unp_kind;
 	uint64_t size_min;
 
 	/* What KOF_TARGET_NAME declared - empty family / maltype 0 for an
@@ -1653,6 +1653,8 @@ static int meta_load(struct artefact *a)
 			a->arch_mask = (uint32_t)strtoul(line + 10, 0, 10);
 		} else if (strncmp(line, "subtype_mask=", 13) == 0) {
 			a->subtype_mask = (uint32_t)strtoul(line + 13, 0, 10);
+		} else if (strncmp(line, "unp_kind=", 9) == 0) {
+			a->unp_kind = (uint32_t)strtoul(line + 9, 0, 10);
 		} else if (strncmp(line, "blob_len=", 9) == 0) {
 			blob_len = strtoull(line + 9, 0, 10);
 		} else if (strncmp(line, "kind=", 5) == 0) {
@@ -2476,6 +2478,7 @@ int main(int argc, char **argv)
 			pm[a].scan_mask   = s->scan_mask;
 			pm[a].arch_mask   = s->arch_mask;
 			pm[a].subtype_mask = s->subtype_mask;
+			pm[a].unp_kind     = s->unp_kind;
 			pm[a].size_min    = s->size_min;
 			pm[a].str         = s->str;
 			pm[a].n_str       = s->n_str;

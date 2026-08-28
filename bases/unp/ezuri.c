@@ -65,6 +65,8 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
 
+KOF_UNPACK_KIND(KOF_UNP_PACKER);
+
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
 
 /*

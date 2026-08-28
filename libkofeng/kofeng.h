@@ -103,6 +103,37 @@ struct kof_result {
 	 * no LZMA" wastes their afternoon.
 	 */
 	uint32_t broken;      /* enum kof_broken, zero when the object was finished */
+
+	/*
+	 * WHAT THE HEURISTIC MADE OF THIS OBJECT, WHETHER OR NOT IT REPORTED.
+	 *
+	 * Here rather than left to be recomputed, because it was being
+	 * recomputed and the copy drifted. kofviewer built its own facts from
+	 * what it could see - tree depth, a name it had been handed - and once
+	 * the engine learned to tell a packer from a container the two answers
+	 * stopped agreeing. A panel that scores an object differently from the
+	 * scanner is worse than one that shows nothing: both look authoritative
+	 * and only one is.
+	 *
+	 * So the engine computes it once, on the object it is looking at, with
+	 * the facts only it has, and hands the whole of it back. A caller that
+	 * wants to explain the number reads the model - kof_heur_default() - for
+	 * the words, and never re-derives the evidence.
+	 *
+	 * `heur_scored` is 0 when the heuristic did not run (switched off) or no
+	 * model covers this format, and that is NOT the same as a score of zero.
+	 */
+	uint8_t  heur_scored;
+	uint8_t  heur_depth;        /* executable packer layers above this object */
+	/*
+	 * Was this object produced BY an executable packer, as opposed to having
+	 * been carried by a container. The viewer's own name-matching guess at
+	 * this is exactly what this field exists to retire.
+	 */
+	uint8_t  from_packer;
+	int32_t  heur_score;        /* centinats */
+	uint32_t heur_flags;        /* KOF_HEUR_FL(KOF_HEUR_F_*) */
+	uint64_t heur_anomalies;    /* the format's own anomaly word */
 };
 
 /*

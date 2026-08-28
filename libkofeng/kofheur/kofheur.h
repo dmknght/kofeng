@@ -138,6 +138,26 @@ struct kof_heur_model {
 	 * above 100. It is here because the shape is right and the data is what
 	 * is missing - and a later corpus can set it without a code change.
 	 */
+	/*
+	 * WHAT ONE PACKER LAYER IS WORTH ON ITS OWN.
+	 *
+	 * Added per layer, and the reason it has to be ADDED rather than
+	 * multiplied is the whole of why depth did not work before.
+	 *
+	 * depth_gain_pct multiplies the evidence found INSIDE an object, and the
+	 * object that matters after a good unpack has none: a packer that did
+	 * its job hands back a clean, well formed program. Measured on
+	 * 1f85b0c47432... - Ezuri wrapping UPX wrapping TeamTNT - the middle
+	 * layer scores 386 and the payload, which is the malware, scores 0.
+	 * Multiplying zero by any gain leaves zero, so the deepest object, the
+	 * one every layer was put there to hide, could never be reached at all.
+	 *
+	 * So the layering is evidence in its own right. Nothing legitimate is
+	 * wrapped twice: a packer exists to stop a file being read, and doing it
+	 * again says the first was not considered enough.
+	 */
+	int32_t  depth_centinats;
+
 	uint32_t depth_gain_pct;
 };
 

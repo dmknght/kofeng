@@ -419,14 +419,32 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 	if (sc->n_kids == sc->cap_kids) {
 		uint32_t nc = sc->cap_kids ? sc->cap_kids * 2 : 8;
 		struct kof_objsrc **nv = realloc(sc->kids, nc * sizeof *nv);
+		uint8_t *np;
 
 		if (!nv) {
 			kof_src_unref(kid);
 			return 0;
 		}
 		sc->kids = nv;
+		np = realloc(sc->kid_packer, nc * sizeof *np);
+		if (!np) {
+			kof_src_unref(kid);
+			return 0;
+		}
+		sc->kid_packer = np;
 		sc->cap_kids = nc;
 	}
+	/*
+	 * Which sort of module made this child, recorded as it is made.
+	 *
+	 * A container's entry and a packer's payload are the same kind of object
+	 * to everything downstream, and they are not the same kind of evidence -
+	 * see KOF_UNPACK_KIND in kofsig.h.
+	 */
+	sc->kid_packer[sc->n_kids] =
+		(uint8_t)(sc->cur_mod && sc->cur_mod->unp_kind == KOF_UNP_PACKER);
+	if (sc->kid_packer[sc->n_kids])
+		sc->packed_here = 1;
 	sc->kids[sc->n_kids++] = kid;
 	sc->kids_left--;
 	return 1;

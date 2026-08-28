@@ -108,7 +108,17 @@ static const struct kof_heur_model default_model = {
 	default_flag, (uint32_t)(sizeof default_flag / sizeof default_flag[0]),
 	1u << KOF_FMT_ELF,
 	747,
-	100                     /* no depth gain: see kof_heur_model.depth_gain_pct */
+	/*
+	 * PER LAYER. Chosen so that two layers clear the bar from nothing at all
+	 * and one layer never does: 2 x 400 = 800 against a bar of 747, and one
+	 * layer leaves the worst clean object measured - a stripped, packed
+	 * binary at 386 - at 786... which is over. That is deliberate and it is
+	 * the one number here that is a JUDGEMENT rather than a measurement:
+	 * see the note on the bar. Measured cost is stated in the report, not
+	 * hidden in a comment.
+	 */
+	CN(4.00),
+	100                     /* no depth gain yet: nothing to fit it on */
 };
 
 const struct kof_heur_model *kof_heur_default(void)
@@ -152,16 +162,35 @@ int kof_heur_score(const struct kof_heur_model *m,
 		}
 
 	/*
-	 * Depth multiplies what was found INSIDE, which is the whole reason the
-	 * depth is carried. One layer at 100% leaves it alone, which is what this
-	 * build ships - the corpus had six objects two layers deep and that is
-	 * not enough to justify a number.
+	 * Depth, twice over, because it says two things.
+	 *
+	 * It MULTIPLIES what was found inside - a suspicious string under two
+	 * layers of packing is worth more than the same string in the open.
+	 *
+	 * And it ADDS on its own, because after a clean unpack there is nothing
+	 * inside to multiply. See kof_heur_model.depth_centinats: the payload of
+	 * a working packer is a well formed program with no anomalies at all, so
+	 * a purely multiplicative depth reaches exactly the objects that did not
+	 * need it and never the one that did.
+	 *
+	 * Both are capped at four layers. Past four the file is not being packed,
+	 * it is being used to make a scanner do work, and a term that keeps
+	 * growing is the lever that makes that worth doing.
 	 */
-	if (f->packer_depth && m->depth_gain_pct != 100u) {
+	{
 		uint32_t d = f->packer_depth > 4u ? 4u : f->packer_depth;
 
-		while (d--)
-			s = s * (int64_t)m->depth_gain_pct / 100;
+		if (d && m->depth_gain_pct != 100u) {
+			uint32_t k = d;
+
+			while (k--)
+				s = s * (int64_t)m->depth_gain_pct / 100;
+		}
+		if (d && m->depth_centinats) {
+			s += (int64_t)d * m->depth_centinats;
+			if (guess && (int64_t)d * m->depth_centinats > best)
+				*guess = "Layered";
+		}
 	}
 	if (s >  0x7fffffff) s =  0x7fffffff;
 	if (s < -0x7fffffff) s = -0x7fffffff;

@@ -304,6 +304,7 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 				goto out;
 		}
 		o->maltype = m->maltype;
+		o->unp_kind = m->unp_kind;
 
 		for (k = 0; k < m->n_str; k++, si++) {
 			const struct kof_pw_str *s = &m->str[k];

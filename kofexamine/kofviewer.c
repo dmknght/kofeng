@@ -828,6 +828,8 @@ struct object {
 	 * shows the field.
 	 */
 	long long         packer_ver;
+	/* What the engine said about this object, kept whole. */
+	struct kof_result heur;
 	/*
 	 * Whether the engine got to the end of THIS object, and what stopped it.
 	 *
@@ -1309,6 +1311,16 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	snprintf(o->name, sizeof o->name, "%s", name);
 	o->packer_ver = -1;
 	o->broken = res->broken;
+	/*
+	 * The heuristic, as the ENGINE computed it.
+	 *
+	 * Copied rather than reconstructed. This panel used to build its own
+	 * facts out of what it could see - the tree depth, the module name it
+	 * had been handed - and that was a second implementation of the
+	 * engine's, which drifted the moment the engine learned to tell a
+	 * packer from a container.
+	 */
+	o->heur = *res;
 	if (v->pending[0]) {
 		snprintf(o->packer, sizeof o->packer, "%s", v->pending);
 		o->packer_ver = v->pending_ver;
@@ -2119,23 +2131,6 @@ static const char *touch_colour(const struct kof_touch *t)
  * than a new packer, and guessing wrong towards red is the failure that trains
  * people to ignore the colour.
  */
-static const char *packer_colour(const char *name)
-{
-	static const char *const packers[] = { "UPX", "Ezuri" };
-	size_t i;
-
-	for (i = 0; i < sizeof packers / sizeof packers[0]; i++) {
-		size_t n = strlen(packers[i]);
-
-		/* Prefix, not equality: the name carries the format it was
-		 * built for - "UPX.ELF", "UPX.PE" - and both are the packer. */
-		if (strncmp(name, packers[i], n) == 0 &&
-		    (name[n] == 0 || name[n] == '.'))
-			return A_BAD;
-	}
-	return A_WARN;
-}
-
 static void touch_head(const struct kof_touch *t, char *out, size_t cap)
 {
 	if (!t->n_str)
@@ -6386,22 +6381,43 @@ static void draft_refresh(struct view *v)
  * Returns 0 when no model covers this format, which is not the same as a score
  * of zero and must not be shown as one.
  */
+/*
+ * What the heuristic made of this object.
+ *
+ * A read, not a computation. The engine scored it while it was scanning, on the
+ * object it had in front of it, with facts a viewer cannot see - which unpacker
+ * produced which child, and whether that unpacker was a packer or a container.
+ * Everything this file needs is in the result it was handed.
+ *
+ * Returns 0 when the heuristic did not run or no model covers this format,
+ * which is not the same as a score of zero and must not be shown as one.
+ */
 static int heur_of(const struct object *ob, struct kof_heur_facts *out,
 		   int32_t *score, const char **guess)
 {
 	const struct kof_heur_model *hm = kof_heur_default();
 
 	memset(out, 0, sizeof *out);
-	out->format    = ob->ctx.format;
-	out->anomalies = ob->fmt ? ob->fmt->anomalies(ob->info) : 0;
-	if (ob->depth)
-		out->flags |= KOF_HEUR_FL(KOF_HEUR_F_PACKED);
-	if (ob->broken == KOF_BROKEN_DAMAGED)
-		out->flags |= KOF_HEUR_FL(KOF_HEUR_F_UNPACK_PARTIAL);
-	out->packer_depth = ob->depth > 255u ? 255u : (uint8_t)ob->depth;
-	*score = 0;
+	out->format       = ob->ctx.format;
+	out->anomalies    = ob->heur.heur_anomalies;
+	out->flags        = ob->heur.heur_flags;
+	out->packer_depth = ob->heur.heur_depth;
+	*score = ob->heur.heur_score;
 	*guess = "Unknown";
-	return kof_heur_score(hm, out, score, guess);
+	if (!ob->heur.heur_scored)
+		return 0;
+	/*
+	 * Re-run only to recover the WORD, which the result does not carry: the
+	 * score is the engine's and is used as given, and this asks the same
+	 * model the engine used which trace weighed most. Reading a model to
+	 * name a number is not recomputing the number.
+	 */
+	{
+		int32_t ignored = 0;
+
+		kof_heur_score(hm, out, &ignored, guess);
+	}
+	return 1;
 }
 
 /* Would a scan report this object on the heuristic alone. */
@@ -7236,7 +7252,22 @@ static void draw_marker_line(struct out *o, struct view *v)
 	 * which layout the rest of what the module said belongs to.
 	 */
 	if (ob->packer[0]) {
-		const char *pcol = packer_colour(ob->packer);
+		/*
+		 * Which sort of unpacker, from the ENGINE - it knows, because
+		 * every unpack module declares it. The name table this used to
+		 * consult was a guess that would misclassify the twelfth module.
+		 *
+		 * TWO FIELDS, because the name beside an object means two
+		 * different things depending on which object it is. On the file
+		 * itself it is the module that OPENED it, and PACKED says
+		 * whether that module was a packer. On a child it is the module
+		 * that PRODUCED it, and from_packer says the same thing about
+		 * that. Either one being true means the name here is a packer's.
+		 */
+		const char *pcol =
+			(ob->heur.from_packer ||
+			 (ob->heur.heur_flags &
+			  KOF_HEUR_FL(KOF_HEUR_F_PACKED))) ? A_BAD : A_WARN;
 
 		if (ob->packer_ver >= 0)
 			out_fmt(o, "%s%s" A_OFF A_DIM " v%lld" A_OFF,
@@ -9554,7 +9585,11 @@ static void prop_build(struct view *v)
 	 * file on disk would be reading it as the wrong object. */
 	if (ob->packer[0])
 		prop_add(A_OFF, A_DIM "  %-11s " A_OFF "%s%s" A_OFF,
-			 "unpacked by", packer_colour(ob->packer), ob->packer);
+			 "unpacked by",
+			 (ob->heur.from_packer ||
+			  (ob->heur.heur_flags &
+			   KOF_HEUR_FL(KOF_HEUR_F_PACKED))) ? A_BAD : A_WARN,
+			 ob->packer);
 
 	if (ob->fmt && ob->info) {
 		if (ob->ctx.format == KOF_FMT_ELF)

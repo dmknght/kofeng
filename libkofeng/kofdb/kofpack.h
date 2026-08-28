@@ -127,7 +127,13 @@
  * than a refusal - see KOF_TARGET_NAME and finding_str in scan.c for the shape
  * this now matches.
  */
-#define KOF_PACK_VERSION 4u
+/*
+ * 5: struct kof_pack_mod grew unp_kind. A v4 pack has no way to say whether an
+ * unpacker is a packer or a container, and the heuristic now scores that - so a
+ * stale pack is refused rather than read with the field assumed zero, which
+ * would silently classify UPX as an archive.
+ */
+#define KOF_PACK_VERSION 5u
 
 /*
  * The machine the code in this pack was built for. Not an architecture the pack
@@ -423,6 +429,17 @@ struct kof_pack_mod {
 
 	uint32_t family_off;      /* into KOF_SEC_NAME_POOL, NUL terminated */
 	uint32_t maltype;         /* enum kof_maltype */
+
+	/*
+	 * KOF_UNP_CONTAINER or KOF_UNP_PACKER, for an unpack-kind module.
+	 *
+	 * Zero and unread on a detector, the same way family_off and maltype are
+	 * zero and unread on an unpacker. Carried per MODULE rather than per pack
+	 * because a pack groups by preconditions and two unpackers for one format
+	 * can be different kinds - unpack-elf holds UPX and Ezuri today, and both
+	 * happen to be packers only by accident of what has been written.
+	 */
+	uint32_t unp_kind;
 };
 
 /*
@@ -570,7 +587,7 @@ struct kof_pack_idx {
  * entered at the wrong offset. These fail the build instead.
  */
 _Static_assert(sizeof(struct kof_pack_sec)  == 16,  "pack section entry grew padding");
-_Static_assert(sizeof(struct kof_pack_mod)  == 40,  "pack module record grew padding");
+_Static_assert(sizeof(struct kof_pack_mod)  == 44,  "pack module record grew padding");
 _Static_assert(sizeof(struct kof_pack_str)  == 12,  "pack string descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_name) == 8,   "pack name descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_idx)  == 8,   "pack index slot grew padding");

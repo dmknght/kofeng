@@ -59,6 +59,8 @@ struct kof_pw_mod {
 	uint32_t arch_mask;
 	uint32_t subtype_mask;
 	uint64_t size_min;
+	/* KOF_UNP_CONTAINER or KOF_UNP_PACKER; unread for a detector. */
+	uint32_t unp_kind;
 
 	const struct kof_pw_str  *str;
 	uint32_t                  n_str;

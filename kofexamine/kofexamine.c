@@ -1758,6 +1758,18 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	}
 	if (res->broken)
 		printf("   %s%s%s", C_BAD, kof_broken_name(res->broken), C_OFF);
+	/*
+	 * What the heuristic made of it, on the line that says what it is.
+	 *
+	 * The score is the engine's own - it is in the result, not recomputed -
+	 * and the depth beside it is how many EXECUTABLE PACKER layers stand
+	 * above this object. Printed for every recovered object rather than only
+	 * for the ones that report, because the useful question about a sample
+	 * that got away is how far short it came.
+	 */
+	if (g_debug && res->heur_scored)
+		printf("   %sheur %d%s%s d%u%s", C_NOTE, res->heur_score, C_OFF,
+		       C_DIM, res->heur_depth, C_OFF);
 	printf("\n");
 
 	/*

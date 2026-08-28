@@ -319,6 +319,30 @@ echo "   target=$targets (mask $target_mask)"
 # one format's values while targeting another - so that is refused here, where it
 # is a build error with a filename rather than a signature that quietly matches
 # the wrong things.
+#
+# What sort of unpacker this is: 0 container, 1 packer. See KOF_UNPACK_KIND in
+# kofsig.h for why the difference is evidence rather than bookkeeping. Required
+# of an unpack module and refused on a detector, because a detector that declares
+# it has misunderstood what it is writing.
+unp_kind=0
+
+nkind=$(grep -c 'KOF_UNPACK_KIND(' "$src" || true)
+if [ "$nkind" -gt 1 ]; then
+	echo "FAIL: $nkind KOF_UNPACK_KIND declarations; a module is one kind" >&2
+	exit 1
+fi
+if [ "$nkind" -eq 1 ]; then
+	kindname=$(sed -n 's/.*KOF_UNPACK_KIND(\([^)]*\)).*/\1/p' "$src")
+	case "$kindname" in
+	*KOF_UNP_PACKER*)    unp_kind=1 ;;
+	*KOF_UNP_CONTAINER*) unp_kind=0 ;;
+	*)
+		echo "FAIL: KOF_UNPACK_KIND($kindname) names no known kind" >&2
+		exit 1
+		;;
+	esac
+fi
+
 subtype_mask=0        # 0 == any kind of the declared format
 
 nsub=$(grep -c 'KOF_TARGET_SUBTYPE(' "$src" || true)
@@ -605,8 +629,25 @@ if [ "$os" = windows ]; then
 	fi
 	if [ -n "$scan_row" ]; then
 		entry_hex=$scan_row; kind=0; kindname=detect
+		if [ "$nkind" -ne 0 ]; then
+			echo "FAIL: KOF_UNPACK_KIND on a detector; it describes an" >&2
+			echo "      unpacker, and a detector declaring one has" >&2
+			echo "      misunderstood what it is writing" >&2
+			exit 1
+		fi
 	elif [ -n "$unp_row" ]; then
 		entry_hex=$unp_row;  kind=1; kindname=unpack
+		# An unpacker that does not say what sort it is leaves the
+		# heuristic to guess, and the guess is worth score. Refused here
+		# rather than defaulted, because the default that is usually
+		# right - container - is the one that silently loses evidence on
+		# the modules where it is wrong.
+		if [ "$nkind" -eq 0 ]; then
+			echo "FAIL: an unpack module must declare KOF_UNPACK_KIND" >&2
+			echo "      KOF_UNPACK_KIND(KOF_UNP_PACKER)    - it hid a program" >&2
+			echo "      KOF_UNPACK_KIND(KOF_UNP_CONTAINER) - it carried files" >&2
+			exit 1
+		fi
 	else
 		echo "FAIL: no kof_scan or kof_unpack symbol; a module must export one" >&2
 		exit 1
@@ -713,6 +754,7 @@ cp "$raw" "$blob"
 	printf 'size_min=%s\n'  "$size_min"
 	printf 'arch_mask=%s\n' "$arch_mask"
 	printf 'subtype_mask=%s\n' "$subtype_mask"
+	printf 'unp_kind=%s\n' "$unp_kind"
 	# What KOF_TARGET_NAME declared - empty/0 for an unpack-kind module, where
 	# it is not required. ksigbuilder's --extract already validated these; this
 	# is a straight copy through .pre, same as scan_mask above.

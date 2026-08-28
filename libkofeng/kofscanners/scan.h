@@ -102,7 +102,28 @@ struct kof_scanner {
 	 */
 	struct kof_objsrc  *cur_src;
 	struct kof_objsrc **kids;
+	/*
+	 * Per child: was it produced by an EXECUTABLE PACKER rather than by a
+	 * container. Parallel to `kids` because it is a property of the child's
+	 * provenance and has to travel with it onto the work list, where the
+	 * module that made it is long out of scope.
+	 */
+	uint8_t            *kid_packer;
 	uint32_t            n_kids, cap_kids;
+
+	/*
+	 * Did a packer open THIS object.
+	 *
+	 * The fact belongs to the file that was packed, not to what came out of
+	 * it - and that is the bug it exists to fix. "Packed" used to be derived
+	 * from an object's depth, which credits it to the CHILD: the packed file
+	 * itself, sitting at depth 0, was never scored for being packed, and the
+	 * child that got the credit is by construction the clean-looking program
+	 * the packer was hiding.
+	 *
+	 * Cleared per object in unpack_object, read by heur_object after it.
+	 */
+	int                 packed_here;
 
 	/*
 	 * What the next child produced should be called, already sanitised.
