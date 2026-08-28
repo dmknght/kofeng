@@ -1316,12 +1316,12 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
 				  (t->n_names && t->name[0] ? t->name[0] : NULL);
 
 		if (var && !t->fired_name && t->n_names > 1)
-			snprintf(name, sizeof name, "%s:%s-%s +%u",
+			snprintf(name, sizeof name, "%s:%s#%s +%u",
 				 kof_maltype_name(t->maltype),
 				 t->family[0] ? t->family : "?", var,
 				 t->n_names - 1u);
 		else if (var)
-			snprintf(name, sizeof name, "%s:%s-%s",
+			snprintf(name, sizeof name, "%s:%s#%s",
 				 kof_maltype_name(t->maltype),
 				 t->family[0] ? t->family : "?", var);
 		else

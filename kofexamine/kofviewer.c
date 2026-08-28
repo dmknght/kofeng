@@ -420,6 +420,16 @@ static int mark_row(void) { return g_rows; }
 #define OBJ_BUDGET  (256ull << 20)
 
 #define MAX_DECL  32
+/*
+ * Where the string editor's codes live in view.edit.
+ *
+ * One code per declaration, in a band of its own well clear of every other
+ * field's. The bands below it are 1, 4+i, 103+i, 200+i, 300+i, 400+i, 500 and
+ * 501, and each is tested as a band rather than as "at least" - a rule this
+ * file learned the hard way when the size editor claimed everything from 200
+ * up and swallowed the boxes added above it.
+ */
+#define ED_STR    600
 /* How many samples and authors one rule's history holds. Past this the oldest
  * are dropped rather than the file growing without bound - a rule tested against
  * forty samples is a rule whose first ten no longer say much. */
@@ -1013,8 +1023,31 @@ struct view {
 	 */
 	uint32_t    tree_hoff, list_hoff, decl_hoff;
 
+	/* The region column's width for this frame - see draw_decl. */
+	int         rgn_w;
+
 	struct decl  decl[MAX_DECL];
 	uint32_t     n_decl, sel_decl;
+
+	/*
+	 * A string being edited, as text.
+	 *
+	 * The declaration holds bytes, and bytes are not what somebody types. A
+	 * literal is typed as the characters it is - not as the escaped spelling
+	 * the generated source carries, because the escaping is the file
+	 * format's business and typing \x41 to mean A is asking the reader to
+	 * be a compiler. A hex pattern is typed as spaced pairs, the way the
+	 * source reads, which is also what leaves room for the things bytes
+	 * cannot express: ?? for a wildcard, [n-m] for a gap, (a|b) for a
+	 * choice.
+	 *
+	 * So the text lives here while it is being edited and is parsed back
+	 * into the declaration when the field closes. `sedit_ok` is cleared when
+	 * the text cannot be parsed, so the row can say so without the panel
+	 * having to guess.
+	 */
+	char         sedit[600];
+	uint32_t     sedit_off;     /* how far the field is scrolled */
 
 	struct range rng[MAX_RANGE];
 	uint32_t     n_rng, cur_rng;
@@ -3062,9 +3095,22 @@ static uint32_t draft_hash(struct view *v)
 }
 
 /* The sample in front of the reader, as the metadata block names it. */
+/*
+ * The sample this rule was tested against: THE FILE, not the object.
+ *
+ * It used to name the selected object, and inside a container that is the
+ * child's name - which for an unpacked payload is its index, so a rule drafted
+ * against something UPX had just produced recorded "Test sample: 0".
+ *
+ * The file is the right answer even when the draft was written against a child,
+ * because the line exists so that somebody can reproduce this: what they need
+ * is the thing to feed the engine, and the engine reaches the child by itself.
+ * Which child it was is not lost either - it is what the rule's target format
+ * and its ranges say.
+ */
 static const char *draft_sample(struct view *v)
 {
-	const char *n = cur_obj(v)->name;
+	const char *n = (v->path && v->path[0]) ? v->path : cur_obj(v)->name;
 	const char *s = strrchr(n, '/');
 
 	return s ? s + 1 : n;
@@ -6338,17 +6384,6 @@ static void draft_refresh(struct view *v)
 			    "declared", moved, gone);
 }
 
-/*
- * Wide enough for the longest thing the region cell can say.
- *
- * It was twelve, which fitted one region name exactly - and then a range became
- * able to cover two, so the cell had to hold "CODE&DATA>HEADERS" and printed
- * half of it. A column sized to the shortest case truncates silently, and a
- * truncated word reads as a bug in the data rather than in the layout.
- */
-static const char str_hdr[] =
-	" Strings     word      case         region             size  bytes";
-
 static void draw_decl(struct out *o, struct view *v)
 {
 	int top = decl_top();
@@ -6604,8 +6639,43 @@ static void draw_decl(struct out *o, struct view *v)
 	/* A column heading instead of a preposition on every row: "found in
 	 * CODE" said the same word once per string and read like a sentence
 	 * where a table belongs. */
-	if (v->n_decl && PR_VIS(r))
-		sec_bar(o, v, PR(r), str_hdr);
+	/*
+	 * How wide the region column has to be, asked of the rows rather than
+	 * guessed.
+	 *
+	 * It was a fixed eighteen, sized for the widest label the column can
+	 * ever hold - "UNCLAIMED>UNCLAIMED" and the like. Almost no draft has
+	 * one, so almost every draft showed a region of four or five characters
+	 * followed by a dozen spaces and then its size: two facts about the same
+	 * marker, sitting at opposite ends of a gap.
+	 *
+	 * Measured once per frame over every row, so the columns still line up
+	 * with each other - which is the thing a fixed width was there to buy -
+	 * and the gap is only ever as wide as some row actually needs.
+	 */
+	{
+		uint32_t w = 6;         /* the heading is six characters */
+
+		for (i = 0; i < v->n_decl; i++) {
+			const struct decl *d = &v->decl[i];
+			uint32_t n = (uint32_t)strlen(d->rgn);
+
+			if (d->off_rgn)
+				n += 1u + (uint32_t)strlen(d->at_rgn);
+			if (n > w)
+				w = n;
+		}
+		v->rgn_w = (int)(w > 18u ? 18u : w);
+	}
+	if (v->n_decl && PR_VIS(r)) {
+		char hdr[120];
+
+		/* The heading follows the column, so the two cannot drift. */
+		snprintf(hdr, sizeof hdr,
+			 " Strings     word      case         region%*ssize  bytes",
+			 v->rgn_w - 6 + 1, "");
+		sec_bar(o, v, PR(r), hdr);
+	}
 	r += v->n_decl ? 1 : 0;
 	v->row_str = PR(r);
 	for (i = 0; i < v->n_decl; i++, r++) {
@@ -6648,21 +6718,40 @@ static void draw_decl(struct out *o, struct view *v)
 			 * truncated to a stray letter. The region stays because
 			 * that is still where the module will look.
 			 */
-			out_fmt(o, " %s%-18.18s" A_OFF " %s%5u" A_OFF "  ",
-				A_BAD, d->rgn, A_SIZE, d->len);
+			out_fmt(o, " %s%-*.*s" A_OFF " %s%5u" A_OFF "  ",
+				A_BAD, v->rgn_w, v->rgn_w, d->rgn,
+				A_SIZE, d->len);
 		} else if (d->off_rgn) {
 			char both[40];
 
 			snprintf(both, sizeof both, "%s>%s", d->rgn,
 				 d->at_rgn);
-			out_fmt(o, " %s%-18.18s" A_OFF " %s%5u" A_OFF "  ",
-				A_WARN, both, A_SIZE, d->len);
+			out_fmt(o, " %s%-*.*s" A_OFF " %s%5u" A_OFF "  ",
+				A_WARN, v->rgn_w, v->rgn_w, both,
+				A_SIZE, d->len);
 		} else {
-			out_fmt(o, " %s%-18s" A_OFF " %s%5u" A_OFF "  ",
-				A_LOC, d->rgn, A_SIZE, d->len);
+			out_fmt(o, " %s%-*.*s" A_OFF " %s%5u" A_OFF "  ",
+				A_LOC, v->rgn_w, v->rgn_w, d->rgn,
+				A_SIZE, d->len);
 		}
 		v->str_by[i][0] = 1 + (int)o->col_hint;
-		if (d->hexs[0]) {
+		if (v->edit == ED_STR + (int)i) {
+			/*
+			 * The value, in the column the value was in.
+			 *
+			 * Editing in place rather than in a dialog: the row
+			 * around it is the context - which region, how long,
+			 * whether it was found - and a box over the top of that
+			 * would hide the things being edited against.
+			 */
+			int room = g_cols - 9 - v->str_by[i][0];
+
+			if (room < 8)
+				room = 8;
+			field_draw(o, v->sedit, v->caret, &v->sedit_off, room,
+				   1, d->hex ? "hex pairs" : "text",
+				   v->field_all);
+		} else if (d->hexs[0]) {
 			uint32_t n = (uint32_t)strlen(d->hexs);
 			uint32_t from = v->decl_hoff > n ? n : v->decl_hoff;
 
@@ -6680,6 +6769,17 @@ static void draw_decl(struct out *o, struct view *v)
 				out_str(o, "...");
 		}
 		v->str_by[i][1] = (int)o->col_hint;
+		/*
+		 * Edit before delete, and in a colour that is not the delete's.
+		 *
+		 * The order is the order of how much they cost to be wrong
+		 * about: the reachable-by-accident end of the row should be the
+		 * one that can be undone by typing, not the one that removes a
+		 * marker. Red stays reserved for the button that destroys.
+		 */
+		out_at(o, PR(r), g_cols - 8);
+		out_fmt(o, "%s[e]" A_OFF,
+			v->edit == ED_STR + (int)i ? A_SEL : A_ID);
 		out_at(o, PR(r), g_cols - 4);
 		out_str(o, A_BAD "[x]" A_OFF);
 	}
@@ -8062,6 +8162,158 @@ static void copy_offset(struct view *v, int hex)
  * honest answer to that.
  */
 
+/* ---- editing a declared string as text ------------------------------------ */
+
+/*
+ * Is this value one a person can type back?
+ *
+ * A literal is edited as the characters it is, so a byte that has no character
+ * cannot survive the round trip: it would be shown as something, and whatever
+ * that something was would be written back as itself. Refusing to open is the
+ * only answer that does not quietly change the marker. Hex has no such problem
+ * and is always editable - that is what hex is for.
+ */
+static int decl_text_editable(const struct decl *d)
+{
+	uint32_t i;
+
+	if (d->hex)
+		return 1;
+	for (i = 0; i < d->len; i++)
+		if (d->bytes[i] < 0x20 || d->bytes[i] >= 0x7f)
+			return 0;
+	return 1;
+}
+
+/*
+ * A hex pattern, respaced into pairs.
+ *
+ * Only when the pattern is nothing but hex digits and spaces. A pattern with
+ * structure in it - ??, [4-8], (41|42) - is left exactly as its author wrote
+ * it: the digits inside a gap are hex digits too, so pairing them off blindly
+ * would turn [4-8] into something else, and an author who has spaced a pattern
+ * to show its shape has said something worth keeping.
+ */
+static void hex_respace(const char *in, char *out, size_t cap)
+{
+	size_t n = 0;
+	uint32_t half = 0;
+	const char *p;
+
+	for (p = in; *p; p++)
+		if (hexval(*p) < 0 && *p != ' ' && *p != '\t') {
+			snprintf(out, cap, "%s", in);
+			return;
+		}
+	for (p = in; *p && n + 4u < cap; p++) {
+		if (*p == ' ' || *p == '\t')
+			continue;
+		if (half == 2u) {
+			out[n++] = ' ';
+			half = 0;
+		}
+		out[n++] = *p;
+		half++;
+	}
+	out[n] = 0;
+}
+
+/* Fill the scratch from a declaration and give it the caret. */
+static void decl_edit_open(struct view *v, uint32_t i)
+{
+	struct decl *d = &v->decl[i];
+
+	if (i >= v->n_decl)
+		return;
+	if (!decl_text_editable(d)) {
+		say_note(v, "string %u holds bytes that are not text - edit it "
+			 "as hex", i + 1u);
+		return;
+	}
+	if (d->hex) {
+		if (d->hexs[0]) {
+			hex_respace(d->hexs, v->sedit, sizeof v->sedit);
+		} else {
+			uint32_t k;
+			size_t n = 0;
+
+			for (k = 0; k < d->len && n + 4u < sizeof v->sedit; k++)
+				n += (size_t)snprintf(v->sedit + n,
+						      sizeof v->sedit - n,
+						      k ? " %02X" : "%02X",
+						      d->bytes[k]);
+		}
+	} else {
+		uint32_t k, n = d->len;
+
+		if (n >= sizeof v->sedit)
+			n = (uint32_t)sizeof v->sedit - 1u;
+		for (k = 0; k < n; k++)
+			v->sedit[k] = (char)d->bytes[k];
+		v->sedit[n] = 0;
+	}
+	v->sedit_off = 0;
+	v->sel_decl = i;
+	v->edit = ED_STR + (int)i;
+}
+
+/*
+ * Parse the scratch back into the declaration.
+ *
+ * A hex pattern keeps its spelling in `hexs` - that is what generation writes
+ * and what a wildcard lives in - and the concrete prefix of it is decoded into
+ * `bytes` so the row can still say how long it is and where it is. A literal is
+ * its characters and nothing else.
+ *
+ * Either way the bytes have changed, so where they are is asked again rather
+ * than carried over: the whole point of an edit is that it may no longer be the
+ * same run, and a stale offset would light the wrong bytes in the pane.
+ */
+static void decl_edit_commit(struct view *v, uint32_t i)
+{
+	struct decl *d = &v->decl[i];
+	size_t n = strlen(v->sedit);
+	uint8_t *nb;
+
+	if (i >= v->n_decl)
+		return;
+	if (d->hex) {
+		/*
+		 * Refused rather than truncated. A hex pattern cut off halfway
+		 * is still a valid pattern - a shorter one, matching something
+		 * else - so writing it would replace the marker with a marker
+		 * nobody asked for, silently.
+		 */
+		if (n >= sizeof d->hexs) {
+			say_note(v, "hex pattern is longer than %u characters "
+				 "- left as it was",
+				 (unsigned)(sizeof d->hexs - 1u));
+			return;
+		}
+		memcpy(d->hexs, v->sedit, n + 1u);
+		/* Two characters a byte at most, so half the text is a safe
+		 * ceiling for what can come out of it. */
+		nb = realloc(d->bytes, n / 2u + 1u);
+		if (!nb)
+			return;
+		d->bytes = nb;
+		d->len = hexs_bytes(d->hexs, d->bytes, (uint32_t)(n / 2u + 1u));
+	} else {
+		nb = realloc(d->bytes, n + 1u);
+		if (!nb)
+			return;
+		d->bytes = nb;
+		memcpy(d->bytes, v->sedit, n);
+		d->len = (uint32_t)n;
+	}
+	if (!d->len) {
+		say_note(v, "string %u would be empty - left as it was",
+			 i + 1u);
+		return;
+	}
+	decl_locate(v, d);
+}
+
 static void decl_remove(struct view *v, uint32_t i)
 {
 	if (i >= v->n_decl)
@@ -9213,12 +9465,19 @@ static void prop_build(struct view *v)
 		char dir[KOF_DUMP_PATH_ROOM];
 		const char *slash = strrchr(v->path, '/');
 
+		/*
+		 * Ending in a separator, always.
+		 *
+		 * A directory row and a name row sit one above the other in the
+		 * same column, and without the trailing slash the last
+		 * component of the path reads as another file name. The slash
+		 * is the one character that says which of the two this is, and
+		 * it costs nothing.
+		 */
 		if (!slash) {
-			snprintf(dir, sizeof dir, ".");
-		} else if (slash == v->path) {
-			snprintf(dir, sizeof dir, "/");
+			snprintf(dir, sizeof dir, "./");
 		} else {
-			size_t n = (size_t)(slash - v->path);
+			size_t n = (size_t)(slash - v->path) + 1u;   /* keep it */
 
 			if (n >= sizeof dir)
 				n = sizeof dir - 1u;
@@ -10941,6 +11200,15 @@ static void click(struct view *v, int rclick)
 				v->sel_decl = i;
 				if (g_mx >= g_cols - 4) {
 					decl_remove(v, i);
+				} else if (g_mx >= g_cols - 8 &&
+					   g_mx < g_cols - 5) {
+					decl_edit_open(v, i);
+				} else if (v->edit == ED_STR + (int)i &&
+					   g_mx >= v->str_by[i][0]) {
+					/* A click inside the open field is a
+					 * click in a text box, not a request to
+					 * jump to the bytes. */
+					return;
 				} else if (!v->decl[i].hex &&
 					   g_mx >= v->str_wc[i][0] &&
 					   g_mx <= v->str_wc[i][0] + 8) {
@@ -11189,6 +11457,123 @@ static void click(struct view *v, int rclick)
 		}
 	}
 	(void)rclick;   /* the menu it will open does not exist yet */
+}
+
+/*
+ * ONE TEXT FIELD, FOR EVERY TEXT FIELD.
+ *
+ * Lifted out of the key handler so that a new box does not get a new editor.
+ * Every field in this panel is expected to behave the way a text field behaves
+ * anywhere - select all, copy, paste, arrows, Home, End, Delete, backspace,
+ * insert at the caret - and the way to guarantee that is for there to be one
+ * implementation of it rather than a family of near-copies that drift.
+ *
+ * `v->edit` names which field is open and is cleared here when it closes, so a
+ * caller that has to do something on close - a string declaration, which has to
+ * be parsed back out of the text - can see that it happened.
+ *
+ * Returns 1: a key that reaches a field is consumed by it.
+ */
+static int field_key(struct view *v, char *buf, size_t cap, int k)
+{
+	size_t n;
+
+	n = strlen(buf);
+	/* A field just opened puts the caret at the end of what is
+	 * already in it, which is where typing continues from. */
+	if (v->edit != v->edit_prev) {
+		v->edit_prev = v->edit;
+		v->caret = (uint32_t)n;
+		v->field_all = 0;
+	}
+	if (v->caret > n)
+		v->caret = (uint32_t)n;
+
+	/*
+	 * Copy and paste, with the keys everything else uses.
+	 *
+	 * A terminal keeps Ctrl+Shift+C and Ctrl+Shift+V for itself and
+	 * passes the unshifted pair straight through, so these are free
+	 * to take - and taking them is what makes a text field here
+	 * behave like a text field anywhere else.
+	 */
+	if (k == 0x01) {                /* Ctrl+A */
+		v->field_all = n != 0;
+		return 1;
+	}
+	if (k == 0x03) {                /* Ctrl+C */
+		copy_osc52(buf, n);
+		copy_said(v, n);
+		return 1;
+	}
+	/*
+	 * Anything that writes replaces the selection first.
+	 *
+	 * Done here rather than in each branch so no branch can forget:
+	 * a field that is shown as selected and then appends is worse
+	 * than one that never offered selection.
+	 */
+	if (v->field_all && (k == 127 || k == 8 || k == K_DEL ||
+			     k == 0x16 || k == K_PASTE ||
+			     (k >= 0x20 && k < 0x7f))) {
+		buf[0] = 0;
+		n = 0;
+		v->caret = 0;
+		v->field_all = 0;
+		if (k == 127 || k == 8 || k == K_DEL)
+			return 1;
+	}
+	if (v->field_all && (k == K_LEFT || k == K_RIGHT ||
+			     k == K_HOME || k == K_END || k == 27 ||
+			     k == '\r' || k == '\n'))
+		v->field_all = 0;
+	if (k == 0x16 || k == K_PASTE) {        /* Ctrl+V, or a paste */
+		const char *src = k == K_PASTE ? g_paste : g_clip;
+		size_t sn = k == K_PASTE ? g_paste_n : g_clip_n, i;
+
+		for (i = 0; i < sn && n + 2u < cap; i++) {
+			char c2 = src[i];
+
+			if (c2 < 0x20 || c2 >= 0x7f)
+				continue;   /* a field holds a line */
+			memmove(buf + v->caret + 1u, buf + v->caret,
+				n - v->caret + 1u);
+			buf[v->caret++] = c2;
+			n++;
+		}
+		return 1;
+	}
+	if (k == K_LEFT) {
+		if (v->caret)
+			v->caret--;
+	} else if (k == K_RIGHT) {
+		if (v->caret < n)
+			v->caret++;
+	} else if (k == K_HOME) {
+		v->caret = 0;
+	} else if (k == K_END) {
+		v->caret = (uint32_t)n;
+	} else if (k == 27 || k == '\r' || k == '\n') {
+		v->edit = 0;
+	} else if (k == 127 || k == 8) {
+		/* Deletes what is BEFORE the caret, which is what
+		 * backspace means; the character under it is what
+		 * a delete key takes, below. */
+		if (v->caret) {
+			memmove(buf + v->caret - 1u, buf + v->caret,
+				n - v->caret + 1u);
+			v->caret--;
+		}
+	} else if (k == K_DEL) {
+		if (v->caret < n)
+			memmove(buf + v->caret, buf + v->caret + 1u,
+				n - v->caret);
+	} else if (k >= 0x20 && k < 0x7f && n + 2u < cap) {
+		memmove(buf + v->caret + 1u, buf + v->caret,
+			n - v->caret + 1u);
+		buf[v->caret++] = (char)k;
+	}
+	return 1;
 }
 
 static int handle(struct view *v, int k)
@@ -11523,6 +11908,16 @@ static int handle(struct view *v, int k)
 			}
 			return 1;
 		}
+		if (v->edit >= ED_STR && v->edit < ED_STR + MAX_DECL) {
+			uint32_t si = (uint32_t)(v->edit - ED_STR);
+			int r2 = field_key(v, v->sedit, sizeof v->sedit, k);
+
+			/* field_key clears v->edit when the field closes, and
+			 * closing is when the text becomes a declaration. */
+			if (!v->edit)
+				decl_edit_commit(v, si);
+			return r2;
+		}
 		{
 		/*
 		 * Which box the keys are going into, and how much it holds.
@@ -11533,7 +11928,7 @@ static int handle(struct view *v, int k)
 		 * carries its own now, taken from the array it is.
 		 */
 		char *buf;
-		size_t cap, n;
+		size_t cap;
 
 		if (v->edit == 501) {
 			buf = v->note;
@@ -11551,102 +11946,7 @@ static int handle(struct view *v, int k)
 			buf = v->cnd[(v->edit - 4) % MAX_GROUP].variant;
 			cap = sizeof v->cnd[0].variant;
 		}
-		n = strlen(buf);
-		/* A field just opened puts the caret at the end of what is
-		 * already in it, which is where typing continues from. */
-		if (v->edit != v->edit_prev) {
-			v->edit_prev = v->edit;
-			v->caret = (uint32_t)n;
-			v->field_all = 0;
-		}
-		if (v->caret > n)
-			v->caret = (uint32_t)n;
-
-		/*
-		 * Copy and paste, with the keys everything else uses.
-		 *
-		 * A terminal keeps Ctrl+Shift+C and Ctrl+Shift+V for itself and
-		 * passes the unshifted pair straight through, so these are free
-		 * to take - and taking them is what makes a text field here
-		 * behave like a text field anywhere else.
-		 */
-		if (k == 0x01) {                /* Ctrl+A */
-			v->field_all = n != 0;
-			return 1;
-		}
-		if (k == 0x03) {                /* Ctrl+C */
-			copy_osc52(buf, n);
-			copy_said(v, n);
-			return 1;
-		}
-		/*
-		 * Anything that writes replaces the selection first.
-		 *
-		 * Done here rather than in each branch so no branch can forget:
-		 * a field that is shown as selected and then appends is worse
-		 * than one that never offered selection.
-		 */
-		if (v->field_all && (k == 127 || k == 8 || k == K_DEL ||
-				     k == 0x16 || k == K_PASTE ||
-				     (k >= 0x20 && k < 0x7f))) {
-			buf[0] = 0;
-			n = 0;
-			v->caret = 0;
-			v->field_all = 0;
-			if (k == 127 || k == 8 || k == K_DEL)
-				return 1;
-		}
-		if (v->field_all && (k == K_LEFT || k == K_RIGHT ||
-				     k == K_HOME || k == K_END || k == 27 ||
-				     k == '\r' || k == '\n'))
-			v->field_all = 0;
-		if (k == 0x16 || k == K_PASTE) {        /* Ctrl+V, or a paste */
-			const char *src = k == K_PASTE ? g_paste : g_clip;
-			size_t sn = k == K_PASTE ? g_paste_n : g_clip_n, i;
-
-			for (i = 0; i < sn && n + 2u < cap; i++) {
-				char c2 = src[i];
-
-				if (c2 < 0x20 || c2 >= 0x7f)
-					continue;   /* a field holds a line */
-				memmove(buf + v->caret + 1u, buf + v->caret,
-					n - v->caret + 1u);
-				buf[v->caret++] = c2;
-				n++;
-			}
-			return 1;
-		}
-		if (k == K_LEFT) {
-			if (v->caret)
-				v->caret--;
-		} else if (k == K_RIGHT) {
-			if (v->caret < n)
-				v->caret++;
-		} else if (k == K_HOME) {
-			v->caret = 0;
-		} else if (k == K_END) {
-			v->caret = (uint32_t)n;
-		} else if (k == 27 || k == '\r' || k == '\n') {
-			v->edit = 0;
-		} else if (k == 127 || k == 8) {
-			/* Deletes what is BEFORE the caret, which is what
-			 * backspace means; the character under it is what
-			 * a delete key takes, below. */
-			if (v->caret) {
-				memmove(buf + v->caret - 1u, buf + v->caret,
-					n - v->caret + 1u);
-				v->caret--;
-			}
-		} else if (k == K_DEL) {
-			if (v->caret < n)
-				memmove(buf + v->caret, buf + v->caret + 1u,
-					n - v->caret);
-		} else if (k >= 0x20 && k < 0x7f && n + 2u < cap) {
-			memmove(buf + v->caret + 1u, buf + v->caret,
-				n - v->caret + 1u);
-			buf[v->caret++] = (char)k;
-		}
-		return 1;
+		return field_key(v, buf, cap, k);
 		}
 	}
 
@@ -12049,6 +12349,16 @@ static void file_close(struct view *v)
 {
 	uint32_t i, k;
 
+	/*
+	 * The draft goes with the file, and its declarations own heap.
+	 *
+	 * Missed at first, and the shape of the miss is worth keeping: the
+	 * declarations were freed by draft_clear on every path that REPLACED a
+	 * draft, and by nothing at all on the path that abandoned one. That
+	 * cost a few bytes at exit for as long as moving to another file meant
+	 * re-execing - and became a leak per file the moment it did not.
+	 */
+	draft_clear(v);
 	for (i = 0; i < v->n_obj; i++) {
 		struct object *o = &v->obj[i];
 
