@@ -2030,7 +2030,7 @@ static void touch_name(const struct kof_touch *t, char *out, size_t cap)
 	const char *fam = t->family[0] ? t->family : "?";
 
 	if (t->fired_name)
-		snprintf(out, cap, "%s:%s-%s", kof_maltype_name(t->maltype),
+		snprintf(out, cap, "%s:%s#%s", kof_maltype_name(t->maltype),
 			 fam, t->fired_name);
 	else if (t->n_names > 1u)
 		snprintf(out, cap, "%s:%s (%u variants)",
@@ -2044,6 +2044,40 @@ static const char *touch_colour(const struct kof_touch *t)
 	return t->fired                        ? A_BAD :
 	       t->kind == KOF_TOUCH_ELSEWHERE  ? A_LOC :
 	       t->kind == KOF_TOUCH_INELIGIBLE ? A_DIM : A_WARN;
+}
+
+/*
+ * Which module opened an object, coloured by what that module is.
+ *
+ * An EXECUTABLE PACKER is red. Its whole purpose is that the file cannot be
+ * read as it stands, and there is no ordinary reason to ship a program that
+ * way; that it was recognised at all is a statement about the object.
+ *
+ * A DECOMPRESSOR, ARCHIVE OR DOCUMENT PARSER is yellow. It says the object
+ * arrived inside a container, which is how nearly all software arrives.
+ *
+ * The engine does not classify its unpackers - a module is only a kof_unpack
+ * entry point and whatever name it gives itself through kof_debug - so the
+ * split is made here, from that name. Unknown names take the quieter colour:
+ * a module this list has not heard of is far more likely to be a new container
+ * than a new packer, and guessing wrong towards red is the failure that trains
+ * people to ignore the colour.
+ */
+static const char *packer_colour(const char *name)
+{
+	static const char *const packers[] = { "UPX", "Ezuri" };
+	size_t i;
+
+	for (i = 0; i < sizeof packers / sizeof packers[0]; i++) {
+		size_t n = strlen(packers[i]);
+
+		/* Prefix, not equality: the name carries the format it was
+		 * built for - "UPX.ELF", "UPX.PE" - and both are the packer. */
+		if (strncmp(name, packers[i], n) == 0 &&
+		    (name[n] == 0 || name[n] == '.'))
+			return A_BAD;
+	}
+	return A_WARN;
 }
 
 static void touch_head(const struct kof_touch *t, char *out, size_t cap)
@@ -7021,25 +7055,30 @@ static void draw_marker_line(struct out *o, struct view *v)
 	 * the recovered bytes are short and nothing else on the screen says why.
 	 */
 	/*
-	 * YELLOW, NOT RED. A PACKER IS NOT A VERDICT.
+	 * The colour separates two things this field has always conflated.
 	 *
-	 * Red on this line means something is wrong - a marker absent from the
-	 * object, a rule that cannot fire - and "this came out of UPX" is none of
-	 * those. It is how the object was reached, and plenty of clean software
-	 * is packed: measured, 400 of a 13638 file clean corpus. Painting it in
-	 * the colour reserved for faults made every packed file look like a
-	 * finding before a single module had run.
+	 * A PACKER stays red. Nothing legitimate ships an executable wrapped in
+	 * UPX or Ezuri without a reason, and the wrapper is there to stop the
+	 * file being read - which is a fact about intent, and belongs in the
+	 * colour the rest of the screen reserves for what is wrong.
+	 *
+	 * A DECOMPRESSOR OR PARSER goes yellow. "This came out of a zip", "this
+	 * came out of an RTF" says only how the object was reached. Archives and
+	 * documents are how software is shipped; red there made every object
+	 * inside a container look like a finding before a module had run.
 	 *
 	 * The version stays beside the name and stays dim - it qualifies the
 	 * name rather than competing with it, and it is the field that decides
 	 * which layout the rest of what the module said belongs to.
 	 */
 	if (ob->packer[0]) {
+		const char *pcol = packer_colour(ob->packer);
+
 		if (ob->packer_ver >= 0)
-			out_fmt(o, A_WARN "%s" A_OFF A_DIM " v%lld" A_OFF,
-				ob->packer, ob->packer_ver);
+			out_fmt(o, "%s%s" A_OFF A_DIM " v%lld" A_OFF,
+				pcol, ob->packer, ob->packer_ver);
 		else
-			out_fmt(o, A_WARN "%s" A_OFF, ob->packer);
+			out_fmt(o, "%s%s" A_OFF, pcol, ob->packer);
 		out_str(o, A_DIM "  |  " A_OFF);
 	}
 
@@ -9111,8 +9150,8 @@ static void prop_build(struct view *v)
 	 * below describes bytes an unpacker produced, and reading it as the
 	 * file on disk would be reading it as the wrong object. */
 	if (ob->packer[0])
-		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_WARN "%s" A_OFF,
-			 "unpacked by", ob->packer);
+		prop_add(A_OFF, A_DIM "  %-11s " A_OFF "%s%s" A_OFF,
+			 "unpacked by", packer_colour(ob->packer), ob->packer);
 
 	if (ob->fmt && ob->info) {
 		if (ob->ctx.format == KOF_FMT_ELF)
