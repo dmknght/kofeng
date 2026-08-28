@@ -227,6 +227,17 @@ static void verdict_run(kof_engine *eng, const char *path)
 		return;
 	memset(&opt, 0, sizeof opt);
 	opt.all_matches = 1;
+	/*
+	 * The most this build's heuristic can be asked for.
+	 *
+	 * A tool that examines one named file is not a scanner walking a
+	 * filesystem: the reason a level is optional there - it costs a pass
+	 * over every object - is not a reason here, where there is one object
+	 * and somebody is sitting in front of it waiting to be told about it.
+	 * Named rather than numbered so this keeps meaning "the most" as levels
+	 * are added.
+	 */
+	opt.heur_level = KOF_HEUR_LEVEL_MAX;
 	sc = kof_scanner_new(eng);
 	if (!sc)
 		return;
@@ -1816,6 +1827,17 @@ static int unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
 	memset(&opt, 0, sizeof opt);
 	memset(&u, 0, sizeof u);
 	opt.all_matches = 1;
+	/*
+	 * The most this build's heuristic can be asked for.
+	 *
+	 * A tool that examines one named file is not a scanner walking a
+	 * filesystem: the reason a level is optional there - it costs a pass
+	 * over every object - is not a reason here, where there is one object
+	 * and somebody is sitting in front of it waiting to be told about it.
+	 * Named rather than numbered so this keeps meaning "the most" as levels
+	 * are added.
+	 */
+	opt.heur_level = KOF_HEUR_LEVEL_MAX;
 	u.dump_dir = dump_dir;
 	u.touch = markers ? eng : NULL;
 	g_debug = verbose;

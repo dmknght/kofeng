@@ -864,6 +864,28 @@ struct view {
 	void       *map;
 	uint64_t    map_len;
 
+	/*
+	 * WHAT SURVIVES A FILE SWITCH.
+	 *
+	 * Opening the next file used to re-exec this program, because the view
+	 * is full of pointers whose lifetime is one file and unpicking them by
+	 * hand is how a stale one gets left behind. Re-execing also threw away
+	 * the database, and loading it is most of what starting costs - so
+	 * every step through a directory paid for a load nobody asked for.
+	 *
+	 * These four are the state that belongs to the SESSION rather than to
+	 * the file. file_open keeps exactly them and clears everything else, so
+	 * a field added to this struct is cleared by default: the failure mode
+	 * of forgetting one is a reset panel, not a pointer into a file that is
+	 * no longer mapped.
+	 *
+	 * `pathbuf` exists because `path` used to point into argv, which is
+	 * fine for a path that never changes and wrong the moment one does.
+	 */
+	kof_engine *eng;
+	char        dbdir[256];
+	char        pathbuf[KOF_DUMP_PATH_ROOM];
+
 	struct object obj[MAX_OBJ];
 	uint32_t      n_obj;
 
@@ -1393,6 +1415,17 @@ static void objects_collect(struct view *v, kof_engine *eng)
 
 	memset(&opt, 0, sizeof opt);
 	opt.all_matches = 1;
+	/*
+	 * The most this build's heuristic can be asked for.
+	 *
+	 * A tool that examines one named file is not a scanner walking a
+	 * filesystem: the reason a level is optional there - it costs a pass
+	 * over every object - is not a reason here, where there is one object
+	 * and somebody is sitting in front of it waiting to be told about it.
+	 * Named rather than numbered so this keeps meaning "the most" as levels
+	 * are added.
+	 */
+	opt.heur_level = KOF_HEUR_LEVEL_MAX;
 	/* -1 rather than the zeroed view's 0, because 0 is a version a container
 	 * can carry. Set here so the first module to speak cannot inherit it. */
 	v->pending_ver = -1;
@@ -8674,7 +8707,19 @@ static void find_run(struct view *v, int back)
  * and that is one page rather than a menu of them. So it is one item, under
  * File, next to the other things that are about the file in hand.
  */
-enum bar_menu { BM_FILE = 0, BM_EDIT, BM_ANALYSIS, BM_HELP, BM_COUNT };
+enum bar_menu {
+	BM_FILE = 0, BM_EDIT, BM_ANALYSIS,
+	/*
+	 * Moving between files, apart from Analysis.
+	 *
+	 * Stepping to the next sample is not an analysis of the one on screen -
+	 * it is leaving it - and having it sit under the same heading as
+	 * Dashboard and Dump meant the one item in there that discards work was
+	 * filed with the two that only look at things.
+	 */
+	BM_SWITCH,
+	BM_HELP, BM_COUNT
+};
 
 /*
  * Dump, next to them, because it is about this file too.
@@ -8701,7 +8746,8 @@ enum bar_item {
 	 * about the bytes in front of the reader and neither writes a signature,
 	 * so they belong together and not beside Save.
 	 */
-	BI_DASH, BI_DUMP, BI_NEXT,
+	BI_DASH, BI_DUMP, BI_REBUILD,
+	BI_NEXT, BI_PREV,
 	BI_KEYS, BI_ABOUT,
 	BI_COUNT
 };
@@ -8716,15 +8762,27 @@ static const struct {
 	{ "Quit",           BM_FILE },
 	{ "Find...",        BM_EDIT },
 	{ "Go to...",       BM_EDIT },
-	{ "Dashboard",      BM_ANALYSIS },
-	{ "Dump",           BM_ANALYSIS },
-	{ "Next file",      BM_ANALYSIS },
-	{ "Keyboard",       BM_HELP },
+	{ "Dashboard",         BM_ANALYSIS },
+	{ "Dump",              BM_ANALYSIS },
+	{ "Rebuild database",  BM_ANALYSIS },
+	/*
+	 * "Next" and "Previous", not "Next file" and "Previous file": the menu
+	 * they are in is called Switch-File, and repeating the noun in every
+	 * item under it is the sort of label that reads like a form.
+	 */
+	{ "Next",              BM_SWITCH },
+	{ "Previous",          BM_SWITCH },
+	{ "Keyboard",          BM_HELP },
 	{ "About",          BM_HELP }
 };
 
 static const char *const bar_name[BM_COUNT] = {
-	"File", "Edit", "Analysis", "Help"
+	/*
+	 * Hyphenated, because the bar is a row of single words and a title with
+	 * a space in it reads as two of them - "Switch" and "File" - which is a
+	 * menu that does not exist next to a menu that does.
+	 */
+	"File", "Edit", "Analysis", "Switch-File", "Help"
 };
 
 /*
@@ -8754,7 +8812,15 @@ static int bar_enabled(struct view *v, int i)
 	case BI_DASH:      return 1;
 	/* Needs a file to step from, and nothing the reader typed that would be
 	 * lost - moving on is the one action here that throws work away. */
-	case BI_NEXT:      return v->path && v->path[0] && !draft_edited(v);
+	case BI_NEXT:
+	case BI_PREV:      return v->path && v->path[0] && !draft_edited(v);
+	/*
+	 * Rebuilding replaces the database this file was examined against, so
+	 * the file is examined again - which throws the draft away for the same
+	 * reason stepping to another file does.
+	 */
+	case BI_REBUILD:   return v->basedir[0] && v->dbdir[0] &&
+				  !draft_edited(v);
 	case BI_QUIT:      return 1;
 	case BI_FIND:      return 1;
 	case BI_GOTO:      return 0;            /* the dialog is not built */
@@ -9131,6 +9197,37 @@ static void prop_build(struct view *v)
 
 	prop_head("Object");
 	prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF, "name", base);
+	/*
+	 * Where the file is, under what it is called.
+	 *
+	 * Only for the object that came off the disk: the name of a child is a
+	 * path INSIDE its container, so its directory is the container's and
+	 * saying so twice would suggest the child has a place of its own on the
+	 * filesystem. The top level object is the only one that does.
+	 *
+	 * Shown even when the row is long, because it is one of the two things
+	 * a reader copies out of this panel - the other is the name - and the
+	 * selection machinery in prop_put makes both copyable.
+	 */
+	if (v->sel_node == 0 && v->path && v->path[0]) {
+		char dir[KOF_DUMP_PATH_ROOM];
+		const char *slash = strrchr(v->path, '/');
+
+		if (!slash) {
+			snprintf(dir, sizeof dir, ".");
+		} else if (slash == v->path) {
+			snprintf(dir, sizeof dir, "/");
+		} else {
+			size_t n = (size_t)(slash - v->path);
+
+			if (n >= sizeof dir)
+				n = sizeof dir - 1u;
+			memcpy(dir, v->path, n);
+			dir[n] = 0;
+		}
+		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_LOC "%s" A_OFF,
+			 "folder", dir);
+	}
 	prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_SIZE "%llu" A_OFF A_DIM
 		 " bytes" A_OFF, "size", (unsigned long long)ob->buf.n);
 	{
@@ -9635,48 +9732,66 @@ static void dump_all(struct view *v)
  * The cost is honest and small: the database is loaded again. That is a second on
  * a large one, against a rewrite that could lose somebody's draft.
  */
-static char **g_argv;           /* what this process was started with */
+/* Defined with the rest of the session's lifetime, at the foot of this file. */
+static int file_open(struct view *v, const char *path, kof_engine *eng);
 
-static void open_next(struct view *v)
+/*
+ * The file next to this one in its directory, in either direction.
+ *
+ * `dir` is +1 for the next name and -1 for the one before it. Ordering is by
+ * name rather than by whatever readdir hands back, so stepping forward and then
+ * back returns to where it started - which is the only property that makes a
+ * pair of these usable as a way of walking a sample directory.
+ *
+ * Directories, empty files and anything that cannot be stat'ed are skipped
+ * rather than ending the walk: a sample directory routinely holds a README and
+ * a subdirectory of notes, and stopping at one would put the rest out of reach.
+ *
+ * Returns 0 and leaves a message when there is nothing that way.
+ */
+static int neighbour_file(struct view *v, int dir, char *out, size_t cap)
 {
-	char dir[KOF_DUMP_PATH_ROOM], best[KOF_DUMP_PATH_ROOM];
+	char folder[KOF_DUMP_PATH_ROOM], best[KOF_DUMP_PATH_ROOM];
 	const char *base = base_name(v->path);
 	size_t lead = (size_t)(base - v->path);
 	DIR *d;
 	struct dirent *e;
 	int found = 0;
 
-	if (lead + 1 >= sizeof dir)
-		return;
+	if (lead + 1 >= sizeof folder)
+		return 0;
 	if (lead) {
-		memcpy(dir, v->path, lead);
-		dir[lead ? lead - 1 : 0] = 0;   /* drop the separator */
+		memcpy(folder, v->path, lead);
+		folder[lead ? lead - 1 : 0] = 0;   /* drop the separator */
 	}
-	if (!lead || !dir[0])
-		snprintf(dir, sizeof dir, ".");
+	if (!lead || !folder[0])
+		snprintf(folder, sizeof folder, ".");
 
-	d = opendir(dir);
+	d = opendir(folder);
 	if (!d) {
 		v->act_ok = 0;
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "cannot read %.60s", dir);
-		return;
+			 "cannot read %.60s", folder);
+		return 0;
 	}
-	/*
-	 * The smallest name greater than this one, so the order is the same
-	 * every time and does not depend on how the filesystem hands entries
-	 * back. Directories and anything unreadable are skipped rather than
-	 * stopping the walk.
-	 */
 	while ((e = readdir(d)) != NULL) {
 		char cand[KOF_DUMP_PATH_ROOM];
 		struct stat st;
+		int rel = strcmp(e->d_name, base);
 
-		if (strcmp(e->d_name, base) <= 0)
+		/* On the wrong side of where we are, or where we already are. */
+		if (dir > 0 ? rel <= 0 : rel >= 0)
 			continue;
-		if (found && strcmp(e->d_name, base_name(best)) >= 0)
-			continue;
-		if ((size_t)snprintf(cand, sizeof cand, "%s/%s", dir,
+		/* Further away than the best so far: nearest wins, which for
+		 * "next" is the smallest name above and for "previous" is the
+		 * largest name below. */
+		if (found) {
+			int cmp = strcmp(e->d_name, base_name(best));
+
+			if (dir > 0 ? cmp >= 0 : cmp <= 0)
+				continue;
+		}
+		if ((size_t)snprintf(cand, sizeof cand, "%s/%s", folder,
 				     e->d_name) >= sizeof cand)
 			continue;
 		if (stat(cand, &st) != 0 || !S_ISREG(st.st_mode) ||
@@ -9689,29 +9804,217 @@ static void open_next(struct view *v)
 
 	if (!found) {
 		v->act_ok = 0;
-		snprintf(v->act_msg, sizeof v->act_msg,
-			 "%.50s is the last file here", base);
-		return;
+		snprintf(v->act_msg, sizeof v->act_msg, "%.50s is the %s file here",
+			 base, dir > 0 ? "last" : "first");
+		return 0;
 	}
-	if (!g_argv) {
-		v->act_ok = 0;
-		snprintf(v->act_msg, sizeof v->act_msg, "cannot restart");
-		return;
-	}
-	/*
-	 * The path is the last argument, which is where the option parser
-	 * expects it and where this process received its own.
-	 */
-	{
-		uint32_t n = 0;
+	snprintf(out, cap, "%s", best);
+	return 1;
+}
 
-		while (g_argv[n]) n++;
-		if (n) g_argv[n - 1] = best;
+/*
+ * Step to the neighbouring file.
+ *
+ * This used to re-exec the program, because the view was full of pointers whose
+ * lifetime was one file. It now hands the path to file_open, which keeps the
+ * engine - so stepping through a directory of samples no longer reloads the
+ * database once per file, and the terminal never leaves raw mode.
+ */
+static void open_step(struct view *v, int dir)
+{
+	char next[KOF_DUMP_PATH_ROOM];
+
+	if (!neighbour_file(v, dir, next, sizeof next))
+		return;
+	if (!file_open(v, next, v->eng))
+		return;                 /* file_open left the reason */
+	v->act_ok = 1;
+	snprintf(v->act_msg, sizeof v->act_msg, "opened %.60s",
+		 base_name(v->path));
+}
+
+/*
+ * Rebuild the signature database and pick it up, without leaving.
+ *
+ *
+ * WHY IT SHELLS OUT TO make
+ *
+ * Building a database is two stages and neither is small. Each source is
+ * compiled freestanding, then checked for relocations and for writable state,
+ * then linked to raw bytes - that is ksigcompiler.sh, seven hundred lines of it
+ * wrapped around five tools - and only then does ksigbuilder pack the artefacts.
+ * A second implementation of that inside a viewer would be a second thing to
+ * keep in step with the first, and the first is where the checks live.
+ *
+ * So this runs the build that already exists, in the tree it belongs to.
+ *
+ *
+ * FINDING THE TREE
+ *
+ * Upwards from the bases directory, to the first level holding a Makefile. That
+ * is the directory the sources are part of, which is a better answer than the
+ * working directory: a viewer started from somewhere else would otherwise
+ * rebuild whatever tree it happened to be standing in, or nothing at all.
+ *
+ *
+ * WHAT IT DOES AFTERWARDS
+ *
+ * Closes the engine, opens the new one, and re-opens the file. Re-opening is
+ * the point rather than a side effect: the reason to rebuild from in here is to
+ * see whether the rule just written fires, and an engine swapped in under a
+ * result computed against the old one would still show the old answer.
+ *
+ * The build's own output goes to a file and only its last line is shown - a
+ * compiler diagnostic is what the reader needs, and the rest of a build log is
+ * not, on a status line one row tall.
+ */
+static int tree_root_of(const char *bases, char *out, size_t cap)
+{
+	char at[KOF_DUMP_PATH_ROOM];
+
+	if (!realpath(bases, at)) {
+		/* A bases directory that does not exist yet is legal - generate
+		 * creates it - so fall back to where this was started. */
+		if (!getcwd(at, sizeof at))
+			return 0;
 	}
-	term_restore();
-	execv("/proc/self/exe", g_argv);
-	/* Only here if exec failed; the terminal is already back. */
-	_exit(1);
+	for (;;) {
+		char mk[KOF_DUMP_PATH_ROOM];
+		struct stat st;
+		char *slash;
+
+		if ((size_t)snprintf(mk, sizeof mk, "%s/Makefile", at) <
+		    sizeof mk && stat(mk, &st) == 0 && S_ISREG(st.st_mode)) {
+			size_t n = strlen(at);
+
+			if (n >= cap)
+				return 0;
+			memcpy(out, at, n + 1u);
+			return 1;
+		}
+		slash = strrchr(at, '/');
+		if (!slash || slash == at)
+			return 0;
+		*slash = 0;
+	}
+}
+
+static void build_last_line(const char *log, char *out, size_t cap)
+{
+	FILE *f = fopen(log, "r");
+	char line[200];
+
+	out[0] = 0;
+	if (!f)
+		return;
+	while (fgets(line, sizeof line, f)) {
+		size_t n = strlen(line);
+
+		while (n && (line[n - 1u] == 10 || line[n - 1u] == 13))
+			line[--n] = 0;
+		if (n)
+			snprintf(out, cap, "%s", line);
+	}
+	fclose(f);
+}
+
+static void rebuild_db(struct view *v)
+{
+	char root[KOF_DUMP_PATH_ROOM];
+	char log[] = "/tmp/kofviewer-build-XXXXXX";
+	char here[KOF_DUMP_PATH_ROOM];
+	kof_engine *fresh, *old;
+	pid_t pid;
+	int fd, status = -1;
+
+	if (!tree_root_of(v->basedir, root, sizeof root)) {
+		v->act_ok = 0;
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "no Makefile above %.50s", v->basedir);
+		return;
+	}
+	/* The path to reopen, taken before the file is closed under us. */
+	snprintf(here, sizeof here, "%s", v->path);
+
+	fd = mkstemp(log);
+	if (fd < 0) {
+		v->act_ok = 0;
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "cannot make a log file");
+		return;
+	}
+
+	pid = fork();
+	if (pid == 0) {
+		/* Writable, because execvp takes char *const[] and a string
+		 * literal is not one. The same shape the clipboard fork in
+		 * this file uses, and for the same reason. */
+		static char a0[] = "make", a1[] = "databases";
+		char *const args[] = { a0, a1, NULL };
+
+		if (chdir(root) != 0)
+			_exit(127);
+		dup2(fd, 1);
+		dup2(fd, 2);
+		close(fd);
+		execvp("make", args);
+		_exit(127);
+	}
+	close(fd);
+	if (pid < 0) {
+		unlink(log);
+		v->act_ok = 0;
+		snprintf(v->act_msg, sizeof v->act_msg, "cannot start make");
+		return;
+	}
+	while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+		;
+
+	if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) {
+		char last[200];
+
+		build_last_line(log, last, sizeof last);
+		unlink(log);
+		v->act_ok = 0;
+		if (last[0])
+			snprintf(v->act_msg, sizeof v->act_msg,
+				 "build failed: %.130s", last);
+		else
+			snprintf(v->act_msg, sizeof v->act_msg, "build failed");
+		return;
+	}
+	unlink(log);
+
+	/*
+	 * THE ORDER HERE IS THE WHOLE OF THE CARE.
+	 *
+	 * A kof_touch holds borrowed pointers into the engine - the module, the
+	 * family, every variant name - so the old engine must outlive everything
+	 * derived from it, and the swap must not leave the view holding either
+	 * half of a torn state.
+	 *
+	 * So: build the new engine first; hand it to file_open, which tears the
+	 * old view down only after it has successfully mapped the new file; and
+	 * close the old engine last, when nothing points into it any more. Each
+	 * failure returns with the session exactly as it was - the old engine,
+	 * the old file, and a message.
+	 */
+	fresh = kof_engine_open(v->dbdir);
+	if (!fresh) {
+		v->act_ok = 0;
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "built, but %.50s would not load", v->dbdir);
+		return;
+	}
+	old = v->eng;
+	if (!file_open(v, here, fresh)) {
+		kof_engine_close(fresh);
+		return;                 /* file_open left the reason */
+	}
+	kof_engine_close(old);
+	v->act_ok = 1;
+	snprintf(v->act_msg, sizeof v->act_msg, "database rebuilt from %.60s",
+		 root);
 }
 
 static void bar_run(struct view *v, int i)
@@ -9742,7 +10045,9 @@ static void bar_run(struct view *v, int i)
 		v->warn[0] = 0;
 		break;
 	case BI_DUMP:    dump_all(v); break;
-	case BI_NEXT:    open_next(v); break;
+	case BI_NEXT:    open_step(v, +1); break;
+	case BI_PREV:    open_step(v, -1); break;
+	case BI_REBUILD: rebuild_db(v); break;
 	case BI_DASH:
 		/* Whatever the last copy or dump said belongs to the screen
 		 * it was said on, not to a page opened afterwards. */
@@ -11733,7 +12038,14 @@ static void usage(void)
 	"              directories both work. Default kofdraft/.\n");
 }
 
-static void view_free(struct view *v)
+/*
+ * Everything one FILE owns, and nothing the session owns.
+ *
+ * Deliberately not view_free: the engine, the two extent buffers and the bases
+ * directory outlive any one file, and freeing them here is what would make a
+ * file switch cost a database load again.
+ */
+static void file_close(struct view *v)
 {
 	uint32_t i, k;
 
@@ -11749,29 +12061,155 @@ static void view_free(struct view *v)
 		if (o->mapped)
 			kof_unmap_file(o->mapped, o->mapped_len);
 	}
+	v->n_obj = 0;
+	if (v->map) {
+		kof_unmap_file(v->map, v->map_len);
+		v->map = NULL;
+		v->map_len = 0;
+	}
+}
+
+static void view_free(struct view *v)
+{
+	file_close(v);
 	free(v->ext);
+	free(v->probe);
+}
+
+/*
+ * Point the whole view at another file, keeping the session.
+ *
+ * The new file is opened and mapped BEFORE the old one is let go, so a path
+ * that cannot be read leaves the reader looking at what they already had with
+ * a message saying why - rather than at an empty screen.
+ *
+ * Then the view is cleared wholesale and the session's four fields are put
+ * back. Clearing wholesale rather than resetting the per-file fields by name is
+ * the point: this struct has upwards of eighty members and a switch that
+ * enumerated them would go stale the first time one was added, silently, in
+ * whichever pane happened to hold the field that was missed.
+ *
+ * Returns 0 with act_msg set on failure.
+ */
+static int file_open(struct view *v, const char *path, kof_engine *eng)
+{
+	struct stat st;
+	void       *map;
+	uint64_t    len;
+	int         fd;
+	/* The session. */
+	struct kof_range *ext   = v->ext;
+	struct kof_range *probe = v->probe;
+	uint32_t          cap   = v->decl_cap;
+	int               offr  = v->off_region;
+	char basedir[sizeof v->basedir];
+	char dbdir[sizeof v->dbdir];
+	char keep[KOF_DUMP_PATH_ROOM];
+
+	snprintf(keep, sizeof keep, "%s", path);
+
+	fd = open(keep, O_RDONLY);
+	if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+	    st.st_size <= 0) {
+		if (fd >= 0)
+			close(fd);
+		v->act_ok = 0;
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "%.60s is not a regular non-empty file",
+			 base_name(keep));
+		return 0;
+	}
+	len = (uint64_t)st.st_size;
+	map = kof_map_file_ro(fd, len);
+	close(fd);
+	if (!map) {
+		v->act_ok = 0;
+		snprintf(v->act_msg, sizeof v->act_msg, "cannot map %.60s",
+			 base_name(keep));
+		return 0;
+	}
+
+	snprintf(basedir, sizeof basedir, "%s", v->basedir);
+	snprintf(dbdir, sizeof dbdir, "%s", v->dbdir);
+
+	file_close(v);
+	memset(v, 0, sizeof *v);
+
+	v->eng   = eng;
+	v->ext   = ext;
+	v->probe = probe;
+	v->decl_cap = cap;
+	v->off_region = offr;
+	snprintf(v->basedir, sizeof v->basedir, "%s", basedir);
+	snprintf(v->dbdir, sizeof v->dbdir, "%s", dbdir);
+
+	/* The fields whose cleared value is not their resting value. */
+	v->prop_sel_row = -1;
+	v->sel_a = v->sel_b = KOF_BROKEN;
+	v->find_at = KOF_BROKEN;
+	v->bar_open = -1;
+	v->bar_sel = -1;
+
+	snprintf(v->pathbuf, sizeof v->pathbuf, "%s", keep);
+	v->path = v->pathbuf;
+	v->map = map;
+	v->map_len = len;
+
+	if (v->eng)
+		objects_collect(v, v->eng);
+	if (!v->n_obj) {
+		/*
+		 * No database, or a scan that produced nothing. The file is
+		 * still an object and is still worth looking at - the tree is
+		 * just one deep.
+		 */
+		struct object *o = &v->obj[0];
+
+		memset(o, 0, sizeof *o);
+		snprintf(o->name, sizeof o->name, "%s", v->path);
+		o->buf = kof_buf_make(v->map, v->map_len);
+		v->n_obj = 1;
+	}
+	objects_examine(v, v->eng);
+	tree_build(v);
+	view_select(v);
+
+	/*
+	 * A file that already matches something opens showing what matched.
+	 *
+	 * That is nearly always the reason for opening it: a researcher looking
+	 * at a detected sample is there to see the rule that caught it, or to
+	 * write the one that should have. Starting on an empty panel makes them
+	 * go and find it first.
+	 */
+	{
+		struct object *o0 = &v->obj[0];
+		uint32_t k;
+
+		for (k = 0; k < o0->n_touch; k++)
+			if (o0->touch[k].fired) {
+				draft_show(v, k);
+				break;
+			}
+	}
+	/* Whatever was auto-loaded is what this file started as, so it is not
+	 * unsaved work. */
+	v->saved_hash = draft_hash(v);
+	return 1;
 }
 
 int main(int argc, char **argv)
 {
 	const char *path = NULL, *db = NULL, *base = "kofdraft";
-	kof_engine *eng = NULL;
 	uint64_t last_paint = 0;
 	struct view v;
 	struct stat st;
-	int fd, i, rc = 0;
+	int i, rc = 0;
 
-	g_argv = argv;
 	memset(&v, 0, sizeof v);
-	v.prop_sel_row = -1;
-	v.sel_a = v.sel_b = KOF_BROKEN;
-	v.find_at = KOF_BROKEN;
-	v.bar_open = -1;
-	v.bar_sel = -1;
+	/* The one preference that is not zero at rest. Everything else file_open
+	 * sets, for the first file and for every one after it. */
 	v.decl_cap = 12;
-	/* An empty draft is a saved draft: whatever the hash of "nothing" turns
-	 * out to be, it must not read as unsaved work. */
-	v.saved_hash = draft_hash(&v);
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--db") && i + 1 < argc)
@@ -11793,23 +12231,6 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
-	fd = open(path, O_RDONLY);
-	if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-	    st.st_size <= 0) {
-		fprintf(stderr, "kofviewer: %s is not a regular non-empty "
-				"file\n", path);
-		if (fd >= 0)
-			close(fd);
-		return 1;
-	}
-	v.map_len = (uint64_t)st.st_size;
-	v.map = kof_map_file_ro(fd, v.map_len);
-	close(fd);
-	if (!v.map) {
-		fprintf(stderr, "kofviewer: cannot map %s\n", path);
-		return 1;
-	}
-	v.path = path;
 	/*
 	 * The tree a drafted signature is written into.
 	 *
@@ -11826,6 +12247,8 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	snprintf(v.basedir, sizeof v.basedir, "%s", base);
+	if (db)
+		snprintf(v.dbdir, sizeof v.dbdir, "%s", db);
 
 	v.ext = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *v.ext);
 	v.probe = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *v.probe);
@@ -11835,47 +12258,17 @@ int main(int argc, char **argv)
 	}
 
 	if (db) {
-		eng = kof_engine_open(db);
-		if (!eng)
+		v.eng = kof_engine_open(db);
+		if (!v.eng)
 			fprintf(stderr, "kofviewer: cannot load a database from "
 					"%s\n", db);
 	}
-	if (eng)
-		objects_collect(&v, eng);
-	if (!v.n_obj) {
-		/*
-		 * No database, or a scan that produced nothing. The file is
-		 * still an object and is still worth looking at - the tree is
-		 * just one deep.
-		 */
-		struct object *o = &v.obj[0];
-
-		memset(o, 0, sizeof *o);
-		snprintf(o->name, sizeof o->name, "%s", path);
-		o->buf = kof_buf_make(v.map, v.map_len);
-		v.n_obj = 1;
-	}
-	objects_examine(&v, eng);
-	tree_build(&v);
-	view_select(&v);
-
-	/*
-	 * A file that already matches something opens showing what matched.
-	 *
-	 * That is nearly always the reason for opening it: a researcher looking
-	 * at a detected sample is there to see the rule that caught it, or to
-	 * write the one that should have. Starting on an empty panel makes them
-	 * go and find it first.
-	 */
-	{
-		struct object *o0 = &v.obj[0];
-		uint32_t k;
-
-		for (k = 0; k < o0->n_touch; k++)
-			if (o0->touch[k].fired) {
-				draft_show(&v, k);
-				break;
-			}
+	if (!file_open(&v, path, v.eng)) {
+		fprintf(stderr, "kofviewer: %s\n", v.act_msg);
+		kof_engine_close(v.eng);
+		free(v.ext);
+		free(v.probe);
+		return 1;
 	}
 
 	if (!term_setup()) {
@@ -11916,7 +12309,6 @@ int main(int argc, char **argv)
 
 out:
 	view_free(&v);
-	kof_unmap_file(v.map, v.map_len);
-	kof_engine_close(eng);
+	kof_engine_close(v.eng);
 	return rc;
 }

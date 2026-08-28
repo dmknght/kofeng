@@ -49,6 +49,20 @@
  */
 #define KOF_LEVEL_HEUR    2
 
+/*
+ * Everything the heuristic in this build can be asked to look at.
+ *
+ * A number rather than a name was the wrong thing to make callers write. A tool
+ * that examines ONE file on purpose - kofexamine, kofviewer - wants the most
+ * evidence available, and the cost that makes a level optional for a scanner
+ * walking a filesystem does not apply to it. Naming the top means those tools
+ * keep asking for the top as levels are added, instead of each of them pinning
+ * whatever number happened to be the maximum on the day it was written.
+ *
+ * See kof_scan_option.heur_level for what the levels are.
+ */
+#define KOF_HEUR_LEVEL_MAX 1u
+
 
 /*
  * Findings are accumulated, not overwritten: two families can match one object, and
@@ -322,6 +336,13 @@ struct kof_scan_option {
 	 * the value that means off sit at one end of a ladder whose other end is
 	 * the most expensive setting, and every caller would have to know which
 	 * end was which.
+	 *
+	 * A caller that wants everything this build can offer should say so with
+	 * KOF_HEUR_LEVEL_MAX rather than with a number. An analysis tool asks for
+	 * the most because it is looking at one file on purpose - it is not the
+	 * scanner walking a filesystem, and the cost that makes a level optional
+	 * there does not apply - and it should keep asking for the most as levels
+	 * are added, without an edit to every such tool.
 	 */
 	uint32_t heur_level;
 
