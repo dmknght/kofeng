@@ -4,13 +4,13 @@
  * Test sample: 2bc860efee229662a3c55dcf6e50d6142b3eec99c606faa1210f24541cad12f5
  * Researcher:  dmknght
  * Created 2026-08-29, updated 2026-08-29
- * Engine:      db format 5, module ABI 2
+ * Engine:      db format 6, module ABI 2
  */
 
 #include <kofmod/kofsig.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
-KOF_TARGET_NAME(KOF_MALTYPE_MINER, "Prometei");
+KOF_TARGET_NAME(KOF_MALTYPE_MINER, "PrometeiX");
 
 KOF_TARGET_RANGE(scan_range_unclaimed, KOF_SCAN_ELF_UNCLAIMED);
 KOF_TARGET_RANGE(scan_range_data, KOF_SCAN_ELF_DATA);
@@ -29,9 +29,6 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 	/* matcher 1: Json config of enc key in Unclaimed */
 	if (kof_find_str_all(scan_range_unclaimed, s1, s2, s3))
 		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
-	/* matcher 1: Json config of enc key in Unclaimed */
-	/* matcher 2: Download URL and Persistense path */
-	/* matcher 3: Mining strings */
 	{
 		/* matcher 2: Download URL and Persistense path */
 		if (kof_find_str_any(scan_range_data, s0, s4))
