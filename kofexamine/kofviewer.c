@@ -737,6 +737,16 @@ struct decl {
 	 * so rather than imply the count is the whole of it.
 	 */
 	uint64_t hits[DECL_HITS_MAX];
+	/*
+	 * AND HOW LONG EACH ONE IS, WHICH IS NOT ONE NUMBER.
+	 *
+	 * `len` is the SHORTEST a match can be. A pattern with a jump has no
+	 * single length - "GET /[4-7].tsunami" covers 17 bytes of "arm5" and 20
+	 * of "powerpc" - so lighting `len` bytes at every occurrence cut the
+	 * tail off the longer ones, by exactly as much as their jump exceeded
+	 * its minimum. The row said "17-20" and the pane lit 17 either way.
+	 */
+	uint32_t hit_len[DECL_HITS_MAX];
 	uint32_t n_hits;
 	int      hits_clipped;
 	/*
@@ -2144,6 +2154,46 @@ static void decl_locate(struct view *v, struct decl *d)
 		if (d->hits_clipped && d->at != KOF_BROKEN)
 			break;  /* the list is full and the row has its answer */
 	}
+	/*
+	 * How long each of them actually is, asked of the matcher.
+	 *
+	 * kof_match_where says where a match starts and not where it ends, and
+	 * the engine keeps that to itself. Truncating the buffer is how to ask:
+	 * a match needs its whole length to be there, so the shortest cut the
+	 * pattern still matches under IS its length here. Monotonic - a longer
+	 * cut can only help - so it is a bisection rather than a walk, eight
+	 * probes for the widest jump the compiler allows.
+	 *
+	 * Skipped entirely for a pattern whose length is fixed, which is nearly
+	 * all of them.
+	 */
+	if (d->span_max > d->len) {
+		uint32_t h;
+
+		for (h = 0; h < d->n_hits; h++) {
+			uint32_t lo = d->len, hi = d->span_max;
+
+			if (d->hits[h] + hi > ob->buf.n)
+				hi = (uint32_t)(ob->buf.n - d->hits[h]);
+			while (lo < hi) {
+				uint32_t mid = lo + (hi - lo) / 2u;
+
+				kof_match_begin(&m, kof_buf_make(ob->buf.p,
+						d->hits[h] + mid));
+				if (kof_match_at(&m, d->hits[h], pat,
+						 (uint16_t)plen, kind, flags))
+					hi = mid;
+				else
+					lo = mid + 1u;
+			}
+			d->hit_len[h] = lo;
+		}
+	} else {
+		uint32_t h;
+
+		for (h = 0; h < d->n_hits; h++)
+			d->hit_len[h] = d->len;
+	}
 	kof_match_state_free(&m);
 	if (d->at != KOF_BROKEN)
 		return;
@@ -2182,7 +2232,7 @@ static int decl_kind(struct view *v, uint64_t off)
 		for (j = 0; j < d->n_hits; j++) {
 			if (off < d->hits[j])
 				break;  /* sorted: nothing later can contain it */
-			if (off < d->hits[j] + d->len)
+			if (off < d->hits[j] + d->hit_len[j])
 				return 1;
 		}
 	}
