@@ -227,6 +227,17 @@ struct out {
 	 * laying out a line can record where its pieces landed. Escapes do not
 	 * count; nothing here needs more than that. */
 	size_t col_hint;
+	/*
+	 * And WHERE that row began, which col_hint alone cannot say.
+	 *
+	 * col_hint counts from the last positioning, not from column one, so
+	 * "1 + col_hint" is only the real column when the row started at column
+	 * one. The find dialog starts its rows at column three, and its click
+	 * boxes have been two columns left of the text they name ever since.
+	 * A field that wants to turn a click into a caret cannot be wrong by
+	 * two, so the base is recorded rather than assumed.
+	 */
+	int   row_hint, col_base;
 };
 
 static void out_add(struct out *o, const char *s, size_t n)
@@ -285,6 +296,8 @@ static void out_fmt(struct out *o, const char *fmt, ...)
 static void out_at(struct out *o, int row, int col)
 {
 	out_fmt(o, "\033[%d;%dH", row, col);
+	o->row_hint = row;
+	o->col_base = col;
 }
 
 #define A_OFF   "\033[0m"
@@ -420,6 +433,20 @@ static int mark_row(void) { return g_rows; }
 #define OBJ_BUDGET  (256ull << 20)
 
 #define MAX_DECL  32
+/*
+ * THE LARGEST DECLARATION, AND THE TWO BUFFERS THAT MUST AGREE WITH IT.
+ *
+ * A hex marker is written three characters to the byte ("2E 2E 5C"), so the
+ * spelling of a DECL_BYTES_MAX pattern needs 3*N characters and the scratch a
+ * person types into must hold the same. They used to be two unrelated numbers -
+ * hexs[512] and sedit[600] - and the gap between them was a silent data loss:
+ * a hex marker of 171 bytes or more spells out past 512 characters, so the
+ * field opened, took keys, and then decl_edit_commit refused the whole thing
+ * for being too long. The edit vanished with no mark on the screen. Whatever
+ * can be typed must be committable, which means one number, not two.
+ */
+#define DECL_BYTES_MAX 512u
+#define DECL_HEXS_CAP  (3u * DECL_BYTES_MAX + 16u)
 /* "[ Discard ]" with a space in front, so the note box can leave room. */
 #define NEW_BTN_W 12
 /*
@@ -644,7 +671,7 @@ struct decl {
 	 * Generate wrote that program back out as the pattern. Opening a rule
 	 * and saving it replaced it with a different rule.
 	 */
-	char     hexs[512];         /* the pattern, when bytes cannot say it */
+	char     hexs[DECL_HEXS_CAP];   /* the pattern, when bytes cannot say it */
 	uint32_t obj;               /* which object it was taken from */
 	uint32_t mask;              /* the region it was taken from */
 	char     rgn[24];           /* that region's short name */
@@ -1040,7 +1067,7 @@ struct view {
 	 * the text cannot be parsed, so the row can say so without the panel
 	 * having to guess.
 	 */
-	char         sedit[600];
+	char         sedit[DECL_HEXS_CAP];
 	uint32_t     sedit_off;     /* how far the field is scrolled */
 
 	struct range rng[MAX_RANGE];
@@ -6398,6 +6425,22 @@ static void cnd_rail(struct out *o, int depth, int bar)
  * past the end. A block cursor would hide the character; this is the same thing
  * every terminal editor does.
  */
+/*
+ * WHERE THE OPEN FIELD IS, SO A CLICK IN IT CAN BECOME A CARET.
+ *
+ * Every text box on the panel goes through field_draw, and only the open one is
+ * drawn with `editing` set - so one record is enough for all of them, and no
+ * caller has to remember to keep a box of its own in step with its drawing.
+ *
+ * `room` is cleared at the top of every frame: a field whose row scrolled out
+ * of view is not drawn, and a stale rectangle would swallow clicks meant for
+ * whatever now occupies those columns.
+ */
+static struct {
+	int      row, col, room;
+	uint32_t off, len;
+} g_fld;
+
 static void field_draw(struct out *o, const char *text, uint32_t caret,
 		       uint32_t *off, int room, int editing, const char *ph,
 		       int all)
@@ -6437,6 +6480,13 @@ static void field_draw(struct out *o, const char *text, uint32_t caret,
 		if (*off + (uint32_t)room > want)
 			*off = want > (uint32_t)room
 			       ? want - (uint32_t)room : 0;
+	}
+	if (editing) {
+		g_fld.row  = o->row_hint;
+		g_fld.col  = o->col_base + (int)o->col_hint;
+		g_fld.room = room;
+		g_fld.off  = *off;
+		g_fld.len  = len;
 	}
 	for (i = 0; i < (uint32_t)room; i++) {
 		uint32_t at = *off + i;
@@ -8101,8 +8151,18 @@ static int menu_enabled(struct view *v, int a)
 		return v->sel_a != KOF_BROKEN;
 	if (a == M_COPY_OFF_HEX || a == M_COPY_OFF_DEC)
 		return 1;
-	if (a == M_DECL_HEX)
-		return v->sel_a != KOF_BROKEN && v->n_decl < MAX_DECL;
+	if (a == M_DECL_HEX) {
+		uint64_t lo, hi;
+
+		if (v->sel_a == KOF_BROKEN || v->n_decl >= MAX_DECL)
+			return 0;
+		lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
+		hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
+		/* Bounded like the literal beside it. Unbounded, a drag over a
+		 * whole object declared a marker whose spelling no field could
+		 * hold and no row could show. */
+		return hi - lo + 1u <= DECL_BYTES_MAX;
+	}
 	if (a == M_DECL_STR) {
 		/* Greyed when the bytes cannot BE a literal, which is a
 		 * property of the bytes and not of the user - saying so here
@@ -8488,6 +8548,19 @@ static void hex_respace(const char *in, char *out, size_t cap)
 			snprintf(out, cap, "%s", in);
 			return;
 		}
+	/*
+	 * Respacing GROWS the text by half, and a spelling that would not fit
+	 * after that is left exactly as it was. Spacing is a courtesy; losing
+	 * the tail of a pattern to it is not a trade worth making.
+	 */
+	for (p = in, n = 0; *p; p++)
+		if (*p != ' ' && *p != '\t')
+			n++;
+	if (n + n / 2u + 2u > cap) {
+		snprintf(out, cap, "%s", in);
+		return;
+	}
+	n = 0;
 	for (p = in; *p && n + 4u < cap; p++) {
 		if (*p == ' ' || *p == '\t')
 			continue;
@@ -8774,6 +8847,7 @@ static void redraw(struct view *v)
 	struct out o = { NULL, 0, 0, 0 };
 	int wiped = 0, under;
 
+	g_fld.room = 0;
 	term_size();
 	if (g_winch) {
 		/*
@@ -11372,6 +11446,42 @@ static void click(struct view *v, int rclick)
 		return;
 	}
 
+	/*
+	 * A CLICK INSIDE THE OPEN FIELD IS A CARET, NOT A CLICK AWAY.
+	 *
+	 * Ahead of everything that reads the panel, and ahead of `v->edit = 0`
+	 * below, because that assignment is what made this impossible: the
+	 * strings row already carried a branch for "the click landed in the box
+	 * that is open", and it could never be true - edit had been cleared two
+	 * screens earlier in the same function. So clicking the character you
+	 * wanted to fix closed the box and jumped the pane to the bytes.
+	 *
+	 * Done here rather than per field so the answer is the same in all of
+	 * them: the column under the pointer, plus however far the box is
+	 * scrolled, is the character the caret goes to - and past the end of
+	 * the text it goes to the end, which is where clicking the empty part
+	 * of a box should put it.
+	 */
+	if (v->edit && g_fld.room > 0 && !v->ch.open && !v->menu_open &&
+	    g_my == g_fld.row && g_mx >= g_fld.col &&
+	    g_mx < g_fld.col + g_fld.room) {
+		uint32_t k = g_fld.off + (uint32_t)(g_mx - g_fld.col);
+
+		v->caret = k > g_fld.len ? g_fld.len : k;
+		v->field_all = 0;
+		/*
+		 * And the field counts as already open.
+		 *
+		 * field_key puts the caret at the end whenever it sees a field
+		 * it has not typed into yet - which is right when a box is
+		 * opened by its button, and wrong here: the click has just said
+		 * where the caret goes, and the next keystroke would move it
+		 * back to the end before inserting anything.
+		 */
+		v->edit_prev = v->edit;
+		return;
+	}
+
 	if (v->find_open && find_click(v))
 		return;
 
@@ -12344,7 +12454,11 @@ static int handle(struct view *v, int k)
 		}
 		if (v->edit >= ED_STR && v->edit < ED_STR + MAX_DECL) {
 			uint32_t si = (uint32_t)(v->edit - ED_STR);
-			int r2 = field_key(v, v->sedit, sizeof v->sedit, k);
+			/* The cap is the declaration's, not the scratch's: see
+			 * DECL_HEXS_CAP. They are the same size today, and
+			 * naming the right one is what keeps them that way. */
+			int r2 = field_key(v, v->sedit,
+					   sizeof v->decl[si].hexs, k);
 
 			/* field_key clears v->edit when the field closes, and
 			 * closing is when the text becomes a declaration. */
