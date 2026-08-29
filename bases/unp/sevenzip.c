@@ -109,6 +109,22 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	for (i = 0; i < z->n_folders; i++) {
 		const struct kof_7z_folder *fo = &z->folder[i];
 
+		/*
+		 * What each folder actually is, before anything is decided
+		 * about it.
+		 *
+		 * Without this a folder that does not open is indistinguishable
+		 * from one that was never looked at: `opened 0` was the whole
+		 * report, and every reason - an unread coder, a size the host
+		 * clamped, a stream that did not decode - looks the same from
+		 * outside. Three numbers per folder is a cheap thing to be able
+		 * to read.
+		 */
+		kof_debug("SevenZip.folder_coder", fo->coder);
+		if (fo->filter)
+			kof_debug("SevenZip.folder_filter", fo->filter);
+		kof_debug("SevenZip.folder_unpack", fo->unpack_size);
+
 		if (!fo->pack_size || !fo->unpack_size)
 			continue;
 		if (fo->coder != KOF_7Z_CODER_LZMA2 &&
@@ -147,10 +163,16 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			continue;
 		}
 		method = fo->filter ? KOF_UNP_LZMA2_BCJ_X86 : KOF_UNP_LZMA2;
-		if (kof_unpack_at(method, fo->pack_off, fo->pack_size,
-				  fo->unpack_size) == 0) {
-			unreached++;
-			continue;
+		{
+			uint64_t got = kof_unpack_at(method, fo->pack_off,
+						     fo->pack_size,
+						     fo->unpack_size);
+
+			kof_debug("SevenZip.folder_got", got);
+			if (got == 0) {
+				unreached++;
+				continue;
+			}
 		}
 		if (!kof_child())
 			KOF_UNP_BROKEN(KOF_UNP_LIMIT);

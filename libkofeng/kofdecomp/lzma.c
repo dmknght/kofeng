@@ -665,6 +665,32 @@ int kof_lzma2_decode(const uint8_t *in, uint64_t in_len, uint8_t *out,
 			 * begins, which is the only thing it is authoritative for.
 			 */
 			r_status = lz_run(&z, in + p, in_len - p, out, at + u_len, &at);
+			/*
+			 * A CHUNK THAT FILLED ITS OWN LENGTH HAS ENDED, NOT BEEN
+			 * REFUSED.
+			 *
+			 * lz_run is given `at + u_len` as its output bound - the
+			 * CHUNK's declared size, chosen by this loop - so reaching
+			 * it is the ordinary way a chunk finishes, and lz_run says
+			 * STOPPED because from inside it a bound is a bound. The
+			 * loop below then treated that as a reason to stop the
+			 * whole stream, so every LZMA2 stream of more than one
+			 * chunk ended after the first.
+			 *
+			 * It went unnoticed because most do not have a second:
+			 * 251 of 256 archives measured are a single chunk, and for
+			 * those the break lands where the stream ends anyway.
+			 * Win32.Fearso.c.7z is two folders of several chunks each,
+			 * and produced 67075 of 392128 bytes - the first chunk,
+			 * exactly - while a reference decoder read both folders
+			 * whole.
+			 *
+			 * The caller's buffer being full is a real STOPPED and is
+			 * still caught, below, where it is also known whether the
+			 * stream had more to say.
+			 */
+			if (r_status == KOF_DEC_STOPPED && at == before + u_len)
+				r_status = KOF_DEC_OK;
 			/* Not just the zero-progress case below: a chunk can produce
 			 * some bytes and still end short (r.short_input mid-stream),
 			 * and that status must survive past `p += c_len` too, or a

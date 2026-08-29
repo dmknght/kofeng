@@ -232,6 +232,26 @@ static void scan_broken(struct kof_scanner *sc, uint32_t reason)
 }
 
 /*
+ * A limit that bounded ONE decode, and says nothing about the next.
+ *
+ * scan_broken's sticky stop is right for a budget: past a ceiling there is
+ * nowhere to put what comes next, so asking again wastes time. It is wrong for
+ * the declared-ratio clamp, which is a sanity bound on ONE stream's own header -
+ * a folder claiming to expand 56x tells you nothing about the folder after it.
+ *
+ * Measured on Win32.Fearso.c.7z: two content folders, the first declaring
+ * 342267 -> 19069533 and the second an ordinary 358660 -> 392128. Clamping the
+ * first set stop, and the second - which decodes perfectly - was never
+ * attempted. Eleven more archives in the same collection fail the same way, and
+ * the reported reason was a budget the caller had not actually run out of.
+ */
+static void scan_capped(struct kof_scanner *sc, uint32_t reason)
+{
+	if (!sc->broken)
+		sc->broken = reason;
+}
+
+/*
  * Whether the object may still PRODUCE, which is not the same question as whether
  * it is complete.
  *
@@ -800,19 +820,46 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 	uint64_t room, want, produced = 0, decoded, at;
 	uint8_t *buf;
 	int st;
+	int capped = 0;
 
 	room = sc->resident < sc->resident_max
 	     ? (sc->resident_max - sc->resident) / 2u : 0;
-	if (room > sc->obj_cap)
-		room = sc->obj_cap;
+	/*
+	 * WHICH CEILING IS BINDING, because they mean different things.
+	 *
+	 * The residency figure is what is LEFT: nothing more fits right now, and
+	 * asking again for this object is wasted work - a sticky stop is right.
+	 * obj_cap is a per object SIZE POLICY: one entry may not exceed it, and
+	 * that says nothing whatever about the entry after it.
+	 *
+	 * They were one number and one sticky stop, and the cost was whole
+	 * archives. Win32.Fearso.c.7z has two content folders; the first claims
+	 * 19069533 bytes, over the per object cap, and clamping it stopped the
+	 * object - so the second folder, an ordinary 392128 byte executable that
+	 * decodes perfectly, was never attempted. Eleven more archives in the
+	 * same collection are shaped the same way.
+	 */
 	if (room == 0) {
 		scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
-	want = out_hint ? out_hint : room;
-	if (want > room) {
-		want = room;
-		scan_broken(sc, KOF_BROKEN_LIMIT);   /* the tail will not fit and will be dropped */
+	{
+		int by_policy = room > sc->obj_cap;
+
+		if (by_policy)
+			room = sc->obj_cap;
+		want = out_hint ? out_hint : room;
+		if (want > room) {
+			want = room;
+			/* The tail will not fit and will be dropped. Sticky only
+			 * when it was residency that ran out. */
+			if (by_policy) {
+				capped = 1;
+				scan_capped(sc, KOF_BROKEN_LIMIT);
+			} else {
+				scan_broken(sc, KOF_BROKEN_LIMIT);
+			}
+		}
 	}
 
 	buf = malloc((size_t)want);
@@ -844,7 +891,8 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 
 		if (want > lim) {
 			want = lim;
-			scan_broken(sc, KOF_BROKEN_LIMIT);
+			capped = 1;
+			scan_capped(sc, KOF_BROKEN_LIMIT);
 		}
 		/*
 		 * No larger than the output, because a filter cannot cover more of
@@ -873,7 +921,8 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 
 		if (want > lim) {
 			want = lim;
-			scan_broken(sc, KOF_BROKEN_LIMIT);
+			capped = 1;
+			scan_capped(sc, KOF_BROKEN_LIMIT);
 		}
 		st = kof_lzma2_decode(in, in_len, buf, want, &produced);
 		/*
@@ -922,8 +971,17 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 	 */
 	if (st == KOF_DEC_STOPPED && out_hint && want == out_hint)
 		st = KOF_DEC_OK;
-	if (st != KOF_DEC_OK)
-		scan_broken(sc, broken_of_status(st));
+	if (st != KOF_DEC_OK) {
+		uint32_t why = broken_of_status(st);
+
+		/* A buffer the ratio clamp sized, filled: this stream was cut
+		 * short and the next one is unaffected. Recorded, not sticky -
+		 * see scan_capped. */
+		if (capped && why == KOF_BROKEN_LIMIT)
+			scan_capped(sc, why);
+		else
+			scan_broken(sc, why);
+	}
 
 	/*
 	 * An image becomes a file before anybody sees it.
