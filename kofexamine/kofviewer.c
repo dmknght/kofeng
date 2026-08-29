@@ -648,6 +648,14 @@ struct cond {
 
 struct decl {
 	uint8_t *bytes;
+	/*
+	 * The mask beside them, 0xff where the byte must match exactly and a
+	 * nibble cleared where the pattern wrote '?'. NULL for a literal and
+	 * for a hex pattern with no wildcard in it - the common case pays
+	 * nothing. See hexs_scan.
+	 */
+	uint8_t *msk;
+	int      inexact;           /* a gap or an alternation: cannot be located */
 	uint32_t len;
 	int      hex;               /* KOF_DEFINE_HEXSTR, else KOF_DEFINE_STR */
 
@@ -1975,6 +1983,14 @@ static void decl_locate(struct view *v, struct decl *d)
 	if (!d->len || d->len > ob->buf.n)
 		return;
 	/*
+	 * A gap or an alternation has no fixed length, so there is no run of
+	 * bytes to look for. Saying "not here" is wrong and saying where a
+	 * prefix of it sits is worse, so the pattern simply has no location -
+	 * which is what at == KOF_BROKEN already means to every reader of it.
+	 */
+	if (d->inexact)
+		return;
+	/*
 	 * EVERY OCCURRENCE, NOT THE FIRST ONE.
 	 *
 	 * This stopped at the first match and judged the marker by where that
@@ -2001,6 +2017,12 @@ static void decl_locate(struct view *v, struct decl *d)
 					a = (uint8_t)(a - 'A' + 'a');
 				if (b >= 'A' && b <= 'Z')
 					b = (uint8_t)(b - 'A' + 'a');
+			}
+			/* Masked exactly as the engine matches it: a cleared
+			 * nibble is a nibble the pattern did not name. */
+			if (d->msk) {
+				a &= d->msk[k];
+				b &= d->msk[k];
 			}
 			if (a != b)
 				break;
@@ -3238,8 +3260,10 @@ static void draft_clear(struct view *v)
 {
 	uint32_t i;
 
-	for (i = 0; i < v->n_decl; i++)
+	for (i = 0; i < v->n_decl; i++) {
 		free(v->decl[i].bytes);
+		free(v->decl[i].msk);
+	}
 	memset(v->decl, 0, sizeof v->decl);
 	memset(v->grp, 0, sizeof v->grp);
 	memset(v->cnd, 0, sizeof v->cnd);
@@ -3644,29 +3668,105 @@ static int hexval(char c);
  * had. What the pattern IS remains in decl.hexs; this is only what can be
  * searched for.
  */
-static uint32_t hexs_bytes(const char *t, uint8_t *out, uint32_t cap)
+/*
+ * A HEX PATTERN AS THE ENGINE READS IT: A VALUE AND A MASK PER POSITION.
+ *
+ * The parse this replaced kept only the concrete bytes and stopped at the first
+ * character that was not a hex digit, which is right for a pattern that has
+ * none and quietly wrong for every pattern that does: "2E ?? 5C" came back as
+ * the single byte 2E, so the row said the marker was one byte long and
+ * decl_locate went looking for that one byte. Editing a working pattern to add
+ * a wildcard made it stop matching at the wildcard.
+ *
+ * This reads the same shapes hexcomp.c does - "??" and "?4" are nibble masks -
+ * and reports the LENGTH IN POSITIONS, wildcards counted. Gaps ("[4-6]") and
+ * alternations ("( E8 | E9 )") have no fixed length and no fixed mask, so they
+ * cannot be searched for this way at all: `*ok` is cleared and the caller is
+ * expected to say it cannot locate the pattern rather than locate a prefix of
+ * it, which is what pointing at the wrong bytes with confidence looks like.
+ */
+static uint32_t hexs_scan(const char *t, uint8_t *val, uint8_t *msk,
+			  uint32_t cap, int *ok)
 {
 	uint32_t n = 0;
 
+	*ok = 1;
 	while (*t && n < cap) {
-		int hi, lo;
+		uint8_t hi = 0, lo = 0;
+		int hi_any = 0, lo_any = 0;
 
 		while (*t == ' ' || *t == '\t')
 			t++;
-		hi = hexval(*t);
-		if (hi < 0)
+		if (!*t)
 			break;
-		t++;
-		while (*t == ' ' || *t == '\t')
-			t++;
-		lo = hexval(*t);
-		if (lo < 0)
+		if (*t == '[' || *t == '(' || *t == '|' || *t == ')') {
+			*ok = 0;
 			break;
+		}
+		if (*t == '?') {
+			hi_any = 1;
+		} else {
+			int h = hexval(*t);
+
+			if (h < 0) { *ok = 0; break; }
+			hi = (uint8_t)h;
+		}
 		t++;
-		out[n++] = (uint8_t)((hi << 4) | lo);
+		if (*t == '?') {
+			lo_any = 1;
+		} else {
+			int l = hexval(*t);
+
+			if (l < 0) { *ok = 0; break; }
+			lo = (uint8_t)l;
+		}
+		t++;
+		val[n] = (uint8_t)((hi << 4) | lo);
+		msk[n] = (uint8_t)((hi_any ? 0x00u : 0xf0u) |
+				   (lo_any ? 0x00u : 0x0fu));
+		n++;
 	}
+	if (*t)
+		*ok = 0;        /* ran out of room: what is left is unread */
 	return n;
 }
+
+/*
+ * Fill a declaration's bytes and mask from the pattern as written.
+ *
+ * One function for the three places a hex marker arrives - a source file, a
+ * pack, and an edit - because a marker read one way and the same marker read
+ * another must give the same draft, and three copies of this drifted apart
+ * once already.
+ */
+static int decl_from_hexs(struct decl *d)
+{
+	size_t n = strlen(d->hexs);
+	uint32_t cap = (uint32_t)(n / 2u + 1u), i;
+	uint8_t *b, *m;
+	int ok = 1;
+
+	b = realloc(d->bytes, cap);
+	if (!b)
+		return 0;
+	d->bytes = b;
+	m = realloc(d->msk, cap);
+	if (!m)
+		return 0;
+	d->msk = m;
+	d->len = hexs_scan(d->hexs, d->bytes, d->msk, cap, &ok);
+	d->inexact = !ok;
+	/* A pattern with nothing wildcarded carries no mask: the compare in
+	 * decl_locate then costs what it always did. */
+	for (i = 0; i < d->len && d->msk[i] == 0xffu; i++)
+		;
+	if (i == d->len) {
+		free(d->msk);
+		d->msk = NULL;
+	}
+	return 1;
+}
+
 
 static int src_quoted(const char *p, char *out, size_t cap)
 {
@@ -4171,12 +4271,9 @@ no_head:
 				 * and the byte conversion below turns a "??"
 				 * into a 00, which is a different pattern. */
 				snprintf(d->hexs, sizeof d->hexs, "%s", text);
-				d->bytes = malloc(n ? n : 1u);
-				if (!d->bytes)
+				if (!decl_from_hexs(d))
 					continue;
-				d->len = hexs_bytes(text, d->bytes,
-						    (uint32_t)n);
-				(void)k;
+				(void)n; (void)k;
 				d->hex = 1;
 			} else {
 				d->len = (uint32_t)strlen(text);
@@ -4593,12 +4690,9 @@ static void draft_from_touch(struct view *v, const struct kof_touch *t)
 			snprintf(d->hexs, sizeof d->hexs, "%s", st->text);
 			if (!d->hexs[0])
 				continue;
-			hn = strlen(d->hexs) / 2u;
-			d->bytes = malloc(hn ? hn : 1u);
-			if (!d->bytes)
+			if (!decl_from_hexs(d))
 				break;
-			d->len = hexs_bytes(d->hexs, d->bytes, (uint32_t)hn);
-			(void)k;
+			(void)hn; (void)k;
 		} else {
 			d->bytes = malloc(st->pool_len);
 			if (!d->bytes)
@@ -5103,7 +5197,7 @@ static void generate(struct view *v, int as_new)
 		}
 	}
 	struct object *ob = &v->obj[v->decl[0].obj];
-	char path[400], safe[48];
+	char path[400], safe[48], fname[48];
 	uint32_t i, k;
 	FILE *f;
 	size_t j = 0;
@@ -5118,6 +5212,23 @@ static void generate(struct view *v, int as_new)
 		if (isalnum((unsigned char)v->family[i]) || v->family[i] == '_')
 			safe[j++] = v->family[i];
 	safe[j] = 0;
+	/*
+	 * THE FILE NAME IS LOWER CASE; THE FAMILY NAME IS NOT.
+	 *
+	 * They share their letters and nothing else. A signature tree sorted by
+	 * a tool that folds case, or read on a filesystem that does, should not
+	 * depend on how a researcher typed the family into the panel - so the
+	 * name on disk is settled here, once.
+	 *
+	 * What the module DECLARES itself to be keeps the spelling it was
+	 * given: KOF_TARGET_NAME below writes `safe`, and that string is the
+	 * verdict a user reads. "mirai" is not how the family is written. The
+	 * two used to be one variable, which is why lowering the path lowered
+	 * the verdict with it.
+	 */
+	for (i = 0; safe[i]; i++)
+		fname[i] = (char)tolower((unsigned char)safe[i]);
+	fname[i] = 0;
 	if (!j)
 		return;
 
@@ -5197,7 +5308,7 @@ static void generate(struct view *v, int as_new)
 					struct stat es;
 
 					snprintf(path, sizeof path,
-						 "%s/%s_%0*u.c", dir, safe,
+						 "%s/%s_%0*u.c", dir, fname,
 						 (int)wide[w], n);
 					if (stat(path, &es) != 0) {
 						free_one = 1;
@@ -5207,7 +5318,7 @@ static void generate(struct view *v, int as_new)
 			}
 			if (!free_one) {
 				say_err(v, "%.40s has no free number left",
-					safe);
+					fname);
 				return;
 			}
 		}
@@ -6961,6 +7072,7 @@ static void draw_decl(struct out *o, struct view *v)
 	for (i = 0; i < v->n_decl; i++, r++) {
 		const struct decl *d = &v->decl[i];
 		uint32_t k;
+		char sz[12];
 
 		if (!PR_VIS(r))
 			continue;
@@ -6988,6 +7100,18 @@ static void draw_decl(struct out *o, struct view *v)
 		 * as correct on every row. The arrow is the whole diagnosis:
 		 * searched there, found here.
 		 */
+		/*
+		 * HOW LONG IT IS, OR THAT NOBODY CAN SAY.
+		 *
+		 * A gap or an alternation has no one length - "2E [2-4] 5C" is
+		 * five bytes long, or six, or seven. Printing the number of
+		 * bytes read before the construct said "1", which is not a
+		 * shorter answer but a wrong one.
+		 */
+		if (d->inexact)
+			snprintf(sz, sizeof sz, "?");
+		else
+			snprintf(sz, sizeof sz, "%u", d->len);
 		if (d->at == KOF_BROKEN) {
 			/*
 			 * Declared, and not in this object.
@@ -6998,21 +7122,21 @@ static void draw_decl(struct out *o, struct view *v)
 			 * truncated to a stray letter. The region stays because
 			 * that is still where the module will look.
 			 */
-			out_fmt(o, " %s%-*.*s" A_OFF " %s%5u" A_OFF "  ",
+			out_fmt(o, " %s%-*.*s" A_OFF " %s%5s" A_OFF "  ",
 				A_BAD, v->rgn_w, v->rgn_w, d->rgn,
-				A_SIZE, d->len);
+				A_SIZE, sz);
 		} else if (d->off_rgn) {
 			char both[40];
 
 			snprintf(both, sizeof both, "%s>%s", d->rgn,
 				 d->at_rgn);
-			out_fmt(o, " %s%-*.*s" A_OFF " %s%5u" A_OFF "  ",
+			out_fmt(o, " %s%-*.*s" A_OFF " %s%5s" A_OFF "  ",
 				A_WARN, v->rgn_w, v->rgn_w, both,
-				A_SIZE, d->len);
+				A_SIZE, sz);
 		} else {
-			out_fmt(o, " %s%-*.*s" A_OFF " %s%5u" A_OFF "  ",
+			out_fmt(o, " %s%-*.*s" A_OFF " %s%5s" A_OFF "  ",
 				A_LOC, v->rgn_w, v->rgn_w, d->rgn,
-				A_SIZE, d->len);
+				A_SIZE, sz);
 		}
 		v->str_by[i][0] = 1 + (int)o->col_hint;
 		if (v->edit == ED_STR + (int)i) {
@@ -8436,7 +8560,7 @@ static void copy_osc52(const char *bytes, size_t n)
 {
 	static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 				  "abcdefghijklmnopqrstuvwxyz0123456789+/";
-	struct out o = { NULL, 0, 0, 0 };
+	struct out o = { 0 };
 	size_t i;
 
 	out_str(&o, "\033]52;c;");
@@ -8647,13 +8771,8 @@ static void decl_edit_commit(struct view *v, uint32_t i)
 			return;
 		}
 		memcpy(d->hexs, v->sedit, n + 1u);
-		/* Two characters a byte at most, so half the text is a safe
-		 * ceiling for what can come out of it. */
-		nb = realloc(d->bytes, n / 2u + 1u);
-		if (!nb)
+		if (!decl_from_hexs(d))
 			return;
-		d->bytes = nb;
-		d->len = hexs_bytes(d->hexs, d->bytes, (uint32_t)(n / 2u + 1u));
 	} else {
 		nb = realloc(d->bytes, n + 1u);
 		if (!nb)
@@ -8675,6 +8794,7 @@ static void decl_remove(struct view *v, uint32_t i)
 	if (i >= v->n_decl)
 		return;
 	free(v->decl[i].bytes);
+	free(v->decl[i].msk);
 	memmove(&v->decl[i], &v->decl[i + 1u],
 		(v->n_decl - i - 1u) * sizeof v->decl[0]);
 	v->n_decl--;
@@ -8764,7 +8884,7 @@ static void menu_run(struct view *v, int a)
 {
 	struct object *ob = cur_obj(v);
 	uint64_t lo, hi, k, n;
-	struct out t = { NULL, 0, 0, 0 };
+	struct out t = { 0 };
 
 	if (!menu_enabled(v, a))
 		return;
@@ -8844,7 +8964,7 @@ static int g_prop_drawn;
 
 static void redraw(struct view *v)
 {
-	struct out o = { NULL, 0, 0, 0 };
+	struct out o = { 0 };
 	int wiped = 0, under;
 
 	g_fld.room = 0;
