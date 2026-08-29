@@ -575,6 +575,7 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		m->family_off = pm[i].family_off;
 		m->maltype    = pm[i].maltype;
 		m->unp_kind   = pm[i].unp_kind;
+		m->src_off    = pm[i].src_off;
 
 
 		/* Only a detector's regions go into the union the scanner resolves.
@@ -768,6 +769,44 @@ const char *kof_db_family(const struct kof_engine *e, const struct kof_module *m
 		   (size_t)(pool_len - m->family_off)) == NULL)
 		return NULL;
 	return pool + m->family_off;
+}
+
+/*
+ * The source this module was written in, relative to the bases tree.
+ *
+ * NULL when the database does not carry one - a module compiled outside a tree,
+ * or a pack built before the field existed. A caller joins it with its own idea
+ * of where the tree is; the database records the path INSIDE the tree and not an
+ * absolute one, because an absolute path is a fact about the machine that built
+ * the database rather than about the module.
+ */
+const char *kof_db_source(const struct kof_engine *e, const struct kof_module *m)
+{
+	const struct kof_pack_hdr *h;
+	const uint8_t *base;
+	const char *pool;
+	uint64_t pool_off, pool_len;
+
+	if (!m || m->pack_id >= e->n_packs)
+		return NULL;
+	base = e->packs[m->pack_id].map;
+	if (!base)
+		return NULL;
+	h = (const void *)base;
+
+	pool_off = h->sec[KOF_SEC_NAME_POOL].off;
+	pool_len = h->sec[KOF_SEC_NAME_POOL].len;
+	if (pool_off > e->packs[m->pack_id].len ||
+	    pool_len > e->packs[m->pack_id].len - pool_off)
+		return NULL;
+
+	pool = (const char *)base + pool_off;
+	if (!m->src_off || m->src_off >= pool_len)
+		return NULL;
+	if (memchr(pool + m->src_off, 0,
+		   (size_t)(pool_len - m->src_off)) == NULL)
+		return NULL;
+	return pool + m->src_off;
 }
 
 struct kof_engine *kof_db_load(const char *path)

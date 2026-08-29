@@ -305,6 +305,18 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 		}
 		o->maltype = m->maltype;
 		o->unp_kind = m->unp_kind;
+		if (m->src && m->src[0]) {
+			uint32_t src_uid;
+
+			/* +1: pool_intern writes exactly the bytes it is given
+			 * and appends nothing, so the terminator is part of the
+			 * string. Without it the entry runs into the next one
+			 * and the path came back as "…/x.cp1tox". */
+			if (!pool_intern(&dn, &b->name_pool, m->src,
+					 (uint32_t)strlen(m->src) + 1u,
+					 &o->src_off, &src_uid))
+				goto out;
+		}
 
 		for (k = 0; k < m->n_str; k++, si++) {
 			const struct kof_pw_str *s = &m->str[k];

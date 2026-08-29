@@ -61,6 +61,9 @@ struct kof_pw_mod {
 	uint64_t size_min;
 	/* KOF_UNP_CONTAINER or KOF_UNP_PACKER; unread for a detector. */
 	uint32_t unp_kind;
+	/* Where the source lives inside the bases tree; NULL or empty when it
+	 * was compiled from outside one. */
+	const char *src;
 
 	const struct kof_pw_str  *str;
 	uint32_t                  n_str;

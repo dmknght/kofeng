@@ -3465,29 +3465,61 @@ static void src_scan(const char *dir, int depth)
 	closedir(d);
 }
 
-/* The file a fired module was written in, by family and by the line one of its
- * detections sits on. NULL when the tree does not hold it. */
+/*
+ * The file a fired module was written in - ASKED, NOT DERIVED.
+ *
+ * The database carries it now (kof_db_source), because the build knew it and
+ * used to discard it. What stood here re-derived it: scan the bases tree once,
+ * read every source, and match a module to a file on the LINE NUMBERS its
+ * detection names sit on.
+ *
+ * That key is correct exactly while the sources hold still, and it was cached
+ * for the life of the process. So pressing Rebuild database - the one action
+ * whose whole purpose is that the sources changed - left an index describing
+ * the tree as it had been: nothing matched, the draft fell back to the
+ * database, and because a database keeps a module's strings and not its logic
+ * every rule redrew as a single find_all.
+ *
+ * A duplicate of something the engine can answer is not just more code. It is a
+ * second thing to keep true, and it goes false quietly.
+ */
+/*
+ * Build the index of the bases tree, once, for the ONE question that still
+ * needs it: does some existing source already declare this exact set of
+ * markers. That is a content question over the whole tree, and no single scan
+ * result answers it - unlike "which file was this module written in", which the
+ * database now carries and which used to be answered from here by matching line
+ * numbers. See src_of.
+ */
+static void src_index(struct view *v)
+{
+	if (g_src_done)
+		return;
+	g_src_done = 1;
+	g_src = calloc(SRC_MAX, sizeof *g_src);
+	if (g_src)
+		src_scan(v->basedir, 0);
+}
+
 static const char *src_of(struct view *v, const struct kof_touch *t)
 {
-	uint32_t i, j, k;
+	static char path[KOF_DUMP_PATH_ROOM];
+	const char *rel;
 
-	if (!g_src_done) {
-		g_src_done = 1;
-		g_src = calloc(SRC_MAX, sizeof *g_src);
-		if (g_src)
-			src_scan(v->basedir, 0);
-	}
-	if (!g_src || !t->family)
+	if (!v->eng || !t->mod)
 		return NULL;
-	for (i = 0; i < g_n_src; i++) {
-		if (strcmp(g_src[i].family, t->family) != 0)
-			continue;
-		for (j = 0; j < t->n_names; j++)
-			for (k = 0; k < g_src[i].n_line; k++)
-				if (g_src[i].line[k] == t->name_id[j])
-					return g_src[i].path;
-	}
-	return NULL;
+	rel = kof_db_source(v->eng, t->mod);
+	if (!rel || !rel[0])
+		return NULL;
+	/*
+	 * The database records the path INSIDE the tree; where the tree is, is
+	 * this viewer's own --bases. An absolute path in the database would be a
+	 * fact about the machine that built it.
+	 */
+	if ((size_t)snprintf(path, sizeof path, "%s/%s",
+			     v->basedir[0] ? v->basedir : ".", rel) >= sizeof path)
+		return NULL;
+	return path;
 }
 
 
@@ -4667,7 +4699,10 @@ static const char *draft_dup(struct view *v, int *near)
 
 	if (near)
 		*near = 0;
-	if (!g_src || !v->n_decl)
+	if (!v->n_decl)
+		return NULL;
+	src_index(v);
+	if (!g_src)
 		return NULL;
 	tgt = draft_tgt(v);
 	for (i = 0; i < v->n_decl; i++) {

@@ -131,6 +131,10 @@ struct kof_module {
 	/* KOF_UNP_CONTAINER or KOF_UNP_PACKER; see KOF_UNPACK_KIND in kofsig.h.
 	 * Meaningless and unread for a detector. */
 	uint32_t unp_kind;
+
+	/* Where this module's source lives inside the bases tree, or 0. Read
+	 * with kof_db_source(). */
+	uint32_t src_off;
 };
 
 /*
@@ -288,5 +292,14 @@ const char *kof_db_name_at(const struct kof_engine *, const struct kof_module *,
  * kof_db_name's own comment gives. NULL if the record does not hold together;
  * "" (not NULL) for a module that legitimately declared none. */
 const char *kof_db_family(const struct kof_engine *, const struct kof_module *);
+
+/*
+ * Where this module's source lives inside the bases tree, or NULL.
+ *
+ * Carried by the build rather than re-derived: a tool that has a scan result and
+ * wants the rule's source should ask, not go looking. See kof_pack_mod.src_off
+ * for the bug that came of looking.
+ */
+const char *kof_db_source(const struct kof_engine *, const struct kof_module *);
 
 #endif /* KOFENG_KOFDB_H */

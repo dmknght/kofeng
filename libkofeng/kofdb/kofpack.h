@@ -133,7 +133,7 @@
  * stale pack is refused rather than read with the field assumed zero, which
  * would silently classify UPX as an archive.
  */
-#define KOF_PACK_VERSION 5u
+#define KOF_PACK_VERSION 6u
 
 /*
  * The machine the code in this pack was built for. Not an architecture the pack
@@ -440,6 +440,25 @@ struct kof_pack_mod {
 	 * happen to be packers only by accident of what has been written.
 	 */
 	uint32_t unp_kind;
+
+	/*
+	 * THE SOURCE THIS MODULE WAS WRITTEN IN, relative to the bases tree.
+	 *
+	 * Into KOF_SEC_NAME_POOL like the family, and zero when the source was
+	 * outside the tree.
+	 *
+	 * Here because the build knew it and used to throw it away, and every
+	 * tool that wanted it afterwards had to guess. kofviewer guessed by
+	 * scanning the tree and matching a module to a file on the LINE NUMBERS
+	 * its detection names sit on - a key that is correct exactly until the
+	 * sources are edited, which is the moment somebody rebuilds and looks
+	 * again. Rebuilding therefore made the viewer show every rule as one
+	 * find_all, because no source matched and it fell back to the database,
+	 * which keeps a module's strings and not its logic.
+	 *
+	 * A fact the build has should be carried, not re-derived.
+	 */
+	uint32_t src_off;
 };
 
 /*
@@ -587,7 +606,7 @@ struct kof_pack_idx {
  * entered at the wrong offset. These fail the build instead.
  */
 _Static_assert(sizeof(struct kof_pack_sec)  == 16,  "pack section entry grew padding");
-_Static_assert(sizeof(struct kof_pack_mod)  == 44,  "pack module record grew padding");
+_Static_assert(sizeof(struct kof_pack_mod)  == 48,  "pack module record grew padding");
 _Static_assert(sizeof(struct kof_pack_str)  == 12,  "pack string descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_name) == 8,   "pack name descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_idx)  == 8,   "pack index slot grew padding");

@@ -1762,6 +1762,7 @@ static int extract_main(int argc, char **argv)
 struct artefact {
 	char    *stem;                   /* the path without the .blob */
 	char    *label;                  /* what the module is called; see below */
+	char    *srcpath;                /* where it lives in the bases tree */
 	uint8_t *code;
 	uint32_t code_len;
 
@@ -1796,6 +1797,7 @@ static void artefact_free(struct artefact *a)
 {
 	free(a->stem);
 	free(a->label);
+	free(a->srcpath);
 	free(a->family);
 	free(a->code);
 	free(a->str);
@@ -1919,6 +1921,21 @@ static int meta_load(struct artefact *a)
 		} else if (strncmp(line, "kind=", 5) == 0) {
 			a->kind = (uint32_t)strtoul(line + 5, 0, 10);
 			have_kind = 1;
+		} else if (strncmp(line, "srcpath=", 8) == 0) {
+			/* The newline, like every other text field here. Left
+			 * on, it goes into the name pool with the string and
+			 * the entry runs into the one after it: the path came
+			 * back as "signatures/x.c\np1tox" and opened nothing. */
+			char *nl = strchr(line + 8, '\n');
+
+			if (nl)
+				*nl = 0;
+			free(a->srcpath);
+			a->srcpath = strdup(line + 8);
+			if (!a->srcpath) {
+				fclose(f);
+				goto out;
+			}
 		} else if (strncmp(line, "label=", 6) == 0) {
 			char *nl = strchr(line + 6, '\n');
 
@@ -2738,6 +2755,7 @@ int main(int argc, char **argv)
 			pm[a].arch_mask   = s->arch_mask;
 			pm[a].subtype_mask = s->subtype_mask;
 			pm[a].unp_kind     = s->unp_kind;
+			pm[a].src          = s->srcpath;
 			pm[a].size_min    = s->size_min;
 			pm[a].str         = s->str;
 			pm[a].n_str       = s->n_str;

@@ -57,12 +57,19 @@ incdir=${KOF_INCLUDE:-$root/build/release/include}
 # nothing reports it. Encoding the kind removes the collision and makes the
 # artefact directory say where each blob came from.
 name=$(basename "$src" .c)
+# Where this source lives inside the bases tree, kept as well as flattened.
+# The flattened form names the artefact; this one is the module's PROVENANCE and
+# goes into the database, so a tool holding a scan result can open the file the
+# module was written in without going looking for it. Empty when the source is
+# outside the tree, which is a hand compile and has no tree relative name.
+srcpath=""
 if [ -n "${KOF_BASEDIR:-}" ]; then
 	abs=$(cd -- "$(dirname -- "$src")" && pwd)/$(basename -- "$src")
 	case "$abs" in
 	"$KOF_BASEDIR"/*)
 		rel=${abs#"$KOF_BASEDIR"/}
 		name=$(printf '%s' "${rel%.c}" | tr '/' '_')
+		srcpath=$rel
 		;;
 	esac
 fi
@@ -774,6 +781,7 @@ cp "$raw" "$blob"
 	# basename is known here and nowhere else, because the flattening above has
 	# already destroyed the boundary by the time the .meta is read.
 	printf 'label=%s\n'     "$(basename "$src" .c)"
+	printf 'srcpath=%s\n'   "$srcpath"
 } > "$metafile"
 
 printf '== ok  %s  %s bytes  kind=%s  names=%s  strs=%s  target=%d scan=0x%x\n' \
