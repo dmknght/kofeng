@@ -190,8 +190,10 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 	if (o->region_bytes[KOF_DOCOLE_CLS_DATA]) {
 		got = kof_gather_max(KOF_SCAN_DOCOLE_CONTENT_DATA, GATHER_CAP);
-		if (got)
-			kof_child();
+		/* Recorded rather than returned: the size check below has its
+		 * own reason to report and both are worth saying. */
+		if (got && !kof_child())
+			kof_unp_broken(KOF_UNP_LIMIT);
 		if (got < o->region_bytes[KOF_DOCOLE_CLS_DATA])
 			kof_unp_broken(KOF_UNP_LIMIT);
 	}

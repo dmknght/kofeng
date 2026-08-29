@@ -2129,14 +2129,15 @@ static void touch_name(const struct kof_touch *t, char *out, size_t cap)
 {
 	const char *fam = t->family[0] ? t->family : "?";
 
-	if (t->fired_name)
-		snprintf(out, cap, "%s:%s#%s", kof_maltype_name(t->maltype),
-			 fam, t->fired_name);
-	else if (t->n_names > 1u)
-		snprintf(out, cap, "%s:%s (%u variants)",
-			 kof_maltype_name(t->maltype), fam, t->n_names);
-	else
-		snprintf(out, cap, "%s:%s", kof_maltype_name(t->maltype), fam);
+	/* The engine's spelling. The "(n variants)" tail is this panel's own and
+	 * is added after it, never mixed into it - see kof_name_compose. */
+	kof_name_compose(out, cap, NULL, kof_maltype_name(t->maltype), fam,
+			 t->fired_name);
+	if (!t->fired_name && t->n_names > 1u) {
+		size_t at = strlen(out);
+
+		snprintf(out + at, cap - at, " (%u variants)", t->n_names);
+	}
 }
 
 /* Defined with the input loop; the status line needs it to age a message. */

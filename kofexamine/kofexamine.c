@@ -1315,19 +1315,17 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
 		const char *var = t->fired_name ? t->fired_name :
 				  (t->n_names && t->name[0] ? t->name[0] : NULL);
 
-		if (var && !t->fired_name && t->n_names > 1)
-			snprintf(name, sizeof name, "%s:%s#%s +%u",
-				 kof_maltype_name(t->maltype),
-				 t->family[0] ? t->family : "?", var,
-				 t->n_names - 1u);
-		else if (var)
-			snprintf(name, sizeof name, "%s:%s#%s",
+		/* The engine's spelling, with this tool's own suffix after it
+		 * rather than woven into it - see kof_name_compose. */
+		kof_name_compose(name, sizeof name, NULL,
 				 kof_maltype_name(t->maltype),
 				 t->family[0] ? t->family : "?", var);
-		else
-			snprintf(name, sizeof name, "%s:%s",
-				 kof_maltype_name(t->maltype),
-				 t->family[0] ? t->family : "?");
+		if (var && !t->fired_name && t->n_names > 1) {
+			size_t at = strlen(name);
+
+			snprintf(name + at, sizeof name - at, " +%u",
+				 t->n_names - 1u);
+		}
 
 		{
 			char head[48];

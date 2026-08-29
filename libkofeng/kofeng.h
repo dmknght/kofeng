@@ -33,6 +33,7 @@
 #define KOFENG_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 /* How strongly a finding is asserted. Mirrors enum kof_level on the module side; a
  * host must not have to include the module ABI to read a result. */
@@ -178,6 +179,30 @@ enum kof_broken {
 };
 
 const char *kof_broken_name(uint32_t reason);
+
+/*
+ * HOW A DETECTION IS SPELLED, IN ONE PLACE.
+ *
+ *     kof_name_compose(buf, sizeof buf, "ELF-x64", "Botnet", "Mirai", "Gen")
+ *     -> "ELF-x64/Botnet:Mirai#Gen"
+ *
+ * The engine composes this for every finding, and three other things reproduce
+ * it: kofexamine and kofviewer to show a marker row, and kofinspect to decide
+ * WHICH module a scan result belongs to. That last one is not display - it is
+ * one half of a string comparison whose other half the engine wrote - so a
+ * spelling that drifts there does not look wrong, it silently stops matching.
+ *
+ * It drifted exactly that way: the family/variant separator moved from "-" to
+ * "#" in the engine, kofinspect kept the "-", and every detected sample
+ * reported "Hit 0, Skip 1" in the viewer and no verdict at all in kofexamine
+ * while the scanner called the same file infected.
+ *
+ * `target` and `variant` may be NULL or empty and are left out when they are.
+ */
+void kof_name_compose(char *out, size_t cap, const char *target,
+		      const char *maltype, const char *family,
+		      const char *variant);
+
 
 /*
  * What a scan cost. Exposed because the design rests on a module being cheap for the

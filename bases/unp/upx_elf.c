@@ -1086,9 +1086,20 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 */
 	kof_debug("UPX.ELF.shortfall", want > got ? want - got : 0);
 
-	if (blocks)
-		kof_child();
-	else
+	/*
+	 * The handover is checked, like every container in this directory
+	 * checks it.
+	 *
+	 * A packer's child is not one entry of many - it is the whole of what
+	 * the file was hiding. Refused by the host (a ceiling reached, the child
+	 * cap spent) and not reported, the module would be saying it unpacked
+	 * the object while having produced nothing, which is the one answer a
+	 * scan must never give about a packed sample.
+	 */
+	if (blocks) {
+		if (!kof_child())
+			kof_unp_broken(KOF_UNP_LIMIT);
+	} else
 		/* Opened it and recovered nothing. The block chain did not begin
 		 * where this module looks, which on this corpus is a damaged file
 		 * far more often than a layout nobody has met. */

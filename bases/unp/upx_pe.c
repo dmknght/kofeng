@@ -223,7 +223,18 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	if (got == 0)
 		KOF_UNP_BROKEN(KOF_UNP_DAMAGED);
 
-	kof_child();
+	/*
+	 * The handover is checked, like every container in this directory
+	 * checks it.
+	 *
+	 * A packer's child is not one entry of many - it is the whole of what
+	 * the file was hiding. Refused by the host (a ceiling reached, the child
+	 * cap spent) and not reported, the module would be saying it unpacked
+	 * the object while having produced nothing, which is the one answer a
+	 * scan must never give about a packed sample.
+	 */
+	if (!kof_child())
+		kof_unp_broken(KOF_UNP_LIMIT);
 
 	/* Short of what the container declared: the stream did not hold what it
 	 * said it held. The host records its own reason when a limit was what

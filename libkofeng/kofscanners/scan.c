@@ -272,6 +272,34 @@ static int prefilter(const struct kof_module *m, const struct kof_obj_ctx *ctx,
  * An object with no architecture - a script, or one nothing identified - gets the
  * format alone. A "-any" suffix would be a field describing nothing.
  */
+/*
+ * The one spelling. See kof_name_compose in kofeng.h for why it is a function.
+ *
+ * "#" between the family and the variant, not "-": a family name may contain a
+ * hyphen and several in bases/ do, so the old separator could not be told from
+ * the name around it by eye or by anything reading the string back. "#" appears
+ * in no family and in no variant.
+ */
+void kof_name_compose(char *out, size_t cap, const char *target,
+		      const char *maltype, const char *family,
+		      const char *variant)
+{
+	int has_t = target && target[0];
+	int has_v = variant && variant[0];
+
+	if (!out || !cap)
+		return;
+	if (has_t && has_v)
+		snprintf(out, cap, "%s/%s:%s#%s", target, maltype, family,
+			 variant);
+	else if (has_t)
+		snprintf(out, cap, "%s/%s:%s", target, maltype, family);
+	else if (has_v)
+		snprintf(out, cap, "%s:%s#%s", maltype, family, variant);
+	else
+		snprintf(out, cap, "%s:%s", maltype, family);
+}
+
 static void finding_str(const struct kof_scanner *sc,
 			const struct kof_obj_ctx *ctx,
 			const struct kof_module *m, char *out, size_t cap)
@@ -288,18 +316,9 @@ static void finding_str(const struct kof_scanner *sc,
 		snprintf(fmtarch, sizeof fmtarch, "%s-%s", fmt,
 			 kof_arch_name(ctx->arch));
 
-	/*
-	 * "#" between the family and the variant, not "-".
-	 *
-	 * A family name may contain a hyphen and several in bases/ do, so the
-	 * old separator could not be told from the name around it by eye or by
-	 * anything reading the string back. "#" appears in no family and in no
-	 * variant, and it is the character a reader already associates with "the
-	 * part within" from every other place identifiers are written this way.
-	 */
-	snprintf(out, cap, "%s/%s:%s#%s", fmtarch, maltype,
-		 (family && family[0]) ? family : "unknown",
-		 variant ? variant : "unknown");
+	kof_name_compose(out, cap, fmtarch, maltype,
+			 (family && family[0]) ? family : "unknown",
+			 variant ? variant : "unknown");
 }
 
 /* ---- identify -------------------------------------------------------------- */

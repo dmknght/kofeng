@@ -557,12 +557,12 @@ static int cmp_touch(const void *a, const void *b)
  * module id. The target prefix is the engine's and not the module's to claim,
  * so the comparison starts after it.
  *
- * THE SEPARATOR HAS TO BE THE ENGINE'S. This built the name with a dash after
- * the engine had moved to '#', so no finding ever matched a marker row again:
- * every detected sample reported "Hit 0 Skip 1" in the viewer and no verdict at
- * all in kofexamine, while the scanner called the same file infected. A
- * separator is not a display choice on this path - it is half of a string
- * comparison, and the other half is composed in finding_str in scan.c.
+ * THE SPELLING IS THE ENGINE'S, and is now asked for rather than repeated. This
+ * built the name with a dash after the engine had moved to '#', so no finding
+ * ever matched a marker row again: every detected sample reported "Hit 0 Skip 1"
+ * in the viewer and no verdict at all in kofexamine, while the scanner called
+ * the same file infected. A separator is not a display choice on this path - it
+ * is half of a string comparison, and the other half is the engine's.
  */
 static const char *fired_as(const struct kof_touch *t,
 			    const char *const *finding, uint32_t n_finding)
@@ -574,8 +574,9 @@ static const char *fired_as(const struct kof_touch *t,
 
 		if (!t->name[j])
 			continue;
-		snprintf(want, sizeof want, "%s:%s#%s",
-			 kof_maltype_name(t->maltype), t->family, t->name[j]);
+		kof_name_compose(want, sizeof want, NULL,
+				 kof_maltype_name(t->maltype), t->family,
+				 t->name[j]);
 		for (k = 0; k < n_finding; k++) {
 			const char *p = strchr(finding[k], '/');
 
