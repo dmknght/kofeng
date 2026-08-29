@@ -716,6 +716,30 @@ int kof_match_at(struct kof_match_ctx *m, uint64_t off,
 	if (!kof_in_range(m->data, off, len))
 		return 0;
 	m->n_bytes_scanned += len;
+	/*
+	 * THE WORD RULE APPLIES HERE TOO, AND USED NOT TO.
+	 *
+	 * The flag arrived, was carried through the descriptor, and was dropped:
+	 * this compared bytes and nothing else. So one declaration meant two
+	 * things depending on which door a module used - kof_find_str_any on a
+	 * FULLWORD "sh" refuses to see it inside "bash", and kof_find_str_at on
+	 * the same string agreed that it was there. A marker that means
+	 * different things to different calls is worse than a marker that is
+	 * wrong, because only one of the two readings is ever tested.
+	 *
+	 * The boundary is the OBJECT, which is the only one this call has: it is
+	 * given an offset and no window. match_one, which is given a range,
+	 * treats the range edge as a boundary instead - that is the region the
+	 * module asked about, and its edge is where its text stops.
+	 *
+	 * Hex carries no word option; see the same note in match_one.
+	 */
+	if (flags & KOF_STR_FULLWORD) {
+		if (off > 0 && is_word_byte(m->data.p[off - 1]))
+			return 0;
+		if (off + len < m->data.n && is_word_byte(m->data.p[off + len]))
+			return 0;
+	}
 	if (flags & KOF_STR_ICASE) {
 		uint16_t i;
 

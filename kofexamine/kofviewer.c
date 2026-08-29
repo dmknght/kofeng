@@ -2111,6 +2111,24 @@ static void decl_locate(struct view *v, struct decl *d)
 		if (at == KOF_BROKEN)
 			break;
 		/*
+		 * RE-ASKED, BECAUSE RESTARTING MOVED THE WORD BOUNDARY.
+		 *
+		 * A range search treats the START of its range as a word
+		 * boundary - that is right when the range is a region a module
+		 * named, and wrong here, where the range start is only "past
+		 * the last hit". Walking occurrences this way, every hit after
+		 * the first was judged word-initial whatever byte preceded it,
+		 * so the pane could light a run that the module will not match.
+		 *
+		 * kof_match_at has no window and uses the object, which is the
+		 * boundary that applies to the file being examined.
+		 */
+		if ((flags & KOF_STR_FULLWORD) &&
+		    !kof_match_at(&m, at, pat, (uint16_t)plen, kind, flags)) {
+			from = at + 1u;
+			continue;
+		}
+		/*
 		 * Recorded before anything is decided about it.
 		 *
 		 * The walk used to return the moment it found the occurrence

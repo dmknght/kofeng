@@ -129,8 +129,30 @@ int kof_gzip_parse(kof_buf file, struct kof_gzip_info *g, struct kof_obj_ctx *ct
 	memset(g, 0, sizeof *g);
 	g->version = KOF_GZIP_INFO_VERSION;
 
-	if (!kof_gzip_sniff(file))
-		return 0;
+	/*
+	 * THE MAGIC, CHECKED HERE - NOT THE SNIFF, WHICH ALSO CHECKS THE METHOD.
+	 *
+	 * Calling kof_gzip_sniff cost this collector a bit it declares. The sniff
+	 * requires CM to be 8, so by the time the method test below ran, cm was
+	 * provably 8 and KOF_GZIP_ANOM_BAD_METHOD could not be set from any call
+	 * path at all - a declared anomaly no input could reach.
+	 *
+	 * The other collectors do not delegate: kof_pe_parse tests the MZ itself
+	 * and raises BAD_MZ, kof_elf_parse tests its own magic. A collector
+	 * answering a caller that did not sniff first has to say WHY, and "the
+	 * recogniser said no" is not a reason it can pass on.
+	 *
+	 * The engine sniffs before it parses, so nothing it does changes: a file
+	 * whose CM is not 8 is still not classified as gzip. What changes is that
+	 * a caller who parses one anyway is told which field is wrong.
+	 */
+	{
+		uint8_t id1, id2;
+
+		if (!kof_rd_u8(file, 0, &id1) || !kof_rd_u8(file, 1, &id2) ||
+		    id1 != 0x1f || id2 != 0x8b)
+			return 0;
+	}
 	/* The fixed header has to be there in full before any of it is believed:
 	 * a three byte file can pass the sniff. */
 	if (!kof_rd_u8(file, 2, &cm)  || !kof_rd_u8(file, 3, &flg) ||

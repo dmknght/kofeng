@@ -97,6 +97,17 @@ static uint32_t hostile(uint64_t obj_size)
 	}
 }
 
+static uint32_t rd16(const uint8_t *b, uint64_t off)
+{
+	return (uint32_t)b[off] | ((uint32_t)b[off + 1] << 8);
+}
+
+static uint32_t rd32(const uint8_t *b, uint64_t off)
+{
+	return (uint32_t)b[off] | ((uint32_t)b[off + 1] << 8) |
+	       ((uint32_t)b[off + 2] << 16) | ((uint32_t)b[off + 3] << 24);
+}
+
 static void put16(uint8_t *b, uint64_t off, uint16_t v)
 {
 	if (off + 2 > OBJ_MAX)
@@ -104,6 +115,8 @@ static void put16(uint8_t *b, uint64_t off, uint16_t v)
 	b[off] = (uint8_t)v;
 	b[off + 1] = (uint8_t)(v >> 8);
 }
+
+static void put64w(uint8_t *b, uint64_t off, uint64_t v);
 
 static void put32(uint8_t *b, uint64_t off, uint32_t v)
 {
@@ -180,7 +193,16 @@ static uint64_t gen_pe(uint8_t *b)
 /* An ELF object built the same way. */
 static uint64_t gen_elf(uint8_t *b)
 {
-	uint64_t n = 128 + rnd() % (OBJ_MAX - 128);
+	/*
+	 * Sometimes SHORTER THAN THE HEADER IT DECLARES.
+	 *
+	 * The floor used to be 128 bytes, so an ELF64 header - 64 bytes - always
+	 * fitted and TRUNCATED_HEADER was unreachable. A file of five bytes that
+	 * begins \177ELF is a thing a scanner is handed, and the collector has
+	 * to answer for it.
+	 */
+	uint64_t n = (rnd() % 12) ? 128 + rnd() % (OBJ_MAX - 128)
+				  : 5 + rnd() % 60;
 	int is64 = rnd() % 2;
 	uint64_t i;
 
@@ -191,7 +213,9 @@ static uint64_t gen_elf(uint8_t *b)
 	memcpy(b, "\177ELF", 4);
 	b[4] = (uint8_t)((rnd() % 5) ? (is64 ? 2 : 1) : rnd());
 	b[5] = (uint8_t)((rnd() % 5) ? 1 : rnd());
-	b[6] = 1;
+	/* e_version. Nailed to 1 before, which is why BAD_VERSION was a bit the
+	 * parser declared and this test could never reach. */
+	b[6] = (uint8_t)((rnd() % 6) ? 1 : rnd());
 
 	put16(b, 16, (uint16_t)(rnd() % 5));            /* e_type */
 	put16(b, 18, (uint16_t)((rnd() % 3) ? 62 : rnd()));
@@ -214,6 +238,66 @@ static uint64_t gen_elf(uint8_t *b)
 		put16(b, 46, (uint16_t)((rnd() % 3) ? 40 : rnd()));
 		put16(b, 48, (uint16_t)(rnd() % 40));
 		put16(b, 50, (uint16_t)(rnd() % 40));
+	}
+
+	/*
+	 * REAL PROGRAM AND SECTION HEADERS, NOT RANDOM BYTES.
+	 *
+	 * The tables used to be whatever noise filled the object, so p_type was
+	 * PT_LOAD once in four billion and every rule about a LOAD segment - its
+	 * file size against its memory size, one overlapping another, an entry
+	 * point that lands outside an executable one - was unreachable. Two of
+	 * those anomalies carry weight in the heuristic model, so they were
+	 * scored facts that no test had ever seen raised.
+	 *
+	 * The tables are written where the header says they are, when it says
+	 * somewhere they fit. The FIELDS stay hostile: this makes the shape
+	 * plausible so the walk is entered, not the contents sane.
+	 */
+	{
+		uint64_t phoff = is64 ? rd32(b, 32) : rd32(b, 28);
+		uint64_t shoff = is64 ? rd32(b, 40) : rd32(b, 32);
+		uint32_t phnum = is64 ? rd16(b, 56) : rd16(b, 44);
+		uint32_t shnum = is64 ? rd16(b, 60) : rd16(b, 48);
+		uint32_t pe = is64 ? 56u : 32u, se = is64 ? 64u : 40u;
+		uint32_t k;
+
+		for (k = 0; k < phnum; k++) {
+			uint64_t o = phoff + (uint64_t)k * pe;
+
+			if (o + pe > n)
+				break;
+			/* PT_LOAD most of the time, so the LOAD rules run. */
+			put32(b, o, (rnd() % 4) ? 1u : (uint32_t)(rnd() % 8));
+			if (is64) {
+				put32(b, o + 4, (uint32_t)(rnd() % 8));
+				put64w(b, o + 8,  hostile(n));   /* p_offset */
+				put64w(b, o + 16, hostile(n));   /* p_vaddr  */
+				put64w(b, o + 32, hostile(n));   /* p_filesz */
+				put64w(b, o + 40, hostile(n));   /* p_memsz  */
+			} else {
+				put32(b, o + 4,  hostile(n));
+				put32(b, o + 8,  hostile(n));
+				put32(b, o + 16, hostile(n));
+				put32(b, o + 20, hostile(n));
+				put32(b, o + 24, (uint32_t)(rnd() % 8));
+			}
+		}
+		for (k = 0; k < shnum; k++) {
+			uint64_t o = shoff + (uint64_t)k * se;
+
+			if (o + se > n)
+				break;
+			put32(b, o, hostile(n));                 /* sh_name */
+			put32(b, o + 4, (uint32_t)(rnd() % 20)); /* sh_type */
+			if (is64) {
+				put64w(b, o + 24, hostile(n));   /* sh_offset */
+				put64w(b, o + 32, hostile(n));   /* sh_size   */
+			} else {
+				put32(b, o + 16, hostile(n));
+				put32(b, o + 20, hostile(n));
+			}
+		}
 	}
 	return n;
 }
@@ -245,6 +329,12 @@ static uint64_t gen_elf(uint8_t *b)
  * is decided by its name and a fuzzer that only writes noise never exercises that
  * decision - it would test the walk and never the classification.
  */
+static void put64w(uint8_t *b, uint64_t off, uint64_t v)
+{
+	put32(b, off, (uint32_t)v);
+	put32(b, off + 4, (uint32_t)(v >> 32));
+}
+
 static uint64_t gen_docole(uint8_t *b)
 {
 	static const char *const names[] = {
@@ -1118,14 +1208,35 @@ int main(int argc, char **argv)
 		 * would be caught.
 		 */
 		if (n) {
-			uint8_t save = obj[0];
+			/*
+			 * A CORRUPTION ANYWHERE THE RECOGNISER LOOKS, NOT ONLY
+			 * BYTE ZERO.
+			 *
+			 * Byte zero fails every sniff, so this path only ever
+			 * reached each format's BAD_MAGIC bit. The bits a sniff
+			 * checks BESIDES the magic - gzip's compression method,
+			 * the "PE\0\0" at e_lfanew - were left unreachable from
+			 * either path: the main loop cannot see them because
+			 * the sniff refuses first, and this one could not
+			 * produce them. Three bytes at random offsets in the
+			 * head reach both.
+			 */
+			uint8_t save[3];
+			uint64_t at[3];
+			uint32_t c, n_c = 1u + (uint32_t)(rnd() % 3);
+			uint64_t head = n < 512 ? n : 512;
 
-			obj[0] = (uint8_t)rnd();
+			for (c = 0; c < n_c; c++) {
+				at[c] = rnd() % head;
+				save[c] = obj[at[c]];
+				obj[at[c]] = (uint8_t)rnd();
+			}
 			memset(&ctx, 0, sizeof ctx);
 			if (!f->sniff(kof_buf_make(obj, n)))
 				f->parse(kof_buf_make(obj, n), view, &ctx);
 			anom[f - fmts] |= f->anom(view);
-			obj[0] = save;
+			while (c--)
+				obj[at[c]] = save[c];
 		}
 	}
 
