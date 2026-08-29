@@ -1935,7 +1935,8 @@ static uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off);
 static void decl_locate(struct view *v, struct decl *d)
 {
 	struct object *ob = &v->obj[d->obj < v->n_obj ? d->obj : 0];
-	uint64_t i;
+	uint64_t i, first = KOF_BROKEN;
+	uint32_t first_nd = 0;
 
 	d->at = KOF_BROKEN;
 	d->off_rgn = 0;
@@ -1943,8 +1944,24 @@ static void decl_locate(struct view *v, struct decl *d)
 	d->at_mask = 0;
 	if (!d->len || d->len > ob->buf.n)
 		return;
+	/*
+	 * EVERY OCCURRENCE, NOT THE FIRST ONE.
+	 *
+	 * This stopped at the first match and judged the marker by where that
+	 * landed - so a string present in BOTH the declared region and some
+	 * other one was reported as living in whichever came first in the file.
+	 * With the other one first, the row said "declared in CODE, found in
+	 * DATA" and coloured itself as a rule that cannot fire, about a rule
+	 * that fires perfectly: the bytes are in CODE as well, and the module
+	 * searches CODE.
+	 *
+	 * So an occurrence INSIDE the declared region wins, wherever it sits in
+	 * the file, and the first occurrence anywhere is kept as the fallback
+	 * for the case where none of them is. The cost is finishing a scan this
+	 * was already doing.
+	 */
 	for (i = 0; i + d->len <= ob->buf.n; i++) {
-		uint32_t k;
+		uint32_t k, nd;
 
 		for (k = 0; k < d->len; k++) {
 			uint8_t a = ob->buf.p[i + k], b = d->bytes[k];
@@ -1958,27 +1975,42 @@ static void decl_locate(struct view *v, struct decl *d)
 			if (a != b)
 				break;
 		}
-		if (k == d->len) {
-			uint32_t nd;
+		if (k != d->len)
+			continue;
 
+		nd = node_at(v, d->obj, i);
+		if (first == KOF_BROKEN) {
+			first = i;
+			first_nd = nd;
+		}
+		/*
+		 * In the region the module searches: this is the occurrence
+		 * that matters and nothing later can improve on it.
+		 *
+		 * Only a range that NAMES regions can be satisfied this way -
+		 * an unset mask means nothing has been decided yet, and
+		 * KOF_SCAN_ALL is satisfied by any occurrence at all.
+		 */
+		if (!d->mask || d->mask == KOF_SCAN_ALL ||
+		    (nd < v->n_node && (d->mask & v->node[nd].mask))) {
 			d->at = i;
-			/*
-			 * Where it really is, against where it is looked for.
-			 *
-			 * Only a range that names regions can be contradicted:
-			 * an unset mask means nothing has been decided yet, and
-			 * KOF_SCAN_ALL cannot be missed.
-			 */
-			nd = node_at(v, d->obj, i);
 			if (nd < v->n_node && v->node[nd].mask) {
 				d->at_mask = v->node[nd].mask;
 				snprintf(d->at_rgn, sizeof d->at_rgn, "%s",
 					 v->node[nd].label);
-				if (d->mask && d->mask != KOF_SCAN_ALL &&
-				    !(d->mask & v->node[nd].mask))
-					d->off_rgn = 1;
 			}
 			return;
+		}
+	}
+
+	/* Present, and nowhere the module looks. That is the finding. */
+	if (first != KOF_BROKEN) {
+		d->at = first;
+		if (first_nd < v->n_node && v->node[first_nd].mask) {
+			d->at_mask = v->node[first_nd].mask;
+			snprintf(d->at_rgn, sizeof d->at_rgn, "%s",
+				 v->node[first_nd].label);
+			d->off_rgn = 1;
 		}
 	}
 }
@@ -2106,6 +2138,9 @@ static void touch_name(const struct kof_touch *t, char *out, size_t cap)
 	else
 		snprintf(out, cap, "%s:%s", kof_maltype_name(t->maltype), fam);
 }
+
+/* Defined with the input loop; the status line needs it to age a message. */
+static uint64_t now_ms(void);
 
 static const char *touch_colour(const struct kof_touch *t)
 {
@@ -3287,6 +3322,32 @@ static uint32_t pat_of(const uint8_t *b, uint32_t n, int hex)
 static struct src_ent *g_src;
 static uint32_t        g_n_src;
 static int             g_src_done;
+
+/*
+ * DROP THE SOURCE INDEX, BECAUSE THE TREE UNDER IT HAS MOVED.
+ *
+ * The index is a cache of the bases tree, built once on first use and matched
+ * against a fired module by the SOURCE LINE each of its detection names sits
+ * on. That is a fine key while the sources hold still, and rebuilding is
+ * exactly the moment they do not.
+ *
+ * The bug it exists for: generate a signature, press Rebuild database, and the
+ * viewer showed every matcher as find_all. The new database carries the new
+ * line numbers, the index still held the old ones, no source matched - so the
+ * draft was rebuilt from the DATABASE, which keeps a module's strings and not
+ * its logic, and a draft with no logic defaults to find_all. Closing and
+ * reopening was fine because that scanned the tree again.
+ *
+ * Called wherever the tree changes: after a rebuild, and after a save writes a
+ * source into it.
+ */
+static void src_forget(void)
+{
+	free(g_src);
+	g_src = NULL;
+	g_n_src = 0;
+	g_src_done = 0;
+}
 
 static int src_read(const char *path, struct src_ent *out)
 {
@@ -5325,6 +5386,10 @@ static void generate(struct view *v, int as_new)
 		say_err(v, "could not write the file");
 		return;
 	}
+	/* A source has just appeared in the tree, or an existing one has moved
+	 * its lines. Either way what the index knows about where each detection
+	 * name sits is now about the file that was there before. */
+	src_forget();
 	v->warn[0] = 0;
 	/* What was written is now what is saved. Without this the draft stayed
 	 * dirty forever: the panel kept saying "(unsaved)" and the guard that
@@ -5592,10 +5657,11 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		if (!c->n)
 			return;
 	} else if (what == CH_LOGIC) {
-		/* The chooser is 26 wide; these have to say the difference
-		 * inside that. */
-		ch_add(c, "or   next only if miss");
-		ch_add(c, "and  next as well");
+		/* The operators, unglossed. They are the two words a signature
+		 * author already thinks in, and a sentence explaining what "or"
+		 * means is a sentence they read once and then read past. */
+		ch_add(c, "or");
+		ch_add(c, "and");
 	} else if (what == CH_SWITCH) {
 		/*
 		 * Three answers, and the one that loses work is not the first.
@@ -7363,6 +7429,32 @@ static void draw_marker_line(struct out *o, struct view *v)
 	 * always made from the hex pane. Put there, the one message that exists
 	 * to stop a silent failure was itself silent.
 	 */
+	/*
+	 * AND IT FADES.
+	 *
+	 * This slot had no expiry at all: it was written when something
+	 * happened and cleared only by opening the dashboard. So "opened a3"
+	 * from a file switch sat on the status line for the rest of the
+	 * session, outranking the selection readout - the reader drags out a
+	 * run of bytes, the line still says what happened a minute ago, and the
+	 * one number they asked for by dragging never appears.
+	 *
+	 * A confirmation is worth a few seconds. A FAILURE is worth longer:
+	 * it is the message somebody has to act on, and it competes with a
+	 * selection they can make again in a second.
+	 */
+	if (v->act_msg[0]) {
+		static char last[sizeof v->act_msg];
+		static uint64_t since;
+		uint64_t now = now_ms();
+
+		if (strcmp(last, v->act_msg) != 0) {
+			snprintf(last, sizeof last, "%s", v->act_msg);
+			since = now;
+		}
+		if (now - since > (v->act_ok ? 4000u : 15000u))
+			v->act_msg[0] = 0;
+	}
 	if (v->act_msg[0]) {
 		snprintf(right, sizeof right, "%s", v->act_msg);
 		rcol = v->act_ok ? A_SIZE : A_WARN;
@@ -9515,6 +9607,160 @@ static void prop_pe(const struct object *ob)
 	}
 }
 
+/*
+ * The chain an object hangs from, above the object itself.
+ *
+ * A child's name is a path INSIDE its containers - "sample.zip//0:a.rar//1:x" -
+ * so the enclosing objects are its own name's prefixes, cut at each "//". That
+ * makes the walk a string operation and not a second tree: whatever the tree
+ * pane shows, this reads the same names.
+ *
+ * Numbered UP from the object being looked at, so "Enclosing 1" is the thing
+ * that produced it whether the chain is one deep or four. Numbering down from
+ * the file would mean the label of the immediate parent changed with the depth
+ * of the object, which is the one thing a reader uses it for.
+ */
+static int obj_by_name(const struct view *v, const char *name, size_t n)
+{
+	uint32_t i;
+
+	for (i = 0; i < v->n_obj; i++)
+		if (strlen(v->obj[i].name) == n &&
+		    strncmp(v->obj[i].name, name, n) == 0)
+			return (int)i;
+	return -1;
+}
+
+/* The enclosing objects, outermost first. Returns how many were found. */
+static uint32_t obj_ancestors(const struct view *v, const struct object *ob,
+			      const struct object **out, uint32_t cap)
+{
+	const char *name = ob->name;
+	size_t cut[MAX_OBJ];
+	uint32_t n = 0, k, w = 0;
+	const char *p;
+
+	/* Every "//" in the name is one container boundary. */
+	for (p = strstr(name, "//"); p && n < MAX_OBJ; p = strstr(p + 2, "//"))
+		cut[n++] = (size_t)(p - name);
+
+	for (k = 0; k < n && w < cap; k++) {
+		int idx = obj_by_name(v, name, cut[k]);
+
+		if (idx >= 0)
+			out[w++] = &v->obj[idx];
+	}
+	return w;
+}
+
+/*
+ * One object's identity, as rows.
+ *
+ * Shared by the object being looked at and by every object above it, so the two
+ * cannot describe the same thing differently - the reason this is a function
+ * and not a second copy of the block.
+ *
+ * `full` is what separates them. The object in focus gets a row per fact,
+ * because that is what the panel is for. An enclosing object gets size, format
+ * and arch folded onto one line: a chain four deep would otherwise be
+ * twenty-four rows of context above the thing somebody actually opened.
+ */
+static void prop_object_rows(struct view *v, const struct object *ob, int full)
+{
+	const char *base = strrchr(ob->name, '/');
+	const char *sub = ob->fmt ? kof_inspect_subtype_name(ob->ctx.format,
+							     ob->ctx.subtype)
+				  : NULL;
+	const char *fmt = ob->fmt ? kof_format_name(ob->ctx.format) : "raw";
+	int top = strstr(ob->name, "//") == NULL;
+
+	/*
+	 * What to call it, which differs by where it came from.
+	 *
+	 * A file is its basename. A CHILD has no basename worth printing: its
+	 * name is a path inside a container and the last slash-separated piece
+	 * of it is often the bare index - the enclosing block for a UPX payload
+	 * read "name 0", which tells a reader nothing at all. The piece after
+	 * the last "//" is the entry as the tree pane spells it, index and
+	 * label together, so the two panes name the same object the same way.
+	 */
+	{
+		const char *sep = NULL, *q;
+
+		for (q = strstr(ob->name, "//"); q; q = strstr(q + 2, "//"))
+			sep = q;
+		base = sep ? sep : (base ? base + 1 : ob->name);
+	}
+	prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF, "name", base);
+
+	/*
+	 * Only the object that came off the disk has a folder.
+	 *
+	 * The name of a child is a path inside its container, so its directory
+	 * is the container's; printing one would suggest the child has a place
+	 * of its own on the filesystem. Which object that is is decided from the
+	 * NAME rather than from the selection, so an enclosing block gets it
+	 * right too - the top of the chain is the file, wherever the reader
+	 * happens to be standing.
+	 */
+	if (top && v->path && v->path[0]) {
+		char dir[KOF_DUMP_PATH_ROOM];
+		const char *slash = strrchr(v->path, '/');
+
+		/* Ending in a separator, always: a directory row and a name row
+		 * sit one above the other in the same column, and without it the
+		 * last component reads as another file name. */
+		if (!slash) {
+			snprintf(dir, sizeof dir, "./");
+		} else {
+			size_t n = (size_t)(slash - v->path) + 1u;
+
+			if (n >= sizeof dir)
+				n = sizeof dir - 1u;
+			memcpy(dir, v->path, n);
+			dir[n] = 0;
+		}
+		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_LOC "%s" A_OFF,
+			 "folder", dir);
+	}
+
+	if (full) {
+		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_SIZE "%llu" A_OFF
+			 A_DIM " bytes" A_OFF, "size",
+			 (unsigned long long)ob->buf.n);
+		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s%s%s" A_OFF,
+			 "format", fmt, sub ? " " : "", sub ? sub : "");
+		if (ob->fmt)
+			prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF,
+				 "arch", kof_arch_name(ob->ctx.arch));
+	} else {
+		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_SIZE "%llu" A_OFF
+			 A_DIM " bytes   " A_OFF A_ID "%s%s%s%s%s" A_OFF,
+			 "size", (unsigned long long)ob->buf.n, fmt,
+			 sub ? " " : "", sub ? sub : "",
+			 ob->fmt ? " " : "",
+			 ob->fmt ? kof_arch_name(ob->ctx.arch) : "");
+	}
+
+	/*
+	 * The module beside this object, and WHICH RELATION it names.
+	 *
+	 * On a child it is the module that PRODUCED it - "unpacked by". On the
+	 * file itself it is the module that OPENED it - "opened by" - and the
+	 * two are not the same statement. It read "unpacked by" for both, which
+	 * was merely odd while one block was on screen and is wrong now that the
+	 * chain is stacked: the top of the chain came off the disk, and a panel
+	 * saying it was unpacked by something invents a layer above the file.
+	 */
+	if (ob->packer[0])
+		prop_add(A_OFF, A_DIM "  %-11s " A_OFF "%s%s" A_OFF,
+			 top ? "opened by" : "unpacked by",
+			 (ob->heur.from_packer ||
+			  (ob->heur.heur_flags &
+			   KOF_HEUR_FL(KOF_HEUR_F_PACKED))) ? A_BAD : A_WARN,
+			 ob->packer);
+}
+
 static void prop_build(struct view *v)
 {
 	struct object *ob = cur_obj(v);
@@ -9525,71 +9771,36 @@ static void prop_build(struct view *v)
 	g_n_prop = 0;
 	base = base ? base + 1 : ob->name;
 
-	prop_head("Object");
-	prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF, "name", base);
 	/*
-	 * Where the file is, under what it is called.
+	 * THE CHAIN FIRST, THEN THE OBJECT.
 	 *
-	 * Only for the object that came off the disk: the name of a child is a
-	 * path INSIDE its container, so its directory is the container's and
-	 * saying so twice would suggest the child has a place of its own on the
-	 * filesystem. The top level object is the only one that does.
+	 * A child on its own is a size and a format with no answer to "where did
+	 * this come from" - and that question is most of why anybody opens the
+	 * dashboard on a child at all. The enclosing objects are stacked above
+	 * it, outermost first, so the panel reads top down the way the engine
+	 * reached the bytes: the file, what it held, what that held.
 	 *
-	 * Shown even when the row is long, because it is one of the two things
-	 * a reader copies out of this panel - the other is the name - and the
-	 * selection machinery in prop_put makes both copyable.
+	 * They are deliberately smaller than the block below them. The object in
+	 * focus is what the rest of this page is about; the chain is context,
+	 * and context that takes as much room as the subject stops being context.
 	 */
-	if (v->sel_node == 0 && v->path && v->path[0]) {
-		char dir[KOF_DUMP_PATH_ROOM];
-		const char *slash = strrchr(v->path, '/');
-
-		/*
-		 * Ending in a separator, always.
-		 *
-		 * A directory row and a name row sit one above the other in the
-		 * same column, and without the trailing slash the last
-		 * component of the path reads as another file name. The slash
-		 * is the one character that says which of the two this is, and
-		 * it costs nothing.
-		 */
-		if (!slash) {
-			snprintf(dir, sizeof dir, "./");
-		} else {
-			size_t n = (size_t)(slash - v->path) + 1u;   /* keep it */
-
-			if (n >= sizeof dir)
-				n = sizeof dir - 1u;
-			memcpy(dir, v->path, n);
-			dir[n] = 0;
-		}
-		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_LOC "%s" A_OFF,
-			 "folder", dir);
-	}
-	prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_SIZE "%llu" A_OFF A_DIM
-		 " bytes" A_OFF, "size", (unsigned long long)ob->buf.n);
 	{
-		const char *sub = ob->fmt
-			? kof_inspect_subtype_name(ob->ctx.format,
-						   ob->ctx.subtype) : NULL;
+		const struct object *up[MAX_OBJ];
+		uint32_t n_up = obj_ancestors(v, ob, up, MAX_OBJ), k;
 
-		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s%s%s" A_OFF,
-			 "format",
-			 ob->fmt ? kof_format_name(ob->ctx.format) : "raw",
-			 sub ? " " : "", sub ? sub : "");
+		for (k = 0; k < n_up; k++) {
+			char head[32];
+
+			/* Counted up from the object being looked at, so 1 is
+			 * always its immediate container however deep it is. */
+			snprintf(head, sizeof head, "Enclosing %u", n_up - k);
+			prop_head(head);
+			prop_object_rows(v, up[k], 0);
+		}
 	}
-	if (ob->fmt)
-		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF, "arch",
-			 kof_arch_name(ob->ctx.arch));
-	/* Where it came from, when it did not come from the disk. Everything
-	 * below describes bytes an unpacker produced, and reading it as the
-	 * file on disk would be reading it as the wrong object. */
-	if (ob->packer[0])
-		prop_add(A_OFF, A_DIM "  %-11s " A_OFF "%s%s" A_OFF,
-			 "unpacked by",
-			 (ob->heur.from_packer ||
-			  (ob->heur.heur_flags &
-			   KOF_HEUR_FL(KOF_HEUR_F_PACKED))) ? A_BAD : A_WARN,
-			 ob->packer);
+
+	prop_head("Object");
+	prop_object_rows(v, ob, 1);
 
 	if (ob->fmt && ob->info) {
 		if (ob->ctx.format == KOF_FMT_ELF)
@@ -10338,6 +10549,9 @@ static void rebuild_db(struct view *v)
 			 "built, but %.50s would not load", v->dbdir);
 		return;
 	}
+	/* The sources were just recompiled: whatever this knew about where each
+	 * detection name sits is a fact about the tree before the build. */
+	src_forget();
 	old = v->eng;
 	if (!file_open(v, here, fresh)) {
 		kof_engine_close(fresh);
@@ -11508,6 +11722,17 @@ static void click(struct view *v, int rclick)
 			v->last_click_ms = now;
 			v->sel_a = v->sel_b = at;
 			v->dragging = 1;
+			/*
+			 * A deliberate act outranks a stale confirmation.
+			 *
+			 * The status line's action slot ages out on its own, but
+			 * four seconds is still four seconds during which a
+			 * reader who has just dragged out a run sees what
+			 * happened before it instead of the run they selected.
+			 * Selecting bytes is a request for the readout; making
+			 * it clears whatever was being announced.
+			 */
+			v->act_msg[0] = 0;
 			v->dragged = 0;
 			if (again) {
 				select_run(v);
