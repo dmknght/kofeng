@@ -420,6 +420,8 @@ static int mark_row(void) { return g_rows; }
 #define OBJ_BUDGET  (256ull << 20)
 
 #define MAX_DECL  32
+/* "[ Discard ]" with a space in front, so the note box can leave room. */
+#define NEW_BTN_W 12
 /*
  * Where the string editor's codes live in view.edit.
  *
@@ -1099,6 +1101,7 @@ struct view {
 	int         f_c0, f_c1, t_c0, t_c1, v_c0, v_c1, g_c0, g_c1;
 	int         n_c0, n_c1;     /* the "+ condition" button */
 	int         sv_c0, sv_c1;   /* "Save As", when there is a file */
+	int         nw_c0, nw_c1;   /* "New" - empty the panel */
 	int         nt_c0, nt_c1;   /* the module's own note */
 	int         nt_len, nt_room;/* its length and the width it is shown in */
 	int         grp_len[MAX_GROUP], grp_room[MAX_GROUP];
@@ -3233,6 +3236,27 @@ static void draft_clear(struct view *v)
 	v->gen_ok = 0;
 	v->prow_off = 0;
 	v->prow_seen = 0;
+}
+
+/*
+ * Empty the panel and call that the saved state.
+ *
+ * draft_clear on its own leaves the panel looking unsaved: saved_hash still
+ * describes whatever was in it, so an empty draft reads as work in progress and
+ * the guards that ask "is there something to lose" all answer yes.
+ *
+ * This is what the New button does, and what a signature examined and then
+ * abandoned needs - opening a rule to look at it loads it into the panel, and
+ * the way back to a blank one should not be closing the program.
+ */
+static void draft_reset(struct view *v)
+{
+	draft_clear(v);
+	v->saved_hash = draft_hash(v);
+	v->sel_decl = 0;
+	v->cur_grp = v->cur_cnd = 0;
+	v->warn[0] = 0;
+	say_note(v, "panel cleared");
 }
 
 /* ---- reading a signature back out of its source ---------------------------
@@ -6668,7 +6692,10 @@ static void draw_decl(struct out *o, struct view *v)
 		 * available is known here and nowhere else.
 		 */
 		size_t len = strlen(v->note);
-		int room = g_cols - c - 3;
+		/* Less what the New button needs at the right hand end: the
+		 * note takes what is left of the row, and something else now
+		 * has the end of it. */
+		int room = g_cols - c - 3 - NEW_BTN_W;
 		uint32_t off;
 
 		if (room < 8)
@@ -6680,6 +6707,25 @@ static void draw_decl(struct out *o, struct view *v)
 		out_str(o, "]" A_OFF);
 	}
 	v->nt_c0 = c; v->nt_c1 = (int)o->col_hint;
+
+	/*
+	 * THROW THE DRAFT AWAY, at the far right of the row.
+	 *
+	 * Opening a signature to look at it LOADS it into this panel - that is
+	 * the point of the panel - and there was no way back to an empty one
+	 * short of leaving the program. A rule examined because it was skipped,
+	 * or because it did not match, is exactly the case where the next thing
+	 * somebody wants is a blank sheet.
+	 *
+	 * At the far end rather than beside Save: green is what the two buttons
+	 * that write a file wear, this one throws the panel away, and a discard
+	 * next to a commit is how a misclick happens.
+	 */
+	out_at(o, decl_top(), g_cols - NEW_BTN_W + 1);
+	v->nw_c0 = g_cols - NEW_BTN_W + 1;
+	out_fmt(o, " %s[ Discard ]" A_OFF,
+		v->n_decl || v->family[0] ? A_ID : "\033[47;90m");
+	v->nw_c1 = g_cols;
 
 
 	/* The optional declarations, one per row, each removable. */
@@ -11499,7 +11545,15 @@ static void click(struct view *v, int rclick)
 			generate(v, 0);
 		else if (v->sv_c0 > 0 && g_mx >= v->sv_c0 && g_mx <= v->sv_c1)
 			generate(v, 1);
-		else if (g_mx >= v->nt_c0 && g_mx <= v->nt_c1)
+		else if (g_mx >= v->nw_c0 && g_mx <= v->nw_c1) {
+			/* No confirmation. The panel is a draft, not a
+			 * document: what it holds was either loaded from a file
+			 * that still exists or typed a moment ago, and a dialog
+			 * between the button and the blank sheet is a step in
+			 * the way of the thing the button is for. */
+			if (v->n_decl || v->family[0])
+				draft_reset(v);
+		} else if (g_mx >= v->nt_c0 && g_mx <= v->nt_c1)
 			v->edit = 501;
 		return;
 	}
