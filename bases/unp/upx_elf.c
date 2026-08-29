@@ -952,6 +952,19 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			kof_unp_broken(KOF_UNP_DAMAGED);
 			if (have < UPX_MIN_CUT)
 				break;
+			/*
+			 * Clamped before the cast, not after.
+			 *
+			 * `have` is a 64 bit distance to the end of the object
+			 * and sz_cpr is 32 bits, so an object past 4GB would
+			 * wrap it - and the wrap can land on a value SMALLER
+			 * than the check above just approved, including zero.
+			 * Nothing is read out of bounds either way, but a
+			 * length that passed a test and then changed is the
+			 * shape of a later bug rather than of a decode.
+			 */
+			if (have > 0xffffffffu)
+				have = 0xffffffffu;
 			sz_cpr = (uint32_t)have;
 			cut = 1;
 		}
@@ -1077,8 +1090,22 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		uint32_t t_m, t_dec;
 
 		if (upx_tail_of(ctx, be, want, &t_off, &t_len, &t_m, &t_unc)) {
+			/*
+			 * Asked of the sizes AS THE RECORD STATED THEM, before
+			 * anything below adjusts them.
+			 *
+			 * The LZMA branch shortens t_len by two, so a record
+			 * claiming method 14 with c_len exactly u_len + 2 would
+			 * come out of it with the two equal and be copied as if
+			 * it were stored - handing back compressed bytes as the
+			 * original. Both numbers are attacker chosen, so that is
+			 * a shape to be refused by construction rather than one
+			 * to hope does not occur.
+			 */
+			int t_stored = t_unc == t_len;
+
 			t_dec = method_of(t_m);
-			if (t_dec == 0 && t_m == UPX_M_LZMA &&
+			if (!t_stored && t_dec == 0 && t_m == UPX_M_LZMA &&
 			    t_len > UPX_LZMA_SKIP) {
 				t_dec = upx_lzma_method(kof_u8(t_off));
 				t_off += UPX_LZMA_SKIP;
@@ -1099,7 +1126,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			 * walk recovered 31248 of 5028448 and the rest was sat
 			 * in the object, uncompressed, unread.
 			 */
-			if (t_unc == t_len) {
+			if (t_stored) {
 				uint64_t k = 0;
 
 				while (k < t_len) {
