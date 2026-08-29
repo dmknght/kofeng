@@ -10,7 +10,7 @@
 #include <kofmod/kofsig.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
-KOF_TARGET_NAME(KOF_MALTYPE_MINER, "PrometeiX");
+KOF_TARGET_NAME(KOF_MALTYPE_MINER, "Prometei");
 
 KOF_TARGET_RANGE(scan_range_unclaimed, KOF_SCAN_ELF_UNCLAIMED);
 KOF_TARGET_RANGE(scan_range_data, KOF_SCAN_ELF_DATA);
