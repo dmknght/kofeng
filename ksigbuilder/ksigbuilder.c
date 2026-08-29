@@ -1447,6 +1447,10 @@ struct use {
 	uint32_t n_rng;
 	int      rng[KOF_MAX_RANGE_PER_MODULE];
 	int      line[KOF_MAX_RANGE_PER_MODULE];
+	/* Where in the source each of those calls begins, so the text BETWEEN
+	 * two of them can be read. What joins them decides whether one range
+	 * over both would mean the same thing. */
+	size_t   at[KOF_MAX_RANGE_PER_MODULE];
 };
 
 static struct use uses[MAX_PATTERNS];
@@ -1488,7 +1492,7 @@ static int rng_index(const char *name)
 	return -1;
 }
 
-static void use_add(int pi, int ri, int line)
+static void use_add(int pi, int ri, int line, size_t at)
 {
 	struct use *u = &uses[pi];
 	uint32_t k;
@@ -1501,7 +1505,41 @@ static void use_add(int pi, int ri, int line)
 	if (u->n_rng >= KOF_MAX_RANGE_PER_MODULE)
 		return;
 	u->line[u->n_rng] = line;
+	u->at[u->n_rng]   = at;
 	u->rng[u->n_rng++] = ri;
+}
+
+/*
+ * ARE TWO SEARCHES FOR ONE MARKER JOINED BY "OR", AND ONLY BY "OR".
+ *
+ * This is the whole of what decides whether the build may say "these two are
+ * one search". "find(CODE,s) || find(DATA,s)" asks whether the marker is in
+ * either, which is exactly what one range over CODE|DATA asks - and reads the
+ * object once instead of twice. "find(CODE,s) && find(DATA,s)" asks whether it
+ * is in BOTH, which one range cannot express at all, and merging it would
+ * quietly turn a strict rule into a loose one.
+ *
+ * The text between the two calls is what says which. A "&&" anywhere in it, or
+ * a statement boundary, and the two are not one expression - so nothing is
+ * claimed. Being unsure here costs a vaguer warning; being wrong would cost a
+ * signature that no longer means what its author wrote.
+ */
+static int joined_by_or(const char *src, size_t a, size_t b)
+{
+	size_t i;
+	int saw_or = 0;
+
+	if (b <= a)
+		return 0;
+	for (i = a; i < b; i++) {
+		if (src[i] == ';' || src[i] == '{' || src[i] == '}')
+			return 0;       /* different statements */
+		if (src[i] == '&' && i + 1 < b && src[i + 1] == '&')
+			return 0;       /* an AND is not mergeable */
+		if (src[i] == '|' && i + 1 < b && src[i + 1] == '|')
+			saw_or = 1;
+	}
+	return saw_or;
 }
 
 /*
@@ -1572,7 +1610,8 @@ static void lint_calls(const char *src, size_t len)
 			pi = pat_index(sname);
 			if (pi >= 0) {
 				if (ri >= 0)
-					use_add(pi, ri, line);
+					use_add(pi, ri, line,
+						(size_t)(at - src));
 				else
 					uses[pi].used_unranged = 1;
 			}
@@ -1581,7 +1620,7 @@ static void lint_calls(const char *src, size_t len)
 	}
 }
 
-static void lint_report(void)
+static void lint_report(const char *src)
 {
 	int i;
 	uint32_t k;
@@ -1608,29 +1647,59 @@ static void lint_report(void)
 		 */
 		if (u->n_rng > 1) {
 			uint32_t both = 0;
+			char list[256];
+			size_t at = 0;
+			int mergeable = 1;
 
 			for (k = 0; k < u->n_rng; k++)
 				both |= rngs[u->rng[k]].mask;
-			char list[256];
-			size_t at = 0;
-
-			for (k = 0; k < u->n_rng; k++)
+			for (k = 0; k < u->n_rng; k++) {
 				at += (size_t)snprintf(list + at,
 						       sizeof list - at,
 						       k ? ", %s" : "%s",
 						       rngs[u->rng[k]].name);
+				if (k && !joined_by_or(src, u->at[k - 1u],
+						       u->at[k]))
+					mergeable = 0;
+			}
+			/*
+			 * THE COST IS THE SAME IN BOTH CASES, AND IT IS THE
+			 * POINT.
+			 *
+			 * Whatever joins the two calls, a region the marker is
+			 * NOT in is scanned to exhaustion before the next one is
+			 * looked at - twice the bytes for one question about one
+			 * marker. That is what this warns about, and it is said
+			 * first, because it is true either way.
+			 *
+			 * What the join decides is only whether the fix is
+			 * available. "||" asks whether the marker is in either,
+			 * which one range over the union asks in a single pass.
+			 * "&&" asks whether it is in BOTH, which one range
+			 * cannot express - merging it would quietly turn a
+			 * strict rule into a loose one - so there the answer is
+			 * to check that two regions were really meant.
+			 */
 			lwarn(u->line[0],
-			      "'%s' is searched in %u ranges (%s)",
+			      "'%s' is searched in %u ranges (%s): a region it "
+			      "is not in is scanned to the end before the next "
+			      "is looked at",
 			      pats[i].name, u->n_rng, list);
+			if (mergeable)
+				fprintf(stderr, "%s:%d: note:  the calls are "
+					"joined by '||', so one "
+					"KOF_TARGET_RANGE(<name>, 0x%x) and one "
+					"call ask the same question in one pass\n",
+					src_name, u->line[0], both);
+			else
+				fprintf(stderr, "%s:%d: note:  not joined by "
+					"'||', so one range over 0x%x would ask "
+					"a different question - check that two "
+					"regions were meant\n",
+					src_name, u->line[0], both);
 			for (k = 1; k < u->n_rng; k++)
 				fprintf(stderr, "%s:%d: note:  also here\n",
 					src_name, u->line[k]);
-			fprintf(stderr, "%s:%d: note:  one range over mask "
-				"0x%x would read the object once instead of "
-				"%u times; the extents of a range are walked "
-				"in file order and the search stops at the "
-				"first hit\n", src_name, u->line[0], both,
-				u->n_rng);
 		}
 		/*
 		 * Below the presence set's key width.
@@ -1689,7 +1758,7 @@ static int extract_main(int argc, char **argv)
 	/* Diagnosis, after the declarations are known and before anything is
 	 * written: a warning about a pack that was never produced is noise. */
 	lint_calls(src, src_len);
-	lint_report();
+	lint_report(src);
 
 	out = fopen(argv[3], "w");
 	if (!out) {
