@@ -84,10 +84,15 @@ static const struct kof_heur_anom_term default_anom[] = {
 static const struct kof_heur_flag_term default_flag[] = {
 	/* --- how it was reached ------------------------------------------ */
 	{ KOF_HEUR_F_PACKED,          CN(1.11), "Packed"     },
-	{ KOF_HEUR_F_UNPACK_PARTIAL,  CN(3.24), "PackTamper" },
-	/* --- what the database noticed without firing --------------------- */
-	{ KOF_HEUR_F_MARKER_OUTSIDE,  CN(3.66), "StrayMarker"},
-	{ KOF_HEUR_F_FAMILY_PARTIAL,  CN(0.84), "PartFamily" }
+	{ KOF_HEUR_F_UNPACK_PARTIAL,  CN(3.24), "PackTamper" }
+	/*
+	 * There were two more here - StrayMarker and PartFamily, both measured -
+	 * for evidence the database notices without firing. Nothing ever
+	 * gathered those facts, so the weights sat in the table describing a
+	 * question no code asked. A measured weight for a fact that is never
+	 * collected reads as a working feature, so it is out until the
+	 * collector arrives with it.
+	 */
 };
 
 /*
@@ -107,18 +112,26 @@ static const struct kof_heur_model default_model = {
 	default_anom, (uint32_t)(sizeof default_anom / sizeof default_anom[0]),
 	default_flag, (uint32_t)(sizeof default_flag / sizeof default_flag[0]),
 	1u << KOF_FMT_ELF,
-	747,
+	747
 	/*
-	 * PER LAYER. Chosen so that two layers clear the bar from nothing at all
-	 * and one layer never does: 2 x 400 = 800 against a bar of 747, and one
-	 * layer leaves the worst clean object measured - a stripped, packed
-	 * binary at 386 - at 786... which is over. That is deliberate and it is
-	 * the one number here that is a JUDGEMENT rather than a measurement:
-	 * see the note on the bar. Measured cost is stated in the report, not
-	 * hidden in a comment.
+	 * THERE WAS A TERM HERE FOR PACKER DEPTH, AND IT WAS WRONG.
+	 *
+	 * 400 centinats per layer, so two layers scored 800 against a bar of
+	 * 747 - a verdict out of packing alone, with no other evidence. What it
+	 * actually caught, measured over the corpus: four malware files, and
+	 * three clean ones. The three were bunzip2, kill and zipinfo wrapped in
+	 * Ezuri, each scoring exactly 800 - the whole verdict being the term
+	 * itself. "Nothing legitimate is wrapped twice" was the argument, and it
+	 * is false: a packed bunzip2 is a packed bunzip2.
+	 *
+	 * The measured step is 0 to 1 layer, not 1 to 2: the corpus holds 979
+	 * objects one layer deep and 7 at two. A term shaped to reward the
+	 * second layer was reaching for a population that is not there.
+	 *
+	 * Depth is still REPORTED - kof_result.heur_depth, the d1/d2 an examiner
+	 * prints - because where an object sat is worth knowing. It is not
+	 * scored.
 	 */
-	CN(4.00),
-	100                     /* no depth gain yet: nothing to fit it on */
 };
 
 const struct kof_heur_model *kof_heur_default(void)
@@ -161,37 +174,6 @@ int kof_heur_score(const struct kof_heur_model *m,
 			}
 		}
 
-	/*
-	 * Depth, twice over, because it says two things.
-	 *
-	 * It MULTIPLIES what was found inside - a suspicious string under two
-	 * layers of packing is worth more than the same string in the open.
-	 *
-	 * And it ADDS on its own, because after a clean unpack there is nothing
-	 * inside to multiply. See kof_heur_model.depth_centinats: the payload of
-	 * a working packer is a well formed program with no anomalies at all, so
-	 * a purely multiplicative depth reaches exactly the objects that did not
-	 * need it and never the one that did.
-	 *
-	 * Both are capped at four layers. Past four the file is not being packed,
-	 * it is being used to make a scanner do work, and a term that keeps
-	 * growing is the lever that makes that worth doing.
-	 */
-	{
-		uint32_t d = f->packer_depth > 4u ? 4u : f->packer_depth;
-
-		if (d && m->depth_gain_pct != 100u) {
-			uint32_t k = d;
-
-			while (k--)
-				s = s * (int64_t)m->depth_gain_pct / 100;
-		}
-		if (d && m->depth_centinats) {
-			s += (int64_t)d * m->depth_centinats;
-			if (guess && (int64_t)d * m->depth_centinats > best)
-				*guess = "Layered";
-		}
-	}
 	if (s >  0x7fffffff) s =  0x7fffffff;
 	if (s < -0x7fffffff) s = -0x7fffffff;
 	*out = (int32_t)s;

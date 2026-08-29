@@ -1558,7 +1558,6 @@ static void objects_collect(struct view *v, kof_engine *eng)
 	 * Named rather than numbered so this keeps meaning "the most" as levels
 	 * are added.
 	 */
-	opt.heur_level = KOF_HEUR_LEVEL_MAX;
 	/* -1 rather than the zeroed view's 0, because 0 is a version a container
 	 * can carry. Set here so the first module to speak cannot inherit it. */
 	v->pending_ver = -1;
@@ -6889,7 +6888,6 @@ static int heur_of(const struct object *ob, struct kof_heur_facts *out,
 	out->format       = ob->ctx.format;
 	out->anomalies    = ob->heur.heur_anomalies;
 	out->flags        = ob->heur.heur_flags;
-	out->packer_depth = ob->heur.heur_depth;
 	*score = ob->heur.heur_score;
 	*guess = "Unknown";
 	if (!ob->heur.heur_scored)

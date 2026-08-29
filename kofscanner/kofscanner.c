@@ -246,14 +246,11 @@ static void usage(const char *argv0)
 		"  --follow-links  follow symbolic links (off by default: a link into\n"
 		"                  an ancestor turns a walk into a loop)\n"
 		"  --all-matches   keep scanning an object after the first finding\n"
-		"  --heur N        how hard to look for what no signature names,\n"
-		"                  default 1:\n"
-		"                    0  off - nothing gathered, nothing scored\n"
-		"                    1  the object's own structure and what the\n"
-		"                       unpackers made of it. Costs no extra pass\n"
-		"                    2  also markers no rule reached (costs a pass\n"
-		"                       over every object; not implemented yet)\n"
-		"                  It reports a level of its own and never a family\n"
+		"  --heur N        1 (default) scores what the format parse found\n"
+		"                  wrong with the object and what the unpackers made\n"
+		"                  of it; 0 gathers and scores nothing. Costs no\n"
+		"                  extra pass either way. It reports a level of its\n"
+		"                  own and never a family\n"
 		"  --dump DIR      write every object the engine PRODUCED into DIR:\n"
 		"                  what came out of an unpacker, not what went in\n"
 		"  --stats         report what the prefilter and the presence set earned\n"
@@ -267,13 +264,16 @@ static void usage(const char *argv0)
 }
 
 /*
- * --heur, as a level rather than as two switches.
+ * --heur, which is on or off and used to be a ladder.
  *
- * The engine keeps "should this run" and "how far may it look" in separate
- * fields, and it is right to: a zeroed kof_scan_option has to mean the
- * heuristic RUNS, so the off state cannot be the zero of a ladder. A command
- * line has no such constraint, so the mapping is done here, once, and the
- * ladder stays a ladder where a person reads it.
+ * The second rung was marker evidence and was never built: nothing gathered
+ * those facts, so asking for it changed no verdict and cost nothing, which is
+ * the worst kind of option - one that answers yes and does nothing. The engine
+ * still keeps "should this run" as its own field rather than as the zero of a
+ * number, because a zeroed kof_scan_option has to mean the heuristic RUNS.
+ *
+ * Written as a number rather than as --no-heur so that the command lines and
+ * scripts that already say --heur 0 or --heur 1 keep working.
  */
 static int heur_arg(const char *v, struct kof_scan_option *opt)
 {
@@ -286,9 +286,8 @@ static int heur_arg(const char *v, struct kof_scan_option *opt)
 	if (*end)
 		return 0;               /* trailing junk: not a level */
 	switch (n) {
-	case 0: opt->heur_off = 1; opt->heur_level = 0; return 1;
-	case 1: opt->heur_off = 0; opt->heur_level = 0; return 1;
-	case 2: opt->heur_off = 0; opt->heur_level = 1; return 1;
+	case 0: opt->heur_off = 1; return 1;
+	case 1: opt->heur_off = 0; return 1;
 	default: return 0;
 	}
 }
@@ -298,7 +297,7 @@ static int heur_arg(const char *v, struct kof_scan_option *opt)
  * to is the one result worth never producing. */
 static int heur_bad(const char *argv0, const char *v)
 {
-	fprintf(stderr, "%s: --heur takes 0, 1 or 2, not '%s'\n", argv0, v);
+	fprintf(stderr, "%s: --heur takes 0 or 1, not '%s'\n", argv0, v);
 	return 2;
 }
 

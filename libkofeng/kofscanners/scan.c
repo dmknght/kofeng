@@ -552,11 +552,13 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
  * made over the object, which is why this runs unless the caller switched it off
  * rather than only when the caller asked for it.
  *
- * The marker-derived facts are deliberately absent, and that is the whole reason
- * heur_level exists beside heur_off. Knowing that a family has two markers present
- * but did not fire means asking about markers whose module's logic never reached
- * them - a pass over the object that would otherwise not happen. Free evidence is
- * on for everybody; evidence that costs a pass is asked for.
+ * Marker-derived evidence is deliberately absent. Knowing that a family has two
+ * markers present but did not fire means asking about markers whose module's
+ * logic never reached them, which is a pass over the object that would
+ * otherwise not happen - so it is not free, and nothing here gathers it. There
+ * was a --heur level for asking; it gathered nothing and changed no verdict, so
+ * it is gone. If that evidence is ever collected it needs its own switch again,
+ * and the switch should arrive with the collector rather than before it.
  */
 static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 			const struct kof_scan_option *opt, uint32_t pdepth,
@@ -581,7 +583,6 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	 * that had been wrapped to be hidden. Only a module that declared itself
 	 * KOF_UNP_PACKER adds a layer now.
 	 */
-	f.packer_depth = pdepth > 255u ? 255u : (uint8_t)pdepth;
 	f.anomalies    = kof_heur_anomalies(ctx);
 	/*
 	 * The object that WAS packed, not the one that came out.
@@ -594,15 +595,6 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		f.flags |= KOF_HEUR_FL(KOF_HEUR_F_PACKED);
 	if (partial)
 		f.flags |= KOF_HEUR_FL(KOF_HEUR_F_UNPACK_PARTIAL);
-	/*
-	 * KOF_HEUR_F_MARKER_OUTSIDE and KOF_HEUR_F_FAMILY_PARTIAL belong here,
-	 * under opt->heur_level >= 1, and are not set: the facts are not gathered
-	 * anywhere in this path yet. The model already carries their measured
-	 * values, so wiring them is adding the collector rather than retuning
-	 * anything, and until it exists a raised level costs nothing and changes
-	 * no verdict.
-	 */
-
 	if (!kof_heur_score(m, &f, &score, &guess))
 		return;                 /* no model for this format - say nothing */
 
@@ -618,7 +610,7 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	out->heur_score     = score;
 	out->heur_flags     = f.flags;
 	out->heur_anomalies = f.anomalies;
-	out->heur_depth     = f.packer_depth;
+	out->heur_depth     = pdepth > 255u ? 255u : (uint8_t)pdepth;
 
 	if (score < m->bar_centinats || out->n >= KOF_MAX_FINDINGS)
 		return;

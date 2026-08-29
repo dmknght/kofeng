@@ -50,19 +50,6 @@
  */
 #define KOF_LEVEL_HEUR    2
 
-/*
- * Everything the heuristic in this build can be asked to look at.
- *
- * A number rather than a name was the wrong thing to make callers write. A tool
- * that examines ONE file on purpose - kofexamine, kofviewer - wants the most
- * evidence available, and the cost that makes a level optional for a scanner
- * walking a filesystem does not apply to it. Naming the top means those tools
- * keep asking for the top as levels are added, instead of each of them pinning
- * whatever number happened to be the maximum on the day it was written.
- *
- * See kof_scan_option.heur_level for what the levels are.
- */
-#define KOF_HEUR_LEVEL_MAX 1u
 
 
 /*
@@ -375,32 +362,6 @@ struct kof_scan_option {
 	 */
 	uint32_t heur_off;
 
-	/*
-	 * HOW MUCH EVIDENCE THE HEURISTIC MAY GO AND FETCH.
-	 *
-	 * 0 - the default. Structure only: what the format parse found wrong with
-	 *     the object, and what the unpackers made of it. No extra searching
-	 *     and no extra pass; every fact at this level already exists.
-	 * 1 - also marker evidence: asking the presence set about markers that no
-	 *     module's logic reached, and locating them. NOT IMPLEMENTED yet, and
-	 *     behind its own number rather than folded into the default because
-	 *     it is the level that costs a pass over the object - the reason the
-	 *     free level runs for everybody and this one does not.
-	 *
-	 * Separate from heur_off so that "should this run" and "how far should it
-	 * look" stay separate questions. Rolling them into one number would make
-	 * the value that means off sit at one end of a ladder whose other end is
-	 * the most expensive setting, and every caller would have to know which
-	 * end was which.
-	 *
-	 * A caller that wants everything this build can offer should say so with
-	 * KOF_HEUR_LEVEL_MAX rather than with a number. An analysis tool asks for
-	 * the most because it is looking at one file on purpose - it is not the
-	 * scanner walking a filesystem, and the cost that makes a level optional
-	 * there does not apply - and it should keep asking for the most as levels
-	 * are added, without an edit to every such tool.
-	 */
-	uint32_t heur_level;
 
 	/*
 	 * What producing children is allowed to cost.

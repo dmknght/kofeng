@@ -30,7 +30,7 @@
  * COST WHEN IT IS OFF
  *
  * Nothing. The collector is not entered, no facts are gathered, and the scan path
- * runs exactly as it did before - see kof_scan_option.heur_level. That is the
+ * runs exactly as it did before - see kof_scan_option.heur_off. That is the
  * point of keeping collection inside this module rather than in the parser: an
  * engine built for scanning should not pay for a feature nobody asked for.
  */
@@ -82,11 +82,6 @@ enum kof_heur_fact {
 	/* An unpacker recognised its own format and could not finish. Legitimate
 	 * packing unpacks cleanly; measured 0 of 13638 clean objects. */
 	KOF_HEUR_F_UNPACK_PARTIAL,
-	/* A database marker is present but outside every region its module
-	 * searches - the marker is there and the rule could never have fired. */
-	KOF_HEUR_F_MARKER_OUTSIDE,
-	/* Two or more markers of one family, where that family did not fire. */
-	KOF_HEUR_F_FAMILY_PARTIAL,
 	KOF_HEUR_F_COUNT
 };
 
@@ -129,36 +124,7 @@ struct kof_heur_model {
 	/* The score at or above which the object is reported. Set from the
 	 * highest score any clean object reached, plus a margin. */
 	int32_t  bar_centinats;
-	/*
-	 * How much one packer layer multiplies the evidence found inside it,
-	 * in percent. 100 leaves it unchanged.
-	 *
-	 * Measured and NOT yet used: the corpus held six objects two layers deep,
-	 * three malicious and three clean, so there is no basis for a number
-	 * above 100. It is here because the shape is right and the data is what
-	 * is missing - and a later corpus can set it without a code change.
-	 */
-	/*
-	 * WHAT ONE PACKER LAYER IS WORTH ON ITS OWN.
-	 *
-	 * Added per layer, and the reason it has to be ADDED rather than
-	 * multiplied is the whole of why depth did not work before.
-	 *
-	 * depth_gain_pct multiplies the evidence found INSIDE an object, and the
-	 * object that matters after a good unpack has none: a packer that did
-	 * its job hands back a clean, well formed program. Measured on
-	 * 1f85b0c47432... - Ezuri wrapping UPX wrapping TeamTNT - the middle
-	 * layer scores 386 and the payload, which is the malware, scores 0.
-	 * Multiplying zero by any gain leaves zero, so the deepest object, the
-	 * one every layer was put there to hide, could never be reached at all.
-	 *
-	 * So the layering is evidence in its own right. Nothing legitimate is
-	 * wrapped twice: a packer exists to stop a file being read, and doing it
-	 * again says the first was not considered enough.
-	 */
-	int32_t  depth_centinats;
 
-	uint32_t depth_gain_pct;
 };
 
 /*
@@ -169,7 +135,6 @@ struct kof_heur_model {
  */
 struct kof_heur_facts {
 	uint8_t  format;
-	uint8_t  packer_depth;   /* packer layers between this object and the file */
 	uint64_t anomalies;
 	uint32_t flags;          /* 1u << enum kof_heur_fact */
 };
