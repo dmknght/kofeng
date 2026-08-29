@@ -10,8 +10,6 @@ KOF_TARGET_RANGE(scan_range_data, KOF_SCAN_ELF_DATA); // define variable scan_ra
 KOF_DEFINE_STR(mirai_1,  "4r3s b0tn3t",  KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(mirai_2,  "31mip:%s",  KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(mirai_3,  "oanacroane",  KOF_CASE_EXACT, KOF_WORD_FULLWORD);
-KOF_DEFINE_STR(mirai_4,  "Tsunami successfully deployed!",  KOF_CASE_EXACT, KOF_WORD_FULLWORD);
-KOF_DEFINE_STR(mirai_5,  ".tsunami -l .t -g",  KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 
 
 void kof_scan(const struct kof_obj_ctx *ctx)
@@ -26,7 +24,5 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 	 * object, together with every other module's.
 	 */
 	if (kof_find_str_any(scan_range_data, mirai_1, mirai_2, mirai_3))
-		KOF_SCAN_INFECT(KOF_MALVAR_GENERIC);
-	if (kof_find_str_all(scan_range_data, mirai_4, mirai_5))
 		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
 }
