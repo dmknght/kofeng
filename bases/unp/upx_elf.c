@@ -323,9 +323,22 @@ static const struct upx_shape shapes[] = {
  */
 #define UPX_MAX_PAD     (1u << 20)
 #define UPX_MAX_GAP     (1u << 18)
-/* The tail is padding plus a section header table. A thousand sections at 64
- * bytes is already absurd; this is more than that. */
-#define UPX_TAIL_MAX    (1u << 20)
+/*
+ * THE TAIL IS NOT ALWAYS PADDING.
+ *
+ * It was bounded at a megabyte on the reasoning that a tail is alignment plus a
+ * section header table, and that is what it is in nearly every sample. It is not
+ * what it is in all of them: 4c839f32e78f... is a 15706 byte UPX stub with
+ * 4997278 bytes APPENDED past everything its ELF declares, and the PackHeader at
+ * the end describes that blob as the tail block - 4997200 bytes of it, which is
+ * exactly the amount the walk was coming up short by.
+ *
+ * So the bound is now the only one that is actually a bound: the tail is part of
+ * the original file and cannot be larger than the original file. That number is
+ * p_info's, stated at the front, and the PackHeader states it again at the back -
+ * the two agreeing is already this function's admission test, so nothing new is
+ * being trusted. A megabyte was a guess about shape; `want` is arithmetic.
+ */
 /* How far back from the end of the object a PackHeader may be, and how long it
  * is. Both fixed by the format rather than read from it. */
 #define UPX_PH_WINDOW   4096u
@@ -615,7 +628,7 @@ static int upx_tail_of(const struct kof_obj_ctx *ctx, int be, uint64_t want,
 			stated = RD32(ph + 24u);
 			if (stated != want || u_len == 0u || c_len == 0u)
 				continue;
-			if (u_len > UPX_TAIL_MAX || c_len > u_len)
+			if (u_len > want || c_len > u_len)
 				continue;
 
 			/*
@@ -623,8 +636,22 @@ static int upx_tail_of(const struct kof_obj_ctx *ctx, int be, uint64_t want,
 			 * the PackHeader. Found by looking for the two sizes
 			 * the PackHeader just gave, which is a bounded scan
 			 * over bytes that are already in the object.
+			 *
+			 * WHERE TO START LOOKING follows from c_len rather than
+			 * from a fixed window. The compressed bytes run from
+			 * just past the b_info to the PackHeader, so the record
+			 * sits about c_len + 12 back from it, and a window that
+			 * began a fixed 4096 bytes before the PackHeader could
+			 * only ever find a tail smaller than that - which is why
+			 * a five megabyte one was invisible. The slack absorbs
+			 * whatever alignment sits between the data and the
+			 * PackHeader, and the scan is still bounded by the tail
+			 * it is looking for.
 			 */
-			for (at = ph > UPX_PH_WINDOW ? ph - UPX_PH_WINDOW : 0;
+			{
+			uint64_t back = c_len + B_INFO_LEN + UPX_PH_WINDOW;
+
+			for (at = ph > back ? ph - back : 0;
 			     at + B_INFO_LEN <= ph; at++) {
 				if (RD32(at) != u_len || RD32(at + 4u) != c_len)
 					continue;
@@ -638,6 +665,7 @@ static int upx_tail_of(const struct kof_obj_ctx *ctx, int be, uint64_t want,
 				*out_unc = u_len;
 				kof_debug("UPX.ELF.tail", u_len);
 				return 1;
+			}
 			}
 		}
 	}
@@ -1057,16 +1085,48 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 				t_len -= UPX_LZMA_SKIP;
 			}
 			/*
-			 * Bounded by what the PackHeader declared it expands
-			 * to. Left unbounded it ran a byte or two past the end
-			 * - NRV2 decodes until its input is exhausted, and the
-			 * last few bits of a stream can yield one more symbol -
-			 * so the recovered file came out longer than the
-			 * original it was rebuilding.
+			 * A TAIL THAT IS STORED IS COPIED, NOT DECODED.
+			 *
+			 * u_len == c_len is the block saying so in arithmetic
+			 * rather than in a method number: nothing UPX emits
+			 * compresses to exactly its own size, it stores instead.
+			 * Read as a coding it is method 0, which method_of does
+			 * not know, so the tail was located and then dropped.
+			 *
+			 * That is most of a file on 4c839f32e78f...: a 15706
+			 * byte stub with 4997200 stored bytes appended, whose
+			 * first bytes are "GCC: (Debian 4.9" in the clear. The
+			 * walk recovered 31248 of 5028448 and the rest was sat
+			 * in the object, uncompressed, unread.
 			 */
-			if (t_dec)
+			if (t_unc == t_len) {
+				uint64_t k = 0;
+
+				while (k < t_len) {
+					uint8_t buf[4096];
+					uint32_t n = 0;
+
+					while (n < sizeof buf && k < t_len)
+						buf[n++] = kof_u8(t_off + k++);
+					if (!kof_emit(buf, n)) {
+						kof_unp_broken(KOF_UNP_LIMIT);
+						break;
+					}
+					got += n;
+				}
+			} else if (t_dec) {
+				/*
+				 * Bounded by what the PackHeader declared it
+				 * expands to. Left unbounded it ran a byte or
+				 * two past the end - NRV2 decodes until its
+				 * input is exhausted, and the last few bits of a
+				 * stream can yield one more symbol - so the
+				 * recovered file came out longer than the
+				 * original it was rebuilding.
+				 */
 				got += kof_unpack_at(t_dec, t_off, t_len,
 						     t_unc);
+			}
 		}
 	}
 
