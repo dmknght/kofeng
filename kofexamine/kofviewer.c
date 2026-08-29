@@ -2924,18 +2924,30 @@ static void emit_cond(FILE *f, struct view *v, uint32_t i, int depth,
 	 * comment there would break the line that has to stay readable. Named
 	 * by number so it can be told from the condition's own note when a
 	 * branch carries several.
+	 *
+	 * A GROUPING GETS NONE OF THEM. It has no test of its own - it is a
+	 * brace around some branches - so it uses no matcher, and its children
+	 * carry their own notes a line or two below. The filter below used to be
+	 * gated on the condition HAVING an expression, and a grouping has none,
+	 * so it printed every matcher's note in the file and then each child
+	 * printed its own again. Prometei_00.c came out with three notes above
+	 * the brace and the same three repeated inside it.
+	 *
+	 * An empty expression on a LEAF is a different thing: it means the
+	 * default, every matcher joined by &, so there every note belongs.
 	 */
-	for (k = 0; k < v->n_grp; k++) {
-		char t[120];
+	if (!(!c->expr[0] && cnd_children(v, i)))
+		for (k = 0; k < v->n_grp; k++) {
+			char t[120];
 
-		if (!v->grp[k].note[0])
-			continue;
-		if (c->expr[0] && !cnd_uses(c, k))
-			continue;
-		snprintf(t, sizeof t, "matcher %u: %s", k + 1u,
-			 v->grp[k].note);
-		emit_note(f, t, depth);
-	}
+			if (!v->grp[k].note[0])
+				continue;
+			if (c->expr[0] && !cnd_uses(c, k))
+				continue;
+			snprintf(t, sizeof t, "matcher %u: %s", k + 1u,
+				 v->grp[k].note);
+			emit_note(f, t, depth);
+		}
 	for (d = 0; d < depth; d++)
 		fputc('\t', f);
 	if (!c->expr[0] && cnd_children(v, i)) {
@@ -4354,7 +4366,30 @@ shc_done:
 								   10) : 2u;
 			}
 			if (pend[0]) {
-				snprintf(g->note, sizeof g->note, "%s", pend);
+				/*
+				 * The LABEL is not part of the note.
+				 *
+				 * generate writes "matcher N: <note>", and this
+				 * kept the whole line - so the next generate
+				 * prefixed a label that was already there and
+				 * the file grew "matcher 1: matcher 1: ..." one
+				 * layer per save. The number is derived from
+				 * where the matcher sits, so reading it back is
+				 * reading back something this side already
+				 * knows.
+				 */
+				const char *note = pend;
+
+				if (strncmp(note, "matcher ", 8) == 0) {
+					const char *colon = strchr(note + 8, ':');
+
+					if (colon) {
+						note = colon + 1;
+						while (*note == ' ')
+							note++;
+					}
+				}
+				snprintf(g->note, sizeof g->note, "%s", note);
 				pend[0] = 0;
 			}
 			{
