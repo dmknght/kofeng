@@ -64,6 +64,9 @@
 #include "kofinspect.h"
 #include "../libkofeng/kofheur/kofheur.h"
 #include "../libkofeng/kofscanners/scan.h"
+#include "../libkofeng/kofmatchers/kofmatch.h"
+#include "../libkofeng/kofmatchers/hexprog.h"
+#include "../libkofeng/kofdb/kofpack.h"
 
 /* ---- the terminal ---------------------------------------------------------
  *
@@ -446,6 +449,21 @@ static int mark_row(void) { return g_rows; }
  * can be typed must be committable, which means one number, not two.
  */
 #define DECL_BYTES_MAX 512u
+/* How many occurrences of one marker the pane will light. Past this the
+ * highlight stops being information and starts being a background colour. */
+#define DECL_HITS_MAX  64u
+/*
+ * The right hand end of a string row, in columns from the right edge.
+ *
+ * The two arrows appear ONLY when there is more than one occurrence to step
+ * between: a marker that is in the file once has nowhere to go, and a pair of
+ * dead buttons on every row is worse than a row that is shorter.
+ */
+#define STR_BTN_X     4u        /* [x] */
+#define STR_BTN_E     8u        /* [e] */
+#define STR_BTN_NEXT 12u        /* [>] */
+#define STR_CNT      19u        /* "nn/nn", five wide */
+#define STR_BTN_PREV 23u        /* [<] */
 #define DECL_HEXS_CAP  (3u * DECL_BYTES_MAX + 16u)
 /* "[ Discard ]" with a space in front, so the note box can leave room. */
 #define NEW_BTN_W 12
@@ -649,13 +667,18 @@ struct cond {
 struct decl {
 	uint8_t *bytes;
 	/*
-	 * The mask beside them, 0xff where the byte must match exactly and a
-	 * nibble cleared where the pattern wrote '?'. NULL for a literal and
-	 * for a hex pattern with no wildcard in it - the common case pays
-	 * nothing. See hexs_scan.
+	 * HOW MANY BYTES ARE IN THE ARRAY, WHICH IS NOT HOW LONG THE PATTERN IS.
+	 *
+	 * They were one number and could be while every marker was a run of
+	 * concrete bytes. A hex pattern is not one: "2E ?? 5C" is three bytes
+	 * long in a file and has no byte array at all, and "6A 40 [4-6] 8D" is
+	 * six to eight. So `len` is what the pattern covers where it matches -
+	 * what the size column shows and what the pane highlights - and
+	 * `nbytes` bounds the array, which is empty for any pattern the engine
+	 * had to compile.
 	 */
-	uint8_t *msk;
-	int      inexact;           /* a gap or an alternation: cannot be located */
+	uint32_t nbytes;
+	uint32_t span_max;          /* len is the minimum; equal when fixed */
 	uint32_t len;
 	int      hex;               /* KOF_DEFINE_HEXSTR, else KOF_DEFINE_STR */
 
@@ -699,6 +722,33 @@ struct decl {
 	 * the pane can light them. KOF_BROKEN when they are not there at all -
 	 * a marker taken from one sample and carried to another. */
 	uint64_t at;
+	/*
+	 * AND EVERYWHERE ELSE IT IS, BECAUSE ONE OF THEM IS NOT THE ANSWER.
+	 *
+	 * `at` is the occurrence the row reports on - the one inside the region
+	 * the module searches, when there is one. The pane lit that one and no
+	 * other, so a marker that appears eight times looked like a marker that
+	 * appears once, and the seven places worth reading were the seven the
+	 * highlight did not point at.
+	 *
+	 * Kept sorted, and capped: a two byte marker occurs everywhere, and a
+	 * list of every offset in a 16 MB object is neither drawable nor worth
+	 * drawing. `hits_clipped` says the list is a prefix so the row can say
+	 * so rather than imply the count is the whole of it.
+	 */
+	uint64_t hits[DECL_HITS_MAX];
+	uint32_t n_hits;
+	int      hits_clipped;
+	/*
+	 * WHICH ONE THE ROW IS POINTING AT.
+	 *
+	 * Clicking the bytes goes to this one, not to the first: after stepping
+	 * to the third occurrence and scrolling away, clicking the row is how
+	 * you get BACK to the third. Starting it at the occurrence the row
+	 * reports on means the first click still lands where the row says it
+	 * will.
+	 */
+	uint32_t cur_hit;
 
 	/*
 	 * How a literal is compared. Both are properties of KOF_DEFINE_STR and
@@ -1973,23 +2023,62 @@ static uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off);
 static void decl_locate(struct view *v, struct decl *d)
 {
 	struct object *ob = &v->obj[d->obj < v->n_obj ? d->obj : 0];
-	uint64_t i, first = KOF_BROKEN;
-	uint32_t first_nd = 0;
+	struct kof_match_ctx m;
+	uint8_t prog[KOF_HEX_MAX_PROG];
+	const uint8_t *pat;
+	uint64_t at, from = 0, first = KOF_BROKEN;
+	uint32_t plen, first_nd = 0;
+	uint8_t kind, flags = 0;
 
 	d->at = KOF_BROKEN;
 	d->off_rgn = 0;
 	d->at_rgn[0] = 0;
 	d->at_mask = 0;
+	d->n_hits = 0;
+	d->hits_clipped = 0;
 	if (!d->len || d->len > ob->buf.n)
 		return;
+
 	/*
-	 * A gap or an alternation has no fixed length, so there is no run of
-	 * bytes to look for. Saying "not here" is wrong and saying where a
-	 * prefix of it sits is worse, so the pattern simply has no location -
-	 * which is what at == KOF_BROKEN already means to every reader of it.
+	 * SEARCHED BY THE ENGINE, NOT BY A SECOND SEARCH WRITTEN HERE.
+	 *
+	 * This used to walk the buffer comparing d->bytes itself, which was a
+	 * copy of the matcher with two of its rules missing: a hex pattern with
+	 * a wildcard has no byte run to compare at all, and a literal was
+	 * compared without the word and case rules the module will be matched
+	 * under. So the panel could say "found" about a marker the database
+	 * will not find, and "not found" about one it will.
+	 *
+	 * kof_hex_compile turns the written pattern into the same program the
+	 * pack stores, and kof_match_where runs the same walk over these bytes.
+	 * Whatever the panel says about a marker is now what the scan will do
+	 * with it, including the parts nobody here had to know about.
 	 */
-	if (d->inexact)
+	if (d->hex && d->hexs[0]) {
+		plen = kof_hex_compile(d->hexs, prog, sizeof prog, NULL);
+		if (!plen)
+			return;         /* it will not compile; it cannot match */
+		pat = prog;
+		kind = KOF_STR_HEX;
+	} else {
+		pat = d->bytes;
+		plen = d->nbytes;
+		kind = KOF_STR_LITERAL;
+		if (!d->hex) {
+			if (d->icase)
+				flags |= KOF_STR_ICASE;
+			if (d->fullword)
+				flags |= KOF_STR_FULLWORD;
+		}
+	}
+	if (!pat || !plen || plen > 0xffffu)
 		return;
+
+	memset(&m, 0, sizeof m);
+	if (!kof_match_state_init(&m, 0, 0))
+		return;
+	kof_match_begin(&m, kof_buf_make(ob->buf.p, ob->buf.n));
+
 	/*
 	 * EVERY OCCURRENCE, NOT THE FIRST ONE.
 	 *
@@ -2003,61 +2092,66 @@ static void decl_locate(struct view *v, struct decl *d)
 	 *
 	 * So an occurrence INSIDE the declared region wins, wherever it sits in
 	 * the file, and the first occurrence anywhere is kept as the fallback
-	 * for the case where none of them is. The cost is finishing a scan this
-	 * was already doing.
+	 * for the case where none of them is.
 	 */
-	for (i = 0; i + d->len <= ob->buf.n; i++) {
-		uint32_t k, nd;
+	while (from < ob->buf.n) {
+		uint32_t nd;
 
-		for (k = 0; k < d->len; k++) {
-			uint8_t a = ob->buf.p[i + k], b = d->bytes[k];
+		at = kof_match_where(&m, from, ob->buf.n - from, pat,
+				     (uint16_t)plen, kind, flags);
+		if (at == KOF_BROKEN)
+			break;
+		/*
+		 * Recorded before anything is decided about it.
+		 *
+		 * The walk used to return the moment it found the occurrence
+		 * the row would report, so the pane knew about that one and no
+		 * other. Every occurrence is a place worth reading, so the
+		 * search now runs to the end of the object and the choice of
+		 * which one the row names is made from the whole list.
+		 */
+		if (d->n_hits < DECL_HITS_MAX)
+			d->hits[d->n_hits++] = at;
+		else
+			d->hits_clipped = 1;
 
-			if (d->icase && !d->hex) {
-				if (a >= 'A' && a <= 'Z')
-					a = (uint8_t)(a - 'A' + 'a');
-				if (b >= 'A' && b <= 'Z')
-					b = (uint8_t)(b - 'A' + 'a');
-			}
-			/* Masked exactly as the engine matches it: a cleared
-			 * nibble is a nibble the pattern did not name. */
-			if (d->msk) {
-				a &= d->msk[k];
-				b &= d->msk[k];
-			}
-			if (a != b)
-				break;
-		}
-		if (k != d->len)
-			continue;
-
-		nd = node_at(v, d->obj, i);
+		nd = node_at(v, d->obj, at);
 		if (first == KOF_BROKEN) {
-			first = i;
+			first = at;
 			first_nd = nd;
 		}
 		/*
 		 * In the region the module searches: this is the occurrence
-		 * that matters and nothing later can improve on it.
+		 * the ROW reports, and nothing later can improve on it. The
+		 * walk carries on regardless - the pane wants the rest.
 		 *
 		 * Only a range that NAMES regions can be satisfied this way -
 		 * an unset mask means nothing has been decided yet, and
 		 * KOF_SCAN_ALL is satisfied by any occurrence at all.
 		 */
-		if (!d->mask || d->mask == KOF_SCAN_ALL ||
-		    (nd < v->n_node && (d->mask & v->node[nd].mask))) {
-			d->at = i;
+		if (d->at == KOF_BROKEN &&
+		    (!d->mask || d->mask == KOF_SCAN_ALL ||
+		     (nd < v->n_node && (d->mask & v->node[nd].mask)))) {
+			d->at = at;
+			d->cur_hit = d->n_hits ? d->n_hits - 1u : 0u;
 			if (nd < v->n_node && v->node[nd].mask) {
 				d->at_mask = v->node[nd].mask;
 				snprintf(d->at_rgn, sizeof d->at_rgn, "%s",
 					 v->node[nd].label);
 			}
-			return;
 		}
+		from = at + 1u;
+		if (d->hits_clipped && d->at != KOF_BROKEN)
+			break;  /* the list is full and the row has its answer */
 	}
+	kof_match_state_free(&m);
+	if (d->at != KOF_BROKEN)
+		return;
 
 	/* Present, and nowhere the module looks. That is the finding. */
 	if (first != KOF_BROKEN) {
 		d->at = first;
+		d->cur_hit = 0;
 		if (first_nd < v->n_node && v->node[first_nd].mask) {
 			d->at_mask = v->node[first_nd].mask;
 			snprintf(d->at_rgn, sizeof d->at_rgn, "%s",
@@ -2075,10 +2169,22 @@ static int decl_kind(struct view *v, uint64_t off)
 	for (i = 0; i < v->n_decl; i++) {
 		const struct decl *d = &v->decl[i];
 
-		if (d->at == KOF_BROKEN)
+		uint32_t j;
+
+		if (!d->n_hits) {
+			/* Set by a path that never searched. One is still
+			 * better than none. */
+			if (d->at != KOF_BROKEN &&
+			    off >= d->at && off < d->at + d->len)
+				return 1;
 			continue;
-		if (off >= d->at && off < d->at + d->len)
-			return 1;
+		}
+		for (j = 0; j < d->n_hits; j++) {
+			if (off < d->hits[j])
+				break;  /* sorted: nothing later can contain it */
+			if (off < d->hits[j] + d->len)
+				return 1;
+		}
 	}
 	return 0;
 }
@@ -3157,7 +3263,7 @@ static uint32_t draft_hash(struct view *v)
 			for (j = 0; d->hexs[j]; j++)
 				MIX((uint8_t)d->hexs[j]);
 		else
-			for (j = 0; j < d->len; j++)
+			for (j = 0; j < d->nbytes; j++)
 				MIX(d->bytes[j]);
 	}
 	for (i = 0; i < v->n_grp; i++) {
@@ -3260,10 +3366,8 @@ static void draft_clear(struct view *v)
 {
 	uint32_t i;
 
-	for (i = 0; i < v->n_decl; i++) {
+	for (i = 0; i < v->n_decl; i++)
 		free(v->decl[i].bytes);
-		free(v->decl[i].msk);
-	}
 	memset(v->decl, 0, sizeof v->decl);
 	memset(v->grp, 0, sizeof v->grp);
 	memset(v->cnd, 0, sizeof v->cnd);
@@ -3395,6 +3499,62 @@ static uint32_t tgt_mix(uint32_t h, const char *tok)
 	return h + k;
 }
 
+static uint32_t pat_of(const uint8_t *b, uint32_t n, int hex);
+
+/*
+ * One spelling for one pattern, so a hash of it means something.
+ *
+ * The same marker is written three ways: "2E 2E 5C" in a source file, "2e2e5c"
+ * by somebody who prefers lower case, and "2E2E5C" when the panel rebuilds it
+ * from a pack that kept the compiled program and not the text. They are the
+ * same pattern, so the duplicate check has to see one string, not three.
+ */
+static void hex_canon(const char *in, char *out, size_t cap)
+{
+	size_t n = 0;
+
+	for (; *in && n + 1u < cap; in++) {
+		if (*in == ' ' || *in == '\t')
+			continue;
+		out[n++] = (char)toupper((unsigned char)*in);
+	}
+	out[n] = 0;
+}
+
+/*
+ * WHAT A DECLARATION HASHES TO - THE SPELLING, NOT THE BYTES.
+ *
+ * The source side of the duplicate check reads a .c file and hashes the text
+ * between the quotes. So the draft side has to hash the text it WOULD write
+ * between those quotes, or the two never agree. They never did for a hex
+ * marker: the file says "2E 2E 5C" and the draft hashed the three decoded
+ * bytes, so a rule was never reported as a duplicate of itself.
+ *
+ * And now it cannot even try, because a hex pattern with a wildcard has no
+ * decoded bytes at all - which is what turned a wrong answer into a null
+ * dereference.
+ */
+static uint32_t decl_pat(const struct decl *d)
+{
+	char t[DECL_HEXS_CAP];
+	size_t n = 0;
+	uint32_t k;
+
+	if (!d->hex)
+		return pat_of(d->bytes, d->nbytes, 0);
+	if (d->hexs[0]) {
+		hex_canon(d->hexs, t, sizeof t);
+		return pat_of((const uint8_t *)t, (uint32_t)strlen(t), 1);
+	}
+	/* Declared from a selection: generation writes it as plain pairs, so
+	 * that is the spelling this has to hash. */
+	for (k = 0; k < d->nbytes && n + 3u < sizeof t; k++)
+		n += (size_t)snprintf(t + n, sizeof t - n, "%02X",
+				      d->bytes[k]);
+	t[n] = 0;
+	return pat_of((const uint8_t *)t, (uint32_t)n, 1);
+}
+
 static uint32_t pat_of(const uint8_t *b, uint32_t n, int hex)
 {
 	uint32_t h = 2166136261u, i;
@@ -3508,6 +3668,13 @@ static int src_read(const char *path, struct src_ent *out)
 				     m + 1 < sizeof text; q++)
 					text[m++] = *q;
 				text[m] = 0;
+				if (hex) {
+					char c[sizeof text];
+
+					hex_canon(text, c, sizeof c);
+					m = strlen(c);
+					memcpy(text, c, m + 1u);
+				}
 				out->pat += pat_of((const uint8_t *)text,
 						   (uint32_t)m, hex);
 				out->n_pat++;
@@ -3669,104 +3836,40 @@ static int hexval(char c);
  * searched for.
  */
 /*
- * A HEX PATTERN AS THE ENGINE READS IT: A VALUE AND A MASK PER POSITION.
+ * A hex pattern, read by THE ENGINE'S COMPILER.
  *
- * The parse this replaced kept only the concrete bytes and stopped at the first
- * character that was not a hex digit, which is right for a pattern that has
- * none and quietly wrong for every pattern that does: "2E ?? 5C" came back as
- * the single byte 2E, so the row said the marker was one byte long and
- * decl_locate went looking for that one byte. Editing a working pattern to add
- * a wildcard made it stop matching at the wildcard.
+ * What stood here read the text itself and kept only the concrete bytes,
+ * stopping at the first character that was not a hex digit. That is right for
+ * a pattern with no wildcard in it and quietly wrong for every pattern that
+ * has one: "2E ?? 5C" came back as the single byte 2E, so the row said the
+ * marker was one byte long and the search went looking for that one byte -
+ * editing a working pattern to add a wildcard made it stop matching at the
+ * wildcard.
  *
- * This reads the same shapes hexcomp.c does - "??" and "?4" are nibble masks -
- * and reports the LENGTH IN POSITIONS, wildcards counted. Gaps ("[4-6]") and
- * alternations ("( E8 | E9 )") have no fixed length and no fixed mask, so they
- * cannot be searched for this way at all: `*ok` is cleared and the caller is
- * expected to say it cannot locate the pattern rather than locate a prefix of
- * it, which is what pointing at the wrong bytes with confidence looks like.
- */
-static uint32_t hexs_scan(const char *t, uint8_t *val, uint8_t *msk,
-			  uint32_t cap, int *ok)
-{
-	uint32_t n = 0;
-
-	*ok = 1;
-	while (*t && n < cap) {
-		uint8_t hi = 0, lo = 0;
-		int hi_any = 0, lo_any = 0;
-
-		while (*t == ' ' || *t == '\t')
-			t++;
-		if (!*t)
-			break;
-		if (*t == '[' || *t == '(' || *t == '|' || *t == ')') {
-			*ok = 0;
-			break;
-		}
-		if (*t == '?') {
-			hi_any = 1;
-		} else {
-			int h = hexval(*t);
-
-			if (h < 0) { *ok = 0; break; }
-			hi = (uint8_t)h;
-		}
-		t++;
-		if (*t == '?') {
-			lo_any = 1;
-		} else {
-			int l = hexval(*t);
-
-			if (l < 0) { *ok = 0; break; }
-			lo = (uint8_t)l;
-		}
-		t++;
-		val[n] = (uint8_t)((hi << 4) | lo);
-		msk[n] = (uint8_t)((hi_any ? 0x00u : 0xf0u) |
-				   (lo_any ? 0x00u : 0x0fu));
-		n++;
-	}
-	if (*t)
-		*ok = 0;        /* ran out of room: what is left is unread */
-	return n;
-}
-
-/*
- * Fill a declaration's bytes and mask from the pattern as written.
- *
- * One function for the three places a hex marker arrives - a source file, a
- * pack, and an edit - because a marker read one way and the same marker read
- * another must give the same draft, and three copies of this drifted apart
- * once already.
+ * The repair is not a better parser here. kof_hex_compile is the parser, it
+ * already knows "??" and "?4" and "[4-6]" and "( E8 | E9 )", it is what the
+ * build runs over the same text, and a second reading of the same syntax in
+ * this file would be a second thing to keep correct. So the panel compiles the
+ * pattern exactly as the database will and asks the compiler how long a match
+ * spans; the bytes array goes away, because a pattern with a wildcard has none.
  */
 static int decl_from_hexs(struct decl *d)
 {
-	size_t n = strlen(d->hexs);
-	uint32_t cap = (uint32_t)(n / 2u + 1u), i;
-	uint8_t *b, *m;
-	int ok = 1;
+	uint8_t prog[KOF_HEX_MAX_PROG];
+	struct kof_hex_stat st;
 
-	b = realloc(d->bytes, cap);
-	if (!b)
-		return 0;
-	d->bytes = b;
-	m = realloc(d->msk, cap);
-	if (!m)
-		return 0;
-	d->msk = m;
-	d->len = hexs_scan(d->hexs, d->bytes, d->msk, cap, &ok);
-	d->inexact = !ok;
-	/* A pattern with nothing wildcarded carries no mask: the compare in
-	 * decl_locate then costs what it always did. */
-	for (i = 0; i < d->len && d->msk[i] == 0xffu; i++)
-		;
-	if (i == d->len) {
-		free(d->msk);
-		d->msk = NULL;
+	free(d->bytes);
+	d->bytes = NULL;
+	d->nbytes = 0;
+	if (!kof_hex_compile(d->hexs, prog, sizeof prog, &st)) {
+		d->len = 0;
+		d->span_max = 0;
+		return 0;               /* kof_hex_error() says what is wrong */
 	}
+	d->len = st.min_span;
+	d->span_max = st.max_span;
 	return 1;
 }
-
 
 static int src_quoted(const char *p, char *out, size_t cap)
 {
@@ -4271,8 +4374,7 @@ no_head:
 				 * and the byte conversion below turns a "??"
 				 * into a 00, which is a different pattern. */
 				snprintf(d->hexs, sizeof d->hexs, "%s", text);
-				if (!decl_from_hexs(d))
-					continue;
+				decl_from_hexs(d);
 				(void)n; (void)k;
 				d->hex = 1;
 			} else {
@@ -4281,6 +4383,7 @@ no_head:
 				if (!d->bytes)
 					continue;
 				memcpy(d->bytes, text, d->len);
+				d->nbytes = d->len;
 				d->icase = strstr(line, "KOF_CASE_ICASE") != 0;
 				d->fullword = strstr(line,
 						     "KOF_WORD_FULLWORD") != 0;
@@ -4690,8 +4793,7 @@ static void draft_from_touch(struct view *v, const struct kof_touch *t)
 			snprintf(d->hexs, sizeof d->hexs, "%s", st->text);
 			if (!d->hexs[0])
 				continue;
-			if (!decl_from_hexs(d))
-				break;
+			decl_from_hexs(d);
 			(void)hn; (void)k;
 		} else {
 			d->bytes = malloc(st->pool_len);
@@ -4699,6 +4801,7 @@ static void draft_from_touch(struct view *v, const struct kof_touch *t)
 				break;
 			memcpy(d->bytes, st->pool, st->pool_len);
 			d->len = st->pool_len;
+			d->nbytes = d->len;
 		}
 		d->icase = (st->flags & KOF_STR_ICASE) != 0;
 		d->fullword = (st->flags & KOF_STR_FULLWORD) != 0;
@@ -4740,6 +4843,22 @@ static void draft_from_touch(struct view *v, const struct kof_touch *t)
 	}
 	if (!v->n_decl)
 		return;
+	/*
+	 * The pack says where ONE occurrence is; the pane wants them all.
+	 *
+	 * st->at is what the scan happened to stop on. Re-running the search
+	 * here fills the occurrence list and settles at/at_rgn the same way the
+	 * source path does, so a draft built from a database and a draft built
+	 * from a file light the same bytes. The declared region above is left
+	 * alone: the pack kept the strings and not the logic, so where the
+	 * bytes are IS the only reading of where the module would look.
+	 */
+	{
+		uint32_t di;
+
+		for (di = 0; di < v->n_decl; di++)
+			decl_locate(v, &v->decl[di]);
+	}
 
 	memset(&v->grp[0], 0, sizeof v->grp[0]);
 	v->n_grp = 1;
@@ -4887,8 +5006,7 @@ static const char *draft_dup(struct view *v, int *near)
 		return NULL;
 	tgt = draft_tgt(v);
 	for (i = 0; i < v->n_decl; i++) {
-		pat += pat_of(v->decl[i].bytes, v->decl[i].len,
-			      v->decl[i].hex);
+		pat += decl_pat(&v->decl[i]);
 		n++;
 	}
 	for (i = 0; i < g_n_src; i++) {
@@ -4918,9 +5036,7 @@ static const char *draft_dup(struct view *v, int *near)
 		if (g_src[i].n_pat + 1u != n && g_src[i].n_pat != n + 1u)
 			continue;
 		for (k = 0; k < v->n_decl; k++) {
-			uint32_t less = pat - pat_of(v->decl[k].bytes,
-						     v->decl[k].len,
-						     v->decl[k].hex);
+			uint32_t less = pat - decl_pat(&v->decl[k]);
 
 			if (g_src[i].pat == less &&
 			    g_src[i].n_pat + 1u == n) {
@@ -5517,12 +5633,12 @@ static void generate(struct view *v, int as_new)
 			if (d->hexs[0])
 				fputs(d->hexs, f);
 			else
-				for (j = 0; j < d->len; j++)
+				for (j = 0; j < d->nbytes; j++)
 					fprintf(f, "%02X", d->bytes[j]);
 			fprintf(f, "\");\n");
 		} else {
 			fprintf(f, "KOF_DEFINE_STR(s%u, \"", i);
-			decl_put_literal(f, d->bytes, d->len);
+			decl_put_literal(f, d->bytes, d->nbytes);
 			fprintf(f, "\", %s, %s);\n",
 				d->icase ? "KOF_CASE_ICASE" : "KOF_CASE_EXACT",
 				d->fullword ? "KOF_WORD_FULLWORD"
@@ -7072,7 +7188,7 @@ static void draw_decl(struct out *o, struct view *v)
 	for (i = 0; i < v->n_decl; i++, r++) {
 		const struct decl *d = &v->decl[i];
 		uint32_t k;
-		char sz[12];
+		char sz[24];
 
 		if (!PR_VIS(r))
 			continue;
@@ -7101,15 +7217,14 @@ static void draw_decl(struct out *o, struct view *v)
 		 * searched there, found here.
 		 */
 		/*
-		 * HOW LONG IT IS, OR THAT NOBODY CAN SAY.
+		 * HOW MUCH OF THE FILE IT COVERS, WHICH MAY BE A RANGE.
 		 *
-		 * A gap or an alternation has no one length - "2E [2-4] 5C" is
-		 * five bytes long, or six, or seven. Printing the number of
-		 * bytes read before the construct said "1", which is not a
-		 * shorter answer but a wrong one.
+		 * "6A 40 [4-6] 8D 4D" is six bytes long, or seven, or eight -
+		 * the compiler answers both ends and the column shows both,
+		 * because one number would have to be the wrong one.
 		 */
-		if (d->inexact)
-			snprintf(sz, sizeof sz, "?");
+		if (d->span_max > d->len)
+			snprintf(sz, sizeof sz, "%u-%u", d->len, d->span_max);
 		else
 			snprintf(sz, sizeof sz, "%u", d->len);
 		if (d->at == KOF_BROKEN) {
@@ -7148,7 +7263,10 @@ static void draw_decl(struct out *o, struct view *v)
 			 * whether it was found - and a box over the top of that
 			 * would hide the things being edited against.
 			 */
-			int room = g_cols - 9 - v->str_by[i][0];
+			int room = g_cols - (int)(d->n_hits > 1u
+						  ? STR_BTN_PREV + 1u
+						  : STR_BTN_E + 1u)
+				   - v->str_by[i][0];
 
 			if (room < 8)
 				room = 8;
@@ -7165,11 +7283,11 @@ static void draw_decl(struct out *o, struct view *v)
 		} else {
 			uint32_t from = v->decl_hoff / 2u;
 
-			if (from > d->len)
-				from = d->len;
-			for (k = from; k < d->len && k < from + 16u; k++)
+			if (from > d->nbytes)
+				from = d->nbytes;
+			for (k = from; k < d->nbytes && k < from + 16u; k++)
 				out_fmt(o, "%02X", d->bytes[k]);
-			if (d->len > from + 16u)
+			if (d->nbytes > from + 16u)
 				out_str(o, "...");
 		}
 		v->str_by[i][1] = (int)o->col_hint;
@@ -7181,10 +7299,23 @@ static void draw_decl(struct out *o, struct view *v)
 		 * one that can be undone by typing, not the one that removes a
 		 * marker. Red stays reserved for the button that destroys.
 		 */
-		out_at(o, PR(r), g_cols - 8);
+		if (d->n_hits > 1u) {
+			char cnt[8];
+
+			out_at(o, PR(r), g_cols - (int)STR_BTN_PREV);
+			out_fmt(o, "%s[<]" A_OFF, A_ID);
+			snprintf(cnt, sizeof cnt, "%u/%u%s",
+				 d->cur_hit + 1u, d->n_hits,
+				 d->hits_clipped ? "+" : "");
+			out_at(o, PR(r), g_cols - (int)STR_CNT);
+			out_fmt(o, A_DIM "%5.5s" A_OFF, cnt);
+			out_at(o, PR(r), g_cols - (int)STR_BTN_NEXT);
+			out_fmt(o, "%s[>]" A_OFF, A_ID);
+		}
+		out_at(o, PR(r), g_cols - (int)STR_BTN_E);
 		out_fmt(o, "%s[e]" A_OFF,
 			v->edit == ED_STR + (int)i ? A_SEL : A_ID);
-		out_at(o, PR(r), g_cols - 4);
+		out_at(o, PR(r), g_cols - (int)STR_BTN_X);
 		out_str(o, A_BAD "[x]" A_OFF);
 	}
 
@@ -7848,7 +7979,25 @@ static void draw_marker_line(struct out *o, struct view *v)
 
 have_right:
 	if (right[0]) {
-		int at = g_cols - (int)strlen(right) - 1;
+		int at, room = g_cols - (int)o->col_hint - 4;
+
+		/*
+		 * CUT TO FIT, NOT DROPPED FOR NOT FITTING.
+		 *
+		 * The test used to be "does the whole of it fit", and a message
+		 * that did not was simply not drawn - so the longest messages,
+		 * which are the ones that explain something, were the ones
+		 * nobody ever saw. The hex compiler's refusals are three lines
+		 * of advice and vanished entirely; the reader was left with a
+		 * marker of length zero and no reason for it.
+		 */
+		if (room > 8 && (int)strlen(right) > room) {
+			right[room - 3] = '.';
+			right[room - 2] = '.';
+			right[room - 1] = '.';
+			right[room] = 0;
+		}
+		at = g_cols - (int)strlen(right) - 1;
 
 		if (at > (int)o->col_hint + 2) {
 			out_at(o, mark_row(), at);
@@ -8646,7 +8795,7 @@ static int decl_text_editable(const struct decl *d)
 
 	if (d->hex)
 		return 1;
-	for (i = 0; i < d->len; i++)
+	for (i = 0; i < d->nbytes; i++)
 		if (d->bytes[i] < 0x20 || d->bytes[i] >= 0x7f)
 			return 0;
 	return 1;
@@ -8717,14 +8866,14 @@ static void decl_edit_open(struct view *v, uint32_t i)
 			uint32_t k;
 			size_t n = 0;
 
-			for (k = 0; k < d->len && n + 4u < sizeof v->sedit; k++)
+			for (k = 0; k < d->nbytes && n + 4u < sizeof v->sedit; k++)
 				n += (size_t)snprintf(v->sedit + n,
 						      sizeof v->sedit - n,
 						      k ? " %02X" : "%02X",
 						      d->bytes[k]);
 		}
 	} else {
-		uint32_t k, n = d->len;
+		uint32_t k, n = d->nbytes;
 
 		if (n >= sizeof v->sedit)
 			n = (uint32_t)sizeof v->sedit - 1u;
@@ -8771,8 +8920,16 @@ static void decl_edit_commit(struct view *v, uint32_t i)
 			return;
 		}
 		memcpy(d->hexs, v->sedit, n + 1u);
-		if (!decl_from_hexs(d))
+		/*
+		 * Refused by the same compiler the build uses, and in its own
+		 * words. A pattern the panel accepted and the build then threw
+		 * out is a rule that looked right in the viewer and does not
+		 * exist in the database.
+		 */
+		if (!decl_from_hexs(d)) {
+			say_note(v, "%s", kof_hex_error());
 			return;
+		}
 	} else {
 		nb = realloc(d->bytes, n + 1u);
 		if (!nb)
@@ -8780,6 +8937,7 @@ static void decl_edit_commit(struct view *v, uint32_t i)
 		d->bytes = nb;
 		memcpy(d->bytes, v->sedit, n);
 		d->len = (uint32_t)n;
+		d->nbytes = d->len;
 	}
 	if (!d->len) {
 		say_note(v, "string %u would be empty - left as it was",
@@ -8794,7 +8952,6 @@ static void decl_remove(struct view *v, uint32_t i)
 	if (i >= v->n_decl)
 		return;
 	free(v->decl[i].bytes);
-	free(v->decl[i].msk);
 	memmove(&v->decl[i], &v->decl[i + 1u],
 		(v->n_decl - i - 1u) * sizeof v->decl[0]);
 	v->n_decl--;
@@ -8825,6 +8982,7 @@ static void decl_add(struct view *v, int hex)
 		return;
 	for (k = lo; k <= hi; k++)
 		d->bytes[i++] = ob->buf.p[view_map(v, k, 0)];
+	d->nbytes = d->len;
 	d->hex = hex;
 	/* Fullword by default. A marker is a name, a path, a format string -
 	 * something with edges - far more often than it is a fragment of one,
@@ -11853,11 +12011,29 @@ static void click(struct view *v, int rclick)
 				if (r != want)
 					continue;
 				v->sel_decl = i;
-				if (g_mx >= g_cols - 4) {
+				if (g_mx >= g_cols - (int)STR_BTN_X) {
 					decl_remove(v, i);
-				} else if (g_mx >= g_cols - 8 &&
-					   g_mx < g_cols - 5) {
+				} else if (g_mx >= g_cols - (int)STR_BTN_E &&
+					   g_mx < g_cols - (int)STR_BTN_E + 3) {
 					decl_edit_open(v, i);
+				} else if (v->decl[i].n_hits > 1u &&
+					   g_mx >= g_cols - (int)STR_BTN_PREV &&
+					   g_mx < g_cols - (int)STR_BTN_PREV
+						   + 3) {
+					struct decl *d = &v->decl[i];
+
+					d->cur_hit = (d->cur_hit + d->n_hits
+						      - 1u) % d->n_hits;
+					view_show(v, d->hits[d->cur_hit]);
+				} else if (v->decl[i].n_hits > 1u &&
+					   g_mx >= g_cols - (int)STR_BTN_NEXT &&
+					   g_mx < g_cols - (int)STR_BTN_NEXT
+						   + 3) {
+					struct decl *d = &v->decl[i];
+
+					d->cur_hit = (d->cur_hit + 1u)
+						     % d->n_hits;
+					view_show(v, d->hits[d->cur_hit]);
 				} else if (v->edit == ED_STR + (int)i &&
 					   g_mx >= v->str_by[i][0]) {
 					/* A click inside the open field is a
@@ -11881,12 +12057,29 @@ static void click(struct view *v, int rclick)
 					 * run, which is the confirmation that
 					 * it is the right one.
 					 */
-					if (v->decl[i].at != KOF_BROKEN)
-						view_show(v, v->decl[i].at);
-					else
+					/*
+					 * BACK TO THE ONE YOU WERE ON.
+					 *
+					 * Not to the first: after stepping to
+					 * an occurrence and scrolling the pane
+					 * elsewhere, clicking the row is how
+					 * you return to it. The first is where
+					 * cur_hit starts, so nothing changes
+					 * for a marker that occurs once.
+					 */
+					struct decl *d = &v->decl[i];
+
+					if (d->n_hits) {
+						if (d->cur_hit >= d->n_hits)
+							d->cur_hit = 0;
+						view_show(v, d->hits[d->cur_hit]);
+					} else if (d->at != KOF_BROKEN) {
+						view_show(v, d->at);
+					} else {
 						say_note(v, "string %u is "
 							 "not in this object",
 							 i + 1u);
+					}
 				}
 				return;
 			}
