@@ -134,6 +134,54 @@ static uint32_t rar_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 }
 
 /*
+ * Does this RAR5 file header say its data is encrypted.
+ *
+ * RAR5 does not carry a "password" flag the way RAR3 does. Encryption is an
+ * EXTRA RECORD on the file header - type 1 - and the extra area is a list of
+ * (size, type, payload) at the end of the header. This parser read the area's
+ * size only to step over it and dropped the contents, so nothing here could
+ * ever tell an encrypted entry from a plain one: the data was handed to the
+ * decoder, which made nothing of ciphertext, and the archive was reported
+ * DAMAGED.
+ *
+ * That is the wrong word and it sends a reader the wrong way. UNSUPPORTED is a
+ * gap a later build closes; DAMAGED is a fact about the file; ENCRYPTED says no
+ * build will ever read this without a key. NeonBatsLoader.rar - nine entries,
+ * every one carrying a crypt record, with "password.txt" beside them - reported
+ * damaged.
+ *
+ * Walked defensively: the area lies at the END of the header, so its bounds
+ * come from hdr_end rather than from wherever the cursor happened to stop, and
+ * a record whose size does not advance ends the walk rather than repeating it.
+ */
+static int rar5_encrypted(kof_buf f, uint64_t hdr_end, uint64_t extra)
+{
+	uint64_t at;
+
+	if (!extra || extra > hdr_end)
+		return 0;
+	at = hdr_end - extra;
+	while (at < hdr_end) {
+		uint64_t rsize, rtype, next;
+		int ok;
+
+		rsize = rd_vint(f, &at, &ok);
+		if (!ok || rsize == 0)
+			return 0;
+		next = at + rsize;              /* size counts from here */
+		if (next <= at || next > hdr_end)
+			return 0;
+		rtype = rd_vint(f, &at, &ok);
+		if (!ok)
+			return 0;
+		if (rtype == KOF_RAR5_EXTRA_CRYPT)
+			return 1;
+		at = next;
+	}
+	return 0;
+}
+
+/*
  * The RAR5 block chain.
  *
  * Every block is a CRC, its own size, and then a header whose first two numbers say
@@ -155,7 +203,7 @@ static void rar5_walk(struct rw *s, kof_buf file)
 	kof_runs_add(&s->runs, file.n, 0, RAR5_MAGIC_LEN, KOF_RAR_CLS_HEADERS);
 
 	while (at + 4u < file.n) {
-		uint64_t hdr_start, hsize, htype, hflags, dsize = 0;
+		uint64_t hdr_start, hsize, htype, hflags, dsize = 0, extra = 0;
 		uint64_t hdr_end, blk_end;
 		int ok;
 
@@ -184,7 +232,7 @@ static void rar5_walk(struct rw *s, kof_buf file)
 		 * and then dropped: the area itself is inside hsize, so it needs no
 		 * run of its own and bounds nothing. */
 		if (hflags & KOF_RAR5_H_EXTRA) {
-			rd_vint(file, &at, &ok);
+			extra = rd_vint(file, &at, &ok);
 			if (!ok) break;
 		}
 		if (hflags & KOF_RAR5_H_DATA) {
@@ -288,6 +336,19 @@ static void rar5_walk(struct rw *s, kof_buf file)
 				if (comp & 0x40u) {
 					e->suspicious |= KOF_RAR_ENT_SOLID;
 					r->anomalies |= KOF_RAR_ANOM_SOLID;
+				}
+
+				/*
+				 * Encrypted, which RAR5 says in an extra record
+				 * rather than in a flag - see rar5_encrypted.
+				 * Marked here so the unpacker refuses the entry
+				 * instead of handing ciphertext to a decoder and
+				 * calling the result damaged.
+				 */
+				if (rar5_encrypted(file, hdr_end, extra)) {
+					e->suspicious |= KOF_RAR_ENT_ENCRYPTED;
+					r->anomalies |= KOF_RAR_ANOM_ENCRYPTED;
+					r->n_encrypted++;
 				}
 
 				if (nlen &&
@@ -614,6 +675,29 @@ int kof_rar_parse(kof_buf file, struct kof_rar_info *r, struct kof_obj_ctx *ctx)
 
 		if (size < B_BASE_LEN) {
 			r->anomalies |= KOF_RAR_ANOM_BAD_BLOCK;
+			break;
+		}
+
+		/*
+		 * ENCRYPTED HEADERS: everything after this block is ciphertext.
+		 *
+		 * The same shape the RAR5 walk already handles when it meets a
+		 * crypt block, and it was missing here. Walking on reads noise
+		 * as block headers - measured, a type byte of 0xda and a size of
+		 * 7401 out of one archive - so the walk produced zero entries
+		 * and the file was reported BAD_BLOCK or TRUNCATED. Both are
+		 * statements about a corrupt file, and these files are not
+		 * corrupt; they are locked.
+		 *
+		 * Three archives in this collection, all with the flag set on a
+		 * perfectly well formed main header.
+		 */
+		if (typ == KOF_RAR3_BLK_ARCHIVE &&
+		    (flags & KOF_RAR3_M_ENC_HEADERS)) {
+			r->anomalies |= KOF_RAR_ANOM_ENCRYPTED;
+			r->n_encrypted++;
+			kof_runs_add(&s.runs, file.n, at, size,
+				     KOF_RAR_CLS_HEADERS);
 			break;
 		}
 		if (at + size > file.n) {

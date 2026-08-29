@@ -110,6 +110,18 @@ enum {
 	KOF_RAR5_H_DATA  = 0x0002   /* a data area follows the block */
 };
 
+/*
+ * Extra-record types on a RAR5 file header.
+ *
+ * Only the one that changes what can be said about an entry is named. RAR5 has
+ * no password flag - encryption is this record - so an archive whose entries
+ * all carry it is encrypted, and saying "damaged" instead sends a reader to
+ * look for a corruption that is not there.
+ */
+enum {
+	KOF_RAR5_EXTRA_CRYPT = 1
+};
+
 enum {
 	KOF_RAR5_F_DIR      = 0x0001,
 	KOF_RAR5_F_TIME     = 0x0002,  /* four bytes of mtime are present */
@@ -126,6 +138,18 @@ enum {
 	KOF_RAR3_F_LARGE        = 1u << 8,   /* the 64 bit halves are present */
 	KOF_RAR3_F_UNICODE      = 1u << 9,
 	KOF_RAR3_F_ADD_SIZE     = 1u << 15   /* data follows the header */
+};
+
+/*
+ * Flags that mean something only on the RAR3 archive header (KOF_RAR3_BLK_ARCHIVE).
+ *
+ * The bit values collide with the file-header flags above and mean different
+ * things, which is why they are named apart rather than added to that set.
+ */
+enum {
+	/* Every block header AFTER this one is ciphertext. Not "some entry is
+	 * encrypted" - the archive's structure itself is unreadable. */
+	KOF_RAR3_M_ENC_HEADERS = 1u << 7
 };
 
 /* Methods, 0x30 through 0x35. Only "stored" changes what can be done. */
