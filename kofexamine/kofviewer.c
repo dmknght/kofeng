@@ -9650,10 +9650,12 @@ static void prop_pe(const struct object *ob)
  * makes the walk a string operation and not a second tree: whatever the tree
  * pane shows, this reads the same names.
  *
- * Numbered UP from the object being looked at, so "Enclosing 1" is the thing
- * that produced it whether the chain is one deep or four. Numbering down from
- * the file would mean the label of the immediate parent changed with the depth
- * of the object, which is the one thing a reader uses it for.
+ * NUMBERED BY DEPTH, from the file down. The file is 0, what it produced is 1,
+ * and so on to the object in focus - the same direction the engine reached them
+ * and the same direction the panel is read in. It counted the other way at
+ * first, up from the object being looked at, and that put the highest number at
+ * the top of the screen: the two blocks read as a chain and their numbers ran
+ * against it.
  */
 static int obj_by_name(const struct view *v, const char *name, size_t n)
 {
@@ -9826,15 +9828,26 @@ static void prop_build(struct view *v)
 		for (k = 0; k < n_up; k++) {
 			char head[32];
 
-			/* Counted up from the object being looked at, so 1 is
-			 * always its immediate container however deep it is. */
-			snprintf(head, sizeof head, "Enclosing %u", n_up - k);
+			/* k is the depth: 0 is the file, and the count runs the
+			 * way the blocks are stacked. */
+			snprintf(head, sizeof head, "Enclosing %u", k);
 			prop_head(head);
 			prop_object_rows(v, up[k], 0);
 		}
-	}
+		if (n_up) {
+			char head[32];
 
-	prop_head("Object");
+			/* The chain's last link carries its own number, so the
+			 * sequence does not stop one short of the thing it was
+			 * counting towards. On a file with nothing above it the
+			 * number would be the only one on the page and says
+			 * nothing, so it is left off. */
+			snprintf(head, sizeof head, "Object %u", n_up);
+			prop_head(head);
+		} else {
+			prop_head("Object");
+		}
+	}
 	prop_object_rows(v, ob, 1);
 
 	if (ob->fmt && ob->info) {

@@ -144,6 +144,33 @@ static int pool_intern(struct dedup *d, struct buf *pool, const void *data,
 }
 
 /*
+ * A C STRING into the name pool, terminator and all.
+ *
+ * pool_intern is the byte primitive and serves two pools with two different
+ * conventions: the string pool holds patterns, which are bytes and end where
+ * their length says, and the name pool holds C strings, which end at a NUL that
+ * has to be WRITTEN because nothing appends one.
+ *
+ * Keeping those two straight was left to each caller remembering to add one to
+ * a strlen, and the first caller that did not paid for it in a way that looked
+ * like something else entirely: the source path went in without its terminator,
+ * the very next string interned - a variant name - landed immediately after it,
+ * and reading the path back returned "signatures/Prometei_00.c" run together
+ * with "p1tox". Nothing had confused a path with a variant name; there was
+ * simply no boundary between them, and a C string read finds the next NUL in
+ * the pool whoever it belongs to.
+ *
+ * So the name pool gets its own front door and the convention stops being a
+ * thing to remember.
+ */
+static int name_intern(struct dedup *d, struct buf *pool, const char *str,
+		       uint32_t *out_off, uint32_t *out_uid)
+{
+	return pool_intern(d, pool, str, (uint32_t)strlen(str) + 1u,
+			   out_off, out_uid);
+}
+
+/*
  * Everything the first pass produces. Held together so the second pass has one
  * thing to read from and the failure path has one thing to release.
  */
@@ -296,10 +323,9 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 		 */
 		{
 			const char *fam = m->family ? m->family : "";
-			uint32_t flen = (uint32_t)strlen(fam) + 1;
 			uint32_t family_uid;
 
-			if (!pool_intern(&dn, &b->name_pool, fam, flen,
+			if (!name_intern(&dn, &b->name_pool, fam,
 					 &o->family_off, &family_uid))
 				goto out;
 		}
@@ -308,12 +334,7 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 		if (m->src && m->src[0]) {
 			uint32_t src_uid;
 
-			/* +1: pool_intern writes exactly the bytes it is given
-			 * and appends nothing, so the terminator is part of the
-			 * string. Without it the entry runs into the next one
-			 * and the path came back as "…/x.cp1tox". */
-			if (!pool_intern(&dn, &b->name_pool, m->src,
-					 (uint32_t)strlen(m->src) + 1u,
+			if (!name_intern(&dn, &b->name_pool, m->src,
 					 &o->src_off, &src_uid))
 				goto out;
 		}
@@ -379,12 +400,11 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 			b->rng[ri] = m->rng[k];
 		for (k = 0; k < m->n_names; k++, ni++) {
 			const struct kof_pw_name *nm = &m->name[k];
-			uint32_t off, tlen, nuid;
+			uint32_t off, nuid;
 			if (!nm->text)
 				goto out;
-			tlen = (uint32_t)strlen(nm->text) + 1;   /* with the NUL */
 			/* Names share the pool too, but nothing keys on their id. */
-			if (!pool_intern(&dn, &b->name_pool, nm->text, tlen, &off,
+			if (!name_intern(&dn, &b->name_pool, nm->text, &off,
 					 &nuid))
 				goto out;
 			(void)nuid;
