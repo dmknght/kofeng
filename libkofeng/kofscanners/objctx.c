@@ -1798,6 +1798,69 @@ static uint64_t emu_pages(const struct kof_scanner *sc)
 }
 
 /*
+ * IS THIS IMAGE ANYTHING THE RUN ACTUALLY MADE?
+ *
+ * A stub copies itself before it unpacks - UPX maps its own file, relocates
+ * into the copy and mprotects it executable - and that copy trips the same
+ * "memory made executable" test the payload does. Measured over the malware
+ * corpus: of 15 objects that reached the instruction ceiling, every single one
+ * handed back exactly one image, and every one of those was the UPX stub,
+ * recognisable by the strings it carries about /proc/self/exe. Those bytes are
+ * already in the object, which is already being scanned, so a child made of
+ * them can find nothing that was not going to be found anyway - and it puts a
+ * node in the tree that a person then has to work out is not the payload.
+ *
+ * Decided by asking whether the content is ALREADY IN THE FILE, which is the
+ * general form of the question and holds for any self-copying stub rather than
+ * for UPX in particular. Three probes rather than one because a decompressed
+ * payload can easily repeat one short run of the file it came from; all three
+ * matching means this is a copy. Zero-filled probes are skipped - they say
+ * nothing about origin - and an image with nothing but those is not worth
+ * emitting either.
+ *
+ * The search is the engine's own, over the object's own match context, so this
+ * costs what a signature costs and behaves the same way.
+ */
+#define NOVEL_PROBE  32u
+#define NOVEL_TRIES  16u
+
+static int emu_novel(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	unsigned k, tried = 0, found = 0;
+
+	if (n < NOVEL_PROBE)
+		return 0;
+	for (k = 1; k <= NOVEL_TRIES; k++) {
+		uint64_t at = (n - NOVEL_PROBE) * k / (NOVEL_TRIES + 1u);
+		unsigned j;
+
+		for (j = 0; j < NOVEL_PROBE; j++)
+			if (p[at + j])
+				break;
+		if (j == NOVEL_PROBE)
+			continue;               /* all zeroes: says nothing */
+		tried++;
+		if (kof_match_in(&sc->m, 0, ctx->obj_size, p + at, NOVEL_PROBE,
+				 KOF_CASE_EXACT, KOF_WORD_SUBSTRING))
+			found++;
+	}
+	/*
+	 * Nothing but zeroes is not a payload either.
+	 *
+	 * A MAJORITY rather than all of them, and that is the whole reason this
+	 * is a proportion instead of a search. The stub's copy of itself is not
+	 * byte-identical to the file - it relocates into the copy before it
+	 * runs there - so asking whether any one run of bytes is present
+	 * answered "new" for most probes and let all fifteen through. What
+	 * separates the two cases is how MUCH of the image the file already
+	 * contains: a relocated stub is nearly all of it, a decompressed
+	 * payload is almost none.
+	 */
+	return tried && found * 2u < tried;
+}
+
+/*
  * Hand one recovered image to the sink. Emitted in pieces because c_emit takes
  * a uint32 length and refuses anything over EMIT_MAX - a decompressor already
  * works a window at a time and so does this.
@@ -1871,14 +1934,32 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	sc->emu_stage = 1;
 	for (any = 0, it = 0;
 	     kof_emu_next_snapshot(e, &it, &va, &bytes, &len); ) {
+		if (!emu_novel(ctx, bytes, len))
+			continue;               /* the stub's own copy of itself */
 		any = 1;
 		if (!emu_give(ctx, bytes, len))
 			break;
 		if (c_child(ctx))
 			made++;
 	}
-	if (!any)
+	/*
+	 * The written-memory fallback needs the run to have FINISHED.
+	 *
+	 * A snapshot is a packer saying "this is code now" about its own
+	 * output, so it is a payload whenever it exists. Written memory is not:
+	 * it is everything the guest touched, stack and scratch included, and
+	 * it is only the whole of what was produced once the guest has stopped
+	 * on its own terms. Measured over the malware corpus - of 17 objects no
+	 * static unpacker opened, 2 ran to their own exit and yielded an 86 KB
+	 * ELF each, and the other 15 hit the instruction ceiling and yielded
+	 * four to twelve kilobytes of stub and stack. Handing those back cost a
+	 * scan 15 child objects that were not payloads and could not be.
+	 */
+	if (!any && (rep.stop == KOF_EMU_STOP_EXIT ||
+		     rep.stop == KOF_EMU_STOP_HANDOFF))
 		for (it = 0; kof_emu_next_written(e, &it, &va, &bytes, &len); ) {
+			if (!emu_novel(ctx, bytes, len))
+				continue;
 			if (!emu_give(ctx, bytes, len))
 				break;
 			if (c_child(ctx))
