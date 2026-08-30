@@ -469,9 +469,25 @@ static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ct
  * lose. The same policy that already decides whether to keep running detectors
  * decides whether to open the container.
  */
+/*
+ * HOW MANY LAYERS OF PACKING THE INTERPRETER WILL GO THROUGH.
+ *
+ * Counted in PACKER layers, not tree depth - a tar inside a tar is not two
+ * layers of packing, and pdepth already makes that distinction for the
+ * heuristic. Emulator output is marked as a packer's, so it adds a layer like
+ * any other unpacked payload.
+ *
+ * Two, because a packer wrapped in another packer is a real thing and a third
+ * layer has not been seen: no object in the malware corpus reaches even the
+ * second by this route. The reason for a ceiling at all is cost - each layer is
+ * its own budget, up to 256 million instructions, so an object crafted to nest
+ * could otherwise spend minutes of a scan on itself.
+ */
+#define EMU_MAX_PACKER_DEPTH 1u
+
 static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			 const struct kof_scan_option *opt,
-			 const struct kof_result *res)
+			 const struct kof_result *res, uint32_t pdepth)
 {
 	uint32_t i;
 	int applies = 0;
@@ -557,6 +573,7 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * it: once the tree's budget is gone there is nothing to spend.
 	 */
 	if (!sc->broken && opt->emu_use != KOF_EMU_NEVER &&
+	    pdepth <= EMU_MAX_PACKER_DEPTH &&
 	    (opt->emu_use == KOF_EMU_ONLY || !sc->packed_here)) {
 		if (kof_scan_emu_unpack(ctx, opt->emu_use == KOF_EMU_ONLY))
 			applies = 1;
@@ -749,7 +766,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	sc->st.bytes_searched += sc->m.n_bytes_scanned;
 	sc->st.gram_bytes     += sc->m.n_bytes_indexed;
 
-	out->broken = unpack_object(sc, &ctx, opt, out);
+	out->broken = unpack_object(sc, &ctx, opt, out, pdepth);
 
 	/* Last, because the unpack result is one of the facts. */
 	heur_object(sc, &ctx, opt, pdepth, out->broken == KOF_BROKEN_DAMAGED, out);
