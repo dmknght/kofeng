@@ -64,6 +64,7 @@
 #include "kofinspect.h"
 #include "../libkofeng/kofheur/kofheur.h"
 #include "../libkofeng/kofscanners/scan.h"
+#include "../libkofeng/kofunpack/emu_unpack.h"
 #include "../libkofeng/kofmatchers/kofmatch.h"
 #include "../libkofeng/kofmatchers/hexprog.h"
 #include "../libkofeng/kofdb/kofpack.h"
@@ -912,6 +913,13 @@ struct object {
 	uint32_t          n_finding;
 	char              packer[48];   /* the module that opened or unpacked it */
 	/*
+	 * What the scanner's own gate makes of this object, when no module
+	 * claimed it: KOF_EMU_UNP_* . Computed once beside the parse rather
+	 * than while drawing - it reads every executable segment, and the
+	 * status line is repainted on every keystroke.
+	 */
+	uint8_t           emu_why;
+	/*
 	 * The version that module read out of the object, or -1 for none.
 	 *
 	 * Signed and not a flag beside a uint, because 0 is a version a container
@@ -1268,10 +1276,13 @@ struct view {
 	 * are fast, and where one applies it is the better answer. One is the
 	 * interpreter, in place of them.
 	 *
-	 * Kept across file_open like basedir and dbdir, because it is a
-	 * property of the session rather than of the file - stepping to the
-	 * next sample while looking at emulator output should keep looking at
-	 * emulator output.
+	 * NOT kept when the file changes, unlike basedir and dbdir. It is a
+	 * question asked about ONE object - "what does this look like if it is
+	 * run instead of read" - and carrying the answer to the next sample
+	 * means every step through a directory pays for an interpretation
+	 * nobody asked for, which on a large object is tens of seconds. So
+	 * stepping to another file starts over on the static unpackers, and the
+	 * researcher who wants the other answer asks for it again.
 	 */
 	int         emu_mode;
 
@@ -1615,6 +1626,10 @@ static void objects_examine(struct view *v, kof_engine *eng)
 		o->fmt = kof_inspect_identify(o->buf, &o->ctx, &o->info);
 		if (!o->fmt)
 			o->ctx.obj_size = o->buf.n;
+		if (o->fmt && o->info && o->ctx.format == KOF_FMT_ELF)
+			o->emu_why = (uint8_t)kof_emu_unp_gate(&o->ctx, o->info,
+							       o->buf.p,
+							       o->buf.n);
 		if (eng &&
 		    !kof_touch_object(eng, o->buf, &o->ctx,
 				      (const char *const *)o->finding,
@@ -7782,6 +7797,29 @@ ids_done:
 
 }
 
+/*
+ * The two halves of what the gate found, spelled once.
+ *
+ * A short tag for the status line, where there is room for a name and not a
+ * sentence, and the reason for the dashboard, where there is room for both.
+ * Two wordings for two strengths of claim: dense executable segments select
+ * nothing across 1 246 clean binaries, so that one is a statement; a header
+ * that cannot be loaded is weaker, because every instance of it in the malware
+ * corpus turned out to be a truncated file rather than a packed one.
+ */
+static const char *emu_why_tag(uint8_t why)
+{
+	return why == KOF_EMU_UNP_WHY_DENSE ? "Unknown packer"
+	     : why == KOF_EMU_UNP_WHY_BROKEN ? "Possible packer" : NULL;
+}
+
+static const char *emu_why_reason(uint8_t why)
+{
+	return why == KOF_EMU_UNP_WHY_DENSE
+	       ? "executable segments too dense to be code"
+	       : "header cannot be loaded as written";
+}
+
 static void draw_marker_line(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
@@ -7861,6 +7899,19 @@ static void draw_marker_line(struct out *o, struct view *v)
 		else
 			out_fmt(o, "%s%s" A_OFF, pcol, ob->packer);
 		out_str(o, A_DIM "  |  " A_OFF);
+	} else if (emu_why_tag(ob->emu_why)) {
+		/*
+		 * NO MODULE NAMED IT, AND IT STILL LOOKS PACKED.
+		 *
+		 * The same slot, because it answers the same question - what
+		 * got this object into the shape it is in - and a reader who
+		 * has learnt to look here for "UPX.ELF v13" should find the
+		 * next best answer in the same place rather than nowhere.
+		 */
+		out_fmt(o, "%s%s" A_OFF,
+			ob->emu_why == KOF_EMU_UNP_WHY_DENSE ? A_BAD : A_WARN,
+			emu_why_tag(ob->emu_why));
+		out_str(o, A_DIM "  |  " A_OFF);
 	}
 
 	if (!ob->n_touch) {
@@ -7880,7 +7931,19 @@ static void draw_marker_line(struct out *o, struct view *v)
 		 * verdict and a reader should be able to match the two by eye
 		 * rather than by working out that they are about one thing.
 		 */
-		if (heur_reports(ob, &hsc, &hguess))
+		/*
+		 * The packer tag wins the line when both apply.
+		 *
+		 * They are not competing readings of the same evidence - one
+		 * says something hid this object's code, the other that its
+		 * structure is wrong - but the status line holds one and the
+		 * packer is the one worth acting on: it names a button to
+		 * press. The heuristic verdict is not lost, it is on the
+		 * dashboard a keystroke away, on its own line.
+		 */
+		if (emu_why_tag(ob->emu_why))
+			out_str(o, A_DIM "no markers" A_OFF);
+		else if (heur_reports(ob, &hsc, &hguess))
 			out_fmt(o, A_BAD "Heur:%s#s%d" A_OFF A_DIM
 				"  no marker" A_OFF, hguess, hsc);
 		else
@@ -9742,13 +9805,10 @@ enum bar_item {
 	 */
 	BI_DUMP, BI_DUMP_STATIC, BI_DUMP_EMU,
 	/*
-	 * Re-open the object with the other unpacker.
+	 * Examine this object again with the other unpacker in front of it.
 	 *
-	 * Named for what it does rather than for what it is: "reopen" is the
-	 * visible effect - the tree is rebuilt and the draft is gone - and
-	 * naming the unpacker says which of the two answers is about to be on
-	 * screen. The label changes with the mode, so it always states the
-	 * thing that will happen rather than the state that is.
+	 * The label changes with the mode, so it always states the thing that
+	 * will happen rather than the state that is. See bar_label.
 	 */
 	BI_UNPACKER,
 	BI_REBUILD,
@@ -9805,9 +9865,17 @@ static int bar_has_sub(int i)
  */
 static const char *bar_label(struct view *v, int i)
 {
+	/*
+	 * "Examine with", not "Reopen with". Reopening is the mechanism, and
+	 * naming a menu item after its mechanism tells the reader what the tool
+	 * will DO rather than what they will get. What they get is the same
+	 * examination of the same object with the other unpacker in front of it
+	 * - and it is a question asked once about this file, not a mode the
+	 * session enters, which is why it does not follow them to the next one.
+	 */
 	if (i == BI_UNPACKER)
-		return v->emu_mode ? "Reopen with static unpacker"
-				   : "Reopen with emulator";
+		return v->emu_mode ? "Examine with static unpacker"
+				   : "Examine with emulator";
 	return bar_item[i].label;
 }
 
@@ -10589,6 +10657,38 @@ no_regions:
 	 * breakdown is a number to be believed rather than read, and this page
 	 * exists to be read.
 	 */
+	/*
+	 * WHO OPENED IT, OR WHAT SAYS SOMETHING SHOULD HAVE.
+	 *
+	 * Its own section rather than a line under Heuristic, because it is a
+	 * different kind of statement: the heuristic scores STRUCTURE and
+	 * reports a level, while this says a packer is involved and names the
+	 * one thing a reader can do about it. Filing them together put "the
+	 * code is hidden" beside "the file is truncated" as though they were
+	 * two readings of one measurement.
+	 */
+	if (ob->packer[0] || emu_why_tag(ob->emu_why)) {
+		prop_head("Packer");
+		if (ob->packer[0] && ob->packer_ver >= 0)
+			prop_add(A_OFF, "  %-11s " A_BAD "%s" A_OFF A_DIM
+				 "  v%lld" A_OFF, "unpacker", ob->packer,
+				 ob->packer_ver);
+		else if (ob->packer[0])
+			prop_add(A_OFF, "  %-11s " A_BAD "%s" A_OFF,
+				 "unpacker", ob->packer);
+		else
+			prop_add(A_OFF, "  %-11s %s%s" A_OFF A_DIM "  %s" A_OFF,
+				 "verdict",
+				 ob->emu_why == KOF_EMU_UNP_WHY_DENSE
+				 ? A_BAD : A_WARN,
+				 emu_why_tag(ob->emu_why),
+				 emu_why_reason(ob->emu_why));
+		if (!ob->packer[0])
+			prop_add(A_DIM,
+				 "  %-11s Analysis > Examine with emulator",
+				 "try");
+	}
+
 	{
 		const struct kof_heur_model *hm = kof_heur_default();
 		struct kof_heur_facts hf;
@@ -10894,6 +10994,35 @@ static const char *base_name(const char *path)
 	return s ? s + 1 : path;
 }
 
+/*
+ * SAY SO WHEN THE FILE LOOKS PACKED AND NOTHING OPENED IT.
+ *
+ * The one case where the menu item above is the right thing to press, and the
+ * one case a reader has no way to recognise from the screen: the tree is one
+ * node deep, the strings are nothing, and that looks exactly like an ordinary
+ * stripped binary. What separates them is what the scanner's own gate looks at
+ * - a code region too dense to be code, or a header that cannot be loaded as
+ * written - so this asks the same question with the same code rather than
+ * inventing a second opinion about it.
+ *
+ * Only when the static unpackers produced nothing. A file a module opened has
+ * already been taken apart, and telling somebody to run it as well would be
+ * offering them the slower of two answers they already have.
+ */
+static void hint_packed(struct view *v)
+{
+	struct object *o0 = &v->obj[0];
+
+	if (v->emu_mode || v->n_obj != 1 || !o0->emu_why)
+		return;
+	v->act_ok = 0;
+	snprintf(v->act_msg, sizeof v->act_msg,
+		 "%s - try Analysis > Examine with emulator",
+		 o0->emu_why == KOF_EMU_UNP_WHY_BROKEN
+		 ? "no unpacker opened it and its header cannot be loaded"
+		 : "no unpacker opened it and its code is too dense to be code");
+}
+
 /* Re-opening is how the tree is rebuilt, and both dumping and switching
  * unpacker need it. Declared here because both come before it. */
 static int file_open(struct view *v, const char *path, kof_engine *eng);
@@ -11152,6 +11281,15 @@ static void open_step(struct view *v, int dir)
 		return;
 	if (!file_open(v, next, v->eng))
 		return;                 /* file_open left the reason */
+	/*
+	 * Unless file_open already had something to say. "opened <name>" is a
+	 * confirmation of the thing the reader just did and can see; a note
+	 * that this file looks packed and nothing opened it is the one thing on
+	 * the screen they could not have worked out, and it was being written
+	 * over one line after it was produced.
+	 */
+	if (v->act_msg[0])
+		return;
 	v->act_ok = 1;
 	snprintf(v->act_msg, sizeof v->act_msg, "opened %.60s",
 		 base_name(v->path));
@@ -13580,9 +13718,14 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	char basedir[sizeof v->basedir];
 	char dbdir[sizeof v->dbdir];
 	char keep[KOF_DUMP_PATH_ROOM];
-	int  emu_mode = v->emu_mode;
+	/*
+	 * Kept only when this is the same file being rebuilt - which is what
+	 * the menu item does - and dropped when it is a different one.
+	 */
+	int  emu_mode;
 
 	snprintf(keep, sizeof keep, "%s", path);
+	emu_mode = (v->path && strcmp(v->path, keep) == 0) ? v->emu_mode : 0;
 
 	fd = open(keep, O_RDONLY);
 	if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
@@ -13672,6 +13815,7 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	/* Whatever was auto-loaded is what this file started as, so it is not
 	 * unsaved work. */
 	v->saved_hash = draft_hash(v);
+	hint_packed(v);
 	return 1;
 }
 
