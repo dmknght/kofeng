@@ -3586,7 +3586,7 @@ static void draft_reset(struct view *v)
 	v->sel_decl = 0;
 	v->cur_grp = v->cur_cnd = 0;
 	v->warn[0] = 0;
-	say_note(v, "panel cleared");
+	say_note(v, "Panel cleared");
 }
 
 /* ---- reading a signature back out of its source ---------------------------
@@ -5049,7 +5049,7 @@ static void draft_from_touch(struct view *v, const struct kof_touch *t)
 	v->n_cnd = 1;
 	v->cur_cnd = 0;
 	say_note(v,
-		 "loaded %u string(s) from %s - check the matcher, the logic is "
+		 "Loaded %u string(s) from %s - check the matcher, the logic is "
 		 "not in the database", v->n_decl,
 		 t->family[0] ? t->family : "the database");
 	v->saved_hash = draft_hash(v);
@@ -5101,7 +5101,7 @@ static void draft_show(struct view *v, uint32_t idx)
 			 * are wrong, and a loaded file is not one. */
 			v->warn[0] = 0;
 			if (rc < 0)
-				say_note(v, "only partly read - check it "
+				say_note(v, "Only partly read - check it "
 					    "against the file");
 			return;
 		}
@@ -5261,9 +5261,9 @@ static const char *draft_missing(struct view *v)
 	 * directory entry along.
 	 */
 	if (v->foreign)
-		return "custom logic - read only, edit the file directly";
+		return "Custom logic - read only, edit the file directly";
 	if (!v->family[0])
-		return "name the family";
+		return "Name the family";
 	/*
 	 * A NAME, AND ONLY THE CHARACTERS A NAME HAS.
 	 *
@@ -5280,15 +5280,15 @@ static const char *draft_missing(struct view *v)
 	 * early, legible half of that check, not the whole of it.
 	 */
 	if (!name_chars_ok(v->family))
-		return "family: letters, digits, . - _ only";
+		return "Family: letters, digits, . - _ only";
 	for (i = 0; i < v->n_cnd; i++)
 		if (v->cnd[i].var_kind == 2 && v->cnd[i].variant[0] &&
 		    !name_chars_ok(v->cnd[i].variant))
-			return "variant: letters, digits, . - _ only";
+			return "Variant: letters, digits, . - _ only";
 	if (!v->n_decl)
-		return "declare a string";
+		return "Declare a string";
 	if (!v->n_grp)
-		return "add a matcher";
+		return "Add a matcher";
 	/*
 	 * TWO MATCHERS THAT ASK THE SAME THING, INCLUDING THE THRESHOLD.
 	 *
@@ -5315,12 +5315,12 @@ static const char *draft_missing(struct view *v)
 
 		for (j = i + 1u; j < v->n_grp; j++)
 			if (grp_same_call(v, i, j))
-				return "two matchers ask the same thing - "
+				return "Two matchers ask the same thing - "
 				       "remove one or change a threshold";
 	}
 	for (i = 0; i < v->n_grp; i++)
 		if (!grp_count(v, i))
-			return "every matcher needs a string";
+			return "Every matcher needs a string";
 	/*
 	 * What one call can hold.
 	 *
@@ -5332,10 +5332,10 @@ static const char *draft_missing(struct view *v)
 	 */
 	for (i = 0; i < v->n_grp; i++)
 		if (grp_count(v, i) > 16u)
-			return "a matcher holds at most 16 markers - "
+			return "A matcher holds at most 16 markers - "
 			       "split it in two";
 	if (!v->n_cnd)
-		return "add a condition";
+		return "Add a condition";
 	for (i = 0; i < v->n_cnd; i++) {
 		/*
 		 * A condition with children and no matchers of its own is a
@@ -5347,7 +5347,7 @@ static const char *draft_missing(struct view *v)
 		 * decide something needs something to decide it on.
 		 */
 		if (!v->cnd[i].expr[0] && !cnd_children(v, i))
-			return "every condition needs a matcher";
+			return "Every condition needs a matcher";
 	}
 
 	/*
@@ -5467,7 +5467,7 @@ static void generate(struct view *v, int as_new)
 		}
 		dup = draft_dup(v, &near);
 		if (dup && !near) {
-			say_note(v, "same markers as %s - edit that instead",
+			say_note(v, "Same markers as %s - edit that instead",
 				 dup);
 			return;
 		}
@@ -5481,9 +5481,9 @@ static void generate(struct view *v, int as_new)
 		 */
 		if (!draft_dirty(v) && v->gen_path[0]) {
 			say_note(v, "%s",
-				 as_new ? "nothing changed - a copy would be a "
+				 as_new ? "Nothing changed - a copy would be a "
 					  "duplicate"
-					: "nothing changed since the last save");
+					: "Nothing changed since the last save");
 			return;
 		}
 	}
@@ -5541,7 +5541,7 @@ static void generate(struct view *v, int as_new)
 		if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
 			snprintf(dir, sizeof dir, "%s", v->basedir);
 		if (kof_mkdir(dir, 0777) != 0 && errno != EEXIST) {
-			say_err(v, "cannot create %.90s", dir);
+			say_err(v, "Cannot create %.90s", dir);
 			return;
 		}
 		/*
@@ -5616,7 +5616,7 @@ static void generate(struct view *v, int as_new)
 	}
 	f = fopen(path, "w");
 	if (!f) {
-		say_err(v, "cannot write %.90s", path);
+		say_err(v, "Cannot write %.90s", path);
 		return;
 	}
 
@@ -5907,7 +5907,7 @@ static void generate(struct view *v, int as_new)
 	snprintf(v->gen_path, sizeof v->gen_path, "%.*s",
 		 (int)sizeof v->gen_path - 1, path);
 	if (!v->gen_ok) {
-		say_err(v, "could not write the file");
+		say_err(v, "Could not write the file");
 		return;
 	}
 	/* A source has just appeared in the tree, or an existing one has moved
@@ -6478,11 +6478,11 @@ static void rng_apply(struct view *v, int verb, uint32_t target, uint32_t here)
 	switch (verb) {
 	case 0:
 		rng_retarget(v, target, here);
-		say_note(v, "%s", "scan range switched");
+		say_note(v, "%s", "Scan range switched");
 		break;
 	case 1:
 		rng_retarget(v, target, target | here);
-		say_note(v, "%s", "scan range extended");
+		say_note(v, "%s", "Scan range extended");
 		break;
 	case 2: {
 		/*
@@ -6500,27 +6500,27 @@ static void rng_apply(struct view *v, int verb, uint32_t target, uint32_t here)
 
 		for (k = 0; k < v->n_grp; k++)
 			if (grp_has_range(v, k) && grp_mask(v, k) == here) {
-				say_note(v, "%s", "a matcher already searches "
+				say_note(v, "%s", "A matcher already searches "
 					 "that range");
 				return;
 			}
 		for (k = 0; k < v->n_rng_add; k++)
 			if (v->rng_add[k] == here) {
-				say_note(v, "%s", "that range is already "
+				say_note(v, "%s", "That range is already "
 					 "declared");
 				return;
 			}
 		if (v->n_rng_add >= MAX_GROUP) {
-			say_err(v, "%s", "no room for another range");
+			say_err(v, "%s", "No room for another range");
 			return;
 		}
 		v->rng_add[v->n_rng_add++] = here;
-		say_note(v, "%s", "scan range added - give it a matcher");
+		say_note(v, "%s", "Scan range added - give it a matcher");
 		break;
 	}
 	case 3:
 		rng_retarget(v, target, KOF_SCAN_ALL);
-		say_note(v, "%s", "scan range is now the whole file");
+		say_note(v, "%s", "Scan range is now the whole file");
 		break;
 	default:
 		break;
@@ -7130,7 +7130,7 @@ static void draft_refresh(struct view *v)
 			v->grp[g].mask = m;
 	}
 	if (!moved && !gone)
-		say_note(v, "every marker is already in the region it is "
+		say_note(v, "Every marker is already in the region it is "
 			    "searched for");
 	else if (!gone)
 		say_note(v, "%u marker(s) moved to the region they are in",
@@ -9143,10 +9143,10 @@ static void copy_said(struct view *v, size_t n)
 	v->act_ok = g_clip_via != NULL;
 	if (g_clip_via)
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "copied %u byte(s) via %s", (unsigned)n, g_clip_via);
+			 "Copied %u byte(s) via %s", (unsigned)n, g_clip_via);
 	else
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "copied %u byte(s) - this program only, the terminal "
+			 "Copied %u byte(s) - this program only, the terminal "
 			 "refused the clipboard", (unsigned)n);
 }
 
@@ -9248,7 +9248,7 @@ static void decl_edit_open(struct view *v, uint32_t i)
 	if (i >= v->n_decl)
 		return;
 	if (!decl_text_editable(d)) {
-		say_note(v, "string %u holds bytes that are not text - edit it "
+		say_note(v, "String %u holds bytes that are not text - edit it "
 			 "as hex", i + 1u);
 		return;
 	}
@@ -9307,7 +9307,7 @@ static void decl_edit_commit(struct view *v, uint32_t i)
 		 * nobody asked for, silently.
 		 */
 		if (n >= sizeof d->hexs) {
-			say_note(v, "hex pattern is longer than %u characters "
+			say_note(v, "Hex pattern is longer than %u characters "
 				 "- left as it was",
 				 (unsigned)(sizeof d->hexs - 1u));
 			return;
@@ -9320,7 +9320,22 @@ static void decl_edit_commit(struct view *v, uint32_t i)
 		 * exist in the database.
 		 */
 		if (!decl_from_hexs(d)) {
-			say_note(v, "%s", kof_hex_error());
+			{
+				/*
+				 * Capitalised here and not at the source: the
+				 * same string is printed by ksigbuilder as
+				 * "file:line: message", where lowercase is the
+				 * convention every compiler follows. The status
+				 * line is a sentence on its own and starts like
+				 * one.
+				 */
+				char why[160];
+
+				snprintf(why, sizeof why, "%s", kof_hex_error());
+				if (why[0] >= 'a' && why[0] <= 'z')
+					why[0] = (char)(why[0] - 32);
+				say_note(v, "%s", why);
+			}
 			return;
 		}
 	} else {
@@ -9333,7 +9348,7 @@ static void decl_edit_commit(struct view *v, uint32_t i)
 		d->nbytes = d->len;
 	}
 	if (!d->len) {
-		say_note(v, "string %u would be empty - left as it was",
+		say_note(v, "String %u would be empty - left as it was",
 			 i + 1u);
 		return;
 	}
@@ -11310,7 +11325,7 @@ static void dump_all(struct view *v, int use_emu)
 	say_unpacked(v);
 	if (!kof_dump_dir_for(v->path, dir, sizeof dir)) {
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "no dump: path too long to place one beside the file");
+			 "No dump: path too long to place one beside the file");
 		return;
 	}
 	if (use_emu) {
@@ -11318,7 +11333,7 @@ static void dump_all(struct view *v, int use_emu)
 
 		if (at + 5 > sizeof dir) {
 			snprintf(v->act_msg, sizeof v->act_msg,
-				 "no dump: path too long to place one beside "
+				 "No dump: path too long to place one beside "
 				 "the file");
 			return;
 		}
@@ -11348,7 +11363,7 @@ static void dump_all(struct view *v, int use_emu)
 			if (!kof_dump_child(dir, tag, o->buf.p, o->buf.n, sub,
 					    sizeof sub, why, sizeof why)) {
 				snprintf(v->act_msg, sizeof v->act_msg,
-					 "dump stopped: %.120s", why);
+					 "Dump stopped: %.120s", why);
 				return;
 			}
 			kids++;
@@ -11357,7 +11372,7 @@ static void dump_all(struct view *v, int use_emu)
 		if (!kof_dump_object(into, o->buf, o->fmt, &o->ctx, &ds, why,
 				     sizeof why)) {
 			snprintf(v->act_msg, sizeof v->act_msg,
-				 "dump stopped: %.120s", why);
+				 "Dump stopped: %.120s", why);
 			return;
 		}
 		files += ds.regions;
@@ -11366,7 +11381,7 @@ static void dump_all(struct view *v, int use_emu)
 
 	v->act_ok = 1;
 	snprintf(v->act_msg, sizeof v->act_msg,
-		 "dumped %u region(s), %llu B, %u recovered -> %.60s%s",
+		 "Dumped %u region(s), %llu B, %u recovered -> %.60s%s",
 		 files, (unsigned long long)bytes, kids, base_name(dir),
 		 skipped ? "  (some too large to hold)" : "");
 }
@@ -11427,7 +11442,7 @@ static int neighbour_file(struct view *v, int dir, char *out, size_t cap)
 	if (!d) {
 		v->act_ok = 0;
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "cannot read %.60s", folder);
+			 "Cannot read %.60s", folder);
 		return 0;
 	}
 	while ((e = readdir(d)) != NULL) {
@@ -11485,7 +11500,7 @@ static void open_step(struct view *v, int dir)
 	if (!file_open(v, next, v->eng))
 		return;                 /* file_open left the reason */
 	v->act_ok = 1;
-	snprintf(v->act_msg, sizeof v->act_msg, "opened %.60s",
+	snprintf(v->act_msg, sizeof v->act_msg, "Opened %.60s",
 		 base_name(v->path));
 }
 
@@ -11586,7 +11601,7 @@ static void rebuild_db(struct view *v)
 	if (!tree_root_of(v->basedir, root, sizeof root)) {
 		v->act_ok = 0;
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "no Makefile above %.50s", v->basedir);
+			 "No Makefile above %.50s", v->basedir);
 		return;
 	}
 	/* The path to reopen, taken before the file is closed under us. */
@@ -11596,7 +11611,7 @@ static void rebuild_db(struct view *v)
 	if (fd < 0) {
 		v->act_ok = 0;
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "cannot make a log file");
+			 "Cannot make a log file");
 		return;
 	}
 
@@ -11620,7 +11635,7 @@ static void rebuild_db(struct view *v)
 	if (pid < 0) {
 		unlink(log);
 		v->act_ok = 0;
-		snprintf(v->act_msg, sizeof v->act_msg, "cannot start make");
+		snprintf(v->act_msg, sizeof v->act_msg, "Cannot start make");
 		return;
 	}
 	while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
@@ -11634,9 +11649,9 @@ static void rebuild_db(struct view *v)
 		v->act_ok = 0;
 		if (last[0])
 			snprintf(v->act_msg, sizeof v->act_msg,
-				 "build failed: %.130s", last);
+				 "Build failed: %.130s", last);
 		else
-			snprintf(v->act_msg, sizeof v->act_msg, "build failed");
+			snprintf(v->act_msg, sizeof v->act_msg, "Build failed");
 		return;
 	}
 	unlink(log);
@@ -11659,7 +11674,7 @@ static void rebuild_db(struct view *v)
 	if (!fresh) {
 		v->act_ok = 0;
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "built, but %.50s would not load", v->dbdir);
+			 "Built, but %.50s would not load", v->dbdir);
 		return;
 	}
 	/* The sources were just recompiled: whatever this knew about where each
@@ -11672,7 +11687,7 @@ static void rebuild_db(struct view *v)
 	}
 	kof_engine_close(old);
 	v->act_ok = 1;
-	snprintf(v->act_msg, sizeof v->act_msg, "database rebuilt from %.60s",
+	snprintf(v->act_msg, sizeof v->act_msg, "Database rebuilt from %.60s",
 		 root);
 }
 
@@ -11689,7 +11704,7 @@ static void bar_run(struct view *v, int i)
 			if (why)
 				say_err(v, "%s", why);
 			else
-				say_note(v, "nothing to write");
+				say_note(v, "Nothing to write");
 		}
 		return;
 	}
@@ -12555,7 +12570,7 @@ static void click(struct view *v, int rclick)
 					 * the bug - there is a real answer
 					 * here and it is worth a line.
 					 */
-					say_note(v, "marker %u is not in this "
+					say_note(v, "Marker %u is not in this "
 						 "object - nowhere to jump to",
 						 k + 1u);
 				}
@@ -12726,7 +12741,7 @@ static void click(struct view *v, int rclick)
 					} else if (d->at != KOF_BROKEN) {
 						view_show(v, d->at);
 					} else {
-						say_note(v, "string %u is "
+						say_note(v, "String %u is "
 							 "not in this object",
 							 i + 1u);
 					}
@@ -13510,13 +13525,13 @@ static int handle(struct view *v, int k)
 		if (bar_enabled(v, BI_NEXT))
 			open_step(v, +1);
 		else
-			say_note(v, "finish or undo the draft first");
+			say_note(v, "Finish or undo the draft first");
 		break;
 	case 0x1c:                      /* Ctrl+\ */
 		if (bar_enabled(v, BI_PREV))
 			open_step(v, -1);
 		else
-			say_note(v, "finish or undo the draft first");
+			say_note(v, "Finish or undo the draft first");
 		break;
 	case 0x06:                      /* Ctrl+F */
 		v->find_open = 1;
@@ -13528,7 +13543,7 @@ static int handle(struct view *v, int k)
 			find_run(v, 0);
 		break;
 	case 0x0f:                      /* Ctrl+O */
-		say_note(v, "open: not built yet - pass the file on the "
+		say_note(v, "Open: not built yet - pass the file on the "
 			    "command line");
 		break;
 	case 'q':
@@ -13937,7 +13952,7 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	close(fd);
 	if (!map) {
 		v->act_ok = 0;
-		snprintf(v->act_msg, sizeof v->act_msg, "cannot map %.60s",
+		snprintf(v->act_msg, sizeof v->act_msg, "Cannot map %.60s",
 			 base_name(keep));
 		return 0;
 	}
