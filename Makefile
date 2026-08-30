@@ -203,8 +203,9 @@ LDFLAGS ?=
 # net that reports green whatever it catches. Halting turns a finding into a failed
 # build, which is the only form of it anyone acts on.
 ifeq ($(SAN),1)
-CFLAGS  += -fsanitize=address,undefined -fno-sanitize-recover=all \
-           -fno-omit-frame-pointer
+SAN_CFLAGS := -fsanitize=address,undefined -fno-sanitize-recover=all \
+              -fno-omit-frame-pointer
+CFLAGS  += $(SAN_CFLAGS)
 LDFLAGS += -fsanitize=address,undefined -fno-sanitize-recover=all
 endif
 
@@ -323,7 +324,48 @@ $(INT)/lib_%.o: libkofeng/%.c $(STAMP) | $(INT)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(LIB): $(LIB_OBJ)
+# ---- libkofemu: the emulator, and the decoder it stands on -----------------
+#
+# TWO FLAG SETS, ON PURPOSE.
+#
+# libkofemu/*.c is kofeng's own and compiles under kofeng's warning policy like
+# everything else. libkofemu/bddisasm/ is vendored and does not: bdx86_decoder.c
+# alone raises 53 findings under -Wconversion and -Wsign-conversion, none of
+# them bugs and all of them a house style it was never written to. Forcing it
+# through would mean patching a third-party tree, and a patched tree turns every
+# future upgrade from a copy into a merge - see libkofemu/bddisasm/README.kofeng.md.
+#
+# So the vendored files get their own set: upstream's own disable list, plus
+# -Wno-error=incompatible-pointer-types because GCC 14 promoted that to an error
+# and bddisasm 3.0.1 predates the change.
+#
+# What they do NOT get excused from is the sanitizers. This code decodes bytes
+# an attacker chose, which is exactly the ground ASAN and UBSan exist to cover,
+# so SAN_CFLAGS is threaded through here as well.
+EMU_INC := -Ilibkofemu/bddisasm/inc -Ilibkofemu/bddisasm/src \
+           -Ilibkofemu/bddisasm/src/include
+
+VENDOR_CFLAGS := -O2 -g -std=c11 -fno-common -D_LIB -DAMD64 \
+                 -Wall -Wextra \
+                 -Wno-missing-field-initializers -Wno-missing-braces \
+                 -Wno-unused-function -Wno-error=incompatible-pointer-types \
+                 $(SAN_CFLAGS)
+
+EMU_SRC    := $(wildcard libkofemu/*.c)
+VENDOR_SRC := $(wildcard libkofemu/bddisasm/src/*.c)
+
+EMU_OBJ    := $(patsubst libkofemu/%.c,$(INT)/emu_%.o,$(EMU_SRC))
+VENDOR_OBJ := $(patsubst libkofemu/bddisasm/src/%.c,$(INT)/bdd_%.o,$(VENDOR_SRC))
+
+$(INT)/emu_%.o: libkofemu/%.c $(STAMP) | $(INT)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(EMU_INC) -c $< -o $@
+
+$(INT)/bdd_%.o: libkofemu/bddisasm/src/%.c $(STAMP) | $(INT)
+	@mkdir -p $(dir $@)
+	$(CC) $(VENDOR_CFLAGS) $(EMU_INC) -c $< -o $@
+
+$(LIB): $(LIB_OBJ) $(EMU_OBJ) $(VENDOR_OBJ)
 	@mkdir -p $(dir $@)
 	$(AR) rcs $@ $^
 
@@ -551,11 +593,26 @@ ASAN_BIN := $(patsubst tests/unit/%.c,$(TEST)/asan_%$(EXE),$(UNIT_SRC))
 
 ASAN_LIB := $(TEST)/libkofeng-asan.a
 
-$(ASAN_LIB): $(LIB_SRC) $(SDK_HDR) | $(TEST)
+#
+# The emulator goes in too. It is the newest code here and the one that owns the
+# most raw memory - a sparse page table, lazily committed mappings and the
+# payload snapshots - so leaving it out would exempt exactly what most needs
+# checking. bddisasm comes along because the emulator cannot link without it,
+# but with the vendor's own warning flags: it is not ours to fix.
+#
+$(ASAN_LIB): $(LIB_SRC) $(EMU_SRC) $(VENDOR_SRC) $(SDK_HDR) | $(TEST)
 	@rm -rf $(TEST)/asan-obj && mkdir -p $(TEST)/asan-obj
 	@for f in $(LIB_SRC); do \
 		o=$(TEST)/asan-obj/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
 		$(CC) $(CFLAGS) $(ASAN_FLAGS) -c $$f -o $$o || exit 1; \
+	done
+	@for f in $(EMU_SRC); do \
+		o=$(TEST)/asan-obj/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
+		$(CC) $(CFLAGS) $(ASAN_FLAGS) $(EMU_INC) -c $$f -o $$o || exit 1; \
+	done
+	@for f in $(VENDOR_SRC); do \
+		o=$(TEST)/asan-obj/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
+		$(CC) $(VENDOR_CFLAGS) $(ASAN_FLAGS) $(EMU_INC) -c $$f -o $$o || exit 1; \
 	done
 	@$(AR) rcs $@ $(TEST)/asan-obj/*.o
 
