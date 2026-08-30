@@ -10899,6 +10899,47 @@ static const char *base_name(const char *path)
 static int file_open(struct view *v, const char *path, kof_engine *eng);
 
 /*
+ * SAY WHAT THE REOPEN ACTUALLY PRODUCED, not that a reopen happened.
+ *
+ * "reopened, unpacked by the emulator" is true of a file the emulator could not
+ * touch and of one it took apart, and on the first the reader is left looking
+ * at a tree one deep with nothing to say why. The engine already worked out the
+ * why - it is on the object, in the same field a truncated archive uses - so
+ * this reads it back rather than inventing a second account of it.
+ *
+ * The common case is worth spelling out: a UPX sample cut short has no entry
+ * point left in it, because the stub sits past the compressed data. The static
+ * unpacker still recovers the prefix by reading structure; there is nothing for
+ * an interpreter to start.
+ */
+static void say_unpacked(struct view *v)
+{
+	const char *who = v->emu_mode ? "emulator" : "static unpacker";
+	uint32_t kids = v->n_obj ? v->n_obj - 1u : 0;
+
+	v->act_ok = kids != 0;
+	/*
+	 * No "reopened" prefix. The tree changing under the reader is the one
+	 * part they can already see, and the status line is narrow enough that
+	 * spending ten columns on it truncated away the REASON - which is the
+	 * only part they cannot work out for themselves.
+	 */
+	if (kids) {
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "%s: recovered %u object(s)", who, kids);
+		return;
+	}
+	if (v->n_obj && v->obj[0].broken) {
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "%s: nothing - %s", who,
+			 kof_broken_name(v->obj[0].broken));
+		return;
+	}
+	snprintf(v->act_msg, sizeof v->act_msg,
+		 "%s: nothing to open here", who);
+}
+
+/*
  * Write the object tree out, from the unpacker named.
  *
  * The tree on screen is what one unpacker made of the file, so dumping the
@@ -10928,6 +10969,13 @@ static void dump_all(struct view *v, int use_emu)
 		if (!file_open(v, keep, v->eng))
 			return;         /* file_open left the reason */
 	}
+	/*
+	 * Whatever the dump goes on to say, the reader has just had the tree
+	 * replaced under them and is owed the reason it looks the way it does.
+	 * Written first so a dump message overwrites it - the dump is what they
+	 * asked for - and left standing when the dump writes nothing at all.
+	 */
+	say_unpacked(v);
 	if (!kof_dump_dir_for(v->path, dir, sizeof dir)) {
 		snprintf(v->act_msg, sizeof v->act_msg,
 			 "no dump: path too long to place one beside the file");
@@ -11337,12 +11385,8 @@ static void bar_run(struct view *v, int i)
 
 		snprintf(keep, sizeof keep, "%s", v->path);
 		v->emu_mode = !v->emu_mode;
-		if (file_open(v, keep, v->eng)) {
-			v->act_ok = 1;
-			snprintf(v->act_msg, sizeof v->act_msg,
-				 "reopened, unpacked by the %s",
-				 v->emu_mode ? "emulator" : "static unpacker");
-		}
+		if (file_open(v, keep, v->eng))
+			say_unpacked(v);
 		break;
 	}
 	case BI_NEXT:    open_step(v, +1); break;
