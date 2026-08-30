@@ -2448,14 +2448,28 @@ static void touch_name(const struct kof_touch *t, char *out, size_t cap)
 {
 	const char *fam = t->family[0] ? t->family : "?";
 
-	/* The engine's spelling. The "(n variants)" tail is this panel's own and
+	/* The engine's spelling. The "(n matchers)" tail is this panel's own and
 	 * is added after it, never mixed into it - see kof_name_compose. */
 	kof_name_compose(out, cap, NULL, kof_maltype_name(t->maltype), fam,
 			 t->fired_name);
 	if (!t->fired_name && t->n_names > 1u) {
 		size_t at = strlen(out);
 
-		snprintf(out + at, cap - at, " (%u variants)", t->n_names);
+		/*
+		 * MATCHERS, which is what this tool calls the find-pattern
+		 * blocks a module is written out of.
+		 *
+		 * The number is the count of verdict names the module can
+		 * report, and it says "matchers" because that is what those
+		 * names correspond to in a module's source: one per block that
+		 * can conclude something. It is not read out of the module's
+		 * code - a compiled blob has no such count to read - so a
+		 * module that reports one name from two blocks will say one.
+		 * Called "variants" before, which named the wrong half: a
+		 * reader wants to know how many ways this module can fire, not
+		 * how many spellings the answer has.
+		 */
+		snprintf(out + at, cap - at, " (%u matchers)", t->n_names);
 	}
 }
 
@@ -6309,9 +6323,16 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		 * Named by what happens rather than by yes and no: "discard"
 		 * is a word people read before clicking, "OK" is not.
 		 */
-		ch_add(c, "keep editing");
-		ch_add(c, "write it, then switch");
-		ch_add(c, "discard it and switch");
+		/*
+		 * Capitalised, like every other row that is an ACTION. The
+		 * lowercase rows in these menus are values a signature can
+		 * hold - fullword, ignore-case, and, or, find_all - and the
+		 * difference is worth keeping visible: one row sets a field,
+		 * the other does something to the draft.
+		 */
+		ch_add(c, "Keep editing");
+		ch_add(c, "Write it, then switch");
+		ch_add(c, "Discard it and switch");
 	} else if (what == CH_OPT) {
 		/* Only the ones this object can answer for, and only the ones
 		 * not already there: a list that offers what it will refuse is
@@ -7996,10 +8017,14 @@ ids_done:
 }
 
 /*
- * The two halves of what the gate found, spelled once.
+ * What the gate found, as a name and as a reason.
  *
- * A short tag for the status line, where there is room for a name and not a
- * sentence, and the reason for the dashboard, where there is room for both.
+ * The NAME is the whole of what the status line says. A sentence explaining
+ * which measurement fired was tried there and was simply too long - it pushed
+ * everything else off the row, and "Unknown packer" already tells a reader both
+ * that something packed this and that nothing here knows what. The reason
+ * belongs on the dashboard, where there is a line for it.
+ *
  * Two wordings for two strengths of claim: dense executable segments select
  * nothing across 1 246 clean binaries, so that one is a statement; a header
  * that cannot be loaded is weaker, because every instance of it in the malware
@@ -8155,11 +8180,20 @@ static void draw_marker_line(struct out *o, struct view *v)
 		touch_name(&ob->touch[v->sel_touch], name, sizeof name);
 		touch_head(&ob->touch[v->sel_touch], head, sizeof head);
 
-		/* Capitalised, because they are the labels of two controls
+		/*
+		 * Capitalised, because they are the labels of two controls
 		 * rather than words in a sentence - the same way every other
-		 * button on this screen is written. */
-		snprintf(hits, sizeof hits, "Hit %u", hit);
-		snprintf(skips, sizeof skips, "Skip %u", ob->n_touch - hit);
+		 * button on this screen is written.
+		 *
+		 * "Matched" and "Skipped" rather than "Hit" and "Skip". The
+		 * dashboard has said "matched" and "skipped" for as long as it
+		 * has existed, and the two screens describing one fact in two
+		 * vocabularies is a thing a reader has to translate. They also
+		 * say what happened to the OBJECT: "Hit" is jargon for what
+		 * happened to the module.
+		 */
+		snprintf(hits, sizeof hits, "Matched %u", hit);
+		snprintf(skips, sizeof skips, "Skipped %u", ob->n_touch - hit);
 
 		c = 1 + (int)o->col_hint;
 		v->hit_c0 = c;
@@ -10030,9 +10064,9 @@ static const struct {
 	{ "Dashboard",         BM_ANALYSIS, -1 },
 	{ "Dump",              BM_ANALYSIS, -1 },
 	{ "Static unpacker",   BM_ANALYSIS, BI_DUMP },
-	{ "Emu unpacker",      BM_ANALYSIS, BI_DUMP },
-	/* Replaced at draw time by the mode's own wording. */
-	{ "Reopen with...",    BM_ANALYSIS, -1 },
+	{ "Emulator unpacker", BM_ANALYSIS, BI_DUMP },
+	/* Replaced at draw time by the mode's own wording - see bar_label. */
+	{ "Examine with...",   BM_ANALYSIS, -1 },
 	{ "Rebuild database",  BM_ANALYSIS, -1 },
 	/*
 	 * "Next" and "Previous", not "Next file" and "Previous file": the menu
@@ -11192,35 +11226,6 @@ static const char *base_name(const char *path)
 	return s ? s + 1 : path;
 }
 
-/*
- * SAY SO WHEN THE FILE LOOKS PACKED AND NOTHING OPENED IT.
- *
- * The one case where the menu item above is the right thing to press, and the
- * one case a reader has no way to recognise from the screen: the tree is one
- * node deep, the strings are nothing, and that looks exactly like an ordinary
- * stripped binary. What separates them is what the scanner's own gate looks at
- * - a code region too dense to be code, or a header that cannot be loaded as
- * written - so this asks the same question with the same code rather than
- * inventing a second opinion about it.
- *
- * Only when the static unpackers produced nothing. A file a module opened has
- * already been taken apart, and telling somebody to run it as well would be
- * offering them the slower of two answers they already have.
- */
-static void hint_packed(struct view *v)
-{
-	struct object *o0 = &v->obj[0];
-
-	if (v->emu_mode || v->n_obj != 1 || !o0->emu_why)
-		return;
-	v->act_ok = 0;
-	snprintf(v->act_msg, sizeof v->act_msg,
-		 "%s - try Analysis > Examine with emulator",
-		 o0->emu_why == KOF_EMU_UNP_WHY_BROKEN
-		 ? "no unpacker opened it and its header cannot be loaded"
-		 : "no unpacker opened it and its code is too dense to be code");
-}
-
 /* Re-opening is how the tree is rebuilt, and both dumping and switching
  * unpacker need it. Declared here because both come before it. */
 static int file_open(struct view *v, const char *path, kof_engine *eng);
@@ -11479,15 +11484,6 @@ static void open_step(struct view *v, int dir)
 		return;
 	if (!file_open(v, next, v->eng))
 		return;                 /* file_open left the reason */
-	/*
-	 * Unless file_open already had something to say. "opened <name>" is a
-	 * confirmation of the thing the reader just did and can see; a note
-	 * that this file looks packed and nothing opened it is the one thing on
-	 * the screen they could not have worked out, and it was being written
-	 * over one line after it was produced.
-	 */
-	if (v->act_msg[0])
-		return;
 	v->act_ok = 1;
 	snprintf(v->act_msg, sizeof v->act_msg, "opened %.60s",
 		 base_name(v->path));
@@ -14013,7 +14009,6 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	/* Whatever was auto-loaded is what this file started as, so it is not
 	 * unsaved work. */
 	v->saved_hash = draft_hash(v);
-	hint_packed(v);
 	return 1;
 }
 
