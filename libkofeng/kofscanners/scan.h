@@ -126,6 +126,15 @@ struct kof_scanner {
 	int                 packed_here;
 
 	/*
+	 * Set while the emulator stage runs, and read where children are
+	 * recorded. What that stage produces is a packer's payload by
+	 * definition - it is memory a program wrote before running it - but no
+	 * module made it, so the usual test on `cur_mod` would file it as a
+	 * container entry and lose the distinction downstream.
+	 */
+	int                 emu_stage;
+
+	/*
 	 * What the next child produced should be called, already sanitised.
 	 *
 	 * Held here rather than passed to each producer because there are two ways to
@@ -237,6 +246,21 @@ void kof_mod_attach(struct kof_obj_ctx *, struct kof_scanner *);
 
 /* Swap the producing surface in for the length of one unpacker, and out again. */
 void kof_mod_unpack_mode(struct kof_obj_ctx *, int on);
+
+/*
+ * THE LAST RESORT: run the object and keep what it writes.
+ *
+ * Entered when every module that could have opened this object has run and none
+ * of them did, and the gate in emu_unpack.h says the object either hides its
+ * code behind something dense or cannot be loaded as written. `force` skips the
+ * gate, for a caller who has asked for this object specifically rather than
+ * scanned a tree.
+ * Lives here rather than in scan.c because producing a child is this file's
+ * business - the same ceilings, the same sink, the same accounting.
+ *
+ * Returns the number of children produced.
+ */
+uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force);
 
 /* Turn a named range into extents. objctx.c needs it; the parse is what knows. */
 uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *, uint32_t scan_mask,

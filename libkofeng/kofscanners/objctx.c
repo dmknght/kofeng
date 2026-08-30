@@ -21,6 +21,7 @@
  */
 
 #include "scan.h"
+#include "../kofunpack/emu_unpack.h"
 
 #include "../kofdecomp/ovba.h"
 #include "../kofdecomp/lzma.h"
@@ -462,7 +463,8 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 	 * see KOF_UNPACK_KIND in kofsig.h.
 	 */
 	sc->kid_packer[sc->n_kids] =
-		(uint8_t)(sc->cur_mod && sc->cur_mod->unp_kind == KOF_UNP_PACKER);
+		(uint8_t)(sc->emu_stage ||
+			  (sc->cur_mod && sc->cur_mod->unp_kind == KOF_UNP_PACKER));
 	if (sc->kid_packer[sc->n_kids])
 		sc->packed_here = 1;
 	sc->kids[sc->n_kids++] = kid;
@@ -1746,4 +1748,101 @@ uint32_t kof_fact_id(const char *field)
 	if (dot && dot[1])
 		field = dot + 1;
 	return kof_crc32(field, (uint64_t)strlen(field));
+}
+
+
+/* ---- the last resort ------------------------------------------------------
+ *
+ * See kof_scan_emu_unpack in scan.h.
+ */
+
+/*
+ * The instruction budget one object may spend.
+ *
+ * Measured over 200 UPX-packed binaries: five million carries 178 of them all
+ * the way to the stub's own exit, and the 21 that hit the ceiling had already
+ * written their payload by the time they did - a budget stop is a result, not
+ * a failure, because everything written up to it is still dumped. Raising it
+ * further buys the two largest objects and costs every object that spins.
+ */
+#define EMU_INSN_BUDGET  5000000ull
+
+/*
+ * Hand one recovered image to the sink. Emitted in pieces because c_emit takes
+ * a uint32 length and refuses anything over EMIT_MAX - a decompressor already
+ * works a window at a time and so does this.
+ */
+static int emu_give(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n)
+{
+	uint64_t at;
+
+	for (at = 0; at < n; ) {
+		uint64_t chunk = n - at;
+
+		if (chunk > EMIT_MAX)
+			chunk = EMIT_MAX;
+		if (!c_emit(ctx, p + at, (uint32_t)chunk))
+			return 0;
+		at += chunk;
+	}
+	return 1;
+}
+
+uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	const struct kof_elf_info *info;
+	struct kof_emu_unp_report rep;
+	struct kof_emu *e;
+	kof_buf b;
+	uint32_t it, made = 0;
+	uint64_t va, len;
+	const uint8_t *bytes;
+	int any;
+
+	if (!sc || !sc->cur_src || ctx->format != KOF_FMT_ELF || !ctx->file_header)
+		return 0;
+	if (!can_produce(sc))
+		return 0;
+	b = kof_src_buf(sc->cur_src);
+	info = kof_elf(ctx);
+	if (!force && kof_emu_unp_gate(ctx, info, b.p, b.n) == KOF_EMU_UNP_NO)
+		return 0;
+
+	e = kof_emu_unp_run(b.p, b.n, info, EMU_INSN_BUDGET, 0, &rep);
+	if (!e)
+		return 0;
+
+	/*
+	 * Snapshots first, and the written pages only if there were none.
+	 *
+	 * A snapshot is memory a program made executable, which is a payload
+	 * saying so about itself; written memory is everything else it touched,
+	 * stack and scratch included. When both exist the snapshots ARE the
+	 * result and the rest is noise - measured on a UPX-packed PyInstaller
+	 * binary, the written set held the payload plus twelve kilobytes of
+	 * stub and stack, and the payload had since been overwritten in place.
+	 * When a packer never calls mprotect there are no snapshots, and then
+	 * the written pages are all there is.
+	 */
+	sc->emu_stage = 1;
+	for (any = 0, it = 0;
+	     kof_emu_next_snapshot(e, &it, &va, &bytes, &len); ) {
+		any = 1;
+		if (!emu_give(ctx, bytes, len))
+			break;
+		if (c_child(ctx))
+			made++;
+	}
+	if (!any)
+		for (it = 0; kof_emu_next_written(e, &it, &va, &bytes, &len); ) {
+			if (!emu_give(ctx, bytes, len))
+				break;
+			if (c_child(ctx))
+				made++;
+		}
+	sc->emu_stage = 0;
+
+	kof_emu_free(e);
+	return made;
 }

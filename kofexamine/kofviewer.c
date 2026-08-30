@@ -1260,6 +1260,24 @@ struct view {
 	 * drag.
 	 */
 	int         bar_drag;       /* 0 none, 1 hex, 2 tree, 3 draft */
+	/*
+	 * WHICH UNPACKER FILLED THE TREE ON SCREEN.
+	 *
+	 * Zero is the static unpackers, which is what opening a file uses and
+	 * what a reader should get without asking: they read structure, they
+	 * are fast, and where one applies it is the better answer. One is the
+	 * interpreter, in place of them.
+	 *
+	 * Kept across file_open like basedir and dbdir, because it is a
+	 * property of the session rather than of the file - stepping to the
+	 * next sample while looking at emulator output should keep looking at
+	 * emulator output.
+	 */
+	int         emu_mode;
+
+	/* Which top-level item's submenu is showing, -1 for none. */
+	int         bar_sub;
+
 	int         bar_open;       /* which menu is down, -1 for none */
 	int         bar_sel;        /* the item under the pointer or the cursor */
 	int         help_open;      /* 0 none, 1 keyboard, 2 about */
@@ -1548,6 +1566,20 @@ static void objects_collect(struct view *v, kof_engine *eng)
 
 	memset(&opt, 0, sizeof opt);
 	opt.all_matches = 1;
+	/*
+	 * NEVER rather than the zeroed AUTO, and ONLY when asked for.
+	 *
+	 * A scanner wants AUTO: interpret whatever no module could open, since
+	 * a missed payload is a missed detection. A viewer wants neither half
+	 * of that silently. Opening a file must show what the unpackers make of
+	 * it, so that what is on screen is what a scan would have matched
+	 * against; and when a reader asks for the interpreter they want its
+	 * answer for THIS object, not only for the objects the modules gave up
+	 * on. So the two settings here are the two ends, and the middle one -
+	 * useful to a scan - would be the one setting whose output nobody could
+	 * attribute to either.
+	 */
+	opt.emu_use = v->emu_mode ? KOF_EMU_ONLY : KOF_EMU_NEVER;
 	/*
 	 * The most this build's heuristic can be asked for.
 	 *
@@ -9699,7 +9731,27 @@ enum bar_item {
 	 * about the bytes in front of the reader and neither writes a signature,
 	 * so they belong together and not beside Save.
 	 */
-	BI_DASH, BI_DUMP, BI_REBUILD,
+	BI_DASH,
+	/*
+	 * Dump opens rather than acts: what to dump is now a question with two
+	 * answers, and they are answers to the same question rather than two
+	 * unrelated items that happen to both write files. The two under it
+	 * write to different directories - the emulator's carries an _emu
+	 * suffix - so one can be produced without losing the other, which is
+	 * the whole reason for having both.
+	 */
+	BI_DUMP, BI_DUMP_STATIC, BI_DUMP_EMU,
+	/*
+	 * Re-open the object with the other unpacker.
+	 *
+	 * Named for what it does rather than for what it is: "reopen" is the
+	 * visible effect - the tree is rebuilt and the draft is gone - and
+	 * naming the unpacker says which of the two answers is about to be on
+	 * screen. The label changes with the mode, so it always states the
+	 * thing that will happen rather than the state that is.
+	 */
+	BI_UNPACKER,
+	BI_REBUILD,
 	BI_NEXT, BI_PREV,
 	BI_KEYS, BI_ABOUT,
 	BI_COUNT
@@ -9708,26 +9760,56 @@ enum bar_item {
 static const struct {
 	const char *label;
 	int         menu;
+	/* The item this one hangs under, or -1 for a top-level entry. */
+	int         parent;
 } bar_item[BI_COUNT] = {
-	{ "Open...",        BM_FILE },
-	{ "Save",           BM_FILE },
-	{ "Save As...",     BM_FILE },
-	{ "Quit",           BM_FILE },
-	{ "Find...",        BM_EDIT },
-	{ "Go to...",       BM_EDIT },
-	{ "Dashboard",         BM_ANALYSIS },
-	{ "Dump",              BM_ANALYSIS },
-	{ "Rebuild database",  BM_ANALYSIS },
+	{ "Open...",        BM_FILE, -1 },
+	{ "Save",           BM_FILE, -1 },
+	{ "Save As...",     BM_FILE, -1 },
+	{ "Quit",           BM_FILE, -1 },
+	{ "Find...",        BM_EDIT, -1 },
+	{ "Go to...",       BM_EDIT, -1 },
+	{ "Dashboard",         BM_ANALYSIS, -1 },
+	{ "Dump",              BM_ANALYSIS, -1 },
+	{ "Static unpacker",   BM_ANALYSIS, BI_DUMP },
+	{ "Emu unpacker",      BM_ANALYSIS, BI_DUMP },
+	/* Replaced at draw time by the mode's own wording. */
+	{ "Reopen with...",    BM_ANALYSIS, -1 },
+	{ "Rebuild database",  BM_ANALYSIS, -1 },
 	/*
 	 * "Next" and "Previous", not "Next file" and "Previous file": the menu
 	 * they are in is called Switch-File, and repeating the noun in every
 	 * item under it is the sort of label that reads like a form.
 	 */
-	{ "Next",              BM_SWITCH },
-	{ "Previous",          BM_SWITCH },
-	{ "Keyboard",          BM_HELP },
-	{ "About",          BM_HELP }
+	{ "Next",              BM_SWITCH, -1 },
+	{ "Previous",          BM_SWITCH, -1 },
+	{ "Keyboard",          BM_HELP, -1 },
+	{ "About",          BM_HELP, -1 }
 };
+
+/* Does this item open a submenu rather than do something. */
+static int bar_has_sub(int i)
+{
+	int k;
+
+	for (k = 0; k < BI_COUNT; k++)
+		if (bar_item[k].parent == i)
+			return 1;
+	return 0;
+}
+
+/*
+ * The wording an item shows now, which for the unpacker switch is not the
+ * wording in the table: a menu entry should say what pressing it does, and what
+ * it does depends on which unpacker filled the tree.
+ */
+static const char *bar_label(struct view *v, int i)
+{
+	if (i == BI_UNPACKER)
+		return v->emu_mode ? "Reopen with static unpacker"
+				   : "Reopen with emulator";
+	return bar_item[i].label;
+}
 
 static const char *const bar_name[BM_COUNT] = {
 	/*
@@ -9761,7 +9843,17 @@ static int bar_enabled(struct view *v, int i)
 	/* Off for a viewer that has no file behind it, which is the one case
 	 * where there is nowhere for a dump to go: the directory is named after
 	 * the file and placed beside it. */
+	/* The parent is live whenever either of its children could be. */
 	case BI_DUMP:      return v->path && v->path[0];
+	case BI_DUMP_STATIC:
+	case BI_DUMP_EMU:
+		/*
+		 * Both may have to rebuild the tree to write the view they
+		 * name, and rebuilding it throws the draft away - the same
+		 * reason stepping to another file is refused with one open.
+		 */
+		return v->path && v->path[0] && !draft_edited(v);
+	case BI_UNPACKER:  return v->path && v->path[0] && !draft_edited(v);
 	case BI_DASH:      return 1;
 	/* Needs a file to step from, and nothing the reader typed that would be
 	 * lost - moving on is the one action here that throws work away. */
@@ -9816,7 +9908,7 @@ static int bar_enabled(struct view *v, int i)
  * pair - 30/40, 37/47, 90/100, 97/107 - is never a colour, it is an erasure.
  */
 
-#define BAR_W 18
+#define BAR_W 30
 
 /*
  * Where each menu's block starts on the bar.
@@ -9838,7 +9930,7 @@ static int bar_col(int m)
 
 static void draw_bar(struct out *o, struct view *v)
 {
-	int m, i, y;
+	int m, i, y, bar_sub_row = 0;
 
 	row_start(o, 1, 1);
 	out_str(o, A_HEAD " ");
@@ -9862,30 +9954,86 @@ static void draw_bar(struct out *o, struct view *v)
 	for (i = 0; i < BI_COUNT; i++) {
 		int col = bar_col(v->bar_open);
 
-		if (bar_item[i].menu != v->bar_open || !bar_shown(v, i))
+		if (bar_item[i].menu != v->bar_open || bar_item[i].parent >= 0 ||
+		    !bar_shown(v, i))
 			continue;
 		out_at(o, y, col);
-		if (i == v->bar_sel)
+		if (i == v->bar_sel || i == v->bar_sub)
 			out_str(o, BAR_CUR);
 		else if (!bar_enabled(v, i))
 			out_str(o, BAR_OFF);
 		else
 			out_str(o, BAR_ON);
-		out_fmt(o, " %-*s", BAR_W - 1, bar_item[i].label);
+		/*
+		 * An item that opens something says so. Without the marker the
+		 * two kinds of entry are indistinguishable until one is
+		 * pressed, and one of them appears to do nothing.
+		 */
+		if (bar_has_sub(i))
+			out_fmt(o, " %-*s>", BAR_W - 2, bar_label(v, i));
+		else
+			out_fmt(o, " %-*s", BAR_W - 1, bar_label(v, i));
 		out_str(o, A_OFF);
+		if (i == v->bar_sub)
+			bar_sub_row = y;
 		y++;
+	}
+
+	/* The open submenu, beside its parent rather than over it. */
+	if (v->bar_sub >= 0 && bar_sub_row > 0) {
+		int col = bar_col(v->bar_open) + BAR_W;
+
+		y = bar_sub_row;
+		for (i = 0; i < BI_COUNT; i++) {
+			if (bar_item[i].parent != v->bar_sub || !bar_shown(v, i))
+				continue;
+			out_at(o, y, col);
+			out_str(o, bar_enabled(v, i) ? BAR_ON : BAR_OFF);
+			out_fmt(o, " %-*s", BAR_W - 1, bar_label(v, i));
+			out_str(o, A_OFF);
+			y++;
+		}
 	}
 }
 
-/* Which item a click on an open drop-down landed on, or -1. */
+/*
+ * Which item a click on an open drop-down landed on, or -1.
+ *
+ * The submenu is tested FIRST. It is drawn over whatever is to the right of its
+ * parent, so a click inside it is inside the submenu whatever else is there -
+ * testing the parent panel first would answer for a column the reader cannot
+ * see.
+ */
 static int bar_item_at(struct view *v, int row, int col)
 {
-	int y = 2, i, c0 = bar_col(v->bar_open);
+	int y = 2, i, c0 = bar_col(v->bar_open), sub_row = 0;
 
+	for (i = 0; i < BI_COUNT; i++) {
+		if (bar_item[i].menu != v->bar_open || bar_item[i].parent >= 0 ||
+		    !bar_shown(v, i))
+			continue;
+		if (i == v->bar_sub)
+			sub_row = y;
+		y++;
+	}
+	if (v->bar_sub >= 0 && sub_row > 0 &&
+	    col >= c0 + BAR_W && col < c0 + 2 * BAR_W) {
+		y = sub_row;
+		for (i = 0; i < BI_COUNT; i++) {
+			if (bar_item[i].parent != v->bar_sub || !bar_shown(v, i))
+				continue;
+			if (row == y)
+				return i;
+			y++;
+		}
+		return -1;
+	}
 	if (col < c0 || col >= c0 + BAR_W)
 		return -1;
+	y = 2;
 	for (i = 0; i < BI_COUNT; i++) {
-		if (bar_item[i].menu != v->bar_open || !bar_shown(v, i))
+		if (bar_item[i].menu != v->bar_open || bar_item[i].parent >= 0 ||
+		    !bar_shown(v, i))
 			continue;
 		if (row == y)
 			return i;
@@ -10746,7 +10894,25 @@ static const char *base_name(const char *path)
 	return s ? s + 1 : path;
 }
 
-static void dump_all(struct view *v)
+/* Re-opening is how the tree is rebuilt, and both dumping and switching
+ * unpacker need it. Declared here because both come before it. */
+static int file_open(struct view *v, const char *path, kof_engine *eng);
+
+/*
+ * Write the object tree out, from the unpacker named.
+ *
+ * The tree on screen is what one unpacker made of the file, so dumping the
+ * OTHER one's view means rebuilding the tree first - and then what was written
+ * is what is on screen, which is the only version of this a reader can check.
+ * Producing a directory that does not match the view would be worse than
+ * making them ask twice.
+ *
+ * The directories differ by an _emu suffix so both can exist at once. That is
+ * the point of having two: the static unpacker and the interpreter disagreeing
+ * about the same file is a finding, and it cannot be seen if one overwrites the
+ * other.
+ */
+static void dump_all(struct view *v, int use_emu)
 {
 	char dir[KOF_DUMP_PATH_ROOM], sub[KOF_DUMP_PATH_ROOM], why[256];
 	struct kof_dump_stat ds;
@@ -10754,10 +10920,29 @@ static void dump_all(struct view *v)
 	uint64_t bytes = 0;
 
 	v->act_ok = 0;
+	if (use_emu != (v->emu_mode != 0)) {
+		char keep[KOF_DUMP_PATH_ROOM];
+
+		snprintf(keep, sizeof keep, "%s", v->path);
+		v->emu_mode = use_emu;
+		if (!file_open(v, keep, v->eng))
+			return;         /* file_open left the reason */
+	}
 	if (!kof_dump_dir_for(v->path, dir, sizeof dir)) {
 		snprintf(v->act_msg, sizeof v->act_msg,
 			 "no dump: path too long to place one beside the file");
 		return;
+	}
+	if (use_emu) {
+		size_t at = strlen(dir);
+
+		if (at + 5 > sizeof dir) {
+			snprintf(v->act_msg, sizeof v->act_msg,
+				 "no dump: path too long to place one beside "
+				 "the file");
+			return;
+		}
+		memcpy(dir + at, "_emu", 5);
 	}
 	for (i = 0; i < v->n_obj; i++) {
 		struct object *o = &v->obj[i];
@@ -10824,7 +11009,7 @@ static void dump_all(struct view *v)
  * a large one, against a rewrite that could lose somebody's draft.
  */
 /* Defined with the rest of the session's lifetime, at the foot of this file. */
-static int file_open(struct view *v, const char *path, kof_engine *eng);
+
 
 /*
  * The file next to this one in its directory, in either direction.
@@ -11128,8 +11313,15 @@ static void bar_run(struct view *v, int i)
 		}
 		return;
 	}
+	/* A parent opens; it does not act. Clicking it again closes what it
+	 * opened, so the same press undoes itself. */
+	if (bar_has_sub(i)) {
+		v->bar_sub = (v->bar_sub == i) ? -1 : i;
+		return;
+	}
 	v->bar_open = -1;
 	v->bar_sel = -1;
+	v->bar_sub = -1;
 	switch (i) {
 	case BI_SAVE:    generate(v, 0); break;
 	case BI_SAVE_AS: generate(v, 1); break;
@@ -11138,7 +11330,21 @@ static void bar_run(struct view *v, int i)
 		v->edit = 500;
 		v->warn[0] = 0;
 		break;
-	case BI_DUMP:    dump_all(v); break;
+	case BI_DUMP_STATIC: dump_all(v, 0); break;
+	case BI_DUMP_EMU:    dump_all(v, 1); break;
+	case BI_UNPACKER: {
+		char keep[KOF_DUMP_PATH_ROOM];
+
+		snprintf(keep, sizeof keep, "%s", v->path);
+		v->emu_mode = !v->emu_mode;
+		if (file_open(v, keep, v->eng)) {
+			v->act_ok = 1;
+			snprintf(v->act_msg, sizeof v->act_msg,
+				 "reopened, unpacked by the %s",
+				 v->emu_mode ? "emulator" : "static unpacker");
+		}
+		break;
+	}
 	case BI_NEXT:    open_step(v, +1); break;
 	case BI_PREV:    open_step(v, -1); break;
 	case BI_REBUILD: rebuild_db(v); break;
@@ -11780,6 +11986,7 @@ static void click(struct view *v, int rclick)
 			    g_mx < c0 + (int)strlen(bar_name[m]) + 2) {
 				v->bar_open = m;
 				v->bar_sel = -1;
+				v->bar_sub = -1;
 				break;
 			}
 		}
@@ -11787,6 +11994,7 @@ static void click(struct view *v, int rclick)
 	}
 	if (v->bar_open >= 0) {
 		v->bar_open = -1;       /* a click anywhere else closes it */
+		v->bar_sub = -1;
 		return;
 	}
 
@@ -13328,6 +13536,7 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	char basedir[sizeof v->basedir];
 	char dbdir[sizeof v->dbdir];
 	char keep[KOF_DUMP_PATH_ROOM];
+	int  emu_mode = v->emu_mode;
 
 	snprintf(keep, sizeof keep, "%s", path);
 
@@ -13364,6 +13573,7 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	v->decl_cap = cap;
 	snprintf(v->basedir, sizeof v->basedir, "%s", basedir);
 	snprintf(v->dbdir, sizeof v->dbdir, "%s", dbdir);
+	v->emu_mode = emu_mode;
 
 	/* The fields whose cleared value is not their resting value. */
 	v->prop_sel_row = -1;
@@ -13371,6 +13581,7 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	v->find_at = KOF_BROKEN;
 	v->bar_open = -1;
 	v->bar_sel = -1;
+	v->bar_sub = -1;
 
 	snprintf(v->pathbuf, sizeof v->pathbuf, "%s", keep);
 	v->path = v->pathbuf;

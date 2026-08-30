@@ -254,7 +254,11 @@ static void usage(const char *argv0)
 		"  --dump DIR      write every object the engine PRODUCED into DIR:\n"
 		"                  what came out of an unpacker, not what went in\n"
 		"  --stats         report what the prefilter and the presence set earned\n"
-		"  --max-produced N  bytes an object may yield before the scan gives up\n"
+		"  --emu MODE      auto (default) interprets an object that no unpacker\n"
+	    "                  could open and that looks packed or damaged, keeping\n"
+	    "                  what it writes; never interprets nothing; only\n"
+	    "                  interprets instead of the packer modules, ungated\n"
+	    "  --max-produced N  bytes an object may yield before the scan gives up\n"
 		"  --max-resident N  bytes of produced data that may be alive at once\n"
 		"  --max-object N    bytes any one produced object may reach\n"
 		"  -v              also report objects that came back clean\n"
@@ -351,6 +355,24 @@ int main(int argc, char **argv)
 		} else if (strcmp(argv[i], "--heur") == 0 && i + 1 < argc) {
 			if (!heur_arg(argv[++i], &opt))
 				return heur_bad(argv[0], argv[i]);
+		}
+		else if (strcmp(argv[i], "--emu") == 0 && i + 1 < argc) {
+			const char *w = argv[++i];
+
+			/* Words rather than numbers: "--emu 2" says nothing
+			 * about what it does, and the three settings are not
+			 * points on a scale - "only" is not more of "auto". */
+			if (strcmp(w, "auto") == 0)
+				opt.emu_use = KOF_EMU_AUTO;
+			else if (strcmp(w, "never") == 0)
+				opt.emu_use = KOF_EMU_NEVER;
+			else if (strcmp(w, "only") == 0)
+				opt.emu_use = KOF_EMU_ONLY;
+			else {
+				fprintf(stderr, "%s: --emu takes auto, never "
+					"or only, not '%s'\n", argv[0], w);
+				return 2;
+			}
 		}
 		else if (strcmp(argv[i], "--max-produced") == 0 && i + 1 < argc)
 			opt.max_produced_bytes = strtoull(argv[++i], NULL, 10);

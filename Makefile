@@ -303,6 +303,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/containers/rtf_parse.c \
            libkofeng/kofparsers/containers/pdf_parse.c \
            libkofeng/kofunpack/pe_rebuild.c \
+           libkofeng/kofunpack/emu_unpack.c \
            libkofeng/kofdecomp/decomp.c \
            libkofeng/kofdecomp/inflate.c \
            libkofeng/kofdecomp/ovba.c \

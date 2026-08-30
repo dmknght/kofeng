@@ -515,6 +515,16 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		/* The same preconditions a detector gets: an unpacker for PE has no
 		 * business being entered for an ELF. The region test is skipped -
 		 * an unpacker names no region to search. */
+		/*
+		 * KOF_EMU_ONLY replaces the packer modules and only those. A
+		 * container still has to be opened by the code that knows its
+		 * format - there is nothing to interpret in a zip - so asking
+		 * for the interpreter must not also turn off the archive
+		 * readers underneath it.
+		 */
+		if (opt->emu_use == KOF_EMU_ONLY &&
+		    m->unp_kind == KOF_UNP_PACKER)
+			continue;
 		if (!(m->target_mask & (1u << ctx->format)))
 			continue;
 		if (ctx->obj_size < m->size_min)
@@ -530,6 +540,26 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		sc->cur_mod = m;
 		m->fn(ctx);
 		sc->cur_mod = NULL;
+	}
+	/*
+	 * NOTHING OPENED IT, SO RUN IT.
+	 *
+	 * Last, and only when every module that declared this format has had
+	 * its turn and none of them produced anything. That ordering is the
+	 * whole economy of it: a family with a static unpacker is opened by
+	 * reading, which costs a pass over the object, and emulating it as well
+	 * would pay a million instructions to learn the same thing. What is
+	 * left when they all decline is either a packer nobody here has written
+	 * a module for, or an object too damaged to read - and both are cases
+	 * where running it is the only remaining way to see inside.
+	 *
+	 * `broken` is checked first for the same reason the module loop checks
+	 * it: once the tree's budget is gone there is nothing to spend.
+	 */
+	if (!sc->broken && opt->emu_use != KOF_EMU_NEVER &&
+	    (opt->emu_use == KOF_EMU_ONLY || !sc->packed_here)) {
+		if (kof_scan_emu_unpack(ctx, opt->emu_use == KOF_EMU_ONLY))
+			applies = 1;
 	}
 	kof_mod_unpack_mode(ctx, 0);
 

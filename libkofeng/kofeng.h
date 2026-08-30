@@ -318,6 +318,13 @@ typedef int (*kof_on_object)(const char *name, const void *bytes, uint64_t len,
  * Zeroing the struct gives the conservative answer everywhere - no recursion - so a
  * caller that forgets a field does not get a surprise, it gets less.
  */
+/* Values for kof_scan_option.emu_use. */
+enum kof_emu_use {
+	KOF_EMU_AUTO  = 0,  /* after every unpacker declined, if the gate fires */
+	KOF_EMU_NEVER = 1,  /* interpret nothing, whatever the object looks like */
+	KOF_EMU_ONLY  = 2   /* interpret instead of the packer modules, ungated */
+};
+
 struct kof_scan_option {
 	int      recurse_dirs;     /* descend into directories */
 	uint32_t max_depth;        /* 0 -> a built-in ceiling applies */
@@ -361,6 +368,32 @@ struct kof_scan_option {
 	 * would be claiming more than it measured.
 	 */
 	uint32_t heur_off;
+
+	/*
+	 * WHEN THE INTERPRETER RUNS, and zero is the useful default - like
+	 * heur_off above and for a related reason: it costs nothing on an
+	 * object it declines.
+	 *
+	 * It is entered only after every unpacker has declined the object, and
+	 * only when the object either hides its code behind something too dense
+	 * to be code or carries a header that cannot be loaded as written.
+	 * Measured over 1 246 clean binaries - /usr/bin and the unpacked half
+	 * of the packed-ELF corpus - that gate selects none of them, so an
+	 * ordinary scan never reaches the interpreter at all.
+	 *
+	 * KOF_EMU_NEVER is for a caller whose answer must not depend on running
+	 * anything: the interpreter never executes a guest instruction on the
+	 * host, but it is still the largest thing a scan can be asked to do,
+	 * and a caller with a hard time bound has a right to refuse it.
+	 *
+	 * KOF_EMU_ONLY is not a faster AUTO and is not for scanning. It skips
+	 * the packer modules and interprets whatever it is given, gate or no
+	 * gate, because a person has asked to see what the object does rather
+	 * than what a module says about it. Comparing the two answers is the
+	 * whole point of having it - a static unpacker and an interpreter
+	 * disagreeing about the same file is a finding.
+	 */
+	uint32_t emu_use;
 
 
 	/*

@@ -108,8 +108,35 @@ struct kof_emu {
 	/* The thread pointer, as arch_prctl set it. */
 	uint64_t fs_base, gs_base;
 
-	/* A monotonic tick for RDTSC, in no particular unit. */
-	uint64_t tsc;
+	/*
+	 * THE CLOCK, WHICH IS AN ANTI-EMULATION SURFACE AND NOT A CONVENIENCE.
+	 *
+	 * It advances with instructions retired rather than with real time, so a
+	 * run is reproducible and so the RATIO a stub measures stays plausible:
+	 * code that does more work reads a larger delta, which is the only thing
+	 * a timing check is really looking at. Real time would make the same
+	 * scan answer differently twice, and a frozen clock announces the
+	 * emulator to anything that reads it twice.
+	 *
+	 * `tsc_skew` is time that passed without instructions - a sleep granted
+	 * in full without waiting for it.
+	 */
+	uint64_t tsc_skew;
+
+	/*
+	 * How a delay loop ends.
+	 *
+	 * A stub that spins on the clock until N ticks have gone by would
+	 * otherwise run until the budget is gone, having done nothing. Reading
+	 * the clock twice in quick succession with no work between is what that
+	 * loop looks like from here and looks like nothing else - ordinary code
+	 * does not ask the time in a tight loop - so the wait is granted in
+	 * jumps that grow until the loop's own condition is met. Nothing else
+	 * accelerates: a check that times a piece of REAL work sees the honest
+	 * per-instruction rate.
+	 */
+	uint64_t tsc_last_insn;
+	uint32_t tsc_spin;
 
 	/* Thread ids handed to clone, none of which ever run. */
 	uint64_t next_tid;
@@ -528,6 +555,43 @@ int kof_emu_next_snapshot(struct kof_emu *e, uint32_t *it, uint64_t *va,
 	*len   = e->snap[*it].len;
 	(*it)++;
 	return 1;
+}
+
+/*
+ * Roughly a cycle per instruction, which is what a real machine retires. The
+ * number only has to keep the ratio between two readings believable.
+ */
+#define TSC_PER_INSN  1u
+
+/* The jump a recognised delay loop is granted, doubling while it persists. */
+#define TSC_SPIN_MIN  (1u << 16)
+#define TSC_SPIN_AT   8u
+
+static uint64_t tsc_read(struct kof_emu *e)
+{
+	uint64_t gap = e->insn - e->tsc_last_insn;
+
+	if (gap < 64u) {
+		/* Asked again having done nothing: a wait, not a measurement. */
+		if (++e->tsc_spin > TSC_SPIN_AT) {
+			uint32_t k = e->tsc_spin - TSC_SPIN_AT;
+
+			e->tsc_skew += (uint64_t)TSC_SPIN_MIN <<
+				       (k > 20u ? 20u : k);
+		}
+	} else {
+		e->tsc_spin = 0;
+	}
+	e->tsc_last_insn = e->insn;
+	return e->insn * TSC_PER_INSN + e->tsc_skew;
+}
+
+/* Nanoseconds, from the same clock. A tick is taken to be a nanosecond: the
+ * unit is arbitrary and one that needs no conversion is one that cannot be
+ * converted wrongly. */
+static uint64_t tsc_ns(struct kof_emu *e)
+{
+	return tsc_read(e);
 }
 
 static uint64_t syscall_do(struct kof_emu *e, int *stop_out);
@@ -959,7 +1023,10 @@ enum {
 	SYS_CLOCK_GETTIME = 228, SYS_SET_ROBUST_LIST = 273, SYS_PRLIMIT64 = 302,
 	SYS_GETRANDOM = 318, SYS_MADVISE = 28, SYS_TGKILL = 234,
 	SYS_RSEQ = 334, SYS_SIGRETURN = 15,
-	SYS_GETTIMEOFDAY = 96, SYS_TIME = 201, SYS_GETCPU = 309
+	SYS_GETTIMEOFDAY = 96, SYS_TIME = 201, SYS_GETCPU = 309,
+	SYS_CLOCK_NANOSLEEP = 230, SYS_ALARM = 37, SYS_SETITIMER = 38,
+	SYS_TIMER_CREATE = 222, SYS_TIMER_SETTIME = 223, SYS_PTRACE = 101,
+	SYS_PAUSE = 34, SYS_SELECT = 23, SYS_POLL = 7, SYS_KILL = 62
 };
 
 /* The descriptor an emulated process gets for itself, and for anything else it
@@ -1116,9 +1183,62 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 			}
 		}
 		return 0;
+	/*
+	 * A DELAY IS GRANTED IN FULL AND WAITED FOR NOT AT ALL.
+	 *
+	 * Sleeping is the cheapest anti-emulation trick there is: a stub that
+	 * sleeps thirty seconds before unpacking costs an analyst nothing to
+	 * run and costs an automated scan its entire time budget. Returning
+	 * immediately and leaving the clock alone is the wrong fix, because the
+	 * next thing such a stub does is ask what time it is - and a sleep that
+	 * took no time is a louder signal than a slow machine. So the requested
+	 * interval is added to the clock and the call returns at once: from
+	 * inside, the sleep happened.
+	 */
+	case SYS_NANOSLEEP:
+	case SYS_CLOCK_NANOSLEEP: {
+		uint64_t req = (nr == SYS_NANOSLEEP) ? a0 : e->gpr[KOF_EMU_RDX];
+		uint64_t ts[2], rem[2] = { 0, 0 };
+		uint64_t back = (nr == SYS_NANOSLEEP) ? a1 : e->gpr[KOF_EMU_R10];
+
+		if (req && mem_rd(e, req, ts, sizeof ts))
+			e->tsc_skew += ts[0] * 1000000000u + ts[1];
+		/* Nothing was interrupted, so nothing remains. */
+		if (back)
+			mem_wr(e, back, rem, sizeof rem);
+		return 0;
+	}
+	case SYS_PAUSE:
+	case SYS_SELECT:
+	case SYS_POLL:
+		/*
+		 * Waiting for something outside this process, which is a place
+		 * nothing here can come from. Answered as a timeout - no
+		 * descriptor is ready - so a caller that loops on it makes
+		 * progress instead of blocking on an event that cannot arrive.
+		 */
+		return 0;
+	case SYS_ALARM:
+	case SYS_SETITIMER:
+	case SYS_TIMER_CREATE:
+	case SYS_TIMER_SETTIME:
+		/* Armed, and it will never fire: signals are not delivered here.
+		 * A watchdog that never goes off is the harmless direction. */
+		return 0;
+	case SYS_KILL:
+		/* Including a stub signalling itself to die on a failed check.
+		 * Refused rather than obeyed - the run ends on its own terms. */
+		return (uint64_t)-1;                        /* EPERM */
+	case SYS_PTRACE:
+		/*
+		 * PTRACE_TRACEME succeeds, which is what a process that is NOT
+		 * already being debugged sees. The trick is to call it and
+		 * treat failure as proof of a debugger; answering 0 says there
+		 * is none.
+		 */
+		return 0;
 	case SYS_MADVISE:
 	case SYS_SCHED_YIELD:
-	case SYS_NANOSLEEP:
 	case SYS_SET_ROBUST_LIST:
 	case SYS_SIGALTSTACK:
 	case SYS_TGKILL:
@@ -1162,20 +1282,21 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 		return 8;
 	}
 	case SYS_GETTIMEOFDAY: {
-		uint64_t tv[2];
+		uint64_t now = tsc_ns(e), tv[2];
 
-		e->tsc += 1000u;
-		tv[0] = e->tsc / 1000000000u;
-		tv[1] = (e->tsc % 1000000000u) / 1000u;
+		tv[0] = now / 1000000000u;
+		tv[1] = (now % 1000000000u) / 1000u;
 		if (a0 && !mem_wr(e, a0, tv, sizeof tv))
 			return (uint64_t)-14;
 		return 0;
 	}
-	case SYS_TIME:
-		e->tsc += 1000u;
-		if (a0 && !mem_wr(e, a0, &(uint64_t){ e->tsc / 1000000000u }, 8))
+	case SYS_TIME: {
+		uint64_t now = tsc_ns(e) / 1000000000u;
+
+		if (a0 && !mem_wr(e, a0, &now, 8))
 			return (uint64_t)-14;
-		return e->tsc / 1000000000u;
+		return now;
+	}
 	case SYS_GETCPU: {
 		uint64_t z = 0;
 
@@ -1186,12 +1307,11 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 		return 0;
 	}
 	case SYS_CLOCK_GETTIME: {
-		/* Same steady tick RDTSC reports, in nanoseconds. */
-		uint64_t ts[2];
+		/* Same clock RDTSC reports, in nanoseconds. */
+		uint64_t now = tsc_ns(e), ts[2];
 
-		e->tsc += 1000u;
-		ts[0] = e->tsc / 1000000000u;
-		ts[1] = e->tsc % 1000000000u;
+		ts[0] = now / 1000000000u;
+		ts[1] = now % 1000000000u;
 		if (!mem_wr(e, a1, ts, sizeof ts))
 			return (uint64_t)-14;
 		return 0;
@@ -1412,13 +1532,15 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		 * unreproducible, and a stub that times itself is looking for a
 		 * debugger - a steady tick reads as an ordinary machine.
 		 */
-		case ND_INS_RDTSC: case ND_INS_RDTSCP:
-			e->tsc += 1000u;
-			reg_wr(e, KOF_EMU_RAX, 4, 0, e->tsc & 0xffffffffu);
-			reg_wr(e, KOF_EMU_RDX, 4, 0, e->tsc >> 32);
+		case ND_INS_RDTSC: case ND_INS_RDTSCP: {
+			uint64_t now = tsc_read(e);
+
+			reg_wr(e, KOF_EMU_RAX, 4, 0, now & 0xffffffffu);
+			reg_wr(e, KOF_EMU_RDX, 4, 0, now >> 32);
 			if (ix.Instruction == ND_INS_RDTSCP)
 				reg_wr(e, KOF_EMU_RCX, 4, 0, 0);
 			break;
+		}
 
 		/* XCR0: x87 and SSE enabled, nothing wider - which is the truth
 		 * about this machine, and keeps a runtime off the AVX paths. */
@@ -2028,6 +2150,11 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				goto unsupported;
 			break;
 
+		/* Sign of the accumulator into the whole of RDX/DX. */
+		case ND_INS_CWD:
+			reg_wr(e, KOF_EMU_RDX, 2, 0,
+			       (int16_t)e->gpr[KOF_EMU_RAX] < 0 ? 0xffffu : 0u);
+			break;
 		case ND_INS_CDQ: case ND_INS_CQO:
 			e->gpr[KOF_EMU_RDX] =
 				(ix.Instruction == ND_INS_CQO)
@@ -2035,10 +2162,36 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				: (uint64_t)(uint32_t)((int32_t)e->gpr[KOF_EMU_RAX] >> 31);
 			break;
 
+		/* Widen the accumulator in place. */
+		case ND_INS_CBW:
+			reg_wr(e, KOF_EMU_RAX, 2, 0,
+			       (uint64_t)(uint16_t)(int16_t)(int8_t)e->gpr[KOF_EMU_RAX]);
+			break;
 		case ND_INS_CWDE:
 			e->gpr[KOF_EMU_RAX] =
 				(uint64_t)(uint32_t)(int32_t)(int16_t)e->gpr[KOF_EMU_RAX];
 			break;
+		case ND_INS_CDQE:
+			e->gpr[KOF_EMU_RAX] = (uint64_t)(int64_t)(int32_t)e->gpr[KOF_EMU_RAX];
+			break;
+
+		/* The count-and-branch forms. RCX is the counter and is NOT a
+		 * flag setter - only the branch decision reads ZF. */
+		case ND_INS_LOOP: case ND_INS_LOOPZ: case ND_INS_LOOPNZ: {
+			uint64_t cnt = --e->gpr[KOF_EMU_RCX];
+			int take = cnt != 0;
+
+			if (ix.Instruction == ND_INS_LOOPZ)
+				take = take && (e->flags & FL_ZF);
+			else if (ix.Instruction == ND_INS_LOOPNZ)
+				take = take && !(e->flags & FL_ZF);
+			if (take) {
+				if (!op_rd(e, &ix, &ix.Operands[0], &a))
+					goto unsupported;
+				next = a;
+			}
+			break;
+		}
 
 		case ND_INS_BSWAP:
 			if (!op_rd(e, &ix, &ix.Operands[0], &a))
@@ -2097,8 +2250,25 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		 * pretended otherwise would be a budget that does not bound
 		 * anything.
 		 */
+		/* The flag instructions, which cost a line each and stop real
+		 * samples when they are missing. */
+		case ND_INS_STC: e->flags |= FL_CF;  break;
+		case ND_INS_CLC: e->flags &= ~(uint64_t)FL_CF; break;
+		case ND_INS_CMC: e->flags ^= FL_CF;  break;
+		case ND_INS_SAHF:
+			e->flags = (e->flags & ~(uint64_t)(FL_SF | FL_ZF | FL_AF |
+							   FL_PF | FL_CF)) |
+				   (reg_rd(e, KOF_EMU_RAX, 2, 0) >> 8 &
+				    (FL_SF | FL_ZF | FL_AF | FL_PF | FL_CF));
+			break;
+		case ND_INS_LAHF:
+			reg_wr(e, KOF_EMU_RAX, 1, 1,
+			       (e->flags & (FL_SF | FL_ZF | FL_AF | FL_PF |
+					    FL_CF)) | 2u);
+			break;
+
 		case ND_INS_LODS: case ND_INS_STOS:
-		case ND_INS_MOVS: case ND_INS_SCAS: {
+		case ND_INS_MOVS: case ND_INS_SCAS: case ND_INS_CMPS: {
 			unsigned w = ix.Operands[0].Size ? ix.Operands[0].Size : 1u;
 			int64_t step = (e->flags & FL_DF) ? -(int64_t)w : (int64_t)w;
 			uint64_t iter = 1;
@@ -2132,6 +2302,17 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 					e->gpr[KOF_EMU_RSI] += (uint64_t)step;
 					e->gpr[KOF_EMU_RDI] += (uint64_t)step;
 					break;
+				case ND_INS_CMPS: {
+					uint64_t rhs;
+
+					if (!mem_rd(e, e->gpr[KOF_EMU_RSI], &a, w) ||
+					    !mem_rd(e, e->gpr[KOF_EMU_RDI], &rhs, w))
+						goto fault;
+					fl_sub(e, a, rhs, 0, w);
+					e->gpr[KOF_EMU_RSI] += (uint64_t)step;
+					e->gpr[KOF_EMU_RDI] += (uint64_t)step;
+					break;
+				}
 				default:
 					if (!mem_rd(e, e->gpr[KOF_EMU_RDI], &v, w))
 						goto fault;
@@ -2146,7 +2327,8 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 					/* REPZ/REPNZ on a compare stop on the flag
 					 * as well as on the count; REP on a move
 					 * only on the count. */
-					if (ix.Instruction == ND_INS_SCAS) {
+					if (ix.Instruction == ND_INS_SCAS ||
+					    ix.Instruction == ND_INS_CMPS) {
 						int z = (e->flags & FL_ZF) != 0;
 
 						if (ix.Rep == 0xF3 ? !z : z)
