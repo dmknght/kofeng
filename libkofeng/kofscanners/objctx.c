@@ -22,6 +22,7 @@
 
 #include "scan.h"
 #include "../kofunpack/emu_unpack.h"
+#include "../kofunpack/elf_rebuild.h"
 
 #include "../kofdecomp/ovba.h"
 #include "../kofdecomp/lzma.h"
@@ -1887,6 +1888,13 @@ static int emu_novel(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n
 	return tried && found * 2u < tried;
 }
 
+/* Read the emulated address space for the rebuilder, which knows nothing about
+ * emulators and asks only for bytes at an address. */
+static int emu_rd(void *user, uint64_t va, void *dst, uint32_t n)
+{
+	return kof_emu_read(user, va, dst, n);
+}
+
 /*
  * Hand one recovered image to the sink. Emitted in pieces because c_emit takes
  * a uint32 length and refuses anything over EMIT_MAX - a decompressor already
@@ -1916,9 +1924,9 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	struct kof_emu *e;
 	kof_buf b;
 	uint32_t it, made = 0;
-	uint64_t va, len;
+	uint64_t va, len, built_lo = ~0ull, built_hi = 0;
 	const uint8_t *bytes;
-	int any;
+	int any, built = 0;
 
 	if (!sc || !sc->cur_src || ctx->format != KOF_FMT_ELF || !ctx->file_header)
 		return 0;
@@ -1947,6 +1955,44 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	}
 
 	/*
+	 * AN IMAGE IS NOT A FILE, AND A SCANNER WANTS THE FILE.
+	 *
+	 * What a run leaves is segments at their virtual addresses, spread over
+	 * however many regions the guest mapped. Handed over as they are, the
+	 * one holding the ELF header identifies as ELF with no sections - they
+	 * are in a different region - and the rest identify as nothing, so no
+	 * region partition exists and no signature scoped to CODE or DATA can
+	 * run on any of it. Measured on a sample this unpacks correctly: six
+	 * regions, five of them formatless, against a static unpacker's single
+	 * 2.8 MB file that partitions into HEADERS, CODE, DATA and NOLOAD.
+	 *
+	 * So a region that starts with an ELF header is rebuilt into a file
+	 * first, and the addresses that file accounts for are then skipped -
+	 * emitting them again would hand the same bytes over twice, once with
+	 * structure and once without.
+	 */
+	sc->emu_stage = 1;
+	for (it = 0; kof_emu_next_snapshot(e, &it, &va, &bytes, &len); ) {
+		uint8_t *file = NULL;
+		uint64_t flen = 0;
+
+		if (len < 4 || memcmp(bytes, "\177ELF", 4))
+			continue;
+		if (!kof_elf_rebuild(va, emu_rd, e, sc->obj_cap, &file, &flen,
+				     &built_lo, &built_hi))
+			continue;
+		if (emu_novel(ctx, file, flen) && emu_give(ctx, file, flen) &&
+		    c_child(ctx))
+			made++;
+		free(file);
+		built = 1;
+		break;                  /* one program per run is what a stub
+					 * produces; a second header found in
+					 * its data is not a second program */
+	}
+	sc->emu_stage = 0;
+
+	/*
 	 * Snapshots first, and the written pages only if there were none.
 	 *
 	 * A snapshot is memory a program made executable, which is a payload
@@ -1959,8 +2005,10 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	 * the written pages are all there is.
 	 */
 	sc->emu_stage = 1;
-	for (any = 0, it = 0;
+	for (any = built, it = 0;
 	     kof_emu_next_snapshot(e, &it, &va, &bytes, &len); ) {
+		if (va >= built_lo && va < built_hi)
+			continue;               /* already in the rebuilt file */
 		if (!emu_novel(ctx, bytes, len))
 			continue;               /* the stub's own copy of itself */
 		any = 1;
@@ -1985,6 +2033,8 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	if (!any && (rep.stop == KOF_EMU_STOP_EXIT ||
 		     rep.stop == KOF_EMU_STOP_HANDOFF))
 		for (it = 0; kof_emu_next_written(e, &it, &va, &bytes, &len); ) {
+			if (va >= built_lo && va < built_hi)
+				continue;
 			if (!emu_novel(ctx, bytes, len))
 				continue;
 			if (!emu_give(ctx, bytes, len))
