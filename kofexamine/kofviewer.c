@@ -855,6 +855,14 @@ enum ch_what {
 	CH_RANGE,       /* which declared range a condition searches */
 	CH_RANGE2,      /* what to do to the scan ranges */
 	CH_RANGE3,      /* and which of them, when there are several */
+	/*
+	 * And WHICH REGION to apply, when the markers are spread over more
+	 * than one. A string sits in exactly one region, but a matcher holds
+	 * several strings and they need not agree - so "where the bytes are"
+	 * can be two answers, and applying their union silently is deciding
+	 * for the reader that they wanted both.
+	 */
+	CH_RANGE4,
 	CH_LEVEL,       /* infect or suspect */
 	CH_VARIANT,     /* how the finding names itself */
 	CH_TYPE,        /* enum kof_maltype */
@@ -1420,6 +1428,11 @@ static struct object *cur_obj(struct view *v)
 {
 	return &v->obj[v->node[v->sel_node].obj];
 }
+
+/* Names a region mask - defined with the range menu it belongs to, declared
+ * here because locating a string needs it to say where the string turned up. */
+static void rng_name_of(const struct kof_inspect_fmt *fmt, uint32_t mask,
+			char *out, size_t cap);
 
 /* ---- collecting the objects ------------------------------------------------ */
 
@@ -2083,7 +2096,7 @@ static void decl_locate(struct view *v, struct decl *d)
 	uint8_t prog[KOF_HEX_MAX_PROG];
 	const uint8_t *pat;
 	uint64_t at, from = 0, first = KOF_BROKEN;
-	uint32_t plen, first_nd = 0;
+	uint32_t plen, first_nd = 0, seen_mask = 0;
 	uint8_t kind, flags = 0;
 
 	d->at = KOF_BROKEN;
@@ -2195,6 +2208,18 @@ static void decl_locate(struct view *v, struct decl *d)
 			first_nd = nd;
 		}
 		/*
+		 * EVERY region this string turns up in, not the first one.
+		 *
+		 * What this feeds is the offer to widen the rule's range, and
+		 * that offer has to name where the bytes ARE - all of it. Built
+		 * from the first occurrence alone, a string present in two
+		 * regions proposed whichever came earlier in the file, so a
+		 * marker in both NOLOAD and DATA could be answered with the
+		 * wrong one and the rule would still not fire.
+		 */
+		if (nd < v->n_node)
+			seen_mask |= v->node[nd].mask;
+		/*
 		 * In the region the module searches: this is the occurrence
 		 * the ROW reports, and nothing later can improve on it. The
 		 * walk carries on regardless - the pane wants the rest.
@@ -2267,9 +2292,20 @@ static void decl_locate(struct view *v, struct decl *d)
 		d->at = first;
 		d->cur_hit = 0;
 		if (first_nd < v->n_node && v->node[first_nd].mask) {
-			d->at_mask = v->node[first_nd].mask;
-			snprintf(d->at_rgn, sizeof d->at_rgn, "%s",
-				 v->node[first_nd].label);
+			/*
+			 * The row still points at the first occurrence, because
+			 * a reader jumping to it wants one address. The MASK is
+			 * the union, because the range that would find this
+			 * string has to cover everywhere it is.
+			 */
+			d->at_mask = seen_mask ? seen_mask
+					       : v->node[first_nd].mask;
+			if (d->at_mask == v->node[first_nd].mask)
+				snprintf(d->at_rgn, sizeof d->at_rgn, "%s",
+					 v->node[first_nd].label);
+			else
+				rng_name_of(ob->fmt, d->at_mask, d->at_rgn,
+					    sizeof d->at_rgn);
 			d->off_rgn = 1;
 		}
 	}
@@ -5885,6 +5921,40 @@ static void ch_add(struct chooser *c, const char *t)
  * offers stays next to what picking from it does - two halves of one decision,
  * which drift apart the moment they live in different functions.
  */
+static void ch_open(struct view *v, int what, uint32_t arg, int row, int col);
+
+/*
+ * Apply the verb, or ask which region first.
+ *
+ * Asked only when the markers really are in more than one region, the same way
+ * the range to change is asked for only when the draft holds more than one.
+ * `target` is the range being changed; the region being applied is what this
+ * decides.
+ */
+static void rng_apply(struct view *v, int verb, uint32_t target, uint32_t rgn);
+
+static void rng_finish(struct view *v, struct chooser *c, int verb,
+		       uint32_t target)
+{
+	uint32_t m = v->rng_mask, bits = 0, b;
+
+	for (b = 0; b < 32u; b++)
+		bits += (m >> b) & 1u;
+	/* Verb 3 assigns WHOLE-FILE and never reads the region, so asking
+	 * which region would be asking a question with no consequence. */
+	if (bits > 1 && verb != 3) {
+		struct chooser up = *c;
+
+		up.open = 1;
+		ch_open(v, CH_RANGE4, (uint32_t)verb,
+			up.row + up.sel + 1, up.col + CH_W);
+		v->ch.arg2 = target;
+		v->ch_up = up;
+		return;
+	}
+	rng_apply(v, verb, target, m);
+}
+
 static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 {
 	struct chooser *c = &v->ch;
@@ -5972,9 +6042,19 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		uint32_t seen[MAX_GROUP], g;
 		char add[40], one[40], t[CH_W];
 
+		/*
+		 * ONLY THE STRINGS THE RANGE DOES NOT ALREADY COVER.
+		 *
+		 * `off_rgn` is set exactly when a string is present and nowhere
+		 * the module looks - which is the whole reason this menu is
+		 * open. Built from every grouped string instead, a marker that
+		 * the rule already finds contributed its own region, and the
+		 * offer came back "Extend Data with Data": an assignment that
+		 * changes nothing, on a line that exists to change something.
+		 */
 		one[0] = 0;
 		for (k = 0; k < v->n_decl; k++)
-			if (v->decl[k].grp != 0)
+			if (v->decl[k].grp != 0 && v->decl[k].off_rgn)
 				here |= v->decl[k].at_mask;
 		c->arg2 = here;
 		v->rng_mask = here;
@@ -6018,6 +6098,48 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		}
 		ch_add(c, many > 1 ? "Switch a scan range to WHOLE-FILE..."
 				   : "Switch scan range to WHOLE-FILE");
+	} else if (what == CH_RANGE4) {
+		uint32_t b;
+		char t[CH_W];
+
+		for (b = 0; b < 32u; b++) {
+			if (!(v->rng_mask & (1u << b)))
+				continue;
+			rng_name_of(cur_obj(v)->fmt, 1u << b, t, sizeof t);
+			if (t[0])
+				ch_add(c, t);
+		}
+		/*
+		 * Last, because it is the widest answer and this list reads
+		 * from narrowest to widest like the rest of the menu - and
+		 * because taking all of them is the common case: the reason
+		 * the markers are spread over several regions is usually that
+		 * the rule should have covered all of them.
+		 *
+		 * Worded with the verb it will carry out. "All of them" alone
+		 * is a noun with no action attached, and this row is reached
+		 * after a verb was already chosen two menus ago - by which
+		 * point the reader should not have to remember which.
+		 *
+		 * "all regions FOUND", never "all regions" and never anything
+		 * resembling WHOLE-FILE. They are different assignments and
+		 * the difference matters: this one is the union of the regions
+		 * the markers actually turned up in - two of five, say - while
+		 * WHOLE-FILE abandons regions altogether and searches the
+		 * object end to end, including everything the parse claimed for
+		 * something else. WHOLE-FILE is offered one menu up, as its own
+		 * line, and never reaches this list.
+		 */
+		if (c->n > 1) {
+			static const char *const verbed[3] = {
+				"Switch to all regions found",
+				"Extend with all regions found",
+				"Add all regions found"
+			};
+
+			if (arg < 3u)
+				ch_add(c, verbed[arg]);
+		}
 	} else if (what == CH_RANGE3) {
 		/*
 		 * Which of the draft's ranges the line applies to.
@@ -6423,7 +6545,7 @@ static void ch_take(struct view *v)
 			v->ch_up = up;
 			return;
 		}
-		rng_apply(v, verb, ns ? seen[0] : 0, c->arg2);
+		rng_finish(v, c, verb, ns ? seen[0] : 0);
 		return;
 	}
 	if (c->what == CH_RANGE3) {
@@ -6442,7 +6564,23 @@ static void ch_take(struct view *v)
 				seen[ns++] = mm;
 		}
 		if ((uint32_t)c->sel < ns)
-			rng_apply(v, (int)c->arg, seen[c->sel], v->rng_mask);
+			rng_finish(v, c, (int)c->arg, seen[c->sel]);
+		return;
+	}
+	if (c->what == CH_RANGE4) {
+		uint32_t b, k = 0, pick = 0;
+
+		for (b = 0; b < 32u; b++) {
+			if (!(v->rng_mask & (1u << b)))
+				continue;
+			if ((uint32_t)c->sel == k) {
+				pick = 1u << b;
+				break;
+			}
+			k++;
+		}
+		/* Past the last region is the "all of them" row. */
+		rng_apply(v, (int)c->arg, c->arg2, pick ? pick : v->rng_mask);
 		return;
 	}
 	if (c->what == CH_LOGIC) {
