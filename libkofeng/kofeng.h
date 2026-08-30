@@ -318,10 +318,19 @@ typedef int (*kof_on_object)(const char *name, const void *bytes, uint64_t len,
  * Zeroing the struct gives the conservative answer everywhere - no recursion - so a
  * caller that forgets a field does not get a surprise, it gets less.
  */
-/* Values for kof_scan_option.emu_use. */
+/*
+ * Values for kof_scan_option.emu_use, and NEVER is the one a memset gives.
+ *
+ * The other options here default to the useful setting because they cost
+ * nothing when they do not apply. This one is different: interpreting an object
+ * is the largest thing a scan can do - measured, a UPX-with-LZMA sample needs
+ * forty million instructions to reach its payload and the biggest in the corpus
+ * needed two hundred and fifty - so a caller gets it by asking, not by omitting
+ * a field. kofscanner asks for it at --heur 2.
+ */
 enum kof_emu_use {
-	KOF_EMU_AUTO  = 0,  /* after every unpacker declined, if the gate fires */
-	KOF_EMU_NEVER = 1,  /* interpret nothing, whatever the object looks like */
+	KOF_EMU_NEVER = 0,  /* interpret nothing, whatever the object looks like */
+	KOF_EMU_AUTO  = 1,  /* after every unpacker declined, if the gate fires */
 	KOF_EMU_ONLY  = 2   /* interpret instead of the packer modules, ungated */
 };
 

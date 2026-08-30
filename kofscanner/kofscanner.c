@@ -248,15 +248,17 @@ static void usage(const char *argv0)
 		"  --all-matches   keep scanning an object after the first finding\n"
 		"  --heur N        1 (default) scores what the format parse found\n"
 		"                  wrong with the object and what the unpackers made\n"
-		"                  of it; 0 gathers and scores nothing. Costs no\n"
-		"                  extra pass either way. It reports a level of its\n"
-		"                  own and never a family\n"
+		"                  of it; 0 gathers and scores nothing. Neither costs\n"
+		"                  an extra pass. 2 additionally RUNS an object that\n"
+		"                  no unpacker could open and that looks packed or\n"
+		"                  damaged, and scans what it writes - which is the\n"
+		"                  one level here that costs real time. It reports a\n"
+		"                  level of its own and never a family\n"
 		"  --dump DIR      write every object the engine PRODUCED into DIR:\n"
 		"                  what came out of an unpacker, not what went in\n"
 		"  --stats         report what the prefilter and the presence set earned\n"
-		"  --emu MODE      auto (default) interprets an object that no unpacker\n"
-	    "                  could open and that looks packed or damaged, keeping\n"
-	    "                  what it writes; never interprets nothing; only\n"
+		"  --emu MODE      overrides what --heur chose: never interprets\n"
+	    "                  nothing, auto is what --heur 2 turns on, only\n"
 	    "                  interprets instead of the packer modules, ungated\n"
 	    "  --max-produced N  bytes an object may yield before the scan gives up\n"
 		"  --max-resident N  bytes of produced data that may be alive at once\n"
@@ -289,9 +291,20 @@ static int heur_arg(const char *v, struct kof_scan_option *opt)
 	n = strtoul(v, &end, 10);
 	if (*end)
 		return 0;               /* trailing junk: not a level */
+	/*
+	 * A LADDER OF TWO DECISIONS, not one setting with three values.
+	 *
+	 * 0 and 1 are the old pair: gather and score what the parse and the
+	 * unpackers already produced, or do not. 2 adds the one thing that is
+	 * not free - running an object no unpacker could open. It belongs on
+	 * this flag rather than on its own because it is the same question
+	 * asked harder: how much is this scan willing to spend to say something
+	 * about a file nothing recognised.
+	 */
 	switch (n) {
-	case 0: opt->heur_off = 1; return 1;
-	case 1: opt->heur_off = 0; return 1;
+	case 0: opt->heur_off = 1; opt->emu_use = KOF_EMU_NEVER; return 1;
+	case 1: opt->heur_off = 0; opt->emu_use = KOF_EMU_NEVER; return 1;
+	case 2: opt->heur_off = 0; opt->emu_use = KOF_EMU_AUTO;  return 1;
 	default: return 0;
 	}
 }
@@ -301,7 +314,7 @@ static int heur_arg(const char *v, struct kof_scan_option *opt)
  * to is the one result worth never producing. */
 static int heur_bad(const char *argv0, const char *v)
 {
-	fprintf(stderr, "%s: --heur takes 0 or 1, not '%s'\n", argv0, v);
+	fprintf(stderr, "%s: --heur takes 0, 1 or 2, not '%s'\n", argv0, v);
 	return 2;
 }
 

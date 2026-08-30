@@ -153,6 +153,14 @@ struct kof_emu {
 	uint64_t futex_va;
 	uint32_t futex_spin;
 
+	/*
+	 * The SSE control word, remembered and otherwise ignored: scalar
+	 * arithmetic here runs on the host's own double, so a rounding mode
+	 * stored in it would change nothing. Kept so a caller that saves it and
+	 * restores it reads back what it wrote, which is all any of them check.
+	 */
+	uint32_t mxcsr;
+
 	/* The opening bytes of whatever the guest wrote to stdout or stderr. */
 	char     say[KOF_EMU_SAY];
 	uint32_t n_say;
@@ -389,6 +397,7 @@ struct kof_emu *kof_emu_new(const struct kof_emu_cfg *cfg)
 		free(e);
 		return NULL;
 	}
+	e->mxcsr = 0x1f80u;             /* the reset value: all exceptions masked */
 	e->max_insn = cfg && cfg->max_insn ? cfg->max_insn : DEF_MAX_INSN;
 	e->stop_on_written_jump = cfg ? cfg->stop_on_written_jump : 0;
 	/*
@@ -1582,6 +1591,23 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			break;
 		}
 
+		/*
+		 * The SSE control word, read and written but never acted on:
+		 * this interprets scalar arithmetic with the host's own double,
+		 * so a rounding mode it stored would change nothing. Kept so
+		 * that a caller which saves it and restores it sees what it
+		 * wrote, which is all any of them check.
+		 */
+		case ND_INS_STMXCSR:
+			if (!op_wr(e, &ix, &ix.Operands[0], e->mxcsr))
+				goto unsupported;
+			break;
+		case ND_INS_LDMXCSR:
+			if (!op_rd(e, &ix, &ix.Operands[0], &a))
+				goto unsupported;
+			e->mxcsr = (uint32_t)a;
+			break;
+
 		/* XCR0: x87 and SSE enabled, nothing wider - which is the truth
 		 * about this machine, and keeps a runtime off the AVX paths. */
 		case ND_INS_XGETBV:
@@ -1774,7 +1800,9 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		case ND_INS_MOVUPD: case ND_INS_MOVAPD:
 		case ND_INS_MOVDQU: case ND_INS_MOVDQA:
 		case ND_INS_MOVSS:  case ND_INS_MOVSD:
-		case ND_INS_MOVD:   case ND_INS_MOVQ: {
+		case ND_INS_MOVD:   case ND_INS_MOVQ:
+		/* The half-register loads and stores a memcpy is built from. */
+		case ND_INS_MOVLPS: case ND_INS_MOVLPD: {
 			uint8_t v[16];
 			unsigned n;
 
@@ -1929,6 +1957,65 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				memcpy(&d, y, 8);
 			else { memcpy(&f, y, 4); d = f; }
 			if (!op_wr(e, &ix, &ix.Operands[0], (uint64_t)(int64_t)d))
+				goto unsupported;
+			break;
+		}
+
+		/*
+		 * The high half, and the one-word insert and extract. Present
+		 * because real samples stopped on them: a UPX payload's own
+		 * startup used MOVHPS and another used PINSRW, and one
+		 * unimplemented opcode ends a run that had otherwise reached
+		 * its payload.
+		 */
+		case ND_INS_MOVHPS: case ND_INS_MOVHPD: {
+			uint8_t x[16], y[16];
+			unsigned nx, ny;
+
+			if (ix.Operands[0].Type == ND_OP_MEM) {
+				/* store: the high half goes to memory */
+				if (!vec_rd(e, &ix, &ix.Operands[1], y, &ny))
+					goto unsupported;
+				if (!vec_wr(e, &ix, &ix.Operands[0], y + 8, 8))
+					goto unsupported;
+			} else {
+				if (!vec_rd(e, &ix, &ix.Operands[0], x, &nx) ||
+				    !vec_rd(e, &ix, &ix.Operands[1], y, &ny))
+					goto unsupported;
+				memcpy(x + 8, y, 8);
+				if (!vec_wr(e, &ix, &ix.Operands[0], x, 16))
+					goto unsupported;
+			}
+			break;
+		}
+
+		case ND_INS_PINSRW: {
+			uint8_t x[16];
+			unsigned nx;
+			uint64_t v, sel;
+
+			if (!vec_rd(e, &ix, &ix.Operands[0], x, &nx) ||
+			    !op_rd(e, &ix, &ix.Operands[1], &v) ||
+			    !op_rd(e, &ix, &ix.Operands[2], &sel))
+				goto unsupported;
+			x[(sel & 7u) * 2u]      = (uint8_t)v;
+			x[(sel & 7u) * 2u + 1u] = (uint8_t)(v >> 8);
+			if (!vec_wr(e, &ix, &ix.Operands[0], x, 16))
+				goto unsupported;
+			break;
+		}
+
+		case ND_INS_PEXTRW: {
+			uint8_t y[16];
+			unsigned ny;
+			uint64_t sel;
+
+			if (!vec_rd(e, &ix, &ix.Operands[1], y, &ny) ||
+			    !op_rd(e, &ix, &ix.Operands[2], &sel))
+				goto unsupported;
+			if (!op_wr(e, &ix, &ix.Operands[0],
+				   (uint64_t)y[(sel & 7u) * 2u] |
+				   ((uint64_t)y[(sel & 7u) * 2u + 1u] << 8)))
 				goto unsupported;
 			break;
 		}

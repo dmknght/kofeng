@@ -1757,15 +1757,42 @@ uint32_t kof_fact_id(const char *field)
  */
 
 /*
- * The instruction budget one object may spend.
+ * THE INSTRUCTION BUDGET, DERIVED FROM THE OBJECT RATHER THAN CHOSEN.
  *
- * Measured over 200 UPX-packed binaries: five million carries 178 of them all
- * the way to the stub's own exit, and the 21 that hit the ceiling had already
- * written their payload by the time they did - a budget stop is a result, not
- * a failure, because everything written up to it is still dumped. Raising it
- * further buys the two largest objects and costs every object that spins.
+ * A fixed five million was the single thing most wrong with this stage, and it
+ * did not look wrong: runs ended tidily at the ceiling having written
+ * something, so they read as "the emulator got partway" when they were "the
+ * emulator was interrupted mid-decompression". Measured over the seventeen
+ * objects in the malware corpus that no unpacker could open, the work is
+ * proportional to the PACKED SIZE and the constant is remarkably steady:
+ *
+ *     NRV (UPX method 14)          ~57 instructions per input byte
+ *     LZMA (UPX method 14 + LZMA)  ~250-330 instructions per input byte
+ *
+ * and the totals ran from 2.7 million to 253 million. At five million, two of
+ * the seventeen finished; with the budget below, fifteen do - the same code,
+ * the same design, a ceiling that was two orders of magnitude under what
+ * decompression costs.
+ *
+ * 512 per byte leaves headroom over the worst measured ratio. The floor keeps a
+ * tiny object from getting a budget too small to leave its own entry code; the
+ * cap is what a caller who asked for --heur 2 can be expected to tolerate on
+ * one object, at the ten million instructions a second this interprets.
  */
-#define EMU_INSN_BUDGET  5000000ull
+#define EMU_INSN_PER_BYTE  512ull
+#define EMU_INSN_MIN       (16ull << 20)
+#define EMU_INSN_MAX       (256ull << 20)
+
+static uint64_t emu_insn(uint64_t obj_size)
+{
+	uint64_t n = obj_size * EMU_INSN_PER_BYTE;
+
+	if (n < EMU_INSN_MIN)
+		n = EMU_INSN_MIN;
+	if (n > EMU_INSN_MAX)
+		n = EMU_INSN_MAX;
+	return n;
+}
 
 /*
  * THE INTERPRETER'S SHARE OF THE SCAN'S OWN MEMORY CEILING.
@@ -1902,7 +1929,7 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	if (!force && kof_emu_unp_gate(ctx, info, b.p, b.n) == KOF_EMU_UNP_NO)
 		return 0;
 
-	e = kof_emu_unp_run(b.p, b.n, info, EMU_INSN_BUDGET, emu_pages(sc), &rep);
+	e = kof_emu_unp_run(b.p, b.n, info, emu_insn(b.n), emu_pages(sc), &rep);
 	if (!e) {
 		/*
 		 * No image could be built, and the reasons are all statements
