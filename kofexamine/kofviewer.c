@@ -886,6 +886,17 @@ struct chooser {
 	int      n, sel;
 	uint32_t arg2;              /* the narrowest range, for CH_RANGE */
 	char     item[CH_ITEMS][CH_W];
+	/*
+	 * WHAT EACH ROW DOES, carried rather than derived from its index.
+	 *
+	 * The range menu used to read the verb off c->sel, which holds only
+	 * while every verb is always offered. It is not: switching a range
+	 * away is refused when markers still live in it, and a list that drops
+	 * a row silently renumbers every row after it - so picking "Extend"
+	 * would have carried out "Switch". Written where the row is built,
+	 * read where it is carried out, and the two cannot drift.
+	 */
+	uint8_t  verb[CH_ITEMS];
 };
 
 
@@ -5914,6 +5925,14 @@ static void ch_add(struct chooser *c, const char *t)
 		snprintf(c->item[c->n++], CH_W, "%s", t);
 }
 
+/* The same, for a list whose rows are not all always there. */
+static void ch_add_verb(struct chooser *c, const char *t, unsigned verb)
+{
+	if (c->n < CH_ITEMS)
+		c->verb[c->n] = (uint8_t)verb;
+	ch_add(c, t);
+}
+
 /*
  * Fill and place a chooser.
  *
@@ -6043,19 +6062,39 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		char add[40], one[40], t[CH_W];
 
 		/*
-		 * ONLY THE STRINGS THE RANGE DOES NOT ALREADY COVER.
+		 * WHERE THE MARKERS ARE THAT THE RANGE DOES NOT REACH.
 		 *
-		 * `off_rgn` is set exactly when a string is present and nowhere
-		 * the module looks - which is the whole reason this menu is
-		 * open. Built from every grouped string instead, a marker that
-		 * the rule already finds contributed its own region, and the
-		 * offer came back "Extend Data with Data": an assignment that
-		 * changes nothing, on a line that exists to change something.
+		 * Three quantities, and getting any of them from the wrong set
+		 * of strings breaks the menu in its own way.
+		 *
+		 * `covered` is what the draft already searches. `marks` is
+		 * where the declared strings actually sit - EVERY declared
+		 * string, not only those already put into a matcher, because a
+		 * string is added to the list before it is assigned and the
+		 * whole reason to open this menu is to make the range reach it.
+		 * Built from grouped strings alone, adding a marker in NOLOAD
+		 * to a draft left the menu offering WHOLE-FILE and nothing
+		 * else: there was no ungrouped string to notice.
+		 *
+		 * `here` is what is missing and `keep` is what would be lost.
+		 * A string's own region comes from where it was LOCATED when
+		 * that is known, and from where it was taken otherwise.
 		 */
+		uint32_t covered = 0, marks = 0, keep = 0;
+
 		one[0] = 0;
-		for (k = 0; k < v->n_decl; k++)
-			if (v->decl[k].grp != 0 && v->decl[k].off_rgn)
-				here |= v->decl[k].at_mask;
+		for (g = 0; g < v->n_grp; g++)
+			if (grp_has_range(v, g))
+				covered |= grp_mask(v, g);
+		for (k = 0; k < v->n_decl; k++) {
+			uint32_t mm = v->decl[k].at_mask ? v->decl[k].at_mask
+							 : v->decl[k].mask;
+
+			if (mm && mm != KOF_SCAN_ALL)
+				marks |= mm;
+		}
+		here = marks & ~covered;
+		keep = marks & covered;
 		c->arg2 = here;
 		v->rng_mask = here;
 
@@ -6076,28 +6115,44 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 
 		if (here) {
 			rng_name_of(cur_obj(v)->fmt, here, add, sizeof add);
+			/*
+			 * SWITCH IS OFFERED ONLY WHEN NOTHING IS LEFT BEHIND.
+			 *
+			 * It replaces the range, so with markers still living
+			 * in the range being replaced it is an offer to stop
+			 * finding them - the rule would go from partly working
+			 * to differently broken. Extend is the answer there,
+			 * and it is the answer often enough that Switch being
+			 * absent is the useful signal rather than a missing
+			 * feature.
+			 */
+			if (many && !keep) {
+				if (many > 1)
+					snprintf(t, sizeof t,
+						 "Switch a scan range to "
+						 "%.11s...", add);
+				else
+					snprintf(t, sizeof t,
+						 "Switch scan range to %.15s",
+						 add);
+				ch_add_verb(c, t, 0);
+			}
+			/* Nothing to extend until a range exists. */
 			if (many > 1) {
-				snprintf(t, sizeof t,
-					 "Switch a scan range to %.11s...",
-					 add);
-				ch_add(c, t);
 				snprintf(t, sizeof t,
 					 "Extend a scan range with %.9s...",
 					 add);
-				ch_add(c, t);
-			} else {
-				snprintf(t, sizeof t,
-					 "Switch scan range to %.15s", add);
-				ch_add(c, t);
+				ch_add_verb(c, t, 1);
+			} else if (many == 1) {
 				snprintf(t, sizeof t, "Extend %.12s with %.12s",
 					 one, add);
-				ch_add(c, t);
+				ch_add_verb(c, t, 1);
 			}
 			snprintf(t, sizeof t, "Add %.15s to scan ranges", add);
-			ch_add(c, t);
+			ch_add_verb(c, t, 2);
 		}
-		ch_add(c, many > 1 ? "Switch a scan range to WHOLE-FILE..."
-				   : "Switch scan range to WHOLE-FILE");
+		ch_add_verb(c, many > 1 ? "Switch a scan range to WHOLE-FILE..."
+					: "Switch scan range to WHOLE-FILE", 3);
 	} else if (what == CH_RANGE4) {
 		uint32_t b;
 		char t[CH_W];
@@ -6530,9 +6585,14 @@ static void ch_take(struct view *v)
 			if (!dup)
 				seen[ns++] = mm;
 		}
-		/* With no located marker the list holds WHOLE-FILE alone, so
-		 * the row picked is the last verb whatever its index. */
-		verb = c->n == 1 ? 3 : c->sel;
+		/*
+		 * Read off the row, not off its index. Rows are omitted when
+		 * they would not make sense - Switch when markers would be
+		 * left behind, Extend when there is no range yet - and an
+		 * index-derived verb carries out whichever row happens to sit
+		 * at that number instead.
+		 */
+		verb = (c->sel >= 0 && c->sel < c->n) ? (int)c->verb[c->sel] : 3;
 		/* "Add" makes a range rather than changing one, so it never
 		 * has to ask which. The other three do, and only when the
 		 * draft holds more than one. */
