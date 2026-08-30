@@ -266,6 +266,19 @@ void kof_mod_unpack_mode(struct kof_obj_ctx *, int on);
  */
 uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force);
 
+/*
+ * WHOLE EXECUTABLES CARRIED INSIDE THIS OBJECT, offered as children.
+ *
+ * Not an unpacker: nothing is compressed and nothing is decoded. A dropper that
+ * appends its payload, or lays one out per architecture inside its own code
+ * segment, leaves a complete file sitting at an offset - and until it is handed
+ * over as an object, no collector parses it and no signature can name it.
+ *
+ * Returns how many were produced. See embedded.h for why the header test is
+ * strict and what it measured.
+ */
+uint32_t kof_scan_embedded(const struct kof_obj_ctx *ctx);
+
 /* Turn a named range into extents. objctx.c needs it; the parse is what knows. */
 uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *, uint32_t scan_mask,
 				struct kof_range *ext);

@@ -578,6 +578,16 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		if (kof_scan_emu_unpack(ctx, opt->emu_use == KOF_EMU_ONLY))
 			applies = 1;
 	}
+	/*
+	 * A COMPLETE FILE SITTING AT AN OFFSET IS NOT AN UNPACKING PROBLEM.
+	 *
+	 * Run whatever the modules did or did not do, because carrying a
+	 * payload and being packed are independent: a dropper can be neither,
+	 * either or both. It costs one search of the object for two magics, and
+	 * the header test behind it selects none of 1 328 clean binaries.
+	 */
+	if (!sc->broken && kof_scan_embedded(ctx))
+		applies = 1;
 	kof_mod_unpack_mode(ctx, 0);
 
 	/*

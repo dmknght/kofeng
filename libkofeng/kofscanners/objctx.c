@@ -23,6 +23,7 @@
 #include "scan.h"
 #include "../kofunpack/emu_unpack.h"
 #include "../kofunpack/elf_rebuild.h"
+#include "../kofunpack/embedded.h"
 
 #include "../kofdecomp/ovba.h"
 #include "../kofdecomp/lzma.h"
@@ -2064,4 +2065,70 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	kof_emu_free(e);
 	(void)made;
 	return 1;
+}
+
+
+/* ---- whole executables carried inside another object ----------------------
+ *
+ * See embedded.h. Separate from the unpackers because nothing is unpacked: the
+ * bytes are already a file, they were simply never offered as one.
+ */
+
+/* Enough for a dropper carrying one payload per architecture, and a bound on
+ * an object built to produce thousands of them. */
+#define EMBED_MAX  32u
+
+/*
+ * The magic is searched for with the engine's own matcher over the object's own
+ * context - the same search a signature gets, so it costs what a signature
+ * costs and behaves the same way on the same bytes.
+ */
+static uint32_t embed_one(const struct kof_obj_ctx *ctx, struct kof_scanner *sc,
+			  kof_buf b, const char *magic, uint16_t mlen,
+			  uint32_t made)
+{
+	uint64_t at = 1;
+
+	while (made < EMBED_MAX && at < b.n) {
+		struct kof_embedded e;
+		uint64_t hit = kof_match_where(&sc->m, at, b.n - at,
+					       (const uint8_t *)magic, mlen,
+					       KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
+
+		if (hit == KOF_BROKEN)
+			break;
+		at = hit + 1u;
+		if (!kof_embedded_at(b.p, b.n, hit, &e))
+			continue;
+		/*
+		 * A window, not an emit: the bytes exist in the parent already
+		 * and copying them would charge the budget for something the
+		 * scanner can simply look at through a different offset.
+		 */
+		if (!c_window(ctx, e.off, e.len))
+			break;
+		made++;
+		/* Past what this one accounts for: an executable's own headers
+		 * often contain the magic again, and each of those is a piece
+		 * of the child rather than a child of its own. */
+		if (e.off + e.len > at)
+			at = e.off + e.len;
+	}
+	return made;
+}
+
+uint32_t kof_scan_embedded(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	kof_buf b;
+	uint32_t made = 0;
+
+	if (!sc || !sc->cur_src || !can_produce(sc))
+		return 0;
+	b = kof_src_buf(sc->cur_src);
+	if (!b.p || b.n < 64u)
+		return 0;
+	made = embed_one(ctx, sc, b, "\177ELF", 4, made);
+	made = embed_one(ctx, sc, b, "MZ", 2, made);
+	return made;
 }
