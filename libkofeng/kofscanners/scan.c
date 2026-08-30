@@ -558,6 +558,33 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		sc->cur_mod = NULL;
 	}
 	/*
+	 * A COMPLETE FILE SITTING AT AN OFFSET IS NOT AN UNPACKING PROBLEM.
+	 *
+	 * Run whatever the modules did or did not do, because carrying a
+	 * payload and being packed are independent: a dropper can be neither,
+	 * either or both. It costs one search of the object for two magics, and
+	 * the header test behind it selects none of 1 328 clean binaries.
+	 *
+	 * Off at --heur 0, and that is the right switch for it rather than one
+	 * of its own. Level 0 means "name families and nothing else": no facts
+	 * gathered, nothing scored, no evidence produced that is not a match.
+	 * A payload carried inside another file is exactly that kind of
+	 * evidence - and a caller who has asked for the cheapest possible pass
+	 * should not be given a tree of children they did not ask for.
+	 *
+	 * BEFORE THE INTERPRETER, because the two questions overlap and this is
+	 * the one with an answer. A packed file and a file carrying a payload
+	 * look alike from outside - both are mostly bytes that are not code -
+	 * but "is there a whole executable at this offset" is decided by
+	 * reading a header, while "what does this unpack to" is decided by
+	 * running it for up to 256 million instructions. Cheap and certain
+	 * first. They are not exclusive either: a packed dropper is both, and
+	 * whichever runs first, the children get the other treatment when they
+	 * are scanned in turn.
+	 */
+	if (!sc->broken && !opt->heur_off && kof_scan_embedded(ctx))
+		applies = 1;
+	/*
 	 * NOTHING OPENED IT, SO RUN IT.
 	 *
 	 * Last, and only when every module that declared this format has had
@@ -578,16 +605,6 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		if (kof_scan_emu_unpack(ctx, opt->emu_use == KOF_EMU_ONLY))
 			applies = 1;
 	}
-	/*
-	 * A COMPLETE FILE SITTING AT AN OFFSET IS NOT AN UNPACKING PROBLEM.
-	 *
-	 * Run whatever the modules did or did not do, because carrying a
-	 * payload and being packed are independent: a dropper can be neither,
-	 * either or both. It costs one search of the object for two magics, and
-	 * the header test behind it selects none of 1 328 clean binaries.
-	 */
-	if (!sc->broken && kof_scan_embedded(ctx))
-		applies = 1;
 	kof_mod_unpack_mode(ctx, 0);
 
 	/*
