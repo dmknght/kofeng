@@ -10079,9 +10079,9 @@ static const struct {
 	{ "Dashboard",         BM_ANALYSIS, -1 },
 	{ "Dump",              BM_ANALYSIS, -1 },
 	{ "Static unpacker",   BM_ANALYSIS, BI_DUMP },
-	{ "Emulator unpacker", BM_ANALYSIS, BI_DUMP },
+	{ "Emu unpacker",      BM_ANALYSIS, BI_DUMP },
 	/* Replaced at draw time by the mode's own wording - see bar_label. */
-	{ "Examine with...",   BM_ANALYSIS, -1 },
+	{ "Use ... unpacker",  BM_ANALYSIS, -1 },
 	{ "Rebuild database",  BM_ANALYSIS, -1 },
 	/*
 	 * "Next" and "Previous", not "Next file" and "Previous file": the menu
@@ -10113,16 +10113,20 @@ static int bar_has_sub(int i)
 static const char *bar_label(struct view *v, int i)
 {
 	/*
-	 * "Examine with", not "Reopen with". Reopening is the mechanism, and
-	 * naming a menu item after its mechanism tells the reader what the tool
-	 * will DO rather than what they will get. What they get is the same
-	 * examination of the same object with the other unpacker in front of it
-	 * - and it is a question asked once about this file, not a mode the
-	 * session enters, which is why it does not follow them to the next one.
+	 * "Use X unpacker", naming the tool that will open the file.
+	 *
+	 * Two earlier wordings were worse in the same way. "Reopen with"
+	 * named the mechanism rather than the result. "Examine with emulator"
+	 * named the result but read as though the menu would open the emulator
+	 * and show its insides - when what changes is only which unpacker is in
+	 * front of the same object. What the reader picks here is who does the
+	 * opening, and the label now says exactly that.
+	 *
+	 * "Emu" rather than "emulator" because the column is narrow and the
+	 * word is one a researcher reads without expanding.
 	 */
 	if (i == BI_UNPACKER)
-		return v->emu_mode ? "Examine with static unpacker"
-				   : "Examine with emulator";
+		return v->emu_mode ? "Use static unpacker" : "Use Emu unpacker";
 	return bar_item[i].label;
 }
 
