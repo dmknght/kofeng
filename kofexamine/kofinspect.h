@@ -258,6 +258,23 @@ struct kof_touch_str {
 	 * followed it.
 	 */
 	uint32_t       span_min;
+	/*
+	 * How long the match AT `at` actually is, which is not span_min the
+	 * moment a pattern has a gap in it.
+	 *
+	 * span_min is a property of the PATTERN - the shortest thing it could
+	 * match - and it is the right answer when nothing has been found. Once
+	 * something has, the highlight should cover what was found: measured on
+	 * a Tsunami marker, `474554202F[4-7]2E7473756E616D69` reports a span of
+	 * "17-20", and the occurrence in the object is "GET /armv4l.tsunami",
+	 * nineteen bytes. Lighting seventeen of them cuts the last two
+	 * characters off the thing the reader was shown.
+	 *
+	 * Equal to span_min whenever the pattern is fixed, which is nearly
+	 * always, and KOF_BROKEN's absence is not a case: it is only filled
+	 * when `at` was found.
+	 */
+	uint32_t       span_at;
 	uint8_t        flags;    /* KOF_STR_ICASE | KOF_STR_FULLWORD */
 	/*
 	 * The pattern's identity across the WHOLE database, not within its pack -

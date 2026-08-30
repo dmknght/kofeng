@@ -960,7 +960,19 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 		/* Take the children before anything else can reset them. */
 		if (!w->aborted && !w->out_of_memory &&
 		    (!w->opt->max_depth || depth + 1 <= w->opt->max_depth)) {
-			for (i = 0; i < w->sc->n_kids; i++) {
+			/*
+			 * PUSHED BACKWARDS SO THEY COME OUT FORWARDS.
+			 *
+			 * The stack is what makes this depth-first without
+			 * recursion, and a stack reverses whatever order things
+			 * go onto it. Pushed 0..n-1, the children came back
+			 * n-1..0 - so an archive listed its last entry first,
+			 * and a dropper carrying one payload per architecture
+			 * showed them bottom to top in the viewer's tree. The
+			 * numbering was right all along; only the order they
+			 * were walked in was backwards.
+			 */
+			for (i = w->sc->n_kids; i-- > 0; ) {
 				char kid[512];
 
 				if (n == cap) {
@@ -1097,6 +1109,53 @@ static void read_dir(struct walk *w, const char *dir, uint32_t depth)
 		/* anything else - socket, device, fifo - is not an object */
 	}
 	closedir(d);
+}
+
+/*
+ * Scan bytes the caller already has, under a name of their choosing.
+ *
+ * Same machinery as a file: one source, then scan_tree, which is the part that
+ * knows how an object turns into a tree of them. The directory walk above is
+ * about finding files; this is about scanning one thing, and the two share
+ * everything below that distinction.
+ *
+ * It exists because a tool that has already scanned a file may want to ask a
+ * DIFFERENT question about one object inside it - kofviewer runs the
+ * interpreter on a node the reader picked, having built the tree with the
+ * static unpackers - and re-scanning the whole file with different options
+ * would answer that question about every object instead of the one asked about.
+ *
+ * The bytes are borrowed, not taken: they must outlive the call.
+ */
+int kof_scan_bytes(struct kof_scanner *sc, const void *bytes, uint64_t n,
+		   const char *name, const struct kof_scan_option *opt,
+		   kof_on_object cb, void *user)
+{
+	static const struct kof_scan_option conservative;
+	struct kof_objsrc *src;
+	struct walk w;
+
+	if (!sc || !bytes || !n)
+		return KOF_ERR_ARG;
+	memset(&w, 0, sizeof w);
+	w.sc   = sc;
+	w.opt  = opt ? opt : &conservative;
+	w.cb   = cb;
+	w.user = user;
+
+	/*
+	 * A window over nothing: kof_src_window needs a parent, and there is no
+	 * parent here. kof_src_heap takes ownership of a heap block and this
+	 * caller's bytes are not one, so the source is built to borrow - see
+	 * kof_src_borrow.
+	 */
+	src = kof_src_borrow(bytes, n);
+	if (!src)
+		return KOF_ERR_OPEN;
+	scan_tree(&w, src, name ? name : "");
+	kof_src_unref(src);
+	free(w.path_buf);
+	return w.objects ? (int)w.objects : 0;
 }
 
 int kof_scan_walk(struct kof_scanner *sc, const char *path,

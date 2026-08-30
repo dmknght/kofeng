@@ -534,6 +534,47 @@ static uint64_t where_in(struct kof_match_ctx *m, const struct kof_range *ext,
 	return KOF_BROKEN;
 }
 
+/*
+ * How many bytes the match at s->at covers.
+ *
+ * Asked of the matcher rather than computed from the pattern, because a pattern
+ * with a gap has no single length - only the occurrence does. kof_match_where
+ * says where a match starts and the engine keeps the end to itself, so the way
+ * to ask is to truncate the buffer: a match needs its whole length present, so
+ * the shortest cut it still matches under IS its length. Monotonic, so a
+ * bisection rather than a walk.
+ *
+ * Skipped entirely when the pattern is fixed, which is nearly every marker.
+ */
+static void span_at_of(struct kof_match_ctx *m, kof_buf buf,
+		       struct kof_touch_str *s)
+{
+	uint64_t lo = s->span_min, hi;
+	const char *dash = s->span;
+
+	while (*dash && *dash != '-' && *dash != '+')
+		dash++;
+	if (!*dash || !s->span_min)
+		return;                 /* one length, and it is span_min */
+	hi = *dash == '+' ? buf.n - s->at : strtoul(dash + 1, NULL, 10);
+	if (hi > buf.n - s->at)
+		hi = buf.n - s->at;
+	if (hi <= lo)
+		return;
+	while (lo < hi) {
+		uint64_t mid = lo + (hi - lo) / 2u;
+
+		kof_match_begin(m, kof_buf_make(buf.p, s->at + mid));
+		if (kof_match_at(m, s->at, s->pool, s->pool_len, s->kind,
+				 s->flags))
+			hi = mid;
+		else
+			lo = mid + 1u;
+	}
+	s->span_at = (uint32_t)lo;
+	kof_match_begin(m, buf);        /* put the context back */
+}
+
 /* Most interesting first; within a kind, the one with more markers present. */
 static int cmp_touch(const void *a, const void *b)
 {
@@ -725,8 +766,11 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 			s->uid   = eng->packs[mod->pack_id].uid_base + e->uid;
 
 			s->at = where_in(&m, whole, n_whole, s);
-			if (s->at != KOF_BROKEN)
+			s->span_at = s->span_min;
+			if (s->at != KOF_BROKEN) {
 				t->n_present++;
+				span_at_of(&m, buf, s);
+			}
 
 			if (n_named && where_in(&m, named, n_named, s) !=
 					KOF_BROKEN) {

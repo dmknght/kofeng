@@ -88,6 +88,10 @@ struct kof_objsrc *kof_src_window(struct kof_objsrc *parent, uint64_t off,
 /* Take ownership of a malloc'd buffer. */
 struct kof_objsrc *kof_src_heap(uint8_t *bytes, uint64_t len);
 
+/* Bytes the caller owns and keeps alive; nothing is freed and nothing is
+ * charged to the produced-memory ceiling. */
+struct kof_objsrc *kof_src_borrow(const void *bytes, uint64_t len);
+
 /*
  * Map an open descriptor and take ownership of it. Used for output that outgrew
  * memory: the bytes are already written, this turns them back into an object that

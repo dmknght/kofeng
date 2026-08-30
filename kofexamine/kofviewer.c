@@ -1305,6 +1305,10 @@ struct view {
 	 */
 	int         emu_mode;
 
+	/* Set while a sub-scan runs: swallow its echo of the object it was
+	 * given. See on_object. */
+	int         skip_root;
+
 	/* Which top-level item's submenu is showing, -1 for none. */
 	int         bar_sub;
 
@@ -1457,6 +1461,16 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 
 	if (v->n_obj >= MAX_OBJ || !len)
 		return 0;
+	/*
+	 * A scan of one object's bytes reports that object first, and it is
+	 * already in the tree - it is the row the reader picked. Dropped here
+	 * rather than filtered by name, because two objects can share a name
+	 * and only this one is the echo.
+	 */
+	if (v->skip_root) {
+		v->skip_root = 0;
+		return 0;
+	}
 	o = &v->obj[v->n_obj];
 	memset(o, 0, sizeof *o);
 	snprintf(o->name, sizeof o->name, "%s", name);
@@ -1640,11 +1654,19 @@ static void objects_collect(struct view *v, kof_engine *eng)
  * than inside it: the callback runs while the engine holds the object, and
  * driving the matcher over the same engine from in there is a re-entry nobody
  * has designed for. */
-static void objects_examine(struct view *v, kof_engine *eng)
+/*
+ * Parse and look up the objects from `from` onward.
+ *
+ * A range rather than the whole list, because objects arrive twice now: once
+ * when the file is opened, and again when the reader runs the interpreter on a
+ * node and it produces more. Re-examining the earlier ones would allocate a
+ * second view for each and leak the first.
+ */
+static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 {
 	uint32_t i;
 
-	for (i = 0; i < v->n_obj; i++) {
+	for (i = from; i < v->n_obj; i++) {
 		struct object *o = &v->obj[i];
 
 		o->fmt = kof_inspect_identify(o->buf, &o->ctx, &o->info);
@@ -1660,6 +1682,11 @@ static void objects_examine(struct view *v, kof_engine *eng)
 				      o->n_finding, &o->touch, &o->n_touch))
 			o->n_touch = 0;
 	}
+}
+
+static void objects_examine(struct view *v, kof_engine *eng)
+{
+	objects_examine_from(v, eng, 0);
 }
 
 /* ---- the tree -------------------------------------------------------------- */
@@ -2059,7 +2086,7 @@ static int hit_owner(struct view *v, uint64_t off)
 			 * pool holds a compiled program, and lighting its
 			 * length lit the marker plus whatever followed it in
 			 * the object. */
-			if (off < st->at || off >= st->at + st->span_min)
+			if (off < st->at || off >= st->at + st->span_at)
 				continue;
 			if (st->in_rgn)
 				return (int)i;
@@ -2084,7 +2111,7 @@ static int hit_kind(struct view *v, uint64_t off)
 
 		if (st->at == KOF_BROKEN)
 			continue;
-		if (off >= st->at && off < st->at + st->span_min)
+		if (off >= st->at && off < st->at + st->span_at)
 			return st->in_rgn ? 1 : 2;
 	}
 	return 0;
@@ -10125,8 +10152,10 @@ static const char *bar_label(struct view *v, int i)
 	 * "Emu" rather than "emulator" because the column is narrow and the
 	 * word is one a researcher reads without expanding.
 	 */
-	if (i == BI_UNPACKER)
-		return v->emu_mode ? "Use static unpacker" : "Use Emu unpacker";
+	if (i == BI_UNPACKER) {
+		(void)v;
+		return "Use Emu unpacker";
+	}
 	return bar_item[i].label;
 }
 
@@ -11250,6 +11279,64 @@ static const char *base_name(const char *path)
 static int file_open(struct view *v, const char *path, kof_engine *eng);
 
 /*
+ * See the note on BI_UNPACKER: the interpreter, on the selected object.
+ *
+ * The children it produces are named under that object's own name, so the
+ * engine's "//n" convention puts them in the tree exactly where they belong and
+ * tree_build needs to know nothing about where they came from.
+ */
+static void emu_here(struct view *v)
+{
+	struct object *o = cur_obj(v);
+	struct kof_scan_option opt;
+	kof_scanner *sc;
+	uint32_t before = v->n_obj;
+
+	v->act_ok = 0;
+	if (!v->eng) {
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "No database - nothing to unpack with");
+		return;
+	}
+	if (!o->buf.p || !o->buf.n) {
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "That object's bytes were not kept - nothing to run");
+		return;
+	}
+	sc = kof_scanner_new(v->eng);
+	if (!sc) {
+		snprintf(v->act_msg, sizeof v->act_msg, "Out of memory");
+		return;
+	}
+	memset(&opt, 0, sizeof opt);
+	opt.all_matches = 1;
+	/*
+	 * ONLY, because the reader asked for the interpreter by name. AUTO
+	 * would decline the moment a packer module claimed the object - which
+	 * on this node it already has, or the node would not be here.
+	 */
+	opt.emu_use = KOF_EMU_ONLY;
+	v->pending_ver = -1;
+	v->skip_root = 1;
+	kof_scanner_on_debug(sc, on_debug, v);
+	kof_scan_bytes(sc, o->buf.p, o->buf.n, o->name, &opt, on_object, v);
+	kof_scanner_free(sc);
+	v->skip_root = 0;
+
+	if (v->n_obj == before) {
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "Emu: recovered nothing from this object");
+		return;
+	}
+	objects_examine_from(v, v->eng, before);
+	tree_build(v);
+	view_select(v);
+	v->act_ok = 1;
+	snprintf(v->act_msg, sizeof v->act_msg, "Emu: recovered %u object(s)",
+		 v->n_obj - before);
+}
+
+/*
  * SAY WHAT THE REOPEN ACTUALLY PRODUCED, not that a reopen happened.
  *
  * "reopened, unpacked by the emulator" is true of a file the emulator could not
@@ -11731,15 +11818,7 @@ static void bar_run(struct view *v, int i)
 		break;
 	case BI_DUMP_STATIC: dump_all(v, 0); break;
 	case BI_DUMP_EMU:    dump_all(v, 1); break;
-	case BI_UNPACKER: {
-		char keep[KOF_DUMP_PATH_ROOM];
-
-		snprintf(keep, sizeof keep, "%s", v->path);
-		v->emu_mode = !v->emu_mode;
-		if (file_open(v, keep, v->eng))
-			say_unpacked(v);
-		break;
-	}
+	case BI_UNPACKER: emu_here(v); break;
 	case BI_NEXT:    open_step(v, +1); break;
 	case BI_PREV:    open_step(v, -1); break;
 	case BI_REBUILD: rebuild_db(v); break;

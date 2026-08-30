@@ -513,6 +513,22 @@ void kof_scanner_on_debug(kof_scanner *, kof_on_debug, void *user);
  * Returns the number of objects scanned, or a KOF_ERR_*. Findings arrive through the
  * callback; zero findings on an object is a result and is still reported.
  */
+/*
+ * Scan bytes the caller already holds, under a name of its choosing.
+ *
+ * For a tool that has scanned a file and now wants to ask a different question
+ * about ONE object inside it - the viewer runs the interpreter on a node the
+ * reader picked, having built the tree with the static unpackers. Re-scanning
+ * the file with different options would answer that question about every
+ * object rather than the one that was asked about.
+ *
+ * The bytes are borrowed and must outlive the call. Returns the number of
+ * objects scanned, or a KOF_ERR_*.
+ */
+int kof_scan_bytes(kof_scanner *, const void *bytes, uint64_t n,
+		   const char *name, const struct kof_scan_option *,
+		   kof_on_object, void *user);
+
 int kof_scan_path(kof_scanner *, const char *path, const struct kof_scan_option *,
 		  kof_on_object cb, void *user);
 

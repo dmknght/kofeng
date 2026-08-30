@@ -229,6 +229,26 @@ struct kof_objsrc *kof_src_heap(uint8_t *bytes, uint64_t len)
 	return s;
 }
 
+/*
+ * Bytes somebody else owns and will outlive the scan.
+ *
+ * kof_src_heap takes a block to free and kof_src_window needs a parent to hold
+ * a reference on; a caller that already has a mapped buffer has neither, and
+ * copying it to satisfy the constructor would double the memory for nothing.
+ * `produced` stays zero, which is what it means: nothing was produced, these
+ * bytes existed before the scan and are not charged to its ceiling.
+ */
+struct kof_objsrc *kof_src_borrow(const void *bytes, uint64_t len)
+{
+	struct kof_objsrc *s = src_new();
+
+	if (!s)
+		return NULL;
+	s->p = bytes;
+	s->n = len;
+	return s;
+}
+
 struct kof_objsrc *kof_src_fd(int fd, uint64_t len)
 {
 	struct kof_objsrc *s = src_new();
