@@ -69,6 +69,15 @@ struct kof_emu_unp_report {
 	uint32_t             images;     /* snapshots taken at a W->X mprotect */
 	uint32_t             written;    /* runs of written memory */
 	const char          *detail;     /* the emulator's own last word */
+	/*
+	 * Why no run was attempted at all, or NULL if one was.
+	 *
+	 * Distinct from a run that stopped early, and the distinction matters
+	 * to whoever is reading: "the emulator could not unpack this" and "this
+	 * file does not contain the code that would have unpacked it" are
+	 * different findings, and only the second one is about the file.
+	 */
+	const char          *refused;
 };
 
 /*

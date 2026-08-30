@@ -204,6 +204,14 @@ struct kof_emu *kof_emu_unp_run(const uint8_t *file, uint64_t n,
 	uint64_t bias, entry = 0, phdr_va = 0, lowest_x = 0, base_lo = ~0ull;
 	uint32_t i, mapped = 0;
 	int improvised = 0;
+	/*
+	 * Ranges holding REAL FILE BYTES, which is not the same as ranges that
+	 * are mapped: p_memsz outlives p_filesz, so a segment contributes
+	 * zero-filled pages past the content it actually carries, and a
+	 * truncated file contributes a great many of them.
+	 */
+	uint64_t back_lo[KOF_ELF_MAX_SEGMENTS], back_hi[KOF_ELF_MAX_SEGMENTS];
+	uint32_t n_back = 0;
 
 	if (rep)
 		memset(rep, 0, sizeof *rep);
@@ -237,6 +245,11 @@ struct kof_emu *kof_emu_unp_run(const uint8_t *file, uint64_t n,
 				 perm_of(s->perm)))
 			continue;
 		mapped++;
+		if (fsz && n_back < KOF_ELF_MAX_SEGMENTS) {
+			back_lo[n_back] = va;
+			back_hi[n_back] = va + fsz;
+			n_back++;
+		}
 		if (va < base_lo)
 			base_lo = va;
 		/*
@@ -305,31 +318,55 @@ struct kof_emu *kof_emu_unp_run(const uint8_t *file, uint64_t n,
 	entry = info->entry_addr ? info->entry_addr + (mapped ? bias : 0) : 0;
 	if (!mapped && info->entry_addr && info->entry_addr < n)
 		entry = bias + info->entry_addr;   /* flat: treat it as an offset */
-	{
-		/*
-		 * Readable is not enough, and finding that out cost four
-		 * samples: a truncated file still has its zero-FILLED pages,
-		 * because p_memsz outlives p_filesz, so the declared entry
-		 * reads back sixteen zero bytes and the run decodes them as
-		 * "add [rax], al" and faults on the first instruction. An entry
-		 * that is all zeroes is not an entry, whatever the header says.
-		 */
-		uint8_t probe[16];
-		int usable = 0;
 
-		if (entry && kof_emu_read(e, entry, probe, sizeof probe)) {
-			unsigned k;
+	/*
+	 * THE ENTRY HAS TO BE IN THE FILE, and being mapped is not that.
+	 *
+	 * A truncated object still has every address its header declares -
+	 * p_memsz covers them - so the declared entry reads back as sixteen
+	 * zero bytes and decodes as "add [rax], al". That is what a truncated
+	 * UPX sample looks like from here, and it is the common case rather
+	 * than a corner: the UPX stub sits PAST the compressed data, so a file
+	 * cut short is a file whose entry point is exactly the part that is
+	 * missing. Measured on one - a 240 KB object whose first PT_LOAD claims
+	 * 2.3 MB and whose entry is at offset 2 373 576.
+	 *
+	 * Improvising an entry there produced a run that faulted on its second
+	 * instruction and told the reader nothing. Refusing says the true
+	 * thing, and it is a fact about the FILE: the code that would have
+	 * unpacked it is not present. The static unpacker still recovers what
+	 * the file does hold, which is why it succeeds where this cannot.
+	 */
+	if (entry) {
+		int backed = !mapped;   /* a flat map is file bytes throughout */
 
-			for (k = 0; k < sizeof probe; k++)
-				if (probe[k]) {
-					usable = 1;
-					break;
-				}
+		for (i = 0; !backed && i < n_back; i++)
+			if (entry >= back_lo[i] && entry < back_hi[i])
+				backed = 1;
+		if (!backed) {
+			if (rep)
+				rep->refused = "the entry point is past the "
+					       "bytes the file actually holds";
+			kof_emu_free(e);
+			return NULL;
 		}
-		if (!usable) {
-			entry = lowest_x ? lowest_x : base_lo;
-			improvised = 1;
+	}
+
+	/*
+	 * Only now, and only for a header that could not be read at all. When
+	 * the header IS readable its entry is the best fact available, and
+	 * guessing past it would be substituting a worse one.
+	 */
+	if (!entry) {
+		if (!improvised && mapped) {
+			if (rep)
+				rep->refused = "the object declares no entry "
+					       "point";
+			kof_emu_free(e);
+			return NULL;
 		}
+		entry = lowest_x ? lowest_x : base_lo;
+		improvised = 1;
 	}
 	if (!entry) {
 		kof_emu_free(e);

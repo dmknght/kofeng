@@ -85,6 +85,14 @@ struct kof_emu {
 	struct vma { uint64_t base, len, off; unsigned prot; int backed; } *vma;
 	uint32_t n_vma, max_vma;
 
+	/*
+	 * What the RUN is allowed to cost the host, as against what the guest
+	 * thinks it has. Every one of these is reachable from guest code doing
+	 * something legal in a loop, so each is a ceiling rather than a
+	 * guideline - a guest that hits one is told no and carries on.
+	 */
+	uint64_t snap_bytes;
+
 	/* Where the next hintless mmap lands. Its OWN cursor: deriving it from
 	 * the page count made two mappings overlap whenever anything else added
 	 * a page between them, which is a corruption the stub then executes. */
@@ -243,6 +251,17 @@ static int vma_add(struct kof_emu *e, uint64_t base, uint64_t len,
 {
 	struct vma *v;
 
+	/*
+	 * A ceiling on the number of live mappings, not on their size.
+	 *
+	 * mmap is the one call a guest can make in a loop that costs the HOST
+	 * memory without costing the guest a page: a reservation commits
+	 * nothing, so a loop of them grows this list and nothing else stops it.
+	 * Real programs use tens; a Go runtime reserving its arenas uses a few
+	 * hundred.
+	 */
+	if (e->n_vma >= KOF_EMU_MAX_VMA)
+		return 0;
 	if (e->n_vma == e->max_vma) {
 		uint32_t m = e->max_vma ? e->max_vma * 2u : 8u;
 		struct vma *t = realloc(e->vma, (size_t)m * sizeof *t);
@@ -520,6 +539,17 @@ static void snap_take(struct kof_emu *e, uint64_t va, uint64_t len)
 	}
 	if (!any)
 		return;
+	/*
+	 * Snapshots are copies, so they are the one thing here that can cost
+	 * the host more memory than the guest was ever given: mprotect(PROT_EXEC)
+	 * over written pages, in a loop, would copy the whole address space
+	 * once per call. Bounded by both count and total bytes, because either
+	 * alone leaves the other free - a thousand small ones, or one enormous
+	 * one repeated.
+	 */
+	if (e->n_snap >= KOF_EMU_MAX_SNAP ||
+	    e->snap_bytes + n > (uint64_t)e->max_pages * KOF_EMU_PAGE)
+		return;
 	if (e->n_snap == e->max_snap) {
 		uint32_t m = e->max_snap ? e->max_snap * 2u : 8u;
 		struct snap *t = realloc(e->snap, (size_t)m * sizeof *t);
@@ -542,6 +572,7 @@ static void snap_take(struct kof_emu *e, uint64_t va, uint64_t len)
 	}
 	s->va = base;
 	s->len = n;
+	e->snap_bytes += n;
 	e->n_snap++;
 }
 
@@ -1335,6 +1366,15 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 		uint64_t n = a1, k;
 		uint8_t b[256];
 
+		/*
+		 * Bounded, because this loop is inside ONE guest instruction
+		 * and the instruction budget therefore does not see it. A guest
+		 * asking for a terabyte of randomness would spin here with the
+		 * budget untouched. The real call is capped too, so a short
+		 * return is an answer a caller is written to handle.
+		 */
+		if (n > (1u << 20))
+			n = 1u << 20;
 		for (k = 0; k < n; k += sizeof b) {
 			uint64_t c = n - k < sizeof b ? n - k : sizeof b, j;
 

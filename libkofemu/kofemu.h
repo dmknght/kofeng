@@ -80,6 +80,45 @@ enum kof_emu_stop {
 	KOF_EMU_STOP_STALLED
 };
 
+/*
+ * WHAT ONE RUN MAY COST THE HOST, AND WHAT IT CANNOT COST AT ALL.
+ *
+ * The second half first, because it is the part that is structural rather than
+ * tuned. This translation unit calls no system call, opens no file, starts no
+ * process and no thread: the whole of what it uses from a C library is malloc,
+ * free, the memory moves, qsort, snprintf and sqrt. A guest instruction is
+ * decoded and SIMULATED - nothing is jitted, nothing is mapped executable,
+ * nothing reaches the host's CPU as code. A guest syscall is answered from
+ * synthesised state; the only file it can ever see is the buffer handed to
+ * kof_emu_set_self, and every descriptor it opens refers to that. So a run
+ * cannot read the machine it is running on, write to it, talk to a network, or
+ * outlive the call.
+ *
+ * What remains is resource growth, and that is bounded rather than prevented,
+ * because a guest is allowed to ask. Four things grow with guest BEHAVIOUR
+ * rather than with the object's size:
+ *
+ *   instructions   cfg.max_insn - the CPU bound, counted per instruction and
+ *                  per REP iteration, so a repeat over a megabyte costs a
+ *                  megabyte of budget rather than one instruction's worth
+ *   pages          cfg.max_pages - guest address space that has been touched
+ *   live mappings  KOF_EMU_MAX_VMA - mmap costs the host a record even when it
+ *                  commits no page, so a loop of reservations needs a ceiling
+ *   snapshots      KOF_EMU_MAX_SNAP and a byte total - these are COPIES, the
+ *                  one thing here that can cost the host more than the guest
+ *                  was given
+ *
+ * Hitting any of them is answered the way a kernel answers it - a refusal the
+ * guest can see and carry on from - and never by growing.
+ *
+ * The instruction budget is a CPU bound rather than a time bound on purpose: a
+ * wall-clock limit would make the same scan answer differently on a loaded
+ * machine, and an answer that depends on what else is running is not one a
+ * corpus measurement can be repeated against.
+ */
+#define KOF_EMU_MAX_VMA   1024u
+#define KOF_EMU_MAX_SNAP  64u
+
 struct kof_emu_cfg {
 	uint64_t max_insn;    /* instruction budget; 0 takes the default */
 	uint64_t max_pages;   /* pages this emulation may own; 0 takes the default */

@@ -258,7 +258,11 @@ void kof_mod_unpack_mode(struct kof_obj_ctx *, int on);
  * Lives here rather than in scan.c because producing a child is this file's
  * business - the same ceilings, the same sink, the same accounting.
  *
- * Returns the number of children produced.
+ * Returns non-zero if it ATTEMPTED the object - which is not the same as
+ * having produced anything from it. The difference is what lets a refusal be
+ * reported: "the entry point is not in this file" is a fact about the object,
+ * and an object nobody tried to open must not carry it, while an object that
+ * was tried and could not be opened must.
  */
 uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force);
 
