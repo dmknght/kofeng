@@ -137,6 +137,130 @@ The database can be split into independent signature objects rather than requiri
 
 This also makes it possible to experiment with different loading strategies and memory limits.
 
+## What is in the engine
+
+The signature format above is the oldest part of the project and no longer the
+largest. A scanner that only matched patterns against whole files would find
+almost nothing: the interesting bytes are usually inside something - an archive,
+a compressed stream, a packed executable - and getting to them is most of the
+work. Roughly 58 000 lines of C, none of it depending on anything but a C11
+compiler.
+
+### Collectors
+
+One per format, and they **read structure and change nothing**: ELF, PE, gzip,
+zip, tar, 7z, RAR, XZ, OLE compound files, RTF, PDF. A collector never fails.
+On hostile or truncated input it reports what it recovered plus a bitmask of
+what was wrong with the header, because "this file is broken, and here is how"
+is a fact worth having rather than a reason to stop - the heuristic scores those
+bits, and so does the decision about whether to run the file.
+
+Each format also partitions the object into named regions - for ELF: headers,
+code, data, non-loaded, unclaimed - so a rule can say *where* to look. Every
+byte belongs to exactly one region, which is what makes searching a union of
+them cost one pass.
+
+### Decoders
+
+Written rather than linked: DEFLATE, LZMA, LZMA2, the BCJ and BCJ2 branch
+filters, NRV2B/D/E, RAR3 including its PPMd model, RAR5, and the OVBA
+compression used by Office macros. They live in the host rather than in the
+signature modules because one implementation shared by every caller is one
+place for a bug to be, and because a module is a freestanding blob with no
+writable state - which is not where a decompressor belongs.
+
+The inflate implementation is checked against zlib on random and hostile inputs
+in the test suite rather than trusted.
+
+### Unpackers
+
+Modules like any other signature, declaring what they recognise: UPX for ELF and
+PE, Ezuri, and the container readers. What comes out is handed back to the
+scanner as a child object and scanned like a file, so a payload's own format is
+parsed, its regions partitioned, and its children unpacked in turn.
+
+Two of them rebuild rather than extract. A packer hands back an IMAGE - sections
+at their virtual addresses, no file header - and an image is not a file: it
+identifies as nothing, gets no regions, and no rule scoped to code or data can
+run on it. `pe_rebuild.c` and `elf_rebuild.c` put the file back together.
+
+### Heuristic
+
+Scores what the parse and the unpackers already produced - structural anomalies,
+whether a packer opened the object, whether it opened only part of it - and
+reports a level of its own, never a family name. It costs no extra pass, which
+is why it is on by default.
+
+What it is NOT is a second opinion about content. Every scoring approach that
+tried to be one was measured and dropped; the ceiling for this evidence was 7 %
+of malware at zero false positives, and a number that small is worth reporting
+honestly rather than inflating.
+
+### Emulator
+
+`libkofemu` is an x86-64 interpreter, used for one thing: **running an object
+that no unpacker could open, and keeping what it writes**. A packer nobody has
+written a module for still has to unpack itself before it runs, and that is the
+one thing it cannot avoid doing.
+
+It is a memory dumper with a budget, not a sandbox. The design decisions worth
+stating:
+
+* **Nothing reaches the host.** The interpreter makes no system call, opens no
+  file, starts no process or thread; a guest instruction is decoded and
+  simulated, never executed. Every descriptor the guest opens refers to the
+  buffer it was handed. Isolation is a property of interpretation rather than of
+  a policy that could be wrong.
+* **The boundary is the syscall, not the API.** A guest's calls into libc are
+  just more instructions to interpret; only what it asks the kernel for has to
+  be answered, and that is a small, stable surface.
+* **The clock advances with instructions retired.** A run is reproducible, the
+  ratio a timing check measures stays plausible, and a delay loop - the cheapest
+  anti-emulation trick there is - is recognised and granted its wait in jumps
+  instead of being sat through. A sleep is granted in full and waited for not at
+  all: a sleep that took no time is a louder signal than a slow machine.
+* **The payload is caught where it is finished**, at the `mprotect` that makes
+  it executable, not at the end of the run - by then a program can have mapped
+  something else over it.
+* **Everything is bounded**: instructions, pages, live mappings, snapshots, and
+  how many layers of packing deep it will go.
+
+It runs only at `--heur 2`, because it is the one part of a scan that costs real
+time. The gate that selects candidates - executable segments too dense to be
+code, or a header that cannot be loaded as written - selects nothing across
+1 246 clean binaries.
+
+## Tools
+
+| | |
+|---|---|
+| `kofscanner` | scan a file or a tree |
+| `kofexamine` | what the engine sees in one object: regions, markers, what each module made of it |
+| `kofviewer` | a terminal UI over the same facts, and where signatures are drafted |
+| `ksigbuilder` | pack compiled modules into a database; `ksigcompiler.sh` compiles one |
+
+## Building and testing
+
+`make` needs a C11 compiler and nothing else. `make unit` runs 25 differential
+and fuzzing tests; `make unit-asan` runs the same under AddressSanitizer and
+UBSan, with the engine, the emulator and the vendored disassembler all
+instrumented.
+
+The tests are differential where they can be - inflate against zlib, the three
+matcher entry points against each other - because a corpus run passes while the
+code is still wrong on an input the corpus does not happen to contain.
+
+## Third-party code
+
+The only vendored dependency is **bddisasm 3.0.1** by Bitdefender, under the
+**Apache License 2.0**, in `libkofemu/bddisasm/`. It is the instruction decoder
+the emulator is built on. The files are unmodified; the licence text travels
+with them and the exact subset taken is recorded beside it. See
+[THIRD-PARTY.md](THIRD-PARTY.md).
+
+Everything else is written for this project.
+
+
 ## Current Status
 
 KOFENG is a **research / hobby project** and is still experimental.
