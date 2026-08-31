@@ -932,6 +932,15 @@ struct object {
 	uint32_t          n_finding;
 	char              packer[48];   /* the module that opened or unpacked it */
 	/*
+	 * The interpreter has already been run on this object.
+	 *
+	 * Asking twice cannot produce a different answer - the bytes have not
+	 * changed and the run is deterministic - so a second press appended a
+	 * second identical set of children, and a third a third. Recorded per
+	 * object because the question is per object.
+	 */
+	int               emu_done;
+	/*
 	 * What the scanner's own gate makes of this object, when no module
 	 * claimed it: KOF_EMU_UNP_* . Computed once beside the parse rather
 	 * than while drawing - it reads every executable segment, and the
@@ -5270,12 +5279,25 @@ static int name_chars_ok(const char *s)
 	return 1;
 }
 
+/*
+ * What stops this draft being written, or NULL. `as_new` asks about Save As,
+ * which is allowed in one case Save is not - see the note on v->foreign below.
+ */
+static const char *draft_missing_of(struct view *v, int as_new);
+
+/* The strict question, for every caller that is describing the draft to a
+ * reader rather than deciding whether one particular button works. */
 static const char *draft_missing(struct view *v)
+{
+	return draft_missing_of(v, 0);
+}
+
+static const char *draft_missing_of(struct view *v, int as_new)
 {
 	uint32_t i;
 
 	/*
-	 * LOGIC THIS PANEL DOES NOT CARRY MAKES THE RULE READ ONLY.
+	 * LOGIC THIS PANEL DOES NOT CARRY STOPS SAVE, AND ONLY SAVE.
 	 *
 	 * First, before anything about the draft's completeness, because it is
 	 * not a complaint about the draft: the draft is fine and is a truthful
@@ -5283,12 +5305,16 @@ static const char *draft_missing(struct view *v)
 	 * holds more than this can write back, so writing it back would delete
 	 * the rest.
 	 *
-	 * Both buttons go, not just Save. Save As would write a new file that
-	 * claims to be this rule and is not, which is the same loss one
-	 * directory entry along.
+	 * SAVE AS is a different act and used to be refused with it, which was
+	 * wrong. Overwriting destroys the unmodelled logic; writing a NEW file
+	 * destroys nothing, and deriving a rule from the part that is modelled
+	 * is a thing a researcher does on purpose. The original stays exactly
+	 * as it is, one directory entry away, to compare against.
+	 *
+	 * So this is asked with `as_new`, and the caller says which act it is.
 	 */
-	if (v->foreign)
-		return "Custom logic - read only, edit the file directly";
+	if (v->foreign && !as_new)
+		return "Custom logic - Save As to derive a new rule from it";
 	if (!v->family[0])
 		return "Name the family";
 	/*
@@ -5455,7 +5481,7 @@ static int save_ok(struct view *v)
 {
 	int near = 0;
 
-	if (draft_missing(v))
+	if (draft_missing_of(v, 0))
 		return 0;
 	/* A draft with a file behind it: only an actual change is worth
 	 * writing. Without a file it is a new module, and the thing to refuse
@@ -5469,7 +5495,7 @@ static int save_as_ok(struct view *v)
 {
 	int near = 0;
 
-	if (draft_missing(v) || !v->gen_path[0] || !draft_dirty(v))
+	if (draft_missing_of(v, 1) || !v->gen_path[0] || !draft_dirty(v))
 		return 0;
 	return !(draft_dup(v, &near) && !near);
 }
@@ -5484,7 +5510,10 @@ static void generate(struct view *v, int as_new)
 		 * a matcher would otherwise be written out as a module that
 		 * searches for nothing.
 		 */
-		const char *why = draft_missing(v);
+		/* The same question the button asked, with the same argument:
+		 * a key runs this too, and the two must not disagree about
+		 * whether Save As is allowed on a read-only rule. */
+		const char *why = draft_missing_of(v, as_new);
 		int near = 0;
 		const char *dup;
 
@@ -11303,6 +11332,16 @@ static void emu_here(struct view *v)
 			 "That object's bytes were not kept - nothing to run");
 		return;
 	}
+	if (o->emu_done) {
+		/*
+		 * Not an error and not silence: the reader pressed a button and
+		 * is owed an answer, and the answer is that this one has been
+		 * asked already. Whatever it produced is in the tree below.
+		 */
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "Emu: already run on this object");
+		return;
+	}
 	sc = kof_scanner_new(v->eng);
 	if (!sc) {
 		snprintf(v->act_msg, sizeof v->act_msg, "Out of memory");
@@ -11322,6 +11361,16 @@ static void emu_here(struct view *v)
 	kof_scan_bytes(sc, o->buf.p, o->buf.n, o->name, &opt, on_object, v);
 	kof_scanner_free(sc);
 	v->skip_root = 0;
+	/*
+	 * Marked whatever came of it. A run that recovered nothing has still
+	 * been made, and repeating it would spend the same instructions to
+	 * print the same sentence.
+	 *
+	 * Re-read rather than kept from before the scan: on_object may have
+	 * grown v->obj, and a realloc'd array leaves the old pointer dangling.
+	 */
+	o = &v->obj[v->node[v->sel_node].obj];
+	o->emu_done = 1;
 
 	if (v->n_obj == before) {
 		snprintf(v->act_msg, sizeof v->act_msg,
