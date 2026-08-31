@@ -689,6 +689,28 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	if (score < m->bar_centinats || out->n >= KOF_MAX_FINDINGS)
 		return;
 
+	/*
+	 * A NAMED FAMILY SUPERSEDES A GUESS ABOUT THE SHAPE.
+	 *
+	 * The heuristic's measured worth is on objects the database MISSED -
+	 * eleven percent of those, at this bar. On an object it did not miss it
+	 * contributes nothing to the verdict, and printing both put two
+	 * verdicts on one object: "Botnet:Mirai" and "Heur:Truncated" for the
+	 * same bytes, leaving a reader to work out which one the scanner
+	 * actually means.
+	 *
+	 * The SCORE is still published above, so an examiner shows how the
+	 * object scored either way. What is suppressed is the second verdict,
+	 * not the second fact.
+	 */
+	{
+		uint32_t k;
+
+		for (k = 0; k < out->n; k++)
+			if (out->v[k].level != KOF_LEVEL_HEUR)
+				return;
+	}
+
 	{
 		struct kof_finding *fi = &out->v[out->n++];
 
