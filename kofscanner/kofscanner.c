@@ -469,8 +469,19 @@ int main(int argc, char **argv)
 	 * two are the difference between a quiet scan and a scan that did not
 	 * look.
 	 */
+	/*
+	 * "broken structure", not "by structure, no family named".
+	 *
+	 * The old wording said what the line was NOT - it named no family -
+	 * which reads as an apology for a weaker verdict. What the number
+	 * actually counts is objects whose STRUCTURE scored past the bar:
+	 * truncated, stripped, segments that overlap, an entry point that is
+	 * not executable. There is no vector here for which family an object
+	 * belongs to and there never was, so the line now says the thing it can
+	 * support rather than the thing it cannot.
+	 */
 	if (!opt.heur_off)
-		printf("heuristic %llu object(s) by structure, no family named\n",
+		printf("heuristic %llu object(s) with broken structure\n",
 		       (unsigned long long)r.heur);
 	/*
 	 * Broken objects, split by reason. The three call for different actions -
