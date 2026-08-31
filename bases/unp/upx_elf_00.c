@@ -1,5 +1,5 @@
 /*
- * upx_elf.c - unpack a UPX packed ELF.
+ * upx_elf_00.c - unpack a UPX packed ELF.
  *
  * 154 of 9482 samples in one Linux collection carry a UPX PackHeader in an ELF,
  * and the compressed original is the whole of what they are: the file on disk is a
