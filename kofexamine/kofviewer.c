@@ -11339,13 +11339,44 @@ static void emu_here(struct view *v)
 		 * asked already. Whatever it produced is in the tree below.
 		 */
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "Emu: already run on this object");
+			 "Unpack skipped: the Emu has already run on this");
 		return;
 	}
 	sc = kof_scanner_new(v->eng);
 	if (!sc) {
 		snprintf(v->act_msg, sizeof v->act_msg, "Out of memory");
 		return;
+	}
+	/*
+	 * SAID BEFORE IT STARTS, AND WRITTEN STRAIGHT TO THE STATUS ROW.
+	 *
+	 * Interpreting an object takes as long as it takes - seconds on
+	 * anything large - and the loop does not come back round until it is
+	 * over, so without this the screen sits unchanged and the reader cannot
+	 * tell a slow answer from a program that has stopped responding.
+	 *
+	 * Not a redraw. A full frame is a few kilobytes of escape sequences to
+	 * say one thing that fits in the corner, and the frame it would paint
+	 * is the one already on the screen. Just the notice, where the result
+	 * will appear a moment later.
+	 */
+	{
+		char note[64];
+		int at;
+
+		snprintf(note, sizeof note, " Unpacking with Emu... ");
+		at = g_cols - (int)strlen(note);
+		if (at < 1)
+			at = 1;
+		{
+			char seq[128];
+			int n = snprintf(seq, sizeof seq,
+					 "\033[%d;%dH" A_WARN "%s" A_OFF,
+					 mark_row(), at, note);
+
+			if (n > 0)
+				term_write_n(seq, (size_t)n);
+		}
 	}
 	memset(&opt, 0, sizeof opt);
 	opt.all_matches = 1;
@@ -11373,16 +11404,22 @@ static void emu_here(struct view *v)
 	o->emu_done = 1;
 
 	if (v->n_obj == before) {
+		/*
+		 * A reason, and a short one. Which header field disagreed with
+		 * which is a question for the dashboard; here there is one line
+		 * and the reader wants to know whether to try something else.
+		 */
+		v->act_ok = 0;
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "Emu: recovered nothing from this object");
+			 "Unpack failed: the Emu recovered nothing");
 		return;
 	}
 	objects_examine_from(v, v->eng, before);
 	tree_build(v);
 	view_select(v);
 	v->act_ok = 1;
-	snprintf(v->act_msg, sizeof v->act_msg, "Emu: recovered %u object(s)",
-		 v->n_obj - before);
+	snprintf(v->act_msg, sizeof v->act_msg,
+		 "Unpack completed: %u object(s)", v->n_obj - before);
 }
 
 /*
