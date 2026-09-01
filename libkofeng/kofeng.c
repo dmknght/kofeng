@@ -35,6 +35,11 @@ uint32_t kof_engine_unpackers(const kof_engine *e)
 	return e ? e->n_unp : 0;
 }
 
+uint32_t kof_engine_heur_rules(const kof_engine *e)
+{
+	return e ? e->n_heur : 0;
+}
+
 /*
  * A reason in words, for whoever has to read the scan.
  *

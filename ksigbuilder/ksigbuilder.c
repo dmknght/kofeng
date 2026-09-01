@@ -353,6 +353,30 @@ static int  g_have_find;
 static char g_find_sig[600];
 
 /*
+ * WHAT A HEURISTIC RULE'S NAME HASHES: the traits it declares.
+ *
+ * A detector's KOF_MALVAR_AUTO hashes the find call it guards, because that is
+ * what makes one detection in a family different from another. A rule guards no
+ * find call - it reads fields of the parse - so what distinguishes it is the set
+ * of declarations at the top of the file: what it applies to, when it runs, what
+ * it asks for, and what it is called. Change any of those and it is a different
+ * rule and gets a different name; rebuild without changing them and the name is
+ * the one it had.
+ */
+static char g_heur_sig[600];
+
+static void heur_sig_add(const char *line)
+{
+	size_t n = strlen(g_heur_sig), k = 0;
+
+	while (line[k] == ' ' || line[k] == '\t')
+		k++;
+	while (line[k] && line[k] != '\n' && n + 1 < sizeof g_heur_sig)
+		g_heur_sig[n++] = line[k++];
+	g_heur_sig[n] = 0;
+}
+
+/*
  * Find argument number `want` (1-based) of a macro invocation starting at p.
  *
  * Picking a literal by scanning for the first quote was wrong in the worst way: a
@@ -941,10 +965,10 @@ static void capture_find_call(const char *at)
 /* Base36, fixed at 5 digits - long enough that a 4000 signature database has a
  * negligible chance of two AUTO variants in the same family colliding, short enough
  * to read as a tag rather than a hash dump. */
-static void auto_suffix(char out[6])
+static void auto_suffix_of(char out[6], const char *sig)
 {
 	static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
-	uint32_t h = kof_hash_bytes(g_find_sig, strlen(g_find_sig));
+	uint32_t h = kof_hash_bytes(sig, strlen(sig));
 	int i;
 
 	for (i = 4; i >= 0; i--) {
@@ -952,6 +976,11 @@ static void auto_suffix(char out[6])
 		h /= 36;
 	}
 	out[5] = 0;
+}
+
+static void auto_suffix(char out[6])
+{
+	auto_suffix_of(out, g_find_sig);
 }
 
 /*
@@ -1080,7 +1109,7 @@ static void scan_line(char *at, size_t line_len, int lineno)
 {
 	const struct macro *m = NULL;
 	char *p;
-	int is_variant = 0;
+	int is_variant = 0, is_heur_hit = 0;
 	char saved = at[line_len];
 
 	/* Find within the line; read arguments from the full buffer. Comments were
@@ -1095,11 +1124,20 @@ static void scan_line(char *at, size_t line_len, int lineno)
 
 	/* kof_debug names go in the same table and are keyed the same way: both use
 	 * __LINE__ as the id, so the host resolves either through one lookup. */
+	/* The declarations a rule's name hashes, gathered as they go past. Before
+	 * the dispatch below because KOF_TARGET_FORMAT is in the macros[] table
+	 * and would otherwise be consumed by it. */
+	if (strstr(at, "KOF_HEUR_PHASE(") || strstr(at, "KOF_HEUR_WANT(") ||
+	    strstr(at, "KOF_HEUR_NAME(") || strstr(at, "KOF_TARGET_FORMAT("))
+		heur_sig_add(at);
+
 	p = strstr(at, "KOF_SCAN_INFECT");
 	if (!p)
 		p = strstr(at, "KOF_SCAN_SUSPECT");
 	if (p)
 		is_variant = 1;
+	if (!p && (p = strstr(at, "KOF_HEUR_HIT")) != NULL)
+		is_heur_hit = 1;
 	if (!p)
 		p = strstr(at, "kof_debug");
 	if (!p)
@@ -1132,7 +1170,13 @@ static void scan_line(char *at, size_t line_len, int lineno)
 			return;
 		}
 		names[nnames].line = lineno;
-		if (is_variant) {
+		if (is_heur_hit) {
+			/* No argument to read: a rule has one name and it is
+			 * declared, so what varies between two hits in one rule
+			 * is nothing - and the hash is of the rule, not of the
+			 * line. */
+			auto_suffix_of(names[nnames].text, g_heur_sig);
+		} else if (is_variant) {
 			if (!read_variant(p, lineno, names[nnames].text,
 					  sizeof names[nnames].text))
 				return;
@@ -1837,6 +1881,7 @@ struct artefact {
 
 	uint32_t kind;
 	uint32_t target_mask, scan_mask, arch_mask, subtype_mask, unp_kind;
+	uint32_t heur_phase, heur_want;
 	uint64_t size_min;
 
 	/* What KOF_TARGET_NAME declared - empty family / maltype 0 for an
@@ -1985,6 +2030,10 @@ static int meta_load(struct artefact *a)
 			a->subtype_mask = (uint32_t)strtoul(line + 13, 0, 10);
 		} else if (strncmp(line, "unp_kind=", 9) == 0) {
 			a->unp_kind = (uint32_t)strtoul(line + 9, 0, 10);
+		} else if (strncmp(line, "heur_phase=", 11) == 0) {
+			a->heur_phase = (uint32_t)strtoul(line + 11, 0, 10);
+		} else if (strncmp(line, "heur_want=", 10) == 0) {
+			a->heur_want = (uint32_t)strtoul(line + 10, 0, 10);
 		} else if (strncmp(line, "blob_len=", 9) == 0) {
 			blob_len = strtoull(line + 9, 0, 10);
 		} else if (strncmp(line, "kind=", 5) == 0) {
@@ -2061,7 +2110,15 @@ static int meta_load(struct artefact *a)
 				"rebuild the artefacts\n", a->stem);
 		goto out;
 	}
-	if (a->kind != KOF_PACK_DETECT && a->kind != KOF_PACK_UNPACK) {
+	/* A rule carries its word in the family slot - see ksigcompiler.sh - and
+	 * a rule with none would report a finding with nothing in the middle. */
+	if (a->kind == KOF_PACK_HEUR && (!a->family || !a->family[0])) {
+		fprintf(stderr, "ksigbuilder: %s: heuristic rule declares no "
+				"name\n", a->stem);
+		goto out;
+	}
+	if (a->kind != KOF_PACK_DETECT && a->kind != KOF_PACK_UNPACK &&
+	    a->kind != KOF_PACK_HEUR) {
 		fprintf(stderr, "ksigbuilder: %s: unknown kind %u\n", a->stem,
 			a->kind);
 		goto out;
@@ -2489,6 +2546,18 @@ static void warn_duplicate_patterns(struct artefact *arts, uint32_t n_arts)
 	for (i = 0; i + 1 < n_arts; i++) {
 		if (fps[i].fp != fps[i + 1].fp)
 			continue;
+		/*
+		 * ACROSS KINDS IT IS NOT A DUPLICATE, IT IS A PAIR.
+		 *
+		 * The fingerprint is target, regions and patterns, and a
+		 * heuristic rule declares no patterns - so it collides with
+		 * every other pattern-free module for the same format, which is
+		 * every unpacker. The two say different things about the same
+		 * kind of file and neither is redundant. Only two modules of the
+		 * SAME kind saying it are worth a word.
+		 */
+		if (arts[fps[i].idx].kind != arts[fps[i + 1].idx].kind)
+			continue;
 		fprintf(stderr,
 			"ksigbuilder: warning: %s and %s declare the same target, "
 			"region and pattern set - one may be redundant\n",
@@ -2544,7 +2613,12 @@ static int write_file(const char *path, const uint8_t *data, size_t len)
 
 static const char *kind_name(uint32_t k)
 {
-	return k == KOF_PACK_UNPACK ? "unpack" : "sigs";
+	/* "heur" reads as what it is on the filesystem, which is where somebody
+	 * looks first to ask what a database contains. Grouped with the other
+	 * two here rather than defaulting to "sigs", because a pack of rules
+	 * named sigs- is a pack of rules nobody knows is there. */
+	return k == KOF_PACK_UNPACK ? "unpack" :
+	       k == KOF_PACK_HEUR   ? "heur" : "sigs";
 }
 
 /*
@@ -2824,6 +2898,8 @@ int main(int argc, char **argv)
 			pm[a].arch_mask   = s->arch_mask;
 			pm[a].subtype_mask = s->subtype_mask;
 			pm[a].unp_kind     = s->unp_kind;
+			pm[a].heur_phase   = s->heur_phase;
+			pm[a].heur_want    = s->heur_want;
 			pm[a].src          = s->srcpath;
 			pm[a].size_min    = s->size_min;
 			pm[a].str         = s->str;

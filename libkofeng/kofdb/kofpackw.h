@@ -61,6 +61,10 @@ struct kof_pw_mod {
 	uint64_t size_min;
 	/* KOF_UNP_CONTAINER or KOF_UNP_PACKER; unread for a detector. */
 	uint32_t unp_kind;
+	/* A heuristic rule's phase and its declared engine request; see
+	 * kofmod/heur.h. Zero on every other kind. */
+	uint32_t heur_phase;
+	uint32_t heur_want;
 	/* Where the source lives inside the bases tree; NULL or empty when it
 	 * was compiled from outside one. */
 	const char *src;

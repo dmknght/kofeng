@@ -236,7 +236,8 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 	/* The kind decides which list the modules go into and which point they are
 	 * entered from, so a kind the engine has no list for is refused rather
 	 * than guessed at. */
-	if (h->kind != KOF_PACK_DETECT && h->kind != KOF_PACK_UNPACK)
+	if (h->kind != KOF_PACK_DETECT && h->kind != KOF_PACK_UNPACK &&
+	    h->kind != KOF_PACK_HEUR)
 		REFUSE("holds kind %u, which this engine has no dispatch for",
 		       h->kind);
 	/* Before any offset inside is believed: truncation is caught here. */
@@ -543,6 +544,7 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 	uint32_t rng0 = e->n_rng;
 	uint32_t i;
 	int unpack = (h->kind == KOF_PACK_UNPACK);
+	int heur   = (h->kind == KOF_PACK_HEUR);
 
 	memcpy(e->code + code_at, base + h->sec[KOF_SEC_CODE].off,
 	       (size_t)h->sec[KOF_SEC_CODE].len);
@@ -553,7 +555,8 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 
 	for (i = 0; i < h->n_mods; i++) {
 		struct kof_module *m = unpack ? &e->unp[e->n_unp++]
-					     : &e->mods[e->n_mods++];
+				     : heur ? &e->heur[e->n_heur++]
+					    : &e->mods[e->n_mods++];
 
 		/* Entry offset is zero within each blob; the compiler asserts it,
 		 * so the blob's place in the arena is the entry point. */
@@ -575,13 +578,20 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		m->family_off = pm[i].family_off;
 		m->maltype    = pm[i].maltype;
 		m->unp_kind   = pm[i].unp_kind;
+		m->heur_phase = pm[i].heur_phase;
+		m->heur_want  = pm[i].heur_want;
+		m->kind       = (uint8_t)h->kind;
 		m->src_off    = pm[i].src_off;
 
 
-		/* Only a detector's regions go into the union the scanner resolves.
-		 * An unpacker runs after the searching is done, so a region it
-		 * names must not make every object pay for resolving it. */
-		if (!unpack)
+		/*
+		 * Only a detector's regions go into the union the scanner
+		 * resolves. An unpacker runs after the searching is done, and a
+		 * heuristic reads what the parse already worked out, so a region
+		 * either of them names must not make every object pay for
+		 * resolving it.
+		 */
+		if (!unpack && !heur)
 			e->scan_mask |= m->scan_mask;
 	}
 }
@@ -892,8 +902,9 @@ struct kof_engine *kof_db_load(const char *path)
 		goto out;
 	e->mods     = calloc(n_mods ? n_mods : 1, sizeof *e->mods);
 	e->unp      = calloc(n_mods ? n_mods : 1, sizeof *e->unp);
+	e->heur     = calloc(n_mods ? n_mods : 1, sizeof *e->heur);
 	e->rng_tab  = calloc(n_rng  ? n_rng  : 1, sizeof *e->rng_tab);
-	if (!e->mods || !e->unp || !e->rng_tab ||
+	if (!e->mods || !e->unp || !e->heur || !e->rng_tab ||
 	    !arena_open(e, (size_t)code)) {
 		kof_db_free(e);
 		e = NULL;
@@ -1061,6 +1072,7 @@ void kof_db_free(struct kof_engine *e)
 		return;
 	free(e->mods);
 	free(e->unp);
+	free(e->heur);
 	free(e->rng_tab);
 	free(e->rng_uid);
 	if (e->packs) {

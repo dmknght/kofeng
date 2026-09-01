@@ -331,6 +331,8 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 		}
 		o->maltype = m->maltype;
 		o->unp_kind = m->unp_kind;
+		o->heur_phase = m->heur_phase;
+		o->heur_want  = m->heur_want;
 		if (m->src && m->src[0]) {
 			uint32_t src_uid;
 

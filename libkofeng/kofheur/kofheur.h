@@ -82,12 +82,6 @@ enum kof_heur_fact {
 	/* An unpacker recognised its own format and could not finish. Legitimate
 	 * packing unpacks cleanly; measured 0 of 13638 clean objects. */
 	KOF_HEUR_F_UNPACK_PARTIAL,
-	/*
-	 * The whole file is one blob of executable code and nothing else - see
-	 * kof_heur_code_blob(). Not a size, a SHAPE: measured 0 of 4252 clean
-	 * objects and 18 of 4398 malware ones.
-	 */
-	KOF_HEUR_F_CODE_BLOB,
 	KOF_HEUR_F_COUNT
 };
 
@@ -151,21 +145,6 @@ struct kof_heur_facts {
  * One place that knows the eleven view layouts, so nothing else has to. */
 uint64_t kof_heur_anomalies(const struct kof_obj_ctx *ctx);
 
-/*
- * Non-zero when the object is an ELF that is nothing but a blob of executable
- * code: no section table, a single program header, one PT_LOAD, executable, at
- * file offset zero, covering the file, with the entry point inside it.
- *
- * A COMPILER AND LINKER CANNOT PRODUCE THIS, which is what makes it worth
- * gathering. Anything built by a toolchain has a second segment for its data and
- * usually a PT_PHDR, a PT_GNU_STACK and a dynamic section besides. This shape is
- * what a tool that pastes shellcode into a fixed ELF template produces, and
- * msfvenom is such a tool.
- *
- * The fact is free: every field comes from the parse that already ran, and no
- * pass is made over the bytes.
- */
-int      kof_heur_code_blob(const struct kof_obj_ctx *ctx);
 
 /*
  * Score, in centinats, and whether there was a model to score with.

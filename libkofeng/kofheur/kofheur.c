@@ -38,82 +38,6 @@
 #include "../core/kofmod/rtf.h"
 #include "../core/kofmod/pdf.h"
 
-/*
- * IS THIS FILE NOTHING BUT CODE?
- *
- * See the note in the header for what the shape is and why a toolchain cannot
- * reach it. What follows is how it was measured, because the value in the table
- * below is only worth what the measurement is.
- *
- *   0 of 3252   x86-64 ELF files under /usr/{bin,sbin,lib,libexec}. Not one of
- *               them reaches the shape, and the smallest is 1192 bytes.
- *   0 of 1000   CLEAN binaries packed with upx, ezuri, pakkero, midgetpack and
- *               ward, 200 each. This is the adversarial half: a packed clean
- *               binary is the thing most likely to look hand-built, and none of
- *               the five packers produces a single-segment file - they carry
- *               three, six or seven program headers.
- *  18 of 4398   malware ELF objects. 7 of the 18 the signature database already
- *               names; the other 11 it misses, and they are what this term is
- *               for: two encoder-wrapped meterpreter stagers, eight small
- *               droppers, and one 1266-byte Mirai loader.
- *   7 of 7      the msfvenom samples on hand, including the 618-byte one that a
- *               size bound of 500 would have missed. SIZE IS NOT THE
- *               DISCRIMINATOR and was tried as one: the largest object with the
- *               shape is 1266 bytes and the smallest clean ELF is 1192, so the
- *               two populations overlap on size and separate on structure.
- *
- * WHY THE VALUE IS NOT THE MEASURED RATIO, AND THAT IS SAID PLAINLY.
- *
- * The likelihood ratio these counts support is ln((18.5/4399)/(0.5/4253)) = 3.58
- * nats, and the ceiling on it is the size of the clean corpus rather than the
- * strength of the trace: for the ratio to reach the bar on its own the clean
- * side would have to be measured at better than one in twenty-seven thousand,
- * and 4252 objects cannot say that.
- *
- * The value shipped is 4.72 nats. It is chosen, not measured, and it is chosen
- * so that the shape - together with the missing section table it NECESSARILY
- * implies, worth 2.75 - lands exactly on the bar. The consequence of the choice
- * is what was measured: zero false positives in the 4252 clean objects above,
- * and eleven malware objects reported that the database does not name. Lower it
- * to 358 and the term still contributes; it just stops being sufficient by
- * itself.
- */
-int kof_heur_code_blob(const struct kof_obj_ctx *ctx)
-{
-	const struct kof_elf_info *e;
-	const struct kof_elf_seg *x = NULL;
-	uint32_t i, loads = 0;
-
-	if (!ctx || !ctx->file_header || ctx->format != KOF_FMT_ELF)
-		return 0;
-	e = kof_elf(ctx);
-	if (!e || !e->valid)
-		return 0;
-	/* No section table at all, and one program header: the two numbers a
-	 * template has because it was written by hand. */
-	if (e->shoff != 0 || e->phnum != 1)
-		return 0;
-	for (i = 0; i < e->seg_count && i < KOF_ELF_MAX_SEGMENTS; i++) {
-		if (e->seg[i].type != 1u)               /* PT_LOAD */
-			continue;
-		loads++;
-		if (e->seg[i].perm & KOF_PERM_X)
-			x = &e->seg[i];
-	}
-	if (loads != 1 || !x)
-		return 0;
-	/*
-	 * The segment IS the file: it starts at zero and its file image is at
-	 * least as long as the object. Checked rather than assumed, because a
-	 * single segment that maps only part of the file leaves the rest
-	 * unaccounted for and that is a different object.
-	 */
-	if (x->file_off != 0 || x->file_size < ctx->obj_size)
-		return 0;
-	return e->entry_addr >= x->mem_addr &&
-	       e->entry_addr <  x->mem_addr + x->mem_size;
-}
-
 uint64_t kof_heur_anomalies(const struct kof_obj_ctx *ctx)
 {
 	if (!ctx || !ctx->file_header)
@@ -160,11 +84,18 @@ static const struct kof_heur_anom_term default_anom[] = {
 static const struct kof_heur_flag_term default_flag[] = {
 	/* --- how it was reached ------------------------------------------ */
 	{ KOF_HEUR_F_PACKED,          CN(1.11), "Packed"     },
-	{ KOF_HEUR_F_UNPACK_PARTIAL,  CN(3.24), "PackTamper" },
-	/* --- what the file is, rather than how it was reached ------------ */
-	/* See kof_heur_code_blob() for the measurement AND for why this one
-	 * number in the table is chosen rather than measured. */
-	{ KOF_HEUR_F_CODE_BLOB,       CN(4.72), "Shellcode"  }
+	{ KOF_HEUR_F_UNPACK_PARTIAL,  CN(3.24), "PackTamper" }
+	/*
+	 * THERE WAS A TERM HERE FOR "the file is nothing but code", AND IT IS
+	 * NOW A RULE.
+	 *
+	 * It was the one value in this table that was chosen rather than
+	 * measured - set at the bar so a single trace could report on its own,
+	 * which is not what a sum of log-likelihood ratios is for. That is the
+	 * shape of a rule, so it is written as one:
+	 * bases/heur/shellcode_00.c, where it also carries the measurement and
+	 * asks for the emulator. Nothing here has to pretend to score it.
+	 */
 	/*
 	 * There were two more here - StrayMarker and PartFamily, both measured -
 	 * for evidence the database notices without firing. Nothing ever

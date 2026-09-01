@@ -133,7 +133,7 @@
  * stale pack is refused rather than read with the field assumed zero, which
  * would silently classify UPX as an archive.
  */
-#define KOF_PACK_VERSION 6u
+#define KOF_PACK_VERSION 7u
 
 /*
  * The machine the code in this pack was built for. Not an architecture the pack
@@ -184,7 +184,22 @@ enum kof_pack_machine {
  */
 enum kof_pack_kind {
 	KOF_PACK_DETECT = 0,      /* entry kof_scan; reports findings */
-	KOF_PACK_UNPACK = 1       /* entry kof_unpack; yields child objects */
+	KOF_PACK_UNPACK = 1,      /* entry kof_unpack; yields child objects */
+	/*
+	 * entry kof_heur; reports at KOF_LEVEL_HEUR and nothing above it.
+	 *
+	 * Its own kind rather than a detector with a ceiling, for the reason the
+	 * two above are separate: the scan loop walks every detector for every
+	 * object, and a heuristic runs at its own two points in the object's
+	 * life. Mixed into that loop it would be stepped over and rejected on
+	 * every object that is not at the phase it asked for.
+	 *
+	 * What it may NOT do is what makes it a kind and not a convention: no
+	 * family name, no verdict above HEUR, no child objects. The build
+	 * refuses all three - see ksigcompiler.sh - because a check that runs
+	 * when the module does is a check that has already loaded the code.
+	 */
+	KOF_PACK_HEUR   = 2
 };
 
 /*
@@ -442,6 +457,26 @@ struct kof_pack_mod {
 	uint32_t unp_kind;
 
 	/*
+	 * WHEN a heuristic rule runs, and WHAT it asks the engine for.
+	 *
+	 * Their own fields rather than a second meaning for unp_kind and
+	 * maltype, which are the two that happen to be spare on a heur module.
+	 * Overloading them would work and would be a trap: the day something
+	 * prints a module's maltype for diagnostics, a rule's want-mask reads
+	 * back as a malware type.
+	 *
+	 * heur_phase is enum kof_heur_phase_id and is a PREFILTER field - the
+	 * scan asks for one phase at a time and must not enter a rule that
+	 * declared the other. heur_want is a mask of enum kof_eng_want, fixed at
+	 * build time so that what a rule can ask for is a property of the source
+	 * and not of the object it is looking at.
+	 *
+	 * Zero and unread on a detector and on an unpacker.
+	 */
+	uint32_t heur_phase;
+	uint32_t heur_want;
+
+	/*
 	 * THE SOURCE THIS MODULE WAS WRITTEN IN, relative to the bases tree.
 	 *
 	 * Into KOF_SEC_NAME_POOL like the family, and zero when the source was
@@ -606,7 +641,7 @@ struct kof_pack_idx {
  * entered at the wrong offset. These fail the build instead.
  */
 _Static_assert(sizeof(struct kof_pack_sec)  == 16,  "pack section entry grew padding");
-_Static_assert(sizeof(struct kof_pack_mod)  == 48,  "pack module record grew padding");
+_Static_assert(sizeof(struct kof_pack_mod)  == 56,  "pack module record grew padding");
 _Static_assert(sizeof(struct kof_pack_str)  == 12,  "pack string descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_name) == 8,   "pack name descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_idx)  == 8,   "pack index slot grew padding");

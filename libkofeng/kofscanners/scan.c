@@ -35,6 +35,10 @@
 
 #include "scan.h"
 #include "../kofheur/kofheur.h"
+/* The rule ABI: the phase ids and what a rule may ask the engine for. The
+ * engine-side model next door is a different file with a similar name - see the
+ * note at the top of kofmod/heur.h. */
+#include "../core/kofmod/heur.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -307,7 +311,17 @@ static void finding_str(const struct kof_scanner *sc,
 {
 	const char *variant = kof_db_name(sc->eng, m, sc->rep_name_id);
 	const char *family  = kof_db_family(sc->eng, m);
-	const char *maltype = kof_maltype_name(m->maltype);
+	/*
+	 * "Heur" where a maltype would be, for a rule.
+	 *
+	 * A maltype is a claim about what something DOES - trojan, rootkit,
+	 * miner - and a rule has not established one. Writing the word here
+	 * rather than adding it to the maltype enum keeps it out of the
+	 * vocabulary a signature chooses from, which is what stops a signature
+	 * from ever being able to claim it.
+	 */
+	const char *maltype = m->kind == KOF_PACK_HEUR
+			      ? "Heur" : kof_maltype_name(m->maltype);
 	const char *fmt = kof_format_name(ctx->format);
 	char fmtarch[32];
 
@@ -486,17 +500,48 @@ static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ct
  */
 #define EMU_MAX_PACKER_DEPTH 1u
 
+/*
+ * How many times one scan will honour a rule's ask for the emulator.
+ *
+ * A number and not a fraction of the tree, because the thing being bounded is
+ * wall time on a tree of any size. 512 is what the measured population supports
+ * with room to spare: the rule that asks today fires on 18 of 4398 malware
+ * objects and on none of 5252 clean ones, so a scan that reaches this ceiling
+ * is looking at something no measured corpus resembles - and the honest thing
+ * then is to stop interpreting, not to keep going.
+ */
+#define HEUR_EMU_MAX 512u
+
 static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			 const struct kof_scan_option *opt,
-			 const struct kof_result *res, uint32_t pdepth)
+			 const struct kof_result *res, uint32_t pdepth,
+			 uint32_t want)
 {
 	uint32_t i;
 	int applies = 0;
 
 	if (sc->eng->n_unp == 0)
 		return 0;
-	if (res->n && !opt->all_matches)
-		return 0;
+	/*
+	 * A NAMED OBJECT NEED NOT BE OPENED. A GUESSED ONE MUST BE.
+	 *
+	 * The findings are counted, not just tested: a heuristic says the object
+	 * has a shape, which is the opposite of knowing what is in it - and the
+	 * one rule that exists says "this is a payload and I cannot read it",
+	 * which is a reason to open the object rather than to stop. Testing
+	 * res->n alone made a rule firing at EXAMINE cancel the unpacking of the
+	 * very object it fired on, so a sample that used to yield three children
+	 * yielded none and the payload inside was never scanned.
+	 */
+	if (res->n && !opt->all_matches) {
+		uint32_t k, named = 0;
+
+		for (k = 0; k < res->n; k++)
+			if (res->v[k].level != KOF_LEVEL_HEUR)
+				named++;
+		if (named)
+			return 0;
+	}
 
 	/*
 	 * A fresh attempt for every object.
@@ -600,9 +645,33 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * `broken` is checked first for the same reason the module loop checks
 	 * it: once the tree's budget is gone there is nothing to spend.
 	 */
-	if (!sc->broken && opt->emu_use != KOF_EMU_NEVER &&
+	/*
+	 * A RULE MAY ASK FOR THE EMULATOR ON THIS OBJECT, and only this one.
+	 *
+	 * `want` came back from the EXAMINE phase in the caller and is passed
+	 * down rather than stored, so it cannot outlive the object it was asked
+	 * for. Three things still say no:
+	 *
+	 *   - an explicit --emu never, which is what emu_forbidden is for. The
+	 *     option word alone cannot tell that apart from the NEVER that
+	 *     --heur 1 leaves behind, and turning the second into emulation is
+	 *     the whole point of the ask.
+	 *   - the packer depth ceiling, unchanged.
+	 *   - a ceiling on how many asks a whole scan honours. Without it a
+	 *     directory of objects that all match one rule turns a five second
+	 *     scan into minutes, and that is a cost a file's contents would be
+	 *     choosing.
+	 */
+	if (!sc->broken && (want & KOF_ENG_SCAN_EMU) &&
+	    !opt->emu_forbidden && opt->emu_use == KOF_EMU_NEVER &&
 	    pdepth <= EMU_MAX_PACKER_DEPTH &&
-	    (opt->emu_use == KOF_EMU_ONLY || !sc->packed_here)) {
+	    sc->st.heur_emu < HEUR_EMU_MAX) {
+		sc->st.heur_emu++;
+		if (kof_scan_emu_unpack(ctx, 0))
+			applies = 1;
+	} else if (!sc->broken && opt->emu_use != KOF_EMU_NEVER &&
+		   pdepth <= EMU_MAX_PACKER_DEPTH &&
+		   (opt->emu_use == KOF_EMU_ONLY || !sc->packed_here)) {
 		if (kof_scan_emu_unpack(ctx, opt->emu_use == KOF_EMU_ONLY))
 			applies = 1;
 	}
@@ -670,18 +739,6 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		f.flags |= KOF_HEUR_FL(KOF_HEUR_F_PACKED);
 	if (partial)
 		f.flags |= KOF_HEUR_FL(KOF_HEUR_F_UNPACK_PARTIAL);
-	/*
-	 * WHAT THE FILE IS, asked after everything that could open it has run.
-	 *
-	 * The position matters: an object that carried a packed payload has by
-	 * now been opened, its children scanned, and any name they earned
-	 * recorded. So the shape is asked of a file that nothing else had
-	 * anything to say about - which is the only case where it is allowed to
-	 * become a verdict, by the rule a few lines below that a named family
-	 * supersedes a guess about the shape.
-	 */
-	if (kof_heur_code_blob(ctx))
-		f.flags |= KOF_HEUR_FL(KOF_HEUR_F_CODE_BLOB);
 	if (!kof_heur_score(m, &f, &score, &guess))
 		return;                 /* no model for this format - say nothing */
 
@@ -754,12 +811,87 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	}
 }
 
+/*
+ * THE HEURISTIC RULES, at one of their two points in an object's life.
+ *
+ * Returns the OR of what the rules that FIRED asked the engine for - see
+ * KOF_HEUR_WANT in kofmod/heur.h. An OR and not a last-writer, so two rules
+ * asking for the same thing is the same request and the answer does not depend
+ * on the order the packs happened to load in. That matters: --jobs must not
+ * change a verdict, and scan_mt is the test that says so.
+ *
+ * The mask is returned rather than stored on the scanner. A field would be
+ * state, and state is exactly how "this object asked for the emulator" becomes
+ * "the rest of the scan uses it" - the bug this is shaped to make impossible.
+ */
+static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+			 const struct kof_scan_option *opt,
+			 struct kof_result *out, uint32_t phase,
+			 uint32_t present)
+{
+	uint32_t want = 0, i;
+
+	if (opt->heur_off)
+		return 0;
+	for (i = 0; i < sc->eng->n_heur; i++) {
+		const struct kof_module *m = &sc->eng->heur[i];
+
+		if (m->heur_phase != phase)
+			continue;
+		if (!prefilter(m, ctx, present, &sc->st))
+			continue;
+
+		sc->rep_valid = 0;
+		sc->cur_mod   = m;
+		m->fn(ctx);
+		sc->cur_mod   = NULL;
+
+		if (!sc->rep_valid)
+			continue;
+		want |= m->heur_want;
+		/*
+		 * A NAMED FAMILY SUPERSEDES A GUESS ABOUT THE SHAPE, and the
+		 * rule is the same one the scored model follows a few functions
+		 * down. The ASK is not suppressed with it: whether the object
+		 * is worth interpreting was decided before anything was named,
+		 * and withdrawing it here would leave a rule that fires and
+		 * does nothing on precisely the objects a signature already
+		 * half-recognised.
+		 */
+		{
+			uint32_t k;
+			int named = 0;
+
+			for (k = 0; k < out->n; k++)
+				if (out->v[k].level != KOF_LEVEL_HEUR)
+					named = 1;
+			if (named)
+				continue;
+		}
+		if (out->n < KOF_MAX_FINDINGS) {
+			struct kof_finding *f = &out->v[out->n++];
+
+			f->level = KOF_LEVEL_HEUR;
+			finding_str(sc, ctx, m, f->name, sizeof f->name);
+		} else {
+			out->dropped++;
+		}
+		/* One HEUR line per object, the same way the detector loop
+		 * stops at the first family - and for the same reason: the
+		 * rules after it can only lengthen a list that already says
+		 * what the object looks like. */
+		if (!opt->all_matches)
+			break;
+	}
+	return want;
+}
+
 static void scan_object(struct kof_scanner *sc, kof_buf buf,
 			const struct kof_scan_option *opt, struct kof_result *out,
 			uint32_t pdepth, int from_packer)
 {
 	struct kof_obj_ctx ctx;
-	uint32_t present, i;
+	uint32_t present, i, want;
 
 	out->from_packer = (uint8_t)(from_packer != 0);
 	memset(&ctx, 0, sizeof ctx);
@@ -828,7 +960,19 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	sc->st.bytes_searched += sc->m.n_bytes_scanned;
 	sc->st.gram_bytes     += sc->m.n_bytes_indexed;
 
-	out->broken = unpack_object(sc, &ctx, opt, out, pdepth);
+	/*
+	 * EXAMINE: what the object IS, asked before it is opened.
+	 *
+	 * Here and not earlier so a rule knows whether a family was named, and
+	 * here and not later because this is the last moment at which what it
+	 * asks for can still change what happens to the object.
+	 */
+	want = heur_run(sc, &ctx, opt, out, KOF_HEUR_EXAMINE, present);
+
+	out->broken = unpack_object(sc, &ctx, opt, out, pdepth, want);
+
+	/* VERDICT: how it was reached, which only exists once it has been. */
+	(void)heur_run(sc, &ctx, opt, out, KOF_HEUR_VERDICT, present);
 
 	/* Last, because the unpack result is one of the facts. */
 	heur_object(sc, &ctx, opt, pdepth, out->broken == KOF_BROKEN_DAMAGED, out);

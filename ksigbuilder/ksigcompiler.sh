@@ -350,6 +350,40 @@ if [ "$nkind" -eq 1 ]; then
 	esac
 fi
 
+# A heuristic rule's phase and its declared engine request. Zero on every other
+# kind; the checks that make them required, and that refuse them where they do
+# not belong, live beside the entry-point detection below - there and not here,
+# because which kind this module is is not known until the object exists.
+heur_phase=0
+heur_want=0
+heur_name=""
+nphase=$(grep -c 'KOF_HEUR_PHASE(' "$src" || true)
+if [ "$nphase" -gt 1 ]; then
+	echo "FAIL: $nphase KOF_HEUR_PHASE declarations; a rule runs at one point" >&2
+	exit 1
+fi
+if [ "$nphase" -eq 1 ]; then
+	phasename=$(sed -n 's/.*KOF_HEUR_PHASE(\([^)]*\)).*/\1/p' "$src")
+	case "$phasename" in
+	*KOF_HEUR_EXAMINE*) heur_phase=0 ;;
+	*KOF_HEUR_VERDICT*) heur_phase=1 ;;
+	*)
+		echo "FAIL: KOF_HEUR_PHASE($phasename) names no known phase" >&2
+		echo "      KOF_HEUR_EXAMINE - before the object is opened" >&2
+		echo "      KOF_HEUR_VERDICT - after it has been" >&2
+		exit 1 ;;
+	esac
+fi
+for w in $(sed -n 's/.*KOF_HEUR_WANT(\([^)]*\)).*/\1/p' "$src" | tr '|' ' '); do
+	case "$w" in
+	*KOF_ENG_SCAN_EMU*) heur_want=$((heur_want | 1)) ;;
+	*)
+		echo "FAIL: KOF_HEUR_WANT($w) names nothing the engine offers" >&2
+		exit 1 ;;
+	esac
+done
+heur_name=$(sed -n 's/.*KOF_HEUR_NAME("\([^"]*\)").*/\1/p' "$src" | head -1)
+
 subtype_mask=0        # 0 == any kind of the declared format
 
 nsub=$(grep -c 'KOF_TARGET_SUBTYPE(' "$src" || true)
@@ -526,8 +560,66 @@ if [ "$os" = windows ]; then
 		echo 'struct kof_obj_ctx;'
 		echo '__attribute__((section(".text$0"))) void kof_scan(const struct kof_obj_ctx *);'
 		echo '__attribute__((section(".text$0"))) void kof_unpack(const struct kof_obj_ctx *);'
+		echo '__attribute__((section(".text$0"))) void kof_heur(const struct kof_obj_ctx *);'
 	} >> "$pat"
 fi
+
+#
+# WHAT A RULE MAY NOT BE, checked in the source rather than hoped for.
+#
+# One function because the kind is worked out in two places - the COFF build
+# reads the object, the ELF build reads the linked image - and a check that
+# exists in one of them is a check that half the builds do not run.
+#
+heur_checks() {
+	#
+	# WHAT A RULE MAY NOT BE, checked in the source rather than
+	# hoped for.
+	#
+	# heur.h includes kofsig.h, so the detector's macros are all
+	# still in scope and every one of these WOULD compile. They are
+	# refused because the difference between a heuristic and a
+	# signature is not a matter of degree: a family name is a claim
+	# about identity, and a rule that made one would be a signature
+	# filed in the wrong place and reported in the wrong words.
+	#
+	if [ "$nphase" -eq 0 ]; then
+		echo "FAIL: a heuristic rule must declare KOF_HEUR_PHASE" >&2
+		echo "      KOF_HEUR_PHASE(KOF_HEUR_EXAMINE) - what it IS" >&2
+		echo "      KOF_HEUR_PHASE(KOF_HEUR_VERDICT) - how it was reached" >&2
+		exit 1
+	fi
+	if [ -z "$heur_name" ]; then
+		echo "FAIL: a heuristic rule must declare KOF_HEUR_NAME(\"word\")" >&2
+		exit 1
+	fi
+	if [ "$heur_want" -ne 0 ] && [ "$heur_phase" -ne 0 ]; then
+		echo "FAIL: KOF_HEUR_WANT at KOF_HEUR_VERDICT; the object has" >&2
+		echo "      already been opened by then, so there is nothing" >&2
+		echo "      left to ask for" >&2
+		exit 1
+	fi
+	if grep -qE 'KOF_SCAN_(INFECT|SUSPECT|MATCH)\(' "$src"; then
+		echo "FAIL: a heuristic rule reports KOF_HEUR_HIT and nothing" >&2
+		echo "      above it; naming a family is what a signature does" >&2
+		exit 1
+	fi
+	if grep -q 'KOF_TARGET_NAME(' "$src"; then
+		echo "FAIL: KOF_TARGET_NAME on a heuristic rule; it names a" >&2
+		echo "      family, and a rule recognises a shape - use" >&2
+		echo "      KOF_HEUR_NAME" >&2
+		exit 1
+	fi
+	if grep -qE 'kof_(emit|child|child_window|gather)\(' "$src"; then
+		echo "FAIL: a heuristic rule produces no child objects; that" >&2
+		echo "      is an unpacker" >&2
+		exit 1
+	fi
+	if [ "$nkind" -ne 0 ]; then
+		echo "FAIL: KOF_UNPACK_KIND on a heuristic rule" >&2
+		exit 1
+	fi
+}
 
 echo "== compile"
 "$CC" "${CFLAGS[@]}" -include "$pat" -c "$src" -o "$obj"
@@ -615,7 +707,7 @@ if [ "$os" = windows ]; then
 	# on where the LINKER placed the entry section, only on what the
 	# COMPILER named it, and that is already decided by the time $obj
 	# exists.
-	undef=$("$NM" -u "$obj" 2>/dev/null | grep -vE 'kof_scan|kof_unpack' || true)
+	undef=$("$NM" -u "$obj" 2>/dev/null | grep -vE 'kof_scan|kof_unpack|kof_heur' || true)
 	if [ -n "$undef" ]; then
 		echo "FAIL: undefined symbols (module reached outside its blob):" >&2
 		echo "$undef" >&2
@@ -630,12 +722,28 @@ if [ "$os" = windows ]; then
 	# or undefined, so this needs no extra filtering.
 	scan_row=$("$NM" "$obj" | awk '$2 == "T" && $3 == "kof_scan" {print $1}')
 	unp_row=$("$NM" "$obj" | awk '$2 == "T" && $3 == "kof_unpack" {print $1}')
-	if [ -n "$scan_row" ] && [ -n "$unp_row" ]; then
-		echo "FAIL: exports both kof_scan and kof_unpack; a module is one kind" >&2
+	heur_row=$("$NM" "$obj" | awk '$2 == "T" && $3 == "kof_heur" {print $1}')
+	nentry=0
+	[ -n "$scan_row" ] && nentry=$((nentry + 1))
+	[ -n "$unp_row" ]  && nentry=$((nentry + 1))
+	[ -n "$heur_row" ] && nentry=$((nentry + 1))
+	if [ "$nentry" -gt 1 ]; then
+		echo "FAIL: exports more than one of kof_scan, kof_unpack," >&2
+		echo "      kof_heur; the three ABIs differ and a module is" >&2
+		echo "      one kind" >&2
 		exit 1
 	fi
-	if [ -n "$scan_row" ]; then
+	if [ -n "$heur_row" ]; then
+		entry_hex=$heur_row; kind=2; kindname=heur
+		heur_checks
+	elif [ -n "$scan_row" ]; then
 		entry_hex=$scan_row; kind=0; kindname=detect
+		if [ "$nphase" -ne 0 ] || [ -n "$heur_name" ] ||
+		   [ "$heur_want" -ne 0 ]; then
+			echo "FAIL: heuristic declarations on a detector; a rule" >&2
+			echo "      exports kof_heur and includes kofmod/heur.h" >&2
+			exit 1
+		fi
 		if [ "$nkind" -ne 0 ]; then
 			echo "FAIL: KOF_UNPACK_KIND on a detector; it describes an" >&2
 			echo "      unpacker, and a detector declaring one has" >&2
@@ -656,7 +764,8 @@ if [ "$os" = windows ]; then
 			exit 1
 		fi
 	else
-		echo "FAIL: no kof_scan or kof_unpack symbol; a module must export one" >&2
+		echo "FAIL: no kof_scan, kof_unpack or kof_heur symbol; a module" >&2
+		echo "      must export exactly one" >&2
 		exit 1
 	fi
 	entry=$((16#$entry_hex))
@@ -667,7 +776,7 @@ if [ "$os" = windows ]; then
 	# compiler's own section-per-symbol behaviour) and either one drifting
 	# should fail the build, not ship a blob nothing verified.
 	if [ "$entry" -ne 0 ]; then
-		echo "FAIL: kof_scan/kof_unpack is at section offset 0x$entry_hex, expected 0" >&2
+		echo "FAIL: the entry point is at section offset 0x$entry_hex, expected 0" >&2
 		echo "      check the .text\$0 forcing near the '== patterns' step" >&2
 		exit 1
 	fi
@@ -713,16 +822,33 @@ else
 	# up as the other by mistake - it would not compile. Exactly one must be present.
 	scan_hex=$(nm "$img" | awk '$3 == "kof_scan" {print $1}')
 	unp_hex=$(nm "$img" | awk '$3 == "kof_unpack" {print $1}')
-	if [ -n "$scan_hex" ] && [ -n "$unp_hex" ]; then
-		echo "FAIL: exports both kof_scan and kof_unpack; a module is one kind" >&2
+	heur_hex=$(nm "$img" | awk '$3 == "kof_heur" {print $1}')
+	nentry=0
+	[ -n "$scan_hex" ] && nentry=$((nentry + 1))
+	[ -n "$unp_hex" ]  && nentry=$((nentry + 1))
+	[ -n "$heur_hex" ] && nentry=$((nentry + 1))
+	if [ "$nentry" -gt 1 ]; then
+		echo "FAIL: exports more than one of kof_scan, kof_unpack," >&2
+		echo "      kof_heur; the three ABIs differ and a module is" >&2
+		echo "      one kind" >&2
 		exit 1
 	fi
-	if [ -n "$scan_hex" ]; then
+	if [ -n "$heur_hex" ]; then
+		entry_hex=$heur_hex; kind=2; kindname=heur
+		heur_checks
+	elif [ -n "$scan_hex" ]; then
 		entry_hex=$scan_hex; kind=0; kindname=detect
+		if [ "$nphase" -ne 0 ] || [ -n "$heur_name" ] ||
+		   [ "$heur_want" -ne 0 ]; then
+			echo "FAIL: heuristic declarations on a detector; a rule" >&2
+			echo "      exports kof_heur and includes kofmod/heur.h" >&2
+			exit 1
+		fi
 	elif [ -n "$unp_hex" ]; then
 		entry_hex=$unp_hex;  kind=1; kindname=unpack
 	else
-		echo "FAIL: no kof_scan or kof_unpack symbol; a module must export one" >&2
+		echo "FAIL: no kof_scan, kof_unpack or kof_heur symbol; a module" >&2
+		echo "      must export exactly one" >&2
 		exit 1
 	fi
 	entry=$((16#$entry_hex))
@@ -762,9 +888,17 @@ cp "$raw" "$blob"
 	printf 'arch_mask=%s\n' "$arch_mask"
 	printf 'subtype_mask=%s\n' "$subtype_mask"
 	printf 'unp_kind=%s\n' "$unp_kind"
+	printf 'heur_phase=%s\n' "$heur_phase"
+	printf 'heur_want=%s\n'  "$heur_want"
 	# What KOF_TARGET_NAME declared - empty/0 for an unpack-kind module, where
 	# it is not required. ksigbuilder's --extract already validated these; this
 	# is a straight copy through .pre, same as scan_mask above.
+	# A heuristic rule has no family; its word goes in the same slot, and the
+	# engine writes "Heur" where a maltype would be. See finding_str.
+	if [ "$kind" -eq 2 ]; then
+		family=$heur_name
+		maltype=0
+	fi
 	printf 'family=%s\n'    "$family"
 	printf 'maltype=%s\n'   "$maltype"
 	printf 'nstr=%s\n'      "$nstr"

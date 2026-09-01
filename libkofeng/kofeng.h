@@ -225,6 +225,16 @@ struct kof_stats {
 	 * enforced: a limit nothing can observe is a limit nobody can show works.
 	 */
 	uint64_t peak_resident;
+
+	/*
+	 * How many times a heuristic rule's ask for the emulator was honoured.
+	 *
+	 * Reported because it is a cost a FILE's contents can choose - a rule
+	 * fires on what it finds, and interpreting is the most expensive thing
+	 * this engine does. There is a ceiling on it; this is how a reader sees
+	 * how close a scan came to it. See KOF_HEUR_WANT in kofmod/heur.h.
+	 */
+	uint64_t heur_emu;
 };
 
 typedef struct kof_engine  kof_engine;
@@ -253,6 +263,10 @@ void        kof_engine_close(kof_engine *);
  */
 uint32_t    kof_engine_records(const kof_engine *);
 uint32_t    kof_engine_unpackers(const kof_engine *);
+/* How many heuristic rules the database holds. Its own count because a rule is
+ * neither a record nor an unpacker, and a database whose rules were invisible in
+ * the banner is one nobody checks the loading of. */
+uint32_t    kof_engine_heur_rules(const kof_engine *);
 
 /*
  * The database format version every loaded pack matched.
@@ -403,6 +417,17 @@ struct kof_scan_option {
 	 * disagreeing about the same file is a finding.
 	 */
 	uint32_t emu_use;
+
+	/*
+	 * The caller said never and means it, so a heuristic rule may not ask
+	 * for the emulator on any object.
+	 *
+	 * A separate flag because emu_use cannot tell the two apart: --heur 1
+	 * leaves it NEVER meaning "not on by default", and --emu never leaves it
+	 * NEVER meaning "not at all". A rule's ask is exactly the thing that
+	 * should turn the first into emulation and must not touch the second.
+	 */
+	uint32_t emu_forbidden;
 
 
 	/*

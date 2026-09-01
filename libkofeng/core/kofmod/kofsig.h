@@ -45,7 +45,17 @@
  */
 enum kof_level {
 	KOF_LVL_SUSPECT = 0, /* worth noting; not a detection */
-	KOF_LVL_INFECT  = 1  /* the family is identified */
+	KOF_LVL_INFECT  = 1, /* the family is identified */
+	/*
+	 * A shape clean software does not have, with nothing identified.
+	 *
+	 * Reported only by a heuristic rule - see kofmod/heur.h - and a detector
+	 * that tried would be refused by the build. The value matches
+	 * KOF_LEVEL_HEUR in kofeng.h because the host passes the module's level
+	 * straight through; the two enums are one enum written twice, once for
+	 * each side of the ABI.
+	 */
+	KOF_LVL_HEUR    = 2
 };
 
 /*

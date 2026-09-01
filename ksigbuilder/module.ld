@@ -6,8 +6,9 @@
  * no symbol table. ld resolves every internal reference here, which is the
  * whole reason the runtime has no relocation code.
  *
- * A module exports kof_scan or kof_unpack, never both, so both are named here
- * and only one of the two input sections will ever exist.
+ * A module exports exactly one of kof_scan, kof_unpack and kof_heur, so all
+ * three are named here and only one of the three input sections will ever
+ * exist.
  *
  * KEEP, and no ENTRY. The two are connected:
  *
@@ -37,6 +38,7 @@ SECTIONS
 	.blob : {
 		KEEP(*(.text.kof_scan))
 		KEEP(*(.text.kof_unpack))
+		KEEP(*(.text.kof_heur))
 		*(.text .text.*)
 		*(.rodata .rodata.* .rodata1)
 	}

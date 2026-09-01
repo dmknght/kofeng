@@ -326,6 +326,12 @@ static void print_stats(const struct kof_stats *st)
 	       (unsigned long long)st->gram_answers);
 	printf("presence   %.2f MB indexed\n",
 	       (double)st->gram_bytes / 1048576.0);
+	/*
+	 * Printed even at zero, because zero is the answer a reader wants on a
+	 * clean tree: it says the rules that can turn the emulator on did not.
+	 */
+	printf("heur emu   %llu object(s) interpreted at a rule's request\n",
+	       (unsigned long long)st->heur_emu);
 }
 
 static void usage(const char *argv0)
@@ -541,8 +547,19 @@ int main(int argc, char **argv)
 			return 2;
 		}
 	}
-	if (emu_want >= 0)
+	if (emu_want >= 0) {
 		opt.emu_use = (enum kof_emu_use)emu_want;
+		/*
+		 * SAID EXPLICITLY, so a heuristic rule may not ask past it.
+		 *
+		 * --heur 1 also leaves emu_use at NEVER, and there it means
+		 * "not on by default" - which is exactly the case a rule's ask
+		 * is meant to turn into emulation. Only a --emu never typed on
+		 * the command line means never.
+		 */
+		if (emu_want == KOF_EMU_NEVER)
+			opt.emu_forbidden = 1;
+	}
 
 	if (!db || !target) {
 		usage(argv[0]);
@@ -554,9 +571,10 @@ int main(int argc, char **argv)
 		fprintf(stderr, "%s: cannot load a database from %s\n", argv[0], db);
 		return 2;
 	}
-	printf("database: version %u, %u record(s), %u unpacker(s)\n",
+	printf("database: version %u, %u record(s), %u unpacker(s), "
+	       "%u heur rule(s)\n",
 	       kof_engine_db_version(eng), kof_engine_records(eng),
-	       kof_engine_unpackers(eng));
+	       kof_engine_unpackers(eng), kof_engine_heur_rules(eng));
 
 	sc = kof_scanner_new(eng);
 	if (!sc) {
@@ -667,6 +685,7 @@ int main(int argc, char **argv)
 				sum.gram_bytes     += one->gram_bytes;
 				sum.gram_answers   += one->gram_answers;
 				sum.searches       += one->searches;
+				sum.heur_emu       += one->heur_emu;
 				sum.bytes_searched += one->bytes_searched;
 				if (one->peak_resident > sum.peak_resident)
 					sum.peak_resident = one->peak_resident;

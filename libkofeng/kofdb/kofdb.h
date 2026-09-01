@@ -132,6 +132,21 @@ struct kof_module {
 	 * Meaningless and unread for a detector. */
 	uint32_t unp_kind;
 
+	/* For a heuristic rule: which phase it runs in, and what it asks the
+	 * engine to do with an object it fires on. See kofmod/heur.h. */
+	uint32_t heur_phase;
+	uint32_t heur_want;
+
+	/*
+	 * enum kof_pack_kind, from the pack this came out of.
+	 *
+	 * The three arrays above already say which kind a module is, so this is
+	 * for the one place that has a module and not the array it came from:
+	 * composing a finding's name, where a rule's word is written "Heur" and
+	 * a detector's is its maltype.
+	 */
+	uint8_t  kind;
+
 	/* Where this module's source lives inside the bases tree, or 0. Read
 	 * with kof_db_source(). */
 	uint32_t src_off;
@@ -161,6 +176,14 @@ struct kof_engine {
 
 	struct kof_module   *unp;
 	uint32_t             n_unp;
+
+	/*
+	 * The heuristic rules, in their own array for the same reason: they run
+	 * at two points of their own in an object's life, and neither of the two
+	 * loops above is one of them.
+	 */
+	struct kof_module   *heur;
+	uint32_t             n_heur;
 
 	/*
 	 * How many patterns the whole database declares. A COUNT AND NOT A TABLE:
