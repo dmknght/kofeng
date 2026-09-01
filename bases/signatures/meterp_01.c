@@ -2,7 +2,7 @@
 #include <kofmod/pe.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_PE); // File format elf. Prefilter will use this
-KOF_TARGET_NAME(KOF_MALTYPE_HACKTOOL, "Meterpreter");
+KOF_TARGET_NAME(KOF_MALTYPE_HACKTOOL, "Meterp");
 KOF_TARGET_RANGE(pe_range_data, KOF_SCAN_PE_DATA);
 KOF_TARGET_RANGE(pe_range_code, KOF_SCAN_PE_CODE);
 
