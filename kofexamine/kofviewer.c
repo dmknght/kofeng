@@ -11909,6 +11909,16 @@ static void draw_help(struct out *o, struct view *v)
 	 * program.
 	 */
 	static const char *const keys[] = {
+		/*
+		 * F10 first, and on a row of its own.
+		 *
+		 * It is the only way into the menu bar, and the one key here a
+		 * reader is least likely to try: every other row is a chord
+		 * they already know from somewhere else. Alt does not open it -
+		 * a terminal cannot report a bare modifier - so this row is the
+		 * whole answer to "where is the menu".
+		 */
+		"F10        the menu bar",    "Esc        leave it",
 		"Ctrl+F     find",            "Ctrl+N     next match",
 		"Ctrl+C     copy the field",  "Ctrl+V     paste",
 		"Ctrl+O     open a file",     "Ctrl+Q     quit",
