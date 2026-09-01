@@ -20,9 +20,16 @@
  *              a test that a formatless child is offered back to the unpackers -
  *              which it was not until the module dropped its ELF-only target.
  *
- *   PLAINTEXT  The innermost child is the payload, byte for byte. Counting
- *              children alone would pass on a module that decrypted against the
- *              wrong key and produced three objects of noise.
+ *   PLAINTEXT  The innermost child is the payload, byte for byte, behind the
+ *              ELF header the module puts back in front of it. Counting children
+ *              alone would pass on a module that decrypted against the wrong key
+ *              and produced three objects of noise.
+ *
+ *   LAST ONLY  And the header goes on the LAST layer alone. The intermediate
+ *              layers are decryptors, not payloads; giving each one a header
+ *              would be twenty reconstructions on a twenty-layer sample, and
+ *              nineteen of them would wrap a stub. Asserted by checking that the
+ *              outer children still begin with the stub itself.
  *
  *   SILENCE    An ELF whose entry point is ordinary code yields nothing. The
  *              stub's prologue is common instructions - a jump, two pops, a mov -
@@ -62,6 +69,9 @@ static const uint8_t payload[] = {
 };
 
 #define STUB_LEN 46u
+
+/* The header the module reconstructs: ELF64 header plus one program header. */
+#define ELF_HDR_N 0x78u
 
 /*
  * Wrap `n` bytes at `in` in one layer, into `out`. Returns the wrapped length.
@@ -148,6 +158,8 @@ static uint64_t build_elf(uint8_t *f, const uint8_t *body, uint64_t n)
 static uint64_t n_kids;
 static uint8_t  last[4096];
 static uint64_t last_n;
+static uint8_t  first_kid[64];
+static uint64_t first_kid_n;
 
 static int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user)
@@ -157,6 +169,11 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	if (!strstr(name, "//"))
 		return 0;
 	n_kids++;
+	if (n_kids == 1) {
+		first_kid_n = len < sizeof first_kid ? len : sizeof first_kid;
+		if (bytes)
+			memcpy(first_kid, bytes, (size_t)first_kid_n);
+	}
 	last_n = len < sizeof last ? len : sizeof last;
 	if (bytes)
 		memcpy(last, bytes, (size_t)last_n);
@@ -180,6 +197,7 @@ static int scan(kof_scanner *sc, const char *path, const uint8_t *f, uint64_t n)
 	opt.max_object_bytes   = 1u << 20;
 	n_kids = 0;
 	last_n = 0;
+	first_kid_n = 0;
 	return kof_scan_path(sc, path, &opt, on_object, NULL) >= 0;
 }
 
@@ -224,12 +242,32 @@ int main(int argc, char **argv)
 		       (unsigned long long)n_kids);
 		if (n_kids != 3)
 			fail("three wrapped layers did not yield three children");
-		if (last_n != sizeof payload ||
-		    memcmp(last, payload, sizeof payload) != 0)
-			fail("the innermost child is not the payload");
+		/*
+		 * The reconstructed header, then the payload. Both halves are
+		 * asserted: the header alone would pass on a module that wrote
+		 * one and then decrypted against the wrong key, and the payload
+		 * alone would pass on one that had stopped writing the header -
+		 * which is what makes an ELF-only signature miss it.
+		 */
+		printf("  con trong cùng: %llu byte, đầu %02x %02x %02x %02x\n",
+		       (unsigned long long)last_n, last[0], last[1], last[2],
+		       last[3]);
+		if (last_n != ELF_HDR_N + sizeof payload ||
+		    memcmp(last, "\177ELF", 4) != 0)
+			fail("the innermost child is not an ELF of the right "
+			     "length");
+		else if (memcmp(last + ELF_HDR_N, payload, sizeof payload) != 0)
+			fail("the innermost child's payload is wrong");
 		else
-			printf("  lớp trong cùng khớp payload %u byte\n",
+			printf("  lớp trong cùng: ELF %u byte + payload %u "
+			       "byte\n", (unsigned)ELF_HDR_N,
 			       (unsigned)sizeof payload);
+		/* And the layers before it are left as they are. */
+		if (first_kid_n < 2 || first_kid[0] != 0xeb ||
+		    first_kid[1] != 0x27)
+			fail("an intermediate layer was given a header too");
+		else
+			printf("  lớp trung gian vẫn là stub, không bọc\n");
 	}
 
 	/*

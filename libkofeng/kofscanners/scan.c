@@ -670,6 +670,18 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		f.flags |= KOF_HEUR_FL(KOF_HEUR_F_PACKED);
 	if (partial)
 		f.flags |= KOF_HEUR_FL(KOF_HEUR_F_UNPACK_PARTIAL);
+	/*
+	 * WHAT THE FILE IS, asked after everything that could open it has run.
+	 *
+	 * The position matters: an object that carried a packed payload has by
+	 * now been opened, its children scanned, and any name they earned
+	 * recorded. So the shape is asked of a file that nothing else had
+	 * anything to say about - which is the only case where it is allowed to
+	 * become a verdict, by the rule a few lines below that a named family
+	 * supersedes a guess about the shape.
+	 */
+	if (kof_heur_code_blob(ctx))
+		f.flags |= KOF_HEUR_FL(KOF_HEUR_F_CODE_BLOB);
 	if (!kof_heur_score(m, &f, &score, &guess))
 		return;                 /* no model for this format - say nothing */
 

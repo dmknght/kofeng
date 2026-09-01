@@ -144,25 +144,17 @@ KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_UNKNOWN);
 #define CHUNK          1024u
 
 /*
- * Is the stub at `ep` this stub? Every byte of the fixed part is checked.
+ * The fixed bytes of the stub, with 0x100 standing for "the terminator,
+ * whatever this sample chose" - it appears twice, once in the `mov al` and once
+ * in the `cmp byte [rsi]`, and the two must agree - and 0x101 for the two marker
+ * bytes, which are whatever this sample chose and are not constrained to
+ * anything, so nothing is asserted about them here.
  *
- * The whole prologue rather than a shorter prefix, because the prefix that
- * would identify it - a jmp, two pops, a mov - is ordinary code that appears at
- * the entry point of plenty of hand-written ELFs. What makes this stub itself is
- * the cipher loop in the middle and the end marker inside it, and those are the
- * bytes worth insisting on.
+ * At file scope because it is checked against TWO things: the object, through
+ * the byte accessors, and a buffer of plaintext this module has just produced.
+ * One table, so the two questions cannot come to different answers.
  */
-static int stub_at(const struct kof_obj_ctx *ctx, uint64_t ep,
-		   uint8_t *term_out, uint8_t *mark_out)
-{
-	/*
-	 * The fixed bytes, with 0x100 standing for "the terminator, whatever
-	 * this sample chose" - it appears twice, once in the `mov al` and once
-	 * in the `cmp byte [rsi]`, and the two must agree - and 0x101 for the
-	 * two marker bytes, which are whatever this sample chose and are not
-	 * constrained to anything, so nothing is asserted about them here.
-	 */
-	static const uint16_t want[STUB_KEY_AT] = {
+static const uint16_t stub_want[STUB_KEY_AT] = {
 		0xeb,0x27,                     /* jmp +0x27                  */
 		0x5b,0x53,0x5f,                /* pop rbx; push rbx; pop rdi */
 		0xb0,0x100,                    /* mov al, TT                 */
@@ -182,6 +174,20 @@ static int stub_at(const struct kof_obj_ctx *ctx, uint64_t ep,
 		0xff,0xe1,                     /* jmp rcx                    */
 		0xe8,0xd4,0xff,0xff,0xff       /* call -0x2c                 */
 	};
+
+/*
+ * Is the stub at `ep` this stub? Every byte of the fixed part is checked.
+ *
+ * The whole prologue rather than a shorter prefix, because the prefix that
+ * would identify it - a jmp, two pops, a mov - is ordinary code that appears at
+ * the entry point of plenty of hand-written ELFs. What makes this stub itself is
+ * the cipher loop in the middle and the end marker inside it, and those are the
+ * bytes worth insisting on.
+ */
+static int stub_at(const struct kof_obj_ctx *ctx, uint64_t ep,
+		   uint8_t *term_out, uint8_t *mark_out)
+{
+	static const uint16_t *want = stub_want;
 	uint8_t term;
 	uint32_t i;
 
@@ -223,11 +229,124 @@ static int stub_at(const struct kof_obj_ctx *ctx, uint64_t ep,
 	return 1;
 }
 
+/*
+ * Is the plaintext this module just produced another wrapper?
+ *
+ * The same table as stub_at, against bytes rather than against the object. What
+ * it decides is whether the layer is the LAST one, which is the only thing the
+ * header below is attached to - see the note there.
+ */
+static int stub_in_buf(const uint8_t *p, uint32_t n)
+{
+	uint8_t term;
+	uint32_t i;
+
+	if (n < STUB_KEY_AT)
+		return 0;
+	term = p[STUB_TERM_AT];
+	for (i = 0; i < STUB_KEY_AT; i++) {
+		if (stub_want[i] == 0x100u) {
+			if (p[i] != term)
+				return 0;
+		} else if (stub_want[i] == 0x101u) {
+			continue;
+		} else if (p[i] != (uint8_t)stub_want[i]) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
+/*
+ * THE HEADER msfvenom WOULD HAVE WRITTEN, PUT BACK IN FRONT OF THE PAYLOAD.
+ *
+ * WHY THIS EXISTS. The payload that comes out of the last layer is machine code
+ * and nothing else, so the object had no format - and a signature written for
+ * it therefore could not use an ELF region. The alternative was to let rules
+ * name two formats and branch on which one they got, and that is worse for the
+ * reason the build already gives for keeping one format per module: the branch
+ * is N places that can forget, against one that can be tested. Reattaching the
+ * header moves the work to the one place that knows the payload is an ELF
+ * payload - here.
+ *
+ * WHAT IS BEING CLAIMED, and it is narrow. msfvenom does not compile these; it
+ * pastes the payload into a fixed template, and the template is these 120 bytes
+ * with two lengths patched. So this is not an invention: it is the same file
+ * with the encoder undone, and `cleartext` in the sample set is the reference -
+ * a payload built with no encoder at all is byte for byte this layout.
+ *
+ * WHAT IS NOT CLAIMED: that a file like this was ever on disk. It was not. The
+ * object is what the packer's own loader would have run, expressed in the format
+ * its outermost layer was, and the viewer shows it as a child of that layer
+ * rather than as anything found.
+ *
+ * ONLY THE LAST LAYER GETS ONE. A sample encoded twenty times would otherwise
+ * carry twenty reconstructed headers, nineteen of them wrapping a decryptor
+ * rather than a payload - work and objects for nothing. The intermediate layers
+ * stay formatless, which is what they are.
+ */
+#define ELF_HDR_N   0x78u
+#define ELF_BASE    0x400000ull
+
+static void put64(uint8_t *p, uint64_t v)
+{
+	unsigned i;
+
+	for (i = 0; i < 8; i++)
+		p[i] = (uint8_t)(v >> (i * 8));
+}
+
+static int emit_elf_hdr(const struct kof_obj_ctx *ctx, uint64_t payload_n)
+{
+	uint8_t h[ELF_HDR_N];
+	uint8_t *ph = h + 0x40;
+	uint64_t total = ELF_HDR_N + payload_n;
+	unsigned k;
+
+	/* Zeroed by hand: a module links against nothing, so there is no
+	 * memset here to call. */
+	for (k = 0; k < ELF_HDR_N; k++)
+		h[k] = 0;
+	h[0] = 0x7f; h[1] = 'E'; h[2] = 'L'; h[3] = 'F';
+	h[4] = 2;                       /* ELFCLASS64                       */
+	h[5] = 1;                       /* ELFDATA2LSB                      */
+	h[6] = 1;                       /* EV_CURRENT                       */
+	h[0x10] = 2;                    /* ET_EXEC                          */
+	h[0x12] = 0x3e;                 /* EM_X86_64                        */
+	h[0x14] = 1;                    /* e_version                        */
+	put64(h + 0x18, ELF_BASE + ELF_HDR_N);   /* e_entry: the payload    */
+	put64(h + 0x20, 0x40);          /* e_phoff                          */
+	/* e_shoff stays zero: the template has no section table, and neither
+	 * has any sample measured. */
+	h[0x34] = 0x40;                 /* e_ehsize                         */
+	h[0x36] = 0x38;                 /* e_phentsize                      */
+	h[0x38] = 1;                    /* e_phnum                          */
+
+	ph[0] = 1;                      /* PT_LOAD                          */
+	ph[4] = 7;                      /* RWX, which is what the template   */
+					/* asks for - the payload writes to  */
+					/* itself                            */
+	put64(ph + 0x08, 0);            /* p_offset                         */
+	put64(ph + 0x10, ELF_BASE);     /* p_vaddr                          */
+	put64(ph + 0x18, ELF_BASE);     /* p_paddr                          */
+	put64(ph + 0x20, total);        /* p_filesz                         */
+	/*
+	 * p_memsz = p_filesz. The template pads it - `cleartext` asks for 680
+	 * bytes of image for 250 of file - and the padding is a constant of the
+	 * template rather than anything derived from the payload, so copying the
+	 * number would be inventing one. Against that sample this reconstruction
+	 * differs in these eight bytes and in nothing else.
+	 */
+	put64(ph + 0x28, total);        /* p_memsz                          */
+	put64(ph + 0x30, 0x1000);       /* p_align                          */
+	return kof_emit(h, ELF_HDR_N);
+}
+
 KOF_DEFINE_UNPACK
 {
 	uint8_t buf[CHUNK], key[KEY_MAX];
-	uint64_t ep, at, ct, produced = 0;
-	uint32_t keylen = 0, n = 0;
+	uint64_t ep, at, ct, end, produced = 0;
+	uint32_t keylen = 0, n = 0, first;
 	uint8_t term, mark[2];
 
 	/*
@@ -273,30 +392,59 @@ KOF_DEFINE_UNPACK
 	kof_debug("MSF.xor.key", keylen);
 
 	/*
-	 * The cipher loop, and it ends where the stub's own loop ends: at the
-	 * two byte marker, not at the end of the object.
+	 * WHERE THE PLAINTEXT ENDS, found before any of it is produced.
 	 *
-	 * Stopping at the marker rather than the end matters because the wrapper
-	 * puts nothing after it - so a run to the end would append whatever the
-	 * file carries past the payload, XORed against a key it was never
-	 * encrypted with. The marker is read from the CIPHERTEXT, before the
-	 * XOR, which is what the stub does: `cmp word [rdi]` runs on the byte it
-	 * is about to decrypt.
+	 * It ends where the stub's own loop ends: at the two byte marker, not at
+	 * the end of the object. Stopping at the marker matters because the
+	 * wrapper puts nothing after it - so a run to the end would append
+	 * whatever the file carries past the payload, XORed against a key it was
+	 * never encrypted with. The marker is read from the CIPHERTEXT, before
+	 * the XOR, which is what the stub does: `cmp word [rdi]` runs on the byte
+	 * it is about to decrypt.
+	 *
+	 * Found in its own pass rather than as the loop runs, because the header
+	 * this may put in front carries the length and has to be written first.
+	 * The pass is a byte comparison over the ciphertext and costs nothing
+	 * against the decryption that follows it.
 	 */
-	for (at = ct; kof_in_obj(at, 2); at++) {
+	for (at = ct; kof_in_obj(at, 2); at++)
 		if (kof_u8(at) == mark[0] && kof_u8(at + 1u) == mark[1])
 			break;
+	end = at;
+	produced = end - ct;
+	if (produced < PLAIN_MIN)
+		return;
+
+	/*
+	 * The first chunk, decrypted but not yet handed over: what it holds
+	 * decides whether a header goes in front of it.
+	 */
+	first = produced < CHUNK ? (uint32_t)produced : CHUNK;
+	for (n = 0; n < first; n++)
+		buf[n] = (uint8_t)(kof_u8(ct + n) ^ key[n % keylen]);
+
+	/*
+	 * A layer that decrypts to another stub is a decryptor, not a payload,
+	 * and stays formatless. Only the last one is given its header back - see
+	 * emit_elf_hdr.
+	 */
+	if (!stub_in_buf(buf, n) && !emit_elf_hdr(ctx, produced))
+		return;
+	if (!kof_emit(buf, n))
+		return;
+	/* Handed over, so the buffer starts again - without this the tail flush
+	 * below emitted the first chunk a second time. */
+	at = ct + n;
+	n = 0;
+	for (; at < end; at++) {
 		buf[n++] = (uint8_t)(kof_u8(at) ^
 				     key[(uint32_t)((at - ct) % keylen)]);
-		produced++;
 		if (n == CHUNK) {
 			if (!kof_emit(buf, n))
 				return; /* the host has stopped taking bytes */
 			n = 0;
 		}
 	}
-	if (produced < PLAIN_MIN)
-		return;
 	if (n && !kof_emit(buf, n))
 		return;
 

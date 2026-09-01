@@ -213,6 +213,22 @@ static inline const char *kof_format_name(uint8_t fmt)
 	case KOF_FMT_RAR:    return "RAR";
 	case KOF_FMT_XZ:     return "xz";
 	case KOF_FMT_RTF:    return "RTF";
+	case KOF_FMT_PDF:    return "PDF";
+	/*
+	 * "Raw", not "Unknown", and the two are different answers.
+	 *
+	 * KOF_FMT_UNKNOWN is what an object HAS when no format header claimed
+	 * it - a decrypted payload, a carved blob, the image an unpacker handed
+	 * back. That is a bare binary, and it is a thing a rule can be written
+	 * for. "Unknown" reads as "the engine could not tell", which is the
+	 * default below: a format id this build has no name for, which is a
+	 * fault rather than a fact.
+	 *
+	 * PDF was falling through to that default and reporting Unknown, so a
+	 * PDF finding and a formatless one were spelled the same in a name and
+	 * in a pack's filename.
+	 */
+	case KOF_FMT_UNKNOWN: return "Raw";
 	default:             return "Unknown";
 	}
 }
