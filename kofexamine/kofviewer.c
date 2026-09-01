@@ -726,6 +726,18 @@ enum opt_kind {
 	OPT_SIZE_MAX,
 	OPT_ARCH,
 	OPT_SUBTYPE,
+	/*
+	 * WHICH FILE TYPES THE RULE RUNS ON, when the answer is not just this
+	 * object's own.
+	 *
+	 * Every other option here narrows; this one widens, and that is why it
+	 * exists. A payload recovered from a decryptor has no format header, so
+	 * a rule generated from it targets raw - and the same bytes appear
+	 * inside an ELF that was never packed, where that rule would never be
+	 * entered. Naming both is one declaration, and it was not writable from
+	 * this panel at all: the target was whatever the object happened to be.
+	 */
+	OPT_FORMAT,
 	OPT_COUNT
 };
 
@@ -739,7 +751,7 @@ enum opt_kind {
  */
 static const char *const opt_word[OPT_COUNT] = {
 	"Smallest file size", "Largest file size",
-	"Architecture", "File subtype"
+	"Architecture", "File subtype", "File types"
 };
 
 /*
@@ -760,7 +772,12 @@ static const struct { const char *word; uint32_t val; } arch_word[] = {
 /* The subtypes, per format. The values overlap between formats, which is why
  * naming one format's values while targeting another is a build error. */
 static const char *const fmt_word[] = {
-	"KOF_FMT_ANY", "KOF_FMT_ELF", "KOF_FMT_PE",
+	/* Index 0 is the format an object has when nothing identified it, and it
+	 * is a target like any other: a rule written for a decrypted payload
+	 * applies to exactly that and to no ELF. It read KOF_FMT_ANY here, which
+	 * is a different statement - every format - and is spelled where that is
+	 * meant. */
+	"KOF_FMT_UNKNOWN", "KOF_FMT_ELF", "KOF_FMT_PE",
 	"KOF_FMT_MACHO", "KOF_FMT_SCRIPT", "KOF_FMT_TEXT",
 	"KOF_FMT_GZIP", "KOF_FMT_DOCOLE", "KOF_FMT_ZIP",
 	"KOF_FMT_DOCZIP", "KOF_FMT_TAR", "KOF_FMT_7Z",
@@ -768,6 +785,44 @@ static const char *const fmt_word[] = {
 	"KOF_FMT_PDF"
 };
 #define FMT_WORD_N (sizeof fmt_word / sizeof fmt_word[0])
+
+/*
+ * What a format is called on the panel.
+ *
+ * The engine's own name for all but one of them, so there is no second table to
+ * fall behind. The exception is the format that has no header: the engine calls
+ * it "Unknown", which is what a PARSE says when it failed, and this panel has
+ * called the same thing "raw" since it existed. A rule targeting it is not
+ * targeting a failure - it is targeting a bare blob of bytes, which is what a
+ * decryptor hands back.
+ */
+static const char *fmt_show(uint32_t f)
+{
+	return f == (uint32_t)KOF_FMT_UNKNOWN ? "raw binary"
+					      : kof_format_name((uint8_t)f);
+}
+
+/* The formats a mask names, for the panel and for the source line. `srcword`
+ * picks which vocabulary: the macro names go in the file, the readable ones on
+ * screen. */
+static void fmt_join(char *out, size_t cap, uint64_t mask, int srcword)
+{
+	uint32_t f;
+	size_t at = 0;
+
+	out[0] = 0;
+	for (f = 0; f < FMT_WORD_N; f++) {
+		if (!((mask >> f) & 1u) || at + 1 >= cap)
+			continue;
+		at += (size_t)snprintf(out + at, cap - at, "%s%s",
+				       at ? (srcword ? " | " : "+") : "",
+				       srcword ? fmt_word[f] : fmt_show(f));
+		if (at >= cap)
+			break;
+	}
+	if (!out[0])
+		snprintf(out, cap, "%s", srcword ? "KOF_FMT_ANY" : "?");
+}
 
 static const char *const elf_sub[] = { "NONE", "REL", "EXEC", "DYN", "CORE" };
 static const char *const pe_sub[]  = { "EXE", "DLL", "SYS" };
@@ -1059,6 +1114,10 @@ static void decl_put_literal(FILE *f, const uint8_t *b, uint32_t n)
  * routing wrong.
  */
 #define CH_ITEMS 16
+/* CH_FORMAT lists one row per format, so the list has to hold every one of them.
+ * A format added to the enum without room here would simply not be offered,
+ * which is the kind of missing thing nobody goes looking for. */
+typedef char ch_items_holds_every_format[CH_ITEMS >= KOF_FMT_COUNT ? 1 : -1];
 #define CH_W     38
 
 enum ch_what {
@@ -1083,6 +1142,7 @@ enum ch_what {
 	CH_OPT,         /* which optional declaration to add */
 	CH_ARCH,        /* enum kof_arch, all of it */
 	CH_SUBTYPE,     /* the format's subtypes, all of them */
+	CH_FORMAT,      /* every file type, toggled one pick at a time */
 	CH_WORD,        /* fullword or substring */
 	CH_CASE,        /* case sensitive or not */
 	CH_CMATCH,      /* which matcher to put into a condition */
@@ -2018,6 +2078,30 @@ static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 	}
 }
 
+/*
+ * WHICH SIGNATURE THE PANE LIGHTS BY DEFAULT, and why it is not the first one.
+ *
+ * The hex pane marks where the SELECTED signature's markers sit, which is what
+ * makes the pane useful while authoring one: pick a rule, see where its bytes
+ * land. Defaulting that selection to index zero meant an arbitrary rule's
+ * markers lit up on every file opened - and a short marker lands somewhere by
+ * chance in almost any header. A reader reads a highlight as "this matched",
+ * so the pane was reporting a match that had not happened.
+ *
+ * The default is now the first rule that FIRED. When nothing fired the
+ * selection is past the end, which hit_kind already reads as "light nothing" -
+ * so an unlit pane means no rule matched, and a lit one means one did.
+ */
+static uint32_t touch_default(const struct object *ob)
+{
+	uint32_t i;
+
+	for (i = 0; i < ob->n_touch; i++)
+		if (ob->touch[i].fired)
+			return i;
+	return ob->n_touch;             /* nothing fired: select nothing */
+}
+
 static void objects_examine(struct view *v, kof_engine *eng)
 {
 	objects_examine_from(v, eng, 0);
@@ -2189,7 +2273,7 @@ static void goto_node(struct view *v, uint32_t k)
 	v->dis_have = 0;
 	v->dragging = 0;
 	if (v->node[k].obj != was)
-		v->sel_touch = 0;
+		v->sel_touch = touch_default(&v->obj[v->node[k].obj]);
 	view_select(v);
 }
 
@@ -2324,6 +2408,46 @@ static void draw_frame(struct out *o, struct view *v)
 	out_str(o, A_OFF);
 }
 
+/*
+ * The colour an OBJECT row is drawn in: its verdict, or plain when it has none.
+ *
+ * Read from what the engine reported for that object rather than from anything
+ * this panel worked out - the same rule the heuristic fields follow. A row with
+ * no finding stays as it was, because most rows have none and a tree where
+ * everything is coloured says nothing.
+ */
+static const char *tree_colour(const struct view *v, const struct node *n)
+{
+	const struct object *ob;
+	uint32_t i;
+	int worst = -1;
+
+	if (n->obj >= v->n_obj)
+		return A_BOLD;
+	ob = &v->obj[n->obj];
+	if (!ob->n_finding && !ob->heur.n)
+		return A_BOLD;
+	for (i = 0; i < ob->heur.n; i++) {
+		int lv = (int)ob->heur.v[i].level;
+
+		/* INFECT outranks SUSPECT outranks HEUR, and the row shows the
+		 * strongest thing said about it - a row that matched a family
+		 * and also scored on structure is a match. */
+		if (worst < 0 || lv == KOF_LEVEL_INFECT ||
+		    (lv == KOF_LEVEL_SUSPECT && worst == KOF_LEVEL_HEUR))
+			worst = lv;
+	}
+	if (worst == KOF_LEVEL_INFECT)
+		return A_HIT1;                  /* the same red a match is */
+	if (worst == KOF_LEVEL_SUSPECT)
+		return A_HIT2;
+	if (worst == KOF_LEVEL_HEUR)
+		return A_WARN;
+	/* A finding was recorded but its level is not in the result any more -
+	 * still not a plain row. */
+	return ob->n_finding ? A_HIT1 : A_BOLD;
+}
+
 static void draw_tree(struct out *o, struct view *v)
 {
 	int top = hex_top(), bot = hex_bot();
@@ -2362,12 +2486,32 @@ static void draw_tree(struct out *o, struct view *v)
 			 * would open if it were pressed, and these rows are
 			 * already all open. */
 			out_str(o, sel ? "*" : " ");
-			if (!sel)
-				/* An object row can hold a signature; a region
-				 * row is a place inside one. Different colours
-				 * because they are different kinds of answer,
-				 * not different rows of one kind. */
-				out_str(o, n->mask ? A_ID : A_BOLD);
+			/*
+			 * A region row is a place inside an object; an object
+			 * row can hold a signature. Different colours because
+			 * they are different kinds of answer.
+			 *
+			 * AN OBJECT THAT MATCHED SOMETHING IS NOT WHITE, and
+			 * that is the point of the tree on a nested sample. An
+			 * archive of forty entries, or a dropper unpacked three
+			 * deep, is a column of rows that all look alike - and
+			 * the one worth reading is the one a signature fired
+			 * on, which the reader had to find by walking every row
+			 * and watching the status line. The colour is the
+			 * verdict's own, so a match, a suspicion and a
+			 * heuristic are told apart without opening any of them.
+			 *
+			 * Applied to the SELECTED row as well. It was not, and
+			 * the row selected when a file opens is the root - so
+			 * the verdict on the object a reader is looking at was
+			 * the one verdict the tree never showed.
+			 */
+			if (n->mask) {
+				if (!sel)
+					out_str(o, A_ID);
+			} else {
+				out_str(o, tree_colour(v, n));
+			}
 			/* Truncated, not merely padded: a label wider than its
 			 * column runs into the pane beside it, and the first
 			 * file anyone opens has a sha256 for a name. */
@@ -4856,6 +5000,48 @@ no_head:
 			n_rng++;
 			continue;
 		}
+		/*
+		 * READ BACK, because it is now written out.
+		 *
+		 * Until this option existed the target was always the object's
+		 * own format, so there was nothing here that opening and saving
+		 * could lose. There is now: a rule that names ELF and raw,
+		 * opened on the ELF and saved, would come back naming only ELF
+		 * - and would silently stop being entered for the payload it
+		 * was written against.
+		 *
+		 * Left off when the line says what the default would have
+		 * written anyway. The option is a statement that the target is
+		 * not just this object, and showing a row that says what the
+		 * panel already knows is a row a reader has to rule out.
+		 */
+		if ((p = strstr(line, "KOF_TARGET_FORMAT(")) != NULL) {
+			uint64_t mask = 0;
+			uint32_t k;
+
+			if (!strstr(p, "KOF_FMT_ANY")) {
+				for (k = 0; k < FMT_WORD_N; k++) {
+					const char *at = strstr(p, fmt_word[k]);
+					char nxt;
+
+					if (!at)
+						continue;
+					/* Whole word: a name that is a prefix
+					 * of a longer one must not claim it. */
+					nxt = at[strlen(fmt_word[k])];
+					if (nxt == '_' || isalnum((unsigned char)nxt))
+						continue;
+					mask |= 1ull << k;
+				}
+			}
+			if (mask && mask != (1ull << (cur_obj(v)->fmt
+						      ? cur_obj(v)->ctx.format
+						      : (uint8_t)KOF_FMT_UNKNOWN))) {
+				v->opt_on[OPT_FORMAT] = 1;
+				v->opt_val[OPT_FORMAT] = mask;
+			}
+			continue;
+		}
 		if ((p = strstr(line, "KOF_TARGET_SIZE_MIN(")) != NULL) {
 			v->opt_on[OPT_SIZE_MIN] = 1;
 			v->opt_val[OPT_SIZE_MIN] = strtoull(p + 20, NULL, 0);
@@ -5508,8 +5694,15 @@ static uint32_t draft_tgt(struct view *v)
 	uint32_t h = 0;
 	char w[64];
 
-	h = tgt_mix(h, (ob->fmt && fm < FMT_WORD_N) ? fmt_word[fm]
-						    : "KOF_FMT_ANY");
+	if (v->opt_on[OPT_FORMAT]) {
+		char t[256];
+
+		fmt_join(t, sizeof t, v->opt_val[OPT_FORMAT], 1);
+		h = tgt_mix(h, t);
+	} else {
+		h = tgt_mix(h, (ob->fmt && fm < FMT_WORD_N) ? fmt_word[fm]
+							    : "KOF_FMT_ANY");
+	}
 	snprintf(w, sizeof w, "KOF_MALTYPE_%s",
 		 v->maltype < MALTYPE_N ? maltype_word[v->maltype] : "VIRUS");
 	h = tgt_mix(h, w);
@@ -6091,9 +6284,16 @@ static void generate(struct view *v, int as_new)
 
 	/* The format the object actually is, so the host can rule the module
 	 * out without entering it - and so the regions above mean something. */
-	fprintf(f, "KOF_TARGET_FORMAT(%s);\n",
-		(ob->fmt && ob->ctx.format < FMT_WORD_N)
-		? fmt_word[ob->ctx.format] : "KOF_FMT_ANY");
+	if (v->opt_on[OPT_FORMAT]) {
+		char t[256];
+
+		fmt_join(t, sizeof t, v->opt_val[OPT_FORMAT], 1);
+		fprintf(f, "KOF_TARGET_FORMAT(%s);\n", t);
+	} else {
+		fprintf(f, "KOF_TARGET_FORMAT(%s);\n",
+			(ob->fmt && ob->ctx.format < FMT_WORD_N)
+			? fmt_word[ob->ctx.format] : "KOF_FMT_ANY");
+	}
 	fprintf(f, "KOF_TARGET_NAME(KOF_MALTYPE_%s, \"%s\");\n\n",
 		v->maltype == 0 ? "VIRUS" :
 		v->maltype == 1 ? "TROJAN" :
@@ -6754,6 +6954,17 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 						     cur_obj(v)->ctx.subtype))
 				ch_add(c, opt_word[OPT_SUBTYPE]);
 		}
+		/*
+		 * Offered on every object, unlike the two above: what a rule
+		 * should RUN on is not a property of the sample in hand. The
+		 * ones above are - a zip has no machine - and that is the whole
+		 * difference.
+		 *
+		 * Added last, because ch_take walks the options in enum order
+		 * and matches this list by position.
+		 */
+		if (!v->opt_on[OPT_FORMAT])
+			ch_add(c, opt_word[OPT_FORMAT]);
 		if (!c->n)
 			return;
 	} else if (what == CH_ARCH) {
@@ -6770,6 +6981,25 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 				ch_add(c, pe_sub[i]);
 		if (!c->n)
 			return;
+	} else if (what == CH_FORMAT) {
+		/*
+		 * ONE ROW PER FORMAT, TICKED - not a list of the ones missing.
+		 *
+		 * Picking a row toggles it and the menu closes, so opening it
+		 * twice names two formats. That is what "add a file type" is,
+		 * and it is why the row has to show the state it is in: a list
+		 * that only offered what is absent would tell a reader nothing
+		 * about what the rule already targets.
+		 */
+		for (i = 0; i < FMT_WORD_N; i++) {
+			char w[CH_W];
+
+			snprintf(w, sizeof w, "%s %s",
+				 (v->opt_val[OPT_FORMAT] >> i) & 1u ? "[x]"
+								    : "[ ]",
+				 fmt_show(i));
+			ch_add(c, w);
+		}
 	} else if (what == CH_WORD) {
 		ch_add(c, "substring");
 		ch_add(c, "fullword");
@@ -6942,6 +7172,17 @@ static void ch_take(struct view *v)
 		v->opt_val[OPT_SUBTYPE] = (uint32_t)c->sel;
 		return;
 	}
+	if (c->what == CH_FORMAT) {
+		uint64_t m = v->opt_val[OPT_FORMAT] ^ (1ull << (uint32_t)c->sel);
+
+		/* Never all off. An empty mask is written out as KOF_FMT_ANY,
+		 * which is the opposite of what turning the last one off looks
+		 * like it should mean - so the last one does not turn off, and
+		 * the way to say "no opinion" is to remove the option. */
+		if (m)
+			v->opt_val[OPT_FORMAT] = m;
+		return;
+	}
 	if (c->what == CH_OPT) {
 		struct object *ob = cur_obj(v);
 		int seen = 0, k;
@@ -6956,8 +7197,16 @@ static void ch_take(struct view *v)
 			if (seen++ != c->sel)
 				continue;
 			v->opt_on[k] = 1;
+			/* Seeded from the object, like the rest: what the
+			 * rule targets starts as what this object IS, and a
+			 * formatless one is raw rather than everything. */
 			v->opt_val[k] = k == OPT_SIZE_MIN ? ob->buf.n :
 					k == OPT_SIZE_MAX ? ob->buf.n * 2u :
+					k == OPT_FORMAT ?
+						1ull << (ob->fmt
+							 ? ob->ctx.format
+							 : (uint8_t)
+							   KOF_FMT_UNKNOWN) :
 					k == OPT_ARCH ? ob->ctx.arch
 						      : ob->ctx.subtype;
 			break;
@@ -7888,6 +8137,32 @@ static void dis_span(const struct view *v, uint64_t *at0, int *c0,
  * starts at the anchor's column, the row holding the last ends at the cursor's,
  * and every row between is whole.
  */
+/*
+ * Does the HEX pane's selection cover the instruction at [at, at+alen)?
+ *
+ * One function because three places ask it and they must agree: the painter
+ * marks the whole row on it, Copy takes the whole row on it, and the panel's
+ * right-click leaves the selection alone on it. They were not one function, and
+ * the copy simply did not know about this kind of selection - so a range picked
+ * in the hex pane lit up here and then copied nothing.
+ */
+/* Is there a selection at all, and was it made in the hex pane? */
+static int dis_hex_sel(const struct view *v)
+{
+	return v->sel_a != KOF_BROKEN && !v->sel_from_dis;
+}
+
+static int dis_hex_marks(const struct view *v, uint64_t at, uint64_t alen)
+{
+	uint64_t lo, hi;
+
+	if (!dis_hex_sel(v))
+		return 0;
+	lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
+	hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
+	return at + alen > lo && at <= hi;
+}
+
 static int dis_cols(const struct view *v, uint64_t at, uint64_t alen, int len,
 		    int *from, int *to)
 {
@@ -8097,27 +8372,19 @@ static void draw_disasm(struct out *o, struct view *v)
 			out_str(o, line + to);
 			out_str(o, "\033[K");
 		} else {
-			uint64_t lo = 0, hi = 0;
-			int marked = 0;
+			/*
+			 * THE WHOLE LINE, when the hex selection touches this
+			 * instruction.
+			 *
+			 * Marking only the covered BYTES was tried and is too
+			 * quiet: the bytes are two hex digits in the middle of
+			 * a row and the eye does not find them, which is the
+			 * opposite of what a highlight is for. An instruction
+			 * either is part of what the reader picked or it is
+			 * not, and the row is the unit that says so.
+			 */
+			int marked = dis_hex_marks(v, at0, at - at0);
 			unsigned k;
-
-			if (v->sel_a != KOF_BROKEN && !v->sel_from_dis) {
-				lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
-				hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
-				/*
-				 * THE WHOLE LINE, when the hex selection
-				 * touches this instruction.
-				 *
-				 * Marking only the covered BYTES was tried and
-				 * is too quiet: the bytes are two hex digits in
-				 * the middle of a row and the eye does not find
-				 * them, which is the opposite of what a
-				 * highlight is for. An instruction either is
-				 * part of what the reader picked or it is not,
-				 * and the row is the unit that says so.
-				 */
-				marked = at0 + (at - at0) > lo && at0 <= hi;
-			}
 			if (marked) {
 				out_str(o, A_D_SEL);
 				out_fmt(o, "%s" A_OFF "\033[K", line);
@@ -8405,6 +8672,8 @@ static void draw_decl(struct out *o, struct view *v)
 				 ? kof_inspect_subtype_name(
 					   cur_obj(v)->ctx.format,
 					   (uint8_t)v->opt_val[i]) : "?");
+		else if (i == OPT_FORMAT)
+			fmt_join(val, sizeof val, v->opt_val[i], 0);
 		else
 			snprintf(val, sizeof val, "%llu",
 				 (unsigned long long)v->opt_val[i]);
@@ -9223,8 +9492,20 @@ static void draw_marker_line(struct out *o, struct view *v)
 
 		for (i = 0; i < ob->n_touch; i++)
 			hit += (uint32_t)(ob->touch[i].fired != 0);
-		touch_name(&ob->touch[v->sel_touch], name, sizeof name);
-		touch_head(&ob->touch[v->sel_touch], head, sizeof head);
+		/*
+		 * "No rule selected" is a real state - it is what an object
+		 * that matched nothing starts in, so that the hex pane does not
+		 * light up wherever some unselected rule's marker happened to
+		 * land. The counts still mean something there; the name does
+		 * not, and reading it would be reading one past the array.
+		 */
+		if (v->sel_touch < ob->n_touch) {
+			touch_name(&ob->touch[v->sel_touch], name, sizeof name);
+			touch_head(&ob->touch[v->sel_touch], head, sizeof head);
+		} else {
+			snprintf(name, sizeof name, "no marker selected");
+			head[0] = '\0';
+		}
 
 		/*
 		 * Capitalised, because they are the labels of two controls
@@ -9253,7 +9534,9 @@ static void draw_marker_line(struct out *o, struct view *v)
 
 		out_fmt(o, "%s%s" A_OFF A_DIM "  %s  |  " A_OFF "%s%s %s" A_OFF,
 			hit ? A_BAD : A_DIM, hits, skips,
-			touch_colour(&ob->touch[v->sel_touch]), name, head);
+			v->sel_touch < ob->n_touch
+			? touch_colour(&ob->touch[v->sel_touch]) : A_DIM,
+			name, head);
 	}
 
 	/*
@@ -9892,7 +10175,14 @@ static int menu_enabled(struct view *v, int a)
 	if (!menu_shown(v, a))
 		return 0;
 	if (a == M_COPY_DISASM)
-		return v->dis_open && v->dis_have && v->dis_lines > 0;
+		/*
+		 * The same condition dis_copy runs on, and it has to be: this
+		 * asked for the panel's OWN selection while dis_copy will also
+		 * copy the rows a hex selection lights, so the item greyed out
+		 * over a highlight it was perfectly able to copy.
+		 */
+		return v->dis_open && v->dis_lines > 0 &&
+		       (v->dis_have || dis_hex_sel(v));
 	if (a == M_DISASM) {
 		struct object *ob = cur_obj(v);
 
@@ -10238,7 +10528,16 @@ static void dis_copy(struct view *v)
 	struct out d = { 0 };
 	int r, rows = 0;
 
-	if (!v->dis_open || !v->dis_have || v->dis_lines <= 0)
+	/*
+	 * Either kind of selection will do.
+	 *
+	 * dis_have is the panel's OWN text selection. Requiring it here is what
+	 * made Copy silent on a range picked in the hex pane: the rows were lit,
+	 * the menu offered Copy, and this returned before looking at a single
+	 * one of them.
+	 */
+	if (!v->dis_open || v->dis_lines <= 0 ||
+	    (!v->dis_have && !dis_hex_sel(v)))
 		return;
 	/*
 	 * Exactly the characters that are lit, and the row break between them.
@@ -10251,8 +10550,23 @@ static void dis_copy(struct view *v)
 		int len = (int)strlen(v->dis_line[r]);
 		int from, to;
 
-		if (!dis_cols(v, v->dis_line_at[r], v->dis_line_len[r],
-				      len, &from, &to))
+		if (dis_cols(v, v->dis_line_at[r], v->dis_line_len[r],
+			     len, &from, &to)) {
+			/* A text selection: exactly the characters lit. */
+		} else if (dis_hex_marks(v, v->dis_line_at[r],
+					 v->dis_line_len[r])) {
+			/*
+			 * A selection made in the HEX pane: whole rows, which
+			 * is what is lit. Copying the covered characters would
+			 * be copying a column of a listing, and the range was
+			 * never picked as text in the first place.
+			 */
+			from = 0;
+			to = len;
+		} else {
+			continue;
+		}
+		if (to <= from)
 			continue;
 		if (rows)
 			out_str(&d, "\n");
@@ -11526,7 +11840,8 @@ static void draw_bar(struct out *o, struct view *v)
 			if (bar_item[i].parent != v->bar_sub || !bar_shown(v, i))
 				continue;
 			out_at(o, y, col);
-			out_str(o, bar_enabled(v, i) ? BAR_ON : BAR_OFF);
+			out_str(o, i == v->bar_sel ? BAR_CUR
+				   : bar_enabled(v, i) ? BAR_ON : BAR_OFF);
 			out_fmt(o, " %-*s", BAR_W - 1, bar_label(v, i));
 			out_str(o, A_OFF);
 			y++;
@@ -13029,6 +13344,102 @@ static void rebuild_db(struct view *v)
 		 root);
 }
 
+/* The items of one menu, in table order. Returns how many, up to `cap`. */
+static int bar_items_of(struct view *v, int menu, int *out, int cap)
+{
+	int i, n = 0;
+
+	for (i = 0; i < BI_COUNT && n < cap; i++)
+		if (bar_shown(v, i) && bar_item[i].menu == menu &&
+		    bar_item[i].parent < 0)
+			out[n++] = i;
+	return n;
+}
+
+/*
+ * The rows of a submenu: the children of `parent`.
+ *
+ * Same filter as the loop that DRAWS them, because a cursor that walks a
+ * different set from the one on the screen is a cursor that skips rows or rests
+ * on rows nobody can see.
+ */
+static int bar_kids_of(struct view *v, int parent, int *out, int cap)
+{
+	int i, n = 0;
+
+	for (i = 0; i < BI_COUNT && n < cap; i++)
+		if (bar_shown(v, i) && bar_item[i].parent == parent)
+			out[n++] = i;
+	return n;
+}
+
+/*
+ * Open item `i`'s submenu and put the cursor on its first usable row.
+ *
+ * While a submenu is open the cursor lives INSIDE it - bar_sel holds a child -
+ * and the parent stays lit through bar_sub. Without this the submenu drew rows
+ * that nothing selected and Enter ran the parent again, so the keyboard could
+ * open a submenu and then not reach anything in it.
+ */
+static void bar_enter_sub(struct view *v, int i)
+{
+	int kids[BI_COUNT], n = bar_kids_of(v, i, kids, BI_COUNT), k;
+
+	v->bar_sub = i;
+	v->bar_sel = n ? kids[0] : i;
+	for (k = 0; k < n; k++)
+		if (bar_enabled(v, kids[k])) {
+			v->bar_sel = kids[k];
+			break;
+		}
+}
+
+/*
+ * Open a menu by index and land the cursor on its first usable item.
+ *
+ * First ENABLED, not first: a menu whose top row is greyed - File's "Open",
+ * which is not built yet - would otherwise open with the cursor on something
+ * that does nothing, and an arrow press to leave it reads as the key not
+ * working.
+ */
+static void bar_open_menu(struct view *v, int menu)
+{
+	int items[BI_COUNT], n = bar_items_of(v, menu, items, BI_COUNT), i;
+
+	v->bar_open = menu;
+	v->bar_sub = -1;
+	v->bar_sel = -1;
+	for (i = 0; i < n; i++)
+		if (bar_enabled(v, items[i])) {
+			v->bar_sel = items[i];
+			break;
+		}
+	if (v->bar_sel < 0 && n)
+		v->bar_sel = items[0];
+}
+
+/* Move the cursor up or down within the open menu, skipping disabled rows so
+ * the cursor never rests on something Enter would ignore. */
+static void bar_move_item(struct view *v, int dir)
+{
+	int items[BI_COUNT], n, cur = -1, i, step;
+
+	if (v->bar_open < 0)
+		return;
+	n = v->bar_sub >= 0 ? bar_kids_of(v, v->bar_sub, items, BI_COUNT)
+			    : bar_items_of(v, v->bar_open, items, BI_COUNT);
+	for (i = 0; i < n; i++)
+		if (items[i] == v->bar_sel)
+			cur = i;
+	for (step = 0; step < n; step++) {
+		cur = (cur + dir + n) % n;
+		if (bar_enabled(v, items[cur])) {
+			v->bar_sel = items[cur];
+			return;
+		}
+	}
+}
+
 static void bar_run(struct view *v, int i)
 {
 	if (!bar_enabled(v, i)) {
@@ -13049,7 +13460,12 @@ static void bar_run(struct view *v, int i)
 	/* A parent opens; it does not act. Clicking it again closes what it
 	 * opened, so the same press undoes itself. */
 	if (bar_has_sub(i)) {
-		v->bar_sub = (v->bar_sub == i) ? -1 : i;
+		if (v->bar_sub == i) {
+			v->bar_sub = -1;
+			v->bar_sel = i;
+		} else {
+			bar_enter_sub(v, i);
+		}
 		return;
 	}
 	v->bar_open = -1;
@@ -13087,6 +13503,17 @@ static void bar_run(struct view *v, int i)
 
 /* ---- input ---------------------------------------------------------------- */
 
+/*
+ * THERE IS NO ALT HERE, and there was.
+ *
+ * A chord with Alt is ESC-then-the-letter on the wire, and a bit above the key
+ * space used to carry the letter through to menu-bar shortcuts. What was wanted
+ * is the windowed-editor gesture - tap Alt, the menu bar takes focus - and a
+ * terminal never reports a modifier on its own, so that gesture cannot be built
+ * at all. What the shortcuts offered instead was a different thing wearing the
+ * same key. F10 opens the bar; every other hot key here is Ctrl+key.
+ */
+
 enum key {
 	K_NONE = 0, K_UP = 256, K_DOWN, K_LEFT, K_RIGHT, K_PGUP, K_PGDN,
 	K_HOME, K_END,
@@ -13100,6 +13527,15 @@ enum key {
 	 * decoder's default and come back as 27, so pressing Delete in a field
 	 * did what Escape does: dropped the focus, leaving the text alone. */
 	K_DEL,
+	/*
+	 * F10, which is how a text UI activates its menu bar.
+	 *
+	 * NOT Alt on its own: a terminal never reports a bare modifier. Alt only
+	 * exists on the wire attached to a key - Alt+F arrives as ESC 'f' - so
+	 * "press Alt to reach the menu" cannot be built, while "press F10" is
+	 * what every program with a menu bar in a terminal already uses.
+	 */
+	K_F10,
 	/* Kept contiguous and last: handle() tests the range to let mouse
 	 * events past the modes that own the keyboard. */
 	K_BACKTAB,
@@ -13193,6 +13629,10 @@ static int read_mouse(void)
 	return K_CLICK;
 }
 
+/* How long to wait for the rest of an escape sequence before calling the byte a
+ * lone Escape. See read_key. */
+#define ESC_WAIT_MS 50
+
 /* Is there input already waiting. Used to collapse a burst of key repeats into
  * one frame; never blocks. */
 static int key_pending(void)
@@ -13228,8 +13668,45 @@ static int read_key(void)
 	}
 	if (c != 27)
 		return c;
+	/*
+	 * A LONE ESCAPE HAS TO BE ANSWERABLE WITHOUT A SECOND KEY.
+	 *
+	 * Escape is both a key and the first byte of every sequence, and the
+	 * only thing that tells them apart is whether more bytes follow. This
+	 * read used to be unconditional, so a lone Escape sat here until the
+	 * NEXT keystroke arrived - and that keystroke was then consumed as the
+	 * second byte of a sequence that was never sent. What a reader saw was
+	 * an Escape that did nothing, a menu that closed only on the second
+	 * press, and - worse - every Alt combination after a stray Escape
+	 * behaving as plain Escape, because the Alt's own ESC was eaten as the
+	 * tail of the pending one.
+	 *
+	 * Fifty milliseconds, which is what vim's ttimeoutlen uses for the same
+	 * decision. A terminal emits a sequence as one write, so the bytes are
+	 * already in the buffer when this polls; the wait only ever elapses for
+	 * a key pressed by a person, and fifty milliseconds is below what a
+	 * person can perceive as lag.
+	 */
+	{
+		struct pollfd p;
+
+		p.fd = STDIN_FILENO;
+		p.events = POLLIN;
+		p.revents = 0;
+		if (poll(&p, 1, ESC_WAIT_MS) <= 0 || !(p.revents & POLLIN))
+			return 27;
+	}
 	if (read(STDIN_FILENO, seq, 1) != 1)
 		return 27;
+	/*
+	 * ESC followed by anything that is not a sequence introducer is Escape.
+	 *
+	 * It used to be marked as Alt+that character and there were menu
+	 * shortcuts on the other end. They are gone: what was wanted was a TAP
+	 * of Alt taking the menu bar, which a terminal cannot report at all, and
+	 * a chord that is not that gesture is a second way in that nobody asked
+	 * for. The hot keys this program has are Ctrl+key.
+	 */
 	if (seq[0] != '[' && seq[0] != 'O')
 		return 27;
 	if (read(STDIN_FILENO, seq + 1, 1) != 1)
@@ -13248,7 +13725,20 @@ static int read_key(void)
 		unsigned char t[4];
 		size_t pn = 0;
 
-		if (read(STDIN_FILENO, t, 1) != 1 || t[0] != '0')
+		if (read(STDIN_FILENO, t, 1) != 1)
+			return 27;
+		/*
+		 * CSI 21 ~ is F10 and CSI 200 ~ is a paste, and they share their
+		 * first two bytes. Told apart here rather than in the switch
+		 * below, because this branch has already consumed the '2' - and
+		 * F10 was being swallowed as a malformed paste.
+		 */
+		if (t[0] == '1') {
+			if (read(STDIN_FILENO, t, 1) != 1 || t[0] != '~')
+				return 27;
+			return K_F10;
+		}
+		if (t[0] != '0')
 			return 27;
 		if (read(STDIN_FILENO, t, 1) != 1)
 			return 27;
@@ -13784,6 +14274,24 @@ static void click(struct view *v, int rclick)
 	if (v->find_open && find_click(v))
 		return;
 
+	/*
+	 * A STRING EDIT IS COMMITTED BEFORE THE FOCUS GOES, not dropped.
+	 *
+	 * Every other field types straight into the thing it edits, so leaving
+	 * it keeps what was typed. A pattern does not: it is typed into a
+	 * scratch buffer and parsed back into the declaration when the field
+	 * closes, and closing only ever happened on the keyboard path. So
+	 * clicking away after editing a pattern threw the edit away without a
+	 * word - the row still showed the old bytes, which reads as the edit
+	 * having been saved until it is opened again and is not there.
+	 */
+	if (v->edit >= ED_STR && v->edit < ED_STR + MAX_DECL) {
+		uint32_t si = (uint32_t)(v->edit - ED_STR);
+
+		v->edit = 0;
+		decl_edit_commit(v, si);
+	}
+
 	/* Any click leaves whatever was being typed. The header branch below
 	 * puts the focus back if the click landed on a field, so this is the
 	 * whole of "click away to stop editing". */
@@ -13901,7 +14409,17 @@ static void click(struct view *v, int rclick)
 		 * are the four questions the selection can answer.
 		 */
 		if (rclick) {
-			if (!v->dis_have && idx < v->dis_lines) {
+			/*
+			 * The one-row fallback is for a panel with NOTHING
+			 * picked - not for one showing a range picked in the
+			 * hex pane. It used to fire on that too: the right
+			 * click replaced the reader's range with the single row
+			 * under the pointer, so the menu that opened offered to
+			 * copy one line of what they had selected, and the rest
+			 * of the highlight went out as the menu came up.
+			 */
+			if (!v->dis_have && !dis_hex_sel(v) &&
+			    idx < v->dis_lines) {
 				int ln = (int)strlen(v->dis_line[idx]);
 
 				v->dis_a_at = v->dis_b_at = v->dis_line_at[idx];
@@ -14085,6 +14603,9 @@ static void click(struct view *v, int rclick)
 							g_mx);
 					else if (i == OPT_SUBTYPE)
 						ch_open(v, CH_SUBTYPE, 0,
+							g_my, g_mx);
+					else if (i == OPT_FORMAT)
+						ch_open(v, CH_FORMAT, 0,
 							g_my, g_mx);
 					else {
 						/* A size is typed, so the
@@ -14565,6 +15086,79 @@ static int field_key(struct view *v, char *buf, size_t cap, int k)
 	return 1;
 }
 
+/*
+ * The keyboard, while the menu bar is open. Returns 1 if it took the key.
+ *
+ * Left and right move between menus, up and down within one, Enter runs the
+ * selected item - a submenu parent opens, everything else acts - and Escape
+ * backs out one level. The same model every menu bar in a terminal uses, which
+ * is the point: a reader does not have to learn this one.
+ */
+static int bar_key(struct view *v, int k)
+{
+	if (v->bar_open < 0)
+		return 0;
+	switch (k) {
+	case K_LEFT:
+		/*
+		 * Out of a submenu first, and only then along the bar.
+		 *
+		 * The two directions are what a submenu is navigated with
+		 * everywhere, and giving them the job is what lets Escape mean
+		 * one thing. It used to walk the bar whatever was open, so the
+		 * only way back out of a submenu was Escape - which then had to
+		 * be pressed twice to leave the bar, once per level.
+		 */
+		if (v->bar_sub >= 0) {
+			v->bar_sel = v->bar_sub;   /* back onto the parent */
+			v->bar_sub = -1;
+		} else {
+			bar_open_menu(v, (v->bar_open + BM_COUNT - 1) %
+					 BM_COUNT);
+		}
+		return 1;
+	case K_RIGHT:
+		/* Into the selected submenu when there is one; along the bar
+		 * when there is not. */
+		if (v->bar_sub < 0 && v->bar_sel >= 0 &&
+		    bar_has_sub(v->bar_sel) && bar_enabled(v, v->bar_sel))
+			bar_enter_sub(v, v->bar_sel);
+		else if (v->bar_sub >= 0)
+			break;                  /* already in it; nothing to do */
+		else
+			bar_open_menu(v, (v->bar_open + 1) % BM_COUNT);
+		return 1;
+	case K_UP:
+		/* Inside an open submenu the arrows walk it; the submenu draws
+		 * its own selection, so leave the bar cursor alone. */
+		bar_move_item(v, -1);
+		return 1;
+	case K_DOWN:
+		bar_move_item(v, +1);
+		return 1;
+	case '\r':
+	case '\n':
+		if (v->bar_sel >= 0)
+			bar_run(v, v->bar_sel);
+		return 1;
+	case 27:
+		/*
+		 * ONE PRESS LEAVES THE BAR, from however deep in it.
+		 *
+		 * It used to unwind a level at a time, so leaving a submenu
+		 * took two presses - and from the outside that is
+		 * indistinguishable from an Escape that was dropped, which is
+		 * exactly how it was reported. Escape means "I am done with
+		 * this", and the level is not what a reader is counting.
+		 */
+		v->bar_open = v->bar_sel = v->bar_sub = -1;
+		return 1;
+	default:
+		break;
+	}
+	return 1;                               /* the open bar swallows the rest */
+}
+
 static int handle(struct view *v, int k)
 {
 	int page = hex_last() - hex_top();
@@ -14577,7 +15171,38 @@ static int handle(struct view *v, int k)
 	 * own copy already. The keyboard equivalent of the menu item, and the
 	 * shortcut anybody tries first on highlighted text.
 	 */
-	if (k == 0x03 && v->dis_open && v->dis_have &&
+	/*
+	 * F10 opens the menu bar, and closes it again.
+	 *
+	 * Before every mode below, because the bar is above them on screen and a
+	 * reader reaching for the menu means the menu whatever else is up.
+	 */
+	if (k == K_F10) {
+		if (v->bar_open >= 0)
+			v->bar_open = v->bar_sel = v->bar_sub = -1;
+		else
+			bar_open_menu(v, BM_FILE);
+		return 1;
+	}
+	/*
+	 * An open bar owns the KEYBOARD, the same way the properties page does -
+	 * and only the keyboard.
+	 *
+	 * bar_key swallows every key it does not use, which is right: a letter
+	 * typed under an open menu must not reach the pane behind it. It is
+	 * wrong for the mouse, and that is how this broke. A menu opened by
+	 * CLICKING the bar could not then be clicked: the click on the item
+	 * arrived here as K_CLICK, bar_key swallowed it, and click() - which
+	 * holds the whole hit test for menu rows - was never reached. The menu
+	 * stayed down, every later click vanished into it, and the program read
+	 * as frozen while it was in fact answering every keystroke.
+	 *
+	 * The range test is the one the enum was made contiguous for.
+	 */
+	if (v->bar_open >= 0 && !(k >= K_CLICK && k <= K_RELEASE) &&
+	    bar_key(v, k))
+		return 1;
+	if (k == 0x03 && v->dis_open && (v->dis_have || dis_hex_sel(v)) &&
 	    !v->prop_open && !v->find_open && !v->edit) {
 		dis_copy(v);
 		return 1;
@@ -15292,6 +15917,14 @@ static int handle(struct view *v, int k)
 						view_show(v,
 							  lt->str[v->sel_str].at);
 				}
+			} else if (down && v->sel_touch >=
+					   cur_obj(v)->n_touch) {
+				/* Out of "nothing selected" and onto the first
+				 * rule: the state is entered by opening a file
+				 * that matched nothing, and a state the wheel
+				 * cannot leave is a state that reads as a
+				 * frozen list. */
+				v->sel_touch = 0;
 			} else if (down && v->sel_touch + 1 <
 					   cur_obj(v)->n_touch) {
 				v->sel_touch++;
@@ -15328,7 +15961,8 @@ static int handle(struct view *v, int k)
 		/* The list takes the keys while it is open, whatever pane has
 		 * focus underneath: it is in front, and a cursor that moves
 		 * something behind an open list is a cursor nobody can see. */
-		if (v->show_list && v->list_depth) {
+		if (v->show_list && v->list_depth &&
+		    v->sel_touch < cur_obj(v)->n_touch) {
 			struct object *o2 = cur_obj(v);
 			const struct kof_touch *t2 = &o2->touch[v->sel_touch];
 
@@ -15355,7 +15989,8 @@ static int handle(struct view *v, int k)
 			menu_step(v, -1);
 			break;
 		}
-		if (v->show_list && v->list_depth) {
+		if (v->show_list && v->list_depth &&
+		    v->sel_touch < cur_obj(v)->n_touch) {
 			struct object *o2 = cur_obj(v);
 			const struct kof_touch *t2 = &o2->touch[v->sel_touch];
 
@@ -15572,6 +16207,19 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 				draft_show(v, k);
 				break;
 			}
+		/*
+		 * AND WHEN NOTHING FIRED, NOTHING IS SELECTED.
+		 *
+		 * The hex pane lights where the SELECTED rule's markers sit, and
+		 * a zeroed selection is rule number zero - so opening a file
+		 * that matched nothing lit up wherever some arbitrary rule's
+		 * marker happened to land, which in a header is often somewhere.
+		 * A highlight reads as "this matched", so the pane was reporting
+		 * a match that had not happened. Past the end means no rule, and
+		 * hit_kind already draws nothing for that.
+		 */
+		if (k == o0->n_touch)
+			v->sel_touch = o0->n_touch;
 	}
 	/* Whatever was auto-loaded is what this file started as, so it is not
 	 * unsaved work. */
