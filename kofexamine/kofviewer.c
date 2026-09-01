@@ -62,6 +62,10 @@
 #include <kofmod/pe.h>
 
 #include "kofinspect.h"
+
+/* The disassembler the emulator already carries: the viewer links the same
+ * library, so this costs an include path and nothing else. */
+#include "bddisasm.h"
 #include "../libkofeng/kofheur/kofheur.h"
 #include "../libkofeng/kofscanners/scan.h"
 #include "../libkofeng/kofunpack/emu_unpack.h"
@@ -338,6 +342,141 @@ static const char *byte_colour(uint8_t c)
 	if (c < 0x20 || c == 0x7f)      return A_B_CTRL;
 	return A_B_TEXT;
 }
+
+/*
+ * THE DISASSEMBLY PANEL'S OWN PALETTE, and why it is a separate one.
+ *
+ * The two panes sit one above the other and show the same bytes twice. Colouring
+ * them from one palette made that worse rather than better: a green in the hex
+ * meant "printable ASCII" and a green in the disassembly would mean "register",
+ * and a reader glancing between them has to remember which pane they are in
+ * before a colour means anything.
+ *
+ * So the hex pane keeps the normal range - 32, 33, 35, 36, 90 - and this one
+ * uses the BRIGHT range throughout. Nothing here can be confused for a byte
+ * class, and which pane an eye has landed on is answered by the colours being
+ * brighter rather than by reading the addresses.
+ *
+ * What each one is for:
+ *
+ *   OFF   the offset column, which is a location and reads like one
+ *   BYTE  the raw bytes: supporting detail, deliberately the quietest thing
+ *         on the row, because the reason to have a disassembly is not to read
+ *         hex
+ *   MNEM  the mnemonic - what the instruction DOES, so the brightest
+ *   REG   registers
+ *   IMM   immediates and addresses
+ *   KEY   the size and pointer words - qword, ptr, rel - which are grammar
+ *         rather than content
+ *   PUNC  commas and brackets, which carry no information at all
+ */
+#define A_D_OFF   "\033[94m"
+#define A_D_BYTE  "\033[90m"
+#define A_D_MNEM  "\033[97m"
+#define A_D_REG   "\033[92m"
+/*
+ * Bright CYAN and not bright yellow, which is where this started.
+ *
+ * The hex pane paints every byte at or above 0x80 yellow, and in a binary that
+ * is most of them - so a yellow immediate here landed in a pane whose neighbour
+ * is already largely yellow, which is the one thing this palette exists to
+ * avoid. Nothing in the disassembly is yellow now.
+ */
+#define A_D_IMM   "\033[96m"
+#define A_D_KEY   "\033[95m"
+#define A_D_PUNC  "\033[37m"
+/*
+ * The bytes a HEX selection covers, marked in the byte column.
+ *
+ * A background on the BYTES rather than a colour on the whole row, and that is
+ * the whole design: a marker is a run of bytes, and what a reader needs to know
+ * about the run they have picked is whether it starts and ends on instruction
+ * boundaries - a signature that begins mid-instruction moves the moment the
+ * source is rebuilt with another register allocation. Marking whole rows in two
+ * colours was tried and said the same thing far less exactly. Marking the bytes
+ * themselves shows it byte for byte.
+ */
+#define A_D_SEL   "\033[106;30m"
+
+/*
+ * Which colour a token of the operand text gets.
+ *
+ * A classifier and not a parser. bddisasm's text is regular enough that the
+ * first character decides nearly everything - a digit starts an immediate, a
+ * letter starts either a register or one of a dozen grammar words - and a real
+ * operand parser here would be a second disassembler to disagree with the
+ * first.
+ */
+static const char *dis_token_colour(const char *t, size_t n)
+{
+	static const char *const key[] = {
+		"byte", "word", "dword", "qword", "tword", "oword", "yword",
+		"zword", "ptr", "rel", "far", "near", "short"
+	};
+	unsigned i;
+
+	if (!n)
+		return A_D_PUNC;
+	if (t[0] >= '0' && t[0] <= '9')
+		return A_D_IMM;
+	for (i = 0; i < sizeof key / sizeof key[0]; i++)
+		if (strlen(key[i]) == n && !memcmp(t, key[i], n))
+			return A_D_KEY;
+	return A_D_REG;
+}
+
+/*
+ * Paint one instruction's text: the mnemonic, then its operands token by token.
+ *
+ * Emitted into the frame directly rather than built into a string, because the
+ * colours are escape sequences and a string with escapes in it is a string
+ * whose length no longer matches its width - and the panel's copy path needs
+ * the plain text, which it already has.
+ */
+static void dis_paint(struct out *o, const char *text)
+{
+	size_t i = 0, n = strlen(text);
+
+	/* The mnemonic is everything up to the first space. */
+	while (i < n && text[i] != ' ')
+		i++;
+	out_str(o, A_D_MNEM);
+	out_add(o, text, i);
+	out_str(o, A_OFF);
+	while (i < n) {
+		size_t j = i;
+
+		if (text[i] == ' ') {
+			while (j < n && text[j] == ' ')
+				j++;
+			out_add(o, text + i, j - i);
+			i = j;
+			continue;
+		}
+		/* Punctuation one character at a time: it is never part of a
+		 * token and gluing it to one would colour the token wrong. */
+		if (!((text[i] >= '0' && text[i] <= '9') ||
+		      (text[i] >= 'a' && text[i] <= 'z') ||
+		      (text[i] >= 'A' && text[i] <= 'Z') ||
+		      text[i] == '_')) {
+			out_str(o, A_D_PUNC);
+			out_add(o, text + i, 1);
+			out_str(o, A_OFF);
+			i++;
+			continue;
+		}
+		while (j < n && ((text[j] >= '0' && text[j] <= '9') ||
+				 (text[j] >= 'a' && text[j] <= 'z') ||
+				 (text[j] >= 'A' && text[j] <= 'Z') ||
+				 text[j] == '_' || text[j] == 'x'))
+			j++;
+		out_str(o, dis_token_colour(text + i, j - i));
+		out_add(o, text + i, j - i);
+		out_str(o, A_OFF);
+		i = j;
+	}
+}
+
 /*
  * A marker is lit with a BACKGROUND, not with reverse video.
  *
@@ -367,6 +506,7 @@ static const char *byte_colour(uint8_t c)
  * job of the pane is telling those two apart.
  */
 #define A_HIT3  "\033[45;97m"
+
 
 #define TREE_W   30
 
@@ -412,6 +552,35 @@ static int g_decl_rows;
 static int hex_bot(void)  { return g_rows - g_decl_rows - 2; }
 static int decl_top(void) { return g_rows - g_decl_rows; }
 static int mark_row(void) { return g_rows; }
+
+/*
+ * How many rows the disassembly panel is using, and zero when it is closed.
+ *
+ * It takes them from the BOTTOM OF THE HEX COLUMN and from nowhere else: the
+ * object tree beside it keeps its full height, because the tree is how a reader
+ * moves between objects and losing half of it to look at one is the wrong
+ * trade. So the split is horizontal inside one column rather than a new pane.
+ *
+ * File scope beside g_decl_rows and for the same reason - the geometry helpers
+ * are called from the click routing as well as the drawing, and threading a
+ * view pointer through them to ask one question would be worse.
+ */
+static int g_disasm_rows;
+
+/* The panel's first row. Its heading, which carries the close button, is the
+ * row above that, and the row above THAT is left blank as the rule. */
+static int dis_top(void)  { return hex_bot() - g_disasm_rows + 1; }
+
+/*
+ * The last row the HEX rows may use.
+ *
+ * Everything about the pane as a whole - the tree, the divider, the rule under
+ * both - still asks hex_bot(). Only the things that are about hex BYTES ask
+ * this: what fits on screen, which byte a click landed on, how far a page
+ * scrolls. Keeping the two questions apart is what lets the panel open without
+ * the tree changing height.
+ */
+static int hex_last(void) { return g_disasm_rows ? dis_top() - 2 : hex_bot(); }
 
 /* ---- the signature being drafted -------------------------------------------
  *
@@ -1103,6 +1272,102 @@ struct view {
 	 * of length zero.
 	 */
 	uint64_t    sel_a, sel_b;
+
+	/*
+	 * THE DISASSEMBLY PANEL.
+	 *
+	 * `dis_open` is the panel; `dis_bits` is 32 or 64, because raw shellcode
+	 * carries no header to say which and the answer changes what the same
+	 * bytes mean - a payload unpacked out of a Metasploit encoder is bytes
+	 * and nothing else. It is seeded from the object's architecture when
+	 * there is one and left for the reader to change when there is not.
+	 *
+	 * `dis_at`/`dis_len` pin the panel to a RANGE the reader chose, and
+	 * KOF_BROKEN in dis_len means it is not pinned: it follows the hex
+	 * scroll instead. Both are region offsets, like every other position in
+	 * this view.
+	 */
+	int         dis_open;
+	int         dis_bits;
+	uint64_t    dis_at, dis_len;
+
+	/*
+	 * A selection of LINES in the panel, and the text each one printed.
+	 *
+	 * Lines rather than characters, because an instruction is the unit
+	 * somebody copies: half of a MOV pasted into a note is not a smaller
+	 * answer, it is a wrong one. Held as row indices from the top of the
+	 * panel, and -1 when nothing is selected.
+	 *
+	 * The text is kept because the panel is redrawn from the bytes every
+	 * frame and the copy has to be of what was on screen - decoding it a
+	 * second time at copy time would be a second decoder to disagree with
+	 * the first, in exactly the case where the reader is looking at the
+	 * output of the first.
+	 */
+	/*
+	 * A TEXT SELECTION, character by character, the way one behaves
+	 * anywhere else: an anchor where the press landed and a cursor where the
+	 * pointer is, each a row and a column into the panel's own rows.
+	 *
+	 * It was whole lines, and whole lines are wrong for the same reason a
+	 * hex selection is not whole rows: the reader picks what they mean to
+	 * copy, and an operand or a mnemonic on its own is a thing people take.
+	 *
+	 * dis_have is 0 when nothing is selected.
+	 */
+	/*
+	 * ANCHORED TO BYTES, NOT TO ROWS.
+	 *
+	 * Each end is the file offset of the instruction its row starts at, plus
+	 * a column within that row's text. Row indices were tried and are wrong
+	 * for one reason: they go stale the moment the panel scrolls, so row 3
+	 * stayed lit while row 3 became a different instruction - and scrolling
+	 * away and back lost the selection entirely. A byte offset means the
+	 * highlight belongs to the instruction, which is what the reader picked.
+	 */
+	uint64_t    dis_a_at, dis_b_at;
+	int         dis_ac, dis_bc;
+	int         dis_have;           /* anything selected at all */
+	int         dis_dragging;
+
+
+	/*
+	 * WHAT THE PANEL IS READING FROM when it is not pinned.
+	 *
+	 * See dis_follow_hex for the rule that sets it, and dis_seen_* for what
+	 * it last saw of the two things that can move it.
+	 */
+	uint64_t    dis_follow;
+
+	/*
+	 * WHO SET THE BYTE SELECTION, and it has to be recorded because the
+	 * sync runs both ways.
+	 *
+	 * The panel follows the hex selection, and picking lines in the panel
+	 * SETS that selection - so without this the panel followed itself: a
+	 * click on a line moved the selection, the selection moved the panel's
+	 * start, and the row under the pointer was no longer the row that had
+	 * been clicked. The hex pane does not scroll to a selection, so the two
+	 * came apart as well.
+	 *
+	 * One flag, and the rule it encodes: a selection made HERE does not move
+	 * this panel. A selection made in the hex pane does.
+	 */
+	int         sel_from_dis;
+	char        dis_line[64][120];
+	/*
+	 * The bytes each drawn line stands for.
+	 *
+	 * Kept so that a selection made in the panel can be turned back into a
+	 * byte range - which is what lets the hex pane's own menu items work on
+	 * it unchanged. Selecting three instructions and declaring them as a
+	 * marker is the same act as selecting their bytes, and it should not
+	 * need a second implementation to say so.
+	 */
+	uint64_t    dis_line_at[64], dis_line_len[64];
+	int         dis_lines;
+
 	int         dragging;
 	int         dragged;        /* the pointer moved off the pressed byte */
 
@@ -1798,7 +2063,7 @@ static void tree_build(struct view *v)
 static uint64_t hex_max(const struct view *v)
 {
 	uint64_t per = (uint64_t)(v->per > 0 ? v->per : 16);
-	uint64_t rows = (uint64_t)(hex_bot() - hex_top() + 1);
+	uint64_t rows = (uint64_t)(hex_last() - hex_top() + 1);
 	uint64_t last, top;
 
 	if (!v->rgn_len)
@@ -1859,6 +2124,9 @@ static void goto_node(struct view *v, uint32_t k)
 	v->node[v->sel_node].at = v->rgn_at;
 	v->sel_node = k;
 	v->sel_a = v->sel_b = KOF_BROKEN;
+	/* The panel's rows are about the bytes that were on screen; moving to
+	 * another region makes them about different ones. */
+	v->dis_have = 0;
 	v->dragging = 0;
 	if (v->node[k].obj != was)
 		v->sel_touch = 0;
@@ -2389,7 +2657,7 @@ static int decl_kind(struct view *v, uint64_t off)
 static void draw_hex(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
-	int top = hex_top(), bot = hex_bot();
+	int top = hex_top(), bot = hex_last();
 	int col = TREE_W + 3;
 	int per = (g_cols - col - 12) / 4;
 	int row;
@@ -7257,6 +7525,500 @@ static int heur_reports(const struct object *ob, int32_t *score,
 	return *score >= kof_heur_default()->bar_centinats;
 }
 
+/* ---- the disassembly panel ------------------------------------------------
+ *
+ * WHY IT IS A PANEL AND NOT A DIALOG.
+ *
+ * The question it answers is "what do these bytes do", and the bytes are on
+ * screen already. A box over the top of them would hide the thing being asked
+ * about and make the answer something to memorise before dismissing it; a strip
+ * under the hex keeps both in view, and scrolling the hex scrolls the
+ * disassembly with it. That is also why it has a close button of its own rather
+ * than a key to press: it behaves like the panels around it.
+ *
+ * WHAT IT DECODES, AND THE ONE THING IT CANNOT KNOW.
+ *
+ * bddisasm needs to be told 32 or 64 bit, and the bytes never say. For an
+ * object with a header the collector already worked it out and the panel starts
+ * there. For raw bytes - a payload unwrapped out of an encoder, which is the
+ * case this is most useful for - there is no header and no answer, so the
+ * heading carries the mode and clicking it changes it. Guessing silently would
+ * be worse than asking: the same bytes are valid in both modes and mean
+ * different things, and a reader who cannot see which was assumed cannot tell.
+ */
+#define DIS_MIN_ROWS 4
+#define DIS_MAX_INSN 16u        /* the longest x86 instruction */
+
+/* The mode to start in: what the object says, or 64 when it says nothing. */
+static int dis_default_bits(struct view *v)
+{
+	struct object *ob = cur_obj(v);
+
+	if (ob && ob->fmt) {
+		if (ob->ctx.arch == KOF_ARCH_X86)
+			return 32;
+		if (ob->ctx.arch == KOF_ARCH_X86_64)
+			return 64;
+	}
+	return 64;
+}
+
+/*
+ * Gather up to n bytes of the region at `at` into buf, stopping at the end.
+ *
+ * Byte at a time through view_map, because a region is a list of extents and an
+ * instruction may sit across the join between two of them. Reading the parent's
+ * buffer directly would be faster and would decode bytes that are not adjacent
+ * in this region at all.
+ */
+static unsigned dis_gather(struct view *v, uint64_t at, uint8_t *buf, unsigned n)
+{
+	struct object *ob = cur_obj(v);
+	unsigned k = 0;
+
+	if (!ob || !ob->buf.p)
+		return 0;
+	while (k < n && at + k < v->rgn_len) {
+		uint64_t fo = view_map(v, at + k, 0);
+
+		if (fo >= ob->buf.n)
+			break;
+		buf[k++] = ob->buf.p[fo];
+	}
+	return k;
+}
+
+/*
+ * Where the panel starts reading.
+ *
+ * A pinned range starts where it was pinned. An unpinned one follows the HEX
+ * SELECTION when there is one, and the hex scroll when there is not - and the
+ * selection has to win, because the two panes hold very different amounts. The
+ * hex pane shows seventeen rows of sixteen bytes; the panel shows seventeen
+ * INSTRUCTIONS, which is rarely more than sixty bytes. Starting both at the top
+ * of the scroll meant selecting a byte anywhere below the first few hex rows
+ * lit nothing here at all: the answer was real and off the bottom of the panel.
+ */
+/*
+ * Where the panel reads from, settled once a frame before anything is drawn.
+ *
+ * TWO SEPARATE THINGS, and keeping them separate is the whole of it:
+ *
+ *   the WINDOW follows the hex scroll, always and exactly. Scrolling is a
+ *   deliberate act and nothing may override it.
+ *
+ *   the HIGHLIGHT belongs to the BYTES, not to the window. It is drawn from
+ *   sel_a/sel_b wherever those bytes happen to fall, so scrolling away hides it
+ *   and scrolling back shows it again. Nothing clears it.
+ *
+ * On top of that, one event: a NEW selection made in the hex pane moves the
+ * window once, so the reader sees what they just picked. After that the window
+ * is the scroll's again.
+ *
+ * Two earlier rules each failed at one half. "The selection wins while it is on
+ * the hex screen" kept the highlight and killed the scroll - the window stayed
+ * pinned while the hex moved under it. "The selection wins if there is one" was
+ * worse: a selection left over from an old drag pinned the window for good.
+ * Neither separated the window from the highlight, which is what a selection in
+ * any editor already does.
+ */
+static void dis_follow_hex(struct view *v)
+{
+	if (v->dis_len != KOF_BROKEN)
+		return;                         /* pinned by a menu action */
+
+	/*
+	 * A HEX SELECTION IS A PIN, and with nothing selected the window is the
+	 * scroll's.
+	 *
+	 * The panel holds about sixty bytes where the hex pane holds nearly
+	 * three hundred, and that is what forces the choice. Follow the scroll
+	 * and a selected instruction leaves this panel on the first notch while
+	 * the hex still shows its bytes lit - scroll back and it is still gone,
+	 * because the window starts at the top of the scroll and the selection
+	 * is somewhere down the screen. Four attempts at splitting the
+	 * difference each broke one half.
+	 *
+	 * So the rule is the one that can be said in a sentence: while bytes are
+	 * selected, this panel shows them. Scrolling the hex pane moves the hex
+	 * pane. Clicking anywhere with nothing under it drops the selection -
+	 * both panes do that - and the window goes back to following the scroll.
+	 */
+	if (v->sel_a != KOF_BROKEN && !v->sel_from_dis) {
+		uint64_t lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
+
+		/* A little before it, so the run has something above it to be
+		 * read against. */
+		v->dis_follow = lo > 16u ? lo - 16u : 0u;
+		return;
+	}
+	v->dis_follow = v->rgn_at;
+}
+
+static uint64_t dis_start(const struct view *v)
+{
+	return v->dis_len != KOF_BROKEN ? v->dis_at : v->dis_follow;
+}
+
+/*
+ * Point the HEX selection at whatever the panel's line selection covers.
+ *
+ * One selection, seen two ways: the bytes light up in the hex pane, the
+ * instructions light up here, and every menu item that already works on a byte
+ * range works on this one. The alternative was a second selection with its own
+ * copy of copy, declare and find hanging off it.
+ */
+/* The selection in reading order: (at0,c0) before (at1,c1). */
+static void dis_span(const struct view *v, uint64_t *at0, int *c0,
+		     uint64_t *at1, int *c1)
+{
+	uint64_t aa = v->dis_a_at, ba = v->dis_b_at;
+	int ac = v->dis_ac, bc = v->dis_bc;
+
+	if (ba < aa || (ba == aa && bc < ac)) {
+		uint64_t t = aa; aa = ba; ba = t;
+		{ int u = ac; ac = bc; bc = u; }
+	}
+	*at0 = aa; *c0 = ac; *at1 = ba; *c1 = bc;
+}
+
+/*
+ * Which columns of row `idx` are selected: [*from, *to), empty when none.
+ *
+ * The middle rows of a multi-row selection are taken whole, which is what a
+ * text selection does everywhere - the first row from the anchor to its end,
+ * the last from its start to the cursor.
+ */
+/*
+ * MATCHED BY OVERLAP, NOT BY EQUALITY, because disassembly does not
+ * self-synchronise.
+ *
+ * The selection remembers the offset an instruction STARTED at. Read the same
+ * bytes from somewhere else - which is what scrolling does - and the boundaries
+ * fall differently: the remembered offset can land in the middle of an
+ * instruction, and then no row's start equals it and nothing is lit. That is the
+ * highlight "disappearing on scroll", and it is not about the window at all.
+ *
+ * So a row is selected when its bytes OVERLAP the selected range. The columns
+ * are still exact at the two ends: the row holding the first selected byte
+ * starts at the anchor's column, the row holding the last ends at the cursor's,
+ * and every row between is whole.
+ */
+static int dis_cols(const struct view *v, uint64_t at, uint64_t alen, int len,
+		    int *from, int *to)
+{
+	uint64_t a0, a1;
+	int c0, c1;
+
+	*from = *to = 0;
+	if (!v->dis_have || !alen)
+		return 0;
+	dis_span(v, &a0, &c0, &a1, &c1);
+	if (at + alen <= a0 || at > a1)
+		return 0;               /* no bytes in common */
+	*from = (at <= a0 && a0 < at + alen) ? c0 : 0;
+	*to   = (at <= a1 && a1 < at + alen) ? c1 + 1 : len;
+	if (*from > len)
+		*from = len;
+	if (*to > len)
+		*to = len;
+	return *to > *from;
+}
+
+static void dis_sync_bytes(struct view *v)
+{
+	uint64_t a, b;
+	int c0, c1, k;
+
+	if (!v->dis_have || v->dis_lines <= 0)
+		return;
+	dis_span(v, &a, &c0, &b, &c1);
+	/*
+	 * The bytes of the instructions the selection TOUCHES, whole.
+	 *
+	 * A character selection can stop halfway through a mnemonic, and half a
+	 * mnemonic has no bytes. What the byte range is for is Copy hex and
+	 * Declare as hex, and both of those want instructions - so the range is
+	 * rounded out to the ones the text sits in.
+	 */
+	v->sel_a = a;
+	v->sel_b = b;
+	/* To the END of the instruction the selection stops in: what the byte
+	 * range is for is Copy hex and Declare as hex, and both want whole
+	 * instructions. */
+	for (k = 0; k < v->dis_lines; k++)
+		if (v->dis_line_at[k] == b) {
+			v->sel_b = b + v->dis_line_len[k] - 1u;
+			break;
+		}
+	v->sel_from_dis = 1;
+}
+
+
+static void draw_disasm(struct out *o, struct view *v)
+{
+	int head = dis_top() - 1;
+	int row;
+	int col = TREE_W + 3;
+	uint64_t at = dis_start(v);
+	uint64_t end = v->dis_len == KOF_BROKEN ? v->rgn_len
+					        : v->dis_at + v->dis_len;
+	char note[32];
+
+	if (!g_disasm_rows)
+		return;
+	if (end > v->rgn_len)
+		end = v->rgn_len;
+
+	/*
+	 * The heading, with the two controls a reader needs and nothing else:
+	 * which mode the bytes are being read in, and a way to close.
+	 */
+	out_at(o, head, col);
+	snprintf(note, sizeof note, " Disassembly  [x%d] ", v->dis_bits);
+	/* The panel's own palette here too, so nothing in this strip is yellow -
+	 * the hex pane above is largely yellow already. */
+	out_fmt(o, A_DIM "--" A_OFF A_D_MNEM "%s" A_OFF, note);
+	if (v->dis_len != KOF_BROKEN)
+		out_fmt(o, A_DIM " selection %llu B " A_OFF,
+			(unsigned long long)v->dis_len);
+	out_str(o, A_DIM);
+	{
+		int used = col + 2 + (int)strlen(note) +
+			   (v->dis_len != KOF_BROKEN ? 20 : 0);
+		int k;
+
+		for (k = used; k < g_cols - 4; k++)
+			out_str(o, "-");
+	}
+	out_str(o, A_OFF);
+	out_at(o, head, g_cols - 3);
+	out_str(o, A_D_KEY "[x]" A_OFF);
+
+	v->dis_lines = 0;
+	for (row = dis_top(); row <= hex_bot(); row++) {
+		uint8_t buf[DIS_MAX_INSN];
+		INSTRUX ix;
+		char text[ND_MIN_BUF_SIZE];
+		char line[120];
+		unsigned got, j, w = 0;
+		uint64_t at0 = at;              /* before the length is added */
+		int from, to, len;
+		unsigned ix_len = 1;            /* bytes this row stands for */
+		int ok_decode = 0;
+
+		out_at(o, row, col);
+		if (at >= end) {
+			out_str(o, "\033[K");
+			continue;
+		}
+		got = dis_gather(v, at, buf, DIS_MAX_INSN);
+		if (!got) {
+			out_str(o, "\033[K");
+			continue;
+		}
+		/*
+		 * BUILT AS TEXT FIRST, THEN COLOURED.
+		 *
+		 * The same string is what goes on the screen and what goes in
+		 * the clipboard, so there is one of it. Writing the screen with
+		 * one set of calls and the clipboard with another is how the
+		 * two drift - and the drift would be invisible until somebody
+		 * pasted a line that was never displayed.
+		 */
+		w = (unsigned)snprintf(line, sizeof line, "%08llx  ",
+				       (unsigned long long)view_map(v, at, 0));
+		if (!ND_SUCCESS(NdDecodeEx(&ix, buf, got,
+					   v->dis_bits == 32 ? ND_CODE_32
+							     : ND_CODE_64,
+					   v->dis_bits == 32 ? ND_DATA_32
+							     : ND_DATA_64))) {
+			/*
+			 * One byte, named for what it is. A run of data in the
+			 * middle of code is ordinary - a jump table, a string,
+			 * the padding between functions - and stopping at the
+			 * first one would end the panel on every real object.
+			 */
+			snprintf(line + w, sizeof line - w, "%02x%*s (data)",
+				 buf[0], 19, "");
+			at++;
+			ix_len = 1;
+		} else {
+			ok_decode = 1;
+			ix_len = ix.Length < 7u ? ix.Length : 7u;
+			for (j = 0; j < ix.Length && j < 7u && w + 3 < sizeof line;
+			     j++)
+				w += (unsigned)snprintf(line + w,
+							sizeof line - w,
+							"%02x ", buf[j]);
+			for (; j < 7u && w + 3 < sizeof line; j++)
+				w += (unsigned)snprintf(line + w,
+							sizeof line - w, "   ");
+			NdToText(&ix, view_map(v, at, 0), sizeof text, text);
+			snprintf(line + w, sizeof line - w, "%s", text);
+			at += ix.Length;
+		}
+		if (v->dis_lines < (int)(sizeof v->dis_line /
+					 sizeof v->dis_line[0])) {
+			v->dis_line_at[v->dis_lines]  = at0;
+			v->dis_line_len[v->dis_lines] = at - at0;
+			snprintf(v->dis_line[v->dis_lines++],
+				 sizeof v->dis_line[0], "%s", line);
+		}
+		/*
+		 * Three things can mark a row, drawn in this order.
+		 *
+		 * The TEXT SELECTION is characters and is drawn as a span, so it
+		 * has to be written in three pieces. The HEX selection marks
+		 * whole instructions and in two colours, which is the one thing
+		 * the hex pane above cannot show: a marker is a run of bytes,
+		 * and a run that starts or ends in the MIDDLE of an instruction
+		 * is fragile - the same source rebuilt with another register
+		 * allocation moves those bytes and the signature quietly stops
+		 * matching. Wholly covered is one colour, cut is another.
+		 */
+		/*
+		 * ONE MARK, AND IT IS THE READER'S OWN SELECTION.
+		 *
+		 * A second marking - the instructions a HEX selection covered,
+		 * in two colours for whole and cut - was built and taken back
+		 * out. It repeated what the hex pane already shows one row up,
+		 * it needed a colour that clashed with none of three others, and
+		 * keeping it visible meant holding this panel still while the
+		 * hex scrolled under it. Three costs for a fact the reader could
+		 * already see. What is marked here is what was dragged out here.
+		 */
+		len = (int)strlen(line);
+		/*
+		 * TWO WAYS TO DRAW A ROW, and which one is used depends on
+		 * whether the reader has a TEXT selection over it.
+		 *
+		 * A text selection is characters: it can start mid-mnemonic, so
+		 * it is drawn as three flat runs with a background on the
+		 * middle one, and the syntax colours give way. Anything else
+		 * gets painted properly - offset, bytes, mnemonic, operands -
+		 * with the bytes a HEX selection covers lit one at a time.
+		 *
+		 * Giving way rather than combining: a background plus six
+		 * foregrounds is a row nobody can read, and while a reader is
+		 * dragging text out, what they want to see is the extent of
+		 * what they have got.
+		 */
+		if (dis_cols(v, at0, at - at0, len, &from, &to)) {
+			out_add(o, line, (size_t)from);
+			out_str(o, A_SELB);
+			out_add(o, line + from, (size_t)(to - from));
+			out_str(o, A_OFF);
+			out_str(o, line + to);
+			out_str(o, "\033[K");
+		} else {
+			uint64_t lo = 0, hi = 0;
+			int marked = 0;
+			unsigned k;
+
+			if (v->sel_a != KOF_BROKEN && !v->sel_from_dis) {
+				lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
+				hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
+				/*
+				 * THE WHOLE LINE, when the hex selection
+				 * touches this instruction.
+				 *
+				 * Marking only the covered BYTES was tried and
+				 * is too quiet: the bytes are two hex digits in
+				 * the middle of a row and the eye does not find
+				 * them, which is the opposite of what a
+				 * highlight is for. An instruction either is
+				 * part of what the reader picked or it is not,
+				 * and the row is the unit that says so.
+				 */
+				marked = at0 + (at - at0) > lo && at0 <= hi;
+			}
+			if (marked) {
+				out_str(o, A_D_SEL);
+				out_fmt(o, "%s" A_OFF "\033[K", line);
+			} else {
+				out_str(o, A_D_OFF);
+				out_add(o, line, 8);
+				out_str(o, A_OFF "  ");
+				for (k = 0; k < 7u; k++) {
+					if (k < ix_len) {
+						out_str(o, A_D_BYTE);
+						out_fmt(o, "%02x", buf[k]);
+						out_str(o, A_OFF " ");
+					} else {
+						out_str(o, "   ");
+					}
+				}
+				if (ok_decode)
+					dis_paint(o, text);
+				else
+					out_str(o, A_DIM "(data)" A_OFF);
+				out_str(o, "\033[K");
+			}
+		}
+	}
+}
+
+/*
+ * Open, close, and how many rows it takes.
+ *
+ * Half of what the hex column has, so both halves stay usable - a panel that
+ * took most of the screen would answer the question by hiding the evidence -
+ * and never fewer than DIS_MIN_ROWS, because a panel too short to hold an
+ * instruction is not a panel.
+ */
+static void dis_toggle(struct view *v, uint64_t at, uint64_t len)
+{
+	if (v->dis_open && len == KOF_BROKEN) {
+		v->dis_open = 0;
+		g_disasm_rows = 0;
+		v->dis_have = 0;
+		return;
+	}
+	if (!v->dis_open) {
+		v->dis_bits = dis_default_bits(v);
+		/*
+		 * Nothing selected, spelled out. The struct is cleared to zero
+		 * on a file switch and zero is a valid ROW, so a panel opened
+		 * after one would come up with its first line already lit.
+		 */
+		v->dis_have = 0;
+		v->dis_dragging = 0;
+	}
+	/*
+	 * Opened from the menu with nothing selected, it moves to CODE.
+	 *
+	 * Headers, data and the unclaimed tail all decode into something -
+	 * every byte does - and none of it means anything. A reader who opens a
+	 * disassembly wants the code, so the panel goes and gets it rather than
+	 * showing whichever region the tree happened to be on. Moving the TREE
+	 * rather than pointing the panel somewhere else keeps the two in step:
+	 * the hex shows the same bytes, which is the whole reason the panel is
+	 * under it.
+	 *
+	 * Only on the way open, and only when nothing was selected: a reader who
+	 * picked a range meant that range, and one who is already reading a
+	 * region did not ask to be moved.
+	 */
+	if (!v->dis_open && len == KOF_BROKEN) {
+		uint32_t k;
+
+		for (k = 0; k < v->n_node; k++)
+			if (v->node[k].obj == v->node[v->sel_node].obj &&
+			    v->node[k].mask &&
+			    !strcmp(v->node[k].label, "CODE")) {
+				goto_node(v, k);
+				break;
+			}
+	}
+	v->dis_open = 1;
+	v->dis_at = at;
+	v->dis_len = len;
+	/* Somewhere sane for the first frame; dis_follow_hex settles it from
+	 * there. */
+	v->dis_follow = len == KOF_BROKEN ? v->rgn_at : at;
+}
+
 static void draw_decl(struct out *o, struct view *v)
 {
 	int top = decl_top();
@@ -8824,12 +9586,20 @@ static void draw_list(struct out *o, struct view *v)
  * what is missing - here, that nothing is selected.
  */
 enum menu_action {
-	M_COPY_ASCII = 0,
+	/*
+	 * First, because it is first in the panel's menu and the table's order
+	 * is the menu's order. It is shown ONLY there - in the hex pane there
+	 * is no disassembly to copy - so putting it at the top costs the hex
+	 * menu nothing.
+	 */
+	M_COPY_DISASM = 0,
+	M_COPY_ASCII,
 	M_COPY_HEX,
 	M_COPY_OFF_HEX,
 	M_COPY_OFF_DEC,
 	M_DECL_STR,
 	M_DECL_HEX,
+	M_DISASM,
 	M_GOTO,
 	M_FIND_STR,
 	M_FIND_HEX,
@@ -8850,15 +9620,39 @@ static const struct {
 	int         ctx;
 	int         group;      /* a rule is drawn where this changes */
 } menu_item[M_COUNT] = {
+	/*
+	 * "Copy", not "Copy disassembly".
+	 *
+	 * It only ever appears in the disassembly panel, so the noun would be
+	 * the panel's own name repeated back at the reader - and the item below
+	 * it is "Copy hex", which is the one that DOES need saying because it
+	 * copies something other than what is selected on screen.
+	 */
+	{ "Copy",                 4, 0 },
 	{ "Copy ASCII",           1, 0 },
-	{ "Copy hex",             1, 0 },
+	{ "Copy hex",         1 | 4, 0 },
 	{ "Copy offset (hex)",    2, 0 },
 	{ "Copy offset (dec)",    2, 0 },
 	{ "Declare as string",    1, 1 },
-	{ "Declare as hex",       1, 1 },
-	{ "Go to",                3, 2 },
-	{ "Find string",          3, 2 },
-	{ "Find hex",             3, 2 }
+	{ "Declare as hex",   1 | 4, 1 },
+	/*
+	 * On the bytes and not on the offset column, and in its own group.
+	 *
+	 * It answers the question the other two do not: those turn a selection
+	 * into a signature, this one asks what the selection DOES. It is also
+	 * the only way into the panel for bytes with no region behind them - a
+	 * payload lifted out of an encoder is one flat run and no CODE row
+	 * exists to move to - which is the case it earns its place on.
+	 */
+	{ "View disassembly",     1, 2 },
+	{ "Go to",                3, 3 },
+	/*
+	 * Offered in the panel too: looking at an instruction and wanting to
+	 * find the next place those bytes appear is the same question asked
+	 * from a different pane.
+	 */
+	{ "Find string",      3 | 4, 3 },
+	{ "Find hex",         3 | 4, 3 }
 };
 
 #define MENU_W 24
@@ -8872,6 +9666,23 @@ static int menu_enabled(struct view *v, int a)
 {
 	if (!menu_shown(v, a))
 		return 0;
+	if (a == M_COPY_DISASM)
+		return v->dis_open && v->dis_have && v->dis_lines > 0;
+	if (a == M_DISASM) {
+		struct object *ob = cur_obj(v);
+
+		/*
+		 * No selection needed. With one it opens on those bytes; with
+		 * none it opens on the region, which is what the menu bar's own
+		 * item does - and a reader who right-clicks the pane to ask
+		 * "what is this code" should not have to select something first
+		 * to be allowed to ask.
+		 */
+		if (!ob || !ob->buf.p || !v->rgn_len)
+			return 0;
+		return !ob->fmt || ob->ctx.arch == KOF_ARCH_X86 ||
+		       ob->ctx.arch == KOF_ARCH_X86_64;
+	}
 	if (a == M_COPY_ASCII || a == M_COPY_HEX)
 		return v->sel_a != KOF_BROKEN;
 	if (a == M_COPY_OFF_HEX || a == M_COPY_OFF_DEC)
@@ -9187,6 +9998,51 @@ static void copy_osc52(const char *bytes, size_t n)
 	copy_take(bytes, n);
 	g_clip_via = copy_extern(bytes, n);
 }
+
+/*
+ * The picked lines, into the clipboard.
+ *
+ * Its own function rather than a branch of menu_run, because the keyboard
+ * reaches it too and menu_run answers a question the keyboard has not asked:
+ * whether the item is SHOWN, which depends on a menu being open. Routing Ctrl+C
+ * through it copied nothing at all - the menu context is zero when no menu is
+ * up - and the failure was silent, which is the worst kind for a copy.
+ */
+static void dis_copy(struct view *v)
+{
+	struct out d = { 0 };
+	int r, rows = 0;
+
+	if (!v->dis_open || !v->dis_have || v->dis_lines <= 0)
+		return;
+	/*
+	 * Exactly the characters that are lit, and the row break between them.
+	 *
+	 * Not the whole of each row: the selection is a text selection, so
+	 * copying more than was highlighted would put something in the
+	 * clipboard the reader can see they did not pick.
+	 */
+	for (r = 0; r < v->dis_lines; r++) {
+		int len = (int)strlen(v->dis_line[r]);
+		int from, to;
+
+		if (!dis_cols(v, v->dis_line_at[r], v->dis_line_len[r],
+				      len, &from, &to))
+			continue;
+		if (rows)
+			out_str(&d, "\n");
+		out_add(&d, v->dis_line[r] + from, (size_t)(to - from));
+		rows++;
+	}
+	if (d.n) {
+		copy_osc52(d.p, d.n);
+		snprintf(v->act_msg, sizeof v->act_msg, "Copied %d line(s)",
+			 rows);
+		v->act_ok = 1;
+	}
+	free(d.p);
+}
+
 
 /*
  * Say where the bytes went.
@@ -9523,6 +10379,33 @@ static void menu_run(struct view *v, int a)
 		v->menu_open = 0;
 		return;
 	}
+	if (a == M_COPY_DISASM) {
+		dis_copy(v);
+		v->menu_open = 0;
+		return;
+	}
+	if (a == M_DISASM) {
+		v->dis_open = 0;                /* so the toggle opens */
+		if (v->sel_a == KOF_BROKEN) {
+			/* Nothing picked: the whole region, unpinned, exactly
+			 * as the menu bar opens it. */
+			dis_toggle(v, 0, KOF_BROKEN);
+		} else {
+			uint64_t a0 = v->sel_a < v->sel_b ? v->sel_a
+							  : v->sel_b;
+			uint64_t b0 = v->sel_a < v->sel_b ? v->sel_b
+							  : v->sel_a;
+
+			/*
+			 * Pinned to the selection, so scrolling the hex no
+			 * longer moves it: the reader asked about THESE bytes.
+			 * Closing and reopening from the menu unpins it again.
+			 */
+			dis_toggle(v, a0, b0 - a0 + 1u);
+		}
+		v->menu_open = 0;
+		return;
+	}
 	if (a == M_FIND_STR || a == M_FIND_HEX) {
 		v->find_hex = a == M_FIND_HEX;
 		v->find[0] = 0;
@@ -9690,11 +10573,35 @@ static void redraw(struct view *v)
 	under = !v->prop_open || wiped || !g_prop_drawn;
 	g_prop_drawn = v->prop_open;
 
+	/*
+	 * The panel's height, settled before anything is drawn because every
+	 * geometry helper below reads it. Half of what the hex column has, and
+	 * never so much that the hex is left with less than the panel.
+	 */
+	if (v->dis_open) {
+		int room = hex_bot() - hex_top() + 1;
+
+		dis_follow_hex(v);
+		int want_rows = room / 2;
+
+		if (want_rows < DIS_MIN_ROWS)
+			want_rows = DIS_MIN_ROWS;
+		/* Two rows for the hex to keep, plus the heading. */
+		if (want_rows > room - 3)
+			want_rows = room - 3;
+		g_disasm_rows = want_rows > 0 ? want_rows : 0;
+		if (!g_disasm_rows)
+			v->dis_open = 0;   /* nowhere to put it */
+	} else {
+		g_disasm_rows = 0;
+	}
+
 	out_str(&o, "\033[?2026h");
 	if (under) {
 		draw_frame(&o, v);
 		draw_tree(&o, v);
 		draw_hex(&o, v);
+		draw_disasm(&o, v);
 		draw_decl(&o, v);
 		draw_marker_line(&o, v);
 		if (v->show_list)
@@ -9760,7 +10667,7 @@ static int byte_under(struct view *v, int row, int col, uint64_t *out)
 	int k;
 	uint64_t at;
 
-	if (row < hex_top() || row > hex_bot())
+	if (row < hex_top() || row > hex_last())
 		return 0;
 	if (col >= hexs && col < hexs + 3 * per)
 		k = (col - hexs) / 3;
@@ -10117,6 +11024,12 @@ enum bar_item {
 	 * will happen rather than the state that is. See bar_label.
 	 */
 	BI_UNPACKER,
+	/*
+	 * A toggle rather than two items. The label says which way it goes, the
+	 * same way BI_UNPACKER does - see bar_label - because a menu that offers
+	 * "Show" and "Hide" side by side always has one of them wrong.
+	 */
+	BI_DISASM,
 	BI_REBUILD,
 	BI_NEXT, BI_PREV,
 	BI_KEYS, BI_ABOUT,
@@ -10141,6 +11054,8 @@ static const struct {
 	{ "Emu unpacker",      BM_ANALYSIS, BI_DUMP },
 	/* Replaced at draw time by the mode's own wording - see bar_label. */
 	{ "Use ... unpacker",  BM_ANALYSIS, -1 },
+	/* Replaced at draw time - see bar_label. */
+	{ "Disassembly",       BM_ANALYSIS, -1 },
 	{ "Rebuild database",  BM_ANALYSIS, -1 },
 	/*
 	 * "Next" and "Previous", not "Next file" and "Previous file": the menu
@@ -10188,6 +11103,9 @@ static const char *bar_label(struct view *v, int i)
 		(void)v;
 		return "Use Emu unpacker";
 	}
+	/* Says which way the toggle goes, for the reason above. */
+	if (i == BI_DISASM)
+		return v->dis_open ? "Hide disassembly" : "Show disassembly";
 	return bar_item[i].label;
 }
 
@@ -10234,6 +11152,21 @@ static int bar_enabled(struct view *v, int i)
 		 */
 		return v->path && v->path[0] && !draft_edited(v);
 	case BI_UNPACKER:  return v->path && v->path[0] && !draft_edited(v);
+	/*
+	 * x86 only, because bddisasm decodes x86 and nothing else - offering it
+	 * on an ARM object would print an answer that is wrong in a way a reader
+	 * cannot see. An object with no format at all IS offered: raw bytes out
+	 * of an encoder are exactly what this is for, and the mode is then the
+	 * reader's to pick.
+	 */
+	case BI_DISASM: {
+		struct object *ob = cur_obj(v);
+
+		if (!ob || !ob->buf.p || !v->rgn_len)
+			return 0;
+		return !ob->fmt || ob->ctx.arch == KOF_ARCH_X86 ||
+		       ob->ctx.arch == KOF_ARCH_X86_64;
+	}
 	case BI_DASH:      return 1;
 	/* Needs a file to step from, and nothing the reader typed that would be
 	 * lost - moving on is the one action here that throws work away. */
@@ -11908,6 +12841,7 @@ static void bar_run(struct view *v, int i)
 	case BI_DUMP_STATIC: dump_all(v, 0); break;
 	case BI_DUMP_EMU:    dump_all(v, 1); break;
 	case BI_UNPACKER: emu_here(v); break;
+	case BI_DISASM:   dis_toggle(v, 0, KOF_BROKEN); break;
 	case BI_NEXT:    open_step(v, +1); break;
 	case BI_PREV:    open_step(v, -1); break;
 	case BI_REBUILD: rebuild_db(v); break;
@@ -12289,7 +13223,7 @@ static void bar_to(struct view *v, int which)
 	if (which == 1) {                       /* the hex pane */
 		uint64_t per = (uint64_t)(v->per > 0 ? v->per : 16);
 
-		top = hex_top(); bot = hex_bot();
+		top = hex_top(); bot = hex_last();
 		if (bot <= top)
 			return;
 		max = hex_max(v);
@@ -12330,9 +13264,11 @@ static void bar_to(struct view *v, int which)
 /* Is the pointer on a scrollbar, and which. 0 for none. */
 static int bar_under(struct view *v)
 {
-	if (g_my >= hex_top() && g_my <= hex_bot()) {
+	if (g_my >= hex_top() && g_my <= hex_last()) {
 		if (g_mx == g_cols && v->rgn_len)
 			return 1;
+	}
+	if (g_my >= hex_top() && g_my <= hex_bot()) {
 		if (g_mx == TREE_W)
 			return 2;
 	}
@@ -12517,8 +13453,11 @@ static void click(struct view *v, int rclick)
 	 * button that duplicates another teaches nothing and surprises whoever
 	 * expected a menu.
 	 */
-	if (rclick && !(g_my >= hex_top() && g_my <= hex_bot() &&
-			g_mx > TREE_W && !v->show_list && !v->menu_open))
+	if (rclick && !((g_my >= hex_top() && g_my <= hex_last() &&
+			 g_mx > TREE_W && !v->show_list && !v->menu_open) ||
+			(g_disasm_rows && g_my >= dis_top() &&
+			 g_my <= hex_bot() && g_mx > TREE_W &&
+			 !v->show_list && !v->menu_open)))
 		return;
 
 	/*
@@ -12664,7 +13603,7 @@ static void click(struct view *v, int rclick)
 			if (which == 1) {
 				uint64_t per = (uint64_t)(v->per > 0 ? v->per
 								    : 16);
-				top = hex_top(); bot = hex_bot();
+				top = hex_top(); bot = hex_last();
 				total = v->rgn_len; off = v->rgn_at;
 				shown = (uint64_t)(bot - top + 1) * per;
 			} else if (which == 2) {
@@ -12688,6 +13627,95 @@ static void click(struct view *v, int rclick)
 	/* Pressing the divider starts a resize; the drag handler does the rest.
 	 * Tested before anything else claims the row, and only when there is a
 	 * panel to resize. */
+	/*
+	 * A press on a panel ROW starts a line selection.
+	 *
+	 * The terminal's own selection is not available here - the viewer holds
+	 * the mouse, which is what lets it do everything else - so copying a few
+	 * instructions out has to be something the panel does itself.
+	 */
+	if (g_disasm_rows && g_my >= dis_top() && g_my <= hex_bot() &&
+	    g_mx > TREE_W) {
+		int idx = g_my - dis_top();
+
+		/*
+		 * The panel's own menu, which is a SHORT one.
+		 *
+		 * ctx 4 rather than 1|4: everything the hex pane offers is not
+		 * wanted here. "View disassembly" would open what is already
+		 * open; copying the ASCII of an instruction is not a thing
+		 * anybody does. What is left is copying the text, copying the
+		 * bytes behind it, declaring those bytes, and searching - which
+		 * are the four questions the selection can answer.
+		 */
+		if (rclick) {
+			if (!v->dis_have && idx < v->dis_lines) {
+				int ln = (int)strlen(v->dis_line[idx]);
+
+				v->dis_a_at = v->dis_b_at = v->dis_line_at[idx];
+				v->dis_ac = 0;
+				v->dis_bc = ln > 0 ? ln - 1 : 0;
+				v->dis_have = 1;
+				dis_sync_bytes(v);
+			}
+			v->menu_ctx = 4;
+			v->menu_off = v->sel_a != KOF_BROKEN
+				      ? view_map(v, v->sel_a, 0) : 0;
+			menu_open_at(v, g_my, g_mx);
+			return;
+		}
+
+		/*
+		 * Only where there is text.
+		 *
+		 * A press past the end of a line used to pick the whole line,
+		 * so clicking the empty half of the panel lit a row for no
+		 * reason anybody could see. The panel is text, and text is
+		 * selected where it is.
+		 */
+		if (idx < v->dis_lines &&
+		    g_mx >= TREE_W + 3 &&
+		    g_mx < TREE_W + 3 + (int)strlen(v->dis_line[idx])) {
+			int c = g_mx - (TREE_W + 3);
+
+			v->dis_a_at = v->dis_b_at = v->dis_line_at[idx];
+			v->dis_ac = v->dis_bc = c;
+			v->dis_have = 1;
+			v->dis_dragging = 1;
+			v->act_msg[0] = 0;
+			dis_sync_bytes(v);
+		} else {
+			/* Somewhere with nothing on it: the selection goes,
+			 * rather than being left lit behind the click. */
+			v->dis_have = 0;
+			v->dis_dragging = 0;
+		}
+		return;
+	}
+
+	/*
+	 * The disassembly panel's heading: a close button and a mode switch.
+	 *
+	 * Before the hex hit test, because the heading sits inside the hex
+	 * column and a click there is about the panel rather than about a byte.
+	 */
+	if (g_disasm_rows && g_my == dis_top() - 1 && g_mx > TREE_W) {
+		if (g_mx >= g_cols - 3) {
+			v->dis_open = 0;
+			g_disasm_rows = 0;
+			v->dis_have = 0;
+			return;
+		}
+		/* The mode, where it is written. Anywhere else on the heading
+		 * does nothing, so a stray click on a rule is not a state
+		 * change nobody asked for. */
+		if (g_mx >= TREE_W + 5 && g_mx <= TREE_W + 24) {
+			v->dis_bits = v->dis_bits == 64 ? 32 : 64;
+			return;
+		}
+		return;
+	}
+
 	if (g_decl_rows && g_my == hex_bot() + 1) {
 		v->sizing = 1;
 		return;
@@ -13085,7 +14113,7 @@ static void click(struct view *v, int rclick)
 		v->show_list = 1;
 		return;
 	}
-	if (g_my >= hex_top() && g_my <= hex_bot() && g_mx > TREE_W) {
+	if (g_my >= hex_top() && g_my <= hex_last() && g_mx > TREE_W) {
 		uint64_t at;
 
 		v->pane = 1;
@@ -13119,6 +14147,7 @@ static void click(struct view *v, int rclick)
 			v->last_click = at;
 			v->last_click_ms = now;
 			v->sel_a = v->sel_b = at;
+			v->sel_from_dis = 0;    /* the hex pane owns it now */
 			v->dragging = 1;
 			/*
 			 * A deliberate act outranks a stale confirmation.
@@ -13137,6 +14166,18 @@ static void click(struct view *v, int rclick)
 				v->dragging = 0;
 				v->dragged = 1;
 			}
+		} else {
+			/*
+			 * Inside the pane but on nothing - past the ASCII
+			 * column, or the gap between the two halves. The
+			 * selection goes, for the reason the disassembly
+			 * panel's does: bytes left lit behind a click that
+			 * chose nothing are bytes the reader has to remember
+			 * they did not choose.
+			 */
+			v->sel_a = v->sel_b = KOF_BROKEN;
+			v->dragging = 0;
+			v->dragged = 0;
 		}
 		return;
 	}
@@ -13272,7 +14313,21 @@ static int field_key(struct view *v, char *buf, size_t cap, int k)
 
 static int handle(struct view *v, int k)
 {
-	int page = hex_bot() - hex_top();
+	int page = hex_last() - hex_top();
+
+	/*
+	 * Ctrl+C with a run of disassembly picked.
+	 *
+	 * First, because it is about a selection the reader can see, and every
+	 * other owner of the keyboard below either has no selection or has its
+	 * own copy already. The keyboard equivalent of the menu item, and the
+	 * shortcut anybody tries first on highlighted text.
+	 */
+	if (k == 0x03 && v->dis_open && v->dis_have &&
+	    !v->prop_open && !v->find_open && !v->edit) {
+		dis_copy(v);
+		return 1;
+	}
 
 	/*
 	 * The properties page owns the keyboard while it is up.
@@ -13780,16 +14835,55 @@ static int handle(struct view *v, int k)
 			v->decl_cap = (uint32_t)want;
 			break;
 		}
+		if (v->dis_dragging && g_disasm_rows) {
+			int idx = g_my - dis_top();
+			int c = g_mx - (TREE_W + 3);
+			int len;
+
+			if (idx < 0)
+				idx = 0;
+			if (idx >= v->dis_lines)
+				idx = v->dis_lines - 1;
+			if (idx < 0)
+				break;
+			/* Clamped to the row's own text: a pointer past the end
+			 * of a short line selects that line to its end, which is
+			 * what dragging over ragged text does everywhere. */
+			len = (int)strlen(v->dis_line[idx]);
+			if (c < 0)
+				c = 0;
+			if (c > len - 1)
+				c = len > 0 ? len - 1 : 0;
+			v->dis_b_at = v->dis_line_at[idx];
+			v->dis_bc = c;
+			dis_sync_bytes(v);
+			break;
+		}
 		if (v->dragging && byte_under(v, g_my, g_mx, &at)) {
 			if (at != v->sel_a)
 				v->dragged = 1;
 			v->sel_b = at;
+			v->sel_from_dis = 0;
 		}
 		break;
 	}
 	case K_RELEASE:
 		v->sizing = 0;
 		v->bar_drag = 0;
+		/*
+		 * The drag ENDS and the selection STAYS.
+		 *
+		 * The same shape as the hex pane, which is the point: dragging
+		 * out a run picks it, and what to do with it is a separate act
+		 * through the same right-click menu. Copying on release was
+		 * tried and is wrong here - it makes one pane in the tool
+		 * behave unlike the other, and it changes the clipboard on a
+		 * gesture that in every other pane changes nothing.
+		 */
+		if (v->dis_dragging) {
+			v->dis_dragging = 0;
+			break;
+		}
 		if (v->menu_open)
 			break;
 		/*

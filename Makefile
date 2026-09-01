@@ -456,9 +456,12 @@ $(OUT)/bin/kofexamine$(EXE): $(EXAMINE_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 # kofinspect, and what differs is only how a pane and a line are drawn.
 VIEWER_SRC := kofexamine/kofviewer.c kofexamine/kofinspect.c
 
+# EMU_INC because the viewer disassembles: bddisasm's definitions are already
+# inside $(LIB) - the emulator put them there - so what is missing is only the
+# header, and linking a second copy of the decoder would be the alternative.
 $(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(VIEWER_SRC) $(LIB) -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(EMU_INC) $(VIEWER_SRC) $(LIB) -o $@ $(LDFLAGS)
 
 # ----------------------------------------------------- the database toolchain
 #

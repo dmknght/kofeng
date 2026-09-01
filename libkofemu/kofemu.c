@@ -157,6 +157,11 @@ struct kof_emu {
 	 * row. See SYS_READ: a prompt that ignores EOF asks forever. */
 	uint32_t stdin_eof;
 
+	/* The address of the last x87 instruction that was not a control one.
+	 * FNSTENV reports it, and that report is the only reason x87 is here at
+	 * all - see the note on the FPU cases in the run loop. */
+	uint64_t fpu_rip;
+
 	/* When a page was last written to for the first time - the clock the
 	 * idle test below runs on. */
 	uint64_t last_new_page;
@@ -1651,6 +1656,79 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		case ND_INS_PREFETCHT2: case ND_INS_PREFETCHNTA:
 		case ND_INS_PREFETCHW:
 			break;
+
+		/*
+		 * X87 AS A WAY TO ASK "WHERE AM I", WHICH IS ALL IT IS USED FOR HERE.
+		 *
+		 * A 32 bit shellcode encoder cannot say `lea eax, [rip]` - there is
+		 * no rip relative addressing in 32 bit mode - so it needs another way
+		 * to learn its own address. The classic answer, and the one every
+		 * Metasploit x86 encoder uses, is the FPU: execute any x87
+		 * instruction, then FNSTENV, which writes out an environment block
+		 * whose twelfth byte onward holds the address of that instruction.
+		 * Pop it and you have a pointer to your own code.
+		 *
+		 *     dd c3              ffree  st(3)      <- a marker, nothing else
+		 *     d9 74 24 f4        fnstenv [esp-0xc]
+		 *     5a                 pop    edx        <- edx = &ffree
+		 *
+		 * So what these need is the ADDRESS, not the arithmetic. The stack
+		 * is never read, no value is ever loaded, and the encoders here get
+		 * through their whole decryption loop without one floating point
+		 * operation. Implementing x87 registers to serve them would be a
+		 * numeric core written for callers that do no numerics.
+		 *
+		 * Listed one by one rather than as a range, because the ones that DO
+		 * compute have to keep reaching the unsupported path: an object that
+		 * really uses the FPU must stop and say so rather than run on with
+		 * every result silently wrong. These are the ones a GetPC sequence
+		 * picks from - they alter the register stack's tags and nothing a
+		 * decoder reads - and the arithmetic ones are deliberately absent.
+		 *
+		 * Measured: two of the seven layer samples here stop on their first
+		 * instruction without this, one on FFREE and one on FCMOVBE.
+		 */
+		case ND_INS_FFREE:  case ND_INS_FFREEP:
+		case ND_INS_FNOP:
+		case ND_INS_FDECSTP: case ND_INS_FINCSTP:
+		case ND_INS_FXCH:
+		case ND_INS_FCMOVB:  case ND_INS_FCMOVBE: case ND_INS_FCMOVE:
+		case ND_INS_FCMOVNB: case ND_INS_FCMOVNBE: case ND_INS_FCMOVNE:
+		case ND_INS_FCMOVU:  case ND_INS_FCMOVNU:
+		case ND_INS_FLDZ: case ND_INS_FLD1:
+		case ND_INS_FABS: case ND_INS_FCHS:
+			e->fpu_rip = e->rip;
+			break;
+
+		/*
+		 * The environment block, and the one field in it that matters.
+		 *
+		 * 28 bytes in 32 bit protected mode, and the address of the last
+		 * non-control x87 instruction sits at offset 12. Everything else is
+		 * written as zero: a control word, a status word and tag bits that
+		 * nothing here maintains, and inventing values for them would be
+		 * three more numbers a reader could mistake for real state.
+		 *
+		 * FNSTENV does not check for pending exceptions, which is why the
+		 * encoders use it rather than FSTENV, and why nothing is checked
+		 * here either.
+		 */
+		case ND_INS_FNSTENV: {
+			uint8_t env[28];
+			uint64_t at;
+
+			memset(env, 0, sizeof env);
+			env[12] = (uint8_t)(e->fpu_rip);
+			env[13] = (uint8_t)(e->fpu_rip >> 8);
+			env[14] = (uint8_t)(e->fpu_rip >> 16);
+			env[15] = (uint8_t)(e->fpu_rip >> 24);
+			if (ix.Operands[0].Type != ND_OP_MEM ||
+			    !ea_of(e, &ix, &ix.Operands[0], &at))
+				goto unsupported;
+			if (!mem_wr(e, at, env, sizeof env))
+				goto fault;
+			break;
+		}
 
 		/*
 		 * A clock that only moves forward. Real time would make a run
