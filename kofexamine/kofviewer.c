@@ -426,6 +426,49 @@ static const char *dis_token_colour(const char *t, size_t n)
 }
 
 /*
+ * SHORTEN THE IMMEDIATES, IN PLACE.
+ *
+ * bddisasm prints them at the operand's full width, so a push of 34 comes out
+ * as 0x0000000000000022 - eighteen characters of which two carry the value. On a
+ * row that also holds an offset and seven bytes of hex that is most of the line
+ * spent on zeroes, and the number a reader is looking for is the hardest thing
+ * on it to find.
+ *
+ * Done to the TEXT rather than while painting, so the clipboard gets the same
+ * short form the screen does. Leading zeroes only: nothing else about the number
+ * changes, and a value that really is zero keeps one digit rather than becoming
+ * an empty 0x.
+ */
+static void dis_shorten(char *t)
+{
+	char *r = t, *w = t;
+
+	while (*r) {
+		if (r[0] == '0' && r[1] == 'x') {
+			char *d = r + 2, *keep;
+
+			*w++ = *r++;            /* 0 */
+			*w++ = *r++;            /* x */
+			while (*d == '0')
+				d++;
+			keep = d;
+			while ((*keep >= '0' && *keep <= '9') ||
+			       (*keep >= 'a' && *keep <= 'f') ||
+			       (*keep >= 'A' && *keep <= 'F'))
+				keep++;
+			if (keep == d)
+				*w++ = '0';     /* the value was zero */
+			while (d < keep)
+				*w++ = *d++;
+			r = keep;
+			continue;
+		}
+		*w++ = *r++;
+	}
+	*w = 0;
+}
+
+/*
  * Paint one instruction's text: the mnemonic, then its operands token by token.
  *
  * Emitted into the frame directly rather than built into a string, because the
@@ -1339,6 +1382,32 @@ struct view {
 	 * it last saw of the two things that can move it.
 	 */
 	uint64_t    dis_follow;
+	/*
+	 * HOW FAR THE PANEL SITS FROM THE HEX SCROLL, and it is a CONSTANT.
+	 *
+	 * The panel reads from rgn_at + dis_bias, so scrolling the hex moves it
+	 * by exactly as much - the two are locked together whatever the bias is.
+	 * Selecting bytes is what sets the bias: enough to bring the selected run
+	 * onto these rows. Nothing else changes it, so scrolling away and back
+	 * puts the selection back where it was.
+	 *
+	 * This replaced four attempts that each tied the panel's POSITION to the
+	 * selection instead of to the scroll. Every one of them broke one of the
+	 * two things asked of it - either the panel stopped following the scroll,
+	 * or the highlight left the rows and did not come back. A bias is the
+	 * thing that was missing: an offset can satisfy both because it is not a
+	 * position at all.
+	 */
+	int64_t     dis_bias;
+	/*
+	 * How many bytes the panel's rows covered last frame.
+	 *
+	 * Instruction lengths are only known after decoding, so how far down the
+	 * object these rows reach cannot be computed before drawing them. The
+	 * hex pane uses it to mark which of ITS rows the panel is showing - see
+	 * the note in draw_hex.
+	 */
+	uint64_t    dis_span_bytes;
 
 	/*
 	 * WHO SET THE BYTE SELECTION, and it has to be recorded because the
@@ -2654,6 +2723,10 @@ static int decl_kind(struct view *v, uint64_t off)
 	return 0;
 }
 
+/* Defined with the disassembly panel further down; the hex pane needs it to
+ * mark which of its rows the panel is showing. */
+static uint64_t dis_start(const struct view *v);
+
 static void draw_hex(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
@@ -2682,6 +2755,35 @@ static void draw_hex(struct out *o, struct view *v)
 		 * and on a terminal that ignores synchronized output that blank
 		 * is on screen: holding page-down strobed the whole pane.
 		 */
+		/*
+		 * WHICH HEX ROWS THE DISASSEMBLY IS SHOWING, marked on the
+		 * divider between the panes.
+		 *
+		 * This exists because the two panes cannot cover the same
+		 * ground. Seventeen rows of sixteen bytes is about 270; the same
+		 * seventeen rows of ONE INSTRUCTION each is about sixty. So the
+		 * panel shows roughly the top quarter of what the hex shows, and
+		 * a run selected further down the screen genuinely has no row in
+		 * the panel to be lit on - not because anything was lost but
+		 * because it is not being disassembled.
+		 *
+		 * Four attempts were made to hide that with scrolling rules and
+		 * each broke either the sync or the highlight. The mismatch is
+		 * arithmetic and cannot be ruled away, so it is SHOWN instead:
+		 * the bracket says how far the panel reaches, and a reader who
+		 * selects below it can see why nothing lit and scroll until it
+		 * does.
+		 */
+		if (g_disasm_rows && v->dis_span_bytes) {
+			uint64_t ds = dis_start(v);
+			int covered = at + (uint64_t)(unsigned)per > ds &&
+				      at < ds + v->dis_span_bytes;
+
+
+			out_at(o, row, TREE_W + 1);
+			out_str(o, covered ? A_D_MNEM "\xe2\x94\x82" A_OFF
+					   : A_DIM "|" A_OFF);
+		}
 		out_at(o, row, col);
 		if (at >= v->rgn_len) {
 			out_str(o, "\033[K");
@@ -7624,35 +7726,54 @@ static unsigned dis_gather(struct view *v, uint64_t at, uint8_t *buf, unsigned n
  */
 static void dis_follow_hex(struct view *v)
 {
+	int64_t at;
+
 	if (v->dis_len != KOF_BROKEN)
 		return;                         /* pinned by a menu action */
 
 	/*
-	 * A HEX SELECTION IS A PIN, and with nothing selected the window is the
-	 * scroll's.
+	 * LOCKED TO THE SCROLL, OFFSET BY THE SELECTION.
 	 *
-	 * The panel holds about sixty bytes where the hex pane holds nearly
-	 * three hundred, and that is what forces the choice. Follow the scroll
-	 * and a selected instruction leaves this panel on the first notch while
-	 * the hex still shows its bytes lit - scroll back and it is still gone,
-	 * because the window starts at the top of the scroll and the selection
-	 * is somewhere down the screen. Four attempts at splitting the
-	 * difference each broke one half.
-	 *
-	 * So the rule is the one that can be said in a sentence: while bytes are
-	 * selected, this panel shows them. Scrolling the hex pane moves the hex
-	 * pane. Clicking anywhere with nothing under it drops the selection -
-	 * both panes do that - and the window goes back to following the scroll.
+	 * See dis_bias. The window is the scroll plus a constant, so a notch of
+	 * scroll moves this panel by a notch - always, selection or not - and
+	 * the constant is what keeps a selected run on these rows rather than
+	 * sixty bytes above them.
 	 */
-	if (v->sel_a != KOF_BROKEN && !v->sel_from_dis) {
-		uint64_t lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
+	at = (int64_t)v->rgn_at + v->dis_bias;
+	if (at < 0)
+		at = 0;
+	if ((uint64_t)at > v->rgn_len)
+		at = (int64_t)v->rgn_len;
+	v->dis_follow = (uint64_t)at;
+}
 
-		/* A little before it, so the run has something above it to be
-		 * read against. */
-		v->dis_follow = lo > 16u ? lo - 16u : 0u;
+/*
+ * A new hex selection: set the bias so the run lands on these rows.
+ *
+ * Called where the selection is made rather than tested for every frame,
+ * because it is an EVENT. Testing it per frame is what made the earlier
+ * versions states rather than events, and a state cannot be told from a
+ * leftover.
+ */
+static void dis_bias_to_sel(struct view *v)
+{
+	uint64_t lo;
+
+	if (!v->dis_open || v->dis_len != KOF_BROKEN)
+		return;
+	if (v->sel_a == KOF_BROKEN) {
+		v->dis_bias = 0;                /* nothing picked: plain sync */
 		return;
 	}
-	v->dis_follow = v->rgn_at;
+	lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
+	/* A little before it, so the run has something above it to be read
+	 * against - an instruction on the first row with nothing before it
+	 * reads as the start of something, and it usually is not. */
+	if (lo > 16u)
+		lo -= 16u;
+	else
+		lo = 0;
+	v->dis_bias = (int64_t)lo - (int64_t)v->rgn_at;
 }
 
 static uint64_t dis_start(const struct view *v)
@@ -7855,9 +7976,11 @@ static void draw_disasm(struct out *o, struct view *v)
 				w += (unsigned)snprintf(line + w,
 							sizeof line - w, "   ");
 			NdToText(&ix, view_map(v, at, 0), sizeof text, text);
+			dis_shorten(text);
 			snprintf(line + w, sizeof line - w, "%s", text);
 			at += ix.Length;
 		}
+		v->dis_span_bytes = at - dis_start(v);
 		if (v->dis_lines < (int)(sizeof v->dis_line /
 					 sizeof v->dis_line[0])) {
 			v->dis_line_at[v->dis_lines]  = at0;
@@ -8017,6 +8140,8 @@ static void dis_toggle(struct view *v, uint64_t at, uint64_t len)
 	/* Somewhere sane for the first frame; dis_follow_hex settles it from
 	 * there. */
 	v->dis_follow = len == KOF_BROKEN ? v->rgn_at : at;
+	v->dis_bias = 0;
+	dis_bias_to_sel(v);
 }
 
 static void draw_decl(struct out *o, struct view *v)
@@ -14148,6 +14273,7 @@ static void click(struct view *v, int rclick)
 			v->last_click_ms = now;
 			v->sel_a = v->sel_b = at;
 			v->sel_from_dis = 0;    /* the hex pane owns it now */
+			dis_bias_to_sel(v);
 			v->dragging = 1;
 			/*
 			 * A deliberate act outranks a stale confirmation.
@@ -14178,6 +14304,7 @@ static void click(struct view *v, int rclick)
 			v->sel_a = v->sel_b = KOF_BROKEN;
 			v->dragging = 0;
 			v->dragged = 0;
+			dis_bias_to_sel(v);
 		}
 		return;
 	}
@@ -14864,6 +14991,10 @@ static int handle(struct view *v, int k)
 				v->dragged = 1;
 			v->sel_b = at;
 			v->sel_from_dis = 0;
+			/* The bias tracks the START of the run, so dragging
+			 * downward does not drag the panel with it - the run's
+			 * head stays where the reader can see it. */
+			dis_bias_to_sel(v);
 		}
 		break;
 	}
@@ -14917,6 +15048,7 @@ static int handle(struct view *v, int k)
 			break;
 		}
 		v->sel_a = v->sel_b = KOF_BROKEN;
+		dis_bias_to_sel(v);
 		v->show_list = 0;
 		v->list_depth = 0;
 		break;
@@ -14966,6 +15098,38 @@ static int handle(struct view *v, int k)
 					*h += 4u;
 				else
 					*h = *h > 4u ? *h - 4u : 0u;
+			}
+			break;
+		}
+		/*
+		 * OVER THE DISASSEMBLY PANEL, THE WHEEL MOVES THE PANEL.
+		 *
+		 * This is the way out of a conflict that cannot be resolved by
+		 * any rule: the hex pane shows about 270 bytes and the panel
+		 * about 60, so a selection more than a few hex rows down has no
+		 * row in the panel while the two are locked together. Every
+		 * automatic answer either stopped the panel following the scroll
+		 * or let the highlight leave the rows.
+		 *
+		 * So the reader gets the wheel. The panel follows the hex by
+		 * default and the bracket on the divider says how far it
+		 * reaches; pointing at the panel and turning the wheel moves the
+		 * panel alone, by one instruction at a time. Nothing has to
+		 * guess what was meant.
+		 */
+		if (g_disasm_rows && g_my >= dis_top() && g_my <= hex_bot() &&
+		    g_mx > TREE_W) {
+			/* Four bytes: about one instruction, and the same step
+			 * whichever way the wheel turns. */
+			v->dis_bias += down ? 4 : -4;
+			{
+				int64_t at = (int64_t)v->rgn_at + v->dis_bias;
+
+				if (at < 0)
+					v->dis_bias = -(int64_t)v->rgn_at;
+				else if ((uint64_t)at >= v->rgn_len)
+					v->dis_bias = (int64_t)v->rgn_len -
+						      (int64_t)v->rgn_at;
 			}
 			break;
 		}
