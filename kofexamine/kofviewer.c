@@ -1399,15 +1399,6 @@ struct view {
 	 * position at all.
 	 */
 	int64_t     dis_bias;
-	/*
-	 * How many bytes the panel's rows covered last frame.
-	 *
-	 * Instruction lengths are only known after decoding, so how far down the
-	 * object these rows reach cannot be computed before drawing them. The
-	 * hex pane uses it to mark which of ITS rows the panel is showing - see
-	 * the note in draw_hex.
-	 */
-	uint64_t    dis_span_bytes;
 
 	/*
 	 * WHO SET THE BYTE SELECTION, and it has to be recorded because the
@@ -2282,6 +2273,18 @@ static int bar_thumb(int top, int bot, uint64_t off, uint64_t total,
 	return t0;
 }
 
+/*
+ * A BAR, DRAWN AS ONE SHAPE IN TWO WEIGHTS.
+ *
+ * It was '#' for the thumb and ':' for the track - two different characters, so
+ * the eye read it as a column of punctuation rather than as a rule with a
+ * position on it. One character throughout, bright where the thumb is and dim
+ * elsewhere, reads as what it is; and it is the same shape the panes are divided
+ * by, so a vertical line means the same thing everywhere on the screen.
+ *
+ * Every pane's bar comes through here, so there is one style rather than one per
+ * caller.
+ */
 static void scrollbar(struct out *o, int col, int top, int bot,
 		      uint64_t off, uint64_t total, uint64_t shown)
 {
@@ -2292,10 +2295,9 @@ static void scrollbar(struct out *o, int col, int top, int bot,
 		return;
 	for (i = 0; i < rows; i++) {
 		out_at(o, top + i, col);
-		if (i >= t0 && i < t0 + t1)
-			out_str(o, A_ID "#" A_OFF);
-		else
-			out_str(o, A_DIM ":" A_OFF);
+		out_str(o, i >= t0 && i < t0 + t1
+			   ? A_BOLD "\xe2\x94\x82" A_OFF
+			   : A_DIM "\xe2\x94\x82" A_OFF);
 	}
 }
 
@@ -2723,10 +2725,6 @@ static int decl_kind(struct view *v, uint64_t off)
 	return 0;
 }
 
-/* Defined with the disassembly panel further down; the hex pane needs it to
- * mark which of its rows the panel is showing. */
-static uint64_t dis_start(const struct view *v);
-
 static void draw_hex(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
@@ -2755,35 +2753,6 @@ static void draw_hex(struct out *o, struct view *v)
 		 * and on a terminal that ignores synchronized output that blank
 		 * is on screen: holding page-down strobed the whole pane.
 		 */
-		/*
-		 * WHICH HEX ROWS THE DISASSEMBLY IS SHOWING, marked on the
-		 * divider between the panes.
-		 *
-		 * This exists because the two panes cannot cover the same
-		 * ground. Seventeen rows of sixteen bytes is about 270; the same
-		 * seventeen rows of ONE INSTRUCTION each is about sixty. So the
-		 * panel shows roughly the top quarter of what the hex shows, and
-		 * a run selected further down the screen genuinely has no row in
-		 * the panel to be lit on - not because anything was lost but
-		 * because it is not being disassembled.
-		 *
-		 * Four attempts were made to hide that with scrolling rules and
-		 * each broke either the sync or the highlight. The mismatch is
-		 * arithmetic and cannot be ruled away, so it is SHOWN instead:
-		 * the bracket says how far the panel reaches, and a reader who
-		 * selects below it can see why nothing lit and scroll until it
-		 * does.
-		 */
-		if (g_disasm_rows && v->dis_span_bytes) {
-			uint64_t ds = dis_start(v);
-			int covered = at + (uint64_t)(unsigned)per > ds &&
-				      at < ds + v->dis_span_bytes;
-
-
-			out_at(o, row, TREE_W + 1);
-			out_str(o, covered ? A_D_MNEM "\xe2\x94\x82" A_OFF
-					   : A_DIM "|" A_OFF);
-		}
 		out_at(o, row, col);
 		if (at >= v->rgn_len) {
 			out_str(o, "\033[K");
@@ -7724,12 +7693,96 @@ static unsigned dis_gather(struct view *v, uint64_t at, uint8_t *buf, unsigned n
  * Neither separated the window from the highlight, which is what a selection in
  * any editor already does.
  */
+/* How many bytes the hex pane is showing. The panel is a window inside this. */
+static uint64_t dis_hex_shown(const struct view *v)
+{
+	uint64_t per = (uint64_t)(v->per > 0 ? v->per : 16);
+
+	return (uint64_t)(hex_last() - hex_top() + 1) * per;
+}
+
+/*
+ * The furthest the panel may be scrolled inside the hex pane's range.
+ *
+ * THE PANEL IS A MAGNIFIER, NOT A SECOND VIEW OF THE FILE. The hex pane shows
+ * about 270 bytes and the panel about 60, so the panel can only ever be looking
+ * at part of what the hex shows - and the part is the reader's to choose. What
+ * it must never do is show bytes the hex pane is not showing: two panes claiming
+ * to be in step while looking at different places is worse than one pane.
+ *
+ * So the offset is bounded at both ends: zero is the top of the hex view, and
+ * the maximum is as far down as it can go while its last row is still inside it.
+ */
+/*
+ * THE SPAN THE CONTROL USES, AND WHY IT IS NOT THE MEASURED ONE.
+ *
+ * How many bytes the rows actually cover is known only after decoding them, and
+ * it changes as the panel scrolls: seventeen instructions might be 52 bytes here
+ * and 68 there. Feeding that into the scrollbar and into the clamp made both
+ * unstable - the thumb grew and shrank while scrolling, the maximum offset moved
+ * under the offset, and the offset was pushed back down by the clamp on the next
+ * frame. That is what "the thumb stretches and the position slides back" is.
+ *
+ * A control has to be steady to be usable, so it is sized from the ROWS instead:
+ * four bytes per row, which is close to the average x86 instruction and, more to
+ * the point, never changes. The panel may reach a few bytes further or less than
+ * the nominal; that is invisible, while a jumping scrollbar is not.
+ *
+ * The measured value is still kept - dis_span_bytes - and still used for the
+ * bracket in the hex pane, which is a statement about what IS shown rather than
+ * a control.
+ */
+static uint64_t dis_span_of(const struct view *v)
+{
+	int rows = hex_bot() - dis_top() + 1;
+
+	(void)v;
+	return rows > 0 ? (uint64_t)rows * 4u : 64u;
+}
+
+static int64_t dis_max_bias(const struct view *v)
+{
+	uint64_t shown = dis_hex_shown(v), span = dis_span_of(v);
+	int64_t hi = shown > span ? (int64_t)(shown - span) : 0;
+
+	/*
+	 * AND NOT PAST THE END OF THE OBJECT.
+	 *
+	 * The first bound keeps the panel inside what the hex pane shows. Near
+	 * the end of a region that is not enough: the hex pane's range runs off
+	 * the end of the object - it draws blank rows there, which is what a hex
+	 * dump does - and the panel scrolled into that and showed nothing at
+	 * all. Rows of blank in a disassembly read as a bug rather than as the
+	 * end of the data.
+	 *
+	 * So the offset also stops where the last full window of bytes begins.
+	 */
+	if (v->rgn_len > v->rgn_at + span) {
+		int64_t room = (int64_t)(v->rgn_len - v->rgn_at - span);
+
+		if (hi > room)
+			hi = room;
+	} else {
+		hi = 0;
+	}
+	return hi;
+}
+
 static void dis_follow_hex(struct view *v)
 {
-	int64_t at;
+	int64_t at, hi;
 
 	if (v->dis_len != KOF_BROKEN)
 		return;                         /* pinned by a menu action */
+
+	/* Kept inside the hex pane's range, every frame - the range changes with
+	 * the terminal's height and with how much the last instruction covered,
+	 * so a bias that was legal a frame ago need not be now. */
+	hi = dis_max_bias(v);
+	if (v->dis_bias < 0)
+		v->dis_bias = 0;
+	if (v->dis_bias > hi)
+		v->dis_bias = hi;
 
 	/*
 	 * LOCKED TO THE SCROLL, OFFSET BY THE SELECTION.
@@ -7774,6 +7827,16 @@ static void dis_bias_to_sel(struct view *v)
 	else
 		lo = 0;
 	v->dis_bias = (int64_t)lo - (int64_t)v->rgn_at;
+	/*
+	 * Clamped here as well as per frame, because a selection made near the
+	 * bottom of the hex view would otherwise ask the panel to start past the
+	 * end of it - and the reader would be looking at instructions the hex
+	 * pane above is not showing.
+	 */
+	if (v->dis_bias < 0)
+		v->dis_bias = 0;
+	if (v->dis_bias > dis_max_bias(v))
+		v->dis_bias = dis_max_bias(v);
 }
 
 static uint64_t dis_start(const struct view *v)
@@ -7980,7 +8043,6 @@ static void draw_disasm(struct out *o, struct view *v)
 			snprintf(line + w, sizeof line - w, "%s", text);
 			at += ix.Length;
 		}
-		v->dis_span_bytes = at - dis_start(v);
 		if (v->dis_lines < (int)(sizeof v->dis_line /
 					 sizeof v->dis_line[0])) {
 			v->dis_line_at[v->dis_lines]  = at0;
@@ -8080,6 +8142,44 @@ static void draw_disasm(struct out *o, struct view *v)
 			}
 		}
 	}
+	/*
+	 * THE PANEL'S OWN SCROLLBAR, and what it is a bar OVER.
+	 *
+	 * Not the file: the hex pane's range. The panel is a window inside what
+	 * the hex is showing - about sixty bytes of about two hundred and
+	 * seventy - and until this bar was here that was invisible: a reader who
+	 * selected bytes low in the hex pane saw nothing light up and had no way
+	 * to know the panel simply did not reach that far. The bar says how much
+	 * of the hex view is being disassembled and where in it the rows are, and
+	 * it can be dragged.
+	 *
+	 * Drawn only when there is somewhere to scroll to. A full-length thumb
+	 * on a panel that already covers everything is a control that does
+	 * nothing.
+	 */
+	/*
+	 * THE PANEL'S SCROLLBAR.
+	 *
+	 * A bar over the hex pane's range rather than over the file: the panel
+	 * is a window inside what the hex is showing - about sixty bytes of
+	 * nearly three hundred - and without this bar that was invisible, so a
+	 * reader who selected bytes low in the hex pane saw nothing light up and
+	 * had no way to know the panel did not reach that far.
+	 *
+	 * The TOTAL is the range the offset can actually take, not the hex
+	 * pane's whole span. Those differ near the end of a region, where the
+	 * hex pane draws rows past the last byte: measured against the hex span
+	 * the thumb stopped short of the bottom with the panel already as far
+	 * down as it goes, which reads as a bar that can still be dragged.
+	 *
+	 * Drawn through the shared scrollbar, so this bar looks like every
+	 * other one - see the note there.
+	 */
+	if (dis_max_bias(v) > 0)
+		scrollbar(o, g_cols, dis_top(), hex_bot(),
+			  (uint64_t)v->dis_bias,
+			  (uint64_t)dis_max_bias(v) + dis_span_of(v),
+			  dis_span_of(v));
 }
 
 /*
@@ -13383,6 +13483,21 @@ static void bar_to(struct view *v, int which)
 		frac = (uint64_t)(g_my < top ? 0 : g_my > bot ? bot - top
 							     : g_my - top);
 		v->prow_off = (uint32_t)(frac * max / (uint64_t)(bot - top));
+	} else if (which == 4) {                /* the disassembly panel */
+		/*
+		 * The track is the hex pane's range, not the file's - see the
+		 * note where this bar is drawn. So the fraction names a place
+		 * inside what the hex is showing, and the panel never leaves it.
+		 */
+		int64_t hi = dis_max_bias(v);
+
+		top = dis_top(); bot = hex_bot();
+		if (bot <= top || hi <= 0)
+			return;
+		frac = (uint64_t)(g_my < top ? 0 : g_my > bot ? bot - top
+							     : g_my - top);
+		v->dis_bias = (int64_t)(frac * (uint64_t)hi /
+					(uint64_t)(bot - top));
 	}
 }
 
@@ -13397,6 +13512,11 @@ static int bar_under(struct view *v)
 		if (g_mx == TREE_W)
 			return 2;
 	}
+	/* Before the hex bar's own row test would ever reach here: the panel
+	 * owns the bottom of the same column. */
+	if (g_disasm_rows && g_mx == g_cols &&
+	    g_my >= dis_top() && g_my <= hex_bot() && dis_max_bias(v) > 0)
+		return 4;
 	if (g_decl_rows && g_mx == g_cols && g_my > decl_top() &&
 	    g_my < decl_top() + g_decl_rows - 1)
 		return 3;
@@ -13735,6 +13855,13 @@ static void click(struct view *v, int rclick)
 				top = hex_top(); bot = hex_bot();
 				total = v->n_node; off = v->tree_top;
 				shown = (uint64_t)(bot - top + 1);
+			} else if (which == 4) {
+				/* The disassembly panel's track is the hex
+				 * pane's range - see where the bar is drawn. */
+				top = dis_top(); bot = hex_bot();
+				total = dis_hex_shown(v);
+				off = (uint64_t)v->dis_bias;
+				shown = dis_span_of(v);
 			} else {
 				top = decl_top() + 1;
 				bot = decl_top() + g_decl_rows - 2;
@@ -15122,15 +15249,10 @@ static int handle(struct view *v, int k)
 			/* Four bytes: about one instruction, and the same step
 			 * whichever way the wheel turns. */
 			v->dis_bias += down ? 4 : -4;
-			{
-				int64_t at = (int64_t)v->rgn_at + v->dis_bias;
-
-				if (at < 0)
-					v->dis_bias = -(int64_t)v->rgn_at;
-				else if ((uint64_t)at >= v->rgn_len)
-					v->dis_bias = (int64_t)v->rgn_len -
-						      (int64_t)v->rgn_at;
-			}
+			if (v->dis_bias < 0)
+				v->dis_bias = 0;
+			if (v->dis_bias > dis_max_bias(v))
+				v->dis_bias = dis_max_bias(v);
 			break;
 		}
 		if (v->show_list && g_my > list_top(v) &&
