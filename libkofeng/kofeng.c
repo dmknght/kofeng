@@ -103,3 +103,15 @@ int kof_scan_path(kof_scanner *sc, const char *path,
 		return KOF_ERR_ARG;
 	return kof_scan_walk(sc, path, opt ? opt : &conservative, cb, user);
 }
+
+int kof_scan_path_mt(kof_scanner **scs, unsigned n_sc, const char *path,
+		     const struct kof_scan_option *opt, kof_on_object cb,
+		     void *user)
+{
+	static const struct kof_scan_option conservative;   /* all zero: no recursion */
+
+	if (!scs || !n_sc || !path)
+		return KOF_ERR_ARG;
+	return kof_scan_walk_mt(scs, n_sc, path, opt ? opt : &conservative,
+				cb, user);
+}

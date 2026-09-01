@@ -31,6 +31,11 @@
 CC      ?= cc
 AR      ?= ar
 CFLAGS  ?= -O2 -g
+# The parallel walk in scan.c is pthreads. On this glibc the symbols are in libc
+# and the link succeeds without it - measured, the flag changes the scan's speed
+# by nothing either way - so it is here for the platforms where the link needs
+# it rather than for anything it does on this one.
+LDFLAGS += -pthread
 CFLAGS  += -std=c11 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
            -Wpointer-arith -Wstrict-prototypes -Wmissing-prototypes \
            -fno-common -Ilibkofeng/core
@@ -207,6 +212,16 @@ SAN_CFLAGS := -fsanitize=address,undefined -fno-sanitize-recover=all \
               -fno-omit-frame-pointer
 CFLAGS  += $(SAN_CFLAGS)
 LDFLAGS += -fsanitize=address,undefined -fno-sanitize-recover=all
+endif
+
+# SAN=thread instead, for the parallel walk. A separate switch rather than a
+# third value folded into the one above, because ThreadSanitizer cannot be
+# combined with AddressSanitizer - asking for both is a build that does not
+# link, and a build system should refuse that by construction rather than at
+# the link step.
+ifeq ($(SAN),thread)
+CFLAGS  += -fsanitize=thread -fno-omit-frame-pointer
+LDFLAGS += -fsanitize=thread
 endif
 
 BUILD := build

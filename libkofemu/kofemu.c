@@ -153,6 +153,14 @@ struct kof_emu {
 	uint64_t futex_va;
 	uint32_t futex_spin;
 
+	/* How many reads of standard input have been answered end-of-file in a
+	 * row. See SYS_READ: a prompt that ignores EOF asks forever. */
+	uint32_t stdin_eof;
+
+	/* When a page was last written to for the first time - the clock the
+	 * idle test below runs on. */
+	uint64_t last_new_page;
+
 	/*
 	 * The SSE control word, remembered and otherwise ignored: scalar
 	 * arithmetic here runs on the host's own double, so a rounding mode
@@ -357,6 +365,11 @@ static int mem_wr(struct kof_emu *e, uint64_t va, const void *src, unsigned n)
 			return 0;
 		}
 		p->data[(va + i) & (KOF_EMU_PAGE - 1u)] = s[i];
+		/* The first write to a page is the unit of progress: see
+		 * KOF_EMU_IDLE. Recorded here, where it happens, so nothing
+		 * else has to remember to. */
+		if (!p->written)
+			e->last_new_page = e->insn;
 		p->written = 1;
 		if (e->watch_on && va + i == e->watch_va &&
 		    e->watch_n < KOF_EMU_WATCH_MAX) {
@@ -1463,8 +1476,50 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 		return n;                                       /* wrote it all */
 	}
 	case SYS_READ: {
-		uint64_t got = self_read(e, a1, e->self_pos, e->gpr[KOF_EMU_RDX]);
+		uint64_t got;
 
+		/*
+		 * READING STANDARD INPUT IS END OF FILE, and answering it any
+		 * other way costs an entire budget.
+		 *
+		 * Every open here hands back EMU_SELF_FD, so a descriptor of 0,
+		 * 1 or 2 was never opened: it is the terminal the process
+		 * inherited, and there is no terminal. Serving those reads from
+		 * the scanned file - which is what ignoring the descriptor did -
+		 * feeds a stub the packed image one byte at a time and never
+		 * reaches an end, so a stub that waits for input waits forever.
+		 *
+		 * Measured on midgetpack, which asks for a password: 61 reads of
+		 * stdin answered with file bytes, then four million instructions
+		 * of nothing, 0.47 s per object and 75 s over 200 of them, with
+		 * no payload recovered because there was never a password to
+		 * recover it with. Answering 0 ends the prompt on its first
+		 * read, the stub gives up the way it would on a closed pipe, and
+		 * the run stops in milliseconds.
+		 *
+		 * EOF rather than EAGAIN or EIO: a closed input is an ordinary
+		 * thing a program is written to handle, and an error is not.
+		 *
+		 * AND A PROMPT THAT IGNORES EOF ASKS FOREVER, which is the same
+		 * shape as the futex wait above and is answered the same way.
+		 * midgetpack's prompt does not check the return at all - it
+		 * loops until it sees a newline - so end-of-file alone does not
+		 * end it; measured, it still spent the whole budget. A caller
+		 * that has been told the input is over and asks again has
+		 * stopped making progress, and after a handful of those the run
+		 * is stuck rather than working. The handful is what separates it
+		 * from a program that legitimately probes stdin once or twice
+		 * before giving up on its own.
+		 */
+		if ((int64_t)a0 >= 0 && a0 <= 2) {
+			if (++e->stdin_eof > 8u) {
+				*stop_out = KOF_EMU_STOP_STALLED + 1;
+				return 0;
+			}
+			return 0;
+		}
+		e->stdin_eof = 0;
+		got = self_read(e, a1, e->self_pos, e->gpr[KOF_EMU_RDX]);
 		if ((int64_t)got > 0)
 			e->self_pos += got;
 		return got;
@@ -1557,6 +1612,27 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		 * an unmapped address read as a missing instruction. */
 		e->fault_va = 0;
 		e->fault_kind[0] = 0;
+		/*
+		 * STOP WHEN IT STOPS PRODUCING.
+		 *
+		 * The instruction budget bounds a run that is working; nothing
+		 * bounded one that is not. An unexpected object - junk padding,
+		 * a loop waiting on something that will not happen, a decoder
+		 * fed input it cannot use - would spin to the ceiling and cost
+		 * a scan every second of it for nothing.
+		 *
+		 * Producing means touching a page for the first time, because
+		 * that is what unpacking IS. Measured against the densest real
+		 * work here, an interpreted LZMA decoder writing 2.7 MB over
+		 * 250 million instructions: a new page every ~370 000. The
+		 * ceiling below is an order of magnitude above that, so it
+		 * cannot interrupt work, and it cuts an idle run to a fraction
+		 * of a second whatever the budget allows.
+		 */
+		if (e->insn - e->last_new_page > KOF_EMU_IDLE) {
+			fail(e, KOF_EMU_STOP_STALLED, NULL);
+			break;
+		}
 		next = e->rip + ix.Length;
 		sz = ix.Operands[0].Size ? ix.Operands[0].Size : 8u;
 		e->insn++;

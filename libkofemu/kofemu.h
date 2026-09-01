@@ -116,6 +116,15 @@ enum kof_emu_stop {
  * machine, and an answer that depends on what else is running is not one a
  * corpus measurement can be repeated against.
  */
+/*
+ * How long a run may go without writing to a page it has not written before.
+ *
+ * The instruction budget bounds work; this bounds the absence of it. Ten times
+ * the densest interval measured on real decompression, so productive runs never
+ * see it and an unproductive one ends in a fraction of a second.
+ */
+#define KOF_EMU_IDLE      (4u << 20)
+
 #define KOF_EMU_MAX_VMA   1024u
 #define KOF_EMU_MAX_SNAP  64u
 

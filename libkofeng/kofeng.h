@@ -532,4 +532,31 @@ int kof_scan_bytes(kof_scanner *, const void *bytes, uint64_t n,
 int kof_scan_path(kof_scanner *, const char *path, const struct kof_scan_option *,
 		  kof_on_object cb, void *user);
 
+/*
+ * The same scan, over several scanners at once.
+ *
+ * WHY IT EXISTS, in one measurement: a scan of 12.9GB spends 71% of its
+ * instructions in memmem and keeps exactly one core busy. Nothing in the engine
+ * was waiting for a disk - the work is literal search - so the only thing left
+ * to give it is more than one core.
+ *
+ * The caller supplies the scanners, one per thread, because that has always been
+ * this API's division: the engine is immutable and shared, a scanner is not. A
+ * caller that wants four threads makes four scanners from one engine and hands
+ * them in. Nothing here allocates one, so per-worker budgets stay the caller's
+ * to set - and they SHOULD be set: max_resident_bytes is per scanner, so four
+ * workers with the default may hold four times what one did.
+ *
+ * `path` a directory: the files under it are spread across the scanners. `path`
+ * a file, or n_sc of 1: identical to kof_scan_path, threads and all skipped.
+ *
+ * The callback is serialised and needs no locking of its own. The ORDER objects
+ * arrive in is not preserved - they come back as workers finish - which is the
+ * one thing a caller gives up by asking for this.
+ *
+ * Returns the number of objects scanned, or a KOF_ERR_*.
+ */
+int kof_scan_path_mt(kof_scanner **, unsigned n_scanners, const char *path,
+		     const struct kof_scan_option *, kof_on_object cb, void *user);
+
 #endif /* KOFENG_H */

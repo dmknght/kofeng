@@ -56,7 +56,30 @@ enum kof_emu_unp_why {
 	 * needs only somewhere to start, and can be given one. So the case that
 	 * defeats every other module is the case this handles best.
 	 */
-	KOF_EMU_UNP_WHY_BROKEN = 2
+	KOF_EMU_UNP_WHY_BROKEN = 2,
+
+	/*
+	 * A payload sits ENCRYPTED in a segment that is not code, and the file
+	 * imports something that can turn memory into code.
+	 *
+	 * This is the C-loader shape: the executable segments decode as ordinary
+	 * code, so the DENSE test says nothing, but a block of a writable or
+	 * read-only segment has the entropy of ciphertext and the object imports
+	 * mprotect or memfd_create - the two ways a program hands itself a page
+	 * it can execute. Neither fact alone is worth a run: a resource, a
+	 * certificate or a compressed asset is a high-entropy block with no
+	 * intent, and mprotect is imported by anything with a JIT. Together they
+	 * are a program carrying code it means to run and hide until it does.
+	 *
+	 * Measured over 846 clean binaries: a block of at least 8 KB at 7.2 bits
+	 * per byte in a non-executable PT_LOAD, AND the string "mprotect" or
+	 * "memfd_create" present, fires on none of them. It only sees STRONG
+	 * encryption - a single-byte XOR leaves code at the entropy of code and
+	 * passes straight through, which is a limit of the signal, not a bug in
+	 * it. What it catches is the RC4/AES-wrapped payload an interpreter can
+	 * decrypt by running the loader that was written to decrypt it.
+	 */
+	KOF_EMU_UNP_WHY_LOADER = 3
 };
 
 /* What the run did, for the caller to report rather than guess at. */

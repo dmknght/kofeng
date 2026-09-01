@@ -2030,9 +2030,26 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	 * ELF each, and the other 15 hit the instruction ceiling and yielded
 	 * four to twelve kilobytes of stub and stack. Handing those back cost a
 	 * scan 15 child objects that were not payloads and could not be.
+	 *
+	 * A STALL COUNTS AS FINISHED, and that is not the same concession.
+	 *
+	 * Hitting the ceiling says the budget ran out, which says nothing about
+	 * whether the guest was still producing. A stall is the opposite
+	 * statement: no page has been written for four million instructions, so
+	 * whatever this run was going to write, it already has. The case that
+	 * needs it is self-decrypting shellcode, which decrypts a buffer and
+	 * then enters a loop that never returns - a listener, a connect retry -
+	 * so it never exits and never hands off. Measured on a stub that
+	 * decrypts two kilobytes and then spins: without this the plaintext sits
+	 * in the emulator's written set and is thrown away, with it the payload
+	 * comes back. Measured over the malware corpus the two settings are
+	 * indistinguishable - 308 objects, 60 infected, 19 suspected either way
+	 * - so nothing in that collection stalls with unharvested memory, and
+	 * the clean corpus gains no findings.
 	 */
 	if (!any && (rep.stop == KOF_EMU_STOP_EXIT ||
-		     rep.stop == KOF_EMU_STOP_HANDOFF))
+		     rep.stop == KOF_EMU_STOP_HANDOFF ||
+		     rep.stop == KOF_EMU_STOP_STALLED))
 		for (it = 0; kof_emu_next_written(e, &it, &va, &bytes, &len); ) {
 			if (va >= built_lo && va < built_hi)
 				continue;

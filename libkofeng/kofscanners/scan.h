@@ -293,4 +293,27 @@ struct kof_scanner *kof_scan_of(const struct kof_obj_ctx *);
 int kof_scan_walk(struct kof_scanner *, const char *path,
 		  const struct kof_scan_option *, kof_on_object cb, void *user);
 
+/*
+ * The same walk, spread over several scanners.
+ *
+ * One thread finds the files and the rest scan them, which is the split the
+ * shape of the work already had: enumerating a directory is a syscall per entry
+ * and scanning a file is a pass over its bytes, and only the second one is worth
+ * a core. Measured over 12.9GB, a scan is 71% memmem and 100% of one core, so
+ * the ceiling on a single thread is the one core it uses.
+ *
+ * The caller supplies the scanners because making one is the caller's job in
+ * this API and always has been - the engine is immutable and shared, the
+ * scanner is per thread. Handing in an array rather than a count keeps it that
+ * way: nothing here allocates a scanner, and a caller that wants different
+ * budgets per worker can set them.
+ *
+ * The callback is serialised, so a caller writes it exactly as it would for the
+ * single threaded walk. What is NOT preserved is the ORDER objects arrive in:
+ * files come back as the workers finish them. A caller that needs the old order
+ * passes one scanner.
+ */
+int kof_scan_walk_mt(struct kof_scanner **, unsigned n_sc, const char *path,
+		     const struct kof_scan_option *, kof_on_object cb, void *user);
+
 #endif /* KOFENG_SCAN_H */

@@ -8088,14 +8088,17 @@ ids_done:
  */
 static const char *emu_why_tag(uint8_t why)
 {
-	return why == KOF_EMU_UNP_WHY_DENSE ? "Unknown packer"
-	     : why == KOF_EMU_UNP_WHY_BROKEN ? "Possible packer" : NULL;
+	return why == KOF_EMU_UNP_WHY_DENSE  ? "Unknown packer"
+	     : why == KOF_EMU_UNP_WHY_BROKEN ? "Possible packer"
+	     : why == KOF_EMU_UNP_WHY_LOADER ? "Possible encryptor" : NULL;
 }
 
 static const char *emu_why_reason(uint8_t why)
 {
 	return why == KOF_EMU_UNP_WHY_DENSE
 	       ? "executable segments too dense to be code"
+	     : why == KOF_EMU_UNP_WHY_LOADER
+	       ? "an encrypted block sits in a non-code segment"
 	       : "header cannot be loaded as written";
 }
 

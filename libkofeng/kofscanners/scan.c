@@ -40,6 +40,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
+#include <pthread.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -838,6 +839,31 @@ struct pending {
 	uint32_t depth;
 };
 
+/*
+ * The work queue of a parallel walk: paths in, one worker each takes one out.
+ *
+ * BOUNDED, and that is the only interesting decision in it. An unbounded queue
+ * would let the producer run the whole directory tree ahead of the workers and
+ * hold every path in the tree at once - 14 000 strings here, and no bound at all
+ * on a larger one. A bound makes the producer wait when the workers are behind,
+ * which is exactly when it should.
+ *
+ * A ring of pointers rather than a list: the paths are strdup'd by the producer
+ * and freed by whoever takes them, so ownership moves with the pointer and there
+ * is nothing to walk on shutdown but the slots still holding one.
+ */
+struct mtq {
+	pthread_mutex_t lock;
+	pthread_cond_t  can_put, can_take;
+	char          **slot;
+	size_t          cap, head, tail, n;
+	int             closed;      /* the producer has finished enumerating */
+	int             aborted;     /* a callback asked to stop */
+};
+
+struct walk;
+static void mtq_put(struct walk *w, const char *path, size_t len);
+
 struct walk {
 	struct kof_scanner *sc;
 	const struct kof_scan_option *opt;
@@ -853,6 +879,11 @@ struct walk {
 	int      aborted;
 	int      out_of_memory;
 	uint64_t objects;
+
+	/* Set only on the producer of a parallel walk: where a regular file goes
+	 * instead of being scanned here. NULL in every single threaded walk, and
+	 * the one branch that tests it is the whole difference between them. */
+	struct mtq *q;
 };
 
 static int push_dir(struct walk *w, const char *path, size_t len, uint32_t depth)
@@ -911,6 +942,53 @@ static int path_reserve(struct walk *w, size_t need)
  * A child holds a reference to whatever its bytes live in, so the parent's mapping
  * survives exactly as long as something still points into it and no longer.
  */
+/*
+ * HOW DEEP AN OBJECT MAY BE UNPACKED, AND WHY IT IS NOT A NUMBER.
+ *
+ * A fixed depth is wrong in both directions at once. Twenty layers of a
+ * meterpreter payload is twenty passes over about a kilobyte - measured, a
+ * twenty deep chain of this engine's own XOR unwrapper is 21 objects and
+ * finishes instantly - while twenty layers of a five megabyte archive is a
+ * hundred megabytes of decompression, which is the shape a bomb takes. Pick a
+ * number that allows the first and it permits the second; pick one that refuses
+ * the second and it truncates the first.
+ *
+ * So the allowance is derived from what a layer COSTS, which is the size of the
+ * object about to be opened:
+ *
+ *     allowed = CHAIN_BYTES / size, clamped to [CHAIN_MIN, CHAIN_MAX]
+ *
+ *        200 B  ->  64   a stager encoded over and over
+ *      64 KB    ->  64   still nothing
+ *       1 MB    ->  64
+ *       5 MB    ->  12   an archive: roughly the ten to twenty a reader expects
+ *      16 MB    ->   4
+ *      64 MB+   ->   4   the floor, so something is always looked at
+ *
+ * The floor matters as much as the ceiling: an object too large to descend far
+ * into still gets four levels, because refusing outright would hide a payload
+ * behind one big container. And this bounds LAYERS, not bytes - the produced
+ * byte budget already bounds those, tree wide, and a second byte limit here
+ * would be the same rule written twice.
+ */
+#define CHAIN_BYTES  (64u << 20)
+#define CHAIN_MIN    4u
+#define CHAIN_MAX    64u
+
+static uint32_t depth_allowance(uint64_t size)
+{
+	uint64_t n;
+
+	if (!size)
+		return CHAIN_MAX;
+	n = (uint64_t)CHAIN_BYTES / size;
+	if (n > CHAIN_MAX)
+		return CHAIN_MAX;
+	if (n < CHAIN_MIN)
+		return CHAIN_MIN;
+	return (uint32_t)n;
+}
+
 struct layer {
 	struct kof_objsrc *src;
 	char              *name;
@@ -969,6 +1047,32 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 		scan_object(w->sc, kof_src_buf(src), w->opt, &res, pdepth,
 			    from_packer);
 		w->sc->cur_src = NULL;
+
+		/*
+		 * A LAYER LEFT UNOPENED IS SAID SO, BEFORE THE VERDICT IS.
+		 *
+		 * The cost limit below refuses children, and refusing one in
+		 * silence would report an object as examined when a layer of it
+		 * was never looked at - the failure this engine's budgets are
+		 * careful never to produce. Decided here rather than at the push
+		 * because the callback has not fired yet: after it, the verdict
+		 * for this object is already out.
+		 *
+		 * It reads as "not fully examined", the same channel a
+		 * decompressor uses when its budget runs out, because it is the
+		 * same statement: something was produced and nobody looked at it.
+		 * Measured over 12.9GB and 60 248 objects it never once fires -
+		 * so this is a guard for the file that has not turned up yet
+		 * rather than a thing the scan does today.
+		 */
+		if (!res.broken) {
+			for (i = 0; i < w->sc->n_kids; i++)
+				if (depth + 1u >
+				    depth_allowance(kof_src_buf(w->sc->kids[i]).n)) {
+					res.broken = KOF_BROKEN_LIMIT;
+					break;
+				}
+		}
 
 		w->objects++;
 		{
@@ -1031,6 +1135,18 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 						snprintf(kid, sizeof kid, "%s//%u",
 							 name ? name : "?", i);
 				}
+				/*
+				 * The cost limit, asked about the CHILD rather
+				 * than about this object: what a layer costs is
+				 * the size of the thing that layer produced, and
+				 * a bomb's children are larger than it is. Asking
+				 * the parent would let a small archive hand back
+				 * a huge one at full depth, which is the case the
+				 * limit exists for.
+				 */
+				if (depth + 1u >
+				    depth_allowance(kof_src_buf(w->sc->kids[i]).n))
+					continue;   /* said above, before the verdict */
 				stack[n].src = kof_src_ref(w->sc->kids[i]);
 				stack[n].name = kof_strdup_n(kid, strlen(kid));
 				if (!stack[n].name)
@@ -1126,7 +1242,10 @@ static void read_dir(struct walk *w, const char *dir, uint32_t depth)
 				continue;
 			push_dir(w, w->path_buf, dir_len + 1 + nl, depth + 1);
 		} else if (S_ISREG(sb.st_mode)) {
-			scan_file(w, w->path_buf);
+			if (w->q)
+				mtq_put(w, w->path_buf, dir_len + 1 + nl);
+			else
+				scan_file(w, w->path_buf);
 		}
 		/* anything else - socket, device, fifo - is not an object */
 	}
@@ -1178,6 +1297,240 @@ int kof_scan_bytes(struct kof_scanner *sc, const void *bytes, uint64_t n,
 	kof_src_unref(src);
 	free(w.path_buf);
 	return w.objects ? (int)w.objects : 0;
+}
+
+/* ---- the parallel walk ---------------------------------------------------- */
+
+static void mtq_put(struct walk *w, const char *path, size_t len)
+{
+	struct mtq *q = w->q;
+	char *copy = kof_strdup_n(path, len);
+
+	if (!copy) {
+		w->out_of_memory = 1;
+		return;
+	}
+	pthread_mutex_lock(&q->lock);
+	while (q->n == q->cap && !q->aborted)
+		pthread_cond_wait(&q->can_put, &q->lock);
+	if (q->aborted) {
+		pthread_mutex_unlock(&q->lock);
+		free(copy);
+		w->aborted = 1;
+		return;
+	}
+	q->slot[q->tail] = copy;
+	q->tail = (q->tail + 1u) % q->cap;
+	q->n++;
+	pthread_cond_signal(&q->can_take);
+	pthread_mutex_unlock(&q->lock);
+}
+
+/* One path, or NULL when there will be no more. The caller owns what it gets. */
+static char *mtq_take(struct mtq *q)
+{
+	char *p;
+
+	pthread_mutex_lock(&q->lock);
+	while (q->n == 0 && !q->closed && !q->aborted)
+		pthread_cond_wait(&q->can_take, &q->lock);
+	if (q->n == 0 || q->aborted) {
+		pthread_mutex_unlock(&q->lock);
+		return NULL;
+	}
+	p = q->slot[q->head];
+	q->head = (q->head + 1u) % q->cap;
+	q->n--;
+	pthread_cond_signal(&q->can_put);
+	pthread_mutex_unlock(&q->lock);
+	return p;
+}
+
+/*
+ * What a worker sees. Its own walk - so its own path buffer, its own object
+ * count and its own scanner - plus the queue and the lock that serialises the
+ * callback.
+ */
+struct worker {
+	struct walk       w;
+	struct mtq       *q;
+	pthread_mutex_t  *cb_lock;
+	kof_on_object     cb;
+	void             *user;
+	pthread_t         id;
+};
+
+/*
+ * The callback, under the lock.
+ *
+ * Serialised rather than left to the caller because the alternative is a
+ * callback contract that changes with the number of scanners - every existing
+ * caller would have to be audited for thread safety before it could ever pass
+ * more than one. The lock is held only for the call itself, and a callback that
+ * merely counts or prints is nowhere near the cost of the scan that produced it.
+ */
+static int worker_cb(const char *name, const void *bytes, uint64_t len,
+		     const struct kof_result *res, void *user)
+{
+	struct worker *wk = user;
+	int rc;
+
+	pthread_mutex_lock(wk->cb_lock);
+	rc = wk->cb ? wk->cb(name, bytes, len, res, wk->user) : 0;
+	pthread_mutex_unlock(wk->cb_lock);
+	if (rc) {
+		pthread_mutex_lock(&wk->q->lock);
+		wk->q->aborted = 1;
+		pthread_cond_broadcast(&wk->q->can_take);
+		pthread_cond_broadcast(&wk->q->can_put);
+		pthread_mutex_unlock(&wk->q->lock);
+	}
+	return rc;
+}
+
+static void *worker_main(void *arg)
+{
+	struct worker *wk = arg;
+	char *path;
+
+	while ((path = mtq_take(wk->q)) != NULL) {
+		scan_file(&wk->w, path);
+		free(path);
+		if (wk->w.aborted)
+			break;
+	}
+	return NULL;
+}
+
+int kof_scan_walk_mt(struct kof_scanner **scs, unsigned n_sc, const char *path,
+		     const struct kof_scan_option *opt, kof_on_object cb,
+		     void *user)
+{
+	struct mtq q;
+	struct walk prod;
+	struct worker *wk = NULL;
+	pthread_mutex_t cb_lock;
+	struct stat sb;
+	uint64_t total = 0;
+	unsigned i, started = 0;
+	int rc;
+
+	if (!scs || !n_sc || !scs[0] || !path)
+		return KOF_ERR_ARG;
+	/*
+	 * One scanner is the ordinary walk, and taking that path rather than
+	 * running a producer and a single worker keeps the common case free of
+	 * threads entirely - including the object ORDER, which a caller that
+	 * asked for one scanner has every reason to expect unchanged.
+	 */
+	if (n_sc == 1)
+		return kof_scan_walk(scs[0], path, opt, cb, user);
+
+	if ((opt->follow_symlinks ? stat : kof_lstat)(path, &sb) != 0)
+		return KOF_ERR_OPEN;
+	/* A single file has nothing to spread. */
+	if (!S_ISDIR(sb.st_mode))
+		return kof_scan_walk(scs[0], path, opt, cb, user);
+	if (!opt->recurse_dirs)
+		return KOF_ERR_OPEN;
+
+	memset(&q, 0, sizeof q);
+	/* Four slots per worker: enough that a worker starting a small file does
+	 * not wait on the producer, small enough that the producer cannot run
+	 * away from them. */
+	q.cap = (size_t)n_sc * 4u;
+	q.slot = calloc(q.cap, sizeof *q.slot);
+	if (!q.slot)
+		return KOF_ERR_READ;   /* no memory for the queue */
+	if (pthread_mutex_init(&q.lock, NULL) != 0 ||
+	    pthread_cond_init(&q.can_put, NULL) != 0 ||
+	    pthread_cond_init(&q.can_take, NULL) != 0 ||
+	    pthread_mutex_init(&cb_lock, NULL) != 0) {
+		free(q.slot);
+		return KOF_ERR_READ;   /* no memory for the queue */
+	}
+
+	wk = calloc(n_sc, sizeof *wk);
+	if (!wk) {
+		free(q.slot);
+		return KOF_ERR_READ;   /* no memory for the queue */
+	}
+	for (i = 0; i < n_sc; i++) {
+		wk[i].q        = &q;
+		wk[i].cb_lock  = &cb_lock;
+		wk[i].cb       = cb;
+		wk[i].user     = user;
+		wk[i].w.sc     = scs[i] ? scs[i] : scs[0];
+		wk[i].w.opt    = opt;
+		wk[i].w.cb     = worker_cb;
+		wk[i].w.user   = &wk[i];
+		if (pthread_create(&wk[i].id, NULL, worker_main, &wk[i]) != 0)
+			break;
+		started++;
+	}
+
+	/*
+	 * The producer runs on this thread, and it is the existing walk with the
+	 * queue attached: same directory reading, same symlink policy, same depth
+	 * limit, same stack. Nothing about finding files is written twice.
+	 */
+	memset(&prod, 0, sizeof prod);
+	prod.sc  = scs[0];
+	prod.opt = opt;
+	prod.q   = started ? &q : NULL;
+	if (!started) {
+		/* No thread could be created: scan on this thread rather than
+		 * returning nothing, which is the answer a caller can still use. */
+		free(wk);
+		pthread_mutex_destroy(&q.lock);
+		pthread_cond_destroy(&q.can_put);
+		pthread_cond_destroy(&q.can_take);
+		pthread_mutex_destroy(&cb_lock);
+		free(q.slot);
+		return kof_scan_walk(scs[0], path, opt, cb, user);
+	}
+
+	{
+		size_t n = strlen(path);
+		while (n > 1 && path[n - 1] == '/')
+			n--;
+		push_dir(&prod, path, n, 0);
+	}
+	while (!prod.aborted && !prod.out_of_memory && prod.n > 0) {
+		struct pending p = prod.stack[--prod.n];
+		read_dir(&prod, p.path, p.depth);
+		free(p.path);
+	}
+	while (prod.n > 0)
+		free(prod.stack[--prod.n].path);
+	free(prod.stack);
+	free(prod.path_buf);
+
+	pthread_mutex_lock(&q.lock);
+	q.closed = 1;
+	pthread_cond_broadcast(&q.can_take);
+	pthread_mutex_unlock(&q.lock);
+
+	for (i = 0; i < started; i++) {
+		pthread_join(wk[i].id, NULL);
+		total += wk[i].w.objects;
+	}
+
+	/* Whatever a stopped run left in the ring. */
+	while (q.n > 0) {
+		free(q.slot[q.head]);
+		q.head = (q.head + 1u) % q.cap;
+		q.n--;
+	}
+	free(q.slot);
+	free(wk);
+	pthread_mutex_destroy(&q.lock);
+	pthread_cond_destroy(&q.can_put);
+	pthread_cond_destroy(&q.can_take);
+	pthread_mutex_destroy(&cb_lock);
+
+	rc = (int)total;
+	return rc;
 }
 
 int kof_scan_walk(struct kof_scanner *sc, const char *path,
