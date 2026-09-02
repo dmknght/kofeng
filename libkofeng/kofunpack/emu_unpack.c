@@ -192,13 +192,6 @@ enum kof_emu_unp_why kof_emu_unp_gate(const struct kof_obj_ctx *ctx,
 	if (!ctx || !info || !info->valid || !file)
 		return KOF_EMU_UNP_NO;
 	/*
-	 * x86-64 only, and that is measurement rather than caution: every one
-	 * of the 294 dense objects in the clean-corpus run was x86-64, and
-	 * bddisasm decodes x86 alone. An ARM object would be started here and
-	 * stopped on its first instruction, which costs a page table and
-	 * teaches nothing.
-	 */
-	/*
 	 * x86 AND x86-64, since the emulator learned a 32-bit mode - see
 	 * kof_emu_cfg.bits. It was amd64 only because the interpreter was, and
 	 * the note that used to stand here said the measurement supported that:
@@ -507,6 +500,12 @@ struct kof_emu *kof_emu_unp_run(const uint8_t *file, uint64_t n,
 		return NULL;
 	}
 
+	if (rep) {
+		uint64_t top = cfg.bits == 32 ? STACK_TOP_32 : STACK_TOP;
+
+		rep->stack_hi = top;
+		rep->stack_lo = top - (uint64_t)STACK_PAGES * KOF_EMU_PAGE;
+	}
 	if (!build_stack(e, entry, phdr_va ? phdr_va : base_lo,
 			 info->phentsize, info->phnum, base_lo, cfg.bits)) {
 		kof_emu_free(e);

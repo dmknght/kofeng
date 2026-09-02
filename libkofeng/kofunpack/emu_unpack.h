@@ -91,6 +91,17 @@ struct kof_emu_unp_report {
 	int                  improvised; /* the entry or the mapping was guessed */
 	uint32_t             images;     /* snapshots taken at a W->X mprotect */
 	uint32_t             written;    /* runs of written memory */
+	/*
+	 * THE STACK THIS RUN WAS GIVEN, so a harvest can leave it alone.
+	 *
+	 * A stub pushes, and what it pushed is not something it unpacked - but
+	 * the written-memory set cannot tell the difference, so a scan of a
+	 * 32-bit payload came back carrying a 4 KB page that was 94% zeros as
+	 * though it were a recovered object. Reported rather than recomputed by
+	 * the caller, because where the stack went is a decision made here and
+	 * differs by width.
+	 */
+	uint64_t             stack_lo, stack_hi;
 	const char          *detail;     /* the emulator's own last word */
 	/*
 	 * Why no run was attempted at all, or NULL if one was.
