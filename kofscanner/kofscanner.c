@@ -27,18 +27,68 @@
 
 #include "../libkofeng/kofeng.h"
 
+/*
+ * COLOUR, and only when the output is a terminal.
+ *
+ * A pipe, a log or a grep must get the bytes it always did, so every escape goes
+ * through col(): it returns the sequence when stdout is a tty and an empty string
+ * otherwise, which is the same rule progress already applies to stderr. The codes
+ * are chosen so the verdict reads at a glance - red is the one that stops a
+ * release, green the one that does not.
+ */
+#define C_RED "\033[1;31m"      /* INFECTED  */
+#define C_YEL "\033[1;33m"      /* SUSPECT   */
+#define C_MAG "\033[1;35m"      /* HEURISTIC */
+#define C_CYN "\033[36m"        /* BROKEN    */
+#define C_GRN "\033[32m"        /* OK        */
+#define C_DIM "\033[2m"         /* secondary context */
+#define C_RST "\033[0m"
+
+/*
+ * ONE VERDICT PER TOP-LEVEL FILE, rolled up from every object inside it.
+ *
+ * A packed or carrying file is scanned as a tree - the file, then whatever the
+ * unpackers made of it - and the malware is usually in a child, not the root. So
+ * the root on its own comes back clean, and reporting THAT as the file's verdict
+ * calls an infected file clean. The fix is to key a verdict by the top-level file
+ * (the name up to the first "//") and keep the WORST thing found anywhere in its
+ * tree; the child's finding still prints in full, but the file it came in is what
+ * is counted.
+ *
+ * A small open-addressed map, because the callback is serialised (even under
+ * --jobs) and the objects of one file need not arrive together, so a running
+ * "current file" cannot be trusted - two files' objects interleave. Keyed by the
+ * file name, valued by the worst level seen (-1 for none), the broken reason, and
+ * the finding text to show.
+ */
+struct fent {
+	char    *file;
+	int      level;          /* worst KOF_LEVEL_*, or -1 */
+	uint32_t broken;         /* worst kof_broken reason, or 0 */
+	char     name[224];      /* the worst finding's composed name */
+};
+
+struct fmap {
+	struct fent *arr;        /* entries in first-seen order, for -v listing */
+	size_t       n, cap;
+	uint32_t    *idx;        /* open-addressed: (arr index + 1), 0 = empty */
+	size_t       icap;       /* a power of two */
+};
+
 struct run {
 	/* No object counter: the engine already keeps one, and a second copy is a
 	 * second thing that can disagree with it. */
-	uint64_t infected, suspect, heur, dropped, incomplete;
+	uint64_t dropped;
 	uint64_t by_reason[KOF_BROKEN_COUNT];
 	int verbose;
 	int stats;
+	int color;               /* stdout is a terminal */
 
-	/* Where produced objects are written, or NULL. See dump_object. */
-	const char *dump_dir;
-	uint64_t    dumped;
-	FILE       *manifest;
+	/* Every top-level file's rolled-up verdict, and how many files there were.
+	 * The counts printed at the end are derived from these, so a file with an
+	 * infected child is one infected file and not one clean plus one infected. */
+	struct fmap files;
+	uint64_t    files_total;
 
 	/*
 	 * The progress line: how many objects have gone by, when it was last
@@ -56,64 +106,10 @@ struct run {
 	int      drawn;          /* something is on the line, and must be erased */
 };
 
-/*
- * Write a produced object out, numbered.
- *
- * Named by a counter rather than by what the object is called, and that is the
- * simplification rather than a compromise. A name out of an archive exists to be
- * read in the report; turning one into a filename means answering what to do about
- * separators, "..", duplicates and length, and every one of those answers is a way
- * to write a file somewhere it was not meant to go. A number has none of those
- * questions.
- *
- * The mapping is not lost, it is written down: MANIFEST holds the number against
- * the full name the report printed, so the two are joined by looking rather than by
- * guessing which mangled filename came from which line.
- *
- * The engine itself never creates a file from a name - the objects it produces have
- * no filename at all, by construction (see objsrc.h). This is a debugging
- * convenience, and it keeps that property.
- */
-static void dump_object(struct run *r, const char *name, const void *bytes,
-			uint64_t len)
+/* The escape when stdout is a terminal, nothing otherwise. */
+static const char *col(const struct run *r, const char *c)
 {
-	char path[1024];
-	FILE *f;
-
-	if (!r->dump_dir || !bytes || !len)
-		return;
-	/* Only what the engine PRODUCED. A top level object is already a file on
-	 * disk and copying it would say nothing. */
-	if (!strstr(name, "//"))
-		return;
-
-	r->dumped++;
-	if ((size_t)snprintf(path, sizeof path, "%s/%06llu.raw", r->dump_dir,
-			     (unsigned long long)r->dumped) >= sizeof path) {
-		fprintf(stderr, "kofscanner: dump path too long, skipped\n");
-		return;
-	}
-	f = fopen(path, "wb");
-	if (!f) {
-		fprintf(stderr, "kofscanner: cannot write %s\n", path);
-		return;
-	}
-	if (fwrite(bytes, 1, (size_t)len, f) != (size_t)len)
-		fprintf(stderr, "kofscanner: short write to %s\n", path);
-	fclose(f);
-
-	if (!r->manifest) {
-		char mf[1024];
-
-		snprintf(mf, sizeof mf, "%s/MANIFEST", r->dump_dir);
-		r->manifest = fopen(mf, "w");
-		if (r->manifest)
-			fprintf(r->manifest, "# file          bytes  object\n");
-	}
-	if (r->manifest)
-		fprintf(r->manifest, "%06llu.raw  %10llu  %s\n",
-			(unsigned long long)r->dumped, (unsigned long long)len,
-			name);
+	return r->color ? c : "";
 }
 
 static const char *level_str(uint32_t level)
@@ -121,6 +117,14 @@ static const char *level_str(uint32_t level)
 	if (level == KOF_LEVEL_INFECT)
 		return "INFECTED";
 	return level == KOF_LEVEL_HEUR ? "HEURISTIC" : "SUSPECT";
+}
+
+/* The colour a level speaks in. */
+static const char *level_col(uint32_t level)
+{
+	if (level == KOF_LEVEL_INFECT)
+		return C_RED;
+	return level == KOF_LEVEL_HEUR ? C_MAG : C_YEL;
 }
 
 /* How loudly a level speaks, which is not the order the constants were given.
@@ -133,6 +137,122 @@ static int rank_of(int level)
 	case KOF_LEVEL_HEUR:    return 1;
 	default:                return 0;
 	}
+}
+
+/*
+ * The word a heuristic finding carries between "Heur:" and the "#", which is what
+ * KIND of heuristic it was: "Shellcode" for a rule that recognised a shape,
+ * "Truncated" and the like for the scored model that weighs a damaged structure.
+ * The summary breaks its count down by this, because "broken structure" is true of
+ * the second and wrong about the first.
+ */
+static const char *heur_kind(const char *name, char *buf, size_t cap)
+{
+	const char *p = strstr(name, "/Heur:");
+	size_t i = 0;
+
+	if (!p)
+		return NULL;
+	p += 6;                          /* past "/Heur:" */
+	while (p[i] && p[i] != '#' && p[i] != '?' && i + 1 < cap) {
+		buf[i] = p[i];
+		i++;
+	}
+	buf[i] = 0;
+	return i ? buf : NULL;
+}
+
+/* ---- the per-file verdict map --------------------------------------------- */
+
+static uint32_t fnv_n(const char *s, size_t n)
+{
+	uint32_t h = 2166136261u;
+	size_t i;
+
+	for (i = 0; i < n; i++)
+		h = (h ^ (uint8_t)s[i]) * 16777619u;
+	return h;
+}
+
+/* Find the top-level file's entry, creating it if new. `file` is a substring of a
+ * longer name and is `flen` bytes, not NUL-terminated. NULL only on OOM. */
+static struct fent *fmap_get(struct fmap *m, const char *file, size_t flen)
+{
+	uint32_t h, slot;
+
+	/* Grow the index when it is half full, so probe chains stay short. */
+	if (m->n * 2u >= m->icap) {
+		size_t nc = m->icap ? m->icap * 2u : 256u;
+		uint32_t *ni = calloc(nc, sizeof *ni);
+		size_t i;
+
+		if (!ni)
+			return NULL;
+		for (i = 0; i < m->n; i++) {
+			uint32_t s = fnv_n(m->arr[i].file,
+					   strlen(m->arr[i].file)) &
+				     (uint32_t)(nc - 1u);
+
+			while (ni[s])
+				s = (s + 1u) & (uint32_t)(nc - 1u);
+			ni[s] = (uint32_t)(i + 1u);
+		}
+		free(m->idx);
+		m->idx = ni;
+		m->icap = nc;
+	}
+
+	h = fnv_n(file, flen) & (uint32_t)(m->icap - 1u);
+	for (slot = h; m->idx[slot]; slot = (slot + 1u) & (uint32_t)(m->icap - 1u)) {
+		struct fent *e = &m->arr[m->idx[slot] - 1u];
+
+		if (strlen(e->file) == flen && !memcmp(e->file, file, flen))
+			return e;
+	}
+
+	/* New file: append an entry and point the slot at it. */
+	if (m->n == m->cap) {
+		size_t nc = m->cap ? m->cap * 2u : 128u;
+		struct fent *na = realloc(m->arr, nc * sizeof *na);
+
+		if (!na)
+			return NULL;
+		m->arr = na;
+		m->cap = nc;
+	}
+	{
+		struct fent *e = &m->arr[m->n];
+
+		e->file = malloc(flen + 1u);
+		if (!e->file)
+			return NULL;
+		memcpy(e->file, file, flen);
+		e->file[flen] = 0;
+		e->level = -1;
+		e->broken = 0;
+		e->name[0] = 0;
+		m->idx[slot] = (uint32_t)(m->n + 1u);
+		m->n++;
+		return e;
+	}
+}
+
+static void fmap_free(struct fmap *m)
+{
+	size_t i;
+
+	for (i = 0; i < m->n; i++)
+		free(m->arr[i].file);
+	free(m->arr);
+	free(m->idx);
+}
+
+/* The top-level file a name belongs to: everything up to the first "//". */
+static size_t toplevel_len(const char *name)
+{
+	const char *p = strstr(name, "//");
+
+	return p ? (size_t)(p - name) : strlen(name);
 }
 
 /*
@@ -221,68 +341,91 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	struct run *r = user;
 	uint32_t i;
 	int worst = -1;
+	const char *worst_name = NULL;
+	size_t flen = toplevel_len(name);
+
+	(void)bytes;
+	(void)len;
 
 	progress_draw(r, name);
-	if (res->broken || res->n || r->verbose)
+	/*
+	 * Take the progress line back only when a finding is about to land on it.
+	 * A clean object prints nothing during the scan now - its "OK" waits for
+	 * the per-file pass at the end - so clearing for it under -v would just
+	 * flicker the line the rate limit exists to keep still.
+	 */
+	if (res->n || (res->broken && (res->n == 0 || r->verbose)) || res->dropped)
 		progress_clear(r);
 
-	dump_object(r, name, bytes, len);
+	/* Each top-level FILE counted once, and a root object is the one whose
+	 * name carries no "//" - the separator the engine puts between a parent
+	 * and the objects it produced. */
+	if (flen == strlen(name))
+		r->files_total++;
 
 	/*
-	 * An object the engine could not finish with is not clean, and is not a
-	 * finding either. Reported separately, because the two lead to different
-	 * decisions and collapsing them is how a decompression bomb stops being
-	 * scanned and starts being trusted.
+	 * The findings, in full, at the object that carries them - a child three
+	 * layers down still prints with its own "//"-joined name, so a reader sees
+	 * exactly where in the file it is. The worst of them is what the file rolls
+	 * up to.
+	 */
+	for (i = 0; i < res->n; i++) {
+		uint32_t lv = res->v[i].level;
+
+		printf("%s%-10s%s %s: %s\n", col(r, level_col(lv)),
+		       level_str(lv), col(r, C_RST), name, res->v[i].name);
+		/*
+		 * Ranked, not compared as numbers: KOF_LEVEL_HEUR is 2 and INFECT
+		 * is 1, so ">" on the values alone would let a heuristic outrank a
+		 * named detection. The order a level speaks in is its own fact.
+		 */
+		if (rank_of((int)lv) > rank_of(worst)) {
+			worst = (int)lv;
+			worst_name = res->v[i].name;
+		}
+	}
+
+	/*
+	 * BROKEN is secondary to a finding, not a second verdict beside it.
+	 *
+	 * A context-keyed encoder comes back both as a rule's Heur:Shellcode and,
+	 * from the unpacker that could not read its key, as "the content is
+	 * encrypted". Those are one thing said twice: the finding is the answer,
+	 * the encryption is only why nothing further could be read - so with a
+	 * finding present it is shown under -v and nowhere else. With no finding it
+	 * IS the verdict and always prints. The reason is still tallied either way.
 	 */
 	if (res->broken) {
-		r->incomplete++;
 		if (res->broken < KOF_BROKEN_COUNT)
 			r->by_reason[res->broken]++;
-		printf("%-10s %s: %s\n", "BROKEN", name,
-		       kof_broken_name(res->broken));
+		if (res->n == 0 || r->verbose)
+			printf("%s%-10s%s %s: %s\n", col(r, C_CYN), "BROKEN",
+			       col(r, C_RST), name, kof_broken_name(res->broken));
 	}
-	if (res->n == 0) {
-		if (r->verbose && !res->broken)
-			printf("%-10s %s\n", "OK", name);
-		return 0;
-	}
-	for (i = 0; i < res->n; i++) {
-		printf("%-10s %s: %s\n", level_str(res->v[i].level), name,
-		       res->v[i].name);
-		/*
-		 * Ranked, not compared as numbers.
-		 *
-		 * KOF_LEVEL_HEUR is 2 and INFECT is 1, so ">" made a heuristic
-		 * outrank a named detection - the weakest answer presented as
-		 * the strongest. The values are identifiers; the order they are
-		 * reported in is a separate fact and belongs here.
-		 */
-		if (rank_of((int)res->v[i].level) > rank_of(worst))
-			worst = (int)res->v[i].level;
-	}
+
 	/*
-	 * One object, one count, at its highest level.
-	 *
-	 * Two modules may both name an object, one certain and one not; counting each
-	 * finding would report more infected objects than there are objects, and
-	 * counting the object in both columns would report it twice. Neither is a
-	 * number anyone can act on.
-	 *
-	 * There is no third number for findings. Once an object is reported at its
-	 * level, the count of how many modules agreed is about the database rather
-	 * than about the disk, and it reads as a severity by anyone scanning the
-	 * summary - an object named by four modules is not worse than one named by
-	 * one. Every finding is printed above; the summary counts objects.
+	 * Roll this object's verdict up into its top-level file. Non-clean objects
+	 * always get an entry so the file is counted; a clean object touches one
+	 * only under -v, where every file is listed at the end whatever it turned
+	 * out to be.
 	 */
-	if (worst == KOF_LEVEL_INFECT)
-		r->infected++;
-	else if (worst == KOF_LEVEL_SUSPECT)
-		r->suspect++;
-	else if (worst == KOF_LEVEL_HEUR)
-		r->heur++;
+	if (res->n || res->broken || r->verbose) {
+		struct fent *e = fmap_get(&r->files, name, flen);
+
+		if (e) {
+			if (worst >= 0 && rank_of(worst) > rank_of(e->level)) {
+				e->level = worst;
+				snprintf(e->name, sizeof e->name, "%s",
+					 worst_name ? worst_name : "");
+			}
+			if (res->broken && !e->broken)
+				e->broken = res->broken;
+		}
+	}
+
 	if (res->dropped) {
-		printf("%-10s %s: %u further finding(s) not reported\n", "NOTE",
-		       name, res->dropped);
+		printf("%s%-10s%s %s: %u further finding(s) not reported\n",
+		       col(r, C_DIM), "NOTE", col(r, C_RST), name, res->dropped);
 		r->dropped += res->dropped;
 	}
 	return 0;
@@ -353,8 +496,6 @@ static void usage(const char *argv0)
 		"                  damaged, and scans what it writes - which is the\n"
 		"                  one level here that costs real time. It reports a\n"
 		"                  level of its own and never a family\n"
-		"  --dump DIR      write every object the engine PRODUCED into DIR:\n"
-		"                  what came out of an unpacker, not what went in\n"
 		"  --jobs N        scan on N threads (default 1). The objects come\n"
 	    "                  back in whatever order the workers finish them,\n"
 	    "                  which is the one thing this changes besides speed\n"
@@ -431,6 +572,9 @@ int main(int argc, char **argv)
 	struct timespec t0, t1;
 	double secs, mb;
 	uint64_t unreadable = 0;
+	/* The file-level tallies, computed from the per-file map for the summary
+	 * and read again by the exit code after the map is gone. */
+	uint64_t inf_f = 0, sus_f = 0, broken_objs = 0;
 	int i, rc;
 	/*
 	 * What --emu asked for, held back until every argument has been read.
@@ -520,8 +664,6 @@ int main(int argc, char **argv)
 			opt.max_resident_bytes = strtoull(argv[++i], NULL, 10);
 		else if (strcmp(argv[i], "--max-object") == 0 && i + 1 < argc)
 			opt.max_object_bytes = strtoull(argv[++i], NULL, 10);
-		else if (strcmp(argv[i], "--dump") == 0 && i + 1 < argc)
-			r.dump_dir = argv[++i];
 		else if (strcmp(argv[i], "--jobs") == 0 && i + 1 < argc) {
 			unsigned long v = strtoul(argv[++i], NULL, 10);
 
@@ -638,6 +780,10 @@ int main(int argc, char **argv)
 	 * that separates those two without anybody having to answer it.
 	 */
 	r.progress = isatty(2) ? 1 : 0;
+	/* Colour follows the same rule, asked of stdout because that is where the
+	 * findings go: a redirect or a pipe gets plain text, a terminal gets the
+	 * highlight. */
+	r.color = isatty(1) ? 1 : 0;
 
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	if (jobs > 1)
@@ -651,8 +797,6 @@ int main(int argc, char **argv)
 
 	secs = (double)(t1.tv_sec - t0.tv_sec) +
 	       (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
-	if (r.manifest)
-		fclose(r.manifest);
 	/*
 	 * The totals, summed over every scanner that ran.
 	 *
@@ -697,49 +841,150 @@ int main(int argc, char **argv)
 	}
 	mb = st ? (double)st->object_bytes / 1048576.0 : 0.0;
 
+	/*
+	 * Under -v, the files that came back clean, at the file level.
+	 *
+	 * The findings above already named every infected, suspected, heuristic or
+	 * broken file where it was found, so only the clean ones are left to
+	 * mention - and a scanner that says nothing about a file a person asked it
+	 * to look at reads as a scanner that skipped it. One line per file, not per
+	 * object, so a container and the layers it unpacked to are one "OK".
+	 */
+	if (r.verbose) {
+		size_t fi;
+
+		for (fi = 0; fi < r.files.n; fi++) {
+			const struct fent *e = &r.files.arr[fi];
+
+			if (e->level < 0 && !e->broken)
+				printf("%s%-10s%s %s\n", col(&r, C_GRN), "OK",
+				       col(&r, C_RST), e->file);
+		}
+	}
+
 	printf("\n--- scan complete ---\n");
-	printf("scanned   %llu object(s), %.2f MB\n",
-	       st ? (unsigned long long)st->objects : 0ull, mb);
-	printf("infected  %llu object(s)\n", (unsigned long long)r.infected);
-	printf("suspected %llu object(s)\n", (unsigned long long)r.suspect);
+
 	/*
-	 * Its own line, and printed even at zero when the heuristic ran.
+	 * COUNTS ARE PER FILE, rolled up from the objects inside it.
 	 *
-	 * A number that appears only when it is non-zero cannot be read as "the
-	 * heuristic found nothing" - it reads as "the heuristic was off", and the
-	 * two are the difference between a quiet scan and a scan that did not
-	 * look.
+	 * A packed file scanned as three objects, one of them the malware, is one
+	 * infected file - not two clean objects plus one infected. So the summary
+	 * reads the verdict this run kept for each top-level file rather than
+	 * counting objects, which would call one file both clean and infected on
+	 * two different lines. -v listed every clean OBJECT, so a container whose
+	 * child was the malware printed "OK <file>" above the child's finding; the
+	 * roll-up is what stops that.
 	 */
-	/*
-	 * "broken structure", not "by structure, no family named".
-	 *
-	 * The old wording said what the line was NOT - it named no family -
-	 * which reads as an apology for a weaker verdict. What the number
-	 * actually counts is objects whose STRUCTURE scored past the bar:
-	 * truncated, stripped, segments that overlap, an entry point that is
-	 * not executable. There is no vector here for which family an object
-	 * belongs to and there never was, so the line now says the thing it can
-	 * support rather than the thing it cannot.
-	 */
-	if (!opt.heur_off)
-		printf("heuristic %llu object(s) with broken structure\n",
-		       (unsigned long long)r.heur);
-	/*
-	 * Broken objects, split by reason. The three call for different actions -
-	 * raise a limit, report a gap in this build, or accept that the file is
-	 * damaged - so one total would say the least useful thing the numbers can
-	 * say.
-	 */
-	if (r.incomplete) {
+	{
+		/* Heuristic files broken down by the WORD each finding carries, so
+		 * the summary can say "Shellcode" and "Truncated" apart rather than
+		 * calling a well-formed shellcode shape "broken structure". */
+		struct { char kind[48]; uint64_t n; } hk[16];
+		int n_hk = 0, j;
+		uint64_t heur_f = 0, broken_f = 0, clean_f;
+		uint64_t rf[KOF_BROKEN_COUNT];   /* broken FILES, by their reason */
+		size_t fi;
 		uint32_t k;
 
-		printf("broken    %llu object(s) the engine could not finish\n",
-		       (unsigned long long)r.incomplete);
+		memset(rf, 0, sizeof rf);
+		for (fi = 0; fi < r.files.n; fi++) {
+			const struct fent *e = &r.files.arr[fi];
+
+			if (e->level == KOF_LEVEL_INFECT) {
+				inf_f++;
+			} else if (e->level == KOF_LEVEL_SUSPECT) {
+				sus_f++;
+			} else if (e->level == KOF_LEVEL_HEUR) {
+				char kb[48];
+				const char *kd = heur_kind(e->name, kb, sizeof kb);
+
+				heur_f++;
+				if (kd) {
+					for (j = 0; j < n_hk; j++)
+						if (!strcmp(hk[j].kind, kd))
+							break;
+					if (j == n_hk &&
+					    n_hk < (int)(sizeof hk / sizeof hk[0])) {
+						snprintf(hk[n_hk].kind,
+							 sizeof hk[n_hk].kind, "%s", kd);
+						hk[n_hk].n = 0;
+						n_hk++;
+					}
+					if (j < n_hk)
+						hk[j].n++;
+				}
+			} else if (e->broken) {
+				broken_f++;
+				if (e->broken < KOF_BROKEN_COUNT)
+					rf[e->broken]++;
+			}
+		}
+		/* Per OBJECT, for the exit code only: any object a limit or a gap
+		 * stopped means the scan did not see all of the tree, whatever the
+		 * file it was in rolled up to. */
 		for (k = 1; k < KOF_BROKEN_COUNT; k++)
-			if (r.by_reason[k])
-				printf("            %-28s %llu\n",
-				       kof_broken_name(k),
-				       (unsigned long long)r.by_reason[k]);
+			broken_objs += r.by_reason[k];
+		/*
+		 * Clean is the files nothing was said about, and it is a SUBTRACTION
+		 * clamped so it cannot wrap. It cannot go negative under any normal
+		 * path - every file has one root object, counted once - but a target
+		 * whose own name contains "//" (the separator the engine puts between
+		 * a parent and its children) would miscount the root, and an unsigned
+		 * underflow there would print a clean count in the billions.
+		 */
+		{
+			uint64_t nonclean = inf_f + sus_f + heur_f + broken_f;
+
+			clean_f = r.files_total > nonclean
+				  ? r.files_total - nonclean : 0;
+		}
+
+		printf("scanned   %llu object(s) in %llu file(s), %.2f MB\n",
+		       st ? (unsigned long long)st->objects : 0ull,
+		       (unsigned long long)r.files_total, mb);
+		printf("infected  %s%llu%s file(s)\n",
+		       inf_f ? col(&r, C_RED) : "", (unsigned long long)inf_f,
+		       inf_f ? col(&r, C_RST) : "");
+		printf("suspected %s%llu%s file(s)\n",
+		       sus_f ? col(&r, C_YEL) : "", (unsigned long long)sus_f,
+		       sus_f ? col(&r, C_RST) : "");
+		/*
+		 * HEURISTIC, split by KIND. Printed even at zero when the heuristic
+		 * ran, so a reader can tell "found nothing" from "was switched off".
+		 * The old single line said "with broken structure", which is true of
+		 * the scored model - truncated, overlapping, an entry that is not
+		 * executable - and wrong about a rule that recognised a shellcode
+		 * SHAPE in a perfectly well-formed file. Each kind now speaks for
+		 * itself.
+		 */
+		if (!opt.heur_off) {
+			printf("heuristic %s%llu%s file(s)\n",
+			       heur_f ? col(&r, C_MAG) : "",
+			       (unsigned long long)heur_f,
+			       heur_f ? col(&r, C_RST) : "");
+			for (j = 0; j < n_hk; j++)
+				printf("            %-20s %llu\n", hk[j].kind,
+				       (unsigned long long)hk[j].n);
+		}
+		/*
+		 * Broken files, split by reason. The reasons are counted per object
+		 * because that is where they happen - one file may hold several - and
+		 * the three call for different actions: raise a limit, report a gap in
+		 * this build, or accept that the file is damaged.
+		 */
+		if (broken_f) {
+			printf("broken    %s%llu%s file(s) the engine could not finish\n",
+			       col(&r, C_CYN), (unsigned long long)broken_f,
+			       col(&r, C_RST));
+			for (k = 1; k < KOF_BROKEN_COUNT; k++)
+				if (rf[k])
+					printf("            %-28s %llu\n",
+					       kof_broken_name(k),
+					       (unsigned long long)rf[k]);
+		}
+		printf("clean     %s%llu%s file(s)\n",
+		       clean_f ? col(&r, C_GRN) : "", (unsigned long long)clean_f,
+		       clean_f ? col(&r, C_RST) : "");
 	}
 	/* Throughput beside the time it came from: on its own, a duration says nothing
 	 * without the size of what was scanned, and both are already here. Guarded
@@ -774,6 +1019,7 @@ int main(int argc, char **argv)
 	}
 	kof_scanner_free(sc);
 	kof_engine_close(eng);
+	fmap_free(&r.files);
 
 	/*
 	 * Three outcomes, not two, because "found nothing" and "could not look" are
@@ -788,12 +1034,13 @@ int main(int argc, char **argv)
 	 * A detection outranks an error: if something was found, that is the answer,
 	 * whatever else was skipped alongside it.
 	 */
-	if (r.infected || r.suspect)
+	if (inf_f || sus_f)
 		return 1;
 	/* "Could not finish" belongs with "could not look", not with "found
 	 * nothing": a caller that treats an exhausted budget as a clean scan has
-	 * been evaded rather than reassured. */
-	if (rc < 0 || unreadable || r.incomplete)
+	 * been evaded rather than reassured. broken_objs counts the objects a limit
+	 * or a gap stopped, which is the per-object fact the exit turns on. */
+	if (rc < 0 || unreadable || broken_objs)
 		return 2;
 	return 0;
 }
