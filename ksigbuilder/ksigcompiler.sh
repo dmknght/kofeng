@@ -376,13 +376,16 @@ if [ "$nphase" -eq 1 ]; then
 fi
 for w in $(sed -n 's/.*KOF_HEUR_WANT(\([^)]*\)).*/\1/p' "$src" | tr '|' ' '); do
 	case "$w" in
-	*KOF_ENG_SCAN_EMU*) heur_want=$((heur_want | 1)) ;;
+	*KOF_ENG_USE_EMU*) heur_want=$((heur_want | 1)) ;;
 	*)
 		echo "FAIL: KOF_HEUR_WANT($w) names nothing the engine offers" >&2
 		exit 1 ;;
 	esac
 done
 heur_name=$(sed -n 's/.*KOF_HEUR_NAME("\([^"]*\)").*/\1/p' "$src" | head -1)
+# The predicted family, if the rule declares one. Optional - a rule may report a
+# shape without guessing an identity.
+heur_predict=$(sed -n 's/.*KOF_HEUR_PREDICT("\([^"]*\)").*/\1/p' "$src" | head -1)
 
 subtype_mask=0        # 0 == any kind of the declared format
 
@@ -890,6 +893,8 @@ cp "$raw" "$blob"
 	printf 'unp_kind=%s\n' "$unp_kind"
 	printf 'heur_phase=%s\n' "$heur_phase"
 	printf 'heur_want=%s\n'  "$heur_want"
+	# A rule's predicted family, if it declared one. Empty on every other kind.
+	printf 'heur_predict=%s\n' "$heur_predict"
 	# What KOF_TARGET_NAME declared - empty/0 for an unpack-kind module, where
 	# it is not required. ksigbuilder's --extract already validated these; this
 	# is a straight copy through .pre, same as scan_mask above.

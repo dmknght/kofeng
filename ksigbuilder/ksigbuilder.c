@@ -1889,6 +1889,9 @@ struct artefact {
 	char    *family;
 	uint32_t maltype;
 
+	/* What KOF_HEUR_PREDICT declared, or NULL. Only a rule has one. */
+	char    *heur_predict;
+
 	/* What this module fires on: preconditions plus the exact pattern/region
 	 * set, order independent. See artefact_fingerprint. Not a security hash and
 	 * not stored anywhere beyond this run - it exists only to warn when two
@@ -1913,6 +1916,7 @@ static void artefact_free(struct artefact *a)
 	free(a->label);
 	free(a->srcpath);
 	free(a->family);
+	free(a->heur_predict);
 	free(a->code);
 	free(a->str);
 	free(a->rng);
@@ -2078,6 +2082,20 @@ static int meta_load(struct artefact *a)
 			}
 		} else if (strncmp(line, "maltype=", 8) == 0) {
 			a->maltype = (uint32_t)strtoul(line + 8, 0, 10);
+		} else if (strncmp(line, "heur_predict=", 13) == 0) {
+			char *nl = strchr(line + 13, '\n');
+
+			if (nl)
+				*nl = 0;
+			free(a->heur_predict);
+			/* Empty stays NULL: a rule that predicts nothing must
+			 * not intern a zero-length name and carry an offset
+			 * that reads as a prediction of "". */
+			a->heur_predict = line[13] ? strdup(line + 13) : NULL;
+			if (line[13] && !a->heur_predict) {
+				fclose(f);
+				goto out;
+			}
 		}
 	}
 	fclose(f);
@@ -2910,6 +2928,7 @@ int main(int argc, char **argv)
 			pm[a].n_names     = s->n_names;
 			pm[a].family      = s->family;
 			pm[a].maltype     = s->maltype;
+			pm[a].heur_predict = s->heur_predict;
 		}
 
 		img = kof_pack_build(g->kind, pm, g->n, &img_len);

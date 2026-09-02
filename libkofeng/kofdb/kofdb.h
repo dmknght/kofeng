@@ -137,6 +137,10 @@ struct kof_module {
 	uint32_t heur_phase;
 	uint32_t heur_want;
 
+	/* The family a rule predicts, into the pack's name pool, or 0. Read with
+	 * kof_db_heur_predict(). */
+	uint32_t heur_predict_off;
+
 	/*
 	 * enum kof_pack_kind, from the pack this came out of.
 	 *
@@ -315,6 +319,10 @@ const char *kof_db_name_at(const struct kof_engine *, const struct kof_module *,
  * kof_db_name's own comment gives. NULL if the record does not hold together;
  * "" (not NULL) for a module that legitimately declared none. */
 const char *kof_db_family(const struct kof_engine *, const struct kof_module *);
+
+/* The family a heuristic rule predicts, or NULL. See KOF_HEUR_PREDICT. */
+const char *kof_db_heur_predict(const struct kof_engine *,
+				const struct kof_module *);
 
 /*
  * Where this module's source lives inside the bases tree, or NULL.

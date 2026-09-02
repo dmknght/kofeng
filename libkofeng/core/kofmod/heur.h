@@ -40,7 +40,7 @@
  * A rule may ask for work to be done on the object it just fired on - today the
  * only thing to ask for is the emulator. The ask is DECLARED, not called:
  *
- *     KOF_HEUR_WANT(KOF_ENG_SCAN_EMU);
+ *     KOF_HEUR_WANT(KOF_ENG_USE_EMU);
  *
  * Declared for three reasons, and they are worth more than the flexibility a
  * runtime call would add. It is greppable - which rules can turn the emulator
@@ -76,7 +76,7 @@ enum kof_heur_phase_id {
 /* What a rule may ask the engine to do with the object it fired on. A mask, so
  * two rules asking for the same thing is the same request. */
 enum kof_eng_want {
-	KOF_ENG_SCAN_EMU = 1u << 0    /* interpret this object's entry point */
+	KOF_ENG_USE_EMU = 1u << 0    /* interpret this object's entry point */
 };
 
 /*
@@ -94,6 +94,32 @@ enum kof_eng_want {
  * rule that spelled a maltype would be claiming to have identified something.
  */
 #define KOF_HEUR_NAME(word)
+
+/*
+ * WHAT THE RULE THINKS THIS WILL TURN OUT TO BE. Optional.
+ *
+ * A guess about identity, kept apart from KOF_HEUR_NAME because the two are
+ * different claims and a reader has to be able to tell them apart:
+ *
+ *     KOF_HEUR_NAME("Shellcode")    the SHAPE, which the rule established
+ *     KOF_HEUR_PREDICT("Meterp")    the FAMILY it expects, which it has not
+ *
+ * It is written into the finding after a '?', so the object reads
+ *
+ *     ELF-x64/Heur:Shellcode?Meterp
+ *
+ * and the question mark is the whole point: this is a prediction and nothing
+ * has confirmed it. The moment a signature matches on real bytes - the payload
+ * an unpacker or the emulator recovered - that signature's name supersedes the
+ * finding entirely and the guess is gone. A prediction never becomes a verdict
+ * by being repeated; it is replaced by evidence or it stays a question.
+ *
+ * It also STEERS: an object predicted to be family F has F's decoders tried
+ * first. That is a reordering and never a filter - every decoder still runs when
+ * the predicted one produces nothing - so a wrong prediction costs the ordering
+ * and nothing else. See unp_order in scan.c.
+ */
+#define KOF_HEUR_PREDICT(family)
 
 /*
  * Entry point. One per module, and a module exporting kof_scan or kof_unpack as

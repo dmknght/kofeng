@@ -580,6 +580,7 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		m->unp_kind   = pm[i].unp_kind;
 		m->heur_phase = pm[i].heur_phase;
 		m->heur_want  = pm[i].heur_want;
+		m->heur_predict_off = pm[i].heur_predict_off;
 		m->kind       = (uint8_t)h->kind;
 		m->src_off    = pm[i].src_off;
 
@@ -752,7 +753,17 @@ const char *kof_db_name_at(const struct kof_engine *e,
  * here - just the same two checks kof_db_name's loop body makes for whichever
  * descriptor it found.
  */
-const char *kof_db_family(const struct kof_engine *e, const struct kof_module *m)
+/*
+ * A string at `off` in the module's own pack's name pool, or NULL.
+ *
+ * One function because three fields are stored the same way - the family, the
+ * predicted family and the source path - and each is an offset that has to be
+ * bounded against the pool and checked for a terminator before it is returned
+ * as a C string. Three copies of that would be three places for one of the two
+ * checks to go missing.
+ */
+static const char *db_pool_str(const struct kof_engine *e,
+			       const struct kof_module *m, uint32_t off)
 {
 	const struct kof_pack_hdr *h;
 	const uint8_t *base;
@@ -773,12 +784,31 @@ const char *kof_db_family(const struct kof_engine *e, const struct kof_module *m
 		return NULL;
 
 	pool = (const char *)base + pool_off;
-	if (m->family_off >= pool_len)
+	if (off >= pool_len)
 		return NULL;
-	if (memchr(pool + m->family_off, 0,
-		   (size_t)(pool_len - m->family_off)) == NULL)
+	if (memchr(pool + off, 0, (size_t)(pool_len - off)) == NULL)
 		return NULL;
-	return pool + m->family_off;
+	return pool + off;
+}
+
+const char *kof_db_family(const struct kof_engine *e, const struct kof_module *m)
+{
+	return db_pool_str(e, m, m ? m->family_off : 0);
+}
+
+/*
+ * The family a heuristic rule PREDICTS, or NULL when it predicts nothing.
+ *
+ * Zero is "no prediction" and not "offset zero": the packer interns nothing for
+ * a rule without KOF_HEUR_PREDICT, and offset zero in the pool belongs to
+ * whatever string happened to be interned first.
+ */
+const char *kof_db_heur_predict(const struct kof_engine *e,
+				const struct kof_module *m)
+{
+	if (!m || !m->heur_predict_off)
+		return NULL;
+	return db_pool_str(e, m, m->heur_predict_off);
 }
 
 /*

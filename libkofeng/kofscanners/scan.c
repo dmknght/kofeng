@@ -512,13 +512,54 @@ static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ct
  */
 #define HEUR_EMU_MAX 512u
 
+/*
+ * The preconditions an unpacker gets, the same a detector does minus the region
+ * test an unpacker has no use for. Its own function because the two passes below
+ * both apply it, and a check that lived in one loop and not the other would let
+ * the family pass run a module the general pass would have ruled out.
+ */
+static int unp_eligible(const struct kof_module *m,
+			const struct kof_obj_ctx *ctx,
+			const struct kof_scan_option *opt)
+{
+	/*
+	 * KOF_EMU_ONLY replaces the packer modules and only those. A container
+	 * still has to be opened by the code that knows its format - there is
+	 * nothing to interpret in a zip.
+	 */
+	if (opt->emu_use == KOF_EMU_ONLY && m->unp_kind == KOF_UNP_PACKER)
+		return 0;
+	if (!(m->target_mask & (1u << ctx->format)))
+		return 0;
+	if (ctx->obj_size < m->size_min)
+		return 0;
+	if (m->arch_mask &&
+	    (ctx->arch >= 32 || !(m->arch_mask & (1u << ctx->arch))))
+		return 0;
+	return 1;
+}
+
+/* Whether an unpacker's declared family is the one a rule predicted. Both are
+ * strings; NULL on either side is "no", so an unpacker that declares no family
+ * never matches and an object with no prediction never has a family pass. */
+static int unp_is_family(const struct kof_scanner *sc,
+			 const struct kof_module *m, const char *predict)
+{
+	const char *fam;
+
+	if (!predict)
+		return 0;
+	fam = kof_db_family(sc->eng, m);
+	return fam && strcmp(fam, predict) == 0;
+}
+
 static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			 const struct kof_scan_option *opt,
 			 const struct kof_result *res, uint32_t pdepth,
-			 uint32_t want)
+			 uint32_t want, const char *predict)
 {
 	uint32_t i;
-	int applies = 0;
+	int applies = 0, family_opened = 0;
 
 	if (sc->eng->n_unp == 0)
 		return 0;
@@ -571,28 +612,58 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	sc->stop = 0;
 
 	kof_mod_unpack_mode(ctx, 1);
-	for (i = 0; i < sc->eng->n_unp; i++) {
+
+	/*
+	 * FAMILY FIRST, when a rule predicted one.
+	 *
+	 * A heuristic that fired on this object may have named the family it
+	 * expects - see KOF_HEUR_PREDICT. The decoders of that family are tried
+	 * before any other, so an object correctly predicted is opened by the
+	 * one module written for it and the rest are never entered.
+	 *
+	 * This is a REORDERING and never a filter, and the distinction is the
+	 * whole safety of it. If the predicted family's decoders open the object
+	 * the general pass is skipped - the best case, and the only time
+	 * anything is saved. If they do not, the general pass runs every
+	 * eligible unpacker exactly as it always has. So a wrong prediction
+	 * costs the order it imposed and misses nothing: the worst case is the
+	 * old case. The number of children before and after is how "did it open
+	 * it" is answered, because producing a child is the only thing an
+	 * unpacker does that the next pass would want to know about.
+	 */
+	if (predict) {
+		uint32_t kids0 = sc->n_kids;
+
+		for (i = 0; i < sc->eng->n_unp && !sc->broken; i++) {
+			const struct kof_module *m = &sc->eng->unp[i];
+
+			if (!unp_eligible(m, ctx, opt) ||
+			    !unp_is_family(sc, m, predict))
+				continue;
+			applies = 1;
+			sc->cur_mod = m;
+			m->fn(ctx);
+			sc->cur_mod = NULL;
+		}
+		family_opened = sc->n_kids > kids0;
+	}
+
+	/*
+	 * The general pass, unless the predicted family already opened it.
+	 *
+	 * It skips the family-matched modules when a prediction was made,
+	 * because the family pass above already ran them - re-running one that
+	 * declined would be doing its work twice.
+	 */
+	for (i = 0; !family_opened && i < sc->eng->n_unp; i++) {
 		const struct kof_module *m = &sc->eng->unp[i];
 
-		/* The same preconditions a detector gets: an unpacker for PE has no
-		 * business being entered for an ELF. The region test is skipped -
-		 * an unpacker names no region to search. */
-		/*
-		 * KOF_EMU_ONLY replaces the packer modules and only those. A
-		 * container still has to be opened by the code that knows its
-		 * format - there is nothing to interpret in a zip - so asking
-		 * for the interpreter must not also turn off the archive
-		 * readers underneath it.
-		 */
-		if (opt->emu_use == KOF_EMU_ONLY &&
-		    m->unp_kind == KOF_UNP_PACKER)
+		if (!unp_eligible(m, ctx, opt))
 			continue;
-		if (!(m->target_mask & (1u << ctx->format)))
-			continue;
-		if (ctx->obj_size < m->size_min)
-			continue;
-		if (m->arch_mask &&
-		    (ctx->arch >= 32 || !(m->arch_mask & (1u << ctx->arch))))
+		/* Skip what the family pass already tried. Guarded on `predict`
+		 * so the resolve-and-compare is not paid on the overwhelming
+		 * majority of objects, which no rule spoke for. */
+		if (predict && unp_is_family(sc, m, predict))
 			continue;
 
 		applies = 1;
@@ -662,16 +733,38 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 *     scan into minutes, and that is a cost a file's contents would be
 	 *     choosing.
 	 */
-	if (!sc->broken && (want & KOF_ENG_SCAN_EMU) &&
-	    !opt->emu_forbidden && opt->emu_use == KOF_EMU_NEVER &&
+	/*
+	 * A RULE'S ASK IS THE GATE when it fires, in any mode that permits the
+	 * emulator at all.
+	 *
+	 *   - it does not fire under --emu never (emu_forbidden), which is the
+	 *     one refusal a rule may not talk past;
+	 *   - it yields to a static unpacker that already opened the object
+	 *     (!packed_here) - the same guard the AUTO fallback carries, because
+	 *     a payload peeled without running anything must not be run as well;
+	 *   - it is bounded by the packer depth and by HEUR_EMU_MAX.
+	 *
+	 * When it does fire, the emulator is FORCED - the entropy gate below is
+	 * skipped. That is the performance point and a correctness fix at once.
+	 * Cheaper: the rule read a few parse fields where the gate makes a
+	 * byte-histogram pass over every executable segment. Stricter: the gate
+	 * needs DENSE_MIN bytes of code before its estimate means anything, and a
+	 * meterpreter payload is smaller than that - so the gate returned NO on
+	 * exactly the objects the rule fires on, and --heur 2 missed a shikata
+	 * sample --heur 1 caught. The shape fires on 0 of 5252 clean objects, so
+	 * it is a safe thing to force emulation on.
+	 */
+	if (!sc->broken && (want & KOF_ENG_USE_EMU) &&
+	    !opt->emu_forbidden && !sc->packed_here &&
 	    pdepth <= EMU_MAX_PACKER_DEPTH &&
 	    sc->st.heur_emu < HEUR_EMU_MAX) {
 		sc->st.heur_emu++;
-		if (kof_scan_emu_unpack(ctx, 0))
+		if (kof_scan_emu_unpack(ctx, 1))
 			applies = 1;
 	} else if (!sc->broken && opt->emu_use != KOF_EMU_NEVER &&
 		   pdepth <= EMU_MAX_PACKER_DEPTH &&
 		   (opt->emu_use == KOF_EMU_ONLY || !sc->packed_here)) {
+		/* The entropy gate, for objects no rule spoke for. */
 		if (kof_scan_emu_unpack(ctx, opt->emu_use == KOF_EMU_ONLY))
 			applies = 1;
 	}
@@ -827,10 +920,12 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			 const struct kof_scan_option *opt,
 			 struct kof_result *out, uint32_t phase,
-			 uint32_t present)
+			 uint32_t present, const char **predict)
 {
 	uint32_t want = 0, i;
 
+	if (predict)
+		*predict = NULL;
 	if (opt->heur_off)
 		return 0;
 	for (i = 0; i < sc->eng->n_heur; i++) {
@@ -849,6 +944,22 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		if (!sc->rep_valid)
 			continue;
 		want |= m->heur_want;
+		/*
+		 * The FIRST prediction wins, and it is kept whether or not this
+		 * rule's finding survives the named-family test below.
+		 *
+		 * Kept, because a prediction is used for two different things: it
+		 * is written into the finding, and it decides which decoder is
+		 * tried first. The second is worth having even on an object a
+		 * signature already named - the name is about the container, the
+		 * decoder is about what is inside it.
+		 */
+		if (predict && !*predict) {
+			const char *pf = kof_db_heur_predict(sc->eng, m);
+
+			if (pf && pf[0])
+				*predict = pf;
+		}
 		/*
 		 * A NAMED FAMILY SUPERSEDES A GUESS ABOUT THE SHAPE, and the
 		 * rule is the same one the scored model follows a few functions
@@ -870,9 +981,32 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		}
 		if (out->n < KOF_MAX_FINDINGS) {
 			struct kof_finding *f = &out->v[out->n++];
+			const char *pf = kof_db_heur_predict(sc->eng, m);
 
 			f->level = KOF_LEVEL_HEUR;
 			finding_str(sc, ctx, m, f->name, sizeof f->name);
+			/*
+			 * The guess, after a question mark: Heur:Shellcode?Meterp.
+			 *
+			 * The shape is what the rule established and goes in the
+			 * name proper; this is what it expects the object to turn
+			 * out to be and has not shown. The punctuation is the
+			 * whole distinction, and it is why the two are not simply
+			 * concatenated - a reader has to be able to see which
+			 * half is evidence.
+			 *
+			 * Appended rather than composed inside finding_str
+			 * because that function is shared with the detectors,
+			 * and a detector has nothing to predict: it either
+			 * identified the family or it did not report.
+			 */
+			if (pf && pf[0]) {
+				size_t at = strlen(f->name);
+
+				if (at + 2 < sizeof f->name)
+					snprintf(f->name + at,
+						 sizeof f->name - at, "?%s", pf);
+			}
 		} else {
 			out->dropped++;
 		}
@@ -892,6 +1026,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 {
 	struct kof_obj_ctx ctx;
 	uint32_t present, i, want;
+	const char *predict = NULL;
 
 	out->from_packer = (uint8_t)(from_packer != 0);
 	memset(&ctx, 0, sizeof ctx);
@@ -967,12 +1102,12 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * here and not later because this is the last moment at which what it
 	 * asks for can still change what happens to the object.
 	 */
-	want = heur_run(sc, &ctx, opt, out, KOF_HEUR_EXAMINE, present);
+	want = heur_run(sc, &ctx, opt, out, KOF_HEUR_EXAMINE, present, &predict);
 
-	out->broken = unpack_object(sc, &ctx, opt, out, pdepth, want);
+	out->broken = unpack_object(sc, &ctx, opt, out, pdepth, want, predict);
 
 	/* VERDICT: how it was reached, which only exists once it has been. */
-	(void)heur_run(sc, &ctx, opt, out, KOF_HEUR_VERDICT, present);
+	(void)heur_run(sc, &ctx, opt, out, KOF_HEUR_VERDICT, present, NULL);
 
 	/* Last, because the unpack result is one of the facts. */
 	heur_object(sc, &ctx, opt, pdepth, out->broken == KOF_BROKEN_DAMAGED, out);

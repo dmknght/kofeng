@@ -333,6 +333,15 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 		o->unp_kind = m->unp_kind;
 		o->heur_phase = m->heur_phase;
 		o->heur_want  = m->heur_want;
+		/* Interned like the family and the source path: the text lives
+		 * once in the pool and the record carries an offset. */
+		if (m->heur_predict && m->heur_predict[0]) {
+			uint32_t predict_uid;
+
+			if (!name_intern(&dn, &b->name_pool, m->heur_predict,
+					 &o->heur_predict_off, &predict_uid))
+				goto out;
+		}
 		if (m->src && m->src[0]) {
 			uint32_t src_uid;
 

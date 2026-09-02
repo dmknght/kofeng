@@ -132,8 +132,17 @@
  * unpacker is a packer or a container, and the heuristic now scores that - so a
  * stale pack is refused rather than read with the field assumed zero, which
  * would silently classify UPX as an archive.
+ *
+ * 7: struct kof_pack_mod grew heur_phase and heur_want, for the rule-based
+ * heuristic kind - see kofmod/heur.h.
+ *
+ * 8: it grew heur_predict_off with it. A rule may now name the family it expects
+ * an object to turn out to be, which the engine both reports and uses to decide
+ * which decoder to try first. Read as zero from a v7 pack it would mean "no
+ * prediction", which is not wrong so much as silently less useful - and a pack
+ * is a build artefact, so refusing costs a rebuild and nothing else.
  */
-#define KOF_PACK_VERSION 7u
+#define KOF_PACK_VERSION 8u
 
 /*
  * The machine the code in this pack was built for. Not an architecture the pack
@@ -477,6 +486,16 @@ struct kof_pack_mod {
 	uint32_t heur_want;
 
 	/*
+	 * The family a rule PREDICTS, into KOF_SEC_NAME_POOL like family_off, or
+	 * zero when it predicts nothing.
+	 *
+	 * Its own field and not family_off, because on a rule that slot already
+	 * holds the shape word - "Shellcode" - and the two are different claims.
+	 * See KOF_HEUR_PREDICT in kofmod/heur.h.
+	 */
+	uint32_t heur_predict_off;
+
+	/*
 	 * THE SOURCE THIS MODULE WAS WRITTEN IN, relative to the bases tree.
 	 *
 	 * Into KOF_SEC_NAME_POOL like the family, and zero when the source was
@@ -641,7 +660,7 @@ struct kof_pack_idx {
  * entered at the wrong offset. These fail the build instead.
  */
 _Static_assert(sizeof(struct kof_pack_sec)  == 16,  "pack section entry grew padding");
-_Static_assert(sizeof(struct kof_pack_mod)  == 56,  "pack module record grew padding");
+_Static_assert(sizeof(struct kof_pack_mod)  == 60,  "pack module record grew padding");
 _Static_assert(sizeof(struct kof_pack_str)  == 12,  "pack string descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_name) == 8,   "pack name descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_idx)  == 8,   "pack index slot grew padding");

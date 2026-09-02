@@ -102,6 +102,18 @@ KOF_UNPACK_KIND(KOF_UNP_PACKER);
 KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_UNKNOWN);
 
 /*
+ * THE FAMILY THIS DECODES, so the engine can try it first.
+ *
+ * An unpacker reports no findings, so this names nothing on its own - it is
+ * unread by everything except the family-first routing in scan.c. A heuristic
+ * that predicts "Meterp" (see bases/heur/shellcode_00.c) makes the engine run
+ * the unpackers of family Meterp - this one - before the rest. On an object that
+ * really is a Meterp payload that is the fast path; on one that is not, this
+ * declines like any other unpacker and the general pass runs.
+ */
+KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, "Meterp");
+
+/*
  * NO ARCHITECTURE IS DECLARED, and it is tempting to declare one: the stub is
  * amd64 machine code and on any other architecture these bytes are data that
  * happens to look like it.

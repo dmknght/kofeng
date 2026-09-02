@@ -51,7 +51,16 @@ KOF_TARGET_FORMAT(KOF_FMT_ELF);
  */
 KOF_HEUR_PHASE(KOF_HEUR_EXAMINE);
 KOF_HEUR_NAME("Shellcode");
-KOF_HEUR_WANT(KOF_ENG_SCAN_EMU);
+
+/*
+ * The shape is the shape of a msfvenom payload, and the family it most often
+ * carries is meterpreter - so the rule guesses "Meterp" and the engine both
+ * reports it (Heur:Shellcode?Meterp) and tries the Meterp decoder first. The
+ * guess never becomes a verdict: if a decoder recovers the payload and a
+ * signature names it, that name wins; if nothing does, the question mark stands.
+ */
+KOF_HEUR_PREDICT("Meterp");
+KOF_HEUR_WANT(KOF_ENG_USE_EMU);
 
 /*
  * No architecture is declared. The shape is a property of the ELF layout and
