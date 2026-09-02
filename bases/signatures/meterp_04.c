@@ -3,6 +3,7 @@
  *
  * Test sample: win_x64_raw
  * Test sample: win_x64_clear
+ * Test sample: win_x64_dll
  * Researcher:  dmknght
  * Created 2026-09-02, updated 2026-09-02
  * Engine:      db format 8, module ABI 2
@@ -17,12 +18,14 @@
 KOF_TARGET_FORMAT(KOF_FMT_PE);
 KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, "Meterp");
 
-KOF_TARGET_RANGE(scan_range_code, KOF_SCAN_PE_CODE);
+KOF_TARGET_ARCH(KOF_ARCH_X86_64);
+
+KOF_TARGET_RANGE(scan_range_code_data, KOF_SCAN_PE_CODE | KOF_SCAN_PE_DATA);
 
 KOF_DEFINE_HEXSTR(s0, "48 85 F6 75 ?? 41 FF E7");
 
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
-	if (kof_find_str_any(scan_range_code, s0))
+	if (kof_find_str_any(scan_range_code_data, s0))
 		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
 }
