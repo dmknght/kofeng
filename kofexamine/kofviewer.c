@@ -1609,6 +1609,21 @@ struct view {
 
 	int         edit;           /* 0 none, 1 family, 2 variant */
 	int         gen_ok;
+	/*
+	 * WAS THIS DRAFT READ OUT OF A SIGNATURE THAT ALREADY EXISTS.
+	 *
+	 * Set by draft_show on BOTH of its paths - the .c source when it can be
+	 * found, the database when it cannot - because either way the reader is
+	 * looking at a rule somebody already wrote, not writing one. gen_path
+	 * cannot answer this: it is only set on the source path, so a rule
+	 * loaded from the database (which is the usual case, since --bases has
+	 * to point at the tree for the source to be found) looked exactly like
+	 * a fresh draft.
+	 *
+	 * What it changes is what a marker's colour MEANS - see the region
+	 * column in draw_decl.
+	 */
+	int         from_rule;
 	char        gen_path[600];
 
 	/* Where the header's controls landed, recorded as they are drawn. */
@@ -4154,6 +4169,7 @@ static void draft_clear(struct view *v)
 	v->meta_made[0] = 0;
 	v->gen_path[0] = 0;
 	v->gen_ok = 0;
+	v->from_rule = 0;
 	v->prow_off = 0;
 	v->prow_seen = 0;
 }
@@ -5686,6 +5702,7 @@ static void draft_show(struct view *v, uint32_t idx)
 			snprintf(v->gen_path, sizeof v->gen_path, "%.*s",
 				 (int)sizeof v->gen_path - 1, path);
 			v->gen_ok = 1;
+			v->from_rule = 1;
 			v->saved_hash = draft_hash(v);
 			/* The path shows on its own; `warn` is for things that
 			 * are wrong, and a loaded file is not one. */
@@ -5696,6 +5713,7 @@ static void draft_show(struct view *v, uint32_t idx)
 			return;
 		}
 		draft_from_touch(v, &ob->touch[idx]);
+		v->from_rule = 1;
 	}
 }
 
@@ -9234,14 +9252,17 @@ static void draw_decl(struct out *o, struct view *v)
 			/*
 			 * Declared, and not in this object.
 			 *
-			 * The colour is the whole message - red on a row whose
-			 * neighbours are not red. Spelling "absent" beside the
-			 * region cost more width than the column had and got
-			 * truncated to a stray letter. The region stays because
-			 * that is still where the module will look.
+			 * GREY, not red. The colour is the whole message - the
+			 * region stays because that is still where the module
+			 * will look - but "absent" is the quiet case: nothing is
+			 * wrong with the file, this marker simply is not in it.
+			 * Red said "look at me" on every row of a rule being
+			 * read against a sample it was not written for, which is
+			 * most of them; dim says it without shouting, and is
+			 * still far enough off the background to read.
 			 */
 			out_fmt(o, " %s%-*.*s" A_OFF " %s%5s" A_OFF "  ",
-				A_BAD, v->rgn_w, v->rgn_w, d->rgn,
+				A_DIM, v->rgn_w, v->rgn_w, d->rgn,
 				A_SIZE, sz);
 		} else if (d->off_rgn) {
 			char both[40];
@@ -9252,8 +9273,26 @@ static void draw_decl(struct out *o, struct view *v)
 				A_WARN, v->rgn_w, v->rgn_w, both,
 				A_SIZE, sz);
 		} else {
+			/*
+			 * PRESENT - and what that MEANS depends on which way the
+			 * panel is being used.
+			 *
+			 * Drafting a new rule, a marker that is in the file is
+			 * the thing you were looking for: green, the colour it
+			 * has always had. READING a rule that already exists
+			 * against a sample, the same fact is a HIT - this rule
+			 * finds this marker in this file - and that is worth the
+			 * loud colour, because it is the answer the reader
+			 * opened the file to get.
+			 *
+			 * Which mode it is comes from gen_path, the same field
+			 * that decides whether the button above says Generate or
+			 * Save: non-empty means the draft was read out of a
+			 * signature that is already on disk.
+			 */
 			out_fmt(o, " %s%-*.*s" A_OFF " %s%5s" A_OFF "  ",
-				A_LOC, v->rgn_w, v->rgn_w, d->rgn,
+				v->from_rule ? A_BAD : A_LOC,
+				v->rgn_w, v->rgn_w, d->rgn,
 				A_SIZE, sz);
 		}
 		v->str_by[i][0] = 1 + (int)o->col_hint;
