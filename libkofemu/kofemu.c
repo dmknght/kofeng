@@ -58,6 +58,20 @@ struct kof_emu {
 	uint32_t     tab_mask;        /* size - 1; size is a power of two */
 	uint32_t     n_pages, max_pages;
 
+	/*
+	 * THE LAST PAGE LOOKED UP, so a run of bytes in one page pays for one
+	 * hash instead of one per byte. See page_lookup: an instruction fetch is
+	 * sixteen bytes of the same page, and mem_rd/mem_wr resolve every byte
+	 * on its own, so without this each fetch ran the mixing hash sixteen
+	 * times. Safe to hold a raw pointer because a page, once created, is
+	 * never moved or freed until the whole emulator is (the table is
+	 * allocated once and open-addressing entries do not relocate); the one
+	 * thing that could go stale is a NULL - an unmapped base that a later
+	 * mmap fills - so only a non-NULL page is ever cached.
+	 */
+	uint64_t     cache_base;
+	struct page *cache_page;
+
 	uint64_t gpr[KOF_EMU_NGPR];
 	uint64_t rip;
 	uint64_t flags;               /* only the six that matter, see FL_* */
@@ -334,12 +348,38 @@ static struct page *vma_commit(struct kof_emu *e, uint64_t base)
 }
 
 /*
+ * page_find with a one-entry memo of the last non-NULL result.
+ *
+ * mem_rd/mem_wr resolve one byte at a time, and consecutive bytes share a page
+ * except at a boundary, so the memo answers all but the first byte of an
+ * access without hashing. It never memoises a miss - see the note on
+ * cache_page - so a base that is unmapped now and filled later still resolves
+ * through page_find, and the per-byte straddle behaviour is unchanged: every
+ * byte still resolves its own page independently, just more cheaply.
+ */
+static struct page *page_lookup(struct kof_emu *e, uint64_t va)
+{
+	uint64_t base = va & ~(uint64_t)(KOF_EMU_PAGE - 1u);
+	struct page *p;
+
+	if (e->cache_page && e->cache_base == base)
+		return e->cache_page;
+	p = page_find(e, va);
+	if (p) {
+		e->cache_base = base;
+		e->cache_page = p;
+	}
+	return p;
+}
+
+/*
  * Every read and write goes through these, one byte at a time.
  *
  * A byte at a time because an access may straddle a page boundary and the two
  * pages need not be adjacent in the table - and because a straddling access
- * that half succeeds is the bug this design exists to make impossible. Speed
- * is not the constraint; the budget is.
+ * that half succeeds is the bug this design exists to make impossible. The
+ * per-byte page resolution goes through page_lookup so that a within-page run
+ * costs one hash rather than one per byte.
  */
 static int mem_rd(struct kof_emu *e, uint64_t va, void *dst, unsigned n)
 {
@@ -347,7 +387,7 @@ static int mem_rd(struct kof_emu *e, uint64_t va, void *dst, unsigned n)
 	unsigned i;
 
 	for (i = 0; i < n; i++) {
-		struct page *p = page_find(e, va + i);
+		struct page *p = page_lookup(e, va + i);
 
 		if (!p) {
 			e->fault_va = va + i;
@@ -365,7 +405,7 @@ static int mem_wr(struct kof_emu *e, uint64_t va, const void *src, unsigned n)
 	unsigned i;
 
 	for (i = 0; i < n; i++) {
-		struct page *p = page_find(e, va + i);
+		struct page *p = page_lookup(e, va + i);
 
 		if (!p) {
 			e->fault_va = va + i;
@@ -841,7 +881,12 @@ static void fl_sub(struct kof_emu *e, uint64_t a, uint64_t b, uint64_t bin,
 	uint64_t sign = (uint64_t)1 << (bytes * 8u - 1u);
 
 	fl_logic(e, r, bytes);
-	if ((a & m) < (b & m) + bin)                           e->flags |= FL_CF;
+	/* Borrow. The b+bin form overflows the mask only when b is all ones in
+	 * the width and bin is 1 - at sz==8 that wraps to 0 and the naive a<0
+	 * test misses a borrow that in fact always happens - so that one case is
+	 * taken out before the comparison that would misread it. */
+	if ((b & m) == m && bin)                               e->flags |= FL_CF;
+	else if ((a & m) < (b & m) + bin)                      e->flags |= FL_CF;
 	if ((a ^ b) & (a ^ r) & sign)                          e->flags |= FL_OF;
 	if ((a & 0xfu) < (b & 0xfu) + bin)                     e->flags |= FL_AF;
 }
@@ -898,6 +943,14 @@ static int ea_of(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
 		else if (m->Seg == 5)
 			a += e->gs_base;
 	}
+	/*
+	 * A 32-bit process computes addresses in 32 bits: a base+disp that runs
+	 * past 4 GB wraps rather than reaching into a 64-bit address space the
+	 * guest does not have. RIP-relative returned above and does not reach
+	 * here, so nothing 64-bit is masked by mistake.
+	 */
+	if (e->bits == 32)
+		a &= 0xffffffffu;
 	*out = a;
 	return 1;
 }
@@ -2030,11 +2083,14 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				uint64_t r64 = (acc & mask_of(sz)) * (a & mask_of(sz));
 
 				hi = (r64 >> (sz * 8u)) & mask_of(sz);
-				reg_wr(e, KOF_EMU_RAX, sz, 0, r64);
-				if (sz == 1)
+				/* 8-bit MUL lands the whole 16-bit product in AX;
+				 * every wider size splits it AX/DX. */
+				if (sz == 1) {
 					reg_wr(e, KOF_EMU_RAX, 2, 0, r64);
-				else
+				} else {
+					reg_wr(e, KOF_EMU_RAX, sz, 0, r64);
 					reg_wr(e, KOF_EMU_RDX, sz, 0, hi);
+				}
 			}
 			e->flags = hi ? (e->flags | FL_CF | FL_OF)
 				      : (e->flags & ~(uint64_t)(FL_CF | FL_OF));
@@ -2055,8 +2111,19 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 					reg_wr(e, KOF_EMU_RAX, 8, 0, lo / a);
 					reg_wr(e, KOF_EMU_RDX, 8, 0, lo % a);
 				} else {
-					int64_t n = (int64_t)lo, d = (int64_t)a;
+					int64_t n, d = (int64_t)a;
 
+					/*
+					 * hi is 0 here, so the true dividend is the
+					 * non-negative value lo. If lo's top bit is
+					 * set, (int64_t)lo reads back negative and the
+					 * signed division would be wrong - stop rather
+					 * than answer wrongly, as the hi!=0 case above
+					 * already does.
+					 */
+					if ((int64_t)lo < 0)
+						goto unsupported;
+					n = (int64_t)lo;
 					reg_wr(e, KOF_EMU_RAX, 8, 0, (uint64_t)(n / d));
 					reg_wr(e, KOF_EMU_RDX, 8, 0, (uint64_t)(n % d));
 				}
@@ -2544,32 +2611,101 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				goto unsupported;
 			break;
 
-		case ND_INS_SHL: case ND_INS_SHR: case ND_INS_SAR:
-		case ND_INS_ROL: case ND_INS_ROR: {
+		/*
+		 * SHIFTS and ROTATES are split, because they touch DIFFERENT
+		 * flags: a shift sets SF/ZF/PF from its result like a logical op,
+		 * a rotate leaves those four alone and moves only CF and OF. The
+		 * old code ran both through fl_logic and so clobbered SF/ZF/PF on
+		 * every rotate and left CF/OF wrong - a `rol; jc` read a carry
+		 * that was always zero.
+		 *
+		 * The count is masked to five bits (six at 64) as the hardware
+		 * does, and then - the second thing the old code got wrong -
+		 * BOUNDED to the operand width before it reaches a C shift. A
+		 * `sar al, 12` delivers a count of 12 against an 8-bit value, and
+		 * `>> 12` past a byte sign-extended into 64 bits is a shift of 68:
+		 * undefined in C, and on the host it wraps mod 64 to a wrong
+		 * answer rather than the all-sign-bits x86 produces.
+		 */
+		case ND_INS_SHL: case ND_INS_SHR: case ND_INS_SAR: {
 			unsigned n, w = sz * 8u;
+			uint64_t m = mask_of(sz);
 
 			if (!op_rd(e, &ix, &ix.Operands[0], &a) ||
 			    !op_rd(e, &ix, &ix.Operands[1], &b))
 				goto unsupported;
 			n = (unsigned)(b & (sz == 8 ? 63u : 31u));
 			if (!n) break;                    /* no shift, no flags */
-			a &= mask_of(sz);
+			a &= m;
 			switch (ix.Instruction) {
-			case ND_INS_SHL: r = a << n; break;
-			case ND_INS_SHR: r = a >> n; break;
-			case ND_INS_SAR:
-				r = (uint64_t)(((int64_t)(a << (64u - w))) >>
-					       (64u - w + n));
+			case ND_INS_SHL: r = n >= w ? 0 : (a << n) & m; break;
+			case ND_INS_SHR: r = n >= w ? 0 : a >> n; break;
+			default: /* SAR: sign-extend, then an arithmetic right shift
+				  * capped at w-1 so it saturates to all sign bits. */
+				r = (uint64_t)(((int64_t)sext(a, sz)) >>
+					       (n >= w ? w - 1u : n)) & m;
 				break;
-			case ND_INS_ROL: r = (a << n) | (a >> (w - n)); break;
-			default:         r = (a >> n) | (a << (w - n)); break;
 			}
 			fl_logic(e, r, sz);
-			if (ix.Instruction == ND_INS_SHL)
-				{ if ((a >> (w - n)) & 1u) e->flags |= FL_CF; }
-			else if (ix.Instruction != ND_INS_ROL &&
-				 ix.Instruction != ND_INS_ROR)
-				{ if ((a >> (n - 1u)) & 1u) e->flags |= FL_CF; }
+			/* CF is the last bit shifted out, and zero once the count
+			 * has cleared the whole width. */
+			if (ix.Instruction == ND_INS_SHL) {
+				if (n <= w && (a >> (w - n)) & 1u)
+					e->flags |= FL_CF;
+			} else if (ix.Instruction == ND_INS_SHR) {
+				if (n <= w && (a >> (n - 1u)) & 1u)
+					e->flags |= FL_CF;
+			} else {   /* SAR: bit n-1, or the sign once past the width */
+				unsigned cb = n <= w ? n - 1u : w - 1u;
+
+				if ((a >> cb) & 1u)
+					e->flags |= FL_CF;
+			}
+			if (!op_wr(e, &ix, &ix.Operands[0], r))
+				goto unsupported;
+			break;
+		}
+
+		case ND_INS_ROL: case ND_INS_ROR: {
+			unsigned n, rc, w = sz * 8u;
+			uint64_t m = mask_of(sz);
+
+			if (!op_rd(e, &ix, &ix.Operands[0], &a) ||
+			    !op_rd(e, &ix, &ix.Operands[1], &b))
+				goto unsupported;
+			n = (unsigned)(b & (sz == 8 ? 63u : 31u));
+			if (!n) break;                    /* masked count 0: no flags */
+			a &= m;
+			rc = n % w;                       /* a rotate is modulo width */
+			if (ix.Instruction == ND_INS_ROL)
+				r = rc ? ((a << rc) | (a >> (w - rc))) & m : a;
+			else
+				r = rc ? ((a >> rc) | (a << (w - rc))) & m : a;
+			/*
+			 * ONLY CF and OF - SF/ZF/PF/AF are untouched, so fl_logic
+			 * must not run here. CF takes the bit that landed in the
+			 * position the rotate feeds it; OF is defined for a count
+			 * of one alone and left as-is otherwise.
+			 */
+			e->flags &= ~(uint64_t)FL_CF;
+			if (ix.Instruction == ND_INS_ROL) {
+				if (r & 1u)
+					e->flags |= FL_CF;          /* LSB of result */
+				if (n == 1) {
+					e->flags &= ~(uint64_t)FL_OF;
+					if (((r >> (w - 1u)) & 1u) ^ (r & 1u))
+						e->flags |= FL_OF;
+				}
+			} else {
+				if ((r >> (w - 1u)) & 1u)
+					e->flags |= FL_CF;          /* MSB of result */
+				if (n == 1) {
+					e->flags &= ~(uint64_t)FL_OF;
+					if (((r >> (w - 1u)) & 1u) ^
+					    ((r >> (w - 2u)) & 1u))
+						e->flags |= FL_OF;
+				}
+			}
 			if (!op_wr(e, &ix, &ix.Operands[0], r))
 				goto unsupported;
 			break;

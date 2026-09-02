@@ -1947,7 +1947,7 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	struct kof_emu_unp_report rep;
 	struct kof_emu *e;
 	kof_buf b;
-	uint32_t it, made = 0;
+	uint32_t it;
 	uint64_t va, len, built_lo = ~0ull, built_hi = 0;
 	const uint8_t *bytes;
 	int any, built = 0;
@@ -2005,9 +2005,8 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 		if (!kof_elf_rebuild(va, emu_rd, e, sc->obj_cap, &file, &flen,
 				     &built_lo, &built_hi))
 			continue;
-		if (emu_novel(ctx, file, flen) && emu_give(ctx, file, flen) &&
-		    c_child(ctx))
-			made++;
+		if (emu_novel(ctx, file, flen) && emu_give(ctx, file, flen))
+			c_child(ctx);
 		free(file);
 		built = 1;
 		break;                  /* one program per run is what a stub
@@ -2038,8 +2037,7 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 		any = 1;
 		if (!emu_give(ctx, bytes, len))
 			break;
-		if (c_child(ctx))
-			made++;
+		c_child(ctx);
 	}
 	/*
 	 * The written-memory fallback needs the run to have FINISHED.
@@ -2085,8 +2083,7 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 				continue;
 			if (!emu_give(ctx, bytes, len))
 				break;
-			if (c_child(ctx))
-				made++;
+			c_child(ctx);
 		}
 	sc->emu_stage = 0;
 
@@ -2108,7 +2105,6 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	 * case it is true of.
 	 */
 	kof_emu_free(e);
-	(void)made;
 	return 1;
 }
 
