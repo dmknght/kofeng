@@ -57,12 +57,18 @@ KOF_UNPACK_KIND(KOF_UNP_PACKER);
 KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_UNKNOWN);
 
 /*
- * NO KOF_TARGET_NAME. The family-first routing in scan.c runs the unpackers of
- * a predicted family before the rest, and there is nothing to be gained by
- * running this one early - it produces no child, so it can never be the module
- * that opens an object. Declaring Meterp here would put a module that always
- * declines at the head of the queue for every predicted object.
+ * The family this recognises, so a heuristic predicting Meterp reaches it first.
+ *
+ * THIS WAS LEFT OFF ONCE, with the reasoning that a module producing no child
+ * can never be the one that opens an object and so gains nothing by running
+ * early. That missed the other way a module ends a pass: KOF_UNP_BROKEN goes
+ * through the host's `incomplete` hook to sc->broken, and the general pass
+ * begins each iteration with `if (sc->broken) break`. So recognising the
+ * encoder in the family pass stops the remaining unpackers from being entered
+ * at all - which on this database is fourteen modules that would each have
+ * declined, on precisely the objects where nothing can be recovered.
  */
+KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, "Meterp");
 
 /* Which of the four, for the log line. */
 enum {

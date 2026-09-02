@@ -2576,6 +2576,20 @@ static void warn_duplicate_patterns(struct artefact *arts, uint32_t n_arts)
 		 */
 		if (arts[fps[i].idx].kind != arts[fps[i + 1].idx].kind)
 			continue;
+		/*
+		 * A MODULE THAT DECLARES NO PATTERN IS NOT COMPARABLE.
+		 *
+		 * The fingerprint is target, regions and patterns, so with no
+		 * patterns it is only the target - and every unpacker for one
+		 * format then collides with every other. The four msfvenom
+		 * decoders are the case: each recognises its stub by comparing
+		 * bytes inside kof_unpack, which is code and not a declaration,
+		 * so all four fingerprint identically and none is redundant.
+		 * Saying so anyway trains a reader to ignore the warning, which
+		 * costs the one time it is real.
+		 */
+		if (!arts[fps[i].idx].n_str && !arts[fps[i + 1].idx].n_str)
+			continue;
 		fprintf(stderr,
 			"ksigbuilder: warning: %s and %s declare the same target, "
 			"region and pattern set - one may be redundant\n",
