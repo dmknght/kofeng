@@ -7717,7 +7717,19 @@ static void prow_build(struct view *v)
 	for (i = 0; i < (uint32_t)OPT_COUNT; i++)
 		if (v->opt_on[i])
 			prow_add(v, RW_OPT, i);
-	if (v->n_grp)
+	/*
+	 * The scan range row while there is ANY range to show, which is not the
+	 * same as "while there is a matcher".
+	 *
+	 * Gated on n_grp alone, removing the last matcher took the row with it -
+	 * and with the row went every DECLARED range that no matcher had been
+	 * given yet. Those still existed in rng_add, still blocked the save
+	 * ("scan range X is in no matcher"), and now had nowhere to be seen and
+	 * no menu to be removed from, because [Update scan range] lives on this
+	 * row. A range one can neither use nor get rid of is a draft that cannot
+	 * be finished.
+	 */
+	if (v->n_grp || v->n_rng_add)
 		prow_add(v, RW_RANGES, 0);
 	if (v->n_decl) {
 		prow_add(v, RW_STRHDR, 0);
@@ -9074,7 +9086,7 @@ static void draw_decl(struct out *o, struct view *v)
 	 * is answering "which ranges is this signature going to search", which
 	 * is the question that made a managed list look necessary.
 	 */
-	if (v->n_grp && PR_VIS(r)) {
+	if ((v->n_grp || v->n_rng_add) && PR_VIS(r)) {
 		uint32_t seen[MAX_GROUP], n_seen = 0, k;
 
 		row_start(o, PR(r), 1);
@@ -9150,7 +9162,7 @@ static void draw_decl(struct out *o, struct view *v)
 			v->rgf_c1 = (int)o->col_hint;
 		}
 	}
-	r += v->n_grp ? 1 : 0;
+	r += (v->n_grp || v->n_rng_add) ? 1 : 0;
 
 	/*
 	 * The strings.
@@ -14167,6 +14179,39 @@ enum key {
 static char   g_paste[4096];    /* the last bracketed paste */
 static size_t g_paste_n;
 
+/*
+ * WHAT A PASTE SHOULD INSERT, in one place.
+ *
+ * A bracketed paste is the terminal handing the system clipboard over already,
+ * so it is used as given. A Ctrl+V has to go and ASK for it - wl-paste, xclip,
+ * xsel - so that it pastes what every other program would; only when none of
+ * them answers does it fall back to this program's own last copy, which is the
+ * best it can then do.
+ *
+ * One function because there is more than one field to paste into and they were
+ * getting it different: the string editor asked the clipboard tools, the find
+ * box read g_clip directly and so pasted only what had been copied inside this
+ * program - a Ctrl+V of something yanked from a terminal or a browser put the
+ * wrong bytes in the search box, or nothing at all.
+ */
+static size_t paste_src(int k, const char **out)
+{
+	static char clip[8192];
+	size_t sn;
+
+	if (k == K_PASTE) {
+		*out = g_paste;
+		return g_paste_n;
+	}
+	sn = paste_extern(clip, sizeof clip);
+	if (sn) {
+		*out = clip;
+		return sn;
+	}
+	*out = g_clip;
+	return g_clip_n;
+}
+
 static int g_mx, g_my;          /* where the last click was, 1 based */
 static int g_mod_shift;         /* shift was held for it */
 static int g_mod_ctrl;          /* and control, which slides text sideways */
@@ -15533,7 +15578,7 @@ static void click(struct view *v, int rclick)
 			}
 			r++;
 		}
-		if (v->n_grp) {
+		if (v->n_grp || v->n_rng_add) {
 			if (r == want) {
 				/* The summary carries the draft's two range
 				 * controls; the rest of it is a readout. */
@@ -15979,22 +16024,8 @@ static int field_key(struct view *v, char *buf, size_t cap, int k)
 		 * only when none is installed does it fall back to this
 		 * program's own last copy, which is the best it can then do.
 		 */
-		static char clip[8192];
 		const char *src;
-		size_t sn, i;
-
-		if (k == K_PASTE) {
-			src = g_paste;
-			sn = g_paste_n;
-		} else {
-			sn = paste_extern(clip, sizeof clip);
-			if (sn) {
-				src = clip;
-			} else {
-				src = g_clip;
-				sn = g_clip_n;
-			}
-		}
+		size_t sn = paste_src(k, &src), i;
 
 		for (i = 0; i < sn && n + 2u < cap; i++) {
 			char c2 = src[i];
@@ -16441,6 +16472,35 @@ static int handle(struct view *v, int k)
 			} else if ((k == 127 || k == 8) && nn) {
 				v->gotobuf[nn - 1u] = 0;
 				v->caret = (uint32_t)(nn - 1u);
+			} else if (k == 0x16 || k == K_PASTE) {
+				/* An offset is exactly the kind of thing that
+				 * gets copied out of a report and pasted in
+				 * here, so it takes the system clipboard like
+				 * every other field - see paste_src. Only the
+				 * characters an offset can hold are kept, so a
+				 * pasted "0x1a2b\n" arrives clean. */
+				const char *src;
+				size_t sn = paste_src(k, &src), i;
+
+				for (i = 0; i < sn &&
+				     nn + 1u < sizeof v->gotobuf; i++) {
+					char c2 = src[i];
+
+					if (!((c2 >= '0' && c2 <= '9') ||
+					      (c2 >= 'a' && c2 <= 'f') ||
+					      (c2 >= 'A' && c2 <= 'F') ||
+					      c2 == 'x' || c2 == 'X' ||
+					      c2 == 'n' || c2 == 'N'))
+						continue;
+					if (v->num_fresh) {
+						v->gotobuf[0] = 0;
+						nn = 0;
+						v->num_fresh = 0;
+					}
+					v->gotobuf[nn++] = c2;
+					v->gotobuf[nn] = 0;
+				}
+				v->caret = (uint32_t)nn;
 			} else if (((k >= '0' && k <= '9') ||
 				    (k >= 'a' && k <= 'f') ||
 				    (k >= 'A' && k <= 'F') ||
@@ -16503,10 +16563,8 @@ static int handle(struct view *v, int k)
 					     k == 27 || k == '\r' || k == '\n'))
 				v->field_all = 0;
 			if (k == 0x16 || k == K_PASTE) {
-				const char *src = k == K_PASTE ? g_paste
-							       : g_clip;
-				size_t sn = k == K_PASTE ? g_paste_n
-							 : g_clip_n, i;
+				const char *src;
+				size_t sn = paste_src(k, &src), i;
 
 				for (i = 0; i < sn && n + 2u < sizeof v->find;
 				     i++) {
