@@ -49,6 +49,7 @@
  */
 
 #include <kofmod/kofsig.h>
+#include "msf_elf32.h"
 
 KOF_UNPACK_KIND(KOF_UNP_PACKER);
 
@@ -218,6 +219,12 @@ KOF_DEFINE_UNPACK
 	end = at;
 	produced = end - ct;
 	if (produced < PLAIN_MIN)
+		return;
+
+	/* The ELF32 header first, so the child is a file and not a bare blob -
+	 * see msf_elf32.h. produced fits 32 bits: a stager is a few hundred
+	 * bytes and the object it came from is bounded far below 4 GB. */
+	if (!msf_emit_elf32(ctx, (uint32_t)produced))
 		return;
 
 	for (at = ct; at < end; at++) {

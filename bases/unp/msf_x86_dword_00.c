@@ -60,6 +60,7 @@
  */
 
 #include <kofmod/kofsig.h>
+#include "msf_elf32.h"
 
 KOF_UNPACK_KIND(KOF_UNP_PACKER);
 
@@ -275,6 +276,47 @@ KOF_DEFINE_UNPACK
 	 * labelled by this module rather than by whichever spoke last. */
 	kof_debug("MSF.x86.coding", coding[found].code);
 
+	/*
+	 * THE PAYLOAD LENGTH, computed before a byte of it is emitted, so the
+	 * ELF32 header that goes in front carries the right p_filesz - see
+	 * msf_elf32.h. The bounds each coding needs are checked here too, so a
+	 * header is never emitted for a payload that then turns out not to fit.
+	 * The additive coding has no count in the stub - it stops at the first
+	 * zero plaintext dword - so its length is found by a pre-pass that runs
+	 * the same feedback without emitting, on a copy of the key.
+	 */
+	{
+		uint32_t total;
+
+		if (coding[found].code == C_COUNTDN) {
+			if (cnt > BODY_MAX || !kof_in_obj(body, cnt))
+				return;
+			total = cnt;
+		} else if (coding[found].code == C_ADDITIVE) {
+			uint32_t k2 = key, prod = 0;
+
+			for (at = body; kof_in_obj(at, 4) && prod < BODY_MAX;
+			     at += 4u) {
+				uint32_t pl = kof_u32(at) ^ k2;
+
+				prod += 4u;
+				if (!pl)
+					break;
+				k2 += pl;
+			}
+			total = prod;
+		} else {
+			if (cnt > BODY_MAX / 4u ||
+			    !kof_in_obj(body, (uint64_t)cnt * 4u))
+				return;
+			total = cnt * 4u;
+		}
+		if (total < PLAIN_MIN)
+			return;
+		if (!msf_emit_elf32(ctx, total))
+			return;
+	}
+
 	if (coding[found].code == C_COUNTDN) {
 		/*
 		 * A byte XORed with its own countdown index. The stub walks ecx
@@ -284,8 +326,6 @@ KOF_DEFINE_UNPACK
 		 */
 		uint32_t k;
 
-		if (cnt > BODY_MAX || !kof_in_obj(body, cnt))
-			return;
 		for (k = 0; k < cnt; k++) {
 			buf[n++] = (uint8_t)(kof_u8(body + k) ^
 					     (uint8_t)(k + 1u));
@@ -326,8 +366,6 @@ KOF_DEFINE_UNPACK
 		/* A constant dword key, cnt dwords of it. */
 		uint32_t k;
 
-		if (cnt > BODY_MAX / 4u || !kof_in_obj(body, (uint64_t)cnt * 4u))
-			return;
 		for (k = 0; k < cnt; k++) {
 			uint32_t pl = kof_u32(body + (uint64_t)k * 4u) ^ key;
 			uint32_t b;
@@ -344,8 +382,7 @@ KOF_DEFINE_UNPACK
 		}
 	}
 
-	if (produced < PLAIN_MIN)
-		return;
+	(void)produced;
 	if (n && !kof_emit(buf, n))
 		return;
 

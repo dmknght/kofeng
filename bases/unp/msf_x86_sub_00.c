@@ -68,6 +68,7 @@
  */
 
 #include <kofmod/kofsig.h>
+#include "msf_elf32.h"
 
 KOF_UNPACK_KIND(KOF_UNP_PACKER);
 
@@ -276,6 +277,10 @@ KOF_DEFINE_UNPACK
 		n = do_place(ctx, ep, buf, CHUNK);
 		if (n < PLAIN_MIN)
 			return;
+		/* The ELF32 header first, so the child is a file. See
+		 * msf_elf32.h. */
+		if (!msf_emit_elf32(ctx, n))
+			return;
 		if (!kof_emit(buf, n))
 			return;
 	} else {
@@ -283,6 +288,8 @@ KOF_DEFINE_UNPACK
 		uint32_t i;
 
 		if (k * 4u < PLAIN_MIN)
+			return;
+		if (!msf_emit_elf32(ctx, k * 4u))
 			return;
 		/*
 		 * BACK TO FRONT: a push moves down, so the first dword recorded
