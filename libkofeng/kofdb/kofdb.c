@@ -360,17 +360,15 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 			}
 		}
 		for (k = 0; k < h->n_names; k++) {
-			uint64_t o = nm[k].off, j;
-			int terminated = 0;
+			uint64_t o = nm[k].off;
 
 			if (o >= npool)
 				REFUSE("name %u lies outside its pool", k);
-			for (j = o; j < npool; j++)
-				if (np[j] == 0) {
-					terminated = 1;
-					break;
-				}
-			if (!terminated)
+			/* memchr, not a hand loop: db_name_lookup already reads
+			 * these with memchr, and a crafted pool whose NUL is far
+			 * from a name's offset turned the hand loop into an
+			 * O(names x pool) scan on hostile input. */
+			if (memchr(np + o, 0, (size_t)(npool - o)) == NULL)
 				REFUSE("name %u is not terminated inside its pool",
 				       k);
 		}
@@ -857,7 +855,7 @@ struct kof_engine *kof_db_load(const char *path)
 	const char **paths = NULL;
 	const char *single[1];
 	uint32_t n_paths = 0, n_ok = 0, i;
-	uint64_t n_mods = 0, n_str = 0, n_rng = 0, code = 0, memo = 0;
+	uint64_t n_mods = 0, n_str = 0, n_rng = 0, code = 0;
 	size_t at = 0;
 	int owned = 0;
 
@@ -900,7 +898,6 @@ struct kof_engine *kof_db_load(const char *path)
 		n_mods += h->n_mods;
 		n_str  += h->n_str;
 		n_rng  += h->n_rng;
-		memo   += h->memo_slots;
 		/* Padded to the same boundary the packer used inside each pool, so
 		 * an aligned offset stays aligned once the pools are concatenated. */
 		/* Each pack's blobs keep the offsets its own header gives them, so
@@ -915,13 +912,13 @@ struct kof_engine *kof_db_load(const char *path)
 	 * In 64 bits, then refused if a total does not fit the engine's uint32.
 	 *
 	 * Not defensive politeness: every one of these is an index into a table
-	 * allocated from it. A wrapped memo total in particular allocates a memo
-	 * smaller than the slots the modules address, and the matcher's bounds check
-	 * turns that into every search past the wrap answering "absent" - a database
-	 * that loads, scans, and quietly detects nothing.
+	 * allocated from it. The memo is NOT summed here - it is not the sum of
+	 * the packs' memo_slots but n_uid x n_masks, derived and bounds-checked
+	 * further down where those are known - so a check on the sum here would
+	 * reject on a number the allocation never uses.
 	 */
 	if (n_mods > 0xffffffffu || n_str > 0xffffffffu ||
-	    n_rng > 0xffffffffu || memo > 0xffffffffu) {
+	    n_rng > 0xffffffffu) {
 		fprintf(stderr, "kofdb: %s: more entries than an index can hold\n",
 			path);
 		goto out;

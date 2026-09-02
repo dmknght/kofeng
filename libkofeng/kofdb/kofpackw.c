@@ -248,13 +248,36 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 	b->rng  = calloc(b->n_rng  ? b->n_rng  : 1, sizeof *b->rng);
 	if (!b->mod || !b->str || !b->name || !b->rng)
 		goto out;
-	/* dn now interns one family string per module as well as one entry per
-	 * finding (see the loop below), so it is sized for both up front - the
-	 * same reason dedup_init takes an expected count instead of growing:
-	 * a table that fills mid-build is a build error, not silently slow. */
+	/*
+	 * dn interns, per module, a family AND (when present) a heur_predict and
+	 * a source path, plus one entry per finding name - so up to n_name + 3n
+	 * distinct strings, and one more for the empty string reserved below. It
+	 * is sized for all of them up front: dedup_init takes an expected count
+	 * rather than growing, so a table that fills mid-build is a build error,
+	 * not a silent wrong answer. Sizing it for only n_name + n - which is
+	 * what it was before predict and src were interned into it - overflowed
+	 * on a HEUR pack with more rules than names and aborted the whole build.
+	 */
 	if (!dedup_init(&ds, b->n_str ? b->n_str : 1) ||
-	    !dedup_init(&dn, (b->n_name ? b->n_name : 1) + (n ? n : 1)))
+	    !dedup_init(&dn, (b->n_name ? b->n_name : 1) + 3u * (n ? n : 1) + 1u))
 		goto out;
+
+	/*
+	 * RESERVE POOL OFFSET ZERO for the empty string, so nothing else lands
+	 * there. heur_predict_off and src_off use 0 to mean "absent", and the
+	 * loader reads it back that way (kof_db_heur_predict, kof_db_source) -
+	 * but offset 0 is otherwise whatever string was interned first, module
+	 * 0's family. Without this, a rule that predicts a family equal to that
+	 * string dedups to offset 0 and its prediction is silently read as none.
+	 * Both fields are only ever set for a non-empty value, so pinning ""
+	 * here means a real predict or src can never collide with the sentinel.
+	 */
+	{
+		uint32_t empty_off, empty_uid;
+
+		if (!name_intern(&dn, &b->name_pool, "", &empty_off, &empty_uid))
+			goto out;
+	}
 
 	for (i = 0; i < n; i++) {
 		const struct kof_pw_mod *m = &mods[i];
