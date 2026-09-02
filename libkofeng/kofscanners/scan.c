@@ -1124,6 +1124,39 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	/* VERDICT: how it was reached, which only exists once it has been. */
 	(void)heur_run(sc, &ctx, opt, out, KOF_HEUR_VERDICT, present, NULL);
 
+	/*
+	 * A RULE'S HEUR IS A LAST RESORT, and an object that OPENED is not the
+	 * last resort - its children are.
+	 *
+	 * A rule says "I could not identify this, but here is its shape". When
+	 * the object unpacks, the thing worth identifying is what came out, not
+	 * the wrapper: rc4_1 is an encrypted stager, and the reader wants the
+	 * Trojan:Meterp on the payload three layers down, not a Heur:Shellcode
+	 * on the ciphertext that carried it. So a rule's heur on an object that
+	 * produced children is dropped.
+	 *
+	 * THE SIGNAL IS NOT LOST, it MOVES. The same shape rule fires on the
+	 * decoded child; if nothing can name that child either, the child
+	 * produces no children of its own, so its heur is kept. The prediction
+	 * ends up on the leaf that nothing could open or name, which is where
+	 * "I could not identify this" belongs.
+	 *
+	 * DONE BEFORE heur_object, so only the RULE heur is dropped. The scored
+	 * model that follows is about the object's own structure - a truncated
+	 * header is truncated whether or not the object unpacked - so it is
+	 * added after this and stays. Only children this object PRODUCED count;
+	 * sc->n_kids is reset before it was scanned, and a container's members
+	 * are its children too, but a container carries no rule heur to drop.
+	 */
+	if (sc->n_kids > 0 && out->n > 0) {
+		uint32_t r, w = 0;
+
+		for (r = 0; r < out->n; r++)
+			if (out->v[r].level != KOF_LEVEL_HEUR)
+				out->v[w++] = out->v[r];
+		out->n = w;
+	}
+
 	/* Last, because the unpack result is one of the facts. */
 	heur_object(sc, &ctx, opt, pdepth, out->broken == KOF_BROKEN_DAMAGED, out);
 }

@@ -1826,6 +1826,33 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		 */
 		case ND_INS_FXAM: case ND_INS_FTST:
 		case ND_INS_FSQRT: case ND_INS_FRNDINT:
+		/*
+		 * The x87 COMPARES join the flag-setters, for the same reason.
+		 *
+		 * A GetPC that opens with a compare rather than an FXAM stopped
+		 * on it: x86_poly's stub reaches `fucomip` as its fifth
+		 * instruction and, without this, the run ends there with
+		 * "unsupported: FUCOMIP". Like FXAM these leave a condition
+		 * behind and no value - FCOMI/FUCOMIP into EFLAGS, the FCOM
+		 * family into the x87 status word - and a decoder reads neither;
+		 * it wants only the address the instruction records for a later
+		 * fnstenv or fxsave.
+		 *
+		 * NOT written as `Category == ND_CAT_X87_ALU`, though every one
+		 * of these carries that category: so does FADD, FMUL, FDIV, every
+		 * instruction that actually computes. bddisasm files arithmetic
+		 * and comparison under the one category, so testing it would let
+		 * the arithmetic through too - and an object that really adds
+		 * would then run on with a wrong st0 and never say so, which is
+		 * the whole thing the enumeration above exists to prevent. The
+		 * compares are safe because their output is a flag nothing reads,
+		 * not because of what category they share.
+		 */
+		case ND_INS_FCOM:  case ND_INS_FCOMP:  case ND_INS_FCOMPP:
+		case ND_INS_FUCOM: case ND_INS_FUCOMP: case ND_INS_FUCOMPP:
+		case ND_INS_FCOMI: case ND_INS_FCOMIP:
+		case ND_INS_FUCOMI: case ND_INS_FUCOMIP:
+		case ND_INS_FICOM: case ND_INS_FICOMP:
 			e->fpu_rip = e->rip;
 			break;
 
