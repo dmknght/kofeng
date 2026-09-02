@@ -1080,6 +1080,7 @@ enum ch_what {
 	 * for the reader that they wanted both.
 	 */
 	CH_RANGE4,
+	CH_RANGE_DEL,   /* which scan range to remove */
 	CH_LEVEL,       /* infect or suspect */
 	CH_VARIANT,     /* how the finding names itself */
 	CH_TYPE,        /* enum kof_maltype */
@@ -6439,6 +6440,10 @@ static void ch_add_verb(struct chooser *c, const char *t, unsigned verb)
  * which drift apart the moment they live in different functions.
  */
 static void ch_open(struct view *v, int what, uint32_t arg, int row, int col);
+/* The removable scan ranges, listed the same way where the menu is built and
+ * where a pick is carried out. Defined beside rng_apply, used here first. */
+static uint32_t rng_removable(struct view *v, uint32_t *mask, int *unused,
+			      uint32_t cap);
 
 /*
  * Apply the verb, or ask which region first.
@@ -6651,6 +6656,21 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		}
 		ch_add_verb(c, many > 1 ? "Switch a scan range to WHOLE-FILE..."
 					: "Switch scan range to WHOLE-FILE", 3);
+		/*
+		 * And removing one, which was the one thing this menu could not
+		 * do: an unused declared range had nowhere to be taken back out,
+		 * and a range in a matcher could only be reached through the
+		 * matcher. Always behind its own list, even for a single range -
+		 * removing is destructive, so the extra step naming exactly what
+		 * goes is a confirmation rather than a question nobody asked.
+		 */
+		{
+			uint32_t dm[2u * MAX_GROUP];
+			int du[2u * MAX_GROUP];
+
+			if (rng_removable(v, dm, du, 2u * MAX_GROUP) > 0u)
+				ch_add_verb(c, "Remove a scan range...", 4);
+		}
 	} else if (what == CH_RANGE4) {
 		uint32_t b;
 		char t[CH_W];
@@ -6719,6 +6739,24 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 			seen[n_seen++] = mm;
 			rng_name_of(cur_obj(v)->fmt, mm, t, sizeof t);
 			ch_add(c, t);
+		}
+		if (!c->n)
+			return;
+	} else if (what == CH_RANGE_DEL) {
+		/* Which scan range to remove, unused ones first then the
+		 * matcher ranges - the same list rng_removable hands the taker,
+		 * each named so a matcher range says what removing it costs. */
+		uint32_t dm[2u * MAX_GROUP];
+		int du[2u * MAX_GROUP];
+		uint32_t dn = rng_removable(v, dm, du, 2u * MAX_GROUP), di;
+
+		for (di = 0; di < dn; di++) {
+			char rn[40], lab[CH_W];
+
+			rng_name_of(cur_obj(v)->fmt, dm[di], rn, sizeof rn);
+			snprintf(lab, sizeof lab, "%.15s%s", rn,
+				 du[di] ? " (unused)" : " and its matcher");
+			ch_add(c, lab);
 		}
 		if (!c->n)
 			return;
@@ -6937,9 +6975,13 @@ static void rng_retarget(struct view *v, uint32_t was, uint32_t now)
 			continue;
 		v->grp[g].mask = now;
 		/* The strings follow, or their row would keep claiming a
-		 * region the matcher no longer searches. */
+		 * region the matcher no longer searches. decl.grp is a bitmask -
+		 * one bit per matcher, the way grp_mask and grp_count read it -
+		 * so membership of matcher g is a bit test, not "== g", which
+		 * only ever moved the strings of matcher 0 (and, for g==0, every
+		 * string in no matcher at all). */
 		for (i = 0; i < v->n_decl; i++)
-			if (v->decl[i].grp == g) {
+			if (v->decl[i].grp & (1u << g)) {
 				v->decl[i].mask = now;
 				rng_name_of(cur_obj(v)->fmt, now,
 					    v->decl[i].rgn,
@@ -6947,6 +6989,91 @@ static void rng_retarget(struct view *v, uint32_t was, uint32_t now)
 				decl_locate(v, &v->decl[i]);
 			}
 	}
+}
+
+/*
+ * THE SCAN RANGES A READER MAY REMOVE, and which kind each one is.
+ *
+ * Two kinds on one list, because a reader thinks of them as one thing - the
+ * ranges this draft has. An UNUSED range is a KOF_TARGET_RANGE the draft
+ * declared that no matcher searches; removing it just drops the declaration. A
+ * range a matcher DOES search has no life apart from that matcher - see the note
+ * on grp.mask - so removing it removes the matcher, the same thing the matcher's
+ * own [x] does, reached from where the reader was looking instead.
+ *
+ * Unused first, then the matcher ranges deduplicated. Enumerated the same way
+ * where the menu is drawn and where a pick is carried out, so a row index means
+ * the same on both sides.
+ */
+static uint32_t rng_removable(struct view *v, uint32_t *mask, int *unused,
+			      uint32_t cap)
+{
+	uint32_t n = 0, i, g, k;
+
+	for (i = 0; i < v->n_rng_add && n < cap; i++) {
+		int used = 0;
+
+		for (g = 0; g < v->n_grp; g++)
+			used |= grp_has_range(v, g) &&
+				grp_mask(v, g) == v->rng_add[i];
+		if (used)
+			continue;
+		mask[n] = v->rng_add[i];
+		unused[n] = 1;
+		n++;
+	}
+	for (g = 0; g < v->n_grp && n < cap; g++) {
+		uint32_t mm;
+		int dup = 0;
+
+		if (!grp_has_range(v, g))
+			continue;
+		mm = grp_mask(v, g);
+		for (k = 0; k < n; k++)
+			dup |= mask[k] == mm;
+		if (dup)
+			continue;
+		mask[n] = mm;
+		unused[n] = 0;
+		n++;
+	}
+	return n;
+}
+
+/* Drop an unused declared range from the draft. */
+static void rng_add_drop(struct view *v, uint32_t mask)
+{
+	uint32_t i;
+
+	for (i = 0; i < v->n_rng_add; i++)
+		if (v->rng_add[i] == mask) {
+			memmove(&v->rng_add[i], &v->rng_add[i + 1u],
+				(v->n_rng_add - i - 1u) * sizeof v->rng_add[0]);
+			v->n_rng_add--;
+			return;
+		}
+}
+
+/*
+ * Remove one scan range. An unused declaration is dropped; a range a matcher
+ * searches takes the matcher(s) with it - backwards, because grp_remove shifts
+ * every matcher above the one it drops down by one.
+ */
+static void rng_delete(struct view *v, uint32_t mask, int unused)
+{
+	if (unused) {
+		rng_add_drop(v, mask);
+		say_note(v, "%s", "Scan range removed");
+		return;
+	}
+	{
+		uint32_t g = v->n_grp;
+
+		while (g-- > 0)
+			if (grp_has_range(v, g) && grp_mask(v, g) == mask)
+				grp_remove(v, g);
+	}
+	say_note(v, "%s", "Scan range removed with its matcher");
 }
 
 /*
@@ -7098,6 +7225,20 @@ static void ch_take(struct view *v)
 		 * at that number instead.
 		 */
 		verb = (c->sel >= 0 && c->sel < c->n) ? (int)c->verb[c->sel] : 3;
+		/*
+		 * Remove is its own list - it includes the unused ranges that
+		 * ns above does not count - so it does not go through the switch
+		 * picker. One range removes without asking; several ask which.
+		 */
+		if (verb == 4) {
+			struct chooser up = *c;
+
+			up.open = 1;
+			ch_open(v, CH_RANGE_DEL, 0,
+				up.row + up.sel + 1, up.col + CH_W);
+			v->ch_up = up;
+			return;
+		}
 		/* "Add" makes a range rather than changing one, so it never
 		 * has to ask which. The other three do, and only when the
 		 * draft holds more than one. */
@@ -7146,6 +7287,15 @@ static void ch_take(struct view *v)
 		}
 		/* Past the last region is the "all of them" row. */
 		rng_apply(v, (int)c->arg, c->arg2, pick ? pick : v->rng_mask);
+		return;
+	}
+	if (c->what == CH_RANGE_DEL) {
+		uint32_t dm[2u * MAX_GROUP];
+		int du[2u * MAX_GROUP];
+		uint32_t dn = rng_removable(v, dm, du, 2u * MAX_GROUP);
+
+		if (c->sel >= 0 && (uint32_t)c->sel < dn)
+			rng_delete(v, dm[c->sel], du[c->sel]);
 		return;
 	}
 	if (c->what == CH_LOGIC) {
@@ -10662,53 +10812,75 @@ static void dis_copy(struct view *v)
 		return;
 
 	/*
-	 * A HEX SELECTION IS COPIED WHOLE, not only where it shows.
+	 * A SELECTION SPANNING MORE THAN ONE INSTRUCTION IS COPIED WHOLE, not
+	 * only where it shows.
 	 *
 	 * The panel is a window - it decodes as many instructions as it has rows
-	 * and no more - but a selection made in the hex pane can be longer than
-	 * that window. Copying only the visible rows cut the clipboard off at
-	 * whatever happened to be on screen, so a reader who selected a whole
-	 * region and copied got the top of it and silently lost the rest. The
-	 * range is decoded here from its first byte to its last, off the screen
-	 * entirely, so what is copied is the whole of what was picked while the
-	 * panel still only shows what fits.
+	 * and no more - but a selection can be longer than that window, whether it
+	 * was made in the hex pane or dragged down the disassembly itself while it
+	 * scrolled. Copying only the visible rows cut the clipboard off at whatever
+	 * happened to be on screen, so a reader who selected a whole region and
+	 * copied got the top of it and silently lost the rest. So the byte range is
+	 * decoded here from its first instruction to its last, off the screen
+	 * entirely.
 	 *
-	 * The text selection below is different and stays row-based: it IS the
-	 * characters on the rows, cannot extend past them, and copying more than
-	 * was lit would put something in the clipboard the reader can see they
-	 * did not pick.
+	 * A SINGLE-INSTRUCTION disassembly selection stays row-based: there it IS
+	 * the characters on the one row - part of a mnemonic, an operand on its own
+	 * - and copying the whole instruction instead would put in the clipboard
+	 * more than the reader can see they picked. dis_span's two ends being the
+	 * same instruction is what tells the two apart.
 	 */
-	if (!v->dis_have && dis_hex_sel(v)) {
-		uint64_t lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
-		uint64_t hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
-		uint64_t at = dis_sync(v, lo);
-		uint32_t guard = 0;
+	{
+		uint64_t lo = 0, hi = 0;
+		int whole = 0;
 
-		while (at <= hi && at < v->rgn_len && guard++ < (1u << 20)) {
-			char line[120];
+		if (!v->dis_have && dis_hex_sel(v)) {
+			lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
+			hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
+			whole = 1;
+		} else if (v->dis_have) {
+			uint64_t a0, a1;
+			int c0, c1;
 
-			if (!dis_format(v, &at, line, sizeof line,
-					NULL, NULL, NULL, NULL, 0))
-				break;
+			dis_span(v, &a0, &c0, &a1, &c1);
+			if (a0 != a1) {         /* more than one instruction */
+				lo = a0;
+				hi = a1;        /* the loop takes the a1 one whole */
+				whole = 1;
+			}
+		}
+
+		if (whole) {
+			uint64_t at = dis_sync(v, lo);
+			uint32_t guard = 0;
+
+			while (at <= hi && at < v->rgn_len &&
+			       guard++ < (1u << 20)) {
+				char line[120];
+
+				if (!dis_format(v, &at, line, sizeof line,
+						NULL, NULL, NULL, NULL, 0))
+					break;
+				if (rows)
+					out_str(&d, "\n");
+				out_add(&d, line, strlen(line));
+				rows++;
+			}
+		} else
+		for (r = 0; r < v->dis_lines; r++) {
+			int len = (int)strlen(v->dis_line[r]);
+			int from, to;
+
+			if (!dis_cols(v, v->dis_line_at[r], v->dis_line_len[r],
+				      len, &from, &to))
+				continue;
+			if (to <= from)
+				continue;
 			if (rows)
 				out_str(&d, "\n");
-			out_add(&d, line, strlen(line));
+			out_add(&d, v->dis_line[r] + from, (size_t)(to - from));
 			rows++;
 		}
-	} else
-	for (r = 0; r < v->dis_lines; r++) {
-		int len = (int)strlen(v->dis_line[r]);
-		int from, to;
-
-		if (!dis_cols(v, v->dis_line_at[r], v->dis_line_len[r],
-			      len, &from, &to))
-			continue;
-		if (to <= from)
-			continue;
-		if (rows)
-			out_str(&d, "\n");
-		out_add(&d, v->dis_line[r] + from, (size_t)(to - from));
-		rows++;
 	}
 	if (d.n) {
 		copy_osc52(d.p, d.n);
