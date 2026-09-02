@@ -58,7 +58,7 @@ KOF_UNPACK_KIND(KOF_UNP_PACKER);
  * after the first have no header of their own, and a module that named only ELF
  * peeled one layer of a sample wrapped three times.
  */
-KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_UNKNOWN);
+KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_PE | KOF_FMT_UNKNOWN);
 
 /* The family this decodes, so a heuristic that predicts Meterp routes here
  * first. See the same declaration in msf_xor_00.c. */
@@ -224,7 +224,7 @@ KOF_DEFINE_UNPACK
 	/* The ELF32 header first, so the child is a file and not a bare blob -
 	 * see msf_elf32.h. produced fits 32 bits: a stager is a few hundred
 	 * bytes and the object it came from is bounded far below 4 GB. */
-	if (!msf_emit_elf32(ctx, (uint32_t)produced))
+	if (!msf_emit_hdr(ctx, (uint32_t)produced))
 		return;
 
 	for (at = ct; at < end; at++) {

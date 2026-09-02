@@ -69,7 +69,7 @@ KOF_UNPACK_KIND(KOF_UNP_PACKER);
  * payload these produce may itself be wrapped again, and the layer after the
  * first has no header for a format target to match.
  */
-KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_UNKNOWN);
+KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_PE | KOF_FMT_UNKNOWN);
 
 /* The family this decodes, so a heuristic predicting Meterp routes here first. */
 KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, "Meterp");
@@ -313,7 +313,7 @@ KOF_DEFINE_UNPACK
 		}
 		if (total < PLAIN_MIN)
 			return;
-		if (!msf_emit_elf32(ctx, total))
+		if (!msf_emit_hdr(ctx, total))
 			return;
 	}
 

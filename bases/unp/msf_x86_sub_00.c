@@ -74,7 +74,7 @@ KOF_UNPACK_KIND(KOF_UNP_PACKER);
 
 /* ELF and the formatless children, for the reason msf_xor_00.c gives: these can
  * sit under another encoder, and the layer below has no header. */
-KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_UNKNOWN);
+KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_PE | KOF_FMT_UNKNOWN);
 
 /* The family, so a Meterp prediction routes here first. */
 KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, "Meterp");
@@ -279,7 +279,7 @@ KOF_DEFINE_UNPACK
 			return;
 		/* The ELF32 header first, so the child is a file. See
 		 * msf_elf32.h. */
-		if (!msf_emit_elf32(ctx, n))
+		if (!msf_emit_hdr(ctx, n))
 			return;
 		if (!kof_emit(buf, n))
 			return;
@@ -289,7 +289,7 @@ KOF_DEFINE_UNPACK
 
 		if (k * 4u < PLAIN_MIN)
 			return;
-		if (!msf_emit_elf32(ctx, k * 4u))
+		if (!msf_emit_hdr(ctx, k * 4u))
 			return;
 		/*
 		 * BACK TO FRONT: a push moves down, so the first dword recorded

@@ -89,4 +89,21 @@ static int msf_emit_elf32(const struct kof_obj_ctx *ctx, uint32_t payload_n)
 	return kof_emit(h, MSF_ELF32_HDR);
 }
 
+/*
+ * WHICH header a decoded payload gets, in one place.
+ *
+ * Every x86 decoder faces the same question and the answer is a property of the
+ * object, not of the decoder: a payload peeled out of a PE is Windows shellcode
+ * and belongs in a PE, one peeled out of an ELF is Linux shellcode and belongs
+ * in an ELF. A formatless intermediate layer keeps the ELF answer, which is
+ * what the ELF chain has always done.
+ */
+#include "msf_pe.h"
+
+static int msf_emit_hdr(const struct kof_obj_ctx *ctx, uint32_t payload_n)
+{
+	return MSF_RECON_PE(ctx) ? msf_emit_pe(ctx, payload_n, 32)
+				 : msf_emit_elf32(ctx, payload_n);
+}
+
 #endif /* MSF_ELF32_H */

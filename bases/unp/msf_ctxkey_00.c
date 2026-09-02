@@ -54,7 +54,7 @@ KOF_UNPACK_KIND(KOF_UNP_PACKER);
  * context-keyed layer can sit under another encoder, and the object it arrives
  * as then has no header.
  */
-KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_UNKNOWN);
+KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_PE | KOF_FMT_UNKNOWN);
 
 /*
  * The family this recognises, so a heuristic predicting Meterp reaches it first.

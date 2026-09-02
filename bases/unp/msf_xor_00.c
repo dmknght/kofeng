@@ -81,6 +81,7 @@
  */
 
 #include <kofmod/kofsig.h>
+#include "msf_pe.h"
 
 KOF_UNPACK_KIND(KOF_UNP_PACKER);
 
@@ -99,7 +100,7 @@ KOF_UNPACK_KIND(KOF_UNP_PACKER);
  * allows more than one target only for a module that never casts. The two facts
  * this needs - the format and the entry offset - are on the context itself.
  */
-KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_UNKNOWN);
+KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_PE | KOF_FMT_UNKNOWN);
 
 /*
  * THE FAMILY THIS DECODES, so the engine can try it first.
@@ -440,8 +441,17 @@ KOF_DEFINE_UNPACK
 	 * and stays formatless. Only the last one is given its header back - see
 	 * emit_elf_hdr.
 	 */
-	if (!stub_in_buf(buf, n) && !emit_elf_hdr(ctx, produced))
-		return;
+	/* A Windows payload is reconstructed as a PE and a Linux one as an ELF -
+	 * see MSF_RECON_PE. The stub_in_buf gate is unchanged: an intermediate
+	 * decryptor still gets no header at all. */
+	if (!stub_in_buf(buf, n)) {
+		if (MSF_RECON_PE(ctx)) {
+			if (!msf_emit_pe(ctx, (uint32_t)produced, 64))
+				return;
+		} else if (!emit_elf_hdr(ctx, produced)) {
+			return;
+		}
+	}
 	if (!kof_emit(buf, n))
 		return;
 	/* Handed over, so the buffer starts again - without this the tail flush
