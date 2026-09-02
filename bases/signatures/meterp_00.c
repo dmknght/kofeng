@@ -3,14 +3,16 @@
  *
  * Test sample: shikata_ga_nai
  * Researcher:  dmknght
- * Created 2026-09-01, updated 2026-09-01
- * Engine:      db format 6, module ABI 2
+ * Created 2026-09-01, updated 2026-09-02
+ * Engine:      db format 7, module ABI 2
  */
 
 #include <kofmod/kofsig.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
 KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, "Meterp");
+
+KOF_TARGET_SUBTYPE(KOF_ELF_EXEC);
 
 KOF_TARGET_RANGE(scan_range_code, KOF_SCAN_ELF_CODE);
 
