@@ -10521,6 +10521,89 @@ static const char *copy_extern(const char *bytes, size_t n)
 	return NULL;
 }
 
+/*
+ * THE SYSTEM CLIPBOARD, READ back through a helper - the other half of
+ * copy_extern.
+ *
+ * Ctrl+V used to paste this program's OWN last copy, held in g_clip, because the
+ * only clipboard it could reach was the one it wrote. But copy already reaches
+ * the system clipboard through wl-copy/xclip/xsel, and the same tools read it:
+ * wl-paste, xclip -o, xsel -o. So a paste asks them, and what comes back is what
+ * any other program would paste - not just what this one copied.
+ *
+ * OSC 52 could ask the TERMINAL to send the clipboard, but the reply is even
+ * less reliable than the write: most terminals refuse a clipboard READ outright,
+ * as an obvious way for a remote program to steal what you copied. When the
+ * terminal DOES paste - the user pressing its own paste key - it arrives as a
+ * bracketed paste and this is not consulted at all.
+ *
+ * Writes up to `cap` bytes into `out`, returns how many, or 0 when no helper is
+ * installed or the clipboard is empty. The child's stdin is /dev/null and its
+ * stderr is too, so it can neither read a key meant for this program nor draw on
+ * the screen it is using.
+ */
+static size_t paste_extern(char *out, size_t cap)
+{
+	static const char *const helper[][4] = {
+		{ "wl-paste", "-n", NULL, NULL },
+		{ "xclip", "-o", "-selection", "clipboard" },
+		{ "xsel", "-o", "-b", NULL }
+	};
+	size_t h;
+
+	for (h = 0; h < sizeof helper / sizeof helper[0]; h++) {
+		int fds[2];
+		pid_t pid;
+		int status = 0;
+		size_t got = 0;
+
+		if (pipe(fds) != 0)
+			return 0;
+		pid = fork();
+		if (pid < 0) {
+			close(fds[0]);
+			close(fds[1]);
+			return 0;
+		}
+		if (pid == 0) {
+			int devnull = open("/dev/null", O_RDWR);
+
+			if (devnull >= 0) {
+				dup2(devnull, STDIN_FILENO);
+				dup2(devnull, STDERR_FILENO);
+			}
+			dup2(fds[1], STDOUT_FILENO);
+			close(fds[0]);
+			close(fds[1]);
+			{
+				char *argv[4];
+				size_t a;
+
+				for (a = 0; a < 4u; a++)
+					argv[a] = helper[h][a]
+						  ? strdup(helper[h][a]) : NULL;
+				execvp(argv[0], argv);
+			}
+			_exit(127);
+		}
+		close(fds[1]);
+		while (got < cap) {
+			ssize_t r = read(fds[0], out + got, cap - got);
+
+			if (r <= 0)
+				break;
+			got += (size_t)r;
+		}
+		close(fds[0]);
+		if (waitpid(pid, &status, 0) == pid &&
+		    WIFEXITED(status) && WEXITSTATUS(status) == 0 && got)
+			return got;
+		/* Installed but empty, or not installed (exit 127): try the
+		 * next tool rather than returning an empty clipboard as final. */
+	}
+	return 0;
+}
+
 static void copy_osc52(const char *bytes, size_t n)
 {
 	static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -15106,8 +15189,29 @@ static int field_key(struct view *v, char *buf, size_t cap, int k)
 			     k == '\r' || k == '\n'))
 		v->field_all = 0;
 	if (k == 0x16 || k == K_PASTE) {        /* Ctrl+V, or a paste */
-		const char *src = k == K_PASTE ? g_paste : g_clip;
-		size_t sn = k == K_PASTE ? g_paste_n : g_clip_n, i;
+		/*
+		 * A bracketed paste is the terminal handing over the system
+		 * clipboard already - use it as given. A Ctrl+V asks the
+		 * clipboard tools for it, so it pastes what any program would;
+		 * only when none is installed does it fall back to this
+		 * program's own last copy, which is the best it can then do.
+		 */
+		static char clip[8192];
+		const char *src;
+		size_t sn, i;
+
+		if (k == K_PASTE) {
+			src = g_paste;
+			sn = g_paste_n;
+		} else {
+			sn = paste_extern(clip, sizeof clip);
+			if (sn) {
+				src = clip;
+			} else {
+				src = g_clip;
+				sn = g_clip_n;
+			}
+		}
 
 		for (i = 0; i < sn && n + 2u < cap; i++) {
 			char c2 = src[i];
