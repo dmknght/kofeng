@@ -534,12 +534,32 @@ static int hex_search(struct kof_match_ctx *m, uint64_t off, uint64_t len,
 	const struct kof_hex_alt *aa = &alts[steps[h->anchor_step].alt_first];
 	const uint8_t *run = prog + aa->data_off + h->anchor_in_alt;
 	uint64_t at = 0, base = off;
+	/*
+	 * THE RANGE'S END, and the walk is not allowed past it.
+	 *
+	 * hex_walk and alt_at bounded their reads against the OBJECT, so a hex
+	 * match could begin inside the range and run out the other side of it -
+	 * a pattern scoped to the PE headers could match with its tail in the
+	 * first section, and it disagreed with the literal search, which
+	 * respects the range exactly. Reading outside the range one was asked
+	 * about is a bug however the bytes happen to be laid out.
+	 *
+	 * Fixed by handing the walk a view that ENDS where the range does
+	 * rather than by threading a limit through every read: alt_at already
+	 * bounds with kof_in_range against the buffer it is given, and
+	 * hex_walk's own test is `at >= d.n`, so shrinking `n` bounds every
+	 * read there is - present and future - and none can be forgotten. The
+	 * base pointer is unchanged, so offsets stay absolute.
+	 */
+	kof_buf lim;
 
 	m->n_calls++;
 	len = kof_clip_len(m->data.n, off, len);
 	if (len < h->min_span)
 		return 0;
 	m->n_bytes_scanned += len;
+	lim.p = m->data.p;
+	lim.n = off + len;
 
 	for (;;) {
 		uint64_t q, d;
@@ -562,7 +582,15 @@ static int hex_search(struct kof_match_ctx *m, uint64_t off, uint64_t len,
 			start = q - d;
 			if (start < off)
 				break;
-			if (hex_walk(m->data, start, prog)) {
+			/*
+			 * And the range's end is a cheap reject: a match needs
+			 * min_span bytes and this candidate has only
+			 * lim.n - start left, so the walk is not entered at all
+			 * when the tail is too short for the shortest match.
+			 */
+			if (lim.n - start < h->min_span)
+				continue;
+			if (hex_walk(lim, start, prog)) {
 				if (hit)
 					*hit = start;
 				return 1;
