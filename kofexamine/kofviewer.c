@@ -7998,16 +7998,19 @@ static unsigned dis_format(struct view *v, uint64_t *at, char *line, size_t cap,
 			   uint8_t *bytes_out, unsigned *ix_len_out,
 			   int *ok_out, char *text_out, size_t text_cap);
 
-static uint64_t dis_full_start(struct view *v, unsigned rows)
+static uint64_t dis_last_start(struct view *v, uint64_t lo, uint64_t end,
+			       unsigned rows)
 {
 	uint64_t back = (uint64_t)rows * DIS_MAX_INSN;
-	uint64_t at = v->rgn_len > back ? dis_sync(v, v->rgn_len - back) : 0;
+	uint64_t at = end > lo + back ? dis_sync(v, end - back) : lo;
 	uint64_t ring[256];
 	unsigned n = 0, cap = rows < 256u ? rows : 256u;
 
 	if (!cap)
-		return 0;
-	while (at < v->rgn_len) {
+		return lo;
+	if (at < lo)                    /* dis_sync can round to before lo */
+		at = lo;
+	while (at < end) {
 		char line[120];
 		uint64_t at0 = at;
 
@@ -8018,76 +8021,76 @@ static uint64_t dis_full_start(struct view *v, unsigned rows)
 			break;
 	}
 	/* Fewer than a panelful in the trailing window: it all fits, so the
-	 * window can start at the region's beginning. */
+	 * window can start at the range's beginning. */
 	if (n <= cap)
-		return 0;
+		return lo;
 	return ring[n % cap];   /* the oldest kept - exactly `rows` from the end */
+}
+
+/* THE LATEST START THAT STILL FILLS THE PANEL over the whole region. */
+static uint64_t dis_full_start(struct view *v, unsigned rows)
+{
+	return dis_last_start(v, 0, v->rgn_len, rows);
 }
 
 static int64_t dis_max_bias(struct view *v)
 {
-	uint64_t shown, span = dis_span_of(v);
+	int nr = hex_bot() - dis_top() + 1;
+	uint64_t shown, win, full;
 	int64_t hi;
 
+	if (nr < 1)
+		nr = 1;
+
 	/*
-	 * A PINNED RANGE SCROLLS WITHIN ITSELF.
+	 * A PINNED RANGE SCROLLS WITHIN ITSELF, to the EXACT last window.
 	 *
 	 * "View disassembly" on a hex selection pins the panel to that run, and
 	 * the run can be far longer than the rows there are to show it - select
-	 * a whole region and it is the whole region. The bound is therefore the
-	 * pinned length, and it has to be, because the two bounds below are
-	 * about the HEX PANE's window: a pinned panel does not follow the hex
-	 * scroll, so measuring against it gave a maximum of zero and the panel
-	 * could not be scrolled at all. That is what a reader sees as "the
-	 * wheel does nothing here, but it works when I open it without a
-	 * selection".
+	 * a whole region and it is the whole region. The bound cannot be the hex
+	 * pane's window, which a pinned panel does not follow; it is the start of
+	 * the last window inside the pinned run, decoded rather than guessed the
+	 * way dis_full_start does for the whole region. Guessing it as
+	 * dis_len - span was the same span overshoot the region bound below used
+	 * to have: for a run of one-byte instructions span is far more than the
+	 * bytes a panelful shows, so the scroll stopped a span short and the tail
+	 * of the run - the last instructions of win_x64_raw among them - could
+	 * not be reached. Decoded, a run of one-byte instructions reaches its
+	 * tail and a run of long ones leaves no blank row past the end.
 	 */
-	if (v->dis_len != KOF_BROKEN)
-		return v->dis_len > span ? (int64_t)(v->dis_len - span) : 0;
+	if (v->dis_len != KOF_BROKEN) {
+		uint64_t end = v->dis_at + v->dis_len;
 
-	shown = dis_hex_shown(v);
-	hi = shown > span ? (int64_t)(shown - span) : 0;
+		if (end > v->rgn_len)
+			end = v->rgn_len;
+		full = dis_last_start(v, v->dis_at, end, (unsigned)nr);
+		return full > v->dis_at ? (int64_t)(full - v->dis_at) : 0;
+	}
 
 	/*
-	 * AND NOT PAST THE END OF THE REGION - but the bound is ROWS, not span.
-	 *
-	 * The first bound keeps the panel inside what the hex pane shows. Near
-	 * the end of a region that is not enough on its own, so the scroll also
-	 * stops so the last window still lands on real bytes.
-	 *
-	 * How far that is was the bug. It used `span` - rows times a nominal
-	 * FOUR bytes an instruction - and meterpreter shellcode is nothing like
-	 * four bytes an instruction: it is a run of one-byte pushes and pops, so
-	 * the panel shows far fewer bytes than span claims, and the clamp stopped
-	 * the scroll a whole span short of the end. On cleartext the last forty
-	 * bytes of the code could not be reached or selected at all.
-	 *
-	 * The honest bound is one byte per row, because that is the least a row
-	 * can show: an instruction is at least a byte. Stopping `rows` before the
-	 * end guarantees the final byte is reachable whatever the instruction
-	 * lengths are. On a region of long instructions the last window can then
-	 * carry a blank row or two past the end - which the draw shows as blank,
-	 * and which is the honest picture of "this is where the code stops",
-	 * unlike a tail that cannot be reached.
+	 * The panel inside the hex pane's window, bounded at ONE BYTE PER ROW -
+	 * the least a row can show - not at span's nominal four. Span, being so
+	 * much larger than the bytes one-byte shellcode actually shows, stopped
+	 * the scroll a whole span short of where the region bound below wanted
+	 * it, so the two disagreed and the smaller (this one) won and cut the
+	 * tail off.
 	 */
-	{
-		int nr = hex_bot() - dis_top() + 1;
-		uint64_t full;
+	shown = dis_hex_shown(v);
+	win = (uint64_t)nr;
+	hi = shown > win ? (int64_t)(shown - win) : 0;
 
-		if (nr < 1)
-			nr = 1;
-		/*
-		 * The exact last-window start, decoded rather than guessed - see
-		 * dis_full_start. Below rgn_at it means the whole region already
-		 * fits from where the panel is; otherwise the offset from rgn_at
-		 * is the most the panel may be scrolled.
-		 */
-		full = dis_full_start(v, (unsigned)nr);
-		if (full <= v->rgn_at)
-			hi = 0;
-		else if (hi > (int64_t)(full - v->rgn_at))
-			hi = (int64_t)(full - v->rgn_at);
-	}
+	/*
+	 * AND NOT PAST THE REGION'S LAST WINDOW, decoded exactly by
+	 * dis_full_start so the final row holds the final instruction and no row
+	 * comes back blank. Below rgn_at it means the whole region already fits
+	 * from where the panel is; otherwise its offset from rgn_at is the most
+	 * the panel may be scrolled.
+	 */
+	full = dis_full_start(v, (unsigned)nr);
+	if (full <= v->rgn_at)
+		hi = 0;
+	else if (hi > (int64_t)(full - v->rgn_at))
+		hi = (int64_t)(full - v->rgn_at);
 	return hi;
 }
 
