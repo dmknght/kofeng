@@ -1115,6 +1115,14 @@ struct chooser {
 	 * read where it is carried out, and the two cannot drift.
 	 */
 	uint8_t  verb[CH_ITEMS];
+	/*
+	 * WHICH ROWS OPEN ANOTHER LIST, marked the way the menu bar marks it:
+	 * a ">" at the item's far edge (see bar_has_sub and the draw beside it),
+	 * not a suffix on the text. Without it a row that opens a list and a row
+	 * that acts are indistinguishable until one is pressed, and one of them
+	 * appears to do nothing.
+	 */
+	uint8_t  sub[CH_ITEMS];
 };
 
 
@@ -6432,6 +6440,15 @@ static void ch_add_verb(struct chooser *c, const char *t, unsigned verb)
 	ch_add(c, t);
 }
 
+/* The same, for a row that OPENS A LIST rather than acting - drawn with the
+ * menu bar's ">" marker. See chooser.sub. */
+static void ch_add_verb_sub(struct chooser *c, const char *t, unsigned verb)
+{
+	if (c->n < CH_ITEMS)
+		c->sub[c->n] = 1;
+	ch_add_verb(c, t, verb);
+}
+
 /*
  * Fill and place a chooser.
  *
@@ -6632,8 +6649,8 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 			if (many && !keep) {
 				if (many > 1)
 					snprintf(t, sizeof t,
-						 "Switch a scan range to "
-						 "%.11s...", add);
+						 "Switch a scan range to %.13s",
+						 add);
 				else
 					snprintf(t, sizeof t,
 						 "Switch scan range to %.15s",
@@ -6643,7 +6660,7 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 			/* Nothing to extend until a range exists. */
 			if (many > 1) {
 				snprintf(t, sizeof t,
-					 "Extend a scan range with %.9s...",
+					 "Extend a scan range with %.11s",
 					 add);
 				ch_add_verb(c, t, 1);
 			} else if (many == 1) {
@@ -6654,22 +6671,37 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 			snprintf(t, sizeof t, "Add %.15s to scan ranges", add);
 			ch_add_verb(c, t, 2);
 		}
-		ch_add_verb(c, many > 1 ? "Switch a scan range to WHOLE-FILE..."
+		ch_add_verb(c, many > 1 ? "Switch a scan range to WHOLE-FILE"
 					: "Switch scan range to WHOLE-FILE", 3);
 		/*
-		 * And removing one, which was the one thing this menu could not
-		 * do: an unused declared range had nowhere to be taken back out,
-		 * and a range in a matcher could only be reached through the
-		 * matcher. Always behind its own list, even for a single range -
-		 * removing is destructive, so the extra step naming exactly what
-		 * goes is a confirmation rather than a question nobody asked.
+		 * And removing one, which was the one thing this menu could
+		 * not do: an unused declared range had nowhere to be taken
+		 * back out, and a range in a matcher could only be reached
+		 * through the matcher.
+		 *
+		 * ONE RANGE IS NAMED AND REMOVED ON THE SPOT; several open a
+		 * list. A menu that asks which of one thing to remove is a
+		 * question with a single answer, and naming the range in the
+		 * line is what makes the direct click safe - the reader can
+		 * see exactly what goes before they press it.
 		 */
 		{
 			uint32_t dm[2u * MAX_GROUP];
 			int du[2u * MAX_GROUP];
+			uint32_t dn = rng_removable(v, dm, du,
+						   2u * MAX_GROUP);
 
-			if (rng_removable(v, dm, du, 2u * MAX_GROUP) > 0u)
-				ch_add_verb(c, "Remove a scan range...", 4);
+			if (dn == 1u) {
+				char rn[40];
+
+				rng_name_of(cur_obj(v)->fmt, dm[0], rn,
+					    sizeof rn);
+				snprintf(t, sizeof t,
+					 "Remove scan range %.15s", rn);
+				ch_add_verb(c, t, 4);
+			} else if (dn > 1u) {
+				ch_add_verb_sub(c, "Remove a scan range", 4);
+			}
 		}
 	} else if (what == CH_RANGE4) {
 		uint32_t b;
@@ -7230,13 +7262,27 @@ static void ch_take(struct view *v)
 		 * ns above does not count - so it does not go through the switch
 		 * picker. One range removes without asking; several ask which.
 		 */
+		/*
+		 * Remove is its own list - it includes the unused ranges that
+		 * ns above does not count - so it does not go through the switch
+		 * picker. One range was NAMED in the line and goes on the spot;
+		 * several open the list that names each.
+		 */
 		if (verb == 4) {
-			struct chooser up = *c;
+			uint32_t dm[2u * MAX_GROUP];
+			int du[2u * MAX_GROUP];
+			uint32_t dn = rng_removable(v, dm, du, 2u * MAX_GROUP);
 
-			up.open = 1;
-			ch_open(v, CH_RANGE_DEL, 0,
-				up.row + up.sel + 1, up.col + CH_W);
-			v->ch_up = up;
+			if (dn == 1u) {
+				rng_delete(v, dm[0], du[0]);
+			} else if (dn > 1u) {
+				struct chooser up = *c;
+
+				up.open = 1;
+				ch_open(v, CH_RANGE_DEL, 0,
+					up.row + up.sel + 1, up.col + CH_W);
+				v->ch_up = up;
+			}
 			return;
 		}
 		/* "Add" makes a range rather than changing one, so it never
@@ -7430,7 +7476,11 @@ static void draw_one_chooser(struct out *o, const struct chooser *c, int live)
 		 * keyboard is not there any more. */
 		out_str(o, i == c->sel ? (live ? A_SEL : "\033[100;97m")
 				       : "\033[47;30m");
-		out_fmt(o, " %-*.*s", CH_W - 2, CH_W - 2, c->item[i]);
+		/* The ">" sits at the far edge, as the menu bar draws it. */
+		if (c->sub[i])
+			out_fmt(o, " %-*.*s>", CH_W - 3, CH_W - 3, c->item[i]);
+		else
+			out_fmt(o, " %-*.*s", CH_W - 2, CH_W - 2, c->item[i]);
 		out_str(o, A_OFF);
 	}
 }
