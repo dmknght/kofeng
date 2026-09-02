@@ -7831,8 +7831,27 @@ static uint64_t dis_span_of(const struct view *v)
 
 static int64_t dis_max_bias(const struct view *v)
 {
-	uint64_t shown = dis_hex_shown(v), span = dis_span_of(v);
-	int64_t hi = shown > span ? (int64_t)(shown - span) : 0;
+	uint64_t shown, span = dis_span_of(v);
+	int64_t hi;
+
+	/*
+	 * A PINNED RANGE SCROLLS WITHIN ITSELF.
+	 *
+	 * "View disassembly" on a hex selection pins the panel to that run, and
+	 * the run can be far longer than the rows there are to show it - select
+	 * a whole region and it is the whole region. The bound is therefore the
+	 * pinned length, and it has to be, because the two bounds below are
+	 * about the HEX PANE's window: a pinned panel does not follow the hex
+	 * scroll, so measuring against it gave a maximum of zero and the panel
+	 * could not be scrolled at all. That is what a reader sees as "the
+	 * wheel does nothing here, but it works when I open it without a
+	 * selection".
+	 */
+	if (v->dis_len != KOF_BROKEN)
+		return v->dis_len > span ? (int64_t)(v->dis_len - span) : 0;
+
+	shown = dis_hex_shown(v);
+	hi = shown > span ? (int64_t)(shown - span) : 0;
 
 	/*
 	 * AND NOT PAST THE END OF THE OBJECT.
@@ -7861,8 +7880,21 @@ static void dis_follow_hex(struct view *v)
 {
 	int64_t at, hi;
 
-	if (v->dis_len != KOF_BROKEN)
-		return;                         /* pinned by a menu action */
+	/*
+	 * A pinned panel does not FOLLOW the hex pane, but its offset still has
+	 * to be clamped - the rows it has change with the terminal's height, so
+	 * a bias that was legal a frame ago need not be now. Only the second
+	 * half below is skipped: where the window starts is dis_at, not the hex
+	 * scroll. See dis_start.
+	 */
+	if (v->dis_len != KOF_BROKEN) {
+		hi = dis_max_bias(v);
+		if (v->dis_bias < 0)
+			v->dis_bias = 0;
+		if (v->dis_bias > hi)
+			v->dis_bias = hi;
+		return;
+	}
 
 	/* Kept inside the hex pane's range, every frame - the range changes with
 	 * the terminal's height and with how much the last instruction covered,
@@ -7930,7 +7962,12 @@ static void dis_bias_to_sel(struct view *v)
 
 static uint64_t dis_start(const struct view *v)
 {
-	return v->dis_len != KOF_BROKEN ? v->dis_at : v->dis_follow;
+	/* Pinned: the run's start plus however far it has been scrolled. The
+	 * bias is clamped to the run by dis_follow_hex, so this cannot leave
+	 * it. */
+	return v->dis_len != KOF_BROKEN
+	       ? v->dis_at + (uint64_t)(v->dis_bias > 0 ? v->dis_bias : 0)
+	       : v->dis_follow;
 }
 
 /*
@@ -8054,12 +8091,76 @@ static void dis_sync_bytes(struct view *v)
 }
 
 
+/*
+ * How far back to look for an instruction boundary. See dis_sync.
+ *
+ * Sixty-four bytes is far more than x86 needs: a stream re-synchronises within a
+ * handful of instructions, and the longest instruction there is is fifteen
+ * bytes. It is a window rather than the whole region because the region can be
+ * megabytes and this runs once a frame.
+ */
+#define DIS_RESYNC 64u
+
+/*
+ * THE FIRST INSTRUCTION BOUNDARY AT OR AFTER `want`.
+ *
+ * x86 IS NOT SELF-DELIMITING, and the panel's start moves in bytes: the scroll
+ * offset is a byte count and the hex pane's rows are sixteen bytes, so where the
+ * panel begins is almost never where an instruction begins. Decoding from there
+ * reads the middle of one instruction as the start of another and produces a
+ * listing that does not exist - measured on x86_clear, scrolling turned
+ *
+ *     00000057  31 db     XOR ebx, ebx        (real, and ndisasm agrees)
+ *
+ * into
+ *
+ *     00000058  db f7     FCOMI st0, st7      (not in the file at all)
+ *
+ * and further down produced a six-byte AND that swallowed the `MOV ecx, esp` at
+ * 0x72 - a real instruction that then had no row of its own.
+ *
+ * So the start is re-synchronised: decode forward from a little way back and
+ * take the first boundary that reaches `want`. This is what a disassembler does
+ * and it is why the answer is stable - the stream converges on the true
+ * boundaries within a few instructions whatever it is entered at.
+ */
+static uint64_t dis_sync(struct view *v, uint64_t want)
+{
+	uint64_t at;
+	unsigned guard;
+
+	if (!want)
+		return 0;
+	at = want > DIS_RESYNC ? want - DIS_RESYNC : 0;
+
+	for (guard = 0; at < want && guard < DIS_RESYNC; guard++) {
+		uint8_t buf[DIS_MAX_INSN];
+		INSTRUX ix;
+		unsigned got = dis_gather(v, at, buf, DIS_MAX_INSN);
+
+		if (!got)
+			return want;            /* nothing to read: leave it */
+		if (ND_SUCCESS(NdDecodeEx(&ix, buf, got,
+					  v->dis_bits == 32 ? ND_CODE_32
+							    : ND_CODE_64,
+					  v->dis_bits == 32 ? ND_DATA_32
+							    : ND_DATA_64)) &&
+		    ix.Length)
+			at += ix.Length;
+		else
+			at += 1u;               /* data: one byte, as the panel does */
+	}
+	/* At or past `want` - never before it, so the panel does not silently
+	 * show bytes the scroll had already left behind. */
+	return at;
+}
+
 static void draw_disasm(struct out *o, struct view *v)
 {
 	int head = dis_top() - 1;
 	int row;
 	int col = TREE_W + 3;
-	uint64_t at = dis_start(v);
+	uint64_t at = dis_sync(v, dis_start(v));
 	uint64_t end = v->dis_len == KOF_BROKEN ? v->rgn_len
 					        : v->dis_at + v->dis_len;
 	char note[32];
@@ -8074,7 +8175,18 @@ static void draw_disasm(struct out *o, struct view *v)
 	 * which mode the bytes are being read in, and a way to close.
 	 */
 	out_at(o, head, col);
-	snprintf(note, sizeof note, " Disassembly  [x%d] ", v->dis_bits);
+	/*
+	 * "x86" and "x64", not "x32" and "x64".
+	 *
+	 * The width in bits is what the field holds and printing it directly was
+	 * the obvious thing, but nobody calls 32-bit Intel "x32" - the engine
+	 * itself writes ELF-x86 in every finding, and a panel using a second name
+	 * for the same architecture is a name a reader has to translate. x32 is
+	 * also a real and different thing (the ILP32 ABI on amd64), so it is not
+	 * merely unconventional here, it is taken.
+	 */
+	snprintf(note, sizeof note, " Disassembly  [%s] ",
+		 v->dis_bits == 32 ? "x86" : "x64");
 	/* The panel's own palette here too, so nothing in this strip is yellow -
 	 * the hex pane above is largely yellow already. */
 	out_fmt(o, A_DIM "--" A_OFF A_D_MNEM "%s" A_OFF, note);
@@ -14212,10 +14324,17 @@ static void click(struct view *v, int rclick)
 				total = v->n_node; off = v->tree_top;
 				shown = (uint64_t)(bot - top + 1);
 			} else if (which == 4) {
-				/* The disassembly panel's track is the hex
-				 * pane's range - see where the bar is drawn. */
+				/*
+				 * The disassembly panel's track is what the
+				 * panel can reach: the hex pane's range when it
+				 * follows the hex, and the PINNED RUN when it
+				 * does not. Reading dis_hex_shown either way
+				 * made the thumb of a pinned panel describe a
+				 * window it does not have.
+				 */
 				top = dis_top(); bot = hex_bot();
-				total = dis_hex_shown(v);
+				total = v->dis_len != KOF_BROKEN
+					? v->dis_len : dis_hex_shown(v);
 				off = (uint64_t)v->dis_bias;
 				shown = dis_span_of(v);
 			} else {
