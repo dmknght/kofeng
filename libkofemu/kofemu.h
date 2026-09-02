@@ -144,6 +144,20 @@ struct kof_emu_cfg {
 	 * the run early, but a caller asking for it should know it is a guess.
 	 */
 	int stop_on_written_jump;
+
+	/*
+	 * 32 or 64, and 0 means 64 - so a caller written before this existed
+	 * still asks for what it used to get.
+	 *
+	 * WHAT IT CHANGES, and it is less than it looks: how bddisasm is asked
+	 * to decode, how wide a push and a pop are, and which syscall
+	 * convention `int 0x80` and `syscall` name. The instruction handlers
+	 * are already width-agnostic because they work from the operand sizes
+	 * bddisasm reports rather than from a machine word, and the loader
+	 * reads the parser's normalised segment list, which is the same shape
+	 * for an ELF32 and an ELF64.
+	 */
+	unsigned bits;
 };
 
 /* Page protection, as PT_LOAD's p_flags spells it. */

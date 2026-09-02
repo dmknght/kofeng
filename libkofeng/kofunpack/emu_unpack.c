@@ -24,6 +24,17 @@
 #define FLAT_BASE     0x0000000000400000ull
 
 #define STACK_TOP     0x00007ffffffff000ull
+/*
+ * The 32-bit stack, and it has to be its own number rather than the one above
+ * masked down.
+ *
+ * A 32-bit guest computes stack addresses in 32 bits, so an esp of
+ * 0x7ffffffff000 truncates to 0xfffff000 the moment the code touches it - and
+ * then writes there, to a page nothing mapped. Measured: bloxor faulted on its
+ * second instruction, writing to 0xffffef34. This is where Linux actually puts
+ * a 32-bit stack, so the guest's own arithmetic lands inside what is mapped.
+ */
+#define STACK_TOP_32  0xfffff000ull
 #define STACK_PAGES   64u
 
 /*
@@ -187,7 +198,21 @@ enum kof_emu_unp_why kof_emu_unp_gate(const struct kof_obj_ctx *ctx,
 	 * stopped on its first instruction, which costs a page table and
 	 * teaches nothing.
 	 */
-	if (ctx->arch != KOF_ARCH_X86_64)
+	/*
+	 * x86 AND x86-64, since the emulator learned a 32-bit mode - see
+	 * kof_emu_cfg.bits. It was amd64 only because the interpreter was, and
+	 * the note that used to stand here said the measurement supported that:
+	 * every one of the 294 dense objects in the clean-corpus run was amd64.
+	 * That is still true of the DENSE gate and says nothing about the
+	 * others - the shape rule in bases/heur/shellcode_00.c fires on 32-bit
+	 * payloads and asks for the emulator on them, and until now the ask
+	 * arrived here and was refused.
+	 *
+	 * Everything else is still refused: bddisasm decodes these two and an
+	 * ARM object would be started and stopped on its first instruction,
+	 * which costs a page table and teaches nothing.
+	 */
+	if (ctx->arch != KOF_ARCH_X86_64 && ctx->arch != KOF_ARCH_X86)
 		return KOF_EMU_UNP_NO;
 
 	/*
@@ -246,22 +271,24 @@ enum kof_emu_unp_why kof_emu_unp_gate(const struct kof_obj_ctx *ctx,
  * copied zeroes over the trampoline it was about to jump through.
  */
 static int build_stack(struct kof_emu *e, uint64_t entry, uint64_t phdr_va,
-		       uint64_t phent, uint64_t phnum, uint64_t base)
+		       uint64_t phent, uint64_t phnum, uint64_t base,
+		       unsigned bits)
 {
 	static const char nm[] = "/tmp/a";
 	uint8_t zero[16] = { 0 };
 	uint64_t v[32], sp, strv;
+	uint64_t top = bits == 32 ? STACK_TOP_32 : STACK_TOP;
 	int k = 0;
 
-	if (!kof_emu_map(e, STACK_TOP - (uint64_t)STACK_PAGES * KOF_EMU_PAGE,
+	if (!kof_emu_map(e, top - (uint64_t)STACK_PAGES * KOF_EMU_PAGE,
 			 NULL, 0, (uint64_t)STACK_PAGES * KOF_EMU_PAGE,
 			 KOF_EMU_R | KOF_EMU_W))
 		return 0;
 
-	strv = (STACK_TOP - 16u - sizeof nm) & ~15ull;
+	strv = (top - 16u - sizeof nm) & ~15ull;
 	kof_emu_map(e, strv, (const uint8_t *)nm, sizeof nm, sizeof nm,
 		    KOF_EMU_R | KOF_EMU_W);
-	kof_emu_map(e, STACK_TOP - 16u, zero, 8, 16, KOF_EMU_R | KOF_EMU_W);
+	kof_emu_map(e, top - 16u, zero, 8, 16, KOF_EMU_R | KOF_EMU_W);
 
 	v[k++] = 1;                  /* argc      */
 	v[k++] = strv;               /* argv[0]   */
@@ -321,6 +348,13 @@ struct kof_emu *kof_emu_unp_run(const uint8_t *file, uint64_t n,
 	memset(&cfg, 0, sizeof cfg);
 	cfg.max_insn = max_insn;
 	cfg.max_pages = max_pages;
+	/*
+	 * The width comes from the FILE, not from a caller's opinion: an ELF32
+	 * holds i386 code and an ELF64 holds amd64, and the parser has already
+	 * normalised which one this is. Reading it here is what keeps the two
+	 * from ever disagreeing.
+	 */
+	cfg.bits = info->elf_class == KOF_ELFCLASS_32 ? 32u : 64u;
 	e = kof_emu_new(&cfg);
 	if (!e)
 		return NULL;
@@ -474,12 +508,42 @@ struct kof_emu *kof_emu_unp_run(const uint8_t *file, uint64_t n,
 	}
 
 	if (!build_stack(e, entry, phdr_va ? phdr_va : base_lo,
-			 info->phentsize, info->phnum, base_lo)) {
+			 info->phentsize, info->phnum, base_lo, cfg.bits)) {
 		kof_emu_free(e);
 		return NULL;
 	}
 	kof_emu_set_self(e, file, n);
 	kof_emu_set_rip(e, entry);
+
+	/*
+	 * THE GENERAL REGISTERS POINT AT THE ENTRY, not at zero.
+	 *
+	 * A whole family of encoders needs this. The Alpha2 unicode decoders
+	 * take a BUFFER REGISTER - the caller is expected to leave a register
+	 * pointing at the shellcode, because an exploit that lands one there is
+	 * how they are used - and then index from it. Started with zeros,
+	 * x86_unicode_upper read address 0x46 on its twenty-first instruction
+	 * and faulted; every alphanumeric decoder of that family did the same.
+	 *
+	 * Zero was never right anyway. The ABI leaves these UNDEFINED at entry,
+	 * so a real process finds whatever the loader left - never a page of
+	 * zeros - and nothing that runs correctly may depend on their value.
+	 * Pointing them at the entry is both closer to what a real run looks
+	 * like and the one value that makes this family work.
+	 *
+	 * RSP and RBP are left alone: the stack is real and was just built, and
+	 * overwriting the pointer to it would break every stub that pushes.
+	 */
+	{
+		static const unsigned seed[] = {
+			KOF_EMU_RAX, KOF_EMU_RCX, KOF_EMU_RDX, KOF_EMU_RBX,
+			KOF_EMU_RSI, KOF_EMU_RDI
+		};
+		unsigned k;
+
+		for (k = 0; k < sizeof seed / sizeof seed[0]; k++)
+			kof_emu_set_reg(e, seed[k], entry);
+	}
 
 	{
 		enum kof_emu_stop st = kof_emu_run(e);

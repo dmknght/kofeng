@@ -64,6 +64,9 @@ struct kof_emu {
 
 	uint64_t max_insn, insn;
 	int      stop_on_written_jump;
+	/* 32 or 64. See kof_emu_cfg.bits; everything it changes is marked with
+	 * a reference back to this field. */
+	unsigned bits;
 	/* The address the last failed access asked for. A fault with no address
 	 * is a fault nobody can act on. */
 	uint64_t fault_va;
@@ -418,6 +421,9 @@ struct kof_emu *kof_emu_new(const struct kof_emu_cfg *cfg)
 	e->mxcsr = 0x1f80u;             /* the reset value: all exceptions masked */
 	e->max_insn = cfg && cfg->max_insn ? cfg->max_insn : DEF_MAX_INSN;
 	e->stop_on_written_jump = cfg ? cfg->stop_on_written_jump : 0;
+	/* 0 means 64: a caller written before the field existed asks for what
+	 * it always got. */
+	e->bits = (cfg && cfg->bits == 32) ? 32u : 64u;
 	/*
 	 * THE VSYSCALL PAGE, WHICH A REAL KERNEL ALWAYS PROVIDES.
 	 *
@@ -653,6 +659,7 @@ static uint64_t tsc_ns(struct kof_emu *e)
 }
 
 static uint64_t syscall_do(struct kof_emu *e, int *stop_out);
+static uint64_t sysarg(const struct kof_emu *e, unsigned i);
 
 static uint64_t do_syscall(struct kof_emu *e, int *stop_out)
 {
@@ -660,13 +667,20 @@ static uint64_t do_syscall(struct kof_emu *e, int *stop_out)
 	uint64_t ret;
 
 	s = &e->syslog[e->n_syslog % KOF_EMU_SYSLOG];
-	s->nr     = e->gpr[KOF_EMU_RAX];
-	s->arg[0] = e->gpr[KOF_EMU_RDI];
-	s->arg[1] = e->gpr[KOF_EMU_RSI];
-	s->arg[2] = e->gpr[KOF_EMU_RDX];
-	s->arg[3] = e->gpr[KOF_EMU_R10];
-	s->arg[4] = e->gpr[KOF_EMU_R8];
-	s->arg[5] = e->gpr[KOF_EMU_R9];
+	/* The number AS THE GUEST GAVE IT, not the translated one: a reader of
+	 * the log is looking at a 32-bit program and expects to see i386
+	 * numbers. What it was translated to is the dispatcher's business. */
+	s->nr     = e->bits == 32 ? (e->gpr[KOF_EMU_RAX] & 0xffffffffu)
+				  : e->gpr[KOF_EMU_RAX];
+	s->arg[0] = e->bits == 32 ? (e->gpr[KOF_EMU_RBX] & 0xffffffffu)
+				  : e->gpr[KOF_EMU_RDI];
+	s->arg[1] = e->bits == 32 ? (e->gpr[KOF_EMU_RCX] & 0xffffffffu)
+				  : e->gpr[KOF_EMU_RSI];
+	s->arg[2] = e->bits == 32 ? (e->gpr[KOF_EMU_RDX] & 0xffffffffu)
+				  : e->gpr[KOF_EMU_RDX];
+	s->arg[3] = sysarg(e, 0);
+	s->arg[4] = sysarg(e, 1);
+	s->arg[5] = sysarg(e, 2);
 	ret = syscall_do(e, stop_out);
 	s->ret = ret;
 	e->n_syslog++;
@@ -1038,19 +1052,38 @@ static int op_wr(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
 	}
 }
 
+/*
+ * A push is one machine word, and how wide that is is the mode - see
+ * kof_emu.bits. Getting this wrong is not a small error: every call, every
+ * return address and every GetPC trick reads the stack at the width the code
+ * wrote it, so a 32-bit stub on an 8-byte stack loses its own address on the
+ * first `call`.
+ */
+static unsigned wordsz(const struct kof_emu *e)
+{
+	return e->bits == 32 ? 4u : 8u;
+}
+
 static int push(struct kof_emu *e, uint64_t v)
 {
-	e->gpr[KOF_EMU_RSP] -= 8;
-	return mem_wr(e, e->gpr[KOF_EMU_RSP], &v, 8);
+	unsigned w = wordsz(e);
+
+	e->gpr[KOF_EMU_RSP] -= w;
+	if (w == 4u)
+		e->gpr[KOF_EMU_RSP] &= 0xffffffffu;
+	return mem_wr(e, e->gpr[KOF_EMU_RSP], &v, w);
 }
 
 static int pop(struct kof_emu *e, uint64_t *v)
 {
 	uint64_t t = 0;
+	unsigned w = wordsz(e);
 
-	if (!mem_rd(e, e->gpr[KOF_EMU_RSP], &t, 8))
+	if (!mem_rd(e, e->gpr[KOF_EMU_RSP], &t, w))
 		return 0;
-	e->gpr[KOF_EMU_RSP] += 8;
+	e->gpr[KOF_EMU_RSP] += w;
+	if (w == 4u)
+		e->gpr[KOF_EMU_RSP] &= 0xffffffffu;
 	*v = t;
 	return 1;
 }
@@ -1127,10 +1160,90 @@ static uint64_t self_read(struct kof_emu *e, uint64_t va, uint64_t off,
  * that computed an address inside its own image. */
 #define EMU_MMAP_BASE  0x00007f0000000000ull
 
+/*
+ * THE i386 SYSCALL NUMBERS THE STUBS HERE ACTUALLY USE, translated to the
+ * amd64 ones the dispatcher below is written in.
+ *
+ * The two tables are unrelated - i386 write is 4 and amd64 write is 1 - so a
+ * 32-bit stub run against the amd64 dispatcher asks for whatever happens to
+ * share its number, which is worse than not running it at all: exit(1) on i386
+ * is number 1, and amd64 number 1 is write. Translated rather than duplicated,
+ * because what the syscalls DO is identical and only their numbering is not.
+ *
+ * A number with no row here returns -ENOSYS through the dispatcher's default,
+ * the same as an unknown amd64 one. The list is what the measured stubs use
+ * plus the ones any shellcode reaches for; it is not the whole i386 table and
+ * does not need to be.
+ */
+static uint64_t i386_nr(uint64_t nr)
+{
+	switch (nr) {
+	case 1:   return SYS_EXIT;
+	case 2:   return SYS_GETPID;        /* fork; nothing here forks */
+	case 3:   return SYS_READ;
+	case 4:   return SYS_WRITE;
+	case 5:   return SYS_OPEN;
+	case 6:   return SYS_CLOSE;
+	case 11:  return SYS_EXECVE;
+	case 13:  return SYS_TIME;
+	case 19:  return SYS_LSEEK;
+	case 20:  return SYS_GETPID;
+	case 45:  return SYS_BRK;
+	case 54:  return SYS_IOCTL;
+	case 78:  return SYS_GETTIMEOFDAY;
+	case 90:  return SYS_MMAP;          /* old_mmap, via a struct */
+	case 91:  return SYS_MUNMAP;
+	case 93:  return SYS_FTRUNCATE;
+	case 125: return SYS_MPROTECT;
+	case 158: return SYS_SCHED_YIELD;
+	case 162: return SYS_NANOSLEEP;
+	case 192: return SYS_MMAP;          /* mmap2 */
+	case 219: return SYS_MADVISE;
+	case 224: return SYS_GETTID;
+	case 240: return SYS_FUTEX;
+	case 252: return SYS_EXIT_GROUP;
+	case 355: return SYS_GETRANDOM;
+	case 356: return SYS_MEMFD_CREATE;
+	default:  return nr | (1ull << 32);  /* no such i386 call: cannot collide */
+	}
+}
+
+/*
+ * Arguments three, four and five.
+ *
+ * Two and below are handled where they are read - amd64's rdx and i386's edx
+ * are the same register, so arg2 needs no translation at all, and the first two
+ * are taken once at the top of syscall_do. These three differ and are read in
+ * only a handful of places, so they get an accessor rather than three more
+ * ternaries at each site.
+ */
+static uint64_t sysarg(const struct kof_emu *e, unsigned i)
+{
+	static const unsigned amd64[3] = { KOF_EMU_R10, KOF_EMU_R8, KOF_EMU_R9 };
+	static const unsigned i386[3]  = { KOF_EMU_RSI, KOF_EMU_RDI, KOF_EMU_RBP };
+	uint64_t v;
+
+	if (i >= 3)
+		return 0;
+	v = e->gpr[e->bits == 32 ? i386[i] : amd64[i]];
+	return e->bits == 32 ? (v & 0xffffffffu) : v;
+}
+
 static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 {
-	uint64_t nr = e->gpr[KOF_EMU_RAX];
-	uint64_t a0 = e->gpr[KOF_EMU_RDI], a1 = e->gpr[KOF_EMU_RSI];
+	/*
+	 * i386 passes the number in eax and the arguments in ebx, ecx, edx,
+	 * esi, edi, ebp - a different register for every one of them than amd64
+	 * uses. Read here rather than by moving the guest's registers about,
+	 * because the guest is entitled to find them unchanged when the call
+	 * returns.
+	 */
+	uint64_t nr = e->bits == 32 ? i386_nr(e->gpr[KOF_EMU_RAX] & 0xffffffffu)
+				    : e->gpr[KOF_EMU_RAX];
+	uint64_t a0 = e->bits == 32 ? (e->gpr[KOF_EMU_RBX] & 0xffffffffu)
+				    : e->gpr[KOF_EMU_RDI];
+	uint64_t a1 = e->bits == 32 ? (e->gpr[KOF_EMU_RCX] & 0xffffffffu)
+				    : e->gpr[KOF_EMU_RSI];
 
 	*stop_out = 0;
 	switch (nr) {
@@ -1155,9 +1268,9 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 		 * MAP_ANONYMOUS settles it regardless of what the fd looks
 		 * like.
 		 */
-		int32_t  fd    = (int32_t)e->gpr[KOF_EMU_R8];
-		uint64_t flags = e->gpr[KOF_EMU_R10];
-		uint64_t off = e->gpr[KOF_EMU_R9];
+		int32_t  fd    = (int32_t)sysarg(e, 1);
+		uint64_t flags = sysarg(e, 0);
+		uint64_t off = sysarg(e, 2);
 		uint64_t at;
 
 		if (!len)
@@ -1257,7 +1370,7 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 	case SYS_CLOCK_NANOSLEEP: {
 		uint64_t req = (nr == SYS_NANOSLEEP) ? a0 : e->gpr[KOF_EMU_RDX];
 		uint64_t ts[2], rem[2] = { 0, 0 };
-		uint64_t back = (nr == SYS_NANOSLEEP) ? a1 : e->gpr[KOF_EMU_R10];
+		uint64_t back = (nr == SYS_NANOSLEEP) ? a1 : sysarg(e, 0);
 
 		if (req && mem_rd(e, req, ts, sizeof ts))
 			e->tsc_skew += ts[0] * 1000000000u + ts[1];
@@ -1378,8 +1491,8 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 		/* 8 MB of stack, and as many descriptors as anyone asks for. */
 		uint64_t lim[2] = { 8u * 1024u * 1024u, ~(uint64_t)0 };
 
-		if (e->gpr[KOF_EMU_R10] &&
-		    !mem_wr(e, e->gpr[KOF_EMU_R10], lim, sizeof lim))
+		if (sysarg(e, 0) &&
+		    !mem_wr(e, sysarg(e, 0), lim, sizeof lim))
 			return (uint64_t)-14;
 		return 0;
 	}
@@ -1452,7 +1565,7 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 		return e->self_pos;
 	}
 	case SYS_PREAD64:
-		return self_read(e, a1, e->gpr[KOF_EMU_R10], e->gpr[KOF_EMU_RDX]);
+		return self_read(e, a1, sysarg(e, 0), e->gpr[KOF_EMU_RDX]);
 	case SYS_FSTAT:
 	case SYS_NEWFSTATAT: {
 		/* struct stat is 144 bytes on amd64 and the only field a stub
@@ -1607,7 +1720,9 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			}
 			memset(code + got, 0, sizeof code - got);
 		}
-		st = NdDecodeEx(&ix, code, sizeof code, ND_CODE_64, ND_DATA_64);
+		st = NdDecodeEx(&ix, code, sizeof code,
+				e->bits == 32 ? ND_CODE_32 : ND_CODE_64,
+				e->bits == 32 ? ND_DATA_32 : ND_DATA_64);
 		if (!ND_SUCCESS(st)) { fail(e, KOF_EMU_STOP_DECODE, NULL); break; }
 
 		e->trace[e->trace_n++ % KOF_EMU_TRACE] = e->rip;
@@ -1697,6 +1812,20 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		case ND_INS_FCMOVU:  case ND_INS_FCMOVNU:
 		case ND_INS_FLDZ: case ND_INS_FLD1:
 		case ND_INS_FABS: case ND_INS_FCHS:
+		/*
+		 * FXAM and the other flag-setters belong here too.
+		 *
+		 * They were missing and it cost a whole encoder family: the
+		 * Alpha2 stubs open with `fxam` before the fnstenv, so the run
+		 * stopped on its FIRST instruction with "unsupported: FXAM" -
+		 * measured on x86_alpha_mixed. What every instruction in this
+		 * group has in common is that the run does not need its
+		 * arithmetic, only the address it leaves behind for a later
+		 * fnstenv to report. FXAM examines st0 and sets the condition
+		 * codes; nothing here reads those, and a GetPC does not care.
+		 */
+		case ND_INS_FXAM: case ND_INS_FTST:
+		case ND_INS_FSQRT: case ND_INS_FRNDINT:
 			e->fpu_rip = e->rip;
 			break;
 
@@ -1726,6 +1855,53 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			    !ea_of(e, &ix, &ix.Operands[0], &at))
 				goto unsupported;
 			if (!mem_wr(e, at, env, sizeof env))
+				goto fault;
+			break;
+		}
+
+		/*
+		 * FXSAVE - THE OTHER GetPC, and the reason it is here.
+		 *
+		 * It saves the whole x87/SSE state, 512 bytes of it, and one
+		 * field is the address of the last x87 instruction - the same
+		 * value FNSTENV reports and the same use a stub makes of it.
+		 * x64/zutto_dekiru opens with `fxsave [r8]` and died on its
+		 * fifth instruction without it.
+		 *
+		 * The layout differs between the two forms and the difference
+		 * matters, because a stub reads one exact offset:
+		 *
+		 *   FXSAVE64   FIP is 64 bits at offset 8
+		 *   FXSAVE     FIP is 32 bits at offset 8, its selector at 12
+		 *
+		 * Everything else is written as zero. A run that needed the
+		 * control word or a live xmm register out of this block would
+		 * be doing arithmetic on the FPU, which nothing this interprets
+		 * does - and a wrong answer there would be visible, not silent,
+		 * because the stub would fetch from the wrong address.
+		 */
+		case ND_INS_FXSAVE:
+		case ND_INS_FXSAVE64: {
+			uint8_t area[512];
+			uint64_t at;
+
+			memset(area, 0, sizeof area);
+			if (ix.Instruction == ND_INS_FXSAVE64) {
+				unsigned k;
+
+				for (k = 0; k < 8u; k++)
+					area[8 + k] = (uint8_t)(e->fpu_rip >>
+								(k * 8));
+			} else {
+				area[8]  = (uint8_t)(e->fpu_rip);
+				area[9]  = (uint8_t)(e->fpu_rip >> 8);
+				area[10] = (uint8_t)(e->fpu_rip >> 16);
+				area[11] = (uint8_t)(e->fpu_rip >> 24);
+			}
+			if (ix.Operands[0].Type != ND_OP_MEM ||
+			    !ea_of(e, &ix, &ix.Operands[0], &at))
+				goto unsupported;
+			if (!mem_wr(e, at, area, sizeof area))
 				goto fault;
 			break;
 		}
@@ -2382,6 +2558,122 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				goto fault;
 			break;
 
+		/*
+		 * PUSHAD / POPAD - 32-BIT ONLY, AND THE STUBS USE THEM.
+		 *
+		 * amd64 dropped both, so the interpreter never needed them and
+		 * did not carry them. A 32-bit encoder reaches for them the
+		 * moment it wants to save state around a decode loop:
+		 * single_static_bit stopped on its fifteenth instruction with
+		 * "unsupported: PUSHAD".
+		 *
+		 * The order is the architecture's and not a choice: eax, ecx,
+		 * edx, ebx, the ORIGINAL esp, ebp, esi, edi. POPAD restores
+		 * them in reverse and DISCARDS the saved esp - the stack pointer
+		 * is where the pops left it, not what was written.
+		 */
+		case ND_INS_PUSHA:
+		case ND_INS_PUSHAD: {
+			static const unsigned ord[8] = {
+				KOF_EMU_RAX, KOF_EMU_RCX, KOF_EMU_RDX,
+				KOF_EMU_RBX, KOF_EMU_RSP, KOF_EMU_RBP,
+				KOF_EMU_RSI, KOF_EMU_RDI
+			};
+			uint64_t sp0 = e->gpr[KOF_EMU_RSP];
+			unsigned k;
+
+			for (k = 0; k < 8u; k++)
+				if (!push(e, ord[k] == KOF_EMU_RSP
+					     ? sp0 : e->gpr[ord[k]]))
+					goto fault;
+			break;
+		}
+
+		case ND_INS_POPA:
+		case ND_INS_POPAD: {
+			static const unsigned ord[8] = {
+				KOF_EMU_RDI, KOF_EMU_RSI, KOF_EMU_RBP,
+				KOF_EMU_RSP, KOF_EMU_RBX, KOF_EMU_RDX,
+				KOF_EMU_RCX, KOF_EMU_RAX
+			};
+			unsigned k;
+
+			for (k = 0; k < 8u; k++) {
+				uint64_t t;
+
+				if (!pop(e, &t))
+					goto fault;
+				if (ord[k] != KOF_EMU_RSP)
+					e->gpr[ord[k]] = t;   /* esp: discarded */
+			}
+			break;
+		}
+
+		/*
+		 * THE BCD ADJUSTS, and they are here because Alpha2 uses them
+		 * as arithmetic rather than as decimal.
+		 *
+		 * An alphanumeric encoder can only emit bytes in a narrow range,
+		 * so it builds its values out of whatever instructions fall in
+		 * that range - and AAA, AAS and their siblings do. What the
+		 * decoder needs from them is the exact register and flag result,
+		 * which is why these are implemented rather than skipped: a stub
+		 * computing an offset through AAA and getting the wrong AF back
+		 * reads its payload from the wrong place.
+		 *
+		 * 32-bit only, like PUSHAD - amd64 removed them.
+		 */
+		case ND_INS_AAA:
+		case ND_INS_AAS: {
+			uint32_t ax = (uint32_t)(e->gpr[KOF_EMU_RAX] & 0xffffu);
+			unsigned al = ax & 0xffu, ah = (ax >> 8) & 0xffu;
+			int adj = (al & 0x0fu) > 9u || (e->flags & FL_AF);
+
+			if (adj) {
+				if (ix.Instruction == ND_INS_AAA) {
+					al = (al + 6u) & 0xffu;
+					ah = (ah + 1u) & 0xffu;
+				} else {
+					al = (al - 6u) & 0xffu;
+					ah = (ah - 1u) & 0xffu;
+				}
+				e->flags |= FL_AF | FL_CF;
+			} else {
+				e->flags &= ~(uint64_t)(FL_AF | FL_CF);
+			}
+			al &= 0x0fu;
+			e->gpr[KOF_EMU_RAX] =
+				(e->gpr[KOF_EMU_RAX] & ~0xffffull) |
+				((uint64_t)ah << 8) | al;
+			break;
+		}
+
+		case ND_INS_DAA:
+		case ND_INS_DAS: {
+			unsigned al = (unsigned)(e->gpr[KOF_EMU_RAX] & 0xffu);
+			unsigned old = al;
+			int oldcf = (e->flags & FL_CF) != 0;
+			int sub = ix.Instruction == ND_INS_DAS;
+
+			e->flags &= ~(uint64_t)FL_CF;
+			if ((al & 0x0fu) > 9u || (e->flags & FL_AF)) {
+				al = sub ? (al - 6u) & 0xffu : (al + 6u) & 0xffu;
+				if (sub && old < 6u)
+					e->flags |= FL_CF;
+				e->flags |= FL_AF;
+			} else {
+				e->flags &= ~(uint64_t)FL_AF;
+			}
+			if (old > 0x99u || oldcf) {
+				al = sub ? (al - 0x60u) & 0xffu
+					 : (al + 0x60u) & 0xffu;
+				e->flags |= FL_CF;
+			}
+			e->gpr[KOF_EMU_RAX] =
+				(e->gpr[KOF_EMU_RAX] & ~0xffull) | al;
+			break;
+		}
+
 		case ND_INS_LEAVE:
 			e->gpr[KOF_EMU_RSP] = e->gpr[KOF_EMU_RBP];
 			if (!pop(e, &e->gpr[KOF_EMU_RBP]))
@@ -2646,6 +2938,39 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				e->gpr[KOF_EMU_RAX] = 0x000306a9;  /* a plausible model */
 				e->gpr[KOF_EMU_RDX] = 0x078bfbff;  /* fpu..sse2, no avx */
 			}
+			break;
+		}
+
+		/*
+		 * `int 0x80` IS THE 32-BIT SYSCALL, and the only interrupt this
+		 * runs.
+		 *
+		 * Every other vector is refused rather than ignored: an
+		 * `int 3` is a debugger trap and an `int 0x2e` is Windows, and
+		 * a stub reaching either is doing something this environment
+		 * cannot answer for. Returning from them as though they had
+		 * worked would let the run carry on into a state the guest
+		 * never actually reached.
+		 *
+		 * Accepted in 64-bit mode too. Linux still honours int 0x80
+		 * from a 64-bit process - with the i386 table - so a stub that
+		 * uses it there is doing something real, and refusing it would
+		 * be this emulator disagreeing with the kernel.
+		 */
+		case ND_INS_INT: {
+			int s = 0;
+			uint64_t ret;
+			unsigned was = e->bits;
+
+			if (ix.Operands[0].Type != ND_OP_IMM ||
+			    ix.Operands[0].Info.Immediate.Imm != 0x80)
+				goto unsupported;
+			/* int 0x80 is the i386 convention whatever the mode. */
+			e->bits = 32;
+			ret = do_syscall(e, &s);
+			e->bits = was;
+			if (s) { e->stop = (enum kof_emu_stop)(s - 1); goto done; }
+			e->gpr[KOF_EMU_RAX] = ret;
 			break;
 		}
 
