@@ -56,6 +56,7 @@
 
 #include <kofeng.h>
 #include "../libkofeng/core/kofplatform.h"
+#include "goto_parse.h"
 #include <kofcore.h>
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
@@ -241,9 +242,11 @@ struct out {
 	 * col_hint counts from the last positioning, not from column one, so
 	 * "1 + col_hint" is only the real column when the row started at column
 	 * one. The find dialog starts its rows at column three, and its click
-	 * boxes have been two columns left of the text they name ever since.
-	 * A field that wants to turn a click into a caret cannot be wrong by
-	 * two, so the base is recorded rather than assumed.
+	 * boxes were two columns left of the text they name for as long as they
+	 * were written that way; they are "col_base + col_hint" now, and so is
+	 * the Go to box. A field that wants to turn a click into a caret cannot
+	 * be wrong by two, so the base is recorded rather than assumed - and
+	 * anything laying out a row records its boxes from it, never from 1.
 	 */
 	int   row_hint, col_base;
 };
@@ -279,6 +282,21 @@ static void out_str(struct out *o, const char *s)
 		}
 		o->col_hint++;
 	}
+}
+
+/*
+ * One GLYPH: several bytes, one column.
+ *
+ * out_str counts col_hint per byte, which is right for ASCII and wrong for
+ * anything else - a three byte box character would advance the column count by
+ * three and every width and click box computed from it after that would be out.
+ * The scrollbar gets away with out_str because it writes one glyph and then
+ * repositions; a border cannot.
+ */
+static void out_glyph(struct out *o, const char *g)
+{
+	out_add(o, g, strlen(g));
+	o->col_hint++;
 }
 
 static void out_fmt(struct out *o, const char *fmt, ...)
@@ -1063,7 +1081,15 @@ static void decl_put_literal(FILE *f, const uint8_t *b, uint32_t n)
  * four times, and four bespoke popups would be four places to get the click
  * routing wrong.
  */
-#define CH_ITEMS 16
+/*
+ * Enough rows for the longest list any menu builds, which is CH_MARKER's: one
+ * per declared marker, and MAX_DECL of those. At sixteen, a draft with more
+ * than sixteen unused markers simply ended - ch_add drops what does not fit and
+ * the list has no scroll - so the markers past the sixteenth could not be put
+ * into a matcher from the menu at all. Two spare for the rows a list adds
+ * around its items.
+ */
+#define CH_ITEMS (MAX_DECL + 2)
 #define CH_W     38
 
 enum ch_what {
@@ -1598,7 +1624,15 @@ struct view {
 	 * they are asked to qualify it.
 	 */
 	struct chooser ch_up;
-	int         a_c0, a_c1, b_c0, b_c1, p_c0, p_c1, o_c0, o_c1;
+	int         a_c0, a_c1, b_c0, b_c1, o_c0, o_c1;
+	/*
+	 * "[+ String]" - ONE PAIR PER MATCHER, because its column depends on
+	 * how many marker ids that matcher's row already printed. A single
+	 * shared pair was overwritten by every row in turn, so only the last
+	 * matcher's button answered a click and the earlier rows' buttons were
+	 * dead while blank space at the last row's column was live.
+	 */
+	int         p_c0[MAX_GROUP][2];
 	int         opt_c0[OPT_COUNT], opt_c1[OPT_COUNT];
 
 	/*
@@ -1702,6 +1736,20 @@ struct view {
 	 */
 	char        find[80];
 	int         find_open;      /* the dialog is up */
+	/*
+	 * GO TO: an offset typed in, and where it is measured from.
+	 *
+	 * Its own flag and buffer rather than the find dialog's, because the two
+	 * take different things - find takes bytes to look for, this takes one
+	 * number - and sharing the field meant a half-typed search turning into
+	 * an offset. `goto_file` says whether the number is a FILE offset or an
+	 * offset into the region being looked at: both are what somebody means
+	 * by "offset" depending on what they are reading, and the hex pane shows
+	 * region offsets while every report and every finding names file ones.
+	 */
+	int         goto_open;
+	int         goto_file;      /* 1 file offset, 0 offset in this region */
+	char        gotobuf[20];
 	int         find_hex;       /* the text is hex digits, not bytes */
 	int         find_icase;     /* letters compare either way; text only */
 	int         find_regex;     /* declared, refused: see draw_find */
@@ -1709,6 +1757,8 @@ struct view {
 	uint64_t    find_at;        /* the last hit, in file offsets */
 	uint32_t    find_i, find_n; /* which hit it is, and how many there are */
 	uint32_t    find_off;       /* how far the field is scrolled */
+	uint32_t    goto_off;       /* the same, for the Go to field */
+	int         g_txt[2], g_mode[2], g_go[2], g_cancel[2];
 	/* One offset per field that can hold more than it shows. Separate
 	 * because they scroll independently: a caret in one says nothing about
 	 * where another is being read from. */
@@ -1743,6 +1793,17 @@ struct view {
 	uint32_t    cseq_idx[4 * MAX_GROUP];
 	uint32_t    n_cseq;
 	int         cnd_id0[MAX_GROUP];   /* where its matcher ids start */
+	/*
+	 * And where its TYPED EXPRESSION box is, when the condition carries one
+	 * that is not a plain list of ids.
+	 *
+	 * The box was drawn with a focus colour and the keys to edit it were
+	 * wired (edit band 103+i), but nothing recorded a click range and
+	 * nothing ever set that band - so a rule loaded from source with an
+	 * expression like "(1&2)|3" showed a field that could not be focused or
+	 * typed into by any means.
+	 */
+	int         cnd_ex[MAX_GROUP][2];
 	int         cnd_mt[MAX_GROUP][2];
 	int         row_rng, row_grp;
 	int         pane;           /* 0 tree, 1 hex, 2 markers, 3 draft */
@@ -3409,10 +3470,24 @@ static void rng_name_of(const struct kof_inspect_fmt *fmt, uint32_t mask,
  * that used to happen, since the caller passed no format and got WHOLE_FILE for
  * everything.
  */
+/*
+ * How long a scan_range_ identifier can get: the prefix, plus the longest
+ * region name rng_name_of produces (a join of every region word - for ELF
+ * "headers_code_data_noload" is 24 characters on its own), plus the terminator.
+ * Named so the two callers and this function cannot be sized differently -
+ * which is how the identifier came to be cut in the first place.
+ */
+#define RNG_IDENT_MAX 64
+
 static void rng_ident(const struct kof_inspect_fmt *fmt, uint32_t mask,
 		      char *out, size_t cap)
 {
-	char w[24];
+	/* Forty, like every other rng_name_of caller. At 24 the display name of
+	 * a mask over enough regions was cut before it became an identifier, so
+	 * two different masks could have produced one scan_range_ name - two
+	 * KOF_TARGET_RANGE declarations of the same identifier, which does not
+	 * compile, in a file the tool reported as written. */
+	char w[40];
 	size_t i;
 
 	/* Named the way bases/ names them - scan_range_data, not DATA. A bare
@@ -3559,7 +3634,7 @@ static int grp_shared(struct view *v, uint32_t g)
 static void emit_call_as(FILE *f, struct view *v, uint32_t g, int force_multi)
 {
 	const struct group *q = &v->grp[g];
-	char nm[40];
+	char nm[RNG_IDENT_MAX];
 	uint32_t i;
 
 	rng_ident(cur_obj(v)->fmt, grp_mask(v, g), nm, sizeof nm);
@@ -6246,7 +6321,7 @@ static void generate(struct view *v, int as_new)
 
 		for (g2 = 0; g2 < v->n_grp; g2++) {
 			uint32_t m, b, q;
-			char nm[40];
+			char nm[RNG_IDENT_MAX];
 			int first = 1;
 
 			if (!grp_count(v, g2))
@@ -6492,6 +6567,32 @@ static void rng_finish(struct view *v, struct chooser *c, int verb,
 		return;
 	}
 	rng_apply(v, verb, target, m);
+}
+
+/*
+ * Is this optional declaration worth offering on THIS object.
+ *
+ * One function because two places need the answer - the list that offers them
+ * and the taker that walks the same list to find which row was picked - and a
+ * predicate written twice is a menu that offers what it will refuse.
+ *
+ * Architecture and subtype belong to executables and to nothing else: a zip has
+ * no machine and a PDF has no ET_DYN. Asked of the object in hand rather than
+ * from a fixed list, so the menu answers for the file being looked at.
+ */
+static int opt_offerable(struct view *v, int k)
+{
+	uint8_t fm = cur_obj(v)->ctx.format;
+	int exe = fm == KOF_FMT_ELF || fm == KOF_FMT_PE || fm == KOF_FMT_MACHO;
+
+	if (k < 0 || k >= OPT_COUNT || v->opt_on[k])
+		return 0;
+	if (k == OPT_ARCH)
+		return exe && cur_obj(v)->ctx.arch != 0;
+	if (k == OPT_SUBTYPE)
+		return exe && kof_inspect_subtype_name(fm,
+						cur_obj(v)->ctx.subtype) != NULL;
+	return 1;                       /* the two sizes always apply */
 }
 
 static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
@@ -6891,28 +6992,17 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		/* Only the ones this object can answer for, and only the ones
 		 * not already there: a list that offers what it will refuse is
 		 * a list that lies about itself. */
-		if (!v->opt_on[OPT_SIZE_MIN])
+		if (opt_offerable(v, OPT_SIZE_MIN))
 			ch_add(c, opt_word[OPT_SIZE_MIN]);
-		if (!v->opt_on[OPT_SIZE_MAX])
+		if (opt_offerable(v, OPT_SIZE_MAX))
 			ch_add(c, opt_word[OPT_SIZE_MAX]);
-		/*
-		 * Architecture and subtype belong to executables and to nothing
-		 * else: a zip has no machine and a PDF has no ET_DYN. Offered
-		 * on the object in hand rather than from a fixed list, so the
-		 * menu answers for the file being looked at.
-		 */
-		{
-			uint8_t fm = cur_obj(v)->ctx.format;
-			int exe = fm == KOF_FMT_ELF || fm == KOF_FMT_PE ||
-				  fm == KOF_FMT_MACHO;
-
-			if (exe && !v->opt_on[OPT_ARCH] && cur_obj(v)->ctx.arch)
-				ch_add(c, opt_word[OPT_ARCH]);
-			if (exe && !v->opt_on[OPT_SUBTYPE] &&
-			    kof_inspect_subtype_name(fm,
-						     cur_obj(v)->ctx.subtype))
-				ch_add(c, opt_word[OPT_SUBTYPE]);
-		}
+		/* Architecture and subtype belong to executables and to nothing
+		 * else - opt_offerable is where that is decided, for this list
+		 * and for the taker both. */
+		if (opt_offerable(v, OPT_ARCH))
+			ch_add(c, opt_word[OPT_ARCH]);
+		if (opt_offerable(v, OPT_SUBTYPE))
+			ch_add(c, opt_word[OPT_SUBTYPE]);
 		if (!c->n)
 			return;
 	} else if (what == CH_ARCH) {
@@ -7195,11 +7285,18 @@ static void ch_take(struct view *v)
 		int seen = 0, k;
 
 		for (k = 0; k < OPT_COUNT; k++) {
-			if (v->opt_on[k])
-				continue;
-			if (k == OPT_ARCH && !ob->ctx.arch)
-				continue;
-			if (k == OPT_SUBTYPE && (!ob->fmt || !ob->ctx.subtype))
+			/*
+			 * THE SAME QUESTION THE LIST ASKED - see opt_offerable.
+			 *
+			 * These skips used to be written out again here, and the
+			 * two spellings disagreed on the commonest object there
+			 * is: the list offers "File subtype" when the format has
+			 * a NAME for the object's subtype, and KOF_PE_EXE is
+			 * zero with the name "EXE", while this loop skipped any
+			 * subtype that was zero. So on an ordinary PE the row
+			 * was offered, picked, and silently did nothing.
+			 */
+			if (!opt_offerable(v, k))
 				continue;
 			if (seen++ != c->sel)
 				continue;
@@ -7470,6 +7567,12 @@ static void draw_one_chooser(struct out *o, const struct chooser *c, int live)
 	int i;
 
 	for (i = 0; i < c->n; i++) {
+		/* ch_open lifts a long list up the screen and stops at row one,
+		 * so on a short terminal a very long one can still reach the
+		 * bottom. Painting past it corrupts the rows below rather than
+		 * simply not fitting. */
+		if (c->row + i > g_rows)
+			break;
 		out_at(o, c->row + i, c->col);
 		/* The parent keeps its highlight so the line the submenu is
 		 * qualifying stays pointed at, but in a colour that says the
@@ -9075,8 +9178,21 @@ static void draw_decl(struct out *o, struct view *v)
 		uint32_t k;
 		char sz[24];
 
-		if (!PR_VIS(r))
+		if (!PR_VIS(r)) {
+			/*
+			 * A ROW THAT IS NOT DRAWN HAS NO CLICK TARGETS.
+			 *
+			 * Left at last frame's columns, a scrolled-out row's
+			 * ranges still answer a click - so a press at those
+			 * columns on whatever row now sits there acted on THIS
+			 * marker, which is the failure the per-row recording
+			 * exists to prevent (see the note on grp_nt). The
+			 * condition loop below already clears its own.
+			 */
+			v->str_wc[i][0] = v->str_wc[i][1] = -1;
+			v->str_by[i][0] = v->str_by[i][1] = -1;
 			continue;
+		}
 		row_start(o, PR(r), 1);
 		/* Right aligned in a fixed width, so the columns after it do
 		 * not step sideways when the list reaches ten. Two digits is
@@ -9229,6 +9345,14 @@ static void draw_decl(struct out *o, struct view *v)
 		else
 			snprintf(rl, sizeof rl, "find_all");
 
+		if (!PR_VIS(r)) {
+			/* Scrolled out: this matcher has no click targets this
+			 * frame. See the same clearing on the string rows. */
+			v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
+			v->grp_rg[g][0] = v->grp_rg[g][1] = -1;
+			v->grp_th[g][0] = v->grp_th[g][1] = -1;
+			v->grp_nt[g][0] = v->grp_nt[g][1] = -1;
+		}
 		if (PR_VIS(r)) {
 			char nm[40], lead[16];
 
@@ -9328,11 +9452,11 @@ static void draw_decl(struct out *o, struct view *v)
 		}
 		if (first)
 			out_str(o, A_DIM "none yet" A_OFF);
-		v->p_c0 = v->p_c1 = -1;
+		v->p_c0[g][0] = v->p_c0[g][1] = -1;
 		if (decl_free(v)) {
-			v->p_c0 = 1 + (int)o->col_hint;
+			v->p_c0[g][0] = 1 + (int)o->col_hint;
 			out_fmt(o, "   " A_ID "[+ String]" A_OFF);
-			v->p_c1 = (int)o->col_hint;
+			v->p_c0[g][1] = (int)o->col_hint;
 		}
 		r++;
 	}
@@ -9367,6 +9491,7 @@ static void draw_decl(struct out *o, struct view *v)
 		if (!PR_VIS(r)) {
 			if (v->cseq_kind[g] == CS_COND) {
 				v->cnd_lv[ci][0] = v->cnd_lv[ci][1] = -1;
+				v->cnd_ex[ci][0] = v->cnd_ex[ci][1] = -1;
 				v->cnd_vr[ci][0] = v->cnd_vr[ci][1] = -1;
 			} else if (v->cseq_kind[g] == CS_MATCH) {
 				v->cnd_mt[ci][0] = v->cnd_mt[ci][1] = -1;
@@ -9457,6 +9582,7 @@ static void draw_decl(struct out *o, struct view *v)
 			out_str(o, A_DIM "Matchers: " A_OFF);
 			v->cnd_id0[ci] = 1 + (int)o->col_hint;
 			v->cnd_op[ci][0] = v->cnd_op[ci][1] = -1;
+			v->cnd_ex[ci][0] = v->cnd_ex[ci][1] = -1;
 			{
 				char canon[64];
 
@@ -9468,6 +9594,8 @@ static void draw_decl(struct out *o, struct view *v)
 					 * list would show a different
 					 * condition from the generated one. */
 					v->cnd_id0[ci] = -1;
+					v->cnd_ex[ci][0] = 1 +
+							   (int)o->col_hint;
 					out_str(o, v->edit == 103 + (int)ci
 						   ? A_SEL : A_WARN);
 					field_draw(o, c2->expr, v->caret,
@@ -9478,6 +9606,7 @@ static void draw_decl(struct out *o, struct view *v)
 						   v->edit == 103 + (int)ci,
 						   "", v->field_all);
 					out_str(o, A_OFF);
+					v->cnd_ex[ci][1] = (int)o->col_hint;
 					goto ids_done;
 				}
 			}
@@ -10415,6 +10544,14 @@ static int menu_enabled(struct view *v, int a)
 {
 	if (!menu_shown(v, a))
 		return 0;
+	/*
+	 * Go to needs no selection and no draft - it is a jump to a number the
+	 * reader types - so it is live whenever a file is open. Without a branch
+	 * here it fell to the closing `return 0` and drew greyed for ever, which
+	 * is the same silent nothing the missing menu_run branch used to give.
+	 */
+	if (a == M_GOTO)
+		return 1;
 	if (a == M_COPY_DISASM)
 		/*
 		 * The same condition dis_copy runs on, and it has to be: this
@@ -11256,6 +11393,17 @@ static void decl_add(struct view *v, int hex)
 	v->warn[0] = 0;
 	v->sel_decl = v->n_decl;
 	v->n_decl++;
+	/*
+	 * LOCATED, like every other path that produces a declaration.
+	 *
+	 * `at` was set straight from the selection and n_hits/cur_hit/at_mask
+	 * left at zero, so a marker just taken from the pane showed no "n/m"
+	 * occurrence count and no [<]/[>] step arrows - those are gated on
+	 * n_hits > 1 - however many times its bytes appear. It looked like a
+	 * marker that occurs once until the reader pressed "Update string
+	 * regions", which is a thing they had no reason to press.
+	 */
+	decl_locate(v, &v->decl[v->n_decl - 1u]);
 
 	/* The selection has been taken; leaving it lit would invite taking it
 	 * twice. */
@@ -11307,8 +11455,24 @@ static void menu_run(struct view *v, int a)
 		v->menu_open = 0;
 		return;
 	}
+	if (a == M_GOTO) {
+		/*
+		 * The item was in both menus and in the enum, and nothing ever
+		 * handled it - so it drew, took the click, and did nothing. It
+		 * opens the prompt now; see draw_goto.
+		 */
+		v->goto_open = 1;
+		v->find_open = 0;      /* they share the box - see draw_goto */
+		v->gotobuf[0] = 0;
+		v->num_fresh = 1;
+		v->edit = 520;
+		v->menu_open = 0;
+		v->warn[0] = 0;
+		return;
+	}
 	if (a == M_FIND_STR || a == M_FIND_HEX) {
 		v->find_hex = a == M_FIND_HEX;
+		v->goto_open = 0;      /* they share the box - see draw_goto */
 		v->find[0] = 0;
 		v->find_at = KOF_BROKEN;
 		v->find_open = 1;
@@ -11364,6 +11528,8 @@ static char  *g_last;
 static size_t g_last_n;
 
 static void draw_find(struct out *o, struct view *v);
+static void draw_goto(struct out *o, struct view *v);
+static int  goto_click(struct view *v);
 static void draw_bar(struct out *o, struct view *v);
 static void draw_help(struct out *o, struct view *v);
 static void draw_prop(struct out *o, struct view *v);
@@ -11512,6 +11678,8 @@ static void redraw(struct view *v)
 		draw_bar(&o, v);
 		if (v->find_open)
 			draw_find(&o, v);
+		if (v->goto_open)
+			draw_goto(&o, v);
 	}
 	if (v->prop_open)
 		draw_prop(&o, v);
@@ -12082,7 +12250,7 @@ static int bar_enabled(struct view *v, int i)
 				  !draft_edited(v);
 	case BI_QUIT:      return 1;
 	case BI_FIND:      return 1;
-	case BI_GOTO:      return 0;            /* the dialog is not built */
+	case BI_GOTO:      return 1;            /* draw_goto / goto_take */
 	case BI_KEYS:
 	case BI_ABOUT:     return 1;
 	default:           return 0;
@@ -13848,7 +14016,20 @@ static void bar_run(struct view *v, int i)
 	case BI_SAVE_AS: generate(v, 1); break;
 	case BI_FIND:
 		v->find_open = 1;
+		v->goto_open = 0;              /* they share the box */
 		v->edit = 500;
+		v->warn[0] = 0;
+		break;
+	/* The twin of BI_FIND, and it has to be here as well as in
+	 * bar_enabled: an item that reports itself live and has no case falls
+	 * to `default: break;` - the menu closes and nothing happens, which
+	 * is exactly how BI_GOTO looked before the dialog existed. */
+	case BI_GOTO:
+		v->goto_open = 1;
+		v->find_open = 0;      /* they share the box - see draw_goto */
+		v->gotobuf[0] = 0;
+		v->num_fresh = 1;
+		v->edit = 520;
 		v->warn[0] = 0;
 		break;
 	case BI_DUMP_STATIC: dump_all(v, 0); break;
@@ -14402,7 +14583,46 @@ static int bar_under(struct view *v)
  * horizontal lines with nothing between them read as a mistake rather than as a
  * frame.
  */
-#define FIND_H 4
+/*
+ * Five rows: a border, three of content, and a border. It was four and the box
+ * had no bottom edge at all - the side bars simply stopped, which reads as a
+ * dialog that has been cut off rather than one that ends.
+ */
+#define FIND_H 5
+
+/*
+ * The Go to box: its own height and its own rows, no longer borrowed from the
+ * find dialog.
+ *
+ * Five rows because it has three of content and a border top and bottom, and it
+ * spans the FULL WIDTH so that no column of the panel underneath shows through
+ * beside it. Sharing find's rows left columns one and two unpainted - find
+ * starts its rows at column three - and the two columns of whatever was behind
+ * it, read down five rows, is what made the dialog look like it was floating on
+ * top of a mess.
+ */
+#define GOTO_H 5
+
+/* Light box drawing, rounded at the corners, to match the scrollbar's U+2502
+ * rather than a row of ASCII dashes. */
+#define G_TL "\xe2\x95\xad"     /* U+256D */
+#define G_TR "\xe2\x95\xae"     /* U+256E */
+#define G_BL "\xe2\x95\xb0"     /* U+2570 */
+#define G_BR "\xe2\x95\xaf"     /* U+256F */
+#define G_H  "\xe2\x94\x80"     /* U+2500 */
+#define G_V  "\xe2\x94\x82"     /* U+2502 - the scrollbar's own */
+
+static int goto_top(void)
+{
+	return g_rows - GOTO_H - 1;
+}
+
+/* A row of the box, from column one so the border owns the left edge. */
+static void goto_row(struct out *o, int y)
+{
+	out_at(o, y, 1);
+	o->col_hint = 0;
+}
 
 static int find_top(void)
 {
@@ -14423,73 +14643,285 @@ static void find_row(struct out *o, int y)
 	o->col_hint = 0;
 }
 
+/*
+ * The number typed in, or KOF_BROKEN when it is not one.
+ *
+ * The parsing itself is in goto_parse.h, where a test can reach it - see the
+ * note there on why the base rules are the part worth testing. This only
+ * translates that header's "bad" into the engine's KOF_BROKEN, which are the
+ * same value but named for two different vocabularies.
+ */
+static uint64_t goto_value(const struct view *v)
+{
+	uint64_t n = kof_goto_parse(v->gotobuf);
+
+	return n == KOF_GOTO_BAD ? KOF_BROKEN : n;
+}
+
+/*
+ * Take the offset there, and SELECT the byte as well as scrolling to it.
+ *
+ * Scrolling alone puts the answer on the screen and leaves the reader to find
+ * which of sixteen columns it was - so the byte is selected, which is also what
+ * makes the disassembly panel and every menu item that works on a selection
+ * point at it.
+ */
+static void goto_take(struct view *v)
+{
+	uint64_t val = goto_value(v), fo;
+
+	if (val == KOF_BROKEN) {
+		say_err(v, "%s", "Not a number");
+		return;
+	}
+	fo = v->goto_file ? val : view_map(v, val, 0);
+	if (fo == KOF_BROKEN || fo >= cur_obj(v)->buf.n) {
+		say_err(v, "Past the end of the %s",
+			v->goto_file ? "file" : "region");
+		return;
+	}
+	view_show(v, fo);
+	{
+		uint64_t r = view_unmap(v, fo);
+
+		if (r != KOF_BROKEN) {
+			v->sel_a = v->sel_b = r;
+			v->sel_from_dis = 0;
+		}
+	}
+	v->goto_open = 0;
+	v->edit = 0;
+	say_note(v, "At file offset 0x%llx", (unsigned long long)fo);
+}
+
+/*
+ * GO TO, one line: the number, what it is measured from, and what it resolved
+ * to.
+ *
+ * The resolved value is shown while it is being typed rather than after the
+ * jump, because an offset typed into the wrong base is the mistake this dialog
+ * exists to make, and seeing "0x120 -> file 0x1120" says which base was used
+ * before Enter commits to it.
+ */
+/* Fill the row out to the right border and close it. */
+static void goto_edge(struct out *o)
+{
+	while ((int)o->col_hint < g_cols - 1)
+		out_str(o, " ");
+	out_glyph(o, G_V);
+}
+
+static void draw_goto(struct out *o, struct view *v)
+{
+	int top = goto_top(), i;
+	uint64_t val = goto_value(v);
+	int ok = val != KOF_BROKEN;
+
+	if (top < 1 || g_cols < 24)
+		return;                 /* no room to draw a box honestly */
+
+	/* Top border. */
+	goto_row(o, top);
+	out_str(o, A_DIM);
+	out_glyph(o, G_TL);
+	for (i = 0; i < g_cols - 2; i++)
+		out_glyph(o, G_H);
+	out_glyph(o, G_TR);
+	out_str(o, A_OFF);
+
+	/*
+	 * The field and what the number is measured from.
+	 *
+	 * Every click box is recorded as col_base + col_hint, not 1 + col_hint:
+	 * col_hint counts from wherever the row was positioned, so the shorter
+	 * form is only right for a row that starts at column one. The find
+	 * dialog's boxes have been two columns off for exactly that reason -
+	 * see the note on col_base - and this box is not going to repeat it.
+	 */
+	goto_row(o, top + 1);
+	out_str(o, A_DIM);
+	out_glyph(o, G_V);
+	out_str(o, A_OFF);
+	out_fmt(o, A_DIM " Go to " A_OFF);
+	v->g_txt[0] = o->col_base + (int)o->col_hint;
+	out_fmt(o, "%s[", v->edit == 520 ? A_SEL : A_ID);
+	field_draw(o, v->gotobuf, v->caret, &v->goto_off, 18,
+		   v->edit == 520, "offset", v->field_all);
+	out_str(o, "]" A_OFF);
+	v->g_txt[1] = o->col_base + (int)o->col_hint - 1;
+	out_fmt(o, A_DIM "  as " A_OFF);
+	v->g_mode[0] = o->col_base + (int)o->col_hint;
+	out_fmt(o, "%s[%s]" A_OFF, A_ID, v->goto_file ? "File" : "Region");
+	v->g_mode[1] = o->col_base + (int)o->col_hint - 1;
+	out_str(o, A_DIM);
+	goto_edge(o);
+	out_str(o, A_OFF);
+
+	/*
+	 * WHAT THE NUMBER RESOLVED TO, while it is being typed.
+	 *
+	 * An offset typed in the wrong base is the mistake this box invites -
+	 * "10" is sixteen here - so it is shown in both bases before Enter
+	 * commits to it, and a field that is not a number says so rather than
+	 * waiting for the jump to fail.
+	 */
+	goto_row(o, top + 2);
+	out_str(o, A_DIM);
+	out_glyph(o, G_V);
+	out_str(o, A_OFF);
+	if (!v->gotobuf[0])
+		out_fmt(o, A_DIM " hex by default - 0x for hex, 0n for decimal"
+			A_OFF);
+	else if (!ok)
+		out_fmt(o, " %snot a number" A_OFF, A_WARN);
+	else
+		out_fmt(o, A_DIM " = " A_OFF "%s0x%llx" A_OFF A_DIM
+			" = %llu, from the %s" A_OFF, A_ID,
+			(unsigned long long)val, (unsigned long long)val,
+			v->goto_file ? "file" : "region");
+	out_str(o, A_DIM);
+	goto_edge(o);
+	out_str(o, A_OFF);
+
+	goto_row(o, top + 3);
+	out_str(o, A_DIM);
+	out_glyph(o, G_V);
+	out_str(o, A_OFF);
+	out_str(o, " ");
+	v->g_go[0] = o->col_base + (int)o->col_hint;
+	out_fmt(o, "%s[ Go ]" A_OFF, ok ? A_ID : A_DIM);
+	v->g_go[1] = o->col_base + (int)o->col_hint - 1;
+	out_str(o, "  ");
+	v->g_cancel[0] = o->col_base + (int)o->col_hint;
+	out_fmt(o, A_ID "[ Cancel ]" A_OFF);
+	v->g_cancel[1] = o->col_base + (int)o->col_hint - 1;
+	out_str(o, A_DIM);
+	goto_edge(o);
+	out_str(o, A_OFF);
+
+	/* Bottom border. */
+	goto_row(o, top + 4);
+	out_str(o, A_DIM);
+	out_glyph(o, G_BL);
+	for (i = 0; i < g_cols - 2; i++)
+		out_glyph(o, G_H);
+	out_glyph(o, G_BR);
+	out_str(o, A_OFF);
+}
+
+/*
+ * A click inside the Go to box. Mirrors find_click, including the rule that a
+ * click OUTSIDE only takes the caret away - the dialog keeps its place until
+ * Cancel or Esc, because losing a half-typed offset to a stray click on the
+ * hex pane is the kind of thing a tool only has to do once.
+ */
+static int goto_click(struct view *v)
+{
+	int top = goto_top();
+
+	if (g_my < top || g_my >= top + GOTO_H) {
+		v->edit = 0;
+		return 0;
+	}
+	if (g_my == top + 1 && g_mx >= v->g_txt[0] && g_mx <= v->g_txt[1]) {
+		v->edit = 520;
+		return 1;
+	}
+	if (g_my == top + 1 && g_mx >= v->g_mode[0] && g_mx <= v->g_mode[1]) {
+		/* File offsets are what every report and every finding names;
+		 * region offsets are what the hex gutter shows. Both are "the
+		 * offset" depending on what is being read, so it is a toggle
+		 * rather than a guess. */
+		v->goto_file = !v->goto_file;
+		return 1;
+	}
+	if (g_my == top + 3) {
+		if (g_mx >= v->g_cancel[0] && g_mx <= v->g_cancel[1]) {
+			v->goto_open = 0;
+			v->edit = 0;
+		} else if (g_mx >= v->g_go[0] && g_mx <= v->g_go[1]) {
+			goto_take(v);
+		}
+	}
+	return 1;
+}
+
 static void draw_find(struct out *o, struct view *v)
 {
 	int top = find_top(), y, i;
 
 	find_row(o, top + 1);
 	out_fmt(o, A_DIM "Find " A_OFF);
-	v->f_txt[0] = 1 + (int)o->col_hint;
+	v->f_txt[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, "%s[", v->edit == 500 ? A_SEL : A_ID);
 	field_draw(o, v->find, v->caret, &v->find_off, 40, v->edit == 500, "", v->field_all);
 	out_str(o, "]" A_OFF);
-	v->f_txt[1] = (int)o->col_hint;
+	v->f_txt[1] = o->col_base + (int)o->col_hint - 1;
 	out_fmt(o, A_DIM "  as " A_OFF);
-	v->f_mode[0] = 1 + (int)o->col_hint;
+	v->f_mode[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, "%s[%s]" A_OFF, A_WARN, v->find_hex ? "Hex" : "Text");
-	v->f_mode[1] = (int)o->col_hint;
+	v->f_mode[1] = o->col_base + (int)o->col_hint - 1;
 	out_str(o, "\033[K");
 
 	find_row(o, top + 2);
-	v->f_rx[0] = 1 + (int)o->col_hint;
+	v->f_rx[0] = o->col_base + (int)o->col_hint;
 	/* Bright black on white, not on bright black: the same colour twice is
 	 * a grey block where a label should be. */
 	out_fmt(o, "\033[47;90m[ ] Regex" A_OFF);
-	v->f_rx[1] = (int)o->col_hint;
+	v->f_rx[1] = o->col_base + (int)o->col_hint - 1;
 	out_str(o, "   ");
-	v->f_ic[0] = 1 + (int)o->col_hint;
+	v->f_ic[0] = o->col_base + (int)o->col_hint;
 	if (v->find_hex)
 		out_fmt(o, "\033[47;90m[ ] Ignore case" A_OFF);
 	else
 		out_fmt(o, "%s[%s] Ignore case" A_OFF, A_ID,
 			v->find_icase ? "x" : " ");
-	v->f_ic[1] = (int)o->col_hint;
+	v->f_ic[1] = o->col_base + (int)o->col_hint - 1;
 	out_str(o, "   ");
-	v->f_all[0] = 1 + (int)o->col_hint;
+	v->f_all[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, "%s[%s] Search whole object" A_OFF, A_ID,
 		v->find_scope ? "x" : " ");
-	v->f_all[1] = (int)o->col_hint;
+	v->f_all[1] = o->col_base + (int)o->col_hint - 1;
 	out_str(o, "\033[K");
 
 	find_row(o, top + 3);
-	v->f_next[0] = 1 + (int)o->col_hint;
+	v->f_next[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, "%s[ Find next ]" A_OFF, v->find[0] ? A_ID : A_DIM);
-	v->f_next[1] = (int)o->col_hint;
+	v->f_next[1] = o->col_base + (int)o->col_hint - 1;
 	out_str(o, "  ");
-	v->f_back[0] = 1 + (int)o->col_hint;
+	v->f_back[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, "%s[ Find previous ]" A_OFF, v->find[0] ? A_ID : A_DIM);
-	v->f_back[1] = (int)o->col_hint;
+	v->f_back[1] = o->col_base + (int)o->col_hint - 1;
 	out_str(o, "  ");
-	v->f_cancel[0] = 1 + (int)o->col_hint;
+	v->f_cancel[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, A_ID "[ Cancel ]" A_OFF);
-	v->f_cancel[1] = (int)o->col_hint;
+	v->f_cancel[1] = o->col_base + (int)o->col_hint - 1;
 	/* Where the hit is belongs on the status line, which says it already.
 	 * Saying it twice made the dialog a row taller for no new fact. */
 	out_str(o, "\033[K");
 
+	/*
+	 * The frame, drawn after the content because the content rows clear to
+	 * the end of the line and would take the right edge with them.
+	 *
+	 * Light box drawing rounded at the corners, the same glyphs the Go to
+	 * box and the scrollbar use - a row of ASCII dashes beside a U+2502
+	 * scrollbar looked like two different programs.
+	 */
 	for (y = top; y < top + FIND_H; y++) {
 		out_at(o, y, 1);
 		out_str(o, A_DIM);
-		if (y == top) {
-			out_str(o, "+");
+		if (y == top || y == top + FIND_H - 1) {
+			out_str(o, y == top ? G_TL : G_BL);
 			for (i = 2; i < g_cols; i++)
-				out_str(o, "-");
-			out_str(o, "+" A_OFF);
+				out_str(o, G_H);
+			out_str(o, y == top ? G_TR : G_BR);
+			out_str(o, A_OFF);
 			continue;
 		}
-		out_str(o, "| " A_OFF);
+		out_str(o, G_V " " A_OFF);
 		out_at(o, y, g_cols);
-		out_str(o, A_DIM "|" A_OFF);
+		out_str(o, A_DIM G_V A_OFF);
 	}
 }
 
@@ -14643,6 +15075,8 @@ static void click(struct view *v, int rclick)
 		return;
 	}
 
+	if (v->goto_open && goto_click(v))
+		return;
 	if (v->find_open && find_click(v))
 		return;
 
@@ -14941,8 +15375,14 @@ static void click(struct view *v, int rclick)
 			ch_open(v, CH_OPT, 0, g_my + 1, g_mx);
 		else if (g_mx >= v->t_c0 && g_mx <= v->t_c1)
 			ch_open(v, CH_TYPE, 0, g_my, g_mx);
-		else if (g_mx >= v->n_c0 && g_mx <= v->n_c1)
-			ch_open(v, CH_RULE, MAX_GROUP, g_my, g_mx);
+		/*
+		 * n_c0/n_c1 is NOT tested here: it is the "[+ Matcher]" button
+		 * and it is recorded on the MATCHERS row, not on this one. Read
+		 * on the header row it claimed columns 2..12, which with a short
+		 * or empty family is the blank space just right of the Family
+		 * box - so a click there created a matcher nobody asked for. The
+		 * matchers row tests it, where it was drawn.
+		 */
 		else if (g_mx >= v->g_c0 && g_mx <= v->g_c1)
 			generate(v, 0);
 		else if (v->sv_c0 > 0 && g_mx >= v->sv_c0 && g_mx <= v->sv_c1)
@@ -14968,6 +15408,25 @@ static void click(struct view *v, int rclick)
 		 */
 		int want = g_my - decl_top() - 1 + (int)v->prow_off, r = 0;
 		uint32_t g, i;
+
+		/*
+		 * AND IT MUST BE A ROW THAT IS ON THE SCREEN.
+		 *
+		 * The row test above accepts everything up to mark_row() - 1,
+		 * which is one row MORE than PR_VIS lays out: the last of those
+		 * is the dashed rule draw_marker_line paints, not a draft row.
+		 * So a click on the rule resolved to prow_off + g_decl_rows - 2
+		 * - the first row past the window - and the walk below happily
+		 * found whatever marker, matcher or condition sits there. At the
+		 * far right of the row (g_mx >= g_cols - 4) that is the remove
+		 * button, so clicking the separator DELETED something that was
+		 * not on the screen and could not be seen to go.
+		 *
+		 * Tested against PR_VIS, the same predicate the drawing uses, so
+		 * the two cannot disagree about which rows exist.
+		 */
+		if (!PR_VIS(want))
+			return;
 
 		for (i = 0; i < (uint32_t)OPT_COUNT; i++) {
 			if (!v->opt_on[i])
@@ -15135,23 +15594,46 @@ static void click(struct view *v, int rclick)
 			}
 			r++;
 			if (r == want) {
+				/* Where the ids start: past "     Markers: ". */
 				int c2 = 15;
 
 				v->cur_grp = g;
-				if (v->p_c0 > 0 && g_mx >= v->p_c0 &&
-				    g_mx <= v->p_c1) {
+				if (v->p_c0[g][0] > 0 &&
+				    g_mx >= v->p_c0[g][0] &&
+				    g_mx <= v->p_c0[g][1]) {
 					ch_open(v, CH_MARKER, g, g_my - 3,
 						g_mx);
 					return;
 				}
-				/* An id on this row is a marker; clicking it
-				 * takes it back out of the matcher. */
+				/*
+				 * An id on this row is a marker; clicking it
+				 * takes it back out of the matcher.
+				 *
+				 * EACH ID IS MEASURED, the way cnd_id_click
+				 * measures the ones on a condition row. Three
+				 * columns apiece assumed every id was one digit
+				 * and the row prints ", %u": from the first
+				 * two-digit id on - MAX_DECL is 32, so ids
+				 * reach 32 - every id after it drifted one
+				 * column further left, and the click removed
+				 * the wrong marker or none. The hit window is
+				 * the digits only, not the ", " that joins
+				 * them, so the gap between two ids is dead
+				 * rather than belonging to whichever is nearer.
+				 */
 				for (i = 0; i < v->n_decl; i++) {
+					char num[8];
+					int w;
+
 					if (!(v->decl[i].grp & (1u << g)))
 						continue;
-					if (g_mx >= c2 && g_mx < c2 + 3)
+					w = snprintf(num, sizeof num, "%u",
+						     i + 1u);
+					if (g_mx >= c2 && g_mx < c2 + w) {
 						v->decl[i].grp &= ~(1u << g);
-					c2 += 3;
+						return;
+					}
+					c2 += w + 2;    /* the ", " after it */
 				}
 				return;
 			}
@@ -15208,6 +15690,13 @@ static void click(struct view *v, int rclick)
 					 g_mx >= v->cnd_op[ci][0] &&
 					 g_mx <= v->cnd_op[ci][1])
 					v->cnd[ci].op = !v->cnd[ci].op;
+				/* A typed expression is a FIELD, not a list of
+				 * ids - so it takes the caret rather than
+				 * having one of its characters removed. */
+				else if (v->cnd_ex[ci][0] > 0 &&
+					 g_mx >= v->cnd_ex[ci][0] &&
+					 g_mx <= v->cnd_ex[ci][1])
+					v->edit = 103 + (int)ci;
 				else
 					cnd_id_click(v, ci);
 				return;
@@ -15827,6 +16316,56 @@ static int handle(struct view *v, int k)
 				}
 				v->num[nn] = (char)k;
 				v->num[nn + 1u] = 0;
+			}
+			v->num_fresh = 0;
+			return 1;
+		}
+		/*
+		 * Esc closes the box whether or not the field has the caret.
+		 * A click on the pane behind takes the caret away but leaves
+		 * the box up - deliberately, so a half-typed offset survives a
+		 * stray click - and without this there was then no key that
+		 * would put it away, only the Cancel button.
+		 */
+		if (v->goto_open && k == 27) {
+			v->goto_open = 0;
+			v->edit = 0;
+			return 1;
+		}
+		if (v->edit == 520) {
+			/*
+			 * The Go to field: hex digits, the two prefixes, and
+			 * the editing a one-line number needs and no more.
+			 * Enter jumps, Esc closes without moving - the same
+			 * pair every other prompt here uses.
+			 */
+			size_t nn = strlen(v->gotobuf);
+
+			if (v->edit != v->edit_prev) {
+				v->edit_prev = v->edit;
+				v->caret = (uint32_t)nn;
+				v->field_all = 0;
+			}
+			if (k == 27) {
+				v->goto_open = 0;
+				v->edit = 0;
+			} else if (k == '\r' || k == '\n') {
+				goto_take(v);
+			} else if ((k == 127 || k == 8) && nn) {
+				v->gotobuf[nn - 1u] = 0;
+				v->caret = (uint32_t)(nn - 1u);
+			} else if (((k >= '0' && k <= '9') ||
+				    (k >= 'a' && k <= 'f') ||
+				    (k >= 'A' && k <= 'F') ||
+				    k == 'x' || k == 'X' || k == 'n' || k == 'N')
+				   && nn + 1u < sizeof v->gotobuf) {
+				if (v->num_fresh) {
+					v->gotobuf[0] = 0;
+					nn = 0;
+				}
+				v->gotobuf[nn] = (char)k;
+				v->gotobuf[nn + 1u] = 0;
+				v->caret = (uint32_t)(nn + 1u);
 			}
 			v->num_fresh = 0;
 			return 1;

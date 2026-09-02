@@ -52,7 +52,7 @@
  */
 #define GRAM_MAX_BYTES ((uint64_t)GRAM_SLOTS * 693u / 1000u)
 
-static struct kof_gram *gram_new(uint32_t n_patterns);
+static struct kof_gram *gram_new(void);
 static void             gram_free(struct kof_gram *);
 static uint64_t         gram_build(struct kof_gram *, kof_buf);
 static int              gram_may_contain(const struct kof_gram *, const uint8_t *,
@@ -202,11 +202,39 @@ static int find_lit(const uint8_t *hay, uint64_t hlen,
 			uint8_t lo = fold(needle[0]);
 			uint8_t up = (uint8_t)(lo - 32);   /* lo is a letter here */
 			uint64_t s = 0;
+			/*
+			 * ONCE A CASE IS ABSENT FROM THE TAIL IT STAYS ABSENT.
+			 *
+			 * memchr returning NULL over [s, last] says the byte is
+			 * in none of it, and `s` only ever grows - so every
+			 * later call for that case would scan the same bytes to
+			 * reach the same NULL. Without this the loop kept
+			 * issuing it: with one case missing and the other
+			 * frequent, the absent one rescanned the whole
+			 * remaining span at every one of the ~n candidates, and
+			 * the search went quadratic. Measured on a haystack of
+			 * 0x41 with the needle "abc": 64 KB 0.014 s, 256 KB
+			 * 0.251 s, 1 MB 5.9 s - an all-letter case-insensitive
+			 * pattern over a few megabytes was minutes of one
+			 * scan, reachable from the viewer's find box and from
+			 * any object too large for the presence table.
+			 */
+			int lo_gone = 0, up_gone = 0;
 
 			while (s <= last) {
 				size_t span = (size_t)(last - s + 1);
-				const uint8_t *q = memchr(hay + s, lo, span);
-				const uint8_t *q2 = memchr(hay + s, up, span);
+				const uint8_t *q = NULL, *q2 = NULL;
+
+				if (!lo_gone) {
+					q = memchr(hay + s, lo, span);
+					if (!q)
+						lo_gone = 1;
+				}
+				if (!up_gone) {
+					q2 = memchr(hay + s, up, span);
+					if (!q2)
+						up_gone = 1;
+				}
 				if (q2 && (!q || q2 < q))
 					q = q2;
 				if (!q)
@@ -264,12 +292,12 @@ struct kof_gram {
 	uint16_t  gen;
 };
 
-static struct kof_gram *gram_new(uint32_t n_patterns)
+/* The threshold is gram_ensure's - its only caller tests it before calling, so
+ * testing it again here was a second copy of one decision. */
+static struct kof_gram *gram_new(void)
 {
 	struct kof_gram *g;
 
-	if (n_patterns < GRAM_MIN_PATTERNS)
-		return NULL;
 	g = calloc(1, sizeof *g);
 	if (!g)
 		return NULL;
@@ -408,6 +436,30 @@ static int hex_walk(kof_buf d, uint64_t start, const uint8_t *prog)
 	const struct kof_hex_step *steps = (const void *)(prog + h->steps_off);
 	const struct kof_hex_alt *alts = (const void *)(prog + h->alts_off);
 	uint64_t cur[KOF_HEX_MAX_REACH], next[KOF_HEX_MAX_REACH];
+	/*
+	 * WHICH END OFFSETS THIS STEP HAS ALREADY RECORDED, exactly.
+	 *
+	 * The dedup used to be one comparison against the last write, on the
+	 * claim that "positions are produced in non-decreasing order within a
+	 * step". That is true only while there is ONE position to carry: with
+	 * several, the writes run cur[0]+gap_min..cur[0]+gap_max, then restart
+	 * at cur[1]+gap_min - BELOW the last write - so every overlap between
+	 * one position's window and the next was written again. next[] filled
+	 * with duplicates, reached KOF_HEX_MAX_REACH, and the `break` then
+	 * discarded the whole high end of the genuinely reachable set: a
+	 * pattern with two varying gaps of 23 bytes or more each stopped
+	 * matching input it is present in. Measured: `[0-21] ?? [0-21]` found
+	 * its target, `[0-22] ?? [0-22]` did not, the threshold being
+	 * (gap+1)^2 > 512 - the count of DUPLICATES, not of answers.
+	 *
+	 * A bitmap makes it exact and O(1). Every end lies at or after `start`
+	 * and no further than the longest a match can be, and the format bounds
+	 * that: KOF_HEX_MAX_STEPS alternatives of at most KOF_HEX_MAX_ALT_LEN,
+	 * plus KOF_HEX_MAX_GAP_TOTAL of summed gap variance. So the window is a
+	 * compile-time size and the whole thing is 290 bytes of stack.
+	 */
+	uint8_t seen[(KOF_HEX_MAX_STEPS * KOF_HEX_MAX_ALT_LEN +
+		      KOF_HEX_MAX_GAP_TOTAL) / 8u + 2u];
 	uint32_t n_cur = 1, i;
 
 	cur[0] = start;
@@ -416,6 +468,7 @@ static int hex_walk(kof_buf d, uint64_t start, const uint8_t *prog)
 		const struct kof_hex_step *st = &steps[i];
 		uint32_t n_next = 0, k;
 
+		memset(seen, 0, sizeof seen);
 		for (k = 0; k < n_cur; k++) {
 			uint32_t g;
 
@@ -428,23 +481,34 @@ static int hex_walk(kof_buf d, uint64_t start, const uint8_t *prog)
 				for (j = 0; j < st->n_alts; j++) {
 					const struct kof_hex_alt *a =
 						&alts[st->alt_first + j];
-					uint64_t end;
+					uint64_t end, rel;
 
 					if (!alt_at(d, at, prog, a))
 						continue;
 					end = at + a->len;
-					/* Sorted insert-at-end with a dedup against
-					 * the last write: positions are produced in
-					 * non-decreasing order within a step, so one
-					 * comparison is enough. */
-					if (n_next && next[n_next - 1] == end)
+					rel = end - start;
+					if (rel < (uint64_t)sizeof seen * 8u) {
+						if (seen[rel >> 3] &
+						    (uint8_t)(1u << (rel & 7u)))
+							continue;
+						seen[rel >> 3] |=
+						    (uint8_t)(1u << (rel & 7u));
+					} else if (n_next &&
+						   next[n_next - 1] == end) {
+						/* Past the window the format
+						 * allows: keep the old weaker
+						 * test rather than record a
+						 * duplicate. Unreachable for a
+						 * program the loader accepted. */
 						continue;
+					}
 					if (n_next >= KOF_HEX_MAX_REACH)
-						break;
+						goto reach_full;
 					next[n_next++] = end;
 				}
 			}
 		}
+reach_full:
 		if (n_next == 0)
 			return 0;
 		memcpy(cur, next, n_next * sizeof cur[0]);
@@ -563,7 +627,21 @@ static int match_one(struct kof_match_ctx *m, uint64_t base, uint64_t span,
 			uint64_t end = hit + len;
 			int lok = (hit == base) ||
 				  !is_word_byte(m->data.p[hit - 1]);
-			int rok = (end >= base + span) ||
+			/*
+			 * `end >= m->data.n` before the read, not only
+			 * `end >= base + span`.
+			 *
+			 * span is the CALLER's, and match_ranges hands the
+			 * region extents through unclipped - unlike
+			 * kof_match_in and kof_match_where, which both clip
+			 * first. An extent claiming more than the object holds
+			 * therefore let a FULLWORD match at the very last byte
+			 * read data.p[data.n]. It is also the right answer:
+			 * a match that ends at the end of the object has no
+			 * following byte, so there is nothing to break the
+			 * word.
+			 */
+			int rok = (end >= base + span) || end >= m->data.n ||
 				  !is_word_byte(m->data.p[end]);
 			if (lok && rok) {
 				if (at)
@@ -582,9 +660,16 @@ static int match_ranges(struct kof_match_ctx *m, const struct kof_range *ext,
 {
 	uint32_t i;
 
-	for (i = 0; i < next; i++)
-		if (match_one(m, ext[i].off, ext[i].len, bytes, len, kind, flags, 0))
+	for (i = 0; i < next; i++) {
+		/* Clipped here as kof_match_in and kof_match_where do it: an
+		 * extent is produced by a format collector and describes the
+		 * object it was parsed from, so it should already fit - but the
+		 * two ad-hoc entry points do not trust that either. */
+		uint64_t l = kof_clip_len(m->data.n, ext[i].off, ext[i].len);
+
+		if (l && match_one(m, ext[i].off, l, bytes, len, kind, flags, 0))
 			return 1;
+	}
 	return 0;
 }
 
@@ -604,7 +689,7 @@ static int gram_ensure(struct kof_match_ctx *m)
 		return 1;
 	if (m->gram_patterns < GRAM_MIN_PATTERNS)
 		return 0;
-	m->gram = gram_new(m->gram_patterns);
+	m->gram = gram_new();
 	return m->gram != NULL;
 }
 
@@ -663,11 +748,20 @@ int kof_match_lookup(struct kof_match_ctx *m, uint32_t slot,
 	uint16_t *cell;
 	int found;
 
-	if (!m->memo || slot >= m->memo_len)
-		return 0;
-	cell = &m->memo[slot];
+	/*
+	 * NO MEMO MEANS NO MEMOISING, NOT "ABSENT".
+	 *
+	 * This used to `return 0` when the memo was missing or too small - which
+	 * reports the pattern as not present WITHOUT LOOKING, so a database that
+	 * ended up with memo_size 0 (kofdb.c derives it from n_uid * n_masks)
+	 * would load clean, scan every object and detect nothing at all. The
+	 * memo is a cache; the honest degradation is to answer the question the
+	 * slow way. kof_match_state_init already treats memo_len 0 as success,
+	 * so the two now agree.
+	 */
+	cell = (m->memo && slot < m->memo_len) ? &m->memo[slot] : NULL;
 	/* Written by an earlier object is the same as not written. */
-	if ((*cell >> 2) == m->memo_gen) {
+	if (cell && (*cell >> 2) == m->memo_gen) {
 		uint16_t state = *cell & 3u;
 
 		if (state != KOF_MEMO_UNKNOWN)
@@ -677,12 +771,14 @@ int kof_match_lookup(struct kof_match_ctx *m, uint32_t slot,
 	if (!gram_admits(m->gram_use, bytes, len, kind, flags)) {
 		if (answered_without_scan)
 			(*answered_without_scan)++;
-		*cell = (uint16_t)((m->memo_gen << 2) | KOF_MEMO_ABSENT);
+		if (cell)
+			*cell = (uint16_t)((m->memo_gen << 2) | KOF_MEMO_ABSENT);
 		return 0;
 	}
 	found = match_ranges(m, ext, next, bytes, len, kind, flags);
-	*cell = (uint16_t)((m->memo_gen << 2) |
-			   (found ? KOF_MEMO_PRESENT : KOF_MEMO_ABSENT));
+	if (cell)
+		*cell = (uint16_t)((m->memo_gen << 2) |
+				   (found ? KOF_MEMO_PRESENT : KOF_MEMO_ABSENT));
 	return found;
 }
 
@@ -703,6 +799,18 @@ int kof_match_at(struct kof_match_ctx *m, uint64_t off,
 		 const uint8_t *bytes, uint16_t len, uint8_t kind, uint8_t flags)
 {
 	m->n_calls++;
+
+	/*
+	 * A pattern of no bytes matches nothing, which is what find_lit and
+	 * find_range both already answer. This entry point did not: an empty
+	 * needle passed the range test and then memcmp(.., 0) compared equal,
+	 * so it reported a match at every offset in the object. The three
+	 * entry points have to agree about what an empty pattern is, and a
+	 * caller with a user-supplied length reaches this one - the viewer's
+	 * find box does.
+	 */
+	if (!len && kind != KOF_STR_HEX)
+		return 0;
 
 	if (kind == KOF_STR_HEX) {
 		const struct kof_hex_hdr *h = (const void *)bytes;
