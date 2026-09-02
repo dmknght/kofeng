@@ -455,6 +455,16 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 			return 0;
 		}
 		sc->kid_packer = np;
+		{
+			const char **nf = realloc(sc->kid_family,
+						  nc * sizeof *nf);
+
+			if (!nf) {
+				kof_src_unref(kid);
+				return 0;
+			}
+			sc->kid_family = nf;
+		}
 		sc->cap_kids = nc;
 	}
 	/*
@@ -469,6 +479,19 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 			  (sc->cur_mod && sc->cur_mod->unp_kind == KOF_UNP_PACKER));
 	if (sc->kid_packer[sc->n_kids])
 		sc->packed_here = 1;
+	/*
+	 * The family the producer decodes, so the child can be routed to that
+	 * family's decoder first - see the push loop in the walk. NULL when no
+	 * module produced it (an emulator image) or the producer declared no
+	 * family; empty counts as none, since an unpacker without KOF_TARGET_NAME
+	 * interns "".
+	 */
+	{
+		const char *fam = sc->cur_mod
+				  ? kof_db_family(sc->eng, sc->cur_mod) : NULL;
+
+		sc->kid_family[sc->n_kids] = (fam && fam[0]) ? fam : NULL;
+	}
 	sc->kids[sc->n_kids++] = kid;
 	sc->kids_left--;
 	return 1;

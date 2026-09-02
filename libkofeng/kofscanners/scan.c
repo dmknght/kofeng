@@ -86,6 +86,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	kof_scan_kids_reset(sc);
 	free(sc->kids);
 	free(sc->kid_packer);
+	free(sc->kid_family);
 	for (i = 0; i < KOF_FMT_COUNT; i++)
 		free(sc->view[i]);
 	free(sc->inf);
@@ -1022,7 +1023,8 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 
 static void scan_object(struct kof_scanner *sc, kof_buf buf,
 			const struct kof_scan_option *opt, struct kof_result *out,
-			uint32_t pdepth, int from_packer)
+			uint32_t pdepth, int from_packer,
+			const char *inherit_predict)
 {
 	struct kof_obj_ctx ctx;
 	uint32_t present, i, want;
@@ -1103,6 +1105,19 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * asks for can still change what happens to the object.
 	 */
 	want = heur_run(sc, &ctx, opt, out, KOF_HEUR_EXAMINE, present, &predict);
+	/*
+	 * A rule's own guess wins; the inherited one is the fallback.
+	 *
+	 * A heuristic firing on THIS object knows more about it than its parent
+	 * did - so its prediction takes precedence. The inherited family is for
+	 * the case no rule fired at all, which is exactly the formatless
+	 * intermediate layer a decoder peels: nothing recognises it, but its
+	 * parent was a Meterp payload, so it very probably is one too, and
+	 * trying that decoder first is the whole point of carrying the guess
+	 * down.
+	 */
+	if (!predict)
+		predict = inherit_predict;
 
 	out->broken = unpack_object(sc, &ctx, opt, out, pdepth, want, predict);
 
@@ -1294,6 +1309,15 @@ struct layer {
 	 */
 	uint32_t           pdepth;
 	int                from_packer;  /* its producer was a packer */
+	/*
+	 * The family its producer decodes, inherited as a prediction, or NULL.
+	 *
+	 * A pointer into a pack mapping, valid for the life of the engine, so it
+	 * is copied here as-is. It is what carries the Meterp guess down through
+	 * the formatless intermediate layers a decoder peels, on which no
+	 * heuristic fires - see scan_object.
+	 */
+	const char        *inherit_predict;
 };
 
 static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
@@ -1307,6 +1331,7 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 	char *name = kof_strdup_n(path, strlen(path));
 	uint32_t depth = 0, pdepth = 0;
 	int from_packer = 0;            /* the root came off the disk */
+	const char *inherit = NULL;     /* the root inherits no prediction */
 
 	/* Every other allocation failure in this function sets out_of_memory so
 	 * the walk is reported incomplete rather than clean - this one didn't,
@@ -1336,7 +1361,7 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 		w->sc->cur_src = src;
 		kof_scan_kids_reset(w->sc);
 		scan_object(w->sc, kof_src_buf(src), w->opt, &res, pdepth,
-			    from_packer);
+			    from_packer, inherit);
 		w->sc->cur_src = NULL;
 
 		/*
@@ -1447,6 +1472,9 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 						       w->sc->kid_packer[i];
 				stack[n].pdepth = pdepth +
 					(stack[n].from_packer ? 1u : 0u);
+				stack[n].inherit_predict =
+					w->sc->kid_family ? w->sc->kid_family[i]
+							  : NULL;
 				n++;
 			}
 		}
@@ -1467,6 +1495,7 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 		depth = stack[n].depth;
 		pdepth = stack[n].pdepth;
 		from_packer = stack[n].from_packer;
+		inherit = stack[n].inherit_predict;
 	}
 
 	while (n > 0) {

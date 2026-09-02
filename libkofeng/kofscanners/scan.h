@@ -109,6 +109,17 @@ struct kof_scanner {
 	 * module that made it is long out of scope.
 	 */
 	uint8_t            *kid_packer;
+	/*
+	 * The family the producing unpacker DECODES, per child, or NULL.
+	 *
+	 * A pointer into a pack mapping (kof_db_family), which outlives the
+	 * scan, so it is safe to keep. It is what lets a child inherit its
+	 * parent's family as a prediction: an intermediate layer msf_xor peeled
+	 * is formatless, so no heuristic fires on it and it would otherwise lose
+	 * the Meterp guess its parent carried - and with it the family-first
+	 * fast path. See the push loop in the walk.
+	 */
+	const char        **kid_family;
 	uint32_t            n_kids, cap_kids;
 
 	/*
