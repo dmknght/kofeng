@@ -334,6 +334,23 @@ static void out_at(struct out *o, int row, int col)
 #define A_SIZE  "\033[32m"
 #define A_BAD   "\033[31m"
 #define A_WARN  "\033[33m"
+/*
+ * AND and OR, told apart by colour.
+ *
+ * Both were A_WARN, so a condition read as one yellow word between blue ids and
+ * the reader had to actually read it to know whether the rule was narrowing or
+ * widening - which is the single most consequential thing on the row. AND is
+ * cyan because it TIGHTENS (every id must be present); OR keeps the yellow it
+ * had, because widening is the one that costs false positives and yellow is
+ * what this panel already uses for "worth a second look".
+ *
+ * Named rather than written as escapes at the two sites: the operator inside a
+ * condition and the join to the next one are drawn in different functions with
+ * opposite polarity (`op` is 0-and-1-or, `join` is 0-or-1-and), and the pair
+ * only stays consistent if the colour is chosen by the WORD, not by the field.
+ */
+#define A_AND   "\033[36m"
+#define A_OR    "\033[33m"
 #define A_SEL   "\033[7m"
 
 /*
@@ -1700,6 +1717,18 @@ struct view {
 	int         prop_open;      /* the properties page is up */
 	uint32_t    prop_off;       /* the first of its lines on screen */
 	int         prop_x0, prop_x1, prop_y;   /* its close control */
+	/*
+	 * "[Copy full path]" on the folder row: which row carries it and which
+	 * of that row's columns it occupies, or -1 when the page has no such
+	 * row at all.
+	 *
+	 * Recorded per BUILD rather than per frame because the page scrolls -
+	 * the row's index in g_prop is fixed, its position on the screen is
+	 * not, so the click converts one to the other with prop_off the way the
+	 * select path already does.
+	 */
+	int32_t     prop_cp_row;
+	int         prop_cp_x0, prop_cp_x1;
 	/*
 	 * WHAT IS SELECTED ON THE PAGE, WHICH IS NOT THE SAME AS WHAT WAS CLICKED.
 	 *
@@ -9621,7 +9650,8 @@ static void draw_decl(struct out *o, struct view *v)
 						if (v->cnd_op[ci][0] < 0)
 							v->cnd_op[ci][0] = 2 +
 							  (int)o->col_hint;
-						out_fmt(o, A_WARN " %s " A_OFF,
+						out_fmt(o, "%s %s " A_OFF,
+							c2->op ? A_OR : A_AND,
 							c2->op ? "or" : "and");
 						v->cnd_op[ci][1] =
 							(int)o->col_hint - 1;
@@ -9668,7 +9698,8 @@ ids_done:
 			out_fmt(o, "%*s", deep ? 6 : 1, "");
 			out_str(o, A_DIM "logic " A_OFF);
 			v->cnd_jn[ci][0] = 1 + (int)o->col_hint;
-			out_fmt(o, A_WARN "[%s]" A_OFF,
+			out_fmt(o, "%s[%s]" A_OFF,
+				c2->join ? A_AND : A_OR,
 				c2->join ? "and" : "or");
 			v->cnd_jn[ci][1] = (int)o->col_hint;
 			r++;
@@ -11533,6 +11564,8 @@ static int  goto_click(struct view *v);
 static void draw_bar(struct out *o, struct view *v);
 static void draw_help(struct out *o, struct view *v);
 static void draw_prop(struct out *o, struct view *v);
+/* Used by prop_build to measure a row it has just written - see prop_cp_row. */
+static uint32_t prop_plain(const char *s, char *out, uint32_t cap);
 
 /* The properties page was up on the frame before this one. */
 static int g_prop_drawn;
@@ -12798,8 +12831,43 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 			memcpy(dir, v->path, n);
 			dir[n] = 0;
 		}
-		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_LOC "%s" A_OFF,
-			 "folder", dir);
+		/*
+		 * AND A WAY TO TAKE THE WHOLE PATH IN ONE GESTURE.
+		 *
+		 * The folder and the name are two rows, so copying the thing a
+		 * person actually needs - the path to hand to another tool -
+		 * meant selecting one row, copying, selecting the other,
+		 * copying, and joining them by hand. The button copies
+		 * v->path, which is exactly that join.
+		 *
+		 * Only on this row, which is only drawn for the object that
+		 * came off the disk - see the note above. A child's name is a
+		 * path inside its container and has no filesystem path to copy,
+		 * and in a nested view the row belongs to the outermost parent,
+		 * so the button follows the same rule without a second test.
+		 */
+		static const char lab[] = "[ Copy full path ]";
+		char plain[PROP_W];
+		const char *at;
+
+		v->prop_cp_row = (int32_t)g_n_prop;
+		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_LOC "%s" A_OFF
+			 "  \033[47;30m%s" A_OFF, "folder", dir, lab);
+		/*
+		 * Measured off the RENDERED row, not counted by hand: the row
+		 * is built by a format string with colour escapes in it, and a
+		 * column computed from the format drifts the moment the format
+		 * changes. prop_plain strips the escapes, which is the same
+		 * thing the click path does to find what it selected.
+		 */
+		prop_plain(g_prop[v->prop_cp_row].text, plain, sizeof plain);
+		at = strstr(plain, lab);
+		if (at) {
+			v->prop_cp_x0 = (int)(at - plain);
+			v->prop_cp_x1 = v->prop_cp_x0 + (int)sizeof lab - 2;
+		} else {
+			v->prop_cp_row = -1;   /* did not fit: no button */
+		}
 	}
 
 	if (full) {
@@ -12847,6 +12915,7 @@ static void prop_build(struct view *v)
 	uint64_t total = 0;
 
 	g_n_prop = 0;
+	v->prop_cp_row = -1;
 	base = base ? base + 1 : ob->name;
 
 	/*
@@ -16217,6 +16286,24 @@ static int handle(struct view *v, int k)
 				if (line < 0 || g_my >= g_rows - 2 ||
 				    idx >= g_n_prop)
 					return 1;
+				/*
+				 * The folder row's button, before the select
+				 * path claims the click. It copies the whole
+				 * path in one gesture - see prop_cp_row - and
+				 * it is on exactly one row, so it is tested by
+				 * row index rather than by looking at the text.
+				 */
+				if (v->prop_cp_row >= 0 &&
+				    (int32_t)idx == v->prop_cp_row &&
+				    col >= v->prop_cp_x0 &&
+				    col <= v->prop_cp_x1 &&
+				    v->path && v->path[0]) {
+					size_t pl = strlen(v->path);
+
+					copy_osc52(v->path, pl);
+					copy_said(v, pl);
+					return 1;
+				}
 				pn = prop_plain(g_prop[idx].text, plain,
 						sizeof plain);
 				if (!pn)
