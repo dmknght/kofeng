@@ -985,28 +985,49 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			const char *pf = kof_db_heur_predict(sc->eng, m);
 
 			f->level = KOF_LEVEL_HEUR;
-			finding_str(sc, ctx, m, f->name, sizeof f->name);
 			/*
-			 * The guess, after a question mark: Heur:Shellcode?Meterp.
+			 * <target>/Heur:<family>#<variant>?<shape>.
 			 *
-			 * The shape is what the rule established and goes in the
-			 * name proper; this is what it expects the object to turn
-			 * out to be and has not shown. The punctuation is the
-			 * whole distinction, and it is why the two are not simply
-			 * concatenated - a reader has to be able to see which
-			 * half is evidence.
+			 * The name follows the shape a detector's does - maltype,
+			 * family, variant - and reads the same way: the FAMILY is what
+			 * the object is, here what the rule PREDICTS it is, and the "?"
+			 * carries the one thing a heuristic must admit - that the family
+			 * is a guess and the SHAPE after the mark is the only thing
+			 * actually shown. A rule that recognises a shellcode layout and
+			 * expects Meterp reads Heur:Meterp#<variant>?Shellcode: the
+			 * guessed family where a reader looks for one, the evidence
+			 * behind the mark.
 			 *
-			 * Appended rather than composed inside finding_str
-			 * because that function is shared with the detectors,
-			 * and a detector has nothing to predict: it either
-			 * identified the family or it did not report.
+			 * Composed here and not through finding_str because that one is
+			 * shared with the detectors and puts the MODULE's declared
+			 * family in that slot - which for a rule is the shape it is
+			 * named for, not the family it guesses. With no prediction the
+			 * shape is all there is, and finding_str writing it as the
+			 * family is exactly right.
 			 */
 			if (pf && pf[0]) {
-				size_t at = strlen(f->name);
+				const char *variant =
+					kof_db_name(sc->eng, m, sc->rep_name_id);
+				const char *shape = kof_db_family(sc->eng, m);
+				const char *fmt = kof_format_name(ctx->format);
+				char fmtarch[32];
+				size_t at;
 
-				if (at + 2 < sizeof f->name)
-					snprintf(f->name + at,
-						 sizeof f->name - at, "?%s", pf);
+				if (ctx->arch == KOF_ARCH_ANY ||
+				    ctx->format == KOF_FMT_UNKNOWN)
+					snprintf(fmtarch, sizeof fmtarch, "%s", fmt);
+				else
+					snprintf(fmtarch, sizeof fmtarch, "%s-%s",
+						 fmt, kof_arch_name(ctx->arch));
+				kof_name_compose(f->name, sizeof f->name, fmtarch,
+						 "Heur", pf,
+						 variant ? variant : "unknown");
+				at = strlen(f->name);
+				if (shape && shape[0] && at + 2 < sizeof f->name)
+					snprintf(f->name + at, sizeof f->name - at,
+						 "?%s", shape);
+			} else {
+				finding_str(sc, ctx, m, f->name, sizeof f->name);
 			}
 		} else {
 			out->dropped++;

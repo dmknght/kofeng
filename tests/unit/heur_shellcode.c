@@ -144,7 +144,13 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	return 0;
 }
 
-/* Returns non-zero when the object was reported as Heur:Shellcode. */
+/*
+ * Returns non-zero when the object was reported as a heuristic whose SHAPE is
+ * Shellcode. A rule names itself Heur:<predicted-family>#<variant>?<shape>, so
+ * the shape "Shellcode" sits after the "?" when there is a prediction (there is
+ * one here, Meterp) and right after "Heur:" when there is not. Both are a Heur
+ * finding carrying the word Shellcode, which is what this asks.
+ */
 static int shellcode_said(kof_scanner *sc, const char *path,
 			  const uint8_t *f, uint64_t n)
 {
@@ -167,7 +173,7 @@ static int shellcode_said(kof_scanner *sc, const char *path,
 		fail("the scan could not run");
 		return 0;
 	}
-	return strstr(seen, "Heur:Shellcode") != NULL;
+	return strstr(seen, "Heur:") != NULL && strstr(seen, "Shellcode") != NULL;
 }
 
 int main(int argc, char **argv)

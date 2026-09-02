@@ -42,6 +42,7 @@
 #define C_CYN "\033[36m"        /* BROKEN    */
 #define C_GRN "\033[32m"        /* OK        */
 #define C_DIM "\033[2m"         /* secondary context */
+#define C_BLD "\033[1m"         /* a neutral number worth the eye */
 #define C_RST "\033[0m"
 
 /*
@@ -148,15 +149,35 @@ static int rank_of(int level)
  */
 static const char *heur_kind(const char *name, char *buf, size_t cap)
 {
-	const char *p = strstr(name, "/Heur:");
+	const char *q = strrchr(name, '?');
 	size_t i = 0;
 
-	if (!p)
-		return NULL;
-	p += 6;                          /* past "/Heur:" */
-	while (p[i] && p[i] != '#' && p[i] != '?' && i + 1 < cap) {
-		buf[i] = p[i];
-		i++;
+	if (q) {
+		/*
+		 * A rule names itself Heur:<family>#<variant>?<shape> - the
+		 * family is its guess and the SHAPE after the mark is what it
+		 * actually recognised, which is the "kind" this breakdown groups
+		 * by. Grouping by the family instead would put every predicted
+		 * family on its own line and bury the one fact they share.
+		 */
+		const char *p = q + 1;
+
+		while (p[i] && i + 1 < cap) {
+			buf[i] = p[i];
+			i++;
+		}
+	} else {
+		/* The scored model has no guess and no "?": its word sits between
+		 * "Heur:" and the "#", and it is the kind - Truncated and such. */
+		const char *p = strstr(name, "/Heur:");
+
+		if (!p)
+			return NULL;
+		p += 6;
+		while (p[i] && p[i] != '#' && i + 1 < cap) {
+			buf[i] = p[i];
+			i++;
+		}
 	}
 	buf[i] = 0;
 	return i ? buf : NULL;
@@ -939,9 +960,10 @@ int main(int argc, char **argv)
 				  ? r.files_total - nonclean : 0;
 		}
 
-		printf("scanned   %llu object(s) in %llu file(s), %.2f MB\n",
+		printf("scanned   %llu object(s) in %s%llu%s file(s), %.2f MB\n",
 		       st ? (unsigned long long)st->objects : 0ull,
-		       (unsigned long long)r.files_total, mb);
+		       col(&r, C_BLD), (unsigned long long)r.files_total,
+		       col(&r, C_RST), mb);
 		printf("infected  %s%llu%s file(s)\n",
 		       inf_f ? col(&r, C_RED) : "", (unsigned long long)inf_f,
 		       inf_f ? col(&r, C_RST) : "");
@@ -962,9 +984,14 @@ int main(int argc, char **argv)
 			       heur_f ? col(&r, C_MAG) : "",
 			       (unsigned long long)heur_f,
 			       heur_f ? col(&r, C_RST) : "");
+			/* Each kind on its own line, read the same way as the
+			 * totals above it: the count right after the label and
+			 * then "file(s)", not pushed out to a far column, and
+			 * indented so it sits under the heuristic total. */
 			for (j = 0; j < n_hk; j++)
-				printf("            %-20s %llu\n", hk[j].kind,
-				       (unsigned long long)hk[j].n);
+				printf("  %-8s %s%llu%s file(s)\n", hk[j].kind,
+				       col(&r, C_MAG),
+				       (unsigned long long)hk[j].n, col(&r, C_RST));
 		}
 		/*
 		 * Broken files, split by reason. The reasons are counted per object
