@@ -726,18 +726,6 @@ enum opt_kind {
 	OPT_SIZE_MAX,
 	OPT_ARCH,
 	OPT_SUBTYPE,
-	/*
-	 * WHICH FILE TYPES THE RULE RUNS ON, when the answer is not just this
-	 * object's own.
-	 *
-	 * Every other option here narrows; this one widens, and that is why it
-	 * exists. A payload recovered from a decryptor has no format header, so
-	 * a rule generated from it targets raw - and the same bytes appear
-	 * inside an ELF that was never packed, where that rule would never be
-	 * entered. Naming both is one declaration, and it was not writable from
-	 * this panel at all: the target was whatever the object happened to be.
-	 */
-	OPT_FORMAT,
 	OPT_COUNT
 };
 
@@ -751,7 +739,7 @@ enum opt_kind {
  */
 static const char *const opt_word[OPT_COUNT] = {
 	"Smallest file size", "Largest file size",
-	"Architecture", "File subtype", "File types"
+	"Architecture", "File subtype"
 };
 
 /*
@@ -785,44 +773,6 @@ static const char *const fmt_word[] = {
 	"KOF_FMT_PDF"
 };
 #define FMT_WORD_N (sizeof fmt_word / sizeof fmt_word[0])
-
-/*
- * What a format is called on the panel.
- *
- * The engine's own name for all but one of them, so there is no second table to
- * fall behind. The exception is the format that has no header: the engine calls
- * it "Unknown", which is what a PARSE says when it failed, and this panel has
- * called the same thing "raw" since it existed. A rule targeting it is not
- * targeting a failure - it is targeting a bare blob of bytes, which is what a
- * decryptor hands back.
- */
-static const char *fmt_show(uint32_t f)
-{
-	return f == (uint32_t)KOF_FMT_UNKNOWN ? "raw binary"
-					      : kof_format_name((uint8_t)f);
-}
-
-/* The formats a mask names, for the panel and for the source line. `srcword`
- * picks which vocabulary: the macro names go in the file, the readable ones on
- * screen. */
-static void fmt_join(char *out, size_t cap, uint64_t mask, int srcword)
-{
-	uint32_t f;
-	size_t at = 0;
-
-	out[0] = 0;
-	for (f = 0; f < FMT_WORD_N; f++) {
-		if (!((mask >> f) & 1u) || at + 1 >= cap)
-			continue;
-		at += (size_t)snprintf(out + at, cap - at, "%s%s",
-				       at ? (srcword ? " | " : "+") : "",
-				       srcword ? fmt_word[f] : fmt_show(f));
-		if (at >= cap)
-			break;
-	}
-	if (!out[0])
-		snprintf(out, cap, "%s", srcword ? "KOF_FMT_ANY" : "?");
-}
 
 static const char *const elf_sub[] = { "NONE", "REL", "EXEC", "DYN", "CORE" };
 static const char *const pe_sub[]  = { "EXE", "DLL", "SYS" };
@@ -1114,10 +1064,6 @@ static void decl_put_literal(FILE *f, const uint8_t *b, uint32_t n)
  * routing wrong.
  */
 #define CH_ITEMS 16
-/* CH_FORMAT lists one row per format, so the list has to hold every one of them.
- * A format added to the enum without room here would simply not be offered,
- * which is the kind of missing thing nobody goes looking for. */
-typedef char ch_items_holds_every_format[CH_ITEMS >= KOF_FMT_COUNT ? 1 : -1];
 #define CH_W     38
 
 enum ch_what {
@@ -1142,7 +1088,6 @@ enum ch_what {
 	CH_OPT,         /* which optional declaration to add */
 	CH_ARCH,        /* enum kof_arch, all of it */
 	CH_SUBTYPE,     /* the format's subtypes, all of them */
-	CH_FORMAT,      /* every file type, toggled one pick at a time */
 	CH_WORD,        /* fullword or substring */
 	CH_CASE,        /* case sensitive or not */
 	CH_CMATCH,      /* which matcher to put into a condition */
@@ -5000,48 +4945,6 @@ no_head:
 			n_rng++;
 			continue;
 		}
-		/*
-		 * READ BACK, because it is now written out.
-		 *
-		 * Until this option existed the target was always the object's
-		 * own format, so there was nothing here that opening and saving
-		 * could lose. There is now: a rule that names ELF and raw,
-		 * opened on the ELF and saved, would come back naming only ELF
-		 * - and would silently stop being entered for the payload it
-		 * was written against.
-		 *
-		 * Left off when the line says what the default would have
-		 * written anyway. The option is a statement that the target is
-		 * not just this object, and showing a row that says what the
-		 * panel already knows is a row a reader has to rule out.
-		 */
-		if ((p = strstr(line, "KOF_TARGET_FORMAT(")) != NULL) {
-			uint64_t mask = 0;
-			uint32_t k;
-
-			if (!strstr(p, "KOF_FMT_ANY")) {
-				for (k = 0; k < FMT_WORD_N; k++) {
-					const char *at = strstr(p, fmt_word[k]);
-					char nxt;
-
-					if (!at)
-						continue;
-					/* Whole word: a name that is a prefix
-					 * of a longer one must not claim it. */
-					nxt = at[strlen(fmt_word[k])];
-					if (nxt == '_' || isalnum((unsigned char)nxt))
-						continue;
-					mask |= 1ull << k;
-				}
-			}
-			if (mask && mask != (1ull << (cur_obj(v)->fmt
-						      ? cur_obj(v)->ctx.format
-						      : (uint8_t)KOF_FMT_UNKNOWN))) {
-				v->opt_on[OPT_FORMAT] = 1;
-				v->opt_val[OPT_FORMAT] = mask;
-			}
-			continue;
-		}
 		if ((p = strstr(line, "KOF_TARGET_SIZE_MIN(")) != NULL) {
 			v->opt_on[OPT_SIZE_MIN] = 1;
 			v->opt_val[OPT_SIZE_MIN] = strtoull(p + 20, NULL, 0);
@@ -5694,15 +5597,8 @@ static uint32_t draft_tgt(struct view *v)
 	uint32_t h = 0;
 	char w[64];
 
-	if (v->opt_on[OPT_FORMAT]) {
-		char t[256];
-
-		fmt_join(t, sizeof t, v->opt_val[OPT_FORMAT], 1);
-		h = tgt_mix(h, t);
-	} else {
-		h = tgt_mix(h, (ob->fmt && fm < FMT_WORD_N) ? fmt_word[fm]
-							    : "KOF_FMT_ANY");
-	}
+	h = tgt_mix(h, (ob->fmt && fm < FMT_WORD_N) ? fmt_word[fm]
+						    : "KOF_FMT_ANY");
 	snprintf(w, sizeof w, "KOF_MALTYPE_%s",
 		 v->maltype < MALTYPE_N ? maltype_word[v->maltype] : "VIRUS");
 	h = tgt_mix(h, w);
@@ -6284,16 +6180,9 @@ static void generate(struct view *v, int as_new)
 
 	/* The format the object actually is, so the host can rule the module
 	 * out without entering it - and so the regions above mean something. */
-	if (v->opt_on[OPT_FORMAT]) {
-		char t[256];
-
-		fmt_join(t, sizeof t, v->opt_val[OPT_FORMAT], 1);
-		fprintf(f, "KOF_TARGET_FORMAT(%s);\n", t);
-	} else {
-		fprintf(f, "KOF_TARGET_FORMAT(%s);\n",
-			(ob->fmt && ob->ctx.format < FMT_WORD_N)
-			? fmt_word[ob->ctx.format] : "KOF_FMT_ANY");
-	}
+	fprintf(f, "KOF_TARGET_FORMAT(%s);\n",
+		(ob->fmt && ob->ctx.format < FMT_WORD_N)
+		? fmt_word[ob->ctx.format] : "KOF_FMT_ANY");
 	fprintf(f, "KOF_TARGET_NAME(KOF_MALTYPE_%s, \"%s\");\n\n",
 		v->maltype == 0 ? "VIRUS" :
 		v->maltype == 1 ? "TROJAN" :
@@ -6954,17 +6843,6 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 						     cur_obj(v)->ctx.subtype))
 				ch_add(c, opt_word[OPT_SUBTYPE]);
 		}
-		/*
-		 * Offered on every object, unlike the two above: what a rule
-		 * should RUN on is not a property of the sample in hand. The
-		 * ones above are - a zip has no machine - and that is the whole
-		 * difference.
-		 *
-		 * Added last, because ch_take walks the options in enum order
-		 * and matches this list by position.
-		 */
-		if (!v->opt_on[OPT_FORMAT])
-			ch_add(c, opt_word[OPT_FORMAT]);
 		if (!c->n)
 			return;
 	} else if (what == CH_ARCH) {
@@ -6981,25 +6859,6 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 				ch_add(c, pe_sub[i]);
 		if (!c->n)
 			return;
-	} else if (what == CH_FORMAT) {
-		/*
-		 * ONE ROW PER FORMAT, TICKED - not a list of the ones missing.
-		 *
-		 * Picking a row toggles it and the menu closes, so opening it
-		 * twice names two formats. That is what "add a file type" is,
-		 * and it is why the row has to show the state it is in: a list
-		 * that only offered what is absent would tell a reader nothing
-		 * about what the rule already targets.
-		 */
-		for (i = 0; i < FMT_WORD_N; i++) {
-			char w[CH_W];
-
-			snprintf(w, sizeof w, "%s %s",
-				 (v->opt_val[OPT_FORMAT] >> i) & 1u ? "[x]"
-								    : "[ ]",
-				 fmt_show(i));
-			ch_add(c, w);
-		}
 	} else if (what == CH_WORD) {
 		ch_add(c, "substring");
 		ch_add(c, "fullword");
@@ -7172,17 +7031,6 @@ static void ch_take(struct view *v)
 		v->opt_val[OPT_SUBTYPE] = (uint32_t)c->sel;
 		return;
 	}
-	if (c->what == CH_FORMAT) {
-		uint64_t m = v->opt_val[OPT_FORMAT] ^ (1ull << (uint32_t)c->sel);
-
-		/* Never all off. An empty mask is written out as KOF_FMT_ANY,
-		 * which is the opposite of what turning the last one off looks
-		 * like it should mean - so the last one does not turn off, and
-		 * the way to say "no opinion" is to remove the option. */
-		if (m)
-			v->opt_val[OPT_FORMAT] = m;
-		return;
-	}
 	if (c->what == CH_OPT) {
 		struct object *ob = cur_obj(v);
 		int seen = 0, k;
@@ -7197,16 +7045,8 @@ static void ch_take(struct view *v)
 			if (seen++ != c->sel)
 				continue;
 			v->opt_on[k] = 1;
-			/* Seeded from the object, like the rest: what the
-			 * rule targets starts as what this object IS, and a
-			 * formatless one is raw rather than everything. */
 			v->opt_val[k] = k == OPT_SIZE_MIN ? ob->buf.n :
 					k == OPT_SIZE_MAX ? ob->buf.n * 2u :
-					k == OPT_FORMAT ?
-						1ull << (ob->fmt
-							 ? ob->ctx.format
-							 : (uint8_t)
-							   KOF_FMT_UNKNOWN) :
 					k == OPT_ARCH ? ob->ctx.arch
 						      : ob->ctx.subtype;
 			break;
@@ -8672,8 +8512,6 @@ static void draw_decl(struct out *o, struct view *v)
 				 ? kof_inspect_subtype_name(
 					   cur_obj(v)->ctx.format,
 					   (uint8_t)v->opt_val[i]) : "?");
-		else if (i == OPT_FORMAT)
-			fmt_join(val, sizeof val, v->opt_val[i], 0);
 		else
 			snprintf(val, sizeof val, "%llu",
 				 (unsigned long long)v->opt_val[i]);
@@ -14613,9 +14451,6 @@ static void click(struct view *v, int rclick)
 							g_mx);
 					else if (i == OPT_SUBTYPE)
 						ch_open(v, CH_SUBTYPE, 0,
-							g_my, g_mx);
-					else if (i == OPT_FORMAT)
-						ch_open(v, CH_FORMAT, 0,
 							g_my, g_mx);
 					else {
 						/* A size is typed, so the
