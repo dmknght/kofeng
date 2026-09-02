@@ -1114,7 +1114,6 @@ enum ch_what {
 	CH_RULE,        /* find all / any / multi, for a new or existing group */
 	CH_RANGE,       /* which declared range a condition searches */
 	CH_RANGE2,      /* what to do to the scan ranges */
-	CH_RANGE3,      /* and which of them, when there are several */
 	/*
 	 * And WHICH REGION to apply, when the markers are spread over more
 	 * than one. A string sits in exactly one region, but a matcher holds
@@ -1123,7 +1122,9 @@ enum ch_what {
 	 * for the reader that they wanted both.
 	 */
 	CH_RANGE4,
-	CH_RANGE_DEL,   /* which scan range to remove */
+	CH_RANGE_ADD,   /* which region to declare as a new range */
+	CH_RANGE_EXT,   /* which region to extend the subject range with */
+	CH_RANGE_DROP,  /* which region to drop off the subject range */
 	CH_LEVEL,       /* infect or suspect */
 	CH_VARIANT,     /* how the finding names itself */
 	CH_TYPE,        /* enum kof_maltype */
@@ -1619,7 +1620,19 @@ struct view {
 	int         nt_len, nt_room;/* its length and the width it is shown in */
 	int         grp_len[MAX_GROUP], grp_room[MAX_GROUP];
 	int         rng_c0, rng_c1, m_c0, m_c1, s_c0, s_c1, e_c0, e_c1;
-	int         rgs_c0, rgs_c1; /* "Update scan range"     - where it looks */
+	/*
+	 * WHERE EACH RANGE NAME IS ON THE SCAN RANGES ROW.
+	 *
+	 * The row used to carry one [Update scan range] button that acted on
+	 * "a range" and then asked which. Now the NAME is the control: clicking
+	 * one opens a menu whose subject is that range, so the question "which"
+	 * is answered by where the reader pressed instead of by another list.
+	 * Parallel to the order rng_all produces, which is the order they are
+	 * drawn in.
+	 */
+	int         rng_hs[2 * MAX_GROUP][2];
+	uint32_t    n_rng_hs;
+	int         rga_c0, rga_c1; /* "[+ Add scan range]" at the row's end */
 	int         rgf_c0, rgf_c1; /* "Update string regions" - where they are */
 	uint32_t    rng_mask;       /* the region the range menu was built on */
 	/*
@@ -6565,38 +6578,12 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col);
  * where a pick is carried out. Defined beside rng_apply, used here first. */
 static uint32_t rng_removable(struct view *v, uint32_t *mask, int *unused,
 			      uint32_t cap);
+/* Every range the draft has, in one order, and which regions the object has -
+ * both defined beside rng_apply and used by the menus above it. */
+static uint32_t rng_all(struct view *v, uint32_t *mask, int *unused,
+			uint32_t cap);
+static uint32_t rng_object_regions(struct view *v);
 
-/*
- * Apply the verb, or ask which region first.
- *
- * Asked only when the markers really are in more than one region, the same way
- * the range to change is asked for only when the draft holds more than one.
- * `target` is the range being changed; the region being applied is what this
- * decides.
- */
-static void rng_apply(struct view *v, int verb, uint32_t target, uint32_t rgn);
-
-static void rng_finish(struct view *v, struct chooser *c, int verb,
-		       uint32_t target)
-{
-	uint32_t m = v->rng_mask, bits = 0, b;
-
-	for (b = 0; b < 32u; b++)
-		bits += (m >> b) & 1u;
-	/* Verb 3 assigns WHOLE-FILE and never reads the region, so asking
-	 * which region would be asking a question with no consequence. */
-	if (bits > 1 && verb != 3) {
-		struct chooser up = *c;
-
-		up.open = 1;
-		ch_open(v, CH_RANGE4, (uint32_t)verb,
-			up.row + up.sel + 1, up.col + CH_W);
-		v->ch.arg2 = target;
-		v->ch_up = up;
-		return;
-	}
-	rng_apply(v, verb, target, m);
-}
 
 /*
  * Is this optional declaration worth offering on THIS object.
@@ -6639,286 +6626,141 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		ch_add(c, "find_multi (>=N)");
 	} else if (what == CH_RANGE) {
 		/*
-		 * The ranges this matcher COULD search, worked out from the
-		 * markers it holds rather than offered from a list.
+		 * WHICH DEFINED RANGE THIS MATCHER SEARCHES.
 		 *
-		 * A marker was found in exactly one region - the regions of a
-		 * format partition the object, rangelist.h says so - but it
-		 * sits inside every range that covers that region, and there
-		 * are always at least two: its own, and the whole file. So the
-		 * question is never "which range is this string in", it is
-		 * "which ranges hold all of them", and that has one narrowest
-		 * answer and one widest.
+		 * Every range the draft has, plus WHOLE-FILE - not a set worked
+		 * out from the markers the matcher happens to hold. That was
+		 * the old rule and it is what made a matcher on CODE&DATA
+		 * refuse a DATA marker: the range was DERIVED from the first
+		 * marker, so taking one from CODE narrowed the matcher to CODE
+		 * and locked the other region out, even though the draft had
+		 * declared CODE&DATA and the row displayed it.
+		 *
+		 * Picking here PINS grp[g].mask to the chosen range, so the
+		 * eligibility test - rng_holds, an overlap - then admits a
+		 * marker from any region the range covers. That is the whole
+		 * fix: the range says what may go in, rather than the first
+		 * thing that went in saying what the range is.
 		 */
-		uint32_t need = 0;
+		uint32_t rm[2 * MAX_GROUP];
+		int ru[2 * MAX_GROUP];
+		uint32_t nr = rng_all(v, rm, ru, 2u * MAX_GROUP), k;
 		char t[CH_W];
 
-		for (i = 0; i < v->n_decl; i++)
-			if (v->decl[i].grp & (1u << arg))
-				need |= v->decl[i].mask;
-		if (!need)
-			need = KOF_SCAN_ALL;
-
-		c->arg2 = need;
-		rng_name_of(cur_obj(v)->fmt, need, t, sizeof t);
-		ch_add(c, t);
-		/*
-		 * And any range the draft has declared that nothing searches.
-		 *
-		 * Without this, "Add CODE to scan ranges" is a dead end: the
-		 * range exists, the save refuses until a matcher names it, and
-		 * there is nowhere to name it from. This is that place.
-		 */
-		for (i = 0; i < v->n_rng_add; i++) {
-			uint32_t k, used = 0;
-
-			for (k = 0; k < v->n_grp; k++)
-				used += (uint32_t)(grp_has_range(v, k) &&
-						   grp_mask(v, k) ==
-						   v->rng_add[i]);
-			if (used || v->rng_add[i] == need)
-				continue;
-			rng_name_of(cur_obj(v)->fmt, v->rng_add[i], t,
-				    sizeof t);
+		for (k = 0; k < nr; k++) {
+			rng_name_of(cur_obj(v)->fmt, rm[k], t, sizeof t);
 			ch_add(c, t);
 		}
-		if (need != KOF_SCAN_ALL)
-			ch_add(c, "WHOLE-FILE");
+		ch_add(c, "WHOLE-FILE");
 	} else if (what == CH_RANGE2) {
 		/*
-		 * Four assignments, and one region to make them with.
+		 * THE MENU FOR ONE RANGE, the one whose name was clicked.
 		 *
-		 * The region is not browsed for: it is where this draft's
-		 * markers actually are, which the tool worked out when it
-		 * located them and which is the reason anyone opens this menu
-		 * - the rule says DATA, the bytes are in CODE.
+		 * `arg` is its index in rng_all's order - the same order the row
+		 * drew the names in - so the subject is settled before a single
+		 * item is offered, and every item names it.
 		 *
-		 * Every line reads the same way and one word carries the
-		 * difference: Switch replaces, Extend keeps and adds, Add
-		 * declares a range of its own, and the last is the same
-		 * assignment to everything. Written as assignments and not as
-		 * verbs like "Scan WHOLE-FILE", which read as an order to go
-		 * and scan rather than as a range being set.
-		 *
-		 * How many ranges the draft has decides how three of them can
-		 * be worded at all: with one there is nothing to disambiguate
-		 * and the line names it, with several it cannot and says "a
-		 * scan range" with an ellipsis - this tool's existing promise
-		 * that a choice is still coming, the way File spells Open and
-		 * Save As.
+		 * Three things can be done to a range and they are different
+		 * questions: make it cover MORE (extend), make it cover LESS
+		 * (drop one region), or make it not exist (remove). Drop and
+		 * remove are deliberately not the same item: on CODE&DATA&NOLOAD
+		 * "remove" takes the whole range away, while "drop" takes one
+		 * region off and leaves a narrower range behind.
 		 */
-		uint32_t here = 0, k, many = 0;
-		uint32_t seen[MAX_GROUP], g;
-		char add[40], one[40], t[CH_W];
+		uint32_t rm[2 * MAX_GROUP];
+		int ru[2 * MAX_GROUP];
+		uint32_t nr = rng_all(v, rm, ru, 2u * MAX_GROUP);
+		uint32_t cur, have, rest, bits = 0, b;
+		char nm[40], t[CH_W];
 
-		/*
-		 * WHERE THE MARKERS ARE THAT THE RANGE DOES NOT REACH.
-		 *
-		 * Three quantities, and getting any of them from the wrong set
-		 * of strings breaks the menu in its own way.
-		 *
-		 * `covered` is what the draft already searches. `marks` is
-		 * where the declared strings actually sit - EVERY declared
-		 * string, not only those already put into a matcher, because a
-		 * string is added to the list before it is assigned and the
-		 * whole reason to open this menu is to make the range reach it.
-		 * Built from grouped strings alone, adding a marker in NOLOAD
-		 * to a draft left the menu offering WHOLE-FILE and nothing
-		 * else: there was no ungrouped string to notice.
-		 *
-		 * `here` is what is missing and `keep` is what would be lost.
-		 * A string's own region comes from where it was LOCATED when
-		 * that is known, and from where it was taken otherwise.
-		 */
-		uint32_t covered = 0, marks = 0, keep = 0;
+		if (arg >= nr)
+			return;
+		cur  = rm[arg];
+		have = rng_object_regions(v);
+		rest = have & ~cur;               /* regions it does not cover */
+		for (b = 0; b < 32u; b++)
+			bits += (cur >> b) & 1u;
+		rng_name_of(cur_obj(v)->fmt, cur, nm, sizeof nm);
+		c->arg2 = cur;
 
-		one[0] = 0;
-		for (g = 0; g < v->n_grp; g++)
-			if (grp_has_range(v, g))
-				covered |= grp_mask(v, g);
-		for (k = 0; k < v->n_decl; k++) {
-			uint32_t mm = v->decl[k].at_mask ? v->decl[k].at_mask
-							 : v->decl[k].mask;
+		/* Extend: one region left is named outright, several ask. */
+		if (rest && !(cur & KOF_SCAN_ALL)) {
+			uint32_t rb = 0;
 
-			if (mm && mm != KOF_SCAN_ALL)
-				marks |= mm;
-		}
-		here = marks & ~covered;
-		keep = marks & covered;
-		c->arg2 = here;
-		v->rng_mask = here;
+			for (b = 0; b < 32u; b++)
+				rb += (rest >> b) & 1u;
+			if (rb == 1u) {
+				char on[40];
 
-		for (g = 0; g < v->n_grp; g++) {
-			uint32_t mm;
-			int dup = 0;
-
-			if (!grp_has_range(v, g))
-				continue;
-			mm = grp_mask(v, g);
-			for (k = 0; k < many; k++)
-				dup |= seen[k] == mm;
-			if (!dup)
-				seen[many++] = mm;
-		}
-		if (many == 1)
-			rng_name_of(cur_obj(v)->fmt, seen[0], one, sizeof one);
-
-		if (here) {
-			rng_name_of(cur_obj(v)->fmt, here, add, sizeof add);
-			/*
-			 * SWITCH IS OFFERED ONLY WHEN NOTHING IS LEFT BEHIND.
-			 *
-			 * It replaces the range, so with markers still living
-			 * in the range being replaced it is an offer to stop
-			 * finding them - the rule would go from partly working
-			 * to differently broken. Extend is the answer there,
-			 * and it is the answer often enough that Switch being
-			 * absent is the useful signal rather than a missing
-			 * feature.
-			 */
-			if (many && !keep) {
-				if (many > 1)
-					snprintf(t, sizeof t,
-						 "Switch a scan range to %.13s",
-						 add);
-				else
-					snprintf(t, sizeof t,
-						 "Switch scan range to %.15s",
-						 add);
+				rng_name_of(cur_obj(v)->fmt, rest, on, sizeof on);
+				snprintf(t, sizeof t, "Extend with %.20s", on);
 				ch_add_verb(c, t, 0);
+			} else {
+				ch_add_verb_sub(c, "Extend with a region", 0);
 			}
-			/* Nothing to extend until a range exists. */
-			if (many > 1) {
-				snprintf(t, sizeof t,
-					 "Extend a scan range with %.11s",
-					 add);
-				ch_add_verb(c, t, 1);
-			} else if (many == 1) {
-				snprintf(t, sizeof t, "Extend %.12s with %.12s",
-					 one, add);
-				ch_add_verb(c, t, 1);
-			}
-			snprintf(t, sizeof t, "Add %.15s to scan ranges", add);
-			ch_add_verb(c, t, 2);
 		}
-		ch_add_verb(c, many > 1 ? "Switch a scan range to WHOLE-FILE"
-					: "Switch scan range to WHOLE-FILE", 3);
 		/*
-		 * And removing one, which was the one thing this menu could
-		 * not do: an unused declared range had nowhere to be taken
-		 * back out, and a range in a matcher could only be reached
-		 * through the matcher.
-		 *
-		 * ONE RANGE IS NAMED AND REMOVED ON THE SPOT; several open a
-		 * list. A menu that asks which of one thing to remove is a
-		 * question with a single answer, and naming the range in the
-		 * line is what makes the direct click safe - the reader can
-		 * see exactly what goes before they press it.
+		 * Drop one region, only while there is more than one to drop
+		 * FROM: a range of a single region has nothing to narrow to,
+		 * and taking its last region away is what Remove means.
 		 */
-		{
-			uint32_t dm[2u * MAX_GROUP];
-			int du[2u * MAX_GROUP];
-			uint32_t dn = rng_removable(v, dm, du,
-						   2u * MAX_GROUP);
-
-			if (dn == 1u) {
-				char rn[40];
-
-				rng_name_of(cur_obj(v)->fmt, dm[0], rn,
-					    sizeof rn);
-				snprintf(t, sizeof t,
-					 "Remove scan range %.15s", rn);
-				ch_add_verb(c, t, 4);
-			} else if (dn > 1u) {
-				ch_add_verb_sub(c, "Remove a scan range", 4);
-			}
-		}
-	} else if (what == CH_RANGE4) {
-		uint32_t b;
+		if (bits > 1u)
+			ch_add_verb_sub(c, "Drop a region from this range", 1);
+		snprintf(t, sizeof t, "Remove scan range %.15s", nm);
+		ch_add_verb(c, t, 2);
+		if (!c->n)
+			return;
+	} else if (what == CH_RANGE_ADD) {
+		/*
+		 * A NEW RANGE, over any single region the object has, and
+		 * WHOLE-FILE last.
+		 *
+		 * Every region is offered, not only those no range covers yet.
+		 * A narrow range and a wider one containing it are different
+		 * questions - "this marker must be in CODE" beside "any of
+		 * these, wherever the compiler put them" - and offering only
+		 * the uncovered ones made the narrow one unreachable the moment
+		 * the wide one existed, with no way back. An exactly duplicate
+		 * mask is still refused where the range is created; the packer
+		 * merges identical masks anyway.
+		 */
+		uint32_t have = rng_object_regions(v), b;
 		char t[CH_W];
 
 		for (b = 0; b < 32u; b++) {
-			if (!(v->rng_mask & (1u << b)))
+			if (!(have & (1u << b)))
 				continue;
 			rng_name_of(cur_obj(v)->fmt, 1u << b, t, sizeof t);
-			if (t[0])
-				ch_add(c, t);
-		}
-		/*
-		 * Last, because it is the widest answer and this list reads
-		 * from narrowest to widest like the rest of the menu - and
-		 * because taking all of them is the common case: the reason
-		 * the markers are spread over several regions is usually that
-		 * the rule should have covered all of them.
-		 *
-		 * Worded with the verb it will carry out. "All of them" alone
-		 * is a noun with no action attached, and this row is reached
-		 * after a verb was already chosen two menus ago - by which
-		 * point the reader should not have to remember which.
-		 *
-		 * "all regions FOUND", never "all regions" and never anything
-		 * resembling WHOLE-FILE. They are different assignments and
-		 * the difference matters: this one is the union of the regions
-		 * the markers actually turned up in - two of five, say - while
-		 * WHOLE-FILE abandons regions altogether and searches the
-		 * object end to end, including everything the parse claimed for
-		 * something else. WHOLE-FILE is offered one menu up, as its own
-		 * line, and never reaches this list.
-		 */
-		if (c->n > 1) {
-			static const char *const verbed[3] = {
-				"Switch to all regions found",
-				"Extend with all regions found",
-				"Add all regions found"
-			};
-
-			if (arg < 3u)
-				ch_add(c, verbed[arg]);
-		}
-	} else if (what == CH_RANGE3) {
-		/*
-		 * Which of the draft's ranges the line applies to.
-		 *
-		 * Only when there is more than one - a list offering a single
-		 * answer is a question nobody asked - and opened to the RIGHT
-		 * of the line that raised it, the way a submenu belongs beside
-		 * its parent rather than on top of it.
-		 */
-		uint32_t seen[MAX_GROUP], n_seen = 0, k, g;
-
-		for (g = 0; g < v->n_grp; g++) {
-			uint32_t mm;
-			char t[CH_W];
-			int dup = 0;
-
-			if (!grp_has_range(v, g))
-				continue;
-			mm = grp_mask(v, g);
-			for (k = 0; k < n_seen; k++)
-				dup |= seen[k] == mm;
-			if (dup)
-				continue;
-			seen[n_seen++] = mm;
-			rng_name_of(cur_obj(v)->fmt, mm, t, sizeof t);
 			ch_add(c, t);
 		}
-		if (!c->n)
-			return;
-	} else if (what == CH_RANGE_DEL) {
-		/* Which scan range to remove, unused ones first then the
-		 * matcher ranges - the same list rng_removable hands the taker,
-		 * each named so a matcher range says what removing it costs. */
-		uint32_t dm[2u * MAX_GROUP];
-		int du[2u * MAX_GROUP];
-		uint32_t dn = rng_removable(v, dm, du, 2u * MAX_GROUP), di;
+		ch_add(c, "WHOLE-FILE");
+	} else if (what == CH_RANGE_EXT || what == CH_RANGE_DROP) {
+		/*
+		 * Which region to add to, or take off, the subject range. The
+		 * subject came down in arg2 from the menu that raised this one.
+		 */
+		/*
+		 * THE SUBJECT COMES THROUGH `arg`, not arg2.
+		 *
+		 * ch_open memsets the chooser and then builds the items, so
+		 * anything the caller writes into arg2 AFTERWARDS is not there
+		 * while this list is being made. It was read from arg2 and the
+		 * effects were both bugs: Drop saw 0, produced no items and so
+		 * never opened at all, and Extend saw "every region" while the
+		 * taker later saw "every region except this range's" - two
+		 * different lists, so row N chose a different region from the
+		 * one printed on it.
+		 */
+		uint32_t set = what == CH_RANGE_EXT
+			     ? (rng_object_regions(v) & ~arg) : arg;
+		char t[CH_W];
+		uint32_t b;
 
-		for (di = 0; di < dn; di++) {
-			char rn[40], lab[CH_W];
-
-			rng_name_of(cur_obj(v)->fmt, dm[di], rn, sizeof rn);
-			snprintf(lab, sizeof lab, "%.15s%s", rn,
-				 du[di] ? " (unused)" : " and its matcher");
-			ch_add(c, lab);
+		for (b = 0; b < 32u; b++) {
+			if (!(set & (1u << b)))
+				continue;
+			rng_name_of(cur_obj(v)->fmt, 1u << b, t, sizeof t);
+			ch_add(c, t);
 		}
 		if (!c->n)
 			return;
@@ -7119,27 +6961,52 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
  */
 static void rng_retarget(struct view *v, uint32_t was, uint32_t now)
 {
-	uint32_t g, i;
+	uint32_t g, i, w = 0;
 
 	for (g = 0; g < v->n_grp; g++) {
 		if (!grp_has_range(v, g) || grp_mask(v, g) != was)
 			continue;
 		v->grp[g].mask = now;
-		/* The strings follow, or their row would keep claiming a
-		 * region the matcher no longer searches. decl.grp is a bitmask -
-		 * one bit per matcher, the way grp_mask and grp_count read it -
-		 * so membership of matcher g is a bit test, not "== g", which
-		 * only ever moved the strings of matcher 0 (and, for g==0, every
-		 * string in no matcher at all). */
-		for (i = 0; i < v->n_decl; i++)
-			if (v->decl[i].grp & (1u << g)) {
-				v->decl[i].mask = now;
-				rng_name_of(cur_obj(v)->fmt, now,
-					    v->decl[i].rgn,
-					    sizeof v->decl[i].rgn);
-				decl_locate(v, &v->decl[i]);
-			}
 	}
+	/*
+	 * AND THE DECLARED LIST, which is the half this used to miss.
+	 *
+	 * A range put there by [+ Scan range] lives in rng_add until a matcher
+	 * is given it, and this function only ever walked the matchers. Two
+	 * things went wrong from that. Extending a range NO matcher had yet did
+	 * nothing at all - the loop above matched nothing - so a range could
+	 * only be widened after it had been handed to a matcher. And extending
+	 * one that a matcher DID have moved the matcher to the wider mask while
+	 * leaving the old narrow mask sitting in rng_add, where rng_all then
+	 * reported it as a second, unused range: a region that appeared out of
+	 * nowhere the moment you extended.
+	 *
+	 * Rewritten with a dedup, because the wider mask may already be
+	 * declared - two entries for one mask would draw the same range twice.
+	 */
+	for (i = 0; i < v->n_rng_add; i++) {
+		uint32_t m = v->rng_add[i] == was ? now : v->rng_add[i];
+		uint32_t k;
+		int dup = 0;
+
+		for (k = 0; k < w; k++)
+			dup |= v->rng_add[k] == m;
+		if (!dup)
+			v->rng_add[w++] = m;
+	}
+	v->n_rng_add = w;
+	/*
+	 * THE STRINGS ARE LEFT ALONE.
+	 *
+	 * This used to rewrite every marker's own region to the matcher's new
+	 * range. That is a different fact: a string's region is where it WAS
+	 * FOUND and the matcher's range is where it will be LOOKED FOR - the
+	 * distinction the panel spends two column headings on. Widening a
+	 * matcher to CODE&DATA does not move a marker that was found in CODE,
+	 * and saying it does makes the row claim a provenance the search never
+	 * established. Eligibility still holds: rng_holds is an overlap, so a
+	 * CODE marker remains valid for a CODE&DATA matcher.
+	 */
 }
 
 /*
@@ -7189,6 +7056,60 @@ static uint32_t rng_removable(struct view *v, uint32_t *mask, int *unused,
 		n++;
 	}
 	return n;
+}
+
+/*
+ * EVERY RANGE THE DRAFT HAS, in one order.
+ *
+ * The distinct masks the matchers search, then the declared ones nothing
+ * searches yet. Its own function because three places need the same list in the
+ * same order - the row that draws the names, the click that turns a column into
+ * a range, and the menu that acts on one - and a list built three times is a
+ * list that disagrees with itself about which range is which.
+ */
+static uint32_t rng_all(struct view *v, uint32_t *mask, int *unused,
+			uint32_t cap)
+{
+	uint32_t n = 0, g, k;
+
+	for (g = 0; g < v->n_grp && n < cap; g++) {
+		uint32_t m;
+		int dup = 0;
+
+		if (!grp_has_range(v, g))
+			continue;
+		m = grp_mask(v, g);
+		for (k = 0; k < n; k++)
+			dup |= mask[k] == m;
+		if (dup)
+			continue;
+		mask[n] = m;
+		unused[n] = 0;
+		n++;
+	}
+	for (g = 0; g < v->n_rng_add && n < cap; g++) {
+		int used = 0;
+
+		for (k = 0; k < n; k++)
+			used |= mask[k] == v->rng_add[g];
+		if (used)
+			continue;
+		mask[n] = v->rng_add[g];
+		unused[n] = 1;
+		n++;
+	}
+	return n;
+}
+
+/* Which regions the object HAS, as a mask - what a range may be built from. */
+static uint32_t rng_object_regions(struct view *v)
+{
+	uint32_t m = 0, k;
+
+	for (k = 0; k < v->n_node; k++)
+		if (v->node[k].obj == v->node[v->sel_node].obj && v->node[k].mask)
+			m |= v->node[k].mask;
+	return m;
 }
 
 /* Drop an unused declared range from the draft. */
@@ -7360,114 +7281,111 @@ static void ch_take(struct view *v)
 		return;
 	}
 	if (c->what == CH_RANGE2) {
-		uint32_t seen[MAX_GROUP], ns = 0, g, k;
-		int verb;
-
-		for (g = 0; g < v->n_grp; g++) {
-			uint32_t mm;
-			int dup = 0;
-
-			if (!grp_has_range(v, g))
-				continue;
-			mm = grp_mask(v, g);
-			for (k = 0; k < ns; k++)
-				dup |= seen[k] == mm;
-			if (!dup)
-				seen[ns++] = mm;
-		}
 		/*
-		 * Read off the row, not off its index. Rows are omitted when
-		 * they would not make sense - Switch when markers would be
-		 * left behind, Extend when there is no range yet - and an
-		 * index-derived verb carries out whichever row happens to sit
-		 * at that number instead.
+		 * One range is the subject, and c->arg2 holds its mask - put
+		 * there when the menu was built, so the taker cannot disagree
+		 * with the row about which range was pressed even if the draft
+		 * changed shape in between.
 		 */
-		verb = (c->sel >= 0 && c->sel < c->n) ? (int)c->verb[c->sel] : 3;
-		/*
-		 * Remove is its own list - it includes the unused ranges that
-		 * ns above does not count - so it does not go through the switch
-		 * picker. One range removes without asking; several ask which.
-		 */
-		/*
-		 * Remove is its own list - it includes the unused ranges that
-		 * ns above does not count - so it does not go through the switch
-		 * picker. One range was NAMED in the line and goes on the spot;
-		 * several open the list that names each.
-		 */
-		if (verb == 4) {
-			uint32_t dm[2u * MAX_GROUP];
-			int du[2u * MAX_GROUP];
-			uint32_t dn = rng_removable(v, dm, du, 2u * MAX_GROUP);
+		uint32_t cur = c->arg2, rest = rng_object_regions(v) & ~cur;
+		int verb = (c->sel >= 0 && c->sel < c->n)
+			 ? (int)c->verb[c->sel] : 2;
+		uint32_t b, rb = 0;
 
-			if (dn == 1u) {
-				rng_delete(v, dm[0], du[0]);
-			} else if (dn > 1u) {
+		for (b = 0; b < 32u; b++)
+			rb += (rest >> b) & 1u;
+
+		if (verb == 0) {                /* extend */
+			if (rb == 1u) {
+				rng_retarget(v, cur, cur | rest);
+				say_note(v, "%s", "Scan range extended");
+			} else if (rb > 1u) {
 				struct chooser up = *c;
 
 				up.open = 1;
-				ch_open(v, CH_RANGE_DEL, 0,
+				ch_open(v, CH_RANGE_EXT, cur,
 					up.row + up.sel + 1, up.col + CH_W);
 				v->ch_up = up;
 			}
 			return;
 		}
-		/* "Add" makes a range rather than changing one, so it never
-		 * has to ask which. The other three do, and only when the
-		 * draft holds more than one. */
-		if (verb != 2 && ns > 1) {
+		if (verb == 1) {                /* drop one region */
 			struct chooser up = *c;
 
 			up.open = 1;
-			ch_open(v, CH_RANGE3, (uint32_t)verb,
+			ch_open(v, CH_RANGE_DROP, cur,
 				up.row + up.sel + 1, up.col + CH_W);
 			v->ch_up = up;
 			return;
 		}
-		rng_finish(v, c, verb, ns ? seen[0] : 0);
-		return;
-	}
-	if (c->what == CH_RANGE3) {
-		uint32_t seen[MAX_GROUP], ns = 0, g, k;
+		/* verb 2: remove the whole range, matcher and all. */
+		{
+			uint32_t dm[2u * MAX_GROUP];
+			int du[2u * MAX_GROUP];
+			uint32_t dn = rng_removable(v, dm, du, 2u * MAX_GROUP), i;
 
-		for (g = 0; g < v->n_grp; g++) {
-			uint32_t mm;
-			int dup = 0;
-
-			if (!grp_has_range(v, g))
-				continue;
-			mm = grp_mask(v, g);
-			for (k = 0; k < ns; k++)
-				dup |= seen[k] == mm;
-			if (!dup)
-				seen[ns++] = mm;
+			for (i = 0; i < dn; i++)
+				if (dm[i] == cur) {
+					rng_delete(v, cur, du[i]);
+					return;
+				}
+			/* Not in the removable list means a matcher searches it
+			 * and rng_delete's own walk will take that matcher; ask
+			 * it directly rather than refusing. */
+			rng_delete(v, cur, 0);
 		}
-		if ((uint32_t)c->sel < ns)
-			rng_finish(v, c, (int)c->arg, seen[c->sel]);
 		return;
 	}
-	if (c->what == CH_RANGE4) {
-		uint32_t b, k = 0, pick = 0;
+	if (c->what == CH_RANGE_ADD) {
+		uint32_t have = rng_object_regions(v), b, n = 0, pick = 0;
 
 		for (b = 0; b < 32u; b++) {
-			if (!(v->rng_mask & (1u << b)))
+			if (!(have & (1u << b)))
 				continue;
-			if ((uint32_t)c->sel == k) {
+			if ((int)n++ == c->sel) {
 				pick = 1u << b;
 				break;
 			}
-			k++;
 		}
-		/* Past the last region is the "all of them" row. */
-		rng_apply(v, (int)c->arg, c->arg2, pick ? pick : v->rng_mask);
+		/* Past the last region is the WHOLE-FILE row. */
+		rng_apply(v, 2, 0, pick ? pick : KOF_SCAN_ALL);
 		return;
 	}
-	if (c->what == CH_RANGE_DEL) {
-		uint32_t dm[2u * MAX_GROUP];
-		int du[2u * MAX_GROUP];
-		uint32_t dn = rng_removable(v, dm, du, 2u * MAX_GROUP);
+	if (c->what == CH_RANGE_EXT || c->what == CH_RANGE_DROP) {
+		uint32_t cur = c->arg;          /* the same field the build read */
+		uint32_t set = c->what == CH_RANGE_EXT
+			     ? (rng_object_regions(v) & ~cur) : cur;
+		uint32_t b, n = 0, pick = 0;
 
-		if (c->sel >= 0 && (uint32_t)c->sel < dn)
-			rng_delete(v, dm[c->sel], du[c->sel]);
+		for (b = 0; b < 32u; b++) {
+			if (!(set & (1u << b)))
+				continue;
+			if ((int)n++ == c->sel) {
+				pick = 1u << b;
+				break;
+			}
+		}
+		if (!pick)
+			return;
+		if (c->what == CH_RANGE_EXT) {
+			rng_retarget(v, cur, cur | pick);
+			say_note(v, "%s", "Scan range extended");
+		} else {
+			/*
+			 * Narrowed, not removed: the range keeps every region
+			 * but this one. Taking the LAST region away would leave
+			 * a matcher searching nothing, which is what Remove is
+			 * for - so it is refused here rather than silently
+			 * producing one.
+			 */
+			if ((cur & ~pick) == 0) {
+				say_err(v, "%s", "That is the range's only "
+					"region - remove the range instead");
+				return;
+			}
+			rng_retarget(v, cur, cur & ~pick);
+			say_note(v, "%s", "Region dropped from the scan range");
+		}
 		return;
 	}
 	if (c->what == CH_LOGIC) {
@@ -7560,34 +7478,16 @@ static void ch_take(struct view *v)
 			q->thresh = 2;
 	} else if (c->what == CH_RANGE) {
 		/*
-		 * Row 0 is the range derived from this matcher's markers, the
-		 * last is WHOLE-FILE, and anything between is a range the
-		 * draft declared and nothing uses. Resolved by walking the
-		 * same list the chooser was built from rather than by an index
-		 * into it - the two would drift the moment one gained a row.
+		 * The same list the menu was built from, walked in the same
+		 * order - see the note there. Past the last defined range is
+		 * the WHOLE-FILE row.
 		 */
-		if (c->sel == 0) {
-			q->mask = c->arg2;
-		} else {
-			uint32_t i, n = 1;
+		uint32_t rm[2 * MAX_GROUP];
+		int ru[2 * MAX_GROUP];
+		uint32_t nr = rng_all(v, rm, ru, 2u * MAX_GROUP);
 
-			q->mask = KOF_SCAN_ALL;
-			for (i = 0; i < v->n_rng_add; i++) {
-				uint32_t k, used = 0;
-
-				for (k = 0; k < v->n_grp; k++)
-					used += (uint32_t)(grp_has_range(v, k)
-							   && grp_mask(v, k) ==
-							   v->rng_add[i]);
-				if (used || v->rng_add[i] == c->arg2)
-					continue;
-				if ((int)n == c->sel) {
-					q->mask = v->rng_add[i];
-					break;
-				}
-				n++;
-			}
-		}
+		q->mask = (c->sel >= 0 && (uint32_t)c->sel < nr)
+			? rm[c->sel] : KOF_SCAN_ALL;
 	}
 }
 
@@ -7729,8 +7629,16 @@ static void prow_build(struct view *v)
 	 * row. A range one can neither use nor get rid of is a draft that cannot
 	 * be finished.
 	 */
-	if (v->n_grp || v->n_rng_add)
-		prow_add(v, RW_RANGES, 0);
+	/*
+	 * ALWAYS, like the Matchers and Conditions headings.
+	 *
+	 * Gated on having a matcher, removing the last one took the row away -
+	 * and [+ Add scan range] lives on it, so there was then no way to
+	 * declare a range at all: the draft could not be finished and nothing
+	 * on the screen said why. A heading that disappears takes its controls
+	 * with it, so this one does not disappear.
+	 */
+	prow_add(v, RW_RANGES, 0);
 	if (v->n_decl) {
 		prow_add(v, RW_STRHDR, 0);
 		for (i = 0; i < v->n_decl; i++)
@@ -7756,6 +7664,21 @@ static void prow_build(struct view *v)
  * why it read as one long list. A bar per section costs the row the column
  * headings were already taking and gives the eye somewhere to stop.
  */
+/*
+ * RE-LOCATE THE STRINGS' REGIONS - a small button, in the region column's own
+ * heading rather than a sentence at the end of the row.
+ *
+ * It reads as one of the row buttons the strings already carry ([x] and the
+ * rest) because that is what it is: three characters beside the thing it acts
+ * on. Spelled out at the end of the heading it was the widest thing on the row
+ * and said in five words what its position says by itself.
+ */
+#define BTN_UPDRGN "[r]"
+/* " Strings     word      case         region" - the heading up to and
+ * including the region title, so the button's column is measured from it
+ * rather than counted by hand. */
+#define STR_HDR_PRE " Strings     word      case         region"
+
 static void sec_bar(struct out *o, struct view *v, int row, const char *text)
 {
 	int i, n = (int)strlen(text);
@@ -9086,83 +9009,63 @@ static void draw_decl(struct out *o, struct view *v)
 	 * is answering "which ranges is this signature going to search", which
 	 * is the question that made a managed list look necessary.
 	 */
-	if ((v->n_grp || v->n_rng_add) && PR_VIS(r)) {
-		uint32_t seen[MAX_GROUP], n_seen = 0, k;
+	if (PR_VIS(r)) {
+		uint32_t rm[2 * MAX_GROUP];
+		int ru[2 * MAX_GROUP];
+		uint32_t nr = rng_all(v, rm, ru, 2u * MAX_GROUP), k;
 
 		row_start(o, PR(r), 1);
 		out_fmt(o, A_DIM " Scan ranges " A_OFF);
-		for (g = 0; g < v->n_grp; g++) {
-			uint32_t m;
-			char t[40];
-			int dup = 0;
-
-			/*
-			 * A matcher with no markers yet searches nothing, so it
-			 * has no range to report. It used to report WHOLE-FILE,
-			 * because that is what grp_mask falls back to when it
-			 * has nothing to derive from - which read as "this
-			 * signature will scan the whole file" beside strings
-			 * that had all been taken from one region.
-			 */
-			if (!grp_has_range(v, g))
-				continue;
-			m = grp_mask(v, g);
-			for (k = 0; k < n_seen; k++)
-				dup |= seen[k] == m;
-			if (dup)
-				continue;
-			seen[n_seen++] = m;
-			rng_name_of(cur_obj(v)->fmt, m, t, sizeof t);
-			out_fmt(o, " %s%s" A_OFF, A_LOC, t);
-		}
-		/* Declared and not yet used by anything. Named so it can be
-		 * seen, marked so it cannot be mistaken for a range that is
-		 * doing work. */
-		for (g = 0; g < v->n_rng_add; g++) {
-			char t[40];
-			uint32_t q;
-			int used = 0;
-
-			for (q = 0; q < n_seen; q++)
-				used |= seen[q] == v->rng_add[g];
-			if (used)
-				continue;
-			rng_name_of(cur_obj(v)->fmt, v->rng_add[g], t,
-				    sizeof t);
-			out_fmt(o, " %s%s (unused)" A_OFF, A_WARN, t);
-			n_seen++;
-		}
-		if (!n_seen)
-			out_str(o, A_DIM " none yet" A_OFF);
 		/*
-		 * The row's two controls, named for the distinction the panel
-		 * already draws between its columns: a matcher's range is
-		 * where it will be LOOKED FOR, a string's region is where it
-		 * WAS FOUND. One button per fact, in the row about both. They
-		 * live here rather than beside the strings because both act on
-		 * the whole draft.
+		 * EACH NAME IS A CONTROL, and its own subject.
+		 *
+		 * The row used to end in one [Update scan range] button that
+		 * acted on "a range" and then asked which one - a question the
+		 * reader had already answered by looking at the row. Clicking
+		 * the name opens the menu for THAT range, so extend, drop and
+		 * remove all read as things done to the thing pressed.
+		 *
+		 * An unused range - declared, no matcher searching it - is
+		 * still named and still clickable, because removing it is the
+		 * one thing it needs and this is where that lives.
 		 */
-		{
-			uint32_t d2, off = 0;
+		v->n_rng_hs = 0;
+		for (k = 0; k < nr; k++) {
+			char t[40];
 			int c0;
 
-			for (d2 = 0; d2 < v->n_decl; d2++)
-				off += (uint32_t)(v->decl[d2].off_rgn != 0);
+			rng_name_of(cur_obj(v)->fmt, rm[k], t, sizeof t);
+			out_str(o, " ");
+			c0 = o->col_base + (int)o->col_hint;
+			out_fmt(o, "%s%s" A_OFF, ru[k] ? A_WARN : A_LOC, t);
+			if (ru[k])
+				out_fmt(o, A_DIM " (unused)" A_OFF);
+			if (v->n_rng_hs < 2u * MAX_GROUP) {
+				v->rng_hs[v->n_rng_hs][0] = c0;
+				v->rng_hs[v->n_rng_hs][1] =
+					o->col_base + (int)o->col_hint - 1;
+				v->n_rng_hs++;
+			}
+		}
+		if (!nr)
+			out_str(o, A_DIM " none yet" A_OFF);
+		/*
+		 * And a way to declare one more, at the END of the names rather
+		 * than flushed to the right edge: it belongs to the list it
+		 * extends, and a control parked in the corner reads as being
+		 * about the panel instead.
+		 */
+		{
+			int c0;
 
-			c0 = 2 + (int)o->col_hint;
-			out_fmt(o, "  %s[Update scan range]" A_OFF,
-				n_seen ? "\033[100;97m" : "\033[100;37m");
-			v->rgs_c0 = c0;
-			v->rgs_c1 = (int)o->col_hint;
-
-			c0 = 2 + (int)o->col_hint;
-			out_fmt(o, "  %s[Update string regions]" A_OFF,
-				off ? "\033[43;30m" : "\033[100;37m");
-			v->rgf_c0 = c0;
-			v->rgf_c1 = (int)o->col_hint;
+			out_str(o, "  ");
+			c0 = o->col_base + (int)o->col_hint;
+			out_fmt(o, "\033[100;97m[+ Scan range]" A_OFF);
+			v->rga_c0 = c0;
+			v->rga_c1 = o->col_base + (int)o->col_hint - 1;
 		}
 	}
-	r += (v->n_grp || v->n_rng_add) ? 1 : 0;
+	r++;                            /* the scan ranges row, always */
 
 	/*
 	 * The strings.
@@ -9190,7 +9093,12 @@ static void draw_decl(struct out *o, struct view *v)
 	 * and the gap is only ever as wide as some row actually needs.
 	 */
 	{
-		uint32_t w = 6;         /* the heading is six characters */
+		/*
+		 * Six for the word "region", plus a space and the [r] button
+		 * that now sits beside it - the heading has to fit in the
+		 * column it names, or the button would land on "size".
+		 */
+		uint32_t w = 6u + 1u + (uint32_t)(sizeof BTN_UPDRGN - 1);
 
 		for (i = 0; i < v->n_decl; i++) {
 			const struct decl *d = &v->decl[i];
@@ -9205,12 +9113,65 @@ static void draw_decl(struct out *o, struct view *v)
 	}
 	if (v->n_decl && PR_VIS(r)) {
 		char hdr[120];
+		uint32_t d2, off = 0;
+		int c0;
 
 		/* The heading follows the column, so the two cannot drift. */
-		snprintf(hdr, sizeof hdr,
-			 " Strings     word      case         region%*ssize  bytes",
+		snprintf(hdr, sizeof hdr, STR_HDR_PRE "%*ssize  bytes",
 			 v->rgn_w - 6 + 1, "");
 		sec_bar(o, v, PR(r), hdr);
+		/*
+		 * [Update string regions] BELONGS HERE, beside the column it is
+		 * about.
+		 *
+		 * It used to sit on the scan ranges row next to a control about
+		 * a matcher's range, and the two read as one pair - but a
+		 * string's region is where it WAS FOUND and a matcher's range is
+		 * where it will be LOOKED FOR, which is the distinction this
+		 * panel spends two column headings making. The button that
+		 * re-locates strings goes with the strings.
+		 */
+		for (d2 = 0; d2 < v->n_decl; d2++)
+			off += (uint32_t)(v->decl[d2].off_rgn != 0);
+		/*
+		 * PLACED PAST THE HEADING, never over it.
+		 *
+		 * sec_bar has already drawn the heading and padded the rest of
+		 * the row with its own background, so the button is written
+		 * onto that padding - positioned at the column after the text.
+		 *
+		 * Repositioning to column one and writing spaces to get there
+		 * is what the first attempt did, and it blanked the heading it
+		 * was supposed to sit beside: the whole title, "region" column
+		 * and all, became a row of spaces with one button on it.
+		 */
+		{
+			int w = (int)sizeof BTN_UPDRGN - 1;
+			/*
+			 * One column after the word "region", which is inside
+			 * the region column's own width - rgn_w is held at a
+			 * minimum that leaves room for it, so the heading and
+			 * the data rows below still share one column layout.
+			 */
+			int bcol = (int)sizeof STR_HDR_PRE + 1;
+
+			if (bcol + w <= g_cols) {
+				out_at(o, PR(r), bcol);
+				o->col_hint = 0;
+				c0 = o->col_base;
+				out_fmt(o, "%s%s" A_OFF,
+					off ? "\033[43;30m" : "\033[100;37m",
+					BTN_UPDRGN);
+				v->rgf_c0 = c0;
+				v->rgf_c1 = o->col_base + (int)o->col_hint - 1;
+			} else {
+				/* No room on this width: no button, and no
+				 * stale columns left answering clicks. */
+				v->rgf_c0 = v->rgf_c1 = -1;
+			}
+		}
+	} else if (!v->n_decl) {
+		v->rgf_c0 = v->rgf_c1 = -1;
 	}
 	r += v->n_decl ? 1 : 0;
 	v->row_str = PR(r);
@@ -15578,22 +15539,37 @@ static void click(struct view *v, int rclick)
 			}
 			r++;
 		}
-		if (v->n_grp || v->n_rng_add) {
+		{
 			if (r == want) {
-				/* The summary carries the draft's two range
-				 * controls; the rest of it is a readout. */
-				if (g_mx >= v->rgs_c0 && g_mx <= v->rgs_c1)
-					ch_open(v, CH_RANGE2, 0, g_my, g_mx);
-				else if (g_mx >= v->rgf_c0 && g_mx <= v->rgf_c1)
-					draft_refresh(v);
+				uint32_t h;
+
+				/*
+				 * A NAME IS THE SUBJECT. Which range was
+				 * pressed is passed as the menu's argument, so
+				 * every item it offers is about that one.
+				 */
+				for (h = 0; h < v->n_rng_hs; h++)
+					if (g_mx >= v->rng_hs[h][0] &&
+					    g_mx <= v->rng_hs[h][1]) {
+						ch_open(v, CH_RANGE2, h,
+							g_my, g_mx);
+						return;
+					}
+				if (g_mx >= v->rga_c0 && g_mx <= v->rga_c1)
+					ch_open(v, CH_RANGE_ADD, 0, g_my, g_mx);
 				return;
 			}
 			r++;
 		}
 		if (v->n_decl) {
-			if (r == want)
-				return;         /* the "Strings" heading */
-			r++;
+			if (r == want) {
+				/* The heading carries [Update string regions]
+				 * now - see where it is drawn. */
+				if (g_mx >= v->rgf_c0 && g_mx <= v->rgf_c1)
+					draft_refresh(v);
+				return;
+			}
+			r++;                    /* the "Strings" heading */
 			for (i = 0; i < v->n_decl; i++, r++) {
 				if (r != want)
 					continue;
