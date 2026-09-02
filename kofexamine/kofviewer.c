@@ -7829,7 +7829,52 @@ static uint64_t dis_span_of(const struct view *v)
 	return rows > 0 ? (uint64_t)rows * 4u : 64u;
 }
 
-static int64_t dis_max_bias(const struct view *v)
+/*
+ * THE LATEST START THAT STILL FILLS THE PANEL, as a region offset.
+ *
+ * The clamp used to approximate this - stop `rows` bytes before the end, one
+ * byte a row - and that reaches the last byte but overshoots when the
+ * instructions are longer than a byte: `rows` instructions from `rgn_len - rows`
+ * run past the end and the surplus rows come back blank. The exact answer needs
+ * the instruction lengths, so it is decoded: the last `rows` instructions span
+ * at most rows*DIS_MAX_INSN bytes, so decoding from there forward and keeping
+ * the start of the one that leaves exactly `rows` behind is the start from which
+ * the last row holds the last instruction and no row is blank.
+ *
+ * Bounded whatever the region size, because only that trailing window is walked.
+ */
+static uint64_t dis_sync(struct view *v, uint64_t want);
+static unsigned dis_format(struct view *v, uint64_t *at, char *line, size_t cap,
+			   uint8_t *bytes_out, unsigned *ix_len_out,
+			   int *ok_out, char *text_out, size_t text_cap);
+
+static uint64_t dis_full_start(struct view *v, unsigned rows)
+{
+	uint64_t back = (uint64_t)rows * DIS_MAX_INSN;
+	uint64_t at = v->rgn_len > back ? dis_sync(v, v->rgn_len - back) : 0;
+	uint64_t ring[256];
+	unsigned n = 0, cap = rows < 256u ? rows : 256u;
+
+	if (!cap)
+		return 0;
+	while (at < v->rgn_len) {
+		char line[120];
+		uint64_t at0 = at;
+
+		ring[n % cap] = at0;
+		n++;
+		if (!dis_format(v, &at, line, sizeof line, NULL, NULL, NULL,
+				NULL, 0) || at <= at0)
+			break;
+	}
+	/* Fewer than a panelful in the trailing window: it all fits, so the
+	 * window can start at the region's beginning. */
+	if (n <= cap)
+		return 0;
+	return ring[n % cap];   /* the oldest kept - exactly `rows` from the end */
+}
+
+static int64_t dis_max_bias(struct view *v)
 {
 	uint64_t shown, span = dis_span_of(v);
 	int64_t hi;
@@ -7854,24 +7899,44 @@ static int64_t dis_max_bias(const struct view *v)
 	hi = shown > span ? (int64_t)(shown - span) : 0;
 
 	/*
-	 * AND NOT PAST THE END OF THE OBJECT.
+	 * AND NOT PAST THE END OF THE REGION - but the bound is ROWS, not span.
 	 *
 	 * The first bound keeps the panel inside what the hex pane shows. Near
-	 * the end of a region that is not enough: the hex pane's range runs off
-	 * the end of the object - it draws blank rows there, which is what a hex
-	 * dump does - and the panel scrolled into that and showed nothing at
-	 * all. Rows of blank in a disassembly read as a bug rather than as the
-	 * end of the data.
+	 * the end of a region that is not enough on its own, so the scroll also
+	 * stops so the last window still lands on real bytes.
 	 *
-	 * So the offset also stops where the last full window of bytes begins.
+	 * How far that is was the bug. It used `span` - rows times a nominal
+	 * FOUR bytes an instruction - and meterpreter shellcode is nothing like
+	 * four bytes an instruction: it is a run of one-byte pushes and pops, so
+	 * the panel shows far fewer bytes than span claims, and the clamp stopped
+	 * the scroll a whole span short of the end. On cleartext the last forty
+	 * bytes of the code could not be reached or selected at all.
+	 *
+	 * The honest bound is one byte per row, because that is the least a row
+	 * can show: an instruction is at least a byte. Stopping `rows` before the
+	 * end guarantees the final byte is reachable whatever the instruction
+	 * lengths are. On a region of long instructions the last window can then
+	 * carry a blank row or two past the end - which the draw shows as blank,
+	 * and which is the honest picture of "this is where the code stops",
+	 * unlike a tail that cannot be reached.
 	 */
-	if (v->rgn_len > v->rgn_at + span) {
-		int64_t room = (int64_t)(v->rgn_len - v->rgn_at - span);
+	{
+		int nr = hex_bot() - dis_top() + 1;
+		uint64_t full;
 
-		if (hi > room)
-			hi = room;
-	} else {
-		hi = 0;
+		if (nr < 1)
+			nr = 1;
+		/*
+		 * The exact last-window start, decoded rather than guessed - see
+		 * dis_full_start. Below rgn_at it means the whole region already
+		 * fits from where the panel is; otherwise the offset from rgn_at
+		 * is the most the panel may be scrolled.
+		 */
+		full = dis_full_start(v, (unsigned)nr);
+		if (full <= v->rgn_at)
+			hi = 0;
+		else if (hi > (int64_t)(full - v->rgn_at))
+			hi = (int64_t)(full - v->rgn_at);
 	}
 	return hi;
 }
@@ -8124,6 +8189,68 @@ static void dis_sync_bytes(struct view *v)
  * and it is why the answer is stable - the stream converges on the true
  * boundaries within a few instructions whatever it is entered at.
  */
+/*
+ * ONE INSTRUCTION, AS A PLAIN LINE: "<offset>  <bytes>  <mnemonic>".
+ *
+ * The exact text the panel shows and the clipboard gets, from ONE place, so the
+ * two cannot drift - the draw builds its rows through this and so does Copy, and
+ * "the same string on screen and in the clipboard" is a property of there being
+ * one function rather than a promise two blocks of code keep.
+ *
+ * It advances *at by the instruction's length and returns that length, so a
+ * caller walking a range needs nothing else. Data that will not decode is one
+ * byte named "(data)".
+ *
+ * The out-parameters are for the DRAW, which re-emits the line coloured and so
+ * needs the pieces: the raw bytes, how many of them the row shows, whether the
+ * mnemonic decoded, and the mnemonic on its own. Copy passes NULL for all of
+ * them - it wants the flat line and nothing else.
+ */
+static unsigned dis_format(struct view *v, uint64_t *at, char *line, size_t cap,
+			   uint8_t *bytes_out, unsigned *ix_len_out,
+			   int *ok_out, char *text_out, size_t text_cap)
+{
+	uint8_t buf[DIS_MAX_INSN];
+	INSTRUX ix;
+	char text[ND_MIN_BUF_SIZE];
+	unsigned got, j, w;
+
+	if (ix_len_out)
+		*ix_len_out = 1;
+	if (ok_out)
+		*ok_out = 0;
+	got = dis_gather(v, *at, buf, DIS_MAX_INSN);
+	if (!got)
+		return 0;
+	if (bytes_out)
+		memcpy(bytes_out, buf, DIS_MAX_INSN);
+	w = (unsigned)snprintf(line, cap, "%08llx  ",
+			       (unsigned long long)view_map(v, *at, 0));
+	if (!ND_SUCCESS(NdDecodeEx(&ix, buf, got,
+				   v->dis_bits == 32 ? ND_CODE_32 : ND_CODE_64,
+				   v->dis_bits == 32 ? ND_DATA_32
+						     : ND_DATA_64))) {
+		snprintf(line + w, cap - w, "%02x%*s (data)", buf[0], 19, "");
+		(*at)++;
+		return 1;
+	}
+	if (ix_len_out)
+		*ix_len_out = ix.Length < 7u ? ix.Length : 7u;
+	if (ok_out)
+		*ok_out = 1;
+	for (j = 0; j < ix.Length && j < 7u && w + 3 < cap; j++)
+		w += (unsigned)snprintf(line + w, cap - w, "%02x ", buf[j]);
+	for (; j < 7u && w + 3 < cap; j++)
+		w += (unsigned)snprintf(line + w, cap - w, "   ");
+	NdToText(&ix, view_map(v, *at, 0), sizeof text, text);
+	dis_shorten(text);
+	snprintf(line + w, cap - w, "%s", text);
+	if (text_out)
+		snprintf(text_out, text_cap, "%s", text);
+	*at += ix.Length;
+	return ix.Length;
+}
+
 static uint64_t dis_sync(struct view *v, uint64_t want)
 {
 	uint64_t at;
@@ -8209,10 +8336,8 @@ static void draw_disasm(struct out *o, struct view *v)
 	v->dis_lines = 0;
 	for (row = dis_top(); row <= hex_bot(); row++) {
 		uint8_t buf[DIS_MAX_INSN];
-		INSTRUX ix;
 		char text[ND_MIN_BUF_SIZE];
 		char line[120];
-		unsigned got, j, w = 0;
 		uint64_t at0 = at;              /* before the length is added */
 		int from, to, len;
 		unsigned ix_len = 1;            /* bytes this row stands for */
@@ -8223,52 +8348,15 @@ static void draw_disasm(struct out *o, struct view *v)
 			out_str(o, "\033[K");
 			continue;
 		}
-		got = dis_gather(v, at, buf, DIS_MAX_INSN);
-		if (!got) {
+		/*
+		 * Built by dis_format, coloured below. There is one formatter so
+		 * the clipboard cannot get a line the screen never showed - see
+		 * dis_format and dis_copy.
+		 */
+		if (!dis_format(v, &at, line, sizeof line, buf, &ix_len,
+				&ok_decode, text, sizeof text)) {
 			out_str(o, "\033[K");
 			continue;
-		}
-		/*
-		 * BUILT AS TEXT FIRST, THEN COLOURED.
-		 *
-		 * The same string is what goes on the screen and what goes in
-		 * the clipboard, so there is one of it. Writing the screen with
-		 * one set of calls and the clipboard with another is how the
-		 * two drift - and the drift would be invisible until somebody
-		 * pasted a line that was never displayed.
-		 */
-		w = (unsigned)snprintf(line, sizeof line, "%08llx  ",
-				       (unsigned long long)view_map(v, at, 0));
-		if (!ND_SUCCESS(NdDecodeEx(&ix, buf, got,
-					   v->dis_bits == 32 ? ND_CODE_32
-							     : ND_CODE_64,
-					   v->dis_bits == 32 ? ND_DATA_32
-							     : ND_DATA_64))) {
-			/*
-			 * One byte, named for what it is. A run of data in the
-			 * middle of code is ordinary - a jump table, a string,
-			 * the padding between functions - and stopping at the
-			 * first one would end the panel on every real object.
-			 */
-			snprintf(line + w, sizeof line - w, "%02x%*s (data)",
-				 buf[0], 19, "");
-			at++;
-			ix_len = 1;
-		} else {
-			ok_decode = 1;
-			ix_len = ix.Length < 7u ? ix.Length : 7u;
-			for (j = 0; j < ix.Length && j < 7u && w + 3 < sizeof line;
-			     j++)
-				w += (unsigned)snprintf(line + w,
-							sizeof line - w,
-							"%02x ", buf[j]);
-			for (; j < 7u && w + 3 < sizeof line; j++)
-				w += (unsigned)snprintf(line + w,
-							sizeof line - w, "   ");
-			NdToText(&ix, view_map(v, at, 0), sizeof text, text);
-			dis_shorten(text);
-			snprintf(line + w, sizeof line - w, "%s", text);
-			at += ix.Length;
 		}
 		if (v->dis_lines < (int)(sizeof v->dis_line /
 					 sizeof v->dis_line[0])) {
@@ -10489,33 +10577,49 @@ static void dis_copy(struct view *v)
 	if (!v->dis_open || v->dis_lines <= 0 ||
 	    (!v->dis_have && !dis_hex_sel(v)))
 		return;
+
 	/*
-	 * Exactly the characters that are lit, and the row break between them.
+	 * A HEX SELECTION IS COPIED WHOLE, not only where it shows.
 	 *
-	 * Not the whole of each row: the selection is a text selection, so
-	 * copying more than was highlighted would put something in the
-	 * clipboard the reader can see they did not pick.
+	 * The panel is a window - it decodes as many instructions as it has rows
+	 * and no more - but a selection made in the hex pane can be longer than
+	 * that window. Copying only the visible rows cut the clipboard off at
+	 * whatever happened to be on screen, so a reader who selected a whole
+	 * region and copied got the top of it and silently lost the rest. The
+	 * range is decoded here from its first byte to its last, off the screen
+	 * entirely, so what is copied is the whole of what was picked while the
+	 * panel still only shows what fits.
+	 *
+	 * The text selection below is different and stays row-based: it IS the
+	 * characters on the rows, cannot extend past them, and copying more than
+	 * was lit would put something in the clipboard the reader can see they
+	 * did not pick.
 	 */
+	if (!v->dis_have && dis_hex_sel(v)) {
+		uint64_t lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
+		uint64_t hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
+		uint64_t at = dis_sync(v, lo);
+		uint32_t guard = 0;
+
+		while (at <= hi && at < v->rgn_len && guard++ < (1u << 20)) {
+			char line[120];
+
+			if (!dis_format(v, &at, line, sizeof line,
+					NULL, NULL, NULL, NULL, 0))
+				break;
+			if (rows)
+				out_str(&d, "\n");
+			out_add(&d, line, strlen(line));
+			rows++;
+		}
+	} else
 	for (r = 0; r < v->dis_lines; r++) {
 		int len = (int)strlen(v->dis_line[r]);
 		int from, to;
 
-		if (dis_cols(v, v->dis_line_at[r], v->dis_line_len[r],
-			     len, &from, &to)) {
-			/* A text selection: exactly the characters lit. */
-		} else if (dis_hex_marks(v, v->dis_line_at[r],
-					 v->dis_line_len[r])) {
-			/*
-			 * A selection made in the HEX pane: whole rows, which
-			 * is what is lit. Copying the covered characters would
-			 * be copying a column of a listing, and the range was
-			 * never picked as text in the first place.
-			 */
-			from = 0;
-			to = len;
-		} else {
+		if (!dis_cols(v, v->dis_line_at[r], v->dis_line_len[r],
+			      len, &from, &to))
 			continue;
-		}
 		if (to <= from)
 			continue;
 		if (rows)
