@@ -445,6 +445,18 @@ static void out_at(struct out *o, int row, int col)
 #define A_S_SIZE  A_SIZE          /* st_size  - a size, like every other */
 #define A_S_NAME  "\033[97m"      /* the name */
 #define A_S_HEAD  "\033[4;37m"    /* the column titles */
+/*
+ * THE ROW A HEURISTIC NAMED, and the only place in this table where a whole
+ * row takes one colour.
+ *
+ * Every other colour here says what a FIELD is; this says something about the
+ * record as a whole, so it cannot be another hue in the same scheme - it has
+ * to be the kind of mark that reads as "this one", which is a background. The
+ * red is the one the hex pane already uses for a marker the database counted
+ * (A_HIT1), so a reader who has seen a highlighted byte knows what it means
+ * before being told.
+ */
+#define A_S_FOUND "\033[41;97m"
 
 static const char *byte_colour(uint8_t c)
 {
@@ -816,6 +828,18 @@ static int hex_last(void) { return g_disasm_rows ? dis_top() - 2 : hex_bot(); }
 #define MAX_PROW  (OPT_COUNT + 1 + 2 + MAX_DECL + 2 + 2 * MAX_GROUP + 2 + \
 		   4 * MAX_GROUP)
 #define MAX_RANGE 8
+
+/*
+ * DLG_ROWS / DLG_COLS - what a dialog's recorded text can hold.
+ *
+ * Sized from the boxes themselves: neither is taller than 28 rows and the
+ * widest is 116 columns, so these are those numbers with room to spare. A row
+ * longer than DLG_COLS is truncated in the RECORDING only - what is on screen
+ * is whatever was drawn - and truncating the copy of a row nobody can select
+ * past is not a loss.
+ */
+#define DLG_ROWS 40
+#define DLG_COLS 168
 
 /* A string that no condition uses yet. Declaring one must not invent a place to
  * put it: the condition is the researcher's decision and making it for them is
@@ -1335,6 +1359,11 @@ struct object {
 	 */
 	uint8_t          *sym_imp, *sym_exp;
 	uint32_t          sym_imp_n, sym_exp_n;
+
+	/* The address a heuristic named as a carried payload, and its length, or
+	 * zero when none did. Reported through kof_debug - see on_debug. */
+	uint64_t          payload_at;
+	uint64_t          payload_len;
 };
 
 /*
@@ -1444,6 +1473,19 @@ struct view {
 
 	char        pending[48];    /* the unpacker that has just spoken */
 	long long   pending_ver;    /* and the version it reported, or -1 */
+	/*
+	 * WHERE A HEURISTIC SAID THE PAYLOAD IS, held the same way and for the
+	 * same reason: a rule reports it while the object is being opened, so
+	 * it arrives before the object does and has to wait for it.
+	 *
+	 * The ADDRESS, not the record index - see the note in
+	 * bases/heur/scloader_00.c. That is what lets the symbols dialog find
+	 * the row without knowing anything about how the rule found it: the
+	 * dialog compares each record's own value, and nothing here has to
+	 * repeat the test the rule made.
+	 */
+	uint64_t    pend_payload;
+	uint64_t    pend_paylen;
 
 	struct node node[MAX_TREE];
 	uint32_t    n_node, sel_node, tree_top;
@@ -1921,6 +1963,39 @@ struct view {
 	 * records and the pane behind it is a table of bytes, and sharing one
 	 * offset made opening the dialog jump the pane.
 	 */
+	/*
+	 * The shellcode dialog: open, and how far down its byte dump is.
+	 *
+	 * Separate from the symbols dialog's fields even though the two look
+	 * alike, because they can be open over each other and a shared offset
+	 * would move one when the other scrolled.
+	 */
+	/*
+	 * A DIALOG'S TEXT, AND THE CHARACTERS SELECTED IN IT.
+	 *
+	 * One set of fields for both dialogs, because only one of them can be
+	 * selected in at a time - the boxes are modals, and the topmost owns
+	 * the mouse. Two sets would be two things to keep in step for no gain.
+	 *
+	 * dlg_y0/dlg_x0 are where row 0, column 0 of the recorded text sits on
+	 * screen, so a click can be turned into a (row, column) in the text
+	 * without the click routing knowing how the box is laid out.
+	 *
+	 * The anchor is where the drag started and is NOT normalised: a
+	 * selection dragged upwards has b before a, and normalising on the way
+	 * in would make the anchor move as the pointer does. It is ordered when
+	 * it is read, in dlg_span.
+	 */
+	char        dlg_line[DLG_ROWS][DLG_COLS];
+	int         dlg_rows;
+	int         dlg_y0, dlg_x0;
+	int         dlg_ar, dlg_ac, dlg_br, dlg_bc;
+	int         dlg_have;
+	int         dlg_drag;
+
+	uint8_t     sc_open;
+	uint64_t    sc_at;
+
 	uint8_t     sym_open;
 	uint64_t    sym_at;
 	/*
@@ -2085,6 +2160,11 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		v->pending[0] = 0;
 		v->pending_ver = -1;
 	}
+	/* Cleared as it is taken, whether or not anything reported one, so a
+	 * payload named on one object can never be shown against the next. */
+	o->payload_at  = v->pend_payload;
+	o->payload_len = v->pend_paylen;
+	v->pend_payload = v->pend_paylen = 0;
 	for (p = name; (p = strstr(p, "//")) != NULL; p += 2)
 		o->depth++;
 
@@ -2174,10 +2254,13 @@ static void on_debug(uint32_t fact, const char *what, uint64_t value, void *user
 	/* Computed once. The engine hands the field's id with every note, so
 	 * picking the one field this cares about is an integer compare rather
 	 * than finding a dot and running strcmp per note per object. */
-	static uint32_t f_version;
+	static uint32_t f_version, f_payload, f_paylen;
 
-	if (!f_version)
+	if (!f_version) {
 		f_version = kof_fact_id("version");
+		f_payload = kof_fact_id("payload");
+		f_paylen  = kof_fact_id("length");
+	}
 
 	if (n >= sizeof v->pending)
 		n = sizeof v->pending - 1u;
@@ -2199,6 +2282,17 @@ static void on_debug(uint32_t fact, const char *what, uint64_t value, void *user
 	 */
 	if (fact == f_version)
 		v->pending_ver = (long long)value;
+	/*
+	 * Two more fields kept, and they are kept for the same reason "version"
+	 * is: a reader looking at this object asks for them. A rule that says
+	 * "this file carries a payload" is only half an answer - the other half
+	 * is which of the symbols it is, and that is a number the rule already
+	 * computed and would otherwise be thrown away.
+	 */
+	else if (fact == f_payload)
+		v->pend_payload = value;
+	else if (fact == f_paylen)
+		v->pend_paylen = value;
 }
 
 static void objects_collect(struct view *v, kof_engine *eng)
@@ -2208,6 +2302,18 @@ static void objects_collect(struct view *v, kof_engine *eng)
 
 	memset(&opt, 0, sizeof opt);
 	opt.all_matches = 1;
+	/*
+	 * LEVEL 2, and this is only expressible because the level and the
+	 * emulator became separate fields.
+	 *
+	 * A viewer wants every heuristic that has anything to say about the
+	 * object in front of the reader - that is what the panel is for - and a
+	 * rule gated to level 2 is gated on COST, not on confidence. It does
+	 * NOT want the interpreter, which is the other half of what --heur 2
+	 * means on the command line. Before these were two fields, asking for
+	 * one without the other was not possible.
+	 */
+	opt.heur_level = KOF_HEUR_LEVEL_MAX;
 	/*
 	 * NEVER rather than the zeroed AUTO, and ONLY when asked for.
 	 *
@@ -12234,6 +12340,12 @@ static void draw_find(struct out *o, struct view *v);
 static void draw_goto(struct out *o, struct view *v);
 static int  goto_click(struct view *v);
 static void draw_symbols(struct out *o, struct view *v);
+static void draw_shellcode(struct out *o, struct view *v);
+static int  scd_click(struct view *v);
+static void scd_scroll(struct view *v, int64_t d);
+static uint64_t scd_max(struct view *v);
+static const uint8_t *scd_bytes(struct view *v, uint32_t *n);
+static int  scd_rows(void);
 static int  symd_click(struct view *v);
 static void symd_scroll(struct view *v, int64_t d);
 static void symd_clamp(struct view *v);
@@ -12402,6 +12514,8 @@ static void redraw(struct view *v)
 			draw_goto(&o, v);
 		if (v->sym_open)
 			draw_symbols(&o, v);
+		if (v->sc_open)
+			draw_shellcode(&o, v);
 	}
 	if (v->prop_open)
 		draw_prop(&o, v);
@@ -12798,35 +12912,27 @@ enum bar_item {
 	 * about the bytes in front of the reader and neither writes a signature,
 	 * so they belong together and not beside Save.
 	 */
+	/*
+	 * ANALYSIS, in the order a reader works through it: what the object IS,
+	 * then what is inside it, then what to DO about it. The rule after
+	 * BI_FINDSC is where that turns over - everything above answers a
+	 * question, everything below writes something or re-runs the scan.
+	 */
 	BI_DASH,
-	/*
-	 * The symbol table, decoded. Directly under Dashboard because it is the
-	 * same kind of item - a question about the object that writes nothing -
-	 * and the two dumping items below open files instead.
-	 */
 	BI_SYMS,
-	/*
-	 * Dump opens rather than acts: what to dump is now a question with two
-	 * answers, and they are answers to the same question rather than two
-	 * unrelated items that happen to both write files. The two under it
-	 * write to different directories - the emulator's carries an _emu
-	 * suffix - so one can be produced without losing the other, which is
-	 * the whole reason for having both.
-	 */
-	BI_DUMP, BI_DUMP_STATIC, BI_DUMP_EMU,
-	/*
-	 * Examine this object again with the other unpacker in front of it.
-	 *
-	 * The label changes with the mode, so it always states the thing that
-	 * will happen rather than the state that is. See bar_label.
-	 */
-	BI_UNPACKER,
-	/*
-	 * A toggle rather than two items. The label says which way it goes, the
-	 * same way BI_UNPACKER does - see bar_label - because a menu that offers
-	 * "Show" and "Hide" side by side always has one of them wrong.
-	 */
+	/* Label replaced at draw time by the mode's own wording - a menu that
+	 * offers "Show" and "Hide" side by side always has one of them wrong. */
 	BI_DISASM,
+	/*
+	 * What a heuristic already found, shown on demand.
+	 *
+	 * It runs nothing: the rule ran during the scan and reported where the
+	 * payload is, so this item only displays what is already known. See
+	 * bases/heur/scloader_00.c and on_debug.
+	 */
+	BI_FINDSC,
+	BI_UNPACKER,
+	BI_DUMP, BI_DUMP_STATIC, BI_DUMP_EMU,
 	BI_REBUILD,
 	BI_NEXT, BI_PREV,
 	BI_KEYS, BI_ABOUT,
@@ -12838,32 +12944,44 @@ static const struct {
 	int         menu;
 	/* The item this one hangs under, or -1 for a top-level entry. */
 	int         parent;
+	/*
+	 * Draw a rule ABOVE this item.
+	 *
+	 * On the item BELOW the break rather than the one above it, so
+	 * appending to a group does not move the break - which is the
+	 * mistake the other spelling invites.
+	 *
+	 * BOTH the drawer and the hit test must count the extra row. They
+	 * are two separate walks over this table and they have disagreed
+	 * before - see the note on bar_col - so the row comes from one
+	 * helper, bar_gap, that both call.
+	 */
+	int         sep;
 } bar_item[BI_COUNT] = {
-	{ "Open...",        BM_FILE, -1 },
-	{ "Save",           BM_FILE, -1 },
-	{ "Save As...",     BM_FILE, -1 },
-	{ "Quit",           BM_FILE, -1 },
-	{ "Find...",        BM_EDIT, -1 },
-	{ "Go to...",       BM_EDIT, -1 },
-	{ "Dashboard",         BM_ANALYSIS, -1 },
-	{ "Symbols",           BM_ANALYSIS, -1 },
-	{ "Dump",              BM_ANALYSIS, -1 },
-	{ "Static unpacker",   BM_ANALYSIS, BI_DUMP },
-	{ "Emu unpacker",      BM_ANALYSIS, BI_DUMP },
-	/* Replaced at draw time by the mode's own wording - see bar_label. */
-	{ "Use ... unpacker",  BM_ANALYSIS, -1 },
-	/* Replaced at draw time - see bar_label. */
-	{ "Disassembly",       BM_ANALYSIS, -1 },
-	{ "Rebuild database",  BM_ANALYSIS, -1 },
+	{ "Open...",        BM_FILE, -1, 0 },
+	{ "Save",           BM_FILE, -1, 0 },
+	{ "Save As...",     BM_FILE, -1, 0 },
+	{ "Quit",           BM_FILE, -1, 0 },
+	{ "Find...",        BM_EDIT, -1, 0 },
+	{ "Go to...",       BM_EDIT, -1, 0 },
+	{ "Dashboard",         BM_ANALYSIS, -1, 0 },
+	{ "Symbols",           BM_ANALYSIS, -1, 0 },
+	{ "Disassembly",       BM_ANALYSIS, -1, 0 },
+	{ "Find shellcode in variables", BM_ANALYSIS, -1, 0 },
+	{ "Use ... unpacker",  BM_ANALYSIS, -1, 1 },
+	{ "Dump",              BM_ANALYSIS, -1, 0 },
+	{ "Static unpacker",   BM_ANALYSIS, BI_DUMP, 0 },
+	{ "Emu unpacker",      BM_ANALYSIS, BI_DUMP, 0 },
+	{ "Rebuild database",  BM_ANALYSIS, -1, 0 },
 	/*
 	 * "Next" and "Previous", not "Next file" and "Previous file": the menu
 	 * they are in is called Switch-File, and repeating the noun in every
 	 * item under it is the sort of label that reads like a form.
 	 */
-	{ "Next",              BM_SWITCH, -1 },
-	{ "Previous",          BM_SWITCH, -1 },
-	{ "Keyboard",          BM_HELP, -1 },
-	{ "About",          BM_HELP, -1 }
+	{ "Next",              BM_SWITCH, -1, 0 },
+	{ "Previous",          BM_SWITCH, -1, 0 },
+	{ "Keyboard",          BM_HELP, -1, 0 },
+	{ "About",          BM_HELP, -1, 0 }
 };
 
 /* Does this item open a submenu rather than do something. */
@@ -12930,6 +13048,19 @@ static int bar_shown(struct view *v, int i)
 	return i >= 0 && i < BI_COUNT;
 }
 
+/*
+ * How many rows this item takes before its own: 1 for a rule above it, else 0.
+ *
+ * One function, called by BOTH the drawer and the hit test, because they are
+ * two walks over the same table and the whole class of bug here is one of them
+ * counting a row the other does not. See the note on bar_col for the last time
+ * that happened.
+ */
+static int bar_gap(struct view *v, int i)
+{
+	return (i > 0 && bar_item[i].sep && bar_shown(v, i)) ? 1 : 0;
+}
+
 static int bar_enabled(struct view *v, int i)
 {
 	switch (i) {
@@ -12987,6 +13118,16 @@ static int bar_enabled(struct view *v, int i)
 	 * the tool looked and found nothing, the empty box says it might not
 	 * have looked.
 	 */
+	/*
+	 * Always offered on an object, because BOTH answers are answers.
+	 *
+	 * Greying it when nothing was found would make "this file carries no
+	 * payload" indistinguishable from "this build cannot look" - and the
+	 * reader who wants to know is exactly the one who has not looked yet.
+	 * The item costs nothing to run: the rule ran during the scan and this
+	 * only reports what it said.
+	 */
+	case BI_FINDSC:    return 1;
 	case BI_SYMS: {
 		const struct object *o = cur_obj(v);
 
@@ -13081,6 +13222,22 @@ static void draw_bar(struct out *o, struct view *v)
 		if (bar_item[i].menu != v->bar_open || bar_item[i].parent >= 0 ||
 		    !bar_shown(v, i))
 			continue;
+		if (bar_gap(v, i)) {
+			int k;
+
+			/* On the panel's own background, so the break reads as
+			 * part of the menu rather than a line drawn over it. */
+			out_at(o, y, col);
+			out_str(o, BAR_ON " ");
+			/* U+2500 written out, because G_H is defined with the
+			 * dialog glyphs further down and the bar is drawn
+			 * before them - the same reason scrollbar() spells its
+			 * U+2502 this way. */
+			for (k = 0; k < BAR_W - 2; k++)
+				out_glyph(o, "\xe2\x94\x80");
+			out_str(o, " " A_OFF);
+			y++;
+		}
 		out_at(o, y, col);
 		if (i == v->bar_sel || i == v->bar_sub)
 			out_str(o, BAR_CUR);
@@ -13137,6 +13294,7 @@ static int bar_item_at(struct view *v, int row, int col)
 		if (bar_item[i].menu != v->bar_open || bar_item[i].parent >= 0 ||
 		    !bar_shown(v, i))
 			continue;
+		y += bar_gap(v, i);
 		if (i == v->bar_sub)
 			sub_row = y;
 		y++;
@@ -13160,6 +13318,10 @@ static int bar_item_at(struct view *v, int row, int col)
 		if (bar_item[i].menu != v->bar_open || bar_item[i].parent >= 0 ||
 		    !bar_shown(v, i))
 			continue;
+		/* The rule's own row belongs to nothing: a click on it must not
+		 * land on the item under it, which is what skipping the row
+		 * without testing it achieves. */
+		y += bar_gap(v, i);
 		if (row == y)
 			return i;
 		y++;
@@ -14174,6 +14336,10 @@ static void emu_here(struct view *v)
 	}
 	memset(&opt, 0, sizeof opt);
 	opt.all_matches = 1;
+	/* The same level as the ordinary collect - see the note there. A node
+	 * re-examined through the interpreter must not lose the heuristics the
+	 * first pass would have run on it. */
+	opt.heur_level = KOF_HEUR_LEVEL_MAX;
 	/*
 	 * ONLY, because the reader asked for the interpreter by name. AUTO
 	 * would decline the moment a packer module claimed the object - which
@@ -14805,6 +14971,45 @@ static void bar_run(struct view *v, int i)
 	case BI_SYMS:
 		symd_open(v);
 		return;
+	/*
+	 * SHOW what the heuristic found, or say plainly that it found nothing.
+	 *
+	 * Both outcomes are reported, and the negative one goes to the status
+	 * line rather than opening an empty dialog - a box with nothing in it
+	 * makes the reader work out which of "nothing found" and "nothing
+	 * shown" they are looking at.
+	 */
+	case BI_FINDSC: {
+		uint32_t n = 0;
+
+		if (!scd_bytes(v, &n) || !n) {
+			/*
+			 * act_msg, NOT say_note.
+			 *
+			 * The note channel is only drawn while the reader is in
+			 * the draft panel or the marker list - see the status
+			 * bar - so a note written from here had nowhere to
+			 * appear and the item read as doing nothing at all.
+			 * act_msg is what a menu action's outcome goes to; it
+			 * is where "Copied 2 line(s)" appears, and it is drawn
+			 * whatever the reader is looking at.
+			 *
+			 * act_ok, because finding nothing IS the answer and not
+			 * a failure - it decides how long the line stays up,
+			 * and an answer does not need fifteen seconds.
+			 */
+			snprintf(v->act_msg, sizeof v->act_msg, "%s",
+				 "no variable in this object looks like "
+				 "shellcode");
+			v->act_ok = 1;
+			v->menu_open = 0;
+			return;
+		}
+		v->sc_open = 1;
+		v->sc_at = 0;
+		v->menu_open = 0;
+		return;
+	}
 	case BI_GOTO:
 		v->goto_open = 1;
 		v->find_open = 0;      /* they share the box - see draw_goto */
@@ -15575,10 +15780,26 @@ static void symd_edge(struct out *o, int w)
  * no escape sequence, and a field entering from the left is still coloured
  * even though its first characters are not drawn.
  */
+
 struct sclip {
 	struct out *o;
 	int         vcol;               /* column in the unclipped row */
 	int         from, to;           /* the visible window */
+	/*
+	 * WHERE THE VISIBLE CHARACTERS ARE ALSO WRITTEN, so they can be
+	 * selected and copied.
+	 *
+	 * The row has to be recorded as it is drawn rather than rebuilt
+	 * afterwards, because "afterwards" means a second copy of the format
+	 * strings and the clipping - and the copy a reader takes would then be
+	 * whatever that second version produced, not what they were looking at.
+	 * Recorded here, the two cannot differ: there is one walk.
+	 *
+	 * NULL when a caller does not want a recording, which is what the
+	 * heading rows use.
+	 */
+	char       *rec;
+	int         rec_n;
 };
 
 static void sclip_puts(struct sclip *c, const char *attr, const char *t)
@@ -15593,6 +15814,8 @@ static void sclip_puts(struct sclip *c, const char *attr, const char *t)
 			on = 1;
 		}
 		out_fmt(c->o, "%c", *t);
+		if (c->rec && c->rec_n < DLG_COLS - 1)
+			c->rec[c->rec_n++] = *t;
 	}
 	if (on)
 		out_str(c->o, A_OFF);
@@ -15612,7 +15835,8 @@ static void sclip_fmt(struct sclip *c, const char *attr, const char *fmt, ...)
 /* The name field, which is NUL-padded to a fixed 40 and NOT necessarily
  * terminated - so it is copied out before being written, never passed as a
  * string. Padded to `nw` so the columns after it line up. */
-static void sclip_name(struct sclip *c, const uint8_t *r, int nw)
+static void sclip_name(struct sclip *c, const uint8_t *r, int nw,
+		       const char *attr)
 {
 	char t[KOF_SYM_NAMELEN + 1];
 	int k;
@@ -15629,7 +15853,170 @@ static void sclip_name(struct sclip *c, const uint8_t *r, int nw)
 	for (; k < nw; k++)
 		t[k] = ' ';
 	t[k] = 0;
-	sclip_puts(c, A_S_NAME, t);
+	sclip_puts(c, attr ? attr : A_S_NAME, t);
+}
+
+/* ---- selecting and copying a dialog's text ---------------------------------
+ *
+ * A character selection over the rows a dialog recorded while it drew them.
+ * Shared by the symbols and shellcode boxes: both are tables of text a reader
+ * wants to paste into a note, and neither is a hex pane whose selection means
+ * an extent of a file.
+ *
+ * The selection is over the TEXT, not over what the text describes. Dragging
+ * across a symbols row copies the row as it reads on screen - which is the
+ * point, because that is what a reader is looking at when they decide to keep
+ * it.
+ */
+
+/*
+ * Closing a dialog drops the selection in it.
+ *
+ * One function because there are four places a box closes - two buttons, Escape
+ * and q - and a selection left behind by any of them would be painted over
+ * whatever box opened next, since the recorded rows are shared. Written as a
+ * helper rather than two statements at each site: the first attempt WAS two
+ * statements, one of them fell outside an unbraced `if`, and the compiler's
+ * misleading-indentation warning is what caught it.
+ */
+static void dlg_close(struct view *v)
+{
+	v->sc_open = 0;
+	v->sym_open = 0;
+	v->dlg_have = 0;
+	v->dlg_drag = 0;
+}
+
+/* Start a fresh recording. Called by a dialog before it draws its rows, so a
+ * box that has just changed what it shows cannot be selected against what it
+ * showed before. */
+static void dlg_rec_begin(struct view *v, int y0, int x0)
+{
+	v->dlg_rows = 0;
+	v->dlg_y0 = y0;
+	v->dlg_x0 = x0;
+}
+
+/* Take the row the clipper just wrote. */
+static void dlg_rec_row(struct view *v, struct sclip *c)
+{
+	if (v->dlg_rows >= DLG_ROWS)
+		return;
+	c->rec[c->rec_n] = 0;
+	v->dlg_rows++;
+}
+
+/* The buffer the next row should be recorded into, or NULL when full. */
+static char *dlg_rec_buf(struct view *v)
+{
+	return v->dlg_rows < DLG_ROWS ? v->dlg_line[v->dlg_rows] : 0;
+}
+
+/*
+ * The selection in reading order, as first/last row and the columns on each.
+ * Zero when there is nothing selected.
+ */
+static int dlg_span(const struct view *v, int *r0, int *c0, int *r1, int *c1)
+{
+	if (!v->dlg_have)
+		return 0;
+	if (v->dlg_ar < v->dlg_br ||
+	    (v->dlg_ar == v->dlg_br && v->dlg_ac <= v->dlg_bc)) {
+		*r0 = v->dlg_ar; *c0 = v->dlg_ac;
+		*r1 = v->dlg_br; *c1 = v->dlg_bc;
+	} else {
+		*r0 = v->dlg_br; *c0 = v->dlg_bc;
+		*r1 = v->dlg_ar; *c1 = v->dlg_ac;
+	}
+	return 1;
+}
+
+/*
+ * Paint the selection over what has already been drawn.
+ *
+ * A SECOND PASS, on purpose. The alternative is to test every character
+ * against the selection inside the clipper, which puts the selection's logic
+ * into the one function that must stay simple enough to be obviously right
+ * about clipping. Overwriting the span afterwards costs one repositioning per
+ * selected row and cannot affect a row that is not selected at all.
+ */
+static void dlg_paint_sel(struct out *o, struct view *v)
+{
+	int r0, c0, r1, c1, r;
+
+	if (!dlg_span(v, &r0, &c0, &r1, &c1))
+		return;
+	for (r = r0; r <= r1 && r < v->dlg_rows; r++) {
+		int len = (int)strlen(v->dlg_line[r]);
+		int from = (r == r0) ? c0 : 0;
+		int to   = (r == r1) ? c1 + 1 : len;
+
+		if (from < 0)
+			from = 0;
+		if (to > len)
+			to = len;
+		if (to <= from)
+			continue;
+		out_at(o, v->dlg_y0 + r, v->dlg_x0 + from);
+		out_str(o, A_SEL);
+		out_add(o, v->dlg_line[r] + from, (size_t)(to - from));
+		out_str(o, A_OFF);
+	}
+}
+
+/* Which (row, column) of the recorded text a screen position is, or 0 when it
+ * is not over the text at all. */
+static int dlg_at(const struct view *v, int row, int col, int *r, int *c)
+{
+	int rr = row - v->dlg_y0, cc = col - v->dlg_x0;
+
+	if (rr < 0 || rr >= v->dlg_rows || cc < 0)
+		return 0;
+	if (cc >= (int)strlen(v->dlg_line[rr]))
+		cc = (int)strlen(v->dlg_line[rr]) - 1;
+	if (cc < 0)
+		return 0;
+	*r = rr;
+	*c = cc;
+	return 1;
+}
+
+/*
+ * Copy the selection, rows joined by newlines and trailing blanks dropped.
+ *
+ * The blanks go because these tables are padded to their column widths, so a
+ * row selected whole ends in a run of spaces that is part of the layout and
+ * not part of what the reader picked out.
+ */
+static void dlg_copy(struct view *v)
+{
+	int r0, c0, r1, c1, r, rows = 0;
+	struct out d = { 0 };
+
+	if (!dlg_span(v, &r0, &c0, &r1, &c1))
+		return;
+	for (r = r0; r <= r1 && r < v->dlg_rows; r++) {
+		int len = (int)strlen(v->dlg_line[r]);
+		int from = (r == r0) ? c0 : 0;
+		int to   = (r == r1) ? c1 + 1 : len;
+
+		if (to > len)
+			to = len;
+		while (to > from && v->dlg_line[r][to - 1] == ' ')
+			to--;
+		if (rows)
+			out_str(&d, "\n");
+		if (to > from)
+			out_add(&d, v->dlg_line[r] + from, (size_t)(to - from));
+		rows++;
+	}
+	if (d.n) {
+		copy_osc52(d.p, d.n);
+		snprintf(v->act_msg, sizeof v->act_msg, "Copied %d line(s)",
+			 rows);
+		v->act_ok = 1;
+	}
+	free(d.p);
 }
 
 static void draw_symbols(struct out *o, struct view *v)
@@ -15723,6 +16110,12 @@ static void draw_symbols(struct out *o, struct view *v)
 	sc.o = o;
 	sc.from = v->sym_hoff;
 	sc.to = v->sym_hoff + vis;
+	sc.rec = 0;
+	sc.rec_n = 0;
+	/* Row 0 of the recording is the first RECORD row, not the heading: a
+	 * heading is not something a reader selects, and starting the text at
+	 * the first row of data is what lets dlg_at be a subtraction. */
+	dlg_rec_begin(v, y + 3, x + 2);
 
 	/* Top border, with the title sunk into it. */
 	symd_row(o, y);
@@ -15825,11 +16218,14 @@ static void draw_symbols(struct out *o, struct view *v)
 		const uint8_t *r = (at < (uint64_t)n)
 				 ? sym_rec(b, (uint32_t)nb, (uint32_t)at) : 0;
 		char fl[8], shn[8];
+		const char *mark;
 
 		symd_row(o, y + 3 + i);
 		out_str(o, A_DIM);
 		out_glyph(o, G_V);
 		out_str(o, A_OFF " ");
+		sc.rec = dlg_rec_buf(v);
+		sc.rec_n = 0;
 
 		if (!r) {
 			/* Nothing to draw, but the row still has to be blanked
@@ -15840,6 +16236,28 @@ static void draw_symbols(struct out *o, struct view *v)
 		} else {
 			sym_flag_str(r[KOF_SYM_R_FLAGS], fl);
 			sym_shn_str(r, shn, sizeof shn);
+			/*
+			 * IS THIS THE ROW A HEURISTIC NAMED.
+			 *
+			 * Compared on the symbol's own VALUE against what the
+			 * rule reported - which is exactly why the rule reports
+			 * a value and not a record index. This table is the
+			 * SPLIT one, imports and exports renumbered from zero,
+			 * so an index taken from the engine's block would name
+			 * the wrong row here.
+			 *
+			 * Nothing in this file repeats the test the rule made.
+			 * It only asks "was it this one", which is what keeps
+			 * the two from ever disagreeing about the answer.
+			 *
+			 * payload_at is guarded because a rule may report
+			 * nothing and zero IS a real symbol value - every
+			 * undefined symbol has it - so "no payload" must not be
+			 * spelled as an address.
+			 */
+			mark = (ob->payload_at &&
+				sym_u64(r, KOF_SYM_R_VALUE) == ob->payload_at)
+			       ? A_S_FOUND : 0;
 			sc.vcol = 0;
 			/*
 			 * DECIMAL, unlike everything else here. It is not a
@@ -15848,15 +16266,15 @@ static void draw_symbols(struct out *o, struct view *v)
 			 * reads - and printing a count in hex invites it to be
 			 * read as an offset into something.
 			 */
-			sclip_fmt(&sc, A_S_IDX, "%4llu ",
+			sclip_fmt(&sc, mark ? mark : A_S_IDX, "%4llu ",
 				  (unsigned long long)at);
-			sclip_fmt(&sc, A_S_TYPE, "%-7s ",
+			sclip_fmt(&sc, mark ? mark : A_S_TYPE, "%-7s ",
 				  sym_type_str(r[KOF_SYM_R_TYPE]));
-			sclip_fmt(&sc, A_S_BIND, "%-6s ",
+			sclip_fmt(&sc, mark ? mark : A_S_BIND, "%-6s ",
 				  sym_bind_str(r[KOF_SYM_R_BIND]));
-			sclip_fmt(&sc, A_S_VIS, "%-9s ",
+			sclip_fmt(&sc, mark ? mark : A_S_VIS, "%-9s ",
 				  sym_vis_str(r[KOF_SYM_R_VIS]));
-			sclip_fmt(&sc, A_S_FLAG, "%-5s ", fl);
+			sclip_fmt(&sc, mark ? mark : A_S_FLAG, "%-5s ", fl);
 			/*
 			 * The name, in the middle now, and PADDED TO nw so the
 			 * three columns after it line up.
@@ -15869,21 +16287,23 @@ static void draw_symbols(struct out *o, struct view *v)
 			 * name written past the edge would wrap and overwrite
 			 * the screen outside the box.
 			 */
-			sclip_name(&sc, r, nw);
+			sclip_name(&sc, r, nw, mark);
 			sclip_puts(&sc, A_OFF, " ");
-			sclip_fmt(&sc, A_S_SHN, "%5s ", shn);
-			sclip_fmt(&sc, A_S_SIZE, "%*llu ", sw,
+			sclip_fmt(&sc, mark ? mark : A_S_SHN, "%5s ", shn);
+			sclip_fmt(&sc, mark ? mark : A_S_SIZE, "%*llu ", sw,
 				  (unsigned long long)sym_u64(r,
 							KOF_SYM_R_SIZE));
 			/* "0x", because this one IS a number out of the file
 			 * and an address at that - and it now sits next to a
 			 * decimal size and a decimal record number, where an
 			 * unmarked base is a guess. */
-			sclip_fmt(&sc, A_S_VAL, "0x%0*llx", wd,
+			sclip_fmt(&sc, mark ? mark : A_S_VAL, "0x%0*llx", wd,
 				  (unsigned long long)sym_u64(r,
 							KOF_SYM_R_VALUE));
 		}
 		symd_edge(o, w);
+		if (sc.rec)
+			dlg_rec_row(v, &sc);
 	}
 
 	/* Bottom border. */
@@ -15909,6 +16329,8 @@ static void draw_symbols(struct out *o, struct view *v)
 	if (n > (uint32_t)rows)
 		scrollbar(o, x + w - 1, y + 3, y + 3 + rows - 1,
 			  v->sym_at, n, (uint64_t)rows);
+	/* Last, so the selection is over everything else the box drew. */
+	dlg_paint_sel(o, v);
 }
 
 /*
@@ -15929,7 +16351,7 @@ static int symd_click(struct view *v)
 
 	if (g_my == y + 1) {
 		if (g_mx >= v->sy_close[0] && g_mx <= v->sy_close[1]) {
-			v->sym_open = 0;
+			dlg_close(v);
 			return 1;
 		}
 		for (i = 0; i < 2; i++)
@@ -16000,6 +16422,376 @@ static void symd_open(struct view *v)
 	v->sym_open = sym_count(o->sym_exp, o->sym_exp_n) ? SYMN_EXP
 			: sym_count(o->sym_imp, o->sym_imp_n) ? SYMN_IMP
 			: SYMN_EXP;
+}
+
+/* ---- the shellcode dialog ---------------------------------------------------
+ *
+ * What "Find shellcode in variables" shows, and it FINDS NOTHING ITSELF.
+ *
+ * The heuristic ran during the scan and reported where the payload is - see
+ * bases/heur/scloader_00.c and on_debug - so this dialog reads that answer and
+ * shows the bytes it points at. That is the whole design: the test lives in one
+ * place, in the engine, where it is measured, and the menu item is a way of
+ * asking to see what it concluded rather than a second implementation of it.
+ *
+ * WHY A DIALOG AND NOT A REGION. The bytes are already visible in the hex pane
+ * as part of DATA - what is missing is knowing WHICH bytes, and that is one
+ * address and one length. A dialog is the shape of "here is the answer to the
+ * question you asked", and it closes when the reader is done with it.
+ */
+
+/* Base64, decoded, because that is the one wrapper that can be undone with no
+ * guesswork: the alphabet is fixed and the transform is reversible. Returns the
+ * bytes written, or 0 when the input is not base64 - which is most payloads,
+ * and not a failure. */
+static uint32_t b64_try(const uint8_t *in, uint32_t n, uint8_t *out,
+			uint32_t cap)
+{
+	static const char *A =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	uint32_t i, k = 0, acc = 0, bits = 0;
+
+	/*
+	 * Refused on the first byte that is not in the alphabet, rather than
+	 * skipped. A payload with a few base64-looking bytes in it is not
+	 * base64, and decoding the parts that happen to fit would produce a
+	 * blob that means nothing and looks like an answer.
+	 */
+	if (n < 8u)
+		return 0;
+	for (i = 0; i < n; i++) {
+		const char *p;
+		uint8_t c = in[i];
+
+		/*
+		 * A NUL ENDS THE INPUT, it does not fail it.
+		 *
+		 * These blobs are declared as C string literals - `char code[]
+		 * = "SDHJ..."` - so sizeof includes the terminator and the
+		 * symbol's size is one more than the text. Treating that last
+		 * byte as "not base64" refused every one of them, and the
+		 * dialog said "looks like ?" over a screen of visibly base64
+		 * ASCII.
+		 *
+		 * Only at the END, though: a NUL with data after it is not a
+		 * string and not base64, so the loop stops rather than skipping
+		 * and the tail is never decoded as if it belonged.
+		 */
+		if (!c)
+			break;
+		if (c == '=' || c == '\n' || c == '\r')
+			continue;
+		p = strchr(A, (int)c);
+		if (!p)
+			return 0;
+		acc = (acc << 6) | (uint32_t)(p - A);
+		bits += 6;
+		if (bits >= 8) {
+			bits -= 8;
+			if (k >= cap)
+				return 0;
+			out[k++] = (uint8_t)(acc >> bits);
+		}
+	}
+	return k;
+}
+
+/*
+ * What the payload's first bytes say it is.
+ *
+ * Named from the stub, not from the whole blob: every one of these is a
+ * decoder whose first instructions are fixed by the encoder that emitted it,
+ * so the front of the blob is the one part that identifies it. Measured across
+ * the samples on hand - see the table in bases/heur/scloader_00.c.
+ *
+ * "?" for anything unmeasured, which is honest: a wrong name here would be
+ * read as a decode that had happened.
+ */
+static const char *sc_kind(const uint8_t *b, uint32_t n)
+{
+	if (n >= 6 && b[0] == 0xfc && b[1] == 0x48 && b[2] == 0x83 &&
+	    b[3] == 0xe4 && b[4] == 0xf0 && b[5] == 0xe8)
+		return "msf x64 block_api (Windows, raw)";
+	if (n >= 9 && b[0] == 0xfc && b[1] == 0xe8 && b[2] == 0x82 &&
+	    b[3] == 0x00 && b[4] == 0x00 && b[5] == 0x00 && b[6] == 0x60)
+		return "msf x86 block_api (Windows, raw)";
+	if (n >= 6 && b[0] == 0x48 && b[1] == 0x31 && b[2] == 0xc9 &&
+	    b[3] == 0x48 && b[4] == 0x81 && b[5] == 0xe9)
+		return "msf x64/xor decoder stub";
+	if (n >= 4 && b[0] == 0xd9 && b[1] == 0x74 && b[2] == 0x24)
+		return "msf x86 fnstenv GetPC (shikata family)";
+	if (n >= 8 && (b[4] == 0xd9 || b[5] == 0xd9) &&
+	    (b[5] == 0x74 || b[6] == 0x74))
+		return "msf x86 fnstenv GetPC (shikata family)";
+	if (n >= 4 && b[0] == 0x48 && b[1] == 0x31 && b[2] == 0xc0)
+		return "x86-64 shellcode, no decoder in front";
+	if (n >= 2 && b[0] == 0xeb)
+		return "jmp/pop/xor decoder stub";
+	return "?";
+}
+
+/* Geometry, borrowed from the symbols dialog so the two look like one tool.
+ * Narrower, because a hex dump is a fixed width and there is nothing to gain
+ * from a box wider than it. */
+static int scd_w(void)
+{
+	int w = g_cols - 4;
+
+	return w > 82 ? 82 : w;
+}
+
+static int scd_h(void)
+{
+	int h = g_rows - 6;
+
+	return h > 26 ? 26 : h;
+}
+
+static int scd_x(void) { return (g_cols - scd_w()) / 2 + 1; }
+static int scd_y(void) { return (g_rows - scd_h()) / 2 + 1; }
+
+/* Height less two borders, the two heading lines and the decode line. */
+static int scd_rows(void)
+{
+	int r = scd_h() - 6;
+
+	return r > 0 ? r : 0;
+}
+
+/* 16 bytes to a row, like the pane, so a reader comparing the two is comparing
+ * the same rows. */
+#define SCD_PER 16u
+
+static void scd_row(struct out *o, int y)
+{
+	out_at(o, y, scd_x());
+	o->col_hint = 0;
+}
+
+static void scd_edge(struct out *o, int w)
+{
+	while ((int)o->col_hint < w - 1)
+		out_str(o, " ");
+	out_str(o, A_DIM);
+	out_glyph(o, G_V);
+	out_str(o, A_OFF);
+}
+
+/*
+ * The payload's bytes, and how many.
+ *
+ * From the object's buffer at the offset the section table maps the reported
+ * ADDRESS to - the rule reports an address because that is what survives, so
+ * the translation happens here, once, against the parse the viewer already
+ * holds. NULL when no rule reported one, or when the address is not inside any
+ * section this file has, which is a broken symbol rather than a payload.
+ */
+static const uint8_t *scd_bytes(struct view *v, uint32_t *n)
+{
+	struct object *o = cur_obj(v);
+	const struct kof_elf_info *e = o->info;
+	uint32_t i;
+
+	if (n)
+		*n = 0;
+	if (!o->payload_at || !o->payload_len || !e || !e->valid || !o->buf.p)
+		return 0;
+	for (i = 0; i < e->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
+		const struct kof_elf_sec *sc = &e->sec[i];
+		uint64_t fo;
+
+		if (sc->type != 1u || !sc->mem_addr)          /* PROGBITS */
+			continue;
+		if (o->payload_at < sc->mem_addr ||
+		    o->payload_at >= sc->mem_addr + sc->file_size)
+			continue;
+		fo = sc->file_off + (o->payload_at - sc->mem_addr);
+		if (fo >= o->buf.n || o->payload_len > o->buf.n - fo)
+			return 0;
+		if (n)
+			*n = (uint32_t)o->payload_len;
+		return o->buf.p + fo;
+	}
+	return 0;
+}
+
+static uint64_t scd_max(struct view *v)
+{
+	uint32_t n = 0;
+	uint64_t rows;
+
+	(void)scd_bytes(v, &n);
+	rows = ((uint64_t)n + SCD_PER - 1u) / SCD_PER;
+	return rows > (uint64_t)scd_rows() ? rows - (uint64_t)scd_rows() : 0;
+}
+
+static void draw_shellcode(struct out *o, struct view *v)
+{
+	int x = scd_x(), y = scd_y(), w = scd_w(), h = scd_h();
+	int rows = scd_rows(), i;
+	uint32_t n = 0, dn = 0;
+	const uint8_t *b = scd_bytes(v, &n);
+	struct object *ob = cur_obj(v);
+	static uint8_t dec[KOF_SYM_NAMELEN * 256];
+
+	if (w < 60 || h < 10 || !b)
+		return;
+	if (v->sc_at > scd_max(v))
+		v->sc_at = scd_max(v);
+
+	/* Top border with the title in it. */
+	scd_row(o, y);
+	out_str(o, A_DIM);
+	out_glyph(o, G_TL);
+	out_glyph(o, G_H);
+	out_str(o, A_OFF A_BOLD " Shellcode in variable " A_OFF A_DIM);
+	for (i = 0; i < w - 26; i++)
+		out_glyph(o, G_H);
+	out_glyph(o, G_TR);
+	out_str(o, A_OFF);
+
+	/* What it is, and the close button. */
+	scd_row(o, y + 1);
+	out_str(o, A_DIM);
+	out_glyph(o, G_V);
+	out_str(o, A_OFF " ");
+	out_fmt(o, A_S_VAL "0x%llx" A_OFF A_DIM " + " A_OFF A_S_SIZE "%u" A_OFF
+		A_DIM " bytes" A_OFF, (unsigned long long)ob->payload_at,
+		(unsigned)n);
+	while ((int)o->col_hint < w - 6)
+		out_str(o, " ");
+	v->sy_close[0] = o->col_base + (int)o->col_hint;
+	out_fmt(o, "%s[x]" A_OFF, A_WARN);
+	v->sy_close[1] = o->col_base + (int)o->col_hint - 1;
+	scd_edge(o, w);
+
+	/*
+	 * WHAT IT LOOKS LIKE, and what came out if anything did.
+	 *
+	 * Two different claims on one line, kept apart by their wording. The
+	 * stub name is recognition - the front of the blob matched a shape that
+	 * was measured - and it says nothing about the rest. The decode is the
+	 * only thing here that is a transform actually performed, and it only
+	 * ever happens for base64, which is why it is the only one named.
+	 */
+	scd_row(o, y + 2);
+	out_str(o, A_DIM);
+	out_glyph(o, G_V);
+	out_str(o, A_OFF " ");
+	dn = b64_try(b, n, dec, (uint32_t)sizeof dec);
+	if (dn)
+		out_fmt(o, A_DIM "base64, decoded to " A_OFF A_S_SIZE "%u"
+			A_OFF A_DIM " bytes: " A_OFF A_S_NAME "%s" A_OFF,
+			(unsigned)dn, sc_kind(dec, dn));
+	else
+		out_fmt(o, A_DIM "looks like " A_OFF A_S_NAME "%s" A_OFF,
+			sc_kind(b, n));
+	scd_edge(o, w);
+
+	/*
+	 * The bytes. The DECODED ones when there are any, because the reader
+	 * asked what the payload is and base64 is not it - and the line above
+	 * says which of the two is on screen, so neither can be mistaken for
+	 * the other.
+	 */
+	{
+		const uint8_t *show = dn ? dec : b;
+		uint32_t shown = dn ? dn : n;
+		struct sclip sc;
+
+		sc.o = o;
+		sc.from = 0;
+		/* No horizontal scroll here: a hex dump is a fixed width and
+		 * the box is sized to hold it, so the window is the whole row
+		 * and the clipper is used only for its RECORDING. */
+		sc.to = DLG_COLS;
+		dlg_rec_begin(v, y + 3, x + 2);
+
+		for (i = 0; i < rows; i++) {
+			uint64_t at = (v->sc_at + (uint64_t)i) * SCD_PER;
+			uint32_t k;
+
+			scd_row(o, y + 3 + i);
+			out_str(o, A_DIM);
+			out_glyph(o, G_V);
+			out_str(o, A_OFF " ");
+			sc.rec = dlg_rec_buf(v);
+			sc.rec_n = 0;
+			sc.vcol = 0;
+			if (at >= shown) {
+				scd_edge(o, w);
+				if (sc.rec)
+					dlg_rec_row(v, &sc);
+				continue;
+			}
+			sclip_fmt(&sc, A_LOC, "%04llx ",
+				  (unsigned long long)at);
+			for (k = 0; k < SCD_PER; k++) {
+				if (at + k >= shown) {
+					sclip_puts(&sc, A_OFF, "   ");
+					continue;
+				}
+				sclip_fmt(&sc, byte_colour(show[at + k]),
+					  "%02X ", show[at + k]);
+			}
+			sclip_puts(&sc, A_OFF, " ");
+			for (k = 0; k < SCD_PER && at + k < shown; k++) {
+				uint8_t c = show[at + k];
+				char t[2];
+
+				t[0] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
+				t[1] = 0;
+				sclip_puts(&sc, byte_colour(c), t);
+			}
+			scd_edge(o, w);
+			if (sc.rec)
+				dlg_rec_row(v, &sc);
+		}
+	}
+
+	scd_row(o, y + h - 1);
+	out_str(o, A_DIM);
+	out_glyph(o, G_BL);
+	for (i = 0; i < w - 2; i++)
+		out_glyph(o, G_H);
+	out_glyph(o, G_BR);
+	out_str(o, A_OFF);
+
+	{
+		uint64_t total = ((uint64_t)(dn ? dn : n) + SCD_PER - 1u)
+				 / SCD_PER;
+
+		if (total > (uint64_t)rows)
+			scrollbar(o, x + w - 1, y + 3, y + 3 + rows - 1,
+				  v->sc_at, total, (uint64_t)rows);
+	}
+	dlg_paint_sel(o, v);
+}
+
+/* Every click while it is up is the dialog's, for the reason symd_click
+ * gives: it is a modal, and a click on the tree behind it would change the
+ * object the bytes belong to. */
+static int scd_click(struct view *v)
+{
+	if (g_my == scd_y() + 1 &&
+	    g_mx >= v->sy_close[0] && g_mx <= v->sy_close[1])
+		dlg_close(v);
+	return 1;
+}
+
+static void scd_scroll(struct view *v, int64_t d)
+{
+	uint64_t max = scd_max(v);
+
+	if (d < 0) {
+		uint64_t up = (uint64_t)(-d);
+
+		v->sc_at = v->sc_at > up ? v->sc_at - up : 0;
+	} else {
+		v->sc_at += (uint64_t)d;
+	}
+	if (v->sc_at > max)
+		v->sc_at = max;
 }
 
 static int goto_top(void)
@@ -16467,6 +17259,31 @@ static void click(struct view *v, int rclick)
 
 	/* Before every other hit test: the box is opaque, and symd_click
 	 * swallows anything that lands inside it. */
+	/*
+	 * A DIALOG'S TEXT SELECTION starts here, before the box's own hit test.
+	 *
+	 * A press on a row of text is the start of a drag; the close button and
+	 * the tabs are tested by the box afterwards, and they are not on a text
+	 * row, so the two cannot both claim a click. A press anywhere else
+	 * inside the box clears whatever was selected, which is what every
+	 * other text selection does and what makes a stray click a way OUT of a
+	 * selection rather than something that leaves it stuck on screen.
+	 */
+	if (v->sc_open || v->sym_open) {
+		int r, c;
+
+		if (dlg_at(v, g_my, g_mx, &r, &c)) {
+			v->dlg_ar = v->dlg_br = r;
+			v->dlg_ac = v->dlg_bc = c;
+			v->dlg_have = 1;
+			v->dlg_drag = 1;
+			return;
+		}
+		v->dlg_have = 0;
+		v->dlg_drag = 0;
+	}
+	if (v->sc_open && scd_click(v))
+		return;
 	if (v->sym_open && symd_click(v))
 		return;
 	if (v->goto_open && goto_click(v))
@@ -17483,6 +18300,18 @@ static int handle(struct view *v, int k)
 	if (v->bar_open >= 0 && !(k >= K_CLICK && k <= K_RELEASE) &&
 	    bar_key(v, k))
 		return 1;
+	/*
+	 * Ctrl+C IN A DIALOG COPIES THE DIALOG, tested before every other owner
+	 * of that key.
+	 *
+	 * The box is over everything else, so while one is up it is the only
+	 * thing a reader can be selecting in - and the disassembly panel's own
+	 * Ctrl+C below would otherwise answer for a selection nobody can see.
+	 */
+	if (k == 0x03 && (v->sc_open || v->sym_open) && v->dlg_have) {
+		dlg_copy(v);
+		return 1;
+	}
 	if (k == 0x03 && v->dis_open && (v->dis_have || dis_hex_sel(v)) &&
 	    !v->prop_open && !v->find_open && !v->edit) {
 		dis_copy(v);
@@ -17502,12 +18331,27 @@ static int handle(struct view *v, int k)
 	 * Tab switches halves, because two tabs a click apart want a key too,
 	 * and it is the key every other tabbed thing uses.
 	 */
+	if (v->sc_open && !(k >= K_CLICK && k <= K_RELEASE)) {
+		int pg = scd_rows() > 1 ? scd_rows() - 1 : 1;
+
+		switch (k) {
+		case 27: case 'q': case 'Q': dlg_close(v);           break;
+		case K_UP:    scd_scroll(v, -1);                    break;
+		case K_DOWN:  scd_scroll(v, 1);                     break;
+		case K_PGUP:  scd_scroll(v, -(int64_t)pg);          break;
+		case K_PGDN:  scd_scroll(v, pg);                    break;
+		case K_HOME:  v->sc_at = 0;                         break;
+		case K_END:   v->sc_at = scd_max(v);                break;
+		default:      break;
+		}
+		return 1;
+	}
 	if (v->sym_open && !(k >= K_CLICK && k <= K_RELEASE)) {
 		int pg = symd_rows() > 1 ? symd_rows() - 1 : 1;
 
 		switch (k) {
 		case 27: case 'q': case 'Q':
-			v->sym_open = 0;
+			dlg_close(v);
 			break;
 		case '\t':
 			v->sym_open = v->sym_open == SYMN_IMP ? SYMN_EXP
@@ -18108,6 +18952,22 @@ static int handle(struct view *v, int k)
 	case K_DRAG: {
 		uint64_t at;
 
+		/*
+		 * A DIALOG'S TEXT SELECTION FIRST: the box is a modal, so a drag
+		 * while one is up is the box's, whatever else on screen would
+		 * otherwise have taken it. dlg_at clamps to the recorded text, so
+		 * dragging past the last row extends to it rather than stopping
+		 * the moment the pointer leaves the box.
+		 */
+		if (v->dlg_drag) {
+			int r, c;
+
+			if (dlg_at(v, g_my, g_mx, &r, &c)) {
+				v->dlg_br = r;
+				v->dlg_bc = c;
+			}
+			break;
+		}
 		if (v->bar_drag) {
 			bar_to(v, v->bar_drag);
 			break;
@@ -18166,6 +19026,9 @@ static int handle(struct view *v, int k)
 		break;
 	}
 	case K_RELEASE:
+		/* The drag is over; what was picked stays picked, so
+		 * Ctrl+C has something to copy after the button comes up. */
+		v->dlg_drag = 0;
 		v->sizing = 0;
 		v->bar_drag = 0;
 		/*
@@ -18241,6 +19104,10 @@ static int handle(struct view *v, int k)
 		 * pointer happened to be on the left would move something they
 		 * cannot see.
 		 */
+		if (v->sc_open) {
+			scd_scroll(v, down ? 3 : -3);
+			break;
+		}
 		if (v->sym_open) {
 			/* Shift (or ctrl) turns the wheel sideways, the same
 			 * binding the tree, the draft panel and the marker

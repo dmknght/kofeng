@@ -925,6 +925,20 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			 uint32_t present, const char **predict)
 {
 	uint32_t want = 0, i;
+	/*
+	 * ZERO MEANS UNSTATED, and unstated is level 1.
+	 *
+	 * Not a default written into the struct, because there is no
+	 * initialiser to write it in: every caller declares a
+	 * kof_scan_option on the stack and clears it, so a field whose
+	 * useful value is 1 arrives as 0. Reading 0 as "the level every rule
+	 * ran at before there was a choice" is what keeps kofexamine, the
+	 * unit tests and any embedder working unchanged - the alternative
+	 * silently disabled every heuristic for all of them.
+	 *
+	 * Level 0 is not spelled here: it is opt->heur_off, tested above.
+	 */
+	uint32_t lvl = opt->heur_level ? opt->heur_level : 1u;
 
 	if (predict)
 		*predict = NULL;
@@ -934,6 +948,17 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		const struct kof_module *m = &sc->eng->heur[i];
 
 		if (m->heur_phase != phase)
+			continue;
+		/*
+		 * A rule gated above this scan's level is not ENTERED, not
+		 * merely ignored afterwards. That is the whole point of the
+		 * declaration: the cost it was gated for - and for a rule that
+		 * walks a symbol table, that cost is real - must not be paid by
+		 * a caller who did not ask for it. Beside the phase test
+		 * because they are the same kind of thing, a property of the
+		 * rule that the scan compares against without running anything.
+		 */
+		if (m->heur_level > lvl)
 			continue;
 		if (!prefilter(m, ctx, present, &sc->st))
 			continue;

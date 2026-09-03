@@ -64,6 +64,7 @@ struct kof_pw_mod {
 	/* A heuristic rule's phase and its declared engine request; see
 	 * kofmod/heur.h. Zero on every other kind. */
 	uint32_t heur_phase;
+	uint32_t heur_level;
 	uint32_t heur_want;
 	/* The family this rule predicts, or NULL. See KOF_HEUR_PREDICT. */
 	const char *heur_predict;

@@ -577,6 +577,10 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		m->maltype    = pm[i].maltype;
 		m->unp_kind   = pm[i].unp_kind;
 		m->heur_phase = pm[i].heur_phase;
+		/* Zero means unstated - a pack written before the field
+		 * existed - and unstated is level 1, which is what every rule
+		 * ran at before there was a choice. */
+		m->heur_level = pm[i].heur_level ? pm[i].heur_level : 1u;
 		m->heur_want  = pm[i].heur_want;
 		m->heur_predict_off = pm[i].heur_predict_off;
 		m->kind       = (uint8_t)h->kind;

@@ -348,6 +348,17 @@ enum kof_emu_use {
 	KOF_EMU_ONLY  = 2   /* interpret instead of the packer modules, ungated */
 };
 
+/*
+ * The highest heuristic level this build knows.
+ *
+ * For a caller that means "everything" rather than a particular number -
+ * kofexamine and kofviewer both do, because they look at one object somebody
+ * is sitting in front of. Named so that adding a level moves this and not
+ * every caller, which is what the comment in kofexamine has always said it
+ * wanted and could not have until levels existed.
+ */
+#define KOF_HEUR_LEVEL_MAX 2u
+
 struct kof_scan_option {
 	int      recurse_dirs;     /* descend into directories */
 	uint32_t max_depth;        /* 0 -> a built-in ceiling applies */
@@ -391,6 +402,22 @@ struct kof_scan_option {
 	 * would be claiming more than it measured.
 	 */
 	uint32_t heur_off;
+
+	/*
+	 * WHICH --heur LEVEL THIS SCAN IS, so a rule can be gated to one.
+	 *
+	 * ZERO MEANS UNSTATED and is read as 1, which is what every rule ran at
+	 * before there was a choice. That is deliberate rather than tidy: there
+	 * is no initialiser for this struct - callers declare it on the stack
+	 * and clear it - so a field whose useful default is 1 arrives as 0, and
+	 * treating 0 as "off" would silently disable every heuristic for every
+	 * caller that has not been updated.
+	 *
+	 * Level 0 is not spelled here either; it is heur_off above. A rule
+	 * declaring KOF_HEUR_LEVEL higher than this is not entered. See
+	 * kofmod/heur.h.
+	 */
+	uint32_t heur_level;
 
 	/*
 	 * WHEN THE INTERPRETER RUNS, and zero is the useful default - like

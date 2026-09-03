@@ -357,6 +357,28 @@ fi
 heur_phase=0
 heur_want=0
 heur_name=""
+# The lowest --heur level the rule runs at. 0 here means UNSTATED, which the
+# engine reads as level 1 - so a rule that declares nothing behaves as every
+# rule did before the declaration existed.
+heur_level=0
+nlevel=$(grep -c 'KOF_HEUR_LEVEL(' "$src" || true)
+if [ "$nlevel" -gt 1 ]; then
+	echo "FAIL: $nlevel KOF_HEUR_LEVEL declarations; a rule has one level" >&2
+	exit 1
+fi
+if [ "$nlevel" -eq 1 ]; then
+	heur_level=$(sed -n 's/.*KOF_HEUR_LEVEL(\([^)]*\)).*/\1/p' "$src" | tr -d ' ')
+	case "$heur_level" in
+	1|2) ;;
+	0)
+		echo "FAIL: KOF_HEUR_LEVEL(0) - level 0 gathers nothing, so no" >&2
+		echo "      rule can opt into it. Use 1 (the default) or 2." >&2
+		exit 1 ;;
+	*)
+		echo "FAIL: KOF_HEUR_LEVEL($heur_level) is not a level; use 1 or 2" >&2
+		exit 1 ;;
+	esac
+fi
 nphase=$(grep -c 'KOF_HEUR_PHASE(' "$src" || true)
 if [ "$nphase" -gt 1 ]; then
 	echo "FAIL: $nphase KOF_HEUR_PHASE declarations; a rule runs at one point" >&2
@@ -893,6 +915,7 @@ cp "$raw" "$blob"
 	printf 'unp_kind=%s\n' "$unp_kind"
 	printf 'heur_phase=%s\n' "$heur_phase"
 	printf 'heur_want=%s\n'  "$heur_want"
+	printf 'heur_level=%s\n' "$heur_level"
 	# A rule's predicted family, if it declared one. Empty on every other kind.
 	printf 'heur_predict=%s\n' "$heur_predict"
 	# What KOF_TARGET_NAME declared - empty/0 for an unpack-kind module, where

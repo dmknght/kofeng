@@ -239,6 +239,7 @@ static void verdict_run(kof_engine *eng, const char *path)
 	 * Named rather than numbered so this keeps meaning "the most" as levels
 	 * are added.
 	 */
+	opt.heur_level = KOF_HEUR_LEVEL_MAX;
 	sc = kof_scanner_new(eng);
 	if (!sc)
 		return;
@@ -1933,6 +1934,7 @@ static int unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
 	 * Named rather than numbered so this keeps meaning "the most" as levels
 	 * are added.
 	 */
+	opt.heur_level = KOF_HEUR_LEVEL_MAX;
 	u.dump_dir = dump_dir;
 	u.touch = markers ? eng : NULL;
 	g_debug = verbose;

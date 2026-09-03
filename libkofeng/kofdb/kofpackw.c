@@ -355,6 +355,7 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 		o->maltype = m->maltype;
 		o->unp_kind = m->unp_kind;
 		o->heur_phase = m->heur_phase;
+		o->heur_level = m->heur_level;
 		o->heur_want  = m->heur_want;
 		/* Interned like the family and the source path: the text lives
 		 * once in the pool and the record carries an offset. */

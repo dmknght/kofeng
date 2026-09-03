@@ -566,9 +566,12 @@ static int heur_arg(const char *v, struct kof_scan_option *opt)
 	 * about a file nothing recognised.
 	 */
 	switch (n) {
-	case 0: opt->heur_off = 1; opt->emu_use = KOF_EMU_NEVER; return 1;
-	case 1: opt->heur_off = 0; opt->emu_use = KOF_EMU_NEVER; return 1;
-	case 2: opt->heur_off = 0; opt->emu_use = KOF_EMU_AUTO;  return 1;
+	case 0: opt->heur_off = 1; opt->heur_level = 0;
+		opt->emu_use = KOF_EMU_NEVER; return 1;
+	case 1: opt->heur_off = 0; opt->heur_level = 1;
+		opt->emu_use = KOF_EMU_NEVER; return 1;
+	case 2: opt->heur_off = 0; opt->heur_level = 2;
+		opt->emu_use = KOF_EMU_AUTO;  return 1;
 	default: return 0;
 	}
 }

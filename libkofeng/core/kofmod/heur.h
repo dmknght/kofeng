@@ -85,6 +85,26 @@ enum kof_eng_want {
  * for why a declaration the compiler cannot see is the right shape here.
  */
 #define KOF_HEUR_PHASE(p)
+/*
+ * THE LOWEST --heur LEVEL AT WHICH THIS RULE RUNS. Default 1.
+ *
+ *     KOF_HEUR_LEVEL(2);
+ *
+ * A rule declares this when its evidence is worth more work than a default
+ * scan should spend, or when it is new enough that it should not reach a
+ * caller who did not ask for the extra scrutiny. Level 1 is the default and
+ * needs no declaration; level 0 turns every rule off and no rule can opt into
+ * it, because a level that gathers nothing has nothing to gather.
+ *
+ * DECLARED, like the phase and the want-mask, and for the same reasons - it is
+ * greppable, it is fixed at build time, and a hostile object cannot steer it.
+ * See the note above on KOF_HEUR_WANT.
+ *
+ * The engine skips a rule whose level is above the scan's. That is a prefilter,
+ * not a check inside the rule: a rule that must not run at level 1 must not be
+ * ENTERED at level 1, or the cost it was gated for is paid anyway.
+ */
+#define KOF_HEUR_LEVEL(n)
 #define KOF_HEUR_WANT(w)
 
 /*

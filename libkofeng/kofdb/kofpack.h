@@ -141,8 +141,12 @@
  * which decoder to try first. Read as zero from a v7 pack it would mean "no
  * prediction", which is not wrong so much as silently less useful - and a pack
  * is a build artefact, so refusing costs a rebuild and nothing else.
+ * 9: struct kof_pack_mod grew heur_level. A rule may be gated to a --heur
+ *    level, so evidence that costs more than a default scan should spend can
+ *    be asked for rather than always paid. Zero means unstated, which reads as
+ *    level 1 - so a v8 pack runs exactly as it did.
  */
-#define KOF_PACK_VERSION 8u
+#define KOF_PACK_VERSION 9u
 
 /*
  * The machine the code in this pack was built for. Not an architecture the pack
@@ -486,6 +490,14 @@ struct kof_pack_mod {
 	uint32_t heur_want;
 
 	/*
+	 * The lowest --heur level at which the rule runs; 0 means unstated and
+	 * is read as 1, so a pack written before this field existed behaves as
+	 * it always did. A PREFILTER field like heur_phase - the scan knows its
+	 * own level and must not enter a rule that asked for more.
+	 */
+	uint32_t heur_level;
+
+	/*
 	 * The family a rule PREDICTS, into KOF_SEC_NAME_POOL like family_off, or
 	 * zero when it predicts nothing.
 	 *
@@ -660,7 +672,9 @@ struct kof_pack_idx {
  * entered at the wrong offset. These fail the build instead.
  */
 _Static_assert(sizeof(struct kof_pack_sec)  == 16,  "pack section entry grew padding");
-_Static_assert(sizeof(struct kof_pack_mod)  == 60,  "pack module record grew padding");
+/* 60 through v8; 64 from v9, which added heur_level. The number moves only
+ * with KOF_PACK_VERSION - if it moves without one, the edit is the bug. */
+_Static_assert(sizeof(struct kof_pack_mod)  == 64,  "pack module record grew padding");
 _Static_assert(sizeof(struct kof_pack_str)  == 12,  "pack string descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_name) == 8,   "pack name descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_idx)  == 8,   "pack index slot grew padding");

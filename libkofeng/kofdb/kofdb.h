@@ -135,6 +135,7 @@ struct kof_module {
 	/* For a heuristic rule: which phase it runs in, and what it asks the
 	 * engine to do with an object it fires on. See kofmod/heur.h. */
 	uint32_t heur_phase;
+	uint32_t heur_level;
 	uint32_t heur_want;
 
 	/* The family a rule predicts, into the pack's name pool, or 0. Read with

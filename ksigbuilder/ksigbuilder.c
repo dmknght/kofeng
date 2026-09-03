@@ -1249,6 +1249,7 @@ static void scan_line(char *at, size_t line_len, int lineno)
 	 * the dispatch below because KOF_TARGET_FORMAT is in the macros[] table
 	 * and would otherwise be consumed by it. */
 	if (strstr(at, "KOF_HEUR_PHASE(") || strstr(at, "KOF_HEUR_WANT(") ||
+	    strstr(at, "KOF_HEUR_LEVEL(") ||
 	    strstr(at, "KOF_HEUR_NAME(") || strstr(at, "KOF_TARGET_FORMAT("))
 		heur_sig_add(at);
 
@@ -2011,7 +2012,7 @@ struct artefact {
 
 	uint32_t kind;
 	uint32_t target_mask, scan_mask, arch_mask, subtype_mask, unp_kind;
-	uint32_t heur_phase, heur_want;
+	uint32_t heur_phase, heur_want, heur_level;
 	uint64_t size_min;
 
 	/* What KOF_TARGET_NAME declared - empty family / maltype 0 for an
@@ -2172,6 +2173,8 @@ static int meta_load(struct artefact *a)
 			a->heur_phase = (uint32_t)strtoul(line + 11, 0, 10);
 		} else if (strncmp(line, "heur_want=", 10) == 0) {
 			a->heur_want = (uint32_t)strtoul(line + 10, 0, 10);
+		} else if (strncmp(line, "heur_level=", 11) == 0) {
+			a->heur_level = (uint32_t)strtoul(line + 11, 0, 10);
 		} else if (strncmp(line, "blob_len=", 9) == 0) {
 			blob_len = strtoull(line + 9, 0, 10);
 		} else if (strncmp(line, "kind=", 5) == 0) {
@@ -3066,6 +3069,7 @@ int main(int argc, char **argv)
 			pm[a].unp_kind     = s->unp_kind;
 			pm[a].heur_phase   = s->heur_phase;
 			pm[a].heur_want    = s->heur_want;
+			pm[a].heur_level   = s->heur_level;
 			pm[a].src          = s->srcpath;
 			pm[a].size_min    = s->size_min;
 			pm[a].str         = s->str;
