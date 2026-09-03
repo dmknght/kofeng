@@ -59,6 +59,7 @@
 #include "goto_parse.h"
 #include <kofcore.h>
 #include <kofmod/kofsig.h>
+#include <kofmod/kofsym.h>
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 
@@ -367,6 +368,82 @@ static void out_at(struct out *o, int row, int col)
 #define A_B_WS    "\033[36m"      /* space, tab, newline */
 #define A_B_CTRL  "\033[35m"      /* the rest of ASCII */
 #define A_B_HIGH  "\033[33m"      /* >= 0x80 */
+
+/*
+ * THE SYMBOL TABLE'S COLOURS, WHICH ARE ABOUT FIELDS AND NOT ABOUT BYTES.
+ *
+ * The byte colours above answer "what kind of byte is this" - the only question
+ * worth asking of an extent of a file, where nothing says where one value ends
+ * and the next begins. A symbol record is the opposite: every field is at a
+ * fixed offset and the reader already knows the boundaries, so colouring by
+ * byte value would spend the whole palette saying something the layout says
+ * better, and say nothing about which number is a size and which is an address.
+ * So these key on the FIELD.
+ *
+ * Value and size borrow A_LOC and A_SIZE deliberately rather than picking new
+ * hues: an address is cyan in the hex gutter, in the tree and in a finding's
+ * location, and a size is green everywhere the tool prints one. A reader who
+ * has learnt those two here has learnt them for the rest of the screen.
+ */
+/*
+ * ONE HUE PER FIELD, AND NO HUE USED TWICE.
+ *
+ * This is the whole rule, and it was broken twice. type, vis and flags were
+ * 95, 35 and 35 - two magentas and a bright magenta - so the four attribute
+ * bytes at the front of every record came out as one red-purple smear with no
+ * boundary visible in it; and the dialog's record number shared 93 with bind's
+ * 33, two yellows. Fields the reader is meant to tell apart must not be told
+ * apart by brightness alone.
+ *
+ * They are assigned so that ADJACENT fields are far apart in hue, because
+ * adjacency is what makes two colours hard to separate. In the block the order
+ * is type, bind, vis, flags, shndx, value, size, name - bytes 0,1,2,3,4,8,16,24
+ * - and no two neighbours below are from the same family.
+ *
+ * Value and size are fixed points, not choices: an address is cyan in the hex
+ * gutter, in the tree and in a finding's location, and a size is green
+ * everywhere the tool prints one. Everything else is arranged around them.
+ */
+#define A_S_HDR   "\033[93m"      /* the block's 16-byte header, once at the top */
+/*
+ * The record number, and DIM on purpose. It is the one column that is not in
+ * the record at all - the viewer counts it - so it reads as a gutter rather
+ * than as a field, which is also what keeps it clear of every hue below.
+ */
+#define A_S_IDX   "\033[90m"
+#define A_S_TYPE  "\033[95m"      /* STT_*  bright magenta */
+#define A_S_BIND  "\033[33m"      /* STB_*  yellow */
+#define A_S_VIS   "\033[94m"      /* STV_*  bright blue */
+#define A_S_FLAG  "\033[91m"      /* the derived flags, bright red */
+/*
+ * The section index - a REAL PURPLE, and the only 256-colour code in this file.
+ *
+ * Every other colour here is one of the sixteen, and that is what ran out. The
+ * eight families are all spoken for - red flags, green size, yellow bind,
+ * bright-yellow header, blue vis, magenta type, cyan value, white name, grey
+ * rec - and eleven things need telling apart, so some family must be used
+ * twice. That is fine only where the two are never adjacent in EITHER view,
+ * and this field is the one that cannot satisfy it: it has DIFFERENT NEIGHBOURS
+ * in the two, flags and value in the block, size and name in the dialog, so it
+ * has to be clear of four colours rather than two. Light grey read as the name
+ * beside it; bright cyan touches value; bright green touches size; blue sits
+ * two bytes from vis; and plain magenta - which is what it was - is the SAME
+ * FAMILY as type's bright magenta, which is why the two read as one colour
+ * however far apart they sit.
+ *
+ * So: #af87ff, a hue no other field owns. Cyan stays "an address" and green
+ * stays "a size" throughout the tool, which is the reason for reaching outside
+ * the sixteen rather than taking one of those two meanings for a third job.
+ *
+ * A terminal without 256-colour support ignores the sequence and draws the
+ * column in the default foreground - it loses a distinction, it does not break
+ * the layout.
+ */
+#define A_S_SHN   "\033[38;5;141m"
+#define A_S_VAL   A_LOC           /* st_value - an address, like every other */
+#define A_S_SIZE  A_SIZE          /* st_size  - a size, like every other */
+#define A_S_NAME  "\033[97m"      /* the name */
+#define A_S_HEAD  "\033[4;37m"    /* the column titles */
 
 static const char *byte_colour(uint8_t c)
 {
@@ -1244,6 +1321,19 @@ struct object {
 	uint32_t          broken;
 	struct kof_touch *touch;
 	uint32_t          n_touch;
+
+	/*
+	 * The object's symbol records, in the KSYM layout kofsym.h fixes.
+	 *
+	 * Built ONCE, when the object is parsed, and right-sized: the cap is
+	 * 4096 records and a scratch of that size for each of MAX_OBJ objects
+	 * would be thirty megabytes held to show a table nobody may open, while
+	 * the real counts are tens to a few thousand. NULL and zero for a file
+	 * with no symbols and for every non-ELF - which is a normal answer, not
+	 * a failure, so nothing downstream treats it as one.
+	 */
+	uint8_t          *sym_imp, *sym_exp;
+	uint32_t          sym_imp_n, sym_exp_n;
 };
 
 /*
@@ -1254,11 +1344,25 @@ struct object {
  * selecting one means. `depth` is what makes it a tree on screen - a region is
  * always one level inside the object that has it.
  */
+/* Which of the two symbol blocks a tree row names. Not a bool any more: there
+ * are two, they are a partition, and a row has to say which half it is. */
+#define SYMN_IMP 1u
+#define SYMN_EXP 2u
+
 struct node {
 	char     label[48];
 	uint32_t depth;
 	uint32_t obj;               /* which object this row belongs to */
 	uint32_t mask;              /* the region, or 0 when the row IS the object */
+	/*
+	 * The symbol row is not a region and cannot be spelled as one: a region
+	 * is an extent of the FILE, and these records are built rather than
+	 * pointed at. So it gets a flag of its own instead of a reserved mask
+	 * value - a sentinel mask would have to be excluded by hand everywhere a
+	 * mask is resolved, and every place that forgot would resolve it as a
+	 * real region and show the wrong bytes.
+	 */
+	uint8_t  sym;               /* 0 none, or SYMN_IMP / SYMN_EXP */
 	uint64_t bytes;
 
 	/*
@@ -1805,6 +1909,21 @@ struct view {
 	 * region offsets while every report and every finding names file ones.
 	 */
 	int         goto_open;
+	/*
+	 * THE SYMBOLS DIALOG: which half it is showing, and how far down.
+	 *
+	 * Zero when closed, otherwise SYMN_IMP or SYMN_EXP - one field rather
+	 * than an open flag beside a mode, because those two can disagree and
+	 * "open, showing neither" is a state that has to be drawn as something.
+	 *
+	 * The scroll is its own, not the pane's: the dialog is a table of
+	 * records and the pane behind it is a table of bytes, and sharing one
+	 * offset made opening the dialog jump the pane.
+	 */
+	uint8_t     sym_open;
+	uint64_t    sym_at;
+	int         sy_close[2];        /* the close button */
+	int         sy_tab[2][2];       /* [imports|exports], each a box */
 	int         goto_file;      /* 1 file offset, 0 offset in this region */
 	char        gotobuf[20];
 	int         find_hex;       /* the text is hex digits, not bytes */
@@ -2120,6 +2239,271 @@ static void objects_collect(struct view *v, kof_engine *eng)
  * than inside it: the callback runs while the engine holds the object, and
  * driving the matcher over the same engine from in there is a re-entry nobody
  * has designed for. */
+/* ---- the symbol table, as records ------------------------------------------
+ *
+ * The KSYM block kofsym.h defines, read back for the screen. The viewer does
+ * NOT re-walk the symbol table to draw it: the engine builds the block, this
+ * file only lays the fields out, so the table a reader sees and the bytes a
+ * signature matches are the same bytes. A second walk here would be a second
+ * chance to disagree with the first.
+ */
+
+/*
+ * Every field is at a constant offset, so these are the whole of the reader.
+ *
+ * They take a BLOCK rather than an object because there are two of them now -
+ * imports and exports - and a reader keyed on the object would have to be told
+ * which, in every caller, with nothing to stop it being told wrong.
+ */
+static uint32_t sym_count(const uint8_t *b, uint32_t n)
+{
+	if (!b || n < KOF_SYM_HDRLEN)
+		return 0;
+	return (uint32_t)b[KOF_SYM_H_COUNT] |
+	       ((uint32_t)b[KOF_SYM_H_COUNT + 1] << 8) |
+	       ((uint32_t)b[KOF_SYM_H_COUNT + 2] << 16) |
+	       ((uint32_t)b[KOF_SYM_H_COUNT + 3] << 24);
+}
+
+static void sym_put_count(uint8_t *b, uint32_t v)
+{
+	b[KOF_SYM_H_COUNT + 0] = (uint8_t)v;
+	b[KOF_SYM_H_COUNT + 1] = (uint8_t)(v >> 8);
+	b[KOF_SYM_H_COUNT + 2] = (uint8_t)(v >> 16);
+	b[KOF_SYM_H_COUNT + 3] = (uint8_t)(v >> 24);
+}
+
+static const uint8_t *sym_rec(const uint8_t *b, uint32_t n, uint32_t i)
+{
+	uint64_t at = (uint64_t)KOF_SYM_HDRLEN + (uint64_t)i * KOF_SYM_RECLEN;
+
+	if (i >= sym_count(b, n) || at + KOF_SYM_RECLEN > n)
+		return 0;
+	return b + at;
+}
+
+static uint64_t sym_u64(const uint8_t *r, uint32_t at)
+{
+	uint64_t v = 0;
+	int k;
+
+	for (k = 7; k >= 0; k--)
+		v = (v << 8) | (uint64_t)r[at + (uint32_t)k];
+	return v;
+}
+
+/* ELF's own names for ELF's own numbering. Spelled here rather than shared with
+ * kofexamine because the two print different widths and a shared table would
+ * have to be padded for the wider one. */
+static const char *sym_type_str(uint8_t t)
+{
+	switch (t) {
+	case 0:  return "NOTYPE";
+	case 1:  return "OBJECT";
+	case 2:  return "FUNC";
+	case 3:  return "SECTION";
+	case 4:  return "FILE";
+	case 5:  return "COMMON";
+	case 6:  return "TLS";
+	case 10: return "GNU_IFUNC";
+	default: return "?";
+	}
+}
+
+static const char *sym_bind_str(uint8_t b)
+{
+	switch (b) {
+	case 0:  return "LOCAL";
+	case 1:  return "GLOBAL";
+	case 2:  return "WEAK";
+	case 10: return "GNU_UNIQ";
+	default: return "?";
+	}
+}
+
+static const char *sym_vis_str(uint8_t x)
+{
+	switch (x) {
+	case 0:  return "DEFAULT";
+	case 1:  return "INTERNAL";
+	case 2:  return "HIDDEN";
+	case 3:  return "PROTECTED";
+	default: return "?";
+	}
+}
+
+static const char *sym_origin_str(const uint8_t *b, uint32_t n)
+{
+	if (!b || n < KOF_SYM_HDRLEN)
+		return "none";
+	switch (b[KOF_SYM_H_ORIGIN]) {
+	case KOF_SYM_ORIGIN_SYMTAB: return ".symtab";
+	case KOF_SYM_ORIGIN_DYNSYM: return ".dynsym";
+	default:                    return "none";
+	}
+}
+
+/*
+ * WHICH FIELD A BYTE OF THE BLOCK BELONGS TO, as a colour.
+ *
+ * This replaces byte_colour for the two symbol rows, and the reason is that
+ * byte_colour answers the wrong question here. It asks "what KIND of byte is
+ * this" - the only question worth asking of an extent of a file, where nothing
+ * marks where one value ends and the next begins. In a KSYM block every field
+ * is at a known offset, so that question is already answered, and asking it
+ * anyway produced a screen of magenta: A_B_CTRL fires on everything under 0x20,
+ * which is every type, bind, vis, flags and shndx byte in the block, plus every
+ * small value and size. The palette was spending itself saying "control byte"
+ * about two thirds of the block and saying nothing about the structure.
+ *
+ * The bytes are still BYTES - nothing here decodes them, which is the whole
+ * point of these two rows - but the colour now says which field each one is in,
+ * so a record's boundaries and its fields can be read off the hex directly.
+ * A record is 64 bytes and the pane draws 8 or 16 to a row, so records always
+ * start on a row boundary and the bands line up down the pane.
+ *
+ * The zeros stay visible rather than being dimmed away: over half the block is
+ * zero by construction - a 40 byte name field holds a 16 byte name - and a zero
+ * in the value field is a fact worth seeing, not padding to be hidden.
+ */
+static const char *sym_byte_colour(uint64_t off)
+{
+	uint64_t r;
+
+	if (off < KOF_SYM_HDRLEN)
+		return A_S_HDR;
+	r = (off - KOF_SYM_HDRLEN) % KOF_SYM_RECLEN;
+	if (r == KOF_SYM_R_TYPE)
+		return A_S_TYPE;
+	if (r == KOF_SYM_R_BIND)
+		return A_S_BIND;
+	if (r == KOF_SYM_R_VIS)
+		return A_S_VIS;
+	if (r == KOF_SYM_R_FLAGS)
+		return A_S_FLAG;
+	if (r < KOF_SYM_R_VALUE)        /* shndx, and the two reserved bytes */
+		return A_S_SHN;
+	if (r < KOF_SYM_R_SIZE)
+		return A_S_VAL;
+	if (r < KOF_SYM_R_NAME)
+		return A_S_SIZE;
+	return A_S_NAME;
+}
+
+/* Is the row the cursor is on a symbol row rather than a region. */
+static int sym_view(const struct view *v)
+{
+	return v->sel_node < v->n_node && v->node[v->sel_node].sym != 0;
+}
+
+/*
+ * The block the selected row names, and its length.
+ *
+ * This is what makes the two rows show BYTES. A symbol row is not an extent of
+ * the file, so the pane cannot read the object's buffer for it - but the block
+ * is a run of bytes like any other, so once the pane is pointed at it every
+ * column it draws is the column it always drew. The alternative was a second
+ * pane that happened to look like a hex dump, and two hex panes drift.
+ */
+static const uint8_t *sym_block(const struct view *v, uint64_t *n)
+{
+	const struct object *o = &v->obj[v->node[v->sel_node].obj];
+	uint8_t which = v->node[v->sel_node].sym;
+
+	if (which == SYMN_IMP) {
+		if (n)
+			*n = o->sym_imp_n;
+		return o->sym_imp;
+	}
+	if (n)
+		*n = o->sym_exp_n;
+	return o->sym_exp;
+}
+
+/*
+ * Build the two blocks for one object.
+ *
+ * IMPORTS AND EXPORTS ARE A PARTITION, not two filters that might both miss a
+ * symbol. Every record the engine produced lands in exactly one of them:
+ * undefined is an import, because an undefined symbol is precisely one this
+ * object needs somebody else to supply, and everything else is defined and goes
+ * to exports. That includes LOCAL symbols, which a linker would not export -
+ * dropping them would lose the FILE and OBJECT records that say what the object
+ * was built from, which is the half a reader is usually here for.
+ *
+ * Split HERE rather than in the engine, and from the engine's own block rather
+ * than by walking the symbol table a second time: the record layout is fixed
+ * and public, so the split is a copy, and a second walk would be a second
+ * chance to disagree with the first about what a symbol is.
+ *
+ * The scratch is static and reused: it is a quarter megabyte, one object is
+ * parsed at a time, and putting it on the stack would overflow the thread that
+ * draws the screen. Failure leaves both blocks NULL, which reads as "no
+ * symbols" - the same answer a stripped file gives, and the right one, because
+ * a table that could not be built has nothing true to show.
+ */
+static void sym_build(struct object *o)
+{
+	static uint8_t scratch[KOF_SYM_MAX_BYTES];
+	uint32_t n, total, i, n_imp = 0, n_exp = 0;
+
+	o->sym_imp = o->sym_exp = 0;
+	o->sym_imp_n = o->sym_exp_n = 0;
+
+	n = kof_elf_syms(o->buf, o->info, scratch, (uint32_t)sizeof scratch);
+	total = sym_count(scratch, n);
+	if (!total)
+		return;
+
+	for (i = 0; i < total; i++) {
+		const uint8_t *r = sym_rec(scratch, n, i);
+
+		if (r && (r[KOF_SYM_R_FLAGS] & KOF_SYM_F_UNDEFINED))
+			n_imp++;
+		else if (r)
+			n_exp++;
+	}
+
+	/*
+	 * Both blocks are allocated before either is filled, and a failure to
+	 * get one drops BOTH. Half a partition is worse than none: the tree
+	 * would show one row, and a reader who found no imports there could not
+	 * tell "this object imports nothing" from "the other half is missing".
+	 */
+	o->sym_imp = malloc((size_t)KOF_SYM_HDRLEN + n_imp * KOF_SYM_RECLEN);
+	o->sym_exp = malloc((size_t)KOF_SYM_HDRLEN + n_exp * KOF_SYM_RECLEN);
+	if (!o->sym_imp || !o->sym_exp) {
+		free(o->sym_imp);
+		free(o->sym_exp);
+		o->sym_imp = o->sym_exp = 0;
+		return;
+	}
+
+	/* The header is the engine's, copied whole, so version, reclen, origin
+	 * and the truncated flag say the same thing in both halves as they did
+	 * in the block they came from. Only the count differs. */
+	memcpy(o->sym_imp, scratch, KOF_SYM_HDRLEN);
+	memcpy(o->sym_exp, scratch, KOF_SYM_HDRLEN);
+	sym_put_count(o->sym_imp, n_imp);
+	sym_put_count(o->sym_exp, n_exp);
+	o->sym_imp_n = KOF_SYM_HDRLEN + n_imp * KOF_SYM_RECLEN;
+	o->sym_exp_n = KOF_SYM_HDRLEN + n_exp * KOF_SYM_RECLEN;
+
+	n_imp = n_exp = 0;
+	for (i = 0; i < total; i++) {
+		const uint8_t *r = sym_rec(scratch, n, i);
+
+		if (!r)
+			continue;
+		if (r[KOF_SYM_R_FLAGS] & KOF_SYM_F_UNDEFINED)
+			memcpy(o->sym_imp + KOF_SYM_HDRLEN +
+			       n_imp++ * KOF_SYM_RECLEN, r, KOF_SYM_RECLEN);
+		else
+			memcpy(o->sym_exp + KOF_SYM_HDRLEN +
+			       n_exp++ * KOF_SYM_RECLEN, r, KOF_SYM_RECLEN);
+	}
+}
+
 /*
  * Parse and look up the objects from `from` onward.
  *
@@ -2142,6 +2526,8 @@ static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 			o->emu_why = (uint8_t)kof_emu_unp_gate(&o->ctx, o->info,
 							       o->buf.p,
 							       o->buf.n);
+		if (o->fmt && o->info && o->ctx.format == KOF_FMT_ELF)
+			sym_build(o);
 		if (eng &&
 		    !kof_touch_object(eng, o->buf, &o->ctx,
 				      (const char *const *)o->finding,
@@ -2192,8 +2578,21 @@ static void tree_add(struct view *v, uint32_t depth, uint32_t obj,
 	n->depth = depth;
 	n->obj = obj;
 	n->mask = mask;
+	n->sym = 0;
 	n->bytes = bytes;
 	snprintf(n->label, sizeof n->label, "%s", label);
+}
+
+/* The symbol row, marked as such. Separate from tree_add because `at` is
+ * deliberately NOT cleared there - a row keeps its scroll across a rebuild - so
+ * the slot arrives with the last tenant's values in it and a flag that is only
+ * ever set would stay set on whatever region row inherited the slot. */
+static void tree_add_sym(struct view *v, uint32_t depth, uint32_t obj,
+			 uint64_t bytes, uint8_t which, const char *label)
+{
+	tree_add(v, depth, obj, 0, bytes, label);
+	if (v->n_node)
+		v->node[v->n_node - 1u].sym = which;
 }
 
 static void tree_build(struct view *v)
@@ -2261,6 +2660,38 @@ static void tree_build(struct view *v)
 					 s ? s + 1 : rn);
 			}
 		}
+		/*
+		 * Last, and only when there is something in it.
+		 *
+		 * Last because it is not a region: every row above it is an
+		 * extent of the file and this one is built, so it reads as the
+		 * derived thing it is rather than as another slice. Suppressed
+		 * when empty because a row that opens onto nothing is worse
+		 * than no row - the reader clicks it to find out, every time.
+		 * A stripped file simply has no symbol row, which is itself the
+		 * answer.
+		 */
+		/*
+		 * The two symbol rows, last, and each only when it has records.
+		 *
+		 * Last because they are not regions: every row above is an
+		 * extent of the file and these are built, so they read as the
+		 * derived things they are rather than as more slices. Sized in
+		 * BYTES like every other row - the column means bytes, and a
+		 * record count there would read as a very small region.
+		 *
+		 * Suppressed when empty rather than shown as zero: an object
+		 * that imports nothing and one whose symbols could not be read
+		 * are different facts, and a row that opens onto nothing
+		 * cannot tell them apart. No row at all is the honest answer,
+		 * the same one a stripped file gives.
+		 */
+		if (sym_count(o->sym_imp, o->sym_imp_n))
+			tree_add_sym(v, o->depth * 2u + 1u, i,
+				     o->sym_imp_n, SYMN_IMP, "SYM_IMP");
+		if (sym_count(o->sym_exp, o->sym_exp_n))
+			tree_add_sym(v, o->depth * 2u + 1u, i,
+				     o->sym_exp_n, SYMN_EXP, "SYM_EXP");
 	}
 }
 
@@ -2300,6 +2731,27 @@ static void view_select(struct view *v)
 
 	v->n_ext = 0;
 	v->rgn_len = 0;
+	/*
+	 * One record per row, so `per` is one and every piece of scroll
+	 * machinery already here - hex_max, page up, the wheel - measures in
+	 * records without knowing it. The alternative was a second scroll
+	 * position for this one view, which is the sort of parallel state that
+	 * ends up one keystroke out of step with the first.
+	 *
+	 * n_ext stays zero: there are no extents, and leaving it zero is what
+	 * keeps view_map, the byte selection and the disassembler from being
+	 * handed offsets into a region that does not exist.
+	 */
+	if (v->node[v->sel_node].sym) {
+		uint64_t n = 0;
+
+		(void)sym_block(v, &n);
+		v->rgn_len = n;
+		v->rgn_at = v->node[v->sel_node].at;
+		if (v->rgn_at > hex_max(v))
+			v->rgn_at = hex_max(v);
+		return;
+	}
 	if (!v->ext)
 		return;
 	v->n_ext = kof_scan_resolve_range(&o->ctx,
@@ -2349,6 +2801,29 @@ static void goto_node(struct view *v, uint32_t k)
 	view_select(v);
 }
 
+/*
+ * THE BYTES THE SELECTED ROW IS SHOWING, whatever kind of row it is.
+ *
+ * One accessor, because five places need it and they had all hard-coded
+ * `ob->buf.p`: the pane, the copy, the marker being declared, the word the
+ * double-click extends to, and the disassembler's feed. On a symbol row that
+ * pointer is wrong - view_map returns an offset into the BLOCK, so indexing the
+ * file with it reads unrelated bytes at the same number and hands them to the
+ * copy and to the marker as though they were what was on screen. Every caller
+ * asks here instead, so a row kind added later cannot be right in the drawing
+ * and silently wrong in everything that acts on it.
+ */
+static const uint8_t *view_bytes(const struct view *v, uint64_t *n)
+{
+	const struct object *o = &v->obj[v->node[v->sel_node].obj];
+
+	if (sym_view(v))
+		return sym_block(v, n);
+	if (n)
+		*n = o->buf.n;
+	return o->buf.p;
+}
+
 /* The file offset of byte `at` of the selected region, and how much of that
  * extent is left. Regions are not contiguous, so a pane that walked the file
  * would show bytes the region does not contain. */
@@ -2356,6 +2831,20 @@ static uint64_t view_map(const struct view *v, uint64_t at, uint64_t *run)
 {
 	uint32_t i;
 
+	/*
+	 * A symbol row has no extents and needs no mapping: the block is one
+	 * contiguous run, so byte `at` of the row is byte `at` of the block.
+	 * Returning zero here instead - which is what the loop below does with
+	 * n_ext of zero - pointed every column of the pane at the first byte.
+	 */
+	if (sym_view(v)) {
+		uint64_t n = 0;
+
+		(void)sym_block(v, &n);
+		if (run)
+			*run = at < n ? n - at : 0;
+		return at;
+	}
 	for (i = 0; i < v->n_ext; i++) {
 		if (at < v->ext[i].len) {
 			if (run)
@@ -2578,7 +3067,7 @@ static void draw_tree(struct out *o, struct view *v)
 			 * the verdict on the object a reader is looking at was
 			 * the one verdict the tree never showed.
 			 */
-			if (n->mask) {
+			if (n->mask || n->sym) {
 				if (!sel)
 					out_str(o, A_ID);
 			} else {
@@ -2941,6 +3430,71 @@ static int decl_kind(struct view *v, uint64_t off)
 	return 0;
 }
 
+/* ---- the symbol view -------------------------------------------------------
+ *
+ * The rows of the KSYM block, one record to a line, in place of the hex pane.
+ *
+ * IT IS NOT A HEX DUMP AND DOES NOT PRETEND TO BE ONE. The records are built
+ * from the section table rather than read out of a run of the file, so there is
+ * no offset column that would mean anything: printing one would invite a reader
+ * to go to it, and land them somewhere unrelated. What identifies a row here is
+ * the record number, which is why that is the first field.
+ */
+
+/*
+ * The flag byte as five characters, ONE PER BIT.
+ *
+ * Five, because there are five flags - and the column is headed "flags", which
+ * is five wide, so the field now fills its own heading instead of sitting four
+ * characters into a five character column.
+ *
+ * DEFINED and UNDEFINED get a slot each rather than sharing one. They used to:
+ * slot zero was 'D', 'u' or '.', which is shorter and lies about the data - the
+ * two are separate bits in the record, so a record carrying both, or a record
+ * carrying neither because it was built by something that did not set them, was
+ * displayed as one of the ordinary cases. Five slots cannot misreport a byte
+ * whatever is in it.
+ *
+ * A dot rather than a blank for a bit that is clear: a blank column reads as a
+ * field that was not printed.
+ */
+static void sym_flag_str(uint8_t f, char *out)
+{
+	out[0] = (f & KOF_SYM_F_DEFINED)     ? 'D' : '.';
+	out[1] = (f & KOF_SYM_F_UNDEFINED)   ? 'U' : '.';
+	out[2] = (f & KOF_SYM_F_IN_WRITABLE) ? 'W' : '.';
+	out[3] = (f & KOF_SYM_F_IN_EXEC)     ? 'X' : '.';
+	out[4] = (f & KOF_SYM_F_HAS_SIZE)    ? 'S' : '.';
+	out[5] = 0;
+}
+
+/*
+ * "UND", "ABS", or the index.
+ *
+ * The two special cases are NOT the same value and must not be tested as one.
+ * ELF's SHN_UNDEF is zero and the builder keeps it - an import genuinely has no
+ * section - while the reserved indices above 0xff00 (SHN_ABS, SHN_COMMON) are
+ * folded to 0xffff so a rule comparing the field has one number to compare
+ * against. Reading zero as an ordinary index printed "0" for every import,
+ * which is a real section number and the wrong answer.
+ *
+ * UND is decided by the FLAG rather than by the zero: the flag is what the
+ * builder itself concluded, so the column and anything matching on the flag
+ * cannot disagree.
+ */
+static void sym_shn_str(const uint8_t *r, char *out, size_t n)
+{
+	uint32_t x = (uint32_t)r[KOF_SYM_R_SHNDX] |
+		     ((uint32_t)r[KOF_SYM_R_SHNDX + 1] << 8);
+
+	if (r[KOF_SYM_R_FLAGS] & KOF_SYM_F_UNDEFINED)
+		snprintf(out, n, "%s", "UND");
+	else if (x == 0xffffu)
+		snprintf(out, n, "%s", "ABS");
+	else
+		snprintf(out, n, "%u", x);
+}
+
 static void draw_hex(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
@@ -2949,6 +3503,29 @@ static void draw_hex(struct out *o, struct view *v)
 	int per = (g_cols - col - 12) / 4;
 	int row;
 	uint64_t at = v->rgn_at;
+	/*
+	 * WHERE THE BYTES COME FROM, and it is not always the object.
+	 *
+	 * A symbol row draws the KSYM block, which is built rather than read
+	 * out of the file, so the pane is pointed at that buffer instead. Held
+	 * as one pointer rather than branched on per byte: the pane reads it
+	 * three times per column and a test repeated there is a test that can
+	 * be forgotten in one of the three.
+	 *
+	 * `sym` also turns the HIGHLIGHTING off. hit_kind and decl_kind take
+	 * FILE offsets - a marker's occurrences, a declared string's hits - and
+	 * the offsets here are into the block, so asking them would light bytes
+	 * that mean nothing: the highlight would be at the same numeric offset
+	 * as a real hit somewhere entirely unrelated.
+	 */
+	uint64_t base_n = ob->buf.n;
+	const uint8_t *base = ob->buf.p;
+	int sym = sym_view(v);
+
+	if (sym)
+		base = sym_block(v, &base_n);
+	if (!base)
+		base_n = 0;
 
 	if (per > 16)
 		per = 16;
@@ -2990,12 +3567,13 @@ static void draw_hex(struct out *o, struct view *v)
 				out_str(o, " ");
 			{
 				uint64_t fo = view_map(v, at + (uint64_t)k, 0);
-				uint8_t bv = ob->buf.p[fo];
-				int h = hit_kind(v, fo);
+				uint8_t bv = fo < base_n ? base[fo] : 0;
+				int h = sym ? 0 : hit_kind(v, fo);
 
 				out_str(o, in_sel(v, at + (uint64_t)k) ? A_SELB :
 					h ? (h == 1 ? A_HIT1 : A_HIT2)
-					  : decl_kind(v, fo) ? A_HIT3
+					  : (!sym && decl_kind(v, fo)) ? A_HIT3
+					  : sym ? sym_byte_colour(fo)
 					  : byte_colour(bv));
 				out_fmt(o, "%02X", bv);
 				out_str(o, A_OFF);
@@ -3004,12 +3582,13 @@ static void draw_hex(struct out *o, struct view *v)
 		out_str(o, "  ");
 		for (k = 0; k < per && at + (uint64_t)k < v->rgn_len; k++) {
 			uint64_t fo = view_map(v, at + (uint64_t)k, 0);
-			uint8_t c = ob->buf.p[fo];
-			int h = hit_kind(v, fo);
+			uint8_t c = fo < base_n ? base[fo] : 0;
+			int h = sym ? 0 : hit_kind(v, fo);
 
 			out_str(o, in_sel(v, at + (uint64_t)k) ? A_SELB :
 				h ? (h == 1 ? A_HIT1 : A_HIT2)
-				  : decl_kind(v, fo) ? A_HIT3
+				  : (!sym && decl_kind(v, fo)) ? A_HIT3
+				  : sym ? sym_byte_colour(fo)
 				  : byte_colour(c));
 			out_fmt(o, "%c", (c >= 0x20 && c < 0x7f) ? c : '.');
 			out_str(o, A_OFF);
@@ -8018,17 +8597,18 @@ static int dis_default_bits(struct view *v)
  */
 static unsigned dis_gather(struct view *v, uint64_t at, uint8_t *buf, unsigned n)
 {
-	struct object *ob = cur_obj(v);
+	uint64_t bn = 0;
+	const uint8_t *bp = view_bytes(v, &bn);
 	unsigned k = 0;
 
-	if (!ob || !ob->buf.p)
+	if (!bp)
 		return 0;
 	while (k < n && at + k < v->rgn_len) {
 		uint64_t fo = view_map(v, at + k, 0);
 
-		if (fo >= ob->buf.n)
+		if (fo >= bn)
 			break;
-		buf[k++] = ob->buf.p[fo];
+		buf[k++] = bp[fo];
 	}
 	return k;
 }
@@ -10649,8 +11229,32 @@ static int menu_enabled(struct view *v, int a)
 		hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
 		if (hi - lo + 1u > sizeof t)
 			return 0;
-		for (k = lo; k <= hi; k++)
-			t[n++] = cur_obj(v)->buf.p[view_map(v, k, 0)];
+		{
+			/*
+			 * Through view_bytes, or this judges the wrong bytes.
+			 *
+			 * It read the object's buffer at what view_map returns,
+			 * which on a symbol row is an offset into the built
+			 * block - so literal_safe was asked about unrelated
+			 * file bytes at the same number, said no, and the item
+			 * greyed out over a selection that was plain ASCII on
+			 * screen. The failure was silent in the worst way: the
+			 * menu simply did nothing, with no way to tell that
+			 * from "not implemented".
+			 */
+			uint64_t bn = 0;
+			const uint8_t *bp = view_bytes(v, &bn);
+
+			if (!bp)
+				return 0;
+			for (k = lo; k <= hi; k++) {
+				uint64_t f = view_map(v, k, 0);
+
+				if (f >= bn)
+					return 0;
+				t[n++] = bp[f];
+			}
+		}
 		return literal_safe(t, n);
 	}
 	if (a == M_FIND_STR || a == M_FIND_HEX)
@@ -11366,7 +11970,6 @@ static void decl_remove(struct view *v, uint32_t i)
 
 static void decl_add(struct view *v, int hex)
 {
-	struct object *ob = cur_obj(v);
 	struct node *n = &v->node[v->sel_node];
 	struct decl *d;
 	uint64_t lo, hi, k;
@@ -11384,8 +11987,18 @@ static void decl_add(struct view *v, int hex)
 	d->bytes = malloc(d->len);
 	if (!d->bytes)
 		return;
-	for (k = lo; k <= hi; k++)
-		d->bytes[i++] = ob->buf.p[view_map(v, k, 0)];
+	{
+		/* From the view, not from the object: on a symbol row these
+		 * offsets are into the built block. See view_bytes. */
+		uint64_t bn = 0;
+		const uint8_t *bp = view_bytes(v, &bn);
+
+		for (k = lo; k <= hi; k++) {
+			uint64_t f = view_map(v, k, 0);
+
+			d->bytes[i++] = (bp && f < bn) ? bp[f] : 0;
+		}
+	}
 	d->nbytes = d->len;
 	d->hex = hex;
 	/* Fullword by default. A marker is a name, a path, a format string -
@@ -11455,7 +12068,6 @@ static void decl_add(struct view *v, int hex)
 
 static void menu_run(struct view *v, int a)
 {
-	struct object *ob = cur_obj(v);
 	uint64_t lo, hi, k, n;
 	struct out t = { 0 };
 
@@ -11528,8 +12140,12 @@ static void menu_run(struct view *v, int a)
 	hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
 	n = hi - lo + 1u;
 
+	uint64_t bn = 0;
+	const uint8_t *bp = view_bytes(v, &bn);
+
 	for (k = 0; k < n; k++) {
-		uint8_t c = ob->buf.p[view_map(v, lo + k, 0)];
+		uint64_t bf = view_map(v, lo + k, 0);
+		uint8_t c = (bp && bf < bn) ? bp[bf] : 0;
 
 		if (a == M_COPY_HEX) {
 			char x[3];
@@ -11573,6 +12189,11 @@ static size_t g_last_n;
 static void draw_find(struct out *o, struct view *v);
 static void draw_goto(struct out *o, struct view *v);
 static int  goto_click(struct view *v);
+static void draw_symbols(struct out *o, struct view *v);
+static int  symd_click(struct view *v);
+static void symd_scroll(struct view *v, int64_t d);
+static void symd_clamp(struct view *v);
+static void symd_open(struct view *v);
 static void draw_bar(struct out *o, struct view *v);
 static void draw_help(struct out *o, struct view *v);
 static void draw_prop(struct out *o, struct view *v);
@@ -11690,7 +12311,17 @@ static void redraw(struct view *v)
 	 * geometry helper below reads it. Half of what the hex column has, and
 	 * never so much that the hex is left with less than the panel.
 	 */
-	if (v->dis_open) {
+	/*
+	 * The symbol view takes the whole column.
+	 *
+	 * The panel disassembles the bytes the hex pane is showing, and this
+	 * view is showing none: leaving it open would reserve its rows, cost
+	 * the table a third of its height, and fill them with the last region's
+	 * instructions - which would read as a disassembly OF THE SYMBOLS.
+	 * dis_open itself is left alone, so the panel is still there when the
+	 * reader moves back to a region.
+	 */
+	if (v->dis_open && !sym_view(v)) {
 		int room = hex_bot() - hex_top() + 1;
 
 		dis_follow_hex(v);
@@ -11725,6 +12356,8 @@ static void redraw(struct view *v)
 			draw_find(&o, v);
 		if (v->goto_open)
 			draw_goto(&o, v);
+		if (v->sym_open)
+			draw_symbols(&o, v);
 	}
 	if (v->prop_open)
 		draw_prop(&o, v);
@@ -12123,6 +12756,12 @@ enum bar_item {
 	 */
 	BI_DASH,
 	/*
+	 * The symbol table, decoded. Directly under Dashboard because it is the
+	 * same kind of item - a question about the object that writes nothing -
+	 * and the two dumping items below open files instead.
+	 */
+	BI_SYMS,
+	/*
 	 * Dump opens rather than acts: what to dump is now a question with two
 	 * answers, and they are answers to the same question rather than two
 	 * unrelated items that happen to both write files. The two under it
@@ -12163,6 +12802,7 @@ static const struct {
 	{ "Find...",        BM_EDIT, -1 },
 	{ "Go to...",       BM_EDIT, -1 },
 	{ "Dashboard",         BM_ANALYSIS, -1 },
+	{ "Symbols",           BM_ANALYSIS, -1 },
 	{ "Dump",              BM_ANALYSIS, -1 },
 	{ "Static unpacker",   BM_ANALYSIS, BI_DUMP },
 	{ "Emu unpacker",      BM_ANALYSIS, BI_DUMP },
@@ -12296,6 +12936,19 @@ static int bar_enabled(struct view *v, int i)
 	case BI_QUIT:      return 1;
 	case BI_FIND:      return 1;
 	case BI_GOTO:      return 1;            /* draw_goto / goto_take */
+	/*
+	 * Offered only when there is a table to show. An object with neither
+	 * half - a PE, or a fully stripped ELF - would open a dialog with two
+	 * empty tabs, which is a worse answer than a greyed item: the grey says
+	 * the tool looked and found nothing, the empty box says it might not
+	 * have looked.
+	 */
+	case BI_SYMS: {
+		const struct object *o = cur_obj(v);
+
+		return sym_count(o->sym_imp, o->sym_imp_n) != 0 ||
+		       sym_count(o->sym_exp, o->sym_exp_n) != 0;
+	}
 	case BI_KEYS:
 	case BI_ABOUT:     return 1;
 	default:           return 0;
@@ -14105,6 +14758,9 @@ static void bar_run(struct view *v, int i)
 	 * bar_enabled: an item that reports itself live and has no case falls
 	 * to `default: break;` - the menu closes and nothing happens, which
 	 * is exactly how BI_GOTO looked before the dialog existed. */
+	case BI_SYMS:
+		symd_open(v);
+		return;
 	case BI_GOTO:
 		v->goto_open = 1;
 		v->find_open = 0;      /* they share the box - see draw_goto */
@@ -14492,23 +15148,24 @@ static uint64_t now_ms(void)
  */
 static void select_run(struct view *v)
 {
-	struct object *ob = cur_obj(v);
+	uint64_t bn = 0;
+	const uint8_t *bp = view_bytes(v, &bn);
 	uint64_t a = v->sel_a, b;
 
-	if (a == KOF_BROKEN)
+	if (a == KOF_BROKEN || !bp)
 		return;
 	b = a;
 	while (a > 0) {
 		uint64_t f = view_map(v, a - 1u, 0);
 
-		if (f == KOF_BROKEN || !byte_text(ob->buf.p[f]))
+		if (f == KOF_BROKEN || f >= bn || !byte_text(bp[f]))
 			break;
 		a--;
 	}
 	while (b + 1u < v->rgn_len) {
 		uint64_t f = view_map(v, b + 1u, 0);
 
-		if (f == KOF_BROKEN || !byte_text(ob->buf.p[f]))
+		if (f == KOF_BROKEN || f >= bn || !byte_text(bp[f]))
 			break;
 		b++;
 	}
@@ -14725,6 +15382,381 @@ static int bar_under(struct view *v)
 #define G_BR "\xe2\x95\xaf"     /* U+256F */
 #define G_H  "\xe2\x94\x80"     /* U+2500 */
 #define G_V  "\xe2\x94\x82"     /* U+2502 - the scrollbar's own */
+
+/* ---- the symbols dialog ----------------------------------------------------
+ *
+ * The symbol records, decoded, over the top of whatever the reader was looking
+ * at. A DIALOG and not a pane, because it answers a question about the object
+ * rather than about the bytes on screen: it is opened, read, and closed, and
+ * the place the reader was does not move underneath them.
+ *
+ * The two tree rows show the same records as BYTES, which is what a signature
+ * matches. This is the other half of that: the same block, read as what the
+ * fields mean. Neither is the "real" one - a reader needs both, and needs to be
+ * able to see that they are the same thing, which is why the dialog names the
+ * row it is showing rather than inventing a third view of its own.
+ */
+
+/* Sized to the screen and then capped. The cap is not tidiness: past about a
+ * hundred columns the fields are all in place and the rest is a very long gap
+ * between the size and the name, which is harder to read down, not easier. */
+static int symd_w(void)
+{
+	int w = g_cols - 8;
+
+	return w > 104 ? 104 : w;
+}
+
+static int symd_h(void)
+{
+	int h = g_rows - 6;
+
+	return h > 28 ? 28 : h;
+}
+
+static int symd_x(void) { return (g_cols - symd_w()) / 2 + 1; }
+static int symd_y(void) { return (g_rows - symd_h()) / 2 + 1; }
+
+/* How many record rows the box has: its height less the two borders, the tab
+ * row and the column heading. */
+static int symd_rows(void)
+{
+	int r = symd_h() - 4;
+
+	return r > 0 ? r : 0;
+}
+
+/* The block the dialog is showing, which is the tab it is on and NOT the tree
+ * row - the reader can switch tabs without the tree moving under them. */
+static const uint8_t *symd_block(struct view *v, uint64_t *n)
+{
+	const struct object *o = cur_obj(v);
+
+	if (v->sym_open == SYMN_IMP) {
+		if (n)
+			*n = o->sym_imp_n;
+		return o->sym_imp;
+	}
+	if (n)
+		*n = o->sym_exp_n;
+	return o->sym_exp;
+}
+
+static uint64_t symd_max(struct view *v)
+{
+	uint64_t nb = 0;
+	const uint8_t *b;
+	uint32_t n, rows = (uint32_t)symd_rows();
+
+	/*
+	 * The block is fetched on its OWN LINE, and this is not style.
+	 *
+	 * It was `sym_count(symd_block(v, &nb), (uint32_t)nb)`, and the order
+	 * in which a compiler evaluates two arguments is unspecified: `nb` was
+	 * read while it was still zero, sym_count saw a length shorter than a
+	 * header and answered zero records, and so this returned a maximum
+	 * scroll of zero. Every scroll clamped straight back to the top and the
+	 * dialog looked as though its keys were not wired up at all - while the
+	 * keys were arriving and doing exactly what they were told.
+	 */
+	b = symd_block(v, &nb);
+	n = sym_count(b, (uint32_t)nb);
+	return n > rows ? n - rows : 0u;
+}
+
+static void symd_clamp(struct view *v)
+{
+	if (v->sym_at > symd_max(v))
+		v->sym_at = symd_max(v);
+}
+
+/* A row of the box, from its left edge, so col_base + col_hint is an absolute
+ * column and every click box recorded below lands where its text is. */
+static void symd_row(struct out *o, int y)
+{
+	out_at(o, y, symd_x());
+	o->col_hint = 0;
+}
+
+/*
+ * Fill to the right border and draw it.
+ *
+ * Every row of the box has to reach its own edge. Positioning the cursor at
+ * the edge and drawing the border there is NOT the same thing: the box sits on
+ * top of the hex pane, so whatever the row did not write is still the pane's
+ * bytes, and the tab row and the column heading showed a stripe of hex running
+ * through the middle of the dialog. col_hint counts BYTES, which is why the box
+ * glyphs go through out_glyph and this counts in it rather than in strlen.
+ */
+static void symd_edge(struct out *o, int w)
+{
+	while ((int)o->col_hint < w - 1)
+		out_str(o, " ");
+	out_str(o, A_DIM);
+	out_glyph(o, G_V);
+	out_str(o, A_OFF);
+}
+
+static void draw_symbols(struct out *o, struct view *v)
+{
+	int x = symd_x(), y = symd_y(), w = symd_w(), h = symd_h();
+	int rows = symd_rows(), i;
+	uint64_t nb = 0;
+	const uint8_t *b = symd_block(v, &nb);
+	uint32_t n = sym_count(b, (uint32_t)nb);
+	int used, room, wd = 8;
+	const struct object *ob = cur_obj(v);
+
+	if (w < 40 || h < 8)
+		return;                 /* no room to draw a box honestly */
+
+	/*
+	 * Re-clamped every frame rather than only when it is scrolled, because
+	 * the box's height follows the terminal's: making the window taller
+	 * shows more records, which moves the last legal offset, and an offset
+	 * left past it would draw a table of blank rows.
+	 */
+	symd_clamp(v);
+
+	/* Same rule as the pane: one width for the whole table, decided by the
+	 * whole table, or the column cannot be read down. */
+	for (i = 0; (uint32_t)i < n; i++) {
+		const uint8_t *r = sym_rec(b, (uint32_t)nb, (uint32_t)i);
+
+		if (r && (sym_u64(r, KOF_SYM_R_VALUE) > 0xffffffffull ||
+			  sym_u64(r, KOF_SYM_R_SIZE) > 0xffffffffull)) {
+			wd = 16;
+			break;
+		}
+	}
+	used = 5 + 8 + 7 + 10 + 6 + (wd + 1) + (wd == 16 ? 13 : 9) + 6;
+
+	/* Top border, with the title sunk into it. */
+	symd_row(o, y);
+	out_str(o, A_DIM);
+	out_glyph(o, G_TL);
+	out_glyph(o, G_H);
+	out_str(o, A_OFF A_BOLD " Symbols " A_OFF A_DIM);
+	/*
+	 * w - 12, counted rather than guessed: the row is one corner, one rule,
+	 * the nine characters of " Symbols ", the fill, and the other corner -
+	 * so the fill is w - 12 and the row comes to w. It was w - 13, which
+	 * drew the box one column narrower at the top than every row under it,
+	 * and than every other dialog in the tool.
+	 */
+	for (i = 0; i < w - 12; i++)
+		out_glyph(o, G_H);
+	out_glyph(o, G_TR);
+	out_str(o, A_OFF);
+
+	/*
+	 * The tabs and the close button.
+	 *
+	 * Both halves are always offered, even the empty one, and each says how
+	 * many records it has. A tab that disappeared when it was empty would
+	 * make "this object imports nothing" indistinguishable from "there is
+	 * no imports tab in this build", and the count is the answer to the
+	 * question the reader opened the dialog with.
+	 */
+	symd_row(o, y + 1);
+	out_str(o, A_DIM);
+	out_glyph(o, G_V);
+	out_str(o, A_OFF " ");
+	for (i = 0; i < 2; i++) {
+		uint8_t which = i ? SYMN_EXP : SYMN_IMP;
+		uint32_t cnt = i ? sym_count(ob->sym_exp, ob->sym_exp_n)
+				 : sym_count(ob->sym_imp, ob->sym_imp_n);
+
+		v->sy_tab[i][0] = o->col_base + (int)o->col_hint;
+		out_fmt(o, "%s[ %s %u ]" A_OFF " ",
+			v->sym_open == which ? A_SEL : A_ID,
+			i ? "SYM_EXP" : "SYM_IMP", cnt);
+		v->sy_tab[i][1] = o->col_base + (int)o->col_hint - 1;
+	}
+	out_fmt(o, A_DIM "%s, %u record%s%s" A_OFF,
+		sym_origin_str(b, (uint32_t)nb), n, n == 1 ? "" : "s",
+		(nb > KOF_SYM_H_TRUNC && b && b[KOF_SYM_H_TRUNC])
+			? ", TRUNCATED" : "");
+	/* The close button hard against the right edge, where a close button
+	 * is, rather than after text whose length changes with the object. The
+	 * gap in front of it is padded, not skipped - see symd_edge. */
+	while ((int)o->col_hint < w - 6)
+		out_str(o, " ");
+	v->sy_close[0] = o->col_base + (int)o->col_hint;
+	out_fmt(o, "%s[x]" A_OFF, A_WARN);
+	v->sy_close[1] = o->col_base + (int)o->col_hint - 1;
+	symd_edge(o, w);
+
+	/* Column heading, to the same widths and separators as the rows. */
+	symd_row(o, y + 2);
+	out_str(o, A_DIM);
+	out_glyph(o, G_V);
+	out_str(o, A_OFF " ");
+	out_fmt(o, A_S_HEAD "%-4s %-7s %-6s %-9s %-5s %*s %*s %-5s %s" A_OFF,
+		"rec", "type", "bind", "vis", "flags",
+		wd, "value", wd == 16 ? 12 : 8, "size", "sec", "name");
+	symd_edge(o, w);
+
+	room = w - 3 - used;
+
+	for (i = 0; i < rows; i++) {
+		uint64_t at = v->sym_at + (uint64_t)i;
+		const uint8_t *r = (at < (uint64_t)n)
+				 ? sym_rec(b, (uint32_t)nb, (uint32_t)at) : 0;
+		char fl[8], shn[8];
+		int k;
+
+		symd_row(o, y + 3 + i);
+		out_str(o, A_DIM);
+		out_glyph(o, G_V);
+		out_str(o, A_OFF " ");
+
+		if (!r) {
+			/* Nothing to draw, but the row still has to be blanked
+			 * INSIDE the border: the box is over other content, and
+			 * a clear-to-end-of-line would take the rest of the
+			 * screen with it. symd_edge does the filling. */
+			(void)0;
+		} else {
+			sym_flag_str(r[KOF_SYM_R_FLAGS], fl);
+			sym_shn_str(r, shn, sizeof shn);
+			out_fmt(o, A_S_IDX "%04llx" A_OFF " ",
+				(unsigned long long)at);
+			out_fmt(o, A_S_TYPE "%-7s" A_OFF " ",
+				sym_type_str(r[KOF_SYM_R_TYPE]));
+			out_fmt(o, A_S_BIND "%-6s" A_OFF " ",
+				sym_bind_str(r[KOF_SYM_R_BIND]));
+			out_fmt(o, A_S_VIS "%-9s" A_OFF " ",
+				sym_vis_str(r[KOF_SYM_R_VIS]));
+			out_fmt(o, A_S_FLAG "%-5s" A_OFF " ", fl);
+			out_fmt(o, A_S_VAL "%0*llx" A_OFF " ", wd,
+				(unsigned long long)sym_u64(r,
+							KOF_SYM_R_VALUE));
+			out_fmt(o, A_S_SIZE "%*llu" A_OFF " ",
+				wd == 16 ? 12 : 8,
+				(unsigned long long)sym_u64(r,
+							KOF_SYM_R_SIZE));
+			out_fmt(o, A_S_SHN "%-5s" A_OFF " ", shn);
+			/*
+			 * The name last, printed as the bytes the record holds
+			 * rather than as a C string: it is NUL-PADDED TO A
+			 * FIXED 40 AND NOT NECESSARILY TERMINATED, so a %s
+			 * would run into the next record. Clipped to what is
+			 * left inside the border - nothing here turns autowrap
+			 * off, so a name written past the edge would wrap and
+			 * overwrite the screen outside the box.
+			 */
+			out_str(o, A_S_NAME);
+			for (k = 0; k < room && k < (int)KOF_SYM_NAMELEN; k++) {
+				char c = (char)r[KOF_SYM_R_NAME + (uint32_t)k];
+
+				if (!c)
+					break;
+				out_fmt(o, "%c", c);
+				}
+			out_str(o, A_OFF);
+		}
+		symd_edge(o, w);
+	}
+
+	/* Bottom border. */
+	symd_row(o, y + h - 1);
+	out_str(o, A_DIM);
+	out_glyph(o, G_BL);
+	for (i = 0; i < w - 2; i++)
+		out_glyph(o, G_H);
+	out_glyph(o, G_BR);
+	out_str(o, A_OFF);
+
+	/*
+	 * The scrollbar ON the right border, not inside it.
+	 *
+	 * Inside, it drew a second vertical line one column in from the first,
+	 * and since the track is the same dim U+2502 as the border the pair
+	 * read as a doubled border with a bright spot in it rather than as a
+	 * scrollbar. On the border there is one line, and the bold thumb says
+	 * where in the table the reader is. Drawn last so it replaces the
+	 * border on the rows it covers, and only when there is more than fits -
+	 * the same rule the panes use.
+	 */
+	if (n > (uint32_t)rows)
+		scrollbar(o, x + w - 1, y + 3, y + 3 + rows - 1,
+			  v->sym_at, n, (uint64_t)rows);
+}
+
+/*
+ * A click in the dialog. Returns non-zero when it was the dialog's, which is
+ * how the caller knows not to route it on to whatever is underneath.
+ *
+ * EVERY click is swallowed while it is up, inside the box or outside it, which
+ * is what makes it a modal rather than a floating panel. Two reasons, and the
+ * second is the one that matters: a click on a record must not fall through and
+ * select a byte in the pane behind it, and a click on the TREE must not move
+ * the cursor to another object - the dialog shows the symbols of whichever
+ * object is selected, so that would silently replace the table being read with
+ * a different one. Closing is [x], Escape or q.
+ */
+static int symd_click(struct view *v)
+{
+	int y = symd_y(), i;
+
+	if (g_my == y + 1) {
+		if (g_mx >= v->sy_close[0] && g_mx <= v->sy_close[1]) {
+			v->sym_open = 0;
+			return 1;
+		}
+		for (i = 0; i < 2; i++)
+			if (g_mx >= v->sy_tab[i][0] &&
+			    g_mx <= v->sy_tab[i][1]) {
+				uint8_t which = i ? SYMN_EXP : SYMN_IMP;
+
+				/* Switching tabs goes back to the top. The
+				 * offset is a position in THIS table and means
+				 * somewhere else in the other one. */
+				if (v->sym_open != which) {
+					v->sym_open = which;
+					v->sym_at = 0;
+				}
+				return 1;
+			}
+	}
+	return 1;
+}
+
+/* The wheel and the keys, in one place so they cannot disagree about the
+ * clamp. `d` is in records, positive downwards. */
+static void symd_scroll(struct view *v, int64_t d)
+{
+	uint64_t max = symd_max(v);
+
+	if (d < 0) {
+		uint64_t up = (uint64_t)(-d);
+
+		v->sym_at = v->sym_at > up ? v->sym_at - up : 0;
+	} else {
+		v->sym_at += (uint64_t)d;
+	}
+	if (v->sym_at > max)
+		v->sym_at = max;
+}
+
+/*
+ * Open the dialog on the half that has something in it.
+ *
+ * Exports first because that is what almost every object has and what a reader
+ * asking about a shellcode loader is after, but an object with only imports -
+ * a stripped dynamic executable, which is most of them - opens on imports
+ * rather than on an empty table it has to be told to leave.
+ */
+static void symd_open(struct view *v)
+{
+	const struct object *o = cur_obj(v);
+
+	v->sym_at = 0;
+	v->sym_open = sym_count(o->sym_exp, o->sym_exp_n) ? SYMN_EXP
+			: sym_count(o->sym_imp, o->sym_imp_n) ? SYMN_IMP
+			: SYMN_EXP;
+}
 
 static int goto_top(void)
 {
@@ -15189,6 +16221,10 @@ static void click(struct view *v, int rclick)
 		return;
 	}
 
+	/* Before every other hit test: the box is opaque, and symd_click
+	 * swallows anything that lands inside it. */
+	if (v->sym_open && symd_click(v))
+		return;
 	if (v->goto_open && goto_click(v))
 		return;
 	if (v->find_open && find_click(v))
@@ -16210,6 +17246,42 @@ static int handle(struct view *v, int k)
 	}
 
 	/*
+	 * THE SYMBOLS DIALOG OWNS THE KEYBOARD WHILE IT IS UP.
+	 *
+	 * Everything it does not use is swallowed rather than passed down. It
+	 * is a modal over the pane, so a Down arrow meant for the table must
+	 * not scroll a hex pane the reader cannot see - which is the failure
+	 * that makes a dialog feel like it is not really there. The mouse is
+	 * NOT swallowed here: click() holds the hit test for the box, the same
+	 * arrangement the menu bar above needed and for the same reason.
+	 *
+	 * Tab switches halves, because two tabs a click apart want a key too,
+	 * and it is the key every other tabbed thing uses.
+	 */
+	if (v->sym_open && !(k >= K_CLICK && k <= K_RELEASE)) {
+		int pg = symd_rows() > 1 ? symd_rows() - 1 : 1;
+
+		switch (k) {
+		case 27: case 'q': case 'Q':
+			v->sym_open = 0;
+			break;
+		case '\t':
+			v->sym_open = v->sym_open == SYMN_IMP ? SYMN_EXP
+							     : SYMN_IMP;
+			v->sym_at = 0;
+			break;
+		case K_UP:    symd_scroll(v, -1);            break;
+		case K_DOWN:  symd_scroll(v, 1);             break;
+		case K_PGUP:  symd_scroll(v, -(int64_t)pg);  break;
+		case K_PGDN:  symd_scroll(v, pg);            break;
+		case K_HOME:  v->sym_at = 0;                 break;
+		case K_END:   v->sym_at = symd_max(v);       break;
+		default:      break;
+		}
+		return 1;
+	}
+
+	/*
 	 * The properties page owns the keyboard while it is up.
 	 *
 	 * Unlike the two help boxes it is a page rather than a card, so "any
@@ -16912,6 +17984,21 @@ static int handle(struct view *v, int k)
 	case K_WHEEL_DOWN: {
 		int down = k == K_WHEEL_DOWN, n;
 
+		/*
+		 * The dialog first, wherever the pointer is.
+		 *
+		 * The rule below - the wheel turns whatever it is over - is
+		 * about panels laid out side by side. A modal is not one of
+		 * those: it is over them, it is the only thing the reader can
+		 * be looking at, and scrolling the tree behind it because the
+		 * pointer happened to be on the left would move something they
+		 * cannot see.
+		 */
+		if (v->sym_open) {
+			symd_scroll(v, down ? 3 : -3);
+			break;
+		}
+
 		/* Shift turns the wheel sideways, the way it does in every
 		 * other program that has both. */
 		/*
@@ -17163,6 +18250,8 @@ static void file_close(struct view *v)
 			free(o->finding[k]);
 		free(o->finding);
 		free(o->info);
+		free(o->sym_imp);
+		free(o->sym_exp);
 		free(o->own);
 		if (o->mapped)
 			kof_unmap_file(o->mapped, o->mapped_len);

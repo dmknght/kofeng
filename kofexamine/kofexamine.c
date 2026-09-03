@@ -101,6 +101,7 @@
 #include <kofcore.h>
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
+#include <kofmod/kofsym.h>
 #include <kofmod/pe.h>
 #include <kofmod/gzip.h>
 #include <kofmod/docole.h>
@@ -446,13 +447,13 @@ static void put_type(const char *(*name)(uint32_t), uint32_t t, int width)
 	printf("%s%-*s%s", C_ID, width, w, C_OFF);
 }
 
+static void print_syms(kof_buf buf, const void *view);
+
 static void print_elf(const void *view, const struct kof_obj_ctx *ctx,
 		      kof_buf buf)
 {
 	const struct kof_elf_info *e = view;
 	uint32_t i;
-
-	(void)buf;
 
 	printf("  class     %s %s%s%s  type=%u machine=%u\n",
 	       e->elf_class == KOF_ELFCLASS_64 ? "ELF64" : "ELF32", C_ID,
@@ -484,6 +485,91 @@ static void print_elf(const void *view, const struct kof_obj_ctx *ctx,
 		       C_SIZE, (unsigned long long)e->sec[i].file_size, C_OFF);
 		put_type(kof_inspect_shtype_name, e->sec[i].type, 0);
 		printf("\n");
+	}
+	print_syms(buf, view);
+}
+
+/*
+ * The symbol table, as the block kofsym.h defines rather than as ELF states it.
+ *
+ * Printed from the SAME bytes a rule would match, not from a second walk of the
+ * section - so what is on the screen and what a signature sees cannot drift.
+ * Each field gets the colour its KIND gets everywhere else in this tool: an
+ * address is C_LOC, a size is C_SIZE, a name is C_ID. Reading a record then
+ * needs no legend, because the colours already mean those things on the segment
+ * and section rows above.
+ */
+static const char *sym_type_name(uint8_t t)
+{
+	switch (t) {
+	case KOF_STT_NOTYPE:  return "NOTYPE";
+	case KOF_STT_OBJECT:  return "OBJECT";
+	case KOF_STT_FUNC:    return "FUNC";
+	case KOF_STT_SECTION: return "SECTION";
+	case KOF_STT_FILE:    return "FILE";
+	case KOF_STT_COMMON:  return "COMMON";
+	case KOF_STT_TLS:     return "TLS";
+	default:              return "?";
+	}
+}
+
+static const char *sym_bind_name(uint8_t b)
+{
+	switch (b) {
+	case KOF_STB_LOCAL:  return "LOCAL";
+	case KOF_STB_GLOBAL: return "GLOBAL";
+	case KOF_STB_WEAK:   return "WEAK";
+	default:             return "?";
+	}
+}
+
+static uint64_t sym_rd64(const uint8_t *p)
+{
+	uint64_t v = 0;
+	int i;
+
+	for (i = 7; i >= 0; i--)
+		v = (v << 8) | p[i];
+	return v;
+}
+
+static void print_syms(kof_buf buf, const void *view)
+{
+	static uint8_t blk[KOF_SYM_MAX_BYTES];
+	uint32_t w, count, i;
+	uint8_t origin;
+
+	w = kof_elf_syms(buf, (const struct kof_elf_info *)view, blk, sizeof blk);
+	if (w < KOF_SYM_HDRLEN)
+		return;
+	count  = (uint32_t)blk[KOF_SYM_H_COUNT] |
+		 ((uint32_t)blk[KOF_SYM_H_COUNT + 1] << 8) |
+		 ((uint32_t)blk[KOF_SYM_H_COUNT + 2] << 16) |
+		 ((uint32_t)blk[KOF_SYM_H_COUNT + 3] << 24);
+	origin = blk[KOF_SYM_H_ORIGIN];
+	printf("  symbols   %s%s%s  count=%s%u%s%s\n",
+	       C_ID,
+	       origin == KOF_SYM_ORIGIN_SYMTAB ? ".symtab" :
+	       origin == KOF_SYM_ORIGIN_DYNSYM ? ".dynsym" : "none",
+	       C_OFF, C_SIZE, count, C_OFF,
+	       blk[KOF_SYM_H_TRUNC] ? "  (truncated at the record cap)" : "");
+	for (i = 0; i < count; i++) {
+		const uint8_t *r = blk + KOF_SYM_HDRLEN + (size_t)i * KOF_SYM_RECLEN;
+		uint64_t val = sym_rd64(r + KOF_SYM_R_VALUE);
+		uint64_t sz  = sym_rd64(r + KOF_SYM_R_SIZE);
+		uint8_t  fl  = r[KOF_SYM_R_FLAGS];
+
+		printf("     %s%-7s%s %s%-6s%s value=%s0x%-10llx%s size=%s%-8llu%s "
+		       "%s%s%s%s %s%s%s\n",
+		       C_ID,   sym_type_name(r[KOF_SYM_R_TYPE]), C_OFF,
+		       C_WARN, sym_bind_name(r[KOF_SYM_R_BIND]), C_OFF,
+		       C_LOC,  (unsigned long long)val, C_OFF,
+		       C_SIZE, (unsigned long long)sz,  C_OFF,
+		       C_DIM,
+		       (fl & KOF_SYM_F_UNDEFINED)   ? "UND " : "",
+		       (fl & KOF_SYM_F_IN_WRITABLE) ? "W" : "",
+		       C_OFF,
+		       C_ID, (const char *)(r + KOF_SYM_R_NAME), C_OFF);
 	}
 }
 
