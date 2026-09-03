@@ -2381,13 +2381,29 @@ static const char *sym_byte_colour(uint64_t off)
 		return A_S_VIS;
 	if (r == KOF_SYM_R_FLAGS)
 		return A_S_FLAG;
-	if (r < KOF_SYM_R_VALUE)        /* shndx, and the two reserved bytes */
+	/*
+	 * EACH FIELD AS ITS OWN RANGE, start and length, not "below the next
+	 * one's offset".
+	 *
+	 * It was a chain of `r < KOF_SYM_R_VALUE`, `r < KOF_SYM_R_SIZE`,
+	 * `r < KOF_SYM_R_NAME` - which reads as if it follows the macros but
+	 * silently assumes they are in ascending order. Reordering the record
+	 * so the name sits next to the attributes made every one of those tests
+	 * false about a different field, and nothing would have failed to
+	 * compile: the pane would simply have coloured the wrong bytes. Written
+	 * this way the tests do not care what order the fields are in.
+	 */
+	if (r >= KOF_SYM_R_NAME && r < KOF_SYM_R_NAME + KOF_SYM_NAMELEN)
+		return A_S_NAME;
+	if (r >= KOF_SYM_R_SHNDX && r < KOF_SYM_R_SHNDX + 2u)
 		return A_S_SHN;
-	if (r < KOF_SYM_R_SIZE)
-		return A_S_VAL;
-	if (r < KOF_SYM_R_NAME)
+	if (r >= KOF_SYM_R_SIZE && r < KOF_SYM_R_SIZE + 8u)
 		return A_S_SIZE;
-	return A_S_NAME;
+	if (r >= KOF_SYM_R_VALUE && r < KOF_SYM_R_VALUE + 8u)
+		return A_S_VAL;
+	/* The two reserved bytes, which belong to no field. Dim, like the
+	 * record number, because that is what they are: structure, not data. */
+	return A_S_IDX;
 }
 
 /* Is the row the cursor is on a symbol row rather than a region. */

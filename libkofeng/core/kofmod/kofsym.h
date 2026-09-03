@@ -55,7 +55,15 @@
 #define KOF_SYM_MAGIC1  'S'
 #define KOF_SYM_MAGIC2  'Y'
 #define KOF_SYM_MAGIC3  'M'
-#define KOF_SYM_VERSION 1u
+/*
+ * 2, not 1. Version 1 put the name at 24 with the numeric fields in front of
+ * it; the fields are the same but a reader that trusted the old offsets would
+ * decode every record wrong, so the number has to move with the layout. Bumped
+ * while nothing yet depends on it - no signature can match these records until
+ * the engine can search a region that is built rather than file-backed - which
+ * is exactly when a layout is still free to change.
+ */
+#define KOF_SYM_VERSION 2u
 #define KOF_SYM_HDRLEN  16u
 #define KOF_SYM_RECLEN  64u
 #define KOF_SYM_NAMELEN 40u     /* inline, NUL-padded, truncated if longer */
@@ -69,17 +77,49 @@
 #define KOF_SYM_H_TRUNC    13u  /* 1  1 when the cap stopped it short         */
 #define KOF_SYM_H_RESERVED 14u  /* 2  zero                                    */
 
-/* Record field offsets. Every one is a constant; nothing here is searched for. */
+/*
+ * RECORD FIELD OFFSETS, ORDERED FOR THE PATTERN THAT MATCHES THEM.
+ *
+ * Not ELF's order, and it never was - ELF has TWO orders, which is the whole
+ * reason this layout exists. Elf64_Sym is name,info,other,shndx,value,size and
+ * Elf32_Sym is name,value,size,info,other,shndx: the same fields in different
+ * places, so neither can be the layout a rule is written against. What is taken
+ * from the standard is the ENUM VALUES - STT_*, STB_*, STV_* below - because a
+ * private numbering would cost every rule author a translation table.
+ *
+ * The order here is chosen so that WHAT A RULE MATCHES ON IS CONTIGUOUS.
+ * Attributes first, then the name immediately after them, because the question
+ * a rule asks is almost always some form of "a GLOBAL OBJECT called X": with
+ * the numeric fields in between - as they were, twenty bytes of shndx,
+ * reserved, value and size - that one question needed a hex pattern with a gap
+ * step across all twenty, on every rule. Now the four attribute bytes and the
+ * name are one run and the pattern has no gap in it at all.
+ *
+ * The numeric fields go last because they are READ far more often than they are
+ * matched: an address and a size move with every build, so a rule that pinned
+ * them would be a rule about one binary.
+ *
+ * ALIGNMENT IS DELIBERATELY NOT PRESERVED. value and size are at 54 and 46,
+ * neither 8-aligned, and that is safe because nothing casts a pointer into a
+ * record - every read goes through kof_rd_* or the viewer's own byte loop, both
+ * of which assemble the value a byte at a time. Alignment would have cost the
+ * contiguity above, which is the property that matters.
+ *
+ * The record stays 64 bytes rather than shrinking to the 62 the fields need.
+ * A power of two keeps a record an exact number of hex rows - four at sixteen
+ * bytes to the row, eight at eight - so record boundaries line up down the
+ * pane instead of walking across it.
+ */
 #define KOF_SYM_R_TYPE      0u  /* 1  STT_*  - ELF's numbering                */
 #define KOF_SYM_R_BIND      1u  /* 1  STB_*                                   */
 #define KOF_SYM_R_VIS       2u  /* 1  STV_*                                   */
 #define KOF_SYM_R_FLAGS     3u  /* 1  KOF_SYM_F_*                             */
-#define KOF_SYM_R_SHNDX     4u  /* 2  section index; 0 is ELF's SHN_UNDEF,   */
+#define KOF_SYM_R_NAME      4u  /* 40 NUL-padded - adjacent to the attributes */
+#define KOF_SYM_R_SHNDX    44u  /* 2  section index; 0 is ELF's SHN_UNDEF,    */
                                 /*    0xffff any reserved index (ABS, COMMON) */
-#define KOF_SYM_R_RESERVED  6u  /* 2  zero                                    */
-#define KOF_SYM_R_VALUE     8u  /* 8  address, little endian                  */
-#define KOF_SYM_R_SIZE     16u  /* 8  size, little endian                     */
-#define KOF_SYM_R_NAME     24u  /* 40 NUL-padded                              */
+#define KOF_SYM_R_SIZE     46u  /* 8  size, little endian                     */
+#define KOF_SYM_R_VALUE    54u  /* 8  address, little endian                  */
+#define KOF_SYM_R_RESERVED 62u  /* 2  zero                                    */
 
 /* Which table the block was built from. */
 enum kof_sym_origin {
