@@ -22,6 +22,7 @@
 
 #include <kofmod/kofsym.h>
 #include "../kofparsers/binaries/elf_sym.h"
+#include "../kofparsers/binaries/pe_sym.h"
 #include "scan.h"
 #include "../kofunpack/emu_unpack.h"
 #include "../kofunpack/elf_rebuild.h"
@@ -1656,10 +1657,10 @@ static void c_name_next(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t le
 /*
  * The object's symbol records, built at most once.
  *
- * ELF only, because that is the only builder there is - a PE gets NULL, which
- * a rule reads as "no symbols" and stops on, the same answer a stripped ELF
- * gives. The buffer is the scanner's and outlives the module call; it is NOT
- * rebuilt per ask, so ten rules asking cost one walk of the symbol table.
+ * ELF and PE, each through its own builder - see the note inside. Any other
+ * format gets NULL, which a rule reads as "no symbols" and stops on, the same
+ * answer a stripped ELF gives. The buffer is the scanner's and outlives the
+ * module call; it is NOT rebuilt per ask, so ten rules asking cost one walk.
  */
 static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 {
@@ -1668,14 +1669,27 @@ static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 	if (!sc->sym_done) {
 		sc->sym_done = 1;
 		sc->sym_n = 0;
-		if (ctx->format == KOF_FMT_ELF && ctx->file_header) {
+		if (ctx->file_header &&
+		    (ctx->format == KOF_FMT_ELF ||
+		     ctx->format == KOF_FMT_PE)) {
 			if (!sc->sym)
 				sc->sym = malloc(KOF_SYM_MAX_BYTES);
-			if (sc->sym)
+			/*
+			 * One block, two builders, and the format decides which
+			 * - not the caller. A rule asks for "this object's
+			 * symbols" and gets them in one layout whatever the
+			 * file is, which is the whole reason the layout exists.
+			 */
+			if (sc->sym && ctx->format == KOF_FMT_ELF)
 				sc->sym_n = kof_elf_syms(sc->m.data,
 							 ctx->file_header,
 							 sc->sym,
 							 KOF_SYM_MAX_BYTES);
+			else if (sc->sym)
+				sc->sym_n = kof_pe_syms(sc->m.data,
+							ctx->file_header,
+							sc->sym,
+							KOF_SYM_MAX_BYTES);
 		}
 	}
 	if (nbytes)

@@ -93,6 +93,28 @@ struct kof_result {
 	uint32_t broken;      /* enum kof_broken, zero when the object was finished */
 
 	/*
+	 * HOW MANY MODULES ACTUALLY RAN ON THIS OBJECT.
+	 *
+	 * Zero means NOTHING EVALUATED IT, and that has to be distinguishable
+	 * from "everything applicable evaluated it and found nothing" - for the
+	 * same reason `broken` above is a separate field. Both are the verdict
+	 * "do not know" arriving by different routes, and both were being
+	 * reported as clean.
+	 *
+	 * It happens: a formatless blob - a payload lifted out of a variable,
+	 * a decoder's output, anything with no header - matches no module's
+	 * declared target, so the prefilter excludes every one of them and the
+	 * object comes back with no findings. Measured on one: 40 modules
+	 * considered, 0 ran, all 40 excluded by target. That object reported
+	 * exactly as /usr/bin/ls, which had 31 run on it.
+	 *
+	 * A COUNT and not a flag, because "one module ran" and "thirty-one ran"
+	 * are different amounts of confidence in a clean verdict, and a caller
+	 * that wants to say so has the number.
+	 */
+	uint32_t examined;
+
+	/*
 	 * WHAT THE HEURISTIC MADE OF THIS OBJECT, WHETHER OR NOT IT REPORTED.
 	 *
 	 * Here rather than left to be recomputed, because it was being

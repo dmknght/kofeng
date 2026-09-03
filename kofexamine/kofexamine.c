@@ -103,6 +103,7 @@
 #include <kofmod/elf.h>
 #include <kofmod/kofsym.h>
 #include "../kofparsers/binaries/elf_sym.h"
+#include "../kofparsers/binaries/pe_sym.h"
 #include <kofmod/pe.h>
 #include <kofmod/gzip.h>
 #include <kofmod/docole.h>
@@ -449,7 +450,7 @@ static void put_type(const char *(*name)(uint32_t), uint32_t t, int width)
 	printf("%s%-*s%s", C_ID, width, w, C_OFF);
 }
 
-static void print_syms(kof_buf buf, const void *view);
+static void print_syms(const uint8_t *blk, uint32_t w);
 
 static void print_elf(const void *view, const struct kof_obj_ctx *ctx,
 		      kof_buf buf)
@@ -488,7 +489,11 @@ static void print_elf(const void *view, const struct kof_obj_ctx *ctx,
 		put_type(kof_inspect_shtype_name, e->sec[i].type, 0);
 		printf("\n");
 	}
-	print_syms(buf, view);
+	{
+		static uint8_t blk[KOF_SYM_MAX_BYTES];
+
+		print_syms(blk, kof_elf_syms(buf, e, blk, sizeof blk));
+	}
 }
 
 /*
@@ -535,14 +540,20 @@ static uint64_t sym_rd64(const uint8_t *p)
 	return v;
 }
 
-static void print_syms(kof_buf buf, const void *view)
+/*
+ * Takes the BUILT BLOCK rather than the file and its parse.
+ *
+ * It used to call kof_elf_syms itself, which made it an ELF function by
+ * construction. A PE has imports and exports in the same layout now - see
+ * kofparsers/binaries/pe_sym.c - so the builder is the caller's business and
+ * this prints whatever it is handed. One printer, one layout, two formats.
+ */
+static void print_syms(const uint8_t *blk, uint32_t w)
 {
-	static uint8_t blk[KOF_SYM_MAX_BYTES];
-	uint32_t w, count, i;
+	uint32_t count, i;
 	uint8_t origin;
 
-	w = kof_elf_syms(buf, (const struct kof_elf_info *)view, blk, sizeof blk);
-	if (w < KOF_SYM_HDRLEN)
+	if (!blk || w < KOF_SYM_HDRLEN)
 		return;
 	count  = (uint32_t)blk[KOF_SYM_H_COUNT] |
 		 ((uint32_t)blk[KOF_SYM_H_COUNT + 1] << 8) |
@@ -552,7 +563,8 @@ static void print_syms(kof_buf buf, const void *view)
 	printf("  symbols   %s%s%s  count=%s%u%s%s\n",
 	       C_ID,
 	       origin == KOF_SYM_ORIGIN_SYMTAB ? ".symtab" :
-	       origin == KOF_SYM_ORIGIN_DYNSYM ? ".dynsym" : "none",
+	       origin == KOF_SYM_ORIGIN_DYNSYM ? ".dynsym" :
+	       origin == KOF_SYM_ORIGIN_PE_DIR ? "imports+exports" : "none",
 	       C_OFF, C_SIZE, count, C_OFF,
 	       blk[KOF_SYM_H_TRUNC] ? "  (truncated at the record cap)" : "");
 	for (i = 0; i < count; i++) {
@@ -627,6 +639,13 @@ static void print_pe(const void *view, const struct kof_obj_ctx *ctx,
 			       (unsigned long long)(p->sec[i].claim_off +
 						    p->sec[i].claim_len));
 		printf("\n");
+	}
+	/* The imports and exports, in the same block and printed by the same
+	 * function an ELF's symbols are - see print_syms. */
+	{
+		static uint8_t blk[KOF_SYM_MAX_BYTES];
+
+		print_syms(blk, kof_pe_syms(buf, p, blk, sizeof blk));
 	}
 }
 

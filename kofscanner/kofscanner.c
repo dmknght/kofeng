@@ -66,6 +66,21 @@ struct fent {
 	char    *file;
 	int      level;          /* worst KOF_LEVEL_*, or -1 */
 	uint32_t broken;         /* worst kof_broken reason, or 0 */
+	/*
+	 * Whether ANY module ran on any object of this file.
+	 *
+	 * A file every applicable module cleared and a file nothing was
+	 * eligible for are both "no findings", and reporting them the same way
+	 * is the mistake `broken` was added to avoid in its own case. A
+	 * formatless blob - a payload lifted out of a variable, a decoder's
+	 * output - matches no module's declared target, so the prefilter
+	 * excludes all of them and the object comes back looking clean.
+	 *
+	 * Rolled up as an OR across the file's objects: a container whose
+	 * members were examined has been examined, even if the container's own
+	 * bytes matched nothing.
+	 */
+	int      examined;
 	char     name[224];      /* the worst finding's composed name */
 };
 
@@ -251,6 +266,7 @@ static struct fent *fmap_get(struct fmap *m, const char *file, size_t flen)
 		e->file[flen] = 0;
 		e->level = -1;
 		e->broken = 0;
+		e->examined = 0;
 		e->name[0] = 0;
 		m->idx[slot] = (uint32_t)(m->n + 1u);
 		m->n++;
@@ -429,8 +445,14 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	 * always get an entry so the file is counted; a clean object touches one
 	 * only under -v, where every file is listed at the end whatever it turned
 	 * out to be.
+	 *
+	 * AN UNEXAMINED OBJECT ALWAYS GETS ONE TOO, for the same reason a broken
+	 * one does: it is not clean. Without this it had no entry outside -v, so
+	 * the SKIPPED line below had nothing to iterate and the file vanished
+	 * into the clean count by subtraction - which is exactly the silence
+	 * being fixed.
 	 */
-	if (res->n || res->broken || r->verbose) {
+	if (res->n || res->broken || !res->examined || r->verbose) {
 		struct fent *e = fmap_get(&r->files, name, flen);
 
 		if (e) {
@@ -441,6 +463,8 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 			}
 			if (res->broken && !e->broken)
 				e->broken = res->broken;
+			if (res->examined)
+				e->examined = 1;
 		}
 	}
 
@@ -880,8 +904,45 @@ int main(int argc, char **argv)
 		for (fi = 0; fi < r.files.n; fi++) {
 			const struct fent *e = &r.files.arr[fi];
 
-			if (e->level < 0 && !e->broken)
+			if (e->level < 0 && !e->broken && e->examined)
 				printf("%s%-10s%s %s\n", col(&r, C_GRN), "OK",
+				       col(&r, C_RST), e->file);
+		}
+		/*
+		 * The unexamined ones, and NOT under -v only.
+		 *
+		 * "OK" is a claim, and this is the one case where the scan
+		 * cannot make it: no module was eligible, so nothing looked.
+		 * Saying so unconditionally is the point - a caller who only
+		 * reads the default output would otherwise be told a file is
+		 * clean when the honest answer is that it was not examined.
+		 */
+		/*
+		 * The unexamined ones, beside the clean ones and behind the
+		 * same -v.
+		 *
+		 * It printed unconditionally at first, on the argument that a
+		 * caller must not be told "clean" when nothing looked. That
+		 * argument is right and the SUMMARY is where it is answered -
+		 * there is a `skipped` count now, and it is not folded into
+		 * clean.
+		 *
+		 * WHY THIS DIFFERS FROM BROKEN, which prints its verdict
+		 * unconditionally by the rule above it: FREQUENCY. A broken
+		 * file is rare - a limit ran out, a codec is missing, the file
+		 * is damaged - so a line each is information. Skipped is
+		 * ordinary: 190 of the 954 files in /usr/bin are shell and
+		 * Perl scripts that no module targets, and a line each buried
+		 * everything else the scan had to say. Same kind of verdict,
+		 * two orders of magnitude apart in how often it happens, so
+		 * the count carries it and the per-file line is detail.
+		 */
+		for (fi = 0; fi < r.files.n; fi++) {
+			const struct fent *e = &r.files.arr[fi];
+
+			if (e->level < 0 && !e->broken && !e->examined)
+				printf("%s%-10s%s %s: no module targets this "
+				       "format\n", col(&r, C_DIM), "SKIPPED",
 				       col(&r, C_RST), e->file);
 		}
 	}
@@ -906,6 +967,7 @@ int main(int argc, char **argv)
 		struct { char kind[48]; uint64_t n; } hk[16];
 		int n_hk = 0, j;
 		uint64_t heur_f = 0, broken_f = 0, clean_f;
+		uint64_t skip_f = 0;
 		uint64_t rf[KOF_BROKEN_COUNT];   /* broken FILES, by their reason */
 		size_t fi;
 		uint32_t k;
@@ -941,6 +1003,12 @@ int main(int argc, char **argv)
 				broken_f++;
 				if (e->broken < KOF_BROKEN_COUNT)
 					rf[e->broken]++;
+			} else if (!e->examined) {
+				/* Counted apart from clean, and BEFORE the
+				 * subtraction below, or the file would be
+				 * counted as clean by omission - which is the
+				 * whole thing this is here to stop. */
+				skip_f++;
 			}
 		}
 		/* Per OBJECT, for the exit code only: any object a limit or a gap
@@ -957,7 +1025,8 @@ int main(int argc, char **argv)
 		 * underflow there would print a clean count in the billions.
 		 */
 		{
-			uint64_t nonclean = inf_f + sus_f + heur_f + broken_f;
+			uint64_t nonclean = inf_f + sus_f + heur_f + broken_f +
+					    skip_f;
 
 			clean_f = r.files_total > nonclean
 				  ? r.files_total - nonclean : 0;
@@ -987,6 +1056,11 @@ int main(int argc, char **argv)
 			       heur_f ? col(&r, C_MAG) : "",
 			       (unsigned long long)heur_f,
 			       heur_f ? col(&r, C_RST) : "");
+		/*
+		 * Only when there are any. A line reading "skipped 0" on every
+		 * scan is noise; the interesting case is the one where it is
+		 * not zero, and then it has to be impossible to miss.
+		 */
 			/* Each kind on its own line, read the same way as the
 			 * totals above it: the count right after the label and
 			 * then "file(s)", not pushed out to a far column, and
@@ -1002,6 +1076,12 @@ int main(int argc, char **argv)
 		 * the three call for different actions: raise a limit, report a gap in
 		 * this build, or accept that the file is damaged.
 		 */
+		if (skip_f) {
+			printf("skipped   %s%llu%s file(s)  "
+			       "(no module targets the format)\n",
+			       col(&r, C_DIM), (unsigned long long)skip_f,
+			       col(&r, C_RST));
+		}
 		if (broken_f) {
 			printf("broken    %s%llu%s file(s) the engine could not finish\n",
 			       col(&r, C_CYN), (unsigned long long)broken_f,

@@ -154,7 +154,21 @@
 enum kof_sym_origin {
 	KOF_SYM_ORIGIN_NONE   = 0,
 	KOF_SYM_ORIGIN_SYMTAB = 1,   /* ELF .symtab - full, removed by strip     */
-	KOF_SYM_ORIGIN_DYNSYM = 2    /* ELF .dynsym - what dynamic linking needs */
+	KOF_SYM_ORIGIN_DYNSYM = 2,   /* ELF .dynsym - what dynamic linking needs */
+	/*
+	 * A PE's import and export directories.
+	 *
+	 * A NEW VALUE IN AN EXISTING FIELD, not a new field, so the layout is
+	 * unchanged and the version does not move: a reader that predates this
+	 * sees a number it does not know and falls to its default, which is
+	 * the same "unknown origin" it would have printed anyway.
+	 *
+	 * One value for both directories because they are one block, and which
+	 * half a record came from is already in its flags - UNDEFINED is an
+	 * import, DEFINED is an export. A second origin would say the same
+	 * thing twice and let the two disagree.
+	 */
+	KOF_SYM_ORIGIN_PE_DIR = 3
 };
 
 /*

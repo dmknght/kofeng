@@ -195,8 +195,15 @@ static uint32_t regions_present(const struct kof_obj_ctx *ctx, uint32_t wanted)
  * default has to fall that way: over-running costs time, under-running costs
  * detections and would not show up as a failure anywhere.
  */
+/*
+ * `out` is the per-object result and may be NULL - the unpack pass has no
+ * result to fill yet. Passed rather than derived from the stats, because those
+ * are cumulative and a per-object number taken by differencing them is wrong
+ * the moment two objects are in flight.
+ */
 static int prefilter(const struct kof_module *m, const struct kof_obj_ctx *ctx,
-		     uint32_t present, struct kof_stats *st)
+		     uint32_t present, struct kof_stats *st,
+		     struct kof_result *out)
 {
 	st->considered++;
 
@@ -240,6 +247,8 @@ static int prefilter(const struct kof_module *m, const struct kof_obj_ctx *ctx,
 	}
 
 	st->ran++;
+	if (out)
+		out->examined++;
 	return 1;
 }
 
@@ -960,7 +969,7 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 */
 		if (m->heur_level > lvl)
 			continue;
-		if (!prefilter(m, ctx, present, &sc->st))
+		if (!prefilter(m, ctx, present, &sc->st, out))
 			continue;
 
 		sc->rep_valid = 0;
@@ -1108,7 +1117,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	for (i = 0; i < sc->eng->n_mods; i++) {
 		const struct kof_module *m = &sc->eng->mods[i];
 
-		if (!prefilter(m, &ctx, present, &sc->st))
+		if (!prefilter(m, &ctx, present, &sc->st, out))
 			continue;
 
 		sc->rep_valid = 0;

@@ -309,7 +309,33 @@ KOF_DEFINE_HEUR
 	 * toolchain this template is built with, and it is the reason this is a
 	 * heuristic rather than a verdict.
 	 */
-	for (i = kof_sym_first(b, n); (r = kof_sym_rec(b, n, i)) != 0; i++) {
+	/*
+	 * BACKWARDS, from the last record to `_start`.
+	 *
+	 * The WINDOW is the same either way - `_start` bounds it at one end and
+	 * the last record at the other, about six records on the samples
+	 * measured - so this is not a shorter search. It changes two things.
+	 *
+	 * It optimises the BEST case and leaves the worst alone: the payload
+	 * sits within the last six records in every sample measured, and four
+	 * of twelve are the very last, so backwards usually finds it on the
+	 * first or second test rather than after walking the whole window.
+	 *
+	 * And it decides WHICH candidate is reported when a file has more than
+	 * one. Two to four records pass the attribute test and up to two pass
+	 * everything; forwards reports the first, backwards the last. The
+	 * blob's position was measured for this: it ends exactly at its
+	 * section's end in twelve of twelve, so the later candidate is the more
+	 * likely payload.
+	 *
+	 * The loop condition is `i-- > lo`, which compares before it decrements,
+	 * so it visits [lo, cnt) and stops without ever letting an unsigned
+	 * index wrap below zero.
+	 */
+	for (i = kof_sym_count(b, n); i-- > kof_sym_first(b, n); ) {
+		r = kof_sym_rec(b, n, i);
+		if (!r)
+			continue;
 		uint64_t sz, val, fo;
 		uint32_t shndx, k, top = 0;
 		uint32_t freq[256];

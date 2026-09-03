@@ -61,6 +61,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/kofsym.h>
 #include "../kofparsers/binaries/elf_sym.h"
+#include "../kofparsers/binaries/pe_sym.h"
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 
@@ -1364,6 +1365,11 @@ struct object {
 	 * zero when none did. Reported through kof_debug - see on_debug. */
 	uint64_t          payload_at;
 	uint64_t          payload_len;
+	/* Set on the CHILD this viewer built from a parent's payload, so the
+	 * menu can find it without inferring anything from the name. A name
+	 * test alone would also match an unpacker's child that happened to sit
+	 * under the same parent. */
+	int               payload_of;
 };
 
 /*
@@ -1993,9 +1999,6 @@ struct view {
 	int         dlg_have;
 	int         dlg_drag;
 
-	uint8_t     sc_open;
-	uint64_t    sc_at;
-
 	uint8_t     sym_open;
 	uint64_t    sym_at;
 	/*
@@ -2586,7 +2589,15 @@ static void sym_build(struct object *o)
 	o->sym_imp = o->sym_exp = 0;
 	o->sym_imp_n = o->sym_exp_n = 0;
 
-	n = kof_elf_syms(o->buf, o->info, scratch, (uint32_t)sizeof scratch);
+	/*
+	 * Whichever builder the format has. The split below does not care which
+	 * it was: it sorts on the UNDEFINED flag, and that flag means the same
+	 * thing in both - an ELF symbol nobody defines here and a PE import are
+	 * the same claim.
+	 */
+	n = o->ctx.format == KOF_FMT_PE
+	  ? kof_pe_syms(o->buf, o->info, scratch, (uint32_t)sizeof scratch)
+	  : kof_elf_syms(o->buf, o->info, scratch, (uint32_t)sizeof scratch);
 	total = sym_count(scratch, n);
 	if (!total)
 		return;
@@ -2654,6 +2665,256 @@ static void sym_build(struct object *o)
 	}
 }
 
+/* The largest payload the viewer will decode into, which is the largest one
+ * the heuristic will report - see SCL_SIZE_MAX in bases/heur/scloader_00.c.
+ * Named here because two functions decode into a buffer of it and a mismatch
+ * would truncate one view and not the other. */
+#define SCL_SIZE_MAX_VIEW 8192u
+
+/* Base64, decoded, because that is the one wrapper that can be undone with no
+ * guesswork: the alphabet is fixed and the transform is reversible. Returns the
+ * bytes written, or 0 when the input is not base64 - which is most payloads,
+ * and not a failure. */
+static uint32_t b64_try(const uint8_t *in, uint32_t n, uint8_t *out,
+			uint32_t cap)
+{
+	static const char *A =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	uint32_t i, k = 0, acc = 0, bits = 0;
+
+	/*
+	 * Refused on the first byte that is not in the alphabet, rather than
+	 * skipped. A payload with a few base64-looking bytes in it is not
+	 * base64, and decoding the parts that happen to fit would produce a
+	 * blob that means nothing and looks like an answer.
+	 */
+	if (n < 8u)
+		return 0;
+	for (i = 0; i < n; i++) {
+		const char *p;
+		uint8_t c = in[i];
+
+		/*
+		 * A NUL ENDS THE INPUT, it does not fail it.
+		 *
+		 * These blobs are declared as C string literals - `char code[]
+		 * = "SDHJ..."` - so sizeof includes the terminator and the
+		 * symbol's size is one more than the text. Treating that last
+		 * byte as "not base64" refused every one of them, and the
+		 * dialog said "looks like ?" over a screen of visibly base64
+		 * ASCII.
+		 *
+		 * Only at the END, though: a NUL with data after it is not a
+		 * string and not base64, so the loop stops rather than skipping
+		 * and the tail is never decoded as if it belonged.
+		 */
+		if (!c)
+			break;
+		if (c == '=' || c == '\n' || c == '\r')
+			continue;
+		p = strchr(A, (int)c);
+		if (!p)
+			return 0;
+		acc = (acc << 6) | (uint32_t)(p - A);
+		bits += 6;
+		if (bits >= 8) {
+			bits -= 8;
+			if (k >= cap)
+				return 0;
+			out[k++] = (uint8_t)(acc >> bits);
+		}
+	}
+	return k;
+}
+
+/*
+ * Take a run of bytes as a new object in the tree.
+ *
+ * The small half of what on_object does, and only the small half: bytes this
+ * size are always copied, because the one caller is a payload and the
+ * heuristic that names one bounds it at SCL_SIZE_MAX. No spill, no budget
+ * branch, no findings - those exist in on_object because the engine hands it
+ * whatever an unpacker produced, which can be a decompressed installer.
+ *
+ * Not shared with on_object for that reason: factoring the two together would
+ * mean one function with a parameter saying which of its halves to run, and
+ * the half this caller does not want is the half with the temporary files in
+ * it.
+ */
+static int obj_take(struct view *v, const char *name,
+		    const uint8_t *bytes, uint32_t len)
+{
+	struct object *o;
+	const char *p;
+
+	if (v->n_obj >= MAX_OBJ || !len || !bytes)
+		return 0;
+	if (v->obj_held + len > OBJ_BUDGET)
+		return 0;
+	o = &v->obj[v->n_obj];
+	memset(o, 0, sizeof *o);
+	snprintf(o->name, sizeof o->name, "%s", name);
+	o->own = malloc((size_t)len);
+	if (!o->own)
+		return 0;
+	memcpy(o->own, bytes, (size_t)len);
+	o->buf = kof_buf_make(o->own, len);
+	v->obj_held += len;
+	/* Depth from the "//" in the name, exactly as on_object derives it, so
+	 * the tree indents this the same way it indents an unpacked child. */
+	for (p = o->name; (p = strstr(p, "//")) != NULL; p += 2)
+		o->depth++;
+	v->n_obj++;
+	return 1;
+}
+
+
+/*
+ * WHICH WIDTH TO DECODE A PAYLOAD AT, which is NOT its parent's.
+ *
+ * A 64-bit ELF routinely carries 32-bit Windows shellcode - two of the samples
+ * measured do - and a payload child has no format of its own, so the ordinary
+ * arch test cannot answer for it and the fallback says 64. At 64 the fourth
+ * byte of a textbook msf x86 prologue comes out "(data)": `60` is PUSHAD in
+ * 32-bit mode and does not exist in 64-bit.
+ *
+ * Taken from the same prefixes sc_kind recognises, because recognising the stub
+ * IS knowing which mode emitted it. Falls back to the caller's default when
+ * nothing is recognised, which is the best available guess and no worse than
+ * what was there before - and the disassembly panel's own bit switch is right
+ * there to override it.
+ */
+static unsigned sc_bits(const uint8_t *b, uint32_t n, unsigned dflt)
+{
+	if (!b)
+		return dflt;
+	if (n >= 6 && b[0] == 0xfc && b[1] == 0x48 && b[2] == 0x83)
+		return 64;                      /* x64 block_api */
+	if (n >= 7 && b[0] == 0xfc && b[1] == 0xe8 && b[2] == 0x82 &&
+	    b[6] == 0x60)
+		return 32;                      /* x86 block_api, PUSHAD */
+	if (n >= 4 && b[0] == 0x48 && b[1] == 0x31)
+		return 64;                      /* x64/xor, and raw x64 */
+	if (n >= 8 && (b[4] == 0xd9 || b[5] == 0xd9))
+		return 32;                      /* fnstenv GetPC is x86 */
+	return dflt;
+}
+
+static const char *sc_kind(const uint8_t *b, uint32_t n)
+{
+	if (n >= 6 && b[0] == 0xfc && b[1] == 0x48 && b[2] == 0x83 &&
+	    b[3] == 0xe4 && b[4] == 0xf0 && b[5] == 0xe8)
+		return "msf x64 block_api (Windows, raw)";
+	if (n >= 9 && b[0] == 0xfc && b[1] == 0xe8 && b[2] == 0x82 &&
+	    b[3] == 0x00 && b[4] == 0x00 && b[5] == 0x00 && b[6] == 0x60)
+		return "msf x86 block_api (Windows, raw)";
+	if (n >= 6 && b[0] == 0x48 && b[1] == 0x31 && b[2] == 0xc9 &&
+	    b[3] == 0x48 && b[4] == 0x81 && b[5] == 0xe9)
+		return "msf x64/xor decoder stub";
+	if (n >= 4 && b[0] == 0xd9 && b[1] == 0x74 && b[2] == 0x24)
+		return "msf x86 fnstenv GetPC (shikata family)";
+	if (n >= 8 && (b[4] == 0xd9 || b[5] == 0xd9) &&
+	    (b[5] == 0x74 || b[6] == 0x74))
+		return "msf x86 fnstenv GetPC (shikata family)";
+	if (n >= 4 && b[0] == 0x48 && b[1] == 0x31 && b[2] == 0xc0)
+		return "x86-64 shellcode, no decoder in front";
+	if (n >= 2 && b[0] == 0xeb)
+		return "jmp/pop/xor decoder stub";
+	return "?";
+}
+
+/*
+ * THE PAYLOAD A HEURISTIC NAMED, AS AN OBJECT OF ITS OWN.
+ *
+ * This is the whole reason the rule reports an address. A dialog showing the
+ * bytes was the first attempt and it was the wrong shape: a researcher cannot
+ * do anything with a hex dump in a box, while an OBJECT gets everything this
+ * tool already does - a row in the tree, the hex pane with its selection and
+ * its right-click menu, the disassembly panel, Find, Go to, the marker list,
+ * and the draft panel to declare a signature from. None of that had to be
+ * written for it; it works because the object is an object.
+ *
+ * NAMED "//payload", because depth in this tree is counted from the "//" in a
+ * name - see on_object - so the separator is what makes it a child rather than
+ * a sibling. It carries the symbol's own name too, since that is what a reader
+ * saw in the symbols dialog and is how they will recognise it here.
+ *
+ * DECODED WHEN IT IS BASE64, and the name says which: the encoded text is not
+ * the payload, and an object holding it would disassemble as garbage. Only
+ * base64, for the reason b64_try gives - it is the one wrapper undoable with no
+ * guesswork. An encoder STUB is left alone: it is real code and disassembling
+ * it is exactly what a reader wants.
+ *
+ * WHAT THIS IS NOT: a claim that this object was ever a file. It was not. It is
+ * the bytes a global variable holds, presented as the thing they are so that
+ * the tools can reach them - the same claim bases/unp/msf_elf32.h makes about a
+ * reconstructed payload, and the same reason.
+ */
+static int payload_child(struct view *v, uint32_t parent)
+{
+	struct object *po = &v->obj[parent];
+	const struct kof_elf_info *e = po->info;
+	static uint8_t dec[SCL_SIZE_MAX_VIEW];
+	const uint8_t *b = 0;
+	uint32_t n = 0, dn, i;
+	char name[256], sym[KOF_SYM_NAMELEN + 1];
+
+	if (!po->payload_at || !po->payload_len || !e || !e->valid || !po->buf.p)
+		return 0;
+	if (v->n_obj >= MAX_OBJ)
+		return 0;
+
+	/* The address, through the parent's own section table. */
+	for (i = 0; i < e->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
+		const struct kof_elf_sec *sc = &e->sec[i];
+		uint64_t fo;
+
+		if (sc->type != 1u || !sc->mem_addr)
+			continue;
+		if (po->payload_at < sc->mem_addr ||
+		    po->payload_at >= sc->mem_addr + sc->file_size)
+			continue;
+		fo = sc->file_off + (po->payload_at - sc->mem_addr);
+		if (fo >= po->buf.n || po->payload_len > po->buf.n - fo)
+			return 0;
+		b = po->buf.p + fo;
+		n = (uint32_t)po->payload_len;
+		break;
+	}
+	if (!b || !n)
+		return 0;
+
+	/* Which symbol it was, read back from the block rather than remembered,
+	 * so the name here and the row marked in the symbols dialog can only
+	 * ever be the same symbol. */
+	sym[0] = 0;
+	{
+		const uint8_t *r;
+		uint32_t k;
+
+		for (k = 0; (r = kof_sym_rec(po->sym_exp, po->sym_exp_n, k));
+		     k++) {
+			uint32_t j;
+
+			if (kof_sym_u64(r, KOF_SYM_R_VALUE) != po->payload_at)
+				continue;
+			for (j = 0; j < KOF_SYM_NAMELEN &&
+				    r[KOF_SYM_R_NAME + j]; j++)
+				sym[j] = (char)r[KOF_SYM_R_NAME + j];
+			sym[j] = 0;
+			break;
+		}
+	}
+
+	dn = b64_try(b, n, dec, (uint32_t)sizeof dec);
+	snprintf(name, sizeof name, "%s//%s%s", po->name,
+		 sym[0] ? sym : "payload", dn ? " (base64 decoded)" : "");
+	if (!obj_take(v, name, dn ? dec : b, dn ? dn : n))
+		return 0;
+	v->obj[v->n_obj - 1u].payload_of = 1;
+	return 1;
+}
+
 /*
  * Parse and look up the objects from `from` onward.
  *
@@ -2676,7 +2937,9 @@ static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 			o->emu_why = (uint8_t)kof_emu_unp_gate(&o->ctx, o->info,
 							       o->buf.p,
 							       o->buf.n);
-		if (o->fmt && o->info && o->ctx.format == KOF_FMT_ELF)
+		if (o->fmt && o->info &&
+		    (o->ctx.format == KOF_FMT_ELF ||
+		     o->ctx.format == KOF_FMT_PE))
 			sym_build(o);
 		if (eng &&
 		    !kof_touch_object(eng, o->buf, &o->ctx,
@@ -2713,6 +2976,23 @@ static uint32_t touch_default(const struct object *ob)
 static void objects_examine(struct view *v, kof_engine *eng)
 {
 	objects_examine_from(v, eng, 0);
+	/*
+	 * The payloads a heuristic named, added as objects of their own.
+	 *
+	 * AFTER the parse, because the address a rule reports has to be turned
+	 * into a file offset through the parent's section table, and that table
+	 * is what objects_examine_from builds. Then examined again from the
+	 * first new one, so the payloads themselves get identified, scanned for
+	 * markers and given a region tree like anything else.
+	 */
+	{
+		uint32_t before = v->n_obj, i;
+
+		for (i = 0; i < before; i++)
+			payload_child(v, i);
+		if (v->n_obj > before)
+			objects_examine_from(v, eng, before);
+	}
 }
 
 /* ---- the tree -------------------------------------------------------------- */
@@ -8728,6 +9008,21 @@ static int dis_default_bits(struct view *v)
 {
 	struct object *ob = cur_obj(v);
 
+	/*
+	 * A PAYLOAD'S WIDTH IS ITS OWN, not its parent's.
+	 *
+	 * A payload child has no format, so the arch test below cannot answer
+	 * for it and the fallback would say 64 - and a 64-bit ELF routinely
+	 * carries 32-bit Windows shellcode. Decoded at 64 the fourth byte of a
+	 * textbook msf x86 prologue comes out "(data)", because `60` is PUSHAD
+	 * in 32-bit mode and does not exist in 64-bit.
+	 *
+	 * Taken from the stub the payload starts with, since recognising the
+	 * stub IS knowing which mode emitted it. Still a guess, and still
+	 * overridable - the panel's own bit switch is right there.
+	 */
+	if (ob && ob->payload_of && ob->buf.p)
+		return (int)sc_bits(ob->buf.p, (uint32_t)ob->buf.n, 64u);
 	if (ob && ob->fmt) {
 		if (ob->ctx.arch == KOF_ARCH_X86)
 			return 32;
@@ -12340,12 +12635,6 @@ static void draw_find(struct out *o, struct view *v);
 static void draw_goto(struct out *o, struct view *v);
 static int  goto_click(struct view *v);
 static void draw_symbols(struct out *o, struct view *v);
-static void draw_shellcode(struct out *o, struct view *v);
-static int  scd_click(struct view *v);
-static void scd_scroll(struct view *v, int64_t d);
-static uint64_t scd_max(struct view *v);
-static const uint8_t *scd_bytes(struct view *v, uint32_t *n);
-static int  scd_rows(void);
 static int  symd_click(struct view *v);
 static void symd_scroll(struct view *v, int64_t d);
 static void symd_clamp(struct view *v);
@@ -12514,8 +12803,6 @@ static void redraw(struct view *v)
 			draw_goto(&o, v);
 		if (v->sym_open)
 			draw_symbols(&o, v);
-		if (v->sc_open)
-			draw_shellcode(&o, v);
 	}
 	if (v->prop_open)
 		draw_prop(&o, v);
@@ -14979,25 +15266,58 @@ static void bar_run(struct view *v, int i)
 	 * makes the reader work out which of "nothing found" and "nothing
 	 * shown" they are looking at.
 	 */
+	/*
+	 * GO TO THE PAYLOAD, which is an object of its own.
+	 *
+	 * There used to be a dialog here showing the bytes, then the same
+	 * dialog showing a disassembly. Both are gone: the payload is a child
+	 * object now, so the tree, the hex pane with its selection and its
+	 * right-click menu, the disassembly panel, Find, Go to and the draft
+	 * are all already pointed at it. A dialog was a second, worse copy of
+	 * tools that exist.
+	 *
+	 * So the item's job is to take the reader THERE - the payload is one
+	 * row among however many the tree has - and to say what it looks like,
+	 * which is the one thing the dialog said that the tree does not.
+	 */
 	case BI_FINDSC: {
-		uint32_t n = 0;
+		uint32_t me = v->node[v->sel_node].obj, k;
+		uint32_t kid = 0;
 
-		if (!scd_bytes(v, &n) || !n) {
-			/*
-			 * act_msg, NOT say_note.
-			 *
-			 * The note channel is only drawn while the reader is in
-			 * the draft panel or the marker list - see the status
-			 * bar - so a note written from here had nowhere to
-			 * appear and the item read as doing nothing at all.
-			 * act_msg is what a menu action's outcome goes to; it
-			 * is where "Copied 2 line(s)" appears, and it is drawn
-			 * whatever the reader is looking at.
-			 *
-			 * act_ok, because finding nothing IS the answer and not
-			 * a failure - it decides how long the line stays up,
-			 * and an answer does not need fifteen seconds.
-			 */
+		/*
+		 * ALREADY THERE IS AN ANSWER, NOT A FAILURE.
+		 *
+		 * The reader sees the payload in the tree, clicks it, then asks
+		 * to find it - which is the most natural order to do those two
+		 * things in, and it reported "no variable in this object looks
+		 * like shellcode". The object under the cursor WAS the payload;
+		 * the search was for a payload inside it, and a payload does
+		 * not carry one.
+		 *
+		 * The question is about the file, not about whichever row the
+		 * cursor is on, so a payload child answers with itself. That
+		 * also makes the item idempotent: pressing it twice says the
+		 * same thing rather than contradicting itself.
+		 */
+		if (v->obj[me].payload_of)
+			kid = me;
+
+		/* The child of THIS object, found by the name payload_child
+		 * built: it is the parent's name with a "//" and the symbol
+		 * after it, so a prefix test is exact rather than a guess. */
+		for (k = 0; !kid && k < v->n_obj; k++) {
+			size_t pn = strlen(v->obj[me].name);
+
+			if (k == me || v->obj[k].depth <= v->obj[me].depth)
+				continue;
+			if (strncmp(v->obj[k].name, v->obj[me].name, pn) == 0 &&
+			    v->obj[k].name[pn] == '/' &&
+			    v->obj[k].payload_of) {
+				kid = k;
+				break;
+			}
+		}
+		if (!kid) {
 			snprintf(v->act_msg, sizeof v->act_msg, "%s",
 				 "no variable in this object looks like "
 				 "shellcode");
@@ -15005,8 +15325,16 @@ static void bar_run(struct view *v, int i)
 			v->menu_open = 0;
 			return;
 		}
-		v->sc_open = 1;
-		v->sc_at = 0;
+		for (k = 0; k < v->n_node; k++)
+			if (v->node[k].obj == kid && !v->node[k].mask &&
+			    !v->node[k].sym) {
+				goto_node(v, k);
+				break;
+			}
+		snprintf(v->act_msg, sizeof v->act_msg, "%s",
+			 sc_kind(v->obj[kid].buf.p,
+				 (uint32_t)v->obj[kid].buf.n));
+		v->act_ok = 1;
 		v->menu_open = 0;
 		return;
 	}
@@ -15881,7 +16209,6 @@ static void sclip_name(struct sclip *c, const uint8_t *r, int nw,
  */
 static void dlg_close(struct view *v)
 {
-	v->sc_open = 0;
 	v->sym_open = 0;
 	v->dlg_have = 0;
 	v->dlg_drag = 0;
@@ -16440,359 +16767,6 @@ static void symd_open(struct view *v)
  * question you asked", and it closes when the reader is done with it.
  */
 
-/* Base64, decoded, because that is the one wrapper that can be undone with no
- * guesswork: the alphabet is fixed and the transform is reversible. Returns the
- * bytes written, or 0 when the input is not base64 - which is most payloads,
- * and not a failure. */
-static uint32_t b64_try(const uint8_t *in, uint32_t n, uint8_t *out,
-			uint32_t cap)
-{
-	static const char *A =
-		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-	uint32_t i, k = 0, acc = 0, bits = 0;
-
-	/*
-	 * Refused on the first byte that is not in the alphabet, rather than
-	 * skipped. A payload with a few base64-looking bytes in it is not
-	 * base64, and decoding the parts that happen to fit would produce a
-	 * blob that means nothing and looks like an answer.
-	 */
-	if (n < 8u)
-		return 0;
-	for (i = 0; i < n; i++) {
-		const char *p;
-		uint8_t c = in[i];
-
-		/*
-		 * A NUL ENDS THE INPUT, it does not fail it.
-		 *
-		 * These blobs are declared as C string literals - `char code[]
-		 * = "SDHJ..."` - so sizeof includes the terminator and the
-		 * symbol's size is one more than the text. Treating that last
-		 * byte as "not base64" refused every one of them, and the
-		 * dialog said "looks like ?" over a screen of visibly base64
-		 * ASCII.
-		 *
-		 * Only at the END, though: a NUL with data after it is not a
-		 * string and not base64, so the loop stops rather than skipping
-		 * and the tail is never decoded as if it belonged.
-		 */
-		if (!c)
-			break;
-		if (c == '=' || c == '\n' || c == '\r')
-			continue;
-		p = strchr(A, (int)c);
-		if (!p)
-			return 0;
-		acc = (acc << 6) | (uint32_t)(p - A);
-		bits += 6;
-		if (bits >= 8) {
-			bits -= 8;
-			if (k >= cap)
-				return 0;
-			out[k++] = (uint8_t)(acc >> bits);
-		}
-	}
-	return k;
-}
-
-/*
- * What the payload's first bytes say it is.
- *
- * Named from the stub, not from the whole blob: every one of these is a
- * decoder whose first instructions are fixed by the encoder that emitted it,
- * so the front of the blob is the one part that identifies it. Measured across
- * the samples on hand - see the table in bases/heur/scloader_00.c.
- *
- * "?" for anything unmeasured, which is honest: a wrong name here would be
- * read as a decode that had happened.
- */
-static const char *sc_kind(const uint8_t *b, uint32_t n)
-{
-	if (n >= 6 && b[0] == 0xfc && b[1] == 0x48 && b[2] == 0x83 &&
-	    b[3] == 0xe4 && b[4] == 0xf0 && b[5] == 0xe8)
-		return "msf x64 block_api (Windows, raw)";
-	if (n >= 9 && b[0] == 0xfc && b[1] == 0xe8 && b[2] == 0x82 &&
-	    b[3] == 0x00 && b[4] == 0x00 && b[5] == 0x00 && b[6] == 0x60)
-		return "msf x86 block_api (Windows, raw)";
-	if (n >= 6 && b[0] == 0x48 && b[1] == 0x31 && b[2] == 0xc9 &&
-	    b[3] == 0x48 && b[4] == 0x81 && b[5] == 0xe9)
-		return "msf x64/xor decoder stub";
-	if (n >= 4 && b[0] == 0xd9 && b[1] == 0x74 && b[2] == 0x24)
-		return "msf x86 fnstenv GetPC (shikata family)";
-	if (n >= 8 && (b[4] == 0xd9 || b[5] == 0xd9) &&
-	    (b[5] == 0x74 || b[6] == 0x74))
-		return "msf x86 fnstenv GetPC (shikata family)";
-	if (n >= 4 && b[0] == 0x48 && b[1] == 0x31 && b[2] == 0xc0)
-		return "x86-64 shellcode, no decoder in front";
-	if (n >= 2 && b[0] == 0xeb)
-		return "jmp/pop/xor decoder stub";
-	return "?";
-}
-
-/* Geometry, borrowed from the symbols dialog so the two look like one tool.
- * Narrower, because a hex dump is a fixed width and there is nothing to gain
- * from a box wider than it. */
-static int scd_w(void)
-{
-	int w = g_cols - 4;
-
-	return w > 82 ? 82 : w;
-}
-
-static int scd_h(void)
-{
-	int h = g_rows - 6;
-
-	return h > 26 ? 26 : h;
-}
-
-static int scd_x(void) { return (g_cols - scd_w()) / 2 + 1; }
-static int scd_y(void) { return (g_rows - scd_h()) / 2 + 1; }
-
-/* Height less two borders, the two heading lines and the decode line. */
-static int scd_rows(void)
-{
-	int r = scd_h() - 6;
-
-	return r > 0 ? r : 0;
-}
-
-/* 16 bytes to a row, like the pane, so a reader comparing the two is comparing
- * the same rows. */
-#define SCD_PER 16u
-
-static void scd_row(struct out *o, int y)
-{
-	out_at(o, y, scd_x());
-	o->col_hint = 0;
-}
-
-static void scd_edge(struct out *o, int w)
-{
-	while ((int)o->col_hint < w - 1)
-		out_str(o, " ");
-	out_str(o, A_DIM);
-	out_glyph(o, G_V);
-	out_str(o, A_OFF);
-}
-
-/*
- * The payload's bytes, and how many.
- *
- * From the object's buffer at the offset the section table maps the reported
- * ADDRESS to - the rule reports an address because that is what survives, so
- * the translation happens here, once, against the parse the viewer already
- * holds. NULL when no rule reported one, or when the address is not inside any
- * section this file has, which is a broken symbol rather than a payload.
- */
-static const uint8_t *scd_bytes(struct view *v, uint32_t *n)
-{
-	struct object *o = cur_obj(v);
-	const struct kof_elf_info *e = o->info;
-	uint32_t i;
-
-	if (n)
-		*n = 0;
-	if (!o->payload_at || !o->payload_len || !e || !e->valid || !o->buf.p)
-		return 0;
-	for (i = 0; i < e->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
-		const struct kof_elf_sec *sc = &e->sec[i];
-		uint64_t fo;
-
-		if (sc->type != 1u || !sc->mem_addr)          /* PROGBITS */
-			continue;
-		if (o->payload_at < sc->mem_addr ||
-		    o->payload_at >= sc->mem_addr + sc->file_size)
-			continue;
-		fo = sc->file_off + (o->payload_at - sc->mem_addr);
-		if (fo >= o->buf.n || o->payload_len > o->buf.n - fo)
-			return 0;
-		if (n)
-			*n = (uint32_t)o->payload_len;
-		return o->buf.p + fo;
-	}
-	return 0;
-}
-
-static uint64_t scd_max(struct view *v)
-{
-	uint32_t n = 0;
-	uint64_t rows;
-
-	(void)scd_bytes(v, &n);
-	rows = ((uint64_t)n + SCD_PER - 1u) / SCD_PER;
-	return rows > (uint64_t)scd_rows() ? rows - (uint64_t)scd_rows() : 0;
-}
-
-static void draw_shellcode(struct out *o, struct view *v)
-{
-	int x = scd_x(), y = scd_y(), w = scd_w(), h = scd_h();
-	int rows = scd_rows(), i;
-	uint32_t n = 0, dn = 0;
-	const uint8_t *b = scd_bytes(v, &n);
-	struct object *ob = cur_obj(v);
-	static uint8_t dec[KOF_SYM_NAMELEN * 256];
-
-	if (w < 60 || h < 10 || !b)
-		return;
-	if (v->sc_at > scd_max(v))
-		v->sc_at = scd_max(v);
-
-	/* Top border with the title in it. */
-	scd_row(o, y);
-	out_str(o, A_DIM);
-	out_glyph(o, G_TL);
-	out_glyph(o, G_H);
-	out_str(o, A_OFF A_BOLD " Shellcode in variable " A_OFF A_DIM);
-	for (i = 0; i < w - 26; i++)
-		out_glyph(o, G_H);
-	out_glyph(o, G_TR);
-	out_str(o, A_OFF);
-
-	/* What it is, and the close button. */
-	scd_row(o, y + 1);
-	out_str(o, A_DIM);
-	out_glyph(o, G_V);
-	out_str(o, A_OFF " ");
-	out_fmt(o, A_S_VAL "0x%llx" A_OFF A_DIM " + " A_OFF A_S_SIZE "%u" A_OFF
-		A_DIM " bytes" A_OFF, (unsigned long long)ob->payload_at,
-		(unsigned)n);
-	while ((int)o->col_hint < w - 6)
-		out_str(o, " ");
-	v->sy_close[0] = o->col_base + (int)o->col_hint;
-	out_fmt(o, "%s[x]" A_OFF, A_WARN);
-	v->sy_close[1] = o->col_base + (int)o->col_hint - 1;
-	scd_edge(o, w);
-
-	/*
-	 * WHAT IT LOOKS LIKE, and what came out if anything did.
-	 *
-	 * Two different claims on one line, kept apart by their wording. The
-	 * stub name is recognition - the front of the blob matched a shape that
-	 * was measured - and it says nothing about the rest. The decode is the
-	 * only thing here that is a transform actually performed, and it only
-	 * ever happens for base64, which is why it is the only one named.
-	 */
-	scd_row(o, y + 2);
-	out_str(o, A_DIM);
-	out_glyph(o, G_V);
-	out_str(o, A_OFF " ");
-	dn = b64_try(b, n, dec, (uint32_t)sizeof dec);
-	if (dn)
-		out_fmt(o, A_DIM "base64, decoded to " A_OFF A_S_SIZE "%u"
-			A_OFF A_DIM " bytes: " A_OFF A_S_NAME "%s" A_OFF,
-			(unsigned)dn, sc_kind(dec, dn));
-	else
-		out_fmt(o, A_DIM "looks like " A_OFF A_S_NAME "%s" A_OFF,
-			sc_kind(b, n));
-	scd_edge(o, w);
-
-	/*
-	 * The bytes. The DECODED ones when there are any, because the reader
-	 * asked what the payload is and base64 is not it - and the line above
-	 * says which of the two is on screen, so neither can be mistaken for
-	 * the other.
-	 */
-	{
-		const uint8_t *show = dn ? dec : b;
-		uint32_t shown = dn ? dn : n;
-		struct sclip sc;
-
-		sc.o = o;
-		sc.from = 0;
-		/* No horizontal scroll here: a hex dump is a fixed width and
-		 * the box is sized to hold it, so the window is the whole row
-		 * and the clipper is used only for its RECORDING. */
-		sc.to = DLG_COLS;
-		dlg_rec_begin(v, y + 3, x + 2);
-
-		for (i = 0; i < rows; i++) {
-			uint64_t at = (v->sc_at + (uint64_t)i) * SCD_PER;
-			uint32_t k;
-
-			scd_row(o, y + 3 + i);
-			out_str(o, A_DIM);
-			out_glyph(o, G_V);
-			out_str(o, A_OFF " ");
-			sc.rec = dlg_rec_buf(v);
-			sc.rec_n = 0;
-			sc.vcol = 0;
-			if (at >= shown) {
-				scd_edge(o, w);
-				if (sc.rec)
-					dlg_rec_row(v, &sc);
-				continue;
-			}
-			sclip_fmt(&sc, A_LOC, "%04llx ",
-				  (unsigned long long)at);
-			for (k = 0; k < SCD_PER; k++) {
-				if (at + k >= shown) {
-					sclip_puts(&sc, A_OFF, "   ");
-					continue;
-				}
-				sclip_fmt(&sc, byte_colour(show[at + k]),
-					  "%02X ", show[at + k]);
-			}
-			sclip_puts(&sc, A_OFF, " ");
-			for (k = 0; k < SCD_PER && at + k < shown; k++) {
-				uint8_t c = show[at + k];
-				char t[2];
-
-				t[0] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
-				t[1] = 0;
-				sclip_puts(&sc, byte_colour(c), t);
-			}
-			scd_edge(o, w);
-			if (sc.rec)
-				dlg_rec_row(v, &sc);
-		}
-	}
-
-	scd_row(o, y + h - 1);
-	out_str(o, A_DIM);
-	out_glyph(o, G_BL);
-	for (i = 0; i < w - 2; i++)
-		out_glyph(o, G_H);
-	out_glyph(o, G_BR);
-	out_str(o, A_OFF);
-
-	{
-		uint64_t total = ((uint64_t)(dn ? dn : n) + SCD_PER - 1u)
-				 / SCD_PER;
-
-		if (total > (uint64_t)rows)
-			scrollbar(o, x + w - 1, y + 3, y + 3 + rows - 1,
-				  v->sc_at, total, (uint64_t)rows);
-	}
-	dlg_paint_sel(o, v);
-}
-
-/* Every click while it is up is the dialog's, for the reason symd_click
- * gives: it is a modal, and a click on the tree behind it would change the
- * object the bytes belong to. */
-static int scd_click(struct view *v)
-{
-	if (g_my == scd_y() + 1 &&
-	    g_mx >= v->sy_close[0] && g_mx <= v->sy_close[1])
-		dlg_close(v);
-	return 1;
-}
-
-static void scd_scroll(struct view *v, int64_t d)
-{
-	uint64_t max = scd_max(v);
-
-	if (d < 0) {
-		uint64_t up = (uint64_t)(-d);
-
-		v->sc_at = v->sc_at > up ? v->sc_at - up : 0;
-	} else {
-		v->sc_at += (uint64_t)d;
-	}
-	if (v->sc_at > max)
-		v->sc_at = max;
-}
 
 static int goto_top(void)
 {
@@ -17260,7 +17234,8 @@ static void click(struct view *v, int rclick)
 	/* Before every other hit test: the box is opaque, and symd_click
 	 * swallows anything that lands inside it. */
 	/*
-	 * A DIALOG'S TEXT SELECTION starts here, before the box's own hit test.
+	 * THE SYMBOLS DIALOG'S TEXT SELECTION starts here, before the box's own
+	 * hit test.
 	 *
 	 * A press on a row of text is the start of a drag; the close button and
 	 * the tabs are tested by the box afterwards, and they are not on a text
@@ -17269,7 +17244,7 @@ static void click(struct view *v, int rclick)
 	 * other text selection does and what makes a stray click a way OUT of a
 	 * selection rather than something that leaves it stuck on screen.
 	 */
-	if (v->sc_open || v->sym_open) {
+	if (v->sym_open) {
 		int r, c;
 
 		if (dlg_at(v, g_my, g_mx, &r, &c)) {
@@ -17282,8 +17257,6 @@ static void click(struct view *v, int rclick)
 		v->dlg_have = 0;
 		v->dlg_drag = 0;
 	}
-	if (v->sc_open && scd_click(v))
-		return;
 	if (v->sym_open && symd_click(v))
 		return;
 	if (v->goto_open && goto_click(v))
@@ -18308,7 +18281,7 @@ static int handle(struct view *v, int k)
 	 * thing a reader can be selecting in - and the disassembly panel's own
 	 * Ctrl+C below would otherwise answer for a selection nobody can see.
 	 */
-	if (k == 0x03 && (v->sc_open || v->sym_open) && v->dlg_have) {
+	if (k == 0x03 && v->sym_open && v->dlg_have) {
 		dlg_copy(v);
 		return 1;
 	}
@@ -18331,21 +18304,6 @@ static int handle(struct view *v, int k)
 	 * Tab switches halves, because two tabs a click apart want a key too,
 	 * and it is the key every other tabbed thing uses.
 	 */
-	if (v->sc_open && !(k >= K_CLICK && k <= K_RELEASE)) {
-		int pg = scd_rows() > 1 ? scd_rows() - 1 : 1;
-
-		switch (k) {
-		case 27: case 'q': case 'Q': dlg_close(v);           break;
-		case K_UP:    scd_scroll(v, -1);                    break;
-		case K_DOWN:  scd_scroll(v, 1);                     break;
-		case K_PGUP:  scd_scroll(v, -(int64_t)pg);          break;
-		case K_PGDN:  scd_scroll(v, pg);                    break;
-		case K_HOME:  v->sc_at = 0;                         break;
-		case K_END:   v->sc_at = scd_max(v);                break;
-		default:      break;
-		}
-		return 1;
-	}
 	if (v->sym_open && !(k >= K_CLICK && k <= K_RELEASE)) {
 		int pg = symd_rows() > 1 ? symd_rows() - 1 : 1;
 
@@ -19104,10 +19062,6 @@ static int handle(struct view *v, int k)
 		 * pointer happened to be on the left would move something they
 		 * cannot see.
 		 */
-		if (v->sc_open) {
-			scd_scroll(v, down ? 3 : -3);
-			break;
-		}
 		if (v->sym_open) {
 			/* Shift (or ctrl) turns the wheel sideways, the same
 			 * binding the tree, the draft panel and the marker
