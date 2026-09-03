@@ -20,6 +20,8 @@
  * the matcher; what to do with the answer is the scan routine's business.
  */
 
+#include <kofmod/kofsym.h>
+#include "../kofparsers/binaries/elf_sym.h"
 #include "scan.h"
 #include "../kofunpack/emu_unpack.h"
 #include "../kofunpack/elf_rebuild.h"
@@ -1651,17 +1653,49 @@ static void c_name_next(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t le
  * rather than by a check somewhere that could be missed. Same shape as
  * resolve_scan being NULL when nothing identified the object.
  */
+/*
+ * The object's symbol records, built at most once.
+ *
+ * ELF only, because that is the only builder there is - a PE gets NULL, which
+ * a rule reads as "no symbols" and stops on, the same answer a stripped ELF
+ * gives. The buffer is the scanner's and outlives the module call; it is NOT
+ * rebuilt per ask, so ten rules asking cost one walk of the symbol table.
+ */
+static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc->sym_done) {
+		sc->sym_done = 1;
+		sc->sym_n = 0;
+		if (ctx->format == KOF_FMT_ELF && ctx->file_header) {
+			if (!sc->sym)
+				sc->sym = malloc(KOF_SYM_MAX_BYTES);
+			if (sc->sym)
+				sc->sym_n = kof_elf_syms(sc->m.data,
+							 ctx->file_header,
+							 sc->sym,
+							 KOF_SYM_MAX_BYTES);
+		}
+	}
+	if (nbytes)
+		*nbytes = sc->sym_n;
+	/* A header with no records is not worth handing back: every reader
+	 * would have to test the count anyway, and NULL says it once. */
+	return kof_sym_count(sc->sym, sc->sym_n) ? sc->sym : 0;
+}
+
 static const struct kof_content kof_detect_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, NULL, NULL, NULL, NULL, NULL, c_find_str_where,
-	NULL, NULL, c_incomplete, NULL
+	NULL, NULL, c_incomplete, NULL, c_syms
 };
 
 static const struct kof_content kof_unpack_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, c_window, c_emit, c_child, c_unpack,
 	c_unpack_peek, c_find_str_where, c_gather, c_name_next, c_incomplete,
-	c_unpack_entry
+	c_unpack_entry, c_syms
 };
 
 /*

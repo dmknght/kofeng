@@ -42,7 +42,6 @@
 #define KOF_KOFSYM_H
 
 #include <stdint.h>
-#include <kofcore.h>          /* kof_buf */
 
 /*
  * The block: one header, then `count` records of KOF_SYM_RECLEN bytes.
@@ -56,14 +55,15 @@
 #define KOF_SYM_MAGIC2  'Y'
 #define KOF_SYM_MAGIC3  'M'
 /*
- * 2, not 1. Version 1 put the name at 24 with the numeric fields in front of
- * it; the fields are the same but a reader that trusted the old offsets would
- * decode every record wrong, so the number has to move with the layout. Bumped
- * while nothing yet depends on it - no signature can match these records until
- * the engine can search a region that is built rather than file-backed - which
- * is exactly when a layout is still free to change.
+ * 3.
+ *
+ * Version 1 put the name at 24 with the numeric fields in front of it; a reader
+ * that trusted those offsets would decode every record wrong, so the number had
+ * to move with the layout. Version 3 gives the two reserved header bytes a
+ * meaning - the index of `_start` - which a version 2 reader would read as the
+ * zero the contract promised. Records are untouched between 2 and 3.
  */
-#define KOF_SYM_VERSION 2u
+#define KOF_SYM_VERSION 3u
 #define KOF_SYM_HDRLEN  16u
 #define KOF_SYM_RECLEN  64u
 #define KOF_SYM_NAMELEN 40u     /* inline, NUL-padded, truncated if longer */
@@ -75,7 +75,36 @@
 #define KOF_SYM_H_COUNT     8u  /* 4  records that follow                     */
 #define KOF_SYM_H_ORIGIN   12u  /* 1  KOF_SYM_ORIGIN_*                        */
 #define KOF_SYM_H_TRUNC    13u  /* 1  1 when the cap stopped it short         */
-#define KOF_SYM_H_RESERVED 14u  /* 2  zero                                    */
+/*
+ * THE INDEX OF `_start`, or KOF_SYM_NO_START when the block has none.
+ *
+ * In the two bytes that were reserved, so the header stays sixteen and every
+ * record offset is unchanged. Sixteen bits is enough by construction:
+ * KOF_SYM_MAX_RECS is 4096, so no valid index needs more, and 0xffff cannot
+ * collide with one.
+ *
+ * WHY THE BUILDER RECORDS IT. `_start` comes from crt1.o, which the link line
+ * puts before the object a person wrote, so a program's own globals are emitted
+ * after it. A rule looking for a payload in a global can therefore begin at
+ * `_start` + 1 rather than at record zero - on the loaders measured that is 6
+ * or 7 records to examine instead of 63 to 66.
+ *
+ * The builder is the only place this is free. It already reads every name to
+ * copy it into the record, so noticing one costs a comparison it is
+ * effectively already doing; a rule finding the same index would have to walk
+ * the names itself, which is the search the index exists to avoid.
+ *
+ * WHAT IT IS NOT. This is a CONVENTION OF THE LINK, not a rule of the format.
+ * ELF guarantees only that local symbols precede global ones - that is sh_info
+ * - and says nothing about the order among globals. A static link, -nostartfiles,
+ * a different libc or a linker that emits in another order can all put a global
+ * before `_start`, and a rule that starts after it would not see that global.
+ * So it is offered as a starting point, never as a bound: a rule that must not
+ * miss anything walks from zero, and one that trades that for a shorter walk
+ * does so knowingly.
+ */
+#define KOF_SYM_H_START    14u  /* 2  index of `_start`, or KOF_SYM_NO_START  */
+#define KOF_SYM_NO_START  0xffffu
 
 /*
  * RECORD FIELD OFFSETS, ORDERED FOR THE PATTERN THAT MATCHES THEM.
@@ -170,8 +199,104 @@ enum { KOF_STV_DEFAULT = 0, KOF_STV_INTERNAL = 1, KOF_STV_HIDDEN = 2,
  * header, so an empty answer is still a block a reader can parse. `cap` bounds
  * it; KOF_SYM_MAX_BYTES is enough for the record cap.
  */
-struct kof_elf_info;
-uint32_t kof_elf_syms(kof_buf file, const struct kof_elf_info *e,
-		      uint8_t *out, uint32_t cap);
+/* ---- reading a block ------------------------------------------------------
+ *
+ * THE CANONICAL READERS. Everything that reads a KSYM block goes through these
+ * - the engine, kofexamine, kofviewer and any module - because the alternative
+ * is what was there first: three private copies of the same four lines, which
+ * is three places to get the bounds wrong and three to forget when the layout
+ * moves. The layout HAS moved once already (see the note on version 2).
+ *
+ * kof_sym_rec is the whole of the walk a rule needs. It answers the question
+ * "is there a record i" with a pointer or NULL, so a loop is
+ *
+ *     for (i = 0; (r = kof_sym_rec(b, n, i)); i++)
+ *             if (r[KOF_SYM_R_TYPE] == STT_OBJECT && ...)
+ *
+ * and cannot run past the block: the bound is checked from the header's own
+ * count AND from the byte length, so a truncated or malformed block stops the
+ * loop rather than reading into whatever follows.
+ *
+ * That loop is also why the record length is fixed. A rule steps
+ * KOF_SYM_RECLEN from KOF_SYM_HDRLEN and tests three bytes per record - type
+ * at +0, bind at +1, flags at +3 - instead of searching for anything.
+ */
+static inline uint32_t kof_sym_count(const uint8_t *b, uint32_t n)
+{
+	if (!b || n < KOF_SYM_HDRLEN)
+		return 0;
+	return (uint32_t)b[KOF_SYM_H_COUNT] |
+	       ((uint32_t)b[KOF_SYM_H_COUNT + 1] << 8) |
+	       ((uint32_t)b[KOF_SYM_H_COUNT + 2] << 16) |
+	       ((uint32_t)b[KOF_SYM_H_COUNT + 3] << 24);
+}
+
+static inline const uint8_t *kof_sym_rec(const uint8_t *b, uint32_t n, uint32_t i)
+{
+	uint64_t at = (uint64_t)KOF_SYM_HDRLEN + (uint64_t)i * KOF_SYM_RECLEN;
+
+	if (i >= kof_sym_count(b, n) || at + KOF_SYM_RECLEN > (uint64_t)n)
+		return 0;
+	return b + at;
+}
+
+/* value and size, little endian whatever the host is. Byte at a time because
+ * NEITHER IS ALIGNED - the layout puts contiguity before alignment, so a cast
+ * would be a misaligned load on the architectures that care. */
+static inline uint64_t kof_sym_u64(const uint8_t *r, uint32_t at)
+{
+	uint64_t v = 0;
+	int k;
+
+	for (k = 7; k >= 0; k--)
+		v = (v << 8) | (uint64_t)r[at + (uint32_t)k];
+	return v;
+}
+
+/*
+ * Where a walk may begin, given what the block knows.
+ *
+ * Returns the record after `_start`, or zero when the block has no `_start` to
+ * start after - so a caller writes `for (i = kof_sym_first(b, n); ...)` and
+ * gets the short walk when one is available and the whole table when it is not,
+ * without a branch of its own. See the note on KOF_SYM_H_START for what this
+ * does and does not promise.
+ */
+static inline uint32_t kof_sym_first(const uint8_t *b, uint32_t n)
+{
+	uint32_t s;
+
+	if (!b || n < KOF_SYM_HDRLEN)
+		return 0;
+	s = (uint32_t)b[KOF_SYM_H_START] |
+	    ((uint32_t)b[KOF_SYM_H_START + 1] << 8);
+	if (s == KOF_SYM_NO_START || s + 1u >= kof_sym_count(b, n))
+		return 0;
+	return s + 1u;
+}
+
+/* Which table it came from, or 0 when there is none. */
+static inline uint8_t kof_sym_origin(const uint8_t *b, uint32_t n)
+{
+	return (b && n >= KOF_SYM_HDRLEN) ? b[KOF_SYM_H_ORIGIN] : 0u;
+}
+
+/* Did the cap stop the block short of the symbols the file has. */
+static inline int kof_sym_truncated(const uint8_t *b, uint32_t n)
+{
+	return (b && n > KOF_SYM_H_TRUNC) ? b[KOF_SYM_H_TRUNC] != 0 : 0;
+}
+
+/*
+ * THE BUILDER IS NOT DECLARED HERE, and that is the SDK boundary.
+ *
+ * This header is published to modules; kofparsers/binaries/elf_sym.h is not.
+ * A module has no business walking a symbol table itself - it asks the host
+ * through kof_syms(), which hands back a block the engine already built - and
+ * declaring the builder here would have dragged kofcore.h into the SDK to get
+ * kof_buf, which is exactly the reach the published header set exists to
+ * prevent. Everything above this line is layout and readers, which is all a
+ * rule needs.
+ */
 
 #endif /* KOF_KOFSYM_H */

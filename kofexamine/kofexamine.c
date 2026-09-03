@@ -102,6 +102,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
 #include <kofmod/kofsym.h>
+#include "../kofparsers/binaries/elf_sym.h"
 #include <kofmod/pe.h>
 #include <kofmod/gzip.h>
 #include <kofmod/docole.h>

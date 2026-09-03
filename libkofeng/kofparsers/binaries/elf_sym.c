@@ -21,6 +21,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
 #include <kofmod/kofsym.h>
+#include "elf_sym.h"
 
 #define SHT_SYMTAB_ 2
 #define SHT_DYNSYM_ 11
@@ -154,7 +155,7 @@ uint32_t kof_elf_syms(kof_buf file, const struct kof_elf_info *e,
 		      uint8_t *out, uint32_t cap)
 {
 	const struct kof_elf_sec *sym = 0, *str = 0;
-	uint32_t i, n = 0, want, trunc = 0;
+	uint32_t i, n = 0, want, trunc = 0, start = KOF_SYM_NO_START;
 	uint8_t origin = KOF_SYM_ORIGIN_NONE;
 	uint64_t entsz, count;
 	kof_buf strtab;
@@ -169,6 +170,18 @@ uint32_t kof_elf_syms(kof_buf file, const struct kof_elf_info *e,
 	out[KOF_SYM_H_MAGIC + 3] = KOF_SYM_MAGIC3;
 	put16(out + KOF_SYM_H_VERSION, KOF_SYM_VERSION);
 	put16(out + KOF_SYM_H_RECLEN,  KOF_SYM_RECLEN);
+	/*
+	 * ABSENT, written before anything can return early.
+	 *
+	 * The memset above leaves this field zero, and zero is a VALID INDEX -
+	 * a reader would take it as "`_start` is record 0, begin at record 1"
+	 * and skip the first record of a block that has no `_start` at all.
+	 * The two early returns below - no string table, or one that does not
+	 * fit the file - both reach a caller through this header, so the honest
+	 * value has to be in place before them rather than at the end with the
+	 * count.
+	 */
+	put16(out + KOF_SYM_H_START, KOF_SYM_NO_START);
 
 	is64 = e->elf_class == KOF_ELFCLASS_64;
 	be   = e->elf_data  == KOF_ELFDATA_BE;
@@ -220,10 +233,34 @@ uint32_t kof_elf_syms(kof_buf file, const struct kof_elf_info *e,
 		if (!one_rec(file, e, be, is64,
 			     sym->file_off + (uint64_t)i * entsz, strtab, rec))
 			break;
+		/*
+		 * `_start`, noticed on the way past.
+		 *
+		 * Free here and nowhere else: the record's name has just been
+		 * written, so this reads memory that is already hot, and it is
+		 * seven bytes compared once per symbol against a walk of every
+		 * name that a caller would otherwise have to do for itself.
+		 *
+		 * The FIRST one wins. A well-formed object has one `_start`,
+		 * but a hand-built or hostile table can repeat it, and taking
+		 * the last would let a later duplicate push the starting point
+		 * past records a caller must see. The first is the conservative
+		 * choice: it can only make the walk longer.
+		 */
+		if (start == KOF_SYM_NO_START &&
+		    rec[KOF_SYM_R_NAME + 0] == '_' &&
+		    rec[KOF_SYM_R_NAME + 1] == 's' &&
+		    rec[KOF_SYM_R_NAME + 2] == 't' &&
+		    rec[KOF_SYM_R_NAME + 3] == 'a' &&
+		    rec[KOF_SYM_R_NAME + 4] == 'r' &&
+		    rec[KOF_SYM_R_NAME + 5] == 't' &&
+		    rec[KOF_SYM_R_NAME + 6] == 0)
+			start = n;
 		n++;
 	}
 	out[KOF_SYM_H_ORIGIN] = origin;
 	out[KOF_SYM_H_TRUNC]  = (uint8_t)trunc;
 	put32(out + KOF_SYM_H_COUNT, n);
+	put16(out + KOF_SYM_H_START, start);
 	return KOF_SYM_HDRLEN + n * KOF_SYM_RECLEN;
 }

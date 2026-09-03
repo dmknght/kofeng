@@ -585,6 +585,22 @@ struct kof_content {
 	 */
 	uint64_t (*unpack_entry)(const struct kof_obj_ctx *, uint32_t method,
 				 uint32_t index, uint64_t out_hint);
+
+	/*
+	 * The object's symbol records, in the KSYM layout kofmod/kofsym.h fixes,
+	 * or NULL when it has none.
+	 *
+	 * A POINTER, not a reader like rd8 above, and the difference is
+	 * deliberate. rd8 exists because the object's bytes may be mapped,
+	 * spilled or windowed and a module must not hold a pointer into them.
+	 * This block is neither: it is built on demand into storage the scanner
+	 * owns for the length of the object, so handing it over directly costs
+	 * nothing and lets a rule walk records with plain array indexing -
+	 * which is the whole point of a fixed record length.
+	 *
+	 * Built at most once per object, and only if something asks.
+	 */
+	const uint8_t *(*syms)(const struct kof_obj_ctx *, uint32_t *nbytes);
 };
 
 /*
@@ -1139,6 +1155,22 @@ static inline uint32_t kof_bswap32(uint32_t v)
 	return ((v & 0xff000000u) >> 24) | ((v & 0x00ff0000u) >> 8) |
 	       ((v & 0x0000ff00u) << 8)  | ((v & 0x000000ffu) << 24);
 }
+
+/*
+ * The object's symbol records, and how many bytes of them.
+ *
+ * Named like the other content accessors so a rule reads the same way:
+ *
+ *     uint32_t n; const uint8_t *b = kof_syms(&n), *r;
+ *     for (i = 0; (r = kof_sym_rec(b, n, i)); i++)
+ *             if (r[KOF_SYM_R_TYPE] == 1 && r[KOF_SYM_R_BIND] == 1)
+ *                     ...
+ *
+ * NULL and zero for an object with no symbols - a stripped file, or any
+ * non-ELF - which is a normal answer and stops the loop on its first test.
+ */
+#define kof_syms(np) ((ctx)->content->syms ? \
+		      (ctx)->content->syms((ctx), (np)) : 0)
 
 #define kof_u8(off)  ((ctx)->content->rd8 ((ctx), (uint64_t)(off)))
 #define kof_u16(off) ((ctx)->content->rd16((ctx), (uint64_t)(off)))

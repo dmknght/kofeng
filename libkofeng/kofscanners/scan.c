@@ -90,6 +90,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	for (i = 0; i < KOF_FMT_COUNT; i++)
 		free(sc->view[i]);
 	free(sc->inf);
+	free(sc->sym);
 	free(sc);
 }
 
@@ -1069,6 +1070,9 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	ctx.obj_size = buf.n;
 
 	kof_match_begin(&sc->m, buf);
+	/* A new object: whatever block the last one had is not this one's. */
+	sc->sym_done = 0;
+	sc->sym_n = 0;
 
 	identify(sc, buf, &ctx);
 

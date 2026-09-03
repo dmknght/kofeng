@@ -231,6 +231,24 @@ struct kof_scanner {
 	 */
 	uint32_t stop;
 
+	/*
+	 * THE OBJECT'S SYMBOL RECORDS, built at most once per object.
+	 *
+	 * Lazily: most objects are never asked, and the block is up to a quarter
+	 * megabyte, so building it for every object would be a walk of the
+	 * symbol table nothing reads. Allocated once for the scanner and reused
+	 * across objects rather than per object - the size is fixed by the cap,
+	 * so there is nothing to gain by freeing and taking it again.
+	 *
+	 * `sym_done` is what makes it once-per-object rather than once-per-ask:
+	 * a file with no symbols must not be re-walked by every module that
+	 * asks, and "built, and the answer was nothing" has to be
+	 * distinguishable from "not built yet".
+	 */
+	uint8_t  *sym;
+	uint32_t  sym_n;
+	uint8_t   sym_done;
+
 	struct kof_stats st;
 };
 
