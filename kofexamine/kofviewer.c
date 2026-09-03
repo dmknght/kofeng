@@ -1922,6 +1922,13 @@ struct view {
 	 */
 	uint8_t     sym_open;
 	uint64_t    sym_at;
+	/*
+	 * How far the table is scrolled SIDEWAYS, in columns of the unclipped
+	 * row. Its own field beside sym_at rather than a shared "scroll",
+	 * because the two axes clamp against different limits: a table that
+	 * fits vertically may still not fit across.
+	 */
+	int         sym_hoff;
 	int         sy_close[2];        /* the close button */
 	int         sy_tab[2][2];       /* [imports|exports], each a box */
 	int         goto_file;      /* 1 file offset, 0 offset in this region */
@@ -15529,6 +15536,81 @@ static void symd_edge(struct out *o, int w)
 	out_str(o, A_OFF);
 }
 
+/*
+ * A ROW WRITER THAT CLIPS TO A WINDOW, so the table can be scrolled sideways.
+ *
+ * The problem it solves: the row is a fixed sequence of columns whose natural
+ * width does not depend on the box. When the box is narrower, the row has to
+ * stop at the border - and stopping by not writing the tail is what shortened
+ * the name column instead, which loses data. Worse, getting that budget wrong
+ * by one wrote THROUGH the border and the scrollbar beside it, because nothing
+ * here turns autowrap off and a terminal has no clip region.
+ *
+ * So every field goes through this. It counts columns in the FULL row and emits
+ * only those inside [from, to), which makes horizontal scrolling a change of
+ * two numbers rather than a different layout, and makes writing past the border
+ * impossible rather than merely avoided. The colour is emitted lazily - once,
+ * before the first visible character of a run - so a field scrolled off costs
+ * no escape sequence, and a field entering from the left is still coloured
+ * even though its first characters are not drawn.
+ */
+struct sclip {
+	struct out *o;
+	int         vcol;               /* column in the unclipped row */
+	int         from, to;           /* the visible window */
+};
+
+static void sclip_puts(struct sclip *c, const char *attr, const char *t)
+{
+	int on = 0;
+
+	for (; *t; t++, c->vcol++) {
+		if (c->vcol < c->from || c->vcol >= c->to)
+			continue;
+		if (!on) {
+			out_str(c->o, attr);
+			on = 1;
+		}
+		out_fmt(c->o, "%c", *t);
+	}
+	if (on)
+		out_str(c->o, A_OFF);
+}
+
+static void sclip_fmt(struct sclip *c, const char *attr, const char *fmt, ...)
+{
+	char t[96];
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(t, sizeof t, fmt, ap);
+	va_end(ap);
+	sclip_puts(c, attr, t);
+}
+
+/* The name field, which is NUL-padded to a fixed 40 and NOT necessarily
+ * terminated - so it is copied out before being written, never passed as a
+ * string. Padded to `nw` so the columns after it line up. */
+static void sclip_name(struct sclip *c, const uint8_t *r, int nw)
+{
+	char t[KOF_SYM_NAMELEN + 1];
+	int k;
+
+	if (nw > (int)KOF_SYM_NAMELEN)
+		nw = (int)KOF_SYM_NAMELEN;
+	for (k = 0; k < nw; k++) {
+		char ch = (char)r[KOF_SYM_R_NAME + (uint32_t)k];
+
+		if (!ch)
+			break;
+		t[k] = ch;
+	}
+	for (; k < nw; k++)
+		t[k] = ' ';
+	t[k] = 0;
+	sclip_puts(c, A_S_NAME, t);
+}
+
 static void draw_symbols(struct out *o, struct view *v)
 {
 	int x = symd_x(), y = symd_y(), w = symd_w(), h = symd_h();
@@ -15536,7 +15618,8 @@ static void draw_symbols(struct out *o, struct view *v)
 	uint64_t nb = 0;
 	const uint8_t *b = symd_block(v, &nb);
 	uint32_t n = sym_count(b, (uint32_t)nb);
-	int wd = 8, sw, fixed, nw;
+	int wd = 8, sw, fixed, nw = 0, natural, vis, hmax;
+	struct sclip sc;
 	const struct object *ob = cur_obj(v);
 
 	if (w < 40 || h < 8)
@@ -15578,18 +15661,40 @@ static void draw_symbols(struct out *o, struct view *v)
 	sw = wd == 16 ? 12 : 8;             /* the size column */
 	fixed = 5 + 8 + 7 + 10 + 6 + 6 + (sw + 1) + wd;
 	/*
-	 * The `- 1` is the SPACE AFTER THE NAME, and leaving it out cost the
-	 * value column its last digit at eighty columns: the name contributes
-	 * nw plus a separator, so budgeting nw put the row one character past
-	 * the border - which does not truncate, it overwrites the border and
-	 * the scrollbar beside it. Every other column's separator is already
-	 * inside its number in `fixed`.
+	 * THE NAME COLUMN IS AS WIDE AS THE LONGEST NAME IN THIS TABLE, and no
+	 * longer sized from what the box has left over.
+	 *
+	 * Sizing it from the box was what forced the choice between losing
+	 * characters off the name and writing past the border. Sizing it from
+	 * the DATA removes the choice: the row has one natural width, the box
+	 * shows as much of it as it can, and the rest is reached by scrolling
+	 * sideways. It also means a table of short names does not carry a
+	 * forty-column gutter it never uses.
 	 */
-	nw = (w - 3) - fixed - 1;
-	if (nw > (int)KOF_SYM_NAMELEN)
-		nw = (int)KOF_SYM_NAMELEN;
+	for (i = 0; (uint32_t)i < n; i++) {
+		const uint8_t *r = sym_rec(b, (uint32_t)nb, (uint32_t)i);
+		int L = 0;
+
+		if (!r)
+			continue;
+		while (L < (int)KOF_SYM_NAMELEN &&
+		       r[KOF_SYM_R_NAME + (uint32_t)L])
+			L++;
+		if (L > nw)
+			nw = L;
+	}
 	if (nw < 4)
-		nw = 4;                     /* something, however cramped */
+		nw = 4;                     /* the heading says "name" */
+	natural = fixed + nw + 1;
+	vis = w - 3;
+	hmax = natural > vis ? natural - vis : 0;
+	if (v->sym_hoff > hmax)
+		v->sym_hoff = hmax;
+	if (v->sym_hoff < 0)
+		v->sym_hoff = 0;
+	sc.o = o;
+	sc.from = v->sym_hoff;
+	sc.to = v->sym_hoff + vis;
 
 	/* Top border, with the title sunk into it. */
 	symd_row(o, y);
@@ -15664,9 +15769,10 @@ static void draw_symbols(struct out *o, struct view *v)
 	 * numeric columns should read. The width is unchanged - this is where
 	 * the characters sit in the field, not how wide the field is.
 	 */
-	out_fmt(o, A_S_HEAD "%-4s %-7s %-6s %-9s %-5s %-*.*s %5s %*s %*s" A_OFF,
-		"rec", "type", "bind", "vis", "flags",
-		nw, nw, "name", "sec", sw, "size", wd, "value");
+	sc.vcol = 0;
+	sclip_fmt(&sc, A_S_HEAD, "%-4s %-7s %-6s %-9s %-5s %-*.*s %5s %*s %*s",
+		  "rec", "type", "bind", "vis", "flags",
+		  nw, nw, "name", "sec", sw, "size", wd, "value");
 	symd_edge(o, w);
 
 	for (i = 0; i < rows; i++) {
@@ -15674,7 +15780,6 @@ static void draw_symbols(struct out *o, struct view *v)
 		const uint8_t *r = (at < (uint64_t)n)
 				 ? sym_rec(b, (uint32_t)nb, (uint32_t)at) : 0;
 		char fl[8], shn[8];
-		int k;
 
 		symd_row(o, y + 3 + i);
 		out_str(o, A_DIM);
@@ -15690,15 +15795,16 @@ static void draw_symbols(struct out *o, struct view *v)
 		} else {
 			sym_flag_str(r[KOF_SYM_R_FLAGS], fl);
 			sym_shn_str(r, shn, sizeof shn);
-			out_fmt(o, A_S_IDX "%04llx" A_OFF " ",
-				(unsigned long long)at);
-			out_fmt(o, A_S_TYPE "%-7s" A_OFF " ",
-				sym_type_str(r[KOF_SYM_R_TYPE]));
-			out_fmt(o, A_S_BIND "%-6s" A_OFF " ",
-				sym_bind_str(r[KOF_SYM_R_BIND]));
-			out_fmt(o, A_S_VIS "%-9s" A_OFF " ",
-				sym_vis_str(r[KOF_SYM_R_VIS]));
-			out_fmt(o, A_S_FLAG "%-5s" A_OFF " ", fl);
+			sc.vcol = 0;
+			sclip_fmt(&sc, A_S_IDX, "%04llx ",
+				  (unsigned long long)at);
+			sclip_fmt(&sc, A_S_TYPE, "%-7s ",
+				  sym_type_str(r[KOF_SYM_R_TYPE]));
+			sclip_fmt(&sc, A_S_BIND, "%-6s ",
+				  sym_bind_str(r[KOF_SYM_R_BIND]));
+			sclip_fmt(&sc, A_S_VIS, "%-9s ",
+				  sym_vis_str(r[KOF_SYM_R_VIS]));
+			sclip_fmt(&sc, A_S_FLAG, "%-5s ", fl);
 			/*
 			 * The name, in the middle now, and PADDED TO nw so the
 			 * three columns after it line up.
@@ -15711,24 +15817,14 @@ static void draw_symbols(struct out *o, struct view *v)
 			 * name written past the edge would wrap and overwrite
 			 * the screen outside the box.
 			 */
-			out_str(o, A_S_NAME);
-			for (k = 0; k < nw; k++) {
-				char c = (char)r[KOF_SYM_R_NAME + (uint32_t)k];
-
-				if (!c)
-					break;
-				out_fmt(o, "%c", c);
-			}
-			out_str(o, A_OFF);
-			for (; k < nw; k++)
-				out_str(o, " ");
-			out_str(o, " ");
-			out_fmt(o, A_S_SHN "%5s" A_OFF " ", shn);
-			out_fmt(o, A_S_SIZE "%*llu" A_OFF " ", sw,
-				(unsigned long long)sym_u64(r,
+			sclip_name(&sc, r, nw);
+			sclip_puts(&sc, A_OFF, " ");
+			sclip_fmt(&sc, A_S_SHN, "%5s ", shn);
+			sclip_fmt(&sc, A_S_SIZE, "%*llu ", sw,
+				  (unsigned long long)sym_u64(r,
 							KOF_SYM_R_SIZE));
-			out_fmt(o, A_S_VAL "%0*llx" A_OFF, wd,
-				(unsigned long long)sym_u64(r,
+			sclip_fmt(&sc, A_S_VAL, "%0*llx", wd,
+				  (unsigned long long)sym_u64(r,
 							KOF_SYM_R_VALUE));
 		}
 		symd_edge(o, w);
@@ -15791,11 +15887,27 @@ static int symd_click(struct view *v)
 				if (v->sym_open != which) {
 					v->sym_open = which;
 					v->sym_at = 0;
+					v->sym_hoff = 0;
 				}
 				return 1;
 			}
 	}
 	return 1;
+}
+
+/*
+ * Sideways, in columns, positive to the right.
+ *
+ * The upper bound is NOT clamped here: it depends on the longest name in the
+ * table and on the box's width, both of which draw_symbols works out, so it
+ * clamps there on the way past. Clamping in two places from two different
+ * derivations is how the two end up disagreeing.
+ */
+static void symd_hscroll(struct view *v, int d)
+{
+	v->sym_hoff += d;
+	if (v->sym_hoff < 0)
+		v->sym_hoff = 0;
 }
 
 /* The wheel and the keys, in one place so they cannot disagree about the
@@ -15828,6 +15940,7 @@ static void symd_open(struct view *v)
 	const struct object *o = cur_obj(v);
 
 	v->sym_at = 0;
+	v->sym_hoff = 0;
 	v->sym_open = sym_count(o->sym_exp, o->sym_exp_n) ? SYMN_EXP
 			: sym_count(o->sym_imp, o->sym_imp_n) ? SYMN_IMP
 			: SYMN_EXP;
@@ -17344,9 +17457,12 @@ static int handle(struct view *v, int k)
 			v->sym_open = v->sym_open == SYMN_IMP ? SYMN_EXP
 							     : SYMN_IMP;
 			v->sym_at = 0;
+			v->sym_hoff = 0;
 			break;
 		case K_UP:    symd_scroll(v, -1);            break;
 		case K_DOWN:  symd_scroll(v, 1);             break;
+		case K_LEFT:  symd_hscroll(v, -4);           break;
+		case K_RIGHT: symd_hscroll(v, 4);            break;
 		case K_PGUP:  symd_scroll(v, -(int64_t)pg);  break;
 		case K_PGDN:  symd_scroll(v, pg);            break;
 		case K_HOME:  v->sym_at = 0;                 break;
@@ -18070,7 +18186,13 @@ static int handle(struct view *v, int k)
 		 * cannot see.
 		 */
 		if (v->sym_open) {
-			symd_scroll(v, down ? 3 : -3);
+			/* Shift (or ctrl) turns the wheel sideways, the same
+			 * binding the tree, the draft panel and the marker
+			 * list already use - see the branch below. */
+			if (g_mod_shift || g_mod_ctrl)
+				symd_hscroll(v, down ? 4 : -4);
+			else
+				symd_scroll(v, down ? 3 : -3);
 			break;
 		}
 
