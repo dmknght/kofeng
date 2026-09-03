@@ -60,6 +60,7 @@
 #include <kofcore.h>
 #include <kofmod/kofsig.h>
 #include <kofmod/kofsym.h>
+#include "../kofparsers/binaries/elf_sym.h"
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 
@@ -2272,6 +2273,12 @@ static uint32_t sym_count(const uint8_t *b, uint32_t n)
 	       ((uint32_t)b[KOF_SYM_H_COUNT + 3] << 24);
 }
 
+static void sym_put16(uint8_t *b, uint32_t v)
+{
+	b[0] = (uint8_t)v;
+	b[1] = (uint8_t)(v >> 8);
+}
+
 static void sym_put_count(uint8_t *b, uint32_t v)
 {
 	b[KOF_SYM_H_COUNT + 0] = (uint8_t)v;
@@ -2509,6 +2516,20 @@ static void sym_build(struct object *o)
 	memcpy(o->sym_exp, scratch, KOF_SYM_HDRLEN);
 	sym_put_count(o->sym_imp, n_imp);
 	sym_put_count(o->sym_exp, n_exp);
+	/*
+	 * THE `_start` INDEX DOES NOT SURVIVE THE SPLIT, so it is cleared in
+	 * both halves rather than carried over with the rest of the header.
+	 *
+	 * It is an index into the block it was built for, and these two blocks
+	 * RENUMBER their records from zero. Copied verbatim it would name a
+	 * different symbol in each half - or one past the end of the shorter -
+	 * and kof_sym_first would hand a reader a starting point that skips
+	 * real records. There is no correct value to put here: `_start` is a
+	 * defined symbol, so it is not in the imports half at all, and its
+	 * index in the exports half is not the one the builder measured.
+	 */
+	sym_put16(o->sym_imp + KOF_SYM_H_START, KOF_SYM_NO_START);
+	sym_put16(o->sym_exp + KOF_SYM_H_START, KOF_SYM_NO_START);
 	o->sym_imp_n = KOF_SYM_HDRLEN + n_imp * KOF_SYM_RECLEN;
 	o->sym_exp_n = KOF_SYM_HDRLEN + n_exp * KOF_SYM_RECLEN;
 
@@ -15659,7 +15680,14 @@ static void draw_symbols(struct out *o, struct view *v)
 	 * the other columns do not want, up to the 40 a record can hold.
 	 */
 	sw = wd == 16 ? 12 : 8;             /* the size column */
-	fixed = 5 + 8 + 7 + 10 + 6 + 6 + (sw + 1) + wd;
+	/*
+	 * The value column is wd + 2: the digits, plus the "0x" in front of
+	 * them. Counted here rather than left out, because this number is what
+	 * the name column's width is derived from - and a column budget that
+	 * forgets a separator is what put a row through the border once
+	 * already.
+	 */
+	fixed = 5 + 8 + 7 + 10 + 6 + 6 + (sw + 1) + (wd + 2);
 	/*
 	 * THE NAME COLUMN IS AS WIDE AS THE LONGEST NAME IN THIS TABLE, and no
 	 * longer sized from what the box has left over.
@@ -15770,9 +15798,26 @@ static void draw_symbols(struct out *o, struct view *v)
 	 * the characters sit in the field, not how wide the field is.
 	 */
 	sc.vcol = 0;
-	sclip_fmt(&sc, A_S_HEAD, "%-4s %-7s %-6s %-9s %-5s %-*.*s %5s %*s %*s",
-		  "rec", "type", "bind", "vis", "flags",
-		  nw, nw, "name", "sec", sw, "size", wd, "value");
+	/*
+	 * ONE CALL PER COLUMN, exactly as the rows below do it.
+	 *
+	 * It was a single format string for the whole heading, and that
+	 * silently lost the last column: sclip_fmt renders into a fixed buffer
+	 * before clipping, and a heading with a forty-column name field runs
+	 * past it, so "value" was truncated away by vsnprintf with nothing to
+	 * show that it had been. Per column, no single piece can outgrow the
+	 * buffer however wide the name gets, and the heading is built the same
+	 * way as the row it labels - which is the only way the two stay in step.
+	 */
+	sclip_fmt(&sc, A_S_HEAD, "%-4s ",   "rec");
+	sclip_fmt(&sc, A_S_HEAD, "%-7s ",   "type");
+	sclip_fmt(&sc, A_S_HEAD, "%-6s ",   "bind");
+	sclip_fmt(&sc, A_S_HEAD, "%-9s ",   "vis");
+	sclip_fmt(&sc, A_S_HEAD, "%-5s ",   "flags");
+	sclip_fmt(&sc, A_S_HEAD, "%-*.*s ", nw, nw, "name");
+	sclip_fmt(&sc, A_S_HEAD, "%5s ",    "sec");
+	sclip_fmt(&sc, A_S_HEAD, "%*s ",    sw, "size");
+	sclip_fmt(&sc, A_S_HEAD, "%*s",     wd + 2, "value");
 	symd_edge(o, w);
 
 	for (i = 0; i < rows; i++) {
@@ -15796,7 +15841,14 @@ static void draw_symbols(struct out *o, struct view *v)
 			sym_flag_str(r[KOF_SYM_R_FLAGS], fl);
 			sym_shn_str(r, shn, sizeof shn);
 			sc.vcol = 0;
-			sclip_fmt(&sc, A_S_IDX, "%04llx ",
+			/*
+			 * DECIMAL, unlike everything else here. It is not a
+			 * number the file contains - it is how many records in
+			 * this one is, which the reader counts rather than
+			 * reads - and printing a count in hex invites it to be
+			 * read as an offset into something.
+			 */
+			sclip_fmt(&sc, A_S_IDX, "%4llu ",
 				  (unsigned long long)at);
 			sclip_fmt(&sc, A_S_TYPE, "%-7s ",
 				  sym_type_str(r[KOF_SYM_R_TYPE]));
@@ -15823,7 +15875,11 @@ static void draw_symbols(struct out *o, struct view *v)
 			sclip_fmt(&sc, A_S_SIZE, "%*llu ", sw,
 				  (unsigned long long)sym_u64(r,
 							KOF_SYM_R_SIZE));
-			sclip_fmt(&sc, A_S_VAL, "%0*llx", wd,
+			/* "0x", because this one IS a number out of the file
+			 * and an address at that - and it now sits next to a
+			 * decimal size and a decimal record number, where an
+			 * unmarked base is a guess. */
+			sclip_fmt(&sc, A_S_VAL, "0x%0*llx", wd,
 				  (unsigned long long)sym_u64(r,
 							KOF_SYM_R_VALUE));
 		}
