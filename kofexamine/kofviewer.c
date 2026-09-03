@@ -15418,9 +15418,25 @@ static int bar_under(struct view *v)
  * between the size and the name, which is harder to read down, not easier. */
 static int symd_w(void)
 {
-	int w = g_cols - 8;
+	int w = g_cols - 4;
 
-	return w > 104 ? 104 : w;
+	/*
+	 * Wider than it was, and the cap is now derived rather than picked.
+	 *
+	 * Reordering the columns to follow the record moved the NAME into the
+	 * middle, where it has to be a fixed width - a variable column between
+	 * fixed ones cannot be read down. So the box has to be wide enough to
+	 * hold every column at full size or the name loses characters it did
+	 * not have to lose: 5 rec, 8 type, 7 bind, 10 vis, 6 flags, 41 name,
+	 * 6 sec, 13 size, 16 value, plus the border, a space and the border.
+	 * That is 116 for a table with 64-bit values in it, and there is no
+	 * reason to go past what the columns can use: a box wider than its
+	 * content is a stripe of empty inside a border. A table whose values
+	 * all fit in 32 bits needs twelve fewer, and those twelve fall at the
+	 * right edge as a margin rather than being taken off the name - the
+	 * name is data, the margin is not.
+	 */
+	return w > 116 ? 116 : w;
 }
 
 static int symd_h(void)
@@ -15520,7 +15536,7 @@ static void draw_symbols(struct out *o, struct view *v)
 	uint64_t nb = 0;
 	const uint8_t *b = symd_block(v, &nb);
 	uint32_t n = sym_count(b, (uint32_t)nb);
-	int used, room, wd = 8;
+	int wd = 8, sw, fixed, nw;
 	const struct object *ob = cur_obj(v);
 
 	if (w < 40 || h < 8)
@@ -15545,7 +15561,35 @@ static void draw_symbols(struct out *o, struct view *v)
 			break;
 		}
 	}
-	used = 5 + 8 + 7 + 10 + 6 + (wd + 1) + (wd == 16 ? 13 : 9) + 6;
+	/*
+	 * THE COLUMNS, IN THE ORDER THE RECORD STORES THEM.
+	 *
+	 * type, bind, vis, flags, name, sec, size, value - the same order as
+	 * the bytes in the two SYM rows, so a reader moving between the dialog
+	 * and the hex is reading the same sequence twice rather than mentally
+	 * transposing it. It used to end value, size, sec, name, which was a
+	 * different order from the block it describes.
+	 *
+	 * The name is a FIXED width because it is no longer last. A variable
+	 * column with fixed ones after it cannot be read down - every row's
+	 * sec, size and value would start somewhere else. It gets everything
+	 * the other columns do not want, up to the 40 a record can hold.
+	 */
+	sw = wd == 16 ? 12 : 8;             /* the size column */
+	fixed = 5 + 8 + 7 + 10 + 6 + 6 + (sw + 1) + wd;
+	/*
+	 * The `- 1` is the SPACE AFTER THE NAME, and leaving it out cost the
+	 * value column its last digit at eighty columns: the name contributes
+	 * nw plus a separator, so budgeting nw put the row one character past
+	 * the border - which does not truncate, it overwrites the border and
+	 * the scrollbar beside it. Every other column's separator is already
+	 * inside its number in `fixed`.
+	 */
+	nw = (w - 3) - fixed - 1;
+	if (nw > (int)KOF_SYM_NAMELEN)
+		nw = (int)KOF_SYM_NAMELEN;
+	if (nw < 4)
+		nw = 4;                     /* something, however cramped */
 
 	/* Top border, with the title sunk into it. */
 	symd_row(o, y);
@@ -15608,12 +15652,22 @@ static void draw_symbols(struct out *o, struct view *v)
 	out_str(o, A_DIM);
 	out_glyph(o, G_V);
 	out_str(o, A_OFF " ");
-	out_fmt(o, A_S_HEAD "%-4s %-7s %-6s %-9s %-5s %*s %*s %-5s %s" A_OFF,
+	/*
+	 * sec is RIGHT-aligned, unlike every other text column here.
+	 *
+	 * Its values are the short ones - "UND", "ABS", or an index of one to
+	 * five digits - and size beside it is a right-aligned number, so
+	 * left-aligning sec pushed the two apart by the whole of its unused
+	 * width plus the whole of size's leading padding: "ABS" and a size of
+	 * 0 sat ten columns apart with nothing in between. Right-aligned, the
+	 * two columns meet at their values, which is also how two adjacent
+	 * numeric columns should read. The width is unchanged - this is where
+	 * the characters sit in the field, not how wide the field is.
+	 */
+	out_fmt(o, A_S_HEAD "%-4s %-7s %-6s %-9s %-5s %-*.*s %5s %*s %*s" A_OFF,
 		"rec", "type", "bind", "vis", "flags",
-		wd, "value", wd == 16 ? 12 : 8, "size", "sec", "name");
+		nw, nw, "name", "sec", sw, "size", wd, "value");
 	symd_edge(o, w);
-
-	room = w - 3 - used;
 
 	for (i = 0; i < rows; i++) {
 		uint64_t at = v->sym_at + (uint64_t)i;
@@ -15645,32 +15699,37 @@ static void draw_symbols(struct out *o, struct view *v)
 			out_fmt(o, A_S_VIS "%-9s" A_OFF " ",
 				sym_vis_str(r[KOF_SYM_R_VIS]));
 			out_fmt(o, A_S_FLAG "%-5s" A_OFF " ", fl);
-			out_fmt(o, A_S_VAL "%0*llx" A_OFF " ", wd,
-				(unsigned long long)sym_u64(r,
-							KOF_SYM_R_VALUE));
-			out_fmt(o, A_S_SIZE "%*llu" A_OFF " ",
-				wd == 16 ? 12 : 8,
-				(unsigned long long)sym_u64(r,
-							KOF_SYM_R_SIZE));
-			out_fmt(o, A_S_SHN "%-5s" A_OFF " ", shn);
 			/*
-			 * The name last, printed as the bytes the record holds
-			 * rather than as a C string: it is NUL-PADDED TO A
-			 * FIXED 40 AND NOT NECESSARILY TERMINATED, so a %s
-			 * would run into the next record. Clipped to what is
-			 * left inside the border - nothing here turns autowrap
-			 * off, so a name written past the edge would wrap and
-			 * overwrite the screen outside the box.
+			 * The name, in the middle now, and PADDED TO nw so the
+			 * three columns after it line up.
+			 *
+			 * Printed as the bytes the record holds rather than as
+			 * a C string: it is NUL-padded to a fixed 40 and not
+			 * necessarily terminated, so a %s would run into the
+			 * next field. Clipped to nw for the same reason it is
+			 * padded to it - nothing here turns autowrap off, so a
+			 * name written past the edge would wrap and overwrite
+			 * the screen outside the box.
 			 */
 			out_str(o, A_S_NAME);
-			for (k = 0; k < room && k < (int)KOF_SYM_NAMELEN; k++) {
+			for (k = 0; k < nw; k++) {
 				char c = (char)r[KOF_SYM_R_NAME + (uint32_t)k];
 
 				if (!c)
 					break;
 				out_fmt(o, "%c", c);
-				}
+			}
 			out_str(o, A_OFF);
+			for (; k < nw; k++)
+				out_str(o, " ");
+			out_str(o, " ");
+			out_fmt(o, A_S_SHN "%5s" A_OFF " ", shn);
+			out_fmt(o, A_S_SIZE "%*llu" A_OFF " ", sw,
+				(unsigned long long)sym_u64(r,
+							KOF_SYM_R_SIZE));
+			out_fmt(o, A_S_VAL "%0*llx" A_OFF, wd,
+				(unsigned long long)sym_u64(r,
+							KOF_SYM_R_VALUE));
 		}
 		symd_edge(o, w);
 	}
