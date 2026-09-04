@@ -341,6 +341,36 @@ struct kof_range {
 #define KOF_SCAN_ALL (1u << 0)
 
 /*
+ * THE SYMBOL RECORDS, IN TWO HALVES - and unlike every region above, these are
+ * not bytes of the file.
+ *
+ * kof_syms() hands back a block the host BUILT while parsing and cached for the
+ * object (see kof_scanner). Naming it here is what lets a signature match a
+ * symbol rather than match some bytes that happen to spell one, which is the
+ * whole reason the KSYM layout exists: "inflateEnd" searched in DATA is any
+ * occurrence of that string anywhere in the data, and searched in SYM_EXP it is
+ * the claim that this file EXPORTS inflateEnd. The second is a far narrower
+ * statement about the same ten bytes, and narrower is what a signature is for.
+ *
+ * Shared like KOF_SCAN_ALL rather than named per format, and for the same
+ * reason: the block means the same thing for every input that has one. Both
+ * builders fill one layout, so a rule scoped to SYM_IMP reads an ELF undefined
+ * symbol and a PE import as the one claim they both are.
+ *
+ * FROM THE TOP, because format regions number upward from bit 1 and these must
+ * never collide with a region a format adds later. The highest bit any format
+ * uses today is 7.
+ *
+ * The split is on KOF_SYM_F_UNDEFINED, and the extents cover RECORDS ONLY - the
+ * block's own header is not searched. Its count and `_start` index change with
+ * the file, so a pattern over them would be matching the host's bookkeeping
+ * rather than anything the object says.
+ */
+#define KOF_SCAN_SYM_IMP (1u << 30)
+#define KOF_SCAN_SYM_EXP (1u << 31)
+#define KOF_SCAN_SYM     (KOF_SCAN_SYM_IMP | KOF_SCAN_SYM_EXP)
+
+/*
  * Bounded reads over the object under scan, addressed by offset from its start.
  *
  * Deliberately not a pointer to the bytes:

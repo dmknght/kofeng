@@ -210,6 +210,16 @@ struct rgn_name {
 static const struct rgn_name rgn_names[] = {
 	RGN(KOF_SCAN_ALL),
 
+	/*
+	 * Not a format's, like the two above and below are: the symbol block
+	 * means the same thing for every input that has one, so kofsig.h
+	 * defines these and any target may name them. A rule scoped to
+	 * SYM_EXP says "this object exports these bytes", which is a narrower
+	 * claim than the same bytes found loose in DATA.
+	 */
+	RGN(KOF_SCAN_SYM_IMP),
+	RGN(KOF_SCAN_SYM_EXP),
+
 	RGN(KOF_SCAN_ELF_HEADERS),
 	RGN(KOF_SCAN_ELF_CODE),
 	RGN(KOF_SCAN_ELF_DATA),

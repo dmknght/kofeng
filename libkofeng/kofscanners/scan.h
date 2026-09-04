@@ -248,6 +248,40 @@ struct kof_scanner {
 	uint8_t  *sym;
 	uint32_t  sym_n;
 	uint8_t   sym_done;
+	/*
+	 * A SECOND MATCHER, BOUND TO THAT BLOCK.
+	 *
+	 * `m` is bound to the object's bytes, and the block is not in the
+	 * object - so a search scoped to KOF_SCAN_SYM_IMP has a different
+	 * buffer to run over and cannot borrow it. Everything else is the same
+	 * machinery, which is the point: the extents of one half of the block
+	 * are a kof_range list like any other, so the matcher answers them the
+	 * way it answers a region.
+	 *
+	 * Initialised with NO presence table and NO memo. Both exist to make a
+	 * database-sized number of searches over a file-sized buffer
+	 * affordable, and this buffer is at most a quarter megabyte and usually
+	 * a few kilobytes - building a 32MB table to avoid scanning it would
+	 * cost more than every search it could ever save.
+	 */
+	struct kof_match_ctx msym;
+	uint8_t   msym_bound;       /* bound to the block built for THIS object */
+	/*
+	 * THE TWO HALVES' EXTENTS, BUILT AT MOST ONCE PER OBJECT.
+	 *
+	 * Which records are imports and which are exports is a property of the
+	 * OBJECT, not of the pattern being looked for - so building the list
+	 * inside every search was a walk of every record per marker, and a
+	 * database with two hundred symbol-scoped markers paid it two hundred
+	 * times over for one unchanging answer.
+	 *
+	 * Allocated on the first symbol search a scanner ever does, and kept:
+	 * two lists at the extent cap is 128KB against the presence table's
+	 * 32MB, and a scanner that never meets a symbol range never takes it.
+	 */
+	struct kof_range *sym_ext[2];
+	uint32_t  sym_ext_n[2];
+	uint8_t   sym_ext_done[2];
 
 	struct kof_stats st;
 };

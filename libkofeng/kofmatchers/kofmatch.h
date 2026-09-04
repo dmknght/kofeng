@@ -38,6 +38,20 @@ struct kof_match_ctx {
 	 */
 	struct kof_gram *gram_use;
 	uint32_t         gram_patterns;   /* what the engine declared; 0 -> no table */
+	/*
+	 * HOW BIG A TABLE, and HOW MANY PATTERNS MAKE IT WORTH ONE. Zero on
+	 * both means the defaults, which are sized for a whole file.
+	 *
+	 * A matcher over the symbol block wants neither default. The table is
+	 * sized to keep occupancy low for the LARGEST buffer it will ever
+	 * stamp, and that buffer is a quarter megabyte rather than a hundred,
+	 * so 32MB of it would be memory nothing reads. And the threshold
+	 * exists because stamping costs a pass over the buffer - which for a
+	 * few kilobytes is paid back by the second search, not the hundred and
+	 * fortieth.
+	 */
+	uint8_t          gram_bits;
+	uint32_t         gram_min;
 
 	/*
 	 * The memo, one cell per (string, range) pair, STAMPED RATHER THAN CLEARED.
@@ -80,6 +94,17 @@ void kof_match_begin(struct kof_match_ctx *m, kof_buf data);
 #define KOF_MEMO_GEN_MAX 0x3fffu
 
 /*
+ * "Answer this one, and cache nothing."
+ *
+ * A slot past the end of the memo already means no cell, which kof_match_lookup
+ * handles because a database can legitimately have no memo at all. This names
+ * that, so a caller with a question the memo cannot key - one whose mask spans
+ * two different buffers, say - says so rather than passing a plausible-looking
+ * slot number and quietly overwriting the answer that belongs to it.
+ */
+#define KOF_MEMO_NONE 0xffffffffu
+
+/*
  * Attach the per-object search state. `memo_len` counts cells; `gram` is built on
  * first use and restamped per object.
  */
@@ -103,6 +128,27 @@ void kof_match_state_free(struct kof_match_ctx *);
  * exported: a caller assembling them differently is a caller that can get the
  * two-stage order wrong.
  */
+/*
+ * The memo on its own, for a question this matcher cannot answer itself.
+ *
+ * The symbol block is searched by a SECOND matcher, because it is not the
+ * object's bytes - but the question "is this marker in that range of this
+ * object" is the same KIND of question and deserves the same cache. Rather
+ * than give that matcher a memo of its own, which would double a table sized
+ * by the whole database to serve a buffer of a few kilobytes, the caller reads
+ * and writes the existing cell around a search it runs elsewhere.
+ *
+ * The cell protocol - the generation in the top bits, the answer in the low two
+ * - stays here, where kof_match_lookup also uses it. A caller reimplementing it
+ * would be a second copy of the one rule that decides whether a cached answer is
+ * still this object's.
+ *
+ * get returns -1 for "not known", else 0 or 1. Both are no-ops when the matcher
+ * has no memo, so a caller need not test for one.
+ */
+int  kof_match_memo_get(const struct kof_match_ctx *, uint32_t slot);
+void kof_match_memo_put(struct kof_match_ctx *, uint32_t slot, int found);
+
 int kof_match_lookup(struct kof_match_ctx *, uint32_t slot,
 		     const struct kof_range *ext, uint32_t next,
 		     const uint8_t *bytes, uint16_t len, uint8_t kind, uint8_t flags,

@@ -39,6 +39,7 @@
  * engine-side model next door is a different file with a similar name - see the
  * note at the top of kofmod/heur.h. */
 #include "../core/kofmod/heur.h"
+#include "../core/kofmod/kofsym.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -69,6 +70,26 @@ struct kof_scanner *kof_scan_new(const struct kof_engine *eng)
 	 * search is answered, not how a scan is bookkept. */
 	if (!kof_match_state_init(&sc->m, eng->n_str, eng->memo_size))
 		goto fail;
+	/*
+	 * The symbol block's matcher: its own presence table, sized for a
+	 * block rather than for a file, and no memo.
+	 *
+	 * 20 bits is 1M slots - 2MB against the file table's 32MB - and the
+	 * block is capped at KOF_SYM_MAX_BYTES, a quarter megabyte, so
+	 * occupancy stays under a quarter even at the cap and is a fraction of
+	 * a percent at the median few kilobytes.
+	 *
+	 * The threshold is 2 rather than 140 because the arithmetic behind 140
+	 * is about a buffer of megabytes: stamping costs one pass, and over a
+	 * block this small the second search already pays it back.
+	 *
+	 * No memo here - c_find_str keeps the cell in sc->m, where the slot is
+	 * already allocated by the database. See the note there.
+	 */
+	sc->msym.gram_bits = 20;
+	sc->msym.gram_min = 2;
+	if (!kof_match_state_init(&sc->msym, eng->n_str, 0))
+		goto fail;
 	return sc;
 
 fail:
@@ -83,6 +104,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	if (!sc)
 		return;
 	kof_match_state_free(&sc->m);
+	kof_match_state_free(&sc->msym);
 	kof_scan_kids_reset(sc);
 	free(sc->kids);
 	free(sc->kid_packer);
@@ -91,6 +113,8 @@ void kof_scan_free(struct kof_scanner *sc)
 		free(sc->view[i]);
 	free(sc->inf);
 	free(sc->sym);
+	free(sc->sym_ext[0]);
+	free(sc->sym_ext[1]);
 	free(sc);
 }
 
@@ -175,12 +199,44 @@ static uint32_t regions_present(const struct kof_obj_ctx *ctx, uint32_t wanted)
 	for (bit = 1; bit < 32; bit++) {
 		uint32_t m = 1u << bit;
 
-		if (!(wanted & m))
+		if (!(wanted & m) || (m & KOF_SCAN_SYM))
 			continue;
 		if (ctx->resolve_scan(ctx, m, ext, KOF_SCAN_MAX_EXTENTS))
 			present |= m;
 	}
 	return present;
+}
+
+/*
+ * The same question about the two halves of the symbol block.
+ *
+ * Separate from the loop above because resolve_scan answers about the FILE, and
+ * these are not in it - asked there, a format's resolver would say no to bits it
+ * has never heard of and the prefilter would skip every module naming them.
+ * Silent, and exactly the loss the note above describes.
+ *
+ * Still gated on `wanted`, so the block is not built for an object no module
+ * asks about - which is nearly all of them.
+ */
+static uint32_t sym_halves_present(const struct kof_obj_ctx *ctx,
+				   uint32_t wanted)
+{
+	uint32_t n = 0, total, i, present = 0;
+	const uint8_t *b;
+
+	if (!(wanted & KOF_SCAN_SYM) || !ctx->content || !ctx->content->syms)
+		return 0;
+	b = ctx->content->syms(ctx, &n);
+	total = kof_sym_count(b, n);
+	for (i = 0; i < total && present != KOF_SCAN_SYM; i++) {
+		const uint8_t *r = kof_sym_rec(b, n, i);
+
+		if (!r)
+			continue;
+		present |= (r[KOF_SYM_R_FLAGS] & KOF_SYM_F_UNDEFINED)
+			 ? KOF_SCAN_SYM_IMP : KOF_SCAN_SYM_EXP;
+	}
+	return present & wanted;
 }
 
 /*
@@ -1104,13 +1160,17 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	ctx.obj_size = buf.n;
 
 	kof_match_begin(&sc->m, buf);
-	/* A new object: whatever block the last one had is not this one's. */
+	/* A new object: whatever block the last one had is not this one's, and
+	 * neither is the matcher bound to it. */
 	sc->sym_done = 0;
 	sc->sym_n = 0;
+	sc->msym_bound = 0;
+	sc->sym_ext_done[0] = sc->sym_ext_done[1] = 0;
 
 	identify(sc, buf, &ctx);
 
 	present = regions_present(&ctx, sc->eng->scan_mask);
+	present |= sym_halves_present(&ctx, sc->eng->scan_mask);
 	sc->st.objects++;
 	sc->st.object_bytes += buf.n;
 

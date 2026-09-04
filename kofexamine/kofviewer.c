@@ -3180,7 +3180,23 @@ static void tree_add(struct view *v, uint32_t depth, uint32_t obj,
 static void tree_add_sym(struct view *v, uint32_t depth, uint32_t obj,
 			 uint64_t bytes, uint8_t which, const char *label)
 {
-	tree_add(v, depth, obj, 0, bytes, label);
+	/*
+	 * A REAL MASK, because these halves are real scan targets.
+	 *
+	 * It used to be zero, which said "this row is not something a signature
+	 * can be scoped to" - and that was true only for as long as the engine
+	 * could not search the block. It can (KOF_SCAN_SYM_IMP in kofsig.h),
+	 * and scoping to it is the entire point of splitting the block in two:
+	 * a name matched in DATA is any occurrence of those bytes, and the same
+	 * name matched in SYM_EXP is the claim that this object exports it.
+	 *
+	 * Zero also had a second meaning here that it should never have had -
+	 * node_at reads a maskless row as THE OBJECT ROW - so a symbol row was
+	 * one wrong lookup away from being handed back as the whole file.
+	 */
+	tree_add(v, depth, obj, which == SYMN_IMP ? KOF_SCAN_SYM_IMP
+						  : KOF_SCAN_SYM_EXP,
+		 bytes, label);
 	if (v->n_node)
 		v->node[v->n_node - 1u].sym = which;
 }
@@ -3806,6 +3822,165 @@ static int hit_kind(struct view *v, uint64_t off)
  */
 static uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off);
 
+/*
+ * The pattern a declaration stands for, compiled the way the database will.
+ *
+ * Shared because two locators need it and a second reading of the same
+ * declaration is a second thing to keep in step - which is how the panel came
+ * to report "found" about markers the scan would miss in the first place.
+ */
+static int decl_pattern(const struct decl *d, uint8_t *prog,
+			const uint8_t **pat, uint32_t *plen,
+			uint8_t *kind, uint8_t *flags)
+{
+	*flags = 0;
+	if (d->hex && d->hexs[0]) {
+		*plen = kof_hex_compile(d->hexs, prog, KOF_HEX_MAX_PROG, NULL);
+		if (!*plen)
+			return 0;       /* it will not compile; it cannot match */
+		*pat = prog;
+		*kind = KOF_STR_HEX;
+	} else {
+		*pat = d->bytes;
+		*plen = d->nbytes;
+		*kind = KOF_STR_LITERAL;
+		if (!d->hex) {
+			if (d->icase)
+				*flags |= KOF_STR_ICASE;
+			if (d->fullword)
+				*flags |= KOF_STR_FULLWORD;
+		}
+	}
+	return *pat && *plen && *plen <= 0xffffu;
+}
+
+/*
+ * How long each hit actually is, asked of the matcher.
+ *
+ * kof_match_where says where a match starts and not where it ends, and the
+ * engine keeps that to itself. Truncating the buffer is how to ask: a match
+ * needs its whole length to be there, so the shortest cut the pattern still
+ * matches under IS its length. Monotonic - a longer cut can only help - so it
+ * is a bisection rather than a walk, eight probes for the widest jump the
+ * compiler allows. Skipped entirely for a pattern of fixed length, which is
+ * nearly all of them.
+ */
+static void decl_hit_lens(struct decl *d, struct kof_match_ctx *m,
+			  const uint8_t *buf, uint64_t n, const uint8_t *pat,
+			  uint32_t plen, uint8_t kind, uint8_t flags)
+{
+	uint32_t h;
+
+	for (h = 0; h < d->n_hits; h++) {
+		uint32_t lo = d->len, hi = d->span_max;
+
+		if (d->span_max <= d->len) {
+			d->hit_len[h] = d->len;
+			continue;
+		}
+		if (d->hits[h] + hi > n)
+			hi = (uint32_t)(n - d->hits[h]);
+		while (lo < hi) {
+			uint32_t mid = lo + (hi - lo) / 2u;
+
+			kof_match_begin(m, kof_buf_make(buf, d->hits[h] + mid));
+			if (kof_match_at(m, d->hits[h], pat, (uint16_t)plen,
+					 kind, flags))
+				hi = mid;
+			else
+				lo = mid + 1u;
+		}
+		d->hit_len[h] = lo;
+	}
+}
+
+/*
+ * WHERE A MARKER SCOPED TO A SYMBOL HALF SITS - in that half, not in the file.
+ *
+ * A different address space, so a different search: the block is built, the
+ * object's bytes do not contain it, and running the file locator over a
+ * sym-scoped marker would report it absent from a scan that finds it every
+ * time.
+ *
+ * The half searched is the one the pane shows, so an offset recorded here is a
+ * pane coordinate and the row's jump lands where the reader took the bytes
+ * from. The engine searches its own interleaved block instead, but the halves
+ * are byte-identical run for run - sym_extents coalesces adjacent records of
+ * one half, which is exactly the contiguous block kofviewer built - so both
+ * answer the same question about the same bytes.
+ *
+ * Records only. The block's own header is not scanned by the engine, so a
+ * marker over it must not be reported as found here either.
+ *
+ * A mask naming BOTH halves is searched imports first and reported as whichever
+ * half holds the bytes - the same convention the file locator already uses for
+ * a string present in two regions, where the row names one and the widen offer
+ * names the union.
+ */
+static void decl_locate_sym(struct view *v, struct decl *d)
+{
+	struct object *ob = &v->obj[d->obj < v->n_obj ? d->obj : 0];
+	struct kof_match_ctx m;
+	uint8_t prog[KOF_HEX_MAX_PROG];
+	const uint8_t *pat;
+	uint32_t plen;
+	uint8_t kind, flags;
+	int half;
+
+	if (!decl_pattern(d, prog, &pat, &plen, &kind, &flags))
+		return;
+	memset(&m, 0, sizeof m);
+	if (!kof_match_state_init(&m, 0, 0))
+		return;
+
+	for (half = 0; half < 2; half++) {
+		uint32_t bit = half ? KOF_SCAN_SYM_EXP : KOF_SCAN_SYM_IMP;
+		const uint8_t *b = half ? ob->sym_exp : ob->sym_imp;
+		uint64_t bn = half ? ob->sym_exp_n : ob->sym_imp_n;
+		uint64_t from = KOF_SYM_HDRLEN;
+
+		if (!(d->mask & bit) || !b || bn <= KOF_SYM_HDRLEN ||
+		    d->len > bn - KOF_SYM_HDRLEN)
+			continue;
+		while (from < bn) {
+			uint64_t at;
+
+			kof_match_begin(&m, kof_buf_make(b, bn));
+			at = kof_match_where(&m, from, bn - from, pat,
+					     (uint16_t)plen, kind, flags);
+			if (at == KOF_BROKEN)
+				break;
+			/* Re-asked, because restarting the window moves the
+			 * word boundary - see the same note in decl_locate. */
+			if ((flags & KOF_STR_FULLWORD) &&
+			    !kof_match_at(&m, at, pat, (uint16_t)plen, kind,
+					  flags)) {
+				from = at + 1u;
+				continue;
+			}
+			if (d->n_hits < DECL_HITS_MAX)
+				d->hits[d->n_hits++] = at;
+			else
+				d->hits_clipped = 1;
+			if (d->at == KOF_BROKEN) {
+				d->at = at;
+				d->cur_hit = d->n_hits ? d->n_hits - 1u : 0u;
+				d->at_mask = bit;
+				snprintf(d->at_rgn, sizeof d->at_rgn, "%s",
+					 half ? "SYM_EXP" : "SYM_IMP");
+			}
+			from = at + 1u;
+			if (d->hits_clipped)
+				break;
+		}
+		if (d->n_hits) {
+			decl_hit_lens(d, &m, b, bn, pat, plen, kind, flags);
+			break;
+		}
+	}
+	kof_match_state_free(&m);
+}
+
 static void decl_locate(struct view *v, struct decl *d)
 {
 	struct object *ob = &v->obj[d->obj < v->n_obj ? d->obj : 0];
@@ -3822,7 +3997,16 @@ static void decl_locate(struct view *v, struct decl *d)
 	d->at_mask = 0;
 	d->n_hits = 0;
 	d->hits_clipped = 0;
-	if (!d->len || d->len > ob->buf.n)
+	if (!d->len)
+		return;
+	/* A different buffer entirely - see decl_locate_sym. Tested before the
+	 * size check below, which is against the object and would refuse a
+	 * marker longer than a small file but present in its symbol block. */
+	if (d->mask & KOF_SCAN_SYM) {
+		decl_locate_sym(v, d);
+		return;
+	}
+	if (d->len > ob->buf.n)
 		return;
 
 	/*
@@ -3840,24 +4024,7 @@ static void decl_locate(struct view *v, struct decl *d)
 	 * Whatever the panel says about a marker is now what the scan will do
 	 * with it, including the parts nobody here had to know about.
 	 */
-	if (d->hex && d->hexs[0]) {
-		plen = kof_hex_compile(d->hexs, prog, sizeof prog, NULL);
-		if (!plen)
-			return;         /* it will not compile; it cannot match */
-		pat = prog;
-		kind = KOF_STR_HEX;
-	} else {
-		pat = d->bytes;
-		plen = d->nbytes;
-		kind = KOF_STR_LITERAL;
-		if (!d->hex) {
-			if (d->icase)
-				flags |= KOF_STR_ICASE;
-			if (d->fullword)
-				flags |= KOF_STR_FULLWORD;
-		}
-	}
-	if (!pat || !plen || plen > 0xffffu)
+	if (!decl_pattern(d, prog, &pat, &plen, &kind, &flags))
 		return;
 
 	memset(&m, 0, sizeof m);
@@ -3973,33 +4140,7 @@ static void decl_locate(struct view *v, struct decl *d)
 	 * Skipped entirely for a pattern whose length is fixed, which is nearly
 	 * all of them.
 	 */
-	if (d->span_max > d->len) {
-		uint32_t h;
-
-		for (h = 0; h < d->n_hits; h++) {
-			uint32_t lo = d->len, hi = d->span_max;
-
-			if (d->hits[h] + hi > ob->buf.n)
-				hi = (uint32_t)(ob->buf.n - d->hits[h]);
-			while (lo < hi) {
-				uint32_t mid = lo + (hi - lo) / 2u;
-
-				kof_match_begin(&m, kof_buf_make(ob->buf.p,
-						d->hits[h] + mid));
-				if (kof_match_at(&m, d->hits[h], pat,
-						 (uint16_t)plen, kind, flags))
-					hi = mid;
-				else
-					lo = mid + 1u;
-			}
-			d->hit_len[h] = lo;
-		}
-	} else {
-		uint32_t h;
-
-		for (h = 0; h < d->n_hits; h++)
-			d->hit_len[h] = d->len;
-	}
+	decl_hit_lens(d, &m, ob->buf.p, ob->buf.n, pat, plen, kind, flags);
 	kof_match_state_free(&m);
 	if (d->at != KOF_BROKEN)
 		return;
@@ -4685,7 +4826,25 @@ static void rng_name_of(const struct kof_inspect_fmt *fmt, uint32_t mask,
 		snprintf(out, cap, "WHOLE-FILE");
 		return;
 	}
-	for (b = 0; b < 32u && at + 1u < cap; b++) {
+	/*
+	 * The symbol halves name themselves.
+	 *
+	 * The loop below asks the FORMAT what a bit is called, and these two
+	 * are not a format's - they mean the same thing for every input that
+	 * has a symbol block, which is why kofsig.h defines them rather than
+	 * elf.h or pe.h. Left to the loop they would come back unnamed, and an
+	 * unnamed mask falls out of the bottom of this function as WHOLE-FILE:
+	 * a range that says "search the exports" would have been written into
+	 * a rule as "search everything".
+	 */
+	for (b = 30u; b < 32u && at + 1u < cap; b++) {
+		if (!(mask & (1u << b)))
+			continue;
+		at += (size_t)snprintf(out + at, cap - at, "%s%s",
+				       at ? "&" : "",
+				       b == 30u ? "SYM_IMP" : "SYM_EXP");
+	}
+	for (b = 0; b < 30u && at + 1u < cap; b++) {
 		const char *w = NULL;
 
 		if (!(mask & (1u << b)))
@@ -5780,8 +5939,16 @@ static uint32_t src_mask_of(const struct kof_inspect_fmt *fmt, const char *e)
 
 	if (strstr(e, "KOF_SCAN_ALL"))
 		return KOF_SCAN_ALL;
+	/* Before the format's own words and independently of them: these two
+	 * are in kofsig.h, so a rule can name them with no format header at
+	 * all, and reopening such a rule must give back the range it declared
+	 * rather than an empty mask. */
+	if (strstr(e, "KOF_SCAN_SYM_IMP"))
+		m |= KOF_SCAN_SYM_IMP;
+	if (strstr(e, "KOF_SCAN_SYM_EXP"))
+		m |= KOF_SCAN_SYM_EXP;
 	if (!fmt)
-		return 0;
+		return m;
 	for (k = 0; k < fmt->n_regions; k++) {
 		const char *w = fmt->region_name(fmt->regions[k]);
 
@@ -6859,9 +7026,8 @@ static void draft_from_touch(struct view *v, const struct kof_touch *t)
 	v->cnd[0].level = LV_INFECT;
 	v->n_cnd = 1;
 	v->cur_cnd = 0;
-	say_note(v,
-		 "Loaded %u string(s) from %s - check the matcher, the logic is "
-		 "not in the database", v->n_decl,
+	say_note(v, "Loaded %u string(s) from %s - markers only, no logic",
+		 v->n_decl,
 		 t->family[0] ? t->family : "the database");
 	v->saved_hash = draft_hash(v);
 }
@@ -6913,8 +7079,7 @@ static void draft_show(struct view *v, uint32_t idx)
 			 * are wrong, and a loaded file is not one. */
 			v->warn[0] = 0;
 			if (rc < 0)
-				say_note(v, "Only partly read - check it "
-					    "against the file");
+				say_note(v, "Partly read - check it against the file");
 			return;
 		}
 		draft_from_touch(v, &ob->touch[idx]);
@@ -7601,8 +7766,27 @@ static void generate(struct view *v, int as_new)
 
 			rng_ident(ob->fmt, m, nm, sizeof nm);
 			fprintf(f, "KOF_TARGET_RANGE(%s, ", nm);
+			/*
+			 * The symbol halves first, and by their own names.
+			 *
+			 * The loop below spells a bit by asking the FORMAT for
+			 * it, and these two belong to no format - so they came
+			 * out unnamed, `first` stayed set, and the range was
+			 * written as KOF_SCAN_ALL. A rule meaning "search the
+			 * exports" would have compiled, shipped, and searched
+			 * the whole file.
+			 */
+			if (!(m & KOF_SCAN_ALL) && (m & KOF_SCAN_SYM_IMP)) {
+				fprintf(f, "KOF_SCAN_SYM_IMP");
+				first = 0;
+			}
+			if (!(m & KOF_SCAN_ALL) && (m & KOF_SCAN_SYM_EXP)) {
+				fprintf(f, "%sKOF_SCAN_SYM_EXP",
+					first ? "" : " | ");
+				first = 0;
+			}
 			if (!(m & KOF_SCAN_ALL))
-				for (b = 0; b < 32u; b++) {
+				for (b = 0; b < 30u; b++) {
 					const char *w = NULL;
 
 					if (!(m & (1u << b)))
@@ -9104,14 +9288,13 @@ static void draft_refresh(struct view *v)
 			v->grp[g].mask = m;
 	}
 	if (!moved && !gone)
-		say_note(v, "Every marker is already in the region it is "
-			    "searched for");
+		say_note(v, "Every marker is already in the region searched");
 	else if (!gone)
-		say_note(v, "%u marker(s) moved to the region they are in",
+		say_note(v, "Moved %u marker(s) to where they are",
 			 moved);
 	else
-		say_note(v, "%u moved, %u not in this object - left as "
-			    "declared", moved, gone);
+		say_note(v, "%u moved, %u not here - left as declared",
+			 moved, gone);
 }
 
 /*
@@ -11294,7 +11477,23 @@ static void draw_marker_line(struct out *o, struct view *v)
 		 * but how many there are and how far through them you are. */
 		/* The wording an editor uses. "hit 1/1" reads as a ratio of
 		 * something, and the thing it was a ratio of was never said. */
-		if (v->find_n && v->find_i)
+		/*
+		 * A SYMBOL ROW HAS ONE OFFSET, AND IT IS NOT A FILE OFFSET.
+		 *
+		 * The pair above is "where in the file" and "where in the
+		 * region", and on a symbol row view_map returns the second for
+		 * both - so the line read "offset 00000054 (region: 00000054)"
+		 * and invited the number in front to be used as a file offset,
+		 * which is what declaring a marker from this row used to do
+		 * with it. The block is built, so it is said once and named
+		 * for what it is.
+		 */
+		if (sym_view(v))
+			snprintf(right, sizeof right,
+				 "%llu B   block offset %08llx",
+				 (unsigned long long)(hi - lo + 1u),
+				 (unsigned long long)lo);
+		else if (v->find_n && v->find_i)
 			snprintf(right, sizeof right,
 				 "match %u of %u   %llu B   offset %08llx "
 				 "(region: %08llx)",
@@ -12387,8 +12586,7 @@ static void copy_said(struct view *v, size_t n)
 			 "Copied %u byte(s) via %s", (unsigned)n, g_clip_via);
 	else
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "Copied %u byte(s) - this program only, the terminal "
-			 "refused the clipboard", (unsigned)n);
+			 "Copied %u byte(s) - terminal refused the clipboard", (unsigned)n);
 }
 
 /* Copying an offset is copying a number, so it has two spellings and both are
@@ -12489,8 +12687,7 @@ static void decl_edit_open(struct view *v, uint32_t i)
 	if (i >= v->n_decl)
 		return;
 	if (!decl_text_editable(d)) {
-		say_note(v, "String %u holds bytes that are not text - edit it "
-			 "as hex", i + 1u);
+		say_note(v, "String %u is not text - edit it as hex", i + 1u);
 		return;
 	}
 	if (d->hex) {
@@ -12548,8 +12745,7 @@ static void decl_edit_commit(struct view *v, uint32_t i)
 		 * nobody asked for, silently.
 		 */
 		if (n >= sizeof d->hexs) {
-			say_note(v, "Hex pattern is longer than %u characters "
-				 "- left as it was",
+			say_note(v, "Hex pattern over %u characters - unchanged",
 				 (unsigned)(sizeof d->hexs - 1u));
 			return;
 		}
@@ -12589,7 +12785,7 @@ static void decl_edit_commit(struct view *v, uint32_t i)
 		d->nbytes = d->len;
 	}
 	if (!d->len) {
-		say_note(v, "String %u would be empty - left as it was",
+		say_note(v, "String %u would be empty - unchanged",
 			 i + 1u);
 		return;
 	}
@@ -12663,7 +12859,33 @@ static void decl_add(struct view *v, int hex)
 	 * the absence of a region rather than one of them, which is why a range
 	 * built on it contained nothing.
 	 */
-	{
+	if (n->sym) {
+		/*
+		 * THE ROW IS THE ANSWER, and no lookup is wanted.
+		 *
+		 * This went through node_at like every other row, which is a
+		 * FILE-offset lookup - and view_map on a symbol row returns an
+		 * offset into the built block, so whichever region happened to
+		 * sit at that distance from zero won. A name taken out of
+		 * SYM_EXP at block offset 0x54 was declared HEADERS in libz
+		 * and UNCLAIMED in a shorter-headered sample, neither of which
+		 * contains the bytes.
+		 *
+		 * The lookup exists because the hex pane can follow a marker
+		 * into another region while the tree cursor stays put, so the
+		 * cursor is not evidence. On a symbol row the pane cannot go
+		 * anywhere else - the block is one contiguous run - so the row
+		 * IS the evidence, and it now carries the scan target to say
+		 * so.
+		 */
+		char lab[sizeof n->label];
+
+		/* Through a local: both point into `struct view`, so the
+		 * compiler cannot prove the copy does not overlap itself. */
+		snprintf(lab, sizeof lab, "%s", n->label);
+		d->mask = n->mask;
+		snprintf(d->rgn, sizeof d->rgn, "%.23s", lab);
+	} else {
 		/*
 		 * Mapped first: `lo` counts bytes along the region being
 		 * looked at, not bytes into the file, and the two differ by
@@ -12685,7 +12907,9 @@ static void decl_add(struct view *v, int hex)
 			 rn->mask ? rn->label : "WHOLE-FILE");
 	}
 	d->grp = 0;
-	d->at = view_map(v, lo, 0);
+	/* Not on a symbol row: there `lo` is a block offset and this field is
+	 * a file offset. decl_locate sets it from the search either way. */
+	d->at = n->sym ? KOF_BROKEN : view_map(v, lo, 0);
 	(void)g;
 	v->warn[0] = 0;
 	v->sel_decl = v->n_decl;
@@ -13106,6 +13330,10 @@ static uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off)
 				best = k;               /* the object row */
 			continue;
 		}
+		/* A symbol half is not in the file, so no file offset is ever
+		 * in it and the resolver has nothing to say about the bit. */
+		if (v->node[k].mask & KOF_SCAN_SYM)
+			continue;
 		n = kof_scan_resolve_range(&v->obj[obj].ctx, v->node[k].mask,
 					   v->probe);
 		for (j = 0; j < n; j++)
@@ -14354,7 +14582,7 @@ static void prop_build(struct view *v)
 
 		for (i = 0; i < v->n_node; i++)
 			if (v->node[i].obj == v->node[v->sel_node].obj &&
-			    v->node[i].mask)
+			    v->node[i].mask && !v->node[i].sym)
 				n++;
 		/* No parser claimed the bytes, so nothing divided them. That
 		 * is not a file whose regions fail to add up - it is a file
@@ -14366,14 +14594,22 @@ static void prop_build(struct view *v)
 			goto no_regions;
 		}
 	}
+	/*
+	 * The symbol halves are left out of this sum on purpose.
+	 *
+	 * What follows is a PARTITION CHECK - the regions are extents of the
+	 * file and must add up to it - and the halves are built, so their bytes
+	 * are not the file's. Counted in, every ELF with symbols would report
+	 * MISMATCH about a partition that is perfectly sound.
+	 */
 	for (i = 0; i < v->n_node; i++)
 		if (v->node[i].obj == v->node[v->sel_node].obj &&
-		    v->node[i].mask)
+		    v->node[i].mask && !v->node[i].sym)
 			total += v->node[i].bytes;
 	for (i = 0; i < v->n_node; i++) {
 		const struct node *n = &v->node[i];
 
-		if (n->obj != v->node[v->sel_node].obj || !n->mask)
+		if (n->obj != v->node[v->sel_node].obj || !n->mask || n->sym)
 			continue;
 		prop_add(A_OFF, "  " A_ID "%-11s" A_OFF A_SIZE "%-10llu" A_OFF
 			 A_LOC "%5.1f%%" A_OFF, n->label,
@@ -14802,12 +15038,12 @@ static void emu_here(struct view *v)
 	v->act_ok = 0;
 	if (!v->eng) {
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "No database - nothing to unpack with");
+			 "No database to unpack with");
 		return;
 	}
 	if (!o->buf.p || !o->buf.n) {
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "That object's bytes were not kept - nothing to run");
+			 "Object's bytes were not kept");
 		return;
 	}
 	if (o->emu_done) {
@@ -14817,7 +15053,7 @@ static void emu_here(struct view *v)
 		 * asked already. Whatever it produced is in the tree below.
 		 */
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "Unpack skipped: the Emu has already run on this");
+			 "Emu has already run on this");
 		return;
 	}
 	sc = kof_scanner_new(v->eng);
@@ -14893,7 +15129,7 @@ static void emu_here(struct view *v)
 		 */
 		v->act_ok = 0;
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "Unpack failed: the Emu recovered nothing");
+			 "Emu recovered nothing");
 		return;
 	}
 	objects_examine_from(v, v->eng, before);
@@ -14901,7 +15137,7 @@ static void emu_here(struct view *v)
 	view_select(v);
 	v->act_ok = 1;
 	snprintf(v->act_msg, sizeof v->act_msg,
-		 "Unpack completed: %u object(s)", v->n_obj - before);
+		 "Unpacked %u object(s)", v->n_obj - before);
 }
 
 /*
@@ -14984,7 +15220,7 @@ static void dump_all(struct view *v, int use_emu)
 	say_unpacked(v);
 	if (!kof_dump_dir_for(v->path, dir, sizeof dir)) {
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "No dump: path too long to place one beside the file");
+			 "No dump: path too long");
 		return;
 	}
 	if (use_emu) {
@@ -14992,8 +15228,7 @@ static void dump_all(struct view *v, int use_emu)
 
 		if (at + 5 > sizeof dir) {
 			snprintf(v->act_msg, sizeof v->act_msg,
-				 "No dump: path too long to place one beside "
-				 "the file");
+				 "No dump: path too long");
 			return;
 		}
 		memcpy(dir + at, "_emu", 5);
@@ -17773,8 +18008,7 @@ static void click(struct view *v, int rclick)
 					 * here and it is worth a line.
 					 */
 					say_note(v, "Marker %u is not in this "
-						 "object - nowhere to jump to",
-						 k + 1u);
+					 "object", k + 1u);
 				}
 			}
 			return;
@@ -19101,7 +19335,7 @@ static int handle(struct view *v, int k)
 			find_run(v, 0);
 		break;
 	case 0x0f:                      /* Ctrl+O */
-		say_note(v, "Open: not built yet - pass the file on the "
+		say_note(v, "No file picker - pass the file on the "
 			    "command line");
 		break;
 	case 'q':

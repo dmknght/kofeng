@@ -131,6 +131,132 @@ static const struct kof_str_ent *str_of(const struct kof_scanner *sc, uint32_t i
  * the word boundaries. What is left here is the only part that needs the object's
  * parse: turning a named range into extents.
  */
+static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes);
+
+/*
+ * The extents of one half of the symbol block, LAST RECORD FIRST.
+ *
+ * The same shape a region resolve produces, over a different buffer: one run per
+ * record, and adjacent records of the same half coalesced into one. Coalescing
+ * is deliberate and matches the region contract - a pattern lying across the
+ * join between two adjacent extents is found - and it also makes the engine's
+ * view of a half byte-identical to the contiguous half kofviewer displays, so a
+ * marker taken from the SYM_EXP pane matches exactly the run it was taken from.
+ *
+ * Records only: KOF_SYM_HDRLEN is skipped, for the reason in kofsig.h.
+ *
+ *
+ * WHY BACKWARDS.
+ *
+ * A symbol table is written runtime-first: the null record, the section and
+ * file entries, then libc and the toolchain, and the author's own symbols
+ * LAST. A rule scoped to a symbol half is nearly always asking about one of
+ * the author's, so the answer is at the end of the table and a forward walk
+ * pays for the whole runtime prefix to reach it. bases/heur/scloader_00.c
+ * already walks its records this way for exactly this reason.
+ *
+ * IT CANNOT CHANGE AN ANSWER, and that is what makes it free rather than a
+ * trade. kof_match_lookup returns whether the pattern is PRESENT - match_ranges
+ * takes the extents in array order and stops at the first hit, so reversing
+ * them reorders the work and not the result. The best case improves, the worst
+ * case is the same walk, and nothing is skipped.
+ *
+ * The other search - kof_find_str_where, which answers WHERE - would be a
+ * different matter, since the first hit found is the hit reported. It never
+ * comes through here: it takes a module-computed offset and length rather than
+ * a range id, so it has no extents to reverse.
+ *
+ * Each run still holds its own bytes in file order - only the RUNS are
+ * reversed - because a run is one contiguous region and match_one scans it
+ * forward like any other.
+ */
+static uint32_t sym_extents(const uint8_t *b, uint32_t n, int undef,
+			    struct kof_range *ext, uint32_t cap)
+{
+	uint32_t total = kof_sym_count(b, n), i, k = 0;
+
+	for (i = total; i-- > 0; ) {
+		const uint8_t *r = kof_sym_rec(b, n, i);
+		uint64_t off;
+
+		if (!r)
+			continue;
+		if (!(r[KOF_SYM_R_FLAGS] & KOF_SYM_F_UNDEFINED) != !undef)
+			continue;
+		off = (uint64_t)KOF_SYM_HDRLEN + (uint64_t)i * KOF_SYM_RECLEN;
+		/* The record immediately ABOVE this one is the run being built,
+		 * so the run grows downward: its start moves back a record and
+		 * its length grows by one. */
+		if (k && ext[k - 1u].off == off + KOF_SYM_RECLEN) {
+			ext[k - 1u].off = off;
+			ext[k - 1u].len += KOF_SYM_RECLEN;
+			continue;
+		}
+		if (k >= cap)
+			return k;
+		ext[k].off = off;
+		ext[k].len = KOF_SYM_RECLEN;
+		k++;
+	}
+	return k;
+}
+
+/*
+ * Search the halves of the symbol block that `mask` names.
+ *
+ * NOT MEMOISED, and that is not an oversight. The memo cell is keyed on the
+ * (marker, mask) pair, so a mask that names a symbol half AND a file region is
+ * one question with two buffers behind it - answering half of it and stamping
+ * the cell would make the other half unreachable for every later asker. The
+ * block is small enough that repeating the search is cheaper than the bug.
+ */
+static int c_find_str_sym(const struct kof_obj_ctx *ctx, uint32_t mask,
+			  const uint8_t *bytes, const struct kof_str_ent *e)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	uint32_t sym_n = 0;
+	const uint8_t *sym = c_syms(ctx, &sym_n);
+	int half;
+
+	if (!sym)
+		return 0;
+	if (!sc->msym_bound) {
+		kof_match_begin(&sc->msym, kof_buf_make(sym, sym_n));
+		sc->msym_bound = 1;
+	}
+	/* Imports then exports, so a mask naming both stops on the first half
+	 * that answers rather than always walking the longer one. */
+	for (half = 0; half < 2; half++) {
+		if (!(mask & (half ? KOF_SCAN_SYM_EXP : KOF_SCAN_SYM_IMP)))
+			continue;
+		/*
+		 * Built once for this object and then reused, because the
+		 * split is the object's and not the pattern's. See sym_ext in
+		 * scan.h.
+		 */
+		if (!sc->sym_ext_done[half]) {
+			if (!sc->sym_ext[half]) {
+				sc->sym_ext[half] =
+					malloc(KOF_SCAN_MAX_EXTENTS *
+					       sizeof *sc->sym_ext[half]);
+				if (!sc->sym_ext[half])
+					return 0;
+			}
+			sc->sym_ext_n[half] =
+				sym_extents(sym, sym_n, !half,
+					    sc->sym_ext[half],
+					    KOF_SCAN_MAX_EXTENTS);
+			sc->sym_ext_done[half] = 1;
+		}
+		if (sc->sym_ext_n[half] &&
+		    kof_match_lookup(&sc->msym, KOF_MEMO_NONE,
+				     sc->sym_ext[half], sc->sym_ext_n[half],
+				     bytes, e->len, e->kind, e->flags, 0))
+			return 1;
+	}
+	return 0;
+}
+
 static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 		      uint32_t range_id)
 {
@@ -156,6 +282,62 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 	 * private to whoever asked first, and nobody can ask a signature author to
 	 * know which markers other authors chose.
 	 */
+	/*
+	 * The symbol halves first, because they are not in the object and the
+	 * resolve below cannot describe them.
+	 *
+	 * A mask may name both spaces - SYM_EXP | CODE is a sayable thing and
+	 * means "in either" - so this answers its half and falls through with
+	 * the file bits still to do. When there are none left the whole
+	 * question was about the block and the memo is skipped, which is what
+	 * c_find_str_sym's note is about.
+	 */
+	if (mask & KOF_SCAN_SYM) {
+		uint32_t sslot = KOF_MEMO_NONE;
+		int found;
+
+		/*
+		 * A mask naming ONLY symbol halves keys the memo like any
+		 * other, and must: it is one marker, one range, one buffer -
+		 * the same question however many modules ask it. Two rules
+		 * naming the same symbol used to pay two walks of the block
+		 * each time, which is exactly what the memo exists to stop.
+		 *
+		 * The cell lives in sc->m even though the search runs on
+		 * sc->msym. The slot is derived from (marker, mask) and a
+		 * symbol mask has its own rng_uid, so these cells cannot
+		 * collide with a file range's - and sc->m is begun once per
+		 * object, so its generation invalidates them at exactly the
+		 * right moment. Giving msym a memo of its own would instead
+		 * duplicate a table sized by the whole database.
+		 *
+		 * A MIXED mask gets none of this. SYM_EXP | CODE is one
+		 * question over two buffers, so a cell stamped after answering
+		 * half of it would make the other half unreachable for every
+		 * later asker.
+		 */
+		if (!(mask & ~KOF_SCAN_SYM)) {
+			uid = sc->eng->packs[m->pack_id].uid_base + e->uid;
+			sslot = uid * sc->eng->n_masks +
+				sc->eng->rng_uid[m->rng_base + range_id];
+			found = kof_match_memo_get(&sc->m, sslot);
+			if (found >= 0)
+				return found;
+		}
+		found = c_find_str_sym(ctx, mask, bytes, e);
+		if (sslot != KOF_MEMO_NONE)
+			kof_match_memo_put(&sc->m, sslot, found);
+		if (found)
+			return 1;
+		mask &= ~KOF_SCAN_SYM;
+		if (!mask)
+			return 0;
+		n = kof_scan_resolve_range(ctx, mask, ext);
+		return kof_match_lookup(&sc->m, KOF_MEMO_NONE, ext, n, bytes,
+					e->len, e->kind, e->flags,
+					&sc->st.gram_answers);
+	}
+
 	uid = sc->eng->packs[m->pack_id].uid_base + e->uid;
 	slot = uid * sc->eng->n_masks + sc->eng->rng_uid[m->rng_base + range_id];
 

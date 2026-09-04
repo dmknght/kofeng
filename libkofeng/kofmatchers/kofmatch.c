@@ -52,7 +52,7 @@
  */
 #define GRAM_MAX_BYTES ((uint64_t)GRAM_SLOTS * 693u / 1000u)
 
-static struct kof_gram *gram_new(void);
+static struct kof_gram *gram_new(uint8_t bits);
 static void             gram_free(struct kof_gram *);
 static uint64_t         gram_build(struct kof_gram *, kof_buf);
 static int              gram_may_contain(const struct kof_gram *, const uint8_t *,
@@ -72,6 +72,8 @@ void kof_match_begin(struct kof_match_ctx *m, kof_buf data)
 	uint16_t *memo = m->memo;
 	uint32_t memo_len = m->memo_len;
 	uint32_t patterns = m->gram_patterns;
+	uint8_t  bits = m->gram_bits;
+	uint32_t gmin = m->gram_min;
 	uint16_t gen = m->memo_gen;
 
 	memset(m, 0, sizeof *m);
@@ -80,6 +82,8 @@ void kof_match_begin(struct kof_match_ctx *m, kof_buf data)
 	m->memo = memo;
 	m->memo_len = memo_len;
 	m->gram_patterns = patterns;
+	m->gram_bits = bits;
+	m->gram_min = gmin;
 
 	/*
 	 * A new generation instead of a new memo.
@@ -109,7 +113,9 @@ void kof_match_begin(struct kof_match_ctx *m, kof_buf data)
 	 * an object are fewer than its length and the true occupancy is below the
 	 * estimate. The threshold errs towards keeping the filter.
 	 */
-	if (data.n <= GRAM_MAX_BYTES && gram_ensure(m))
+	if (data.n <= (m->gram_bits
+		       ? (uint64_t)(1u << m->gram_bits) * 693u / 1000u
+		       : GRAM_MAX_BYTES) && gram_ensure(m))
 		m->gram_use = m->gram;
 
 	m->n_bytes_indexed = gram_build(m->gram_use, data);
@@ -290,20 +296,24 @@ static int find_range(struct kof_match_ctx *m, uint64_t off, uint64_t len,
 struct kof_gram {
 	uint16_t *stamp;
 	uint16_t  gen;
+	uint32_t  slots;
+	uint8_t   bits;
 };
 
 /* The threshold is gram_ensure's - its only caller tests it before calling, so
  * testing it again here was a second copy of one decision. */
-static struct kof_gram *gram_new(void)
+static struct kof_gram *gram_new(uint8_t bits)
 {
 	struct kof_gram *g;
 
 	g = calloc(1, sizeof *g);
 	if (!g)
 		return NULL;
+	g->bits = bits;
+	g->slots = 1u << bits;
 	/* calloc is lazy, but build writes scattered stamps, so the pages get touched
 	 * for real - which is why this is not allocated when it will not be used. */
-	g->stamp = calloc(GRAM_SLOTS, sizeof *g->stamp);
+	g->stamp = calloc(g->slots, sizeof *g->stamp);
 	if (!g->stamp) {
 		free(g);
 		return NULL;
@@ -319,14 +329,14 @@ static void gram_free(struct kof_gram *g)
 	free(g);
 }
 
-static uint32_t gram_hash4(const uint8_t *p)
+static uint32_t gram_hash4(const struct kof_gram *g, const uint8_t *p)
 {
 	uint32_t v = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
 		     ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 	/* Odd multiplier, high bits taken: mixes all four input bytes into the index,
 	 * which matters because the low bytes of a gram in text or code are far from
 	 * uniform. */
-	return (v * 2654435761u) >> (32 - GRAM_BITS);
+	return (v * 2654435761u) >> (32 - g->bits);
 }
 
 static uint64_t gram_build(struct kof_gram *g, kof_buf b)
@@ -338,13 +348,13 @@ static uint64_t gram_build(struct kof_gram *g, kof_buf b)
 	if (++g->gen == 0) {
 		/* Wrapped: every slot still holds a stamp from 65535 objects ago,
 		 * which would now read as current. */
-		memset(g->stamp, 0, (size_t)GRAM_SLOTS * sizeof *g->stamp);
+		memset(g->stamp, 0, (size_t)g->slots * sizeof *g->stamp);
 		g->gen = 1;
 	}
 	if (b.n < 4)
 		return 0;
 	for (i = 0; i + 4 <= b.n; i++)
-		g->stamp[gram_hash4(b.p + i)] = g->gen;
+		g->stamp[gram_hash4(g, b.p + i)] = g->gen;
 	return b.n;
 }
 
@@ -359,7 +369,7 @@ static int gram_may_contain(const struct kof_gram *g, const uint8_t *b,
 	if (!g || len < 4)
 		return 1;
 	if (!icase)
-		return g->stamp[gram_hash4(b)] == g->gen;
+		return g->stamp[gram_hash4(g, b)] == g->gen;
 
 	/* The table holds the object's bytes as they are, so a folded pattern has to be
 	 * looked up as every case combination its letters allow. */
@@ -384,7 +394,7 @@ static int gram_may_contain(const struct kof_gram *g, const uint8_t *b,
 				bit++;
 			}
 		}
-		if (g->stamp[gram_hash4(v)] == g->gen)
+		if (g->stamp[gram_hash4(g, v)] == g->gen)
 			return 1;
 	}
 	return 0;
@@ -715,15 +725,16 @@ static int gram_ensure(struct kof_match_ctx *m)
 {
 	if (m->gram)
 		return 1;
-	if (m->gram_patterns < GRAM_MIN_PATTERNS)
+	if (m->gram_patterns < (m->gram_min ? m->gram_min : GRAM_MIN_PATTERNS))
 		return 0;
-	m->gram = gram_new();
+	m->gram = gram_new(m->gram_bits ? m->gram_bits : GRAM_BITS);
 	return m->gram != NULL;
 }
 
 int kof_match_state_init(struct kof_match_ctx *m, uint32_t n_patterns,
 			 uint32_t memo_len)
 {
+	/* gram_bits and gram_min are the caller's, set before this and kept. */
 	m->gram = NULL;                   /* built on first object that wants it */
 	m->gram_use = NULL;
 	m->gram_patterns = n_patterns;
@@ -768,6 +779,34 @@ static int gram_admits(const struct kof_gram *g, const uint8_t *bytes, uint16_t 
 	return gram_may_contain(g, bytes, len, (flags & KOF_STR_ICASE) != 0);
 }
 
+static uint16_t *memo_cell(const struct kof_match_ctx *m, uint32_t slot)
+{
+	return (m->memo && slot < m->memo_len) ? &m->memo[slot] : NULL;
+}
+
+int kof_match_memo_get(const struct kof_match_ctx *m, uint32_t slot)
+{
+	uint16_t *cell = memo_cell(m, slot);
+
+	/* Written by an earlier object is the same as not written. */
+	if (!cell || (*cell >> 2) != m->memo_gen)
+		return -1;
+	switch (*cell & 3u) {
+	case KOF_MEMO_PRESENT: return 1;
+	case KOF_MEMO_ABSENT:  return 0;
+	default:               return -1;
+	}
+}
+
+void kof_match_memo_put(struct kof_match_ctx *m, uint32_t slot, int found)
+{
+	uint16_t *cell = memo_cell(m, slot);
+
+	if (cell)
+		*cell = (uint16_t)((m->memo_gen << 2) |
+				   (found ? KOF_MEMO_PRESENT : KOF_MEMO_ABSENT));
+}
+
 int kof_match_lookup(struct kof_match_ctx *m, uint32_t slot,
 		     const struct kof_range *ext, uint32_t next,
 		     const uint8_t *bytes, uint16_t len, uint8_t kind, uint8_t flags,
@@ -787,13 +826,12 @@ int kof_match_lookup(struct kof_match_ctx *m, uint32_t slot,
 	 * slow way. kof_match_state_init already treats memo_len 0 as success,
 	 * so the two now agree.
 	 */
-	cell = (m->memo && slot < m->memo_len) ? &m->memo[slot] : NULL;
-	/* Written by an earlier object is the same as not written. */
-	if (cell && (*cell >> 2) == m->memo_gen) {
-		uint16_t state = *cell & 3u;
+	cell = memo_cell(m, slot);
+	{
+		int known = kof_match_memo_get(m, slot);
 
-		if (state != KOF_MEMO_UNKNOWN)
-			return state == KOF_MEMO_PRESENT;
+		if (known >= 0)
+			return known;
 	}
 
 	if (!gram_admits(m->gram_use, bytes, len, kind, flags)) {
