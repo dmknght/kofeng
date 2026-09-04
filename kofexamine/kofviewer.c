@@ -1078,6 +1078,7 @@ struct view {
 	 */
 	uint64_t    pend_payload;
 	uint64_t    pend_paylen;
+	uint32_t    pend_paybits;
 
 	struct node node[MAX_TREE];
 	uint32_t    n_node, sel_node, tree_top;
@@ -1751,7 +1752,9 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	 * payload named on one object can never be shown against the next. */
 	o->payload_at  = v->pend_payload;
 	o->payload_len = v->pend_paylen;
+	o->payload_bits = v->pend_paybits;
 	v->pend_payload = v->pend_paylen = 0;
+	v->pend_paybits = 0;
 	for (p = name; (p = strstr(p, "//")) != NULL; p += 2)
 		o->depth++;
 
@@ -1841,12 +1844,13 @@ static void on_debug(uint32_t fact, const char *what, uint64_t value, void *user
 	/* Computed once. The engine hands the field's id with every note, so
 	 * picking the one field this cares about is an integer compare rather
 	 * than finding a dot and running strcmp per note per object. */
-	static uint32_t f_version, f_payload, f_paylen;
+	static uint32_t f_version, f_payload, f_paylen, f_paybits;
 
 	if (!f_version) {
 		f_version = kof_fact_id("version");
 		f_payload = kof_fact_id("payload");
 		f_paylen  = kof_fact_id("length");
+		f_paybits = kof_fact_id("bits");
 	}
 
 	if (n >= sizeof v->pending)
@@ -1880,6 +1884,11 @@ static void on_debug(uint32_t fact, const char *what, uint64_t value, void *user
 		v->pend_payload = value;
 	else if (fact == f_paylen)
 		v->pend_paylen = value;
+	/* How wide the payload is, said by whoever found it. See the note in
+	 * bases/heur/scloader_00.c: guessing it again here from the same bytes
+	 * is one fact in two places, and the copy here was the wrong one. */
+	else if (fact == f_paybits)
+		v->pend_paybits = (uint32_t)value;
 }
 
 static void objects_collect(struct view *v, kof_engine *eng)
@@ -2605,7 +2614,12 @@ static int payload_child(struct view *v, uint32_t parent)
 
 		if (sn > SCL_SIZE_MAX_VIEW)
 			return 0;
-		hn = pelf_hdr(img, sn, sc_bits(src, sn, 64u));
+		/* The finder's answer first; sc_bits only for a payload that
+		 * came out of a decoder, where the stub shape is the evidence
+		 * and nobody has said the width. */
+		hn = pelf_hdr(img, sn,
+			      po->payload_bits ? po->payload_bits
+					       : sc_bits(src, sn, 64u));
 		memcpy(img + hn, src, sn);
 		if (!obj_take(v, name, img, hn + sn))
 			return 0;
@@ -5047,26 +5061,33 @@ static int dis_default_bits(struct view *v)
 	struct object *ob = cur_obj(v);
 
 	/*
-	 * A PAYLOAD'S WIDTH IS ITS OWN, not its parent's.
+	 * A PAYLOAD'S WIDTH IS ITS OWN, not its parent's - and it is already
+	 * written down.
 	 *
-	 * A payload child has no format, so the arch test below cannot answer
-	 * for it and the fallback would say 64 - and a 64-bit ELF routinely
-	 * carries 32-bit Windows shellcode. Decoded at 64 the fourth byte of a
-	 * textbook msf x86 prologue comes out "(data)", because `60` is PUSHAD
-	 * in 32-bit mode and does not exist in 64-bit.
+	 * A 64-bit ELF routinely carries a 32-bit payload, and decoding one at
+	 * the wrong width is not a near miss: `53` reads as PUSH rbx instead of
+	 * PUSH ebx, and `60` - PUSHAD, which 64-bit mode does not have at all -
+	 * comes out as "(data)".
 	 *
-	 * Taken from the stub the payload starts with, since recognising the
-	 * stub IS knowing which mode emitted it. Still a guess, and still
-	 * overridable - the panel's own bit switch is right there.
+	 * So this used to special-case a payload child and ask sc_bits. That
+	 * was wrong twice over. It is a THIRD place deciding a fact the finder
+	 * already decided and pelf_hdr already wrote into the reconstruction's
+	 * header - and it was handed `ob->buf.p`, which BEGINS WITH THAT
+	 * HEADER, so it never matched a stub prologue and every payload came
+	 * out 64.
+	 *
+	 * The parse of that header is the answer, for a payload child exactly
+	 * as for any other object. sc_bits stays only as the last resort for a
+	 * buffer nothing has identified.
 	 */
-	if (ob && ob->payload_of && ob->buf.p)
-		return (int)sc_bits(ob->buf.p, (uint32_t)ob->buf.n, 64u);
 	if (ob && ob->fmt) {
 		if (ob->ctx.arch == KOF_ARCH_X86)
 			return 32;
 		if (ob->ctx.arch == KOF_ARCH_X86_64)
 			return 64;
 	}
+	if (ob && ob->payload_of && ob->buf.p)
+		return (int)sc_bits(ob->buf.p, (uint32_t)ob->buf.n, 64u);
 	return 64;
 }
 
@@ -14419,7 +14440,14 @@ static void click(struct view *v, int rclick)
  *
  * Returns 1: a key that reaches a field is consumed by it.
  */
-static int field_key(struct view *v, char *buf, size_t cap, int k)
+/*
+ * `accept` says which characters this field takes, or is NULL for any printable
+ * one. It exists because a family name reaches a filesystem path, a C literal
+ * and a verdict line - so the field refuses what the build would refuse, as it
+ * is typed, rather than letting a draft be finished and then rejected.
+ */
+static int field_key(struct view *v, char *buf, size_t cap, int k,
+		     int (*accept)(int))
 {
 	size_t n;
 
@@ -14520,7 +14548,8 @@ static int field_key(struct view *v, char *buf, size_t cap, int k)
 		if (v->caret < n)
 			memmove(buf + v->caret, buf + v->caret + 1u,
 				n - v->caret);
-	} else if (k >= 0x20 && k < 0x7f && n + 2u < cap) {
+	} else if (k >= 0x20 && k < 0x7f && n + 2u < cap &&
+		   (!accept || accept(k))) {
 		memmove(buf + v->caret + 1u, buf + v->caret,
 			n - v->caret + 1u);
 		buf[v->caret++] = (char)k;
@@ -15180,7 +15209,8 @@ static int handle_chooser_key(struct view *v, int k)
 			 * DECL_HEXS_CAP. They are the same size today, and
 			 * naming the right one is what keeps them that way. */
 			int r2 = field_key(v, v->ed.dr.sedit,
-					   sizeof v->ed.dr.decl[si].hexs, k);
+					   sizeof v->ed.dr.decl[si].hexs, k,
+					   NULL);
 
 			/* field_key clears v->edit when the field closes, and
 			 * closing is when the text becomes a declaration. */
@@ -15199,6 +15229,9 @@ static int handle_chooser_key(struct view *v, int k)
 		 */
 		char *buf;
 		size_t cap;
+		/* A name goes into a path, a literal and a verdict line; the
+		 * rest of these are prose. See kof_name_char in kofsig.h. */
+		int (*accept)(int) = NULL;
 
 		if (v->edit == 501) {
 			buf = v->ed.dr.note;
@@ -15206,6 +15239,7 @@ static int handle_chooser_key(struct view *v, int k)
 		} else if (v->edit == 1) {
 			buf = v->ed.dr.family;
 			cap = sizeof v->ed.dr.family;
+			accept = kof_name_char;
 		} else if (v->edit >= 300) {
 			buf = v->ed.dr.grp[(v->edit - 300) % MAX_GROUP].note;
 			cap = sizeof v->ed.dr.grp[0].note;
@@ -15215,8 +15249,9 @@ static int handle_chooser_key(struct view *v, int k)
 		} else {
 			buf = v->ed.dr.cnd[(v->edit - 4) % MAX_GROUP].variant;
 			cap = sizeof v->ed.dr.cnd[0].variant;
+			accept = kof_name_char;
 		}
-		return field_key(v, buf, cap, k);
+		return field_key(v, buf, cap, k, accept);
 		}
 	}
 

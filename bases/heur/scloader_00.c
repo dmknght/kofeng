@@ -216,6 +216,179 @@ KOF_HEUR_NAME("SCLoader");
 #define SCL_SIZE_MIN    64u
 #define SCL_SIZE_MAX    8192u
 
+/*
+ * ---- THE POINTER-SHAPED VARIANT ------------------------------------------
+ *
+ * `char shellcode[] = "..."` puts the bytes IN the symbol, and the walk below
+ * measures them. `char *shellcode = "..."` puts an ADDRESS in the symbol and
+ * the bytes in .rodata, so the symbol's size is the width of a pointer and the
+ * size gate refuses it - which is how a loader carrying its payload in clear
+ * went unseen. Measured on 8e33bf25...: eight bytes at 0x4038 holding 0x2004,
+ * and the twenty-three bytes there are the ordinary Linux x86
+ * execve("/bin//sh") in clear.
+ *
+ * Followed ONCE, never recursively: a pointer to a pointer is not a shape a
+ * compiler produces for this, and chasing further is walking data as addresses.
+ *
+ * WHAT SEPARATES IT FROM `char *message = "..."`, which is the same shape:
+ *
+ *   The target is NOT EXECUTABLE. This is the one that matters. Without it the
+ *   walk finds every function pointer in .data - 313 of them in 300 clean
+ *   binaries - because a pointer into .text is of course not text.
+ *
+ *   The blob is not mostly printable. A message is; SCL_NPR_PCT of the bytes
+ *   must be outside printable ASCII. Alone this leaves 2 in 300.
+ *
+ *   It is not a table, by the same top-byte test the inline case uses. That
+ *   takes it to 1 in 300 - a size_t that happened to look binary.
+ *
+ *   IT MAKES A SYSCALL. Linux shellcode has to; a data blob does not. This is
+ *   what takes it to 0 in 300 clean binaries while keeping the one real
+ *   payload, and it is also what drops a 21-byte candidate that turned out to
+ *   be a Discord name written in UTF-8 emoji.
+ *
+ * The cost is stated rather than hidden: a cleartext payload that reaches the
+ * kernel some other way - through a resolved libc pointer, say - is not found
+ * by this. The alternative measured worse: eleven false positives, ten of them
+ * OpenSSL curve tables in statically linked samples.
+ */
+#define SCL_PTR_MIN     16u     /* shorter than this is not a payload */
+#define SCL_NPR_PCT     15u     /* of the blob must be non-printable */
+#define SHF_EXECINSTR_X SHF_EXECINSTR_
+
+
+/*
+ * Where a symbol's own bytes are in the file, or 0 when the record's numbers do
+ * not describe a place in it.
+ *
+ * The record's shndx, value and the section's own addresses are all read out of
+ * the file, so every one of them is checked rather than trusted: a forged index
+ * or an address below the section it claims to be in must fail the test, not
+ * produce an offset.
+ */
+static uint64_t scl_sym_off(const struct kof_obj_ctx *ctx,
+			    const struct kof_elf_info *e, const uint8_t *r,
+			    uint64_t need)
+{
+	uint32_t shndx = (uint32_t)r[KOF_SYM_R_SHNDX] |
+			 ((uint32_t)r[KOF_SYM_R_SHNDX + 1] << 8);
+	uint64_t val, fo;
+
+	if (shndx >= e->sec_count || shndx >= KOF_ELF_MAX_SECTIONS)
+		return 0;
+	if (e->sec[shndx].type != SHT_PROGBITS_)
+		return 0;
+	val = kof_sym_u64(r, KOF_SYM_R_VALUE);
+	if (val < e->sec[shndx].mem_addr)
+		return 0;
+	fo = e->sec[shndx].file_off + (val - e->sec[shndx].mem_addr);
+	if (fo >= ctx->obj_size || need > ctx->obj_size - fo)
+		return 0;
+	if (fo < e->sec[shndx].file_off ||
+	    need > e->sec[shndx].file_size -
+		   (fo - e->sec[shndx].file_off))
+		return 0;
+	return fo;
+}
+
+/*
+ * Does this symbol hold a pointer to a cleartext payload.
+ *
+ * Reports it through kof_debug the same way the inline case does, so the viewer
+ * and the scanner see one shape of answer whichever branch found it.
+ */
+static int scl_pointer(const struct kof_obj_ctx *ctx,
+		       const struct kof_elf_info *e, const uint8_t *r)
+{
+	uint64_t fo = scl_sym_off(ctx, e, r,
+				  e->elf_class == KOF_ELFCLASS_64 ? 8u : 4u);
+	uint64_t pv = 0, po, len, k;
+	uint32_t w = e->elf_class == KOF_ELFCLASS_64 ? 8u : 4u;
+	uint32_t i, npr = 0, top = 0, freq[256], sys = 0;
+
+	if (!fo)
+		return 0;
+	for (k = 0; k < w; k++)
+		pv |= (uint64_t)kof_u8(fo + k) << (8u * k);
+	if (!pv)
+		return 0;
+
+	/* The section the address lands in, and it must not be code: without
+	 * this the walk finds every function pointer in .data. */
+	for (i = 0; i < e->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
+		const struct kof_elf_sec *sc = &e->sec[i];
+
+		if (sc->type != SHT_PROGBITS_ || (sc->flags & SHF_EXECINSTR_))
+			continue;
+		if (pv < sc->mem_addr || pv >= sc->mem_addr + sc->file_size)
+			continue;
+		po = sc->file_off + (pv - sc->mem_addr);
+		if (po >= ctx->obj_size)
+			return 0;
+		len = sc->file_off + sc->file_size - po;
+		if (len > ctx->obj_size - po)
+			len = ctx->obj_size - po;
+		if (len > SCL_SIZE_MAX)
+			len = SCL_SIZE_MAX;
+		/* A `char *` initialiser is a string, so the payload ends where
+		 * the compiler put its terminator. */
+		for (k = 0; k < len; k++)
+			if (kof_u8(po + k) == 0u) {
+				len = k;
+				break;
+			}
+		if (len < SCL_PTR_MIN)
+			return 0;
+		for (k = 0; k < 256u; k++)
+			freq[k] = 0;
+		for (k = 0; k < len; k++) {
+			uint8_t c = kof_u8(po + k);
+
+			if (++freq[c] > top)
+				top = freq[c];
+			if (c < 0x20u || c >= 0x7fu)
+				npr++;
+			/* int 0x80, syscall, sysenter - the whole of how a
+			 * payload on Linux reaches the kernel. */
+			if (k + 1u < len) {
+				uint8_t d = kof_u8(po + k + 1u);
+
+				/*
+				 * WHICH one, not merely that there is one.
+				 *
+				 * int 0x80 and sysenter are how a 32-bit
+				 * payload reaches the kernel and `syscall` is
+				 * how a 64-bit one does, so the marker settles
+				 * the width - and the width decides how the
+				 * payload is disassembled. The alternative was
+				 * for whoever displays it to guess again from
+				 * the same bytes, which is one fact in two
+				 * places and the second one was wrong: a
+				 * cleartext x86 payload inside an ELF64 loader
+				 * came out labelled x64.
+				 */
+				if (c == 0xcdu && d == 0x80u)
+					sys = 32u;
+				else if (c == 0x0fu && d == 0x34u)
+					sys = 32u;
+				else if (c == 0x0fu && d == 0x05u)
+					sys = 64u;
+			}
+		}
+		if (npr * 100u < (uint32_t)len * SCL_NPR_PCT)
+			return 0;
+		if (top * SCL_TOP_DENOM >= (uint32_t)len)
+			return 0;       /* a table, not a payload */
+		if (!sys)
+			return 0;
+		kof_debug("SCLoader.payload", pv);
+		kof_debug("SCLoader.length", len);
+		kof_debug("SCLoader.bits", sys);
+		return 1;
+	}
+	return 0;
+}
+
 KOF_DEFINE_HEUR
 {
 	const struct kof_elf_info *e = kof_elf(ctx);
@@ -346,6 +519,16 @@ KOF_DEFINE_HEUR
 			continue;
 
 		sz = kof_sym_u64(r, KOF_SYM_R_SIZE);
+		if (sz == (e->elf_class == KOF_ELFCLASS_64 ? 8u : 4u) &&
+		    e->elf_data == KOF_ELFDATA_LE) {
+			/* A pointer, followed once - see the note above. Only
+			 * little-endian, because reading an address the wrong
+			 * way round yields a number that lands nowhere and the
+			 * walk would look like it had simply found nothing. */
+			if (scl_pointer(ctx, e, r))
+				KOF_HEUR_HIT();
+			continue;
+		}
 		if (sz < SCL_SIZE_MIN || sz > SCL_SIZE_MAX)
 			continue;
 

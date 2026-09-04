@@ -839,6 +839,19 @@ static int read_family(const char *p, int line, char *out, size_t cap)
 		return 0;
 	}
 	out[n] = 0;
+	/*
+	 * THE CHARACTERS, checked here because this is the authority.
+	 *
+	 * kofviewer refuses them as they are typed, but a source written by
+	 * hand never goes through the panel - and the name reaches a filesystem
+	 * path, a C literal and a verdict line, so "anything between the
+	 * quotes" was never the rule anyone meant. See kof_name_ok in kofsig.h.
+	 */
+	if (!kof_name_ok(out)) {
+		err(line, "family name must be letters, digits, '-' or '_', "
+			  "and at most 63 of them");
+		return 0;
+	}
 	return 1;
 }
 
@@ -1151,7 +1164,9 @@ static int read_variant(const char *p, int line, char *out, size_t cap)
 			 *
 			 * This becomes part of a detection string a scanner
 			 * prints - "ELF-x64/Botnet:Mirai-0i0bq" - so letters,
-			 * digits and . - _ are the whole of it. Anything else
+			 * digits, '-' and '_' are the whole of it - the same
+			 * set kof_name_ok fixes for a family, because they end
+			 * up in the same detection string. Anything else
 			 * is refused rather than carried, and the reason is
 			 * what a quote does on the way IN to a file rather
 			 * than out of it: a tool that generates signatures
@@ -1161,10 +1176,9 @@ static int read_variant(const char *p, int line, char *out, size_t cap)
 			 * here rather than only in the generator means a file
 			 * written by hand is checked too.
 			 */
-			if (!isalnum((unsigned char)*q) && *q != '.' &&
-			    *q != '-' && *q != '_') {
+			if (!kof_name_char((unsigned char)*q)) {
 				err(line, "detection variant may hold letters, "
-					  "digits and . - _ only");
+					  "digits, '-' and '_' only");
 				return 0;
 			}
 			raw[rn++] = *q++;

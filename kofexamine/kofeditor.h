@@ -532,6 +532,9 @@ struct object {
 	 * zero when none did. Reported through kof_debug - see on_debug. */
 	uint64_t          payload_at;
 	uint64_t          payload_len;
+	/* How wide it is, from whoever found it rather than guessed again from
+	 * the same bytes - see bases/heur/scloader_00.c. 0 when unknown. */
+	uint32_t          payload_bits;
 	/* Set on the CHILD this viewer built from a parent's payload, so the
 	 * menu can find it without inferring anything from the name. A name
 	 * test alone would also match an unpacker's child that happened to sit
