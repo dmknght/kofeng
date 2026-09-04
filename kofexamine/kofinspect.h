@@ -294,6 +294,20 @@ struct kof_touch_str {
 	 * clear is the interesting case: present, and in the wrong place.
 	 */
 	uint64_t       at;       /* KOF_BROKEN when absent from the object */
+	/*
+	 * WHICH BUFFER `at` IS AN OFFSET INTO.
+	 *
+	 * Zero for the object's bytes. KOF_SCAN_SYM_IMP or KOF_SCAN_SYM_EXP
+	 * when the marker was found in the object's symbol block, which is
+	 * built and is not part of the file - so a caller must not hand that
+	 * number to anything that expects a file offset.
+	 *
+	 * Without it, a marker declared over a symbol record was reported
+	 * "absent" with region "-" on a row whose own header said 2/2: the
+	 * search that fills `at` only ever looked at the file, where the
+	 * block's records are not.
+	 */
+	uint32_t       sym;
 	int            in_rgn;
 };
 
@@ -337,6 +351,17 @@ struct kof_touch {
 	uint32_t                n_str;      /* markers the module declares */
 	uint32_t                n_present;  /* found anywhere in the object */
 	uint32_t                n_in_rgn;   /* found where the module looks */
+	/*
+	 * WHERE THE MODULE LOOKS, as the region mask it declared.
+	 *
+	 * Carried because the database HAS it and the panel was inventing a
+	 * substitute: a rule opened from the pack showed its range as "-" and
+	 * its matcher as WHOLE-FILE, so a marker declared in SYM_EXP was then
+	 * searched over the file, where the block's records are not, and
+	 * reported absent. The pack keeps the strings and not the logic - but
+	 * the range is not logic, it is a fact about each search.
+	 */
+	uint32_t                scan_mask;
 	struct kof_touch_str   *str;        /* n_str of them, owned */
 };
 

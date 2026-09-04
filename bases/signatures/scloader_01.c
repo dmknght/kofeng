@@ -13,13 +13,16 @@
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
 KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, "SCLoader");
 
-KOF_TARGET_RANGE(scan_range_sym_exp_noload, KOF_SCAN_SYM_EXP | KOF_SCAN_ELF_NOLOAD);
+KOF_TARGET_RANGE(scan_range_noload, KOF_SCAN_ELF_NOLOAD);
+KOF_TARGET_RANGE(scan_range_sym_exp, KOF_SCAN_SYM_EXP);
 
 KOF_DEFINE_HEXSTR(s0, "007368656C6C636F646500");
 KOF_DEFINE_HEXSTR(s1, "010100157368656C6C636F6465");
 
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
-	if (kof_find_str_any(scan_range_sym_exp_noload, s0, s1))
+	if (kof_find_str_any(scan_range_noload, s0))
+		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+	else if (kof_find_str_any(scan_range_sym_exp, s1))
 		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
 }

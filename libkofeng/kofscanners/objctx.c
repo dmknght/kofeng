@@ -170,37 +170,6 @@ static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes);
  * reversed - because a run is one contiguous region and match_one scans it
  * forward like any other.
  */
-static uint32_t sym_extents(const uint8_t *b, uint32_t n, int undef,
-			    struct kof_range *ext, uint32_t cap)
-{
-	uint32_t total = kof_sym_count(b, n), i, k = 0;
-
-	for (i = total; i-- > 0; ) {
-		const uint8_t *r = kof_sym_rec(b, n, i);
-		uint64_t off;
-
-		if (!r)
-			continue;
-		if (!(r[KOF_SYM_R_FLAGS] & KOF_SYM_F_UNDEFINED) != !undef)
-			continue;
-		off = (uint64_t)KOF_SYM_HDRLEN + (uint64_t)i * KOF_SYM_RECLEN;
-		/* The record immediately ABOVE this one is the run being built,
-		 * so the run grows downward: its start moves back a record and
-		 * its length grows by one. */
-		if (k && ext[k - 1u].off == off + KOF_SYM_RECLEN) {
-			ext[k - 1u].off = off;
-			ext[k - 1u].len += KOF_SYM_RECLEN;
-			continue;
-		}
-		if (k >= cap)
-			return k;
-		ext[k].off = off;
-		ext[k].len = KOF_SYM_RECLEN;
-		k++;
-	}
-	return k;
-}
-
 /*
  * Search the halves of the symbol block that `mask` names.
  *
@@ -243,9 +212,11 @@ static int c_find_str_sym(const struct kof_obj_ctx *ctx, uint32_t mask,
 					return 0;
 			}
 			sc->sym_ext_n[half] =
-				sym_extents(sym, sym_n, !half,
-					    sc->sym_ext[half],
-					    KOF_SCAN_MAX_EXTENTS);
+				kof_sym_extents(sym, sym_n,
+						half ? KOF_SCAN_SYM_EXP
+						     : KOF_SCAN_SYM_IMP,
+						sc->sym_ext[half],
+						KOF_SCAN_MAX_EXTENTS);
 			sc->sym_ext_done[half] = 1;
 		}
 		if (sc->sym_ext_n[half] &&
@@ -1856,22 +1827,15 @@ static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 		     ctx->format == KOF_FMT_PE)) {
 			if (!sc->sym)
 				sc->sym = malloc(KOF_SYM_MAX_BYTES);
-			/*
-			 * One block, two builders, and the format decides which
-			 * - not the caller. A rule asks for "this object's
-			 * symbols" and gets them in one layout whatever the
-			 * file is, which is the whole reason the layout exists.
-			 */
-			if (sc->sym && ctx->format == KOF_FMT_ELF)
-				sc->sym_n = kof_elf_syms(sc->m.data,
-							 ctx->file_header,
-							 sc->sym,
-							 KOF_SYM_MAX_BYTES);
-			else if (sc->sym)
-				sc->sym_n = kof_pe_syms(sc->m.data,
-							ctx->file_header,
-							sc->sym,
-							KOF_SYM_MAX_BYTES);
+			/* Which builder is kof_syms_build's decision, in one
+			 * place - see sym_any.c. */
+			if (sc->sym)
+				sc->sym_n = kof_syms_build(ctx->format,
+							   sc->m.data.p,
+							   sc->m.data.n,
+							   ctx->file_header,
+							   sc->sym,
+							   KOF_SYM_MAX_BYTES);
 		}
 	}
 	if (nbytes)

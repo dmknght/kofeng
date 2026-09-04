@@ -42,6 +42,7 @@
 #define KOF_KOFSYM_H
 
 #include <stdint.h>
+#include <kofmod/kofsig.h>   /* struct kof_range, KOF_SCAN_SYM_* */
 
 /*
  * The block: one header, then `count` records of KOF_SYM_RECLEN bytes.
@@ -288,6 +289,93 @@ static inline uint32_t kof_sym_first(const uint8_t *b, uint32_t n)
 		return 0;
 	return s + 1u;
 }
+
+/*
+ * ONE ANSWER TO "WHERE DOES A SYMBOL MASK POINT", FOR EVERY CALLER.
+ *
+ * Three places need it - the scan (kof_find_str), the marker pane
+ * (kof_touch_object) and the draft panel (kofviewer) - and while each had its
+ * own version they disagreed, which is exactly the shape of bug that is
+ * invisible: the scan detected a marker in SYM_EXP, the panel called the same
+ * marker absent, and the status line counted it as one of two. So the decision
+ * lives here and the callers only run the matcher over what it returns.
+ *
+ * The extents index the BLOCK, not the object - the block is built, and none of
+ * its records is a run of bytes in the file.
+ *
+ * LAST RECORD FIRST. A symbol table is written runtime-first, with the author's
+ * own symbols at the end, so a rule scoped to a half is nearly always asking
+ * about one of those. It cannot change an answer: kof_match_lookup reports
+ * whether a pattern is PRESENT and stops at the first extent that has it, so
+ * reversing the list reorders the work and not the result.
+ *
+ * Adjacent records of the SAME half coalesce into one run; a record of the
+ * other half breaks it. That is deliberate: the halves are separate targets, so
+ * a pattern is never matched across the join between them.
+ *
+ * Records only - the block's own header is not searched, because its count and
+ * `_start` index are the host's bookkeeping rather than anything the object
+ * says.
+ */
+static inline uint32_t kof_sym_extents(const uint8_t *b, uint32_t n,
+				       uint32_t mask, struct kof_range *ext,
+				       uint32_t cap)
+{
+	uint32_t k = 0, half;
+
+	if (!b || !ext)
+		return 0;
+	for (half = 0; half < 2u; half++) {
+		uint32_t bit = half ? KOF_SCAN_SYM_EXP : KOF_SCAN_SYM_IMP;
+		uint32_t total, i, first = k;
+
+		if (!(mask & bit))
+			continue;
+		total = kof_sym_count(b, n);
+		for (i = total; i-- > 0; ) {
+			const uint8_t *r = kof_sym_rec(b, n, i);
+			uint64_t off;
+
+			if (!r)
+				continue;
+			/* half 0 is the imports, which are the undefined ones. */
+			if (((r[KOF_SYM_R_FLAGS] & KOF_SYM_F_UNDEFINED) != 0u)
+			    == (half != 0u))
+				continue;
+			off = (uint64_t)KOF_SYM_HDRLEN +
+			      (uint64_t)i * KOF_SYM_RECLEN;
+			/* The record just above is the run being built, so the
+			 * run grows downward. Only within this half - `first`
+			 * is where this half's runs start. */
+			if (k > first &&
+			    ext[k - 1u].off == off + KOF_SYM_RECLEN) {
+				ext[k - 1u].off = off;
+				ext[k - 1u].len += KOF_SYM_RECLEN;
+				continue;
+			}
+			if (k >= cap)
+				return k;
+			ext[k].off = off;
+			ext[k].len = KOF_SYM_RECLEN;
+			k++;
+		}
+	}
+	return k;
+}
+
+/*
+ * The block for an object, whichever builder its format has.
+ *
+ * The format picks the builder, not the caller: a rule asks for "this object's
+ * symbols" and gets one layout whatever the file is, which is the whole reason
+ * the layout exists. Defined in kofparsers/binaries/sym_any.c so that the
+ * choice is made in one place too - it used to be made separately by the
+ * scanner and by kofviewer.
+ *
+ * Returns the bytes written, or 0 when the format has no symbols to give.
+ */
+uint32_t kof_syms_build(uint32_t format, const uint8_t *data, uint64_t data_n,
+			const void *info, uint8_t *out, uint32_t cap);
 
 /* Which table it came from, or 0 when there is none. */
 static inline uint8_t kof_sym_origin(const uint8_t *b, uint32_t n)

@@ -25,6 +25,7 @@
  * the same reason kofexamine.c and kofviewer.c both say _GNU_SOURCE. */
 #define _GNU_SOURCE
 
+#include <kofmod/kofsym.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -634,7 +635,26 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 		     struct kof_touch **out, uint32_t *n_out)
 {
 	struct kof_match_ctx m;
+	/*
+	 * A SECOND MATCHER, over the object's symbol block.
+	 *
+	 * `m` is bound to the object's bytes, and a range scoped to a symbol
+	 * half does not point there: kof_sym_extents indexes the BUILT block.
+	 * Without this, a marker the scan finds in SYM_EXP was counted as not
+	 * in its region here, so the status line read "1/2" about a rule whose
+	 * two markers both match - the pane and the scan disagreeing about the
+	 * same object, which is the one thing this pane must never do.
+	 *
+	 * No presence table and no memo: the block is a few kilobytes and each
+	 * marker is asked about once.
+	 */
+	struct kof_match_ctx msym;
+	uint8_t *sym = NULL;
+	uint32_t sym_n = 0;
 	struct kof_range *whole = NULL, *named = NULL;
+	/* One list per half, so a hit says WHICH half without this file
+	 * re-deriving the membership the engine already decided. */
+	struct kof_range *nsym[2] = { NULL, NULL };
 	struct kof_touch *v = NULL;
 	uint32_t n = 0, i, j, n_whole = 0;
 	int ok = 0;
@@ -650,14 +670,35 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 	 * database affordable rather than merely possible.
 	 */
 	memset(&m, 0, sizeof m);
+	memset(&msym, 0, sizeof msym);
+	if (!kof_match_state_init(&msym, 0, 0))
+		return 0;
 	if (!kof_match_state_init(&m, eng->n_str, 0))
 		return 0;
 	kof_match_begin(&m, buf);
 
 	whole = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *whole);
 	named = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *named);
+	nsym[0] = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *nsym[0]);
+	nsym[1] = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *nsym[1]);
+	/*
+	 * Built here rather than asked of ctx->content: this pane runs over an
+	 * inspected object and not inside a scanner, so the accessor a module
+	 * would use is not available. kof_syms_build is the same one decision
+	 * the scanner makes - see sym_any.c.
+	 */
+	if (ctx->file_header &&
+	    (ctx->format == KOF_FMT_ELF || ctx->format == KOF_FMT_PE)) {
+		sym = malloc(KOF_SYM_MAX_BYTES);
+		if (sym)
+			sym_n = kof_syms_build(ctx->format, buf.p, buf.n,
+					       ctx->file_header, sym,
+					       KOF_SYM_MAX_BYTES);
+		if (sym_n)
+			kof_match_begin(&msym, kof_buf_make(sym, sym_n));
+	}
 	v     = calloc(eng->n_mods, sizeof *v);
-	if (!whole || !named || !v)
+	if (!whole || !named || !nsym[0] || !nsym[1] || !v)
 		goto out;
 
 	/* The object entire, which is what "is this marker here at all" means. One
@@ -680,13 +721,14 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 	for (i = 0; i < eng->n_mods; i++) {
 		const struct kof_module *mod = &eng->mods[i];
 		struct kof_touch *t = &v[n];
-		uint32_t n_named = 0;
+		uint32_t n_named = 0, n_nsym[2] = { 0, 0 };
 		const char *why;
 
 		memset(t, 0, sizeof *t);
 		t->mod     = mod;
 		t->maltype = mod->maltype;
 		t->family  = kof_db_family(eng, mod);
+		t->scan_mask = mod->scan_mask;
 		if (!t->family)
 			t->family = "";
 		t->n_str   = mod->n_str;
@@ -714,6 +756,18 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 		if (!why)
 			n_named = kof_scan_resolve_range(ctx, mod->scan_mask,
 							 named);
+		/* And the symbol halves it names, which are a different buffer
+		 * and so separate lists. Same function the scan uses. */
+		if (!why && sym_n) {
+			n_nsym[0] = kof_sym_extents(sym, sym_n,
+						    mod->scan_mask &
+						    KOF_SCAN_SYM_IMP, nsym[0],
+						    KOF_SCAN_MAX_EXTENTS);
+			n_nsym[1] = kof_sym_extents(sym, sym_n,
+						    mod->scan_mask &
+						    KOF_SCAN_SYM_EXP, nsym[1],
+						    KOF_SCAN_MAX_EXTENTS);
+		}
 
 		if (mod->n_str) {
 			t->str = calloc(mod->n_str, sizeof *t->str);
@@ -772,10 +826,46 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 				span_at_of(&m, buf, s);
 			}
 
+			/*
+			 * In its region - in EITHER buffer the mask names.
+			 * A mask like SYM_EXP|NOLOAD is one question over two
+			 * of them, and answering only the file half is what
+			 * made the count disagree with the scan.
+			 */
 			if (n_named && where_in(&m, named, n_named, s) !=
 					KOF_BROKEN) {
 				s->in_rgn = 1;
 				t->n_in_rgn++;
+			} else {
+				uint32_t h;
+
+				for (h = 0; h < 2u; h++) {
+					uint64_t a2;
+
+					if (!n_nsym[h])
+						continue;
+					a2 = where_in(&msym, nsym[h],
+						      n_nsym[h], s);
+					if (a2 == KOF_BROKEN)
+						continue;
+					s->in_rgn = 1;
+					t->n_in_rgn++;
+					/*
+					 * And it is PRESENT, which the search
+					 * over the file could not see: the
+					 * block's records are nowhere in it.
+					 * Reported with the buffer it is in, so
+					 * no caller reads a block offset as a
+					 * file offset.
+					 */
+					if (s->at == KOF_BROKEN) {
+						s->at = a2;
+						s->sym = h ? KOF_SCAN_SYM_EXP
+							   : KOF_SCAN_SYM_IMP;
+						t->n_present++;
+					}
+					break;
+				}
 			}
 		}
 
@@ -834,6 +924,10 @@ out:
 		kof_touch_free(v, eng->n_mods);
 	free(whole);
 	free(named);
+	free(nsym[0]);
+	free(nsym[1]);
+	free(sym);
+	kof_match_state_free(&msym);
 	kof_match_state_free(&m);
 	return ok;
 }

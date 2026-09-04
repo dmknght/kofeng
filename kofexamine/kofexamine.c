@@ -1535,6 +1535,18 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
 			}
 			if (miss)
 				printf("%-10s  ", "-");
+			else if (s->sym)
+				/*
+				 * Found in the object's symbol block, which is
+				 * built - so this number is an offset into
+				 * that and not into the file. Marked, because
+				 * a bare number in this column has always
+				 * meant a file offset and the two are not
+				 * interchangeable.
+				 */
+				printf("%s%-10s%s  ", cl,
+				       (s->sym & KOF_SCAN_SYM_IMP)
+				       ? "sym_imp" : "sym_exp", co);
 			else
 				printf("%s%-10llu%s  ", cl,
 				       (unsigned long long)s->at, co);

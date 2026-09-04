@@ -308,6 +308,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofmatchers/hexcomp.c \
            libkofeng/kofparsers/binaries/elf_parse.c \
            libkofeng/kofparsers/binaries/elf_sym.c \
+           libkofeng/kofparsers/binaries/sym_any.c \
            libkofeng/kofparsers/binaries/pe_sym.c \
            libkofeng/kofparsers/binaries/pe_parse.c \
            libkofeng/kofparsers/containers/gzip_parse.c \
