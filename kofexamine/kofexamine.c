@@ -1354,7 +1354,9 @@ static const char *src_path_of(const char *family, uint32_t line)
  * compiled code and were never evaluated - and the wording says so.
  */
 static void print_markers(struct kof_engine *eng, kof_buf buf,
-			  const struct kof_obj_ctx *ctx, const char *display)
+			  const struct kof_obj_ctx *ctx,
+			  const struct kof_inspect_fmt *fmt,
+			  const char *display)
 {
 	struct kof_touch *v = NULL;
 	uint32_t n = 0, i, j, shown;
@@ -1366,7 +1368,7 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
 		if (!strcmp(g_verdict[q].object, display))
 			names[m++] = g_verdict[q].name;
 
-	if (!kof_touch_object(eng, buf, ctx, names, m, &v, &n)) {
+	if (!kof_touch_object(eng, buf, ctx, fmt, names, m, &v, &n)) {
 		free(names);
 		printf("  markers   out of memory\n");
 		return;
@@ -1594,7 +1596,7 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 			 * is a truthful answer and occasionally the useful one. */
 			if (eng) {
 				ctx.obj_size = buf.n;
-				print_markers(eng, buf, &ctx, display);
+				print_markers(eng, buf, &ctx, NULL, display);
 			}
 			rc = 1;
 			goto out;
@@ -1679,7 +1681,7 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 			       (unsigned long long)ds.whole_bytes, dir);
 		}
 		if (eng)
-			print_markers(eng, buf, &ctx, display);
+			print_markers(eng, buf, &ctx, f, display);
 		rc = 1;
 	}
 out:

@@ -308,6 +308,19 @@ struct kof_touch_str {
 	 * block's records are not.
 	 */
 	uint32_t       sym;
+	/*
+	 * WHICH REGION OR HALF `at` IS IN, as a mask.
+	 *
+	 * Carried rather than looked up again by each caller: the list used to
+	 * re-derive it from `at` while the draft panel read it off the
+	 * locator's answer, which is the same fact computed two ways - and the
+	 * two ways disagreed for an offset in the symbol block, where a
+	 * file-offset lookup has nothing to say.
+	 *
+	 * A caller turns it into a word with the format's own region names;
+	 * that part is presentation and stays with the caller.
+	 */
+	uint32_t       at_mask;
 	int            in_rgn;
 };
 
@@ -386,8 +399,101 @@ struct kof_touch {
  * module that fired has to be there whether or not it declares a marker, and a
  * structural detection declares none.
  */
+/* The matcher, forward declared: the locator below takes two of them and this
+ * header does not otherwise need to know what one contains. */
+struct kof_match_ctx;
+
+/*
+ * ---- WHERE A MARKER IS, AND IN WHICH REGION -----------------------------
+ *
+ * ONE RULE, because two lists show it and they must not disagree.
+ *
+ * The status line's marker list and the draft panel's string table exist for
+ * different reasons and show different columns, but "where is this marker" and
+ * "which region is that" are the same two questions in both - so they are
+ * answered here and read there.
+ *
+ * They used to be answered twice. kof_touch_object took the first occurrence
+ * anywhere in the file and worked out `in_rgn` separately; the panel preferred
+ * an occurrence the module would actually count and asked the symbol halves
+ * before the file. On a marker present in BOTH the block and the file - the
+ * name "shellcode" is one, since it is a record's name field and a string
+ * table entry - the two answered different offsets in different regions about
+ * one marker on one object.
+ *
+ * THE RULE:
+ *   1. the symbol halves the mask names, imports before exports, because that
+ *      is the order kof_find_str asks in and therefore the occurrence that
+ *      actually decided the detection;
+ *   2. otherwise the file, preferring an occurrence inside the mask;
+ *   3. otherwise the first occurrence anywhere, with `off_rgn` set to say the
+ *      rule cannot fire on it.
+ *
+ * Hits are collected from ONE space only, so every offset in `hits` is in the
+ * same buffer and a caller cannot mix them.
+ */
+
+/*
+ * The regions of one object, resolved once.
+ *
+ * Region lookup is per hit and resolving a region walks the segment and section
+ * tables, so the answer is prepared once per object rather than recomputed for
+ * every marker of every module.
+ */
+struct kof_region_map {
+	uint32_t          mask[32];
+	struct kof_range *ext[32];
+	uint32_t          n[32];
+	uint32_t          n_reg;
+};
+
+int      kof_region_map_build(struct kof_region_map *,
+			      const struct kof_obj_ctx *,
+			      const struct kof_inspect_fmt *);
+void     kof_region_map_free(struct kof_region_map *);
+/* The region holding a file offset, as a region mask; 0 when none does. */
+uint32_t kof_region_map_at(const struct kof_region_map *, uint64_t off);
+
+#define KOF_LOCATE_HITS 64u
+
+struct kof_locate {
+	uint64_t at;            /* KOF_BROKEN when nowhere at all */
+	uint32_t at_mask;       /* the region or half holding `at` */
+	uint32_t sym;           /* KOF_SCAN_SYM_* when `at` is in the block */
+	uint32_t seen_mask;     /* every region the file occurrences are in */
+	int      in_rgn;        /* `at` is somewhere the mask names */
+	int      off_rgn;       /* present, and nowhere the mask names */
+	uint32_t cur_hit;       /* which of `hits` is `at` */
+	uint32_t n_hits;
+	int      clipped;
+	uint64_t hits[KOF_LOCATE_HITS];
+	uint32_t hit_len[KOF_LOCATE_HITS];
+};
+
+/*
+ * `m` is a matcher for the object's bytes and `msym` one for its symbol block;
+ * both are begun here. `scratch` is an extent buffer of `cap` entries.
+ * Returns whether anything was found.
+ */
+int kof_locate_str(struct kof_match_ctx *m, struct kof_match_ctx *msym,
+		   const struct kof_region_map *map, kof_buf obj,
+		   const uint8_t *sym, uint32_t sym_n, uint32_t mask,
+		   const uint8_t *pat, uint16_t plen, uint8_t kind,
+		   uint8_t flags, uint32_t span_min, uint32_t span_max,
+		   struct kof_range *scratch, uint32_t cap,
+		   struct kof_locate *out);
+
+/*
+ * `span_min`/`span_max` are the PATTERN's span, which for a hex marker is not
+ * `plen`: there `pat` is a compiled program and its length is the program's -
+ * the three byte pattern 2E2E5C arrives as 67 bytes of it. Passing plen instead
+ * made a hit's reported length the program's size, so the pane lit the marker
+ * plus whatever followed it.
+ */
+
 int  kof_touch_object(struct kof_engine *eng, kof_buf buf,
 		      const struct kof_obj_ctx *ctx,
+		      const struct kof_inspect_fmt *fmt,
 		      const char *const *finding, uint32_t n_finding,
 		      struct kof_touch **out, uint32_t *n_out);
 
