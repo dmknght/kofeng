@@ -9530,7 +9530,23 @@ static void draw_help(struct out *o, struct view *v)
 		"Ctrl+]     next file",       "Ctrl+\\     previous file",
 		"Tab        next pane",       "m          the marker list"
 	};
-	static const char *const about[] = {
+	/*
+	 * THREE VERSIONS, AND THEY ARE THREE DIFFERENT THINGS.
+	 *
+	 * The engine is this binary. The database is whatever directory was
+	 * loaded beside it, and it is the one that changes weekly - so it is
+	 * shown separately, with its own build stamp, and says so plainly when
+	 * none is loaded. The module ABI is what the code inside a pack was
+	 * compiled against, which is the number that explains a refusal nobody
+	 * expected.
+	 *
+	 * Built here rather than kept as literals because two of the three are
+	 * not properties of this file: the engine's comes from the library that
+	 * is actually loaded, and the database's from the packs.
+	 */
+	static char ver_eng[96], ver_db[80], ver_abi[48];
+	static char cnt_sig[64], cnt_fmt[96];
+	static const char *about[] = {
 		"KOFViewer - the engine's view of a file, navigable.",
 		"",
 		"Three panes over one object: the tree of what the engine",
@@ -9538,13 +9554,122 @@ static void draw_help(struct out *o, struct view *v)
 		"from them. What the database already knows is on the",
 		"status line; what you are writing is below the rule.",
 		"",
+		ver_eng, ver_db, ver_abi,
+		"",
+		cnt_sig, cnt_fmt,
+		"",
 		"Part of KOFENG."
 	};
-	const char *const *line = v->help_open == 1 ? keys : about;
+
+	{
+		struct kof_version ev;
+		struct kof_db_version dv;
+
+		/*
+		 * BUILT AGAINST, AND LOADED - and they are shown apart only
+		 * when they differ.
+		 *
+		 * The macros are what this file compiled against; the call is
+		 * what the library actually is. Linked statically they cannot
+		 * disagree, so saying both would be two identical numbers and
+		 * a reader learning to skip the line. The day libkofeng is a
+		 * shared object they can, and then the disagreement IS the bug
+		 * being reported - which is the only reason a tool needs an
+		 * engine version at all, since it has no version of its own.
+		 */
+		/*
+		 * MAJOR AND MINOR ONLY. The build stamps are expected to
+		 * differ: the engine and this tool can be built - and shipped -
+		 * at different times, which is the whole reason the engine has
+		 * a version of its own. Two components rebuilt eleven minutes
+		 * apart across the top of an hour already disagree, and a line
+		 * that cries mismatch at that is a line people learn to skip.
+		 *
+		 * The INTERFACE is major.minor, so that is what a mismatch is.
+		 */
+		kof_engine_version(&ev);
+		if (ev.major == KOFENG_MAJOR && ev.minor == KOFENG_MINOR)
+			snprintf(ver_eng, sizeof ver_eng,
+				 "Engine      %u.%u  build %u",
+				 (unsigned)ev.major, (unsigned)ev.minor,
+				 ev.build);
+		else
+			snprintf(ver_eng, sizeof ver_eng,
+				 "Engine      %u.%u build %u  (this tool was "
+				 "built against %u.%u)",
+				 (unsigned)ev.major, (unsigned)ev.minor,
+				 ev.build, (unsigned)KOFENG_MAJOR,
+				 (unsigned)KOFENG_MINOR);
+		if (v->eng && kof_engine_db_version(v->eng, &dv))
+			snprintf(ver_db, sizeof ver_db,
+				 "Database    %u.%u  build %u",
+				 (unsigned)dv.major, (unsigned)dv.minor,
+				 dv.build);
+		else
+			snprintf(ver_db, sizeof ver_db,
+				 "Database    none loaded");
+		snprintf(ver_abi, sizeof ver_abi, "Module ABI  %u",
+			 (unsigned)KOFSIG_ABI_VERSION);
+
+		/*
+		 * WHAT IS LOADED, AND WHAT THIS BUILD CAN READ - two different
+		 * questions, so two lines.
+		 *
+		 * The counts come from the database and move when it does. The
+		 * formats come from the engine's parser list, which is a
+		 * property of the binary: a build knows how to read the same
+		 * set whether or not any database is present. Asking the list
+		 * rather than counting a literal is the point - a format added
+		 * to the engine appears here without anyone remembering to.
+		 */
+		if (v->eng)
+			snprintf(cnt_sig, sizeof cnt_sig,
+				 "Signatures  %u   unpackers %u   heur rules %u",
+				 kof_engine_records(v->eng),
+				 kof_engine_unpackers(v->eng),
+				 kof_engine_heur_rules(v->eng));
+		else
+			snprintf(cnt_sig, sizeof cnt_sig,
+				 "Signatures  none loaded");
+		{
+			const struct kof_parser *fmts;
+			uint32_t nf = 0, k, at = 0;
+
+			fmts = kof_parser_list(&nf);
+			at = (uint32_t)snprintf(cnt_fmt, sizeof cnt_fmt,
+						"Formats     %u:", nf);
+			for (k = 0; k < nf && at + 1u < sizeof cnt_fmt; k++)
+				at += (uint32_t)snprintf(cnt_fmt + at,
+							 sizeof cnt_fmt - at,
+							 " %s",
+							 kof_format_name(fmts[k].format));
+		}
+	}
+	const char *const *line = v->help_open == 1 ? keys
+						     : (const char *const *)about;
 	int n = v->help_open == 1 ? (int)(sizeof keys / sizeof keys[0])
 				  : (int)(sizeof about / sizeof about[0]);
 	int h = n + 4, top = (g_rows - h) / 2, w = 60, left, y, i;
 
+	/*
+	 * THE BOX FITS THE TEXT, not the other way round.
+	 *
+	 * It was a fixed sixty columns, which was wide enough for prose and cut
+	 * the format list in half the moment About started reporting facts
+	 * instead of describing itself - and a truncated list of what the engine
+	 * can read is worse than none, because it reads as a complete one.
+	 *
+	 * Still bounded by the terminal: a line longer than the screen is drawn
+	 * short rather than drawn outside it.
+	 */
+	for (i = 0; i < n; i++) {
+		int len = (int)strlen(line[i]) + 4;
+
+		if (len > w)
+			w = len;
+	}
+	if (w > g_cols - 4)
+		w = g_cols - 4;
 	if (top < 2)
 		top = 2;
 	left = (g_cols - w) / 2;

@@ -65,6 +65,18 @@ const char *kof_broken_name(uint32_t reason)
 }
 
 /*
+ * What this build of the library is. See kofeng.h for why it decides nothing.
+ */
+void kof_engine_version(struct kof_version *out)
+{
+	if (!out)
+		return;
+	out->major = KOFENG_MAJOR;
+	out->minor = KOFENG_MINOR;
+	out->build = KOFENG_BUILD;
+}
+
+/*
  * The oldest version among the loaded packs - see kofeng.h for why oldest.
  *
  * The header is already resident: a pack is mapped and kof_db_pack keeps the

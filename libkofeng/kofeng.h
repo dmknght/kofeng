@@ -440,6 +440,42 @@ uint32_t    kof_engine_heur_rules(const kof_engine *);
  *
  * Zero-filled and non-zero return when there is no database.
  */
+/*
+ * THE ENGINE'S OWN VERSION, AND IT GATES NOTHING.
+ *
+ * Worth saying first, because a number in a header invites a comparison. Every
+ * compatibility question here is already answered by a field that describes an
+ * ARTEFACT: a pack says which layout it has and which module ABI its code was
+ * built against, and the loader refuses on those. There is nothing left for an
+ * engine version to decide, and a check written against one would be inventing
+ * a rule rather than enforcing one.
+ *
+ * What it is for: the number a person quotes in a bug report, and the line an
+ * operator reads to see whether the binary in front of them is the one they
+ * think it is.
+ *
+ * A FUNCTION AND NOT JUST THE MACROS, because the two answer different
+ * questions once this is a shared library: the macros say what the caller was
+ * COMPILED against, the call says what is actually loaded. When they disagree
+ * that is itself the bug being reported.
+ */
+#define KOFENG_MAJOR 1u
+#define KOFENG_MINOR 0u
+
+/* The Makefile passes the real stamp; this only keeps a stray compilation
+ * building, the same way KOF_PACK_BUILD does. */
+#ifndef KOFENG_BUILD
+#define KOFENG_BUILD 0u
+#endif
+
+struct kof_version {
+	uint16_t major;
+	uint16_t minor;
+	uint32_t build;      /* YYYYMMDDHH in UTC, as the database's is */
+};
+
+void        kof_engine_version(struct kof_version *);
+
 struct kof_db_version {
 	uint16_t major;
 	uint16_t minor;

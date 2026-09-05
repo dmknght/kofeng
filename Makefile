@@ -382,7 +382,13 @@ EMU_INC := -Ilibkofemu/bddisasm/inc -Ilibkofemu/bddisasm/src \
 # one thing this format is good for. Computed once per make run, so every pack
 # in one build carries the same stamp.
 KOF_BUILD_STAMP := $(shell date -u +%Y%m%d%H)
+#
+# TWO NAMES, ONE VALUE. The stamp is the same instant because both are built by
+# the same make run; the names stay apart because the two things they describe
+# can be shipped separately - an engine binary and a database built a week later
+# are the ordinary case, and then the numbers differ on their own.
 CFLAGS += -DKOF_PACK_BUILD=$(KOF_BUILD_STAMP)u
+CFLAGS += -DKOFENG_BUILD=$(KOF_BUILD_STAMP)u
 
 VENDOR_CFLAGS := -O2 -g -std=c11 -fno-common -D_LIB -DAMD64 \
                  -Wall -Wextra \
