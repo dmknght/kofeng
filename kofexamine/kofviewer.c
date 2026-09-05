@@ -2261,36 +2261,6 @@ static void sym_build(struct object *o)
 
 
 
-/*
- * WHICH WIDTH TO DECODE A PAYLOAD AT, which is NOT its parent's.
- *
- * A 64-bit ELF routinely carries 32-bit Windows shellcode - two of the samples
- * measured do - and a payload child has no format of its own, so the ordinary
- * arch test cannot answer for it and the fallback says 64. At 64 the fourth
- * byte of a textbook msf x86 prologue comes out "(data)": `60` is PUSHAD in
- * 32-bit mode and does not exist in 64-bit.
- *
- * Taken from the same prefixes sc_kind recognises, because recognising the stub
- * IS knowing which mode emitted it. Falls back to the caller's default when
- * nothing is recognised, which is the best available guess and no worse than
- * what was there before - and the disassembly panel's own bit switch is right
- * there to override it.
- */
-static unsigned sc_bits(const uint8_t *b, uint32_t n, unsigned dflt)
-{
-	if (!b)
-		return dflt;
-	if (n >= 6 && b[0] == 0xfc && b[1] == 0x48 && b[2] == 0x83)
-		return 64;                      /* x64 block_api */
-	if (n >= 7 && b[0] == 0xfc && b[1] == 0xe8 && b[2] == 0x82 &&
-	    b[6] == 0x60)
-		return 32;                      /* x86 block_api, PUSHAD */
-	if (n >= 4 && b[0] == 0x48 && b[1] == 0x31)
-		return 64;                      /* x64/xor, and raw x64 */
-	if (n >= 8 && (b[4] == 0xd9 || b[5] == 0xd9))
-		return 32;                      /* fnstenv GetPC is x86 */
-	return dflt;
-}
 
 static const char *sc_kind(const uint8_t *b, uint32_t n)
 {
@@ -2314,44 +2284,6 @@ static const char *sc_kind(const uint8_t *b, uint32_t n)
 		return "jmp/pop/xor decoder stub";
 	return "?";
 }
-
-/*
- * A PSEUDO ELF HEADER IN FRONT OF THE PAYLOAD.
- *
- * WHY. Without one the payload is a formatless blob, and the scanner says so:
- * "SKIPPED - no module targets this format". Every rule declares a format and
- * scopes itself to a region, so a blob matches nothing and is not even offered
- * to a module. A header is what makes the payload reachable - it is not a
- * claim that a file like this ever existed, exactly as bases/unp/msf_pe.h says
- * of its own reconstruction.
- *
- * THE PAYLOAD GOES IN A WRITABLE, NON-EXECUTABLE SEGMENT, so it lands in region
- * DATA. Three measured reasons, and the first is the one that matters:
- *
- *  - In the PARENT the payload is in .data, so region DATA. One DATA-scoped
- *    rule then reaches both: the un-encoded payload sitting in the loader's
- *    variable, and the decoded payload here. Nine of twelve samples measured
- *    are already matchable in the parent that way, with no reconstruction.
- *  - An entry point inside a non-executable segment raises
- *    KOF_ELF_ANOM_ENTRY_NOT_EXEC, which kof_emu_unp_gate reads as "unloadable"
- *    and would hand every reconstructed child to the interpreter for nothing.
- *    ET_DYN with e_entry 0 raises nothing: an image with no entry point is what
- *    a blob lifted out of a variable IS.
- *  - An RWX segment with the entry on it lands the payload in CODE and is
- *    byte-for-byte the shape bases/heur/shellcode_00.c looks for - no section
- *    table, one program header, one executable PT_LOAD that is the whole file.
- *    Measured: the engine flags its own reconstruction as an msfvenom template.
- *
- * p_filesz MUST NOT EXCEED WHAT IS WRITTEN, or KOF_ELF_ANOM_SEG_PAST_EOF fires
- * and kofheur scores it "Truncated" - the engine detecting its own output.
- * p_memsz may be larger; that is what .bss is. Measured both ways.
- *
- * The width follows the payload, not the parent: sc_bits reads it off the stub,
- * because a 64-bit loader routinely carries 32-bit Windows shellcode.
- */
-
-
-
 
 /*
  * WHICH CHILD IS THE PAYLOAD A HEURISTIC NAMED.
@@ -4846,8 +4778,11 @@ static int dis_default_bits(struct view *v)
 	 * payload came out 64.
 	 *
 	 * The parse of that header is the answer, for a payload child exactly
-	 * as for any other object. sc_bits stays only as the last resort for a
-	 * buffer nothing has identified.
+	 * as for any other object - and once the engine started producing that
+	 * child, "a payload with no header" stopped existing, so the last
+	 * resort went with it. sc_bits read four stub prologues to guess a
+	 * width; four measured byte patterns, kept in a tool, answering a
+	 * question the engine had already answered in a field.
 	 */
 	if (ob && ob->fmt) {
 		if (ob->ctx.arch == KOF_ARCH_X86)
@@ -4855,8 +4790,6 @@ static int dis_default_bits(struct view *v)
 		if (ob->ctx.arch == KOF_ARCH_X86_64)
 			return 64;
 	}
-	if (ob && ob->payload_of && ob->buf.p)
-		return (int)sc_bits(ob->buf.p, (uint32_t)ob->buf.n, 64u);
 	return 64;
 }
 

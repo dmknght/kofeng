@@ -310,6 +310,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/binaries/elf_sym.c \
            libkofeng/kofparsers/binaries/sym_any.c \
            libkofeng/kofparsers/kofformat.c \
+           libkofeng/kofdisasm/xref.c \
            libkofeng/kofparsers/binaries/pe_sym.c \
            libkofeng/kofparsers/binaries/pe_parse.c \
            libkofeng/kofparsers/containers/gzip_parse.c \
@@ -345,6 +346,13 @@ LIB     := $(SDK)/lib/libkofeng.a
 $(INT)/lib_%.o: libkofeng/%.c $(STAMP) | $(INT)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# kofdisasm/ reads instructions, so it needs the decoder's headers. Only this
+# one directory does; the rest of the engine is kept away from them on purpose,
+# because a parser that can decode is a parser that will start to.
+$(INT)/lib_kofdisasm/%.o: libkofeng/kofdisasm/%.c $(STAMP) | $(INT)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(EMU_INC) -c $< -o $@
 
 # ---- libkofemu: the emulator, and the decoder it stands on -----------------
 #

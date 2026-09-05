@@ -747,6 +747,14 @@ struct kof_content {
 	 * Built at most once per object, and only if something asks.
 	 */
 	const uint8_t *(*syms)(const struct kof_obj_ctx *, uint32_t *nbytes);
+
+	/*
+	 * WHAT THE CODE DOES WITH A DATA ADDRESS.
+	 *
+	 * Built at most once per object, and only if something asks - one
+	 * linear sweep of the executable sections, no more.
+	 */
+	uint32_t (*data_xref)(const struct kof_obj_ctx *, uint64_t va);
 };
 
 /*
@@ -1317,6 +1325,51 @@ static inline uint32_t kof_bswap32(uint32_t v)
  */
 #define kof_syms(np) ((ctx)->content->syms ? \
 		      (ctx)->content->syms((ctx), (np)) : 0)
+
+/*
+ * WHICH CODE REFERS TO THE DATA AT `va`, AND HOW.
+ *
+ *     if (kof_data_xref(sym_value) & (KOF_XREF_CALL | KOF_XREF_JUMP))
+ *             ...this variable is executed, whatever its bytes look like
+ *
+ * The question a rule looking for a payload actually wants answered. Asking
+ * what the BYTES look like - how unprintable they are, whether a syscall
+ * instruction is in them - is defeated by encoding the payload, which is the
+ * first thing anyone does to it. An ordinary variable is read; a payload is
+ * executed; and that difference is in the code, where no encoding of the data
+ * reaches.
+ *
+ * FIVE MECHANICAL FACTS AND NO CONCLUSIONS. The engine says what the
+ * instructions did; what that MEANS is composed in bases/, next to the rest of
+ * the vocabulary of malware. A rule looking for a payload staged into a fresh
+ * mapping wants KOF_XREF_ARG, one looking for a direct call wants
+ * KOF_XREF_CALL, and neither needs a line changed here.
+ *
+ * Zero for an address nothing referred to, and zero for an object with no code
+ * to sweep. NOT an assertion that the variable is unused: see KOF_XREF_PARTIAL.
+ */
+#define kof_data_xref(va) ((ctx)->content->data_xref ? \
+			   (ctx)->content->data_xref((ctx), (uint64_t)(va)) : 0u)
+
+/* Code forms this address, or loads from it. */
+#define KOF_XREF_READ    (1u << 0)
+/* Code stores to it. */
+#define KOF_XREF_WRITE   (1u << 1)
+/* It is the target of a CALL - direct or through a register. A direct call
+ * usually names code, and names a variable exactly when a compiler could prove
+ * the target constant, which is what -O2 does to a called function pointer. */
+#define KOF_XREF_CALL    (1u << 2)
+/* The same, for a JMP. */
+#define KOF_XREF_JUMP    (1u << 3)
+/* It was in a register when a CALL happened - an argument, as far as a sweep
+ * that knows no calling convention can tell. */
+#define KOF_XREF_ARG     (1u << 4)
+/*
+ * The sweep gave up before it had seen everything - too many distinct
+ * addresses, or code it could not decode. A rule may still trust a bit that IS
+ * set; it may not read the absence of one as "not referred to".
+ */
+#define KOF_XREF_PARTIAL (1u << 5)
 
 #define kof_u8(off)  ((ctx)->content->rd8 ((ctx), (uint64_t)(off)))
 #define kof_u16(off) ((ctx)->content->rd16((ctx), (uint64_t)(off)))

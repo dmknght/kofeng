@@ -248,6 +248,30 @@ static uint32_t scf_b64(const uint8_t *in, uint32_t n, uint8_t *out,
 	return k;
 }
 
+
+/*
+ * WHAT "CARRIES A PAYLOAD" MEANS, IN THIS FILE AND NOWHERE ELSE.
+ *
+ * The engine reports mechanical facts about a data address - read, written,
+ * called, jumped to, in a register at a call - and says nothing about what any
+ * of them is evidence of. This is where they become a claim, because this is
+ * where the vocabulary of malware lives.
+ *
+ * EXECUTED is the claim being made: control reached the bytes. Called or jumped
+ * to, because a loader may do either and the two are the same statement about
+ * the data.
+ *
+ * STAGED is the shape this cannot yet see and is written down so the next
+ * person does not have to work out that it is missing: a payload handed to
+ * mprotect or memcpy and executed in a mapping of its own is an ARGUMENT and
+ * never a call target. Adding it is a line here, not a change to the engine -
+ * which is the whole point of the engine reporting facts rather than verdicts.
+ */
+#define SCF_EXECUTED  (KOF_XREF_CALL | KOF_XREF_JUMP)
+/* #define SCF_STAGED (KOF_XREF_ARG | KOF_XREF_WRITE)  - not used yet, measured
+ * on nothing; enabling it without measuring is how a heuristic gets a
+ * reputation. */
+
 /* What the search found. `at` is a file offset and is what an unpacker reads;
  * `va` is the symbol's own value and is what a report shows, because an offset
  * into a block the engine built means nothing to a reader looking at the file.
@@ -345,6 +369,7 @@ static int scl_pointer(const struct kof_obj_ctx *ctx,
 {
 	uint64_t fo = scl_sym_off(ctx, e, r,
 				  e->elf_class == KOF_ELFCLASS_64 ? 8u : 4u);
+	uint64_t sym_va = kof_sym_u64(r, KOF_SYM_R_VALUE);
 	uint64_t pv = 0, po, len, k;
 	uint32_t w = e->elf_class == KOF_ELFCLASS_64 ? 8u : 4u;
 	uint32_t i, npr = 0, top = 0, freq[256], sys = 0;
@@ -381,6 +406,16 @@ static int scl_pointer(const struct kof_obj_ctx *ctx,
 				break;
 			}
 		if (len < SCL_PTR_MIN)
+			return 0;
+		/*
+		 * THE SAME QUESTION, ASKED OF THE POINTER.
+		 *
+		 * `fo` is where the pointer variable sits and `po` is what it
+		 * points at, and it is the POINTER the code calls: the loader
+		 * loads the variable and calls the register. Asking about the
+		 * target would ask about an address the code never names.
+		 */
+		if (!(kof_data_xref(sym_va) & SCF_EXECUTED))
 			return 0;
 		for (k = 0; k < 256u; k++)
 			freq[k] = 0;
@@ -559,12 +594,13 @@ static int scf_find(const struct kof_obj_ctx *ctx, struct scf_hit *out,
 	 * index wrap below zero.
 	 */
 	for (i = kof_sym_count(b, n); i-- > kof_sym_first(b, n); ) {
-		r = kof_sym_rec(b, n, i);
-		if (!r)
-			continue;
 		uint64_t sz, val, fo;
 		uint32_t shndx, k, top = 0;
 		uint32_t freq[256];
+
+		r = kof_sym_rec(b, n, i);
+		if (!r)
+			continue;
 
 		/* The four bytes, and nothing else is read unless they pass. */
 		if (r[KOF_SYM_R_TYPE]  != 1u   || r[KOF_SYM_R_BIND] != 1u ||
@@ -617,6 +653,24 @@ static int scf_find(const struct kof_obj_ctx *ctx, struct scf_hit *out,
 			if (++freq[c] > top)
 				top = freq[c];
 		}
+		/*
+		 * IS IT EXECUTED?
+		 *
+		 * The question the byte tests below cannot answer. They ask
+		 * what the blob LOOKS like - how evenly its bytes are spread -
+		 * and encoding the payload defeats every one of them, which is
+		 * the first thing anyone does to a payload. This asks what the
+		 * CODE does with the variable, and no encoding of the data
+		 * reaches the code.
+		 *
+		 * Required, not merely preferred: a variable nothing calls is
+		 * not a payload however its bytes are distributed. The one
+		 * thing that could be lost is a loader that copies the blob
+		 * somewhere else before calling it, and that shape is not
+		 * visible to a sweep this cheap - see codeuse.h, which says so.
+		 */
+		if (!(kof_data_xref(val) & SCF_EXECUTED))
+			continue;
 		/* A byte that owns a quarter of the blob makes it a table, not
 		 * a payload. See the note on SCL_TOP_DENOM. */
 		if (top * SCL_TOP_DENOM < (uint32_t)sz) {

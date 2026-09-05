@@ -23,6 +23,7 @@
 #include <kofmod/kofsym.h>
 #include "../kofparsers/binaries/elf_sym.h"
 #include "../kofparsers/binaries/pe_sym.h"
+#include "../kofdisasm/xref.h"
 #include "scan.h"
 #include "../kofunpack/emu_unpack.h"
 #include "../kofunpack/elf_rebuild.h"
@@ -132,6 +133,7 @@ static const struct kof_str_ent *str_of(const struct kof_scanner *sc, uint32_t i
  * parse: turning a named range into extents.
  */
 static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes);
+static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va);
 
 /*
  * The extents of one half of the symbol block, LAST RECORD FIRST.
@@ -927,6 +929,23 @@ static uint64_t expand_limit(uint64_t in_len, uint64_t declared)
 	return KOF_EXPAND_FLOOR;
 }
 
+/*
+ * The methods unpack_buffered takes: everything whose whole output has to be
+ * addressable at once. DEFLATE and HEXTEXT stream instead and are answered
+ * before this is asked.
+ *
+ * A predicate rather than three ifs in a row, each ending in the same call.
+ * That is what it was, in both places, and the three differed only in whether
+ * NRV2 had filled in a variant and a width - which nrv2_of already says.
+ */
+static int buffered_method(uint32_t method)
+{
+	return method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86 ||
+	       method == KOF_UNP_RAR3  || method == KOF_UNP_RAR5 ||
+	       method >= KOF_UNP_LZMA  ||
+	       (method >= KOF_UNP_NRV2B_8 && method <= KOF_UNP_NRV2E_32);
+}
+
 /* NRV2's three codings and three bit widths, as the module ABI numbers them. */
 static int nrv2_of(uint32_t method, int *variant, int *bits)
 {
@@ -1278,23 +1297,147 @@ static uint32_t c_unpack_peek(const struct kof_obj_ctx *ctx, uint32_t method,
 	 * around it. A caller wanting the first N bytes of a block must pass
 	 * the block's own declared size, not the size of its buffer.
 	 */
-	if (method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86 ||
-	    method == KOF_UNP_RAR3 || method == KOF_UNP_RAR5)
-		return (uint32_t)unpack_buffered(sc, ctx, method, 0, 0,
-						 b.p + off, len, cap,
-						 KOF_FORM_RAW,
-						 (uint8_t *)out, cap);
-	if (nrv2_of(method, &variant, &bits))
-		return (uint32_t)unpack_buffered(sc, ctx, method, variant, bits,
-						 b.p + off, len, cap,
-						 KOF_FORM_RAW,
-						 (uint8_t *)out, cap);
-	if (method >= KOF_UNP_LZMA)
-		return (uint32_t)unpack_buffered(sc, ctx, method, 0, 0,
-						 b.p + off, len, cap,
-						 KOF_FORM_RAW,
-						 (uint8_t *)out, cap);
+	if (!buffered_method(method))
+		return 0;
+	if (!nrv2_of(method, &variant, &bits))
+		variant = bits = 0;
+	return (uint32_t)unpack_buffered(sc, ctx, method, variant, bits,
+					 b.p + off, len, cap, KOF_FORM_RAW,
+					 (uint8_t *)out, cap);
 	return 0;      /* a method this engine does not peek into */
+}
+
+/*
+ * RTF's hex text, back to bytes.
+ *
+ * Its own function because it is an algorithm, not a dispatch: c_unpack picks a
+ * decoder and this decodes, and having the two in one place made c_unpack a
+ * hundred and forty lines that reached eight levels deep - all of the depth
+ * being here, in the brace and control-word skipping this format needs.
+ *
+ * WHAT IT SKIPS AND WHY. \bin and its friends put arbitrary text between the
+ * hex digits, and a group in braces can hold a whole document; both would
+ * otherwise be read as data. The control word skip is the one that matters:
+ * without it "\par" contributes an 'a' to the stream and every byte after it
+ * is shifted by half a nibble.
+ */
+static uint64_t unpack_hextext(const struct kof_obj_ctx *ctx, kof_buf b,
+			       uint64_t off, uint64_t len)
+{
+	uint64_t produced = 0;
+
+	/*
+	 * Hex to bytes, streamed through the sink like DEFLATE.
+	 *
+	 * No output buffer of its own and no size hint needed: two input
+	 * characters are one output byte, so the length is known and the
+	 * bytes can leave as they are made. Whitespace between digits is
+	 * skipped - it is legal in RTF and is used to break a blob up so a
+	 * fixed prefix does not match.
+	 */
+	uint8_t out[512];
+	uint32_t n = 0;
+	int hi = -1;
+	uint64_t i;
+
+	for (i = 0; i < len; i++) {
+		uint8_t ch = b.p[off + i];
+		int v;
+
+		if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n')
+			continue;
+		/*
+		 * A nested group is skipped WHOLE, not just its braces.
+		 *
+		 * Its content is a different destination and is not this
+		 * object's data. Skipping only the braces decodes the junk
+		 * inside as if it were payload, which on a real document
+		 * produced 2875922 bytes against the correct 2875905 - the
+		 * right length to look plausible and wrong from the first
+		 * byte.
+		 */
+		if (ch == '{') {
+			uint32_t d = 0;
+
+			while (i < len) {
+				uint8_t g = b.p[off + i];
+
+				if (g == '\\') {
+					i += 2u;
+					continue;
+				}
+				if (g == '{') {
+					d++;
+				} else if (g == '}') {
+					d--;
+					if (d == 0)
+						break;
+				}
+				i++;
+			}
+			continue;
+		}
+		if (ch == '}')
+			continue;
+		if (ch == '\\') {
+			uint64_t k = i + 1u;
+			int alpha = 0;
+
+			/*
+			 * A control WORD is letters; a control SYMBOL is
+			 * one character that is not. Both have to be
+			 * stepped over and the second is the one that
+			 * catches a reader out - the ignorable destination
+			 * marker is written "\*", so a decoder that skips
+			 * only the backslash lands on the asterisk, finds
+			 * it is not a hex digit, and stops. Measured on a
+			 * real document that ended the decode after zero
+			 * bytes of a 2.8MB payload.
+			 */
+			while (k < len) {
+				uint8_t d = b.p[off + k];
+
+				if (!((d >= 'a' && d <= 'z') ||
+				      (d >= 'A' && d <= 'Z')))
+					break;
+				alpha = 1;
+				k++;
+			}
+			if (!alpha) {
+				i = k;            /* the symbol itself */
+				continue;
+			}
+			if (k < len && b.p[off + k] == '-')
+				k++;
+			while (k < len && b.p[off + k] >= '0' &&
+			       b.p[off + k] <= '9')
+				k++;
+			if (k < len && b.p[off + k] == ' ')
+				k++;
+			i = k - 1u;
+			continue;
+		}
+		if (ch >= '0' && ch <= '9')       v = ch - '0';
+		else if ((ch | 0x20) >= 'a' && (ch | 0x20) <= 'f')
+			v = (ch | 0x20) - 'a' + 10;
+		else
+			continue;                 /* skipped, as the parser does */
+		if (hi < 0) {
+			hi = v;
+			continue;
+		}
+		out[n++] = (uint8_t)((hi << 4) | v);
+		hi = -1;
+		if (n == sizeof out) {
+			if (!c_emit(ctx, out, n))
+				return produced;
+			produced += n;
+			n = 0;
+		}
+	}
+	if (n && c_emit(ctx, out, n))
+		produced += n;
+	return produced;
 }
 
 static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
@@ -1355,132 +1498,15 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		return produced;
 	}
 
-	if (method == KOF_UNP_HEXTEXT) {
-		/*
-		 * Hex to bytes, streamed through the sink like DEFLATE.
-		 *
-		 * No output buffer of its own and no size hint needed: two input
-		 * characters are one output byte, so the length is known and the
-		 * bytes can leave as they are made. Whitespace between digits is
-		 * skipped - it is legal in RTF and is used to break a blob up so a
-		 * fixed prefix does not match.
-		 */
-		uint8_t out[512];
-		uint32_t n = 0;
-		int hi = -1;
-		uint64_t i;
+	if (method == KOF_UNP_HEXTEXT)
+		return unpack_hextext(ctx, b, off, len);
 
-		for (i = 0; i < len; i++) {
-			uint8_t ch = b.p[off + i];
-			int v;
-
-			if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n')
-				continue;
-			/*
-			 * A nested group is skipped WHOLE, not just its braces.
-			 *
-			 * Its content is a different destination and is not this
-			 * object's data. Skipping only the braces decodes the junk
-			 * inside as if it were payload, which on a real document
-			 * produced 2875922 bytes against the correct 2875905 - the
-			 * right length to look plausible and wrong from the first
-			 * byte.
-			 */
-			if (ch == '{') {
-				uint32_t d = 0;
-
-				while (i < len) {
-					uint8_t g = b.p[off + i];
-
-					if (g == '\\') {
-						i += 2u;
-						continue;
-					}
-					if (g == '{') {
-						d++;
-					} else if (g == '}') {
-						d--;
-						if (d == 0)
-							break;
-					}
-					i++;
-				}
-				continue;
-			}
-			if (ch == '}')
-				continue;
-			if (ch == '\\') {
-				uint64_t k = i + 1u;
-				int alpha = 0;
-
-				/*
-				 * A control WORD is letters; a control SYMBOL is
-				 * one character that is not. Both have to be
-				 * stepped over and the second is the one that
-				 * catches a reader out - the ignorable destination
-				 * marker is written "\*", so a decoder that skips
-				 * only the backslash lands on the asterisk, finds
-				 * it is not a hex digit, and stops. Measured on a
-				 * real document that ended the decode after zero
-				 * bytes of a 2.8MB payload.
-				 */
-				while (k < len) {
-					uint8_t d = b.p[off + k];
-
-					if (!((d >= 'a' && d <= 'z') ||
-					      (d >= 'A' && d <= 'Z')))
-						break;
-					alpha = 1;
-					k++;
-				}
-				if (!alpha) {
-					i = k;            /* the symbol itself */
-					continue;
-				}
-				if (k < len && b.p[off + k] == '-')
-					k++;
-				while (k < len && b.p[off + k] >= '0' &&
-				       b.p[off + k] <= '9')
-					k++;
-				if (k < len && b.p[off + k] == ' ')
-					k++;
-				i = k - 1u;
-				continue;
-			}
-			if (ch >= '0' && ch <= '9')       v = ch - '0';
-			else if ((ch | 0x20) >= 'a' && (ch | 0x20) <= 'f')
-				v = (ch | 0x20) - 'a' + 10;
-			else
-				continue;                 /* skipped, as the parser does */
-			if (hi < 0) {
-				hi = v;
-				continue;
-			}
-			out[n++] = (uint8_t)((hi << 4) | v);
-			hi = -1;
-			if (n == sizeof out) {
-				if (!c_emit(ctx, out, n))
-					return produced;
-				produced += n;
-				n = 0;
-			}
-		}
-		if (n && c_emit(ctx, out, n))
-			produced += n;
-		return produced;
-	}
-	if (method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86 ||
-	    method == KOF_UNP_RAR3 || method == KOF_UNP_RAR5)
-		return unpack_buffered(sc, ctx, method, 0, 0, b.p + off, len,
-				       out_hint, form, NULL, 0);
-	if (nrv2_of(method, &variant, &bits))
-		return unpack_buffered(sc, ctx, method, variant, bits, b.p + off,
-				       len, out_hint, form, NULL, 0);
-	if (method >= KOF_UNP_LZMA)
-		return unpack_buffered(sc, ctx, method, 0, 0, b.p + off, len,
-				       out_hint, form, NULL, 0);
-
-	return 0;      /* a method this engine does not have */
+	if (!buffered_method(method))
+		return 0;
+	if (!nrv2_of(method, &variant, &bits))
+		variant = bits = 0;
+	return unpack_buffered(sc, ctx, method, variant, bits, b.p + off, len,
+			       out_hint, form, NULL, 0);      /* a method this engine does not have */
 }
 
 /*
@@ -1807,6 +1833,77 @@ static void c_name_next(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t le
  * rather than by a check somewhere that could be missed. Same shape as
  * resolve_scan being NULL when nothing identified the object.
  */
+
+/*
+ * WHAT THE CODE DOES WITH ONE DATA ADDRESS.
+ *
+ * The sweep is over the EXECUTABLE sections only, and it is one sweep for the
+ * object rather than one per question: the answer does not depend on which
+ * address is asked about, so building it per ask would decode the same
+ * instructions once for every variable a rule considers - which is the shape
+ * that makes an analysis too slow to enable by default.
+ *
+ * ELF only for now, and x86 only, because that is what can be swept: the
+ * decoder is an x86 decoder. Any other object answers zero, which a rule reads
+ * as "nothing known" rather than "not used" - see KOF_XREF_PARTIAL.
+ */
+static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	uint32_t f;
+
+	if (!sc->use_done) {
+		const struct kof_elf_info *e = ctx->file_header;
+		uint32_t i;
+
+		sc->use_done = 1;
+		if (ctx->format != KOF_FMT_ELF || !e ||
+		    (ctx->arch != KOF_ARCH_X86 && ctx->arch != KOF_ARCH_X86_64))
+			return 0;
+		/*
+		 * EVERY executable section, under ONE budget.
+		 *
+		 * Not the first one: the first executable section of an
+		 * ordinary ELF is .init, twenty three bytes that name no
+		 * variable, and stopping there answered "nothing is called"
+		 * for every file. The budget is what bounds the work, and it
+		 * is a total rather than a per-section limit so that a file
+		 * with many small executable sections costs the same as one
+		 * with a single large one.
+		 */
+		{
+			uint32_t left = KOF_XREF_MAX;
+			kof_buf b = kof_src_buf(sc->cur_src);
+
+			sc->use = kof_xref_new();
+			for (i = 0; sc->use && left &&
+				    i < e->sec_count && i < KOF_ELF_MAX_SECTIONS;
+			     i++) {
+				const struct kof_elf_sec *sec = &e->sec[i];
+				uint32_t n;
+
+				if (sec->type != 1u || !(sec->flags & 0x4u))
+					continue;       /* PROGBITS, executable */
+				if (!sec->file_size || sec->file_off >= b.n ||
+				    sec->file_size > b.n - sec->file_off)
+					continue;
+				n = sec->file_size < left
+				  ? (uint32_t)sec->file_size : left;
+				kof_xref_add(sc->use, b.p + sec->file_off, n,
+						sec->mem_addr,
+						ctx->arch == KOF_ARCH_X86
+						? 32u : 64u);
+				left -= n;
+			}
+		}
+	}
+	if (!sc->use)
+		return 0;
+	f = kof_xref_of(sc->use, va);
+	return f ? f | (kof_xref_full(sc->use) ? KOF_XREF_PARTIAL : 0u)
+		 : (kof_xref_full(sc->use) ? KOF_XREF_PARTIAL : 0u);
+}
+
 /*
  * The object's symbol records, built at most once.
  *
@@ -1848,14 +1945,14 @@ static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 static const struct kof_content kof_detect_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, NULL, NULL, NULL, NULL, NULL, c_find_str_where,
-	NULL, NULL, c_incomplete, NULL, c_syms
+	NULL, NULL, c_incomplete, NULL, c_syms, c_data_xref
 };
 
 static const struct kof_content kof_unpack_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, c_window, c_emit, c_child, c_unpack,
 	c_unpack_peek, c_find_str_where, c_gather, c_name_next, c_incomplete,
-	c_unpack_entry, c_syms
+	c_unpack_entry, c_syms, c_data_xref
 };
 
 /*

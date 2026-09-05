@@ -249,6 +249,15 @@ struct kof_scanner {
 	uint32_t  sym_n;
 	uint8_t   sym_done;
 	/*
+	 * WHAT THE CODE DOES WITH EACH DATA ADDRESS, swept once for the same
+	 * reason the symbol block is built once: the sweep costs a decode per
+	 * instruction, and every module that asks would otherwise pay for it
+	 * again. `use_done` separates "swept, and it named nothing" from "not
+	 * swept yet", exactly as sym_done does.
+	 */
+	struct kof_xref *use;
+	uint8_t            use_done;
+	/*
 	 * A SECOND MATCHER, BOUND TO THAT BLOCK.
 	 *
 	 * `m` is bound to the object's bytes, and the block is not in the

@@ -41,6 +41,7 @@
 #include "../core/kofmod/heur.h"
 #include "../core/kofmod/kofsym.h"
 #include "../kofparsers/kofformat.h"
+#include "../kofdisasm/xref.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -113,6 +114,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	for (i = 0; i < KOF_FMT_COUNT; i++)
 		free(sc->view[i]);
 	free(sc->inf);
+	kof_xref_free(sc->use);
 	free(sc->sym);
 	free(sc->sym_ext[0]);
 	free(sc->sym_ext[1]);
@@ -903,6 +905,8 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	{
 		struct kof_finding *fi = &out->v[out->n++];
 
+		char fmtarch[32], sv[16];
+
 		fi->level = KOF_LEVEL_HEUR;
 		/*
 		 * <target>/Heur:<what it looks like>:<how strongly>.
@@ -917,8 +921,6 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		 * Heur is not a family and never becomes one. It is the engine
 		 * saying it recognised a shape, not a thing.
 		 */
-		char fmtarch[32], sv[16];
-
 		kof_name_target(fmtarch, sizeof fmtarch, ctx->format, ctx->arch);
 		snprintf(sv, sizeof sv, "s%d", score);
 		kof_finding_name(fi, fmtarch, "Heur", guess, sv, NULL);
@@ -1110,6 +1112,13 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	sc->sym_n = 0;
 	sc->msym_bound = 0;
 	sc->sym_ext_done[0] = sc->sym_ext_done[1] = 0;
+	/* And whatever the last object's code did with its addresses. Freed
+	 * rather than kept the way `sym` is: the block has a fixed cap and is
+	 * reused, this is sized by what a sweep found and reusing it would mean
+	 * carrying the largest one met so far for the rest of the walk. */
+	kof_xref_free(sc->use);
+	sc->use = NULL;
+	sc->use_done = 0;
 
 	identify(sc, buf, &ctx);
 
