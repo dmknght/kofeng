@@ -678,7 +678,7 @@ static void dis_paint(struct out *o, const char *text)
 #define A_HIT3  "\033[45;97m"
 
 
-#define TREE_W   30
+#define TREE_W   31
 
 /*
  * Four fixed rows and everything else is the panes.
@@ -2257,104 +2257,8 @@ static void sym_build(struct object *o)
  * the heuristic will report - see SCL_SIZE_MAX in bases/heur/scloader_00.c.
  * Named here because two functions decode into a buffer of it and a mismatch
  * would truncate one view and not the other. */
-#define SCL_SIZE_MAX_VIEW 8192u
 
-/* Base64, decoded, because that is the one wrapper that can be undone with no
- * guesswork: the alphabet is fixed and the transform is reversible. Returns the
- * bytes written, or 0 when the input is not base64 - which is most payloads,
- * and not a failure. */
-static uint32_t b64_try(const uint8_t *in, uint32_t n, uint8_t *out,
-			uint32_t cap)
-{
-	static const char *A =
-		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-	uint32_t i, k = 0, acc = 0, bits = 0;
 
-	/*
-	 * Refused on the first byte that is not in the alphabet, rather than
-	 * skipped. A payload with a few base64-looking bytes in it is not
-	 * base64, and decoding the parts that happen to fit would produce a
-	 * blob that means nothing and looks like an answer.
-	 */
-	if (n < 8u)
-		return 0;
-	for (i = 0; i < n; i++) {
-		const char *p;
-		uint8_t c = in[i];
-
-		/*
-		 * A NUL ENDS THE INPUT, it does not fail it.
-		 *
-		 * These blobs are declared as C string literals - `char code[]
-		 * = "SDHJ..."` - so sizeof includes the terminator and the
-		 * symbol's size is one more than the text. Treating that last
-		 * byte as "not base64" refused every one of them, and the
-		 * dialog said "looks like ?" over a screen of visibly base64
-		 * ASCII.
-		 *
-		 * Only at the END, though: a NUL with data after it is not a
-		 * string and not base64, so the loop stops rather than skipping
-		 * and the tail is never decoded as if it belonged.
-		 */
-		if (!c)
-			break;
-		if (c == '=' || c == '\n' || c == '\r')
-			continue;
-		p = strchr(A, (int)c);
-		if (!p)
-			return 0;
-		acc = (acc << 6) | (uint32_t)(p - A);
-		bits += 6;
-		if (bits >= 8) {
-			bits -= 8;
-			if (k >= cap)
-				return 0;
-			out[k++] = (uint8_t)(acc >> bits);
-		}
-	}
-	return k;
-}
-
-/*
- * Take a run of bytes as a new object in the tree.
- *
- * The small half of what on_object does, and only the small half: bytes this
- * size are always copied, because the one caller is a payload and the
- * heuristic that names one bounds it at SCL_SIZE_MAX. No spill, no budget
- * branch, no findings - those exist in on_object because the engine hands it
- * whatever an unpacker produced, which can be a decompressed installer.
- *
- * Not shared with on_object for that reason: factoring the two together would
- * mean one function with a parameter saying which of its halves to run, and
- * the half this caller does not want is the half with the temporary files in
- * it.
- */
-static int obj_take(struct view *v, const char *name,
-		    const uint8_t *bytes, uint32_t len)
-{
-	struct object *o;
-	const char *p;
-
-	if (v->n_obj >= MAX_OBJ || !len || !bytes)
-		return 0;
-	if (v->obj_held + len > OBJ_BUDGET)
-		return 0;
-	o = &v->obj[v->n_obj];
-	memset(o, 0, sizeof *o);
-	snprintf(o->name, sizeof o->name, "%s", name);
-	o->own = malloc((size_t)len);
-	if (!o->own)
-		return 0;
-	memcpy(o->own, bytes, (size_t)len);
-	o->buf = kof_buf_make(o->own, len);
-	v->obj_held += len;
-	/* Depth from the "//" in the name, exactly as on_object derives it, so
-	 * the tree indents this the same way it indents an unpacked child. */
-	for (p = o->name; (p = strstr(p, "//")) != NULL; p += 2)
-		o->depth++;
-	v->n_obj++;
-	return 1;
-}
 
 
 /*
@@ -2445,216 +2349,67 @@ static const char *sc_kind(const uint8_t *b, uint32_t n)
  * The width follows the payload, not the parent: sc_bits reads it off the stub,
  * because a 64-bit loader routinely carries 32-bit Windows shellcode.
  */
-#define PELF_EH64 64u
-#define PELF_PH64 56u
-#define PELF_EH32 52u
-#define PELF_PH32 32u
 
-static void pelf_put(uint8_t *p, uint64_t v, unsigned n)
-{
-	unsigned i;
 
-	for (i = 0; i < n; i++)
-		p[i] = (uint8_t)(v >> (8u * i));
-}
+
 
 /*
- * Write the header for `n` payload bytes into `out` (at least 120 bytes) and
- * return its length. `bits` is 32 or 64 and decides ELF32 against ELF64 - not
- * cosmetic, because the collector reads the class to set the object's
- * architecture, and an x86 payload described as ELF64 would be disassembled as
- * amd64.
+ * WHICH CHILD IS THE PAYLOAD A HEURISTIC NAMED.
+ *
+ * The engine produces it now - bases/unp/scpayload_00.c emits it, wrapped by
+ * kof_wrap_elf so a region-scoped signature can reach it - so this file no
+ * longer carves anything. What is left is naming the row, and that is a display
+ * question: a reader wants "Shellcode-x86", not "//0 ELF-x86".
+ *
+ * Recognised by the SHAPE OF THE RECONSTRUCTION rather than by a flag, because
+ * there is no flag: an unpacker does not get to say what kind of child it made.
+ * The shape is specific - no section table at all, one segment, and a parent
+ * whose heuristic reported a payload - and the one thing it could be confused
+ * with is another reconstruction of shellcode, which would carry the same label
+ * correctly anyway.
  */
-static uint32_t pelf_hdr(uint8_t *out, uint32_t n, unsigned bits)
+static void payload_tag(struct view *v, uint32_t at)
 {
-	int b64 = bits != 32;
-	uint32_t eh = b64 ? PELF_EH64 : PELF_EH32;
-	uint32_t ph = b64 ? PELF_PH64 : PELF_PH32;
-	uint32_t hdrs = eh + ph;
-	uint8_t *p;
-	uint32_t k;
+	struct object *o = &v->obj[at];
+	const struct kof_elf_info *e = o->info;
+	uint32_t p;
 
-	for (k = 0; k < hdrs; k++)
-		out[k] = 0;
-	out[0] = 0x7f; out[1] = 'E'; out[2] = 'L'; out[3] = 'F';
-	out[4] = b64 ? 2u : 1u;         /* ELFCLASS64 / ELFCLASS32 */
-	out[5] = 1;                     /* ELFDATA2LSB             */
-	out[6] = 1;                     /* EV_CURRENT              */
-	pelf_put(out + 16, 3, 2);       /* ET_DYN - see the note   */
-	pelf_put(out + 18, b64 ? 0x3eu : 3u, 2);   /* x86-64 / i386 */
-	pelf_put(out + 20, 1, 4);       /* EV_CURRENT              */
-	/* e_entry stays 0. e_shoff and e_shnum stay 0: there is no section
-	 * table, and inventing one would be inventing bytes. */
-	/*
-	 * The offsets, and they are worth spelling out because getting them
-	 * wrong is silent. Written two bytes late at first - 54/56/58 for
-	 * ELF64 instead of 52/54/56 - so the parser read e_phentsize as 64 and
-	 * e_phnum as 56: fifty-six program headers of sixty-four bytes, far
-	 * past the end of a 203-byte file. It still identified as ELF-x64, and
-	 * the whole object came back as one HEADERS region with no DATA at all.
-	 *
-	 *   ELF64  e_phoff 32(8)  e_ehsize 52(2)  e_phentsize 54(2)  e_phnum 56(2)
-	 *   ELF32  e_phoff 28(4)  e_ehsize 40(2)  e_phentsize 42(2)  e_phnum 44(2)
-	 */
-	pelf_put(out + (b64 ? 32u : 28u), eh, b64 ? 8u : 4u);   /* e_phoff */
-	pelf_put(out + (b64 ? 52u : 40u), eh, 2);               /* e_ehsize */
-	pelf_put(out + (b64 ? 54u : 42u), ph, 2);               /* e_phentsize */
-	pelf_put(out + (b64 ? 56u : 44u), 1, 2);                /* e_phnum */
-
-	p = out + eh;
-	pelf_put(p + 0, 1, 4);                  /* PT_LOAD */
-	if (b64) {
-		pelf_put(p + 4,  6, 4);         /* p_flags = RW */
-		pelf_put(p + 8,  0, 8);         /* p_offset */
-		pelf_put(p + 16, 0, 8);         /* p_vaddr  */
-		pelf_put(p + 24, 0, 8);         /* p_paddr  */
-		pelf_put(p + 32, hdrs + n, 8);  /* p_filesz - exactly the file */
-		pelf_put(p + 40, hdrs + n, 8);  /* p_memsz  */
-		pelf_put(p + 48, 0x1000, 8);    /* p_align  */
-	} else {
-		pelf_put(p + 4,  0, 4);         /* p_offset */
-		pelf_put(p + 8,  0, 4);         /* p_vaddr  */
-		pelf_put(p + 12, 0, 4);         /* p_paddr  */
-		pelf_put(p + 16, hdrs + n, 4);  /* p_filesz */
-		pelf_put(p + 20, hdrs + n, 4);  /* p_memsz  */
-		pelf_put(p + 24, 6, 4);         /* p_flags = RW */
-		pelf_put(p + 28, 0x1000, 4);    /* p_align  */
-	}
-	return hdrs;
-}
-
-/*
- * THE PAYLOAD A HEURISTIC NAMED, AS AN OBJECT OF ITS OWN.
- *
- * This is the whole reason the rule reports an address. A dialog showing the
- * bytes was the first attempt and it was the wrong shape: a researcher cannot
- * do anything with a hex dump in a box, while an OBJECT gets everything this
- * tool already does - a row in the tree, the hex pane with its selection and
- * its right-click menu, the disassembly panel, Find, Go to, the marker list,
- * and the draft panel to declare a signature from. None of that had to be
- * written for it; it works because the object is an object.
- *
- * NAMED "//payload", because depth in this tree is counted from the "//" in a
- * name - see on_object - so the separator is what makes it a child rather than
- * a sibling. It carries the symbol's own name too, since that is what a reader
- * saw in the symbols dialog and is how they will recognise it here.
- *
- * DECODED WHEN IT IS BASE64, and the name says which: the encoded text is not
- * the payload, and an object holding it would disassemble as garbage. Only
- * base64, for the reason b64_try gives - it is the one wrapper undoable with no
- * guesswork. An encoder STUB is left alone: it is real code and disassembling
- * it is exactly what a reader wants.
- *
- * WHAT THIS IS NOT: a claim that this object was ever a file. It was not. It is
- * the bytes a global variable holds, presented as the thing they are so that
- * the tools can reach them - the same claim bases/unp/msf_elf32.h makes about a
- * reconstructed payload, and the same reason.
- */
-static int payload_child(struct view *v, uint32_t parent)
-{
-	struct object *po = &v->obj[parent];
-	const struct kof_elf_info *e = po->info;
-	static uint8_t dec[SCL_SIZE_MAX_VIEW];
-	const uint8_t *b = 0;
-	uint32_t n = 0, dn, i;
-	char name[256], sym[KOF_SYM_NAMELEN + 1];
-
-	if (!po->payload_at || !po->payload_len || !e || !e->valid || !po->buf.p)
-		return 0;
-	if (v->n_obj >= MAX_OBJ)
-		return 0;
-
-	/* The address, through the parent's own section table. */
-	for (i = 0; i < e->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
-		const struct kof_elf_sec *sc = &e->sec[i];
-		uint64_t fo;
-
-		if (sc->type != 1u || !sc->mem_addr)
-			continue;
-		if (po->payload_at < sc->mem_addr ||
-		    po->payload_at >= sc->mem_addr + sc->file_size)
-			continue;
-		fo = sc->file_off + (po->payload_at - sc->mem_addr);
-		if (fo >= po->buf.n || po->payload_len > po->buf.n - fo)
-			return 0;
-		b = po->buf.p + fo;
-		n = (uint32_t)po->payload_len;
-		break;
-	}
-	if (!b || !n)
-		return 0;
-
-	/* Which symbol it was, read back from the block rather than remembered,
-	 * so the name here and the row marked in the symbols dialog can only
-	 * ever be the same symbol. */
-	sym[0] = 0;
-	{
+	if (!o->depth || o->ctx.format != KOF_FMT_ELF || !e || !e->valid)
+		return;
+	if (e->sec_count != 0 || e->seg_count != 1)
+		return;
+	for (p = 0; p < at; p++) {
+		const struct object *par = &v->obj[p];
+		size_t pn = strlen(par->name);
 		const uint8_t *r;
 		uint32_t k;
 
-		for (k = 0; (r = kof_sym_rec(po->sym, po->sym_n, k)); k++) {
+		if (par->depth + 1u != o->depth || !par->payload_at)
+			continue;
+		if (strncmp(o->name, par->name, pn) != 0 ||
+		    o->name[pn] != '/')
+			continue;
+		o->payload_of = 1;
+		/*
+		 * WHICH VARIABLE IT CAME OUT OF, read back from the parent's
+		 * symbol block rather than remembered, so the name shown here
+		 * and the row marked in the symbols dialog can only ever be the
+		 * same symbol. The address is the engine's - the heuristic
+		 * reported it - and the block is the engine's too.
+		 */
+		for (k = 0; (r = kof_sym_rec(par->sym, par->sym_n, k)); k++) {
 			uint32_t j;
 
-			if (kof_sym_u64(r, KOF_SYM_R_VALUE) != po->payload_at)
+			if (kof_sym_u64(r, KOF_SYM_R_VALUE) != par->payload_at)
 				continue;
 			for (j = 0; j < KOF_SYM_NAMELEN &&
 				    r[KOF_SYM_R_NAME + j]; j++)
-				sym[j] = (char)r[KOF_SYM_R_NAME + j];
-			sym[j] = 0;
+				o->payload_sym[j] = (char)r[KOF_SYM_R_NAME + j];
+			o->payload_sym[j] = 0;
 			break;
 		}
+		return;
 	}
-
-	dn = b64_try(b, n, dec, (uint32_t)sizeof dec);
-	/*
-	 * NAMED "Shellcode", NOT after the symbol it came from.
-	 *
-	 * It was `//code`, `//shellcode`, `//buf`, `//random` - whatever the
-	 * author had called the variable - which is the same mistake the static
-	 * signature makes: the name carries no information and changes with
-	 * every sample. The tree row reads "//Shellcode ELF-x64", which says
-	 * what the object IS in the two terms that matter, and the symbol it
-	 * was lifted from is a fact about the PARENT, so it belongs in the
-	 * dashboard beside the parent's other facts - see payload_sym.
-	 */
-	snprintf(name, sizeof name, "%s//Shellcode", po->name);
-
-	/*
-	 * The payload with a pseudo header in front of it, not the bare bytes.
-	 *
-	 * Bare, the child came back "SKIPPED - no module targets this format":
-	 * every rule declares a format and scopes to a region, so a blob is
-	 * never offered to one. With the header it is an ELF whose DATA region
-	 * IS the payload, which is the same region the bytes occupy in the
-	 * parent - so one rule reaches both. See pelf_hdr.
-	 */
-	{
-		static uint8_t img[SCL_SIZE_MAX_VIEW + 128u];
-		const uint8_t *src = dn ? dec : b;
-		uint32_t sn = dn ? dn : n;
-		uint32_t hn;
-
-		if (sn > SCL_SIZE_MAX_VIEW)
-			return 0;
-		/* The finder's answer first; sc_bits only for a payload that
-		 * came out of a decoder, where the stub shape is the evidence
-		 * and nobody has said the width. */
-		hn = pelf_hdr(img, sn,
-			      po->payload_bits ? po->payload_bits
-					       : sc_bits(src, sn, 64u));
-		memcpy(img + hn, src, sn);
-		if (!obj_take(v, name, img, hn + sn))
-			return 0;
-	}
-	{
-		struct object *ko = &v->obj[v->n_obj - 1u];
-
-		ko->payload_of = 1;
-		ko->payload_b64 = dn ? 1 : 0;
-		snprintf(ko->payload_sym, sizeof ko->payload_sym, "%s",
-			 sym[0] ? sym : "(unnamed)");
-	}
-	return 1;
 }
 
 /*
@@ -2688,6 +2443,7 @@ static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 				      o->finding, o->n_finding,
 				      &o->touch, &o->n_touch))
 			o->n_touch = 0;
+		payload_tag(v, i);
 	}
 }
 
@@ -2718,24 +2474,7 @@ static uint32_t touch_default(const struct object *ob)
 static void objects_examine(struct view *v, kof_engine *eng)
 {
 	objects_examine_from(v, eng, 0);
-	/*
-	 * The payloads a heuristic named, added as objects of their own.
-	 *
-	 * AFTER the parse, because the address a rule reports has to be turned
-	 * into a file offset through the parent's section table, and that table
-	 * is what objects_examine_from builds. Then examined again from the
-	 * first new one, so the payloads themselves get identified, scanned for
-	 * markers and given a region tree like anything else.
-	 */
-	{
-		uint32_t before = v->n_obj, i;
-
-		for (i = 0; i < before; i++)
-			payload_child(v, i);
-		if (v->n_obj > before)
-			objects_examine_from(v, eng, before);
 	}
-}
 
 
 
@@ -2857,21 +2596,19 @@ static void tree_build(struct view *v)
 			snprintf(label, sizeof label, "%s", what);
 		else if (o->payload_of)
 			/*
-			 * "Shellcode-x64", in the SAME SHAPE as every other
-			 * object row: the root reads "ELF-x64", a PE child
-			 * reads "PE-x86", and this reads "Shellcode-x64".
-			 * <what it is>-<arch>, one convention, already on the
-			 * screen above it.
+			 * "//0 Shellcode-x64", in the SAME SHAPE as every
+			 * other produced object: the "//<n>" says the engine
+			 * made this, rather than it having been in the file,
+			 * and every other child on this tree carries one.
+			 * Dropping it read as though a Shellcode object had
+			 * simply been there - which is the one thing a
+			 * reconstruction must not imply.
 			 *
-			 * Two shapes were tried and both were worse.
-			 * "ELF-x64//Shellcode" is eighteen columns against the
-			 * sixteen a depth-one row has, so it came out
-			 * "ELF-x64//Shellco" - and the "ELF-" was the redundant
-			 * half anyway, since the parent row says ELF and this
-			 * object's own HEADERS and DATA rows say it again.
-			 * "[Shellcode] x64" fits and marks the reconstruction,
-			 * but it invents a bracket convention this tree does
-			 * not otherwise use.
+			 * The "ELF-" that an ordinary child row carries is
+			 * dropped, and only that: the parent row says ELF and
+			 * this object's own HEADERS and DATA rows say it
+			 * again, while "what it is" is the half a reader
+			 * cannot get anywhere else.
 			 *
 			 * NOT "SHELLCODE". Capitals in this tree mean REGION -
 			 * HEADERS, CODE, DATA, SYM_IMP - and this is an object.
@@ -2889,7 +2626,8 @@ static void tree_build(struct view *v)
 			 * RECONSTRUCTED_ELF-x64_SHELLCODE, and the name row
 			 * names the variable it came out of.
 			 */
-			snprintf(label, sizeof label, "Shellcode-%s",
+			snprintf(label, sizeof label, "//%s Shellcode-%s",
+				 tail ? tail + 1 : o->name,
 				 o->fmt ? kof_arch_name(o->ctx.arch) : "?");
 		else
 			snprintf(label, sizeof label, "//%s %s%s",
@@ -3358,7 +3096,7 @@ static void draw_tree(struct out *o, struct view *v)
 			/* Truncated, not merely padded: a label wider than its
 			 * column runs into the pane beside it, and the first
 			 * file anyone opens has a sha256 for a name. */
-			out_fmt(o, "%-18.18s", row + off);
+			out_fmt(o, "%-19.19s", row + off);
 		}
 		if (!sel)
 			out_str(o, A_OFF A_SIZE);
@@ -3366,7 +3104,12 @@ static void draw_tree(struct out *o, struct view *v)
 		out_str(o, A_OFF);
 	}
 	/* The tree's own bar, in the two columns its rows never reach: a row is
-	 * a mark, eighteen of label and nine of size, and TREE_W is thirty. */
+	 * a mark, nineteen of label and nine of size, and TREE_W is thirty one.
+	 *
+	 * Nineteen and not eighteen because "//0 Shellcode-x86" is seventeen
+	 * and a depth-one row spends two on indentation - it came out
+	 * "//0 Shellcode-x8", one character short, which is the worst width to
+	 * be since it reads as a different architecture. */
 	scrollbar(o, TREE_W, top, bot, v->tree_top, v->n_node,
 		  (uint64_t)(bot - top + 1));
 }
@@ -5097,10 +4840,10 @@ static int dis_default_bits(struct view *v)
 	 *
 	 * So this used to special-case a payload child and ask sc_bits. That
 	 * was wrong twice over. It is a THIRD place deciding a fact the finder
-	 * already decided and pelf_hdr already wrote into the reconstruction's
-	 * header - and it was handed `ob->buf.p`, which BEGINS WITH THAT
-	 * HEADER, so it never matched a stub prologue and every payload came
-	 * out 64.
+	 * already decided and kof_wrap_elf already wrote into the
+	 * reconstruction's header - and it was handed `ob->buf.p`, which BEGINS
+	 * WITH THAT HEADER, so it never matched a stub prologue and every
+	 * payload came out 64.
 	 *
 	 * The parse of that header is the answer, for a payload child exactly
 	 * as for any other object. sc_bits stays only as the last resort for a
@@ -10174,9 +9917,7 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 	if (ob->payload_of && ob->payload_sym[0])
 		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF
 			 A_DIM "   from " A_OFF A_BAD "%s" A_OFF "%s",
-			 "name", base, ob->payload_sym,
-			 ob->payload_b64 ? A_DIM "  (base64 undone)" A_OFF
-					 : "");
+			 "name", base, ob->payload_sym, "");
 	else
 		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF,
 			 "name", base);
@@ -11574,9 +11315,9 @@ static void bar_run(struct view *v, int i)
 		if (v->obj[me].payload_of)
 			kid = me;
 
-		/* The child of THIS object, found by the name payload_child
-		 * built: it is the parent's name with a "//" and the symbol
-		 * after it, so a prefix test is exact rather than a guess. */
+		/* The child of THIS object, found by the name the engine gave
+		 * it: a child's name is the parent's with a "//" after it, so a
+		 * prefix test is exact rather than a guess. */
 		for (k = 0; !kid && k < v->n_obj; k++) {
 			size_t pn = strlen(v->obj[me].name);
 

@@ -549,7 +549,6 @@ struct object {
 	 * tree row eighteen columns wide.
 	 */
 	char              payload_sym[KOF_SYM_NAMELEN + 1];
-	int               payload_b64;
 };
 /*
  * WHAT THE EDITOR IS DRIVING: the draft, plus the little of its surroundings a

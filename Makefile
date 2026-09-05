@@ -407,6 +407,7 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/kofsig.h \
            $(SDK)/include/kofmod/heur.h \
            $(SDK)/include/kofmod/kofsym.h \
+           $(SDK)/include/kofmod/wrap.h \
            $(SDK)/include/kofmod/elf.h \
            $(SDK)/include/kofmod/pe.h \
            $(SDK)/include/kofmod/gzip.h \
