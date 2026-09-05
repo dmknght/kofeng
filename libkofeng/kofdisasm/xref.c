@@ -15,7 +15,7 @@
  * object whose code is over eight kilobytes - so this is a second bound on a
  * different axis: a pathological eight kilobytes is a few thousand
  * instructions, and remembering every distinct address they name would be a
- * table the size of the code. Two hundred and fifty six is far past what the
+ * table the size of the code. Five hundred and twelve is far past what the
  * loaders measured name (nine at most), and hitting it sets `full` rather than
  * dropping a row silently, so a caller can tell "not used" from "not known".
  */
