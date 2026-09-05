@@ -173,11 +173,57 @@ CFLAGS      += -pthread -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
 # end on real ARM64 Windows hardware: a hosted hello-world built this way
 # ran correctly under Windows's x64 emulation, and so did the full scanner
 # against a real PE, where the native-ARM64 build had crashed instantly.
+# KOF_HOST_MACH=arm64 asks for the other half of this: a host tool that is
+# ITSELF native ARM64 machine code, loading blobs ksigcompiler.sh built with
+# KOF_TARGET_MACH=arm64 (see the sigs recipe below) - nothing here runs under
+# Windows's x64 emulation at all. Unset (the default) keeps every existing
+# build byte-for-byte the same: still forced to x86_64, still what every
+# database shipped so far was built for.
+#
+# Both machines build into the same tree, and switching between them is safe
+# for one reason: this variable changes CFLAGS, so it changes FLAGSIG, so the
+# flag stamp below rebuilds every object rather than leaving the previous
+# machine's behind. That is not a nicety - a stale object of the other machine
+# inside libkofeng.a does not fail at compile time, and at link time it is
+# reported as "undefined symbol" against symbols the archive demonstrably
+# holds. The blobs and the database need no such guard: sigs and databases
+# both rm -rf their output before writing it.
+#
+# Same probe, same reasoning, mirrored: ask the compiler what it already is
+# before forcing anything, so a build host that is already the target machine
+# adds no cross-compile flags at all.
+#
+# Captured in its own variable, KOF_CROSS_FLAGS, rather than appended to
+# CFLAGS alone - VENDOR_CFLAGS below (the vendored bddisasm decoder) is a
+# deliberately separate flag list that does not inherit CFLAGS at all, and it
+# still has to end up targeting the same machine as everything else. Missing
+# on the first pass of this: on a build host whose native compiler target
+# does not match the one being forced (this ARM64 box building the x86_64
+# default, or the reverse cross direction for KOF_HOST_MACH=arm64), the
+# vendored decoder silently compiled for whatever the compiler's own default
+# was, landing wrong-machine objects in libkofeng.a next to correctly forced
+# ones - which does not fail at compile time, only at final link, and not
+# even with a machine-mismatch error for the files actually at fault: lld's
+# default (non-whole-archive) archive symbol lookup came back "undefined
+# symbol" for symbols that verifiably exist in the archive's own index,
+# because a mismatched member anywhere in the archive broke lookup for every
+# member, not only itself. Confirmed empirically: stripping the
+# wrong-machine members out of a copy of the archive made the exact same
+# link command resolve cleanly.
 CC_MACHINE := $(shell $(CC) -dumpmachine 2>/dev/null)
+KOF_CROSS_FLAGS :=
+ifeq ($(KOF_HOST_MACH),arm64)
+ifeq ($(findstring aarch64,$(CC_MACHINE)),)
+KOF_ARM64_SYSROOT ?= C:/msys64/clangarm64
+KOF_CROSS_FLAGS += -target aarch64-w64-windows-gnu --sysroot=$(KOF_ARM64_SYSROOT) -fuse-ld=lld
+endif
+else
 ifeq ($(findstring x86_64,$(CC_MACHINE)),)
 KOF_X86_SYSROOT ?= C:/msys64/mingw64
-CFLAGS      += -target x86_64-w64-windows-gnu --sysroot=$(KOF_X86_SYSROOT) -fuse-ld=lld
+KOF_CROSS_FLAGS += -target x86_64-w64-windows-gnu --sysroot=$(KOF_X86_SYSROOT) -fuse-ld=lld
 endif
+endif
+CFLAGS += $(KOF_CROSS_FLAGS)
 else
 NATIVE_OS   := $(shell uname -s 2>/dev/null)
 EXE         :=
@@ -270,6 +316,9 @@ help:
 	@echo "  databases     compile bases/ into the shipping databases"
 	@echo "                                                 -> $(OUT)/databases"
 	@echo "  databases BASEDIR=D   compile D instead        -> $(TEST)/databases-<name>"
+	@echo "  KOF_HOST_MACH=arm64   (Windows) build the tools and every signature"
+	@echo "                        blob ARM64-native, instead of the default"
+	@echo "                        x86_64 cross-compile"
 	@echo "  unit          build and run the tests"
 	@echo "  fixtures      build the binaries the tests parse"
 	@echo "  clean         remove $(BUILD)"
@@ -394,7 +443,7 @@ VENDOR_CFLAGS := -O2 -g -std=c11 -fno-common -D_LIB -DAMD64 \
                  -Wall -Wextra \
                  -Wno-missing-field-initializers -Wno-missing-braces \
                  -Wno-unused-function -Wno-error=incompatible-pointer-types \
-                 $(SAN_CFLAGS)
+                 $(SAN_CFLAGS) $(KOF_CROSS_FLAGS)
 
 EMU_SRC    := $(wildcard libkofemu/*.c)
 VENDOR_SRC := $(wildcard libkofemu/bddisasm/src/*.c)
@@ -567,6 +616,9 @@ sigs: $(OUT)/bin/ksigbuilder$(EXE) $(SDK_HDR)
 	@mkdir -p $(ARTEFACTS)
 	@echo "$(SIGS)" | tr ' ' '\n' | KOF_OUTDIR=$(abspath $(ARTEFACTS)) \
 		KOF_BASEDIR=$(abspath $(BASEDIR)) \
+		KOF_TARGET_MACH=$(if $(filter arm64,$(KOF_HOST_MACH)),arm64,x86_64) \
+		KOF_KSIGBUILDER=$(abspath $(OUT)/bin/ksigbuilder$(EXE)) \
+		KOF_INCLUDE=$(abspath $(OUT)/include) \
 		xargs -P $(JOBS) -n 1 ksigbuilder/ksigcompiler.sh >/dev/null
 	@echo "  $(words $(SIGS)) source(s) from $(BASEDIR) -> $(ARTEFACTS)"
 
