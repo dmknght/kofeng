@@ -611,6 +611,47 @@ fi
 # reads the object, the ELF build reads the linked image - and a check that
 # exists in one of them is a check that half the builds do not run.
 #
+#
+# WHAT A DETECTOR AND AN UNPACKER MAY NOT BE.
+#
+# Functions rather than inline code because the entry-point dispatch exists
+# TWICE - once for the PE image and once for the ELF one - and the two had
+# already drifted: the Windows copy refused an unpack module with no
+# KOF_UNPACK_KIND and a detector that declared one, the ELF copy refused
+# neither. Since almost every build is the ELF one, both checks were
+# effectively off, and bases/decomp/gzip.c shipped for that long without
+# declaring its kind at all.
+#
+# Two copies of a refusal are one refusal and one hole.
+#
+detect_checks() {
+	if [ "$nphase" -ne 0 ] || [ -n "$heur_name" ] ||
+	   [ "$heur_want" -ne 0 ]; then
+		echo "FAIL: heuristic declarations on a detector; a rule" >&2
+		echo "      exports kof_heur and includes kofmod/heur.h" >&2
+		exit 1
+	fi
+	if [ "$nkind" -ne 0 ]; then
+		echo "FAIL: KOF_UNPACK_KIND on a detector; it describes an" >&2
+		echo "      unpacker, and a detector declaring one has" >&2
+		echo "      misunderstood what it is writing" >&2
+		exit 1
+	fi
+}
+
+unpack_checks() {
+	# An unpacker that does not say what sort it is leaves the heuristic to
+	# guess, and the guess is worth score. Refused rather than defaulted,
+	# because the default that is usually right - container - is the one
+	# that silently loses evidence on the modules where it is wrong.
+	if [ "$nkind" -eq 0 ]; then
+		echo "FAIL: an unpack module must declare KOF_UNPACK_KIND" >&2
+		echo "      KOF_UNPACK_KIND(KOF_UNP_PACKER)    - it hid a program" >&2
+		echo "      KOF_UNPACK_KIND(KOF_UNP_CONTAINER) - it carried files" >&2
+		exit 1
+	fi
+}
+
 heur_checks() {
 	#
 	# WHAT A RULE MAY NOT BE, checked in the source rather than
@@ -778,31 +819,10 @@ if [ "$os" = windows ]; then
 		heur_checks
 	elif [ -n "$scan_row" ]; then
 		entry_hex=$scan_row; kind=0; kindname=detect
-		if [ "$nphase" -ne 0 ] || [ -n "$heur_name" ] ||
-		   [ "$heur_want" -ne 0 ]; then
-			echo "FAIL: heuristic declarations on a detector; a rule" >&2
-			echo "      exports kof_heur and includes kofmod/heur.h" >&2
-			exit 1
-		fi
-		if [ "$nkind" -ne 0 ]; then
-			echo "FAIL: KOF_UNPACK_KIND on a detector; it describes an" >&2
-			echo "      unpacker, and a detector declaring one has" >&2
-			echo "      misunderstood what it is writing" >&2
-			exit 1
-		fi
+		detect_checks
 	elif [ -n "$unp_row" ]; then
 		entry_hex=$unp_row;  kind=1; kindname=unpack
-		# An unpacker that does not say what sort it is leaves the
-		# heuristic to guess, and the guess is worth score. Refused here
-		# rather than defaulted, because the default that is usually
-		# right - container - is the one that silently loses evidence on
-		# the modules where it is wrong.
-		if [ "$nkind" -eq 0 ]; then
-			echo "FAIL: an unpack module must declare KOF_UNPACK_KIND" >&2
-			echo "      KOF_UNPACK_KIND(KOF_UNP_PACKER)    - it hid a program" >&2
-			echo "      KOF_UNPACK_KIND(KOF_UNP_CONTAINER) - it carried files" >&2
-			exit 1
-		fi
+		unpack_checks
 	else
 		echo "FAIL: no kof_scan, kof_unpack or kof_heur symbol; a module" >&2
 		echo "      must export exactly one" >&2
@@ -878,14 +898,10 @@ else
 		heur_checks
 	elif [ -n "$scan_hex" ]; then
 		entry_hex=$scan_hex; kind=0; kindname=detect
-		if [ "$nphase" -ne 0 ] || [ -n "$heur_name" ] ||
-		   [ "$heur_want" -ne 0 ]; then
-			echo "FAIL: heuristic declarations on a detector; a rule" >&2
-			echo "      exports kof_heur and includes kofmod/heur.h" >&2
-			exit 1
-		fi
+		detect_checks
 	elif [ -n "$unp_hex" ]; then
 		entry_hex=$unp_hex;  kind=1; kindname=unpack
+		unpack_checks
 	else
 		echo "FAIL: no kof_scan, kof_unpack or kof_heur symbol; a module" >&2
 		echo "      must export exactly one" >&2

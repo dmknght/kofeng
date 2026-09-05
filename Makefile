@@ -565,10 +565,21 @@ $(OUT)/bin/ksigbuilder$(EXE): ksigbuilder/ksigbuilder.c $(LIB) $(SDK_HDR) $(STAM
 # and in how often they change rather than merely in name:
 #
 #   bases/signatures/  detections. Name a family. Change weekly.
-#   bases/decomp/      container openers - gzip, zip, tar. A file that is a
-#                      wrapper around other files; yields many entries.
-#   bases/unp/         executable unpackers - overlay, UPX. A file that IS the
-#                      payload, transformed; yields one image.
+#   bases/decomp/      the CONTAINER unpackers - gzip, zip, tar, rar, 7z, xz,
+#                      docole, rtf, overlay. A file that carried other files.
+#   bases/unp/         the PACKER unpackers - UPX, Ezuri, midgetpack, the msf
+#                      encoders. A file that IS the payload, transformed.
+#
+# The directory is the module's KOF_UNPACK_KIND and nothing else, so the split
+# is checkable in one line rather than remembered:
+#
+#   grep -L KOF_UNP_CONTAINER bases/decomp/*.c   # must print nothing
+#   grep -L KOF_UNP_PACKER    bases/unp/*.c      # must print nothing
+#
+# It was not that before. The rule above was stated by EXAMPLE - "gzip, zip,
+# tar" - and eight of the nine containers had drifted into bases/unp/ while zip
+# and tar, named here as decomp, were among them. A split described by examples
+# is a split nothing checks.
 #
 # decomp and unp compile to the same pack kind and the engine does not tell them
 # apart - the split is for the people who maintain them. The decompression

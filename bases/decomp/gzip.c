@@ -1,7 +1,7 @@
 /*
- * unp_gzip.c - yield what a gzip holds as an object of its own.
+ * gzip.c - yield what a gzip holds as an object of its own.
  *
- * The first module that produces bytes which were not in the file. unp_overlay
+ * The first module that produces bytes which were not in the file. overlay.c
  * yields a window - the parent's mapping at a different offset, costing nothing -
  * and this is the other kind: output that has to be decoded, held somewhere and
  * paid for out of a budget.

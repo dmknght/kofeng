@@ -51,6 +51,10 @@
 #include <kofmod/elf.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
+/* A PACKER: it produces one object out of one, and the coding exists to stop
+ * that object being read. A container would be the wrong claim and it feeds a
+ * score - see KOF_UNPACK_KIND in kofsig.h. */
+KOF_UNPACK_KIND(KOF_UNP_PACKER);
 
 /* The stub's marker. A real one would be a byte pattern from the sample. */
 KOF_DEFINE_HEXSTR(stub_magic, "4B 4F 46 53 54 55 42 30");   /* KOFSTUB0 */

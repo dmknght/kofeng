@@ -1,5 +1,5 @@
 /*
- * unp_overlay.c - yield a PE's overlay as an object of its own.
+ * overlay.c - yield a PE's overlay as an object of its own.
  *
  * The first unpacker, and deliberately the simplest one that exists: the overlay
  * is bytes past everything any structure in the file claimed, the collector has

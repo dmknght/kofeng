@@ -1610,11 +1610,11 @@ enum kof_unp_broken {
  * macros end a function without looking any of them up.
  *
  * kof_unp_broken records and carries on, for the module that has recovered
- * something and means to keep it. Nothing in this tree needs it today - measured
- * across 23.5GB of samples, no call site reaches it - and an archive module will
- * need it constantly: an entry in a zip whose compression method this build lacks
- * is a reason to record and move to the NEXT entry, not to abandon the entries
- * already recovered.
+ * something and means to keep it. That is now the commoner of the two - 37 call
+ * sites against 18 - and every one of them is in a module that walks entries,
+ * exactly as this note predicted when there were none: an entry in a zip whose
+ * compression method this build lacks is a reason to record and move to the NEXT
+ * entry, not to abandon the entries already recovered.
  */
 #define kof_unp_broken(reason)                                             \
 	((void)((ctx)->content->incomplete ?                               \
