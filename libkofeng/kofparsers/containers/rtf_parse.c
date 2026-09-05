@@ -497,11 +497,6 @@ int kof_rtf_parse(kof_buf file, struct kof_rtf_info *r, struct kof_obj_ctx *ctx)
 
 /* ---- names -------------------------------------------------------------------- */
 
-#define RTF_REGIONS(X)          \
-	X(KOF_SCAN_RTF_BODY)      \
-	X(KOF_SCAN_RTF_OBJDATA)   \
-	X(KOF_SCAN_RTF_BINARY)    \
-	X(KOF_SCAN_RTF_UNCLAIMED)
 
 #define X_BIT(b)  (b),
 #define X_CASE(b) case (b): return #b;

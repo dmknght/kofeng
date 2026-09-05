@@ -1355,7 +1355,7 @@ static const char *src_path_of(const char *family, uint32_t line)
  */
 static void print_markers(struct kof_engine *eng, kof_buf buf,
 			  const struct kof_obj_ctx *ctx,
-			  const struct kof_inspect_fmt *fmt,
+			  const struct kof_parser *fmt,
 			  const char *display)
 {
 	struct kof_touch *v = NULL;
@@ -1577,7 +1577,7 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 {
 	struct kof_obj_ctx ctx;
 	void *view = 0;
-	const struct kof_inspect_fmt *f = 0;
+	const struct kof_parser *f = 0;
 	uint64_t total = 0;
 	uint32_t i;
 	int rc = 0;

@@ -324,10 +324,18 @@ struct kof_pe_dir {
  * this says what Windows will do with the file rather than what the file is called.
  * Measured over 5143 PE images: 4635 executables, 492 libraries, 16 drivers.
  */
+/* X(NAME, value), read the same way as KOF_ELF_TYPE_LIST next door: one list
+ * feeding the enum, the build tool's parse and an editor's menu. */
+#define KOF_PE_IMAGE_LIST(X)                                                 \
+	X(KOF_PE_EXE, 0)                                                     \
+	X(KOF_PE_DLL, 1)                                                     \
+	X(KOF_PE_SYS, 2)   /* subsystem NATIVE: a kernel mode driver */
+
 enum kof_pe_image {
-	KOF_PE_EXE = 0,
-	KOF_PE_DLL = 1,
-	KOF_PE_SYS = 2    /* subsystem NATIVE: a kernel mode driver */
+#define KOF_PE_IMAGE_X(name, val) name = val,
+	KOF_PE_IMAGE_LIST(KOF_PE_IMAGE_X)
+#undef KOF_PE_IMAGE_X
+	KOF_PE_IMAGE_COUNT = 3
 };
 
 /* IMAGE_FILE_DLL, and the subsystem a driver runs in. */

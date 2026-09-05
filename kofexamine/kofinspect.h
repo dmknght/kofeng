@@ -25,25 +25,22 @@
 #include <stdint.h>
 #include "../libkofeng/core/kofcore.h"
 #include "../libkofeng/kofdb/kofdb.h"
+#include "../libkofeng/kofparsers/kofformat.h"
 
 /* ---- what a format is ------------------------------------------------------
  *
- * Everything a consumer needs in order to see an object the way the engine does,
- * and nothing about how to show it. Rendering is left out on purpose: the two
- * front ends in this tree render nothing alike - one prints lines, one paints
- * panes - and a print callback here would be the printer's shape imposed on
+ * Nothing, any more. Everything a consumer needs in order to see an object the
+ * way the engine does - how to sniff it, how to parse it, what its regions are
+ * called, what its anomaly bits mean - is one struct published by the engine,
+ * because the engine is where the formats are. This header used to carry a
+ * second table of the same shape; four test files carried a third, fourth and
+ * fifth. See kofparsers/kofformat.h.
+ *
+ * What stays out of that struct is rendering, and on purpose: the two front
+ * ends in this tree render nothing alike - one prints lines, one paints panes -
+ * and a print callback in the engine would be the printer's shape imposed on
  * both.
  */
-struct kof_inspect_fmt {
-	uint32_t    view_size;
-	int       (*sniff)(kof_buf);
-	int       (*parse)(kof_buf, void *, struct kof_obj_ctx *);
-	const uint32_t *regions;
-	uint32_t    n_regions;
-	const char *(*region_name)(uint32_t);
-	const char *(*anomaly_name)(unsigned);
-	uint64_t  (*anomalies)(const void *);
-};
 
 /*
  * Identify and parse. Returns the format, fills `ctx`, and hands back a view the
@@ -59,7 +56,7 @@ struct kof_inspect_fmt {
  * then failed. A parser loosened later would change that, and this is the place
  * the answer would have to come back through.
  */
-const struct kof_inspect_fmt *kof_inspect_identify(kof_buf, struct kof_obj_ctx *,
+const struct kof_parser *kof_inspect_identify(kof_buf, struct kof_obj_ctx *,
 						   void **view_out);
 
 /* The subtype in the format's own vocabulary - ET_EXEC, DLL - or NULL. A number
@@ -174,7 +171,7 @@ struct kof_dump_stat {
  * honest representation: a pattern spanning the join is one a module would find.
  */
 int kof_dump_object(const char *dir, kof_buf buf,
-		    const struct kof_inspect_fmt *f,
+		    const struct kof_parser *f,
 		    const struct kof_obj_ctx *ctx,
 		    struct kof_dump_stat *st, char *err, uint32_t err_cap);
 
@@ -375,6 +372,22 @@ struct kof_touch {
 	 * the range is not logic, it is a fact about each search.
 	 */
 	uint32_t                scan_mask;
+	/*
+	 * THE PRECONDITIONS THE MODULE DECLARED, which the pack also keeps.
+	 *
+	 * Same reason scan_mask is here: the panel writes these back out when a
+	 * rule is regenerated, and it had no way to learn them - so opening a
+	 * rule from the database and saving it dropped every KOF_TARGET_ line
+	 * it had, silently widening it. size_min is a size; the two masks are
+	 * 1u << value, the way the host tests them.
+	 *
+	 * There is no maximum here because the engine has none by design - see
+	 * KOF_TARGET_SIZE_MIN in kofsig.h. A rule wanting an upper bound writes
+	 * it in its body, and the panel reads that back from the source.
+	 */
+	uint64_t                size_min;
+	uint32_t                arch_mask;
+	uint32_t                subtype_mask;
 	struct kof_touch_str   *str;        /* n_str of them, owned */
 };
 
@@ -449,7 +462,7 @@ struct kof_region_map {
 
 int      kof_region_map_build(struct kof_region_map *,
 			      const struct kof_obj_ctx *,
-			      const struct kof_inspect_fmt *);
+			      const struct kof_parser *);
 void     kof_region_map_free(struct kof_region_map *);
 /* The region holding a file offset, as a region mask; 0 when none does. */
 uint32_t kof_region_map_at(const struct kof_region_map *, uint64_t off);
@@ -493,7 +506,7 @@ int kof_locate_str(struct kof_match_ctx *m, struct kof_match_ctx *msym,
 
 int  kof_touch_object(struct kof_engine *eng, kof_buf buf,
 		      const struct kof_obj_ctx *ctx,
-		      const struct kof_inspect_fmt *fmt,
+		      const struct kof_parser *fmt,
 		      const char *const *finding, uint32_t n_finding,
 		      struct kof_touch **out, uint32_t *n_out);
 

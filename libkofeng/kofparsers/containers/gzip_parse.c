@@ -274,12 +274,6 @@ int kof_gzip_parse(kof_buf file, struct kof_gzip_info *g, struct kof_obj_ctx *ct
 
 /* ---- names, for tools --------------------------------------------------------- */
 
-#define GZIP_REGIONS(X)          \
-	X(KOF_SCAN_GZIP_HEADER)    \
-	X(KOF_SCAN_GZIP_NAME)      \
-	X(KOF_SCAN_GZIP_DATA)      \
-	X(KOF_SCAN_GZIP_TRAILER)   \
-	X(KOF_SCAN_GZIP_UNCLAIMED)
 
 #define X_BIT(b)  (b),
 #define X_CASE(b) case (b): return #b;

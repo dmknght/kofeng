@@ -375,10 +375,6 @@ done:
 
 /* ---- names -------------------------------------------------------------------- */
 
-#define XZ_REGIONS(X)          \
-	X(KOF_SCAN_XZ_HEADERS)   \
-	X(KOF_SCAN_XZ_PACKED)    \
-	X(KOF_SCAN_XZ_UNCLAIMED)
 
 #define X_BIT(b)  (b),
 #define X_CASE(b) case (b): return #b;

@@ -413,10 +413,6 @@ int kof_tar_parse(kof_buf file, struct kof_tar_info *t, struct kof_obj_ctx *ctx)
 
 /* ---- names, for tools --------------------------------------------------------- */
 
-#define TAR_REGIONS(X)          \
-	X(KOF_SCAN_TAR_HEADERS)   \
-	X(KOF_SCAN_TAR_DATA)      \
-	X(KOF_SCAN_TAR_UNCLAIMED)
 
 #define X_BIT(b)  (b),
 #define X_CASE(b) case (b): return #b;

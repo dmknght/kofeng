@@ -213,12 +213,21 @@ struct kof_elf_seg {
  * are really modules tests for a section name in their own module, after the
  * prefilter has already done the cheap part.
  */
+/* X(NAME, value). One list: the enum below, the words the build tool accepts in
+ * KOF_TARGET_SUBTYPE, and the set an editor offers all come from it. The build
+ * script used to keep a copy of its own and match it as a substring. */
+#define KOF_ELF_TYPE_LIST(X)                                                 \
+	X(KOF_ELF_NONE, 0)                                                   \
+	X(KOF_ELF_REL,  1)                                                   \
+	X(KOF_ELF_EXEC, 2)                                                   \
+	X(KOF_ELF_DYN,  3)                                                   \
+	X(KOF_ELF_CORE, 4)
+
 enum kof_elf_type {
-	KOF_ELF_NONE = 0,
-	KOF_ELF_REL  = 1,
-	KOF_ELF_EXEC = 2,
-	KOF_ELF_DYN  = 3,
-	KOF_ELF_CORE = 4
+#define KOF_ELF_TYPE_X(name, val) name = val,
+	KOF_ELF_TYPE_LIST(KOF_ELF_TYPE_X)
+#undef KOF_ELF_TYPE_X
+	KOF_ELF_TYPE_COUNT = 5
 };
 
 struct kof_elf_sec {

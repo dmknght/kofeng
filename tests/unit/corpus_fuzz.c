@@ -31,6 +31,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include "../../libkofeng/kofparsers/kofformat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -176,44 +177,9 @@ static void poke_accessors(const struct kof_obj_ctx *ctx, uint64_t obj_size,
  * format added meant another parameter in three places. The view is one allocation
  * sized for the largest because only one parse is ever in flight.
  */
-typedef int (*cf_parse)(kof_buf, void *, struct kof_obj_ctx *);
-
-#define CF_WRAP(name, type, fn)                                            \
-	static int name(kof_buf b, void *v, struct kof_obj_ctx *c)         \
-	{ return fn(b, (type *)v, c); }
-
-CF_WRAP(c_elf,    struct kof_elf_info,    kof_elf_parse)
-CF_WRAP(c_pe,     struct kof_pe_info,     kof_pe_parse)
-CF_WRAP(c_gzip,   struct kof_gzip_info,   kof_gzip_parse)
-CF_WRAP(c_docole, struct kof_docole_info, kof_docole_parse)
-CF_WRAP(c_zip,    struct kof_zip_info,    kof_zip_parse)
-CF_WRAP(c_tar,    struct kof_tar_info,    kof_tar_parse)
-CF_WRAP(c_7z,     struct kof_7z_info,     kof_7z_parse)
-CF_WRAP(c_rar,    struct kof_rar_info,    kof_rar_parse)
-CF_WRAP(c_xz,     struct kof_xz_info,     kof_xz_parse)
-CF_WRAP(c_rtf,    struct kof_rtf_info,    kof_rtf_parse)
-CF_WRAP(c_pdf,    struct kof_pdf_info,    kof_pdf_parse)
-
-static const struct fmt {
-	int (*sniff)(kof_buf);
-	cf_parse parse;
-	size_t view_size;
-	const uint32_t *bits;
-	uint32_t n_bits;
-} fmts[] = {
-	{ kof_elf_sniff,    c_elf,    sizeof(struct kof_elf_info),    kof_elf_region_bits,    KOF_ELF_REGION_COUNT },
-	{ kof_pe_sniff,     c_pe,     sizeof(struct kof_pe_info),     kof_pe_region_bits,     KOF_PE_REGION_COUNT },
-	{ kof_gzip_sniff,   c_gzip,   sizeof(struct kof_gzip_info),   kof_gzip_region_bits,   KOF_GZIP_REGION_COUNT },
-	{ kof_docole_sniff, c_docole, sizeof(struct kof_docole_info), kof_docole_region_bits, KOF_DOCOLE_REGION_COUNT },
-	{ kof_zip_sniff,    c_zip,    sizeof(struct kof_zip_info),    kof_zip_region_bits,    KOF_ZIP_REGION_COUNT },
-	{ kof_tar_sniff,    c_tar,    sizeof(struct kof_tar_info),    kof_tar_region_bits,    KOF_TAR_REGION_COUNT },
-	{ kof_7z_sniff,     c_7z,     sizeof(struct kof_7z_info),     kof_7z_region_bits,     KOF_7Z_REGION_COUNT },
-	{ kof_rar_sniff,    c_rar,    sizeof(struct kof_rar_info),    kof_rar_region_bits,    KOF_RAR_REGION_COUNT },
-	{ kof_xz_sniff,     c_xz,     sizeof(struct kof_xz_info),     kof_xz_region_bits,     KOF_XZ_REGION_COUNT },
-	{ kof_rtf_sniff,    c_rtf,    sizeof(struct kof_rtf_info),    kof_rtf_region_bits,    KOF_RTF_REGION_COUNT },
-	{ kof_pdf_sniff,    c_pdf,    sizeof(struct kof_pdf_info),    kof_pdf_region_bits,    KOF_PDF_REGION_COUNT }
-};
-#define N_FMT (sizeof fmts / sizeof fmts[0])
+static const struct kof_parser *fmts;
+static uint32_t n_fmt;
+#define N_FMT n_fmt
 
 /* Parse one buffer and run every check over it. */
 static void one(kof_buf buf, void *view, const char *what,
@@ -230,7 +196,7 @@ static void one(kof_buf buf, void *view, const char *what,
 		if (!fmts[k].parse(buf, view, &ctx))
 			return;
 		t->parsed++;
-		pc_check(what, &ctx, buf.n, fmts[k].bits, fmts[k].n_bits, rep);
+		pc_check(what, &ctx, buf.n, fmts[k].regions, fmts[k].n_regions, rep);
 		t->checked++;
 		poke_accessors(&ctx, buf.n, what, rep);
 		return;
@@ -362,6 +328,7 @@ int main(int argc, char **argv)
 	uint32_t rounds = 4000;
 	uint64_t seed = 20240101u;
 
+	fmts = kof_parser_list(&n_fmt);
 	if (argc > 1)
 		seed = strtoull(argv[1], 0, 0);
 	if (argc > 2)

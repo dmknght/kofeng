@@ -813,9 +813,21 @@ static int hex_last(void) { return g_disasm_rows ? dis_top() - 2 : hex_bot(); }
  * and is the right name there, where the reader is looking at C; on a panel it
  * is a token to decode, and "size_min" does not say whether it is a minimum
  * this module requires or a minimum it refuses.
+ *
+ * The two size rows are spelled as the COMPARISON they are. "Smallest file
+ * size" reads as a description of the file rather than as a condition on it,
+ * and the reader then has to work out which way it points; ">=" says it and
+ * needs no working out. Whoever is writing a signature is writing C, so the
+ * operator is the familiar spelling rather than a jargon one.
+ *
+ * The two are not equally cheap and the panel does not pretend otherwise: the
+ * minimum becomes a declared precondition the host evaluates without calling
+ * the module, the maximum becomes a test in the body, and the generated source
+ * shows which is which. See KOF_TARGET_SIZE_MIN in kofsig.h for why there is
+ * no declared maximum.
  */
 static const char *const opt_word[OPT_COUNT] = {
-	"Smallest file size", "Largest file size",
+	"File size >=", "File size <=",
 	"Architecture", "File subtype"
 };
 
@@ -1443,7 +1455,18 @@ struct view {
 	uint64_t    last_click;     /* the byte a click landed on */
 	uint64_t    last_click_ms;  /* and when, so a second one can pair */
 
-	uint32_t    prow_seen;      /* how tall the draft was last frame */
+	uint32_t    prow_seen;
+	/*
+	 * A DRAFT THAT WAS LOADED OPENS AT ITS BEGINNING.
+	 *
+	 * The panel scrolls to the bottom when it grows, because what grew is
+	 * the row the reader just asked for. Replacing the whole draft also
+	 * makes it grow - by every row at once - and that read as the same
+	 * event, so opening a rule from the database landed at the end of it
+	 * and the KOF_TARGET_ rows, which are at the top, were off screen. The
+	 * options looked as though the rule had not declared any.
+	 */
+	int         prow_home;      /* how tall the draft was last frame */
      /* what the draft was when it was written */
 	uint64_t    obj_held;       /* bytes of recovered objects being kept */
 	int         sizing;
@@ -3847,6 +3870,7 @@ static void draft_wipe(struct view *v)
 	v->note_off = 0;
 	v->prow_off = 0;
 	v->prow_seen = 0;
+	v->prow_home = 1;
 }
 
 
@@ -3881,6 +3905,8 @@ static void draft_show(struct view *v, uint32_t idx)
 		const char *path = src_of(&v->ed, &ob->touch[idx]);
 		int rc = path ? draft_from_source(&v->ed, path) : 0;
 
+		v->prow_home = 1;       /* a loaded draft opens at its top */
+
 		if (rc) {
 			/*
 			 * A draft that came from a file belongs to that file:
@@ -3903,6 +3929,7 @@ static void draft_show(struct view *v, uint32_t idx)
 			return;
 		}
 		draft_from_touch(&v->ed, &ob->touch[idx]);
+		v->prow_home = 1;       /* a loaded draft opens at its top */
 		v->ed.dr.from_rule = 1;
 	}
 }
@@ -8780,8 +8807,12 @@ static void redraw(struct view *v)
 		 * for appeared off the bottom of a panel that looked unchanged,
 		 * which reads as the button having done nothing.
 		 */
-		if (v->n_prow > v->prow_seen)
+		if (v->prow_home) {
+			v->prow_off = 0;
+			v->prow_home = 0;
+		} else if (v->n_prow > v->prow_seen) {
 			v->prow_off = 0xffffffffu;      /* clamped below */
+		}
 		v->prow_seen = v->n_prow;
 
 		/* Two more than the rows it shows: the heading it starts with
@@ -13777,6 +13808,7 @@ static int click_panel_head(struct view *v)
 			 * the way of the thing the button is for. */
 			if (v->ed.dr.n_decl || v->ed.dr.family[0])
 				draft_reset(&v->ed);
+				v->prow_home = 1;
 		} else if (g_mx >= v->nt_c0 && g_mx <= v->nt_c1)
 			v->edit = 501;
 		return 1;

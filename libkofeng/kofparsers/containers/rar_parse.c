@@ -794,12 +794,6 @@ settle:
 
 /* ---- names -------------------------------------------------------------------- */
 
-#define RAR_REGIONS(X)          \
-	X(KOF_SCAN_RAR_HEADERS)   \
-	X(KOF_SCAN_RAR_NAMES)     \
-	X(KOF_SCAN_RAR_STORED)    \
-	X(KOF_SCAN_RAR_PACKED)    \
-	X(KOF_SCAN_RAR_UNCLAIMED)
 
 #define X_BIT(b)  (b),
 #define X_CASE(b) case (b): return #b;

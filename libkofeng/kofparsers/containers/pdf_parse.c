@@ -456,12 +456,6 @@ int kof_pdf_parse(kof_buf file, struct kof_pdf_info *p, struct kof_obj_ctx *ctx)
 
 /* ---- names, for tools --------------------------------------------------------- */
 
-#define PDF_REGIONS(X)                 \
-	X(KOF_SCAN_PDF_HEADER)           \
-	X(KOF_SCAN_PDF_OBJECTS)          \
-	X(KOF_SCAN_PDF_STREAM_PLAIN)     \
-	X(KOF_SCAN_PDF_STREAM_PACKED)    \
-	X(KOF_SCAN_PDF_UNCLAIMED)
 
 #define X_BIT(b)  (b),
 #define X_CASE(b) case (b): return #b;

@@ -43,6 +43,7 @@
 
 #define _POSIX_C_SOURCE 199309L
 
+#include "../../libkofeng/kofparsers/kofformat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -151,35 +152,24 @@ static uint64_t hostile_pair(uint32_t k, uint64_t obj_len)
 
 /* ---- the table ---------------------------------------------------------------- */
 
-typedef int (*parse_fn)(kof_buf, void *, struct kof_obj_ctx *);
 
-#define WRAP(name, type, fn)                                               \
-	static int name(kof_buf b, void *v, struct kof_obj_ctx *c)         \
-	{ return fn(b, (type *)v, c); }
 
-WRAP(w_elf,    struct kof_elf_info,    kof_elf_parse)
-WRAP(w_pe,     struct kof_pe_info,     kof_pe_parse)
-WRAP(w_gzip,   struct kof_gzip_info,   kof_gzip_parse)
-WRAP(w_docole, struct kof_docole_info, kof_docole_parse)
-WRAP(w_zip,    struct kof_zip_info,    kof_zip_parse)
-WRAP(w_tar,    struct kof_tar_info,    kof_tar_parse)
-WRAP(w_7z,     struct kof_7z_info,     kof_7z_parse)
-WRAP(w_rar,    struct kof_rar_info,    kof_rar_parse)
-WRAP(w_xz,     struct kof_xz_info,     kof_xz_parse)
-WRAP(w_pdf,    struct kof_pdf_info,    kof_pdf_parse)
-WRAP(w_rtf,    struct kof_rtf_info,    kof_rtf_parse)
 
+/*
+ * `name` is this test's label, not the format's: two rows say "rar" and "rar5"
+ * because the two archive layouts need different seeds while both are RAR to
+ * the engine. Everything the engine already knows about a format is reached
+ * through `format` rather than restated here.
+ */
 struct target {
 	const char *name;
 	uint64_t (*seed)(uint8_t *);
 	const struct field *fields;
 	uint32_t n_fields;
-	parse_fn parse;
-	uint32_t view_size;
-	const uint32_t *bits;
-	uint32_t n_bits;
+	uint8_t  format;                       /* which engine parser answers */
 	uint32_t (*elems)(const void *view);
 	uint32_t want_elems;
+	const struct kof_parser *p;    /* resolved from `format` at startup */
 };
 
 static uint32_t n_elf(const void *v)
@@ -201,47 +191,35 @@ static uint32_t n_pdf(const void *v)
 static uint32_t n_rtf(const void *v)
 { return ((const struct kof_rtf_info *)v)->n_objects; }
 
-static const struct target targets[] = {
+static struct target targets[] = {
 	{ "elf",  seed_elf,  f_elf,  sizeof f_elf  / sizeof f_elf[0],
-	  w_elf,  (uint32_t)sizeof(struct kof_elf_info),
-	  kof_elf_region_bits,  KOF_ELF_REGION_COUNT, n_elf, ELF_NSEC },
+	  KOF_FMT_ELF, n_elf, ELF_NSEC },
 	{ "pe",   seed_pe,   f_pe,   sizeof f_pe   / sizeof f_pe[0],
-	  w_pe,   (uint32_t)sizeof(struct kof_pe_info),
-	  kof_pe_region_bits,   KOF_PE_REGION_COUNT, n_pe, 1u },
+	  KOF_FMT_PE, n_pe, 1u },
 	{ "zip",  seed_zip,  f_zip,  sizeof f_zip  / sizeof f_zip[0],
-	  w_zip,  (uint32_t)sizeof(struct kof_zip_info),
-	  kof_zip_region_bits,  KOF_ZIP_REGION_COUNT, n_zip, Z_NENT },
+	  KOF_FMT_ZIP, n_zip, Z_NENT },
 	{ "tar",  seed_tar,  f_tar,  sizeof f_tar  / sizeof f_tar[0],
-	  w_tar,  (uint32_t)sizeof(struct kof_tar_info),
-	  kof_tar_region_bits,  KOF_TAR_REGION_COUNT, n_tar, 1u },
+	  KOF_FMT_TAR, n_tar, 1u },
 	{ "gzip", seed_gzip, f_gzip, sizeof f_gzip / sizeof f_gzip[0],
-	  w_gzip, (uint32_t)sizeof(struct kof_gzip_info),
-	  kof_gzip_region_bits, KOF_GZIP_REGION_COUNT, NULL, 0 },
+	  KOF_FMT_GZIP, NULL, 0 },
 	{ "7z",   seed_7z,   f_7z,   sizeof f_7z   / sizeof f_7z[0],
-	  w_7z,   (uint32_t)sizeof(struct kof_7z_info),
-	  kof_7z_region_bits,   KOF_7Z_REGION_COUNT, NULL, 0 },
+	  KOF_FMT_7Z, NULL, 0 },
 	{ "rar",  seed_rar,  f_rar,  sizeof f_rar  / sizeof f_rar[0],
-	  w_rar,  (uint32_t)sizeof(struct kof_rar_info),
-	  kof_rar_region_bits,  KOF_RAR_REGION_COUNT, n_rar, R_NENT },
+	  KOF_FMT_RAR, n_rar, R_NENT },
 	{ "docole", seed_docole, f_docole,
 	  sizeof f_docole / sizeof f_docole[0],
-	  w_docole, (uint32_t)sizeof(struct kof_docole_info),
-	  kof_docole_region_bits, KOF_DOCOLE_REGION_COUNT, n_docole, 3u },
+	  KOF_FMT_DOCOLE, n_docole, 3u },
 	{ "xz",   seed_xz,   f_xz,   sizeof f_xz   / sizeof f_xz[0],
-	  w_xz,   (uint32_t)sizeof(struct kof_xz_info),
-	  kof_xz_region_bits,   KOF_XZ_REGION_COUNT, n_xz, 1u },
+	  KOF_FMT_XZ, n_xz, 1u },
 	/* RAR5 is a second entry rather than a second seed: it shares the parser
 	 * and the region set with RAR3 and nothing else, so the seed, the field
 	 * list and the entry count all have to differ. */
 	{ "rar5", seed_rar5, f_rar5, sizeof f_rar5 / sizeof f_rar5[0],
-	  w_rar,  (uint32_t)sizeof(struct kof_rar_info),
-	  kof_rar_region_bits,  KOF_RAR_REGION_COUNT, n_rar, V_NENT },
+	  KOF_FMT_RAR, n_rar, V_NENT },
 	{ "pdf",  seed_pdf,  f_pdf,  sizeof f_pdf  / sizeof f_pdf[0],
-	  w_pdf,  (uint32_t)sizeof(struct kof_pdf_info),
-	  kof_pdf_region_bits,  KOF_PDF_REGION_COUNT, n_pdf, P_NOBJ },
+	  KOF_FMT_PDF, n_pdf, P_NOBJ },
 	{ "rtf",  seed_rtf,  f_rtf,  sizeof f_rtf  / sizeof f_rtf[0],
-	  w_rtf,  (uint32_t)sizeof(struct kof_rtf_info),
-	  kof_rtf_region_bits,  KOF_RTF_REGION_COUNT, n_rtf, T_NOBJ }
+	  KOF_FMT_RTF, n_rtf, T_NOBJ }
 };
 
 /* ---- the run ------------------------------------------------------------------ */
@@ -305,7 +283,7 @@ static double baseline_ms(const struct target *tg, uint8_t *obj, void *view)
 		memset(&ctx, 0, sizeof ctx);
 		tg->seed(obj);
 		t0 = now_ms();
-		tg->parse(kof_buf_make(obj, len), view, &ctx);
+		tg->p->parse(kof_buf_make(obj, len), view, &ctx);
 		v[i] = now_ms() - t0;
 	}
 	for (i = 1; i < 15u; i++) {
@@ -347,7 +325,7 @@ static void one_case(const struct target *tg, uint8_t *obj, void *view,
 	alloc_peak = 0;
 
 	t0 = now_ms();
-	if (tg->parse(kof_buf_make(obj, seed_len), view, &ctx)) {
+	if (tg->p->parse(kof_buf_make(obj, seed_len), view, &ctx)) {
 		t->parsed++;
 		if (g)
 			snprintf(what, sizeof what, "%s %s=0x%llx %s=0x%llx",
@@ -356,7 +334,7 @@ static void one_case(const struct target *tg, uint8_t *obj, void *view,
 		else
 			snprintf(what, sizeof what, "%s %s=0x%llx", tg->name,
 				 f->name, (unsigned long long)v);
-		pc_check(what, &ctx, seed_len, tg->bits, tg->n_bits, rep);
+		pc_check(what, &ctx, seed_len, tg->p->regions, tg->p->n_regions, rep);
 	}
 	dt = now_ms() - t0;
 	t->cases++;
@@ -420,16 +398,24 @@ int main(void)
 	memset(&t, 0, sizeof t);
 
 	for (ti = 0; ti < sizeof targets / sizeof targets[0]; ti++) {
+		targets[ti].p = kof_parser_of(targets[ti].format);
+		if (!targets[ti].p) {
+			printf("no engine parser for %s\n", targets[ti].name);
+			return 1;
+		}
+	}
+
+	for (ti = 0; ti < sizeof targets / sizeof targets[0]; ti++) {
 		const struct target *tg = &targets[ti];
 		uint64_t seed_len;
 		double base;
 
-		if (tg->view_size > view_cap) {
+		if (tg->p->view_size > view_cap) {
 			free(view);
-			view = malloc(tg->view_size);
+			view = malloc(tg->p->view_size);
 			if (!view)
 				return 1;
-			view_cap = tg->view_size;
+			view_cap = tg->p->view_size;
 		}
 		seed_len = tg->seed(obj);
 		base = baseline_ms(tg, obj, view);
@@ -448,7 +434,7 @@ int main(void)
 			struct kof_obj_ctx ctx;
 
 			memset(&ctx, 0, sizeof ctx);
-			if (!tg->parse(kof_buf_make(obj, seed_len), view, &ctx)) {
+			if (!tg->p->parse(kof_buf_make(obj, seed_len), view, &ctx)) {
 				printf("  SEED %s does not parse - the cases "
 				       "below test nothing\n", tg->name);
 				rep.failed++;

@@ -40,6 +40,7 @@
  * note at the top of kofmod/heur.h. */
 #include "../core/kofmod/heur.h"
 #include "../core/kofmod/kofsym.h"
+#include "../kofparsers/kofformat.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -417,97 +418,6 @@ static void finding_str(const struct kof_scanner *sc,
  * writing it down here is cheaper than discovering it is implied by the order of
  * two if statements somewhere.
  */
-struct parser {
-	uint8_t  format;                       /* enum kof_format */
-	uint32_t view_size;
-	int (*sniff)(kof_buf);
-	int (*parse)(kof_buf, void *view, struct kof_obj_ctx *);
-};
-
-static int elf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_elf_parse(b, (struct kof_elf_info *)v, c);
-}
-
-static int pe_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_pe_parse(b, (struct kof_pe_info *)v, c);
-}
-
-static int gzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_gzip_parse(b, (struct kof_gzip_info *)v, c);
-}
-
-static int docole_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_docole_parse(b, (struct kof_docole_info *)v, c);
-}
-
-static int zip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_zip_parse(b, (struct kof_zip_info *)v, c);
-}
-
-static int tar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_tar_parse(b, (struct kof_tar_info *)v, c);
-}
-
-static int sevenzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_7z_parse(b, (struct kof_7z_info *)v, c);
-}
-
-static int rar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_rar_parse(b, (struct kof_rar_info *)v, c);
-}
-
-static int xz_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_xz_parse(b, (struct kof_xz_info *)v, c);
-}
-
-static int rtf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_rtf_parse(b, (struct kof_rtf_info *)v, c);
-}
-
-static int pdf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_pdf_parse(b, (struct kof_pdf_info *)v, c);
-}
-
-static const struct parser parsers[] = {
-	{ KOF_FMT_ELF,  (uint32_t)sizeof(struct kof_elf_info),
-	  kof_elf_sniff,  elf_parse_thunk  },
-	{ KOF_FMT_PE,   (uint32_t)sizeof(struct kof_pe_info),
-	  kof_pe_sniff,   pe_parse_thunk   },
-	{ KOF_FMT_GZIP, (uint32_t)sizeof(struct kof_gzip_info),
-	  kof_gzip_sniff, gzip_parse_thunk },
-	{ KOF_FMT_DOCOLE, (uint32_t)sizeof(struct kof_docole_info),
-	  kof_docole_sniff, docole_parse_thunk },
-	/*
-	 * One row, two formats. The parse decides between ZIP and DOCZIP from the
-	 * entry names and sets ctx->format itself, so the format named here is only
-	 * which VIEW to allocate - and both share one.
-	 */
-	{ KOF_FMT_ZIP, (uint32_t)sizeof(struct kof_zip_info),
-	  kof_zip_sniff, zip_parse_thunk },
-	{ KOF_FMT_TAR, (uint32_t)sizeof(struct kof_tar_info),
-	  kof_tar_sniff, tar_parse_thunk },
-	{ KOF_FMT_7Z, (uint32_t)sizeof(struct kof_7z_info),
-	  kof_7z_sniff, sevenzip_parse_thunk },
-	{ KOF_FMT_RAR, (uint32_t)sizeof(struct kof_rar_info),
-	  kof_rar_sniff, rar_parse_thunk },
-	{ KOF_FMT_XZ, (uint32_t)sizeof(struct kof_xz_info),
-	  kof_xz_sniff, xz_parse_thunk },
-	{ KOF_FMT_RTF, (uint32_t)sizeof(struct kof_rtf_info),
-	  kof_rtf_sniff, rtf_parse_thunk },
-	{ KOF_FMT_PDF, (uint32_t)sizeof(struct kof_pdf_info),
-	  kof_pdf_sniff, pdf_parse_thunk }
-};
 
 /*
  * Decide what the object is and fill the matching view.
@@ -522,10 +432,12 @@ static const struct parser parsers[] = {
  */
 static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx)
 {
-	uint32_t i;
+	const struct kof_parser *parsers;
+	uint32_t i, n;
 
-	for (i = 0; i < sizeof parsers / sizeof parsers[0]; i++) {
-		const struct parser *p = &parsers[i];
+	parsers = kof_parser_list(&n);
+	for (i = 0; i < n; i++) {
+		const struct kof_parser *p = &parsers[i];
 
 		if (!p->sniff(buf))
 			continue;

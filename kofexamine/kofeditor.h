@@ -449,7 +449,7 @@ struct object {
 	kof_buf   buf;
 	uint32_t  depth;            /* how many "//" its name carries */
 
-	const struct kof_inspect_fmt *fmt;
+	const struct kof_parser *fmt;
 	struct kof_obj_ctx            ctx;
 	void                         *info;
 
@@ -774,16 +774,16 @@ int decl_pattern(const struct decl *d, uint8_t *prog,
 			uint8_t *kind, uint8_t *flags);
 int rng_holds(uint32_t rmask, uint32_t region);
 int cnd_uses(const struct cond *c, uint32_t g);
-void rng_name_of(const struct kof_inspect_fmt *fmt, uint32_t mask,
+void rng_name_of(const struct kof_parser *fmt, uint32_t mask,
 			char *out, size_t cap);
-void rng_ident(const struct kof_inspect_fmt *fmt, uint32_t mask,
+void rng_ident(const struct kof_parser *fmt, uint32_t mask,
 		      char *out, size_t cap);
 const char *src_ident(const char *p, char *out, size_t cap);
 uint32_t decl_pat(const struct decl *d);
 void src_forget(void);
 int src_read(const char *path, struct src_ent *out);
 void src_scan(const char *dir, int depth);
-uint32_t src_mask_of(const struct kof_inspect_fmt *fmt, const char *e);
+uint32_t src_mask_of(const struct kof_parser *fmt, const char *e);
 int decl_from_hexs(struct decl *d);
 int src_quoted(const char *p, char *out, size_t cap);
 uint32_t src_str_idx(struct sname *tab, uint32_t n, const char *id);

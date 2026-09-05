@@ -23,6 +23,8 @@
 #include <pwd.h>
 #include <unistd.h>
 #include <time.h>
+#include <kofmod/elf.h>
+#include <kofmod/pe.h>
 
 #include "kofeditor.h"
 #include "../libkofeng/kofmatchers/hexprog.h"
@@ -69,14 +71,29 @@ static void meta_add(char tab[][128], uint32_t *n, uint32_t cap, const char *w);
 static void meta_add_who(char tab[][48], uint32_t *n, uint32_t cap,
 			 const char *w);
 
-const struct kof_arch_word arch_word[] = {
-	{ "ANY",     0 }, { "X86",     1 }, { "X86_64",  2 }, { "ARM",     3 },
-	{ "ARM64",   4 }, { "RISCV64", 5 }, { "MIPS",    6 }, { "PPC64",   7 },
-	{ "MIPS64",  8 }, { "PPC",     9 }, { "RISCV32", 10 }
-};
+/*
+ * The architectures to offer, generated from the engine's list.
+ *
+ * The word here is the identifier with KOF_ARCH_ cut off, because that is what
+ * the panel shows and what the emitted KOF_TARGET_ARCH() is built back up from.
+ * Generated rather than typed so the menu cannot offer an architecture the
+ * builder will reject, or miss one it would accept - which it did, three of
+ * them, while this was a hand written list.
+ */
+#define ARCH_X_WORD(name, val, short_word) { #name + sizeof "KOF_ARCH_" - 1, val },
+const struct kof_arch_word arch_word[] = { KOF_ARCH_LIST(ARCH_X_WORD) };
+#undef ARCH_X_WORD
 
-const char *const elf_sub[] = { "NONE", "REL", "EXEC", "DYN", "CORE" };
-const char *const pe_sub[]  = { "EXE", "DLL", "SYS" };
+/* Both generated from the format headers, for the reason arch_word is: the menu
+ * must offer exactly what the builder accepts. The prefix is cut off because
+ * the panel shows the bare kind and the emitted declaration puts it back. */
+#define ELF_SUB_X(name, val) #name + sizeof "KOF_ELF_" - 1,
+const char *const elf_sub[] = { KOF_ELF_TYPE_LIST(ELF_SUB_X) };
+#undef ELF_SUB_X
+
+#define PE_SUB_X(name, val) #name + sizeof "KOF_PE_" - 1,
+const char *const pe_sub[]  = { KOF_PE_IMAGE_LIST(PE_SUB_X) };
+#undef PE_SUB_X
 
 
 
@@ -341,7 +358,7 @@ int cnd_uses(const struct cond *c, uint32_t g)
  * needs, and a name kept beside it would be one more thing to update when a
  * marker is added or taken away.
  */
-void rng_name_of(const struct kof_inspect_fmt *fmt, uint32_t mask,
+void rng_name_of(const struct kof_parser *fmt, uint32_t mask,
 			char *out, size_t cap)
 {
 	uint32_t b, k;
@@ -401,7 +418,7 @@ void rng_name_of(const struct kof_inspect_fmt *fmt, uint32_t mask,
 		snprintf(out, cap, "WHOLE-FILE");
 }
 
-void rng_ident(const struct kof_inspect_fmt *fmt, uint32_t mask,
+void rng_ident(const struct kof_parser *fmt, uint32_t mask,
 		      char *out, size_t cap)
 {
 	/* Forty, like every other rng_name_of caller. At 24 the display name of
@@ -639,7 +656,7 @@ void src_scan(const char *dir, int depth)
 	closedir(d);
 }
 
-uint32_t src_mask_of(const struct kof_inspect_fmt *fmt, const char *e)
+uint32_t src_mask_of(const struct kof_parser *fmt, const char *e)
 {
 	uint32_t m = 0, k;
 
@@ -2558,7 +2575,7 @@ int draft_from_source(struct kof_editor *e, const char *path)
 	struct sname str[MAX_DECL];
 	struct { char id[48]; uint32_t mask; } rng[8];
 	uint32_t n_str = 0, n_rng = 0, i;
-	const struct kof_inspect_fmt *fmt = e->obj[e->cur].fmt;
+	const struct kof_parser *fmt = e->obj[e->cur].fmt;
 	/*
 	 * Which condition owns each brace depth, so a verdict lands on the one
 	 * whose body it is in.
@@ -3310,6 +3327,46 @@ void draft_from_touch(struct kof_editor *e, const struct kof_touch *t)
 	memset(&e->dr.grp[0], 0, sizeof e->dr.grp[0]);
 	e->dr.n_grp = 1;
 	e->dr.cur_grp = 0;
+	/*
+	 * THE PRECONDITIONS, restored the same way the range is.
+	 *
+	 * They are in the pack - the host tests them on every object - and the
+	 * panel writes them back out on Generate. Not reading them meant a rule
+	 * opened from the database and saved again lost every KOF_TARGET_ line
+	 * it declared: an x86-only rule became any-architecture, a rule that
+	 * skipped small files stopped skipping them. Nothing said so, because
+	 * the generated file simply had fewer lines than it used to.
+	 *
+	 * An architecture or subtype mask with more than one bit in it cannot
+	 * be shown by a panel that offers one choice, so it is left off rather
+	 * than shown wrong - and draft_missing refuses to generate over it, so
+	 * the rule is not quietly widened instead.
+	 */
+	if (t->size_min) {
+		e->dr.opt_on[OPT_SIZE_MIN] = 1;
+		e->dr.opt_val[OPT_SIZE_MIN] = t->size_min;
+	}
+	if (t->arch_mask && (t->arch_mask & (t->arch_mask - 1u)) == 0u) {
+		uint32_t k;
+
+		for (k = 0; k < ARCH_N; k++)
+			if (t->arch_mask == (1u << arch_word[k].val)) {
+				e->dr.opt_on[OPT_ARCH] = 1;
+				e->dr.opt_val[OPT_ARCH] = k;
+				break;
+			}
+	}
+	if (t->subtype_mask && (t->subtype_mask & (t->subtype_mask - 1u)) == 0u) {
+		uint32_t k;
+
+		for (k = 0; k < 32u; k++)
+			if (t->subtype_mask == (1u << k)) {
+				e->dr.opt_on[OPT_SUBTYPE] = 1;
+				e->dr.opt_val[OPT_SUBTYPE] = k;
+				break;
+			}
+	}
+
 	/* The range is the module's own, so the matcher shows what the rule
 	 * actually searches rather than WHOLE-FILE. */
 	e->dr.grp[0].mask = t->scan_mask;

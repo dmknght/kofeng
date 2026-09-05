@@ -845,16 +845,6 @@ int kof_elf_parse(kof_buf file, struct kof_elf_info *info,
 
 /* ---- names, for tools ------------------------------------------------------- */
 
-/*
- * The regions, once. The bit list and the names are both generated from it, so
- * they cannot disagree and adding a region is one line.
- */
-#define ELF_REGIONS(X)          \
-	X(KOF_SCAN_ELF_HEADERS)   \
-	X(KOF_SCAN_ELF_CODE)      \
-	X(KOF_SCAN_ELF_DATA)      \
-	X(KOF_SCAN_ELF_NOLOAD)    \
-	X(KOF_SCAN_ELF_UNCLAIMED)
 
 #define X_BIT(b)  (b),
 #define X_CASE(b) case (b): return #b;

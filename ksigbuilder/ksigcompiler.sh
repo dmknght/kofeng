@@ -418,45 +418,24 @@ if [ "$nsub" -gt 1 ]; then
 fi
 if [ "$nsub" -eq 1 ]; then
 	subnames=$(sed -n 's/.*KOF_TARGET_SUBTYPE(\([^)]*\)).*/\1/p' "$src")
-	saw_elf=0
-	saw_pe=0
-	for pair in NONE:0 REL:1 EXEC:2 DYN:3 CORE:4; do
-		nm=${pair%:*}
-		bit=${pair#*:}
-		case "$subnames" in
-		*KOF_ELF_$nm*)
-			subtype_mask=$((subtype_mask | (1 << bit)))
-			saw_elf=1
-			;;
-		esac
-	done
-	for pair in EXE:0 DLL:1 SYS:2; do
-		nm=${pair%:*}
-		bit=${pair#*:}
-		case "$subnames" in
-		*KOF_PE_$nm*)
-			subtype_mask=$((subtype_mask | (1 << bit)))
-			saw_pe=1
-			;;
-		esac
-	done
-	if [ "$subtype_mask" -eq 0 ]; then
-		echo "FAIL: KOF_TARGET_SUBTYPE($subnames) names no known subtype" >&2
+	# Asked, not restated - see KOF_TARGET_ARCH above for what a shell-side
+	# copy of a header's list cost last time. ksigbuilder answers with the
+	# mask and with WHICH format's vocabulary was used, because the two
+	# formats' subtype values collide on purpose; it also rejects a
+	# declaration that mixes them.
+	if ! sub=$("$ksigbuilder" --subtype-mask "$subnames"); then
+		echo "FAIL: KOF_TARGET_SUBTYPE($subnames)" >&2
 		exit 1
 	fi
-	if [ "$saw_elf" -eq 1 ] && [ "$saw_pe" -eq 1 ]; then
-		echo "FAIL: KOF_TARGET_SUBTYPE mixes ELF and PE subtypes" >&2
-		echo "      their values collide on purpose and mean different" >&2
-		echo "      things; a module applies to one format's kinds" >&2
-		exit 1
-	fi
+	subtype_mask=${sub% *}
+	subfmt=${sub#* }
 	# 2 is the ELF target bit, 4 the PE one - the same numbers the format loop
 	# above assigns.
-	if [ "$saw_elf" -eq 1 ] && [ $((target_mask & 2)) -eq 0 ]; then
+	if [ "$subfmt" = ELF ] && [ $((target_mask & 2)) -eq 0 ]; then
 		echo "FAIL: names KOF_ELF_* subtypes but does not target ELF" >&2
 		exit 1
 	fi
-	if [ "$saw_pe" -eq 1 ] && [ $((target_mask & 4)) -eq 0 ]; then
+	if [ "$subfmt" = PE ] && [ $((target_mask & 4)) -eq 0 ]; then
 		echo "FAIL: names KOF_PE_* subtypes but does not target PE" >&2
 		exit 1
 	fi
@@ -529,15 +508,17 @@ if [ "$narch" -gt 1 ]; then
 fi
 if [ "$narch" -eq 1 ]; then
 	archnames=$(sed -n 's/.*KOF_TARGET_ARCH(\([^)]*\)).*/\1/p' "$src")
-	i=0
-	for a in ANY X86 X86_64 ARM ARM64 RISCV64 MIPS PPC64; do
-		case "$archnames" in
-		*KOF_ARCH_$a*) arch_mask=$((arch_mask | (1 << i))) ;;
-		esac
-		i=$((i + 1))
-	done
-	if [ "$arch_mask" -eq 0 ]; then
-		echo "FAIL: KOF_TARGET_ARCH($archnames) names no known architecture" >&2
+	# Asked, not restated.
+	#
+	# This used to hold its own ordered list of the architectures and match
+	# them with a glob. KOF_ARCH_X86 is a PREFIX of KOF_ARCH_X86_64, so
+	# naming the 64 bit one set both bits and every x86-64-only rule also ran
+	# on x86 objects; ARM inside ARM64 was the same shape. The list had also
+	# stopped three architectures short of kofsig.h, so naming one of those
+	# failed the build. A shell cannot include the header, so it asks the
+	# program that can.
+	if ! arch_mask=$("$ksigbuilder" --arch-mask "$archnames"); then
+		echo "FAIL: KOF_TARGET_ARCH($archnames)" >&2
 		exit 1
 	fi
 	echo "   require arch=$archnames (mask $arch_mask)"

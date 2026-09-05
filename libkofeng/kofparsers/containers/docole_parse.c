@@ -1184,14 +1184,6 @@ done:
 
 /* ---- names, for tools --------------------------------------------------------- */
 
-#define DOCOLE_REGIONS(X)                       \
-	X(KOF_SCAN_DOCOLE_HEADERS)                \
-	X(KOF_SCAN_DOCOLE_DIRECTORY)              \
-	X(KOF_SCAN_DOCOLE_CONTENT_DATA)           \
-	X(KOF_SCAN_DOCOLE_CONTENT_MACROS)         \
-	X(KOF_SCAN_DOCOLE_CONTENT_METADATA)       \
-	X(KOF_SCAN_DOCOLE_RESOURCES)              \
-	X(KOF_SCAN_DOCOLE_UNCLAIMED)
 
 #define X_BIT(b)  (b),
 #define X_CASE(b) case (b): return #b;

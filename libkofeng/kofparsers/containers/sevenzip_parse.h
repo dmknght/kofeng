@@ -29,6 +29,16 @@ const char *kof_7z_region_name(uint32_t bit);
 const char *kof_7z_anomaly_name(unsigned index);
 const char *kof_7z_header_kind_name(uint32_t kind);
 
+/* THE REGION LIST, where everything that needs it can see it.
+ * It lived in the .c, so ksigbuilder - which has to turn the name a
+ * signature writes back into a bit - kept a hand copy in rgn_names[]
+ * with, in its own words, no build-time check that it had not fallen
+ * behind. Now there is one list and one place to add to. */
+#define SZ_REGIONS(X)          \
+	X(KOF_SCAN_7Z_HEADERS)   \
+	X(KOF_SCAN_7Z_PACKED)    \
+	X(KOF_SCAN_7Z_UNCLAIMED)
+
 extern const uint32_t kof_7z_region_bits[];
 #define KOF_7Z_REGION_COUNT 3u   /* asserted against the array in the .c */
 

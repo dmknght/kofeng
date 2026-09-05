@@ -57,6 +57,22 @@ const char *kof_elf_anomaly_name(unsigned index);
  * signature fail to compile. Here it is defined once, beside the name function, and
  * both are generated from the same list.
  */
+/* THE REGION LIST, where everything that needs it can see it.
+ * It lived in the .c, so ksigbuilder - which has to turn the name a
+ * signature writes back into a bit - kept a hand copy in rgn_names[]
+ * with, in its own words, no build-time check that it had not fallen
+ * behind. Now there is one list and one place to add to. */
+/*
+ * The regions, once. The bit list and the names are both generated from it, so
+ * they cannot disagree and adding a region is one line.
+ */
+#define ELF_REGIONS(X)          \
+	X(KOF_SCAN_ELF_HEADERS)   \
+	X(KOF_SCAN_ELF_CODE)      \
+	X(KOF_SCAN_ELF_DATA)      \
+	X(KOF_SCAN_ELF_NOLOAD)    \
+	X(KOF_SCAN_ELF_UNCLAIMED)
+
 extern const uint32_t kof_elf_region_bits[];
 #define KOF_ELF_REGION_COUNT 5u   /* asserted against the array in the .c */
 

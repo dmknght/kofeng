@@ -43,6 +43,16 @@ int kof_tar_sniff(kof_buf file);
 const char *kof_tar_region_name(uint32_t bit);
 const char *kof_tar_anomaly_name(unsigned index);
 
+/* THE REGION LIST, where everything that needs it can see it.
+ * It lived in the .c, so ksigbuilder - which has to turn the name a
+ * signature writes back into a bit - kept a hand copy in rgn_names[]
+ * with, in its own words, no build-time check that it had not fallen
+ * behind. Now there is one list and one place to add to. */
+#define TAR_REGIONS(X)          \
+	X(KOF_SCAN_TAR_HEADERS)   \
+	X(KOF_SCAN_TAR_DATA)      \
+	X(KOF_SCAN_TAR_UNCLAIMED)
+
 extern const uint32_t kof_tar_region_bits[];
 #define KOF_TAR_REGION_COUNT 3u   /* asserted against the array in the .c */
 

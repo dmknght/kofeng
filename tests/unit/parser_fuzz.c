@@ -24,6 +24,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include "../../libkofeng/kofparsers/kofformat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1078,23 +1079,8 @@ static uint64_t gen_pdf(uint8_t *b)
  * meant editing all three and getting the numbering right in each. One row is one
  * format, and the counters are an array beside it.
  */
-typedef int (*pf_parse)(kof_buf, void *, struct kof_obj_ctx *);
 
-#define PF_WRAP(name, type, fn)                                            \
-	static int name(kof_buf b, void *v, struct kof_obj_ctx *c)         \
-	{ return fn(b, (type *)v, c); }
 
-PF_WRAP(p_elf,    struct kof_elf_info,    kof_elf_parse)
-PF_WRAP(p_pe,     struct kof_pe_info,     kof_pe_parse)
-PF_WRAP(p_gzip,   struct kof_gzip_info,   kof_gzip_parse)
-PF_WRAP(p_docole, struct kof_docole_info, kof_docole_parse)
-PF_WRAP(p_zip,    struct kof_zip_info,    kof_zip_parse)
-PF_WRAP(p_tar,    struct kof_tar_info,    kof_tar_parse)
-PF_WRAP(p_7z,     struct kof_7z_info,     kof_7z_parse)
-PF_WRAP(p_rar,    struct kof_rar_info,    kof_rar_parse)
-PF_WRAP(p_xz,     struct kof_xz_info,     kof_xz_parse)
-PF_WRAP(p_rtf,    struct kof_rtf_info,    kof_rtf_parse)
-PF_WRAP(p_pdf,    struct kof_pdf_info,    kof_pdf_parse)
 
 /*
  * The anomaly word of each view.
@@ -1104,45 +1090,34 @@ PF_WRAP(p_pdf,    struct kof_pdf_info,    kof_pdf_parse)
  * read a segment count as an anomaly mask and reported it as coverage. It did,
  * until this replaced it.
  */
-#define PF_ANOM(name, type)                                                \
-	static uint64_t name(const void *v)                                \
-	{ return ((const type *)v)->anomalies; }
 
-PF_ANOM(a_elf,    struct kof_elf_info)
-PF_ANOM(a_pe,     struct kof_pe_info)
-PF_ANOM(a_gzip,   struct kof_gzip_info)
-PF_ANOM(a_docole, struct kof_docole_info)
-PF_ANOM(a_zip,    struct kof_zip_info)
-PF_ANOM(a_tar,    struct kof_tar_info)
-PF_ANOM(a_7z,     struct kof_7z_info)
-PF_ANOM(a_rar,    struct kof_rar_info)
-PF_ANOM(a_xz,     struct kof_xz_info)
-PF_ANOM(a_rtf,    struct kof_rtf_info)
-PF_ANOM(a_pdf,    struct kof_pdf_info)
 
-static const struct fmt {
-	const char *name;
+/*
+ * What the engine does not publish, and only that.
+ *
+ * The generator is this test's own, and the anomaly COUNT is a per-format
+ * constant with no runtime accessor. Everything else about a format - how to
+ * sniff it, how to parse it, how big its view is, what its regions and anomaly
+ * bits are called - is asked of the engine, so a format that changes there
+ * changes here with it.
+ */
+static struct fmt {
+	uint8_t  format;
 	uint64_t (*gen)(uint8_t *);
-	int (*sniff)(kof_buf);
-	pf_parse parse;
-	size_t view_size;
-	const uint32_t *bits;
-	uint32_t n_bits;
-	uint64_t (*anom)(const void *);
-	const char *(*anom_name)(unsigned);
 	uint32_t n_anom;
+	const struct kof_parser *p;
 } fmts[] = {
-	{ "PE",     gen_pe,     kof_pe_sniff,     p_pe,     sizeof(struct kof_pe_info),     kof_pe_region_bits,     KOF_PE_REGION_COUNT, a_pe, kof_pe_anomaly_name, KOF_PE_ANOM_COUNT },
-	{ "ELF",    gen_elf,    kof_elf_sniff,    p_elf,    sizeof(struct kof_elf_info),    kof_elf_region_bits,    KOF_ELF_REGION_COUNT, a_elf, kof_elf_anomaly_name, KOF_ELF_ANOM_COUNT },
-	{ "gzip",   gen_gzip,   kof_gzip_sniff,   p_gzip,   sizeof(struct kof_gzip_info),   kof_gzip_region_bits,   KOF_GZIP_REGION_COUNT, a_gzip, kof_gzip_anomaly_name, KOF_GZIP_ANOM_COUNT },
-	{ "docole", gen_docole, kof_docole_sniff, p_docole, sizeof(struct kof_docole_info), kof_docole_region_bits, KOF_DOCOLE_REGION_COUNT, a_docole, kof_docole_anomaly_name, KOF_DOCOLE_ANOM_COUNT },
-	{ "zip",    gen_zip,    kof_zip_sniff,    p_zip,    sizeof(struct kof_zip_info),    kof_zip_region_bits,    KOF_ZIP_REGION_COUNT, a_zip, kof_zip_anomaly_name, KOF_ZIP_ANOM_COUNT },
-	{ "tar",    gen_tar,    kof_tar_sniff,    p_tar,    sizeof(struct kof_tar_info),    kof_tar_region_bits,    KOF_TAR_REGION_COUNT, a_tar, kof_tar_anomaly_name, KOF_TAR_ANOM_COUNT },
-	{ "7z",     gen_7z,     kof_7z_sniff,     p_7z,     sizeof(struct kof_7z_info),     kof_7z_region_bits,     KOF_7Z_REGION_COUNT, a_7z, kof_7z_anomaly_name, KOF_7Z_ANOM_COUNT },
-	{ "rar",    gen_rar,    kof_rar_sniff,    p_rar,    sizeof(struct kof_rar_info),    kof_rar_region_bits,    KOF_RAR_REGION_COUNT, a_rar, kof_rar_anomaly_name, KOF_RAR_ANOM_COUNT },
-	{ "xz",     gen_xz,     kof_xz_sniff,     p_xz,     sizeof(struct kof_xz_info),     kof_xz_region_bits,     KOF_XZ_REGION_COUNT, a_xz, kof_xz_anomaly_name, KOF_XZ_ANOM_COUNT },
-	{ "rtf",    gen_rtf,    kof_rtf_sniff,    p_rtf,    sizeof(struct kof_rtf_info),    kof_rtf_region_bits,    KOF_RTF_REGION_COUNT, a_rtf, kof_rtf_anomaly_name, KOF_RTF_ANOM_COUNT },
-	{ "pdf",    gen_pdf,    kof_pdf_sniff,    p_pdf,    sizeof(struct kof_pdf_info),    kof_pdf_region_bits,    KOF_PDF_REGION_COUNT, a_pdf, kof_pdf_anomaly_name, KOF_PDF_ANOM_COUNT }
+	{ KOF_FMT_PE, gen_pe, KOF_PE_ANOM_COUNT, NULL },
+	{ KOF_FMT_ELF, gen_elf, KOF_ELF_ANOM_COUNT, NULL },
+	{ KOF_FMT_GZIP, gen_gzip, KOF_GZIP_ANOM_COUNT, NULL },
+	{ KOF_FMT_DOCOLE, gen_docole, KOF_DOCOLE_ANOM_COUNT, NULL },
+	{ KOF_FMT_ZIP, gen_zip, KOF_ZIP_ANOM_COUNT, NULL },
+	{ KOF_FMT_TAR, gen_tar, KOF_TAR_ANOM_COUNT, NULL },
+	{ KOF_FMT_7Z, gen_7z, KOF_7Z_ANOM_COUNT, NULL },
+	{ KOF_FMT_RAR, gen_rar, KOF_RAR_ANOM_COUNT, NULL },
+	{ KOF_FMT_XZ, gen_xz, KOF_XZ_ANOM_COUNT, NULL },
+	{ KOF_FMT_RTF, gen_rtf, KOF_RTF_ANOM_COUNT, NULL },
+	{ KOF_FMT_PDF, gen_pdf, KOF_PDF_ANOM_COUNT, NULL }
 };
 #define N_FMT (sizeof fmts / sizeof fmts[0])
 
@@ -1165,9 +1140,16 @@ int main(int argc, char **argv)
 
 	/* One view buffer, sized for the largest, rather than eleven live at
 	 * once: only one parse is in flight and the views run to megabytes. */
+	for (k = 0; k < N_FMT; k++) {
+		fmts[k].p = kof_parser_of(fmts[k].format);
+		if (!fmts[k].p) {
+			printf("no engine parser for format %u\n", fmts[k].format);
+			return 1;
+		}
+	}
 	for (k = 0; k < N_FMT; k++)
-		if (fmts[k].view_size > big)
-			big = fmts[k].view_size;
+		if (fmts[k].p->view_size > big)
+			big = fmts[k].p->view_size;
 	view = malloc(big);
 	if (!view)
 		return 1;
@@ -1186,12 +1168,12 @@ int main(int argc, char **argv)
 
 		snprintf(what, sizeof what, "seed=%llu round=%llu %s",
 			 (unsigned long long)seed, (unsigned long long)r,
-			 f->name);
+			 kof_format_name(f->format));
 
-		if (f->sniff(buf) && f->parse(buf, view, &ctx)) {
+		if (f->p->sniff(buf) && f->p->parse(buf, view, &ctx)) {
 			parsed[f - fmts]++;
-			anom[f - fmts] |= f->anom(view);
-			pc_check(what, &ctx, n, f->bits, f->n_bits, &rep);
+			anom[f - fmts] |= f->p->anomalies(view);
+			pc_check(what, &ctx, n, f->p->regions, f->p->n_regions, &rep);
 		}
 
 		/*
@@ -1232,9 +1214,9 @@ int main(int argc, char **argv)
 				obj[at[c]] = (uint8_t)rnd();
 			}
 			memset(&ctx, 0, sizeof ctx);
-			if (!f->sniff(kof_buf_make(obj, n)))
-				f->parse(kof_buf_make(obj, n), view, &ctx);
-			anom[f - fmts] |= f->anom(view);
+			if (!f->p->sniff(kof_buf_make(obj, n)))
+				f->p->parse(kof_buf_make(obj, n), view, &ctx);
+			anom[f - fmts] |= f->p->anomalies(view);
 			while (c--)
 				obj[at[c]] = save[c];
 		}
@@ -1244,7 +1226,7 @@ int main(int argc, char **argv)
 	printf("hostile headers: %llu round(s), parsed",
 	       (unsigned long long)rounds);
 	for (k = 0; k < N_FMT; k++)
-		printf(" %s %llu", fmts[k].name,
+		printf(" %s %llu", kof_format_name(fmts[k].format),
 		       (unsigned long long)parsed[k]);
 	printf(", partition %llu/%llu", 
 	       (unsigned long long)(rep.checked - rep.failed),
@@ -1275,10 +1257,10 @@ int main(int argc, char **argv)
 			if (anom[k] & (1ull << b))
 				continue;
 			if (first) {
-				printf("  %s never raised:", fmts[k].name);
+				printf("  %s never raised:", kof_format_name(fmts[k].format));
 				first = 0;
 			}
-			printf(" %s", fmts[k].anom_name(b));
+			printf(" %s", fmts[k].p->anomaly_name(b));
 		}
 		if (!first)
 			printf("\n");

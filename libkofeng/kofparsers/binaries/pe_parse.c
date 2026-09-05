@@ -715,15 +715,6 @@ int kof_pe_parse(kof_buf file, struct kof_pe_info *info, struct kof_obj_ctx *ctx
 
 /* ---- names, for tools ------------------------------------------------------- */
 
-/* The regions, once: bit list and names generated from the same line each. */
-#define PE_REGIONS(X)           \
-	X(KOF_SCAN_PE_HEADERS)    \
-	X(KOF_SCAN_PE_CODE)       \
-	X(KOF_SCAN_PE_DATA)       \
-	X(KOF_SCAN_PE_RESOURCE)   \
-	X(KOF_SCAN_PE_SIGNATURE)  \
-	X(KOF_SCAN_PE_OVERLAY)    \
-	X(KOF_SCAN_PE_UNCLAIMED)
 
 #define X_BIT(b)  (b),
 #define X_CASE(b) case (b): return #b;

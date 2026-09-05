@@ -24,6 +24,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include "../../libkofeng/kofparsers/kofformat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -145,49 +146,14 @@ static int check(const char *path, kof_buf buf, struct kof_obj_ctx *ctx,
 /*
  * The collectors, in the order the engine tries them.
  *
- * The same order and not a convenient one: which format a polyglot is read as is
- * decided by that order, so a test that used its own would be checking a partition
- * the scanner never computes.
+ * Asked for rather than restated: which format a polyglot is read as is decided
+ * by that order, so a test that kept its own list would be checking a partition
+ * the scanner never computes - and would go on passing after the engine's list
+ * changed under it.
  */
-typedef int (*rp_parse)(kof_buf, void *, struct kof_obj_ctx *);
-
-#define RP_WRAP(name, type, fn)                                            \
-	static int name(kof_buf b, void *v, struct kof_obj_ctx *c)         \
-	{ return fn(b, (type *)v, c); }
-
-RP_WRAP(q_elf,    struct kof_elf_info,    kof_elf_parse)
-RP_WRAP(q_pe,     struct kof_pe_info,     kof_pe_parse)
-RP_WRAP(q_gzip,   struct kof_gzip_info,   kof_gzip_parse)
-RP_WRAP(q_docole, struct kof_docole_info, kof_docole_parse)
-RP_WRAP(q_zip,    struct kof_zip_info,    kof_zip_parse)
-RP_WRAP(q_tar,    struct kof_tar_info,    kof_tar_parse)
-RP_WRAP(q_7z,     struct kof_7z_info,     kof_7z_parse)
-RP_WRAP(q_rar,    struct kof_rar_info,    kof_rar_parse)
-RP_WRAP(q_xz,     struct kof_xz_info,     kof_xz_parse)
-RP_WRAP(q_rtf,    struct kof_rtf_info,    kof_rtf_parse)
-RP_WRAP(q_pdf,    struct kof_pdf_info,    kof_pdf_parse)
-
-static const struct fmt {
-	const char *name;
-	int (*sniff)(kof_buf);
-	rp_parse parse;
-	size_t view_size;
-	const uint32_t *bits;
-	uint32_t n_bits;
-} fmts[] = {
-	{ "ELF",    kof_elf_sniff,    q_elf,    sizeof(struct kof_elf_info),    kof_elf_region_bits,    KOF_ELF_REGION_COUNT },
-	{ "PE",     kof_pe_sniff,     q_pe,     sizeof(struct kof_pe_info),     kof_pe_region_bits,     KOF_PE_REGION_COUNT },
-	{ "gzip",   kof_gzip_sniff,   q_gzip,   sizeof(struct kof_gzip_info),   kof_gzip_region_bits,   KOF_GZIP_REGION_COUNT },
-	{ "docole", kof_docole_sniff, q_docole, sizeof(struct kof_docole_info), kof_docole_region_bits, KOF_DOCOLE_REGION_COUNT },
-	{ "zip",    kof_zip_sniff,    q_zip,    sizeof(struct kof_zip_info),    kof_zip_region_bits,    KOF_ZIP_REGION_COUNT },
-	{ "tar",    kof_tar_sniff,    q_tar,    sizeof(struct kof_tar_info),    kof_tar_region_bits,    KOF_TAR_REGION_COUNT },
-	{ "7z",     kof_7z_sniff,     q_7z,     sizeof(struct kof_7z_info),     kof_7z_region_bits,     KOF_7Z_REGION_COUNT },
-	{ "rar",    kof_rar_sniff,    q_rar,    sizeof(struct kof_rar_info),    kof_rar_region_bits,    KOF_RAR_REGION_COUNT },
-	{ "xz",     kof_xz_sniff,     q_xz,     sizeof(struct kof_xz_info),     kof_xz_region_bits,     KOF_XZ_REGION_COUNT },
-	{ "rtf",    kof_rtf_sniff,    q_rtf,    sizeof(struct kof_rtf_info),    kof_rtf_region_bits,    KOF_RTF_REGION_COUNT },
-	{ "pdf",    kof_pdf_sniff,    q_pdf,    sizeof(struct kof_pdf_info),    kof_pdf_region_bits,    KOF_PDF_REGION_COUNT }
-};
-#define N_FMT (sizeof fmts / sizeof fmts[0])
+static const struct kof_parser *fmts;
+static uint32_t n_fmt;
+#define N_FMT n_fmt
 
 static void one_file(const char *path, struct tally *t)
 {
@@ -223,8 +189,9 @@ static void one_file(const char *path, struct tally *t)
 		if (view) {
 			memset(&ctx, 0, sizeof ctx);
 			if (fmts[k].parse(buf, view, &ctx)) {
-				int r = check(path, buf, &ctx, fmts[k].bits,
-					      fmts[k].n_bits, fmts[k].name);
+				int r = check(path, buf, &ctx, fmts[k].regions,
+					      fmts[k].n_regions,
+					      kof_format_name(fmts[k].format));
 
 				if (r < 0)
 					t[k].capped++;
@@ -277,12 +244,13 @@ int main(int argc, char **argv)
 		"/usr/share/man/man1", "/usr/share/i18n/charmaps",
 		"/usr/share/xml/docbook/xml/xsl-stylesheets"
 	};
-	struct tally t[N_FMT];
+	struct tally t[KOF_PARSER_COUNT];
 	uint64_t seen = 0, failed = 0;
 	uint32_t k;
 	int i;
 
 	memset(t, 0, sizeof t);
+	fmts = kof_parser_list(&n_fmt);
 	if (argc > 1)
 		for (i = 1; i < argc; i++)
 			walk(argv[i], t);
@@ -292,7 +260,7 @@ int main(int argc, char **argv)
 
 	printf("partition:");
 	for (k = 0; k < N_FMT; k++) {
-		printf("  %s %llu/%llu", fmts[k].name,
+		printf("  %s %llu/%llu", kof_format_name(fmts[k].format),
 		       (unsigned long long)(t[k].objects - t[k].failures),
 		       (unsigned long long)t[k].objects);
 		if (t[k].capped)

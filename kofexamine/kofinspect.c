@@ -35,6 +35,7 @@
 #include "../libkofeng/core/kofplatform.h"
 #include "../libkofeng/kofmatchers/kofmatch.h"
 #include "../libkofeng/kofscanners/scan.h"
+#include "../libkofeng/kofparsers/kofformat.h"
 
 /*
  * The parsers, by their internal headers.
@@ -46,127 +47,8 @@
  */
 #include "../libkofeng/kofparsers/binaries/elf_parse.h"
 #include "../libkofeng/kofparsers/binaries/pe_parse.h"
-#include "../libkofeng/kofparsers/containers/gzip_parse.h"
-#include "../libkofeng/kofparsers/containers/docole_parse.h"
-#include "../libkofeng/kofparsers/containers/zip_parse.h"
-#include "../libkofeng/kofparsers/containers/tar_parse.h"
-#include "../libkofeng/kofparsers/containers/sevenzip_parse.h"
-#include "../libkofeng/kofparsers/containers/rar_parse.h"
-#include "../libkofeng/kofparsers/containers/xz_parse.h"
-#include "../libkofeng/kofparsers/containers/rtf_parse.h"
-#include "../libkofeng/kofparsers/containers/pdf_parse.h"
 
 /* ---- the formats, and how to get a view of one ---------------------------- */
-
-static int elf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_elf_parse(b, (struct kof_elf_info *)v, c);
-}
-
-static int gzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_gzip_parse(b, (struct kof_gzip_info *)v, c);
-}
-
-static int docole_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_docole_parse(b, (struct kof_docole_info *)v, c);
-}
-
-static int zip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_zip_parse(b, (struct kof_zip_info *)v, c);
-}
-
-static int tar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_tar_parse(b, (struct kof_tar_info *)v, c);
-}
-
-static int rtf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_rtf_parse(b, (struct kof_rtf_info *)v, c);
-}
-
-static int xz_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_xz_parse(b, (struct kof_xz_info *)v, c);
-}
-
-static int rar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_rar_parse(b, (struct kof_rar_info *)v, c);
-}
-
-static int sevenzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_7z_parse(b, (struct kof_7z_info *)v, c);
-}
-
-static int pe_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_pe_parse(b, (struct kof_pe_info *)v, c);
-}
-
-static int pdf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
-{
-	return kof_pdf_parse(b, (struct kof_pdf_info *)v, c);
-}
-
-static uint64_t anom_elf(const void *v)
-{
-	return ((const struct kof_elf_info *)v)->anomalies;
-}
-
-static uint64_t anom_pe(const void *v)
-{
-	return ((const struct kof_pe_info *)v)->anomalies;
-}
-
-static uint64_t anom_gzip(const void *v)
-{
-	return ((const struct kof_gzip_info *)v)->anomalies;
-}
-
-static uint64_t anom_docole(const void *v)
-{
-	return ((const struct kof_docole_info *)v)->anomalies;
-}
-
-static uint64_t anom_zip(const void *v)
-{
-	return ((const struct kof_zip_info *)v)->anomalies;
-}
-
-static uint64_t anom_tar(const void *v)
-{
-	return ((const struct kof_tar_info *)v)->anomalies;
-}
-
-static uint64_t anom_7z(const void *v)
-{
-	return ((const struct kof_7z_info *)v)->anomalies;
-}
-
-static uint64_t anom_rar(const void *v)
-{
-	return ((const struct kof_rar_info *)v)->anomalies;
-}
-
-static uint64_t anom_xz(const void *v)
-{
-	return ((const struct kof_xz_info *)v)->anomalies;
-}
-
-static uint64_t anom_pdf(const void *v)
-{
-	return ((const struct kof_pdf_info *)v)->anomalies;
-}
-
-static uint64_t anom_rtf(const void *v)
-{
-	return ((const struct kof_rtf_info *)v)->anomalies;
-}
 
 /*
  * The names of an ELF's program and section header types.
@@ -396,43 +278,6 @@ const char *kof_inspect_subtype_name(uint8_t fmt, uint8_t sub)
 	return 0;
 }
 
-static const struct kof_inspect_fmt formats[] = {
-	{ (uint32_t)sizeof(struct kof_elf_info), kof_elf_sniff, elf_parse_thunk,
-	  kof_elf_region_bits, KOF_ELF_REGION_COUNT,
-	  kof_elf_region_name, kof_elf_anomaly_name, anom_elf },
-	{ (uint32_t)sizeof(struct kof_pe_info), kof_pe_sniff, pe_parse_thunk,
-	  kof_pe_region_bits, KOF_PE_REGION_COUNT,
-	  kof_pe_region_name, kof_pe_anomaly_name, anom_pe },
-	{ (uint32_t)sizeof(struct kof_gzip_info), kof_gzip_sniff, gzip_parse_thunk,
-	  kof_gzip_region_bits, KOF_GZIP_REGION_COUNT,
-	  kof_gzip_region_name, kof_gzip_anomaly_name, anom_gzip },
-	{ (uint32_t)sizeof(struct kof_docole_info), kof_docole_sniff,
-	  docole_parse_thunk, kof_docole_region_bits, KOF_DOCOLE_REGION_COUNT,
-	  kof_docole_region_name, kof_docole_anomaly_name, anom_docole },
-	{ (uint32_t)sizeof(struct kof_zip_info), kof_zip_sniff, zip_parse_thunk,
-	  kof_zip_region_bits, KOF_ZIP_REGION_COUNT,
-	  kof_zip_region_name, kof_zip_anomaly_name, anom_zip },
-	{ (uint32_t)sizeof(struct kof_tar_info), kof_tar_sniff, tar_parse_thunk,
-	  kof_tar_region_bits, KOF_TAR_REGION_COUNT,
-	  kof_tar_region_name, kof_tar_anomaly_name, anom_tar },
-	{ (uint32_t)sizeof(struct kof_7z_info), kof_7z_sniff, sevenzip_parse_thunk,
-	  kof_7z_region_bits, KOF_7Z_REGION_COUNT,
-	  kof_7z_region_name, kof_7z_anomaly_name, anom_7z },
-	{ (uint32_t)sizeof(struct kof_rar_info), kof_rar_sniff, rar_parse_thunk,
-	  kof_rar_region_bits, KOF_RAR_REGION_COUNT,
-	  kof_rar_region_name, kof_rar_anomaly_name, anom_rar },
-	{ (uint32_t)sizeof(struct kof_xz_info), kof_xz_sniff, xz_parse_thunk,
-	  kof_xz_region_bits, KOF_XZ_REGION_COUNT,
-	  kof_xz_region_name, kof_xz_anomaly_name, anom_xz },
-	{ (uint32_t)sizeof(struct kof_rtf_info), kof_rtf_sniff, rtf_parse_thunk,
-	  kof_rtf_region_bits, KOF_RTF_REGION_COUNT,
-	  kof_rtf_region_name, kof_rtf_anomaly_name, anom_rtf },
-	{ (uint32_t)sizeof(struct kof_pdf_info), kof_pdf_sniff, pdf_parse_thunk,
-	  kof_pdf_region_bits, KOF_PDF_REGION_COUNT,
-	  kof_pdf_region_name, kof_pdf_anomaly_name, anom_pdf }
-};
-
-
 /*
  * Identify the object and parse it.
  *
@@ -445,24 +290,26 @@ static const struct kof_inspect_fmt formats[] = {
  * info struct - there is nothing to tear down - so free() is the whole of the
  * release and no kof_inspect_release exists to wrap it.
  */
-const struct kof_inspect_fmt *kof_inspect_identify(kof_buf buf,
+const struct kof_parser *kof_inspect_identify(kof_buf buf,
 						   struct kof_obj_ctx *ctx,
 						   void **view_out)
 {
-	uint32_t i;
+	const struct kof_parser *parsers;
+	uint32_t i, n;
 
 	*view_out = NULL;
 	memset(ctx, 0, sizeof *ctx);
 
-	for (i = 0; i < sizeof formats / sizeof formats[0]; i++) {
+	parsers = kof_parser_list(&n);
+	for (i = 0; i < n; i++) {
 		void *view;
 
-		if (!formats[i].sniff(buf))
+		if (!parsers[i].sniff(buf))
 			continue;
-		view = malloc(formats[i].view_size);
-		if (view && formats[i].parse(buf, view, ctx)) {
+		view = malloc(parsers[i].view_size);
+		if (view && parsers[i].parse(buf, view, ctx)) {
 			*view_out = view;
-			return &formats[i];
+			return &parsers[i];
 		}
 		free(view);
 		return NULL;
@@ -587,7 +434,7 @@ static const char *fired_as(const struct kof_touch *t,
 
 int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 		     const struct kof_obj_ctx *ctx,
-		     const struct kof_inspect_fmt *fmt,
+		     const struct kof_parser *fmt,
 		     const char *const *finding, uint32_t n_finding,
 		     struct kof_touch **out, uint32_t *n_out)
 {
@@ -686,7 +533,10 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 		t->mod     = mod;
 		t->maltype = mod->maltype;
 		t->family  = kof_db_family(eng, mod);
-		t->scan_mask = mod->scan_mask;
+		t->scan_mask    = mod->scan_mask;
+		t->size_min     = mod->size_min;
+		t->arch_mask    = mod->arch_mask;
+		t->subtype_mask = mod->subtype_mask;
 		if (!t->family)
 			t->family = "";
 		t->n_str   = mod->n_str;
@@ -999,7 +849,7 @@ struct layout_row {
 	const char *name;
 };
 
-static int dump_layout(const char *dir, const struct kof_inspect_fmt *f,
+static int dump_layout(const char *dir, const struct kof_parser *f,
 		       const struct kof_obj_ctx *ctx, char *err, uint32_t err_cap)
 {
 	static struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
@@ -1079,7 +929,7 @@ static int dump_region(const char *dir, uint32_t rank, const char *region,
 }
 
 int kof_dump_object(const char *dir, kof_buf buf,
-		    const struct kof_inspect_fmt *f,
+		    const struct kof_parser *f,
 		    const struct kof_obj_ctx *ctx,
 		    struct kof_dump_stat *st, char *err, uint32_t err_cap)
 {
@@ -1187,7 +1037,7 @@ int kof_dump_child(const char *dir, const char *tag,
 
 int kof_region_map_build(struct kof_region_map *map,
 			 const struct kof_obj_ctx *ctx,
-			 const struct kof_inspect_fmt *fmt)
+			 const struct kof_parser *fmt)
 {
 	uint32_t k;
 

@@ -181,20 +181,57 @@ enum kof_format {
  * Width is derivable from the value, which is why there is no separate bits
  * field: arch implies width, width does not imply arch.
  */
+/*
+ * THE LIST, ONCE.
+ *
+ * Written as a macro rather than an enum body because four things need it and
+ * only one of them is the enum: a finding prints the short word, a signature
+ * source writes KOF_ARCH_X86_64 and the builder has to turn that back into a
+ * value, an editor offers the set to pick from, and the build script used to
+ * keep an eleventh-hand copy of its own.
+ *
+ * That copy is why this is a macro now. It listed the architectures in order
+ * and matched them as substrings, so KOF_ARCH_X86 - a PREFIX of KOF_ARCH_X86_64
+ * - set both bits, and every x86-64-only rule also ran on x86 objects. It had
+ * also stopped three architectures short of this list. Neither could be caught
+ * by a compiler while the list existed twice.
+ *
+ * X(NAME, value, short word). The short words are kept to the width of the
+ * thing they describe rather than spelled out; x86 and x64 keep their
+ * conventional spellings because those are what everyone already reads, and the
+ * rest follow the same shape so the set can be scanned at a glance.
+ */
+#define KOF_ARCH_LIST(X)                                                     \
+	X(KOF_ARCH_ANY,     0,  "any")   /* script, text, bytecode */        \
+	X(KOF_ARCH_X86,     1,  "x86")                                       \
+	X(KOF_ARCH_X86_64,  2,  "x64")                                       \
+	X(KOF_ARCH_ARM,     3,  "a32")                                       \
+	X(KOF_ARCH_ARM64,   4,  "a64")                                       \
+	X(KOF_ARCH_RISCV64, 5,  "r64")                                       \
+	X(KOF_ARCH_MIPS,    6,  "m32")                                       \
+	X(KOF_ARCH_PPC64,   7,  "p64")                                       \
+	X(KOF_ARCH_MIPS64,  8,  "m64")                                       \
+	X(KOF_ARCH_PPC,     9,  "p32")                                       \
+	X(KOF_ARCH_RISCV32, 10, "r32")
+
 enum kof_arch {
-	KOF_ARCH_ANY     = 0,  /* does not apply: script, text, bytecode */
-	KOF_ARCH_X86     = 1,
-	KOF_ARCH_X86_64  = 2,
-	KOF_ARCH_ARM     = 3,  /* 32 bit */
-	KOF_ARCH_ARM64   = 4,
-	KOF_ARCH_RISCV64 = 5,
-	KOF_ARCH_MIPS    = 6,  /* 32 bit */
-	KOF_ARCH_PPC64   = 7,
-	KOF_ARCH_MIPS64  = 8,
-	KOF_ARCH_PPC     = 9,  /* 32 bit */
-	KOF_ARCH_RISCV32 = 10,
+#define KOF_ARCH_X_ENUM(name, val, word) name = val,
+	KOF_ARCH_LIST(KOF_ARCH_X_ENUM)
+#undef KOF_ARCH_X_ENUM
 	KOF_ARCH_OTHER   = 255 /* recognised format, architecture not in this list */
 };
+
+/* How many the list names, which is not the largest value: OTHER is outside it
+ * on purpose. A mask has one bit per member, so this is also its width. */
+#define KOF_ARCH_COUNT 11u
+
+/* strcmp, spelled out: this header is included by rule sources that get no
+ * libc, and one identifier comparison does not justify the dependency. */
+static inline int kof_streq_(const char *a, const char *b)
+{
+	while (*a && *a == *b) { a++; b++; }
+	return *a == *b;
+}
 
 /*
  * Names for the two common enums, next to the enums themselves.
@@ -254,19 +291,32 @@ static inline const char *kof_format_name(uint8_t fmt)
 static inline const char *kof_arch_name(uint8_t arch)
 {
 	switch (arch) {
-	case KOF_ARCH_X86:     return "x86";
-	case KOF_ARCH_X86_64:  return "x64";
-	case KOF_ARCH_ARM:     return "a32";
-	case KOF_ARCH_ARM64:   return "a64";
-	case KOF_ARCH_RISCV32: return "r32";
-	case KOF_ARCH_RISCV64: return "r64";
-	case KOF_ARCH_MIPS:    return "m32";
-	case KOF_ARCH_MIPS64:  return "m64";
-	case KOF_ARCH_PPC:     return "p32";
-	case KOF_ARCH_PPC64:   return "p64";
-	case KOF_ARCH_ANY:     return "any";
-	default:               return "other";
+#define KOF_ARCH_X_NAME(name, val, word) case name: return word;
+	KOF_ARCH_LIST(KOF_ARCH_X_NAME)
+#undef KOF_ARCH_X_NAME
+	default: return "other";
 	}
+}
+
+/*
+ * The way back: the identifier a signature source writes, to its value.
+ *
+ * Whole names only - `s` must be the identifier and nothing more. Substring
+ * matching is what broke this before, KOF_ARCH_X86 being a prefix of
+ * KOF_ARCH_X86_64, so the comparison here is strcmp and the caller splits its
+ * own tokens.
+ *
+ * Returns 1 and sets *out on a hit, 0 on an unknown name - never a sentinel
+ * value, because every value in the enum is a legal architecture and there is
+ * none left over to mean "no".
+ */
+static inline int kof_arch_from_name(const char *s, uint8_t *out)
+{
+#define KOF_ARCH_X_FROM(name, val, word)                                     \
+	if (kof_streq_(s, #name)) { *out = (uint8_t)(val); return 1; }
+	KOF_ARCH_LIST(KOF_ARCH_X_FROM)
+#undef KOF_ARCH_X_FROM
+	return 0;
 }
 
 /*

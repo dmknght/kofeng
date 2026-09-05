@@ -909,10 +909,6 @@ done:
 
 /* ---- names, for tools --------------------------------------------------------- */
 
-#define SZ_REGIONS(X)          \
-	X(KOF_SCAN_7Z_HEADERS)   \
-	X(KOF_SCAN_7Z_PACKED)    \
-	X(KOF_SCAN_7Z_UNCLAIMED)
 
 #define X_BIT(b)  (b),
 #define X_CASE(b) case (b): return #b;

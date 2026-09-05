@@ -544,12 +544,6 @@ done:
 
 /* ---- names, for tools --------------------------------------------------------- */
 
-#define ZIP_REGIONS(X)            \
-	X(KOF_SCAN_ZIP_HEADERS)     \
-	X(KOF_SCAN_ZIP_NAMES)       \
-	X(KOF_SCAN_ZIP_STORED)      \
-	X(KOF_SCAN_ZIP_PACKED)      \
-	X(KOF_SCAN_ZIP_UNCLAIMED)
 
 #define X_BIT(b)  (b),
 #define X_CASE(b) case (b): return #b;

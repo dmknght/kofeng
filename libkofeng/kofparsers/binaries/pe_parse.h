@@ -65,6 +65,21 @@ const char *kof_pe_anomaly_name(unsigned index);
 
 /* Every region bit the format defines, in bit order. See the note on
  * kof_elf_region_bits: one list, so a region added here cannot go untested. */
+/* THE REGION LIST, where everything that needs it can see it.
+ * It lived in the .c, so ksigbuilder - which has to turn the name a
+ * signature writes back into a bit - kept a hand copy in rgn_names[]
+ * with, in its own words, no build-time check that it had not fallen
+ * behind. Now there is one list and one place to add to. */
+/* The regions, once: bit list and names generated from the same line each. */
+#define PE_REGIONS(X)           \
+	X(KOF_SCAN_PE_HEADERS)    \
+	X(KOF_SCAN_PE_CODE)       \
+	X(KOF_SCAN_PE_DATA)       \
+	X(KOF_SCAN_PE_RESOURCE)   \
+	X(KOF_SCAN_PE_SIGNATURE)  \
+	X(KOF_SCAN_PE_OVERLAY)    \
+	X(KOF_SCAN_PE_UNCLAIMED)
+
 extern const uint32_t kof_pe_region_bits[];
 #define KOF_PE_REGION_COUNT 7u   /* asserted against the array in the .c */
 
