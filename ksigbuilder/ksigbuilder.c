@@ -291,33 +291,6 @@ static const struct macro macros[] = {
 	{ NULL, DECL_RANGE }
 };
 
-/*
- * enum kof_maltype (kofsig.h) as words a source may write. Only the parse
- * direction lives here now: the display word a finding shows comes from
- * kof_maltype_name (kofsig.h) at report time, not from this table at build
- * time - ksigbuilder stores the enum value on the module record and nothing
- * else, see struct kof_pack_mod. A type added to the enum and not here still
- * fails loudly, in read_maltype, rather than compiling and never being
- * reachable from a signature.
- */
-struct maltype_name {
-	const char *word;
-	int         val;
-};
-
-static const struct maltype_name maltype_names[] = {
-	{ "KOF_MALTYPE_VIRUS",    KOF_MALTYPE_VIRUS    },
-	{ "KOF_MALTYPE_TROJAN",   KOF_MALTYPE_TROJAN   },
-	{ "KOF_MALTYPE_ROOTKIT",  KOF_MALTYPE_ROOTKIT  },
-	{ "KOF_MALTYPE_BOTNET",   KOF_MALTYPE_BOTNET   },
-	{ "KOF_MALTYPE_RANSOM",   KOF_MALTYPE_RANSOM   },
-	{ "KOF_MALTYPE_MINER",    KOF_MALTYPE_MINER    },
-	{ "KOF_MALTYPE_ADWARE",   KOF_MALTYPE_ADWARE   },
-	{ "KOF_MALTYPE_EXPLOIT",  KOF_MALTYPE_EXPLOIT  },
-	{ "KOF_MALTYPE_DROPPER",  KOF_MALTYPE_DROPPER  },
-	{ "KOF_MALTYPE_HACKTOOL", KOF_MALTYPE_HACKTOOL },
-	{ NULL, 0 }
-};
 
 /*
  * KOF_TARGET_NAME's two fields, file scoped like target_mask and its siblings: one
@@ -756,7 +729,6 @@ static int read_maltype(const char *p, int line, int *out)
 	const char *a = nth_arg(p, 1, line);
 	char tok[32];
 	size_t n = 0;
-	int i;
 
 	if (!a)
 		return 0;
@@ -771,19 +743,14 @@ static int read_maltype(const char *p, int line, int *out)
 		tok[n++] = *a++;
 	}
 	tok[n] = 0;
-	for (i = 0; maltype_names[i].word; i++)
-		if (strcmp(tok, maltype_names[i].word) == 0) {
-			*out = maltype_names[i].val;
-			return 1;
-		}
-	{
-		int k;
-		fprintf(stderr, "%s:%d: error: \"%s\" is not a known malware type. "
-				"Known:\n", src_name, line, tok);
-		for (k = 0; maltype_names[k].word; k++)
-			fprintf(stderr, "    %s\n", maltype_names[k].word);
-		errors++;
-	}
+	if (kof_maltype_from_name(tok, out))
+		return 1;
+	fprintf(stderr, "%s:%d: error: \"%s\" is not a known malware type. "
+			"Known:\n", src_name, line, tok);
+#define X_SHOW(name, word) fprintf(stderr, "    %s\n", #name);
+	KOF_MALTYPE_LIST(X_SHOW)
+#undef X_SHOW
+	errors++;
 	return 0;
 }
 

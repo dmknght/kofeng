@@ -137,10 +137,12 @@ const char *const fmt_word[] = {
  * chosen in is information - it is the order somebody read the object - and a
  * signature's declarations do not care about order at all.
  */
-const char *const maltype_word[] = {
-	"Virus", "Trojan", "Rootkit", "Botnet", "Ransom",
-	"Miner", "Adware", "Exploit", "Dropper", "Hacktool"
-};
+/* The display words, from the engine's list. The menu offers exactly the types
+ * a signature may declare, and the emitted KOF_MALTYPE_<WORD> is built by
+ * upper-casing what is shown. */
+#define MALTYPE_X_WORD(name, word) word,
+const char *const maltype_word[] = { KOF_MALTYPE_LIST(MALTYPE_X_WORD) };
+#undef MALTYPE_X_WORD
 /*
  * Write text into a C comment, keeping only what a comment can hold.
  *
@@ -1687,11 +1689,23 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 	 * early, legible half of that check, not the whole of it.
 	 */
 	if (!name_chars_ok(e->dr.family))
-		return "Family: letters, digits, . - _ only";
+		return "Family: letters, digits, - and _ only";
+	/*
+	 * A CUSTOM VARIANT IS A PROMISE OF A NAME, so an empty one is refused
+	 * rather than quietly ignored.
+	 *
+	 * The check used to skip an empty box, and the emit below skips it too -
+	 * so picking Custom and typing nothing produced exactly what Auto
+	 * produces, with nothing on screen saying the choice had been dropped.
+	 * kof_name_ok refuses an empty name for the family already; the same
+	 * rule, applied here, says so.
+	 */
 	for (i = 0; i < e->dr.n_cnd; i++)
-		if (e->dr.cnd[i].var_kind == 2 && e->dr.cnd[i].variant[0] &&
+		if (e->dr.cnd[i].var_kind == 2 &&
 		    !name_chars_ok(e->dr.cnd[i].variant))
-			return "Variant: letters, digits, . - _ only";
+			return e->dr.cnd[i].variant[0]
+			       ? "Variant: letters, digits, - and _ only"
+			       : "Custom variant needs a name";
 	if (!e->dr.n_decl)
 		return "Declare a string";
 	if (!e->dr.n_grp)
@@ -2415,7 +2429,7 @@ void emit_verdict(FILE *f, const struct cond *c, int depth)
 	}
 	fprintf(f, "KOF_SCAN_%s(", c->level == LV_SUSPECT ? "SUSPECT"
 							  : "INFECT");
-	if (c->var_kind == 2 && c->variant[0])
+	if (c->var_kind == 2)
 		fprintf(f, "\"%s\"", c->variant);
 	else if (c->var_kind == 1)
 		fprintf(f, "KOF_MALVAR_GENERIC");

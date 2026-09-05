@@ -50,6 +50,74 @@
  */
 #define KOF_LEVEL_HEUR    2
 
+/*
+ * WHICH VERDICT IS STRONGER.
+ *
+ * The numbers above do not say. SUSPECT is 0, INFECT is 1 and HEUR is 2, so
+ * comparing the constants gets the order exactly wrong, and every host that
+ * needed to pick the worst of several findings worked the order out for itself
+ * - the scanner in a switch returning 3/2/1, the viewer in a chain of ifs
+ * beside a comment restating the same rule. Two spellings of one fact, neither
+ * of them here, where the constants are.
+ *
+ * Higher is stronger. The values are ranks and nothing else: do not store them,
+ * do not send them anywhere, and do not assume the gaps mean anything.
+ */
+static inline int kof_level_rank(uint32_t level)
+{
+	if (level == KOF_LEVEL_INFECT)
+		return 3;
+	if (level == KOF_LEVEL_SUSPECT)
+		return 2;
+	return level == KOF_LEVEL_HEUR ? 1 : 0;
+}
+
+/*
+ * WHERE ONE OBJECT'S NAME ENDS AND ITS CHILD'S BEGINS.
+ *
+ * The engine joins a container to what it holds with this, so a result name is
+ * "archive.zip//inner.elf" and a payload two layers down carries two of them.
+ * It is written in scan.c and it was read - as the bare literal "//" - in the
+ * scanner, in the examiner and in the viewer, each with its own loop.
+ *
+ * The word for what the tools do with it: a file's verdict is the worst of
+ * everything under it, so they need the top level name, and a tree needs the
+ * depth. Both are here so the separator is spelled once.
+ */
+#define KOF_OBJ_SEP     "//"
+#define KOF_OBJ_SEP_LEN 2u
+
+/* Length of the top-level file's name: everything before the first separator,
+ * or the whole name when the object IS the file. */
+static inline size_t kof_obj_toplevel_len(const char *name)
+{
+	const char *p = name;
+
+	while (*p) {
+		if (p[0] == '/' && p[1] == '/')
+			return (size_t)(p - name);
+		p++;
+	}
+	return (size_t)(p - name);
+}
+
+/* How many containers deep: 0 for the file itself. */
+static inline uint32_t kof_obj_depth(const char *name)
+{
+	uint32_t n = 0;
+	const char *p = name;
+
+	while (*p) {
+		if (p[0] == '/' && p[1] == '/') {
+			n++;
+			p += 2;
+		} else {
+			p++;
+		}
+	}
+	return n;
+}
+
 
 
 /*
@@ -59,14 +127,57 @@
  */
 #define KOF_MAX_FINDINGS 16
 
+/*
+ * WHERE ONE PART OF A NAME SITS INSIDE IT.
+ *
+ * Offsets rather than pointers, because a finding is copied by value all over
+ * this tree and a pointer into a struct does not survive that. `n` of 0 means
+ * the part is absent; the text is name[at] for n bytes and is NOT terminated
+ * there, so print it with "%.*s".
+ */
+struct kof_name_span {
+	uint16_t at, n;
+};
+
 struct kof_finding {
 	uint32_t level;                  /* KOF_LEVEL_* */
 
-	/* <target>.<family.variant>, composed by the engine - for example
-	 * "ELF-x64.Mirai.Gen". The target is not authored, so a module cannot claim
-	 * a format it was not run against. */
+	/*
+	 * <target>/<maltype>:<family>#<variant>, composed by the engine - for
+	 * example "ELF-x64/Botnet:Mirai#Gen", and for a heuristic
+	 * "ELF-x64/Heur:Meterp#g7q2x?Shellcode". The target is not authored, so
+	 * a module cannot claim a format it was not run against.
+	 */
 	char     name[224];
+
+	/*
+	 * THE SAME NAME, ALREADY TAKEN APART.
+	 *
+	 * Because the alternative was every reader taking it apart again. The
+	 * scanner walked the string for the '?' and then for the '#' to group
+	 * heuristics by shape; the examiner cut at the '/' to compare the rest;
+	 * each knew the punctuation the engine had just finished writing. A
+	 * separator that changed - and one has, '-' to '#' - broke them
+	 * silently, one at a time.
+	 *
+	 * The engine knows all five parts before it joins them, so it says so.
+	 * `shape` is the word after the '?' and only a heuristic has one: it is
+	 * what the rule actually recognised, where `family` is only what it
+	 * guesses the object is.
+	 */
+	struct kof_name_span target, maltype, family, variant, shape;
 };
+
+/* Non-zero when this finding is a heuristic's - the maltype word is "Heur",
+ * which is the engine's and never a module's family. */
+static inline int kof_finding_is_heur(const struct kof_finding *f)
+{
+	return f->maltype.n == 4 &&
+	       f->name[f->maltype.at + 0] == 'H' &&
+	       f->name[f->maltype.at + 1] == 'e' &&
+	       f->name[f->maltype.at + 2] == 'u' &&
+	       f->name[f->maltype.at + 3] == 'r';
+}
 
 struct kof_result {
 	struct kof_finding v[KOF_MAX_FINDINGS];
@@ -211,6 +322,29 @@ const char *kof_broken_name(uint32_t reason);
 void kof_name_compose(char *out, size_t cap, const char *target,
 		      const char *maltype, const char *family,
 		      const char *variant);
+
+/*
+ * The same composition, onto a finding, recording where each part landed.
+ *
+ * This is what the engine itself uses; kof_name_compose above stays for a
+ * caller that only wants the string - kofinspect builds one to compare against
+ * a result it did not produce.
+ *
+ * `shape` is the heuristic's, appended after a '?'. NULL or empty for a
+ * detector's finding, which has no such thing to admit.
+ */
+void kof_finding_name(struct kof_finding *f, const char *target,
+		      const char *maltype, const char *family,
+		      const char *variant, const char *shape);
+
+/*
+ * The target word a finding is scoped to: "ELF-x64", or "ELF" when the object
+ * has no architecture to speak of.
+ *
+ * Composed in three places inside the scanner before this, with the same
+ * two-line rule about KOF_ARCH_ANY written out each time.
+ */
+void kof_name_target(char *out, size_t cap, uint8_t format, uint8_t arch);
 
 
 /*

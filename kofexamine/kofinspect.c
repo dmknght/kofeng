@@ -335,25 +335,23 @@ const char *kof_touch_kind_name(enum kof_touch_kind k)
 }
 
 /*
- * The preconditions, in the order the scan path applies them.
+ * The word for why a module was not eligible.
  *
- * Mirrored from kof_scan rather than reasoned out again: a module is ruled out
- * here exactly when it would have been ruled out there, or the "did not run"
- * answer is a guess about the engine rather than a report of it.
+ * The TEST is the engine's - kof_module_precond - and this only names its
+ * answer. It used to be the test as well, copied out of the scan path with a
+ * comment saying so, which meant this pane could disagree with the scan about
+ * whether a module ran at all.
  */
 static const char *ruled_out_by(const struct kof_module *m,
 				const struct kof_obj_ctx *ctx, uint64_t size)
 {
-	if (!(m->target_mask & (1u << ctx->format)))
-		return "targets another format";
-	if (size < m->size_min)
-		return "object is below its minimum size";
-	if (m->arch_mask &&
-	    (ctx->arch >= 32 || !(m->arch_mask & (1u << ctx->arch))))
-		return "targets another architecture";
-	if (m->subtype_mask &&
-	    (ctx->subtype >= 32 || !(m->subtype_mask & (1u << ctx->subtype))))
-		return "targets another kind of this format";
+	switch (kof_module_precond(m, ctx, size)) {
+	case KOF_PRECOND_TARGET:  return "targets another format";
+	case KOF_PRECOND_SIZE:    return "object is below its minimum size";
+	case KOF_PRECOND_ARCH:    return "targets another architecture";
+	case KOF_PRECOND_SUBTYPE: return "targets another kind of this format";
+	case KOF_PRECOND_OK:      break;
+	}
 	return NULL;
 }
 
@@ -398,36 +396,41 @@ static int cmp_touch(const void *a, const void *b)
 /*
  * Did a scan report this module, and under which of its names.
  *
- * Matched on the composed name because struct kof_finding carries a name and no
- * module id. The target prefix is the engine's and not the module's to claim,
- * so the comparison starts after it.
+ * Matched part by part, because a finding now carries its parts. There is no
+ * spelling left to agree on: no separator, no prefix to skip, nothing composed
+ * on this side at all - which is the point.
  *
- * THE SPELLING IS THE ENGINE'S, and is now asked for rather than repeated. This
- * built the name with a dash after the engine had moved to '#', so no finding
- * ever matched a marker row again: every detected sample reported "Hit 0 Skip 1"
- * in the viewer and no verdict at all in kofexamine, while the scanner called
- * the same file infected. A separator is not a display choice on this path - it
- * is half of a string comparison, and the other half is the engine's.
+ * IT USED TO COMPOSE THE NAME AND COMPARE THE STRINGS, and it built that name
+ * with a dash after the engine had moved to '#'. No finding matched a marker
+ * row again: every detected sample reported "Hit 0 Skip 1" in the viewer and no
+ * verdict at all in kofexamine, while the scanner called the same file
+ * infected. A separator is not a display choice on this path - it was half of a
+ * string comparison whose other half the engine wrote.
  */
+static int span_is(const struct kof_finding *f,
+		   const struct kof_name_span *sp, const char *word)
+{
+	if (!word)
+		return sp->n == 0;
+	return strlen(word) == sp->n &&
+	       memcmp(f->name + sp->at, word, sp->n) == 0;
+}
+
 static const char *fired_as(const struct kof_touch *t,
-			    const char *const *finding, uint32_t n_finding)
+			    const struct kof_finding *finding,
+			    uint32_t n_finding)
 {
 	uint32_t j, k;
 
 	for (j = 0; j < t->n_names; j++) {
-		char want[224];
-
 		if (!t->name[j])
 			continue;
-		kof_name_compose(want, sizeof want, NULL,
-				 kof_maltype_name(t->maltype), t->family,
-				 t->name[j]);
-		for (k = 0; k < n_finding; k++) {
-			const char *p = strchr(finding[k], '/');
-
-			if (strcmp(p ? p + 1 : finding[k], want) == 0)
+		for (k = 0; k < n_finding; k++)
+			if (span_is(&finding[k], &finding[k].maltype,
+				    kof_maltype_name(t->maltype)) &&
+			    span_is(&finding[k], &finding[k].family, t->family) &&
+			    span_is(&finding[k], &finding[k].variant, t->name[j]))
 				return t->name[j];
-		}
 	}
 	return NULL;
 }
@@ -435,7 +438,7 @@ static const char *fired_as(const struct kof_touch *t,
 int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 		     const struct kof_obj_ctx *ctx,
 		     const struct kof_parser *fmt,
-		     const char *const *finding, uint32_t n_finding,
+		     const struct kof_finding *finding, uint32_t n_finding,
 		     struct kof_touch **out, uint32_t *n_out)
 {
 	struct kof_match_ctx m;

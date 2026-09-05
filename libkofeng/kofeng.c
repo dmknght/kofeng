@@ -46,15 +46,21 @@ uint32_t kof_engine_heur_rules(const kof_engine *e)
  * Here and not in the caller because the vocabulary is the engine's: a host that
  * spelled these itself would drift from what the engine actually reports the day a
  * reason is added.
+ *
+ * NOUN PHRASES, SENTENCE CASE. They were clauses - "the content is encrypted" -
+ * from when they only ever appeared after a colon. The scanner now prints the
+ * most specific thing it knows in the first column, so a reason starts a line,
+ * and a clause reads as a fragment there. A noun phrase reads correctly in both
+ * places.
  */
 const char *kof_broken_name(uint32_t reason)
 {
 	switch (reason) {
-	case KOF_BROKEN_LIMIT:       return "a limit was reached";
-	case KOF_BROKEN_UNSUPPORTED: return "not supported by this build";
-	case KOF_BROKEN_DAMAGED:     return "the object is damaged";
-	case KOF_BROKEN_ENCRYPTED:   return "the content is encrypted";
-	default:                     return "unknown";
+	case KOF_BROKEN_LIMIT:       return "Limit reached";
+	case KOF_BROKEN_UNSUPPORTED: return "Unsupported by this build";
+	case KOF_BROKEN_DAMAGED:     return "Damaged object";
+	case KOF_BROKEN_ENCRYPTED:   return "Encrypted content";
+	default:                     return "Unknown";
 	}
 }
 

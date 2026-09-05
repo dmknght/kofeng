@@ -24,6 +24,7 @@
 
 #include <stdint.h>
 #include "../libkofeng/core/kofcore.h"
+#include "../libkofeng/kofeng.h"
 #include "../libkofeng/kofdb/kofdb.h"
 #include "../libkofeng/kofparsers/kofformat.h"
 
@@ -507,7 +508,7 @@ int kof_locate_str(struct kof_match_ctx *m, struct kof_match_ctx *msym,
 int  kof_touch_object(struct kof_engine *eng, kof_buf buf,
 		      const struct kof_obj_ctx *ctx,
 		      const struct kof_parser *fmt,
-		      const char *const *finding, uint32_t n_finding,
+		      const struct kof_finding *finding, uint32_t n_finding,
 		      struct kof_touch **out, uint32_t *n_out);
 
 void kof_touch_free(struct kof_touch *v, uint32_t n);

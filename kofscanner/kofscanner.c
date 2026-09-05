@@ -82,6 +82,17 @@ struct fent {
 	 */
 	int      examined;
 	char     name[224];      /* the worst finding's composed name */
+	/*
+	 * WHICH KIND of heuristic it was: "Shellcode" for a rule that recognised
+	 * a shape, "Truncated" and the like for the scored model. The summary
+	 * breaks its count down by this, because "broken structure" is true of
+	 * the second and wrong about the first.
+	 *
+	 * Taken from the finding the engine handed over, which carries its own
+	 * parts. This file used to walk the composed name for the '?' and then
+	 * the '#' to find the same word again.
+	 */
+	char     kind[48];
 };
 
 struct fmap {
@@ -128,14 +139,28 @@ static const char *col(const struct run *r, const char *c)
 	return r->color ? c : "";
 }
 
-static const char *level_str(uint32_t level)
-{
-	if (level == KOF_LEVEL_INFECT)
-		return "INFECTED";
-	return level == KOF_LEVEL_HEUR ? "HEURISTIC" : "SUSPECT";
-}
 
 /* The colour a level speaks in. */
+/*
+ * ONE COLUMN, AND WHAT GOES IN IT.
+ *
+ * The line was "<LEVEL>  <path>: <name>", which spent its widest, first and
+ * most-read column on the least specific thing it knew. A reader scanning a
+ * page of results wants the finding, and the level is already in the colour it
+ * is printed in - so the name takes the column and the level is what colours
+ * it. "INFECTED ... : ELF-x64/Botnet:Mirai#el7jd" said the same thing twice.
+ *
+ * Everything printed per object follows that rule: the most specific thing
+ * known goes first, coloured by how strongly it is meant. Where there is
+ * nothing more specific - a file that came back clean - the status word stays,
+ * because it IS the whole of what is known.
+ *
+ * The width fits the common detection name (31 of the 55 characters the longest
+ * in this corpus runs to) so paths line up for most rows; a longer one pushes
+ * its path right rather than being cut.
+ */
+#define W_TAG 31
+
 static const char *level_col(uint32_t level)
 {
 	if (level == KOF_LEVEL_INFECT)
@@ -143,60 +168,7 @@ static const char *level_col(uint32_t level)
 	return level == KOF_LEVEL_HEUR ? C_MAG : C_YEL;
 }
 
-/* How loudly a level speaks, which is not the order the constants were given.
- * -1 for "nothing reported yet", so an object with no findings ranks below all. */
-static int rank_of(int level)
-{
-	switch (level) {
-	case KOF_LEVEL_INFECT:  return 3;
-	case KOF_LEVEL_SUSPECT: return 2;
-	case KOF_LEVEL_HEUR:    return 1;
-	default:                return 0;
-	}
-}
 
-/*
- * The word a heuristic finding carries between "Heur:" and the "#", which is what
- * KIND of heuristic it was: "Shellcode" for a rule that recognised a shape,
- * "Truncated" and the like for the scored model that weighs a damaged structure.
- * The summary breaks its count down by this, because "broken structure" is true of
- * the second and wrong about the first.
- */
-static const char *heur_kind(const char *name, char *buf, size_t cap)
-{
-	const char *q = strrchr(name, '?');
-	size_t i = 0;
-
-	if (q) {
-		/*
-		 * A rule names itself Heur:<family>#<variant>?<shape> - the
-		 * family is its guess and the SHAPE after the mark is what it
-		 * actually recognised, which is the "kind" this breakdown groups
-		 * by. Grouping by the family instead would put every predicted
-		 * family on its own line and bury the one fact they share.
-		 */
-		const char *p = q + 1;
-
-		while (p[i] && i + 1 < cap) {
-			buf[i] = p[i];
-			i++;
-		}
-	} else {
-		/* The scored model has no guess and no "?": its word sits between
-		 * "Heur:" and the "#", and it is the kind - Truncated and such. */
-		const char *p = strstr(name, "/Heur:");
-
-		if (!p)
-			return NULL;
-		p += 6;
-		while (p[i] && p[i] != '#' && i + 1 < cap) {
-			buf[i] = p[i];
-			i++;
-		}
-	}
-	buf[i] = 0;
-	return i ? buf : NULL;
-}
 
 /* ---- the per-file verdict map --------------------------------------------- */
 
@@ -268,6 +240,7 @@ static struct fent *fmap_get(struct fmap *m, const char *file, size_t flen)
 		e->broken = 0;
 		e->examined = 0;
 		e->name[0] = 0;
+		e->kind[0] = 0;
 		m->idx[slot] = (uint32_t)(m->n + 1u);
 		m->n++;
 		return e;
@@ -284,13 +257,6 @@ static void fmap_free(struct fmap *m)
 	free(m->idx);
 }
 
-/* The top-level file a name belongs to: everything up to the first "//". */
-static size_t toplevel_len(const char *name)
-{
-	const char *p = strstr(name, "//");
-
-	return p ? (size_t)(p - name) : strlen(name);
-}
 
 /*
  * Called once per object the engine scanned, findings or not.
@@ -379,7 +345,8 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	uint32_t i;
 	int worst = -1;
 	const char *worst_name = NULL;
-	size_t flen = toplevel_len(name);
+	const struct kof_finding *worst_f = NULL;
+	size_t flen = kof_obj_toplevel_len(name);
 
 	(void)bytes;
 	(void)len;
@@ -409,16 +376,17 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	for (i = 0; i < res->n; i++) {
 		uint32_t lv = res->v[i].level;
 
-		printf("%s%-10s%s %s: %s\n", col(r, level_col(lv)),
-		       level_str(lv), col(r, C_RST), name, res->v[i].name);
+		printf("%s%-*s%s %s\n", col(r, level_col(lv)),
+		       W_TAG, res->v[i].name, col(r, C_RST), name);
 		/*
 		 * Ranked, not compared as numbers: KOF_LEVEL_HEUR is 2 and INFECT
 		 * is 1, so ">" on the values alone would let a heuristic outrank a
 		 * named detection. The order a level speaks in is its own fact.
 		 */
-		if (rank_of((int)lv) > rank_of(worst)) {
+		if (kof_level_rank((uint32_t)(int)lv) > kof_level_rank((uint32_t)worst)) {
 			worst = (int)lv;
 			worst_name = res->v[i].name;
+			worst_f = &res->v[i];
 		}
 	}
 
@@ -436,8 +404,9 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		if (res->broken < KOF_BROKEN_COUNT)
 			r->by_reason[res->broken]++;
 		if (res->n == 0 || r->verbose)
-			printf("%s%-10s%s %s: %s\n", col(r, C_CYN), "BROKEN",
-			       col(r, C_RST), name, kof_broken_name(res->broken));
+			printf("%s%-*s%s %s\n", col(r, C_CYN), W_TAG,
+			       kof_broken_name(res->broken), col(r, C_RST),
+			       name);
 	}
 
 	/*
@@ -456,10 +425,26 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		struct fent *e = fmap_get(&r->files, name, flen);
 
 		if (e) {
-			if (worst >= 0 && rank_of(worst) > rank_of(e->level)) {
+			if (worst >= 0 && kof_level_rank((uint32_t)worst) > kof_level_rank((uint32_t)e->level)) {
+				const struct kof_name_span *k;
+
 				e->level = worst;
 				snprintf(e->name, sizeof e->name, "%s",
 					 worst_name ? worst_name : "");
+				/*
+				 * The shape when the rule offered one, the
+				 * family when it did not - the same choice as
+				 * before, made on the engine's spans rather
+				 * than on the punctuation between them.
+				 */
+				e->kind[0] = 0;
+				if (worst_f && kof_finding_is_heur(worst_f)) {
+					k = worst_f->shape.n ? &worst_f->shape
+							     : &worst_f->family;
+					snprintf(e->kind, sizeof e->kind,
+						 "%.*s", (int)k->n,
+						 worst_f->name + k->at);
+				}
 			}
 			if (res->broken && !e->broken)
 				e->broken = res->broken;
@@ -469,8 +454,12 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	}
 
 	if (res->dropped) {
-		printf("%s%-10s%s %s: %u further finding(s) not reported\n",
-		       col(r, C_DIM), "NOTE", col(r, C_RST), name, res->dropped);
+		char tag[48];
+
+		snprintf(tag, sizeof tag, "+%u finding(s) not reported",
+			 res->dropped);
+		printf("%s%-*s%s %s\n", col(r, C_DIM), W_TAG, tag,
+		       col(r, C_RST), name);
 		r->dropped += res->dropped;
 	}
 	return 0;
@@ -905,8 +894,8 @@ int main(int argc, char **argv)
 			const struct fent *e = &r.files.arr[fi];
 
 			if (e->level < 0 && !e->broken && e->examined)
-				printf("%s%-10s%s %s\n", col(&r, C_GRN), "OK",
-				       col(&r, C_RST), e->file);
+				printf("%s%-*s%s %s\n", col(&r, C_GRN), W_TAG,
+				       "OK", col(&r, C_RST), e->file);
 		}
 		/*
 		 * The unexamined ones, and NOT under -v only.
@@ -941,8 +930,8 @@ int main(int argc, char **argv)
 			const struct fent *e = &r.files.arr[fi];
 
 			if (e->level < 0 && !e->broken && !e->examined)
-				printf("%s%-10s%s %s: no module targets this "
-				       "format\n", col(&r, C_DIM), "SKIPPED",
+				printf("%s%-*s%s %s\n", col(&r, C_DIM), W_TAG,
+				       "No module targets this format",
 				       col(&r, C_RST), e->file);
 		}
 	}
@@ -981,8 +970,7 @@ int main(int argc, char **argv)
 			} else if (e->level == KOF_LEVEL_SUSPECT) {
 				sus_f++;
 			} else if (e->level == KOF_LEVEL_HEUR) {
-				char kb[48];
-				const char *kd = heur_kind(e->name, kb, sizeof kb);
+				const char *kd = e->kind[0] ? e->kind : NULL;
 
 				heur_f++;
 				if (kd) {

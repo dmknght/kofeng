@@ -264,36 +264,14 @@ static int prefilter(const struct kof_module *m, const struct kof_obj_ctx *ctx,
 {
 	st->considered++;
 
-	if (!(m->target_mask & (1u << ctx->format))) {
-		st->by_target++;
-		return 0;
-	}
-	if (ctx->obj_size < m->size_min) {
-		st->by_size++;
-		return 0;
-	}
-	if (m->arch_mask) {
-		/* An architecture outside the bit width cannot be named by a mask, so
-		 * a module that constrains architecture does not cover it. */
-		if (ctx->arch >= 32 || !(m->arch_mask & (1u << ctx->arch))) {
-			st->by_arch++;
-			return 0;
-		}
-	}
-	/*
-	 * What kind of that format, in the format's own vocabulary.
-	 *
-	 * Safe to test with no idea which format this is, because target_mask was
-	 * tested first: a module constraining subtype named one format's values, and
-	 * this line is only reached for an object of a format that module declared.
-	 * That is what lets KOF_ELF_REL and KOF_PE_DLL share the number 1.
-	 */
-	if (m->subtype_mask) {
-		if (ctx->subtype >= 32 ||
-		    !(m->subtype_mask & (1u << ctx->subtype))) {
-			st->by_subtype++;
-			return 0;
-		}
+	/* The declared preconditions, from kof_module_precond - the one place
+	 * that applies them. What is left here is only the counting. */
+	switch (kof_module_precond(m, ctx, ctx->obj_size)) {
+	case KOF_PRECOND_TARGET:  st->by_target++;  return 0;
+	case KOF_PRECOND_SIZE:    st->by_size++;    return 0;
+	case KOF_PRECOND_ARCH:    st->by_arch++;    return 0;
+	case KOF_PRECOND_SUBTYPE: st->by_subtype++; return 0;
+	case KOF_PRECOND_OK:      break;
 	}
 	/* A module that names regions cannot match if none exist here: every search
 	 * it performs would be over an empty range. One that names none - scalar
@@ -373,9 +351,82 @@ void kof_name_compose(char *out, size_t cap, const char *target,
 		snprintf(out, cap, "%s:%s", maltype, family);
 }
 
+/*
+ * Compose onto a finding, and say where each part went.
+ *
+ * Written once, forward, so the offsets fall out of the writing rather than
+ * being searched for afterwards - which is the whole point: nothing downstream
+ * should ever have to look for a separator this function just placed.
+ */
+static void span_put(struct kof_finding *f, struct kof_name_span *sp,
+		     size_t *at, const char *text)
+{
+	size_t n = 0;
+
+	sp->at = (uint16_t)*at;
+	if (text)
+		while (text[n] && *at + n + 1u < sizeof f->name) {
+			f->name[*at + n] = text[n];
+			n++;
+		}
+	sp->n = (uint16_t)n;
+	*at += n;
+}
+
+static void sep_put(struct kof_finding *f, size_t *at, char c)
+{
+	if (*at + 1u < sizeof f->name)
+		f->name[(*at)++] = c;
+}
+
+void kof_finding_name(struct kof_finding *f, const char *target,
+		      const char *maltype, const char *family,
+		      const char *variant, const char *shape)
+{
+	size_t at = 0;
+
+	if (!f)
+		return;
+	f->target.at = f->target.n = 0;
+	f->maltype = f->family = f->variant = f->shape = f->target;
+
+	if (target && target[0]) {
+		span_put(f, &f->target, &at, target);
+		sep_put(f, &at, '/');
+	}
+	span_put(f, &f->maltype, &at, maltype);
+	sep_put(f, &at, ':');
+	span_put(f, &f->family, &at, family);
+	if (variant && variant[0]) {
+		sep_put(f, &at, '#');
+		span_put(f, &f->variant, &at, variant);
+	}
+	if (shape && shape[0]) {
+		sep_put(f, &at, '?');
+		span_put(f, &f->shape, &at, shape);
+	}
+	f->name[at] = 0;
+}
+
+/*
+ * "ELF-x64", or "ELF" when there is no architecture to name.
+ *
+ * An object with no architecture - a script, or one nothing identified - gets
+ * the format alone: a "-any" suffix would be a field describing nothing.
+ */
+void kof_name_target(char *out, size_t cap, uint8_t format, uint8_t arch)
+{
+	const char *fmt = kof_format_name(format);
+
+	if (arch == KOF_ARCH_ANY || format == KOF_FMT_UNKNOWN)
+		snprintf(out, cap, "%s", fmt);
+	else
+		snprintf(out, cap, "%s-%s", fmt, kof_arch_name(arch));
+}
+
 static void finding_str(const struct kof_scanner *sc,
 			const struct kof_obj_ctx *ctx,
-			const struct kof_module *m, char *out, size_t cap)
+			const struct kof_module *m, struct kof_finding *f)
 {
 	const char *variant = kof_db_name(sc->eng, m, sc->rep_name_id);
 	const char *family  = kof_db_family(sc->eng, m);
@@ -390,18 +441,12 @@ static void finding_str(const struct kof_scanner *sc,
 	 */
 	const char *maltype = m->kind == KOF_PACK_HEUR
 			      ? "Heur" : kof_maltype_name(m->maltype);
-	const char *fmt = kof_format_name(ctx->format);
 	char fmtarch[32];
 
-	if (ctx->arch == KOF_ARCH_ANY || ctx->format == KOF_FMT_UNKNOWN)
-		snprintf(fmtarch, sizeof fmtarch, "%s", fmt);
-	else
-		snprintf(fmtarch, sizeof fmtarch, "%s-%s", fmt,
-			 kof_arch_name(ctx->arch));
-
-	kof_name_compose(out, cap, fmtarch, maltype,
+	kof_name_target(fmtarch, sizeof fmtarch, ctx->format, ctx->arch);
+	kof_finding_name(f, fmtarch, maltype,
 			 (family && family[0]) ? family : "unknown",
-			 variant ? variant : "unknown");
+			 variant ? variant : "unknown", NULL);
 }
 
 /* ---- identify -------------------------------------------------------------- */
@@ -508,14 +553,16 @@ static int unp_eligible(const struct kof_module *m,
 	 */
 	if (opt->emu_use == KOF_EMU_ONLY && m->unp_kind == KOF_UNP_PACKER)
 		return 0;
-	if (!(m->target_mask & (1u << ctx->format)))
-		return 0;
-	if (ctx->obj_size < m->size_min)
-		return 0;
-	if (m->arch_mask &&
-	    (ctx->arch >= 32 || !(m->arch_mask & (1u << ctx->arch))))
-		return 0;
-	return 1;
+	/*
+	 * Same preconditions as a detector's, from the same place.
+	 *
+	 * This loop used to spell out three of the four and leave subtype out,
+	 * so KOF_TARGET_SUBTYPE on an unpacker built, reported "require subtype"
+	 * and then did nothing. No unpacker in bases/ declares one, so honouring
+	 * it changes no scan today - it makes the declaration mean what the
+	 * build tool already says it means.
+	 */
+	return kof_module_precond(m, ctx, ctx->obj_size) == KOF_PRECOND_OK;
 }
 
 /* Whether an unpacker's declared family is the one a rule predicted. Both are
@@ -870,16 +917,11 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		 * Heur is not a family and never becomes one. It is the engine
 		 * saying it recognised a shape, not a thing.
 		 */
-		char fmtarch[32];
-		const char *fmt = kof_format_name(ctx->format);
+		char fmtarch[32], sv[16];
 
-		if (ctx->arch == KOF_ARCH_ANY || ctx->format == KOF_FMT_UNKNOWN)
-			snprintf(fmtarch, sizeof fmtarch, "%s", fmt);
-		else
-			snprintf(fmtarch, sizeof fmtarch, "%s-%s", fmt,
-				 kof_arch_name(ctx->arch));
-		snprintf(fi->name, sizeof fi->name, "%s/Heur:%s#s%d",
-			 fmtarch, guess, score);
+		kof_name_target(fmtarch, sizeof fmtarch, ctx->format, ctx->arch);
+		snprintf(sv, sizeof sv, "s%d", score);
+		kof_finding_name(fi, fmtarch, "Heur", guess, sv, NULL);
 	}
 }
 
@@ -1012,25 +1054,15 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 				const char *variant =
 					kof_db_name(sc->eng, m, sc->rep_name_id);
 				const char *shape = kof_db_family(sc->eng, m);
-				const char *fmt = kof_format_name(ctx->format);
 				char fmtarch[32];
-				size_t at;
 
-				if (ctx->arch == KOF_ARCH_ANY ||
-				    ctx->format == KOF_FMT_UNKNOWN)
-					snprintf(fmtarch, sizeof fmtarch, "%s", fmt);
-				else
-					snprintf(fmtarch, sizeof fmtarch, "%s-%s",
-						 fmt, kof_arch_name(ctx->arch));
-				kof_name_compose(f->name, sizeof f->name, fmtarch,
-						 "Heur", pf,
-						 variant ? variant : "unknown");
-				at = strlen(f->name);
-				if (shape && shape[0] && at + 2 < sizeof f->name)
-					snprintf(f->name + at, sizeof f->name - at,
-						 "?%s", shape);
+				kof_name_target(fmtarch, sizeof fmtarch,
+						ctx->format, ctx->arch);
+				kof_finding_name(f, fmtarch, "Heur", pf,
+						 variant ? variant : "unknown",
+						 shape);
 			} else {
-				finding_str(sc, ctx, m, f->name, sizeof f->name);
+				finding_str(sc, ctx, m, f);
 			}
 		} else {
 			out->dropped++;
@@ -1106,7 +1138,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 		if (out->n < KOF_MAX_FINDINGS) {
 			struct kof_finding *f = &out->v[out->n++];
 			f->level = sc->rep_level;
-			finding_str(sc, &ctx, m, f->name, sizeof f->name);
+			finding_str(sc, &ctx, m, f);
 		} else {
 			out->dropped++;
 		}

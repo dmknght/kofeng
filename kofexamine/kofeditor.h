@@ -453,7 +453,7 @@ struct object {
 	struct kof_obj_ctx            ctx;
 	void                         *info;
 
-	char            **finding;
+	struct kof_finding *finding;   /* as the engine handed them over */
 	uint32_t          n_finding;
 	char              packer[48];   /* the module that opened or unpacked it */
 	/*

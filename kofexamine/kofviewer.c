@@ -1735,7 +1735,6 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 {
 	struct view *v = user;
 	struct object *o;
-	const char *p;
 	uint32_t i;
 
 	if (v->n_obj >= MAX_OBJ || !len)
@@ -1778,8 +1777,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	o->payload_bits = v->pend_paybits;
 	v->pend_payload = v->pend_paylen = 0;
 	v->pend_paybits = 0;
-	for (p = name; (p = strstr(p, "//")) != NULL; p += 2)
-		o->depth++;
+	o->depth = kof_obj_depth(name);
 
 	/*
 	 * The top level is already mapped; anything else exists only inside
@@ -1832,15 +1830,16 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	}
 
 	for (i = 0; i < res->n; i++) {
-		char **g = realloc(o->finding, (o->n_finding + 1) * sizeof *g);
+		struct kof_finding *g = realloc(o->finding,
+						(o->n_finding + 1) * sizeof *g);
 
 		if (!g)
 			break;
 		o->finding = g;
-		o->finding[o->n_finding] = strdup(res->v[i].name);
-		if (!o->finding[o->n_finding])
-			break;
-		o->n_finding++;
+		/* The whole finding, by value: it carries the name AND where
+		 * each part of it starts, so nothing downstream has to take the
+		 * name apart again. strdup of the name alone threw that away. */
+		o->finding[o->n_finding++] = res->v[i];
 	}
 	v->n_obj++;
 	return 0;
@@ -2686,8 +2685,8 @@ static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 			sym_build(o);
 		if (eng &&
 		    !kof_touch_object(eng, o->buf, &o->ctx, o->fmt,
-				      (const char *const *)o->finding,
-				      o->n_finding, &o->touch, &o->n_touch))
+				      o->finding, o->n_finding,
+				      &o->touch, &o->n_touch))
 			o->n_touch = 0;
 	}
 }
@@ -3271,14 +3270,14 @@ static const char *tree_colour(const struct view *v, const struct node *n)
 	ob = &v->obj[n->obj];
 	if (!ob->n_finding && !ob->heur.n)
 		return A_BOLD;
+	/* The strongest thing said about it - a row that matched a family and
+	 * also scored on structure is a match. The order is the engine's, asked
+	 * for rather than restated: the constants do not carry it. */
 	for (i = 0; i < ob->heur.n; i++) {
 		int lv = (int)ob->heur.v[i].level;
 
-		/* INFECT outranks SUSPECT outranks HEUR, and the row shows the
-		 * strongest thing said about it - a row that matched a family
-		 * and also scored on structure is a match. */
-		if (worst < 0 || lv == KOF_LEVEL_INFECT ||
-		    (lv == KOF_LEVEL_SUSPECT && worst == KOF_LEVEL_HEUR))
+		if (worst < 0 || kof_level_rank((uint32_t)lv) >
+				 kof_level_rank((uint32_t)worst))
 			worst = lv;
 	}
 	if (worst == KOF_LEVEL_INFECT)
@@ -7577,7 +7576,7 @@ static void draw_list(struct out *o, struct view *v)
 			"Markers", w - 66, range);
 	else
 		out_fmt(o, A_DIM " %-14s %6s %8s  %-10s %-12s %-*s" A_OFF,
-			"Marker", "db id", "size", "at", "region",
+			"Marker", "db-id", "size", "at", "region",
 			w - 59 > 0 ? w - 59 : 1, range);
 
 	for (i = 0; i < shown; i++) {
@@ -8398,7 +8397,7 @@ static void copy_said(struct view *v, size_t n)
 			 "Copied %u byte(s) via %s", (unsigned)n, g_clip_via);
 	else
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "Copied %u byte(s) - terminal refused the clipboard", (unsigned)n);
+			 "Copied %u byte(s); terminal refused clipboard", (unsigned)n);
 }
 
 /* Copying an offset is copying a number, so it has two spellings and both are
@@ -9201,7 +9200,7 @@ static uint64_t find_next(struct view *v, uint64_t from)
 	 * This searched the object's bytes and then dropped any hit that
 	 * view_unmap could not place in the region being looked at. A symbol
 	 * row has no extents to place anything in, so EVERY hit was dropped
-	 * and the search reported "no match" about a marker that is plainly on
+	 * and the search reported "No match" about a marker that is plainly on
 	 * the screen - and would have been wrong the other way too, since the
 	 * block's layout is ours and its records are nowhere in the file.
 	 *
@@ -9289,7 +9288,7 @@ static void find_run(struct view *v, int back)
 			at = find_next(v, 0);           /* wrap */
 	}
 	if (at == KOF_BROKEN) {
-		snprintf(v->find_msg, sizeof v->find_msg, "no match");
+		snprintf(v->find_msg, sizeof v->find_msg, "No match");
 		v->find_i = v->find_n = 0;
 		return;
 	}
@@ -10846,7 +10845,7 @@ static void emu_here(struct view *v)
 	}
 	if (!o->buf.p || !o->buf.n) {
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "Object's bytes were not kept");
+			 "Object bytes were not kept");
 		return;
 	}
 	if (o->emu_done) {
@@ -10856,7 +10855,7 @@ static void emu_here(struct view *v)
 		 * asked already. Whatever it produced is in the tree below.
 		 */
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "Emu has already run on this");
+			 "Emu already ran on this object");
 		return;
 	}
 	sc = kof_scanner_new(v->eng);
@@ -10976,12 +10975,12 @@ static void say_unpacked(struct view *v)
 	}
 	if (v->n_obj && v->obj[0].broken) {
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "%s: nothing - %s", who,
+			 "%s: nothing (%s)", who,
 			 kof_broken_name(v->obj[0].broken));
 		return;
 	}
 	snprintf(v->act_msg, sizeof v->act_msg,
-		 "%s: nothing to open here", who);
+		 "%s: nothing to open", who);
 }
 
 /*
@@ -11023,7 +11022,7 @@ static void dump_all(struct view *v, int use_emu)
 	say_unpacked(v);
 	if (!kof_dump_dir_for(v->path, dir, sizeof dir)) {
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "No dump: path too long");
+			 "Dump failed: path too long");
 		return;
 	}
 	if (use_emu) {
@@ -11031,7 +11030,7 @@ static void dump_all(struct view *v, int use_emu)
 
 		if (at + 5 > sizeof dir) {
 			snprintf(v->act_msg, sizeof v->act_msg,
-				 "No dump: path too long");
+				 "Dump failed: path too long");
 			return;
 		}
 		memcpy(dir + at, "_emu", 5);
@@ -11172,8 +11171,8 @@ static int neighbour_file(struct view *v, int dir, char *out, size_t cap)
 
 	if (!found) {
 		v->act_ok = 0;
-		snprintf(v->act_msg, sizeof v->act_msg, "%.50s is the %s file here",
-			 base, dir > 0 ? "last" : "first");
+		snprintf(v->act_msg, sizeof v->act_msg, "No %s file in this folder",
+			 dir > 0 ? "next" : "previous");
 		return 0;
 	}
 	snprintf(out, cap, "%s", best);
@@ -11308,7 +11307,7 @@ static void rebuild_db(struct view *v)
 	if (fd < 0) {
 		v->act_ok = 0;
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "Cannot make a log file");
+			 "Cannot create log file");
 		return;
 	}
 
@@ -11371,7 +11370,7 @@ static void rebuild_db(struct view *v)
 	if (!fresh) {
 		v->act_ok = 0;
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "Built, but %.50s would not load", v->dbdir);
+			 "Built, but %.50s will not load", v->dbdir);
 		return;
 	}
 	/* The sources were just recompiled: whatever this knew about where each
@@ -11592,8 +11591,7 @@ static void bar_run(struct view *v, int i)
 		}
 		if (!kid) {
 			snprintf(v->act_msg, sizeof v->act_msg, "%s",
-				 "no variable in this object looks like "
-				 "shellcode");
+				 "No shellcode-like variable here");
 			v->act_ok = 1;
 			v->menu_open = 0;
 			return;
@@ -15912,7 +15910,7 @@ static void usage(void)
  */
 static void file_close(struct view *v)
 {
-	uint32_t i, k;
+	uint32_t i;
 
 	/*
 	 * The draft goes with the file, and its declarations own heap.
@@ -15928,8 +15926,6 @@ static void file_close(struct view *v)
 		struct object *o = &v->obj[i];
 
 		kof_touch_free(o->touch, o->n_touch);
-		for (k = 0; k < o->n_finding; k++)
-			free(o->finding[k]);
 		free(o->finding);
 		free(o->info);
 		free(o->sym);
@@ -15996,7 +15992,7 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 			close(fd);
 		v->act_ok = 0;
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "%.60s is not a regular non-empty file",
+			 "%.60s is empty or not a regular file",
 			 base_name(keep));
 		return 0;
 	}

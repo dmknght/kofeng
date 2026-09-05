@@ -192,8 +192,10 @@ static uint8_t g_parent_format;
  * of findings, and an index would be more code than the search it removes.
  */
 struct verdict {
-	char *object;
-	char *name;
+	char               *object;
+	/* The finding as the engine handed it over, not a copy of its text:
+	 * kof_touch_object matches a module against it part by part. */
+	struct kof_finding  f;
 };
 
 static struct verdict *g_verdict;
@@ -213,8 +215,8 @@ static int verdict_collect(const char *name, const void *bytes, uint64_t len,
 			return 0;
 		g_verdict = g;
 		g_verdict[g_n_verdict].object = strdup(name);
-		g_verdict[g_n_verdict].name = strdup(res->v[i].name);
-		if (!g_verdict[g_n_verdict].object || !g_verdict[g_n_verdict].name)
+		g_verdict[g_n_verdict].f = res->v[i];
+		if (!g_verdict[g_n_verdict].object)
 			return 0;
 		g_n_verdict++;
 	}
@@ -254,7 +256,6 @@ static void verdict_free(void)
 
 	for (i = 0; i < g_n_verdict; i++) {
 		free(g_verdict[i].object);
-		free(g_verdict[i].name);
 	}
 	free(g_verdict);
 	g_verdict = NULL;
@@ -1361,12 +1362,12 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
 	struct kof_touch *v = NULL;
 	uint32_t n = 0, i, j, shown;
 
-	const char **names = calloc(g_n_verdict + 1, sizeof *names);
+	struct kof_finding *names = calloc(g_n_verdict + 1, sizeof *names);
 	uint32_t m = 0, q;
 
 	for (q = 0; q < g_n_verdict && names; q++)
 		if (!strcmp(g_verdict[q].object, display))
-			names[m++] = g_verdict[q].name;
+			names[m++] = g_verdict[q].f;
 
 	if (!kof_touch_object(eng, buf, ctx, fmt, names, m, &v, &n)) {
 		free(names);
@@ -1809,9 +1810,13 @@ static void on_debug(uint32_t fact, const char *what, uint64_t value,
 	struct unp_run *u = user;
 
 	(void)fact;             /* this one prints; it does not match */
+	/* The fact takes the column, not the word "debug".
+	 *
+	 * Three facts printed three "debug"s and one of them was never the thing
+	 * being read - the name a module chose IS the label, and it says which
+	 * module said it. Same rule the scanner's result lines follow. */
 	if (g_debug)
-		printf("  debug     %-18s %10llu\n", what,
-		       (unsigned long long)value);
+		printf("  %-24s %10llu\n", what, (unsigned long long)value);
 	if (u) {
 		const char *dot = strrchr(what, '.');
 		size_t n = dot ? (size_t)(dot - what) : strlen(what);
@@ -1828,7 +1833,7 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 		       const struct kof_result *res, void *user)
 {
 	struct unp_run *u = user;
-	const char *tail = strstr(name, "//");
+	const char *tail = strstr(name, KOF_OBJ_SEP);
 	char tag[128], sub[KOF_DUMP_PATH_ROOM];
 
 	/* The first object is the file itself, which the rest of this tool has

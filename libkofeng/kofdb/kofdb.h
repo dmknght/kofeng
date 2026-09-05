@@ -158,6 +158,53 @@ struct kof_module {
 };
 
 /*
+ * WHETHER A MODULE MAY RUN ON THIS OBJECT AT ALL.
+ *
+ * The preconditions a module declares, in the order they are applied, and the
+ * one place they are applied from. There were three: the detector loop, the
+ * unpacker loop, and a mirror in kofinspect whose own comment said it was
+ * copied "rather than reasoned out again". Copies of a rule about what a scan
+ * DOES are worse than most, because the tool that shows why a module did not
+ * run then answers from its own copy - so it can say "would have run" about a
+ * module the engine had already excluded, and be believed.
+ *
+ * The unpacker loop is why this returns a REASON and not a yes/no: it needs to
+ * count what excluded a module, and the examiner needs a word for it.
+ *
+ * ORDER MATTERS AND IS PART OF THE ANSWER. Subtype is tested last because it is
+ * only meaningful once the format is known - two formats' subtype values
+ * deliberately collide, and testing target first is what makes reading
+ * ctx->subtype safe.
+ */
+enum kof_precond {
+	KOF_PRECOND_OK = 0,
+	KOF_PRECOND_TARGET,      /* targets another format */
+	KOF_PRECOND_SIZE,        /* object is below its minimum size */
+	KOF_PRECOND_ARCH,        /* targets another architecture */
+	KOF_PRECOND_SUBTYPE      /* targets another kind of this format */
+};
+
+static inline enum kof_precond kof_module_precond(const struct kof_module *m,
+						  const struct kof_obj_ctx *ctx,
+						  uint64_t size)
+{
+	if (!(m->target_mask & (1u << ctx->format)))
+		return KOF_PRECOND_TARGET;
+	if (size < m->size_min)
+		return KOF_PRECOND_SIZE;
+	/* An architecture outside the bit width cannot be named by a mask, so a
+	 * module that constrains architecture does not cover it. */
+	if (m->arch_mask &&
+	    (ctx->arch >= 32 || !(m->arch_mask & (1u << ctx->arch))))
+		return KOF_PRECOND_ARCH;
+	if (m->subtype_mask &&
+	    (ctx->subtype >= 32 || !(m->subtype_mask & (1u << ctx->subtype))))
+		return KOF_PRECOND_SUBTYPE;
+	return KOF_PRECOND_OK;
+}
+
+
+/*
  * The database, materialised. Immutable once kof_db_load returns.
  *
  * The code arena is deliberately never unmapped: the module table holds function

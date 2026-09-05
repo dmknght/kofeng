@@ -1577,17 +1577,30 @@ enum kof_unp_broken {
  * number would be silent everywhere a database built before the move is still read
  * against a build after it.
  */
+/*
+ * X(NAME, display word). Read like KOF_ARCH_LIST above: the enum, the word a
+ * finding shows, and the parse a build tool needs to turn "KOF_MALTYPE_TROJAN"
+ * in a source back into a value all come from here. ksigbuilder kept the parse
+ * direction as a table of its own, with a comment admitting it was a second
+ * copy that could only fail loudly once someone hit it.
+ */
+#define KOF_MALTYPE_LIST(X)                                                  \
+	X(KOF_MALTYPE_VIRUS,    "Virus")                                     \
+	X(KOF_MALTYPE_TROJAN,   "Trojan")    /* covers spyware */            \
+	X(KOF_MALTYPE_ROOTKIT,  "Rootkit")                                   \
+	X(KOF_MALTYPE_BOTNET,   "Botnet")                                    \
+	X(KOF_MALTYPE_RANSOM,   "Ransom")                                    \
+	X(KOF_MALTYPE_MINER,    "Miner")                                     \
+	X(KOF_MALTYPE_ADWARE,   "Adware")                                    \
+	X(KOF_MALTYPE_EXPLOIT,  "Exploit")                                   \
+	X(KOF_MALTYPE_DROPPER,  "Dropper")   /* covers downloader */         \
+	X(KOF_MALTYPE_HACKTOOL, "Hacktool")
+
 enum kof_maltype {
-	KOF_MALTYPE_VIRUS,
-	KOF_MALTYPE_TROJAN,      /* covers spyware */
-	KOF_MALTYPE_ROOTKIT,
-	KOF_MALTYPE_BOTNET,
-	KOF_MALTYPE_RANSOM,
-	KOF_MALTYPE_MINER,
-	KOF_MALTYPE_ADWARE,
-	KOF_MALTYPE_EXPLOIT,
-	KOF_MALTYPE_DROPPER,     /* covers downloader */
-	KOF_MALTYPE_HACKTOOL
+#define KOF_MALTYPE_X_ENUM(name, word) name,
+	KOF_MALTYPE_LIST(KOF_MALTYPE_X_ENUM)
+#undef KOF_MALTYPE_X_ENUM
+	KOF_MALTYPE_COUNT
 };
 
 /*
@@ -1599,18 +1612,22 @@ enum kof_maltype {
 static inline const char *kof_maltype_name(uint32_t maltype)
 {
 	switch (maltype) {
-	case KOF_MALTYPE_VIRUS:    return "Virus";
-	case KOF_MALTYPE_TROJAN:   return "Trojan";
-	case KOF_MALTYPE_ROOTKIT:  return "Rootkit";
-	case KOF_MALTYPE_BOTNET:   return "Botnet";
-	case KOF_MALTYPE_RANSOM:   return "Ransom";
-	case KOF_MALTYPE_MINER:    return "Miner";
-	case KOF_MALTYPE_ADWARE:   return "Adware";
-	case KOF_MALTYPE_EXPLOIT:  return "Exploit";
-	case KOF_MALTYPE_DROPPER:  return "Dropper";
-	case KOF_MALTYPE_HACKTOOL: return "Hacktool";
-	default:                   return "Malware";
+#define KOF_MALTYPE_X_NAME(name, word) case name: return word;
+	KOF_MALTYPE_LIST(KOF_MALTYPE_X_NAME)
+#undef KOF_MALTYPE_X_NAME
+	default: return "Malware";
 	}
+}
+
+/* The way back: the identifier a signature source writes, to its value. Whole
+ * names only, for the reason kof_arch_from_name gives. */
+static inline int kof_maltype_from_name(const char *s, int *out)
+{
+#define KOF_MALTYPE_X_FROM(name, word)                                       \
+	if (kof_streq_(s, #name)) { *out = (int)(name); return 1; }
+	KOF_MALTYPE_LIST(KOF_MALTYPE_X_FROM)
+#undef KOF_MALTYPE_X_FROM
+	return 0;
 }
 
 /*
