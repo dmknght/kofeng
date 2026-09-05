@@ -76,8 +76,10 @@
  * code section `.data`. CODE means IMAGE_SCN_MEM_EXECUTE, which is what the
  * loader acts on. Same choice ELF made in partitioning by PT_LOAD permission.
  *
- * The six regions partition the object: every byte is in exactly one, so OR-ing
- * masks scans nothing twice.
+ * The seven regions partition the object: every byte is in exactly one, so OR-ing
+ * masks scans nothing twice. RESOURCE was appended after the first six and the
+ * count moves with it - a partition that has lost track of how many parts it has
+ * is one nobody can check.
  */
 enum kof_scan_pe {
 	KOF_SCAN_PE_HEADERS   = 1u << 1,  /* [0, e_lfanew) plus the PE signature,
