@@ -29,6 +29,18 @@
 #include <kofmod/gzip.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_GZIP);
+/*
+ * A CONTAINER, not a packer: a gzip carries a file that was separately there,
+ * the way a zip or a tar does. It hid nothing, so depth through it is a
+ * directory tree rather than a layer of packing, and a heuristic that weighs
+ * "this was packed" must not weigh this.
+ *
+ * Spelled out because it was previously absent, and absent meant the builder's
+ * default - which happened to be this value. A kind that is right by default is
+ * still a kind nobody declared; see the note on KOF_UNPACK_KIND in kofsig.h for
+ * why this one is declared rather than guessed.
+ */
+KOF_UNPACK_KIND(KOF_UNP_CONTAINER);
 
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {
