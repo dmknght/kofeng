@@ -1738,7 +1738,9 @@ static void lint_calls(const char *src, size_t len)
 			    ((p[-1] >= 'A' && p[-1] <= 'Z') ||
 			     (p[-1] >= 'a' && p[-1] <= 'z') ||
 			     (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_'))
-				continue;       /* mid identifier */
+				continue;
+
+/* mid identifier */
 			if (!ident_at(p, sname, sizeof sname))
 				continue;
 			pi = pat_index(sname);
@@ -1751,6 +1753,93 @@ static void lint_calls(const char *src, size_t len)
 			}
 			p += strlen(sname) - 1u;
 		}
+	}
+}
+
+/* The header as the source names it: beside the source, not beside the cwd. */
+static FILE *open_beside(const char *src, const char *rel)
+{
+	char full[1024];
+	const char *slash = strrchr(src, '/');
+	size_t n;
+
+	if (!slash)
+		return fopen(rel, "r");
+	n = (size_t)(slash - src) + 1u;
+	if (n + strlen(rel) + 1u > sizeof full)
+		return NULL;
+	memcpy(full, src, n);
+	strcpy(full + n, rel);
+	return fopen(full, "r");
+}
+
+
+/*
+ * A kof_debug IN AN INCLUDED HEADER REPORTS A FACT NOBODY CAN NAME.
+ *
+ * The macro sends __LINE__ and nothing else, and the name for that line is
+ * extracted from the source file named on the command line - this one. An
+ * include is never opened, so a call inside one compiles, runs, calls the
+ * host's debug hook, and arrives with an id the pack has no name for. The host
+ * has nothing to print and prints nothing.
+ *
+ * That is the worst shape a defect can take: the call is there, the code runs,
+ * and the only evidence is an absence. It cost three separate measurements in
+ * one afternoon, each read as "this path never executes" when the truth was
+ * "this path cannot say anything".
+ *
+ * NOT FIXED BY FOLLOWING THE INCLUDE, which is why this warns instead. Two
+ * files both have a line 63; the id is the line and carries no file, so names
+ * gathered from a header would collide with the source's own. Making it work
+ * would mean changing what the macro sends, and that is the module ABI.
+ *
+ * Local includes only - <kofmod/...> is the SDK and has no rules in it.
+ */
+static void lint_debug_in_headers(const char *src, size_t n)
+{
+	size_t i = 0;
+	int line = 1;
+
+	for (i = 0; i < n; i++) {
+		char path[512];
+		size_t k = 0, j;
+		FILE *f;
+		char buf[4096];
+		int hline = 1;
+
+		if (src[i] == '\n') {
+			line++;
+			continue;
+		}
+		if (src[i] != '#' || (i && src[i - 1] != '\n'))
+			continue;
+		j = i + 1u;
+		while (j < n && (src[j] == ' ' || src[j] == '\t'))
+			j++;
+		if (j + 8u >= n || memcmp(src + j, "include", 7) != 0)
+			continue;
+		j += 7u;
+		while (j < n && (src[j] == ' ' || src[j] == '\t'))
+			j++;
+		if (j >= n || src[j] != '"')
+			continue;                       /* <> is the SDK */
+		j++;
+		while (j < n && src[j] != '"' && k + 1u < sizeof path)
+			path[k++] = src[j++];
+		path[k] = 0;
+		f = open_beside(src_name, path);
+        	if (!f)
+			continue;
+		while (fgets(buf, (int)sizeof buf, f)) {
+			if (strstr(buf, "kof_debug("))
+				lwarn(line,
+				      "%s:%d calls kof_debug from an included "
+				      "header; the fact has no name and the "
+				      "host will drop it in silence",
+				      path, hline);
+			hline++;
+		}
+		fclose(f);
 	}
 }
 
@@ -2029,6 +2118,7 @@ static int extract_main(int argc, char **argv)
 	/* Diagnosis, after the declarations are known and before anything is
 	 * written: a warning about a pack that was never produced is noise. */
 	lint_calls(src, src_len);
+	lint_debug_in_headers(src, src_len);
 	lint_report(src);
 
 	out = fopen(argv[3], "w");

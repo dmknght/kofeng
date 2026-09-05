@@ -754,7 +754,8 @@ struct kof_content {
 	 * Built at most once per object, and only if something asks - one
 	 * linear sweep of the executable sections, no more.
 	 */
-	uint32_t (*data_xref)(const struct kof_obj_ctx *, uint64_t va);
+	uint32_t (*data_xref)(const struct kof_obj_ctx *, uint64_t va,
+			      uint64_t size);
 };
 
 /*
@@ -1329,7 +1330,7 @@ static inline uint32_t kof_bswap32(uint32_t v)
 /*
  * WHICH CODE REFERS TO THE DATA AT `va`, AND HOW.
  *
- *     if (kof_data_xref(sym_value) & (KOF_XREF_CALL | KOF_XREF_JUMP))
+ *     if (kof_data_xref(sym_value, sym_size) & (KOF_XREF_CALL | KOF_XREF_JUMP))
  *             ...this variable is executed, whatever its bytes look like
  *
  * The question a rule looking for a payload actually wants answered. Asking
@@ -1345,11 +1346,17 @@ static inline uint32_t kof_bswap32(uint32_t v)
  * mapping wants KOF_XREF_ARG, one looking for a direct call wants
  * KOF_XREF_CALL, and neither needs a line changed here.
  *
- * Zero for an address nothing referred to, and zero for an object with no code
- * to sweep. NOT an assertion that the variable is unused: see KOF_XREF_PARTIAL.
+ * A RANGE, because a blob is not referred to at its first byte - see
+ * kof_xref_in in kofdisasm/xref.h for the three-load measurement that says so.
+ * Pass the variable's own size; 0 asks about the one address.
+ *
+ * Zero for a range nothing referred to, and zero for an object with no code to
+ * sweep. NOT an assertion that the variable is unused: see KOF_XREF_PARTIAL.
  */
-#define kof_data_xref(va) ((ctx)->content->data_xref ? \
-			   (ctx)->content->data_xref((ctx), (uint64_t)(va)) : 0u)
+#define kof_data_xref(va, size) ((ctx)->content->data_xref ?               \
+				 (ctx)->content->data_xref((ctx),           \
+							   (uint64_t)(va),  \
+							   (uint64_t)(size)) : 0u)
 
 /* Code forms this address, or loads from it. */
 #define KOF_XREF_READ    (1u << 0)
@@ -1370,6 +1377,39 @@ static inline uint32_t kof_bswap32(uint32_t v)
  * set; it may not read the absence of one as "not referred to".
  */
 #define KOF_XREF_PARTIAL (1u << 5)
+/*
+ * A REGION THAT REFERS TO IT ALSO MAKES AN INDIRECT CALL.
+ *
+ * Evidence about the neighbourhood rather than about the address, and it exists
+ * because the address facts miss the shape that matters most: a payload copied
+ * into a fresh mapping and called there is never called, jumped to, or even
+ * passed anywhere - and yet one region of code reads it and transfers control.
+ *
+ * A REGION, not a function: the boundaries come from RET, because the files
+ * this has to work on are stripped and have no function table to read.
+ *
+ * MEASURED 11.6% ON CLEAN BINARIES, which is why no rule gates on it alone.
+ */
+#define KOF_XREF_RGN_ICALL (1u << 6)
+/* ...or the region directly calls a region that does. One level. Measured 3.3%
+ * on clean binaries, and it fires on programs that only read a lookup table:
+ * every dynamically linked binary calls __libc_start_main through the GOT, from
+ * the region its entry point is in. */
+#define KOF_XREF_RGN_NEAR  (1u << 7)
+/*
+ * SOMETHING OTHER THAN STARTUP CODE REFERS TO IT.
+ *
+ * Every ELF carries code nobody wrote - the entry stub, the PLT thunks, .init
+ * and .fini, and whatever .init_array registers - and all of it references data
+ * that no rule about a person's program is looking for. The startup set is
+ * found from the ELF's own structure, not from symbols: 4 of 400 binaries in
+ * /usr/bin still carry `_start` as a symbol, and every one of them has an entry
+ * point and an .init_array.
+ *
+ * Absent means the only code that ever mentions it is code the compiler wrote.
+ * Measured: 87% of sized variables in clean binaries are in that position.
+ */
+#define KOF_XREF_USER      (1u << 8)
 
 #define kof_u8(off)  ((ctx)->content->rd8 ((ctx), (uint64_t)(off)))
 #define kof_u16(off) ((ctx)->content->rd16((ctx), (uint64_t)(off)))

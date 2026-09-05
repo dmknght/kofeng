@@ -268,9 +268,64 @@ static uint32_t scf_b64(const uint8_t *in, uint32_t n, uint8_t *out,
  * which is the whole point of the engine reporting facts rather than verdicts.
  */
 #define SCF_EXECUTED  (KOF_XREF_CALL | KOF_XREF_JUMP)
-/* #define SCF_STAGED (KOF_XREF_ARG | KOF_XREF_WRITE)  - not used yet, measured
- * on nothing; enabling it without measuring is how a heuristic gets a
- * reputation. */
+
+/*
+ * WHAT WAS MEASURED, AND WHY THE REGION FACTS ARE NOT IN THE GATE.
+ *
+ * Over two hundred binaries from /usr/bin - all of them clean - taking every
+ * OBJECT symbol sized between 64 and 8192 bytes, which is what this rule
+ * considers at all. 121 such variables:
+ *
+ *     KOF_XREF_CALL          0 of 121     0.0%
+ *     KOF_XREF_RGN_ICALL    14 of 121    11.6%
+ *     KOF_XREF_RGN_NEAR      4 of 121     3.3%
+ *
+ * So the gate is CALL and only CALL. One in nine ordinary variables lives in a
+ * region that makes an indirect call somewhere, and the reason is structural
+ * rather than incidental: EVERY dynamically linked binary calls
+ * __libc_start_main through the GOT, which is an indirect call, and it does so
+ * from the region the entry point is in. Measured 107 of 107 over /usr/bin.
+ * Startup code alone therefore guarantees an indirect call in any binary, and
+ * RGN_NEAR - one level of "calls a region that has one" - inherits it: it fired
+ * on a purposely built control that does nothing but read a lookup table.
+ *
+ * The two shapes this therefore does NOT catch, stated so the next person does
+ * not have to rediscover them:
+ *
+ *   - the address handed to a helper that calls its parameter
+ *   - the payload copied into a fresh mapping and called there, which gcc
+ *     inlines to MOVs so nothing is even passed to a call
+ *
+ * Both are visible to the region facts and neither is separable from ordinary
+ * code by them alone. Catching them needs the region evidence COMBINED with the
+ * shape tests below, and that combination has not been measured - so it is not
+ * enabled. A heuristic gets its reputation from the first thing it gets wrong.
+ */
+/*
+ * STAGED: the payload is handed somewhere and something nearby transfers
+ * control - which is what a loader that copies into a fresh mapping looks like
+ * from outside. ARG is the load-bearing half: the negative control that only
+ * reads a lookup table has ARG clear, and 21.3% of ordinary variables have it
+ * set, so it is evidence and not proof. It is ORed with EXECUTED rather than
+ * replacing it, and the byte tests below still have to pass.
+ */
+#define SCF_STAGED    (KOF_XREF_ARG | KOF_XREF_RGN_ICALL | KOF_XREF_RGN_NEAR)
+#define SCF_IS_STAGED(x) (((x) & KOF_XREF_ARG) && \
+			  ((x) & (KOF_XREF_RGN_ICALL | KOF_XREF_RGN_NEAR)))
+
+/*
+ * AND WHERE THE ENGINE CANNOT LOOK, THIS GATE DOES NOT APPLY.
+ *
+ * The sweep behind kof_data_xref reads x86. On an ARM or a MIPS object it
+ * answers KOF_XREF_PARTIAL and nothing else, which says "not analysed" rather
+ * than "not referred to" - and gating on it regardless would reject every
+ * candidate on every such file without a word. It did, for one build.
+ *
+ * So: where the answer is real, require it. Where it is not, fall through to
+ * the byte tests, which is what this rule had before the sweep existed.
+ */
+#define SCF_NO_XREF(x)  (((x) & KOF_XREF_PARTIAL) && !((x) & SCF_EXECUTED))
+
 
 /* What the search found. `at` is a file offset and is what an unpacker reads;
  * `va` is the symbol's own value and is what a report shows, because an offset
@@ -415,8 +470,12 @@ static int scl_pointer(const struct kof_obj_ctx *ctx,
 		 * loads the variable and calls the register. Asking about the
 		 * target would ask about an address the code never names.
 		 */
-		if (!(kof_data_xref(sym_va) & SCF_EXECUTED))
-			return 0;
+		{
+			uint32_t x = kof_data_xref(sym_va, w);
+
+			if (!SCF_NO_XREF(x) && !(x & SCF_EXECUTED) && !SCF_IS_STAGED(x))
+				return 0;
+		}
 		for (k = 0; k < 256u; k++)
 			freq[k] = 0;
 		for (k = 0; k < len; k++) {
@@ -593,7 +652,28 @@ static int scf_find(const struct kof_obj_ctx *ctx, struct scf_hit *out,
 	 * so it visits [lo, cnt) and stops without ever letting an unsigned
 	 * index wrap below zero.
 	 */
-	for (i = kof_sym_count(b, n); i-- > kof_sym_first(b, n); ) {
+	/*
+	 * EVERY RECORD, BACKWARDS - and the `_start` anchor that used to bound
+	 * this is gone.
+	 *
+	 * It bounded the walk to the records after `_start`, where this
+	 * toolchain emits a program's own globals: 63 records became 6 or 7,
+	 * and all thirteen payloads found across a 4940 file lab are in that
+	 * window. It looked like a clear win and it was not measurable. Three
+	 * interleaved runs over the corpus: anchored 0.26/0.22/0.22, whole
+	 * block 0.24/0.24/0.22. The walk is microseconds against half a
+	 * gigabyte of scanning, so the tenfold cut in iterations bought
+	 * nothing.
+	 *
+	 * What it COST was real: the ordering is the linker's, not the
+	 * format's, so -nostartfiles or another translation unit order puts a
+	 * global before `_start` and the payload was never looked at. A
+	 * purposely built loader does exactly that.
+	 *
+	 * Backwards is kept - it decides WHICH candidate is reported when a
+	 * file has more than one, and the blob sits at the end.
+	 */
+	for (i = kof_sym_count(b, n); i-- > 0; ) {
 		uint64_t sz, val, fo;
 		uint32_t shndx, k, top = 0;
 		uint32_t freq[256];
@@ -645,14 +725,6 @@ static int scf_find(const struct kof_obj_ctx *ctx, struct scf_hit *out,
 		if (fo >= ctx->obj_size || sz > ctx->obj_size - fo)
 			continue;
 
-		for (k = 0; k < 256u; k++)
-			freq[k] = 0;
-		for (k = 0; k < (uint32_t)sz; k++) {
-			uint8_t c = kof_u8(fo + k);
-
-			if (++freq[c] > top)
-				top = freq[c];
-		}
 		/*
 		 * IS IT EXECUTED?
 		 *
@@ -667,10 +739,31 @@ static int scf_find(const struct kof_obj_ctx *ctx, struct scf_hit *out,
 		 * not a payload however its bytes are distributed. The one
 		 * thing that could be lost is a loader that copies the blob
 		 * somewhere else before calling it, and that shape is not
-		 * visible to a sweep this cheap - see codeuse.h, which says so.
+		 * visible to a sweep this cheap - see kofdisasm/xref.h, which
+		 * says so.
+		 *
+		 * FIRST, because it is the cheapest and the most selective.
+		 * It sat after the histogram below, so every candidate this
+		 * rejects had already paid a pass over its whole blob - up to
+		 * eight kilobytes read one byte at a time through the module
+		 * boundary - to compute a number that was then thrown away.
+		 * The sweep behind this is paid once for the object; the
+		 * lookup is a hash probe.
 		 */
-		if (!(kof_data_xref(val) & SCF_EXECUTED))
-			continue;
+		{
+			uint32_t x = kof_data_xref(val, sz);
+
+			if (!SCF_NO_XREF(x) && !(x & SCF_EXECUTED) && !SCF_IS_STAGED(x))
+				continue;
+		}
+		for (k = 0; k < 256u; k++)
+			freq[k] = 0;
+		for (k = 0; k < (uint32_t)sz; k++) {
+			uint8_t c = kof_u8(fo + k);
+
+			if (++freq[c] > top)
+				top = freq[c];
+		}
 		/* A byte that owns a quarter of the blob makes it a table, not
 		 * a payload. See the note on SCL_TOP_DENOM. */
 		if (top * SCL_TOP_DENOM < (uint32_t)sz) {

@@ -36,29 +36,20 @@
 #include <stdint.h>
 
 /*
- * WHAT KIND OF REFERENCE, AND NOTHING ABOUT WHAT IT MEANS.
+ * THE FLAGS ARE NOT DEFINED HERE.
  *
- * Five mechanical facts. Not one of them says "payload", "loader" or anything
- * else about intent, and that is deliberate: the meaning is assembled where the
- * vocabulary of malware lives, in bases/, and a rule that wants a different
- * shape composes these differently without a line changing here.
+ * They are the module ABI's, in kofmod/kofsig.h, and there is exactly one
+ * definition of them because there was briefly two. This header had
+ * KOF_XREF_RGN_ICALL at bit 5 while the ABI had KOF_XREF_PARTIAL there, so a
+ * rule asking "is this address referred to by code that calls it" read a region
+ * fact as "this build cannot analyse the object" and fell through to accept
+ * every candidate. Eighteen X11 utilities came back carrying shellcode.
  *
- * It was two flags, and the second of them was called CALLED and meant "this is
- * executed" - a conclusion, sitting in the engine, which every future question
- * would have had to be added alongside.
+ * The engine writes these values and a module reads them; one side owning the
+ * numbers and the other repeating them is the same mistake in a smaller space.
  */
-#define KOF_XREF_READ   (1u << 0)  /* code forms this address, or loads from it */
-#define KOF_XREF_WRITE  (1u << 1)  /* code stores to it */
-#define KOF_XREF_CALL   (1u << 2)  /* it is the target of a CALL */
-#define KOF_XREF_JUMP   (1u << 3)  /* it is the target of a JMP */
-/*
- * It is in a register at a CALL - an argument, as far as a sweep with no
- * knowledge of the ABI can tell. The weakest of the five and the one that
- * carries the shape nothing else here can: a payload handed to mprotect or
- * memcpy and executed somewhere else entirely is an argument and never a call
- * target.
- */
-#define KOF_XREF_ARG    (1u << 4)
+#include "../core/kofmod/kofsig.h"
+
 
 /*
  * THE MOST CODE ONE SWEEP WILL READ.
@@ -91,12 +82,41 @@ struct kof_xref *kof_xref_new(void);
 void kof_xref_add(struct kof_xref *u, const uint8_t *code, uint32_t code_n,
 		     uint64_t code_va, unsigned bits);
 
-/* KOF_USE_* for one address, or 0 for an address the sweep never named. */
-uint32_t kof_xref_of(const struct kof_xref *u, uint64_t va);
+/*
+ * KOF_XREF_* for everything the sweep named in [va, va + n).
+ *
+ * A RANGE AND NOT AN ADDRESS, because a blob is not referred to at its first
+ * byte. Measured on gcc -O0 output for a memcpy of a 23 byte array:
+ *
+ *     mov 0x2eab(%rip),%rax   # 4020 <pay>
+ *     mov 0x2eac(%rip),%rdx   # 4028 <pay+0x8>
+ *     mov 0x2ea5(%rip),%rax   # 402f <pay+0xf>
+ *
+ * Three references, two of them into the middle of the variable. Asking about
+ * the first byte alone found one of the three, and would have found none at all
+ * had the compiler started anywhere but the front.
+ *
+ * `n` of 0 or 1 asks about the single address.
+ */
+uint32_t kof_xref_in(const struct kof_xref *u, uint64_t va, uint64_t n);
+
 
 /* Non-zero when the sweep ran out of room and stopped recording. A caller that
- * needs "definitely not used" rather than "used" has to treat that as unknown. */
+ * needs "definitely not referred to" rather than "referred to" has to treat
+ * that as unknown. */
 int kof_xref_full(const struct kof_xref *u);
+
+/*
+ * "This address holds startup code" - the entry point, an .init_array entry,
+ * whatever the entry stub hands to __libc_start_main. Call it for each, in any
+ * order, before the first query; the region each lands in is resolved once the
+ * sweep has seen them all.
+ *
+ * Anything a startup region calls DIRECTLY and nothing else calls is startup
+ * too - which is how register_tm_clones and its siblings are found, since
+ * nothing points at them from outside.
+ */
+void kof_xref_startup(struct kof_xref *u, uint64_t va);
 
 void kof_xref_free(struct kof_xref *u);
 

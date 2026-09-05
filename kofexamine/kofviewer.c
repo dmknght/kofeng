@@ -339,6 +339,16 @@ static void out_at(struct out *o, int row, int col)
 #define A_BAD   "\033[31m"
 #define A_WARN  "\033[33m"
 /*
+ * MAGENTA FOR A HEURISTIC, the colour the scanner has used for one since it had
+ * colour at all.
+ *
+ * The three verdicts were painted in two here: anything that fired came out
+ * red, so a structural guess and a named family looked alike on the one screen
+ * where the difference is the point. A reader moving between the two tools
+ * should not have to learn a second scheme.
+ */
+#define A_HEUR  "\033[35m"
+/*
  * AND and OR, told apart by colour.
  *
  * Both were A_WARN, so a condition read as one yellow word between blue ids and
@@ -6775,7 +6785,7 @@ static void draw_marker_line(struct out *o, struct view *v)
 		if (emu_why_tag(ob->emu_why))
 			out_str(o, A_DIM "no markers" A_OFF);
 		else if (heur_reports(ob, &hsc, &hguess))
-			out_fmt(o, A_BAD "Heur:%s#s%d" A_OFF A_DIM
+			out_fmt(o, A_HEUR "Heur:%s#s%d" A_OFF A_DIM
 				"  no marker" A_OFF, hguess, hsc);
 		else
 			out_str(o, A_DIM "no markers" A_OFF);
@@ -9958,6 +9968,35 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 			 ob->packer);
 }
 
+/*
+ * The colour a verdict is painted in - the scanner's, so the two tools agree.
+ *
+ * Ranked through the engine rather than compared as numbers: KOF_LEVEL_HEUR is
+ * 2 and INFECT is 1, so ">" on the constants puts them the wrong way round.
+ */
+static const char *level_attr(uint32_t level)
+{
+	if (level == KOF_LEVEL_INFECT)
+		return A_BAD;
+	return level == KOF_LEVEL_HEUR ? A_HEUR : A_WARN;
+}
+
+/* The strongest thing anything said about this object, for the summary line. */
+static const char *worst_attr(const struct object *ob)
+{
+	uint32_t i, worst = 0;
+	int have = 0;
+
+	for (i = 0; i < ob->n_touch; i++)
+		if (ob->touch[i].fired &&
+		    (!have || kof_level_rank(ob->touch[i].fired_level) >
+			      kof_level_rank(worst))) {
+			worst = ob->touch[i].fired_level;
+			have = 1;
+		}
+	return have ? level_attr(worst) : A_BAD;
+}
+
 static void prop_build(struct view *v)
 {
 	struct object *ob = cur_obj(v);
@@ -10173,10 +10212,17 @@ no_regions:
 		} else {
 			prop_add(A_OFF, "  %-11s %s%d" A_OFF A_DIM
 				 "  of %d to report" A_OFF, "score",
-				 sc >= hm->bar_centinats ? A_BAD : A_SIZE,
+				 sc >= hm->bar_centinats ? A_HEUR : A_SIZE,
 				 sc, hm->bar_centinats);
+			/*
+			 * The colour goes in the TEXT, not in prop_add's first
+			 * argument: that argument is stored on the row and read
+			 * by nothing, so this line has been printing in the
+			 * default colour for as long as it has existed.
+			 */
 			if (sc >= hm->bar_centinats)
-				prop_add(A_BAD, "  %-11s %s", "verdict", guess);
+				prop_add(A_OFF, "  %-11s " A_HEUR "%s" A_OFF,
+					 "verdict", guess);
 			for (k = 0; k < hm->n_anom; k++)
 				if (hm->anom[k].format == hf.format &&
 				    (hf.anomalies & hm->anom[k].mask))
@@ -10205,8 +10251,8 @@ no_regions:
 	 * whether the module ran and declined, or never ran at all.
 	 */
 	prop_add(A_OFF, "  %s%u" A_OFF A_DIM " matched, " A_OFF A_SIZE "%u"
-		 A_OFF A_DIM " skipped" A_OFF, hit ? A_BAD : A_SIZE, hit,
-		 ob->n_touch - hit);
+		 A_OFF A_DIM " skipped" A_OFF, hit ? worst_attr(ob) : A_SIZE,
+		 hit, ob->n_touch - hit);
 	for (i = 0; i < ob->n_touch; i++) {
 		const struct kof_touch *t = &ob->touch[i];
 		char name[80], head[24];
@@ -10214,7 +10260,8 @@ no_regions:
 		touch_name(t, name, sizeof name);
 		touch_head(t, head, sizeof head);
 		prop_add(A_OFF, "  %s%-44s" A_OFF A_SIZE "%-10s" A_OFF A_WARN
-			 "%s" A_OFF, t->fired ? A_BAD : A_ID, name, head,
+			 "%s" A_OFF, t->fired ? level_attr(t->fired_level)
+					      : A_ID, name, head,
 			 t->kind == KOF_TOUCH_INELIGIBLE && t->ruled_out
 			 ? t->ruled_out : "");
 	}

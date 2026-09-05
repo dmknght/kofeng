@@ -133,7 +133,8 @@ static const struct kof_str_ent *str_of(const struct kof_scanner *sc, uint32_t i
  * parse: turning a named range into extents.
  */
 static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes);
-static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va);
+static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
+			    uint64_t size);
 
 /*
  * The extents of one half of the symbol block, LAST RECORD FIRST.
@@ -1834,6 +1835,14 @@ static void c_name_next(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t le
  * resolve_scan being NULL when nothing identified the object.
  */
 
+/* Section names are fixed length and may be truncated; comparing the whole of
+ * a short literal against them is all this needs. */
+static int kof_str_ne(const char *a, const char *b)
+{
+	while (*a && *a == *b) { a++; b++; }
+	return *a != *b;
+}
+
 /*
  * WHAT THE CODE DOES WITH ONE DATA ADDRESS.
  *
@@ -1847,7 +1856,8 @@ static void c_name_next(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t le
  * decoder is an x86 decoder. Any other object answers zero, which a rule reads
  * as "nothing known" rather than "not used" - see KOF_XREF_PARTIAL.
  */
-static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va)
+static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
+			    uint64_t size)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	uint32_t f;
@@ -1857,9 +1867,20 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va)
 		uint32_t i;
 
 		sc->use_done = 1;
+		/*
+		 * NOTHING KNOWN IS NOT THE SAME AS NOTHING FOUND.
+		 *
+		 * The decoder behind this reads x86, so an ARM or a MIPS
+		 * object cannot be swept at all - and answering plain zero
+		 * would tell a rule that no code refers to the address, which
+		 * is a different and much stronger claim than "this build
+		 * cannot say". A rule gating on the answer would then reject
+		 * every candidate on every non-x86 file, silently, and the
+		 * shellcode finder did exactly that for one build.
+		 */
 		if (ctx->format != KOF_FMT_ELF || !e ||
 		    (ctx->arch != KOF_ARCH_X86 && ctx->arch != KOF_ARCH_X86_64))
-			return 0;
+			return KOF_XREF_PARTIAL;
 		/*
 		 * EVERY executable section, under ONE budget.
 		 *
@@ -1872,18 +1893,86 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va)
 		 * with a single large one.
 		 */
 		{
-			uint32_t left = KOF_XREF_MAX;
+			uint32_t left = KOF_XREF_MAX, pass;
+			uint64_t biggest = 0;
 			kof_buf b = kof_src_buf(sc->cur_src);
 
+			for (i = 0; i < e->sec_count &&
+				    i < KOF_ELF_MAX_SECTIONS; i++)
+				if (e->sec[i].type == 1u &&
+				    (e->sec[i].flags & 0x4u) &&
+				    e->sec[i].file_size > biggest)
+					biggest = e->sec[i].file_size;
+
 			sc->use = kof_xref_new();
+			/*
+			 * WHAT THE COMPILER PUT THERE, from the ELF's own
+			 * structure and not from symbols - the files this has
+			 * to work on are stripped.
+			 *
+			 *   the entry point               _start
+			 *   .init_array, .fini_array      frame_dummy and
+			 *                                 __do_global_dtors_aux
+			 *   every executable section
+			 *   that is not .text             .init .fini .plt
+			 *
+			 * What those regions call is startup as well, resolved
+			 * inside the map - which is the only way the tm_clones
+			 * pair is ever found, since nothing names them.
+			 */
+			if (sc->use && e->entry_addr)
+				kof_xref_startup(sc->use, e->entry_addr);
+			for (i = 0; sc->use && i < e->sec_count &&
+				    i < KOF_ELF_MAX_SECTIONS; i++) {
+				const struct kof_elf_sec *sec = &e->sec[i];
+				uint32_t w = ctx->arch == KOF_ARCH_X86 ? 4u : 8u;
+				uint64_t k;
+
+				if (sec->type == 1u && (sec->flags & 0x4u) &&
+				    kof_str_ne(sec->name, ".text"))
+					kof_xref_startup(sc->use, sec->mem_addr);
+				if (sec->type != 14u && sec->type != 15u)
+					continue;   /* INIT_ARRAY, FINI_ARRAY */
+				for (k = 0; k + w <= sec->file_size; k += w) {
+					uint64_t v = 0, q;
+
+					for (q = 0; q < w; q++)
+						v |= (uint64_t)c_rd8(ctx,
+							sec->file_off + k + q)
+						     << (8u * q);
+					kof_xref_startup(sc->use, v);
+				}
+			}
+			/*
+			 * LARGEST SECTION FIRST, and the budget is why.
+			 *
+			 * Section table order puts .init, .plt, .plt.got and
+			 * .plt.sec ahead of .text, and those are stubs that name
+			 * no variable. Sweeping them first spends the budget on
+			 * them: measured over 4940 ELF files in one lab, .text
+			 * was left NOTHING in 56 of them and was cut short in
+			 * another 466 - a tenth of the corpus analysed wrongly,
+			 * and silently, because the answer for an address in an
+			 * unswept section is "nothing refers to it".
+			 *
+			 * By size and not by the name ".text", because the name
+			 * is a convention and the size is the thing that
+			 * matters: whatever holds the most code is where the
+			 * code is.
+			 */
+			for (pass = 0; sc->use && left && pass < 2; pass++)
 			for (i = 0; sc->use && left &&
 				    i < e->sec_count && i < KOF_ELF_MAX_SECTIONS;
 			     i++) {
 				const struct kof_elf_sec *sec = &e->sec[i];
 				uint32_t n;
+				int big;
 
 				if (sec->type != 1u || !(sec->flags & 0x4u))
 					continue;       /* PROGBITS, executable */
+				big = sec->file_size >= biggest;
+				if ((pass == 0) != (big != 0))
+					continue;
 				if (!sec->file_size || sec->file_off >= b.n ||
 				    sec->file_size > b.n - sec->file_off)
 					continue;
@@ -1898,8 +1987,8 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va)
 		}
 	}
 	if (!sc->use)
-		return 0;
-	f = kof_xref_of(sc->use, va);
+		return KOF_XREF_PARTIAL;
+	f = kof_xref_in(sc->use, va, size);
 	return f ? f | (kof_xref_full(sc->use) ? KOF_XREF_PARTIAL : 0u)
 		 : (kof_xref_full(sc->use) ? KOF_XREF_PARTIAL : 0u);
 }

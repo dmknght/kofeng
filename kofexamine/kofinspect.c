@@ -416,7 +416,7 @@ static int span_is(const struct kof_finding *f,
 	       memcmp(f->name + sp->at, word, sp->n) == 0;
 }
 
-static const char *fired_as(const struct kof_touch *t,
+static const char *fired_as(struct kof_touch *t,
 			    const struct kof_finding *finding,
 			    uint32_t n_finding)
 {
@@ -429,8 +429,13 @@ static const char *fired_as(const struct kof_touch *t,
 			if (span_is(&finding[k], &finding[k].maltype,
 				    kof_maltype_name(t->maltype)) &&
 			    span_is(&finding[k], &finding[k].family, t->family) &&
-			    span_is(&finding[k], &finding[k].variant, t->name[j]))
+			    span_is(&finding[k], &finding[k].variant, t->name[j])) {
+				/* The level comes from the finding that
+				 * matched, not from the module's declaration:
+				 * one module can report either. */
+				t->fired_level = finding[k].level;
 				return t->name[j];
+			}
 	}
 	return NULL;
 }

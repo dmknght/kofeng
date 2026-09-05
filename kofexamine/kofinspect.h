@@ -341,6 +341,15 @@ struct kof_touch {
 	 */
 	int                     fired;
 	const char             *fired_name;  /* the variant it reported, if any */
+	/*
+	 * AND HOW STRONGLY, which is not the same question as whether.
+	 *
+	 * A module that fired may have reported INFECT, SUSPECT or HEUR, and a
+	 * pane that paints all three the same colour tells a reader less than
+	 * the scanner's one-line output does. KOF_LEVEL_*; only meaningful when
+	 * `fired`.
+	 */
+	uint32_t                fired_level;
 
 	/* Set only for KOF_TOUCH_INELIGIBLE: the precondition that ruled it out,
 	 * as the word a reader needs rather than as a mask to decode. */
