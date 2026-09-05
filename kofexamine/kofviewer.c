@@ -9596,15 +9596,27 @@ static void draw_help(struct out *o, struct view *v)
 #define PROP_MAX  600
 #define PROP_W    200
 
+/*
+ * A LINE CARRIES ITS OWN COLOURS, INSIDE ITS TEXT.
+ *
+ * There was a `col` field beside the text, set by every caller and read by
+ * none - prop_put draws the text and nothing else. So prop_add's first
+ * argument, which reads exactly like the colour a row is painted in, painted
+ * nothing, and had not since the page was written. Nine rows asked for a colour
+ * and came out in the default one; the heuristic verdict was one of them.
+ *
+ * The escapes belong in the text because the page is a table of different KINDS
+ * of fact - a name, an offset, a size - and one colour per row cannot say which
+ * is which. Every other row on this page already worked that way.
+ */
 struct prop_line {
-	char        text[PROP_W];
-	const char *col;
+	char text[PROP_W];
 };
 
 static struct prop_line g_prop[PROP_MAX];
 static uint32_t         g_n_prop;
 
-static void prop_add(const char *col, const char *fmt, ...)
+static void prop_add(const char *fmt, ...)
 {
 	va_list ap;
 
@@ -9613,7 +9625,6 @@ static void prop_add(const char *col, const char *fmt, ...)
 	va_start(ap, fmt);
 	vsnprintf(g_prop[g_n_prop].text, PROP_W, fmt, ap);
 	va_end(ap);
-	g_prop[g_n_prop].col = col;
 	g_n_prop++;
 }
 
@@ -9621,8 +9632,8 @@ static void prop_add(const char *col, const char *fmt, ...)
 static void prop_head(const char *w)
 {
 	if (g_n_prop)
-		prop_add(A_DIM, "%s", "");
-	prop_add(A_OFF, A_BOLD "%s" A_OFF, w);
+		prop_add(A_DIM "%s", "");
+	prop_add(A_BOLD "%s" A_OFF, w);
 }
 
 static void prop_perm(char *out, size_t cap, unsigned p)
@@ -9634,7 +9645,7 @@ static void prop_perm(char *out, size_t cap, unsigned p)
 /* "9 of 9 declared", and the count that did not add up said as such. */
 static void prop_claimed(const char *label, uint32_t have, uint32_t claimed)
 {
-	prop_add(A_OFF, A_DIM "  %-11s " A_OFF "%s%u of %u" A_OFF A_DIM
+	prop_add(A_DIM "  %-11s " A_OFF "%s%u of %u" A_OFF A_DIM
 		 " declared" A_OFF, label,
 		 have == claimed ? A_SIZE : A_WARN, have, claimed);
 }
@@ -9646,7 +9657,7 @@ static void prop_elf(const struct object *ob)
 	uint32_t i;
 
 	prop_head("ELF");
-	prop_add(A_OFF, A_DIM "  %-11s " A_ID "%s %s" A_OFF A_DIM
+	prop_add(A_DIM "  %-11s " A_ID "%s %s" A_OFF A_DIM
 		 "   type=" A_OFF A_SIZE "%u" A_OFF A_DIM " machine=" A_OFF
 		 A_SIZE "%u" A_OFF, "class",
 		 e->elf_class == KOF_ELFCLASS_64 ? "ELF64" : "ELF32",
@@ -9654,7 +9665,7 @@ static void prop_elf(const struct object *ob)
 					       : "little-endian",
 		 e->e_type, e->e_machine);
 	prop_perm(perm, sizeof perm, e->entry_perm);
-	prop_add(A_OFF, A_DIM "  %-11s " A_LOC "0x%llx" A_OFF A_DIM
+	prop_add(A_DIM "  %-11s " A_LOC "0x%llx" A_OFF A_DIM
 		 "  file " A_OFF A_LOC "%llu" A_OFF "  " A_ID "%s" A_OFF,
 		 "entry", (unsigned long long)e->entry_addr,
 		 (unsigned long long)ob->ctx.entry_off, perm);
@@ -9669,7 +9680,7 @@ static void prop_elf(const struct object *ob)
 			w = num;
 		}
 		prop_perm(perm, sizeof perm, e->seg[i].perm);
-		prop_add(A_OFF, "     " A_ID "%-16s" A_OFF A_DIM " off=" A_OFF
+		prop_add("     " A_ID "%-16s" A_OFF A_DIM " off=" A_OFF
 			 A_LOC "%-9llu" A_OFF A_DIM "size=" A_OFF A_SIZE
 			 "%-9llu" A_OFF A_DIM "vaddr=" A_OFF A_LOC
 			 "0x%-10llx" A_OFF A_ID "%s" A_OFF,
@@ -9686,7 +9697,7 @@ static void prop_elf(const struct object *ob)
 			snprintf(num, sizeof num, "%u", e->sec[i].type);
 			w = num;
 		}
-		prop_add(A_OFF, "     " A_ID "%-20s" A_OFF A_DIM " off=" A_OFF
+		prop_add("     " A_ID "%-20s" A_OFF A_DIM " off=" A_OFF
 			 A_LOC "%-9llu" A_OFF A_DIM "size=" A_OFF A_SIZE
 			 "%-9llu" A_OFF A_DIM " %s" A_OFF,
 			 e->sec[i].name,
@@ -9702,27 +9713,27 @@ static void prop_pe(const struct object *ob)
 	uint32_t i;
 
 	prop_head("PE");
-	prop_add(A_OFF, A_DIM "  %-11s " A_ID "%s" A_OFF A_DIM "  machine="
+	prop_add(A_DIM "  %-11s " A_ID "%s" A_OFF A_DIM "  machine="
 	 A_OFF A_LOC "0x%04x" A_OFF A_DIM " characteristics=" A_OFF A_LOC
 	 "0x%04x" A_OFF, "image", p->pe32_plus ? "PE32+" : "PE32", p->machine,
 	 p->characteristics);
-	prop_add(A_OFF, A_DIM "  %-11s lfanew=" A_OFF A_LOC "%llu" A_OFF A_DIM
+	prop_add(A_DIM "  %-11s lfanew=" A_OFF A_LOC "%llu" A_OFF A_DIM
 		 "  gap=" A_OFF A_SIZE "%llu" A_OFF, "stub",
 		 (unsigned long long)p->lfanew,
 		 (unsigned long long)p->stub_len);
-	prop_add(A_OFF, A_DIM "  %-11s end=" A_OFF A_LOC "%llu" A_OFF A_DIM
+	prop_add(A_DIM "  %-11s end=" A_OFF A_LOC "%llu" A_OFF A_DIM
 		 "  declared=" A_OFF A_SIZE "%llu" A_OFF, "headers",
 		 (unsigned long long)p->header_end,
 		 (unsigned long long)p->size_of_headers);
 	prop_perm(perm, sizeof perm, p->entry_perm);
-	prop_add(A_OFF, A_DIM "  %-11s rva=" A_OFF A_LOC "0x%llx" A_OFF A_DIM
+	prop_add(A_DIM "  %-11s rva=" A_OFF A_LOC "0x%llx" A_OFF A_DIM
 		 "  file " A_OFF A_LOC "%llu" A_OFF A_DIM "  sec=" A_OFF A_ID
 		 "%s" A_OFF "  " A_ID "%s" A_OFF, "entry",
 		 (unsigned long long)p->entry_rva,
 		 (unsigned long long)ob->ctx.entry_off,
 		 p->entry_sec < p->sec_count ? p->sec[p->entry_sec].name
 					     : "none", perm);
-	prop_add(A_OFF, A_DIM "  %-11s code=" A_OFF A_SIZE "%llu" A_OFF A_DIM
+	prop_add(A_DIM "  %-11s code=" A_OFF A_SIZE "%llu" A_OFF A_DIM
 		 " init=" A_OFF A_SIZE "%llu" A_OFF A_DIM " uninit=" A_OFF
 		 A_SIZE "%llu" A_OFF, "summary",
 		 (unsigned long long)p->size_of_code,
@@ -9734,19 +9745,19 @@ static void prop_pe(const struct object *ob)
 	 * is missing, and an overlay is where a packer's payload usually is.
 	 */
 	if (p->cert_len)
-		prop_add(A_OFF, A_DIM "  %-11s off=" A_OFF A_LOC "%llu" A_OFF
+		prop_add(A_DIM "  %-11s off=" A_OFF A_LOC "%llu" A_OFF
 			 A_DIM "  len=" A_OFF A_SIZE "%llu" A_OFF, "signature",
 			 (unsigned long long)p->cert_off,
 			 (unsigned long long)p->cert_len);
 	if (p->overlay_len)
-		prop_add(A_OFF, A_WARN "  %-11s" A_OFF A_DIM " off=" A_OFF A_LOC
+		prop_add(A_WARN "  %-11s" A_OFF A_DIM " off=" A_OFF A_LOC
 			 "%llu" A_OFF A_DIM "  len=" A_OFF A_WARN "%llu" A_OFF,
 			 "overlay", (unsigned long long)p->overlay_off,
 			 (unsigned long long)p->overlay_len);
 	prop_claimed("sections", p->nsec, p->nsec_claimed);
 	for (i = 0; i < p->sec_count; i++) {
 		prop_perm(perm, sizeof perm, p->sec[i].perm);
-		prop_add(A_OFF, "     " A_ID "%-9s" A_OFF A_DIM " off=" A_OFF
+		prop_add("     " A_ID "%-9s" A_OFF A_DIM " off=" A_OFF
 			 A_LOC "%-9llu" A_OFF A_DIM "raw=" A_OFF A_SIZE
 			 "%-9llu" A_OFF A_DIM "rva=" A_OFF A_LOC "0x%-8llx"
 			 A_OFF A_DIM "vsz=" A_OFF A_LOC "0x%-8llx" A_OFF A_ID
@@ -9858,11 +9869,11 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 	 * and the word only has to say how the two halves relate.
 	 */
 	if (ob->payload_of && ob->payload_sym[0])
-		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF
+		prop_add(A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF
 			 A_DIM "   from " A_OFF A_BAD "%s" A_OFF "%s",
 			 "name", base, ob->payload_sym, "");
 	else
-		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF,
+		prop_add(A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF,
 			 "name", base);
 
 	/*
@@ -9912,7 +9923,7 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 		const char *at;
 
 		v->prop_cp_row = (int32_t)g_n_prop;
-		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_LOC "%s" A_OFF
+		prop_add(A_DIM "  %-11s " A_OFF A_LOC "%s" A_OFF
 			 "  \033[47;30m%s" A_OFF, "folder", dir, lab);
 		/*
 		 * Measured off the RENDERED row, not counted by hand: the row
@@ -9932,16 +9943,16 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 	}
 
 	if (full) {
-		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_SIZE "%llu" A_OFF
+		prop_add(A_DIM "  %-11s " A_OFF A_SIZE "%llu" A_OFF
 			 A_DIM " bytes" A_OFF, "size",
 			 (unsigned long long)ob->buf.n);
-		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s%s%s" A_OFF,
+		prop_add(A_DIM "  %-11s " A_OFF A_ID "%s%s%s" A_OFF,
 			 "format", fmt, sub ? " " : "", sub ? sub : "");
 		if (ob->fmt)
-			prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF,
+			prop_add(A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF,
 				 "arch", kof_arch_name(ob->ctx.arch));
 	} else {
-		prop_add(A_OFF, A_DIM "  %-11s " A_OFF A_SIZE "%llu" A_OFF
+		prop_add(A_DIM "  %-11s " A_OFF A_SIZE "%llu" A_OFF
 			 A_DIM " bytes   " A_OFF A_ID "%s%s%s%s%s" A_OFF,
 			 "size", (unsigned long long)ob->buf.n, fmt,
 			 sub ? " " : "", sub ? sub : "",
@@ -9960,7 +9971,7 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 	 * saying it was unpacked by something invents a layer above the file.
 	 */
 	if (ob->packer[0])
-		prop_add(A_OFF, A_DIM "  %-11s " A_OFF "%s%s" A_OFF,
+		prop_add(A_DIM "  %-11s " A_OFF "%s%s" A_OFF,
 			 top ? "opened by" : "unpacked by",
 			 (ob->heur.from_packer ||
 			  (ob->heur.heur_flags &
@@ -10076,7 +10087,7 @@ static void prop_build(struct view *v)
 		 * with no regions, and saying MISMATCH there invented a
 		 * problem. */
 		if (!n) {
-			prop_add(A_OFF, A_DIM "  %-11s no parser divides this "
+			prop_add(A_DIM "  %-11s no parser divides this "
 				 "object" A_OFF, "whole");
 			goto no_regions;
 		}
@@ -10098,13 +10109,13 @@ static void prop_build(struct view *v)
 
 		if (n->obj != v->node[v->sel_node].obj || !n->mask || n->sym)
 			continue;
-		prop_add(A_OFF, "  " A_ID "%-11s" A_OFF A_SIZE "%-10llu" A_OFF
+		prop_add("  " A_ID "%-11s" A_OFF A_SIZE "%-10llu" A_OFF
 			 A_LOC "%5.1f%%" A_OFF, n->label,
 			 (unsigned long long)n->bytes,
 			 total ? 100.0 * (double)n->bytes / (double)total : 0.0);
 	}
 	if (total != ob->buf.n)
-		prop_add(A_BAD, "  %-11s regions sum to %llu of %llu",
+		prop_add(A_BAD "  %-11s regions sum to %llu of %llu" A_OFF,
 			 "MISMATCH", (unsigned long long)total,
 			 (unsigned long long)ob->buf.n);
 no_regions:
@@ -10131,14 +10142,14 @@ no_regions:
 	 * conditions - SEG_PAST_EOF, ENTRY_NOT_EXEC.
 	 */
 	if (ob->payload_of) {
-		prop_add(A_WARN, "  RECONSTRUCTED_%s-%s_SHELLCODE",
+		prop_add(A_WARN "  RECONSTRUCTED_%s-%s_SHELLCODE" A_OFF,
 			 ob->fmt ? kof_format_name(ob->ctx.format) : "RAW",
 			 ob->fmt ? kof_arch_name(ob->ctx.arch) : "?");
 	} else if (ob->fmt && ob->info && ob->fmt->anomalies) {
 		uint64_t anom = ob->fmt->anomalies(ob->info);
 
 		if (!anom)
-			prop_add(A_DIM, "  none");
+			prop_add(A_DIM "  none" A_OFF);
 		for (i = 0; i < 64; i++) {
 			const char *an;
 
@@ -10146,12 +10157,12 @@ no_regions:
 				continue;
 			an = ob->fmt->anomaly_name(i);
 			if (an)
-				prop_add(A_BAD, "  %s", an);
+				prop_add(A_BAD "  %s" A_OFF, an);
 			else
-				prop_add(A_BAD, "  bit%u", i);
+				prop_add(A_BAD "  bit%u" A_OFF, i);
 		}
 	} else {
-		prop_add(A_DIM, "  no parser claimed these bytes");
+		prop_add(A_DIM "  no parser claimed these bytes" A_OFF);
 	}
 
 	/*
@@ -10180,23 +10191,22 @@ no_regions:
 	if (ob->packer[0] || emu_why_tag(ob->emu_why)) {
 		prop_head("Packer");
 		if (ob->packer[0] && ob->packer_ver >= 0)
-			prop_add(A_OFF, "  %-11s " A_BAD "%s" A_OFF A_DIM
+			prop_add("  %-11s " A_BAD "%s" A_OFF A_DIM
 				 "  v%lld" A_OFF, "unpacker", ob->packer,
 				 ob->packer_ver);
 		else if (ob->packer[0])
-			prop_add(A_OFF, "  %-11s " A_BAD "%s" A_OFF,
+			prop_add("  %-11s " A_BAD "%s" A_OFF,
 				 "unpacker", ob->packer);
 		else
-			prop_add(A_OFF, "  %-11s %s%s" A_OFF A_DIM "  %s" A_OFF,
+			prop_add("  %-11s %s%s" A_OFF A_DIM "  %s" A_OFF,
 				 "verdict",
 				 ob->emu_why == KOF_EMU_UNP_WHY_DENSE
 				 ? A_BAD : A_WARN,
 				 emu_why_tag(ob->emu_why),
 				 emu_why_reason(ob->emu_why));
 		if (!ob->packer[0])
-			prop_add(A_DIM,
-				 "  %-11s Analysis > Examine with emulator",
-				 "try");
+			prop_add(A_DIM "  %-11s Analysis > Examine with "
+				 "emulator" A_OFF, "try");
 	}
 
 	{
@@ -10208,9 +10218,9 @@ no_regions:
 
 		prop_head("Heuristic");
 		if (!heur_of(ob, &hf, &sc, &guess)) {
-			prop_add(A_DIM, "  no model for this format - not scored");
+			prop_add(A_DIM "  no model for this format - not scored" A_OFF);
 		} else {
-			prop_add(A_OFF, "  %-11s %s%d" A_OFF A_DIM
+			prop_add("  %-11s %s%d" A_OFF A_DIM
 				 "  of %d to report" A_OFF, "score",
 				 sc >= hm->bar_centinats ? A_HEUR : A_SIZE,
 				 sc, hm->bar_centinats);
@@ -10221,18 +10231,18 @@ no_regions:
 			 * default colour for as long as it has existed.
 			 */
 			if (sc >= hm->bar_centinats)
-				prop_add(A_OFF, "  %-11s " A_HEUR "%s" A_OFF,
+				prop_add("  %-11s " A_HEUR "%s" A_OFF,
 					 "verdict", guess);
 			for (k = 0; k < hm->n_anom; k++)
 				if (hm->anom[k].format == hf.format &&
 				    (hf.anomalies & hm->anom[k].mask))
-					prop_add(A_OFF, "     %s+%-6d" A_OFF
+					prop_add("     %s+%-6d" A_OFF
 						 A_DIM " %s" A_OFF, A_WARN,
 						 hm->anom[k].centinats,
 						 hm->anom[k].guess);
 			for (k = 0; k < hm->n_flag; k++)
 				if (hf.flags & KOF_HEUR_FL(hm->flag[k].fact))
-					prop_add(A_OFF, "     %s+%-6d" A_OFF
+					prop_add("     %s+%-6d" A_OFF
 						 A_DIM " %s" A_OFF, A_WARN,
 						 hm->flag[k].centinats,
 						 hm->flag[k].guess);
@@ -10250,7 +10260,7 @@ no_regions:
 	 * was worse still - it ended mid-sentence and left the reader to guess
 	 * whether the module ran and declined, or never ran at all.
 	 */
-	prop_add(A_OFF, "  %s%u" A_OFF A_DIM " matched, " A_OFF A_SIZE "%u"
+	prop_add("  %s%u" A_OFF A_DIM " matched, " A_OFF A_SIZE "%u"
 		 A_OFF A_DIM " skipped" A_OFF, hit ? worst_attr(ob) : A_SIZE,
 		 hit, ob->n_touch - hit);
 	for (i = 0; i < ob->n_touch; i++) {
@@ -10259,7 +10269,7 @@ no_regions:
 
 		touch_name(t, name, sizeof name);
 		touch_head(t, head, sizeof head);
-		prop_add(A_OFF, "  %s%-44s" A_OFF A_SIZE "%-10s" A_OFF A_WARN
+		prop_add("  %s%-44s" A_OFF A_SIZE "%-10s" A_OFF A_WARN
 			 "%s" A_OFF, t->fired ? level_attr(t->fired_level)
 					      : A_ID, name, head,
 			 t->kind == KOF_TOUCH_INELIGIBLE && t->ruled_out
