@@ -425,17 +425,29 @@ uint32_t    kof_engine_unpackers(const kof_engine *);
 uint32_t    kof_engine_heur_rules(const kof_engine *);
 
 /*
- * The database format version every loaded pack matched.
+ * WHAT THE LOADED DATABASE ACTUALLY SAYS ABOUT ITSELF.
  *
- * A constant of this build rather than something read out of a file, and it is one
- * precisely because the loader refuses any pack that disagrees with it: there is no
- * state in which a loaded database has some other version. It is reported so that
- * an operator looking at a scanner and a database directory can tell whether they
- * belong together, which is the question this answers.
+ * Read out of the packs, not taken from a constant of this build - and the
+ * difference is new. While a pack was refused unless its version matched
+ * exactly, the loaded value could only be this build's, so a constant was the
+ * same answer; the comment here said so. A minor that is accepted when it is
+ * LOWER ends that: an engine at 1.7 happily loads a 1.3 database, and reporting
+ * 1.7 would be reporting the reader rather than what was read.
  *
- * The engine's own version belongs beside this and is not here yet.
+ * THE OLDEST OF THE PACKS, because that is the question an operator is asking.
+ * A database directory is many files, and it is only as fresh as its stalest
+ * part: reporting the newest would hide exactly the pack that needs updating.
+ *
+ * Zero-filled and non-zero return when there is no database.
  */
-uint32_t    kof_engine_db_version(const kof_engine *);
+struct kof_db_version {
+	uint16_t major;
+	uint16_t minor;
+	uint32_t build;      /* YYYYMMDDHH in UTC; 0 when the pack did not say */
+	uint32_t machine;    /* enum kof_pack_machine, as the packs were built */
+};
+
+int         kof_engine_db_version(const kof_engine *, struct kof_db_version *);
 
 /* One scanner per thread. The engine it is made from must outlive it. */
 kof_scanner *kof_scanner_new(const kof_engine *);

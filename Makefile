@@ -375,6 +375,15 @@ $(INT)/lib_kofdisasm/%.o: libkofeng/kofdisasm/%.c $(STAMP) | $(INT)
 EMU_INC := -Ilibkofemu/bddisasm/inc -Ilibkofemu/bddisasm/src \
            -Ilibkofemu/bddisasm/src/include
 
+# WHEN THIS DATABASE WAS BUILT, as YYYYMMDDHH in UTC - see KOF_PACK_BUILD.
+#
+# UTC and not local time: two build machines in different zones would otherwise
+# stamp packs with numbers that do not increase with time, and ordering is the
+# one thing this format is good for. Computed once per make run, so every pack
+# in one build carries the same stamp.
+KOF_BUILD_STAMP := $(shell date -u +%Y%m%d%H)
+CFLAGS += -DKOF_PACK_BUILD=$(KOF_BUILD_STAMP)u
+
 VENDOR_CFLAGS := -O2 -g -std=c11 -fno-common -D_LIB -DAMD64 \
                  -Wall -Wextra \
                  -Wno-missing-field-initializers -Wno-missing-braces \

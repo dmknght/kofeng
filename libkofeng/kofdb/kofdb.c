@@ -225,11 +225,43 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 	if (h->abi_version > KOFSIG_ABI_VERSION)
 		REFUSE("modules need ABI %u, this engine provides %u",
 		       h->abi_version, (unsigned)KOFSIG_ABI_VERSION);
-	if (h->version != KOF_PACK_VERSION)
-		REFUSE("pack version %u, this engine reads %u", h->version,
-		       KOF_PACK_VERSION);
+	/*
+	 * THE THREE VERSION RULES, and they are three different rules.
+	 *
+	 * major is the layout: anything but an exact match reads the wrong
+	 * bytes, so it is refused outright.
+	 *
+	 * minor is additive, so a pack older than this engine is fine and a pack
+	 * NEWER is not - it may name a section this build has never heard of.
+	 * That asymmetry is the whole value of having a minor at all: an engine
+	 * update no longer forces every database to be rebuilt.
+	 *
+	 * build is not tested. It says when the pack was made and nothing about
+	 * whether it can be read.
+	 */
+	if (h->major != KOF_PACK_MAJOR)
+		REFUSE("pack layout %u, this engine reads %u",
+		       (unsigned)h->major, (unsigned)KOF_PACK_MAJOR);
+	if (h->minor > KOF_PACK_MINOR)
+		REFUSE("pack needs format %u.%u, this engine provides %u.%u",
+		       (unsigned)h->major, (unsigned)h->minor,
+		       (unsigned)KOF_PACK_MAJOR, (unsigned)KOF_PACK_MINOR);
 	/* A pack holds native code, so one built for another machine is refused
 	 * loudly rather than entered. */
+	/*
+	 * A CLEARER MESSAGE, NOT A SECOND GUARD - and worth being precise about,
+	 * because it looks like one.
+	 *
+	 * A pack from an older build that could not name its host carries zero.
+	 * The comparison below already refuses it, on every host, because no
+	 * host can itself be zero any more: kofpack.h makes an unrecognised
+	 * build machine an #error rather than a value. So this line can never
+	 * change a decision - only what the operator is told. Deleting the
+	 * #error is what would give it teeth again, and then two unrecognised
+	 * hosts would be running each other's native code.
+	 */
+	if (h->machine == KOF_PACK_MACH_NONE)
+		REFUSE("pack names no machine");
 	if (h->machine != KOF_PACK_MACH_HOST)
 		REFUSE("built for machine %u, this is %u", h->machine,
 		       (unsigned)KOF_PACK_MACH_HOST);

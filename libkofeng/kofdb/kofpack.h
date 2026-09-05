@@ -101,6 +101,7 @@
 #ifndef KOFENG_KOFPACK_H
 #define KOFENG_KOFPACK_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* "KOFP", little end first. Byte order is the host's; this only has to differ
@@ -108,45 +109,56 @@
 #define KOF_PACK_MAGIC   0x50464f4bu
 
 /*
- * There is no compatibility range: a pack is a build artefact next to the engine
- * that reads it, and a loader that accepts an older layout is a loader carrying two
- * layouts. A pack whose version differs is refused, not converted.
+ * THREE NUMBERS, THREE DIFFERENT RULES. A version field only earns its place if
+ * a reader knows exactly what to do with it, so each is spelled out here and
+ * enforced in one place - kof_db_load.
  *
- * Still moving while the format is pre-release. Nothing has shipped, every database in
- * existence is rebuilt from source by `make db`, and a version that moves before
- * anyone can be holding the old one is a number that records edits rather than
- * compatibility. It gets bumped on the first release and on every shape change
- * after that.
+ *   major   the LAYOUT of this file. Refused unless it matches exactly: a
+ *           reader that guesses reads the wrong bytes.
  *
- * 4: struct kof_pack_mod grew family_off and maltype, and KOF_SEC_NAME_POOL's
- * contract changed with it - a finding's name descriptor used to hold the whole
- * composed string ("Botnet.Mirai.Generic"); now it holds only the variant, and
- * the family text lives once per module instead of once per finding. A version 3
- * reader would read a version 4 pack's name pool as full names and be
- * technically not wrong, which is exactly the kind of not-wrong that is worse
- * than a refusal - see KOF_TARGET_NAME and finding_str in scan.c for the shape
- * this now matches.
+ *   minor   an ADDITIVE change - a section id appended, a field added at the
+ *           tail of a record. Refused only when the pack's is HIGHER than the
+ *           reader's, so a new engine still reads databases built before it.
+ *           That is the whole point of having it: an engine update stops
+ *           forcing every database to be rebuilt.
+ *
+ *   build   WHEN this pack was made, and nothing else. Never compared for
+ *           compatibility. See KOF_PACK_BUILD.
+ *
+ * MAJOR RESTARTS AT 1 HERE. The single `version` it replaces reached 9, and the
+ * reset is safe in both directions because the old check was `!=`: an engine
+ * from that era reads the u32 at offset 4, sees major|minor<<16, and refuses
+ * every value this can produce. It stays safe as long as major never returns to
+ * 9 - eight bumps away, and worth remembering then.
+ *
+ * A pack is a build artefact next to the engine that reads it. Nothing here
+ * converts an old one; a refusal costs a rebuild and nothing else.
  */
+#define KOF_PACK_MAJOR 1u
+#define KOF_PACK_MINOR 0u
+
 /*
- * 5: struct kof_pack_mod grew unp_kind. A v4 pack has no way to say whether an
- * unpacker is a packer or a container, and the heuristic now scores that - so a
- * stale pack is refused rather than read with the field assumed zero, which
- * would silently classify UPX as an archive.
+ * WHEN, as YYYYMMDDHH in UTC - 2026090514 for 14:00 on the 5th.
  *
- * 7: struct kof_pack_mod grew heur_phase and heur_want, for the rule-based
- * heuristic kind - see kofmod/heur.h.
+ * A number rather than a string so a reader can order two of them, and to the
+ * hour because a database may be pushed more than once a day. ORDER is all this
+ * is good for: subtracting two of them lies (20260901 - 20260831 is 70, not 1),
+ * and nothing here subtracts.
  *
- * 8: it grew heur_predict_off with it. A rule may now name the family it expects
- * an object to turn out to be, which the engine both reports and uses to decide
- * which decoder to try first. Read as zero from a v7 pack it would mean "no
- * prediction", which is not wrong so much as silently less useful - and a pack
- * is a build artefact, so refusing costs a rebuild and nothing else.
- * 9: struct kof_pack_mod grew heur_level. A rule may be gated to a --heur
- *    level, so evidence that costs more than a default scan should spend can
- *    be asked for rather than always paid. Zero means unstated, which reads as
- *    level 1 - so a v8 pack runs exactly as it did.
+ * UTC IS NOT OPTIONAL. Two build machines in different zones would otherwise
+ * produce stamps that do not increase with time, which breaks the one property
+ * the format has.
+ *
+ * It sits before crc32 and is therefore OUTSIDE the checksum, so two builds of
+ * identical sources at different hours still produce the same crc32 - which is
+ * what lets "same content?" be answered by comparing packs.
+ *
+ * The Makefile passes the real value; this default only keeps a stray
+ * compilation building.
  */
-#define KOF_PACK_VERSION 9u
+#ifndef KOF_PACK_BUILD
+#define KOF_PACK_BUILD 0u
+#endif
 
 /*
  * The machine the code in this pack was built for. Not an architecture the pack
@@ -154,10 +166,23 @@
  * scan and is a different question with the same word in it.
  */
 enum kof_pack_machine {
+	/*
+	 * Zero is not a machine. It is what a pack written by a build that could
+	 * not name its own host would carry, and two such builds on different
+	 * architectures would then accept each other's native code - which is the
+	 * one failure this field exists to prevent. The build refuses to happen
+	 * below, and the loader refuses the value as well, because a pack written
+	 * before that refusal existed can still be sitting on a disk.
+	 */
 	KOF_PACK_MACH_NONE    = 0,
 	KOF_PACK_MACH_X86_64  = 1,
 	KOF_PACK_MACH_ARM64   = 2,
-	KOF_PACK_MACH_RISCV64 = 3
+	KOF_PACK_MACH_RISCV64 = 3,
+	KOF_PACK_MACH_X86     = 4,
+	KOF_PACK_MACH_ARM     = 5,
+	KOF_PACK_MACH_RISCV32 = 6,
+	KOF_PACK_MACH_MIPS64  = 7,
+	KOF_PACK_MACH_MIPS    = 8
 };
 
 #if defined(__x86_64__)
@@ -166,8 +191,26 @@ enum kof_pack_machine {
 #define KOF_PACK_MACH_HOST KOF_PACK_MACH_ARM64
 #elif defined(__riscv) && __riscv_xlen == 64
 #define KOF_PACK_MACH_HOST KOF_PACK_MACH_RISCV64
+#elif defined(__i386__)
+#define KOF_PACK_MACH_HOST KOF_PACK_MACH_X86
+#elif defined(__arm__)
+#define KOF_PACK_MACH_HOST KOF_PACK_MACH_ARM
+#elif defined(__riscv) && __riscv_xlen == 32
+#define KOF_PACK_MACH_HOST KOF_PACK_MACH_RISCV32
+#elif defined(__mips__) && defined(__mips64)
+#define KOF_PACK_MACH_HOST KOF_PACK_MACH_MIPS64
+#elif defined(__mips__)
+#define KOF_PACK_MACH_HOST KOF_PACK_MACH_MIPS
 #else
-#define KOF_PACK_MACH_HOST KOF_PACK_MACH_NONE
+/*
+ * NOT A DEFAULT - A REFUSAL.
+ *
+ * A pack carries native code, and the machine it was built for is a property of
+ * this compiler on this host: it is never unknown, it is only unrecognised. A
+ * fallback value would let two unrecognised hosts agree with each other, and
+ * they would agree by running each other's instructions.
+ */
+#error "unknown build machine: a pack holds native code and cannot guess"
 #endif
 
 /*
@@ -318,7 +361,9 @@ struct kof_pack_sec {
  */
 struct kof_pack_hdr {
 	uint32_t magic;
-	uint32_t version;
+	uint16_t major;           /* KOF_PACK_MAJOR - refused unless equal   */
+	uint16_t minor;           /* KOF_PACK_MINOR - refused if higher      */
+	uint32_t build;           /* KOF_PACK_BUILD - never compared         */
 
 	/*
 	 * Checksum over [KOF_PACK_CRC_FROM, file_len), so it covers the rest of
@@ -409,7 +454,12 @@ struct kof_pack_hdr {
 };
 
 /* The checksum covers everything after itself. */
-#define KOF_PACK_CRC_FROM ((uint64_t)(sizeof(uint32_t) * 3))
+/*
+ * The checksum covers everything after itself, so what precedes it is exactly
+ * what a reader must understand BEFORE it can decide whether the checksum is
+ * worth computing: which file this is, which layout, and when it was made.
+ */
+#define KOF_PACK_CRC_FROM ((uint64_t)(sizeof(uint32_t) * 4))
 
 /*
  * One module, cold side: read only once the prefilter has decided to run it.
@@ -684,10 +734,14 @@ _Static_assert(sizeof(struct kof_pack_idx)  == 8,   "pack index slot grew paddin
  * legitimately grew, which taught whoever hit it to update the number rather than to
  * ask why it moved. */
 _Static_assert(sizeof(struct kof_pack_hdr) ==
-	       80 + KOF_SEC_COUNT * sizeof(struct kof_pack_sec),
+	       88 + KOF_SEC_COUNT * sizeof(struct kof_pack_sec),
 	       "pack header changed size");
 
 /* The checksum has to start after itself and cover everything else. */
-_Static_assert(KOF_PACK_CRC_FROM == 12, "checksum no longer starts after the crc field");
+_Static_assert(KOF_PACK_CRC_FROM == 16,
+	       "checksum no longer starts after the crc field");
+_Static_assert(offsetof(struct kof_pack_hdr, crc32) + sizeof(uint32_t) ==
+	       KOF_PACK_CRC_FROM,
+	       "crc32 is not the last field outside the checksummed region");
 
 #endif /* KOFENG_KOFPACK_H */

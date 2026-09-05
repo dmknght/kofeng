@@ -64,14 +64,42 @@ const char *kof_broken_name(uint32_t reason)
 	}
 }
 
-uint32_t kof_engine_db_version(const kof_engine *e)
+/*
+ * The oldest version among the loaded packs - see kofeng.h for why oldest.
+ *
+ * The header is already resident: a pack is mapped and kof_db_pack keeps the
+ * mapping, so this reads the bytes the loader validated rather than a copy made
+ * beside them. Nothing stores these values anywhere, which is the point - one
+ * source, and it is the file.
+ */
+int kof_engine_db_version(const kof_engine *e, struct kof_db_version *out)
 {
-	/* Not read back out of the engine: a pack whose version differs from this one
-	 * never became part of it, so the loaded version and this constant are the
-	 * same number by construction. Taking the argument anyway keeps the call
-	 * shaped like the rest, and keeps the answer meaningless without a database -
-	 * which is what it is. */
-	return e ? KOF_PACK_VERSION : 0;
+	uint32_t i;
+	int have = 0;
+
+	if (!out)
+		return 0;
+	out->major = out->minor = 0;
+	out->build = out->machine = 0;
+	if (!e)
+		return 0;
+	for (i = 0; i < e->n_packs; i++) {
+		const struct kof_pack_hdr *h = e->packs[i].map;
+
+		if (!h)
+			continue;
+		if (!have || h->major < out->major ||
+		    (h->major == out->major && h->minor < out->minor) ||
+		    (h->major == out->major && h->minor == out->minor &&
+		     h->build < out->build)) {
+			out->major   = h->major;
+			out->minor   = h->minor;
+			out->build   = h->build;
+			out->machine = h->machine;
+		}
+		have = 1;
+	}
+	return have;
 }
 
 kof_scanner *kof_scanner_new(const kof_engine *e)

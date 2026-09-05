@@ -558,7 +558,9 @@ uint8_t *kof_pack_build(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n
 
 	h = (struct kof_pack_hdr *)img;
 	h->magic   = KOF_PACK_MAGIC;
-	h->version = KOF_PACK_VERSION;
+	h->major = KOF_PACK_MAJOR;
+	h->minor = KOF_PACK_MINOR;
+	h->build = KOF_PACK_BUILD;
 	/* Which vtable the blobs expect. Taken from the header this packer was built
 	 * against, which is the same SDK the modules were compiled against - they come
 	 * out of one tree and one `make`. */

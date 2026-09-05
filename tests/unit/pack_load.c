@@ -159,6 +159,53 @@ static void reseal(uint8_t *img, size_t len)
  * is expressible: it is the one mutation that changes the file rather than its
  * contents.
  */
+
+/*
+ * The mirror of expect_refused, and this file needs exactly one.
+ *
+ * Every other case here proves a refusal, so a rule that became "refuse
+ * everything" would pass all of them. The minor rule is the one that must
+ * ACCEPT - an engine reading a database older than itself - and without a case
+ * that fails when it stops accepting, the asymmetry is untested.
+ */
+static void expect_loaded(const char *tag, const uint8_t *good, size_t good_len,
+			  void (*mutate)(uint8_t *, size_t *), int seal)
+{
+	uint8_t *img = malloc(good_len);
+	size_t len = good_len;
+	char dir[512];
+	struct kof_engine *e;
+
+	if (!img) {
+		fail(tag, "out of memory");
+		return;
+	}
+	memcpy(img, good, good_len);
+	mutate(img, &len);
+	if (seal)
+		reseal(img, len);
+
+	if (!case_dir(dir, sizeof dir, tag)) {
+		fail(tag, "cannot make a directory for the case");
+		free(img);
+		return;
+	}
+	if (!write_pack(dir, "ok.ksig", img, len)) {
+		fail(tag, "cannot write the pack");
+		free(img);
+		rm_dir(dir, NULL, NULL);
+		return;
+	}
+	free(img);
+
+	e = kof_db_load(dir);
+	if (!e)
+		fail(tag, "refused a pack it should have loaded");
+	else
+		kof_db_free(e);
+	rm_dir(dir, "ok.ksig", NULL);
+}
+
 static void expect_refused(const char *tag, const uint8_t *good, size_t good_len,
 			   void (*mutate)(uint8_t *, size_t *), int seal)
 {
@@ -207,10 +254,48 @@ static void mut_magic(uint8_t *img, size_t *len)
 	HDR(img)->magic ^= 0xffu;
 }
 
-static void mut_version(uint8_t *img, size_t *len)
+/*
+ * THE THREE VERSION RULES, one mutation each - and the third is the one worth
+ * having a test for.
+ *
+ * major and a HIGHER minor must be refused, for the reasons kofpack.h gives. A
+ * LOWER minor must be ACCEPTED, and nothing else in this file tests an
+ * acceptance: it is the whole reason minor exists, so a change that quietly
+ * turned the rule back into an equality would pass every other case here.
+ */
+static void mut_major(uint8_t *img, size_t *len)
 {
 	(void)len;
-	HDR(img)->version = KOF_PACK_VERSION + 1u;
+	HDR(img)->major = (uint16_t)(KOF_PACK_MAJOR + 1u);
+}
+
+static void mut_minor_newer(uint8_t *img, size_t *len)
+{
+	(void)len;
+	HDR(img)->minor = (uint16_t)(KOF_PACK_MINOR + 1u);
+}
+
+/* Not a refusal: this one has to load. */
+static void mut_minor_older(uint8_t *img, size_t *len)
+{
+	(void)len;
+	HDR(img)->minor = 0;
+	HDR(img)->build = 1999010100u;   /* and the stamp changes nothing */
+}
+
+/*
+ * Zero is not a machine.
+ *
+ * A build that could not name its host would write it, and two such builds on
+ * different architectures would then accept each other's native code. The build
+ * cannot produce this any more - kofpack.h makes it an #error - but a pack
+ * written before that refusal existed can still be on a disk, so the loader
+ * refuses the value as well.
+ */
+static void mut_machine_none(uint8_t *img, size_t *len)
+{
+	(void)len;
+	HDR(img)->machine = (uint32_t)KOF_PACK_MACH_NONE;
 }
 
 /*
@@ -588,7 +673,8 @@ static void check_mixed(const uint8_t *good, size_t good_len)
  */
 #define ORDER_PACKS 32u
 
-static int order_exercised;   /* did readdir hand back an order worth sorting? */
+static int order_exercised;
+static int minor_exercised;   /* did readdir hand back an order worth sorting? */
 
 static void check_order(void)
 {
@@ -699,9 +785,11 @@ int main(void)
 		int seal;
 	} cases[] = {
 		{ "magic",         mut_magic,             1 },
-		{ "version",       mut_version,           1 },
+		{ "major",         mut_major,             1 },
+		{ "minor_newer",   mut_minor_newer,       1 },
 		{ "abi",           mut_abi,               1 },
 		{ "machine",       mut_machine,           1 },
+		{ "machine_none",  mut_machine_none,      1 },
 		{ "kind",          mut_kind,              1 },
 		{ "truncated",     mut_truncate,          1 },
 		{ "file_len",      mut_file_len,          1 },
@@ -753,14 +841,31 @@ int main(void)
 		expect_refused(cases[i].tag, good, good_len, cases[i].fn,
 			       cases[i].seal);
 
+	/*
+	 * And the one that has to LOAD - when there is one.
+	 *
+	 * At minor 0 there is no older minor to build, so this case cannot be
+	 * written and saying so is the only honest thing to print. It was
+	 * written before this guard existed and it passed: it set minor to 0
+	 * against an engine at 0, which tests nothing, and turning the rule
+	 * from `>` back into `!=` went unnoticed. The line at the end reports
+	 * which of the two happened.
+	 */
+	if (KOF_PACK_MINOR > 0u) {
+		expect_loaded("minor_older", good, good_len, mut_minor_older, 1);
+		minor_exercised = 1;
+	}
+
 	check_mixed(good, good_len);
 	check_order();
 
 	free(good);
 	rmdir(root);
 
-	printf("pack load: %zu/%zu refusal(s), load order %s, good pack %s\n",
-	       n_cases - (size_t)failures, n_cases,
+	printf("pack load: %zu/%zu refusal(s), older minor %s, load order %s, "
+	       "good pack %s\n", n_cases - (size_t)failures, n_cases,
+	       minor_exercised ? "accepted"
+			       : "NOT EXERCISED (engine is at minor 0)",
 	       order_exercised ? "sorted" : "NOT EXERCISED (fs gave sorted order)",
 	       failures ? "FAILED" : "ok");
 	return failures != 0;

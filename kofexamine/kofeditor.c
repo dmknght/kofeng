@@ -3636,8 +3636,11 @@ void generate(struct kof_editor *e, int as_new)
 		 * and inventing one here would put a number in every file that
 		 * nothing else in the tree could confirm.
 		 */
-		fprintf(f, " * Engine:      db format %u, module ABI %u\n",
-			(unsigned)KOF_PACK_VERSION,
+		/* Metadata: when this source was written and against what. The
+		 * db format is the one this build WRITES, which is the honest
+		 * thing to record here - the file is a source, not a pack. */
+		fprintf(f, " * Engine:      db format %u.%u, module ABI %u\n",
+			(unsigned)KOF_PACK_MAJOR, (unsigned)KOF_PACK_MINOR,
 			(unsigned)KOFSIG_ABI_VERSION);
 		fprintf(f, " */\n");
 	}

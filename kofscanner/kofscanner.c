@@ -750,10 +750,20 @@ int main(int argc, char **argv)
 		fprintf(stderr, "%s: cannot load a database from %s\n", argv[0], db);
 		return 2;
 	}
-	printf("database: version %u, %u record(s), %u unpacker(s), "
-	       "%u heur rule(s)\n",
-	       kof_engine_db_version(eng), kof_engine_records(eng),
-	       kof_engine_unpackers(eng), kof_engine_heur_rules(eng));
+	{
+		/*
+		 * The OLDEST pack's version, which is what the engine reports:
+		 * a database directory is only as fresh as its stalest file.
+		 */
+		struct kof_db_version dv;
+
+		kof_engine_db_version(eng, &dv);
+		printf("database: format %u.%u build %u, %u record(s), "
+		       "%u unpacker(s), %u heur rule(s)\n",
+		       (unsigned)dv.major, (unsigned)dv.minor, dv.build,
+		       kof_engine_records(eng), kof_engine_unpackers(eng),
+		       kof_engine_heur_rules(eng));
+	}
 
 	sc = kof_scanner_new(eng);
 	if (!sc) {
