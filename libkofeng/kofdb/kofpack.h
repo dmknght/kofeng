@@ -135,7 +135,22 @@
  * converts an old one; a refusal costs a rebuild and nothing else.
  */
 #define KOF_PACK_MAJOR 1u
-#define KOF_PACK_MINOR 0u
+/*
+ * 1: KOF_UNP_ZLIB.
+ *
+ * The layout did not move, which is why this is a minor and not a major - but
+ * it is not nothing either, and the difference is what the minor rule exists
+ * for. A pack built now may hold a module that asks the host to decode RFC 1950
+ * framing, and an engine that predates the method would answer that request
+ * with zero bytes: the scan would finish, report nothing, and be believed. A
+ * detection that did not happen is the one failure no test notices, so a pack
+ * that can contain such a module is refused by an older engine rather than
+ * silently under-run by it.
+ *
+ * The other direction stays open, which is the point of the asymmetry: this
+ * engine still loads every pack built at minor 0.
+ */
+#define KOF_PACK_MINOR 1u
 
 /*
  * WHEN, as YYYYMMDDHH in UTC - 2026090514 for 14:00 on the 5th.

@@ -460,7 +460,7 @@ uint32_t    kof_engine_heur_rules(const kof_engine *);
  * that is itself the bug being reported.
  */
 #define KOFENG_MAJOR 1u
-#define KOFENG_MINOR 0u
+#define KOFENG_MINOR 1u
 
 /* The Makefile passes the real stamp; this only keeps a stray compilation
  * building, the same way KOF_PACK_BUILD does. */

@@ -489,7 +489,8 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/sevenzip.h \
            $(SDK)/include/kofmod/rar.h \
            $(SDK)/include/kofmod/xz.h \
-           $(SDK)/include/kofmod/rtf.h
+           $(SDK)/include/kofmod/rtf.h \
+           $(SDK)/include/kofmod/pdf.h
 
 $(SDK)/include/kofeng.h: libkofeng/kofeng.h
 	@mkdir -p $(dir $@)
@@ -716,9 +717,17 @@ ASAN_LIB := $(TEST)/libkofeng-asan.a
 #
 $(ASAN_LIB): $(LIB_SRC) $(EMU_SRC) $(VENDOR_SRC) $(SDK_HDR) | $(TEST)
 	@rm -rf $(TEST)/asan-obj && mkdir -p $(TEST)/asan-obj
+	@# EMU_INC here as well as on the two loops below: libkofeng itself now
+	@# contains a file that includes bddisasm - kofdisasm/xref.c - so the
+	@# library's own sources need the decoder's include path. The release
+	@# build gives it that through a per-directory rule; this loop has no
+	@# per-directory anything, and without the flag it stopped building
+	@# entirely ("fatal error: bddisasm.h: No such file or directory"), which
+	@# is how the sanitizer target came to be broken while make unit stayed
+	@# green. Two compiles of one library are two things to keep in step.
 	@for f in $(LIB_SRC); do \
 		o=$(TEST)/asan-obj/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
-		$(CC) $(CFLAGS) $(ASAN_FLAGS) -c $$f -o $$o || exit 1; \
+		$(CC) $(CFLAGS) $(ASAN_FLAGS) $(EMU_INC) -c $$f -o $$o || exit 1; \
 	done
 	@for f in $(EMU_SRC); do \
 		o=$(TEST)/asan-obj/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \

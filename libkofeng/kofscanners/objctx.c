@@ -1466,6 +1466,44 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 	if (!len)
 		return 0;
 
+	/*
+	 * ZLIB IS DEFLATE WITH TWO BYTES IN FRONT, so it is answered by moving
+	 * the window rather than by a second decoder.
+	 *
+	 * RFC 1950 wraps RFC 1951 in a two byte header and a four byte Adler-32.
+	 * The trailer needs nothing: inflate stops at its own end-of-stream
+	 * marker and never reads it. Only the header has to go, and after it the
+	 * bytes are exactly what the DEFLATE path below already handles - so
+	 * this translates the request and falls through instead of repeating
+	 * that block.
+	 *
+	 * THE HEADER IS CHECKED, NOT ASSUMED. CM must be 8, the window must be
+	 * no larger than 32KB, the two bytes together must be a multiple of 31 -
+	 * the check digit RFC 1950 carries for exactly this - and FDICT must be
+	 * clear, because a preset dictionary names data this engine does not
+	 * have and decoding without it produces confident garbage.
+	 *
+	 * A stream that fails the check is decoded from its FIRST byte as raw
+	 * DEFLATE, which is what a producer that emitted RFC 1951 under a zlib
+	 * name meant. That is why a caller unsure which of the two it holds can
+	 * name this method and be right either way - and why the PDF module,
+	 * whose /FlateDecode is either in practice, does exactly that.
+	 */
+	if (method == KOF_UNP_ZLIB) {
+		if (len > 2u) {
+			uint32_t cmf = b.p[off];
+			uint32_t flg = b.p[off + 1u];
+
+			if ((cmf & 0x0fu) == 8u && (cmf >> 4) <= 7u &&
+			    ((cmf << 8) + flg) % 31u == 0u &&
+			    !(flg & 0x20u)) {
+				off += 2u;
+				len -= 2u;
+			}
+		}
+		method = KOF_UNP_DEFLATE;
+	}
+
 	if (method == KOF_UNP_DEFLATE) {
 		if (!sc->inf) {
 			sc->inf = malloc(sizeof *sc->inf);

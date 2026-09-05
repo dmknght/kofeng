@@ -861,6 +861,24 @@ enum kof_unp_method {
 	 * a decoder here rather than branching inside one.
 	 */
 	KOF_UNP_RAR5 = 8,
+	/*
+	 * RFC 1950 - the same DEFLATE data behind two bytes of framing.
+	 *
+	 * Its own method rather than two lines in every caller, because zlib
+	 * framing is not peculiar to any one format: a PDF's /FlateDecode uses
+	 * it, and so does anything else that reached for the obvious library.
+	 * The rule kofsig.h states for the whole unpack surface applies to it -
+	 * standard and shared belongs in the host - and the first module to meet
+	 * it had open-coded the header check, which is one copy away from every
+	 * later one getting it subtly different.
+	 *
+	 * The framing is CHECKED, not assumed: a stream that does not carry a
+	 * valid zlib header is decoded as raw DEFLATE from its first byte, which
+	 * is what a producer that emitted RFC 1951 under a zlib name meant. So a
+	 * caller that is unsure which it has can name this one and be right
+	 * either way.
+	 */
+	KOF_UNP_ZLIB = 9,
 
 	KOF_UNP_NRV2B_8 = 16, KOF_UNP_NRV2B_16, KOF_UNP_NRV2B_32,
 	KOF_UNP_NRV2D_8,      KOF_UNP_NRV2D_16, KOF_UNP_NRV2D_32,
@@ -1549,6 +1567,12 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
  * has nothing sensible to pass and should not have to invent one. */
 #define kof_unpack_deflate(off, len)                                       \
 	kof_unpack_at(KOF_UNP_DEFLATE, (off), (len), 0)
+
+/* The same, for a stream that carries zlib framing - or might. The host checks
+ * the header and falls back to raw DEFLATE when there is none, so a caller that
+ * cannot tell the two apart names this one. Needs no size either. */
+#define kof_unpack_zlib(off, len)                                          \
+	kof_unpack_at(KOF_UNP_ZLIB, (off), (len), 0)
 
 /*
  * Decode entry `index` of this object into the object being produced.
