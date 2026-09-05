@@ -136,21 +136,30 @@
  */
 #define KOF_PACK_MAJOR 1u
 /*
- * 1: KOF_UNP_ZLIB.
+ * THESE TWO NUMBERS DESCRIBE THE FILE, NOT THE ENGINE, and the distinction is
+ * worth stating because it was got wrong once already.
  *
- * The layout did not move, which is why this is a minor and not a major - but
- * it is not nothing either, and the difference is what the minor rule exists
- * for. A pack built now may hold a module that asks the host to decode RFC 1950
- * framing, and an engine that predates the method would answer that request
- * with zero bytes: the scan would finish, report nothing, and be believed. A
- * detection that did not happen is the one failure no test notices, so a pack
- * that can contain such a module is refused by an older engine rather than
- * silently under-run by it.
+ * KOF_UNP_ZLIB was added to the module ABI and this was bumped to 1 alongside
+ * it, on the reasoning that a pack built afterwards might hold a module asking
+ * for a method an older host does not implement. That reasoning is not wrong
+ * about the risk and is badly wrong about the remedy: this version gates the
+ * WHOLE FILE. A database holds every signature that targets a format, so
+ * refusing it costs a reader every unrelated detection in it to protect one
+ * module's decoder - and the failure being protected against is one module
+ * getting zero bytes back, not a wild call or a misread record.
  *
- * The other direction stays open, which is the point of the asymmetry: this
- * engine still loads every pack built at minor 0.
+ * So the rule is: this moves when the LAYOUT moves - a section added, a record
+ * reshaped, a field given a new meaning - and not when the engine grows a
+ * capability. A capability is the engine's own version, KOFENG_MINOR, which
+ * gates nothing and is there to be read.
+ *
+ * The residual risk is stated rather than papered over: a pack whose module
+ * names a method an older host lacks gets zero bytes from that call, and the
+ * module sees the same answer it would get from a corrupt stream. Making that
+ * distinguishable is a per-module question - one module declaring what it needs
+ * - and not something a file-wide refusal can answer.
  */
-#define KOF_PACK_MINOR 1u
+#define KOF_PACK_MINOR 0u
 
 /*
  * WHEN, as YYYYMMDDHH in UTC - 2026090514 for 14:00 on the 5th.
