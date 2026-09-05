@@ -524,14 +524,14 @@ static void order_build(struct kof_xref *u)
 	u->sorted = 1;
 }
 
-uint32_t kof_xref_in(const struct kof_xref *u, uint64_t va, uint64_t n)
+uint32_t kof_xref_in(struct kof_xref *u, uint64_t va, uint64_t n)
 {
 	uint32_t lo = 0, hi, f = 0;
 
 	if (!u || !va)
 		return 0;
 	if (!u->sorted)
-		order_build((struct kof_xref *)u);
+		order_build(u);
 	if (n < 1u)
 		n = 1u;
 	hi = u->n;

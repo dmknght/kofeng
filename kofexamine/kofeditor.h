@@ -302,6 +302,18 @@ struct range {
  * it carries no verdict, and the same matcher can be used by two different
  * conclusions.
  */
+/*
+ * The suffix kof_find_str_ takes for a group's rule.
+ *
+ * One spelling for both readers of the field: the emitter writes it into the
+ * generated source and the chooser shows the author which call a group will
+ * become, and those two have to agree or the preview lies.
+ */
+static inline const char *grp_rule_word(int rule)
+{
+	return rule == 1 ? "any" : rule == 2 ? "multi" : "all";
+}
+
 struct group {
 	int      rule;              /* 0 ALL, 1 ANY, 2 threshold */
 	uint32_t thresh;
@@ -663,8 +675,9 @@ void decl_remove(struct kof_editor *e, uint32_t i);
  * they belong with the thing that writes and reads those declarations rather
  * than with the pane that happens to show them in a menu.
  *
- * Sizes spelled out because the tables are defined in kofeditor.c and sizeof
- * cannot see across a translation unit; the definitions assert they agree.
+ * The counts come with them because sizeof cannot see across a translation
+ * unit; each is a variable filled by sizeof where the table is defined, so it
+ * cannot disagree with the table it counts.
  */
 
 struct kof_arch_word { const char *word; uint32_t val; };

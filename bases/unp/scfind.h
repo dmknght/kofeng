@@ -270,46 +270,45 @@ static uint32_t scf_b64(const uint8_t *in, uint32_t n, uint8_t *out,
 #define SCF_EXECUTED  (KOF_XREF_CALL | KOF_XREF_JUMP)
 
 /*
- * WHAT WAS MEASURED, AND WHY THE REGION FACTS ARE NOT IN THE GATE.
+ * WHAT WAS MEASURED, AND WHAT EACH HALF OF THE GATE IS WORTH.
  *
- * Over two hundred binaries from /usr/bin - all of them clean - taking every
+ * Over three hundred binaries from /usr/bin - all of them clean - taking every
  * OBJECT symbol sized between 64 and 8192 bytes, which is what this rule
- * considers at all. 121 such variables:
+ * considers at all. 155 such variables:
  *
- *     KOF_XREF_CALL          0 of 121     0.0%
- *     KOF_XREF_RGN_ICALL    14 of 121    11.6%
- *     KOF_XREF_RGN_NEAR      4 of 121     3.3%
+ *     CALL or JUMP                    0 of 155     0.0%
+ *     RGN_ICALL                      22 of 155    14.2%
+ *     ARG                            33 of 155    21.3%
+ *     ARG and (RGN_ICALL or NEAR)    25 of 155    16.1%
  *
- * So the gate is CALL and only CALL. One in nine ordinary variables lives in a
- * region that makes an indirect call somewhere, and the reason is structural
- * rather than incidental: EVERY dynamically linked binary calls
- * __libc_start_main through the GOT, which is an indirect call, and it does so
- * from the region the entry point is in. Measured 107 of 107 over /usr/bin.
- * Startup code alone therefore guarantees an indirect call in any binary, and
- * RGN_NEAR - one level of "calls a region that has one" - inherits it: it fired
- * on a purposely built control that does nothing but read a lookup table.
+ * So no region fact is usable ALONE, and the reason is structural rather than
+ * incidental: every dynamically linked binary calls __libc_start_main through
+ * the GOT, which is an indirect call, from the region its entry point is in -
+ * 107 of 107 over /usr/bin. Startup code alone guarantees a region with an
+ * indirect call in any binary at all.
  *
- * The two shapes this therefore does NOT catch, stated so the next person does
- * not have to rediscover them:
+ * THE GATE IS AN AND WITH THE BYTE TESTS BELOW, and that is what makes the
+ * loose half safe. Measured at RULE level rather than at variable level:
+ * enabling STAGED changed the hit count over 4940 real ELF files not at all
+ * (13 either way) and added no finding on /usr/bin at --heur 2. The zero
+ * belongs to the COMBINATION - relax the shape tests below to recover some lost
+ * detection and this number moves without anything here warning about it.
+ *
+ * The two shapes STAGED exists for, neither of which any file in that lab
+ * exhibits - they are exercised only by purpose-built controls:
  *
  *   - the address handed to a helper that calls its parameter
  *   - the payload copied into a fresh mapping and called there, which gcc
  *     inlines to MOVs so nothing is even passed to a call
- *
- * Both are visible to the region facts and neither is separable from ordinary
- * code by them alone. Catching them needs the region evidence COMBINED with the
- * shape tests below, and that combination has not been measured - so it is not
- * enabled. A heuristic gets its reputation from the first thing it gets wrong.
  */
 /*
- * STAGED: the payload is handed somewhere and something nearby transfers
- * control - which is what a loader that copies into a fresh mapping looks like
- * from outside. ARG is the load-bearing half: the negative control that only
- * reads a lookup table has ARG clear, and 21.3% of ordinary variables have it
- * set, so it is evidence and not proof. It is ORed with EXECUTED rather than
- * replacing it, and the byte tests below still have to pass.
+ * A PREDICATE AND NOT A MASK, because the rule is an AND.
+ *
+ * There was a KOF_XREF_ARG|RGN_ICALL|RGN_NEAR mask beside this that nothing
+ * used, and it read as "any of these" - which is the wrong rule and the loose
+ * one. ARG is required: the control that only reads a lookup table has ARG
+ * clear and RGN_NEAR set, so the mask would have accepted it.
  */
-#define SCF_STAGED    (KOF_XREF_ARG | KOF_XREF_RGN_ICALL | KOF_XREF_RGN_NEAR)
 #define SCF_IS_STAGED(x) (((x) & KOF_XREF_ARG) && \
 			  ((x) & (KOF_XREF_RGN_ICALL | KOF_XREF_RGN_NEAR)))
 

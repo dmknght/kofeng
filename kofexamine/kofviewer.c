@@ -3949,10 +3949,8 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		for (i = 0; i < v->ed.dr.n_grp; i++) {
 			if (!cmatch_ok(v, arg, i))
 				continue;
-			snprintf(t, sizeof t, "%u  %s", i + 1u,
-				 v->ed.dr.grp[i].rule == 1 ? "find_any" :
-				 v->ed.dr.grp[i].rule == 2 ? "find_multi" :
-				 "find_all");
+			snprintf(t, sizeof t, "%u  find_%s", i + 1u,
+				 grp_rule_word(v->ed.dr.grp[i].rule));
 			ch_add(c, t);
 		}
 		if (!c->n)
@@ -13660,9 +13658,10 @@ static int click_panel_head(struct view *v)
 			 * that still exists or typed a moment ago, and a dialog
 			 * between the button and the blank sheet is a step in
 			 * the way of the thing the button is for. */
-			if (v->ed.dr.n_decl || v->ed.dr.family[0])
+			if (v->ed.dr.n_decl || v->ed.dr.family[0]) {
 				draft_reset(&v->ed);
 				v->prow_home = 1;
+			}
 		} else if (g_mx >= v->nt_c0 && g_mx <= v->nt_c1)
 			v->edit = 501;
 		return 1;

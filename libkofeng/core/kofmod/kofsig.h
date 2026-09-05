@@ -1693,6 +1693,9 @@ enum kof_maltype {
 #define KOF_MALTYPE_X_ENUM(name, word) name,
 	KOF_MALTYPE_LIST(KOF_MALTYPE_X_ENUM)
 #undef KOF_MALTYPE_X_ENUM
+	/* A terminator, not a bound anything indexes: every table of these is
+	 * expanded from the list above, so none can disagree with it, and
+	 * kof_maltype_name answers a value from outside with "Malware". */
 	KOF_MALTYPE_COUNT
 };
 
@@ -1709,6 +1712,21 @@ static inline const char *kof_maltype_name(uint32_t maltype)
 	KOF_MALTYPE_LIST(KOF_MALTYPE_X_NAME)
 #undef KOF_MALTYPE_X_NAME
 	default: return "Malware";
+	}
+}
+
+/*
+ * The identifier a signature source writes for one of these - for a tool that
+ * generates source, so the spelling comes from the list above rather than from
+ * a second copy of it. kof_maltype_name gives the word a report shows.
+ */
+static inline const char *kof_maltype_ident(uint32_t maltype)
+{
+	switch (maltype) {
+#define KOF_MALTYPE_X_IDENT(name, word) case name: return #name;
+	KOF_MALTYPE_LIST(KOF_MALTYPE_X_IDENT)
+#undef KOF_MALTYPE_X_IDENT
+	default: return "KOF_MALTYPE_VIRUS";
 	}
 }
 

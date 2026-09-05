@@ -97,8 +97,11 @@ void kof_xref_add(struct kof_xref *u, const uint8_t *code, uint32_t code_n,
  * had the compiler started anywhere but the front.
  *
  * `n` of 0 or 1 asks about the single address.
+ *
+ * Not const: the first query sorts the entries into a searchable index, so the
+ * map a caller passes is finished by asking it a question.
  */
-uint32_t kof_xref_in(const struct kof_xref *u, uint64_t va, uint64_t n);
+uint32_t kof_xref_in(struct kof_xref *u, uint64_t va, uint64_t n);
 
 
 /* Non-zero when the sweep ran out of room and stopped recording. A caller that

@@ -723,7 +723,8 @@ struct kof_pack_idx {
  */
 _Static_assert(sizeof(struct kof_pack_sec)  == 16,  "pack section entry grew padding");
 /* 60 through v8; 64 from v9, which added heur_level. The number moves only
- * with KOF_PACK_VERSION - if it moves without one, the edit is the bug. */
+ * with KOF_PACK_MAJOR or KOF_PACK_MINOR - if it moves without one, the edit is
+ * the bug. */
 _Static_assert(sizeof(struct kof_pack_mod)  == 64,  "pack module record grew padding");
 _Static_assert(sizeof(struct kof_pack_str)  == 12,  "pack string descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_name) == 8,   "pack name descriptor grew padding");

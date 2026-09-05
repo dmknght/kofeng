@@ -2283,10 +2283,6 @@ const uint32_t pe_sub_n       = sizeof pe_sub        / sizeof pe_sub[0];
 const uint32_t fmt_word_n     = sizeof fmt_word      / sizeof fmt_word[0];
 const uint32_t maltype_word_n = sizeof maltype_word  / sizeof maltype_word[0];
 
-
-
-
-
 /* The call itself, without whatever is compared against it. `force_multi` asks
  * for the counting form whatever the matcher is spelled as, which is what a
  * shared call has to be. */
@@ -2298,9 +2294,7 @@ void emit_call_as(FILE *f, struct kof_editor *e, uint32_t g, int force_multi)
 
 	rng_ident(e->obj[e->cur].fmt, grp_mask(e, g), nm, sizeof nm);
 	fprintf(f, "kof_find_str_%s(%s",
-		force_multi ? "multi"
-			    : q->rule == 1 ? "any" : q->rule == 2 ? "multi"
-							         : "all", nm);
+		force_multi ? "multi" : grp_rule_word(q->rule), nm);
 	for (i = 0; i < e->dr.n_decl; i++)
 		if (e->dr.decl[i].grp & (1u << g))
 			fprintf(f, ", s%u", i);
@@ -3674,16 +3668,8 @@ void generate(struct kof_editor *e, int as_new)
 	fprintf(f, "KOF_TARGET_FORMAT(%s);\n",
 		(ob->fmt && ob->ctx.format < FMT_WORD_N)
 		? fmt_word[ob->ctx.format] : "KOF_FMT_ANY");
-	fprintf(f, "KOF_TARGET_NAME(KOF_MALTYPE_%s, \"%s\");\n\n",
-		e->dr.maltype == 0 ? "VIRUS" :
-		e->dr.maltype == 1 ? "TROJAN" :
-		e->dr.maltype == 2 ? "ROOTKIT" :
-		e->dr.maltype == 3 ? "BOTNET" :
-		e->dr.maltype == 4 ? "RANSOM" :
-		e->dr.maltype == 5 ? "MINER" :
-		e->dr.maltype == 6 ? "ADWARE" :
-		e->dr.maltype == 7 ? "EXPLOIT" :
-		e->dr.maltype == 8 ? "DROPPER" : "HACKTOOL", safe);
+	fprintf(f, "KOF_TARGET_NAME(%s, \"%s\");\n\n",
+		kof_maltype_ident(e->dr.maltype), safe);
 
 	/* One declaration per declared range, spelled as the OR of the region
 	 * names it holds - which is what a source has to write and what
