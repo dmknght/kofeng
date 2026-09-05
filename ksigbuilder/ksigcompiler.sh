@@ -108,6 +108,21 @@ MINGW*|MSYS*|Windows*|windows) os=windows ;;
 *)                              os=linux ;;
 esac
 
+# Which machine the blob's own code is for - a different axis from KOF_TARGET_OS
+# above (the format the blob is linked as) and from a signature's own
+# KOF_TARGET_ARCH(...) declaration (which CPU architecture of SCANNED OBJECT the
+# module applies to - a question about the sample, not about the blob). Default
+# x86_64 so every existing build (and every reference to this script that does
+# not set the variable) keeps producing exactly what it always has.
+case "${KOF_TARGET_MACH:-x86_64}" in
+x86_64) mach=x86_64 ;;
+arm64)  mach=arm64 ;;
+*)
+	echo "FAIL: KOF_TARGET_MACH=${KOF_TARGET_MACH} names no known machine (x86_64, arm64)" >&2
+	exit 1
+	;;
+esac
+
 obj=$tmp/$name.o
 raw=$tmp/$name.raw
 
@@ -161,7 +176,7 @@ fi
 #                          referenced by absolute address
 #   no-stack-protector     avoids an implicit __stack_chk_fail import
 #   function/data-sections plus --gc-sections lets ld drop what is unreachable
-#   cf-protection=none     drops .note.gnu.property
+#   cf-protection=none     drops .note.gnu.property - x86 only, see below
 CFLAGS=(
 	-std=c11 -Os
 	-ffreestanding -fno-builtin -nostdlib
@@ -169,7 +184,6 @@ CFLAGS=(
 	-fno-ident -g0
 	-fno-stack-protector
 	-fno-jump-tables
-	-fcf-protection=none
 	-ffunction-sections -fdata-sections
 	-Wall -Wextra -Werror
 	# The staged SDK, not the source tree. A module gets exactly the module
@@ -177,17 +191,37 @@ CFLAGS=(
 	# error here rather than a habit that shows up in a signature later.
 	"-I$incdir"
 )
+# CET shadow-stack/branch-tracking is an x86 feature; clang rejects this flag
+# outright when targeting a non-x86 machine, so it is only ever offered where
+# it means something.
+if [ "$mach" = x86_64 ]; then
+	CFLAGS+=(-fcf-protection=none)
+fi
 if [ "$os" = windows ]; then
+	# Windows probes the stack one page at a time past a threshold, via a
+	# call to __chkstk_ms - a real CRT symbol this freestanding blob has
+	# none of. Raised well past anything a signature module's own locals
+	# could plausibly need (verified: a real module with a 4KB local
+	# buffer needs this - the tight instruction/size budget these modules
+	# already run under means genuinely exceeding 1MB of stack in one
+	# frame is not a real module, it is a different bug).
+	CFLAGS+=(-mstack-probe-size=1000000)
 	# No -fPIC: it is an ELF concept (GOT-indirect addressing) that this
-	# target does not have a matching flag for. x86_64 Windows code already
-	# has no other shape - every local reference clang emits is RIP
-	# relative by default - so the zero-relocation property comes for free
-	# once the linker below is told to lay .text and .rdata out as one
-	# contiguous region, the same job module.ld does for the ELF side.
-	# Verified against this exact flag set with clang 22.1.8: the linked
-	# image carries an empty relocation table and an empty base relocation
-	# directory.
-	CFLAGS+=(-target x86_64-w64-windows-gnu)
+	# target does not have a matching flag for. Every reference clang emits
+	# for either Windows machine here is already PC/page relative by
+	# default (RIP-relative on x86_64, ADRP+ADD on AArch64) - so the
+	# zero-relocation property comes for free once the linker below is
+	# told to lay .text and .rdata out as one contiguous region, the same
+	# job module.ld does for the ELF side.
+	# x86_64 verified against this exact flag set with clang 22.1.8: the
+	# linked image carries an empty relocation table and an empty base
+	# relocation directory. arm64 is new ground - not assumed equivalent
+	# without the same check; see the "== validate image" step below,
+	# which asserts it either way.
+	case "$mach" in
+	x86_64) CFLAGS+=(-target x86_64-w64-windows-gnu) ;;
+	arm64)  CFLAGS+=(-target aarch64-w64-windows-gnu) ;;
+	esac
 else
 	CFLAGS+=(-fPIC)
 fi
