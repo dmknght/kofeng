@@ -171,7 +171,7 @@ struct kof_emu {
 	uint32_t futex_spin;
 
 	/* How many reads of standard input have been answered end-of-file in a
-	 * row. See SYS_READ: a prompt that ignores EOF asks forever. */
+	 * row. See EMU_SYS_READ: a prompt that ignores EOF asks forever. */
 	uint32_t stdin_eof;
 
 	/* The address of the last x87 instruction that was not a control one.
@@ -1153,24 +1153,39 @@ static int pop(struct kof_emu *e, uint64_t *v)
  * rare, and a stub that stops because we stopped it learns more than one that
  * gets a refusal it was already coded to survive.
  */
+/*
+ * EMU_SYS_ RATHER THAN SYS_, AND THE PREFIX IS NOT DECORATION.
+ *
+ * mingw-w64's <stdio.h> defines SYS_OPEN - an MSVC-era constant for how many
+ * files a process may have open - so an unprefixed enumerator here collided
+ * with a macro from a header nothing in this file includes on purpose, and the
+ * entire Windows build stopped: this object is inside libkofeng.a, so the
+ * failure took the library, both tools that link it, and every test, on x86_64
+ * and ARM64 alike.
+ *
+ * The names are this file's alone - nothing outside it refers to one - so the
+ * prefix costs nothing and removes the whole class of collision rather than the
+ * one instance of it. A guard around the include order would have fixed today's
+ * symbol and left the next one to be found by a build that breaks.
+ */
 enum {
-	SYS_READ = 0, SYS_WRITE = 1, SYS_OPEN = 2, SYS_CLOSE = 3,
-	SYS_FSTAT = 5, SYS_LSEEK = 8,
-	SYS_MMAP = 9, SYS_MPROTECT = 10, SYS_MUNMAP = 11, SYS_BRK = 12,
-	SYS_PREAD64 = 17, SYS_FTRUNCATE = 77, SYS_READLINK = 89,
-	SYS_ARCH_PRCTL = 158, SYS_EXECVE = 59, SYS_EXIT = 60, SYS_EXIT_GROUP = 231,
-	SYS_OPENAT = 257, SYS_NEWFSTATAT = 262, SYS_MEMFD_CREATE = 319,
-	SYS_IOCTL = 16, SYS_SCHED_YIELD = 24, SYS_NANOSLEEP = 35,
-	SYS_GETPID = 39, SYS_CLONE = 56, SYS_RT_SIGACTION = 13,
-	SYS_RT_SIGPROCMASK = 14, SYS_SIGALTSTACK = 131, SYS_GETTID = 186,
-	SYS_FUTEX = 202, SYS_SCHED_GETAFFINITY = 204, SYS_SET_TID_ADDRESS = 218,
-	SYS_CLOCK_GETTIME = 228, SYS_SET_ROBUST_LIST = 273, SYS_PRLIMIT64 = 302,
-	SYS_GETRANDOM = 318, SYS_MADVISE = 28, SYS_TGKILL = 234,
-	SYS_RSEQ = 334, SYS_SIGRETURN = 15,
-	SYS_GETTIMEOFDAY = 96, SYS_TIME = 201, SYS_GETCPU = 309,
-	SYS_CLOCK_NANOSLEEP = 230, SYS_ALARM = 37, SYS_SETITIMER = 38,
-	SYS_TIMER_CREATE = 222, SYS_TIMER_SETTIME = 223, SYS_PTRACE = 101,
-	SYS_PAUSE = 34, SYS_SELECT = 23, SYS_POLL = 7, SYS_KILL = 62
+	EMU_SYS_READ = 0, EMU_SYS_WRITE = 1, EMU_SYS_OPEN = 2, EMU_SYS_CLOSE = 3,
+	EMU_SYS_FSTAT = 5, EMU_SYS_LSEEK = 8,
+	EMU_SYS_MMAP = 9, EMU_SYS_MPROTECT = 10, EMU_SYS_MUNMAP = 11, EMU_SYS_BRK = 12,
+	EMU_SYS_PREAD64 = 17, EMU_SYS_FTRUNCATE = 77, EMU_SYS_READLINK = 89,
+	EMU_SYS_ARCH_PRCTL = 158, EMU_SYS_EXECVE = 59, EMU_SYS_EXIT = 60, EMU_SYS_EXIT_GROUP = 231,
+	EMU_SYS_OPENAT = 257, EMU_SYS_NEWFSTATAT = 262, EMU_SYS_MEMFD_CREATE = 319,
+	EMU_SYS_IOCTL = 16, EMU_SYS_SCHED_YIELD = 24, EMU_SYS_NANOSLEEP = 35,
+	EMU_SYS_GETPID = 39, EMU_SYS_CLONE = 56, EMU_SYS_RT_SIGACTION = 13,
+	EMU_SYS_RT_SIGPROCMASK = 14, EMU_SYS_SIGALTSTACK = 131, EMU_SYS_GETTID = 186,
+	EMU_SYS_FUTEX = 202, EMU_SYS_SCHED_GETAFFINITY = 204, EMU_SYS_SET_TID_ADDRESS = 218,
+	EMU_SYS_CLOCK_GETTIME = 228, EMU_SYS_SET_ROBUST_LIST = 273, EMU_SYS_PRLIMIT64 = 302,
+	EMU_SYS_GETRANDOM = 318, EMU_SYS_MADVISE = 28, EMU_SYS_TGKILL = 234,
+	EMU_SYS_RSEQ = 334, EMU_SYS_SIGRETURN = 15,
+	EMU_SYS_GETTIMEOFDAY = 96, EMU_SYS_TIME = 201, EMU_SYS_GETCPU = 309,
+	EMU_SYS_CLOCK_NANOSLEEP = 230, EMU_SYS_ALARM = 37, EMU_SYS_SETITIMER = 38,
+	EMU_SYS_TIMER_CREATE = 222, EMU_SYS_TIMER_SETTIME = 223, EMU_SYS_PTRACE = 101,
+	EMU_SYS_PAUSE = 34, EMU_SYS_SELECT = 23, EMU_SYS_POLL = 7, EMU_SYS_KILL = 62
 };
 
 /* The descriptor an emulated process gets for itself, and for anything else it
@@ -1224,39 +1239,65 @@ static uint64_t self_read(struct kof_emu *e, uint64_t va, uint64_t off,
  * because what the syscalls DO is identical and only their numbering is not.
  *
  * A number with no row here returns -ENOSYS through the dispatcher's default,
- * the same as an unknown amd64 one. The list is what the measured stubs use
- * plus the ones any shellcode reaches for; it is not the whole i386 table and
- * does not need to be.
+ * the same as an unknown amd64 one. It is not the whole i386 table and does not
+ * need to be.
+ *
+ * What it DOES need to be is as wide as the dispatcher, and it was not. This
+ * table was written from the stubs measured when 32-bit mode was added, and the
+ * dispatcher has grown since without it following: counted, the dispatcher
+ * answered 52 numbers meaningfully and this table could reach 24 of them, so 28
+ * considered answers sat unreachable from 32-bit code. Some of those matter to
+ * what this interpreter is for - openat is what modern code calls instead of
+ * open, fstat64 is how a stub finds its own size, clock_gettime is the timing
+ * check the amd64 side deliberately answers - and a stub asking for one got
+ * -ENOSYS while its 64-bit twin was served.
+ *
+ * The rows below are the ones whose numbers were read out of
+ * asm/unistd_32.h rather than remembered. Anything still missing is missing on
+ * purpose or has simply not been met yet; the gap to close was never "the whole
+ * table", it was "everything this file already knows how to answer".
  */
 static uint64_t i386_nr(uint64_t nr)
 {
 	switch (nr) {
-	case 1:   return SYS_EXIT;
-	case 2:   return SYS_GETPID;        /* fork; nothing here forks */
-	case 3:   return SYS_READ;
-	case 4:   return SYS_WRITE;
-	case 5:   return SYS_OPEN;
-	case 6:   return SYS_CLOSE;
-	case 11:  return SYS_EXECVE;
-	case 13:  return SYS_TIME;
-	case 19:  return SYS_LSEEK;
-	case 20:  return SYS_GETPID;
-	case 45:  return SYS_BRK;
-	case 54:  return SYS_IOCTL;
-	case 78:  return SYS_GETTIMEOFDAY;
-	case 90:  return SYS_MMAP;          /* old_mmap, via a struct */
-	case 91:  return SYS_MUNMAP;
-	case 93:  return SYS_FTRUNCATE;
-	case 125: return SYS_MPROTECT;
-	case 158: return SYS_SCHED_YIELD;
-	case 162: return SYS_NANOSLEEP;
-	case 192: return SYS_MMAP;          /* mmap2 */
-	case 219: return SYS_MADVISE;
-	case 224: return SYS_GETTID;
-	case 240: return SYS_FUTEX;
-	case 252: return SYS_EXIT_GROUP;
-	case 355: return SYS_GETRANDOM;
-	case 356: return SYS_MEMFD_CREATE;
+	case 1:   return EMU_SYS_EXIT;
+	case 2:   return EMU_SYS_GETPID;        /* fork; nothing here forks */
+	case 3:   return EMU_SYS_READ;
+	case 4:   return EMU_SYS_WRITE;
+	case 5:   return EMU_SYS_OPEN;
+	case 6:   return EMU_SYS_CLOSE;
+	case 11:  return EMU_SYS_EXECVE;
+	case 13:  return EMU_SYS_TIME;
+	case 19:  return EMU_SYS_LSEEK;
+	case 20:  return EMU_SYS_GETPID;
+	case 45:  return EMU_SYS_BRK;
+	case 54:  return EMU_SYS_IOCTL;
+	case 78:  return EMU_SYS_GETTIMEOFDAY;
+	case 90:  return EMU_SYS_MMAP;          /* old_mmap, via a struct */
+	case 91:  return EMU_SYS_MUNMAP;
+	case 93:  return EMU_SYS_FTRUNCATE;
+	case 125: return EMU_SYS_MPROTECT;
+	case 85:  return EMU_SYS_READLINK;      /* /proc/self/exe             */
+	case 120: return EMU_SYS_CLONE;
+	case 158: return EMU_SYS_SCHED_YIELD;
+	case 162: return EMU_SYS_NANOSLEEP;
+	case 192: return EMU_SYS_MMAP;          /* mmap2 */
+	case 174: return EMU_SYS_RT_SIGACTION;
+	case 175: return EMU_SYS_RT_SIGPROCMASK;
+	case 180: return EMU_SYS_PREAD64;
+	case 197: return EMU_SYS_FSTAT;        /* fstat64; only st_size is read */
+	case 219: return EMU_SYS_MADVISE;
+	case 224: return EMU_SYS_GETTID;
+	case 240: return EMU_SYS_FUTEX;
+	case 242: return EMU_SYS_SCHED_GETAFFINITY;
+	case 265: return EMU_SYS_CLOCK_GETTIME;
+	case 267: return EMU_SYS_CLOCK_NANOSLEEP;
+	case 270: return EMU_SYS_TGKILL;
+	case 295: return EMU_SYS_OPENAT;
+	case 26:  return EMU_SYS_PTRACE;
+	case 252: return EMU_SYS_EXIT_GROUP;
+	case 355: return EMU_SYS_GETRANDOM;
+	case 356: return EMU_SYS_MEMFD_CREATE;
 	default:  return nr | (1ull << 32);  /* no such i386 call: cannot collide */
 	}
 }
@@ -1300,16 +1341,16 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 
 	*stop_out = 0;
 	switch (nr) {
-	case SYS_EXIT:
-	case SYS_EXIT_GROUP:
+	case EMU_SYS_EXIT:
+	case EMU_SYS_EXIT_GROUP:
 		*stop_out = KOF_EMU_STOP_EXIT + 1;
 		return 0;
-	case SYS_EXECVE:
+	case EMU_SYS_EXECVE:
 		/* The stub is done and is handing control to what it produced.
 		 * Everything worth dumping has already been written. */
 		*stop_out = KOF_EMU_STOP_HANDOFF + 1;
 		return 0;
-	case SYS_MMAP: {
+	case EMU_SYS_MMAP: {
 		uint64_t len = (a1 + KOF_EMU_PAGE - 1u) & ~(uint64_t)(KOF_EMU_PAGE - 1u);
 		uint64_t prot = e->gpr[KOF_EMU_RDX];
 		/*
@@ -1364,14 +1405,14 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 			return (uint64_t)-12;
 		return at;
 	}
-	case SYS_MPROTECT:
+	case EMU_SYS_MPROTECT:
 		if (e->gpr[KOF_EMU_RDX] & KOF_EMU_X)
 			snap_take(e, a0, a1);
 		return 0;
-	case SYS_MUNMAP:
-	case SYS_BRK:
-	case SYS_FTRUNCATE:
-	case SYS_CLOSE:
+	case EMU_SYS_MUNMAP:
+	case EMU_SYS_BRK:
+	case EMU_SYS_FTRUNCATE:
+	case EMU_SYS_CLOSE:
 		return 0;
 	/*
 	 * SERVICES A RUNTIME DEMANDS AND A PACKER NEVER USES.
@@ -1383,7 +1424,7 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 	 * that is true of this machine: one thread, one CPU, no signals, a
 	 * clock that only moves forward.
 	 */
-	case SYS_FUTEX:
+	case EMU_SYS_FUTEX:
 		/*
 		 * A WAIT NOBODY WILL END.
 		 *
@@ -1419,11 +1460,11 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 	 * interval is added to the clock and the call returns at once: from
 	 * inside, the sleep happened.
 	 */
-	case SYS_NANOSLEEP:
-	case SYS_CLOCK_NANOSLEEP: {
-		uint64_t req = (nr == SYS_NANOSLEEP) ? a0 : e->gpr[KOF_EMU_RDX];
+	case EMU_SYS_NANOSLEEP:
+	case EMU_SYS_CLOCK_NANOSLEEP: {
+		uint64_t req = (nr == EMU_SYS_NANOSLEEP) ? a0 : e->gpr[KOF_EMU_RDX];
 		uint64_t ts[2], rem[2] = { 0, 0 };
-		uint64_t back = (nr == SYS_NANOSLEEP) ? a1 : sysarg(e, 0);
+		uint64_t back = (nr == EMU_SYS_NANOSLEEP) ? a1 : sysarg(e, 0);
 
 		if (req && mem_rd(e, req, ts, sizeof ts))
 			e->tsc_skew += ts[0] * 1000000000u + ts[1];
@@ -1432,9 +1473,9 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 			mem_wr(e, back, rem, sizeof rem);
 		return 0;
 	}
-	case SYS_PAUSE:
-	case SYS_SELECT:
-	case SYS_POLL:
+	case EMU_SYS_PAUSE:
+	case EMU_SYS_SELECT:
+	case EMU_SYS_POLL:
 		/*
 		 * Waiting for something outside this process, which is a place
 		 * nothing here can come from. Answered as a timeout - no
@@ -1442,18 +1483,18 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 		 * progress instead of blocking on an event that cannot arrive.
 		 */
 		return 0;
-	case SYS_ALARM:
-	case SYS_SETITIMER:
-	case SYS_TIMER_CREATE:
-	case SYS_TIMER_SETTIME:
+	case EMU_SYS_ALARM:
+	case EMU_SYS_SETITIMER:
+	case EMU_SYS_TIMER_CREATE:
+	case EMU_SYS_TIMER_SETTIME:
 		/* Armed, and it will never fire: signals are not delivered here.
 		 * A watchdog that never goes off is the harmless direction. */
 		return 0;
-	case SYS_KILL:
+	case EMU_SYS_KILL:
 		/* Including a stub signalling itself to die on a failed check.
 		 * Refused rather than obeyed - the run ends on its own terms. */
 		return (uint64_t)-1;                        /* EPERM */
-	case SYS_PTRACE:
+	case EMU_SYS_PTRACE:
 		/*
 		 * PTRACE_TRACEME succeeds, which is what a process that is NOT
 		 * already being debugged sees. The trick is to call it and
@@ -1461,20 +1502,20 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 		 * is none.
 		 */
 		return 0;
-	case SYS_MADVISE:
-	case SYS_SCHED_YIELD:
-	case SYS_SET_ROBUST_LIST:
-	case SYS_SIGALTSTACK:
-	case SYS_TGKILL:
-	case SYS_RSEQ:
+	case EMU_SYS_MADVISE:
+	case EMU_SYS_SCHED_YIELD:
+	case EMU_SYS_SET_ROBUST_LIST:
+	case EMU_SYS_SIGALTSTACK:
+	case EMU_SYS_TGKILL:
+	case EMU_SYS_RSEQ:
 		return 0;
-	case SYS_GETPID:
-	case SYS_GETTID:
-	case SYS_SET_TID_ADDRESS:
+	case EMU_SYS_GETPID:
+	case EMU_SYS_GETTID:
+	case EMU_SYS_SET_TID_ADDRESS:
 		return 1;
-	case SYS_IOCTL:
+	case EMU_SYS_IOCTL:
 		return (uint64_t)-25;                       /* ENOTTY: not a tty */
-	case SYS_CLONE:
+	case EMU_SYS_CLONE:
 		/*
 		 * The parent's half of a clone, and only that. This returns
 		 * once, with a thread id, and the child never runs - there is
@@ -1486,26 +1527,26 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 		 */
 		e->next_tid++;
 		return e->next_tid;
-	case SYS_RT_SIGACTION:
-	case SYS_RT_SIGPROCMASK: {
+	case EMU_SYS_RT_SIGACTION:
+	case EMU_SYS_RT_SIGPROCMASK: {
 		/* The old value, if asked for, is "nothing was set". */
-		uint64_t old = (nr == SYS_RT_SIGACTION) ? e->gpr[KOF_EMU_RDX] : a1;
+		uint64_t old = (nr == EMU_SYS_RT_SIGACTION) ? e->gpr[KOF_EMU_RDX] : a1;
 		uint8_t z[152];
 
 		if (old) {
 			memset(z, 0, sizeof z);
-			mem_wr(e, old, z, nr == SYS_RT_SIGACTION ? 32u : 8u);
+			mem_wr(e, old, z, nr == EMU_SYS_RT_SIGACTION ? 32u : 8u);
 		}
 		return 0;
 	}
-	case SYS_SCHED_GETAFFINITY: {
+	case EMU_SYS_SCHED_GETAFFINITY: {
 		uint64_t mask = 1;                          /* one CPU, cpu 0 */
 
 		if (a1 < 8 || !mem_wr(e, e->gpr[KOF_EMU_RDX], &mask, 8))
 			return (uint64_t)-22;               /* EINVAL */
 		return 8;
 	}
-	case SYS_GETTIMEOFDAY: {
+	case EMU_SYS_GETTIMEOFDAY: {
 		uint64_t now = tsc_ns(e), tv[2];
 
 		tv[0] = now / 1000000000u;
@@ -1514,14 +1555,14 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 			return (uint64_t)-14;
 		return 0;
 	}
-	case SYS_TIME: {
+	case EMU_SYS_TIME: {
 		uint64_t now = tsc_ns(e) / 1000000000u;
 
 		if (a0 && !mem_wr(e, a0, &now, 8))
 			return (uint64_t)-14;
 		return now;
 	}
-	case SYS_GETCPU: {
+	case EMU_SYS_GETCPU: {
 		uint64_t z = 0;
 
 		if (a0 && !mem_wr(e, a0, &z, 4))
@@ -1530,7 +1571,7 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 			return (uint64_t)-14;
 		return 0;
 	}
-	case SYS_CLOCK_GETTIME: {
+	case EMU_SYS_CLOCK_GETTIME: {
 		/* Same clock RDTSC reports, in nanoseconds. */
 		uint64_t now = tsc_ns(e), ts[2];
 
@@ -1540,7 +1581,7 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 			return (uint64_t)-14;
 		return 0;
 	}
-	case SYS_PRLIMIT64: {
+	case EMU_SYS_PRLIMIT64: {
 		/* 8 MB of stack, and as many descriptors as anyone asks for. */
 		uint64_t lim[2] = { 8u * 1024u * 1024u, ~(uint64_t)0 };
 
@@ -1549,7 +1590,7 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 			return (uint64_t)-14;
 		return 0;
 	}
-	case SYS_GETRANDOM: {
+	case EMU_SYS_GETRANDOM: {
 		/*
 		 * Deterministic on purpose. A scan that returns a different
 		 * answer each run cannot be tested, and nothing that unpacks a
@@ -1578,7 +1619,7 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 		}
 		return n;
 	}
-	case SYS_ARCH_PRCTL:
+	case EMU_SYS_ARCH_PRCTL:
 		/* ARCH_SET_FS / ARCH_SET_GS. The two GET codes report where the
 		 * emulator put them, so a runtime that reads its own thread
 		 * pointer back gets what it wrote. */
@@ -1592,12 +1633,11 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 			return 0;
 		}
 		return (uint64_t)-22;                       /* EINVAL */
-	case SYS_MEMFD_CREATE:
-	case SYS_OPEN:
+	case EMU_SYS_MEMFD_CREATE:
+	case EMU_SYS_OPEN:
+	case EMU_SYS_OPENAT:
 		return EMU_SELF_FD;
-	case SYS_OPENAT:
-		return EMU_SELF_FD;
-	case SYS_READLINK: {
+	case EMU_SYS_READLINK: {
 		/* Whatever was asked about is this process. The path only has to
 		 * be openable, and every open here answers with the same file. */
 		static const char path[] = "/proc/self/exe";
@@ -1609,7 +1649,7 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 			return (uint64_t)-14;
 		return n;
 	}
-	case SYS_LSEEK: {
+	case EMU_SYS_LSEEK: {
 		uint64_t whence = e->gpr[KOF_EMU_RDX];
 
 		if (whence == 0)      e->self_pos = a1;
@@ -1617,14 +1657,14 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 		else                  e->self_pos = e->self_n + a1;
 		return e->self_pos;
 	}
-	case SYS_PREAD64:
+	case EMU_SYS_PREAD64:
 		return self_read(e, a1, sysarg(e, 0), e->gpr[KOF_EMU_RDX]);
-	case SYS_FSTAT:
-	case SYS_NEWFSTATAT: {
+	case EMU_SYS_FSTAT:
+	case EMU_SYS_NEWFSTATAT: {
 		/* struct stat is 144 bytes on amd64 and the only field a stub
 		 * reads is st_size at offset 48. The rest stays zero, which is
 		 * a stat nobody here will look at twice. */
-		uint64_t at = (nr == SYS_FSTAT) ? a1 : e->gpr[KOF_EMU_RDX];
+		uint64_t at = (nr == EMU_SYS_FSTAT) ? a1 : e->gpr[KOF_EMU_RDX];
 		uint8_t st[144];
 
 		memset(st, 0, sizeof st);
@@ -1633,7 +1673,7 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 			return (uint64_t)-14;
 		return 0;
 	}
-	case SYS_WRITE: {
+	case EMU_SYS_WRITE: {
 		uint64_t n = e->gpr[KOF_EMU_RDX];
 
 		if (a0 <= 2 && e->n_say < KOF_EMU_SAY) {
@@ -1646,7 +1686,7 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 		}
 		return n;                                       /* wrote it all */
 	}
-	case SYS_READ: {
+	case EMU_SYS_READ: {
 		uint64_t got;
 
 		/*

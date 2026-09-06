@@ -340,6 +340,19 @@ enum kof_pe_image {
 	KOF_PE_IMAGE_COUNT = 3
 };
 
+/* The identifier a signature source writes, to its value - the same direction
+ * kof_arch_from_name goes, so a tool that resolves a PE subtype asks this
+ * header instead of matching the enum with a regex. */
+static inline int kof_pe_image_from_name(const char *s, uint32_t *out)
+{
+#define KOF_SUB_X_FROM(name, val)                                            \
+	if (kof_streq_(s, #name)) { *out = (uint32_t)(val); return 1; }
+	KOF_PE_IMAGE_LIST(KOF_SUB_X_FROM)
+#undef KOF_SUB_X_FROM
+	return 0;
+}
+
+
 /* IMAGE_FILE_DLL, and the subsystem a driver runs in. */
 #define KOF_PE_CHAR_DLL      0x2000u
 #define KOF_PE_SUBSYS_NATIVE 1u

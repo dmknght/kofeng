@@ -230,6 +230,19 @@ enum kof_elf_type {
 	KOF_ELF_TYPE_COUNT = 5
 };
 
+/* The identifier a signature source writes, to its value - the same direction
+ * kof_arch_from_name goes, so a tool that resolves a ELF subtype asks this
+ * header instead of matching the enum with a regex. */
+static inline int kof_elf_type_from_name(const char *s, uint32_t *out)
+{
+#define KOF_SUB_X_FROM(name, val)                                            \
+	if (kof_streq_(s, #name)) { *out = (uint32_t)(val); return 1; }
+	KOF_ELF_TYPE_LIST(KOF_SUB_X_FROM)
+#undef KOF_SUB_X_FROM
+	return 0;
+}
+
+
 struct kof_elf_sec {
 	uint64_t file_off, file_size;
 	uint64_t mem_addr;

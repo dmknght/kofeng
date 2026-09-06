@@ -318,14 +318,76 @@ void kof_src_on_free(struct kof_objsrc *s, void (*fn)(void *, uint64_t), void *u
 	}
 }
 
+static int kof_src_tmpfile_in(char *dir_out, size_t dir_cap);
+
+/*
+ * The first directory in the list above that a file can actually be made in.
+ *
+ * Answered by trying rather than by testing permissions: a directory that
+ * stat says is writable can still refuse - a full filesystem, a read-only
+ * mount, a container with no /tmp - and the only test that does not lie is
+ * the one the caller was going to do anyway.
+ */
+const char *kof_src_tmpdir(void)
+{
+	static char kept[4096];
+	int fd;
+
+	if (kept[0])
+		return kept;
+	fd = kof_src_tmpfile_in(kept, sizeof kept);
+	if (fd < 0) {
+		kept[0] = 0;
+		return NULL;
+	}
+	close(fd);
+	return kept[0] ? kept : NULL;
+}
+
 int kof_src_tmpfile(void)
 {
+	return kof_src_tmpfile_in(NULL, 0);
+}
+
+static int kof_src_tmpfile_in(char *dir_out, size_t dir_cap)
+{
+	/*
+	 * THE VARIABLE AND THE FALLBACKS ARE BOTH PER-PLATFORM.
+	 *
+	 * POSIX names the directory in TMPDIR and has two conventional places
+	 * to try when it says nothing. Windows uses TEMP, falls back to TMP,
+	 * and has no path that is guaranteed to exist - C:\Windows\Temp is not
+	 * writable by an ordinary account and hard-coding it would fail in a
+	 * way that reads as "the scanner is broken" rather than "set TEMP".
+	 *
+	 * The list order is what matters and is the same on both: the
+	 * environment first, because a caller who set it meant it - a scan of a
+	 * large archive can produce more than a small /tmp holds.
+	 */
+#ifdef _WIN32
+	static const char *const dirs[] = { NULL, NULL, "." };
+	const char *env = getenv("TEMP");
+	const char *env2 = getenv("TMP");
+#else
 	static const char *const dirs[] = { NULL, "/tmp", "/var/tmp" };
 	const char *env = getenv("TMPDIR");
+#endif
 	uint32_t i;
+
+#ifdef _WIN32
+	if (!env || !*env)
+		env = env2;
+#endif
 
 	for (i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
 		const char *d = dirs[i] ? dirs[i] : env;
+
+#ifdef _WIN32
+		/* The second row is the other environment variable, already
+		 * folded into `env` above, so it would repeat the first. */
+		if (i == 1u)
+			continue;
+#endif
 		char path[4096];
 		int fd;
 
@@ -335,19 +397,52 @@ int kof_src_tmpfile(void)
 		/* No directory entry is ever created, so there is nothing to
 		 * traverse to, nothing to race, and nothing to clean up. */
 		fd = open(d, O_TMPFILE | O_RDWR | O_EXCL, 0600);
-		if (fd >= 0)
+		if (fd >= 0) {
+			if (dir_out)
+				snprintf(dir_out, dir_cap, "%s", d);
 			return fd;
+		}
 #endif
 		/* Same property one syscall later: the name exists only between
 		 * these two calls, and never holds anything. */
-		if ((size_t)snprintf(path, sizeof path, "%s/kofXXXXXX", d) >=
-		    sizeof path)
+		if ((size_t)snprintf(path, sizeof path, "%s%ckofXXXXXX", d,
+				     KOF_PATH_SEP) >= sizeof path)
 			continue;
+#ifdef _WIN32
+		/*
+		 * TWO DIFFERENCES, BOTH SILENT IF IGNORED.
+		 *
+		 * Windows refuses to delete a file that is open, so the unlink
+		 * below cannot be used to make the file anonymous: it fails,
+		 * and every object this engine spills is left on disk. The
+		 * _O_TEMPORARY flag reaches the same guarantee from the other
+		 * end - the system deletes it when the last handle closes.
+		 *
+		 * And the CRT opens in TEXT mode by default, which turns every
+		 * 0x0A written into 0x0D 0x0A. What is spilled here is a
+		 * decompressed object - arbitrary bytes - so text mode does not
+		 * add characters to a document, it shifts everything after the
+		 * first newline and the scan reads back a file that is not the
+		 * one produced.
+		 */
+		if (!_mktemp(path))
+			continue;
+		fd = _open(path, _O_CREAT | _O_EXCL | _O_RDWR | _O_BINARY |
+				 _O_TEMPORARY, _S_IREAD | _S_IWRITE);
+		if (fd >= 0) {
+			if (dir_out)
+				snprintf(dir_out, dir_cap, "%s", d);
+			return fd;
+		}
+#else
 		fd = mkstemp(path);
 		if (fd >= 0) {
 			unlink(path);
+			if (dir_out)
+				snprintf(dir_out, dir_cap, "%s", d);
 			return fd;
 		}
+#endif
 	}
 	return -1;
 }

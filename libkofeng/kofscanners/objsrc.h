@@ -131,4 +131,15 @@ void kof_src_on_free(struct kof_objsrc *, void (*fn)(void *, uint64_t), void *us
  */
 int kof_src_tmpfile(void);
 
+/*
+ * The directory a scratch file may be written in, or NULL when none is usable.
+ *
+ * Exported beside kof_src_tmpfile because a caller that needs a file it can
+ * REOPEN BY NAME - a build log the viewer reads back after the build has
+ * finished - cannot use the anonymous one, and would otherwise repeat the
+ * search for a writable directory along with the environment variable that
+ * differs per platform. One answer, two shapes of caller.
+ */
+const char *kof_src_tmpdir(void);
+
 #endif /* KOFENG_OBJSRC_H */

@@ -276,7 +276,7 @@ enum kof_pack_kind {
 	 *
 	 * What it may NOT do is what makes it a kind and not a convention: no
 	 * family name, no verdict above HEUR, no child objects. The build
-	 * refuses all three - see ksigcompiler.sh - because a check that runs
+	 * refuses all three - see ksigbuilder - because a check that runs
 	 * when the module does is a check that has already loaded the code.
 	 */
 	KOF_PACK_HEUR   = 2

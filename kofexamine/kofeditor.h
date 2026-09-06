@@ -648,7 +648,10 @@ int draft_dirty(struct kof_editor *e);
 void src_index(struct kof_editor *e);
 const char *src_of(struct kof_editor *e, const struct kof_touch *t);
 uint32_t draft_tgt(struct kof_editor *e);
-const char *draft_dup(struct kof_editor *e, int *near);
+/* `near_miss` and not `near`: mingw's headers still #define near and far as the
+ * empty macros 16-bit compilers needed, so a parameter with that name compiles
+ * everywhere except Windows, where it vanishes and the call site stops parsing. */
+const char *draft_dup(struct kof_editor *e, int *near_miss);
 const char *draft_missing_of(struct kof_editor *e, int as_new);
 void rng_retarget(struct kof_editor *e, uint32_t was, uint32_t now);
 uint32_t rng_removable(struct kof_editor *e, uint32_t *mask, int *unused, uint32_t cap);

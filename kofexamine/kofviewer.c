@@ -41,16 +41,18 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <pwd.h>
+#endif
 #include <time.h>
 #include <dirent.h>
 #include <fcntl.h>
-#include <unistd.h>
-#include <poll.h>
 #include <signal.h>
+#ifndef _WIN32
+#include <unistd.h>
 #include <sys/wait.h>
-#include <termios.h>
-#include <sys/ioctl.h>
+#endif
+#include "kofplat.h"
 #include <sys/stat.h>
 #include <errno.h>
 
@@ -73,6 +75,7 @@
 #include "bddisasm.h"
 #include "../libkofeng/kofheur/kofheur.h"
 #include "../libkofeng/kofscanners/scan.h"
+#include "../libkofeng/kofscanners/objsrc.h"
 #include "../libkofeng/kofunpack/emu_unpack.h"
 #include "../libkofeng/kofmatchers/kofmatch.h"
 #include "../libkofeng/kofmatchers/hexprog.h"
@@ -116,7 +119,6 @@ static void term_write(const char *s)
 	term_write_n(s, strlen(s));
 }
 
-static struct termios  g_saved_tty;
 static int             g_tty_raw;
 static int             g_rows = 24, g_cols = 80;
 
@@ -125,7 +127,7 @@ static void term_restore(void)
 	if (!g_tty_raw)
 		return;
 	g_tty_raw = 0;
-	tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_saved_tty);
+	kof_tty_raw_leave();
 	/* Cursor back, main screen back, in that order: the show has to happen
 	 * on the screen that is about to be left, or it applies to the one being
 	 * returned to and the user's shell gets it. */
@@ -141,39 +143,19 @@ static void on_signal(int sig)
 	raise(sig);
 }
 
-static volatile sig_atomic_t g_winch;
-
-static void on_winch(int sig)
-{
-	(void)sig;
-	g_winch = 1;
-}
-
 static int term_setup(void)
 {
-	struct termios raw;
-
-	if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+	if (!kof_tty_ok()) {
 		fprintf(stderr, "kofviewer: needs a terminal\n");
 		return 0;
 	}
-	if (tcgetattr(STDIN_FILENO, &g_saved_tty) != 0)
-		return 0;
-	raw = g_saved_tty;
-	/* No echo, no line discipline, no signals from keys, and a read that
-	 * returns as soon as one byte is there. */
-	raw.c_lflag &= (tcflag_t)~(ECHO | ICANON | IEXTEN | ISIG);
-	raw.c_iflag &= (tcflag_t)~(IXON | ICRNL | BRKINT | INPCK | ISTRIP);
-	raw.c_oflag &= (tcflag_t)~OPOST;
-	raw.c_cc[VMIN] = 1;
-	raw.c_cc[VTIME] = 0;
 
 	atexit(term_restore);
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
 	signal(SIGSEGV, on_signal);
 
-	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) != 0)
+	if (!kof_tty_raw_enter())
 		return 0;
 	g_tty_raw = 1;
 	/* Alternate screen, no cursor, and SGR mouse reporting - the last so a
@@ -190,18 +172,7 @@ static int term_setup(void)
 	 * being selected. Holding shift still bypasses all of this and gives
 	 * back the terminal's copy, in every terminal that implements 1006.
 	 */
-	{
-		/*
-		 * Without SA_RESTART on purpose: the point is for the blocked
-		 * read to come back so the loop can lay the screen out again.
-		 */
-		struct sigaction sa;
-
-		memset(&sa, 0, sizeof sa);
-		sa.sa_handler = on_winch;
-		sigemptyset(&sa.sa_mask);
-		sigaction(SIGWINCH, &sa, NULL);
-	}
+	kof_tty_watch_size();
 	/*
 	 * ?2004h is bracketed paste. Without it a paste arrives as the keys it
 	 * spells, so pasting a path into a field runs whatever those letters
@@ -215,11 +186,11 @@ static int term_setup(void)
 
 static void term_size(void)
 {
-	struct winsize ws;
+	int r = 0, c = 0;
 
-	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row && ws.ws_col) {
-		g_rows = ws.ws_row;
-		g_cols = ws.ws_col;
+	if (kof_tty_size(&r, &c)) {
+		g_rows = r;
+		g_cols = c;
 	}
 	if (g_rows < 12)
 		g_rows = 12;
@@ -1810,12 +1781,10 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		o->buf = kof_buf_make(NULL, 0);
 		o->too_big = 1;
 	} else if (len >= OBJ_SPILL) {
-		char tmp[] = "/tmp/kofviewerXXXXXX";
-		int fd = mkstemp(tmp);
+		int fd = kof_src_tmpfile();
 
 		if (fd < 0)
 			return 0;
-		unlink(tmp);            /* it lives only as long as the fd */
 		if (write(fd, bytes, (size_t)len) != (ssize_t)len) {
 			close(fd);
 			return 0;
@@ -2510,7 +2479,7 @@ static void tree_build(struct view *v)
 	v->n_node = 0;
 	for (i = 0; i < v->n_obj; i++) {
 		struct object *o = &v->obj[i];
-		const char *tail = strrchr(o->name, '/');
+		const char *tail = kof_path_sep_last(o->name);
 		char label[48], what[24];
 
 		/*
@@ -3634,7 +3603,7 @@ static void draft_show(struct view *v, uint32_t idx)
  */
 static int save_ok(struct view *v)
 {
-	int near = 0;
+	int near_miss = 0;
 
 	if (draft_missing_of(&v->ed, 0))
 		return 0;
@@ -3643,16 +3612,16 @@ static int save_ok(struct view *v)
 	 * is one the tree already holds. */
 	if (v->ed.dr.gen_path[0])
 		return draft_dirty(&v->ed);
-	return !(draft_dup(&v->ed, &near) && !near);
+	return !(draft_dup(&v->ed, &near_miss) && !near_miss);
 }
 
 static int save_as_ok(struct view *v)
 {
-	int near = 0;
+	int near_miss = 0;
 
 	if (draft_missing_of(&v->ed, 1) || !v->ed.dr.gen_path[0] || !draft_dirty(&v->ed))
 		return 0;
-	return !(draft_dup(&v->ed, &near) && !near);
+	return !(draft_dup(&v->ed, &near_miss) && !near_miss);
 }
 
 
@@ -5679,8 +5648,8 @@ static void draw_decl_head(struct out *o, struct view *v)
 		 * rather than on purpose.
 		 */
 		const char *why = draft_missing(&v->ed);
-		int near = 0;
-		const char *dup = why ? NULL : draft_dup(&v->ed, &near);
+		int near_miss = 0;
+		const char *dup = why ? NULL : draft_dup(&v->ed, &near_miss);
 		int changed = draft_dirty(&v->ed);
 
 		c = 2 + (int)o->col_hint;
@@ -5708,7 +5677,7 @@ static void draw_decl_head(struct out *o, struct view *v)
 		 * button they pushed the controls sideways as they changed
 		 * length, on the row that already carries every declaration.
 		 */
-		(void)why; (void)dup; (void)near; (void)changed;
+		(void)why; (void)dup; (void)near_miss; (void)changed;
 	}
 
 	/* No label: the box says what it is, and the row is already a line of
@@ -6920,8 +6889,8 @@ static void draw_marker_line(struct out *o, struct view *v)
 	}
 	if (v->pane == 3 && g_decl_rows) {
 		const char *why = draft_missing(&v->ed);
-		int near = 0;
-		const char *dup = why ? NULL : draft_dup(&v->ed, &near);
+		int near_miss = 0;
+		const char *dup = why ? NULL : draft_dup(&v->ed, &near_miss);
 
 		if (v->ed.dr.warn[0]) {
 			snprintf(right, sizeof right, "%s", v->ed.dr.warn);
@@ -6937,8 +6906,8 @@ static void draw_marker_line(struct out *o, struct view *v)
 			 * Neither is a failure, and the exact-match one is the
 			 * reading that follows a Save As that worked. */
 			snprintf(right, sizeof right, "%s %s",
-				 near ? "all but one marker of"
-				      : "same markers as", dup);
+				 near_miss ? "all but one marker of"
+					   : "same markers as", dup);
 			rcol = A_WARN;
 		}
 		else if (v->ed.dr.gen_path[0])
@@ -7768,6 +7737,34 @@ static void copy_take(const char *bytes, size_t n)
  *
  * Returns the helper's name, or NULL when none of them is installed.
  */
+/*
+ * COPY AND PASTE ARE THE ONE PLACE THE TWO SYSTEMS DIFFER IN KIND.
+ *
+ * Windows has a clipboard and the calls below reach it. X11 and Wayland have a
+ * convention between running programs, so the POSIX half spawns whichever of
+ * wl-copy, xclip or xsel is installed and treats "none of them are" as a normal
+ * answer - which is why the OSC 52 fallback after this exists at all.
+ *
+ * Split whole rather than per statement: there is no shared shape to factor
+ * out, and pretending there is would mean a function whose two halves have
+ * nothing in common but a name.
+ */
+#ifdef _WIN32
+
+/* Returns what to name in the status line, the way the POSIX side returns
+ * whichever helper worked. */
+static const char *copy_extern(const char *bytes, size_t n)
+{
+	return kof_clip_put(bytes, n) ? "clipboard" : NULL;
+}
+
+static size_t paste_extern(char *out, size_t cap)
+{
+	return kof_clip_get(out, cap);
+}
+
+#else /* POSIX */
+
 static const char *copy_extern(const char *bytes, size_t n)
 {
 	static const char *const helper[][4] = {
@@ -7925,6 +7922,8 @@ static size_t paste_extern(char *out, size_t cap)
 	}
 	return 0;
 }
+
+#endif /* _WIN32 */
 
 static void copy_osc52(const char *bytes, size_t n)
 {
@@ -8455,14 +8454,14 @@ static void redraw(struct view *v)
 
 	g_fld.room = 0;
 	term_size();
-	if (g_winch) {
+	if (kof_tty_resize_pending()) {
 		/*
 		 * The cached frame describes a screen of the old size, and the
 		 * terminal has thrown away whatever was on it. Comparing
 		 * against it would let an unchanged frame skip the repaint and
 		 * leave the screen as the resize left it.
 		 */
-		g_winch = 0;
+		kof_tty_resize_clear();
 		free(g_last);
 		g_last = NULL;
 		g_last_n = 0;
@@ -9954,7 +9953,7 @@ static uint32_t obj_ancestors(const struct view *v, const struct object *ob,
  */
 static void prop_object_rows(struct view *v, const struct object *ob, int full)
 {
-	const char *base = strrchr(ob->name, '/');
+	const char *base = kof_path_sep_last(ob->name);
 	const char *sub = ob->fmt ? kof_inspect_subtype_name(ob->ctx.format,
 							     ob->ctx.subtype)
 				  : NULL;
@@ -10011,7 +10010,7 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 	 */
 	if (top && v->path && v->path[0]) {
 		char dir[KOF_DUMP_PATH_ROOM];
-		const char *slash = strrchr(v->path, '/');
+		const char *slash = kof_path_sep_last(v->path);
 
 		/* Ending in a separator, always: a directory row and a name row
 		 * sit one above the other in the same column, and without it the
@@ -10134,7 +10133,7 @@ static const char *worst_attr(const struct object *ob)
 static void prop_build(struct view *v)
 {
 	struct object *ob = cur_obj(v);
-	const char *base = strrchr(ob->name, '/');
+	const char *base = kof_path_sep_last(ob->name);
 	uint32_t i, hit = 0;
 	uint64_t total = 0;
 
@@ -10640,9 +10639,7 @@ static void draw_prop(struct out *o, struct view *v)
  * be any length, so the message names the directory and not the road to it. */
 static const char *base_name(const char *path)
 {
-	const char *s = strrchr(path, '/');
-
-	return s ? s + 1 : path;
+	return kof_path_base(path);
 }
 
 /*
@@ -11062,7 +11059,7 @@ static void open_step(struct view *v, int dir)
  *
  * Building a database is two stages and neither is small. Each source is
  * compiled freestanding, then checked for relocations and for writable state,
- * then linked to raw bytes - that is ksigcompiler.sh, seven hundred lines of it
+ * then linked to raw bytes - that is ksigbuilder --module, seven hundred lines of it
  * wrapped around five tools - and only then does ksigbuilder pack the artefacts.
  * A second implementation of that inside a viewer would be a second thing to
  * keep in step with the first, and the first is where the checks live.
@@ -11093,16 +11090,16 @@ static int tree_root_of(const char *bases, char *out, size_t cap)
 {
 	char at[KOF_DUMP_PATH_ROOM];
 
-	if (!realpath(bases, at)) {
+	if (!kof_abs_path(bases, at, sizeof at)) {
 		/* A bases directory that does not exist yet is legal - generate
 		 * creates it - so fall back to where this was started. */
-		if (!getcwd(at, sizeof at))
+		if (!kof_getcwd(at, sizeof at))
 			return 0;
 	}
 	for (;;) {
 		char mk[KOF_DUMP_PATH_ROOM];
 		struct stat st;
-		char *slash;
+		const char *sep;
 
 		if ((size_t)snprintf(mk, sizeof mk, "%s/Makefile", at) <
 		    sizeof mk && stat(mk, &st) == 0 && S_ISREG(st.st_mode)) {
@@ -11113,10 +11110,13 @@ static int tree_root_of(const char *bases, char *out, size_t cap)
 			memcpy(out, at, n + 1u);
 			return 1;
 		}
-		slash = strrchr(at, '/');
-		if (!slash || slash == at)
+		/* Indexed rather than cast: the helper answers about any
+		 * string and says so with const, while `at` is this function's
+		 * own buffer and trimming it in place is the point. */
+		sep = kof_path_sep_last(at);
+		if (!sep || sep == at)
 			return 0;
-		*slash = 0;
+		at[sep - at] = 0;
 	}
 }
 
@@ -11142,11 +11142,27 @@ static void build_last_line(const char *log, char *out, size_t cap)
 static void rebuild_db(struct view *v)
 {
 	char root[KOF_DUMP_PATH_ROOM];
-	char log[] = "/tmp/kofviewer-build-XXXXXX";
+	char log[KOF_DUMP_PATH_ROOM];
 	char here[KOF_DUMP_PATH_ROOM];
 	kof_engine *fresh, *old;
-	pid_t pid;
-	int fd, status = -1;
+	int fd, ok = 0;
+
+	{
+		/* A NAMED file, so it cannot use kof_src_tmpfile: the build
+		 * writes it, make exits, and only then is it read back for the
+		 * line to show. The directory is the engine's answer either
+		 * way - one search for a writable place, not two. */
+		const char *td = kof_src_tmpdir();
+
+		if (!td) {
+			v->act_ok = 0;
+			snprintf(v->act_msg, sizeof v->act_msg,
+				 "No writable temporary directory");
+			return;
+		}
+		snprintf(log, sizeof log, "%s%ckofviewer-build-XXXXXX",
+			 td, KOF_PATH_SEP);
+	}
 
 	if (!tree_root_of(v->basedir, root, sizeof root)) {
 		v->act_ok = 0;
@@ -11165,33 +11181,14 @@ static void rebuild_db(struct view *v)
 		return;
 	}
 
-	pid = fork();
-	if (pid == 0) {
-		/* Writable, because execvp takes char *const[] and a string
-		 * literal is not one. The same shape the clipboard fork in
-		 * this file uses, and for the same reason. */
-		static char a0[] = "make", a1[] = "databases";
-		char *const args[] = { a0, a1, NULL };
+	{
+		static const char *const args[] = { "make", "databases", NULL };
 
-		if (chdir(root) != 0)
-			_exit(127);
-		dup2(fd, 1);
-		dup2(fd, 2);
-		close(fd);
-		execvp("make", args);
-		_exit(127);
+		ok = kof_run_to_fd(root, args, fd);
 	}
 	close(fd);
-	if (pid < 0) {
-		unlink(log);
-		v->act_ok = 0;
-		snprintf(v->act_msg, sizeof v->act_msg, "Cannot start make");
-		return;
-	}
-	while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-		;
 
-	if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) {
+	if (!ok) {
 		char last[200];
 
 		build_last_line(log, last, sizeof last);
@@ -11662,12 +11659,7 @@ static int read_mouse(void)
  * one frame; never blocks. */
 static int key_pending(void)
 {
-	struct pollfd p;
-
-	p.fd = STDIN_FILENO;
-	p.events = POLLIN;
-	p.revents = 0;
-	return poll(&p, 1, 0) > 0 && (p.revents & POLLIN) != 0;
+	return kof_in_ready(0);
 }
 
 static int read_key(void)
@@ -11687,7 +11679,7 @@ static int read_key(void)
 	 */
 	n = read(STDIN_FILENO, &c, 1);
 	if (n != 1) {
-		if (n < 0 && errno == EINTR && g_winch)
+		if (n < 0 && errno == EINTR && kof_tty_resize_pending())
 			return K_RESIZE;
 		return K_NONE;
 	}
@@ -11712,15 +11704,8 @@ static int read_key(void)
 	 * a key pressed by a person, and fifty milliseconds is below what a
 	 * person can perceive as lag.
 	 */
-	{
-		struct pollfd p;
-
-		p.fd = STDIN_FILENO;
-		p.events = POLLIN;
-		p.revents = 0;
-		if (poll(&p, 1, ESC_WAIT_MS) <= 0 || !(p.revents & POLLIN))
-			return 27;
-	}
+	if (!kof_in_ready(ESC_WAIT_MS))
+		return 27;
 	if (read(STDIN_FILENO, seq, 1) != 1)
 		return 27;
 	/*

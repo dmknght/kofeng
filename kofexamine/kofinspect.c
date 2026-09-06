@@ -773,9 +773,7 @@ static int name_char_ok(unsigned char c)
 
 static const char *base_of(const char *path)
 {
-	const char *s = strrchr(path, '/');
-
-	return s ? s + 1 : path;
+	return kof_path_base(path);
 }
 
 static void dump_dir_name(const char *base, char *out, size_t cap)

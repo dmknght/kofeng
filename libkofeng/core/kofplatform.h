@@ -253,4 +253,84 @@ static inline void kof_unmap_anon(void *p, uint64_t len)
 
 #endif
 
+/*
+ * THE LAST PATH SEPARATOR, and it is not the same character on both systems.
+ *
+ * Windows accepts '/' as well as '\\' and mixes them freely - an argument typed
+ * at a shell, a path built by this program and a path from the registry can
+ * all end up in one string - so both count there.
+ *
+ * On POSIX only '/' counts, and treating '\\' as a separator would be a bug
+ * rather than a kindness: a backslash is a perfectly legal character inside a
+ * filename, so a file genuinely called "a\\b" would have its name cut in half.
+ *
+ * Returns a pointer past the separator, or the whole string when there is
+ * none - which is what every caller wants for a display name.
+ */
+/* The separator to WRITE when joining a path. Both work on Windows; this is
+ * the one that looks native in a message a person reads. */
+#ifdef _WIN32
+#define KOF_PATH_SEP '\\'
+#else
+#define KOF_PATH_SEP '/'
+#endif
+
+static inline const char *kof_path_sep_last(const char *p)
+{
+	const char *s = NULL, *q;
+
+	for (q = p; *q; q++) {
+#ifdef _WIN32
+		if (*q == '/' || *q == '\\')
+#else
+		if (*q == '/')
+#endif
+			s = q;
+	}
+	return s;
+}
+
+/* The name after it, or the whole string when there is none - which is what a
+ * caller showing a display name wants. */
+static inline const char *kof_path_base(const char *p)
+{
+	const char *s = kof_path_sep_last(p);
+
+	return s ? s + 1 : p;
+}
+
+/*
+ * An absolute path, with the platform's own resolver.
+ *
+ * Here rather than in a tool because more than one asks: the viewer resolves
+ * the bases directory a draft is written into, and the database builder
+ * resolves a source before working out where it sits inside the content tree.
+ * Two copies of a path rule are two things to get differently wrong.
+ */
+#ifdef _WIN32
+static inline int kof_abs_path(const char *in, char *out, size_t cap)
+{
+	char buf[4096];
+
+	if (!_fullpath(buf, in, sizeof buf))
+		return 0;
+	if (strlen(buf) >= cap)
+		return 0;
+	memcpy(out, buf, strlen(buf) + 1u);
+	return 1;
+}
+#else
+static inline int kof_abs_path(const char *in, char *out, size_t cap)
+{
+	char buf[4096];
+
+	if (!realpath(in, buf))
+		return 0;
+	if (strlen(buf) >= cap)
+		return 0;
+	memcpy(out, buf, strlen(buf) + 1u);
+	return 1;
+}
+#endif
+
 #endif /* KOFENG_KOFPLATFORM_H */

@@ -237,7 +237,7 @@ code, or a header that cannot be loaded as written - selects nothing across
 | `kofscanner` | scan a file or a tree |
 | `kofexamine` | what the engine sees in one object: regions, markers, what each module made of it |
 | `kofviewer` | a terminal UI over the same facts, and where signatures are drafted |
-| `ksigbuilder` | pack compiled modules into a database; `ksigcompiler.sh` compiles one |
+| `ksigbuilder` | pack compiled modules into a database; `--module` compiles one |
 
 ## Building and testing
 

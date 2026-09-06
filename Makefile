@@ -24,7 +24,7 @@
 # but the directory is named after what it is for, not after how it was compiled.
 #
 # Signature modules are NOT built with these flags: they are freestanding,
-# position independent blobs produced by ksigbuilder/ksigcompiler.sh with its own
+# position independent blobs produced by ksigbuilder with its own
 # flag set, and mixing the two sets in one place is how they end up applied to the
 # wrong target.
 
@@ -92,7 +92,7 @@ CFLAGS  += $(call kof_probe,$(KOF_WARN_PORTABLE)) \
 # a document" - and this project's users are exactly as likely to invoke
 # kofscanner from a PowerShell prompt as from this Makefile. Every place in
 # this tree that names one of these binaries - the targets below,
-# ksigcompiler.sh's KOF_KSIGBUILDER default - spells $(EXE) after it instead.
+# ksigbuilder's own default - spells $(EXE) after it instead.
 #
 # -pthread: clock_gettime is POSIX and every host tool that times a scan uses
 # it, but on this target it resolves through winpthreads' pthread_time.h, and
@@ -145,7 +145,7 @@ export TMP  := $(WINTMP)
 export TEMP := $(WINTMP)
 CFLAGS      += -pthread -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
 # Every signature blob this engine ever loads is x86_64 machine code, always,
-# on every host - deliberate, see ksigcompiler.sh, since a database has to be
+# on every host - deliberate, see ksigbuilder, since a database has to be
 # one thing every scanner can load rather than a matrix of per-arch builds.
 # A host tool that is not ALSO x86_64 cannot run one: jumping into raw
 # x86_64 bytes from a differently-arched native process is an illegal
@@ -165,7 +165,7 @@ CFLAGS      += -pthread -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
 # compiler is the one thing here that cannot lie about what it targets.
 #
 # The fix is cross-compiling the host tools too, the same way
-# ksigcompiler.sh already cross-compiles every blob: clang is a cross
+# ksigbuilder already cross-compiles every blob: clang is a cross
 # compiler by construction, so the only extra ingredient is an x86_64
 # mingw-w64 sysroot (headers/crt/import libs) alongside whatever native one
 # came with the compiler - KOF_X86_SYSROOT points at it, overridable for an
@@ -174,7 +174,7 @@ CFLAGS      += -pthread -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
 # ran correctly under Windows's x64 emulation, and so did the full scanner
 # against a real PE, where the native-ARM64 build had crashed instantly.
 # KOF_HOST_MACH=arm64 asks for the other half of this: a host tool that is
-# ITSELF native ARM64 machine code, loading blobs ksigcompiler.sh built with
+# ITSELF native ARM64 machine code, loading blobs ksigbuilder built with
 # KOF_TARGET_MACH=arm64 (see the sigs recipe below) - nothing here runs under
 # Windows's x64 emulation at all. Unset (the default) keeps every existing
 # build byte-for-byte the same: still forced to x86_64, still what every
@@ -600,6 +600,11 @@ $(OUT)/bin/ksigbuilder$(EXE): ksigbuilder/ksigbuilder.c $(LIB) $(SDK_HDR) $(STAM
 # built five minutes ago was still in the next release build, and a detection
 # deleted from the source kept shipping because its blob was never removed. Neither
 # shows up as a failure - the build succeeds and the database is quietly wrong.
+# The linker that links a MODULE, which is not always the one that links this
+# project's own tools: a module is freestanding position-independent code with a
+# script of its own, and on Windows that is lld rather than the system linker.
+LD_FOR_SIGS ?= $(if $(filter windows,$(NATIVE_OS)),ld.lld,ld)
+
 BASEDIR   ?= bases
 BASESET   := $(notdir $(patsubst %/,%,$(BASEDIR)))
 
@@ -626,12 +631,14 @@ sigs: $(OUT)/bin/ksigbuilder$(EXE) $(SDK_HDR)
 		exit 2; }
 	@rm -rf $(ARTEFACTS)
 	@mkdir -p $(ARTEFACTS)
-	@echo "$(SIGS)" | tr ' ' '\n' | KOF_OUTDIR=$(abspath $(ARTEFACTS)) \
+	@for s in $(SIGS); do \
 		KOF_BASEDIR=$(abspath $(BASEDIR)) \
-		KOF_TARGET_MACH=$(if $(filter arm64,$(KOF_HOST_MACH)),arm64,x86_64) \
-		KOF_KSIGBUILDER=$(abspath $(OUT)/bin/ksigbuilder$(EXE)) \
 		KOF_INCLUDE=$(abspath $(OUT)/include) \
-		xargs -P $(JOBS) -n 1 ksigbuilder/ksigcompiler.sh >/dev/null
+		KOF_LDSCRIPT=$(abspath ksigbuilder/module.ld) \
+		CC="$(CC)" LD="$(LD_FOR_SIGS)" \
+		$(OUT)/bin/ksigbuilder$(EXE) --module "$$s" \
+			$(abspath $(ARTEFACTS)) >/dev/null || exit 1; \
+	done
 	@echo "  $(words $(SIGS)) source(s) from $(BASEDIR) -> $(ARTEFACTS)"
 
 databases: sigs $(OUT)/bin/ksigbuilder$(EXE)

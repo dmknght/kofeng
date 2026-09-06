@@ -9,7 +9,7 @@
  *   a heuristic says   "this object has a shape clean software does not"
  *
  * So a rule here names no family, reports nothing above KOF_LVL_HEUR, and
- * produces no child objects. The build refuses all three - see ksigcompiler.sh -
+ * produces no child objects. The build refuses all three - see ksigbuilder -
  * because a rule that could report INFECT would be a signature written in the
  * wrong file, and the difference matters to a reader of the output: a family
  * name is a claim about identity, a heuristic word is a claim about shape.

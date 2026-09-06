@@ -20,8 +20,10 @@
 #include <errno.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#ifndef _WIN32
 #include <pwd.h>
 #include <unistd.h>
+#endif
 #include <time.h>
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
@@ -42,17 +44,36 @@
  * this tool has no way to know one and inventing a field for somebody to fill in
  * would leave it empty in every file.
  */
+/*
+ * WHO IS WRITING THIS SIGNATURE, for the researcher line in the generated file.
+ *
+ * The environment first on both platforms, because that is what a person can
+ * set when the account name is not the name they publish under. Only when it
+ * says nothing does this ask the system.
+ *
+ * The system half is where the platforms differ and the reason they are split
+ * rather than papered over: getpwuid is the POSIX account database and has no
+ * Windows equivalent worth emulating, while USERNAME is the variable Windows
+ * itself sets for exactly this. Guarded at the include as well as at the use -
+ * <pwd.h> and <unistd.h> do not exist on the Windows side at all, and a build
+ * that stops at a missing header stops for the whole tool.
+ */
 static const char *meta_user(void)
 {
 	const char *u = getenv("USER");
 
 	if (!u || !u[0])
 		u = getenv("LOGNAME");
+#ifdef _WIN32
+	if (!u || !u[0])
+		u = getenv("USERNAME");
+#else
 	if (!u || !u[0]) {
 		struct passwd *pw = getpwuid(getuid());
 
 		u = pw && pw->pw_name ? pw->pw_name : "";
 	}
+#endif
 	return u ? u : "";
 }
 
@@ -61,8 +82,35 @@ static void meta_today(char *out, uint32_t cap)
 {
 	time_t now = time(NULL);
 	struct tm tmv;
+	int have;
 
-	if (localtime_r(&now, &tmv))
+	/*
+	 * localtime_r is POSIX and absent on Windows. Its MSVC-shaped
+	 * replacement, localtime_s, is NOT reached for here: mingw follows
+	 * MSVC's argument order (struct tm * first) while C11 Annex K specifies
+	 * the opposite, so the same call spells two different things depending
+	 * on which declaration wins - a portability fix that compiles either
+	 * way and is wrong in one of them.
+	 *
+	 * Plain localtime is unambiguous, and the reason localtime_r exists -
+	 * a shared static buffer - does not apply: Windows returns thread-local
+	 * storage, and the result is copied out before anything else can run.
+	 *
+	 * Local rather than in kofplatform.h because this is the only caller in
+	 * the tree. It belongs there the moment there is a second.
+	 */
+#ifdef _WIN32
+	{
+		const struct tm *lt = localtime(&now);
+
+		have = lt != NULL;
+		if (have)
+			tmv = *lt;
+	}
+#else
+	have = localtime_r(&now, &tmv) != NULL;
+#endif
+	if (have)
 		strftime(out, cap, "%Y-%m-%d", &tmv);
 	else
 		snprintf(out, cap, "unknown");
@@ -1417,9 +1465,7 @@ uint32_t draft_hash(struct kof_editor *e)
 const char *draft_sample(struct kof_editor *e)
 {
 	const char *n = (e->path && e->path[0]) ? e->path : (&e->obj[e->cur])->name;
-	const char *s = strrchr(n, '/');
-
-	return s ? s + 1 : n;
+	return kof_path_base(n);
 }
 
 
@@ -1588,12 +1634,12 @@ uint32_t draft_tgt(struct kof_editor *e)
 	return h;
 }
 
-const char *draft_dup(struct kof_editor *e, int *near)
+const char *draft_dup(struct kof_editor *e, int *near_miss)
 {
 	uint32_t pat = 0, n = 0, i, tgt;
 
-	if (near)
-		*near = 0;
+	if (near_miss)
+		*near_miss = 0;
 	if (!e->dr.n_decl)
 		return NULL;
 	src_index(e);
@@ -1623,7 +1669,7 @@ const char *draft_dup(struct kof_editor *e, int *near)
 	 * these sizes, and the answer a researcher wants before adding a rule
 	 * that mostly repeats one.
 	 */
-	for (i = 0; i < g_n_src && near; i++) {
+	for (i = 0; i < g_n_src && near_miss; i++) {
 		uint32_t k;
 
 		if (e->dr.gen_path[0] && !strcmp(g_src[i].path, e->dr.gen_path))
@@ -1635,7 +1681,7 @@ const char *draft_dup(struct kof_editor *e, int *near)
 
 			if (g_src[i].pat == less &&
 			    g_src[i].n_pat + 1u == n) {
-				*near = 1;
+				*near_miss = 1;
 				return g_src[i].path;
 			}
 		}
@@ -3408,15 +3454,15 @@ void generate(struct kof_editor *e, int as_new)
 		 * a key runs this too, and the two must not disagree about
 		 * whether Save As is allowed on a read-only rule. */
 		const char *why = draft_missing_of(e, as_new);
-		int near = 0;
+		int near_miss = 0;
 		const char *dup;
 
 		if (why) {
 			say_err(e, "%s first", why);
 			return;
 		}
-		dup = draft_dup(e, &near);
-		if (dup && !near) {
+		dup = draft_dup(e, &near_miss);
+		if (dup && !near_miss) {
 			say_note(e, "Same markers as %s - edit that instead",
 				 dup);
 			return;

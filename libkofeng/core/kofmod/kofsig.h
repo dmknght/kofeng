@@ -12,7 +12,7 @@
  *
  * No external symbols means nothing to resolve at load time, so loading is a copy
  * and an mprotect. No writable data means one mapped copy serves every thread.
- * ksigcompiler.sh enforces all of it on the object.
+ * ksigbuilder enforces all of it on the object.
  *
  * A consequence to know before writing a module: string literals are fine, arrays
  * of pointers to them are not - those land in .data.rel.ro with relocations against
@@ -243,6 +243,45 @@ static inline int kof_streq_(const char *a, const char *b)
  * Inline rather than a .c file: they are switch statements over an enum this header
  * already declares, so anything that has the enum has all it needs.
  */
+/*
+ * THE WAY BACK: the identifier a signature source writes, to its value.
+ *
+ * The sibling of kof_arch_from_name and kof_maltype_from_name, and it was the
+ * one missing. Its absence had a cost that was not obvious: the database
+ * builder needed format identifiers resolved, could not ask the engine, and
+ * so read this header with sed - a shell regex over C source, learning enum
+ * values by matching "KOF_FMT_\([A-Z0-9_]*\) *= *\([0-9]*\)". That works
+ * until a value is written as an expression, a comment mentions one, or the
+ * enum is reformatted, and it fails by producing a WRONG MASK rather than an
+ * error.
+ *
+ * KOF_FMT_ANY is not here. It is not a format, it is every format at once, and
+ * the caller that accepts it has to turn it into a mask rather than a value.
+ */
+static inline int kof_format_from_name(const char *s, uint8_t *out)
+{
+#define KOF_FMT_X_FROM(name, val)                                           \
+	if (kof_streq_(s, #name)) { *out = (uint8_t)(val); return 1; }
+	KOF_FMT_X_FROM(KOF_FMT_UNKNOWN, KOF_FMT_UNKNOWN)
+	KOF_FMT_X_FROM(KOF_FMT_ELF,     KOF_FMT_ELF)
+	KOF_FMT_X_FROM(KOF_FMT_PE,      KOF_FMT_PE)
+	KOF_FMT_X_FROM(KOF_FMT_MACHO,   KOF_FMT_MACHO)
+	KOF_FMT_X_FROM(KOF_FMT_SCRIPT,  KOF_FMT_SCRIPT)
+	KOF_FMT_X_FROM(KOF_FMT_TEXT,    KOF_FMT_TEXT)
+	KOF_FMT_X_FROM(KOF_FMT_GZIP,    KOF_FMT_GZIP)
+	KOF_FMT_X_FROM(KOF_FMT_DOCOLE,  KOF_FMT_DOCOLE)
+	KOF_FMT_X_FROM(KOF_FMT_ZIP,     KOF_FMT_ZIP)
+	KOF_FMT_X_FROM(KOF_FMT_DOCZIP,  KOF_FMT_DOCZIP)
+	KOF_FMT_X_FROM(KOF_FMT_TAR,     KOF_FMT_TAR)
+	KOF_FMT_X_FROM(KOF_FMT_7Z,      KOF_FMT_7Z)
+	KOF_FMT_X_FROM(KOF_FMT_RAR,     KOF_FMT_RAR)
+	KOF_FMT_X_FROM(KOF_FMT_XZ,      KOF_FMT_XZ)
+	KOF_FMT_X_FROM(KOF_FMT_RTF,     KOF_FMT_RTF)
+	KOF_FMT_X_FROM(KOF_FMT_PDF,     KOF_FMT_PDF)
+#undef KOF_FMT_X_FROM
+	return 0;
+}
+
 static inline const char *kof_format_name(uint8_t fmt)
 {
 	switch (fmt) {
