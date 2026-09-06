@@ -1,0 +1,14 @@
+# Line endings, decided here rather than by whoever checked the tree out.
+#
+# core.autocrlf=true is the Windows default, and it rewrites every text file to
+# CRLF on checkout - including the shell scripts. A shell script whose shebang
+# reads "#!/bin/sh\r" is not a shell script to Linux: execve fails, and what
+# comes back is ENOENT, "No such file or directory", naming the script that is
+# plainly there. Building this tree from Windows and testing it from WSL over
+# the same checkout is a thing this project actually does, so the scripts are
+# pinned to LF and the question stops depending on who cloned it.
+*.sh   text eol=lf
+*.ld   text eol=lf
+
+# The PowerShell half is the mirror image: it is only ever run by Windows.
+*.ps1  text eol=crlf

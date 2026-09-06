@@ -702,9 +702,20 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	int be = elf->valid && elf->elf_data == KOF_ELFDATA_BE;
 	uint64_t magic_at, at, want, got = 0;
 	uint32_t blocks = 0;
-	/* Zeroed here rather than by upx_layout_of, so a peek that fails leaves
-	 * a layout that finds no gaps instead of one full of stack. */
-	struct upx_layout L = { { 0 }, { 0 }, 0 };
+	/*
+	 * Emptied here rather than by upx_layout_of, so a peek that fails
+	 * leaves a layout that finds no gaps instead of one full of stack.
+	 *
+	 * The count is the whole of what that takes: off[] and len[] are read
+	 * only under `i + 1 < n` (see upx_gap_at), so at n == 0 there is no
+	 * reading them, and upx_layout_of sets n itself before it writes an
+	 * entry. Zeroing the arrays as well would be 264 bytes nothing can
+	 * observe - and at that size the compiler stops storing them inline
+	 * and emits a call to memset, which is a libc symbol a freestanding
+	 * blob has none of. That does not fail at compile time; it fails when
+	 * the module is linked, on every host.
+	 */
+	struct upx_layout L;
 	uint64_t padded = 0;
 	/*
 	 * The first block, kept because it may have to be written out from here
@@ -717,6 +728,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 */
 	uint8_t hdr[UPX_HDR_PEEK];
 	uint32_t hdr_len = 0;
+
+	L.n = 0;
 
 	/*
 	 * Find the stub's magic. Bounded to the front of the object because the

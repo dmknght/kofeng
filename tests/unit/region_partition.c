@@ -22,22 +22,25 @@
  * failing - a machine without one of them should not fail the build.
  */
 
-#define _POSIX_C_SOURCE 200809L
+/* _GNU_SOURCE, not _POSIX_C_SOURCE: this file includes kofplatform.h, whose
+ * POSIX kof_memmem calls glibc memmem - a GNU extension that strict POSIX mode
+ * hides. It is a superset of what _POSIX_C_SOURCE 200809L gave this file. */
+#define _GNU_SOURCE
 
 #include "../../libkofeng/kofparsers/kofformat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <unistd.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 
+#include "../../libkofeng/core/kofplatform.h"
 #include "../../libkofeng/kofparsers/binaries/elf_parse.h"
 #include "../../libkofeng/kofparsers/binaries/pe_parse.h"
 #include "../../libkofeng/kofparsers/containers/gzip_parse.h"
@@ -171,9 +174,9 @@ static void one_file(const char *path, struct tally *t)
 		close(fd);
 		return;
 	}
-	map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	map = kof_map_file_ro(fd, (uint64_t)st.st_size);
 	close(fd);
-	if (map == MAP_FAILED)
+	if (!map)
 		return;
 
 	buf = kof_buf_make(map, (uint64_t)st.st_size);
@@ -204,7 +207,7 @@ static void one_file(const char *path, struct tally *t)
 		}
 		break;
 	}
-	munmap(map, (size_t)st.st_size);
+	kof_unmap_file(map, (uint64_t)st.st_size);
 }
 
 static void walk(const char *dir, struct tally *t)

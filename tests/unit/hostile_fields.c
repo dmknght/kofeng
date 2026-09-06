@@ -84,6 +84,29 @@
 #define AMPLIFY_MAX  200.0
 #define FLOOR_MS       0.5
 
+/*
+ * How many times a case that looks slow is measured again before it is believed.
+ *
+ * The floor above assumed a baseline of a few microseconds, and on this hardware
+ * the baselines are one: an ELF header parses in 0.001 ms, so FLOOR_MS alone
+ * demands 500x and the ratio the comment above is about stops deciding anything.
+ * What actually decided it was whether the scheduler took the thread away once
+ * during that one measurement - a single 0.6 ms hiccup against a 0.001 ms
+ * baseline reads as 498x and fails the run. Measured: 1 failure in 6 runs on
+ * native ARM64, 1 in 3 under Windows's x64 emulation, a different format each
+ * time, and 1 in 2 on Linux - which is a report on the machine's mood, not on
+ * any parser.
+ *
+ * The budget is NOT loosened for this: a run that keeps failing at random is
+ * worth no more than one that cannot fail, and the answer to both is to measure
+ * properly rather than to widen what counts as passing. Amplification is work
+ * the parser really does, so it reproduces every time; scheduler noise only ever
+ * ADDS time, so the smallest of several measurements is the one with the least
+ * of it in. A case is re-timed only when it has already tripped the threshold,
+ * which is a few dozen cases out of a hundred thousand - the run costs the same.
+ */
+#define CONFIRM_RUNS   5u
+
 /* No parse of a one megabyte object has a reason to hold more than this. */
 #define ALLOC_LIMIT (24u << 20)
 
@@ -296,6 +319,41 @@ static double baseline_ms(const struct target *tg, uint8_t *obj, void *view)
 }
 
 /*
+ * Time the same parse again, and report the cheapest it ever was.
+ *
+ * Everything the real measurement also does - ranking, the partition check, the
+ * allocation ceiling - is deliberately left out: this is not another case, it is
+ * the same case asked a second time, and it must not be counted twice. The
+ * allocation counters it disturbs are saved and put back by the caller for the
+ * same reason.
+ */
+static double confirm_ms(const struct target *tg, uint8_t *obj, void *view,
+			 const struct field *f, uint64_t v,
+			 const struct field *g, uint64_t gv,
+			 uint64_t seed_len, double best)
+{
+	uint32_t i;
+
+	for (i = 0; i < CONFIRM_RUNS; i++) {
+		struct kof_obj_ctx ctx;
+		double t0, dt;
+
+		memset(&ctx, 0, sizeof ctx);
+		tg->seed(obj);
+		poke(obj, seed_len, f, v);
+		if (g)
+			poke(obj, seed_len, g, gv);
+
+		t0 = now_ms();
+		(void)tg->p->parse(kof_buf_make(obj, seed_len), view, &ctx);
+		dt = now_ms() - t0;
+		if (dt < best)
+			best = dt;
+	}
+	return best;
+}
+
+/*
  * One case, of one or two fields.
  *
  * Two, because one is not enough to express the shapes that hurt. The measured ELF
@@ -338,6 +396,20 @@ static void one_case(const struct target *tg, uint8_t *obj, void *view,
 	}
 	dt = now_ms() - t0;
 	t->cases++;
+
+	/*
+	 * Ask again before believing a slow one - see CONFIRM_RUNS. Only the
+	 * cases that already look like failures pay for this, and the counters
+	 * the extra parses move are put back, because the allocation ceiling
+	 * below is a question about the ONE parse that was accounted.
+	 */
+	if (dt > FLOOR_MS && base > 0.0 && dt / base > AMPLIFY_MAX) {
+		uint64_t keep_live = alloc_live, keep_peak = alloc_peak;
+
+		dt = confirm_ms(tg, obj, view, f, v, g, gv, seed_len, dt);
+		alloc_live = keep_live;
+		alloc_peak = keep_peak;
+	}
 
 	{
 		double amp = base > 0.0 ? dt / base : 0.0;

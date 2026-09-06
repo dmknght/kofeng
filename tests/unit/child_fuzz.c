@@ -24,13 +24,17 @@
  * Getting that wrong is a use-after-free or a leak, and LeakSanitizer is watching.
  */
 
-#define _POSIX_C_SOURCE 200809L
+/* _GNU_SOURCE, not _POSIX_C_SOURCE: this file includes kofplatform.h, whose
+ * POSIX kof_memmem calls glibc memmem - a GNU extension that strict POSIX mode
+ * hides. It is a superset of what _POSIX_C_SOURCE 200809L gave this file. */
+#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#include "../../libkofeng/core/kofplatform.h"
 #include "../../libkofeng/kofscanners/scan.h"
 
 static int failures;
@@ -181,7 +185,7 @@ int main(int argc, char **argv)
 		rounds = strtoull(argv[2], 0, 0);
 	rng_state = seed ? seed : 1;
 
-	snprintf(root, sizeof root, "%s/kof_child_XXXXXX", tmp && *tmp ? tmp : "/tmp");
+	snprintf(root, sizeof root, "%s/kof_child_XXXXXX", tmp && *tmp ? tmp : kof_tmpdir());
 	if (!mkdtemp(root)) {
 		printf("child fuzz: cannot make a work directory\n");
 		return 1;

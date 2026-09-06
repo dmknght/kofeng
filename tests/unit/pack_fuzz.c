@@ -35,7 +35,10 @@
  * Deterministic: a failure names a seed and a round.
  */
 
-#define _POSIX_C_SOURCE 200809L
+/* _GNU_SOURCE, not _POSIX_C_SOURCE: this file includes kofplatform.h, whose
+ * POSIX kof_memmem calls glibc memmem - a GNU extension that strict POSIX mode
+ * hides. It is a superset of what _POSIX_C_SOURCE 200809L gave this file. */
+#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +46,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "../../libkofeng/core/kofplatform.h"
 #include "../../libkofeng/kofdb/kofdb.h"
 #include "../../libkofeng/kofdb/kofpack.h"
 #include "../../libkofeng/kofdb/kofpackw.h"
@@ -427,7 +431,7 @@ int main(int argc, char **argv)
 	rng_state = seed ? seed : 1;
 
 	snprintf(root, sizeof root, "%s/kof_pack_fuzz_XXXXXX",
-		 tmp && *tmp ? tmp : "/tmp");
+		 tmp && *tmp ? tmp : kof_tmpdir());
 	if (!mkdtemp(root)) {
 		printf("pack fuzz: cannot make a work directory\n");
 		return 1;

@@ -19,13 +19,17 @@
  * the production path the scanner actually uses, not a model of it.
  */
 
-#define _POSIX_C_SOURCE 200809L
+/* _GNU_SOURCE, not _POSIX_C_SOURCE: this file includes kofplatform.h, whose
+ * POSIX kof_memmem calls glibc memmem - a GNU extension that strict POSIX mode
+ * hides. It is a superset of what _POSIX_C_SOURCE 200809L gave this file. */
+#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#include "../../libkofeng/core/kofplatform.h"
 #include "../../libkofeng/kofscanners/scan.h"
 
 static int failures;
@@ -321,7 +325,7 @@ int main(void)
 	FILE *f;
 	const char *tmp = getenv("TMPDIR");
 
-	snprintf(root, sizeof root, "%s/kof_budget_XXXXXX", tmp && *tmp ? tmp : "/tmp");
+	snprintf(root, sizeof root, "%s/kof_budget_XXXXXX", tmp && *tmp ? tmp : kof_tmpdir());
 	if (!mkdtemp(root)) {
 		printf("budget: cannot make a work directory\n");
 		return 1;

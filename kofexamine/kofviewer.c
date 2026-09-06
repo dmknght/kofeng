@@ -274,6 +274,53 @@ static void out_glyph(struct out *o, const char *g)
 	o->col_hint++;
 }
 
+/*
+ * THE ONLY CHARACTERS THIS PROGRAM PRINTS THAT ARE NOT PLAIN ASCII.
+ *
+ * Everything else is: every byte taken from the file being read is clamped to
+ * 0x20..0x7e before it reaches the screen, and the panes are already divided
+ * with '|' and '-'. So this block is the whole of the question "what does this
+ * look like on a terminal that is not the one it was written on".
+ *
+ * On Windows it is not the same question. A console has a CODE PAGE, and the
+ * default on this machine is 437: the three bytes of U+2502 are not one
+ * character there, they are three - the console draws them as "Γöé", and the
+ * scrollbar comes out as a column of that. Neither half of that is
+ * survivable: the glyphs are wrong AND each one is three columns wide where
+ * the layout was told it is one, so the frame after it is out of place too.
+ *
+ * ASCII rather than the code page's own box drawing characters (CP437 has a
+ * real U+2502 at byte 0xb3), because that would only move the assumption: 0xb3
+ * is a box character on 437, a superscript three on 1252, and nothing at all
+ * on 65001. The low 128 are the same in every one of them, which is the only
+ * guarantee available here, and a frame drawn in '|' and '-' is legible on a
+ * console with any code page and any font - which is more than can be said for
+ * a frame drawn in the right characters on the wrong one.
+ *
+ * The alternative was SetConsoleOutputCP(CP_UTF8) at startup, which keeps the
+ * rounded corners. It is one line and it is not taken here: it changes a
+ * setting that outlives the program on a console it does not own, legacy
+ * conhost has never been reliable about it, and the failure mode when it does
+ * not take is the mess above rather than a plainer box.
+ */
+#if defined(_WIN32)
+#define G_TL "+"
+#define G_TR "+"
+#define G_BL "+"
+#define G_BR "+"
+#define G_H  "-"
+#define G_V  "|"
+#else
+/* Light box drawing, rounded at the corners, to match the scrollbar's U+2502
+ * rather than a row of ASCII dashes. */
+#define G_TL "\xe2\x95\xad"     /* U+256D */
+#define G_TR "\xe2\x95\xae"     /* U+256E */
+#define G_BL "\xe2\x95\xb0"     /* U+2570 */
+#define G_BR "\xe2\x95\xaf"     /* U+256F */
+#define G_H  "\xe2\x94\x80"     /* U+2500 */
+#define G_V  "\xe2\x94\x82"     /* U+2502 - the scrollbar's own */
+#endif
+
 static void out_fmt(struct out *o, const char *fmt, ...)
 	__attribute__((format(printf, 2, 3)));
 
@@ -2872,8 +2919,8 @@ static void scrollbar(struct out *o, int col, int top, int bot,
 	for (i = 0; i < rows; i++) {
 		out_at(o, top + i, col);
 		out_str(o, i >= t0 && i < t0 + t1
-			   ? A_BOLD "\xe2\x94\x82" A_OFF
-			   : A_DIM "\xe2\x94\x82" A_OFF);
+			   ? A_BOLD G_V A_OFF
+			   : A_DIM G_V A_OFF);
 	}
 }
 
@@ -9397,12 +9444,8 @@ static void draw_bar(struct out *o, struct view *v)
 			 * part of the menu rather than a line drawn over it. */
 			out_at(o, y, col);
 			out_str(o, BAR_ON " ");
-			/* U+2500 written out, because G_H is defined with the
-			 * dialog glyphs further down and the bar is drawn
-			 * before them - the same reason scrollbar() spells its
-			 * U+2502 this way. */
 			for (k = 0; k < BAR_W - 2; k++)
-				out_glyph(o, "\xe2\x94\x80");
+				out_glyph(o, G_H);
 			out_str(o, " " A_OFF);
 			y++;
 		}
@@ -12022,14 +12065,10 @@ static int bar_under(struct view *v)
  */
 #define GOTO_H 5
 
-/* Light box drawing, rounded at the corners, to match the scrollbar's U+2502
- * rather than a row of ASCII dashes. */
-#define G_TL "\xe2\x95\xad"     /* U+256D */
-#define G_TR "\xe2\x95\xae"     /* U+256E */
-#define G_BL "\xe2\x95\xb0"     /* U+2570 */
-#define G_BR "\xe2\x95\xaf"     /* U+256F */
-#define G_H  "\xe2\x94\x80"     /* U+2500 */
-#define G_V  "\xe2\x94\x82"     /* U+2502 - the scrollbar's own */
+/* The box drawing glyphs (G_TL, G_H, G_V and the rest) are defined beside
+ * out_glyph, up with the output primitives: the scrollbar and the menu bar draw
+ * with them too, and they are the one place where what to print depends on the
+ * platform. */
 
 /* ---- the symbols dialog ----------------------------------------------------
  *

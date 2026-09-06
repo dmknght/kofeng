@@ -33,7 +33,10 @@
  * files that eight workers actually contend for them.
  */
 
-#define _POSIX_C_SOURCE 200809L
+/* _GNU_SOURCE, not _POSIX_C_SOURCE: this file includes kofplatform.h, whose
+ * POSIX kof_memmem calls glibc memmem - a GNU extension that strict POSIX mode
+ * hides. It is a superset of what _POSIX_C_SOURCE 200809L gave this file. */
+#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,6 +45,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "../../libkofeng/core/kofplatform.h"
 #include "../../libkofeng/kofeng.h"
 
 #define FILES     64u
@@ -153,10 +157,10 @@ static void build_tree(const char *root)
 	char path[512];
 	unsigned i;
 
-	mkdir(root, 0700);
+	kof_mkdir(root, 0700);
 	for (i = 0; i < SUBDIRS; i++) {
 		snprintf(path, sizeof path, "%s/d%u", root, i);
-		mkdir(path, 0700);
+		kof_mkdir(path, 0700);
 	}
 	for (i = 0; i < FILES; i++) {
 		snprintf(path, sizeof path, "%s/d%u/f%03u.bin",

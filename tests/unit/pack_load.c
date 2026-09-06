@@ -19,7 +19,10 @@
  * reason that cost it one signature.
  */
 
-#define _POSIX_C_SOURCE 200809L
+/* _GNU_SOURCE, not _POSIX_C_SOURCE: this file includes kofplatform.h, whose
+ * POSIX kof_memmem calls glibc memmem - a GNU extension that strict POSIX mode
+ * hides. It is a superset of what _POSIX_C_SOURCE 200809L gave this file. */
+#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +31,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
+#include "../../libkofeng/core/kofplatform.h"
 #include "../../libkofeng/kofdb/kofdb.h"
 #include "../../libkofeng/kofdb/kofpack.h"
 #include "../../libkofeng/kofdb/kofpackw.h"
@@ -122,7 +126,7 @@ static int write_pack(const char *dir, const char *leaf, const uint8_t *img,
 static int case_dir(char *out, size_t cap, const char *tag)
 {
 	snprintf(out, cap, "%s/%s", root, tag);
-	return mkdir(out, 0700) == 0;
+	return kof_mkdir(out, 0700) == 0;
 }
 
 /* Remove the case's files, then the case's directory. Variadic in spirit: a case
@@ -696,7 +700,7 @@ static void check_order(void)
 	snprintf(dir, sizeof dir, "build/kof_order_XXXXXX");
 	if (!mkdtemp(dir)) {
 		snprintf(dir, sizeof dir, "%s/kof_order_XXXXXX",
-			 getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+			 kof_tmpdir());
 		if (!mkdtemp(dir)) {
 			fail("order", "cannot make a directory for the case");
 			return;
@@ -814,7 +818,7 @@ int main(void)
 	const char *tmp = getenv("TMPDIR");
 
 	snprintf(root, sizeof root, "%s/kof_pack_load_XXXXXX",
-		 tmp && *tmp ? tmp : "/tmp");
+		 tmp && *tmp ? tmp : kof_tmpdir());
 	if (!mkdtemp(root)) {
 		printf("pack load: cannot make a work directory\n");
 		return 1;
@@ -830,8 +834,14 @@ int main(void)
 	check_good(good, good_len);
 
 	/* The refusals are noisy by design - the loader names the file and what is
-	 * wrong with it - and here every one of them is expected. */
+	 * wrong with it - and here every one of them is expected. The bit bucket
+	 * is spelled differently on Windows, and reaching for the POSIX name
+	 * there fails the test for a reason that has nothing to do with packs. */
+#ifdef _WIN32
+	if (!freopen("NUL", "w", stderr)) {
+#else
 	if (!freopen("/dev/null", "w", stderr)) {
+#endif
 		printf("pack load: cannot silence the expected diagnostics\n");
 		free(good);
 		rmdir(root);

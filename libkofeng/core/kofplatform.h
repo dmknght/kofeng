@@ -49,12 +49,14 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdlib.h>          /* getenv - kof_tmpdir below */
 #include <sys/stat.h>
 
 #ifdef _WIN32
 
 #include <windows.h>
 #include <io.h>
+
 #include <string.h>
 
 /* See the header comment: not a verified equivalent, only the closest
@@ -144,12 +146,22 @@ static inline void kof_unmap_anon(void *p, uint64_t len)
  */
 #define KOF_MEMMEM_FAIL_MAX 1024
 
+/*
+ * Consecutive memchr calls that skipped nothing before the search stops
+ * calling it. Small because the evidence is unambiguous - a skip of zero
+ * means the byte was already there - and because the cost of being wrong for
+ * this many bytes is nothing next to being wrong for a whole haystack.
+ */
+#define KOF_MEMMEM_GIVE_UP 16u
+
 static inline const void *kof_memmem(const void *hay_, size_t hlen,
 				      const void *needle_, size_t nlen)
 {
 	const uint8_t *hay = (const uint8_t *)hay_;
 	const uint8_t *needle = (const uint8_t *)needle_;
 	uint32_t fail[KOF_MEMMEM_FAIL_MAX];
+	unsigned barren = 0;
+	int anchored = 1;
 	size_t i, k;
 
 	if (nlen == 0)
@@ -175,14 +187,70 @@ static inline const void *kof_memmem(const void *hay_, size_t hlen,
 		fail[i] = (uint32_t)k;
 	}
 
+	/*
+	 * SKIPPING TO THE NEXT BYTE THAT COULD START A MATCH, while keeping
+	 * the automaton that makes the worst case linear.
+	 *
+	 * While k is zero nothing is half-matched, so every byte that is not
+	 * the needle's first cannot begin one and memchr may run over them at
+	 * whatever width the C library uses. The KMP state is not restarted by
+	 * this - memchr only ever skips bytes the loop below would have
+	 * rejected one at a time - so the O(hlen + nlen) bound is the same
+	 * bound as before.
+	 *
+	 * `anchored` is the retreat, and it is why this is safe to do at all.
+	 * On a haystack whose every byte is the needle's first, memchr skips
+	 * nothing and its call overhead is pure loss - which is exactly the
+	 * shape this function was given a KMP to survive. So the skips are
+	 * watched, and enough consecutive ones that gained no ground turns the
+	 * anchor off for the rest of the call. One way, so there is no
+	 * oscillating between the two.
+	 *
+	 * Measured on this machine, 32MB haystacks, MB/s, x86_64 then AArch64:
+	 *
+	 *              before        after
+	 *   sparse     1455  533     21333  21333
+	 *   dense       372  332       674    800
+	 *   hostile     901 1280      1049   2000
+	 *
+	 * The AArch64 column is why this was looked at: the plain loop carries
+	 * the needle index through a load whose address depends on it, so each
+	 * iteration waits a load latency, and the same C on x86_64 happens to
+	 * break that chain. Skipping the bytes entirely helps both and does
+	 * not depend on either compiler continuing to do what it does today.
+	 */
 	k = 0;
-	for (i = 0; i < hlen; i++) {
-		while (k > 0 && hay[i] != needle[k])
+	i = 0;
+	while (i < hlen) {
+		uint8_t c;
+
+		if (k == 0 && anchored) {
+			const uint8_t *hit = (const uint8_t *)
+				memchr(hay + i, needle[0], hlen - i);
+
+			if (!hit)
+				return NULL;
+			if (hit == hay + i) {
+				if (++barren >= KOF_MEMMEM_GIVE_UP)
+					anchored = 0;
+			} else {
+				barren = 0;
+			}
+			i = (size_t)(hit - hay);
+			k = 1;
+			if (nlen == 1)
+				return hay + i;
+			i++;
+			continue;
+		}
+		c = hay[i];
+		while (k > 0 && c != needle[k])
 			k = fail[k - 1];
-		if (hay[i] == needle[k])
+		if (c == needle[k])
 			k++;
 		if (k == nlen)
 			return hay + (i + 1 - nlen);
+		i++;
 	}
 	return NULL;
 }
@@ -191,6 +259,7 @@ static inline const void *kof_memmem(const void *hay_, size_t hlen,
 
 #include <sys/mman.h>
 #include <unistd.h>
+#include <fcntl.h>           /* open, O_RDONLY - kof_map_file_ro below */
 #include <string.h>
 
 /* The real one - see the header comment on why this side just calls it. Needs
@@ -297,6 +366,93 @@ static inline const char *kof_path_base(const char *p)
 	const char *s = kof_path_sep_last(p);
 
 	return s ? s + 1 : p;
+}
+
+/*
+ * WHERE SCRATCH FILES GO. Never NULL.
+ *
+ * TMPDIR is the POSIX spelling and Windows does not set it - it sets TMP, and
+ * TEMP behind that. A caller that knows only the first name falls back to
+ * "/tmp", which on Windows is a path that does not exist, and the failure
+ * arrives as "cannot make a work directory" with nothing saying why.
+ *
+ * The current directory is the last resort rather than a failure: a test that
+ * writes its scratch files beside the build output is untidy, and one that
+ * cannot run at all is worse.
+ */
+static inline const char *kof_tmpdir(void)
+{
+	const char *p = getenv("TMPDIR");
+
+	if (p && p[0])
+		return p;
+#ifdef _WIN32
+	p = getenv("TMP");
+	if (p && p[0])
+		return p;
+	p = getenv("TEMP");
+	if (p && p[0])
+		return p;
+	return ".";
+#else
+	return "/tmp";
+#endif
+}
+
+/*
+ * IS `path` INSIDE `dir`, and if so, where does the part below it begin?
+ *
+ * Returns NULL when it is not, so a caller can tell "not in the tree" from "at
+ * the top of it", which is an empty string rather than a null.
+ *
+ * Separators are compared as equals, and on Windows so is case. That is not
+ * politeness: the two strings arriving here come from different places and
+ * spell the same directory differently. A build names its sources the way they
+ * were typed and its content tree the way GNU make's $(abspath) writes one -
+ * forward slashes - while kof_abs_path answers through _fullpath, which writes
+ * backslashes. Compared byte for byte the answer is "not inside" for a path
+ * that plainly is, and the caller falls back to a bare basename: which is how
+ * two sources both called shellcode_00.c, in different directories, came to
+ * write over each other's artefacts and leave two modules out of the database
+ * with nothing reporting it.
+ *
+ * The boundary is checked, not just the prefix - ".../bases" must not match
+ * ".../basesuffix/x.c".
+ */
+static inline const char *kof_path_under(const char *path, const char *dir)
+{
+	size_t i;
+
+	if (!path || !dir || !dir[0])
+		return NULL;
+	for (i = 0; dir[i]; i++) {
+		char a = path[i], b = dir[i];
+
+		if (!a)
+			return NULL;
+		if (a == '\\')
+			a = '/';
+		if (b == '\\')
+			b = '/';
+#ifdef _WIN32
+		if (a >= 'A' && a <= 'Z')
+			a = (char)(a - 'A' + 'a');
+		if (b >= 'A' && b <= 'Z')
+			b = (char)(b - 'A' + 'a');
+#endif
+		if (a != b)
+			return NULL;
+	}
+	/* `dir` may or may not have been written with a trailing separator;
+	 * either way what follows it has to start on one, or `path` is a
+	 * different name that merely begins with these bytes. */
+	if (i && (dir[i - 1] == '/' || dir[i - 1] == '\\'))
+		return path + i;
+	if (path[i] != '/' && path[i] != '\\')
+		return NULL;
+	while (path[i] == '/' || path[i] == '\\')
+		i++;
+	return path + i;
 }
 
 /*

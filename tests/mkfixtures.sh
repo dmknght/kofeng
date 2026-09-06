@@ -80,9 +80,28 @@ build_set() {
 	"$_cc" $_flags "$src/plain.c"    -o "$out/plain-$_tag$_exe"
 	# shellcheck disable=SC2086
 	"$_cc" $_flags "$src/sections.c" -o "$out/sections-$_tag$_exe"
+	built=$((built + 2))
+
+	# The shared object, which is the one that does not always link.
+	#
+	# On a host whose default compiler targets Windows this asks for a DLL,
+	# and -shared drags in dllcrt2.o beside a startup the object already
+	# has: "duplicate symbol DllMainCRTStartup". That is a property of the
+	# target, not of anything being tested, and it used to take the whole
+	# fixture set down with it - leaving the corpus-driven tests with an
+	# empty directory and reporting "nothing tested" rather than a failure.
+	#
+	# So it is allowed to fail and says which one went missing. The two
+	# executables and the overlay above are what the region and partition
+	# tests actually walk.
 	# shellcheck disable=SC2086
-	"$_cc" $_flags -shared -fPIC "$src/shared.c" -o "$out/shared-$_tag$_lib"
-	built=$((built + 3))
+	if "$_cc" $_flags -shared -fPIC "$src/shared.c" \
+	          -o "$out/shared-$_tag$_lib" 2>/dev/null; then
+		built=$((built + 1))
+	else
+		rm -f "$out/shared-$_tag$_lib"
+		skipped="$skipped shared($_tag)"
+	fi
 
 	# An overlay: bytes past everything any structure in the file claims.
 	#

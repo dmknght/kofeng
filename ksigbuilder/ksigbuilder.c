@@ -2170,6 +2170,43 @@ static int coff_read(const char *path, struct img_facts *out)
 		free(b);
 		return 0;
 	}
+
+	/*
+	 * The sections, for the same question the ELF side asks of .data and
+	 * .bss: does this module carry state.
+	 *
+	 * COFF has no single writable/non-writable pair that reads off a size
+	 * report - .rdata is legitimately data and must not count - so the
+	 * name is what decides, and -fdata-sections spells a global in
+	 * .data$<name> or .bss$<name> rather than in a section called exactly
+	 * .data. The prefix is therefore what is matched, not the whole name.
+	 *
+	 * A section header is forty bytes, after the twenty byte file header
+	 * and whatever optional header it declares - an object declares none,
+	 * but the field is read rather than assumed.
+	 */
+	{
+		uint32_t nsec = (uint32_t)rd_le(b + 2, 2);
+		uint32_t optsz = (uint32_t)rd_le(b + 16, 2);
+		uint64_t at = 20u + optsz;
+
+		for (i = 0; i < nsec; i++, at += 40u) {
+			const uint8_t *s = b + at;
+			char nm[9];
+			uint64_t raw;
+
+			if (at + 40u > (uint64_t)len)
+				break;
+			memcpy(nm, s, 8);
+			nm[8] = 0;
+			raw = rd_le(s + 16, 4);          /* SizeOfRawData */
+			if (!strncmp(nm, ".bss", 4))
+				out->bss_bytes += raw;
+			else if (!strncmp(nm, ".data", 5))
+				out->data_bytes += raw;
+		}
+	}
+
 	for (i = 0; i < nsym; i++) {
 		const uint8_t *e = b + symptr + (size_t)i * 18u;
 		char name[64];
@@ -2226,6 +2263,76 @@ next:
 	free(b);
 	return 1;
 }
+
+#ifdef _WIN32
+/*
+ * THE LINKED PE, asked the two questions the object cannot answer.
+ *
+ * Read with the engine's own PE collector rather than a second parser written
+ * here, for the reason the ELF side reads its image with kof_elf_parse: a
+ * disagreement between how the build reads a header and how the scanner reads
+ * one is a disagreement nobody would find, and there is no reason to have two
+ * of them.
+ *
+ * Symbols are NOT read here. lld strips the image's symbol table by default,
+ * so which entry point a module exports and whether anything is undefined are
+ * questions only the object can still answer - see coff_read.
+ */
+static int pe_image_read(const char *path, struct img_facts *out)
+{
+	struct kof_pe_info *info;
+	struct kof_obj_ctx ctx;
+	uint8_t *buf;
+	size_t len;
+	kof_buf b;
+	uint32_t i;
+	int ok = 0;
+
+	memset(out, 0, sizeof *out);
+	buf = (uint8_t *)slurp(path, &len);
+	if (!buf)
+		return 0;
+	info = calloc(1, sizeof *info);
+	if (!info) {
+		free(buf);
+		return 0;
+	}
+	b.p = buf;
+	b.n = len;
+	memset(&ctx, 0, sizeof ctx);
+	if (!kof_pe_parse(b, info, &ctx))
+		goto done;
+
+	/*
+	 * A base relocation directory with anything in it means the image
+	 * expects to be fixed up at whatever address it lands at, and the
+	 * loader fixes up nothing: it copies the bytes and enters them.
+	 */
+	if (info->dir[KOF_PE_DIR_BASERELOC].size)
+		out->have_reloc = 1;
+
+	for (i = 0; i < info->sec_count; i++) {
+		const struct kof_pe_sec *s = &info->sec[i];
+
+		/* Everything was merged into .text at link time; anything else
+		 * carrying content means the merge and the compiler's flags
+		 * have drifted apart. */
+		if (strcmp(s->name, ".text") != 0) {
+			if (!out->extra_sec[0])
+				snprintf(out->extra_sec, sizeof out->extra_sec,
+					 "%s", s->name);
+			continue;
+		}
+		out->blob_off = s->file_off;
+		out->blob_len = s->file_size;
+	}
+	ok = out->blob_len != 0;
+done:
+	free(info);
+	free(buf);
+	return ok;
+}
+#endif /* _WIN32 */
 
 /*
  * Every fact this build needs about one ELF, in one pass.
@@ -3134,6 +3241,91 @@ static int check_size_body(void)
 static char g_entry_kept[32];
 
 /*
+ * THE RAW BLOB - the bytes the database stores and the loader jumps into.
+ *
+ * Two routes here, and they arrive at the same bytes rather than at two
+ * answers: module.ld places everything in .blob at address zero and discards
+ * the rest, and the image has just been checked to carry no other section. So
+ * "the allocatable sections laid out by address", which is what --oformat
+ * binary writes, is the contents of .blob and nothing besides it.
+ *
+ * The linker is asked wherever the linker can answer, so on every host that
+ * has built a database so far the bytes still come from where they always
+ * came from. Two hosts cannot answer. GNU ld's AArch64 backend refuses the
+ * request outright - "cannot change output format whilst linking AArch64
+ * binaries". lld in its link flavour has no --oformat at all, which is why
+ * the Windows build used to reach for llvm-objcopy --dump-section instead.
+ * Both take the bytes out of the image this build has already linked, parsed
+ * and validated - which is also what removes objcopy from what a Windows
+ * build has to have installed.
+ *
+ * Chosen by which host this is, not by running the link and reading its exit
+ * code: a refusal to change output format and a link that genuinely went
+ * wrong both come back as failure, and a fallback that cannot tell them apart
+ * would turn a real error into a silently different blob.
+ */
+static int emit_raw(const char *ld, const char *lds, const char *obj,
+		    const char *img, const char *raw,
+		    const struct img_facts *f)
+{
+#if defined(_WIN32) || defined(__aarch64__) || defined(_M_ARM64)
+	uint8_t *buf;
+	size_t len;
+	FILE *out;
+	int ok;
+
+	(void)ld;
+	(void)lds;
+	(void)obj;
+
+	buf = (uint8_t *)slurp(img, &len);
+	if (!buf) {
+		fprintf(stderr, "FAIL: cannot re-read the linked image\n");
+		return 0;
+	}
+	/* The offsets come from this same file, but they are still checked
+	 * against its real length before either is believed. */
+	if (f->blob_off > (uint64_t)len ||
+	    f->blob_len > (uint64_t)len - f->blob_off) {
+		fprintf(stderr, "FAIL: .blob lies outside the image\n");
+		free(buf);
+		return 0;
+	}
+	out = fopen(raw, "wb");
+	if (!out) {
+		fprintf(stderr, "FAIL: cannot write %s\n", raw);
+		free(buf);
+		return 0;
+	}
+	ok = fwrite(buf + f->blob_off, 1, (size_t)f->blob_len, out) ==
+	     (size_t)f->blob_len;
+	if (fclose(out) != 0)
+		ok = 0;
+	free(buf);
+	if (!ok) {
+		fprintf(stderr, "FAIL: writing %s\n", raw);
+		return 0;
+	}
+	return 1;
+#else
+	const char *cmd[] = { ld, "-T", lds, "--gc-sections",
+			      "--oformat", "binary",
+			      obj, "-o", raw, NULL };
+	int rc;
+
+	(void)img;
+	(void)f;
+
+	rc = run_tool(cmd);
+	if (rc != 0) {
+		fprintf(stderr, "FAIL: raw link returned %d\n", rc);
+		return 0;
+	}
+	return 1;
+#endif
+}
+
+/*
  * Compile, link, validate and emit one module. Non-zero on success, with
  * *entry_out naming the entry point the image exports.
  *
@@ -3159,19 +3351,118 @@ static int do_build(const char *src, const char *pat, const char *obj,
 	snprintf(inc, sizeof inc, "-I%s",
 		 incdir && incdir[0] ? incdir : ".");
 
+	/*
+	 * WHICH MACHINE THE BLOB IS FOR, said out loud rather than inherited.
+	 *
+	 * Without this the module compile is whatever `cc` defaults to, which
+	 * is the machine the compiler was built for and not necessarily the
+	 * one this database is being built for. The pack's own machine field
+	 * comes from KOF_PACK_MACH_HOST - a property of the build that made
+	 * ksigbuilder - so the two are set by different things and can
+	 * disagree.
+	 *
+	 * They did. On an ARM64 Windows host building the x86_64 default, the
+	 * tools were cross-compiled to x86_64 and stamped the pack x86_64,
+	 * while every blob came out AArch64 because `cc` here is native. That
+	 * database loads without a complaint - the machine field says exactly
+	 * what the engine is - and then the scanner enters the first module
+	 * and dies on STATUS_ILLEGAL_INSTRUCTION.
+	 *
+	 * Empty means "whatever cc targets", which is right for a native
+	 * build and is what the Linux side uses.
+	 */
 	{
-		const char *cmd[] = {
-			cc, "-std=c11", "-Os",
+		const char *triple = getenv("KOF_TARGET_TRIPLE");
+		char targ[256];
+		const char *flags[] = {
+			"-std=c11", "-Os",
 			"-ffreestanding", "-fno-builtin", "-nostdlib",
 			"-fno-asynchronous-unwind-tables",
 			"-fno-unwind-tables",
 			"-fno-ident", "-g0",
 			"-fno-stack-protector", "-fno-jump-tables",
 			"-ffunction-sections", "-fdata-sections",
+#if (defined(__aarch64__) || defined(_M_ARM64)) && !defined(_WIN32)
+			/*
+			 * REACHING THE BLOB'S OWN RODATA, ON A HOST WHERE
+			 * PC-RELATIVE MEANS PAGE-RELATIVE.
+			 *
+			 * A blob is linked at address zero and then copied to
+			 * wherever the arena has room, and nothing relocates
+			 * it - which works because every reference inside it
+			 * is PC-relative. On x86-64 that is RIP-relative and
+			 * counts in BYTES, so any load address will do.
+			 *
+			 * AArch64's default is adrp+add, and adrp counts in
+			 * 4KB PAGES: it yields the page the instruction is
+			 * in, and the add carries the link-time offset within
+			 * that page. The two agree only when the blob is
+			 * loaded at the same page offset it was linked at,
+			 * and the loader aligns a blob to KOF_PACK_BLOB_ALIGN
+			 * - sixteen bytes. So a module reading a const table
+			 * of its own read whatever happened to sit at that
+			 * offset from a page boundary instead.
+			 *
+			 * Measured before this flag: ten of the sixty-two
+			 * modules in bases/ emitted adrp, and every one of
+			 * them was silently reading the wrong bytes - no
+			 * fault, no refusal, just a module that never
+			 * matched. tests/unit/msf_xor.c is the one that
+			 * noticed.
+			 *
+			 * -mcmodel=tiny emits adr instead, which is
+			 * PC-relative in bytes and therefore correct at any
+			 * load address. Its cost is a 1MB reach from the
+			 * instruction to what it names; a signature module is
+			 * a few kilobytes, and a blob that ever outgrew that
+			 * fails at link time with a relocation overflow
+			 * rather than by reading the wrong address.
+			 *
+			 * ELF only, and not by choice: clang refuses the tiny
+			 * model for a COFF target outright - "tiny code model
+			 * is only supported on ELF". AArch64 Windows has the
+			 * same adrp and therefore the same bug waiting, and
+			 * it needs a different remedy - most likely giving a
+			 * blob a page-aligned home in the arena rather than
+			 * the sixteen bytes KOF_PACK_BLOB_ALIGN promises.
+			 * Nothing here is affected by that yet, because the
+			 * COFF half of this function is not written.
+			 */
+			"-mcmodel=tiny",
+#endif
+#ifdef _WIN32
+			/*
+			 * Windows grows a stack a page at a time and has the
+			 * function ask for it, by calling __chkstk once its
+			 * frame passes a threshold. That is a CRT symbol, and
+			 * a module links against no CRT - so a signature with
+			 * a large enough local buffer fails to link, naming a
+			 * function nobody wrote a call to.
+			 *
+			 * Raised past anything a module's own locals can
+			 * plausibly need. It is not a licence to use a
+			 * megabyte of stack: a module runs on whatever stack
+			 * the host was already on, and the modules here budget
+			 * in kilobytes. It only stops the compiler from
+			 * reaching for a runtime that is not there.
+			 */
+			"-mstack-probe-size=1000000",
+#endif
 			"-Wall", "-Wextra", "-Werror",
 			inc, "-include", pat, "-c", src, "-o", obj,
 			NULL
 		};
+		const char *cmd[8 + sizeof flags / sizeof flags[0]];
+		unsigned n = 0, k;
+
+		cmd[n++] = cc;
+		if (triple && triple[0]) {
+			snprintf(targ, sizeof targ, "--target=%s", triple);
+			cmd[n++] = targ;
+		}
+		for (k = 0; flags[k]; k++)
+			cmd[n++] = flags[k];
+		cmd[n] = NULL;
 
 		rc = run_tool(cmd);
 		if (rc != 0) {
@@ -3183,7 +3474,11 @@ static int do_build(const char *src, const char *pat, const char *obj,
 
 	/* No writable state, checked on the OBJECT where the sections
 	 * are still separate and attributable. */
+#ifdef _WIN32
+	if (!coff_read(obj, &f)) {
+#else
 	if (!img_read(obj, NULL, &f)) {
+#endif
 		fprintf(stderr, "FAIL: cannot read the compiled "
 				"object\n");
 		return 0;
@@ -3199,8 +3494,41 @@ static int do_build(const char *src, const char *pat, const char *obj,
 	}
 
 	{
+#ifdef _WIN32
+		/*
+		 * COFF has no linker script, so what module.ld does for the
+		 * ELF side is done with flags here.
+		 *
+		 * -dll -noentry: nothing is ever loaded as a PE image, so the
+		 * header's own entry field is read by nobody - the host copies
+		 * raw bytes into its arena and enters them by offset. -dll is
+		 * only what -noentry has to be paired with; it sets a header
+		 * bit nothing reads.
+		 *
+		 * The three -merge flags are the part that matters. Without
+		 * them .rdata lands in its own separately page-aligned
+		 * section, and the PC-relative loads reaching it are correct
+		 * only at that gap - so dumping .text alone would carry code
+		 * whose data references point past the end of what was
+		 * copied. Merging first makes the linker resolve every
+		 * reference assuming byte-for-byte adjacency, which is what
+		 * leaves one section that is self-contained at any address.
+		 */
+		char outarg[1024];
+		const char *cmd[] = { ld, "-flavor", "link",
+				      "-dll", "-noentry",
+				      "-subsystem:native", "-nodefaultlib",
+				      "-merge:.rdata=.text",
+				      "-merge:.data=.text",
+				      "-merge:.bss=.text",
+				      obj, outarg, NULL };
+
+		(void)lds;
+		snprintf(outarg, sizeof outarg, "-out:%s", img);
+#else
 		const char *cmd[] = { ld, "-T", lds, "--gc-sections",
 				      obj, "-o", img, NULL };
+#endif
 
 		rc = run_tool(cmd);
 		if (rc != 0) {
@@ -3208,27 +3536,33 @@ static int do_build(const char *src, const char *pat, const char *obj,
 			return 0;
 		}
 	}
+#ifdef _WIN32
 	{
-		/* The raw blob comes from the linker rather than from
-		 * extracting a section: --oformat binary is what the
-		 * loader's input has always been, and changing where
-		 * the bytes come from would change the blob. */
-		const char *cmd[] = { ld, "-T", lds, "--gc-sections",
-				      "--oformat", "binary",
-				      obj, "-o", raw, NULL };
+		/*
+		 * Two files, two questions - see coff_read. The object has
+		 * already answered which entry point this module exports and
+		 * whether it reaches outside itself; the image answers what it
+		 * alone can, and those answers are laid over the object's
+		 * rather than replacing them.
+		 */
+		struct img_facts im;
 
-		rc = run_tool(cmd);
-		if (rc != 0) {
-			fprintf(stderr, "FAIL: raw link returned %d\n",
-				rc);
+		if (!pe_image_read(img, &im)) {
+			fprintf(stderr, "FAIL: cannot read the linked "
+					"image\n");
 			return 0;
 		}
+		f.have_reloc = im.have_reloc;
+		snprintf(f.extra_sec, sizeof f.extra_sec, "%s", im.extra_sec);
+		f.blob_off = im.blob_off;
+		f.blob_len = im.blob_len;
 	}
-
+#else
 	if (!img_read(img, ".blob", &f)) {
 		fprintf(stderr, "FAIL: cannot read the linked image\n");
 		return 0;
 	}
+#endif
 	if (f.have_reloc) {
 		fprintf(stderr, "FAIL: relocations remain (%s)\n",
 			f.extra_sec);
@@ -3252,11 +3586,20 @@ static int do_build(const char *src, const char *pat, const char *obj,
 		return 0;
 	}
 	if (f.entry_off != 0) {
-		fprintf(stderr, "FAIL: entry point is at 0x%llx, "
-				"expected 0; check module.ld\n",
+		fprintf(stderr, "FAIL: entry point is at 0x%llx, expected 0; "
+				"check module.ld (ELF) or the .text$0 "
+				"forcing (COFF)\n",
 			(unsigned long long)f.entry_off);
 		return 0;
 	}
+
+	/* Last, and only once the image above has been read and accepted -
+	 * one of the two routes in emit_raw takes its bytes out of exactly
+	 * that image, so nothing is written before there is something worth
+	 * writing. */
+	if (!emit_raw(ld, lds, obj, img, raw, &f))
+		return 0;
+
 	snprintf(g_entry_kept, sizeof g_entry_kept, "%.31s", f.entry_name);
 	*entry_out = g_entry_kept;
 	return 1;
@@ -3325,6 +3668,34 @@ static int extract_main(int argc, char **argv)
 	}
 	fprintf(out, "/* generated by ksigbuilder --extract from %s - do not edit */\n",
 		argv[2]);
+#ifdef _WIN32
+	/*
+	 * THE ENTRY POINT AT OFFSET ZERO, WITHOUT A LINKER SCRIPT.
+	 *
+	 * module.ld gives the ELF build this for free by naming
+	 * .text.kof_scan/.text.kof_unpack/.text.kof_heur first, so whichever
+	 * one the source defines lands at zero. COFF has no such script; what
+	 * it has instead is section grouping by name - sections called
+	 * "name$suffix" are concatenated into "name" in ascending suffix
+	 * order. A digit sorts before every letter a C identifier can start
+	 * with, so declaring the three entry points into ".text$0" here forces
+	 * whichever one the source goes on to define into the leading slot,
+	 * without the source ever seeing this.
+	 *
+	 * Declared, not defined: the source still provides the only body. An
+	 * attribute on an earlier declaration of the same symbol still
+	 * applies, and kofsig.h's own prototype comes later in translation
+	 * unit order carrying no section of its own. The struct stays
+	 * incomplete because nothing here names a field of it.
+	 */
+	fprintf(out, "struct kof_obj_ctx;\n");
+	fprintf(out, "__attribute__((section(\".text$0\"))) "
+		     "void kof_scan(const struct kof_obj_ctx *);\n");
+	fprintf(out, "__attribute__((section(\".text$0\"))) "
+		     "void kof_unpack(const struct kof_obj_ctx *);\n");
+	fprintf(out, "__attribute__((section(\".text$0\"))) "
+		     "void kof_heur(const struct kof_obj_ctx *);\n");
+#endif
 	for (i = 0; i < nrngs; i++)
 		emit_rng_id(out, &rngs[i], i);
 	for (i = 0; i < npats; i++)
@@ -4429,16 +4800,11 @@ static int module_main(int argc, char **argv)
 		 * prefix, which is what keeps two sources of the same basename
 		 * from overwriting each other. */
 		static char abs[4096];
+		const char *under = NULL;
 
-		rel = src;
-		if (basedir && basedir[0] && kof_abs_path(src, abs, sizeof abs) &&
-		    !strncmp(abs, basedir, strlen(basedir))) {
-			rel = abs + strlen(basedir);
-			while (*rel == '/' || *rel == '\\')
-				rel++;
-		} else {
-			rel = kof_path_base(src);
-		}
+		if (basedir && basedir[0] && kof_abs_path(src, abs, sizeof abs))
+			under = kof_path_under(abs, basedir);
+		rel = under && under[0] ? under : kof_path_base(src);
 	}
 	{
 		size_t i, n = 0;

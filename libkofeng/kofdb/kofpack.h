@@ -338,9 +338,38 @@ struct kof_pack_sec {
 #define KOF_PACK_SEC_ALIGN  64u
 #define KOF_PACK_CODE_ALIGN 4096u
 
-/* Each blob inside the code section, so an entry point is never misaligned for
- * the target's calling convention. Same value the loose-file arena uses. */
+/*
+ * Each blob inside the code section, so an entry point is never misaligned for
+ * the target's calling convention. Same value the loose-file arena uses.
+ *
+ * ONE EXCEPTION, AND IT IS NOT ABOUT CALLING CONVENTIONS.
+ *
+ * A blob is linked at address zero, copied to wherever the arena has room and
+ * entered without a single relocation being applied. That works only because
+ * everything inside it is PC-relative - and on AArch64 the instruction that
+ * reaches a module's own constants is adrp, which is relative in 4KB PAGES
+ * rather than in bytes. It carries the offset the link computed within page
+ * zero, so it lands on the right bytes only when the blob's runtime address
+ * has the same page offset it was linked at: zero. Sixteen-byte alignment does
+ * not give that, and the module then reads whatever sits at that distance from
+ * a page boundary - no fault, no refusal, just a module that never matches.
+ *
+ * On ELF the module build says -mcmodel=tiny instead, which emits adr and
+ * counts in bytes, so the blob is correct at ANY address and no promise about
+ * where it lands is needed. That is the better fix and it is preferred where
+ * it exists; clang refuses the tiny model for COFF, so on AArch64 Windows the
+ * requirement has to be satisfied rather than removed - by handing each blob a
+ * page of its own.
+ *
+ * The packer and the loader both read this one constant, so the padding it
+ * writes and the placement it checks cannot come apart. The arena itself is an
+ * anonymous mapping and is page-aligned already.
+ */
+#if (defined(__aarch64__) || defined(_M_ARM64)) && defined(_WIN32)
+#define KOF_PACK_BLOB_ALIGN 4096u
+#else
 #define KOF_PACK_BLOB_ALIGN 16u
+#endif
 
 /*
  * Limits the format imposes, stated here because this is the file both the writer

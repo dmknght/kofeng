@@ -26,7 +26,10 @@
  * reports green.
  */
 
-#define _POSIX_C_SOURCE 200809L
+/* _GNU_SOURCE, not _POSIX_C_SOURCE: this file includes kofplatform.h, whose
+ * POSIX kof_memmem calls glibc memmem - a GNU extension that strict POSIX mode
+ * hides. It is a superset of what _POSIX_C_SOURCE 200809L gave this file. */
+#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,9 +37,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 
+#include "../../libkofeng/core/kofplatform.h"
 #include "../../libkofeng/kofdecomp/nrv2.h"
 #include "../../libkofeng/kofdecomp/lzma.h"
 
@@ -227,13 +230,13 @@ static void walk(const char *dir)
 			close(fd);
 			continue;
 		}
-		map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+		map = kof_map_file_ro(fd, (uint64_t)st.st_size);
 		close(fd);
-		if (map == MAP_FAILED)
+		if (!map)
 			continue;
 		if (memcmp(map, "\177ELF", 4) == 0)
 			one_file(path, map, (uint64_t)st.st_size);
-		munmap(map, (size_t)st.st_size);
+		kof_unmap_file(map, (uint64_t)st.st_size);
 	}
 	closedir(d);
 }

@@ -37,7 +37,39 @@
  * modules that never run. An object that matches costs strictly more.
  */
 
-#define _POSIX_C_SOURCE 200809L
+/* _GNU_SOURCE, not _POSIX_C_SOURCE: this file includes kofplatform.h, whose
+ * POSIX kof_memmem calls glibc memmem - a GNU extension that strict POSIX mode
+ * hides. It is a superset of what _POSIX_C_SOURCE 200809L gave this file. */
+#define _GNU_SOURCE
+
+#ifdef _WIN32
+/*
+ * NOT PORTED, AND SAYING SO RATHER THAN GOING MISSING.
+ *
+ * What this file measures is the split between memory the process must pay for
+ * and clean file pages the kernel may drop - the long note further down is
+ * entirely about why one combined figure is a dishonest answer. That split
+ * comes from /proc/self/smaps_rollup, and Windows has no equivalent:
+ * GetProcessMemoryInfo reports a working set without distinguishing what is
+ * private and dirty from what is a shared mapping of the pack. A number could
+ * be produced here, and it would not be the number this test exists to
+ * report.
+ *
+ * So it compiles, runs, and states the reason. The alternative was leaving it
+ * out of the Windows build, where a test that is absent looks exactly like a
+ * test that passed.
+ */
+#include <stdio.h>
+
+int main(void)
+{
+	printf("db scale: not measured on Windows - the private/page-cache "
+	       "split this test reports comes from /proc/self/smaps_rollup, "
+	       "which has no equivalent here\n");
+	return 0;
+}
+
+#else
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,6 +81,7 @@
 #include <sys/wait.h>
 #include <sys/vfs.h>
 
+#include "../../libkofeng/core/kofplatform.h"
 #include "../../libkofeng/kofdb/kofdb.h"
 #include "../../libkofeng/kofdb/kofpackw.h"
 #include "../../libkofeng/kofscanners/scan.h"
@@ -565,7 +598,7 @@ int main(void)
 		n = 1024u;
 
 	if (snprintf(dir, sizeof dir, "%s/kofscaleXXXXXX",
-		     tmp && *tmp ? tmp : "/tmp") >= (int)sizeof dir) {
+		     tmp && *tmp ? tmp : kof_tmpdir()) >= (int)sizeof dir) {
 		fail("scale", "TMPDIR is too long to work in");
 		return 1;
 	}
@@ -641,3 +674,5 @@ int main(void)
 		printf("db_scale: %d failure(s)\n", failures);
 	return failures ? 1 : 0;
 }
+
+#endif /* _WIN32 */
