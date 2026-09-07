@@ -139,7 +139,7 @@ kof_probe = $(if $(filter 0,$(shell $(CC) -Werror $(1) -xc -c $(DEVNULL) \
 # without this flag the link fails on an undefined clock_gettime64 rather than
 # on anything this tree's own code did wrong.
 #
-# '-Wl,-Bstatic' -lwinpthread '-Wl,-Bdynamic': -pthread alone links libwinpthread-1.dll
+# -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic: -pthread alone links libwinpthread-1.dll
 # in dynamically, which is only ever on PATH inside an MSYS2 install - anyone who
 # runs the built .exe from a plain PowerShell or cmd prompt gets no error and no
 # output at all, because Windows refuses to start a process whose DLL cannot be
@@ -163,48 +163,60 @@ ifeq ($(OS),Windows_NT)
 NATIVE_OS   := windows
 EXE         := .exe
 #
-# POWERSHELL IS THE SHELL HERE, AND THAT IS THE WHOLE POSIX DEPENDENCY GONE.
+# CMD IS THE SHELL HERE, AND THAT IS THE WHOLE POSIX DEPENDENCY GONE.
 #
 # This used to require MSYS2: not for the compiler - clang has never needed it
 # - but because every recipe was written in POSIX sh, and GNU Make's own
 # documented fallback when it cannot find one is cmd.exe. That is not a build
 # failure, it is a different program reading the recipes and understanding
 # none of them, so the build died with cmd.exe's error text naming nothing
-# about the real cause.
+# about the real cause. So the recipes below do not speak either dialect
+# directly: they are written in terms of the operations named further down,
+# and each platform says how it performs them. A recipe that needed a loop or
+# a conditional was rewritten as make's own foreach or as a per-target rule,
+# which is a better Makefile on both platforms and not a concession to this
+# one.
 #
-# PowerShell is on every Windows install since 7, which makes it the one shell
-# that can be assumed. What it is NOT is sh: no `for` loops that look like
-# sh's, no `test`, no `mkdir -p`. So the recipes below do not speak either
-# dialect directly - they are written in terms of the operations named just
-# under here, and each platform says how it performs them. A recipe that
-# needed a loop or a conditional was rewritten as make's own foreach or as a
-# per-target rule, which is a better Makefile on both platforms and not a
-# concession to this one.
-SHELL       := powershell.exe
-.SHELLFLAGS := -NoProfile -NonInteractive -Command
+# NOT PowerShell, which is what this was first, and the reason is measured
+# rather than aesthetic. Every recipe LINE is one shell process, and on this
+# machine:
+#
+#     powershell.exe   1178 ms per recipe line
+#     cmd.exe            70 ms per recipe line
+#
+# That is not a tax on the shell-ish parts of the build, it is a tax on all of
+# it - make spawns the shell for `clang -c foo.c` too, and there is no fast
+# path that skips it (measured: a recipe with no metacharacter at all costs
+# the same). A clean build runs about 150 recipe lines, so the choice of shell
+# alone was three minutes of a five minute build, against eight seconds of
+# actual compiling. cmd is also on more Windows installs than PowerShell is,
+# so nothing is given up for it.
+#
+# What cmd cannot do is answered by starting PowerShell deliberately, once -
+# see NOW_UTC below. That is the shape to keep: PowerShell as a program this
+# build occasionally runs, never as the thing that runs every line of it.
+SHELL       := cmd.exe
+.SHELLFLAGS := /c
 #
 # IS THERE A COMPILER AT ALL - ASKED ONCE, ANSWERED IN ONE LINE.
 #
-# Without this the answer arrives as a wall. PowerShell raises
-# CommandNotFoundException for a program that is not on PATH, and it does so
-# BEFORE any redirection applies - there is no process to redirect the stderr
-# of - so the `2>$null` on the flag probes does not catch it. Measured: the
-# probes alone produce five multi-line exception blocks, each naming the flag
-# list rather than the missing compiler, before the first source file is read.
+# Without this the answer arrives as a wall: every flag probe below runs the
+# compiler, and a compiler that is not there produces one "is not recognized"
+# block per probe, each naming a warning list rather than the missing program.
 # The one line that says what is actually wrong ends up several screens above
 # where the reader is looking.
 #
-# Get-Command, not a trial compile, because the two failures want different
-# words: a compiler that is absent is a PATH problem and a compiler that is
-# present but broken is not, and running one to find out the first would print
-# the wall this exists to prevent. -ErrorAction SilentlyContinue silences the
-# ASKING - it is the one place a silent probe is right, because make's own
-# $(error) below says everything instead, loudly and once.
+# `where`, not a trial compile, because the two failures want different words:
+# a compiler that is absent is a PATH problem and a compiler that is present
+# but broken is not, and running one to find out the first would print the wall
+# this exists to prevent. Its own output and error are dropped - the one place
+# a silent probe is right, because make's own $(error) below says everything
+# instead, loudly and once.
 #
 # Recursive (=), not simple (:=), because it is asked TWICE and the answer
 # between the two asks is allowed to change: once before the search below, once
 # after it has put a toolchain on PATH.
-KOF_CC_FOUND = $(shell if (Get-Command '$(CC)' -ErrorAction SilentlyContinue) { 'yes' })
+KOF_CC_FOUND = $(shell where $(CC) >NUL 2>NUL && echo yes)
 
 #
 # NOT ON PATH IS NOT THE SAME AS NOT INSTALLED.
@@ -273,7 +285,7 @@ export TEMP := $(TMP)
 # that matters goes past unread. LDFLAGS is on every link command in this file,
 # so nothing about the resulting binaries changes.
 CFLAGS      += -pthread
-LDFLAGS     += '-Wl,-Bstatic' -lwinpthread '-Wl,-Bdynamic'
+LDFLAGS     += -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
 # By default every signature blob this engine loads is x86_64 machine code on
 # every host - deliberate, see ksigbuilder, since a database has to be
 # one thing every scanner can load rather than a matrix of per-arch builds.
@@ -426,35 +438,48 @@ endif
 SP       :=
 
 ifeq ($(NATIVE_OS),windows)
-MKDIR    = New-Item -ItemType Directory -Force -Path
 #
-# Guarded with Test-Path rather than silenced with -ErrorAction, and the
-# difference is the exit code: Remove-Item on a path that is not there fails
-# even with -ErrorAction SilentlyContinue, which only hides the message.
-# PowerShell then exits 1, make stops, and the build dies on its first line
-# after a clean - which is exactly what it did until this was measured.
+# `mkdir` alone fails on a directory that is already there, and cmd has no
+# -p. The guard is the flag: `if not exist` costs nothing and says the same.
+# Paths are quoted because the build tree can sit under Program Files.
+MKDIR    = if not exist "$(subst /,\,$(1))" mkdir "$(subst /,\,$(1))"
 #
-# Takes its argument through $(call) because the path is needed twice.
-RMRF     = if (Test-Path '$(1)') { Remove-Item -Recurse -Force '$(1)' }
-COPY     = Copy-Item -Force
-QUIET    = | Out-Null
+# rmdir /s /q fails on a path that is not there, so it is guarded the same
+# way. Both take their argument through $(call) because each needs it twice,
+# and both convert to backslashes: cmd's own file commands do not accept the
+# forward slashes the rest of this Makefile writes.
+RMRF     = if exist "$(subst /,\,$(1))" rmdir /s /q "$(subst /,\,$(1))"
+COPY     = copy /y "$(subst /,\,$(1))" "$(subst /,\,$(2))" >NUL
+#
+# Running a program this build just produced, by the path it was written to.
+#
+# cmd splits a command word at '/' looking for switches, so
+# `build/release/bin/ksigbuilder.exe` reaches it as the command `build` with
+# the option `/release` - "'build' is not recognized". Only the PROGRAM word
+# has this problem; the arguments after it are passed through untouched, which
+# is why every other path in this file can stay in forward slashes.
+EXEC     = $(subst /,\,$(1))
+QUIET    = >NUL
 DEVNULL  = NUL
 # A command that does nothing, for a recipe whose only content is a message:
 # make prints "Nothing to be done" for a target with no commands at all.
-NOOP     = $$null
-SILENCE  = 2>$$null
+NOOP     = rem
+SILENCE  = 2>NUL
 # The two things the build asks the system rather than the compiler: when this
 # is, and which dependency files exist. Both are one call, so they are spelled
 # per platform here instead of reaching for `date` and `find`.
-NOW_UTC  = (Get-Date).ToUniversalTime().ToString('yyyyMMddHH')
 #
-# Guarded with Test-Path for the reason RMRF is, and one more: the ONE error
-# worth tolerating here is "the tree has not been built yet", and
-# -ErrorAction SilentlyContinue tolerated every other one too. A directory
-# that cannot be read - a permission, a half-deleted build, a path that is now
-# a file - came back as an empty list, indistinguishable from a clean tree, and
-# the result was a build that quietly rebuilt nothing after a header change.
-FIND_DEPS = if (Test-Path '$(BUILD)') { Get-ChildItem -Recurse -Filter *.d '$(BUILD)' | ForEach-Object FullName }
+# The clock is the one thing cmd cannot answer: %DATE% is whatever the user's
+# locale says and is not UTC. One PowerShell start, once per make run, is
+# worth more than parsing a localised date string; everything else here is
+# cmd, which is why the recipes are fast again.
+NOW_UTC  = powershell -NoProfile -Command "(Get-Date).ToUniversalTime().ToString('yyyyMMddHH')"
+#
+# `dir /s /b` lists full paths, and prints "File Not Found" to stderr on a
+# tree that has not been built yet - which is the ONE error worth tolerating,
+# so only that stream is dropped. `if exist` first, so a missing build/ is not
+# an error at all rather than a silenced one.
+FIND_DEPS = if exist "$(subst /,\,$(BUILD))" dir /s /b "$(subst /,\,$(BUILD))\*.d" 2>NUL
 # The fixture builder, which is a program rather than a make recipe because it
 # probes toolchains. It exists twice for the reason its own headers give: a
 # PowerShell recipe cannot run a .sh - Windows hands it to a file association,
@@ -462,9 +487,10 @@ FIND_DEPS = if (Test-Path '$(BUILD)') { Get-ChildItem -Recurse -Filter *.d '$(BU
 # is not true of the .ps1 on a host whose execution policy is restricted.
 MKFIXTURES = powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/mkfixtures.ps1
 else
-MKDIR    = mkdir -p
+MKDIR    = mkdir -p '$(1)'
 RMRF     = rm -rf '$(1)'
-COPY     = cp -f
+COPY     = cp -f '$(1)' '$(2)'
+EXEC     = $(1)
 QUIET    = >/dev/null
 DEVNULL  = /dev/null
 NOOP     = :
@@ -474,10 +500,23 @@ FIND_DEPS = find $(BUILD) -name '*.d' 2>/dev/null
 MKFIXTURES = tests/mkfixtures.sh
 endif
 
+#
 # The second warning tier, now that the probe knows what to read - see
 # kof_probe above for why it is a probe rather than a list.
-CFLAGS  += $(call kof_probe,$(KOF_WARN_PORTABLE)) \
-           $(call kof_probe,$(KOF_WARN_GCC))
+#
+# ASKED ONCE. := is not a style choice here, it is the difference between two
+# compiler runs and a hundred and eighteen of them.
+#
+# CFLAGS is recursively expanded - `CFLAGS ?= -O2 -g` makes it so, and every
+# += after that keeps it that way - which means a `$(call kof_probe,...)`
+# appended to it is not a result, it is a recipe for getting one, re-run in
+# full every single time anything expands $(CFLAGS). Every compile line does.
+# Measured on this tree: 102 seconds of a 310 second `make sdk`, spent asking
+# the same compiler the same two questions once per object file. Answering
+# them into a simply-expanded variable first costs the two runs it should.
+KOF_WARN_EXTRA := $(call kof_probe,$(KOF_WARN_PORTABLE)) \
+                  $(call kof_probe,$(KOF_WARN_GCC))
+CFLAGS  += $(KOF_WARN_EXTRA)
 
 # Header dependencies, emitted as a side effect of every compile and included
 # below. Without them a header edit rebuilds nothing: the object files are newer
@@ -504,10 +543,10 @@ LDFLAGS ?=
 # net that reports green whatever it catches. Halting turns a finding into a failed
 # build, which is the only form of it anyone acts on.
 ifeq ($(SAN),1)
-SAN_CFLAGS := '-fsanitize=address,undefined' -fno-sanitize-recover=all \
+SAN_CFLAGS := -fsanitize=address,undefined -fno-sanitize-recover=all \
               -fno-omit-frame-pointer
 CFLAGS  += $(SAN_CFLAGS)
-LDFLAGS += '-fsanitize=address,undefined' -fno-sanitize-recover=all
+LDFLAGS += -fsanitize=address,undefined -fno-sanitize-recover=all
 endif
 
 # SAN=thread instead, for the parallel walk. A separate switch rather than a
@@ -516,8 +555,8 @@ endif
 # link, and a build system should refuse that by construction rather than at
 # the link step.
 ifeq ($(SAN),thread)
-CFLAGS  += '-fsanitize=thread' -fno-omit-frame-pointer
-LDFLAGS += '-fsanitize=thread'
+CFLAGS  += -fsanitize=thread -fno-omit-frame-pointer
+LDFLAGS += -fsanitize=thread
 endif
 
 BUILD := build
@@ -582,7 +621,7 @@ help:
 	@$(NOOP)
 
 $(BUILD) $(OUT) $(INT) $(TEST):
-	@$(MKDIR) $@ $(QUIET)
+	@$(call MKDIR,$@)
 
 # ------------------------------------------------------------ the flag stamp
 #
@@ -606,7 +645,7 @@ $(BUILD) $(OUT) $(INT) $(TEST):
 FLAGSIG := $(CC) $(CFLAGS) $(LDFLAGS)
 STAMP   := $(INT)/.flags
 
-$(shell $(MKDIR) $(INT) $(QUIET))
+$(shell $(call MKDIR,$(INT)))
 
 STAMP_WAS := $(if $(wildcard $(STAMP)),$(file < $(STAMP)))
 ifneq ($(STAMP_WAS),$(FLAGSIG))
@@ -662,14 +701,14 @@ LIB_OBJ := $(patsubst libkofeng/%.c,$(INT)/lib_%.o,$(LIB_SRC))
 LIB     := $(SDK)/lib/libkofeng.a
 
 $(INT)/lib_%.o: libkofeng/%.c $(STAMP) | $(INT)
-	@$(MKDIR) $(dir $@) $(QUIET)
+	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # kofdisasm/ reads instructions, so it needs the decoder's headers. Only this
 # one directory does; the rest of the engine is kept away from them on purpose,
 # because a parser that can decode is a parser that will start to.
 $(INT)/lib_kofdisasm/%.o: libkofeng/kofdisasm/%.c $(STAMP) | $(INT)
-	@$(MKDIR) $(dir $@) $(QUIET)
+	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(EMU_INC) -c $< -o $@
 
 # ---- libkofemu: the emulator, and the decoder it stands on -----------------
@@ -721,15 +760,15 @@ EMU_OBJ    := $(patsubst libkofemu/%.c,$(INT)/emu_%.o,$(EMU_SRC))
 VENDOR_OBJ := $(patsubst libkofemu/bddisasm/src/%.c,$(INT)/bdd_%.o,$(VENDOR_SRC))
 
 $(INT)/emu_%.o: libkofemu/%.c $(STAMP) | $(INT)
-	@$(MKDIR) $(dir $@) $(QUIET)
+	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(EMU_INC) -c $< -o $@
 
 $(INT)/bdd_%.o: libkofemu/bddisasm/src/%.c $(STAMP) | $(INT)
-	@$(MKDIR) $(dir $@) $(QUIET)
+	@$(call MKDIR,$(dir $@))
 	$(CC) $(VENDOR_CFLAGS) $(EMU_INC) -c $< -o $@
 
 $(LIB): $(LIB_OBJ) $(EMU_OBJ) $(VENDOR_OBJ)
-	@$(MKDIR) $(dir $@) $(QUIET)
+	@$(call MKDIR,$(dir $@))
 	$(AR) rcs $@ $^
 
 # ------------------------------------------------------------------- the SDK
@@ -762,12 +801,12 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/pdf.h
 
 $(SDK)/include/kofeng.h: libkofeng/kofeng.h
-	@$(MKDIR) $(dir $@) $(QUIET)
-	@$(COPY) $< $@
+	@$(call MKDIR,$(dir $@))
+	@$(call COPY,$<,$@)
 
 $(SDK)/include/kofmod/%.h: libkofeng/core/kofmod/%.h
-	@$(MKDIR) $(dir $@) $(QUIET)
-	@$(COPY) $< $@
+	@$(call MKDIR,$(dir $@))
+	@$(call COPY,$<,$@)
 
 sdk: $(LIB) $(SDK_HDR)
 	$(info $(SP)  $(LIB))
@@ -781,7 +820,7 @@ sdk: $(LIB) $(SDK_HDR)
 SCANNER_SRC := kofscanner/kofscanner.c
 
 $(OUT)/bin/kofscanner$(EXE): $(SCANNER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
-	@$(MKDIR) $(dir $@) $(QUIET)
+	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(SCANNER_SRC) $(LIB) -o $@ $(LDFLAGS)
 
 # --------------------------------------------------------------- the examiner
@@ -797,7 +836,7 @@ $(OUT)/bin/kofscanner$(EXE): $(SCANNER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 EXAMINE_SRC := kofexamine/kofexamine.c kofexamine/kofinspect.c kofexamine/kofeditor.c
 
 $(OUT)/bin/kofexamine$(EXE): $(EXAMINE_SRC) $(LIB) $(SDK_HDR) $(STAMP)
-	@$(MKDIR) $(dir $@) $(QUIET)
+	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(EXAMINE_SRC) $(LIB) -o $@ $(LDFLAGS)
 
 # The other front end onto the same layer. Two binaries from one directory, and
@@ -809,7 +848,7 @@ VIEWER_SRC := kofexamine/kofviewer.c kofexamine/kofview.c kofexamine/kofinspect.
 # inside $(LIB) - the emulator put them there - so what is missing is only the
 # header, and linking a second copy of the decoder would be the alternative.
 $(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
-	@$(MKDIR) $(dir $@) $(QUIET)
+	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(EMU_INC) $(VIEWER_SRC) $(LIB) -o $@ $(LDFLAGS)
 
 # ----------------------------------------------------- the database toolchain
@@ -819,7 +858,7 @@ $(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 # only, and deliberately not linked into anything that runs on an endpoint.
 
 $(OUT)/bin/ksigbuilder$(EXE): ksigbuilder/ksigbuilder.c $(LIB) $(SDK_HDR) $(STAMP)
-	@$(MKDIR) $(dir $@) $(QUIET)
+	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) $< $(LIB) -o $@ $(LDFLAGS)
 
 # ------------------------------------------------------------- the database
@@ -924,9 +963,9 @@ export CC
 databases: $(OUT)/bin/ksigbuilder$(EXE) $(SDK_HDR)
 	@$(call RMRF,$(ARTEFACTS))
 	@$(call RMRF,$(DB))
-	@$(MKDIR) $(ARTEFACTS) $(QUIET)
-	@$(MKDIR) $(DB) $(QUIET)
-	@$(OUT)/bin/ksigbuilder$(EXE) --tree $(BASEDIR) $(ARTEFACTS) $(DB)
+	@$(call MKDIR,$(ARTEFACTS))
+	@$(call MKDIR,$(DB))
+	@$(call EXEC,$(OUT)/bin/ksigbuilder$(EXE)) --tree $(BASEDIR) $(ARTEFACTS) $(DB)
 	$(info $(SP)   scan with: $(OUT)/bin/kofscanner$(EXE) --db $(DB) --scan-files <path>)
 
 # Kept as a name because it is in muscle memory and in scripts; the artefacts
@@ -967,7 +1006,7 @@ UNIT_BIN := $(patsubst tests/unit/%.c,$(TEST)/unit_%$(EXE),$(UNIT_SRC))
 # back as exit code 0xC0000135 and no output at all, which reads like a crash
 # in the test rather than a missing DLL.
 ifeq ($(NATIVE_OS),windows)
-UNIT_LIBS_inflate_diff := '-Wl,-Bstatic' -lz '-Wl,-Bdynamic'
+UNIT_LIBS_inflate_diff := -Wl,-Bstatic -lz -Wl,-Bdynamic
 else
 UNIT_LIBS_inflate_diff := -lz
 endif
@@ -1019,7 +1058,7 @@ UNIT_RUN := $(addprefix run-,$(UNIT_BIN))
 
 $(UNIT_RUN): run-%: %
 	$(info == $(notdir $*))
-	@$*
+	@$(call EXEC,$*)
 
 unit: fixtures test-sigs $(UNIT_RUN)
 	$(info all $(words $(UNIT_BIN)) test(s) passed)
@@ -1041,7 +1080,7 @@ unit: fixtures test-sigs $(UNIT_RUN)
 # Sources are compiled here rather than linked against the release library, so the
 # sanitiser instruments the parsers and decoders themselves and not only the test.
 #
-ASAN_FLAGS := '-fsanitize=address,undefined' -fno-omit-frame-pointer \
+ASAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer \
               -fno-sanitize-recover=undefined
 ASAN_BIN := $(patsubst tests/unit/%.c,$(TEST)/asan_%$(EXE),$(UNIT_SRC))
 
@@ -1077,7 +1116,7 @@ endef
 #
 $(ASAN_LIB): $(LIB_SRC) $(EMU_SRC) $(VENDOR_SRC) $(SDK_HDR) | $(TEST)
 	@$(call RMRF,$(TEST)/asan-obj)
-	@$(MKDIR) $(TEST)/asan-obj $(QUIET)
+	@$(call MKDIR,$(TEST)/asan-obj)
 	@# EMU_INC here as well as on the two loops below: libkofeng itself now
 	@# contains a file that includes bddisasm - kofdisasm/xref.c - so the
 	@# library's own sources need the decoder's include path. The release
@@ -1113,7 +1152,7 @@ ASAN_RUN := $(addprefix run-,$(ASAN_BIN))
 
 $(ASAN_RUN): run-%: %
 	$(info == $(notdir $*))
-	@$*
+	@$(call EXEC,$*)
 
 unit-asan: fixtures test-sigs $(ASAN_RUN)
 	$(info all $(words $(ASAN_BIN)) sanitized test(s) passed)
