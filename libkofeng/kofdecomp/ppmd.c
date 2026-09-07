@@ -698,6 +698,33 @@ static uint32_t create_successors(struct kof_ppmd *m, int skip, uint32_t p_off)
 		succ = st_succ(p);
 		if (succ != upbranch) {
 			c = succ;
+			/*
+			 * NOTHING COLLECTED MEANS NOTHING TO BUILD, AND THE
+			 * WORK BELOW IS NOT MERELY WASTED.
+			 *
+			 * ps[] is what the loop below hangs new contexts off.
+			 * Empty, it creates none, so up_state_sym and
+			 * up_state_freq are computed and thrown away - and
+			 * computing up_state_sym means SCANNING context c for a
+			 * symbol that has no reason to be in it. The scan is
+			 * unbounded by design (the reference has it that way,
+			 * and bounding it by num_stats is a measured
+			 * regression), so it runs to the end of the arena, trips
+			 * the bounds guard, and this function returns 0.
+			 *
+			 * The caller reads that as "out of memory" and calls
+			 * restart_model mid-stream. The model then no longer
+			 * matches the encoder's and the entry dies a few symbols
+			 * later, nowhere near here.
+			 *
+			 * Measured over 13672 RAR3 entries in 152 archives: 105
+			 * entries reached this point with pn == 0, and every one
+			 * of the 105 was a failure - the whole of the corrupt
+			 * bucket. No entry reached it with pn != 0. Returning
+			 * here is what Ppmd7 does ("if (numPs == 0) return c").
+			 */
+			if (pn == 0u)
+				return c;
 			break;
 		}
 		if (pn >= MAX_O)

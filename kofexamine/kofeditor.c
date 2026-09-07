@@ -1299,6 +1299,20 @@ void cnd_canon(struct kof_editor *e, uint32_t g, char *out, size_t cap)
 	for (m = 0; m < e->dr.n_grp; m++) {
 		if (!cnd_uses(c, m))
 			continue;
+		/*
+		 * `at` MUST STOP ADVANCING AT THE END OF THE BUFFER.
+		 *
+		 * snprintf returns the length it WANTED to write, so without
+		 * this `at` walks past cap, "cap - at" wraps to an enormous
+		 * size_t, and the next call is handed a buffer it believes is
+		 * unbounded. It cannot be reached today - MAX_GROUP is 8 and
+		 * each id costs at most three columns, so 24 of the 64 both
+		 * callers pass - but that is a chain of three facts none of
+		 * which is stated here, and the same shape has already had to
+		 * be fixed once in the pack builder.
+		 */
+		if (at + 8u >= cap)
+			break;
 		/* The "!" is part of the list, not part of the typing. A
 		 * negated id that canon left out would make every negated
 		 * condition disagree with its own canonical form, and the row
