@@ -644,9 +644,26 @@ enum ch_what {
 	CH_WORD,        /* fullword or substring */
 	CH_CASE,        /* case sensitive or not */
 	CH_CMATCH,      /* which matcher to put into a condition */
+	CH_CMATCH2,     /* what to do to one matcher a condition already names */
+	CH_CSWAP,       /* which other matcher to put in its place */
 	CH_SWITCH,      /* what to do about unsaved work before switching */
 	CH_LOGIC        /* how the next condition at this level attaches */
 };
+
+/*
+ * A MENU ABOUT A PAIR, and ch_open takes one argument.
+ *
+ * "This matcher, inside this condition" is two indices, and they are packed
+ * into `arg` rather than a second field being added, because ch_open memsets
+ * the chooser before it builds the list - so anything a caller writes beside
+ * arg is not there while the list is being made. That is not hypothetical: it
+ * is exactly the bug recorded beside CH_RANGE_EXT, where a subject read from
+ * arg2 came through as zero and the menu never opened. Both indices are bounded
+ * by MAX_GROUP, which is 8.
+ */
+#define CH_PAIR(ci, m)  ((uint32_t)(ci) | ((uint32_t)(m) << 16))
+#define CH_PAIR_C(x)    ((x) & 0xffffu)
+#define CH_PAIR_M(x)    ((x) >> 16)
 
 struct chooser {
 	int      open;
@@ -1397,7 +1414,21 @@ struct view {
 	uint8_t     cseq_kind[4 * MAX_GROUP];
 	uint32_t    cseq_idx[4 * MAX_GROUP];
 	uint32_t    n_cseq;
-	int         cnd_id0[MAX_GROUP];   /* where its matcher ids start */
+	/*
+	 * WHERE EACH MATCHER ID ON A CONDITION'S ROW WAS DRAWN.
+	 *
+	 * Recorded while drawing, the way every other clickable span on these
+	 * rows is, rather than recomputed by the hit test from a start column
+	 * and a stride. The stride version has been wrong twice - once when the
+	 * ids grew past one digit, once when the separator stopped being ", " -
+	 * and both times the failure was a click that removed a matcher the
+	 * author had not pointed at. There is nothing to keep in step here: the
+	 * columns come from the same pass that printed them.
+	 *
+	 * -1 means "not drawn": the condition does not name that matcher, or
+	 * the row is showing a typed expression rather than a list.
+	 */
+	int         cnd_ids[MAX_GROUP][MAX_GROUP][2];
 	/*
 	 * And where its TYPED EXPRESSION box is, when the condition carries one
 	 * that is not a plain list of ids.
@@ -3679,6 +3710,79 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		}
 		if (!c->n)
 			return;
+	} else if (what == CH_CMATCH2) {
+		/*
+		 * One matcher on a condition's row, and the three things that
+		 * can be done to it.
+		 *
+		 * Clicking it used to remove it outright. That is the right
+		 * thing to be able to do and the wrong thing for a click to
+		 * mean on its own: it is the only one of the three that loses
+		 * work, and it happened with nothing on screen to undo it.
+		 */
+		uint32_t ci = CH_PAIR_C(arg), m = CH_PAIR_M(arg);
+		struct cond *cc;
+		char t[CH_W];
+
+		if (ci >= v->ed.dr.n_cnd || m >= v->ed.dr.n_grp)
+			return;
+		cc = &v->ed.dr.cnd[ci];
+		if (!cnd_uses(cc, m))
+			return;
+		/*
+		 * ONE VERB FOR BOTH DIRECTIONS, in the notation the row is
+		 * already showing.
+		 *
+		 * Inverting is its own inverse, so the item never needs an
+		 * "un-" form - and naming the two ends says which way this
+		 * particular row goes without the reader having to work out
+		 * which state they are in. Spelling the same fact out in words
+		 * instead - "must be absent" - makes them translate between two
+		 * vocabularies for it, and the "!" is the one on screen.
+		 */
+		snprintf(t, sizeof t, cnd_neg(cc, m)
+			 ? "Invert !%u to %u"
+			 : "Invert %u to !%u", m + 1u, m + 1u);
+		ch_add_verb(c, t, 0);
+		/*
+		 * Only while there is another matcher to switch TO. A row that
+		 * opens an empty list is a row that appears to do nothing, and
+		 * the same predicate answers here and where the pick is carried
+		 * out - see opt_offerable for why that matters.
+		 */
+		for (i = 0; i < v->ed.dr.n_grp; i++)
+			if (cmatch_ok(v, ci, i))
+				break;
+		if (i < v->ed.dr.n_grp)
+			ch_add_verb_sub(c, "Switch to another matcher", 1);
+		snprintf(t, sizeof t, "Remove matcher %u", m + 1u);
+		ch_add_verb(c, t, 2);
+	} else if (what == CH_CSWAP) {
+		/*
+		 * The matchers this condition could hold instead - which is
+		 * the same list CH_CMATCH offers, for the same reason: one
+		 * already in the expression would produce "1&1", and one the
+		 * gate above already tested has been decided before control
+		 * gets here.
+		 *
+		 * The one being replaced is in the expression, so it excludes
+		 * itself and no extra rule is needed to keep it off its own
+		 * list.
+		 */
+		uint32_t ci = CH_PAIR_C(arg);
+		char t[CH_W];
+
+		if (ci >= v->ed.dr.n_cnd)
+			return;
+		for (i = 0; i < v->ed.dr.n_grp; i++) {
+			if (!cmatch_ok(v, ci, i))
+				continue;
+			snprintf(t, sizeof t, "%u  find_%s", i + 1u,
+				 grp_rule_word(v->ed.dr.grp[i].rule));
+			ch_add(c, t);
+		}
+		if (!c->n)
+			return;
 	} else if (what == CH_LOGIC) {
 		/* The operators, unglossed. They are the two words a signature
 		 * author already thinks in, and a sentence explaining what "or"
@@ -4027,6 +4131,53 @@ static void ch_take(struct view *v)
 			l = strlen(cc->expr);
 			snprintf(cc->expr + l, sizeof cc->expr - l, "%s%u",
 				 l ? (cc->op ? "|" : "&") : "", i + 1u);
+			break;
+		}
+		return;
+	}
+	if (c->what == CH_CMATCH2) {
+		uint32_t ci = CH_PAIR_C(c->arg), m = CH_PAIR_M(c->arg);
+		/*
+		 * The verb is carried on the row, not read off c->sel: "Switch"
+		 * is offered only while there is somewhere to switch to, so a
+		 * fixed row number would carry out Remove whenever it was not.
+		 */
+		int verb = (c->sel >= 0 && c->sel < c->n)
+			 ? (int)c->verb[c->sel] : 2;
+
+		if (ci >= v->ed.dr.n_cnd || m >= v->ed.dr.n_grp)
+			return;
+		if (verb == 0) {
+			cnd_negate_matcher(&v->ed.dr.cnd[ci], m);
+			return;
+		}
+		if (verb == 1) {
+			struct chooser up = *c;
+
+			up.open = 1;
+			ch_open(v, CH_CSWAP, c->arg,
+				up.row + up.sel + 1, up.col + CH_W);
+			v->ch_up = up;
+			return;
+		}
+		cnd_drop_matcher(&v->ed.dr.cnd[ci], m);
+		return;
+	}
+	if (c->what == CH_CSWAP) {
+		uint32_t ci = CH_PAIR_C(c->arg), m = CH_PAIR_M(c->arg);
+		uint32_t i, n = 0;
+
+		if (ci >= v->ed.dr.n_cnd || m >= v->ed.dr.n_grp)
+			return;
+		/* The same walk the list was built from, so row N names the
+		 * matcher printed on row N even if the draft changed shape
+		 * while the menu was open. */
+		for (i = 0; i < v->ed.dr.n_grp; i++) {
+			if (!cmatch_ok(v, ci, i))
+				continue;
+			if ((int)n++ != c->sel)
+				continue;
+			cnd_swap_matcher(&v->ed, ci, m, i);
 			break;
 		}
 		return;
@@ -6197,12 +6348,16 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 		}
 
 		if (v->cseq_kind[g] == CS_MATCH) {
+			uint32_t m2;
+
 			/* Indented under the condition it belongs to, and
 			 * continuing the stroke while a sibling is still
 			 * below. */
 			cnd_rail(o, deep, 1);
 			out_str(o, A_DIM "Matchers: " A_OFF);
-			v->cnd_id0[ci] = 1 + (int)o->col_hint;
+			for (m2 = 0; m2 < MAX_GROUP; m2++)
+				v->cnd_ids[ci][m2][0] =
+					v->cnd_ids[ci][m2][1] = -1;
 			v->cnd_op[ci][0] = v->cnd_op[ci][1] = -1;
 			v->cnd_ex[ci][0] = v->cnd_ex[ci][1] = -1;
 			{
@@ -6214,8 +6369,9 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 					/* Typed, and not a list. Shown as
 					 * written, because rendering it as a
 					 * list would show a different
-					 * condition from the generated one. */
-					v->cnd_id0[ci] = -1;
+					 * condition from the generated one -
+					 * and no id is drawn, so none of them
+					 * is clickable. */
 					v->cnd_ex[ci][0] = 1 +
 							   (int)o->col_hint;
 					out_str(o, v->edit == 103 + (int)ci
@@ -6249,7 +6405,19 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 						v->cnd_op[ci][1] =
 							(int)o->col_hint - 1;
 					}
+					v->cnd_ids[ci][m][0] = 1 +
+							       (int)o->col_hint;
+					/* The "!" is not the id's colour: it
+					 * says the opposite of what the id
+					 * says, and reading past it is reading
+					 * the condition backwards. It is inside
+					 * the click window, because it is what
+					 * the author is pointing at when they
+					 * want it gone. */
+					if (cnd_neg(c2, m))
+						out_str(o, A_WARN "!" A_OFF);
 					out_fmt(o, "%s%u" A_OFF, A_ID, m + 1u);
+					v->cnd_ids[ci][m][1] = (int)o->col_hint;
 					first2 = 0;
 				}
 				if (first2)
@@ -11980,35 +12148,29 @@ static void select_run(struct view *v)
 
 
 /*
- * A matcher id on a condition's row, clicked to take it back out.
+ * A matcher id on a condition's row, clicked to ask what to do with it.
  *
- * The mirror of clicking a marker id inside a matcher, and it has to be the
- * mirror: a list you can only add to is a list that gets rebuilt from scratch
- * every time somebody changes their mind.
+ * It used to remove the matcher where it stood. Removing is still one of the
+ * three things offered, and it is the only one of them that loses work - so it
+ * is now something picked off a list rather than the meaning of landing on a
+ * number.
  *
- * The ids are laid out as "1, 2, 3", so the nth one starts at a known column
- * and the click lands on a number rather than on an index into anything.
+ * The columns are the ones the row was DRAWN at, not columns worked out again
+ * from a start and a stride. See view.cnd_ids for what that arithmetic cost
+ * the last two times it drifted from the drawing.
  */
 static void cnd_id_click(struct view *v, uint32_t g)
 {
-	struct cond *c = &v->ed.dr.cnd[g];
-	int at = v->cnd_id0[g];
 	uint32_t m;
 
-	if (at <= 0)
-		return;
-	for (m = 0; m < v->ed.dr.n_grp; m++) {
-		char num[8];
-		int w;
-
-		if (!cnd_uses(c, m))
+	for (m = 0; m < v->ed.dr.n_grp && m < MAX_GROUP; m++) {
+		if (v->cnd_ids[g][m][0] < 0)
 			continue;
-		w = snprintf(num, sizeof num, "%u", m + 1u);
-		if (g_mx >= at && g_mx < at + w) {
-			cnd_drop_matcher(c, m);
+		if (g_mx >= v->cnd_ids[g][m][0] &&
+		    g_mx <= v->cnd_ids[g][m][1]) {
+			ch_open(v, CH_CMATCH2, CH_PAIR(g, m), g_my - 3, g_mx);
 			return;
 		}
-		at += w + 2;            /* the ", " that follows it */
 	}
 }
 
@@ -14050,17 +14212,22 @@ static int click_panel_rows(struct view *v)
 				 * An id on this row is a marker; clicking it
 				 * takes it back out of the matcher.
 				 *
-				 * EACH ID IS MEASURED, the way cnd_id_click
-				 * measures the ones on a condition row. Three
-				 * columns apiece assumed every id was one digit
-				 * and the row prints ", %u": from the first
-				 * two-digit id on - MAX_DECL is 32, so ids
-				 * reach 32 - every id after it drifted one
-				 * column further left, and the click removed
-				 * the wrong marker or none. The hit window is
-				 * the digits only, not the ", " that joins
-				 * them, so the gap between two ids is dead
-				 * rather than belonging to whichever is nearer.
+				 * EACH ID IS MEASURED. Three columns apiece
+				 * assumed every id was one digit and the row
+				 * prints ", %u": from the first two-digit id on
+				 * - MAX_DECL is 32, so ids reach 32 - every id
+				 * after it drifted one column further left, and
+				 * the click removed the wrong marker or none.
+				 * The hit window is the digits only, not the
+				 * ", " that joins them, so the gap between two
+				 * ids is dead rather than belonging to
+				 * whichever is nearer.
+				 *
+				 * The condition rows below gave up on measuring
+				 * and record the columns as they draw them
+				 * (view.cnd_ids), which is the better answer
+				 * and the one to reach for if this row's
+				 * separator ever changes the way theirs did.
 				 */
 				for (i = 0; i < v->ed.dr.n_decl; i++) {
 					char num[8];

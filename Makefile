@@ -828,6 +828,25 @@ endif
 $(TEST)/unit_%$(EXE): tests/unit/%.c $(LIB) $(STAMP) | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) $< $(LIB) -o $@ $(LDFLAGS) $(UNIT_LIBS_$*)
 
+# The draft model is not in the library, so the one test over it says so here.
+#
+# A signature draft is what the viewer edits, not what the engine scans with, so
+# kofeditor.c lives beside the tools rather than inside libkofeng - and a test
+# over it has to compile that source. An explicit rule rather than another
+# pattern variable: exactly one test needs this, and a rule states the whole
+# dependency in the place somebody reading the recipe is already looking.
+EDITOR_SRC := kofexamine/kofeditor.c kofexamine/kofinspect.c
+
+$(TEST)/unit_cond_expr$(EXE): tests/unit/cond_expr.c $(EDITOR_SRC) $(LIB) \
+                              $(SDK_HDR) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $< $(EDITOR_SRC) $(LIB) \
+	      -o $@ $(LDFLAGS)
+
+$(TEST)/asan_cond_expr$(EXE): tests/unit/cond_expr.c $(EDITOR_SRC) \
+                              $(ASAN_LIB) $(SDK_HDR) $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) -I$(SDK)/include $< $(EDITOR_SRC) \
+	       $(ASAN_LIB) -o $@ $(LDFLAGS)
+
 # The engine's own signature set is BUILT here, not merely present.
 #
 # It is not part of `make db`, so nothing else compiles it - and a rename that

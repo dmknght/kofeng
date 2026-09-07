@@ -803,6 +803,19 @@ int decl_from_hexs(struct decl *d);
 int src_quoted(const char *p, char *out, size_t cap);
 uint32_t src_str_idx(struct sname *tab, uint32_t n, const char *id);
 int decl_text_editable(const struct decl *d);
+/*
+ * The three edits a condition's id row can make to one of its matchers, and
+ * the question the row asks before drawing it.
+ *
+ * A negated id is written "!1" in the expression rather than kept in a flag
+ * beside it. The expression is also a TEXT BOX the author can type in, so a
+ * flag would be a second place the same fact lived - and the two would part
+ * company the first time somebody edited the text by hand.
+ */
+int  cnd_neg(const struct cond *c, uint32_t g);
 void cnd_drop_matcher(struct cond *c, uint32_t g);
+void cnd_negate_matcher(struct cond *c, uint32_t g);
+void cnd_swap_matcher(struct kof_editor *e, uint32_t ci, uint32_t g,
+		      uint32_t to);
 
 #endif /* KOF_KOFEDITOR_H */

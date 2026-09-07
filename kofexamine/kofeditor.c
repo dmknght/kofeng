@@ -365,24 +365,91 @@ int rng_holds(uint32_t rmask, uint32_t region)
  *
  * An empty expression names all of them, which is what it generates.
  */
+/*
+ * The next matcher id in an expression, and whether it is negated.
+ *
+ * ONE SCANNER, because every walk over these ids has to agree about where a
+ * "!" belongs - does this condition name that matcher, is that one negated,
+ * rewrite the list without it, renumber it. Written four times it would be four
+ * places for the "!" to be lost, and a lost "!" is a condition that generates
+ * the opposite of what the panel shows.
+ *
+ * A "!" negates only the number it actually reaches. "!(" is a parenthesis the
+ * author typed around a group, and the group is not this list's to speak for -
+ * so it is left to the emitter, which passes it through, and to cnd_canon,
+ * which will disagree with the text and let the text be shown as typed.
+ *
+ * Returns 0 at the end of the expression.
+ */
+static int cnd_next_id(const char **pp, unsigned long *id, int *neg)
+{
+	const char *p = *pp;
+	int n = 0;
+
+	while (*p) {
+		if (*p == '!') {
+			const char *q = p + 1;
+
+			while (*q == ' ')
+				q++;
+			if (*q >= '0' && *q <= '9') {
+				/* Set rather than toggled: a "!" that does not
+				 * reach a number is dropped below, so "!!1" is
+				 * one negation here and one in the emitter,
+				 * which drops the same one. Two readings of the
+				 * same text that disagreed would be a panel
+				 * showing the opposite of the generated file. */
+				n = 1;
+				p = q;
+				continue;
+			}
+			n = 0;
+			p++;
+			continue;
+		}
+		if (*p >= '0' && *p <= '9') {
+			char *end;
+
+			*id = strtoul(p, &end, 10);
+			*neg = n;
+			*pp = end;
+			return 1;
+		}
+		n = 0;
+		p++;
+	}
+	*pp = p;
+	return 0;
+}
+
 int cnd_uses(const struct cond *c, uint32_t g)
 {
 	const char *p = c->expr;
+	unsigned long n;
+	int neg;
 
-	while (*p) {
-		if (*p >= '0' && *p <= '9') {
-			char *end;
-			unsigned long n;
+	while (cnd_next_id(&p, &n, &neg))
+		if (n == (unsigned long)g + 1ul)
+			return 1;
+	return 0;
+}
 
-			n = strtoul(p, &end, 10);
-			p = end;
+/*
+ * Is this condition asking for that matcher to be ABSENT.
+ *
+ * Separate from cnd_uses because they are different questions and the panel
+ * asks both: an id is drawn when the condition uses it, and drawn with a "!"
+ * when the condition wants it missing.
+ */
+int cnd_neg(const struct cond *c, uint32_t g)
+{
+	const char *p = c->expr;
+	unsigned long n;
+	int neg;
 
-			if (n == (unsigned long)g + 1ul)
-				return 1;
-			continue;
-		}
-		p++;
-	}
+	while (cnd_next_id(&p, &n, &neg))
+		if (n == (unsigned long)g + 1ul)
+			return neg;
 	return 0;
 }
 
@@ -842,7 +909,12 @@ int decl_text_editable(const struct decl *d)
 }
 
 /*
- * Take one matcher out of a condition's expression.
+ * Rewrite a condition's id list, applying one edit to one matcher.
+ *
+ * Drop, negate and switch are the same walk - read the ids in order, decide
+ * what the new list says about each, write them back joined with the
+ * condition's own operator - so they are one function with a verb rather than
+ * three copies of the loop.
  *
  * Rewritten from the ids that are left rather than edited in place, because
  * removing "2" from "1&2|3" by deleting characters leaves "1&|3" - and an
@@ -851,34 +923,95 @@ int decl_text_editable(const struct decl *d)
  * parentheses, a mix of & and | - is preserved only in so far as the join it
  * was written with; that is the price of a list and a text box being the same
  * field.
+ *
+ * The room check is not decoration. A negation ADDS a character, so this is the
+ * one edit that can make an expression longer than the one it replaces, and
+ * "sizeof out - at" underflows to an enormous size_t the moment at passes the
+ * end. Twenty-two columns is the widest one id can be written in - a "!", a
+ * join, and every digit of an unsigned long somebody typed by hand.
  */
-void cnd_drop_matcher(struct cond *c, uint32_t g)
+enum { CND_DROP = 0, CND_NEG, CND_SWAP };
+
+static void cnd_rewrite(struct cond *c, uint32_t g, uint32_t to, int verb)
 {
-	char out[64];
+	char out[sizeof c->expr];
 	size_t at = 0;
 	const char *p = c->expr;
-	int first = 1;
+	unsigned long n;
+	int neg, first = 1;
 
-	while (*p) {
-		if (*p >= '0' && *p <= '9') {
-			char *end;
-			unsigned long n;
+	out[0] = 0;
+	while (cnd_next_id(&p, &n, &neg)) {
+		int w;
 
-			n = strtoul(p, &end, 10);
-			p = end;
-
-			if (n == (unsigned long)g + 1ul)
+		if (n == (unsigned long)g + 1ul) {
+			if (verb == CND_DROP)
 				continue;
-			at += (size_t)snprintf(out + at, sizeof out - at,
-					       "%s%lu", first ? "" : (c->op
-					       ? "|" : "&"), n);
-			first = 0;
-			continue;
+			if (verb == CND_NEG)
+				neg = !neg;
+			else
+				n = (unsigned long)to + 1ul;
 		}
-		p++;
+		if (at + 22u >= sizeof out)
+			break;
+		w = snprintf(out + at, sizeof out - at, "%s%s%lu",
+			     first ? "" : (c->op ? "|" : "&"),
+			     neg ? "!" : "", n);
+		if (w < 0)
+			break;
+		at += (size_t)w;
+		first = 0;
 	}
 	out[at] = 0;
 	snprintf(c->expr, sizeof c->expr, "%s", out);
+}
+
+/* Take one matcher out of a condition's expression. */
+void cnd_drop_matcher(struct cond *c, uint32_t g)
+{
+	cnd_rewrite(c, g, 0, CND_DROP);
+}
+
+/*
+ * Flip one matcher between "must be found" and "must be absent".
+ *
+ * A toggle rather than a set, because the row that opens this menu already
+ * shows which way round it is and the menu names the other one. Two calls -
+ * negate, then un-negate - leave the expression exactly as they found it.
+ */
+void cnd_negate_matcher(struct cond *c, uint32_t g)
+{
+	cnd_rewrite(c, g, 0, CND_NEG);
+}
+
+/*
+ * Put a different matcher where this one stands, keeping its negation.
+ *
+ * Not a remove followed by an add: an add appends, so the negation would be
+ * left behind on the way through and "!1 and 2" would come back as "2 and 3".
+ * Whether the caller may offer `to` at all - it must not already be in this
+ * condition, nor in the gate above it - is cmatch_ok's answer, not this one's.
+ *
+ * AND THE LIST GOES BACK INTO THE ORDER THE ROW DRAWS IN.
+ *
+ * cnd_canon lists matchers by number, and the row shows its text box instead of
+ * its ids the moment the expression and the canonical form disagree. Without
+ * this, switching 1 for 3 left "3&2" - a list by every other measure - and the
+ * author who clicked a matcher got a text box back. Reordering costs nothing,
+ * because the negation travels with the id rather than with the position.
+ */
+void cnd_swap_matcher(struct kof_editor *e, uint32_t ci, uint32_t g,
+		      uint32_t to)
+{
+	struct cond *c;
+	char canon[sizeof e->dr.cnd[0].expr];
+
+	if (ci >= e->dr.n_cnd || to >= e->dr.n_grp)
+		return;
+	c = &e->dr.cnd[ci];
+	cnd_rewrite(c, g, to, CND_SWAP);
+	cnd_canon(e, ci, canon, sizeof canon);
+	snprintf(c->expr, sizeof c->expr, "%s", canon);
 }
 
 
@@ -1166,8 +1299,13 @@ void cnd_canon(struct kof_editor *e, uint32_t g, char *out, size_t cap)
 	for (m = 0; m < e->dr.n_grp; m++) {
 		if (!cnd_uses(c, m))
 			continue;
-		at += (size_t)snprintf(out + at, cap - at, "%s%u",
-				       at ? (c->op ? "|" : "&") : "", m + 1u);
+		/* The "!" is part of the list, not part of the typing. A
+		 * negated id that canon left out would make every negated
+		 * condition disagree with its own canonical form, and the row
+		 * would fall back to the text box the moment it was negated. */
+		at += (size_t)snprintf(out + at, cap - at, "%s%s%u",
+				       at ? (c->op ? "|" : "&") : "",
+				       cnd_neg(c, m) ? "!" : "", m + 1u);
 	}
 }
 
@@ -1216,32 +1354,31 @@ void grp_remove(struct kof_editor *e, uint32_t g)
 	}
 	for (k = 0; k < e->dr.n_cnd; k++) {
 		struct cond *c = &e->dr.cnd[k];
-		char out[64];
+		char out[sizeof c->expr];
 		size_t at = 0;
 		const char *p = c->expr;
-		int first = 1;
+		unsigned long n;
+		int neg, first = 1;
 
 		out[0] = 0;
-		while (*p) {
-			if (*p >= '0' && *p <= '9') {
-				char *end;
-				unsigned long n;
+		while (cnd_next_id(&p, &n, &neg)) {
+			int w;
 
-				n = strtoul(p, &end, 10);
-				p = end;
-
-				if (n == (unsigned long)g + 1ul)
-					continue;
-				if (n > (unsigned long)g + 1ul)
-					n--;
-				at += (size_t)snprintf(out + at,
-						       sizeof out - at, "%s%lu",
-						       first ? "" : (c->op
-						       ? "|" : "&"), n);
-				first = 0;
+			if (n == (unsigned long)g + 1ul)
 				continue;
-			}
-			p++;
+			if (n > (unsigned long)g + 1ul)
+				n--;
+			/* The id moves down; whether it was negated does not.
+			 * See cnd_rewrite for why the room is checked. */
+			if (at + 22u >= sizeof out)
+				break;
+			w = snprintf(out + at, sizeof out - at, "%s%s%lu",
+				     first ? "" : (c->op ? "|" : "&"),
+				     neg ? "!" : "", n);
+			if (w < 0)
+				break;
+			at += (size_t)w;
+			first = 0;
 		}
 		out[at] = 0;
 		snprintf(c->expr, sizeof c->expr, "%s", out);
@@ -2376,7 +2513,7 @@ void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g)
 /*
  * The expression, with each matcher id replaced by its call.
  *
- * Anything that is not a digit, a space, "&", "|" or a bracket is dropped
+ * Anything that is not a digit, a space, "!", "&", "|" or a bracket is dropped
  * rather than passed through: this text becomes C, and the one thing it must
  * not do is carry something the person typing did not mean as code.
  */
@@ -2399,6 +2536,45 @@ void emit_expr(FILE *f, struct kof_editor *e, const char *expr)
 		return;
 	}
 	while (*expr) {
+		if (*expr == '!') {
+			/*
+			 * A "!" belongs to whatever comes after it.
+			 *
+			 * Before an id it is WRAPPED, and the brackets are the
+			 * whole point: a threshold matcher emits "m1 >= 3", and
+			 * "!m1 >= 3" is "(!m1) >= 3" - which compiles, always
+			 * reads false, and looks exactly like what was asked
+			 * for. Before a parenthesis it is the author negating a
+			 * group they typed themselves, and it goes through as
+			 * written. Anywhere else it negates nothing and is
+			 * dropped with the rest of what is not code.
+			 */
+			const char *q = expr + 1;
+
+			while (*q == ' ')
+				q++;
+			if (*q >= '0' && *q <= '9') {
+				uint32_t id = 0;
+
+				while (*q >= '0' && *q <= '9')
+					id = id * 10u + (uint32_t)(*q++ - '0');
+				fprintf(f, "!(");
+				if (id >= 1u && id <= e->dr.n_grp)
+					emit_matcher(f, e, id - 1u);
+				else
+					fprintf(f, "0");
+				fprintf(f, ")");
+				expr = q;
+				continue;
+			}
+			if (*q == '(') {
+				fputc('!', f);
+				expr = q;
+				continue;
+			}
+			expr++;
+			continue;
+		}
 		if (*expr >= '0' && *expr <= '9') {
 			uint32_t id = 0;
 
@@ -2620,6 +2796,40 @@ void draft_reset(struct kof_editor *e)
 	e->dr.cur_grp = e->dr.cur_cnd = 0;
 	e->dr.warn[0] = 0;
 	say_note(e, "Panel cleared");
+}
+
+/*
+ * Is the call at `at` negated in the source it is being read out of.
+ *
+ * generate writes "!(...)" around a negated matcher - the brackets are there so
+ * that "!" cannot bind tighter than a threshold's ">=" - and a hand-written
+ * "!kof_find_str_any(...)" says the same thing. Both are one "!" reached by
+ * stepping back over spaces and at most one "(", so both are read the same way.
+ *
+ * Without this the ROUND TRIP INVERTS THE FILE: a negated matcher generates
+ * "!(...)", comes back as an ordinary one, and the next save writes a signature
+ * meaning the opposite of the one that was opened - with nothing on screen to
+ * say so, because the panel would be showing what it read.
+ */
+static int src_negated(const char *line, const char *at)
+{
+	int par = 0;
+
+	while (at > line) {
+		char ch = at[-1];
+
+		if (ch == ' ' || ch == '\t') {
+			at--;
+			continue;
+		}
+		if (ch == '(' && !par) {
+			par = 1;
+			at--;
+			continue;
+		}
+		return ch == '!';
+	}
+	return 0;
 }
 
 int draft_from_source(struct kof_editor *e, const char *path)
@@ -3080,9 +3290,11 @@ shc_done:
 
 					snprintf(e->dr.cnd[cur].expr + l,
 						 sizeof e->dr.cnd[0].expr - l,
-						 "%s%u",
+						 "%s%s%u",
 						 l ? (e->dr.cnd[cur].op ? "|" : "&")
-						   : "", e->dr.n_grp + 1u);
+						   : "",
+						 src_negated(line, at) ? "!" : "",
+						 e->dr.n_grp + 1u);
 				}
 				e->dr.n_grp++;
 				break;
@@ -3167,8 +3379,9 @@ shc_done:
 				size_t l = strlen(e->dr.cnd[cur].expr);
 
 				snprintf(e->dr.cnd[cur].expr + l,
-					 sizeof e->dr.cnd[0].expr - l, "%s%u",
+					 sizeof e->dr.cnd[0].expr - l, "%s%s%u",
 					 l ? (e->dr.cnd[cur].op ? "|" : "&") : "",
+					 src_negated(line, p) ? "!" : "",
 					 e->dr.n_grp + 1u);
 			}
 			e->dr.n_grp++;
