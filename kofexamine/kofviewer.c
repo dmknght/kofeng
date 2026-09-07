@@ -1,7 +1,7 @@
 /*
  * kofviewer - the engine's view of a file, navigable.
  *
- *   kofviewer [--db <dir>] [--sources <dir>] <file>
+ *   kofviewer [--db <dir>] [--sources <dir>] <file|folder>
  *
  * kofexamine prints everything at once and is right to: piped into grep or
  * diffed against yesterday, a dump is the useful shape. This is the other half
@@ -1533,6 +1533,15 @@ struct view {
 	int         bar_open;       /* which menu is down, -1 for none */
 	int         bar_sel;        /* the item under the pointer or the cursor */
 	int         help_open;      /* 0 none, 1 keyboard, 2 about */
+	/*
+	 * About scrolls, so it needs an offset - and it needs somewhere to
+	 * record where its Close button landed, because a click arrives as a
+	 * screen position and nothing else knows the box's geometry once
+	 * draw_help has returned. Set while drawing, read while clicking; the
+	 * same shape the menu bar's hit test already has.
+	 */
+	int         about_off;
+	int         about_btn_y, about_btn_x0, about_btn_x1;
 	int         prop_open;      /* the properties page is up */
 	uint32_t    prop_off;       /* the first of its lines on screen */
 	int         prop_x0, prop_x1, prop_y;   /* its close control */
@@ -2526,7 +2535,7 @@ static void tree_build(struct view *v)
 	v->n_node = 0;
 	for (i = 0; i < v->n_obj; i++) {
 		struct object *o = &v->obj[i];
-		const char *tail = kof_path_sep_last(o->name);
+		const char *leaf = kof_obj_leaf(o->name);
 		char label[48], what[24];
 
 		/*
@@ -2584,12 +2593,10 @@ static void tree_build(struct view *v)
 			 * RECONSTRUCTED_ELF-x64_SHELLCODE, and the name row
 			 * names the variable it came out of.
 			 */
-			snprintf(label, sizeof label, "//%s Shellcode-%s",
-				 tail ? tail + 1 : o->name,
+			snprintf(label, sizeof label, "//%s Shellcode-%s", leaf,
 				 o->fmt ? kof_arch_name(o->ctx.arch) : "?");
 		else
-			snprintf(label, sizeof label, "//%s %s%s",
-				 tail ? tail + 1 : o->name, what,
+			snprintf(label, sizeof label, "//%s %s%s", leaf, what,
 				 /* Scanned, but not kept: there is nothing to
 				  * show and the row should not pretend there
 				  * is. */
@@ -8487,6 +8494,18 @@ static void symd_clamp(struct view *v);
 static void symd_open(struct view *v);
 static void draw_bar(struct out *o, struct view *v);
 static void draw_help(struct out *o, struct view *v);
+
+#define PROP_MAX  600
+#define PROP_W    200
+
+/* A LINE CARRIES ITS OWN COLOURS, INSIDE ITS TEXT - see prop_put, which draws
+ * one. Declared here rather than beside the properties page because more than
+ * one dialog builds pages of these. */
+struct prop_line {
+	char text[PROP_W];
+};
+
+
 static void draw_prop(struct out *o, struct view *v);
 /* Used by prop_build to measure a row it has just written - see prop_cp_row. */
 static uint32_t prop_plain(const char *s, char *out, uint32_t cap);
@@ -9120,7 +9139,7 @@ enum bar_menu {
  * to do one thing.
  */
 enum bar_item {
-	BI_OPEN = 0, BI_SAVE, BI_SAVE_AS, BI_QUIT,
+	BI_SAVE = 0, BI_SAVE_AS, BI_QUIT,
 	BI_FIND, BI_GOTO,
 	/*
 	 * Analysis is what the tool does TO an object, as against File which is
@@ -9174,7 +9193,6 @@ static const struct {
 	 */
 	int         sep;
 } bar_item[BI_COUNT] = {
-	{ "Open...",        BM_FILE, -1, 0 },
 	{ "Save",           BM_FILE, -1, 0 },
 	{ "Save As...",     BM_FILE, -1, 0 },
 	{ "Quit",           BM_FILE, -1, 0 },
@@ -9280,7 +9298,6 @@ static int bar_gap(struct view *v, int i)
 static int bar_enabled(struct view *v, int i)
 {
 	switch (i) {
-	case BI_OPEN:      return 0;            /* no way in yet */
 	case BI_SAVE:      return save_ok(v);
 	case BI_SAVE_AS:   return save_as_ok(v);
 	/* Off for a viewer that has no file behind it, which is the one case
@@ -9541,6 +9558,224 @@ static int bar_item_at(struct view *v, int row, int col)
 }
 
 
+/* Defined with the properties page, which is where the idiom of a line
+ * carrying its own colours comes from; About draws its rows the same way so
+ * there is one function that knows how to skip an escape. */
+static void prop_put(struct out *o, const char *s, int room, int sa, int sb);
+
+/*
+ * How wide a line is on the screen, which is not how long it is in memory.
+ *
+ * The About lines carry their own colours, so strlen counts escape bytes the
+ * terminal never draws and the box would be sized for text that is not there.
+ */
+static int vis_cols(const char *s)
+{
+	int n = 0;
+
+	while (*s) {
+		if (*s == '\033') {
+			while (*s && *s != 'm')
+				s++;
+			if (*s)
+				s++;
+			continue;
+		}
+		s++;
+		n++;
+	}
+	return n;
+}
+
+/*
+ * WHICH SHELF A FORMAT BELONGS ON.
+ *
+ * Grouped rather than listed, because a flat run of eleven names says only
+ * that there are eleven; grouped it says what KIND of thing this build can
+ * open, which is the question somebody reading an About box actually has.
+ *
+ * The groups are here and the members are not: a format added to the engine
+ * still appears without anyone remembering to, because the list comes from
+ * kof_parser_list. A format nobody classified lands in "Other", which is
+ * visible and harmless - the alternative, dropping it, would make the box
+ * quietly lie about what the binary can read.
+ */
+static int fmt_group(uint8_t f)
+{
+	switch (f) {
+	case KOF_FMT_ELF:
+	case KOF_FMT_PE:
+	case KOF_FMT_MACHO:
+		return 0;
+	case KOF_FMT_DOCOLE:
+	case KOF_FMT_DOCZIP:
+	case KOF_FMT_RTF:
+	case KOF_FMT_PDF:
+		return 1;
+	case KOF_FMT_ZIP:
+	case KOF_FMT_TAR:
+	case KOF_FMT_RAR:
+	case KOF_FMT_7Z:
+	case KOF_FMT_GZIP:
+	case KOF_FMT_XZ:
+		return 2;
+	default:
+		return 3;
+	}
+}
+
+#define ABOUT_MAX  40
+#define ABOUT_W    200
+
+static char     g_about[ABOUT_MAX][ABOUT_W];
+static uint32_t g_n_about;
+
+static void abt(const char *fmt, ...)
+{
+	va_list ap;
+
+	if (g_n_about >= ABOUT_MAX)
+		return;
+	va_start(ap, fmt);
+	vsnprintf(g_about[g_n_about], ABOUT_W, fmt, ap);
+	va_end(ap);
+	g_n_about++;
+}
+
+/*
+ * The About page, built rather than written out.
+ *
+ * Three of the four blocks are facts about what is loaded right now - the
+ * engine that is linked, the database that was found beside it, the formats
+ * this build can parse - and a literal would be a fourth place for them to be
+ * wrong. Only the two sentences at the top are prose, and they say what the
+ * tool is FOR: reading a file the way the engine reads it, and turning what is
+ * found into a signature.
+ *
+ * A SECTION TITLE AND A FIELD NAME ARE COLOURED; A VALUE IS NOT. The eye needs
+ * help finding the block it wants, not help reading a number once it is there
+ * - and a number in colour reads as a warning in a program where colour
+ * already means something on every other screen.
+ */
+static void about_build(struct view *v)
+{
+	struct kof_version ev;
+	struct kof_db_version dv;
+	const struct kof_parser *fmts;
+	uint32_t nf = 0, k;
+	int g;
+	static const char *const gname[4] = {
+		"Executable", "Document", "Archive", "Other"
+	};
+
+	g_n_about = 0;
+
+	/*
+	 * Two lines, and they are the only prose here.
+	 *
+	 * What the panes are is on the screen behind this box; repeating it
+	 * turns an About into a manual, and a manual nobody opened this dialog
+	 * to read. What is NOT on the screen is why the two halves belong
+	 * together - that the signature written here is the same kind the
+	 * scanner loads - so that is what these say.
+	 */
+	abt(A_BOLD "KOFViewer" A_OFF "  -  a file, as the engine sees it.");
+	abt("");
+	abt("Look through what the engine found inside a file, and turn what");
+	abt("you find there into a signature the scanner can use.");
+	abt("");
+
+	abt(A_ID "Versions" A_OFF);
+	/*
+	 * BUILT AGAINST, AND LOADED - shown apart only when they differ.
+	 *
+	 * The macros are what this file compiled against; the call is what the
+	 * library actually is. Linked statically they cannot disagree, so
+	 * saying both would be two identical numbers and a reader learning to
+	 * skip the line. The day libkofeng is a shared object they can, and
+	 * then the disagreement IS the bug being reported.
+	 *
+	 * MAJOR AND MINOR ONLY. The build stamps are expected to differ: the
+	 * engine and this tool can be built - and shipped - at different times.
+	 * The INTERFACE is major.minor, so that is what a mismatch is.
+	 */
+	kof_engine_version(&ev);
+	if (ev.major == KOFENG_MAJOR && ev.minor == KOFENG_MINOR)
+		abt("  " A_DIM "Engine     " A_OFF " %u.%u   build %u",
+		    (unsigned)ev.major, (unsigned)ev.minor, ev.build);
+	else
+		abt("  " A_DIM "Engine     " A_OFF " %u.%u   build %u   "
+		    A_WARN "(this tool was built against %u.%u)" A_OFF,
+		    (unsigned)ev.major, (unsigned)ev.minor, ev.build,
+		    (unsigned)KOFENG_MAJOR, (unsigned)KOFENG_MINOR);
+	if (v->eng && kof_engine_db_version(v->eng, &dv))
+		abt("  " A_DIM "Database   " A_OFF " %u.%u   build %u",
+		    (unsigned)dv.major, (unsigned)dv.minor, dv.build);
+	else
+		abt("  " A_DIM "Database   " A_OFF " " A_WARN "none loaded" A_OFF);
+	abt("  " A_DIM "Module ABI " A_OFF " %u", (unsigned)KOFSIG_ABI_VERSION);
+	abt("");
+
+	/*
+	 * THREE KINDS OF RECORD, THREE ROWS. They were one line reading
+	 * "Signatures N unpackers N heur rules N", which is a sentence to be
+	 * parsed rather than a table to be read - and they are not three
+	 * flavours of one thing: a detector names a family, an unpacker
+	 * produces objects, a rule scores what the parse found. Three rows is
+	 * also what lets a zero stand out, and a database with no unpackers is
+	 * worth noticing.
+	 */
+	abt(A_ID "Database" A_OFF);
+	if (v->eng) {
+		abt("  " A_DIM "Signatures " A_OFF " %u",
+		    kof_engine_records(v->eng));
+		abt("  " A_DIM "Unpackers  " A_OFF " %u",
+		    kof_engine_unpackers(v->eng));
+		abt("  " A_DIM "Heur rules " A_OFF " %u",
+		    kof_engine_heur_rules(v->eng));
+	} else {
+		abt("  " A_DIM "Signatures " A_OFF " " A_WARN "none loaded" A_OFF);
+	}
+	abt("");
+
+	abt(A_ID "File formats" A_OFF);
+	fmts = kof_parser_list(&nf);
+	for (g = 0; g < 4; g++) {
+		char row[ABOUT_W];
+		uint32_t at = 0;
+		int any = 0;
+
+		row[0] = 0;
+		for (k = 0; k < nf; k++) {
+			if (fmt_group(fmts[k].format) != g)
+				continue;
+			any = 1;
+			if (at + 1u >= sizeof row)
+				break;
+			at += (uint32_t)snprintf(row + at, sizeof row - at, " %s",
+						 kof_format_name(fmts[k].format));
+		}
+		if (any)
+			abt("  " A_DIM "%-11s" A_OFF "%s", gname[g], row);
+	}
+	abt("");
+	/*
+	 * WHO WROTE IT, AND UNDER WHAT TERMS - and the terms are not one answer.
+	 *
+	 * The repository is MIT in the main, and it is not single-licensed: a
+	 * vendored decoder is Apache-2.0 and so are four files of its own. A
+	 * lone "MIT" row would be true about most of what somebody is reading
+	 * and wrong about the binary they are running. Two rows, and the second
+	 * points at the file that carries the detail rather than trying to hold
+	 * it - an About box is the wrong place to enumerate paths.
+	 */
+	abt(A_ID "Project" A_OFF);
+	abt("  " A_DIM "Author     " A_OFF " DmKnght");
+	abt("  " A_DIM "License    " A_OFF " MIT, with parts under Apache-2.0");
+	abt("  " A_DIM "           " A_OFF " " A_DIM "see LICENSE; a file's own SPDX"
+	    " line wins" A_OFF);
+}
+
 /* The two Help dialogs. Drawn like the find box: content, then the frame. */
 static void draw_help(struct out *o, struct view *v)
 {
@@ -9567,129 +9802,17 @@ static void draw_help(struct out *o, struct view *v)
 		"Ctrl+F     find",            "Ctrl+N     next match",
 		"Ctrl+C     copy the field",  "Ctrl+V     paste",
 		"Ctrl+O     open a file",     "Ctrl+Q     quit",
-		"Ctrl+]     next file",       "Ctrl+\\     previous file",
+		"Ctrl+]     previous file",   "Ctrl+\\     next file",
 		"Tab        next pane",       "m          the marker list"
 	};
-	/*
-	 * THREE VERSIONS, AND THEY ARE THREE DIFFERENT THINGS.
-	 *
-	 * The engine is this binary. The database is whatever directory was
-	 * loaded beside it, and it is the one that changes weekly - so it is
-	 * shown separately, with its own build stamp, and says so plainly when
-	 * none is loaded. The module ABI is what the code inside a pack was
-	 * compiled against, which is the number that explains a refusal nobody
-	 * expected.
-	 *
-	 * Built here rather than kept as literals because two of the three are
-	 * not properties of this file: the engine's comes from the library that
-	 * is actually loaded, and the database's from the packs.
-	 */
-	static char ver_eng[96], ver_db[80], ver_abi[48];
-	static char cnt_sig[64], cnt_fmt[96];
-	static const char *about[] = {
-		"KOFViewer - the engine's view of a file, navigable.",
-		"",
-		"Three panes over one object: the tree of what the engine",
-		"found in it, the bytes, and the signature being drafted",
-		"from them. What the database already knows is on the",
-		"status line; what you are writing is below the rule.",
-		"",
-		ver_eng, ver_db, ver_abi,
-		"",
-		cnt_sig, cnt_fmt,
-		"",
-		"Part of KOFENG."
-	};
+	const char *const *line;
+	int n, w = 60, h, top, left, y, i, rows, maxrows;
 
-	{
-		struct kof_version ev;
-		struct kof_db_version dv;
-
-		/*
-		 * BUILT AGAINST, AND LOADED - and they are shown apart only
-		 * when they differ.
-		 *
-		 * The macros are what this file compiled against; the call is
-		 * what the library actually is. Linked statically they cannot
-		 * disagree, so saying both would be two identical numbers and
-		 * a reader learning to skip the line. The day libkofeng is a
-		 * shared object they can, and then the disagreement IS the bug
-		 * being reported - which is the only reason a tool needs an
-		 * engine version at all, since it has no version of its own.
-		 */
-		/*
-		 * MAJOR AND MINOR ONLY. The build stamps are expected to
-		 * differ: the engine and this tool can be built - and shipped -
-		 * at different times, which is the whole reason the engine has
-		 * a version of its own. Two components rebuilt eleven minutes
-		 * apart across the top of an hour already disagree, and a line
-		 * that cries mismatch at that is a line people learn to skip.
-		 *
-		 * The INTERFACE is major.minor, so that is what a mismatch is.
-		 */
-		kof_engine_version(&ev);
-		if (ev.major == KOFENG_MAJOR && ev.minor == KOFENG_MINOR)
-			snprintf(ver_eng, sizeof ver_eng,
-				 "Engine      %u.%u  build %u",
-				 (unsigned)ev.major, (unsigned)ev.minor,
-				 ev.build);
-		else
-			snprintf(ver_eng, sizeof ver_eng,
-				 "Engine      %u.%u build %u  (this tool was "
-				 "built against %u.%u)",
-				 (unsigned)ev.major, (unsigned)ev.minor,
-				 ev.build, (unsigned)KOFENG_MAJOR,
-				 (unsigned)KOFENG_MINOR);
-		if (v->eng && kof_engine_db_version(v->eng, &dv))
-			snprintf(ver_db, sizeof ver_db,
-				 "Database    %u.%u  build %u",
-				 (unsigned)dv.major, (unsigned)dv.minor,
-				 dv.build);
-		else
-			snprintf(ver_db, sizeof ver_db,
-				 "Database    none loaded");
-		snprintf(ver_abi, sizeof ver_abi, "Module ABI  %u",
-			 (unsigned)KOFSIG_ABI_VERSION);
-
-		/*
-		 * WHAT IS LOADED, AND WHAT THIS BUILD CAN READ - two different
-		 * questions, so two lines.
-		 *
-		 * The counts come from the database and move when it does. The
-		 * formats come from the engine's parser list, which is a
-		 * property of the binary: a build knows how to read the same
-		 * set whether or not any database is present. Asking the list
-		 * rather than counting a literal is the point - a format added
-		 * to the engine appears here without anyone remembering to.
-		 */
-		if (v->eng)
-			snprintf(cnt_sig, sizeof cnt_sig,
-				 "Signatures  %u   unpackers %u   heur rules %u",
-				 kof_engine_records(v->eng),
-				 kof_engine_unpackers(v->eng),
-				 kof_engine_heur_rules(v->eng));
-		else
-			snprintf(cnt_sig, sizeof cnt_sig,
-				 "Signatures  none loaded");
-		{
-			const struct kof_parser *fmts;
-			uint32_t nf = 0, k, at = 0;
-
-			fmts = kof_parser_list(&nf);
-			at = (uint32_t)snprintf(cnt_fmt, sizeof cnt_fmt,
-						"Formats     %u:", nf);
-			for (k = 0; k < nf && at + 1u < sizeof cnt_fmt; k++)
-				at += (uint32_t)snprintf(cnt_fmt + at,
-							 sizeof cnt_fmt - at,
-							 " %s",
-							 kof_format_name(fmts[k].format));
-		}
-	}
-	const char *const *line = v->help_open == 1 ? keys
-						     : (const char *const *)about;
-	int n = v->help_open == 1 ? (int)(sizeof keys / sizeof keys[0])
-				  : (int)(sizeof about / sizeof about[0]);
-	int h = n + 4, top = (g_rows - h) / 2, w = 60, left, y, i;
+	if (v->help_open == 2)
+		about_build(v);
+	line = v->help_open == 1 ? keys : NULL;
+	n = v->help_open == 1 ? (int)(sizeof keys / sizeof keys[0])
+			      : (int)g_n_about;
 
 	/*
 	 * THE BOX FITS THE TEXT, not the other way round.
@@ -9700,16 +9823,32 @@ static void draw_help(struct out *o, struct view *v)
 	 * can read is worse than none, because it reads as a complete one.
 	 *
 	 * Still bounded by the terminal: a line longer than the screen is drawn
-	 * short rather than drawn outside it.
+	 * short rather than drawn outside it. What no longer follows from that
+	 * is the HEIGHT - a box taller than the terminal used to be drawn off
+	 * the bottom, so About scrolls instead.
 	 */
 	for (i = 0; i < n; i++) {
-		int len = (int)strlen(line[i]) + 4;
+		int len = (line ? (int)strlen(line[i]) : vis_cols(g_about[i])) + 4;
 
 		if (len > w)
 			w = len;
 	}
 	if (w > g_cols - 4)
 		w = g_cols - 4;
+
+	maxrows = g_rows - 8;
+	if (maxrows < 3)
+		maxrows = 3;
+	rows = n > maxrows ? maxrows : n;
+	if (v->about_off > n - rows)
+		v->about_off = n - rows;
+	if (v->about_off < 0)
+		v->about_off = 0;
+	if (v->help_open == 1)
+		v->about_off = 0;
+
+	h = rows + 4;
+	top = (g_rows - h) / 2;
 	if (top < 2)
 		top = 2;
 	left = (g_cols - w) / 2;
@@ -9731,15 +9870,53 @@ static void draw_help(struct out *o, struct view *v)
 			out_str(o, " ");
 		out_str(o, "|" A_OFF);
 	}
-	out_at(o, top + 1, left + 2);
-	out_fmt(o, A_ID "%s" A_OFF,
-		v->help_open == 1 ? "Keyboard" : "About");
-	for (i = 0; i < n; i++) {
-		out_at(o, top + 3 + i, left + 2);
-		out_fmt(o, A_DIM "%-.*s" A_OFF, w - 4, line[i]);
+	/*
+	 * THE BUTTON SITS ON THE TOP BORDER, at the right.
+	 *
+	 * Where a window's close control is everywhere else, and where the eye
+	 * goes first on a box that may be scrolled: at the bottom it moved with
+	 * nothing but was still the last thing read, which is the wrong order
+	 * for the one control the dialog has.
+	 */
+	v->about_btn_y = -1;
+	if (v->help_open == 2) {
+		const char *b = " Close ";
+		int bw = (int)strlen(b);
+
+		v->about_btn_y = top;
+		v->about_btn_x0 = left + w - 2 - bw;
+		v->about_btn_x1 = v->about_btn_x0 + bw - 1;
+		out_at(o, v->about_btn_y, v->about_btn_x0);
+		out_fmt(o, A_SEL "%s" A_OFF, b);
 	}
+	out_at(o, top + 1, left + 2);
+	out_fmt(o, A_ID "%s" A_OFF, v->help_open == 1 ? "Keyboard" : "About");
+	/* How far down a scrolled page is, beside its title rather than at the
+	 * bottom: the bottom row is the button's, and a reader looking for
+	 * "am I at the end" looks where the title is. */
+	if (rows < n)
+		out_fmt(o, A_DIM "   %d-%d of %d" A_OFF, v->about_off + 1,
+			v->about_off + rows, n);
+	for (i = 0; i < rows; i++) {
+		out_at(o, top + 3 + i, left + 2);
+		if (line) {
+			out_fmt(o, A_DIM "%-.*s" A_OFF, w - 4, line[i]);
+		} else {
+			out_str(o, A_OFF);
+			prop_put(o, g_about[v->about_off + i], w - 4, -1, -1);
+			out_str(o, A_OFF);
+		}
+	}
+
+	/*
+	 * About no longer closes on any key or any click, because it scrolls: a
+	 * page that answers the wheel and also vanishes on the click that starts
+	 * a drag is a page nobody can read to the end. So the bottom border says
+	 * what the keyboard does, and the button above says what the mouse does.
+	 */
 	out_at(o, top + h - 1, left + 2);
-	out_fmt(o, A_DIM " press any key " A_OFF);
+	out_fmt(o, A_DIM "%s" A_OFF,
+		v->help_open == 1 ? " press any key " : " Esc closes ");
 }
 
 /* ---- the properties page --------------------------------------------------------
@@ -9758,8 +9935,6 @@ static void draw_help(struct out *o, struct view *v)
  * page that shows neither because it shows only what they have in common is a
  * page nobody opens twice.
  */
-#define PROP_MAX  600
-#define PROP_W    200
 
 /*
  * A LINE CARRIES ITS OWN COLOURS, INSIDE ITS TEXT.
@@ -9774,10 +9949,6 @@ static void draw_help(struct out *o, struct view *v)
  * of fact - a name, an offset, a size - and one colour per row cannot say which
  * is which. Every other row on this page already worked that way.
  */
-struct prop_line {
-	char text[PROP_W];
-};
-
 static struct prop_line g_prop[PROP_MAX];
 static uint32_t         g_n_prop;
 
@@ -11010,67 +11181,128 @@ static void dump_all(struct view *v, int use_emu)
  *
  * Returns 0 and leaves a message when there is nothing that way.
  */
-static int neighbour_file(struct view *v, int dir, char *out, size_t cap)
+/*
+ * What counts as a file this viewer will step to.
+ *
+ * NOT the same test the scanner's directory walk uses, and the difference is
+ * deliberate. That one lstats and takes empty files, because scanning one is a
+ * question with an answer - "zero findings on an object is a result". This is
+ * navigation: an empty file opens a window on nothing, and a directory or a
+ * socket is not an object at all. A sample directory routinely holds a README
+ * and a subdirectory of notes, and stepping into either is a dead end.
+ */
+static int walkable_file(const char *path)
 {
-	char folder[KOF_DUMP_PATH_ROOM], best[KOF_DUMP_PATH_ROOM];
-	const char *base = base_name(v->path);
-	size_t lead = (size_t)(base - v->path);
-	DIR *d;
+	struct stat st;
+
+	return stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
+}
+
+/*
+ * PICK A FILE OUT OF A DIRECTORY - the first, or the one either side of a name.
+ *
+ * One walk answering all three questions, because they are one question asked
+ * with different comparisons, and two walks are two chances for the ordering to
+ * drift. When it drifted the symptom was quiet: the folder opened on the file
+ * one rule called first, and the very first step forward skipped it, because
+ * the other rule did not think it was a file at all.
+ *
+ * Ordering is by NAME rather than by whatever readdir hands back, which is the
+ * only property that makes forward-then-back return to where it started.
+ *
+ * `from` is the base name to move away from, and is ignored - may be NULL - for
+ * PICK_FIRST. Returns 0 and touches nothing when there is no such file; the
+ * caller says so in whatever terms suit where it was called from.
+ */
+enum { PICK_FIRST = 0, PICK_NEXT = 1, PICK_PREV = -1 };
+
+static int dir_pick(const char *folder, const char *from, int which,
+		    char *out, size_t cap)
+{
+	DIR *d = opendir(folder);
 	struct dirent *e;
+	char best[KOF_DUMP_PATH_ROOM];
 	int found = 0;
 
-	if (lead + 1 >= sizeof folder)
+	if (!d)
 		return 0;
-	if (lead) {
-		memcpy(folder, v->path, lead);
-		folder[lead ? lead - 1 : 0] = 0;   /* drop the separator */
-	}
-	if (!lead || !folder[0])
-		snprintf(folder, sizeof folder, ".");
-
-	d = opendir(folder);
-	if (!d) {
-		v->act_ok = 0;
-		snprintf(v->act_msg, sizeof v->act_msg,
-			 "Cannot read %.60s", folder);
-		return 0;
-	}
 	while ((e = readdir(d)) != NULL) {
 		char cand[KOF_DUMP_PATH_ROOM];
-		struct stat st;
-		int rel = strcmp(e->d_name, base);
 
-		/* On the wrong side of where we are, or where we already are. */
-		if (dir > 0 ? rel <= 0 : rel >= 0)
-			continue;
-		/* Further away than the best so far: nearest wins, which for
-		 * "next" is the smallest name above and for "previous" is the
-		 * largest name below. */
+		if (which != PICK_FIRST) {
+			int rel = strcmp(e->d_name, from);
+
+			/* On the wrong side of where we are, or where we
+			 * already are. */
+			if (which > 0 ? rel <= 0 : rel >= 0)
+				continue;
+		}
+		/*
+		 * Further away than the best so far. Nearest wins, which for
+		 * NEXT is the smallest name above and for PREV the largest
+		 * below - and for FIRST, the smallest of all.
+		 *
+		 * `>= 0` and not `> 0`: FIRST wants the smallest name, which is
+		 * the same comparison NEXT uses. Written as `which > 0` it fell
+		 * in with PREV and opened a folder on its LAST file.
+		 */
 		if (found) {
 			int cmp = strcmp(e->d_name, base_name(best));
 
-			if (dir > 0 ? cmp >= 0 : cmp <= 0)
+			if (which >= 0 ? cmp >= 0 : cmp <= 0)
 				continue;
 		}
 		if ((size_t)snprintf(cand, sizeof cand, "%s/%s", folder,
 				     e->d_name) >= sizeof cand)
 			continue;
-		if (stat(cand, &st) != 0 || !S_ISREG(st.st_mode) ||
-		    st.st_size <= 0)
+		if (!walkable_file(cand))
 			continue;
 		snprintf(best, sizeof best, "%s", cand);
 		found = 1;
 	}
 	closedir(d);
+	if (found)
+		snprintf(out, cap, "%s", best);
+	return found;
+}
 
-	if (!found) {
-		v->act_ok = 0;
-		snprintf(v->act_msg, sizeof v->act_msg, "No %s file in this folder",
-			 dir > 0 ? "next" : "previous");
-		return 0;
+/*
+ * The directory a path lives in, as a string dir_pick can open.
+ *
+ * "." for a bare name, and the separator dropped from anything else - which is
+ * the one piece of string work both callers were doing separately.
+ */
+static void dir_of(const char *path, char *out, size_t cap)
+{
+	const char *base = base_name(path);
+	size_t lead = (size_t)(base - path);
+
+	if (!lead || lead + 1 >= cap) {
+		snprintf(out, cap, ".");
+		return;
 	}
-	snprintf(out, cap, "%s", best);
-	return 1;
+	memcpy(out, path, lead);
+	out[lead - 1] = 0;              /* drop the separator */
+	if (!out[0])
+		snprintf(out, cap, "/");   /* the path was "/name" */
+}
+
+/*
+ * The file next to this one in its directory, in either direction.
+ *
+ * Returns 0 and leaves a message when there is nothing that way.
+ */
+static int neighbour_file(struct view *v, int dir, char *out, size_t cap)
+{
+	char folder[KOF_DUMP_PATH_ROOM];
+
+	dir_of(v->path, folder, sizeof folder);
+	if (dir_pick(folder, base_name(v->path), dir, out, cap))
+		return 1;
+	v->act_ok = 0;
+	snprintf(v->act_msg, sizeof v->act_msg, "No %s file in this folder",
+		 dir > 0 ? "next" : "previous");
+	return 0;
 }
 
 /*
@@ -11377,12 +11609,55 @@ static void bar_move_item(struct view *v, int dir)
 	}
 }
 
+/*
+ * WHY AN ITEM IS GREY, IN THE WORDS A READER NEEDS.
+ *
+ * bar_enabled decides; this explains, and the two are kept apart so the
+ * decision has one home. Every reason here is the negation of the test there -
+ * read them side by side when either changes.
+ *
+ * NULL for an item whose greyness explains itself: Save with an empty draft
+ * has its own two messages below, and an item disabled because there is no
+ * file open is answered by the empty screen.
+ */
+static const char *bar_why_off(struct view *v, int i)
+{
+	switch (i) {
+	case BI_SYMS:
+		/* Both readings are true of the same object and neither can be
+		 * told from the other: a table that was stripped and one that
+		 * was never written both arrive as no records. */
+		return "No symbols in this object - it is stripped or declares none";
+	case BI_DISASM:
+		return "Nothing to disassemble - this object has no code for "
+		       "this build to read";
+	case BI_NEXT:
+	case BI_PREV:
+	case BI_UNPACKER:
+	case BI_DUMP_STATIC:
+	case BI_DUMP_EMU:
+		if (draft_edited(&v->ed))
+			return "Finish or undo the draft first";
+		return NULL;
+	case BI_REBUILD:
+		return "Set both a database and a signature tree first";
+	default:
+		return NULL;
+	}
+}
+
 static void bar_run(struct view *v, int i)
 {
 	if (!bar_enabled(v, i)) {
 		/*
-		 * A greyed item that does nothing when clicked teaches nothing.
-		 * The two that can be greyed for a reason worth reading say it.
+		 * A GREYED ITEM THAT DOES NOTHING WHEN CLICKED TEACHES NOTHING.
+		 *
+		 * Save and Save As have their own two messages, and they go to
+		 * the draft panel's note because that is where the reader is
+		 * when they press them. Everything else can be pressed from any
+		 * pane, so it answers through act_msg - the slot that shows
+		 * wherever the reader is and fades on its own. Putting one of
+		 * those in dr.warn is how a reply gets written and never read.
 		 */
 		if (i == BI_SAVE || i == BI_SAVE_AS) {
 			const char *why = draft_missing(&v->ed);
@@ -11391,6 +11666,14 @@ static void bar_run(struct view *v, int i)
 				say_err(&v->ed, "%s", why);
 			else
 				say_note(&v->ed, "Nothing to write");
+		} else {
+			const char *why = bar_why_off(v, i);
+
+			if (why) {
+				snprintf(v->act_msg, sizeof v->act_msg, "%s",
+					 why);
+				v->act_ok = 0;
+			}
 		}
 		return;
 	}
@@ -11528,7 +11811,7 @@ static void bar_run(struct view *v, int i)
 		v->prop_dragging = 0;
 		break;
 	case BI_KEYS:    v->help_open = 1; break;
-	case BI_ABOUT:   v->help_open = 2; break;
+	case BI_ABOUT:   v->help_open = 2; v->about_off = 0; break;
 	default: break;
 	}
 }
@@ -12879,7 +13162,8 @@ static void symd_open(struct view *v)
 	v->sym_at = 0;
 	v->sym_hoff = 0;
 	/* Exports first when there are any, since that is the half a reader
-	 * opening this is usually after. Both counts come from the engine. */
+	 * opening this is usually after. Both counts come from the engine.
+	 * That there ARE any is bar_enabled's to decide - see bar_why_off. */
 	v->sym_open = SYMN_EXP;
 	if (v->probe &&
 	    !sym_half(o, KOF_SCAN_SYM_EXP, v->probe, KOF_SCAN_MAX_EXTENTS, 0) &&
@@ -14188,12 +14472,23 @@ static void click(struct view *v, int rclick)
 		return;
 
 	/*
-	 * The help box takes any click, the bar takes the row it owns and
+	 * The help box takes the click, the bar takes the row it owns and
 	 * whatever is under an open menu. Both before the panes, for the same
 	 * reason the chooser is: what is drawn on top is asked first.
+	 *
+	 * KEYBOARD CLOSES ON ANY CLICK; ABOUT ONLY ON ITS BUTTON. About
+	 * scrolls, and a page that vanishes on the click that starts a drag
+	 * cannot be read to the end. Keyboard is a cheat sheet with nowhere to
+	 * scroll to, so dismissing it with a click stays the fastest thing.
 	 */
-	if (v->help_open) {
+	if (v->help_open == 1) {
 		v->help_open = 0;
+		return;
+	}
+	if (v->help_open == 2) {
+		if (v->about_btn_y >= 0 && g_my == v->about_btn_y &&
+		    g_mx >= v->about_btn_x0 && g_mx <= v->about_btn_x1)
+			v->help_open = 0;
 		return;
 	}
 	if (v->bar_open >= 0) {
@@ -15610,15 +15905,63 @@ static int handle(struct view *v, int k)
 		page = 1;
 
 	/*
-	 * Any KEY closes the help box - but a mouse event is not a key.
+	 * Any KEY closes the Keyboard box - but a mouse event is not a key.
 	 *
 	 * They arrive here as codes out of the same enum, so a test for "any
 	 * key" catches the release of the very click that opened the box: it
 	 * appeared and vanished in one gesture. The mouse codes are contiguous
 	 * and last in the enum for exactly this kind of test.
 	 */
-	if (v->help_open && k < K_CLICK) {
+	if (v->help_open == 1 && k < K_CLICK) {
 		v->help_open = 0;
+		return 1;
+	}
+	/*
+	 * ABOUT ANSWERS THE KEYS THAT MOVE A PAGE, and closes on the two that
+	 * mean "done" everywhere else. Any key would close it, which is what
+	 * Keyboard does - but then the wheel and the arrows could not scroll
+	 * it, and a page long enough to need scrolling is exactly the one this
+	 * became.
+	 */
+	/*
+	 * The wheel scrolls About, a click has to reach click() - which is the
+	 * only code that knows where the Close button was drawn - and every
+	 * other key is eaten so the page can be read to the end.
+	 *
+	 * Written as a guard on the block rather than as a case inside it,
+	 * because "not handled here" cannot be spelled with a return in this
+	 * function: 0 is what Ctrl+Q returns and it means QUIT. The first
+	 * version of this used it and closed the program instead of the dialog.
+	 */
+	if (v->help_open == 2 &&
+	    (k < K_CLICK || k == K_WHEEL_UP || k == K_WHEEL_DOWN)) {
+		switch (k) {
+		case 27:                /* Esc */
+		case '\r':
+		case '\n':
+		case 'q':
+			v->help_open = 0;
+			break;
+		case K_UP:
+		case K_WHEEL_UP:
+			if (v->about_off > 0)
+				v->about_off--;
+			break;
+		case K_DOWN:
+		case K_WHEEL_DOWN:
+			v->about_off++;   /* clamped where the box is measured */
+			break;
+		case K_PGUP:
+			v->about_off -= 8;
+			break;
+		case K_PGDN:
+			v->about_off += 8;
+			break;
+		default:
+			break;
+		}
+		if (v->about_off < 0)
+			v->about_off = 0;
 		return 1;
 	}
 
@@ -15635,7 +15978,12 @@ static int handle(struct view *v, int k)
 	/*
 	 * STEPPING THROUGH A DIRECTORY WITHOUT REACHING FOR THE MENU.
 	 *
-	 * Ctrl+] is the next file and Ctrl+\ the one before it.
+	 * Ctrl+] is the PREVIOUS file and Ctrl+\ the next one.
+	 *
+	 * That way round because of where the keys sit: on a US layout \ is to
+	 * the right of ], so the rightward key steps forward. The pair reads as
+	 * a direction on the keyboard rather than as a bracket that has to be
+	 * remembered.
 	 *
 	 * Ctrl+[ WOULD HAVE BEEN THE OBVIOUS PARTNER AND CANNOT BE USED. A
 	 * terminal sends Ctrl+[ as 0x1B, which is the Escape key, byte for
@@ -15652,14 +16000,14 @@ static int handle(struct view *v, int k)
 	 * to be reported.
 	 */
 	case 0x1d:                      /* Ctrl+] */
-		if (bar_enabled(v, BI_NEXT))
-			open_step(v, +1);
+		if (bar_enabled(v, BI_PREV))
+			open_step(v, -1);
 		else
 			say_note(&v->ed, "Finish or undo the draft first");
 		break;
 	case 0x1c:                      /* Ctrl+\ */
-		if (bar_enabled(v, BI_PREV))
-			open_step(v, -1);
+		if (bar_enabled(v, BI_NEXT))
+			open_step(v, +1);
 		else
 			say_note(&v->ed, "Finish or undo the draft first");
 		break;
@@ -15770,7 +16118,7 @@ static void usage(void)
 	fprintf(stderr,
 	"kofviewer - the engine's view of a file, navigable\n"
 	"\n"
-	"  kofviewer [--db <dir>] <file>\n"
+	"  kofviewer [--db <dir>] <file|folder>\n"
 	"\n"
 	"  --db D      load that database. Without it there is one object and\n"
 	"              no markers: unpacking is what modules do, and modules\n"
@@ -16029,6 +16377,30 @@ int main(int argc, char **argv)
 	snprintf(v.basedir, sizeof v.basedir, "%s", base);
 	if (db)
 		snprintf(v.dbdir, sizeof v.dbdir, "%s", db);
+
+	/*
+	 * A DIRECTORY IS A REASONABLE THING TO POINT THIS AT.
+	 *
+	 * Samples arrive in folders, and the first thing anybody does with one
+	 * is open a file in it and start stepping. Resolving the folder here
+	 * means Ctrl+] and Ctrl+\ work from the first frame, on the same
+	 * ordering they will use for the rest of the session.
+	 *
+	 * An empty folder is FATAL rather than an empty window. A viewer with no
+	 * object shows three empty panes and a status line about nothing, which
+	 * reads as the program having failed to load a file it never had; a line
+	 * on stderr says what is actually true.
+	 */
+	if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+		static char first[KOF_DUMP_PATH_ROOM];
+
+		if (!dir_pick(path, NULL, PICK_FIRST, first, sizeof first)) {
+			fprintf(stderr, "kofviewer: %s holds no file to open\n",
+				path);
+			return 1;
+		}
+		path = first;
+	}
 
 	v.ext = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *v.ext);
 	v.probe = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *v.probe);

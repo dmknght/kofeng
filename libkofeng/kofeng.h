@@ -102,6 +102,33 @@ static inline size_t kof_obj_toplevel_len(const char *name)
 }
 
 /* How many containers deep: 0 for the file itself. */
+/*
+ * The LAST segment of an object's name: what this object is, inside its parent.
+ *
+ * "archive.zip//3:bin/x86" gives "3:bin/x86", and a name with no separator at
+ * all gives the whole thing - which is the right answer for the file itself.
+ *
+ * Here rather than in each tool because a tool that cut at the last '/' instead
+ * got it right only while no label contained one: an archive member called
+ * bin/x86 came out as "x86", and a name whose separator was missing came out as
+ * the file's own basename. Both read as a different object from the one on the
+ * row.
+ */
+static inline const char *kof_obj_leaf(const char *name)
+{
+	const char *p = name, *last = name;
+
+	while (*p) {
+		if (p[0] == KOF_OBJ_SEP[0] && p[1] == KOF_OBJ_SEP[1]) {
+			p += KOF_OBJ_SEP_LEN;
+			last = p;
+			continue;
+		}
+		p++;
+	}
+	return last;
+}
+
 static inline uint32_t kof_obj_depth(const char *name)
 {
 	uint32_t n = 0;
