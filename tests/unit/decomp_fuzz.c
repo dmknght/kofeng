@@ -64,7 +64,10 @@
 #define MARKER    0xA5
 
 static uint64_t failures, rounds_done, seeds;
-static uint64_t by_status[4];
+/* One bucket per status, the WHOLE closed set - see decomp.h. Sized to a
+ * subset it would index out of bounds the day a decoder returned the code
+ * it was missing. */
+static uint64_t by_status[KOF_DEC_UNSUPPORTED + 1];
 
 static void fail(uint64_t r, const char *why)
 {
@@ -201,9 +204,11 @@ static uint8_t out_a[OUT_CAP], out_b[OUT_CAP];
  * one format, and two copies of the checks would be two places for one of them to
  * be dropped.
  */
-static int decode_any(int lzma, int variant, int bits, unsigned lc, unsigned lp,
-		      unsigned pbits, const uint8_t *src, uint64_t n,
-		      uint8_t *dst, uint64_t cap, uint64_t *produced)
+static enum kof_decomp_status decode_any(int lzma, int variant, int bits, unsigned lc,
+				       unsigned lp, unsigned pbits,
+				       const uint8_t *src, uint64_t n,
+				       uint8_t *dst, uint64_t cap,
+				       uint64_t *produced)
 {
 	if (lzma)
 		return kof_lzma_decode(lc, lp, pbits, src, n, dst, cap, produced);
@@ -216,7 +221,7 @@ static void one(uint64_t r)
 	int variant, bits, lzma = 0;
 	unsigned lc = 3, lp = 0, pbits = 2;
 	uint64_t cap, pa = 0, pb = 0, i;
-	int sa, sb;
+	enum kof_decomp_status sa, sb;
 
 	/*
 	 * One round in eight leaves a real block ALONE and checks it decodes.
@@ -232,7 +237,7 @@ static void one(uint64_t r)
 	if (seeds && (r % 8) == 3) {
 		uint32_t s = (uint32_t)(rnd() % seeds);
 		uint64_t p = 0;
-		int st;
+		enum kof_decomp_status st;
 
 		if (seed_unc[s] <= OUT_CAP) {
 			memset(out_a, MARKER, seed_unc[s]);
@@ -302,8 +307,19 @@ static void one(uint64_t r)
 	sa = decode_any(lzma, variant, bits, lc, lp, pbits, in, n, out_a, cap, &pa);
 	rounds_done++;
 
-	if (sa < 0 || sa > KOF_DEC_CORRUPT) {
-		fail(r, "status is not one the decoder defines");
+	/*
+	 * MEMBERSHIP OF THE WHOLE SET, and the "< 0" has to stay able to fail.
+	 *
+	 * The bound was KOF_DEC_CORRUPT, which is the last code THESE TWO
+	 * decoders produce rather than the last one the enum defines - so a
+	 * decoder that learnt to report an unsupported coding would have been
+	 * failed here for returning something valid. And the sign test is only
+	 * a test at all because enum kof_decomp_status is pinned signed; under
+	 * an unsigned underlying type it is always false and a stray -1 arrives
+	 * as a large positive index instead.
+	 */
+	if (sa < 0 || sa > KOF_DEC_UNSUPPORTED) {
+		fail(r, "status is not one the enum defines");
 		return;
 	}
 	by_status[sa]++;
@@ -389,7 +405,8 @@ int main(int argc, char **argv)
 
 		for (v = 0; v < 3; v++) {
 			uint64_t p = 0;
-			int st = kof_nrv2_decode(v, 32, zeros, sizeof zeros,
+			enum kof_decomp_status st = kof_nrv2_decode(v, 32, zeros,
+								     sizeof zeros,
 						 out_a, OUT_CAP, &p);
 
 			if (st != KOF_DEC_CORRUPT)

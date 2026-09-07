@@ -67,7 +67,7 @@ static void one_file(const char *path, const char *name)
 	for (i = 0; i + 3 <= len; i++) {
 		struct acc a;
 		uint64_t produced = 0;
-		int st;
+		enum kof_decomp_status st;
 
 		if (!kof_ovba_plausible(b + i, (uint64_t)(len - i)))
 			continue;
@@ -120,7 +120,8 @@ static int selfcheck(void)
 	uint64_t produced;
 	uint32_t len = (uint32_t)(sizeof msg - 1u);
 	uint16_t hdr;
-	int st, bad = 0, i;
+	enum kof_decomp_status st;
+	int bad = 0, i;
 
 	hdr = (uint16_t)((len + 2u - 3u) | (3u << 12));
 	in[0] = 0x01; in[1] = (uint8_t)hdr; in[2] = (uint8_t)(hdr >> 8);

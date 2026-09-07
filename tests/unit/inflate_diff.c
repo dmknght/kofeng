@@ -116,7 +116,7 @@ static size_t zlib_inflate_raw(const uint8_t *in, size_t n, uint8_t **out, int *
 	z.next_in = (Bytef *)in;
 	z.avail_in = (uInt)n;
 	for (;;) {
-		int r;
+		enum kof_decomp_status r;
 
 		z.next_out = *out + have;
 		z.avail_out = (uInt)(cap - have);
@@ -151,7 +151,7 @@ static void round_trip(const char *what, const uint8_t *data, size_t n, int leve
 	size_t comp_n = 0;
 	struct kof_inflate *st;
 	struct out o;
-	int r;
+	enum kof_decomp_status r;
 
 	if (!zlib_deflate_raw(data, n, level, &comp, &comp_n)) {
 		fail(what, "zlib would not compress the input");
@@ -189,7 +189,7 @@ static void stops_short(const uint8_t *data, size_t n, size_t limit)
 	size_t comp_n = 0;
 	struct kof_inflate *st;
 	struct out o;
-	int r;
+	enum kof_decomp_status r;
 
 	if (!zlib_deflate_raw(data, n, 6, &comp, &comp_n))
 		return;
@@ -262,7 +262,8 @@ static void hostile(uint64_t rounds)
 		struct out o;
 		uint8_t *zout = NULL;
 		size_t zn;
-		int zended, k, status;
+		enum kof_decomp_status status;
+		int zended, k;
 
 		if (r % 3 != 2) {
 			int b = (int)(r % 3);      /* 0: deflated, 1: stored */

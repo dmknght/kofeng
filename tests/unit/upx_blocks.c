@@ -148,7 +148,8 @@ static void one_file(const char *path, const uint8_t *f, uint64_t n)
 		unsigned method  = f[at + 8];
 		uint8_t *out;
 		uint64_t produced = 0;
-		int variant, st;
+		enum kof_decomp_status st;
+		int variant;
 
 		if (sz_cpr == 0 || sz_unc == 0)
 			break;
