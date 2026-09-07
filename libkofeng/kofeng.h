@@ -370,6 +370,25 @@ struct kof_stats {
 	uint64_t gram_bytes;             /* cost of building presence sets */
 	uint64_t gram_answers;           /* searches answered without scanning */
 
+	/*
+	 * WHAT THE BATCHED SWEEP DID, AND WHAT IT COST.
+	 *
+	 * `multi_bytes` against `bytes_searched` is the whole claim this engine
+	 * makes about its own scaling: the first is what a region cost read once
+	 * for all of its markers, the second is what was left to read one marker
+	 * at a time. A build where the second grows with the database and the
+	 * first does not is a build where the sweep stopped working, and there is
+	 * no other way to see that from outside.
+	 *
+	 * `multi_hash4` and `multi_wumanber` say which routine the router picked,
+	 * split because they are picked for opposite reasons - short markers and
+	 * long ones - and a base drifting from one to the other is worth seeing.
+	 */
+	uint64_t multi_passes;           /* regions read once for all their markers */
+	uint64_t multi_hash4, multi_wumanber;   /* which routine did it */
+	uint64_t multi_bytes;            /* bytes those passes walked */
+	uint64_t multi_answers;            /* answers written without a search */
+
 	uint64_t searches, bytes_searched;
 
 	/*
@@ -425,6 +444,30 @@ uint32_t    kof_engine_unpackers(const kof_engine *);
 uint32_t    kof_engine_heur_rules(const kof_engine *);
 
 /*
+ * WHAT THE MULTI-PATTERN TABLES COST, AND HOW BAD THEIR WORST BUCKET IS.
+ *
+ * Two numbers this design rests on, and neither is visible from anywhere else.
+ *
+ * `bytes` is the memory the tables took. It is CHOSEN and not incurred - the
+ * bucket counts are derived from the marker count and bounded - and the claim
+ * that a base can grow without the matcher's footprint following it is only
+ * checkable if the footprint can be read.
+ *
+ * `max_chain` is the longest bucket in any of them, which is what bounds the
+ * worst case: a bucket hit costs one verify per marker on its chain, so a base
+ * where many markers share their first four bytes turns a file full of those
+ * bytes into a slow scan. Four on the shipping base. Nothing in the engine acts
+ * on it yet - a threshold cannot be fitted on a hundred markers - so it is
+ * reported rather than enforced, which is the honest state of it.
+ *
+ * Either pointer may be NULL. Zero-filled and non-zero return when the database
+ * has no tables, which is not an error: it means every marker is searched one
+ * at a time, as this engine did before 2.0.
+ */
+int         kof_engine_multimatch(const kof_engine *, uint64_t *bytes,
+				  uint32_t *max_chain);
+
+/*
  * WHAT THE LOADED DATABASE ACTUALLY SAYS ABOUT ITSELF.
  *
  * Read out of the packs, not taken from a constant of this build - and the
@@ -459,8 +502,19 @@ uint32_t    kof_engine_heur_rules(const kof_engine *);
  * COMPILED against, the call says what is actually loaded. When they disagree
  * that is itself the bug being reported.
  */
-#define KOFENG_MAJOR 1u
-#define KOFENG_MINOR 1u
+/*
+ * 2.0 - THE SCAN STOPPED BEING ONE SEARCH PER MARKER.
+ *
+ * A major rather than a minor because the thing an operator quotes in a bug
+ * report should change when the scan's shape does, and this one changed: a
+ * region is now read once for every marker declared against it, by a routine
+ * the build chooses from the marker set. Nothing about the artefacts moved -
+ * a pack still says its own layout and module ABI, and those are still what
+ * the loader refuses on - so this gates nothing, exactly as the note above
+ * says it must not.
+ */
+#define KOFENG_MAJOR 2u
+#define KOFENG_MINOR 0u
 
 /* The Makefile passes the real stamp; this only keeps a stray compilation
  * building, the same way KOF_PACK_BUILD does. */

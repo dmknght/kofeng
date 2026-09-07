@@ -171,6 +171,21 @@ int kof_match_lookup(struct kof_match_ctx *, uint32_t slot,
 int kof_match_at(struct kof_match_ctx *, uint64_t off,
 		 const uint8_t *bytes, uint16_t len, uint8_t kind, uint8_t flags);
 
+/*
+ * Does the hex program match starting exactly at `start`?
+ *
+ * Exported for the multi-pattern pass, which finds anchor runs in its own
+ * batched sweep and then has to finish them the same way hex_search does. A
+ * second copy of the walk would be a second thing that can disagree about what
+ * a gap, an alternation or a mask means - and only one of the two would be the
+ * one the unit suite exercises.
+ *
+ * `d.n` IS THE LIMIT, not the object's length: the caller shrinks the view to
+ * the end of the range it was asked about, which is what stops a match starting
+ * inside a region and running out the far side of it. See hex_search.
+ */
+int kof_hex_walk(kof_buf d, uint64_t start, const uint8_t *prog);
+
 /* Search a single ad-hoc range, for the same reason: the module computed it. */
 int kof_match_in(struct kof_match_ctx *, uint64_t off, uint64_t len,
 		 const uint8_t *bytes, uint16_t plen, uint8_t kind, uint8_t flags);

@@ -52,6 +52,7 @@
 #define _GNU_SOURCE
 
 #include "kofdb.h"
+#include "../kofmatchers/kofmultimatch.h"
 #include "../kofmatchers/hexprog.h"
 
 #include <stdio.h>
@@ -1114,6 +1115,22 @@ struct kof_engine *kof_db_load(const char *path)
 		e->packs = mp;
 		e->n_packs = n_ok;
 		mp = NULL;
+
+		/*
+		 * The multi-pattern matchers, and they have to be built HERE.
+		 *
+		 * It reads marker bytes through kof_db_str, which reads them out
+		 * of the packs - so it cannot run until the engine has taken the
+		 * mappings, four lines above. Built before that it saw no packs
+		 * and collected nothing, silently: every mask came out with no
+		 * markers and the sweep never ran, while the scan stayed correct
+		 * because an unfilled memo cell means "not known yet".
+		 *
+		 * A NULL result is not an error. It is a database that will be
+		 * searched one marker at a time, which is what this engine did
+		 * before these existed.
+		 */
+		e->multi = kof_multimatch_build(e);
 	}
 out:
 	if (mp) {
@@ -1136,6 +1153,8 @@ void kof_db_free(struct kof_engine *e)
 	free(e->mods);
 	free(e->unp);
 	free(e->heur);
+	kof_multimatch_free(e->multi);
+	e->multi = NULL;
 	free(e->rng_tab);
 	free(e->rng_uid);
 	if (e->packs) {

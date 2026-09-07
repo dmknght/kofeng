@@ -34,6 +34,7 @@
 #define _GNU_SOURCE
 
 #include "scan.h"
+#include "../kofmatchers/kofmultimatch.h"
 #include "../kofheur/kofheur.h"
 /* The rule ABI: the phase ids and what a rule may ask the engine for. The
  * engine-side model next door is a different file with a similar name - see the
@@ -92,6 +93,13 @@ struct kof_scanner *kof_scan_new(const struct kof_engine *eng)
 	sc->msym.gram_min = 2;
 	if (!kof_match_state_init(&sc->msym, eng->n_str, 0))
 		goto fail;
+
+	/* One counter per region, and one word per marker for where it was seen.
+	 * A failure here is not fatal: the prepass needs both and simply does
+	 * not run without them. */
+	sc->live = calloc(KOF_MULTIMATCH_BITS, sizeof *sc->live);
+	if (eng->multi && eng->multi->n_pat)
+		sc->found = calloc(eng->multi->n_pat, sizeof *sc->found);
 	return sc;
 
 fail:
@@ -107,6 +115,10 @@ void kof_scan_free(struct kof_scanner *sc)
 		return;
 	kof_match_state_free(&sc->m);
 	kof_match_state_free(&sc->msym);
+	free(sc->live);
+	free(sc->found);
+	sc->live = NULL;
+	sc->found = NULL;
 	kof_scan_kids_reset(sc);
 	free(sc->kids);
 	free(sc->kid_packer);
@@ -287,6 +299,156 @@ static int prefilter(const struct kof_module *m, const struct kof_obj_ctx *ctx,
 	if (out)
 		out->examined++;
 	return 1;
+}
+
+
+/* ---- the multi-pattern prepass ----------------------------------------------------- */
+
+/*
+ * Answer every marker of every worthwhile region, before any module runs.
+ *
+ * WHY THIS IS A SEPARATE PASS AND NOT PART OF THE MODULE LOOP
+ *
+ * Because the saving is shared. A region's markers are asked about by many
+ * modules, and the lazy path reads the region once for each of them; read once
+ * for all of them, the cost stops growing with the database. Doing it inside
+ * the loop would mean the first module to name a region paid for every other
+ * module's markers, which is the same total but attributed to whoever happened
+ * to be first - and it would have to happen before that module's own logic
+ * ran, which is this function.
+ *
+ * It writes nothing but memo cells, so it is invisible: a cell means "is this
+ * marker in this region mask of this object" and has one answer whoever fills
+ * it. kof_match_lookup reads the cell before it does anything else, so a
+ * module's calls turn into table reads without knowing it. See find_str in
+ * kofmod/kofsig.h, which reserved exactly this.
+ *
+ * THE PRECONDITIONS ARE EVALUATED TWICE, ON PURPOSE
+ *
+ * Once here to count what is live, once in the loop below to decide what runs.
+ * They are integer comparisons against a record already in cache, and the
+ * alternative - a survivor list built here and consumed there - is a second
+ * representation of the same decision that could disagree with the first.
+ */
+static void multi_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+			  uint32_t present)
+{
+	const struct kof_engine *e = sc->eng;
+	const struct kof_module *arrays[3];
+	uint32_t counts[3], a, i, r, b, u;
+	uint32_t swept = 0;
+
+	if (!e->multi || !e->multi->n_pat || !sc->live || !sc->found ||
+	    !e->n_masks)
+		return;
+
+	memset(sc->live, 0, KOF_MULTIMATCH_BITS * sizeof *sc->live);
+	memset(sc->found, 0, (size_t)e->multi->n_pat * sizeof *sc->found);
+
+	arrays[0] = e->mods; counts[0] = e->n_mods;
+	arrays[1] = e->unp;  counts[1] = e->n_unp;
+	arrays[2] = e->heur; counts[2] = e->n_heur;
+
+	/*
+	 * All three arrays, because all three run against THIS object and share
+	 * THIS memo. Counting only detectors would under-report a region that
+	 * the unpackers and the rules between them make worth sweeping.
+	 *
+	 * Counted per REGION rather than per mask: a module naming CODE|DATA
+	 * makes both of them worth sweeping, and it is the regions that get
+	 * swept.
+	 */
+	for (a = 0; a < 3; a++) {
+		for (i = 0; i < counts[a]; i++) {
+			const struct kof_module *m = &arrays[a][i];
+			uint32_t bits = 0;
+
+			if (kof_module_precond(m, ctx, ctx->obj_size) !=
+			    KOF_PRECOND_OK)
+				continue;
+			if (m->scan_mask && !(m->scan_mask & present))
+				continue;
+			for (r = 0; r < m->n_rng; r++) {
+				if (m->rng_base + r >= e->n_rng)
+					break;
+				bits |= e->rng_tab[m->rng_base + r];
+			}
+			for (b = 0; b < KOF_MULTIMATCH_BITS; b++)
+				if (bits & (1u << b))
+					sc->live[b] += m->n_str;
+		}
+	}
+
+	/*
+	 * ONE PASS PER REGION, NOT PER MASK.
+	 *
+	 * Regions partition the object, so this reads every byte at most once;
+	 * the masks that name several of them are answered afterwards by an OR,
+	 * which is arithmetic rather than another pass. Keyed on masks instead,
+	 * the same corpus swept 2972 MB of a 1704 MB tree - CODE once for CODE
+	 * and again for CODE|DATA, DATA three times over.
+	 */
+	for (b = 0; b < KOF_MULTIMATCH_BITS; b++) {
+		const struct kof_multimatch *t = &e->multi->tab[b];
+		enum kof_multimatch_kind kind = kof_multimatch_pick(t, sc->live[b]);
+		uint32_t bit = 1u << b;
+		uint32_t n_ext;
+
+		if (kind == KOF_MULTIMATCH_NONE)
+			continue;
+		/*
+		 * The symbol halves are not the object's bytes - they are
+		 * searched by a second matcher over a buffer this one has never
+		 * seen - and KOF_MULTIMATCH_BITS already stops short of them.
+		 * A region the object does not have has nothing to sweep, and
+		 * counts as swept: it contributes no hits either way.
+		 */
+		if (!(bit & KOF_SCAN_ALL) && !(bit & present)) {
+			swept |= bit;
+			continue;
+		}
+		n_ext = kof_scan_resolve_range(ctx, bit, sc->ext);
+		if (!n_ext) {
+			swept |= bit;
+			continue;
+		}
+		sc->st.multi_bytes += kof_multimatch_sweep(e->multi, b, kind,
+							   &sc->m, sc->ext,
+							   n_ext, sc->found);
+		sc->st.multi_passes++;
+		if (kind == KOF_MULTIMATCH_WUMANBER)
+			sc->st.multi_wumanber++;
+		else
+			sc->st.multi_hash4++;
+		swept |= bit;
+	}
+
+	/*
+	 * Now the masks, from what the sweeps found.
+	 *
+	 * A mask is answerable only when every region it names that THIS OBJECT
+	 * HAS was swept - otherwise "found in none of them" is not a fact about
+	 * the object, it is a fact about which passes ran, and writing ABSENT
+	 * from it would be a lost detection that nothing would report. A region
+	 * the object lacks is not a gap: it has no bytes to hide a marker in.
+	 */
+	for (u = 0; u < e->n_masks; u++) {
+		uint32_t bits = e->multi->mask_bits[u];
+
+		if (!bits || (bits & KOF_SCAN_SYM))
+			continue;
+		if (bits & ~(KOF_SCAN_ALL | ((1u << KOF_MULTIMATCH_BITS) - 1u)))
+			continue;
+		if (bits & present & ~swept)
+			continue;
+		if (!(bits & KOF_SCAN_ALL) && !(bits & present))
+			continue;
+		if ((bits & KOF_SCAN_ALL) && !(swept & KOF_SCAN_ALL))
+			continue;
+		sc->st.multi_answers +=
+			kof_multimatch_fold(e->multi, &sc->m, u, bits,
+					    sc->found, e->n_masks);
+	}
 }
 
 /* ---- naming a finding ------------------------------------------------------ */
@@ -1126,6 +1288,10 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	present |= sym_halves_present(&ctx, sc->eng->scan_mask);
 	sc->st.objects++;
 	sc->st.object_bytes += buf.n;
+
+	/* Before any module: one pass per region worth one, filling the memo the
+	 * modules' own calls are about to read. */
+	multi_prepass(sc, &ctx, present);
 
 	for (i = 0; i < sc->eng->n_mods; i++) {
 		const struct kof_module *m = &sc->eng->mods[i];

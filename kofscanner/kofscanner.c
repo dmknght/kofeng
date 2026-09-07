@@ -496,6 +496,21 @@ static void print_stats(const struct kof_stats *st)
 		       (unsigned long long)(st->ran + skipped),
 		       (unsigned long long)st->considered);
 
+	/*
+	 * The batched pass first, because it is what the per-marker line below
+	 * is now measured AGAINST. A region swept once appears here; whatever
+	 * the sweep could not answer - hex programs, markers too short to key,
+	 * the symbol halves - appears there. The second number growing with the
+	 * database while the first does not is the shape to watch for.
+	 */
+	printf("multi      %llu pass(es) (%llu hash4, %llu wu-manber), "
+	       "%.2f MB read\n",
+	       (unsigned long long)st->multi_passes,
+	       (unsigned long long)st->multi_hash4,
+	       (unsigned long long)st->multi_wumanber,
+	       (double)st->multi_bytes / 1048576.0);
+	printf("  answers written without a search %llu\n",
+	       (unsigned long long)st->multi_answers);
 	printf("searches   %llu, %.2f MB read\n",
 	       (unsigned long long)st->searches,
 	       (double)st->bytes_searched / 1048576.0);
@@ -757,12 +772,22 @@ int main(int argc, char **argv)
 		 */
 		struct kof_db_version dv;
 
+		uint64_t mmb = 0;
+		uint32_t mmc = 0;
+
 		kof_engine_db_version(eng, &dv);
 		printf("database: format %u.%u build %u, %u record(s), "
 		       "%u unpacker(s), %u heur rule(s)\n",
 		       (unsigned)dv.major, (unsigned)dv.minor, dv.build,
 		       kof_engine_records(eng), kof_engine_unpackers(eng),
 		       kof_engine_heur_rules(eng));
+		/* The matcher's footprint is a design claim - bucket counts are
+		 * derived from the marker count and bounded - so it is printed
+		 * where a reader will see it rather than left to be inferred. */
+		if (kof_engine_multimatch(eng, &mmb, &mmc) == 0 && mmb)
+			printf("          multi-pattern tables %.2f MB, "
+			       "worst bucket %u marker(s)\n",
+			       (double)mmb / 1048576.0, mmc);
 	}
 
 	sc = kof_scanner_new(eng);
@@ -876,6 +901,11 @@ int main(int argc, char **argv)
 				sum.gram_bytes     += one->gram_bytes;
 				sum.gram_answers   += one->gram_answers;
 				sum.searches       += one->searches;
+				sum.multi_passes   += one->multi_passes;
+				sum.multi_hash4     += one->multi_hash4;
+				sum.multi_wumanber += one->multi_wumanber;
+				sum.multi_bytes    += one->multi_bytes;
+				sum.multi_answers    += one->multi_answers;
 				sum.heur_emu       += one->heur_emu;
 				sum.bytes_searched += one->bytes_searched;
 				if (one->peak_resident > sum.peak_resident)

@@ -54,6 +54,8 @@ typedef void (*kof_scan_fn)(const struct kof_obj_ctx *);
  * to kilobytes, and sizing every slot for the largest would have made the table
  * 131MB.
  */
+struct kof_multimatch_set;
+
 struct kof_str_ent {
 	uint32_t off;             /* into the pack's string pool */
 	uint16_t len;
@@ -263,6 +265,20 @@ struct kof_engine {
 
 	/* Patterns the whole database declares, after identical ones are merged. */
 	uint32_t             n_uid;
+
+	/*
+	 * The multi-pattern matchers, one per region mask.
+	 *
+	 * Owned here rather than by the scanner because the marker set is the
+	 * DATABASE's: built once when the packs are loaded, read-only after, and
+	 * therefore shared by every scanner thread. Building it per scanner would
+	 * duplicate a table sized by the base once per thread - the same mistake
+	 * the memo already refuses to make for the symbol block.
+	 *
+	 * NULL is not an error. It means every mask is answered the way it was
+	 * before this existed, one search per (marker, region).
+	 */
+	struct kof_multimatch_set *multi;
 
 	/*
 	 * The packs, kept mapped for their names alone.

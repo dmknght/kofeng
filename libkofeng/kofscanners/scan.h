@@ -275,6 +275,25 @@ struct kof_scanner {
 	 */
 	struct kof_match_ctx msym;
 	uint8_t   msym_bound;       /* bound to the block built for THIS object */
+
+	/*
+	 * HOW MANY MARKERS ARE LIVE ON EACH REGION, FOR THIS OBJECT.
+	 *
+	 * Refilled per object from the modules the preconditions left, and read
+	 * by the multi-pattern prepass to decide whether a region is worth one
+	 * pass. One counter per region bit - tens of bytes, not a table.
+	 *
+	 * `found` is the other half: one word per marker in the database, where
+	 * bit b says that marker was seen in region b. The sweeps fill it and
+	 * the fold reads it, which is what lets a mask naming CODE|DATA be
+	 * answered by an OR instead of a second pass over the bytes.
+	 *
+	 * NULL when the allocation failed, and that is not an error: no counts
+	 * and no record means no sweep, which is the behaviour this engine had
+	 * before there was one.
+	 */
+	uint32_t *live;
+	uint32_t *found;
 	/*
 	 * THE TWO HALVES' EXTENTS, BUILT AT MOST ONCE PER OBJECT.
 	 *

@@ -11,6 +11,7 @@
 
 #include "kofeng.h"
 #include "kofdb/kofdb.h"
+#include "kofmatchers/kofmultimatch.h"
 #include "kofscanners/scan.h"
 
 kof_engine *kof_engine_open(const char *db_path)
@@ -39,6 +40,27 @@ uint32_t kof_engine_heur_rules(const kof_engine *e)
 {
 	return e ? e->n_heur : 0;
 }
+int kof_engine_multimatch(const kof_engine *e, uint64_t *bytes,
+			  uint32_t *max_chain)
+{
+	uint32_t i, worst = 0;
+
+	if (bytes)
+		*bytes = 0;
+	if (max_chain)
+		*max_chain = 0;
+	if (!e || !e->multi)
+		return -1;
+	if (bytes)
+		*bytes = (uint64_t)e->multi->bytes;
+	for (i = 0; i < KOF_MULTIMATCH_BITS; i++)
+		if (e->multi->tab[i].max_chain > worst)
+			worst = e->multi->tab[i].max_chain;
+	if (max_chain)
+		*max_chain = worst;
+	return 0;
+}
+
 
 /*
  * A reason in words, for whoever has to read the scan.

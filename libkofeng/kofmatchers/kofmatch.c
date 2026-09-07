@@ -614,6 +614,11 @@ static int hex_search(struct kof_match_ctx *m, uint64_t off, uint64_t len,
 	}
 }
 
+int kof_hex_walk(kof_buf d, uint64_t start, const uint8_t *prog)
+{
+	return hex_walk(d, start, prog);
+}
+
 /* ---- searching ranges ----------------------------------------------------- */
 
 static int is_word_byte(uint8_t c)
