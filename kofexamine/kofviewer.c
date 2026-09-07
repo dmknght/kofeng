@@ -1247,6 +1247,19 @@ struct view {
 	/* Which top-level item's submenu is showing, -1 for none. */
 	int         bar_sub;
 
+	/*
+	 * THE MENU ASKED TO LEAVE.
+	 *
+	 * A flag and not a return value, because bar_run is reached from a
+	 * click handler that returns nothing and from a key handler that
+	 * returns "handled" - so there is no one code the two could carry, and
+	 * giving the click path a return type means threading it through
+	 * everything above it to answer one item.
+	 *
+	 * The loop reads it immediately after handle(), so nothing runs a frame
+	 * after it is set.
+	 */
+	int         quit;
 	int         bar_open;       /* which menu is down, -1 for none */
 	int         bar_sel;        /* the item under the pointer or the cursor */
 	int         help_open;      /* 0 none, 1 keyboard, 2 about */
@@ -10039,19 +10052,50 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 	 * and the word only has to say how the two halves relate.
 	 */
 	/*
-	 * WHAT IT IS, spelled by obj_label - the same function the tree pane
-	 * uses, so the two panes cannot come to different words for one row.
+	 * WHAT IT IS - and for the file itself, WHAT IT IS CALLED.
 	 *
-	 * It used to be the FILE's basename here, which made a tar read as
-	 * "paths.tar" on a row the tree called "Tar-any", and put the format
-	 * and the architecture on the end of the size row instead. The name is
-	 * not lost: it is the folder row's other half, one line below, where
-	 * the two together are the path and the button copies the join.
+	 * A CHILD is spelled by obj_label, the same function the tree pane
+	 * uses, so the two panes cannot come to different words for one row.
+	 * That was made true of the file as well, and for the file it was
+	 * wrong: the row read "ELF-x64" while the two rows under it already
+	 * said format ELF and arch x64, and the name was nowhere. The note
+	 * that used to stand here claimed the name was "the folder row's other
+	 * half" - it is not. The folder row ends at the last separator, so the
+	 * basename appeared in no row at all, only inside the copy button.
+	 *
+	 * So the file gets its basename. In the full view that is the whole
+	 * row, because format and arch have rows of their own below. On an
+	 * ENCLOSING row (full == 0) it carries the type too: those rows have no
+	 * format or arch line, which is what the note beside the size row
+	 * below is about.
 	 */
 	{
 		char id[64];
 
-		obj_label(ob, id, sizeof id);
+		if (top) {
+			/* `nm` and not `base`: there is a basedir-ish `base`
+			 * further out in this function's scope. */
+			const char *nm = kof_path_base(ob->name);
+			char what[24];
+
+			snprintf(what, sizeof what, "%s%s%s",
+				 ob->fmt ? kof_format_name(ob->ctx.format)
+					 : "raw",
+				 ob->fmt ? "-" : "",
+				 ob->fmt ? kof_arch_name(ob->ctx.arch) : "");
+			/* The cut is written into the format rather than left
+			 * to the buffer, the way obj_label writes its own: a
+			 * file name has no length limit and the row has a
+			 * column count, so a reader of the format string can
+			 * see where it stops. */
+			if (full)
+				snprintf(id, sizeof id, "%.60s", nm);
+			else
+				snprintf(id, sizeof id, "%.36s  %.18s", nm,
+					 what);
+		} else {
+			obj_label(ob, id, sizeof id);
+		}
 		if (ob->payload_of && ob->payload_sym[0])
 			prop_add(A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF
 				 A_DIM "  from " A_OFF A_ID "%s" A_OFF "%s",
@@ -11622,9 +11666,13 @@ static void bar_move_item(struct view *v, int dir)
  * decision has one home. Every reason here is the negation of the test there -
  * read them side by side when either changes.
  *
- * NULL for an item whose greyness explains itself: Save with an empty draft
- * has its own two messages below, and an item disabled because there is no
- * file open is answered by the empty screen.
+ * NULL for an item whose greyness explains itself: an item disabled because no
+ * file is open is answered by the empty screen, and a draft that is short of a
+ * matcher or a name is described by draft_missing_of where it is written out.
+ *
+ * Save is the exception, and it is why the two Save cases return NULL for every
+ * other reason: "nowhere to put it" is not a fact about the draft, so nothing
+ * the author does to the draft will explain it, and it has to be said here.
  */
 static const char *bar_why_off(struct view *v, int i)
 {
@@ -11642,9 +11690,26 @@ static const char *bar_why_off(struct view *v, int i)
 		 * told from the other: a table that was stripped and one that
 		 * was never written both arrive as no records. */
 		return "No symbols in this object - it is stripped or declares none";
-	case BI_DISASM:
-		return "Nothing to disassemble - this object has no code for "
-		       "this build to read";
+	case BI_DISASM: {
+		/*
+		 * TWO REASONS, AND ONE OF THEM WAS BEING TOLD AS THE OTHER.
+		 *
+		 * bar_enabled refuses this both for an object with no bytes to
+		 * read and for one whose machine this build cannot decode - it
+		 * says so itself, in the note about ARM. The single message
+		 * here covered both, so an AArch64 binary full of code was
+		 * told it had none. Split, because the two want different
+		 * things from the reader: one is a file with nothing in it,
+		 * the other is a gap in this build.
+		 */
+		const struct object *o = cur_obj(v);
+
+		if (!o || !o->buf.p || !v->rgn_len)
+			return "Nothing to disassemble - this object has no "
+			       "bytes in the selected region";
+		return "This build decodes x86 only - the object's machine is "
+		       "something else";
+	}
 	case BI_NEXT:
 	case BI_PREV:
 	case BI_UNPACKER:
@@ -11654,6 +11719,19 @@ static const char *bar_why_off(struct view *v, int i)
 			return "Finish or undo the draft first";
 		return NULL;
 	case BI_REBUILD:
+		/*
+		 * THREE TESTS IN bar_enabled, AND THIS ANSWERED FOR TWO.
+		 *
+		 * Rebuilding also needs the draft settled, because it examines
+		 * the file again and that throws the draft away. Grey for that
+		 * reason, the reader was told to set a database and a tree they
+		 * had already set - a message that sends somebody looking in
+		 * the wrong place is worse than no message, which is the whole
+		 * reason this function exists.
+		 */
+		if (draft_edited(&v->ed))
+			return "Finish or undo the draft first - rebuilding "
+			       "examines the file again";
 		return "Set both a database and a signature tree first";
 	default:
 		return NULL;
@@ -11674,8 +11752,19 @@ static void bar_run(struct view *v, int i)
 		 * those in dr.warn is how a reply gets written and never read.
 		 */
 		if (i == BI_SAVE || i == BI_SAVE_AS) {
-			const char *why = draft_missing(&v->ed);
+			/*
+			 * bar_why_off FIRST, and it matters which order.
+			 *
+			 * draft_missing describes the DRAFT, and until there is
+			 * a tree to write into no draft is complete enough to
+			 * change that - so asking it first answered a greyed
+			 * Save with "add a marker" on a draft that had plenty,
+			 * and the reason it was really grey was never said.
+			 */
+			const char *why = bar_why_off(v, i);
 
+			if (!why)
+				why = draft_missing(&v->ed);
 			if (why)
 				say_err(&v->ed, "%s", why);
 			else
@@ -11708,6 +11797,17 @@ static void bar_run(struct view *v, int i)
 	switch (i) {
 	case BI_SAVE:    generate(&v->ed, 0); break;
 	case BI_SAVE_AS: generate(&v->ed, 1); break;
+	/*
+	 * IT HAD NO CASE, so it fell to `default: break;` - the menu closed and
+	 * the program stayed open. That is the failure the note further down
+	 * describes for BI_FIND, and this was the other instance of it: an item
+	 * bar_enabled reports live, with nothing behind it.
+	 *
+	 * No confirmation, matching Ctrl+Q, which leaves whatever is open
+	 * without asking. Two ways out that disagree about that would be worse
+	 * than either.
+	 */
+	case BI_QUIT:    v->quit = 1; break;
 	case BI_FIND:
 		v->find_open = 1;
 		v->goto_open = 0;              /* they share the box */
@@ -16440,7 +16540,7 @@ int main(int argc, char **argv)
 
 		if (k == K_NONE)
 			break;
-		if (!handle(&v, k))
+		if (!handle(&v, k) || v.quit)
 			break;
 		/*
 		 * One frame per batch of input, not one per key.
