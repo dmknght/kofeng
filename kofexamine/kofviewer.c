@@ -3391,6 +3391,10 @@ static int save_ok(struct view *v)
 {
 	int near_miss = 0;
 
+	/* Nowhere to write is not a draft problem, and it is asked first:
+	 * every other reason below describes the draft. */
+	if (!v->ed.basedir || !v->ed.basedir[0])
+		return 0;
 	if (draft_missing_of(&v->ed, 0))
 		return 0;
 	/* A draft with a file behind it: only an actual change is worth
@@ -3405,6 +3409,8 @@ static int save_as_ok(struct view *v)
 {
 	int near_miss = 0;
 
+	if (!v->ed.basedir || !v->ed.basedir[0])
+		return 0;
 	if (draft_missing_of(&v->ed, 1) || !v->ed.dr.gen_path[0] || !draft_dirty(&v->ed))
 		return 0;
 	return !(draft_dup(&v->ed, &near_miss) && !near_miss);
@@ -9427,8 +9433,16 @@ static void prop_put(struct out *o, const char *s, int room, int sa, int sb);
 /*
  * How wide a line is on the screen, which is not how long it is in memory.
  *
- * The About lines carry their own colours, so strlen counts escape bytes the
- * terminal never draws and the box would be sized for text that is not there.
+ * Two things make those differ. The lines carry their own colours, so strlen
+ * counts escape bytes the terminal never draws. And a glyph outside ASCII is
+ * several bytes and still one column: About's bullets are three bytes each, so
+ * counting bytes measured those lines two columns too wide, page_draw sized the
+ * box from the widest line, and the lines holding a bullet were the ones whose
+ * right border came up short of the rest.
+ *
+ * Single-width glyphs only. A double-width one would need a width table, and a
+ * freestanding tool has none to consult - the glyphs this program draws are its
+ * own choice, so the restriction is on the choosing.
  */
 static int vis_cols(const char *s)
 {
@@ -9442,8 +9456,9 @@ static int vis_cols(const char *s)
 				s++;
 			continue;
 		}
+		if (((unsigned char)*s & 0xc0u) != 0x80u)
+			n++;      /* a continuation byte is already counted */
 		s++;
-		n++;
 	}
 	return n;
 }
@@ -9531,19 +9546,37 @@ static void about_build(struct view *v)
 	g_n_about = 0;
 
 	/*
-	 * Two lines, and they are the only prose here.
+	 * What it is, then what it does, then the one thing the screen behind
+	 * this box cannot say.
 	 *
-	 * The first says what the program is, in the words somebody would use
-	 * to describe it to a colleague. The second says the one thing the
-	 * screen behind this box does not: that a draft here is not a mock-up -
-	 * it goes through the builder that produces the shipped database.
+	 * The first line is how somebody would describe the program to a
+	 * colleague. The list after it is what the panes are FOR, in one line
+	 * each - a reader who has just opened the tool can see the bytes, the
+	 * disassembly and the tree, but not what any of them are offered for,
+	 * and an About that names them is shorter than finding out by clicking.
 	 *
-	 * What the panes are is on that screen already. Repeating it would turn
-	 * an About into a manual, and nobody opens this dialog to read one.
+	 * The last line is the one fact nowhere on that screen: a draft here is
+	 * not a mock-up, it goes through the builder that produces the shipped
+	 * database. It stays even though the list grew, because it is the only
+	 * claim in this box that a reader could not otherwise check.
 	 */
 	abt(A_BOLD "KOFViewer" A_OFF "  -  a TUI file examiner built on the KOF"
 	    " engine,");
 	abt("               with signature generation.");
+	abt("");
+	abt("  " A_DIM "\xe2\x80\xa2" A_OFF " a hex view of any region, with the"
+	    " strings and markers");
+	abt("    a signature would look for lit where they sit");
+	abt("  " A_DIM "\xe2\x80\xa2" A_OFF " disassembly beside it, and which"
+	    " code refers to which data");
+	abt("  " A_DIM "\xe2\x80\xa2" A_OFF " the file's structure as the engine"
+	    " parsed it - headers,");
+	abt("    sections, regions, symbols");
+	abt("  " A_DIM "\xe2\x80\xa2" A_OFF " the unpackers, so a packed or"
+	    " archived payload is examined");
+	abt("    as an object of its own");
+	abt("  " A_DIM "\xe2\x80\xa2" A_OFF " a signature generator, from marked"
+	    " bytes to compiled rule");
 	abt("");
 	abt("Signatures drafted here are compiled by the same builder that");
 	abt("produces the shipped database.");
@@ -9636,9 +9669,9 @@ static void about_build(struct view *v)
 	 * a licence file with a worse layout.
 	 */
 	abt(A_ID "Project" A_OFF);
-	abt("  " A_DIM "Author     " A_OFF " DmKnght");
-	abt("  " A_DIM "License    " A_OFF " MIT, some parts under Apache-2.0");
-	abt("  " A_DIM "Third party" A_OFF " bddisasm 3.0.1 by Bitdefender "
+	abt("  " A_DIM "Author       " A_OFF " DmKnght");
+	abt("  " A_DIM "License      " A_OFF " MIT, some parts under Apache-2.0");
+	abt("  " A_DIM "Third parties" A_OFF " bddisasm 3.0.1 by Bitdefender "
 	    A_DIM "- Apache-2.0" A_OFF);
 }
 
@@ -10511,8 +10544,9 @@ static void prop_put(struct out *o, const char *s, int room, int sa, int sb)
 			continue;
 		}
 		{
-			char t[2];
+			char t[8];
 			int want = sa >= 0 && n >= sa && n <= sb;
+			int len = 1, k;
 
 			/* The reverse is turned on and off around the run
 			 * rather than per character: the line carries its own
@@ -10522,8 +10556,29 @@ static void prop_put(struct out *o, const char *s, int room, int sa, int sb)
 				out_str(o, want ? A_SEL : A_OFF);
 				inv = want;
 			}
-			t[0] = *s++;
-			t[1] = 0;
+			/*
+			 * ONE GLYPH PER COLUMN, not one byte.
+			 *
+			 * A multi-byte glyph reached the terminal intact even
+			 * when written a byte at a time, but each byte counted
+			 * against `room` - so a line holding one was padded two
+			 * columns short and stopped before the border. The
+			 * length comes from the lead byte, and a sequence cut
+			 * off by the end of the string stops there rather than
+			 * reading past it. See vis_cols, which has to agree
+			 * with this or the box and its contents are measured
+			 * differently.
+			 */
+			if (((unsigned char)*s & 0xe0u) == 0xc0u)
+				len = 2;
+			else if (((unsigned char)*s & 0xf0u) == 0xe0u)
+				len = 3;
+			else if (((unsigned char)*s & 0xf8u) == 0xf0u)
+				len = 4;
+			for (k = 0; k < len && s[k]; k++)
+				t[k] = s[k];
+			t[k] = 0;
+			s += k;
 			out_str(o, t);
 			n++;
 		}
@@ -11574,6 +11629,14 @@ static void bar_move_item(struct view *v, int dir)
 static const char *bar_why_off(struct view *v, int i)
 {
 	switch (i) {
+	case BI_SAVE:
+	case BI_SAVE_AS:
+		/* First, because it is not about the draft: with no tree named
+		 * there is nowhere to put one however complete it is. */
+		if (!v->ed.basedir[0])
+			return "No signature tree given - start with "
+			       "--bases <dir>";
+		return NULL;
 	case BI_SYMS:
 		/* Both readings are true of the same object and neither can be
 		 * told from the other: a table that was stripped and one that
@@ -16052,7 +16115,8 @@ static void usage(void)
 	"              live in a database.\n"
 	"  --bases D   the signature source tree, which is also where a drafted\n"
 	"              signature is written. A content root or one of its kind\n"
-	"              directories both work. Default kofdraft/.\n");
+	"              directories both work. No default: without it a\n"
+	"              draft can be written but not saved.\n");
 }
 
 /*
@@ -16245,7 +16309,23 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 
 int main(int argc, char **argv)
 {
-	const char *path = NULL, *db = NULL, *base = "kofdraft";
+	/*
+	 * NO DEFAULT BASES DIRECTORY.
+	 *
+	 * It was "kofdraft", and the effect was that Save wrote a signature
+	 * into a directory it created in whatever the working directory
+	 * happened to be. Two keystrokes reach it - F10 opens the bar on the
+	 * File menu and Enter takes its first enabled item, which is Save - so
+	 * a stray Return in a terminal left a generated .c in a source tree
+	 * nobody had pointed the tool at.
+	 *
+	 * Empty rather than NULL: v.basedir is a fixed buffer and every reader
+	 * of it already tests basedir[0], so "not given" stays one convention
+	 * instead of two. With none given, Save and Save As are refused and
+	 * say why - the honest answer, because there is nowhere the author has
+	 * said to put it.
+	 */
+	const char *path = NULL, *db = NULL, *base = "";
 	uint64_t last_paint = 0;
 	struct view v;
 	struct stat st;

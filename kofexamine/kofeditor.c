@@ -1688,7 +1688,10 @@ void src_index(struct kof_editor *e)
 	g_src_done = 1;
 	g_src = calloc(SRC_MAX, sizeof *g_src);
 	if (g_src)
-		src_scan(e->basedir, 0);
+		/* Nothing to scan when no tree was named, and src_scan would
+		 * walk the working directory if handed an empty path. */
+		if (e->basedir && e->basedir[0])
+			src_scan(e->basedir, 0);
 }
 
 const char *src_of(struct kof_editor *e, const struct kof_touch *t)
@@ -3746,6 +3749,15 @@ void generate(struct kof_editor *e, int as_new)
 		char dir[300];
 		struct stat st;
 
+		if (!e->basedir || !e->basedir[0]) {
+			/* The buttons are greyed for this, but a key runs
+			 * generate too - see the note at the top of this
+			 * function about the two not being allowed to
+			 * disagree. */
+			say_err(e, "%s", "No signature tree given - start "
+				"with --bases <dir>");
+			return;
+		}
 		snprintf(dir, sizeof dir, "%s/signatures", e->basedir);
 		if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
 			snprintf(dir, sizeof dir, "%s", e->basedir);
