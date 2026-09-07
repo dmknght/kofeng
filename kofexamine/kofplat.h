@@ -45,7 +45,7 @@ static HANDLE kof_out_h(void) { return GetStdHandle(STD_OUTPUT_HANDLE); }
 static DWORD kof_saved_in_mode, kof_saved_out_mode;
 static int   kof_mode_saved;
 
-static int kof_tty_ok(void)
+static inline int kof_tty_ok(void)
 {
 	DWORD m;
 
@@ -68,7 +68,7 @@ static int kof_tty_ok(void)
  * viewer wants bytes, not lines, and wants Ctrl-C as a keystroke rather than
  * as a signal.
  */
-static int kof_tty_raw_enter(void)
+static inline int kof_tty_raw_enter(void)
 {
 	DWORD in_mode, out_mode;
 
@@ -93,7 +93,7 @@ static int kof_tty_raw_enter(void)
 	return 1;
 }
 
-static void kof_tty_raw_leave(void)
+static inline void kof_tty_raw_leave(void)
 {
 	if (!kof_mode_saved)
 		return;
@@ -109,7 +109,7 @@ static void kof_tty_raw_leave(void)
  * console is three hundred rows tall. Laying out to dwSize would draw most of
  * the screen where nobody can see it.
  */
-static int kof_tty_size(int *rows, int *cols)
+static inline int kof_tty_size(int *rows, int *cols)
 {
 	CONSOLE_SCREEN_BUFFER_INFO csbi;
 
@@ -131,7 +131,7 @@ static int kof_tty_size(int *rows, int *cols)
  */
 static int kof_seen_rows, kof_seen_cols;
 
-static int kof_tty_resize_pending(void)
+static inline int kof_tty_resize_pending(void)
 {
 	int r = 0, c = 0;
 
@@ -140,7 +140,7 @@ static int kof_tty_resize_pending(void)
 	return r != kof_seen_rows || c != kof_seen_cols;
 }
 
-static void kof_tty_resize_clear(void)
+static inline void kof_tty_resize_clear(void)
 {
 	kof_tty_size(&kof_seen_rows, &kof_seen_cols);
 }
@@ -156,7 +156,7 @@ static void kof_tty_resize_clear(void)
  * resize as a keystroke, which is the reader's job and would then be done
  * twice.
  */
-static int kof_in_ready(int ms)
+static inline int kof_in_ready(int ms)
 {
 	DWORD w = WaitForSingleObject(kof_in_h(),
 				      ms < 0 ? INFINITE : (DWORD)ms);
@@ -180,7 +180,7 @@ static int kof_in_ready(int ms)
  * different bytes than it went in. The conversion is done here, once, rather
  * than leaving the caller to discover that the round trip is lossy.
  */
-static int kof_clip_put(const char *bytes, size_t n)
+static inline int kof_clip_put(const char *bytes, size_t n)
 {
 	int wn;
 	HGLOBAL h;
@@ -217,7 +217,7 @@ static int kof_clip_put(const char *bytes, size_t n)
 	return ok;
 }
 
-static size_t kof_clip_get(char *out, size_t cap)
+static inline size_t kof_clip_get(char *out, size_t cap)
 {
 	HANDLE h;
 	const wchar_t *w;
@@ -286,7 +286,7 @@ static size_t kof_clip_get(char *out, size_t cap)
  * bInheritHandles must be TRUE and the handle made inheritable, or the child
  * gets no output at all and the log this exists to write comes back empty.
  */
-static int kof_run_to_fd(const char *dir, const char *const *argv, int fd)
+static inline int kof_run_to_fd(const char *dir, const char *const *argv, int fd)
 {
 	char cmd[4096];
 	size_t at = 0;
@@ -355,7 +355,7 @@ static int kof_run_to_fd(const char *dir, const char *const *argv, int fd)
 
 /* ---- paths ------------------------------------------------------------- */
 
-static int kof_getcwd(char *out, size_t cap)
+static inline int kof_getcwd(char *out, size_t cap)
 {
 	return _getcwd(out, (int)cap) != NULL;
 }
@@ -376,12 +376,12 @@ static int kof_getcwd(char *out, size_t cap)
 static struct termios kof_saved_tty;
 static int            kof_mode_saved;
 
-static int kof_tty_ok(void)
+static inline int kof_tty_ok(void)
 {
 	return isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
 }
 
-static int kof_tty_raw_enter(void)
+static inline int kof_tty_raw_enter(void)
 {
 	struct termios raw;
 
@@ -399,7 +399,7 @@ static int kof_tty_raw_enter(void)
 	return tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == 0;
 }
 
-static void kof_tty_raw_leave(void)
+static inline void kof_tty_raw_leave(void)
 {
 	if (!kof_mode_saved)
 		return;
@@ -407,7 +407,7 @@ static void kof_tty_raw_leave(void)
 	tcsetattr(STDIN_FILENO, TCSAFLUSH, &kof_saved_tty);
 }
 
-static int kof_tty_size(int *rows, int *cols)
+static inline int kof_tty_size(int *rows, int *cols)
 {
 	struct winsize ws;
 
@@ -421,7 +421,7 @@ static int kof_tty_size(int *rows, int *cols)
 
 static volatile sig_atomic_t kof_winch;
 
-static void kof_on_winch(int sig)
+static inline void kof_on_winch(int sig)
 {
 	(void)sig;
 	kof_winch = 1;
@@ -430,7 +430,7 @@ static void kof_on_winch(int sig)
 /* Installed here so the signal and the flag that reads it stay together.
  * Without SA_RESTART on purpose: the point is for a blocked read to come back
  * so the loop can lay the screen out again. */
-static void kof_tty_watch_size(void)
+static inline void kof_tty_watch_size(void)
 {
 	struct sigaction sa;
 
@@ -446,19 +446,19 @@ static void kof_tty_watch_size(void)
  * signal, and the draw loop is what has actually dealt with it. One function
  * that consumed would let whichever ran first hide the resize from the other.
  */
-static int kof_tty_resize_pending(void)
+static inline int kof_tty_resize_pending(void)
 {
 	return kof_winch != 0;
 }
 
-static void kof_tty_resize_clear(void)
+static inline void kof_tty_resize_clear(void)
 {
 	kof_winch = 0;
 }
 
 /* ---- input ------------------------------------------------------------- */
 
-static int kof_in_ready(int ms)
+static inline int kof_in_ready(int ms)
 {
 	struct pollfd p;
 
@@ -476,7 +476,7 @@ static int kof_in_ready(int ms)
 
 /* Run `argv` in `dir`, both output streams to `fd`, and wait. Non-zero when it
  * ran and exited zero. */
-static int kof_run_to_fd(const char *dir, const char *const *argv, int fd)
+static inline int kof_run_to_fd(const char *dir, const char *const *argv, int fd)
 {
 	pid_t pid;
 	int status = 0;
@@ -511,7 +511,7 @@ static int kof_run_to_fd(const char *dir, const char *const *argv, int fd)
 
 /* ---- paths ------------------------------------------------------------- */
 
-static int kof_getcwd(char *out, size_t cap)
+static inline int kof_getcwd(char *out, size_t cap)
 {
 	return getcwd(out, cap) != NULL;
 }
@@ -524,7 +524,7 @@ static int kof_getcwd(char *out, size_t cap)
  * better than a caller that has to know which platform it is on.
  */
 #ifdef _WIN32
-static void kof_tty_watch_size(void) { }
+static inline void kof_tty_watch_size(void) { }
 #endif
 
 #endif /* KOFENG_KOFPLAT_H */

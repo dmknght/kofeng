@@ -656,7 +656,7 @@ $(OUT)/bin/kofexamine$(EXE): $(EXAMINE_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 # The other front end onto the same layer. Two binaries from one directory, and
 # the directory is the toolchain rather than the tool: what they share is
 # kofinspect, and what differs is only how a pane and a line are drawn.
-VIEWER_SRC := kofexamine/kofviewer.c kofexamine/kofinspect.c kofexamine/kofeditor.c
+VIEWER_SRC := kofexamine/kofviewer.c kofexamine/kofview.c kofexamine/kofinspect.c kofexamine/kofeditor.c
 
 # EMU_INC because the viewer disassembles: bddisasm's definitions are already
 # inside $(LIB) - the emulator put them there - so what is missing is only the

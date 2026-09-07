@@ -68,6 +68,7 @@
 #include <kofmod/pe.h>
 
 #include "kofinspect.h"
+#include "kofview.h"
 #include "kofeditor.h"
 
 /* The disassembler the emulator already carries: the viewer links the same
@@ -81,309 +82,6 @@
 #include "../libkofeng/kofmatchers/hexprog.h"
 #include "../libkofeng/kofdb/kofpack.h"
 
-/* ---- the terminal ---------------------------------------------------------
- *
- * Raw mode, alternate screen, no cursor - and every one of them put back on the
- * way out, including the way out nobody plans for. A tool that leaves a terminal
- * in raw mode after a crash is a tool people stop running, so the restore is
- * registered before the first change is made and is idempotent.
- */
-/*
- * Everything this program puts on the terminal goes through one call.
- *
- * It used to be two - fputs for the mode changes, write for the frames - and
- * that was a real bug rather than untidiness. stdout to a terminal is line
- * buffered and a mode change carries no newline, so "turn the mouse on" sat in
- * stdio's buffer for the whole session while every frame went straight out
- * around it. The terminal was never asked to report a click, so it never did,
- * and the viewer looked like a viewer whose mouse did not work.
- *
- * It also makes the restore path correct: write is async-signal-safe and
- * fputs/fflush are not, and the restore runs from a signal handler.
- */
-static void term_write_n(const char *s, size_t n)
-{
-	size_t off = 0;
-
-	while (off < n) {
-		ssize_t k = write(STDOUT_FILENO, s + off, n - off);
-
-		if (k <= 0)
-			return;
-		off += (size_t)k;
-	}
-}
-
-static void term_write(const char *s)
-{
-	term_write_n(s, strlen(s));
-}
-
-static int             g_tty_raw;
-static int             g_rows = 24, g_cols = 80;
-
-static void term_restore(void)
-{
-	if (!g_tty_raw)
-		return;
-	g_tty_raw = 0;
-	kof_tty_raw_leave();
-	/* Cursor back, main screen back, in that order: the show has to happen
-	 * on the screen that is about to be left, or it applies to the one being
-	 * returned to and the user's shell gets it. */
-	term_write("\033[?2004l\033[?1006l\033[?1002l\033[?1000l\033[?25h\033[?1049l");
-}
-
-static void on_signal(int sig)
-{
-	term_restore();
-	/* Re-raise with the default handler so the exit status says what
-	 * happened. Exiting 0 here would tell a script the run succeeded. */
-	signal(sig, SIG_DFL);
-	raise(sig);
-}
-
-static int term_setup(void)
-{
-	if (!kof_tty_ok()) {
-		fprintf(stderr, "kofviewer: needs a terminal\n");
-		return 0;
-	}
-
-	atexit(term_restore);
-	signal(SIGINT, on_signal);
-	signal(SIGTERM, on_signal);
-	signal(SIGSEGV, on_signal);
-
-	if (!kof_tty_raw_enter())
-		return 0;
-	g_tty_raw = 1;
-	/* Alternate screen, no cursor, and SGR mouse reporting - the last so a
-	 * click can move the cursor to what it landed on. */
-	/*
-	 * Alternate screen, no cursor, and mouse reporting in three parts: 1000
-	 * for press and release, 1002 for motion WHILE a button is down, 1006
-	 * for the SGR encoding that has no coordinate ceiling.
-	 *
-	 * 1002 is what makes a drag a drag. It also takes the terminal's own
-	 * text selection away, which is the point rather than a cost: a
-	 * selection made of screen characters would span the tree pane, the
-	 * offset column and the ASCII column, and none of those are what is
-	 * being selected. Holding shift still bypasses all of this and gives
-	 * back the terminal's copy, in every terminal that implements 1006.
-	 */
-	kof_tty_watch_size();
-	/*
-	 * ?2004h is bracketed paste. Without it a paste arrives as the keys it
-	 * spells, so pasting a path into a field runs whatever those letters
-	 * are bound to; with it the run is delimited and can be put where the
-	 * caret is.
-	 */
-	term_write("\033[?1049h\033[?25l\033[?1000h\033[?1002h\033[?1006h"
-		   "\033[?2004h");
-	return 1;
-}
-
-static void term_size(void)
-{
-	int r = 0, c = 0;
-
-	if (kof_tty_size(&r, &c)) {
-		g_rows = r;
-		g_cols = c;
-	}
-	if (g_rows < 12)
-		g_rows = 12;
-	if (g_cols < 60)
-		g_cols = 60;
-}
-
-/* ---- drawing --------------------------------------------------------------
- *
- * One frame is built into a buffer and written with one call. Not for speed:
- * writing a screen in fifty pieces makes a resize or a slow link show the frame
- * being assembled, and the flicker looks like a bug in the tool.
- */
-struct out {
-	char  *p;
-	size_t n, cap;
-	/* Printable columns emitted since the last row_start, so a caller
-	 * laying out a line can record where its pieces landed. Escapes do not
-	 * count; nothing here needs more than that. */
-	size_t col_hint;
-	/*
-	 * And WHERE that row began, which col_hint alone cannot say.
-	 *
-	 * col_hint counts from the last positioning, not from column one, so
-	 * "1 + col_hint" is only the real column when the row started at column
-	 * one. The find dialog starts its rows at column three, and its click
-	 * boxes were two columns left of the text they name for as long as they
-	 * were written that way; they are "col_base + col_hint" now, and so is
-	 * the Go to box. A field that wants to turn a click into a caret cannot
-	 * be wrong by two, so the base is recorded rather than assumed - and
-	 * anything laying out a row records its boxes from it, never from 1.
-	 */
-	int   row_hint, col_base;
-};
-
-static void out_add(struct out *o, const char *s, size_t n)
-{
-	if (o->n + n + 1 > o->cap) {
-		size_t want = o->cap ? o->cap * 2 : 8192;
-
-		while (want < o->n + n + 1)
-			want *= 2;
-		o->p = realloc(o->p, want);
-		if (!o->p)
-			exit(1);
-		o->cap = want;
-	}
-	memcpy(o->p + o->n, s, n);
-	o->n += n;
-}
-
-static void out_str(struct out *o, const char *s)
-{
-	const char *p;
-
-	out_add(o, s, strlen(s));
-	for (p = s; *p; p++) {
-		if (*p == '\033') {
-			while (*p && *p != 'm' && *p != 'H' && *p != 'K')
-				p++;
-			if (!*p)
-				break;
-			continue;
-		}
-		o->col_hint++;
-	}
-}
-
-/*
- * One GLYPH: several bytes, one column.
- *
- * out_str counts col_hint per byte, which is right for ASCII and wrong for
- * anything else - a three byte box character would advance the column count by
- * three and every width and click box computed from it after that would be out.
- * The scrollbar gets away with out_str because it writes one glyph and then
- * repositions; a border cannot.
- */
-static void out_glyph(struct out *o, const char *g)
-{
-	out_add(o, g, strlen(g));
-	o->col_hint++;
-}
-
-/*
- * THE ONLY CHARACTERS THIS PROGRAM PRINTS THAT ARE NOT PLAIN ASCII.
- *
- * Everything else is: every byte taken from the file being read is clamped to
- * 0x20..0x7e before it reaches the screen, and the panes are already divided
- * with '|' and '-'. So this block is the whole of the question "what does this
- * look like on a terminal that is not the one it was written on".
- *
- * On Windows it is not the same question. A console has a CODE PAGE, and the
- * default on this machine is 437: the three bytes of U+2502 are not one
- * character there, they are three - the console draws them as "Γöé", and the
- * scrollbar comes out as a column of that. Neither half of that is
- * survivable: the glyphs are wrong AND each one is three columns wide where
- * the layout was told it is one, so the frame after it is out of place too.
- *
- * ASCII rather than the code page's own box drawing characters (CP437 has a
- * real U+2502 at byte 0xb3), because that would only move the assumption: 0xb3
- * is a box character on 437, a superscript three on 1252, and nothing at all
- * on 65001. The low 128 are the same in every one of them, which is the only
- * guarantee available here, and a frame drawn in '|' and '-' is legible on a
- * console with any code page and any font - which is more than can be said for
- * a frame drawn in the right characters on the wrong one.
- *
- * The alternative was SetConsoleOutputCP(CP_UTF8) at startup, which keeps the
- * rounded corners. It is one line and it is not taken here: it changes a
- * setting that outlives the program on a console it does not own, legacy
- * conhost has never been reliable about it, and the failure mode when it does
- * not take is the mess above rather than a plainer box.
- */
-#if defined(_WIN32)
-#define G_TL "+"
-#define G_TR "+"
-#define G_BL "+"
-#define G_BR "+"
-#define G_H  "-"
-#define G_V  "|"
-#else
-/* Light box drawing, rounded at the corners, to match the scrollbar's U+2502
- * rather than a row of ASCII dashes. */
-#define G_TL "\xe2\x95\xad"     /* U+256D */
-#define G_TR "\xe2\x95\xae"     /* U+256E */
-#define G_BL "\xe2\x95\xb0"     /* U+2570 */
-#define G_BR "\xe2\x95\xaf"     /* U+256F */
-#define G_H  "\xe2\x94\x80"     /* U+2500 */
-#define G_V  "\xe2\x94\x82"     /* U+2502 - the scrollbar's own */
-#endif
-
-static void out_fmt(struct out *o, const char *fmt, ...)
-	__attribute__((format(printf, 2, 3)));
-
-static void out_fmt(struct out *o, const char *fmt, ...)
-{
-	char t[1024];
-	va_list ap;
-	int n;
-
-	va_start(ap, fmt);
-	n = vsnprintf(t, sizeof t, fmt, ap);
-	va_end(ap);
-	if (n > 0) {
-		size_t keep = (size_t)n < sizeof t ? (size_t)n : sizeof t - 1;
-
-		t[keep] = 0;
-		out_str(o, t);
-	}
-}
-
-static void out_at(struct out *o, int row, int col)
-{
-	out_fmt(o, "\033[%d;%dH", row, col);
-	o->row_hint = row;
-	o->col_base = col;
-}
-
-#define A_OFF   "\033[0m"
-#define A_BOLD  "\033[1m"
-#define A_DIM   "\033[90m"
-#define A_ID    "\033[34m"
-#define A_LOC   "\033[36m"
-#define A_SIZE  "\033[32m"
-#define A_BAD   "\033[31m"
-#define A_WARN  "\033[33m"
-/*
- * MAGENTA FOR A HEURISTIC, the colour the scanner has used for one since it had
- * colour at all.
- *
- * The three verdicts were painted in two here: anything that fired came out
- * red, so a structural guess and a named family looked alike on the one screen
- * where the difference is the point. A reader moving between the two tools
- * should not have to learn a second scheme.
- */
-#define A_HEUR  "\033[35m"
-/*
- * AND and OR, told apart by colour.
- *
- * Both were A_WARN, so a condition read as one yellow word between blue ids and
- * the reader had to actually read it to know whether the rule was narrowing or
- * widening - which is the single most consequential thing on the row. AND is
- * cyan because it TIGHTENS (every id must be present); OR keeps the yellow it
- * had, because widening is the one that costs false positives and yellow is
- * what this panel already uses for "worth a second look".
- *
- * Named rather than written as escapes at the two sites: the operator inside a
- * condition and the join to the next one are drawn in different functions with
- * opposite polarity (`op` is 0-and-1-or, `join` is 0-or-1-and), and the pair
- * only stays consistent if the colour is chosen by the WORD, not by the field.
- */
-#define A_AND   "\033[36m"
-#define A_OR    "\033[33m"
-#define A_SEL   "\033[7m"
 
 /*
  * Byte classes, the way a modern hex dumper colours them.
@@ -1536,14 +1234,14 @@ struct view {
 	int         bar_sel;        /* the item under the pointer or the cursor */
 	int         help_open;      /* 0 none, 1 keyboard, 2 about */
 	/*
-	 * About scrolls, so it needs an offset - and it needs somewhere to
-	 * record where its Close button landed, because a click arrives as a
-	 * screen position and nothing else knows the box's geometry once
-	 * draw_help has returned. Set while drawing, read while clicking; the
-	 * same shape the menu bar's hit test already has.
+	 * Both help dialogs scroll, and both need somewhere to record where
+	 * their Close button landed - a click arrives as a screen position and
+	 * nothing else knows the box's geometry once draw_help has returned.
+	 * Set while drawing, read while clicking; the same shape the menu bar's
+	 * hit test already has.
 	 */
-	int         about_off;
-	int         about_btn_y, about_btn_x0, about_btn_x1;
+	int         help_off;
+	int         help_btn_y, help_btn_x0, help_btn_x1;
 	int         prop_open;      /* the properties page is up */
 	uint32_t    prop_off;       /* the first of its lines on screen */
 	int         prop_x0, prop_x1, prop_y;   /* its close control */
@@ -1571,8 +1269,6 @@ struct view {
 	 * Columns index the line's PLAIN text - what prop_plain produces - so the
 	 * range means the same thing to the painter and to the copier.
 	 */
-	int32_t     prop_sel_row;               /* -1 when nothing is selected */
-	int32_t     prop_sel_a, prop_sel_b;     /* inclusive, may be reversed */
 	/*
 	 * Where the mouse went DOWN, which is not where the selection starts.
 	 *
@@ -1582,8 +1278,6 @@ struct view {
 	 * pulling back over the word does nothing until the pointer passes its
 	 * far edge, which is what made dragging feel broken.
 	 */
-	int32_t     prop_anchor;
-	int         prop_dragging;
 	/*
 	 * What is being searched for, and where it was last found.
 	 *
@@ -7630,43 +7324,77 @@ static int menu_enabled(struct view *v, int a)
 	return 0;
 }
 
+/*
+ * The context menu as kv_menu sees it.
+ *
+ * Built per call rather than kept: every field is a function pointer into this
+ * file and the only state is `v`, so a cached one would be a struct that has to
+ * be invalidated for no saving at all.
+ */
+static int cm_shown(void *ud, int i)   { return menu_shown((struct view *)ud, i); }
+static int cm_enabled(void *ud, int i) { return menu_enabled((struct view *)ud, i); }
+static const char *cm_label(void *ud, int i)
+{
+	(void)ud;
+	return menu_item[i].label;
+}
+
+/*
+ * A rule where the group changes - but only counting rows that are SHOWN.
+ *
+ * The previous item in the table may be hidden, in which case the group it
+ * belongs to is not on the screen and a rule marking the change would be a
+ * rule between two rows of the same group.
+ */
+static int cm_rule(void *ud, int i)
+{
+	struct view *v = ud;
+	int k;
+
+	for (k = i - 1; k >= 0; k--) {
+		if (!menu_shown(v, k))
+			continue;
+		return menu_item[k].group != menu_item[i].group;
+	}
+	return 0;               /* the first shown row needs no rule above it */
+}
+
+static struct kv_menu ctx_menu(struct view *v)
+{
+	struct kv_menu m;
+
+	memset(&m, 0, sizeof m);
+	m.n = M_COUNT;
+	m.ud = v;
+	m.shown = cm_shown;
+	m.enabled = cm_enabled;
+	m.rule_above = cm_rule;
+	m.label = cm_label;
+	m.w = MENU_W;
+	m.c_on  = "\033[47;30m";
+	m.c_off = "\033[47;90m";
+	m.c_cur = A_SEL;
+	return m;
+}
+
 /* Rows including the rules between groups, which take a line each. */
 static int menu_rows(struct view *v)
 {
-	int i, n = 0, last = -1;
+	struct kv_menu m = ctx_menu(v);
 
-	for (i = 0; i < M_COUNT; i++) {
-		if (!menu_shown(v, i))
-			continue;
-		if (last >= 0 && menu_item[i].group != last)
-			n++;
-		last = menu_item[i].group;
-		n++;
-	}
-	return n;
+	return kv_menu_rows(&m);
 }
 
 /* The action on a drawn row, or -1 for a rule or past the end. */
 static int menu_at_row(struct view *v, int row)
 {
-	int i, n = 0, last = -1;
+	struct kv_menu m = ctx_menu(v);
 
-	for (i = 0; i < M_COUNT; i++) {
-		if (!menu_shown(v, i))
-			continue;
-		if (last >= 0 && menu_item[i].group != last)
-			n++;
-		last = menu_item[i].group;
-		if (n++ == row)
-			return i;
-	}
-	return -1;
+	return kv_menu_at_row(&m, row);
 }
 
 static void menu_open_at(struct view *v, int row, int col)
 {
-	int i;
-
 	v->menu_open = 1;
 	v->menu_row = row;
 	v->menu_col = col;
@@ -7680,75 +7408,26 @@ static void menu_open_at(struct view *v, int row, int col)
 		v->menu_col = 1;
 
 	/* Open on something choosable, so Enter always does what is highlighted. */
-	v->menu_sel = 0;
-	for (i = 0; i < M_COUNT; i++)
-		if (menu_enabled(v, i)) {
-			v->menu_sel = i;
-			break;
-		}
+	{
+		struct kv_menu m = ctx_menu(v);
+
+		v->menu_sel = kv_menu_first(&m);
+	}
 }
 
 static void menu_step(struct view *v, int d)
 {
-	int i, k = v->menu_sel;
+	struct kv_menu m = ctx_menu(v);
 
-	for (i = 0; i < M_COUNT; i++) {
-		k += d;
-		if (k < 0 || k >= M_COUNT)
-			return;
-		if (menu_enabled(v, k)) {
-			v->menu_sel = k;
-			return;
-		}
-	}
+	v->menu_sel = kv_menu_step(&m, v->menu_sel, d);
 }
 
 
 static void draw_menu(struct out *o, struct view *v)
 {
-	int i, r = 0, last = -1;
+	struct kv_menu m = ctx_menu(v);
 
-	for (i = 0; i < M_COUNT; i++) {
-		int on;
-
-		if (!menu_shown(v, i))
-			continue;
-		/* A rule where the kind of action changes: taking bytes out,
-		 * turning bytes into a declaration, and going somewhere are
-		 * three different intentions and the eye should not have to
-		 * read the labels to see that. */
-		if (last >= 0 && menu_item[i].group != last) {
-			int k;
-
-			out_at(o, v->menu_row + r++, v->menu_col);
-			out_str(o, "\033[47;90m");
-			/* One short of MENU_W: an item is a leading space plus
-			 * MENU_W - 2 of label, so the rule has to be the same
-			 * width or it steps out past the menu it divides. */
-			for (k = 0; k < MENU_W - 1; k++)
-				out_str(o, "-");
-			out_str(o, A_OFF);
-		}
-		last = menu_item[i].group;
-		on = menu_enabled(v, i);
-		out_at(o, v->menu_row + r++, v->menu_col);
-		/*
-		 * Disabled keeps the menu's background and loses contrast, it
-		 * does not lose the text. It was 100;90 - bright black on
-		 * bright black - which is the same colour twice, so the items
-		 * were there and unreadable. A disabled item still has to say
-		 * what it would do; that is the whole reason it is shown.
-		 */
-		if (i == v->menu_sel && on)
-			out_str(o, A_SEL);
-		else if (!on)
-			out_str(o, "\033[47;90m");
-		else
-			out_str(o, "\033[47;30m");
-		out_fmt(o, " %-*.*s", MENU_W - 2, MENU_W - 2,
-			menu_item[i].label);
-		out_str(o, A_OFF);
-	}
+	kv_menu_draw(o, &m, v->menu_row, v->menu_col, v->menu_sel, -1);
 }
 
 /*
@@ -8512,8 +8191,37 @@ struct prop_line {
 	char text[PROP_W];
 };
 
+/*
+ * A page of lines in a box - the shape three dialogs share. Declared here with
+ * prop_line because both are the vocabulary of that shared renderer; the
+ * renderer itself is defined beside the properties page, which is where its
+ * dependencies live.
+ */
+struct page {
+	const char       *title;
+	struct prop_line *line;
+	uint32_t          n;
+	uint32_t         *off;          /* the caller's scroll; clamped by the draw */
+	int               full;         /* fill the screen, or fit the text */
+	int               close;        /* draw a close control */
+	int               record;       /* record rows for selection and copy */
+	const char       *foot;         /* bottom-rule hint, or NULL */
+
+	/* Written while drawing, read while clicking. */
+	int               btn_y, btn_x0, btn_x1;
+	int               top, left, w, h;
+	uint32_t          shown;
+};
+
+static void page_draw(struct out *o, struct view *v, struct page *p);
+
 
 static void draw_prop(struct out *o, struct view *v);
+/* Defined with the rest of the dialog selection layer, below - the properties
+ * page draws before it and records into it. */
+static void dlg_rec_begin(struct view *v, int y0, int x0);
+static void dlg_rec_text(struct view *v, const char *plain);
+static void dlg_paint_sel(struct out *o, struct view *v);
 /* Used by prop_build to measure a row it has just written - see prop_cp_row. */
 static uint32_t prop_plain(const char *s, char *out, uint32_t cap);
 
@@ -9432,9 +9140,62 @@ static int bar_col(int m)
 	return c;
 }
 
+/*
+ * The menu bar's drop-down and its submenu, as kv_menu sees them.
+ *
+ * Two descriptors over one table: `shown` is what distinguishes them, because a
+ * drop-down holds the items of one menu that have no parent and a submenu holds
+ * the children of one of those. Everything after that - where the rows land,
+ * which one a click hit, how a greyed one is drawn - is the same question and
+ * is now answered in one place.
+ */
+static int bm_shown_top(void *ud, int i)
+{
+	struct view *v = ud;
+
+	return bar_item[i].menu == v->bar_open && bar_item[i].parent < 0 &&
+	       bar_shown(v, i);
+}
+
+static int bm_shown_sub(void *ud, int i)
+{
+	struct view *v = ud;
+
+	return bar_item[i].parent == v->bar_sub && bar_shown(v, i);
+}
+
+static int bm_enabled(void *ud, int i) { return bar_enabled((struct view *)ud, i); }
+static int bm_rule(void *ud, int i)    { return bar_gap((struct view *)ud, i); }
+static int bm_sub(void *ud, int i)     { (void)ud; return bar_has_sub(i); }
+static const char *bm_label(void *ud, int i)
+{
+	return bar_label((struct view *)ud, i);
+}
+
+static struct kv_menu bar_menu(struct view *v, int sub)
+{
+	struct kv_menu m;
+
+	memset(&m, 0, sizeof m);
+	m.n = BI_COUNT;
+	m.ud = v;
+	m.shown = sub ? bm_shown_sub : bm_shown_top;
+	m.enabled = bm_enabled;
+	/* A submenu is one group by construction - it is the children of one
+	 * item - so it never draws a rule, and it never opens another. */
+	m.rule_above = sub ? NULL : bm_rule;
+	m.has_sub = sub ? NULL : bm_sub;
+	m.label = bm_label;
+	m.w = BAR_W;
+	m.c_on  = BAR_ON;
+	m.c_off = BAR_OFF;
+	m.c_cur = BAR_CUR;
+	return m;
+}
+
 static void draw_bar(struct out *o, struct view *v)
 {
-	int m, i, y, bar_sub_row = 0;
+	int m, i;
 
 	row_start(o, 1, 1);
 	out_str(o, A_HEAD " ");
@@ -9454,61 +9215,20 @@ static void draw_bar(struct out *o, struct view *v)
 		return;
 
 	/* The drop-down, drawn over whatever is under it. */
-	y = 2;
-	for (i = 0; i < BI_COUNT; i++) {
+	{
+		struct kv_menu top = bar_menu(v, 0);
 		int col = bar_col(v->bar_open);
 
-		if (bar_item[i].menu != v->bar_open || bar_item[i].parent >= 0 ||
-		    !bar_shown(v, i))
-			continue;
-		if (bar_gap(v, i)) {
-			int k;
+		kv_menu_draw(o, &top, 2, col, v->bar_sel, v->bar_sub);
 
-			/* On the panel's own background, so the break reads as
-			 * part of the menu rather than a line drawn over it. */
-			out_at(o, y, col);
-			out_str(o, BAR_ON " ");
-			for (k = 0; k < BAR_W - 2; k++)
-				out_glyph(o, G_H);
-			out_str(o, " " A_OFF);
-			y++;
-		}
-		out_at(o, y, col);
-		if (i == v->bar_sel || i == v->bar_sub)
-			out_str(o, BAR_CUR);
-		else if (!bar_enabled(v, i))
-			out_str(o, BAR_OFF);
-		else
-			out_str(o, BAR_ON);
-		/*
-		 * An item that opens something says so. Without the marker the
-		 * two kinds of entry are indistinguishable until one is
-		 * pressed, and one of them appears to do nothing.
-		 */
-		if (bar_has_sub(i))
-			out_fmt(o, " %-*s>", BAR_W - 2, bar_label(v, i));
-		else
-			out_fmt(o, " %-*s", BAR_W - 1, bar_label(v, i));
-		out_str(o, A_OFF);
-		if (i == v->bar_sub)
-			bar_sub_row = y;
-		y++;
-	}
+		/* The open submenu, beside its parent rather than over it. */
+		if (v->bar_sub >= 0) {
+			struct kv_menu sub = bar_menu(v, 1);
+			int r = kv_menu_row_of(&top, v->bar_sub);
 
-	/* The open submenu, beside its parent rather than over it. */
-	if (v->bar_sub >= 0 && bar_sub_row > 0) {
-		int col = bar_col(v->bar_open) + BAR_W;
-
-		y = bar_sub_row;
-		for (i = 0; i < BI_COUNT; i++) {
-			if (bar_item[i].parent != v->bar_sub || !bar_shown(v, i))
-				continue;
-			out_at(o, y, col);
-			out_str(o, i == v->bar_sel ? BAR_CUR
-				   : bar_enabled(v, i) ? BAR_ON : BAR_OFF);
-			out_fmt(o, " %-*s", BAR_W - 1, bar_label(v, i));
-			out_str(o, A_OFF);
-			y++;
+			if (r >= 0)
+				kv_menu_draw(o, &sub, 2 + r, col + BAR_W,
+					     v->bar_sel, -1);
 		}
 	}
 }
@@ -9523,45 +9243,22 @@ static void draw_bar(struct out *o, struct view *v)
  */
 static int bar_item_at(struct view *v, int row, int col)
 {
-	int y = 2, i, c0 = bar_col(v->bar_open), sub_row = 0;
+	struct kv_menu top = bar_menu(v, 0);
+	int c0 = bar_col(v->bar_open);
 
-	for (i = 0; i < BI_COUNT; i++) {
-		if (bar_item[i].menu != v->bar_open || bar_item[i].parent >= 0 ||
-		    !bar_shown(v, i))
-			continue;
-		y += bar_gap(v, i);
-		if (i == v->bar_sub)
-			sub_row = y;
-		y++;
-	}
-	if (v->bar_sub >= 0 && sub_row > 0 &&
-	    col >= c0 + BAR_W && col < c0 + 2 * BAR_W) {
-		y = sub_row;
-		for (i = 0; i < BI_COUNT; i++) {
-			if (bar_item[i].parent != v->bar_sub || !bar_shown(v, i))
-				continue;
-			if (row == y)
-				return i;
-			y++;
-		}
-		return -1;
+	/* The submenu column first: it is drawn over what would otherwise be
+	 * empty screen beside the drop-down, so a click there is its click. */
+	if (v->bar_sub >= 0 && col >= c0 + BAR_W && col < c0 + 2 * BAR_W) {
+		struct kv_menu sub = bar_menu(v, 1);
+		int r = kv_menu_row_of(&top, v->bar_sub);
+
+		return r < 0 ? -1 : kv_menu_at_row(&sub, row - (2 + r));
 	}
 	if (col < c0 || col >= c0 + BAR_W)
 		return -1;
-	y = 2;
-	for (i = 0; i < BI_COUNT; i++) {
-		if (bar_item[i].menu != v->bar_open || bar_item[i].parent >= 0 ||
-		    !bar_shown(v, i))
-			continue;
-		/* The rule's own row belongs to nothing: a click on it must not
-		 * land on the item under it, which is what skipping the row
-		 * without testing it achieves. */
-		y += bar_gap(v, i);
-		if (row == y)
-			return i;
-		y++;
-	}
-	return -1;
+	/* A rule's own row belongs to nothing, which kv_menu_at_row answers
+	 * with -1 rather than with the item under it. */
+	return kv_menu_at_row(&top, row - 2);
 }
 
 
@@ -9633,7 +9330,7 @@ static int fmt_group(uint8_t f)
 #define ABOUT_MAX  40
 #define ABOUT_W    200
 
-static char     g_about[ABOUT_MAX][ABOUT_W];
+static struct prop_line g_about[ABOUT_MAX];
 static uint32_t g_n_about;
 
 static void abt(const char *fmt, ...)
@@ -9643,7 +9340,7 @@ static void abt(const char *fmt, ...)
 	if (g_n_about >= ABOUT_MAX)
 		return;
 	va_start(ap, fmt);
-	vsnprintf(g_about[g_n_about], ABOUT_W, fmt, ap);
+	vsnprintf(g_about[g_n_about].text, ABOUT_W, fmt, ap);
 	va_end(ap);
 	g_n_about++;
 }
@@ -9788,7 +9485,15 @@ static void about_build(struct view *v)
 	    A_DIM "- Apache-2.0" A_OFF);
 }
 
-/* The two Help dialogs. Drawn like the find box: content, then the frame. */
+/*
+ * The two Help dialogs, over the same page renderer the properties page uses.
+ *
+ * They differ from it in three flags and in what they list. That was not true a
+ * short while ago: About had its own box, its own scroll clamp, its own close
+ * button and its own idea of what a click on one meant, and got the last of
+ * those wrong on the first attempt because it was the second copy of code that
+ * already worked elsewhere.
+ */
 static void draw_help(struct out *o, struct view *v)
 {
 	/*
@@ -9817,118 +9522,45 @@ static void draw_help(struct out *o, struct view *v)
 		"Ctrl+]     previous file",   "Ctrl+\\     next file",
 		"Tab        next pane",       "m          the marker list"
 	};
-	const char *const *line;
-	int n, w = 60, h, top, left, y, i, rows, maxrows;
+	static struct prop_line g_keys[sizeof keys / sizeof keys[0]];
+	struct page pg;
+	uint32_t i;
 
-	if (v->help_open == 2)
+	/*
+	 * ONE STANDARD, BOTH DIALOGS.
+	 *
+	 * Keyboard used to close on any key and any click, which was defensible
+	 * while it was a fixed cheat sheet drawn by its own code. It is neither
+	 * now: it scrolls when the terminal is short, and it is drawn by the
+	 * same renderer as everything else. A box that answers the wheel and
+	 * also vanishes on the click that starts a drag cannot be read to the
+	 * end - so it closes the way every other box here closes.
+	 */
+	memset(&pg, 0, sizeof pg);
+	if (v->help_open == 1) {
+		for (i = 0; i < sizeof keys / sizeof keys[0]; i++)
+			snprintf(g_keys[i].text, PROP_W, "%s", keys[i]);
+		pg.title = "Keyboard";
+		pg.line = g_keys;
+		pg.n = (uint32_t)(sizeof keys / sizeof keys[0]);
+		pg.off = (uint32_t *)&v->help_off;
+		pg.close = 1;
+		pg.record = 1;
+		pg.foot = " Esc closes ";
+	} else {
 		about_build(v);
-	line = v->help_open == 1 ? keys : NULL;
-	n = v->help_open == 1 ? (int)(sizeof keys / sizeof keys[0])
-			      : (int)g_n_about;
-
-	/*
-	 * THE BOX FITS THE TEXT, not the other way round.
-	 *
-	 * It was a fixed sixty columns, which was wide enough for prose and cut
-	 * the format list in half the moment About started reporting facts
-	 * instead of describing itself - and a truncated list of what the engine
-	 * can read is worse than none, because it reads as a complete one.
-	 *
-	 * Still bounded by the terminal: a line longer than the screen is drawn
-	 * short rather than drawn outside it. What no longer follows from that
-	 * is the HEIGHT - a box taller than the terminal used to be drawn off
-	 * the bottom, so About scrolls instead.
-	 */
-	for (i = 0; i < n; i++) {
-		int len = (line ? (int)strlen(line[i]) : vis_cols(g_about[i])) + 4;
-
-		if (len > w)
-			w = len;
+		pg.title = "About";
+		pg.line = g_about;
+		pg.n = g_n_about;
+		pg.off = (uint32_t *)&v->help_off;
+		pg.close = 1;
+		pg.record = 1;
+		pg.foot = " Esc closes ";
 	}
-	if (w > g_cols - 4)
-		w = g_cols - 4;
-
-	maxrows = g_rows - 8;
-	if (maxrows < 3)
-		maxrows = 3;
-	rows = n > maxrows ? maxrows : n;
-	if (v->about_off > n - rows)
-		v->about_off = n - rows;
-	if (v->about_off < 0)
-		v->about_off = 0;
-	if (v->help_open == 1)
-		v->about_off = 0;
-
-	h = rows + 4;
-	top = (g_rows - h) / 2;
-	if (top < 2)
-		top = 2;
-	left = (g_cols - w) / 2;
-	if (left < 2)
-		left = 2;
-
-	for (y = top; y < top + h; y++) {
-		out_at(o, y, left);
-		out_str(o, A_DIM);
-		if (y == top || y == top + h - 1) {
-			out_str(o, "+");
-			for (i = 1; i < w - 1; i++)
-				out_str(o, "-");
-			out_str(o, "+" A_OFF);
-			continue;
-		}
-		out_str(o, "|");
-		for (i = 1; i < w - 1; i++)
-			out_str(o, " ");
-		out_str(o, "|" A_OFF);
-	}
-	/*
-	 * THE BUTTON SITS ON THE TOP BORDER, at the right.
-	 *
-	 * Where a window's close control is everywhere else, and where the eye
-	 * goes first on a box that may be scrolled: at the bottom it moved with
-	 * nothing but was still the last thing read, which is the wrong order
-	 * for the one control the dialog has.
-	 */
-	v->about_btn_y = -1;
-	if (v->help_open == 2) {
-		const char *b = " Close ";
-		int bw = (int)strlen(b);
-
-		v->about_btn_y = top;
-		v->about_btn_x0 = left + w - 2 - bw;
-		v->about_btn_x1 = v->about_btn_x0 + bw - 1;
-		out_at(o, v->about_btn_y, v->about_btn_x0);
-		out_fmt(o, A_SEL "%s" A_OFF, b);
-	}
-	out_at(o, top + 1, left + 2);
-	out_fmt(o, A_ID "%s" A_OFF, v->help_open == 1 ? "Keyboard" : "About");
-	/* How far down a scrolled page is, beside its title rather than at the
-	 * bottom: the bottom row is the button's, and a reader looking for
-	 * "am I at the end" looks where the title is. */
-	if (rows < n)
-		out_fmt(o, A_DIM "   %d-%d of %d" A_OFF, v->about_off + 1,
-			v->about_off + rows, n);
-	for (i = 0; i < rows; i++) {
-		out_at(o, top + 3 + i, left + 2);
-		if (line) {
-			out_fmt(o, A_DIM "%-.*s" A_OFF, w - 4, line[i]);
-		} else {
-			out_str(o, A_OFF);
-			prop_put(o, g_about[v->about_off + i], w - 4, -1, -1);
-			out_str(o, A_OFF);
-		}
-	}
-
-	/*
-	 * About no longer closes on any key or any click, because it scrolls: a
-	 * page that answers the wheel and also vanishes on the click that starts
-	 * a drag is a page nobody can read to the end. So the bottom border says
-	 * what the keyboard does, and the button above says what the mouse does.
-	 */
-	out_at(o, top + h - 1, left + 2);
-	out_fmt(o, A_DIM "%s" A_OFF,
-		v->help_open == 1 ? " press any key " : " Esc closes ");
+	page_draw(o, v, &pg);
+	v->help_btn_y = pg.btn_y;
+	v->help_btn_x0 = pg.btn_x0;
+	v->help_btn_x1 = pg.btn_x1;
 }
 
 /* ---- the properties page --------------------------------------------------------
@@ -10675,10 +10307,6 @@ no_regions:
  * "0x400270" has no colon, but a name might, and splitting a name is worse than
  * making somebody drag.
  */
-static int prop_break(char c)
-{
-	return c == ' ' || c == '\t' || c == '=' || c == ',';
-}
 
 static uint32_t prop_plain(const char *s, char *out, uint32_t cap)
 {
@@ -10761,74 +10389,158 @@ static void prop_put(struct out *o, const char *s, int room, int sa, int sb)
  * of the page: a row spent telling you which keys work is a row not spent on
  * the file, and it says the same thing every time you open it.
  */
-static void draw_prop(struct out *o, struct view *v)
+/*
+ * A PAGE OF LINES IN A BOX - the last thing three dialogs were each doing on
+ * their own.
+ *
+ * The properties page, About and Keyboard differ in what they list and in
+ * whether the box fills the screen; everything else was written three times.
+ * Where the border goes, how the scroll is clamped to what fits, where the
+ * close control lands and what a click on it has to compare against, and - for
+ * the two that record - which rows the selection layer was told about.
+ *
+ * It is not in kofview.c with the terminal because the recording lives on the
+ * view: dlg_rec_* is how every dialog in this file becomes selectable, and a
+ * page that could not record would be a page that copies differently from the
+ * symbol table beside it.
+ *
+ * The caller owns the lines and the offset. This clamps the offset, because
+ * how far a page can scroll is a fact about the box and the caller does not
+ * know the box until this has drawn it.
+ */
+static void page_draw(struct out *o, struct view *v, struct page *p)
 {
-	int top = 2, left = 2, w = g_cols - 4, h = g_rows - 3, y, i;
-	int room, inner;
-	uint32_t shown;
-	char pos[48];
 	static const char close[] = "[ Close ]";
+	int room, inner, y, i;
+	uint32_t k;
+	char pos[48];
 
-	if (w < 30 || h < 6)
-		return;
-	prop_build(v);
-	room = h - 2;
+	p->btn_y = -1;
+	if (p->full) {
+		p->top = 2;
+		p->left = 2;
+		p->w = g_cols - 4;
+		p->h = g_rows - 3;
+	} else {
+		int maxrows = g_rows - 8, want;
+
+		if (maxrows < 3)
+			maxrows = 3;
+		p->w = 60;
+		for (k = 0; k < p->n; k++) {
+			int len = vis_cols(p->line[k].text) + 4;
+
+			if (len > p->w)
+				p->w = len;
+		}
+		if (p->w > g_cols - 4)
+			p->w = g_cols - 4;
+		want = (int)p->n > maxrows ? maxrows : (int)p->n;
+		p->h = want + 4;
+		p->top = (g_rows - p->h) / 2;
+		p->left = (g_cols - p->w) / 2;
+		if (p->top < 2)
+			p->top = 2;
+		if (p->left < 2)
+			p->left = 2;
+	}
+	if (p->w < 30 || p->h < 6)
+		return;                 /* no room to draw a box honestly */
+
+	room = p->full ? p->h - 2 : p->h - 4;
 	if (room < 1)
 		room = 1;
-	inner = w - 4;
-	if (g_n_prop > (uint32_t)room) {
-		if (v->prop_off > g_n_prop - (uint32_t)room)
-			v->prop_off = g_n_prop - (uint32_t)room;
+	inner = p->w - 4;
+	if (p->n > (uint32_t)room) {
+		if (*p->off > p->n - (uint32_t)room)
+			*p->off = p->n - (uint32_t)room;
 	} else {
-		v->prop_off = 0;
+		*p->off = 0;
 	}
-	shown = g_n_prop - v->prop_off;
-	if (shown > (uint32_t)room)
-		shown = (uint32_t)room;
-
-
-	/* The top rule: the title, then a run of rule, then the way out. */
-	out_at(o, top, left);
-	out_fmt(o, A_DIM "+- " A_OFF A_BOLD "Properties" A_OFF A_DIM " ");
-	v->prop_y = top;
-	v->prop_x1 = left + w - 3;
-	v->prop_x0 = v->prop_x1 - (int)sizeof close + 2;
-	for (i = left + 15; i < v->prop_x0 - 1; i++)
-		out_str(o, "-");
-	out_str(o, " " A_OFF);
-	out_str(o, "\033[47;30m");
-	out_str(o, close);
-	out_fmt(o, A_OFF A_DIM "-+" A_OFF);
+	p->shown = p->n - *p->off;
+	if (p->shown > (uint32_t)room)
+		p->shown = (uint32_t)room;
 
 	/*
-	 * The bottom rule: where in the page this window is, and what the last
-	 * click on it copied.
+	 * THE TOP RULE, COUNTED RATHER THAN GUESSED.
 	 *
-	 * The copy note is HERE and not in the status bar, and that is forced
-	 * rather than chosen: while this page is up the rows under it are not
-	 * repainted - see `under` in draw() - so a message written to the status
-	 * line would not appear until the page was closed, by which time it is
-	 * about something the reader can no longer see.
+	 * The row is: corner, one rule, a space, the title, a space, the fill,
+	 * then either the close control or one more rule, then the corner. Every
+	 * one of those is a column, and the fill is what is left - which is why
+	 * it is written as a subtraction of named pieces rather than as a number
+	 * somebody counted once. A rule one short draws a box narrower at the
+	 * top than at every row below it, and the step is visible.
 	 */
-	snprintf(pos, sizeof pos, "%u-%u of %u", v->prop_off + 1u,
-		 v->prop_off + shown, g_n_prop);
-	out_at(o, top + h - 1, left);
-	out_fmt(o, A_DIM "+- %s ", pos);
-	i = 4 + (int)strlen(pos);
-	if (v->act_msg[0]) {
-		int fit = w - 3 - i - 2;
+	out_at(o, p->top, p->left);
+	out_str(o, A_DIM);
+	out_glyph(o, G_TL);
+	out_glyph(o, G_H);
+	out_fmt(o, A_OFF A_BOLD " %s " A_OFF A_DIM, p->title);
+	if (p->close) {
+		/* corner + rule + " title " + fill + " " + close + rule + corner */
+		int fill = p->w - 1 - 1 - ((int)strlen(p->title) + 2) -
+			   (1 + (int)sizeof close - 1) - 1 - 1;
 
-		if (fit > 12) {
-			out_fmt(o, A_OFF "%s%.*s" A_OFF A_DIM " ",
-				v->act_ok ? A_SIZE : A_WARN, fit,
-				v->act_msg);
-			i += (int)strlen(v->act_msg) > fit
-			   ? fit + 1 : (int)strlen(v->act_msg) + 1;
-		}
+		p->btn_y = p->top;
+		p->btn_x0 = p->left + p->w - 2 - ((int)sizeof close - 1);
+		p->btn_x1 = p->btn_x0 + (int)sizeof close - 2;
+		for (i = 0; i < fill; i++)
+			out_glyph(o, G_H);
+		out_str(o, " " A_OFF);
+		out_str(o, "\033[47;30m");
+		out_str(o, close);
+		out_str(o, A_OFF A_DIM);
+		out_glyph(o, G_H);
+		out_glyph(o, G_TR);
+		out_str(o, A_OFF);
+	} else {
+		int fill = p->w - 1 - 1 - ((int)strlen(p->title) + 2) - 1;
+
+		for (i = 0; i < fill; i++)
+			out_glyph(o, G_H);
+		out_glyph(o, G_TR);
+		out_str(o, A_OFF);
 	}
-	for (; i < w - 1; i++)
-		out_str(o, "-");
-	out_fmt(o, "+" A_OFF);
+
+	/*
+	 * The bottom rule: where in the page this window is, and whatever the
+	 * caller wants said beside it.
+	 *
+	 * The note is HERE and not in the status bar, and that is forced rather
+	 * than chosen: while a full-screen page is up the rows under it are not
+	 * repainted - see `under` in redraw() - so a message written to the
+	 * status line would not appear until the page was closed, by which time
+	 * it is about something the reader can no longer see.
+	 */
+	snprintf(pos, sizeof pos, "%u-%u of %u", *p->off + 1u,
+		 *p->off + p->shown, p->n);
+	{
+		const char *foot = p->n > (uint32_t)room
+				 ? pos : (p->foot ? p->foot : pos);
+		int used;
+
+		out_at(o, p->top + p->h - 1, p->left);
+		out_str(o, A_DIM);
+		out_glyph(o, G_BL);
+		out_glyph(o, G_H);
+		out_fmt(o, " %s ", foot);
+		used = 1 + 1 + (int)strlen(foot) + 2;
+		if (p->full && v->act_msg[0]) {
+			int fit = p->w - used - 2;
+
+			if (fit > 12) {
+				out_fmt(o, A_OFF "%s%.*s" A_OFF A_DIM " ",
+					v->act_ok ? A_SIZE : A_WARN, fit,
+					v->act_msg);
+				used += ((int)strlen(v->act_msg) > fit
+					 ? fit : (int)strlen(v->act_msg)) + 1;
+			}
+		}
+		for (i = used; i < p->w - 1; i++)
+			out_glyph(o, G_H);
+		out_glyph(o, G_BR);
+		out_str(o, A_OFF);
+	}
 
 	/*
 	 * One pass per row: the left rule, the line, the right rule.
@@ -10838,26 +10550,54 @@ static void draw_prop(struct out *o, struct view *v)
 	 * visible difference - and the frame is the thing that has to stay
 	 * small, because a large one is what tears.
 	 */
-	for (y = 0; y < h - 2; y++) {
-		out_at(o, top + 1 + y, left);
-		out_str(o, A_DIM "|" A_OFF " ");
-		if (y < (int)shown) {
-			uint32_t idx = v->prop_off + (uint32_t)y;
-			int sa = -1, sb = -1;
+	if (p->record)
+		dlg_rec_begin(v, p->top + 1, p->left + 2);
+	for (y = 0; y < p->h - 2; y++) {
+		out_at(o, p->top + 1 + y, p->left);
+		out_str(o, A_DIM);
+		out_glyph(o, G_V);
+		out_str(o, A_OFF " ");
+		if (y < (int)p->shown) {
+			uint32_t idx = *p->off + (uint32_t)y;
 
-			if ((int32_t)idx == v->prop_sel_row) {
-				sa = v->prop_sel_a < v->prop_sel_b
-				   ? v->prop_sel_a : v->prop_sel_b;
-				sb = v->prop_sel_a < v->prop_sel_b
-				   ? v->prop_sel_b : v->prop_sel_a;
+			prop_put(o, p->line[idx].text, inner, -1, -1);
+			if (p->record) {
+				char plain[PROP_W];
+
+				prop_plain(p->line[idx].text, plain,
+					   sizeof plain);
+				dlg_rec_text(v, plain);
 			}
-			prop_put(o, g_prop[idx].text, inner, sa, sb);
-		}
-		else
+		} else {
 			for (i = 0; i < inner; i++)
 				out_str(o, " ");
-		out_str(o, " " A_DIM "|" A_OFF);
+		}
+		out_str(o, " " A_DIM);
+		out_glyph(o, G_V);
+		out_str(o, A_OFF);
 	}
+	/* Last, so the selection is over everything the box drew. */
+	if (p->record)
+		dlg_paint_sel(o, v);
+}
+
+static void draw_prop(struct out *o, struct view *v)
+{
+	struct page pg;
+
+	prop_build(v);
+	memset(&pg, 0, sizeof pg);
+	pg.title = "Properties";
+	pg.line = g_prop;
+	pg.n = g_n_prop;
+	pg.off = &v->prop_off;
+	pg.full = 1;
+	pg.close = 1;
+	pg.record = 1;
+	page_draw(o, v, &pg);
+	v->prop_y = pg.btn_y;
+	v->prop_x0 = pg.btn_x0;
+	v->prop_x1 = pg.btn_x1;
 }
 
 /*
@@ -11861,11 +11601,9 @@ static void bar_run(struct view *v, int i)
 		v->prop_open = 1;
 		v->prop_off = 0;
 		v->act_msg[0] = 0;
-		v->prop_sel_row = -1;
-		v->prop_dragging = 0;
 		break;
-	case BI_KEYS:    v->help_open = 1; break;
-	case BI_ABOUT:   v->help_open = 2; v->about_off = 0; break;
+	case BI_KEYS:    v->help_open = 1; v->help_off = 0; break;
+	case BI_ABOUT:   v->help_open = 2; v->help_off = 0; break;
 	default: break;
 	}
 }
@@ -12698,6 +12436,53 @@ static void dlg_rec_row(struct view *v, struct sclip *c)
 }
 
 /* The buffer the next row should be recorded into, or NULL when full. */
+/*
+ * Record a row that is already plain text.
+ *
+ * The symbol table builds its rows column by column through sclip, which writes
+ * into dlg_rec_buf as it clips - so it records as a side effect of drawing. A
+ * page of pre-rendered lines has nothing to hook into: it draws one string and
+ * the plain form of it is a separate call. This is that call, so both kinds of
+ * dialog end up in the same recording and the same selection code serves them.
+ */
+/*
+ * Where one word ends and the next begins, for a click that means "this one".
+ *
+ * A reader clicking a number, a name or an offset means the whole of it, not
+ * the character under the pointer - and having to drag across a value to copy
+ * it is the sort of thing that makes people select it out of the terminal
+ * instead. Dragging still widens the selection from there.
+ */
+static int dlg_break(char c)
+{
+	return c == ' ' || c == '\t' || c == '=' || c == ',';
+}
+
+/* Widen [*a, *b] on a recorded row to the word they land in. */
+static void dlg_word(const char *line, int *a, int *b)
+{
+	int n = (int)strlen(line);
+
+	if (*a < 0 || *a >= n || dlg_break(line[*a]))
+		return;                 /* on a separator: take the one char */
+	while (*a > 0 && !dlg_break(line[*a - 1]))
+		(*a)--;
+	while (*b + 1 < n && !dlg_break(line[*b + 1]))
+		(*b)++;
+}
+
+static void dlg_rec_text(struct view *v, const char *plain)
+{
+	if (v->dlg_rows >= DLG_ROWS)
+		return;
+	/* Explicitly cut to what the recording holds. A page line may be wider
+	 * than DLG_COLS and the tail of it is off the screen anyway - the box
+	 * is at most as wide as the terminal - so what is lost is text nobody
+	 * could have selected. */
+	snprintf(v->dlg_line[v->dlg_rows], DLG_COLS, "%.*s", DLG_COLS - 1, plain);
+	v->dlg_rows++;
+}
+
 static char *dlg_rec_buf(struct view *v)
 {
 	return v->dlg_rows < DLG_ROWS ? v->dlg_line[v->dlg_rows] : 0;
@@ -14530,19 +14315,34 @@ static void click(struct view *v, int rclick)
 	 * whatever is under an open menu. Both before the panes, for the same
 	 * reason the chooser is: what is drawn on top is asked first.
 	 *
-	 * KEYBOARD CLOSES ON ANY CLICK; ABOUT ONLY ON ITS BUTTON. About
-	 * scrolls, and a page that vanishes on the click that starts a drag
-	 * cannot be read to the end. Keyboard is a cheat sheet with nowhere to
-	 * scroll to, so dismissing it with a click stays the fastest thing.
+	 * EITHER HELP BOX CLOSES ON ITS BUTTON AND NOWHERE ELSE. Both scroll,
+	 * and a page that vanishes on the click that starts a drag cannot be
+	 * read to the end.
 	 */
-	if (v->help_open == 1) {
-		v->help_open = 0;
-		return;
-	}
-	if (v->help_open == 2) {
-		if (v->about_btn_y >= 0 && g_my == v->about_btn_y &&
-		    g_mx >= v->about_btn_x0 && g_mx <= v->about_btn_x1)
+	if (v->help_open) {
+		int r, c;
+
+		if (v->help_btn_y >= 0 && g_my == v->help_btn_y &&
+		    g_mx >= v->help_btn_x0 && g_mx <= v->help_btn_x1) {
 			v->help_open = 0;
+			return;
+		}
+		/* Anything else in the box is a SELECTION, through the same
+		 * layer the properties page and the symbol table use - these
+		 * pages record their rows for exactly this. */
+		if (dlg_at(v, g_my, g_mx, &r, &c)) {
+			int a = c, b = c;
+
+			dlg_word(v->dlg_line[r], &a, &b);
+			v->dlg_ar = v->dlg_br = r;
+			v->dlg_ac = a;
+			v->dlg_bc = b;
+			v->dlg_have = 1;
+			v->dlg_drag = 1;
+			return;
+		}
+		v->dlg_have = 0;
+		v->dlg_drag = 0;
 		return;
 	}
 	if (v->bar_open >= 0) {
@@ -14574,12 +14374,24 @@ static void click(struct view *v, int rclick)
 		return;
 	if (click_field(v))
 		return;
-	if (v->sym_open) {
+	/*
+	 * A DIALOG'S TEXT SELECTION, whichever dialog is up.
+	 *
+	 * The properties page had its own copy of this - an anchor, a row, two
+	 * columns and a dragging flag on the view - answering the same question
+	 * the symbol table already asked this layer. One recording, one
+	 * selection, one Ctrl+C.
+	 */
+	if (v->sym_open || v->prop_open) {
 		int r, c;
 
 		if (dlg_at(v, g_my, g_mx, &r, &c)) {
+			int a = c, b = c;
+
+			dlg_word(v->dlg_line[r], &a, &b);
 			v->dlg_ar = v->dlg_br = r;
-			v->dlg_ac = v->dlg_bc = c;
+			v->dlg_ac = a;
+			v->dlg_bc = b;
 			v->dlg_have = 1;
 			v->dlg_drag = 1;
 			return;
@@ -15070,42 +14882,16 @@ static int handle_prop_key(struct view *v, int k)
 			v->prop_off = 0xffffffu;
 			return 1;
 		case K_DRAG:
-			if (v->prop_dragging && v->prop_sel_row >= 0) {
-				char plain[PROP_W];
-				uint32_t pn = prop_plain(
-					g_prop[v->prop_sel_row].text,
-					plain, sizeof plain);
-				int col = g_mx - 4;
-
-				if (col < 0) col = 0;
-				if ((uint32_t)col >= pn && pn)
-					col = (int)pn - 1;
-				/* From where the button went down, so pulling
-				 * either way from the click grows the run. */
-				v->prop_sel_a = v->prop_anchor;
-				v->prop_sel_b = col;
-			}
-			return 1;
 		case K_RELEASE:
-			v->prop_dragging = 0;
+			/*
+			 * The drag and the release belong to the selection
+			 * layer, which the click handler already fed - see the
+			 * dlg_drag branch there. Swallowed rather than passed
+			 * on, because a modal owns the mouse while it is up.
+			 */
 			return 1;
 		case 0x03:                      /* Ctrl+C */
-			if (v->prop_sel_row >= 0) {
-				char plain[PROP_W];
-				uint32_t pn = prop_plain(
-					g_prop[v->prop_sel_row].text,
-					plain, sizeof plain);
-				int a2 = v->prop_sel_a < v->prop_sel_b
-				       ? v->prop_sel_a : v->prop_sel_b;
-				int b2 = v->prop_sel_a < v->prop_sel_b
-				       ? v->prop_sel_b : v->prop_sel_a;
-
-				if (pn && a2 >= 0 && (uint32_t)b2 < pn) {
-					copy_osc52(plain + a2,
-						   (size_t)(b2 - a2 + 1));
-					copy_said(v, (size_t)(b2 - a2 + 1));
-				}
-			}
+			dlg_copy(v);
 			return 1;
 		case 27:
 		case 'q':
@@ -15120,10 +14906,14 @@ static int handle_prop_key(struct view *v, int k)
 			 *
 			 * A click anywhere used to dismiss the page, which
 			 * meant every attempt to scroll it by grabbing at it,
-			 * or to click a line to read it more closely, threw
-			 * the page away and put the tool back where it was.
-			 * A window with a close button is closed by its close
-			 * button.
+			 * or to click a line to read it more closely, threw the
+			 * page away. A window with a close button is closed by
+			 * its close button.
+			 *
+			 * Everything else a click does here is a SELECTION, and
+			 * that is click()'s - it holds the hit test for every
+			 * dialog's recorded text and this one is no longer an
+			 * exception to it.
 			 */
 			if (g_my == v->prop_y && g_mx >= v->prop_x0 &&
 			    g_mx <= v->prop_x1) {
@@ -15131,70 +14921,12 @@ static int handle_prop_key(struct view *v, int k)
 				return 1;
 			}
 			/*
-			 * A click SELECTS; Ctrl+C copies. See view.prop_sel_row.
-			 *
-			 * The word under the cursor to start with, because that
-			 * is what a reader means by clicking on a number, and
-			 * dragging widens it. Clicking past the end of the text
-			 * takes the whole line - the row is still reachable
-			 * whole without a second gesture to learn.
+			 * -1, NOT 0. In this function 0 means "handled, and the
+			 * answer is 0" - and 0 is what handle() returns to quit.
+			 * "Not mine, carry on down the chain" is -1, which is
+			 * what lets the click reach click() and be a selection.
 			 */
-			{
-				int line = g_my - 3;    /* top(2) + rule(1) */
-				uint32_t idx = v->prop_off + (uint32_t)line;
-				char plain[PROP_W];
-				uint32_t pn;
-				int col = g_mx - 4;
-
-				if (line < 0 || g_my >= g_rows - 2 ||
-				    idx >= g_n_prop)
-					return 1;
-				/*
-				 * The folder row's button, before the select
-				 * path claims the click. It copies the whole
-				 * path in one gesture - see prop_cp_row - and
-				 * it is on exactly one row, so it is tested by
-				 * row index rather than by looking at the text.
-				 */
-				if (v->prop_cp_row >= 0 &&
-				    (int32_t)idx == v->prop_cp_row &&
-				    col >= v->prop_cp_x0 &&
-				    col <= v->prop_cp_x1 &&
-				    v->path && v->path[0]) {
-					size_t pl = strlen(v->path);
-
-					copy_osc52(v->path, pl);
-					copy_said(v, pl);
-					return 1;
-				}
-				pn = prop_plain(g_prop[idx].text, plain,
-						sizeof plain);
-				if (!pn)
-					return 1;
-				v->prop_sel_row = (int32_t)idx;
-				v->prop_anchor = col < 0 ? 0
-					       : ((uint32_t)col >= pn
-						  ? (int32_t)pn - 1 : col);
-				if (col < 0 || (uint32_t)col >= pn ||
-				    prop_break(plain[col])) {
-					v->prop_sel_a = 0;
-					v->prop_sel_b = (int32_t)pn - 1;
-				} else {
-					int a = col, b = col;
-
-					while (a > 0 && !prop_break(plain[a - 1]))
-						a--;
-					while ((uint32_t)b + 1u < pn &&
-					       !prop_break(plain[b + 1]))
-						b++;
-					v->prop_sel_a = a;
-					v->prop_sel_b = b;
-				}
-				v->prop_dragging = 1;
-			}
-			return 1;
-		default:
-			return 1;
+			return -1;
 		}
 	}
 	/*
@@ -15959,35 +15691,17 @@ static int handle(struct view *v, int k)
 		page = 1;
 
 	/*
-	 * Any KEY closes the Keyboard box - but a mouse event is not a key.
+	 * EITHER HELP BOX, and the same keys.
 	 *
-	 * They arrive here as codes out of the same enum, so a test for "any
-	 * key" catches the release of the very click that opened the box: it
-	 * appeared and vanished in one gesture. The mouse codes are contiguous
-	 * and last in the enum for exactly this kind of test.
-	 */
-	if (v->help_open == 1 && k < K_CLICK) {
-		v->help_open = 0;
-		return 1;
-	}
-	/*
-	 * ABOUT ANSWERS THE KEYS THAT MOVE A PAGE, and closes on the two that
-	 * mean "done" everywhere else. Any key would close it, which is what
-	 * Keyboard does - but then the wheel and the arrows could not scroll
-	 * it, and a page long enough to need scrolling is exactly the one this
-	 * became.
-	 */
-	/*
-	 * The wheel scrolls About, a click has to reach click() - which is the
-	 * only code that knows where the Close button was drawn - and every
-	 * other key is eaten so the page can be read to the end.
+	 * The wheel scrolls it, a click has to reach click() - which is the only
+	 * code that knows where the Close button was drawn - and every other key
+	 * is eaten so the page can be read to the end.
 	 *
 	 * Written as a guard on the block rather than as a case inside it,
 	 * because "not handled here" cannot be spelled with a return in this
-	 * function: 0 is what Ctrl+Q returns and it means QUIT. The first
-	 * version of this used it and closed the program instead of the dialog.
+	 * function: 0 is what Ctrl+Q returns and it means QUIT.
 	 */
-	if (v->help_open == 2 &&
+	if (v->help_open &&
 	    (k < K_CLICK || k == K_WHEEL_UP || k == K_WHEEL_DOWN)) {
 		switch (k) {
 		case 27:                /* Esc */
@@ -15998,24 +15712,27 @@ static int handle(struct view *v, int k)
 			break;
 		case K_UP:
 		case K_WHEEL_UP:
-			if (v->about_off > 0)
-				v->about_off--;
+			if (v->help_off > 0)
+				v->help_off--;
 			break;
 		case K_DOWN:
 		case K_WHEEL_DOWN:
-			v->about_off++;   /* clamped where the box is measured */
+			v->help_off++;   /* clamped where the box is measured */
 			break;
 		case K_PGUP:
-			v->about_off -= 8;
+			v->help_off -= 8;
 			break;
 		case K_PGDN:
-			v->about_off += 8;
+			v->help_off += 8;
+			break;
+		case 0x03:              /* Ctrl+C */
+			dlg_copy(v);
 			break;
 		default:
 			break;
 		}
-		if (v->about_off < 0)
-			v->about_off = 0;
+		if (v->help_off < 0)
+			v->help_off = 0;
 		return 1;
 	}
 
@@ -16303,7 +16020,6 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	v->emu_mode = emu_mode;
 
 	/* The fields whose cleared value is not their resting value. */
-	v->prop_sel_row = -1;
 	v->sel_a = v->sel_b = KOF_BROKEN;
 	v->find_at = KOF_BROKEN;
 	v->bar_open = -1;
