@@ -756,7 +756,7 @@ static void content_probe(kof_buf f, struct kof_7z_info *z)
 {
 	uint8_t *out;
 	uint64_t produced = 0;
-	int st;
+	enum kof_decomp_status st;
 
 	if (z->header_kind != KOF_7Z_HDR_CODED ||
 	    z->hdr_coder != KOF_7Z_CODER_LZMA || !z->hdr_pack_size)

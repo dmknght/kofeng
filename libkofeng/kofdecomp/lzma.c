@@ -485,7 +485,7 @@ static int lz_run(struct lz_state *z, const uint8_t *in, uint64_t in_len,
  *
  * A thin wrapper now: fresh state, decode once, throw the state away.
  */
-int kof_lzma_decode(unsigned lc, unsigned lp, unsigned pb,
+enum kof_decomp_status kof_lzma_decode(unsigned lc, unsigned lp, unsigned pb,
 		    const uint8_t *in, uint64_t in_len,
 		    uint8_t *out, uint64_t out_cap, uint64_t *produced)
 {
@@ -540,7 +540,7 @@ int kof_lzma_decode(unsigned lc, unsigned lp, unsigned pb,
  * dictionary needs no special handling here because a match reads out of the output
  * buffer and the output cursor is simply not rewound between chunks.
  */
-int kof_lzma2_decode(const uint8_t *in, uint64_t in_len, uint8_t *out,
+enum kof_decomp_status kof_lzma2_decode(const uint8_t *in, uint64_t in_len, uint8_t *out,
 		     uint64_t out_cap, uint64_t *produced)
 {
 	struct lz_state z;

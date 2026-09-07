@@ -60,7 +60,7 @@
  * Returns a kof_decomp_status. KOF_DEC_STOPPED means the output buffer filled,
  * which is the receiver's limit rather than a failure of the stream.
  */
-int kof_lzma_decode(unsigned lc, unsigned lp, unsigned pb,
+enum kof_decomp_status kof_lzma_decode(unsigned lc, unsigned lp, unsigned pb,
 		    const uint8_t *in, uint64_t in_len,
 		    uint8_t *out, uint64_t out_cap, uint64_t *produced);
 
@@ -72,7 +72,7 @@ int kof_lzma_decode(unsigned lc, unsigned lp, unsigned pb,
  * produced and how far a match may reach - the same arrangement plain LZMA uses
  * here and for the same reason.
  */
-int kof_lzma2_decode(const uint8_t *in, uint64_t in_len, uint8_t *out,
+enum kof_decomp_status kof_lzma2_decode(const uint8_t *in, uint64_t in_len, uint8_t *out,
 		     uint64_t out_cap, uint64_t *produced);
 
 #endif /* KOFENG_LZMA_H */

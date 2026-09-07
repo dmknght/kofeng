@@ -2514,10 +2514,6 @@ struct use {
 	uint32_t n_rng;
 	int      rng[KOF_MAX_RANGE_PER_MODULE];
 	int      line[KOF_MAX_RANGE_PER_MODULE];
-	/* Where in the source each of those calls begins, so the text BETWEEN
-	 * two of them can be read. What joins them decides whether one range
-	 * over both would mean the same thing. */
-	size_t   at[KOF_MAX_RANGE_PER_MODULE];
 };
 
 static struct use uses[MAX_PATTERNS];
@@ -2559,7 +2555,7 @@ static int rng_index(const char *name)
 	return -1;
 }
 
-static void use_add(int pi, int ri, int line, size_t at)
+static void use_add(int pi, int ri, int line)
 {
 	struct use *u = &uses[pi];
 	uint32_t k;
@@ -2572,42 +2568,9 @@ static void use_add(int pi, int ri, int line, size_t at)
 	if (u->n_rng >= KOF_MAX_RANGE_PER_MODULE)
 		return;
 	u->line[u->n_rng] = line;
-	u->at[u->n_rng]   = at;
 	u->rng[u->n_rng++] = ri;
 }
 
-/*
- * ARE TWO SEARCHES FOR ONE MARKER JOINED BY "OR", AND ONLY BY "OR".
- *
- * This is the whole of what decides whether the build may say "these two are
- * one search". "find(CODE,s) || find(DATA,s)" asks whether the marker is in
- * either, which is exactly what one range over CODE|DATA asks - and reads the
- * object once instead of twice. "find(CODE,s) && find(DATA,s)" asks whether it
- * is in BOTH, which one range cannot express at all, and merging it would
- * quietly turn a strict rule into a loose one.
- *
- * The text between the two calls is what says which. A "&&" anywhere in it, or
- * a statement boundary, and the two are not one expression - so nothing is
- * claimed. Being unsure here costs a vaguer warning; being wrong would cost a
- * signature that no longer means what its author wrote.
- */
-static int joined_by_or(const char *src, size_t a, size_t b)
-{
-	size_t i;
-	int saw_or = 0;
-
-	if (b <= a)
-		return 0;
-	for (i = a; i < b; i++) {
-		if (src[i] == ';' || src[i] == '{' || src[i] == '}')
-			return 0;       /* different statements */
-		if (src[i] == '&' && i + 1 < b && src[i + 1] == '&')
-			return 0;       /* an AND is not mergeable */
-		if (src[i] == '|' && i + 1 < b && src[i + 1] == '|')
-			saw_or = 1;
-	}
-	return saw_or;
-}
 
 /*
  * Walk the call sites.
@@ -2679,8 +2642,7 @@ static void lint_calls(const char *src, size_t len)
 			pi = pat_index(sname);
 			if (pi >= 0) {
 				if (ri >= 0)
-					use_add(pi, ri, line,
-						(size_t)(at - src));
+					use_add(pi, ri, line);
 				else
 					uses[pi].used_unranged = 1;
 			}
@@ -2776,10 +2738,9 @@ static void lint_debug_in_headers(const char *src, size_t n)
 	}
 }
 
-static void lint_report(const char *src)
+static void lint_report(void)
 {
 	int i;
-	uint32_t k;
 
 	for (i = 0; i < npats; i++) {
 		struct use *u = &uses[i];
@@ -2792,80 +2753,70 @@ static void lint_report(const char *src)
 			continue;
 		}
 		/*
-		 * THE ONE THAT COSTS REAL TIME.
+		 * THERE WAS A WARNING HERE, AND WHAT REPLACED IT IS A
+		 * MEASUREMENT.
 		 *
-		 * Measured over 13426 objects with one marker in .rodata: one
-		 * range covering CODE|DATA read 185 MB, two calls over CODE then
-		 * DATA read 869 MB - 4.7x - and found the same 1567 objects. The
-		 * extents of one range are walked in FILE ORDER and the search
-		 * stops at the first hit; two ranges must exhaust the first
-		 * region before the second is looked at.
+		 * It said that a marker searched through two ranges costs a
+		 * region scanned to exhaustion before the next is looked at,
+		 * and it carried a number: 13426 objects, one marker in
+		 * .rodata, 185 MB through one CODE|DATA range against 869 MB
+		 * through two calls - 4.7x. It then told the author to merge
+		 * the two ranges into one.
+		 *
+		 * Neither half of that survived the region sweep.
+		 *
+		 * THE COST. Re-measured over 4941 ELF objects, two ranges
+		 * against one merged range:
+		 *
+		 *   sweep firing, marker absent    2037.08 MB both ways,
+		 *                                  0 searches both ways
+		 *   sweep declining, absent        2037.08 MB both ways
+		 *   sweep declining, present       1933.42 against 1860.03 MB
+		 *                                  - 3.9%, same 700 detections
+		 *
+		 * The reading moved. The scanner sweeps each REGION once for
+		 * every marker any module declares on it, before a module runs,
+		 * and a mask over several regions is answered by an OR over
+		 * what that sweep already wrote - so how many ranges name a
+		 * region decides how many memo lookups happen, not how many
+		 * bytes are read. Where the sweep declines
+		 * (KOF_MULTIMATCH_MIN_LIVE) both forms walk the extents in file
+		 * order and stop at the first hit, which is why even there the
+		 * difference is a few percent and not a factor.
+		 *
+		 * THE ADVICE, and this is the worse half: for a pair naming a
+		 * symbol half it was BACKWARDS. Those bytes are not the
+		 * object's. The symbol block is built for the object, searched
+		 * through a matcher of its own, and its extents are chosen by
+		 * an ATTRIBUTE - import against export binding - and walked
+		 * last-record-first, because a rule scoped to a symbol is
+		 * nearly always asking about one of the author's, and those sit
+		 * at the end of the table. None of that is a file region and
+		 * none of it is what the sweep does, so "one range, one pass"
+		 * was never on offer.
+		 *
+		 * What merging actually buys is in c_find_str: a mask naming
+		 * ONLY symbol halves is memoised, a mask naming only file
+		 * regions is answered from the sweep, and a MIXED mask is
+		 * memoised NOWHERE - one question over two buffers cannot stamp
+		 * a cell after answering half of it. So the file half of a
+		 * merged mask is searched with KOF_MEMO_NONE, from scratch,
+		 * every call. Measured on the same 4941 objects with CODE and
+		 * SYM_EXP:
+		 *
+		 *   two ranges     1563.83 MB swept, 0 searches
+		 *   one merged     1563.83 MB swept, 5140 searches reading
+		 *                  1563.83 MB - the whole of CODE, again
+		 *
+		 * Twice the bytes for taking the advice. Every instance of this
+		 * warning in the tree was of that kind, and all of them were
+		 * false.
+		 *
+		 * What is left is a question about MEANING and not about cost -
+		 * two calls joined by "&&" ask whether one marker is in both
+		 * regions, which is unusual enough to be worth a second look -
+		 * and that is not what this said, so it is not kept here.
 		 */
-		if (u->n_rng > 1) {
-			uint32_t both = 0;
-			char list[256];
-			size_t at = 0;
-			int mergeable = 1;
-
-			for (k = 0; k < u->n_rng; k++)
-				both |= rngs[u->rng[k]].mask;
-			for (k = 0; k < u->n_rng; k++) {
-				/*
-				 * snprintf returns the length it WANTED to write,
-				 * so once the joined names fill the buffer `at`
-				 * must stop advancing - otherwise sizeof list - at
-				 * wraps and list + at points off the end. The
-				 * message is a warning; a truncated list is fine, a
-				 * smashed stack is not.
-				 */
-				if (at < sizeof list)
-					at += (size_t)snprintf(list + at,
-							       sizeof list - at,
-							       k ? ", %s" : "%s",
-							       rngs[u->rng[k]].name);
-				if (k && !joined_by_or(src, u->at[k - 1u],
-						       u->at[k]))
-					mergeable = 0;
-			}
-			/*
-			 * THE COST IS THE SAME IN BOTH CASES, AND IT IS THE
-			 * POINT.
-			 *
-			 * Whatever joins the two calls, a region the marker is
-			 * NOT in is scanned to exhaustion before the next one is
-			 * looked at - twice the bytes for one question about one
-			 * marker. That is what this warns about, and it is said
-			 * first, because it is true either way.
-			 *
-			 * What the join decides is only whether the fix is
-			 * available. "||" asks whether the marker is in either,
-			 * which one range over the union asks in a single pass.
-			 * "&&" asks whether it is in BOTH, which one range
-			 * cannot express - merging it would quietly turn a
-			 * strict rule into a loose one - so there the answer is
-			 * to check that two regions were really meant.
-			 */
-			lwarn(u->line[0],
-			      "'%s' is searched in %u ranges (%s): a region it "
-			      "is not in is scanned to the end before the next "
-			      "is looked at",
-			      pats[i].name, u->n_rng, list);
-			if (mergeable)
-				fprintf(stderr, "%s:%d: note:  the calls are "
-					"joined by '||', so one "
-					"KOF_TARGET_RANGE(<name>, 0x%x) and one "
-					"call ask the same question in one pass\n",
-					src_name, u->line[0], both);
-			else
-				fprintf(stderr, "%s:%d: note:  not joined by "
-					"'||', so one range over 0x%x would ask "
-					"a different question - check that two "
-					"regions were meant\n",
-					src_name, u->line[0], both);
-			for (k = 1; k < u->n_rng; k++)
-				fprintf(stderr, "%s:%d: note:  also here\n",
-					src_name, u->line[k]);
-		}
 		/*
 		 * Below the presence set's key width.
 		 *
@@ -3652,7 +3603,7 @@ static int extract_main(int argc, char **argv)
 	 * written: a warning about a pack that was never produced is noise. */
 	lint_calls(src, src_len);
 	lint_debug_in_headers(src, src_len);
-	lint_report(src);
+	lint_report();
 
 	/* Kept for the module mode's own checks: it asks the same buffer the
 	 * declarations were read from, so a name inside a comment is invisible
@@ -4743,6 +4694,34 @@ static void module_reset(void)
 		g_decl[i].line = 0;
 		g_decl[i].arg[0] = 0;
 	}
+	/*
+	 * THE COUNTS ARE NOT THE STATE.
+	 *
+	 * npats/nrngs/nnames going back to zero makes the next module's
+	 * pattern 0 reuse uses[0] - and uses[] was never cleared, so it still
+	 * held the PREVIOUS module's range list, its line numbers and its
+	 * source offsets. --module runs extract_main in this process once per
+	 * source, so every module after the first inherited whatever the one
+	 * before it left behind.
+	 *
+	 * What it produced was warnings about code that does not exist. An
+	 * unpacker declaring no ranges at all and searching once with
+	 * kof_find_str_where was reported as "searched in 2 ranges
+	 * (scan_range_code, scan_range_sym_exp)" - a pair no source in the tree
+	 * contains, because the two names came from two different files - at
+	 * line numbers that landed on declarations rather than on calls. And
+	 * `used_unranged` persisting the other way would have SUPPRESSED the
+	 * "never searched" warning for a marker that really is never searched.
+	 *
+	 * So the arrays are cleared, not just their counters. They are static
+	 * because they are large, which is a reason to reset them here and not
+	 * a reason to trust them.
+	 */
+	memset(uses, 0, sizeof uses);
+	memset(rng_used, 0, sizeof rng_used);
+	memset(pats, 0, sizeof pats);
+	memset(rngs, 0, sizeof rngs);
+	memset(names, 0, sizeof names);
 	npats = nrngs = nnames = errors = 0;
 	scan_mask = 0;
 	g_target_mask = g_arch_mask = g_subtype_mask = 0;

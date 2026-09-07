@@ -9,7 +9,7 @@
 
 #include "decomp.h"
 
-const char *kof_decomp_status_name(int status)
+const char *kof_decomp_status_name(enum kof_decomp_status status)
 {
 	switch (status) {
 	case KOF_DEC_OK:        return "ok";

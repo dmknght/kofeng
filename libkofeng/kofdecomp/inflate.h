@@ -127,7 +127,7 @@ struct kof_inflate {
  * trailer is at the end of the compressed data, not at the end of the file, and
  * only the decoder knows where that is.
  */
-int kof_inflate(struct kof_inflate *st, const uint8_t *in, uint64_t in_len,
+enum kof_decomp_status kof_inflate(struct kof_inflate *st, const uint8_t *in, uint64_t in_len,
 		kof_inflate_sink sink, void *user,
 		uint64_t *consumed, uint64_t *produced);
 

@@ -78,7 +78,7 @@ typedef int (*kof_ovba_sink)(void *user, const uint8_t *p, uint32_t n);
  * a container that fails part way still yields real source, and for a scanner that
  * prefix is usually the part that identifies the sample.
  */
-int kof_ovba_decode(const uint8_t *in, uint64_t in_len, kof_ovba_sink sink,
+enum kof_decomp_status kof_ovba_decode(const uint8_t *in, uint64_t in_len, kof_ovba_sink sink,
 		    void *user, uint64_t *produced);
 
 /*

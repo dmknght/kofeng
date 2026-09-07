@@ -81,7 +81,7 @@ enum kof_nrv2_bits {
  * Returns a kof_decomp_status. KOF_DEC_STOPPED means the output buffer filled -
  * the receiver's limit, not the stream's failure.
  */
-int kof_nrv2_decode(int variant, int bits, const uint8_t *in, uint64_t in_len,
+enum kof_decomp_status kof_nrv2_decode(int variant, int bits, const uint8_t *in, uint64_t in_len,
 		    uint8_t *out, uint64_t out_cap, uint64_t *produced);
 
 #endif /* KOFENG_NRV2_H */

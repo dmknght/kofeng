@@ -78,7 +78,7 @@ static int flush(struct out *o, kof_ovba_sink sink, void *user, uint64_t *produc
 	return cont;
 }
 
-int kof_ovba_decode(const uint8_t *in, uint64_t in_len, kof_ovba_sink sink,
+enum kof_decomp_status kof_ovba_decode(const uint8_t *in, uint64_t in_len, kof_ovba_sink sink,
 		    void *user, uint64_t *produced)
 {
 	struct out o;

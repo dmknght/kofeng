@@ -156,7 +156,7 @@ static int nrv_len_tail(struct nrv_in *s, uint32_t *len)
 
 /* ---- the decoder --------------------------------------------------------------- */
 
-int kof_nrv2_decode(int variant, int bits, const uint8_t *in, uint64_t in_len,
+enum kof_decomp_status kof_nrv2_decode(int variant, int bits, const uint8_t *in, uint64_t in_len,
 		    uint8_t *out, uint64_t out_cap, uint64_t *produced)
 {
 	struct nrv_in s;

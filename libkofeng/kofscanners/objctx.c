@@ -443,7 +443,7 @@ static int can_produce(const struct kof_scanner *sc)
 
 /* A decoder's status, in the vocabulary the caller sees. Stopping is the
  * receiver's limit; everything else is the stream failing. */
-static uint32_t broken_of_status(int st)
+static uint32_t broken_of_status(enum kof_decomp_status st)
 {
 	if (st == KOF_DEC_STOPPED)
 		return KOF_BROKEN_LIMIT;
@@ -1028,7 +1028,7 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 {
 	uint64_t room, want, produced = 0, decoded, at;
 	uint8_t *buf;
-	int st;
+	enum kof_decomp_status st;
 	int capped = 0;
 
 	room = sc->resident < sc->resident_max
@@ -1541,7 +1541,7 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		 */
 		{
 			struct expand_sink e;
-			int st;
+			enum kof_decomp_status st;
 
 			e.ctx = ctx;
 			e.left = expand_limit(len, out_hint);
@@ -1587,7 +1587,7 @@ static uint64_t decode_stream(const struct kof_7z_pack *pk, const uint8_t *in,
 			      uint8_t *out, uint64_t cap, uint64_t *got)
 {
 	uint64_t n = 0;
-	int st;
+	enum kof_decomp_status st;
 
 	*got = 0;
 	if (pk->coder == KOF_7Z_CODER_LZMA2)
@@ -1706,7 +1706,7 @@ static uint64_t c_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 	uint8_t *in;
 	uint64_t total = 0, at = 0, produced = 0, room;
 	uint32_t n, i;
-	int st;
+	enum kof_decomp_status st;
 
 	(void)out_hint;
 	if (!can_produce(sc))

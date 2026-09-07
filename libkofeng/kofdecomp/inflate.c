@@ -520,7 +520,7 @@ static int build_dynamic(struct kof_inflate *s)
 
 /* ---- the stream ------------------------------------------------------------- */
 
-int kof_inflate(struct kof_inflate *s, const uint8_t *in, uint64_t in_len,
+enum kof_decomp_status kof_inflate(struct kof_inflate *s, const uint8_t *in, uint64_t in_len,
 		kof_inflate_sink sink, void *user,
 		uint64_t *consumed, uint64_t *produced)
 {
