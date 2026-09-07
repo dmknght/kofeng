@@ -1285,8 +1285,6 @@ struct view {
 	 * not, so the click converts one to the other with prop_off the way the
 	 * select path already does.
 	 */
-	int32_t     prop_cp_row;
-	int         prop_cp_x0, prop_cp_x1;
 	/*
 	 * WHAT IS SELECTED ON THE PAGE, WHICH IS NOT THE SAME AS WHAT WAS CLICKED.
 	 *
@@ -8409,7 +8407,8 @@ static void draw_prop(struct out *o, struct view *v);
 static void dlg_rec_begin(struct view *v, int y0, int x0);
 static void dlg_rec_text(struct view *v, const char *plain);
 static void dlg_paint_sel(struct out *o, struct view *v);
-/* Used by prop_build to measure a row it has just written - see prop_cp_row. */
+/* A row without its colour escapes: what the terminal actually shows, which is
+ * what a click and a copy are both answered in. */
 static uint32_t prop_plain(const char *s, char *out, uint32_t cap);
 
 /* The properties page was up on the frame before this one. */
@@ -10012,6 +10011,19 @@ static uint32_t obj_ancestors(const struct view *v, const struct object *ob,
  * and arch folded onto one line: a chain four deep would otherwise be
  * twenty-four rows of context above the thing somebody actually opened.
  */
+/*
+ * THE COPY BUTTON'S LABEL, in one place because two things need it: the row
+ * that draws it and the click that carries it out.
+ *
+ * The click finds it by SEARCHING THE DRAWN ROW for this text. That is not the
+ * obvious way round - the row could record its own columns - and it is the way
+ * round that works: prop_object_rows used to record an index into the full row
+ * list while the click path is answered in indices into the rows the page
+ * actually put on screen, which begin at the scroll offset. Two different
+ * numbers, compared as one.
+ */
+#define PROP_CP_LABEL "[ Copy full path ]"
+
 static void prop_object_rows(struct view *v, const struct object *ob, int full)
 {
 	const char *base = kof_path_sep_last(ob->name);
@@ -10147,28 +10159,9 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 		 * and in a nested view the row belongs to the outermost parent,
 		 * so the button follows the same rule without a second test.
 		 */
-		static const char lab[] = "[ Copy full path ]";
-		char plain[PROP_W];
-		const char *at;
-
-		v->prop_cp_row = (int32_t)g_n_prop;
 		prop_add(A_DIM "  %-11s " A_OFF A_LOC "%s" A_OFF
-			 "  \033[47;30m%s" A_OFF, "folder", dir, lab);
-		/*
-		 * Measured off the RENDERED row, not counted by hand: the row
-		 * is built by a format string with colour escapes in it, and a
-		 * column computed from the format drifts the moment the format
-		 * changes. prop_plain strips the escapes, which is the same
-		 * thing the click path does to find what it selected.
-		 */
-		prop_plain(g_prop[v->prop_cp_row].text, plain, sizeof plain);
-		at = strstr(plain, lab);
-		if (at) {
-			v->prop_cp_x0 = (int)(at - plain);
-			v->prop_cp_x1 = v->prop_cp_x0 + (int)sizeof lab - 2;
-		} else {
-			v->prop_cp_row = -1;   /* did not fit: no button */
-		}
+			 "  \033[47;30m%s" A_OFF, "folder", dir,
+			 PROP_CP_LABEL);
 	}
 
 	if (full) {
@@ -10245,7 +10238,6 @@ static void prop_build(struct view *v)
 	uint64_t total = 0;
 
 	g_n_prop = 0;
-	v->prop_cp_row = -1;
 	base = base ? base + 1 : ob->name;
 
 	/*
@@ -14706,6 +14698,30 @@ static void click(struct view *v, int rclick)
 
 		if (dlg_at(v, g_my, g_mx, &r, &c)) {
 			int a = c, b = c;
+			/*
+			 * THE BUTTON BEFORE THE SELECTION.
+			 *
+			 * Nothing read prop_cp_row after the dashboard moved
+			 * onto the page renderer, so pressing this did what a
+			 * press on any other row does - started a text
+			 * selection - and the button looked dead. It is
+			 * recognised here by the label it drew, which needs no
+			 * agreement about row numbering between the two paths.
+			 */
+			const char *cp = strstr(v->dlg_line[r], PROP_CP_LABEL);
+
+			if (cp && v->path && v->path[0]) {
+				int x0 = (int)(cp - v->dlg_line[r]);
+
+				if (c >= x0 && c < x0 +
+				    (int)(sizeof PROP_CP_LABEL - 1)) {
+					size_t n = strlen(v->path);
+
+					copy_osc52(v->path, n);
+					copy_said(v, n);
+					return;
+				}
+			}
 
 			dlg_word(v->dlg_line[r], &a, &b);
 			v->dlg_ar = v->dlg_br = r;
