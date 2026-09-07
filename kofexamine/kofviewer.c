@@ -1010,7 +1010,9 @@ struct chooser {
 #define SYMN_EXP 2u
 
 struct node {
-	char     label[48];
+	/* 64, matching obj_label's output: a node built from one used to be
+	 * copied into a shorter field and lost its tail. */
+	char     label[64];
 	uint32_t depth;
 	uint32_t obj;               /* which object this row belongs to */
 	uint32_t mask;              /* the region, or 0 when the row IS the object */
@@ -2528,6 +2530,74 @@ static void tree_add_sym(struct view *v, uint32_t depth, uint32_t obj,
 		v->node[v->n_node - 1u].sym = which;
 }
 
+/*
+ * WHAT TO CALL AN OBJECT, IN ONE PLACE.
+ *
+ * The tree pane and the dashboard both name every object, and they must name it
+ * the same way or the two panes describe different things - which they did: the
+ * tree said what an object IS and the dashboard said what its FILE is called,
+ * so a tar and its first member read as "Tar-any" and "paths.tar" for the same
+ * row. This is that decision, made once.
+ *
+ * What the object IS, not what it is called. The path is on the folder row
+ * already, and a sha256 filename repeated in a nineteen column field says
+ * nothing. "ELF-x64" does: a signature targets a format and an architecture, so
+ * those are the two facts a row exists to carry.
+ *
+ * "ELF-a32", not "ELF a32". The row is space separated fields, so a field that
+ * contains a space reads as two - "//0 ELF a32" looks like three columns and is
+ * two. The hyphen is also what the engine uses when it composes a finding name,
+ * so the two spell the same object the same way.
+ */
+/* `out` needs 64 bytes: the widths in the format strings below add up to
+ * 57 plus the terminator. */
+static void obj_label(const struct object *o, char *out, size_t cap)
+{
+	const char *leaf = kof_obj_leaf(o->name);
+	char what[24];
+
+	snprintf(what, sizeof what, "%s%s%s",
+		 o->fmt ? kof_format_name(o->ctx.format) : "raw",
+		 o->fmt ? "-" : "",
+		 o->fmt ? kof_arch_name(o->ctx.arch) : "");
+	if (o->depth == 0) {
+		snprintf(out, cap, "%s", what);
+	} else if (o->payload_of) {
+		/*
+		 * "//0 Shellcode-x64", in the SAME SHAPE as every other
+		 * produced object: the "//<n>" says the engine made this rather
+		 * than it having been in the file, and every other child
+		 * carries one. Dropping it read as though a Shellcode object
+		 * had simply been there - the one thing a reconstruction must
+		 * not imply.
+		 *
+		 * The "ELF-" an ordinary child row carries is dropped, and only
+		 * that: the parent row says ELF and this object's own HEADERS
+		 * and DATA rows say it again, while "what it is" is the half a
+		 * reader cannot get anywhere else.
+		 *
+		 * NOT "SHELLCODE". Capitals in this tree mean REGION - HEADERS,
+		 * CODE, DATA, SYM_IMP - and this is an object. Shouting it
+		 * would file a child object under the parent's regions.
+		 *
+		 * The ARCHITECTURE stays because it is the one fact the parent
+		 * does not imply: a 64-bit loader routinely carries a 32-bit
+		 * payload.
+		 */
+		/* The leaf is bounded explicitly rather than left to snprintf:
+		 * a container member's name has no length limit and the row
+		 * has 48 columns, so the cut is stated where a reader of the
+		 * format string can see it. */
+		snprintf(out, cap, "//%.24s Shellcode-%s", leaf,
+			 o->fmt ? kof_arch_name(o->ctx.arch) : "?");
+	} else {
+		snprintf(out, cap, "//%.24s %.18s%s", leaf, what,
+			 /* Scanned, but not kept: there is nothing to show and
+			  * the row should not pretend there is. */
+			 o->too_big ? "  (not kept)" : "");
+	}
+}
+
 static void tree_build(struct view *v)
 {
 	uint32_t i, k;
@@ -2535,72 +2605,9 @@ static void tree_build(struct view *v)
 	v->n_node = 0;
 	for (i = 0; i < v->n_obj; i++) {
 		struct object *o = &v->obj[i];
-		const char *leaf = kof_obj_leaf(o->name);
-		char label[48], what[24];
+		char label[64];
 
-		/*
-		 * What the object IS, not what it is called.
-		 *
-		 * The path is on the title line already, and a sha256 filename
-		 * repeated in a nineteen column field says nothing. "ELF x64"
-		 * does: a signature targets a format and an architecture, so
-		 * those are the two facts a row in this tree exists to carry.
-		 */
-		/*
-		 * "ELF-a32", not "ELF a32".
-		 *
-		 * The row is space separated fields, so a field that contains a
-		 * space reads as two - "//0 ELF a32" looks like three columns
-		 * and is two. The hyphen is also what the engine itself uses
-		 * when it composes a finding name, so the two spell the same
-		 * object the same way.
-		 */
-		snprintf(what, sizeof what, "%s%s%s",
-			 o->fmt ? kof_format_name(o->ctx.format) : "raw",
-			 o->fmt ? "-" : "",
-			 o->fmt ? kof_arch_name(o->ctx.arch) : "");
-		if (o->depth == 0)
-			snprintf(label, sizeof label, "%s", what);
-		else if (o->payload_of)
-			/*
-			 * "//0 Shellcode-x64", in the SAME SHAPE as every
-			 * other produced object: the "//<n>" says the engine
-			 * made this, rather than it having been in the file,
-			 * and every other child on this tree carries one.
-			 * Dropping it read as though a Shellcode object had
-			 * simply been there - which is the one thing a
-			 * reconstruction must not imply.
-			 *
-			 * The "ELF-" that an ordinary child row carries is
-			 * dropped, and only that: the parent row says ELF and
-			 * this object's own HEADERS and DATA rows say it
-			 * again, while "what it is" is the half a reader
-			 * cannot get anywhere else.
-			 *
-			 * NOT "SHELLCODE". Capitals in this tree mean REGION -
-			 * HEADERS, CODE, DATA, SYM_IMP - and this is an object.
-			 * Shouting it would file a child object under the
-			 * parent's regions, which is the one thing the row must
-			 * not say.
-			 *
-			 * The ARCHITECTURE stays because it is the one fact the
-			 * parent does not imply: a 64-bit loader routinely
-			 * carries a 32-bit payload, and the x86 samples show
-			 * Shellcode-x86 over an ELF32 header.
-			 *
-			 * That it is a RECONSTRUCTION is said where there is
-			 * room to say it - the dashboard's Anomalies row reads
-			 * RECONSTRUCTED_ELF-x64_SHELLCODE, and the name row
-			 * names the variable it came out of.
-			 */
-			snprintf(label, sizeof label, "//%s Shellcode-%s", leaf,
-				 o->fmt ? kof_arch_name(o->ctx.arch) : "?");
-		else
-			snprintf(label, sizeof label, "//%s %s%s", leaf, what,
-				 /* Scanned, but not kept: there is nothing to
-				  * show and the row should not pretend there
-				  * is. */
-				 o->too_big ? "  (not kept)" : "");
+		obj_label(o, label, sizeof label);
 		tree_add(v, o->depth * 2u, i, 0, o->buf.n, label);
 
 		if (!o->fmt || !v->ext)
@@ -9608,7 +9615,6 @@ static int fmt_group(uint8_t f)
 	case KOF_FMT_MACHO:
 		return 0;
 	case KOF_FMT_DOCOLE:
-	case KOF_FMT_DOCZIP:
 	case KOF_FMT_RTF:
 	case KOF_FMT_PDF:
 		return 1;
@@ -9673,16 +9679,20 @@ static void about_build(struct view *v)
 	/*
 	 * Two lines, and they are the only prose here.
 	 *
-	 * What the panes are is on the screen behind this box; repeating it
-	 * turns an About into a manual, and a manual nobody opened this dialog
-	 * to read. What is NOT on the screen is why the two halves belong
-	 * together - that the signature written here is the same kind the
-	 * scanner loads - so that is what these say.
+	 * The first says what the program is, in the words somebody would use
+	 * to describe it to a colleague. The second says the one thing the
+	 * screen behind this box does not: that a draft here is not a mock-up -
+	 * it goes through the builder that produces the shipped database.
+	 *
+	 * What the panes are is on that screen already. Repeating it would turn
+	 * an About into a manual, and nobody opens this dialog to read one.
 	 */
-	abt(A_BOLD "KOFViewer" A_OFF "  -  a file, as the engine sees it.");
+	abt(A_BOLD "KOFViewer" A_OFF "  -  a TUI file examiner built on the KOF"
+	    " engine,");
+	abt("               with signature generation.");
 	abt("");
-	abt("Look through what the engine found inside a file, and turn what");
-	abt("you find there into a signature the scanner can use.");
+	abt("Signatures drafted here are compiled by the same builder that");
+	abt("produces the shipped database.");
 	abt("");
 
 	abt(A_ID "Versions" A_OFF);
@@ -9752,7 +9762,8 @@ static void about_build(struct view *v)
 			any = 1;
 			if (at + 1u >= sizeof row)
 				break;
-			at += (uint32_t)snprintf(row + at, sizeof row - at, " %s",
+			at += (uint32_t)snprintf(row + at, sizeof row - at,
+						 " %s",
 						 kof_format_name(fmts[k].format));
 		}
 		if (any)
@@ -9762,18 +9773,19 @@ static void about_build(struct view *v)
 	/*
 	 * WHO WROTE IT, AND UNDER WHAT TERMS - and the terms are not one answer.
 	 *
-	 * The repository is MIT in the main, and it is not single-licensed: a
-	 * vendored decoder is Apache-2.0 and so are four files of its own. A
+	 * The repository is MIT in the main and is not single-licensed: a
+	 * vendored decoder is Apache-2.0 and so are a few files of its own. A
 	 * lone "MIT" row would be true about most of what somebody is reading
-	 * and wrong about the binary they are running. Two rows, and the second
-	 * points at the file that carries the detail rather than trying to hold
-	 * it - an About box is the wrong place to enumerate paths.
+	 * and wrong about the binary they are running, so the row says so and
+	 * the next one names the dependency that is not MIT. Which exact FILES
+	 * differ is LICENSE's job - an About box that enumerated paths would be
+	 * a licence file with a worse layout.
 	 */
 	abt(A_ID "Project" A_OFF);
 	abt("  " A_DIM "Author     " A_OFF " DmKnght");
-	abt("  " A_DIM "License    " A_OFF " MIT, with parts under Apache-2.0");
-	abt("  " A_DIM "           " A_OFF " " A_DIM "see LICENSE; a file's own SPDX"
-	    " line wins" A_OFF);
+	abt("  " A_DIM "License    " A_OFF " MIT, some parts under Apache-2.0");
+	abt("  " A_DIM "Third party" A_OFF " bddisasm 3.0.1 by Bitdefender "
+	    A_DIM "- Apache-2.0" A_OFF);
 }
 
 /* The two Help dialogs. Drawn like the find box: content, then the frame. */
@@ -10204,13 +10216,28 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 	 * `from` rather than `variable`, because the row already has a label
 	 * and the word only has to say how the two halves relate.
 	 */
-	if (ob->payload_of && ob->payload_sym[0])
-		prop_add(A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF
-			 A_DIM "   from " A_OFF A_BAD "%s" A_OFF "%s",
-			 "name", base, ob->payload_sym, "");
-	else
-		prop_add(A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF,
-			 "name", base);
+	/*
+	 * WHAT IT IS, spelled by obj_label - the same function the tree pane
+	 * uses, so the two panes cannot come to different words for one row.
+	 *
+	 * It used to be the FILE's basename here, which made a tar read as
+	 * "paths.tar" on a row the tree called "Tar-any", and put the format
+	 * and the architecture on the end of the size row instead. The name is
+	 * not lost: it is the folder row's other half, one line below, where
+	 * the two together are the path and the button copies the join.
+	 */
+	{
+		char id[64];
+
+		obj_label(ob, id, sizeof id);
+		if (ob->payload_of && ob->payload_sym[0])
+			prop_add(A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF
+				 A_DIM "  from " A_OFF A_ID "%s" A_OFF "%s",
+				 "name", id, ob->payload_sym, "");
+		else
+			prop_add(A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF,
+				 "name", id);
+	}
 
 	/*
 	 * Only the object that came off the disk has a folder.
@@ -10288,12 +10315,12 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 			prop_add(A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF,
 				 "arch", kof_arch_name(ob->ctx.arch));
 	} else {
+		/* Bytes and nothing else. The format and the architecture are
+		 * on the identity row above, and saying them twice on two
+		 * adjacent rows is how a reader learns to skip one of them. */
 		prop_add(A_DIM "  %-11s " A_OFF A_SIZE "%llu" A_OFF
-			 A_DIM " bytes   " A_OFF A_ID "%s%s%s%s%s" A_OFF,
-			 "size", (unsigned long long)ob->buf.n, fmt,
-			 sub ? " " : "", sub ? sub : "",
-			 ob->fmt ? " " : "",
-			 ob->fmt ? kof_arch_name(ob->ctx.arch) : "");
+			 A_DIM " bytes" A_OFF,
+			 "size", (unsigned long long)ob->buf.n);
 	}
 
 	/*
@@ -11221,11 +11248,34 @@ static int dir_pick(const char *folder, const char *from, int which,
 {
 	DIR *d = opendir(folder);
 	struct dirent *e;
-	char best[KOF_DUMP_PATH_ROOM];
+	char best[KOF_DUMP_PATH_ROOM], dir[KOF_DUMP_PATH_ROOM];
+	size_t dn;
 	int found = 0;
 
 	if (!d)
 		return 0;
+	/*
+	 * A TRAILING SLASH WOULD PUT "//" IN THE PATH, AND "//" MEANS SOMETHING.
+	 *
+	 * It is KOF_OBJ_SEP: the engine joins a container to what it holds with
+	 * it, so "dir//file.tar" does not name a file in a directory, it names
+	 * an object inside a container called "dir". Opening a folder written
+	 * with its trailing slash made the FILE read as a child of the folder -
+	 * the tree indented the root and labelled it "//paths.tar Tar-any", and
+	 * the dashboard called it a nested object.
+	 *
+	 * The scanner's own directory walk trims this for exactly the same
+	 * reason; see scan.c. One more place that has to know, because the
+	 * separator is shared and a caller building a path is a caller that can
+	 * spell it wrong.
+	 */
+	dn = strlen(folder);
+	while (dn > 1 && folder[dn - 1] == '/')
+		dn--;
+	if (dn >= sizeof dir)
+		dn = sizeof dir - 1u;
+	memcpy(dir, folder, dn);
+	dir[dn] = 0;
 	while ((e = readdir(d)) != NULL) {
 		char cand[KOF_DUMP_PATH_ROOM];
 
@@ -11252,7 +11302,11 @@ static int dir_pick(const char *folder, const char *from, int which,
 			if (which >= 0 ? cmp >= 0 : cmp <= 0)
 				continue;
 		}
-		if ((size_t)snprintf(cand, sizeof cand, "%s/%s", folder,
+		/* "/" is the one directory whose name already ends in the
+		 * separator and must keep it, or the join would be "/name"
+		 * spelled "//name". */
+		if ((size_t)snprintf(cand, sizeof cand, "%s%s%s", dir,
+				     dir[0] == '/' && !dir[1] ? "" : "/",
 				     e->d_name) >= sizeof cand)
 			continue;
 		if (!walkable_file(cand))
