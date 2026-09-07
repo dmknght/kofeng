@@ -1115,24 +1115,12 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 		scratch = malloc((size_t)sn);
 		if (scratch)
 			sc->resident += sn;
-		/*
-		 * Cast because these two decoders return the status ENUM while
-		 * every other one below returns int, and clang reports the
-		 * assignment as a change of signedness - an enum whose
-		 * enumerators are all non-negative is unsigned to it. The
-		 * values are the same KOF_DEC_* codes either way; what differs
-		 * is only the declared return type, and making all of them
-		 * agree is a change to five decoder headers rather than to
-		 * this line.
-		 */
 		if (method == KOF_UNP_RAR3)
-			st = (int)kof_rar3_decode(in, in_len, buf, want,
-						  scratch, scratch ? sn : 0u,
-						  &produced);
+			st = kof_rar3_decode(in, in_len, buf, want, scratch,
+					     scratch ? sn : 0u, &produced);
 		else
-			st = (int)kof_rar5_decode(in, in_len, buf, want,
-						  scratch, scratch ? sn : 0u,
-						  &produced);
+			st = kof_rar5_decode(in, in_len, buf, want, scratch,
+					     scratch ? sn : 0u, &produced);
 		if (scratch) {
 			sc->resident -= sn;
 			free(scratch);
