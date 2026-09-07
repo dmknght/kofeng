@@ -1,5 +1,8 @@
 # Third-party code in kofeng
 
+The project's own terms are MIT; see [LICENSE](LICENSE), which also carries the
+summary of everything below. This file is the detail.
+
 ## bddisasm 3.0.1 — Apache License 2.0
 
     libkofemu/bddisasm/

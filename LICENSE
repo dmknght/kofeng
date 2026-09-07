@@ -1,0 +1,87 @@
+MIT License
+
+Copyright (c) 2026 DmKnght
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+THIRD-PARTY COMPONENTS UNDER OTHER TERMS
+================================================================================
+
+The MIT terms above cover the code written for this project. This repository
+also redistributes third-party code, which keeps its own licence. Nothing above
+replaces or weakens those terms, and nothing below applies to anything except
+the paths it names.
+
+--------------------------------------------------------------------------------
+bddisasm 3.0.1 - Apache License 2.0
+    libkofemu/bddisasm/
+--------------------------------------------------------------------------------
+
+Copyright (c) Bitdefender. Licensed under the Apache License, Version 2.0.
+
+The instruction decoder the emulator is built on. The files are redistributed
+unmodified. The full licence text travels with them at
+`libkofemu/bddisasm/LICENSE`; the provenance and the exact subset taken are
+recorded in `libkofemu/bddisasm/README.kofeng.md`.
+
+Apache 2.0 requires that a copy of the licence travel with the code, that
+existing copyright and attribution notices are kept, and that modified files
+say they were modified. The first two are satisfied by the paths above; the
+third does not arise, because the files are not modified. See THIRD-PARTY.md.
+
+--------------------------------------------------------------------------------
+Files in this project under the Apache License 2.0
+--------------------------------------------------------------------------------
+
+Copyright (c) 2026 DmKnght. Licensed under the Apache License, Version 2.0.
+
+    libkofeng/kofparsers/kofformat.c
+    libkofeng/kofparsers/kofformat.h
+    libkofeng/kofdisasm/xref.c
+    libkofeng/kofdisasm/xref.h
+
+These four carry their own SPDX line and it is the one that governs them. Every
+other file written for this project is under the MIT terms above; where a file
+carries an SPDX identifier, that identifier wins.
+
+The full Apache 2.0 text is at `libkofemu/bddisasm/LICENSE`, which is the copy
+this repository already ships.
+
+--------------------------------------------------------------------------------
+Signature sources - bases/
+--------------------------------------------------------------------------------
+
+The detection signatures under `bases/` are data rather than program code, and
+they carry their own terms: see `bases/LICENSE`. They are kept separate on
+purpose. A signature can contain a string lifted from a sample, its value has a
+different lifetime from the engine's, and a project may want to place
+conditions on redistributing detection data that it would not place on the
+scanner that reads it. Deciding both in one file would make that impossible to
+change later without reopening every release already made.
+
+--------------------------------------------------------------------------------
+Test material
+--------------------------------------------------------------------------------
+
+`tests/fixtures/` and any sample corpus referenced by the test scripts are
+inputs, not part of the Software. Where a fixture is generated it is covered by
+the MIT terms above; where one is a third-party artefact it is not redistributed
+here, and the scripts that want it say where to get it.

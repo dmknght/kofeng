@@ -250,6 +250,22 @@ The tests are differential where they can be - inflate against zlib, the three
 matcher entry points against each other - because a corpus run passes while the
 code is still wrong on an input the corpus does not happen to contain.
 
+## Licence
+
+The code written for this project is under the **MIT License** - see
+[LICENSE](LICENSE).
+
+The repository is not single-licensed, and the root LICENSE says so in full:
+
+| what | terms |
+|------|-------|
+| engine, tools, tests | MIT |
+| `kofparsers/kofformat.*`, `kofdisasm/xref.*` | Apache License 2.0 - they carry their own SPDX line, and it wins |
+| `libkofemu/bddisasm/` | Apache License 2.0, Bitdefender |
+| `bases/` signatures | [bases/LICENSE](bases/LICENSE) - MIT today, kept separate so it need not stay that way |
+
+Where a file carries an `SPDX-License-Identifier`, that identifier governs it.
+
 ## Third-party code
 
 The only vendored dependency is **bddisasm 3.0.1** by Bitdefender, under the

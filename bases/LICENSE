@@ -1,0 +1,38 @@
+MIT License
+
+Copyright (c) 2026 DmKnght
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+--------------------------------------------------------------------------------
+WHY THIS FILE EXISTS WHEN IT SAYS THE SAME THING AS THE ONE ABOVE IT
+--------------------------------------------------------------------------------
+
+Today these terms are the repository's terms. The file is here so that they do
+not have to stay that way.
+
+A signature is not the scanner. It is detection data: it can carry a string
+lifted from a sample, it is rewritten on a different schedule from the engine,
+and a project may one day want to say something about redistributing it -
+attribution, or a restriction on training - that it would never say about the
+code that reads it. Settled in the root LICENSE, that decision could not be
+revisited without reopening every release already published under it.
+
+So the seam is cut now, while it costs nothing, rather than when it is needed.
