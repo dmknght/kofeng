@@ -20,7 +20,14 @@
  * the matcher; what to do with the answer is the scan routine's business.
  */
 
+/* Before any include, and _GNU_SOURCE rather than _POSIX_C_SOURCE, for the
+ * reason kofdb.c gives at length: kofplatform.h's POSIX branch has an inline
+ * kof_memmem whose body calls memmem, which glibc declares only under this
+ * macro - and _POSIX_C_SOURCE actively suppresses it. */
+#define _GNU_SOURCE
+
 #include <kofmod/kofsym.h>
+#include "../core/kofplatform.h"   /* kof_write_all - the spill file below */
 #include "../kofparsers/binaries/elf_sym.h"
 #include "../kofparsers/binaries/pe_sym.h"
 #include "../kofdisasm/xref.h"
@@ -704,8 +711,7 @@ static int sink_spill(struct kof_scanner *sc)
 			return 0;
 	}
 	if (sc->sink_len) {
-		if (write(sc->sink_fd, sc->sink_mem, sc->sink_len) !=
-		    (ssize_t)sc->sink_len)
+		if (!kof_write_all(sc->sink_fd, sc->sink_mem, sc->sink_len))
 			return 0;
 		sc->sink_spilled += sc->sink_len;
 		sc->sink_len = 0;
@@ -1109,12 +1115,24 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 		scratch = malloc((size_t)sn);
 		if (scratch)
 			sc->resident += sn;
+		/*
+		 * Cast because these two decoders return the status ENUM while
+		 * every other one below returns int, and clang reports the
+		 * assignment as a change of signedness - an enum whose
+		 * enumerators are all non-negative is unsigned to it. The
+		 * values are the same KOF_DEC_* codes either way; what differs
+		 * is only the declared return type, and making all of them
+		 * agree is a change to five decoder headers rather than to
+		 * this line.
+		 */
 		if (method == KOF_UNP_RAR3)
-			st = kof_rar3_decode(in, in_len, buf, want, scratch,
-					     scratch ? sn : 0u, &produced);
+			st = (int)kof_rar3_decode(in, in_len, buf, want,
+						  scratch, scratch ? sn : 0u,
+						  &produced);
 		else
-			st = kof_rar5_decode(in, in_len, buf, want, scratch,
-					     scratch ? sn : 0u, &produced);
+			st = (int)kof_rar5_decode(in, in_len, buf, want,
+						  scratch, scratch ? sn : 0u,
+						  &produced);
 		if (scratch) {
 			sc->resident -= sn;
 			free(scratch);

@@ -128,18 +128,18 @@ static void meta_add_who(char tab[][48], uint32_t *n, uint32_t cap,
  * builder will reject, or miss one it would accept - which it did, three of
  * them, while this was a hand written list.
  */
-#define ARCH_X_WORD(name, val, short_word) { #name + sizeof "KOF_ARCH_" - 1, val },
+#define ARCH_X_WORD(name, val, short_word) { &#name[sizeof "KOF_ARCH_" - 1], val },
 const struct kof_arch_word arch_word[] = { KOF_ARCH_LIST(ARCH_X_WORD) };
 #undef ARCH_X_WORD
 
 /* Both generated from the format headers, for the reason arch_word is: the menu
  * must offer exactly what the builder accepts. The prefix is cut off because
  * the panel shows the bare kind and the emitted declaration puts it back. */
-#define ELF_SUB_X(name, val) #name + sizeof "KOF_ELF_" - 1,
+#define ELF_SUB_X(name, val) &#name[sizeof "KOF_ELF_" - 1],
 const char *const elf_sub[] = { KOF_ELF_TYPE_LIST(ELF_SUB_X) };
 #undef ELF_SUB_X
 
-#define PE_SUB_X(name, val) #name + sizeof "KOF_PE_" - 1,
+#define PE_SUB_X(name, val) &#name[sizeof "KOF_PE_" - 1],
 const char *const pe_sub[]  = { KOF_PE_IMAGE_LIST(PE_SUB_X) };
 #undef PE_SUB_X
 

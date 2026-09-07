@@ -203,8 +203,25 @@ function Add-Archive([string]$Name, [scriptblock]$Make) {
 $tar = Join-Path $Out "sample.tar"
 if (Get-Command tar -ErrorAction SilentlyContinue) {
     Add-Archive "tar" {
-        & tar -cf $tar -C (Split-Path -Parent $payload) (Split-Path -Leaf $payload)
-        if ($LASTEXITCODE -ne 0) { throw "tar failed" }
+        #
+        # A RELATIVE archive name, written from inside the output directory.
+        #
+        # Not tidiness: GNU tar parses the name after -f as host:path, so an
+        # ordinary Windows path is a remote archive on a machine called "D" -
+        # it fails with "Cannot connect to D: resolve failed" and builds
+        # nothing. Windows ships bsdtar in System32, which has no such idea,
+        # but Git for Windows puts GNU tar on PATH ahead of it and which one
+        # answers is a matter of PATH order. A name with no colon in it is the
+        # one thing both agree on. -C keeps its full path: only -f is parsed
+        # that way.
+        Push-Location $Out
+        try {
+            & tar -cf 'sample.tar' -C (Split-Path -Parent $payload) `
+                  (Split-Path -Leaf $payload)
+            if ($LASTEXITCODE -ne 0) { throw "tar failed" }
+        } finally {
+            Pop-Location
+        }
     }
 } else {
     $skipped += "tar"

@@ -380,6 +380,50 @@ static inline const char *kof_path_base(const char *p)
  * writes its scratch files beside the build output is untidy, and one that
  * cannot run at all is worse.
  */
+/*
+ * Write the whole buffer, or say it failed. Two problems, one function.
+ *
+ * THE COUNT. POSIX write() takes a size_t; Windows's takes an unsigned int,
+ * and every caller in this tree had a size_t to give it. clang says so -
+ * "implicit conversion loses integer precision" at four separate call sites -
+ * and it is right: a length past 4GB does not merely warn, it writes the wrong
+ * number of bytes. Chunking below the limit makes the cast true rather than
+ * hopeful, and puts the platform difference in one place instead of four.
+ *
+ * THE SHORT WRITE. A write() that returns less than it was asked for has not
+ * failed; it has been interrupted, or filled a pipe. Two of those four callers
+ * compared the return against the full length and treated anything else as an
+ * error, which is a bug that only shows up on the large objects this scanner
+ * exists to read. Looping is the whole fix, and the two callers that already
+ * looped were each carrying their own copy of it.
+ *
+ * Returns 1 on success and 0 on failure, like the rest of this header - not
+ * the byte count, because no caller wanted one and a partial answer is what
+ * the loop is here to remove.
+ */
+#define KOF_WRITE_CHUNK 0x10000000u  /* 256MB - comfortably inside an int */
+
+static inline int kof_write_all(int fd, const void *buf, uint64_t n)
+{
+	const unsigned char *p = (const unsigned char *)buf;
+
+	while (n) {
+		unsigned int want = n > KOF_WRITE_CHUNK
+				  ? KOF_WRITE_CHUNK : (unsigned int)n;
+#ifdef _WIN32
+		int k = _write(fd, p, want);
+#else
+		ssize_t k = write(fd, p, want);
+#endif
+
+		if (k <= 0)
+			return 0;
+		p += (size_t)k;
+		n -= (uint64_t)k;
+	}
+	return 1;
+}
+
 static inline const char *kof_tmpdir(void)
 {
 	const char *p = getenv("TMPDIR");

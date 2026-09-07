@@ -119,7 +119,48 @@ void out_fmt(struct out *o, const char *fmt, ...);
  * Named rather than written inline, because there are two sets: a terminal that
  * cannot show U+2500 gets ASCII, and a box drawn half in each is worse than a
  * box drawn entirely in either.
+ *
+ * THESE ARE THE ONLY CHARACTERS THIS PROGRAM PRINTS THAT ARE NOT PLAIN ASCII.
+ *
+ * Everything else is: every byte taken from the file being read is clamped to
+ * 0x20..0x7e before it reaches the screen, and the panes are divided with '|'
+ * and '-'. So this block is the whole of the question "what does this look
+ * like on a terminal that is not the one it was written on".
+ *
+ * On Windows it is not the same question, which is why the switch is thrown
+ * here rather than left for somebody to remember. A console has a CODE PAGE,
+ * and the default is 437: the three bytes of U+2502 are not one character
+ * there, they are three - the console draws them as "Gamma-o-e", and the
+ * scrollbar comes out as a column of that. Neither half of that is
+ * survivable: the glyphs are wrong AND each one is three columns wide where
+ * out_glyph told the layout it is one, so the frame after it is out of place
+ * too. A switch that exists but that nothing sets is the same as no switch:
+ * KOFVIEW_ASCII_BOX was referenced here and defined nowhere, so the ASCII set
+ * was unreachable code and Windows got the mess.
+ *
+ * ASCII rather than the code page's own box drawing characters (CP437 has a
+ * real U+2502 at byte 0xb3), because that would only move the assumption: 0xb3
+ * is a box character on 437, a superscript three on 1252, and nothing at all
+ * on 65001. The low 128 are the same in every one of them, which is the only
+ * guarantee available here, and a frame drawn in '|' and '-' is legible on a
+ * console with any code page and any font - which is more than can be said for
+ * a frame drawn in the right characters on the wrong one.
+ *
+ * The alternative was SetConsoleOutputCP(CP_UTF8) at startup, which keeps the
+ * rounded corners. It is one line and it is not taken here: it changes a
+ * setting that outlives the program on a console it does not own, legacy
+ * conhost has never been reliable about it, and the failure mode when it does
+ * not take is the mess above rather than a plainer box.
+ *
+ * Both directions stay available to anyone who knows their own terminal:
+ * -DKOFVIEW_ASCII_BOX forces the plain set on a POSIX terminal that cannot
+ * draw the others, and -DKOFVIEW_UTF8_BOX keeps the rounded ones on a Windows
+ * console that has been set to UTF-8 already.
  */
+#if defined(_WIN32) && !defined(KOFVIEW_UTF8_BOX)
+#define KOFVIEW_ASCII_BOX 1
+#endif
+
 #ifdef KOFVIEW_ASCII_BOX
 #define G_TL "+"
 #define G_TR "+"

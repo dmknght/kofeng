@@ -54,6 +54,24 @@
 #define AMPLIFY_MAX 200.0
 #define FLOOR_MS      0.5
 
+/*
+ * How many times a case that looks slow is measured again before it is
+ * believed - the same guard, for the same reason, as hostile_fields.c.
+ *
+ * FLOOR_MS is absolute and the baselines here are small, so what decides a
+ * failure is whether the scheduler took the thread away once during a single
+ * measurement rather than whether any unpacker did too much work. Measured on
+ * this hardware: a run that fails on a different format each time and passes
+ * on the next attempt, with no code between the two.
+ *
+ * The budget is not loosened. Amplification is work the unpacker really does,
+ * so it reproduces on every attempt; scheduler noise only ever ADDS time, so
+ * the smallest of several measurements is the one with the least of it in.
+ * Only cases that have already tripped are re-timed - a handful out of
+ * thousands - so the run costs what it did before.
+ */
+#define CONFIRM_RUNS  5u
+
 /* What one object is allowed to yield here. Small on purpose: a module that
  * produces more than this from a 64KB seed has believed something. */
 #define PRODUCE_CAP (4u << 20)
@@ -237,7 +255,32 @@ int main(int argc, char **argv)
 				double dt = scan_once(sc, path, obj, len, tg,
 						      &tg->fields[fi],
 						      hostile(vi, len), &err);
-				double amp = base > 0.0 ? dt / base : 0.0;
+				double amp;
+
+				/*
+				 * Ask again before believing a slow one - see
+				 * CONFIRM_RUNS. Its own err, thrown away: this
+				 * is the same case measured twice, not another
+				 * case, and a failure it reports has already
+				 * been counted from the measurement above.
+				 */
+				if (base > 0.0 && dt > FLOOR_MS &&
+				    dt / base > AMPLIFY_MAX) {
+					uint32_t r;
+
+					for (r = 0; r < CONFIRM_RUNS; r++) {
+						int ignore = 0;
+						double again = scan_once(sc,
+							path, obj, len, tg,
+							&tg->fields[fi],
+							hostile(vi, len),
+							&ignore);
+
+						if (again < dt)
+							dt = again;
+					}
+				}
+				amp = base > 0.0 ? dt / base : 0.0;
 
 				t.cases++;
 				if (err) {

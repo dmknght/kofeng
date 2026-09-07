@@ -242,7 +242,6 @@ static int hex_parse(const char *text)
 
 		if (*p == '(') {
 			struct hx_step *st;
-			uint32_t k;
 
 			/* Close whatever bytes preceded the group. */
 			if (cur.len) {
@@ -263,7 +262,7 @@ static int hex_parse(const char *text)
 			pending = 0;
 
 			p++;
-			for (k = 0;; ) {
+			for (;;) {
 				struct hx_alt *a;
 
 				if (st->n_alts >= KOF_HEX_MAX_ALTS)
@@ -296,8 +295,12 @@ static int hex_parse(const char *text)
 				}
 				if (a->len == 0)
 					return hex_err("empty alternative");
+				/* Counted once, in st->n_alts. A second
+				 * counter alongside it was incremented here
+				 * and never read - the cap above tests
+				 * st->n_alts, and so does everything after
+				 * this loop. */
 				st->n_alts++;
-				k++;
 
 				if (*p == '|') {
 					p++;

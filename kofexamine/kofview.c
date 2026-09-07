@@ -4,10 +4,18 @@
  * boundary this file is on the far side of.
  */
 
-#define _POSIX_C_SOURCE 200809L
+/* _GNU_SOURCE, not _POSIX_C_SOURCE, and before any include: this file now
+ * pulls in kofplatform.h for kof_write_all, and that header's POSIX branch
+ * has an inline kof_memmem whose body calls memmem - a GNU extension the
+ * compiler must see declared to compile the body at all, whether or not this
+ * translation unit ever calls it. On glibc _POSIX_C_SOURCE does not merely
+ * fail to enable memmem, it suppresses it. Same reasoning, same wording, as
+ * kofdb.c and kofmatch.c. */
+#define _GNU_SOURCE
 
 #include "kofview.h"
 #include "kofplat.h"
+#include "../libkofeng/core/kofplatform.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -38,15 +46,9 @@
  */
 void term_write_n(const char *s, size_t n)
 {
-	size_t off = 0;
-
-	while (off < n) {
-		ssize_t k = write(STDOUT_FILENO, s + off, n - off);
-
-		if (k <= 0)
-			return;
-		off += (size_t)k;
-	}
+	/* A screen that could not be written is not worth an error path: the
+	 * next redraw writes the whole thing again. */
+	(void)kof_write_all(STDOUT_FILENO, s, n);
 }
 
 void term_write(const char *s)
@@ -188,35 +190,6 @@ void out_glyph(struct out *o, const char *g)
 	o->col_hint++;
 }
 
-/*
- * THE ONLY CHARACTERS THIS PROGRAM PRINTS THAT ARE NOT PLAIN ASCII.
- *
- * Everything else is: every byte taken from the file being read is clamped to
- * 0x20..0x7e before it reaches the screen, and the panes are already divided
- * with '|' and '-'. So this block is the whole of the question "what does this
- * look like on a terminal that is not the one it was written on".
- *
- * On Windows it is not the same question. A console has a CODE PAGE, and the
- * default on this machine is 437: the three bytes of U+2502 are not one
- * character there, they are three - the console draws them as "Γöé", and the
- * scrollbar comes out as a column of that. Neither half of that is
- * survivable: the glyphs are wrong AND each one is three columns wide where
- * the layout was told it is one, so the frame after it is out of place too.
- *
- * ASCII rather than the code page's own box drawing characters (CP437 has a
- * real U+2502 at byte 0xb3), because that would only move the assumption: 0xb3
- * is a box character on 437, a superscript three on 1252, and nothing at all
- * on 65001. The low 128 are the same in every one of them, which is the only
- * guarantee available here, and a frame drawn in '|' and '-' is legible on a
- * console with any code page and any font - which is more than can be said for
- * a frame drawn in the right characters on the wrong one.
- *
- * The alternative was SetConsoleOutputCP(CP_UTF8) at startup, which keeps the
- * rounded corners. It is one line and it is not taken here: it changes a
- * setting that outlives the program on a console it does not own, legacy
- * conhost has never been reliable about it, and the failure mode when it does
- * not take is the mess above rather than a plainer box.
- */
 void out_fmt(struct out *o, const char *fmt, ...)
 {
 	char t[1024];

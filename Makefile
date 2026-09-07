@@ -28,7 +28,28 @@
 # flag set, and mixing the two sets in one place is how they end up applied to the
 # wrong target.
 
+#
+# `cc` is a POSIX convention, and Windows does not have it.
+#
+# Not "usually does not": no Windows C toolchain installs a cc.exe. LLVM from
+# winget or from llvm.org gives clang.exe, the Visual Studio tools give cl.exe,
+# and the only cc.exe on a Windows box belongs to MSYS2 - which is exactly the
+# thing this build no longer requires. So make's own built-in default sends the
+# build looking for a program that was never going to be there, and someone who
+# installed LLVM the ordinary Windows way still gets "cc is not recognized".
+#
+# $(origin) rather than ?=, because make PREDEFINES CC. Its origin is `default`,
+# not `undefined`, and ?= only assigns to the latter - so `CC ?= clang` here
+# would silently do nothing and leave `cc` in place. Command line and
+# environment both still win, which is the whole point of testing the origin
+# rather than overwriting.
+ifeq ($(OS),Windows_NT)
+ifneq ($(filter default undefined,$(origin CC)),)
+CC := clang
+endif
+else
 CC      ?= cc
+endif
 AR      ?= ar
 CFLAGS  ?= -O2 -g
 # The parallel walk in scan.c is pthreads. On this glibc the symbols are in libc
@@ -162,6 +183,77 @@ EXE         := .exe
 SHELL       := powershell.exe
 .SHELLFLAGS := -NoProfile -NonInteractive -Command
 #
+# IS THERE A COMPILER AT ALL - ASKED ONCE, ANSWERED IN ONE LINE.
+#
+# Without this the answer arrives as a wall. PowerShell raises
+# CommandNotFoundException for a program that is not on PATH, and it does so
+# BEFORE any redirection applies - there is no process to redirect the stderr
+# of - so the `2>$null` on the flag probes does not catch it. Measured: the
+# probes alone produce five multi-line exception blocks, each naming the flag
+# list rather than the missing compiler, before the first source file is read.
+# The one line that says what is actually wrong ends up several screens above
+# where the reader is looking.
+#
+# Get-Command, not a trial compile, because the two failures want different
+# words: a compiler that is absent is a PATH problem and a compiler that is
+# present but broken is not, and running one to find out the first would print
+# the wall this exists to prevent. -ErrorAction SilentlyContinue silences the
+# ASKING - it is the one place a silent probe is right, because make's own
+# $(error) below says everything instead, loudly and once.
+#
+# Recursive (=), not simple (:=), because it is asked TWICE and the answer
+# between the two asks is allowed to change: once before the search below, once
+# after it has put a toolchain on PATH.
+KOF_CC_FOUND = $(shell if (Get-Command '$(CC)' -ErrorAction SilentlyContinue) { 'yes' })
+
+#
+# NOT ON PATH IS NOT THE SAME AS NOT INSTALLED.
+#
+# The usual state of a Windows box: MSYS2 is installed, clang is in it, and
+# nothing put its bin directory on PATH - so `make` from an ordinary Windows
+# Terminal fails on a machine that has everything it needs. These are the
+# directories a Windows toolchain actually lands in, and finding one is enough
+# to build with.
+#
+# $(wildcard), not a shell: it is make's own file test, so this costs no
+# process and works before anything has been established about the shell. None
+# of these paths contain a space, which is why they can be a make word list at
+# all - "C:\Program Files\LLVM\bin" cannot be, and is named in the error below
+# rather than searched, because a path with a space in it is not one word to
+# make and quoting it through to both platforms' shells is a bigger change than
+# this problem is worth.
+#
+# PATH is PREPENDED rather than CC being rewritten to an absolute path, because
+# the compiler is not the only thing needed from that directory: ksigbuilder
+# starts ld.lld with CreateProcess, which searches PATH and knows nothing about
+# this Makefile's variables. One prepend covers both, and the rest of PATH is
+# untouched - verified, 21 entries in and 22 out.
+#
+# Announced with $(info), not done quietly. A build that works because
+# something was found in a place the user did not ask for should say so: the
+# alternative is a build that behaves differently on two machines for a reason
+# neither of them prints.
+KOF_TOOLDIRS := C:/msys64/clangarm64/bin C:/msys64/mingw64/bin \
+                C:/msys64/clang64/bin C:/msys64/mingw32/bin
+ifneq ($(KOF_CC_FOUND),yes)
+KOF_TOOLDIR := $(patsubst %/,%,$(firstword $(dir \
+                   $(wildcard $(addsuffix /$(CC).exe,$(KOF_TOOLDIRS))))))
+ifneq ($(KOF_TOOLDIR),)
+export PATH := $(subst /,\,$(KOF_TOOLDIR));$(PATH)
+$(info make: $(CC) was not on PATH; using the one in $(KOF_TOOLDIR))
+endif
+endif
+
+ifneq ($(KOF_CC_FOUND),yes)
+$(error No C compiler: '$(CC)' is not on PATH. Install one and put it there, \
+then retry. MSYS2 (https://www.msys2.org/) puts clang in \
+C:\msys64\clangarm64\bin on ARM64 or C:\msys64\mingw64\bin on x86-64; LLVM \
+from winget ("winget install LLVM.LLVM") puts it in \
+C:\Program Files\LLVM\bin. Building the signature databases also needs \
+ld.lld from the same place. A compiler that is installed but named something \
+else can be given directly: make CC=clang-19)
+endif
+#
 # TMP/TEMP: a linked binary needs somewhere to put its intermediates, and the
 # native compiler reads the Windows convention for that rather than TMPDIR.
 # $(CURDIR) is already a Windows path when make is native, and the mixed
@@ -169,7 +261,19 @@ SHELL       := powershell.exe
 # which is one more POSIX tool (cygpath) the build no longer looks for.
 export TMP  := $(subst /,\,$(CURDIR))\build\temp
 export TEMP := $(TMP)
-CFLAGS      += -pthread '-Wl,-Bstatic' -lwinpthread '-Wl,-Bdynamic'
+#
+# -pthread in CFLAGS because it means something at both steps; the rest in
+# LDFLAGS because it does not.
+#
+# They were all in CFLAGS, and every -c compile in the tree then printed three
+# warnings it could do nothing about - "'linker' input unused" for each of
+# -Wl,-Bstatic, -lwinpthread and -Wl,-Bdynamic - which is three lines per
+# object file for a build that has nothing wrong with it. That is worse than
+# untidy: a build whose normal output is warnings is a build where the warning
+# that matters goes past unread. LDFLAGS is on every link command in this file,
+# so nothing about the resulting binaries changes.
+CFLAGS      += -pthread
+LDFLAGS     += '-Wl,-Bstatic' -lwinpthread '-Wl,-Bdynamic'
 # By default every signature blob this engine loads is x86_64 machine code on
 # every host - deliberate, see ksigbuilder, since a database has to be
 # one thing every scanner can load rather than a matrix of per-arch builds.
@@ -199,12 +303,26 @@ CFLAGS      += -pthread '-Wl,-Bstatic' -lwinpthread '-Wl,-Bdynamic'
 # end on real ARM64 Windows hardware: a hosted hello-world built this way
 # ran correctly under Windows's x64 emulation, and so did the full scanner
 # against a real PE, where the native-ARM64 build had crashed instantly.
-# KOF_HOST_MACH=arm64 asks for the other half of this: a host tool that is
-# ITSELF native ARM64 machine code, loading blobs ksigbuilder built with
-# KOF_TARGET_MACH=arm64 (see the sigs recipe below) - nothing here runs under
-# Windows's x64 emulation at all. Unset (the default) keeps every existing
-# build byte-for-byte the same: still forced to x86_64, still what every
-# database shipped so far was built for.
+# That cross-compile is now what you ASK for rather than what you get.
+#
+# The default follows the compiler: whatever machine it says it targets is the
+# machine the tools and every signature blob are built for, so on this ARM64
+# box a plain `make` produces ARM64 throughout and nothing runs under Windows's
+# x64 emulation. It used to force x86_64 on every host, which was right while
+# an ARM64-native build did not work at all - jumping into an x86_64 blob from
+# an ARM64 process is an illegal instruction - and stopped being right once it
+# did. The failure it was avoiding is a mismatch between the tools and the
+# blobs, and matching them to the compiler avoids it in the direction that
+# costs nothing at run time instead of the one that pays the emulation tax
+# forever.
+#
+# KOF_HOST_MACH still overrides in both directions - x86_64 for the machine
+# every database shipped so far was built for, arm64 to force it the other way
+# on an x86_64 host - and a forced machine that is not the compiler's own is
+# what the sysroots below are for. WORTH KNOWING BEFORE SHIPPING: a database
+# is machine-specific, so an ARM64 build now produces packs an x86_64 scanner
+# refuses (kofdb says "built for machine 1, this is 2" and skips the file).
+# Building what is distributed still means saying KOF_HOST_MACH=x86_64.
 #
 # Both machines build into the same tree, and switching between them is safe
 # for one reason: this variable changes CFLAGS, so it changes FLAGSIG, so the
@@ -247,6 +365,25 @@ KOF_CROSS_FLAGS :=
 # x86_64 default - the pack says one thing and carries the other, and the
 # scanner dies on STATUS_ILLEGAL_INSTRUCTION inside the first module. So both
 # are decided here, once, and handed down.
+#
+# Unset means "whatever this compiler already is", which is the whole of
+# building native without being asked to.
+#
+# Read from -dumpmachine and not from the CPU: $(PROCESSOR_ARCHITECTURE) is the
+# architecture of the process that reads it, and make itself is an x86-64
+# binary running under emulation on this ARM64 box - it reads "AMD64" on
+# hardware that has no x86-64 in it. The compiler is the one thing here that
+# cannot be wrong about what it targets, and it is also the thing whose answer
+# actually matters: a native build is one where no cross flags are added at
+# all, which is exactly the case where this agrees with the compiler.
+ifeq ($(KOF_HOST_MACH),)
+ifneq ($(findstring aarch64,$(CC_MACHINE)),)
+KOF_HOST_MACH := arm64
+else
+KOF_HOST_MACH := x86_64
+endif
+endif
+
 KOF_TARGET_TRIPLE :=
 ifeq ($(KOF_HOST_MACH),arm64)
 KOF_TARGET_TRIPLE := aarch64-w64-windows-gnu
@@ -310,7 +447,14 @@ SILENCE  = 2>$$null
 # is, and which dependency files exist. Both are one call, so they are spelled
 # per platform here instead of reaching for `date` and `find`.
 NOW_UTC  = (Get-Date).ToUniversalTime().ToString('yyyyMMddHH')
-FIND_DEPS = Get-ChildItem -Recurse -Filter *.d -ErrorAction SilentlyContinue $(BUILD) | ForEach-Object FullName
+#
+# Guarded with Test-Path for the reason RMRF is, and one more: the ONE error
+# worth tolerating here is "the tree has not been built yet", and
+# -ErrorAction SilentlyContinue tolerated every other one too. A directory
+# that cannot be read - a permission, a half-deleted build, a path that is now
+# a file - came back as an empty list, indistinguishable from a clean tree, and
+# the result was a build that quietly rebuilt nothing after a header change.
+FIND_DEPS = if (Test-Path '$(BUILD)') { Get-ChildItem -Recurse -Filter *.d '$(BUILD)' | ForEach-Object FullName }
 # The fixture builder, which is a program rather than a make recipe because it
 # probes toolchains. It exists twice for the reason its own headers give: a
 # PowerShell recipe cannot run a .sh - Windows hands it to a file association,
@@ -426,9 +570,12 @@ help:
 	$(info $(SP)  databases     compile bases/ into the shipping databases)
 	$(info $(SP)                                                 -> $(OUT)/databases)
 	$(info $(SP)  databases BASEDIR=D   compile D instead        -> $(TEST)/databases-<name>)
-	$(info $(SP)  KOF_HOST_MACH=arm64   (Windows) build the tools and every signature)
-	$(info $(SP)                        blob ARM64-native, instead of the default)
-	$(info $(SP)                        x86_64 cross-compile)
+	$(info $(SP)  KOF_HOST_MACH=<m>     (Windows) build the tools and every signature)
+	$(info $(SP)                        blob for machine <m>: x86_64 or arm64. The)
+	$(info $(SP)                        default is whatever the compiler already)
+	$(info $(SP)                        targets, here $(KOF_HOST_MACH). A database is)
+	$(info $(SP)                        machine-specific, so say x86_64 to build the)
+	$(info $(SP)                        one that is distributed.)
 	$(info $(SP)  unit          build and run the tests)
 	$(info $(SP)  fixtures      build the binaries the tests parse)
 	$(info $(SP)  clean         remove $(BUILD))

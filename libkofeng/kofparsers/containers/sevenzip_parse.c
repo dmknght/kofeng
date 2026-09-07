@@ -513,13 +513,15 @@ static int one_folder(kof_buf h, uint64_t *at, struct kof_7z_info *z,
 	 * every branch is wrong.
 	 */
 	if (fo->filter == KOF_7Z_CODER_BCJ2 && nc >= 2u) {
-		uint64_t in_base = 0, out_base = 0, c, j;
+		uint64_t in_base = 0, c, j;
 
-		/* Where the last coder's inputs start. */
-		for (c = 0; c + 1u < nc; c++) {
+		/* Where the last coder's inputs start. Only the INPUT base is
+		 * wanted: the matching output base was accumulated here too and
+		 * never read, because the bind-pair chase below walks the
+		 * outputs itself and keeps its own `ob` while it does. clang
+		 * reports it as set-but-unused, and it is. */
+		for (c = 0; c + 1u < nc; c++)
 			in_base += cin[c];
-			out_base += cout[c];
-		}
 		if (cin[nc - 1u] == 4u) {
 			for (j = 0; j < 4u; j++) {
 				uint64_t want = in_base + j, b, src = want;

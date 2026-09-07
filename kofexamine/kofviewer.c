@@ -1568,7 +1568,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 
 		if (fd < 0)
 			return 0;
-		if (write(fd, bytes, (size_t)len) != (ssize_t)len) {
+		if (!kof_write_all(fd, bytes, len)) {
 			close(fd);
 			return 0;
 		}
@@ -8578,18 +8578,7 @@ static void redraw(struct view *v)
 		}
 	}
 	if (o.n)
-		{
-			size_t off = 0;
-
-			while (off < o.n) {
-				ssize_t k = write(STDOUT_FILENO, o.p + off,
-						  o.n - off);
-
-				if (k <= 0)
-					break;
-				off += (size_t)k;
-			}
-		}
+		(void)kof_write_all(STDOUT_FILENO, o.p, o.n);
 	free(o.p);
 }
 
