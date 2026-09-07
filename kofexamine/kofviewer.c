@@ -9498,6 +9498,7 @@ static int fmt_group(uint8_t f)
 	case KOF_FMT_DOCOLE:
 	case KOF_FMT_RTF:
 	case KOF_FMT_PDF:
+	case KOF_FMT_DOCZIP:
 		return 1;
 	case KOF_FMT_ZIP:
 	case KOF_FMT_TAR:
@@ -9510,6 +9511,10 @@ static int fmt_group(uint8_t f)
 		return 3;
 	}
 }
+
+/* See the note in the loop that reads it: a format the engine reports without
+ * a collector of its own. */
+static const uint8_t about_extra[] = { KOF_FMT_DOCZIP };
 
 #define ABOUT_MAX  40
 #define ABOUT_W    200
@@ -9664,6 +9669,27 @@ static void about_build(struct view *v)
 			at += (uint32_t)snprintf(row + at, sizeof row - at,
 						 " %s",
 						 kof_format_name(fmts[k].format));
+		}
+		/*
+		 * AND THE FORMATS THAT ARE REPORTED WITHOUT BEING PARSERS.
+		 *
+		 * kof_parser_list is the collectors, and one format this build
+		 * opens is not one of them: zip_parse decides from the entry
+		 * names whether what it has is an ordinary archive or an Office
+		 * document, so DocZip has an enum value and a name and no
+		 * collector of its own. Left to the parser list alone the box
+		 * said nothing about it, which reads as a format this build
+		 * cannot open.
+		 */
+		for (k = 0; k < sizeof about_extra / sizeof about_extra[0]; k++) {
+			if (fmt_group(about_extra[k]) != g)
+				continue;
+			any = 1;
+			if (at + 1u >= sizeof row)
+				break;
+			at += (uint32_t)snprintf(row + at, sizeof row - at,
+						 " %s",
+						 kof_format_name(about_extra[k]));
 		}
 		if (any)
 			abt("  " A_DIM "%-11s" A_OFF "%s", gname[g], row);
