@@ -24,6 +24,8 @@
 #include "../../libkofgrille/wevt_ring.h"
 #include "../../libkofgrille/wfilter.h"
 #include "../../libkofgrille/wtext.h"
+#include "../../libkofeng/kofevt/kofevt.h"
+#include "../../libkofeng/kofevt/kofevtlog.h"
 
 static int failures;
 
@@ -61,11 +63,11 @@ static void eq_u64(const char *what, uint64_t got, uint64_t want)
  */
 static void t_layout(void)
 {
-	if (sizeof(struct kofw_evt) != KOFW_EVT_SIZE)
-		fail("layout", "struct kofw_evt is not KOFW_EVT_SIZE bytes");
+	if (sizeof(struct kofw_evt) != KOFW_REC_SIZE)
+		fail("layout", "struct kofw_evt is not KOFW_REC_SIZE bytes");
 	if ((size_t)((const char *)&((struct kofw_evt *)0)->text -
-		     (const char *)0) != KOFW_EVT_HEAD)
-		fail("layout", "KOFW_EVT_HEAD is not where text[] starts");
+		     (const char *)0) != KOFW_REC_HEAD)
+		fail("layout", "KOFW_REC_HEAD is not where text[] starts");
 }
 
 /* ---- every type has a name ---------------------------------------------- */
@@ -81,8 +83,8 @@ static void t_type_names(void)
 {
 	uint16_t i;
 
-	for (i = 1; i < KOFW_EVT_TYPE_COUNT; i++) {
-		const char *n = kofw_evt_type_name(i);
+	for (i = 1; i < KOF_EVT_TYPE_COUNT; i++) {
+		const char *n = kof_evt_verb_name(i);
 
 		if (!n || !*n || !strcmp(n, "?")) {
 			printf("  FAIL type name: verb %u has no name\n",
@@ -92,7 +94,7 @@ static void t_type_names(void)
 	}
 	/* Out of range still has to answer something, so a record written by a
 	 * build that knew one more verb still prints. */
-	if (strcmp(kofw_evt_type_name(KOFW_EVT_TYPE_COUNT + 50u), "?"))
+	if (strcmp(kof_evt_verb_name(KOF_EVT_TYPE_COUNT + 50u), "?"))
 		fail("type name", "an unknown verb did not come back as ?");
 
 	for (i = 1; i < KOFW_PROV_COUNT; i++) {
@@ -228,11 +230,11 @@ static void t_ansi(void)
 
 static void loc_is(const char *path, uint8_t want)
 {
-	uint8_t got = kofw_classify_path(path);
+	uint8_t got = kof_classify_path(path);
 
 	if (got != want) {
 		printf("  FAIL classify \"%s\": got %s, wanted %s\n", path,
-		       kofw_loc_name(got), kofw_loc_name(want));
+		       kof_loc_name(got), kof_loc_name(want));
 		failures++;
 	}
 }
@@ -246,33 +248,33 @@ static void t_classify(void)
 	 * check that ran first would swallow it and every dropper's first write
 	 * would be filed as ordinary user activity.
 	 */
-	loc_is("C:\\Users\\bob\\AppData\\Local\\Temp\\a.exe", KOFW_LOC_TEMP);
-	loc_is("C:\\Windows\\Temp\\a.exe", KOFW_LOC_TEMP);
-	loc_is("C:\\Users\\bob\\Desktop\\a.exe", KOFW_LOC_USER);
+	loc_is("C:\\Users\\bob\\AppData\\Local\\Temp\\a.exe", KOF_LOC_TEMP);
+	loc_is("C:\\Windows\\Temp\\a.exe", KOF_LOC_TEMP);
+	loc_is("C:\\Users\\bob\\Desktop\\a.exe", KOF_LOC_USER);
 
 	/* ETW delivers device paths, not drive letters. If this stopped
 	 * matching, every module load would classify as `other` and the
 	 * system-module filter would suppress nothing. */
 	loc_is("\\Device\\HarddiskVolume3\\Windows\\System32\\ntdll.dll",
-	       KOFW_LOC_SYSTEM);
+	       KOF_LOC_SYSTEM);
 	loc_is("\\Device\\HarddiskVolume3\\Users\\bob\\AppData\\Local\\Temp\\x",
-	       KOFW_LOC_TEMP);
+	       KOF_LOC_TEMP);
 
 	/* The 8.3 spellings of the same places - the branch that exists so a
 	 * short path is not silently classified as something else. */
-	loc_is("C:\\DOCUME~1\\bob\\LOCALS~1\\Temp\\a.exe", KOFW_LOC_TEMP);
-	loc_is("C:\\PROGRA~1\\thing\\a.dll", KOFW_LOC_PROGRAMS);
+	loc_is("C:\\DOCUME~1\\bob\\LOCALS~1\\Temp\\a.exe", KOF_LOC_TEMP);
+	loc_is("C:\\PROGRA~1\\thing\\a.dll", KOF_LOC_PROGRAMS);
 
 	/* The two extra system directories an ARM64 machine has. */
-	loc_is("C:\\Windows\\SyChpe32\\kernel32.dll", KOFW_LOC_SYSTEM);
-	loc_is("C:\\Windows\\SysArm32\\kernel32.dll", KOFW_LOC_SYSTEM);
-	loc_is("C:\\Windows\\SysWOW64\\kernel32.dll", KOFW_LOC_SYSTEM);
+	loc_is("C:\\Windows\\SyChpe32\\kernel32.dll", KOF_LOC_SYSTEM);
+	loc_is("C:\\Windows\\SysArm32\\kernel32.dll", KOF_LOC_SYSTEM);
+	loc_is("C:\\Windows\\SysWOW64\\kernel32.dll", KOF_LOC_SYSTEM);
 
 	/* Case is not a way to spell a different location. */
-	loc_is("c:\\windows\\system32\\ntdll.dll", KOFW_LOC_SYSTEM);
-	loc_is("C:\\WINDOWS\\SYSTEM32\\NTDLL.DLL", KOFW_LOC_SYSTEM);
+	loc_is("c:\\windows\\system32\\ntdll.dll", KOF_LOC_SYSTEM);
+	loc_is("C:\\WINDOWS\\SYSTEM32\\NTDLL.DLL", KOF_LOC_SYSTEM);
 
-	loc_is("D:\\stuff\\a.exe", KOFW_LOC_OTHER);
+	loc_is("D:\\stuff\\a.exe", KOF_LOC_OTHER);
 
 	/*
 	 * WINDOWS FOLDS CASE, LINUX DOES NOT, and one matcher cannot do both -
@@ -282,50 +284,50 @@ static void t_classify(void)
 	 * different file from /etc/passwd, and reporting T1136.001 against it
 	 * is a finding about a file nobody touched.
 	 */
-	loc_is("C:\\WINDOWS\\SYSTEM32\\NTDLL.DLL", KOFW_LOC_SYSTEM);
+	loc_is("C:\\WINDOWS\\SYSTEM32\\NTDLL.DLL", KOF_LOC_SYSTEM);
 	loc_is("\\REGISTRY\\MACHINE\\SOFTWARE\\Microsoft\\Windows\\"
-	       "CURRENTVERSION\\RUN", KOFW_LOC_AUTOSTART);
-	loc_is("/etc/passwd", KOFW_LOC_CREDENTIAL);
-	loc_is("/etc/PASSWD", KOFW_LOC_OTHER);
-	loc_is("/ETC/ld.so.preload", KOFW_LOC_OTHER);
+	       "CURRENTVERSION\\RUN", KOF_LOC_AUTOSTART);
+	loc_is("/etc/passwd", KOF_LOC_CREDENTIAL);
+	loc_is("/etc/PASSWD", KOF_LOC_OTHER);
+	loc_is("/ETC/ld.so.preload", KOF_LOC_OTHER);
 
 	/* ---- the technique tag, which rides the same single pass -------- */
 	{
 		uint16_t att = 0xffff;
 
-		if (kofw_classify("\\REGISTRY\\MACHINE\\SOFTWARE\\Microsoft"
+		if (kof_classify("\\REGISTRY\\MACHINE\\SOFTWARE\\Microsoft"
 				  "\\Windows\\CurrentVersion\\Run", &att)
-		    != KOFW_LOC_AUTOSTART || att != KOFW_ATT_RUN_KEY)
+		    != KOF_LOC_AUTOSTART || att != KOF_ATT_RUN_KEY)
 			fail("attack", "a Run value is not T1547.001");
 
-		if (kofw_classify("/etc/ld.so.preload", &att)
-		    != KOFW_LOC_PRELOAD || att != KOFW_ATT_LD_PRELOAD)
+		if (kof_classify("/etc/ld.so.preload", &att)
+		    != KOF_LOC_PRELOAD || att != KOF_ATT_LD_PRELOAD)
 			fail("attack", "ld.so.preload is not T1574.006");
 
-		if (kofw_classify("C:\\Windows\\System32\\drivers\\etc\\"
-				  "hosts", &att) != KOFW_LOC_HOSTS ||
-		    att != KOFW_ATT_HOSTS)
+		if (kof_classify("C:\\Windows\\System32\\drivers\\etc\\"
+				  "hosts", &att) != KOF_LOC_HOSTS ||
+		    att != KOF_ATT_HOSTS)
 			fail("attack", "the hosts file is not T1562.001");
 
-		if (kofw_classify("\\REGISTRY\\MACHINE\\SYSTEM\\"
+		if (kof_classify("\\REGISTRY\\MACHINE\\SYSTEM\\"
 				  "CurrentControlSet\\Services\\evil", &att)
-		    != KOFW_LOC_SERVICE || att != KOFW_ATT_SERVICE)
+		    != KOF_LOC_SERVICE || att != KOF_ATT_SERVICE)
 			fail("attack", "a service key is not T1543.003");
 
 		/* Temp is not a technique. A location worth knowing and a
 		 * technique are different claims, and conflating them would
 		 * tag every ordinary download. */
-		if (kofw_classify("C:\\Users\\b\\AppData\\Local\\Temp\\a",
-				  &att) != KOFW_LOC_TEMP ||
-		    att != KOFW_ATT_NONE)
+		if (kof_classify("C:\\Users\\b\\AppData\\Local\\Temp\\a",
+				  &att) != KOF_LOC_TEMP ||
+		    att != KOF_ATT_NONE)
 			fail("attack", "temp carries a technique tag");
 
 		/* Every technique in the list has both an id and a name. */
 		{
 			uint16_t i;
-			for (i = 1; i < KOFW_ATT_COUNT; i++) {
-				if (!*kofw_attack_id(i) ||
-				    !*kofw_attack_name(i)) {
+			for (i = 1; i < KOF_ATT_COUNT; i++) {
+				if (!*kof_attack_id(i) ||
+				    !*kof_attack_name(i)) {
 					printf("  FAIL attack %u: no id or "
 					       "name\n", (unsigned)i);
 					failures++;
@@ -336,8 +338,8 @@ static void t_classify(void)
 
 	/* "nothing to classify" is not the same answer as "classified, and it
 	 * is nowhere interesting" - drop_loc is tested against this. */
-	loc_is("", KOFW_LOC_UNKNOWN);
-	loc_is(NULL, KOFW_LOC_UNKNOWN);
+	loc_is("", KOF_LOC_UNKNOWN);
+	loc_is(NULL, KOF_LOC_UNKNOWN);
 }
 
 /* ---- the ring ----------------------------------------------------------- */
@@ -429,8 +431,12 @@ static void mk(struct kofw_evt *e, uint16_t type, uint32_t pid, uint32_t ppid)
 	e->pid        = pid;
 	e->ppid       = ppid;
 	e->raiser_pid = ppid;
-	e->off_image  = KOFW_TEXT_NONE;
-	e->off_object = KOFW_TEXT_NONE;
+	e->off_image   = KOF_TEXT_NONE;
+	e->off_object  = KOF_TEXT_NONE;
+	/* All THREE, because 0 is a legal offset: a record that left this at
+	 * zero would report the object string as the command line, which is
+	 * exactly what this test caught the first time it ran. */
+	e->off_cmdline = KOF_TEXT_NONE;
 }
 
 static void set_obj(struct kofw_evt *e, const char *path)
@@ -463,30 +469,30 @@ static void t_scope(void)
 	}
 
 	/* A child of the root is kin. */
-	mk(&e, KOFW_EVT_PROC_START, 200, 100);
+	mk(&e, KOF_EVT_PROC_START, 200, 100);
 	if (!kofw_filter_apply(&t, &f, &e, NULL))
 		fail("scope", "refused a child of the root");
 
 	/* A GRANDCHILD is kin too - the set has to grow transitively or a
 	 * dropper that shells out twice disappears. */
-	mk(&e, KOFW_EVT_PROC_START, 300, 200);
+	mk(&e, KOF_EVT_PROC_START, 300, 200);
 	if (!kofw_filter_apply(&t, &f, &e, NULL))
 		fail("scope", "refused a grandchild");
 
 	/* An unrelated process is not. */
-	mk(&e, KOFW_EVT_PROC_START, 400, 999);
+	mk(&e, KOF_EVT_PROC_START, 400, 999);
 	if (kofw_filter_apply(&t, &f, &e, NULL))
 		fail("scope", "admitted an unrelated process");
 
 	/* A file event from inside the tree is kept, one from outside is not. */
-	mk(&e, KOFW_EVT_FILE_NEW, 300, 0);
+	mk(&e, KOF_EVT_FILE_NEW, 300, 0);
 	set_obj(&e, "C:\\Users\\bob\\AppData\\Local\\Temp\\drop.exe");
 	if (!kofw_filter_apply(&t, &f, &e, NULL))
 		fail("scope", "refused a file event from the tree");
-	if (e.obj_loc != KOFW_LOC_TEMP)
+	if (e.obj_loc != KOF_LOC_TEMP)
 		fail("scope", "did not classify the object path");
 
-	mk(&e, KOFW_EVT_FILE_NEW, 400, 0);
+	mk(&e, KOF_EVT_FILE_NEW, 400, 0);
 	set_obj(&e, "C:\\Users\\bob\\AppData\\Local\\Temp\\other.exe");
 	if (kofw_filter_apply(&t, &f, &e, NULL))
 		fail("scope", "admitted a file event from outside the tree");
@@ -498,21 +504,21 @@ static void t_scope(void)
 	 * the ProcessStart of every program that lives in System32 - which is
 	 * most of them.
 	 */
-	f.drop_loc = 1u << KOFW_LOC_SYSTEM;
+	f.drop_loc = 1u << KOF_LOC_SYSTEM;
 
-	mk(&e, KOFW_EVT_IMAGE_LOAD, 300, 0);
+	mk(&e, KOF_EVT_IMAGE_LOAD, 300, 0);
 	set_obj(&e, "C:\\Windows\\System32\\ntdll.dll");
 	if (kofw_filter_apply(&t, &f, &e, NULL))
 		fail("scope", "kept a system module load under drop_loc");
 
-	mk(&e, KOFW_EVT_IMAGE_LOAD, 300, 0);
+	mk(&e, KOF_EVT_IMAGE_LOAD, 300, 0);
 	set_obj(&e, "C:\\Users\\bob\\AppData\\Local\\Temp\\evil.dll");
 	if (!kofw_filter_apply(&t, &f, &e, NULL))
 		fail("scope", "dropped a module load from temp");
 
-	mk(&e, KOFW_EVT_PROC_START, 500, 300);
+	mk(&e, KOF_EVT_PROC_START, 500, 300);
 	set_obj(&e, "");
-	e.off_object = KOFW_TEXT_NONE;
+	e.off_object = KOF_TEXT_NONE;
 	if (!kofw_filter_apply(&t, &f, &e, NULL))
 		fail("scope", "drop_loc suppressed a process start");
 	f.drop_loc = 0;
@@ -520,14 +526,14 @@ static void t_scope(void)
 	/* Liveness: the tree is finished when every tracked pid has stopped,
 	 * which is what a trace waits for. */
 	eq_u64("scope alive", t.n_alive_tracked, 4);
-	mk(&e, KOFW_EVT_PROC_STOP, 500, 0);
+	mk(&e, KOF_EVT_PROC_STOP, 500, 0);
 	(void)kofw_filter_apply(&t, &f, &e, NULL);
-	mk(&e, KOFW_EVT_PROC_STOP, 300, 0);
+	mk(&e, KOF_EVT_PROC_STOP, 300, 0);
 	(void)kofw_filter_apply(&t, &f, &e, NULL);
 	eq_u64("scope alive after two stops", t.n_alive_tracked, 2);
 
 	/* A repeated stop for the same pid must not underflow the count. */
-	mk(&e, KOFW_EVT_PROC_STOP, 300, 0);
+	mk(&e, KOF_EVT_PROC_STOP, 300, 0);
 	(void)kofw_filter_apply(&t, &f, &e, NULL);
 	eq_u64("scope alive after a repeat stop", t.n_alive_tracked, 2);
 
@@ -536,7 +542,7 @@ static void t_scope(void)
 	{
 		struct kofw_filter none;
 		memset(&none, 0, sizeof none);
-		mk(&e, KOFW_EVT_FILE_NEW, 4242, 0);
+		mk(&e, KOF_EVT_FILE_NEW, 4242, 0);
 		if (!kofw_filter_apply(&t, &none, &e, NULL))
 			fail("scope", "a zeroed filter refused something");
 	}
@@ -565,6 +571,252 @@ static void t_pid_reuse(void)
 		fail("reuse", "refused a lookup with no discriminator");
 }
 
+/* ---- the recorded trace ------------------------------------------------- */
+
+/*
+ * THE POINT OF THE FORMAT, TESTED ON THE PLATFORM THAT CANNOT COLLECT.
+ *
+ * A trace is written and read back here on a host with no ETW at all - which
+ * is the whole claim wtrace.h makes, and the reason a rule engine over events
+ * will be testable when there is one.
+ */
+static void t_trace(void)
+{
+	const char *path = "grille_host_trace.tmp";
+	struct kofevt_log_w *w;
+	struct kofevt_log_r *r;
+	const struct kofevt_log_hdr *h;
+	struct kofevt_log_info li;
+	struct kofw_evt e;
+	const char *why = "";
+	uint64_t n;
+	unsigned i, got = 0;
+
+	memset(&li, 0, sizeof li);
+	li.rec_size = (uint32_t)sizeof(struct kofw_evt);
+	li.rec_kind = KOFEVT_REC_KOFW;
+	li.build    = 20260908u;
+	li.os       = 1u;
+	li.root_pid = 4321u;
+	w = kofevt_log_create(path, &li);
+	if (!w) {
+		fail("trace", "could not create");
+		return;
+	}
+	for (i = 0; i < 100; i++) {
+		mk(&e, KOF_EVT_FILE_NEW, 1000u + i, 7u);
+		e.seq   = i;
+		e.stamp = 1000000ull + i;
+		set_obj(&e, "C:\\Users\\b\\AppData\\Local\\Temp\\a.exe");
+		if (kofevt_log_write(w, &e))
+			fail("trace", "write failed");
+	}
+	n = kofevt_log_close(w);
+	eq_u64("trace written", n, 100);
+
+	r = kofevt_log_open(path, (uint32_t)sizeof(struct kofw_evt),
+			    KOFEVT_REC_KOFW, &why);
+	if (!r) {
+		printf("  FAIL trace open: %s\n", why);
+		failures++;
+		remove(path);
+		return;
+	}
+	h = kofevt_log_header(r);
+	eq_u64("trace rec_size", h->rec_size, sizeof(struct kofw_evt));
+	eq_u64("trace root_pid", h->root_pid, 4321u);
+	eq_u64("trace build", h->build, 20260908u);
+	/* Written by seeking back at close - zero here would mean the writer
+	 * was killed, which is a different thing from an empty trace. */
+	eq_u64("trace n_records", h->n_records, 100);
+
+	while (kofevt_log_read(r, &e)) {
+		eq_u64("trace seq", e.seq, got);
+		eq_u64("trace pid", e.pid, 1000u + got);
+		eq_str("trace object", kofw_evt_object(&e),
+		       "C:\\Users\\b\\AppData\\Local\\Temp\\a.exe");
+		got++;
+	}
+	eq_u64("trace read back", got, 100);
+	kofevt_log_free(r);
+
+	/* A file that is not a trace is refused, not read. */
+	{
+		FILE *f = fopen(path, "wb");
+		if (f) {
+			fputs("not a trace at all, quite definitely", f);
+			fclose(f);
+		}
+		if (kofevt_log_open(path, (uint32_t)sizeof(struct kofw_evt),
+				    KOFEVT_REC_KOFW, &why))
+			fail("trace", "opened something that is not a log");
+	}
+
+	/*
+	 * THE CHECK THE FORMAT EXISTS FOR: a record size that is not ours is
+	 * refused rather than read from the wrong offsets.
+	 */
+	{
+		struct kofevt_log_hdr bad;
+		FILE *f;
+
+		memset(&bad, 0, sizeof bad);
+		bad.magic    = KOFEVT_LOG_MAGIC;
+		bad.version  = KOFEVT_LOG_VERSION;
+		bad.hdr_size = (uint16_t)sizeof bad;
+		bad.rec_size = (uint32_t)sizeof(struct kofw_evt) + 8u;
+		f = fopen(path, "wb");
+		if (f) {
+			fwrite(&bad, sizeof bad, 1, f);
+			fclose(f);
+		}
+		bad.rec_kind = KOFEVT_REC_KOFW;
+		if (kofevt_log_open(path, (uint32_t)sizeof(struct kofw_evt),
+				    KOFEVT_REC_KOFW, &why))
+			fail("trace", "read a log whose record size differs");
+	}
+
+	/*
+	 * SIZE IS NOT IDENTITY. A record of the right size from a different
+	 * collector decodes at the right offsets and means something else, and
+	 * nothing downstream can notice - so the kind is checked too.
+	 */
+	{
+		struct kofevt_log_hdr other;
+		FILE *f;
+
+		memset(&other, 0, sizeof other);
+		other.magic    = KOFEVT_LOG_MAGIC;
+		other.version  = KOFEVT_LOG_VERSION;
+		other.hdr_size = (uint16_t)sizeof other;
+		other.rec_size = (uint32_t)sizeof(struct kofw_evt);
+		other.rec_kind = KOFEVT_REC_KOF;   /* the neutral record */
+		f = fopen(path, "wb");
+		if (f) {
+			fwrite(&other, sizeof other, 1, f);
+			fclose(f);
+		}
+		if (kofevt_log_open(path, (uint32_t)sizeof(struct kofw_evt),
+				    KOFEVT_REC_KOFW, &why))
+			fail("trace", "read another collector's record as ours");
+		/* ...but a reader that only reports what a file claims may
+		 * open it, which is what KOFEVT_REC_NONE is for. */
+		{
+			struct kofevt_log_r *any =
+				kofevt_log_open(path, 0, KOFEVT_REC_NONE, &why);
+			if (!any)
+				fail("trace", "REC_NONE refused a valid log");
+			else
+				kofevt_log_free(any);
+		}
+	}
+
+	remove(path);
+}
+
+/* ---- collector record -> neutral record --------------------------------- */
+
+/*
+ * THE CONVERSION IS WHERE THE TWO VOCABULARIES MEET, so it is the one place a
+ * mismatch between them turns into a wrong answer rather than a compile error.
+ *
+ * Checked field by field on purpose. A memcpy-shaped test would pass while
+ * actor_pid held a tid, because both are uint32 and both are plausible.
+ */
+static void t_convert(void)
+{
+	struct kofw_evt in;
+	struct kof_evt  out;
+
+	mk(&in, KOF_EVT_FILE_NEW, 4242u, 7u);
+	in.stamp       = 123456789ull;
+	in.seq         = 99u;
+	in.create_time = 555u;
+	in.tid         = 31u;
+	in.session_id  = 2u;
+	in.exit_code   = 0u;
+	in.addr        = 0x7ff600001000ull;
+	in.addr_size   = 4096u;
+	in.net_daddr   = 0x08080808u;
+	in.net_dport   = 0x5000u;      /* 80, network order */
+	in.net_size    = 1500u;
+	in.raw_id      = 30u;
+	in.attack      = KOF_ATT_RUN_KEY;
+	in.obj_loc     = KOF_LOC_AUTOSTART;
+	set_obj(&in, "C:\\Windows\\Temp\\a.exe");
+
+	kofw_evt_to_kof(&in, &out);
+
+	eq_u64("conv stamp", out.stamp, 123456789ull);
+	eq_u64("conv seq", out.seq, 99u);
+	eq_u64("conv create_time", out.create_time, 555u);
+	eq_u64("conv pid", out.pid, 4242u);
+	eq_u64("conv ppid", out.ppid, 7u);
+	/* raiser_pid becomes actor_pid - the rename IS the point, so a test
+	 * that only compared sizes would not notice it going to the wrong
+	 * field. */
+	eq_u64("conv actor_pid", out.actor_pid, in.raiser_pid);
+	eq_u64("conv tid", out.tid, 31u);
+	eq_u64("conv session", out.session_id, 2u);
+	eq_u64("conv addr", out.addr, 0x7ff600001000ull);
+	eq_u64("conv addr_size", out.addr_size, 4096u);
+	eq_u64("conv daddr", out.net_daddr, 0x08080808u);
+	eq_u64("conv dport", out.net_dport, 0x5000u);
+	eq_u64("conv size", out.net_size, 1500u);
+	eq_u64("conv verb", out.verb, KOF_EVT_FILE_NEW);
+	eq_u64("conv raw_id", out.raw_id, 30u);
+	eq_u64("conv attack", out.attack, KOF_ATT_RUN_KEY);
+	eq_u64("conv loc", out.loc, KOF_LOC_AUTOSTART);
+	eq_u64("conv os", out.os, KOF_OS_WINDOWS);
+	eq_str("conv object", kof_evt_object(&out), "C:\\Windows\\Temp\\a.exe");
+	eq_str("conv image", kof_evt_image(&out), "");
+	eq_str("conv cmdline", kof_evt_cmdline(&out), "");
+
+	/*
+	 * THE ARENA IS SMALLER IN THE NEUTRAL RECORD - its header carries two
+	 * more fields - so text that fit in one may not fit in the other. It
+	 * has to be cut AND flagged: a path shortened without saying so is what
+	 * a later rule matches and is wrong about.
+	 */
+	{
+		size_t i;
+
+		/*
+		 * A FULL ARENA MUST SURVIVE WHOLE.
+		 *
+		 * The two records' headers grow independently, so which arena
+		 * is larger is not obvious and was guessed wrongly here once -
+		 * the neutral one is larger today, and a static assert in
+		 * wtext.c is what keeps it that way. This checks the
+		 * consequence: nothing is cut and nothing is flagged.
+		 */
+		mk(&in, KOF_EVT_FILE_NEW, 1u, 1u);
+		in.off_object = 0;
+		for (i = 0; i + 1 < sizeof in.text; i++)
+			in.text[i] = 'x';
+		in.text[sizeof in.text - 1] = '\0';
+		in.text_len = (uint16_t)sizeof in.text;
+
+		kofw_evt_to_kof(&in, &out);
+		eq_u64("conv full arena", out.text_len, sizeof in.text);
+		if (out.flags & KOF_EF_TRUNCATED)
+			fail("convert", "flagged a truncation that did not happen");
+		if (strlen(kof_evt_object(&out)) != sizeof in.text - 1u)
+			fail("convert", "lost bytes from a full arena");
+	}
+
+	/* An offset that fell outside what was copied becomes absent - the
+	 * bytes it pointed at are not there to be read. */
+	{
+		mk(&in, KOF_EVT_PROC_START, 1u, 1u);
+		in.text_len   = 4u;
+		in.off_image  = 0u;
+		in.off_object = 400u;      /* past text_len */
+		kofw_evt_to_kof(&in, &out);
+		eq_u64("conv stale offset", out.off_object, KOF_TEXT_NONE);
+	}
+}
+
 int main(void)
 {
 	printf("grille_host: the ETW-free half of libkofgrille\n");
@@ -576,6 +828,8 @@ int main(void)
 	t_ring();
 	t_scope();
 	t_pid_reuse();
+	t_convert();
+	t_trace();
 
 	if (failures) {
 		printf("%d failure(s)\n", failures);

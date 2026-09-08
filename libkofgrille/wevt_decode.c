@@ -20,15 +20,15 @@
 /*
  * THE ASSERTION kofgrille.h PROMISES.
  *
- * KOFW_EVT_HEAD is how the text arena is sized, so if a field is ever added
+ * KOFW_REC_HEAD is how the text arena is sized, so if a field is ever added
  * above text[] without moving it, every string in every record silently starts
  * at the wrong offset - and a path read from the wrong offset still looks like
  * a path. The header said this was checked here. It was not, until now.
  */
-_Static_assert(offsetof(struct kofw_evt, text) == KOFW_EVT_HEAD,
-	       "KOFW_EVT_HEAD no longer matches the record layout");
-_Static_assert(sizeof(struct kofw_evt) == KOFW_EVT_SIZE,
-	       "struct kofw_evt is not KOFW_EVT_SIZE bytes");
+_Static_assert(offsetof(struct kofw_evt, text) == KOFW_REC_HEAD,
+	       "KOFW_REC_HEAD no longer matches the record layout");
+_Static_assert(sizeof(struct kofw_evt) == KOFW_REC_SIZE,
+	       "struct kofw_evt is not KOFW_REC_SIZE bytes");
 
 const GUID KOFW_GUID_KERNEL_PROCESS = {
 	0x22fb2cd6, 0x0e7b, 0x422b,
@@ -260,23 +260,23 @@ static uint8_t field_of(const wchar_t *name, uint16_t type, uint8_t prov)
 		return KOFW_FLD_ADDR_SIZE;
 
 	if (name_is(name, "ImageName")) {
-		if (type == KOFW_EVT_PROC_START || type == KOFW_EVT_PROC_STOP)
+		if (type == KOF_EVT_PROC_START || type == KOF_EVT_PROC_STOP)
 			return KOFW_FLD_IMAGE;
 		return KOFW_FLD_OBJECT;
 	}
 	return KOFW_FLD_SKIP;
 }
 
-/* What a (provider, id) pair means to this build, or KOFW_EVT_RAW when nothing
+/* What a (provider, id) pair means to this build, or KOF_EVT_RAW when nothing
  * yet. */
 static uint16_t type_of(uint8_t prov, uint16_t id)
 {
 	if (prov == KOFW_PROV_PROCESS) {
 		switch (id) {
-		case EVID_PROCESS_START: return KOFW_EVT_PROC_START;
-		case EVID_PROCESS_STOP:  return KOFW_EVT_PROC_STOP;
-		case EVID_IMAGE_LOAD:    return KOFW_EVT_IMAGE_LOAD;
-		case EVID_IMAGE_UNLOAD:  return KOFW_EVT_IMAGE_UNLOAD;
+		case EVID_PROCESS_START: return KOF_EVT_PROC_START;
+		case EVID_PROCESS_STOP:  return KOF_EVT_PROC_STOP;
+		case EVID_IMAGE_LOAD:    return KOF_EVT_IMAGE_LOAD;
+		case EVID_IMAGE_UNLOAD:  return KOF_EVT_IMAGE_UNLOAD;
 		default: break;
 		}
 	} else if (prov == KOFW_PROV_NET) {
@@ -290,17 +290,17 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 		 * count computed from this stream.
 		 */
 		switch (id) {
-		case 12: return KOFW_EVT_NET_CONNECT;
-		case 10: return KOFW_EVT_NET_SEND;
-		case 11: return KOFW_EVT_NET_RECV;
-		case 13: return KOFW_EVT_NET_DISCONNECT;
+		case 12: return KOF_EVT_NET_CONNECT;
+		case 10: return KOF_EVT_NET_SEND;
+		case 11: return KOF_EVT_NET_RECV;
+		case 13: return KOF_EVT_NET_DISCONNECT;
 		default: break;
 		}
 	} else if (prov == KOFW_PROV_FILE) {
 		switch (id) {
-		case EVID_FILE_CREATE_NEW: return KOFW_EVT_FILE_NEW;
-		case EVID_FILE_RENAME:     return KOFW_EVT_FILE_RENAME;
-		case EVID_FILE_DELETE:     return KOFW_EVT_FILE_DELETE;
+		case EVID_FILE_CREATE_NEW: return KOF_EVT_FILE_NEW;
+		case EVID_FILE_RENAME:     return KOF_EVT_FILE_RENAME;
+		case EVID_FILE_DELETE:     return KOF_EVT_FILE_DELETE;
 		/*
 		 * FileIo Write. Established from its shape rather than from a
 		 * list: `--schema` describes id 16 version 1 as ByteOffset,
@@ -314,7 +314,7 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 		 * 10 to be kept in a map. Until that exists these are typed but
 		 * pathless, which is still better than untyped.
 		 */
-		case 16u:                  return KOFW_EVT_FILE_WRITE;
+		case 16u:                  return KOF_EVT_FILE_WRITE;
 		default: break;
 		}
 	} else if (prov == KOFW_PROV_REGISTRY) {
@@ -335,9 +335,9 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 		 * discovery run needs and is strictly more honest than a
 		 * guess. Filling this switch in afterwards is three lines.
 		 *
-		 *   case <id>: return KOFW_EVT_REG_CREATE;
-		 *   case <id>: return KOFW_EVT_REG_SET_VALUE;
-		 *   case <id>: return KOFW_EVT_REG_DELETE;
+		 *   case <id>: return KOF_EVT_REG_CREATE;
+		 *   case <id>: return KOF_EVT_REG_SET_VALUE;
+		 *   case <id>: return KOF_EVT_REG_DELETE;
 		 */
 	} else if (prov == KOFW_PROV_AMSI) {
 		/*
@@ -349,7 +349,7 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 		 * one. Both halves of that are now fixed.
 		 */
 		if (id == 1101u)
-			return KOFW_EVT_AMSI_SCAN;
+			return KOF_EVT_AMSI_SCAN;
 		/*
 		 * EMPTY FOR THE SAME REASON, WITH A DIFFERENT OBSTACLE.
 		 *
@@ -375,7 +375,7 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 		 * with the content already visible, which is most of the value.
 		 */
 	}
-	return KOFW_EVT_RAW;
+	return KOF_EVT_RAW;
 }
 
 /* What this event type is expected to carry, so what is left over after the
@@ -383,22 +383,22 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 static uint32_t wanted(uint16_t type)
 {
 	switch (type) {
-	case KOFW_EVT_PROC_START:
+	case KOF_EVT_PROC_START:
 		return KOFW_F_PID | KOFW_F_PPID | KOFW_F_CREATE_TIME |
 		       KOFW_F_SESSION | KOFW_F_IMAGE;
-	case KOFW_EVT_PROC_STOP:
+	case KOF_EVT_PROC_STOP:
 		return KOFW_F_PID | KOFW_F_CREATE_TIME | KOFW_F_EXIT_CODE |
 		       KOFW_F_IMAGE;
-	case KOFW_EVT_IMAGE_LOAD:
-	case KOFW_EVT_IMAGE_UNLOAD:
+	case KOF_EVT_IMAGE_LOAD:
+	case KOF_EVT_IMAGE_UNLOAD:
 		return KOFW_F_PID | KOFW_F_OBJECT;
-	case KOFW_EVT_FILE_NEW:
-	case KOFW_EVT_FILE_RENAME:
-	case KOFW_EVT_FILE_DELETE:
-	case KOFW_EVT_FILE_WRITE:
-	case KOFW_EVT_REG_CREATE:
-	case KOFW_EVT_REG_SET_VALUE:
-	case KOFW_EVT_REG_DELETE:
+	case KOF_EVT_FILE_NEW:
+	case KOF_EVT_FILE_RENAME:
+	case KOF_EVT_FILE_DELETE:
+	case KOF_EVT_FILE_WRITE:
+	case KOF_EVT_REG_CREATE:
+	case KOF_EVT_REG_SET_VALUE:
+	case KOF_EVT_REG_DELETE:
 		/* No pid here on purpose: Kernel-File's payload does not repeat
 		 * it, and the process that acted is the one the kernel was
 		 * running - which the header already gave. Asking for a field
@@ -727,8 +727,8 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 	out->tid         = rec->EventHeader.ThreadId;
 	out->raiser_pid  = rec->EventHeader.ProcessId;
 	out->cpu         = rec->BufferContext.ProcessorNumber;
-	out->off_image   = KOFW_TEXT_NONE;
-	out->off_object  = KOFW_TEXT_NONE;
+	out->off_image   = KOF_TEXT_NONE;
+	out->off_object  = KOF_TEXT_NONE;
 	/*
 	 * NONE, not the zero a memset leaves.
 	 *
@@ -738,7 +738,7 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 	 * network and registry event would have reported the process image as
 	 * its command line, and that reads like data.
 	 */
-	out->off_cmdline = KOFW_TEXT_NONE;
+	out->off_cmdline = KOF_TEXT_NONE;
 
 	/*
 	 * THE SUBJECT DEFAULTS TO WHOEVER RAISED THE EVENT.
@@ -930,7 +930,7 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 	 * came from, so the string is offered as "here is what it carried", not
 	 * as a field this build understands.
 	 */
-	if (out->off_object == KOFW_TEXT_NONE && spare_len &&
+	if (out->off_object == KOF_TEXT_NONE && spare_len &&
 	    tnext + 1u < sizeof out->text) {
 		size_t room = sizeof out->text - tnext, n = 0;
 		int    cut = 0;

@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "kofgrille.h"
+#include "kofevtfmt.h"
 
 /*
  * What a run produced, counted as it goes.
@@ -22,27 +23,10 @@
  * is the answer. Somebody reading four hundred events wants to know what came
  * out of them, and scrolling is not that.
  */
-struct wm_tally {
-	uint64_t proc, image;
-	uint64_t file_new, file_del, file_ren, file_wr;
-	uint64_t reg, amsi;
-	uint64_t conn, bytes_sent, bytes_recv;
-	uint64_t raw;
-};
 
-/* Count one event without printing it - what --quiet uses. Split from
- * wm_render so the tally cannot come out different depending on whether
- * anybody was looking. */
-void wm_count(const struct kofw_evt *e, struct wm_tally *t);
-
-/* Print one event and count it. `who` is the subject's name for the column and
- * may be "" - see kofw_mon_name_of. */
-void wm_render(const struct kofw_evt *e, double secs, const char *who,
-	       struct wm_tally *t);
-
-void wm_print_tally(const struct wm_tally *t, double secs, const char *what,
-		    uint64_t suppressed, uint64_t h_loc, uint64_t h_scope,
-		    uint64_t h_type);
+/* Rendering, counting and the tally moved to kofevt - see kofevtfmt.h. What is
+ * left here is the health line, which is about the COLLECTOR rather than about
+ * an event. */
 
 /*
  * LOSS IS PART OF THE RESULT, not a footnote.

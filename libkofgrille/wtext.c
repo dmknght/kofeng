@@ -6,8 +6,16 @@
  * and that is the whole of the library's test surface.
  */
 
+#include <string.h>
+
 #include "kofgrille.h"
 #include "wtext.h"
+
+/* See kofw_evt_to_kof: the conversion may not shorten a path, and this is what
+ * makes that true rather than likely. */
+_Static_assert(KOFW_REC_SIZE - KOFW_REC_HEAD <= KOF_EVT_SIZE - KOF_EVT_HEAD,
+	       "the neutral record's text arena is smaller than the "
+	       "collector's - a conversion would silently truncate paths");
 
 
 /* ------------------------------------------------------------------ UTF-16 */
@@ -146,7 +154,7 @@ size_t kofw_ansi_to_text(const uint8_t *src, size_t n, char *dst,
 
 const char *kofw_evt_image(const struct kofw_evt *e)
 {
-	if (!e || e->off_image == KOFW_TEXT_NONE ||
+	if (!e || e->off_image == KOF_TEXT_NONE ||
 	    e->off_image >= sizeof e->text)
 		return "";
 	return e->text + e->off_image;
@@ -154,7 +162,7 @@ const char *kofw_evt_image(const struct kofw_evt *e)
 
 const char *kofw_evt_cmdline(const struct kofw_evt *e)
 {
-	if (!e || e->off_cmdline == KOFW_TEXT_NONE ||
+	if (!e || e->off_cmdline == KOF_TEXT_NONE ||
 	    e->off_cmdline >= sizeof e->text)
 		return "";
 	return e->text + e->off_cmdline;
@@ -162,37 +170,12 @@ const char *kofw_evt_cmdline(const struct kofw_evt *e)
 
 const char *kofw_evt_object(const struct kofw_evt *e)
 {
-	if (!e || e->off_object == KOFW_TEXT_NONE ||
+	if (!e || e->off_object == KOF_TEXT_NONE ||
 	    e->off_object >= sizeof e->text)
 		return "";
 	return e->text + e->off_object;
 }
 
-const char *kofw_evt_type_name(uint16_t type)
-{
-	switch (type) {
-	case KOFW_EVT_PROC_START: return "ProcStart";
-	case KOFW_EVT_PROC_STOP:  return "ProcStop";
-	case KOFW_EVT_IMAGE_LOAD: return "ImageLoad";
-	case KOFW_EVT_FILE_NEW:   return "FileNew";
-	case KOFW_EVT_FILE_DELETE: return "FileDel";
-	case KOFW_EVT_FILE_RENAME: return "FileRen";
-	case KOFW_EVT_NET_CONNECT:    return "NetConn";
-	case KOFW_EVT_NET_SEND:       return "NetSend";
-	case KOFW_EVT_NET_RECV:       return "NetRecv";
-	case KOFW_EVT_NET_DISCONNECT: return "NetClose";
-	case KOFW_EVT_IMAGE_UNLOAD:   return "ImgUnload";
-	case KOFW_EVT_FILE_WRITE:     return "FileWrite";
-	case KOFW_EVT_REG_CREATE:     return "RegNew";
-	case KOFW_EVT_REG_SET_VALUE:  return "RegSet";
-	case KOFW_EVT_REG_DELETE:     return "RegDel";
-	case KOFW_EVT_THREAD_START:   return "ThreadNew";
-	case KOFW_EVT_THREAD_STOP:    return "ThreadEnd";
-	case KOFW_EVT_AMSI_SCAN:      return "AmsiScan";
-	case KOFW_EVT_RAW:        return "raw";
-	default:                  return "?";
-	}
-}
 
 const char *kofw_provider_name(uint8_t prov)
 {
@@ -230,4 +213,83 @@ const char *kofw_sub_name(uint32_t one_bit)
 	case KOFW_SUB_AMSI:       return "amsi";
 	default:                  return "";
 	}
+}
+
+/* ------------------------------------------- to the neutral record */
+
+/*
+ * See kofgrille.h for why this direction and not the other.
+ *
+ * The text arena is copied WHOLE and the offsets carried across, rather than
+ * re-appending three strings. Two reasons: the offsets are already consistent
+ * with each other, and re-appending would silently re-truncate a record that
+ * had already been cut - turning one KOF_EF_TRUNCATED into two different
+ * strings, neither of which is what was collected.
+ */
+void kofw_evt_to_kof(const struct kofw_evt *in, struct kof_evt *out)
+{
+	size_t n;
+
+	if (!in || !out)
+		return;
+
+	memset(out, 0, sizeof *out);
+
+	out->stamp       = in->stamp;
+	out->seq         = in->seq;
+	out->create_time = in->create_time;
+	out->addr        = in->addr;
+	out->addr_size   = in->addr_size;
+
+	out->pid         = in->pid;
+	out->ppid        = in->ppid;
+	/* The name changes because the meaning is worth stating once: it is
+	 * who CAUSED the event, which for an injection is the whole answer. */
+	out->actor_pid   = in->raiser_pid;
+	out->tid         = in->tid;
+	out->session_id  = in->session_id;
+	out->exit_code   = in->exit_code;
+	out->miss        = in->miss;
+
+	out->net_daddr   = in->net_daddr;
+	out->net_saddr   = in->net_saddr;
+	out->net_size    = in->net_size;
+	out->net_dport   = in->net_dport;
+	out->net_sport   = in->net_sport;
+
+	out->verb        = in->type;
+	out->attack      = in->attack;
+	out->raw_id      = in->raw_id;
+	out->loc         = in->obj_loc;
+	out->flags       = in->flags;
+	out->os          = KOF_OS_WINDOWS;
+
+	/*
+	 * THE WHOLE ARENA SURVIVES, AND THAT IS ASSERTED RATHER THAN HOPED.
+	 *
+	 * The static assert below is the real guarantee: the neutral record's
+	 * arena is at least as large as this collector's, so a conversion can
+	 * never shorten a path. It is worth an assertion because the two
+	 * headers grow independently - this one gained a command line, that one
+	 * gained an attack id - and the day one overtakes the other, a silent
+	 * truncation would start producing paths that look whole.
+	 *
+	 * The clamp is kept anyway, for the case where somebody changes a
+	 * header and the assert is what tells them. If it ever runs, the record
+	 * says so: a path shortened without saying so is what a later rule
+	 * matches and is wrong about.
+	 */
+	n = in->text_len;
+	if (n > sizeof out->text) {
+		n = sizeof out->text;
+		out->flags |= KOF_EF_TRUNCATED;
+	}
+	memcpy(out->text, in->text, n);
+	out->text_len = (uint16_t)n;
+
+	/* An offset that fell outside what was copied becomes absent, which is
+	 * the only honest answer - the bytes it pointed at are not here. */
+	out->off_image   = (in->off_image   < n) ? in->off_image   : KOF_TEXT_NONE;
+	out->off_object  = (in->off_object  < n) ? in->off_object  : KOF_TEXT_NONE;
+	out->off_cmdline = (in->off_cmdline < n) ? in->off_cmdline : KOF_TEXT_NONE;
 }

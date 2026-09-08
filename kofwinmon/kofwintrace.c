@@ -53,6 +53,7 @@
 
 #include "kofgrille.h"
 #include "wrender.h"
+#include "kofevtlog.h"
 
 static volatile LONG g_stop;
 
@@ -94,6 +95,13 @@ static void usage(void)
 	      "                  last thing a process did routinely arrives\n"
 	      "                  after its own ProcessStop.\n"
 	      "  --ring N        records in flight (default 65536, 512B each)\n"
+	      "  --log FILE      record every event this run KEPT into FILE, as\n"
+	      "                  fixed 512-byte records behind a header. The\n"
+	      "                  point is replay: a rule that cannot be run\n"
+	      "                  again over a recorded trace cannot be\n"
+	      "                  regression tested, and a false positive nobody\n"
+	      "                  can reproduce cannot be fixed. The file reads\n"
+	      "                  on a host with no ETW at all.\n"
 	      "  --schema        at exit, print every payload shape that\n"
 	      "                  arrived, with a record count for each\n"
 	      "  --all-images    do not suppress system module loads\n"
@@ -187,7 +195,8 @@ int main(int argc, char **argv)
 	struct kofw_mon   *mon;
 	struct kofw_health health;
 	struct kofw_evt    e;
-	struct wm_tally    tally;
+	struct kof_evt     ke;
+	struct kof_evt_tally tally;
 	STARTUPINFOA        si;
 	PROCESS_INFORMATION pi;
 	char     cmd[8192];
@@ -232,6 +241,8 @@ int main(int argc, char **argv)
 	int      want_write = 1, want_reg = 1, want_thread = 0, want_open = 0;
 	int      want_amsi = 1;
 	int      show_raw = 1, show_all_img = 0, show_schema = 0, quiet = 0;
+	const char *log_path = NULL;
+	struct kofevt_log_w *log = NULL;
 	int      err = 0, i, first;
 	size_t   n;
 
@@ -283,6 +294,9 @@ int main(int argc, char **argv)
 			want_thread = 1;
 		else if (!strcmp(argv[i], "--pipe"))
 			want_open = 1;
+		else if ((!strcmp(argv[i], "--log") ||
+			  !strcmp(argv[i], "-o")) && i + 1 < argc)
+			log_path = argv[++i];
 		/*
 		 * COLLECT WITHOUT PRINTING, and it is not a cosmetic option.
 		 *
@@ -445,9 +459,9 @@ int main(int argc, char **argv)
 		 */
 		f.root_pid = no_scope ? 0u : root_pid;
 		if (!show_all_img)
-			f.drop_loc = 1u << KOFW_LOC_SYSTEM;
+			f.drop_loc = 1u << KOF_LOC_SYSTEM;
 		if (!show_raw)
-			f.types = ~(uint32_t)(1u << KOFW_EVT_RAW);
+			f.types = ~(uint32_t)(1u << KOF_EVT_RAW);
 		if (amsi_anywhere)
 			f.scope_exempt_prov = 1u << KOFW_PROV_AMSI;
 		kofw_mon_filter(mon, &f);
@@ -558,6 +572,46 @@ int main(int argc, char **argv)
 			      "starts will SURVIVE this tracer\n", stderr);
 	}
 
+	/*
+	 * OPENED AFTER THE SESSION AND BEFORE THE TARGET RUNS.
+	 *
+	 * After, because the header records which providers actually enabled -
+	 * a trace where the registry provider refused is a different artefact
+	 * from one where the machine touched no registry, and no record in the
+	 * file can show that difference.
+	 *
+	 * Before ResumeThread, because the first thing the target does is the
+	 * part nothing else can get.
+	 *
+	 * The writes themselves raise file events. They do not feed back: this
+	 * process is not in the traced subtree, so its own events are refused
+	 * by the scope filter before they ever reach the writer.
+	 */
+	if (log_path) {
+		struct kofw_health h1;
+		struct kofevt_log_info li;
+
+		kofw_mon_health(mon, &h1);
+		memset(&li, 0, sizeof li);
+		/* The record this collector produces, named as well as sized:
+		 * another collector's 512-byte record is not this one. */
+		li.rec_size    = (uint32_t)sizeof(struct kof_evt);
+		li.rec_kind    = KOFEVT_REC_KOF;
+		li.build       = (uint32_t)KOFENG_BUILD;
+		li.os          = 1u;
+		li.root_pid    = root_pid;
+		li.sub_asked   = h1.sub_asked;
+		li.sub_enabled = h1.sub_enabled;
+		li.started     = wm_now();
+		log = kofevt_log_create(log_path, &li);
+		if (!log)
+			fprintf(stderr, "kofwintrace: cannot write '%s' - "
+				"continuing without a log\n", log_path);
+		else
+			fprintf(stderr, "kofwintrace: recording to %s\n",
+				log_path);
+	}
+
 	t_wall0 = wm_now();
 	ResumeThread(pi.hThread);
 
@@ -581,15 +635,30 @@ int main(int argc, char **argv)
 		 * ProcessStop, refusing everything outside it - happened inside
 		 * kofw_mon_next. What arrives here is already scoped.
 		 */
+		/* Recorded before it is rendered, so a --quiet run and a loud
+		 * one produce the same file. */
+		/*
+		 * CONVERTED ONCE, HERE, AND EVERYTHING DOWNSTREAM IS NEUTRAL.
+		 *
+		 * The log, the renderer and the tally all take struct kof_evt,
+		 * so a recorded log is collector-independent and the line a
+		 * viewer prints from it is produced by the same code that
+		 * printed it live.
+		 */
+		kofw_evt_to_kof(&e, &ke);
+
+		if (log)
+			(void)kofevt_log_write(log, &ke);
+
 		if (!quiet)
-			wm_render(&e, ev_secs,
+			kof_evt_render(&ke, ev_secs,
 				  kofw_mon_name_of(mon, e.pid,
-						   e.type == KOFW_EVT_PROC_START ||
-						   e.type == KOFW_EVT_PROC_STOP
+						   e.type == KOF_EVT_PROC_START ||
+						   e.type == KOF_EVT_PROC_STOP
 							   ? e.create_time : 0),
-				  &tally);
+				  stdout, &tally);
 		else
-			wm_count(&e, &tally);
+			kof_evt_count(&ke, &tally);
 
 tick:
 		alive = kofw_mon_tracked_alive(mon);
@@ -630,9 +699,7 @@ tick:
 		snprintf(what, sizeof what, "subtree of pid %lu",
 			 (unsigned long)root_pid);
 		kofw_mon_health(mon, &health);
-		wm_print_tally(&tally, secs, what, health.filtered,
-			       health.filtered_loc, health.filtered_scope,
-			       health.filtered_type);
+		kof_evt_print_tally(&tally, secs, what, stderr);
 	}
 
 	wm_print_health(&health, secs);
@@ -670,15 +737,19 @@ tick:
 	 * matched to its entry and the counter, not the machine, is wrong.
 	 */
 	if (alive) {
-		uint32_t i, p;
+		/* Neither `i` nor `n`: main already has both in scope by here.
+		 * A shadowed index is harmless until somebody moves code
+		 * between the two scopes, and this function is long enough
+		 * that they will. */
+		uint32_t k, pid;
 		const char *nm;
 
 		fprintf(stderr, "   %lu process(es) still running at exit:\n",
 			(unsigned long)alive);
-		for (i = 0; (nm = kofw_mon_tracked_nth(mon, i, &p)) != NULL;
-		     i++)
+		for (k = 0; (nm = kofw_mon_tracked_nth(mon, k, &pid)) != NULL;
+		     k++)
 			fprintf(stderr, "     pid %-6lu %s\n",
-				(unsigned long)p, *nm ? nm : "?");
+				(unsigned long)pid, *nm ? nm : "?");
 		fputs("   If one of those has a ProcStop above, the count is "
 		      "wrong rather than the machine.\n", stderr);
 	}
@@ -700,6 +771,13 @@ tick:
 	} else if (alive) {
 		fputs("   WARNING those processes were NOT terminated: this "
 		      "run had no job object\n", stderr);
+	}
+
+	if (log) {
+		uint64_t nrec = kofevt_log_close(log);
+
+		fprintf(stderr, "   recorded %llu event(s) to %s\n",
+			(unsigned long long)nrec, log_path);
 	}
 
 	CloseHandle(pi.hThread);

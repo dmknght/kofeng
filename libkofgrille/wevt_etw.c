@@ -44,7 +44,7 @@
 
 /*
  * WINEVENT_KEYWORD_THREAD. Off by default and worth its cost only for one
- * question - see KOFW_EVT_THREAD_START on why that question is the in-memory
+ * question - see KOF_EVT_THREAD_START on why that question is the in-memory
  * load, and why nothing else in this file can answer it.
  */
 #define KW_THREAD  0x20u
@@ -713,7 +713,7 @@ static void fill_cmdline(struct kofw_mon *m, struct kofw_evt *e)
 	size_t used = e->text_len, room;
 	int    rc;
 
-	e->off_cmdline = KOFW_TEXT_NONE;
+	e->off_cmdline = KOF_TEXT_NONE;
 
 	if (used + 1u >= sizeof e->text)
 		return;
@@ -776,7 +776,7 @@ int kofw_mon_next(struct kofw_mon *m, struct kofw_evt *out, uint32_t wait_ms)
 					 * scoped trace throws away almost all
 					 * of them.
 					 */
-					if (out->type == KOFW_EVT_PROC_START)
+					if (out->type == KOF_EVT_PROC_START)
 						fill_cmdline(m, out);
 					return 1;
 				}

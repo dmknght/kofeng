@@ -61,180 +61,25 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/*
+ * THE VOCABULARY COMES FROM THERE, NOT FROM HERE.
+ *
+ * Verbs, locations and techniques are defined once in libkofeng/kofevt and
+ * this file uses them. They were declared here and mirrored there for one
+ * afternoon, which is a shape that works exactly until the two copies
+ * disagree - and then the conversion between them compiles, runs, and files
+ * every module load as a process start.
+ *
+ * This is not a dependency on the engine. kofevt includes stdio, stdint,
+ * stddef and nothing else - no kofeng.h, no OS header - which is the property
+ * that lets this collector include it and keeps the rule at the top of this
+ * file true.
+ */
+#include "kofevt.h"
+
 /* ------------------------------------------------------------------ events */
 
-enum kofw_evt_type {
-	KOFW_EVT_NONE = 0,
 
-	/*
-	 * A process began or ended.
-	 *
-	 * The lowest volume of anything worth having - single digits per second on
-	 * an idle desktop, a few hundred during a build - and the highest value,
-	 * which is why it is the only pair the first version subscribes to.
-	 */
-	KOFW_EVT_PROC_START = 1,
-	KOFW_EVT_PROC_STOP  = 2,
-
-	/*
-	 * A module was mapped into a process. Medium volume - it bursts when an
-	 * application starts and is quiet otherwise - and it is where a DLL
-	 * loaded out of a temporary directory becomes visible.
-	 */
-	KOFW_EVT_IMAGE_LOAD = 3,
-
-	/*
-	 * THE FILE EVENTS, AND THE ONES DELIBERATELY MISSING.
-	 *
-	 * A file APPEARED, was unlinked, or was renamed. Not opened, not read,
-	 * not written-to. That distinction is the whole reason file tracing is
-	 * affordable at all: Kernel-File's CREATE keyword fires on every open a
-	 * machine performs, while CREATE_NEW_FILE fires only when a file comes
-	 * into existence, and the ratio between them is orders of magnitude on
-	 * any machine doing work.
-	 *
-	 * Nothing is lost for the evidence this is collected for. "Something
-	 * read a file" is not a fact anybody writes a rule against; "an
-	 * executable appeared in a startup directory" is.
-	 */
-	KOFW_EVT_FILE_NEW    = 4,
-	KOFW_EVT_FILE_DELETE = 5,
-	KOFW_EVT_FILE_RENAME = 6,
-
-	/*
-	 * Something arrived that this build has no type for.
-	 *
-	 * Kept rather than dropped, and this is not laziness. Event ids differ
-	 * between Windows builds, and an id nobody typed yet is exactly what a
-	 * discovery run is looking for - so it carries its provider, id and
-	 * version, and whatever strings its payload held. A collector that
-	 * silently discarded these could not be used to find out what it should
-	 * be collecting.
-	 */
-	KOFW_EVT_RAW = 7,
-
-	/*
-	 * TCP, and the four that carry the evidence.
-	 *
-	 * CONNECT and DISCONNECT are low volume and name the other end, which is
-	 * the fact worth keeping - a C2 address is a connect, not a payload.
-	 * SEND and RECV fire per operation and are the high-volume pair; they
-	 * are here because their SIZES are what a threshold is eventually
-	 * computed over, not because every one of them needs to be stored.
-	 *
-	 * IPv6 has its own ids and is not typed yet, so it still arrives as RAW.
-	 */
-	KOFW_EVT_NET_CONNECT    = 8,
-	KOFW_EVT_NET_SEND       = 9,
-	KOFW_EVT_NET_RECV       = 10,
-	KOFW_EVT_NET_DISCONNECT = 11,
-
-	/*
-	 * A module was unmapped. Low value on its own and typed anyway, because
-	 * the id was already being let through the provider filter and was
-	 * arriving as RAW - which cost the same and told nobody anything.
-	 */
-	KOFW_EVT_IMAGE_UNLOAD = 12,
-
-	/*
-	 * DATA WAS WRITTEN INTO A FILE THAT ALREADY EXISTED.
-	 *
-	 * Separate from FILE_NEW because they answer different questions: one
-	 * says a file APPEARED, the other says data LANDED in one. A payload
-	 * written over something innocuous creates nothing and raises no
-	 * FILE_NEW at all.
-	 */
-	KOFW_EVT_FILE_WRITE = 13,
-
-	/*
-	 * THE REGISTRY, and it is three verbs rather than one.
-	 *
-	 * A key being created, a value being set and either being deleted are
-	 * different claims and a rule branches on which. The autorun case wants
-	 * VALUE_SET; a rootkit hiding a service wants DELETE; a key appearing
-	 * under a hive that has none is CREATE.
-	 *
-	 * The path travels in `object`, as every other object path does, so
-	 * nothing downstream needs a registry-shaped field.
-	 */
-	KOFW_EVT_REG_CREATE    = 14,
-	KOFW_EVT_REG_SET_VALUE = 15,
-	KOFW_EVT_REG_DELETE    = 16,
-
-	/*
-	 * A THREAD STARTED, AND WHY IT IS HERE AFTER BEING REFUSED ONCE.
-	 *
-	 * The THREAD keyword was left off with the note that it is an order of
-	 * magnitude more traffic than the others and nothing reads it. The
-	 * first half is true. The second stopped being true the moment the
-	 * question became "why do we not see a DLL that was loaded in memory".
-	 *
-	 * IMAGE_LOAD fires when the kernel maps an image SECTION. A payload
-	 * that was allocated, copied, relocated and had its imports resolved by
-	 * hand never maps one, so there is no image event to miss - the event
-	 * does not exist.
-	 *
-	 * WHAT THIS CATCHES, AND WHAT IT DOES NOT. It catches execution that
-	 * arrives on a NEW thread: a remote injection, and a reflective load
-	 * whose payload starts a thread of its own.
-	 *
-	 * It does not catch the transfer itself in the common Metasploit shape,
-	 * and that was a wrong claim here until somebody ran one. A stager
-	 * receives its payload into a buffer, casts the buffer to a function
-	 * pointer and CALLS it - on the thread it already had. No thread is
-	 * created, so no event of any kind marks the moment control passes into
-	 * memory that was never a file. There is no in-box event for a call,
-	 * and no arrangement of these providers produces one.
-	 *
-	 * The signal survives that only because of what happens AFTER: the
-	 * reflective loader resolves its imports through LoadLibrary, which
-	 * does map sections and does raise IMAGE_LOAD - see KOFW_EF_LATE_LOAD -
-	 * and a payload like meterpreter goes on to start threads of its own,
-	 * which is when KOFW_EF_UNBACKED finally fires. Both are late relative
-	 * to the transfer. Neither is the transfer.
-	 *
-	 * ESTABLISHED, and the answer is yes. Kernel-Process ThreadStart is
-	 * event 3 version 1 and carries ten properties, two of which are
-	 * addresses:
-	 *
-	 *     StartAddr        where the kernel begins the thread - the same
-	 *                      ntdll stub for every ordinary thread
-	 *     Win32StartAddr   the routine the thread was created to run
-	 *
-	 * Only the second can answer the question, because the first is inside
-	 * ntdll for injected and innocent threads alike. It is what lands in
-	 * kofw_evt.addr, and KOFW_EF_UNBACKED is set when it falls in no image
-	 * the process was watched mapping.
-	 */
-	KOFW_EVT_THREAD_START = 17,
-	KOFW_EVT_THREAD_STOP  = 18,
-
-	/*
-	 * AN APPLICATION SUBMITTED A BUFFER TO AmsiScanBuffer.
-	 *
-	 * The only CONTENT this collector ever sees. Every other event says that
-	 * something happened - a file appeared, a connection opened, a thread
-	 * started somewhere odd. This one says what a script actually contained,
-	 * after the scripting host expanded it: a decoded -EncodedCommand, a
-	 * script block a downloader built at run time, a macro body.
-	 *
-	 * THE CONTENT IS A PREFIX, NOT THE WHOLE BUFFER. A record is 512 bytes,
-	 * of which the text arena is the tail, and a submitted script block is
-	 * routinely kilobytes - so what lands in `object` is the beginning of it
-	 * and KOFW_EF_TRUNCATED is set. That is enough to see WHAT a thing is
-	 * and not enough to scan it; anything wanting the whole buffer needs a
-	 * path that does not go through a fixed record, and there is not one
-	 * here yet.
-	 *
-	 * NOT DELIVERED BY THE ID TABLE YET - see type_of() in wevt_decode.c.
-	 * Until the ids are established on a machine that actually produces
-	 * these, they arrive as KOFW_EVT_RAW with their real id visible, which
-	 * is what a discovery run needs.
-	 */
-	KOFW_EVT_AMSI_SCAN = 19,
-
-	KOFW_EVT_TYPE_COUNT
-};
 
 /*
  * WHAT ROLE A PATH PLAYS, decided once by this library rather than by whoever
@@ -252,70 +97,7 @@ enum kofw_evt_type {
  * a classification is a decision that can be wrong, and the raw path is the
  * only thing that lets somebody check.
  */
-enum kofw_loc {
-	/* Nothing matched, or there was no path to classify. Distinct from
-	 * "classified, and it is nowhere interesting". */
-	KOFW_LOC_UNKNOWN = 0,
 
-	/* The directories every process draws its modules from. */
-	KOFW_LOC_SYSTEM,
-
-	/* Installed software. */
-	KOFW_LOC_PROGRAMS,
-
-	/* Scratch space, and the first place a dropper writes. */
-	KOFW_LOC_TEMP,
-
-	/* Somewhere under a user profile that is not scratch space. */
-	KOFW_LOC_USER,
-
-	/*
-	 * THE PLACES THE MATRIX PUT HERE.
-	 *
-	 * Everything from KOFW_LOC_AUTOSTART down is an ATT&CK technique that
-	 * turned out to BE a path. That is most of the persistence column and a
-	 * good part of defence evasion: T1547.001 is a Run value, T1053.005 is
-	 * a file under System32\Tasks, T1546.010 is AppInit_DLLs, T1574.006 is
-	 * /etc/ld.so.preload. None of them needs a chain of events or a window
-	 * - one write to one place is the whole finding.
-	 *
-	 * They are LOCATIONS rather than rules on purpose. The classification
-	 * already happens once per event, on the consumer thread, in one pass
-	 * over one table - so tagging the technique there costs nothing beyond
-	 * the table row. A rule engine that matched twenty path patterns per
-	 * record would be doing that work again per rule, and with the registry
-	 * subscribed there are six figures of records a second to do it to.
-	 */
-	KOFW_LOC_AUTOSTART,    /* Run keys, Startup  | ~/.config/autostart     */
-	KOFW_LOC_SERVICE,      /* Services, IFEO     | systemd units, init.d   */
-	KOFW_LOC_SCHEDULE,     /* Tasks              | cron, at, timers        */
-	KOFW_LOC_SHELL_INIT,   /* profile.ps1        | .bashrc, rc.local       */
-	KOFW_LOC_PRELOAD,      /* AppInit_DLLs       | /etc/ld.so.preload      */
-	KOFW_LOC_SSH,          /*  -                 | authorized_keys         */
-	KOFW_LOC_CREDENTIAL,   /* SAM, SECURITY      | /etc/shadow, sudoers    */
-	KOFW_LOC_KERNEL_MOD,   /* drivers            | /lib/modules            */
-	KOFW_LOC_WEB_ROOT,     /* inetpub            | /var/www - a webshell   */
-	KOFW_LOC_HOSTS,        /* drivers\etc\hosts  | /etc/hosts              */
-
-	/*
-	 * A NAMED PIPE, which is a file object and is why it is a location.
-	 *
-	 * \Device\NamedPipe\<name> on Windows; a fifo anywhere on Linux. It
-	 * is here because the pipe is how one process gets another to act on
-	 * its behalf - Meterpreter's getsystem creates a pipe, has a SYSTEM
-	 * service connect to it, and impersonates the token that arrives. The
-	 * pipe's CREATION is the observable half of that, and it is a file
-	 * event with a recognisable path.
-	 */
-	KOFW_LOC_PIPE,
-
-	/* Classified, and it is none of the above - which is a fact, not a
-	 * failure to decide. */
-	KOFW_LOC_OTHER,
-
-	/* Bounded because kofw_filter.drop_loc is 1u << this. */
-	KOFW_LOC_COUNT
-};
 
 /*
  * THE TECHNIQUES THIS BUILD RECOGNISES BY PATH ALONE.
@@ -330,63 +112,9 @@ enum kofw_loc {
  * finding up, and giving it any other job is how a taxonomy becomes a
  * detection engine by accident.
  */
-#define KOFW_ATTACK_LIST(X)                                                   \
-	/*  enum                 technique     finding name              */  \
-	X(KOFW_ATT_NONE,         "",           "")                           \
-	X(KOFW_ATT_RUN_KEY,      "T1547.001",  "Persist.RunKey")             \
-	X(KOFW_ATT_STARTUP_DIR,  "T1547.001",  "Persist.StartupFolder")      \
-	X(KOFW_ATT_WINLOGON,     "T1547.004",  "Persist.Winlogon")           \
-	X(KOFW_ATT_APPINIT,      "T1546.010",  "Persist.AppInitDlls")        \
-	X(KOFW_ATT_IFEO,         "T1546.012",  "Persist.Ifeo")               \
-	X(KOFW_ATT_SERVICE,      "T1543.003",  "Persist.Service")            \
-	X(KOFW_ATT_SCHED_TASK,   "T1053.005",  "Persist.ScheduledTask")      \
-	X(KOFW_ATT_CRON,         "T1053.003",  "Persist.Cron")               \
-	X(KOFW_ATT_SYSTEMD,      "T1543.002",  "Persist.SystemdService")     \
-	X(KOFW_ATT_RC_SCRIPT,    "T1037.004",  "Persist.RcScript")           \
-	X(KOFW_ATT_SHELL_PROFILE,"T1546.004",  "Persist.ShellProfile")       \
-	X(KOFW_ATT_LD_PRELOAD,   "T1574.006",  "Hijack.LdPreload")           \
-	X(KOFW_ATT_SSH_KEY,      "T1098.004",  "Persist.SshKey")             \
-	X(KOFW_ATT_ACCOUNT_FILE, "T1136.001",  "Account.LocalFile")          \
-	X(KOFW_ATT_SUDOERS,      "T1548.003",  "Privilege.Sudoers")          \
-	X(KOFW_ATT_CRED_STORE,   "T1003",      "Credential.Store")           \
-	X(KOFW_ATT_HOSTS,        "T1562.001",  "Evade.HostsFile")            \
-	X(KOFW_ATT_KERNEL_MOD,   "T1014",      "Rootkit.KernelModule")       \
-	X(KOFW_ATT_WEB_SHELL,    "T1505.003",  "Persist.WebShell")           \
-	X(KOFW_ATT_PIPE_IMPERSONATE, "T1134.001", "Privilege.PipeImpersonation")
 
-enum kofw_attack {
-#define KOFW_ATT_X_ENUM(name, tech, word) name,
-	KOFW_ATTACK_LIST(KOFW_ATT_X_ENUM)
-#undef KOFW_ATT_X_ENUM
-	KOFW_ATT_COUNT
-};
 
-/* "T1547.001", or "" for KOFW_ATT_NONE and for a value from a newer build.
- * Never NULL. */
-const char *kofw_attack_id(uint16_t att);
 
-/* "Persist.RunKey", or "". Never NULL. */
-const char *kofw_attack_name(uint16_t att);
-
-/* "system", "temp", ... Never NULL. */
-const char *kofw_loc_name(uint8_t loc);
-
-/*
- * Classify a path on its own. Exposed because it is plain string work with no
- * Windows API in it, so it is the part worth testing directly - and because a
- * caller holding a path from somewhere other than an event should get the same
- * answer this library would give.
- */
-uint8_t kofw_classify_path(const char *path);
-
-/*
- * The same pass, answering both questions.
- *
- * Separate entry point rather than two functions, because walking the table
- * twice to get two fields off the same row is the cost this design exists to
- * avoid. `att` may be NULL when a caller only wants the location.
- */
-uint8_t kofw_classify(const char *path, uint16_t *att);
 
 /* "process", "file", "net". Never NULL. */
 const char *kofw_provider_name(uint8_t prov);
@@ -421,7 +149,7 @@ enum {
 	/*
 	 * A THREAD WHOSE ENTRY POINT IS IN NO MAPPED IMAGE.
 	 *
-	 * Set on KOFW_EVT_THREAD_START when Win32StartAddr falls outside every
+	 * Set on KOF_EVT_THREAD_START when Win32StartAddr falls outside every
 	 * range this collector watched being mapped into that process. That is
 	 * the shape of a reflectively loaded DLL and of a remote injection, and
 	 * it is the only in-box way to see either: a payload that allocates
@@ -486,7 +214,7 @@ enum {
 
 /* Absent, for the text offsets below. Zero is a legal offset into text[], so it
  * cannot double as the sentinel. */
-#define KOFW_TEXT_NONE 0xffffu
+#define KOF_TEXT_NONE 0xffffu
 
 /*
  * The size of one record, and the whole reason it is fixed.
@@ -496,7 +224,7 @@ enum {
  * whatever the machine does next. What is left for text after the fields below
  * is what an image path gets; a longer one is cut and flagged.
  */
-#define KOFW_EVT_SIZE 512u
+#define KOFW_REC_SIZE 512u
 
 /* Everything above text[], so the arena can be sized to fill the record
  * exactly. Asserted against the real offset in the .c. */
@@ -517,7 +245,7 @@ enum {
  * is not a crash - it is every string in every record starting two bytes off,
  * which reads as data.
  */
-#define KOFW_EVT_HEAD 104u
+#define KOFW_REC_HEAD 104u
 
 struct kofw_evt {
 	/*
@@ -599,7 +327,7 @@ struct kofw_evt {
 	 */
 	uint32_t miss;
 
-	uint16_t type;         /* enum kofw_evt_type */
+	uint16_t type;         /* enum kof_evt_verb */
 	uint16_t raw_id;       /* the provider's own event id */
 
 	uint8_t  cpu;          /* whose per-processor buffer it came out of */
@@ -619,8 +347,8 @@ struct kofw_evt {
 	 * holding based on the event type. That is a thing to get wrong once per
 	 * consumer instead of never.
 	 */
-	uint16_t off_image;    /* into text[], or KOFW_TEXT_NONE */
-	uint16_t off_object;   /* into text[], or KOFW_TEXT_NONE */
+	uint16_t off_image;    /* into text[], or KOF_TEXT_NONE */
+	uint16_t off_object;   /* into text[], or KOF_TEXT_NONE */
 
 	/*
 	 * THE COMMAND LINE, on a PROC_START, when it could be read in time.
@@ -636,25 +364,25 @@ struct kofw_evt {
 	 * Every living-off-the-land technique looks identical without this
 	 * field and obvious with it.
 	 */
-	uint16_t off_cmdline;  /* into text[], or KOFW_TEXT_NONE */
+	uint16_t off_cmdline;  /* into text[], or KOF_TEXT_NONE */
 
 	uint16_t text_len;
 
 	/*
-	 * What kofw_classify_path made of the object path, or of the image when
+	 * What kof_classify_path made of the object path, or of the image when
 	 * there is no object. Filled on the consumer side, never in the
 	 * callback: classifying is string work and the callback is the one piece
 	 * of code the whole machine pays for.
 	 */
-	uint8_t  obj_loc;      /* enum kofw_loc */
+	uint8_t  obj_loc;      /* enum kof_evt_loc */
 	uint8_t  reserved;
 
 	/*
-	 * WHICH ATT&CK TECHNIQUE THE OBJECT PATH IS, or KOFW_ATT_NONE.
+	 * WHICH ATT&CK TECHNIQUE THE OBJECT PATH IS, or KOF_ATT_NONE.
 	 *
 	 * An index rather than a string, so the record stays fixed size and a
 	 * recorded trace stays replayable. Filled by the same single pass that
-	 * fills obj_loc - see kofw_classify.
+	 * fills obj_loc - see kof_classify.
 	 */
 	uint16_t attack;
 
@@ -700,7 +428,7 @@ struct kofw_evt {
 	 */
 	uint64_t addr_size;
 
-	char     text[KOFW_EVT_SIZE - KOFW_EVT_HEAD];
+	char     text[KOFW_REC_SIZE - KOFW_REC_HEAD];
 };
 
 /* Which normalised field a decode failed to supply. */
@@ -728,7 +456,7 @@ enum {
 
 	/*
 	 * Files appearing, being unlinked and being renamed - and NOT being
-	 * opened, read or written to. See KOFW_EVT_FILE_NEW for why that line is
+	 * opened, read or written to. See KOF_EVT_FILE_NEW for why that line is
 	 * drawn where it is, and why almost nothing of value is on the far side
 	 * of it.
 	 */
@@ -788,7 +516,7 @@ enum {
 	 * keyword. The most expensive thing in this list per unit of evidence,
 	 * and the only in-box way an unelevated-of-PPL consumer can see code
 	 * start running somewhere that is not a mapped image. See
-	 * KOFW_EVT_THREAD_START.
+	 * KOF_EVT_THREAD_START.
 	 */
 	KOFW_SUB_THREAD   = 1u << 6,
 
@@ -856,9 +584,6 @@ const char *kofw_evt_object(const struct kofw_evt *);
  * the two apart. Never NULL. */
 const char *kofw_evt_cmdline(const struct kofw_evt *);
 
-/* "ProcStart", "ProcStop", ... Never NULL, so a record written by a build that
- * knew one more type still prints as something. */
-const char *kofw_evt_type_name(uint16_t type);
 
 /* ----------------------------------------------------------------- monitor */
 
@@ -1100,15 +825,15 @@ struct kofw_health {
  */
 struct kofw_filter {
 	/*
-	 * Types to keep, as 1u << enum kofw_evt_type. Zero keeps all of them.
+	 * Types to keep, as 1u << enum kof_evt_verb. Zero keeps all of them.
 	 */
 	uint32_t types;
 
 	/*
-	 * Locations to REFUSE, as 1u << enum kofw_loc, tested against
+	 * Locations to REFUSE, as 1u << enum kof_evt_loc, tested against
 	 * kofw_evt.obj_loc.
 	 *
-	 * The one that earns its keep is KOFW_LOC_SYSTEM against module loads:
+	 * The one that earns its keep is KOF_LOC_SYSTEM against module loads:
 	 * `cmd.exe /c` maps 27 modules before running a command and all 27 are
 	 * the loader's own furniture, so a view that prints them prints almost
 	 * nothing else. Note this refuses by the OBJECT's location - a process
@@ -1154,7 +879,7 @@ struct kofw_filter {
 	 *
 	 * By provider and not by event type on purpose - a type only exists
 	 * once its ids have been established, and the records this is for are
-	 * still arriving as KOFW_EVT_RAW.
+	 * still arriving as KOF_EVT_RAW.
 	 */
 	uint32_t scope_exempt_prov;
 };
@@ -1235,6 +960,26 @@ size_t kofw_mon_describe(struct kofw_mon *, char *buf, size_t cap);
  * number that looks like a duration and is not one.
  */
 #define KOFW_TICKS_PER_SEC 10000000ull
+
+/*
+ * THE COLLECTOR'S RECORD, TURNED INTO THE ONE EVERYTHING ELSE READS.
+ *
+ * struct kofw_evt is this library's internal transport: it carries what ETW
+ * gave, including the things only ETW has - which provider, which per-processor
+ * buffer, which payload version. struct kof_evt is what a log, a viewer, a
+ * rule and a Linux collector all speak.
+ *
+ * The conversion lives HERE and not in kofevt, and that direction is the whole
+ * design: kofevt must not know what an ETW record looks like or it stops being
+ * neutral, so each collector is responsible for producing the neutral form.
+ * The Linux twin will have its own function with the same shape and kofevt will
+ * not learn about either.
+ *
+ * What is dropped is named rather than quietly lost: cpu, provider and
+ * raw_version are ETW's own bookkeeping and have no meaning on another
+ * platform. raw_id survives because a discovery run needs it.
+ */
+void kofw_evt_to_kof(const struct kofw_evt *in, struct kof_evt *out);
 
 void kofw_mon_close(struct kofw_mon *);
 

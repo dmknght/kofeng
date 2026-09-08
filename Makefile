@@ -972,12 +972,28 @@ WIN_SRC := libkofgrille/wevt_ring.c \
            libkofgrille/wevt_decode.c \
            libkofgrille/wevt_etw.c
 
-WIN_OBJ := $(patsubst libkofgrille/%.c,$(INT)/win_%.o,$(WIN_SRC))
+#
+# The log format is a component of its own under libkofeng, not part of the
+# Windows collector - see libkofeng/kofevt/kofevt.h for why it is there and why
+# it includes nothing from the engine. It is compiled into libkofgrille.a so a
+# tool links one archive, and the SAME source compiles natively for the host
+# tests, which is the point of it having no Windows in it.
+WIN_SRC += libkofeng/kofevt/kofevt.c libkofeng/kofevt/kofevtfmt.c \
+           libkofeng/kofevt/kofevtlog.c
+
+WIN_OBJ := $(patsubst libkofgrille/%.c,$(INT)/win_%.o,\
+                      $(filter libkofgrille/%,$(WIN_SRC))) \
+           $(patsubst libkofeng/kofevt/%.c,$(INT)/win_evt_%.o,\
+                      $(filter libkofeng/kofevt/%,$(WIN_SRC)))
+
+$(INT)/win_evt_%.o: libkofeng/kofevt/%.c $(STAMP) | $(INT)
+	@$(call MKDIR,$(dir $@))
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofeng/kofevt -c $< -o $@
 WINLIB  := $(SDK)/lib/libkofgrille.a
 
 $(INT)/win_%.o: libkofgrille/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
-	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -c $< -o $@
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng/kofevt -c $< -o $@
 
 $(WINLIB): $(WIN_OBJ)
 	@$(call MKDIR,$(dir $@))
@@ -997,13 +1013,13 @@ WINMON_SHARED := kofwinmon/wrender.c
 
 $(OUT)/bin/kofwinmon$(WIN_EXE): kofwinmon/kofwinmon.c $(WINMON_SHARED) $(WINLIB) $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ikofwinmon \
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng/kofevt -Ikofwinmon \
 	      kofwinmon/kofwinmon.c $(WINMON_SHARED) $(WINLIB) -o $@ \
 	      $(WIN_LDFLAGS) $(WIN_LDLIBS)
 
 $(OUT)/bin/kofwintrace$(WIN_EXE): kofwinmon/kofwintrace.c $(WINMON_SHARED) $(WINLIB) $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ikofwinmon \
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng/kofevt -Ikofwinmon \
 	      kofwinmon/kofwintrace.c $(WINMON_SHARED) $(WINLIB) -o $@ \
 	      $(WIN_LDFLAGS) $(WIN_LDLIBS)
 
@@ -1218,17 +1234,21 @@ EDITOR_SRC := kofexamine/kofeditor.c kofexamine/kofinspect.c
 # already caught one - kofw_evt_image() and kofw_evt_object() were in
 # wevt_decode.c, so wfilter.c could not link without the Windows half.
 GRILLE_HOST_SRC := libkofgrille/wevt_ring.c libkofgrille/wfilter.c \
-                   libkofgrille/wtext.c
+                   libkofgrille/wtext.c \
+                   libkofeng/kofevt/kofevt.c \
+                   libkofeng/kofevt/kofevtfmt.c \
+                   libkofeng/kofevt/kofevtlog.c
 
 $(TEST)/unit_grille_host$(EXE): tests/unit/grille_host.c $(GRILLE_HOST_SRC) \
                                 $(STAMP) | $(TEST)
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille $< $(GRILLE_HOST_SRC) -o $@ \
-	      $(LDFLAGS)
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng/kofevt $< \
+	      $(GRILLE_HOST_SRC) -o $@ $(LDFLAGS)
 
 $(TEST)/asan_grille_host$(EXE): tests/unit/grille_host.c $(GRILLE_HOST_SRC) \
                                 $(STAMP) | $(TEST)
-	$(CC) $(CFLAGS) $(ASAN_FLAGS) $(DEPTO) -Ilibkofgrille $< \
-	      $(GRILLE_HOST_SRC) -o $@ $(LDFLAGS) $(ASAN_FLAGS)
+	$(CC) $(CFLAGS) $(ASAN_FLAGS) $(DEPTO) -Ilibkofgrille \
+	      -Ilibkofeng/kofevt $< $(GRILLE_HOST_SRC) -o $@ \
+	      $(LDFLAGS) $(ASAN_FLAGS)
 
 $(TEST)/unit_cond_expr$(EXE): tests/unit/cond_expr.c $(EDITOR_SRC) $(LIB) \
                               $(SDK_HDR) $(STAMP) | $(TEST)

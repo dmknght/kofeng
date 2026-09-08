@@ -81,7 +81,8 @@ int main(int argc, char **argv)
 	struct kofw_mon   *mon;
 	struct kofw_health health;
 	struct kofw_evt    e;
-	struct wm_tally    tally;
+	struct kof_evt     ke;
+	struct kof_evt_tally tally;
 	double   run_secs = 0.0, stats_every = 10.0, next_stats, secs = 0.0;
 	double   ev_secs = 0.0;
 	/*
@@ -194,9 +195,9 @@ int main(int argc, char **argv)
 		/* Watching the machine means seeing all of it, except the
 		 * module loads every process performs - see kofw_filter. */
 		if (!show_all_img)
-			f.drop_loc = 1u << KOFW_LOC_SYSTEM;
+			f.drop_loc = 1u << KOF_LOC_SYSTEM;
 		if (!show_raw)
-			f.types = ~(uint32_t)(1u << KOFW_EVT_RAW);
+			f.types = ~(uint32_t)(1u << KOF_EVT_RAW);
 		filt = f;
 	}
 
@@ -238,12 +239,12 @@ int main(int argc, char **argv)
 		ev_secs = wm_secs_since(t_ev0, e.stamp);
 		secs    = wm_secs_since(t_wall0, wm_now());
 
-		wm_render(&e, ev_secs,
+		kof_evt_render(&ke, ev_secs,
 			  kofw_mon_name_of(mon, e.pid,
-					   e.type == KOFW_EVT_PROC_START ||
-					   e.type == KOFW_EVT_PROC_STOP
+					   e.type == KOF_EVT_PROC_START ||
+					   e.type == KOF_EVT_PROC_STOP
 						   ? e.create_time : 0),
-			  &tally);
+			  stdout, &tally);
 
 tick:
 		if (run_secs > 0.0 && secs >= run_secs)
@@ -266,9 +267,7 @@ tick:
 	}
 
 	kofw_mon_health(mon, &health);
-	wm_print_tally(&tally, secs, "whole machine", health.filtered,
-		       health.filtered_loc, health.filtered_scope,
-		       health.filtered_type);
+	kof_evt_print_tally(&tally, secs, "whole machine", stderr);
 	wm_print_health(&health, secs);
 
 	kofw_mon_close(mon);

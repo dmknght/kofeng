@@ -1,0 +1,279 @@
+/*
+ * kofevt.c - the tables that turn a path and a verb into meaning.
+ *
+ * NO OS HEADER HERE AND NONE MAY BE ADDED. Everything in this file is string
+ * work and switch statements, which is exactly why it is here rather than in a
+ * collector: it is the half that a Linux CI can run against a Windows log, and
+ * the half where the bugs are.
+ *
+ * It moved out of libkofgrille for the reason the header gives - the enums are
+ * defined once or they rot - and the tables came with them, because a
+ * classification split across two libraries is two classifications.
+ */
+
+#include <stddef.h>
+#include <string.h>
+
+#include "kofevt.h"
+
+static int has_ci(const char *hay, const char *needle, int fold)
+{
+	size_t i, j;
+
+	for (i = 0; hay[i]; i++) {
+		for (j = 0; needle[j]; j++) {
+			char a = hay[i + j], b = needle[j];
+
+			if (fold) {
+				if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+				if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+			}
+			if (a != b)
+				break;
+		}
+		if (!needle[j])
+			return 1;
+	}
+	return 0;
+}
+
+/*
+ * THE TABLE, AND WHY ITS ORDER IS ITS CORRECTNESS.
+ *
+ * One pass, first match wins, MOST SPECIFIC FIRST. That is not a style
+ * preference, it is the only ordering that is right, and the reason is one
+ * example: the per-user temp directory lives INSIDE a user profile, so a
+ * \Users\ row that ran before \AppData\Local\Temp\ would swallow it and every
+ * dropper's first write would be filed as ordinary user activity. Every row
+ * below is placed by that rule and nothing may be appended without checking it.
+ *
+ * BOTH PLATFORMS IN ONE TABLE, because a path is unambiguous about which one it
+ * is - a backslash row cannot match a Linux path and a /etc row cannot match a
+ * Windows one - and two tables would be two places to forget a row.
+ *
+ * The technique is the ATT&CK id this path IS. Where a row has one, an event
+ * that WRITES to it is a finding on its own with no chain and no window behind
+ * it: T1547.001 is a value under Run, T1053.005 is a file under System32\Tasks.
+ * Where a row has KOF_ATT_NONE the location is still worth knowing and is not
+ * itself a finding.
+ */
+static const struct {
+	const char *needle;
+	uint8_t     loc;
+	uint16_t    att;
+	/*
+	 * 1 for a Windows path, 0 for a Linux one. Not derived from the
+	 * separator, even though every row happens to agree with it: a derived
+	 * rule is one somebody has to re-derive when they add a row, and this
+	 * is the field that decides whether /etc/PASSWD is a finding.
+	 */
+	uint8_t     fold;
+} LOCS[] = {
+	/*
+	 * A PIPE BEFORE ANYTHING ELSE, because \Device\NamedPipe\ is not
+	 * under any of the directories below and a row that matched it later
+	 * would never be reached anyway - but putting it first says that a
+	 * pipe is not a file in a place, it is a different kind of object.
+	 */
+	{ "\\Device\\NamedPipe\\", KOF_LOC_PIPE, KOF_ATT_PIPE_IMPERSONATE, 1 },
+	{ "\\pipe\\", KOF_LOC_PIPE, KOF_ATT_PIPE_IMPERSONATE, 1 },
+
+	/* ---- temp, FIRST, for the reason above ---------------------------- */
+	{ "\\AppData\\Local\\Temp\\", KOF_LOC_TEMP, KOF_ATT_NONE, 1 },
+	{ "\\Windows\\Temp\\", KOF_LOC_TEMP, KOF_ATT_NONE, 1 },
+	{ "\\APPDAT~1\\LOCAL~1\\Temp\\", KOF_LOC_TEMP, KOF_ATT_NONE, 1 },
+	{ "\\LOCALS~1\\Temp\\", KOF_LOC_TEMP, KOF_ATT_NONE, 1 },
+	{ "/tmp/", KOF_LOC_TEMP, KOF_ATT_NONE, 0 },
+	{ "/var/tmp/", KOF_LOC_TEMP, KOF_ATT_NONE, 0 },
+	{ "/dev/shm/", KOF_LOC_TEMP, KOF_ATT_NONE, 0 },
+
+	/* ---- the matrix rows, before the generic locations they sit inside - */
+
+	/* Registry autoruns. RunOnce and the Wow6432Node mirror are separate
+	 * spellings of the same key and each needs its own row: a needle is a
+	 * substring, not a pattern. */
+	{ "\\CurrentVersion\\Run", KOF_LOC_AUTOSTART, KOF_ATT_RUN_KEY, 1 },
+	{ "\\CurrentVersion\\RunOnce", KOF_LOC_AUTOSTART, KOF_ATT_RUN_KEY, 1 },
+	{ "\\Start Menu\\Programs\\Startup\\",
+	  KOF_LOC_AUTOSTART,  KOF_ATT_STARTUP_DIR, 1 },
+	{ "/.config/autostart/", KOF_LOC_AUTOSTART, KOF_ATT_STARTUP_DIR, 0 },
+
+	{ "\\Winlogon\\Shell", KOF_LOC_AUTOSTART, KOF_ATT_WINLOGON, 1 },
+	{ "\\Winlogon\\Userinit", KOF_LOC_AUTOSTART, KOF_ATT_WINLOGON, 1 },
+
+	{ "\\AppInit_DLLs", KOF_LOC_PRELOAD, KOF_ATT_APPINIT, 1 },
+	{ "\\Image File Execution Options\\",
+	  KOF_LOC_SERVICE,    KOF_ATT_IFEO, 1 },
+	{ "\\CurrentControlSet\\Services\\",
+	  KOF_LOC_SERVICE,    KOF_ATT_SERVICE, 1 },
+	{ "\\System32\\Tasks\\", KOF_LOC_SCHEDULE, KOF_ATT_SCHED_TASK, 1 },
+	{ "\\Schedule\\TaskCache\\", KOF_LOC_SCHEDULE, KOF_ATT_SCHED_TASK, 1 },
+
+	/* Linux persistence. */
+	{ "/etc/ld.so.preload", KOF_LOC_PRELOAD, KOF_ATT_LD_PRELOAD, 0 },
+	{ "/etc/cron", KOF_LOC_SCHEDULE, KOF_ATT_CRON, 0 },
+	{ "/var/spool/cron", KOF_LOC_SCHEDULE, KOF_ATT_CRON, 0 },
+	{ "/etc/systemd/system/", KOF_LOC_SERVICE, KOF_ATT_SYSTEMD, 0 },
+	{ "/lib/systemd/system/", KOF_LOC_SERVICE, KOF_ATT_SYSTEMD, 0 },
+	{ "/.config/systemd/user/", KOF_LOC_SERVICE, KOF_ATT_SYSTEMD, 0 },
+	{ "/etc/rc.local", KOF_LOC_SHELL_INIT, KOF_ATT_RC_SCRIPT, 0 },
+	{ "/etc/init.d/", KOF_LOC_SERVICE, KOF_ATT_RC_SCRIPT, 0 },
+	{ "/.bashrc", KOF_LOC_SHELL_INIT, KOF_ATT_SHELL_PROFILE, 0 },
+	{ "/.bash_profile", KOF_LOC_SHELL_INIT, KOF_ATT_SHELL_PROFILE, 0 },
+	{ "/.profile", KOF_LOC_SHELL_INIT, KOF_ATT_SHELL_PROFILE, 0 },
+	{ "/etc/profile", KOF_LOC_SHELL_INIT, KOF_ATT_SHELL_PROFILE, 0 },
+	{ "/.ssh/authorized_keys", KOF_LOC_SSH, KOF_ATT_SSH_KEY, 0 },
+
+	/* Identity and privilege. */
+	{ "/etc/passwd", KOF_LOC_CREDENTIAL, KOF_ATT_ACCOUNT_FILE, 0 },
+	{ "/etc/shadow", KOF_LOC_CREDENTIAL, KOF_ATT_ACCOUNT_FILE, 0 },
+	{ "/etc/sudoers", KOF_LOC_CREDENTIAL, KOF_ATT_SUDOERS, 0 },
+	{ "\\config\\SAM", KOF_LOC_CREDENTIAL, KOF_ATT_CRED_STORE, 1 },
+	{ "\\config\\SECURITY", KOF_LOC_CREDENTIAL, KOF_ATT_CRED_STORE, 1 },
+	{ "\\config\\SYSTEM", KOF_LOC_CREDENTIAL, KOF_ATT_CRED_STORE, 1 },
+
+	/* Defence evasion. */
+	{ "\\drivers\\etc\\hosts", KOF_LOC_HOSTS, KOF_ATT_HOSTS, 1 },
+	{ "/etc/hosts", KOF_LOC_HOSTS, KOF_ATT_HOSTS, 0 },
+
+	{ "/lib/modules/", KOF_LOC_KERNEL_MOD, KOF_ATT_KERNEL_MOD, 0 },
+	{ "\\System32\\drivers\\", KOF_LOC_KERNEL_MOD, KOF_ATT_KERNEL_MOD, 1 },
+
+	{ "\\inetpub\\wwwroot\\", KOF_LOC_WEB_ROOT, KOF_ATT_WEB_SHELL, 1 },
+	{ "/var/www/", KOF_LOC_WEB_ROOT, KOF_ATT_WEB_SHELL, 0 },
+
+	/* ---- the generic locations, LAST ---------------------------------- */
+	{ "\\Windows\\System32\\", KOF_LOC_SYSTEM, KOF_ATT_NONE, 1 },
+	{ "\\Windows\\SysWOW64\\", KOF_LOC_SYSTEM, KOF_ATT_NONE, 1 },
+	/* The two extra system directories an ARM64 machine has: SyChpe32
+	 * holds the compiled-hybrid x86 binaries and SysArm32 the ARM32 ones.
+	 * Leaving them out made every x86 process on such a host look like it
+	 * was loading unknown modules. */
+	{ "\\Windows\\SyChpe32\\", KOF_LOC_SYSTEM, KOF_ATT_NONE, 1 },
+	{ "\\Windows\\SysArm32\\", KOF_LOC_SYSTEM, KOF_ATT_NONE, 1 },
+	{ "\\Windows\\WinSxS\\", KOF_LOC_SYSTEM, KOF_ATT_NONE, 1 },
+	{ "\\Windows\\assembly\\", KOF_LOC_SYSTEM, KOF_ATT_NONE, 1 },
+	{ "\\Windows\\Microsoft.NET\\", KOF_LOC_SYSTEM, KOF_ATT_NONE, 1 },
+	{ "/usr/lib/", KOF_LOC_SYSTEM, KOF_ATT_NONE, 0 },
+	{ "/usr/lib64/", KOF_LOC_SYSTEM, KOF_ATT_NONE, 0 },
+	{ "/lib/", KOF_LOC_SYSTEM, KOF_ATT_NONE, 0 },
+	{ "/lib64/", KOF_LOC_SYSTEM, KOF_ATT_NONE, 0 },
+
+	{ "\\Program Files\\", KOF_LOC_PROGRAMS, KOF_ATT_NONE, 1 },
+	{ "\\Program Files (x86)\\", KOF_LOC_PROGRAMS, KOF_ATT_NONE, 1 },
+	{ "\\PROGRA~1\\", KOF_LOC_PROGRAMS, KOF_ATT_NONE, 1 },
+	{ "\\PROGRA~2\\", KOF_LOC_PROGRAMS, KOF_ATT_NONE, 1 },
+	{ "/usr/bin/", KOF_LOC_PROGRAMS, KOF_ATT_NONE, 0 },
+	{ "/usr/sbin/", KOF_LOC_PROGRAMS, KOF_ATT_NONE, 0 },
+	{ "/opt/", KOF_LOC_PROGRAMS, KOF_ATT_NONE, 0 },
+
+	{ "\\Users\\", KOF_LOC_USER, KOF_ATT_NONE, 1 },
+	{ "/home/", KOF_LOC_USER, KOF_ATT_NONE, 0 },
+	{ "/root/", KOF_LOC_USER, KOF_ATT_NONE, 0 },
+};
+
+uint8_t kof_classify(const char *path, uint16_t *att)
+{
+	size_t i;
+
+	if (att)
+		*att = KOF_ATT_NONE;
+	if (!path || !*path)
+		return KOF_LOC_UNKNOWN;
+
+	for (i = 0; i < sizeof LOCS / sizeof LOCS[0]; i++) {
+		if (has_ci(path, LOCS[i].needle, LOCS[i].fold)) {
+			if (att)
+				*att = LOCS[i].att;
+			return LOCS[i].loc;
+		}
+	}
+	return KOF_LOC_OTHER;
+}
+
+uint8_t kof_classify_path(const char *path)
+{
+	return kof_classify(path, NULL);
+}
+
+const char *kof_loc_name(uint8_t loc)
+{
+	switch (loc) {
+	case KOF_LOC_SYSTEM:     return "system";
+	case KOF_LOC_PROGRAMS:   return "programs";
+	case KOF_LOC_TEMP:       return "temp";
+	case KOF_LOC_USER:       return "user";
+	case KOF_LOC_AUTOSTART:  return "autostart";
+	case KOF_LOC_SERVICE:    return "service";
+	case KOF_LOC_SCHEDULE:   return "schedule";
+	case KOF_LOC_SHELL_INIT: return "shellinit";
+	case KOF_LOC_PRELOAD:    return "preload";
+	case KOF_LOC_SSH:        return "ssh";
+	case KOF_LOC_CREDENTIAL: return "credential";
+	case KOF_LOC_KERNEL_MOD: return "kmod";
+	case KOF_LOC_WEB_ROOT:   return "webroot";
+	case KOF_LOC_HOSTS:      return "hosts";
+	case KOF_LOC_PIPE:       return "pipe";
+	case KOF_LOC_OTHER:      return "other";
+	default:                 return "unknown";
+	}
+}
+
+const char *kof_attack_id(uint16_t att)
+{
+	switch (att) {
+#define KOF_ATT_X_ID(name, tech, word) case name: return tech;
+	KOF_ATTACK_LIST(KOF_ATT_X_ID)
+#undef KOF_ATT_X_ID
+	default: return "";
+	}
+}
+
+const char *kof_attack_name(uint16_t att)
+{
+	switch (att) {
+#define KOF_ATT_X_NAME(name, tech, word) case name: return word;
+	KOF_ATTACK_LIST(KOF_ATT_X_NAME)
+#undef KOF_ATT_X_NAME
+	default: return "";
+	}
+}
+
+const char *kof_evt_verb_name(uint16_t verb)
+{
+	switch (verb) {
+	case KOF_EVT_PROC_START:    return "ProcStart";
+	case KOF_EVT_PROC_STOP:     return "ProcStop";
+	case KOF_EVT_IMAGE_LOAD:    return "ImageLoad";
+	case KOF_EVT_IMAGE_UNLOAD:  return "ImgUnload";
+	case KOF_EVT_FILE_NEW:      return "FileNew";
+	case KOF_EVT_FILE_DELETE:   return "FileDel";
+	case KOF_EVT_FILE_RENAME:   return "FileRen";
+	case KOF_EVT_FILE_WRITE:    return "FileWrite";
+	case KOF_EVT_REG_CREATE:    return "RegNew";
+	case KOF_EVT_REG_SET_VALUE: return "RegSet";
+	case KOF_EVT_REG_DELETE:    return "RegDel";
+	case KOF_EVT_NET_CONNECT:   return "NetConn";
+	case KOF_EVT_NET_SEND:      return "NetSend";
+	case KOF_EVT_NET_RECV:      return "NetRecv";
+	case KOF_EVT_NET_DISCONNECT: return "NetClose";
+	case KOF_EVT_THREAD_START:  return "ThreadNew";
+	case KOF_EVT_THREAD_STOP:   return "ThreadEnd";
+	case KOF_EVT_AMSI_SCAN:     return "AmsiScan";
+	case KOF_EVT_RAW:           return "raw";
+	default:                    return "?";
+	}
+}
+
+/* ---- reading a record back --------------------------------------------- */
+
+static const char *at(const struct kof_evt *e, uint16_t off)
+{
+	if (!e || off == KOF_TEXT_NONE || off >= sizeof e->text)
+		return "";
+	return e->text + off;
+}
+
+const char *kof_evt_image(const struct kof_evt *e)   { return at(e, e ? e->off_image   : KOF_TEXT_NONE); }
+const char *kof_evt_object(const struct kof_evt *e)  { return at(e, e ? e->off_object  : KOF_TEXT_NONE); }
+const char *kof_evt_cmdline(const struct kof_evt *e) { return at(e, e ? e->off_cmdline : KOF_TEXT_NONE); }
