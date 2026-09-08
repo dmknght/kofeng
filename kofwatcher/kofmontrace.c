@@ -139,15 +139,14 @@ static void usage(void)
 	      "                  honest answer. Check `filtered out (... out of\n"
 	      "                  tree N ...)` in the summary: a large N is what\n"
 	      "                  this looks like before you turn it off.\n"
-	      "  --amsi-anywhere show AMSI records from EVERY process, not\n"
-	      "                  only the traced tree. Breaks the promise that\n"
-	      "                  everything printed belongs to one tree, and\n"
-	      "                  is worth it for one reason: a payload that\n"
-	      "                  migrated is running somewhere that is nobody's\n"
-	      "                  descendant, so its submissions are attributed\n"
-	      "                  outside the tree and dropped - at exactly the\n"
-	      "                  moment they matter. AMSI is low volume, so\n"
-	      "                  the cost is a few extra lines.\n"
+	      "  --no-amsi-anywhere\n"
+	      "                  show AMSI records only from the traced tree.\n"
+	      "                  ON by default means EVERY process is shown,\n"
+	      "                  which breaks the promise that every line\n"
+	      "                  belongs to one tree and is worth it: a payload\n"
+	      "                  that migrated is nobody's descendant, so its\n"
+	      "                  submissions are attributed outside the tree and\n"
+	      "                  dropped at exactly the moment they matter.\n"
 	      "  --no-amsi       do not subscribe to AMSI. That provider\n"
 	      "                  reports what an application handed to\n"
 	      "                  AmsiScanBuffer - an expanded PowerShell\n"
@@ -159,14 +158,16 @@ static void usage(void)
 	      "                  is usually longer than the record, so most of\n"
 	      "                  these arrive [cut].\n"
 	      "\n"
-	      "  --pipe          subscribe to file OPENS, which is the only\n"
+	      "  --no-pipe       stop subscribing to file OPENS. ON by default:\n"
+	      "                  it is the only\n"
 	      "                  way a named pipe is visible - and a pipe is\n"
 	      "                  how getsystem works: create a pipe, get a\n"
 	      "                  SYSTEM service to connect, impersonate the\n"
 	      "                  token that arrives. Expensive: CREATE fires on\n"
 	      "                  every open the machine performs. Use --quiet.\n"
-	      "  --thread        subscribe to thread create/exit. OFF by\n"
-	      "                  default because it is the highest volume of\n"
+	      "  --no-thread     stop subscribing to thread create/exit. ON by\n"
+	      "                  default here even though it is the highest\n"
+	      "                  volume of\n"
 	      "                  anything here - and it is the ONLY in-box way\n"
 	      "                  to see a payload that was loaded in memory:\n"
 	      "                  ImageLoad fires when the kernel maps an image\n"
@@ -220,7 +221,18 @@ int main(int argc, char **argv)
 	uint64_t t_wall0, t_ev0 = 0;
 	uint32_t root_pid, alive = 1;
 	HANDLE   job = NULL;
-	int      leave_running = 0, stop_on_exit = 0, amsi_anywhere = 0;
+	/*
+	 * AMSI FROM EVERYWHERE, ON BY DEFAULT.
+	 *
+	 * It breaks the promise that every line belongs to the traced tree,
+	 * which is why it was opt-in - and that was the wrong trade. A payload
+	 * that migrated is running somewhere that is nobody's descendant, so
+	 * its submissions are attributed outside the tree and dropped at
+	 * exactly the moment they matter. AMSI is low volume, so the cost of
+	 * being right is a few extra lines; the cost of being tidy is missing
+	 * the thing being traced for.
+	 */
+	int      leave_running = 0, stop_on_exit = 0, amsi_anywhere = 1;
 	int      no_scope = 0;
 	/*
 	 * LOUD BY DEFAULT, and that is a decision rather than an oversight.
@@ -236,7 +248,19 @@ int main(int argc, char **argv)
 	 * nothing at all.
 	 */
 	int      want_file = 1, want_image = 1, want_net = 1;
-	int      want_write = 1, want_reg = 1, want_thread = 0, want_open = 0;
+	/*
+	 * EVERYTHING ON, INCLUDING THE TWO EXPENSIVE ONES.
+	 *
+	 * thread and pipe were opt-in here for the same reason they are absent
+	 * from KOFW_SUB_SENSOR: they are an order of magnitude more traffic
+	 * than the rest. That is the right answer for a sensor on every
+	 * machine forever, and the wrong one for this: a tracer is pointed at
+	 * one program by somebody who is watching, its subtree filter throws
+	 * away everything else on the machine, and the two of them are the
+	 * only view there is of an in-memory load and of getsystem. Making
+	 * somebody remember a flag to see those is making them miss them.
+	 */
+	int      want_write = 1, want_reg = 1, want_thread = 1, want_open = 1;
 	int      want_amsi = 1;
 	int      show_raw = 1, show_all_img = 0, show_schema = 0, quiet = 0;
 	const char *log_path = NULL;
@@ -280,14 +304,22 @@ int main(int argc, char **argv)
 			leave_running = 1;
 		else if (!strcmp(argv[i], "--until-exit"))
 			stop_on_exit = 1;
+		else if (!strcmp(argv[i], "--no-amsi-anywhere"))
+			amsi_anywhere = 0;
 		else if (!strcmp(argv[i], "--amsi-anywhere"))
-			amsi_anywhere = 1;
+			amsi_anywhere = 1;      /* now a default; kept working */
 		else if (!strcmp(argv[i], "--no-scope"))
 			no_scope = 1;
 		else if (!strcmp(argv[i], "--no-amsi"))
 			want_amsi = 0;
 		else if (!strcmp(argv[i], "--no-registry"))
 			want_reg = 0;
+		else if (!strcmp(argv[i], "--no-thread"))
+			want_thread = 0;
+		else if (!strcmp(argv[i], "--no-pipe"))
+			want_open = 0;
+		/* The old opt-in spellings, kept so a command line in
+		 * somebody's history still works. They now confirm a default. */
 		else if (!strcmp(argv[i], "--thread"))
 			want_thread = 1;
 		else if (!strcmp(argv[i], "--pipe"))

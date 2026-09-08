@@ -44,6 +44,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <string.h>
 
 #include "kofeng.h"
@@ -67,31 +68,48 @@
 #include "wchan.h"
 #endif
 
+/*
+ * STOPPED BY THE OPERATOR, not by the source running out.
+ *
+ * A real-time client has no natural end: it attaches and keeps deciding until
+ * somebody stops it. Ctrl-C sets this, the loop notices, and the summary and
+ * the log get finished properly - which a kill would not do, and the log's
+ * record count is written by seeking back at close.
+ */
+static volatile int g_stop;
+
+static void on_sigint(int sig)
+{
+	(void)sig;
+	g_stop = 1;
+}
+
 static void usage(void)
 {
 	kof_evt_banner(stderr, "kofwatchman", (uint32_t)KOFENG_BUILD,
-		       "verdicts over a recorded event log");
+		       "verdicts over a live event stream");
 	fputs("\nusage: kofwatchman [options]\n"
 	      "\n"
+	      "Attaches to a running kofwatchtower and keeps deciding until it\n"
+	      "is stopped. It is the client; the sensor is the server.\n"
+	      "\n"
+	      "  --log FILE    WRITE what was received to FILE. This is where a\n"
+	      "                log comes from: the sensor collects and hands\n"
+	      "                over, and what is worth keeping is a decision -\n"
+	      "                so it belongs to the half that is deciding.\n"
+	      "  --replay FILE read a log written earlier instead of attaching\n"
+	      "                to a sensor. For analysing after the fact, and\n"
+	      "                for the CI, which has no sensor to attach to.\n"
 	      "  --channel NAME attach to this channel instead of the default\n"
-	      "  --log FILE    read a RECORDED log instead of attaching to a\n"
-	      "                running sensor. Optional: with no --log this\n"
-	      "                attaches to kofwatchtower, which is what a\n"
-	      "                real-time run does. A log is for analysing after\n"
-	      "                the fact, and for the CI, which has no sensor.\n"
-	      "  --record FILE persist what was received to a log. THIS is\n"
-	      "                where a log gets written: the sensor collects and\n"
-	      "                hands over, and what is worth keeping is a\n"
-	      "                decision - so it belongs to the half that is\n"
-	      "                deciding. Works with --log too, which is how a\n"
-	      "                recording gets filtered down to a smaller one.\n"
+
 	      "  --db DIR      the signature database (default build/release/databases)\n"
 	      "  --all         print every event, not only the ones that matched\n"
 	      "  --no-scan     do not scan files, only read and count\n"
 	      "\n"
-	      "The two sources hand over the SAME struct kof_evt in the same\n"
-	      "order, which is what the record format was normalised for: a log\n"
-	      "recorded on Windows is analysed here by this same binary.\n",
+	      "A live channel and a replay hand over the SAME struct kof_evt in\n"
+	      "the same order, which is what the record format was normalised\n"
+	      "for: a log written on Windows is replayed here by this same\n"
+	      "binary. Ctrl-C to stop - it finishes the log properly.\n",
 	      stderr);
 }
 
@@ -228,14 +246,26 @@ struct wm_source {
 #endif
 };
 
+/*
+ * 1 with a record, 0 when the SOURCE IS FINISHED - which a live channel never
+ * is.
+ *
+ * That distinction is the whole difference between the two sources and it was
+ * wrong: the loop treated "nothing there right now" as "nothing more ever" and
+ * exited, so watchman attached to a running sensor, drained whatever happened
+ * to be buffered, and quit. A real-time client waits.
+ *
+ * So an empty channel returns -1: nothing yet, keep going. A replay returns 0
+ * at the end of the file, because there a file really does end.
+ */
 static int source_next(struct wm_source *s, struct kof_evt *out)
 {
 #ifdef _WIN32
 	if (s->chan)
-		return kofw_chan_next(s->chan, out, 200u);
+		return kofw_chan_next(s->chan, out, 200u) ? 1 : -1;
 #endif
 	if (s->log)
-		return kofevt_log_read(s->log, out);
+		return kofevt_log_read(s->log, out) ? 1 : 0;
 	return 0;
 }
 
@@ -253,7 +283,7 @@ static void source_close(struct wm_source *s)
 
 int main(int argc, char **argv)
 {
-	const char *log_path = NULL, *rec_path = NULL;
+	const char *replay_path = NULL, *log_path = NULL;
 	struct kofevt_log_w *rec = NULL;
 	const char *db_path  = "build/release/databases";
 	int         show_all = 0, do_scan = 1, i;
@@ -274,15 +304,16 @@ int main(int argc, char **argv)
 
 	memset(&tally, 0, sizeof tally);
 	memset(&hits, 0, sizeof hits);
+	signal(SIGINT, on_sigint);
 	memset(&src, 0, sizeof src);
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--log") && i + 1 < argc)
-			log_path = argv[++i];
+			log_path = argv[++i];          /* written */
+		else if (!strcmp(argv[i], "--replay") && i + 1 < argc)
+			replay_path = argv[++i];       /* read */
 		else if (!strcmp(argv[i], "--channel") && i + 1 < argc)
 			chan_name = argv[++i];
-		else if (!strcmp(argv[i], "--record") && i + 1 < argc)
-			rec_path = argv[++i];
 		else if (!strcmp(argv[i], "--db") && i + 1 < argc)
 			db_path = argv[++i];
 		else if (!strcmp(argv[i], "--all"))
@@ -312,7 +343,7 @@ int main(int argc, char **argv)
 	 * NO --log MEANS THE LIVE SENSOR, which is the ordinary way to run
 	 * this: watchman is the client, kofwatchtower is the server.
 	 */
-	if (!log_path) {
+	if (!replay_path) {
 #ifdef _WIN32
 		src.chan = kofw_chan_sub_open(chan_name, &why);
 #else
@@ -330,9 +361,10 @@ int main(int argc, char **argv)
 			return 1;
 		}
 	} else {
-		lr = kofevt_log_open(log_path, 0, KOFEVT_REC_NONE, &why);
+		lr = kofevt_log_open(replay_path, 0, KOFEVT_REC_NONE, &why);
 		if (!lr) {
-			fprintf(stderr, "kofwatchman: %s: %s\n", log_path, why);
+			fprintf(stderr, "kofwatchman: %s: %s\n", replay_path,
+				why);
 			return 1;
 		}
 		src.log = lr;
@@ -358,7 +390,7 @@ int main(int argc, char **argv)
 	} else
 #endif
 	{
-		fprintf(stderr, "  source   %s (recorded)\n", log_path);
+		fprintf(stderr, "  source   %s (replay)\n", replay_path);
 		fprintf(stderr, "  platform %s/%s, sensor build %lu, record "
 			"%u bytes\n",
 			kof_evt_platform_name((uint8_t)h->platform),
@@ -404,7 +436,7 @@ int main(int argc, char **argv)
 	 * was written, and a reader of the second file must not be told it came
 	 * from here.
 	 */
-	if (rec_path) {
+	if (log_path) {
 		struct kofevt_log_info li;
 
 		memset(&li, 0, sizeof li);
@@ -432,12 +464,12 @@ int main(int argc, char **argv)
 			li.build   = (uint32_t)KOFENG_BUILD;
 			li.started = kof_evt_now();
 		}
-		rec = kofevt_log_create(rec_path, &li);
+		rec = kofevt_log_create(log_path, &li);
 		if (!rec)
 			fprintf(stderr, "kofwatchman: cannot write '%s' - "
-				"continuing without recording\n", rec_path);
+				"continuing without a log\n", log_path);
 		else
-			fprintf(stderr, "  recording to %s\n", rec_path);
+			fprintf(stderr, "  logging to %s\n", log_path);
 	}
 
 	if (do_scan) {
@@ -457,9 +489,17 @@ int main(int argc, char **argv)
 		}
 	}
 
-	while (source_next(&src, &e)) {
-		const char *obj = kof_evt_object(&e);
+	while (!g_stop) {
+		int got = source_next(&src, &e);
+		const char *obj;
 		double secs;
+
+		if (got == 0)
+			break;              /* a replay ran out */
+		if (got < 0)
+			continue;           /* live, nothing yet - keep going */
+
+		obj = kof_evt_object(&e);
 
 		n++;
 		if (!have_t0) {
@@ -504,8 +544,8 @@ int main(int argc, char **argv)
 	if (rec) {
 		uint64_t nrec = kofevt_log_close(rec);
 
-		fprintf(stderr, "   recorded %llu event(s) to %s\n",
-			(unsigned long long)nrec, rec_path);
+		fprintf(stderr, "   logged %llu event(s) to %s\n",
+			(unsigned long long)nrec, log_path);
 	}
 
 	source_close(&src);
