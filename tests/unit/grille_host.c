@@ -17,6 +17,7 @@
  * thin edge that talks to the provider.
  */
 
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -765,7 +766,9 @@ static void t_trace(void)
 	unsigned i, got = 0;
 
 	memset(&li, 0, sizeof li);
-	li.rec_size = (uint32_t)sizeof(struct kofw_evt);
+	li.rec_size  = (uint32_t)sizeof(struct kofw_evt);
+	li.head_size = (uint16_t)KOFW_REC_HEAD;
+	li.len_off   = (uint16_t)offsetof(struct kofw_evt, text_len);
 	li.rec_kind = KOFEVT_REC_KOFW;
 	li.build    = 20260908u;
 	li.platform = KOF_PLAT_WINDOWS;
@@ -786,6 +789,29 @@ static void t_trace(void)
 	}
 	n = kofevt_log_close(w);
 	eq_u64("trace written", n, 100);
+
+	/*
+	 * THE PADDING IS ACTUALLY GONE, measured rather than assumed.
+	 *
+	 * Fixed 512-byte records put 100 events in 51 264 bytes and most of it
+	 * was the zeros between one path and the next. Variable records cost
+	 * the head plus exactly the text each event had.
+	 */
+	{
+		FILE *f = fopen(path, "rb");
+		long  sz = 0;
+		long  want = (long)sizeof(struct kofevt_log_hdr) +
+			     100L * ((long)KOFW_REC_HEAD + (long)e.text_len);
+
+		if (f) {
+			fseek(f, 0, SEEK_END);
+			sz = ftell(f);
+			fclose(f);
+		}
+		eq_u64("trace file size", (uint64_t)sz, (uint64_t)want);
+		if (sz >= (long)sizeof(struct kofevt_log_hdr) + 100L * 512L)
+			fail("trace", "still writing fixed-size records");
+	}
 
 	r = kofevt_log_open(path, (uint32_t)sizeof(struct kofw_evt),
 			    KOFEVT_REC_KOFW, &why);
@@ -816,6 +842,45 @@ static void t_trace(void)
 		got++;
 	}
 	eq_u64("trace read back", got, 100);
+
+	/*
+	 * WHAT A VIEWER NEEDS: jump to a record without having read the ones
+	 * before it, and without the file being in memory.
+	 */
+	eq_u64("trace count", kofevt_log_count(r), 100);
+
+	if (!kofevt_log_seek(r, 42))
+		fail("trace", "could not seek to a record");
+	if (!kofevt_log_read(r, &e))
+		fail("trace", "nothing at the record seeked to");
+	eq_u64("trace seek seq", e.seq, 42);
+	eq_u64("trace seek pid", e.pid, 1000u + 42u);
+
+	/* The last one, and one past it. */
+	if (!kofevt_log_seek(r, 99) || !kofevt_log_read(r, &e))
+		fail("trace", "could not reach the last record");
+	eq_u64("trace last seq", e.seq, 99);
+	if (kofevt_log_seek(r, 100))
+		fail("trace", "seeked past the end");
+
+	/*
+	 * A RECORD MUST NOT INHERIT THE PREVIOUS ONE'S TEXT.
+	 *
+	 * The one way a variable-length format hands back something that looks
+	 * like a complete path and is two records spliced together: seek back
+	 * to a short record after reading a long one and check the tail is
+	 * clear.
+	 */
+	if (kofevt_log_seek(r, 0) && kofevt_log_read(r, &e)) {
+		size_t k;
+		for (k = e.text_len; k < sizeof e.text; k++) {
+			if (e.text[k] != 0) {
+				fail("trace", "text left over from another record");
+				break;
+			}
+		}
+	}
+
 	kofevt_log_free(r);
 
 	/* A file that is not a trace is refused, not read. */
@@ -843,6 +908,8 @@ static void t_trace(void)
 		bad.version  = KOFEVT_LOG_VERSION;
 		bad.hdr_size = (uint16_t)sizeof bad;
 		bad.rec_size = (uint32_t)sizeof(struct kofw_evt) + 8u;
+		bad.head_size = (uint16_t)KOFW_REC_HEAD;
+		bad.len_off = (uint16_t)offsetof(struct kofw_evt, text_len);
 		f = fopen(path, "wb");
 		if (f) {
 			fwrite(&bad, sizeof bad, 1, f);
@@ -868,6 +935,8 @@ static void t_trace(void)
 		other.version  = KOFEVT_LOG_VERSION;
 		other.hdr_size = (uint16_t)sizeof other;
 		other.rec_size = (uint32_t)sizeof(struct kofw_evt);
+		other.head_size = (uint16_t)KOFW_REC_HEAD;
+		other.len_off = (uint16_t)offsetof(struct kofw_evt, text_len);
 		other.rec_kind = KOFEVT_REC_KOF;   /* the neutral record */
 		f = fopen(path, "wb");
 		if (f) {

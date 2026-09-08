@@ -45,6 +45,7 @@
  * means it.
  */
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -596,6 +597,11 @@ int main(int argc, char **argv)
 		/* The record this collector produces, named as well as sized:
 		 * another collector's 512-byte record is not this one. */
 		li.rec_size    = (uint32_t)sizeof(struct kof_evt);
+		/* The shape, so the log can write only the text a record
+		 * actually has - offsetof at the one place that knows the
+		 * layout. */
+		li.head_size   = (uint16_t)KOF_EVT_HEAD;
+		li.len_off     = (uint16_t)offsetof(struct kof_evt, text_len);
 		li.rec_kind    = KOFEVT_REC_KOF;
 		li.build       = (uint32_t)KOFENG_BUILD;
 		/* 0 asks kofevt for this host, so the tool does not have

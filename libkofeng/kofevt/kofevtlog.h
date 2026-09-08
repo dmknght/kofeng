@@ -92,7 +92,13 @@ enum kofevt_rec_kind {
  * covers the record growing, which is the common case and must not need a
  * version bump - otherwise every added field orphans every recorded trace.
  */
-#define KOFEVT_LOG_VERSION 1u
+/*
+ * 2 - records became variable length. A v1 file is fixed-size records and this
+ * build does not read one; nothing has shipped, so there is nothing to keep
+ * compatible with, and a reader that guessed would read every field of every
+ * record from the wrong offset.
+ */
+#define KOFEVT_LOG_VERSION 2u
 
 #define KOFEVT_LOG_HDR_SIZE 64u
 
@@ -134,7 +140,20 @@ struct kofevt_log_hdr {
 	 */
 	uint64_t n_records;
 
-	uint8_t  reserved[16];
+	/*
+	 * THE SHAPE OF A RECORD, so this file can walk one without knowing
+	 * what any field means.
+	 *
+	 * `head_size` is the fixed part. `len_off` is where a uint16 giving the
+	 * text length sits inside it. Together they are the whole contract
+	 * between a variable-length log and a record type it has never heard
+	 * of - which is what keeps kofevt's log usable by a Linux collector
+	 * whose record has different fields in a different order.
+	 */
+	uint16_t head_size;
+	uint16_t len_off;
+
+	uint8_t  reserved[12];
 };
 
 /*
@@ -144,7 +163,13 @@ struct kofevt_log_hdr {
  * the header and both are checked on the way back in.
  */
 struct kofevt_log_info {
+	/* The whole record, which bounds how much text one may claim. */
 	uint32_t rec_size;
+	/* The fixed part, and where the uint16 text length lives in it. Both
+	 * are offsetof/sizeof at the caller, which is the only place that
+	 * knows the record's layout. */
+	uint16_t head_size;
+	uint16_t len_off;
 	uint32_t rec_kind;     /* enum kofevt_rec_kind */
 	uint32_t build;        /* the collector's build stamp */
 	uint8_t  platform;     /* enum kof_evt_platform; 0 asks for this host */
@@ -202,6 +227,43 @@ const struct kofevt_log_hdr *kofevt_log_header(const struct kofevt_log_r *);
  * truncated by definition, and refusing to read the 40 000 records before the
  * truncation would be losing the evidence to a technicality. */
 int kofevt_log_read(struct kofevt_log_r *, void *out);
+
+/* ------------------------------------------------------- for a viewer */
+
+/*
+ * HOW MANY RECORDS, without reading them.
+ *
+ * The header's own count when the writer closed cleanly, and a counted walk
+ * when it did not - a log of something that took the machine down has zero
+ * there, and that is the case a viewer most needs to open.
+ *
+ * The walk reads heads and SEEKS PAST text rather than reading it, so counting
+ * a large log costs seeks and not memory.
+ */
+uint64_t kofevt_log_count(struct kofevt_log_r *);
+
+/*
+ * Position at record `n`, so the next kofevt_log_read returns it.
+ *
+ * WHY THIS IS NOT A MULTIPLICATION ANY MORE, and what replaces it.
+ *
+ * Records are variable length, so record N is not at a computable offset. A
+ * viewer scrolling a list still needs to jump, and the two obvious answers are
+ * both wrong: walking from the start on every scroll is O(n) per keystroke,
+ * and remembering every record's offset is 8 bytes per event - 800MB on a log
+ * with a hundred million of them, which is the overflow this is supposed to
+ * avoid.
+ *
+ * So: a CHECKPOINT every KOFEVT_LOG_STRIDE records, built once, and a walk of
+ * at most that many from the nearest one. A hundred million events cost under
+ * a megabyte of index and never more than 1023 records of walking.
+ *
+ * Non-zero on success. The index is built on the first call, not at open, so a
+ * consumer that only streams never pays for it.
+ */
+#define KOFEVT_LOG_STRIDE 1024u
+
+int kofevt_log_seek(struct kofevt_log_r *, uint64_t n);
 
 void kofevt_log_free(struct kofevt_log_r *);
 
