@@ -777,6 +777,14 @@ CFLAGS += -DKOFENG_BUILD=$(KOF_BUILD_STAMP)u
 # is for and which already carries four suppressions of the same kind. The
 # tree's own code is untouched by it and stays on the full warning tier.
 #
+# BOTH SPELLINGS OF THE SAME UPSTREAM ISSUE ARE SILENCED.
+#
+# clang calls it -Wincompatible-pointer-types-discards-qualifiers and reports
+# it on by default; gcc reports the same call as -Wincompatible-pointer-types.
+# The second was at -Wno-error= in VENDOR_CFLAGS, which demotes it to a warning
+# that then prints on every build of a file this tree does not own. Silenced
+# rather than demoted, for the vendor set only.
+#
 # PROBED VIA THE POSITIVE FORM, deliberately. Both compilers accept an unknown
 # -Wno-<anything> in silence, so probing the negative form would prove nothing
 # and would leave GCC carrying a flag it does not know. The positive spelling is
@@ -788,7 +796,8 @@ VENDOR_WNO_QUAL := $(if $(call kof_probe,-Wincompatible-pointer-types-discards-q
 VENDOR_CFLAGS := -O2 -g -std=c11 -fno-common -D_LIB -DAMD64 \
                  -Wall -Wextra \
                  -Wno-missing-field-initializers -Wno-missing-braces \
-                 -Wno-unused-function -Wno-error=incompatible-pointer-types \
+                 -Wno-unused-function \
+                 -Wno-incompatible-pointer-types \
                  $(VENDOR_WNO_QUAL) \
                  $(SAN_CFLAGS) $(KOF_CROSS_FLAGS)
 
@@ -920,10 +929,22 @@ KOFEVT_SRC := libkofeng/kofevt/kofevt.c libkofeng/kofevt/kofevtfmt.c \
 # On Windows it also links the collector, for the live channel - which is a
 # Windows transport, so off Windows the recording path is the whole program.
 # See the note at the top of kofwatchman.c.
+#
+# `=` AND NOT `:=`, AND THAT IS THE WHOLE OF THIS COMMENT.
+#
+# WINLIB and WIN_LDLIBS are set by the Windows block a hundred lines BELOW
+# this. A `:=` here expands them immediately, which is to say to nothing, and
+# the link then succeeds at finding no collector - undefined kofw_chan_* and a
+# reader with no reason to suspect the Makefile. Deferred, they expand when the
+# recipe runs, by which time the block has been read.
+#
+# This is the same trap the note on `tools:` further down describes. It has now
+# caught two things in this file, so: anything referring to a variable the
+# Windows block sets must be deferred, or must be inside the block.
 ifeq ($(NATIVE_OS),windows)
-WATCHMAN_CHAN := -Ilibkofgrille $(WINLIB) $(WIN_LDLIBS)
+WATCHMAN_CHAN = -Ilibkofgrille $(WINLIB) $(WIN_LDLIBS)
 else
-WATCHMAN_CHAN :=
+WATCHMAN_CHAN =
 endif
 
 $(OUT)/bin/kofwatchman$(EXE): kofwatcher/kofwatchman.c $(KOFEVT_SRC) $(LIB) \
@@ -1095,6 +1116,17 @@ kofmontrace: $(OUT)/bin/kofmontrace$(WIN_EXE)
 # above this, where none of these variables are set yet.
 ifeq ($(NATIVE_OS),windows)
 tools: kofwatchtower kofmontrace
+
+#
+# THE COLLECTOR IS A PREREQUISITE OF kofwatchman ON WINDOWS, declared here
+# because a prerequisite naming $(WINLIB) up where that rule lives would expand
+# to nothing - make reads prerequisites when it reads the rule, and that is
+# before this block. A target may collect prerequisites from more than one
+# place, which is what makes this the fix rather than a duplicate rule.
+#
+# Without it the archive and the binary race: a clean `make tools` can link
+# kofwatchman against a libkofgrille.a that has not been built yet.
+$(OUT)/bin/kofwatchman$(EXE): $(WINLIB)
 endif
 
 endif
