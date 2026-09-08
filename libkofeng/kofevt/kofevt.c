@@ -327,7 +327,7 @@ const char *kof_evt_cmdline(const struct kof_evt *e) { return at(e, e ? e->off_c
 
 /* ---- which machine this is --------------------------------------------- */
 
-const char *kof_platform_name(uint8_t plat)
+const char *kof_evt_platform_name(uint8_t plat)
 {
 	switch (plat) {
 	case KOF_PLAT_WINDOWS: return "windows";
@@ -337,7 +337,7 @@ const char *kof_platform_name(uint8_t plat)
 	}
 }
 
-const char *kof_arch_name(uint8_t arch)
+const char *kof_evt_arch_name(uint8_t arch)
 {
 	switch (arch) {
 	case KOF_EARCH_X86:    return "x86";
@@ -353,7 +353,7 @@ const char *kof_arch_name(uint8_t arch)
  * cannot spell the same machine differently - which is the only way a header
  * field like this goes wrong.
  */
-uint8_t kof_platform_self(void)
+uint8_t kof_evt_platform_self(void)
 {
 #if defined(_WIN32)
 	return KOF_PLAT_WINDOWS;
@@ -366,7 +366,7 @@ uint8_t kof_platform_self(void)
 #endif
 }
 
-uint8_t kof_arch_self(void)
+uint8_t kof_evt_arch_self(void)
 {
 #if defined(__x86_64__) || defined(_M_X64)
 	return KOF_EARCH_X86_64;

@@ -54,17 +54,20 @@ static void usage(void)
 {
 	kof_evt_banner(stderr, "kofwatchman", (uint32_t)KOFENG_BUILD,
 		       "verdicts over a recorded event log");
-	fputs("\nusage: kofwatchman --log FILE [--db DIR] [options]\n"
+	fputs("\nusage: kofwatchman [options]\n"
 	      "\n"
-	      "  --log FILE    the event log to read - what kofwatchtower or\n"
-	      "                kofmontrace wrote with --log\n"
+	      "  --log FILE    read a RECORDED log instead of attaching to a\n"
+	      "                running sensor. Optional: with no --log this\n"
+	      "                attaches to kofwatchtower, which is what a\n"
+	      "                real-time run does. A log is for analysing after\n"
+	      "                the fact, and for the CI, which has no sensor.\n"
 	      "  --db DIR      the signature database (default build/release/databases)\n"
 	      "  --all         print every event, not only the ones that matched\n"
-	      "  --no-scan     do not scan files, only read and count the log\n"
+	      "  --no-scan     do not scan files, only read and count\n"
 	      "\n"
-	      "Reads a log rather than attaching to a live sensor: the\n"
-	      "shared-memory channel is designed and not built. The records are\n"
-	      "the same either way, which is what that format was chosen for.\n",
+	      "The two sources hand over the SAME struct kof_evt in the same\n"
+	      "order, which is what the record format was normalised for: a log\n"
+	      "recorded on Windows is analysed here by this same binary.\n",
 	      stderr);
 }
 
@@ -179,6 +182,38 @@ static int looks_openable(const char *p)
 	return (p[1] == ':' && (p[2] == '\\' || p[2] == '/')) || p[0] == '/';
 }
 
+/*
+ * WHERE RECORDS COME FROM, and why it is an abstraction with one member.
+ *
+ * A live sensor and a recorded log are the same stream: the same struct
+ * kof_evt, in the same order, with the same header saying which record and
+ * which platform. Everything after next() is identical, so the difference is
+ * one function pointer and not two programs.
+ *
+ * Written now, with only one of the two implemented, because the alternative
+ * is a main() shaped around reading a file that has to be turned inside out
+ * the day the channel lands - and that is the version where the two paths
+ * quietly stop behaving the same.
+ */
+struct wm_source {
+	struct kofevt_log_r *log;      /* the recorded source, or NULL */
+	/* the live one will keep its mapping here */
+};
+
+static int source_next(struct wm_source *s, struct kof_evt *out)
+{
+	if (s->log)
+		return kofevt_log_read(s->log, out);
+	return 0;
+}
+
+static void source_close(struct wm_source *s)
+{
+	if (s->log)
+		kofevt_log_free(s->log);
+	s->log = NULL;
+}
+
 int main(int argc, char **argv)
 {
 	const char *log_path = NULL;
@@ -186,6 +221,7 @@ int main(int argc, char **argv)
 	int         show_all = 0, do_scan = 1, i;
 
 	struct kofevt_log_r *lr;
+	struct wm_source src;
 	const struct kofevt_log_hdr *h;
 	const char *why = "";
 	kof_engine  *eng = NULL;
@@ -199,6 +235,7 @@ int main(int argc, char **argv)
 
 	memset(&tally, 0, sizeof tally);
 	memset(&hits, 0, sizeof hits);
+	memset(&src, 0, sizeof src);
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--log") && i + 1 < argc)
@@ -219,9 +256,24 @@ int main(int argc, char **argv)
 			return 2;
 		}
 	}
+	/*
+	 * NO --log MEANS THE LIVE SENSOR, which is the ordinary way to run
+	 * this and is the one not built yet.
+	 *
+	 * It reports that rather than falling back to something else: a
+	 * real-time protection tool that silently analysed a stale file
+	 * instead of the running machine would be worse than one that does
+	 * nothing, because it would look like it was working.
+	 */
 	if (!log_path) {
-		usage();
-		return 2;
+		kof_evt_banner(stderr, "kofwatchman", (uint32_t)KOFENG_BUILD,
+			       "verdicts over an event stream");
+		fputs("\nkofwatchman: cannot attach to a running sensor yet - "
+		      "the channel between\n"
+		      "  kofwatchtower and this is designed and not built. Run "
+		      "the sensor with\n"
+		      "  --log FILE and pass the same file here.\n", stderr);
+		return 1;
 	}
 
 	lr = kofevt_log_open(log_path, 0, KOFEVT_REC_NONE, &why);
@@ -229,6 +281,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "kofwatchman: %s: %s\n", log_path, why);
 		return 1;
 	}
+	src.log = lr;
 	h = kofevt_log_header(lr);
 
 	/*
@@ -238,11 +291,12 @@ int main(int argc, char **argv)
 	 * whether the writer closed cleanly. A verdict computed over a stream
 	 * whose provenance nobody stated is a verdict nobody can check.
 	 */
-	fprintf(stderr, "kofwatchman: connected to real-time protection\n");
+	fputs("kofwatchman: connected to real-time protection (recorded)\n",
+	      stderr);
 	fprintf(stderr, "  source   %s\n", log_path);
 	fprintf(stderr, "  platform %s/%s, sensor build %lu, record %u bytes\n",
-		kof_platform_name((uint8_t)h->platform),
-		kof_arch_name((uint8_t)h->arch),
+		kof_evt_platform_name((uint8_t)h->platform),
+		kof_evt_arch_name((uint8_t)h->arch),
 		(unsigned long)h->build, (unsigned)h->rec_size);
 	if (h->n_records)
 		fprintf(stderr, "  %llu event(s)\n",
@@ -263,13 +317,13 @@ int main(int argc, char **argv)
 		fputs("kofwatchman: this log holds a collector's own record, "
 		      "not the neutral one - nothing here can read it\n",
 		      stderr);
-		kofevt_log_free(lr);
+		source_close(&src);
 		return 1;
 	}
 	if (h->rec_size != sizeof(struct kof_evt)) {
 		fputs("kofwatchman: the log's record is not this build's size\n",
 		      stderr);
-		kofevt_log_free(lr);
+		source_close(&src);
 		return 1;
 	}
 
@@ -290,7 +344,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	while (kofevt_log_read(lr, &e)) {
+	while (source_next(&src, &e)) {
 		const char *obj = kof_evt_object(&e);
 		double secs;
 
@@ -331,6 +385,6 @@ int main(int argc, char **argv)
 		(unsigned long long)n, (unsigned long long)scanned,
 		(unsigned long long)skipped, (unsigned long long)hits.n);
 
-	kofevt_log_free(lr);
+	source_close(&src);
 	return hits.n ? 1 : 0;
 }

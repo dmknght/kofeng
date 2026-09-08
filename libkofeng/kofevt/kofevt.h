@@ -548,16 +548,25 @@ enum kof_evt_arch {
 	KOF_EARCH_ARM64   = 4
 };
 
-/* "windows", "linux", ... and "x86_64", "arm64", ... Never NULL. */
-const char *kof_platform_name(uint8_t plat);
-const char *kof_arch_name(uint8_t arch);
+/*
+ * "windows", "linux", ... and "x86_64", "arm64", ... Never NULL.
+ *
+ * PREFIXED kof_evt_ AND NOT kof_, because the engine already has a
+ * kof_arch_name and it answers a different question: what architecture is this
+ * SCANNED OBJECT. This one says which machine produced a log. Two concepts,
+ * two names - the collision was a linker warning today and would have been a
+ * silent wrong answer the day somebody included both headers and got whichever
+ * came first.
+ */
+const char *kof_evt_platform_name(uint8_t plat);
+const char *kof_evt_arch_name(uint8_t arch);
 
 /*
  * What THIS build was compiled for, so a collector does not have to work it
  * out and two collectors cannot disagree about how to spell it.
  */
-uint8_t kof_platform_self(void);
-uint8_t kof_arch_self(void);
+uint8_t kof_evt_platform_self(void);
+uint8_t kof_evt_arch_self(void);
 
 struct kof_evt {
 	/*

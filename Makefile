@@ -886,9 +886,14 @@ VIEWER_SRC := kofexamine/kofviewer.c kofexamine/kofview.c kofexamine/kofinspect.
 # EMU_INC because the viewer disassembles: bddisasm's definitions are already
 # inside $(LIB) - the emulator put them there - so what is missing is only the
 # header, and linking a second copy of the decoder would be the alternative.
+#
+# kofevt is on the include path because the viewer recognises an event log.
+# It reads the HEADER only - the browser is a mode of its own and does not
+# exist yet - so it needs the format's declaration and not its reader.
 $(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(EMU_INC) $(VIEWER_SRC) $(LIB) -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include -Ilibkofeng/kofevt $(EMU_INC) \
+	      $(VIEWER_SRC) libkofeng/kofevt/kofevt.c $(LIB) -o $@ $(LDFLAGS)
 
 # ----------------------------------------------------- the database toolchain
 #
