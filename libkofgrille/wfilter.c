@@ -189,8 +189,32 @@ static void mods_add(struct kofw_ptab *t, struct kofw_pent *p, uint64_t base,
 {
 	struct kofw_modblk *blk;
 
-	if (!base || !size)
+	/*
+	 * A MODULE LOAD THAT COULD NOT BE RECORDED WITHDRAWS THE NEGATIVE
+	 * CLAIM. It used to just return.
+	 *
+	 * This is the bug behind a false <<UNBACKED: entry point in no mapped
+	 * image>>. A module whose base or size did not decode - ImageSize not
+	 * reached because the shape truncated, or spelled differently on some
+	 * build - was silently left out of the list while the list went on
+	 * claiming to be whole. Every thread that then started inside that
+	 * module was in no KNOWN range, so the collector concluded it was in no
+	 * range at all, and reported an injection that had not happened.
+	 *
+	 * The rule the pool exhaustion below already follows: an incomplete
+	 * list cannot support "this address is in no image". So mods_full is
+	 * set here too - it is the flag that says the negative claim is off -
+	 * and the loss is counted so a run can show it happened.
+	 *
+	 * A false UNBACKED is the worst kind of finding this collector can
+	 * produce: it names a specific process as being injected into, on
+	 * evidence that is an absence, and the absence was ours.
+	 */
+	if (!base || !size) {
+		p->mods_full = 1;
+		t->mod_undecoded++;
 		return;
+	}
 
 	if (p->mods != KOFW_MODBLK_NONE && p->mods < KOFW_MODBLK_MAX &&
 	    t->blk[p->mods].n < KOFW_MODS_PER_BLK) {

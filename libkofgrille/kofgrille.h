@@ -563,6 +563,35 @@ enum {
 
 	/* Everything this build can collect. What kofmontrace takes by default
 	 * - see the note there on why a discovery tool defaults to loud. */
+	/*
+	 * WHAT A SENSOR SUBSCRIBES TO, decided here and not on a command line.
+	 *
+	 * A sensor is not a tracer. A tracer is pointed at one program by
+	 * somebody who knows what they are looking for, so choosing providers
+	 * belongs to it. A sensor runs on every machine, all the time, and its
+	 * subscription is a PROPERTY OF THE PRODUCT: if it is wrong it is wrong
+	 * everywhere, and a flag only means the wrong thing gets set by
+	 * somebody who did not know what it cost.
+	 *
+	 * So this is the set, and what is absent is absent on purpose:
+	 *
+	 *   KOFW_SUB_THREAD    the only in-box view of an in-memory load, and
+	 *                      an order of magnitude more traffic than
+	 *                      everything else here combined. Off until there
+	 *                      is a measurement of what it costs on a real
+	 *                      machine - see kofmontrace --thread, which is
+	 *                      where that measurement is taken.
+	 *   KOFW_SUB_FILE_OPEN the only way a named pipe is visible, and it
+	 *                      fires on every file the machine opens. Same
+	 *                      answer for the same reason.
+	 *
+	 * Both are reachable from the tracer, which is where an expensive
+	 * subscription belongs: on a tool somebody ran on purpose.
+	 */
+	KOFW_SUB_SENSOR = KOFW_SUB_PROCESS | KOFW_SUB_IMAGE | KOFW_SUB_FILE |
+			  KOFW_SUB_FILE_WRITE | KOFW_SUB_NET |
+			  KOFW_SUB_REGISTRY | KOFW_SUB_AMSI,
+
 	KOFW_SUB_ALL = KOFW_SUB_PROCESS | KOFW_SUB_IMAGE | KOFW_SUB_FILE |
 		       KOFW_SUB_FILE_WRITE | KOFW_SUB_NET |
 		       KOFW_SUB_REGISTRY | KOFW_SUB_THREAD |
@@ -768,6 +797,18 @@ struct kofw_health {
 	uint64_t mod_pool_exhausted;
 
 	/*
+	 * Module loads whose base or size did not decode, so at least one
+	 * process's module list is incomplete.
+	 *
+	 * It matters for one reason: KOFW_EF_UNBACKED is a claim that an
+	 * address is in NO mapped image, and a list with a hole in it cannot
+	 * support that. Non-zero here means the collector stopped answering
+	 * for those processes rather than answering wrongly - and a reader
+	 * seeing no unbacked threads needs to know which of the two happened.
+	 */
+	uint64_t mod_undecoded;
+
+	/*
 	 * Holes in kofw_evt.seq, counted BEFORE the filter runs.
 	 *
 	 * This has to live here rather than in a consumer, and the reason is
@@ -948,6 +989,20 @@ void kofw_mon_health(struct kofw_mon *, struct kofw_health *);
  * stays in struct kofw_health for anything that wants it.
  */
 void kofw_mon_health_neutral(struct kofw_mon *, struct kof_evt_health *);
+
+/*
+ * Print what the NEUTRAL line cannot say.
+ *
+ * kof_evt_health_print covers what every collector has - kept, dropped, lost,
+ * gaps. These are this collector's own: how many threads it called unbacked,
+ * how many module lists it stopped being able to answer for, how many loads
+ * arrived late, how much it refused and why.
+ *
+ * Two lines rather than one struct, because the day a Linux collector exists
+ * it will have its own second line and neither of them should have to know
+ * about the other's counters. Call it after the neutral one.
+ */
+void kofw_health_print_extra(FILE *out, const struct kofw_health *);
 
 /*
  * Print that health, and say which build and which subscriptions produced it.

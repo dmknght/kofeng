@@ -41,6 +41,7 @@
  * needs the fact layer, and this file is where it will be consumed.
  */
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,6 +62,12 @@ static void usage(void)
 	      "                attaches to kofwatchtower, which is what a\n"
 	      "                real-time run does. A log is for analysing after\n"
 	      "                the fact, and for the CI, which has no sensor.\n"
+	      "  --record FILE persist what was received to a log. THIS is\n"
+	      "                where a log gets written: the sensor collects and\n"
+	      "                hands over, and what is worth keeping is a\n"
+	      "                decision - so it belongs to the half that is\n"
+	      "                deciding. Works with --log too, which is how a\n"
+	      "                recording gets filtered down to a smaller one.\n"
 	      "  --db DIR      the signature database (default build/release/databases)\n"
 	      "  --all         print every event, not only the ones that matched\n"
 	      "  --no-scan     do not scan files, only read and count\n"
@@ -216,7 +223,8 @@ static void source_close(struct wm_source *s)
 
 int main(int argc, char **argv)
 {
-	const char *log_path = NULL;
+	const char *log_path = NULL, *rec_path = NULL;
+	struct kofevt_log_w *rec = NULL;
 	const char *db_path  = "build/release/databases";
 	int         show_all = 0, do_scan = 1, i;
 
@@ -240,6 +248,8 @@ int main(int argc, char **argv)
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--log") && i + 1 < argc)
 			log_path = argv[++i];
+		else if (!strcmp(argv[i], "--record") && i + 1 < argc)
+			rec_path = argv[++i];
 		else if (!strcmp(argv[i], "--db") && i + 1 < argc)
 			db_path = argv[++i];
 		else if (!strcmp(argv[i], "--all"))
@@ -327,6 +337,38 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	/*
+	 * OPENED FROM WHAT THE SOURCE SAID, not from what this build assumes.
+	 *
+	 * The recorder copies the source's own provenance - platform, arch,
+	 * sensor build, which subscriptions were running - because a recording
+	 * made from a Windows stream is still a Windows recording however it
+	 * was written, and a reader of the second file must not be told it came
+	 * from here.
+	 */
+	if (rec_path) {
+		struct kofevt_log_info li;
+
+		memset(&li, 0, sizeof li);
+		li.rec_size    = (uint32_t)sizeof(struct kof_evt);
+		li.head_size   = (uint16_t)KOF_EVT_HEAD;
+		li.len_off     = (uint16_t)offsetof(struct kof_evt, text_len);
+		li.rec_kind    = KOFEVT_REC_KOF;
+		li.build       = h->build;
+		li.platform    = (uint8_t)h->platform;
+		li.arch        = (uint8_t)h->arch;
+		li.root_pid    = h->root_pid;
+		li.sub_asked   = h->sub_asked;
+		li.sub_enabled = h->sub_enabled;
+		li.started     = h->started;
+		rec = kofevt_log_create(rec_path, &li);
+		if (!rec)
+			fprintf(stderr, "kofwatchman: cannot write '%s' - "
+				"continuing without recording\n", rec_path);
+		else
+			fprintf(stderr, "  recording to %s\n", rec_path);
+	}
+
 	if (do_scan) {
 		eng = kof_engine_open(db_path);
 		if (!eng) {
@@ -354,6 +396,9 @@ int main(int argc, char **argv)
 			t0 = e.stamp;
 		}
 		secs = kof_evt_secs_since(t0, e.stamp);
+
+		if (rec)
+			(void)kofevt_log_write(rec, &e);
 
 		kof_evt_count(&e, &tally);
 		if (show_all)
@@ -384,6 +429,13 @@ int main(int argc, char **argv)
 		"skipped %llu unopenable path(s), matched %llu\n",
 		(unsigned long long)n, (unsigned long long)scanned,
 		(unsigned long long)skipped, (unsigned long long)hits.n);
+
+	if (rec) {
+		uint64_t nrec = kofevt_log_close(rec);
+
+		fprintf(stderr, "   recorded %llu event(s) to %s\n",
+			(unsigned long long)nrec, rec_path);
+	}
 
 	source_close(&src);
 	return hits.n ? 1 : 0;

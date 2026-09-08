@@ -716,6 +716,10 @@ tick:
 
 	kofw_mon_health_neutral(mon, &nh);
 	kof_evt_health_print(stderr, &nh, secs);
+	/* And the half only this collector has - see kofw_health_print_extra
+	 * for why the unbacked count and the reasons it may be unanswerable
+	 * belong on the same screen. */
+	kofw_health_print_extra(stderr, &health);
 
 	/*
 	 * THE SHAPES, AND WHY THIS IS ON THE TOOL PEOPLE ACTUALLY DEBUG WITH.

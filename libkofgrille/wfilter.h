@@ -95,6 +95,16 @@ struct kofw_ptab {
 	uint32_t n_alive_tracked;
 	uint64_t overflow;
 
+	/*
+	 * Module loads whose base or size did not decode.
+	 *
+	 * Non-zero means at least one process's module list is incomplete and
+	 * its UNBACKED answer has been withdrawn - see mods_add. Counted
+	 * rather than only acted on, because "no unbacked threads were seen"
+	 * and "we stopped being able to tell" are different results.
+	 */
+	uint64_t mod_undecoded;
+
 	struct kofw_modblk blk[KOFW_MODBLK_MAX];
 	uint16_t blk_free;      /* head of the free list */
 	uint64_t mod_exhausted; /* times the pool had nothing left */
@@ -121,7 +131,14 @@ struct kofw_ptab {
  * job is to be a cache.
  */
 #define KOFW_FTAB_MAX  4096u
-#define KOFW_FNAME_MAX 200u
+/*
+ * 128 and not 200. Measured: the table is KOFW_FTAB_MAX of these, so every
+ * byte here is four kilobytes of a service's resident set, and 200 cost 852KB
+ * to hold names that are almost all shorter than 128. A name that does not fit
+ * is cut, and a cut path in a WRITE event still says which directory was
+ * written to - which is the fact a rule uses.
+ */
+#define KOFW_FNAME_MAX 128u
 
 struct kofw_fent {
 	uint64_t key;

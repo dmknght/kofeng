@@ -871,6 +871,7 @@ void kofw_mon_health(struct kofw_mon *m, struct kofw_health *h)
 	h->cmdline_got        = m->cmdline_got;
 	h->cmdline_lost       = m->cmdline_lost;
 	h->mod_pool_exhausted = m->ptab.mod_exhausted;
+	h->mod_undecoded      = m->ptab.mod_undecoded;
 	h->seq_gaps       = m->seq_gaps;
 	h->sub_asked      = m->sub_asked;
 	h->sub_enabled    = m->sub_enabled;
@@ -922,6 +923,60 @@ void kofw_mon_health_neutral(struct kofw_mon *m, struct kof_evt_health *out)
 			     h.etw_buffers_lost + h.etw_rt_buf_lost;
 	out->sub_asked     = h.sub_asked;
 	out->sub_enabled   = h.sub_enabled;
+}
+
+void kofw_health_print_extra(FILE *out, const struct kofw_health *h)
+{
+	if (!out || !h)
+		return;
+
+	/*
+	 * WHY A NEGATIVE FINDING NEEDS ITS OWN LINE.
+	 *
+	 * KOFW_EF_UNBACKED says an address was in no mapped image, which is a
+	 * claim about an ABSENCE - and an absence is only evidence when the
+	 * list it is absent from is complete. mod_undecoded and
+	 * mod_pool_exhausted are the two ways that stops being true, so they
+	 * are printed beside the unbacked count and not somewhere else: a
+	 * reader looking at "3 unbacked" has to be able to see, in the same
+	 * place, whether the collector was still able to tell.
+	 */
+	fprintf(out, "   threads unbacked %llu, late module loads %llu\n",
+		(unsigned long long)h->unbacked_threads,
+		(unsigned long long)h->late_loads);
+
+	if (h->mod_undecoded || h->mod_pool_exhausted)
+		fprintf(out, "   INCOMPLETE: %llu module load(s) undecoded, "
+			     "%llu pool exhaustion(s) - the unbacked answer was "
+			     "WITHDRAWN for those processes rather than "
+			     "guessed\n",
+			(unsigned long long)h->mod_undecoded,
+			(unsigned long long)h->mod_pool_exhausted);
+
+	if (h->filtered)
+		fprintf(out, "   filtered out %llu  (location %llu, out of "
+			     "tree %llu, type %llu)\n",
+			(unsigned long long)h->filtered,
+			(unsigned long long)h->filtered_loc,
+			(unsigned long long)h->filtered_scope,
+			(unsigned long long)h->filtered_type);
+
+	if (h->skipped_self)
+		fprintf(out, "   %llu event(s) of this process refused\n",
+			(unsigned long long)h->skipped_self);
+
+	if (h->schema_full)
+		fprintf(out, "   INCOMPLETE: the schema cache is FULL - %llu "
+			     "event(s) dropped whole and every new event id "
+			     "will be too; --schema shows what it filled up "
+			     "on\n",
+			(unsigned long long)h->schema_full);
+
+	if (h->untracked)
+		fprintf(out, "   INCOMPLETE: %llu process(es) could not be "
+			     "tracked; the scoped view is missing their "
+			     "events\n",
+			(unsigned long long)h->untracked);
 }
 
 void kofw_mon_filter(struct kofw_mon *m, const struct kofw_filter *f)
