@@ -30,10 +30,19 @@
  *
  * SAFETY, PLAINLY
  *
- * This RUNS what you give it, with the privileges it was started with, and it
- * does not sandbox, contain or undo anything. That is what makes the trace real
- * and it is also the whole risk. A machine that runs live samples through this
- * is a machine that has run live samples.
+ * This RUNS what you give it, with the privileges it was started with. It does
+ * not sandbox it and it does not undo anything it did - files it wrote, keys it
+ * set and connections it made all outlive the trace. That is what makes the
+ * trace real and it is also the whole risk: a machine that runs live samples
+ * through this is a machine that has run live samples.
+ *
+ * What it DOES do is contain the tree's lifetime. Everything launched goes into
+ * a job object with KILL_ON_JOB_CLOSE, so the target and every descendant die
+ * when this exits - on Ctrl-C, on a deadline, and on this process being killed
+ * outright. That is not sandboxing; it is the difference between stopping a
+ * trace and stopping the run, which used to be two different things without
+ * anything saying so. --leave-running gives the old behaviour to somebody who
+ * means it.
  */
 
 #include <stdio.h>
@@ -65,12 +74,25 @@ static void usage(void)
 	      "The subtree filter is what makes that affordable: everything\n"
 	      "outside one process tree is discarded before it is printed.\n"
 	      "\n"
-	      "  --timeout N     give up after N seconds. Default 0 = never:\n"
-	      "                  the run ends when the traced subtree exits\n"
-	      "                  plus --grace, or on Ctrl-C. A deadline\n"
-	      "                  truncates the runs that matter most.\n"
-	      "  --grace N       keep collecting N seconds after the subtree\n"
-	      "                  exits (default 2)\n"
+	      "NOTHING STOPS THIS ON ITS OWN. It collects until Ctrl-C. Neither\n"
+	      "a deadline nor the traced tree exiting ends the run unless you\n"
+	      "ask for it, because both end traces early in the case that\n"
+	      "matters: a payload that migrates leaves the process it was\n"
+	      "launched in, that process exits, and the tracked tree empties at\n"
+	      "the moment the interesting half starts running somewhere else.\n"
+	      "\n"
+	      "  --timeout N     stop after N seconds. Default 0 = never.\n"
+	      "                  For an unattended run.\n"
+	      "  --until-exit    stop once the traced tree has exited, plus\n"
+	      "                  --grace. The old default. Right when the\n"
+	      "                  target really is the whole story - a script,\n"
+	      "                  an installer - and wrong for anything that\n"
+	      "                  might hand off.\n"
+	      "  --grace N       with --until-exit, keep collecting N seconds\n"
+	      "                  after the tree exits (default 2). Events are\n"
+	      "                  delivered up to a flush timer late, so the\n"
+	      "                  last thing a process did routinely arrives\n"
+	      "                  after its own ProcessStop.\n"
 	      "  --ring N        records in flight (default 65536, 512B each)\n"
 	      "  --schema        at exit, print every payload shape that\n"
 	      "                  arrived, with a record count for each\n"
@@ -87,7 +109,44 @@ static void usage(void)
 	      "  --no-file       do not subscribe to file create/delete/rename\n"
 	      "  --no-file-write do not subscribe to writes into existing files\n"
 	      "  --no-net        do not subscribe to network events\n"
+	      "  --leave-running the target and its children SURVIVE this\n"
+	      "                  tracer. Off by default: everything launched\n"
+	      "                  goes into a job object that the kernel kills\n"
+	      "                  when this exits, including on Ctrl-C and\n"
+	      "                  including if this is killed itself. Ask for\n"
+	      "                  this only when you mean to leave a sample\n"
+	      "                  running on the machine.\n"
 	      "  --no-registry   do not subscribe to registry create/set/delete\n"
+	      "  --no-scope      show events from EVERY process, not only the\n"
+	      "                  launched tree. Use this when the subject can\n"
+	      "                  MIGRATE: a payload that moves into another\n"
+	      "                  process is nobody's descendant, so it and\n"
+	      "                  everything it starts fall outside the tree and\n"
+	      "                  are dropped. No event announces a migration,\n"
+	      "                  so nothing here can follow one - turning the\n"
+	      "                  scope off and taking the noise is the only\n"
+	      "                  honest answer. Check `filtered out (... out of\n"
+	      "                  tree N ...)` in the summary: a large N is what\n"
+	      "                  this looks like before you turn it off.\n"
+	      "  --amsi-anywhere show AMSI records from EVERY process, not\n"
+	      "                  only the traced tree. Breaks the promise that\n"
+	      "                  everything printed belongs to one tree, and\n"
+	      "                  is worth it for one reason: a payload that\n"
+	      "                  migrated is running somewhere that is nobody's\n"
+	      "                  descendant, so its submissions are attributed\n"
+	      "                  outside the tree and dropped - at exactly the\n"
+	      "                  moment they matter. AMSI is low volume, so\n"
+	      "                  the cost is a few extra lines.\n"
+	      "  --no-amsi       do not subscribe to AMSI. That provider\n"
+	      "                  reports what an application handed to\n"
+	      "                  AmsiScanBuffer - an expanded PowerShell\n"
+	      "                  command, a macro body - and is the ONLY\n"
+	      "                  source of content here: everything else says\n"
+	      "                  that something happened, this says what it\n"
+	      "                  said. Free on a machine running no scripts.\n"
+	      "                  Note the content is a PREFIX: a script block\n"
+	      "                  is usually longer than the record, so most of\n"
+	      "                  these arrive [cut].\n"
 	      "\n"
 	      "  --pipe          subscribe to file OPENS, which is the only\n"
 	      "                  way a named pipe is visible - and a pipe is\n"
@@ -117,7 +176,8 @@ static void usage(void)
 	      "\n"
 	      "Requires an elevated prompt.\n"
 	      "\n"
-	      "THIS EXECUTES THE FILE. It does not sandbox or contain it.\n",
+	      "THIS EXECUTES THE FILE. It does not sandbox it and does not undo\n"
+	      "what it did; it does kill the tree it launched when it exits.\n",
 	      stderr);
 }
 
@@ -132,22 +192,29 @@ int main(int argc, char **argv)
 	PROCESS_INFORMATION pi;
 	char     cmd[8192];
 	/*
-	 * NO DEADLINE BY DEFAULT.
+	 * NOTHING STOPS THIS ON ITS OWN, and both defaults got there the same
+	 * way - by being wrong in the case that matters.
 	 *
-	 * 60 seconds was a backstop for a target that never exits, and it was
-	 * the wrong default: the run that matters is the one where the sample
-	 * is still working, and cutting that off at a minute truncates exactly
-	 * the part somebody waited for. The tracer already has a correct
-	 * stopping condition - the tracked subtree is empty, plus the grace
-	 * window for events still in flight - and Ctrl-C covers a target that
-	 * hangs.
+	 * A 60 second deadline was a backstop for a target that never exits. It
+	 * cut off exactly the runs somebody had waited for, so it went to 0.
 	 *
-	 * 0 means no deadline. --timeout N puts one back for an unattended run.
+	 * The subtree emptying then became the stopping condition, and that is
+	 * worse, because it is not a timeout going off - it is the trace ending
+	 * on a signal that should have started it. A payload that migrates
+	 * leaves the process it was launched in; that process exits; the tracked
+	 * tree is empty at precisely the moment the interesting half begins
+	 * running somewhere else.
+	 *
+	 * So: Ctrl-C ends a run. --timeout N for unattended. --until-exit for
+	 * the old behaviour, when the target really is the whole story.
 	 */
 	double   timeout = 0.0, grace = 2.0, exited_at = -1.0;
 	double   secs = 0.0, ev_secs = 0.0;
 	uint64_t t_wall0, t_ev0 = 0;
 	uint32_t root_pid, alive = 1;
+	HANDLE   job = NULL;
+	int      leave_running = 0, stop_on_exit = 0, amsi_anywhere = 0;
+	int      no_scope = 0;
 	/*
 	 * LOUD BY DEFAULT, and that is a decision rather than an oversight.
 	 *
@@ -163,6 +230,7 @@ int main(int argc, char **argv)
 	 */
 	int      want_file = 1, want_image = 1, want_net = 1;
 	int      want_write = 1, want_reg = 1, want_thread = 0, want_open = 0;
+	int      want_amsi = 1;
 	int      show_raw = 1, show_all_img = 0, show_schema = 0, quiet = 0;
 	int      err = 0, i, first;
 	size_t   n;
@@ -199,6 +267,16 @@ int main(int argc, char **argv)
 			want_write = 0;
 		else if (!strcmp(argv[i], "--no-net"))
 			want_net = 0;
+		else if (!strcmp(argv[i], "--leave-running"))
+			leave_running = 1;
+		else if (!strcmp(argv[i], "--until-exit"))
+			stop_on_exit = 1;
+		else if (!strcmp(argv[i], "--amsi-anywhere"))
+			amsi_anywhere = 1;
+		else if (!strcmp(argv[i], "--no-scope"))
+			no_scope = 1;
+		else if (!strcmp(argv[i], "--no-amsi"))
+			want_amsi = 0;
 		else if (!strcmp(argv[i], "--no-registry"))
 			want_reg = 0;
 		else if (!strcmp(argv[i], "--thread"))
@@ -295,6 +373,7 @@ int main(int argc, char **argv)
 			(want_write ? KOFW_SUB_FILE_WRITE : 0u) |
 			(want_net   ? KOFW_SUB_NET   : 0u) |
 			(want_reg   ? KOFW_SUB_REGISTRY : 0u) |
+			(want_amsi  ? KOFW_SUB_AMSI : 0u) |
 			(want_thread ? KOFW_SUB_THREAD : 0u) |
 			(want_open  ? KOFW_SUB_FILE_OPEN : 0u);
 	opt.trace_self = 1;   /* see the header comment */
@@ -347,22 +426,53 @@ int main(int argc, char **argv)
 		struct kofw_filter f;
 
 		memset(&f, 0, sizeof f);
-		f.root_pid = root_pid;
+		/*
+		 * NO SCOPE AT ALL, when asked.
+		 *
+		 * Scoping to a tree is what makes a trace readable, and it has
+		 * one failure that is not a bug and cannot be fixed from
+		 * inside: parentage. A payload that migrates is running in a
+		 * process that is nobody's descendant, and everything it does
+		 * from there - including every process it goes on to create -
+		 * is attributed outside the tree and dropped. The trace shows a
+		 * clean subtree and says nothing about the thing that walked
+		 * out of it.
+		 *
+		 * There is no clever repair for that: no event says "this
+		 * process is now running somebody else's code". So the honest
+		 * option is to turn the scope off and take the noise, which on
+		 * a quiet test machine is a fair trade.
+		 */
+		f.root_pid = no_scope ? 0u : root_pid;
 		if (!show_all_img)
 			f.drop_loc = 1u << KOFW_LOC_SYSTEM;
 		if (!show_raw)
 			f.types = ~(uint32_t)(1u << KOFW_EVT_RAW);
+		if (amsi_anywhere)
+			f.scope_exempt_prov = 1u << KOFW_PROV_AMSI;
 		kofw_mon_filter(mon, &f);
 	}
+
+	/* Said out loud, because it breaks the promise the rest of the output
+	 * makes: with this on, not every line below belongs to the traced
+	 * tree. */
+	if (amsi_anywhere)
+		fputs("kofwintrace: --amsi-anywhere: AMSI records from ANY "
+		      "process are shown, not only the traced tree\n", stderr);
 
 	fprintf(stderr, "kofwintrace: build %llu\n",
 		(unsigned long long)KOFENG_BUILD);
 	fprintf(stderr, "kofwintrace: %s\nkofwintrace: root pid %lu, providers:"
-		" process%s%s%s%s%s\n\n",
+		" process%s%s%s%s%s%s%s%s\n\n",
 		cmd, (unsigned long)root_pid,
 		want_image ? " image" : "", want_file ? " file" : "",
 		want_write ? " file-write" : "", want_net ? " net" : "",
-		want_reg ? " registry" : "");
+		want_reg ? " registry" : "", want_amsi ? " amsi" : "",
+		/* thread and file-open were subscribed and not announced, which
+		 * is the one thing this line exists to prevent: when a provider
+		 * enables and then delivers nothing, the banner is what says
+		 * whether it was ever asked for. */
+		want_thread ? " thread" : "", want_open ? " file-open" : "");
 
 	/*
 	 * SAID AT THE START, not only in the summary. A provider that refused
@@ -397,6 +507,55 @@ int main(int argc, char **argv)
 						kofw_sub_name(b));
 			fputs("\n\n", stderr);
 		}
+	}
+
+	/*
+	 * A JOB OBJECT, ASSIGNED WHILE THE TARGET IS STILL SUSPENDED.
+	 *
+	 * Ctrl-C used to stop the tracer and leave the sample running. The
+	 * console sends CTRL_C_EVENT to the process group, so a well-behaved
+	 * console child dies with it - but a sample is not a well-behaved
+	 * console child, and anything it spawned into its own group never got
+	 * the event at all. Somebody stopping a trace reasonably believes they
+	 * stopped the run.
+	 *
+	 * TerminateProcess on the root would not have fixed it either: it kills
+	 * one process and orphans the tree under it, which for a dropper is the
+	 * half that matters. A job holds the whole descendancy, and
+	 * KILL_ON_JOB_CLOSE means the kernel does the killing when the last
+	 * handle goes - so it still happens if this tracer crashes or is killed
+	 * itself, which is exactly when it is most needed.
+	 *
+	 * Assigned before ResumeThread for the same reason the pid is recorded
+	 * before it: after that instruction the target can create children, and
+	 * a child created before the job exists is outside it forever.
+	 */
+	if (!leave_running) {
+		JOBOBJECT_EXTENDED_LIMIT_INFORMATION eli;
+
+		job = CreateJobObjectW(NULL, NULL);
+		if (job) {
+			memset(&eli, 0, sizeof eli);
+			eli.BasicLimitInformation.LimitFlags =
+				JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+			if (!SetInformationJobObject(
+				    job, JobObjectExtendedLimitInformation,
+				    &eli, sizeof eli) ||
+			    !AssignProcessToJobObject(job, pi.hProcess)) {
+				CloseHandle(job);
+				job = NULL;
+			}
+		}
+		/*
+		 * Loud, not silent. Without the job this tool leaves whatever
+		 * it ran behind when it exits, and that is a fact about the
+		 * machine somebody has to know before they trust the trace to
+		 * have ended the run.
+		 */
+		if (!job)
+			fputs("kofwintrace: WARNING could not contain the "
+			      "target in a job object; it and anything it "
+			      "starts will SURVIVE this tracer\n", stderr);
 	}
 
 	t_wall0 = wm_now();
@@ -434,7 +593,21 @@ int main(int argc, char **argv)
 
 tick:
 		alive = kofw_mon_tracked_alive(mon);
-		if (alive == 0 && exited_at < 0.0)
+		/*
+		 * THE SUBTREE EMPTYING IS NOT A REASON TO STOP, unless asked.
+		 *
+		 * It was the default and it was wrong for the case that matters
+		 * most. A payload that migrates leaves the process it was
+		 * launched in, and that process then exits - so the tracked tree
+		 * empties at exactly the moment the interesting half begins
+		 * running somewhere else. Stopping there ends the trace on the
+		 * event that should have started it.
+		 *
+		 * So nothing stops this on its own now. Ctrl-C ends it, or
+		 * --timeout for an unattended run, or --until-exit for the old
+		 * behaviour when the target really is the whole story.
+		 */
+		if (stop_on_exit && alive == 0 && exited_at < 0.0)
 			exited_at = secs;
 		/*
 		 * The grace window, and it is not politeness. Events are
@@ -484,9 +657,50 @@ tick:
 	/* An overflowed tracking table is reported by wm_print_health above,
 	 * because it is a kind of incompleteness and belongs beside the other
 	 * kinds rather than in a line of its own. */
-	if (alive)
-		fprintf(stderr, "   %lu process(es) still running at exit\n",
+	/*
+	 * NAMED, not just counted - because this line is the answer to "why did
+	 * the trace not finish on its own".
+	 *
+	 * With no deadline, the run ends when the tracked tree empties, so a
+	 * non-zero count here is the whole explanation for a trace that sat
+	 * until Ctrl-C. It has two causes needing opposite responses, and only
+	 * the names separate them: a descendant that really is still running -
+	 * a service, a shell waiting on input - or a process that visibly
+	 * exited in the trace above, which means its ProcessStop was never
+	 * matched to its entry and the counter, not the machine, is wrong.
+	 */
+	if (alive) {
+		uint32_t i, p;
+		const char *nm;
+
+		fprintf(stderr, "   %lu process(es) still running at exit:\n",
 			(unsigned long)alive);
+		for (i = 0; (nm = kofw_mon_tracked_nth(mon, i, &p)) != NULL;
+		     i++)
+			fprintf(stderr, "     pid %-6lu %s\n",
+				(unsigned long)p, *nm ? nm : "?");
+		fputs("   If one of those has a ProcStop above, the count is "
+		      "wrong rather than the machine.\n", stderr);
+	}
+
+	/*
+	 * KILL THE TREE BEFORE ANYTHING ELSE IS TORN DOWN.
+	 *
+	 * Closing the job handle would do it on its own - that is what
+	 * KILL_ON_JOB_CLOSE is - but doing it explicitly means the processes are
+	 * gone before this returns rather than at some point during exit, and it
+	 * gives the line below something true to say.
+	 */
+	if (job) {
+		if (alive)
+			fprintf(stderr, "   terminating %lu process(es) still "
+				"in the traced tree\n", (unsigned long)alive);
+		TerminateJobObject(job, 1);
+		CloseHandle(job);
+	} else if (alive) {
+		fputs("   WARNING those processes were NOT terminated: this "
+		      "run had no job object\n", stderr);
+	}
 
 	CloseHandle(pi.hThread);
 	CloseHandle(pi.hProcess);

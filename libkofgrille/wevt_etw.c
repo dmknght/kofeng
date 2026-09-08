@@ -32,6 +32,7 @@
 #include "wevt_ring.h"
 #include "wevt_decode.h"
 #include "wfilter.h"
+#include "wcmdline.h"
 
 /*
  * WINEVENT_KEYWORD_PROCESS and _IMAGE. Thread (0x20) is deliberately left off:
@@ -100,10 +101,42 @@
  * this assumes. A wrong keyword here is silent in the same way a wrong GUID
  * is: the session starts and the machine looks quiet.
  */
-#define KW_REG_CREATE   0x0020u
-#define KW_REG_SETVALUE 0x0100u
-#define KW_REG_DELETE   0x0040u
-#define KW_REG_MUTATE   (KW_REG_CREATE | KW_REG_SETVALUE | KW_REG_DELETE)
+/*
+ * ESTABLISHED, from `logman query providers Microsoft-Windows-Kernel-Registry`
+ * on this machine. The table it prints, in full:
+ *
+ *   0x0001 CloseKey        0x0100 SetValueKey     0x1000 CreateKey
+ *   0x0002 QuerySecurityKey 0x0200 DeleteValueKey 0x2000 OpenKey
+ *   0x0004 SetSecurityKey  0x0400 QueryValueKey   0x4000 DeleteKey
+ *   0x0010 EnumerateValueKey 0x0800 EnumerateKey  0x8000 QueryKey
+ *   0x0020 QueryMultipleValueKey
+ *   0x0040 SetInformationKey
+ *   0x0080 FlushKey
+ *
+ * The previous values were guesses and every one of the three was wrong in a
+ * different way: 0x20 is QueryMultipleValueKey and 0x40 is SetInformationKey,
+ * so two of the three subscriptions were pure noise, and CreateKey and DeleteKey
+ * - two of the three verbs actually wanted - were not subscribed at all. Only
+ * SetValueKey was right, by accident.
+ *
+ * The symptom was not silence, which is what makes it worth writing down: the
+ * session delivered thousands of records a minute and none of them was a
+ * registry change. A wrong keyword that happens to name a busy operation looks
+ * exactly like a working subscription.
+ */
+#define KW_REG_CREATE      0x1000u
+#define KW_REG_SETVALUE    0x0100u
+#define KW_REG_DELVALUE    0x0200u
+#define KW_REG_DELETE      0x4000u
+#define KW_REG_MUTATE   (KW_REG_CREATE | KW_REG_SETVALUE | \
+			 KW_REG_DELVALUE | KW_REG_DELETE)
+
+/*
+ * AMSI publishes exactly one keyword and its own manifest calls it "Event1",
+ * which is as much as `logman query providers Microsoft-Antimalware-Scan-
+ * Interface` will tell anybody. There is nothing to select between.
+ */
+#define KW_AMSI_ALL     0x0001u
 
 /*
  * NO EVENT-ID FILTER ON ANY PROVIDER ANY MORE, AND THAT IS THE POINT.
@@ -155,6 +188,7 @@ struct kofw_mon {
 	uint64_t           filtered;
 	uint64_t           filtered_loc, filtered_scope, filtered_type;
 	uint64_t           seq_expect, seq_gaps;
+	uint64_t           cmdline_got, cmdline_lost;
 	int                seq_started;
 
 	_Atomic uint64_t skipped_self;
@@ -532,6 +566,19 @@ static int enable_providers(struct kofw_mon *m, uint32_t subs)
 			m->sub_enabled |= KOFW_SUB_REGISTRY;
 	}
 
+	/*
+	 * AMSI publishes one keyword, spelled "Event1" in its own manifest and
+	 * worth exactly what the name suggests. Enabled whole, with no id filter,
+	 * because nothing here has established what its ids are - see the note in
+	 * wevt_decode.c. Its volume is not a concern either way: it fires only
+	 * when an application submits a buffer, so a machine running no scripts
+	 * produces none at all.
+	 */
+	if (subs & KOFW_SUB_AMSI) {
+		if (enable_one(m, &KOFW_GUID_AMSI, KW_AMSI_ALL, NULL, 0) == 0)
+			m->sub_enabled |= KOFW_SUB_AMSI;
+	}
+
 	return m->sub_enabled ? 0 : KOFW_ERR_PROVIDER;
 }
 
@@ -653,6 +700,41 @@ fail:
 
 /* ---------------------------------------------------------------- draining */
 
+/*
+ * Append the new process's command line to the record's text arena.
+ *
+ * Into whatever the image and object left, which is the same rule every other
+ * string here follows. A command line that does not fit is cut and flagged,
+ * because the beginning of one is where the interesting part usually is: the
+ * flags come before the payload.
+ */
+static void fill_cmdline(struct kofw_mon *m, struct kofw_evt *e)
+{
+	size_t used = e->text_len, room;
+	int    rc;
+
+	e->off_cmdline = KOFW_TEXT_NONE;
+
+	if (used + 1u >= sizeof e->text)
+		return;
+	room = sizeof e->text - used;
+
+	rc = kofw_cmdline_of(e->pid, e->text + used, room);
+	if (rc == KOFW_CMDLINE_FAIL) {
+		/* Said, not implied. An unread command line and an empty one
+		 * are different facts about the program. */
+		e->flags |= KOFW_EF_CMDLINE_RACED;
+		m->cmdline_lost++;
+		return;
+	}
+
+	e->off_cmdline = (uint16_t)used;
+	e->text_len    = (uint16_t)(used + strlen(e->text + used) + 1u);
+	if (rc == KOFW_CMDLINE_CUT)
+		e->flags |= KOFW_EF_TRUNCATED;
+	m->cmdline_got++;
+}
+
 int kofw_mon_next(struct kofw_mon *m, struct kofw_evt *out, uint32_t wait_ms)
 {
 	uint32_t left = wait_ms;
@@ -683,8 +765,21 @@ int kofw_mon_next(struct kofw_mon *m, struct kofw_evt *out, uint32_t wait_ms)
 				uint8_t why = KOFW_REFUSE_NONE;
 
 				if (kofw_filter_apply(&m->ptab, &m->filter,
-						      out, &why))
+						      out, &why)) {
+					/*
+					 * AFTER the filter, never before. This
+					 * opens a handle and reads another
+					 * process's memory, so doing it for
+					 * every ProcessStart on the machine
+					 * would spend that on records the
+					 * caller is about to throw away - and a
+					 * scoped trace throws away almost all
+					 * of them.
+					 */
+					if (out->type == KOFW_EVT_PROC_START)
+						fill_cmdline(m, out);
 					return 1;
+				}
 				if (why == KOFW_REFUSE_LOC)
 					m->filtered_loc++;
 				else if (why == KOFW_REFUSE_SCOPE)
@@ -735,6 +830,11 @@ void kofw_mon_health(struct kofw_mon *m, struct kofw_health *h)
 	h->filtered_scope = m->filtered_scope;
 	h->filtered_type  = m->filtered_type;
 	h->untracked      = m->ptab.overflow;
+	h->unbacked_threads   = m->ptab.unbacked;
+	h->late_loads         = m->ptab.late_loads;
+	h->cmdline_got        = m->cmdline_got;
+	h->cmdline_lost       = m->cmdline_lost;
+	h->mod_pool_exhausted = m->ptab.mod_exhausted;
 	h->seq_gaps       = m->seq_gaps;
 	h->sub_asked      = m->sub_asked;
 	h->sub_enabled    = m->sub_enabled;
@@ -792,6 +892,27 @@ int kofw_mon_track(struct kofw_mon *m, uint32_t pid, const char *image)
 uint32_t kofw_mon_tracked_alive(const struct kofw_mon *m)
 {
 	return m ? m->ptab.n_alive_tracked : 0;
+}
+
+const char *kofw_mon_tracked_nth(struct kofw_mon *m, uint32_t i, uint32_t *pid)
+{
+	uint32_t k, seen = 0;
+
+	if (!m)
+		return NULL;
+
+	for (k = 0; k < KOFW_PTAB_MAX; k++) {
+		const struct kofw_pent *p = &m->ptab.e[k];
+
+		if (!p->used || !p->tracked || !p->alive)
+			continue;
+		if (seen++ != i)
+			continue;
+		if (pid)
+			*pid = p->pid;
+		return p->image;
+	}
+	return NULL;
 }
 
 const char *kofw_mon_name_of(struct kofw_mon *m, uint32_t pid,

@@ -96,7 +96,7 @@ int main(int argc, char **argv)
 	uint64_t t_wall0, t_ev0 = 0;
 	int      quiet = 0, show_schema = 0, show_raw = 0, show_all_img = 0;
 	int      want_file = 0, want_image = 0, want_net = 0, want_write = 0;
-	int      want_reg = 0, want_thread = 0, want_open = 0;
+	int      want_reg = 0, want_thread = 0, want_open = 0, want_amsi = 0;
 	struct kofw_filter filt;
 	int      err = 0, i;
 
@@ -127,6 +127,8 @@ int main(int argc, char **argv)
 			want_file = want_write = 1;
 		else if (!strcmp(argv[i], "--net"))
 			want_net = 1;
+		else if (!strcmp(argv[i], "--amsi"))
+			want_amsi = 1;
 		else if (!strcmp(argv[i], "--registry"))
 			want_reg = 1;
 		else if (!strcmp(argv[i], "--thread"))
@@ -149,7 +151,8 @@ int main(int argc, char **argv)
 		 */
 		else if (!strcmp(argv[i], "--all"))
 			want_image = show_all_img = want_file = want_write =
-				want_net = want_reg = show_raw = 1;
+				want_net = want_reg = show_raw = 1,
+				want_amsi = 1;
 		else {
 			/* Named, rather than only printing the usage: the
 			 * whole question a reader has is WHICH argument was
@@ -180,6 +183,7 @@ int main(int argc, char **argv)
 			(want_write ? KOFW_SUB_FILE_WRITE : 0u) |
 			(want_net   ? KOFW_SUB_NET   : 0u) |
 			(want_reg   ? KOFW_SUB_REGISTRY : 0u) |
+			(want_amsi  ? KOFW_SUB_AMSI : 0u) |
 			(want_thread ? KOFW_SUB_THREAD : 0u) |
 			(want_open  ? KOFW_SUB_FILE_OPEN : 0u);
 
@@ -207,12 +211,14 @@ int main(int argc, char **argv)
 	kofw_mon_filter(mon, &filt);
 
 	fprintf(stderr,
-		"kofwinmon: whole machine, providers: process%s%s%s%s\n"
+		"kofwinmon: whole machine, providers: process%s%s%s%s%s%s%s%s\n"
 		"kofwinmon: verify one with `logman query providers <name>` - a\n"
 		"kofwinmon: wrong provider is silent, not an error, so if nothing\n"
 		"kofwinmon: arrives that is the first thing to check.\n\n",
 		want_image ? " image" : "", want_file ? " file" : "",
-		want_write ? " file-write" : "", want_net ? " net" : "");
+		want_write ? " file-write" : "", want_net ? " net" : "",
+		want_reg ? " registry" : "", want_thread ? " thread" : "",
+		want_open ? " file-open" : "", want_amsi ? " amsi" : "");
 
 	t_wall0    = wm_now();
 	next_stats = stats_every;

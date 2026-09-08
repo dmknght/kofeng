@@ -152,6 +152,14 @@ const char *kofw_evt_image(const struct kofw_evt *e)
 	return e->text + e->off_image;
 }
 
+const char *kofw_evt_cmdline(const struct kofw_evt *e)
+{
+	if (!e || e->off_cmdline == KOFW_TEXT_NONE ||
+	    e->off_cmdline >= sizeof e->text)
+		return "";
+	return e->text + e->off_cmdline;
+}
+
 const char *kofw_evt_object(const struct kofw_evt *e)
 {
 	if (!e || e->off_object == KOFW_TEXT_NONE ||
@@ -180,6 +188,7 @@ const char *kofw_evt_type_name(uint16_t type)
 	case KOFW_EVT_REG_DELETE:     return "RegDel";
 	case KOFW_EVT_THREAD_START:   return "ThreadNew";
 	case KOFW_EVT_THREAD_STOP:    return "ThreadEnd";
+	case KOFW_EVT_AMSI_SCAN:      return "AmsiScan";
 	case KOFW_EVT_RAW:        return "raw";
 	default:                  return "?";
 	}
@@ -192,6 +201,17 @@ const char *kofw_provider_name(uint8_t prov)
 	case KOFW_PROV_FILE:    return "file";
 	case KOFW_PROV_NET:     return "net";
 	case KOFW_PROV_REGISTRY: return "registry";
+	/*
+	 * Missing here for a whole debugging session, and it cost the answer to
+	 * "is AMSI arriving at all". Its records were printing as `[? id 1101]`
+	 * and were read as some unknown provider's noise - so a source that was
+	 * working the whole time looked like one that had never been enabled.
+	 *
+	 * A `default` that returns "?" for a value the enum HAS is worse than
+	 * one that returns "?" for a value it does not: the first hides a
+	 * working path.
+	 */
+	case KOFW_PROV_AMSI:    return "amsi";
 	default:                return "?";
 	}
 }
@@ -207,6 +227,7 @@ const char *kofw_sub_name(uint32_t one_bit)
 	case KOFW_SUB_REGISTRY:   return "registry";
 	case KOFW_SUB_THREAD:     return "thread";
 	case KOFW_SUB_FILE_OPEN:  return "file-open";
+	case KOFW_SUB_AMSI:       return "amsi";
 	default:                  return "";
 	}
 }

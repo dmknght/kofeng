@@ -172,19 +172,66 @@ enum kofw_evt_type {
 	 * IMAGE_LOAD fires when the kernel maps an image SECTION. A payload
 	 * that was allocated, copied, relocated and had its imports resolved by
 	 * hand never maps one, so there is no image event to miss - the event
-	 * does not exist. What such a payload almost always does next is START
-	 * A THREAD, and a thread whose start address lies in private memory
-	 * rather than inside any mapped image is the shape of a reflective load
-	 * and of a remote injection.
+	 * does not exist.
 	 *
-	 * That test needs the start address, and whether Kernel-Process's
-	 * ThreadStart payload carries one is NOT established here - it is
-	 * exactly what `--schema` is for. If it does, kofw_evt.addr holds it.
-	 * If it does not, this subscription is volume for nothing and should go
-	 * back off.
+	 * WHAT THIS CATCHES, AND WHAT IT DOES NOT. It catches execution that
+	 * arrives on a NEW thread: a remote injection, and a reflective load
+	 * whose payload starts a thread of its own.
+	 *
+	 * It does not catch the transfer itself in the common Metasploit shape,
+	 * and that was a wrong claim here until somebody ran one. A stager
+	 * receives its payload into a buffer, casts the buffer to a function
+	 * pointer and CALLS it - on the thread it already had. No thread is
+	 * created, so no event of any kind marks the moment control passes into
+	 * memory that was never a file. There is no in-box event for a call,
+	 * and no arrangement of these providers produces one.
+	 *
+	 * The signal survives that only because of what happens AFTER: the
+	 * reflective loader resolves its imports through LoadLibrary, which
+	 * does map sections and does raise IMAGE_LOAD - see KOFW_EF_LATE_LOAD -
+	 * and a payload like meterpreter goes on to start threads of its own,
+	 * which is when KOFW_EF_UNBACKED finally fires. Both are late relative
+	 * to the transfer. Neither is the transfer.
+	 *
+	 * ESTABLISHED, and the answer is yes. Kernel-Process ThreadStart is
+	 * event 3 version 1 and carries ten properties, two of which are
+	 * addresses:
+	 *
+	 *     StartAddr        where the kernel begins the thread - the same
+	 *                      ntdll stub for every ordinary thread
+	 *     Win32StartAddr   the routine the thread was created to run
+	 *
+	 * Only the second can answer the question, because the first is inside
+	 * ntdll for injected and innocent threads alike. It is what lands in
+	 * kofw_evt.addr, and KOFW_EF_UNBACKED is set when it falls in no image
+	 * the process was watched mapping.
 	 */
 	KOFW_EVT_THREAD_START = 17,
 	KOFW_EVT_THREAD_STOP  = 18,
+
+	/*
+	 * AN APPLICATION SUBMITTED A BUFFER TO AmsiScanBuffer.
+	 *
+	 * The only CONTENT this collector ever sees. Every other event says that
+	 * something happened - a file appeared, a connection opened, a thread
+	 * started somewhere odd. This one says what a script actually contained,
+	 * after the scripting host expanded it: a decoded -EncodedCommand, a
+	 * script block a downloader built at run time, a macro body.
+	 *
+	 * THE CONTENT IS A PREFIX, NOT THE WHOLE BUFFER. A record is 512 bytes,
+	 * of which the text arena is the tail, and a submitted script block is
+	 * routinely kilobytes - so what lands in `object` is the beginning of it
+	 * and KOFW_EF_TRUNCATED is set. That is enough to see WHAT a thing is
+	 * and not enough to scan it; anything wanting the whole buffer needs a
+	 * path that does not go through a fixed record, and there is not one
+	 * here yet.
+	 *
+	 * NOT DELIVERED BY THE ID TABLE YET - see type_of() in wevt_decode.c.
+	 * Until the ids are established on a machine that actually produces
+	 * these, they arrive as KOFW_EVT_RAW with their real id visible, which
+	 * is what a discovery run needs.
+	 */
+	KOFW_EVT_AMSI_SCAN = 19,
 
 	KOFW_EVT_TYPE_COUNT
 };
@@ -351,6 +398,7 @@ enum kofw_provider {
 	KOFW_PROV_FILE,
 	KOFW_PROV_NET,
 	KOFW_PROV_REGISTRY,
+	KOFW_PROV_AMSI,
 	KOFW_PROV_COUNT
 };
 
@@ -368,7 +416,72 @@ enum {
 	 * arrived did not match the schema this build learned. See kofw_evt.miss
 	 * for which ones.
 	 */
-	KOFW_EF_PARTIAL   = 1u << 1
+	KOFW_EF_PARTIAL   = 1u << 1,
+
+	/*
+	 * A THREAD WHOSE ENTRY POINT IS IN NO MAPPED IMAGE.
+	 *
+	 * Set on KOFW_EVT_THREAD_START when Win32StartAddr falls outside every
+	 * range this collector watched being mapped into that process. That is
+	 * the shape of a reflectively loaded DLL and of a remote injection, and
+	 * it is the only in-box way to see either: a payload that allocates
+	 * memory, copies an image into it, fixes its own relocations and
+	 * resolves its own imports never maps an image section, so there is no
+	 * IMAGE_LOAD to miss - the event does not exist. What it does next is
+	 * start a thread, and that thread's entry point is in private memory.
+	 *
+	 * ONLY SET WHEN THE ANSWER IS KNOWABLE. It requires that this session
+	 * saw the process START, so that every module it ever mapped was
+	 * witnessed - see kofw_pent.mods_whole. For a process that predates the
+	 * session, or one whose module list overflowed the pool, the flag is
+	 * never set, because a list that begins in the middle cannot support
+	 * "in none of them".
+	 *
+	 * NOT A VERDICT. JIT compilers do exactly this, and so do several
+	 * legitimate loaders. It is a fact worth carrying, at the strength of
+	 * one fact.
+	 */
+	KOFW_EF_UNBACKED  = 1u << 2,
+
+	/*
+	 * A MODULE MAPPED LONG AFTER THE PROCESS STARTED.
+	 *
+	 * A program's imports are mapped in a burst before it runs a line of
+	 * its own code, and that burst is over in well under a second. A module
+	 * arriving much later was asked for at run time.
+	 *
+	 * It is here because of the one case the thread test cannot see. A
+	 * stager that calls its payload through a function pointer creates no
+	 * thread, so nothing marks the transfer - but the reflective loader it
+	 * hands control to resolves ITS imports through LoadLibrary, and those
+	 * do map sections. ws2_32 or wininet appearing in a process that has
+	 * been running for a minute and never needed a socket is the visible
+	 * consequence of an invisible event.
+	 *
+	 * NOISY ON ITS OWN, and more so than KOFW_EF_UNBACKED. COM activation,
+	 * plugin hosts, .NET and every shell extension load modules late and
+	 * legitimately. This is a timing fact and nothing more; it earns its
+	 * keep combined with WHICH module, in WHICH process, and with what else
+	 * that process did - never alone.
+	 *
+	 * Set only where the answer is knowable: it needs the process's own
+	 * start to have been seen, for the same reason KOFW_EF_UNBACKED does.
+	 */
+	KOFW_EF_LATE_LOAD = 1u << 3,
+
+	/*
+	 * THE COMMAND LINE WAS WANTED AND COULD NOT BE READ.
+	 *
+	 * It is read from the new process's own memory, so it can only be read
+	 * while that process still exists - and the processes worth reading are
+	 * exactly the ones that do not last. A stager runs for milliseconds.
+	 *
+	 * Flagged rather than left empty, because an empty command line and a
+	 * command line nobody managed to read are different facts and only one
+	 * of them is about the program. Without this, every lost race would
+	 * look like a process that was started with no arguments.
+	 */
+	KOFW_EF_CMDLINE_RACED = 1u << 4
 };
 
 /* Absent, for the text offsets below. Zero is a legal offset into text[], so it
@@ -387,7 +500,24 @@ enum {
 
 /* Everything above text[], so the arena can be sized to fill the record
  * exactly. Asserted against the real offset in the .c. */
-#define KOFW_EVT_HEAD 96u
+/*
+ * If the _Static_assert in wevt_decode.c fires, the compiler is right and this
+ * is wrong: set it to the offset it reports. It exists so that adding a field
+ * above text[] cannot silently move every string in every record - and it has
+ * now earned its place twice.
+ *
+ * The second time was off_cmdline. Two more bytes obviously make the header two
+ * bytes bigger, so this went to 106 and the assert refused it: the uint16 landed
+ * in the two bytes of padding that were already sitting between `attack` and
+ * `net_daddr` waiting for the latter's 4-byte alignment. The field is free and
+ * the header did not move at all.
+ *
+ * Which is the argument for the assert rather than for arithmetic. Nobody
+ * tracks padding by hand across a struct this size, and the failure it prevents
+ * is not a crash - it is every string in every record starting two bytes off,
+ * which reads as data.
+ */
+#define KOFW_EVT_HEAD 104u
 
 struct kofw_evt {
 	/*
@@ -491,6 +621,23 @@ struct kofw_evt {
 	 */
 	uint16_t off_image;    /* into text[], or KOFW_TEXT_NONE */
 	uint16_t off_object;   /* into text[], or KOFW_TEXT_NONE */
+
+	/*
+	 * THE COMMAND LINE, on a PROC_START, when it could be read in time.
+	 *
+	 * Not from ETW: Kernel-Process's ProcessStart carries sixteen properties
+	 * and none of them is this. It is read out of the new process's PEB
+	 * instead, which is why it is the only field here that can lose a race -
+	 * see KOFW_EF_CMDLINE_RACED.
+	 *
+	 * It earns that trouble because without it the process events cannot
+	 * name what happened. "powershell.exe started" is not a fact anybody can
+	 * act on; "powershell.exe -nop -w hidden -enc <...>" is the whole event.
+	 * Every living-off-the-land technique looks identical without this
+	 * field and obvious with it.
+	 */
+	uint16_t off_cmdline;  /* into text[], or KOFW_TEXT_NONE */
+
 	uint16_t text_len;
 
 	/*
@@ -539,6 +686,19 @@ struct kofw_evt {
 	 * a pid.
 	 */
 	uint64_t addr;
+
+	/*
+	 * HOW BIG THE THING AT `addr` IS, when the event said.
+	 *
+	 * An ImageLoad's ImageSize today, and it exists for one reason: with the
+	 * base and the size, a module occupies a RANGE, and a range is what lets
+	 * a later thread's entry point be tested against it. Without the size
+	 * there is a list of addresses and no way to ask whether something falls
+	 * inside a module.
+	 *
+	 * Zero when the event named none.
+	 */
+	uint64_t addr_size;
 
 	char     text[KOFW_EVT_SIZE - KOFW_EVT_HEAD];
 };
@@ -653,12 +813,31 @@ enum {
 	 */
 	KOFW_SUB_FILE_OPEN = 1u << 7,
 
+	/*
+	 * WHAT A SCRIPT ACTUALLY SAID.
+	 *
+	 * Microsoft-Antimalware-Scan-Interface reports the buffers applications
+	 * hand to AmsiScanBuffer: an expanded PowerShell command, a macro body, a
+	 * script block on its way to being executed. Everything else this
+	 * collector gathers is the FACT of something - a file appeared, a
+	 * connection opened. This is the only source of CONTENT, which is what
+	 * makes it worth a provider of its own despite being small.
+	 *
+	 * Low volume: it fires only when a scripting host asks, so an idle
+	 * machine produces none at all. Cheap to leave on.
+	 *
+	 * Not a substitute for anything. It is a user-mode provider, so a process
+	 * can silence its own submissions, and a payload that never uses a
+	 * scripting host was never going to appear here.
+	 */
+	KOFW_SUB_AMSI    = 1u << 8,
+
 	/* Everything this build can collect. What kofwintrace takes by default
 	 * - see the note there on why a discovery tool defaults to loud. */
 	KOFW_SUB_ALL = KOFW_SUB_PROCESS | KOFW_SUB_IMAGE | KOFW_SUB_FILE |
 		       KOFW_SUB_FILE_WRITE | KOFW_SUB_NET |
 		       KOFW_SUB_REGISTRY | KOFW_SUB_THREAD |
-		       KOFW_SUB_FILE_OPEN
+		       KOFW_SUB_FILE_OPEN | KOFW_SUB_AMSI
 };
 
 /* "process", "image", "file", ... for one KOFW_SUB_* bit. "" for anything
@@ -671,6 +850,11 @@ const char *kofw_evt_image(const struct kofw_evt *);
 /* What the event acted on - the file that appeared, the module mapped, the
  * path unlinked - or "" when there is none. Never NULL. */
 const char *kofw_evt_object(const struct kofw_evt *);
+
+/* The command line of a process that just started, or "" - which means either
+ * that there was none or that the race was lost. KOFW_EF_CMDLINE_RACED tells
+ * the two apart. Never NULL. */
+const char *kofw_evt_cmdline(const struct kofw_evt *);
 
 /* "ProcStart", "ProcStop", ... Never NULL, so a record written by a build that
  * knew one more type still prints as something. */
@@ -833,6 +1017,30 @@ struct kofw_health {
 	 * Non-zero means the scoped view is INCOMPLETE. */
 	uint64_t untracked;
 
+	/* Threads whose entry point was in no mapped image - see
+	 * KOFW_EF_UNBACKED. A count of facts, not of verdicts. */
+	uint64_t unbacked_threads;
+
+	/* Modules mapped long after their process started - see
+	 * KOFW_EF_LATE_LOAD. Expect a non-zero count on any real machine; it is
+	 * a population to look through, not an alarm. */
+	uint64_t late_loads;
+
+	/*
+	 * Command lines read, and lost to the race.
+	 *
+	 * The ratio is the useful number and it is expected to be poor: the
+	 * processes worth reading are the short-lived ones. A high `lost` is
+	 * the method's limit showing, not a fault - but it also bounds what any
+	 * conclusion drawn from command lines can claim.
+	 */
+	uint64_t cmdline_got, cmdline_lost;
+
+	/* Times a process' module list could not be extended because the range
+	 * pool was empty. Non-zero means KOFW_EF_UNBACKED is being withheld for
+	 * those processes, so a zero unbacked count is less meaningful. */
+	uint64_t mod_pool_exhausted;
+
 	/*
 	 * Holes in kofw_evt.seq, counted BEFORE the filter runs.
 	 *
@@ -924,6 +1132,31 @@ struct kofw_filter {
 	 * mean the subject left the tree rather than that it did nothing.
 	 */
 	uint32_t root_pid;
+
+	/*
+	 * PROVIDERS EXEMPT FROM THE SUBTREE SCOPE, as 1u << enum kofw_provider.
+	 *
+	 * Scoping to a process tree is what turns a stream into evidence, and it
+	 * is wrong for exactly one kind of record: the ones whose value does not
+	 * depend on whose tree they came from.
+	 *
+	 * AMSI is that kind. It reports the CONTENT an application submitted,
+	 * it is low volume enough to be free, and the moment it matters most is
+	 * the moment the scope has already lost the subject - a payload that
+	 * migrated is running in a process that is nobody's descendant, and its
+	 * script submissions are attributed to a pid outside the tree and
+	 * dropped. The trace then shows a clean subtree and says nothing about
+	 * the thing that walked out of it.
+	 *
+	 * Exempting a provider BREAKS the tool's promise that everything shown
+	 * belongs to one tree, so it is never a default: a caller asks, and the
+	 * caller says so in its own output.
+	 *
+	 * By provider and not by event type on purpose - a type only exists
+	 * once its ids have been established, and the records this is for are
+	 * still arriving as KOFW_EVT_RAW.
+	 */
+	uint32_t scope_exempt_prov;
 };
 
 /*
@@ -949,6 +1182,22 @@ int kofw_mon_track(struct kofw_mon *, uint32_t pid, const char *image);
 /* How many tracked processes have not yet stopped. Zero once a tracked tree has
  * finished, which is what a trace waits for. Meaningless without a root_pid. */
 uint32_t kofw_mon_tracked_alive(const struct kofw_mon *);
+
+/*
+ * WHICH tracked processes have not stopped - not just how many.
+ *
+ * The count alone turns "the trace will not finish" into a number, and a number
+ * is not a diagnosis. A tracer waits for the tracked tree to empty, so a count
+ * stuck above zero has exactly two causes and they call for opposite responses:
+ * a descendant really is still running, or a ProcessStop was never matched to
+ * its entry and the counter is wrong about the world. Naming the processes
+ * separates them in one glance - a familiar long-lived child is the first, a
+ * process that visibly exited is the second.
+ *
+ * Walks the entries: `i` from 0 upward until it returns NULL. Fills *pid when
+ * non-NULL. The name is borrowed and valid until the next kofw_mon_next.
+ */
+const char *kofw_mon_tracked_nth(struct kofw_mon *, uint32_t i, uint32_t *pid);
 
 /*
  * What this pid is, for reporting. "" when the collector has not seen it start.

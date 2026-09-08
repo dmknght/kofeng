@@ -257,7 +257,93 @@ uint8_t kofw_classify_path(const char *path)
 
 void kofw_ptab_init(struct kofw_ptab *t)
 {
+	uint16_t i;
+
 	memset(t, 0, sizeof *t);
+
+	/* Chain the module-range pool into one free list. */
+	for (i = 0; i + 1 < KOFW_MODBLK_MAX; i++)
+		t->blk[i].next = (uint16_t)(i + 1);
+	t->blk[KOFW_MODBLK_MAX - 1].next = KOFW_MODBLK_NONE;
+	t->blk_free = 0;
+}
+
+/* ------------------------------------------------- where images are mapped */
+
+static void mods_release(struct kofw_ptab *t, struct kofw_pent *p)
+{
+	uint16_t b = p->mods, next;
+
+	while (b != KOFW_MODBLK_NONE && b < KOFW_MODBLK_MAX) {
+		next = t->blk[b].next;
+		t->blk[b].n    = 0;
+		t->blk[b].next = t->blk_free;
+		t->blk_free    = b;
+		b = next;
+	}
+	p->mods      = KOFW_MODBLK_NONE;
+	p->mods_full = 0;
+}
+
+static void mods_add(struct kofw_ptab *t, struct kofw_pent *p, uint64_t base,
+		     uint64_t size)
+{
+	struct kofw_modblk *blk;
+
+	if (!base || !size)
+		return;
+
+	if (p->mods != KOFW_MODBLK_NONE && p->mods < KOFW_MODBLK_MAX &&
+	    t->blk[p->mods].n < KOFW_MODS_PER_BLK) {
+		blk = &t->blk[p->mods];
+	} else {
+		uint16_t b = t->blk_free;
+
+		if (b == KOFW_MODBLK_NONE) {
+			/* Out of pool. The list is now incomplete, so it can no
+			 * longer support a negative claim - see mods_whole. */
+			t->mod_exhausted++;
+			p->mods_full = 1;
+			return;
+		}
+		t->blk_free = t->blk[b].next;
+		blk         = &t->blk[b];
+		blk->n      = 0;
+		blk->next   = p->mods;
+		p->mods     = b;
+	}
+
+	blk->base[blk->n] = base;
+	blk->size[blk->n] = size > 0xffffffffu ? 0xffffffffu : (uint32_t)size;
+	blk->n++;
+}
+
+/*
+ * Is `addr` inside any image this process was watched mapping.
+ *
+ * An unmapped module is NOT removed from the list, deliberately. Keeping a
+ * stale range can only make an address look backed when it is not, which
+ * suppresses a report; dropping it could make a live module look absent and
+ * manufacture one. Between a missed detection and a fabricated one, this errs
+ * toward the first.
+ */
+static int mods_contain(const struct kofw_ptab *t, const struct kofw_pent *p,
+			uint64_t addr)
+{
+	uint16_t b = p->mods;
+
+	while (b != KOFW_MODBLK_NONE && b < KOFW_MODBLK_MAX) {
+		const struct kofw_modblk *blk = &t->blk[b];
+		uint8_t i;
+
+		for (i = 0; i < blk->n; i++) {
+			if (addr >= blk->base[i] &&
+			    addr - blk->base[i] < blk->size[i])
+				return 1;
+		}
+		b = blk->next;
+	}
+	return 0;
 }
 
 /* The basename, which is what a name column wants. The full path stays on the
@@ -309,7 +395,22 @@ struct kofw_pent *kofw_ptab_add(struct kofw_ptab *t, uint32_t pid,
 			t->overflow++;
 			return NULL;
 		}
+		/*
+		 * Recycling drops every entry, so every module block they held
+		 * has to go back to the pool - otherwise it leaks away one
+		 * recycle at a time and the detector quietly stops working.
+		 */
+		uint16_t k;
+
 		memset(t->e, 0, sizeof t->e);
+		for (k = 0; k + 1 < KOFW_MODBLK_MAX; k++) {
+			t->blk[k].n    = 0;
+			t->blk[k].next = (uint16_t)(k + 1);
+		}
+		t->blk[KOFW_MODBLK_MAX - 1].n    = 0;
+		t->blk[KOFW_MODBLK_MAX - 1].next = KOFW_MODBLK_NONE;
+		t->blk_free = 0;
+
 		t->n = 0;
 		t->n_alive_tracked = 0;
 	}
@@ -323,6 +424,13 @@ struct kofw_pent *kofw_ptab_add(struct kofw_ptab *t, uint32_t pid,
 			t->n++;
 			p->used = 1;
 			p->pid  = pid;
+			/*
+			 * NOT ZERO. Zero is a legal block index, so an entry
+			 * left as memset gave it would claim to own the first
+			 * block of the pool and read back whatever ranges some
+			 * other process had put there.
+			 */
+			p->mods = KOFW_MODBLK_NONE;
 		}
 		p->create_time = create_time;
 		p->alive       = 1;
@@ -409,12 +517,66 @@ int kofw_filter_apply(struct kofw_ptab *t, const struct kofw_filter *f,
 			p->tracked = 1;
 			t->n_alive_tracked++;
 		}
+		if (p) {
+			/*
+			 * The module list starts here and is therefore whole:
+			 * every image this process ever maps is downstream of
+			 * this event. A process the session did not see start
+			 * never gets this bit, and so never gets a verdict.
+			 */
+			mods_release(t, p);
+			p->mods_whole = 1;
+		}
 	} else if (e->type == KOFW_EVT_PROC_STOP) {
 		p = kofw_ptab_of(t, e->pid, e->create_time);
 		if (p && p->alive) {
 			p->alive = 0;
 			if (p->tracked && t->n_alive_tracked)
 				t->n_alive_tracked--;
+		}
+		if (p) {
+			mods_release(t, p);
+			p->mods_whole = 0;
+		}
+	} else if (e->type == KOFW_EVT_IMAGE_LOAD) {
+		p = kofw_ptab_of(t, e->pid, 0);
+		if (p) {
+			mods_add(t, p, e->addr, e->addr_size);
+
+			/*
+			 * A module mapped long after the process started.
+			 *
+			 * Both values are FILETIME, so this is a subtraction
+			 * and not a conversion. The comparison is guarded
+			 * against a stamp older than the creation time rather
+			 * than assumed: records arrive up to a flush timer
+			 * late and out of order across CPUs, and an unsigned
+			 * subtraction the wrong way round would produce an
+			 * enormous positive and flag everything.
+			 */
+			if (p->mods_whole && p->create_time &&
+			    e->stamp > p->create_time &&
+			    e->stamp - p->create_time > KOFW_LATE_LOAD_TICKS) {
+				e->flags |= KOFW_EF_LATE_LOAD;
+				t->late_loads++;
+			}
+		}
+	} else if (e->type == KOFW_EVT_THREAD_START && e->addr) {
+		p = kofw_ptab_of(t, e->pid, 0);
+		/*
+		 * THE ONE PLACE THE COLLECTOR SAYS SOMETHING IT WAS NOT TOLD.
+		 *
+		 * Every other field on a record is a value some provider
+		 * supplied. This one is a conclusion drawn from two of them -
+		 * where images were mapped, and where a thread began - and it
+		 * is drawn here rather than left to a consumer because only the
+		 * collector has both, and only it knows whether the module list
+		 * is complete enough for the answer to mean anything.
+		 */
+		if (p && p->mods_whole && !p->mods_full &&
+		    !mods_contain(t, p, e->addr)) {
+			e->flags |= KOFW_EF_UNBACKED;
+			t->unbacked++;
 		}
 	}
 
@@ -433,7 +595,8 @@ int kofw_filter_apply(struct kofw_ptab *t, const struct kofw_filter *f,
 		return 0;
 	}
 
-	if (scoped) {
+	if (scoped &&
+	    !(f->scope_exempt_prov & (1u << e->provider))) {
 		/* Judged on the SUBJECT, which for a file or network event is
 		 * the process that acted. */
 		p = kofw_ptab_of(t, e->pid,

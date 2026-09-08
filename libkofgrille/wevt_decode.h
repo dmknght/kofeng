@@ -76,6 +76,7 @@ extern const GUID KOFW_GUID_KERNEL_PROCESS;   /* Microsoft-Windows-Kernel-Proces
 extern const GUID KOFW_GUID_KERNEL_FILE;      /* Microsoft-Windows-Kernel-File */
 extern const GUID KOFW_GUID_KERNEL_NET;       /* Microsoft-Windows-Kernel-Network */
 extern const GUID KOFW_GUID_KERNEL_REGISTRY;  /* Microsoft-Windows-Kernel-Registry */
+extern const GUID KOFW_GUID_AMSI;             /* Microsoft-Antimalware-Scan-Interface */
 
 struct kofw_prop {
 	uint16_t in_type;   /* TDH_INTYPE_* */
@@ -176,7 +177,8 @@ enum kofw_field {
 	KOFW_FLD_DPORT,
 	KOFW_FLD_SPORT,
 	KOFW_FLD_SIZE,
-	KOFW_FLD_ADDR
+	KOFW_FLD_ADDR,
+	KOFW_FLD_ADDR_SIZE
 };
 
 /*

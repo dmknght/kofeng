@@ -967,6 +967,7 @@ endif
 
 WIN_SRC := libkofgrille/wevt_ring.c \
            libkofgrille/wfilter.c \
+           libkofgrille/wcmdline.c \
            libkofgrille/wtext.c \
            libkofgrille/wevt_decode.c \
            libkofgrille/wevt_etw.c

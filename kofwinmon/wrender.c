@@ -82,6 +82,7 @@ void wm_count(const struct kofw_evt *e, struct wm_tally *t)
 	case KOFW_EVT_NET_DISCONNECT:
 	case KOFW_EVT_THREAD_START:
 	case KOFW_EVT_THREAD_STOP:                   break;
+	case KOFW_EVT_AMSI_SCAN:      t->amsi++;     break;
 	default:                      t->raw++;      break;
 	}
 }
@@ -96,10 +97,25 @@ void wm_render(const struct kofw_evt *e, double secs, const char *who,
 	       who && *who ? who : "?");
 
 	switch (e->type) {
-	case KOFW_EVT_PROC_START:
+	case KOFW_EVT_PROC_START: {
+		const char *cl = kofw_evt_cmdline(e);
+
 		printf("  ppid=%lu  %s", (unsigned long)e->ppid,
 		       kofw_evt_image(e));
+		/*
+		 * On its own line and indented, because it is usually longer
+		 * than everything before it and because it is the line that
+		 * matters. An image path names the program; the arguments name
+		 * what it was asked to do, and for every living-off-the-land
+		 * technique the second IS the event.
+		 */
+		if (*cl)
+			printf("\n                                 cmd: %s",
+			       cl);
+		else if (e->flags & KOFW_EF_CMDLINE_RACED)
+			printf("  [cmd unread: process gone]");
 		break;
+	}
 	case KOFW_EVT_PROC_STOP:
 		printf("  exit=%lu", (unsigned long)e->exit_code);
 		break;
@@ -116,6 +132,14 @@ void wm_render(const struct kofw_evt *e, double secs, const char *who,
 	case KOFW_EVT_THREAD_START:
 	case KOFW_EVT_THREAD_STOP:
 		printf("  start=0x%llx", (unsigned long long)e->addr);
+		break;
+	case KOFW_EVT_AMSI_SCAN:
+		/* The submitted content, which is a PREFIX - see
+		 * KOFW_EVT_AMSI_SCAN. The [cut] marker the common tail adds is
+		 * doing real work here: unlike a path, a script block is
+		 * usually longer than the arena, so most of these are
+		 * legitimately incomplete rather than exceptionally so. */
+		printf("  %s", kofw_evt_object(e));
 		break;
 	case KOFW_EVT_FILE_NEW:
 		printf("  [%s] %s", kofw_loc_name(e->obj_loc),
@@ -204,6 +228,18 @@ void wm_render(const struct kofw_evt *e, double secs, const char *who,
 		printf("  <%s %s>", kofw_attack_id(e->attack),
 		       kofw_attack_name(e->attack));
 
+	/*
+	 * Loud, because it is the only line in a trace that is a CONCLUSION
+	 * rather than a report, and because it is the one thing in the whole
+	 * stream that a reflectively loaded payload cannot avoid producing.
+	 */
+	if (e->flags & KOFW_EF_UNBACKED)
+		printf("  <<UNBACKED: entry point in no mapped image>>");
+	/* Quieter than UNBACKED on purpose: this one is common and legitimate,
+	 * and a marker as loud would train a reader to ignore both. */
+	if (e->flags & KOFW_EF_LATE_LOAD)
+		printf("  [late]");
+
 	if (e->flags & KOFW_EF_TRUNCATED)
 		printf("  [cut]");
 	/* Printed, never hidden: a field the decode could not supply is the
@@ -226,6 +262,7 @@ void wm_print_tally(const struct wm_tally *t, double secs, const char *what,
 		"   files renamed     : %llu\n"
 		"   files written     : %llu\n"
 		"   registry changes  : %llu\n"
+		"   amsi submissions  : %llu\n"
 		"   connections       : %llu\n"
 		"   bytes sent/recv   : %llu / %llu\n"
 		"   untyped events    : %llu\n"
@@ -239,6 +276,7 @@ void wm_print_tally(const struct wm_tally *t, double secs, const char *what,
 		(unsigned long long)t->file_ren,
 		(unsigned long long)t->file_wr,
 		(unsigned long long)t->reg,
+		(unsigned long long)t->amsi,
 		(unsigned long long)t->conn,
 		(unsigned long long)t->bytes_sent,
 		(unsigned long long)t->bytes_recv,
@@ -279,6 +317,42 @@ void wm_print_health(const struct kofw_health *h, double secs)
 			"   INCOMPLETE: %llu process(es) could not be tracked; "
 			"the scoped view is missing their events\n",
 			(unsigned long long)h->untracked);
+
+	/*
+	 * Reported next to the losses rather than with the tally, because both
+	 * numbers here qualify a NEGATIVE result. A run that found no unbacked
+	 * thread means something only if the module lists were complete, and
+	 * mod_pool_exhausted is what says they were not.
+	 */
+	/*
+	 * Both halves, always, because the ratio is the fact. A run that read
+	 * three command lines and lost forty has not said much about what ran,
+	 * and the forty is the only thing that admits it.
+	 */
+	if (h->cmdline_got || h->cmdline_lost)
+		fprintf(stderr,
+			"   command lines     : %llu read, %llu lost to the "
+			"race (the short-lived ones)\n",
+			(unsigned long long)h->cmdline_got,
+			(unsigned long long)h->cmdline_lost);
+
+	if (h->late_loads)
+		fprintf(stderr,
+			"   %llu module(s) mapped late - see [late] above; "
+			"common and legitimate on its own\n",
+			(unsigned long long)h->late_loads);
+
+	if (h->unbacked_threads)
+		fprintf(stderr,
+			"   %llu thread(s) started in no mapped image "
+			"(reflective load or injection - see the trace)\n",
+			(unsigned long long)h->unbacked_threads);
+	if (h->mod_pool_exhausted)
+		fprintf(stderr,
+			"   INCOMPLETE: the module-range pool ran out %llu "
+			"time(s); unbacked-thread detection was withheld for "
+			"the processes affected\n",
+			(unsigned long long)h->mod_pool_exhausted);
 
 	/*
 	 * Its own line, and worded as a state rather than a count, because that

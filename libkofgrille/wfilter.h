@@ -29,12 +29,63 @@
  */
 #define KOFW_PTAB_MAX 4096u
 
+/*
+ * WHERE EACH PROCESS HAS AN IMAGE MAPPED.
+ *
+ * Eight ranges to a block, blocks chained out of one pool, because the number
+ * per process varies by two orders of magnitude - a console tool maps a dozen
+ * modules and a PowerShell host maps well over a hundred - and a fixed array
+ * sized for the second would be mostly waste multiplied by every process in the
+ * table.
+ *
+ * uint32 for the size: an image is not four gigabytes.
+ */
+#define KOFW_MODS_PER_BLK 8u
+#define KOFW_MODBLK_MAX   4096u
+#define KOFW_MODBLK_NONE  0xffffu
+
+/*
+ * HOW LATE IS LATE, in FILETIME ticks: five seconds.
+ *
+ * A program's own imports are mapped before it runs a line of its own code, and
+ * that burst is over in well under a second even on a slow disk. Five is not a
+ * measured threshold - it is a deliberately loose one, chosen so that a slow
+ * machine or a cold cache cannot push an ordinary startup past it. Tightening it
+ * would find more and invent more; this errs toward saying nothing.
+ */
+#define KOFW_LATE_LOAD_TICKS 50000000ull
+
+struct kofw_modblk {
+	uint64_t base[KOFW_MODS_PER_BLK];
+	uint32_t size[KOFW_MODS_PER_BLK];
+	uint16_t next;
+	uint8_t  n;
+};
+
 struct kofw_pent {
 	uint32_t pid;
 	uint64_t create_time;   /* 0 when not known yet */
 	uint8_t  used;
 	uint8_t  alive;
 	uint8_t  tracked;       /* in the subtree named by filter.root_pid */
+
+	/*
+	 * WHETHER THE MODULE LIST CAN BE TRUSTED TO BE COMPLETE, which is the
+	 * whole difference between this being evidence and being noise.
+	 *
+	 * `mods_whole` is set only when this process's own ProcessStart was
+	 * seen, so every image it has ever mapped was witnessed. A process that
+	 * predates the session has a module list that begins in the middle, and
+	 * "this address is in none of the modules I know about" then means
+	 * nothing at all.
+	 *
+	 * `mods_full` clears it again if the pool ran out. Same reasoning: a
+	 * partial list cannot support a negative claim.
+	 */
+	uint8_t  mods_whole;
+	uint8_t  mods_full;
+	uint16_t mods;          /* head block, or KOFW_MODBLK_NONE */
+
 	char     image[120];
 };
 
@@ -43,6 +94,12 @@ struct kofw_ptab {
 	uint32_t n;
 	uint32_t n_alive_tracked;
 	uint64_t overflow;
+
+	struct kofw_modblk blk[KOFW_MODBLK_MAX];
+	uint16_t blk_free;      /* head of the free list */
+	uint64_t mod_exhausted; /* times the pool had nothing left */
+	uint64_t unbacked;      /* threads flagged - see KOFW_EF_UNBACKED */
+	uint64_t late_loads;    /* modules flagged - see KOFW_EF_LATE_LOAD */
 };
 
 void kofw_ptab_init(struct kofw_ptab *);

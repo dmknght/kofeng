@@ -60,6 +60,30 @@ const GUID KOFW_GUID_KERNEL_REGISTRY = {
 	{ 0xa0, 0x51, 0x33, 0xd1, 0x3d, 0x54, 0x13, 0xbd }
 };
 
+/*
+ * Microsoft-Antimalware-Scan-Interface, {2A576B87-09A7-520E-C21A-4942F0271D67}.
+ *
+ * THE ONE PROVIDER HERE THAT IS NOT A KERNEL PROVIDER, and the difference
+ * matters twice.
+ *
+ * What it reports is what an APPLICATION handed to AmsiScanBuffer - a
+ * PowerShell command line after the shell has expanded it, a macro body, a
+ * script block about to be executed. That is the only place in this whole
+ * collector where the content of something is visible rather than the fact of
+ * it: the file events say a script appeared, this says what the script SAYS.
+ *
+ * The cost of being a user-mode provider is that a process can silence it for
+ * itself. Patching ntdll!EtwEventWrite in your own address space stops your own
+ * AMSI submissions being reported, and so does not calling AmsiScanBuffer at
+ * all - a payload that never touches a scripting host is simply not an AMSI
+ * client. Neither is true of the kernel providers, which is why this is an
+ * addition to them and not a replacement for any of them.
+ */
+const GUID KOFW_GUID_AMSI = {
+	0x2a576b87, 0x09a7, 0x520e,
+	{ 0xc2, 0x1a, 0x49, 0x42, 0xf0, 0x27, 0x1d, 0x67 }
+};
+
 const GUID KOFW_GUID_KERNEL_FILE = {
 	0xedd08927, 0x9cc4, 0x4e65,
 	{ 0xb9, 0x70, 0xc2, 0x56, 0x0f, 0xb5, 0xc2, 0x89 }
@@ -75,6 +99,8 @@ uint8_t kofw_provider_of(const GUID *g)
 		return KOFW_PROV_FILE;
 	if (!memcmp(g, &KOFW_GUID_KERNEL_REGISTRY, sizeof *g))
 		return KOFW_PROV_REGISTRY;
+	if (!memcmp(g, &KOFW_GUID_AMSI, sizeof *g))
+		return KOFW_PROV_AMSI;
 	return KOFW_PROV_NONE;
 }
 
@@ -129,8 +155,34 @@ static int name_is(const wchar_t *w, const char *ascii)
  * something else entirely. One global name table would have quietly filed every
  * loaded DLL as the loading process's own identity.
  */
-static uint8_t field_of(const wchar_t *name, uint16_t type)
+static uint8_t field_of(const wchar_t *name, uint16_t type, uint8_t prov)
 {
+	/*
+	 * AMSI FIRST, AND ONLY `content` FEEDS THE OBJECT.
+	 *
+	 * The walk assigns fields in payload order and the last match wins, so
+	 * every name mapped to OBJECT competes for the same slot. That is fine
+	 * where the candidates are alternative spellings of one path. It is not
+	 * fine here: an AMSI event carries the submitted buffer AND the names
+	 * of the application and the content beside it, and whichever the
+	 * provider happens to list last is what a reader would see. A trace
+	 * showing "PowerShell" where the script was supposed to be is not an
+	 * error anybody would notice as one.
+	 *
+	 * This is the same mistake StartAddr and Win32StartAddr made, caught in
+	 * a second place. The general rule it argues for: names may only share
+	 * a field when they are alternatives, never when they can co-occur.
+	 */
+	if (prov == KOFW_PROV_AMSI) {
+		if (name_is(name, "content") || name_is(name, "Content"))
+			return KOFW_FLD_OBJECT;
+		if (name_is(name, "ProcessID") || name_is(name, "PID"))
+			return KOFW_FLD_PID;
+		/* appname and contentname are context and would otherwise
+		 * overwrite the buffer. Visible in --schema; not carried. */
+		return KOFW_FLD_SKIP;
+	}
+
 	/*
 	 * TWO SPELLINGS OF THE SAME FIELD, and the second one cost a whole
 	 * debugging session.
@@ -182,9 +234,30 @@ static uint8_t field_of(const wchar_t *name, uint16_t type)
 	 * only in-box way to see either without a protected-process signature.
 	 * ImageBase is here too, so a module load reports where it landed.
 	 */
-	if (name_is(name, "StartAddr") || name_is(name, "StartAddress") ||
-	    name_is(name, "Win32StartAddr") || name_is(name, "ImageBase"))
+	/*
+	 * ESTABLISHED, no longer assumed. Kernel-Process ThreadStart is event 3
+	 * version 1 and carries BOTH `StartAddr` and `Win32StartAddr`, each a
+	 * pointer. They are not interchangeable:
+	 *
+	 *   StartAddr        where the kernel begins the thread, which for
+	 *                    every ordinary thread is the same ntdll stub.
+	 *   Win32StartAddr   the routine the thread was actually created to
+	 *                    run - the one a caller passed to CreateThread.
+	 *
+	 * Only the second answers "is this entry point inside a mapped image",
+	 * because the first is inside ntdll for injected and innocent threads
+	 * alike. Mapping both to one field made the answer depend on which the
+	 * payload happened to list last, which is not a decision anybody made.
+	 */
+	if (name_is(name, "Win32StartAddr") || name_is(name, "StartAddress") ||
+	    name_is(name, "ImageBase"))
 		return KOFW_FLD_ADDR;
+
+	/* ImageSize, so a module load describes a RANGE rather than a point.
+	 * Without it there is a list of addresses and no way to ask whether a
+	 * thread's entry point falls inside one. */
+	if (name_is(name, "ImageSize"))
+		return KOFW_FLD_ADDR_SIZE;
 
 	if (name_is(name, "ImageName")) {
 		if (type == KOFW_EVT_PROC_START || type == KOFW_EVT_PROC_STOP)
@@ -228,6 +301,20 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 		case EVID_FILE_CREATE_NEW: return KOFW_EVT_FILE_NEW;
 		case EVID_FILE_RENAME:     return KOFW_EVT_FILE_RENAME;
 		case EVID_FILE_DELETE:     return KOFW_EVT_FILE_DELETE;
+		/*
+		 * FileIo Write. Established from its shape rather than from a
+		 * list: `--schema` describes id 16 version 1 as ByteOffset,
+		 * Irp, FileObject, FileKey, IssuingThreadId, IOSize, IOFlags,
+		 * ExtraFlags - a size against a file handle, which is a write
+		 * and nothing else.
+		 *
+		 * Note what it does NOT carry: a path. The target is named by
+		 * FileObject, a kernel pointer, and turning those back into
+		 * paths needs the FileKey->FileName records that arrive as id
+		 * 10 to be kept in a map. Until that exists these are typed but
+		 * pathless, which is still better than untyped.
+		 */
+		case 16u:                  return KOFW_EVT_FILE_WRITE;
 		default: break;
 		}
 	} else if (prov == KOFW_PROV_REGISTRY) {
@@ -251,6 +338,41 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 		 *   case <id>: return KOFW_EVT_REG_CREATE;
 		 *   case <id>: return KOFW_EVT_REG_SET_VALUE;
 		 *   case <id>: return KOFW_EVT_REG_DELETE;
+		 */
+	} else if (prov == KOFW_PROV_AMSI) {
+		/*
+		 * ESTABLISHED, on this machine, the same way as every other id
+		 * here: run a script under the tracer and read the id off the
+		 * line. It is 1101 version 1, and it was arriving all along -
+		 * it printed as `[? id 1101 v1]` because kofw_provider_name had
+		 * no case for AMSI, so a working provider read as an unknown
+		 * one. Both halves of that are now fixed.
+		 */
+		if (id == 1101u)
+			return KOFW_EVT_AMSI_SCAN;
+		/*
+		 * EMPTY FOR THE SAME REASON, WITH A DIFFERENT OBSTACLE.
+		 *
+		 * Registry's ids are unestablished because nobody has run the
+		 * discovery yet. AMSI's are unestablished because this machine
+		 * CANNOT run it: Get-MpComputerStatus reports
+		 * RealTimeProtectionEnabled = False, and with real-time
+		 * protection off the scripting hosts stop submitting buffers,
+		 * so the provider is correctly enabled and correctly silent.
+		 *
+		 * That is worth writing down precisely because it looks
+		 * identical to a wrong GUID from the outside. The wiring was
+		 * checked another way instead: MpOav.dll is registered as an
+		 * AMSI provider under HKLM\SOFTWARE\Microsoft\AMSI\Providers,
+		 * amsi.dll is present, and EnableTraceEx2 accepted the GUID.
+		 * What is missing is production, not plumbing.
+		 *
+		 * To finish this: on a machine with real-time protection on,
+		 * run `kofwinmon --amsi --schema`, execute a script, and read
+		 * the id off the shape dump. The property names are already
+		 * mapped in field_of, so `content` will land in `object` the
+		 * moment the id is typed - and until then these arrive as RAW
+		 * with the content already visible, which is most of the value.
 		 */
 	}
 	return KOFW_EVT_RAW;
@@ -485,7 +607,7 @@ static struct kofw_schema *learn(struct kofw_schema_cache *c, uint8_t prov,
 		sc->prop[sc->n_prop].in_type = in_type;
 		sc->prop[sc->n_prop].fixed   = fx;
 		sc->prop[sc->n_prop].field   = pi->NameOffset
-						       ? field_of(name, type)
+						       ? field_of(name, type, prov)
 						       : KOFW_FLD_SKIP;
 		if (pi->NameOffset) {
 			char  *d = sc->prop[sc->n_prop].name;
@@ -570,6 +692,10 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 	struct kofw_schema *sc;
 	const uint8_t *base;
 	size_t   off, total, tnext = 0;
+	/* The longest string no named field claimed - see KOFW_FLD_SKIP in the
+	 * walk below, and the use after it. */
+	size_t   spare_off = 0, spare_len = 0;
+	uint16_t spare_type = 0;
 	uint16_t id, type;
 	uint32_t want;
 	uint8_t  prov;
@@ -603,6 +729,16 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 	out->cpu         = rec->BufferContext.ProcessorNumber;
 	out->off_image   = KOFW_TEXT_NONE;
 	out->off_object  = KOFW_TEXT_NONE;
+	/*
+	 * NONE, not the zero a memset leaves.
+	 *
+	 * Zero is a valid offset into text[], so a record that never had a
+	 * command line read into it would answer kofw_evt_cmdline() with
+	 * whatever sits at offset 0 - which is the image path. Every file,
+	 * network and registry event would have reported the process image as
+	 * its command line, and that reads like data.
+	 */
+	out->off_cmdline = KOFW_TEXT_NONE;
 
 	/*
 	 * THE SUBJECT DEFAULTS TO WHOEVER RAISED THE EVENT.
@@ -695,6 +831,41 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 			else if (len >= 4)
 				out->addr = rd_u32(base + off);
 			break;
+		case KOFW_FLD_ADDR_SIZE:
+			if (len >= 8)
+				out->addr_size = rd_u64(base + off);
+			else if (len >= 4)
+				out->addr_size = rd_u32(base + off);
+			break;
+
+		/*
+		 * A STRING NOBODY CLAIMED, remembered in case nothing does.
+		 *
+		 * An event whose property names this build has never seen -
+		 * every provider on its first encounter - fills no string field
+		 * and renders as a bare `[prov id v]` with nothing after it.
+		 * That reads as "the event carried nothing", which is what AMSI
+		 * looked like for a whole session while it was in fact carrying
+		 * the script.
+		 *
+		 * So the longest unclaimed string is kept, and used below only
+		 * if no named field took the object slot. Longest rather than
+		 * first, because the payload that matters is the content and
+		 * the ones beside it are labels: an application name and a
+		 * content name are short, a submitted script block is not.
+		 *
+		 * A fallback, never an override. Anything this build actually
+		 * recognises still wins.
+		 */
+		case KOFW_FLD_SKIP:
+			if ((pr->in_type == TDH_INTYPE_UNICODESTRING ||
+			     pr->in_type == TDH_INTYPE_ANSISTRING) &&
+			    len > spare_len) {
+				spare_off  = off;
+				spare_len  = len;
+				spare_type = pr->in_type;
+			}
+			break;
 
 		case KOFW_FLD_IMAGE:
 		case KOFW_FLD_OBJECT: {
@@ -750,6 +921,37 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 		off += len;
 	}
 
+	/*
+	 * THE UNCLAIMED STRING, used only if nothing named took the slot.
+	 *
+	 * This is what makes a provider legible on its first encounter instead
+	 * of on the second, after somebody has read a shape dump and added its
+	 * property names. The record still says which provider and which id it
+	 * came from, so the string is offered as "here is what it carried", not
+	 * as a field this build understands.
+	 */
+	if (out->off_object == KOFW_TEXT_NONE && spare_len &&
+	    tnext + 1u < sizeof out->text) {
+		size_t room = sizeof out->text - tnext, n = 0;
+		int    cut = 0;
+
+		if (spare_type == TDH_INTYPE_UNICODESTRING)
+			n = kofw_utf16_to_utf8(
+				(const uint16_t *)(const void *)
+					(base + spare_off),
+				spare_len / 2u, out->text + tnext, room, &cut);
+		else
+			n = kofw_ansi_to_text(base + spare_off, spare_len,
+					      out->text + tnext, room, &cut);
+		if (n) {
+			out->off_object = (uint16_t)tnext;
+			tnext += n + 1u;
+			out->text_len = (uint16_t)tnext;
+			if (cut)
+				out->flags |= KOFW_EF_TRUNCATED;
+		}
+	}
+
 	out->miss = want;
 	if (want)
 		out->flags |= KOFW_EF_PARTIAL;
@@ -768,6 +970,7 @@ static const char *field_name(uint8_t f)
 	case KOFW_FLD_SESSION:     return "-> session";
 	case KOFW_FLD_EXIT_CODE:   return "-> exit_code";
 	case KOFW_FLD_ADDR:        return "-> addr";
+	case KOFW_FLD_ADDR_SIZE:   return "-> addr_size";
 	case KOFW_FLD_IMAGE:       return "-> image";
 	case KOFW_FLD_OBJECT:      return "-> object";
 	default:                   return "";
