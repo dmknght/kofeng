@@ -685,6 +685,23 @@ enum kof_pack_str_kind {
 #define KOF_STR_FULLWORD (1u << 1)
 
 /*
+ * The literal is UTF-16LE - the widened form of an ASCII marker.
+ *
+ * The BYTES are already what they will be compared against; ksigbuilder
+ * interleaved the zero high halves, so the matcher needs no special compare
+ * path and the presence set keys on the widened bytes like any other.
+ *
+ * It matters for exactly one thing: FULLWORD. That test asks what sits beside
+ * a match, and beside a UTF-16 match the answer is half of a character. After
+ * the match the next byte is the low half of the following character, which is
+ * the right byte to look at; BEFORE it, the previous byte is the zero high half
+ * of the preceding character, which is never a word byte - so the leading test
+ * passed on every match and a wide fullword pattern silently behaved as a
+ * substring. With this flag the matcher steps back a whole character instead.
+ */
+#define KOF_STR_WIDE     (1u << 2)
+
+/*
  * One declared string: where its bytes are, and how to match them.
  *
  * A pool with (offset, length) rather than an inline buffer. Measured on the

@@ -670,6 +670,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/binaries/elf_sym.c \
            libkofeng/kofparsers/binaries/sym_any.c \
            libkofeng/kofparsers/kofformat.c \
+           libkofeng/kofparsers/events/amsi_parse.c \
            libkofeng/kofdisasm/xref.c \
            libkofeng/kofparsers/binaries/pe_sym.c \
            libkofeng/kofparsers/binaries/pe_parse.c \

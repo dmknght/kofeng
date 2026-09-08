@@ -907,6 +907,21 @@ struct view {
 	uint64_t             log_next;   /* the first record past the window */
 
 	/*
+	 * HOW MANY OF THOSE RECORDS ARE EVENTS.
+	 *
+	 * Not the same number as log_n, and the difference is not cosmetic: a
+	 * continuation is a record and is not an event, so a log holding one
+	 * AMSI submission split over nine chunks has ten records and one event.
+	 * Reported as ten, the header told a reader there were nine things in
+	 * the file that are not there.
+	 *
+	 * log_n stays the record count, because that is what indexes the file -
+	 * kofevt_log_extent, the window, the paging all count records. This is
+	 * only ever shown.
+	 */
+	uint64_t             log_events;
+
+	/*
 	 * WHICH VERBS THIS LOG ACTUALLY CONTAINS, and which of them to show.
 	 *
 	 * Both are masks of 1u << kof_evt_verb. `log_verbs` is what the file
@@ -2535,6 +2550,7 @@ static void log_scan_verbs(struct view *v)
 
 	v->log_verbs = 0;
 	v->log_keep  = 0;
+	v->log_events = 0;
 	if (!v->log || !v->map)
 		return;
 	h = kofevt_log_header(v->log);
@@ -2555,6 +2571,8 @@ static void log_scan_verbs(struct view *v)
 		 * invite a reader to hide the tails while keeping the heads,
 		 * which is not a view of anything.
 		 */
+		if (verb != KOF_EVT_CONT)
+			v->log_events++;
 		if (verb < 32u && verb != KOF_EVT_CONT)
 			v->log_verbs |= 1u << verb;
 		if ((uint32_t)h->head_size + tl > h->rec_size)
@@ -18216,7 +18234,7 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 				 kof_evt_platform_name((uint8_t)lh->platform),
 				 kof_evt_arch_name((uint8_t)lh->arch),
 				 (unsigned long)lh->build,
-				 (unsigned long long)v->log_n);
+				 (unsigned long long)v->log_events);
 			v->act_ok = 1;
 		}
 	}

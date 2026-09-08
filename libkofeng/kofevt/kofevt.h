@@ -690,6 +690,7 @@ enum kof_evt_kind {
  * payload is unreadable rather than read as the wrong kind. */
 enum kof_evt_kind kof_evt_kind_of(uint16_t verb);
 
+
 struct kof_evt {
 	/*
 	 * WHEN, as 100ns units since 1601 on every platform.

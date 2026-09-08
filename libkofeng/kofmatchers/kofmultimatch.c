@@ -143,10 +143,38 @@ static int pat_at(const struct kof_match_ctx *m, const struct kof_multimatch_pat
 	}
 	if (!(p->flags & KOF_STR_FULLWORD))
 		return 1;
-	if (at > base && is_word_byte(m->data.p[at - 1]))
+
+	/*
+	 * A WIDE MATCH IS BOUNDED BY CHARACTERS, NOT BY BYTES.
+	 *
+	 * The pattern is the marker with zero high halves interleaved and it
+	 * ENDS with one, so the byte at `end` is the low half of the next
+	 * character - the right byte to test, and the trailing side needs no
+	 * change.
+	 *
+	 * The leading side does. The byte at `at - 1` is the zero high half of
+	 * the character before, which is never a word byte, so that test passed
+	 * on every match and the option meant nothing. The character before
+	 * lives at [at - 2, at - 1]: it is a word character when its low half
+	 * is a word byte AND its high half is zero. A non-zero high half means
+	 * the bytes there are not UTF-16 text at all, so nothing is being
+	 * abutted and the boundary holds.
+	 */
+	if (p->flags & KOF_STR_WIDE) {
+		if (at >= base + 2u && m->data.p[at - 1] == 0 &&
+		    is_word_byte(m->data.p[at - 2]))
+			return 0;
+	} else if (at > base && is_word_byte(m->data.p[at - 1])) {
 		return 0;
-	if (end < base + span && end < m->data.n && is_word_byte(m->data.p[end]))
-		return 0;
+	}
+	if (end < base + span && end < m->data.n &&
+	    is_word_byte(m->data.p[end])) {
+		/* Wide: only when a whole character follows. A word byte with a
+		 * non-zero byte above it is not a UTF-16 character. */
+		if (!(p->flags & KOF_STR_WIDE) ||
+		    (end + 1u < m->data.n && m->data.p[end + 1u] == 0))
+			return 0;
+	}
 	return 1;
 }
 

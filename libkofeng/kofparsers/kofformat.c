@@ -13,6 +13,7 @@
 #include "containers/xz_parse.h"
 #include "containers/rtf_parse.h"
 #include "containers/pdf_parse.h"
+#include "events/amsi_parse.h"
 
 /*
  * Each parser takes its own view type; the table takes one signature. The casts
@@ -71,6 +72,11 @@ static int rtf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 static int pdf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
 	return kof_pdf_parse(b, (struct kof_pdf_info *)v, c);
+}
+
+static int amsi_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_amsi_parse(b, v, c);
 }
 
 /*
@@ -181,7 +187,21 @@ static const struct kof_parser formats[] = {
 	{ KOF_FMT_PDF, (uint32_t)sizeof(struct kof_pdf_info),
 	  kof_pdf_sniff, pdf_parse_thunk,
 	  kof_pdf_region_bits, KOF_PDF_REGION_COUNT,
-	  kof_pdf_region_name, kof_pdf_anomaly_name, anom_pdf }
+	  kof_pdf_region_name, kof_pdf_anomaly_name, anom_pdf },
+
+	/*
+	 * LAST, AND ITS SNIFF NEVER ACCEPTS.
+	 *
+	 * Order is part of this table's contract - the first sniff that accepts
+	 * wins - and this row opts out of that race entirely: an event record
+	 * has no magic, so any sniff would be a guess about whose bytes these
+	 * are. It is reached only through kof_parser_of(KOF_EVT_AMSI), by a
+	 * caller that already knows what it is holding. See amsi_parse.h.
+	 */
+	{ KOF_EVT_AMSI, (uint32_t)sizeof(struct kof_amsi_view),
+	  kof_amsi_sniff, amsi_parse_thunk,
+	  kof_amsi_regions, 2u,
+	  kof_amsi_region_name, kof_amsi_anomaly_name, kof_amsi_anomalies }
 };
 
 

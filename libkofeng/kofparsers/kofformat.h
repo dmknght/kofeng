@@ -55,7 +55,7 @@ struct kof_parser {
 /* How many rows. Public so a caller that keeps a table of its own, one row per
  * format, can check its length against this and fail to build rather than fall
  * quietly behind. */
-#define KOF_PARSER_COUNT 11u
+#define KOF_PARSER_COUNT 12u
 
 /*
  * The list, in sniff order. Sets *n and returns a pointer that stays valid for

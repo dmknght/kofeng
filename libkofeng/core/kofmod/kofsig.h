@@ -164,10 +164,85 @@ enum kof_format {
 	KOF_FMT_RTF     = 14,
 	KOF_FMT_PDF     = 15,
 
-	/* One past the last, so a host can size a per-format table. Not a format:
-	 * nothing is ever this. */
+	/*
+	 * ONE COLLECTED EVENT, not a file.
+	 *
+	 * The object is a struct kof_evt - what a collector saw happen, with the
+	 * submitted content in its arena. It is a format here for the same
+	 * reason every other value is: format is what the prefilter rules on, so
+	 * a rule written about a script submission is never offered an ELF and
+	 * an ELF rule is never offered an event.
+	 *
+	 * It is DECLARED, NOT SNIFFED. Every format above is recognised from its
+	 * bytes; a record has no magic, and guessing "this 512 bytes is an
+	 * event" from plausible-looking fields would claim arbitrary data as
+	 * one. Whoever has the record knows what it is - the client that read it
+	 * off the channel, the viewer that opened the log - and says so.
+	 *
+	 * AMSI rather than EVENT because the regions are AMSI's: a submission
+	 * and the fields around it. A verb with a different shape worth writing
+	 * rules against gets its own value and its own regions, the same way
+	 * DOCOLE and DOCZIP are two formats rather than one with a sub-kind.
+	 * A NetRecv rule, for instance, is a comparison of ADDRESSES rather
+	 * than a search through bytes, so it wants a different shape again.
+	 *
+	 *
+	 * KOF_EVT_ AND NOT KOF_FMT_, AND THE NAME IS NOT COSMETIC.
+	 *
+	 * This sits in enum kof_format because format is the axis the prefilter
+	 * rules on - one value per kind of thing a rule can be written about,
+	 * so an event is never offered to an ELF module and an ELF is never
+	 * offered to this one. That is the mechanism and it does not change.
+	 *
+	 * But what an author DECLARES is the kind of event, so that is what
+	 * they write. A signature reading KOF_TARGET_EVENT(KOF_EVT_AMSI) says
+	 * what it is about; the same rule spelled as a "format" would be asking
+	 * an author to call a submission a file format.
+	 *
+	 * NOT TO BE CONFUSED WITH KOF_EVT_AMSI_SCAN, which is a VERB - what one
+	 * record says happened. This is what a RULE targets. They are one to
+	 * one today and they are not the same axis: verbs are the collector's
+	 * vocabulary and grow as it learns event ids, targets grow only when
+	 * there is a shape worth writing rules against. kof_evt_target_of()
+	 * maps one to the other, so the relationship is code rather than a
+	 * convention two files have to remember.
+	 */
+	KOF_EVT_AMSI    = 19,
+
+	/*
+	 * One past the last FILE FORMAT, so a host can size a per-format table.
+	 * Not a format: nothing is ever this.
+	 *
+	 * It stops at the file formats on purpose. Event targets are numbered
+	 * above them - see KOF_TARGET_FIRST_EVENT - so this is no longer the
+	 * width of the axis, and anything sizing an array by target value wants
+	 * KOF_TARGET_BITS instead.
+	 */
 	KOF_FMT_COUNT   = 16
 };
+
+/*
+ * WHERE EVENT TARGETS START, AND WHY THE BOUNDARY IS DECLARED.
+ *
+ * An event target's value IS its verb - KOF_EVT_AMSI is KOF_EVT_AMSI_SCAN, the
+ * same number - so the byte a client filters records on is the byte the
+ * prefilter rules modules on, and the two cannot drift apart because they are
+ * one number.
+ *
+ * That only works while no verb collides with a file format, and verbs start at
+ * 1: KOF_EVT_PROC_START would be KOF_FMT_ELF. So the low half of the axis
+ * belongs to file formats and the high half to verbs, and every event target
+ * asserts that it is above the line (see kofevt.h). A verb below it simply
+ * cannot be given a target until the boundary moves.
+ *
+ * THE AXIS IS 32 VALUES WIDE AND THAT IS A HARD CEILING: a module's target is a
+ * uint32 MASK in the pack, because a module may target more than one thing.
+ * Sixteen are spent on file formats and sixteen are left for events - which is
+ * ample, because a target is needed per RULE SHAPE and not per verb, and most
+ * verbs will never have one.
+ */
+#define KOF_TARGET_FIRST_EVENT 16u
+#define KOF_TARGET_BITS        32u
 
 /*
  * Architecture, normalised across formats.
@@ -278,6 +353,7 @@ static inline int kof_format_from_name(const char *s, uint8_t *out)
 	KOF_FMT_X_FROM(KOF_FMT_XZ,      KOF_FMT_XZ)
 	KOF_FMT_X_FROM(KOF_FMT_RTF,     KOF_FMT_RTF)
 	KOF_FMT_X_FROM(KOF_FMT_PDF,     KOF_FMT_PDF)
+	KOF_FMT_X_FROM(KOF_EVT_AMSI,    KOF_EVT_AMSI)
 #undef KOF_FMT_X_FROM
 	return 0;
 }
@@ -298,6 +374,7 @@ static inline const char *kof_format_name(uint8_t fmt)
 	case KOF_FMT_7Z:     return "7z";
 	case KOF_FMT_RAR:    return "RAR";
 	case KOF_FMT_XZ:     return "xz";
+	case KOF_EVT_AMSI:   return "AMSI";
 	case KOF_FMT_RTF:    return "RTF";
 	case KOF_FMT_PDF:    return "PDF";
 	/*
@@ -1821,6 +1898,21 @@ static inline int kof_maltype_from_name(const char *s, int *out)
 #define KOF_TARGET_FORMAT(mask)
 
 /*
+ * Declare that this module targets a kind of EVENT rather than a file format.
+ *
+ *     KOF_TARGET_EVENT(KOF_EVT_AMSI);
+ *
+ * The same declaration as KOF_TARGET_FORMAT and read the same way - there is
+ * one target axis and this is a second spelling of it, not a second axis. It
+ * exists because an author writing a rule about a script submission should not
+ * have to call it a format; see KOF_EVT_AMSI.
+ *
+ * A module may use one or the other and not both: they say the same thing, so
+ * two of them is two answers to one question.
+ */
+#define KOF_TARGET_EVENT(mask)
+
+/*
  * Declare what this module detects: a type from enum kof_maltype, and a family name
  * this module's author picks.
  *
@@ -1967,6 +2059,44 @@ enum kof_str_word {
  * At most KOF_MAX_STR_PER_MODULE strings and KOF_MAX_RANGE_PER_MODULE ranges.
  */
 #define KOF_DEFINE_STR(name, lit, casing, word)
+
+/*
+ * Declare a string the target holds as UTF-16LE.
+ *
+ *     KOF_DEFINE_STR_WIDE(iex, "IEX(New-Object", KOF_CASE_EXACT,
+ *                         KOF_WORD_SUBSTRING);
+ *
+ * Written as the text a person reads; stored as the bytes the target has. A
+ * PowerShell script block reaches AMSI as UTF-16, so "IEX" is 49 00 45 00 58 00
+ * on the wire, and a rule that declared it as a plain literal would look for
+ * three bytes that are never adjacent there.
+ *
+ * A BUILD-TIME EXPANSION, NOT A COMPARE MODE. The high bytes are interleaved
+ * here and the result is an ordinary pool entry, so the matcher is unchanged
+ * and the presence set still works - the wide form carries its own four
+ * concrete bytes to key on. A runtime "wide" flag would have done neither: the
+ * fast nocase path anchors inside memchr, and a compare mode that skipped
+ * bytes could not use it.
+ *
+ * ASCII ONLY. Each character becomes one byte and a zero, which is UTF-16LE
+ * for U+0000..U+007F and wrong for anything above it. A pattern with a byte
+ * over 0x7F is refused rather than encoded incorrectly - a marker that is
+ * silently the wrong bytes is a rule that silently never fires.
+ *
+ * KOF_WORD_FULLWORD WORKS, AND IS TESTED AT CHARACTER GRANULARITY - which is
+ * the only way it can mean anything here.
+ *
+ * A byte-level fullword test asks what the neighbouring BYTES are. After a
+ * wide match that is already right: the pattern ends with a zero high half, so
+ * the next byte is the low half of the following character. Before it, it is
+ * not: the previous byte is the zero high half of the preceding character, and
+ * a zero is never a word byte - so the leading test would pass on every match
+ * and "IEX" would match inside "PIEXY" while the source said it does not.
+ *
+ * So a wide literal carries KOF_STR_WIDE and the matcher steps back a whole
+ * character on the leading side. See that flag for the exact test.
+ */
+#define KOF_DEFINE_STR_WIDE(name, lit, casing, word)
 
 /*
  * Declare a byte pattern with wildcards, jumps and alternatives.

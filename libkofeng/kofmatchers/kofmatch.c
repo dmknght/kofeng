@@ -668,8 +668,19 @@ static int match_one(struct kof_match_ctx *m, uint64_t base, uint64_t span,
 		}
 		{
 			uint64_t end = hit + len;
-			int lok = (hit == base) ||
-				  !is_word_byte(m->data.p[hit - 1]);
+			/*
+			 * A WIDE MATCH IS BOUNDED BY CHARACTERS - see the same
+			 * test in kofmultimatch.c, and KOF_STR_WIDE for why the
+			 * leading side is the one that needed it: the byte
+			 * before a UTF-16 match is the zero high half of the
+			 * character before it, which is never a word byte.
+			 */
+			int lok = (flags & KOF_STR_WIDE)
+				? (hit < base + 2u ||
+				   m->data.p[hit - 1] != 0 ||
+				   !is_word_byte(m->data.p[hit - 2]))
+				: ((hit == base) ||
+				   !is_word_byte(m->data.p[hit - 1]));
 			/*
 			 * `end >= m->data.n` before the read, not only
 			 * `end >= base + span`.
@@ -684,8 +695,14 @@ static int match_one(struct kof_match_ctx *m, uint64_t base, uint64_t span,
 			 * following byte, so there is nothing to break the
 			 * word.
 			 */
+			/* The trailing byte is already the next character's low
+			 * half, so this side only gains the "a whole character
+			 * has to follow" condition. */
 			int rok = (end >= base + span) || end >= m->data.n ||
-				  !is_word_byte(m->data.p[end]);
+				  !is_word_byte(m->data.p[end]) ||
+				  ((flags & KOF_STR_WIDE) &&
+				   (end + 1u >= m->data.n ||
+				    m->data.p[end + 1u] != 0));
 			if (lok && rok) {
 				if (at)
 					*at = hit;

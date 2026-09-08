@@ -59,7 +59,13 @@ struct kof_scanner {
 	 * Indexed by enum kof_format, so adding a format adds a table row and no
 	 * field here.
 	 */
-	void *view[KOF_FMT_COUNT];
+	/*
+	 * Indexed by TARGET VALUE, not by file-format count. Event targets are
+	 * numbered above the file formats - KOF_EVT_AMSI is 19 - so a table
+	 * sized by KOF_FMT_COUNT would be written past by the first event
+	 * scanned.
+	 */
+	void *view[KOF_TARGET_BITS];
 
 	/* Set while a module runs: find_str is called from inside one, and the ids it
 	 * passes are module local, so the host has to know whose they are. */

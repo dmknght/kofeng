@@ -114,6 +114,7 @@
 #include <kofmod/rar.h>
 #include <kofmod/xz.h>
 #include <kofmod/rtf.h>
+#include <kofmod/amsi.h>   /* an event's two regions */
 
 #include "../libkofeng/kofdb/kofpackw.h"
 #include "../libkofeng/kofdb/kofpack.h"
@@ -151,6 +152,19 @@ struct pat {
 	int      fullword;          /* literal only */
 	uint32_t len;               /* bytes, or the compiled program length */
 	uint8_t  bytes[KOF_HEX_MAX_PROG];
+
+	/*
+	 * The text as it was WRITTEN, kept only for reporting.
+	 *
+	 * A wide pattern's bytes are the literal with zeros interleaved, so
+	 * printing them - in the generated header's comment, in the build log -
+	 * shows one character and stops at the first zero. What a reader needs
+	 * to see in those places is the marker they typed.
+	 *
+	 * Empty for anything that is already readable as its own bytes.
+	 */
+	char     shown[MAX_LITERAL];
+	int      wide;
 };
 
 static struct pat pats[MAX_PATTERNS];
@@ -262,6 +276,7 @@ static const struct rgn_name rgn_names[] = {
 	XZ_REGIONS(RGN)
 	RTF_REGIONS(RGN)
 	PDF_REGIONS(RGN)
+	AMSI_REGIONS(RGN)
 };
 #undef RGN
 #undef RGN
@@ -282,6 +297,7 @@ static void err(int line, const char *msg)
 enum decl_kind {
 	DECL_RANGE = 0,
 	DECL_STR,
+	DECL_STRWIDE,
 	DECL_HEXSTR,
 	DECL_NAME
 };
@@ -292,10 +308,14 @@ struct macro {
 };
 
 static const struct macro macros[] = {
-	{ "KOF_TARGET_RANGE",  DECL_RANGE  },
-	{ "KOF_TARGET_NAME",   DECL_NAME   },
-	{ "KOF_DEFINE_HEXSTR", DECL_HEXSTR },
-	{ "KOF_DEFINE_STR",    DECL_STR    },
+	{ "KOF_TARGET_RANGE",  DECL_RANGE   },
+	{ "KOF_TARGET_NAME",   DECL_NAME    },
+	{ "KOF_DEFINE_HEXSTR", DECL_HEXSTR  },
+	/* BEFORE KOF_DEFINE_STR, which is a prefix of it - see the note on the
+	 * enum above. Tested the other way round, every wide declaration would
+	 * be read as a plain one and silently look for the unencoded bytes. */
+	{ "KOF_DEFINE_STR_WIDE", DECL_STRWIDE },
+	{ "KOF_DEFINE_STR",    DECL_STR     },
 	{ NULL, DECL_RANGE }
 };
 
@@ -1224,6 +1244,17 @@ static int read_variant(const char *p, int line, char *out, size_t cap)
 
 struct simple_decl {
 	const char *name;
+	/*
+	 * A SECOND SPELLING OF THE SAME DECLARATION, or NULL.
+	 *
+	 * One slot, two names: KOF_TARGET_EVENT and KOF_TARGET_FORMAT say the
+	 * same thing about the same axis, and an author writing a rule about a
+	 * script submission should not have to call it a format. Sharing the
+	 * slot rather than adding one is what keeps "declared twice" working -
+	 * a module that uses both spellings has answered one question twice,
+	 * and gets the same error as a module that repeated either.
+	 */
+	const char *alias;
 	int         count;
 	int         line;
 	char        arg[DECL_ARG_MAX];
@@ -1236,16 +1267,16 @@ enum {
 };
 
 static struct simple_decl g_decl[SD_COUNT] = {
-	{ "KOF_TARGET_FORMAT",  0, 0, { 0 } },
-	{ "KOF_TARGET_ARCH",    0, 0, { 0 } },
-	{ "KOF_TARGET_SUBTYPE", 0, 0, { 0 } },
-	{ "KOF_TARGET_SIZE_MIN",0, 0, { 0 } },
-	{ "KOF_UNPACK_KIND",    0, 0, { 0 } },
-	{ "KOF_HEUR_PHASE",     0, 0, { 0 } },
-	{ "KOF_HEUR_LEVEL",     0, 0, { 0 } },
-	{ "KOF_HEUR_WANT",      0, 0, { 0 } },
-	{ "KOF_HEUR_NAME",      0, 0, { 0 } },
-	{ "KOF_HEUR_PREDICT",   0, 0, { 0 } }
+	{ "KOF_TARGET_FORMAT",  "KOF_TARGET_EVENT", 0, 0, { 0 } },
+	{ "KOF_TARGET_ARCH",    NULL, 0, 0, { 0 } },
+	{ "KOF_TARGET_SUBTYPE", NULL, 0, 0, { 0 } },
+	{ "KOF_TARGET_SIZE_MIN",NULL, 0, 0, { 0 } },
+	{ "KOF_UNPACK_KIND",    NULL, 0, 0, { 0 } },
+	{ "KOF_HEUR_PHASE",     NULL, 0, 0, { 0 } },
+	{ "KOF_HEUR_LEVEL",     NULL, 0, 0, { 0 } },
+	{ "KOF_HEUR_WANT",      NULL, 0, 0, { 0 } },
+	{ "KOF_HEUR_NAME",      NULL, 0, 0, { 0 } },
+	{ "KOF_HEUR_PREDICT",   NULL, 0, 0, { 0 } }
 };
 
 /*
@@ -1309,11 +1340,17 @@ static void decl_collect(const char *at, int lineno)
 {
 	int i;
 
-	for (i = 0; i < SD_COUNT; i++) {
+	for (i = 0; i < SD_COUNT * 2; i++) {
+		struct simple_decl *d = &g_decl[i % SD_COUNT];
+		const char *want = (i < SD_COUNT) ? d->name : d->alias;
 		const char *p = at;
-		size_t nl = strlen(g_decl[i].name);
+		size_t nl;
 
-		while ((p = strstr(p, g_decl[i].name)) != NULL) {
+		if (!want)
+			continue;
+		nl = strlen(want);
+
+		while ((p = strstr(p, want)) != NULL) {
 			/* A longer identifier that merely contains this one is
 			 * not this declaration. */
 			if (p[nl] != '(' ||
@@ -1322,13 +1359,12 @@ static void decl_collect(const char *at, int lineno)
 				p += nl;
 				continue;
 			}
-			if (g_decl[i].count == 0) {
-				g_decl[i].line = lineno;
-				if (!decl_arg(p, g_decl[i].arg,
-					      sizeof g_decl[i].arg))
-					g_decl[i].arg[0] = 0;
+			if (d->count == 0) {
+				d->line = lineno;
+				if (!decl_arg(p, d->arg, sizeof d->arg))
+					d->arg[0] = 0;
 			}
-			g_decl[i].count++;
+			d->count++;
 			p += nl;
 		}
 	}
@@ -1657,6 +1693,53 @@ static void resolve_decls(void)
 	resolve_heur();
 }
 
+/*
+ * Turn a literal into the bytes a UTF-16LE target holds, in place.
+ *
+ * The whole of the wide support: one interleave at build time and an ordinary
+ * pool entry afterwards. See KOF_DEFINE_STR_WIDE for why it is done here and
+ * not as a compare mode in the matcher.
+ */
+static int widen(struct pat *o, int line)
+{
+	uint8_t out[KOF_HEX_MAX_PROG];
+	uint32_t i;
+
+	/*
+	 * REFUSED, NOT ENCODED WRONG. One byte and a zero is UTF-16LE only for
+	 * ASCII; for anything above it the real encoding is a different number
+	 * of bytes with different values, so writing two here would produce a
+	 * marker that is not the text the author wrote and would never fire.
+	 */
+	for (i = 0; i < o->len; i++) {
+		if (o->bytes[i] >= 0x80u) {
+			err(line, "a wide pattern must be ASCII - a byte above "
+				  "0x7F is not one UTF-16 unit, so it cannot be "
+				  "widened by interleaving zeros");
+			return 0;
+		}
+	}
+	if (o->len * 2u > sizeof out) {
+		err(line, "wide pattern too long once widened");
+		return 0;
+	}
+
+	/* Kept before the bytes are replaced - it is what every report shows. */
+	if (o->len < sizeof o->shown) {
+		memcpy(o->shown, o->bytes, o->len);
+		o->shown[o->len] = '\0';
+	}
+	o->wide = 1;
+
+	for (i = 0; i < o->len; i++) {
+		out[i * 2u]      = o->bytes[i];
+		out[i * 2u + 1u] = 0;
+	}
+	o->len *= 2u;
+	memcpy(o->bytes, out, o->len);
+	return 1;
+}
+
 static void scan_line(char *at, size_t line_len, int lineno)
 {
 	const struct macro *m = NULL;
@@ -1858,6 +1941,9 @@ static void scan_line(char *at, size_t line_len, int lineno)
 			       "KOF_WORD_SUBSTRING", "KOF_WORD_FULLWORD",
 			       &o->fullword))
 			return;
+
+		if (m->kind == DECL_STRWIDE && !widen(o, lineno))
+			return;
 		npats++;
 	}
 }
@@ -1872,8 +1958,10 @@ static void scan_line(char *at, size_t line_len, int lineno)
  */
 static void emit_str_id(FILE *out, const struct pat *p, int idx)
 {
-	fprintf(out, "/* line %d: \"%.*s\"%s%s */\n", p->line,
-		(int)p->len, (const char *)p->bytes,
+	fprintf(out, "/* line %d: \"%.*s\"%s%s%s */\n", p->line,
+		p->wide ? (int)strlen(p->shown) : (int)p->len,
+		p->wide ? p->shown : (const char *)p->bytes,
+		p->wide ? " wide" : "",
 		p->icase ? " icase" : "",
 		p->fullword ? " fullword" : "");
 	fprintf(out, "#define kof_strid_%s %d\n\n", p->name, idx);
@@ -1908,6 +1996,49 @@ static void emit_str_record(FILE *out, const struct pat *p, int idx)
 			fprintf(out, "%02x", p->bytes[i]);
 		fputc('\n', out);
 		return;
+	}
+	/*
+	 * A LITERAL THAT IS NOT TEXT goes in hex too, and keeps its options.
+	 *
+	 * The 's' row puts the bytes last so nothing in them needs escaping -
+	 * which holds only while they are printable. A wide pattern is the
+	 * literal with zero high bytes interleaved, so the row ended at the
+	 * first character and the reader's own length check refused the build:
+	 * "string of declared length 28 does not match its literal". Loud, and
+	 * still a build that cannot produce a wide signature.
+	 *
+	 * 'h' is not the answer either - it means a compiled hex PROGRAM, and
+	 * reading a literal back as one would change what the matcher does with
+	 * it. So 'w': a literal, in hex, with the icase and fullword columns an
+	 * 'h' row has no room for.
+	 *
+	 * Chosen by what the bytes ARE, not by which macro was used. Anything
+	 * that cannot survive a text column takes this row, so a future pattern
+	 * with a control byte in it works without anyone remembering this.
+	 */
+	{
+		int text_safe = 1;
+
+		for (i = 0; i < p->len; i++) {
+			uint8_t c = p->bytes[i];
+
+			if (c < 0x20u || c == 0x7fu) {
+				text_safe = 0;
+				break;
+			}
+		}
+		if (!text_safe) {
+			/* The wide column belongs on this row and only this
+			 * row: a widened pattern has a zero above every
+			 * character, so it is never text-safe and can never
+			 * take the 's' path. */
+			fprintf(out, "w\t%d\t%d\t%d\t%d\t%u\t", idx,
+				p->icase, p->fullword, p->wide, p->len);
+			for (i = 0; i < p->len; i++)
+				fprintf(out, "%02x", p->bytes[i]);
+			fputc('\n', out);
+			return;
+		}
 	}
 	fprintf(out, "s\t%d\t%d\t%d\t%u\t%.*s\n", idx,
 		p->icase, p->fullword, p->len, (int)p->len,
@@ -4189,6 +4320,86 @@ static int strs_load(struct artefact *a)
 			a->str[a->n_str].flags = (uint8_t)
 				((icase ? KOF_STR_ICASE : 0u) |
 				 (fullw ? KOF_STR_FULLWORD : 0u));
+			a->n_str++;
+			bytes_len += len;
+		/* w <id> <icase> <fullword> <len> <literal as hex digits> - a
+		 * literal whose bytes cannot go in a text column. Same meaning
+		 * as an 's' row in every other respect. */
+		} else if (p[0] == 'w' && p[1] == '\t') {
+			unsigned long v[5], icase, fullw, wide, len;
+			char *end;
+			uint32_t k2;
+			int k;
+
+			p += 2;
+			for (k = 0; k < 5; k++) {
+				tab = strchr(p, '\t');
+				if (!tab)
+					break;
+				*tab = 0;
+				v[k] = strtoul(p, 0, 10);
+				p = tab + 1;
+			}
+			if (k != 5) {
+				fprintf(stderr, "ksigbuilder: %s: malformed wide "
+						"string row\n", a->stem);
+				goto out;
+			}
+			icase = v[1];
+			fullw = v[2];
+			wide  = v[3];
+			len   = v[4];
+			if (len == 0 || len > KOF_STR_MAX_LEN) {
+				fprintf(stderr, "ksigbuilder: %s: literal of "
+						"length %lu\n", a->stem, len);
+				goto out;
+			}
+			for (end = p; *end && *end != '\n' && *end != '\r'; end++)
+				;
+			if ((size_t)(end - p) != len * 2) {
+				fprintf(stderr, "ksigbuilder: %s: literal says "
+						"%lu bytes and carries %u\n",
+					a->stem, len,
+					(unsigned)((end - p) / 2));
+				goto out;
+			}
+			if (bytes_len + len > bytes_cap) {
+				size_t nc = bytes_cap ? bytes_cap * 2 : 1024;
+				uint8_t *nb;
+				while (nc < bytes_len + len)
+					nc *= 2;
+				nb = realloc(a->str_bytes, nc);
+				if (!nb)
+					goto out;
+				a->str_bytes = nb;
+				bytes_cap = nc;
+			}
+			if (a->n_str == scap) {
+				uint32_t nc = scap ? scap * 2 : 8;
+				struct kof_pw_str *nv = realloc(a->str,
+								nc * sizeof *nv);
+				if (!nv)
+					goto out;
+				a->str = nv;
+				scap = nc;
+			}
+			for (k2 = 0; k2 < len; k2++) {
+				char h[3];
+
+				h[0] = p[k2 * 2u];
+				h[1] = p[k2 * 2u + 1u];
+				h[2] = 0;
+				a->str_bytes[bytes_len + k2] =
+					(uint8_t)strtoul(h, 0, 16);
+			}
+			a->str[a->n_str].bytes =
+				(const uint8_t *)(uintptr_t)bytes_len;
+			a->str[a->n_str].len   = (uint16_t)len;
+			a->str[a->n_str].kind  = KOF_STR_LITERAL;
+			a->str[a->n_str].flags = (uint8_t)
+				((icase ? KOF_STR_ICASE : 0u) |
+				 (fullw ? KOF_STR_FULLWORD : 0u) |
+				 (wide  ? KOF_STR_WIDE     : 0u));
 			a->n_str++;
 			bytes_len += len;
 		/* h <id> <len> <program as hex digits> */
