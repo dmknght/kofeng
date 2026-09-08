@@ -166,16 +166,25 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 	}
 
 	/*
-	 * THE TECHNIQUE, WHERE THE PATH ITSELF IS ONE.
+	 * THE TECHNIQUE IS NOT PRINTED AT ALL, and that is the decision rather
+	 * than an omission.
 	 *
-	 * Printed after the path rather than instead of it, always. A
-	 * classification is a decision that can be wrong and the raw path is
-	 * the only thing that lets somebody check it - which is the same rule
-	 * the record follows for obj_loc.
+	 * It was rendered beside the path and it read as a verdict, which it
+	 * is not: writing a Run value is what every installer on the machine
+	 * does. Softening it to a name in braces was still wrong - anything on
+	 * an event line is read as something that happened, and what happened
+	 * was a registry write.
+	 *
+	 * The tag stays ON THE RECORD, because a rule will want it: it is a
+	 * cheap fact, already computed, that a rule can require alongside the
+	 * ones carrying the actual weight - who wrote it, what they wrote,
+	 * what else they did in the same window. When that engine exists it
+	 * will emit a FINDING line, and a technique id belongs there, where it
+	 * names a decision somebody made rather than a directory somebody
+	 * wrote to.
+	 *
+	 * Until then the line carries evidence and nothing else.
 	 */
-	if (e->attack != KOF_ATT_NONE)
-		fprintf(out, "  <%s %s>", kof_attack_id(e->attack),
-		       kof_attack_name(e->attack));
 
 	/*
 	 * Loud, because it is the only line in a trace that is a CONCLUSION

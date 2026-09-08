@@ -370,41 +370,62 @@ const char *kof_loc_name(uint8_t loc);
  * expanded three ways cannot disagree with itself. Adding a technique is one
  * row.
  *
- * The id is REPORTING ONLY. Nothing matches on it, nothing sums it, no rule
- * branches on it. Giving a taxonomy any other job is how it becomes a
- * detection engine by accident.
+ * WHAT THE TAG IS FOR, AND WHAT IT IS NOT.
+ *
+ * It is an INPUT to detection, not an output of it. A path classified as
+ * KOF_ATT_RUN_KEY says the write landed in a place the matrix has a name for -
+ * and every installer on the machine writes there. Nothing about the tag makes
+ * an event a finding, and an event line that printed it like one would be
+ * announcing a detection that nobody performed.
+ *
+ * What consumes it is the fact layer: a location and a technique tag are two
+ * cheap, already-computed facts that a rule can require alongside the ones that
+ * carry the actual weight - who wrote it, what they wrote, what else they did
+ * in the same window. The finding is what the RULE produces, and the technique
+ * id belongs on that line because there it names a decision rather than a
+ * directory.
+ *
+ * So: no rule branches on the id STRING, nothing sums the tags, no callback
+ * surfaces one as an event name, and NOTHING PRINTS ONE ON AN EVENT LINE.
+ * Giving a taxonomy any other job is how it becomes a detection engine by
+ * accident.
+ *
+ * The tactic each one belongs to is a trailing comment on its row. It is a
+ * comment and not a field on purpose: nothing reads it, it is there so that
+ * whoever adds the next row can see which column of the matrix they are
+ * filling in and which are still empty.
  */
 #define KOF_ATTACK_LIST(X)                                                   \
 	/*  enum                 technique     finding name              */  \
 	X(KOF_ATT_NONE,         "",           "")                           \
-	X(KOF_ATT_RUN_KEY,      "T1547.001",  "Persist.RunKey")             \
-	X(KOF_ATT_STARTUP_DIR,  "T1547.001",  "Persist.StartupFolder")      \
-	X(KOF_ATT_WINLOGON,     "T1547.004",  "Persist.Winlogon")           \
-	X(KOF_ATT_APPINIT,      "T1546.010",  "Persist.AppInitDlls")        \
-	X(KOF_ATT_IFEO,         "T1546.012",  "Persist.Ifeo")               \
-	X(KOF_ATT_SERVICE,      "T1543.003",  "Persist.Service")            \
-	X(KOF_ATT_SCHED_TASK,   "T1053.005",  "Persist.ScheduledTask")      \
-	X(KOF_ATT_CRON,         "T1053.003",  "Persist.Cron")               \
-	X(KOF_ATT_SYSTEMD,      "T1543.002",  "Persist.SystemdService")     \
-	X(KOF_ATT_RC_SCRIPT,    "T1037.004",  "Persist.RcScript")           \
-	X(KOF_ATT_SHELL_PROFILE,"T1546.004",  "Persist.ShellProfile")       \
-	X(KOF_ATT_LD_PRELOAD,   "T1574.006",  "Hijack.LdPreload")           \
-	X(KOF_ATT_SSH_KEY,      "T1098.004",  "Persist.SshKey")             \
-	X(KOF_ATT_ACCOUNT_FILE, "T1136.001",  "Account.LocalFile")          \
-	X(KOF_ATT_SUDOERS,      "T1548.003",  "Privilege.Sudoers")          \
-	X(KOF_ATT_CRED_STORE,   "T1003",      "Credential.Store")           \
-	X(KOF_ATT_HOSTS,        "T1562.001",  "Evade.HostsFile")            \
-	X(KOF_ATT_KERNEL_MOD,   "T1014",      "Rootkit.KernelModule")       \
-	X(KOF_ATT_WEB_SHELL,    "T1505.003",  "Persist.WebShell")           \
-	X(KOF_ATT_PIPE_IMPERSONATE, "T1134.001", "Privilege.PipeImpersonation") \
+	X(KOF_ATT_RUN_KEY,      "T1547.001",  "Persist.RunKey") /* persistence, privesc */ \
+	X(KOF_ATT_STARTUP_DIR,  "T1547.001",  "Persist.StartupFolder") /* persistence, privesc */ \
+	X(KOF_ATT_WINLOGON,     "T1547.004",  "Persist.Winlogon") /* persistence, privesc */ \
+	X(KOF_ATT_APPINIT,      "T1546.010",  "Persist.AppInitDlls") /* persistence, privesc */ \
+	X(KOF_ATT_IFEO,         "T1546.012",  "Persist.Ifeo") /* persistence, privesc */ \
+	X(KOF_ATT_SERVICE,      "T1543.003",  "Persist.Service") /* persistence, privesc */ \
+	X(KOF_ATT_SCHED_TASK,   "T1053.005",  "Persist.ScheduledTask") /* execution, persistence */ \
+	X(KOF_ATT_CRON,         "T1053.003",  "Persist.Cron") /* execution, persistence */ \
+	X(KOF_ATT_SYSTEMD,      "T1543.002",  "Persist.SystemdService") /* persistence, privesc */ \
+	X(KOF_ATT_RC_SCRIPT,    "T1037.004",  "Persist.RcScript") /* persistence, privesc */ \
+	X(KOF_ATT_SHELL_PROFILE,"T1546.004",  "Persist.ShellProfile") /* persistence, privesc */ \
+	X(KOF_ATT_LD_PRELOAD,   "T1574.006",  "Hijack.LdPreload") /* persistence, privesc, evasion */ \
+	X(KOF_ATT_SSH_KEY,      "T1098.004",  "Persist.SshKey") /* persistence */ \
+	X(KOF_ATT_ACCOUNT_FILE, "T1136.001",  "Account.LocalFile") /* persistence */ \
+	X(KOF_ATT_SUDOERS,      "T1548.003",  "Privilege.Sudoers") /* privesc, evasion */ \
+	X(KOF_ATT_CRED_STORE,   "T1003",      "Credential.Store") /* credential access */ \
+	X(KOF_ATT_HOSTS,        "T1562.001",  "Evade.HostsFile") /* defense evasion */ \
+	X(KOF_ATT_KERNEL_MOD,   "T1014",      "Rootkit.KernelModule") /* defense evasion */ \
+	X(KOF_ATT_WEB_SHELL,    "T1505.003",  "Persist.WebShell") /* persistence */ \
+	X(KOF_ATT_PIPE_IMPERSONATE, "T1134.001", "Privilege.PipeImpersonation") /* privesc, evasion */ \
 	/* Added by walking Metasploit's windows/persistence modules against
 	 * this table and writing down what nothing matched. That is the only
 	 * way a coverage claim means anything - the four below were each a
 	 * module that ran and produced no finding. */                        \
-	X(KOF_ATT_ACCESSIBILITY, "T1546.008", "Persist.AccessibilityFeature") \
-	X(KOF_ATT_ACTIVE_SETUP,  "T1547.014", "Persist.ActiveSetup")          \
-	X(KOF_ATT_BITS_JOB,      "T1197",     "Persist.BitsJob")              \
-	X(KOF_ATT_PS_PROFILE,    "T1546.013", "Persist.PowerShellProfile")
+	X(KOF_ATT_ACCESSIBILITY, "T1546.008", "Persist.AccessibilityFeature") /* persistence, privesc */ \
+	X(KOF_ATT_ACTIVE_SETUP,  "T1547.014", "Persist.ActiveSetup") /* persistence, privesc */ \
+	X(KOF_ATT_BITS_JOB,      "T1197",     "Persist.BitsJob") /* defense evasion, persistence */ \
+	X(KOF_ATT_PS_PROFILE,    "T1546.013", "Persist.PowerShellProfile") /* persistence, privesc */ \
 
 enum kof_attack {
 #define KOF_ATT_X_ENUM(name, tech, word) name,
