@@ -392,12 +392,45 @@ size_t kof_evt_label(const struct kof_evt *e, uint64_t index, char *out,
  * byte for byte as before, because it might be a PE header and guessing at it
  * would be worse than dots.
  *
- * TRAILING UNPRINTABLE BYTES ARE CUT either way. A run of NULs at the end of a
- * buffer is padding in every case that produces one, and it is the part of the
- * rendering that says the least per column of screen.
+ * TRAILING NUL BYTES ARE CUT, and nothing else is.
+ *
+ * It used to cut every trailing unprintable, which is the same thing for a
+ * padded string and a catastrophe for a PE: "MZ\x90\x00\x03\x00..." is
+ * almost entirely unprintable, so the trim ate the whole image and left the
+ * two letters. A reader would have seen "MZ" and had no way to tell a
+ * two-byte submission from a hundred-kilobyte executable.
+ *
+ * A run of NULs at the end is padding in every case that produces one. A run
+ * of anything else is data that happens not to be letters, and cutting it is
+ * deciding on a reader's behalf that their payload was not worth showing.
  *
  * Returns how many characters were written; `out` is always terminated.
  */
+static size_t content_readable(const char *p, size_t n, char *out, size_t cap);
+
+int kof_evt_text_is_wide(const char *p, size_t n)
+{
+	size_t i;
+
+	/* A single byte cannot be a UTF-16 unit. */
+	if (!p || n < 2u)
+		return 0;
+	/*
+	 * The test is over the whole buffer, not a sample: a PE section that
+	 * begins with a few NUL-separated bytes would pass a sample and then be
+	 * silently stripped of half of itself.
+	 */
+	for (i = 1; i < n; i += 2)
+		if (p[i] != '\0')
+			return 0;
+	return 1;
+}
+
+size_t kof_evt_text_of(const char *p, size_t n, char *out, size_t cap)
+{
+	return content_readable(p, n, out, cap);
+}
+
 static size_t content_readable(const char *p, size_t n, char *out, size_t cap)
 {
 	size_t i, w = 0;
@@ -415,23 +448,21 @@ static size_t content_readable(const char *p, size_t n, char *out, size_t cap)
 	 * silently stripped of half of itself. One pass costs nothing here -
 	 * this runs per drawn row, not per event.
 	 */
-	/* A single byte cannot be UTF-16 and must still be shown. */
-	wide = (n >= 2u);
-	for (i = 1; wide && i < n; i += 2) {
-		if (p[i] != '\0') {
-			wide = 0;
-			break;
-		}
-	}
+	/* Asked BEFORE the padding is cut: the test needs whole pairs, and
+	 * trimming can leave an odd number of bytes. */
+	wide = kof_evt_text_is_wide(p, n);
+
+	/* The padding, which says nothing. Cut from the SOURCE rather than
+	 * from the rendering, so it is the NUL bytes that go and not every
+	 * byte that happened to render as a dot. */
+	while (n && p[n - 1u] == '\0')
+		n--;
 
 	for (i = 0; i < n && w + 1u < cap; i += wide ? 2u : 1u) {
 		unsigned char c = (unsigned char)p[i];
 
 		out[w++] = (c >= 0x20u && c < 0x7fu) ? (char)c : '.';
 	}
-	/* The tail, which says nothing. */
-	while (w && out[w - 1u] == '.')
-		w--;
 	out[w] = '\0';
 	return w;
 }

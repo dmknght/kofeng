@@ -890,8 +890,21 @@ struct view {
 	 * questions are different and neither wants the other's file position.
 	 */
 	struct kofevt_log_r *log;
-	uint64_t             log_n;      /* events in the file */
-	uint64_t             log_first;  /* the window's first index */
+	uint64_t             log_n;      /* records in the file */
+	uint64_t             log_first;  /* the window's first record */
+
+	/*
+	 * WHICH RECORD EACH ROW STANDS FOR, and where the window stopped.
+	 *
+	 * Rows are not records any more and the two must not be conflated: the
+	 * verb filter hides some, and a continuation is absorbed into the event
+	 * in front of it rather than given a row. The paging code used to
+	 * recover the last row's record as `log_first + row - 1`, which is only
+	 * true when every record in the window got a row - so with a filter on,
+	 * turning the page landed somewhere unrelated to where the reader was.
+	 */
+	uint64_t             log_idx[MAX_OBJ];
+	uint64_t             log_next;   /* the first record past the window */
 
 	/*
 	 * WHICH VERBS THIS LOG ACTUALLY CONTAINS, and which of them to show.
@@ -936,6 +949,34 @@ struct view {
 	 * reach the tail of an AMSI buffer without the panel eating the pane.
 	 */
 	int                  evt_hscroll;
+
+	/*
+	 * THE WHOLE SUBMISSION, gathered from the event and the continuations
+	 * behind it.
+	 *
+	 * The record holds a prefix - four hundred bytes of arena - and the
+	 * rest arrives as KOF_EVT_CONT records, which this viewer folds into
+	 * the same row. `join` is the raw bytes, in the order they were sent;
+	 * `text` is the rendering of them, which is what a pane can show.
+	 *
+	 * Both are allocated once with the log and reused per selection: a
+	 * record's content is bounded by what the collector will send, so a
+	 * fixed pair costs the same for every event and there is nothing to
+	 * grow or free while walking a log.
+	 */
+	char                *evt_join;
+	size_t               evt_join_len;
+	char                *evt_text;
+	size_t               evt_text_len;
+
+	/*
+	 * The gathered content is UTF-16LE - a NUL above every character.
+	 *
+	 * Kept because the HEX PANE needs it too, not only the field row: a
+	 * dump of a script block is half NUL bytes, and a column of dots
+	 * between every letter is the thing that makes it unreadable.
+	 */
+	int                  evt_wide;
 
 	struct kof_range *ext;
 	uint32_t          n_ext;
@@ -2490,7 +2531,13 @@ static void log_scan_verbs(struct view *v)
 
 		memcpy(&verb, p + offsetof(struct kof_evt, verb), sizeof verb);
 		memcpy(&tl, p + h->len_off, sizeof tl);
-		if (verb < 32u)
+		/*
+		 * A CONTINUATION IS NOT A KIND OF EVENT and must not appear in
+		 * the filter menu. Offering "cont" as something to tick would
+		 * invite a reader to hide the tails while keeping the heads,
+		 * which is not a view of anything.
+		 */
+		if (verb < 32u && verb != KOF_EVT_CONT)
 			v->log_verbs |= 1u << verb;
 		if ((uint32_t)h->head_size + tl > h->rec_size)
 			break;              /* the record contradicts itself */
@@ -2526,13 +2573,37 @@ static void log_window(struct view *v)
 
 	for (i = v->log_first; i < v->log_n && n + 1u < MAX_OBJ; i++) {
 		struct object *o = &v->obj[n];
-		uint64_t off = 0;
+		uint64_t off = 0, end;
+		/*
+		 * The event's OWN record number, taken before the chunks
+		 * behind it are absorbed. `i` walks to the end of the span, so
+		 * reading the id off it afterwards named the last chunk - an
+		 * event five records in was labelled eleven.
+		 */
+		uint64_t id = i;
 		uint32_t len = 0;
+		uint16_t vb = 0;
 
 		if (!kofevt_log_extent(v->log, i, &off, &len))
 			break;
 		if (off + len > v->map_len)
 			break;
+
+		memcpy(&vb, (const uint8_t *)v->map + off +
+			    offsetof(struct kof_evt, verb), sizeof vb);
+
+		/*
+		 * A CONTINUATION GETS NO ROW OF ITS OWN.
+		 *
+		 * It is the tail of the record in front of it, not an event -
+		 * see KOF_EVT_CONT. Listed separately it read as a second thing
+		 * happening, named "cont", with a fragment of somebody else's
+		 * script in it. Reached here it means its parent was filtered
+		 * out or the window began in the middle of a chain; either way
+		 * there is nothing for it to be the tail of on this screen.
+		 */
+		if (vb == KOF_EVT_CONT)
+			continue;
 
 		/*
 		 * FILTERED HERE, so the window holds LOG_WIN events a reader
@@ -2540,14 +2611,34 @@ static void log_window(struct view *v)
 		 * hidden. Filtering after the window was filled would leave a
 		 * panel of three rows and no way to reach the fourth match.
 		 */
-		{
-			uint16_t vb = 0;
+		if (vb < 32u && v->log_keep && !(v->log_keep & (1u << vb)))
+			continue;
 
-			memcpy(&vb, (const uint8_t *)v->map + off +
-				    offsetof(struct kof_evt, verb), sizeof vb);
-			if (vb < 32u && v->log_keep &&
-			    !(v->log_keep & (1u << vb)))
-				continue;
+		/*
+		 * THE CHUNKS BEHIND IT BELONG TO THIS ROW.
+		 *
+		 * They sit immediately after it in the file, so the event's
+		 * bytes are one contiguous range and the hex pane can show the
+		 * whole thing - head, content, and every continuation - as the
+		 * real file bytes they are, with nothing synthesised.
+		 */
+		end = off + len;
+		while (i + 1u < v->log_n) {
+			uint64_t coff = 0;
+			uint32_t clen = 0;
+			uint16_t cvb = 0;
+
+			if (!kofevt_log_extent(v->log, i + 1u, &coff, &clen))
+				break;
+			if (coff + clen > v->map_len)
+				break;
+			memcpy(&cvb, (const uint8_t *)v->map + coff +
+				     offsetof(struct kof_evt, verb),
+			       sizeof cvb);
+			if (cvb != KOF_EVT_CONT)
+				break;
+			end = coff + clen;
+			i++;
 		}
 
 		/*
@@ -2559,9 +2650,11 @@ static void log_window(struct view *v)
 		 * is on the part that can afford it.
 		 */
 		snprintf(o->name, sizeof o->name, "%.64s//%llu",
-			 v->obj[0].name, (unsigned long long)i);
+			 v->obj[0].name, (unsigned long long)id);
 		o->depth = 1;
-		o->buf   = kof_buf_make((const uint8_t *)v->map + off, len);
+		o->buf   = kof_buf_make((const uint8_t *)v->map + off,
+				        (size_t)(end - off));
+		v->log_idx[n] = id;
 
 		/*
 		 * The row's text comes from the RECORD, through the same
@@ -2579,12 +2672,18 @@ static void log_window(struct view *v)
 			memset(&rec, 0, sizeof rec);
 			memcpy(&rec, (const uint8_t *)v->map + off,
 			       len < sizeof rec ? len : sizeof rec);
-			kof_evt_label(&rec, i, o->label, sizeof o->label);
+			kof_evt_label(&rec, id, o->label, sizeof o->label);
 		}
 		n++;
 		if (n - 1u >= LOG_WIN)
 			break;
 	}
+	/*
+	 * Where the next page starts. Taken from the walk rather than computed
+	 * from the window's size, because the two disagree the moment a filter
+	 * hides a record or a chain of chunks is folded into one row.
+	 */
+	v->log_next = (i < v->log_n) ? i + 1u : v->log_n;
 	v->n_obj = n;
 }
 
@@ -2596,21 +2695,28 @@ static void log_window(struct view *v)
  * possible - stepping one row past the end otherwise reloads on every
  * keystroke, which is the difference between scrolling and thrashing.
  */
-static int log_window_to(struct view *v, uint64_t want)
+/*
+ * MOVE THE WINDOW TO START AT `first`, and say whether it moved.
+ *
+ * A WALK, NOT A JUMP, and the difference is the bug this replaced. The old one
+ * CENTRED the window on the record asked for - reasonable for "go to event
+ * 90000", wrong for "the reader pressed Down at the bottom of the list": it
+ * put the next record in the middle of a fresh window, so stepping off the end
+ * moved the selection forty-eight events BACKWARDS, into the middle of what
+ * had just been read.
+ *
+ * Turning a page starts the page where the last one ended. That is the only
+ * behaviour that composes: a reader holding Down walks the log once, in order,
+ * and never sees the same event twice.
+ */
+static int log_window_from(struct view *v, uint64_t first)
 {
-	uint64_t first;
-
-	if (!v->log || want >= v->log_n)
+	if (!v->log || !v->log_n)
 		return 0;
-	if (want >= v->log_first && want < v->log_first + LOG_WIN)
+	if (first >= v->log_n)
 		return 0;
-
-	if (want < v->log_first)
-		first = (want > LOG_WIN / 2u) ? want - LOG_WIN / 2u : 0;
-	else
-		first = want - LOG_WIN / 2u;
-	if (first + LOG_WIN > v->log_n)
-		first = (v->log_n > LOG_WIN) ? v->log_n - LOG_WIN : 0;
+	if (first == v->log_first)
+		return 0;
 
 	v->log_first = first;
 	log_window(v);
@@ -2775,6 +2881,18 @@ static uint64_t hex_max(const struct view *v)
  * statement of "this colour is this row" on the screen, and it can afford to
  * be, because it is short.
  */
+/*
+ * HOW MUCH OF ONE SUBMISSION IS HELD FOR READING.
+ *
+ * The collector will send up to sixty-four kilobytes of a script block, and
+ * this matches it so that what a reader sees here is what a scanner would get.
+ * Two buffers of that size are taken once when a log is opened, not per event:
+ * every record can be the big one, so making it conditional would only move
+ * the cost to whichever event was selected.
+ */
+#define EVT_JOIN_MAX (64u * 1024u)
+#define EVT_TEXT_MAX (64u * 1024u)
+
 #define EVT_PAL_N 6u
 
 /* The chip beside the row's name. Dark grounds with white text. */
@@ -2948,6 +3066,25 @@ static const char *evt_byte_colour(const struct view *v, uint64_t off)
 				   vl, sizeof vl))
 			return NULL;
 		/*
+		 * THE OBJECT IS NOT LIT, and that is the point.
+		 *
+		 * Every other row names a field of known size and known
+		 * meaning, so a colour over its bytes is a claim that can only
+		 * be right or wrong by an offset. The object is where the claim
+		 * gets shaky: it is a length that came from the provider, it
+		 * may be a path or a script or a PE image, and it may run past
+		 * what the record actually holds. Lighting it wrongly is worse
+		 * than not lighting it, because a wrong extent looks exactly
+		 * like a right one.
+		 *
+		 * So those bytes keep the dump's own colouring - NULs from
+		 * text, text from high bytes - which is the reading that
+		 * needs no claim about where a field ends. The panel still
+		 * shows the content, and its offset still says where to look.
+		 */
+		if (!strcmp(nm, "object"))
+			return NULL;
+		/*
 		 * The picked row keeps its own hue and gains emphasis on top
 		 * of it, rather than taking a seventh colour: the palette's one
 		 * rule is that a colour means a field, and breaking it at the
@@ -3012,14 +3149,42 @@ static int evt_val_w(void)
  */
 #define EVT_WRAP_MAX 2
 
+/*
+ * WHAT A ROW SHOWS, which for one row is not what the record holds.
+ *
+ * The object row of a content event shows the WHOLE submission - the record's
+ * own bytes and every continuation folded in - because that is the thing the
+ * reader is after and the record alone is a four-hundred-byte prefix of it.
+ * Every other row is the record's, straight from kof_evt_field.
+ *
+ * One function, because three places ask - the line count, the line-to-row
+ * map, and the drawer - and they have to agree on the length of the string or
+ * the wrap, the scroll and the click all land in different places.
+ *
+ * `val` is scratch the caller owns; the returned pointer may be it or may be
+ * the gathered text, and is valid until the next call or the next selection.
+ */
+static const char *evt_row_value(const struct view *v, int i,
+				 char *val, size_t cap)
+{
+	char nm[32];
+
+	if (!kof_evt_field(&v->evt, (unsigned)i, nm, sizeof nm, val, cap))
+		return NULL;
+	if (v->evt_text_len && !strcmp(nm, "object"))
+		return v->evt_text;
+	return val;
+}
+
 static int evt_row_lines(const struct view *v, int i)
 {
-	char nm[32], vl[512];
+	char vl[512];
+	const char *sv = evt_row_value(v, i, vl, sizeof vl);
 	int w = evt_val_w(), n, len;
 
-	if (!kof_evt_field(&v->evt, (unsigned)i, nm, sizeof nm, vl, sizeof vl))
+	if (!sv)
 		return 0;
-	len = (int)strlen(vl) - v->evt_hscroll;
+	len = (int)strlen(sv) - v->evt_hscroll;
 	if (len < 0)
 		len = 0;
 	n = (len + w - 1) / w;
@@ -3032,16 +3197,16 @@ static int evt_row_lines(const struct view *v, int i)
  * that every row is blank and the panel scrolls into nothing. */
 static int evt_val_max(const struct view *v)
 {
-	char nm[32], vl[512];
+	char vl[512];
 	int i, m = 0;
 
 	for (i = 0; i < v->evt_n; i++) {
+		const char *sv = evt_row_value(v, i, vl, sizeof vl);
 		int n;
 
-		if (!kof_evt_field(&v->evt, (unsigned)i, nm, sizeof nm,
-				   vl, sizeof vl))
+		if (!sv)
 			break;
-		n = (int)strlen(vl);
+		n = (int)strlen(sv);
 		if (n > m)
 			m = n;
 	}
@@ -3112,6 +3277,57 @@ static void evt_load(struct view *v)
 	       o->buf.n < sizeof v->evt ? (size_t)o->buf.n : sizeof v->evt);
 	v->evt_have = 1;
 	v->evt_n = (int)kof_evt_n_fields(&v->evt);
+
+	/*
+	 * THE CONTINUATIONS BEHIND IT, gathered into one buffer.
+	 *
+	 * The node's bytes are the whole span - the event and every chunk that
+	 * followed it - so the chain is walked here rather than through the log
+	 * reader: the records are already mapped and already known to be
+	 * contiguous, which is what makes them one node.
+	 *
+	 * Through kof_evt_join, not by concatenating: the part worth having
+	 * from that API is the refusal, and a viewer that joined across a
+	 * dropped chunk would show a script that was never submitted.
+	 */
+	v->evt_join_len = 0;
+	v->evt_text_len = 0;
+	v->evt_wide = 0;
+	if (v->evt_join && v->evt_text && v->log) {
+		const struct kofevt_log_hdr *h = kofevt_log_header(v->log);
+		struct kof_evt_join j;
+		size_t at = (size_t)h->head_size + v->evt.text_len;
+
+		if (kof_evt_join_start(&j, &v->evt, v->evt_join,
+				       EVT_JOIN_MAX)) {
+			while (at + h->head_size <= o->buf.n) {
+				struct kof_evt c;
+				uint16_t tl = 0;
+
+				memset(&c, 0, sizeof c);
+				memcpy(&c, o->buf.p + at,
+				       (size_t)h->head_size <= sizeof c
+					       ? h->head_size : sizeof c);
+				memcpy(&tl, o->buf.p + at + h->len_off,
+				       sizeof tl);
+				if (at + h->head_size + tl > o->buf.n)
+					break;
+				if (tl > sizeof c.text)
+					break;
+				memcpy(c.text, o->buf.p + at + h->head_size,
+				       tl);
+				if (!kof_evt_join_add(&j, &c))
+					break;
+				at += (size_t)h->head_size + tl;
+			}
+			v->evt_join_len = j.len;
+			v->evt_wide = kof_evt_text_is_wide(v->evt_join,
+							   j.len);
+			v->evt_text_len = kof_evt_text_of(v->evt_join, j.len,
+							  v->evt_text,
+							  EVT_TEXT_MAX);
+		}
+	}
 
 	/*
 	 * The cursor is dropped, not carried across.
@@ -3222,18 +3438,18 @@ static void goto_node(struct view *v, uint32_t k)
 	 * the selection instead, and the ids on screen keep counting.
 	 */
 	if (v->log && k >= v->n_node && v->n_node) {
-		uint64_t last = v->log_first;
-		uint32_t leaf = 0, j;
+		uint32_t j;
 
-		/* The event index the last row stands for. Nodes carry an
-		 * object index, and only the event objects have one. */
-		for (j = 0; j < v->n_node; j++)
-			if (v->node[j].obj > leaf)
-				leaf = v->node[j].obj;
-		if (leaf)
-			last = v->log_first + leaf - 1u;
-
-		if (last + 1u < v->log_n && log_window_to(v, last + 1u)) {
+		/*
+		 * The next page begins where this one stopped - a number the
+		 * window itself reports, because it is the only thing that
+		 * knows how many records went into a row. Recomputing it from
+		 * the row count assumed one record per row, which stopped
+		 * being true when the verb filter arrived and stopped being
+		 * true again when continuations were folded in.
+		 */
+		if (v->log_next < v->log_n &&
+		    log_window_from(v, v->log_next)) {
 			tree_build(v);
 			/* Land on the first row of what was just loaded rather
 			 * than at the top: the reader was moving DOWN. */
@@ -3251,10 +3467,16 @@ static void goto_node(struct view *v, uint32_t k)
 		return;
 	}
 	if (v->log && k == (uint32_t)-1 && v->log_first) {
+		/*
+		 * A page back, by RECORDS rather than by rows. With a filter on
+		 * this may not fill the screen - the records behind may be ones
+		 * the filter hides - and that is the honest result: it shows
+		 * what is there. Stepping back again keeps going.
+		 */
 		uint64_t back = (v->log_first > LOG_WIN) ?
-				v->log_first - 1u : 0;
+				v->log_first - LOG_WIN : 0;
 
-		if (log_window_to(v, back)) {
+		if (log_window_from(v, back)) {
 			tree_build(v);
 			v->sel_node = v->n_node ? v->n_node - 1u : 0;
 			v->sel_a = v->sel_b = KOF_BROKEN;
@@ -3886,6 +4108,7 @@ static void draw_hex(struct out *o, struct view *v)
 			uint8_t c = fo < base_n ? base[fo] : 0;
 			int h = hit_kind(v, fo);
 			const char *ec = evt_byte_colour(v, at + (uint64_t)k);
+			char glyph;
 
 			out_str(o, in_sel(v, at + (uint64_t)k) ? A_SELB :
 				h ? (h == 1 ? A_HIT1 : A_HIT2)
@@ -3893,7 +4116,26 @@ static void draw_hex(struct out *o, struct view *v)
 				  : decl_kind(v, fo) ? A_HIT3
 				  : sym ? sym_byte_colour(fo)
 				  : byte_colour(c));
-			out_fmt(o, "%c", (c >= 0x20 && c < 0x7f) ? c : '.');
+			/*
+			 * ONE CELL, ONE BYTE, AND NO INTERPRETATION.
+			 *
+			 * The NUL halves of a UTF-16 script block were drawn as
+			 * spaces here for a while, so the column read "I E X"
+			 * instead of "I.E.X." - easier to read, and wrong for
+			 * this pane. Some AMSI submissions carry a PE, whose
+			 * header is mostly NULs and is not text at all, and a
+			 * dump that decides which of its zeros are worth
+			 * drawing is a dump that can no longer be checked
+			 * against the file.
+			 *
+			 * The reading belongs one pane down: the event panel
+			 * renders the gathered content as text, says when it
+			 * collapsed pairs, and is allowed to because it is a
+			 * rendering. This is the ground truth, and its whole
+			 * value is that it never flatters the bytes.
+			 */
+			glyph = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
+			out_fmt(o, "%c", glyph);
 			out_str(o, A_OFF);
 		}
 		out_str(o, "\033[K");
@@ -6051,7 +6293,8 @@ static void draw_evt(struct out *o, struct view *v)
 	out_str(o, A_D_KEY "[x]" A_OFF);
 
 	for (row = evt_top(); row <= hex_bot(); row++) {
-		char name[32], val[512];
+		char name[32], scratch[512];
+		const char *val;
 		uint16_t fo = 0, fl = 0;
 		int skip = 0;
 		int vw = evt_val_w();
@@ -6060,7 +6303,12 @@ static void draw_evt(struct out *o, struct view *v)
 		if (!evt_line_at(v, v->evt_scroll + (row - evt_top()), &i,
 				 &skip) ||
 		    !kof_evt_field(&v->evt, (unsigned)i, name, sizeof name,
-				   val, sizeof val)) {
+				   scratch, sizeof scratch)) {
+			out_str(o, "\033[K");
+			continue;
+		}
+		val = evt_row_value(v, i, scratch, sizeof scratch);
+		if (!val) {
 			out_str(o, "\033[K");
 			continue;
 		}
@@ -6155,7 +6403,14 @@ static void draw_evt(struct out *o, struct view *v)
 		 * see the palette's header for why the chip is a background
 		 * and the bytes it maps to are not.
 		 */
-		out_str(o, evt_row_colour(name));
+		/*
+		 * No chip for the object either. The chip is the legend for a
+		 * colour in the dump, and there is no longer one to explain -
+		 * a swatch beside a row whose bytes are not lit would send a
+		 * reader looking for a colour that is not there.
+		 */
+		if (strcmp(name, "object"))
+			out_str(o, evt_row_colour(name));
 		out_fmt(o, " %-11.11s ", name);
 		out_str(o, A_OFF);
 
@@ -8308,7 +8563,17 @@ static const struct {
 	 * copies something other than what is selected on screen.
 	 */
 	{ "Copy",                 4, 0 },
-	{ "Copy ASCII",           1, 0 },
+	/*
+	 * "Copy text", not "Copy ASCII".
+	 *
+	 * ASCII is what the ENCODING was assumed to be, not what the reader is
+	 * asking for - and it stopped being true as soon as the pane started
+	 * showing UTF-16 script blocks. What the item does is give back the
+	 * readable half of the selection, whatever that turns out to be, and
+	 * naming it after one encoding invites the question of which item to
+	 * use for the others. There is only this one.
+	 */
+	{ "Copy text",            1, 0 },
 	{ "Copy hex",         1 | 4, 0 },
 	{ "Copy offset (hex)",    2, 0 },
 	{ "Copy offset (dec)",    2, 0 },
@@ -17205,7 +17470,21 @@ static void on_cursor_down(struct view *v)
 		} else if (v->show_list) {
 			if (v->sel_touch + 1 < cur_obj(v)->n_touch)
 				v->sel_touch++;
-		} else if (v->pane == 0 && v->sel_node + 1 < v->n_node) {
+		} else if (v->pane == 0 &&
+			   (v->sel_node + 1 < v->n_node ||
+			    (v->log && v->n_node))) {
+			/*
+			 * PAST THE LAST ROW IS A PAGE TURN, for a log.
+			 *
+			 * The guard here was "there is another row", which is
+			 * the right answer for a file - its objects are all of
+			 * them - and the wrong one for a log, whose rows are a
+			 * window over millions. It made the keyboard stop at
+			 * the bottom of the window while the wheel, which has
+			 * no such guard, turned the page: two ways to move
+			 * through the same list that disagreed about how long
+			 * it was.
+			 */
 			goto_node(v, v->sel_node + 1u);
 		} else if (v->pane == 1) {
 			hex_step(v, 1);
@@ -17244,7 +17523,10 @@ static void on_cursor_up(struct view *v)
 		} else if (v->show_list) {
 			if (v->sel_touch)
 				v->sel_touch--;
-		} else if (v->pane == 0 && v->sel_node) {
+		} else if (v->pane == 0 && (v->sel_node || v->log)) {
+			/* And back, the same way: at the top of a log's window
+			 * there is a page before it. goto_node reads the
+			 * wrapped -1 as that request. */
 			goto_node(v, v->sel_node - 1u);
 		} else if (v->pane == 1) {
 			hex_step(v, -1);
@@ -17543,12 +17825,18 @@ static void file_close(struct view *v)
 	 * re-execing - and became a leak per file the moment it did not.
 	 */
 	draft_wipe(v);
-	/* The log's reader goes with the file. Its objects own no heap - their
-	 * buffers are the mapping - so there is nothing else to undo. */
+	/* The log's reader goes with the file, and so do the two buffers that
+	 * gather a submission out of it. The objects themselves own no heap -
+	 * their bytes are the mapping - so there is nothing else to undo. */
 	if (v->log) {
 		kofevt_log_free(v->log);
 		v->log = NULL;
 	}
+	free(v->evt_join);
+	free(v->evt_text);
+	v->evt_join = v->evt_text = NULL;
+	v->evt_join_len = v->evt_text_len = 0;
+	v->evt_have = 0;
 	for (i = 0; i < v->n_obj; i++) {
 		struct object *o = &v->obj[i];
 
@@ -17712,6 +18000,15 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 				 */
 				v->evt_open = 1;
 				v->evt_sel = -1;
+				/*
+				 * A failed allocation is not fatal: the panel
+				 * then shows what the record itself holds,
+				 * which is what it showed before continuations
+				 * existed. It is not worth refusing to open a
+				 * log over.
+				 */
+				v->evt_join = malloc(EVT_JOIN_MAX);
+				v->evt_text = malloc(EVT_TEXT_MAX);
 				log_scan_verbs(v);
 				log_window(v);
 			} else {

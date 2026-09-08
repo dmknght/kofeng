@@ -1428,6 +1428,45 @@ static void t_browse(void)
 		if (!kof_evt_content_looks_binary(&a))
 			fail("content", "did not notice an MZ");
 
+		/*
+		 * A PE IS NOT UTF-16, AND THE RENDERING MUST NOT GUESS THAT IT
+		 * IS.
+		 *
+		 * Some submissions carry an executable, and a PE header is full
+		 * of NULs - "MZ\x90\x00" already has one at index three. A
+		 * rendering that collapsed pairs on the strength of a few of
+		 * them would drop every second byte of an image and show half
+		 * of it as though it were the whole, which is the failure this
+		 * whole file exists to prevent: not an error, a plausible
+		 * fabrication.
+		 *
+		 * What makes it safe is that the test is over the WHOLE buffer
+		 * - every odd byte - so a single non-zero one anywhere refuses
+		 * it. That is the property under test, not the outcome for this
+		 * particular header.
+		 */
+		if (kof_evt_text_is_wide((const char *)pe, sizeof pe))
+			fail("content", "called a PE header UTF-16");
+		{
+			char shown[64];
+			size_t k = kof_evt_text_of((const char *)pe,
+						   sizeof pe, shown,
+						   sizeof shown);
+
+			/*
+			 * Byte for byte, and ALL of them but the two NULs of
+			 * padding at the end. The header is fourteen bytes of
+			 * mostly-unprintable data and every one of them has to
+			 * survive: the first version of this cut trailing
+			 * unprintables and left "MZ".
+			 */
+			if (shown[0] != 'M' || shown[1] != 'Z')
+				fail("content", "a PE did not render as bytes");
+			eq_u64("pe render len", k, sizeof pe - 2u);
+			if (shown[2] != '.')
+				fail("content", "a PE lost a byte to collapsing");
+		}
+
 		/* THE ONE A STRING GOT WRONG: bytes past a NUL survive, and
 		 * the length is the buffer's rather than up to the NUL. */
 		mk_kof(&a, KOF_EVT_AMSI_SCAN, 7u);
@@ -1437,6 +1476,19 @@ static void t_browse(void)
 		eq_u64("content len past NUL", tn, sizeof u16);
 		if (t[2] != 'c')
 			fail("content", "lost the bytes after the first NUL");
+
+		/* And this one IS wide, so it renders as the text it is rather
+		 * than as letters with a dot between each pair. */
+		if (!kof_evt_text_is_wide(t, tn))
+			fail("content", "did not recognise UTF-16");
+		{
+			char shown[64];
+
+			kof_evt_text_of(t, tn, shown, sizeof shown);
+			if (strcmp(shown, "echo hi"))
+				printf("  FAIL utf16 render: got \"%s\"\n",
+				       shown), failures++;
+		}
 	}
 
 	/* One past the end yields nothing rather than an empty row. */

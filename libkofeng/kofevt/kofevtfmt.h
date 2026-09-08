@@ -140,6 +140,32 @@ int kof_evt_field_extent(const struct kof_evt *, unsigned i,
 int kof_evt_content(const struct kof_evt *, const char **text, size_t *len);
 
 /*
+ * IS THIS BUFFER UTF-16LE - a NUL above every character.
+ *
+ * Asked because it changes how the bytes should be SHOWN, and in two places
+ * that must agree: a field row rendering the text, and a hex dump deciding
+ * what to draw in the ASCII column for the NUL halves. A pane that collapsed
+ * the pairs while the dump beside it printed a dot for each one would be two
+ * answers to the same question.
+ *
+ * The whole buffer is tested, never a sample - a blob that merely begins with
+ * NUL-separated bytes would pass a sample and then be silently stripped of
+ * half of itself.
+ */
+int kof_evt_text_is_wide(const char *p, size_t n);
+
+/*
+ * Render `n` bytes for READING: UTF-16LE collapsed to its characters, anything
+ * else byte for byte with unprintables as dots, and the trailing run of
+ * unprintables - padding, in every case that produces one - cut.
+ *
+ * Returns how many characters were written; `out` is always terminated. This
+ * is a rendering and not a decoding: it is for a person looking at a pane, and
+ * a scanner must read the raw bytes through kof_evt_content instead.
+ */
+size_t kof_evt_text_of(const char *p, size_t n, char *out, size_t cap);
+
+/*
  * WHAT THE CONTENT IS NOT: THE ORIGINAL BYTES.
  *
  * The collector converts a submitted buffer to text at the edge - control
