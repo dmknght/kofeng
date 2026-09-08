@@ -4077,7 +4077,8 @@ void generate(struct kof_editor *e, int as_new)
 					fprintf(f, "%02X", d->bytes[j]);
 			fprintf(f, "\");\n");
 		} else {
-			fprintf(f, "KOF_DEFINE_STR(s%u, \"", i);
+			fprintf(f, "KOF_DEFINE_STR%s(s%u, \"",
+				d->wide ? "_WIDE" : "", i);
 			decl_put_literal(f, d->bytes, d->nbytes);
 			fprintf(f, "\", %s, %s);\n",
 				d->icase ? "KOF_CASE_ICASE" : "KOF_CASE_EXACT",

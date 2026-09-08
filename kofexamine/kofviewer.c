@@ -963,7 +963,7 @@ struct view {
 	 * become a window over it rather than its beginning - and a reader can
 	 * reach the tail of an AMSI buffer without the panel eating the pane.
 	 */
-	int                  evt_hscroll;
+
 
 	/*
 	 * THE WHOLE SUBMISSION, gathered from the event and the continuations
@@ -1007,7 +1007,6 @@ struct view {
 	 * wraps and the panel scrolls, and a selection anchored to a screen
 	 * cell would name a different part of the text after either.
 	 */
-	int                  evt_txt_row;   /* which row, or -1 for none */
 	int                  evt_txt_a, evt_txt_b;
 	int                  evt_txt_drag;
 
@@ -1180,7 +1179,8 @@ struct view {
 	int         hit_c0, hit_c1, skip_c0, skip_c1, name_c0, name_c1;
 
 	/* Which half of the hex pane the menu was opened on. */
-	int         menu_ctx;       /* 1 bytes, 2 the offset column */
+	int         menu_ctx;       /* 1 bytes, 2 the offset column,
+				     * 4 the disassembly, 8 the event box */
 	uint64_t    menu_off;       /* the row offset it was opened on */
 
 	int         menu_open, menu_row, menu_col, menu_sel;
@@ -3156,52 +3156,21 @@ static const char *evt_byte_colour(const struct view *v, uint64_t off)
  * row off wherever a panel had scrolled.
  */
 
-/* The width the value column has. One expression, because the drawer and the
- * line count must wrap at the same place or they describe different screens. */
 /* The offset column: four hex digits and the space after them. It was
  * "0077+392" - offset and length - and the length has gone; see the drawer. */
 #define EVT_OFF_W 5
 
-/* Where the value column starts: past the offset and the name chip. */
-static int evt_val_x(void)
-{
-	return TREE_W + 3 + EVT_OFF_W + 13 + 1;
-}
-
-static int evt_val_w(void)
-{
-	int w = g_cols - evt_val_x();
-
-	return w > 8 ? w : 8;
-}
-
-/*
- * A CAP ON HOW FAR ONE VALUE MAY UNROLL.
- *
- * Without it a four-hundred-byte AMSI submission takes the whole panel and the
- * fields around it go off the bottom - so the record's SHAPE, which is what
- * this panel is for, is lost to the one field that is already on screen in
- * full: the hex pane below is showing those very bytes, lit in the row's own
- * colour, and repeating them here as text buys a reader nothing they cannot
- * see.
- *
- * Two lines, then. Enough to tell a script block from a path from a base64
- * blob, which is the question a field list answers; reading the thing is what
- * the dump is for, and walking past two lines of it is what the shift is for.
- */
-#define EVT_WRAP_MAX 2
-
 /*
  * WHAT A ROW SHOWS, which for one row is not what the record holds.
  *
- * The object row of a content event shows the WHOLE submission - the record's
- * own bytes and every continuation folded in - because that is the thing the
- * reader is after and the record alone is a four-hundred-byte prefix of it.
- * Every other row is the record's, straight from kof_evt_field.
+ * The box row of a content event shows the WHOLE submission - the record's own
+ * bytes and every continuation folded in - because that is the thing the reader
+ * is after and the record alone is a prefix of it. Every other row is the
+ * record's, straight from kof_evt_field.
  *
- * One function, because three places ask - the line count, the line-to-row
- * map, and the drawer - and they have to agree on the length of the string or
- * the wrap, the scroll and the click all land in different places.
+ * One function, because the classifier, the box and the drawer all ask, and
+ * they have to agree on the string or the wrap, the scroll and the selection
+ * land in different places.
  *
  * `val` is scratch the caller owns; the returned pointer may be it or may be
  * the gathered text, and is valid until the next call or the next selection.
@@ -3218,122 +3187,272 @@ static const char *evt_row_value(const struct view *v, int i,
 	return val;
 }
 
-static int evt_row_lines(const struct view *v, int i)
-{
-	char vl[512];
-	const char *sv = evt_row_value(v, i, vl, sizeof vl);
-	int w = evt_val_w(), n, len;
-
-	if (!sv)
-		return 0;
-	len = (int)strlen(sv) - v->evt_hscroll;
-	if (len < 0)
-		len = 0;
-	n = (len + w - 1) / w;
-	if (n < 1)
-		n = 1;
-	return n > EVT_WRAP_MAX ? EVT_WRAP_MAX : n;
-}
-
-/* The longest value the record has, which is how far the shift may go: past
- * that every row is blank and the panel scrolls into nothing. */
-static int evt_val_max(const struct view *v)
-{
-	char vl[512];
-	int i, m = 0;
-
-	for (i = 0; i < v->evt_n; i++) {
-		const char *sv = evt_row_value(v, i, vl, sizeof vl);
-		int n;
-
-		if (!sv)
-			break;
-		n = (int)strlen(sv);
-		if (n > m)
-			m = n;
-	}
-	return m;
-}
-
-/* Every line the record needs, which is what the panel asks for and what its
- * scrollbar measures. */
-static int evt_total_lines(const struct view *v)
-{
-	int i, n = 0;
-
-	for (i = 0; i < v->evt_n; i++)
-		n += evt_row_lines(v, i);
-	return n;
-}
-
-/*
- * Which row line `n` belongs to, and how far into its value that line starts.
- * Zero when `n` is past the end.
- */
-static int evt_line_at(const struct view *v, int n, int *row, int *skip)
-{
-	int i, at = 0;
-
-	if (n < 0)
-		return 0;
-	for (i = 0; i < v->evt_n; i++) {
-		int lines = evt_row_lines(v, i);
-
-		if (n < at + lines) {
-			if (row)  *row = i;
-			if (skip) *skip = (n - at) * evt_val_w();
-			return 1;
-		}
-		at += lines;
-	}
-	return 0;
-}
-
-/*
- * WHERE IN A ROW'S TEXT THE POINTER IS, for a click or a drag in the value
- * column. Zero when it is not over one.
+/* ---- how the panel is divided ---------------------------------------------
  *
- * One function for both, because a drag that computed the position differently
- * from the click that started it selects from somewhere the reader never
- * pressed - and the two were three lines apart, which is exactly far enough to
- * drift.
+ * THREE ZONES, because the record has three kinds of thing in it and they want
+ * different shapes on screen.
+ *
+ * The metadata is a table: a dozen short values, each one a number or a word.
+ * Laid down the screen one per line it was a tall column of mostly empty rows,
+ * and the field a reader had come for - the submission - was pushed off the
+ * bottom. Two columns side by side halve that height and waste nothing,
+ * because none of these values is wide.
+ *
+ * The submission is not a table row at all. It is a document: hundreds or
+ * thousands of characters that a reader wants to scroll through, select out of
+ * and copy. So it gets a box of its own under the table, with the full width
+ * and its own scroll, and the table above it stays put while it moves.
+ *
+ * The warnings sit between them, full width and flush left, because they are
+ * about the record as a whole and belong to neither.
  */
-static int evt_text_at(const struct view *v, int my, int mx, int *row, int *ch)
+
+/* The object box: tall enough to show a line of context either side of what a
+ * reader is looking at, short enough to leave the table and the hex pane their
+ * room. */
+#define EVT_BOX_ROWS 3
+
+/*
+ * Sort the record's rows into the three zones, once.
+ *
+ * `meta` gets every row that names bytes and is not the submission; `warn` gets
+ * the rows that name none. Returns the object row's index, or -1.
+ *
+ * One classifier, called by the drawer and by the click routing, because the
+ * two must agree about which row is where - the last time this pane had two
+ * ways to count its rows they drifted and clicks landed a row off.
+ */
+static int evt_zones(const struct view *v, int *meta, int *n_meta,
+		     int *warn, int *n_warn)
 {
-	int line, i = 0, skip = 0;
+	int i, box = -1;
 
-	if (!evt_live(v) || my < evt_top() || my > hex_bot())
-		return 0;
-	if (mx < evt_val_x())
-		return 0;
-	line = v->evt_scroll + (my - evt_top());
-	if (!evt_line_at(v, line, &i, &skip))
-		return 0;
-	if (row)
-		*row = i;
-	if (ch) {
-		int c = skip + v->evt_hscroll + (mx - evt_val_x());
-		char scratch[512];
-		const char *sv = evt_row_value(v, i, scratch, sizeof scratch);
-		int len = sv ? (int)strlen(sv) : 0;
+	*n_meta = 0;
+	*n_warn = 0;
+	for (i = 0; i < v->evt_n && i < 64; i++) {
+		char nm[32], vl[512];
+		uint16_t fo = 0, fl = 0;
 
-		/* Clamped to the row's own text: a pointer past the end of a
-		 * short value selects it to its end, which is what dragging
-		 * over ragged text does everywhere. */
-		if (c > len)
-			c = len;
-		if (c < 0)
-			c = 0;
-		*ch = c;
+		if (!kof_evt_field(&v->evt, (unsigned)i, nm, sizeof nm,
+				   vl, sizeof vl))
+			break;
+		(void)kof_evt_field_extent(&v->evt, (unsigned)i, &fo, &fl);
+		if (!fl) {
+			warn[(*n_warn)++] = i;
+			continue;
+		}
+		/*
+		 * WHICH ROW GETS THE BOX, decided by SHAPE and not by verb.
+		 *
+		 * The box is for the record's principal text - the thing a
+		 * reader opened the event to read. For a submission that is
+		 * `object`; for a process start it is `cmdline`, which is
+		 * where a payload puts its encoded command and is every bit as
+		 * long. Both are the LAST text in the arena, so taking the
+		 * last one that qualifies gets it right without naming verbs.
+		 *
+		 * `image` stays in the table even though it sits beside them:
+		 * a program's path is a short, stable fact about the event, and
+		 * a reader scanning the table wants it there rather than three
+		 * lines down in a scrolling box.
+		 *
+		 * A short value stays in the table too. A box around eleven
+		 * characters is three rows spent to show one.
+		 */
+		if ((!strcmp(nm, "object") || !strcmp(nm, "cmdline")) &&
+		    (v->evt_text_len ||
+		     (int)strlen(vl) > (g_cols - (TREE_W + 3) - 1) / 2)) {
+			if (box >= 0)
+				meta[(*n_meta)++] = box;
+			box = i;
+			continue;
+		}
+		meta[(*n_meta)++] = i;
 	}
+	return box;
+}
+
+static int evt_warn_lines(const struct view *v)
+{
+	int meta[64], warn[64], nm = 0, nw = 0;
+
+	(void)evt_zones(v, meta, &nm, warn, &nw);
+	return nw;
+}
+
+/* Lines the two-column table needs. The left column takes the first half, so
+ * an odd count leaves the gap at the bottom right rather than in the middle. */
+static int evt_meta_lines(const struct view *v)
+{
+	int meta[64], warn[64], nm = 0, nw = 0;
+
+	(void)evt_zones(v, meta, &nm, warn, &nw);
+	return (nm + 1) / 2;
+}
+
+/* The box's first row. Its rule is the row above it. */
+static int evt_box_top(const struct view *v)
+{
+	return evt_top() + evt_meta_lines(v) + evt_warn_lines(v) + 1;
+}
+
+/* Where the box's text starts and how wide it is. */
+static int evt_box_x(void)  { return TREE_W + 3 + 2; }
+static int evt_box_w(void)
+{
+	int w = g_cols - evt_box_x() - 2;
+
+	return w > 8 ? w : 8;
+}
+
+/*
+ * The box's text, which is whichever row the box took.
+ *
+ * The caller supplies scratch because the answer may be the row's own value -
+ * a command line - or the gathered submission, which lives in the view. It
+ * returns whichever, so a caller never has to know which case it got.
+ */
+static const char *evt_box_text(const struct view *v, char *buf, size_t cap,
+				size_t *len)
+{
+	int meta[64], warn[64], nm = 0, nw = 0, box;
+	const char *t;
+
+	box = evt_zones(v, meta, &nm, warn, &nw);
+	if (box < 0) {
+		if (len)
+			*len = 0;
+		return "";
+	}
+	t = evt_row_value(v, box, buf, cap);
+	if (!t)
+		t = "";
+	if (len)
+		*len = strlen(t);
+	return t;
+}
+
+/*
+ * WHERE THE BOX'S TEXT SITS IN THE RECORD, and how many bytes a character of
+ * it takes. Zero when the box holds nothing.
+ *
+ * The step is the whole reason this is not a straight offset: a UTF-16
+ * submission renders one character per TWO bytes, so a run of ten characters
+ * on screen is twenty bytes in the dump. Anything mapping a selection back to
+ * the object needs both numbers, and getting them from one place is what stops
+ * the two panes from disagreeing about which bytes a highlight means.
+ */
+static int evt_box_extent(const struct view *v, uint16_t *off, int *step)
+{
+	int meta[64], warn[64], nm = 0, nw = 0, box;
+	uint16_t fo = 0, fl = 0;
+
+	box = evt_zones(v, meta, &nm, warn, &nw);
+	if (box < 0)
+		return 0;
+	if (!kof_evt_field_extent(&v->evt, (unsigned)box, &fo, &fl) || !fl)
+		return 0;
+	if (off)  *off = fo;
+	if (step) *step = v->evt_wide ? 2 : 1;
+	return (int)fl;
+}
+
+static int evt_box_total(const struct view *v)
+{
+	char scratch[512];
+	size_t n = 0;
+
+	(void)evt_box_text(v, scratch, sizeof scratch, &n);
+	return (int)((n + (size_t)evt_box_w() - 1u) / (size_t)evt_box_w());
+}
+
+/*
+ * WHERE IN THE BOX'S TEXT THE POINTER IS. Zero when it is not over the box.
+ *
+ * One function for the press and the drag both, because a drag that computed
+ * the position differently from the click that started it selects from
+ * somewhere the reader never pressed - and the two were three lines apart,
+ * which is exactly far enough to drift.
+ */
+static int evt_text_at(const struct view *v, int my, int mx, int *ch)
+{
+	char scratch[512];
+	size_t n = 0;
+	int w = evt_box_w(), line, c;
+
+	if (!evt_live(v))
+		return 0;
+	if (my < evt_box_top(v) || my >= evt_box_top(v) + EVT_BOX_ROWS)
+		return 0;
+	if (mx < evt_box_x())
+		return 0;
+	(void)evt_box_text(v, scratch, sizeof scratch, &n);
+	if (!n)
+		return 0;
+
+	line = v->evt_scroll + (my - evt_box_top(v));
+	c = line * w + (mx - evt_box_x());
+	/* Clamped to the text: a pointer past the end of a short last line
+	 * selects to the end, which is what dragging over ragged text does
+	 * everywhere. */
+	if (c > (int)n)
+		c = (int)n;
+	if (c < 0)
+		c = 0;
+	if (ch)
+		*ch = c;
 	return 1;
 }
 
-/* The picked run, low end first - the reader may have dragged backwards. */
-static int evt_text_span(const struct view *v, int row, int *from, int *to)
+/*
+ * WHICH TABLE CELL THE POINTER IS OVER, as a row index, or -1.
+ *
+ * The table is filled down the left column and then down the right, so the
+ * cell under a pointer is `k` on the left and `half + k` on the right - the
+ * same arithmetic the drawer uses, from the same classifier.
+ */
+static int evt_meta_at(const struct view *v, int my, int mx)
 {
-	if (v->evt_txt_row < 0 || v->evt_txt_row != row)
-		return 0;
+	int meta[64], warn[64], nm = 0, nw = 0, half, k, cw;
+
+	if (!evt_live(v))
+		return -1;
+	/*
+	 * THE TREE IS NOT THIS PANEL, and the bound was missing.
+	 *
+	 * Only the row range was tested, so a click in the OBJECT LIST at a
+	 * height that happened to fall inside the table was read as a click on
+	 * a metadata cell: picking an event out of the list lit a field in the
+	 * hex pane and never changed the selection. The panel starts to the
+	 * right of the divider, like every other pane here.
+	 */
+	if (mx <= TREE_W)
+		return -1;
+	(void)evt_zones(v, meta, &nm, warn, &nw);
+	half = (nm + 1) / 2;
+	k = my - evt_top();
+	if (k < 0 || k >= half)
+		return -1;
+	cw = (g_cols - (TREE_W + 3) - 1) / 2;
+	if (mx >= TREE_W + 3 + cw)
+		k += half;
+	return k < nm ? meta[k] : -1;
+}
+
+/*
+ * The picked run of the box, copied out. Returns how many characters, and
+ * writes nothing when there is no selection.
+ *
+ * The box's text is a RENDERING - UTF-16 already collapsed, padding already
+ * trimmed - so what comes back is what the reader sees, which is also what
+ * belongs in a signature: KOF_DEFINE_STR_WIDE is written with the characters
+ * and widened at build time.
+ */
+static size_t evt_sel_text(const struct view *v, char *out, size_t cap);
+
+/* The picked run, low end first - the reader may have dragged backwards. */
+static int evt_text_span(const struct view *v, int *from, int *to)
+{
 	if (v->evt_txt_a == v->evt_txt_b)
 		return 0;
 	if (from) *from = v->evt_txt_a < v->evt_txt_b ? v->evt_txt_a
@@ -3341,6 +3460,70 @@ static int evt_text_span(const struct view *v, int row, int *from, int *to)
 	if (to)   *to   = v->evt_txt_a < v->evt_txt_b ? v->evt_txt_b
 						      : v->evt_txt_a;
 	return 1;
+}
+
+/*
+ * Put the hex pane's selection over the bytes the box's selection came from.
+ *
+ * The two panes are showing one record and a reader dragging through the text
+ * is pointing at bytes; leaving the dump unmarked made them do the arithmetic
+ * themselves, which for a UTF-16 submission is "twice the character count,
+ * plus wherever the field starts".
+ *
+ * CLAMPED TO WHAT IS REALLY THERE. Past the record's own arena the text came
+ * from continuation records that sit further along the object, and the step
+ * from a character to a byte stops being a multiplication - so the mark stops
+ * at the end of this record's content rather than running on over bytes it
+ * cannot account for.
+ */
+static void evt_sync_hex(struct view *v)
+{
+	uint16_t off = 0;
+	int step = 1, fl, from = 0, to = 0;
+	uint64_t a, b;
+
+	fl = evt_box_extent(v, &off, &step);
+	if (!fl || !evt_text_span(v, &from, &to)) {
+		v->sel_a = v->sel_b = KOF_BROKEN;
+		return;
+	}
+	a = (uint64_t)off + (uint64_t)from * (uint64_t)step;
+	b = (uint64_t)off + (uint64_t)to * (uint64_t)step;
+	if (b > (uint64_t)off + (uint64_t)fl)
+		b = (uint64_t)off + (uint64_t)fl;
+	if (a >= b) {
+		v->sel_a = v->sel_b = KOF_BROKEN;
+		return;
+	}
+	v->sel_a = a;
+	v->sel_b = b - 1u;
+}
+
+static size_t evt_sel_text(const struct view *v, char *out, size_t cap)
+{
+	char scratch[512];
+	const char *t;
+	size_t n = 0, len;
+	int from = 0, to = 0;
+
+	if (!out || !cap)
+		return 0;
+	out[0] = '\0';
+	if (!evt_live(v) || !evt_text_span(v, &from, &to))
+		return 0;
+	t = evt_box_text(v, scratch, sizeof scratch, &n);
+	if (!t)
+		return 0;
+	if (to > (int)n)
+		to = (int)n;
+	if (to <= from)
+		return 0;
+	len = (size_t)(to - from);
+	if (len > cap - 1u)
+		len = cap - 1u;
+	memcpy(out, t + from, len);
+	out[len] = '\0';
+	return len;
 }
 
 /*
@@ -3422,6 +3605,35 @@ static void evt_load(struct view *v)
 			v->evt_text_len = kof_evt_text_of(v->evt_join, j.len,
 							  v->evt_text,
 							  EVT_TEXT_MAX);
+
+			/*
+			 * THE FLAG DESCRIBED THE RECORD; THIS COPY IS THE
+			 * EVENT.
+			 *
+			 * KOF_EF_TRUNCATED is set by the collector when the
+			 * submission did not fit one record - which was true
+			 * of the record and stopped being true the moment the
+			 * continuations behind it were folded in. Left alone
+			 * it put "text was cut" beside a submission that is
+			 * whole, which is a false claim about evidence, and
+			 * the worst kind: it tells a reader not to trust
+			 * something that is complete.
+			 *
+			 * So the claim is re-made against what is actually
+			 * held. kof_evt_join_whole is the one that knows -
+			 * short because a chunk was lost, short because the
+			 * buffer filled, or not short at all - and the warning
+			 * now says only what survives that test.
+			 *
+			 * Not "remove the warning": a join that IS short still
+			 * has to say so, and now it says so about the right
+			 * thing.
+			 */
+			if (kof_evt_join_whole(&j, &v->evt))
+				v->evt.flags &= (uint8_t)~KOF_EF_TRUNCATED;
+			else
+				v->evt.flags |= (uint8_t)KOF_EF_TRUNCATED;
+			v->evt_n = (int)kof_evt_n_fields(&v->evt);
 		}
 	}
 
@@ -3435,10 +3647,8 @@ static void evt_load(struct view *v)
 	 */
 	v->evt_sel = -1;
 	v->evt_scroll = 0;
-	v->evt_hscroll = 0;
 	/* The text selection is about THIS record's words. Carried across it
 	 * would name a stretch of a string that is no longer there. */
-	v->evt_txt_row = -1;
 	v->evt_txt_a = v->evt_txt_b = 0;
 	v->evt_txt_drag = 0;
 }
@@ -4590,6 +4800,30 @@ static int opt_offerable(struct view *v, int k)
 	int exe = fm == KOF_FMT_ELF || fm == KOF_FMT_PE || fm == KOF_FMT_MACHO;
 
 	if (k < 0 || k >= OPT_COUNT || v->ed.dr.opt_on[k])
+		return 0;
+
+	/*
+	 * AN EVENT HAS NONE OF THESE.
+	 *
+	 * All four are questions about a FILE. Architecture and subtype are
+	 * properties of an executable, and a record is not one. The two sizes
+	 * are worse than merely inapplicable: an event's object size is the
+	 * record, which is a fixed head plus however much of a script the
+	 * collector managed to carry - so "size >= 400" is a statement about
+	 * the transport, not about the sample, and it would drift the day the
+	 * head or the arena changes size.
+	 *
+	 * Offered anyway, they would be four rows a researcher has to know to
+	 * leave alone, and one of them would silently narrow a rule to
+	 * submissions of a particular length for reasons having nothing to do
+	 * with what the rule is about.
+	 *
+	 * What WOULD be meaningful here is a bound on the CONTENT - "a script
+	 * block at least this long" is a real claim about a sample. There is no
+	 * precondition for it yet; see the note in the reply rather than
+	 * inventing one that the host does not check.
+	 */
+	if (v->log)
 		return 0;
 	if (k == OPT_ARCH)
 		return exe && cur_obj(v)->ctx.arch != 0;
@@ -6351,49 +6585,6 @@ static uint64_t dis_sync(struct view *v, uint64_t want)
 	return at;
 }
 
-/*
- * One visible slice of a row's value, with the reader's pick lit inside it.
- *
- * Written as three flat runs rather than by colouring each character: a
- * selection is a range of the STRING, and the part of it on this line is
- * whatever of that range falls in [at, at + w). Splitting it here keeps the
- * drawing loop out of the arithmetic and means the wrap and the selection
- * cannot disagree about where a line starts.
- */
-static void evt_put_value(struct out *o, const struct view *v, int row,
-			  const char *val, int at, int w)
-{
-	int len = (int)strlen(val);
-	int from = 0, to = 0, a, b;
-
-	out_str(o, " ");
-	if (at >= len)
-		return;
-	if (len - at < w)
-		w = len - at;
-
-	if (!evt_text_span(v, row, &from, &to)) {
-		out_fmt(o, "%.*s", w, val + at);
-		out_str(o, A_OFF);
-		return;
-	}
-	/* The picked range, clipped to this line. */
-	a = from - at;
-	b = to - at;
-	if (a < 0) a = 0;
-	if (b > w)  b = w;
-	if (b <= a) {
-		out_fmt(o, "%.*s", w, val + at);
-		out_str(o, A_OFF);
-		return;
-	}
-	out_fmt(o, "%.*s", a, val + at);
-	out_str(o, A_SELB);
-	out_fmt(o, "%.*s", b - a, val + at + a);
-	out_str(o, A_OFF);
-	out_fmt(o, "%.*s", w - b, val + at + b);
-	out_str(o, A_OFF);
-}
 
 /*
  * THE EVENT PANEL - what the record above it says, in the wording montrace
@@ -6409,26 +6600,24 @@ static void draw_evt(struct out *o, struct view *v)
 {
 	int head = evt_top() - 1;
 	int col = TREE_W + 3;
-	int row, i;
-	char note[40];
+	int meta[64], warn[64], nm = 0, nw = 0, objrow;
+	int lines, half, k, row;
+	int cw = (g_cols - col - 1) / 2;
+	char note[48];
 
 	if (!g_evt_rows)
 		return;
+	objrow = evt_zones(v, meta, &nm, warn, &nw);
 
 	/* The heading, and the same close control the other panel has - a
 	 * reader who has closed one knows where the other's is. */
 	out_at(o, head, col);
-	if (v->evt_hscroll)
-		snprintf(note, sizeof note, " Event %s  [+%d chars] ",
-			 kof_evt_verb_name(v->evt.verb), v->evt_hscroll);
-	else
-		snprintf(note, sizeof note, " Event %s  [%u field(s)] ",
-			 kof_evt_verb_name(v->evt.verb), (unsigned)v->evt_n);
+	snprintf(note, sizeof note, " Event %s ",
+		 kof_evt_verb_name(v->evt.verb));
 	out_fmt(o, A_DIM "--" A_OFF A_BOLD "%s" A_OFF, note);
 	out_str(o, A_DIM);
 	{
 		int used = col + 2 + (int)strlen(note);
-		int k;
 
 		for (k = used; k < g_cols - 4; k++)
 			out_str(o, "-");
@@ -6437,151 +6626,170 @@ static void draw_evt(struct out *o, struct view *v)
 	out_at(o, head, g_cols - 3);
 	out_str(o, A_D_KEY "[x]" A_OFF);
 
-	for (row = evt_top(); row <= hex_bot(); row++) {
-		char name[32], scratch[512];
-		const char *val;
-		uint16_t fo = 0, fl = 0;
-		int skip = 0;
-		int vw = evt_val_w();
+	/*
+	 * THE TABLE, filled DOWN the left column and then down the right.
+	 *
+	 * Down-then-across, not across-then-down: the rows are in the record's
+	 * own layout order, and reading a column top to bottom is then reading
+	 * the record front to back. Filled across, consecutive fields would sit
+	 * side by side and the eye would have to zigzag to follow the offsets.
+	 */
+	half = (nm + 1) / 2;
+	for (k = 0; k < half; k++) {
+		int c2;
 
+		row = evt_top() + k;
 		out_at(o, row, col);
-		if (!evt_line_at(v, v->evt_scroll + (row - evt_top()), &i,
-				 &skip) ||
-		    !kof_evt_field(&v->evt, (unsigned)i, name, sizeof name,
-				   scratch, sizeof scratch)) {
-			out_str(o, "\033[K");
-			continue;
-		}
-		val = evt_row_value(v, i, scratch, sizeof scratch);
-		if (!val) {
-			out_str(o, "\033[K");
-			continue;
-		}
-		(void)kof_evt_field_extent(&v->evt, (unsigned)i, &fo, &fl);
+		for (c2 = 0; c2 < 2; c2++) {
+			int idx = c2 == 0 ? k : half + k;
+			char name[32], scratch[256];
+			const char *val;
+			uint16_t fo = 0, fl = 0;
 
-		/*
-		 * A CONTINUATION LINE REPEATS NOTHING.
-		 *
-		 * No offset, no name, no chip - the row is one fact and it has
-		 * already said whose it is. Repeating the label down the left
-		 * would make one long value look like four short rows, which is
-		 * the opposite of what the wrap is for.
-		 */
-		if (skip > 0) {
-			int at = skip + v->evt_hscroll;
-			int left = (int)strlen(val) - (at + vw);
+			if (idx >= nm) {
+				out_str(o, "\033[K");
+				break;
+			}
+			if (c2)
+				out_at(o, row, col + cw);
+			if (!kof_evt_field(&v->evt, (unsigned)meta[idx], name,
+					   sizeof name, scratch, sizeof scratch))
+				continue;
+			val = evt_row_value(v, meta[idx], scratch,
+					    sizeof scratch);
+			if (!val)
+				continue;
+			(void)kof_evt_field_extent(&v->evt,
+						   (unsigned)meta[idx],
+						   &fo, &fl);
 
-			/*
-			 * A MARK IN THE NAME COLUMN, so a continuation cannot
-			 * be read as a row of its own.
-			 *
-			 * The column was left blank, which is right when one
-			 * long value sits among short ones and wrong the
-			 * moment two of them wrap in a row: four unnamed lines
-			 * follow each other and there is nothing on screen
-			 * saying where the first value ended and the second
-			 * began. The mark is dim and in the gutter, so it
-			 * groups the lines without competing with the names.
-			 */
-			out_fmt(o, "%*s" A_DIM "%*s" A_OFF, EVT_OFF_W, "",
-				13, "   -");
-			if (i == v->evt_sel)
-				out_str(o, A_BOLD);
-			evt_put_value(o, v, i, val, at, vw);
-			/*
-			 * WHAT WAS LEFT OUT, said as a count rather than as an
-			 * ellipsis. "..." tells a reader there is more; a
-			 * number tells them whether it is worth going after,
-			 * which is the decision they are actually making.
-			 */
-			if (left > 0)
-				out_fmt(o, A_DIM "  +%d more" A_OFF, left);
-			out_str(o, "\033[K");
-			continue;
-		}
-
-		/*
-		 * A FLAG ROW IS NOT A FIELD and is not drawn as one.
-		 *
-		 * It has no offset, no length and no bytes to point at, so it
-		 * gets no offset column and no colour chip - those would all be
-		 * blank or, worse, filled in with something. What it gets is a
-		 * mark and the warning colour, because what every one of them
-		 * says is that this record is not what it looks like.
-		 */
-		if (!fl) {
-			/*
-			 * FLUSH LEFT, out past the offset column.
-			 *
-			 * The columns to the right are a table ABOUT the
-			 * record's bytes - an offset, a length, the field they
-			 * describe. A warning is about the record as a whole
-			 * and has none of those, so sitting it in their
-			 * gutter makes it look like a row whose offset went
-			 * missing. Starting at the panel's own edge says it is
-			 * not in the table at all.
-			 */
-			out_fmt(o, A_WARN "! %s: %.*s" A_OFF, name,
-				g_cols - col - 6, val);
-			out_str(o, "\033[K");
-			continue;
-		}
-
-		/*
-		 * THE OFFSET, in the colour the hex pane's own offset column
-		 * uses, so the number in this row and the number down the left
-		 * of the dump are visibly the same kind of thing.
-		 *
-		 * THE LENGTH USED TO BE HERE TOO, as "0077+392", and it is not
-		 * worth a column. Where a field ENDS is not a question a reader
-		 * of this panel asks - the highlight in the dump answers it in
-		 * the form they actually want it, which is by showing them the
-		 * end. What they need from the panel is where to LOOK, and that
-		 * is one number.
-		 */
-		out_fmt(o, A_LOC "%0*X" A_OFF " ", EVT_OFF_W - 1, (unsigned)fo);
-
-		/*
-		 * The name carries the row's colour and the value does not -
-		 * see the palette's header for why the chip is a background
-		 * and the bytes it maps to are not.
-		 */
-		/*
-		 * No chip for the object either. The chip is the legend for a
-		 * colour in the dump, and there is no longer one to explain -
-		 * a swatch beside a row whose bytes are not lit would send a
-		 * reader looking for a colour that is not there.
-		 */
-		if (strcmp(name, "object"))
+			out_fmt(o, A_LOC "%0*X" A_OFF " ", EVT_OFF_W - 1,
+				(unsigned)fo);
 			out_str(o, evt_row_colour(name));
-		out_fmt(o, " %-11.11s ", name);
-		out_str(o, A_OFF);
-
-		/* The picked row, marked the way a picked thing is marked
-		 * everywhere else here rather than with a seventh colour. */
-		if (i == v->evt_sel)
-			out_str(o, A_BOLD);
-		evt_put_value(o, v, i, val, v->evt_hscroll, vw);
-		/* Only when this is the whole row - a wrapped value says it on
-		 * its last line, and saying it twice would read as two
-		 * different amounts. */
-		if (evt_row_lines(v, i) == 1) {
-			int left = (int)strlen(val) - (v->evt_hscroll + vw);
-
-			if (left > 0)
-				out_fmt(o, A_DIM "  +%d more" A_OFF, left);
+			out_fmt(o, " %-9.9s ", name);
+			out_str(o, A_OFF);
+			if (meta[idx] == v->evt_sel)
+				out_str(o, A_BOLD);
+			out_fmt(o, " %.*s", cw - EVT_OFF_W - 13, val);
+			out_str(o, A_OFF);
+			if (!c2)
+				out_str(o, "\033[K");
 		}
+	}
+
+	/* The warnings, full width and flush left - they are about the record
+	 * as a whole and belong to neither zone. */
+	for (k = 0; k < nw; k++) {
+		char name[32], scratch[256];
+
+		row = evt_top() + half + k;
+		out_at(o, row, col);
+		if (kof_evt_field(&v->evt, (unsigned)warn[k], name,
+				  sizeof name, scratch, sizeof scratch))
+			out_fmt(o, A_WARN "! %s: %.*s" A_OFF, name,
+				g_cols - col - 6, scratch);
 		out_str(o, "\033[K");
 	}
 
-	{
-		int shown = hex_bot() - evt_top() + 1;
-		int total = evt_total_lines(v);
+	if (objrow < 0)
+		return;
 
-		if (total > shown)
-			scrollbar(o, g_cols, evt_top(), hex_bot(),
-				  (uint64_t)v->evt_scroll, (uint64_t)total,
-				  (uint64_t)shown);
+	/*
+	 * THE SUBMISSION, in a box of its own.
+	 *
+	 * A rule above it rather than a heading: the box is the rest of the
+	 * panel, so what it holds needs no announcing, and a heading would cost
+	 * one of the three lines it has to show text in.
+	 */
+	row = evt_box_top(v) - 1;
+	out_at(o, row, col);
+	{
+		size_t n = 0;
+		char lead[48], scratch[512], bname[32], bval[64];
+
+		(void)evt_box_text(v, scratch, sizeof scratch, &n);
+		if (!kof_evt_field(&v->evt, (unsigned)objrow, bname,
+				   sizeof bname, bval, sizeof bval))
+			bname[0] = '\0';
+		{
+			uint16_t bo = 0;
+
+			/*
+			 * The offset, in the same column format every field
+			 * row uses. The box is a field like the others - it is
+			 * only drawn differently - and a reader looking for
+			 * where its bytes are should not have to click a row to
+			 * find out.
+			 */
+			(void)evt_box_extent(v, &bo, NULL);
+			snprintf(lead, sizeof lead, " %s  %04X  %u B%s ",
+				 bname, (unsigned)bo, (unsigned)n,
+				 v->evt_wide ? " utf-16" : "");
+		}
+		out_fmt(o, A_DIM "--%s" A_OFF, lead);
+		out_str(o, A_DIM);
+		for (k = col + 2 + (int)strlen(lead); k < g_cols - 1; k++)
+			out_str(o, "-");
+		out_str(o, A_OFF);
+	}
+	out_str(o, "\033[K");
+
+	lines = evt_box_total(v);
+	if (v->evt_scroll > lines - EVT_BOX_ROWS)
+		v->evt_scroll = lines - EVT_BOX_ROWS;
+	if (v->evt_scroll < 0)
+		v->evt_scroll = 0;
+
+	{
+		char scratch[512];
+		size_t n = 0;
+		const char *t = evt_box_text(v, scratch, sizeof scratch, &n);
+		int w = evt_box_w();
+
+		for (k = 0; k < EVT_BOX_ROWS; k++) {
+			int at = (v->evt_scroll + k) * w;
+			int take = (int)n - at;
+			int from = 0, to = 0, a, b;
+
+			out_at(o, evt_box_top(v) + k, evt_box_x());
+			if (at >= (int)n || take <= 0) {
+				out_str(o, "\033[K");
+				continue;
+			}
+			if (take > w)
+				take = w;
+
+			/*
+			 * The picked run, clipped to this line - three flat
+			 * pieces rather than a colour per character, so the
+			 * wrap and the selection cannot disagree about where a
+			 * line begins.
+			 */
+			a = v->evt_txt_a < v->evt_txt_b ? v->evt_txt_a
+							: v->evt_txt_b;
+			b = v->evt_txt_a < v->evt_txt_b ? v->evt_txt_b
+							: v->evt_txt_a;
+			from = a - at;
+			to   = b - at;
+			if (from < 0) from = 0;
+			if (to > take) to = take;
+			if (a == b || to <= from) {
+				out_fmt(o, "%.*s", take, t + at);
+			} else {
+				out_fmt(o, "%.*s", from, t + at);
+				out_str(o, A_SELB);
+				out_fmt(o, "%.*s", to - from, t + at + from);
+				out_str(o, A_OFF);
+				out_fmt(o, "%.*s", take - to, t + at + to);
+			}
+			out_str(o, A_OFF);
+			out_str(o, "\033[K");
+		}
+		if (lines > EVT_BOX_ROWS)
+			scrollbar(o, g_cols, evt_box_top(v),
+				  evt_box_top(v) + EVT_BOX_ROWS - 1,
+				  (uint64_t)v->evt_scroll, (uint64_t)lines,
+				  (uint64_t)EVT_BOX_ROWS);
 	}
 }
 
@@ -8677,6 +8885,20 @@ enum menu_action {
 	M_GOTO,
 	M_FIND_STR,
 	M_FIND_HEX,
+
+	/*
+	 * THE EVENT BOX'S OWN TWO, and they are separate items rather than the
+	 * ones above with another context bit.
+	 *
+	 * "Copy text" already exists for the hex pane and copies the readable
+	 * half of a BYTE selection. The box's selection is a run of characters
+	 * in a rendering - UTF-16 already collapsed, padding already trimmed -
+	 * so it is a different thing to copy, and one item that meant two
+	 * things depending on where the reader right-clicked would be the kind
+	 * of item nobody can predict.
+	 */
+	M_EVT_COPY,
+	M_EVT_DECL,
 	M_COUNT
 };
 
@@ -8736,7 +8958,12 @@ static const struct {
 	 * from a different pane.
 	 */
 	{ "Find string",      3 | 4, 3 },
-	{ "Find hex",         3 | 4, 3 }
+	{ "Find hex",         3 | 4, 3 },
+
+	/* Context 8: the event panel's text box. Nothing else offers these and
+	 * they offer nothing else. */
+	{ "Copy text",            8, 0 },
+	{ "Declare as text",      8, 1 }
 };
 
 #define MENU_W 24
@@ -8839,6 +9066,14 @@ static int menu_enabled(struct view *v, int a)
 			}
 		}
 		return literal_safe(t, n);
+	}
+	if (a == M_EVT_COPY || a == M_EVT_DECL) {
+		/* Both act on a selection, so neither is live without one -
+		 * a greyed row says "select something first", which is the
+		 * whole message. */
+		char sel[8];
+
+		return evt_sel_text(v, sel, sizeof sel) != 0;
 	}
 	if (a == M_FIND_STR || a == M_FIND_HEX)
 		return 1;       /* opens the find dialog, in either mode */
@@ -9448,6 +9683,64 @@ static void decl_edit_open(struct view *v, uint32_t i)
 
 
 
+/*
+ * Declare a marker from the event box's selection.
+ *
+ * Not decl_add with a flag: that one takes a range of the HEX selection and
+ * reads the object's bytes through view_map. This takes characters out of a
+ * rendering, and the two differ in the one way that matters - `at` is not
+ * known here. A UTF-16 submission's characters are two bytes each, its padding
+ * has been trimmed, and past the record's own arena the text came from
+ * continuation records that sit elsewhere in the object. So the marker is
+ * recorded as one carried from a sample rather than found at an offset in it,
+ * which is a state struct decl already has.
+ */
+static void decl_add_text(struct view *v, const char *text, size_t n)
+{
+	struct decl *d;
+
+	if (!text || !n || v->ed.dr.n_decl >= MAX_DECL)
+		return;
+	d = &v->ed.dr.decl[v->ed.dr.n_decl];
+	memset(d, 0, sizeof *d);
+	d->len = (uint32_t)n;
+	d->bytes = malloc(n);
+	if (!d->bytes)
+		return;
+	memcpy(d->bytes, text, n);
+	d->nbytes = d->len;
+	d->hex = 0;
+	/*
+	 * THE ENCODING IS KNOWN, NOT GUESSED.
+	 *
+	 * The box shows a rendering, and the view already worked out what it
+	 * was rendering when it built it - see evt_wide. So a marker taken from
+	 * a UTF-16 submission is declared wide without anyone being asked, and
+	 * ksigbuilder widens it at build time.
+	 */
+	d->wide = v->evt_wide;
+	/*
+	 * SUBSTRING, not fullword, and this is the opposite default to
+	 * decl_add's.
+	 *
+	 * That one is declaring a name, a path, a format string - something
+	 * with edges. This is declaring a fragment a reader dragged out of the
+	 * middle of a script, where the character before it is as likely to be
+	 * a letter as a quote. A fullword default here would silently narrow
+	 * most of these to nothing.
+	 */
+	d->fullword = 0;
+	d->obj = v->node[v->sel_node].obj;
+	d->at = KOF_BROKEN;
+	snprintf(d->rgn, sizeof d->rgn, "%s", "OBJDATA");
+	v->ed.dr.n_decl++;
+	v->ed.dr.sel_decl = v->ed.dr.n_decl - 1u;
+	snprintf(v->act_msg, sizeof v->act_msg,
+		 "declared %u character(s)%s", (unsigned)n,
+		 v->evt_wide ? " as a wide string" : "");
+	v->act_ok = 1;
+}
+
 static void decl_add(struct view *v, int hex)
 {
 	struct node *n = &v->node[v->sel_node];
@@ -9588,6 +9881,21 @@ static void menu_run(struct view *v, int a)
 	}
 	if (a == M_DECL_STR || a == M_DECL_HEX) {
 		decl_add(v, a == M_DECL_HEX);
+		v->menu_open = 0;
+		return;
+	}
+	if (a == M_EVT_COPY || a == M_EVT_DECL) {
+		char sel[512];
+		size_t sn = evt_sel_text(v, sel, sizeof sel);
+
+		if (sn) {
+			if (a == M_EVT_COPY) {
+				copy_osc52(sel, sn);
+				copy_said(v, sn);
+			} else {
+				decl_add_text(v, sel, sn);
+			}
+		}
 		v->menu_open = 0;
 		return;
 	}
@@ -9908,7 +10216,19 @@ static void redraw(struct view *v)
 	 */
 	if (evt_have_rec(v) && v->evt_open && !sym_view(v)) {
 		int room = hex_bot() - hex_top() + 1;
-		int want = evt_total_lines(v);
+		int meta[64], warn[64], nm2 = 0, nw2 = 0;
+		int want;
+
+
+		/*
+		 * The table, the warnings, and the box with its rule - the
+		 * three zones, added up. Asked from the same classifier the
+		 * drawer uses, so the panel is never a row taller or shorter
+		 * than what goes in it.
+		 */
+		want = evt_meta_lines(v) + evt_warn_lines(v);
+		if (evt_zones(v, meta, &nm2, warn, &nw2) >= 0)
+			want += 1 + EVT_BOX_ROWS;
 
 		if (want > room / 2)
 			want = room / 2;
@@ -16408,56 +16728,67 @@ static void click(struct view *v, int rclick)
 	 * overwritten by the next thing the reader points at; Ctrl+C after
 	 * choosing is the contract every other text does.
 	 */
+	/*
+	 * THE BOX IS TEXT, and a press in it starts a selection. The TABLE is a
+	 * list of fields, and a press in it picks one and takes the dump to its
+	 * bytes.
+	 *
+	 * Two zones, two gestures, and neither is a guess about what a click
+	 * meant: they are different parts of the panel and they look different.
+	 *
+	 * Nothing is copied here. Copying on click is how a selection gets
+	 * overwritten by the next thing the reader points at; Ctrl+C after
+	 * choosing is the contract every other text has.
+	 */
+	/*
+	 * A RIGHT-CLICK IN THE BOX OPENS ITS OWN MENU.
+	 *
+	 * Before the left-click branch, because that one returns for every
+	 * press inside the box and would swallow this. The selection is left
+	 * alone: right-clicking to copy what you just selected is the gesture,
+	 * and moving the selection first would copy the wrong thing.
+	 */
+	if (evt_live(v) && rclick && evt_text_at(v, g_my, g_mx, NULL)) {
+		v->menu_ctx = 8;
+		menu_open_at(v, g_my, g_mx);
+		return;
+	}
 	if (evt_live(v) && !rclick) {
-		int r = 0, c = 0;
+		int c = 0, r;
 
-		if (evt_text_at(v, g_my, g_mx, &r, &c)) {
-			v->evt_txt_row = r;
+		if (evt_text_at(v, g_my, g_mx, &c)) {
 			v->evt_txt_a = v->evt_txt_b = c;
 			v->evt_txt_drag = 1;
+			evt_sync_hex(v);
 			return;
 		}
-	}
-	if (evt_live(v) && g_my >= evt_top() && g_my <= hex_bot() &&
-	    g_mx > TREE_W) {
-		int i = 0;
-		uint16_t fo = 0, fl = 0;
+		r = evt_meta_at(v, g_my, g_mx);
+		if (r >= 0) {
+			uint16_t fo = 0, fl = 0;
 
-		/* Through the same line-to-row map the drawer used, so a click
-		 * on the third line of a wrapped value picks that value. */
-		if (!evt_line_at(v, v->evt_scroll + (g_my - evt_top()), &i,
-				 NULL))
-			return;
-		/* A press on the name clears any text pick: the two columns
-		 * are one row, and leaving a highlight behind in a value the
-		 * reader has moved away from reads as still-selected. */
-		v->evt_txt_row = -1;
-		/* A second click on the same row puts it out, so the mapping
-		 * can be cleared without moving off the record. */
-		if (i == v->evt_sel) {
-			v->evt_sel = -1;
-			return;
-		}
-		v->evt_sel = i;
-		if (kof_evt_field_extent(&v->evt, (unsigned)i, &fo, &fl) && fl) {
-			/*
-			 * Placed directly rather than through view_show_in:
-			 * that resolves a FILE offset through the node's
-			 * extents, and this offset is already the region's -
-			 * an event node is one object with the record's bytes
-			 * and nothing to map through. Running it through the
-			 * mapping would ask a question whose answer is the
-			 * input.
-			 */
-			uint64_t per = (uint64_t)(v->per > 0 ? v->per : 16);
-			uint64_t row = (uint64_t)fo / per;
+			/* A press on a field clears the text pick: the two
+			 * zones are one panel, and a highlight left behind in
+			 * text the reader has moved away from reads as still
+			 * selected. */
+			v->evt_txt_a = v->evt_txt_b = 0;
+			if (r == v->evt_sel) {
+				v->evt_sel = -1;
+				return;
+			}
+			v->evt_sel = r;
+			if (kof_evt_field_extent(&v->evt, (unsigned)r, &fo,
+						 &fl) && fl) {
+				uint64_t per = (uint64_t)(v->per > 0 ? v->per
+								    : 16);
+				uint64_t hrow = (uint64_t)fo / per;
 
-			v->rgn_at = row > JUMP_LEAD ? (row - JUMP_LEAD) * per
-						    : 0;
-			if (v->rgn_at > hex_max(v))
-				v->rgn_at = hex_max(v);
+				v->rgn_at = hrow > JUMP_LEAD
+					? (hrow - JUMP_LEAD) * per : 0;
+				if (v->rgn_at > hex_max(v))
+					v->rgn_at = hex_max(v);
+			}
+			return;
 		}
-		return;
 	}
 	if (g_evt_rows && g_my == evt_top() - 1 && g_mx > TREE_W) {
 		if (g_mx >= g_cols - 3) {
@@ -17313,14 +17644,15 @@ static void on_drag(struct view *v)
 			return;
 		}
 		if (v->evt_txt_drag) {
-			int r = v->evt_txt_row, c = 0;
+			int c = 0;
 
-			/* The row is fixed at the press; only the far end
-			 * moves. Dragging onto another row extends to that
-			 * row's text, not into it - one value is one string. */
-			if (evt_text_at(v, g_my, g_mx, NULL, &c) &&
-			    r >= 0)
+			/* Only the far end moves. The box is one string, so a
+			 * drag down it is a drag through the text rather than
+			 * from one row to another. */
+			if (evt_text_at(v, g_my, g_mx, &c)) {
 				v->evt_txt_b = c;
+				evt_sync_hex(v);
+			}
 			return;
 		}
 		if (v->dis_dragging && g_disasm_rows) {
@@ -17496,34 +17828,14 @@ static void on_wheel(struct view *v, int k)
 		 */
 		/* The panel's own rows, when the pointer is over them - the
 		 * same rule the disassembler's wheel follows below. */
-		if (g_evt_rows && g_my >= evt_top() && g_my <= hex_bot() &&
-		    g_mx > TREE_W) {
-			int shown = hex_bot() - evt_top() + 1;
-			int hi;
-
-			/*
-			 * SHIFT TURNS THE WHEEL SIDEWAYS, which is what every
-			 * terminal application that scrolls horizontally does -
-			 * the horizontal wheel's own encoding is reported by
-			 * too few terminals to rely on, and this one is in the
-			 * reader's hands rather than their hardware's.
-			 *
-			 * A step is a third of the column, so three turns move
-			 * a full width and a reader can walk a long value
-			 * without losing their place in it.
-			 */
-			if (g_mod_shift) {
-				int step = evt_val_w() / 3;
-				int hmax = evt_val_max(v) - evt_val_w();
-
-				v->evt_hscroll += down ? step : -step;
-				if (v->evt_hscroll > hmax)
-					v->evt_hscroll = hmax;
-				if (v->evt_hscroll < 0)
-					v->evt_hscroll = 0;
-				return;
-			}
-			hi = evt_total_lines(v) - shown;
+		/*
+		 * The box scrolls; the table does not, because the table
+		 * always fits - the panel is sized to hold it.
+		 */
+		if (g_evt_rows && evt_live(v) &&
+		    g_my >= evt_box_top(v) &&
+		    g_my < evt_box_top(v) + EVT_BOX_ROWS && g_mx > TREE_W) {
+			int hi = evt_box_total(v) - EVT_BOX_ROWS;
 
 			v->evt_scroll += down ? 1 : -1;
 			if (v->evt_scroll > hi)
@@ -17844,22 +18156,12 @@ static int handle(struct view *v, int k)
 		 * some other copy would put bytes on the clipboard that the
 		 * reader did not ask for and cannot see.
 		 */
-		char scratch[512];
-		const char *sv;
-		int from = 0, to = 0;
+		char sel[512];
+		size_t n = evt_sel_text(v, sel, sizeof sel);
 
-		if (!evt_live(v) || v->evt_txt_row < 0)
-			break;
-		if (!evt_text_span(v, v->evt_txt_row, &from, &to))
-			break;
-		sv = evt_row_value(v, v->evt_txt_row, scratch, sizeof scratch);
-		if (!sv)
-			break;
-		if (to > (int)strlen(sv))
-			to = (int)strlen(sv);
-		if (to > from) {
-			copy_osc52(sv + from, (size_t)(to - from));
-			copy_said(v, (size_t)(to - from));
+		if (n) {
+			copy_osc52(sel, n);
+			copy_said(v, n);
 		}
 		break;
 	}

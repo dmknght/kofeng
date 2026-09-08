@@ -121,6 +121,20 @@ struct decl {
 	uint32_t span_max;          /* len is the minimum; equal when fixed */
 	uint32_t len;
 	int      hex;               /* KOF_DEFINE_HEXSTR, else KOF_DEFINE_STR */
+	/*
+	 * The target holds this as UTF-16LE - KOF_DEFINE_STR_WIDE.
+	 *
+	 * `bytes` stays the text as a person reads it, one byte per character,
+	 * because that is what the declaration is written from and what every
+	 * panel shows. The widening happens in ksigbuilder, at build time; see
+	 * KOF_DEFINE_STR_WIDE for why it is not a compare mode.
+	 *
+	 * Set when a marker is taken out of a buffer that IS UTF-16 - an AMSI
+	 * submission, which is most of them. Nothing infers it later: by the
+	 * time the bytes are in here the zeros are gone, so a declaration that
+	 * did not record it could not work it out again.
+	 */
+	int      wide;
 
 	/*
 	 * A HEX PATTERN AS IT WAS WRITTEN, WHICH `bytes` CANNOT HOLD.
