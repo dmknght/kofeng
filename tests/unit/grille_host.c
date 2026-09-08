@@ -571,7 +571,7 @@ static void t_scope(void)
 	f.root_pid = 100;
 
 	/* The root is seeded by hand, before it can run - the ordering
-	 * kofwintrace depends on. */
+	 * kofmontrace depends on. */
 	{
 		struct kofw_pent *p = kofw_ptab_add(&t, 100, 0, "root.exe", 0);
 		if (!p)

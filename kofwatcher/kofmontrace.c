@@ -1,10 +1,10 @@
 /*
- * kofwintrace - run a program and show only what IT did.
+ * kofmontrace - run a program and show only what IT did.
  *
  * Point it at a file, it launches it, and it prints the event trace of that
  * process and everything the process went on to create. Nothing else on the
- * machine appears, which is the entire difference between this and kofwinmon:
- * kofwinmon answers "what does this machine do and what does watching it cost",
+ * machine appears, which is the entire difference between this and kofwatchtower:
+ * kofwatchtower answers "what does this machine do and what does watching it cost",
  * this answers "what did THIS program do".
  *
  * That scoping is what turns a stream into evidence. An unattributed list of
@@ -53,7 +53,8 @@
 #include <windows.h>
 
 #include "kofgrille.h"
-#include "wrender.h"
+#include "kofevt.h"
+#include "kofevtfmt.h"
 #include "kofevtlog.h"
 
 static volatile LONG g_stop;
@@ -67,8 +68,9 @@ static BOOL WINAPI on_ctrl(DWORD type)
 
 static void usage(void)
 {
-	wm_banner("kofwintrace");
-	fputs("\nusage: kofwintrace [options] <program> [args...]\n"
+	kof_evt_banner(stderr, "kofmontrace", (uint32_t)KOFENG_BUILD,
+		       "process, image, file, network, registry, amsi");
+	fputs("\nusage: kofmontrace [options] <program> [args...]\n"
 	      "\n"
 	      "EVERY PROVIDER IS ON BY DEFAULT, and so is --raw. This is a tool\n"
 	      "for finding out what a program does and what the stream looks\n"
@@ -195,6 +197,7 @@ int main(int argc, char **argv)
 	struct kofw_mon_option opt;
 	struct kofw_mon   *mon;
 	struct kofw_health health;
+	struct kof_evt_health nh;
 	struct kofw_evt    e;
 	struct kof_evt     ke;
 	struct kof_evt_tally tally;
@@ -318,7 +321,7 @@ int main(int argc, char **argv)
 			opt.no_system_logger = 1;
 		/*
 		 * Asked for explicitly, so it goes to stdout and exits 0 -
-		 * `kofwintrace --help | more` has to work, and a help request
+		 * `kofmontrace --help | more` has to work, and a help request
 		 * is not an error. The usage printed on a BAD argument still
 		 * goes to stderr with a non-zero exit, because that one is.
 		 */
@@ -350,7 +353,7 @@ int main(int argc, char **argv)
 		 * that does not start with a dash.
 		 */
 		else if (argv[i][0] == '-' && argv[i][1] != '\0') {
-			fprintf(stderr, "kofwintrace: unknown option '%s'\n\n",
+			fprintf(stderr, "kofmontrace: unknown option '%s'\n\n",
 				argv[i]);
 			usage();
 			return 2;
@@ -374,7 +377,7 @@ int main(int argc, char **argv)
 				 i > first ? " " : "", q ? "\"" : "",
 				 argv[i], q ? "\"" : "");
 		if (w < 0 || (size_t)w >= sizeof cmd - n) {
-			fputs("kofwintrace: command line too long\n", stderr);
+			fputs("kofmontrace: command line too long\n", stderr);
 			return 2;
 		}
 		n += (size_t)w;
@@ -395,9 +398,9 @@ int main(int argc, char **argv)
 
 	mon = kofw_mon_open(&opt, &err);
 	if (!mon) {
-		fprintf(stderr, "kofwintrace: %s\n", kofw_err_name(err));
+		fprintf(stderr, "kofmontrace: %s\n", kofw_err_name(err));
 		if (err == KOFW_ERR_ACCESS)
-			fputs("kofwintrace: run this from an elevated prompt.\n",
+			fputs("kofmontrace: run this from an elevated prompt.\n",
 			      stderr);
 		return 1;
 	}
@@ -418,7 +421,7 @@ int main(int argc, char **argv)
 
 	if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_SUSPENDED,
 			    NULL, NULL, &si, &pi)) {
-		fprintf(stderr, "kofwintrace: cannot run '%s' (error %lu)\n",
+		fprintf(stderr, "kofmontrace: cannot run '%s' (error %lu)\n",
 			argv[first], (unsigned long)GetLastError());
 		kofw_mon_close(mon);
 		return 1;
@@ -431,8 +434,8 @@ int main(int argc, char **argv)
 	 * "the subtree is known" happens strictly before "the subtree can do
 	 * anything" - the only ordering with no hole in it.
 	 */
-	if (kofw_mon_track(mon, root_pid, wm_leaf(argv[first])) != 0) {
-		fputs("kofwintrace: could not track the root process\n", stderr);
+	if (kofw_mon_track(mon, root_pid, kof_path_leaf(argv[first])) != 0) {
+		fputs("kofmontrace: could not track the root process\n", stderr);
 		TerminateProcess(pi.hProcess, 1);
 		kofw_mon_close(mon);
 		return 1;
@@ -472,12 +475,12 @@ int main(int argc, char **argv)
 	 * makes: with this on, not every line below belongs to the traced
 	 * tree. */
 	if (amsi_anywhere)
-		fputs("kofwintrace: --amsi-anywhere: AMSI records from ANY "
+		fputs("kofmontrace: --amsi-anywhere: AMSI records from ANY "
 		      "process are shown, not only the traced tree\n", stderr);
 
-	fprintf(stderr, "kofwintrace: build %llu\n",
+	fprintf(stderr, "kofmontrace: build %llu\n",
 		(unsigned long long)KOFENG_BUILD);
-	fprintf(stderr, "kofwintrace: %s\nkofwintrace: root pid %lu, providers:"
+	fprintf(stderr, "kofmontrace: %s\nkofmontrace: root pid %lu, providers:"
 		" process%s%s%s%s%s%s%s%s\n\n",
 		cmd, (unsigned long)root_pid,
 		want_image ? " image" : "", want_file ? " file" : "",
@@ -505,7 +508,7 @@ int main(int argc, char **argv)
 	 * changing the command line is still free.
 	 */
 	if (!show_all_img && want_image)
-		fputs("kofwintrace: system module loads are SUPPRESSED "
+		fputs("kofmontrace: system module loads are SUPPRESSED "
 		      "(--all-images to show them)\n", stderr);
 
 	{
@@ -515,7 +518,7 @@ int main(int argc, char **argv)
 		kofw_mon_health(mon, &h0);
 		missing = h0.sub_asked & ~h0.sub_enabled;
 		if (missing) {
-			fputs("kofwintrace: REFUSED by the provider:", stderr);
+			fputs("kofmontrace: REFUSED by the provider:", stderr);
 			for (b = 1u; b; b <<= 1)
 				if (missing & b)
 					fprintf(stderr, " %s",
@@ -568,7 +571,7 @@ int main(int argc, char **argv)
 		 * have ended the run.
 		 */
 		if (!job)
-			fputs("kofwintrace: WARNING could not contain the "
+			fputs("kofmontrace: WARNING could not contain the "
 			      "target in a job object; it and anything it "
 			      "starts will SURVIVE this tracer\n", stderr);
 	}
@@ -611,32 +614,32 @@ int main(int argc, char **argv)
 		li.root_pid    = root_pid;
 		li.sub_asked   = h1.sub_asked;
 		li.sub_enabled = h1.sub_enabled;
-		li.started     = wm_now();
+		li.started     = kof_evt_now();
 		log = kofevt_log_create(log_path, &li);
 		if (!log)
-			fprintf(stderr, "kofwintrace: cannot write '%s' - "
+			fprintf(stderr, "kofmontrace: cannot write '%s' - "
 				"continuing without a log\n", log_path);
 		else
-			fprintf(stderr, "kofwintrace: recording to %s\n",
+			fprintf(stderr, "kofmontrace: recording to %s\n",
 				log_path);
 	}
 
-	t_wall0 = wm_now();
+	t_wall0 = kof_evt_now();
 	ResumeThread(pi.hThread);
 
 	while (!g_stop) {
 
 		if (!kofw_mon_next(mon, &e, 200)) {
-			secs = wm_secs_since(t_wall0, wm_now());
+			secs = kof_evt_secs_since(t_wall0, kof_evt_now());
 			goto tick;
 		}
 
 		if (t_ev0 == 0)
 			t_ev0 = e.stamp;
-		ev_secs = wm_secs_since(t_ev0, e.stamp);
+		ev_secs = kof_evt_secs_since(t_ev0, e.stamp);
 		/* The deadline clock still has to advance while events flow, or
 		 * a program that never stops producing them never times out. */
-		secs = wm_secs_since(t_wall0, wm_now());
+		secs = kof_evt_secs_since(t_wall0, kof_evt_now());
 
 		/*
 		 * Everything that decides WHETHER this record belongs to the
@@ -711,7 +714,8 @@ tick:
 		kof_evt_print_tally(&tally, secs, what, stderr);
 	}
 
-	wm_print_health(&health, secs);
+	kofw_mon_health_neutral(mon, &nh);
+	kof_evt_health_print(stderr, &nh, secs);
 
 	/*
 	 * THE SHAPES, AND WHY THIS IS ON THE TOOL PEOPLE ACTUALLY DEBUG WITH.

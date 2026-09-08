@@ -595,7 +595,7 @@ kofviewer:   $(OUT)/bin/kofviewer$(EXE)
 	$(info $(SP)  $<)
 	@$(NOOP)
 
-tools: kofscanner kofexamine ksigbuilder kofviewer
+tools: kofscanner kofexamine ksigbuilder kofviewer kofwatchman
 
 help:
 	$(info targets:)
@@ -605,8 +605,9 @@ help:
 	$(info $(SP)  kofexamine    the file examiner)
 	$(info $(SP)  ksigbuilder   the database builder)
 	$(info $(SP)  kofviewer     the file examiner, navigable)
-	$(info $(SP)  kofwinmon     the Windows event monitor    (cross-builds w/ mingw))
-	$(info $(SP)  kofwintrace   run a program and trace it          (Windows only))
+	$(info $(SP)  kofwatchman   verdicts over a recorded event log)
+	$(info $(SP)  kofwatchtower the event sensor             (cross-builds w/ mingw))
+	$(info $(SP)  kofmontrace   run a program and trace it          (Windows only))
 	$(info $(SP)  tools         all six of the above)
 	$(info $(SP)  databases     compile bases/ into the shipping databases)
 	$(info $(SP)                                                 -> $(OUT)/databases)
@@ -895,6 +896,31 @@ $(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 # source, and the default mode packs compiled artefacts into .ksig. Build-time
 # only, and deliberately not linked into anything that runs on an endpoint.
 
+#
+# kofwatchman: THE ONE TOOL IN THIS FAMILY THAT IS NOT PLATFORM SPECIFIC.
+#
+# kofwatchtower and kofmontrace link libkofgrille and only build for Windows,
+# because collecting is where the platform lives. kofwatchman does not collect
+# - it reads a recorded log and decides - so it links the ENGINE and kofevt and
+# nothing else, and it builds wherever the engine does.
+#
+# That is not a convenience, it is the point of the record having been
+# normalised: a log written on Windows is analysed here, on the CI, by the same
+# binary a Windows machine would run. Every event rule that ever exists becomes
+# testable because of this line.
+KOFEVT_SRC := libkofeng/kofevt/kofevt.c libkofeng/kofevt/kofevtfmt.c \
+              libkofeng/kofevt/kofevtlog.c
+
+$(OUT)/bin/kofwatchman$(EXE): kofwatcher/kofwatchman.c $(KOFEVT_SRC) $(LIB) \
+                              $(SDK_HDR) $(STAMP)
+	@$(call MKDIR,$(dir $@))
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofeng -Ilibkofeng/kofevt $< \
+	      $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS)
+
+kofwatchman: $(OUT)/bin/kofwatchman$(EXE)
+	$(info $(SP)  $<)
+	@$(NOOP)
+
 $(OUT)/bin/ksigbuilder$(EXE): ksigbuilder/ksigbuilder.c $(LIB) $(SDK_HDR) $(STAMP)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) $< $(LIB) -o $@ $(LDFLAGS)
@@ -1004,34 +1030,35 @@ $(WINLIB): $(WIN_OBJ)
 # the build did not already depend on.
 WIN_LDLIBS := -ltdh -ladvapi32
 
-# Two programs out of one directory, over one collector: kofwinmon watches the
-# machine, kofwintrace watches one program it launches. They are separate binaries
+# Two programs out of one directory (kofwatcher/), over one collector:
+# kofwatchtower is the
+# SENSOR - it watches the machine and does nothing else with what it sees -
+# and kofmontrace watches one program it launches. They are separate binaries
 # because their arguments, lifetimes and exit conditions have nothing in common,
 # and wshared.c holds the part that is genuinely the same - rendering an event,
 # the process-name table, the summary.
-WINMON_SHARED := kofwinmon/wrender.c
 
-$(OUT)/bin/kofwinmon$(WIN_EXE): kofwinmon/kofwinmon.c $(WINMON_SHARED) $(WINLIB) $(STAMP)
+$(OUT)/bin/kofwatchtower$(WIN_EXE): kofwatcher/kofwatchtower.c $(WINLIB) $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng/kofevt -Ikofwinmon \
-	      kofwinmon/kofwinmon.c $(WINMON_SHARED) $(WINLIB) -o $@ \
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng/kofevt -Ikofwatcher \
+	      kofwatcher/kofwatchtower.c $(WINLIB) -o $@ \
 	      $(WIN_LDFLAGS) $(WIN_LDLIBS)
 
-$(OUT)/bin/kofwintrace$(WIN_EXE): kofwinmon/kofwintrace.c $(WINMON_SHARED) $(WINLIB) $(STAMP)
+$(OUT)/bin/kofmontrace$(WIN_EXE): kofwatcher/kofmontrace.c $(WINLIB) $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng/kofevt -Ikofwinmon \
-	      kofwinmon/kofwintrace.c $(WINMON_SHARED) $(WINLIB) -o $@ \
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng/kofevt -Ikofwatcher \
+	      kofwatcher/kofmontrace.c $(WINLIB) -o $@ \
 	      $(WIN_LDFLAGS) $(WIN_LDLIBS)
 
 kofgrille: $(WINLIB)
 	$(info $(SP)  $<)
 	@$(NOOP)
 
-kofwinmon: $(OUT)/bin/kofwinmon$(WIN_EXE)
+kofwatchtower: $(OUT)/bin/kofwatchtower$(WIN_EXE)
 	$(info $(SP)  $<)
 	@$(NOOP)
 
-kofwintrace: $(OUT)/bin/kofwintrace$(WIN_EXE)
+kofmontrace: $(OUT)/bin/kofmontrace$(WIN_EXE)
 	$(info $(SP)  $<)
 	@$(NOOP)
 
@@ -1044,14 +1071,14 @@ kofwintrace: $(OUT)/bin/kofwintrace$(WIN_EXE)
 #
 # A Linux `make tools` must not start requiring a cross-compiler, and a PE file
 # it could not run has no business in a native tools build. Cross-building is
-# what `make kofgrille` and `make kofwinmon` are for, and the CI asks for those
+# what `make kofgrille` and `make kofwatchtower` are for, and the CI asks for those
 # by name.
 #
 # Written here rather than beside the other `tools` prerequisites because make
 # expands a rule's prerequisites when it READS the rule, hundreds of lines
 # above this, where none of these variables are set yet.
 ifeq ($(NATIVE_OS),windows)
-tools: kofwinmon kofwintrace
+tools: kofwatchtower kofmontrace
 endif
 
 endif
@@ -1389,5 +1416,5 @@ clean:
 	@$(call RMRF,$(BUILD))
 
 .PHONY: all sdk sigs databases unit fixtures test-sigs clean \
-        kofscanner kofexamine ksigbuilder kofviewer kofgrille kofwinmon \
-        kofwintrace tools help
+        kofscanner kofexamine ksigbuilder kofviewer kofgrille kofwatchtower kofwatchman \
+        kofmontrace tools help

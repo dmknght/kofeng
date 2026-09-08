@@ -1,5 +1,5 @@
 /*
- * kofwinmon - print what the machine is doing, and what it cost to find out.
+ * kofwatchtower - print what the machine is doing, and what it cost to find out.
  *
  * This detects nothing, deliberately. Its whole job is to answer the two
  * questions that have to be answered before any detection can be designed:
@@ -13,7 +13,7 @@
  * afforded. Turn a provider on, run for a minute while the machine does real
  * work, and read the line - that is the whole method.
  *
- * For the events of ONE program rather than of everything, see kofwintrace in
+ * For the events of ONE program rather than of everything, see kofmontrace in
  * this directory.
  *
  * KNOWN, AND NOT A BUG: this process's own events are refused at the callback,
@@ -28,7 +28,8 @@
 #include <windows.h>
 
 #include "kofgrille.h"
-#include "wrender.h"
+#include "kofevt.h"
+#include "kofevtfmt.h"
 
 static volatile LONG g_stop;
 
@@ -44,8 +45,9 @@ static BOOL WINAPI on_ctrl(DWORD type)
 
 static void usage(void)
 {
-	wm_banner("kofwinmon");
-	fputs("\nusage: kofwinmon [options]\n"
+	kof_evt_banner(stderr, "kofwatchtower", (uint32_t)KOFENG_BUILD,
+		       "process, image, file, network, registry, thread, amsi");
+	fputs("\nusage: kofwatchtower [options]\n"
 	      "\n"
 	      "  --seconds N      stop after N seconds (0 = until ctrl-c)\n"
 	      "  --stats-every N  health line every N seconds (default 10)\n"
@@ -80,6 +82,7 @@ int main(int argc, char **argv)
 	struct kofw_mon_option opt;
 	struct kofw_mon   *mon;
 	struct kofw_health health;
+	struct kof_evt_health nh;
 	struct kofw_evt    e;
 	struct kof_evt     ke;
 	struct kof_evt_tally tally;
@@ -145,8 +148,8 @@ int main(int argc, char **argv)
 			return 0;
 		}
 		/*
-		 * Everything, which is what kofwintrace takes by default and
-		 * what kofwinmon does NOT: this one watches the whole machine
+		 * Everything, which is what kofmontrace takes by default and
+		 * what kofwatchtower does NOT: this one watches the whole machine
 		 * with no subtree filter in front of it, so "everything" here
 		 * is a firehose somebody has to ask for on purpose.
 		 */
@@ -158,7 +161,7 @@ int main(int argc, char **argv)
 			/* Named, rather than only printing the usage: the
 			 * whole question a reader has is WHICH argument was
 			 * wrong, and a wall of usage text does not answer it. */
-			fprintf(stderr, "kofwinmon: unknown option '%s'\n\n",
+			fprintf(stderr, "kofwatchtower: unknown option '%s'\n\n",
 				argv[i]);
 			usage();
 			return 2;
@@ -172,7 +175,7 @@ int main(int argc, char **argv)
 	 * come out as zeros.
 	 */
 	if (quiet && !freopen("NUL", "w", stdout))
-		fputs("kofwinmon: could not silence stdout; printing anyway\n",
+		fputs("kofwatchtower: could not silence stdout; printing anyway\n",
 		      stderr);
 
 	SetConsoleCtrlHandler(on_ctrl, TRUE);
@@ -203,25 +206,25 @@ int main(int argc, char **argv)
 
 	mon = kofw_mon_open(&opt, &err);
 	if (!mon) {
-		fprintf(stderr, "kofwinmon: %s\n", kofw_err_name(err));
+		fprintf(stderr, "kofwatchtower: %s\n", kofw_err_name(err));
 		if (err == KOFW_ERR_ACCESS)
-			fputs("kofwinmon: run this from an elevated prompt.\n",
+			fputs("kofwatchtower: run this from an elevated prompt.\n",
 			      stderr);
 		return 1;
 	}
 	kofw_mon_filter(mon, &filt);
 
 	fprintf(stderr,
-		"kofwinmon: whole machine, providers: process%s%s%s%s%s%s%s%s\n"
-		"kofwinmon: verify one with `logman query providers <name>` - a\n"
-		"kofwinmon: wrong provider is silent, not an error, so if nothing\n"
-		"kofwinmon: arrives that is the first thing to check.\n\n",
+		"kofwatchtower: whole machine, providers: process%s%s%s%s%s%s%s%s\n"
+		"kofwatchtower: verify one with `logman query providers <name>` - a\n"
+		"kofwatchtower: wrong provider is silent, not an error, so if nothing\n"
+		"kofwatchtower: arrives that is the first thing to check.\n\n",
 		want_image ? " image" : "", want_file ? " file" : "",
 		want_write ? " file-write" : "", want_net ? " net" : "",
 		want_reg ? " registry" : "", want_thread ? " thread" : "",
 		want_open ? " file-open" : "", want_amsi ? " amsi" : "");
 
-	t_wall0    = wm_now();
+	t_wall0    = kof_evt_now();
 	next_stats = stats_every;
 
 	while (!g_stop) {
@@ -230,14 +233,14 @@ int main(int argc, char **argv)
 			/* Nothing arrived; the clock still has to advance so a
 			 * quiet machine prints its health line and --seconds
 			 * still expires. */
-			secs = wm_secs_since(t_wall0, wm_now());
+			secs = kof_evt_secs_since(t_wall0, kof_evt_now());
 			goto tick;
 		}
 
 		if (t_ev0 == 0)
 			t_ev0 = e.stamp;
-		ev_secs = wm_secs_since(t_ev0, e.stamp);
-		secs    = wm_secs_since(t_wall0, wm_now());
+		ev_secs = kof_evt_secs_since(t_ev0, e.stamp);
+		secs    = kof_evt_secs_since(t_wall0, kof_evt_now());
 
 		kof_evt_render(&ke, ev_secs,
 			  kofw_mon_name_of(mon, e.pid,
@@ -251,7 +254,8 @@ tick:
 			break;
 		if (secs >= next_stats) {
 			kofw_mon_health(mon, &health);
-			wm_print_health(&health, secs);
+			kofw_mon_health_neutral(mon, &nh);
+	kof_evt_health_print(stderr, &nh, secs);
 			next_stats += stats_every;
 		}
 	}
@@ -268,7 +272,8 @@ tick:
 
 	kofw_mon_health(mon, &health);
 	kof_evt_print_tally(&tally, secs, "whole machine", stderr);
-	wm_print_health(&health, secs);
+	kofw_mon_health_neutral(mon, &nh);
+	kof_evt_health_print(stderr, &nh, secs);
 
 	kofw_mon_close(mon);
 	return 0;

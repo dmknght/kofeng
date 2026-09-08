@@ -92,6 +92,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
 
 /* ------------------------------------------------------------------- verbs */
 
@@ -640,6 +641,90 @@ _Static_assert(offsetof(struct kof_evt, text) == KOF_EVT_HEAD,
 	       "KOF_EVT_HEAD no longer matches the record layout");
 _Static_assert(sizeof(struct kof_evt) == KOF_EVT_SIZE,
 	       "struct kof_evt is not KOF_EVT_SIZE bytes");
+
+/*
+ * Ticks per second in an event stamp.
+ *
+ * A constant rather than something to query, because it is the unit's own
+ * definition and not a property of any machine. It is here so that everything
+ * comparing a stamp against a clock takes the SAME one - see kof_evt_now.
+ */
+#define KOF_TICKS_PER_SEC 10000000ull
+
+/*
+ * Seconds between two stamps, signed and clamped at zero.
+ *
+ * An event's stamp is when it HAPPENED and is routinely older than a wall
+ * clock read while waiting for it; unsigned subtraction there yields 1.8e19
+ * seconds, which prints and is wrong.
+ */
+double kof_evt_secs_since(uint64_t t0, uint64_t t);
+
+/* The last component of a path, either separator. Never NULL. */
+const char *kof_path_leaf(const char *path);
+
+/*
+ * Now, in the same units an event's stamp uses.
+ *
+ * Per-platform inside, which is the ONE thing in this directory that has to
+ * be - a clock is not arithmetic. It is still here rather than in a collector
+ * because every consumer needs it and they must all take the SAME clock:
+ * comparing a stamp against a different epoch subtracts to a number that looks
+ * like a duration and is not one, and that mistake has already cost this tree
+ * a debugging session once.
+ */
+uint64_t kof_evt_now(void);
+
+/* ------------------------------------------------------------- health */
+
+/*
+ * HOW MUCH WAS LOST, in terms every collector has.
+ *
+ * A verdict computed over a stream that dropped records is a different claim
+ * from one computed over a whole stream, and that difference has to reach
+ * whoever reads the verdict. Each collector has losses of its own shape - ETW
+ * counts buffers, a Linux one will count something else - so it fills this in
+ * from its own counters rather than this describing any of them.
+ *
+ * Neutral because watchmen has to print it, and watchmen does not know what an
+ * ETW buffer is.
+ */
+struct kof_evt_health {
+	uint64_t produced;       /* records the collector wrote */
+	uint64_t dropped;        /* its own queue was full */
+	uint64_t high_water;     /* the deepest that queue has been */
+	uint64_t undecoded;      /* arrived, could not be read */
+	uint64_t filtered;       /* handed over to nobody, on purpose */
+	uint64_t seq_gaps;       /* holes in the arrival counter */
+	uint64_t upstream_lost;  /* lost BEFORE the collector saw it */
+	uint32_t sub_asked;      /* what was requested */
+	uint32_t sub_enabled;    /* what is actually running */
+};
+
+/* Print it, and name what is incomplete rather than only counting it. */
+void kof_evt_health_print(FILE *out, const struct kof_evt_health *,
+			  double secs);
+
+/*
+ * THE BUILD STAMP, AND WHY EVERY BANNER CARRIES IT.
+ *
+ * "I rebuilt and the output is identical" has two causes that look the same
+ * from a terminal: nothing changed, or the binary being run is not the one
+ * just built - an old copy earlier on PATH, a build that failed after the
+ * tools step, a machine that did not pull. Guessing between those costs an
+ * afternoon; reading a number off the banner costs a second. It has already
+ * paid for itself once here.
+ *
+ * The Makefile passes the real stamp. The fallback keeps a stray compilation
+ * building and says so rather than printing a zero that looks like an answer.
+ */
+#ifndef KOFENG_BUILD
+#define KOFENG_BUILD 0u
+#endif
+
+/* Name, build stamp, and a one-line description of what is being collected. */
+void kof_evt_banner(FILE *out, const char *tool, uint32_t build,
+		    const char *collects);
 
 /* The subject's image path, what the event acted on, and how the subject was
  * invoked. "" when the record carries none. Never NULL. */

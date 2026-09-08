@@ -601,9 +601,64 @@ static int open_consumer(struct kofw_mon *m)
 	return 0;
 }
 
-struct kofw_mon *kofw_mon_open(const struct kofw_mon_option *opt, int *err)
+/*
+ * Everything kofw_mon_open does that is not "start a session": the ring, the
+ * process and file tables, the counters, the name.
+ *
+ * Split out so that opening stays readable, and so a second way of getting
+ * records - a service handing over a session it started, a replayed log - does
+ * not have to duplicate the setup and drift into a different collector.
+ */
+static struct kofw_mon *mon_alloc(const struct kofw_mon_option *o)
 {
 	static const wchar_t DEFAULT_NAME[] = L"KofengEventMonitor";
+	struct kofw_mon *m = calloc(1, sizeof *m);
+
+	if (!m)
+		return NULL;
+
+	m->self_pid   = GetCurrentProcessId();
+	m->trace_self = o->trace_self;
+	kofw_ptab_init(&m->ptab);
+	kofw_ftab_init(&m->ftab);
+	atomic_init(&m->skipped_self, 0u);
+	atomic_init(&m->decode_failed, 0u);
+	atomic_init(&m->arrived, 0u);
+
+	{
+		const char *n = o->session_name;
+		size_t i = 0;
+
+		if (n) {
+			for (; i + 1 < NAME_MAX_CH && n[i]; i++)
+				m->name[i] = (wchar_t)(unsigned char)n[i];
+		} else {
+			for (; i + 1 < NAME_MAX_CH && DEFAULT_NAME[i]; i++)
+				m->name[i] = DEFAULT_NAME[i];
+		}
+		m->name[i] = 0;
+	}
+
+	if (kofw_ring_init(&m->ring, o->ring_capacity) != 0) {
+		free(m);
+		return NULL;
+	}
+	m->qprops_sz = props_bytes();
+	m->qprops    = calloc(1, m->qprops_sz);
+	m->wake      = CreateEventW(NULL, FALSE, FALSE, NULL);
+	if (!m->qprops || !m->wake) {
+		if (m->wake)
+			CloseHandle(m->wake);
+		free(m->qprops);
+		kofw_ring_free(&m->ring);
+		free(m);
+		return NULL;
+	}
+	return m;
+}
+
+struct kofw_mon *kofw_mon_open(const struct kofw_mon_option *opt, int *err)
+{
 	struct kofw_mon_option o;
 	struct kofw_mon *m;
 	int rc;
@@ -615,46 +670,10 @@ struct kofw_mon *kofw_mon_open(const struct kofw_mon_option *opt, int *err)
 	if (opt)
 		o = *opt;
 
-	m = calloc(1, sizeof *m);
+	m = mon_alloc(&o);
 	if (!m) {
 		if (err) *err = KOFW_ERR_MEM;
 		return NULL;
-	}
-
-	m->self_pid    = GetCurrentProcessId();
-	kofw_ptab_init(&m->ptab);
-	kofw_ftab_init(&m->ftab);
-	m->trace_self  = o.trace_self;
-	atomic_init(&m->skipped_self, 0u);
-	atomic_init(&m->decode_failed, 0u);
-	atomic_init(&m->arrived, 0u);
-
-	{
-		const char *n = o.session_name;
-		size_t i = 0;
-		if (n) {
-			for (; i + 1 < NAME_MAX_CH && n[i]; i++)
-				m->name[i] = (wchar_t)(unsigned char)n[i];
-			m->name[i] = 0;
-		} else {
-			for (; i + 1 < NAME_MAX_CH && DEFAULT_NAME[i]; i++)
-				m->name[i] = DEFAULT_NAME[i];
-			m->name[i] = 0;
-		}
-	}
-
-	if (kofw_ring_init(&m->ring, o.ring_capacity) != 0) {
-		free(m);
-		if (err) *err = KOFW_ERR_MEM;
-		return NULL;
-	}
-
-	m->qprops_sz = props_bytes();
-	m->qprops    = calloc(1, m->qprops_sz);
-	m->wake      = CreateEventW(NULL, FALSE, FALSE, NULL);
-	if (!m->qprops || !m->wake) {
-		rc = KOFW_ERR_MEM;
-		goto fail;
 	}
 
 	rc = start_session(m, &o);
@@ -876,6 +895,33 @@ void kofw_mon_health(struct kofw_mon *m, struct kofw_health *h)
 			h->etw_rt_buf_lost  = m->qprops->RealTimeBuffersLost;
 		}
 	}
+}
+
+void kofw_mon_health_neutral(struct kofw_mon *m, struct kof_evt_health *out)
+{
+	struct kofw_health h;
+
+	if (!m || !out)
+		return;
+	kofw_mon_health(m, &h);
+
+	memset(out, 0, sizeof *out);
+	out->produced      = h.produced;
+	out->dropped       = h.ring_dropped;
+	out->high_water    = h.ring_high_water;
+	out->undecoded     = h.decode_failed;
+	out->filtered      = h.filtered;
+	out->seq_gaps      = h.seq_gaps;
+	/*
+	 * ETW counts three losses upstream of this library and they happen at
+	 * different places; summed here because a neutral consumer can act on
+	 * "some was lost before we saw it" and cannot act on which ETW buffer
+	 * it was. Anything that wants them apart reads kofw_health.
+	 */
+	out->upstream_lost = (uint64_t)h.etw_events_lost +
+			     h.etw_buffers_lost + h.etw_rt_buf_lost;
+	out->sub_asked     = h.sub_asked;
+	out->sub_enabled   = h.sub_enabled;
 }
 
 void kofw_mon_filter(struct kofw_mon *m, const struct kofw_filter *f)

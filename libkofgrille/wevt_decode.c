@@ -113,7 +113,7 @@ uint8_t kofw_provider_of(const GUID *g)
  * KERNEL-FILE'S IDS, AND HOW THEY WERE ESTABLISHED.
  *
  * Not copied from documentation, and not guessed. Each was watched into place:
- * a script performed one operation at a time, a second apart, under kofwintrace
+ * a script performed one operation at a time, a second apart, under kofmontrace
  * with --raw, and the id that appeared at each step is the one written here.
  *
  *   30  a `copy` produced a new file      -> FileName, the new path
@@ -297,7 +297,7 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 	} else if (prov == KOFW_PROV_NET) {
 		/*
 		 * Established the same way as Kernel-File's: one HTTP fetch under
-		 * kofwintrace --raw, and the ids read off in the order they arrived -
+		 * kofmontrace --raw, and the ids read off in the order they arrived -
 		 * 12 first, then 10, then 11, and 13 after the process had exited.
 		 * 18 also appears between them and is NOT typed: a fourth id in that
 		 * position is most likely the copy-to-user step rather than a
@@ -339,7 +339,7 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 		 * Kernel-Registry's ids have not been established on a real
 		 * machine, and the two other providers in this file say in
 		 * their own comments how that is done: one operation at a
-		 * time, a second apart, under `kofwintrace --raw --schema`,
+		 * time, a second apart, under `kofmontrace --raw --schema`,
 		 * reading the id off the ordered trace. Numbers copied from
 		 * documentation are how a table ends up decoding CREATE as
 		 * SETVALUE - which is silent, because an event typed as the
@@ -383,7 +383,7 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 		 * What is missing is production, not plumbing.
 		 *
 		 * To finish this: on a machine with real-time protection on,
-		 * run `kofwinmon --amsi --schema`, execute a script, and read
+		 * run `kofwatchtower --amsi --schema`, execute a script, and read
 		 * the id off the shape dump. The property names are already
 		 * mapped in field_of, so `content` will land in `object` the
 		 * moment the id is typed - and until then these arrive as RAW

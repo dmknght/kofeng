@@ -60,6 +60,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
 
 /*
  * THE VOCABULARY COMES FROM THERE, NOT FROM HERE.
@@ -560,7 +561,7 @@ enum {
 	 */
 	KOFW_SUB_AMSI    = 1u << 8,
 
-	/* Everything this build can collect. What kofwintrace takes by default
+	/* Everything this build can collect. What kofmontrace takes by default
 	 * - see the note there on why a discovery tool defaults to loud. */
 	KOFW_SUB_ALL = KOFW_SUB_PROCESS | KOFW_SUB_IMAGE | KOFW_SUB_FILE |
 		       KOFW_SUB_FILE_WRITE | KOFW_SUB_NET |
@@ -631,7 +632,7 @@ struct kofw_mon_option {
 	 *
 	 * A caller that turns this on takes on the loop itself, and the way to
 	 * carry that is to consume a bounded subtree rather than everything -
-	 * which is what kofwintrace does.
+	 * which is what kofmontrace does.
 	 */
 	int trace_self;
 
@@ -939,6 +940,32 @@ const char *kofw_mon_name_of(struct kofw_mon *, uint32_t pid,
 void kofw_mon_health(struct kofw_mon *, struct kofw_health *);
 
 /*
+ * The same, in the terms every collector has - see struct kof_evt_health.
+ *
+ * This direction and not the other: kofevt must not learn what an ETW buffer
+ * is, so each collector maps its own counters onto the neutral ones. What is
+ * ETW-specific (buffers lost versus events lost, self-skipped, untracked)
+ * stays in struct kofw_health for anything that wants it.
+ */
+void kofw_mon_health_neutral(struct kofw_mon *, struct kof_evt_health *);
+
+/*
+ * Print that health, and say which build and which subscriptions produced it.
+ *
+ * Here rather than in a tool because these are THIS collector's counters -
+ * ETW's own losses, this ring, this filter - and a Linux collector will have
+ * different ones to print. It is not shared vocabulary, it is one platform's
+ * bookkeeping, so it lives with the platform.
+ */
+void kofw_health_print(FILE *out, const struct kofw_health *, double secs);
+
+/* Name, build stamp, and what this build collects. */
+void kofw_banner(FILE *out, const char *tool, uint32_t build);
+
+/* Now, in the same units kofw_evt.stamp uses. */
+uint64_t kofw_now(void);
+
+/*
  * THE PAYLOAD SHAPES THIS RUN ACTUALLY LEARNED, as text.
  *
  * A field arriving absent - kofw_evt.miss - has two causes that look identical
@@ -950,16 +977,8 @@ void kofw_mon_health(struct kofw_mon *, struct kofw_health *);
  */
 size_t kofw_mon_describe(struct kofw_mon *, char *buf, size_t cap);
 
-/*
- * kofw_evt.stamp units per second.
- *
- * A constant rather than something to query, because it is FILETIME's own
- * definition and not a property of this machine. It is here so that a consumer
- * comparing a stamp against a wall clock takes the SAME clock - mixing this
- * with QueryPerformanceCounter subtracts two different epochs and yields a
- * number that looks like a duration and is not one.
- */
-#define KOFW_TICKS_PER_SEC 10000000ull
+/* The stamp's unit is KOF_TICKS_PER_SEC, defined once in kofevt.h - see
+ * there for why it is a constant and not a query. */
 
 /*
  * THE COLLECTOR'S RECORD, TURNED INTO THE ONE EVERYTHING ELSE READS.
@@ -980,6 +999,27 @@ size_t kofw_mon_describe(struct kofw_mon *, char *buf, size_t cap);
  * platform. raw_id survives because a discovery run needs it.
  */
 void kofw_evt_to_kof(const struct kofw_evt *in, struct kof_evt *out);
+
+/*
+ * NO AUTOLOGGER, AND THAT IS A DECISION RATHER THAN A GAP.
+ *
+ * An autologger is a session described in the registry that the kernel starts
+ * during boot, so a consumer attaching later receives everything since. It is
+ * the obvious way to see what ran before anything was watching, and there was
+ * an implementation of it here for about an hour.
+ *
+ * It is removed because it puts this library in the business of installing
+ * something. A registry-described session needs administrator to write, it
+ * OUTLIVES the process, the product and the uninstaller, and a session nobody
+ * ever attaches to keeps buffering forever with no process anywhere aware of
+ * it. Those are lifecycle problems that belong to whatever installs and
+ * removes the product, designed once and carefully - not to a collector, and
+ * not decided as a side effect of wanting boot coverage.
+ *
+ * So the sensor is started by a system service, which is a thing the operating
+ * system already knows how to start early and stop cleanly, and this library
+ * does exactly one thing: collect while it is asked to.
+ */
 
 void kofw_mon_close(struct kofw_mon *);
 

@@ -11,6 +11,19 @@
  * classification split across two libraries is two classifications.
  */
 
+/*
+ * BEFORE ANY INCLUDE, because a feature-test macro that arrives after the
+ * first header does nothing.
+ *
+ * clock_gettime is POSIX and is hidden by a strict -std=c11, which this tree
+ * builds with. Declared here rather than relying on the build to pass
+ * -D_GNU_SOURCE: this file is compiled by the Makefile, by the host test rule
+ * and by hand, and the one that fails is always the one nobody set a flag for.
+ */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <stddef.h>
 #include <string.h>
 
@@ -366,4 +379,110 @@ uint8_t kof_arch_self(void)
 #else
 	return KOF_EARCH_UNKNOWN;
 #endif
+}
+
+/* ---- time and paths ------------------------------------------------- */
+
+double kof_evt_secs_since(uint64_t t0, uint64_t t)
+{
+	int64_t d = (int64_t)(t - t0);
+
+	return d < 0 ? 0.0 : (double)d / (double)KOF_TICKS_PER_SEC;
+}
+
+const char *kof_path_leaf(const char *path)
+{
+	const char *last = path;
+
+	for (; *path; path++) {
+		if (*path == '\\' || *path == '/')
+			last = path + 1;
+	}
+	return last;
+}
+
+/*
+ * The clock, and the only per-platform code in this directory.
+ *
+ * Both branches produce 100ns units since 1601, because that is what an
+ * event's stamp is on the platform that has one - and a consumer comparing the
+ * two must not have to know which it is holding.
+ */
+#ifdef _WIN32
+#include <windows.h>
+uint64_t kof_evt_now(void)
+{
+	FILETIME       ft;
+	ULARGE_INTEGER u;
+
+	GetSystemTimeAsFileTime(&ft);
+	u.LowPart  = ft.dwLowDateTime;
+	u.HighPart = ft.dwHighDateTime;
+	return u.QuadPart;
+}
+#else
+#include <time.h>
+/* Unix epoch to 1601, in 100ns units. */
+#define KOF_EPOCH_DELTA 116444736000000000ull
+uint64_t kof_evt_now(void)
+{
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+		return 0;
+	return KOF_EPOCH_DELTA + (uint64_t)ts.tv_sec * 10000000ull +
+	       (uint64_t)ts.tv_nsec / 100ull;
+}
+#endif
+
+void kof_evt_banner(FILE *out, const char *tool, uint32_t build,
+		    const char *collects)
+{
+	fprintf(out, "%s (kofevt) build %lu\n", tool ? tool : "?",
+		(unsigned long)build);
+	if (build == 0u)
+		fputs("  built without a build stamp - cannot tell you which "
+		      "build this is\n", out);
+	if (collects && *collects)
+		fprintf(out, "  collects: %s\n", collects);
+}
+
+void kof_evt_health_print(FILE *out, const struct kof_evt_health *h,
+			  double secs)
+{
+	uint32_t missing, b;
+
+	if (!out || !h)
+		return;
+
+	fprintf(out, "-- %6.1fs  kept %llu (%.1f/s)  dropped %llu  "
+		     "high-water %llu  upstream lost %llu  undecoded %llu\n",
+		secs, (unsigned long long)h->produced,
+		secs > 0.0 ? (double)h->produced / secs : 0.0,
+		(unsigned long long)h->dropped,
+		(unsigned long long)h->high_water,
+		(unsigned long long)h->upstream_lost,
+		(unsigned long long)h->undecoded);
+
+	/*
+	 * INCOMPLETE IS SAID, not left to be inferred from a number.
+	 *
+	 * A reader about to conclude "the sample did nothing" has to be told
+	 * which kind of run they are holding.
+	 */
+	if (h->dropped || h->upstream_lost || h->seq_gaps)
+		fprintf(out, "   INCOMPLETE: dropped %llu, seq gaps %llu, "
+			     "upstream lost %llu\n",
+			(unsigned long long)h->dropped,
+			(unsigned long long)h->seq_gaps,
+			(unsigned long long)h->upstream_lost);
+
+	missing = h->sub_asked & ~h->sub_enabled;
+	if (missing) {
+		fputs("   INCOMPLETE: subscription(s) never started:", out);
+		for (b = 1u; b; b <<= 1)
+			if (missing & b)
+				fprintf(out, " 0x%x", (unsigned)b);
+		fputs("\n", out);
+	}
 }
