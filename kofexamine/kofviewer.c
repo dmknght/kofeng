@@ -978,6 +978,24 @@ struct view {
 	 */
 	int                  evt_wide;
 
+	/*
+	 * A RUN OF CHARACTERS PICKED OUT OF ONE ROW'S VALUE.
+	 *
+	 * The name column and the value column answer different gestures. A
+	 * click on the NAME is a question about the record - which bytes is
+	 * this - so it lights the field and takes the dump there. A drag across
+	 * the VALUE is a question about the text: an AMSI submission is a
+	 * script, and what a reader wants from a script is to pull a URL or a
+	 * base64 blob out of it and paste it somewhere else.
+	 *
+	 * Anchored to (row, character), not to screen positions: the value
+	 * wraps and the panel scrolls, and a selection anchored to a screen
+	 * cell would name a different part of the text after either.
+	 */
+	int                  evt_txt_row;   /* which row, or -1 for none */
+	int                  evt_txt_a, evt_txt_b;
+	int                  evt_txt_drag;
+
 	struct kof_range *ext;
 	uint32_t          n_ext;
 	/*
@@ -3126,9 +3144,15 @@ static const char *evt_byte_colour(const struct view *v, uint64_t off)
  * "0077+392" - offset and length - and the length has gone; see the drawer. */
 #define EVT_OFF_W 5
 
+/* Where the value column starts: past the offset and the name chip. */
+static int evt_val_x(void)
+{
+	return TREE_W + 3 + EVT_OFF_W + 13 + 1;
+}
+
 static int evt_val_w(void)
 {
-	int w = g_cols - (TREE_W + 3) - (EVT_OFF_W + 13 + 1);
+	int w = g_cols - evt_val_x();
 
 	return w > 8 ? w : 8;
 }
@@ -3248,6 +3272,60 @@ static int evt_line_at(const struct view *v, int n, int *row, int *skip)
 }
 
 /*
+ * WHERE IN A ROW'S TEXT THE POINTER IS, for a click or a drag in the value
+ * column. Zero when it is not over one.
+ *
+ * One function for both, because a drag that computed the position differently
+ * from the click that started it selects from somewhere the reader never
+ * pressed - and the two were three lines apart, which is exactly far enough to
+ * drift.
+ */
+static int evt_text_at(const struct view *v, int my, int mx, int *row, int *ch)
+{
+	int line, i = 0, skip = 0;
+
+	if (!evt_live(v) || my < evt_top() || my > hex_bot())
+		return 0;
+	if (mx < evt_val_x())
+		return 0;
+	line = v->evt_scroll + (my - evt_top());
+	if (!evt_line_at(v, line, &i, &skip))
+		return 0;
+	if (row)
+		*row = i;
+	if (ch) {
+		int c = skip + v->evt_hscroll + (mx - evt_val_x());
+		char scratch[512];
+		const char *sv = evt_row_value(v, i, scratch, sizeof scratch);
+		int len = sv ? (int)strlen(sv) : 0;
+
+		/* Clamped to the row's own text: a pointer past the end of a
+		 * short value selects it to its end, which is what dragging
+		 * over ragged text does everywhere. */
+		if (c > len)
+			c = len;
+		if (c < 0)
+			c = 0;
+		*ch = c;
+	}
+	return 1;
+}
+
+/* The picked run, low end first - the reader may have dragged backwards. */
+static int evt_text_span(const struct view *v, int row, int *from, int *to)
+{
+	if (v->evt_txt_row < 0 || v->evt_txt_row != row)
+		return 0;
+	if (v->evt_txt_a == v->evt_txt_b)
+		return 0;
+	if (from) *from = v->evt_txt_a < v->evt_txt_b ? v->evt_txt_a
+						      : v->evt_txt_b;
+	if (to)   *to   = v->evt_txt_a < v->evt_txt_b ? v->evt_txt_b
+						      : v->evt_txt_a;
+	return 1;
+}
+
+/*
  * Take a copy of the selected event, or forget the one held.
  *
  * Called from view_select, so the panel follows the tree without every mover
@@ -3340,6 +3418,11 @@ static void evt_load(struct view *v)
 	v->evt_sel = -1;
 	v->evt_scroll = 0;
 	v->evt_hscroll = 0;
+	/* The text selection is about THIS record's words. Carried across it
+	 * would name a stretch of a string that is no longer there. */
+	v->evt_txt_row = -1;
+	v->evt_txt_a = v->evt_txt_b = 0;
+	v->evt_txt_drag = 0;
 }
 
 static void view_select(struct view *v)
@@ -6251,6 +6334,50 @@ static uint64_t dis_sync(struct view *v, uint64_t want)
 }
 
 /*
+ * One visible slice of a row's value, with the reader's pick lit inside it.
+ *
+ * Written as three flat runs rather than by colouring each character: a
+ * selection is a range of the STRING, and the part of it on this line is
+ * whatever of that range falls in [at, at + w). Splitting it here keeps the
+ * drawing loop out of the arithmetic and means the wrap and the selection
+ * cannot disagree about where a line starts.
+ */
+static void evt_put_value(struct out *o, const struct view *v, int row,
+			  const char *val, int at, int w)
+{
+	int len = (int)strlen(val);
+	int from = 0, to = 0, a, b;
+
+	out_str(o, " ");
+	if (at >= len)
+		return;
+	if (len - at < w)
+		w = len - at;
+
+	if (!evt_text_span(v, row, &from, &to)) {
+		out_fmt(o, "%.*s", w, val + at);
+		out_str(o, A_OFF);
+		return;
+	}
+	/* The picked range, clipped to this line. */
+	a = from - at;
+	b = to - at;
+	if (a < 0) a = 0;
+	if (b > w)  b = w;
+	if (b <= a) {
+		out_fmt(o, "%.*s", w, val + at);
+		out_str(o, A_OFF);
+		return;
+	}
+	out_fmt(o, "%.*s", a, val + at);
+	out_str(o, A_SELB);
+	out_fmt(o, "%.*s", b - a, val + at + a);
+	out_str(o, A_OFF);
+	out_fmt(o, "%.*s", w - b, val + at + b);
+	out_str(o, A_OFF);
+}
+
+/*
  * THE EVENT PANEL - what the record above it says, in the wording montrace
  * prints.
  *
@@ -6342,9 +6469,7 @@ static void draw_evt(struct out *o, struct view *v)
 				13, "   -");
 			if (i == v->evt_sel)
 				out_str(o, A_BOLD);
-			out_fmt(o, " %.*s", vw,
-				(int)strlen(val) > at ? val + at : "");
-			out_str(o, A_OFF);
+			evt_put_value(o, v, i, val, at, vw);
 			/*
 			 * WHAT WAS LEFT OUT, said as a count rather than as an
 			 * ellipsis. "..." tells a reader there is more; a
@@ -6418,10 +6543,7 @@ static void draw_evt(struct out *o, struct view *v)
 		 * everywhere else here rather than with a seventh colour. */
 		if (i == v->evt_sel)
 			out_str(o, A_BOLD);
-		out_fmt(o, " %.*s", vw,
-			(int)strlen(val) > v->evt_hscroll
-				? val + v->evt_hscroll : "");
-		out_str(o, A_OFF);
+		evt_put_value(o, v, i, val, v->evt_hscroll, vw);
 		/* Only when this is the whole row - a wrapped value says it on
 		 * its last line, and saying it twice would read as two
 		 * different amounts. */
@@ -16253,6 +16375,31 @@ static void click(struct view *v, int rclick)
 	 * see is the same as no highlight. Picking a row is asking "where is
 	 * this", so the answer is to go there.
 	 */
+	/*
+	 * THE VALUE COLUMN IS TEXT, and a press in it starts a selection
+	 * rather than moving the dump.
+	 *
+	 * Two columns, two gestures. The name says which bytes, so pressing it
+	 * lights them and goes there. The value is the thing itself - a path, a
+	 * command line, a script somebody submitted - and what a reader does
+	 * with text is pick a piece of it out. Making the whole row mean "jump"
+	 * left no way to do that at all, on the one field where it matters
+	 * most.
+	 *
+	 * Nothing is copied here. Copying on click is how a selection gets
+	 * overwritten by the next thing the reader points at; Ctrl+C after
+	 * choosing is the contract every other text does.
+	 */
+	if (evt_live(v) && !rclick) {
+		int r = 0, c = 0;
+
+		if (evt_text_at(v, g_my, g_mx, &r, &c)) {
+			v->evt_txt_row = r;
+			v->evt_txt_a = v->evt_txt_b = c;
+			v->evt_txt_drag = 1;
+			return;
+		}
+	}
 	if (evt_live(v) && g_my >= evt_top() && g_my <= hex_bot() &&
 	    g_mx > TREE_W) {
 		int i = 0;
@@ -16263,6 +16410,10 @@ static void click(struct view *v, int rclick)
 		if (!evt_line_at(v, v->evt_scroll + (g_my - evt_top()), &i,
 				 NULL))
 			return;
+		/* A press on the name clears any text pick: the two columns
+		 * are one row, and leaving a highlight behind in a value the
+		 * reader has moved away from reads as still-selected. */
+		v->evt_txt_row = -1;
 		/* A second click on the same row puts it out, so the mapping
 		 * can be cleared without moving off the record. */
 		if (i == v->evt_sel) {
@@ -17143,6 +17294,17 @@ static void on_drag(struct view *v)
 			v->ed.dr.decl_cap = (uint32_t)want;
 			return;
 		}
+		if (v->evt_txt_drag) {
+			int r = v->evt_txt_row, c = 0;
+
+			/* The row is fixed at the press; only the far end
+			 * moves. Dragging onto another row extends to that
+			 * row's text, not into it - one value is one string. */
+			if (evt_text_at(v, g_my, g_mx, NULL, &c) &&
+			    r >= 0)
+				v->evt_txt_b = c;
+			return;
+		}
 		if (v->dis_dragging && g_disasm_rows) {
 			int idx = g_my - dis_top();
 			int c = g_mx - (TREE_W + 3);
@@ -17202,6 +17364,7 @@ static void on_release(struct view *v)
 		 * behave unlike the other, and it changes the clipboard on a
 		 * gesture that in every other pane changes nothing.
 		 */
+		v->evt_txt_drag = 0;
 		if (v->dis_dragging) {
 			v->dis_dragging = 0;
 			return;
@@ -17650,6 +17813,38 @@ static int handle(struct view *v, int k)
 	 */
 	case 0x11:                      /* Ctrl+Q */
 		return 0;
+	case 0x03: {                    /* Ctrl+C */
+		/*
+		 * COPY WHAT WAS PICKED IN THE EVENT PANEL.
+		 *
+		 * After choosing, not on the click that chose - a selection
+		 * that copied itself the moment it was made would be replaced
+		 * by the next thing the reader pointed at, which is the
+		 * opposite of what a clipboard is for.
+		 *
+		 * Nothing picked means nothing happens. Falling through to
+		 * some other copy would put bytes on the clipboard that the
+		 * reader did not ask for and cannot see.
+		 */
+		char scratch[512];
+		const char *sv;
+		int from = 0, to = 0;
+
+		if (!evt_live(v) || v->evt_txt_row < 0)
+			break;
+		if (!evt_text_span(v, v->evt_txt_row, &from, &to))
+			break;
+		sv = evt_row_value(v, v->evt_txt_row, scratch, sizeof scratch);
+		if (!sv)
+			break;
+		if (to > (int)strlen(sv))
+			to = (int)strlen(sv);
+		if (to > from) {
+			copy_osc52(sv + from, (size_t)(to - from));
+			copy_said(v, (size_t)(to - from));
+		}
+		break;
+	}
 	/*
 	 * STEPPING THROUGH A DIRECTORY WITHOUT REACHING FOR THE MENU.
 	 *

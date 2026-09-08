@@ -267,9 +267,6 @@ void kofw_evt_to_kof(const struct kofw_evt *in, struct kof_evt *out)
 
 	out->stamp       = in->stamp;
 	out->seq         = in->seq;
-	out->create_time = in->create_time;
-	out->addr        = in->addr;
-	out->addr_size   = in->addr_size;
 
 	out->pid         = in->pid;
 	out->ppid        = in->ppid;
@@ -277,22 +274,83 @@ void kofw_evt_to_kof(const struct kofw_evt *in, struct kof_evt *out)
 	 * who CAUSED the event, which for an injection is the whole answer. */
 	out->actor_pid   = in->raiser_pid;
 	out->tid         = in->tid;
-	out->session_id  = in->session_id;
-	out->exit_code   = in->exit_code;
-	out->miss        = in->miss;
+	out->miss        = (uint16_t)in->miss;
 
-	out->net_daddr   = in->net_daddr;
-	out->net_saddr   = in->net_saddr;
-	out->net_size    = in->net_size;
-	out->net_dport   = in->net_dport;
-	out->net_sport   = in->net_sport;
-
+	/* BEFORE the payload, and this is not stylistic: kof_evt_set_* read
+	 * the verb to decide which member a caller may write, so filling the
+	 * payload first would hand back NULL for every kind. */
 	out->verb        = in->type;
 	out->attack      = in->attack;
 	out->raw_id      = in->raw_id;
 	out->loc         = in->obj_loc;
 	out->flags       = in->flags;
 	out->os          = KOF_OS_WINDOWS;
+
+	/*
+	 * THE PAYLOAD, AND THIS IS THE ONLY PLACE IT IS WRITTEN.
+	 *
+	 * The collector's own record is flat - it is a ring slot, it never
+	 * reaches a disk or a socket, and its waste is transient - so every
+	 * field is present in it whatever the event is. The neutral record is
+	 * the one that gets stored and sent, and it carries only the payload
+	 * its verb owns.
+	 *
+	 * That makes this function the seam, and the seam is the right place
+	 * for it: the verb is in hand, so the mapping is a decision made once
+	 * with everything visible rather than a rule each consumer has to
+	 * remember. Anything the verb does not own is DROPPED here, on
+	 * purpose - see kof_evt_kind_of for what an untyped event loses and
+	 * why the answer is to type it rather than to widen the record.
+	 */
+	switch (kof_evt_kind_of(out->verb)) {
+	case KOF_EK_PROC: {
+		struct kof_evt_proc *pr = kof_evt_set_proc(out);
+
+		if (pr) {
+			pr->create_time = in->create_time;
+			pr->session_id  = in->session_id;
+			pr->exit_code   = in->exit_code;
+		}
+		break;
+	}
+	case KOF_EK_MEM: {
+		struct kof_evt_mem *mm = kof_evt_set_mem(out);
+
+		if (mm) {
+			mm->addr      = in->addr;
+			mm->addr_size = in->addr_size;
+		}
+		break;
+	}
+	case KOF_EK_NET: {
+		struct kof_evt_net *nt = kof_evt_set_net(out);
+
+		if (nt) {
+			nt->daddr = in->net_daddr;
+			nt->saddr = in->net_saddr;
+			nt->size  = in->net_size;
+			nt->dport = in->net_dport;
+			nt->sport = in->net_sport;
+		}
+		break;
+	}
+	case KOF_EK_FILE: {
+		struct kof_evt_file *fl = kof_evt_set_file(out);
+
+		if (fl) {
+			/* `addr` on the collector's side is the FileKey for a
+			 * file event - see KOFW_FLD_FILE_KEY - and `net_size`
+			 * was where a write's length went. Both get names
+			 * here. */
+			fl->key  = in->addr;
+			fl->size = in->net_size;
+		}
+		break;
+	}
+	case KOF_EK_NONE:
+	default:
+		break;
+	}
 
 	/*
 	 * THE WHOLE ARENA SURVIVES, AND THAT IS ASSERTED RATHER THAN HOPED.

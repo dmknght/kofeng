@@ -498,7 +498,7 @@ uint8_t kof_classify_path(const char *path);
 /* One record. Fixed, so a producer that cannot allocate cannot fail, and so a
  * recorded log is a fixed-record file - see kofevtlog.h. */
 #define KOF_EVT_SIZE 512u
-#define KOF_EVT_HEAD 104u
+#define KOF_EVT_HEAD 72u
 
 /* kof_evt.flags */
 enum {
@@ -601,6 +601,95 @@ const char *kof_evt_arch_name(uint8_t arch);
 uint8_t kof_evt_platform_self(void);
 uint8_t kof_evt_arch_self(void);
 
+/* ------------------------------------------- what a KIND of event carries
+ *
+ * WHY THE TAIL OF THE RECORD IS PER-VERB.
+ *
+ * Everything above the payload is true of every event: when, who, what verb,
+ * where the strings are. Below it, almost nothing is. A file write has no
+ * ports; a connection has no exit code; an AMSI submission has neither, and no
+ * addresses either. Laid out flat, all of them were present in all of them,
+ * and a FileNew carried forty-eight bytes of zero in a hundred-and-four byte
+ * head - which is paid for on every record, in the ring, over the channel, and
+ * on disk.
+ *
+ * They were ALREADY overlapping, just not on paper: `addr` has been a FileKey
+ * on a file event, a thread entry point on a thread event and a module base on
+ * an image load for as long as those events have existed. This says so, which
+ * is the actual improvement - the size is a consequence.
+ *
+ * READ THEM THROUGH THE ACCESSORS, never through the union directly. Each one
+ * checks the verb and returns NULL when the event is not of that kind, so
+ * asking a registry event for its ports is a NULL a caller must handle and not
+ * four bytes of somebody else's address. That is the whole risk of a union in
+ * a record like this, and it is the reason the members are not spelled in any
+ * caller.
+ */
+
+/* A process appearing or leaving. */
+struct kof_evt_proc {
+	/*
+	 * The subject's creation time. Not decoration: a pid is reused,
+	 * sometimes within seconds, so (pid, create_time) is what identifies a
+	 * process and a pid alone does not.
+	 */
+	uint64_t create_time;
+	uint32_t session_id;
+	uint32_t exit_code;    /* PROC_STOP only */
+};
+
+/* Something mapped or started at an address - an image load, a thread. */
+struct kof_evt_mem {
+	/* A thread entry point, a mapped base. Zero means the event named
+	 * none. */
+	uint64_t addr;
+	uint64_t addr_size;
+};
+
+/* A connection or a transfer. The addresses and ports are the provider's own
+ * - see the property names in wevt_decode.c - and the ports are in NETWORK
+ * byte order, as the packet had them. */
+struct kof_evt_net {
+	uint32_t daddr, saddr;
+	uint32_t size;
+	uint16_t dport, sport;
+};
+
+/*
+ * A file the event acted on, named by the kernel's own handle for it.
+ *
+ * FileIo carries FileObject and FileKey - kernel pointers - and no path, so
+ * the collector resolves them to one. The key is kept because a write that
+ * arrives before its own create is a key with no path yet, and the resolution
+ * happens later on the consumer side.
+ */
+struct kof_evt_file {
+	uint64_t key;
+	/*
+	 * Bytes written, for FILE_WRITE.
+	 *
+	 * This lived in `net_size` - a file write reporting its length in a
+	 * field named after the network, because both were u32 and both were
+	 * free. Nothing was wrong with the number; what was wrong is that
+	 * nobody reading the struct could have known where to find it.
+	 */
+	uint32_t size;
+	uint32_t reserved;
+};
+
+/* Which payload a verb owns. */
+enum kof_evt_kind {
+	KOF_EK_NONE = 0,   /* registry, AMSI, continuation, raw - no payload */
+	KOF_EK_PROC,
+	KOF_EK_MEM,
+	KOF_EK_NET,
+	KOF_EK_FILE
+};
+
+/* Never guesses: a verb this build does not know is KOF_EK_NONE, so its
+ * payload is unreadable rather than read as the wrong kind. */
+enum kof_evt_kind kof_evt_kind_of(uint16_t verb);
+
 struct kof_evt {
 	/*
 	 * WHEN, as 100ns units since 1601 on every platform.
@@ -619,17 +708,6 @@ struct kof_evt {
 	 */
 	uint64_t seq;
 
-	/*
-	 * The subject's creation time. Not decoration: a pid is reused,
-	 * sometimes within seconds, so (pid, create_time) is what identifies a
-	 * process and a pid alone does not.
-	 */
-	uint64_t create_time;
-
-	/* An address the event named - a thread entry point, a mapped base -
-	 * and how much. Zero means it named none. */
-	uint64_t addr, addr_size;
-
 	uint32_t pid;          /* the subject */
 	uint32_t ppid;
 
@@ -645,17 +723,19 @@ struct kof_evt {
 	uint32_t actor_pid;
 
 	uint32_t tid;
-	uint32_t session_id;
-	uint32_t exit_code;    /* PROC_STOP only */
-	uint32_t miss;         /* KOF_F_* the collector could not fill */
-
-	uint32_t net_daddr, net_saddr;
-	uint32_t net_size;
-	uint16_t net_dport, net_sport;   /* network byte order, as the packet had */
 
 	uint16_t verb;         /* enum kof_evt_verb */
 	uint16_t attack;       /* enum kof_attack, of the object path */
 	uint16_t raw_id;       /* the source's own event id, for a RAW event */
+
+	/*
+	 * KOF_F_* the collector could not fill.
+	 *
+	 * Sixteen bits, not thirty-two: there are seven of these flags and
+	 * there is no prospect of nine more, so the other half was zero on
+	 * every record ever written.
+	 */
+	uint16_t miss;
 
 	uint16_t off_image;    /* what the subject IS */
 	uint16_t off_object;   /* what the event ACTED ON */
@@ -676,7 +756,19 @@ struct kof_evt {
 	uint8_t  loc;          /* enum kof_evt_loc, of the object */
 	uint8_t  os;           /* enum kof_evt_os */
 	uint8_t  flags;        /* KOF_EF_* */
-	uint8_t  reserved;
+	uint8_t  reserved[3];
+
+	/*
+	 * THE PER-VERB PAYLOAD. Read it with kof_evt_as_*, which check the
+	 * verb; write it with kof_evt_set_*, which check it too and therefore
+	 * require the verb to be set FIRST.
+	 */
+	union {
+		struct kof_evt_proc proc;
+		struct kof_evt_mem  mem;
+		struct kof_evt_net  net;
+		struct kof_evt_file file;
+	} u;
 
 	char     text[KOF_EVT_SIZE - KOF_EVT_HEAD];
 };
@@ -692,6 +784,33 @@ struct kof_evt {
  */
 _Static_assert(offsetof(struct kof_evt, text) == KOF_EVT_HEAD,
 	       "KOF_EVT_HEAD no longer matches the record layout");
+/*
+ * THE PAYLOAD, IF THE VERB OWNS IT.
+ *
+ * NULL otherwise, and that is the point: a caller cannot reach a member
+ * belonging to another kind of event without noticing. Reading a registry
+ * event's `ports` used to be four bytes of whatever the flat layout happened
+ * to leave there, which is a number, and a number is indistinguishable from a
+ * fact once it is on screen.
+ */
+const struct kof_evt_proc *kof_evt_as_proc(const struct kof_evt *);
+const struct kof_evt_mem  *kof_evt_as_mem(const struct kof_evt *);
+const struct kof_evt_net  *kof_evt_as_net(const struct kof_evt *);
+const struct kof_evt_file *kof_evt_as_file(const struct kof_evt *);
+
+/*
+ * The same, to write - so a producer cannot fill in a payload the verb does
+ * not have.
+ *
+ * THE VERB MUST BE SET FIRST. These read it to decide what to hand back, so a
+ * producer that fills the payload before naming the event gets NULL, which is
+ * a bug it will see immediately rather than a record whose bytes mean nothing.
+ */
+struct kof_evt_proc *kof_evt_set_proc(struct kof_evt *);
+struct kof_evt_mem  *kof_evt_set_mem(struct kof_evt *);
+struct kof_evt_net  *kof_evt_set_net(struct kof_evt *);
+struct kof_evt_file *kof_evt_set_file(struct kof_evt *);
+
 _Static_assert(sizeof(struct kof_evt) == KOF_EVT_SIZE,
 	       "struct kof_evt is not KOF_EVT_SIZE bytes");
 

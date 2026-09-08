@@ -50,8 +50,18 @@ void kof_evt_count(const struct kof_evt *e, struct kof_evt_tally *t)
 	case KOF_EVT_REG_SET_VALUE:
 	case KOF_EVT_REG_DELETE:     t->reg++;      break;
 	case KOF_EVT_NET_CONNECT:    t->conn++;     break;
-	case KOF_EVT_NET_SEND:       t->bytes_sent += e->net_size; break;
-	case KOF_EVT_NET_RECV:       t->bytes_recv += e->net_size; break;
+	case KOF_EVT_NET_SEND:
+	case KOF_EVT_NET_RECV: {
+		const struct kof_evt_net *n = kof_evt_as_net(e);
+
+		if (n) {
+			if (e->verb == KOF_EVT_NET_SEND)
+				t->bytes_sent += n->size;
+			else
+				t->bytes_recv += n->size;
+		}
+		break;
+	}
 	case KOF_EVT_PROC_STOP:
 	case KOF_EVT_IMAGE_UNLOAD:
 	case KOF_EVT_NET_DISCONNECT:
@@ -100,9 +110,13 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 			fprintf(out, "  [cmd unread: process gone]");
 		break;
 	}
-	case KOF_EVT_PROC_STOP:
-		fprintf(out, "  exit=%lu", (unsigned long)e->exit_code);
+	case KOF_EVT_PROC_STOP: {
+		const struct kof_evt_proc *pr = kof_evt_as_proc(e);
+
+		if (pr)
+			fprintf(out, "  exit=%lu", (unsigned long)pr->exit_code);
 		break;
+	}
 	case KOF_EVT_IMAGE_LOAD:
 		fprintf(out, "  [%s] %s", kof_loc_name(e->loc),
 		       kof_evt_object(e));
@@ -114,9 +128,14 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 	/* Unreachable until type_of() learns the ids - kept so that typing
 	 * them is a one-line change there and not two. */
 	case KOF_EVT_THREAD_START:
-	case KOF_EVT_THREAD_STOP:
-		fprintf(out, "  start=0x%llx", (unsigned long long)e->addr);
+	case KOF_EVT_THREAD_STOP: {
+		const struct kof_evt_mem *m = kof_evt_as_mem(e);
+
+		if (m)
+			fprintf(out, "  start=0x%llx",
+				(unsigned long long)m->addr);
 		break;
+	}
 	case KOF_EVT_AMSI_SCAN: {
 		/*
 		 * The submitted content, RAW in the record and sanitised here.
@@ -158,12 +177,15 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 		fprintf(out, "  [%s] %s", kof_loc_name(e->loc),
 		       kof_evt_object(e));
 		break;
-	case KOF_EVT_FILE_WRITE:
+	case KOF_EVT_FILE_WRITE: {
+		const struct kof_evt_file *f = kof_evt_as_file(e);
+
 		fprintf(out, "  [%s] %s", kof_loc_name(e->loc),
 		       kof_evt_object(e));
-		if (e->net_size)
-			fprintf(out, "  %lu bytes", (unsigned long)e->net_size);
+		if (f && f->size)
+			fprintf(out, "  %lu bytes", (unsigned long)f->size);
 		break;
+	}
 
 	/*
 	 * The registry path goes in the same column every other object path
@@ -187,17 +209,22 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 		 * that silently disagreed with the packet would be worse than
 		 * one a printer has to swap.
 		 */
-		uint32_t d  = e->net_daddr;
-		uint16_t dp = (uint16_t)((e->net_dport >> 8) |
-					 (e->net_dport << 8));
+		const struct kof_evt_net *n = kof_evt_as_net(e);
+		uint32_t d;
+		uint16_t dp;
+
+		if (!n)
+			break;
+		d  = n->daddr;
+		dp = (uint16_t)((n->dport >> 8) | (n->dport << 8));
 
 		fprintf(out, "  %lu.%lu.%lu.%lu:%u",
 		       (unsigned long)(d & 0xffu),
 		       (unsigned long)((d >> 8) & 0xffu),
 		       (unsigned long)((d >> 16) & 0xffu),
 		       (unsigned long)((d >> 24) & 0xffu), (unsigned)dp);
-		if (e->net_size)
-			fprintf(out, "  %lu bytes", (unsigned long)e->net_size);
+		if (n->size)
+			fprintf(out, "  %lu bytes", (unsigned long)n->size);
 		break;
 	}
 
@@ -213,8 +240,13 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 		 * A start address that is never displayed is a subscription
 		 * paying full volume for nothing.
 		 */
-		if (e->addr)
-			fprintf(out, "  addr=0x%llx", (unsigned long long)e->addr);
+		{
+			const struct kof_evt_mem *m = kof_evt_as_mem(e);
+
+			if (m && m->addr)
+				fprintf(out, "  addr=0x%llx",
+					(unsigned long long)m->addr);
+		}
 		if (*kof_evt_object(e))
 			fprintf(out, "  %s", kof_evt_object(e));
 		break;
@@ -516,12 +548,32 @@ static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
 		ROWF("tid", tid, "%lu", (unsigned long)e->tid);
 	ROWF("stamp", stamp, "%llu", (unsigned long long)e->stamp);
 	ROWF("seq", seq, "%llu", (unsigned long long)e->seq);
-	if (e->create_time)
-		ROWF("created", create_time, "%llu", (unsigned long long)e->create_time);
-	if (e->session_id)
-		ROWF("session", session_id, "%lu", (unsigned long)e->session_id);
-	if (e->verb == KOF_EVT_PROC_STOP)
-		ROWF("exit", exit_code, "%lu", (unsigned long)e->exit_code);
+	/*
+	 * THE PER-VERB PAYLOAD, one block per kind.
+	 *
+	 * Reached through the accessors like every other reader, so a row can
+	 * only appear on an event whose verb owns the field it names - which
+	 * is stronger than the old "if it is non-zero" test: that showed a
+	 * `session` row for anything whose bytes at that offset happened not
+	 * to be zero, whatever the event actually was.
+	 */
+	{
+		const struct kof_evt_proc *pr = kof_evt_as_proc(e);
+
+		if (pr && pr->create_time)
+			ROWF("created", u.proc.create_time, "%llu",
+			     (unsigned long long)pr->create_time);
+		if (pr && pr->session_id)
+			ROWF("session", u.proc.session_id, "%lu",
+			     (unsigned long)pr->session_id);
+	}
+	if (e->verb == KOF_EVT_PROC_STOP) {
+		const struct kof_evt_proc *pr = kof_evt_as_proc(e);
+
+		if (pr)
+			ROWF("exit", u.proc.exit_code, "%lu",
+			     (unsigned long)pr->exit_code);
+	}
 
 	if (*kof_evt_image(e))
 		ROWX("image", (uint16_t)(AT(text) + e->off_image),
@@ -605,28 +657,51 @@ static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
 	 * writes "10.0.0.5:443" on montrace's single line, which is a sentence
 	 * rather than a table and has no bytes to point at.
 	 */
-	if (e->net_daddr || e->net_dport) {
-		uint32_t d = e->net_daddr;
+	{
+		const struct kof_evt_net *nt = kof_evt_as_net(e);
 
-		ROWF("peer", net_daddr, "%lu.%lu.%lu.%lu",
-		     (unsigned long)(d & 0xffu),
-		     (unsigned long)((d >> 8) & 0xffu),
-		     (unsigned long)((d >> 16) & 0xffu),
-		     (unsigned long)((d >> 24) & 0xffu));
-	}
-	if (e->net_dport) {
-		/* Network order on the wire, host order to read. */
-		uint16_t dp = (uint16_t)((e->net_dport >> 8) |
-					 (e->net_dport << 8));
+		if (nt && (nt->daddr || nt->dport)) {
+			uint32_t d = nt->daddr;
 
-		ROWF("peer port", net_dport, "%u", (unsigned)dp);
+			ROWF("peer", u.net.daddr, "%lu.%lu.%lu.%lu",
+			     (unsigned long)(d & 0xffu),
+			     (unsigned long)((d >> 8) & 0xffu),
+			     (unsigned long)((d >> 16) & 0xffu),
+			     (unsigned long)((d >> 24) & 0xffu));
+		}
+		if (nt && nt->dport) {
+			/* Network order on the wire, host order to read. */
+			uint16_t dp = (uint16_t)((nt->dport >> 8) |
+						 (nt->dport << 8));
+
+			ROWF("peer port", u.net.dport, "%u", (unsigned)dp);
+		}
+		if (nt && nt->size)
+			ROWF("bytes", u.net.size, "%lu",
+			     (unsigned long)nt->size);
 	}
-	if (e->net_size)
-		ROWF("bytes", net_size, "%lu", (unsigned long)e->net_size);
-	if (e->addr)
-		ROWF("addr", addr, "0x%llx", (unsigned long long)e->addr);
-	if (e->addr_size)
-		ROWF("addr size", addr_size, "%llu", (unsigned long long)e->addr_size);
+	{
+		const struct kof_evt_file *fl = kof_evt_as_file(e);
+
+		/* A write's length, which used to be reported in the field
+		 * named after the network - see struct kof_evt_file. */
+		if (fl && fl->size)
+			ROWF("bytes", u.file.size, "%lu",
+			     (unsigned long)fl->size);
+		if (fl && fl->key)
+			ROWF("file key", u.file.key, "0x%llx",
+			     (unsigned long long)fl->key);
+	}
+	{
+		const struct kof_evt_mem *mm = kof_evt_as_mem(e);
+
+		if (mm && mm->addr)
+			ROWF("addr", u.mem.addr, "0x%llx",
+			     (unsigned long long)mm->addr);
+		if (mm && mm->addr_size)
+			ROWF("addr size", u.mem.addr_size, "%llu",
+			     (unsigned long long)mm->addr_size);
+	}
 	if (e->raw_id)
 		ROWF("raw id", raw_id, "%u", (unsigned)e->raw_id);
 	/*

@@ -997,7 +997,6 @@ static void t_convert(void)
 
 	eq_u64("conv stamp", out.stamp, 123456789ull);
 	eq_u64("conv seq", out.seq, 99u);
-	eq_u64("conv create_time", out.create_time, 555u);
 	eq_u64("conv pid", out.pid, 4242u);
 	eq_u64("conv ppid", out.ppid, 7u);
 	/* raiser_pid becomes actor_pid - the rename IS the point, so a test
@@ -1005,13 +1004,96 @@ static void t_convert(void)
 	 * field. */
 	eq_u64("conv actor_pid", out.actor_pid, in.raiser_pid);
 	eq_u64("conv tid", out.tid, 31u);
-	eq_u64("conv session", out.session_id, 2u);
-	eq_u64("conv addr", out.addr, 0x7ff600001000ull);
-	eq_u64("conv addr_size", out.addr_size, 4096u);
-	eq_u64("conv daddr", out.net_daddr, 0x08080808u);
-	eq_u64("conv dport", out.net_dport, 0x5000u);
-	eq_u64("conv size", out.net_size, 1500u);
 	eq_u64("conv verb", out.verb, KOF_EVT_FILE_NEW);
+
+	/*
+	 * THE PAYLOAD IS THE VERB'S, AND ONLY THE VERB'S.
+	 *
+	 * The collector's record is flat, so `in` carries a creation time, an
+	 * address and a set of ports whatever the event was. A FILE_NEW owns
+	 * none of those - it owns a FileKey - and the conversion is where that
+	 * is decided. This used to check that every field came through, which
+	 * is what a flat record does; now it checks that they do NOT, because
+	 * a file event reporting a session id would be reporting a field that
+	 * belongs to a different kind of event entirely.
+	 */
+	if (kof_evt_as_proc(&out))
+		fail("conv", "a file event answered as a process event");
+	if (kof_evt_as_mem(&out))
+		fail("conv", "a file event answered as a memory event");
+	if (kof_evt_as_net(&out))
+		fail("conv", "a file event answered as a network event");
+	{
+		const struct kof_evt_file *fl = kof_evt_as_file(&out);
+
+		if (!fl) {
+			fail("conv", "a file event has no file payload");
+		} else {
+			/* `addr` on the collector's side IS the FileKey, and
+			 * `net_size` was where a write's length went - both
+			 * get their real names here. */
+			eq_u64("conv file key", fl->key, 0x7ff600001000ull);
+			eq_u64("conv file size", fl->size, 1500u);
+		}
+	}
+
+	/* The same input, read as each of the other kinds. One conversion per
+	 * verb, because the verb is the only thing that decides. */
+	{
+		struct kofw_evt k = in;
+		struct kof_evt o2;
+
+		k.type = KOF_EVT_PROC_START;
+		kofw_evt_to_kof(&k, &o2);
+		{
+			const struct kof_evt_proc *pr = kof_evt_as_proc(&o2);
+
+			if (!pr)
+				fail("conv", "a proc event has no proc payload");
+			else {
+				eq_u64("conv create_time", pr->create_time, 555u);
+				eq_u64("conv session", pr->session_id, 2u);
+			}
+		}
+		if (kof_evt_as_file(&o2))
+			fail("conv", "a proc event answered as a file event");
+
+		k.type = KOF_EVT_IMAGE_LOAD;
+		kofw_evt_to_kof(&k, &o2);
+		{
+			const struct kof_evt_mem *mm = kof_evt_as_mem(&o2);
+
+			if (!mm)
+				fail("conv", "an image load has no mem payload");
+			else {
+				eq_u64("conv addr", mm->addr,
+				       0x7ff600001000ull);
+				eq_u64("conv addr_size", mm->addr_size, 4096u);
+			}
+		}
+
+		k.type = KOF_EVT_NET_SEND;
+		kofw_evt_to_kof(&k, &o2);
+		{
+			const struct kof_evt_net *nt = kof_evt_as_net(&o2);
+
+			if (!nt)
+				fail("conv", "a net event has no net payload");
+			else {
+				eq_u64("conv daddr", nt->daddr, 0x08080808u);
+				eq_u64("conv dport", nt->dport, 0x5000u);
+				eq_u64("conv size", nt->size, 1500u);
+			}
+		}
+
+		/* A registry write owns no payload at all, and every accessor
+		 * has to say so - this is the case a union gets wrong. */
+		k.type = KOF_EVT_REG_SET_VALUE;
+		kofw_evt_to_kof(&k, &o2);
+		if (kof_evt_as_proc(&o2) || kof_evt_as_mem(&o2) ||
+		    kof_evt_as_net(&o2) || kof_evt_as_file(&o2))
+			fail("conv", "a registry write claimed a payload");
+	}
 	eq_u64("conv raw_id", out.raw_id, 30u);
 	eq_u64("conv attack", out.attack, KOF_ATT_RUN_KEY);
 	eq_u64("conv loc", out.loc, KOF_LOC_AUTOSTART);
@@ -1203,7 +1285,15 @@ static void t_browse(void)
 	mk_kof(&e, KOF_EVT_REG_SET_VALUE, 4242u);
 	e.ppid = 7u;
 	e.actor_pid = 99u;
-	e.session_id = 2u;
+	{
+		struct kof_evt_proc *pr = kof_evt_set_proc(&e);
+
+		/* A registry write owns no proc payload, so this is NULL - and
+		 * saying so here is the point: the test used to set a session
+		 * id on an event that has none. */
+		if (pr)
+			fail("fields", "a registry write took a proc payload");
+	}
 	set_obj_kof(&e, "\\REGISTRY\\MACHINE\\SOFTWARE\\Microsoft\\Windows"
 		    "\\CurrentVersion\\Run\\evil");
 	e.loc = kof_classify(kof_evt_object(&e), &e.attack);
@@ -1282,9 +1372,17 @@ static void t_browse(void)
 		struct kof_evt x;
 
 		mk_kof(&x, KOF_EVT_NET_SEND, 300u);
-		x.net_daddr = 0x0100007fu;
-		x.net_dport = 0xbb01u;          /* 443, network order */
-		x.net_size = 4096u;
+		{
+			struct kof_evt_net *nt = kof_evt_set_net(&x);
+
+			if (!nt)
+				fail("extent", "a net event has no net payload");
+			else {
+				nt->daddr = 0x0100007fu;
+				nt->dport = 0xbb01u;   /* 443, network order */
+				nt->size  = 4096u;
+			}
+		}
 		x.os = KOF_OS_WINDOWS;
 		check_extents(&x, "netsend");
 

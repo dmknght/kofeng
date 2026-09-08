@@ -326,6 +326,90 @@ const char *kof_evt_image(const struct kof_evt *e)   { return at(e, e ? e->off_i
 const char *kof_evt_object(const struct kof_evt *e)  { return at(e, e ? e->off_object  : KOF_TEXT_NONE); }
 const char *kof_evt_cmdline(const struct kof_evt *e) { return at(e, e ? e->off_cmdline : KOF_TEXT_NONE); }
 
+/* ---- the per-verb payload ----------------------------------------------- */
+
+enum kof_evt_kind kof_evt_kind_of(uint16_t verb)
+{
+	switch (verb) {
+	case KOF_EVT_PROC_START:
+	case KOF_EVT_PROC_STOP:
+		return KOF_EK_PROC;
+
+	/*
+	 * An image load names a base and a size; a thread names its entry
+	 * point. Different questions, same two numbers, and the answer to
+	 * "where in memory" is the one thing both of them are about.
+	 */
+	case KOF_EVT_IMAGE_LOAD:
+	case KOF_EVT_IMAGE_UNLOAD:
+	case KOF_EVT_THREAD_START:
+	case KOF_EVT_THREAD_STOP:
+		return KOF_EK_MEM;
+
+	/*
+	 * AN UNTYPED EVENT IS READ AS AN ADDRESS, because that is the one
+	 * numeric thing the collector takes from a shape it does not
+	 * recognise, and because thread events arrive here today: type_of()
+	 * has not been given their ids, so `--thread` produces RAW records
+	 * whose whole point is the entry point in `addr`.
+	 *
+	 * THE COST IS STATED RATHER THAN HIDDEN: an untyped event that also
+	 * had ports or a size loses them, because there is no way to carry
+	 * two shapes for something whose shape is unknown. The fix is not a
+	 * bigger payload, it is naming the id in type_of() so the event stops
+	 * being raw.
+	 */
+	case KOF_EVT_RAW:
+		return KOF_EK_MEM;
+
+	case KOF_EVT_NET_CONNECT:
+	case KOF_EVT_NET_DISCONNECT:
+	case KOF_EVT_NET_SEND:
+	case KOF_EVT_NET_RECV:
+		return KOF_EK_NET;
+
+	case KOF_EVT_FILE_NEW:
+	case KOF_EVT_FILE_DELETE:
+	case KOF_EVT_FILE_RENAME:
+	case KOF_EVT_FILE_WRITE:
+		return KOF_EK_FILE;
+
+	/*
+	 * Registry, AMSI, continuations and raw events carry no payload of
+	 * their own - what they are about is the object path or the content,
+	 * which lives in the arena where every verb's strings live.
+	 *
+	 * The default lands here too, and must: a verb from a NEWER build is
+	 * one this one cannot name, so its payload is bytes of unknown shape.
+	 * Returning a kind for it would be guessing at a layout, which is the
+	 * one thing a union must never do.
+	 */
+	default:
+		return KOF_EK_NONE;
+	}
+}
+
+#define AS(name, kind, member, type)                                          \
+	const type *kof_evt_as_##name(const struct kof_evt *e)                \
+	{                                                                     \
+		if (!e || kof_evt_kind_of(e->verb) != (kind))                 \
+			return NULL;                                          \
+		return &e->u.member;                                          \
+	}                                                                     \
+	type *kof_evt_set_##name(struct kof_evt *e)                           \
+	{                                                                     \
+		if (!e || kof_evt_kind_of(e->verb) != (kind))                 \
+			return NULL;                                          \
+		return &e->u.member;                                          \
+	}
+
+AS(proc, KOF_EK_PROC, proc, struct kof_evt_proc)
+AS(mem,  KOF_EK_MEM,  mem,  struct kof_evt_mem)
+AS(net,  KOF_EK_NET,  net,  struct kof_evt_net)
+AS(file, KOF_EK_FILE, file, struct kof_evt_file)
+
+#undef AS
+
 /* ---- putting a record back together ------------------------------------ */
 
 /*
