@@ -666,22 +666,20 @@ struct kofw_mon_option {
 	int trace_self;
 
 	/*
-	 * START AN ORDINARY SESSION, NOT A SYSTEM LOGGER.
+	 * NO OPTION TO RUN WITHOUT EVENT_TRACE_SYSTEM_LOGGER_MODE.
 	 *
-	 * Off by default, so the session carries EVENT_TRACE_SYSTEM_LOGGER_MODE
-	 * as it always has - some kernel providers deliver nothing without it,
-	 * with no error anywhere, which is why the flag went in.
+	 * There was one, as an escape hatch for "the provider enabled and then
+	 * delivered nothing". It is removed because for a SENSOR the escape
+	 * hatch is the failure: several of the kernel providers deliver nothing
+	 * into an ordinary private session, so a sensor running that way
+	 * collects nothing and reports success. An option whose only effect is
+	 * to make the collector silently useless is not a diagnostic, it is a
+	 * way of shipping a broken machine.
 	 *
-	 * It is exposed because the converse is also possible and is not
-	 * something this code can settle by reasoning: a system-logger session
-	 * may be what a manifest provider refuses to deliver into on a given
-	 * build, or another anti-malware product may already hold the one the
-	 * machine allows. Both look identical from here - the session starts,
-	 * EnableTraceEx2 succeeds, and one provider is silent. Turning this on
-	 * and comparing is a thirty-second experiment; deducing it is not
-	 * possible at all.
+	 * If a provider enables and delivers nothing, that is a GUID or a
+	 * keyword to check with `logman query providers <name>`, not a session
+	 * mode to flip.
 	 */
-	int no_system_logger;
 };
 
 #define KOFW_ERR_ARG      (-1)

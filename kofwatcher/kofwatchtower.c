@@ -31,6 +31,7 @@
 #include "kofgrille.h"
 #include "kofevt.h"
 #include "kofevtfmt.h"
+#include "wchan.h"
 
 static volatile LONG g_stop;
 
@@ -50,12 +51,18 @@ static void usage(void)
 		       "process, image, file, network, registry, amsi");
 	fputs("\nusage: kofwatchtower [options]\n"
 	      "\n"
+	      "It PUBLISHES to a shared-memory channel that kofwatchman reads.\n"
+	      "That is the whole of what it does with an event: normalise it and\n"
+	      "hand it over. Deciding, scanning and logging are watchman's.\n"
+	      "\n"
 	      "SILENT BY DEFAULT. A sensor's job is to collect and hand over,\n"
 	      "not to print - it runs as a service where there is nobody to\n"
 	      "read a terminal, and a process writing thousands of lines a\n"
 	      "second to a console nobody is watching is spending the machine's\n"
 	      "time on nothing. Ask for output when you are debugging it.\n"
 	      "\n"
+	      "  --channel NAME   publish under this name instead of the\n"
+	      "                   default, for running two sensors at once\n"
 	      "  --ring N         records in flight (default 16384, 512B each).\n"
 	      "                   THIS IS THE MEMORY BUDGET: 16384 slots is 8MB,\n"
 	      "                   plus about 2MB of fixed tables. Nothing here\n"
@@ -73,8 +80,7 @@ static void usage(void)
 	      "  --stats-every N  a health line every N seconds (0 = never,\n"
 	      "                   which is the default)\n"
 	      "  --health         one health line at exit\n"
-	      "  --no-system-logger  plain session, if a provider enables and\n"
-	      "                   then delivers nothing\n"
+
 	      "\n"
 	      "THERE ARE NO PROVIDER FLAGS, and that is deliberate. What a\n"
 	      "sensor collects is a property of the product, not of a command\n"
@@ -123,6 +129,8 @@ int main(int argc, char **argv)
 	 * format.
 	 */
 	int      do_print = 0, show_health = 0;
+	struct kofw_chan_pub *chan = NULL;
+	const char *chan_name = NULL;
 	struct kofw_filter filt;
 	int      err = 0, i;
 
@@ -152,12 +160,12 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "--ring") && i + 1 < argc)
 			opt.ring_capacity = (uint32_t)strtoul(argv[++i],
 							      NULL, 10);
+		else if (!strcmp(argv[i], "--channel") && i + 1 < argc)
+			chan_name = argv[++i];
 		else if (!strcmp(argv[i], "--print"))
 			do_print = 1;
 		else if (!strcmp(argv[i], "--health"))
 			show_health = 1;
-		else if (!strcmp(argv[i], "--no-system-logger"))
-			opt.no_system_logger = 1;
 		else if (!strcmp(argv[i], "--help") ||
 			 !strcmp(argv[i], "-h") ||
 			 !strcmp(argv[i], "/?")) {
@@ -238,6 +246,23 @@ int main(int argc, char **argv)
 	}
 
 	/*
+	 * THE CHANNEL, opened before the first event can arrive.
+	 *
+	 * Failing to open it is fatal rather than degraded: a sensor with
+	 * nowhere to hand records is collecting for nothing, and a service
+	 * that ran anyway would look healthy while doing no work at all. The
+	 * usual cause is a second sensor already publishing - which is refused
+	 * on purpose, two publishers on one ring interleave into it.
+	 */
+	chan = kofw_chan_publish_open(chan_name, opt.ring_capacity);
+	if (!chan) {
+		fputs("kofwatchtower: cannot publish a channel - another "
+		      "sensor may already be running\n", stderr);
+		kofw_mon_close(mon);
+		return 1;
+	}
+
+	/*
 	 * NO LOG HERE, AND NO SHAPE DUMP.
 	 *
 	 * A sensor collects and hands over. What is worth keeping out of that
@@ -281,6 +306,14 @@ int main(int argc, char **argv)
 		kofw_evt_to_kof(&e, &ke);
 
 		/*
+		 * HANDED OVER FIRST, and its refusal is not this tool's
+		 * problem to solve: a full channel means the subscriber is not
+		 * keeping up, which is counted in the channel header where the
+		 * subscriber can see it too.
+		 */
+		(void)kofw_chan_publish(chan, &ke);
+
+		/*
 		 * Counted always, printed only when asked - so a silent run and
 		 * a --print run produce the same numbers. The counters used to
 		 * live in the render switch, which made the totals a side
@@ -313,6 +346,8 @@ tick:
 	 * nobody is watching is spending the machine's time on nothing - and
 	 * one running as a service has no console at all.
 	 */
+	kofw_chan_publish_close(chan);
+
 	if (show_health) {
 		kofw_mon_health(mon, &health);
 		kofw_mon_health_neutral(mon, &nh);

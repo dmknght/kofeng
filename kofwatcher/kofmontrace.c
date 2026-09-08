@@ -173,13 +173,7 @@ static void usage(void)
 	      "                  section, and a manually mapped DLL never maps\n"
 	      "                  one, so there is no image event to miss. What\n"
 	      "                  it does instead is start a thread whose entry\n"
-	      "                  point is not inside any mapped image.\n"
-	      "  --no-system-logger\n"
-	      "                  start a plain real-time session instead of a\n"
-	      "                  system-logger one. Try this if a provider\n"
-	      "                  enables and then delivers nothing - the two\n"
-	      "                  session modes suit different providers and\n"
-	      "                  neither failure reports itself.\n"
+
 	      "  --no-raw        hide events this build has no type for\n"
 	      "\n"
 	      "Registry events currently arrive UNTYPED, so --no-raw hides them\n"
@@ -317,8 +311,6 @@ int main(int argc, char **argv)
 		 */
 		else if (!strcmp(argv[i], "--quiet"))
 			quiet = 1;
-		else if (!strcmp(argv[i], "--no-system-logger"))
-			opt.no_system_logger = 1;
 		/*
 		 * Asked for explicitly, so it goes to stdout and exits 0 -
 		 * `kofmontrace --help | more` has to work, and a help request

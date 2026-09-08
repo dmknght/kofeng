@@ -916,11 +916,21 @@ $(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 KOFEVT_SRC := libkofeng/kofevt/kofevt.c libkofeng/kofevt/kofevtfmt.c \
               libkofeng/kofevt/kofevtlog.c
 
+#
+# On Windows it also links the collector, for the live channel - which is a
+# Windows transport, so off Windows the recording path is the whole program.
+# See the note at the top of kofwatchman.c.
+ifeq ($(NATIVE_OS),windows)
+WATCHMAN_CHAN := -Ilibkofgrille $(WINLIB) $(WIN_LDLIBS)
+else
+WATCHMAN_CHAN :=
+endif
+
 $(OUT)/bin/kofwatchman$(EXE): kofwatcher/kofwatchman.c $(KOFEVT_SRC) $(LIB) \
                               $(SDK_HDR) $(STAMP)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofeng -Ilibkofeng/kofevt $< \
-	      $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS)
+	      $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS) $(WATCHMAN_CHAN)
 
 kofwatchman: $(OUT)/bin/kofwatchman$(EXE)
 	$(info $(SP)  $<)
@@ -1000,6 +1010,7 @@ WIN_SRC := libkofgrille/wevt_ring.c \
            libkofgrille/wfilter.c \
            libkofgrille/wcmdline.c \
            libkofgrille/wtext.c \
+           libkofgrille/wchan.c \
            libkofgrille/wevt_decode.c \
            libkofgrille/wevt_etw.c
 
@@ -1265,6 +1276,10 @@ EDITOR_SRC := kofexamine/kofeditor.c kofexamine/kofinspect.c
 # says which file did it. That is the whole enforcement mechanism, and it has
 # already caught one - kofw_evt_image() and kofw_evt_object() were in
 # wevt_decode.c, so wfilter.c could not link without the Windows half.
+# NOT wchan.c: it is a Windows transport and includes windows.h. This list is
+# exactly the files whose headers promise they call no OS API, and the promise
+# is worth what compiles it - a file added here that includes windows.h stops
+# the Linux build and names itself.
 GRILLE_HOST_SRC := libkofgrille/wevt_ring.c libkofgrille/wfilter.c \
                    libkofgrille/wtext.c \
                    libkofeng/kofevt/kofevt.c \

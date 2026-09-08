@@ -51,12 +51,29 @@
 #include "kofevtfmt.h"
 #include "kofevtlog.h"
 
+/*
+ * THE LIVE CHANNEL IS PLATFORM SPECIFIC; THIS PROGRAM IS NOT.
+ *
+ * Attaching to a sensor means a shared-memory transport, and that is a
+ * different object on every operating system. Reading a RECORDING is not - it
+ * is a file of normalised records - so this tool builds and runs everywhere
+ * the engine does, and analyses a Windows recording on the CI.
+ *
+ * So the channel is compiled in where there is one, and where there is not the
+ * recording path is the whole program. That is not a limitation to work
+ * around: on a host with no sensor there is nothing live to attach to.
+ */
+#ifdef _WIN32
+#include "wchan.h"
+#endif
+
 static void usage(void)
 {
 	kof_evt_banner(stderr, "kofwatchman", (uint32_t)KOFENG_BUILD,
 		       "verdicts over a recorded event log");
 	fputs("\nusage: kofwatchman [options]\n"
 	      "\n"
+	      "  --channel NAME attach to this channel instead of the default\n"
 	      "  --log FILE    read a RECORDED log instead of attaching to a\n"
 	      "                running sensor. Optional: with no --log this\n"
 	      "                attaches to kofwatchtower, which is what a\n"
@@ -203,12 +220,20 @@ static int looks_openable(const char *p)
  * quietly stop behaving the same.
  */
 struct wm_source {
-	struct kofevt_log_r *log;      /* the recorded source, or NULL */
-	/* the live one will keep its mapping here */
+	struct kofevt_log_r  *log;    /* a recording, or NULL */
+#ifdef _WIN32
+	struct kofw_chan_sub *chan;   /* the live sensor, or NULL */
+#else
+	void                 *chan;   /* always NULL off Windows */
+#endif
 };
 
 static int source_next(struct wm_source *s, struct kof_evt *out)
 {
+#ifdef _WIN32
+	if (s->chan)
+		return kofw_chan_next(s->chan, out, 200u);
+#endif
 	if (s->log)
 		return kofevt_log_read(s->log, out);
 	return 0;
@@ -216,9 +241,14 @@ static int source_next(struct wm_source *s, struct kof_evt *out)
 
 static void source_close(struct wm_source *s)
 {
+#ifdef _WIN32
+	if (s->chan)
+		kofw_chan_sub_close(s->chan);
+#endif
 	if (s->log)
 		kofevt_log_free(s->log);
-	s->log = NULL;
+	s->chan = NULL;
+	s->log  = NULL;
 }
 
 int main(int argc, char **argv)
@@ -230,7 +260,8 @@ int main(int argc, char **argv)
 
 	struct kofevt_log_r *lr;
 	struct wm_source src;
-	const struct kofevt_log_hdr *h;
+	const struct kofevt_log_hdr *h = NULL;
+	const char *chan_name = NULL;
 	const char *why = "";
 	kof_engine  *eng = NULL;
 	kof_scanner *sc  = NULL;
@@ -248,6 +279,8 @@ int main(int argc, char **argv)
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--log") && i + 1 < argc)
 			log_path = argv[++i];
+		else if (!strcmp(argv[i], "--channel") && i + 1 < argc)
+			chan_name = argv[++i];
 		else if (!strcmp(argv[i], "--record") && i + 1 < argc)
 			rec_path = argv[++i];
 		else if (!strcmp(argv[i], "--db") && i + 1 < argc)
@@ -275,24 +308,36 @@ int main(int argc, char **argv)
 	 * instead of the running machine would be worse than one that does
 	 * nothing, because it would look like it was working.
 	 */
+	/*
+	 * NO --log MEANS THE LIVE SENSOR, which is the ordinary way to run
+	 * this: watchman is the client, kofwatchtower is the server.
+	 */
 	if (!log_path) {
-		kof_evt_banner(stderr, "kofwatchman", (uint32_t)KOFENG_BUILD,
-			       "verdicts over an event stream");
-		fputs("\nkofwatchman: cannot attach to a running sensor yet - "
-		      "the channel between\n"
-		      "  kofwatchtower and this is designed and not built. Run "
-		      "the sensor with\n"
-		      "  --log FILE and pass the same file here.\n", stderr);
-		return 1;
+#ifdef _WIN32
+		src.chan = kofw_chan_sub_open(chan_name, &why);
+#else
+		(void)chan_name;
+		why = "this build has no live channel - it is a Windows "
+		      "transport; pass --log FILE";
+#endif
+		if (!src.chan) {
+			kof_evt_banner(stderr, "kofwatchman",
+				       (uint32_t)KOFENG_BUILD,
+				       "verdicts over an event stream");
+			fprintf(stderr, "\nkofwatchman: %s\n", why);
+			fputs("  start kofwatchtower first, or pass --log FILE "
+			      "to read a recording.\n", stderr);
+			return 1;
+		}
+	} else {
+		lr = kofevt_log_open(log_path, 0, KOFEVT_REC_NONE, &why);
+		if (!lr) {
+			fprintf(stderr, "kofwatchman: %s: %s\n", log_path, why);
+			return 1;
+		}
+		src.log = lr;
+		h = kofevt_log_header(lr);
 	}
-
-	lr = kofevt_log_open(log_path, 0, KOFEVT_REC_NONE, &why);
-	if (!lr) {
-		fprintf(stderr, "kofwatchman: %s: %s\n", log_path, why);
-		return 1;
-	}
-	src.log = lr;
-	h = kofevt_log_header(lr);
 
 	/*
 	 * WHAT IT IS HOLDING, said before anything is concluded from it.
@@ -301,19 +346,32 @@ int main(int argc, char **argv)
 	 * whether the writer closed cleanly. A verdict computed over a stream
 	 * whose provenance nobody stated is a verdict nobody can check.
 	 */
-	fputs("kofwatchman: connected to real-time protection (recorded)\n",
-	      stderr);
-	fprintf(stderr, "  source   %s\n", log_path);
-	fprintf(stderr, "  platform %s/%s, sensor build %lu, record %u bytes\n",
-		kof_evt_platform_name((uint8_t)h->platform),
-		kof_evt_arch_name((uint8_t)h->arch),
-		(unsigned long)h->build, (unsigned)h->rec_size);
-	if (h->n_records)
-		fprintf(stderr, "  %llu event(s)\n",
-			(unsigned long long)h->n_records);
-	else
-		fputs("  event count unknown - the sensor did not close "
-		      "cleanly, so the log is however far it got\n", stderr);
+	fputs("kofwatchman: connected to real-time protection\n", stderr);
+#ifdef _WIN32
+	if (src.chan) {
+		const struct kofw_chan_hdr *ch = kofw_chan_sub_header(src.chan);
+
+		fprintf(stderr, "  source   live sensor, pid %lu\n",
+			(unsigned long)ch->pid);
+		fprintf(stderr, "  channel  %u slot(s) of %u bytes\n",
+			(unsigned)ch->capacity, (unsigned)ch->rec_size);
+	} else
+#endif
+	{
+		fprintf(stderr, "  source   %s (recorded)\n", log_path);
+		fprintf(stderr, "  platform %s/%s, sensor build %lu, record "
+			"%u bytes\n",
+			kof_evt_platform_name((uint8_t)h->platform),
+			kof_evt_arch_name((uint8_t)h->arch),
+			(unsigned long)h->build, (unsigned)h->rec_size);
+		if (h->n_records)
+			fprintf(stderr, "  %llu event(s)\n",
+				(unsigned long long)h->n_records);
+		else
+			fputs("  event count unknown - the sensor did not close "
+			      "cleanly, so the log is however far it got\n",
+			      stderr);
+	}
 
 	/*
 	 * A NEUTRAL RECORD IS THE ONE THIS CAN DECODE.
@@ -323,14 +381,14 @@ int main(int argc, char **argv)
 	 * is entirely plausible and entirely wrong - the reason rec_kind exists
 	 * beside rec_size.
 	 */
-	if (h->rec_kind != KOFEVT_REC_KOF) {
+	if (h && h->rec_kind != KOFEVT_REC_KOF) {
 		fputs("kofwatchman: this log holds a collector's own record, "
 		      "not the neutral one - nothing here can read it\n",
 		      stderr);
 		source_close(&src);
 		return 1;
 	}
-	if (h->rec_size != sizeof(struct kof_evt)) {
+	if (h && h->rec_size != sizeof(struct kof_evt)) {
 		fputs("kofwatchman: the log's record is not this build's size\n",
 		      stderr);
 		source_close(&src);
@@ -354,13 +412,26 @@ int main(int argc, char **argv)
 		li.head_size   = (uint16_t)KOF_EVT_HEAD;
 		li.len_off     = (uint16_t)offsetof(struct kof_evt, text_len);
 		li.rec_kind    = KOFEVT_REC_KOF;
-		li.build       = h->build;
-		li.platform    = (uint8_t)h->platform;
-		li.arch        = (uint8_t)h->arch;
-		li.root_pid    = h->root_pid;
-		li.sub_asked   = h->sub_asked;
-		li.sub_enabled = h->sub_enabled;
-		li.started     = h->started;
+		/*
+		 * From the SOURCE where there is one: a recording made from a
+		 * Windows stream is still a Windows recording however it was
+		 * written, and a reader of the second file must not be told it
+		 * came from here. From a live channel there is no such header
+		 * yet, so 0 asks kofevt for this host - which is correct,
+		 * because for a live channel this host IS the source.
+		 */
+		if (h) {
+			li.build       = h->build;
+			li.platform    = (uint8_t)h->platform;
+			li.arch        = (uint8_t)h->arch;
+			li.root_pid    = h->root_pid;
+			li.sub_asked   = h->sub_asked;
+			li.sub_enabled = h->sub_enabled;
+			li.started     = h->started;
+		} else {
+			li.build   = (uint32_t)KOFENG_BUILD;
+			li.started = kof_evt_now();
+		}
 		rec = kofevt_log_create(rec_path, &li);
 		if (!rec)
 			fprintf(stderr, "kofwatchman: cannot write '%s' - "

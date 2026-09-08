@@ -242,8 +242,7 @@ static ULONG props_bytes(void)
 }
 
 static EVENT_TRACE_PROPERTIES *props_new(const wchar_t *name, ULONG buf_kb,
-					 ULONG min_buf, ULONG max_buf,
-					 int no_system_logger)
+					 ULONG min_buf, ULONG max_buf)
 {
 	ULONG sz = props_bytes();
 	EVENT_TRACE_PROPERTIES *p = calloc(1, sz);
@@ -281,9 +280,13 @@ static EVENT_TRACE_PROPERTIES *props_new(const wchar_t *name, ULONG buf_kb,
 	 * failure a wrong provider GUID produces and is why this comment exists
 	 * rather than just the flag.
 	 */
-	p->LogFileMode        = EVENT_TRACE_REAL_TIME_MODE;
-	if (!no_system_logger)
-		p->LogFileMode |= EVENT_TRACE_SYSTEM_LOGGER_MODE;
+	/*
+	 * ALWAYS a system logger - there is no option for anything else. See
+	 * the note in kofgrille.h: several kernel providers deliver nothing
+	 * into an ordinary private session and report success doing it.
+	 */
+	p->LogFileMode        = EVENT_TRACE_REAL_TIME_MODE |
+				EVENT_TRACE_SYSTEM_LOGGER_MODE;
 	p->BufferSize         = buf_kb;
 	p->MinimumBuffers     = min_buf;
 	p->MaximumBuffers     = max_buf;
@@ -403,7 +406,6 @@ static DWORD WINAPI consume(LPVOID arg)
 
 static int start_session(struct kofw_mon *m, const struct kofw_mon_option *o)
 {
-	const int nsl = o->no_system_logger;
 	EVENT_TRACE_PROPERTIES *p;
 	ULONG st;
 	/*
@@ -421,7 +423,7 @@ static int start_session(struct kofw_mon *m, const struct kofw_mon_option *o)
 	ULONG minb = o->min_buffers  ? o->min_buffers  : 32u;
 	ULONG maxb = o->max_buffers  ? o->max_buffers  : 256u;
 
-	p = props_new(m->name, kb, minb, maxb, nsl);
+	p = props_new(m->name, kb, minb, maxb);
 	if (!p)
 		return KOFW_ERR_MEM;
 
@@ -438,14 +440,14 @@ static int start_session(struct kofw_mon *m, const struct kofw_mon_option *o)
 	 * reports the tool as broken.
 	 */
 	if (st == ERROR_ALREADY_EXISTS) {
-		EVENT_TRACE_PROPERTIES *q = props_new(m->name, kb, minb, maxb, nsl);
+		EVENT_TRACE_PROPERTIES *q = props_new(m->name, kb, minb, maxb);
 		if (q) {
 			(void)ControlTraceW(0, m->name, q,
 					    EVENT_TRACE_CONTROL_STOP);
 			free(q);
 		}
 		free(p);
-		p = props_new(m->name, kb, minb, maxb, nsl);
+		p = props_new(m->name, kb, minb, maxb);
 		if (!p)
 			return KOFW_ERR_MEM;
 		st = StartTraceW(&m->session, m->name, p);
@@ -700,7 +702,7 @@ struct kofw_mon *kofw_mon_open(const struct kofw_mon_option *opt, int *err)
 
 fail_session:
 	if (m->session) {
-		EVENT_TRACE_PROPERTIES *p = props_new(m->name, 0, 0, 0, 0);
+		EVENT_TRACE_PROPERTIES *p = props_new(m->name, 0, 0, 0);
 		if (p) {
 			(void)ControlTraceW(m->session, NULL, p,
 					    EVENT_TRACE_CONTROL_STOP);
@@ -1069,7 +1071,7 @@ void kofw_mon_close(struct kofw_mon *m)
 	m->stopping = 1;
 
 	if (m->session) {
-		EVENT_TRACE_PROPERTIES *p = props_new(m->name, 0, 0, 0, 0);
+		EVENT_TRACE_PROPERTIES *p = props_new(m->name, 0, 0, 0);
 		if (p) {
 			(void)ControlTraceW(m->session, NULL, p,
 					    EVENT_TRACE_CONTROL_STOP);
