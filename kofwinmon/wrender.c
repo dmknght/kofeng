@@ -182,4 +182,17 @@ void wm_print_health(const struct kofw_health *h, double secs)
 			"   INCOMPLETE: %llu process(es) could not be tracked; "
 			"the scoped view is missing their events\n",
 			(unsigned long long)h->untracked);
+
+	/*
+	 * Its own line, and worded as a state rather than a count, because that
+	 * is what it is: the collector has stopped learning event shapes, so
+	 * every id first seen from here on is discarded whole. Everything else
+	 * above says how much was lost; this one says the losses will continue.
+	 */
+	if (h->schema_full)
+		fprintf(stderr,
+			"   INCOMPLETE: the schema cache is FULL - %llu event(s) "
+			"were dropped whole and every new event id will be too; "
+			"run with --schema to see what it filled up on\n",
+			(unsigned long long)h->schema_full);
 }

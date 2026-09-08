@@ -2,6 +2,7 @@
  * wevt_decode.c - see wevt_decode.h for why TDH runs once and not per record.
  */
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +15,20 @@
 #include "wcompat.h"
 
 #include "wevt_decode.h"
+#include "wtext.h"
+
+/*
+ * THE ASSERTION kofgrille.h PROMISES.
+ *
+ * KOFW_EVT_HEAD is how the text arena is sized, so if a field is ever added
+ * above text[] without moving it, every string in every record silently starts
+ * at the wrong offset - and a path read from the wrong offset still looks like
+ * a path. The header said this was checked here. It was not, until now.
+ */
+_Static_assert(offsetof(struct kofw_evt, text) == KOFW_EVT_HEAD,
+	       "KOFW_EVT_HEAD no longer matches the record layout");
+_Static_assert(sizeof(struct kofw_evt) == KOFW_EVT_SIZE,
+	       "struct kofw_evt is not KOFW_EVT_SIZE bytes");
 
 const GUID KOFW_GUID_KERNEL_PROCESS = {
 	0x22fb2cd6, 0x0e7b, 0x422b,
@@ -67,138 +82,6 @@ uint8_t kofw_provider_of(const GUID *g)
 #define EVID_FILE_CREATE_NEW 30u
 #define EVID_FILE_RENAME     27u
 #define EVID_FILE_DELETE     26u
-
-/* ------------------------------------------------------------------ UTF-16 */
-
-/*
- * Written out rather than calling WideCharToMultiByte, for two reasons that
- * both matter here. It runs per record on the callback thread, and the Win32
- * call carries codepage and locale machinery this does not need; and it is the
- * one piece of the decode with no Windows API in it, so keeping it plain C is
- * what lets it be tested on a host that has none.
- */
-size_t kofw_utf16_to_utf8(const uint16_t *src, size_t src_chars,
-			  char *dst, size_t dst_cap, int *cut)
-{
-	size_t i = 0, o = 0;
-
-	if (cut)
-		*cut = 0;
-	if (!dst || dst_cap == 0)
-		return 0;
-
-	while (i < src_chars) {
-		uint32_t cp = src[i++];
-
-		if (cp == 0)
-			break;
-
-		/* A surrogate pair, when the low half is actually there. A lone
-		 * half is not an error to reject the whole path over - it is
-		 * passed through as U+FFFD so the rest of the name survives. */
-		if (cp >= 0xd800u && cp <= 0xdbffu) {
-			if (i < src_chars && src[i] >= 0xdc00u &&
-			    src[i] <= 0xdfffu) {
-				uint32_t lo = src[i++];
-				cp = 0x10000u + ((cp - 0xd800u) << 10) +
-				     (lo - 0xdc00u);
-			} else {
-				cp = 0xfffdu;
-			}
-		} else if (cp >= 0xdc00u && cp <= 0xdfffu) {
-			cp = 0xfffdu;
-		}
-
-		/*
-		 * C0 and DEL become '.', for the reason the engine sanitises an
-		 * archive entry name: this string is chosen by whoever created
-		 * the file and it is printed to a terminal, and an escape
-		 * sequence inside it is a report that lies about what it says.
-		 */
-		if (cp < 0x20u || cp == 0x7fu)
-			cp = (uint32_t)'.';
-
-		if (cp < 0x80u) {
-			if (o + 1 >= dst_cap)
-				goto full;
-			dst[o++] = (char)cp;
-		} else if (cp < 0x800u) {
-			if (o + 2 >= dst_cap)
-				goto full;
-			dst[o++] = (char)(0xc0u | (cp >> 6));
-			dst[o++] = (char)(0x80u | (cp & 0x3fu));
-		} else if (cp < 0x10000u) {
-			if (o + 3 >= dst_cap)
-				goto full;
-			dst[o++] = (char)(0xe0u | (cp >> 12));
-			dst[o++] = (char)(0x80u | ((cp >> 6) & 0x3fu));
-			dst[o++] = (char)(0x80u | (cp & 0x3fu));
-		} else {
-			if (o + 4 >= dst_cap)
-				goto full;
-			dst[o++] = (char)(0xf0u | (cp >> 18));
-			dst[o++] = (char)(0x80u | ((cp >> 12) & 0x3fu));
-			dst[o++] = (char)(0x80u | ((cp >> 6) & 0x3fu));
-			dst[o++] = (char)(0x80u | (cp & 0x3fu));
-		}
-	}
-
-	dst[o] = '\0';
-	return o;
-
-full:
-	if (cut)
-		*cut = 1;
-	dst[o] = '\0';
-	return o;
-}
-
-/*
- * The same, for a payload that carries its string as bytes rather than UTF-16.
- *
- * WHICH IS NOT HYPOTHETICAL AND IS WHY THIS EXISTS: on this build,
- * Kernel-Process spells ImageName as UNICODESTRING in ProcessStart and as
- * ANSISTRING in ProcessStop. A decoder that handled only the first got a
- * complete image path from every start and nothing at all from any stop, and
- * reported it as an absent field rather than as an unhandled type - which is
- * the right failure and still took a shape dump to explain.
- *
- * A byte at or above 0x80 becomes '?'. The provider does not say which codepage
- * these bytes are in, so there is no correct interpretation available; turning
- * them into plausible-looking text would invent one, and leaving them raw would
- * emit a string that is not valid UTF-8 into everything downstream. Marking
- * them unknown is the only one of the three that claims nothing.
- */
-static size_t ansi_to_text(const uint8_t *src, size_t n, char *dst,
-			   size_t dst_cap, int *cut)
-{
-	size_t i, o = 0;
-
-	if (cut)
-		*cut = 0;
-	if (!dst || dst_cap == 0)
-		return 0;
-
-	for (i = 0; i < n; i++) {
-		uint8_t b = src[i];
-
-		if (b == 0)
-			break;
-		if (o + 1 >= dst_cap) {
-			if (cut)
-				*cut = 1;
-			break;
-		}
-		if (b < 0x20u || b == 0x7fu)
-			b = (uint8_t)'.';
-		else if (b >= 0x80u)
-			b = (uint8_t)'?';
-		dst[o++] = (char)b;
-	}
-
-	dst[o] = '\0';
-	return o;
-}
 
 /* -------------------------------------------------------- learning a shape */
 
@@ -394,12 +277,21 @@ static struct kofw_schema *learn(struct kofw_schema_cache *c, uint8_t prov,
 	uint8_t  ver = rec->EventHeader.EventDescriptor.Version;
 	ULONG   i;
 
+	/*
+	 * TDH's prototype is not const-correct - TdhGetEventInformation takes a
+	 * PEVENT_RECORD and does not write through it - so the const has to be
+	 * dropped somewhere. Laundered through uintptr_t once, here, rather
+	 * than cast away at each call site: the tree builds with -Wcast-qual and
+	 * the point of that flag is to catch the casts that are NOT this one.
+	 */
+	PEVENT_RECORD mut = (PEVENT_RECORD)(uintptr_t)rec;
+
 	if (c->n >= KOFW_SCHEMA_MAX) {
-		c->learn_failed++;
+		c->cache_full++;
 		return NULL;
 	}
 
-	st = TdhGetEventInformation((PEVENT_RECORD)rec, 0, NULL, NULL, &sz);
+	st = TdhGetEventInformation(mut, 0, NULL, NULL, &sz);
 	if (st != ERROR_INSUFFICIENT_BUFFER || sz == 0) {
 		c->learn_failed++;
 		return NULL;
@@ -409,7 +301,7 @@ static struct kofw_schema *learn(struct kofw_schema_cache *c, uint8_t prov,
 		c->learn_failed++;
 		return NULL;
 	}
-	st = TdhGetEventInformation((PEVENT_RECORD)rec, 0, NULL, info, &sz);
+	st = TdhGetEventInformation(mut, 0, NULL, info, &sz);
 	if (st != ERROR_SUCCESS) {
 		free(info);
 		c->learn_failed++;
@@ -702,8 +594,9 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 					len / 2u, out->text + tnext, room,
 					&cut);
 			else if (pr->in_type == TDH_INTYPE_ANSISTRING)
-				n = ansi_to_text(base + off, len,
-						 out->text + tnext, room, &cut);
+				n = kofw_ansi_to_text(base + off, len,
+						      out->text + tnext, room,
+						      &cut);
 			else
 				got = 0;
 
@@ -804,41 +697,24 @@ size_t kofw_schema_describe(const struct kofw_schema_cache *c, char *buf,
 			o += (size_t)n;
 	}
 
-	return o;
-}
-
-/* ------------------------------------------------------------- accessories */
-
-const char *kofw_evt_image(const struct kofw_evt *e)
-{
-	if (!e || e->off_image == KOFW_TEXT_NONE ||
-	    e->off_image >= sizeof e->text)
-		return "";
-	return e->text + e->off_image;
-}
-
-const char *kofw_evt_object(const struct kofw_evt *e)
-{
-	if (!e || e->off_object == KOFW_TEXT_NONE ||
-	    e->off_object >= sizeof e->text)
-		return "";
-	return e->text + e->off_object;
-}
-
-const char *kofw_evt_type_name(uint16_t type)
-{
-	switch (type) {
-	case KOFW_EVT_PROC_START: return "ProcStart";
-	case KOFW_EVT_PROC_STOP:  return "ProcStop";
-	case KOFW_EVT_IMAGE_LOAD: return "ImageLoad";
-	case KOFW_EVT_FILE_NEW:   return "FileNew";
-	case KOFW_EVT_FILE_DELETE: return "FileDel";
-	case KOFW_EVT_FILE_RENAME: return "FileRen";
-	case KOFW_EVT_NET_CONNECT:    return "NetConn";
-	case KOFW_EVT_NET_SEND:       return "NetSend";
-	case KOFW_EVT_NET_RECV:       return "NetRecv";
-	case KOFW_EVT_NET_DISCONNECT: return "NetClose";
-	case KOFW_EVT_RAW:        return "raw";
-	default:                  return "?";
+	/*
+	 * Said in full rather than as a number, because it is the one line here
+	 * that means the collector is no longer collecting everything it was
+	 * asked for - and the shape it stopped at is the last one listed above,
+	 * which is what somebody reading this needs in order to know what it
+	 * ran out on.
+	 */
+	if (c->cache_full) {
+		n = snprintf(buf + o, cap - o,
+			     "SCHEMA CACHE FULL at %u shapes: %llu event(s) "
+			     "were dropped whole because no slot was left to "
+			     "learn them, and every further NEW (id, version) "
+			     "will be too\n",
+			     (unsigned)KOFW_SCHEMA_MAX,
+			     (unsigned long long)c->cache_full);
+		if (n > 0 && (size_t)n < cap - o)
+			o += (size_t)n;
 	}
+
+	return o;
 }

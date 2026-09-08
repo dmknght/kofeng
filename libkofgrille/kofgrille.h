@@ -538,6 +538,17 @@ struct kofw_health {
 	uint64_t ring_dropped;
 	uint64_t ring_high_water;  /* the deepest the ring has ever been */
 	uint64_t decode_failed;    /* payload the learned schema did not fit */
+
+	/*
+	 * Events dropped whole because the schema cache had no slot left.
+	 *
+	 * Its own line rather than part of decode_failed, because it is not a
+	 * count of bad events - it is the collector announcing that it has
+	 * stopped learning new shapes. Non-zero means every event id first seen
+	 * from here on is discarded, permanently, and kofw_mon_describe() names
+	 * the shapes it filled up on.
+	 */
+	uint64_t schema_full;
 	uint64_t skipped_self;     /* our own events, refused at the callback */
 
 	/* Records the consumer-side filter refused. Counted rather than

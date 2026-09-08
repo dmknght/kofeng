@@ -112,6 +112,20 @@ struct kofw_mon {
 	_Atomic uint64_t skipped_self;
 	_Atomic uint64_t decode_failed;
 
+	/*
+	 * EVENTS THAT ARRIVED, which is not events that were kept - and the
+	 * difference is the whole point of it.
+	 *
+	 * kofw_evt.seq is stamped from this, not from ring.produced. Taking it
+	 * from produced was the obvious thing and it was wrong: produced only
+	 * advances on a successful commit, so a record the ring refused left no
+	 * hole, every seq a consumer saw was contiguous, and kofw_health.seq_gaps
+	 * could not be non-zero however much was lost. The counter a gap is
+	 * measured against has to advance on ARRIVAL or it is not measuring
+	 * arrivals.
+	 */
+	_Atomic uint64_t arrived;
+
 	/* A second properties buffer, so a health query cannot clobber the one
 	 * the session was started with. */
 	EVENT_TRACE_PROPERTIES *qprops;
@@ -225,6 +239,7 @@ static void WINAPI on_event(PEVENT_RECORD rec)
 {
 	struct kofw_mon *m = (struct kofw_mon *)rec->UserContext;
 	struct kofw_evt *slot;
+	uint64_t seq;
 
 	if (!m)
 		return;
@@ -250,9 +265,24 @@ static void WINAPI on_event(PEVENT_RECORD rec)
 		return;
 	}
 
+	/*
+	 * TAKEN HERE, BEFORE ANYTHING CAN REFUSE THE RECORD.
+	 *
+	 * This number becomes kofw_evt.seq, and a gap in it is how a consumer
+	 * learns something was lost - so it has to be claimed by the arrival
+	 * rather than by the survival. Everything below this line can drop the
+	 * event (the ring is full, the decode failed), and each of those now
+	 * leaves exactly the hole it should.
+	 *
+	 * Self-skipped events are counted before it on purpose: those are not a
+	 * loss, they are a deliberate exclusion, and putting them in the
+	 * sequence would report the filter working as damage.
+	 */
+	seq = atomic_fetch_add_explicit(&m->arrived, 1u, memory_order_relaxed);
+
 	slot = kofw_ring_claim(&m->ring);
 	if (!slot)
-		return;   /* the drop is already counted */
+		return;   /* the drop is already counted, and seq now has a hole */
 
 	if (!kofw_decode(&m->schema, rec, slot)) {
 		atomic_fetch_add_explicit(&m->decode_failed, 1u,
@@ -260,8 +290,7 @@ static void WINAPI on_event(PEVENT_RECORD rec)
 		return;   /* claimed and not committed: the slot is reused */
 	}
 
-	slot->seq = atomic_load_explicit(&m->ring.produced,
-					 memory_order_relaxed);
+	slot->seq = seq;
 
 	/*
 	 * Woken only on the empty-to-nonempty edge, so a burst costs one wakeup
@@ -463,6 +492,7 @@ struct kofw_mon *kofw_mon_open(const struct kofw_mon_option *opt, int *err)
 	m->trace_self  = o.trace_self;
 	atomic_init(&m->skipped_self, 0u);
 	atomic_init(&m->decode_failed, 0u);
+	atomic_init(&m->arrived, 0u);
 
 	{
 		const char *n = o.session_name;
@@ -600,6 +630,7 @@ void kofw_mon_health(struct kofw_mon *m, struct kofw_health *h)
 	h->decode_failed  = atomic_load_explicit(&m->decode_failed,
 						 memory_order_relaxed) +
 			    m->schema.learn_failed;
+	h->schema_full    = m->schema.cache_full;
 	h->skipped_self   = atomic_load_explicit(&m->skipped_self,
 						 memory_order_relaxed);
 	h->filtered       = m->filtered;

@@ -98,6 +98,17 @@ struct kofw_schema_cache {
 	struct kofw_schema s[KOFW_SCHEMA_MAX];
 	uint32_t n;
 	uint64_t learn_failed;   /* TDH would not describe an event at all */
+
+	/*
+	 * Shapes that never got a slot because the cache was full.
+	 *
+	 * Counted apart from learn_failed because they say opposite things. A
+	 * TDH failure is one event this build could not read; a full cache is a
+	 * COLLECTOR that has stopped learning - every new (id, version) from
+	 * here on is refused, permanently, and no later event of that shape is
+	 * ever decoded. One is a record, the other is a state.
+	 */
+	uint64_t cache_full;
 };
 
 /* Which normalised field a property feeds. */
@@ -136,20 +147,8 @@ uint8_t kofw_provider_of(const GUID *);
 int kofw_decode(struct kofw_schema_cache *, const EVENT_RECORD *rec,
 		struct kofw_evt *out);
 
-/*
- * UTF-16 to UTF-8, into a fixed buffer, with control characters replaced.
- *
- * Exported because it is the part with no Windows API in it and the part most
- * worth testing directly. Returns bytes written, never including the NUL; sets
- * *cut when the input did not fit.
- *
- * Control characters become '.', for the reason the engine sanitises an archive
- * entry name: an image path is chosen by whoever created the file, it is
- * printed to a terminal, and a terminal escape in it is a report that lies
- * about what it says.
- */
-size_t kofw_utf16_to_utf8(const uint16_t *src, size_t src_chars,
-			  char *dst, size_t dst_cap, int *cut);
+/* The string conversions live in wtext.h, which includes no Windows header -
+ * see that file for why the boundary is where it is. */
 
 /*
  * Render every shape learned so far as text. Returns bytes written, excluding

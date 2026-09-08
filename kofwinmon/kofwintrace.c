@@ -62,6 +62,7 @@ static void usage(void)
 	      "  --grace N     keep collecting N seconds after the subtree\n"
 	      "                exits (default 2)\n"
 	      "  --raw         also print events this build has no type for\n"
+	      "  --schema      at exit, print the payload shapes TDH described\n"
 	      "  --all-images  do not suppress system module loads\n"
 	      "  --no-image    do not subscribe to module loads at all\n"
 	      "  --no-file     do not subscribe to file events\n"
@@ -90,7 +91,8 @@ int main(int argc, char **argv)
 	uint64_t t_wall0, t_ev0 = 0;
 	uint32_t root_pid, alive = 1;
 	int      want_file = 1, want_image = 1, want_net = 0, want_write = 0;
-	int      show_raw = 0, show_all_img = 0, err = 0, i, first;
+	int      show_raw = 0, show_all_img = 0, show_schema = 0;
+	int      err = 0, i, first;
 	size_t   n;
 
 	memset(&opt, 0, sizeof opt);
@@ -106,6 +108,8 @@ int main(int argc, char **argv)
 							      NULL, 10);
 		else if (!strcmp(argv[i], "--raw"))
 			show_raw = 1;
+		else if (!strcmp(argv[i], "--schema"))
+			show_schema = 1;
 		else if (!strcmp(argv[i], "--all-images"))
 			show_all_img = 1;
 		else if (!strcmp(argv[i], "--no-image"))
@@ -271,6 +275,23 @@ tick:
 	}
 
 	wm_print_health(&health, secs);
+
+	/*
+	 * THE SHAPES, AND WHY THIS IS ON THE TOOL PEOPLE ACTUALLY DEBUG WITH.
+	 *
+	 * An event that did not appear has two causes that look identical from
+	 * the outside: the provider never sent it, or it arrived and this build
+	 * had no type for it. Only this dump tells them apart - a shape listed
+	 * for an id means the record reached the decoder. Without it the answer
+	 * to "why did I not see the DLL load" is a guess.
+	 */
+	if (show_schema) {
+		static char shapes[16384];
+
+		if (kofw_mon_describe(mon, shapes, sizeof shapes))
+			fprintf(stderr, "\n-- payload shapes learned:\n%s",
+				shapes);
+	}
 
 	/* An overflowed tracking table is reported by wm_print_health above,
 	 * because it is a kind of incompleteness and belongs beside the other

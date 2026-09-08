@@ -605,7 +605,7 @@ help:
 	$(info $(SP)  kofexamine    the file examiner)
 	$(info $(SP)  ksigbuilder   the database builder)
 	$(info $(SP)  kofviewer     the file examiner, navigable)
-	$(info $(SP)  kofwinmon     the Windows event monitor           (Windows only))
+	$(info $(SP)  kofwinmon     the Windows event monitor    (cross-builds w/ mingw))
 	$(info $(SP)  kofwintrace   run a program and trace it          (Windows only))
 	$(info $(SP)  tools         all six of the above)
 	$(info $(SP)  databases     compile bases/ into the shipping databases)
@@ -872,17 +872,65 @@ $(OUT)/bin/ksigbuilder$(EXE): ksigbuilder/ksigbuilder.c $(LIB) $(SDK_HDR) $(STAM
 # in libkofeng includes kofgrille.h, so the dependency runs one way and stays that
 # way by failing to compile otherwise rather than by a note asking for care.
 #
-# WINDOWS ONLY, AND THAT IS A COST RATHER THAN A DETAIL: none of this can be
-# built or tested on a Linux CI. What keeps it from being a hole is the split
-# inside the library - wevt_ring.c and the UTF-16 conversion in wevt_decode.c
-# call no Windows API at all, deliberately, because they are the parts with
-# arithmetic in them and therefore the parts with bugs in them. When the trace
-# recorder lands, the replay path joins them on that side of the line and the
-# untestable remainder is the thin layer that only talks to ETW.
+# WINDOWS TARGET, BUT NOT A WINDOWS-ONLY BUILD - AND THE DIFFERENCE IS THE
+# WHOLE REASON THIS BLOCK IS SHAPED LIKE THIS.
+#
+# It used to be gated on `NATIVE_OS == windows`, so a Linux tree compiled not
+# one line of it. That is not the same cost as "cannot be tested": the tree is
+# built with -Wall -Wextra -Wconversion -Wsign-conversion and a second probed
+# tier on top, and a warning is worth exactly as many times as somebody sees
+# it. A directory no CI ever compiles is a directory where they pile up unseen,
+# which is what had already happened - two -Wcast-qual findings sat in
+# wevt_decode.c from the day it landed, in a tree whose Makefile says it passes
+# that tier with zero findings.
+#
+# So the gate is now the TOOLCHAIN, not the host. On Windows nothing changes.
+# On anything else a mingw cross-compiler builds it if one is installed, and if
+# none is, this block quietly does not exist exactly as before.
+#
+# Cross-compiling still cannot RUN any of it - there is no ETW on Linux and no
+# pretending otherwise. It type-checks every line and links every symbol, and
+# the half that CAN run (wevt_ring.c, wfilter.c, wtext.c) is covered natively
+# by tests/unit/grille_host.c.
 ifeq ($(NATIVE_OS),windows)
+WIN_CC ?= $(CC)
+WIN_AR ?= $(AR)
+else
+WIN_CC ?= $(shell command -v x86_64-w64-mingw32-gcc 2>/dev/null)
+WIN_AR ?= $(shell command -v x86_64-w64-mingw32-ar 2>/dev/null)
+endif
+
+# .exe whichever host built it, because the artefact is a Windows binary. $(EXE)
+# is the NATIVE suffix and is empty on Linux, which would name a PE file
+# something no Windows will execute by double-click.
+WIN_EXE := .exe
+
+ifneq ($(WIN_CC),)
+ifneq ($(WIN_AR),)
+
+#
+# THE WARNING SET, RESTATED RATHER THAN TAKEN FROM $(CFLAGS).
+#
+# $(CFLAGS) carries the host's include paths, the build-stamp defines and
+# whatever a sanitiser target appended - none of which a mingw cross-compiler
+# can use. What has to match is the WARNINGS, so that a finding here is the
+# same finding the rest of the tree would have reported. Natively there is no
+# such distinction and $(CFLAGS) is used unchanged.
+#
+ifeq ($(NATIVE_OS),windows)
+WIN_CFLAGS  := $(CFLAGS)
+WIN_LDFLAGS := $(LDFLAGS)
+else
+WIN_CFLAGS  := -std=c11 -O2 -g -fno-common \
+               -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
+               -Wpointer-arith -Wstrict-prototypes -Wmissing-prototypes \
+               $(KOF_WARN_PORTABLE) $(KOF_WARN_GCC) -MMD -MP
+WIN_LDFLAGS :=
+endif
 
 WIN_SRC := libkofgrille/wevt_ring.c \
            libkofgrille/wfilter.c \
+           libkofgrille/wtext.c \
            libkofgrille/wevt_decode.c \
            libkofgrille/wevt_etw.c
 
@@ -891,11 +939,11 @@ WINLIB  := $(SDK)/lib/libkofgrille.a
 
 $(INT)/win_%.o: libkofgrille/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille -c $< -o $@
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -c $< -o $@
 
 $(WINLIB): $(WIN_OBJ)
 	@$(call MKDIR,$(dir $@))
-	$(AR) rcs $@ $^
+	$(WIN_AR) rcs $@ $^
 
 # tdh for the one-time schema lookup, advapi32 for the session itself. Both are
 # import libraries that ship with every Windows toolchain, so this adds nothing
@@ -909,27 +957,27 @@ WIN_LDLIBS := -ltdh -ladvapi32
 # the process-name table, the summary.
 WINMON_SHARED := kofwinmon/wrender.c
 
-$(OUT)/bin/kofwinmon$(EXE): kofwinmon/kofwinmon.c $(WINMON_SHARED) $(WINLIB) $(STAMP)
+$(OUT)/bin/kofwinmon$(WIN_EXE): kofwinmon/kofwinmon.c $(WINMON_SHARED) $(WINLIB) $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille -Ikofwinmon \
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ikofwinmon \
 	      kofwinmon/kofwinmon.c $(WINMON_SHARED) $(WINLIB) -o $@ \
-	      $(LDFLAGS) $(WIN_LDLIBS)
+	      $(WIN_LDFLAGS) $(WIN_LDLIBS)
 
-$(OUT)/bin/kofwintrace$(EXE): kofwinmon/kofwintrace.c $(WINMON_SHARED) $(WINLIB) $(STAMP)
+$(OUT)/bin/kofwintrace$(WIN_EXE): kofwinmon/kofwintrace.c $(WINMON_SHARED) $(WINLIB) $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille -Ikofwinmon \
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ikofwinmon \
 	      kofwinmon/kofwintrace.c $(WINMON_SHARED) $(WINLIB) -o $@ \
-	      $(LDFLAGS) $(WIN_LDLIBS)
+	      $(WIN_LDFLAGS) $(WIN_LDLIBS)
 
 kofgrille: $(WINLIB)
 	$(info $(SP)  $<)
 	@$(NOOP)
 
-kofwinmon: $(OUT)/bin/kofwinmon$(EXE)
+kofwinmon: $(OUT)/bin/kofwinmon$(WIN_EXE)
 	$(info $(SP)  $<)
 	@$(NOOP)
 
-kofwintrace: $(OUT)/bin/kofwintrace$(EXE)
+kofwintrace: $(OUT)/bin/kofwintrace$(WIN_EXE)
 	$(info $(SP)  $<)
 	@$(NOOP)
 
@@ -937,8 +985,22 @@ kofwintrace: $(OUT)/bin/kofwintrace$(EXE)
 # prerequisite naming a variable this block sets would expand to nothing:
 # make expands a rule's prerequisites when it reads the rule, and that happens
 # hundreds of lines before this.
+#
+# ADDED TO `tools` ONLY WHERE THEY ARE THE HOST'S OWN BINARIES.
+#
+# A Linux `make tools` must not start requiring a cross-compiler, and a PE file
+# it could not run has no business in a native tools build. Cross-building is
+# what `make kofgrille` and `make kofwinmon` are for, and the CI asks for those
+# by name.
+#
+# Written here rather than beside the other `tools` prerequisites because make
+# expands a rule's prerequisites when it READS the rule, hundreds of lines
+# above this, where none of these variables are set yet.
+ifeq ($(NATIVE_OS),windows)
 tools: kofwinmon kofwintrace
+endif
 
+endif
 endif
 
 # ------------------------------------------------------------- the database
@@ -1102,6 +1164,33 @@ $(TEST)/unit_%$(EXE): tests/unit/%.c $(LIB) $(STAMP) | $(TEST)
 # pattern variable: exactly one test needs this, and a rule states the whole
 # dependency in the place somebody reading the recipe is already looking.
 EDITOR_SRC := kofexamine/kofeditor.c kofexamine/kofinspect.c
+
+#
+# THE ETW-FREE HALF OF libkofgrille, TESTED ON WHATEVER HOST IS RUNNING.
+#
+# Not linked against $(LIB): libkofgrille is a SIBLING of libkofeng and nothing
+# in either includes the other's header, so a test that pulled the engine in
+# would be the first thing in the tree to cross that line.
+#
+# These three files are the ones their own headers promise call no Windows API,
+# and the promise is worth what compiles it. It is checked here rather than
+# assumed: the sources are listed explicitly, so the day somebody adds
+# #include <windows.h> to one of them this test stops building on Linux and
+# says which file did it. That is the whole enforcement mechanism, and it has
+# already caught one - kofw_evt_image() and kofw_evt_object() were in
+# wevt_decode.c, so wfilter.c could not link without the Windows half.
+GRILLE_HOST_SRC := libkofgrille/wevt_ring.c libkofgrille/wfilter.c \
+                   libkofgrille/wtext.c
+
+$(TEST)/unit_grille_host$(EXE): tests/unit/grille_host.c $(GRILLE_HOST_SRC) \
+                                $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille $< $(GRILLE_HOST_SRC) -o $@ \
+	      $(LDFLAGS)
+
+$(TEST)/asan_grille_host$(EXE): tests/unit/grille_host.c $(GRILLE_HOST_SRC) \
+                                $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(ASAN_FLAGS) $(DEPTO) -Ilibkofgrille $< \
+	      $(GRILLE_HOST_SRC) -o $@ $(LDFLAGS) $(ASAN_FLAGS)
 
 $(TEST)/unit_cond_expr$(EXE): tests/unit/cond_expr.c $(EDITOR_SRC) $(LIB) \
                               $(SDK_HDR) $(STAMP) | $(TEST)
