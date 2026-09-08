@@ -517,9 +517,10 @@ uint8_t *kof_pack_build(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n
 
 	off = kof_round_up(sizeof(struct kof_pack_hdr), KOF_PACK_SEC_ALIGN);
 	for (i = 0; i < KOF_SEC_COUNT; i++) {
-		uint64_t a = (i == KOF_SEC_CODE) ? KOF_PACK_CODE_ALIGN
-						 : KOF_PACK_SEC_ALIGN;
-		off = kof_round_up(off, a);
+		/* Every section the same; the code section stopped being page
+		 * aligned in the file - see KOF_PACK_SEC_ALIGN for what that
+		 * cost and why nothing needed it. */
+		off = kof_round_up(off, KOF_PACK_SEC_ALIGN);
 		at[i] = off;
 		off += len[i];
 	}

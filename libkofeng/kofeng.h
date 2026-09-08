@@ -541,7 +541,15 @@ int         kof_engine_multimatch(const kof_engine *, uint64_t *bytes,
  * says it must not.
  */
 #define KOFENG_MAJOR 2u
-#define KOFENG_MINOR 0u
+/*
+ * 1 - the database loader and writer changed together.
+ *
+ * kofpackw stopped page aligning the code section and kofdb stopped expecting
+ * it to be, which is a change in this library's own code and so belongs here as
+ * well as in KOF_PACK_MINOR. It still gates nothing: a pack says its own layout
+ * and that is what the loader refuses on.
+ */
+#define KOFENG_MINOR 1u
 
 /* The Makefile passes the real stamp; this only keeps a stray compilation
  * building, the same way KOF_PACK_BUILD does. */

@@ -159,7 +159,23 @@
  * distinguishable is a per-module question - one module declaring what it needs
  * - and not something a file-wide refusal can answer.
  */
-#define KOF_PACK_MINOR 0u
+/*
+ * 1 - the code section is no longer page aligned in the file.
+ *
+ * A layout move by the rule above: KOF_PACK_CODE_ALIGN went from 4096 to
+ * KOF_PACK_SEC_ALIGN, so the code section starts where the sections before it
+ * ended rather than on the next page. Nothing about a module or a record
+ * changed; where the section sits did, and that is exactly what this number is
+ * for.
+ *
+ * A 1.0 pack still loads: its code section is 4096-aligned, which is also
+ * 64-aligned, so the validator accepts it unchanged. A 1.1 pack is refused by a
+ * 1.0 engine, which is the correct direction and what "refused if higher"
+ * buys.
+ *
+ * Measured on the shipped set: 123,196 bytes of database became 49,148.
+ */
+#define KOF_PACK_MINOR 1u
 
 /*
  * WHEN, as YYYYMMDDHH in UTC - 2026090514 for 14:00 on the 5th.
@@ -332,11 +348,31 @@ struct kof_pack_sec {
 	uint64_t len;
 };
 
-/* Section start alignment. 64 puts each prefilter column on a cache line, which is
- * the only reason any of them is aligned at all. Code is page aligned so that a
- * future zero-copy mapping is a decision and not a re-layout. */
+/*
+ * Section start alignment. 64 puts each prefilter column on a cache line, which
+ * is the only reason any of them is aligned at all.
+ *
+ * THE CODE SECTION USED TO BE PAGE ALIGNED IN THE FILE, AND THAT COST MORE
+ * THAN THE WHOLE REST OF THE DATABASE.
+ *
+ * The reason given was that a future zero-copy mapping should be a decision
+ * rather than a re-layout. Measured on the shipped signature set: 21 packs, 63
+ * modules, 27.8 KB of actual content in 123 KB of files - and the difference
+ * was almost entirely this. sigs-elf-x64.ksig carried 3132 bytes of zeros to
+ * push 54 bytes of code onto a page boundary in a FILE nobody maps.
+ *
+ * Nobody maps it because the loader does not: kof_db_open sizes an anonymous
+ * arena, memcpy's each pack's code section into it and rounds the ARENA offset
+ * to KOF_PACK_BLOB_ALIGN as it goes. Where a blob lands in memory is decided
+ * there and owes nothing to where it sat in the file. The AArch64-on-Windows
+ * requirement below is satisfied by that arena rounding, not by this.
+ *
+ * So the file no longer pays for a mapping path that does not exist. If one is
+ * ever written it will need a pack laid out for it, and that is a format
+ * decision to make then - with the measurement above in front of whoever makes
+ * it.
+ */
 #define KOF_PACK_SEC_ALIGN  64u
-#define KOF_PACK_CODE_ALIGN 4096u
 
 /*
  * Each blob inside the code section, so an entry point is never misaligned for

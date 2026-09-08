@@ -4304,9 +4304,106 @@ static int artefact_load(struct artefact *a, const char *blob_path)
 	return meta_load(a) && names_load(a) && strs_load(a);
 }
 
+/*
+ * WHICH PACK A FORMAT BELONGS IN.
+ *
+ * Derived from enum kof_format by a switch with no default, so a format added
+ * to the engine and not assigned here fails to compile rather than silently
+ * landing in a pack somebody has to notice is wrong.
+ *
+ * Executables stay apart by format - an ELF pack and a PE pack - because that
+ * is the split a person reading a database directory expects and because they
+ * are the two that will grow. Archives and documents are gathered, because
+ * "which container was it" is a question the per-module column answers and not
+ * one worth a file each.
+ */
+enum pack_bucket {
+	BUCKET_NONE = -1,
+	BUCKET_ELF = 0, BUCKET_PE, BUCKET_MACHO,
+	BUCKET_ARCHIVE, BUCKET_DOC, BUCKET_TEXT, BUCKET_RAW
+};
+
+static int bucket_of_format(uint32_t fmt)
+{
+	switch (fmt) {
+	case KOF_FMT_ELF:     return BUCKET_ELF;
+	case KOF_FMT_PE:      return BUCKET_PE;
+	case KOF_FMT_MACHO:   return BUCKET_MACHO;
+	case KOF_FMT_GZIP:
+	case KOF_FMT_ZIP:
+	case KOF_FMT_TAR:
+	case KOF_FMT_7Z:
+	case KOF_FMT_RAR:
+	case KOF_FMT_XZ:
+	/*
+	 * DOCZIP IS AN ARCHIVE HERE, not a document, and the distinction is
+	 * about what an unpacker targets rather than what a user opens.
+	 *
+	 * A .docx IS a zip file; the unpacker that opens one is the zip
+	 * unpacker, and it declares ZIP|DOCZIP. Filing DOCZIP under documents
+	 * split that mask across two buckets, which made it bucketless and gave
+	 * it a pack of its own sitting next to unpack-archive - the exact
+	 * untidiness this grouping exists to remove. The doc bucket is for
+	 * containers that are documents in their own right: OLE, RTF, PDF.
+	 */
+	case KOF_FMT_DOCZIP:  return BUCKET_ARCHIVE;
+	case KOF_FMT_DOCOLE:
+	case KOF_FMT_RTF:
+	case KOF_FMT_PDF:     return BUCKET_DOC;
+	case KOF_FMT_SCRIPT:
+	case KOF_FMT_TEXT:    return BUCKET_TEXT;
+	case KOF_FMT_UNKNOWN: return BUCKET_RAW;
+	default:              return BUCKET_NONE;
+	}
+}
+
+static const char *bucket_name(int b)
+{
+	switch (b) {
+	case BUCKET_ELF:     return "elf";
+	case BUCKET_PE:      return "pe";
+	case BUCKET_MACHO:   return "macho";
+	case BUCKET_ARCHIVE: return "archive";
+	case BUCKET_DOC:     return "doc";
+	case BUCKET_TEXT:    return "text";
+	case BUCKET_RAW:     return "raw";
+	default:             return "";
+	}
+}
+
+/*
+ * The bucket a whole target mask belongs to, or BUCKET_NONE when its bits do
+ * not agree.
+ *
+ * A module targeting ELF and PE together is not an executable-bucket module,
+ * it is its own thing - and it keeps its own pack rather than being filed under
+ * whichever half was tested first.
+ */
+static int bucket_of_mask(uint32_t mask)
+{
+	int b = BUCKET_NONE;
+	uint32_t f;
+
+	for (f = 0; f < 32u; f++) {
+		int this_b;
+
+		if (!(mask & (1u << f)))
+			continue;
+		this_b = bucket_of_format(f);
+		if (this_b == BUCKET_NONE)
+			return BUCKET_NONE;
+		if (b == BUCKET_NONE)
+			b = this_b;
+		else if (b != this_b)
+			return BUCKET_NONE;
+	}
+	return b;
+}
+
 /* A set of artefacts sharing one grouping key, which is one pack. */
 struct group {
 	uint32_t  kind, target_mask, arch_mask;
+	int       bucket;                /* enum pack_bucket, or BUCKET_NONE */
 	uint32_t *member;                /* indices into the artefact array */
 	uint32_t  n, cap;
 };
@@ -5326,10 +5423,36 @@ static int pack_main(int argc, char **argv)
 	 * property that makes this cheap however large the set gets. */
 	for (a = 0; a < n_arts; a++) {
 		struct group *g = NULL;
+		int ab = bucket_of_mask(arts[a].target_mask);
+
+		/*
+		 * BY BUCKET, AND ARCHITECTURE IS NOT PART OF THE KEY.
+		 *
+		 * It used to be one pack per exact (kind, target_mask,
+		 * arch_mask), on the reasoning that a pack whose any_target is
+		 * exactly M lets the scanner skip the whole file in one
+		 * comparison instead of N.
+		 *
+		 * That comparison does not exist. any_target, any_scan and
+		 * any_arch are written into every pack header by the writer and
+		 * are read by NOTHING - grep the tree. What actually filters is
+		 * KOF_SEC_PRE_TARGET and KOF_SEC_PRE_ARCH, the per-module
+		 * columns the scanner sweeps at kofdb.c:569. So the split was
+		 * buying a skip that was never wired up, and charging a whole
+		 * file for it: sigs-elf-x86.ksig held ONE module and cost 4164
+		 * bytes, of which 3132 were zeros.
+		 *
+		 * If a pack-level prefilter is ever implemented, the header
+		 * fields are still there and still correct - the writer unions
+		 * them from the members, so a merged pack gets a wider union and
+		 * skips less, which costs sweeps and never a detection.
+		 */
 		for (j = 0; j < n_groups; j++)
 			if (groups[j].kind == arts[a].kind &&
-			    groups[j].target_mask == arts[a].target_mask &&
-			    groups[j].arch_mask == arts[a].arch_mask) {
+			    ((ab != BUCKET_NONE && groups[j].bucket == ab) ||
+			     (ab == BUCKET_NONE &&
+			      groups[j].bucket == BUCKET_NONE &&
+			      groups[j].target_mask == arts[a].target_mask))) {
 				g = &groups[j];
 				break;
 			}
@@ -5345,8 +5468,22 @@ static int pack_main(int argc, char **argv)
 			g = &groups[n_groups++];
 			memset(g, 0, sizeof *g);
 			g->kind        = arts[a].kind;
+			g->bucket      = ab;
 			g->target_mask = arts[a].target_mask;
 			g->arch_mask   = arts[a].arch_mask;
+		} else {
+			/*
+			 * The union, for the name. arch_mask 0 means ANY, so
+			 * it absorbs rather than being absorbed - a pack
+			 * holding one arch-any module is an arch-any pack, and
+			 * OR-ing 0 into a specific mask would claim the
+			 * opposite.
+			 */
+			g->target_mask |= arts[a].target_mask;
+			if (g->arch_mask == 0u || arts[a].arch_mask == 0u)
+				g->arch_mask = 0u;
+			else
+				g->arch_mask |= arts[a].arch_mask;
 		}
 		if (!group_add(g, a))
 			goto done;
@@ -5435,13 +5572,36 @@ static int pack_main(int argc, char **argv)
 			size_t aat = 0;
 
 			if (g->kind != KOF_PACK_UNPACK ||
-			    !label_one(arts, g->member, g->n, fmt, sizeof fmt))
-				if (!format_list(g->target_mask, fmt, sizeof fmt))
+			    !label_one(arts, g->member, g->n, fmt, sizeof fmt)) {
+				/*
+				 * The bucket names the pack when there is one:
+				 * "archive" rather than "zip+tar+gzip+xz+rar+
+				 * sevenzip", which is what the union spells and
+				 * which nobody can read. The format list stays
+				 * for a mask whose bits do not agree on a
+				 * bucket, because there the exact set IS the
+				 * only honest name.
+				 */
+				const char *bn = bucket_name(g->bucket);
+
+				if (*bn)
+					snprintf(fmt, sizeof fmt, "%s", bn);
+				else if (!format_list(g->target_mask, fmt,
+						      sizeof fmt))
 					snprintf(fmt, sizeof fmt, "x%x",
 						 g->target_mask);
+			}
 
+			/*
+			 * ARCHITECTURE IS NEVER IN THE NAME ANY MORE, because
+			 * it is no longer in the key: an x86-only module and an
+			 * arch-any one share a pack, so a suffix naming one of
+			 * them would describe the pack wrongly. Which
+			 * architectures a pack covers is in its header and in
+			 * the per-module column, where it is read.
+			 */
 			arch[0] = 0;
-			if (g->arch_mask) {
+			if (0) {
 				uint32_t ab;
 
 				for (ab = 0; ab < 32u; ab++) {

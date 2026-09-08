@@ -283,8 +283,11 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 
 	for (i = 0; i < KOF_SEC_COUNT; i++) {
 		uint64_t off = h->sec[i].off, n = h->sec[i].len;
-		uint64_t align = (i == KOF_SEC_CODE) ? KOF_PACK_CODE_ALIGN
-						     : KOF_PACK_SEC_ALIGN;
+		/* One alignment for every section now that the code section is
+		 * not page aligned in the file - see KOF_PACK_SEC_ALIGN. Where
+		 * a blob lands in MEMORY is decided by the arena rounding in
+		 * kof_db_open, which is the requirement that actually exists. */
+		uint64_t align = KOF_PACK_SEC_ALIGN;
 
 		if (off > len || n > len - off)
 			REFUSE("section %llu runs outside the file",
