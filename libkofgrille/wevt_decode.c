@@ -552,6 +552,7 @@ static struct kofw_schema *learn(struct kofw_schema_cache *c, uint8_t prov,
 		const EVENT_PROPERTY_INFO *pi = &info->EventPropertyInfoArray[i];
 		const wchar_t *name;
 		uint16_t in_type, fx;
+		uint8_t  len_from;
 
 		if (sc->n_prop >= KOFW_SCHEMA_MAX_PROP) {
 			sc->truncated = 1;
@@ -565,10 +566,33 @@ static struct kofw_schema *learn(struct kofw_schema_cache *c, uint8_t prov,
 		 * the header for why a wrong offset is worse than a missing
 		 * field.
 		 */
-		if (pi->Flags & (PropertyStruct | PropertyParamLength |
-				 PropertyParamCount)) {
+		if (pi->Flags & (PropertyStruct | PropertyParamCount)) {
 			sc->truncated = 1;
 			break;
+		}
+
+		/*
+		 * A LENGTH THAT IS ANOTHER PROPERTY'S VALUE - resolved rather
+		 * than refused. See kofw_prop.len_from for what this unblocked.
+		 *
+		 * Accepted only when that property is already in the shape and
+		 * is a fixed-size integer, so its offset is known before this
+		 * one is reached and reading it is arithmetic rather than a
+		 * guess. Anything else still stops the walk.
+		 */
+		len_from = 0;
+		if (pi->Flags & PropertyParamLength) {
+			USHORT li = pi->lengthPropertyIndex;
+
+			if (li < sc->n_prop && sc->prop[li].fixed &&
+			    sc->prop[li].fixed <= 4u &&
+			    sc->prop[li].in_type != TDH_INTYPE_UNICODESTRING &&
+			    sc->prop[li].in_type != TDH_INTYPE_ANSISTRING) {
+				len_from = (uint8_t)(li + 1u);
+			} else {
+				sc->truncated = 1;
+				break;
+			}
 		}
 
 		in_type = pi->nonStructType.InType;
@@ -604,8 +628,14 @@ static struct kofw_schema *learn(struct kofw_schema_cache *c, uint8_t prov,
 
 		name = (const wchar_t *)((const char *)info + pi->NameOffset);
 
-		sc->prop[sc->n_prop].in_type = in_type;
-		sc->prop[sc->n_prop].fixed   = fx;
+		sc->prop[sc->n_prop].in_type  = in_type;
+		sc->prop[sc->n_prop].fixed    = fx;
+		sc->prop[sc->n_prop].len_from = len_from;
+		/* A length that comes from elsewhere is not a fixed size, and
+		 * leaving `fixed` set would make the walk step by the wrong
+		 * amount before ever consulting it. */
+		if (len_from)
+			sc->prop[sc->n_prop].fixed = 0;
 		sc->prop[sc->n_prop].field   = pi->NameOffset
 						       ? field_of(name, type, prov)
 						       : KOFW_FLD_SKIP;
@@ -698,6 +728,7 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 	uint16_t spare_type = 0;
 	uint16_t id, type;
 	uint32_t want;
+	size_t   prop_at[KOFW_SCHEMA_MAX_PROP];
 	uint8_t  prov;
 	uint8_t  i;
 
@@ -756,6 +787,14 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 	total = rec->UserDataLength;
 	off   = 0;
 
+	/*
+	 * WHERE EACH PROPERTY LANDED, so a property whose length is another
+	 * property's value can read that value. Only the fixed-size ones are
+	 * ever consulted - see kofw_prop.len_from - and the walk is strictly
+	 * forward, so the entry is always written before it is read.
+	 */
+	memset(prop_at, 0, sizeof prop_at);
+
 	for (i = 0; i < sc->n_prop; i++) {
 		const struct kofw_prop *pr = &sc->prop[i];
 		size_t len = pr->fixed;
@@ -763,7 +802,27 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 		if (off >= total)
 			break;
 
-		if (len == 0) {
+		prop_at[i] = off;
+
+		if (pr->len_from) {
+			/* The length is the value of a property already
+			 * walked. Read it at its recorded offset rather than
+			 * re-deriving where it was. */
+			const struct kofw_prop *lp = &sc->prop[pr->len_from - 1u];
+			size_t lat = prop_at[pr->len_from - 1u];
+			uint32_t v = 0;
+
+			if (lat + lp->fixed > total)
+				break;
+			if (lp->fixed == 1u)
+				v = base[lat];
+			else if (lp->fixed == 2u)
+				v = (uint32_t)base[lat] |
+				    ((uint32_t)base[lat + 1u] << 8);
+			else
+				v = rd_u32(base + lat);
+			len = v;
+		} else if (len == 0) {
 			len = measure(pr->in_type, base + off, total - off);
 			if (len == SIZE_MAX)
 				break;
@@ -895,6 +954,34 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 				n = kofw_ansi_to_text(base + off, len,
 						      out->text + tnext, room,
 						      &cut);
+			/*
+			 * A BINARY BUFFER, which is what AMSI's `content` is.
+			 *
+			 * Not a string type, so it used to be skipped entirely
+			 * - the second of the two reasons the one field that
+			 * subscription exists for never appeared.
+			 *
+			 * WHICH ENCODING IS A HEURISTIC AND IS LABELLED AS
+			 * ONE: a PowerShell script block arrives as UTF-16 and
+			 * a macro body as bytes, and the provider does not say
+			 * which. Two NUL high bytes in the first four is the
+			 * test. Guessing wrong costs legibility and nothing
+			 * else - the bytes are sanitised either way, and the
+			 * raw record still carries what arrived.
+			 */
+			else if (pr->in_type == TDH_INTYPE_BINARY) {
+				if (len >= 4u && base[off + 1u] == 0 &&
+				    base[off + 3u] == 0)
+					n = kofw_utf16_to_utf8(
+						(const uint16_t *)(const void *)
+							(base + off),
+						len / 2u, out->text + tnext,
+						room, &cut);
+				else
+					n = kofw_bytes_to_text(base + off, len,
+							       out->text + tnext,
+							       room, &cut);
+			}
 			else
 				got = 0;
 

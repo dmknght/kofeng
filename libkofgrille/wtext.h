@@ -54,4 +54,15 @@ size_t kofw_utf16_to_utf8(const uint16_t *src, size_t src_chars,
 size_t kofw_ansi_to_text(const uint8_t *src, size_t n, char *dst,
 			 size_t dst_cap, int *cut);
 
+/*
+ * The same, for a BUFFER rather than a string: it does not stop at a NUL.
+ *
+ * That difference is the whole reason it exists. A submitted script block is a
+ * length-delimited buffer that may contain NULs, and reading it with the
+ * string version returns everything up to the first one - which for a UTF-16
+ * buffer read as bytes is exactly one character.
+ */
+size_t kofw_bytes_to_text(const uint8_t *src, size_t n, char *dst,
+			  size_t dst_cap, int *cut);
+
 #endif /* KOFGRILLE_WTEXT_H */

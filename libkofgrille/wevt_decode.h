@@ -84,6 +84,30 @@ struct kofw_prop {
 	uint8_t  field;     /* enum kofw_field */
 
 	/*
+	 * WHERE THIS PROPERTY'S LENGTH COMES FROM, when it comes from another
+	 * property: that property's index plus one, or 0 for the ordinary case.
+	 *
+	 * The walk used to STOP at any such property, on the grounds that a
+	 * length which is another property's value cannot be stepped over
+	 * without interpreting the payload. That is true and it is also not a
+	 * reason to stop, because interpreting the payload is exactly what this
+	 * loop is doing - the length property has already been walked, its
+	 * offset is known, and reading an integer that the schema itself
+	 * described is not a guess.
+	 *
+	 * It stopped one thing in particular: AMSI's `content` is sized by
+	 * `contentsize`, so the shape truncated AT the buffer, and the one
+	 * field the whole AMSI subscription exists for was the one field never
+	 * decoded. The events arrived, they decoded, and they carried no
+	 * content - which reads exactly like a provider that does not send it.
+	 *
+	 * Only a length property that is FIXED-SIZE and ALREADY WALKED is
+	 * accepted. Anything else still truncates, because there the objection
+	 * does hold.
+	 */
+	uint8_t  len_from;
+
+	/*
 	 * The manifest's own name for this property, kept rather than discarded
 	 * once it has been matched.
 	 *

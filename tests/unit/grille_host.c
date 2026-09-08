@@ -226,6 +226,62 @@ static void t_ansi(void)
 	}
 }
 
+/* ---- a buffer is not a C string ----------------------------------------- */
+
+/*
+ * WHAT BLOCKED AMSI CONTENT, half of it, tested where it can be tested.
+ *
+ * A submitted script block is a length-delimited BUFFER. Read with the string
+ * conversion it ends at the first NUL - and a UTF-16 buffer read as bytes has
+ * a NUL at index 1, so the whole submission comes back as one character.
+ */
+static void t_bytes(void)
+{
+	char buf[64];
+	int  cut = 0;
+	size_t n;
+
+	{
+		static const uint8_t utf16le[] = {
+			'e', 0, 'c', 0, 'h', 0, 'o', 0
+		};
+
+		/* The string version stops dead at the first high byte. */
+		n = kofw_ansi_to_text(utf16le, sizeof utf16le, buf,
+				      sizeof buf, &cut);
+		eq_u64("ansi stops at NUL", n, 1);
+
+		/* The buffer version does not. */
+		n = kofw_bytes_to_text(utf16le, sizeof utf16le, buf,
+				       sizeof buf, &cut);
+		eq_u64("bytes keeps going", n, sizeof utf16le);
+		eq_str("bytes readable", buf, "e.c.h.o.");
+	}
+
+	/* Read as what it is, it is just text. */
+	{
+		static const uint16_t script[] = {
+			'e', 'c', 'h', 'o', ' ', 'h', 'i'
+		};
+		n = kofw_utf16_to_utf8(script, 7, buf, sizeof buf, &cut);
+		eq_str("utf16 script", buf, "echo hi");
+		eq_u64("utf16 script len", n, 7);
+	}
+
+	/* A buffer that does not fit is cut and says so. */
+	{
+		static const uint8_t big[32] = { 0 };
+		char small[5];
+
+		cut = 0;
+		n = kofw_bytes_to_text(big, sizeof big, small, sizeof small,
+				       &cut);
+		eq_u64("bytes cut len", n, 4);
+		if (!cut)
+			fail("bytes", "was cut and did not say so");
+	}
+}
+
 /* ---- path classification ------------------------------------------------ */
 
 static void loc_is(const char *path, uint8_t want)
@@ -824,6 +880,7 @@ int main(void)
 	t_type_names();
 	t_utf16();
 	t_ansi();
+	t_bytes();
 	t_classify();
 	t_ring();
 	t_scope();

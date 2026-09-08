@@ -18,6 +18,36 @@ _Static_assert(KOFW_REC_SIZE - KOFW_REC_HEAD <= KOF_EVT_SIZE - KOF_EVT_HEAD,
 	       "collector's - a conversion would silently truncate paths");
 
 
+size_t kofw_bytes_to_text(const uint8_t *src, size_t n, char *dst,
+			  size_t dst_cap, int *cut)
+{
+	size_t i, o = 0;
+
+	if (cut)
+		*cut = 0;
+	if (!dst || dst_cap == 0)
+		return 0;
+
+	for (i = 0; i < n; i++) {
+		uint8_t b = src[i];
+
+		if (o + 1 >= dst_cap) {
+			if (cut)
+				*cut = 1;
+			break;
+		}
+		/* A NUL becomes a dot rather than an ending - see wtext.h. */
+		if (b < 0x20u || b == 0x7fu)
+			b = (uint8_t)'.';
+		else if (b >= 0x80u)
+			b = (uint8_t)'?';
+		dst[o++] = (char)b;
+	}
+
+	dst[o] = '\0';
+	return o;
+}
+
 /* ------------------------------------------------------------------ UTF-16 */
 
 /*
