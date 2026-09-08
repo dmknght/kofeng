@@ -59,6 +59,10 @@ static void usage(void)
 	      "  --file-write     ... and to writes into existing files\n"
 	      "  --net            subscribe to network events\n"
 	      "  --registry       subscribe to registry create/set/delete\n"
+	      "  --thread         subscribe to thread create/exit - the only\n"
+	      "                   in-box view of an in-memory module load\n"
+	      "  --no-system-logger  plain session, if a provider delivers\n"
+	      "                   nothing after enabling successfully\n"
 	      "  --all            every provider, system images and raw events\n"
 	      "\n"
 	      "Process start/stop is always on: everything else is scoped BY a\n"
@@ -89,7 +93,7 @@ int main(int argc, char **argv)
 	uint64_t t_wall0, t_ev0 = 0;
 	int      quiet = 0, show_schema = 0, show_raw = 0, show_all_img = 0;
 	int      want_file = 0, want_image = 0, want_net = 0, want_write = 0;
-	int      want_reg = 0;
+	int      want_reg = 0, want_thread = 0;
 	struct kofw_filter filt;
 	int      err = 0, i;
 
@@ -122,6 +126,10 @@ int main(int argc, char **argv)
 			want_net = 1;
 		else if (!strcmp(argv[i], "--registry"))
 			want_reg = 1;
+		else if (!strcmp(argv[i], "--thread"))
+			want_thread = 1;
+		else if (!strcmp(argv[i], "--no-system-logger"))
+			opt.no_system_logger = 1;
 		/*
 		 * Everything, which is what kofwintrace takes by default and
 		 * what kofwinmon does NOT: this one watches the whole machine
@@ -160,7 +168,8 @@ int main(int argc, char **argv)
 			(want_file  ? KOFW_SUB_FILE  : 0u) |
 			(want_write ? KOFW_SUB_FILE_WRITE : 0u) |
 			(want_net   ? KOFW_SUB_NET   : 0u) |
-			(want_reg   ? KOFW_SUB_REGISTRY : 0u);
+			(want_reg   ? KOFW_SUB_REGISTRY : 0u) |
+			(want_thread ? KOFW_SUB_THREAD : 0u);
 
 	{
 		struct kofw_filter f;

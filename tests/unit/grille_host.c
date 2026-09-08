@@ -274,6 +274,66 @@ static void t_classify(void)
 
 	loc_is("D:\\stuff\\a.exe", KOFW_LOC_OTHER);
 
+	/*
+	 * WINDOWS FOLDS CASE, LINUX DOES NOT, and one matcher cannot do both -
+	 * so the table says per row and this is what checks it.
+	 *
+	 * Folding everything would have been the easy bug: /etc/PASSWD is a
+	 * different file from /etc/passwd, and reporting T1136.001 against it
+	 * is a finding about a file nobody touched.
+	 */
+	loc_is("C:\\WINDOWS\\SYSTEM32\\NTDLL.DLL", KOFW_LOC_SYSTEM);
+	loc_is("\\REGISTRY\\MACHINE\\SOFTWARE\\Microsoft\\Windows\\"
+	       "CURRENTVERSION\\RUN", KOFW_LOC_AUTOSTART);
+	loc_is("/etc/passwd", KOFW_LOC_CREDENTIAL);
+	loc_is("/etc/PASSWD", KOFW_LOC_OTHER);
+	loc_is("/ETC/ld.so.preload", KOFW_LOC_OTHER);
+
+	/* ---- the technique tag, which rides the same single pass -------- */
+	{
+		uint16_t att = 0xffff;
+
+		if (kofw_classify("\\REGISTRY\\MACHINE\\SOFTWARE\\Microsoft"
+				  "\\Windows\\CurrentVersion\\Run", &att)
+		    != KOFW_LOC_AUTOSTART || att != KOFW_ATT_RUN_KEY)
+			fail("attack", "a Run value is not T1547.001");
+
+		if (kofw_classify("/etc/ld.so.preload", &att)
+		    != KOFW_LOC_PRELOAD || att != KOFW_ATT_LD_PRELOAD)
+			fail("attack", "ld.so.preload is not T1574.006");
+
+		if (kofw_classify("C:\\Windows\\System32\\drivers\\etc\\"
+				  "hosts", &att) != KOFW_LOC_HOSTS ||
+		    att != KOFW_ATT_HOSTS)
+			fail("attack", "the hosts file is not T1562.001");
+
+		if (kofw_classify("\\REGISTRY\\MACHINE\\SYSTEM\\"
+				  "CurrentControlSet\\Services\\evil", &att)
+		    != KOFW_LOC_SERVICE || att != KOFW_ATT_SERVICE)
+			fail("attack", "a service key is not T1543.003");
+
+		/* Temp is not a technique. A location worth knowing and a
+		 * technique are different claims, and conflating them would
+		 * tag every ordinary download. */
+		if (kofw_classify("C:\\Users\\b\\AppData\\Local\\Temp\\a",
+				  &att) != KOFW_LOC_TEMP ||
+		    att != KOFW_ATT_NONE)
+			fail("attack", "temp carries a technique tag");
+
+		/* Every technique in the list has both an id and a name. */
+		{
+			uint16_t i;
+			for (i = 1; i < KOFW_ATT_COUNT; i++) {
+				if (!*kofw_attack_id(i) ||
+				    !*kofw_attack_name(i)) {
+					printf("  FAIL attack %u: no id or "
+					       "name\n", (unsigned)i);
+					failures++;
+				}
+			}
+		}
+	}
+
 	/* "nothing to classify" is not the same answer as "classified, and it
 	 * is nowhere interesting" - drop_loc is tested against this. */
 	loc_is("", KOFW_LOC_UNKNOWN);

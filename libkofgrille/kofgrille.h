@@ -161,6 +161,31 @@ enum kofw_evt_type {
 	KOFW_EVT_REG_SET_VALUE = 15,
 	KOFW_EVT_REG_DELETE    = 16,
 
+	/*
+	 * A THREAD STARTED, AND WHY IT IS HERE AFTER BEING REFUSED ONCE.
+	 *
+	 * The THREAD keyword was left off with the note that it is an order of
+	 * magnitude more traffic than the others and nothing reads it. The
+	 * first half is true. The second stopped being true the moment the
+	 * question became "why do we not see a DLL that was loaded in memory".
+	 *
+	 * IMAGE_LOAD fires when the kernel maps an image SECTION. A payload
+	 * that was allocated, copied, relocated and had its imports resolved by
+	 * hand never maps one, so there is no image event to miss - the event
+	 * does not exist. What such a payload almost always does next is START
+	 * A THREAD, and a thread whose start address lies in private memory
+	 * rather than inside any mapped image is the shape of a reflective load
+	 * and of a remote injection.
+	 *
+	 * That test needs the start address, and whether Kernel-Process's
+	 * ThreadStart payload carries one is NOT established here - it is
+	 * exactly what `--schema` is for. If it does, kofw_evt.addr holds it.
+	 * If it does not, this subscription is volume for nothing and should go
+	 * back off.
+	 */
+	KOFW_EVT_THREAD_START = 17,
+	KOFW_EVT_THREAD_STOP  = 18,
+
 	KOFW_EVT_TYPE_COUNT
 };
 
@@ -197,12 +222,91 @@ enum kofw_loc {
 	/* Somewhere under a user profile that is not scratch space. */
 	KOFW_LOC_USER,
 
+	/*
+	 * THE PLACES THE MATRIX PUT HERE.
+	 *
+	 * Everything from KOFW_LOC_AUTOSTART down is an ATT&CK technique that
+	 * turned out to BE a path. That is most of the persistence column and a
+	 * good part of defence evasion: T1547.001 is a Run value, T1053.005 is
+	 * a file under System32\Tasks, T1546.010 is AppInit_DLLs, T1574.006 is
+	 * /etc/ld.so.preload. None of them needs a chain of events or a window
+	 * - one write to one place is the whole finding.
+	 *
+	 * They are LOCATIONS rather than rules on purpose. The classification
+	 * already happens once per event, on the consumer thread, in one pass
+	 * over one table - so tagging the technique there costs nothing beyond
+	 * the table row. A rule engine that matched twenty path patterns per
+	 * record would be doing that work again per rule, and with the registry
+	 * subscribed there are six figures of records a second to do it to.
+	 */
+	KOFW_LOC_AUTOSTART,    /* Run keys, Startup  | ~/.config/autostart     */
+	KOFW_LOC_SERVICE,      /* Services, IFEO     | systemd units, init.d   */
+	KOFW_LOC_SCHEDULE,     /* Tasks              | cron, at, timers        */
+	KOFW_LOC_SHELL_INIT,   /* profile.ps1        | .bashrc, rc.local       */
+	KOFW_LOC_PRELOAD,      /* AppInit_DLLs       | /etc/ld.so.preload      */
+	KOFW_LOC_SSH,          /*  -                 | authorized_keys         */
+	KOFW_LOC_CREDENTIAL,   /* SAM, SECURITY      | /etc/shadow, sudoers    */
+	KOFW_LOC_KERNEL_MOD,   /* drivers            | /lib/modules            */
+	KOFW_LOC_WEB_ROOT,     /* inetpub            | /var/www - a webshell   */
+	KOFW_LOC_HOSTS,        /* drivers\etc\hosts  | /etc/hosts              */
+
 	/* Classified, and it is none of the above - which is a fact, not a
 	 * failure to decide. */
 	KOFW_LOC_OTHER,
 
+	/* Bounded because kofw_filter.drop_loc is 1u << this. */
 	KOFW_LOC_COUNT
 };
+
+/*
+ * THE TECHNIQUES THIS BUILD RECOGNISES BY PATH ALONE.
+ *
+ * An X-macro for the same reason KOF_MALTYPE_LIST is one: the enum, the
+ * technique id and the finding name are three views of one list, and a list
+ * expanded three ways cannot disagree with itself. Adding a technique is one
+ * row.
+ *
+ * The technique string is REPORTING ONLY. Nothing matches on it, nothing sums
+ * it, and no rule branches on it - it is what a reader needs to look the
+ * finding up, and giving it any other job is how a taxonomy becomes a
+ * detection engine by accident.
+ */
+#define KOFW_ATTACK_LIST(X)                                                   \
+	/*  enum                 technique     finding name              */  \
+	X(KOFW_ATT_NONE,         "",           "")                           \
+	X(KOFW_ATT_RUN_KEY,      "T1547.001",  "Persist.RunKey")             \
+	X(KOFW_ATT_STARTUP_DIR,  "T1547.001",  "Persist.StartupFolder")      \
+	X(KOFW_ATT_WINLOGON,     "T1547.004",  "Persist.Winlogon")           \
+	X(KOFW_ATT_APPINIT,      "T1546.010",  "Persist.AppInitDlls")        \
+	X(KOFW_ATT_IFEO,         "T1546.012",  "Persist.Ifeo")               \
+	X(KOFW_ATT_SERVICE,      "T1543.003",  "Persist.Service")            \
+	X(KOFW_ATT_SCHED_TASK,   "T1053.005",  "Persist.ScheduledTask")      \
+	X(KOFW_ATT_CRON,         "T1053.003",  "Persist.Cron")               \
+	X(KOFW_ATT_SYSTEMD,      "T1543.002",  "Persist.SystemdService")     \
+	X(KOFW_ATT_RC_SCRIPT,    "T1037.004",  "Persist.RcScript")           \
+	X(KOFW_ATT_SHELL_PROFILE,"T1546.004",  "Persist.ShellProfile")       \
+	X(KOFW_ATT_LD_PRELOAD,   "T1574.006",  "Hijack.LdPreload")           \
+	X(KOFW_ATT_SSH_KEY,      "T1098.004",  "Persist.SshKey")             \
+	X(KOFW_ATT_ACCOUNT_FILE, "T1136.001",  "Account.LocalFile")          \
+	X(KOFW_ATT_SUDOERS,      "T1548.003",  "Privilege.Sudoers")          \
+	X(KOFW_ATT_CRED_STORE,   "T1003",      "Credential.Store")           \
+	X(KOFW_ATT_HOSTS,        "T1562.001",  "Evade.HostsFile")            \
+	X(KOFW_ATT_KERNEL_MOD,   "T1014",      "Rootkit.KernelModule")       \
+	X(KOFW_ATT_WEB_SHELL,    "T1505.003",  "Persist.WebShell")
+
+enum kofw_attack {
+#define KOFW_ATT_X_ENUM(name, tech, word) name,
+	KOFW_ATTACK_LIST(KOFW_ATT_X_ENUM)
+#undef KOFW_ATT_X_ENUM
+	KOFW_ATT_COUNT
+};
+
+/* "T1547.001", or "" for KOFW_ATT_NONE and for a value from a newer build.
+ * Never NULL. */
+const char *kofw_attack_id(uint16_t att);
+
+/* "Persist.RunKey", or "". Never NULL. */
+const char *kofw_attack_name(uint16_t att);
 
 /* "system", "temp", ... Never NULL. */
 const char *kofw_loc_name(uint8_t loc);
@@ -214,6 +318,15 @@ const char *kofw_loc_name(uint8_t loc);
  * answer this library would give.
  */
 uint8_t kofw_classify_path(const char *path);
+
+/*
+ * The same pass, answering both questions.
+ *
+ * Separate entry point rather than two functions, because walking the table
+ * twice to get two fields off the same row is the cost this design exists to
+ * avoid. `att` may be NULL when a caller only wants the location.
+ */
+uint8_t kofw_classify(const char *path, uint16_t *att);
 
 /* "process", "file", "net". Never NULL. */
 const char *kofw_provider_name(uint8_t prov);
@@ -261,7 +374,7 @@ enum {
 
 /* Everything above text[], so the arena can be sized to fill the record
  * exactly. Asserted against the real offset in the .c. */
-#define KOFW_EVT_HEAD 84u
+#define KOFW_EVT_HEAD 96u
 
 struct kofw_evt {
 	/*
@@ -377,6 +490,15 @@ struct kofw_evt {
 	uint8_t  reserved;
 
 	/*
+	 * WHICH ATT&CK TECHNIQUE THE OBJECT PATH IS, or KOFW_ATT_NONE.
+	 *
+	 * An index rather than a string, so the record stays fixed size and a
+	 * recorded trace stays replayable. Filled by the same single pass that
+	 * fills obj_loc - see kofw_classify.
+	 */
+	uint16_t attack;
+
+	/*
 	 * THE OTHER END, for a network event and nothing else.
 	 *
 	 * IPv4 only so far: the addresses arrive as UINT32 on the ids this build
@@ -389,6 +511,21 @@ struct kofw_evt {
 	uint32_t net_daddr, net_saddr;
 	uint16_t net_dport, net_sport;
 	uint32_t net_size;
+
+	/*
+	 * AN ADDRESS THE EVENT NAMED, when it named one.
+	 *
+	 * A thread's start address today. 64 bits because a 32-bit field would
+	 * silently truncate every address on the platform this actually runs
+	 * on, and a truncated address does not look wrong - it looks like an
+	 * address, which is the failure mode this record's design exists to
+	 * refuse.
+	 *
+	 * Zero means the event carried none. Not KOFW_NA: zero is not a legal
+	 * thread entry point, so it is unambiguous here in a way it is not for
+	 * a pid.
+	 */
+	uint64_t addr;
 
 	char     text[KOFW_EVT_SIZE - KOFW_EVT_HEAD];
 };
@@ -473,11 +610,25 @@ enum {
 	 */
 	KOFW_SUB_REGISTRY = 1u << 5,
 
+	/*
+	 * Thread create and exit, from the process provider under a third
+	 * keyword. The most expensive thing in this list per unit of evidence,
+	 * and the only in-box way an unelevated-of-PPL consumer can see code
+	 * start running somewhere that is not a mapped image. See
+	 * KOFW_EVT_THREAD_START.
+	 */
+	KOFW_SUB_THREAD   = 1u << 6,
+
 	/* Everything this build can collect. What kofwintrace takes by default
 	 * - see the note there on why a discovery tool defaults to loud. */
 	KOFW_SUB_ALL = KOFW_SUB_PROCESS | KOFW_SUB_IMAGE | KOFW_SUB_FILE |
-		       KOFW_SUB_FILE_WRITE | KOFW_SUB_NET | KOFW_SUB_REGISTRY
+		       KOFW_SUB_FILE_WRITE | KOFW_SUB_NET |
+		       KOFW_SUB_REGISTRY | KOFW_SUB_THREAD
 };
+
+/* "process", "image", "file", ... for one KOFW_SUB_* bit. "" for anything
+ * else. Never NULL - it is used to print which subscriptions were refused. */
+const char *kofw_sub_name(uint32_t one_bit);
 
 /* The subject's image path, or "" when the event carried none. Never NULL. */
 const char *kofw_evt_image(const struct kofw_evt *);
@@ -539,6 +690,24 @@ struct kofw_mon_option {
 	 * which is what kofwintrace does.
 	 */
 	int trace_self;
+
+	/*
+	 * START AN ORDINARY SESSION, NOT A SYSTEM LOGGER.
+	 *
+	 * Off by default, so the session carries EVENT_TRACE_SYSTEM_LOGGER_MODE
+	 * as it always has - some kernel providers deliver nothing without it,
+	 * with no error anywhere, which is why the flag went in.
+	 *
+	 * It is exposed because the converse is also possible and is not
+	 * something this code can settle by reasoning: a system-logger session
+	 * may be what a manifest provider refuses to deliver into on a given
+	 * build, or another anti-malware product may already hold the one the
+	 * machine allows. Both look identical from here - the session starts,
+	 * EnableTraceEx2 succeeds, and one provider is silent. Turning this on
+	 * and comparing is a thirty-second experiment; deducing it is not
+	 * possible at all.
+	 */
+	int no_system_logger;
 };
 
 #define KOFW_ERR_ARG      (-1)
@@ -629,6 +798,25 @@ struct kofw_health {
 	 * had none.
 	 */
 	uint64_t seq_gaps;
+
+	/*
+	 * WHICH SUBSCRIPTIONS THE PROVIDER ACCEPTED, and which it refused.
+	 *
+	 * Masks of KOFW_SUB_*. `sub_asked & ~sub_enabled` is the set that was
+	 * asked for and is not running, and it belongs in this struct for the
+	 * same reason every other field here does: it is a reason the stream is
+	 * incomplete, and a reader about to conclude "the sample did no network
+	 * activity" has to be told the network provider never started.
+	 *
+	 * This used to be invisible in the worst possible way. One provider
+	 * refusing aborted kofw_mon_open entirely, so the only two outcomes
+	 * were "everything" and "nothing" - and when the session DID start,
+	 * nothing anywhere said whether a provider had delivered a single
+	 * record. A subscription that quietly is not running looks exactly like
+	 * a machine that is not doing that thing.
+	 */
+	uint32_t sub_asked;
+	uint32_t sub_enabled;
 
 	uint32_t etw_events_lost;
 	uint32_t etw_buffers_lost;

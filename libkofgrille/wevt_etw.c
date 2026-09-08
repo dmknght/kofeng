@@ -42,6 +42,13 @@
 #define KW_IMAGE   0x40u
 
 /*
+ * WINEVENT_KEYWORD_THREAD. Off by default and worth its cost only for one
+ * question - see KOFW_EVT_THREAD_START on why that question is the in-memory
+ * load, and why nothing else in this file can answer it.
+ */
+#define KW_THREAD  0x20u
+
+/*
  * KERNEL-FILE, AND THE LINE THIS DRAWS.
  *
  * CREATE_NEW_FILE (0x1000) fires when a file comes into existence.
@@ -131,6 +138,10 @@ struct kofw_mon {
 	/* Consumer-side state: the filter and the process table it needs. Only
 	 * kofw_mon_next touches these, and there is one consumer by
 	 * construction, so they need no lock. */
+	/* What was asked for and what the providers actually accepted. Set once
+	 * at open, read by kofw_mon_health. */
+	uint32_t sub_asked, sub_enabled;
+
 	struct kofw_filter filter;
 	struct kofw_ptab   ptab;
 	uint64_t           filtered;
@@ -187,7 +198,8 @@ static ULONG props_bytes(void)
 }
 
 static EVENT_TRACE_PROPERTIES *props_new(const wchar_t *name, ULONG buf_kb,
-					 ULONG min_buf, ULONG max_buf)
+					 ULONG min_buf, ULONG max_buf,
+					 int no_system_logger)
 {
 	ULONG sz = props_bytes();
 	EVENT_TRACE_PROPERTIES *p = calloc(1, sz);
@@ -225,8 +237,9 @@ static EVENT_TRACE_PROPERTIES *props_new(const wchar_t *name, ULONG buf_kb,
 	 * failure a wrong provider GUID produces and is why this comment exists
 	 * rather than just the flag.
 	 */
-	p->LogFileMode        = EVENT_TRACE_REAL_TIME_MODE |
-				EVENT_TRACE_SYSTEM_LOGGER_MODE;
+	p->LogFileMode        = EVENT_TRACE_REAL_TIME_MODE;
+	if (!no_system_logger)
+		p->LogFileMode |= EVENT_TRACE_SYSTEM_LOGGER_MODE;
 	p->BufferSize         = buf_kb;
 	p->MinimumBuffers     = min_buf;
 	p->MaximumBuffers     = max_buf;
@@ -346,6 +359,7 @@ static DWORD WINAPI consume(LPVOID arg)
 
 static int start_session(struct kofw_mon *m, const struct kofw_mon_option *o)
 {
+	const int nsl = o->no_system_logger;
 	EVENT_TRACE_PROPERTIES *p;
 	ULONG st;
 	/*
@@ -363,7 +377,7 @@ static int start_session(struct kofw_mon *m, const struct kofw_mon_option *o)
 	ULONG minb = o->min_buffers  ? o->min_buffers  : 32u;
 	ULONG maxb = o->max_buffers  ? o->max_buffers  : 256u;
 
-	p = props_new(m->name, kb, minb, maxb);
+	p = props_new(m->name, kb, minb, maxb, nsl);
 	if (!p)
 		return KOFW_ERR_MEM;
 
@@ -380,14 +394,14 @@ static int start_session(struct kofw_mon *m, const struct kofw_mon_option *o)
 	 * reports the tool as broken.
 	 */
 	if (st == ERROR_ALREADY_EXISTS) {
-		EVENT_TRACE_PROPERTIES *q = props_new(m->name, kb, minb, maxb);
+		EVENT_TRACE_PROPERTIES *q = props_new(m->name, kb, minb, maxb, nsl);
 		if (q) {
 			(void)ControlTraceW(0, m->name, q,
 					    EVENT_TRACE_CONTROL_STOP);
 			free(q);
 		}
 		free(p);
-		p = props_new(m->name, kb, minb, maxb);
+		p = props_new(m->name, kb, minb, maxb, nsl);
 		if (!p)
 			return KOFW_ERR_MEM;
 		st = StartTraceW(&m->session, m->name, p);
@@ -443,21 +457,43 @@ static int enable_one(struct kofw_mon *m, const GUID *guid, ULONGLONG keyword,
 	return st == ERROR_SUCCESS ? 0 : KOFW_ERR_PROVIDER;
 }
 
+/*
+ * ENABLE WHAT CAN BE ENABLED, AND RECORD WHAT COULD NOT.
+ *
+ * This used to return on the first refusal, which aborted kofw_mon_open and
+ * threw away every provider that WOULD have worked. That is the wrong trade
+ * twice over: the common case for a refusal is one provider that this build of
+ * Windows spells differently, and losing the other four to it turns a partial
+ * answer into no answer. It also made the failure unattributable - the caller
+ * got "the provider would not enable" and no way to learn which one.
+ *
+ * Now every subscription is attempted, the successes are recorded in
+ * m->sub_enabled, and the whole thing fails only if NOTHING enabled - because a
+ * session with no provider is not a degraded collector, it is a thread waiting
+ * for events that cannot come.
+ */
 static int enable_providers(struct kofw_mon *m, uint32_t subs)
 {
 	ULONGLONG kw = 0;
-	int rc;
+
+	m->sub_asked   = subs;
+	m->sub_enabled = 0;
 
 	if (subs & KOFW_SUB_PROCESS)
 		kw |= KW_PROCESS;
 	if (subs & KOFW_SUB_IMAGE)
 		kw |= KW_IMAGE;
+	if (subs & KOFW_SUB_THREAD)
+		kw |= KW_THREAD;
 
-	if (kw) {
-		rc = enable_one(m, &KOFW_GUID_KERNEL_PROCESS, kw, NULL, 0);
-		if (rc)
-			return rc;
-	}
+	/*
+	 * The process provider carries three subscriptions under three
+	 * keywords, so it enables once and all three stand or fall together -
+	 * there is no way to be told that one keyword of the three was refused.
+	 */
+	if (kw && enable_one(m, &KOFW_GUID_KERNEL_PROCESS, kw, NULL, 0) == 0)
+		m->sub_enabled |= subs & (KOFW_SUB_PROCESS | KOFW_SUB_IMAGE |
+					  KOFW_SUB_THREAD);
 
 	if (subs & (KOFW_SUB_FILE | KOFW_SUB_FILE_WRITE)) {
 		ULONGLONG fkw = 0;
@@ -466,28 +502,25 @@ static int enable_providers(struct kofw_mon *m, uint32_t subs)
 			fkw |= KW_FILE_MUTATE;
 		if (subs & KOFW_SUB_FILE_WRITE)
 			fkw |= KW_FILE_WRITE;
-		rc = enable_one(m, &KOFW_GUID_KERNEL_FILE, fkw, NULL, 0);
-		if (rc)
-			return rc;
+		if (enable_one(m, &KOFW_GUID_KERNEL_FILE, fkw, NULL, 0) == 0)
+			m->sub_enabled |= subs & (KOFW_SUB_FILE |
+						  KOFW_SUB_FILE_WRITE);
 	}
 
 	if (subs & KOFW_SUB_NET) {
-		rc = enable_one(m, &KOFW_GUID_KERNEL_NET, KW_NET_ALL,
-				NULL, 0);
-		if (rc)
-			return rc;
+		if (enable_one(m, &KOFW_GUID_KERNEL_NET, KW_NET_ALL,
+			       NULL, 0) == 0)
+			m->sub_enabled |= KOFW_SUB_NET;
 	}
 
 	if (subs & KOFW_SUB_REGISTRY) {
-		rc = enable_one(m, &KOFW_GUID_KERNEL_REGISTRY, KW_REG_MUTATE,
-				NULL, 0);
-		if (rc)
-			return rc;
+		if (enable_one(m, &KOFW_GUID_KERNEL_REGISTRY, KW_REG_MUTATE,
+			       NULL, 0) == 0)
+			m->sub_enabled |= KOFW_SUB_REGISTRY;
 	}
 
-	return 0;
+	return m->sub_enabled ? 0 : KOFW_ERR_PROVIDER;
 }
-
 
 static int open_consumer(struct kofw_mon *m)
 {
@@ -586,7 +619,7 @@ struct kofw_mon *kofw_mon_open(const struct kofw_mon_option *opt, int *err)
 
 fail_session:
 	if (m->session) {
-		EVENT_TRACE_PROPERTIES *p = props_new(m->name, 0, 0, 0);
+		EVENT_TRACE_PROPERTIES *p = props_new(m->name, 0, 0, 0, 0);
 		if (p) {
 			(void)ControlTraceW(m->session, NULL, p,
 					    EVENT_TRACE_CONTROL_STOP);
@@ -676,6 +709,8 @@ void kofw_mon_health(struct kofw_mon *m, struct kofw_health *h)
 	h->filtered       = m->filtered;
 	h->untracked      = m->ptab.overflow;
 	h->seq_gaps       = m->seq_gaps;
+	h->sub_asked      = m->sub_asked;
+	h->sub_enabled    = m->sub_enabled;
 
 	/*
 	 * ETW's own losses, asked for rather than accumulated: the session keeps
@@ -768,7 +803,7 @@ void kofw_mon_close(struct kofw_mon *m)
 	m->stopping = 1;
 
 	if (m->session) {
-		EVENT_TRACE_PROPERTIES *p = props_new(m->name, 0, 0, 0);
+		EVENT_TRACE_PROPERTIES *p = props_new(m->name, 0, 0, 0, 0);
 		if (p) {
 			(void)ControlTraceW(m->session, NULL, p,
 					    EVENT_TRACE_CONTROL_STOP);

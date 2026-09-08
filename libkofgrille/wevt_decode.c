@@ -173,6 +173,19 @@ static uint8_t field_of(const wchar_t *name, uint16_t type)
 	if (name_is(name, "sport")) return KOFW_FLD_SPORT;
 	if (name_is(name, "size"))  return KOFW_FLD_SIZE;
 
+	/*
+	 * A THREAD'S ENTRY POINT, under whichever of these the manifest uses.
+	 *
+	 * This is the field the whole thread subscription is for: an entry
+	 * point that is not inside any mapped image is what a reflectively
+	 * loaded payload and a remote injection both look like, and it is the
+	 * only in-box way to see either without a protected-process signature.
+	 * ImageBase is here too, so a module load reports where it landed.
+	 */
+	if (name_is(name, "StartAddr") || name_is(name, "StartAddress") ||
+	    name_is(name, "Win32StartAddr") || name_is(name, "ImageBase"))
+		return KOFW_FLD_ADDR;
+
 	if (name_is(name, "ImageName")) {
 		if (type == KOFW_EVT_PROC_START || type == KOFW_EVT_PROC_STOP)
 			return KOFW_FLD_IMAGE;
@@ -634,6 +647,15 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 			if (len >= 4)
 				out->net_size = rd_u32(base + off);
 			break;
+		case KOFW_FLD_ADDR:
+			/* 8 on a 64-bit payload, 4 on a 32-bit one - the shape
+			 * already sized it as a POINTER, so take what is
+			 * there rather than assuming the wider form. */
+			if (len >= 8)
+				out->addr = rd_u64(base + off);
+			else if (len >= 4)
+				out->addr = rd_u32(base + off);
+			break;
 
 		case KOFW_FLD_IMAGE:
 		case KOFW_FLD_OBJECT: {
@@ -706,6 +728,7 @@ static const char *field_name(uint8_t f)
 	case KOFW_FLD_CREATE_TIME: return "-> create_time";
 	case KOFW_FLD_SESSION:     return "-> session";
 	case KOFW_FLD_EXIT_CODE:   return "-> exit_code";
+	case KOFW_FLD_ADDR:        return "-> addr";
 	case KOFW_FLD_IMAGE:       return "-> image";
 	case KOFW_FLD_OBJECT:      return "-> object";
 	default:                   return "";

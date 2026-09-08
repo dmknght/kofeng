@@ -178,6 +178,8 @@ const char *kofw_evt_type_name(uint16_t type)
 	case KOFW_EVT_REG_CREATE:     return "RegNew";
 	case KOFW_EVT_REG_SET_VALUE:  return "RegSet";
 	case KOFW_EVT_REG_DELETE:     return "RegDel";
+	case KOFW_EVT_THREAD_START:   return "ThreadNew";
+	case KOFW_EVT_THREAD_STOP:    return "ThreadEnd";
 	case KOFW_EVT_RAW:        return "raw";
 	default:                  return "?";
 	}
@@ -191,5 +193,19 @@ const char *kofw_provider_name(uint8_t prov)
 	case KOFW_PROV_NET:     return "net";
 	case KOFW_PROV_REGISTRY: return "registry";
 	default:                return "?";
+	}
+}
+
+const char *kofw_sub_name(uint32_t one_bit)
+{
+	switch (one_bit) {
+	case KOFW_SUB_PROCESS:    return "process";
+	case KOFW_SUB_IMAGE:      return "image";
+	case KOFW_SUB_FILE:       return "file";
+	case KOFW_SUB_FILE_WRITE: return "file-write";
+	case KOFW_SUB_NET:        return "net";
+	case KOFW_SUB_REGISTRY:   return "registry";
+	case KOFW_SUB_THREAD:     return "thread";
+	default:                  return "";
 	}
 }

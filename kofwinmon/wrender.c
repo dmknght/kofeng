@@ -63,6 +63,10 @@ void wm_render(const struct kofw_evt *e, double secs, const char *who,
 		printf("  [%s] %s", kofw_loc_name(e->obj_loc),
 		       kofw_evt_object(e));
 		break;
+	case KOFW_EVT_THREAD_START:
+	case KOFW_EVT_THREAD_STOP:
+		printf("  start=0x%llx", (unsigned long long)e->addr);
+		break;
 	case KOFW_EVT_FILE_NEW:
 		t->file_new++;
 		printf("  [%s] %s", kofw_loc_name(e->obj_loc),
@@ -137,6 +141,18 @@ void wm_render(const struct kofw_evt *e, double secs, const char *who,
 		       kofw_evt_object(e));
 		break;
 	}
+
+	/*
+	 * THE TECHNIQUE, WHERE THE PATH ITSELF IS ONE.
+	 *
+	 * Printed after the path rather than instead of it, always. A
+	 * classification is a decision that can be wrong and the raw path is
+	 * the only thing that lets somebody check it - which is the same rule
+	 * the record follows for obj_loc.
+	 */
+	if (e->attack != KOFW_ATT_NONE)
+		printf("  <%s %s>", kofw_attack_id(e->attack),
+		       kofw_attack_name(e->attack));
 
 	if (e->flags & KOFW_EF_TRUNCATED)
 		printf("  [cut]");
@@ -216,6 +232,32 @@ void wm_print_health(const struct kofw_health *h, double secs)
 	 * every id first seen from here on is discarded whole. Everything else
 	 * above says how much was lost; this one says the losses will continue.
 	 */
+	/*
+	 * A REFUSED PROVIDER IS THE FIRST THING TO PRINT AND THE LAST THING
+	 * ANYBODY GUESSES.
+	 *
+	 * Everything else in this function says how much was lost. This one
+	 * says a whole class of event was never collected at all - and it is
+	 * the difference between "the sample did no network activity" and "the
+	 * network provider never started". Those read identically in a trace
+	 * and call for opposite next steps.
+	 */
+	{
+		uint32_t missing = h->sub_asked & ~h->sub_enabled;
+		uint32_t b;
+
+		if (missing) {
+			fputs("   INCOMPLETE: provider(s) REFUSED and never "
+			      "collected:", stderr);
+			for (b = 1u; b; b <<= 1) {
+				if (missing & b)
+					fprintf(stderr, " %s",
+						kofw_sub_name(b));
+			}
+			fputs("\n", stderr);
+		}
+	}
+
 	if (h->schema_full)
 		fprintf(stderr,
 			"   INCOMPLETE: the schema cache is FULL - %llu event(s) "

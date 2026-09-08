@@ -11,9 +11,26 @@
 
 /* ---------------------------------------------------------- classification */
 
-/* Case-insensitive substring, ASCII folding only, which is all these literals
- * need. */
-static int has(const char *hay, const char *needle)
+/*
+ * Substring, with case folding AS AN ARGUMENT - and it has to be an argument.
+ *
+ * Windows compares paths without regard to case, so `\windows\system32\` and
+ * `\WINDOWS\SYSTEM32\` are the same directory and a matcher that folded
+ * neither would be evaded by pressing shift. Linux compares paths WITH regard
+ * to case, so /etc/PASSWD is a different file from /etc/passwd - and a matcher
+ * that folded both would report a technique against a file that is not the one
+ * the technique is about.
+ *
+ * Folding everything was the bug this parameter fixes. There is no single
+ * answer that is right for both, so the table says per row, and the row knows
+ * because a row is written for one platform.
+ *
+ * ASCII folding only, which is all these literals need: every one of them is
+ * an ASCII path component chosen by Microsoft or by a distribution, and a
+ * locale-aware fold would only introduce the Turkish dotless-i problem to a
+ * comparison that has no use for it.
+ */
+static int has_ci(const char *hay, const char *needle, int fold)
 {
 	size_t i, j;
 
@@ -21,8 +38,10 @@ static int has(const char *hay, const char *needle)
 		for (j = 0; needle[j]; j++) {
 			char a = hay[i + j], b = needle[j];
 
-			if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
-			if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+			if (fold) {
+				if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+				if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+			}
 			if (a != b)
 				break;
 		}
@@ -35,64 +54,193 @@ static int has(const char *hay, const char *needle)
 const char *kofw_loc_name(uint8_t loc)
 {
 	switch (loc) {
-	case KOFW_LOC_SYSTEM:   return "system";
-	case KOFW_LOC_PROGRAMS: return "programs";
-	case KOFW_LOC_TEMP:     return "temp";
-	case KOFW_LOC_USER:     return "user";
-	case KOFW_LOC_OTHER:    return "other";
-	default:                return "unknown";
+	case KOFW_LOC_SYSTEM:     return "system";
+	case KOFW_LOC_PROGRAMS:   return "programs";
+	case KOFW_LOC_TEMP:       return "temp";
+	case KOFW_LOC_USER:       return "user";
+	case KOFW_LOC_AUTOSTART:  return "autostart";
+	case KOFW_LOC_SERVICE:    return "service";
+	case KOFW_LOC_SCHEDULE:   return "schedule";
+	case KOFW_LOC_SHELL_INIT: return "shellinit";
+	case KOFW_LOC_PRELOAD:    return "preload";
+	case KOFW_LOC_SSH:        return "ssh";
+	case KOFW_LOC_CREDENTIAL: return "credential";
+	case KOFW_LOC_KERNEL_MOD: return "kmod";
+	case KOFW_LOC_WEB_ROOT:   return "webroot";
+	case KOFW_LOC_HOSTS:      return "hosts";
+	case KOFW_LOC_OTHER:      return "other";
+	default:                  return "unknown";
 	}
+}
+
+const char *kofw_attack_id(uint16_t att)
+{
+	switch (att) {
+#define KOFW_ATT_X_ID(name, tech, word) case name: return tech;
+	KOFW_ATTACK_LIST(KOFW_ATT_X_ID)
+#undef KOFW_ATT_X_ID
+	default: return "";
+	}
+}
+
+const char *kofw_attack_name(uint16_t att)
+{
+	switch (att) {
+#define KOFW_ATT_X_NAME(name, tech, word) case name: return word;
+	KOFW_ATTACK_LIST(KOFW_ATT_X_NAME)
+#undef KOFW_ATT_X_NAME
+	default: return "";
+	}
+}
+
+/*
+ * THE TABLE, AND WHY ITS ORDER IS ITS CORRECTNESS.
+ *
+ * One pass, first match wins, MOST SPECIFIC FIRST. That is not a style
+ * preference, it is the only ordering that is right, and the reason is one
+ * example: the per-user temp directory lives INSIDE a user profile, so a
+ * \Users\ row that ran before \AppData\Local\Temp\ would swallow it and every
+ * dropper's first write would be filed as ordinary user activity. Every row
+ * below is placed by that rule and nothing may be appended without checking it.
+ *
+ * BOTH PLATFORMS IN ONE TABLE, because a path is unambiguous about which one it
+ * is - a backslash row cannot match a Linux path and a /etc row cannot match a
+ * Windows one - and two tables would be two places to forget a row.
+ *
+ * The technique is the ATT&CK id this path IS. Where a row has one, an event
+ * that WRITES to it is a finding on its own with no chain and no window behind
+ * it: T1547.001 is a value under Run, T1053.005 is a file under System32\Tasks.
+ * Where a row has KOFW_ATT_NONE the location is still worth knowing and is not
+ * itself a finding.
+ */
+static const struct {
+	const char *needle;
+	uint8_t     loc;
+	uint16_t    att;
+	/*
+	 * 1 for a Windows path, 0 for a Linux one. Not derived from the
+	 * separator, even though every row happens to agree with it: a derived
+	 * rule is one somebody has to re-derive when they add a row, and this
+	 * is the field that decides whether /etc/PASSWD is a finding.
+	 */
+	uint8_t     fold;
+} LOCS[] = {
+	/* ---- temp, FIRST, for the reason above ---------------------------- */
+	{ "\\AppData\\Local\\Temp\\", KOFW_LOC_TEMP, KOFW_ATT_NONE, 1 },
+	{ "\\Windows\\Temp\\", KOFW_LOC_TEMP, KOFW_ATT_NONE, 1 },
+	{ "\\APPDAT~1\\LOCAL~1\\Temp\\", KOFW_LOC_TEMP, KOFW_ATT_NONE, 1 },
+	{ "\\LOCALS~1\\Temp\\", KOFW_LOC_TEMP, KOFW_ATT_NONE, 1 },
+	{ "/tmp/", KOFW_LOC_TEMP, KOFW_ATT_NONE, 0 },
+	{ "/var/tmp/", KOFW_LOC_TEMP, KOFW_ATT_NONE, 0 },
+	{ "/dev/shm/", KOFW_LOC_TEMP, KOFW_ATT_NONE, 0 },
+
+	/* ---- the matrix rows, before the generic locations they sit inside - */
+
+	/* Registry autoruns. RunOnce and the Wow6432Node mirror are separate
+	 * spellings of the same key and each needs its own row: a needle is a
+	 * substring, not a pattern. */
+	{ "\\CurrentVersion\\Run", KOFW_LOC_AUTOSTART, KOFW_ATT_RUN_KEY, 1 },
+	{ "\\CurrentVersion\\RunOnce", KOFW_LOC_AUTOSTART, KOFW_ATT_RUN_KEY, 1 },
+	{ "\\Start Menu\\Programs\\Startup\\",
+	  KOFW_LOC_AUTOSTART,  KOFW_ATT_STARTUP_DIR, 1 },
+	{ "/.config/autostart/", KOFW_LOC_AUTOSTART, KOFW_ATT_STARTUP_DIR, 0 },
+
+	{ "\\Winlogon\\Shell", KOFW_LOC_AUTOSTART, KOFW_ATT_WINLOGON, 1 },
+	{ "\\Winlogon\\Userinit", KOFW_LOC_AUTOSTART, KOFW_ATT_WINLOGON, 1 },
+
+	{ "\\AppInit_DLLs", KOFW_LOC_PRELOAD, KOFW_ATT_APPINIT, 1 },
+	{ "\\Image File Execution Options\\",
+	  KOFW_LOC_SERVICE,    KOFW_ATT_IFEO, 1 },
+	{ "\\CurrentControlSet\\Services\\",
+	  KOFW_LOC_SERVICE,    KOFW_ATT_SERVICE, 1 },
+	{ "\\System32\\Tasks\\", KOFW_LOC_SCHEDULE, KOFW_ATT_SCHED_TASK, 1 },
+	{ "\\Schedule\\TaskCache\\", KOFW_LOC_SCHEDULE, KOFW_ATT_SCHED_TASK, 1 },
+
+	/* Linux persistence. */
+	{ "/etc/ld.so.preload", KOFW_LOC_PRELOAD, KOFW_ATT_LD_PRELOAD, 0 },
+	{ "/etc/cron", KOFW_LOC_SCHEDULE, KOFW_ATT_CRON, 0 },
+	{ "/var/spool/cron", KOFW_LOC_SCHEDULE, KOFW_ATT_CRON, 0 },
+	{ "/etc/systemd/system/", KOFW_LOC_SERVICE, KOFW_ATT_SYSTEMD, 0 },
+	{ "/lib/systemd/system/", KOFW_LOC_SERVICE, KOFW_ATT_SYSTEMD, 0 },
+	{ "/.config/systemd/user/", KOFW_LOC_SERVICE, KOFW_ATT_SYSTEMD, 0 },
+	{ "/etc/rc.local", KOFW_LOC_SHELL_INIT, KOFW_ATT_RC_SCRIPT, 0 },
+	{ "/etc/init.d/", KOFW_LOC_SERVICE, KOFW_ATT_RC_SCRIPT, 0 },
+	{ "/.bashrc", KOFW_LOC_SHELL_INIT, KOFW_ATT_SHELL_PROFILE, 0 },
+	{ "/.bash_profile", KOFW_LOC_SHELL_INIT, KOFW_ATT_SHELL_PROFILE, 0 },
+	{ "/.profile", KOFW_LOC_SHELL_INIT, KOFW_ATT_SHELL_PROFILE, 0 },
+	{ "/etc/profile", KOFW_LOC_SHELL_INIT, KOFW_ATT_SHELL_PROFILE, 0 },
+	{ "/.ssh/authorized_keys", KOFW_LOC_SSH, KOFW_ATT_SSH_KEY, 0 },
+
+	/* Identity and privilege. */
+	{ "/etc/passwd", KOFW_LOC_CREDENTIAL, KOFW_ATT_ACCOUNT_FILE, 0 },
+	{ "/etc/shadow", KOFW_LOC_CREDENTIAL, KOFW_ATT_ACCOUNT_FILE, 0 },
+	{ "/etc/sudoers", KOFW_LOC_CREDENTIAL, KOFW_ATT_SUDOERS, 0 },
+	{ "\\config\\SAM", KOFW_LOC_CREDENTIAL, KOFW_ATT_CRED_STORE, 1 },
+	{ "\\config\\SECURITY", KOFW_LOC_CREDENTIAL, KOFW_ATT_CRED_STORE, 1 },
+	{ "\\config\\SYSTEM", KOFW_LOC_CREDENTIAL, KOFW_ATT_CRED_STORE, 1 },
+
+	/* Defence evasion. */
+	{ "\\drivers\\etc\\hosts", KOFW_LOC_HOSTS, KOFW_ATT_HOSTS, 1 },
+	{ "/etc/hosts", KOFW_LOC_HOSTS, KOFW_ATT_HOSTS, 0 },
+
+	{ "/lib/modules/", KOFW_LOC_KERNEL_MOD, KOFW_ATT_KERNEL_MOD, 0 },
+	{ "\\System32\\drivers\\", KOFW_LOC_KERNEL_MOD, KOFW_ATT_KERNEL_MOD, 1 },
+
+	{ "\\inetpub\\wwwroot\\", KOFW_LOC_WEB_ROOT, KOFW_ATT_WEB_SHELL, 1 },
+	{ "/var/www/", KOFW_LOC_WEB_ROOT, KOFW_ATT_WEB_SHELL, 0 },
+
+	/* ---- the generic locations, LAST ---------------------------------- */
+	{ "\\Windows\\System32\\", KOFW_LOC_SYSTEM, KOFW_ATT_NONE, 1 },
+	{ "\\Windows\\SysWOW64\\", KOFW_LOC_SYSTEM, KOFW_ATT_NONE, 1 },
+	/* The two extra system directories an ARM64 machine has: SyChpe32
+	 * holds the compiled-hybrid x86 binaries and SysArm32 the ARM32 ones.
+	 * Leaving them out made every x86 process on such a host look like it
+	 * was loading unknown modules. */
+	{ "\\Windows\\SyChpe32\\", KOFW_LOC_SYSTEM, KOFW_ATT_NONE, 1 },
+	{ "\\Windows\\SysArm32\\", KOFW_LOC_SYSTEM, KOFW_ATT_NONE, 1 },
+	{ "\\Windows\\WinSxS\\", KOFW_LOC_SYSTEM, KOFW_ATT_NONE, 1 },
+	{ "\\Windows\\assembly\\", KOFW_LOC_SYSTEM, KOFW_ATT_NONE, 1 },
+	{ "\\Windows\\Microsoft.NET\\", KOFW_LOC_SYSTEM, KOFW_ATT_NONE, 1 },
+	{ "/usr/lib/", KOFW_LOC_SYSTEM, KOFW_ATT_NONE, 0 },
+	{ "/usr/lib64/", KOFW_LOC_SYSTEM, KOFW_ATT_NONE, 0 },
+	{ "/lib/", KOFW_LOC_SYSTEM, KOFW_ATT_NONE, 0 },
+	{ "/lib64/", KOFW_LOC_SYSTEM, KOFW_ATT_NONE, 0 },
+
+	{ "\\Program Files\\", KOFW_LOC_PROGRAMS, KOFW_ATT_NONE, 1 },
+	{ "\\Program Files (x86)\\", KOFW_LOC_PROGRAMS, KOFW_ATT_NONE, 1 },
+	{ "\\PROGRA~1\\", KOFW_LOC_PROGRAMS, KOFW_ATT_NONE, 1 },
+	{ "\\PROGRA~2\\", KOFW_LOC_PROGRAMS, KOFW_ATT_NONE, 1 },
+	{ "/usr/bin/", KOFW_LOC_PROGRAMS, KOFW_ATT_NONE, 0 },
+	{ "/usr/sbin/", KOFW_LOC_PROGRAMS, KOFW_ATT_NONE, 0 },
+	{ "/opt/", KOFW_LOC_PROGRAMS, KOFW_ATT_NONE, 0 },
+
+	{ "\\Users\\", KOFW_LOC_USER, KOFW_ATT_NONE, 1 },
+	{ "/home/", KOFW_LOC_USER, KOFW_ATT_NONE, 0 },
+	{ "/root/", KOFW_LOC_USER, KOFW_ATT_NONE, 0 },
+};
+
+uint8_t kofw_classify(const char *path, uint16_t *att)
+{
+	size_t i;
+
+	if (att)
+		*att = KOFW_ATT_NONE;
+	if (!path || !*path)
+		return KOFW_LOC_UNKNOWN;
+
+	for (i = 0; i < sizeof LOCS / sizeof LOCS[0]; i++) {
+		if (has_ci(path, LOCS[i].needle, LOCS[i].fold)) {
+			if (att)
+				*att = LOCS[i].att;
+			return LOCS[i].loc;
+		}
+	}
+	return KOFW_LOC_OTHER;
 }
 
 uint8_t kofw_classify_path(const char *path)
 {
-	if (!path || !*path)
-		return KOFW_LOC_UNKNOWN;
-
-	/*
-	 * TEMP IS TESTED FIRST, and the order is the whole correctness of this
-	 * function.
-	 *
-	 * The per-user temp directory lives INSIDE a user profile
-	 * (\Users\<name>\AppData\Local\Temp), so a check for \Users\ that ran
-	 * first would swallow it and every dropper's first write would be filed
-	 * as ordinary user activity. Longest and most specific wins, always.
-	 */
-	if (has(path, "\\AppData\\Local\\Temp\\") ||
-	    has(path, "\\Windows\\Temp\\") ||
-	    /*
-	     * The 8.3 spelling of the same place. ETW delivers long device paths
-	     * on every build measured here, so this has never yet been the
-	     * matching branch - it is present because a path that arrives short
-	     * would otherwise be classified as something else entirely, and that
-	     * failure would be silent.
-	     */
-	    has(path, "\\APPDAT~1\\LOCAL~1\\Temp\\") ||
-	    has(path, "\\LOCALS~1\\Temp\\"))
-		return KOFW_LOC_TEMP;
-
-	if (has(path, "\\Windows\\System32\\")     ||
-	    has(path, "\\Windows\\SysWOW64\\")     ||
-	    /* The two extra system directories an ARM64 machine has: SyChpe32
-	     * holds the compiled-hybrid x86 binaries and SysArm32 the ARM32
-	     * ones. Leaving them out made every x86 process on such a host look
-	     * like it was loading unknown modules. */
-	    has(path, "\\Windows\\SyChpe32\\")     ||
-	    has(path, "\\Windows\\SysArm32\\")     ||
-	    has(path, "\\Windows\\WinSxS\\")       ||
-	    has(path, "\\Windows\\assembly\\")     ||
-	    has(path, "\\Windows\\Microsoft.NET\\"))
-		return KOFW_LOC_SYSTEM;
-
-	if (has(path, "\\Program Files\\") ||
-	    has(path, "\\Program Files (x86)\\") ||
-	    has(path, "\\PROGRA~1\\") || has(path, "\\PROGRA~2\\"))
-		return KOFW_LOC_PROGRAMS;
-
-	if (has(path, "\\Users\\"))
-		return KOFW_LOC_USER;
-
-	return KOFW_LOC_OTHER;
+	return kofw_classify(path, NULL);
 }
 
 /* --------------------------------------------------------- the process table */
@@ -215,7 +363,15 @@ int kofw_filter_apply(struct kofw_ptab *t, const struct kofw_filter *f,
 	 * code the whole machine pays for.
 	 */
 	obj = kofw_evt_object(e);
-	e->obj_loc = *obj ? kofw_classify_path(obj) : KOFW_LOC_UNKNOWN;
+	if (*obj) {
+		uint16_t att = KOFW_ATT_NONE;
+
+		e->obj_loc = kofw_classify(obj, &att);
+		e->attack  = att;
+	} else {
+		e->obj_loc = KOFW_LOC_UNKNOWN;
+		e->attack  = KOFW_ATT_NONE;
+	}
 
 	/*
 	 * MEMBERSHIP BEFORE FILTERING, always.

@@ -77,6 +77,22 @@ static void usage(void)
 	      "  --no-file-write do not subscribe to writes into existing files\n"
 	      "  --no-net        do not subscribe to network events\n"
 	      "  --no-registry   do not subscribe to registry create/set/delete\n"
+	      "\n"
+	      "  --thread        subscribe to thread create/exit. OFF by\n"
+	      "                  default because it is the highest volume of\n"
+	      "                  anything here - and it is the ONLY in-box way\n"
+	      "                  to see a payload that was loaded in memory:\n"
+	      "                  ImageLoad fires when the kernel maps an image\n"
+	      "                  section, and a manually mapped DLL never maps\n"
+	      "                  one, so there is no image event to miss. What\n"
+	      "                  it does instead is start a thread whose entry\n"
+	      "                  point is not inside any mapped image.\n"
+	      "  --no-system-logger\n"
+	      "                  start a plain real-time session instead of a\n"
+	      "                  system-logger one. Try this if a provider\n"
+	      "                  enables and then delivers nothing - the two\n"
+	      "                  session modes suit different providers and\n"
+	      "                  neither failure reports itself.\n"
 	      "  --no-raw        hide events this build has no type for\n"
 	      "\n"
 	      "Registry events currently arrive UNTYPED, so --no-raw hides them\n"
@@ -116,7 +132,7 @@ int main(int argc, char **argv)
 	 * nothing at all.
 	 */
 	int      want_file = 1, want_image = 1, want_net = 1;
-	int      want_write = 1, want_reg = 1;
+	int      want_write = 1, want_reg = 1, want_thread = 0;
 	int      show_raw = 1, show_all_img = 0, show_schema = 0;
 	int      err = 0, i, first;
 	size_t   n;
@@ -155,6 +171,10 @@ int main(int argc, char **argv)
 			want_net = 0;
 		else if (!strcmp(argv[i], "--no-registry"))
 			want_reg = 0;
+		else if (!strcmp(argv[i], "--thread"))
+			want_thread = 1;
+		else if (!strcmp(argv[i], "--no-system-logger"))
+			opt.no_system_logger = 1;
 		/* The old opt-in spellings, which now only confirm a default.
 		 * Accepted rather than refused: a command line somebody has in
 		 * their shell history should not start failing. */
@@ -214,7 +234,8 @@ int main(int argc, char **argv)
 			(want_file  ? KOFW_SUB_FILE  : 0u) |
 			(want_write ? KOFW_SUB_FILE_WRITE : 0u) |
 			(want_net   ? KOFW_SUB_NET   : 0u) |
-			(want_reg   ? KOFW_SUB_REGISTRY : 0u);
+			(want_reg   ? KOFW_SUB_REGISTRY : 0u) |
+			(want_thread ? KOFW_SUB_THREAD : 0u);
 	opt.trace_self = 1;   /* see the header comment */
 
 	mon = kofw_mon_open(&opt, &err);
@@ -279,6 +300,28 @@ int main(int argc, char **argv)
 		want_image ? " image" : "", want_file ? " file" : "",
 		want_write ? " file-write" : "", want_net ? " net" : "",
 		want_reg ? " registry" : "");
+
+	/*
+	 * SAID AT THE START, not only in the summary. A provider that refused
+	 * is the reason a run looks quiet, and learning it after waiting sixty
+	 * seconds for a timeout is learning it too late to change the command
+	 * line.
+	 */
+	{
+		struct kofw_health h0;
+		uint32_t missing, b;
+
+		kofw_mon_health(mon, &h0);
+		missing = h0.sub_asked & ~h0.sub_enabled;
+		if (missing) {
+			fputs("kofwintrace: REFUSED by the provider:", stderr);
+			for (b = 1u; b; b <<= 1)
+				if (missing & b)
+					fprintf(stderr, " %s",
+						kofw_sub_name(b));
+			fputs("\n\n", stderr);
+		}
+	}
 
 	t_wall0 = wm_now();
 	ResumeThread(pi.hThread);
