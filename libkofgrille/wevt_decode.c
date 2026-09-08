@@ -992,22 +992,37 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 			 * ONE: a PowerShell script block arrives as UTF-16 and
 			 * a macro body as bytes, and the provider does not say
 			 * which. Two NUL high bytes in the first four is the
-			 * test. Guessing wrong costs legibility and nothing
-			 * else - the bytes are sanitised either way, and the
-			 * raw record still carries what arrived.
+			 * test.
+			 *
+			 * AND IT IS NO LONGER CONVERTED AT ALL. Sanitising -
+			 * high bytes to '?', control characters to '.' - was
+			 * justified by the record being printed, and this
+			 * record is not printed: it goes over a channel to
+			 * kofwatchman, whose entire purpose is to SCAN what is
+			 * in it. A lossy conversion here destroys the evidence
+			 * before the half that needs it ever sees it, so the
+			 * bytes are copied verbatim and content_len says how
+			 * many. Whoever PRINTS one sanitises it there, which is
+			 * where the terminal is.
 			 */
 			else if (pr->in_type == TDH_INTYPE_BINARY) {
-				if (len >= 4u && base[off + 1u] == 0 &&
-				    base[off + 3u] == 0)
-					n = kofw_utf16_to_utf8(
-						(const uint16_t *)(const void *)
-							(base + off),
-						len / 2u, out->text + tnext,
-						room, &cut);
-				else
-					n = kofw_bytes_to_text(base + off, len,
-							       out->text + tnext,
-							       room, &cut);
+				size_t take = len;
+
+				if (take > room - 1u) {
+					take = room - 1u;
+					cut = 1;
+				}
+				memcpy(out->text + tnext, base + off, take);
+				/*
+				 * Length-delimited, but still NUL terminated
+				 * after it: content_len is what a scanner
+				 * reads, and the NUL is so that anything
+				 * treating the arena as strings - a label, a
+				 * panel row - cannot run off the end of it.
+				 */
+				out->text[tnext + take] = '\0';
+				out->content_len = (uint16_t)take;
+				n = take;
 			}
 			else
 				got = 0;

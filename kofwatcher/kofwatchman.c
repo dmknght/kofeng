@@ -420,6 +420,30 @@ int main(int argc, char **argv)
 		source_close(&src);
 		return 1;
 	}
+	/*
+	 * head_size TOO, AND rec_size IS NOT ENOUGH.
+	 *
+	 * A log written before a field was added to the record has the same
+	 * rec_size (the record is fixed at 512) and the same rec_kind, and its
+	 * head is two bytes shorter - so the text lands two bytes early and
+	 * every path comes back shifted. It reads, it scans, it finds nothing,
+	 * and nothing anywhere says why. Found exactly that way: a log from
+	 * before content_len existed stopped matching a sample it had matched
+	 * an hour earlier.
+	 *
+	 * kofevtlog cannot check this - it is deliberately record-agnostic and
+	 * uses the file's own head_size for I/O. The knowledge that
+	 * KOFEVT_REC_KOF means KOF_EVT_HEAD lives here, with the struct.
+	 */
+	if (h && h->head_size != (uint16_t)KOF_EVT_HEAD) {
+		fprintf(stderr, "kofwatchman: this log's record head is %u "
+			"bytes and this build's is %u - it was written by a "
+			"different version of the record, and every field "
+			"after the head would be read at the wrong offset\n",
+			(unsigned)h->head_size, (unsigned)KOF_EVT_HEAD);
+		source_close(&src);
+		return 1;
+	}
 	if (h && h->rec_size != sizeof(struct kof_evt)) {
 		fputs("kofwatchman: the log's record is not this build's size\n",
 		      stderr);

@@ -12,6 +12,31 @@
 
 #include "kofevtfmt.h"
 
+/*
+ * SANITISED HERE, BECAUSE THIS IS WHERE THE TERMINAL IS.
+ *
+ * The record carries content raw - see kofevt.h - precisely so the half that
+ * scans it gets what arrived. A printer has the opposite duty: the bytes were
+ * chosen by whoever wrote the script, they are about to go to a terminal, and
+ * an escape sequence among them is a report that lies about what it says.
+ *
+ * So the conversion happens at the last possible moment and nowhere earlier.
+ * Control characters and anything above printable ASCII become '.', and the
+ * length is the CONTENT's rather than a NUL's, because content may hold NULs.
+ */
+static void print_sanitised(FILE *out, const char *p, size_t n, size_t cap)
+{
+	size_t i;
+
+	if (n > cap)
+		n = cap;
+	for (i = 0; i < n; i++) {
+		unsigned char c = (unsigned char)p[i];
+
+		fputc((c >= 0x20u && c < 0x7fu) ? (int)c : '.', out);
+	}
+}
+
 void kof_evt_count(const struct kof_evt *e, struct kof_evt_tally *t)
 {
 	switch (e->verb) {
@@ -83,14 +108,35 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 	case KOF_EVT_THREAD_STOP:
 		fprintf(out, "  start=0x%llx", (unsigned long long)e->addr);
 		break;
-	case KOF_EVT_AMSI_SCAN:
-		/* The submitted content, which is a PREFIX - see
-		 * KOF_EVT_AMSI_SCAN. The [cut] marker the common tail adds is
-		 * doing real work here: unlike a path, a script block is
-		 * usually longer than the arena, so most of these are
-		 * legitimately incomplete rather than exceptionally so. */
-		fprintf(out, "  %s", kof_evt_object(e));
+	case KOF_EVT_AMSI_SCAN: {
+		/*
+		 * The submitted content, RAW in the record and sanitised here.
+		 *
+		 * It is also a PREFIX: unlike a path, a script block is usually
+		 * longer than the arena, so the [cut] marker the common tail
+		 * adds is doing real work - most of these are legitimately
+		 * incomplete rather than exceptionally so.
+		 *
+		 * Printed through print_sanitised and not with %s, for two
+		 * reasons that are both the point of content_len existing: the
+		 * bytes may contain NULs, so %s would stop at the first one;
+		 * and they may contain a terminal escape, which %s would send
+		 * to the terminal.
+		 */
+		const char *ct = NULL;
+		size_t cn = 0;
+
+		if (kof_evt_content(e, &ct, &cn) && cn) {
+			fputs("  ", out);
+			print_sanitised(out, ct, cn, 120u);
+			if (cn > 120u)
+				fprintf(out, "... (%llu bytes)",
+					(unsigned long long)cn);
+		} else {
+			fputs("  (no content)", out);
+		}
 		break;
+	}
 	case KOF_EVT_FILE_NEW:
 		fprintf(out, "  [%s] %s", kof_loc_name(e->loc),
 		       kof_evt_object(e));
@@ -240,3 +286,242 @@ void kof_evt_print_tally(const struct kof_evt_tally *t, double secs,
 		(unsigned long long)t->raw);
 }
 
+
+/* ------------------------------------------------- for a browsing UI */
+
+
+/* The last component of a path or a registry key, so a label says which file
+ * rather than which directory. Both separators, because one record may carry
+ * either. */
+static const char *tail_of(const char *p)
+{
+	const char *last = p;
+
+	for (; *p; p++) {
+		if (*p == '\\' || *p == '/')
+			last = p + 1;
+	}
+	return last;
+}
+
+size_t kof_evt_label(const struct kof_evt *e, uint64_t index, char *out,
+		     size_t cap)
+{
+	const char *obj;
+	int n;
+
+	if (!out || cap == 0)
+		return 0;
+	out[0] = '\0';
+	if (!e)
+		return 0;
+
+	obj = kof_evt_object(e);
+	if (!*obj)
+		obj = kof_evt_image(e);
+
+	/*
+	 * The index first, because it is what a reader refers to and it sorts.
+	 * Then the verb, then who, then the leaf of what - a full path does not
+	 * fit a panel column and the directory is the part a reader can ask
+	 * for separately.
+	 */
+	n = snprintf(out, cap, "//%llu %s pid=%lu%s%s",
+		     (unsigned long long)index, kof_evt_verb_name(e->verb),
+		     (unsigned long)e->pid, *obj ? " " : "",
+		     *obj ? tail_of(obj) : "");
+	if (n < 0)
+		return 0;
+	return ((size_t)n < cap) ? (size_t)n : cap - 1u;
+}
+
+/*
+ * THE FIELD TABLE, and why it is a switch rather than a loop over a struct.
+ *
+ * Only the fields an event actually carries are worth a row, and which those
+ * are depends on the verb: a file event has no ports, a thread start has no
+ * exit code, and a row reading "dport 0" is worse than no row because a reader
+ * cannot tell it from a real zero. So the order is fixed and the absent ones
+ * are skipped, which means the index a caller passes is a position in what
+ * THIS event has - not in some universal list.
+ */
+static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
+		    char *name, size_t ncap, char *val, size_t vcap)
+{
+#define ROW(nm, ...)                                                          \
+	do {                                                                  \
+		if (*seen == want) {                                          \
+			snprintf(name, ncap, "%s", nm);                       \
+			snprintf(val, vcap, __VA_ARGS__);                     \
+			return 1;                                             \
+		}                                                             \
+		(*seen)++;                                                    \
+	} while (0)
+
+	ROW("verb",  "%s", kof_evt_verb_name(e->verb));
+	ROW("pid",   "%lu", (unsigned long)e->pid);
+	if (e->actor_pid && e->actor_pid != e->pid)
+		ROW("actor", "%lu", (unsigned long)e->actor_pid);
+	if (e->ppid)
+		ROW("ppid",  "%lu", (unsigned long)e->ppid);
+	if (e->tid)
+		ROW("tid",   "%lu", (unsigned long)e->tid);
+	ROW("stamp", "%llu", (unsigned long long)e->stamp);
+	ROW("seq",   "%llu", (unsigned long long)e->seq);
+	if (e->create_time)
+		ROW("created", "%llu", (unsigned long long)e->create_time);
+	if (e->session_id)
+		ROW("session", "%lu", (unsigned long)e->session_id);
+	if (e->verb == KOF_EVT_PROC_STOP)
+		ROW("exit", "%lu", (unsigned long)e->exit_code);
+
+	if (*kof_evt_image(e))
+		ROW("image", "%s", kof_evt_image(e));
+	if (*kof_evt_object(e))
+		ROW("object", "%s", kof_evt_object(e));
+	if (*kof_evt_cmdline(e))
+		ROW("cmdline", "%s", kof_evt_cmdline(e));
+
+	if (e->loc)
+		ROW("where", "%s", kof_loc_name(e->loc));
+	/*
+	 * The technique, HERE and not on the event line - see the note in
+	 * kofevt.h. A properties panel is somebody asking about one event on
+	 * purpose, which is a different thing from a stream scrolling past.
+	 */
+	if (e->attack)
+		ROW("technique", "%s %s", kof_attack_id(e->attack),
+		    kof_attack_name(e->attack));
+
+	if (e->net_daddr || e->net_dport) {
+		uint32_t d = e->net_daddr;
+		uint16_t dp = (uint16_t)((e->net_dport >> 8) |
+					 (e->net_dport << 8));
+
+		ROW("peer", "%lu.%lu.%lu.%lu:%u",
+		    (unsigned long)(d & 0xffu),
+		    (unsigned long)((d >> 8) & 0xffu),
+		    (unsigned long)((d >> 16) & 0xffu),
+		    (unsigned long)((d >> 24) & 0xffu), (unsigned)dp);
+	}
+	if (e->net_size)
+		ROW("bytes", "%lu", (unsigned long)e->net_size);
+	if (e->addr)
+		ROW("addr", "0x%llx", (unsigned long long)e->addr);
+	if (e->addr_size)
+		ROW("addr size", "%llu", (unsigned long long)e->addr_size);
+	if (e->raw_id)
+		ROW("raw id", "%u", (unsigned)e->raw_id);
+	ROW("source", "%s", (e->os & KOF_OS_WINDOWS) ? "windows" :
+			    (e->os & KOF_OS_LINUX) ? "linux" : "unknown");
+
+	/*
+	 * The flags LAST and only when set, because each one qualifies
+	 * everything above it: a truncated path, a field the collector could
+	 * not supply, an entry point in no mapped image.
+	 */
+	if (e->flags & KOF_EF_TRUNCATED)
+		ROW("note", "text was cut");
+	if (e->flags & KOF_EF_PARTIAL)
+		ROW("note", "fields missing (0x%x)", (unsigned)e->miss);
+	if (e->flags & KOF_EF_UNBACKED)
+		ROW("note", "entry point in no mapped image");
+	if (e->flags & KOF_EF_LATE_LOAD)
+		ROW("note", "module mapped long after process start");
+	if (e->flags & KOF_EF_CMDLINE_RACED)
+		ROW("note", "command line lost to the process exiting");
+#undef ROW
+	return 0;
+}
+
+int kof_evt_field(const struct kof_evt *e, unsigned i,
+		  char *name, size_t ncap, char *val, size_t vcap)
+{
+	unsigned seen = 0;
+
+	if (!e || !name || !val || ncap == 0 || vcap == 0)
+		return 0;
+	name[0] = val[0] = '\0';
+	return field_at(e, i, &seen, name, ncap, val, vcap);
+}
+
+unsigned kof_evt_n_fields(const struct kof_evt *e)
+{
+	char n[32], v[64];
+	unsigned i = 0;
+
+	if (!e)
+		return 0;
+	while (kof_evt_field(e, i, n, sizeof n, v, sizeof v))
+		i++;
+	return i;
+}
+
+/* ----------------------------------------------- events that carry CONTENT */
+
+int kof_evt_content(const struct kof_evt *e, const char **text, size_t *len)
+{
+	const char *t;
+
+	if (!e)
+		return 0;
+	t = kof_evt_object(e);
+
+	/*
+	 * content_len AND NOT strlen, which is the whole reason the field
+	 * exists: the content is raw bytes and may contain NULs - UTF-16 read
+	 * as bytes has one at index 1 - so strlen would report exactly one
+	 * character of a kilobyte submission.
+	 */
+	if (e->content_len) {
+		if (text) *text = t;
+		if (len)  *len  = e->content_len;
+		return 1;
+	}
+	/* A verb that carries content but whose content did not arrive is
+	 * still a content event; saying so lets a viewer show "empty" rather
+	 * than showing a path column. */
+	if (e->verb == KOF_EVT_AMSI_SCAN) {
+		if (text) *text = t;
+		if (len)  *len  = 0;
+		return 1;
+	}
+	return 0;
+}
+
+int kof_evt_content_looks_binary(const struct kof_evt *e)
+{
+	const char *t = NULL;
+	size_t n = 0, i, unknown = 0;
+
+	if (!kof_evt_content(e, &t, &n) || n < 8)
+		return 0;
+
+	/*
+	 * A HEURISTIC, AND LABELLED AS ONE.
+	 *
+	 * The collector already replaced every byte above 0x7f with '?' and
+	 * every control character with '.', so what arrives here cannot be
+	 * inspected as bytes - see the note in kofevtfmt.h. What it CAN be
+	 * asked is whether the replacement characters dominate, which text
+	 * does not do and a mangled binary does.
+	 *
+	 * "MZ" first is checked too, because that survives the conversion
+	 * intact and is worth saying exactly rather than as a proportion.
+	 */
+	if (t[0] == 'M' && t[1] == 'Z')
+		return 1;
+	/*
+	 * RAW BYTES NOW, so this asks the real question rather than counting
+	 * replacement characters: how much of it is outside printable ASCII.
+	 * Script text is almost all inside it; a PE, a UTF-16 buffer or a
+	 * packed blob is not.
+	 */
+	for (i = 0; i < n; i++) {
+		unsigned char c = (unsigned char)t[i];
+
+		if (c < 0x09u || (c > 0x0du && c < 0x20u) || c >= 0x7fu)
+			unknown++;
+	}
+	return unknown * 4u > n;
+}

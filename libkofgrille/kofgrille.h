@@ -246,7 +246,7 @@ enum {
  * is not a crash - it is every string in every record starting two bytes off,
  * which reads as data.
  */
-#define KOFW_REC_HEAD 104u
+#define KOFW_REC_HEAD 112u
 
 struct kofw_evt {
 	/*
@@ -368,6 +368,29 @@ struct kofw_evt {
 	uint16_t off_cmdline;  /* into text[], or KOF_TEXT_NONE */
 
 	uint16_t text_len;
+
+	/*
+	 * HOW LONG THE CONTENT AT off_object IS, when it is CONTENT and not a
+	 * path - which today means an AMSI submission and nothing else.
+	 *
+	 * WHY IT CANNOT BE A NUL-TERMINATED STRING. A submitted script block
+	 * is a length-delimited buffer that may contain NULs; UTF-16 text read
+	 * as bytes has one at index 1. Stored as a string it comes back as
+	 * exactly one character, which is what the string conversion did.
+	 *
+	 * WHY IT IS RAW AND NO LONGER SANITISED. Replacing control characters
+	 * with '.' and high bytes with '?' was justified by the record being
+	 * PRINTED - a terminal escape in a name chosen by whoever made the
+	 * file is a report that lies about what it says. That is still true of
+	 * printing and it is now the printer's job. This record goes over a
+	 * channel to kofwatchman, whose entire purpose is to SCAN what is in
+	 * it, and a lossy conversion at the collector destroys the evidence
+	 * before the half that needs it ever sees it.
+	 *
+	 * Zero when the object is an ordinary path, which every other verb's
+	 * is.
+	 */
+	uint16_t content_len;
 
 	/*
 	 * What kof_classify_path made of the object path, or of the image when

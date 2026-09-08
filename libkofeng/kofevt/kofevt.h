@@ -465,7 +465,7 @@ uint8_t kof_classify_path(const char *path);
 /* One record. Fixed, so a producer that cannot allocate cannot fail, and so a
  * recorded log is a fixed-record file - see kofevtlog.h. */
 #define KOF_EVT_SIZE 512u
-#define KOF_EVT_HEAD 102u
+#define KOF_EVT_HEAD 104u
 
 /* kof_evt.flags */
 enum {
@@ -628,6 +628,17 @@ struct kof_evt {
 	uint16_t off_object;   /* what the event ACTED ON */
 	uint16_t off_cmdline;  /* how the subject was invoked */
 	uint16_t text_len;
+
+	/*
+	 * The length of the CONTENT at off_object, when the object is content
+	 * rather than a path - an AMSI submission. Raw and unsanitised: see
+	 * the note on kofw_evt.content_len for why a collector that cleaned it
+	 * up would be destroying the evidence before the half that scans it
+	 * ever saw it. Sanitising is the PRINTER's job.
+	 *
+	 * Zero for every ordinary path, which is NUL terminated as before.
+	 */
+	uint16_t content_len;
 
 	uint8_t  loc;          /* enum kof_evt_loc, of the object */
 	uint8_t  os;           /* enum kof_evt_os */

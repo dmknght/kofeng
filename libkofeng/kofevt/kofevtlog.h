@@ -265,6 +265,23 @@ uint64_t kofevt_log_count(struct kofevt_log_r *);
 
 int kofevt_log_seek(struct kofevt_log_r *, uint64_t n);
 
+/*
+ * WHERE RECORD `n` LIVES IN THE FILE - its offset and its length on disk.
+ *
+ * For a UI that maps the file and wants to show one event's actual bytes: a
+ * viewer with the log mapped can point a hex pane at exactly this slice
+ * without reading the record at all, and without copying anything.
+ *
+ * The length is the ON-DISK length - the fixed head plus this record's own
+ * text - not sizeof the struct. Those differ, and a pane sized from the struct
+ * would show the next record's opening bytes as though they were this one's.
+ *
+ * Non-zero on success. Uses the same sparse index kofevt_log_seek does, so the
+ * first call pays for it and the rest are a checkpoint plus a short walk.
+ */
+int kofevt_log_extent(struct kofevt_log_r *, uint64_t n, uint64_t *off,
+		      uint32_t *len);
+
 void kofevt_log_free(struct kofevt_log_r *);
 
 #endif /* KOFEVT_LOG_H */

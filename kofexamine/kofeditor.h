@@ -454,6 +454,20 @@ uint32_t tgt_mix(uint32_t h, const char *tok);
 
 struct object {
 	char      name[256];
+
+	/*
+	 * WHAT A TREE ROW SHOWS, when the name is not the answer.
+	 *
+	 * obj_label composes a row from the object's FORMAT - "ELF-x64",
+	 * "raw" - which is right for a scanned object and says nothing about
+	 * an event. A log's rows want "//4021 FileNew pid=5104 f.exe", which
+	 * only the record can supply.
+	 *
+	 * Empty for every ordinary object, and then obj_label behaves exactly
+	 * as it did. Non-empty overrides it - one field, checked in one place,
+	 * rather than obj_label learning what a log is.
+	 */
+	char      label[64];
 	uint8_t  *own;              /* the copy, NULL for the mapped top level */
 	void     *mapped;           /* or a spill file, mapped instead of copied */
 	uint64_t  mapped_len;

@@ -26,6 +26,7 @@
 #include "../../libkofgrille/wfilter.h"
 #include "../../libkofgrille/wtext.h"
 #include "../../libkofeng/kofevt/kofevt.h"
+#include "../../libkofeng/kofevt/kofevtfmt.h"
 #include "../../libkofeng/kofevt/kofevtlog.h"
 
 static int failures;
@@ -1064,6 +1065,232 @@ static void t_convert(void)
 	}
 }
 
+/* ---- the browsing API --------------------------------------------------- */
+
+/*
+ * The NEUTRAL record's own helpers. `mk`/`set_obj` above build a kofw_evt -
+ * the collector's transport - and the browsing API takes a kof_evt. Two
+ * helpers rather than one taking a void*, because the whole point of the two
+ * records being different types is that a mix-up is a compile error.
+ */
+static void mk_kof(struct kof_evt *e, uint16_t verb, uint32_t pid)
+{
+	memset(e, 0, sizeof *e);
+	e->verb        = verb;
+	e->pid         = pid;
+	e->off_image   = KOF_TEXT_NONE;
+	e->off_object  = KOF_TEXT_NONE;
+	e->off_cmdline = KOF_TEXT_NONE;
+}
+
+static void set_obj_kof(struct kof_evt *e, const char *path)
+{
+	size_t n = strlen(path);
+
+	memcpy(e->text, path, n + 1);
+	e->off_object = 0;
+	e->text_len   = (uint16_t)(n + 1);
+}
+
+/*
+ * CONTENT, not a path - so content_len is set and the bytes may be anything.
+ *
+ * A producer of a content event has to set that length; a path-shaped setter
+ * leaves it zero and the content then reads as empty, which is exactly what
+ * this test caught the first time it ran against raw bytes.
+ */
+static void set_content_kof(struct kof_evt *e, const void *bytes, size_t n)
+{
+	memcpy(e->text, bytes, n);
+	e->text[n]       = '\0';
+	e->off_object    = 0;
+	e->content_len   = (uint16_t)n;
+	e->text_len      = (uint16_t)(n + 1);
+}
+
+/*
+ * WHAT A UI ASKS OF A RECORD, tested without a UI.
+ *
+ * A label for a list row, the fields for a properties panel, and where one
+ * event's bytes live in the file so a hex pane can be pointed at them. All of
+ * it is pure record reading, so it is checkable here rather than by looking at
+ * a screen - which is the only way it stays correct.
+ */
+static void t_browse(void)
+{
+	struct kof_evt e;
+	char lab[KOF_EVT_LABEL_MAX];
+	char nm[32], vl[256];
+	unsigned i, n;
+	int saw_verb = 0, saw_obj = 0, saw_tech = 0, saw_port = 0;
+
+	mk_kof(&e, KOF_EVT_REG_SET_VALUE, 4242u);
+	e.ppid = 7u;
+	e.actor_pid = 99u;
+	e.session_id = 2u;
+	set_obj_kof(&e, "\\REGISTRY\\MACHINE\\SOFTWARE\\Microsoft\\Windows"
+		    "\\CurrentVersion\\Run\\evil");
+	e.loc = kof_classify(kof_evt_object(&e), &e.attack);
+	e.os = KOF_OS_WINDOWS;
+
+	/* The label leads with the index, because that is what a reader refers
+	 * to and it is what sorts. */
+	kof_evt_label(&e, 42u, lab, sizeof lab);
+	if (strncmp(lab, "//42 RegSet pid=4242", 20))
+		printf("  FAIL label: got \"%s\"\n", lab), failures++;
+	/* And it ends with the LEAF, not the whole key - a panel column cannot
+	 * hold a registry path and the directory is askable separately. */
+	if (!strstr(lab, "evil"))
+		fail("label", "did not end with the leaf");
+
+	n = kof_evt_n_fields(&e);
+	if (n < 6)
+		fail("fields", "too few fields for a registry write");
+	for (i = 0; i < n; i++) {
+		if (!kof_evt_field(&e, i, nm, sizeof nm, vl, sizeof vl)) {
+			fail("fields", "n_fields promised more than it yields");
+			break;
+		}
+		if (!strcmp(nm, "verb") && !strcmp(vl, "RegSet")) saw_verb = 1;
+		if (!strcmp(nm, "object")) saw_obj = 1;
+		/* The technique belongs on a PROPERTIES panel and nowhere on an
+		 * event line - see the note in kofevt.h. */
+		if (!strcmp(nm, "technique") &&
+		    strstr(vl, "T1547.001")) saw_tech = 1;
+		if (!strcmp(nm, "peer")) saw_port = 1;
+	}
+	if (!saw_verb) fail("fields", "no verb row");
+	if (!saw_obj)  fail("fields", "no object row");
+	if (!saw_tech) fail("fields", "no technique row on a Run key write");
+	/* A registry write has no peer, and a row reading 0.0.0.0:0 would be
+	 * worse than no row - a reader cannot tell it from a real zero. */
+	if (saw_port)  fail("fields", "a registry write reported a peer");
+
+	/* A registry write is not content. */
+	if (kof_evt_content(&e, NULL, NULL))
+		fail("content", "a registry write reported content");
+
+	/*
+	 * AN AMSI SUBMISSION IS content, and a mangled binary is reported as
+	 * one - because a screen of '?' would otherwise read as a junk payload
+	 * rather than as bytes this record cannot carry.
+	 */
+	{
+		struct kof_evt a;
+		const char *t = NULL;
+		size_t tn = 0;
+
+		static const char script[] =
+			"Write-Host 'hello there, this is a script'";
+		/* A PE header, verbatim - which the record now carries because
+		 * the collector stopped sanitising what goes to a scanner. */
+		static const unsigned char pe[] = {
+			'M','Z',0x90,0x00,0x03,0x00,0x00,0x00,
+			0x04,0x00,0x00,0x00,0xff,0xff,0x00,0x00
+		};
+		/* UTF-16 'echo' - a NUL at index 1, which is why a string
+		 * would have reported one character. */
+		static const unsigned char u16[] = {
+			'e',0,'c',0,'h',0,'o',0,' ',0,'h',0,'i',0,0,0
+		};
+
+		mk_kof(&a, KOF_EVT_AMSI_SCAN, 7u);
+		set_content_kof(&a, script, sizeof script - 1u);
+		if (!kof_evt_content(&a, &t, &tn))
+			fail("content", "an AMSI event reported no content");
+		eq_u64("content len", tn, sizeof script - 1u);
+		if (kof_evt_content_looks_binary(&a))
+			fail("content", "called a script binary");
+
+		mk_kof(&a, KOF_EVT_AMSI_SCAN, 7u);
+		set_content_kof(&a, pe, sizeof pe);
+		if (!kof_evt_content_looks_binary(&a))
+			fail("content", "did not notice an MZ");
+
+		/* THE ONE A STRING GOT WRONG: bytes past a NUL survive, and
+		 * the length is the buffer's rather than up to the NUL. */
+		mk_kof(&a, KOF_EVT_AMSI_SCAN, 7u);
+		set_content_kof(&a, u16, sizeof u16);
+		if (!kof_evt_content(&a, &t, &tn))
+			fail("content", "no content for a UTF-16 buffer");
+		eq_u64("content len past NUL", tn, sizeof u16);
+		if (t[2] != 'c')
+			fail("content", "lost the bytes after the first NUL");
+	}
+
+	/* One past the end yields nothing rather than an empty row. */
+	if (kof_evt_field(&e, n, nm, sizeof nm, vl, sizeof vl))
+		fail("fields", "yielded a field past the end");
+}
+
+/* ---- where an event's bytes are ---------------------------------------- */
+
+static void t_extent(void)
+{
+	const char *path = "grille_host_extent.tmp";
+	struct kofevt_log_info li;
+	struct kofevt_log_w *w;
+	struct kofevt_log_r *r;
+	const char *why = "";
+	struct kof_evt e;
+	uint64_t off_a = 0, off_b = 0;
+	uint32_t len_a = 0, len_b = 0;
+
+	memset(&li, 0, sizeof li);
+	li.rec_size  = (uint32_t)sizeof(struct kof_evt);
+	li.head_size = (uint16_t)KOF_EVT_HEAD;
+	li.len_off   = (uint16_t)offsetof(struct kof_evt, text_len);
+	li.rec_kind  = KOFEVT_REC_KOF;
+	w = kofevt_log_create(path, &li);
+	if (!w) {
+		fail("extent", "could not create");
+		return;
+	}
+	/* Two records with DIFFERENT text lengths, which is the case a length
+	 * taken from sizeof the struct gets wrong. */
+	mk_kof(&e, KOF_EVT_FILE_NEW, 1u);
+	set_obj_kof(&e, "/a");
+	kofevt_log_write(w, &e);
+	mk_kof(&e, KOF_EVT_FILE_NEW, 2u);
+	set_obj_kof(&e, "/a/much/longer/path/than/the/first/one");
+	kofevt_log_write(w, &e);
+	(void)kofevt_log_close(w);
+
+	r = kofevt_log_open(path, (uint32_t)sizeof(struct kof_evt),
+			    KOFEVT_REC_KOF, &why);
+	if (!r) {
+		printf("  FAIL extent open: %s\n", why);
+		failures++;
+		remove(path);
+		return;
+	}
+	if (!kofevt_log_extent(r, 0, &off_a, &len_a))
+		fail("extent", "no extent for record 0");
+	if (!kofevt_log_extent(r, 1, &off_b, &len_b))
+		fail("extent", "no extent for record 1");
+
+	eq_u64("extent 0 off", off_a, sizeof(struct kofevt_log_hdr));
+	eq_u64("extent 0 len", len_a, KOF_EVT_HEAD + 3u);   /* "/a" + NUL */
+	eq_u64("extent 1 off", off_b, off_a + len_a);
+	/* ON-DISK length, not sizeof: the second record is longer, and a pane
+	 * sized from the struct would show the next record's opening bytes. */
+	if (len_b <= len_a)
+		fail("extent", "the longer record did not measure longer");
+	if (len_b == sizeof(struct kof_evt))
+		fail("extent", "reported sizeof instead of the on-disk length");
+
+	/* Asking must not disturb a walk: read after an extent query and the
+	 * record that comes back is the one seeked to. */
+	if (kofevt_log_extent(r, 1, &off_b, &len_b) &&
+	    kofevt_log_read(r, &e))
+		eq_u64("extent leaves position", e.pid, 2u);
+	else
+		fail("extent", "could not read after asking");
+
+	kofevt_log_free(r);
+	remove(path);
+}
+
 int main(void)
 {
 	printf("grille_host: the ETW-free half of libkofgrille\n");
@@ -1079,6 +1306,8 @@ int main(void)
 	t_pid_reuse();
 	t_convert();
 	t_trace();
+	t_browse();
+	t_extent();
 
 	if (failures) {
 		printf("%d failure(s)\n", failures);

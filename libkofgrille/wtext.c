@@ -317,6 +317,15 @@ void kofw_evt_to_kof(const struct kofw_evt *in, struct kof_evt *out)
 	memcpy(out->text, in->text, n);
 	out->text_len = (uint16_t)n;
 
+	/*
+	 * Carried across, and clamped to what actually got copied: content_len
+	 * is the number a scanner reads, so one that pointed past the arena
+	 * would hand somebody a length with no bytes behind it.
+	 */
+	out->content_len = in->content_len;
+	if (out->content_len > n)
+		out->content_len = (uint16_t)n;
+
 	/* An offset that fell outside what was copied becomes absent, which is
 	 * the only honest answer - the bytes it pointed at are not here. */
 	out->off_image   = (in->off_image   < n) ? in->off_image   : KOF_TEXT_NONE;

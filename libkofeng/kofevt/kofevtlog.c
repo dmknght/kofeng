@@ -387,6 +387,41 @@ int kofevt_log_seek(struct kofevt_log_r *r, uint64_t n)
 	return 1;
 }
 
+int kofevt_log_extent(struct kofevt_log_r *r, uint64_t n, uint64_t *off,
+		      uint32_t *len)
+{
+	unsigned char head[KOFEVT_HEAD_MAX];
+	long at;
+	uint16_t tl;
+
+	if (!r || !off || !len)
+		return 0;
+	if (!kofevt_log_seek(r, n))
+		return 0;
+
+	at = ftell(r->fp);
+	if (at < 0)
+		return 0;
+
+	/*
+	 * The head is read to learn the text length, then the position is put
+	 * back - so this leaves the reader exactly where it was and a caller
+	 * can ask about any record without disturbing a walk in progress.
+	 */
+	if (r->h.head_size > sizeof head ||
+	    fread(head, r->h.head_size, 1, r->fp) != 1)
+		return 0;
+	memcpy(&tl, head + r->h.len_off, sizeof tl);
+	if ((uint32_t)r->h.head_size + tl > r->h.rec_size)
+		return 0;
+	if (fseek(r->fp, at, SEEK_SET) != 0)
+		return 0;
+
+	*off = (uint64_t)at;
+	*len = (uint32_t)r->h.head_size + tl;
+	return 1;
+}
+
 const struct kofevt_log_hdr *kofevt_log_header(const struct kofevt_log_r *r)
 {
 	return r ? &r->h : NULL;

@@ -890,19 +890,29 @@ $(OUT)/bin/kofexamine$(EXE): $(EXAMINE_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 # The other front end onto the same layer. Two binaries from one directory, and
 # the directory is the toolchain rather than the tool: what they share is
 # kofinspect, and what differs is only how a pane and a line are drawn.
+#
+# The event-log format, linked into anything that reads one. Defined here
+# rather than beside its first user because two rules need it and a variable
+# used before it is set expands to nothing - the trap this file has now been
+# caught by twice.
+KOFEVT_SRC := libkofeng/kofevt/kofevt.c libkofeng/kofevt/kofevtfmt.c \
+              libkofeng/kofevt/kofevtlog.c
+
 VIEWER_SRC := kofexamine/kofviewer.c kofexamine/kofview.c kofexamine/kofinspect.c kofexamine/kofeditor.c
 
 # EMU_INC because the viewer disassembles: bddisasm's definitions are already
 # inside $(LIB) - the emulator put them there - so what is missing is only the
 # header, and linking a second copy of the decoder would be the alternative.
 #
-# kofevt is on the include path because the viewer recognises an event log.
-# It reads the HEADER only - the browser is a mode of its own and does not
-# exist yet - so it needs the format's declaration and not its reader.
-$(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
+# kofevt is linked in because the viewer BROWSES an event log: it reads the
+# header, counts the records, and asks where each one is so a hex pane can be
+# pointed at it. The engine cannot answer any of that - a log is not a scanned
+# object - which is why the format lives beside the engine and not inside it.
+$(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
+                            $(STAMP)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include -Ilibkofeng/kofevt $(EMU_INC) \
-	      $(VIEWER_SRC) libkofeng/kofevt/kofevt.c $(LIB) -o $@ $(LDFLAGS)
+	      $(VIEWER_SRC) $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS)
 
 # ----------------------------------------------------- the database toolchain
 #
@@ -922,9 +932,6 @@ $(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 # normalised: a log written on Windows is analysed here, on the CI, by the same
 # binary a Windows machine would run. Every event rule that ever exists becomes
 # testable because of this line.
-KOFEVT_SRC := libkofeng/kofevt/kofevt.c libkofeng/kofevt/kofevtfmt.c \
-              libkofeng/kofevt/kofevtlog.c
-
 #
 # On Windows it also links the collector, for the live channel - which is a
 # Windows transport, so off Windows the recording path is the whole program.

@@ -67,6 +67,7 @@
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 
+#include "kofevtfmt.h"
 #include "kofevtlog.h"
 #include "kofinspect.h"
 #include "kofview.h"
@@ -711,6 +712,13 @@ struct chooser {
 #define MAX_OBJ  128
 #define MAX_TREE 512
 
+/*
+ * Events per window. Under MAX_OBJ so the parent fits beside them, and under
+ * MAX_TREE with room for the rows tree_build adds. Bigger buys nothing: a
+ * screen shows tens of rows, and the window follows the selection.
+ */
+#define LOG_WIN 96u
+
 
 /*
  * A row in the left pane.
@@ -840,6 +848,24 @@ struct view {
 
 	struct node node[MAX_TREE];
 	uint32_t    n_node, sel_node, tree_top;
+
+	/*
+	 * AN EVENT LOG, BROWSED AS A WINDOW RATHER THAN LOADED.
+	 *
+	 * A log holds millions of records and the object array holds MAX_OBJ,
+	 * so the objects are a WINDOW over it: LOG_WIN events starting at
+	 * log_first, rebuilt when the selection walks off either end. Nothing
+	 * of a record is copied - each event object's buf points into the
+	 * mapped file at that record's own extent, so the hex pane shows the
+	 * real bytes and the memory cost of opening a log is the mapping.
+	 *
+	 * `log` is a second handle on the same file, used only to ask WHERE a
+	 * record is; the bytes come from the mapping. Two handles because the
+	 * questions are different and neither wants the other's file position.
+	 */
+	struct kofevt_log_r *log;
+	uint64_t             log_n;      /* events in the file */
+	uint64_t             log_first;  /* the window's first index */
 
 	struct kof_range *ext;
 	uint32_t          n_ext;
@@ -2293,10 +2319,17 @@ static void obj_label(const struct object *o, char *out, size_t cap)
 	const char *leaf = kof_obj_leaf(o->name);
 	char what[24];
 
+	/* An object that already knows what its row says - see
+	 * struct object.label. */
+	if (o->label[0]) {
+		snprintf(out, cap, "%s", o->label);
+		return;
+	}
+
 	snprintf(what, sizeof what, "%s%s%s",
 		 o->fmt ? kof_format_name(o->ctx.format) : "raw",
 		 o->fmt ? "-" : "",
-		 o->fmt ? kof_evt_arch_name(o->ctx.arch) : "");
+		 o->fmt ? kof_arch_name(o->ctx.arch) : "");
 	if (o->depth == 0) {
 		snprintf(out, cap, "%s", what);
 	} else if (o->payload_of) {
@@ -2326,13 +2359,133 @@ static void obj_label(const struct object *o, char *out, size_t cap)
 		 * has 48 columns, so the cut is stated where a reader of the
 		 * format string can see it. */
 		snprintf(out, cap, "//%.24s Shellcode-%s", leaf,
-			 o->fmt ? kof_evt_arch_name(o->ctx.arch) : "?");
+			 o->fmt ? kof_arch_name(o->ctx.arch) : "?");
 	} else {
 		snprintf(out, cap, "//%.24s %.18s%s", leaf, what,
 			 /* Scanned, but not kept: there is nothing to show and
 			  * the row should not pretend there is. */
 			 o->too_big ? "  (not kept)" : "");
 	}
+}
+
+/*
+ * BUILD THE OBJECT WINDOW FOR AN EVENT LOG.
+ *
+ * obj[0] is the log itself, named KOFT-<system>-<arch> so the row says what
+ * produced it rather than repeating the filename the title bar already shows.
+ * obj[1..] are the events of the current window, one each, named with the
+ * engine's own "//<n>" convention so tree_build nests them under the parent
+ * without knowing anything about logs.
+ *
+ * The index in the name is the event's index IN THE FILE, not in the window -
+ * a reader refers to event 40 000 by that number, and a row that renumbered
+ * itself as the window moved would be unusable for exactly the thing a log is
+ * read for.
+ *
+ * Each event's buf points INTO THE MAPPING at that record's own extent. Not a
+ * copy, and not sizeof the struct: the on-disk length is the head plus this
+ * record's own text, so a pane sized from the struct would show the next
+ * record's opening bytes as this one's.
+ */
+static void log_window(struct view *v)
+{
+	const struct kofevt_log_hdr *h;
+	uint64_t i;
+	uint32_t n = 1;
+
+	if (!v->log)
+		return;
+	h = kofevt_log_header(v->log);
+
+	for (i = 0; i < v->n_obj; i++) {
+		/* Nothing here owns heap - the buffers are the mapping - so
+		 * clearing is enough and there is nothing to free. */
+		memset(&v->obj[i], 0, sizeof v->obj[i]);
+	}
+
+	snprintf(v->obj[0].name, sizeof v->obj[0].name, "KOFT-%s-%s",
+		 kof_evt_platform_name((uint8_t)h->platform),
+		 kof_evt_arch_name((uint8_t)h->arch));
+	snprintf(v->obj[0].label, sizeof v->obj[0].label, "%.48s",
+		 v->obj[0].name);
+	v->obj[0].buf   = kof_buf_make(v->map, v->map_len);
+	v->obj[0].depth = 0;
+
+	for (i = v->log_first; i < v->log_n && n + 1u < MAX_OBJ; i++) {
+		struct object *o = &v->obj[n];
+		uint64_t off = 0;
+		uint32_t len = 0;
+
+		if (!kofevt_log_extent(v->log, i, &off, &len))
+			break;
+		if (off + len > v->map_len)
+			break;
+
+		/*
+		 * The parent's name is bounded explicitly rather than left to
+		 * the compiler to worry about: it is "KOFT-<system>-<arch>",
+		 * which is short, but sizeof says 256 and a %s of that plus an
+		 * index cannot be proven to fit. Truncating the PARENT half
+		 * would break the "//" nesting tree_build reads, so the bound
+		 * is on the part that can afford it.
+		 */
+		snprintf(o->name, sizeof o->name, "%.64s//%llu",
+			 v->obj[0].name, (unsigned long long)i);
+		o->depth = 1;
+		o->buf   = kof_buf_make((const uint8_t *)v->map + off, len);
+
+		/*
+		 * The row's text comes from the RECORD, through the same
+		 * kof_evt_label a TUI or a dashboard would use - so a row here
+		 * and a row there cannot describe the same event differently.
+		 *
+		 * The record is copied out of the mapping rather than cast
+		 * from it: a log written by a build with a shorter head has its
+		 * text at a different offset, and the copy is bounded by what
+		 * this build's struct is.
+		 */
+		{
+			struct kof_evt rec;
+
+			memset(&rec, 0, sizeof rec);
+			memcpy(&rec, (const uint8_t *)v->map + off,
+			       len < sizeof rec ? len : sizeof rec);
+			kof_evt_label(&rec, i, o->label, sizeof o->label);
+		}
+		n++;
+		if (i - v->log_first + 1u >= LOG_WIN)
+			break;
+	}
+	v->n_obj = n;
+}
+
+/*
+ * Move the window so that event `want` is in it, and say whether anything
+ * moved.
+ *
+ * The window is placed so the wanted event is not on its very edge where
+ * possible - stepping one row past the end otherwise reloads on every
+ * keystroke, which is the difference between scrolling and thrashing.
+ */
+static int log_window_to(struct view *v, uint64_t want)
+{
+	uint64_t first;
+
+	if (!v->log || want >= v->log_n)
+		return 0;
+	if (want >= v->log_first && want < v->log_first + LOG_WIN)
+		return 0;
+
+	if (want < v->log_first)
+		first = (want > LOG_WIN / 2u) ? want - LOG_WIN / 2u : 0;
+	else
+		first = want - LOG_WIN / 2u;
+	if (first + LOG_WIN > v->log_n)
+		first = (v->log_n > LOG_WIN) ? v->log_n - LOG_WIN : 0;
+
+	v->log_first = first;
+	log_window(v);
+	return 1;
 }
 
 static void tree_build(struct view *v)
@@ -2528,6 +2681,58 @@ static void view_select(struct view *v)
 static void goto_node(struct view *v, uint32_t k)
 {
 	uint32_t was;
+
+	/*
+	 * WALKING OFF THE END OF THE WINDOW SCROLLS THE LOG, rather than
+	 * stopping at the last loaded event.
+	 *
+	 * Without this the list ends at whatever the window happened to hold
+	 * and a reader concludes the log does too - which for a file of
+	 * millions is the wrong answer given confidently. The window follows
+	 * the selection instead, and the ids on screen keep counting.
+	 */
+	if (v->log && k >= v->n_node && v->n_node) {
+		uint64_t last = v->log_first;
+		uint32_t leaf = 0, j;
+
+		/* The event index the last row stands for. Nodes carry an
+		 * object index, and only the event objects have one. */
+		for (j = 0; j < v->n_node; j++)
+			if (v->node[j].obj > leaf)
+				leaf = v->node[j].obj;
+		if (leaf)
+			last = v->log_first + leaf - 1u;
+
+		if (last + 1u < v->log_n && log_window_to(v, last + 1u)) {
+			tree_build(v);
+			/* Land on the first row of what was just loaded rather
+			 * than at the top: the reader was moving DOWN. */
+			v->sel_node = 0;
+			for (j = 0; j < v->n_node; j++) {
+				if (v->node[j].obj == 1u) {
+					v->sel_node = j;
+					break;
+				}
+			}
+			v->sel_a = v->sel_b = KOF_BROKEN;
+			v->dis_have = 0;
+			view_select(v);
+		}
+		return;
+	}
+	if (v->log && k == (uint32_t)-1 && v->log_first) {
+		uint64_t back = (v->log_first > LOG_WIN) ?
+				v->log_first - 1u : 0;
+
+		if (log_window_to(v, back)) {
+			tree_build(v);
+			v->sel_node = v->n_node ? v->n_node - 1u : 0;
+			v->sel_a = v->sel_b = KOF_BROKEN;
+			v->dis_have = 0;
+			view_select(v);
+		}
+		return;
+	}
 
 	if (k >= v->n_node || k == v->sel_node)
 		return;
@@ -10121,7 +10326,7 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 				 ob->fmt ? kof_format_name(ob->ctx.format)
 					 : "raw",
 				 ob->fmt ? "-" : "",
-				 ob->fmt ? kof_evt_arch_name(ob->ctx.arch) : "");
+				 ob->fmt ? kof_arch_name(ob->ctx.arch) : "");
 			/* The cut is written into the format rather than left
 			 * to the buffer, the way obj_label writes its own: a
 			 * file name has no length limit and the row has a
@@ -10199,7 +10404,7 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 			 "format", fmt, sub ? " " : "", sub ? sub : "");
 		if (ob->fmt)
 			prop_add(A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF,
-				 "arch", kof_evt_arch_name(ob->ctx.arch));
+				 "arch", kof_arch_name(ob->ctx.arch));
 	} else {
 		/* Bytes and nothing else. The format and the architecture are
 		 * on the identity row above, and saying them twice on two
@@ -10392,7 +10597,7 @@ no_regions:
 	if (ob->payload_of) {
 		prop_add(A_WARN "  RECONSTRUCTED_%s-%s_SHELLCODE" A_OFF,
 			 ob->fmt ? kof_format_name(ob->ctx.format) : "RAW",
-			 ob->fmt ? kof_evt_arch_name(ob->ctx.arch) : "?");
+			 ob->fmt ? kof_arch_name(ob->ctx.arch) : "?");
 	} else if (ob->fmt && ob->info && ob->fmt->anomalies) {
 		uint64_t anom = ob->fmt->anomalies(ob->info);
 
@@ -16283,6 +16488,12 @@ static void file_close(struct view *v)
 	 * re-execing - and became a leak per file the moment it did not.
 	 */
 	draft_wipe(v);
+	/* The log's reader goes with the file. Its objects own no heap - their
+	 * buffers are the mapping - so there is nothing else to undo. */
+	if (v->log) {
+		kofevt_log_free(v->log);
+		v->log = NULL;
+	}
 	for (i = 0; i < v->n_obj; i++) {
 		struct object *o = &v->obj[i];
 
@@ -16415,19 +16626,48 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 		const struct kofevt_log_hdr *lh = map;
 
 		if (lh->magic == KOFEVT_LOG_MAGIC) {
+			const char *why = "";
+
+			/*
+			 * A SECOND HANDLE, for asking where records are.
+			 *
+			 * The bytes come from the mapping above; this one
+			 * answers "where is event N" using the log's own
+			 * sparse index. Two handles because the questions are
+			 * different and neither wants the other's file
+			 * position.
+			 */
+			v->log = kofevt_log_open(keep, 0, KOFEVT_REC_NONE,
+						 &why);
+			if (v->log) {
+				v->log_n     = kofevt_log_count(v->log);
+				v->log_first = 0;
+				log_window(v);
+			} else {
+				snprintf(v->act_msg, sizeof v->act_msg,
+					 "event log: %s", why);
+			}
 			snprintf(v->act_msg, sizeof v->act_msg,
-				 "kofevt event log: %s/%s, sensor build %lu, "
-				 "%llu event(s) - read it with kofwatchman "
-				 "--log",
+				 "event log: %s/%s, sensor build %lu, "
+				 "%llu event(s)",
 				 kof_evt_platform_name((uint8_t)lh->platform),
 				 kof_evt_arch_name((uint8_t)lh->arch),
 				 (unsigned long)lh->build,
-				 (unsigned long long)lh->n_records);
+				 (unsigned long long)v->log_n);
 			v->act_ok = 1;
 		}
 	}
 
-	if (v->eng)
+	/*
+	 * A LOG IS NOT SCANNED, and its objects are already built.
+	 *
+	 * objects_collect runs the engine over the file to find what is in it,
+	 * which is the right question for a sample and the wrong one for a
+	 * stream of records: it would find nothing, and then the fallback
+	 * below would replace the event window with one object holding the
+	 * whole file.
+	 */
+	if (v->eng && !v->log)
 		objects_collect(v, v->eng);
 	if (!v->n_obj) {
 		/*
