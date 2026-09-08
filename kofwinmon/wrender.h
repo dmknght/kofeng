@@ -60,4 +60,26 @@ uint64_t wm_now(void);
 
 const char *wm_leaf(const char *path);
 
+/*
+ * THE BUILD STAMP, AND WHY EVERY BANNER CARRIES IT.
+ *
+ * "I rebuilt and the output is identical" has two causes that look the same
+ * from a terminal: nothing changed, or the binary being run is not the one that
+ * was just built - an old copy earlier on PATH, a build that failed after the
+ * tools step, a machine that did not pull. Guessing between those costs an
+ * afternoon; reading a number off the banner costs a second.
+ *
+ * The stamp is the same UTC minute the engine and the pack are stamped with,
+ * so a tool, a database and a library can be compared against each other
+ * rather than only against memory.
+ */
+#ifndef KOFENG_BUILD
+/* A build that did not define it says so, rather than printing a zero that
+ * looks like an answer. */
+#define KOFENG_BUILD 0u
+#endif
+
+/* Print the name, the build stamp and what this build collects. */
+void wm_banner(const char *tool);
+
 #endif /* KOFWINMON_WRENDER_H */

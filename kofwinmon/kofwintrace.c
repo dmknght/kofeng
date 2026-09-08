@@ -56,7 +56,8 @@ static BOOL WINAPI on_ctrl(DWORD type)
 
 static void usage(void)
 {
-	fputs("usage: kofwintrace [options] <program> [args...]\n"
+	wm_banner("kofwintrace");
+	fputs("\nusage: kofwintrace [options] <program> [args...]\n"
 	      "\n"
 	      "EVERY PROVIDER IS ON BY DEFAULT, and so is --raw. This is a tool\n"
 	      "for finding out what a program does and what the stream looks\n"
@@ -175,6 +176,18 @@ int main(int argc, char **argv)
 			want_thread = 1;
 		else if (!strcmp(argv[i], "--no-system-logger"))
 			opt.no_system_logger = 1;
+		/*
+		 * Asked for explicitly, so it goes to stdout and exits 0 -
+		 * `kofwintrace --help | more` has to work, and a help request
+		 * is not an error. The usage printed on a BAD argument still
+		 * goes to stderr with a non-zero exit, because that one is.
+		 */
+		else if (!strcmp(argv[i], "--help") ||
+			 !strcmp(argv[i], "-h") ||
+			 !strcmp(argv[i], "/?")) {
+			usage();
+			return 0;
+		}
 		/* The old opt-in spellings, which now only confirm a default.
 		 * Accepted rather than refused: a command line somebody has in
 		 * their shell history should not start failing. */
@@ -294,6 +307,8 @@ int main(int argc, char **argv)
 		kofw_mon_filter(mon, &f);
 	}
 
+	fprintf(stderr, "kofwintrace: build %llu\n",
+		(unsigned long long)KOFENG_BUILD);
 	fprintf(stderr, "kofwintrace: %s\nkofwintrace: root pid %lu, providers:"
 		" process%s%s%s%s%s\n\n",
 		cmd, (unsigned long)root_pid,

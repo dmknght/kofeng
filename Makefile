@@ -924,7 +924,8 @@ else
 WIN_CFLAGS  := -std=c11 -O2 -g -fno-common \
                -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
                -Wpointer-arith -Wstrict-prototypes -Wmissing-prototypes \
-               $(KOF_WARN_PORTABLE) $(KOF_WARN_GCC) -MMD -MP
+               $(KOF_WARN_PORTABLE) $(KOF_WARN_GCC) -MMD -MP \
+               -DKOFENG_BUILD=$(KOF_BUILD_STAMP)u
 WIN_LDFLAGS :=
 endif
 

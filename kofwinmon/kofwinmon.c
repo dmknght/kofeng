@@ -44,7 +44,8 @@ static BOOL WINAPI on_ctrl(DWORD type)
 
 static void usage(void)
 {
-	fputs("usage: kofwinmon [options]\n"
+	wm_banner("kofwinmon");
+	fputs("\nusage: kofwinmon [options]\n"
 	      "\n"
 	      "  --seconds N      stop after N seconds (0 = until ctrl-c)\n"
 	      "  --stats-every N  health line every N seconds (default 10)\n"
@@ -130,6 +131,12 @@ int main(int argc, char **argv)
 			want_thread = 1;
 		else if (!strcmp(argv[i], "--no-system-logger"))
 			opt.no_system_logger = 1;
+		else if (!strcmp(argv[i], "--help") ||
+			 !strcmp(argv[i], "-h") ||
+			 !strcmp(argv[i], "/?")) {
+			usage();
+			return 0;
+		}
 		/*
 		 * Everything, which is what kofwintrace takes by default and
 		 * what kofwinmon does NOT: this one watches the whole machine

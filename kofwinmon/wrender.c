@@ -9,6 +9,22 @@
 
 #include "wrender.h"
 
+void wm_banner(const char *tool)
+{
+	fprintf(stderr, "%s (kofgrille) build %llu\n", tool,
+		(unsigned long long)KOFENG_BUILD);
+	if (KOFENG_BUILD == 0u)
+		fputs("  built without a build stamp - cannot tell you which "
+		      "build this is\n", stderr);
+	fputs("  collects: process, image, file, file-write, network, "
+	      "registry, thread\n"
+	      "  typed:    process, image, file, network\n"
+	      "  UNtyped (arrive as `raw`): registry, thread, IPv6 - their\n"
+	      "            event ids are not established yet, so --raw must be\n"
+	      "            on to see them at all. See wevt_decode.c.\n",
+	      stderr);
+}
+
 const char *wm_leaf(const char *path)
 {
 	const char *last = path;
