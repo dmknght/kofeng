@@ -185,6 +185,7 @@ struct kofw_mon {
 
 	struct kofw_filter filter;
 	struct kofw_ptab   ptab;
+	struct kofw_ftab   ftab;
 	uint64_t           filtered;
 	uint64_t           filtered_loc, filtered_scope, filtered_type;
 	uint64_t           seq_expect, seq_gaps;
@@ -622,6 +623,7 @@ struct kofw_mon *kofw_mon_open(const struct kofw_mon_option *opt, int *err)
 
 	m->self_pid    = GetCurrentProcessId();
 	kofw_ptab_init(&m->ptab);
+	kofw_ftab_init(&m->ftab);
 	m->trace_self  = o.trace_self;
 	atomic_init(&m->skipped_self, 0u);
 	atomic_init(&m->decode_failed, 0u);
@@ -760,6 +762,21 @@ int kofw_mon_next(struct kofw_mon *m, struct kofw_evt *out, uint32_t wait_ms)
 			if (out->seq > m->seq_expect)
 				m->seq_gaps += out->seq - m->seq_expect;
 			m->seq_expect = out->seq + 1u;
+
+			/*
+			 * FileKey -> path, BEFORE the filter.
+			 *
+			 * The filter classifies the object path and scopes on
+			 * it, so a write whose path is still unresolved would
+			 * be classified as `unknown` and judged on nothing.
+			 * Also before, not after, because a name record must
+			 * reach the table even when the filter is about to
+			 * refuse it - the write it explains may be inside the
+			 * scope even though the name record was not.
+			 */
+			kofw_ftab_add(&m->ftab, out->addr,
+				      kofw_evt_object(out));
+			(void)kofw_ftab_resolve(&m->ftab, out);
 
 			{
 				uint8_t why = KOFW_REFUSE_NONE;

@@ -54,6 +54,8 @@
 #include <stdio.h>
 #include <stdint.h>
 
+#include "kofevt.h"
+
 /*
  * NO RECORD TYPE IS INCLUDED HERE, ON PURPOSE.
  *
@@ -110,7 +112,18 @@ struct kofevt_log_hdr {
 	uint32_t sub_enabled;  /* what the providers actually accepted - a trace
 				* is incomplete in a way its records cannot show */
 	uint32_t root_pid;     /* the traced subtree, or 0 for a whole machine */
-	uint16_t os;           /* 1 windows, 2 linux - which collector wrote it */
+	/*
+	 * WHICH MACHINE WROTE THIS, one byte each.
+	 *
+	 * The most important thing in the header after the record's identity:
+	 * a log is opened by something that did not produce it, on a different
+	 * platform, possibly years later - and almost every field in a record
+	 * means something platform-shaped. A pid, a path separator, whether an
+	 * address is 32 or 64 bits wide. A reader that has to guess gets it
+	 * right until the day it does not.
+	 */
+	uint8_t  platform;     /* enum kof_evt_platform */
+	uint8_t  arch;         /* enum kof_evt_arch */
 	uint16_t rec_kind;     /* enum kofevt_rec_kind */
 
 	/*
@@ -134,7 +147,8 @@ struct kofevt_log_info {
 	uint32_t rec_size;
 	uint32_t rec_kind;     /* enum kofevt_rec_kind */
 	uint32_t build;        /* the collector's build stamp */
-	uint32_t os;           /* 1 windows, 2 linux */
+	uint8_t  platform;     /* enum kof_evt_platform; 0 asks for this host */
+	uint8_t  arch;         /* enum kof_evt_arch;     0 asks for this host */
 	uint32_t root_pid;     /* the traced subtree, or 0 */
 	uint32_t sub_asked;
 	uint32_t sub_enabled;

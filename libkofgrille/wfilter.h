@@ -102,6 +102,52 @@ struct kofw_ptab {
 	uint64_t late_loads;    /* modules flagged - see KOFW_EF_LATE_LOAD */
 };
 
+/* ------------------------------------------------- FileKey -> path */
+
+/*
+ * WHAT A WRITE NAMES ITS TARGET BY, TURNED BACK INTO A PATH.
+ *
+ * FileIo Write carries FileObject and FileKey - kernel pointers - and no
+ * filename at all. That is why the write subscription enables the FILENAME
+ * keyword alongside it: FILENAME emits separate records that map one of those
+ * pointers to a path, and this is where they are kept.
+ *
+ * Without it a write is a byte count against an address nobody can resolve,
+ * which is what `[unknown] [miss 0x40]` on every PowerShell write was.
+ *
+ * RECYCLED WHOLE WHEN FULL, not evicted one at a time. A forgotten mapping
+ * costs one write its path and the next name record puts it back; an LRU would
+ * cost a pointer per entry and a policy to get wrong, on a table whose whole
+ * job is to be a cache.
+ */
+#define KOFW_FTAB_MAX  4096u
+#define KOFW_FNAME_MAX 200u
+
+struct kofw_fent {
+	uint64_t key;
+	char     name[KOFW_FNAME_MAX];
+};
+
+struct kofw_ftab {
+	struct kofw_fent e[KOFW_FTAB_MAX];
+	uint32_t n;
+	uint64_t resolved, unresolved, recycled;
+};
+
+void kofw_ftab_init(struct kofw_ftab *);
+
+/* Remember that `key` is `name`. Silently ignores a zero key or an empty
+ * name - both mean the record did not carry the pair. */
+void kofw_ftab_add(struct kofw_ftab *, uint64_t key, const char *name);
+
+/*
+ * Fill in a record's object path from its key, if it has one and needs one.
+ *
+ * Does nothing to a record that already has a path, so a name record keeps its
+ * own. Non-zero when a path was supplied.
+ */
+int kofw_ftab_resolve(struct kofw_ftab *, struct kofw_evt *);
+
 void kofw_ptab_init(struct kofw_ptab *);
 
 struct kofw_pent *kofw_ptab_find(struct kofw_ptab *, uint32_t pid);

@@ -256,6 +256,21 @@ static uint8_t field_of(const wchar_t *name, uint16_t type, uint8_t prov)
 	/* ImageSize, so a module load describes a RANGE rather than a point.
 	 * Without it there is a list of addresses and no way to ask whether a
 	 * thread's entry point falls inside one. */
+	/*
+	 * HOW A WRITE NAMES ITS TARGET, which is not by path.
+	 *
+	 * FileIo Write carries FileObject and FileKey - kernel pointers - and
+	 * no filename at all. The FILENAME keyword emits separate records that
+	 * map one of those to a path, and wfilter.c keeps them; this is where
+	 * the key itself is picked up so there is something to look up with.
+	 *
+	 * Both spellings, because which one is the stable identity differs by
+	 * event: the name records key on FileKey and the write carries both.
+	 * FileKey is preferred by being tested first.
+	 */
+	if (name_is(name, "FileKey") || name_is(name, "FileObject"))
+		return KOFW_FLD_FILE_KEY;
+
 	if (name_is(name, "ImageSize"))
 		return KOFW_FLD_ADDR_SIZE;
 
@@ -880,6 +895,18 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 		case KOFW_FLD_SIZE:
 			if (len >= 4)
 				out->net_size = rd_u32(base + off);
+			break;
+		case KOFW_FLD_FILE_KEY:
+			/* Into `addr`, which a file event never uses for
+			 * anything else - a write has no entry point. The
+			 * consumer thread resolves it to a path; see
+			 * kofw_ftab_resolve. */
+			if (!out->addr) {
+				if (len >= 8)
+					out->addr = rd_u64(base + off);
+				else if (len >= 4)
+					out->addr = rd_u32(base + off);
+			}
 			break;
 		case KOFW_FLD_ADDR:
 			/* 8 on a 64-bit payload, 4 on a 32-bit one - the shape

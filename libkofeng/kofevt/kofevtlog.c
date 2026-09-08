@@ -73,7 +73,10 @@ struct kofevt_log_w *kofevt_log_create(const char *path,
 	hdr.rec_size    = info->rec_size;
 	hdr.rec_kind    = (uint16_t)info->rec_kind;
 	hdr.build       = info->build;
-	hdr.os          = (uint16_t)info->os;
+	/* Zero means "this host", which is what a collector wants and is one
+	 * less thing for each of them to get right. */
+	hdr.platform    = info->platform ? info->platform : kof_platform_self();
+	hdr.arch        = info->arch     ? info->arch     : kof_arch_self();
 	hdr.root_pid    = info->root_pid;
 	hdr.started     = info->started;
 	/*

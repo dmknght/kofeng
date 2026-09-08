@@ -99,6 +99,40 @@ static const struct {
 	{ "/.config/autostart/", KOF_LOC_AUTOSTART, KOF_ATT_STARTUP_DIR, 0 },
 
 	{ "\\Winlogon\\Shell", KOF_LOC_AUTOSTART, KOF_ATT_WINLOGON, 1 },
+
+	/*
+	 * ACCESSIBILITY, and it is two rows because the technique has two
+	 * halves. Registering an "assistive technology" is a registry write;
+	 * the sticky-keys variant instead replaces a binary that the logon
+	 * screen already runs, which is a file write into System32 and is why
+	 * the second row has to sit above the generic System32 row below.
+	 */
+	{ "\\CurrentVersion\\Accessibility\\ATs\\",
+	  KOF_LOC_AUTOSTART, KOF_ATT_ACCESSIBILITY, 1 },
+	{ "\\System32\\sethc.exe", KOF_LOC_AUTOSTART, KOF_ATT_ACCESSIBILITY, 1 },
+	{ "\\System32\\utilman.exe", KOF_LOC_AUTOSTART, KOF_ATT_ACCESSIBILITY, 1 },
+	{ "\\System32\\osk.exe", KOF_LOC_AUTOSTART, KOF_ATT_ACCESSIBILITY, 1 },
+	{ "\\System32\\Magnify.exe", KOF_LOC_AUTOSTART, KOF_ATT_ACCESSIBILITY, 1 },
+
+	/* StubPath under a component GUID runs once per user at logon. */
+	{ "\\Active Setup\\Installed Components\\",
+	  KOF_LOC_AUTOSTART, KOF_ATT_ACTIVE_SETUP, 1 },
+
+	/*
+	 * A BITS JOB LEAVES NO REGISTRY KEY, which is the point of it. The job
+	 * queue is a file, and writing it is the only thing this collector can
+	 * see - the job is created over COM, and COM calls are not events.
+	 */
+	{ "\\Microsoft\\Network\\Downloader\\",
+	  KOF_LOC_AUTOSTART, KOF_ATT_BITS_JOB, 1 },
+
+	/* Both profile locations: Windows PowerShell and PowerShell 7. */
+	{ "\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1",
+	  KOF_LOC_SHELL_INIT, KOF_ATT_PS_PROFILE, 1 },
+	{ "\\WindowsPowerShell\\profile.ps1",
+	  KOF_LOC_SHELL_INIT, KOF_ATT_PS_PROFILE, 1 },
+	{ "\\Documents\\PowerShell\\Microsoft.PowerShell_profile.ps1",
+	  KOF_LOC_SHELL_INIT, KOF_ATT_PS_PROFILE, 1 },
 	{ "\\Winlogon\\Userinit", KOF_LOC_AUTOSTART, KOF_ATT_WINLOGON, 1 },
 
 	{ "\\AppInit_DLLs", KOF_LOC_PRELOAD, KOF_ATT_APPINIT, 1 },
@@ -277,3 +311,59 @@ static const char *at(const struct kof_evt *e, uint16_t off)
 const char *kof_evt_image(const struct kof_evt *e)   { return at(e, e ? e->off_image   : KOF_TEXT_NONE); }
 const char *kof_evt_object(const struct kof_evt *e)  { return at(e, e ? e->off_object  : KOF_TEXT_NONE); }
 const char *kof_evt_cmdline(const struct kof_evt *e) { return at(e, e ? e->off_cmdline : KOF_TEXT_NONE); }
+
+/* ---- which machine this is --------------------------------------------- */
+
+const char *kof_platform_name(uint8_t plat)
+{
+	switch (plat) {
+	case KOF_PLAT_WINDOWS: return "windows";
+	case KOF_PLAT_LINUX:   return "linux";
+	case KOF_PLAT_MACOS:   return "macos";
+	default:               return "unknown";
+	}
+}
+
+const char *kof_arch_name(uint8_t arch)
+{
+	switch (arch) {
+	case KOF_EARCH_X86:    return "x86";
+	case KOF_EARCH_X86_64: return "x86_64";
+	case KOF_EARCH_ARM:    return "arm";
+	case KOF_EARCH_ARM64:  return "arm64";
+	default:               return "unknown";
+	}
+}
+
+/*
+ * Answered by the preprocessor rather than by each collector, so the two
+ * cannot spell the same machine differently - which is the only way a header
+ * field like this goes wrong.
+ */
+uint8_t kof_platform_self(void)
+{
+#if defined(_WIN32)
+	return KOF_PLAT_WINDOWS;
+#elif defined(__linux__)
+	return KOF_PLAT_LINUX;
+#elif defined(__APPLE__)
+	return KOF_PLAT_MACOS;
+#else
+	return KOF_PLAT_UNKNOWN;
+#endif
+}
+
+uint8_t kof_arch_self(void)
+{
+#if defined(__x86_64__) || defined(_M_X64)
+	return KOF_EARCH_X86_64;
+#elif defined(__i386__) || defined(_M_IX86)
+	return KOF_EARCH_X86;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+	return KOF_EARCH_ARM64;
+#elif defined(__arm__) || defined(_M_ARM)
+	return KOF_EARCH_ARM;
+#else
+	return KOF_EARCH_UNKNOWN;
+#endif
+}

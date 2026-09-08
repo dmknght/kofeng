@@ -598,7 +598,10 @@ int main(int argc, char **argv)
 		li.rec_size    = (uint32_t)sizeof(struct kof_evt);
 		li.rec_kind    = KOFEVT_REC_KOF;
 		li.build       = (uint32_t)KOFENG_BUILD;
-		li.os          = 1u;
+		/* 0 asks kofevt for this host, so the tool does not have
+		 * to know how to spell it. */
+		li.platform    = 0u;
+		li.arch        = 0u;
 		li.root_pid    = root_pid;
 		li.sub_asked   = h1.sub_asked;
 		li.sub_enabled = h1.sub_enabled;

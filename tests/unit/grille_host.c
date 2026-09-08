@@ -378,6 +378,61 @@ static void t_classify(void)
 		    att != KOF_ATT_NONE)
 			fail("attack", "temp carries a technique tag");
 
+		/*
+		 * THE METASPLOIT PERSISTENCE SET, one assertion per module.
+		 *
+		 * A coverage claim is worth what somebody checked, so each of
+		 * these is a path one of those modules writes. Four of them
+		 * matched nothing when this list was first walked, which is
+		 * why the four techniques exist.
+		 */
+		if (kof_classify("\\REGISTRY\\MACHINE\\SOFTWARE\\Microsoft"
+				  "\\Windows NT\\CurrentVersion\\Image File "
+				  "Execution Options\\sethc.exe", &att)
+		    == KOF_LOC_UNKNOWN || att != KOF_ATT_IFEO)
+			fail("attack", "accessibility_features_debugger");
+
+		if (kof_classify("C:\\Windows\\System32\\sethc.exe", &att)
+		    != KOF_LOC_AUTOSTART || att != KOF_ATT_ACCESSIBILITY)
+			fail("attack", "sethc replacement not a technique");
+
+		if (kof_classify("\\REGISTRY\\MACHINE\\SOFTWARE\\Microsoft"
+				  "\\Windows NT\\CurrentVersion\\Accessibility"
+				  "\\ATs\\evil", &att) != KOF_LOC_AUTOSTART ||
+		    att != KOF_ATT_ACCESSIBILITY)
+			fail("attack", "assistive_technology");
+
+		if (kof_classify("C:\\ProgramData\\Microsoft\\Network"
+				  "\\Downloader\\qmgr.db", &att)
+		    != KOF_LOC_AUTOSTART || att != KOF_ATT_BITS_JOB)
+			fail("attack", "bits");
+
+		if (kof_classify("C:\\Users\\b\\Documents\\WindowsPowerShell"
+				  "\\Microsoft.PowerShell_profile.ps1", &att)
+		    != KOF_LOC_SHELL_INIT || att != KOF_ATT_PS_PROFILE)
+			fail("attack", "powershell_profile");
+
+		if (kof_classify("\\REGISTRY\\MACHINE\\SOFTWARE\\Microsoft"
+				  "\\Active Setup\\Installed Components\\{g}"
+				  "\\StubPath", &att) != KOF_LOC_AUTOSTART ||
+		    att != KOF_ATT_ACTIVE_SETUP)
+			fail("attack", "registry_active_setup");
+
+		if (kof_classify("\\REGISTRY\\MACHINE\\SYSTEM\\"
+				  "CurrentControlSet\\Services\\evil", &att)
+		    != KOF_LOC_SERVICE || att != KOF_ATT_SERVICE)
+			fail("attack", "service / service_for_user");
+
+		if (kof_classify("C:\\Windows\\System32\\Tasks\\evil", &att)
+		    != KOF_LOC_SCHEDULE || att != KOF_ATT_SCHED_TASK)
+			fail("attack", "service_for_user schedule");
+
+		if (kof_classify("C:\\Users\\b\\AppData\\Roaming\\Microsoft"
+				  "\\Windows\\Start Menu\\Programs\\Startup"
+				  "\\e.lnk", &att) != KOF_LOC_AUTOSTART ||
+		    att != KOF_ATT_STARTUP_DIR)
+			fail("attack", "startup_folder");
+
 		/* Every technique in the list has both an id and a name. */
 		{
 			uint16_t i;
@@ -604,6 +659,67 @@ static void t_scope(void)
 	}
 }
 
+/* ---- FileKey -> path ---------------------------------------------------- */
+
+/*
+ * WHAT [unknown] [miss 0x40] ON EVERY POWERSHELL WRITE WAS.
+ *
+ * FileIo Write carries FileObject and FileKey - kernel pointers - and no
+ * filename. FILENAME emits separate records mapping one to a path, and until
+ * they were kept, a write was a byte count against an address nobody could
+ * resolve.
+ */
+static void t_ftab(void)
+{
+	struct kofw_ftab t;
+	struct kofw_evt  e;
+
+	kofw_ftab_init(&t);
+
+	/* A name record teaches the table. */
+	mk(&e, KOF_EVT_RAW, 100u, 0u);
+	e.addr = 0xffffab0012340000ull;
+	set_obj(&e, "C:\\Users\\b\\AppData\\Local\\Temp\\p.ps1");
+	kofw_ftab_add(&t, e.addr, kofw_evt_object(&e));
+
+	/* A write carrying only the key gets the path, and stops being
+	 * partial - which is what a reader saw as [miss 0x40]. */
+	mk(&e, KOF_EVT_FILE_WRITE, 100u, 0u);
+	e.addr = 0xffffab0012340000ull;
+	e.miss  = KOF_F_OBJECT;
+	e.flags = KOF_EF_PARTIAL;
+	if (!kofw_ftab_resolve(&t, &e))
+		fail("ftab", "did not resolve a known key");
+	eq_str("ftab path", kofw_evt_object(&e),
+	       "C:\\Users\\b\\AppData\\Local\\Temp\\p.ps1");
+	eq_u64("ftab miss cleared", e.miss, 0);
+	if (e.flags & KOF_EF_PARTIAL)
+		fail("ftab", "still flagged partial after resolving");
+
+	/* An unknown key changes nothing and is counted. */
+	mk(&e, KOF_EVT_FILE_WRITE, 100u, 0u);
+	e.addr = 0xdeadbeefull;
+	if (kofw_ftab_resolve(&t, &e))
+		fail("ftab", "resolved a key it was never told about");
+	eq_u64("ftab unresolved", t.unresolved, 1);
+
+	/* A record that already has a path keeps it: a name record must not
+	 * overwrite itself with a lookup of itself. */
+	mk(&e, KOF_EVT_RAW, 100u, 0u);
+	e.addr = 0xffffab0012340000ull;
+	set_obj(&e, "keep me");
+	if (kofw_ftab_resolve(&t, &e))
+		fail("ftab", "overwrote a path that was already there");
+	eq_str("ftab kept", kofw_evt_object(&e), "keep me");
+
+	/* A zero key is not a key. */
+	kofw_ftab_add(&t, 0, "nowhere");
+	mk(&e, KOF_EVT_FILE_WRITE, 100u, 0u);
+	e.addr = 0;
+	if (kofw_ftab_resolve(&t, &e))
+		fail("ftab", "resolved a zero key");
+}
+
 /* ---- pid reuse ---------------------------------------------------------- */
 
 /*
@@ -652,7 +768,8 @@ static void t_trace(void)
 	li.rec_size = (uint32_t)sizeof(struct kofw_evt);
 	li.rec_kind = KOFEVT_REC_KOFW;
 	li.build    = 20260908u;
-	li.os       = 1u;
+	li.platform = KOF_PLAT_WINDOWS;
+	li.arch     = KOF_EARCH_X86_64;
 	li.root_pid = 4321u;
 	w = kofevt_log_create(path, &li);
 	if (!w) {
@@ -682,6 +799,11 @@ static void t_trace(void)
 	eq_u64("trace rec_size", h->rec_size, sizeof(struct kofw_evt));
 	eq_u64("trace root_pid", h->root_pid, 4321u);
 	eq_u64("trace build", h->build, 20260908u);
+	/* The most important thing in the header after the record's identity:
+	 * which machine wrote it. A reader opening this on another platform
+	 * has no other way to know. */
+	eq_u64("trace platform", h->platform, KOF_PLAT_WINDOWS);
+	eq_u64("trace arch", h->arch, KOF_EARCH_X86_64);
 	/* Written by seeking back at close - zero here would mean the writer
 	 * was killed, which is a different thing from an empty trace. */
 	eq_u64("trace n_records", h->n_records, 100);
@@ -884,6 +1006,7 @@ int main(void)
 	t_classify();
 	t_ring();
 	t_scope();
+	t_ftab();
 	t_pid_reuse();
 	t_convert();
 	t_trace();

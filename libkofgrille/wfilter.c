@@ -35,6 +35,120 @@
  * are string work with no OS in them and they describe an EVENT, not a way of
  * collecting one. See kofevt.h. */
 
+/* ------------------------------------------------------ FileKey -> path */
+
+void kofw_ftab_init(struct kofw_ftab *t)
+{
+	memset(t, 0, sizeof *t);
+}
+
+/* Knuth's multiplicative hash over the pointer, probed linearly. A collision
+ * costs a step and never a wrong answer: an entry is believed only when the
+ * key matches exactly. */
+static uint32_t fslot(uint64_t key)
+{
+	return (uint32_t)((key >> 3) * 2654435761u) % KOFW_FTAB_MAX;
+}
+
+void kofw_ftab_add(struct kofw_ftab *t, uint64_t key, const char *name)
+{
+	uint32_t i, s;
+
+	if (!t || !key || !name || !*name)
+		return;
+
+	/* Half full, because linear probing degrades badly past that and this
+	 * runs on every name record, which is every file the machine opens. */
+	if (t->n >= KOFW_FTAB_MAX / 2u) {
+		memset(t->e, 0, sizeof t->e);
+		t->n = 0;
+		t->recycled++;
+	}
+
+	s = fslot(key);
+	for (i = 0; i < KOFW_FTAB_MAX; i++) {
+		struct kofw_fent *e = &t->e[(s + i) % KOFW_FTAB_MAX];
+		size_t k;
+
+		if (e->key && e->key != key)
+			continue;
+		if (!e->key) {
+			t->n++;
+			e->key = key;
+		}
+		for (k = 0; k + 1 < sizeof e->name && name[k]; k++)
+			e->name[k] = name[k];
+		e->name[k] = '\0';
+		return;
+	}
+}
+
+static const char *ftab_find(struct kofw_ftab *t, uint64_t key)
+{
+	uint32_t i, s;
+
+	if (!t || !key)
+		return NULL;
+	s = fslot(key);
+	for (i = 0; i < KOFW_FTAB_MAX; i++) {
+		const struct kofw_fent *e = &t->e[(s + i) % KOFW_FTAB_MAX];
+
+		/* Nothing is ever removed, so an empty slot means absent
+		 * rather than further along. */
+		if (!e->key)
+			return NULL;
+		if (e->key == key)
+			return e->name;
+	}
+	return NULL;
+}
+
+int kofw_ftab_resolve(struct kofw_ftab *t, struct kofw_evt *e)
+{
+	const char *name;
+	size_t n, room;
+
+	if (!t || !e)
+		return 0;
+	/* A record that already has a path keeps it - a name record is its own
+	 * answer and must not be overwritten by a lookup of itself. */
+	if (e->off_object != KOF_TEXT_NONE || !e->addr)
+		return 0;
+
+	name = ftab_find(t, e->addr);
+	if (!name || !*name) {
+		t->unresolved++;
+		return 0;
+	}
+
+	/*
+	 * Appended on the CONSUMER thread, into whatever the decode left.
+	 * Never in the callback: this is a table walk and a copy, and the
+	 * callback is the one piece of code the whole machine pays for.
+	 */
+	if (e->text_len + 1u >= sizeof e->text)
+		return 0;
+	room = sizeof e->text - e->text_len;
+	n = strlen(name);
+	if (n + 1u > room) {
+		n = room - 1u;
+		e->flags |= KOF_EF_TRUNCATED;
+	}
+	memcpy(e->text + e->text_len, name, n);
+	e->text[e->text_len + n] = '\0';
+	e->off_object = e->text_len;
+	e->text_len   = (uint16_t)(e->text_len + n + 1u);
+
+	/* The field is no longer missing, and saying so is the point: the
+	 * record used to arrive flagged PARTIAL with KOF_F_OBJECT set, which
+	 * is what a reader saw as [miss 0x40]. */
+	e->miss &= ~(uint32_t)KOF_F_OBJECT;
+	if (!e->miss)
+		e->flags &= (uint8_t)~KOF_EF_PARTIAL;
+	t->resolved++;
+	return 1;
+}
+
 /* --------------------------------------------------------- the process table */
 
 void kofw_ptab_init(struct kofw_ptab *t)

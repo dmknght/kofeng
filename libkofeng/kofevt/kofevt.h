@@ -396,7 +396,15 @@ const char *kof_loc_name(uint8_t loc);
 	X(KOF_ATT_HOSTS,        "T1562.001",  "Evade.HostsFile")            \
 	X(KOF_ATT_KERNEL_MOD,   "T1014",      "Rootkit.KernelModule")       \
 	X(KOF_ATT_WEB_SHELL,    "T1505.003",  "Persist.WebShell")           \
-	X(KOF_ATT_PIPE_IMPERSONATE, "T1134.001", "Privilege.PipeImpersonation")
+	X(KOF_ATT_PIPE_IMPERSONATE, "T1134.001", "Privilege.PipeImpersonation") \
+	/* Added by walking Metasploit's windows/persistence modules against
+	 * this table and writing down what nothing matched. That is the only
+	 * way a coverage claim means anything - the four below were each a
+	 * module that ran and produced no finding. */                        \
+	X(KOF_ATT_ACCESSIBILITY, "T1546.008", "Persist.AccessibilityFeature") \
+	X(KOF_ATT_ACTIVE_SETUP,  "T1547.014", "Persist.ActiveSetup")          \
+	X(KOF_ATT_BITS_JOB,      "T1197",     "Persist.BitsJob")              \
+	X(KOF_ATT_PS_PROFILE,    "T1546.013", "Persist.PowerShellProfile")
 
 enum kof_attack {
 #define KOF_ATT_X_ENUM(name, tech, word) name,
@@ -484,8 +492,50 @@ enum {
 	KOF_F_CMDLINE     = 1u << 7
 };
 
-/* Which collector produced a record. */
+/* Which collector produced a record. A MASK, because a caller asks "does this
+ * rule apply to Windows, Linux, or both". */
 enum kof_evt_os { KOF_OS_WINDOWS = 1u << 0, KOF_OS_LINUX = 1u << 1 };
+
+/*
+ * WHICH MACHINE PRODUCED A LOG - one byte each, and they are not the masks
+ * above.
+ *
+ * A record's `os` is a mask because a rule is written for one platform or
+ * both. A LOG was produced by exactly one machine, so its header wants an
+ * identity rather than a set, and one byte says it without inviting anyone to
+ * OR two together.
+ *
+ * These describe the COLLECTOR HOST and deliberately do not reuse the engine's
+ * arch taxonomy: that one answers "what architecture is this scanned object",
+ * which is a different question with a different set of answers, and tying
+ * them together would mean a new object format could not be added without
+ * touching the log format.
+ */
+enum kof_evt_platform {
+	KOF_PLAT_UNKNOWN = 0,
+	KOF_PLAT_WINDOWS = 1,
+	KOF_PLAT_LINUX   = 2,
+	KOF_PLAT_MACOS   = 3
+};
+
+enum kof_evt_arch {
+	KOF_EARCH_UNKNOWN = 0,
+	KOF_EARCH_X86     = 1,
+	KOF_EARCH_X86_64  = 2,
+	KOF_EARCH_ARM     = 3,
+	KOF_EARCH_ARM64   = 4
+};
+
+/* "windows", "linux", ... and "x86_64", "arm64", ... Never NULL. */
+const char *kof_platform_name(uint8_t plat);
+const char *kof_arch_name(uint8_t arch);
+
+/*
+ * What THIS build was compiled for, so a collector does not have to work it
+ * out and two collectors cannot disagree about how to spell it.
+ */
+uint8_t kof_platform_self(void);
+uint8_t kof_arch_self(void);
 
 struct kof_evt {
 	/*
