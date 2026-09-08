@@ -605,7 +605,9 @@ help:
 	$(info $(SP)  kofexamine    the file examiner)
 	$(info $(SP)  ksigbuilder   the database builder)
 	$(info $(SP)  kofviewer     the file examiner, navigable)
-	$(info $(SP)  tools         all four of the above)
+	$(info $(SP)  kofwinmon     the Windows event monitor           (Windows only))
+	$(info $(SP)  kofwintrace   run a program and trace it          (Windows only))
+	$(info $(SP)  tools         all six of the above)
 	$(info $(SP)  databases     compile bases/ into the shipping databases)
 	$(info $(SP)                                                 -> $(OUT)/databases)
 	$(info $(SP)  databases BASEDIR=D   compile D instead        -> $(TEST)/databases-<name>)
@@ -860,6 +862,84 @@ $(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 $(OUT)/bin/ksigbuilder$(EXE): ksigbuilder/ksigbuilder.c $(LIB) $(SDK_HDR) $(STAMP)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) $< $(LIB) -o $@ $(LDFLAGS)
+
+# ------------------------------------------------ libkofgrille: Windows events
+#
+# A SIBLING OF libkofeng, NOT A PART OF IT.
+#
+# The engine takes bytes and says what they are; this takes the machine's own
+# activity and turns it into records. Nothing here includes kofeng.h and nothing
+# in libkofeng includes kofgrille.h, so the dependency runs one way and stays that
+# way by failing to compile otherwise rather than by a note asking for care.
+#
+# WINDOWS ONLY, AND THAT IS A COST RATHER THAN A DETAIL: none of this can be
+# built or tested on a Linux CI. What keeps it from being a hole is the split
+# inside the library - wevt_ring.c and the UTF-16 conversion in wevt_decode.c
+# call no Windows API at all, deliberately, because they are the parts with
+# arithmetic in them and therefore the parts with bugs in them. When the trace
+# recorder lands, the replay path joins them on that side of the line and the
+# untestable remainder is the thin layer that only talks to ETW.
+ifeq ($(NATIVE_OS),windows)
+
+WIN_SRC := libkofgrille/wevt_ring.c \
+           libkofgrille/wfilter.c \
+           libkofgrille/wevt_decode.c \
+           libkofgrille/wevt_etw.c
+
+WIN_OBJ := $(patsubst libkofgrille/%.c,$(INT)/win_%.o,$(WIN_SRC))
+WINLIB  := $(SDK)/lib/libkofgrille.a
+
+$(INT)/win_%.o: libkofgrille/%.c $(STAMP) | $(INT)
+	@$(call MKDIR,$(dir $@))
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille -c $< -o $@
+
+$(WINLIB): $(WIN_OBJ)
+	@$(call MKDIR,$(dir $@))
+	$(AR) rcs $@ $^
+
+# tdh for the one-time schema lookup, advapi32 for the session itself. Both are
+# import libraries that ship with every Windows toolchain, so this adds nothing
+# the build did not already depend on.
+WIN_LDLIBS := -ltdh -ladvapi32
+
+# Two programs out of one directory, over one collector: kofwinmon watches the
+# machine, kofwintrace watches one program it launches. They are separate binaries
+# because their arguments, lifetimes and exit conditions have nothing in common,
+# and wshared.c holds the part that is genuinely the same - rendering an event,
+# the process-name table, the summary.
+WINMON_SHARED := kofwinmon/wrender.c
+
+$(OUT)/bin/kofwinmon$(EXE): kofwinmon/kofwinmon.c $(WINMON_SHARED) $(WINLIB) $(STAMP)
+	@$(call MKDIR,$(dir $@))
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille -Ikofwinmon \
+	      kofwinmon/kofwinmon.c $(WINMON_SHARED) $(WINLIB) -o $@ \
+	      $(LDFLAGS) $(WIN_LDLIBS)
+
+$(OUT)/bin/kofwintrace$(EXE): kofwinmon/kofwintrace.c $(WINMON_SHARED) $(WINLIB) $(STAMP)
+	@$(call MKDIR,$(dir $@))
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille -Ikofwinmon \
+	      kofwinmon/kofwintrace.c $(WINMON_SHARED) $(WINLIB) -o $@ \
+	      $(LDFLAGS) $(WIN_LDLIBS)
+
+kofgrille: $(WINLIB)
+	$(info $(SP)  $<)
+	@$(NOOP)
+
+kofwinmon: $(OUT)/bin/kofwinmon$(EXE)
+	$(info $(SP)  $<)
+	@$(NOOP)
+
+kofwintrace: $(OUT)/bin/kofwintrace$(EXE)
+	$(info $(SP)  $<)
+	@$(NOOP)
+
+# Added to `tools` here rather than in its own line above, because a
+# prerequisite naming a variable this block sets would expand to nothing:
+# make expands a rule's prerequisites when it reads the rule, and that happens
+# hundreds of lines before this.
+tools: kofwinmon kofwintrace
+
+endif
 
 # ------------------------------------------------------------- the database
 #
@@ -1162,4 +1242,5 @@ clean:
 	@$(call RMRF,$(BUILD))
 
 .PHONY: all sdk sigs databases unit fixtures test-sigs clean \
-        kofscanner kofexamine ksigbuilder kofviewer tools help
+        kofscanner kofexamine ksigbuilder kofviewer kofgrille kofwinmon \
+        kofwintrace tools help
