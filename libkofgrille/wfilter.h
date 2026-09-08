@@ -110,6 +110,24 @@ struct kofw_ptab {
 	uint64_t mod_exhausted; /* times the pool had nothing left */
 	uint64_t unbacked;      /* threads flagged - see KOFW_EF_UNBACKED */
 	uint64_t late_loads;    /* modules flagged - see KOFW_EF_LATE_LOAD */
+
+	/*
+	 * WHETHER THE LAST RECORD THIS FILTER SAW WAS KEPT.
+	 *
+	 * A KOF_EVT_CONT record is not an event - it is the tail of the one in
+	 * front of it - so it has no pid to test, no path to classify and no
+	 * decision of its own to make. It has to inherit the decision made
+	 * about its parent, or the two halves of one submission are filtered
+	 * apart: chunks kept behind a dropped parent are bytes belonging to
+	 * nothing, and chunks dropped behind a kept parent leave a hole the
+	 * reassembly can only report as loss.
+	 *
+	 * Here rather than in the filter because the filter is const, and this
+	 * is state about the stream rather than about the policy. There is one
+	 * consumer thread, so it needs no more protection than the rest of the
+	 * table.
+	 */
+	uint8_t  last_kept;
 };
 
 /* ------------------------------------------------- FileKey -> path */
@@ -196,7 +214,10 @@ enum kofw_refuse {
 	KOFW_REFUSE_NONE = 0,
 	KOFW_REFUSE_TYPE,   /* the caller did not ask for this event type */
 	KOFW_REFUSE_LOC,    /* the object is in a location being dropped */
-	KOFW_REFUSE_SCOPE   /* the subject is outside the tracked tree */
+	KOFW_REFUSE_SCOPE,  /* the subject is outside the tracked tree */
+	/* A continuation whose parent was refused - see kofw_filter_apply. It
+	 * is not a decision about this record; there was none to make. */
+	KOFW_REFUSE_PARENT
 };
 
 /*

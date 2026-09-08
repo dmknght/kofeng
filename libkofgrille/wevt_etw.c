@@ -323,10 +323,76 @@ static ULONG WINAPI on_buffer(PEVENT_TRACE_LOGFILEW log)
 	return m && m->stopping ? FALSE : TRUE;
 }
 
+/*
+ * A CAP ON HOW MUCH OF ONE SUBMISSION IS CARRIED.
+ *
+ * Without one, a single script block megabytes long turns into thousands of
+ * records and empties the ring of everything else - so a process start during
+ * that burst is the event that gets dropped, which is precisely backwards.
+ *
+ * Sixty-four kilobytes is far past any script block worth reading whole and
+ * far short of the ring. Past it the chain simply stops: the parent already
+ * says KOFW_EF_TRUNCATED, and a consumer that reassembles gets exactly what
+ * arrived and knows it is short.
+ */
+#define KOFW_SPILL_MAX (64u * 1024u)
+
+/*
+ * Send what did not fit, as KOF_EVT_CONT records behind the parent.
+ *
+ * A chunk carries nothing of its own but the bytes: no path, no pid fields to
+ * be matched on, no technique. Copying the parent's identity into it would
+ * make it look like an event, and something downstream would eventually count
+ * it as one.
+ */
+static void spill_out(struct kofw_mon *m, const struct kofw_evt *parent,
+		      const struct kofw_spill *sp)
+{
+	size_t at = sp->taken, end = sp->total;
+
+	if (end > KOFW_SPILL_MAX)
+		end = KOFW_SPILL_MAX;
+
+	while (at < end) {
+		struct kofw_evt *c;
+		size_t n = end - at;
+		uint64_t seq;
+
+		/* One less than the arena, for the NUL that keeps anything
+		 * treating it as a string inside the record. */
+		if (n > sizeof c->text - 1u)
+			n = sizeof c->text - 1u;
+
+		seq = atomic_fetch_add_explicit(&m->arrived, 1u,
+						memory_order_relaxed);
+		c = kofw_ring_claim(&m->ring);
+		if (!c)
+			return;   /* the ring is full: the chain ends here */
+
+		memset(c, 0, sizeof *c);
+		c->type        = KOF_EVT_CONT;
+		c->seq         = seq;
+		c->stamp       = parent->stamp;
+		c->pid         = parent->pid;
+		c->off_image   = KOF_TEXT_NONE;
+		c->off_cmdline = KOF_TEXT_NONE;
+		c->off_object  = 0;
+		memcpy(c->text, sp->src + at, n);
+		c->text[n]     = '\0';
+		c->content_len = (uint16_t)n;
+		c->text_len    = (uint16_t)(n + 1u);
+
+		if (kofw_ring_commit(&m->ring) == 0 && m->wake)
+			SetEvent(m->wake);
+		at += n;
+	}
+}
+
 static void WINAPI on_event(PEVENT_RECORD rec)
 {
 	struct kofw_mon *m = (struct kofw_mon *)rec->UserContext;
 	struct kofw_evt *slot;
+	struct kofw_spill spill;
 	uint64_t seq;
 
 	if (!m)
@@ -368,11 +434,12 @@ static void WINAPI on_event(PEVENT_RECORD rec)
 	 */
 	seq = atomic_fetch_add_explicit(&m->arrived, 1u, memory_order_relaxed);
 
+	memset(&spill, 0, sizeof spill);
 	slot = kofw_ring_claim(&m->ring);
 	if (!slot)
 		return;   /* the drop is already counted, and seq now has a hole */
 
-	if (!kofw_decode(&m->schema, rec, slot)) {
+	if (!kofw_decode(&m->schema, rec, slot, &spill)) {
 		atomic_fetch_add_explicit(&m->decode_failed, 1u,
 					  memory_order_relaxed);
 		return;   /* claimed and not committed: the slot is reused */
@@ -388,6 +455,24 @@ static void WINAPI on_event(PEVENT_RECORD rec)
 	 */
 	if (kofw_ring_commit(&m->ring) == 0 && m->wake)
 		SetEvent(m->wake);
+
+	/*
+	 * THE REST OF THE SUBMISSION, in as many records as it takes.
+	 *
+	 * Emitted AFTER the parent is committed, so the order a consumer sees
+	 * is the order it needs: the record, then its tail. Each takes its own
+	 * arrival number from the same counter, which is what lets a consumer
+	 * tell "the next chunk" from "the next chunk after something was
+	 * dropped" - see KOF_EVT_CONT and kof_evt_join_add.
+	 *
+	 * A full ring ends the chain rather than waiting for it. Blocking here
+	 * would block the ETW callback, and a slow callback is not paid for in
+	 * latency - it is paid for in records ETW discards at its own end while
+	 * the buffers fill. A short reassembly is a fact a consumer can act on;
+	 * a stalled session is not.
+	 */
+	if (spill.src && spill.total > spill.taken)
+		spill_out(m, slot, &spill);
 }
 
 /* --------------------------------------------------------------- the thread */

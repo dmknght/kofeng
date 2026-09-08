@@ -730,7 +730,7 @@ static size_t measure(uint16_t in_type, const uint8_t *p, size_t left)
 }
 
 int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
-		struct kofw_evt *out)
+		struct kofw_evt *out, struct kofw_spill *spill)
 {
 	/* Not const: the shape's own hit counter is bumped below, and it is
 	 * this thread's to bump - there is one producer by construction. */
@@ -1011,6 +1011,18 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 				if (take > room - 1u) {
 					take = room - 1u;
 					cut = 1;
+				}
+				/*
+				 * WHERE THE WHOLE THING IS, for the caller to
+				 * send on. The record still holds a prefix and
+				 * is still flagged - a consumer that cannot
+				 * reassemble is no worse off than before - but
+				 * the rest is no longer lost here.
+				 */
+				if (spill) {
+					spill->src   = base + off;
+					spill->total = len;
+					spill->taken = take;
 				}
 				memcpy(out->text + tnext, base + off, take);
 				/*

@@ -58,6 +58,15 @@ void kof_evt_count(const struct kof_evt *e, struct kof_evt_tally *t)
 	case KOF_EVT_THREAD_START:   t->thread++;   break;
 	case KOF_EVT_THREAD_STOP:                   break;
 	case KOF_EVT_AMSI_SCAN:      t->amsi++;     break;
+	/*
+	 * A CONTINUATION IS NOT AN EVENT and is counted as nothing.
+	 *
+	 * It is the tail of the record in front of it - see KOF_EVT_CONT. Left
+	 * to the default it would land in `raw`, and a tally would then report
+	 * one AMSI submission as one amsi plus nine raws, which reads as ten
+	 * things happening. Nine of them are the same thing.
+	 */
+	case KOF_EVT_CONT:                          break;
 	default:                      t->raw++;      break;
 	}
 }
@@ -290,24 +299,10 @@ void kof_evt_print_tally(const struct kof_evt_tally *t, double secs,
 /* ------------------------------------------------- for a browsing UI */
 
 
-/* The last component of a path or a registry key, so a label says which file
- * rather than which directory. Both separators, because one record may carry
- * either. */
-static const char *tail_of(const char *p)
-{
-	const char *last = p;
-
-	for (; *p; p++) {
-		if (*p == '\\' || *p == '/')
-			last = p + 1;
-	}
-	return last;
-}
 
 size_t kof_evt_label(const struct kof_evt *e, uint64_t index, char *out,
 		     size_t cap)
 {
-	const char *obj;
 	int n;
 
 	if (!out || cap == 0)
@@ -316,20 +311,29 @@ size_t kof_evt_label(const struct kof_evt *e, uint64_t index, char *out,
 	if (!e)
 		return 0;
 
-	obj = kof_evt_object(e);
-	if (!*obj)
-		obj = kof_evt_image(e);
-
 	/*
-	 * The index first, because it is what a reader refers to and it sorts.
-	 * Then the verb, then who, then the leaf of what - a full path does not
-	 * fit a panel column and the directory is the part a reader can ask
-	 * for separately.
+	 * WHAT A ROW IN A LIST OF EVENTS HAS TO SAY, and no more.
+	 *
+	 * The index, the verb, the process. That is what a reader picks a row
+	 * BY - the index to refer to it, the verb to find the kind they are
+	 * after, the pid to follow one process through the log.
+	 *
+	 * It used to append the leaf of the path as well, which is the field a
+	 * reader most wants and the one a list is worst at showing: it is the
+	 * part that does not fit, so it is the part that gets truncated, and a
+	 * column of half-cut filenames is a column that has to be read twice -
+	 * once to guess and once in the panel that shows the whole record. The
+	 * row's job is to get them to that panel, so it stops here.
+	 *
+	 * No "//" either. That was borrowed from the engine's nested-object
+	 * naming, where it means "inside" - a section inside an executable, a
+	 * member inside an archive. An event is not inside anything, and
+	 * spelling it as though it were describes a structure the log does not
+	 * have.
 	 */
-	n = snprintf(out, cap, "//%llu %s pid=%lu%s%s",
+	n = snprintf(out, cap, "%llu %s pid=%lu",
 		     (unsigned long long)index, kof_evt_verb_name(e->verb),
-		     (unsigned long)e->pid, *obj ? " " : "",
-		     *obj ? tail_of(obj) : "");
+		     (unsigned long)e->pid);
 	if (n < 0)
 		return 0;
 	return ((size_t)n < cap) ? (size_t)n : cap - 1u;
@@ -345,74 +349,274 @@ size_t kof_evt_label(const struct kof_evt *e, uint64_t index, char *out,
  * are skipped, which means the index a caller passes is a position in what
  * THIS event has - not in some universal list.
  */
-static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
-		    char *name, size_t ncap, char *val, size_t vcap)
+/*
+ * WHICH BYTES A ROW CAME FROM, alongside what it says.
+ *
+ * A panel showing a record's fields beside its bytes has to be able to light
+ * up the ones a row is about - that is the whole value of showing them
+ * together, and without it the two halves are two unrelated displays that
+ * happen to share a screen.
+ *
+ * So every row declares its extent as well as its text, in the same macro, in
+ * the same place. Kept together deliberately: an offset maintained in a second
+ * table beside the formatting is an offset that drifts the first time somebody
+ * adds a field, and the drift is invisible - a row lights up the wrong bytes
+ * and looks exactly as correct as before.
+ */
+/*
+ * HOW MANY BYTES OF THE OBJECT ARE ACTUALLY HERE.
+ *
+ * content_len is the length of what was SUBMITTED, and for an AMSI buffer that
+ * is routinely kilobytes while the record's arena is four hundred bytes - so
+ * the record holds a prefix and says so with KOF_EF_TRUNCATED. Used directly
+ * as an extent it claimed bytes past the end of the record: a highlight that
+ * ran off the field, over everything after it, and out of the struct.
+ *
+ * So it is clamped to what the arena actually contains. The full length is not
+ * lost - it is what the reader is told in the value - but the RANGE has to be
+ * the range that exists, because something is going to point at it.
+ */
+/*
+ * A SUBMISSION AS A READER WANTS TO SEE IT, which is not byte for byte.
+ *
+ * The bytes are kept raw in the record on purpose - a scanner needs them - and
+ * the first attempt at showing them wrote one character per byte, printable
+ * ones as themselves and everything else as a dot. That is correct and it is
+ * unreadable for the commonest case there is: a PowerShell script block
+ * arrives as UTF-16, so every second byte is a NUL, and "IEX" came out as
+ * "I.E.X." with a run of dots wherever the buffer was padded. A pane full of
+ * dots is a pane that has to be decoded by eye before it can be read.
+ *
+ * So: if the buffer looks like UTF-16LE - a NUL above every character - the
+ * high bytes are dropped and what is left is the text. Anything else is shown
+ * byte for byte as before, because it might be a PE header and guessing at it
+ * would be worse than dots.
+ *
+ * TRAILING UNPRINTABLE BYTES ARE CUT either way. A run of NULs at the end of a
+ * buffer is padding in every case that produces one, and it is the part of the
+ * rendering that says the least per column of screen.
+ *
+ * Returns how many characters were written; `out` is always terminated.
+ */
+static size_t content_readable(const char *p, size_t n, char *out, size_t cap)
 {
-#define ROW(nm, ...)                                                          \
+	size_t i, w = 0;
+	int wide;
+
+	if (!out || cap == 0)
+		return 0;
+	out[0] = '\0';
+	if (!p || n == 0)
+		return 0;
+
+	/*
+	 * The test is over the whole buffer, not a sample: a PE section that
+	 * begins with a few NUL-separated bytes would pass a sample and then be
+	 * silently stripped of half of itself. One pass costs nothing here -
+	 * this runs per drawn row, not per event.
+	 */
+	/* A single byte cannot be UTF-16 and must still be shown. */
+	wide = (n >= 2u);
+	for (i = 1; wide && i < n; i += 2) {
+		if (p[i] != '\0') {
+			wide = 0;
+			break;
+		}
+	}
+
+	for (i = 0; i < n && w + 1u < cap; i += wide ? 2u : 1u) {
+		unsigned char c = (unsigned char)p[i];
+
+		out[w++] = (c >= 0x20u && c < 0x7fu) ? (char)c : '.';
+	}
+	/* The tail, which says nothing. */
+	while (w && out[w - 1u] == '.')
+		w--;
+	out[w] = '\0';
+	return w;
+}
+
+static uint16_t obj_extent(const struct kof_evt *e)
+{
+	size_t room, n;
+
+	if (e->off_object == KOF_TEXT_NONE ||
+	    e->off_object >= sizeof e->text)
+		return 0;
+	room = sizeof e->text - e->off_object;
+	n = e->content_len ? e->content_len : strlen(kof_evt_object(e));
+	/* The arena's own declared length bounds it too, when it is set: past
+	 * text_len the bytes belong to no field at all. */
+	if (e->text_len > e->off_object &&
+	    (size_t)(e->text_len - e->off_object) < room)
+		room = (size_t)(e->text_len - e->off_object);
+	return (uint16_t)(n < room ? n : room);
+}
+
+static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
+		    char *name, size_t ncap, char *val, size_t vcap,
+		    uint16_t *xoff, uint16_t *xlen)
+{
+#define AT(f)  (uint16_t)offsetof(struct kof_evt, f)
+#define SZ(f)  (uint16_t)sizeof ((struct kof_evt *)0)->f
+#define ROWX(nm, o, l, ...)                                                   \
 	do {                                                                  \
 		if (*seen == want) {                                          \
-			snprintf(name, ncap, "%s", nm);                       \
-			snprintf(val, vcap, __VA_ARGS__);                     \
+			if (name) snprintf(name, ncap, "%s", nm);             \
+			if (val)  snprintf(val, vcap, __VA_ARGS__);           \
+			if (xoff) *xoff = (o);                                \
+			if (xlen) *xlen = (l);                                \
 			return 1;                                             \
 		}                                                             \
 		(*seen)++;                                                    \
 	} while (0)
+/* The ordinary case: a row about one named field of the record. */
+#define ROWF(nm, f, ...) ROWX(nm, AT(f), SZ(f), __VA_ARGS__)
+/* A row about no particular bytes - a note derived from a flag. */
+#define ROW(nm, ...)     ROWX(nm, 0, 0, __VA_ARGS__)
 
-	ROW("verb",  "%s", kof_evt_verb_name(e->verb));
-	ROW("pid",   "%lu", (unsigned long)e->pid);
+	ROWF("verb", verb, "%s", kof_evt_verb_name(e->verb));
+	ROWF("pid", pid, "%lu", (unsigned long)e->pid);
 	if (e->actor_pid && e->actor_pid != e->pid)
-		ROW("actor", "%lu", (unsigned long)e->actor_pid);
+		ROWF("actor", actor_pid, "%lu", (unsigned long)e->actor_pid);
 	if (e->ppid)
-		ROW("ppid",  "%lu", (unsigned long)e->ppid);
+		ROWF("ppid", ppid, "%lu", (unsigned long)e->ppid);
 	if (e->tid)
-		ROW("tid",   "%lu", (unsigned long)e->tid);
-	ROW("stamp", "%llu", (unsigned long long)e->stamp);
-	ROW("seq",   "%llu", (unsigned long long)e->seq);
+		ROWF("tid", tid, "%lu", (unsigned long)e->tid);
+	ROWF("stamp", stamp, "%llu", (unsigned long long)e->stamp);
+	ROWF("seq", seq, "%llu", (unsigned long long)e->seq);
 	if (e->create_time)
-		ROW("created", "%llu", (unsigned long long)e->create_time);
+		ROWF("created", create_time, "%llu", (unsigned long long)e->create_time);
 	if (e->session_id)
-		ROW("session", "%lu", (unsigned long)e->session_id);
+		ROWF("session", session_id, "%lu", (unsigned long)e->session_id);
 	if (e->verb == KOF_EVT_PROC_STOP)
-		ROW("exit", "%lu", (unsigned long)e->exit_code);
+		ROWF("exit", exit_code, "%lu", (unsigned long)e->exit_code);
 
 	if (*kof_evt_image(e))
-		ROW("image", "%s", kof_evt_image(e));
-	if (*kof_evt_object(e))
-		ROW("object", "%s", kof_evt_object(e));
+		ROWX("image", (uint16_t)(AT(text) + e->off_image),
+		     (uint16_t)strlen(kof_evt_image(e)),
+		     "%s", kof_evt_image(e));
+	/*
+	 * THE OBJECT, WHICH IS A PATH FOR EVERY VERB BUT ONE.
+	 *
+	 * An AMSI submission is CONTENT: length-delimited bytes that may hold
+	 * NULs and may hold terminal escapes. Formatted with %s like the paths
+	 * beside it, a UTF-16 script block came out as a single character - the
+	 * high byte of the first letter is a NUL and that is where the string
+	 * ended. The one field the whole subscription exists for was showing
+	 * one letter of itself.
+	 *
+	 * So a content object is written out byte by byte, printable ones as
+	 * themselves and everything else as a dot - the same rendering
+	 * kof_evt_render uses, for the same two reasons. The count is said
+	 * first, because "392 B" is the fact a reader needs before deciding
+	 * whether to go and read it in the dump.
+	 */
+	if (kof_evt_content(e, NULL, NULL) && e->content_len &&
+	    obj_extent(e) != 0) {
+		if (*seen == want) {
+			const char *ct = NULL;
+			size_t cn = 0;
+
+			if (name)
+				snprintf(name, ncap, "%s", "object");
+			if (val && vcap) {
+				/*
+				 * NO "392 B" IN FRONT OF IT. The row already
+				 * carries its length in the offset column -
+				 * "0077+392" - and repeating it here made the
+				 * value seven characters longer than the
+				 * content, so the "+N more" that counts what
+				 * did not fit counted the label too and gave a
+				 * number that was not the number of bytes left.
+				 */
+				(void)kof_evt_content(e, &ct, &cn);
+				(void)content_readable(ct, cn, val, vcap);
+			}
+			if (xoff) *xoff = (uint16_t)(AT(text) + e->off_object);
+			if (xlen) *xlen = obj_extent(e);
+			return 1;
+		}
+		(*seen)++;
+	} else if (*kof_evt_object(e)) {
+		ROWX("object", (uint16_t)(AT(text) + e->off_object),
+		     obj_extent(e), "%s", kof_evt_object(e));
+	}
 	if (*kof_evt_cmdline(e))
-		ROW("cmdline", "%s", kof_evt_cmdline(e));
+		ROWX("cmdline", (uint16_t)(AT(text) + e->off_cmdline),
+		     (uint16_t)strlen(kof_evt_cmdline(e)),
+		     "%s", kof_evt_cmdline(e));
 
 	if (e->loc)
-		ROW("where", "%s", kof_loc_name(e->loc));
+		ROWF("where", loc, "%s", kof_loc_name(e->loc));
 	/*
 	 * The technique, HERE and not on the event line - see the note in
 	 * kofevt.h. A properties panel is somebody asking about one event on
 	 * purpose, which is a different thing from a stream scrolling past.
 	 */
 	if (e->attack)
-		ROW("technique", "%s %s", kof_attack_id(e->attack),
-		    kof_attack_name(e->attack));
+		ROWF("technique", attack, "%s %s", kof_attack_id(e->attack),
+		     kof_attack_name(e->attack));
 
+	/*
+	 * THE ADDRESS AND THE PORT ARE TWO ROWS, because they are two ranges.
+	 *
+	 * They read as one fact and they were written as one row - "10.0.0.5:443"
+	 * over net_daddr - which needs an extent, and there is no single extent
+	 * to give it: the struct groups its fields by width, so the address is
+	 * at 0x44 and the port is twelve bytes later at 0x50. The row claimed
+	 * four bytes plus two and got the address followed by the first half of
+	 * net_saddr - it lit a field it was not about and never lit the port at
+	 * all.
+	 *
+	 * A row maps to one range. Two facts in two places are two rows, and
+	 * the combined form still exists where it costs nothing: kof_evt_render
+	 * writes "10.0.0.5:443" on montrace's single line, which is a sentence
+	 * rather than a table and has no bytes to point at.
+	 */
 	if (e->net_daddr || e->net_dport) {
 		uint32_t d = e->net_daddr;
+
+		ROWF("peer", net_daddr, "%lu.%lu.%lu.%lu",
+		     (unsigned long)(d & 0xffu),
+		     (unsigned long)((d >> 8) & 0xffu),
+		     (unsigned long)((d >> 16) & 0xffu),
+		     (unsigned long)((d >> 24) & 0xffu));
+	}
+	if (e->net_dport) {
+		/* Network order on the wire, host order to read. */
 		uint16_t dp = (uint16_t)((e->net_dport >> 8) |
 					 (e->net_dport << 8));
 
-		ROW("peer", "%lu.%lu.%lu.%lu:%u",
-		    (unsigned long)(d & 0xffu),
-		    (unsigned long)((d >> 8) & 0xffu),
-		    (unsigned long)((d >> 16) & 0xffu),
-		    (unsigned long)((d >> 24) & 0xffu), (unsigned)dp);
+		ROWF("peer port", net_dport, "%u", (unsigned)dp);
 	}
 	if (e->net_size)
-		ROW("bytes", "%lu", (unsigned long)e->net_size);
+		ROWF("bytes", net_size, "%lu", (unsigned long)e->net_size);
 	if (e->addr)
-		ROW("addr", "0x%llx", (unsigned long long)e->addr);
+		ROWF("addr", addr, "0x%llx", (unsigned long long)e->addr);
 	if (e->addr_size)
-		ROW("addr size", "%llu", (unsigned long long)e->addr_size);
+		ROWF("addr size", addr_size, "%llu", (unsigned long long)e->addr_size);
 	if (e->raw_id)
-		ROW("raw id", "%u", (unsigned)e->raw_id);
-	ROW("source", "%s", (e->os & KOF_OS_WINDOWS) ? "windows" :
+		ROWF("raw id", raw_id, "%u", (unsigned)e->raw_id);
+	/*
+	 * ONLY WHEN IT SAYS SOMETHING.
+	 *
+	 * This was unconditional, and it printed on every row of every record:
+	 * "windows" repeated a thousand times in a log whose header already
+	 * says windows, and - worse - "unknown" repeated a thousand times
+	 * whenever the collector left the field alone, which the network path
+	 * does. A row reading "source unknown" looks like a fact about the
+	 * event; it is a fact about a field nobody filled in, and the two are
+	 * not distinguishable once it is on screen.
+	 *
+	 * The platform belongs to the LOG, not the record - the header carries
+	 * it and every reader has already seen it. What this row is for is the
+	 * case the header cannot answer: a stream merged from more than one
+	 * collector. So it appears exactly when the record was stamped, and
+	 * says nothing when it was not.
+	 */
+	if (e->os)
+		ROWF("source", os, "%s", (e->os & KOF_OS_WINDOWS) ? "windows" :
 			    (e->os & KOF_OS_LINUX) ? "linux" : "unknown");
 
 	/*
@@ -420,29 +624,141 @@ static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
 	 * everything above it: a truncated path, a field the collector could
 	 * not supply, an entry point in no mapped image.
 	 */
+	/*
+	 * THE FLAG ROWS, WHICH ARE NOT FIELDS AND MUST NOT READ AS ONE.
+	 *
+	 * They were all called "note", which is not the name of anything - so
+	 * a panel that puts a name in a column had a column of rows labelled
+	 * "note" and no way to tell whether one was a warning, an error, or a
+	 * remark. That is the wrong question to leave a reader holding, because
+	 * the answer changes what they do next.
+	 *
+	 * Two kinds, named for what they mean:
+	 *
+	 *   incomplete - THIS RECORD IS SHORT OF WHAT IT SHOULD HOLD. Nothing
+	 *                in it is wrong; something is absent, and a rule that
+	 *                matched on the absent part would be deciding on a
+	 *                field the collector never wrote.
+	 *
+	 *   anomaly    - THE RECORD IS COMPLETE AND WHAT IT DESCRIBES IS ODD.
+	 *                Not a defect in the collection: a finding about the
+	 *                event, and the reason several of these events are
+	 *                collected at all.
+	 *
+	 * Both carry a ZERO extent, which is how a caller tells them from a
+	 * field without matching on the name - see kof_evt_field_extent.
+	 */
 	if (e->flags & KOF_EF_TRUNCATED)
-		ROW("note", "text was cut");
+		ROW("incomplete", "text was cut");
 	if (e->flags & KOF_EF_PARTIAL)
-		ROW("note", "fields missing (0x%x)", (unsigned)e->miss);
-	if (e->flags & KOF_EF_UNBACKED)
-		ROW("note", "entry point in no mapped image");
-	if (e->flags & KOF_EF_LATE_LOAD)
-		ROW("note", "module mapped long after process start");
+		ROW("incomplete", "fields missing (0x%x)", (unsigned)e->miss);
 	if (e->flags & KOF_EF_CMDLINE_RACED)
-		ROW("note", "command line lost to the process exiting");
+		ROW("incomplete", "command line lost to the process exiting");
+	if (e->flags & KOF_EF_UNBACKED)
+		ROW("anomaly", "entry point in no mapped image");
+	if (e->flags & KOF_EF_LATE_LOAD)
+		ROW("anomaly", "module mapped long after process start");
 #undef ROW
+#undef ROWF
+#undef ROWX
+#undef SZ
+#undef AT
 	return 0;
+}
+
+/*
+ * THE ORDER THE ROWS COME OUT IN, which is the order the BYTES are in.
+ *
+ * field_at declares the rows in the order they make sense to write: what
+ * happened, then to whom, then when. Read beside a hex dump that is the wrong
+ * order, and wrong in the way that costs the most - a reader following the
+ * colours down the dump finds them scattered up and down the list, so the two
+ * halves have to be searched rather than read across. Sorted by offset they
+ * run in step: row three is below row two in both panes.
+ *
+ * The rows that name NO bytes go last, together. They are notes derived from
+ * flags rather than fields, they have nowhere to sit in a layout order, and
+ * putting them at offset zero - which is what sorting them by their zero would
+ * do - would file them under `stamp`.
+ *
+ * An insertion sort over at most a dozen rows, rebuilt per call. It is called
+ * once per drawn row of a panel that is at most half a terminal, so the whole
+ * cost is bounded by the screen; an index cached on the record would have to
+ * be invalidated by every writer of it, and there are several.
+ */
+#define ORDER_MAX 32u
+
+static unsigned row_order(const struct kof_evt *e, uint8_t *ord)
+{
+	unsigned n = 0, i;
+
+	for (i = 0; i < ORDER_MAX; i++) {
+		unsigned seen = 0;
+		uint16_t o = 0, l = 0;
+		unsigned k;
+
+		if (!field_at(e, i, &seen, NULL, 0, NULL, 0, &o, &l))
+			break;
+		/* Insert by (has bytes, then offset), keeping equals in the
+		 * order they were declared - two rows over one range is a bug
+		 * in the table, and a stable order makes it look like one. */
+		for (k = n; k > 0; k--) {
+			unsigned seen2 = 0;
+			uint16_t po = 0, pl = 0;
+
+			(void)field_at(e, ord[k - 1u], &seen2, NULL, 0, NULL, 0,
+				       &po, &pl);
+			if (pl == 0 && l != 0)
+				ord[k] = ord[k - 1u];
+			else if (pl != 0 && l != 0 && po > o)
+				ord[k] = ord[k - 1u];
+			else
+				break;
+		}
+		ord[k] = (uint8_t)i;
+		n++;
+	}
+	return n;
 }
 
 int kof_evt_field(const struct kof_evt *e, unsigned i,
 		  char *name, size_t ncap, char *val, size_t vcap)
 {
-	unsigned seen = 0;
+	uint8_t ord[ORDER_MAX];
+	unsigned seen = 0, n;
 
 	if (!e || !name || !val || ncap == 0 || vcap == 0)
 		return 0;
 	name[0] = val[0] = '\0';
-	return field_at(e, i, &seen, name, ncap, val, vcap);
+	n = row_order(e, ord);
+	if (i >= n)
+		return 0;
+	return field_at(e, ord[i], &seen, name, ncap, val, vcap, NULL, NULL);
+}
+
+int kof_evt_field_extent(const struct kof_evt *e, unsigned i,
+			 uint16_t *off, uint16_t *len)
+{
+	uint8_t ord[ORDER_MAX];
+	unsigned seen = 0, n;
+	uint16_t o = 0, l = 0;
+
+	if (!e)
+		return 0;
+	n = row_order(e, ord);
+	if (i >= n)
+		return 0;
+	if (!field_at(e, ord[i], &seen, NULL, 0, NULL, 0, &o, &l))
+		return 0;
+	/*
+	 * A row about no particular bytes - a note derived from a flag - is
+	 * still a row, and says so with a zero length rather than by failing.
+	 * A caller highlighting on it would otherwise light up the first byte
+	 * of the record for a note about the last.
+	 */
+	if (off) *off = o;
+	if (len) *len = l;
+	return 1;
 }
 
 unsigned kof_evt_n_fields(const struct kof_evt *e)
@@ -472,11 +788,30 @@ int kof_evt_content(const struct kof_evt *e, const char **text, size_t *len)
 	 * exists: the content is raw bytes and may contain NULs - UTF-16 read
 	 * as bytes has one at index 1 - so strlen would report exactly one
 	 * character of a kilobyte submission.
+	 *
+	 * BUT NOT content_len ON ITS OWN EITHER. It is a length without a
+	 * pointer, and the pointer is off_object, which the conversion between
+	 * the collector's record and this one may have set to ABSENT - it does
+	 * that whenever an offset fell outside the bytes that got copied. The
+	 * pair was returned unchecked: kof_evt_object gave back the empty
+	 * string at the end of the arena, content_len said four hundred, and
+	 * every caller read four hundred bytes past it. A viewer printed the
+	 * struct that followed; a scanner would have matched on it.
+	 *
+	 * So the length is clamped to the bytes that are actually THERE, and a
+	 * content_len with no object behind it reports zero rather than a
+	 * number with nothing under it.
 	 */
-	if (e->content_len) {
+	if (e->content_len && e->off_object != KOF_TEXT_NONE &&
+	    e->off_object < sizeof e->text) {
+		size_t room = sizeof e->text - e->off_object;
+		size_t n = e->content_len;
+
+		if (n > room)
+			n = room;
 		if (text) *text = t;
-		if (len)  *len  = e->content_len;
-		return 1;
+		if (len)  *len  = n;
+		return n != 0;
 	}
 	/* A verb that carries content but whose content did not arrive is
 	 * still a content event; saying so lets a viewer show "empty" rather

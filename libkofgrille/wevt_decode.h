@@ -215,15 +215,40 @@ enum kofw_field {
 uint8_t kofw_provider_of(const GUID *);
 
 /*
+ * WHAT WOULD NOT FIT IN THE RECORD, so the caller can send the rest.
+ *
+ * A record is 512 bytes and an AMSI submission is routinely kilobytes, so the
+ * decode stores a prefix. It used to drop the remainder here, inside the
+ * collector, before anything that could scan it existed - which made the one
+ * field that subscription is for unreadable past four hundred bytes.
+ *
+ * It cannot send the rest itself: the ring belongs to the session, and the
+ * decode does not have it. So it reports where the content is - a pointer INTO
+ * THE ETW PAYLOAD, valid only for the length of the callback - and how much of
+ * it went in, and the callback emits continuation records for the rest.
+ *
+ * `src` is NULL and the lengths are zero for every event that carried no
+ * content, which is all of them but one.
+ */
+struct kofw_spill {
+	const uint8_t *src;    /* into rec's payload - callback lifetime only */
+	size_t         total;  /* what the provider handed over */
+	size_t         taken;  /* what fitted in the record */
+};
+
+/*
  * Fill `out` from `rec`, learning the shape if this is the first of its kind.
  *
  * Non-zero if the record was decoded into something worth keeping. Zero when
  * the event is not one this build wants, or when TDH would not describe it -
  * the caller counts the second case, which is why they are not distinguished
  * further here.
+ *
+ * `spill` may be NULL for a caller that cannot send continuations; the record
+ * is then a prefix and says so through KOFW_EF_TRUNCATED, exactly as before.
  */
 int kofw_decode(struct kofw_schema_cache *, const EVENT_RECORD *rec,
-		struct kofw_evt *out);
+		struct kofw_evt *out, struct kofw_spill *spill);
 
 /* The string conversions live in wtext.h, which includes no Windows header -
  * see that file for why the boundary is where it is. */

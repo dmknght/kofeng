@@ -470,6 +470,25 @@ static int g_disasm_rows;
 static int dis_top(void)  { return hex_bot() - g_disasm_rows + 1; }
 
 /*
+ * THE EVENT PANEL, which takes its rows the same way and from the same place.
+ *
+ * A record in the hex pane is 512 bytes of struct, and reading a pid out of it
+ * by counting offsets is not something a reader should have to do - the fields
+ * are what the record MEANS and the bytes are only how it is stored. So the
+ * panel spells them, in the same wording montrace prints, under the bytes they
+ * came from.
+ *
+ * Its own counter rather than the disassembler's, even though the two can
+ * never be open at once - disassembly is hidden for a log and this is hidden
+ * for everything else. Sharing one would make that mutual exclusion load
+ * bearing, and the day something makes them overlap the failure would be a
+ * panel drawn at the other one's height rather than a compile error.
+ */
+static int g_evt_rows;
+
+static int evt_top(void)  { return hex_bot() - g_evt_rows + 1; }
+
+/*
  * The last row the HEX rows may use.
  *
  * Everything about the pane as a whole - the tree, the divider, the rule under
@@ -478,7 +497,14 @@ static int dis_top(void)  { return hex_bot() - g_disasm_rows + 1; }
  * scrolls. Keeping the two questions apart is what lets the panel open without
  * the tree changing height.
  */
-static int hex_last(void) { return g_disasm_rows ? dis_top() - 2 : hex_bot(); }
+static int hex_last(void)
+{
+	if (g_disasm_rows)
+		return dis_top() - 2;
+	if (g_evt_rows)
+		return evt_top() - 2;
+	return hex_bot();
+}
 
 /* ---- the signature being drafted -------------------------------------------
  *
@@ -866,6 +892,50 @@ struct view {
 	struct kofevt_log_r *log;
 	uint64_t             log_n;      /* events in the file */
 	uint64_t             log_first;  /* the window's first index */
+
+	/*
+	 * WHICH VERBS THIS LOG ACTUALLY CONTAINS, and which of them to show.
+	 *
+	 * Both are masks of 1u << kof_evt_verb. `log_verbs` is what the file
+	 * holds - built once by walking the MAPPING, which costs no I/O - and
+	 * it is what the filter submenu offers: a menu listing verbs the log
+	 * does not contain is a menu of rows that do nothing.
+	 *
+	 * `log_keep` is what the object panel shows. It starts equal to
+	 * log_verbs, so opening a log shows everything, and Apply narrows it.
+	 */
+	uint32_t             log_verbs, log_keep;
+
+	/*
+	 * THE SELECTED EVENT, SPELT OUT - the record itself and where the
+	 * reader is inside its field list.
+	 *
+	 * Copied out of the mapping rather than pointed at it, for the reason
+	 * log_window already copies: a log written by a build with a different
+	 * head has its text at another offset, and a bounded copy into THIS
+	 * build's struct is the only read of it that is defined.
+	 *
+	 * `evt_sel` is a row index, and -1 means the panel is open with
+	 * nothing picked - which is the state it starts in, because landing on
+	 * a record should show what it says before it starts pointing at one
+	 * part of it.
+	 */
+	struct kof_evt       evt;
+	int                  evt_have;   /* the copy above is a real record */
+	int                  evt_open;   /* the reader has not closed it */
+	int                  evt_n;      /* rows the record yields */
+	int                  evt_sel;    /* the row lit in both panes, or -1 */
+	int                  evt_scroll; /* first line drawn */
+	/*
+	 * HOW FAR THE VALUES ARE SHIFTED LEFT.
+	 *
+	 * The wrap shows the first six lines of a value, which is enough to see
+	 * what a thing is and not enough to read a submitted script to its end.
+	 * Shifting moves the whole value before it wraps, so the six lines
+	 * become a window over it rather than its beginning - and a reader can
+	 * reach the tail of an AMSI buffer without the panel eating the pane.
+	 */
+	int                  evt_hscroll;
 
 	struct kof_range *ext;
 	uint32_t          n_ext;
@@ -2387,6 +2457,49 @@ static void obj_label(const struct object *o, char *out, size_t cap)
  * record's own text, so a pane sized from the struct would show the next
  * record's opening bytes as this one's.
  */
+/*
+ * WHICH VERBS ARE IN THIS LOG, from the mapping and with no I/O.
+ *
+ * Every record's verb sits at a known offset in its head, and each record says
+ * its own text length - so the whole file can be stepped through with pointer
+ * arithmetic. A million events is a million additions and no syscalls, which
+ * is the difference between asking this question at open and not asking it.
+ *
+ * Deliberately NOT done by reading records through kofevt_log_read: that
+ * copies 512 bytes per event to look at two, and it is the same walk the
+ * sparse index already knows how to do.
+ */
+static void log_scan_verbs(struct view *v)
+{
+	const struct kofevt_log_hdr *h;
+	const uint8_t *p, *end;
+
+	v->log_verbs = 0;
+	v->log_keep  = 0;
+	if (!v->log || !v->map)
+		return;
+	h = kofevt_log_header(v->log);
+	if (h->head_size < offsetof(struct kof_evt, text_len) + 2u)
+		return;
+
+	p   = (const uint8_t *)v->map + h->hdr_size;
+	end = (const uint8_t *)v->map + v->map_len;
+
+	while (p + h->head_size <= end) {
+		uint16_t verb = 0, tl = 0;
+
+		memcpy(&verb, p + offsetof(struct kof_evt, verb), sizeof verb);
+		memcpy(&tl, p + h->len_off, sizeof tl);
+		if (verb < 32u)
+			v->log_verbs |= 1u << verb;
+		if ((uint32_t)h->head_size + tl > h->rec_size)
+			break;              /* the record contradicts itself */
+		p += h->head_size + tl;
+	}
+	/* Everything shown until somebody narrows it. */
+	v->log_keep = v->log_verbs;
+}
+
 static void log_window(struct view *v)
 {
 	const struct kofevt_log_hdr *h;
@@ -2422,6 +2535,22 @@ static void log_window(struct view *v)
 			break;
 
 		/*
+		 * FILTERED HERE, so the window holds LOG_WIN events a reader
+		 * asked to see rather than LOG_WIN records of which most are
+		 * hidden. Filtering after the window was filled would leave a
+		 * panel of three rows and no way to reach the fourth match.
+		 */
+		{
+			uint16_t vb = 0;
+
+			memcpy(&vb, (const uint8_t *)v->map + off +
+				    offsetof(struct kof_evt, verb), sizeof vb);
+			if (vb < 32u && v->log_keep &&
+			    !(v->log_keep & (1u << vb)))
+				continue;
+		}
+
+		/*
 		 * The parent's name is bounded explicitly rather than left to
 		 * the compiler to worry about: it is "KOFT-<system>-<arch>",
 		 * which is short, but sizeof says 256 and a %s of that plus an
@@ -2453,7 +2582,7 @@ static void log_window(struct view *v)
 			kof_evt_label(&rec, i, o->label, sizeof o->label);
 		}
 		n++;
-		if (i - v->log_first + 1u >= LOG_WIN)
+		if (n - 1u >= LOG_WIN)
 			break;
 	}
 	v->n_obj = n;
@@ -2601,6 +2730,402 @@ static uint64_t hex_max(const struct view *v)
 
 /* Resolve whichever region the cursor is on, and put the hex pane back where it
  * was the last time this row was looked at. */
+/* ---- the event panel -------------------------------------------------------
+ *
+ * WHY THE TWO PANES SHARE A PALETTE.
+ *
+ * A field list beside a hex dump is two views of one record, and the question
+ * a reader has is always the same: which bytes is this row talking about. Left
+ * to prose the answer is an offset they have to count to; given a colour it is
+ * a glance. So every row takes a background from a small palette and the bytes
+ * it covers take the SAME background - the mapping is the colour, and it goes
+ * both ways: a run of odd bytes in the dump names itself by matching a row.
+ *
+ * Small on purpose. A record yields up to about a dozen rows and a palette that
+ * gave each its own hue would be a dozen colours nobody can hold; six that
+ * repeat are six a reader can, and two rows sharing one are never adjacent in
+ * the dump because the rows are sorted by offset - so a repeat is always half
+ * a record away from its twin.
+ *
+ * 256-colour, like A_S_SHN and for the same reason: the sixteen are spoken for
+ * by meanings this tool uses everywhere else - red is a marker the database
+ * counted, blue is a drag selection - and a palette built from them would say
+ * those things by accident. A terminal without 256-colour ignores the sequence
+ * and loses the mapping; it does not break the layout.
+ *
+ *
+ * WHY THE DUMP TAKES THE FOREGROUND AND THE PANEL TAKES THE BACKGROUND.
+ *
+ * They were both backgrounds to begin with, and on the fixed head that reads
+ * well - four bytes of pid in a block of colour is a thing the eye lands on.
+ *
+ * The head is not where a record is read. Every one of these ends with the
+ * text arena, and the arena is where the fact is: the path, the command line,
+ * the AMSI submission. It is the last field, it is by far the longest, and it
+ * is the one a reader opened the record to see - so it is exactly the field a
+ * solid background ruins. A hundred and fifty cells of ground is not a
+ * highlight, it is a wall, and it stands over the one part of the record
+ * nobody is skimming.
+ *
+ * So the dump colours the GLYPHS. The hex pane is already a foreground display
+ * - byte_colour tells NULs from text that way - so a field colour joins the
+ * scheme instead of covering it, and a long field reads as a long run of one
+ * ink rather than a slab. The panel's name chip stays a background because it
+ * is eleven characters wide and it is the legend: it has to be the strongest
+ * statement of "this colour is this row" on the screen, and it can afford to
+ * be, because it is short.
+ */
+#define EVT_PAL_N 6u
+
+/* The chip beside the row's name. Dark grounds with white text. */
+static const char *const evt_pal_bg[EVT_PAL_N] = {
+	"\033[48;5;24;97m",   /* deep blue   */
+	"\033[48;5;58;97m",   /* olive       */
+	"\033[48;5;53;97m",   /* plum        */
+	"\033[48;5;22;97m",   /* forest      */
+	"\033[48;5;94;97m",   /* amber-brown */
+	"\033[48;5;60;97m"    /* slate       */
+};
+
+/* The same six hues as ink, bright enough to read a hex digit in. Paired by
+ * index with the chips above - the pairing is the mapping, so the two arrays
+ * are one table and must be edited together. */
+static const char *const evt_pal_fg[EVT_PAL_N] = {
+	"\033[38;5;39m",      /* deep blue   */
+	"\033[38;5;185m",     /* olive       */
+	"\033[38;5;177m",     /* plum        */
+	"\033[38;5;84m",      /* forest      */
+	"\033[38;5;215m",     /* amber-brown */
+	"\033[38;5;147m"      /* slate       */
+};
+
+/*
+ * WHICH COLOUR A ROW OWNS, keyed on the FIELD and not on where it landed.
+ *
+ * It was the row's position, which is not a property of the field: a record's
+ * rows are only the ones that verb has, so `object` is row six on a file event
+ * and row eight on a process start, and the same field changed colour as the
+ * reader walked the log. A colour that means something different on every
+ * record is not a mapping, it is decoration - and it undoes the one thing the
+ * two panes are here to do, which is to be comparable ACROSS events.
+ *
+ * Keyed on the name, so `object` is one colour for the life of the tool. The
+ * names come from kof_evt_field, so a field added there and not here still
+ * gets a colour - the hash is the fallback, not the scheme.
+ */
+static unsigned evt_key(const char *name)
+{
+	/*
+	 * EVERY FIELD THE RECORD CAN SHOW, in the order its bytes appear, with
+	 * the palette slot each one keeps.
+	 *
+	 * Assigned by hand rather than by position, because the rows a record
+	 * shows are a SUBSET - a file event has no ports, a thread start no
+	 * exit code - so two fields far apart in this list can end up on
+	 * neighbouring lines, and neighbouring lines in the same colour are the
+	 * one case the mapping cannot survive. The numbers below are chosen so
+	 * that does not happen for the shapes the collector produces; the
+	 * comment beside each is which of them it was checked against.
+	 *
+	 * A name not listed here still gets a colour, from the hash below. That
+	 * is the fallback for a field added to kof_evt_field and not yet here -
+	 * it works, it is stable, and it is not checked for adjacency.
+	 */
+	static const struct { const char *name; unsigned slot; } fixed[] = {
+		{ "stamp",     0u },
+		{ "seq",       1u },
+		{ "created",   2u },
+		{ "addr",      3u },
+		{ "addr size", 4u },
+		{ "pid",       5u },   /* always present - a fence for the rest */
+		{ "ppid",      0u },
+		{ "actor",     1u },
+		{ "tid",       2u },
+		{ "session",   4u },
+		{ "exit",      2u },
+		{ "peer",      3u },
+		{ "bytes",     1u },
+		{ "peer port", 2u },
+		{ "verb",      3u },   /* always present */
+		{ "technique", 4u },
+		{ "raw id",    5u },
+		{ "where",     0u },
+		{ "source",    1u },
+		{ "image",     2u },
+		{ "object",    3u },
+		{ "cmdline",   4u }
+	};
+	unsigned i, h = 2166136261u;
+
+	for (i = 0; i < sizeof fixed / sizeof fixed[0]; i++)
+		if (!strcmp(name, fixed[i].name))
+			return fixed[i].slot;
+
+	/* FNV-1a over the name for everything else. Stable per name, which is
+	 * the whole requirement; which of the six it lands on does not matter
+	 * as long as it lands on the same one every time. */
+	for (; *name; name++) {
+		h ^= (unsigned char)*name;
+		h *= 16777619u;
+	}
+	return h % EVT_PAL_N;
+}
+
+static const char *evt_row_colour(const char *name)
+{
+	return evt_pal_bg[evt_key(name)];
+}
+
+static const char *evt_row_ink(const char *name)
+{
+	return evt_pal_fg[evt_key(name)];
+}
+
+/*
+ * Is this row the panel's cursor, and is the panel showing anything at all.
+ *
+ * Two questions asked together everywhere they are asked, so they are one
+ * predicate rather than a condition repeated in the drawer, the hex pane and
+ * the click routing - which is where they drifted apart the last time a panel
+ * grew a cursor.
+ */
+static int evt_have_rec(const struct view *v)
+{
+	return v->log != NULL && v->evt_have && v->evt_n > 0;
+}
+
+static int evt_live(const struct view *v)
+{
+	return evt_have_rec(v) && v->evt_open && g_evt_rows > 0;
+}
+
+/*
+ * WHICH ROW A BYTE BELONGS TO, or -1.
+ *
+ * `off` is an offset into the RECORD, which for an event node is also the
+ * offset into the region: the node is the record, whole, with no extents to
+ * map through. That equality is asserted by the caller rather than assumed
+ * here - see draw_hex.
+ *
+ * First match wins. The extents do not overlap today and a later field that
+ * did would be a bug in the field table, not something to resolve by drawing
+ * order; taking the first keeps the picture stable while that is true and
+ * makes the overlap visible as a colour that never appears if it stops being.
+ */
+static int evt_row_of(const struct view *v, uint64_t off)
+{
+	int i;
+
+	if (!evt_have_rec(v))
+		return -1;
+	for (i = 0; i < v->evt_n; i++) {
+		uint16_t fo = 0, fl = 0;
+
+		if (!kof_evt_field_extent(&v->evt, (unsigned)i, &fo, &fl))
+			break;
+		if (fl == 0)
+			continue;   /* a note about no bytes - see the header */
+		if (off >= fo && off < (uint64_t)fo + fl)
+			return i;
+	}
+	return -1;
+}
+
+/* The colour a byte takes from the panel, or NULL when no row claims it. */
+static const char *evt_byte_colour(const struct view *v, uint64_t off)
+{
+	int r;
+
+	if (!evt_live(v))
+		return NULL;
+	{
+		char nm[32], vl[64];
+
+		r = evt_row_of(v, off);
+		if (r < 0)
+			return NULL;
+		if (!kof_evt_field(&v->evt, (unsigned)r, nm, sizeof nm,
+				   vl, sizeof vl))
+			return NULL;
+		/*
+		 * The picked row keeps its own hue and gains emphasis on top
+		 * of it, rather than taking a seventh colour: the palette's one
+		 * rule is that a colour means a field, and breaking it at the
+		 * moment a reader is relying on it is the worst time to.
+		 *
+		 * Emphasis is bold and underline, not a background - the picked
+		 * row is the one most likely to be the long one, because a long
+		 * field is what a reader clicks a row to go and look at.
+		 */
+		if (r == v->evt_sel) {
+			static char lit[32];
+
+			snprintf(lit, sizeof lit, "\033[1;4m%s",
+				 evt_row_ink(nm));
+			return lit;
+		}
+		return evt_row_ink(nm);
+	}
+}
+
+
+/* ---- how a record's rows become screen lines -------------------------------
+ *
+ * A row is one fact and one range, but it is not one LINE: a path, a command
+ * line and an AMSI submission are hundreds of characters, and a panel that
+ * gives each row a line shows the first sixty of them and drops the rest -
+ * which is the part a reader opened the record for.
+ *
+ * So a long value wraps, and the panel's unit of scrolling and of hit-testing
+ * becomes the LINE rather than the row. Two functions answer that, and both
+ * the drawer and the click routing go through them - the last time this pane
+ * grew a second way to count its rows, the two disagreed and clicks landed one
+ * row off wherever a panel had scrolled.
+ */
+
+/* The width the value column has. One expression, because the drawer and the
+ * line count must wrap at the same place or they describe different screens. */
+/* The offset column: four hex digits and the space after them. It was
+ * "0077+392" - offset and length - and the length has gone; see the drawer. */
+#define EVT_OFF_W 5
+
+static int evt_val_w(void)
+{
+	int w = g_cols - (TREE_W + 3) - (EVT_OFF_W + 13 + 1);
+
+	return w > 8 ? w : 8;
+}
+
+/*
+ * A CAP ON HOW FAR ONE VALUE MAY UNROLL.
+ *
+ * Without it a four-hundred-byte AMSI submission takes the whole panel and the
+ * fields around it go off the bottom - so the record's SHAPE, which is what
+ * this panel is for, is lost to the one field that is already on screen in
+ * full: the hex pane below is showing those very bytes, lit in the row's own
+ * colour, and repeating them here as text buys a reader nothing they cannot
+ * see.
+ *
+ * Two lines, then. Enough to tell a script block from a path from a base64
+ * blob, which is the question a field list answers; reading the thing is what
+ * the dump is for, and walking past two lines of it is what the shift is for.
+ */
+#define EVT_WRAP_MAX 2
+
+static int evt_row_lines(const struct view *v, int i)
+{
+	char nm[32], vl[512];
+	int w = evt_val_w(), n, len;
+
+	if (!kof_evt_field(&v->evt, (unsigned)i, nm, sizeof nm, vl, sizeof vl))
+		return 0;
+	len = (int)strlen(vl) - v->evt_hscroll;
+	if (len < 0)
+		len = 0;
+	n = (len + w - 1) / w;
+	if (n < 1)
+		n = 1;
+	return n > EVT_WRAP_MAX ? EVT_WRAP_MAX : n;
+}
+
+/* The longest value the record has, which is how far the shift may go: past
+ * that every row is blank and the panel scrolls into nothing. */
+static int evt_val_max(const struct view *v)
+{
+	char nm[32], vl[512];
+	int i, m = 0;
+
+	for (i = 0; i < v->evt_n; i++) {
+		int n;
+
+		if (!kof_evt_field(&v->evt, (unsigned)i, nm, sizeof nm,
+				   vl, sizeof vl))
+			break;
+		n = (int)strlen(vl);
+		if (n > m)
+			m = n;
+	}
+	return m;
+}
+
+/* Every line the record needs, which is what the panel asks for and what its
+ * scrollbar measures. */
+static int evt_total_lines(const struct view *v)
+{
+	int i, n = 0;
+
+	for (i = 0; i < v->evt_n; i++)
+		n += evt_row_lines(v, i);
+	return n;
+}
+
+/*
+ * Which row line `n` belongs to, and how far into its value that line starts.
+ * Zero when `n` is past the end.
+ */
+static int evt_line_at(const struct view *v, int n, int *row, int *skip)
+{
+	int i, at = 0;
+
+	if (n < 0)
+		return 0;
+	for (i = 0; i < v->evt_n; i++) {
+		int lines = evt_row_lines(v, i);
+
+		if (n < at + lines) {
+			if (row)  *row = i;
+			if (skip) *skip = (n - at) * evt_val_w();
+			return 1;
+		}
+		at += lines;
+	}
+	return 0;
+}
+
+/*
+ * Take a copy of the selected event, or forget the one held.
+ *
+ * Called from view_select, so the panel follows the tree without every mover
+ * of the cursor having to know the panel exists.
+ */
+static void evt_load(struct view *v)
+{
+	const struct object *o;
+
+	v->evt_have = 0;
+	v->evt_n = 0;
+	if (!v->log || !v->n_node)
+		return;
+	/*
+	 * Object 0 is the log itself - "KOFT-<system>-<arch>" - and it is not
+	 * a record. A panel that tried to spell it would read a header as a
+	 * struct kof_evt and print whatever the two happened to share.
+	 */
+	if (v->node[v->sel_node].obj == 0)
+		return;
+	o = &v->obj[v->node[v->sel_node].obj];
+	if (!o->buf.p || !o->buf.n)
+		return;
+
+	memset(&v->evt, 0, sizeof v->evt);
+	memcpy(&v->evt, o->buf.p,
+	       o->buf.n < sizeof v->evt ? (size_t)o->buf.n : sizeof v->evt);
+	v->evt_have = 1;
+	v->evt_n = (int)kof_evt_n_fields(&v->evt);
+
+	/*
+	 * The cursor is dropped, not carried across.
+	 *
+	 * Row 4 of one event and row 4 of the next are different fields - the
+	 * list is what THIS record has - so keeping the index would move the
+	 * highlight to something the reader never pointed at, in a pane whose
+	 * whole claim is that the colour tells you what you picked.
+	 */
+	v->evt_sel = -1;
+	v->evt_scroll = 0;
+	v->evt_hscroll = 0;
+}
+
 static void view_select(struct view *v)
 {
 	struct object *o = cur_obj(v);
@@ -2608,6 +3133,11 @@ static void view_select(struct view *v)
 
 	/* The one UI fact the model is told - see kof_editor.cur. */
 	v->ed.cur = v->node[v->sel_node].obj;
+
+	/* Before the early return below: a view with no extent buffer still
+	 * has a selected row, and the panel is about the RECORD rather than
+	 * about the extents. */
+	evt_load(v);
 
 	v->n_ext = 0;
 	v->rgn_len = 0;
@@ -3327,8 +3857,22 @@ static void draw_hex(struct out *o, struct view *v)
 				 * hits, which are file offsets and have no
 				 * meaning here.
 				 */
+				/*
+				 * The event panel's colour is asked for with
+				 * the REGION offset, not the file offset the
+				 * others use: its extents are offsets into the
+				 * record, and for an event node the region IS
+				 * the record - one object, no extents to map
+				 * through. evt_live is false for every other
+				 * kind of node, which is what keeps that
+				 * equality from having to be checked here.
+				 */
+				const char *ec = evt_byte_colour(v,
+							at + (uint64_t)k);
+
 				out_str(o, in_sel(v, at + (uint64_t)k) ? A_SELB :
 					h ? (h == 1 ? A_HIT1 : A_HIT2)
+					  : ec ? ec
 					  : decl_kind(v, fo) ? A_HIT3
 					  : sym ? sym_byte_colour(fo)
 					  : byte_colour(bv));
@@ -3341,9 +3885,11 @@ static void draw_hex(struct out *o, struct view *v)
 			uint64_t fo = view_map(v, at + (uint64_t)k, 0);
 			uint8_t c = fo < base_n ? base[fo] : 0;
 			int h = hit_kind(v, fo);
+			const char *ec = evt_byte_colour(v, at + (uint64_t)k);
 
 			out_str(o, in_sel(v, at + (uint64_t)k) ? A_SELB :
 				h ? (h == 1 ? A_HIT1 : A_HIT2)
+				  : ec ? ec
 				  : decl_kind(v, fo) ? A_HIT3
 				  : sym ? sym_byte_colour(fo)
 				  : byte_colour(c));
@@ -5460,6 +6006,188 @@ static uint64_t dis_sync(struct view *v, uint64_t want)
 	/* At or past `want` - never before it, so the panel does not silently
 	 * show bytes the scroll had already left behind. */
 	return at;
+}
+
+/*
+ * THE EVENT PANEL - what the record above it says, in the wording montrace
+ * prints.
+ *
+ * Deliberately the same wording. A reader who has watched the tracer's output
+ * scroll past and then opens the log in here is looking at the same events, and
+ * two spellings of one record - "pid" in one place and "process id" in the
+ * other - is two vocabularies to learn for one fact. kof_evt_field is the one
+ * source for both, so they cannot drift.
+ */
+static void draw_evt(struct out *o, struct view *v)
+{
+	int head = evt_top() - 1;
+	int col = TREE_W + 3;
+	int row, i;
+	char note[40];
+
+	if (!g_evt_rows)
+		return;
+
+	/* The heading, and the same close control the other panel has - a
+	 * reader who has closed one knows where the other's is. */
+	out_at(o, head, col);
+	if (v->evt_hscroll)
+		snprintf(note, sizeof note, " Event %s  [+%d chars] ",
+			 kof_evt_verb_name(v->evt.verb), v->evt_hscroll);
+	else
+		snprintf(note, sizeof note, " Event %s  [%u field(s)] ",
+			 kof_evt_verb_name(v->evt.verb), (unsigned)v->evt_n);
+	out_fmt(o, A_DIM "--" A_OFF A_BOLD "%s" A_OFF, note);
+	out_str(o, A_DIM);
+	{
+		int used = col + 2 + (int)strlen(note);
+		int k;
+
+		for (k = used; k < g_cols - 4; k++)
+			out_str(o, "-");
+	}
+	out_str(o, A_OFF);
+	out_at(o, head, g_cols - 3);
+	out_str(o, A_D_KEY "[x]" A_OFF);
+
+	for (row = evt_top(); row <= hex_bot(); row++) {
+		char name[32], val[512];
+		uint16_t fo = 0, fl = 0;
+		int skip = 0;
+		int vw = evt_val_w();
+
+		out_at(o, row, col);
+		if (!evt_line_at(v, v->evt_scroll + (row - evt_top()), &i,
+				 &skip) ||
+		    !kof_evt_field(&v->evt, (unsigned)i, name, sizeof name,
+				   val, sizeof val)) {
+			out_str(o, "\033[K");
+			continue;
+		}
+		(void)kof_evt_field_extent(&v->evt, (unsigned)i, &fo, &fl);
+
+		/*
+		 * A CONTINUATION LINE REPEATS NOTHING.
+		 *
+		 * No offset, no name, no chip - the row is one fact and it has
+		 * already said whose it is. Repeating the label down the left
+		 * would make one long value look like four short rows, which is
+		 * the opposite of what the wrap is for.
+		 */
+		if (skip > 0) {
+			int at = skip + v->evt_hscroll;
+			int left = (int)strlen(val) - (at + vw);
+
+			/*
+			 * A MARK IN THE NAME COLUMN, so a continuation cannot
+			 * be read as a row of its own.
+			 *
+			 * The column was left blank, which is right when one
+			 * long value sits among short ones and wrong the
+			 * moment two of them wrap in a row: four unnamed lines
+			 * follow each other and there is nothing on screen
+			 * saying where the first value ended and the second
+			 * began. The mark is dim and in the gutter, so it
+			 * groups the lines without competing with the names.
+			 */
+			out_fmt(o, "%*s" A_DIM "%*s" A_OFF, EVT_OFF_W, "",
+				13, "   -");
+			if (i == v->evt_sel)
+				out_str(o, A_BOLD);
+			out_fmt(o, " %.*s", vw,
+				(int)strlen(val) > at ? val + at : "");
+			out_str(o, A_OFF);
+			/*
+			 * WHAT WAS LEFT OUT, said as a count rather than as an
+			 * ellipsis. "..." tells a reader there is more; a
+			 * number tells them whether it is worth going after,
+			 * which is the decision they are actually making.
+			 */
+			if (left > 0)
+				out_fmt(o, A_DIM "  +%d more" A_OFF, left);
+			out_str(o, "\033[K");
+			continue;
+		}
+
+		/*
+		 * A FLAG ROW IS NOT A FIELD and is not drawn as one.
+		 *
+		 * It has no offset, no length and no bytes to point at, so it
+		 * gets no offset column and no colour chip - those would all be
+		 * blank or, worse, filled in with something. What it gets is a
+		 * mark and the warning colour, because what every one of them
+		 * says is that this record is not what it looks like.
+		 */
+		if (!fl) {
+			/*
+			 * FLUSH LEFT, out past the offset column.
+			 *
+			 * The columns to the right are a table ABOUT the
+			 * record's bytes - an offset, a length, the field they
+			 * describe. A warning is about the record as a whole
+			 * and has none of those, so sitting it in their
+			 * gutter makes it look like a row whose offset went
+			 * missing. Starting at the panel's own edge says it is
+			 * not in the table at all.
+			 */
+			out_fmt(o, A_WARN "! %s: %.*s" A_OFF, name,
+				g_cols - col - 6, val);
+			out_str(o, "\033[K");
+			continue;
+		}
+
+		/*
+		 * THE OFFSET, in the colour the hex pane's own offset column
+		 * uses, so the number in this row and the number down the left
+		 * of the dump are visibly the same kind of thing.
+		 *
+		 * THE LENGTH USED TO BE HERE TOO, as "0077+392", and it is not
+		 * worth a column. Where a field ENDS is not a question a reader
+		 * of this panel asks - the highlight in the dump answers it in
+		 * the form they actually want it, which is by showing them the
+		 * end. What they need from the panel is where to LOOK, and that
+		 * is one number.
+		 */
+		out_fmt(o, A_LOC "%0*X" A_OFF " ", EVT_OFF_W - 1, (unsigned)fo);
+
+		/*
+		 * The name carries the row's colour and the value does not -
+		 * see the palette's header for why the chip is a background
+		 * and the bytes it maps to are not.
+		 */
+		out_str(o, evt_row_colour(name));
+		out_fmt(o, " %-11.11s ", name);
+		out_str(o, A_OFF);
+
+		/* The picked row, marked the way a picked thing is marked
+		 * everywhere else here rather than with a seventh colour. */
+		if (i == v->evt_sel)
+			out_str(o, A_BOLD);
+		out_fmt(o, " %.*s", vw,
+			(int)strlen(val) > v->evt_hscroll
+				? val + v->evt_hscroll : "");
+		out_str(o, A_OFF);
+		/* Only when this is the whole row - a wrapped value says it on
+		 * its last line, and saying it twice would read as two
+		 * different amounts. */
+		if (evt_row_lines(v, i) == 1) {
+			int left = (int)strlen(val) - (v->evt_hscroll + vw);
+
+			if (left > 0)
+				out_fmt(o, A_DIM "  +%d more" A_OFF, left);
+		}
+		out_str(o, "\033[K");
+	}
+
+	{
+		int shown = hex_bot() - evt_top() + 1;
+		int total = evt_total_lines(v);
+
+		if (total > shown)
+			scrollbar(o, g_cols, evt_top(), hex_bot(),
+				  (uint64_t)v->evt_scroll, (uint64_t)total,
+				  (uint64_t)shown);
+	}
 }
 
 static void draw_disasm(struct out *o, struct view *v)
@@ -8760,12 +9488,40 @@ static void redraw(struct view *v)
 		g_disasm_rows = 0;
 	}
 
+	/*
+	 * THE EVENT PANEL'S HEIGHT, settled the same way and after the
+	 * disassembler on purpose: g_disasm_rows is what hex_bot's neighbours
+	 * are measured against, and a panel sized before it would be sized
+	 * against last frame's number.
+	 *
+	 * As tall as the record needs and no taller. Unlike a disassembly,
+	 * which is as long as the reader keeps scrolling, a record has a fixed
+	 * number of fields - so a fixed half-column would leave blank rows the
+	 * hex pane could have had on almost every event. It still gets a cap,
+	 * because a process start with a long command line yields enough rows
+	 * to crowd out the bytes the panel is explaining.
+	 */
+	if (evt_have_rec(v) && v->evt_open && !sym_view(v)) {
+		int room = hex_bot() - hex_top() + 1;
+		int want = evt_total_lines(v);
+
+		if (want > room / 2)
+			want = room / 2;
+		/* Two rows for the hex to keep, plus the heading. */
+		if (want > room - 3)
+			want = room - 3;
+		g_evt_rows = want > 0 ? want : 0;
+	} else {
+		g_evt_rows = 0;
+	}
+
 	out_str(&o, "\033[?2026h");
 	if (under) {
 		draw_frame(&o, v);
 		draw_tree(&o, v);
 		draw_hex(&o, v);
 		draw_disasm(&o, v);
+		draw_evt(&o, v);
 		draw_decl(&o, v);
 		draw_marker_line(&o, v);
 		if (v->show_list)
@@ -9266,6 +10022,25 @@ enum bar_item {
 	BI_DUMP, BI_DUMP_STATIC, BI_DUMP_EMU,
 	BI_REBUILD,
 	BI_NEXT, BI_PREV,
+
+	/*
+	 * FILTER EVENTS, for a log - a parent with one child per verb and an
+	 * Apply below them.
+	 *
+	 * One slot per possible verb rather than a dynamic list, because
+	 * bar_item is a table indexed by this enum and every walk over it -
+	 * the drawer, the hit test, the keyboard cursor - agrees only because
+	 * they all read the same table. A verb the log does not contain is
+	 * hidden by bar_shown, which is the same mechanism that hides Symbols
+	 * for an object with none.
+	 */
+	BI_FILTER,
+	BI_FILT_V0, BI_FILT_V1, BI_FILT_V2, BI_FILT_V3, BI_FILT_V4,
+	BI_FILT_V5, BI_FILT_V6, BI_FILT_V7, BI_FILT_V8, BI_FILT_V9,
+	BI_FILT_V10, BI_FILT_V11, BI_FILT_V12, BI_FILT_V13, BI_FILT_V14,
+	BI_FILT_V15, BI_FILT_V16, BI_FILT_V17, BI_FILT_V18, BI_FILT_V19,
+	BI_FILT_APPLY,
+
 	BI_KEYS, BI_ABOUT,
 	BI_COUNT
 };
@@ -9310,6 +10085,28 @@ static const struct {
 	 */
 	{ "Next",              BM_SWITCH, -1, 0 },
 	{ "Previous",          BM_SWITCH, -1, 0 },
+	{ "Filter events",     BM_ANALYSIS, -1, 1 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "Apply filter",      BM_ANALYSIS, BI_FILTER, 1 },
 	{ "Keyboard",          BM_HELP, -1, 0 },
 	{ "About",          BM_HELP, -1, 0 }
 };
@@ -9330,6 +10127,14 @@ static int bar_has_sub(int i)
  * wording in the table: a menu entry should say what pressing it does, and what
  * it does depends on which unpacker filled the tree.
  */
+/* The verb a filter child stands for, or -1. */
+static int bar_filt_verb(int i)
+{
+	if (i >= BI_FILT_V0 && i <= BI_FILT_V19)
+		return i - BI_FILT_V0;
+	return -1;
+}
+
 static const char *bar_label(struct view *v, int i)
 {
 	/*
@@ -9352,6 +10157,33 @@ static const char *bar_label(struct view *v, int i)
 	/* Says which way the toggle goes, for the reason above. */
 	if (i == BI_DISASM)
 		return v->dis_open ? "Hide disassembly" : "Show disassembly";
+
+	/*
+	 * A FILTER ROW SHOWS ITS OWN STATE, because it is a checkbox and not a
+	 * command: a reader has to be able to see what is on before deciding
+	 * what to change, and a row that only acted would make them toggle it
+	 * to find out.
+	 *
+	 * The verb's name comes from kof_evt_verb_name, the same one the event
+	 * rows and every other consumer use - a filter labelled differently
+	 * from the rows it filters would be a menu about something else.
+	 *
+	 * Static buffer because this returns a const char * the drawer prints
+	 * immediately, which is the contract the other branches already have.
+	 */
+	{
+		int verb = bar_filt_verb(i);
+
+		if (verb > 0) {
+			static char row[40];
+
+			snprintf(row, sizeof row, "[%c] %s",
+				 (v->log_keep & (1u << (unsigned)verb)) ? 'x'
+									: ' ',
+				 kof_evt_verb_name((uint16_t)verb));
+			return row;
+		}
+	}
 	return bar_item[i].label;
 }
 
@@ -9372,10 +10204,62 @@ static const char *const bar_name[BM_COUNT] = {
  * list. An item that cannot apply is drawn greyed rather than removed, because a
  * menu whose length changes as you move between objects is one you cannot learn.
  */
+
+/*
+ * WHICH ITEMS EXIST AT ALL for the object in hand.
+ *
+ * Distinct from bar_enabled, which greys an item and says why. Something that
+ * cannot apply to this KIND of object should not be a grey row a reader has to
+ * click to be told about - Symbols on an event log is not "disabled", it is
+ * meaningless, and a menu that lists it is a menu describing the wrong tool.
+ */
 static int bar_shown(struct view *v, int i)
 {
-	(void)v;
-	return i >= 0 && i < BI_COUNT;
+	int verb;
+
+	if (i < 0 || i >= BI_COUNT)
+		return 0;
+
+	verb = bar_filt_verb(i);
+	if (verb >= 0) {
+		/*
+		 * Only verbs the log actually contains. A submenu listing
+		 * every verb the format can express would be mostly rows that
+		 * filter nothing, and the reader cannot tell those from the
+		 * ones that would.
+		 */
+		return v->log && verb > 0 &&
+		       (v->log_verbs & (1u << (unsigned)verb)) != 0;
+	}
+	if (i == BI_FILTER || i == BI_FILT_APPLY)
+		return v->log != NULL;
+
+	/*
+	 * WHAT AN EVENT LOG IS NOT.
+	 *
+	 * Symbols, disassembly, the shellcode finder and the unpackers all
+	 * ask questions about a parsed executable. A log is a stream of
+	 * records: it has no symbol table, no instructions, no variables to
+	 * search and nothing for an unpacker to open. Rebuild is about the
+	 * signature database and has nothing to do with the file at all, but
+	 * it re-runs the scan on it, which for a log means discarding the
+	 * event window and finding nothing.
+	 */
+	if (v->log) {
+		switch (i) {
+		case BI_SYMS:
+		case BI_DISASM:
+		case BI_FINDSC:
+		case BI_UNPACKER:
+		case BI_DUMP_STATIC:
+		case BI_DUMP_EMU:
+		case BI_REBUILD:
+			return 0;
+		default:
+			break;
+		}
+	}
+	return 1;
 }
 
 /*
@@ -9464,7 +10348,25 @@ static int bar_enabled(struct view *v, int i)
 	}
 	case BI_KEYS:
 	case BI_ABOUT:     return 1;
-	default:           return 0;
+	/*
+	 * The filter, live whenever there is a log to filter.
+	 *
+	 * It has to be said, because the default below is OFF - which is the
+	 * right default for a table where a missing case means somebody added
+	 * an item and has not decided what makes it usable yet, and which is
+	 * exactly what happened here: the whole submenu was unreachable
+	 * because clicking the parent hit the disabled path and only printed a
+	 * message. The children are toggles and need nothing but the log; the
+	 * ones for verbs the log does not contain are not disabled, they are
+	 * not there at all - see bar_shown.
+	 */
+	case BI_FILTER:
+	case BI_FILT_APPLY:
+		return v->log != NULL;
+	default:
+		if (bar_filt_verb(i) > 0)
+			return v->log != NULL;
+		return 0;
 	}
 }
 
@@ -9562,9 +10464,18 @@ static struct kv_menu bar_menu(struct view *v, int sub)
 	m.ud = v;
 	m.shown = sub ? bm_shown_sub : bm_shown_top;
 	m.enabled = bm_enabled;
-	/* A submenu is one group by construction - it is the children of one
-	 * item - so it never draws a rule, and it never opens another. */
-	m.rule_above = sub ? NULL : bm_rule;
+	/*
+	 * A submenu draws rules too. It used not to, on the grounds that the
+	 * children of one item are one group - which held while the only
+	 * submenu was two dump kinds, and stopped holding with the event
+	 * filter: a list of checkboxes followed by the button that acts on
+	 * them is two groups, and without a rule between them Apply reads as
+	 * one more thing to tick.
+	 *
+	 * It still never opens a further submenu - nothing nests that deep,
+	 * and has_sub is what would draw the arrow saying it did.
+	 */
+	m.rule_above = bm_rule;
 	m.has_sub = sub ? NULL : bm_sub;
 	m.label = bm_label;
 	m.w = BAR_W;
@@ -12015,10 +12926,62 @@ static void bar_run(struct view *v, int i)
 		}
 		return;
 	}
+	/*
+	 * A CHECKBOX DOES NOT CLOSE THE MENU, which is the whole difference
+	 * between it and every other row here.
+	 *
+	 * Turning three verbs off means three presses, and a menu that shut
+	 * after each one would mean reopening and re-descending twice. So the
+	 * toggle happens before the close below and returns - the submenu
+	 * stays exactly where it was, with the row now ticked.
+	 */
+	{
+		int verb = bar_filt_verb(i);
+
+		if (verb > 0) {
+			v->log_keep ^= 1u << (unsigned)verb;
+			return;
+		}
+	}
+
 	v->bar_open = -1;
 	v->bar_sel = -1;
 	v->bar_sub = -1;
 	switch (i) {
+	case BI_FILT_APPLY:
+		/*
+		 * Applied to the OBJECT PANEL by rebuilding the window: the
+		 * filter is part of what a window contains, so there is one
+		 * place that knows about it and no second filtering step for
+		 * the two to disagree at.
+		 *
+		 * Back to the start of the log rather than staying put,
+		 * because the event the selection was on may be one of the
+		 * ones just hidden - and a selection pointing at a row that no
+		 * longer exists is the way a panel starts describing the wrong
+		 * event.
+		 */
+		if (v->log) {
+
+			v->log_first = 0;
+			log_window(v);
+			tree_build(v);
+			v->sel_node = 0;
+			v->sel_a = v->sel_b = KOF_BROKEN;
+			v->dis_have = 0;
+			view_select(v);
+			if (!v->log_keep)
+				snprintf(v->act_msg, sizeof v->act_msg,
+					 "Every event type is unticked - "
+					 "nothing to show");
+			else
+				snprintf(v->act_msg, sizeof v->act_msg,
+					 "Filtered: %u event(s) in the window",
+					 (unsigned)(v->n_obj ? v->n_obj - 1u
+							     : 0));
+			v->act_ok = 1;
+		}
+		break;
 	case BI_SAVE:    generate(&v->ed, 0); break;
 	case BI_SAVE_AS: generate(&v->ed, 1); break;
 	/*
@@ -15015,6 +15978,60 @@ static void click(struct view *v, int rclick)
 		return;
 	if (click_disasm(v, rclick))
 		return;
+	/*
+	 * A ROW OF THE EVENT PANEL, which picks the field AND takes the hex
+	 * pane to it.
+	 *
+	 * Scrolling as well as lighting, because the panel is at most half the
+	 * column and a record is 512 bytes: the field a reader picks is more
+	 * often off the top of the dump than on it, and a highlight nobody can
+	 * see is the same as no highlight. Picking a row is asking "where is
+	 * this", so the answer is to go there.
+	 */
+	if (evt_live(v) && g_my >= evt_top() && g_my <= hex_bot() &&
+	    g_mx > TREE_W) {
+		int i = 0;
+		uint16_t fo = 0, fl = 0;
+
+		/* Through the same line-to-row map the drawer used, so a click
+		 * on the third line of a wrapped value picks that value. */
+		if (!evt_line_at(v, v->evt_scroll + (g_my - evt_top()), &i,
+				 NULL))
+			return;
+		/* A second click on the same row puts it out, so the mapping
+		 * can be cleared without moving off the record. */
+		if (i == v->evt_sel) {
+			v->evt_sel = -1;
+			return;
+		}
+		v->evt_sel = i;
+		if (kof_evt_field_extent(&v->evt, (unsigned)i, &fo, &fl) && fl) {
+			/*
+			 * Placed directly rather than through view_show_in:
+			 * that resolves a FILE offset through the node's
+			 * extents, and this offset is already the region's -
+			 * an event node is one object with the record's bytes
+			 * and nothing to map through. Running it through the
+			 * mapping would ask a question whose answer is the
+			 * input.
+			 */
+			uint64_t per = (uint64_t)(v->per > 0 ? v->per : 16);
+			uint64_t row = (uint64_t)fo / per;
+
+			v->rgn_at = row > JUMP_LEAD ? (row - JUMP_LEAD) * per
+						    : 0;
+			if (v->rgn_at > hex_max(v))
+				v->rgn_at = hex_max(v);
+		}
+		return;
+	}
+	if (g_evt_rows && g_my == evt_top() - 1 && g_mx > TREE_W) {
+		if (g_mx >= g_cols - 3) {
+			v->evt_open = 0;
+			g_evt_rows = 0;
+		}
+		return;
+	}
 	if (g_disasm_rows && g_my == dis_top() - 1 && g_mx > TREE_W) {
 		if (g_mx >= g_cols - 3) {
 			v->dis_open = 0;
@@ -16031,6 +17048,44 @@ static void on_wheel(struct view *v, int k)
 		 * panel alone, by one instruction at a time. Nothing has to
 		 * guess what was meant.
 		 */
+		/* The panel's own rows, when the pointer is over them - the
+		 * same rule the disassembler's wheel follows below. */
+		if (g_evt_rows && g_my >= evt_top() && g_my <= hex_bot() &&
+		    g_mx > TREE_W) {
+			int shown = hex_bot() - evt_top() + 1;
+			int hi;
+
+			/*
+			 * SHIFT TURNS THE WHEEL SIDEWAYS, which is what every
+			 * terminal application that scrolls horizontally does -
+			 * the horizontal wheel's own encoding is reported by
+			 * too few terminals to rely on, and this one is in the
+			 * reader's hands rather than their hardware's.
+			 *
+			 * A step is a third of the column, so three turns move
+			 * a full width and a reader can walk a long value
+			 * without losing their place in it.
+			 */
+			if (g_mod_shift) {
+				int step = evt_val_w() / 3;
+				int hmax = evt_val_max(v) - evt_val_w();
+
+				v->evt_hscroll += down ? step : -step;
+				if (v->evt_hscroll > hmax)
+					v->evt_hscroll = hmax;
+				if (v->evt_hscroll < 0)
+					v->evt_hscroll = 0;
+				return;
+			}
+			hi = evt_total_lines(v) - shown;
+
+			v->evt_scroll += down ? 1 : -1;
+			if (v->evt_scroll > hi)
+				v->evt_scroll = hi;
+			if (v->evt_scroll < 0)
+				v->evt_scroll = 0;
+			return;
+		}
 		if (g_disasm_rows && g_my >= dis_top() && g_my <= hex_bot() &&
 		    g_mx > TREE_W) {
 			/* Four bytes: about one instruction, and the same step
@@ -16642,6 +17697,22 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 			if (v->log) {
 				v->log_n     = kofevt_log_count(v->log);
 				v->log_first = 0;
+				/*
+				 * OPEN FROM THE START, because a log is opened
+				 * to read events and the bytes on their own do
+				 * not say what one is. The panel is where the
+				 * record becomes readable, so making a reader
+				 * find a menu item first would be hiding the
+				 * point of the view behind a switch.
+				 *
+				 * It is still closable, and closing it sticks
+				 * for the rest of the file - a reader working
+				 * on the bytes themselves said what they
+				 * wanted.
+				 */
+				v->evt_open = 1;
+				v->evt_sel = -1;
+				log_scan_verbs(v);
 				log_window(v);
 			} else {
 				snprintf(v->act_msg, sizeof v->act_msg,

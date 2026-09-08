@@ -109,6 +109,20 @@ int kof_evt_field(const struct kof_evt *, unsigned i,
 /* How many fields kof_evt_field will yield for this event. */
 unsigned kof_evt_n_fields(const struct kof_evt *);
 
+/*
+ * WHICH BYTES OF THE RECORD row `i` came from - the offset within the record
+ * and how many.
+ *
+ * This is what lets a panel showing the fields light up the bytes beside them:
+ * without it the two halves are two displays that happen to share a screen.
+ *
+ * Returns 0 when `i` is past the last row. A length of ZERO is not a failure -
+ * it means the row is a note derived from a flag rather than a field, and a
+ * caller must not then highlight the start of the record for it.
+ */
+int kof_evt_field_extent(const struct kof_evt *, unsigned i,
+			 uint16_t *off, uint16_t *len);
+
 /* ----------------------------------------------- events that carry CONTENT */
 
 /*

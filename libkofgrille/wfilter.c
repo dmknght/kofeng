@@ -382,8 +382,13 @@ struct kofw_pent *kofw_ptab_of(struct kofw_ptab *t, uint32_t pid,
 
 /* ---------------------------------------------------------------- the filter */
 
-int kofw_filter_apply(struct kofw_ptab *t, const struct kofw_filter *f,
-		      struct kofw_evt *e, uint8_t *why)
+/*
+ * The decision itself. Split from kofw_filter_apply so that recording it
+ * cannot be forgotten: the answer is needed by the NEXT record when that one
+ * is a continuation, and this function has six ways out.
+ */
+static int filter_decide(struct kofw_ptab *t, const struct kofw_filter *f,
+			 struct kofw_evt *e, uint8_t *why)
 {
 	const char *obj;
 	int scoped = f && f->root_pid != 0;
@@ -391,6 +396,27 @@ int kofw_filter_apply(struct kofw_ptab *t, const struct kofw_filter *f,
 
 	if (why)
 		*why = KOFW_REFUSE_NONE;
+
+	/*
+	 * A CONTINUATION FOLLOWS ITS PARENT AND IS ASKED NOTHING.
+	 *
+	 * Its `object` is CONTENT - the middle of a script block - and running
+	 * kof_classify over that would be asking which directory a fragment of
+	 * PowerShell lives in. The answer would be noise, and worse than noise
+	 * on the day the fragment happens to contain the text of a Run key: the
+	 * chunk would come out carrying an ATT&CK technique it has no business
+	 * asserting, and something downstream would report it.
+	 *
+	 * So: no classification, no membership test, no policy. It goes exactly
+	 * where the record in front of it went.
+	 */
+	if (e->type == KOF_EVT_CONT) {
+		e->obj_loc = KOF_LOC_UNKNOWN;
+		e->attack  = KOF_ATT_NONE;
+		if (!t->last_kept && why)
+			*why = KOFW_REFUSE_PARENT;
+		return t->last_kept;
+	}
 
 	/*
 	 * Classify THE OBJECT ONLY, and leave UNKNOWN when there is none.
@@ -534,4 +560,24 @@ int kofw_filter_apply(struct kofw_ptab *t, const struct kofw_filter *f,
 	}
 
 	return 1;
+}
+
+int kofw_filter_apply(struct kofw_ptab *t, const struct kofw_filter *f,
+		      struct kofw_evt *e, uint8_t *why)
+{
+	int keep;
+
+	if (!t || !e)
+		return 0;
+	keep = filter_decide(t, f, e, why);
+	/*
+	 * REMEMBERED FOR THE NEXT RECORD, and only for a record that had a
+	 * decision to make. A continuation inherited this answer; writing its
+	 * own inheritance back over it would be harmless today and wrong the
+	 * moment a chain is longer than one chunk, because the parent's answer
+	 * has to survive the whole chain.
+	 */
+	if (e->type != KOF_EVT_CONT)
+		t->last_kept = keep ? 1u : 0u;
+	return keep;
 }

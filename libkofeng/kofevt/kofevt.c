@@ -307,6 +307,7 @@ const char *kof_evt_verb_name(uint16_t verb)
 	case KOF_EVT_THREAD_START:  return "ThreadNew";
 	case KOF_EVT_THREAD_STOP:   return "ThreadEnd";
 	case KOF_EVT_AMSI_SCAN:     return "AmsiScan";
+	case KOF_EVT_CONT:          return "cont";
 	case KOF_EVT_RAW:           return "raw";
 	default:                    return "?";
 	}
@@ -324,6 +325,132 @@ static const char *at(const struct kof_evt *e, uint16_t off)
 const char *kof_evt_image(const struct kof_evt *e)   { return at(e, e ? e->off_image   : KOF_TEXT_NONE); }
 const char *kof_evt_object(const struct kof_evt *e)  { return at(e, e ? e->off_object  : KOF_TEXT_NONE); }
 const char *kof_evt_cmdline(const struct kof_evt *e) { return at(e, e ? e->off_cmdline : KOF_TEXT_NONE); }
+
+/* ---- putting a record back together ------------------------------------ */
+
+/*
+ * The bytes a record carries, without going through kofevtfmt - this file is
+ * the record's own, and a join must not need the presentation half linked in
+ * to work. The two agree because there is only one rule: content_len says how
+ * many, and it is never strlen.
+ */
+static const char *content_of(const struct kof_evt *e, size_t *n)
+{
+	if (!e || !e->content_len) {
+		*n = 0;
+		return NULL;
+	}
+	if (e->off_object == KOF_TEXT_NONE ||
+	    e->off_object >= sizeof e->text) {
+		*n = 0;
+		return NULL;
+	}
+	*n = e->content_len;
+	if (*n > sizeof e->text - e->off_object)
+		*n = sizeof e->text - e->off_object;
+	return e->text + e->off_object;
+}
+
+int kof_evt_join_start(struct kof_evt_join *j, const struct kof_evt *parent,
+		       void *buf, size_t cap)
+{
+	const char *p;
+	size_t n = 0;
+
+	if (!j)
+		return 0;
+	memset(j, 0, sizeof *j);
+	j->buf = buf;
+	j->cap = cap;
+	j->idle = 1;
+	if (!parent || !buf || !cap)
+		return 0;
+
+	/*
+	 * A CONTINUATION IS NOT A PARENT. Starting a join on one would treat
+	 * the tail of somebody else's submission as the head of a new one -
+	 * which is exactly the shape of mistake this API exists to prevent, so
+	 * it is refused here rather than left to each caller's loop.
+	 */
+	if (parent->verb == KOF_EVT_CONT)
+		return 0;
+
+	p = content_of(parent, &n);
+	if (!p && parent->verb != KOF_EVT_AMSI_SCAN)
+		return 0;   /* not a content event: nothing to gather */
+
+	j->idle = 0;
+	j->seq = parent->seq;
+	if (n > cap) {
+		n = cap;
+		j->full = 1;
+	}
+	if (n && p)
+		memcpy(j->buf, p, n);
+	j->len = n;
+	return 1;
+}
+
+int kof_evt_join_add(struct kof_evt_join *j, const struct kof_evt *chunk)
+{
+	const char *p;
+	size_t n = 0, room;
+
+	if (!j || j->idle || !chunk)
+		return 0;
+	if (chunk->verb != KOF_EVT_CONT)
+		return 0;
+	if (j->holed || j->full)
+		return 0;
+
+	/*
+	 * ONE PAST THE LAST, and nothing else will do.
+	 *
+	 * seq is the arrival counter, stamped before anything can refuse a
+	 * record, so a gap in it is a record that was dropped rather than one
+	 * that was filtered. A chunk on the far side of a gap is bytes from
+	 * somewhere in the middle of the submission, and there is no way to
+	 * know how far in - so joining it produces a buffer that is missing an
+	 * unknown amount from its middle while reading as continuous. Stop
+	 * instead, and say so.
+	 */
+	if (chunk->seq != j->seq + 1u) {
+		j->holed = 1;
+		return 0;
+	}
+
+	p = content_of(chunk, &n);
+	j->seq = chunk->seq;
+	if (!p || !n)
+		return 1;   /* an empty chunk is contiguous and adds nothing */
+
+	room = j->cap - j->len;
+	if (n > room) {
+		n = room;
+		j->full = 1;
+	}
+	if (n)
+		memcpy(j->buf + j->len, p, n);
+	j->len += n;
+	return n > 0;
+}
+
+int kof_evt_join_whole(const struct kof_evt_join *j,
+		       const struct kof_evt *parent)
+{
+	if (!j || j->idle || j->holed || j->full)
+		return 0;
+	/*
+	 * The parent said it was cut. Something has to have finished it, and
+	 * the only thing that can is a continuation - so a join that gathered
+	 * nothing beyond the parent's own bytes is still short, however
+	 * contiguous it was.
+	 */
+	if (parent && (parent->flags & KOF_EF_TRUNCATED) &&
+	    j->seq == parent->seq)
+		return 0;
+	return 1;
+}
 
 /* ---- which machine this is --------------------------------------------- */
 

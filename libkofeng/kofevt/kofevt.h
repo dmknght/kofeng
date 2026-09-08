@@ -274,12 +274,45 @@ enum kof_evt_verb {
 	 */
 	KOF_EVT_AMSI_SCAN = 19,
 
+	/*
+	 * THE REST OF THE RECORD BEFORE IT, when what it carried did not fit.
+	 *
+	 * A record is 512 bytes and a submitted script block is routinely
+	 * kilobytes, so a content event used to store a prefix, set
+	 * KOF_EF_TRUNCATED, and drop the rest on the floor - inside the
+	 * collector, before anything that could scan it existed. That is the
+	 * one field the AMSI subscription is FOR, and a scanner given its first
+	 * four hundred bytes is a scanner that cannot see a payload assembled
+	 * past that point, which is where a downloader puts it.
+	 *
+	 * So the rest follows, in as many of these as it takes. Each carries
+	 * one chunk in `text` with `content_len` bytes of it, and nothing else
+	 * of its own: no path, no ports, no technique. It is not an event and
+	 * must never be counted, matched or shown as one - it is the tail of
+	 * the record in front of it.
+	 *
+	 * WHICH RECORD IT CONTINUES IS THE ORDER, not a field. Every transport
+	 * here preserves it - the ring is single-producer, the channel is a
+	 * ring, the log is append-only - so a chunk belongs to the last
+	 * non-continuation record seen. That is deliberately not a parent-id
+	 * field: an id would have to be believed, and a consumer that believed
+	 * one could be handed chunks that claim to continue a record it never
+	 * saw. Order cannot be forged by a producer that only appends.
+	 *
+	 * WHAT A LOST CHUNK LOOKS LIKE: `seq` is the arrival counter, so a
+	 * chunk whose seq is not one past the record before it has a hole in
+	 * front of it, and kof_evt_join refuses to concatenate across the hole.
+	 * A short reassembly is reported as short; it is never quietly joined.
+	 */
+	KOF_EVT_CONT = 20,
+
 	KOF_EVT_TYPE_COUNT
 };
 
 /* "ProcStart", "RegSet", ... Never NULL, so a record written by a build that
  * knew one more verb still prints as something. */
 const char *kof_evt_verb_name(uint16_t verb);
+
 
 /* ------------------------------------------------------------------- where */
 
@@ -661,6 +694,82 @@ _Static_assert(offsetof(struct kof_evt, text) == KOF_EVT_HEAD,
 	       "KOF_EVT_HEAD no longer matches the record layout");
 _Static_assert(sizeof(struct kof_evt) == KOF_EVT_SIZE,
 	       "struct kof_evt is not KOF_EVT_SIZE bytes");
+
+/* ------------------------------------------------- putting a record together
+ *
+ * WHY A CONSUMER HAS TO DO THIS AT ALL.
+ *
+ * A content event whose payload does not fit one record is followed by
+ * KOF_EVT_CONT records carrying the rest - see the verb. Every transport
+ * between here and the collector is ordered and append-only, so the chunks
+ * arrive in front of nothing and behind their parent, and reassembly is
+ * concatenation in arrival order.
+ *
+ * It is still not something each consumer should write for itself. There are
+ * three of them - the matcher, the log reader, the viewer - and the part that
+ * is easy to get wrong is not the copying, it is REFUSING TO COPY: a chunk
+ * that arrived after a drop is a chunk with a hole in front of it, and joining
+ * across it yields a buffer that reads as one script and is two halves of two.
+ * That is the failure this codebase spends its comments on: a plausible
+ * fabrication is worse than a short answer, because nothing downstream can
+ * tell it from a fact.
+ *
+ * So: one implementation, which stops at the hole and says it stopped.
+ */
+struct kof_evt_join {
+	uint8_t *buf;      /* the caller's, never owned here */
+	size_t   cap;
+	size_t   len;      /* bytes gathered so far */
+	uint64_t seq;      /* the last record accepted */
+
+	/*
+	 * A CHUNK WAS LOST, so what is in `buf` is a PREFIX of the submission
+	 * and the rest is not coming. Set once and never cleared: a later
+	 * chunk arriving on the far side of the hole does not repair it, and
+	 * appending it would be the fabrication described above.
+	 */
+	uint8_t  holed;
+
+	/* The caller's buffer filled first. Also a prefix, but for a reason the
+	 * caller can fix by passing more room - which is why it is a separate
+	 * flag and not folded into `holed`. */
+	uint8_t  full;
+
+	/* The parent had nothing to continue - kof_evt_join_add was called on a
+	 * join that was never started, or started from a record with no
+	 * content. */
+	uint8_t  idle;
+};
+
+/*
+ * Begin a reassembly at `parent`, copying whatever content it already holds.
+ *
+ * `buf`/`cap` are the caller's and must outlive the join. Non-zero when the
+ * record has content worth gathering; zero for every other verb, and then the
+ * join is inert and kof_evt_join_add will refuse everything.
+ */
+int kof_evt_join_start(struct kof_evt_join *, const struct kof_evt *parent,
+		       void *buf, size_t cap);
+
+/*
+ * Add one record, which should be the next one the transport delivered.
+ *
+ * Non-zero when its bytes were appended. Zero when they were not, and the
+ * reason is in the flags: `idle` (not a continuation, or nothing was started),
+ * `holed` (its seq is not one past the last accepted, so a chunk was lost) or
+ * `full` (no room left). A caller that ignores the return value gets a short
+ * buffer rather than a wrong one.
+ */
+int kof_evt_join_add(struct kof_evt_join *, const struct kof_evt *chunk);
+
+/*
+ * Is what was gathered the whole submission.
+ *
+ * Zero when a chunk was lost, when the buffer filled, or when the parent said
+ * it was truncated and no continuation ever arrived to finish it.
+ */
+int kof_evt_join_whole(const struct kof_evt_join *,
+		       const struct kof_evt *parent);
 
 /*
  * Ticks per second in an event stamp.

@@ -1092,6 +1092,24 @@ static void set_obj_kof(struct kof_evt *e, const char *path)
 	e->text_len   = (uint16_t)(n + 1);
 }
 
+/* The image and the command line, appended after whatever is already in the
+ * arena - a process start carries both, and the second must land where the
+ * first left off or the two rows overlap. */
+static void put_kof(struct kof_evt *e, uint16_t *off, const char *s)
+{
+	size_t n = strlen(s);
+
+	*off = e->text_len;
+	memcpy(e->text + e->text_len, s, n + 1);
+	e->text_len = (uint16_t)(e->text_len + n + 1);
+}
+
+static void set_img_kof(struct kof_evt *e, const char *s)
+{ put_kof(e, &e->off_image, s); }
+
+static void set_cmd_kof(struct kof_evt *e, const char *s)
+{ put_kof(e, &e->off_cmdline, s); }
+
 /*
  * CONTENT, not a path - so content_len is set and the bytes may be anything.
  *
@@ -1116,6 +1134,64 @@ static void set_content_kof(struct kof_evt *e, const void *bytes, size_t n)
  * it is pure record reading, so it is checkable here rather than by looking at
  * a screen - which is the only way it stays correct.
  */
+/*
+ * THE ROWS AND THE BYTES AGREE, which is the whole claim the viewer's event
+ * panel makes: a colour on a row and the same colour on a run of the dump say
+ * they are the same thing.
+ *
+ * Three properties, each of which was broken at least once:
+ *
+ *  - every extent lies INSIDE the record. The text rows are computed as
+ *    offsetof(text) + off_object, and an absent offset is 0xFFFF - which wraps
+ *    a uint16 straight back into the head and lights a field the row is not
+ *    about.
+ *
+ *  - extents do not OVERLAP. The viewer takes the first row covering a byte, so
+ *    an overlap does not show as a clash - it shows as one row silently eating
+ *    the front of another, which is exactly how the old "peer" row (four bytes
+ *    of address plus two, over a struct that puts the port twelve bytes later)
+ *    ate half of net_saddr.
+ *
+ *  - rows come out in LAYOUT order, so the panel reads down in step with the
+ *    dump beside it, and the flag rows - which name no bytes - come last.
+ *
+ * Run over every shape of record the collector produces, because each of them
+ * turns on a different set of rows and the bugs above were all in rows only
+ * some verbs have.
+ */
+static void check_extents(const struct kof_evt *e, const char *what)
+{
+	unsigned n = kof_evt_n_fields(e), a;
+	uint16_t po = 0, pl = 0;
+
+	for (a = 0; a < n; a++) {
+		uint16_t ao = 0, al = 0;
+		unsigned b;
+
+		if (!kof_evt_field_extent(e, a, &ao, &al)) {
+			fail(what, "no extent for a row n_fields promised");
+			return;
+		}
+		if (al && (size_t)ao + al > sizeof *e)
+			fail(what, "an extent runs past the record");
+		if (al && pl == 0 && a > 0)
+			fail(what, "a field row after a flag row");
+		if (al && pl && ao < po)
+			fail(what, "rows are not in layout order");
+		for (b = 0; b < a; b++) {
+			uint16_t bo = 0, bl = 0;
+
+			kof_evt_field_extent(e, b, &bo, &bl);
+			if (!al || !bl)
+				continue;
+			if (ao < bo + bl && bo < ao + al)
+				fail(what, "two rows claim the same bytes");
+		}
+		po = ao;
+		pl = al;
+	}
+}
+
 static void t_browse(void)
 {
 	struct kof_evt e;
@@ -1133,15 +1209,23 @@ static void t_browse(void)
 	e.loc = kof_classify(kof_evt_object(&e), &e.attack);
 	e.os = KOF_OS_WINDOWS;
 
-	/* The label leads with the index, because that is what a reader refers
-	 * to and it is what sorts. */
+	/*
+	 * The label leads with the index, because that is what a reader refers
+	 * to and it is what sorts, and it carries nothing but the index, the
+	 * verb and the process.
+	 *
+	 * IT IS THE WHOLE LABEL, checked with strcmp rather than a prefix. It
+	 * used to append the leaf of the path, which is the field a column is
+	 * worst at showing - it is the part that does not fit, so it is the
+	 * part that gets cut, and a column of half-cut names has to be read
+	 * twice. A prefix test would not have noticed it coming back.
+	 *
+	 * No "//" either: that is the engine's nesting, and an event is not
+	 * inside anything.
+	 */
 	kof_evt_label(&e, 42u, lab, sizeof lab);
-	if (strncmp(lab, "//42 RegSet pid=4242", 20))
+	if (strcmp(lab, "42 RegSet pid=4242"))
 		printf("  FAIL label: got \"%s\"\n", lab), failures++;
-	/* And it ends with the LEAF, not the whole key - a panel column cannot
-	 * hold a registry path and the directory is askable separately. */
-	if (!strstr(lab, "evil"))
-		fail("label", "did not end with the leaf");
 
 	n = kof_evt_n_fields(&e);
 	if (n < 6)
@@ -1165,6 +1249,143 @@ static void t_browse(void)
 	/* A registry write has no peer, and a row reading 0.0.0.0:0 would be
 	 * worse than no row - a reader cannot tell it from a real zero. */
 	if (saw_port)  fail("fields", "a registry write reported a peer");
+
+	/*
+	 * THE ROWS AND THE BYTES AGREE, which is the whole claim the viewer's
+	 * event panel makes: a colour on a row and the same colour on a run of
+	 * the dump say they are the same thing.
+	 *
+	 * Three properties, each of which was broken at least once:
+	 *
+	 *  - every extent lies INSIDE the record. The text rows are computed
+	 *    as offsetof(text) + off_object, and an absent offset is 0xFFFF -
+	 *    which wraps a uint16 straight back into the head and lights a
+	 *    field the row is not about.
+	 *
+	 *  - extents do not OVERLAP. evt_row_of takes the first row covering a
+	 *    byte, so an overlap does not show as a clash, it shows as one row
+	 *    silently eating the front of another - which is exactly how the
+	 *    old "peer" row (four bytes of address plus two, over a struct that
+	 *    puts the port twelve bytes later) ate half of net_saddr.
+	 *
+	 *  - rows come out in LAYOUT order, so the panel reads down in step
+	 *    with the dump beside it.
+	 */
+	check_extents(&e, "regset");
+
+	/*
+	 * The same, over the shapes that turn on the rows the registry write
+	 * does not have: the network pair, the flag rows, and a process start
+	 * carrying every text field at once.
+	 */
+	{
+		struct kof_evt x;
+
+		mk_kof(&x, KOF_EVT_NET_SEND, 300u);
+		x.net_daddr = 0x0100007fu;
+		x.net_dport = 0xbb01u;          /* 443, network order */
+		x.net_size = 4096u;
+		x.os = KOF_OS_WINDOWS;
+		check_extents(&x, "netsend");
+
+		mk_kof(&x, KOF_EVT_PROC_START, 400u);
+		x.ppid = 4u;
+		set_img_kof(&x, "C:\\Windows\\System32\\cmd.exe");
+		set_cmd_kof(&x, "cmd.exe /c whoami");
+		x.os = KOF_OS_WINDOWS;
+		check_extents(&x, "procstart");
+
+		/* Every flag at once: they are the rows with no extent, and
+		 * they must all sort behind every row that has one. */
+		x.flags |= (uint32_t)(KOF_EF_TRUNCATED | KOF_EF_PARTIAL |
+				      KOF_EF_UNBACKED | KOF_EF_LATE_LOAD |
+				      KOF_EF_CMDLINE_RACED);
+		check_extents(&x, "procstart+flags");
+	}
+
+	/*
+	 * PUTTING A CUT SUBMISSION BACK TOGETHER, and refusing to when a chunk
+	 * was lost.
+	 *
+	 * The collector emits KOF_EVT_CONT records behind a content event whose
+	 * payload did not fit. What matters here is not the concatenation - it
+	 * is the refusal: joining across a dropped chunk produces a buffer that
+	 * reads as one script and is two halves of two, and nothing downstream
+	 * could tell that from a fact.
+	 */
+	{
+		struct kof_evt parent, c1, c2;
+		struct kof_evt_join j;
+		char buf[64];
+
+		mk_kof(&parent, KOF_EVT_AMSI_SCAN, 900u);
+		parent.seq = 10u;
+		parent.off_object = 0;
+		memcpy(parent.text, "AAAA", 4);
+		parent.content_len = 4u;
+		parent.text_len = 5u;
+		parent.flags |= KOF_EF_TRUNCATED;
+
+		mk_kof(&c1, KOF_EVT_CONT, 900u);
+		c1.seq = 11u;
+		c1.off_object = 0;
+		memcpy(c1.text, "BBB", 3);
+		c1.content_len = 3u;
+		c1.text_len = 4u;
+
+		c2 = c1;
+		c2.seq = 12u;
+		memcpy(c2.text, "CC", 2);
+		c2.content_len = 2u;
+
+		if (!kof_evt_join_start(&j, &parent, buf, sizeof buf))
+			fail("join", "a content event refused to start a join");
+		/* The parent said it was cut and nothing has finished it. */
+		if (kof_evt_join_whole(&j, &parent))
+			fail("join", "a truncated parent alone reported whole");
+		if (!kof_evt_join_add(&j, &c1) || !kof_evt_join_add(&j, &c2))
+			fail("join", "a contiguous chunk was refused");
+		if (j.len != 9u || memcmp(buf, "AAAABBBCC", 9))
+			fail("join", "the chunks did not reassemble");
+		if (!kof_evt_join_whole(&j, &parent))
+			fail("join", "a complete chain reported short");
+
+		/* A HOLE. c2 arrives without c1, so its bytes belong somewhere
+		 * unknown in the middle - the join must stop, not append. */
+		kof_evt_join_start(&j, &parent, buf, sizeof buf);
+		if (kof_evt_join_add(&j, &c2))
+			fail("join", "a chunk after a gap was appended");
+		if (!j.holed)
+			fail("join", "a gap was not reported");
+		if (j.len != 4u)
+			fail("join", "a refused chunk still changed the buffer");
+		if (kof_evt_join_whole(&j, &parent))
+			fail("join", "a holed join reported whole");
+		/* And it stays refused: a later contiguous-looking chunk does
+		 * not repair a hole that is already in the middle. */
+		if (kof_evt_join_add(&j, &c1))
+			fail("join", "a holed join accepted a later chunk");
+
+		/* A chunk is not a parent - starting on one would treat somebody
+		 * else's tail as a new head. */
+		if (kof_evt_join_start(&j, &c1, buf, sizeof buf))
+			fail("join", "a continuation started a join");
+
+		/* A buffer too small is a prefix, and says so rather than
+		 * overrunning. */
+		{
+			char small[6];
+
+			kof_evt_join_start(&j, &parent, small, sizeof small);
+			kof_evt_join_add(&j, &c1);
+			if (!j.full)
+				fail("join", "a full buffer was not reported");
+			if (j.len > sizeof small)
+				fail("join", "the join wrote past the buffer");
+			if (kof_evt_join_whole(&j, &parent))
+				fail("join", "a full join reported whole");
+		}
+	}
 
 	/* A registry write is not content. */
 	if (kof_evt_content(&e, NULL, NULL))
