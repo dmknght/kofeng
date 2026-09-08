@@ -324,17 +324,55 @@ static uint16_t fixed_size(uint16_t in_type, int ptr32)
 	}
 }
 
+/* (prov, id, ver) into a slot. Knuth's multiplicative hash over the packed
+ * key, which is what the process table already uses for a pid - a collision
+ * costs one probe and never a wrong answer, because the entry is believed only
+ * when all three fields match. */
+static uint32_t schema_slot(uint8_t prov, uint16_t id, uint8_t ver)
+{
+	uint32_t key = ((uint32_t)prov << 24) | ((uint32_t)id << 8) | ver;
+
+	return (key * 2654435761u) & (KOFW_SCHEMA_HASH - 1u);
+}
+
 static struct kofw_schema *find(struct kofw_schema_cache *c, uint8_t prov,
 				uint16_t id, uint8_t ver)
 {
+	uint32_t s = schema_slot(prov, id, ver);
 	uint32_t i;
 
-	for (i = 0; i < c->n; i++) {
-		if (c->s[i].in_use && c->s[i].prov == prov &&
-		    c->s[i].id == id && c->s[i].ver == ver)
-			return &c->s[i];
+	for (i = 0; i < KOFW_SCHEMA_HASH; i++) {
+		uint32_t at = (s + i) & (KOFW_SCHEMA_HASH - 1u);
+		uint16_t ix = c->hash[at];
+		struct kofw_schema *sc;
+
+		/* Empty, and nothing was ever removed - so the key is absent
+		 * rather than further along. */
+		if (ix == 0)
+			return NULL;
+
+		sc = &c->s[ix - 1u];
+		if (sc->prov == prov && sc->id == id && sc->ver == ver)
+			return sc;
 	}
 	return NULL;
+}
+
+/* Publish a freshly learned shape into the index. */
+static void schema_index(struct kofw_schema_cache *c, uint32_t which)
+{
+	const struct kofw_schema *sc = &c->s[which];
+	uint32_t s = schema_slot(sc->prov, sc->id, sc->ver);
+	uint32_t i;
+
+	for (i = 0; i < KOFW_SCHEMA_HASH; i++) {
+		uint32_t at = (s + i) & (KOFW_SCHEMA_HASH - 1u);
+
+		if (c->hash[at] == 0) {
+			c->hash[at] = (uint16_t)(which + 1u);
+			return;
+		}
+	}
 }
 
 static struct kofw_schema *learn(struct kofw_schema_cache *c, uint8_t prov,
@@ -463,6 +501,7 @@ static struct kofw_schema *learn(struct kofw_schema_cache *c, uint8_t prov,
 	free(info);
 
 	sc->in_use = 1;
+	schema_index(c, c->n);
 	c->n++;
 	return sc;
 }

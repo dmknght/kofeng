@@ -68,6 +68,7 @@ const char *kofw_loc_name(uint8_t loc)
 	case KOFW_LOC_KERNEL_MOD: return "kmod";
 	case KOFW_LOC_WEB_ROOT:   return "webroot";
 	case KOFW_LOC_HOSTS:      return "hosts";
+	case KOFW_LOC_PIPE:       return "pipe";
 	case KOFW_LOC_OTHER:      return "other";
 	default:                  return "unknown";
 	}
@@ -125,6 +126,15 @@ static const struct {
 	 */
 	uint8_t     fold;
 } LOCS[] = {
+	/*
+	 * A PIPE BEFORE ANYTHING ELSE, because \Device\NamedPipe\ is not
+	 * under any of the directories below and a row that matched it later
+	 * would never be reached anyway - but putting it first says that a
+	 * pipe is not a file in a place, it is a different kind of object.
+	 */
+	{ "\\Device\\NamedPipe\\", KOFW_LOC_PIPE, KOFW_ATT_PIPE_IMPERSONATE, 1 },
+	{ "\\pipe\\", KOFW_LOC_PIPE, KOFW_ATT_PIPE_IMPERSONATE, 1 },
+
 	/* ---- temp, FIRST, for the reason above ---------------------------- */
 	{ "\\AppData\\Local\\Temp\\", KOFW_LOC_TEMP, KOFW_ATT_NONE, 1 },
 	{ "\\Windows\\Temp\\", KOFW_LOC_TEMP, KOFW_ATT_NONE, 1 },
@@ -342,11 +352,14 @@ struct kofw_pent *kofw_ptab_of(struct kofw_ptab *t, uint32_t pid,
 /* ---------------------------------------------------------------- the filter */
 
 int kofw_filter_apply(struct kofw_ptab *t, const struct kofw_filter *f,
-		      struct kofw_evt *e)
+		      struct kofw_evt *e, uint8_t *why)
 {
 	const char *obj;
 	int scoped = f && f->root_pid != 0;
 	struct kofw_pent *p;
+
+	if (why)
+		*why = KOFW_REFUSE_NONE;
 
 	/*
 	 * Classify THE OBJECT ONLY, and leave UNKNOWN when there is none.
@@ -408,11 +421,17 @@ int kofw_filter_apply(struct kofw_ptab *t, const struct kofw_filter *f,
 	if (!f)
 		return 1;
 
-	if (f->types && !(f->types & (1u << e->type)))
+	if (f->types && !(f->types & (1u << e->type))) {
+		if (why)
+			*why = KOFW_REFUSE_TYPE;
 		return 0;
+	}
 
-	if (f->drop_loc && (f->drop_loc & (1u << e->obj_loc)))
+	if (f->drop_loc && (f->drop_loc & (1u << e->obj_loc))) {
+		if (why)
+			*why = KOFW_REFUSE_LOC;
 		return 0;
+	}
 
 	if (scoped) {
 		/* Judged on the SUBJECT, which for a file or network event is
@@ -421,8 +440,11 @@ int kofw_filter_apply(struct kofw_ptab *t, const struct kofw_filter *f,
 				 e->type == KOFW_EVT_PROC_START ||
 				 e->type == KOFW_EVT_PROC_STOP
 					 ? e->create_time : 0);
-		if (!p || !p->tracked)
+		if (!p || !p->tracked) {
+			if (why)
+				*why = KOFW_REFUSE_SCOPE;
 			return 0;
+		}
 	}
 
 	return 1;

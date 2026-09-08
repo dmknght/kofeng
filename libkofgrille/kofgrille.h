@@ -250,6 +250,18 @@ enum kofw_loc {
 	KOFW_LOC_WEB_ROOT,     /* inetpub            | /var/www - a webshell   */
 	KOFW_LOC_HOSTS,        /* drivers\etc\hosts  | /etc/hosts              */
 
+	/*
+	 * A NAMED PIPE, which is a file object and is why it is a location.
+	 *
+	 * \Device\NamedPipe\<name> on Windows; a fifo anywhere on Linux. It
+	 * is here because the pipe is how one process gets another to act on
+	 * its behalf - Meterpreter's getsystem creates a pipe, has a SYSTEM
+	 * service connect to it, and impersonates the token that arrives. The
+	 * pipe's CREATION is the observable half of that, and it is a file
+	 * event with a recognisable path.
+	 */
+	KOFW_LOC_PIPE,
+
 	/* Classified, and it is none of the above - which is a fact, not a
 	 * failure to decide. */
 	KOFW_LOC_OTHER,
@@ -292,7 +304,8 @@ enum kofw_loc {
 	X(KOFW_ATT_CRED_STORE,   "T1003",      "Credential.Store")           \
 	X(KOFW_ATT_HOSTS,        "T1562.001",  "Evade.HostsFile")            \
 	X(KOFW_ATT_KERNEL_MOD,   "T1014",      "Rootkit.KernelModule")       \
-	X(KOFW_ATT_WEB_SHELL,    "T1505.003",  "Persist.WebShell")
+	X(KOFW_ATT_WEB_SHELL,    "T1505.003",  "Persist.WebShell")           \
+	X(KOFW_ATT_PIPE_IMPERSONATE, "T1134.001", "Privilege.PipeImpersonation")
 
 enum kofw_attack {
 #define KOFW_ATT_X_ENUM(name, tech, word) name,
@@ -619,11 +632,33 @@ enum {
 	 */
 	KOFW_SUB_THREAD   = 1u << 6,
 
+	/*
+	 * FILES BEING OPENED - THE KEYWORD THIS LIBRARY SPENT ITS WHOLE LIFE
+	 * REFUSING, AND THE ONE THING THAT MAKES IT WORTH IT.
+	 *
+	 * Kernel-File's CREATE (0x80) fires on every open a machine performs.
+	 * That is the keyword that makes file tracing famous for being
+	 * unaffordable, and the comment in wevt_etw.c saying nothing of value
+	 * is on the far side of it was true for FILES.
+	 *
+	 * It is not true for PIPES. A named pipe is a file object, it is never
+	 * "created new" in the sense CREATE_NEW_FILE means, and it is how one
+	 * process makes another act for it: getsystem creates a pipe, gets a
+	 * SYSTEM service to connect to it, and impersonates the token that
+	 * arrives. Nothing under any other keyword sees that.
+	 *
+	 * So this is off by default and will stay off by default. Turn it on to
+	 * watch pipes, expect the volume, and use --quiet or a redirect rather
+	 * than a console.
+	 */
+	KOFW_SUB_FILE_OPEN = 1u << 7,
+
 	/* Everything this build can collect. What kofwintrace takes by default
 	 * - see the note there on why a discovery tool defaults to loud. */
 	KOFW_SUB_ALL = KOFW_SUB_PROCESS | KOFW_SUB_IMAGE | KOFW_SUB_FILE |
 		       KOFW_SUB_FILE_WRITE | KOFW_SUB_NET |
-		       KOFW_SUB_REGISTRY | KOFW_SUB_THREAD
+		       KOFW_SUB_REGISTRY | KOFW_SUB_THREAD |
+		       KOFW_SUB_FILE_OPEN
 };
 
 /* "process", "image", "file", ... for one KOFW_SUB_* bit. "" for anything
@@ -782,6 +817,17 @@ struct kofw_health {
 	 * silently dropped: "the sample did nothing" and "everything it did was
 	 * filtered out" are different results. */
 	uint64_t filtered;
+
+	/*
+	 * The same number broken out by WHICH test refused, because the three
+	 * call for three different next steps and one total tells a reader to
+	 * take none of them. `filtered_loc` in particular is the default
+	 * suppression of system module loads, which looks like a bug the first
+	 * time somebody meets it.
+	 */
+	uint64_t filtered_loc;    /* the object's location was being dropped */
+	uint64_t filtered_scope;  /* the subject was outside the tracked tree */
+	uint64_t filtered_type;   /* the caller did not ask for that type */
 
 	/* Processes a tracked tree could not admit because its table was full.
 	 * Non-zero means the scoped view is INCOMPLETE. */

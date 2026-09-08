@@ -206,6 +206,7 @@ const char *kofw_sub_name(uint32_t one_bit)
 	case KOFW_SUB_NET:        return "net";
 	case KOFW_SUB_REGISTRY:   return "registry";
 	case KOFW_SUB_THREAD:     return "thread";
+	case KOFW_SUB_FILE_OPEN:  return "file-open";
 	default:                  return "";
 	}
 }

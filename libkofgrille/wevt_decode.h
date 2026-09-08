@@ -119,9 +119,34 @@ struct kofw_schema {
 	struct kofw_prop prop[KOFW_SCHEMA_MAX_PROP];
 };
 
+/*
+ * HOW THE SHAPE IS FOUND, AND WHY IT IS NOT A SCAN.
+ *
+ * The lookup runs in the ETW callback, once per record, and it used to be a
+ * linear walk over every shape learned so far. That was defensible while the
+ * cap was 64 and the only subscription was process start and stop. It stopped
+ * being defensible the moment the cap went to 256 and the registry was
+ * subscribed: six figures of records a second, up to 256 comparisons each,
+ * inside the one piece of code whose cost the whole machine pays - and the
+ * price is not paid as slowness, it is paid as records ETW discards at its own
+ * end because the buffers filled while the callback was busy.
+ *
+ * A power-of-two open-addressed index, keyed on (provider, id, version), makes
+ * it constant work. Nothing is ever removed from the cache, so there are no
+ * tombstones and a probe stops at the first empty slot.
+ *
+ * Sized at 4x the cap so the table never passes a quarter full - linear
+ * probing degrades badly past half, and this is the hottest lookup in the
+ * library.
+ */
+#define KOFW_SCHEMA_HASH (KOFW_SCHEMA_MAX * 4u)
+
 struct kofw_schema_cache {
 	struct kofw_schema s[KOFW_SCHEMA_MAX];
 	uint32_t n;
+
+	/* Index into s[], biased by one so zero means empty. */
+	uint16_t hash[KOFW_SCHEMA_HASH];
 	uint64_t learn_failed;   /* TDH would not describe an event at all */
 
 	/*

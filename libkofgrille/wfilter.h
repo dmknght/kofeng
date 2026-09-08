@@ -63,6 +63,23 @@ struct kofw_pent *kofw_ptab_of(struct kofw_ptab *, uint32_t pid,
 			       uint64_t create_time);
 
 /*
+ * WHY A RECORD WAS REFUSED, not merely that it was.
+ *
+ * One number for "filtered" cost an afternoon: a run that suppressed 431
+ * system module loads by default reported `modules loaded: 0` beside
+ * `filtered out: 431`, which reads as "the filter ate everything and I do not
+ * know why". The three reasons call for three different next steps -
+ * --all-images, a different --only, a different root - so they are counted
+ * apart.
+ */
+enum kofw_refuse {
+	KOFW_REFUSE_NONE = 0,
+	KOFW_REFUSE_TYPE,   /* the caller did not ask for this event type */
+	KOFW_REFUSE_LOC,    /* the object is in a location being dropped */
+	KOFW_REFUSE_SCOPE   /* the subject is outside the tracked tree */
+};
+
+/*
  * Fold one record into the table and decide whether the caller should see it.
  *
  * Does three things in the order they have to happen: classifies the object
@@ -71,9 +88,14 @@ struct kofw_pent *kofw_ptab_of(struct kofw_ptab *, uint32_t pid,
  * a pid the set has by definition not heard of yet and is admitted on its
  * parent - filtering first would refuse the very event that grows the tree.
  *
- * Returns non-zero to hand the record over, zero to refuse it.
+ * Returns non-zero to hand the record over, zero to refuse it - THE SAME
+ * POLARITY IT ALWAYS HAD. The reason comes out through `why` (enum
+ * kofw_refuse, may be NULL) rather than through the return value, and that is
+ * deliberate: returning the reason directly would make 0 mean "keep", so every
+ * caller that was not updated would invert. The unit test caught exactly that
+ * happening, which is the argument for not doing it.
  */
 int kofw_filter_apply(struct kofw_ptab *, const struct kofw_filter *,
-		      struct kofw_evt *);
+		      struct kofw_evt *, uint8_t *why);
 
 #endif /* KOFGRILLE_WFILTER_H */

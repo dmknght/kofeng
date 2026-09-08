@@ -464,31 +464,31 @@ static void t_scope(void)
 
 	/* A child of the root is kin. */
 	mk(&e, KOFW_EVT_PROC_START, 200, 100);
-	if (!kofw_filter_apply(&t, &f, &e))
+	if (!kofw_filter_apply(&t, &f, &e, NULL))
 		fail("scope", "refused a child of the root");
 
 	/* A GRANDCHILD is kin too - the set has to grow transitively or a
 	 * dropper that shells out twice disappears. */
 	mk(&e, KOFW_EVT_PROC_START, 300, 200);
-	if (!kofw_filter_apply(&t, &f, &e))
+	if (!kofw_filter_apply(&t, &f, &e, NULL))
 		fail("scope", "refused a grandchild");
 
 	/* An unrelated process is not. */
 	mk(&e, KOFW_EVT_PROC_START, 400, 999);
-	if (kofw_filter_apply(&t, &f, &e))
+	if (kofw_filter_apply(&t, &f, &e, NULL))
 		fail("scope", "admitted an unrelated process");
 
 	/* A file event from inside the tree is kept, one from outside is not. */
 	mk(&e, KOFW_EVT_FILE_NEW, 300, 0);
 	set_obj(&e, "C:\\Users\\bob\\AppData\\Local\\Temp\\drop.exe");
-	if (!kofw_filter_apply(&t, &f, &e))
+	if (!kofw_filter_apply(&t, &f, &e, NULL))
 		fail("scope", "refused a file event from the tree");
 	if (e.obj_loc != KOFW_LOC_TEMP)
 		fail("scope", "did not classify the object path");
 
 	mk(&e, KOFW_EVT_FILE_NEW, 400, 0);
 	set_obj(&e, "C:\\Users\\bob\\AppData\\Local\\Temp\\other.exe");
-	if (kofw_filter_apply(&t, &f, &e))
+	if (kofw_filter_apply(&t, &f, &e, NULL))
 		fail("scope", "admitted a file event from outside the tree");
 
 	/*
@@ -502,18 +502,18 @@ static void t_scope(void)
 
 	mk(&e, KOFW_EVT_IMAGE_LOAD, 300, 0);
 	set_obj(&e, "C:\\Windows\\System32\\ntdll.dll");
-	if (kofw_filter_apply(&t, &f, &e))
+	if (kofw_filter_apply(&t, &f, &e, NULL))
 		fail("scope", "kept a system module load under drop_loc");
 
 	mk(&e, KOFW_EVT_IMAGE_LOAD, 300, 0);
 	set_obj(&e, "C:\\Users\\bob\\AppData\\Local\\Temp\\evil.dll");
-	if (!kofw_filter_apply(&t, &f, &e))
+	if (!kofw_filter_apply(&t, &f, &e, NULL))
 		fail("scope", "dropped a module load from temp");
 
 	mk(&e, KOFW_EVT_PROC_START, 500, 300);
 	set_obj(&e, "");
 	e.off_object = KOFW_TEXT_NONE;
-	if (!kofw_filter_apply(&t, &f, &e))
+	if (!kofw_filter_apply(&t, &f, &e, NULL))
 		fail("scope", "drop_loc suppressed a process start");
 	f.drop_loc = 0;
 
@@ -521,14 +521,14 @@ static void t_scope(void)
 	 * which is what a trace waits for. */
 	eq_u64("scope alive", t.n_alive_tracked, 4);
 	mk(&e, KOFW_EVT_PROC_STOP, 500, 0);
-	(void)kofw_filter_apply(&t, &f, &e);
+	(void)kofw_filter_apply(&t, &f, &e, NULL);
 	mk(&e, KOFW_EVT_PROC_STOP, 300, 0);
-	(void)kofw_filter_apply(&t, &f, &e);
+	(void)kofw_filter_apply(&t, &f, &e, NULL);
 	eq_u64("scope alive after two stops", t.n_alive_tracked, 2);
 
 	/* A repeated stop for the same pid must not underflow the count. */
 	mk(&e, KOFW_EVT_PROC_STOP, 300, 0);
-	(void)kofw_filter_apply(&t, &f, &e);
+	(void)kofw_filter_apply(&t, &f, &e, NULL);
 	eq_u64("scope alive after a repeat stop", t.n_alive_tracked, 2);
 
 	/* A zeroed filter means everything, which is the answer a caller who
@@ -537,7 +537,7 @@ static void t_scope(void)
 		struct kofw_filter none;
 		memset(&none, 0, sizeof none);
 		mk(&e, KOFW_EVT_FILE_NEW, 4242, 0);
-		if (!kofw_filter_apply(&t, &none, &e))
+		if (!kofw_filter_apply(&t, &none, &e, NULL))
 			fail("scope", "a zeroed filter refused something");
 	}
 }

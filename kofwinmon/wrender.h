@@ -30,13 +30,19 @@ struct wm_tally {
 	uint64_t raw;
 };
 
+/* Count one event without printing it - what --quiet uses. Split from
+ * wm_render so the tally cannot come out different depending on whether
+ * anybody was looking. */
+void wm_count(const struct kofw_evt *e, struct wm_tally *t);
+
 /* Print one event and count it. `who` is the subject's name for the column and
  * may be "" - see kofw_mon_name_of. */
 void wm_render(const struct kofw_evt *e, double secs, const char *who,
 	       struct wm_tally *t);
 
 void wm_print_tally(const struct wm_tally *t, double secs, const char *what,
-		    uint64_t suppressed);
+		    uint64_t suppressed, uint64_t h_loc, uint64_t h_scope,
+		    uint64_t h_type);
 
 /*
  * LOSS IS PART OF THE RESULT, not a footnote.

@@ -54,16 +54,49 @@ uint64_t wm_now(void)
 	return u.QuadPart;
 }
 
+/*
+ * COUNTING, SEPARATED FROM PRINTING.
+ *
+ * One switch, so a --quiet run and a loud run cannot come back with different
+ * totals for the same stream. The tally used to be incremented inside the
+ * render switch, which meant the numbers were a side effect of somebody
+ * looking at them.
+ */
+void wm_count(const struct kofw_evt *e, struct wm_tally *t)
+{
+	switch (e->type) {
+	case KOFW_EVT_PROC_START:     t->proc++;     break;
+	case KOFW_EVT_IMAGE_LOAD:     t->image++;    break;
+	case KOFW_EVT_FILE_NEW:       t->file_new++; break;
+	case KOFW_EVT_FILE_DELETE:    t->file_del++; break;
+	case KOFW_EVT_FILE_RENAME:    t->file_ren++; break;
+	case KOFW_EVT_FILE_WRITE:     t->file_wr++;  break;
+	case KOFW_EVT_REG_CREATE:
+	case KOFW_EVT_REG_SET_VALUE:
+	case KOFW_EVT_REG_DELETE:     t->reg++;      break;
+	case KOFW_EVT_NET_CONNECT:    t->conn++;     break;
+	case KOFW_EVT_NET_SEND:       t->bytes_sent += e->net_size; break;
+	case KOFW_EVT_NET_RECV:       t->bytes_recv += e->net_size; break;
+	case KOFW_EVT_PROC_STOP:
+	case KOFW_EVT_IMAGE_UNLOAD:
+	case KOFW_EVT_NET_DISCONNECT:
+	case KOFW_EVT_THREAD_START:
+	case KOFW_EVT_THREAD_STOP:                   break;
+	default:                      t->raw++;      break;
+	}
+}
+
 void wm_render(const struct kofw_evt *e, double secs, const char *who,
 	       struct wm_tally *t)
 {
+	wm_count(e, t);
+
 	printf("%8.3f  %-9s pid=%-6lu %-20s", secs,
 	       kofw_evt_type_name(e->type), (unsigned long)e->pid,
 	       who && *who ? who : "?");
 
 	switch (e->type) {
 	case KOFW_EVT_PROC_START:
-		t->proc++;
 		printf("  ppid=%lu  %s", (unsigned long)e->ppid,
 		       kofw_evt_image(e));
 		break;
@@ -71,7 +104,6 @@ void wm_render(const struct kofw_evt *e, double secs, const char *who,
 		printf("  exit=%lu", (unsigned long)e->exit_code);
 		break;
 	case KOFW_EVT_IMAGE_LOAD:
-		t->image++;
 		printf("  [%s] %s", kofw_loc_name(e->obj_loc),
 		       kofw_evt_object(e));
 		break;
@@ -79,27 +111,25 @@ void wm_render(const struct kofw_evt *e, double secs, const char *who,
 		printf("  [%s] %s", kofw_loc_name(e->obj_loc),
 		       kofw_evt_object(e));
 		break;
+	/* Unreachable until type_of() learns the ids - kept so that typing
+	 * them is a one-line change there and not two. */
 	case KOFW_EVT_THREAD_START:
 	case KOFW_EVT_THREAD_STOP:
 		printf("  start=0x%llx", (unsigned long long)e->addr);
 		break;
 	case KOFW_EVT_FILE_NEW:
-		t->file_new++;
 		printf("  [%s] %s", kofw_loc_name(e->obj_loc),
 		       kofw_evt_object(e));
 		break;
 	case KOFW_EVT_FILE_DELETE:
-		t->file_del++;
 		printf("  [%s] %s", kofw_loc_name(e->obj_loc),
 		       kofw_evt_object(e));
 		break;
 	case KOFW_EVT_FILE_RENAME:
-		t->file_ren++;
 		printf("  [%s] %s", kofw_loc_name(e->obj_loc),
 		       kofw_evt_object(e));
 		break;
 	case KOFW_EVT_FILE_WRITE:
-		t->file_wr++;
 		printf("  [%s] %s", kofw_loc_name(e->obj_loc),
 		       kofw_evt_object(e));
 		if (e->net_size)
@@ -114,7 +144,6 @@ void wm_render(const struct kofw_evt *e, double secs, const char *who,
 	case KOFW_EVT_REG_CREATE:
 	case KOFW_EVT_REG_SET_VALUE:
 	case KOFW_EVT_REG_DELETE:
-		t->reg++;
 		printf("  %s", kofw_evt_object(e));
 		break;
 
@@ -133,13 +162,6 @@ void wm_render(const struct kofw_evt *e, double secs, const char *who,
 		uint16_t dp = (uint16_t)((e->net_dport >> 8) |
 					 (e->net_dport << 8));
 
-		if (e->type == KOFW_EVT_NET_CONNECT)
-			t->conn++;
-		else if (e->type == KOFW_EVT_NET_SEND)
-			t->bytes_sent += e->net_size;
-		else if (e->type == KOFW_EVT_NET_RECV)
-			t->bytes_recv += e->net_size;
-
 		printf("  %lu.%lu.%lu.%lu:%u",
 		       (unsigned long)(d & 0xffu),
 		       (unsigned long)((d >> 8) & 0xffu),
@@ -151,10 +173,22 @@ void wm_render(const struct kofw_evt *e, double secs, const char *who,
 	}
 
 	default:
-		t->raw++;
-		printf("  [prov %u id %u v%u]  %s", (unsigned)e->provider,
-		       (unsigned)e->raw_id, (unsigned)e->raw_version,
-		       kofw_evt_object(e));
+		printf("  [%s id %u v%u]", kofw_provider_name(e->provider),
+		       (unsigned)e->raw_id, (unsigned)e->raw_version);
+		/*
+		 * THE ADDRESS, ON THE RAW PATH TOO, and this was the bug.
+		 *
+		 * Thread events are not typed yet, so they arrive as RAW and
+		 * render here - and this branch printed only the object path,
+		 * which a thread event does not have. So `--thread` collected
+		 * the one field it exists for and then showed an empty line.
+		 * A start address that is never displayed is a subscription
+		 * paying full volume for nothing.
+		 */
+		if (e->addr)
+			printf("  addr=0x%llx", (unsigned long long)e->addr);
+		if (*kofw_evt_object(e))
+			printf("  %s", kofw_evt_object(e));
 		break;
 	}
 
@@ -180,7 +214,8 @@ void wm_render(const struct kofw_evt *e, double secs, const char *who,
 }
 
 void wm_print_tally(const struct wm_tally *t, double secs, const char *what,
-		    uint64_t suppressed)
+		    uint64_t suppressed, uint64_t h_loc, uint64_t h_scope,
+		    uint64_t h_type)
 {
 	fprintf(stderr,
 		"\n-- %.1fs, %s\n"
@@ -194,7 +229,8 @@ void wm_print_tally(const struct wm_tally *t, double secs, const char *what,
 		"   connections       : %llu\n"
 		"   bytes sent/recv   : %llu / %llu\n"
 		"   untyped events    : %llu\n"
-		"   filtered out      : %llu\n",
+		"   filtered out      : %llu"
+		"  (location %llu, out of tree %llu, type %llu)\n",
 		secs, what,
 		(unsigned long long)t->proc,
 		(unsigned long long)t->image,
@@ -207,7 +243,9 @@ void wm_print_tally(const struct wm_tally *t, double secs, const char *what,
 		(unsigned long long)t->bytes_sent,
 		(unsigned long long)t->bytes_recv,
 		(unsigned long long)t->raw,
-		(unsigned long long)suppressed);
+		(unsigned long long)suppressed,
+		(unsigned long long)h_loc, (unsigned long long)h_scope,
+		(unsigned long long)h_type);
 }
 
 void wm_print_health(const struct kofw_health *h, double secs)

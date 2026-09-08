@@ -65,13 +65,23 @@ static void usage(void)
 	      "The subtree filter is what makes that affordable: everything\n"
 	      "outside one process tree is discarded before it is printed.\n"
 	      "\n"
-	      "  --timeout N     give up after N seconds (default 60)\n"
+	      "  --timeout N     give up after N seconds. Default 0 = never:\n"
+	      "                  the run ends when the traced subtree exits\n"
+	      "                  plus --grace, or on Ctrl-C. A deadline\n"
+	      "                  truncates the runs that matter most.\n"
 	      "  --grace N       keep collecting N seconds after the subtree\n"
 	      "                  exits (default 2)\n"
 	      "  --ring N        records in flight (default 65536, 512B each)\n"
 	      "  --schema        at exit, print every payload shape that\n"
 	      "                  arrived, with a record count for each\n"
 	      "  --all-images    do not suppress system module loads\n"
+	      "  --quiet         collect and count, print no per-event lines.\n"
+	      "                  The renderer is one printf per event and a\n"
+	      "                  console retires a few thousand lines a second;\n"
+	      "                  with --thread the stream is denser than that,\n"
+	      "                  so the consumer falls behind and the ring drops\n"
+	      "                  events of EVERY kind. Redirecting stdout to a\n"
+	      "                  file does the same and keeps the detail.\n"
 	      "\n"
 	      "  --no-image      do not subscribe to module loads\n"
 	      "  --no-file       do not subscribe to file create/delete/rename\n"
@@ -79,6 +89,12 @@ static void usage(void)
 	      "  --no-net        do not subscribe to network events\n"
 	      "  --no-registry   do not subscribe to registry create/set/delete\n"
 	      "\n"
+	      "  --pipe          subscribe to file OPENS, which is the only\n"
+	      "                  way a named pipe is visible - and a pipe is\n"
+	      "                  how getsystem works: create a pipe, get a\n"
+	      "                  SYSTEM service to connect, impersonate the\n"
+	      "                  token that arrives. Expensive: CREATE fires on\n"
+	      "                  every open the machine performs. Use --quiet.\n"
 	      "  --thread        subscribe to thread create/exit. OFF by\n"
 	      "                  default because it is the highest volume of\n"
 	      "                  anything here - and it is the ONLY in-box way\n"
@@ -115,7 +131,20 @@ int main(int argc, char **argv)
 	STARTUPINFOA        si;
 	PROCESS_INFORMATION pi;
 	char     cmd[8192];
-	double   timeout = 60.0, grace = 2.0, exited_at = -1.0;
+	/*
+	 * NO DEADLINE BY DEFAULT.
+	 *
+	 * 60 seconds was a backstop for a target that never exits, and it was
+	 * the wrong default: the run that matters is the one where the sample
+	 * is still working, and cutting that off at a minute truncates exactly
+	 * the part somebody waited for. The tracer already has a correct
+	 * stopping condition - the tracked subtree is empty, plus the grace
+	 * window for events still in flight - and Ctrl-C covers a target that
+	 * hangs.
+	 *
+	 * 0 means no deadline. --timeout N puts one back for an unattended run.
+	 */
+	double   timeout = 0.0, grace = 2.0, exited_at = -1.0;
 	double   secs = 0.0, ev_secs = 0.0;
 	uint64_t t_wall0, t_ev0 = 0;
 	uint32_t root_pid, alive = 1;
@@ -133,8 +162,8 @@ int main(int argc, char **argv)
 	 * nothing at all.
 	 */
 	int      want_file = 1, want_image = 1, want_net = 1;
-	int      want_write = 1, want_reg = 1, want_thread = 0;
-	int      show_raw = 1, show_all_img = 0, show_schema = 0;
+	int      want_write = 1, want_reg = 1, want_thread = 0, want_open = 0;
+	int      show_raw = 1, show_all_img = 0, show_schema = 0, quiet = 0;
 	int      err = 0, i, first;
 	size_t   n;
 
@@ -174,6 +203,24 @@ int main(int argc, char **argv)
 			want_reg = 0;
 		else if (!strcmp(argv[i], "--thread"))
 			want_thread = 1;
+		else if (!strcmp(argv[i], "--pipe"))
+			want_open = 1;
+		/*
+		 * COLLECT WITHOUT PRINTING, and it is not a cosmetic option.
+		 *
+		 * The renderer is one printf per event on the consumer thread,
+		 * and a Windows console retires a few thousand lines a second
+		 * at best. With --thread the stream is an order of magnitude
+		 * denser than that, so the consumer falls behind, the ring
+		 * fills and the PRODUCER drops - which loses events of every
+		 * kind, not just the ones nobody wanted to read. The tally,
+		 * the health line and --schema are all still computed.
+		 *
+		 * Redirecting stdout to a file does the same thing and keeps
+		 * the detail; this is for when the detail is not wanted at all.
+		 */
+		else if (!strcmp(argv[i], "--quiet"))
+			quiet = 1;
 		else if (!strcmp(argv[i], "--no-system-logger"))
 			opt.no_system_logger = 1;
 		/*
@@ -248,7 +295,8 @@ int main(int argc, char **argv)
 			(want_write ? KOFW_SUB_FILE_WRITE : 0u) |
 			(want_net   ? KOFW_SUB_NET   : 0u) |
 			(want_reg   ? KOFW_SUB_REGISTRY : 0u) |
-			(want_thread ? KOFW_SUB_THREAD : 0u);
+			(want_thread ? KOFW_SUB_THREAD : 0u) |
+			(want_open  ? KOFW_SUB_FILE_OPEN : 0u);
 	opt.trace_self = 1;   /* see the header comment */
 
 	mon = kofw_mon_open(&opt, &err);
@@ -322,6 +370,19 @@ int main(int argc, char **argv)
 	 * seconds for a timeout is learning it too late to change the command
 	 * line.
 	 */
+	/*
+	 * THE DEFAULT SUPPRESSION, ANNOUNCED.
+	 *
+	 * `cmd /c` maps 27 modules before it runs anything and all 27 are the
+	 * loader's own furniture, so hiding them is right - and hiding them
+	 * SILENTLY is what makes somebody conclude the provider is broken when
+	 * their DLL happened to live in System32. One line, at the point where
+	 * changing the command line is still free.
+	 */
+	if (!show_all_img && want_image)
+		fputs("kofwintrace: system module loads are SUPPRESSED "
+		      "(--all-images to show them)\n", stderr);
+
 	{
 		struct kofw_health h0;
 		uint32_t missing, b;
@@ -361,12 +422,15 @@ int main(int argc, char **argv)
 		 * ProcessStop, refusing everything outside it - happened inside
 		 * kofw_mon_next. What arrives here is already scoped.
 		 */
-		wm_render(&e, ev_secs,
-			  kofw_mon_name_of(mon, e.pid,
-					   e.type == KOFW_EVT_PROC_START ||
-					   e.type == KOFW_EVT_PROC_STOP
-						   ? e.create_time : 0),
-			  &tally);
+		if (!quiet)
+			wm_render(&e, ev_secs,
+				  kofw_mon_name_of(mon, e.pid,
+						   e.type == KOFW_EVT_PROC_START ||
+						   e.type == KOFW_EVT_PROC_STOP
+							   ? e.create_time : 0),
+				  &tally);
+		else
+			wm_count(&e, &tally);
 
 tick:
 		alive = kofw_mon_tracked_alive(mon);
@@ -381,7 +445,7 @@ tick:
 		 */
 		if (exited_at >= 0.0 && secs - exited_at >= grace)
 			break;
-		if (secs >= timeout)
+		if (timeout > 0.0 && secs >= timeout)
 			break;
 	}
 
@@ -393,7 +457,9 @@ tick:
 		snprintf(what, sizeof what, "subtree of pid %lu",
 			 (unsigned long)root_pid);
 		kofw_mon_health(mon, &health);
-		wm_print_tally(&tally, secs, what, health.filtered);
+		wm_print_tally(&tally, secs, what, health.filtered,
+			       health.filtered_loc, health.filtered_scope,
+			       health.filtered_type);
 	}
 
 	wm_print_health(&health, secs);

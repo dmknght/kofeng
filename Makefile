@@ -749,10 +749,46 @@ KOF_BUILD_STAMP := $(shell $(NOW_UTC))
 CFLAGS += -DKOF_PACK_BUILD=$(KOF_BUILD_STAMP)u
 CFLAGS += -DKOFENG_BUILD=$(KOF_BUILD_STAMP)u
 
+#
+# A CLANG-ONLY WARNING IN VENDORED CODE, SILENCED FOR VENDORED CODE ONLY.
+#
+# clang reports, on by default and not via -Wall:
+#
+#   bdx86_decoder.c:2656: passing 'PND_IDBE *' to parameter of type
+#   'const ND_IDBE **' discards qualifiers in nested pointer types
+#
+# It is upstream's and it is real: NdDecodeInstruction takes
+# `const ND_IDBE **InsDef`, the caller's local is a plain `PND_IDBE pIns`, and
+# C does not let a T** become a const T** without a cast. It is also harmless
+# in fact - every use of pIns after that line reads a field and nothing ever
+# writes through it - so upstream could have declared the local const and the
+# whole thing would disappear.
+#
+# WE DO NOT PATCH IT, and that is the point of this comment rather than a
+# one-line edit to the file. THIRD-PARTY.md states that the bddisasm files are
+# unmodified, and says so specifically "so that a later reader does not have to
+# diff a release to find out"; Apache 2.0 requires modified files be marked as
+# changed. A patch here would cost that claim, would have to be re-applied at
+# every version bump, and this tree has already removed one patch to vendored
+# code for exactly that reason.
+#
+# So it is suppressed HERE, in the vendor flag set, which is what this variable
+# is for and which already carries four suppressions of the same kind. The
+# tree's own code is untouched by it and stays on the full warning tier.
+#
+# PROBED VIA THE POSITIVE FORM, deliberately. Both compilers accept an unknown
+# -Wno-<anything> in silence, so probing the negative form would prove nothing
+# and would leave GCC carrying a flag it does not know. The positive spelling is
+# rejected by a compiler that has never heard of the warning, which is the
+# question actually being asked.
+VENDOR_WNO_QUAL := $(if $(call kof_probe,-Wincompatible-pointer-types-discards-qualifiers),\
+                        -Wno-incompatible-pointer-types-discards-qualifiers)
+
 VENDOR_CFLAGS := -O2 -g -std=c11 -fno-common -D_LIB -DAMD64 \
                  -Wall -Wextra \
                  -Wno-missing-field-initializers -Wno-missing-braces \
                  -Wno-unused-function -Wno-error=incompatible-pointer-types \
+                 $(VENDOR_WNO_QUAL) \
                  $(SAN_CFLAGS) $(KOF_CROSS_FLAGS)
 
 EMU_SRC    := $(wildcard libkofemu/*.c)

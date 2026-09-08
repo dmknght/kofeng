@@ -60,6 +60,8 @@ static void usage(void)
 	      "  --file-write     ... and to writes into existing files\n"
 	      "  --net            subscribe to network events\n"
 	      "  --registry       subscribe to registry create/set/delete\n"
+	      "  --pipe           subscribe to file opens - the only way a\n"
+	      "                   named pipe is visible (getsystem). Expensive.\n"
 	      "  --thread         subscribe to thread create/exit - the only\n"
 	      "                   in-box view of an in-memory module load\n"
 	      "  --no-system-logger  plain session, if a provider delivers\n"
@@ -94,7 +96,7 @@ int main(int argc, char **argv)
 	uint64_t t_wall0, t_ev0 = 0;
 	int      quiet = 0, show_schema = 0, show_raw = 0, show_all_img = 0;
 	int      want_file = 0, want_image = 0, want_net = 0, want_write = 0;
-	int      want_reg = 0, want_thread = 0;
+	int      want_reg = 0, want_thread = 0, want_open = 0;
 	struct kofw_filter filt;
 	int      err = 0, i;
 
@@ -129,6 +131,8 @@ int main(int argc, char **argv)
 			want_reg = 1;
 		else if (!strcmp(argv[i], "--thread"))
 			want_thread = 1;
+		else if (!strcmp(argv[i], "--pipe"))
+			want_open = 1;
 		else if (!strcmp(argv[i], "--no-system-logger"))
 			opt.no_system_logger = 1;
 		else if (!strcmp(argv[i], "--help") ||
@@ -176,7 +180,8 @@ int main(int argc, char **argv)
 			(want_write ? KOFW_SUB_FILE_WRITE : 0u) |
 			(want_net   ? KOFW_SUB_NET   : 0u) |
 			(want_reg   ? KOFW_SUB_REGISTRY : 0u) |
-			(want_thread ? KOFW_SUB_THREAD : 0u);
+			(want_thread ? KOFW_SUB_THREAD : 0u) |
+			(want_open  ? KOFW_SUB_FILE_OPEN : 0u);
 
 	{
 		struct kofw_filter f;
@@ -255,7 +260,9 @@ tick:
 	}
 
 	kofw_mon_health(mon, &health);
-	wm_print_tally(&tally, secs, "whole machine", health.filtered);
+	wm_print_tally(&tally, secs, "whole machine", health.filtered,
+		       health.filtered_loc, health.filtered_scope,
+		       health.filtered_type);
 	wm_print_health(&health, secs);
 
 	kofw_mon_close(mon);

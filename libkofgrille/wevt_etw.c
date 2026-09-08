@@ -73,6 +73,14 @@
  */
 #define KW_FILE_WRITE  0x0210u
 
+/*
+ * CREATE (0x80) - every file OPEN on the machine, plus FILENAME to name them.
+ *
+ * The expensive one, and it is here for pipes rather than for files. See
+ * KOFW_SUB_FILE_OPEN.
+ */
+#define KW_FILE_OPEN   0x0090u
+
 /* IPv4 and IPv6, which is the entire keyword vocabulary this provider has. */
 #define KW_NET_ALL     0x0030u
 
@@ -145,6 +153,7 @@ struct kofw_mon {
 	struct kofw_filter filter;
 	struct kofw_ptab   ptab;
 	uint64_t           filtered;
+	uint64_t           filtered_loc, filtered_scope, filtered_type;
 	uint64_t           seq_expect, seq_gaps;
 	int                seq_started;
 
@@ -495,16 +504,20 @@ static int enable_providers(struct kofw_mon *m, uint32_t subs)
 		m->sub_enabled |= subs & (KOFW_SUB_PROCESS | KOFW_SUB_IMAGE |
 					  KOFW_SUB_THREAD);
 
-	if (subs & (KOFW_SUB_FILE | KOFW_SUB_FILE_WRITE)) {
+	if (subs & (KOFW_SUB_FILE | KOFW_SUB_FILE_WRITE |
+		    KOFW_SUB_FILE_OPEN)) {
 		ULONGLONG fkw = 0;
 
 		if (subs & KOFW_SUB_FILE)
 			fkw |= KW_FILE_MUTATE;
 		if (subs & KOFW_SUB_FILE_WRITE)
 			fkw |= KW_FILE_WRITE;
+		if (subs & KOFW_SUB_FILE_OPEN)
+			fkw |= KW_FILE_OPEN;
 		if (enable_one(m, &KOFW_GUID_KERNEL_FILE, fkw, NULL, 0) == 0)
 			m->sub_enabled |= subs & (KOFW_SUB_FILE |
-						  KOFW_SUB_FILE_WRITE);
+						  KOFW_SUB_FILE_WRITE |
+						  KOFW_SUB_FILE_OPEN);
 	}
 
 	if (subs & KOFW_SUB_NET) {
@@ -666,9 +679,20 @@ int kofw_mon_next(struct kofw_mon *m, struct kofw_evt *out, uint32_t wait_ms)
 				m->seq_gaps += out->seq - m->seq_expect;
 			m->seq_expect = out->seq + 1u;
 
-			if (kofw_filter_apply(&m->ptab, &m->filter, out))
-				return 1;
-			m->filtered++;
+			{
+				uint8_t why = KOFW_REFUSE_NONE;
+
+				if (kofw_filter_apply(&m->ptab, &m->filter,
+						      out, &why))
+					return 1;
+				if (why == KOFW_REFUSE_LOC)
+					m->filtered_loc++;
+				else if (why == KOFW_REFUSE_SCOPE)
+					m->filtered_scope++;
+				else
+					m->filtered_type++;
+				m->filtered++;
+			}
 		}
 		if (left == 0)
 			return 0;
@@ -707,6 +731,9 @@ void kofw_mon_health(struct kofw_mon *m, struct kofw_health *h)
 	h->skipped_self   = atomic_load_explicit(&m->skipped_self,
 						 memory_order_relaxed);
 	h->filtered       = m->filtered;
+	h->filtered_loc   = m->filtered_loc;
+	h->filtered_scope = m->filtered_scope;
+	h->filtered_type  = m->filtered_type;
 	h->untracked      = m->ptab.overflow;
 	h->seq_gaps       = m->seq_gaps;
 	h->sub_asked      = m->sub_asked;
