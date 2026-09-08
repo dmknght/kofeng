@@ -67,6 +67,7 @@
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 
+#include "kofevtlog.h"
 #include "kofinspect.h"
 #include "kofview.h"
 #include "kofeditor.h"
@@ -2295,7 +2296,7 @@ static void obj_label(const struct object *o, char *out, size_t cap)
 	snprintf(what, sizeof what, "%s%s%s",
 		 o->fmt ? kof_format_name(o->ctx.format) : "raw",
 		 o->fmt ? "-" : "",
-		 o->fmt ? kof_arch_name(o->ctx.arch) : "");
+		 o->fmt ? kof_evt_arch_name(o->ctx.arch) : "");
 	if (o->depth == 0) {
 		snprintf(out, cap, "%s", what);
 	} else if (o->payload_of) {
@@ -2325,7 +2326,7 @@ static void obj_label(const struct object *o, char *out, size_t cap)
 		 * has 48 columns, so the cut is stated where a reader of the
 		 * format string can see it. */
 		snprintf(out, cap, "//%.24s Shellcode-%s", leaf,
-			 o->fmt ? kof_arch_name(o->ctx.arch) : "?");
+			 o->fmt ? kof_evt_arch_name(o->ctx.arch) : "?");
 	} else {
 		snprintf(out, cap, "//%.24s %.18s%s", leaf, what,
 			 /* Scanned, but not kept: there is nothing to show and
@@ -10120,7 +10121,7 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 				 ob->fmt ? kof_format_name(ob->ctx.format)
 					 : "raw",
 				 ob->fmt ? "-" : "",
-				 ob->fmt ? kof_arch_name(ob->ctx.arch) : "");
+				 ob->fmt ? kof_evt_arch_name(ob->ctx.arch) : "");
 			/* The cut is written into the format rather than left
 			 * to the buffer, the way obj_label writes its own: a
 			 * file name has no length limit and the row has a
@@ -10198,7 +10199,7 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 			 "format", fmt, sub ? " " : "", sub ? sub : "");
 		if (ob->fmt)
 			prop_add(A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF,
-				 "arch", kof_arch_name(ob->ctx.arch));
+				 "arch", kof_evt_arch_name(ob->ctx.arch));
 	} else {
 		/* Bytes and nothing else. The format and the architecture are
 		 * on the identity row above, and saying them twice on two
@@ -10391,7 +10392,7 @@ no_regions:
 	if (ob->payload_of) {
 		prop_add(A_WARN "  RECONSTRUCTED_%s-%s_SHELLCODE" A_OFF,
 			 ob->fmt ? kof_format_name(ob->ctx.format) : "RAW",
-			 ob->fmt ? kof_arch_name(ob->ctx.arch) : "?");
+			 ob->fmt ? kof_evt_arch_name(ob->ctx.arch) : "?");
 	} else if (ob->fmt && ob->info && ob->fmt->anomalies) {
 		uint64_t anom = ob->fmt->anomalies(ob->info);
 
@@ -16392,6 +16393,39 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	v->path = v->pathbuf;
 	v->map = map;
 	v->map_len = len;
+
+	/*
+	 * AN EVENT LOG IS NOT A SCAN TARGET, and saying so beats a hex dump.
+	 *
+	 * A .ktr written by kofwatchtower or kofmontrace is a stream of fixed
+	 * records, and dropping one on this viewer used to map it and show its
+	 * bytes - technically correct and useless. It is a format this toolset
+	 * writes for itself, so the viewer recognises it and says what it is
+	 * holding rather than pretending it is a sample.
+	 *
+	 * Recognised here rather than added to the engine's format list on
+	 * purpose: kof_format answers "what is this scanned object", and an
+	 * event log is not one. Same reason kofevt is not under core/kofmod.
+	 *
+	 * The full browser - a scrollable event list, one event's fields on the
+	 * properties panel - is a mode of its own and is not this. What this
+	 * does is stop the confusing answer and name the tool that reads it.
+	 */
+	if (len >= sizeof(struct kofevt_log_hdr)) {
+		const struct kofevt_log_hdr *lh = map;
+
+		if (lh->magic == KOFEVT_LOG_MAGIC) {
+			snprintf(v->act_msg, sizeof v->act_msg,
+				 "kofevt event log: %s/%s, sensor build %lu, "
+				 "%llu event(s) - read it with kofwatchman "
+				 "--log",
+				 kof_evt_platform_name((uint8_t)lh->platform),
+				 kof_evt_arch_name((uint8_t)lh->arch),
+				 (unsigned long)lh->build,
+				 (unsigned long long)lh->n_records);
+			v->act_ok = 1;
+		}
+	}
 
 	if (v->eng)
 		objects_collect(v, v->eng);
