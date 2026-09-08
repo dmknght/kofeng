@@ -69,13 +69,16 @@ this repository already ships.
 Signature sources - bases/
 --------------------------------------------------------------------------------
 
-The detection signatures under `bases/` are data rather than program code, and
-they carry their own terms: see `bases/LICENSE`. They are kept separate on
-purpose. A signature can contain a string lifted from a sample, its value has a
-different lifetime from the engine's, and a project may want to place
-conditions on redistributing detection data that it would not place on the
-scanner that reads it. Deciding both in one file would make that impossible to
-change later without reopening every release already made.
+The detection signatures under `bases/` are covered by the terms above, the
+same as the engine.
+
+They used to carry a separate file saying the same words, kept apart so that
+the terms on detection data could be changed later without reopening the
+engine's. That option is given up here deliberately: a second licence file
+stating identical terms is a thing readers have to diff to discover says
+nothing new, and the separation it bought was never used. If the terms on
+signature data ever do need to diverge, that is the point at which a file
+saying so earns its place - and not before.
 
 --------------------------------------------------------------------------------
 Test material

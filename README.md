@@ -132,6 +132,6 @@ The code written for this project is under the **MIT License** — see
 | engine, tools, tests | MIT |
 | `kofparsers/kofformat.*`, `kofdisasm/xref.*` | Apache License 2.0 — they carry their own SPDX line, and it wins |
 | `libkofemu/bddisasm/` | Apache License 2.0, Bitdefender — see [THIRD-PARTY.md](THIRD-PARTY.md) |
-| `bases/` signatures | [bases/LICENSE](bases/LICENSE) — MIT today, kept separate so it need not stay that way |
+| `bases/` signatures | MIT, the same as the engine |
 
 Where a file carries an `SPDX-License-Identifier`, that identifier governs it.
