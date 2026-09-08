@@ -40,6 +40,26 @@ const GUID KOFW_GUID_KERNEL_NET = {
 	{ 0x8d, 0xfd, 0x43, 0xd9, 0x79, 0x15, 0x3a, 0x88 }
 };
 
+/*
+ * Microsoft-Windows-Kernel-Registry.
+ *
+ * NOT ESTABLISHED THE WAY THE OTHERS WERE, and that difference is why this
+ * comment is longer than the constant. Check it before trusting a quiet run:
+ *
+ *     logman query providers Microsoft-Windows-Kernel-Registry
+ *
+ * EnableTraceEx2 SUCCEEDS for a provider GUID nothing publishes - the session
+ * starts, the keyword is accepted, and not one event ever arrives. There is no
+ * error anywhere in that sequence. A wrong GUID here does not look like a bug,
+ * it looks like a machine that does not touch the registry, which no machine
+ * is. `--schema` naming no `registry` shape at all is what that failure looks
+ * like from the outside.
+ */
+const GUID KOFW_GUID_KERNEL_REGISTRY = {
+	0x70eb4f03, 0xc1de, 0x4f73,
+	{ 0xa0, 0x51, 0x33, 0xd1, 0x3d, 0x54, 0x13, 0xbd }
+};
+
 const GUID KOFW_GUID_KERNEL_FILE = {
 	0xedd08927, 0x9cc4, 0x4e65,
 	{ 0xb9, 0x70, 0xc2, 0x56, 0x0f, 0xb5, 0xc2, 0x89 }
@@ -53,12 +73,15 @@ uint8_t kofw_provider_of(const GUID *g)
 		return KOFW_PROV_NET;
 	if (!memcmp(g, &KOFW_GUID_KERNEL_FILE, sizeof *g))
 		return KOFW_PROV_FILE;
+	if (!memcmp(g, &KOFW_GUID_KERNEL_REGISTRY, sizeof *g))
+		return KOFW_PROV_REGISTRY;
 	return KOFW_PROV_NONE;
 }
 
 #define EVID_PROCESS_START 1u
 #define EVID_PROCESS_STOP  2u
 #define EVID_IMAGE_LOAD    5u
+#define EVID_IMAGE_UNLOAD  6u
 
 /*
  * KERNEL-FILE'S IDS, AND HOW THEY WERE ESTABLISHED.
@@ -127,11 +150,21 @@ static uint8_t field_of(const wchar_t *name, uint16_t type)
 	if (name_is(name, "SessionID"))       return KOFW_FLD_SESSION;
 	if (name_is(name, "ExitCode"))        return KOFW_FLD_EXIT_CODE;
 
-	/* Whatever this provider calls the path it acted on. FileName is
-	 * Kernel-File's spelling; the others are here because a RAW event is
-	 * worth rendering with its path rather than without. */
+	/*
+	 * Whatever this provider calls the path it acted on.
+	 *
+	 * FileName is Kernel-File's spelling. KeyName, ValueName and
+	 * RelativeName are Kernel-Registry's, and having all three here is
+	 * deliberate: which one carries the useful text differs by event, and
+	 * the walk fills `object` from whichever it reaches. The others are
+	 * here because a RAW event is worth rendering with its path rather
+	 * than without - which is the whole of what makes a discovery run
+	 * readable.
+	 */
 	if (name_is(name, "FileName") || name_is(name, "FilePath") ||
-	    name_is(name, "OldFileName") || name_is(name, "NewFileName"))
+	    name_is(name, "OldFileName") || name_is(name, "NewFileName") ||
+	    name_is(name, "KeyName") || name_is(name, "ValueName") ||
+	    name_is(name, "RelativeName") || name_is(name, "KeyObject"))
 		return KOFW_FLD_OBJECT;
 
 	if (name_is(name, "daddr")) return KOFW_FLD_DADDR;
@@ -157,6 +190,7 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 		case EVID_PROCESS_START: return KOFW_EVT_PROC_START;
 		case EVID_PROCESS_STOP:  return KOFW_EVT_PROC_STOP;
 		case EVID_IMAGE_LOAD:    return KOFW_EVT_IMAGE_LOAD;
+		case EVID_IMAGE_UNLOAD:  return KOFW_EVT_IMAGE_UNLOAD;
 		default: break;
 		}
 	} else if (prov == KOFW_PROV_NET) {
@@ -183,6 +217,28 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 		case EVID_FILE_DELETE:     return KOFW_EVT_FILE_DELETE;
 		default: break;
 		}
+	} else if (prov == KOFW_PROV_REGISTRY) {
+		/*
+		 * EMPTY ON PURPOSE, AND THIS IS NOT A TODO LEFT LYING ABOUT.
+		 *
+		 * Kernel-Registry's ids have not been established on a real
+		 * machine, and the two other providers in this file say in
+		 * their own comments how that is done: one operation at a
+		 * time, a second apart, under `kofwintrace --raw --schema`,
+		 * reading the id off the ordered trace. Numbers copied from
+		 * documentation are how a table ends up decoding CREATE as
+		 * SETVALUE - which is silent, because an event typed as the
+		 * wrong thing is still a typed event.
+		 *
+		 * Until then every registry record arrives as RAW carrying its
+		 * provider, id, version and key path, which is exactly what a
+		 * discovery run needs and is strictly more honest than a
+		 * guess. Filling this switch in afterwards is three lines.
+		 *
+		 *   case <id>: return KOFW_EVT_REG_CREATE;
+		 *   case <id>: return KOFW_EVT_REG_SET_VALUE;
+		 *   case <id>: return KOFW_EVT_REG_DELETE;
+		 */
 	}
 	return KOFW_EVT_RAW;
 }
@@ -199,10 +255,15 @@ static uint32_t wanted(uint16_t type)
 		return KOFW_F_PID | KOFW_F_CREATE_TIME | KOFW_F_EXIT_CODE |
 		       KOFW_F_IMAGE;
 	case KOFW_EVT_IMAGE_LOAD:
+	case KOFW_EVT_IMAGE_UNLOAD:
 		return KOFW_F_PID | KOFW_F_OBJECT;
 	case KOFW_EVT_FILE_NEW:
 	case KOFW_EVT_FILE_RENAME:
 	case KOFW_EVT_FILE_DELETE:
+	case KOFW_EVT_FILE_WRITE:
+	case KOFW_EVT_REG_CREATE:
+	case KOFW_EVT_REG_SET_VALUE:
+	case KOFW_EVT_REG_DELETE:
 		/* No pid here on purpose: Kernel-File's payload does not repeat
 		 * it, and the process that acted is the one the kernel was
 		 * running - which the header already gave. Asking for a field
@@ -452,7 +513,9 @@ static size_t measure(uint16_t in_type, const uint8_t *p, size_t left)
 int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 		struct kofw_evt *out)
 {
-	const struct kofw_schema *sc;
+	/* Not const: the shape's own hit counter is bumped below, and it is
+	 * this thread's to bump - there is one producer by construction. */
+	struct kofw_schema *sc;
 	const uint8_t *base;
 	size_t   off, total, tnext = 0;
 	uint16_t id, type;
@@ -473,6 +536,9 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 		if (!sc)
 			return 0;
 	}
+	/* One producer, one cache line this thread already owns - see the note
+	 * on kofw_schema.hits for why a count and not just a list. */
+	sc->hits++;
 
 	memset(out, 0, sizeof *out);
 	out->type        = type;
@@ -658,12 +724,35 @@ size_t kofw_schema_describe(const struct kofw_schema_cache *c, char *buf,
 		return 0;
 	buf[0] = '\0';
 
+	/*
+	 * SAID OUT LOUD, because an empty dump is an ANSWER and an empty dump
+	 * that prints nothing looks like a broken flag.
+	 *
+	 * A shape is learned the first time a record of that (provider, id,
+	 * version) reaches the decoder. So "no shape for the net provider" is
+	 * not "the events were filtered" or "the ids are wrong" - it is "not
+	 * one network record was ever delivered", which points at the session
+	 * and the keyword rather than at anything downstream. That is a
+	 * different bug with a different fix, and this line is what separates
+	 * them.
+	 */
+	if (c->n == 0) {
+		n = snprintf(buf + o, cap - o,
+			     "no shapes learned: not one event reached the "
+			     "decoder, so nothing was filtered - the session "
+			     "or the keyword is what delivered nothing\n");
+		return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
+	}
+
 	for (i = 0; i < c->n; i++) {
 		const struct kofw_schema *s = &c->s[i];
 
 		n = snprintf(buf + o, cap - o,
-			     "event %u version %u: %u properties%s\n",
+			     "%-8s event %-3u v%-2u %10llu record(s)  "
+			     "%u properties%s\n",
+			     kofw_provider_name(s->prov),
 			     (unsigned)s->id, (unsigned)s->ver,
+			     (unsigned long long)s->hits,
 			     (unsigned)s->n_prop,
 			     s->truncated ? "  [SHAPE TRUNCATED - the walk "
 					    "stopped early, so everything "

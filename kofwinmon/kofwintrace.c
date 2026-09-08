@@ -58,17 +58,29 @@ static void usage(void)
 {
 	fputs("usage: kofwintrace [options] <program> [args...]\n"
 	      "\n"
-	      "  --timeout N   give up after N seconds (default 60)\n"
-	      "  --grace N     keep collecting N seconds after the subtree\n"
-	      "                exits (default 2)\n"
-	      "  --raw         also print events this build has no type for\n"
-	      "  --schema      at exit, print the payload shapes TDH described\n"
-	      "  --all-images  do not suppress system module loads\n"
-	      "  --no-image    do not subscribe to module loads at all\n"
-	      "  --no-file     do not subscribe to file events\n"
-	      "  --file-write  also subscribe to writes into EXISTING files\n"
-	      "  --net         also subscribe to network events\n"
-	      "  --ring N      records in flight (default 16384, 512B each)\n"
+	      "EVERY PROVIDER IS ON BY DEFAULT, and so is --raw. This is a tool\n"
+	      "for finding out what a program does and what the stream looks\n"
+	      "like, and a default that collected less would answer neither.\n"
+	      "The subtree filter is what makes that affordable: everything\n"
+	      "outside one process tree is discarded before it is printed.\n"
+	      "\n"
+	      "  --timeout N     give up after N seconds (default 60)\n"
+	      "  --grace N       keep collecting N seconds after the subtree\n"
+	      "                  exits (default 2)\n"
+	      "  --ring N        records in flight (default 65536, 512B each)\n"
+	      "  --schema        at exit, print every payload shape that\n"
+	      "                  arrived, with a record count for each\n"
+	      "  --all-images    do not suppress system module loads\n"
+	      "\n"
+	      "  --no-image      do not subscribe to module loads\n"
+	      "  --no-file       do not subscribe to file create/delete/rename\n"
+	      "  --no-file-write do not subscribe to writes into existing files\n"
+	      "  --no-net        do not subscribe to network events\n"
+	      "  --no-registry   do not subscribe to registry create/set/delete\n"
+	      "  --no-raw        hide events this build has no type for\n"
+	      "\n"
+	      "Registry events currently arrive UNTYPED, so --no-raw hides them\n"
+	      "entirely. See the note in wevt_decode.c on establishing the ids.\n"
 	      "\n"
 	      "Requires an elevated prompt.\n"
 	      "\n"
@@ -90,13 +102,31 @@ int main(int argc, char **argv)
 	double   secs = 0.0, ev_secs = 0.0;
 	uint64_t t_wall0, t_ev0 = 0;
 	uint32_t root_pid, alive = 1;
-	int      want_file = 1, want_image = 1, want_net = 0, want_write = 0;
-	int      show_raw = 0, show_all_img = 0, show_schema = 0;
+	/*
+	 * LOUD BY DEFAULT, and that is a decision rather than an oversight.
+	 *
+	 * Every provider off-by-default made the common case a run that
+	 * collected process events and nothing else - and somebody then
+	 * reported that the tool showed no network activity, which was true
+	 * and was not what they meant. A tool whose job is "show me what this
+	 * program did" cannot have a default that answers "not much".
+	 *
+	 * show_raw goes with it. Registry ids are not typed yet, so with raw
+	 * hidden the registry subscription would cost its volume and print
+	 * nothing at all.
+	 */
+	int      want_file = 1, want_image = 1, want_net = 1;
+	int      want_write = 1, want_reg = 1;
+	int      show_raw = 1, show_all_img = 0, show_schema = 0;
 	int      err = 0, i, first;
 	size_t   n;
 
 	memset(&opt, 0, sizeof opt);
 	memset(&tally, 0, sizeof tally);
+	/* 32MB. The old 16384 was sized for process events alone; with the
+	 * registry in the same session a burst fills that in well under a
+	 * second, and a ring drop is a record nothing can get back. */
+	opt.ring_capacity = 65536u;
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--timeout") && i + 1 < argc)
@@ -107,7 +137,10 @@ int main(int argc, char **argv)
 			opt.ring_capacity = (uint32_t)strtoul(argv[++i],
 							      NULL, 10);
 		else if (!strcmp(argv[i], "--raw"))
-			show_raw = 1;
+			show_raw = 1;          /* the default; kept so an old
+						* command line still works */
+		else if (!strcmp(argv[i], "--no-raw"))
+			show_raw = 0;
 		else if (!strcmp(argv[i], "--schema"))
 			show_schema = 1;
 		else if (!strcmp(argv[i], "--all-images"))
@@ -116,10 +149,39 @@ int main(int argc, char **argv)
 			want_image = 0;
 		else if (!strcmp(argv[i], "--no-file"))
 			want_file = 0;
+		else if (!strcmp(argv[i], "--no-file-write"))
+			want_write = 0;
+		else if (!strcmp(argv[i], "--no-net"))
+			want_net = 0;
+		else if (!strcmp(argv[i], "--no-registry"))
+			want_reg = 0;
+		/* The old opt-in spellings, which now only confirm a default.
+		 * Accepted rather than refused: a command line somebody has in
+		 * their shell history should not start failing. */
 		else if (!strcmp(argv[i], "--file-write"))
 			want_write = 1;
 		else if (!strcmp(argv[i], "--net"))
 			want_net = 1;
+		/*
+		 * AN UNKNOWN OPTION IS AN ERROR, NOT A PROGRAM NAME.
+		 *
+		 * Falling through to `break` made argv[i] the thing to launch,
+		 * so a typo - or a flag this build is too old to know - came
+		 * back as "cannot run '--schema' (error 2)". That reads like
+		 * the tool is broken rather than like the argument was wrong,
+		 * and it is indistinguishable from a stale binary, which is
+		 * exactly the confusion it caused.
+		 *
+		 * Only arguments that LOOK like options are refused; the
+		 * program being traced may legitimately be called anything
+		 * that does not start with a dash.
+		 */
+		else if (argv[i][0] == '-' && argv[i][1] != '\0') {
+			fprintf(stderr, "kofwintrace: unknown option '%s'\n\n",
+				argv[i]);
+			usage();
+			return 2;
+		}
 		else
 			break;
 	}
@@ -151,7 +213,8 @@ int main(int argc, char **argv)
 			(want_image ? KOFW_SUB_IMAGE : 0u) |
 			(want_file  ? KOFW_SUB_FILE  : 0u) |
 			(want_write ? KOFW_SUB_FILE_WRITE : 0u) |
-			(want_net   ? KOFW_SUB_NET   : 0u);
+			(want_net   ? KOFW_SUB_NET   : 0u) |
+			(want_reg   ? KOFW_SUB_REGISTRY : 0u);
 	opt.trace_self = 1;   /* see the header comment */
 
 	mon = kofw_mon_open(&opt, &err);
@@ -211,10 +274,11 @@ int main(int argc, char **argv)
 	}
 
 	fprintf(stderr, "kofwintrace: %s\nkofwintrace: root pid %lu, providers:"
-		" process%s%s%s%s\n\n",
+		" process%s%s%s%s%s\n\n",
 		cmd, (unsigned long)root_pid,
 		want_image ? " image" : "", want_file ? " file" : "",
-		want_write ? " file-write" : "", want_net ? " net" : "");
+		want_write ? " file-write" : "", want_net ? " net" : "",
+		want_reg ? " registry" : "");
 
 	t_wall0 = wm_now();
 	ResumeThread(pi.hThread);

@@ -58,6 +58,8 @@ static void usage(void)
 	      "  --file           subscribe to file create/delete/rename\n"
 	      "  --file-write     ... and to writes into existing files\n"
 	      "  --net            subscribe to network events\n"
+	      "  --registry       subscribe to registry create/set/delete\n"
+	      "  --all            every provider, system images and raw events\n"
 	      "\n"
 	      "Process start/stop is always on: everything else is scoped BY a\n"
 	      "process, so a collector without it cannot attribute what it sees.\n"
@@ -87,6 +89,7 @@ int main(int argc, char **argv)
 	uint64_t t_wall0, t_ev0 = 0;
 	int      quiet = 0, show_schema = 0, show_raw = 0, show_all_img = 0;
 	int      want_file = 0, want_image = 0, want_net = 0, want_write = 0;
+	int      want_reg = 0;
 	struct kofw_filter filt;
 	int      err = 0, i;
 
@@ -117,7 +120,23 @@ int main(int argc, char **argv)
 			want_file = want_write = 1;
 		else if (!strcmp(argv[i], "--net"))
 			want_net = 1;
+		else if (!strcmp(argv[i], "--registry"))
+			want_reg = 1;
+		/*
+		 * Everything, which is what kofwintrace takes by default and
+		 * what kofwinmon does NOT: this one watches the whole machine
+		 * with no subtree filter in front of it, so "everything" here
+		 * is a firehose somebody has to ask for on purpose.
+		 */
+		else if (!strcmp(argv[i], "--all"))
+			want_image = show_all_img = want_file = want_write =
+				want_net = want_reg = show_raw = 1;
 		else {
+			/* Named, rather than only printing the usage: the
+			 * whole question a reader has is WHICH argument was
+			 * wrong, and a wall of usage text does not answer it. */
+			fprintf(stderr, "kofwinmon: unknown option '%s'\n\n",
+				argv[i]);
 			usage();
 			return 2;
 		}
@@ -140,7 +159,8 @@ int main(int argc, char **argv)
 			(want_image ? KOFW_SUB_IMAGE : 0u) |
 			(want_file  ? KOFW_SUB_FILE  : 0u) |
 			(want_write ? KOFW_SUB_FILE_WRITE : 0u) |
-			(want_net   ? KOFW_SUB_NET   : 0u);
+			(want_net   ? KOFW_SUB_NET   : 0u) |
+			(want_reg   ? KOFW_SUB_REGISTRY : 0u);
 
 	{
 		struct kofw_filter f;

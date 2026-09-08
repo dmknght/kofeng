@@ -129,6 +129,38 @@ enum kofw_evt_type {
 	KOFW_EVT_NET_RECV       = 10,
 	KOFW_EVT_NET_DISCONNECT = 11,
 
+	/*
+	 * A module was unmapped. Low value on its own and typed anyway, because
+	 * the id was already being let through the provider filter and was
+	 * arriving as RAW - which cost the same and told nobody anything.
+	 */
+	KOFW_EVT_IMAGE_UNLOAD = 12,
+
+	/*
+	 * DATA WAS WRITTEN INTO A FILE THAT ALREADY EXISTED.
+	 *
+	 * Separate from FILE_NEW because they answer different questions: one
+	 * says a file APPEARED, the other says data LANDED in one. A payload
+	 * written over something innocuous creates nothing and raises no
+	 * FILE_NEW at all.
+	 */
+	KOFW_EVT_FILE_WRITE = 13,
+
+	/*
+	 * THE REGISTRY, and it is three verbs rather than one.
+	 *
+	 * A key being created, a value being set and either being deleted are
+	 * different claims and a rule branches on which. The autorun case wants
+	 * VALUE_SET; a rootkit hiding a service wants DELETE; a key appearing
+	 * under a hive that has none is CREATE.
+	 *
+	 * The path travels in `object`, as every other object path does, so
+	 * nothing downstream needs a registry-shaped field.
+	 */
+	KOFW_EVT_REG_CREATE    = 14,
+	KOFW_EVT_REG_SET_VALUE = 15,
+	KOFW_EVT_REG_DELETE    = 16,
+
 	KOFW_EVT_TYPE_COUNT
 };
 
@@ -183,12 +215,16 @@ const char *kofw_loc_name(uint8_t loc);
  */
 uint8_t kofw_classify_path(const char *path);
 
+/* "process", "file", "net". Never NULL. */
+const char *kofw_provider_name(uint8_t prov);
+
 /* Which provider a record came from. */
 enum kofw_provider {
 	KOFW_PROV_NONE = 0,
 	KOFW_PROV_PROCESS,
 	KOFW_PROV_FILE,
 	KOFW_PROV_NET,
+	KOFW_PROV_REGISTRY,
 	KOFW_PROV_COUNT
 };
 
@@ -418,7 +454,29 @@ enum {
 	 * outside it is discarded anyway. For an always-on collector it would
 	 * matter, and that is the point at which the ids have to be established.
 	 */
-	KOFW_SUB_NET     = 1u << 4
+	KOFW_SUB_NET     = 1u << 4,
+
+	/*
+	 * THE REGISTRY, AND WHY IT IS WORTH ITS VOLUME.
+	 *
+	 * It is the most expensive provider here by a wide margin - a busy
+	 * desktop reads and writes the registry thousands of times a second -
+	 * and it is subscribed anyway, because persistence on Windows is a
+	 * registry write far more often than it is a file. A Run value, a
+	 * service, an IFEO debugger, AppInit_DLLs and a COM hijack are all one
+	 * value being set, and none of them touches a file the collector would
+	 * otherwise see.
+	 *
+	 * The keyword asks for CREATE, SETVALUE and DELETE only. Reads are the
+	 * bulk of the traffic and carry nothing: "something read a key" is not
+	 * a fact anybody writes a rule against, exactly as with files.
+	 */
+	KOFW_SUB_REGISTRY = 1u << 5,
+
+	/* Everything this build can collect. What kofwintrace takes by default
+	 * - see the note there on why a discovery tool defaults to loud. */
+	KOFW_SUB_ALL = KOFW_SUB_PROCESS | KOFW_SUB_IMAGE | KOFW_SUB_FILE |
+		       KOFW_SUB_FILE_WRITE | KOFW_SUB_NET | KOFW_SUB_REGISTRY
 };
 
 /* The subject's image path, or "" when the event carried none. Never NULL. */

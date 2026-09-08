@@ -68,6 +68,42 @@ static void t_layout(void)
 		fail("layout", "KOFW_EVT_HEAD is not where text[] starts");
 }
 
+/* ---- every type has a name ---------------------------------------------- */
+
+/*
+ * A verb added to the enum without a name prints as "?", and "?" in a trace is
+ * indistinguishable from a decode that went wrong. The renderer's switch has
+ * the same problem one layer up, but this catches the common half of it - and
+ * it catches it the moment somebody adds a verb, which is when they still
+ * remember what it was for.
+ */
+static void t_type_names(void)
+{
+	uint16_t i;
+
+	for (i = 1; i < KOFW_EVT_TYPE_COUNT; i++) {
+		const char *n = kofw_evt_type_name(i);
+
+		if (!n || !*n || !strcmp(n, "?")) {
+			printf("  FAIL type name: verb %u has no name\n",
+			       (unsigned)i);
+			failures++;
+		}
+	}
+	/* Out of range still has to answer something, so a record written by a
+	 * build that knew one more verb still prints. */
+	if (strcmp(kofw_evt_type_name(KOFW_EVT_TYPE_COUNT + 50u), "?"))
+		fail("type name", "an unknown verb did not come back as ?");
+
+	for (i = 1; i < KOFW_PROV_COUNT; i++) {
+		if (!strcmp(kofw_provider_name((uint8_t)i), "?")) {
+			printf("  FAIL provider name: %u has no name\n",
+			       (unsigned)i);
+			failures++;
+		}
+	}
+}
+
 /* ---- UTF-16 ------------------------------------------------------------- */
 
 static void t_utf16(void)
@@ -473,6 +509,7 @@ int main(void)
 {
 	printf("grille_host: the ETW-free half of libkofgrille\n");
 	t_layout();
+	t_type_names();
 	t_utf16();
 	t_ansi();
 	t_classify();

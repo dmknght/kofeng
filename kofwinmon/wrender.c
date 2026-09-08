@@ -59,6 +59,10 @@ void wm_render(const struct kofw_evt *e, double secs, const char *who,
 		printf("  [%s] %s", kofw_loc_name(e->obj_loc),
 		       kofw_evt_object(e));
 		break;
+	case KOFW_EVT_IMAGE_UNLOAD:
+		printf("  [%s] %s", kofw_loc_name(e->obj_loc),
+		       kofw_evt_object(e));
+		break;
 	case KOFW_EVT_FILE_NEW:
 		t->file_new++;
 		printf("  [%s] %s", kofw_loc_name(e->obj_loc),
@@ -73,6 +77,25 @@ void wm_render(const struct kofw_evt *e, double secs, const char *who,
 		t->file_ren++;
 		printf("  [%s] %s", kofw_loc_name(e->obj_loc),
 		       kofw_evt_object(e));
+		break;
+	case KOFW_EVT_FILE_WRITE:
+		t->file_wr++;
+		printf("  [%s] %s", kofw_loc_name(e->obj_loc),
+		       kofw_evt_object(e));
+		if (e->net_size)
+			printf("  %lu bytes", (unsigned long)e->net_size);
+		break;
+
+	/*
+	 * The registry path goes in the same column every other object path
+	 * goes in, so a reader scanning for "what did it touch" reads one
+	 * column rather than learning where each provider hides its answer.
+	 */
+	case KOFW_EVT_REG_CREATE:
+	case KOFW_EVT_REG_SET_VALUE:
+	case KOFW_EVT_REG_DELETE:
+		t->reg++;
+		printf("  %s", kofw_evt_object(e));
 		break;
 
 	case KOFW_EVT_NET_CONNECT:
@@ -134,6 +157,8 @@ void wm_print_tally(const struct wm_tally *t, double secs, const char *what,
 		"   files created     : %llu\n"
 		"   files deleted     : %llu\n"
 		"   files renamed     : %llu\n"
+		"   files written     : %llu\n"
+		"   registry changes  : %llu\n"
 		"   connections       : %llu\n"
 		"   bytes sent/recv   : %llu / %llu\n"
 		"   untyped events    : %llu\n"
@@ -144,6 +169,8 @@ void wm_print_tally(const struct wm_tally *t, double secs, const char *what,
 		(unsigned long long)t->file_new,
 		(unsigned long long)t->file_del,
 		(unsigned long long)t->file_ren,
+		(unsigned long long)t->file_wr,
+		(unsigned long long)t->reg,
 		(unsigned long long)t->conn,
 		(unsigned long long)t->bytes_sent,
 		(unsigned long long)t->bytes_recv,

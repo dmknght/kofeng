@@ -173,7 +173,23 @@ const char *kofw_evt_type_name(uint16_t type)
 	case KOFW_EVT_NET_SEND:       return "NetSend";
 	case KOFW_EVT_NET_RECV:       return "NetRecv";
 	case KOFW_EVT_NET_DISCONNECT: return "NetClose";
+	case KOFW_EVT_IMAGE_UNLOAD:   return "ImgUnload";
+	case KOFW_EVT_FILE_WRITE:     return "FileWrite";
+	case KOFW_EVT_REG_CREATE:     return "RegNew";
+	case KOFW_EVT_REG_SET_VALUE:  return "RegSet";
+	case KOFW_EVT_REG_DELETE:     return "RegDel";
 	case KOFW_EVT_RAW:        return "raw";
 	default:                  return "?";
+	}
+}
+
+const char *kofw_provider_name(uint8_t prov)
+{
+	switch (prov) {
+	case KOFW_PROV_PROCESS: return "process";
+	case KOFW_PROV_FILE:    return "file";
+	case KOFW_PROV_NET:     return "net";
+	case KOFW_PROV_REGISTRY: return "registry";
+	default:                return "?";
 	}
 }

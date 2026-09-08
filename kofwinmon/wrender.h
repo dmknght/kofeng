@@ -24,7 +24,8 @@
  */
 struct wm_tally {
 	uint64_t proc, image;
-	uint64_t file_new, file_del, file_ren;
+	uint64_t file_new, file_del, file_ren, file_wr;
+	uint64_t reg;
 	uint64_t conn, bytes_sent, bytes_recv;
 	uint64_t raw;
 };

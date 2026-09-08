@@ -70,16 +70,44 @@
 #define KW_NET_ALL     0x0030u
 
 /*
- * The ids to let through, per provider, filtered IN THE PROVIDER.
+ * KERNEL-REGISTRY: CREATE, SETVALUE and DELETE, and not the reads.
  *
- * Kernel-Process's are known. Kernel-File's are not - see wevt_decode.c - so
- * its subscription is by KEYWORD ONLY and every id the keyword admits arrives.
- * That is the correct shape for a provider whose ids have not been verified: an
- * id filter built from guesses would silently exclude the events worth having,
- * and the keyword is already doing the volume work.
+ * This is the most expensive provider in the file. A desktop doing nothing
+ * touches the registry thousands of times a second, and the overwhelming
+ * majority of that is QUERY - which carries nothing anybody writes a rule
+ * against, exactly as with a file being read. Subscribing to it would spend
+ * the whole buffer budget on traffic that is discarded downstream, and the
+ * records lost to make room would be the ones that mattered.
+ *
+ * The keyword bits are the provider's own and are NOT VERIFIED on a real
+ * machine yet - the same standing as the GUID next to them in wevt_decode.c.
+ * `logman query providers Microsoft-Windows-Kernel-Registry` prints the table
+ * this assumes. A wrong keyword here is silent in the same way a wrong GUID
+ * is: the session starts and the machine looks quiet.
  */
-static const USHORT PROCESS_IDS[] = { 1, 2 };
-static const USHORT IMAGE_IDS[]   = { 1, 2, 5, 6 };
+#define KW_REG_CREATE   0x0020u
+#define KW_REG_SETVALUE 0x0100u
+#define KW_REG_DELETE   0x0040u
+#define KW_REG_MUTATE   (KW_REG_CREATE | KW_REG_SETVALUE | KW_REG_DELETE)
+
+/*
+ * NO EVENT-ID FILTER ON ANY PROVIDER ANY MORE, AND THAT IS THE POINT.
+ *
+ * Kernel-Process used to be enabled with EVENT_FILTER_TYPE_EVENT_ID naming
+ * { 1, 2, 5, 6 } on the grounds that "Kernel-Process's ids are known". They
+ * were assumed, not established - and a FilterIn list is the one construct
+ * here that can exclude an event with no trace whatsoever. If ImageLoad is not
+ * id 5 on some build, the session starts, the keyword is accepted, and no
+ * module load is ever delivered. That failure is indistinguishable from a
+ * machine that loads no modules, which is not a machine.
+ *
+ * The keywords already do the volume work - they are what stops the reads and
+ * the thread churn - so the id filter was buying almost nothing and could cost
+ * everything. Every provider here is now keyword-only, which is also the shape
+ * a discovery run needs: an id nobody has typed yet arrives as RAW and shows up
+ * in `--schema` with a count beside it, instead of being silently refused
+ * upstream by a list somebody wrote from memory.
+ */
 
 #define NAME_MAX_CH 128u
 
@@ -320,9 +348,20 @@ static int start_session(struct kofw_mon *m, const struct kofw_mon_option *o)
 {
 	EVENT_TRACE_PROPERTIES *p;
 	ULONG st;
-	ULONG kb   = o->buffer_kb    ? o->buffer_kb    : 64u;
-	ULONG minb = o->min_buffers  ? o->min_buffers  : 8u;
-	ULONG maxb = o->max_buffers  ? o->max_buffers  : 64u;
+	/*
+	 * SIZED FOR EVERY PROVIDER ON, because that is what the tools now ask
+	 * for by default.
+	 *
+	 * These were 64/8/64, chosen when the only subscription was process
+	 * start and stop - single digits per second. With the registry and the
+	 * file writes in the same session the rate is three orders of magnitude
+	 * higher, and a session whose buffers fill discards records at ITS end,
+	 * where this library cannot count them per subject. Buffers are cheap
+	 * and the loss they prevent is not recoverable.
+	 */
+	ULONG kb   = o->buffer_kb    ? o->buffer_kb    : 128u;
+	ULONG minb = o->min_buffers  ? o->min_buffers  : 32u;
+	ULONG maxb = o->max_buffers  ? o->max_buffers  : 256u;
 
 	p = props_new(m->name, kb, minb, maxb);
 	if (!p)
@@ -415,13 +454,7 @@ static int enable_providers(struct kofw_mon *m, uint32_t subs)
 		kw |= KW_IMAGE;
 
 	if (kw) {
-		const USHORT *ids = (subs & KOFW_SUB_IMAGE) ? IMAGE_IDS
-							    : PROCESS_IDS;
-		size_t n = (subs & KOFW_SUB_IMAGE)
-				   ? sizeof IMAGE_IDS / sizeof IMAGE_IDS[0]
-				   : sizeof PROCESS_IDS / sizeof PROCESS_IDS[0];
-
-		rc = enable_one(m, &KOFW_GUID_KERNEL_PROCESS, kw, ids, n);
+		rc = enable_one(m, &KOFW_GUID_KERNEL_PROCESS, kw, NULL, 0);
 		if (rc)
 			return rc;
 	}
@@ -440,6 +473,13 @@ static int enable_providers(struct kofw_mon *m, uint32_t subs)
 
 	if (subs & KOFW_SUB_NET) {
 		rc = enable_one(m, &KOFW_GUID_KERNEL_NET, KW_NET_ALL,
+				NULL, 0);
+		if (rc)
+			return rc;
+	}
+
+	if (subs & KOFW_SUB_REGISTRY) {
+		rc = enable_one(m, &KOFW_GUID_KERNEL_REGISTRY, KW_REG_MUTATE,
 				NULL, 0);
 		if (rc)
 			return rc;

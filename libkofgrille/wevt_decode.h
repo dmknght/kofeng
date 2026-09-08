@@ -49,9 +49,19 @@
  * unwalkable property, and the fields that fit are still decoded. */
 #define KOFW_SCHEMA_MAX_PROP 32u
 
-/* How many distinct (id, version) pairs are remembered. One provider with two
- * event ids needs a handful even across a Windows upgrade in flight. */
-#define KOFW_SCHEMA_MAX 64u
+/*
+ * How many distinct (id, version) pairs are remembered.
+ *
+ * 64 was sized for one provider with two event ids. It is not enough any more
+ * and the failure is not graceful: a full cache drops every NEW shape whole,
+ * permanently, so the last provider to be enabled is the one that gets nothing.
+ * Kernel-Registry alone publishes dozens of ids and Kernel-File is subscribed
+ * by keyword, which admits every id the keyword covers.
+ *
+ * 256 costs 256 * sizeof(struct kofw_schema), taken once at open and never
+ * grown - which is the same trade the ring makes, for the same reason.
+ */
+#define KOFW_SCHEMA_MAX 256u
 
 /*
  * The providers, defined once and shared with the session that enables them.
@@ -65,6 +75,7 @@
 extern const GUID KOFW_GUID_KERNEL_PROCESS;   /* Microsoft-Windows-Kernel-Process */
 extern const GUID KOFW_GUID_KERNEL_FILE;      /* Microsoft-Windows-Kernel-File */
 extern const GUID KOFW_GUID_KERNEL_NET;       /* Microsoft-Windows-Kernel-Network */
+extern const GUID KOFW_GUID_KERNEL_REGISTRY;  /* Microsoft-Windows-Kernel-Registry */
 
 struct kofw_prop {
 	uint16_t in_type;   /* TDH_INTYPE_* */
@@ -91,6 +102,20 @@ struct kofw_schema {
 	uint8_t  in_use;
 	uint8_t  truncated;  /* the shape stops early - see the header comment */
 	uint8_t  n_prop;
+
+	/*
+	 * HOW MANY RECORDS OF THIS SHAPE ARRIVED.
+	 *
+	 * Discovery needs it and a list of ids does not supply it. "Which ids
+	 * exist" is answered by the shape list; "which id is the volume" is the
+	 * question that decides what gets typed and what gets filtered out at
+	 * the provider, and it is the one that costs money to get wrong.
+	 *
+	 * On the callback thread, so it is a plain increment on a cache line
+	 * this thread already owns - no atomic, because there is one producer.
+	 */
+	uint64_t hits;
+
 	struct kofw_prop prop[KOFW_SCHEMA_MAX_PROP];
 };
 
