@@ -35,9 +35,30 @@
  * reading the same four fields to reach the same two answers.
  */
 struct kof_amsi_view {
-	uint64_t obj_off;   /* where the submitted content starts */
-	uint64_t obj_len;   /* and how much of it there is */
-	uint64_t size;      /* the object as a whole */
+	/*
+	 * WHERE THE SUBMITTED CONTENT IS - FILLED BY THE CALLER, BEFORE THE
+	 * PARSE.
+	 *
+	 * This is input, not output, and that is the whole reason the engine
+	 * can host this parser at all. The offsets live in a collected-event
+	 * record, and that record's layout belongs to libkoforbit - which sits
+	 * OUTSIDE the engine and must stay there: orbit may know the engine's
+	 * types, the engine must never know orbit's. Reading the record here
+	 * would have turned that arrow round, and did until it was noticed.
+	 *
+	 * The caller already has both numbers. It is the client that took the
+	 * record off a channel, or the viewer that opened a log; it declared
+	 * this format in the first place, so it is not being asked for anything
+	 * it had to work out.
+	 *
+	 * The parse VALIDATES them against the buffer. Being told is not being
+	 * right, and an offset past the end would otherwise resolve to a range
+	 * that is not there.
+	 */
+	uint64_t obj_off;
+	uint64_t obj_len;
+
+	uint64_t size;      /* the object as a whole; filled by the parse */
 };
 
 int  kof_amsi_sniff(kof_buf b);
@@ -49,17 +70,6 @@ uint64_t    kof_amsi_anomalies(const void *view);
 
 extern const uint32_t kof_amsi_regions[2];
 
-/*
- * WHICH SIGNATURE TARGET A VERB ROUTES TO, or KOF_FMT_UNKNOWN.
- *
- * The verb is the byte a client filters records on: it decides which rules are
- * even offered a record. This is that decision, in one place.
- *
- * HERE AND NOT IN kofevt.h, which is deliberately standalone - it is compiled
- * into the Windows collector, which must not start pulling in the engine's
- * headers. The mapping is about SIGNATURE TARGETS, so it belongs on the side
- * that knows what a target is.
- */
-uint8_t kof_evt_target_of(uint16_t verb);
+
 
 #endif /* KOF_AMSI_PARSE_H */

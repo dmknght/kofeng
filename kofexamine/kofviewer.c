@@ -926,6 +926,18 @@ struct view {
 	int                  tree_dirty;
 
 	/*
+	 * WHERE A SCAN'S RESULT FOR ITS OWN ROOT SHOULD GO, or -1.
+	 *
+	 * A scan reports the object it was given first, and on_object's normal
+	 * job is to APPEND what it is told about. That is right when the engine
+	 * is walking a file and discovering objects; it is wrong for a row the
+	 * tree already has - a carried image, scanned on its own - where the
+	 * findings belong to the row a reader is looking at and a second copy
+	 * of it would appear beside itself.
+	 */
+	int                  into_obj;
+
+	/*
 	 * HOW MANY OF THOSE RECORDS ARE EVENTS.
 	 *
 	 * Not the same number as log_n, and the difference is not cosmetic: a
@@ -1761,6 +1773,32 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		v->skip_root = 0;
 		return 0;
 	}
+
+	/*
+	 * INTO A ROW THAT ALREADY EXISTS - see view.into_obj. Only the verdict
+	 * is taken: the name, the bytes and the parse are the row's own and
+	 * were settled before the scan ran.
+	 */
+	if (v->into_obj >= 0) {
+		o = &v->obj[v->into_obj];
+		v->into_obj = -1;
+		free(o->finding);
+		o->finding = NULL;
+		o->n_finding = 0;
+		o->heur = *res;
+		o->broken = res->broken;
+		for (i = 0; i < res->n; i++) {
+			struct kof_finding *g = realloc(o->finding,
+						(o->n_finding + 1) * sizeof *g);
+
+			if (!g)
+				break;
+			o->finding = g;
+			o->finding[o->n_finding++] = res->v[i];
+		}
+		return 0;
+	}
+
 	o = &v->obj[v->n_obj];
 	memset(o, 0, sizeof *o);
 	snprintf(o->name, sizeof o->name, "%s", name);
@@ -4106,6 +4144,66 @@ static void evt_load(struct view *v)
 						 (unsigned long long)cid,
 						 kof_format_name(c->ctx.format),
 						 kof_arch_name(c->ctx.arch));
+				}
+				/*
+				 * AND SCANNED, because nothing else will scan
+				 * it.
+				 *
+				 * objects_collect is skipped while a log is
+				 * open - the engine would replace the event
+				 * window with one object holding the whole file
+				 * - so a carried image was the one object in
+				 * the tool that no module ever ran against. A
+				 * signature written from it could never fire,
+				 * which is exactly what it looked like.
+				 *
+				 * ONLY WHEN IT PARSED. An image the engine
+				 * cannot identify has no format for the
+				 * prefilter to rule on, so a scan of it would
+				 * be every module in the database against
+				 * bytes nothing claimed.
+				 *
+				 * Once per materialisation, guarded by fmt
+				 * arriving - the same edge the tree rebuild
+				 * uses. Re-scanning on every keypress would
+				 * spend the database on an object whose bytes
+				 * have not changed.
+				 */
+				if (c->fmt && !had_fmt && v->eng) {
+					struct kof_scan_option so;
+					kof_scanner *sc2;
+
+					memset(&so, 0, sizeof so);
+					so.all_matches = 1;
+					so.heur_level = KOF_HEUR_LEVEL_MAX;
+					sc2 = kof_scanner_new(v->eng);
+					if (sc2) {
+						v->into_obj = (int)sel;
+						kof_scan_bytes(sc2, c->buf.p,
+							       c->buf.n,
+							       c->name, &so,
+							       on_object, v);
+						v->into_obj = -1;
+						kof_scanner_free(sc2);
+					}
+					/*
+					 * AND THE MARKER TOUCHES, which is a
+					 * second question the panel asks: not
+					 * "did a module fire" but "which of the
+					 * database's markers are in here, and
+					 * for the modules that did not fire,
+					 * why". objects_examine does this for
+					 * every ordinary object and skipped
+					 * this one, because it had no bytes
+					 * when that pass ran.
+					 */
+					if (!kof_touch_object(v->eng, c->buf,
+							      &c->ctx, c->fmt,
+							      c->finding,
+							      c->n_finding,
+							      &c->touch,
+							      &c->n_touch))
+						c->n_touch = 0;
 				}
 				if (c->fmt && !had_fmt)
 					v->tree_dirty = 1;
@@ -19477,6 +19575,9 @@ int main(int argc, char **argv)
 	int i, rc = 0;
 
 	memset(&v, 0, sizeof v);
+	/* -1 is "nowhere", and zero is a real object index - see into_obj. A
+	 * memset alone would have aimed every scan's root at the file. */
+	v.into_obj = -1;
 	/* The one preference that is not zero at rest. Everything else file_open
 	 * sets, for the first file and for every one after it. */
 	v.ed.dr.decl_cap = 12;

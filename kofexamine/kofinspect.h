@@ -587,6 +587,22 @@ void kof_inspect_event(const struct kof_evt *e,
 		       kof_inspect_line out, void *user);
 
 /*
+ * WHAT A SCAN DECIDED ABOUT AN OBJECT.
+ *
+ * One line per finding: the verdict, the family it named and the module that
+ * named it. Nothing is interpreted here - a finding already carries its own
+ * name and where each part of it starts, so this is a rendering and not a
+ * second opinion.
+ *
+ * Emits nothing when there are none, which is the common case and is not a
+ * result worth a line of its own: whoever calls this decides whether silence
+ * needs saying.
+ */
+void kof_inspect_findings(const struct kof_finding *f, uint32_t n,
+			  const struct kof_inspect_style *st,
+			  kof_inspect_line out, void *user);
+
+/*
  * HOW MANY OF EACH VERB A LOG HOLDS.
  *
  * `count` is indexed by verb and `keep` is the mask of the ones a caller is

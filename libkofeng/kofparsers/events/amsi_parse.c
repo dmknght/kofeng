@@ -4,40 +4,6 @@
 #include <string.h>
 
 #include "amsi_parse.h"
-#include "../../../libkoforbit/kofevt/kofevt.h"
-
-/*
- * The target value and the verb are ONE NUMBER, and these are what keep them so.
- *
- * A mapping table would work and would be a second place to edit; equal values
- * make kof_evt_target_of a check rather than a translation. The asserts turn
- * "they happen to match" into "they cannot stop matching" - give a target a
- * number that is not its verb, or give one to a verb below the boundary, and
- * the build stops here instead of routing records to the wrong rules.
- */
-_Static_assert((int)KOF_EVT_AMSI == (int)KOF_EVT_AMSI_SCAN,
-	       "an event target's value must be its verb");
-_Static_assert(KOF_EVT_AMSI >= KOF_TARGET_FIRST_EVENT &&
-	       KOF_EVT_AMSI < KOF_TARGET_BITS,
-	       "an event target must sit above the file formats and inside the "
-	       "32-bit target mask");
-
-uint8_t kof_evt_target_of(uint16_t verb)
-{
-	switch (verb) {
-	case KOF_EVT_AMSI_SCAN:
-		return KOF_EVT_AMSI;
-	/*
-	 * Everything else, INCLUDING the verbs whose rules are obviously worth
-	 * writing one day. A network receive wants a rule that compares an
-	 * address to a list, which is not a search through bytes and so is not
-	 * this target's shape - it gets its own value and its own regions when
-	 * it is built, not a borrowed one now.
-	 */
-	default:
-		return KOF_FMT_UNKNOWN;
-	}
-}
 
 const uint32_t kof_amsi_regions[2] = {
 	KOF_SCAN_AMSI_META,
@@ -104,64 +70,28 @@ static uint32_t amsi_resolve_scan(const struct kof_obj_ctx *ctx,
 int kof_amsi_parse(kof_buf b, void *view, struct kof_obj_ctx *ctx)
 {
 	struct kof_amsi_view *v = view;
-	struct kof_evt e;
-	uint64_t start, len;
 
-	if (!v || !ctx || !b.p || b.n < KOF_EVT_HEAD)
+	if (!v || !ctx || !b.p || !b.n)
 		return 0;
 
 	/*
-	 * Copied out rather than cast over.
+	 * BEING TOLD IS NOT BEING RIGHT.
 	 *
-	 * The buffer may be a mapping, and it may have been written by a build
-	 * whose record was a different size; a bounded copy into this build's
-	 * struct is the only read of it that is defined. It costs 512 bytes
-	 * once per object.
+	 * The caller supplies the content's extent - see the header for why the
+	 * engine does not read it out of the record itself - and these checks
+	 * are what stop a wrong answer from resolving to ranges outside the
+	 * object.
 	 */
-	memset(&e, 0, sizeof e);
-	memcpy(&e, b.p, b.n < sizeof e ? (size_t)b.n : sizeof e);
-
-	/*
-	 * BEING TOLD IS NOT BEING RIGHT. A caller declares the format; these
-	 * checks are what stop a wrong declaration from resolving to ranges
-	 * outside the object.
-	 */
-	if (e.verb != KOF_EVT_AMSI_SCAN)
+	if (v->obj_off >= b.n)
 		return 0;
-	if (e.off_object == KOF_TEXT_NONE || e.off_object >= sizeof e.text)
-		return 0;
+	if (!v->obj_len || v->obj_len > b.n - v->obj_off)
+		v->obj_len = b.n - v->obj_off;
 
-	start = (uint64_t)KOF_EVT_HEAD + e.off_object;
-	if (start >= b.n)
-		return 0;
+	v->size = b.n;
 
-	/*
-	 * HOW LONG THE CONTENT IS, and why the buffer has the last word.
-	 *
-	 * content_len is a uint16, so it cannot describe a submission past 64K
-	 * - and a reassembled event routinely is one, because that is the whole
-	 * point of the continuation records. When the caller has joined the
-	 * chunks it presents head plus the WHOLE content and the content is
-	 * everything to the end of the buffer, which is a length no field in
-	 * the record can hold.
-	 *
-	 * So: the field when it fits inside the buffer, the rest of the buffer
-	 * when it does not. Both readings agree for an unjoined record, and the
-	 * disagreement for a joined one is resolved towards the bytes that are
-	 * actually there rather than towards a number that cannot describe
-	 * them.
-	 */
-	len = e.content_len;
-	if (len == 0 || start + len > b.n)
-		len = b.n - start;
-
-	v->obj_off = start;
-	v->obj_len = len;
-	v->size    = b.n;
-
-	ctx->format    = KOF_EVT_AMSI;
-	ctx->obj_size  = b.n;
-	ctx->file_header = v;
+	ctx->format       = KOF_EVT_AMSI;
+	ctx->obj_size     = b.n;
+	ctx->file_header  = v;
 	ctx->resolve_scan = amsi_resolve_scan;
 	return 1;
 }

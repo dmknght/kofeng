@@ -203,9 +203,13 @@ enum kof_format {
 	 * record says happened. This is what a RULE targets. They are one to
 	 * one today and they are not the same axis: verbs are the collector's
 	 * vocabulary and grow as it learns event ids, targets grow only when
-	 * there is a shape worth writing rules against. kof_evt_target_of()
-	 * maps one to the other, so the relationship is code rather than a
-	 * convention two files have to remember.
+	 * there is a shape worth writing rules against.
+	 *
+	 * WHO MAPS ONE TO THE OTHER is the CLIENT, not the engine. A verb is
+	 * libkoforbit's vocabulary and this is the engine's; whoever holds a
+	 * record and wants it scanned knows both, and it is the only side that
+	 * does. The engine deliberately cannot name a verb - see the note in
+	 * amsi_parse.h on which way that arrow points.
 	 */
 	KOF_EVT_AMSI    = 19,
 
