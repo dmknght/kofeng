@@ -778,6 +778,15 @@ struct node {
 	uint64_t bytes;
 
 	/*
+ * How many pieces of one submission the character-to-byte map holds - the
+ * record plus sixty-three continuations, which is about twenty-five kilobytes
+ * of content. Past it a selection still copies and still declares; only the
+ * highlight in the dump stops, because that is the part that needs to know
+ * where each piece is.
+ */
+#define EVT_SEG_MAX 64
+
+/*
 	 * Where this row was last being looked at.
 	 *
 	 * Per row rather than one cursor for the pane, because moving between
@@ -992,6 +1001,24 @@ struct view {
 	 * between every letter is the thing that makes it unreadable.
 	 */
 	int                  evt_wide;
+
+	/*
+	 * WHERE THE GATHERED CONTENT SITS IN THE NODE'S BYTES.
+	 *
+	 * The submission is one string once it is joined, and it is NOT one run
+	 * in the file: the record holds the first four hundred bytes of it and
+	 * each continuation holds the next, with a seventy-two byte head in
+	 * between. So a character in the box maps to a byte in the dump only
+	 * through a table of the pieces.
+	 *
+	 * Without it the sync could only mark a selection inside the FIRST
+	 * record, which is the part a reader scrolls past.
+	 *
+	 * Capped, and the cap is honest: past it the map runs out and the sync
+	 * marks nothing rather than marking the wrong bytes.
+	 */
+	struct { uint32_t at, len; } evt_seg[EVT_SEG_MAX];
+	int                  evt_n_seg;
 
 	/*
 	 * A RUN OF CHARACTERS PICKED OUT OF ONE ROW'S VALUE.
@@ -2926,6 +2953,7 @@ static uint64_t hex_max(const struct view *v)
  * every record can be the big one, so making it conditional would only move
  * the cost to whichever event was selected.
  */
+
 #define EVT_JOIN_MAX (64u * 1024u)
 #define EVT_TEXT_MAX (64u * 1024u)
 
@@ -3463,6 +3491,16 @@ static int evt_text_span(const struct view *v, int *from, int *to)
 }
 
 /*
+ * Put a file offset on screen, a few rows down rather than at the very top.
+ *
+ * Landing a jump on the first row leaves nothing above it, and what is above a
+ * marker is half of what says whether it is the right marker - the string before
+ * it, the padding, the structure it sits in. Two rows of lead-in costs nothing
+ * and is what a reader would have scrolled to anyway.
+ */
+#define JUMP_LEAD 2u
+
+/*
  * Put the hex pane's selection over the bytes the box's selection came from.
  *
  * The two panes are showing one record and a reader dragging through the text
@@ -3476,27 +3514,102 @@ static int evt_text_span(const struct view *v, int *from, int *to)
  * at the end of this record's content rather than running on over bytes it
  * cannot account for.
  */
-static void evt_sync_hex(struct view *v)
+/*
+ * One byte of the gathered content, as an offset into the node's bytes.
+ * KOF_BROKEN when the map does not reach that far.
+ *
+ * The content is one string and several runs - see evt_seg - so this is a walk
+ * over the pieces rather than an addition.
+ */
+static uint64_t evt_content_byte(const struct view *v, uint64_t at)
 {
-	uint16_t off = 0;
-	int step = 1, fl, from = 0, to = 0;
+	int k;
+
+	for (k = 0; k < v->evt_n_seg; k++) {
+		if (at < v->evt_seg[k].len)
+			return (uint64_t)v->evt_seg[k].at + at;
+		at -= v->evt_seg[k].len;
+	}
+	return KOF_BROKEN;
+}
+
+/*
+ * Take the dump to one character of the box.
+ *
+ * Used at the PRESS, where there is no span yet - a and b are the same
+ * character - so evt_sync_hex has nothing to reveal and returns before it
+ * could. Revealing the anchor instead is what a reader means by clicking into
+ * text: show me where this is.
+ */
+static void evt_reveal_char(struct view *v, int c)
+{
+	uint64_t at, per, hrow;
+
+	if (!v->evt_n_seg)
+		return;
+	at = evt_content_byte(v, (uint64_t)c * (uint64_t)(v->evt_wide ? 2 : 1));
+	if (at == KOF_BROKEN)
+		return;
+	per = (uint64_t)(v->per > 0 ? v->per : 16);
+	hrow = at / per;
+	v->rgn_at = hrow > JUMP_LEAD ? (hrow - JUMP_LEAD) * per : 0;
+	if (v->rgn_at > hex_max(v))
+		v->rgn_at = hex_max(v);
+}
+
+static void evt_sync_hex(struct view *v, int reveal)
+{
+	int step = 1, from = 0, to = 0;
 	uint64_t a, b;
 
-	fl = evt_box_extent(v, &off, &step);
-	if (!fl || !evt_text_span(v, &from, &to)) {
+	if (!evt_text_span(v, &from, &to) || !v->evt_n_seg) {
 		v->sel_a = v->sel_b = KOF_BROKEN;
 		return;
 	}
-	a = (uint64_t)off + (uint64_t)from * (uint64_t)step;
-	b = (uint64_t)off + (uint64_t)to * (uint64_t)step;
-	if (b > (uint64_t)off + (uint64_t)fl)
-		b = (uint64_t)off + (uint64_t)fl;
-	if (a >= b) {
+	step = v->evt_wide ? 2 : 1;
+
+	/*
+	 * THE FIRST AND LAST BYTE THE PICKED CHARACTERS OCCUPY.
+	 *
+	 * A UTF-16 character is two bytes, so a run of ten is twenty - and the
+	 * run may cross from the record into a continuation, where the next
+	 * byte is seventy-two further on than arithmetic would say. Both ends
+	 * go through the map for that reason.
+	 *
+	 * The two ends may land in different pieces, and then the marked range
+	 * covers the head between them. That is the honest picture: those bytes
+	 * really are between the two halves of what was selected, and hiding
+	 * them would draw a selection the file does not have.
+	 */
+	a = evt_content_byte(v, (uint64_t)from * (uint64_t)step);
+	b = evt_content_byte(v, (uint64_t)to * (uint64_t)step - 1u);
+	if (a == KOF_BROKEN || b == KOF_BROKEN || b < a) {
 		v->sel_a = v->sel_b = KOF_BROKEN;
 		return;
 	}
 	v->sel_a = a;
-	v->sel_b = b - 1u;
+	v->sel_b = b;
+
+	/*
+	 * TAKE THE DUMP TO IT, but only when the selection STARTS.
+	 *
+	 * A mark the reader cannot see is the same as no mark, and after a few
+	 * turns of the wheel the box is showing text whose bytes are a long way
+	 * down the record - so a selection made there landed off-screen and the
+	 * sync looked like it was not happening at all.
+	 *
+	 * Not on every drag step. The far end of a selection moves with the
+	 * pointer, and scrolling the dump under it on each motion would make
+	 * the bytes slide away while the reader is still choosing them.
+	 */
+	if (reveal) {
+		uint64_t per = (uint64_t)(v->per > 0 ? v->per : 16);
+		uint64_t hrow = v->sel_a / per;
+
+		v->rgn_at = hrow > JUMP_LEAD ? (hrow - JUMP_LEAD) * per : 0;
+		if (v->rgn_at > hex_max(v))
+			v->rgn_at = hex_max(v);
+	}
 }
 
 static size_t evt_sel_text(const struct view *v, char *out, size_t cap)
@@ -3572,6 +3685,7 @@ static void evt_load(struct view *v)
 	v->evt_join_len = 0;
 	v->evt_text_len = 0;
 	v->evt_wide = 0;
+	v->evt_n_seg = 0;
 	if (v->evt_join && v->evt_text && v->log) {
 		const struct kofevt_log_hdr *h = kofevt_log_header(v->log);
 		struct kof_evt_join j;
@@ -3579,6 +3693,15 @@ static void evt_load(struct view *v)
 
 		if (kof_evt_join_start(&j, &v->evt, v->evt_join,
 				       EVT_JOIN_MAX)) {
+			/* The record's own share, which is where the content
+			 * starts in the node's bytes. */
+			if (j.len) {
+				v->evt_seg[0].at =
+					(uint32_t)h->head_size +
+					v->evt.off_object;
+				v->evt_seg[0].len = (uint32_t)j.len;
+				v->evt_n_seg = 1;
+			}
 			while (at + h->head_size <= o->buf.n) {
 				struct kof_evt c;
 				uint16_t tl = 0;
@@ -3595,8 +3718,22 @@ static void evt_load(struct view *v)
 					break;
 				memcpy(c.text, o->buf.p + at + h->head_size,
 				       tl);
-				if (!kof_evt_join_add(&j, &c))
-					break;
+				{
+					size_t was = j.len;
+
+					if (!kof_evt_join_add(&j, &c))
+						break;
+					if (j.len > was &&
+					    v->evt_n_seg < EVT_SEG_MAX) {
+						v->evt_seg[v->evt_n_seg].at =
+							(uint32_t)(at +
+							   h->head_size +
+							   c.off_object);
+						v->evt_seg[v->evt_n_seg].len =
+							(uint32_t)(j.len - was);
+						v->evt_n_seg++;
+					}
+				}
 				at += (size_t)h->head_size + tl;
 			}
 			v->evt_join_len = j.len;
@@ -8898,6 +9035,7 @@ enum menu_action {
 	 * of item nobody can predict.
 	 */
 	M_EVT_COPY,
+	M_EVT_COPY_ALL,
 	M_EVT_DECL,
 	M_COUNT
 };
@@ -8963,6 +9101,21 @@ static const struct {
 	/* Context 8: the event panel's text box. Nothing else offers these and
 	 * they offer nothing else. */
 	{ "Copy text",            8, 0 },
+	/*
+	 * The whole submission, not the part that was dragged.
+	 *
+	 * Directly under "Copy text" because it is the same verb over a wider
+	 * subject, and a reader who has just failed to select two thousand
+	 * characters by dragging should find it there.
+	 *
+	 * OFFERED ONLY WHEN THE CONTENT IS TEXT. A submission carrying a PE is
+	 * an executable, and its rendering is a column of dots with the
+	 * printable fragments of a binary between them - putting that on a
+	 * clipboard gives back something that is neither the file nor a
+	 * readable quotation of it. What that case wants is a dump, which is a
+	 * different item and does not exist yet.
+	 */
+	{ "Copy all text",        8, 0 },
 	{ "Declare as text",      8, 1 }
 };
 
@@ -8970,6 +9123,22 @@ static const struct {
 
 static int menu_shown(struct view *v, int a)
 {
+	/*
+	 * A RECORD HAS NO INSTRUCTIONS.
+	 *
+	 * "View disassembly" asks what a run of bytes DOES, which is a question
+	 * about code. An event's bytes are a struct: integers, offsets and a
+	 * text arena. Disassembling them produces a page of plausible-looking
+	 * instructions that correspond to nothing, which is worse than an empty
+	 * panel because it reads as an answer.
+	 *
+	 * Hidden rather than greyed, and the rule under it goes with it - the
+	 * separator existed to set this item apart from the two around it, so
+	 * with the item gone it would be a line dividing nothing from nothing.
+	 * menu_gap counts only SHOWN rows, so that follows on its own.
+	 */
+	if (v->log && a == M_DISASM)
+		return 0;
 	return (menu_item[a].ctx & v->menu_ctx) != 0;
 }
 
@@ -9074,6 +9243,12 @@ static int menu_enabled(struct view *v, int a)
 		char sel[8];
 
 		return evt_sel_text(v, sel, sizeof sel) != 0;
+	}
+	if (a == M_EVT_COPY_ALL) {
+		/* Hidden rather than greyed for a binary payload: greying it
+		 * would say "not yet", and the answer is not "not yet". */
+		return v->evt_text_len != 0 &&
+		       !kof_evt_content_looks_binary(&v->evt);
 	}
 	if (a == M_FIND_STR || a == M_FIND_HEX)
 		return 1;       /* opens the find dialog, in either mode */
@@ -9884,6 +10059,18 @@ static void menu_run(struct view *v, int a)
 		v->menu_open = 0;
 		return;
 	}
+	if (a == M_EVT_COPY_ALL) {
+		char scratch[512];
+		size_t sn = 0;
+		const char *all = evt_box_text(v, scratch, sizeof scratch, &sn);
+
+		if (all && sn) {
+			copy_osc52(all, sn);
+			copy_said(v, sn);
+		}
+		v->menu_open = 0;
+		return;
+	}
 	if (a == M_EVT_COPY || a == M_EVT_DECL) {
 		char sel[512];
 		size_t sn = evt_sel_text(v, sel, sizeof sel);
@@ -10322,15 +10509,6 @@ static int byte_under(struct view *v, int row, int col, uint64_t *out)
 	return 1;
 }
 
-/*
- * Put a file offset on screen, a few rows down rather than at the very top.
- *
- * Landing a jump on the first row leaves nothing above it, and what is above a
- * marker is half of what says whether it is the right marker - the string before
- * it, the padding, the structure it sits in. Two rows of lead-in costs nothing
- * and is what a reader would have scrolled to anyway.
- */
-#define JUMP_LEAD 2u
 
 /*
  * The region row of `obj` that contains `file_off`, or the object row when none
@@ -10853,11 +11031,60 @@ static int bar_has_sub(int i)
  * it does depends on which unpacker filled the tree.
  */
 /* The verb a filter child stands for, or -1. */
+/*
+ * WHICH VERB A FILTER SLOT STANDS FOR, in the order a reader reads.
+ *
+ * It was the verb's own number, which is the order the collector learnt its
+ * event ids in - so ImageLoad and ImageUnload sat three rows apart with file
+ * events between them, and a reader looking for "the image ones" had to scan
+ * the whole list to find out there were two.
+ *
+ * Sorted by NAME instead, which puts the pairs together for the reason they
+ * read as pairs: they share a prefix because they are the same subject. The
+ * numbers do not change - this is a presentation order and nothing stored ever
+ * sees it.
+ *
+ * Built once and kept, because it is asked for by every walk over the menu -
+ * the drawer, the hit test, the keyboard cursor - and it is the same answer
+ * every time.
+ */
 static int bar_filt_verb(int i)
 {
-	if (i >= BI_FILT_V0 && i <= BI_FILT_V19)
-		return i - BI_FILT_V0;
-	return -1;
+	static uint8_t order[KOF_EVT_TYPE_COUNT];
+	static int n_order;
+	int k;
+
+	if (i < BI_FILT_V0 || i > BI_FILT_V19)
+		return -1;
+
+	if (!n_order) {
+		/* Insertion sort over a couple of dozen names, once. Verb 0 is
+		 * not a verb and KOF_EVT_CONT is not an event a reader filters
+		 * on - see log_scan_verbs - so neither is offered a slot. */
+		int vb;
+
+		for (vb = 1; vb < KOF_EVT_TYPE_COUNT; vb++) {
+			const char *name;
+			int at;
+
+			if (vb == KOF_EVT_CONT)
+				continue;
+			name = kof_evt_verb_name((uint16_t)vb);
+			for (at = n_order; at > 0; at--) {
+				const char *prev =
+					kof_evt_verb_name(order[at - 1]);
+
+				if (strcmp(prev, name) <= 0)
+					break;
+				order[at] = order[at - 1];
+			}
+			order[at] = (uint8_t)vb;
+			n_order++;
+		}
+	}
+
+	k = i - BI_FILT_V0;
+	return k < n_order ? (int)order[k] : -1;
 }
 
 static const char *bar_label(struct view *v, int i)
@@ -16538,7 +16765,21 @@ static void click(struct view *v, int rclick)
 			 g_mx > TREE_W && !v->show_list && !v->menu_open) ||
 			(g_disasm_rows && g_my >= dis_top() &&
 			 g_my <= hex_bot() && g_mx > TREE_W &&
-			 !v->show_list && !v->menu_open)))
+			 !v->show_list && !v->menu_open) ||
+			/*
+			 * AND THE EVENT PANEL'S TEXT BOX, which was left out
+			 * and made its menu unreachable.
+			 *
+			 * This gate is the rule that the right button belongs
+			 * to the panes that have a menu, and the box grew one -
+			 * so it has to be named here or the click is refused
+			 * before anything downstream sees it. It sits below
+			 * hex_last(), which is what put it outside the first
+			 * test even though it is inside the hex column.
+			 */
+			(evt_live(v) && g_my >= evt_box_top(v) &&
+			 g_my < evt_box_top(v) + EVT_BOX_ROWS &&
+			 g_mx > TREE_W && !v->show_list && !v->menu_open)))
 		return;
 
 	/*
@@ -16759,7 +17000,8 @@ static void click(struct view *v, int rclick)
 		if (evt_text_at(v, g_my, g_mx, &c)) {
 			v->evt_txt_a = v->evt_txt_b = c;
 			v->evt_txt_drag = 1;
-			evt_sync_hex(v);
+			evt_reveal_char(v, c);
+			evt_sync_hex(v, 0);
 			return;
 		}
 		r = evt_meta_at(v, g_my, g_mx);
@@ -17651,7 +17893,7 @@ static void on_drag(struct view *v)
 			 * from one row to another. */
 			if (evt_text_at(v, g_my, g_mx, &c)) {
 				v->evt_txt_b = c;
-				evt_sync_hex(v);
+				evt_sync_hex(v, 0);
 			}
 			return;
 		}
