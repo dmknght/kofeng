@@ -639,10 +639,46 @@ static void finding_str(const struct kof_scanner *sc,
  * scan. That is the same answer an unrecognised format gets, and it is the right
  * one: the object still gets scanned by every module whose target covers unknown.
  */
-static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx)
+static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
+		     uint8_t as_format)
 {
 	const struct kof_parser *parsers;
 	uint32_t i, n;
+
+	/*
+	 * A FORMAT THE CALLER DECLARED, which is not something any sniff can
+	 * answer.
+	 *
+	 * Every format below is recognised from its bytes. A collected event is
+	 * not: a record has no magic, and a submitted script block is a
+	 * PowerShell fragment that no file format claims - so a submission
+	 * scanned through the sniff chain comes out "unrecognised", and every
+	 * rule written about it is filtered out before it runs. That was the
+	 * whole gap: the viewer could show the thing and the scanner could not
+	 * be told what it was.
+	 *
+	 * The caller knows. It read the record off a channel or out of a log,
+	 * and it is the only side that can know - so it says, and the sniff
+	 * chain is skipped rather than consulted and overruled.
+	 *
+	 * The parse still runs and may still refuse. Being told is not being
+	 * right, and a declaration that does not survive its own parser leaves
+	 * the object unidentified exactly as a failed sniff would.
+	 */
+	if (as_format) {
+		const struct kof_parser *p = kof_parser_of(as_format);
+
+		if (p) {
+			if (!sc->view[as_format]) {
+				sc->view[as_format] = malloc(p->view_size);
+				if (!sc->view[as_format])
+					return;
+				memset(sc->view[as_format], 0, p->view_size);
+			}
+			(void)p->parse(buf, sc->view[as_format], ctx);
+		}
+		return;
+	}
 
 	parsers = kof_parser_list(&n);
 	for (i = 0; i < n; i++) {
@@ -1282,7 +1318,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	sc->use = NULL;
 	sc->use_done = 0;
 
-	identify(sc, buf, &ctx);
+	identify(sc, buf, &ctx, opt ? opt->as_format : 0u);
 
 	present = regions_present(&ctx, sc->eng->scan_mask);
 	present |= sym_halves_present(&ctx, sc->eng->scan_mask);

@@ -48,6 +48,7 @@
 #include <string.h>
 
 #include "kofeng.h"
+#include <kofmod/kofsig.h>   /* KOF_EVT_AMSI - the target a submission is */
 #include "kofevt.h"
 #include "kofevtfmt.h"
 #include "kofevtlog.h"
@@ -164,6 +165,73 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		printf("NOT FULLY EXAMINED  %s  (reason %u)\n",
 		       name ? name : "?", (unsigned)res->broken);
 	return 0;
+}
+
+/*
+ * Scan a gathered submission, as the file it turned out to be.
+ *
+ * SCANNED AS AN ORDINARY OBJECT, not as an event. What a submission carries is
+ * a PowerShell script or, often enough, an executable - and an executable that
+ * arrived down a channel is the same executable it would have been on disk, so
+ * it wants the same modules. This is the model a zip entry already uses: the
+ * container hands over bytes, and what they ARE is the engine's question.
+ *
+ * The event is still named in whatever fires, through hit_ctx, so a finding
+ * says which submission and which process it came out of rather than pointing
+ * at a buffer nobody can locate afterwards.
+ */
+static void scan_submission(kof_scanner *sc, struct kof_evt_join *j,
+			    const struct kof_evt *head, int do_scan,
+			    struct hit_ctx *hits, uint64_t *scanned)
+{
+	struct kof_scan_option opt;
+	char name[96];
+
+	if (!do_scan || !sc || !j || j->idle || !j->len)
+		return;
+	/*
+	 * A SHORT GATHER IS STILL SCANNED, and that is deliberate: a chunk was
+	 * lost or the buffer filled, but the bytes in hand are real and a
+	 * marker inside them is still a marker. What must not happen is
+	 * treating it as whole - kof_evt_join_whole is what says so, and a
+	 * caller reporting on this should carry that through.
+	 */
+	snprintf(name, sizeof name, "event//%llu//%s",
+		 (unsigned long long)head->seq, kof_evt_verb_name(head->verb));
+	hits->e = head;
+
+	/*
+	 * TWICE, AND THE TWO ASK DIFFERENT QUESTIONS.
+	 *
+	 * As the bytes SNIFF: a submission that carries an executable is that
+	 * executable, and it wants the modules any executable would get. This
+	 * is the pass that finds a Meterpreter image inside an AMSI event, and
+	 * it is the model a zip entry already uses - the container hands over
+	 * bytes and what they ARE is the engine's question.
+	 *
+	 * As the FORMAT IT IS: a script block is not a file format and sniffs
+	 * as nothing, so without a declaration every rule written about a
+	 * submission is filtered out before it runs. The caller is the only
+	 * side that knows what this is, and as_format is how it says.
+	 *
+	 * A STOPGAP, and worth naming as one. The engine's own answer to "a
+	 * container holding a file" is a child object, so the right shape is an
+	 * unpack-kind module targeting KOF_EVT_AMSI that emits the carried
+	 * image - and then one declared scan would reach both. Until that
+	 * exists, two passes over bytes already in memory is the cheap way not
+	 * to lose either half.
+	 */
+	memset(&opt, 0, sizeof opt);
+	opt.all_matches = 1;
+	(void)kof_scan_bytes(sc, j->buf, (uint64_t)j->len, name, &opt,
+			     on_object, hits);
+
+	memset(&opt, 0, sizeof opt);
+	opt.all_matches = 1;
+	opt.as_format = KOF_EVT_AMSI;
+	(void)kof_scan_bytes(sc, j->buf, (uint64_t)j->len, name, &opt,
+			     on_object, hits);
+	(*scanned)++;
 }
 
 struct seen {
@@ -526,6 +594,28 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/*
+	 * THE SUBMISSION BEING GATHERED, if one is.
+	 *
+	 * A content event whose payload did not fit one record is followed by
+	 * continuations - see KOF_EVT_CONT. The VIEWER joins them when it reads
+	 * a log, which is presentation; this is the half that decides, and
+	 * without the same joining here it never sees more than the first four
+	 * hundred bytes of anything. A rule written about a carried executable
+	 * could not fire in production however well it matched in the viewer,
+	 * which is worse than not having the rule: the tool that shows it and
+	 * the tool that acts on it would disagree.
+	 *
+	 * Held across iterations because a chain arrives over several of them.
+	 */
+	static uint8_t join_buf[1024u * 1024u];
+	struct kof_evt_join join;
+	struct kof_evt join_head;
+	int joining = 0;
+
+	memset(&join, 0, sizeof join);
+	memset(&join_head, 0, sizeof join_head);
+
 	while (!g_stop) {
 		int got = source_next(&src, &e);
 		const char *obj;
@@ -552,6 +642,38 @@ int main(int argc, char **argv)
 		if (show_all)
 			kof_evt_render(&e, secs, "", stdout, &tally);
 
+		/*
+		 * GATHER, AND SCAN WHEN THE CHAIN ENDS.
+		 *
+		 * A continuation extends whatever is open. Anything else ends
+		 * it - the collector emits a chain immediately behind its
+		 * parent, so the next ordinary record IS the end of it - and
+		 * the assembled bytes go to the scanner before this record is
+		 * looked at itself.
+		 */
+		if (e.verb == KOF_EVT_CONT) {
+			if (joining)
+				(void)kof_evt_join_add(&join, &e);
+			continue;   /* not an event: nothing else applies */
+		}
+		if (joining) {
+			scan_submission(sc, &join, &join_head, do_scan,
+					&hits, &scanned);
+			joining = 0;
+		}
+		if (do_scan && kof_evt_join_start(&join, &e, join_buf,
+						  sizeof join_buf)) {
+			join_head = e;
+			joining = 1;
+			/*
+			 * Left open rather than scanned here: the chunks that
+			 * finish it have not arrived. A submission that fits
+			 * one record is closed by the next event, which is the
+			 * same path and one iteration later.
+			 */
+			continue;
+		}
+
 		if (!do_scan || !looks_openable(obj)) {
 			if (*obj)
 				skipped++;
@@ -564,6 +686,11 @@ int main(int argc, char **argv)
 		(void)kof_scan_path(sc, obj, NULL, on_object, &hits);
 		scanned++;
 	}
+
+	/* A run that ended mid-chain still has bytes worth looking at, and they
+	 * are as complete as they are ever going to be. */
+	if (joining)
+		scan_submission(sc, &join, &join_head, do_scan, &hits, &scanned);
 
 	if (do_scan) {
 		kof_scanner_free(sc);

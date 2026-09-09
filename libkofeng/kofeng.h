@@ -679,6 +679,25 @@ struct kof_scan_option {
 	int      all_matches;
 
 	/*
+	 * SCAN THESE BYTES AS THIS FORMAT, skipping the sniff chain.
+	 *
+	 * Zero - what a memset gives - identifies the object the ordinary way,
+	 * from its bytes, and that is right for anything that came off a disk.
+	 *
+	 * It is not right for everything. A collected event has no magic to
+	 * sniff and a submitted script block is not a file format at all, so
+	 * both come out unidentified - and an unidentified object is offered to
+	 * no module, because format is what the prefilter rules on. The caller
+	 * that pulled the record off a channel is the only side that knows what
+	 * it is holding, so this is how it says.
+	 *
+	 * The declared format's parser still runs and may still refuse: being
+	 * told is not being right, and a refusal leaves the object unidentified
+	 * exactly as a failed sniff would.
+	 */
+	uint8_t  as_format;
+
+	/*
 	 * THE HEURISTIC'S OFF SWITCH, AND WHY IT IS AN OFF SWITCH.
 	 *
 	 * Zero - the default a memset gives - RUNS the heuristic. It used to be
