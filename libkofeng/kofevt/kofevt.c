@@ -286,6 +286,18 @@ const char *kof_attack_name(uint16_t att)
 	}
 }
 
+const char *kof_evt_source_name(uint8_t src)
+{
+	switch (src) {
+	case KOF_SRC_PROCESS:  return "process";
+	case KOF_SRC_FILE:     return "file";
+	case KOF_SRC_NET:      return "net";
+	case KOF_SRC_REGISTRY: return "registry";
+	case KOF_SRC_AMSI:     return "amsi";
+	default:               return "?";
+	}
+}
+
 const char *kof_evt_verb_name(uint16_t verb)
 {
 	switch (verb) {
@@ -307,8 +319,12 @@ const char *kof_evt_verb_name(uint16_t verb)
 	case KOF_EVT_THREAD_START:  return "ThreadNew";
 	case KOF_EVT_THREAD_STOP:   return "ThreadEnd";
 	case KOF_EVT_AMSI_SCAN:     return "AmsiScan";
-	case KOF_EVT_CONT:          return "cont";
-	case KOF_EVT_RAW:           return "raw";
+	case KOF_EVT_CONT:          return "Cont";
+	/* Capitalised like every other name in this table. These two were the
+	 * only lower-case ones, which showed wherever verbs sit in a column
+	 * beside each other - and it also put them last in any name ordering,
+	 * because lower case sorts after upper. */
+	case KOF_EVT_RAW:           return "Raw";
 	default:                    return "?";
 	}
 }

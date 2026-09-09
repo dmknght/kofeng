@@ -1690,6 +1690,73 @@ out:
 	return rc;
 }
 
+/* One finished line, straight out. */
+static void line_sink(void *user, const char *text)
+{
+	(void)user;
+	printf("%s\n", text);
+}
+
+/*
+ * AN EVENT LOG IS NOT A FILE TO PARSE, so it is answered before the parsers
+ * are asked.
+ *
+ * Everything below this walks regions, and a log has none - it is a stream of
+ * records. Handed to the sniff chain it would come out "Raw, no parser divides
+ * this object", which is true and useless. Recognised here it gets the same
+ * description the viewer's dashboard shows, from the same composer.
+ *
+ * Recognised by OPENING it, not by sniffing bytes: kofevt_log_open validates
+ * the header, the record size and the head size, and refuses anything that is
+ * not one. Zero when the file is not a log, and then nothing has been printed
+ * and the caller carries on.
+ */
+static int examine_event_log(const char *path, int colour)
+{
+	static const struct kof_evt_style plain = { 0, 0, 0, 0 };
+	static const struct kof_evt_style lit = {
+		"\033[36m", "\033[90m", "\033[33m", "\033[0m"
+	};
+	const struct kof_evt_style *st = colour ? &lit : &plain;
+	const struct kofevt_log_hdr *h;
+	struct kofevt_log_r *r;
+	const char *why = 0;
+	uint64_t n, events = 0, i;
+	struct kof_evt e;
+
+	r = kofevt_log_open(path, 0, KOFEVT_REC_NONE, &why);
+	if (!r)
+		return 0;
+	h = kofevt_log_header(r);
+	n = kofevt_log_count(r);
+
+	/* Counted rather than taken from the header: a continuation is a record
+	 * and is not an event, and the header holds only the record count. */
+	for (i = 0; i < n; i++) {
+		if (!kofevt_log_read(r, &e))
+			break;
+		if (e.verb != KOF_EVT_CONT)
+			events++;
+	}
+
+	printf("== %s\n", path);
+	kof_inspect_event_log(h, events, n, st, line_sink, 0);
+
+	if (kofevt_log_seek(r, 0)) {
+		for (i = 0; i < n; i++) {
+			if (!kofevt_log_read(r, &e))
+				break;
+			if (e.verb == KOF_EVT_CONT)
+				continue;
+			printf("\n  -- %llu %s\n", (unsigned long long)i,
+			       kof_evt_verb_name(e.verb));
+			kof_inspect_event(&e, st, line_sink, 0);
+		}
+	}
+	kofevt_log_free(r);
+	return 1;
+}
+
 /*
  * The file on disk, mapped and handed to the same routine as everything else.
  */
@@ -2122,6 +2189,10 @@ int main(int argc, char **argv)
 		 * by the time the report is drawn. */
 		if (markers && eng)
 			verdict_run(eng, argv[i]);
+		/* A log answers itself and skips the parsers - see
+		 * examine_event_log. */
+		if (examine_event_log(argv[i], colour))
+			continue;
 		r = examine(argv[i], dump, markers ? eng : NULL);
 		if (r >= 0 && eng) {
 			char dir[PATH_ROOM];

@@ -309,6 +309,25 @@ enum kof_evt_verb {
 	KOF_EVT_TYPE_COUNT
 };
 
+/*
+ * WHICH SUBSYSTEM AN EVENT CAME FROM.
+ *
+ * The values are the collector's, and there is one collector - see kof_evt.source
+ * for why this is not a second vocabulary.
+ */
+enum kof_evt_source {
+	KOF_SRC_NONE = 0,
+	KOF_SRC_PROCESS,
+	KOF_SRC_FILE,
+	KOF_SRC_NET,
+	KOF_SRC_REGISTRY,
+	KOF_SRC_AMSI,
+	KOF_SRC_COUNT
+};
+
+/* "process", "file", ... Never NULL. */
+const char *kof_evt_source_name(uint8_t src);
+
 /* "ProcStart", "RegSet", ... Never NULL, so a record written by a build that
  * knew one more verb still prints as something. */
 const char *kof_evt_verb_name(uint16_t verb);
@@ -757,7 +776,29 @@ struct kof_evt {
 	uint8_t  loc;          /* enum kof_evt_loc, of the object */
 	uint8_t  os;           /* enum kof_evt_os */
 	uint8_t  flags;        /* KOF_EF_* */
-	uint8_t  reserved[3];
+
+	/*
+	 * WHICH SUBSYSTEM RAISED IT - enum kof_evt_source.
+	 *
+	 * WITHOUT THIS, `raw_id` MEANS NOTHING. An untyped event carries the
+	 * source's own event id so a discovery run can name it later, and that
+	 * id is only unique WITHIN a subsystem: on Windows, id 12 is a file
+	 * event from Kernel-File and a connection from Kernel-Network. The
+	 * collector knows which - it dispatches on it - and the conversion to
+	 * this record used to drop it, so every raw event in a log said "id 12"
+	 * with no way to tell those two apart. A trace full of them could not
+	 * be used to type anything, which is the one job a raw event has.
+	 *
+	 * Taken from a reserved byte, so the record does not grow.
+	 *
+	 * Neutral, like every other field here: the numbers happen to match the
+	 * Windows collector's enum today because it is the only collector, and
+	 * a Linux one maps its own subsystems onto the same list rather than
+	 * adding a second vocabulary.
+	 */
+	uint8_t  source;
+
+	uint8_t  reserved[2];
 
 	/*
 	 * THE PER-VERB PAYLOAD. Read it with kof_evt_as_*, which check the

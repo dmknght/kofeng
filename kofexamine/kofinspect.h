@@ -27,6 +27,9 @@
 #include "../libkofeng/kofeng.h"
 #include "../libkofeng/kofdb/kofdb.h"
 #include "../libkofeng/kofparsers/kofformat.h"
+#include "../libkofeng/kofevt/kofevt.h"
+#include "../libkofeng/kofevt/kofevtfmt.h"
+#include "../libkofeng/kofevt/kofevtlog.h"
 
 /* ---- what a format is ------------------------------------------------------
  *
@@ -525,5 +528,61 @@ void kof_touch_free(struct kof_touch *v, uint32_t n);
 
 /* The word for a kind, for a caller that prints one. */
 const char *kof_touch_kind_name(enum kof_touch_kind);
+
+/* ---- describing one collected event ---------------------------------------
+ *
+ * WHY THIS IS AN API AND NOT A PANEL.
+ *
+ * Two tools show a record: the viewer's dashboard and kofexamine, and they were
+ * about to grow two descriptions of the same thing. That is the mistake the
+ * field accessors in kofevtfmt.h were made to prevent one level down - a page
+ * and a panel that word the same record differently are two vocabularies for
+ * one fact - and it applies again here, to the LAYOUT rather than the wording.
+ *
+ * So the composition lives here and the callers only supply a sink. Each line
+ * arrives finished; what a caller does with it - add it to a scrolling page,
+ * put it to stdout - is the only thing that differs between them.
+ */
+
+/* Where one finished line goes. */
+typedef void (*kof_inspect_line)(void *user, const char *text);
+
+/*
+ * The attributes a caller wants in those lines, or NULL for none.
+ *
+ * Supplied rather than chosen here, because the two tools do not share a
+ * palette: the viewer paints from kofview.h, and kofexamine turns colour off
+ * whenever its output is not a terminal - its output is piped into grep and
+ * diffed against itself, and an escape sequence in either is a bug rather than
+ * a preference. NULL gives plain text, which is what that case needs.
+ */
+struct kof_evt_style {
+	const char *id;    /* a field's name */
+	const char *loc;   /* an offset */
+	const char *warn;  /* a flag row - the record is short, or odd */
+	const char *off;   /* back to normal */
+};
+
+/* The log's own facts: what collected it, and how much is in it. */
+void kof_inspect_event_log(const struct kofevt_log_hdr *h,
+			   uint64_t events, uint64_t records,
+			   const struct kof_evt_style *st,
+			   kof_inspect_line out, void *user);
+
+/*
+ * One record's fields, TWO TO A LINE.
+ *
+ * These values are short and a dozen of them down a page is a tall column of
+ * mostly empty line. Paired left to right rather than filled down two columns,
+ * because a page scrolls: a reader meets the rows in the order they are
+ * written, and there is no second column to read back up.
+ *
+ * A flag row takes the width to itself - it has no offset, its text is a
+ * sentence rather than a value, and pairing it with a number would read as two
+ * halves of one fact.
+ */
+void kof_inspect_event(const struct kof_evt *e,
+		       const struct kof_evt_style *st,
+		       kof_inspect_line out, void *user);
 
 #endif /* KOFENG_KOFINSPECT_H */

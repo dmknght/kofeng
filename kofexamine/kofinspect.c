@@ -1251,3 +1251,103 @@ int kof_locate_str(struct kof_match_ctx *m, struct kof_match_ctx *msym,
 			    span_max);
 	return out->at != KOF_BROKEN;
 }
+
+/* ---- describing one collected event ------------------------------------- */
+
+/* The attribute, or nothing. One helper so every use below reads the same and
+ * a NULL style cannot be forgotten at one of them. */
+static const char *sty(const char *a) { return a ? a : ""; }
+
+void kof_inspect_event_log(const struct kofevt_log_hdr *h,
+			   uint64_t events, uint64_t records,
+			   const struct kof_evt_style *st,
+			   kof_inspect_line out, void *user)
+{
+	char line[256];
+
+	if (!h || !out)
+		return;
+	snprintf(line, sizeof line, "  %s%-11s%s%s/%s",
+		 sty(st ? st->id : NULL), "collected", sty(st ? st->off : NULL),
+		 kof_evt_platform_name((uint8_t)h->platform),
+		 kof_evt_arch_name((uint8_t)h->arch));
+	out(user, line);
+
+	snprintf(line, sizeof line, "  %s%-11s%s%lu",
+		 sty(st ? st->id : NULL), "build", sty(st ? st->off : NULL),
+		 (unsigned long)h->build);
+	out(user, line);
+
+	/*
+	 * BOTH NUMBERS, because they are different questions and the gap
+	 * between them is a fact. A submission split over nine continuations
+	 * is ten records and one event; a reader given only one of those two
+	 * cannot tell a busy log from a chatty one.
+	 */
+	snprintf(line, sizeof line, "  %s%-11s%s%llu",
+		 sty(st ? st->id : NULL), "events", sty(st ? st->off : NULL),
+		 (unsigned long long)events);
+	out(user, line);
+	snprintf(line, sizeof line, "  %s%-11s%s%llu",
+		 sty(st ? st->id : NULL), "records", sty(st ? st->off : NULL),
+		 (unsigned long long)records);
+	out(user, line);
+
+	if (h->root_pid) {
+		snprintf(line, sizeof line, "  %s%-11s%s%lu",
+			 sty(st ? st->id : NULL), "traced pid",
+			 sty(st ? st->off : NULL),
+			 (unsigned long)h->root_pid);
+		out(user, line);
+	}
+}
+
+void kof_inspect_event(const struct kof_evt *e,
+		       const struct kof_evt_style *st,
+		       kof_inspect_line out, void *user)
+{
+	char pend[256], line[512];
+	unsigned k;
+	int have_pend = 0;
+
+	if (!e || !out)
+		return;
+	pend[0] = '\0';
+
+	for (k = 0; ; k++) {
+		char nm[32], vl[256], one[256];
+		uint16_t fo = 0, fl = 0;
+
+		if (!kof_evt_field(e, k, nm, sizeof nm, vl, sizeof vl))
+			break;
+		(void)kof_evt_field_extent(e, k, &fo, &fl);
+
+		if (!fl) {
+			/* A flag row, alone on its line - see the header. */
+			if (have_pend) {
+				out(user, pend);
+				have_pend = 0;
+			}
+			snprintf(line, sizeof line, "       %s%-11s%.100s%s",
+				 sty(st ? st->warn : NULL), nm, vl,
+				 sty(st ? st->off : NULL));
+			out(user, line);
+			continue;
+		}
+		snprintf(one, sizeof one, "  %s%04X%s %s%-10s%s%-24.24s",
+			 sty(st ? st->loc : NULL), (unsigned)fo,
+			 sty(st ? st->off : NULL),
+			 sty(st ? st->id : NULL), nm,
+			 sty(st ? st->off : NULL), vl);
+		if (!have_pend) {
+			snprintf(pend, sizeof pend, "%s", one);
+			have_pend = 1;
+		} else {
+			snprintf(line, sizeof line, "%s   %s", pend, one);
+			out(user, line);
+			have_pend = 0;
+		}
+	}
+	if (have_pend)
+		out(user, pend);
+}

@@ -882,22 +882,25 @@ $(OUT)/bin/kofscanner$(EXE): $(SCANNER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 # database what it already knows about an object. Separate because a second
 # consumer is coming - the viewer - and because the two halves reach for
 # different things: the printer wants the parse, this wants the engine.
-EXAMINE_SRC := kofexamine/kofexamine.c kofexamine/kofinspect.c kofexamine/kofeditor.c
-
-$(OUT)/bin/kofexamine$(EXE): $(EXAMINE_SRC) $(LIB) $(SDK_HDR) $(STAMP)
-	@$(call MKDIR,$(dir $@))
-	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(EXAMINE_SRC) $(LIB) -o $@ $(LDFLAGS)
-
-# The other front end onto the same layer. Two binaries from one directory, and
-# the directory is the toolchain rather than the tool: what they share is
-# kofinspect, and what differs is only how a pane and a line are drawn.
-#
 # The event-log format, linked into anything that reads one. Defined here
 # rather than beside its first user because two rules need it and a variable
 # used before it is set expands to nothing - the trap this file has now been
 # caught by twice.
 KOFEVT_SRC := libkofeng/kofevt/kofevt.c libkofeng/kofevt/kofevtfmt.c \
               libkofeng/kofevt/kofevtlog.c
+
+EXAMINE_SRC := kofexamine/kofexamine.c kofexamine/kofinspect.c kofexamine/kofeditor.c
+
+$(OUT)/bin/kofexamine$(EXE): $(EXAMINE_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
+                            $(STAMP)
+	@$(call MKDIR,$(dir $@))
+	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(EXAMINE_SRC) $(KOFEVT_SRC) \
+	      $(LIB) -o $@ $(LDFLAGS)
+
+# The other front end onto the same layer. Two binaries from one directory, and
+# the directory is the toolchain rather than the tool: what they share is
+# kofinspect, and what differs is only how a pane and a line are drawn.
+#
 
 VIEWER_SRC := kofexamine/kofviewer.c kofexamine/kofview.c kofexamine/kofinspect.c kofexamine/kofeditor.c
 
@@ -1300,7 +1303,9 @@ $(TEST)/unit_%$(EXE): tests/unit/%.c $(LIB) $(STAMP) | $(TEST)
 # over it has to compile that source. An explicit rule rather than another
 # pattern variable: exactly one test needs this, and a rule states the whole
 # dependency in the place somebody reading the recipe is already looking.
-EDITOR_SRC := kofexamine/kofeditor.c kofexamine/kofinspect.c
+# kofinspect now describes events as well as objects, so whatever links it
+# needs the event record with it - see kof_inspect_event.
+EDITOR_SRC := kofexamine/kofeditor.c kofexamine/kofinspect.c $(KOFEVT_SRC)
 
 #
 # THE ETW-FREE HALF OF libkofgrille, TESTED ON WHATEVER HOST IS RUNNING.

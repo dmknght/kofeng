@@ -285,6 +285,12 @@ void kofw_evt_to_kof(const struct kofw_evt *in, struct kof_evt *out)
 	out->loc         = in->obj_loc;
 	out->flags       = in->flags;
 	out->os          = KOF_OS_WINDOWS;
+	/*
+	 * Carried, and the enums are the same list on purpose - see
+	 * kof_evt.source. Without it a raw event's id is unattributable, which
+	 * makes a discovery trace useless for the one thing it is for.
+	 */
+	out->source      = in->provider;
 
 	/*
 	 * THE PAYLOAD, AND THIS IS THE ONLY PLACE IT IS WRITTEN.

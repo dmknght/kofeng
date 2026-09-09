@@ -86,6 +86,26 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 {
 	kof_evt_count(e, t);
 
+	/*
+	 * A CONTINUATION IS NEVER PRINTED.
+	 *
+	 * It is the tail of the record in front of it, not an event - see
+	 * KOF_EVT_CONT. Printed, it is a line saying "Cont pid=901" with a
+	 * fragment of somebody else's script on it, repeated once per four
+	 * hundred bytes: a submission split nine ways turned one event into ten
+	 * lines, nine of which report nothing that happened.
+	 *
+	 * It is still COUNTED above - counted as nothing, which is what
+	 * kof_evt_count does with it - so the tally stays right.
+	 *
+	 * The verb keeps its name because the writer needs one and a record
+	 * whose verb printed as "?" would be a diagnostic problem of its own.
+	 * What it does not need is a line of its own in a report; whoever wants
+	 * the bytes joins them, and kof_evt_join is how.
+	 */
+	if (e->verb == KOF_EVT_CONT)
+		return;
+
 	fprintf(out, "%8.3f  %-9s pid=%-6lu %-20s", secs,
 	       kof_evt_verb_name(e->verb), (unsigned long)e->pid,
 	       who && *who ? who : "?");
@@ -229,7 +249,17 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 	}
 
 	default:
-		fprintf(out, "  [id %u]", (unsigned)e->raw_id);
+		/*
+		 * "[file id 12]", not "[id 12]". A discovery run reads these
+		 * lines to decide what to type, and an id without its provider
+		 * is a number that names two different events.
+		 */
+		if (e->source)
+			fprintf(out, "  [%s id %u]",
+				kof_evt_source_name(e->source),
+				(unsigned)e->raw_id);
+		else
+			fprintf(out, "  [id %u]", (unsigned)e->raw_id);
 		/*
 		 * THE ADDRESS, ON THE RAW PATH TOO, and this was the bug.
 		 *
@@ -702,8 +732,22 @@ static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
 			ROWF("addr size", u.mem.addr_size, "%llu",
 			     (unsigned long long)mm->addr_size);
 	}
-	if (e->raw_id)
+	/*
+	 * THE ID AND THE SUBSYSTEM THAT NUMBERED IT, together.
+	 *
+	 * An id on its own is not a fact about anything: Windows numbers each
+	 * provider's events from one, so "id 12" is a file event and a network
+	 * connection at the same time. Shown as two rows because they are two
+	 * fields at two offsets and the panel maps rows to bytes - the pairing
+	 * is what the reader needs, and putting them next to each other is how
+	 * a table says that.
+	 */
+	if (e->raw_id) {
 		ROWF("raw id", raw_id, "%u", (unsigned)e->raw_id);
+		if (e->source)
+			ROWF("from", source, "%s",
+			     kof_evt_source_name(e->source));
+	}
 	/*
 	 * ONLY WHEN IT SAYS SOMETHING.
 	 *

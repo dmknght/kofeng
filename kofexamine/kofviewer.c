@@ -916,6 +916,16 @@ struct view {
 	uint64_t             log_next;   /* the first record past the window */
 
 	/*
+	 * The tree needs rebuilding before the next frame.
+	 *
+	 * Set when something learns a fact that changes what rows exist - a
+	 * carried image being identified, so its regions can be listed. Acted
+	 * on at the top of the frame, because that is the one place where no
+	 * caller is holding a node index.
+	 */
+	int                  tree_dirty;
+
+	/*
 	 * HOW MANY OF THOSE RECORDS ARE EVENTS.
 	 *
 	 * Not the same number as log_n, and the difference is not cosmetic: a
@@ -1019,6 +1029,25 @@ struct view {
 	 */
 	struct { uint32_t at, len; } evt_seg[EVT_SEG_MAX];
 	int                  evt_n_seg;
+
+	/*
+	 * AN EXECUTABLE CARRIED INSIDE AN EVENT, as a child object.
+	 *
+	 * Some submissions are a PE image rather than a script. The bytes are
+	 * already gathered - kof_evt_join concatenates the raw content and
+	 * nothing else, so what comes out is the file, byte for byte, with no
+	 * record heads or padding between the pieces. What was missing was
+	 * anywhere to LOOK at it: the panel renders text, and a PE rendered as
+	 * text is a column of dots.
+	 *
+	 * So the event grows a child row, and selecting it puts the image in
+	 * the hex pane like any other object. `pe_of` is the object index of
+	 * the EVENT a child belongs to - zero for every row that is not one -
+	 * because the child's bytes are its parent's join, materialised when
+	 * the child is picked rather than for every event in the window.
+	 */
+	uint32_t             pe_of[MAX_OBJ];
+	uint32_t             pe_at;   /* where the image starts in the join */
 
 	/*
 	 * A RUN OF CHARACTERS PICKED OUT OF ONE ROW'S VALUE.
@@ -2330,6 +2359,23 @@ static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 	for (i = from; i < v->n_obj; i++) {
 		struct object *o = &v->obj[i];
 
+		/*
+		 * AN OBJECT WITH NO BYTES YET IS LEFT ALONE.
+		 *
+		 * A PE carried inside an event is materialised when its row is
+		 * picked, not when the window is built - so between the two it
+		 * is a row with a declared size and an empty buffer. Running
+		 * identify over that answers nothing and costs something: it
+		 * memsets ctx, which is where the declared size lives, so the
+		 * row went from "45992 bytes" to "0 bytes" before it was ever
+		 * drawn.
+		 *
+		 * Nothing else reaches here empty - every other object is bytes
+		 * out of the mapping or out of an unpacker.
+		 */
+		if (!o->buf.p || !o->buf.n)
+			continue;
+
 		o->fmt = kof_inspect_identify(o->buf, &o->ctx, &o->info);
 		if (!o->fmt)
 			o->ctx.obj_size = o->buf.n;
@@ -2498,7 +2544,7 @@ static void obj_label(const struct object *o, char *out, size_t cap)
 	}
 
 	snprintf(what, sizeof what, "%s%s%s",
-		 o->fmt ? kof_format_name(o->ctx.format) : "raw",
+		 o->fmt ? kof_format_name(o->ctx.format) : "Raw",
 		 o->fmt ? "-" : "",
 		 o->fmt ? kof_arch_name(o->ctx.arch) : "");
 	if (o->depth == 0) {
@@ -2625,6 +2671,8 @@ static void log_window(struct view *v)
 		 * clearing is enough and there is nothing to free. */
 		memset(&v->obj[i], 0, sizeof v->obj[i]);
 	}
+	memset(v->pe_of, 0, sizeof v->pe_of);
+	v->pe_at = 0;
 
 	snprintf(v->obj[0].name, sizeof v->obj[0].name, "KOFT-%s-%s",
 		 kof_evt_platform_name((uint8_t)h->platform),
@@ -2644,6 +2692,7 @@ static void log_window(struct view *v)
 		 * event five records in was labelled eleven.
 		 */
 		uint64_t id = i;
+		uint64_t pe_bytes = 0;
 		uint32_t len = 0;
 		uint16_t vb = 0;
 
@@ -2686,6 +2735,20 @@ static void log_window(struct view *v)
 		 * real file bytes they are, with nothing synthesised.
 		 */
 		end = off + len;
+		/*
+		 * The submission's total size, summed while the chunks are
+		 * walked anyway. The child row needs it BEFORE anything is
+		 * materialised - a tree row showing "0 bytes" beside an image
+		 * is a row that says the thing is empty.
+		 */
+		{
+			uint16_t cl0 = 0;
+
+			memcpy(&cl0, (const uint8_t *)v->map + off +
+				     offsetof(struct kof_evt, content_len),
+			       sizeof cl0);
+			pe_bytes = cl0;
+		}
 		while (i + 1u < v->log_n) {
 			uint64_t coff = 0;
 			uint32_t clen = 0;
@@ -2700,6 +2763,15 @@ static void log_window(struct view *v)
 			       sizeof cvb);
 			if (cvb != KOF_EVT_CONT)
 				break;
+			{
+				uint16_t ccl = 0;
+
+				memcpy(&ccl, (const uint8_t *)v->map + coff +
+					     offsetof(struct kof_evt,
+						      content_len),
+				       sizeof ccl);
+				pe_bytes += ccl;
+			}
 			end = coff + clen;
 			i++;
 		}
@@ -2738,6 +2810,58 @@ static void log_window(struct view *v)
 			kof_evt_label(&rec, id, o->label, sizeof o->label);
 		}
 		n++;
+
+		/*
+		 * AN EXECUTABLE INSIDE THE EVENT GETS A ROW OF ITS OWN.
+		 *
+		 * Tested on the RECORD's own first two content bytes, straight
+		 * out of the mapping - two bytes, no join, no allocation. The
+		 * expensive part is materialising the image, and that waits
+		 * until somebody selects the row.
+		 *
+		 * "MZ" and nothing cleverer. A submission either begins with a
+		 * DOS header or it does not; searching the middle of a script
+		 * for the letters would offer a child row for every PowerShell
+		 * one-liner that happens to contain them.
+		 */
+		if (n + 1u < MAX_OBJ && vb == KOF_EVT_AMSI_SCAN) {
+			uint16_t oo = 0, cl = 0;
+			const uint8_t *p8 = (const uint8_t *)v->map + off;
+
+			memcpy(&oo, p8 + offsetof(struct kof_evt, off_object),
+			       sizeof oo);
+			memcpy(&cl, p8 + offsetof(struct kof_evt, content_len),
+			       sizeof cl);
+			if (cl >= 2u && oo != KOF_TEXT_NONE &&
+			    (uint64_t)h->head_size + oo + 2u <= len &&
+			    p8[h->head_size + oo] == 'M' &&
+			    p8[h->head_size + oo + 1u] == 'Z') {
+				struct object *c = &v->obj[n];
+
+				memset(c, 0, sizeof *c);
+				{
+					/* Through a copy: the two names are
+					 * fields of the same array, and
+					 * snprintf may not read and write one
+					 * object at once. */
+					char pn[224];
+
+					snprintf(pn, sizeof pn, "%.200s",
+						 o->name);
+					snprintf(c->name, sizeof c->name,
+						 "%s//pe", pn);
+				}
+				snprintf(c->label, sizeof c->label,
+					 "%llu PE image",
+					 (unsigned long long)id);
+				c->depth = 2;
+				c->ctx.obj_size = pe_bytes;
+				v->pe_of[n] = n - 1u;
+				v->log_idx[n] = id;
+				n++;
+			}
+		}
+
 		if (n - 1u >= LOG_WIN)
 			break;
 	}
@@ -2796,7 +2920,14 @@ static void tree_build(struct view *v)
 		char label[64];
 
 		obj_label(o, label, sizeof label);
-		tree_add(v, o->depth * 2u, i, 0, o->buf.n, label);
+		/*
+		 * The bytes when they are here, the DECLARED size when they are
+		 * not. A PE carried inside an event is materialised only when
+		 * its row is picked, and until then buf.n is zero - which the
+		 * row would otherwise print as the image's size.
+		 */
+		tree_add(v, o->depth * 2u, i, 0,
+			 o->buf.n ? o->buf.n : o->ctx.obj_size, label);
 
 		if (!o->fmt || !v->ext)
 			continue;
@@ -2954,10 +3085,34 @@ static uint64_t hex_max(const struct view *v)
  * the cost to whichever event was selected.
  */
 
-#define EVT_JOIN_MAX (64u * 1024u)
-#define EVT_TEXT_MAX (64u * 1024u)
+/*
+ * A MEGABYTE, NOT THE COLLECTOR'S SIXTY-FOUR KILOBYTES.
+ *
+ * Matching the collector's spill cap looked right and is the wrong bound: this
+ * reads a LOG, and a log holds whatever its producer wrote. Capped at one
+ * collector's limit, a submission from any other - or from a later build of
+ * this one - was silently shown as a prefix, and a carried image came out
+ * 65536 bytes long whatever it really was.
+ *
+ * Two of these, taken once when a log is opened rather than per event: every
+ * record can be the big one, so making it conditional would only move the cost
+ * to whichever event was selected.
+ */
+#define EVT_JOIN_MAX (1024u * 1024u)
+#define EVT_TEXT_MAX (1024u * 1024u)
 
-#define EVT_PAL_N 6u
+#define EVT_PAL_N 12u
+
+/*
+ * TWELVE, NOT SIX, because six could not keep one record's own fields apart.
+ *
+ * A process start shows twelve rows at once, so with six hues three of them
+ * shared one - created, tid and image came out the same colour on the same
+ * screen. They were never ADJACENT, which was the rule the six were chosen to
+ * satisfy, and that rule turned out to be too weak: a reader matching a colour
+ * in the dump against the table is not helped by the two candidates being far
+ * apart, they still have to check both.
+ */
 
 /* The chip beside the row's name. Dark grounds with white text. */
 static const char *const evt_pal_bg[EVT_PAL_N] = {
@@ -2966,7 +3121,13 @@ static const char *const evt_pal_bg[EVT_PAL_N] = {
 	"\033[48;5;53;97m",   /* plum        */
 	"\033[48;5;22;97m",   /* forest      */
 	"\033[48;5;94;97m",   /* amber-brown */
-	"\033[48;5;60;97m"    /* slate       */
+	"\033[48;5;60;97m",   /* slate       */
+	"\033[48;5;89;97m",   /* wine        */
+	"\033[48;5;23;97m",   /* teal        */
+	"\033[48;5;100;97m",  /* moss        */
+	"\033[48;5;54;97m",   /* violet      */
+	"\033[48;5;52;97m",   /* rust        */
+	"\033[48;5;30;97m"    /* sea         */
 };
 
 /* The same six hues as ink, bright enough to read a hex digit in. Paired by
@@ -2978,7 +3139,13 @@ static const char *const evt_pal_fg[EVT_PAL_N] = {
 	"\033[38;5;177m",     /* plum        */
 	"\033[38;5;84m",      /* forest      */
 	"\033[38;5;215m",     /* amber-brown */
-	"\033[38;5;147m"      /* slate       */
+	"\033[38;5;147m",     /* slate       */
+	"\033[38;5;211m",     /* wine        */
+	"\033[38;5;80m",      /* teal        */
+	"\033[38;5;149m",     /* moss        */
+	"\033[38;5;141m",     /* violet      */
+	"\033[38;5;209m",     /* rust        */
+	"\033[38;5;44m"       /* sea         */
 };
 
 /*
@@ -3004,10 +3171,12 @@ static unsigned evt_key(const char *name)
 	 * Assigned by hand rather than by position, because the rows a record
 	 * shows are a SUBSET - a file event has no ports, a thread start no
 	 * exit code - so two fields far apart in this list can end up on
-	 * neighbouring lines, and neighbouring lines in the same colour are the
-	 * one case the mapping cannot survive. The numbers below are chosen so
-	 * that does not happen for the shapes the collector produces; the
-	 * comment beside each is which of them it was checked against.
+	 * neighbouring lines. The numbers below are chosen so that no two
+	 * fields which can appear on the same screen share a slot at all - not
+	 * merely that they are not adjacent, which was the earlier rule and was
+	 * too weak: a reader matching a colour in the dump against the table
+	 * gains nothing from the two candidates being far apart, they still
+	 * have to check both.
 	 *
 	 * A name not listed here still gets a colour, from the hash below. That
 	 * is the fallback for a field added to kof_evt_field and not yet here -
@@ -3016,23 +3185,24 @@ static unsigned evt_key(const char *name)
 	static const struct { const char *name; unsigned slot; } fixed[] = {
 		{ "stamp",     0u },
 		{ "seq",       1u },
-		{ "created",   2u },
+		{ "created",   6u },
 		{ "addr",      3u },
 		{ "addr size", 4u },
-		{ "pid",       5u },   /* always present - a fence for the rest */
-		{ "ppid",      0u },
-		{ "actor",     1u },
-		{ "tid",       2u },
-		{ "session",   4u },
+		{ "pid",       5u },
+		{ "ppid",      7u },
+		{ "actor",     8u },
+		{ "tid",       9u },
+		{ "session",  10u },
 		{ "exit",      2u },
 		{ "peer",      3u },
-		{ "bytes",     1u },
-		{ "peer port", 2u },
-		{ "verb",      3u },   /* always present */
-		{ "technique", 4u },
-		{ "raw id",    5u },
-		{ "where",     0u },
-		{ "source",    1u },
+		{ "bytes",     4u },
+		{ "peer port", 6u },
+		{ "verb",     11u },
+		{ "technique", 7u },
+		{ "raw id",    2u },
+		{ "from",      8u },
+		{ "where",     9u },
+		{ "source",   10u },
 		{ "image",     2u },
 		{ "object",    3u },
 		{ "cmdline",   4u }
@@ -3055,12 +3225,12 @@ static unsigned evt_key(const char *name)
 
 static const char *evt_row_colour(const char *name)
 {
-	return evt_pal_bg[evt_key(name)];
+	return evt_pal_bg[evt_key(name) % EVT_PAL_N];
 }
 
 static const char *evt_row_ink(const char *name)
 {
-	return evt_pal_fg[evt_key(name)];
+	return evt_pal_fg[evt_key(name) % EVT_PAL_N];
 }
 
 /*
@@ -3648,6 +3818,8 @@ static size_t evt_sel_text(const struct view *v, char *out, size_t cap)
 static void evt_load(struct view *v)
 {
 	const struct object *o;
+	uint32_t sel, rec;
+	int had_fmt;
 
 	v->evt_have = 0;
 	v->evt_n = 0;
@@ -3658,9 +3830,24 @@ static void evt_load(struct view *v)
 	 * a record. A panel that tried to spell it would read a header as a
 	 * struct kof_evt and print whatever the two happened to share.
 	 */
-	if (v->node[v->sel_node].obj == 0)
+	sel = v->node[v->sel_node].obj;
+	if (sel == 0)
 		return;
-	o = &v->obj[v->node[v->sel_node].obj];
+
+	/*
+	 * A CHILD IS READ THROUGH ITS PARENT - to find its BYTES, and for
+	 * nothing else.
+	 *
+	 * The parent's record is where the join starts, so it has to be loaded
+	 * to materialise the image. What it must NOT do is leave the event
+	 * panel up: once a reader is on the PE row, or on one of its regions,
+	 * they are looking at an executable, and a table of pids and timestamps
+	 * underneath it is describing something else. The panel is closed at
+	 * the end of this function for exactly that case.
+	 */
+	rec = v->pe_of[sel] ? v->pe_of[sel] : sel;
+	had_fmt = v->obj[sel].fmt != NULL;
+	o = &v->obj[rec];
 	if (!o->buf.p || !o->buf.n)
 		return;
 
@@ -3766,12 +3953,102 @@ static void evt_load(struct view *v)
 			 * has to say so, and now it says so about the right
 			 * thing.
 			 */
+			/*
+			 * THE CHILD'S BYTES ARE THE JOIN, and the join is the
+			 * file.
+			 *
+			 * kof_evt_join concatenates the CONTENT of each record
+			 * and nothing else - no heads, no padding, no
+			 * terminator - so what is in this buffer is what was
+			 * submitted, byte for byte. An image opened from here
+			 * parses exactly as it would from disk.
+			 *
+			 * Pointed at rather than copied: the buffer belongs to
+			 * the view and lives as long as the selection does,
+			 * which is exactly how long the object needs it.
+			 */
+			if (v->pe_of[sel] && j.len > v->pe_at) {
+				struct object *c = &v->obj[sel];
+
+				c->buf = kof_buf_make((const uint8_t *)
+						      v->evt_join + v->pe_at,
+						      j.len - v->pe_at);
+				/*
+				 * AND THROUGH THE PARSER, like any other
+				 * object.
+				 *
+				 * The bytes are a file - kof_evt_join gives
+				 * back the submission and nothing else - so
+				 * there is no reason for this row to be the one
+				 * place in the tool that shows an executable as
+				 * undifferentiated bytes. Identified here it
+				 * gets its format, its regions and everything
+				 * downstream that reads ctx.
+				 *
+				 * Re-run per selection rather than cached: the
+				 * buffer it describes is rebuilt each time the
+				 * row is picked, so a kept view would describe
+				 * the previous one.
+				 */
+				free(c->info);
+				c->info = NULL;
+				c->fmt = kof_inspect_identify(c->buf, &c->ctx,
+							      &c->info);
+				if (!c->fmt)
+					c->ctx.obj_size = c->buf.n;
+				/*
+				 * AND ITS REGIONS, which need the tree rebuilt
+				 * because they were not knowable when it was
+				 * last built: the image is materialised when
+				 * the row is picked, and a region row is a
+				 * question about a parsed object.
+				 *
+				 * Safe to do from here. tree_build does not
+				 * call back into the selection, and the rows it
+				 * adds for this object come AFTER the object's
+				 * own row - so the selected node keeps its
+				 * index and nothing has to be restored.
+				 *
+				 * Once per selection: the guard is fmt going
+				 * from absent to present, which happens on the
+				 * first load of a given child and not again.
+				 */
+				/*
+				 * DEFERRED, NOT DONE HERE.
+				 *
+				 * evt_load runs inside view_select, which goes
+				 * on to use v->node[v->sel_node] - and
+				 * tree_build rewrites that array. Rebuilding
+				 * from here left the caller holding an index
+				 * into a list that had changed under it, which
+				 * is a crash and was.
+				 *
+				 * The frame does it instead, before anything is
+				 * drawn and while nothing holds a node.
+				 */
+				if (c->fmt && !had_fmt)
+					v->tree_dirty = 1;
+			}
+
 			if (kof_evt_join_whole(&j, &v->evt))
 				v->evt.flags &= (uint8_t)~KOF_EF_TRUNCATED;
 			else
 				v->evt.flags |= (uint8_t)KOF_EF_TRUNCATED;
 			v->evt_n = (int)kof_evt_n_fields(&v->evt);
 		}
+	}
+
+	/*
+	 * AND NO PANEL FOR A CARRIED FILE.
+	 *
+	 * Last, because everything above it was needed: the record had to be
+	 * read and the chunks joined to get the image out. What is not wanted
+	 * is the explanation - the reader is on a PE now, and a field table
+	 * about the event that carried it belongs to the row above.
+	 */
+	if (v->pe_of[sel]) {
+		v->evt_have = 0;
+		v->evt_n = 0;
 	}
 
 	/*
@@ -6859,13 +7136,36 @@ static void draw_evt(struct out *o, struct view *v)
 			 * find out.
 			 */
 			(void)evt_box_extent(v, &bo, NULL);
-			snprintf(lead, sizeof lead, " %s  %04X  %u B%s ",
-				 bname, (unsigned)bo, (unsigned)n,
+			snprintf(lead, sizeof lead, "  %04X  %u B%s ",
+				 (unsigned)bo, (unsigned)n,
 				 v->evt_wide ? " utf-16" : "");
 		}
-		out_fmt(o, A_DIM "--%s" A_OFF, lead);
+		/*
+		 * THE NAME IN THE TITLE CARRIES THE FIELD'S OWN INK.
+		 *
+		 * The box is a field like any other and its bytes are lit in
+		 * the dump; the title is the only place that says which field
+		 * it is, so it is where the legend belongs. Without it the box
+		 * was the one coloured run in the pane with nothing on screen
+		 * naming it.
+		 *
+		 * The ink, not the chip. A chip is a block of ground and this
+		 * sits inside a rule; the ink is what the dump uses, which is
+		 * the thing being matched against.
+		 *
+		 * Not for `object`, whose bytes are deliberately left to the
+		 * dump's own colouring - see evt_byte_colour. Colouring its
+		 * title would point at a colour that is not there.
+		 */
+		out_str(o, A_DIM "--" A_OFF);
+		if (strcmp(bname, "object"))
+			out_fmt(o, "%s %s" A_OFF, evt_row_ink(bname), bname);
+		else
+			out_fmt(o, A_DIM " %s" A_OFF, bname);
+		out_fmt(o, A_DIM "%s" A_OFF, lead);
 		out_str(o, A_DIM);
-		for (k = col + 2 + (int)strlen(lead); k < g_cols - 1; k++)
+		for (k = col + 2 + (int)strlen(bname) + 1 +
+			 (int)strlen(lead); k < g_cols - 1; k++)
 			out_str(o, "-");
 		out_str(o, A_OFF);
 	}
@@ -10401,6 +10701,28 @@ static void redraw(struct view *v)
 	 * because a process start with a long command line yields enough rows
 	 * to crowd out the bytes the panel is explaining.
 	 */
+	/*
+	 * A DEFERRED TREE REBUILD, here and nowhere else.
+	 *
+	 * Nothing holds a node index at the top of a frame, which is what makes
+	 * this the only safe place - see tree_dirty. The selection is kept by
+	 * OBJECT rather than by row, because the rebuild is what moves the rows.
+	 */
+	if (v->tree_dirty) {
+		uint32_t want_obj = v->n_node ? v->node[v->sel_node].obj : 0;
+		uint32_t k;
+
+		v->tree_dirty = 0;
+		tree_build(v);
+		for (k = 0; k < v->n_node; k++)
+			if (v->node[k].obj == want_obj && !v->node[k].mask) {
+				v->sel_node = k;
+				break;
+			}
+		if (v->sel_node >= v->n_node)
+			v->sel_node = v->n_node ? v->n_node - 1u : 0;
+	}
+
 	if (evt_have_rec(v) && v->evt_open && !sym_view(v)) {
 		int room = hex_bot() - hex_top() + 1;
 		int meta[64], warn[64], nm2 = 0, nw2 = 0;
@@ -11172,8 +11494,20 @@ static int bar_shown(struct view *v, int i)
 	if (i < 0 || i >= BI_COUNT)
 		return 0;
 
-	verb = bar_filt_verb(i);
-	if (verb >= 0) {
+	/*
+	 * A FILTER SLOT IS A SLOT WHETHER OR NOT IT HAS A VERB.
+	 *
+	 * The test was "bar_filt_verb returned something", which is a question
+	 * about the CONTENTS of the slot and not about which item this is. The
+	 * table has twenty slots and the sorted verb list is shorter, so the
+	 * leftover slot answered -1, fell past this branch to the general rules
+	 * at the bottom, and was shown - an empty row under the last verb.
+	 *
+	 * Asking which item it is instead cannot go wrong that way: a slot is a
+	 * slot, and whether it has a verb only decides if it is drawn.
+	 */
+	if (i >= BI_FILT_V0 && i <= BI_FILT_V19) {
+		verb = bar_filt_verb(i);
 		/*
 		 * Only verbs the log actually contains. A submenu listing
 		 * every verb the format can express would be mostly rows that
@@ -11187,17 +11521,27 @@ static int bar_shown(struct view *v, int i)
 		return v->log != NULL;
 
 	/*
-	 * WHAT AN EVENT LOG IS NOT.
+	 * WHAT AN EVENT RECORD IS NOT.
 	 *
 	 * Symbols, disassembly, the shellcode finder and the unpackers all
-	 * ask questions about a parsed executable. A log is a stream of
-	 * records: it has no symbol table, no instructions, no variables to
-	 * search and nothing for an unpacker to open. Rebuild is about the
-	 * signature database and has nothing to do with the file at all, but
-	 * it re-runs the scan on it, which for a log means discarding the
-	 * event window and finding nothing.
+	 * ask questions about a parsed executable. A record is a struct: it
+	 * has no symbol table, no instructions, no variables to search and
+	 * nothing for an unpacker to open. Rebuild is about the signature
+	 * database and has nothing to do with the file at all, but it re-runs
+	 * the scan on it, which for a log means discarding the event window
+	 * and finding nothing.
+	 *
+	 * THE TEST IS THE OBJECT, NOT THE FILE, and that is the whole
+	 * difference. A PE carried inside a submission is an executable that
+	 * happens to have arrived in a log - it has every one of those things,
+	 * and hiding them because of the container it came in would make the
+	 * one place a reader most wants a disassembler the one place without
+	 * one.
+	 *
+	 * The event filter stays offered either way: it is about the LOG, and
+	 * the log is still open whichever row is picked.
 	 */
-	if (v->log) {
+	if (v->log && !v->pe_of[v->node[v->sel_node].obj]) {
 		switch (i) {
 		case BI_SYMS:
 		case BI_DISASM:
@@ -12125,7 +12469,10 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 	const char *sub = ob->fmt ? kof_inspect_subtype_name(ob->ctx.format,
 							     ob->ctx.subtype)
 				  : NULL;
-	const char *fmt = ob->fmt ? kof_format_name(ob->ctx.format) : "raw";
+	/* "Raw", capitalised like every name kof_format_name returns - it sits
+	 * in the same column as "ELF" and "PE" and was the only lower-case one
+	 * there. */
+	const char *fmt = ob->fmt ? kof_format_name(ob->ctx.format) : "Raw";
 	int top = strstr(ob->name, "//") == NULL;
 
 	/*
@@ -12187,7 +12534,7 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 
 			snprintf(what, sizeof what, "%s%s%s",
 				 ob->fmt ? kof_format_name(ob->ctx.format)
-					 : "raw",
+					 : "Raw",
 				 ob->fmt ? "-" : "",
 				 ob->fmt ? kof_arch_name(ob->ctx.arch) : "");
 			/* The cut is written into the format rather than left
@@ -12325,6 +12672,68 @@ static const char *worst_attr(const struct object *ob)
 	return have ? level_attr(worst) : A_BAD;
 }
 
+/*
+ * The dashboard for one event: where it came from, and what it says.
+ *
+ * The field rows are the SAME ones the panel shows, from kof_evt_field, for the
+ * reason they were made an API in the first place - a page and a panel that
+ * described the same record differently would be two vocabularies for one
+ * thing. What the page adds is room: every field, untruncated, and the log's
+ * own header above them.
+ */
+/* The page's sink: one finished line becomes one row. */
+static void prop_sink(void *user, const char *text)
+{
+	(void)user;
+	prop_add("%s", text);
+}
+
+/*
+ * The dashboard for one event.
+ *
+ * The rows are composed by kof_inspect_event, which kofexamine uses too - see
+ * the note there on why the LAYOUT is shared and not only the wording. What
+ * this function decides is the headings and the palette, which are the two
+ * things a page has and a printed line does not.
+ */
+static void prop_event(struct view *v)
+{
+	static const struct kof_evt_style style = {
+		A_ID, A_LOC, A_WARN, A_OFF
+	};
+	const struct kofevt_log_hdr *h;
+
+	if (!v->log)
+		return;
+	h = kofevt_log_header(v->log);
+
+	prop_head("Event log");
+	kof_inspect_event_log(h, v->log_events, v->log_n, &style,
+			      prop_sink, NULL);
+
+	if (!evt_have_rec(v))
+		return;
+
+	/*
+	 * "Record", not "This event" - the page is already about one event, so
+	 * the heading only has to name what the rows ARE, which is the fields
+	 * of its record.
+	 */
+	prop_head("Record");
+	kof_inspect_event(&v->evt, &style, prop_sink, NULL);
+
+	/*
+	 * The whole submission's size, which no field row can report: the
+	 * record's own says how much of it THIS record holds, and the rest
+	 * arrived in continuations.
+	 */
+	if (v->evt_text_len)
+		prop_add("       " A_ID "%-11s" A_OFF A_SIZE "%llu" A_OFF
+			 " characters%s", "gathered",
+			 (unsigned long long)v->evt_text_len,
+			 v->evt_wide ? " (utf-16)" : "");
+}
+
 static void prop_build(struct view *v)
 {
 	struct object *ob = cur_obj(v);
@@ -12376,6 +12785,26 @@ static void prop_build(struct view *v)
 		}
 	}
 	prop_object_rows(v, ob, 1);
+
+	/*
+	 * AN EVENT'S PAGE IS A DIFFERENT PAGE.
+	 *
+	 * Everything below - the format block, the regions, the partition check
+	 * - is about a parsed file. A record has no parser and no regions, so
+	 * that half would be a column of "no parser divides this object" under
+	 * a heading that promised otherwise. What a reader wants here is the
+	 * log it came from and what the record says.
+	 *
+	 * NOT for a carried file. A PE that arrived inside a submission is an
+	 * executable and gets the ordinary page, headers and regions and all -
+	 * see the note in bar_shown about testing the object rather than the
+	 * file.
+	 */
+	if (v->log && !v->pe_of[v->node[v->sel_node].obj] &&
+	    v->node[v->sel_node].obj != 0) {
+		prop_event(v);
+		return;
+	}
 
 	if (ob->fmt && ob->info) {
 		if (ob->ctx.format == KOF_FMT_ELF)
