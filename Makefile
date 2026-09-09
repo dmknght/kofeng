@@ -608,6 +608,7 @@ help:
 	$(info $(SP)  kofwatchman   verdicts over a recorded event log)
 	$(info $(SP)  kofwatchtower the event sensor             (cross-builds w/ mingw))
 	$(info $(SP)  kofmontrace   run a program and trace it          (Windows only))
+	$(info $(SP)  kofmemscan    scan the memory of running processes (Windows only))
 	$(info $(SP)  tools         all six of the above)
 	$(info $(SP)  databases     compile bases/ into the shipping databases)
 	$(info $(SP)                                                 -> $(OUT)/databases)
@@ -684,6 +685,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/containers/rtf_parse.c \
            libkofeng/kofparsers/containers/pdf_parse.c \
            libkofeng/kofunpack/pe_rebuild.c \
+           libkofeng/kofunpack/pe_unmap.c \
            libkofeng/kofunpack/emu_unpack.c \
            libkofeng/kofunpack/elf_rebuild.c \
            libkofeng/kofunpack/embedded.c \
@@ -889,6 +891,10 @@ $(OUT)/bin/kofscanner$(EXE): $(SCANNER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 KOFEVT_SRC := libkoforbit/kofevt/kofevt.c libkoforbit/kofevt/kofevtfmt.c \
               libkoforbit/kofevt/kofevtlog.c
 
+# The verdict cache. Orbit, not the engine, for the reason koffridge.h gives:
+# what an answer is keyed on and how long it stays good are a host's policy.
+KOFRIDGE_SRC := libkoforbit/koffridge/koffridge.c
+
 EXAMINE_SRC := kofexamine/kofexamine.c kofexamine/kofinspect.c kofexamine/kofeditor.c
 
 $(OUT)/bin/kofexamine$(EXE): $(EXAMINE_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
@@ -965,6 +971,29 @@ $(OUT)/bin/kofwatchman$(EXE): kofwatcher/kofwatchman.c $(KOFEVT_SRC) $(LIB) \
 	      $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS) $(WATCHMAN_CHAN)
 
 kofwatchman: $(OUT)/bin/kofwatchman$(EXE)
+	$(info $(SP)  $<)
+	@$(NOOP)
+
+#
+# kofmemscan: THE ENGINE AND THE SNAPSHOT IN ONE PROGRAM, so Windows only.
+#
+# It is the first tool that needs both halves - libkofgrille to find what is
+# mapped, libkofeng to say what it is - and it is built with the NATIVE
+# compiler rather than the cross one, because it has to run on the machine it is
+# inspecting. That is why it appears here beside kofwatchman and not in the
+# cross-build block: the cross block produces binaries for a Windows host, and
+# this one is only ever built ON that host.
+#
+# $(WINLIB) comes in through WATCHMAN_CHAN, which is empty off Windows - so this
+# rule exists everywhere and the target below is only offered where it links.
+$(OUT)/bin/kofmemscan$(EXE): kofwatcher/kofmemscan.c $(KOFRIDGE_SRC) $(LIB) \
+                             $(SDK_HDR) $(STAMP)
+	@$(call MKDIR,$(dir $@))
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofeng -Ilibkofeng/kofparsers \
+	      -Ilibkoforbit/koffridge -Ilibkoforbit/kofevt $< \
+	      $(KOFRIDGE_SRC) $(LIB) -o $@ $(LDFLAGS) $(WATCHMAN_CHAN)
+
+kofmemscan: $(OUT)/bin/kofmemscan$(EXE)
 	$(info $(SP)  $<)
 	@$(NOOP)
 
@@ -1128,7 +1157,7 @@ kofmontrace: $(OUT)/bin/kofmontrace$(WIN_EXE)
 # expands a rule's prerequisites when it READS the rule, hundreds of lines
 # above this, where none of these variables are set yet.
 ifeq ($(NATIVE_OS),windows)
-tools: kofwatchtower kofmontrace
+tools: kofwatchtower kofmontrace kofmemscan
 
 #
 # THE COLLECTOR IS A PREREQUISITE OF kofwatchman ON WINDOWS, declared here
@@ -1307,6 +1336,13 @@ $(TEST)/unit_%$(EXE): tests/unit/%.c $(LIB) $(STAMP) | $(TEST)
 # dependency in the place somebody reading the recipe is already looking.
 # kofinspect now describes events as well as objects, so whatever links it
 # needs the event record with it - see kof_inspect_event.
+# The verdict cache is not in the library either - it is orbit's - so the test
+# over it compiles that source the same way.
+$(TEST)/unit_fridge$(EXE): tests/unit/fridge.c $(KOFRIDGE_SRC) $(LIB) $(STAMP) \
+                           | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) tests/unit/fridge.c $(KOFRIDGE_SRC) $(LIB) \
+	      -o $@ $(LDFLAGS)
+
 EDITOR_SRC := kofexamine/kofeditor.c kofexamine/kofinspect.c $(KOFEVT_SRC)
 
 #

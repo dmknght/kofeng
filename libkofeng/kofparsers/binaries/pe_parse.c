@@ -448,11 +448,33 @@ static uint64_t settle_claims(struct kof_pe_info *p, uint64_t obj_size)
 		n++;
 	}
 
+	/*
+	 * WHICH PAIR OF NUMBERS A SECTION OWNS ITS BYTES BY.
+	 *
+	 * The same section states both - where it is in the file and where the
+	 * loader puts it - and which one is true of THESE bytes is not something
+	 * the header knows. The caller said; see enum kof_pe_layout.
+	 *
+	 * The mapped case also stops skipping a section with no raw data. A .bss
+	 * has SizeOfRawData 0 and VirtualSize of megabytes, and in memory those
+	 * megabytes exist, are zero, and are writable - so they are bytes this
+	 * object has and something must own them, or the partition has a hole
+	 * exactly where an unpacker likes to write.
+	 */
 	for (i = 0; i < p->sec_count && n < cap; i++) {
-		if (!p->sec[i].file_size)
+		uint64_t off, len;
+
+		if (kof_pe_is_mapped(p)) {
+			off = p->sec[i].mem_rva;
+			len = p->sec[i].mem_size;
+		} else {
+			off = p->sec[i].file_off;
+			len = p->sec[i].file_size;
+		}
+		if (!len)
 			continue;
-		c[n].off = p->sec[i].file_off;
-		c[n].len = p->sec[i].file_size;
+		c[n].off = off;
+		c[n].len = len;
 		c[n].rank = 2;
 		c[n].tag = i;
 		n++;
@@ -569,9 +591,20 @@ int kof_pe_parse(kof_buf file, struct kof_pe_info *info, struct kof_obj_ctx *ctx
 	uint32_t lfanew32 = 0, tmp32;
 	uint32_t i;
 	int is64;
+	/*
+	 * The one field of this view the caller owns, saved across the wipe.
+	 *
+	 * The memset is right - every other field is this parser's answer and a
+	 * view is reused across objects - but `layout` is an INPUT, and clearing
+	 * it would make every declared mapped image parse as a file and resolve
+	 * its regions to the wrong bytes. Read it, wipe, put it back.
+	 */
+	uint32_t layout = info ? info->layout : 0u;
 
 	memset(info, 0, sizeof *info);
 	info->version = KOF_PE_INFO_VERSION;
+	info->layout  = layout == KOF_PE_LAYOUT_MAPPED ? KOF_PE_LAYOUT_MAPPED
+						       : KOF_PE_LAYOUT_FILE;
 
 	ctx->obj_size    = file.n;
 	ctx->entry_off   = KOF_NA;
@@ -731,7 +764,7 @@ int kof_pe_parse(kof_buf file, struct kof_pe_info *info, struct kof_obj_ctx *ctx
 	 * that, and getting it wrong once would put a signature blob in the middle
 	 * of RVA space.
 	 */
-	if (info->n_dirs > KOF_PE_DIR_SECURITY) {
+	if (info->n_dirs > KOF_PE_DIR_SECURITY && !kof_pe_is_mapped(info)) {
 		uint64_t co = info->dir[KOF_PE_DIR_SECURITY].rva;
 		uint64_t cn = info->dir[KOF_PE_DIR_SECURITY].size;
 
@@ -757,9 +790,21 @@ int kof_pe_parse(kof_buf file, struct kof_pe_info *info, struct kof_obj_ctx *ctx
 		}
 	}
 
-	/* Overlay: past everything any structure claimed, which settle_claims and
-	 * the certificate above have already accumulated. */
-	if (last_end < file.n) {
+	/*
+	 * Overlay: past everything any structure claimed, which settle_claims and
+	 * the certificate above have already accumulated.
+	 *
+	 * A MAPPED IMAGE HAS NONE, and the tail past its last section is not one.
+	 * An overlay is bytes appended to a FILE; the loader does not map them,
+	 * so what sits past the last section in memory is the alignment slack the
+	 * loader zero-filled. Calling that an overlay would put a region that
+	 * means "appended payload" over a region that means "nothing", and every
+	 * rule written for the first would run against the second. It is left to
+	 * UNCLAIMED, which is what it honestly is - and which is still scanned,
+	 * because UNCLAIMED is the complement and something writing code into
+	 * that slack is precisely the case worth catching.
+	 */
+	if (last_end < file.n && !kof_pe_is_mapped(info)) {
 		info->overlay_off = last_end;
 		info->overlay_len = file.n - last_end;
 	}

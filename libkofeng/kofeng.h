@@ -698,6 +698,41 @@ struct kof_scan_option {
 	uint8_t  as_format;
 
 	/*
+	 * WHAT THE BYTES DO NOT SAY, for the parser named by as_format.
+	 *
+	 * as_format says what this object is. This says the part of "what it
+	 * is" that is not in the object at all, and there are two of those
+	 * already. A collected event carries its submitted content somewhere in
+	 * the middle of the record, and only the client that took the record
+	 * off the channel knows where. An image read out of a process is a PE
+	 * whose sections sit at their VIRTUAL addresses rather than their file
+	 * offsets, and only the caller that read it knows that; a PE parsed the
+	 * ordinary way would resolve every region to the wrong bytes and match
+	 * nothing, quietly.
+	 *
+	 * Both are already fields of the parser's own view - kof_amsi_view has
+	 * obj_off, kof_pe_info has layout - so this is a PREFIX OF THAT VIEW,
+	 * copied in before the parse runs. Not a second vocabulary: adding a
+	 * declared input to a format means adding a field to its view near the
+	 * front, and nothing here changes.
+	 *
+	 * WHY IT HAD TO EXIST. Before it, the view on the declared path was
+	 * zeroed on the first scan and reused unzeroed on every one after, so
+	 * an AMSI object's content extent was 0 the first time - OBJDATA
+	 * swallowed the metadata and METADATA came back empty - and stale the
+	 * rest of the time. The two regions did not partition anything and no
+	 * caller could make them.
+	 *
+	 * Borrowed for the duration of the call. Ignored without as_format, and
+	 * ignored - not truncated - if it is longer than the view it is for: a
+	 * caller and an engine that disagree about a view's size disagree about
+	 * its layout too, and half-copying one would put arbitrary bytes into
+	 * fields the parse trusts.
+	 */
+	const void *as_view;
+	uint32_t    as_view_len;
+
+	/*
 	 * THE HEURISTIC'S OFF SWITCH, AND WHY IT IS AN OFF SWITCH.
 	 *
 	 * Zero - the default a memset gives - RUNS the heuristic. It used to be

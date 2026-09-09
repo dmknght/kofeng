@@ -640,7 +640,7 @@ static void finding_str(const struct kof_scanner *sc,
  * one: the object still gets scanned by every module whose target covers unknown.
  */
 static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
-		     uint8_t as_format)
+		     uint8_t as_format, const void *as_view, uint32_t as_view_len)
 {
 	const struct kof_parser *parsers;
 	uint32_t i, n;
@@ -673,8 +673,25 @@ static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ct
 				sc->view[as_format] = malloc(p->view_size);
 				if (!sc->view[as_format])
 					return;
-				memset(sc->view[as_format], 0, p->view_size);
 			}
+			/*
+			 * ZEROED EVERY TIME, not once when it was allocated.
+			 *
+			 * A view is reused across objects, and the sniff path
+			 * can do that because each of those parsers fills every
+			 * field it later reads. This path cannot: the fields the
+			 * CALLER supplies are exactly the ones the parse does
+			 * not compute, so a view left as the last object found
+			 * it hands this object the last one's answers. That was
+			 * the bug - the first event in a run resolved its
+			 * regions from a zero extent and every event after it
+			 * from the previous event's.
+			 */
+			memset(sc->view[as_format], 0, p->view_size);
+			if (as_view && as_view_len &&
+			    as_view_len <= p->view_size)
+				memcpy(sc->view[as_format], as_view,
+				       as_view_len);
 			(void)p->parse(buf, sc->view[as_format], ctx);
 		}
 		return;
@@ -1318,7 +1335,8 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	sc->use = NULL;
 	sc->use_done = 0;
 
-	identify(sc, buf, &ctx, opt ? opt->as_format : 0u);
+	identify(sc, buf, &ctx, opt ? opt->as_format : 0u,
+		 opt ? opt->as_view : NULL, opt ? opt->as_view_len : 0u);
 
 	present = regions_present(&ctx, sc->eng->scan_mask);
 	present |= sym_halves_present(&ctx, sc->eng->scan_mask);

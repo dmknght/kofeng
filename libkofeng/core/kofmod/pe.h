@@ -44,6 +44,36 @@
 #define KOF_PE_INFO_VERSION 1
 
 /*
+ * WHICH LAYOUT THE BYTES ARE IN, and it is the caller who says.
+ *
+ * A PE exists in two shapes and only one of them is a file. On disk a section
+ * sits at PointerToRawData; once the loader has mapped it, the same section sits
+ * at VirtualAddress, the gaps between sections are zero-filled to
+ * SectionAlignment, and the certificate and the overlay are not there at all.
+ * The section table still says both, so the header alone cannot tell you which
+ * shape you are holding.
+ *
+ * That matters for exactly one thing and it matters completely: the scan
+ * regions. Resolving CODE from PointerToRawData over a mapped image points it at
+ * the wrong bytes - not at nothing, at OTHER SECTIONS' bytes - so every region
+ * rule runs against the wrong input and matches nothing, with no error anywhere.
+ * It is the quietest possible way for a memory scan to be useless.
+ *
+ * DECLARED, NOT SNIFFED, for the reason kof_amsi_view's extents are: the two
+ * shapes are not distinguishable from the bytes in the general case - a file
+ * whose FileAlignment equals its SectionAlignment is byte-identical in both -
+ * and whoever produced the buffer never had to guess. It read a file, or it read
+ * a process. See kof_scan_option.as_view for how it says so.
+ *
+ * FILE IS ZERO, so everything that does not know about this gets what it always
+ * got.
+ */
+enum kof_pe_layout {
+	KOF_PE_LAYOUT_FILE   = 0,  /* PointerToRawData/SizeOfRawData */
+	KOF_PE_LAYOUT_MAPPED = 1   /* VirtualAddress/VirtualSize     */
+};
+
+/*
  * Scan regions.
  *
  * The five ELF regions plus one. The extra is OVERLAY, and it exists because the
@@ -465,7 +495,29 @@ struct kof_pe_info {
 	uint32_t _pad1;
 	struct kof_pe_dir dir[KOF_PE_DIR_COUNT];
 	struct kof_pe_sec sec[KOF_PE_MAX_SECTIONS];
+
+	/*
+	 * enum kof_pe_layout. INPUT: set by the caller before the parse runs,
+	 * never by the parse.
+	 *
+	 * Last in the struct rather than first, which is the opposite of where a
+	 * declared input naturally goes. The reason is that a database is
+	 * compiled against this header and a module reads this struct by offset:
+	 * a field added at the front moves every field after it, and a database
+	 * that was not rebuilt would read every one of them from the wrong
+	 * place. Appended, a stale module reads what it always read and is
+	 * merely blind to this. A caller sets it by passing the whole view - see
+	 * kof_scan_option.as_view - which costs a memset of a struct once per
+	 * object and buys not having to think about that again.
+	 */
+	uint32_t layout;
 };
+
+/* Non-zero when this view describes an image the loader has already mapped. */
+static inline int kof_pe_is_mapped(const struct kof_pe_info *p)
+{
+	return p && p->layout == KOF_PE_LAYOUT_MAPPED;
+}
 
 /*
  * The PE view of the object under scan.
@@ -496,6 +548,19 @@ static inline uint64_t kof_pe_rva_to_off(const struct kof_pe_info *p, uint64_t r
 
 	if (!p || !p->valid)
 		return KOF_BROKEN;
+	/*
+	 * In a mapped image the translation is the identity - that is what
+	 * mapping IS - and doing it through the section table would be wrong
+	 * twice over: it would move the answer by (file_off - mem_rva), and it
+	 * would refuse an RVA that lands in the part of a section the file does
+	 * not store, which in memory is present and zero-filled.
+	 *
+	 * The bound is the object rather than the section table, because
+	 * SizeOfImage covers the alignment slack between sections and a
+	 * directory may legitimately point into a section's zero tail.
+	 */
+	if (p->layout == KOF_PE_LAYOUT_MAPPED)
+		return rva < p->size_of_image ? rva : KOF_BROKEN;
 	for (i = 0; i < p->sec_count; i++) {
 		const struct kof_pe_sec *s = &p->sec[i];
 		uint64_t span = s->mem_size > s->file_size ? s->mem_size
