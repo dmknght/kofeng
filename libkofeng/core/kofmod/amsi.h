@@ -17,9 +17,12 @@
  * really does mean "anywhere in the event".
  *
  * THE OBJECT IS THE REASSEMBLED EVENT, NOT ONE RECORD. A submission longer than
- * the arena arrives as an event followed by KOF_EVT_CONT records, and what a
+ * one record arrives as an event followed by continuation records, and what a
  * rule is written against is the whole of it - so whoever builds the object
- * joins the chunks first (kof_evt_join) and presents head plus full content.
+ * joins them first and presents the head plus the full content. That joining
+ * happens OUTSIDE the engine, in whatever holds the records; the engine is
+ * handed the result and told where the content sits in it.
+ *
  * A rule that saw only the first four hundred bytes would miss whatever a
  * downloader assembled past them, which is where it puts it.
  */

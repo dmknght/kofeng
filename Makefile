@@ -1385,6 +1385,38 @@ unit: fixtures test-sigs $(UNIT_RUN)
 
 # Everything -MMD wrote. Missing on a clean tree, which is why it is a soft
 # include: nothing to rebuild yet, and the first compile creates them.
+#
+# A PREREQUISITE THAT ONLY A STALE DEPENDENCY FILE STILL BELIEVES IN.
+#
+# -MMD -MP already covers headers: -MP emits a phony target for each one, so a
+# header that moves does not stop the build. It does NOT cover sources, because
+# a link rule's .d lists the .c files it was built from - and when one of those
+# moves, make refuses with "No rule to make target '<old path>', needed by
+# <binary>" until somebody works out that the answer is to delete build/temp.
+#
+# That has now cost this tree two file moves, and the second one was worse than
+# the first: the build had been broken for an hour while every test appeared to
+# pass, because the tools being run were the last ones that linked.
+#
+# Named per library rather than as a bare "%.c", which was tried and is too
+# greedy: it let make believe it could produce tests/unit/<anything>.c, so a
+# pattern rule matched a name that was never a source and the compiler was
+# handed "elf_rebuild.d.c". These match only the trees that hold sources.
+#
+# What is lost: a source deleted by accident now fails at the compiler with
+# "No such file or directory" naming the file, rather than at make. That is the
+# better error of the two - it names what is missing rather than what wanted it.
+libkofeng/%.c: ;
+libkofeng/%.h: ;
+libkoforbit/%.c: ;
+libkoforbit/%.h: ;
+libkofgrille/%.c: ;
+libkofgrille/%.h: ;
+kofexamine/%.c: ;
+kofexamine/%.h: ;
+kofwatcher/%.c: ;
+kofwatcher/%.h: ;
+
 -include $(shell $(FIND_DEPS))
 
 #

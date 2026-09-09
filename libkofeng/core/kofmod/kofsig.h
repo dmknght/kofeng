@@ -167,8 +167,13 @@ enum kof_format {
 	/*
 	 * ONE COLLECTED EVENT, not a file.
 	 *
-	 * The object is a struct kof_evt - what a collector saw happen, with the
-	 * submitted content in its arena. It is a format here for the same
+	 * The object is one collected event - what a collector saw happen, with
+	 * the submitted content inside it.
+	 *
+	 * The engine does not read that record's layout and cannot: it belongs
+	 * to libkoforbit, which sits outside. What reaches a parser here is a
+	 * buffer plus the caller's word for where the content is - see
+	 * amsi_parse.h. It is a format here for the same
 	 * reason every other value is: format is what the prefilter rules on, so
 	 * a rule written about a script submission is never offered an ELF and
 	 * an ELF rule is never offered an event.
