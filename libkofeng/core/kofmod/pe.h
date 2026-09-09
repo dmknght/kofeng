@@ -415,6 +415,50 @@ struct kof_pe_info {
 	 * Zero length when the directory is absent or does not resolve. */
 	uint64_t res_off, res_len;
 
+	/*
+	 * THE LINKER'S OWN VERSION, as it wrote it.
+	 *
+	 * Two bytes at the top of the optional header that nothing else in this
+	 * struct carries, and the most direct statement a PE makes about what
+	 * BUILT it: 14.x is a Visual Studio 2015-or-later toolchain, 6.x is an
+	 * old MSVC, 2.25 and its neighbours are the GNU linker, and .NET
+	 * assemblies conventionally write 8.0 or 48.0.
+	 *
+	 * A CLAIM, NOT A MEASUREMENT. Nothing verifies these bytes and a packer
+	 * may write anything into them, so they identify a toolchain about as
+	 * well as a filename identifies a file - which is to say usefully and
+	 * not conclusively. Whoever shows them should say so.
+	 */
+	uint8_t  linker_major, linker_minor;
+	uint8_t  _pad2[2];
+
+	/*
+	 * THE CLI HEADER, when this image is managed code.
+	 *
+	 * A .NET assembly is an ordinary PE with one extra data directory - the
+	 * COM descriptor - pointing at a CLI header. Everything else about it
+	 * reads like a native image and is misleading if taken as one: its
+	 * entry point is a token rather than code, its "machine" says i386 for
+	 * assemblies that run on anything, and disassembling its text section
+	 * yields nothing, because the section holds IL.
+	 *
+	 * `clr_len` zero means the directory was absent or did not resolve, and
+	 * then this is a native image as far as anything here can tell.
+	 */
+	uint64_t clr_off, clr_len;      /* the CLI header, as a file range */
+	uint16_t clr_major, clr_minor;  /* the runtime version it asks for */
+	uint32_t clr_flags;             /* COMIMAGE_FLAGS_* */
+	uint32_t clr_entry_token;
+
+	/*
+	 * The metadata version string - "v4.0.30319" and its kind.
+	 *
+	 * Taken from the metadata root, which the CLI header points at. It is
+	 * the version of the FORMAT the compiler emitted, which is the closest
+	 * thing a managed image has to a compiler stamp.
+	 */
+	char     clr_version[32];
+
 	uint64_t anomalies;
 
 	uint32_t sec_count;

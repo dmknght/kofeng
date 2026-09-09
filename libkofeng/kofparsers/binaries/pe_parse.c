@@ -336,6 +336,68 @@ static void resolve_resource(struct kof_pe_info *p, uint64_t obj_size)
 }
 
 /*
+ * THE CLI HEADER, when this image is managed code.
+ *
+ * Resolved the same way the resource directory is - through the section table,
+ * bounds checked, and left at zero when anything does not add up. A directory
+ * that points outside the file is a claim the file cannot back, and following
+ * it would hand a caller a range that is not there.
+ *
+ * The metadata version string comes from the metadata root the CLI header
+ * points at: magic "BSJB", then two version words, then a length-prefixed
+ * string. It is read here rather than left to a caller because reaching it
+ * means two more RVA resolutions, which is exactly the work a parser exists to
+ * have done once.
+ */
+static void resolve_clr(struct kof_pe_info *p, kof_buf file, uint64_t obj_size)
+{
+	uint64_t rva, len, off, mroot;
+	uint32_t tmp32 = 0, vlen = 0;
+	uint16_t tmp16 = 0;
+
+	p->clr_off = p->clr_len = 0;
+	p->clr_version[0] = '\0';
+	if (p->n_dirs <= KOF_PE_DIR_COM_DESCRIPTOR)
+		return;
+	rva = p->dir[KOF_PE_DIR_COM_DESCRIPTOR].rva;
+	len = p->dir[KOF_PE_DIR_COM_DESCRIPTOR].size;
+	if (!rva || !len)
+		return;
+	off = kof_pe_rva_to_off(p, rva);
+	if (off == KOF_BROKEN || off >= obj_size)
+		return;
+	if (len > obj_size - off)
+		len = obj_size - off;
+	p->clr_off = off;
+	p->clr_len = len;
+
+	/* cb, MajorRuntimeVersion, MinorRuntimeVersion, MetaData(rva,size),
+	 * Flags, EntryPointToken - the first twenty bytes of the CLI header. */
+	if (kof_rd_u16(file, off + 4, 0, &tmp16)) p->clr_major = tmp16;
+	if (kof_rd_u16(file, off + 6, 0, &tmp16)) p->clr_minor = tmp16;
+	if (kof_rd_u32(file, off + 16, 0, &tmp32)) p->clr_flags = tmp32;
+	if (kof_rd_u32(file, off + 20, 0, &tmp32)) p->clr_entry_token = tmp32;
+
+	if (!kof_rd_u32(file, off + 8, 0, &tmp32) || !tmp32)
+		return;
+	mroot = kof_pe_rva_to_off(p, tmp32);
+	if (mroot == KOF_BROKEN || mroot >= obj_size)
+		return;
+	/* "BSJB", then two uint16 versions, a reserved uint32, then the
+	 * length-prefixed version string. */
+	if (!kof_rd_u32(file, mroot, 0, &tmp32) || tmp32 != 0x424a5342u)
+		return;
+	if (!kof_rd_u32(file, mroot + 12, 0, &vlen) || !vlen)
+		return;
+	if (vlen > sizeof p->clr_version - 1u)
+		vlen = (uint32_t)(sizeof p->clr_version - 1u);
+	if (mroot + 16u + vlen > obj_size)
+		return;
+	memcpy(p->clr_version, file.p + mroot + 16u, vlen);
+	p->clr_version[vlen] = '\0';
+}
+
+/*
  * Settle which bytes each structure owns.
  *
  * The regions have to be disjoint or they are not a partition, and nothing in the
@@ -577,6 +639,14 @@ int kof_pe_parse(kof_buf file, struct kof_pe_info *info, struct kof_obj_ctx *ctx
 	if (info->opt_size < (is64 ? 112u : 96u))
 		info->anomalies |= KOF_PE_ANOM_OPTSIZE_ODD;
 
+	/* The linker's own version, two bytes above the sizes - see the note on
+	 * the field. A claim, not a measurement. */
+	{
+		uint8_t lv = 0;
+
+		if (kof_rd_u8(file, opt + 2, &lv)) info->linker_major = lv;
+		if (kof_rd_u8(file, opt + 3, &lv)) info->linker_minor = lv;
+	}
 	if (kof_rd_u32(file, opt + 4,  0, &tmp32)) info->size_of_code        = tmp32;
 	if (kof_rd_u32(file, opt + 8,  0, &tmp32)) info->size_of_init_data   = tmp32;
 	if (kof_rd_u32(file, opt + 12, 0, &tmp32)) info->size_of_uninit_data = tmp32;
@@ -651,6 +721,7 @@ int kof_pe_parse(kof_buf file, struct kof_pe_info *info, struct kof_obj_ctx *ctx
 
 	read_sections(file, info, sectab);
 	resolve_resource(info, file.n);
+	resolve_clr(info, file, file.n);
 	last_end = settle_claims(info, file.n);
 	resolve_entry(info, ctx);
 
