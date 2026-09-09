@@ -2851,8 +2851,16 @@ static void log_window(struct view *v)
 					snprintf(c->name, sizeof c->name,
 						 "%s//pe", pn);
 				}
+				/*
+				 * Named "Img ?" until it is parsed, and given
+				 * its format and architecture the moment it is
+				 * - see evt_load. The row is built before
+				 * anything has looked at the bytes, so the
+				 * alternative to a placeholder is a row that
+				 * claims a format nobody has checked.
+				 */
 				snprintf(c->label, sizeof c->label,
-					 "%llu PE image",
+					 "%llu Img ?",
 					 (unsigned long long)id);
 				c->depth = 2;
 				c->ctx.obj_size = pe_bytes;
@@ -4026,6 +4034,26 @@ static void evt_load(struct view *v)
 				 * The frame does it instead, before anything is
 				 * drawn and while nothing holds a node.
 				 */
+				/*
+				 * THE ROW SAYS WHAT IT IS, now that something
+				 * has looked.
+				 *
+				 * "Img PE-x64" rather than "PE image": the
+				 * architecture is the fact a reader most wants
+				 * from a carried executable and the panel is
+				 * where they are looking. Composed from the
+				 * parser's own answers, so a submission that
+				 * turns out to hold an ELF says ELF.
+				 */
+				if (c->fmt) {
+					uint64_t cid = v->log_idx[sel];
+
+					snprintf(c->label, sizeof c->label,
+						 "%llu Img %s-%s",
+						 (unsigned long long)cid,
+						 kof_format_name(c->ctx.format),
+						 kof_arch_name(c->ctx.arch));
+				}
 				if (c->fmt && !had_fmt)
 					v->tree_dirty = 1;
 			}
@@ -5234,10 +5262,17 @@ static int opt_offerable(struct view *v, int k)
 	 *
 	 * What WOULD be meaningful here is a bound on the CONTENT - "a script
 	 * block at least this long" is a real claim about a sample. There is no
-	 * precondition for it yet; see the note in the reply rather than
-	 * inventing one that the host does not check.
+	 * precondition for it yet, and inventing one the host does not check
+	 * would be worse than not having it.
+	 *
+	 * THE TEST IS THE OBJECT, NOT THE FILE - the same correction bar_shown
+	 * needed. A PE carried inside a submission is an executable: it has an
+	 * architecture, a subtype and a size that all mean what they say, and
+	 * refusing them because of the container it arrived in leaves the one
+	 * object a reader most wants to write a rule about as the one they
+	 * cannot state anything about.
 	 */
-	if (v->log)
+	if (v->log && !v->pe_of[v->node[v->sel_node].obj])
 		return 0;
 	if (k == OPT_ARCH)
 		return exe && cur_obj(v)->ctx.arch != 0;
@@ -10721,6 +10756,19 @@ static void redraw(struct view *v)
 			}
 		if (v->sel_node >= v->n_node)
 			v->sel_node = v->n_node ? v->n_node - 1u : 0;
+		/*
+		 * AND RE-RESOLVE THE SELECTION, which is the half that was
+		 * missing.
+		 *
+		 * The extents, the region length and the scroll clamp all
+		 * belong to the row that is selected, and the rebuild is what
+		 * moves the rows. Left alone they went on describing whatever
+		 * was selected before - and with the wrong extents view_map
+		 * runs off the end and answers 0 for every byte, so the pane
+		 * showed byte zero of the object repeated: sixteen 4D per line
+		 * with the offset column stuck at 00000000.
+		 */
+		view_select(v);
 	}
 
 	if (evt_have_rec(v) && v->evt_open && !sym_view(v)) {

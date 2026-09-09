@@ -1273,9 +1273,36 @@ void kof_inspect_event_log(const struct kofevt_log_hdr *h,
 		 kof_evt_arch_name((uint8_t)h->arch));
 	out(user, line);
 
-	snprintf(line, sizeof line, "  %s%-11s%s%lu",
-		 sty(st ? st->id : NULL), "build", sty(st ? st->off : NULL),
-		 (unsigned long)h->build);
+	/*
+	 * NAMED FOR THE COMPONENT, NOT THE LIBRARY.
+	 *
+	 * "Windows watcher" is what collected this; libkofgrille is the library
+	 * it happens to be built from, and a reader of a log has no reason to
+	 * know that name. The two are separable on purpose - the collector
+	 * ships and versions on its own - so the log says which collector, and
+	 * its version says which contract its records follow.
+	 *
+	 * A version of zero is a log written before collectors carried one. It
+	 * is left off rather than shown as "0.0", which would read as a real
+	 * answer.
+	 */
+	if (h->src_major || h->src_minor)
+		snprintf(line, sizeof line, "  %s%-11s%s%s %u.%u  build %lu",
+			 sty(st ? st->id : NULL), "collector",
+			 sty(st ? st->off : NULL),
+			 h->platform == KOF_PLAT_WINDOWS ? "Windows watcher"
+			 : h->platform == KOF_PLAT_LINUX ? "Linux watcher"
+							 : "watcher",
+			 (unsigned)h->src_major, (unsigned)h->src_minor,
+			 (unsigned long)h->build);
+	else
+		snprintf(line, sizeof line, "  %s%-11s%s%s  build %lu",
+			 sty(st ? st->id : NULL), "collector",
+			 sty(st ? st->off : NULL),
+			 h->platform == KOF_PLAT_WINDOWS ? "Windows watcher"
+			 : h->platform == KOF_PLAT_LINUX ? "Linux watcher"
+							 : "watcher",
+			 (unsigned long)h->build);
 	out(user, line);
 
 	/*

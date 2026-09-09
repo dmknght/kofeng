@@ -121,6 +121,21 @@
 const char *kofw_provider_name(uint8_t prov);
 
 /* Which provider a record came from. */
+/*
+ * THE COLLECTOR'S OWN VERSION.
+ *
+ * Separate from the engine's, because this is a separate component: it can be
+ * built, shipped and replaced without libkofeng changing, and a reader of a log
+ * wants to know which COLLECTOR produced it - the engine that reads the log had
+ * nothing to do with writing it.
+ *
+ * Not the build stamp either. That is a date, and a date answers "is this the
+ * binary I just made". This answers "which contract do these records follow",
+ * which is what somebody opening a six-month-old trace needs.
+ */
+#define KOFW_MAJOR 1u
+#define KOFW_MINOR 0u
+
 enum kofw_provider {
 	KOFW_PROV_NONE = 0,
 	KOFW_PROV_PROCESS,

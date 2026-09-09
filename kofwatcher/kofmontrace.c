@@ -631,6 +631,8 @@ int main(int argc, char **argv)
 		li.len_off     = (uint16_t)offsetof(struct kof_evt, text_len);
 		li.rec_kind    = KOFEVT_REC_KOF;
 		li.build       = (uint32_t)KOFENG_BUILD;
+		li.src_major   = KOFW_MAJOR;
+		li.src_minor   = KOFW_MINOR;
 		/* 0 asks kofevt for this host, so the tool does not have
 		 * to know how to spell it. */
 		li.platform    = 0u;

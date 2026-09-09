@@ -153,7 +153,23 @@ struct kofevt_log_hdr {
 	uint16_t head_size;
 	uint16_t len_off;
 
-	uint8_t  reserved[12];
+	/*
+	 * WHICH COLLECTOR WROTE THIS, as a version rather than a date.
+	 *
+	 * `build` is a date stamp: it says WHEN, which answers "is this the
+	 * binary I just compiled" and nothing else. A version says what the
+	 * collector IS - which contract it implements - and that is the
+	 * question a reader of an old log has: whether the records in it mean
+	 * what this build thinks they mean.
+	 *
+	 * Taken from the reserved bytes, so the header does not grow and every
+	 * log written before this reads them as zero - which is honest, and is
+	 * why a viewer shows nothing rather than "0.0" for those.
+	 */
+	uint16_t src_major;
+	uint16_t src_minor;
+
+	uint8_t  reserved[8];
 };
 
 /*
@@ -172,6 +188,10 @@ struct kofevt_log_info {
 	uint16_t len_off;
 	uint32_t rec_kind;     /* enum kofevt_rec_kind */
 	uint32_t build;        /* the collector's build stamp */
+	/* Which collector, as a version - see the header's own note on why
+	 * this is not the build stamp. Zero when a producer does not say. */
+	uint16_t src_major;
+	uint16_t src_minor;
 	uint8_t  platform;     /* enum kof_evt_platform; 0 asks for this host */
 	uint8_t  arch;         /* enum kof_evt_arch;     0 asks for this host */
 	uint32_t root_pid;     /* the traced subtree, or 0 */

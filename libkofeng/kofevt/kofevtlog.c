@@ -92,6 +92,8 @@ struct kofevt_log_w *kofevt_log_create(const char *path,
 	memset(&hdr, 0, sizeof hdr);
 	hdr.magic       = KOFEVT_LOG_MAGIC;
 	hdr.version     = KOFEVT_LOG_VERSION;
+	hdr.src_major   = info->src_major;
+	hdr.src_minor   = info->src_minor;
 	hdr.hdr_size    = (uint16_t)sizeof hdr;
 	hdr.rec_size    = info->rec_size;
 	hdr.head_size   = info->head_size;

@@ -478,6 +478,19 @@ int main(int argc, char **argv)
 		 */
 		if (h) {
 			li.build       = h->build;
+			/*
+			 * COPIED FROM THE SOURCE, NOT CLAIMED.
+			 *
+			 * This is a client: it did not collect these records,
+			 * it received them. Replaying a log, the collector that
+			 * wrote it is named in that log's header and is carried
+			 * straight across. On a live channel nothing says which
+			 * collector is at the other end - the channel header
+			 * has no version field yet - so it is left zero, which
+			 * a reader shows as absent rather than as 0.0.
+			 */
+			li.src_major   = h->src_major;
+			li.src_minor   = h->src_minor;
 			li.platform    = (uint8_t)h->platform;
 			li.arch        = (uint8_t)h->arch;
 			li.root_pid    = h->root_pid;
