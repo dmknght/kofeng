@@ -954,6 +954,16 @@ struct view {
 	uint32_t             log_verbs, log_keep;
 
 	/*
+	 * HOW MANY OF EACH, counted in the same walk that learns which verbs
+	 * the file holds - so it costs nothing beyond the pass already made.
+	 *
+	 * A mask says a verb is present; a count says whether it is the trace.
+	 * "RegSet" and "RegSet 41000" are different facts about a log, and the
+	 * second is the one that decides where to look.
+	 */
+	uint64_t             log_count[32];
+
+	/*
 	 * THE SELECTED EVENT, SPELT OUT - the record itself and where the
 	 * reader is inside its field list.
 	 *
@@ -2624,6 +2634,7 @@ static void log_scan_verbs(struct view *v)
 	v->log_verbs = 0;
 	v->log_keep  = 0;
 	v->log_events = 0;
+	memset(v->log_count, 0, sizeof v->log_count);
 	if (!v->log || !v->map)
 		return;
 	h = kofevt_log_header(v->log);
@@ -2644,8 +2655,11 @@ static void log_scan_verbs(struct view *v)
 		 * invite a reader to hide the tails while keeping the heads,
 		 * which is not a view of anything.
 		 */
-		if (verb != KOF_EVT_CONT)
+		if (verb != KOF_EVT_CONT) {
 			v->log_events++;
+			if (verb < 32u)
+				v->log_count[verb]++;
+		}
 		if (verb < 32u && verb != KOF_EVT_CONT)
 			v->log_verbs |= 1u << verb;
 		if ((uint32_t)h->head_size + tl > h->rec_size)
@@ -2852,16 +2866,55 @@ static void log_window(struct view *v)
 						 "%s//pe", pn);
 				}
 				/*
-				 * Named "Img ?" until it is parsed, and given
-				 * its format and architecture the moment it is
-				 * - see evt_load. The row is built before
-				 * anything has looked at the bytes, so the
-				 * alternative to a placeholder is a row that
-				 * claims a format nobody has checked.
+				 * NAMED NOW, FROM THE RECORD'S OWN PREFIX.
+				 *
+				 * It used to say "Img ?" until the row was
+				 * clicked, because the image is only joined
+				 * when it is picked - and a list where every
+				 * carried file is a question mark until you
+				 * open it is a list you have to open
+				 * everything in.
+				 *
+				 * It does not need the join. A DOS header, a PE
+				 * header and the machine word all sit in the
+				 * first few hundred bytes, which is inside the
+				 * record's own arena - so the format and the
+				 * architecture are answerable from bytes that
+				 * are already mapped.
+				 *
+				 * A THROWAWAY PARSE, and deliberately not kept:
+				 * every SIZE it worked out is wrong, because it
+				 * was given a prefix. What is taken from it is
+				 * the two facts a prefix can answer honestly.
+				 * The real parse happens on selection, against
+				 * the whole image.
 				 */
-				snprintf(c->label, sizeof c->label,
-					 "%llu Img ?",
-					 (unsigned long long)id);
+				{
+					struct kof_obj_ctx tc;
+					const struct kof_parser *tf;
+					void *ti = NULL;
+					kof_buf pre = kof_buf_make(
+						p8 + h->head_size + oo, cl);
+
+					memset(&tc, 0, sizeof tc);
+					tf = kof_inspect_identify(pre, &tc,
+								  &ti);
+					if (tf)
+						snprintf(c->label,
+							 sizeof c->label,
+							 "%llu Img %s-%s",
+							 (unsigned long long)id,
+							 kof_format_name(
+								tc.format),
+							 kof_arch_name(
+								tc.arch));
+					else
+						snprintf(c->label,
+							 sizeof c->label,
+							 "%llu Img ?",
+							 (unsigned long long)id);
+					free(ti);
+				}
 				c->depth = 2;
 				c->ctx.obj_size = pe_bytes;
 				v->pe_of[n] = n - 1u;
@@ -12386,6 +12439,41 @@ static void prop_pe(const struct object *ob)
 	 A_OFF A_LOC "0x%04x" A_OFF A_DIM " characteristics=" A_OFF A_LOC
 	 "0x%04x" A_OFF, "image", p->pe32_plus ? "PE32+" : "PE32", p->machine,
 	 p->characteristics);
+	/*
+	 * WHAT BUILT IT, as far as the file is willing to say.
+	 *
+	 * The linker version is two bytes the linker wrote about itself: 14.x
+	 * is a modern MSVC, 6.x an old one, 2.x the GNU linker, and .NET
+	 * assemblies conventionally write 8.0 or 48.0. Useful and not
+	 * conclusive - nothing verifies it and a packer may write anything
+	 * there - so the row says "claims", which is the honest verb.
+	 *
+	 * WHEN IT IS MANAGED CODE, that is the more important fact and it is
+	 * not a claim: the CLI header is a real structure the runtime needs, so
+	 * an image carrying one is .NET whatever its linker bytes say. It also
+	 * changes what every other row means - the entry point is a token, not
+	 * code, and the text section holds IL - which is worth knowing before
+	 * reaching for a disassembler.
+	 */
+	if (p->clr_len) {
+		prop_add(A_DIM "  %-11s " A_OFF A_ID ".NET" A_OFF A_DIM
+			 "  runtime " A_OFF A_ID "%u.%u" A_OFF A_DIM
+			 "  metadata " A_OFF A_ID "%s" A_OFF A_DIM "%s" A_OFF,
+			 "managed", (unsigned)p->clr_major,
+			 (unsigned)p->clr_minor,
+			 p->clr_version[0] ? p->clr_version : "?",
+			 (p->clr_flags & 1u) ? "  IL only" : "");
+		prop_add(A_DIM "  %-11s off=" A_OFF A_LOC "%llu" A_OFF A_DIM
+			 "  len=" A_OFF A_SIZE "%llu" A_OFF A_DIM
+			 "  entry token=" A_OFF A_LOC "0x%08x" A_OFF,
+			 "CLI header", (unsigned long long)p->clr_off,
+			 (unsigned long long)p->clr_len, p->clr_entry_token);
+	}
+	prop_add(A_DIM "  %-11s claims " A_OFF A_ID "%u.%u" A_OFF A_DIM
+		 "%s" A_OFF, "linker", (unsigned)p->linker_major,
+		 (unsigned)p->linker_minor,
+		 p->clr_len ? "" : "  (nothing verifies this)");
+
 	prop_add(A_DIM "  %-11s lfanew=" A_OFF A_LOC "%llu" A_OFF A_DIM
 		 "  gap=" A_OFF A_SIZE "%llu" A_OFF, "stub",
 		 (unsigned long long)p->lfanew,
@@ -12759,6 +12847,49 @@ static void prop_event(struct view *v)
 	kof_inspect_event_log(h, v->log_events, v->log_n, &style,
 			      prop_sink, NULL);
 
+	/*
+	 * THE VERB TABLE BELONGS TO THE LOG'S ROW AND NOWHERE ELSE.
+	 *
+	 * It was on every event's page, where it answered a question about the
+	 * whole file that the page was not about. Here it is the point: this
+	 * row IS the file, and what a reader wants first is what kind of trace
+	 * they have.
+	 *
+	 * Two columns, with counts. A mask of which verbs are present says a
+	 * lot less than how many of each - "RegSet" and "RegSet 41000" are
+	 * different facts, and the second is the one that decides where to
+	 * look.
+	 */
+	if (v->node[v->sel_node].obj == 0) {
+		char pend[PROP_W];
+		int have_pend = 0, vb2;
+
+		prop_head("Events by verb");
+		pend[0] = '\0';
+		for (vb2 = 1; vb2 < 32; vb2++) {
+			char one[64];
+
+			if (!(v->log_verbs & (1u << (unsigned)vb2)))
+				continue;
+			snprintf(one, sizeof one,
+				 "  " A_ID "%-11s" A_OFF A_SIZE "%-10llu" A_OFF
+				 "%s", kof_evt_verb_name((uint16_t)vb2),
+				 (unsigned long long)v->log_count[vb2],
+				 (v->log_keep & (1u << (unsigned)vb2))
+					? "" : A_DIM "hidden" A_OFF);
+			if (!have_pend) {
+				snprintf(pend, sizeof pend, "%s", one);
+				have_pend = 1;
+			} else {
+				prop_add("%s   %s", pend, one);
+				have_pend = 0;
+			}
+		}
+		if (have_pend)
+			prop_add("%s", pend);
+		return;
+	}
+
 	if (!evt_have_rec(v))
 		return;
 
@@ -12848,8 +12979,15 @@ static void prop_build(struct view *v)
 	 * see the note in bar_shown about testing the object rather than the
 	 * file.
 	 */
-	if (v->log && !v->pe_of[v->node[v->sel_node].obj] &&
-	    v->node[v->sel_node].obj != 0) {
+	/*
+	 * A LOG'S OWN ROW GETS THE LOG'S PAGE, not a file's.
+	 *
+	 * Object 0 is the file - "KOFT-windows-x86_64" - and it was falling
+	 * through to the format block, the regions and the partition check,
+	 * which described it as raw bytes nobody had parsed. That is true and
+	 * it is not what anybody opens a log to read.
+	 */
+	if (v->log && !v->pe_of[v->node[v->sel_node].obj]) {
 		prop_event(v);
 		return;
 	}
