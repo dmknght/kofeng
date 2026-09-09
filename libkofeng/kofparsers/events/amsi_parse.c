@@ -4,7 +4,7 @@
 #include <string.h>
 
 #include "amsi_parse.h"
-#include "../../kofevt/kofevt.h"
+#include "../../../libkoforbit/kofevt/kofevt.h"
 
 /*
  * The target value and the verb are ONE NUMBER, and these are what keep them so.

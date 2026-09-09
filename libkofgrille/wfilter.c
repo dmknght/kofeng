@@ -31,7 +31,7 @@
  * locale-aware fold would only introduce the Turkish dotless-i problem to a
  * comparison that has no use for it.
  */
-/* The path classifier and the technique table moved to libkofeng/kofevt: they
+/* The path classifier and the technique table moved to libkoforbit/kofevt: they
  * are string work with no OS in them and they describe an EVENT, not a way of
  * collecting one. See kofevt.h. */
 

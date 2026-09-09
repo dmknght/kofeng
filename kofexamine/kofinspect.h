@@ -27,9 +27,9 @@
 #include "../libkofeng/kofeng.h"
 #include "../libkofeng/kofdb/kofdb.h"
 #include "../libkofeng/kofparsers/kofformat.h"
-#include "../libkofeng/kofevt/kofevt.h"
-#include "../libkofeng/kofevt/kofevtfmt.h"
-#include "../libkofeng/kofevt/kofevtlog.h"
+#include "../libkoforbit/kofevt/kofevt.h"
+#include "../libkoforbit/kofevt/kofevtfmt.h"
+#include "../libkoforbit/kofevt/kofevtlog.h"
 
 /* ---- what a format is ------------------------------------------------------
  *
@@ -556,7 +556,8 @@ typedef void (*kof_inspect_line)(void *user, const char *text);
  * diffed against itself, and an escape sequence in either is a bug rather than
  * a preference. NULL gives plain text, which is what that case needs.
  */
-struct kof_evt_style {
+/* Named for the library, not for events: the toolchain rows use it too. */
+struct kof_inspect_style {
 	const char *id;    /* a field's name */
 	const char *loc;   /* an offset */
 	const char *warn;  /* a flag row - the record is short, or odd */
@@ -566,7 +567,7 @@ struct kof_evt_style {
 /* The log's own facts: what collected it, and how much is in it. */
 void kof_inspect_event_log(const struct kofevt_log_hdr *h,
 			   uint64_t events, uint64_t records,
-			   const struct kof_evt_style *st,
+			   const struct kof_inspect_style *st,
 			   kof_inspect_line out, void *user);
 
 /*
@@ -582,7 +583,41 @@ void kof_inspect_event_log(const struct kofevt_log_hdr *h,
  * halves of one fact.
  */
 void kof_inspect_event(const struct kof_evt *e,
-		       const struct kof_evt_style *st,
+		       const struct kof_inspect_style *st,
 		       kof_inspect_line out, void *user);
+
+/*
+ * HOW MANY OF EACH VERB A LOG HOLDS.
+ *
+ * `count` is indexed by verb and `keep` is the mask of the ones a caller is
+ * showing - a viewer with a filter on wants the hidden ones marked rather than
+ * dropped, because a verb that is present and hidden is a different fact from
+ * one that is not there. Pass ~0u when nothing is filtered.
+ *
+ * Two to a line, which is what makes it readable: these are a word and a
+ * number, and a dozen of them down a page is a column of mostly empty line.
+ */
+void kof_inspect_event_verbs(const uint64_t *count, uint32_t keep,
+			     const struct kof_inspect_style *st,
+			     kof_inspect_line out, void *user);
+
+/*
+ * WHAT BUILT AN OBJECT, as far as the object is willing to say.
+ *
+ * Managed or native, statically or dynamically linked, which compiler left its
+ * stamp - the questions asked in the same breath as "what format is this", and
+ * answered from the parsed view rather than guessed.
+ *
+ * Here rather than in a panel for the reason kof_inspect_event is here: two
+ * tools show this and they must not word it two ways. `bytes` is the object
+ * itself, needed because one of the answers - ELF's .comment - is a section's
+ * contents rather than a parsed field.
+ *
+ * Emits nothing when the format has nothing to say, which is most of them.
+ */
+void kof_inspect_toolchain(const struct kof_obj_ctx *ctx, const void *info,
+			   kof_buf bytes,
+			   const struct kof_inspect_style *st,
+			   kof_inspect_line out, void *user);
 
 #endif /* KOFENG_KOFINSPECT_H */

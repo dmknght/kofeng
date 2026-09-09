@@ -25,9 +25,9 @@
 #include "../../libkofgrille/wevt_ring.h"
 #include "../../libkofgrille/wfilter.h"
 #include "../../libkofgrille/wtext.h"
-#include "../../libkofeng/kofevt/kofevt.h"
-#include "../../libkofeng/kofevt/kofevtfmt.h"
-#include "../../libkofeng/kofevt/kofevtlog.h"
+#include "../../libkoforbit/kofevt/kofevt.h"
+#include "../../libkoforbit/kofevt/kofevtfmt.h"
+#include "../../libkoforbit/kofevt/kofevtlog.h"
 
 static int failures;
 

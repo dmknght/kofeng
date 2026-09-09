@@ -12439,40 +12439,14 @@ static void prop_pe(const struct object *ob)
 	 A_OFF A_LOC "0x%04x" A_OFF A_DIM " characteristics=" A_OFF A_LOC
 	 "0x%04x" A_OFF, "image", p->pe32_plus ? "PE32+" : "PE32", p->machine,
 	 p->characteristics);
-	/*
-	 * WHAT BUILT IT, as far as the file is willing to say.
-	 *
-	 * The linker version is two bytes the linker wrote about itself: 14.x
-	 * is a modern MSVC, 6.x an old one, 2.x the GNU linker, and .NET
-	 * assemblies conventionally write 8.0 or 48.0. Useful and not
-	 * conclusive - nothing verifies it and a packer may write anything
-	 * there - so the row says "claims", which is the honest verb.
-	 *
-	 * WHEN IT IS MANAGED CODE, that is the more important fact and it is
-	 * not a claim: the CLI header is a real structure the runtime needs, so
-	 * an image carrying one is .NET whatever its linker bytes say. It also
-	 * changes what every other row means - the entry point is a token, not
-	 * code, and the text section holds IL - which is worth knowing before
-	 * reaching for a disassembler.
-	 */
-	if (p->clr_len) {
-		prop_add(A_DIM "  %-11s " A_OFF A_ID ".NET" A_OFF A_DIM
-			 "  runtime " A_OFF A_ID "%u.%u" A_OFF A_DIM
-			 "  metadata " A_OFF A_ID "%s" A_OFF A_DIM "%s" A_OFF,
-			 "managed", (unsigned)p->clr_major,
-			 (unsigned)p->clr_minor,
-			 p->clr_version[0] ? p->clr_version : "?",
-			 (p->clr_flags & 1u) ? "  IL only" : "");
+	/* The CLI header's own extent. What it MEANS - that this is managed
+	 * code - is said on the identity block; this is the header fact. */
+	if (p->clr_len)
 		prop_add(A_DIM "  %-11s off=" A_OFF A_LOC "%llu" A_OFF A_DIM
 			 "  len=" A_OFF A_SIZE "%llu" A_OFF A_DIM
 			 "  entry token=" A_OFF A_LOC "0x%08x" A_OFF,
 			 "CLI header", (unsigned long long)p->clr_off,
 			 (unsigned long long)p->clr_len, p->clr_entry_token);
-	}
-	prop_add(A_DIM "  %-11s claims " A_OFF A_ID "%u.%u" A_OFF A_DIM
-		 "%s" A_OFF, "linker", (unsigned)p->linker_major,
-		 (unsigned)p->linker_minor,
-		 p->clr_len ? "" : "  (nothing verifies this)");
 
 	prop_add(A_DIM "  %-11s lfanew=" A_OFF A_LOC "%llu" A_OFF A_DIM
 		 "  gap=" A_OFF A_SIZE "%llu" A_OFF, "stub",
@@ -12598,6 +12572,38 @@ static uint32_t obj_ancestors(const struct view *v, const struct object *ob,
  * numbers, compared as one.
  */
 #define PROP_CP_LABEL "[ Copy full path ]"
+
+/* The page's sink: one finished line becomes one row. */
+static void prop_sink(void *user, const char *text)
+{
+	(void)user;
+	prop_add("%s", text);
+}
+
+/*
+ * WHAT BUILT IT, on the identity block rather than in the format block.
+ *
+ * "Is this .NET", "was it linked statically", "which compiler" are questions
+ * about the SAMPLE, asked in the same breath as its format and architecture -
+ * so they belong beside those and not three headings down among the header
+ * offsets. The PE and ELF blocks below are the header, and a reader who has
+ * scrolled to them is already past the point of asking what the thing is.
+ *
+ * The rows themselves come from kof_inspect_toolchain, so kofexamine says the
+ * same things in the same words. What stays here is the palette, which is this
+ * tool's and not the library's.
+ */
+static void prop_toolchain(const struct object *ob)
+{
+	static const struct kof_inspect_style style = {
+		A_ID, A_LOC, A_WARN, A_OFF
+	};
+
+	if (!ob->fmt || !ob->info)
+		return;
+	kof_inspect_toolchain(&ob->ctx, ob->info, ob->buf, &style,
+			      prop_sink, NULL);
+}
 
 static void prop_object_rows(struct view *v, const struct object *ob, int full)
 {
@@ -12751,6 +12757,7 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 		if (ob->fmt)
 			prop_add(A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF,
 				 "arch", kof_arch_name(ob->ctx.arch));
+		prop_toolchain(ob);
 	} else {
 		/* Bytes and nothing else. The format and the architecture are
 		 * on the identity row above, and saying them twice on two
@@ -12817,12 +12824,6 @@ static const char *worst_attr(const struct object *ob)
  * thing. What the page adds is room: every field, untruncated, and the log's
  * own header above them.
  */
-/* The page's sink: one finished line becomes one row. */
-static void prop_sink(void *user, const char *text)
-{
-	(void)user;
-	prop_add("%s", text);
-}
 
 /*
  * The dashboard for one event.
@@ -12834,7 +12835,7 @@ static void prop_sink(void *user, const char *text)
  */
 static void prop_event(struct view *v)
 {
-	static const struct kof_evt_style style = {
+	static const struct kof_inspect_style style = {
 		A_ID, A_LOC, A_WARN, A_OFF
 	};
 	const struct kofevt_log_hdr *h;
@@ -12860,33 +12861,21 @@ static void prop_event(struct view *v)
 	 * different facts, and the second is the one that decides where to
 	 * look.
 	 */
+	/*
+	 * THE VERB TABLE BELONGS TO THE LOG'S ROW AND NOWHERE ELSE.
+	 *
+	 * It was on every event's page, where it answered a question about the
+	 * whole file that the page was not about. Here it is the point: this
+	 * row IS the file, and what a reader wants first is what kind of trace
+	 * they have.
+	 *
+	 * Composed by kof_inspect_event_verbs, so kofexamine says it the same
+	 * way - the palette is this tool's, the layout is not.
+	 */
 	if (v->node[v->sel_node].obj == 0) {
-		char pend[PROP_W];
-		int have_pend = 0, vb2;
-
 		prop_head("Events by verb");
-		pend[0] = '\0';
-		for (vb2 = 1; vb2 < 32; vb2++) {
-			char one[64];
-
-			if (!(v->log_verbs & (1u << (unsigned)vb2)))
-				continue;
-			snprintf(one, sizeof one,
-				 "  " A_ID "%-11s" A_OFF A_SIZE "%-10llu" A_OFF
-				 "%s", kof_evt_verb_name((uint16_t)vb2),
-				 (unsigned long long)v->log_count[vb2],
-				 (v->log_keep & (1u << (unsigned)vb2))
-					? "" : A_DIM "hidden" A_OFF);
-			if (!have_pend) {
-				snprintf(pend, sizeof pend, "%s", one);
-				have_pend = 1;
-			} else {
-				prop_add("%s   %s", pend, one);
-				have_pend = 0;
-			}
-		}
-		if (have_pend)
-			prop_add("%s", pend);
+		kof_inspect_event_verbs(v->log_count, v->log_keep, &style,
+					prop_sink, NULL);
 		return;
 	}
 

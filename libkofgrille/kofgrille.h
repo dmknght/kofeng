@@ -65,7 +65,7 @@
 /*
  * THE VOCABULARY COMES FROM THERE, NOT FROM HERE.
  *
- * Verbs, locations and techniques are defined once in libkofeng/kofevt and
+ * Verbs, locations and techniques are defined once in libkoforbit/kofevt and
  * this file uses them. They were declared here and mirrored there for one
  * afternoon, which is a shape that works exactly until the two copies
  * disagree - and then the conversion between them compiles, runs, and files

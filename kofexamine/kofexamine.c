@@ -1713,15 +1713,16 @@ static void line_sink(void *user, const char *text)
  */
 static int examine_event_log(const char *path, int colour)
 {
-	static const struct kof_evt_style plain = { 0, 0, 0, 0 };
-	static const struct kof_evt_style lit = {
+	static const struct kof_inspect_style plain = { 0, 0, 0, 0 };
+	static const struct kof_inspect_style lit = {
 		"\033[36m", "\033[90m", "\033[33m", "\033[0m"
 	};
-	const struct kof_evt_style *st = colour ? &lit : &plain;
+	const struct kof_inspect_style *st = colour ? &lit : &plain;
 	const struct kofevt_log_hdr *h;
 	struct kofevt_log_r *r;
 	const char *why = 0;
 	uint64_t n, events = 0, i;
+	uint64_t verbs[32];
 	struct kof_evt e;
 
 	r = kofevt_log_open(path, 0, KOFEVT_REC_NONE, &why);
@@ -1732,15 +1733,20 @@ static int examine_event_log(const char *path, int colour)
 
 	/* Counted rather than taken from the header: a continuation is a record
 	 * and is not an event, and the header holds only the record count. */
+	memset(verbs, 0, sizeof verbs);
 	for (i = 0; i < n; i++) {
 		if (!kofevt_log_read(r, &e))
 			break;
-		if (e.verb != KOF_EVT_CONT)
-			events++;
+		if (e.verb == KOF_EVT_CONT)
+			continue;
+		events++;
+		if (e.verb < 32u)
+			verbs[e.verb]++;
 	}
 
 	printf("== %s\n", path);
 	kof_inspect_event_log(h, events, n, st, line_sink, 0);
+	kof_inspect_event_verbs(verbs, ~0u, st, line_sink, 0);
 
 	if (kofevt_log_seek(r, 0)) {
 		for (i = 0; i < n; i++) {

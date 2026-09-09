@@ -1260,7 +1260,7 @@ static const char *sty(const char *a) { return a ? a : ""; }
 
 void kof_inspect_event_log(const struct kofevt_log_hdr *h,
 			   uint64_t events, uint64_t records,
-			   const struct kof_evt_style *st,
+			   const struct kof_inspect_style *st,
 			   kof_inspect_line out, void *user)
 {
 	char line[256];
@@ -1330,7 +1330,7 @@ void kof_inspect_event_log(const struct kofevt_log_hdr *h,
 }
 
 void kof_inspect_event(const struct kof_evt *e,
-		       const struct kof_evt_style *st,
+		       const struct kof_inspect_style *st,
 		       kof_inspect_line out, void *user)
 {
 	char pend[256], line[512];
@@ -1366,6 +1366,156 @@ void kof_inspect_event(const struct kof_evt *e,
 			 sty(st ? st->off : NULL),
 			 sty(st ? st->id : NULL), nm,
 			 sty(st ? st->off : NULL), vl);
+		if (!have_pend) {
+			snprintf(pend, sizeof pend, "%s", one);
+			have_pend = 1;
+		} else {
+			snprintf(line, sizeof line, "%s   %s", pend, one);
+			out(user, line);
+			have_pend = 0;
+		}
+	}
+	if (have_pend)
+		out(user, pend);
+}
+
+/* ---- what built an object ------------------------------------------------ */
+
+void kof_inspect_toolchain(const struct kof_obj_ctx *ctx, const void *info,
+			   kof_buf bytes,
+			   const struct kof_inspect_style *st,
+			   kof_inspect_line out, void *user)
+{
+	char line[256];
+
+	if (!ctx || !info || !out)
+		return;
+
+	if (ctx->format == KOF_FMT_PE) {
+		const struct kof_pe_info *p = info;
+
+		/*
+		 * NOT A CLAIM: the runtime needs the CLI header to load the
+		 * image at all, so an image carrying one IS managed whatever
+		 * else it says. It also changes what every other row means -
+		 * the entry point is a token rather than code, and the text
+		 * section holds IL - which is worth knowing before reaching
+		 * for a disassembler.
+		 */
+		if (p->clr_len) {
+			snprintf(line, sizeof line,
+				 "  %s%-11s %s.NET  runtime %u.%u  metadata %s%s",
+				 sty(st ? st->id : NULL), "compiler",
+				 sty(st ? st->off : NULL),
+				 (unsigned)p->clr_major, (unsigned)p->clr_minor,
+				 p->clr_version[0] ? p->clr_version : "?",
+				 (p->clr_flags & 1u) ? "  IL only" : "");
+			out(user, line);
+		}
+		/*
+		 * The linker's own two bytes. 14.x is a modern MSVC, 6.x an old
+		 * one, 2.x the GNU linker, and .NET assemblies conventionally
+		 * write 8.0 or 48.0.
+		 *
+		 * NOTHING VERIFIES THEM and a packer may write anything there -
+		 * which is said here, in the code, and not on the row: a caveat
+		 * printed beside every value is one nobody reads twice.
+		 */
+		if (p->linker_major || p->linker_minor) {
+			snprintf(line, sizeof line, "  %s%-11s %s%u.%u",
+				 sty(st ? st->id : NULL), "linker",
+				 sty(st ? st->off : NULL),
+				 (unsigned)p->linker_major,
+				 (unsigned)p->linker_minor);
+			out(user, line);
+		}
+		return;
+	}
+
+	if (ctx->format == KOF_FMT_ELF) {
+		const struct kof_elf_info *e = info;
+		uint32_t i;
+		int interp = 0;
+
+		/*
+		 * STATIC OR DYNAMIC, from the one structure that decides it: a
+		 * PT_INTERP segment names the loader an image needs, and an
+		 * image with no interpreter is one nothing has to load for it.
+		 */
+		for (i = 0; i < e->seg_count && i < KOF_ELF_MAX_SEGMENTS; i++)
+			if (e->seg[i].type == 3u) {   /* PT_INTERP */
+				interp = 1;
+				break;
+			}
+		snprintf(line, sizeof line, "  %s%-11s %s%s",
+			 sty(st ? st->id : NULL), "linking",
+			 sty(st ? st->off : NULL),
+			 interp ? "dynamic" : "static");
+		out(user, line);
+
+		/*
+		 * The compiler's own stamp, which GCC and clang both write into
+		 * .comment and neither is obliged to. Absent is common and says
+		 * nothing - a stripped binary has none - so the row is left off
+		 * rather than reported as unknown.
+		 */
+		for (i = 0; i < e->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
+			char txt[80];
+			uint64_t off, len, k, w = 0;
+
+			if (strcmp(e->sec[i].name, ".comment"))
+				continue;
+			off = e->sec[i].file_off;
+			len = e->sec[i].file_size;
+			if (!bytes.p || !len || off >= bytes.n)
+				break;
+			if (len > bytes.n - off)
+				len = bytes.n - off;
+			if (len > sizeof txt - 1u)
+				len = sizeof txt - 1u;
+			/* NUL separated; the first entry is what built the
+			 * object, the rest are the linker's and its inputs'. */
+			for (k = 0; k < len; k++) {
+				char c = (char)bytes.p[off + k];
+
+				if (!c)
+					break;
+				if (c >= 0x20 && c < 0x7f)
+					txt[w++] = c;
+			}
+			txt[w] = '\0';
+			if (w) {
+				snprintf(line, sizeof line, "  %s%-11s %s%s",
+					 sty(st ? st->id : NULL), "compiler",
+					 sty(st ? st->off : NULL), txt);
+				out(user, line);
+			}
+			break;
+		}
+	}
+}
+
+void kof_inspect_event_verbs(const uint64_t *count, uint32_t keep,
+			     const struct kof_inspect_style *st,
+			     kof_inspect_line out, void *user)
+{
+	char pend[160], line[320];
+	int vb, have_pend = 0;
+
+	if (!count || !out)
+		return;
+	pend[0] = '\0';
+	for (vb = 1; vb < 32; vb++) {
+		char one[160];
+
+		if (!count[vb])
+			continue;
+		snprintf(one, sizeof one, "  %s%-11s %s%-10llu%s",
+			 sty(st ? st->id : NULL),
+			 kof_evt_verb_name((uint16_t)vb),
+			 sty(st ? st->off : NULL),
+			 (unsigned long long)count[vb],
+			 (keep & (1u << (unsigned)vb)) ? "" : "hidden");
 		if (!have_pend) {
 			snprintf(pend, sizeof pend, "%s", one);
 			have_pend = 1;

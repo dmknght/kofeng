@@ -886,8 +886,8 @@ $(OUT)/bin/kofscanner$(EXE): $(SCANNER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 # rather than beside its first user because two rules need it and a variable
 # used before it is set expands to nothing - the trap this file has now been
 # caught by twice.
-KOFEVT_SRC := libkofeng/kofevt/kofevt.c libkofeng/kofevt/kofevtfmt.c \
-              libkofeng/kofevt/kofevtlog.c
+KOFEVT_SRC := libkoforbit/kofevt/kofevt.c libkoforbit/kofevt/kofevtfmt.c \
+              libkoforbit/kofevt/kofevtlog.c
 
 EXAMINE_SRC := kofexamine/kofexamine.c kofexamine/kofinspect.c kofexamine/kofeditor.c
 
@@ -915,7 +915,7 @@ VIEWER_SRC := kofexamine/kofviewer.c kofexamine/kofview.c kofexamine/kofinspect.
 $(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
                             $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include -Ilibkofeng/kofevt $(EMU_INC) \
+	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include -Ilibkoforbit/kofevt $(EMU_INC) \
 	      $(VIEWER_SRC) $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS)
 
 # ----------------------------------------------------- the database toolchain
@@ -961,7 +961,7 @@ endif
 $(OUT)/bin/kofwatchman$(EXE): kofwatcher/kofwatchman.c $(KOFEVT_SRC) $(LIB) \
                               $(SDK_HDR) $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofeng -Ilibkofeng/kofevt $< \
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofeng -Ilibkoforbit/kofevt $< \
 	      $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS) $(WATCHMAN_CHAN)
 
 kofwatchman: $(OUT)/bin/kofwatchman$(EXE)
@@ -1048,26 +1048,26 @@ WIN_SRC := libkofgrille/wevt_ring.c \
 
 #
 # The log format is a component of its own under libkofeng, not part of the
-# Windows collector - see libkofeng/kofevt/kofevt.h for why it is there and why
+# Windows collector - see libkoforbit/kofevt/kofevt.h for why it is there and why
 # it includes nothing from the engine. It is compiled into libkofgrille.a so a
 # tool links one archive, and the SAME source compiles natively for the host
 # tests, which is the point of it having no Windows in it.
-WIN_SRC += libkofeng/kofevt/kofevt.c libkofeng/kofevt/kofevtfmt.c \
-           libkofeng/kofevt/kofevtlog.c
+WIN_SRC += libkoforbit/kofevt/kofevt.c libkoforbit/kofevt/kofevtfmt.c \
+           libkoforbit/kofevt/kofevtlog.c
 
 WIN_OBJ := $(patsubst libkofgrille/%.c,$(INT)/win_%.o,\
                       $(filter libkofgrille/%,$(WIN_SRC))) \
-           $(patsubst libkofeng/kofevt/%.c,$(INT)/win_evt_%.o,\
-                      $(filter libkofeng/kofevt/%,$(WIN_SRC)))
+           $(patsubst libkoforbit/kofevt/%.c,$(INT)/win_evt_%.o,\
+                      $(filter libkoforbit/kofevt/%,$(WIN_SRC)))
 
-$(INT)/win_evt_%.o: libkofeng/kofevt/%.c $(STAMP) | $(INT)
+$(INT)/win_evt_%.o: libkoforbit/kofevt/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
-	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofeng/kofevt -c $< -o $@
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkoforbit/kofevt -c $< -o $@
 WINLIB  := $(SDK)/lib/libkofgrille.a
 
 $(INT)/win_%.o: libkofgrille/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
-	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng/kofevt -c $< -o $@
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkoforbit/kofevt -c $< -o $@
 
 $(WINLIB): $(WIN_OBJ)
 	@$(call MKDIR,$(dir $@))
@@ -1088,13 +1088,13 @@ WIN_LDLIBS := -ltdh -ladvapi32
 
 $(OUT)/bin/kofwatchtower$(WIN_EXE): kofwatcher/kofwatchtower.c $(WINLIB) $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng/kofevt -Ikofwatcher \
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkoforbit/kofevt -Ikofwatcher \
 	      kofwatcher/kofwatchtower.c $(WINLIB) -o $@ \
 	      $(WIN_LDFLAGS) $(WIN_LDLIBS)
 
 $(OUT)/bin/kofmontrace$(WIN_EXE): kofwatcher/kofmontrace.c $(WINLIB) $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng/kofevt -Ikofwatcher \
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkoforbit/kofevt -Ikofwatcher \
 	      kofwatcher/kofmontrace.c $(WINLIB) -o $@ \
 	      $(WIN_LDFLAGS) $(WIN_LDLIBS)
 
@@ -1327,19 +1327,19 @@ EDITOR_SRC := kofexamine/kofeditor.c kofexamine/kofinspect.c $(KOFEVT_SRC)
 # the Linux build and names itself.
 GRILLE_HOST_SRC := libkofgrille/wevt_ring.c libkofgrille/wfilter.c \
                    libkofgrille/wtext.c \
-                   libkofeng/kofevt/kofevt.c \
-                   libkofeng/kofevt/kofevtfmt.c \
-                   libkofeng/kofevt/kofevtlog.c
+                   libkoforbit/kofevt/kofevt.c \
+                   libkoforbit/kofevt/kofevtfmt.c \
+                   libkoforbit/kofevt/kofevtlog.c
 
 $(TEST)/unit_grille_host$(EXE): tests/unit/grille_host.c $(GRILLE_HOST_SRC) \
                                 $(STAMP) | $(TEST)
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng/kofevt $< \
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkoforbit/kofevt $< \
 	      $(GRILLE_HOST_SRC) -o $@ $(LDFLAGS)
 
 $(TEST)/asan_grille_host$(EXE): tests/unit/grille_host.c $(GRILLE_HOST_SRC) \
                                 $(STAMP) | $(TEST)
 	$(CC) $(CFLAGS) $(ASAN_FLAGS) $(DEPTO) -Ilibkofgrille \
-	      -Ilibkofeng/kofevt $< $(GRILLE_HOST_SRC) -o $@ \
+	      -Ilibkoforbit/kofevt $< $(GRILLE_HOST_SRC) -o $@ \
 	      $(LDFLAGS) $(ASAN_FLAGS)
 
 $(TEST)/unit_cond_expr$(EXE): tests/unit/cond_expr.c $(EDITOR_SRC) $(LIB) \
