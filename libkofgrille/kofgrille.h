@@ -729,6 +729,16 @@ struct kofw_mon_option {
 #define KOFW_ERR_THREAD   (-7)
 #define KOFW_ERR_PLATFORM (-8)   /* built without the Windows collector */
 
+/*
+ * THE PID NAMES A DIFFERENT PROCESS NOW.
+ *
+ * The snapshot half's own failure - see wproc.h - and it is separate from
+ * KOFW_ERR_ACCESS because the two call for opposite responses. Refused means
+ * try again with more rights; this means the pid was reused between being
+ * observed and being acted on, and trying again is precisely the wrong thing.
+ */
+#define KOFW_ERR_GONE     (-9)
+
 const char *kofw_err_name(int err);
 
 /*

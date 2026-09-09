@@ -1041,6 +1041,7 @@ endif
 WIN_SRC := libkofgrille/wevt_ring.c \
            libkofgrille/wfilter.c \
            libkofgrille/wcmdline.c \
+           libkofgrille/wproc.c \
            libkofgrille/wtext.c \
            libkofgrille/wchan.c \
            libkofgrille/wevt_decode.c \
@@ -1073,10 +1074,11 @@ $(WINLIB): $(WIN_OBJ)
 	@$(call MKDIR,$(dir $@))
 	$(WIN_AR) rcs $@ $^
 
-# tdh for the one-time schema lookup, advapi32 for the session itself. Both are
-# import libraries that ship with every Windows toolchain, so this adds nothing
-# the build did not already depend on.
-WIN_LDLIBS := -ltdh -ladvapi32
+# tdh for the one-time schema lookup, advapi32 for the session itself, psapi for
+# the snapshot half - the module list, the mapped-file name, the working-set
+# query. All three are import libraries that ship with every Windows toolchain,
+# so this adds nothing the build did not already depend on.
+WIN_LDLIBS := -ltdh -ladvapi32 -lpsapi
 
 # Two programs out of one directory (kofwatcher/), over one collector:
 # kofwatchtower is the

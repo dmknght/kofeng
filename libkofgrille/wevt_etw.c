@@ -229,6 +229,7 @@ const char *kofw_err_name(int err)
 	case KOFW_ERR_CONSUMER: return "the trace session would not open";
 	case KOFW_ERR_THREAD:   return "the consumer thread would not start";
 	case KOFW_ERR_PLATFORM: return "built without the Windows collector";
+	case KOFW_ERR_GONE:     return "that pid is not that process any more";
 	default:                return "unknown";
 	}
 }
