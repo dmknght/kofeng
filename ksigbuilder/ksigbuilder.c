@@ -277,6 +277,24 @@ static const struct rgn_name rgn_names[] = {
 	RTF_REGIONS(RGN)
 	PDF_REGIONS(RGN)
 	AMSI_REGIONS(RGN)
+
+	/*
+	 * THE SENTINEL, AND WITHOUT IT EVERY LOOKUP HERE WALKS OFF THE END.
+	 *
+	 * Both searches of this table are written `for (i = 0;
+	 * rgn_names[i].name; i++)`, so they stop on a NULL name - and there was
+	 * none. A name that IS here exits the loop early and every legitimate
+	 * signature therefore built; a name that is NOT - a typo in a range
+	 * declaration, which is the single case the careful message below
+	 * exists for - read past the last entry until it found something that
+	 * was not a string, and crashed.
+	 *
+	 * So ksigbuilder answered a misspelled region with "Segmentation
+	 * fault", from a build with no line number and nothing to look at, and
+	 * the error that lists every valid region name could never be reached.
+	 * Found by writing `KOF_SCAN_PDF_IMAGE` for KOF_SCAN_PDF_STREAM_IMAGE.
+	 */
+	{ NULL, 0 }
 };
 #undef RGN
 #undef RGN

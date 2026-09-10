@@ -29,6 +29,7 @@ const char *kof_pdf_anomaly_name(unsigned index);
 	X(KOF_SCAN_PDF_OBJECTS)          \
 	X(KOF_SCAN_PDF_STREAM_PLAIN)     \
 	X(KOF_SCAN_PDF_STREAM_PACKED)    \
+	X(KOF_SCAN_PDF_STREAM_IMAGE)     \
 	X(KOF_SCAN_PDF_UNCLAIMED)
 
 extern const uint32_t kof_pdf_region_bits[];

@@ -157,6 +157,30 @@ KOF_DEFINE_UNPACK
 			continue;
 
 		/*
+		 * WHAT THIS CHILD IS, SAID BEFORE IT IS HANDED OVER.
+		 *
+		 * Every other container module in this tree names its children
+		 * - zip from an entry name, tar from a header, docole from a
+		 * directory entry - and this one did not, so a PDF's streams
+		 * arrived at a reader as "//1", "//2", with nothing to say
+		 * which of them was a page's drawing operators and which was
+		 * the object stream holding the page tree. A category is the
+		 * one thing a reader needs first and the only thing that was
+		 * missing.
+		 *
+		 * The parse settled it and recorded WHERE the document says so
+		 * - see kof_pdf_object.cat_off - so this is the range the file
+		 * already contains and not a string invented here. A module has
+		 * nothing to build a string in anyway.
+		 *
+		 * Guarded on cat_len, because a stream that no dictionary
+		 * described has no name in the file to give; the child is still
+		 * produced, it just carries the index it always did.
+		 */
+		if (o->cat_len)
+			kof_name_next(o->cat_off, o->cat_len);
+
+		/*
 		 * No filter at all: the bytes are already what they are, so the
 		 * child is a window and the decoder is not involved.
 		 */

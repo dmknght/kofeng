@@ -29,6 +29,60 @@
 # wrong target.
 
 #
+# WHICH MAKE IS RUNNING THIS, ASKED BEFORE ANYTHING DEPENDS ON THE ANSWER.
+#
+# SHELL := cmd.exe below is what removed this build's POSIX dependency, and
+# only a make BUILT FOR WINDOWS can drive it: handing a recipe to cmd as
+# `/c "..."` is the w32 port's batch-mode-shell handling and exists nowhere
+# else. A Cygwin or MSYS make reads the same assignment, execs cmd.exe with
+# the POSIX argument conventions cmd does not understand, and gets an
+# INTERACTIVE shell - so every $(shell) in this file comes back with cmd's
+# startup banner instead of an answer. Measured here, that surfaced as:
+#
+#   - the compiler probe below reading the banner rather than "yes", so a
+#     build with clang installed AND on PATH died saying there was none
+#   - $(shell $(call MKDIR,...)) returning the banner too, make parsing it
+#     as a rule, and the error being "missing separator" pointing at a line
+#     that is perfectly fine
+#   - with no stdin to close, hanging rather than failing
+#
+# THAT IS NOT A REASON TO REFUSE, and it is not a reason to send the build
+# down the POSIX rules either. Both were tried here and both were wrong, for
+# the same reason: they answer a question nobody asked.
+#
+# THERE ARE TWO QUESTIONS AND THIS FILE USED TO ASK ONE.
+#
+#   (a) Is this Windows? That decides $(EXE), TMP/TEMP, and linking
+#       winpthread statically - see the note above on what a dynamic one
+#       costs, which is an .exe that starts nothing and prints nothing.
+#   (b) Can this make drive cmd.exe? That decides SHELL, and with it which
+#       dialect MKDIR, RMRF, COPY and the rest are written in.
+#
+# They are independent, and an MSYS make is exactly the case that separates
+# them: it is on Windows and it cannot drive cmd. Keyed on $(OS) alone, (a)
+# came out NO for it - so it built binaries with no suffix that depended on
+# a DLL only ever found inside an MSYS2 install, which is the failure the
+# note above exists to prevent. Keyed on the shell, (b) is what actually
+# has to change, and only that.
+#
+# So: (a) below is $(OS) OR what MAKE_HOST says, and (b) is its own flag.
+# The POSIX operations are reached by a make that cannot drive cmd, on
+# either platform, and every Windows-shaped decision still applies here.
+#
+# MAKE_HOST and not a probe, because a probe would have to run the shell
+# that is the thing under suspicion. Make sets it itself and reading it
+# costs nothing.
+KOF_UNIXY_MAKE := $(if $(filter %-cygwin %-msys,$(MAKE_HOST)),yes)
+#
+# Windows, whoever is asking. $(OS) is inherited from the kernel and is the
+# right answer wherever it survives; a Cygwin make drops it from its own
+# variable set, and MAKE_HOST is how that make still says where it is.
+KOF_ON_WINDOWS := $(if $(filter Windows_NT,$(OS)),yes)
+ifeq ($(KOF_UNIXY_MAKE),yes)
+KOF_ON_WINDOWS := yes
+endif
+
+#
 # `cc` is a POSIX convention, and Windows does not have it.
 #
 # Not "usually does not": no Windows C toolchain installs a cc.exe. LLVM from
@@ -159,7 +213,7 @@ kof_probe = $(if $(filter 0,$(shell $(CC) -Werror $(1) -xc -c $(DEVNULL) \
 # (TMP/TEMP, .exe, static winpthread) silently does not apply. A check that
 # depends on the exact class of tool this block exists to work around is not
 # a check that survives the case it is meant to catch.
-ifeq ($(OS),Windows_NT)
+ifeq ($(KOF_ON_WINDOWS),yes)
 NATIVE_OS   := windows
 EXE         := .exe
 #
@@ -195,8 +249,17 @@ EXE         := .exe
 # What cmd cannot do is answered by starting PowerShell deliberately, once -
 # see NOW_UTC below. That is the shape to keep: PowerShell as a program this
 # build occasionally runs, never as the thing that runs every line of it.
+#
+# ONLY WHERE IT CAN BE DRIVEN. A Cygwin or MSYS make would exec cmd with
+# POSIX argument conventions and get an interactive shell - see the note on
+# KOF_UNIXY_MAKE - so that make keeps its own /bin/sh and takes the POSIX
+# operations below. Everything else in this block still applies to it,
+# because everything else in this block is about Windows and not about the
+# shell.
+ifneq ($(KOF_UNIXY_MAKE),yes)
 SHELL       := cmd.exe
 .SHELLFLAGS := /c
+endif
 #
 # IS THERE A COMPILER AT ALL - ASKED ONCE, ANSWERED IN ONE LINE.
 #
@@ -216,7 +279,14 @@ SHELL       := cmd.exe
 # Recursive (=), not simple (:=), because it is asked TWICE and the answer
 # between the two asks is allowed to change: once before the search below, once
 # after it has put a toolchain on PATH.
+# `where` is cmd's; a make on its own /bin/sh has `command -v` instead, and
+# asking the wrong one answers "no compiler" for every build that took the
+# other shell. One probe per dialect, chosen by the same flag as the shell.
+ifeq ($(KOF_UNIXY_MAKE),yes)
+KOF_CC_FOUND = $(shell command -v $(CC) >/dev/null 2>&1 && echo yes)
+else
 KOF_CC_FOUND = $(shell where $(CC) >NUL 2>NUL && echo yes)
+endif
 
 #
 # NOT ON PATH IS NOT THE SAME AS NOT INSTALLED.
@@ -271,7 +341,23 @@ endif
 # $(CURDIR) is already a Windows path when make is native, and the mixed
 # C:/... form is accepted by every tool here, so nothing has to convert it -
 # which is one more POSIX tool (cygpath) the build no longer looks for.
+#
+# THE PATH HAS TO BE A WINDOWS ONE, AND $(CURDIR) IS NOT ALWAYS.
+#
+# Under a make on its own /bin/sh, $(CURDIR) is a POSIX path - so the
+# substitution below turns /d/Code_projects/kofeng into
+# \d\Code_projects\kofeng, a path with no drive letter, and the
+# native compiler cannot create a file in one. It fails as "unable to make
+# temporary file" - after every object has compiled, at the first link, a
+# long way from anything that names a path.
+#
+# cygpath ships with the same install that supplies such a make, so it is
+# there whenever this branch is taken and it is asked for nowhere else.
+ifeq ($(KOF_UNIXY_MAKE),yes)
+export TMP  := $(shell cygpath -w '$(CURDIR)')\build\temp
+else
 export TMP  := $(subst /,\,$(CURDIR))\build\temp
+endif
 export TEMP := $(TMP)
 #
 # -pthread in CFLAGS because it means something at both steps; the rest in
@@ -416,6 +502,14 @@ NATIVE_OS   := $(shell uname -s 2>/dev/null)
 EXE         :=
 endif
 
+# Said out loud, because a build that quietly takes a different path is one
+# that behaves differently on two machines for a reason neither of them
+# prints - the rule the toolchain search below follows too.
+ifeq ($(KOF_UNIXY_MAKE),yes)
+$(info make: $(MAKE_HOST) make - keeping the Windows settings and taking the \
+POSIX operations, because this make cannot drive cmd.exe.)
+endif
+
 #
 # THE FILE OPERATIONS A RECIPE IS ALLOWED TO USE.
 #
@@ -437,7 +531,16 @@ endif
 # follows an expansion.
 SP       :=
 
-ifeq ($(NATIVE_OS),windows)
+#
+# KEYED ON THE SHELL AND NOT ON THE PLATFORM, which is the whole point of
+# the split described at the top of this file: these are cmd's spellings, so
+# what decides between them is who is reading the recipe. A Windows build
+# driven by a make on /bin/sh wants the POSIX ones below and wants every
+# other Windows decision left alone.
+# Windows, and a make that can drive cmd there. Spelled once, because it is
+# read as a condition and a reader should not have to re-derive it.
+KOF_CMD_SHELL := $(if $(KOF_UNIXY_MAKE),,$(if $(filter windows,$(NATIVE_OS)),yes))
+ifeq ($(KOF_CMD_SHELL),yes)
 #
 # `mkdir` alone fails on a directory that is already there, and cmd has no
 # -p. The guard is the flag: `if not exist` costs nothing and says the same.
@@ -1454,6 +1557,31 @@ kofexamine/%.c: ;
 kofexamine/%.h: ;
 kofwatcher/%.c: ;
 kofwatcher/%.h: ;
+
+#
+# A DEPENDENCY FILE IS DATA, NEVER A TARGET.
+#
+# The include below is soft, so a missing .d is not an error - but make still
+# asks whether it could MAKE one, and left to its built-in rules it decides
+# that it can. `%: %.o` is built in, the object rules above match anything in
+# their own tree, and the chain that falls out is: to get
+# build/temp/lib_kofdb/kofdb.d, first build kofdb.d.o, which needs
+# kofdb.d.c. The empty source rules just above then tell make that file is
+# fine, so nothing stops it, and the compiler is handed a name no source ever
+# had - "no such file or directory: libkofeng/kofdb/kofdb.d.c", once per
+# library, naming a file nobody wrote.
+#
+# Reached whenever such a .d exists at all, because the intermediate .o it
+# would be built from never does - so it is not a stale-tree problem that a
+# clean would fix. It stays latent on the cmd build only because `dir /s /b`
+# answers in absolute paths with backslashes, which match no pattern rule;
+# POSIX FIND_DEPS answers in relative ones and they match at once.
+#
+# One empty rule ends it: a .d under the build tree is up to date by
+# definition, so make stops hunting for a way to produce one. The files
+# themselves are untouched and header tracking is unaffected - this says
+# nothing about their CONTENT, only that they are not products.
+$(BUILD)/%.d: ;
 
 -include $(shell $(FIND_DEPS))
 
