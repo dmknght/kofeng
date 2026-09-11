@@ -34,7 +34,6 @@
 #include "scan.h"
 #include "../kofunpack/emu_unpack.h"
 #include "../kofunpack/elf_rebuild.h"
-#include "../kofunpack/embedded.h"
 
 #include "../kofdecomp/ovba.h"
 #include "../kofdecomp/lzma.h"
@@ -592,10 +591,85 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 	 * which is the one way this could report the wrong entry.
 	 */
 	if (sc->pend_label_len) {
-		kof_src_label(kid, (const uint8_t *)sc->pend_label,
-			      sc->pend_label_len);
+		/*
+		 * THE KIND AND THEN THE NAME, because they answer different
+		 * questions and a reader wants both.
+		 *
+		 * WHAT IT IS comes first and is always there: CONTENT, FONT,
+		 * SCRIPT. WHAT IT IS CALLED is an addition - a typeface, a
+		 * trigger, a /Type - and it is an addition rather than a
+		 * replacement. Using the name alone read "Calibri-Bold" where
+		 * the row above it read "CONTENT", so a column that had been
+		 * one question became two and the kind of the named rows was
+		 * gone.
+		 *
+		 * Composed HERE so every host spells it the same way. A viewer
+		 * that builds this from an entry table and a dump that builds
+		 * it from a child were two renderings of one label, and they
+		 * had already drifted: one said "FONT Calibri-Bold" and the
+		 * other "Calibri-Bold".
+		 */
+		char both[KOF_SRC_LABEL_MAX];
+		const char *kn = sc->pend_kind
+			       ? kof_entry_kind_name(sc->pend_kind) : NULL;
+		uint32_t w = 0;
+
+		/* Copied rather than formatted: this file does not include
+		 * stdio, and pulling it in for one concatenation would put a
+		 * locale-aware formatter on the path every produced child
+		 * takes. Bounded by the buffer at every step. */
+		if (kn) {
+			uint32_t i;
+
+			for (i = 0; kn[i] && w + 1u < sizeof both; i++)
+				both[w++] = kn[i];
+			if (w + 1u < sizeof both)
+				both[w++] = ' ';
+			for (i = 0; i < sc->pend_label_len &&
+				    w + 1u < sizeof both; i++)
+				both[w++] = sc->pend_label[i];
+			kof_src_label(kid, (const uint8_t *)both, w);
+		} else {
+			kof_src_label(kid, (const uint8_t *)sc->pend_label,
+				      sc->pend_label_len);
+		}
 		sc->pend_label[0] = 0;
 		sc->pend_label_len = 0;
+	} else if (sc->pend_kind) {
+		/*
+		 * NOTHING IN THE FILE NAMED IT, SO SAY WHAT IT IS.
+		 *
+		 * A name from the file is better and wins above - it is what
+		 * the author called this thing. But most of what a container
+		 * carries has no name in it, and an unnamed child is a row that
+		 * a reader cannot tell from the row above it. The kind is not a
+		 * name and does not pretend to be one; it is the honest answer
+		 * to a different question, and it is better than a blank.
+		 *
+		 * UNKNOWN is deliberately excluded by the test: "the parser
+		 * found a thing and will not say what it is" is exactly the
+		 * case where a label would be noise, and a blank is the honest
+		 * rendering of it.
+		 */
+		const char *w = kof_entry_kind_name(sc->pend_kind);
+
+		kof_src_label(kid, (const uint8_t *)w, strlen(w));
+	}
+	/* The kind travels on as well as naming the child above - a host needs
+	 * it to decide what to offer for an object whose format is unknown,
+	 * which is nearly all decoded content. */
+	kof_src_declare_kind(kid, sc->pend_kind);
+	sc->pend_kind = 0;
+	/* Spent whatever happened to the child, and reset to the sentinel
+	 * rather than to zero - zero is entry 0 and is a real answer. */
+	kof_src_declare_entry(kid, sc->pend_entry);
+	sc->pend_entry = KOF_ENTRY_NONE;
+	/* The declared format goes the same way and is cleared the same way,
+	 * even on a refusal - a claim left pending would be worn by the next
+	 * child, which is a claim about the wrong bytes. */
+	if (sc->pend_fmt) {
+		kof_src_declare_fmt(kid, sc->pend_fmt);
+		sc->pend_fmt = 0;
 	}
 	if (sc->kids_left == 0) {
 		/* Refused, and recorded: a container that yields more children than
@@ -1447,6 +1521,95 @@ static uint64_t unpack_hextext(const struct kof_obj_ctx *ctx, kof_buf b,
 	return produced;
 }
 
+/*
+ * ASCII85 as a coding in its own right, not only as a step of a chain.
+ *
+ * Through a buffer and then one emit, rather than a streaming sink like
+ * DEFLATE's: the decode is ONE PASS over input that is already addressable, and
+ * the output is at most four fifths of it, so the buffer is bounded by
+ * something the OS reported rather than by anything the file claims. That is
+ * what makes malloc safe here where it would not be for an expanding coding.
+ *
+ * THE SAME a85_decode THE CHAIN USES. A second copy of the alphabet, the
+ * padding rule and the overflow test would be a second thing that can be wrong
+ * in a way the first is not, and only one of them would be under test - the
+ * same reasoning kof_src_label's note gives for sanitising in one place.
+ *
+ * It existed only inside the chain runner before, which meant a stream whose
+ * ONLY filter was /ASCII85Decode was named correctly, produced nothing, and
+ * said nothing about why. A silent nothing is the one answer this engine must
+ * not give, so the refusal paths below all report.
+ */
+static uint64_t unpack_textcode(const struct kof_obj_ctx *ctx, uint32_t method,
+				kof_buf b, uint64_t off, uint64_t len)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	enum kof_decomp_status st;
+	uint64_t room, got = 0, at;
+	uint8_t *buf;
+
+	/*
+	 * RunLength goes straight to the sink and never through a buffer,
+	 * because its output cannot be sized from its input - see
+	 * textcode.h. Answered first so the buffer below is only ever
+	 * allocated for a coding that can be bounded.
+	 */
+	if (method == KOF_UNP_RUNLENGTH) {
+		struct expand_sink snk;
+
+		snk.ctx = ctx;
+		snk.left = expand_limit(len, 0);
+		st = kof_rle_decode(b.p + off, len, expand_sink_fn, &snk, &got);
+		if (st != KOF_DEC_OK && st != KOF_DEC_TRUNCATED)
+			scan_broken(sc, broken_of_status(st));
+		else if (snk.left == 0)
+			scan_broken(sc, KOF_BROKEN_LIMIT);
+		return got;
+	}
+
+	room = sc->resident < sc->resident_max
+	     ? sc->resident_max - sc->resident : 0;
+	if (len > room) {
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+		return 0;
+	}
+	buf = malloc((size_t)len);
+	if (!buf) {
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+		return 0;
+	}
+	sc->resident += len;
+	if (sc->resident > sc->st.peak_resident)
+		sc->st.peak_resident = sc->resident;
+
+	st = method == KOF_UNP_ASCII85
+	   ? kof_a85_decode(b.p + off, len, buf, len, &got)
+	   : kof_ahx_decode(b.p + off, len, buf, len, &got);
+	if (st != KOF_DEC_OK) {
+		/* The container said this WAS the coding, so input that is not
+		 * it is the file disagreeing with itself - damage, not a gap in
+		 * the engine, and the two lead different places. Whatever
+		 * decoded before the disagreement is still emitted below: those
+		 * bytes are real, and the same judgement is made about a
+		 * damaged archive. */
+		scan_broken(sc, broken_of_status(st));
+	}
+	/* In pieces, because emit takes a 32-bit count and a decoded stream is
+	 * not bounded by one. */
+	for (at = 0; at < got; ) {
+		uint64_t n = got - at;
+
+		if (n > (1u << 20))
+			n = 1u << 20;
+		if (!c_emit(ctx, buf + at, (uint32_t)n))
+			break;
+		at += n;
+	}
+	free(buf);
+	sc->resident -= len;
+	return at;
+}
+
 static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 			 uint64_t off, uint64_t len, uint64_t out_hint,
 			 uint32_t form)
@@ -1545,6 +1708,36 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 
 	if (method == KOF_UNP_HEXTEXT)
 		return unpack_hextext(ctx, b, off, len);
+	if (method == KOF_UNP_ASCII85 || method == KOF_UNP_ASCIIHEX ||
+	    method == KOF_UNP_RUNLENGTH)
+		return unpack_textcode(ctx, method, b, off, len);
+	if (method == KOF_UNP_LZW) {
+		struct expand_sink snk;
+		enum kof_decomp_status st;
+		uint64_t got = 0;
+
+		if (!sc->lzw) {
+			sc->lzw = malloc(sizeof *sc->lzw);
+			if (!sc->lzw) {
+				scan_broken(sc, KOF_BROKEN_LIMIT);
+				return 0;
+			}
+		}
+		snk.ctx = ctx;
+		snk.left = expand_limit(len, out_hint);
+		st = kof_lzw_decode(sc->lzw, b.p + off, len, expand_sink_fn,
+				    &snk, &got);
+		/*
+		 * Truncation is not an error, for the reason the DEFLATE path
+		 * gives: whatever decoded before the stream ran out is real
+		 * output and is the part worth scanning.
+		 */
+		if (st != KOF_DEC_OK && st != KOF_DEC_TRUNCATED)
+			scan_broken(sc, broken_of_status(st));
+		else if (snk.left == 0)
+			scan_broken(sc, KOF_BROKEN_LIMIT);
+		return got;
+	}
 
 	if (!buffered_method(method))
 		return 0;
@@ -1854,6 +2047,248 @@ static uint64_t c_gather(const struct kof_obj_ctx *ctx, uint32_t mask, uint64_t 
  * covered by a test and neither can be shown to work. One place, and the test that
  * mutates it fails.
  */
+/* Whether a method's output can be bounded from its input, which is what an
+ * INTERMEDIATE step of a chain needs: the buffer for it has to be sized before
+ * the decode runs. DEFLATE cannot - that is the whole nature of it - so a Flate
+ * anywhere but last has nowhere to put its output and the chain is refused. */
+static int bounded_by_input(uint32_t method)
+{
+	return method == KOF_UNP_ASCII85 || method == KOF_UNP_ASCIIHEX ||
+	       method == KOF_UNP_HEXTEXT;
+}
+
+/* The entry with this format index, or NULL. Linear because a table is tens of
+ * rows and the alternative is an index the parser would have to keep sorted. */
+static const struct kof_entry *entry_by_index(const struct kof_obj_ctx *ctx,
+					      uint32_t index)
+{
+	const struct kof_entry *tab = NULL;
+	uint32_t n, i;
+
+	if (!ctx->entries)
+		return NULL;
+	n = ctx->entries(ctx, &tab);
+	for (i = 0; tab && i < n; i++)
+		if (tab[i].index == index)
+			return &tab[i];
+	return NULL;
+}
+
+/*
+ * Run an entry's whole coding chain and hand back one child.
+ *
+ * THE SHAPE: every step but the last decodes into a buffer, and the last one
+ * streams into the sink the way a single decode already does. That split is
+ * not an optimisation, it is what makes the memory bounded - an intermediate
+ * has to be addressable at once, so it must be a coding whose size is known
+ * from its input, while the last step's output is charged to the produced
+ * budget as it is written and never has to be held.
+ */
+static uint64_t c_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	const struct kof_entry *e = entry_by_index(ctx, index);
+	uint8_t *mid = NULL;
+	/*
+	 * `mid_cap` IS WHAT WAS ALLOCATED; `len` is how much of it is data.
+	 *
+	 * Two numbers because they differ - ASCII85 fills four fifths of the
+	 * buffer it needs - and the budget must be told the ALLOCATION. Charging
+	 * the decoded length instead under-charged the resident account by the
+	 * difference, which is a budget the host is supposed to be enforcing.
+	 */
+	uint64_t off, len, mid_cap = 0, produced;
+	uint32_t last, i;
+
+	if (!e || !can_produce(sc))
+		return 0;
+	/*
+	 * A step this build cannot express means the chain cannot be run at
+	 * all. Reported and not attempted: every step after a missed one
+	 * decodes refuse, and handing that on as if it were the file is the one
+	 * answer this engine must never give.
+	 */
+	if (e->flags & KOF_ENT_F_CODED_UNKNOWN) {
+		c_incomplete(ctx, KOF_BROKEN_UNSUPPORTED);
+		return 0;
+	}
+	if (e->flags & KOF_ENT_F_SCATTERED)
+		return 0;              /* resolve_entry's case, not this one */
+	if (!e->coding[0] || !e->len)
+		return 0;              /* stored: the caller windows it */
+
+	for (last = 0; last + 1u < 4u && e->coding[last + 1u]; last++)
+		;
+
+	off = e->off;
+	len = e->len;
+	for (i = 0; i < last; i++) {
+		uint8_t *next;
+		uint64_t got, room;
+
+		if (!bounded_by_input(e->coding[i])) {
+			c_incomplete(ctx, KOF_BROKEN_UNSUPPORTED);
+			free(mid);
+			return 0;
+		}
+		room = sc->resident < sc->resident_max
+		     ? sc->resident_max - sc->resident : 0;
+		if (len > room) {
+			scan_broken(sc, KOF_BROKEN_LIMIT);
+			free(mid);
+			return 0;
+		}
+		next = malloc((size_t)len);
+		if (!next) {
+			scan_broken(sc, KOF_BROKEN_LIMIT);
+			free(mid);
+			return 0;
+		}
+		sc->resident += len;
+		if (sc->resident > sc->st.peak_resident)
+			sc->st.peak_resident = sc->resident;
+
+		/*
+		 * From the previous intermediate when there is one, and from
+		 * the object itself on the first step. `off` is zeroed below
+		 * exactly so this stays one expression after that.
+		 */
+		{
+			const uint8_t *p = mid;
+			enum kof_decomp_status st;
+
+			if (!p) {
+				kof_buf b = kof_src_buf(sc->cur_src);
+
+				p = b.p + off;
+			}
+			st = e->coding[i] == KOF_UNP_ASCII85
+			   ? kof_a85_decode(p, len, next, len, &got)
+			   : kof_ahx_decode(p, len, next, len, &got);
+			/*
+			 * A middle step that disagreed with its own declared
+			 * coding stops the chain: the next step would decode
+			 * whatever came out of a failure, and that is refuse
+			 * presented as the file. Unlike the standalone path,
+			 * partial output is NOT kept here - a half-decoded
+			 * intermediate is not input for anything.
+			 */
+			if (st != KOF_DEC_OK)
+				got = 0;
+		}
+		/* The old intermediate is finished with: released, and its
+		 * ALLOCATION uncharged rather than its length. */
+		free(mid);
+		sc->resident -= mid_cap;
+		mid = NULL;
+		mid_cap = 0;
+		if (!got) {
+			free(next);
+			sc->resident -= len;
+			c_incomplete(ctx, KOF_BROKEN_DAMAGED);
+			return 0;
+		}
+		mid = next;
+		mid_cap = len;         /* what malloc took, not what it holds */
+		off = 0;
+		len = got;
+	}
+
+	/*
+	 * The last step, streamed. With an intermediate in hand it reads from
+	 * that; with none it reads the object, which is the ordinary
+	 * single-coding case and is why this also replaces a bare
+	 * kof_unpack_at for a container that has entries.
+	 */
+	if (!mid)
+		return c_unpack(ctx, e->coding[last], off, len, e->out_hint, 0);
+
+	/*
+	 * INFLATE ONLY, over an intermediate.
+	 *
+	 * c_unpack reads the OBJECT, so it cannot be handed a buffer this
+	 * function made - and rather than widen it to take either, the one
+	 * chain that exists in the wild is served and anything else is
+	 * refused out loud. PDF writes /ASCII85Decode in front of a Flate;
+	 * a chain ending in something else, over an intermediate, has not
+	 * turned up, and inventing a path for it would be code nothing
+	 * exercises.
+	 */
+	if (e->coding[last] != KOF_UNP_ZLIB &&
+	    e->coding[last] != KOF_UNP_DEFLATE) {
+		c_incomplete(ctx, KOF_BROKEN_UNSUPPORTED);
+		free(mid);
+		sc->resident -= mid_cap;
+		return 0;
+	}
+	{
+		struct expand_sink snk;
+		enum kof_decomp_status st;
+		const uint8_t *p = mid;
+		uint64_t n = len;
+
+		/* The zlib wrapper, tested the way c_unpack tests it: a stream
+		 * that fails the check is raw DEFLATE under a zlib name. */
+		if (e->coding[last] == KOF_UNP_ZLIB && n > 2u) {
+			uint32_t cmf = p[0], flg = p[1];
+
+			if ((cmf & 0x0fu) == 8u && (cmf >> 4) <= 7u &&
+			    ((cmf << 8) + flg) % 31u == 0u && !(flg & 0x20u)) {
+				p += 2;
+				n -= 2u;
+			}
+		}
+		if (!sc->inf) {
+			sc->inf = malloc(sizeof *sc->inf);
+			if (!sc->inf) {
+				scan_broken(sc, KOF_BROKEN_LIMIT);
+				free(mid);
+				sc->resident -= mid_cap;
+				return 0;
+			}
+		}
+		snk.ctx = ctx;
+		snk.left = expand_limit(n, e->out_hint);
+		produced = 0;
+		st = kof_inflate(sc->inf, p, n, expand_sink_fn, &snk, NULL,
+				 &produced);
+		if (st != KOF_DEC_OK)
+			scan_broken(sc, broken_of_status(st));
+		else if (snk.left == 0)
+			scan_broken(sc, KOF_BROKEN_LIMIT);
+	}
+	free(mid);
+	sc->resident -= mid_cap;
+	return produced;
+}
+
+/*
+ * What the next child is, from a producer that knows.
+ *
+ * A store and nothing else; kid_push is what spends it, and clears it whether
+ * the child was accepted or refused. Unconditional like c_name_next: a call
+ * with KOF_FMT_UNKNOWN is a producer saying "I will not name this one", and it
+ * has to CLEAR what a previous call left rather than leave it standing.
+ */
+static void c_child_format(const struct kof_obj_ctx *ctx, uint8_t fmt)
+{
+	kof_scan_of(ctx)->pend_fmt = fmt;
+}
+
+/* What the next child is for. Stored and spent by kid_push, like the two
+ * beside it, and cleared there whatever happens to the child. */
+static void c_child_kind(const struct kof_obj_ctx *ctx, uint32_t kind)
+{
+	kof_scan_of(ctx)->pend_kind = kind;
+}
+
+/* Which entry the next child is the content of. Stored and spent by kid_push,
+ * like the two beside it. */
+static void c_child_entry(const struct kof_obj_ctx *ctx, uint32_t index)
+{
+	kof_scan_of(ctx)->pend_entry = index;
+}
+
 static void c_name_next(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t len)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
@@ -2075,17 +2510,62 @@ static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 	return kof_sym_count(sc->sym, sc->sym_n) ? sc->sym : 0;
 }
 
+/*
+ * WOULD ANYTHING LOOK INSIDE A CHILD OF THIS FORMAT - see fmt_wanted in
+ * kofmod/kofsig.h for what this is and why it is not a policy.
+ *
+ * Four yeses before the database is consulted at all, and each is a case where
+ * "no" would be an answer this cannot support:
+ *
+ *   NO SCANNER OR NO ENGINE - there is nobody to have an opinion.
+ *
+ *   A RULE ASKED. Evidence on this object beats what the database targets in
+ *   general; that is the whole point of the ask.
+ *
+ *   KOF_FMT_UNKNOWN, which means the producer will not say what the child is.
+ *   Nothing can be concluded from "no rule targets unknown" because the child
+ *   is not unknown once it is open - it is whatever the sniff chain makes of
+ *   it. This is the case a container is used to hide things in, so it is the
+ *   case that must never be skipped.
+ *
+ *   AN EMPTY DATABASE, or a format value this build cannot place. Both are
+ *   "no answer" rather than "no": kofexamine and kofviewer run with no
+ *   database at all, and a tool that then produced no children would be
+ *   showing a document as though it carried nothing.
+ */
+static int c_fmt_wanted(const struct kof_obj_ctx *ctx, uint8_t fmt)
+{
+	const struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc || !sc->eng)
+		return 1;
+	if (sc->raise_carried)
+		return 1;
+	if (fmt == KOF_FMT_UNKNOWN || fmt >= KOF_FMT_COUNT)
+		return 1;
+	if (!sc->eng->any_target)
+		return 1;
+	return (sc->eng->any_target & (1u << fmt)) != 0;
+}
+
 static const struct kof_content kof_detect_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
-	c_find_str_in, c_csum, NULL, NULL, NULL, NULL, NULL, c_find_str_where,
-	NULL, NULL, c_incomplete, NULL, c_syms, c_data_xref
+	c_find_str_in, c_csum, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+	NULL, c_find_str_where,
+	NULL, NULL, c_incomplete, NULL, c_syms, c_data_xref,
+	/* Answered for a detector too. The answer is about the database and
+	 * not about who is asking, and a rule that wants to know whether its
+	 * neighbours care about a format is asking a fair question. */
+	c_fmt_wanted
 };
 
 static const struct kof_content kof_unpack_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, c_window, c_emit, c_child, c_unpack,
-	c_unpack_peek, c_find_str_where, c_gather, c_name_next, c_incomplete,
-	c_unpack_entry, c_syms, c_data_xref
+	c_unpack_peek, c_child_format, c_child_kind, c_child_entry,
+	c_unpack_chain, c_find_str_where,
+	c_gather, c_name_next, c_incomplete,
+	c_unpack_entry, c_syms, c_data_xref, c_fmt_wanted
 };
 
 /*
@@ -2110,6 +2590,9 @@ void kof_mod_unpack_mode(struct kof_obj_ctx *ctx, int on)
 	 * would label it with an entry from a different object. */
 	kof_scan_of(ctx)->pend_label[0] = 0;
 	kof_scan_of(ctx)->pend_label_len = 0;
+	kof_scan_of(ctx)->pend_fmt = 0;
+	kof_scan_of(ctx)->pend_kind = 0;
+	kof_scan_of(ctx)->pend_entry = KOF_ENTRY_NONE;
 	ctx->content = on ? &kof_unpack_vtable : &kof_detect_vtable;
 }
 
@@ -2532,68 +3015,3 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	return 1;
 }
 
-
-/* ---- whole executables carried inside another object ----------------------
- *
- * See embedded.h. Separate from the unpackers because nothing is unpacked: the
- * bytes are already a file, they were simply never offered as one.
- */
-
-/* Enough for a dropper carrying one payload per architecture, and a bound on
- * an object built to produce thousands of them. */
-#define EMBED_MAX  32u
-
-/*
- * The magic is searched for with the engine's own matcher over the object's own
- * context - the same search a signature gets, so it costs what a signature
- * costs and behaves the same way on the same bytes.
- */
-static uint32_t embed_one(const struct kof_obj_ctx *ctx, struct kof_scanner *sc,
-			  kof_buf b, const char *magic, uint16_t mlen,
-			  uint32_t made)
-{
-	uint64_t at = 1;
-
-	while (made < EMBED_MAX && at < b.n) {
-		struct kof_embedded e;
-		uint64_t hit = kof_match_where(&sc->m, at, b.n - at,
-					       (const uint8_t *)magic, mlen,
-					       KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
-
-		if (hit == KOF_BROKEN)
-			break;
-		at = hit + 1u;
-		if (!kof_embedded_at(b.p, b.n, hit, &e))
-			continue;
-		/*
-		 * A window, not an emit: the bytes exist in the parent already
-		 * and copying them would charge the budget for something the
-		 * scanner can simply look at through a different offset.
-		 */
-		if (!c_window(ctx, e.off, e.len))
-			break;
-		made++;
-		/* Past what this one accounts for: an executable's own headers
-		 * often contain the magic again, and each of those is a piece
-		 * of the child rather than a child of its own. */
-		if (e.off + e.len > at)
-			at = e.off + e.len;
-	}
-	return made;
-}
-
-uint32_t kof_scan_embedded(const struct kof_obj_ctx *ctx)
-{
-	struct kof_scanner *sc = kof_scan_of(ctx);
-	kof_buf b;
-	uint32_t made = 0;
-
-	if (!sc || !sc->cur_src || !can_produce(sc))
-		return 0;
-	b = kof_src_buf(sc->cur_src);
-	if (!b.p || b.n < 64u)
-		return 0;
-	made = embed_one(ctx, sc, b, "\177ELF", 4, made);
-	made = embed_one(ctx, sc, b, "MZ", 2, made);
-	return made;
-}

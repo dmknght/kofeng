@@ -19,17 +19,36 @@ int kof_pdf_sniff(kof_buf file);
 
 const char *kof_pdf_region_name(uint32_t bit);
 const char *kof_pdf_anomaly_name(unsigned index);
-/* THE REGION LIST, where everything that needs it can see it.
- * It lived in the .c, so ksigbuilder - which has to turn the name a
- * signature writes back into a bit - kept a hand copy in rgn_names[]
- * with, in its own words, no build-time check that it had not fallen
- * behind. Now there is one list and one place to add to. */
+/*
+ * THE REGION NAME LIST, where everything that needs it can see it.
+ *
+ * It lived in the .c, so ksigbuilder - which has to turn the name a signature
+ * writes back into a bit - kept a hand copy in rgn_names[] with, in its own
+ * words, no build-time check that it had not fallen behind. Now there is one
+ * list, and kof_pdf_region_bits[], kof_pdf_region_name() and ksigbuilder's
+ * table are all it.
+ *
+ * ONE ENTRY PER ARGUMENT, because every format's list is called with the same
+ * one-argument macro from the same table in ksigbuilder. So this is the one
+ * list that is not generated from KOF_PDF_CLASSES, and pdf_parse.c asserts the
+ * two name the same bits - by their union and by their count, which together
+ * leave no way to add a region to one and not the other.
+ *
+ * THE ORDER IS WHAT A READER SEES: structure, then content, then resources,
+ * then the passengers, then what nothing claimed. kofexamine and kofviewer
+ * walk this to print a per-region byte count, so it reads top to bottom like
+ * the document does.
+ */
 #define PDF_REGIONS(X)                 \
-	X(KOF_SCAN_PDF_HEADER)           \
-	X(KOF_SCAN_PDF_OBJECTS)          \
-	X(KOF_SCAN_PDF_STREAM_PLAIN)     \
-	X(KOF_SCAN_PDF_STREAM_PACKED)    \
-	X(KOF_SCAN_PDF_STREAM_IMAGE)     \
+	X(KOF_SCAN_PDF_HEADERS)          \
+	X(KOF_SCAN_PDF_XREF)             \
+	X(KOF_SCAN_PDF_OBJ_TABLE)        \
+	X(KOF_SCAN_PDF_CONTENT)          \
+	X(KOF_SCAN_PDF_CONTENT_SCRIPT)   \
+	X(KOF_SCAN_PDF_CONTENT_METADATA) \
+	X(KOF_SCAN_PDF_RESOURCE_IMAGE)   \
+	X(KOF_SCAN_PDF_RESOURCE_FONT)    \
+	X(KOF_SCAN_EMBEDDED)             \
 	X(KOF_SCAN_PDF_UNCLAIMED)
 
 extern const uint32_t kof_pdf_region_bits[];

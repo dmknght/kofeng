@@ -488,6 +488,23 @@ struct object {
 	int       too_big;          /* kept nowhere: past the session's budget */
 	kof_buf   buf;
 	uint32_t  depth;            /* how many "//" its name carries */
+	/*
+	 * WHICH ENTRY OF ITS PARENT THIS OBJECT IS THE CONTENT OF, or
+	 * KOF_ENTRY_NONE.
+	 *
+	 * From the engine and not worked out here - see kof_result.entry_of.
+	 * It is what lets one stream be ONE row: an entry describes the coded
+	 * extent where it lies in the file, and this object is that stream's
+	 * content. Before this arrived the tree showed both, with nothing
+	 * saying they were the same stream and the first of them opening onto
+	 * compressed noise.
+	 */
+	uint32_t  entry_of;
+	/* And what the producer said it IS - enum kof_entry_kind. The format of
+	 * decoded content is almost always unknown, so this is the only thing
+	 * that separates a peeled payload from a page description stream, and
+	 * the two want opposite answers from every item in the Analysis menu. */
+	uint32_t  entry_kind;
 
 	const struct kof_parser *fmt;
 	struct kof_obj_ctx            ctx;

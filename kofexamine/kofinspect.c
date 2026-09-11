@@ -311,6 +311,25 @@ const struct kof_parser *kof_inspect_identify(kof_buf buf,
 			*view_out = view;
 			return &parsers[i];
 		}
+		/*
+		 * KNOWN DEFECT: THIS GIVES UP WHERE THE SCANNER CARRIES ON.
+		 *
+		 * A sniff accepted and the parse then refused, and this returns
+		 * "nothing identified it" rather than trying the next parser.
+		 * The engine's own identify() continues down the table, so the
+		 * two disagree: a file the scanner names is shown as Raw here.
+		 *
+		 * Reachable: a sniff is a few magic bytes and a parse reads the
+		 * whole structure, so anything that opens with a valid magic and
+		 * is damaged after it takes this path - and so does a file that
+		 * deliberately carries one format's magic and another's body.
+		 *
+		 * Not fixed here because the fix is a loop change with a
+		 * lifetime question in it - which view is freed when the second
+		 * parser succeeds after the first has already written into ctx -
+		 * and ctx is memset once, above, rather than per attempt. The
+		 * honest version resets ctx per candidate.
+		 */
 		free(view);
 		return NULL;
 	}
@@ -318,6 +337,38 @@ const struct kof_parser *kof_inspect_identify(kof_buf buf,
 }
 
 
+
+/* See kofinspect.h for why this is shared rather than one copy per tool. */
+const char *kof_region_label(const char *enum_name)
+{
+	const char *p = enum_name;
+	int have = 0, want, seen = 0;
+
+	if (!enum_name)
+		return "?";
+	/*
+	 * KOF_SCAN_<FMT>_NAME is three underscores in, and that is most of
+	 * them. But a SHARED region has no format part - KOF_SCAN_ALL,
+	 * KOF_SCAN_EMBEDDED - and demanding a third underscore returned those
+	 * in full, so a row read "KOF_SCAN_EMBEDDED" where every neighbour read
+	 * one word.
+	 *
+	 * So: skip three when there are three, two when that is all there is.
+	 * KOF_SCAN_ALL -> ALL, KOF_SCAN_SYM_IMP -> IMP,
+	 * KOF_SCAN_PDF_CONTENT_METADATA -> CONTENT_METADATA, KOF_SCAN_EMBEDDED ->
+	 * EMBEDDED.
+	 */
+	for (p = enum_name; *p; p++)
+		if (*p == '_')
+			have++;
+	want = have >= 3 ? 3 : 2;
+	if (have < 2)
+		return enum_name;
+	for (p = enum_name; *p && seen < want; p++)
+		if (*p == '_')
+			seen++;
+	return p;
+}
 
 const char *kof_touch_kind_name(enum kof_touch_kind k)
 {
@@ -1527,4 +1578,97 @@ void kof_inspect_event_verbs(const uint64_t *count, uint32_t keep,
 	}
 	if (have_pend)
 		out(user, pend);
+}
+
+/* ---- a PDF text string on one line - see kofinspect.h ---------------------- */
+
+static int hexdig(uint8_t c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+uint32_t kof_pdf_text(const uint8_t *p, uint64_t n, int hex,
+		      char *out, uint32_t cap)
+{
+	uint8_t buf[512];
+	uint64_t i;
+	uint32_t w = 0, have = 0;
+	int wide = 0;
+
+	if (!out || !cap)
+		return 0;
+	out[0] = 0;
+	if (!p || !n)
+		return 0;
+
+	/*
+	 * Into a small buffer first, because the three transformations compose:
+	 * a hex string may decode INTO UTF-16, and a literal string's escapes
+	 * have to be gone before the pairs can be counted. Bounded rather than
+	 * allocated - this is one line of a screen, and a title longer than the
+	 * buffer is cut rather than grown into.
+	 */
+	if (hex) {
+		int hi = -1;
+
+		for (i = 0; i < n && have < sizeof buf; i++) {
+			int v = hexdig(p[i]);
+
+			if (v < 0)
+				continue;              /* whitespace, mostly */
+			if (hi < 0) {
+				hi = v;
+				continue;
+			}
+			buf[have++] = (uint8_t)((hi << 4) | v);
+			hi = -1;
+		}
+		/* A trailing lone digit pairs with zero, which is what the
+		 * format says about hex strings generally. */
+		if (hi >= 0 && have < sizeof buf)
+			buf[have++] = (uint8_t)(hi << 4);
+	} else {
+		for (i = 0; i < n && have < sizeof buf; i++) {
+			if (p[i] == '\\' && i + 1u < n) {
+				uint8_t e = p[++i];
+
+				switch (e) {
+				case 'n': buf[have++] = '\n'; break;
+				case 'r': buf[have++] = '\r'; break;
+				case 't': buf[have++] = '\t'; break;
+				case 'b': buf[have++] = '\b'; break;
+				case 'f': buf[have++] = '\f'; break;
+				/* A digit begins an octal escape, which is a
+				 * byte this does not need to name: the bytes
+				 * that matter to a reader are the printable
+				 * ones, and an octal escape of one is rare
+				 * enough that rendering the digits is a
+				 * smaller wrong than a parser for them. */
+				default:  buf[have++] = e; break;
+				}
+				continue;
+			}
+			buf[have++] = p[i];
+		}
+	}
+
+	/* UTF-16BE, and only on the byte order mark: a document that writes
+	 * plain bytes must not have every other one dropped because its title
+	 * happens to be even in length. */
+	if (have >= 2u && buf[0] == 0xfeu && buf[1] == 0xffu)
+		wide = 1;
+
+	for (i = wide ? 3u : 0u; i < have && w + 1u < cap; i += wide ? 2u : 1u) {
+		uint8_t ch = buf[i];
+
+		out[w++] = (ch >= 0x20u && ch < 0x7fu) ? (char)ch : '.';
+	}
+	out[w] = 0;
+	return w;
 }

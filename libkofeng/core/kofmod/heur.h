@@ -76,7 +76,35 @@ enum kof_heur_phase_id {
 /* What a rule may ask the engine to do with the object it fired on. A mask, so
  * two rules asking for the same thing is the same request. */
 enum kof_eng_want {
-	KOF_ENG_USE_EMU = 1u << 0    /* interpret this object's entry point */
+	KOF_ENG_USE_EMU = 1u << 0,   /* interpret this object's entry point */
+	/*
+	 * OPEN WHAT THIS OBJECT CARRIES, whatever the database targets.
+	 *
+	 * The evidence half of smart deep scan. Without it, a producer opens a
+	 * child only when some loaded rule targets the format that child will
+	 * have - see fmt_wanted in kofsig.h - so the pictures and the font
+	 * programs in an ordinary document are left alone, because no rule has
+	 * ever been written about either. That is right for an ordinary
+	 * document and wrong for the one in front of you: a PDF whose object
+	 * table just matched /Launch is a document worth opening the pictures
+	 * of.
+	 *
+	 * So a rule that recognised something says so, and the engine answers
+	 * yes for every format on THIS object.
+	 *
+	 * ONLY MEANINGFUL AT EXAMINE, like the emulator ask and for the same
+	 * reason twice over: at VERDICT the object has already been opened, so
+	 * there is nothing left to ask for. EXAMINE is the one phase that runs
+	 * after the signatures and before the opening, which is what makes
+	 * this possible at all.
+	 *
+	 * PER OBJECT, AND IT CANNOT LEAK. There is no state to set: the engine
+	 * recomputes the ask from the findings of the object it is about to
+	 * open, so "this document asked" can never become "the rest of the
+	 * scan asks". That is the property the declared shape buys, and the
+	 * reason this is a declaration rather than a call.
+	 */
+	KOF_ENG_OPEN_CARRIED = 1u << 1
 };
 
 /*

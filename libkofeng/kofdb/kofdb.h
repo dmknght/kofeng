@@ -240,6 +240,28 @@ struct kof_engine {
 	uint32_t             n_heur;
 
 	/*
+	 * EVERY FORMAT ANY LOADED MODULE TARGETS, or-ed into one mask.
+	 *
+	 * Read by the scanner to answer a producer's question: would anything
+	 * look inside a child of this format - see fmt_wanted in kofmod/kofsig.h
+	 * for why that is the gate asked early rather than a policy.
+	 *
+	 * COMPUTED HERE AND NOT READ FROM THE PACK, although a pack header
+	 * carries the same union of its own modules (any_target, kofpack.h).
+	 * That field is per pack, and a database is a directory of them split
+	 * by kind and format - sigs-pe, unpack-elf, heur-elf - so the union
+	 * that matters is over everything actually loaded. Walking the three
+	 * arrays once at load is cheaper than reasoning about which packs came
+	 * back, and it cannot disagree with the modules the scan will run.
+	 *
+	 * ALL THREE ARRAYS. A detector targeting a format will search a child
+	 * of it; an unpacker will try to peel one; a heuristic will gather
+	 * facts from one. Any of the three is a reason the child is worth
+	 * making.
+	 */
+	uint32_t             any_target;
+
+	/*
 	 * How many patterns the whole database declares. A COUNT AND NOT A TABLE:
 	 * the descriptors and the bytes both stay in the packs and are reached through
 	 * kof_db_str. The matcher needs the number to size its presence table, which

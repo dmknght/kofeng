@@ -292,7 +292,7 @@ static const struct rgn_name rgn_names[] = {
 	 * So ksigbuilder answered a misspelled region with "Segmentation
 	 * fault", from a build with no line number and nothing to look at, and
 	 * the error that lists every valid region name could never be reached.
-	 * Found by writing `KOF_SCAN_PDF_IMAGE` for KOF_SCAN_PDF_STREAM_IMAGE.
+	 * Found by writing `KOF_SCAN_PDF_IMAGE` for KOF_SCAN_PDF_RESOURCE_IMAGE.
 	 */
 	{ NULL, 0 }
 };
@@ -1670,6 +1670,8 @@ static void resolve_heur(void)
 	} else if (wt->count) {
 		if (names_ident(wt->arg, "KOF_ENG_USE_EMU"))
 			g_heur_want |= KOF_ENG_USE_EMU;
+		else if (names_ident(wt->arg, "KOF_ENG_OPEN_CARRIED"))
+			g_heur_want |= KOF_ENG_OPEN_CARRIED;
 		else
 			err(wt->line, "KOF_HEUR_WANT names nothing the engine "
 				      "offers");

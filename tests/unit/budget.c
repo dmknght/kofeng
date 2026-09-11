@@ -264,6 +264,19 @@ static void mod_dangling(const struct kof_obj_ctx *ctx)
 
 /* ---- driving the real scan path --------------------------------------------- */
 
+/*
+ * EVERY DEPTH HERE IS THE OBJECT AXIS, and it used to be spelled max_depth.
+ *
+ * This file scans ONE FILE, so directory depth cannot bound anything in it -
+ * every case that sets a depth is bounding how far a module's children are
+ * followed. One field used to mean both, and when the two were split these
+ * settings kept the name that now means the other axis: the cases still
+ * passed a bound, the bound applied to nothing, and "one long entry is
+ * truncated" turned into a whole tree of streams being unpacked.
+ *
+ * See max_depth and max_object_depth in kofeng.h for the two axes, and
+ * heur_off for whether descending happens at all.
+ */
 static void run_at(const char *path, const char *what,
 		   void (*fn)(const struct kof_obj_ctx *),
 		   const struct kof_scan_option *opt, struct seen *out)
@@ -425,7 +438,7 @@ int main(void)
 	 * what this case is about is the shape of one object, not the tree.
 	 */
 	opt.max_produced_bytes = 1u << 30;
-	opt.max_depth = 1;
+	opt.max_object_depth = 1;
 	run("stream", mod_stream, &opt, &s);
 	trace("stream", &s);
 	expect("stream", s.objects == 2,
@@ -437,7 +450,7 @@ int main(void)
 	       "the cap truncated far below what it allows");
 	expect("stream", s.incomplete >= 1,
 	       "dropping the tail of an entry was not reported as incomplete");
-	opt.max_depth = 0;
+	opt.max_object_depth = 0;
 
 	/*
 	 * --- an archive of ordinary entries, against a small ceiling ---
@@ -449,7 +462,7 @@ int main(void)
 	 */
 	opt.max_produced_bytes = 1u << 30;
 	opt.max_children = 0;
-	opt.max_depth = 1;
+	opt.max_object_depth = 1;
 	run("siblings", mod_siblings, &opt, &s);
 	trace("siblings", &s);
 	expect("siblings", s.peak <= opt.max_resident_bytes,
@@ -463,7 +476,7 @@ int main(void)
 	       "more siblings survived than the ceiling can hold at once");
 	expect("siblings", s.incomplete >= 1,
 	       "entries left unexamined were not reported");
-	opt.max_depth = 0;
+	opt.max_object_depth = 0;
 
 	/* --- many small children: what a per-child limit would miss --- */
 	opt.max_produced_bytes = 4096;
@@ -491,7 +504,7 @@ int main(void)
 	 * and if nothing does this call never returns.
 	 */
 	opt.max_produced_bytes = 1u << 30;
-	opt.max_depth = 6;
+	opt.max_object_depth = 6;
 	run("self-window", mod_selfwindow, &opt, &s);
 	trace("self-window", &s);
 	expect("self-window", s.objects == 7,
@@ -502,7 +515,7 @@ int main(void)
 	 * has to be enough on its own - a caller who sets no limits must still get a
 	 * scan that terminates.
 	 */
-	opt.max_depth = 0;
+	opt.max_object_depth = 0;
 	opt.max_children = 32;
 	run("self-window-nodepth", mod_selfwindow, &opt, &s);
 	trace("self-window-nodepth", &s);
@@ -511,7 +524,7 @@ int main(void)
 	opt.max_children = 0;
 
 	/* --- a single emit no honest decompressor makes --- */
-	opt.max_depth = 0;
+	opt.max_object_depth = 0;
 	opt.max_children = 0;
 	opt.max_produced_bytes = 1u << 30;
 	run("big-emit", mod_bigemit, &opt, &s);
@@ -522,7 +535,7 @@ int main(void)
 	       "an implausible emit length was refused without saying so");
 
 	/* --- emitted but never closed: no object, and nothing left behind --- */
-	opt.max_depth = 0;
+	opt.max_object_depth = 0;
 	opt.max_produced_bytes = 1u << 20;
 	run("dangling", mod_dangling, &opt, &s);
 	trace("dangling", &s);
@@ -537,7 +550,7 @@ int main(void)
 	 * module targets and the module is never entered for it. The regress here is
 	 * a property of a test module that claims every format, not of the call.
 	 */
-	opt.max_depth = 1;
+	opt.max_object_depth = 1;
 	opt.max_children = 0;
 	opt.max_produced_bytes = 64u << 20;
 	opt.max_resident_bytes = 32u << 20;
@@ -547,7 +560,7 @@ int main(void)
 	       "a gather returned a length other than the cap and the region");
 
 	/* --- a child name that must not be printable as it stands --- */
-	opt.max_depth = 1;
+	opt.max_object_depth = 1;
 	opt.max_children = 0;
 	opt.max_produced_bytes = 1u << 20;
 	run_at(big_path, "evil-name", mod_evilname, &opt, &s);

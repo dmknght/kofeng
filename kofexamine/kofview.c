@@ -14,6 +14,10 @@
 #define _GNU_SOURCE
 
 #include "kofview.h"
+/* For enum kof_format, which kv_cap answers about. kofview.h itself stays
+ * free of it: the header is a terminal and a widget, and a caller that only
+ * draws should not have to pull in the engine to do it. */
+#include <kofmod/kofsig.h>
 #include "kofplat.h"
 #include "../libkofeng/core/kofplatform.h"
 
@@ -357,5 +361,43 @@ void kv_menu_draw(struct out *o, const struct kv_menu *m, int top, int left,
 			out_fmt(o, " %-*.*s", m->w - 1, m->w - 1,
 				m->label(m->ud, i));
 		out_str(o, A_OFF);
+	}
+}
+
+/* ---- what a format can be asked - see kofview.h ---------------------------- */
+
+int kv_cap(uint8_t format, int cap)
+{
+	switch (format) {
+	case KOF_FMT_ELF:
+	case KOF_FMT_PE:
+	case KOF_FMT_MACHO:
+		/* All three: an executable image has a symbol table, code at an
+		 * entry point, and is the thing a packer packs. */
+		return cap == KV_CAP_SYMBOLS || cap == KV_CAP_CODE ||
+		       cap == KV_CAP_UNPACK;
+
+	case KOF_FMT_UNKNOWN:
+		/*
+		 * Bytes nothing claimed. No symbol table to look for, but they
+		 * may well BE code - a payload an unpacker peeled, a blob
+		 * carved out of a variable - and that is the case the emulator
+		 * and the disassembler exist for.
+		 */
+		return cap == KV_CAP_CODE || cap == KV_CAP_UNPACK;
+
+	default:
+		/*
+		 * Every container and every document format. Their members come
+		 * out by being READ, which the engine does on its own and which
+		 * is not what any of these items mean, and none of them has a
+		 * symbol table or an entry point.
+		 *
+		 * Written as a default rather than listed, because the list is
+		 * the longer one and a format added tomorrow is far likelier to
+		 * belong here than with the executables - so the safe answer is
+		 * the one a new format gets by saying nothing.
+		 */
+		return 0;
 	}
 }

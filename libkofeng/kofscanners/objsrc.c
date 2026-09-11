@@ -50,6 +50,15 @@ struct kof_objsrc {
 
 	/* What this object is called, sanitised, or empty. Reporting only. */
 	char               label[KOF_SRC_LABEL_MAX];
+
+	/* What the producer declared this is, or KOF_FMT_UNKNOWN. NOT reporting
+	 * only: it decides which modules are even offered the object. */
+	uint8_t            fmt;
+
+	/* KOF_ENTRY_NONE unless a producer said otherwise - set in src_new,
+	 * because the calloc'd zero would mean entry 0. */
+	uint32_t           entry_of;
+	uint32_t           kind;
 };
 
 /*
@@ -95,6 +104,39 @@ static int looks_utf16le(const uint8_t *p, uint64_t len)
 		if (p[i])
 			return 0;
 	return 1;
+}
+
+void kof_src_declare_fmt(struct kof_objsrc *s, uint8_t fmt)
+{
+	if (s)
+		s->fmt = fmt;
+}
+
+void kof_src_declare_entry(struct kof_objsrc *s, uint32_t index)
+{
+	if (s)
+		s->entry_of = index;
+}
+
+uint32_t kof_src_entry_of(const struct kof_objsrc *s)
+{
+	return s ? s->entry_of : KOF_ENTRY_NONE;
+}
+
+void kof_src_declare_kind(struct kof_objsrc *s, uint32_t kind)
+{
+	if (s)
+		s->kind = kind;
+}
+
+uint32_t kof_src_kind_of(const struct kof_objsrc *s)
+{
+	return s ? s->kind : 0u;
+}
+
+uint8_t kof_src_fmt_of(const struct kof_objsrc *s)
+{
+	return s ? s->fmt : 0u;
 }
 
 void kof_src_label(struct kof_objsrc *s, const uint8_t *p, uint64_t len)
@@ -144,6 +186,16 @@ const char *kof_src_label_of(const struct kof_objsrc *s)
 static struct kof_objsrc *src_new(void)
 {
 	struct kof_objsrc *s = calloc(1, sizeof *s);
+
+	/*
+	 * NOT LEFT AT THE CALLOC'D ZERO, because zero is entry 0 and is a real
+	 * answer. Every other field here means nothing useful at zero and can
+	 * be left; this one would claim that the object is the content of its
+	 * parent's first entry. The root of a walk has no parent at all, so it
+	 * would have claimed it loudest.
+	 */
+	if (s)
+		s->entry_of = KOF_ENTRY_NONE;
 
 	if (s)
 		s->refs = 1;

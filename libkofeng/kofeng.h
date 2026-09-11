@@ -206,6 +206,17 @@ static inline int kof_finding_is_heur(const struct kof_finding *f)
 	       f->name[f->maltype.at + 3] == 'r';
 }
 
+/*
+ * "This object did not come from an entry" - the root of a walk, a payload an
+ * emulator wrote, anything a container did not describe.
+ *
+ * Not zero, because zero is a real entry index and the first one at that. Not
+ * KOF_NA either: that is UINT64_MAX and this field is 32 bits, so spelling it
+ * with the wider constant would truncate to 0xffffffff by accident rather than
+ * by decision. One name, stated once, is what stops the two being confused.
+ */
+#define KOF_ENTRY_NONE 0xffffffffu
+
 struct kof_result {
 	struct kof_finding v[KOF_MAX_FINDINGS];
 	uint32_t n;
@@ -251,6 +262,43 @@ struct kof_result {
 	 * that wants to say so has the number.
 	 */
 	uint32_t examined;
+
+	/*
+	 * WHICH ENTRY OF ITS PARENT THIS OBJECT CAME FROM, or KOF_ENTRY_NONE.
+	 *
+	 * The link between the two halves of what a parse says about one thing.
+	 * ctx->entries describes a stream WHERE IT LIES IN THE FILE - coded,
+	 * with its chain and its length; the child is that stream's CONTENT,
+	 * which has no offset in the file at all. They are one thing in two
+	 * states, and nothing connected them: a host saw a row for the coded
+	 * stream and a row for the decoded object and had no way to know they
+	 * were the same stream.
+	 *
+	 * IN THE RESULT AND NOT IN THE NAME. A host learns about a child
+	 * through the scan callback, which hands it a name, some bytes and this
+	 * - so the result is the only channel that reaches it. Putting the index
+	 * in the composed name instead would have changed what every dump
+	 * filename and every finding is called, to carry one number.
+	 *
+	 * Appended rather than inserted, like every other field here: a caller
+	 * built against an older header still reads the ones it knows.
+	 */
+	uint32_t entry_of;
+
+	/*
+	 * WHAT THE PRODUCER SAID THIS OBJECT IS - enum kof_entry_kind.
+	 *
+	 * Beside entry_of because a host needs both and for the same reason:
+	 * the FORMAT of decoded content is almost always KOF_FMT_UNKNOWN, so a
+	 * host deciding what to offer for an object cannot decide it from the
+	 * format alone. "Disassemble" is right for a payload a decoder peeled
+	 * out of a stub and wrong for a page description stream, and both
+	 * arrive formatless.
+	 *
+	 * KOF_ENT_UNKNOWN when nothing said, which is the honest default and
+	 * is what an unidentified blob genuinely is.
+	 */
+	uint32_t entry_kind;
 
 	/*
 	 * WHAT THE HEURISTIC MADE OF THIS OBJECT, WHETHER OR NOT IT REPORTED.
@@ -548,8 +596,32 @@ int         kof_engine_multimatch(const kof_engine *, uint64_t *bytes,
  * it to be, which is a change in this library's own code and so belongs here as
  * well as in KOF_PACK_MINOR. It still gates nothing: a pack says its own layout
  * and that is what the loader refuses on.
+ *
+ * 2 - the object tree: entries, children and smart deep scan.
+ *
+ * A capability rather than a layout move, which is what this number is for.
+ * What a caller can do that it could not before:
+ *
+ *   READ WHAT A CONTAINER DECLARES without opening any of it. ctx->entries
+ *   publishes one row per thing the parse found - kind, name, coding chain -
+ *   so a host can show a document's contents without a decompressor running.
+ *
+ *   SEPARATE ON DEMAND. heur_off gates opening those rows into objects, so a
+ *   caller can look first and descend afterwards, and a region still covers
+ *   every byte either way.
+ *
+ *   HAVE THE ENGINE NOT OPEN WHAT NOTHING WOULD LOOK AT. A producer asks
+ *   fmt_wanted and the answer comes from the loaded database, so what a scan
+ *   spends follows the rules it was given rather than a list in the engine.
+ *
+ * THE DATABASE FORMAT DID NOT MOVE, and that is not an oversight. Everything
+ * above rides in fields the pack already had - one more bit in a module's
+ * heur_want mask, two more values on the format axis - so KOF_PACK_MINOR
+ * stays where it is, exactly as the rule beside it in kofpack.h requires:
+ * that number moves when the LAYOUT moves and not when the engine grows a
+ * capability. A rebuild is needed; a refusal is not.
  */
-#define KOFENG_MINOR 1u
+#define KOFENG_MINOR 2u
 
 /* The Makefile passes the real stamp; this only keeps a stray compilation
  * building, the same way KOF_PACK_BUILD does. */
@@ -654,7 +726,51 @@ enum kof_emu_use {
 
 struct kof_scan_option {
 	int      recurse_dirs;     /* descend into directories */
+	/*
+	 * HOW DEEP INTO DIRECTORIES, and that is now all it means.
+	 *
+	 * It used to mean both: the walk applied it to directory depth AND to
+	 * object depth, so a caller asking for three levels of folders also
+	 * said "stop unpacking after three layers", and a caller wanting a
+	 * flat scan of a deep tree could not say so at all. Two policies on
+	 * one number, and neither expressible alone.
+	 *
+	 * That is the same mistake this file already fixed once, and said so:
+	 * see `pdepth` in scan.c, split from `depth` because "conflating them
+	 * was the bug". This is the third axis and it gets its own field for
+	 * the same reason.
+	 */
 	uint32_t max_depth;        /* 0 -> a built-in ceiling applies */
+	/*
+	 * THERE IS NO SEPARATE DEEP-SCAN FLAG. It is heur_off, below.
+	 *
+	 * There WAS one, and a second switch for it was the mistake: --heur 0
+	 * already means "name families and nothing else - gather no facts, score
+	 * nothing, produce no evidence that is not a match", and descending into
+	 * a file is exactly that kind of evidence. A caller asking for the
+	 * cheapest possible pass was therefore asking for both, and two switches
+	 * meant they could be set inconsistently - a scan that gathered nothing
+	 * and still paid to open every container, or the reverse.
+	 *
+	 * So: heur 0 does not descend, heur 1 and above do. One question, one
+	 * field, and the levels already document what each one is for.
+	 *
+	 * What NOT descending does not turn off: the parse. A container still
+	 * declares what it holds - see ctx->entries - so a caller still learns
+	 * that there are twenty-five images inside without paying to open one,
+	 * and a region still covers their bytes so a rule can still search them.
+	 * Not descending means "do not open", never "do not look".
+	 */
+	/*
+	 * HOW DEEP INTO THE OBJECT TREE, when descending at all.
+	 *
+	 * Zero means the built-in allowance, which is not a constant: it falls
+	 * with the size of the thing being descended into, from 64 layers for
+	 * something small to a floor of 4 for anything past 64MB. See
+	 * depth_allowance in scan.c for why a floor matters as much as a
+	 * ceiling.
+	 */
+	uint32_t max_object_depth;
 	int      follow_symlinks;  /* off is the only safe default: a link into an
 				    * ancestor turns a walk into a loop */
 

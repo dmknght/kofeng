@@ -165,6 +165,45 @@ enum kof_format {
 	KOF_FMT_PDF     = 15,
 
 	/*
+	 * WHAT A DOCUMENT DRAWS WITH, AND WHY THESE TWO ARE FORMATS AT ALL.
+	 *
+	 * A format is one value per kind of thing a rule can be written about -
+	 * that is the line this enum is drawn on, and it is why an event is in
+	 * here. A rasteriser program and a compressed bitmap are both things a
+	 * rule can be written about: a malicious OpenType file is a real
+	 * object, and so is a JBIG2 stream aimed at a decoder bug.
+	 *
+	 * THEY EXIST SO THAT NOTHING OPENS THEM UNTIL SOMETHING WANTS TO, and
+	 * that follows from what a format already does rather than from any new
+	 * policy. A format GATES: a module is offered an object only when
+	 * target_mask names its format. So a child declared KOF_FMT_FONT with
+	 * no rule in the database targeting fonts is a child that will be
+	 * produced - inflated, copied, charged to the budget - and then handed
+	 * to nobody. The gate has already said no; fmt_wanted below is that
+	 * same no, asked before the work instead of after it.
+	 *
+	 * THE DAY SOMEBODY WRITES THE RULE, the work starts happening again,
+	 * with no engine change and no policy table anywhere: one
+	 * KOF_TARGET_FORMAT(KOF_FMT_FONT) in a signature source is the whole
+	 * of it. That is the difference between this and a skip list - a skip
+	 * list has to be edited by whoever notices, and this is answered by the
+	 * database that would have done the looking.
+	 *
+	 * MEASURED, on an ordinary 302KB document: 267KB of it - 88% - is font
+	 * programs, and every byte was being inflated and scanned for rules
+	 * that could not match. Images are the same argument and larger still;
+	 * see KOF_SCAN_PDF_RESOURCE_IMAGE in kofmod/pdf.h for that measurement.
+	 *
+	 * A PARSER DECLARES THESE, and only from its own structure - /Subtype
+	 * /Image says it, a /FontFile reference says it. Where the structure
+	 * does not say, the answer stays KOF_FMT_UNKNOWN, which means "I will
+	 * not say" and is always opened. Guessing here would hide a payload by
+	 * calling it a picture, which is the one mistake this must not make.
+	 */
+	KOF_FMT_IMAGE   = 16,
+	KOF_FMT_FONT    = 17,
+
+	/*
 	 * ONE COLLECTED EVENT, not a file.
 	 *
 	 * The object is one collected event - what a collector saw happen, with
@@ -227,7 +266,7 @@ enum kof_format {
 	 * width of the axis, and anything sizing an array by target value wants
 	 * KOF_TARGET_BITS instead.
 	 */
-	KOF_FMT_COUNT   = 16
+	KOF_FMT_COUNT   = 18
 };
 
 /*
@@ -246,11 +285,18 @@ enum kof_format {
  *
  * THE AXIS IS 32 VALUES WIDE AND THAT IS A HARD CEILING: a module's target is a
  * uint32 MASK in the pack, because a module may target more than one thing.
- * Sixteen are spent on file formats and sixteen are left for events - which is
+ * Eighteen are spent on file formats and fourteen are left for events - which is
  * ample, because a target is needed per RULE SHAPE and not per verb, and most
  * verbs will never have one.
+ *
+ * THE LINE MOVED ONCE, 16 to 18, when KOF_FMT_IMAGE and KOF_FMT_FONT were
+ * added. What that costs is two of the fourteen values left for verbs, and
+ * what it requires is that no event target is below the new line: the only one
+ * is KOF_EVT_AMSI at 19, and every event target asserts it is above the line
+ * (see kofevt.h), so moving it is checked rather than assumed. Moving it again
+ * is the same two steps.
  */
-#define KOF_TARGET_FIRST_EVENT 16u
+#define KOF_TARGET_FIRST_EVENT 18u
 #define KOF_TARGET_BITS        32u
 
 /*
@@ -362,6 +408,8 @@ static inline int kof_format_from_name(const char *s, uint8_t *out)
 	KOF_FMT_X_FROM(KOF_FMT_XZ,      KOF_FMT_XZ)
 	KOF_FMT_X_FROM(KOF_FMT_RTF,     KOF_FMT_RTF)
 	KOF_FMT_X_FROM(KOF_FMT_PDF,     KOF_FMT_PDF)
+	KOF_FMT_X_FROM(KOF_FMT_IMAGE,   KOF_FMT_IMAGE)
+	KOF_FMT_X_FROM(KOF_FMT_FONT,    KOF_FMT_FONT)
 	KOF_FMT_X_FROM(KOF_EVT_AMSI,    KOF_EVT_AMSI)
 #undef KOF_FMT_X_FROM
 	return 0;
@@ -386,6 +434,8 @@ static inline const char *kof_format_name(uint8_t fmt)
 	case KOF_EVT_AMSI:   return "AMSI";
 	case KOF_FMT_RTF:    return "RTF";
 	case KOF_FMT_PDF:    return "PDF";
+	case KOF_FMT_IMAGE:  return "Image";
+	case KOF_FMT_FONT:   return "Font";
 	/*
 	 * "Raw", not "Unknown", and the two are different answers.
 	 *
@@ -599,14 +649,45 @@ struct kof_range {
  * symbol and a PE import as the one claim they both are.
  *
  * FROM THE TOP, because format regions number upward from bit 1 and these must
- * never collide with a region a format adds later. The highest bit any format
- * uses today is 7.
+ * never collide with a region a format adds later. The highest bit a format
+ * uses today is 9 - PDF, whose stream regions are split by what the bytes ARE
+ * rather than by how they are coded. It was 7 when this was written, so the
+ * number is worth re-reading rather than trusting.
  *
  * The split is on KOF_SYM_F_UNDEFINED, and the extents cover RECORDS ONLY - the
  * block's own header is not searched. Its count and `_start` index change with
  * the file, so a pattern over them would be matching the host's bookkeeping
  * rather than anything the object says.
  */
+/*
+ * A FILE THIS OBJECT CARRIES AS A FILE - SHARED, BECAUSE IT IS NOT ONE
+ * FORMAT'S IDEA.
+ *
+ * A PDF attaches an executable through /EF. A doczip IS a zip and every entry
+ * in it is a carried file. An ELF can hold another ELF that a compiler put
+ * there. The containers have nothing in common and the question does: "is this
+ * a passenger rather than part of the document", and a rule that wants
+ * passengers should not have to name one region per format to ask.
+ *
+ * Shared like KOF_SCAN_ALL and KOF_SCAN_SYM_*, and for the reason those give:
+ * it means the same thing for every input that has one.
+ *
+ * INSIDE THE PARTITION, WHICH IS THE DIFFERENCE FROM SYM. The symbol halves
+ * are an overlay - the host BUILT that block and its bytes are not the
+ * object's, so nothing double counts when a mask names them beside a region.
+ * A carried file's bytes ARE the object's, and they are already in one of its
+ * regions. So this is not an overlay on top of those: it is the bit a format
+ * assigns to its OWN carried-file class, through the same *_cls_bit[] table
+ * that maps every other class to a region. One bit, one class per format, no
+ * byte in two regions - which is the property every mask in this engine rests
+ * on and an overlay would have quietly broken.
+ *
+ * FROM THE TOP for the same reason the symbol halves are: format regions
+ * number upward from bit 1 and this must never collide with one a format adds
+ * later.
+ */
+#define KOF_SCAN_EMBEDDED (1u << 29)
+
 #define KOF_SCAN_SYM_IMP (1u << 30)
 #define KOF_SCAN_SYM_EXP (1u << 31)
 #define KOF_SCAN_SYM     (KOF_SCAN_SYM_IMP | KOF_SCAN_SYM_EXP)
@@ -758,6 +839,81 @@ struct kof_content {
 				void *out, uint32_t cap);
 
 	/* Where a declared string is, rather than whether. KOF_BROKEN if absent. */
+	/*
+	 * WHAT THE NEXT CHILD IS, when the producer knows.
+	 *
+	 * The companion of name_next and it works the same way: declared just
+	 * before the child is made, consumed by the making, cleared whatever
+	 * happens - so a claim can never be worn by the child after.
+	 *
+	 * A CLAIM AND NOT A GUESS. A container declares what its own structure
+	 * told it: a PDF knows a stream is page content because /Contents said
+	 * so. It must NOT declare what it would have to guess - the contents of
+	 * an attachment are the sniff chain's business, and a wrong declaration
+	 * runs the wrong parse and hides what the sniff would have found.
+	 *
+	 * KOF_FMT_UNKNOWN is a legitimate thing to declare and means exactly
+	 * that: I will not say. It is also what happens if this is never
+	 * called.
+	 */
+	void (*child_format)(const struct kof_obj_ctx *, uint8_t fmt);
+
+	/*
+	 * WHAT THE NEXT CHILD IS FOR - enum kof_entry_kind.
+	 *
+	 * Beside child_format and NOT the same thing. A format GATES: it decides
+	 * which modules are offered the object, so naming one too precisely
+	 * takes the object away from rules that would have seen it. A kind gates
+	 * nothing. It says what the thing is for, which is what a policy reads
+	 * and what a reader needs - and it is safe to state even when a format
+	 * would not be.
+	 *
+	 * IT IS ALSO THE CHILD'S NAME WHEN NOTHING NAMED IT. name_next takes a
+	 * range in the object, because a name is text the file already contains
+	 * and a module has nowhere to build one - but most things a container
+	 * carries have no name in them at all. A PDF page stream is not called
+	 * anything; neither is a font program. Measured on one document, 12 of
+	 * 14 recovered objects arrived anonymous, and a reader saw a column of
+	 * identical rows. The kind is the honest name for those: not what it is
+	 * called, but what it is.
+	 */
+	void (*child_kind)(const struct kof_obj_ctx *, uint32_t kind);
+
+	/*
+	 * WHICH ENTRY THE NEXT CHILD IS THE CONTENT OF.
+	 *
+	 * The third of the three declarations a producer makes before handing a
+	 * child over, and the one that ties it back to what the parse said. A
+	 * host can then show ONE row for a stream rather than two - the coded
+	 * extent and the decoded content are one thing in two states, and
+	 * without this nothing could tell that.
+	 *
+	 * The entry's OWN index, which is kof_entry.index - the format's number
+	 * for it, not a position in the table. Producers that are not opening a
+	 * declared entry - an emulator writing a payload, a packer peeling a
+	 * stub - simply do not call this, and the child reports
+	 * KOF_ENTRY_NONE.
+	 */
+	void (*child_entry)(const struct kof_obj_ctx *, uint32_t index);
+
+	/*
+	 * RUN AN ENTRY'S WHOLE CODING CHAIN AND HAND BACK THE CHILD.
+	 *
+	 * The host side of kof_entry.coding, and the reason that field is an
+	 * array. A module cannot do this itself: a chain needs a buffer between
+	 * its steps, and a module has no writable memory by design.
+	 *
+	 * `index` is the entry's OWN index - kof_entry.index, the format's
+	 * number for it - not a position in the table.
+	 *
+	 * It refuses rather than half-decodes. An entry flagged
+	 * KOF_ENT_F_CODED_UNKNOWN has a step this build cannot express, and
+	 * running the steps it CAN express would produce bytes that are neither
+	 * the coded form nor the original - so it reports UNSUPPORTED and makes
+	 * nothing. Returns the bytes produced, zero when it produced none.
+	 */
+	uint64_t (*unpack_chain)(const struct kof_obj_ctx *, uint32_t index);
+
 	uint64_t (*find_str_where)(const struct kof_obj_ctx *, uint32_t str_id,
 				   uint64_t off, uint64_t len);
 
@@ -881,6 +1037,46 @@ struct kof_content {
 	 */
 	uint32_t (*data_xref)(const struct kof_obj_ctx *, uint64_t va,
 			      uint64_t size);
+
+	/*
+	 * WOULD ANYTHING LOOK INSIDE A CHILD OF THIS FORMAT.
+	 *
+	 * Asked by a producer BEFORE it spends the work, and it is the whole of
+	 * smart deep scan on the engine's side.
+	 *
+	 * IT IS NOT A POLICY, IT IS THE GATE ASKED EARLY. A module is offered
+	 * an object only when its target_mask names the object's format, so a
+	 * child of a format no loaded rule targets is a child that will be
+	 * produced and handed to nobody. The engine already knew that before
+	 * the inflate started; this is how a producer can know it too. There is
+	 * no list of kinds to open anywhere in the engine, and nothing to edit
+	 * when a format is added - the answer comes from the DATABASE, so
+	 * writing the rule is what turns the work back on.
+	 *
+	 * KOF_FMT_UNKNOWN IS ALWAYS WANTED, and that is the case that matters
+	 * most rather than an exception to be tidied away. A carried file's
+	 * contents are not known until it is opened, so refusing to open it
+	 * because nothing targets "unknown" would be refusing to look at
+	 * exactly the thing a container is used to hide.
+	 *
+	 * EVIDENCE OVERRIDES IT. A heuristic that fired on THIS object may ask
+	 * for everything it carries to be opened - KOF_ENG_OPEN_CARRIED in
+	 * kofmod/heur.h - and then this answers yes whatever the database
+	 * targets. A document with an /OpenAction a rule recognised is worth
+	 * opening the pictures of; a clean one is not. The ask is per object
+	 * and cannot leak into the next, because it is recomputed from that
+	 * object's own findings.
+	 *
+	 * ADVICE AND NOT A GATE: nothing refuses a child whose format this
+	 * answered no for. A producer that asks saves its own work; one that
+	 * does not spends it. Enforcing it at the push would be the bug this
+	 * engine already had once - decompress everything, then drop the
+	 * results on the floor - which is what --heur 0 used to do.
+	 *
+	 * Answers 1 when there is no answer to give (no database loaded), so a
+	 * tool with no rules at all still opens what it finds.
+	 */
+	int (*fmt_wanted)(const struct kof_obj_ctx *, uint8_t fmt);
 };
 
 /*
@@ -1005,6 +1201,52 @@ enum kof_unp_method {
 	 */
 	KOF_UNP_ZLIB = 9,
 
+	/*
+	 * ASCII85 back into bytes: five printable characters carry four.
+	 *
+	 * Not compression, and named as a coding for the reason HEXTEXT is - it
+	 * sits in exactly the same place, a range in, an object out. PDF writes
+	 * it IN FRONT OF a Flate to make a stream survive a text-only channel,
+	 * so its whole importance is that it appears in a CHAIN: a decoder
+	 * handed the Flate half alone inflates ASCII85 text and fails, which is
+	 * how a clean document came to be reported as one the engine could not
+	 * finish.
+	 *
+	 * Output is at most four fifths of input, which is what makes it usable
+	 * as an INTERMEDIATE step - see the chain runner. A step whose output
+	 * cannot be bounded from its input has nowhere to be put.
+	 */
+	KOF_UNP_ASCII85 = 10,
+
+	/*
+	 * The other two transport codings, and see kofdecomp/textcode.h for
+	 * why the three belong together.
+	 *
+	 * ASCIIHEX is bounded by its input like ASCII85, so it can be a middle
+	 * step of a chain. RUNLENGTH expands up to 128x and cannot be sized
+	 * from its input, so it can only be a last step - the host reports a
+	 * chain that asks for more rather than guessing a buffer.
+	 *
+	 * Both are rare, and that is a reason to have them rather than not:
+	 * reaching for an old or unusual coding is how a file gets past a
+	 * parser that only implemented the common one.
+	 */
+	KOF_UNP_ASCIIHEX = 11,
+	KOF_UNP_RUNLENGTH = 12,
+
+	/*
+	 * LZW as PDF and TIFF write it - most-significant-bit first, which is
+	 * NOT the GIF variant. See kofdecomp/lzw.h.
+	 *
+	 * Worth having because it was superseded: a filter nobody expects is a
+	 * filter a parser was never taught, and that is a cheap way to put
+	 * ordinary content past one.
+	 *
+	 * Output is unbounded, so it streams and can only be the LAST step of a
+	 * chain - like DEFLATE and for the same reason.
+	 */
+	KOF_UNP_LZW = 13,
+
 	KOF_UNP_NRV2B_8 = 16, KOF_UNP_NRV2B_16, KOF_UNP_NRV2B_32,
 	KOF_UNP_NRV2D_8,      KOF_UNP_NRV2D_16, KOF_UNP_NRV2D_32,
 	KOF_UNP_NRV2E_8,      KOF_UNP_NRV2E_16, KOF_UNP_NRV2E_32,
@@ -1043,6 +1285,51 @@ enum kof_unp_method {
 	 45u * (uint32_t)(pb))
 
 /*
+ * WHERE IT IS WORTH LOOKING FOR A FILE NOBODY DECLARED.
+ *
+ * Set by a parser on its context; read by the engine when it descends. Three
+ * answers, and the third is not the same as "no answer" - which is the whole
+ * reason this is an enumeration rather than a mask with zero meaning something.
+ */
+enum kof_embed_search {
+	/*
+	 * Nothing declared a scope, so search the whole object.
+	 *
+	 * The value zero deliberately, so an object with no parse at all gets
+	 * the full search by simply saying nothing. That is today's behaviour
+	 * and it is the correct behaviour for those objects: a raw buffer or a
+	 * bytecode block has no structure to consult and no region to narrow
+	 * to, and a whole PE inside one is exactly what a search is for.
+	 */
+	KOF_EMBED_ANYWHERE = 0,
+
+	/*
+	 * The structure names its carried files, so do not search at all.
+	 *
+	 * For a format whose entry table IS the answer: PDF /EF, a zip central
+	 * directory, a CFB directory, a MIME part list. Searching such an
+	 * object cannot find anything the parser did not already declare, and
+	 * measurably does find the same bytes a second time - one attachment,
+	 * two children, and the second one scanned again for nothing.
+	 */
+	KOF_EMBED_DECLARED = 1,
+
+	/*
+	 * Search, but only inside the regions named in ctx->embed_scope.
+	 *
+	 * For a format that CANNOT declare its carried files but does know
+	 * where one could be. An ELF's embedded blob is in its data, never in
+	 * .text; a PE's is in its overlay or its resources. Narrowing is not
+	 * only cheaper - a magic-shaped run of bytes inside executable code is
+	 * a false child, and not looking there is how it stops being one.
+	 *
+	 * It gives up the rare file hidden somewhere unexpected. That is the
+	 * trade, stated rather than hidden.
+	 */
+	KOF_EMBED_SCOPED = 2
+};
+
+/*
  * Everything a module knows about the object it was asked about.
  *
  * The common tier holds only what means the same thing for every kind of
@@ -1051,6 +1338,286 @@ enum kof_unp_method {
  * ET_DYN is an ELF concept, so it lives in the ELF view.
  *
  */
+/*
+ * WHAT A CONTAINER SAYS IS INSIDE IT, AND WHO ACTS ON THAT.
+ *
+ * A region says which bytes are what KIND. This says which bytes are a THING -
+ * a file, a script, a picture - and the difference is the whole of why both
+ * exist.
+ *
+ * WHY A REGION IS NOT ENOUGH, measured rather than argued. A PDF carrying 25
+ * images has them in one IMAGE region of 1.3MB, and every question about one
+ * image is unanswerable there: which of the 25 matched, where that one starts,
+ * whether a PE was appended to the end of one of them. Worse, the region is a
+ * UNION - kof_rl_normalise merges ranges that touch - so two files laid end to
+ * end become one range and a pattern can match across the seam between them,
+ * which is a finding about neither file. A region is the right answer for the
+ * parts of ONE thing: a PE's code across several sections is code, and a
+ * pattern spanning two of them is a real pattern. It is the wrong answer for a
+ * SET of independent things.
+ *
+ * WHY THE PARSER DECLARES AND DOES NOT ACT. A parser knows where an entry is,
+ * what it is, and how it is coded; it has no business deciding whether opening
+ * it is worth the budget, and it cannot know - that depends on which rules are
+ * loaded, which is the host's knowledge and changes per scan. So the parser
+ * fills this in and the host decides. Before this, that decision lived in the
+ * unpacker MODULES, which are compiled blobs shipped in a database: skipping
+ * images meant editing a blob and rebuilding it, and the policy was per format
+ * rather than per engine.
+ *
+ * WHY THE HOST AND NOT THE MODULE PRODUCES THE CHILD. A module can emit bytes,
+ * and that is all it can say about them - so every child arrived untyped and
+ * was then guessed at by the sniff chain. Measured on one document: 32 children
+ * were produced, 1386 rule evaluations were considered against them, and NONE
+ * ran, because an unidentified child is a child no rule targets. Declaring the
+ * format here is what makes the work worth doing.
+ *
+ * Layout rule: append only, like every other structure in this header.
+ */
+
+/*
+ * What an entry IS, in terms every container shares.
+ *
+ * Deliberately not a format: a picture is a picture whether it arrives as JPEG
+ * in a PDF or as PNG in a zip, and a host deciding whether to spend a
+ * decompression on it is asking the same question either way. `format` below is
+ * the separate, stronger claim a parser may or may not be able to make.
+ */
+enum kof_entry_kind {
+	KOF_ENT_UNKNOWN = 0,
+	KOF_ENT_CONTENT,      /* the container's own presentation data */
+	KOF_ENT_SCRIPT,       /* code meant to run when the file is opened */
+	KOF_ENT_METADATA,     /* what the file says about itself */
+	KOF_ENT_IMAGE,        /* pixels */
+	KOF_ENT_FONT,         /* a program for a rasteriser */
+	KOF_ENT_EMBEDDED,     /* a file the container carries AS a file */
+	KOF_ENT_STRUCTURE,    /* the container's own index or graph, coded */
+	KOF_ENT_KIND_COUNT
+};
+
+/*
+ * What an entry IS, as a word.
+ *
+ * Beside the enum it names, and it exists for the reason kof_format_name does:
+ * every host that shows an entry needs this, and the alternative is each one
+ * carrying its own table - which is how kofexamine and kofviewer came to
+ * disagree about region labels.
+ *
+ * SHORT WORDS, because they go in a column beside a length. And UPPER CASE, so
+ * a kind cannot be mistaken for a NAME read out of the file, which sits in the
+ * same cell and is whatever somebody wrote there.
+ *
+ * The default is "?" and not "UNKNOWN": UNKNOWN is a real kind - the parser
+ * found a thing and declines to say what it is - while a value outside the
+ * enumeration is this build not recognising it, which is a fault and not a
+ * fact. Spelling them the same would hide the second behind the first.
+ */
+/*
+ * What a coding IS, as a word.
+ *
+ * Here for the reason kof_entry_kind_name is here: a host that shows an entry
+ * has to show its chain, and the alternative is each host inventing a
+ * shorthand. One did - the viewer printed a bare "z" for "there is a coding"
+ * - and a single letter with no legend anywhere is not a label, it is a thing
+ * the reader has to come and ask about.
+ *
+ * The LZMA ids carry their parameters, so they are a range rather than a
+ * value and are named by the range. The NRV2 variants differ only in bit
+ * width, which is not worth a column, so they are named by family.
+ */
+static inline const char *kof_unp_method_name(uint32_t m)
+{
+	if (m >= KOF_UNP_LZMA && m <= KOF_UNP_LZMA + 224u)
+		return "lzma";
+	if (m >= KOF_UNP_NRV2B_8 && m <= KOF_UNP_NRV2B_32)
+		return "nrv2b";
+	if (m >= KOF_UNP_NRV2D_8 && m <= KOF_UNP_NRV2D_32)
+		return "nrv2d";
+	if (m >= KOF_UNP_NRV2E_8 && m <= KOF_UNP_NRV2E_32)
+		return "nrv2e";
+	switch (m) {
+	case 0:                     return "";        /* nothing to undo */
+	case KOF_UNP_DEFLATE:       return "deflate";
+	case KOF_UNP_ZLIB:          return "zlib";
+	case KOF_UNP_ASCII85:       return "ascii85";
+	case KOF_UNP_ASCIIHEX:      return "asciihex";
+	case KOF_UNP_RUNLENGTH:     return "runlength";
+	case KOF_UNP_LZW:           return "lzw";
+	case KOF_UNP_OVBA:          return "ovba";
+	case KOF_UNP_LZMA2:         return "lzma2";
+	case KOF_UNP_LZMA2_BCJ_X86: return "lzma2+bcj";
+	case KOF_UNP_HEXTEXT:       return "hex";
+	case KOF_UNP_RAR3:          return "rar3";
+	case KOF_UNP_RAR5:          return "rar5";
+	case KOF_UNP_BCJ2:          return "bcj2";
+	default:                    return "?";
+	}
+}
+
+static inline const char *kof_entry_kind_name(uint32_t kind)
+{
+	switch (kind) {
+	case KOF_ENT_UNKNOWN:   return "UNKNOWN";
+	case KOF_ENT_CONTENT:   return "CONTENT";
+	case KOF_ENT_SCRIPT:    return "SCRIPT";
+	case KOF_ENT_METADATA:  return "METADATA";
+	case KOF_ENT_IMAGE:     return "IMAGE";
+	case KOF_ENT_FONT:      return "FONT";
+	case KOF_ENT_EMBEDDED:  return "EMBEDDED";
+	case KOF_ENT_STRUCTURE: return "STRUCTURE";
+	default:                return "?";
+	}
+}
+/*
+ * The bytes are not one range: ask resolve_entry with this entry's `index`.
+ *
+ * A FLAG AND NOT A ZERO LENGTH, which is how this was first written. An
+ * in-band sentinel is the shape hostile input abuses - a declared length of
+ * zero then means two different things and the reader has to guess which. A
+ * compound file stream is a chain rather than a range, and over 1322 streams
+ * in real documents 23.6% are not consecutive, so this is the ordinary case
+ * for a whole format and not an edge.
+ */
+#define KOF_ENT_F_SCATTERED  (1u << 0)
+
+/*
+ * THE CODING CHAIN IS INCOMPLETE: something the container declared is not in
+ * `coding`, so running `coding` does NOT arrive at the original bytes.
+ *
+ * Two shapes of the same thing, and the flag covers both. The chain can be
+ * EMPTY because the first coding was inexpressible - and an empty chain
+ * otherwise means stored, which is the opposite of the truth. Or it can be
+ * PARTIAL: every method in it is real and there was one more step the parser
+ * could not name, so running it produces bytes that are neither the coded
+ * form nor the original.
+ *
+ * enum kof_unp_method has no value for "a coding that exists and which I
+ * cannot perform", and it should not have one: every value in it names a
+ * decoder that is present. So the absence has to be said some other way, and
+ * without a way to say it the absence is indistinguishable from stored.
+ *
+ * That is not a cosmetic difference. /Filter [/ASCII85Decode /FlateDecode]
+ * reduces to no expressible chain, an empty chain reads as stored, and the
+ * host would then window raw ASCII85 AS THOUGH IT WERE THE ORIGINAL BYTES -
+ * a rule written against the decoded content matches nothing, and one written
+ * against a fixed prefix matches the wrong thing. Reporting the range as
+ * present-but-unopenable is the difference between a known gap and a silent
+ * wrong answer.
+ *
+ * Set by the parser when it read the container's declared coding and could
+ * not express all of it. THE HOST MUST CHECK IT BEFORE IT CHECKS `coding`,
+ * because a partial chain looks perfectly runnable, and report
+ * KOF_UNP_UNSUPPORTED - the honest answer: a coding this build lacks is a gap
+ * a later build closes, and it is not the same thing as damage.
+ */
+#define KOF_ENT_F_CODED_UNKNOWN  (1u << 1)
+
+struct kof_entry {
+	/*
+	 * Where the bytes are, when they are one range. Meaningless when
+	 * KOF_ENT_F_SCATTERED is set, and the host must not read it then.
+	 */
+	uint64_t off, len;
+
+	/* The name, as a range in THIS object and never as a string, for the
+	 * reason name_next gives: the name is already in the file, and a parser
+	 * has nowhere to build one. Zero length when nothing named it. */
+	uint64_t name_off, name_len;
+
+	/* What the decoded bytes should come to, when the container declares it.
+	 * Zero when it does not. A hint and never a bound - the host's ceiling
+	 * is what bounds, and this must never be an allocation size. */
+	uint64_t out_hint;
+
+	/*
+	 * THE FORMAT'S OWN INDEX FOR THIS ENTRY, which is not its position in
+	 * this array.
+	 *
+	 * resolve_entry takes the format's index, and a parser may build this
+	 * table as a PROJECTION of something else - PDF does, from its object
+	 * table, where only the rows that carry a stream become entries. So the
+	 * two numbers differ, and assuming they are the same reads the wrong
+	 * entry's ranges. That is a correctness bug and not a tidiness point.
+	 */
+	uint32_t index;
+
+	uint32_t kind;        /* enum kof_entry_kind */
+	uint32_t flags;       /* KOF_ENT_F_* */
+
+	/*
+	 * HOW TO GET BACK TO THE ORIGINAL BYTES, IN ORDER.
+	 *
+	 * A CHAIN and not one method, because containers have chains: PDF
+	 * writes /Filter [/ASCII85Decode /FlateDecode] and the two are applied
+	 * in that order. Held as a single value, a parser had to name one of
+	 * them and the order was lost - PDF stored a BITMASK, said so in its
+	 * own header, and the decompressor then guessed. Measured: on 1 of 3
+	 * real documents that guess fails twice, reaches
+	 * kof_unp_broken(KOF_UNP_UNSUPPORTED), and a clean file is reported as
+	 * one the engine could not finish.
+	 *
+	 * Applied [0] first. A zero terminates - and a FULL array has no
+	 * terminator, so a host reads at most four whatever it finds in [3].
+	 *
+	 * Four, because no real chain is longer and a bound is what stops a
+	 * hostile one multiplying. A chain that needed a fifth is reported
+	 * through KOF_ENT_F_CODED_UNKNOWN and not quietly cut to four, which
+	 * is what happened while the bound sat in the loop condition instead.
+	 *
+	 * All zero means STORED - the bytes are already what they are - but
+	 * ONLY when KOF_ENT_F_CODED_UNKNOWN is clear. Set, it means the
+	 * container declared a coding that this build cannot express, and the
+	 * bytes must not be handed on as if they were the original.
+	 *
+	 * The host stops at the first method it does not know and reports
+	 * KOF_UNP_UNSUPPORTED, which is the honest answer: a coding this build
+	 * lacks is a gap a later build closes. It must never carry on with the
+	 * rest of the chain, since every step after a missed one decodes
+	 * refuse.
+	 */
+	/*
+	 * uint16_t AND NOT uint8_t, which is what this was.
+	 *
+	 * A method id does not fit in a byte. KOF_UNP_LZMA is 64 and CARRIES
+	 * ITS PARAMETERS IN THE ID - lc + 9*lp + 45*pb, 0..224 above the base -
+	 * so the ids run to 288, and KOF_UNP_LZMA_PROPS builds one as a
+	 * uint32_t for that reason. Stored in a byte, LZMA(8,4,4) truncates to
+	 * 32, which is not an invalid value that something would catch: it is
+	 * KOF_UNP_NRV2E_32, a real decoder, and the entry would then name a
+	 * coding the container never declared. Exactly the class of silent
+	 * wrong answer KOF_ENT_F_CODED_UNKNOWN exists to prevent, arriving
+	 * through the width of the field instead.
+	 *
+	 * No parser fills an LZMA chain yet - PDF has no LZMA - so this is
+	 * fixed while it costs four bytes and nothing else. A 7z or xz entry
+	 * table is where it would have been found the hard way.
+	 */
+	uint16_t coding[4];   /* enum kof_unp_method each, [0] applied first */
+
+	/*
+	 * The format the parser is WILLING TO DECLARE about the decoded bytes,
+	 * or KOF_FMT_UNKNOWN when it will not.
+	 *
+	 * A claim and not a guess. A PDF knows a content stream is a content
+	 * stream because /Contents said so, and it does NOT know what is inside
+	 * an /EmbeddedFile - so it declares the first and leaves the second to
+	 * the sniff chain, which is what the sniff chain is for. Declaring
+	 * wrongly is worse than declaring nothing: the parse named by it runs
+	 * instead of the one the bytes deserve.
+	 */
+	uint8_t  format;
+	uint8_t  reserved[3];  /* to 64 bytes; the assert below is the check */
+};
+
+/*
+ * 64 bytes, and it is not tidiness: a format's view holds an ARRAY of these -
+ * PDF's is 1024 long - so padding is multiplied by the entry count and paid on
+ * every parse. Widening coding from 8 to 16 bits fitted in the space the
+ * reserved bytes already held; the next field that does not will show up here
+ * rather than as 8KB more view per document.
+ */
+_Static_assert(sizeof(struct kof_entry) == 64, "entry record grew padding");
+
 struct kof_obj_ctx {
 	uint8_t  format;      /* enum kof_format */
 	uint8_t  arch;        /* enum kof_arch */
@@ -1174,6 +1741,63 @@ struct kof_obj_ctx {
 	 * touch it; it is here so the accessors can take the context rather than
 	 * reach for a global, which keeps them usable from more than one thread. */
 	const void *priv;
+
+	/*
+	 * WHAT THIS OBJECT CONTAINS, as the parse found it. See struct kof_entry.
+	 *
+	 * Sets *out to a table the PARSE owns - it lives in the view, so it is
+	 * valid as long as the view is - and returns how many entries are in it.
+	 * NULL for a format with no entries, which is most of them, and returning
+	 * zero is the same answer as not having the pointer.
+	 *
+	 * Read by the host to decide what to open, and by a tool to show what is
+	 * inside without opening anything. Those were two separate walks before,
+	 * and the viewer's own was built by scraping the scan's callback - which
+	 * is how one missing initialiser deleted the root object from its tree and
+	 * took every region row with it.
+	 */
+	uint32_t (*entries)(const struct kof_obj_ctx *ctx,
+			    const struct kof_entry **out);
+
+	/*
+	 * HOW THIS OBJECT'S CARRIED FILES ARE FOUND. See enum kof_embed_search.
+	 *
+	 * The other half of carried files, and it is a SEPARATE FIELD from the
+	 * mask below because it has three answers and a mask has only two.
+	 *
+	 * A PE or an ELF can hold a file that was read in at compile time -
+	 * //go:embed, an #included blob, a resource the linker placed in
+	 * .rodata - and NOTHING in the structure says so: the section table
+	 * says ".rodata, 2MB, read-only data", not that some range of it is a
+	 * ZIP. A parser cannot declare that without guessing, and guessing is
+	 * the one thing it must not do. So the engine searches for magic and
+	 * validates a header, which is format independent and belongs in one
+	 * place.
+	 *
+	 * What is NOT format independent is where looking is worthwhile, and
+	 * that is all these two fields say.
+	 *
+	 * WHY NOT A MASK ALONE, which is how this was first written: the
+	 * comment then claimed zero meant BOTH "the whole object" and "the
+	 * opt-out", which cannot both be true. An object with NO PARSE AT ALL
+	 * carries a zeroed context - a raw buffer, an AMSI bytecode block,
+	 * anything the sniff chain declined - and that object is the single
+	 * most important one to search, since a raw dropper's payload is found
+	 * no other way. A PDF is the opposite: /EF already said where every
+	 * attachment is, and searching anyway is what made one document produce
+	 * the same attachment twice. Spelling both as zero makes one of them
+	 * wrong whichever way the default goes.
+	 */
+	uint8_t  embed_search;   /* enum kof_embed_search */
+	uint8_t  embed_pad[3];
+
+	/*
+	 * The regions to search, read ONLY when embed_search is
+	 * KOF_EMBED_SCOPED. Meaningless otherwise, and the engine does not look
+	 * at it - so a parser that sets a mask and forgets the policy gets
+	 * today's behaviour rather than a silent narrowing.
+	 */
+	uint32_t embed_scope;
 };
 
 /*
@@ -1644,6 +2268,67 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
  * ever opens a path built from one - see the note in objsrc.h on why the produced
  * objects have no filename at all.
  */
+/*
+ * Declare what the next child is, when the structure said.
+ *
+ *     kof_child_format(KOF_FMT_SCRIPT);
+ *     kof_child_window(off, len);
+ *
+ * See child_format for when a module may say this and when it must not.
+ */
+/*
+ * Decode an entry's whole coding chain into a child.
+ *
+ *     kof_unpack_chain(e->index)
+ *
+ * For a container that has an entry table: the chain, its order and its
+ * bounds are all the host's, and what the module supplies is which entry.
+ */
+/*
+ * Would anything look inside a child of this format - ask before decoding.
+ *
+ *     if (!kof_fmt_wanted(KOF_FMT_FONT))
+ *             continue;               // nothing targets fonts
+ *
+ * See fmt_wanted for why this is the module's decision and not the engine's,
+ * and why a yes for KOF_FMT_UNKNOWN is not a loophole. Answers 1 when the host
+ * offers no opinion, so a producer that asks is never worse off than one that
+ * does not.
+ */
+#define kof_fmt_wanted(fmt)                                                \
+	((ctx)->content->fmt_wanted ?                                      \
+	 (ctx)->content->fmt_wanted((ctx), (uint8_t)(fmt)) : 1)
+
+#define kof_unpack_chain(index)                                            \
+	((ctx)->content->unpack_chain ?                                    \
+	 (ctx)->content->unpack_chain((ctx), (uint32_t)(index)) : 0u)
+
+/*
+ * Declare what the next child is FOR.
+ *
+ *     kof_child_kind(KOF_ENT_CONTENT);
+ *     kof_child_window(off, len);
+ *
+ * Also names it, when name_next found nothing to name it with.
+ */
+/*
+ * Declare which entry the next child is the content of.
+ *
+ *     kof_child_entry(e->index);
+ *     kof_unpack_chain(e->index);
+ */
+#define kof_child_entry(index)                                             \
+	((void)((ctx)->content->child_entry ?                               \
+		((ctx)->content->child_entry((ctx), (uint32_t)(index)), 0) : 0))
+
+#define kof_child_kind(kind)                                               \
+	((void)((ctx)->content->child_kind ?                                \
+		((ctx)->content->child_kind((ctx), (uint32_t)(kind)), 0) : 0))
+
+#define kof_child_format(fmt)                                              \
+	((void)((ctx)->content->child_format ?                              \
+		((ctx)->content->child_format((ctx), (uint8_t)(fmt)), 0) : 0))
+
 #define kof_name_next(off, len)                                            \
 	((void)((ctx)->content->name_next ?                                \
 		((ctx)->content->name_next((ctx), (uint64_t)(off),         \

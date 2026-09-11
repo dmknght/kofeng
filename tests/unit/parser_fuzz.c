@@ -35,6 +35,7 @@
 #include <kofmod/gzip.h>
 
 #include "partition_check.h"
+#include "entry_check.h"
 #include "../../libkofeng/kofparsers/binaries/elf_parse.h"
 #include "../../libkofeng/kofparsers/binaries/pe_parse.h"
 #include "../../libkofeng/kofparsers/containers/gzip_parse.h"
@@ -1127,6 +1128,7 @@ int main(int argc, char **argv)
 	static uint64_t parsed[N_FMT];
 	static uint64_t anom[N_FMT];
 	struct pc_report rep = { 0, 0, 0, 0 };
+	struct ec_report erep = { 0, 0, 0, 0, 0 };
 	uint64_t rounds = ROUNDS, seed = 20240101u, r;
 	size_t big = 0;
 	uint32_t k;
@@ -1174,6 +1176,13 @@ int main(int argc, char **argv)
 			parsed[f - fmts]++;
 			anom[f - fmts] |= f->p->anomalies(view);
 			pc_check(what, &ctx, n, f->p->regions, f->p->n_regions, &rep);
+			/*
+			 * The same ctx, in the same round. An entry table is
+			 * derived from the same mutated bytes the regions are,
+			 * and the mutation that breaks one is rarely the one
+			 * that breaks the other.
+			 */
+			ec_check(what, &ctx, n, &erep);
 		}
 
 		/*
@@ -1231,6 +1240,14 @@ int main(int argc, char **argv)
 	printf(", partition %llu/%llu", 
 	       (unsigned long long)(rep.checked - rep.failed),
 	       (unsigned long long)rep.checked);
+	/* The entry count is objects-with-a-table and not rounds: most formats
+	 * publish no table yet, so a bare pass count would look like a fraction
+	 * of the run had gone unchecked. The row count says how much was
+	 * actually looked at. */
+	printf(", entries %llu/%llu over %llu row(s)",
+	       (unsigned long long)(erep.checked - erep.failed),
+	       (unsigned long long)erep.checked,
+	       (unsigned long long)erep.entries);
 	if (rep.capped)
 		printf(" (+%llu past the extent cap, not checked)",
 		       (unsigned long long)rep.capped);
@@ -1265,5 +1282,5 @@ int main(int argc, char **argv)
 		if (!first)
 			printf("\n");
 	}
-	return rep.failed != 0;
+	return (rep.failed || erep.failed) != 0;
 }

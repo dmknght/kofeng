@@ -1134,6 +1134,27 @@ struct kof_engine *kof_db_load(const char *path)
 		 * before these existed.
 		 */
 		e->multi = kof_multimatch_build(e);
+
+		/*
+		 * And what this database has business with - see any_target.
+		 *
+		 * Here rather than as each pack is walked, because it is the
+		 * union over what was LOADED: a pack that failed to map
+		 * contributes no modules and must contribute no targets
+		 * either, or the engine would open children for rules it does
+		 * not have.
+		 */
+		{
+			uint32_t j;
+
+			e->any_target = 0;
+			for (j = 0; j < e->n_mods; j++)
+				e->any_target |= e->mods[j].target_mask;
+			for (j = 0; j < e->n_unp; j++)
+				e->any_target |= e->unp[j].target_mask;
+			for (j = 0; j < e->n_heur; j++)
+				e->any_target |= e->heur[j].target_mask;
+		}
 	}
 out:
 	if (mp) {

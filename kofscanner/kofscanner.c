@@ -534,12 +534,21 @@ static void usage(const char *argv0)
 		"  --db            module database: a directory of them, or one blob\n"
 		"  --scan-files    file to scan, or directory to scan recursively\n"
 		"  --max-depth N   directory depth limit\n"
+		"  --object-depth N  how deep to descend INSIDE a file: an\n"
+		"                  archive's entries, a dropper's payload. 0 is\n"
+		"                  a built-in allowance that falls with size\n"
 		"  --follow-links  follow symbolic links (off by default: a link into\n"
 		"                  an ancestor turns a walk into a loop)\n"
 		"  --all-matches   keep scanning an object after the first finding\n"
 		"  --heur N        1 (default) scores what the format parse found\n"
 		"                  wrong with the object and what the unpackers made\n"
-		"                  of it; 0 gathers and scores nothing. Neither costs\n"
+		"                  of it, and DESCENDS INTO a file - an archive's\n"
+		"                  entries, an attachment, a dropper's payload.\n"
+		"                  0 gathers nothing, scores nothing and descends\n"
+		"                  into nothing: what is inside is still reported,\n"
+		"                  because a container says what it holds without\n"
+		"                  being opened, and those bytes are still searched\n"
+		"                  as regions of the file they are in. Neither costs\n"
 		"                  an extra pass. 2 additionally RUNS an object that\n"
 		"                  no unpacker could open and that looks packed or\n"
 		"                  damaged, and scans what it writes - which is the\n"
@@ -664,6 +673,9 @@ int main(int argc, char **argv)
 			target = argv[++i];
 		else if (strcmp(argv[i], "--max-depth") == 0 && i + 1 < argc)
 			opt.max_depth = (uint32_t)strtoul(argv[++i], NULL, 10);
+		else if (strcmp(argv[i], "--object-depth") == 0 && i + 1 < argc)
+			opt.max_object_depth =
+				(uint32_t)strtoul(argv[++i], NULL, 10);
 		else if (strcmp(argv[i], "--follow-links") == 0)
 			opt.follow_symlinks = 1;
 		else if (strcmp(argv[i], "--all-matches") == 0)

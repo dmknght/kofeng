@@ -114,7 +114,9 @@ KOF_DEFINE_UNPACK
 {
 	const struct kof_pdf_info *p = kof_pdf(ctx);
 	uint32_t i, opened = 0, windowed = 0, unsupported = 0, failed = 0;
-	uint32_t images = 0;
+	uint32_t carried = 0, in_region = 0, images = 0, unwanted = 0;
+	/* Where the entry walk got to - see the note beside kof_name_next. */
+	uint32_t ent = 0;
 	int encrypted;
 
 	if (!p->valid || !p->n_objects)
@@ -157,6 +159,129 @@ KOF_DEFINE_UNPACK
 			continue;
 
 		/*
+		 * AND NOTHING IS OPENED THAT NOTHING WOULD LOOK AT.
+		 *
+		 * THE DATABASE DECIDES THIS, NOT THIS MODULE. kof_fmt_wanted
+		 * asks the host whether any loaded rule targets the format
+		 * this child would be declared as - the same gate that decides
+		 * who is offered the child once it exists, asked before the
+		 * inflate rather than after it. A stream whose decoded form no
+		 * rule can be offered is a stream this module would decompress
+		 * in order to hand it to nobody.
+		 *
+		 * WHAT IT REPLACED, and this is the reason it is worth having:
+		 * the test below used to be `o->cat == KOF_PDF_CAT_IMAGE`,
+		 * written here, with the measurements that justified it in the
+		 * comment. Two things were wrong with that. It could not be
+		 * turned back on - a rule written about malicious image codecs
+		 * would have had no way to reach the bytes, because the skip
+		 * lived in a module nobody editing signatures would think to
+		 * look at. And it could not be turned off for ONE document -
+		 * the case that matters, where the object table has just
+		 * matched /Launch and the pictures are suddenly worth opening.
+		 * Both are answers the host has and a module does not.
+		 *
+		 * The category is still the parse's, from the object's own
+		 * dictionary - see enum kof_pdf_cat - and the mapping from it
+		 * to a format is shared with the parse rather than written
+		 * twice; see kof_pdf_entry_format.
+		 *
+		 * KOF_FMT_UNKNOWN is always wanted, so every stream the
+		 * dictionary said nothing about is still opened. This skips
+		 * what a document DECLARED to be pixels or a typeface, and
+		 * nothing else.
+		 */
+		if (!kof_fmt_wanted(kof_pdf_entry_format(o->cat))) {
+			unwanted++;
+			continue;
+		}
+
+		/*
+		 * PIXELS ARE NOT OPENED, WHATEVER THEY ARE CODED WITH.
+		 *
+		 * This module already declined the image CODINGS - DCT, JPX,
+		 * CCITT, JBIG2 - and the note above says why: a build that grew
+		 * a JPEG decoder would be decoding pictures rather than finding
+		 * malware. That was never a judgement though, it was a
+		 * capability: those codings could not be undone here anyway.
+		 *
+		 * A Flate coded image could be, and was, and it is the same
+		 * picture at the end of it. Measured on one 1.66MB document: 15
+		 * of its 46 decodable streams were images, 950KB of the 1.26MB
+		 * fed to the decoder, and most of the 23.7MB that came out - a
+		 * fourteenfold expansion whose entire product is raw samples.
+		 * Every one of them became an object nothing could identify, so
+		 * a reader opening that file got fifteen rows of "Raw" between
+		 * the rows that meant something, and a scan spent its budget
+		 * decompressing them to search bytes that answer nothing.
+		 *
+		 * WHAT THIS GIVES UP, stated rather than glossed: a payload
+		 * stored in a stream that declares /Subtype /Image and deflates
+		 * is no longer decompressed, so a rule cannot match its decoded
+		 * form. What remains is that the bytes are still in the file and
+		 * still in a region - KOF_SCAN_PDF_RESOURCE_IMAGE names exactly
+		 * them - so a rule that wants to look at compressed pixel data
+		 * can, and the geometry a real image declares is in the view for
+		 * a heuristic that wants to ask whether the size makes sense.
+		 *
+		 * THE TEST THIS PARAGRAPH DESCRIBED IS GONE, and the paragraph
+		 * is kept because the measurements in it are why the answer
+		 * above comes out the way it does on an ordinary document. A
+		 * declared image now reaches kof_fmt_wanted as KOF_FMT_IMAGE,
+		 * which no shipped rule targets, so it is skipped - by the
+		 * database rather than by this line. What the codings below
+		 * still decline is a capability and not a policy: DCT, JPX,
+		 * CCITT and JBIG2 cannot be undone here at all.
+		 */
+
+		/*
+		 * AN ATTACHMENT IS A FILE, NOT A STREAM THIS MODULE DECODES.
+		 *
+		 * The division this module lives on: a decompressor answers
+		 * "what were these bytes before they were coded", and there is
+		 * nothing to answer for an /EmbeddedFile stored with no filter -
+		 * the bytes are already the file. Offering it anyway produced it
+		 * TWICE, because the host opens declared carried files from the
+		 * entry table as the last step of processing an object, and does
+		 * it generically for every format rather than once per module.
+		 * Measured on a document carrying one PE: two identical 729600
+		 * byte children, each parsed and scanned in full.
+		 *
+		 * A COMPRESSED attachment is different and is NOT skipped here:
+		 * undoing its filter is exactly this module's job, and what the
+		 * host would window is the coded form. The category test is
+		 * therefore paired with the filter test below rather than
+		 * replacing it.
+		 */
+		if (o->cat == KOF_PDF_CAT_EMBEDDED && !o->filters) {
+			carried++;
+			continue;
+		}
+
+		/*
+		 * A STORED METADATA STREAM IS ALREADY IN A REGION, BYTE FOR
+		 * BYTE, SO A CHILD OF IT IS THE SAME SEARCH TWICE.
+		 *
+		 * Measured: the metadata region and the metadata child dumped
+		 * to disk and compared - not one byte different. Unfiltered
+		 * means the child is a WINDOW, so it is not a copy of those
+		 * bytes, it IS those bytes seen through another offset. A rule
+		 * scoped to the metadata region already reaches them; making a
+		 * child adds an object, a parse, a full module pass and a row
+		 * in every listing, and finds exactly what the region pass
+		 * finds.
+		 *
+		 * ONLY WHEN STORED. A compressed metadata stream is a different
+		 * case entirely - the region holds the CODED bytes, so nothing
+		 * has seen the XMP at all until this module inflates it, and
+		 * that child is the only way those bytes are ever searched.
+		 */
+		if (o->cat == KOF_PDF_CAT_METADATA && !o->filters) {
+			in_region++;
+			continue;
+		}
+
+		/*
 		 * WHAT THIS CHILD IS, SAID BEFORE IT IS HANDED OVER.
 		 *
 		 * Every other container module in this tree names its children
@@ -173,12 +298,93 @@ KOF_DEFINE_UNPACK
 		 * already contains and not a string invented here. A module has
 		 * nothing to build a string in anyway.
 		 *
-		 * Guarded on cat_len, because a stream that no dictionary
-		 * described has no name in the file to give; the child is still
+		 * A stream that no dictionary described has no name in the file
+		 * to give, and passes an empty range - the child is still
 		 * produced, it just carries the index it always did.
+		 *
+		 * UNCONDITIONAL, AND THE GUARD THAT WAS HERE WAS THE BUG.
+		 *
+		 * kof_name_next names the NEXT child, and the host clears the
+		 * pending name on every call before it looks at the range - so
+		 * an empty one is how a caller says "no name". Written as
+		 * `if (o->cat_len) kof_name_next(...)`, an object with no
+		 * category never cleared, and the name left pending by an
+		 * earlier object attached to ITS child instead. Two ways to
+		 * arrive there and both happen in an ordinary document: an
+		 * image coding this build does not undo is counted and emits
+		 * nothing, and a decode that came back empty emits nothing
+		 * either. Both had set a name.
+		 *
+		 * What that looked like: a page's content stream reported as
+		 * "Image" because a JPEG two objects earlier had claimed the
+		 * name and never spent it, and every row after it off by one.
+		 * Measured on one document, 4 of 12 rows were wrong - and every
+		 * one of them looked plausible, which is why the count of
+		 * categories had to be compared against the names to see it.
 		 */
-		if (o->cat_len)
+		/*
+		 * THE ENTRY'S NAME, NOT THE OBJECT'S /Type.
+		 *
+		 * cat_off is this object's own /Type or /Subtype, and for a
+		 * stream that is usually nothing: a /FontFile carries no type
+		 * of its own. The PARSE already worked out something better and
+		 * put it on the entry - a font's typeface from the descriptor
+		 * that references it, a script's trigger from the key that
+		 * reached it - and reading it here is what puts that on the
+		 * child rather than leaving it on a row.
+		 *
+		 * IT MATTERS BECAUSE THE ROW IT WAS ON IS GONE. A host that
+		 * shows one row per stream drops the entry row when the
+		 * content is present - two rows for one thing, and the first of
+		 * them opening onto coded bytes - so a name that lives only on
+		 * the entry is a name nobody sees. Measured: five font streams
+		 * whose typefaces the parse had read came out labelled "FONT".
+		 *
+		 * A CURSOR AND NOT A SEARCH. The entry table is a projection of
+		 * the object table and both are walked in the same order, so
+		 * the row for object `i` is at or after where the last one was.
+		 * Searching from the start for each object would be a thousand
+		 * comparisons per stream on a document that has a thousand.
+		 */
+		while (ent < p->n_entries && p->entry[ent].index < i)
+			ent++;
+		if (ent < p->n_entries && p->entry[ent].index == i &&
+		    p->entry[ent].name_len)
+			kof_name_next(p->entry[ent].name_off,
+				      p->entry[ent].name_len);
+		else
 			kof_name_next(o->cat_off, o->cat_len);
+		/*
+		 * AND WHAT IT IS, from the one mapping both this module and the
+		 * parse read - see kof_pdf_entry_format in kofmod/pdf.h.
+		 *
+		 * Beside the name and for the same reason: a child that arrives
+		 * unnamed is offered only to the modules that target unknown,
+		 * and measured that was every rule refused at the target test
+		 * and none run. A page content stream IS text and a /JS stream
+		 * IS script; saying so is what makes producing them worth the
+		 * inflation.
+		 *
+		 * Unconditional, like kof_name_next above and for the identical
+		 * reason: the call CLEARS a previous claim, so skipping it on a
+		 * category with nothing to say would leave the last one
+		 * standing and the next child would wear it.
+		 */
+		kof_child_format(kof_pdf_entry_format(o->cat));
+		/*
+		 * And what it is for. This is what stops a column of identical
+		 * unnamed rows: a page stream and a font program are not called
+		 * anything in a PDF, so name_next above has nothing to point
+		 * at, and 12 of 14 recovered objects arrived blank.
+		 */
+		kof_child_kind(kof_pdf_entry_kind(o->cat));
+		/*
+		 * And which entry this is the content of. The entry table is a
+		 * projection of the object table, and kof_entry.index holds the
+		 * OBJECT index - which is `i` here, so the two agree by
+		 * construction rather than by a lookup.
+		 */
+		kof_child_entry(i);
 
 		/*
 		 * No filter at all: the bytes are already what they are, so the
@@ -188,6 +394,40 @@ KOF_DEFINE_UNPACK
 			if (!kof_child_window(o->stream_off, o->stream_len))
 				break;
 			windowed++;
+			continue;
+		}
+
+		/*
+		 * THE WHOLE CHAIN, IN ORDER, AND THE HOST RUNS IT.
+		 *
+		 * o->filters is a BITMASK - it cannot carry order - and that is
+		 * the bug this replaces: handed the Flate bit for
+		 * /Filter [/ASCII85Decode /FlateDecode], the decoder inflated
+		 * ASCII85 text, failed, and a clean document was reported as
+		 * one the engine could not finish. The entry table has the
+		 * chain in the order the file wrote it, and kof_unpack_chain
+		 * runs it - which this module could not do itself, because a
+		 * chain needs a buffer between its steps and a module has no
+		 * writable memory.
+		 *
+		 * Asked FIRST, so the single-filter case goes the same way as
+		 * the chain: one path, exercised by every coded stream, rather
+		 * than a common path and a rare one that only malformed input
+		 * reaches. The index is the object's own, which is what
+		 * kof_entry.index holds.
+		 *
+		 * A chain the host refuses reports through it - UNSUPPORTED for
+		 * a coding this build lacks, DAMAGED for data that is not what
+		 * it claims - so nothing here has to decide which.
+		 */
+		if (o->filters) {
+			if (kof_unpack_chain(i)) {
+				if (!kof_child())
+					break;
+				opened++;
+				continue;
+			}
+			failed++;
 			continue;
 		}
 
@@ -231,6 +471,16 @@ KOF_DEFINE_UNPACK
 	kof_debug("Pdf.windowed", windowed);
 	kof_debug("Pdf.failed", failed);
 	kof_debug("Pdf.images", images);
+	/* Streams whose decoded form no loaded rule could be offered - see the
+	 * note on kof_fmt_wanted in the loop. Reported because "not opened"
+	 * and "not there" must never look the same to a reader. */
+	kof_debug("Pdf.unwanted", unwanted);
+	/* Left to the host's declared-entry step rather than dropped, which is
+	 * why it is counted here and not silently skipped. */
+	kof_debug("Pdf.carried", carried);
+	/* Left in their region rather than duplicated as children. Counted for
+	 * the same reason carried is: skipped is not the same as absent. */
+	kof_debug("Pdf.in_region", in_region);
 	kof_debug("Pdf.unsupported", unsupported);
 
 	/* Encryption is already reported above, before anything could overwrite

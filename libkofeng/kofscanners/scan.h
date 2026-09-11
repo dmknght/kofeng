@@ -31,6 +31,8 @@
 #include "../kofparsers/containers/pdf_parse.h"
 #include "objsrc.h"
 #include "../kofdecomp/inflate.h"
+#include "../kofdecomp/textcode.h"
+#include "../kofdecomp/lzw.h"
 #include "../kofdecomp/nrv2.h"
 #include "../kofdecomp/lzma.h"
 
@@ -169,6 +171,17 @@ struct kof_scanner {
 	 * strlen turned "ThisDocument" into "T".
 	 */
 	uint32_t pend_label_len;
+	/*
+	 * And what the next child IS, declared by whatever is about to produce
+	 * it. Consumed by kid_push exactly as the label is, and for the same
+	 * reason: a claim that outlived its child would be attached to the next
+	 * one, which is the one way this could name the wrong object.
+	 */
+	uint8_t  pend_fmt;
+	/* And what it is for, which is also its name when nothing named it. */
+	uint32_t pend_kind;
+	/* And which entry it is the content of, or KOF_ENTRY_NONE. */
+	uint32_t pend_entry;
 
 	/* The object being emitted, before it becomes a child. Heap while it is
 	 * small, an unnamed temporary file once it is not - see objsrc.h. */
@@ -210,6 +223,10 @@ struct kof_scanner {
 	 * window, which is what keeps one entry's bytes out of the next.
 	 */
 	struct kof_inflate *inf;
+	/* 20KB of dictionary, allocated on the first LZW stream and reused for
+	 * the rest - the same treatment `inf` gets, and for the same reason:
+	 * most scans never meet one. */
+	struct kof_lzw     *lzw;
 
 	/*
 	 * Where notes go, when anybody wants them.
@@ -236,6 +253,21 @@ struct kof_scanner {
 	 * point continuing. Damage is worth reporting and worth carrying on from.
 	 */
 	uint32_t stop;
+
+	/*
+	 * A RULE ASKED FOR EVERYTHING THIS OBJECT CARRIES TO BE OPENED.
+	 *
+	 * KOF_ENG_OPEN_CARRIED, read off the findings of the object about to be
+	 * opened - see the bit in kofmod/heur.h and fmt_wanted in kofmod/kofsig.h.
+	 *
+	 * PER OBJECT, and set from unpack_object's own `want` parameter rather
+	 * than accumulated: the value comes from the EXAMINE pass of this
+	 * object, so there is no path by which one document's evidence raises
+	 * the next document's policy. Set in the same block that clears `stop`
+	 * and for the same reason - before any early return, so a refusal
+	 * cannot leave the previous object's answer standing.
+	 */
+	int      raise_carried;
 
 	/*
 	 * THE OBJECT'S SYMBOL RECORDS, built at most once per object.
@@ -363,18 +395,6 @@ void kof_mod_unpack_mode(struct kof_obj_ctx *, int on);
  */
 uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force);
 
-/*
- * WHOLE EXECUTABLES CARRIED INSIDE THIS OBJECT, offered as children.
- *
- * Not an unpacker: nothing is compressed and nothing is decoded. A dropper that
- * appends its payload, or lays one out per architecture inside its own code
- * segment, leaves a complete file sitting at an offset - and until it is handed
- * over as an object, no collector parses it and no signature can name it.
- *
- * Returns how many were produced. See embedded.h for why the header test is
- * strict and what it measured.
- */
-uint32_t kof_scan_embedded(const struct kof_obj_ctx *ctx);
 
 /* Turn a named range into extents. objctx.c needs it; the parse is what knows. */
 uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *, uint32_t scan_mask,

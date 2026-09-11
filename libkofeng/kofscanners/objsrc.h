@@ -82,6 +82,37 @@ void kof_src_label(struct kof_objsrc *, const uint8_t *p, uint64_t len);
 /* The label, or "" when the source has none. Never NULL. */
 const char *kof_src_label_of(const struct kof_objsrc *);
 
+/*
+ * THE FORMAT WHATEVER PRODUCED THIS CHILD WAS WILLING TO DECLARE, or
+ * KOF_FMT_UNKNOWN.
+ *
+ * Beside the label and for the same reason: both are things only the producer
+ * knows, and both have to survive the gap between producing a child and
+ * scanning it - which is a queue, so they cannot be passed as arguments.
+ *
+ * A CLAIM AND NOT A GUESS. A container knows a stream is page content because
+ * its own structure said so; it does NOT know what is inside an attachment, so
+ * it declares nothing there and the sniff chain decides. Declaring wrongly is
+ * worse than declaring nothing - the parse named by it runs instead of the one
+ * the bytes deserve - which is why this is only ever set from something the
+ * format actually stated.
+ */
+void    kof_src_declare_fmt(struct kof_objsrc *, uint8_t fmt);
+uint8_t kof_src_fmt_of(const struct kof_objsrc *);
+
+/* Which entry of its parent this source is the content of, or
+ * KOF_ENTRY_NONE. Here for the reason the label and the format are: producing
+ * a child and scanning it are separated by a queue, so what the producer knew
+ * has to travel with the bytes. */
+void     kof_src_declare_entry(struct kof_objsrc *, uint32_t index);
+uint32_t kof_src_entry_of(const struct kof_objsrc *);
+
+/* And what the producer said it is - enum kof_entry_kind, or
+ * KOF_ENT_UNKNOWN. Carried for the same reason: a queue separates producing a
+ * child from scanning it. */
+void     kof_src_declare_kind(struct kof_objsrc *, uint32_t kind);
+uint32_t kof_src_kind_of(const struct kof_objsrc *);
+
 struct kof_objsrc *kof_src_window(struct kof_objsrc *parent, uint64_t off,
 				  uint64_t len);
 

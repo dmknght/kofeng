@@ -395,21 +395,9 @@ static void put_off(const char *label, uint64_t v)
  * that is the same on every one is dropped here rather than kept in a second
  * table that could disagree with the first.
  */
-static const char *short_region(const char *name)
-{
-	const char *p = name;
-	int underscores = 0;
-
-	if (!name)
-		return "?";
-	/* KOF_SCAN_<FMT>_NAME: past the third underscore. */
-	while (*p && underscores < 3) {
-		if (*p == '_')
-			underscores++;
-		p++;
-	}
-	return underscores == 3 ? p : name;
-}
+/* Was short_region here. Moved to kofinspect.c so kofviewer shares it
+ * rather than keeping a second one that disagreed - see kofinspect.h. */
+#define short_region kof_region_label
 
 static void put_perm(uint32_t p)
 {
@@ -1890,6 +1878,23 @@ static void on_debug(uint32_t fact, const char *what, uint64_t value,
 	 * module said it. Same rule the scanner's result lines follow. */
 	if (g_debug)
 		printf("  %-24s %10llu\n", what, (unsigned long long)value);
+	/*
+	 * KNOWN DEFECT: `via` NAMES THE LAST MODULE THAT SAID ANYTHING, NOT THE
+	 * ONE THAT PRODUCED THE CHILD.
+	 *
+	 * It is inferred here from the prefix of a debug key, because that is
+	 * the only thing in this callback that carries a module's name. A
+	 * producer that emits no debug note at all - overlay.c emits none -
+	 * therefore leaves the previous module's prefix standing, and the child
+	 * is reported as having come out of whatever spoke last. Seen for real:
+	 * an overlay grandchild reported "via Pdf".
+	 *
+	 * Not fixable here. The producing module is known to the ENGINE and is
+	 * not in kof_result, so a tool can only guess at it; the fix is a field
+	 * on the result, set where the child is pushed. Until then this is a
+	 * hint and is worth keeping as one - it is right whenever the producer
+	 * says anything, which is most of them.
+	 */
 	if (u) {
 		const char *dot = strrchr(what, '.');
 		size_t n = dot ? (size_t)(dot - what) : strlen(what);
@@ -1925,10 +1930,28 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	 *
 	 * The number is what makes it unique and is the whole identity; the name is
 	 * there so a directory listing is readable, and it is the label the engine
-	 * already reduced to a bare basename of printable ASCII - so nothing here has
-	 * to decide what to do about a separator or a "..", because neither can have
-	 * survived. An entry called "../" arrives with no label at all and gets the
-	 * number by itself.
+	 * already reduced to a bare basename of printable ASCII.
+	 *
+	 * THE LAST COMPONENT'S LABEL, AND NOT THE FIRST COLON IN THE WHOLE PATH.
+	 *
+	 * A composed name is `parent//<i>:<label>` repeated once per layer, so a
+	 * GRANDCHILD's tail carries its parent's label AND the separator after it.
+	 * Read from the first colon, the tag became `3.EmbeddedFile//0` - a path
+	 * with a directory component in it - and the write then failed. It said so
+	 * rather than dropping the object quietly, which is the only reason this was
+	 * ever visible; but a reported failure is still a recovered object that did
+	 * not get written.
+	 *
+	 * It needed a NAMED PARENT to happen at all, which is why it survived: the
+	 * label comes from a container that names its entries, and until the host
+	 * began naming carried files from the entry table the layer above a
+	 * grandchild was usually anonymous. It was never PDF-specific - a zip entry
+	 * called "a.exe" that itself unpacks reaches the same line.
+	 *
+	 * So the separator IS decided about here, once, by walking to the last one.
+	 * What still cannot have survived is a ".." or a path separator INSIDE a
+	 * label - kof_src_label reduces those where the label is made - so an entry
+	 * called "../" arrives with no label and gets the number by itself.
 	 *
 	 * snprintf into a buffer sized from KOF_SRC_LABEL_MAX is what bounds it. A
 	 * name is attacker chosen and archives carry long ones; the label is capped
@@ -1936,7 +1959,11 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	 * the two caps protect different things and only one of them is here.
 	 */
 	{
-		const char *lab = strchr(tail, ':');
+		const char *last = tail, *p = tail, *lab;
+
+		while ((p = strstr(p + KOF_OBJ_SEP_LEN, KOF_OBJ_SEP)) != NULL)
+			last = p;
+		lab = strchr(last, ':');
 
 		if (lab)
 			snprintf(tag, sizeof tag, "%u.%s", u->produced, lab + 1);

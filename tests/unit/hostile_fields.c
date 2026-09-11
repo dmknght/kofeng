@@ -62,6 +62,7 @@
 #include "../../libkofeng/kofparsers/containers/pdf_parse.h"
 #include "../../libkofeng/kofparsers/containers/rtf_parse.h"
 #include "partition_check.h"
+#include "entry_check.h"
 
 
 
@@ -367,7 +368,8 @@ static void one_case(const struct target *tg, uint8_t *obj, void *view,
 		     const struct field *f, uint64_t v,
 		     const struct field *g, uint64_t gv,
 		     uint64_t seed_len,
-		     double base, struct tally *t, struct pc_report *rep)
+		     double base, struct tally *t, struct pc_report *rep,
+		     struct ec_report *erep)
 {
 	struct kof_obj_ctx ctx;
 	double t0, dt;
@@ -393,6 +395,7 @@ static void one_case(const struct target *tg, uint8_t *obj, void *view,
 			snprintf(what, sizeof what, "%s %s=0x%llx", tg->name,
 				 f->name, (unsigned long long)v);
 		pc_check(what, &ctx, seed_len, tg->p->regions, tg->p->n_regions, rep);
+		ec_check(what, &ctx, seed_len, erep);
 	}
 	dt = now_ms() - t0;
 	t->cases++;
@@ -464,6 +467,7 @@ int main(void)
 	uint32_t view_cap = 0, ti, fi, vi;
 	struct tally t;
 	struct pc_report rep = { 0, 0, 0, 0 };
+	struct ec_report erep = { 0, 0, 0, 0, 0 };
 
 	if (!obj)
 		return 1;
@@ -525,7 +529,7 @@ int main(void)
 			for (vi = 0; vi < HOSTILE_N; vi++)
 				one_case(tg, obj, view, &tg->fields[fi],
 					 hostile(vi, seed_len), NULL, 0,
-					 seed_len, base, &t, &rep);
+					 seed_len, base, &t, &rep, &erep);
 
 		/* Then every ordered pair of distinct fields. Ordered rather than
 		 * unordered because the two are written in sequence and a later
@@ -544,7 +548,7 @@ int main(void)
 							 &tg->fields[gi],
 							 hostile_pair(gv, seed_len),
 							 seed_len, base, &t,
-							 &rep);
+							 &rep, &erep);
 			}
 		}
 	}
@@ -554,21 +558,27 @@ int main(void)
 
 	if (t.worst_amp == 0.0)
 		printf("hostile fields: %llu case(s) over %u format(s), %llu "
-		       "parsed, partition %llu/%llu, no case above %.2f ms%s\n",
+		       "parsed, partition %llu/%llu, entries %llu/%llu, "
+		       "no case above %.2f ms%s\n",
 		       (unsigned long long)t.cases,
 		       (unsigned)(sizeof targets / sizeof targets[0]),
 		       (unsigned long long)t.parsed,
 		       (unsigned long long)(rep.checked - rep.failed),
-		       (unsigned long long)rep.checked, FLOOR_MS / 20.0,
+		       (unsigned long long)rep.checked,
+		       (unsigned long long)(erep.checked - erep.failed),
+		       (unsigned long long)erep.checked, FLOOR_MS / 20.0,
 		       (t.slow || t.over_alloc) ? " - FAILED" : "");
 	else
 	printf("hostile fields: %llu case(s) over %u format(s), %llu parsed, "
-	       "partition %llu/%llu, worst amplification %.0fx (%s %s)%s\n",
+	       "partition %llu/%llu, entries %llu/%llu, "
+	       "worst amplification %.0fx (%s %s)%s\n",
 	       (unsigned long long)t.cases,
 	       (unsigned)(sizeof targets / sizeof targets[0]),
 	       (unsigned long long)t.parsed,
 	       (unsigned long long)(rep.checked - rep.failed),
 	       (unsigned long long)rep.checked,
+	       (unsigned long long)(erep.checked - erep.failed),
+	       (unsigned long long)erep.checked,
 	       t.worst_amp, t.worst_where ? t.worst_where : "-",
 	       t.worst_field,
 	       (t.slow || t.over_alloc) ? " - FAILED" : "");
@@ -581,5 +591,5 @@ int main(void)
 			printf("    %6.0fx  %8.3f ms  %s\n", t.top[i].amp,
 			       t.top[i].ms, t.top[i].where);
 	}
-	return (rep.failed || t.slow || t.over_alloc) ? 1 : 0;
+	return (rep.failed || erep.failed || t.slow || t.over_alloc) ? 1 : 0;
 }

@@ -226,9 +226,23 @@ struct kv_menu {
 	/* Is this item in this menu at all - the context mask, the parent, the
 	 * "only while a draft is open" rules. A hidden item takes no row. */
 	int        (*shown)(void *ud, int i);
-	/* Choosable. A shown-but-not-enabled item takes a row and is drawn
-	 * grey: a menu that hides what it cannot do teaches nobody what it
-	 * could do, and an item that vanishes reads as a missing feature. */
+	/*
+	 * Choosable. A shown-but-not-enabled item takes a row and is drawn
+	 * grey.
+	 *
+	 * THE TWO ARE FOR DIFFERENT KINDS OF NO, and this note used to argue
+	 * for only one of them - that hiding teaches nobody what the tool can
+	 * do. True of a thing that is momentarily unavailable; false of a thing
+	 * that cannot apply. "Symbols" on a page description stream is not off
+	 * because something is in the way, it is off because the concept does
+	 * not reach that object - and a greyed row there is a permanent piece
+	 * of furniture the reader has to learn to ignore, on every object of
+	 * every document format.
+	 *
+	 * So: CANNOT APPLY is hidden, MOMENTARILY UNAVAILABLE is greyed. Save
+	 * with nothing edited is grey - it will work in a second. Symbols on a
+	 * PDF is gone - it never will.
+	 */
 	int        (*enabled)(void *ud, int i);
 	/* Draw a rule above this item. Where the caller keeps groups, this is
 	 * "the group changed"; where it keeps a flag, it is the flag. */
@@ -240,6 +254,49 @@ struct kv_menu {
 	int          w;                          /* column width, borders in */
 	const char  *c_on, *c_off, *c_cur;       /* usable, greyed, under cursor */
 };
+
+/* ---- what a FORMAT can be asked -------------------------------------------
+ *
+ * A menu item that is always choosable teaches the reader that it always
+ * applies, and then answers "nothing here" when it does not. "Symbols" on a
+ * PDF is not a thing that failed; it is a thing that was never possible, and
+ * the difference belongs on the screen BEFORE the click.
+ *
+ * So: DISABLED BY DEFAULT, enabled for the object under the cursor. Disabled
+ * and not hidden, for the reason kv_menu's own note gives - an item that
+ * vanishes reads as a missing feature.
+ *
+ * THIS ANSWERS THE FORMAT HALF ONLY, and that is deliberate. Whether an ELF
+ * HAS symbols is a fact about one file and belongs to whoever holds the parse;
+ * whether an ELF CAN have them is a fact about the format and belongs here,
+ * where one table serves the menu and the dashboard rather than each growing
+ * its own. A caller ANDs the two.
+ *
+ * It is keyed on the SELECTED OBJECT'S format and not the file's, so an
+ * attachment answers for itself: a PE carried inside a PDF is a PE, and the
+ * items that apply to executables apply to it.
+ */
+enum kv_cap {
+	/* An import or export table the format defines a place for. */
+	KV_CAP_SYMBOLS = 0,
+	/* Machine code, at somewhere the format names - so disassembling from
+	 * there means something rather than starting mid-instruction. */
+	KV_CAP_CODE,
+	/* Running or peeling it could yield another object. The emulator
+	 * interprets instructions, so this is the executable formats and the
+	 * formatless bytes that may be some - never a container, whose members
+	 * come out by being read rather than by being run. */
+	KV_CAP_UNPACK,
+	KV_CAP_COUNT
+};
+
+/* Non-zero if a format of this kind can be asked this at all. KOF_FMT_UNKNOWN
+ * answers YES to the code questions: bytes nothing claimed are exactly what a
+ * peeled payload looks like, and refusing there would turn the one case the
+ * emulator exists for into the one case it is not offered. A caller that knows
+ * MORE than the format - that the parse called these bytes a page description
+ * stream, say - is expected to say so itself. */
+int kv_cap(uint8_t format, int cap);
 
 /* Drawn rows, rules included - what the caller needs to place the box. */
 int  kv_menu_rows(const struct kv_menu *);

@@ -736,12 +736,30 @@ struct chooser {
  * are the engine's to set and not this tool's to raise.
  */
 #define MAX_OBJ  128
-#define MAX_TREE 512
+/*
+ * 512 WAS SIZED FOR A DIFFERENT POPULATION, and the population changed.
+ *
+ * It was objects plus a dozen region rows each, which 512 covered with room.
+ * The entry table is a row PER THING THE OBJECT HOLDS - a stream, a member, an
+ * attachment - and a document may publish a thousand of them, so the old
+ * number is now reachable by one ordinary file.
+ *
+ * Reaching it was also SILENT: tree_add returns when full, and the rows lost
+ * are whatever came last - which, because detail rows are added per object
+ * inside the walk, could be a LATER OBJECT'S OWN ROW. The object list itself
+ * would have gone short with nothing saying so. Raised so that does not happen
+ * on real input, and tree_build now spends the last slot saying when it does
+ * happen anyway.
+ *
+ * The cost is the array: a node is about 120 bytes, so this is half a megabyte
+ * in a tool that already asks the engine for a 32MB presence table.
+ */
+#define MAX_TREE 4096
 
 /*
- * Events per window. Under MAX_OBJ so the parent fits beside them, and under
- * MAX_TREE with room for the rows tree_build adds. Bigger buys nothing: a
- * screen shows tens of rows, and the window follows the selection.
+ * Events per window. Under MAX_OBJ so the parent fits beside them, and well
+ * under MAX_TREE. Bigger buys nothing: a screen shows tens of rows, and the
+ * window follows the selection.
  */
 #define LOG_WIN 96u
 
@@ -775,6 +793,25 @@ struct node {
 	 * real region and show the wrong bytes.
 	 */
 	uint8_t  sym;               /* 0 none, or SYMN_IMP / SYMN_EXP */
+	/*
+	 * AN ENTRY ROW IS NOT A REGION EITHER, and gets a flag for the same
+	 * reason `sym` did rather than a reserved mask value.
+	 *
+	 * A region says which bytes are what KIND; an entry says what one thing
+	 * IS - a stream, an attachment, a member - and two entries can be the
+	 * same kind, so no mask distinguishes them. The bytes come straight
+	 * from the entry rather than from resolve_scan, which is why off and len
+	 * are here: they are the parser's answer for THIS entry and there is
+	 * nothing to resolve.
+	 *
+	 * A sentinel mask would have had to be excluded by hand everywhere a
+	 * mask is resolved, and every place that forgot would have shown the
+	 * wrong bytes - the note on `sym` above is that lesson already learned
+	 * once.
+	 */
+	uint8_t  ent;               /* the row IS an entry */
+	uint32_t ent_i;             /* which row of ctx->entries */
+	uint64_t ent_off, ent_len;
 	uint64_t bytes;
 
 	/*
@@ -882,6 +919,9 @@ struct view {
 	uint32_t    pend_paybits;
 
 	struct node node[MAX_TREE];
+	/* Whether a row was refused for want of space. A truncated list that
+	 * does not say so is read as a complete one. */
+	uint8_t              tree_cut;
 	uint32_t    n_node, sel_node, tree_top;
 
 	/*
@@ -1489,6 +1529,38 @@ struct view {
 	 */
 	int         emu_mode;
 
+	/*
+	 * SEPARATE THE CHILDREN ON DEMAND RATHER THAN ON OPEN.
+	 *
+	 * The engine's own word and the engine's own flag: kof_scan_option
+	 * .heur_off is what gates opening a declared entry into an object of
+	 * its own - see kof_objtree_may_open - and it is the same flag
+	 * kofscanner spells --heur 0. Not a viewer-only setting beside it,
+	 * because a second axis here would be this tool disagreeing with the
+	 * engine about what a scan of the same file does.
+	 *
+	 * WHAT IT IS FOR. Opening a document separates every stream the parse
+	 * declared, which on a large one is every decompressor in the database
+	 * run before the first row is drawn. A reader who wants to see what the
+	 * document SAYS about itself - the entry table, which is one row per
+	 * stream with its kind, its name and its filter chain - does not need
+	 * any of that work done first. So it can be deferred, and the Analysis
+	 * menu asks for it when they want it.
+	 *
+	 * THE ENTRY ROWS ARE THE POINT OF THE MODE, not a consolation for it.
+	 * An entry row is dropped when its content is present as an object of
+	 * its own - two rows for one stream, see tree_build - so with nothing
+	 * separated the table is shown in full, which is exactly the view a
+	 * reader checking the parse wants.
+	 *
+	 * IT ALSO TURNS THE HEURISTICS OFF, because that is what this one flag
+	 * means in the engine. Said plainly in the usage text rather than
+	 * worked around: the two were made one flag deliberately, and a viewer
+	 * that quietly split them again would be where the two definitions of
+	 * --heur 0 drifted apart.
+	 */
+	int         heur_off;
+
 	/* Set while a sub-scan runs: swallow its echo of the object it was
 	 * given. See on_object. */
 	int         skip_root;
@@ -1828,6 +1900,8 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	v->pend_payload = v->pend_paylen = 0;
 	v->pend_paybits = 0;
 	o->depth = kof_obj_depth(name);
+	o->entry_of = res ? res->entry_of : KOF_ENTRY_NONE;
+	o->entry_kind = res ? res->entry_kind : 0u;
 
 	/*
 	 * The top level is already mapped; anything else exists only inside
@@ -1979,7 +2053,14 @@ static void objects_collect(struct view *v, kof_engine *eng)
 	 * means on the command line. Before these were two fields, asking for
 	 * one without the other was not possible.
 	 */
-	opt.heur_level = KOF_HEUR_LEVEL_MAX;
+	opt.heur_level = v->heur_off ? 0u : KOF_HEUR_LEVEL_MAX;
+	/*
+	 * AND WHETHER THE CHILDREN ARE SEPARATED AT ALL - see view.heur_off.
+	 *
+	 * Zero at rest, so the default is what it has always been: everything
+	 * the parse declared is opened before the tree is drawn.
+	 */
+	opt.heur_off = v->heur_off ? 1u : 0u;
 	/*
 	 * NEVER rather than the zeroed AUTO, and ONLY when asked for.
 	 *
@@ -2519,15 +2600,56 @@ static void tree_add(struct view *v, uint32_t depth, uint32_t obj,
 {
 	struct node *n;
 
-	if (v->n_node >= MAX_TREE)
+	/*
+	 * ONE SLOT SHORT, kept for the notice tree_build writes.
+	 *
+	 * Refusing at the true end would leave nowhere to say that anything was
+	 * refused, and the list would simply stop - indistinguishable from a
+	 * file that had no more to show. One row is a cheap price for the
+	 * difference between "that is all of it" and "that is as much as fits".
+	 */
+	if (v->n_node + 1u >= MAX_TREE) {
+		v->tree_cut = 1;
 		return;
+	}
 	n = &v->node[v->n_node++];
 	n->depth = depth;
 	n->obj = obj;
 	n->mask = mask;
 	n->sym = 0;
+	/* Cleared here for the reason tree_add_sym's note gives about `sym`: a
+	 * slot is reused across rebuilds and `at` is deliberately kept, so a
+	 * flag that is only ever SET would stay set on whatever row inherited
+	 * the slot. */
+	n->ent = 0;
+	n->ent_i = 0;
+	n->ent_off = n->ent_len = 0;
 	n->bytes = bytes;
 	snprintf(n->label, sizeof n->label, "%s", label);
+}
+
+/*
+ * One row of the parser's entry table.
+ *
+ * Mask ZERO would mean "this row is the object" to node_at, so the row is
+ * given KOF_SCAN_ALL and then marked - the same trap tree_add_sym's note
+ * describes, arriving from the other direction. `ent` is what every reader
+ * tests; the mask is only what keeps a maskless row from being handed back as
+ * the whole file.
+ */
+static void tree_add_ent(struct view *v, uint32_t depth, uint32_t obj,
+			 uint32_t index, uint64_t off, uint64_t len,
+			 const char *label)
+{
+	tree_add(v, depth, obj, KOF_SCAN_ALL, len, label);
+	if (v->n_node) {
+		struct node *n = &v->node[v->n_node - 1u];
+
+		n->ent = 1;
+		n->ent_i = index;
+		n->ent_off = off;
+		n->ent_len = len;
+	}
 }
 
 /* The symbol row, marked as such. Separate from tree_add because `at` is
@@ -2625,6 +2747,24 @@ static void obj_label(const struct object *o, char *out, size_t cap)
 		 * format string can see it. */
 		snprintf(out, cap, "//%.24s Shellcode-%s", leaf,
 			 o->fmt ? kof_arch_name(o->ctx.arch) : "?");
+	} else if (!o->fmt) {
+		/*
+		 * NO FORMAT WORD, because the absence of one IS the answer.
+		 *
+		 * This printed "Raw" here, beside a leaf that already says
+		 * CONTENT or FONT - so the row read "//1:CONTENT Raw", which
+		 * is a name followed by the news that it has no format. On a
+		 * row sitting in the region list that is noise: what the reader
+		 * needs is what the thing IS, and nothing claiming a format
+		 * means no format claimed it.
+		 *
+		 * The information is not lost, because a format that IS known
+		 * still prints below - an attached PE reads "PE-x86_64". So
+		 * the presence of the word is the fact, rather than the word
+		 * "Raw" being one.
+		 */
+		snprintf(out, cap, "//%.24s%s", leaf,
+			 o->too_big ? "  (not kept)" : "");
 	} else {
 		snprintf(out, cap, "//%.24s %.18s%s", leaf, what,
 			 /* Scanned, but not kept: there is nothing to show and
@@ -3009,25 +3149,182 @@ static int log_window_from(struct view *v, uint64_t first)
 	return 1;
 }
 
+/*
+ * What one entry row says: what it IS, and what it is CALLED when anything
+ * named it.
+ *
+ * The kind first and always, because it is the fact the parse is sure of and
+ * it is what a scan policy acts on. The name after it when there is one, read
+ * out of the object at the range the entry gives - never from a string the
+ * entry carries, because it does not carry one: the name is already in the
+ * file and a parser has nowhere to build a copy.
+ *
+ * THE CHAIN, SPELLED OUT, because "stored" and "coded but not by anything
+ * this build has" look identical in every other column and lead to opposite
+ * conclusions about what a rule will see.
+ *
+ * Spelled and not abbreviated. This printed a bare "z" first - one letter,
+ * meaning "a coding is present", with no legend on the screen or anywhere
+ * else. The reader cannot tell what it is, cannot tell whether it matters,
+ * and the only way to find out is to ask the person who wrote it. A column
+ * wide enough for "zlib" was never the constraint.
+ *
+ * `+?` at the end is the incomplete flag: there is a step the parse could not
+ * express, so running what IS named does not arrive at the original bytes.
+ * Shown even when a method is named, because a PARTIAL chain is exactly the
+ * case that looks runnable and is not - a Flate stream with a PNG predictor
+ * inflates to predictor rows, not to the file. Alone, `?` means the first
+ * coding was already inexpressible and nothing could be named at all.
+ *
+ * Bounded by the buffer and not by trust: name_len came out of the file.
+ */
+static const char *ent_label(const struct object *o,
+			     const struct kof_entry *e)
+{
+	static char out[64];
+	const char *kind = kof_entry_kind_name(e->kind);
+	char nm[32];
+	uint32_t k = 0;
+
+	nm[0] = 0;
+	if (e->name_len && o->buf.p &&
+	    e->name_off <= o->buf.n && e->name_len <= o->buf.n - e->name_off) {
+		uint64_t cap = e->name_len < sizeof nm - 1u ? e->name_len
+							   : sizeof nm - 1u;
+		uint64_t j;
+
+		/* Printable only. A name is whatever the file says it is, and
+		 * this one goes onto a terminal. */
+		for (j = 0; j < cap; j++) {
+			uint8_t c = o->buf.p[e->name_off + j];
+
+			nm[k++] = (c >= 0x20u && c < 0x7fu) ? (char)c : '.';
+		}
+	}
+	nm[k] = 0;
+
+	{
+		char ch[32];
+		uint32_t c = 0, j;
+
+		ch[0] = 0;
+		for (j = 0; j < 4u && e->coding[j]; j++) {
+			const char *w = kof_unp_method_name(e->coding[j]);
+			int put = snprintf(ch + c, sizeof ch - c, "%s%s",
+					   c ? "+" : "", w);
+
+			if (put <= 0 || (uint32_t)put >= sizeof ch - c)
+				break;
+			c += (uint32_t)put;
+		}
+		if (e->flags & KOF_ENT_F_CODED_UNKNOWN)
+			snprintf(ch + c, sizeof ch - c, "%s?", c ? "+" : "");
+
+		snprintf(out, sizeof out, "%s%s%s%s%s", kind,
+			 nm[0] ? " " : "", nm,
+			 ch[0] ? " " : "", ch);
+	}
+	return out;
+}
+
+/*
+ * Is the content of this entry present as an object of its own?
+ *
+ * A linear walk of the object list, which is bounded at MAX_OBJ and is tens of
+ * rows in practice. An index would have to be rebuilt whenever a child is
+ * added or dropped, and the thing it would save is a walk of a list already
+ * being walked to build the tree.
+ *
+ * `parent` is matched as well as the index, because an entry index is the
+ * FORMAT'S number for it and two objects in one tree can both have an entry 4.
+ * Matching the index alone hid an entry of one document behind a child of
+ * another the moment two PDFs were open at once - which is the shape of bug
+ * that only appears on the second file somebody tries.
+ */
+static int child_of_entry(const struct view *v, uint32_t parent, uint32_t index)
+{
+	uint32_t i;
+
+	if (index == KOF_ENTRY_NONE)
+		return 0;
+	for (i = 0; i < v->n_obj; i++) {
+		const struct object *o = &v->obj[i];
+
+		if (o->entry_of != index)
+			continue;
+		/*
+		 * The parent of a child is the object one level up whose name
+		 * this one's extends. kof_obj_depth gives the level, and the
+		 * list is in walk order - parent before child - so the nearest
+		 * shallower object above it is the one.
+		 */
+		{
+			uint32_t k = i;
+
+			while (k > 0) {
+				k--;
+				if (v->obj[k].depth < o->depth)
+					break;
+			}
+			if (k == parent && v->obj[k].depth < o->depth)
+				return 1;
+		}
+	}
+	return 0;
+}
+
 static void tree_build(struct view *v)
 {
 	uint32_t i, k;
 
 	v->n_node = 0;
+	v->tree_cut = 0;
 	for (i = 0; i < v->n_obj; i++) {
 		struct object *o = &v->obj[i];
 		char label[64];
 
 		obj_label(o, label, sizeof label);
 		/*
+		 * WHERE THE ROW SITS: BESIDE ITS PARENT'S REGIONS WHEN IT HAS
+		 * NO STRUCTURE OF ITS OWN.
+		 *
+		 * A reader's question about a document is flat - what does this
+		 * contain - and the answer has two kinds of thing in it:
+		 * RANGES THAT ARE IN THE FILE, which are regions, and CONTENT
+		 * THAT IS NOT, which is what a decoder produced. The second
+		 * cannot be a region: a region is a partition of this object's
+		 * own bytes and decoded content has no offset in the file, so
+		 * it lives as an object with its own address space. But that is
+		 * a fact about addressing, not about what a reader wants to
+		 * see, and indenting it a level deeper answered the addressing
+		 * question rather than theirs.
+		 *
+		 * So a child with NO FORMAT of its own - a decoded page stream,
+		 * a font program - is drawn at its parent's region level and
+		 * reads as one more row in the same list. A child that IS a
+		 * format keeps its own level, because it genuinely has a
+		 * subtree: an attached PE has headers, code and data of its
+		 * own, and flattening it would file those under the PDF's
+		 * regions.
+		 *
+		 * Depth is drawing only - one snprintf pads by it - so this
+		 * moves nothing but the eye. Selection, the hex pane and the
+		 * search all key off the row's object and mask.
+		 */
+		{
+			uint32_t at = o->depth * 2u;
+
+			if (o->depth && !o->fmt)
+				at = o->depth * 2u - 1u;
+			tree_add(v, at, i, 0,
+				 o->buf.n ? o->buf.n : o->ctx.obj_size, label);
+		}
+		/*
 		 * The bytes when they are here, the DECLARED size when they are
 		 * not. A PE carried inside an event is materialised only when
 		 * its row is picked, and until then buf.n is zero - which the
 		 * row would otherwise print as the image's size.
 		 */
-		tree_add(v, o->depth * 2u, i, 0,
-			 o->buf.n ? o->buf.n : o->ctx.obj_size, label);
-
 		if (!o->fmt || !v->ext)
 			continue;
 		for (k = 0; k < o->fmt->n_regions; k++) {
@@ -3043,13 +3340,11 @@ static void tree_build(struct view *v)
 				total += v->ext[j].len;
 			if (!total)
 				continue;
-			{
-				const char *s = strrchr(rn, '_');
-
-				tree_add(v, o->depth * 2u + 1u, i,
-					 o->fmt->regions[k], total,
-					 s ? s + 1 : rn);
-			}
+			/* kof_region_label and not the last underscore - see
+			 * the note on it in kofinspect.h for what that cost. */
+			tree_add(v, o->depth * 2u + 1u, i,
+				 o->fmt->regions[k], total,
+				 kof_region_label(rn));
 		}
 		/*
 		 * Last, and only when there is something in it.
@@ -3097,6 +3392,93 @@ static void tree_build(struct view *v)
 					     which[h], lab[h]);
 			}
 		}
+
+		/*
+		 * THE ENTRY TABLE, LAST, AND ONLY WHEN THE PARSER PUBLISHES ONE.
+		 *
+		 * The other half of what a parse knows. Every row above answers
+		 * "which bytes are what kind"; these answer "what is each thing
+		 * this object holds" - and the second question is the one deep
+		 * scan acts on, so it is the one a reader has to be able to
+		 * check WITHOUT running a scan and dumping the result to disk.
+		 * That was the whole gap: the table existed, the engine opened
+		 * children from it, and nothing showed it.
+		 *
+		 * FROM ctx->entries AND NOT FROM THE VIEW STRUCT. The API is
+		 * the point - a format's own struct holds this at a different
+		 * offset in every format, and reading it here is how this file
+		 * grew its own copy of things twice before.
+		 *
+		 * Guarded on `ext` the way the region rows are, and it is the
+		 * EXTENT BUFFER and not an option: without it view_select has
+		 * nowhere to put the range when the row is picked, so the row
+		 * would exist and open onto nothing. One allocation for the
+		 * whole view, so this is a failed-malloc path rather than a
+		 * mode - but a row that cannot be looked at should not be
+		 * offered, which is the same rule the region rows follow.
+		 */
+		if (v->ext && o->ctx.entries) {
+			const struct kof_entry *tab = NULL;
+			uint32_t n = o->ctx.entries(&o->ctx, &tab), e;
+
+			for (e = 0; tab && e < n; e++) {
+				/*
+				 * ONE ROW PER STREAM, NOT TWO.
+				 *
+				 * An entry is the stream WHERE IT LIES IN THE
+				 * FILE - coded, with its chain and its length.
+				 * When something decoded it, there is also an
+				 * object holding the CONTENT, and that object's
+				 * row is already in this list at this very
+				 * level. Two rows for one stream, and the first
+				 * of them opens onto compressed noise: a reader
+				 * clicking it sees deflate output, which is the
+				 * one thing nothing can read.
+				 *
+				 * So the entry row is dropped when its content
+				 * is present, and kept when it is not - an
+				 * image nothing opens, a stored attachment, a
+				 * coding this build lacks. There the entry IS
+				 * the only representation, and it says what the
+				 * parse knows: the kind, the name, the chain
+				 * and whether the chain can even be run.
+				 */
+				if (child_of_entry(v, i, tab[e].index))
+					continue;
+				tree_add_ent(v, o->depth * 2u + 1u, i,
+					     tab[e].index, tab[e].off,
+					     tab[e].len,
+					     ent_label(o, &tab[e]));
+			}
+		}
+	}
+
+	/*
+	 * WHAT DID NOT FIT, SAID RATHER THAN LEFT OUT.
+	 *
+	 * Written past tree_add's guard on purpose - the slot was reserved for
+	 * exactly this - and at depth zero so it cannot be read as detail
+	 * belonging to the last object shown.
+	 *
+	 * It is a row that opens onto the whole of object 0, which is normally
+	 * the wrong thing for a row to do; the note on suppressing empty rows
+	 * elsewhere in this file is about rows that PRETEND to have content.
+	 * This one's content is its label, and the alternative is a list that
+	 * ends early and says nothing.
+	 */
+	if (v->tree_cut && v->n_node < MAX_TREE) {
+		struct node *n = &v->node[v->n_node++];
+
+		n->depth = 0;
+		n->obj = 0;
+		n->mask = KOF_SCAN_ALL;
+		n->sym = 0;
+		n->ent = 0;
+		n->ent_i = 0;
+		n->ent_off = n->ent_len = 0;
+		n->bytes = 0;
+		snprintf(n->label, sizeof n->label,
+			 "-- more rows than this list holds --");
 	}
 }
 
@@ -4298,6 +4680,30 @@ static void view_select(struct view *v)
 			b2--;
 			v->ext[a] = v->ext[b2];
 			v->ext[b2] = t;
+		}
+	} else if (v->node[v->sel_node].ent) {
+		/*
+		 * ONE EXTENT, THE ENTRY'S OWN, AND NOT A RESOLVE.
+		 *
+		 * There is nothing to resolve: an entry is one range and the
+		 * parse already said which. Sending it through resolve_scan
+		 * would answer about a REGION - the kind this entry belongs to,
+		 * every entry of that kind at once - and the pane would show a
+		 * different thing from the row the cursor is on.
+		 *
+		 * Clipped to what the object actually has. The range is derived
+		 * from the file, and this is the last place before a read.
+		 */
+		uint64_t off = v->node[v->sel_node].ent_off;
+		uint64_t len = v->node[v->sel_node].ent_len;
+		uint64_t n = o->buf.n ? o->buf.n : o->ctx.obj_size;
+
+		if (off < n) {
+			if (len > n - off)
+				len = n - off;
+			v->ext[0].off = off;
+			v->ext[0].len = len;
+			v->n_ext = len ? 1u : 0u;
 		}
 	} else
 		v->n_ext = kof_scan_resolve_range(&o->ctx,
@@ -11443,7 +11849,31 @@ enum bar_item {
 	 */
 	BI_FINDSC,
 	BI_UNPACKER,
-	BI_DUMP, BI_DUMP_STATIC, BI_DUMP_EMU,
+	/*
+	 * TWO DUMPS, AND ONLY ONE OF THEM IS EVER DRAWN.
+	 *
+	 * BI_DUMP is the executable's: it opens a submenu because there are two
+	 * ways to peel such a file - read it, or run it - and which one worked
+	 * is the interesting part of the answer.
+	 *
+	 * BI_DUMP_PLAIN is every other file's. A PDF cannot be run at all; its
+	 * members come out by being read and there is no second way, so the
+	 * submenu was asking the reader to choose between a thing and nothing.
+	 * It acts instead of opening.
+	 *
+	 * Two ITEMS rather than one that changes shape, because the shape is
+	 * what a reader learns: an item that sometimes opens a box and
+	 * sometimes fires is an item nobody can predict. Each of these is one
+	 * thing, and dump_has_choice decides which exists.
+	 */
+	BI_DUMP, BI_DUMP_STATIC, BI_DUMP_EMU, BI_DUMP_PLAIN,
+	/*
+	 * Only ever drawn in the one mode that can use it - see
+	 * view.heur_off. Once the children are separated there is nothing for
+	 * it to do, and an item that does nothing is hidden rather than
+	 * greyed: see the note on `enabled` in kofview.h.
+	 */
+	BI_SEPARATE,
 	BI_REBUILD,
 	BI_NEXT, BI_PREV,
 
@@ -11501,6 +11931,10 @@ static const struct {
 	{ "Dump",              BM_ANALYSIS, -1, 0 },
 	{ "Static unpacker",   BM_ANALYSIS, BI_DUMP, 0 },
 	{ "Emu unpacker",      BM_ANALYSIS, BI_DUMP, 0 },
+	/* The same word, because a reader should not have to care which of the
+	 * two they are looking at - they never see both. */
+	{ "Dump",              BM_ANALYSIS, -1, 0 },
+	{ "Separate children", BM_ANALYSIS, -1, 0 },
 	{ "Rebuild database",  BM_ANALYSIS, -1, 0 },
 	/*
 	 * "Next" and "Previous", not "Next file" and "Previous file": the menu
@@ -11534,6 +11968,34 @@ static const struct {
 	{ "Keyboard",          BM_HELP, -1, 0 },
 	{ "About",          BM_HELP, -1, 0 }
 };
+
+/*
+ * IS THERE AN UNPACKER TO CHOOSE BETWEEN, for the file being examined.
+ *
+ * THE FILE AND NOT THE SELECTED ROW, unlike the four object items above. Dump
+ * writes every object of the document, so its meaning does not change as the
+ * cursor moves - and a menu whose shape changed while somebody walked the
+ * tree would be changing for no reason the reader did anything about.
+ */
+static int dump_has_choice(const struct view *v)
+{
+	if (!v->n_obj)
+		return 0;
+	return kv_cap(v->obj[0].ctx.format, KV_CAP_UNPACK);
+}
+
+/*
+ * The enum and the table are two lists of the same items, written apart, and
+ * an item is added to both by hand.
+ *
+ * MORE initialisers than the array holds is a compile error already. FEWER is
+ * SILENT: the array zero-fills, so a forgotten row becomes an item with a NULL
+ * label and menu 0 - drawn on the File menu, crashing whatever prints it. This
+ * is the cheapest possible way to be told instead, and it costs nothing at
+ * run time.
+ */
+_Static_assert(sizeof bar_item / sizeof bar_item[0] == BI_COUNT,
+	       "the menu table and its enum disagree");
 
 /* Does this item open a submenu rather than do something. */
 static int bar_has_sub(int i)
@@ -11686,6 +12148,76 @@ static const char *const bar_name[BM_COUNT] = {
  * click to be told about - Symbols on an event log is not "disabled", it is
  * meaningless, and a menu that lists it is a menu describing the wrong tool.
  */
+/*
+ * COULD THESE BYTES BE CODE - the question the disassembler and the emulator
+ * both rest on.
+ *
+ * kv_cap answers it for a FORMAT, and says yes for KOF_FMT_UNKNOWN because
+ * bytes nothing claimed are exactly what a peeled payload looks like. But
+ * decoded content is formatless TOO, and a page description stream is not
+ * code - so the format alone said yes to everything a PDF produced, and
+ * "Disassembly" was offered on a font program.
+ *
+ * The kind is what separates them, and it is the parse's own answer carried
+ * down by the engine rather than anything worked out here. Where the parse
+ * named the thing and the name is not code, the answer is no; where nothing
+ * named it, the answer stays yes, because that is the case these two items
+ * exist for.
+ */
+static int obj_maybe_code(const struct object *o)
+{
+	if (!o)
+		return 0;
+	if (o->fmt)
+		return kv_cap(o->ctx.format, KV_CAP_CODE);
+	switch (o->entry_kind) {
+	case KOF_ENT_CONTENT:
+	case KOF_ENT_FONT:
+	case KOF_ENT_IMAGE:
+	case KOF_ENT_METADATA:
+	case KOF_ENT_STRUCTURE:
+		/* The parse said what these are, and none of them is a program.
+		 * EMBEDDED is deliberately absent: a carried file is a file of
+		 * unknown kind, which is the one the sniff chain declined - so
+		 * it falls to the default and stays offered. */
+		return 0;
+	default:
+		return kv_cap(KOF_FMT_UNKNOWN, KV_CAP_CODE);
+	}
+}
+
+/*
+ * The object "Find shellcode in variables" would act on, or -1.
+ *
+ * ONE WALK, SHARED WITH THE ACTION. The item used to be enabled
+ * unconditionally and the handler then did this search and printed "No
+ * shellcode-like variable here" - so the menu promised something it had not
+ * checked, and a reader learned the answer by being refused. Both call this
+ * now, so what the menu offers and what the action finds cannot disagree.
+ */
+static int findsc_target(const struct view *v)
+{
+	uint32_t me, k;
+
+	if (!v->n_node)
+		return -1;
+	me = v->node[v->sel_node].obj;
+	if (me >= v->n_obj)
+		return -1;
+	if (v->obj[me].payload_of)
+		return (int)me;
+	for (k = 0; k < v->n_obj; k++) {
+		size_t pn = strlen(v->obj[me].name);
+
+		if (k == me || v->obj[k].depth <= v->obj[me].depth)
+			continue;
+		if (strncmp(v->obj[k].name, v->obj[me].name, pn) == 0 &&
+		    v->obj[k].name[pn] == '/' && v->obj[k].payload_of)
+			return (int)k;
+	}
+	return -1;
+}
+
 static int bar_shown(struct view *v, int i)
 {
 	int verb;
@@ -11705,6 +12237,62 @@ static int bar_shown(struct view *v, int i)
 	 * Asking which item it is instead cannot go wrong that way: a slot is a
 	 * slot, and whether it has a verb only decides if it is drawn.
 	 */
+	/*
+	 * WHAT CANNOT APPLY TO THE OBJECT UNDER THE CURSOR IS NOT DRAWN.
+	 *
+	 * These four are about the selected object rather than the file, and
+	 * for most objects of most formats the answer is no: a page stream has
+	 * no symbols, no entry point and nothing to run. Greying them left four
+	 * dead rows in the Analysis menu of every document, which a reader
+	 * learns to skip and which teaches nothing - see the note on `enabled`
+	 * in kofview.h for the distinction this rests on.
+	 *
+	 * The CAPABILITY is here and the transient part stays in bar_enabled: a
+	 * disassembler that applies to this object but whose bytes were not
+	 * kept is momentarily unavailable, and a row that vanishes for that
+	 * would flicker as the reader moves.
+	 */
+	switch (i) {
+	/* One dump or the other, never both - see the note on the enum. */
+	case BI_DUMP:
+	case BI_DUMP_STATIC:
+	case BI_DUMP_EMU:
+		return dump_has_choice(v);
+	case BI_DUMP_PLAIN:
+		return !dump_has_choice(v);
+	/* The mode, and a file: the one thing this acts on is a document that
+	 * was opened without its children being separated. */
+	case BI_SEPARATE:
+		return v->heur_off && v->n_obj != 0;
+	case BI_SYMS: {
+		const struct object *o = cur_obj(v);
+
+		/* The format, then the file: a format with no symbol table
+		 * cannot have them, and a stripped one of a format that can
+		 * has none to show either. Neither is a wait. */
+		if (!o || !kv_cap(o->ctx.format, KV_CAP_SYMBOLS))
+			return 0;
+		return kof_sym_count(o->sym, o->sym_n) != 0;
+	}
+	case BI_DISASM: {
+		const struct object *ob = cur_obj(v);
+
+		if (!obj_maybe_code(ob))
+			return 0;
+		/* This disassembler is x86. An image of another architecture
+		 * would be decoded as instructions it does not contain, which
+		 * is not a thing to offer and then explain. */
+		return !ob->fmt || ob->ctx.arch == KOF_ARCH_X86 ||
+		       ob->ctx.arch == KOF_ARCH_X86_64;
+	}
+	case BI_UNPACKER:
+		return obj_maybe_code(cur_obj(v));
+	case BI_FINDSC:
+		return findsc_target(v) >= 0;
+	default:
+		break;
+	}
+
 	if (i >= BI_FILT_V0 && i <= BI_FILT_V19) {
 		verb = bar_filt_verb(i);
 		/*
@@ -11779,16 +12367,24 @@ static int bar_enabled(struct view *v, int i)
 	 * where there is nowhere for a dump to go: the directory is named after
 	 * the file and placed beside it. */
 	/* The parent is live whenever either of its children could be. */
-	case BI_DUMP:      return v->path && v->path[0];
+	case BI_DUMP:
+	case BI_DUMP_PLAIN:
+		return v->path && v->path[0];
 	case BI_DUMP_STATIC:
 	case BI_DUMP_EMU:
+	/* And this one, for the same reason: it rebuilds. */
+	case BI_SEPARATE:
 		/*
 		 * Both may have to rebuild the tree to write the view they
 		 * name, and rebuilding it throws the draft away - the same
 		 * reason stepping to another file is refused with one open.
 		 */
 		return v->path && v->path[0] && !draft_edited(&v->ed);
-	case BI_UNPACKER:  return v->path && v->path[0] && !draft_edited(&v->ed);
+	case BI_UNPACKER:
+		/* Whether it APPLIES is bar_shown's - emu_here acts on the
+		 * selected object. What is left here is the wait: an edited
+		 * draft, or nothing open. */
+		return v->path && v->path[0] && !draft_edited(&v->ed);
 	/*
 	 * x86 only, because bddisasm decodes x86 and nothing else - offering it
 	 * on an ARM object would print an answer that is wrong in a way a reader
@@ -11797,12 +12393,13 @@ static int bar_enabled(struct view *v, int i)
 	 * reader's to pick.
 	 */
 	case BI_DISASM: {
-		struct object *ob = cur_obj(v);
+		const struct object *ob = cur_obj(v);
 
-		if (!ob || !ob->buf.p || !v->rgn_len)
-			return 0;
-		return !ob->fmt || ob->ctx.arch == KOF_ARCH_X86 ||
-		       ob->ctx.arch == KOF_ARCH_X86_64;
+		/* The format and the architecture are bar_shown's. What is left
+		 * is whether there are bytes to show right now: a large child
+		 * is scanned and not kept, and that is a state rather than a
+		 * property of the object. */
+		return ob && ob->buf.p && v->rgn_len != 0;
 	}
 	case BI_DASH:      return 1;
 	/* Needs a file to step from, and nothing the reader typed that would be
@@ -11835,12 +12432,8 @@ static int bar_enabled(struct view *v, int i)
 	 * The item costs nothing to run: the rule ran during the scan and this
 	 * only reports what it said.
 	 */
-	case BI_FINDSC:    return 1;
-	case BI_SYMS: {
-		const struct object *o = cur_obj(v);
-
-		return kof_sym_count(o->sym, o->sym_n) != 0;
-	}
+	case BI_FINDSC:    return 1;    /* shown only when there is one */
+	case BI_SYMS:      return 1;    /* shown only when there are symbols */
 	case BI_KEYS:
 	case BI_ABOUT:     return 1;
 	/*
@@ -12193,18 +12786,18 @@ static void about_build(struct view *v)
 	    " engine,");
 	abt("               with signature generation.");
 	abt("");
-	abt("  " A_DIM "\xe2\x80\xa2" A_OFF " a hex view of any region, with the"
+	abt("  " A_DIM "-" A_OFF " a hex view of any region, with the"
 	    " strings and markers");
 	abt("    a signature would look for lit where they sit");
-	abt("  " A_DIM "\xe2\x80\xa2" A_OFF " disassembly beside it, and which"
+	abt("  " A_DIM "-" A_OFF " disassembly beside it, and which"
 	    " code refers to which data");
-	abt("  " A_DIM "\xe2\x80\xa2" A_OFF " the file's structure as the engine"
+	abt("  " A_DIM "-" A_OFF " the file's structure as the engine"
 	    " parsed it - headers,");
 	abt("    sections, regions, symbols");
-	abt("  " A_DIM "\xe2\x80\xa2" A_OFF " the unpackers, so a packed or"
+	abt("  " A_DIM "-" A_OFF " the unpackers, so a packed or"
 	    " archived payload is examined");
 	abt("    as an object of its own");
-	abt("  " A_DIM "\xe2\x80\xa2" A_OFF " a signature generator, from marked"
+	abt("  " A_DIM "-" A_OFF " a signature generator, from marked"
 	    " bytes to compiled rule");
 	abt("");
 	abt("Signatures drafted here are compiled by the same builder that");
@@ -12523,6 +13116,67 @@ static void prop_elf(const struct object *ob)
 			 e->sec[i].name,
 			 (unsigned long long)e->sec[i].file_off,
 			 (unsigned long long)e->sec[i].file_size, w);
+	}
+}
+
+/*
+ * WHAT A PDF SAYS ABOUT ITSELF, which is the first thing a reader wants.
+ *
+ * Six strings from the /Info dictionary: who wrote it, with what, and what it
+ * claims to be about. They are the top of the dashboard for the same reason
+ * they are the top of a document's own properties dialog - a researcher
+ * deciding whether a file is worth an hour reads them before any byte of it.
+ *
+ * A PRODUCER STRING IS ALSO EVIDENCE, not just provenance. Builders leave
+ * theirs in, and one that names a tool which does not lay objects out the way
+ * this document does is a disagreement worth seeing beside the anomalies.
+ *
+ * LOOPED OVER THE ENUM rather than six named lines, so a field added to the
+ * parse appears here without this function being touched - the same reason the
+ * regions and the anomalies below are drawn from the registry rather than
+ * listed. The label comes from the parse too, so the two cannot disagree about
+ * what a field is called.
+ *
+ * Nothing is drawn for a key the document does not carry, which is most of
+ * them in most files. A row reading "author -" teaches nothing and pushes the
+ * rows that do say something off a short pane.
+ */
+static void prop_pdf(const struct object *ob)
+{
+	/*
+	 * ob->info IS the view. kof_pdf() takes a CONTEXT and reads
+	 * ctx->file_header out of it, so handing it the view made it read some
+	 * field of the view as a pointer and follow it - which crashed the
+	 * dashboard the first time it was opened on a PDF.
+	 *
+	 * Nothing caught it at compile time because ob->info is void *, which
+	 * converts to any object pointer silently. The other blocks here assign
+	 * it directly for the same reason, and this one now matches them.
+	 */
+	const struct kof_pdf_info *p = ob->info;
+	unsigned k;
+
+	/* `valid` as well as non-NULL: a view that a refused parse left zeroed
+	 * is a view whose ranges mean nothing, and every field below is a range
+	 * this function is about to read with. */
+	if (!p || !p->valid)
+		return;
+	for (k = 0; k < KOF_PDF_DOCINFO_COUNT; k++) {
+		char val[96];
+
+		if (!p->docinfo[k].len || !ob->buf.p)
+			continue;
+		/* Bounded by what the object actually holds: the range came out
+		 * of the file, and this is a read. */
+		if (p->docinfo[k].off >= ob->buf.n ||
+		    p->docinfo[k].len > ob->buf.n - p->docinfo[k].off)
+			continue;
+		if (!kof_pdf_text(ob->buf.p + p->docinfo[k].off,
+				  p->docinfo[k].len, p->docinfo[k].hex,
+				  val, sizeof val))
+			continue;
+		prop_add(A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF,
+			 kof_pdf_docinfo_name(k), val);
 	}
 }
 
@@ -13084,6 +13738,8 @@ static void prop_build(struct view *v)
 			prop_elf(ob);
 		else if (ob->ctx.format == KOF_FMT_PE)
 			prop_pe(ob);
+		else if (ob->ctx.format == KOF_FMT_PDF)
+			prop_pdf(ob);
 	}
 
 	/*
@@ -13858,6 +14514,50 @@ static void say_unpacked(struct view *v)
 	}
 	snprintf(v->act_msg, sizeof v->act_msg,
 		 "%s: nothing to open", who);
+}
+
+/*
+ * SEPARATE NOW, having opened without separating.
+ *
+ * THE WHOLE FILE AND NOT THE SELECTED ROW, which is a decision and not a
+ * shortcut. A scan of one object's bytes APPENDS what it finds to the end of
+ * the object list, and the tree works out a child's parent by looking back for
+ * the nearest shallower object above it - see child_of_entry. That holds for
+ * objects arriving in walk order, and an append breaks it the moment the row
+ * asked about is not the deepest thing in the list: the children would hang
+ * off whichever object happened to be last. Re-collecting the file produces the
+ * walk in order, the way opening it does, so the tree is right by the same
+ * argument it is right on open.
+ *
+ * Through file_open, which is how the other mode that changes what a scan does
+ * - the emulator - already rebuilds. The draft is why the item is disabled
+ * while one is edited: a rebuild throws it away.
+ */
+static void separate_now(struct view *v)
+{
+	char keep[KOF_DUMP_PATH_ROOM];
+	uint32_t before = v->n_obj;
+
+	v->act_ok = 0;
+	if (!v->path || !v->path[0])
+		return;
+	snprintf(keep, sizeof keep, "%s", v->path);
+	v->heur_off = 0;
+	if (!file_open(v, keep, v->eng))
+		return;                 /* file_open left the reason */
+	/*
+	 * Counted rather than assumed. A document whose every entry is an
+	 * image nothing opens separates into nothing, and that is an answer -
+	 * the entry rows are still there, and they now say so having been
+	 * tried rather than having been skipped.
+	 */
+	v->act_ok = v->n_obj > before;
+	if (v->n_obj > before)
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "Separated %u object(s)", v->n_obj - before);
+	else
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "Nothing separated: no entry could be opened");
 }
 
 /*
@@ -14685,43 +15385,23 @@ static void bar_run(struct view *v, int i)
 	 * which is the one thing the dialog said that the tree does not.
 	 */
 	case BI_FINDSC: {
-		uint32_t me = v->node[v->sel_node].obj, k;
-		uint32_t kid = 0;
-
 		/*
-		 * ALREADY THERE IS AN ANSWER, NOT A FAILURE.
+		 * THE SAME WALK THE MENU ASKED - see findsc_target, which also
+		 * carries the reasoning about why a payload row answers with
+		 * itself.
 		 *
-		 * The reader sees the payload in the tree, clicks it, then asks
-		 * to find it - which is the most natural order to do those two
-		 * things in, and it reported "no variable in this object looks
-		 * like shellcode". The object under the cursor WAS the payload;
-		 * the search was for a payload inside it, and a payload does
-		 * not carry one.
-		 *
-		 * The question is about the file, not about whichever row the
-		 * cursor is on, so a payload child answers with itself. That
-		 * also makes the item idempotent: pressing it twice says the
-		 * same thing rather than contradicting itself.
+		 * It used to be repeated here, and the menu asked nothing at
+		 * all: the item was always choosable and this code then printed
+		 * "No shellcode-like variable here". Two copies of a search and
+		 * one of them the only one that ran - so the menu promised what
+		 * it had not checked, and the reader found out by being
+		 * refused. One walk, asked twice, cannot disagree with itself.
 		 */
-		if (v->obj[me].payload_of)
-			kid = me;
+		int found = findsc_target(v);
+		uint32_t kid = found >= 0 ? (uint32_t)found : 0u;
+		uint32_t k;
 
-		/* The child of THIS object, found by the name the engine gave
-		 * it: a child's name is the parent's with a "//" after it, so a
-		 * prefix test is exact rather than a guess. */
-		for (k = 0; !kid && k < v->n_obj; k++) {
-			size_t pn = strlen(v->obj[me].name);
-
-			if (k == me || v->obj[k].depth <= v->obj[me].depth)
-				continue;
-			if (strncmp(v->obj[k].name, v->obj[me].name, pn) == 0 &&
-			    v->obj[k].name[pn] == '/' &&
-			    v->obj[k].payload_of) {
-				kid = k;
-				break;
-			}
-		}
-		if (!kid) {
+		if (found < 0) {
 			snprintf(v->act_msg, sizeof v->act_msg, "%s",
 				 "No shellcode-like variable here");
 			v->act_ok = 1;
@@ -14750,11 +15430,13 @@ static void bar_run(struct view *v, int i)
 		v->ed.dr.warn[0] = 0;
 		break;
 	case BI_DUMP_STATIC: dump_all(v, 0); break;
+	case BI_DUMP_PLAIN:  dump_all(v, 0); break;
 	case BI_DUMP_EMU:    dump_all(v, 1); break;
 	case BI_UNPACKER: emu_here(v); break;
 	case BI_DISASM:   dis_toggle(v, 0, KOF_BROKEN); break;
 	case BI_NEXT:    open_step(v, +1); break;
 	case BI_PREV:    open_step(v, -1); break;
+	case BI_SEPARATE: separate_now(v); break;
 	case BI_REBUILD: rebuild_db(v); break;
 	case BI_DASH:
 		/* Whatever the last copy or dump said belongs to the screen
@@ -19252,7 +19934,7 @@ static void usage(void)
 	fprintf(stderr,
 	"kofviewer - the engine's view of a file, navigable\n"
 	"\n"
-	"  kofviewer [--db <dir>] <file|folder>\n"
+	"  kofviewer [--db <dir>] [--heur 0|1|2] <file|folder>\n"
 	"\n"
 	"  --db D      load that database. Without it there is one object and\n"
 	"              no markers: unpacking is what modules do, and modules\n"
@@ -19260,7 +19942,14 @@ static void usage(void)
 	"  --bases D   the signature source tree, which is also where a drafted\n"
 	"              signature is written. A content root or one of its kind\n"
 	"              directories both work. No default: without it a\n"
-	"              draft can be written but not saved.\n");
+	"              draft can be written but not saved.\n"
+	"  --heur N    0 opens the file WITHOUT separating what it carries:\n"
+	"              the entry table is shown in full instead, one row per\n"
+	"              stream with its kind, name and filter chain, and the\n"
+	"              Analysis menu will separate them when asked. It turns\n"
+	"              the heuristics off too - one flag, the same one\n"
+	"              kofscanner takes. 2 is the default and the most this\n"
+	"              build has.\n");
 }
 
 /*
@@ -19355,6 +20044,12 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	 * the menu item does - and dropped when it is a different one.
 	 */
 	int  emu_mode;
+	/*
+	 * Kept ACROSS files as well, unlike emu_mode: it is how the reader
+	 * asked to be shown a document, not an answer about one object, and a
+	 * researcher stepping through a directory with it set means it.
+	 */
+	int  heur_off = v->heur_off;
 
 	snprintf(keep, sizeof keep, "%s", path);
 	emu_mode = (v->path && strcmp(v->path, keep) == 0) ? v->emu_mode : 0;
@@ -19394,6 +20089,7 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	snprintf(v->basedir, sizeof v->basedir, "%s", basedir);
 	snprintf(v->dbdir, sizeof v->dbdir, "%s", dbdir);
 	v->emu_mode = emu_mode;
+	v->heur_off = heur_off;
 
 	/* The fields whose cleared value is not their resting value. */
 	v->sel_a = v->sel_b = KOF_BROKEN;
@@ -19401,6 +20097,31 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	v->bar_open = -1;
 	v->bar_sel = -1;
 	v->bar_sub = -1;
+	/*
+	 * -1 IS NOWHERE, AND ZERO IS OBJECT ZERO.
+	 *
+	 * main says exactly this where it first builds the view, and the clear
+	 * above undid it - so it has to be said again here, which is what this
+	 * whole block is for.
+	 *
+	 * What it cost: on_object takes its first branch whenever into_obj is
+	 * not negative, and that branch folds only the VERDICT into a row that
+	 * already exists. It sets no name, no bytes and no parse, and it does
+	 * not count the object. So the first thing the engine reported - which
+	 * is THE FILE ITSELF - went into an empty row 0 and was then
+	 * overwritten by the first child.
+	 *
+	 * The file therefore had no row of its own, and with no row for the
+	 * file there were no REGION rows either: every one of them hangs off
+	 * the object whose extents they are. A PDF opened with a database
+	 * showed its children and nothing else - forty-seven rows of "Raw"
+	 * where the format and the regions belonged. Opened WITHOUT a database
+	 * there is no scan, on_object never runs, into_obj is never read, and
+	 * the same file came up perfectly. That difference is why this read as
+	 * the PDF parser having lost its regions rather than as the viewer
+	 * having lost the file.
+	 */
+	v->into_obj = -1;
 
 	snprintf(v->pathbuf, sizeof v->pathbuf, "%s", keep);
 	v->path = v->pathbuf;
@@ -19562,7 +20283,7 @@ int main(int argc, char **argv)
 	 * a stray Return in a terminal left a generated .c in a source tree
 	 * nobody had pointed the tool at.
 	 *
-	 * Empty rather than NULL: v.basedir is a fixed buffer and every reader
+	 * Empty rather than NULL: v->basedir is a fixed buffer and every reader
 	 * of it already tests basedir[0], so "not given" stays one convention
 	 * instead of two. With none given, Save and Save As are refused and
 	 * say why - the honest answer, because there is nowhere the author has
@@ -19570,17 +20291,37 @@ int main(int argc, char **argv)
 	 */
 	const char *path = NULL, *db = NULL, *base = "";
 	uint64_t last_paint = 0;
-	struct view v;
+	/*
+	 * ON THE HEAP, BECAUSE IT DOES NOT FIT ON THE STACK.
+	 *
+	 * struct view is 1.2MB - almost all of it the row array and the object
+	 * array - and the default stack for a thread on Windows is 1MB. As a
+	 * local it overflowed before main had done anything: the process exited
+	 * with 0xC00000FD and printed nothing, which reads exactly like a
+	 * missing library rather than like what it was.
+	 *
+	 * It was ALREADY at three quarters of the stack before the row array
+	 * grew, so this is not a fix for one number - a local of that size is
+	 * one deep call chain away from the same crash whatever the constants
+	 * say. On the heap the constants are free to be sized for the job, and
+	 * the failure mode of a too-large one becomes a NULL from calloc, which
+	 * is a message rather than a silent exit.
+	 */
+	struct view *v;
 	struct stat st;
 	int i, rc = 0;
 
-	memset(&v, 0, sizeof v);
+	v = calloc(1, sizeof *v);
+	if (!v) {
+		fprintf(stderr, "kofviewer: out of memory\n");
+		return 1;
+	}
 	/* -1 is "nowhere", and zero is a real object index - see into_obj. A
 	 * memset alone would have aimed every scan's root at the file. */
-	v.into_obj = -1;
+	v->into_obj = -1;
 	/* The one preference that is not zero at rest. Everything else file_open
 	 * sets, for the first file and for every one after it. */
-	v.ed.dr.decl_cap = 12;
+	v->ed.dr.decl_cap = 12;
 	/*
 	 * The editor borrows what it needs and owns the draft.
 	 *
@@ -19589,11 +20330,31 @@ int main(int argc, char **argv)
 	 * `foreign` is set per file - because a copy of a number that changes
 	 * is a number that goes stale.
 	 */
-	editor_attach(&v);
+	editor_attach(v);
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--db") && i + 1 < argc)
 			db = argv[++i];
+		/*
+		 * Three values, refused rather than clamped - the same
+		 * contract kofscanner's --heur has, and for its reason: a tool
+		 * that quietly did less than it was told to is the one result
+		 * worth never producing. Only 0 is a MODE here; 1 and 2 differ
+		 * in what the heuristics cost, and this tool has one file and
+		 * somebody waiting in front of it, so 2 is the default.
+		 */
+		else if (!strcmp(argv[i], "--heur") && i + 1 < argc) {
+			const char *hv = argv[++i];
+
+			if (!strcmp(hv, "0")) {
+				v->heur_off = 1;
+			} else if (strcmp(hv, "1") && strcmp(hv, "2")) {
+				fprintf(stderr, "kofviewer: --heur takes 0, "
+					"1 or 2, not '%s'\n", hv);
+				free(v);
+				return 2;
+			}
+		}
 		else if (!strcmp(argv[i], "--bases") && i + 1 < argc)
 			base = argv[++i];
 		else if (argv[i][0] == '-') {
@@ -19626,9 +20387,9 @@ int main(int argc, char **argv)
 			base);
 		return 1;
 	}
-	snprintf(v.basedir, sizeof v.basedir, "%s", base);
+	snprintf(v->basedir, sizeof v->basedir, "%s", base);
 	if (db)
-		snprintf(v.dbdir, sizeof v.dbdir, "%s", db);
+		snprintf(v->dbdir, sizeof v->dbdir, "%s", db);
 
 	/*
 	 * A DIRECTORY IS A REASONABLE THING TO POINT THIS AT.
@@ -19654,24 +20415,24 @@ int main(int argc, char **argv)
 		path = first;
 	}
 
-	v.ext = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *v.ext);
-	v.probe = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *v.probe);
-	if (!v.ext || !v.probe) {
+	v->ext = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *v->ext);
+	v->probe = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *v->probe);
+	if (!v->ext || !v->probe) {
 		fprintf(stderr, "kofviewer: out of memory\n");
 		return 1;
 	}
 
 	if (db) {
-		v.eng = kof_engine_open(db);
-		if (!v.eng)
+		v->eng = kof_engine_open(db);
+		if (!v->eng)
 			fprintf(stderr, "kofviewer: cannot load a database from "
 					"%s\n", db);
 	}
-	if (!file_open(&v, path, v.eng)) {
-		fprintf(stderr, "kofviewer: %s\n", v.act_msg);
-		kof_engine_close(v.eng);
-		free(v.ext);
-		free(v.probe);
+	if (!file_open(v, path, v->eng)) {
+		fprintf(stderr, "kofviewer: %s\n", v->act_msg);
+		kof_engine_close(v->eng);
+		free(v->ext);
+		free(v->probe);
 		return 1;
 	}
 
@@ -19680,13 +20441,13 @@ int main(int argc, char **argv)
 		goto out;
 	}
 	last_paint = now_ms();
-	redraw(&v);
+	redraw(v);
 	for (;;) {
 		int k = read_key();
 
 		if (k == K_NONE)
 			break;
-		if (!handle(&v, k) || v.quit)
+		if (!handle(v, k) || v->quit)
 			break;
 		/*
 		 * One frame per batch of input, not one per key.
@@ -19706,13 +20467,13 @@ int main(int argc, char **argv)
 		if (key_pending() && now_ms() - last_paint < 33u)
 			continue;
 		/* redraw decides for itself whether anything changed. */
-		redraw(&v);
+		redraw(v);
 		last_paint = now_ms();
 	}
 	term_restore();
 
 out:
-	view_free(&v);
-	kof_engine_close(v.eng);
+	view_free(v);
+	kof_engine_close(v->eng);
 	return rc;
 }

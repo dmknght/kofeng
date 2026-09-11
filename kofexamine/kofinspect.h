@@ -527,6 +527,62 @@ void kof_touch_free(struct kof_touch *v, uint32_t n);
 
 
 /* The word for a kind, for a caller that prints one. */
+/*
+ * A REGION ENUM NAME, AS A COLUMN WANTS TO READ IT.
+ *
+ * Every region is spelled KOF_SCAN_<FMT>_<NAME> and no reader needs the first
+ * three parts: the object's own row has already said which format it is. So
+ * this returns what follows them - HEADER, OBJECTS, STREAM_PACKED - and the
+ * whole name for anything not shaped that way, because a name this cannot
+ * parse is one a reader should see in full rather than trimmed at a guess.
+ *
+ * HERE RATHER THAN IN EITHER TOOL, because both had their own and they did not
+ * agree. kofviewer took everything after the LAST underscore, which is the
+ * same answer for HEADER and a wrong one for every region whose name has two
+ * words: STREAM_PACKED read as "PACKED" and STREAM_IMAGE as "IMAGE". With one
+ * stream region that was terse; with four of them - PLAIN, PACKED, IMAGE,
+ * FONT - the rows stopped saying they were streams at all, and "IMAGE" beside
+ * a child named "Image" read as though the tree were listing content rather
+ * than regions. Reported as the regions having gone missing, which from the
+ * outside is exactly what it looked like.
+ */
+const char *kof_region_label(const char *enum_name);
+
+/*
+ * A PDF TEXT STRING, MADE FIT TO PUT ON A LINE.
+ *
+ * The parse hands back the range INSIDE the delimiters and decodes nothing,
+ * which is right - a decoded copy needs somewhere to live and a parser has
+ * nowhere. Three things then stand between those bytes and a readable line,
+ * and every host that shows one meets all three:
+ *
+ *   UTF-16, which is how every Word-produced document writes these. A BOM of
+ *   FE FF and then two bytes per character - so rendered as bytes it reads
+ *   ".M.i.c.r.o.s.o.f.t", which is what the first attempt at this printed.
+ *   Only the low half of each pair is kept, because this is one terminal line
+ *   and not a text renderer.
+ *
+ *   ESCAPES, in a literal string: \( is a parenthesis rather than the end of
+ *   the value, and a title of "Report \(final\)" printed its own backslashes.
+ *
+ *   HEX, when the value was written <4A4B>. Told by the flag the parse
+ *   records, because the bytes cannot say: "0FACED" is a legal spelling of
+ *   three bytes and a legal word, and guessing is a title rendered as
+ *   gibberish or the reverse.
+ *
+ * Non-printable bytes become '.', which is what keeps a terminal escape out
+ * of a report - the same rule kof_src_label follows for a child's name.
+ *
+ * Here, in the shared layer, because kofexamine and kofviewer both show these
+ * and a second copy of the three rules is a second thing that renders a title
+ * differently.
+ *
+ * Returns the characters written, and always NUL terminates when cap is
+ * non-zero.
+ */
+uint32_t kof_pdf_text(const uint8_t *p, uint64_t n, int hex,
+		      char *out, uint32_t cap);
+
 const char *kof_touch_kind_name(enum kof_touch_kind);
 
 /* ---- describing one collected event ---------------------------------------

@@ -51,13 +51,21 @@ struct kof_run {
 };
 
 /*
- * Eight, which is two more than the format with the most classes uses.
+ * TWELVE, AND IT WAS EIGHT.
  *
  * A bound rather than a parameter because it sizes the coalescing hint below, and a
  * hint that had to be allocated would put a malloc in front of every parse to save
  * twenty bytes of a structure that is allocated once per scanner.
+ *
+ * Eight was "two more than the format with the most classes uses", and that stopped
+ * being true: PDF reached seven the moment its stream regions were split by what the
+ * bytes ARE - pixels, fonts, script - rather than by how they are coded, and the
+ * eighth was the last. Rationing the last one is the wrong shape of decision to be
+ * making: which categories a format can express should be settled by whether the
+ * format can decide them, not by a constant sizing a hint array. Four more costs
+ * sixteen bytes of a per-parse structure.
  */
-#define KOF_RUNS_MAX_CLS 8u
+#define KOF_RUNS_MAX_CLS 12u
 
 struct kof_runs {
 	struct kof_run *v;

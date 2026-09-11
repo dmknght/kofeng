@@ -34,6 +34,7 @@
 #define _GNU_SOURCE
 
 #include "scan.h"
+#include "objtree.h"
 #include "../kofmatchers/kofmultimatch.h"
 #include "../kofheur/kofheur.h"
 /* The rule ABI: the phase ids and what a rule may ask the engine for. The
@@ -126,6 +127,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	for (i = 0; i < KOF_FMT_COUNT; i++)
 		free(sc->view[i]);
 	free(sc->inf);
+	free(sc->lzw);
 	kof_xref_free(sc->use);
 	free(sc->sym);
 	free(sc->sym_ext[0]);
@@ -668,6 +670,42 @@ static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ct
 	if (as_format) {
 		const struct kof_parser *p = kof_parser_of(as_format);
 
+		/*
+		 * SAID WHEN THERE IS NOTHING TO PARSE - AND ONLY THEN.
+		 *
+		 * KOF_FMT_TEXT and KOF_FMT_SCRIPT have no row in the parser
+		 * table: there is no header to read and no region to carve, so
+		 * there is nothing for a parser to do. For those the id IS the
+		 * whole claim, and it matters because ctx->format is what
+		 * kof_module_precond tests FIRST - an object left at zero is
+		 * offered only to the modules that target unknown, so a
+		 * container that knew it had handed over a script got the rules
+		 * for a bare blob.
+		 *
+		 * A FORMAT WITH A PARSER IS DIFFERENT, AND SETTING IT HERE
+		 * CRASHED. This was written to set the id unconditionally, on
+		 * the argument that failing to read a structure is no reason to
+		 * forget what the thing was said to be. True of a claim; false
+		 * of this field. A module that targets a format reads that
+		 * format's VIEW - kof_pdf(ctx) is a cast of ctx->file_header,
+		 * with no null check anywhere, because a module reached for a
+		 * format is entitled to assume it was parsed.
+		 *
+		 * So a declared format whose parse then REFUSES used to leave
+		 * the id set and file_header NULL, and the first module to
+		 * accept it dereferenced nothing. Reproduced: declare
+		 * KOF_FMT_PDF for an /ObjStm - whose decoded form has no %PDF-
+		 * header, so the parse correctly refuses - and the scan
+		 * segfaults. That is exactly the shape "decide what to parse
+		 * from the description" would produce, so it is not a
+		 * hypothetical.
+		 *
+		 * The rule: the id survives a refusal only where a refusal
+		 * cannot happen. With a parser present it is set below, after
+		 * the parse agreed.
+		 */
+		if (!p)
+			ctx->format = as_format;
 		if (p) {
 			if (!sc->view[as_format]) {
 				sc->view[as_format] = malloc(p->view_size);
@@ -692,6 +730,15 @@ static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ct
 			    as_view_len <= p->view_size)
 				memcpy(sc->view[as_format], as_view,
 				       as_view_len);
+			/*
+			 * The parse sets ctx->format itself when it succeeds -
+			 * every collector does, and one row even chooses
+			 * between two formats while doing it. So there is
+			 * nothing to set here on success, and nothing to undo
+			 * on failure: an object whose declared parse refused is
+			 * unidentified, which is the same answer a failed sniff
+			 * gives and is the honest one.
+			 */
 			(void)p->parse(buf, sc->view[as_format], ctx);
 		}
 		return;
@@ -854,6 +901,50 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 */
 	sc->stop = 0;
 
+	/*
+	 * AND WHETHER A RULE ASKED FOR WHAT THIS OBJECT CARRIES.
+	 *
+	 * From `want`, which the EXAMINE pass in the caller already collected -
+	 * the same mask KOF_ENG_USE_EMU rides in. Assigned rather than or-ed,
+	 * which is what makes it per object: the object being opened now either
+	 * had a rule fire that asked, or it did not.
+	 *
+	 * IN THIS BLOCK, above the early return below, because that is what
+	 * hygiene means here - see the note on the three fields above. A scan
+	 * that refused to open one object must not leave it looking as though
+	 * the next object's rules had asked for anything.
+	 */
+	sc->raise_carried = (want & KOF_ENG_OPEN_CARRIED) != 0;
+
+	/*
+	 * DEEP SCAN OFF MEANS DO NOT OPEN IT, and this is the only place that
+	 * can honour that - everything below produces children.
+	 *
+	 * It was honoured only at the far end of the walk, where children are
+	 * PUSHED, so every container was decompressed in full and the results
+	 * dropped on the floor. Measured: --heur 0 --max-produced 1 on a gzip
+	 * still reported "the engine could not finish", which is a scan that
+	 * paid for work nobody asked for AND then failed at it.
+	 *
+	 * Nothing is lost by refusing here. What is inside a container is
+	 * declared by its parse - ctx->entries - and its bytes are still
+	 * covered by a region, so a rule still searches them. That is the
+	 * distinction kofeng.h draws on the field itself: off means "do not
+	 * descend", never "do not look".
+	 *
+	 * Returning 0 and not sc->broken: refusing to open something is not a
+	 * failure to examine it. `broken` means "something wanted to look and
+	 * could not", and here nothing wanted to.
+	 *
+	 * AFTER the per-object resets just above and not before them. Those
+	 * three fields are hygiene - the note on them says why sticky
+	 * exhaustion "looked harmless and quietly halved the engine" - so an
+	 * early return that skipped them would leave the previous object's
+	 * state standing for this one.
+	 */
+	if (!kof_objtree_may_open(opt))
+		return 0;
+
 	kof_mod_unpack_mode(ctx, 1);
 
 	/*
@@ -918,32 +1009,48 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		sc->cur_mod = NULL;
 	}
 	/*
-	 * A COMPLETE FILE SITTING AT AN OFFSET IS NOT AN UNPACKING PROBLEM.
+	 * A COMPLETE FILE SITTING AT AN OFFSET IS NOT AN UNPACKING PROBLEM -
+	 * AND IT IS NOT THE ENGINE'S SEARCH EITHER, ANY MORE.
 	 *
-	 * Run whatever the modules did or did not do, because carrying a
-	 * payload and being packed are independent: a dropper can be neither,
-	 * either or both. It costs one search of the object for two magics, and
-	 * the header test behind it selects none of 1 328 clean binaries.
+	 * It was: two magics written into the scanner, run over every object of
+	 * every format, before the loop above had even been consulted about
+	 * what the object's structure already said. Three consequences, all one
+	 * fault.
 	 *
-	 * Off at --heur 0, and that is the right switch for it rather than one
-	 * of its own. Level 0 means "name families and nothing else": no facts
-	 * gathered, nothing scored, no evidence produced that is not a match.
-	 * A payload carried inside another file is exactly that kind of
-	 * evidence - and a caller who has asked for the cheapest possible pass
-	 * should not be given a tree of children they did not ask for.
+	 * Finding a THIRD kind of carried file meant editing the engine, so
+	 * what the engine could find was a property of its own build rather
+	 * than of the database - which is the one thing every other kind of
+	 * detection here avoids.
 	 *
-	 * BEFORE THE INTERPRETER, because the two questions overlap and this is
-	 * the one with an answer. A packed file and a file carrying a payload
-	 * look alike from outside - both are mostly bytes that are not code -
-	 * but "is there a whole executable at this offset" is decided by
-	 * reading a header, while "what does this unpack to" is decided by
-	 * running it for up to 256 million instructions. Cheap and certain
-	 * first. They are not exclusive either: a packed dropper is both, and
-	 * whichever runs first, the children get the other treatment when they
-	 * are scanned in turn.
+	 * NOT searching was worse. A format that names its own attachments -
+	 * PDF /EF, a zip directory - has already produced them, so a search
+	 * finds the same bytes again: measured, one attachment became two
+	 * children and 0.69MB was scanned twice. Expressing "do not search a
+	 * PDF" needed a table in the engine naming formats, which is the
+	 * engine deciding a module's business.
+	 *
+	 * And WHERE to look - a PE's overlay and resources, an ELF's data,
+	 * never their code - is format knowledge that was sitting in the
+	 * scanner.
+	 *
+	 * So it is gone, and NOTHING REPLACES IT YET. Its successor is not
+	 * another sweep: a rescan of every object for two-byte magics is the
+	 * cost that made the old one wrong, whatever declared it. What comes
+	 * instead is per studied case - a rule's ASK honoured here rather than
+	 * a search performed here.
+	 *
+	 * THE PLACE FOR THAT ASK NOW EXISTS, which is worth saying because it
+	 * was the missing half. A rule that fires at EXAMINE can declare
+	 * KOF_ENG_OPEN_CARRIED and the engine honours it on THIS object - see
+	 * that bit in kofmod/heur.h. What is still unwritten is the search
+	 * itself: an object whose structure names nothing, where a rule has
+	 * said the bytes are worth looking through anyway. The ask is the hook
+	 * it will hang on, and the reason to write it per case is unchanged -
+	 * whoever knows a family knows where in it to look.
+	 *
+	 * What remains is step 4 below: the carried files the STRUCTURE named,
+	 * which needs no search at all.
 	 */
-	if (!sc->broken && !opt->heur_off && kof_scan_embedded(ctx))
-		applies = 1;
 	/*
 	 * NOTHING OPENED IT, SO RUN IT.
 	 *
@@ -1011,6 +1118,46 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		if (kof_scan_emu_unpack(ctx, opt->emu_use == KOF_EMU_ONLY))
 			applies = 1;
 	}
+	/*
+	 * THE CARRIED FILES THE STRUCTURE NAMED, AND THIS IS LAST ON PURPOSE.
+	 *
+	 * The order of this whole function is the pipeline, and the pipeline is:
+	 *
+	 *   1. the PARSE has already said what the object is made of - which
+	 *      bytes are which region, and which of them are files it carries.
+	 *      That happened in identify(), before any module ran.
+	 *   2. the DETECTORS have had their say, in the caller.
+	 *   3. the UNPACKERS and the emulator have finished above: whatever was
+	 *      compressed or encoded is now an object of its own.
+	 *   4. ONLY THEN are declared carried files opened.
+	 *
+	 * Last because every step before it can change the answer. An object
+	 * that was packed is not the file the author wrote, so its structure's
+	 * claims about what it carries are claims about the wrapper; the
+	 * unpacked child is where those claims are worth acting on, and the
+	 * child is scanned as an object in its own right, so it reaches this
+	 * same step with its own parse behind it. Running this first would open
+	 * attachments named by a wrapper before anything had established that
+	 * the wrapper was the file.
+	 *
+	 * AND IT ONLY RUNS UNDER DEEP SCAN, which is not a saving but the
+	 * definition of the two levels:
+	 *
+	 *   deep OFF   the carried file stays BYTES IN A REGION. Its own format
+	 *              names that region - KOF_SCAN_EMBEDDED where the format
+	 *              has carried files at all - so a rule still searches it,
+	 *              the parse still says how many there are and how big, and
+	 *              nothing is decompressed or copied to learn that.
+	 *   deep ON    the same ranges become children, from the same table, so
+	 *              a file cannot be searchable and unextractable or the
+	 *              reverse.
+	 *
+	 * kof_objtree_may_open is checked inside, at the top, so this is one
+	 * call rather than a call and a guard that could disagree.
+	 */
+	if (!sc->broken && kof_objtree_declared(ctx, opt))
+		applies = 1;
+
 	kof_mod_unpack_mode(ctx, 0);
 
 	/*
@@ -1297,7 +1444,7 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 static void scan_object(struct kof_scanner *sc, kof_buf buf,
 			const struct kof_scan_option *opt, struct kof_result *out,
 			uint32_t pdepth, int from_packer,
-			const char *inherit_predict)
+			const char *inherit_predict, uint8_t as_fmt)
 {
 	struct kof_obj_ctx ctx;
 	uint32_t present, i, want;
@@ -1323,6 +1470,10 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	kof_match_begin(&sc->m, buf);
 	/* A new object: whatever block the last one had is not this one's, and
 	 * neither is the matcher bound to it. */
+	/* The sentinel and not zero: zero is entry 0. Reset per object, like
+	 * every other pending declaration, so one object's claim cannot be
+	 * worn by the next. */
+	sc->pend_entry = KOF_ENTRY_NONE;
 	sc->sym_done = 0;
 	sc->sym_n = 0;
 	sc->msym_bound = 0;
@@ -1335,7 +1486,17 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	sc->use = NULL;
 	sc->use_done = 0;
 
-	identify(sc, buf, &ctx, opt ? opt->as_format : 0u,
+	/*
+	 * THE CHILD'S OWN DECLARATION FIRST, then the caller's.
+	 *
+	 * opt->as_format is about the object the CALLER handed in - a submitted
+	 * event record, which has no magic for a sniff to find. as_fmt is what
+	 * the thing that produced THIS child said about it, and for a child the
+	 * second is the specific claim: the caller's applies to the root of the
+	 * walk and would otherwise be re-applied to every object under it.
+	 */
+	identify(sc, buf, &ctx,
+		 as_fmt ? as_fmt : (opt ? opt->as_format : 0u),
 		 opt ? opt->as_view : NULL, opt ? opt->as_view_len : 0u);
 
 	present = regions_present(&ctx, sc->eng->scan_mask);
@@ -1683,10 +1844,18 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 		 */
 		memset(&res, 0, sizeof res);
 
+		/*
+		 * What the producer said this object is the content of, put
+		 * where a host can read it. Set before the scan rather than
+		 * after, so a callback fired from inside it sees the same
+		 * answer as one fired after.
+		 */
+		res.entry_of = kof_src_entry_of(src);
+		res.entry_kind = kof_src_kind_of(src);
 		w->sc->cur_src = src;
 		kof_scan_kids_reset(w->sc);
 		scan_object(w->sc, kof_src_buf(src), w->opt, &res, pdepth,
-			    from_packer, inherit);
+			    from_packer, inherit, kof_src_fmt_of(src));
 		w->sc->cur_src = NULL;
 
 		/*
@@ -1724,9 +1893,23 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 				w->aborted = 1;
 		}
 
-		/* Take the children before anything else can reset them. */
+		/*
+		 * Take the children before anything else can reset them.
+		 *
+		 * On max_object_depth and not on max_depth: the second is how
+		 * deep into DIRECTORIES the walk goes, and reading it here was
+		 * what made one number mean two policies. See the note on both
+		 * in kofeng.h.
+		 *
+		 * The built-in allowance below still applies whatever these
+		 * say, so a caller that sets neither is bounded exactly as
+		 * before - the difference is only that it can now bound one
+		 * axis without the other.
+		 */
 		if (!w->aborted && !w->out_of_memory &&
-		    (!w->opt->max_depth || depth + 1 <= w->opt->max_depth)) {
+		    kof_objtree_may_open(w->opt) &&
+		    (!w->opt->max_object_depth ||
+		     depth + 1 <= w->opt->max_object_depth)) {
 			/*
 			 * PUSHED BACKWARDS SO THEY COME OUT FORWARDS.
 			 *
