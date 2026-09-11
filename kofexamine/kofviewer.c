@@ -9448,21 +9448,21 @@ static void draw_marker_line(struct out *o, struct view *v)
 		 */
 		if (sym_view(v))
 			snprintf(right, sizeof right,
-				 "%llu B   block %08llx (row: %08llx)",
+				 "%llu B   block 0x%08llx (row: 0x%08llx)",
 				 (unsigned long long)(hi - lo + 1u),
 				 (unsigned long long)view_map(v, lo, 0),
 				 (unsigned long long)lo);
 		else if (v->find_n && v->find_i)
 			snprintf(right, sizeof right,
-				 "match %u of %u   %llu B   offset %08llx "
-				 "(region: %08llx)",
+				 "match %u of %u   %llu B   offset 0x%08llx "
+				 "(region: 0x%08llx)",
 				 v->find_i, v->find_n,
 				 (unsigned long long)(hi - lo + 1u),
 				 (unsigned long long)view_map(v, lo, 0),
 				 (unsigned long long)lo);
 		else
 			snprintf(right, sizeof right,
-				 "%llu B   offset %08llx (region: %08llx)",
+				 "%llu B   offset 0x%08llx (region: 0x%08llx)",
 				 (unsigned long long)(hi - lo + 1u),
 				 (unsigned long long)view_map(v, lo, 0),
 				 (unsigned long long)lo);
