@@ -1439,6 +1439,45 @@ void kof_inspect_event(const struct kof_evt *e,
 
 /* ---- what built an object ------------------------------------------------ */
 
+uint32_t kof_inspect_region_entropy(const struct kof_obj_ctx *ctx,
+				    kof_buf bytes, uint32_t mask)
+{
+	/*
+	 * Static, and the reason is the size: KOF_SCAN_MAX_EXTENTS ranges is
+	 * 64KB, which is more than an interactive tool should put on the stack
+	 * and more than is worth allocating per row. kofexamine's own region
+	 * loop already keeps one of these for the same reason.
+	 *
+	 * It is safe here because the callers are the two tools, both of which
+	 * draw on one thread. A library that grew a threaded caller would have
+	 * to take the buffer from it instead.
+	 */
+	static struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
+	static uint32_t hist[256];
+	uint64_t total = 0;
+	uint32_t n, i;
+
+	if (!ctx || !ctx->resolve_scan || !bytes.p || !bytes.n)
+		return 0;
+	n = ctx->resolve_scan(ctx, mask, ext, KOF_SCAN_MAX_EXTENTS);
+	if (!n)
+		return 0;
+
+	memset(hist, 0, sizeof hist);
+	for (i = 0; i < n; i++) {
+		uint64_t off = ext[i].off, len = ext[i].len, k;
+
+		if (off >= bytes.n)
+			continue;
+		if (len > bytes.n - off)
+			len = bytes.n - off;
+		for (k = 0; k < len; k++)
+			hist[bytes.p[off + k]]++;
+		total += len;
+	}
+	return kof_entropy_hist(hist, total);
+}
+
 /* One heap row, or nothing when the heap is absent. */
 static void clr_row(const struct kof_inspect_style *st, kof_inspect_line out,
 		    void *user, const char *name,

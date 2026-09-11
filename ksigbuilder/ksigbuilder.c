@@ -1678,11 +1678,20 @@ static void resolve_heur(void)
 		err(wt->line, "more than one KOF_HEUR_WANT; use one "
 			      "declaration with '|'");
 	} else if (wt->count) {
+		/*
+		 * Independent tests and not a chain, because the declaration
+		 * takes a MASK - the error above says so - and an else-if
+		 * chain took the first name and silently dropped the rest.
+		 */
+		uint32_t before = (uint32_t)g_heur_want;
+
 		if (names_ident(wt->arg, "KOF_ENG_USE_EMU"))
 			g_heur_want |= KOF_ENG_USE_EMU;
-		else if (names_ident(wt->arg, "KOF_ENG_OPEN_CARRIED"))
+		if (names_ident(wt->arg, "KOF_ENG_OPEN_CARRIED"))
 			g_heur_want |= KOF_ENG_OPEN_CARRIED;
-		else
+		if (names_ident(wt->arg, "KOF_ENG_KEEP_ON_OPEN"))
+			g_heur_want |= KOF_ENG_KEEP_ON_OPEN;
+		if ((uint32_t)g_heur_want == before)
 			err(wt->line, "KOF_HEUR_WANT names nothing the engine "
 				      "offers");
 	}

@@ -708,6 +708,23 @@ struct kof_range {
  */
 struct kof_obj_ctx;
 
+/*
+ * A region measured rather than read. See `region_shape` below.
+ *
+ * `widest` and `widest_off` describe ONE contiguous run and not the region: a
+ * region is usually several, and the difference between "60% of this file is
+ * unclaimed" and "60% of this file is unclaimed IN ONE PIECE" is the whole
+ * signal. The first is true of ordinary binaries full of alignment padding; the
+ * second is not true of any of them.
+ */
+struct kof_region_shape {
+	uint64_t bytes;       /* every byte the region covers */
+	uint64_t widest;      /* the longest single run in it */
+	uint64_t widest_off;  /* where that run starts, in the object */
+	uint32_t runs;        /* how many runs the region is */
+	uint32_t reserved;
+};
+
 struct kof_content {
 	uint8_t  (*rd8) (const struct kof_obj_ctx *, uint64_t off);
 	uint16_t (*rd16)(const struct kof_obj_ctx *, uint64_t off);
@@ -1077,6 +1094,80 @@ struct kof_content {
 	 * tool with no rules at all still opens what it finds.
 	 */
 	int (*fmt_wanted)(const struct kof_obj_ctx *, uint8_t fmt);
+
+	/*
+	 * THE SHAPE OF A REGION, WITHOUT ITS BYTES.
+	 *
+	 * Every other way a module reaches a region hands it the CONTENT - a
+	 * string search through it, a gather of it into a child. This hands it
+	 * the GEOMETRY, and the two answer different questions: "is this marker
+	 * in the data section" against "how much of this file is data at all,
+	 * and is it in one piece".
+	 *
+	 * The second question is one a module could not ask before, and
+	 * re-deriving it is not a fair alternative: the ranges come out of the
+	 * parser's tables through the settle and complement machinery in
+	 * rangelist.h, and a module computing its own complement would be a
+	 * second implementation of the partition - which would be wrong on
+	 * exactly the hostile files that make the answer interesting.
+	 *
+	 * WHAT IT IS FOR, measured. The largest single unclaimed run in 4526
+	 * clean ELF objects is 4095 bytes, which is what alignment padding can
+	 * be and no more; in 3775 malware objects, 723 have one larger than a
+	 * page. A run that big is a file somebody appended, and `widest_off` is
+	 * where it starts - so nothing has to be searched for.
+	 *
+	 * Returns 0 and leaves *out zeroed when the object has no regions -
+	 * an unidentified object, or a mask naming nothing present.
+	 */
+	int (*region_shape)(const struct kof_obj_ctx *, uint32_t region_mask,
+			    struct kof_region_shape *out);
+
+	/*
+	 * HOW RANDOM A REGION'S BYTES ARE, in eighths of a bit - 0 to 64.
+	 *
+	 * Beside region_shape and for the same reason: a rule could ask what a
+	 * region CONTAINS and how big it is, and could not ask what KIND of
+	 * bytes they are. That is the cheapest fact there is about a region and
+	 * the one most heuristics reach for second - padding sits near 0, text
+	 * and tables between 1 and 4, code near 6, and compressed or encrypted
+	 * data above 7.5.
+	 *
+	 * A rule could not compute it either. The bytes of a region are
+	 * scattered, the accessors hand them over one at a time, and a module
+	 * has no writable data to keep a histogram in - so the answer had to
+	 * come from the host or not at all.
+	 *
+	 * OVER THE WHOLE REGION, every range of it, because that is what the
+	 * mask names. A caller that wants one run measures it with the offset
+	 * and length region_shape returned.
+	 *
+	 * Zero for an empty region, which reads as "nothing to measure" rather
+	 * than as "uniform".
+	 */
+	uint32_t (*region_entropy)(const struct kof_obj_ctx *,
+				   uint32_t region_mask);
+
+	/*
+	 * THE SAME, OVER ONE EXTENT THE CALLER NAMES.
+	 *
+	 * The general form, and region_entropy is the convenience: a region is
+	 * scattered and its entropy is that of all its ranges together, which
+	 * is the right answer to "what kind of bytes is this region" and the
+	 * WRONG answer to "what kind of bytes are in that one run".
+	 *
+	 * Measured, and this is why both exist: the unclaimed region of one
+	 * carrier sample is three runs - 3576 bytes of zero padding, one byte,
+	 * and a 31968-byte ELF. Over the region it reads 4.5 bits; over the
+	 * run that matters it reads 4.5 and over another sample's 6.0, while
+	 * the padding dilutes a third down to 4.1. A gate written on the region
+	 * measures the padding as much as the payload.
+	 *
+	 * Clipped to the object, so an extent that runs past the end measures
+	 * what is there. Zero for an empty or out-of-range extent.
+	 */
+	uint32_t (*entropy_at)(const struct kof_obj_ctx *, uint64_t off,
+			       uint64_t len);
 };
 
 /*
@@ -2257,6 +2348,44 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 
 /* Bounded by the host's ceiling alone. */
 #define kof_gather(region_mask) kof_gather_max((region_mask), 0)
+
+/*
+ * Measure a region instead of reading it.
+ *
+ *     struct kof_region_shape u;
+ *     if (kof_region_shape(KOF_SCAN_ELF_UNCLAIMED, &u) && u.widest >= 4096)
+ *             ...  u.widest_off is where the run starts
+ *
+ * Non-zero when *out was filled. See `region_shape` in struct kof_content.
+ */
+#define kof_region_shape(mask, out)                                        \
+	((ctx)->content->region_shape ?                                    \
+	 (ctx)->content->region_shape((ctx), (uint32_t)(mask), (out)) : 0)
+
+/*
+ * How random that region's bytes are, in eighths of a bit - 0 to 64.
+ *
+ *     if (kof_region_entropy(KOF_SCAN_ELF_UNCLAIMED) >= 8u * 7u) ...
+ *
+ * Eighths and not a fraction: a module has no floating point. See
+ * `region_entropy` in struct kof_content.
+ */
+#define kof_region_entropy(mask)                                           \
+	((ctx)->content->region_entropy ?                                  \
+	 (ctx)->content->region_entropy((ctx), (uint32_t)(mask)) : 0u)
+
+/*
+ * How random the bytes at [off, off+len) are, in eighths of a bit.
+ *
+ *     if (kof_entropy_at(u.widest_off, u.widest) >= 8u * 2u) ...
+ *
+ * The extent form, for a caller that has one run rather than a region - see
+ * `entropy_at` in struct kof_content for why the two are not the same question.
+ */
+#define kof_entropy_at(off, len)                                           \
+	((ctx)->content->entropy_at ?                                      \
+	 (ctx)->content->entropy_at((ctx), (uint64_t)(off),                \
+				    (uint64_t)(len)) : 0u)
 
 /*
  * Name the next child, from bytes already in this object.

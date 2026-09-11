@@ -188,3 +188,49 @@ int kof_scan_path_mt(kof_scanner **scs, unsigned n_sc, const char *path,
 	return kof_scan_walk_mt(scs, n_sc, path, opt ? opt : &conservative,
 				cb, user);
 }
+
+/*
+ * See kofeng.h. The arithmetic is the emulator gate's, lifted here rather than
+ * copied: emu_unpack.c now calls this, so there is one implementation and one
+ * place for the test in tests/unit/emu_gate.c to check.
+ */
+uint32_t kof_entropy_hist(const uint32_t hist[256], uint64_t total)
+{
+	uint64_t acc = 0, n = total;
+	unsigned k;
+
+	if (!hist || !n)
+		return 0;
+	for (k = 0; k < 256u; k++) {
+		uint64_t c = hist[k], scaled, base, frac;
+		unsigned lg = 0;
+
+		if (!c)
+			continue;
+		/*
+		 * -log2(c/n) = log2(n) - log2(c), computed on n*256/c so the
+		 * fraction survives the integer log.
+		 */
+		scaled = (n << 8) / c;
+		while (scaled >> (lg + 1u))
+			lg++;
+		base = (uint64_t)1 << lg;
+		frac = ((scaled - base) << 3) / base;
+		acc += c * (((uint64_t)lg << 3) + frac - (8u << 3));
+	}
+	return (uint32_t)(acc / n);
+}
+
+uint32_t kof_entropy_eighths(const void *bytes, uint64_t n)
+{
+	const uint8_t *p = bytes;
+	uint32_t hist[256];
+	uint64_t i;
+
+	if (!p || !n)
+		return 0;
+	memset(hist, 0, sizeof hist);
+	for (i = 0; i < n; i++)
+		hist[p[i]]++;
+	return kof_entropy_hist(hist, n);
+}

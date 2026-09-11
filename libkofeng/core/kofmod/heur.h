@@ -104,7 +104,39 @@ enum kof_eng_want {
 	 * scan asks". That is the property the declared shape buys, and the
 	 * reason this is a declaration rather than a call.
 	 */
-	KOF_ENG_OPEN_CARRIED = 1u << 1
+	KOF_ENG_OPEN_CARRIED = 1u << 1,
+
+	/*
+	 * KEEP THIS FINDING EVEN IF THE OBJECT TURNS OUT TO CARRY SOMETHING.
+	 *
+	 * A rule's heuristic is normally dropped when the object it fired on
+	 * produces children, and the reasoning is sound for the rules it was
+	 * written for: a heuristic usually says "I could not identify this",
+	 * and once the thing unpacks, what is worth identifying is what came
+	 * out. The finding MOVES to the leaf - see the note beside the drop in
+	 * scan.c.
+	 *
+	 * That reasoning has one assumption, and scan.c states it: "a container
+	 * carries no rule heur to drop". A rule whose evidence IS that the
+	 * object carries something breaks it. "This executable has a whole
+	 * second executable glued to it" is a fact about the PARENT; the child
+	 * is an ordinary file and the rule correctly does not fire on it, so
+	 * dropping the parent's finding does not move the signal, it deletes
+	 * it. Measured, before this bit existed: all three PoisonedRefresh
+	 * samples came back clean, with the carried ELF extracted and scanned
+	 * and the statement about the dropper gone.
+	 *
+	 * SO IT IS DECLARED AND NOT INFERRED. The engine cannot tell the two
+	 * kinds of rule apart - both are a heuristic that fired on an object
+	 * that opened - and guessing from the unpacker's kind would tie a
+	 * rule's meaning to which module happened to produce the child.
+	 *
+	 * ASK FOR IT ONLY WHEN THE FINDING IS ABOUT THE OBJECT ITSELF. A rule
+	 * that means "I could not identify this" and asks for this bit reports
+	 * the wrapper of every packed sample it meets, which is the noise the
+	 * drop exists to remove.
+	 */
+	KOF_ENG_KEEP_ON_OPEN = 1u << 2
 };
 
 /*

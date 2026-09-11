@@ -704,6 +704,28 @@ void kof_inspect_event_verbs(const uint64_t *count, uint32_t keep,
  * Emits nothing for a native image, which is every image that is not managed.
  * `info` is the format's view, as kof_inspect_toolchain takes it.
  */
+/*
+ * HOW RANDOM ONE REGION'S BYTES ARE, in eighths of a bit - 0 to 64.
+ *
+ * Here rather than in each tool because the region has to be RESOLVED first:
+ * a region is several ranges scattered through the object, and its entropy is
+ * the entropy of all of them together rather than of the largest or the first.
+ * Both tools were about to resolve it themselves, and a second walk of the
+ * ranges is a second chance to measure a different thing by accident.
+ *
+ * WHAT IT IS FOR, beside a size. A size says how much of the object a region
+ * is; this says what KIND of bytes they are, and it is the cheapest thing that
+ * separates the three cases a reader cares about - code sits near 6, padding
+ * and text near 1 to 4, and compressed or encrypted data above 7.5. An
+ * UNCLAIMED region at 7.9 is a file somebody appended; the same region at 0.0
+ * is alignment.
+ *
+ * NEVER A VERDICT - see kof_entropy_eighths. Zero when the region is empty or
+ * the object has no parse, which reads as "nothing to measure".
+ */
+uint32_t kof_inspect_region_entropy(const struct kof_obj_ctx *ctx,
+				    kof_buf bytes, uint32_t mask);
+
 void kof_inspect_dotnet(const struct kof_obj_ctx *ctx, const void *info,
 			const struct kof_inspect_style *,
 			kof_inspect_line out, void *user);

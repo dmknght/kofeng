@@ -1393,6 +1393,10 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			struct kof_finding *f = &out->v[out->n++];
 			const char *pf = kof_db_heur_predict(sc->eng, m);
 
+			/* Before anything can renumber the slots: the bit is
+			 * this finding's index, and the drop below reads it. */
+			if (m->heur_want & KOF_ENG_KEEP_ON_OPEN)
+				sc->heur_keep |= 1u << (out->n - 1u);
 			f->level = KOF_LEVEL_HEUR;
 			/*
 			 * <target>/Heur:<family>#<variant>?<shape>.
@@ -1474,6 +1478,10 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * every other pending declaration, so one object's claim cannot be
 	 * worn by the next. */
 	sc->pend_entry = KOF_ENTRY_NONE;
+	/* And no finding of the last object's is protected from this one's
+	 * drop: the bits are slot numbers in a result about to be refilled, so
+	 * a stale one would shelter whatever lands in that slot next. */
+	sc->heur_keep = 0;
 	sc->sym_done = 0;
 	sc->sym_n = 0;
 	sc->msym_bound = 0;
@@ -1601,11 +1609,27 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * sc->n_kids is reset before it was scanned, and a container's members
 	 * are its children too, but a container carries no rule heur to drop.
 	 */
+	/*
+	 * A RULE MAY SAY ITS FINDING IS ABOUT THIS OBJECT.
+	 *
+	 * The assumption above - that a rule heur on an object which opened is
+	 * always a failure to identify the wrapper - holds for every rule that
+	 * guesses at a payload and for none that recognises a CARRIER. "This
+	 * executable has a second executable glued to it" is true of the parent
+	 * and of nothing else, and the child it names is an ordinary file that
+	 * no shape rule fires on - so there is no leaf for the signal to move
+	 * to and the drop would simply delete it.
+	 *
+	 * KOF_ENG_KEEP_ON_OPEN is how such a rule says so, per finding rather
+	 * than per object: two rules may fire here and only one of them mean
+	 * it. See sc->heur_keep and the note in kofmod/heur.h.
+	 */
 	if (sc->n_kids > 0 && out->n > 0) {
-		uint32_t r, w = 0;
+		uint32_t r, w = 0, keep = sc->heur_keep;
 
 		for (r = 0; r < out->n; r++)
-			if (out->v[r].level != KOF_LEVEL_HEUR)
+			if (out->v[r].level != KOF_LEVEL_HEUR ||
+			    (keep & (1u << r)))
 				out->v[w++] = out->v[r];
 		out->n = w;
 	}

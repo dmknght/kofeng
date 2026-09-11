@@ -2548,6 +2548,86 @@ static int c_fmt_wanted(const struct kof_obj_ctx *ctx, uint8_t fmt)
 	return (sc->eng->any_target & (1u << fmt)) != 0;
 }
 
+/*
+ * A region's geometry, from the same resolve every other region call uses.
+ *
+ * Offered to a DETECTOR as well as to an unpacker, which most producer-side
+ * entries are not: this reads nothing, produces nothing and spends no budget -
+ * it reports numbers the parse already worked out. A heuristic asking "how much
+ * of this file did nothing account for" is exactly the caller it exists for, and
+ * a heuristic is a detector.
+ */
+static int c_region_shape(const struct kof_obj_ctx *ctx, uint32_t mask,
+			  struct kof_region_shape *out)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	struct kof_range *ext;
+	uint32_t n, i;
+
+	if (!out)
+		return 0;
+	memset(out, 0, sizeof *out);
+	if (!sc)
+		return 0;
+	ext = sc->ext_gather;
+	n = kof_scan_resolve_range(ctx, mask, ext);
+	out->runs = n;
+	for (i = 0; i < n; i++) {
+		out->bytes += ext[i].len;
+		if (ext[i].len > out->widest) {
+			out->widest = ext[i].len;
+			out->widest_off = ext[i].off;
+		}
+	}
+	return n != 0;
+}
+
+/*
+ * The same ranges, measured rather than counted. Offered to a detector for the
+ * reason c_region_shape is: it reads bytes the object already has, produces
+ * nothing, and spends no budget beyond one pass over the region.
+ */
+static uint32_t c_region_entropy(const struct kof_obj_ctx *ctx, uint32_t mask)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	struct kof_range *ext;
+	uint32_t hist[256];
+	kof_buf b;
+	uint64_t total = 0;
+	uint32_t n, i;
+
+	if (!sc)
+		return 0;
+	b = mc(ctx)->data;
+	if (!b.p || !b.n)
+		return 0;
+	ext = sc->ext_gather;
+	n = kof_scan_resolve_range(ctx, mask, ext);
+	if (!n)
+		return 0;
+
+	memset(hist, 0, sizeof hist);
+	for (i = 0; i < n; i++) {
+		kof_buf s2 = kof_slice(b, ext[i].off, ext[i].len);
+		uint64_t k;
+
+		for (k = 0; k < s2.n; k++)
+			hist[s2.p[k]]++;
+		total += s2.n;
+	}
+	return kof_entropy_hist(hist, total);
+}
+
+/* The extent form. See `entropy_at` in kofsig.h for why it is not the same
+ * question as c_region_entropy. */
+static uint32_t c_entropy_at(const struct kof_obj_ctx *ctx, uint64_t off,
+			     uint64_t len)
+{
+	kof_buf s = kof_slice(mc(ctx)->data, off, len);
+
+	return kof_entropy_eighths(s.p, s.n);
+}
+
 static const struct kof_content kof_detect_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -2556,7 +2636,7 @@ static const struct kof_content kof_detect_vtable = {
 	/* Answered for a detector too. The answer is about the database and
 	 * not about who is asking, and a rule that wants to know whether its
 	 * neighbours care about a format is asking a fair question. */
-	c_fmt_wanted
+	c_fmt_wanted, c_region_shape, c_region_entropy, c_entropy_at
 };
 
 static const struct kof_content kof_unpack_vtable = {
@@ -2565,7 +2645,8 @@ static const struct kof_content kof_unpack_vtable = {
 	c_unpack_peek, c_child_format, c_child_kind, c_child_entry,
 	c_unpack_chain, c_find_str_where,
 	c_gather, c_name_next, c_incomplete,
-	c_unpack_entry, c_syms, c_data_xref, c_fmt_wanted
+	c_unpack_entry, c_syms, c_data_xref, c_fmt_wanted, c_region_shape,
+	c_region_entropy, c_entropy_at
 };
 
 /*

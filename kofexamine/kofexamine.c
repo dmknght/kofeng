@@ -1621,8 +1621,24 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 			for (k = 0; k < n; k++)
 				len += ext[k].len;
 			total += len;
+			/*
+			 * The size, then how random those bytes are - the one
+			 * extra number that says what KIND of bytes a region
+			 * holds. Written "name=bytes/H" so a row stays one
+			 * token, and taken from kof_inspect_region_entropy so
+			 * the viewer's dashboard reports the same figure.
+			 *
+			 * Only for a region that HAS bytes: "H 0.0" on an empty
+			 * region is a measurement of nothing, and a column of
+			 * them buries the rows that mean something.
+			 */
 			printf(" %s%s%s=%s%llu%s", C_ID, short_region(rn), C_OFF,
 			       C_SIZE, (unsigned long long)len, C_OFF);
+			if (len)
+				printf("%s/%.1f%s", C_LOC,
+				       (double)kof_inspect_region_entropy(
+					       &ctx, buf, f->regions[i]) / 8.0,
+				       C_OFF);
 		}
 		/* The partition, stated rather than assumed: if these do not add
 		 * up, every region-scoped search on this object is looking at the

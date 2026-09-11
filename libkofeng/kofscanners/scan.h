@@ -131,6 +131,24 @@ struct kof_scanner {
 	uint32_t            n_kids, cap_kids;
 
 	/*
+	 * WHICH OF THIS OBJECT'S FINDINGS SURVIVE IT OPENING.
+	 *
+	 * One bit per slot in kof_result.v, set when a heuristic rule that
+	 * declared KOF_ENG_KEEP_ON_OPEN appended one. Read once, by the drop
+	 * beside the n_kids test in scan_one.
+	 *
+	 * A mask and not a flag on the finding: struct kof_finding is the
+	 * public result ABI, every host copies it by value, and this is a fact
+	 * about how the scan reached the finding rather than about the finding
+	 * - no reader of a result would ever have a use for it.
+	 *
+	 * KOF_MAX_FINDINGS is 16, so a uint32 covers every slot with room to
+	 * spare; a finding past the cap is counted and never stored, so there
+	 * is no bit for it to need.
+	 */
+	uint32_t            heur_keep;
+
+	/*
 	 * Did a packer open THIS object.
 	 *
 	 * The fact belongs to the file that was packed, not to what came out of

@@ -13790,10 +13790,19 @@ static void prop_build(struct view *v)
 
 		if (n->obj != v->node[v->sel_node].obj || !n->mask || n->sym)
 			continue;
+		/*
+		 * And how random those bytes are, from kof_inspect_region_entropy
+		 * so kofexamine reports the same number the same way. It is the
+		 * column that says which row to look at: an UNCLAIMED region at
+		 * 7.9 is a file somebody appended, the same region at 0.0 is
+		 * alignment, and the size alone does not tell them apart.
+		 */
 		prop_add("  " A_ID "%-11s" A_OFF A_SIZE "%-10llu" A_OFF
-			 A_LOC "%5.1f%%" A_OFF, n->label,
-			 (unsigned long long)n->bytes,
-			 total ? 100.0 * (double)n->bytes / (double)total : 0.0);
+			 A_LOC "%5.1f%%" A_OFF A_DIM "  H %.1f" A_OFF,
+			 n->label, (unsigned long long)n->bytes,
+			 total ? 100.0 * (double)n->bytes / (double)total : 0.0,
+			 (double)kof_inspect_region_entropy(&ob->ctx, ob->buf,
+							    n->mask) / 8.0);
 	}
 	if (total != ob->buf.n)
 		prop_add(A_BAD "  %-11s regions sum to %llu of %llu" A_OFF,

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "emu_unpack.h"
+#include "../kofeng.h"
 
 /* Where an ET_DYN object is placed, matching what a loader with ASLR off does.
  * The value matters only in that a stub reading its own addresses must find
@@ -78,35 +79,9 @@
  */
 static unsigned entropy_eighths(const uint32_t *hist, uint64_t total)
 {
-	uint64_t acc = 0;
-	unsigned i;
-
-	if (!total)
-		return 0;
-	for (i = 0; i < 256u; i++) {
-		uint64_t n = hist[i], scaled;
-		unsigned lg = 0;
-
-		if (!n)
-			continue;
-		/*
-		 * -log2(n/total) = log2(total) - log2(n), computed on
-		 * total*256/n so the fraction survives the integer log.
-		 */
-		scaled = (total << 8) / n;
-		while (scaled >> (lg + 1u))
-			lg++;
-		/* lg is floor(log2()); the remainder interpolates linearly
-		 * between it and the next power, which is accurate to well
-		 * under the eighth of a bit this is measured in. */
-		{
-			uint64_t base = (uint64_t)1 << lg;
-			uint64_t frac = ((scaled - base) << 3) / base;
-
-			acc += n * (((uint64_t)lg << 3) + frac - (8u << 3));
-		}
-	}
-	return (unsigned)(acc / total);
+	/* One implementation, in kofeng.c, because the tools show this number
+	 * beside a region and were about to grow a second copy of it. */
+	return (unsigned)kof_entropy_hist(hist, total);
 }
 
 /*

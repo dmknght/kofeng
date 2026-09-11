@@ -620,8 +620,55 @@ int         kof_engine_multimatch(const kof_engine *, uint64_t *bytes,
  * stays where it is, exactly as the rule beside it in kofpack.h requires:
  * that number moves when the LAYOUT moves and not when the engine grows a
  * capability. A rebuild is needed; a refusal is not.
+ *
+ * 3 - objects that are not files: memory, events, and what they carry.
+ *
+ * The theme is that an object need no longer have come off a disk, and a rule
+ * need no longer be about the bytes alone. What a caller can do that it could
+ * not before:
+ *
+ *   SCAN AN IMAGE THE LOADER MAPPED. enum kof_pe_layout tells the PE parse
+ *   which of the two layouts a section table describes, so the scan regions of
+ *   an image read out of a process resolve to the right bytes - they resolved
+ *   to other sections' bytes before, with no error anywhere. kof_pe_unmap turns
+ *   one back into a file, undoing the loader's base relocations, which is what
+ *   makes the file corpus apply to a module that was never written to disk.
+ *
+ *   TELL A PARSER WHAT THE BYTES CANNOT SAY. kof_scan_option.as_view carries
+ *   the declared inputs a parse needs and cannot read - where a submission's
+ *   content sits inside a collected record, which layout an image is in - and
+ *   the declared path now wipes the view per object, which it did not, so one
+ *   object stopped inheriting the last one's answers.
+ *
+ *   NAME THE PARTS OF A .NET ASSEMBLY, wherever it is carried. The CLR region
+ *   bits in kofmod/clr.h mean the same thing in every format that can host an
+ *   assembly, so a rule about a type name is written once; PE resolves them
+ *   today, and the metadata reader itself knows nothing about PE.
+ *
+ *   OPEN WHAT AN EVENT CARRIED. An AMSI submission that IS an executable
+ *   declares it as an entry, so the engine's ordinary declared-children walk
+ *   opens it as a PE child - by the same road a zip member takes, instead of a
+ *   second scan of the same bytes under the event's own name.
+ *
+ *   ASK ABOUT A REGION WITHOUT READING IT. region_shape answers how a region is
+ *   laid out - how many runs, how long the longest, where it starts - and
+ *   region_entropy and entropy_at answer what kind of bytes are in one. A rule
+ *   could ask what a region CONTAINED and could not ask either of those, and
+ *   could not compute them: the bytes are scattered and a module has no
+ *   writable data to keep a histogram in.
+ *
+ *   SAY THAT A FINDING IS ABOUT THIS OBJECT. KOF_ENG_KEEP_ON_OPEN. A rule's
+ *   heuristic is dropped when the object produces children, which is right for
+ *   a rule that means "I could not identify this" and deletes the finding of
+ *   one that means "this carries something" - the child is an ordinary file
+ *   that nothing fires on, so there is no leaf for the signal to move to.
+ *
+ * THE DATABASE FORMAT DID NOT MOVE HERE EITHER, and for the same reason: a bit
+ * in heur_want, bits in the scan mask that no format used, values in the
+ * subtype mask, and fields appended to view structs that only grow at the end.
+ * KOF_PACK_MINOR stays at 1. A rebuild is needed; a refusal is not.
  */
-#define KOFENG_MINOR 2u
+#define KOFENG_MINOR 3u
 
 /* The Makefile passes the real stamp; this only keeps a stray compilation
  * building, the same way KOF_PACK_BUILD does. */
@@ -1071,6 +1118,40 @@ int kof_scan_path(kof_scanner *, const char *path, const struct kof_scan_option 
  *
  * Returns the number of objects scanned, or a KOF_ERR_*.
  */
+/*
+ * SHANNON ENTROPY OF A BUFFER, IN EIGHTHS OF A BIT - 0 to 64.
+ *
+ * Public because three places need the same number and were about to have three
+ * of them: the emulator's gate uses it to decide whether a segment looks
+ * encrypted, and both tools want it beside a region's size, where it is the
+ * cheapest thing that separates code from compressed data from padding.
+ *
+ * EIGHTHS AND NOT A DOUBLE, and the engine computes it without floating point
+ * at all: an integer log2 plus a linear correction, which is accurate to well
+ * under the eighth of a bit it reports and is checked against the float version
+ * in tests/unit/emu_gate.c. A host that wants to print bits divides by 8.0.
+ *
+ * IT IS A SHAPE AND NEVER A VERDICT. 7.9 bits is a compressed archive, an
+ * encrypted payload, and a JPEG; 1.0 is padding and also a long run of one
+ * instruction. What it is good for is telling a reader which region to look at
+ * first, and telling a gate which region is not worth interpreting.
+ *
+ * Zero for an empty buffer, which is honest: no bytes carry no information.
+ */
+uint32_t kof_entropy_eighths(const void *bytes, uint64_t n);
+
+/*
+ * The same number from a histogram somebody already has.
+ *
+ * Two entry points because there are two ways the count arrives and neither is
+ * free: a caller measuring one buffer wants the wrapper above, and a caller
+ * sliding a window over a segment maintains the histogram incrementally and
+ * would pay a full recount per step to use it. `total` is the sum of the
+ * buckets and is passed rather than recomputed, since the sliding caller
+ * already knows it.
+ */
+uint32_t kof_entropy_hist(const uint32_t hist[256], uint64_t total);
+
 int kof_scan_path_mt(kof_scanner **, unsigned n_scanners, const char *path,
 		     const struct kof_scan_option *, kof_on_object cb, void *user);
 
