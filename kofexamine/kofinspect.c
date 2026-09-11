@@ -47,6 +47,7 @@
  */
 #include "../libkofeng/kofparsers/binaries/elf_parse.h"
 #include "../libkofeng/kofparsers/binaries/pe_parse.h"
+#include "../libkofeng/kofparsers/events/amsi_parse.h"
 
 /* ---- the formats, and how to get a view of one ---------------------------- */
 
@@ -274,6 +275,12 @@ const char *kof_inspect_subtype_name(uint8_t fmt, uint8_t sub)
 		case KOF_PE_DLL: return "DLL";
 		case KOF_PE_SYS: return "SYS";
 		default:         return "?";
+		}
+	if (fmt == KOF_EVT_AMSI)
+		switch (sub) {
+		case KOF_AMSI_IMAGE:   return "image";
+		case KOF_AMSI_COMMAND: return "command";
+		default:               return 0;
 		}
 	return 0;
 }
@@ -1431,6 +1438,76 @@ void kof_inspect_event(const struct kof_evt *e,
 }
 
 /* ---- what built an object ------------------------------------------------ */
+
+/* One heap row, or nothing when the heap is absent. */
+static void clr_row(const struct kof_inspect_style *st, kof_inspect_line out,
+		    void *user, const char *name,
+		    const struct kof_clr_stream *s)
+{
+	char line[256];
+
+	if (!s->len)
+		return;
+	snprintf(line, sizeof line, "  %s%-11s %s0x%llx  %llu byte(s)",
+		 sty(st ? st->id : NULL), name, sty(st ? st->off : NULL),
+		 (unsigned long long)s->off, (unsigned long long)s->len);
+	out(user, line);
+}
+
+void kof_inspect_dotnet(const struct kof_obj_ctx *ctx, const void *info,
+			const struct kof_inspect_style *st,
+			kof_inspect_line out, void *user)
+{
+	const struct kof_pe_info *p;
+	const struct kof_clr_meta *m;
+	char line[256];
+	unsigned i;
+
+	if (!ctx || !info || !out || ctx->format != KOF_FMT_PE)
+		return;
+	p = info;
+	m = &p->clr;
+	if (!kof_clr_present(m))
+		return;
+
+	snprintf(line, sizeof line,
+		 "  %s%-11s %s0x%llx  %u stream(s)%s",
+		 sty(st ? st->id : NULL), "metadata", sty(st ? st->off : NULL),
+		 (unsigned long long)m->root_off, (unsigned)m->streams_read,
+		 m->streams_read < m->streams ? "  (fewer than declared)" : "");
+	out(user, line);
+
+	clr_row(st, out, user, "#~", &m->tables);
+	clr_row(st, out, user, "#Strings", &m->strings);
+	clr_row(st, out, user, "#US", &m->us);
+	clr_row(st, out, user, "#Blob", &m->blob);
+	clr_row(st, out, user, "#GUID", &m->guid);
+
+	if (m->res_len) {
+		snprintf(line, sizeof line,
+			 "  %s%-11s %s0x%llx  %llu byte(s)",
+			 sty(st ? st->id : NULL), "resources",
+			 sty(st ? st->off : NULL),
+			 (unsigned long long)m->res_off,
+			 (unsigned long long)m->res_len);
+		out(user, line);
+	}
+
+	/*
+	 * The anomalies, spelled out rather than as a hex word. They are the
+	 * difference between "this heap is empty" and "this heap is somewhere
+	 * this object does not reach", and a reader cannot tell those apart
+	 * from the rows above.
+	 */
+	for (i = 0; i < KOF_CLR_ANOM_COUNT; i++) {
+		if (!(m->anomalies & (1u << i)))
+			continue;
+		snprintf(line, sizeof line, "  %s%-11s %s%s",
+			 sty(st ? st->warn : NULL), "", sty(st ? st->warn : NULL),
+			 kof_clr_anomaly_name(i));
+		out(user, line);
+	}
+}
 
 void kof_inspect_toolchain(const struct kof_obj_ctx *ctx, const void *info,
 			   kof_buf bytes,

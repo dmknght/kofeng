@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "pe_parse.h"
+#include "clr_parse.h"
 #include "../rangelist.h"
 
 /* Offsets within the structures, so the reads below read as the spec does. */
@@ -152,6 +153,29 @@ static uint32_t pe_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 	if (mask & KOF_SCAN_PE_OVERLAY)
 		kof_rl_add(&l, ctx->obj_size, p->overlay_off, p->overlay_len);
 
+	/*
+	 * THE .NET HEAPS BELONG TO NOBODY ELSE.
+	 *
+	 * Taken out of whatever was added above - which in practice is the code
+	 * section, because that is where a compiler puts them - before they are
+	 * added as themselves. Unconditional on the mask: a caller asking only
+	 * for CODE must not be handed the string heaps under that name, whether
+	 * or not it also asked for them.
+	 *
+	 * What is left of .text after this is the part that really is code: the
+	 * IL method bodies in front of the metadata, and the native stub.
+	 */
+	if (kof_clr_present(&p->clr)) {
+		struct kof_range cut[KOF_CLR_CLAIM_MAX];
+		uint32_t cn = kof_clr_claims(&p->clr, cut, KOF_CLR_CLAIM_MAX);
+
+		if (cn)
+			kof_rl_subtract(&l, cut, cn);
+	}
+
+	if (mask & KOF_SCAN_CLR_CLAIMED)
+		kof_clr_add_ranges(&p->clr, mask, &l, ctx->obj_size);
+
 	if (mask & KOF_SCAN_PE_UNCLAIMED) {
 		/*
 		 * The complement of every other region, obtained by asking for
@@ -168,7 +192,11 @@ static uint32_t pe_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 		 * and normalised before it can be inverted, and it is larger than
 		 * the result.
 		 */
-		struct kof_range cv[KOF_PE_MAX_SECTIONS + 3];
+		/* Twice the sections, because kof_rl_subtract splits a
+		 * section the metadata sits inside into two, plus the .NET
+		 * claims themselves and the four singletons. */
+		struct kof_range cv[KOF_PE_MAX_SECTIONS * 2u +
+				    KOF_CLR_CLAIM_MAX + 4u];
 		struct kof_rlist c;
 
 		kof_rl_init(&c, cv, (uint32_t)(sizeof cv / sizeof cv[0]));
@@ -461,6 +489,20 @@ static uint64_t settle_claims(struct kof_pe_info *p, uint64_t obj_size)
 	 * object has and something must own them, or the partition has a hole
 	 * exactly where an unpacker likes to write.
 	 */
+	/*
+	 * THE .NET HEAPS ARE NOT CLAIMANTS HERE, and the reason is a property of
+	 * settling rather than a decision about metadata.
+	 *
+	 * kof_rl_settle resolves a collision by trimming the front of whichever
+	 * claimant starts later, which cannot express a claimant that sits
+	 * STRICTLY INSIDE another - and that is exactly where a compiler puts
+	 * the metadata: in the middle of .text, IL method bodies in front of it.
+	 * Settled, .text reached the bytes first and every heap came back empty,
+	 * and the heaps were then inside CODE as well as inside themselves.
+	 *
+	 * They are taken out of the sections at RESOLVE time instead, where a
+	 * range can become two. See kof_rl_subtract and pe_resolve_scan.
+	 */
 	for (i = 0; i < p->sec_count && n < cap; i++) {
 		uint64_t off, len;
 
@@ -584,6 +626,16 @@ int kof_pe_sniff(kof_buf file)
  * are dropped by every caller, because a parse returning 0 takes its half
  * filled view with it. That would then be worth plumbing out; today it is not.
  */
+/*
+ * RVA to offset, for the .NET reader, which cannot do this itself: the answer
+ * comes out of the section table and differs between a file and a mapped image.
+ * See kof_pe_rva_to_off and enum kof_pe_layout.
+ */
+static uint64_t pe_rva_thunk(const void *user, uint64_t rva)
+{
+	return kof_pe_rva_to_off((const struct kof_pe_info *)user, rva);
+}
+
 int kof_pe_parse(kof_buf file, struct kof_pe_info *info, struct kof_obj_ctx *ctx)
 {
 	uint64_t nt, opt, sectab, dirbase, last_end;
@@ -755,6 +807,14 @@ int kof_pe_parse(kof_buf file, struct kof_pe_info *info, struct kof_obj_ctx *ctx
 	read_sections(file, info, sectab);
 	resolve_resource(info, file.n);
 	resolve_clr(info, file, file.n);
+	/*
+	 * The heaps, if this is a managed image. After resolve_clr because that
+	 * is what found the runtime header, and before settle_claims because
+	 * the heaps are claimants - see the note there.
+	 */
+	if (info->clr_off)
+		(void)kof_clr_read(file, info->clr_off, pe_rva_thunk, info,
+				   &info->clr);
 	last_end = settle_claims(info, file.n);
 	resolve_entry(info, ctx);
 
@@ -841,6 +901,12 @@ _Static_assert(sizeof kof_pe_region_bits / sizeof kof_pe_region_bits[0] ==
 
 const char *kof_pe_region_name(uint32_t bit)
 {
+	/* The .NET bits are not PE's to name: they mean the same in every format
+	 * that hosts an assembly, so one namer answers for all of them. */
+	const char *clr = kof_clr_region_name(bit);
+
+	if (clr)
+		return clr;
 	switch (bit) {
 	PE_REGIONS(X_CASE)
 	default: return 0;

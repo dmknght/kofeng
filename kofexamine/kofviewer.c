@@ -13355,6 +13355,13 @@ static void prop_toolchain(const struct object *ob)
 		return;
 	kof_inspect_toolchain(&ob->ctx, ob->info, ob->buf, &style,
 			      prop_sink, NULL);
+	/*
+	 * And where its metadata is, when it is managed. Beside the toolchain
+	 * rows because the two answer the same reader's next two questions -
+	 * what built this, and what is in it - and because a heap offset is
+	 * useless without knowing the image is .NET at all.
+	 */
+	kof_inspect_dotnet(&ob->ctx, ob->info, &style, prop_sink, NULL);
 }
 
 static void prop_object_rows(struct view *v, const struct object *ob, int full)

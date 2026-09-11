@@ -19,6 +19,11 @@
  * This covers whether the parse tells the host the truth about what to run.
  */
 
+/* _GNU_SOURCE, not _POSIX_C_SOURCE: this file includes kofplatform.h, whose
+ * POSIX kof_memmem calls glibc memmem - a GNU extension that strict POSIX mode
+ * hides, along with lstat and realpath. */
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

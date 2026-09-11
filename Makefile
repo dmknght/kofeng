@@ -861,6 +861,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofdisasm/xref.c \
            libkofeng/kofparsers/binaries/pe_sym.c \
            libkofeng/kofparsers/binaries/pe_parse.c \
+           libkofeng/kofparsers/binaries/clr_parse.c \
            libkofeng/kofparsers/containers/gzip_parse.c \
            libkofeng/kofparsers/containers/docole_parse.c \
            libkofeng/kofparsers/containers/zip_parse.c \
@@ -1037,7 +1038,9 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/rar.h \
            $(SDK)/include/kofmod/xz.h \
            $(SDK)/include/kofmod/rtf.h \
-           $(SDK)/include/kofmod/pdf.h
+           $(SDK)/include/kofmod/pdf.h \
+           $(SDK)/include/kofmod/amsi.h \
+           $(SDK)/include/kofmod/clr.h
 
 $(SDK)/include/kofeng.h: libkofeng/kofeng.h
 	@$(call MKDIR,$(dir $@))

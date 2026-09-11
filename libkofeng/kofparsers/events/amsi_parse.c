@@ -67,6 +67,70 @@ static uint32_t amsi_resolve_scan(const struct kof_obj_ctx *ctx,
 	return n;
 }
 
+/*
+ * The entry table, which holds at most one row and usually none.
+ *
+ * Reached through ctx->entries, so the engine's declared-children walk opens it
+ * the same way it opens a zip member or a PDF attachment - see objtree.h. There
+ * is no AMSI-shaped path through the engine and there must not be one.
+ */
+static uint32_t amsi_entries(const struct kof_obj_ctx *ctx,
+			     const struct kof_entry **out)
+{
+	const struct kof_amsi_view *v = ctx ? ctx->file_header : NULL;
+
+	if (!v || !out)
+		return 0;
+	*out = v->ent;
+	return v->n_ent;
+}
+
+/*
+ * IS THE SUBMISSION AN EXECUTABLE.
+ *
+ * Three reads at fixed places and no search: the MZ, the offset it points at,
+ * and the signature there. That is the same test the PE sniff makes, applied
+ * once at the one offset where a submitted executable starts, rather than swept
+ * across bytes that are a PowerShell script in twenty-eight cases out of thirty.
+ *
+ * The length declared is ALL THE REMAINING CONTENT and not a size computed from
+ * the header. A submission is routinely shorter than the file it came from -
+ * the provider hands over what it has - so a computed size would either reach
+ * past the buffer or cut off an overlay that is present. What the submission
+ * holds from the header on is exactly known, and it is the honest extent.
+ */
+static void declare_carried(struct kof_amsi_view *v, kof_buf b)
+{
+	uint16_t mz = 0;
+	uint32_t lfanew = 0, sig = 0;
+
+	v->n_ent = 0;
+	if (v->obj_len < 0x40u)
+		return;
+	if (!kof_rd_u16(b, v->obj_off, 0, &mz) || mz != 0x5a4du)
+		return;
+	if (!kof_rd_u32(b, v->obj_off + 0x3cu, 0, &lfanew))
+		return;
+	if (lfanew < 0x40u || lfanew > v->obj_len - 4u)
+		return;
+	if (!kof_rd_u32(b, v->obj_off + lfanew, 0, &sig) || sig != 0x00004550u)
+		return;   /* "PE\0\0" little endian */
+
+	memset(&v->ent[0], 0, sizeof v->ent[0]);
+	v->ent[0].off  = v->obj_off;
+	v->ent[0].len  = v->obj_len;
+	v->ent[0].kind = KOF_ENT_EMBEDDED;
+	/*
+	 * The format is DECLARED because it was checked, not guessed. The parse
+	 * it names still runs and may still refuse - a truncated or hostile
+	 * image comes back unidentified exactly as a failed sniff would - so
+	 * saying so costs nothing and lets a host that has no PE module decline
+	 * the child before it opens it.
+	 */
+	v->ent[0].format = KOF_FMT_PE;
+	v->n_ent = 1;
+}
+
 int kof_amsi_parse(kof_buf b, void *view, struct kof_obj_ctx *ctx)
 {
 	struct kof_amsi_view *v = view;
@@ -88,11 +152,22 @@ int kof_amsi_parse(kof_buf b, void *view, struct kof_obj_ctx *ctx)
 		v->obj_len = b.n - v->obj_off;
 
 	v->size = b.n;
+	declare_carried(v, b);
 
 	ctx->format       = KOF_EVT_AMSI;
+	/*
+	 * WHICH OF THE TWO THINGS THIS IS, so a module is not offered the other
+	 * one. An image was proved by declare_carried; anything else with
+	 * content is text a host was about to run, which is what a submission
+	 * IS when it is not a file. See enum kof_amsi_kind.
+	 */
+	ctx->subtype      = v->n_ent ? (uint8_t)KOF_AMSI_IMAGE
+				     : (uint8_t)(v->obj_len ? KOF_AMSI_COMMAND
+							    : KOF_AMSI_UNKNOWN);
 	ctx->obj_size     = b.n;
 	ctx->file_header  = v;
 	ctx->resolve_scan = amsi_resolve_scan;
+	ctx->entries      = v->n_ent ? amsi_entries : NULL;
 	return 1;
 }
 

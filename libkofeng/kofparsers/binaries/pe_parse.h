@@ -15,6 +15,8 @@
 
 #include <kofmod/pe.h>
 #include <kofmod/kofsig.h>
+/* For CLR_REGIONS, which PE_REGIONS below splices into its own list. */
+#include <kofmod/clr.h>
 #include "../../core/kofcore.h"
 
 /*
@@ -71,6 +73,18 @@ const char *kof_pe_anomaly_name(unsigned index);
  * with, in its own words, no build-time check that it had not fallen
  * behind. Now there is one list and one place to add to. */
 /* The regions, once: bit list and names generated from the same line each. */
+/*
+ * THE CLR REGIONS ARE IN THIS LIST AND ARE NOT PE'S OWN.
+ *
+ * They are declared in kofmod/clr.h, they keep their bit numbers in every
+ * format that can host an assembly, and they are here because PE is the format
+ * that hosts one today - ECMA-335 puts .NET metadata inside a PE, so this is
+ * where it is met. An ELF that learns to carry an assembly appends the same
+ * CLR_REGIONS to its own list and nothing else changes.
+ *
+ * They are empty for a native image, which is most of them, and a region that
+ * resolves to nothing costs a caller nothing.
+ */
 #define PE_REGIONS(X)           \
 	X(KOF_SCAN_PE_HEADERS)    \
 	X(KOF_SCAN_PE_CODE)       \
@@ -78,9 +92,10 @@ const char *kof_pe_anomaly_name(unsigned index);
 	X(KOF_SCAN_PE_RESOURCE)   \
 	X(KOF_SCAN_PE_SIGNATURE)  \
 	X(KOF_SCAN_PE_OVERLAY)    \
+	CLR_REGIONS(X)            \
 	X(KOF_SCAN_PE_UNCLAIMED)
 
 extern const uint32_t kof_pe_region_bits[];
-#define KOF_PE_REGION_COUNT 7u   /* asserted against the array in the .c */
+#define KOF_PE_REGION_COUNT 13u  /* asserted against the array in the .c */
 
 #endif /* KOFENG_PE_PARSE_H */

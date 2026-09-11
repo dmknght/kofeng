@@ -90,6 +90,7 @@
 #include <kofmod/kofsig.h>   /* KOF_SCAN_ALL, the per-module maxima */
 #include <kofmod/elf.h>      /* the ELF region names a range may be built from */
 #include <kofmod/pe.h>       /* and the PE image kinds, for --subtype-mask */
+#include <kofmod/amsi.h>     /* and what an AMSI submission is */
 #include <kofmod/heur.h>     /* the phases and want-bits a rule may declare */
 /* The region lists, one per format: rgn_names[] below is generated from them
  * rather than restating them. */
@@ -1500,6 +1501,7 @@ static void resolve_subtype(void)
 	const char *p = d->arg;
 	int want_elf = (g_target_mask & (1u << KOF_FMT_ELF)) != 0;
 	int want_pe = (g_target_mask & (1u << KOF_FMT_PE)) != 0;
+	int want_amsi = (g_target_mask & (1u << KOF_EVT_AMSI)) != 0;
 
 	if (!d->count)
 		return;
@@ -1525,6 +1527,14 @@ static void resolve_subtype(void)
 				snprintf(msg, sizeof msg,
 					 "KOF_TARGET_SUBTYPE names %s but the "
 					 "module does not target PE", one);
+				err(d->line, msg);
+				return;
+			}
+		} else if (kof_amsi_kind_from_name(one, &v)) {
+			if (!want_amsi) {
+				snprintf(msg, sizeof msg,
+					 "KOF_TARGET_SUBTYPE names %s but the "
+					 "module does not target AMSI", one);
 				err(d->line, msg);
 				return;
 			}

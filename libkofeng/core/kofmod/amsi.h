@@ -30,6 +30,9 @@
 #ifndef KOFMOD_AMSI_H
 #define KOFMOD_AMSI_H
 
+/* For kof_streq_, which every from_name helper in this directory uses. */
+#include <kofmod/kofsig.h>
+
 /*
  * Bit 0 is left alone, as it is for every other format here: KOF_SCAN_ALL is
  * the mask that means "everything" and a region sharing its bit could not be
@@ -66,5 +69,55 @@ enum kof_scan_amsi {
 #define AMSI_REGIONS(X)       \
 	X(KOF_SCAN_AMSI_META) \
 	X(KOF_SCAN_AMSI_OBJ)
+
+/*
+ * WHAT WAS SUBMITTED, AS A SUBTYPE - the third prefilter axis, beside format
+ * and architecture. See ctx->subtype in kofsig.h for why this is an axis rather
+ * than two more formats.
+ *
+ * There are two things a provider hands to AMSI and they have nothing in
+ * common but the API they arrive through.
+ *
+ * One is an EXECUTABLE IMAGE: a .NET assembly on its way to Assembly.Load, a
+ * native image a loader is about to map. It is a file, it has a file's
+ * structure, and every rule ever written for that format applies to it - which
+ * is why the parse declares it as a child rather than only marking it here.
+ *
+ * The other is COMMAND TEXT: a PowerShell script block, a command line, a WSH
+ * script, a VBA macro body. Text a host is about to execute, and the place
+ * where deobfuscation work belongs - which is a completely different kind of
+ * module from anything that reads a file header.
+ *
+ * MARKING WHICH ONE SAVES THE WORK, and that is the point of putting it on this
+ * axis. Measured on a real trace: 30 submissions, 2 images, 28 command text. A
+ * deobfuscator that targets COMMAND is not offered the 2, and an image rule is
+ * not offered the 28, and neither has to open an object to find that out.
+ *
+ * UNKNOWN is what a submission with no content is, and it is a real answer
+ * rather than a failure: a provider may submit an empty buffer.
+ */
+#define KOF_AMSI_KIND_LIST(X)                                                \
+	X(KOF_AMSI_UNKNOWN, 0)                                               \
+	X(KOF_AMSI_IMAGE,   1)   /* an executable, declared as a child too */ \
+	X(KOF_AMSI_COMMAND, 2)   /* script or command text about to run */
+
+enum kof_amsi_kind {
+#define KOF_AMSI_KIND_X(name, val) name = val,
+	KOF_AMSI_KIND_LIST(KOF_AMSI_KIND_X)
+#undef KOF_AMSI_KIND_X
+	KOF_AMSI_KIND_COUNT = 3
+};
+
+/* The identifier a signature source writes, to its value - the same shape
+ * kof_pe_image_from_name has, so the build tool asks this header rather than
+ * carrying a copy of the list. */
+static inline int kof_amsi_kind_from_name(const char *s, uint32_t *out)
+{
+#define KOF_AMSI_X_FROM(name, val)                                           \
+	if (kof_streq_(s, #name)) { *out = (uint32_t)(val); return 1; }
+	KOF_AMSI_KIND_LIST(KOF_AMSI_X_FROM)
+#undef KOF_AMSI_X_FROM
+	return 0;
+}
 
 #endif /* KOFMOD_AMSI_H */

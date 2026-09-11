@@ -687,6 +687,27 @@ void kof_inspect_event_verbs(const uint64_t *count, uint32_t keep,
  *
  * Emits nothing when the format has nothing to say, which is most of them.
  */
+/*
+ * WHERE THE .NET METADATA IS, one line per heap.
+ *
+ * A separate call from kof_inspect_toolchain, which answers a different
+ * question: that one says WHAT BUILT the image - the runtime version, the
+ * metadata version, the linker stamp - and this says WHAT IS IN IT and where.
+ * A reader asks the first before they have decided the sample is interesting
+ * and the second once they have.
+ *
+ * The heaps are also the only rows that say anything about a truncated
+ * assembly: a submission cut short by its provider has heaps declared past its
+ * own end, and a run of zero-length rows is how that looks - which is worth
+ * seeing, because it is also the reason a rule for one of them did not fire.
+ *
+ * Emits nothing for a native image, which is every image that is not managed.
+ * `info` is the format's view, as kof_inspect_toolchain takes it.
+ */
+void kof_inspect_dotnet(const struct kof_obj_ctx *ctx, const void *info,
+			const struct kof_inspect_style *,
+			kof_inspect_line out, void *user);
+
 void kof_inspect_toolchain(const struct kof_obj_ctx *ctx, const void *info,
 			   kof_buf bytes,
 			   const struct kof_inspect_style *st,

@@ -173,6 +173,78 @@ static inline void kof_rl_complement(struct kof_rlist *out,
 }
 
 /*
+ * Take `cut` out of every range in `l`.
+ *
+ * WHY SUBTRACTION EXISTS BESIDE SETTLING, since both are about two claimants
+ * wanting the same bytes.
+ *
+ * kof_rl_settle resolves a collision by TRIMMING THE FRONT of the later
+ * claimant: the earlier one keeps the bytes and the later one starts after it.
+ * That is right when the two overlap at an edge, which is how the collisions it
+ * was written for look - a section starting inside the headers, a certificate
+ * pointing into a section.
+ *
+ * It cannot express a claimant that sits STRICTLY INSIDE another, because the
+ * answer there is not a shorter range, it is TWO ranges. The .NET metadata is
+ * exactly that: a compiler puts the heaps in the middle of .text, with IL
+ * method bodies before them and often more after. Settled, the section reached
+ * first and the heaps came back empty; the bytes were then in the section's
+ * region and in their own, which is the one thing a partition forbids.
+ *
+ * So the inner claimant is taken out of the outer one here, at resolve time,
+ * where a list can grow. `l` may gain up to one entry per range it holds, so a
+ * caller must leave room; a split that does not fit is dropped rather than
+ * half-applied, because half a subtraction leaves the overlap it was removing.
+ *
+ * `cut` need not be sorted and may overlap itself.
+ */
+static inline void kof_rl_subtract(struct kof_rlist *l,
+				   const struct kof_range *cut, uint32_t n_cut)
+{
+	uint32_t i, k;
+
+	for (k = 0; k < n_cut; k++) {
+		uint64_t cs = cut[k].off, ce = cut[k].off + cut[k].len;
+
+		if (!cut[k].len)
+			continue;
+		for (i = 0; i < l->n; i++) {
+			uint64_t rs = l->v[i].off, re = rs + l->v[i].len;
+
+			if (ce <= rs || cs >= re)
+				continue;               /* disjoint */
+			if (cs <= rs && ce >= re) {
+				l->v[i].len = 0;        /* swallowed whole */
+				continue;
+			}
+			if (cs <= rs) {                 /* trimmed at the front */
+				l->v[i].off = ce;
+				l->v[i].len = re - ce;
+				continue;
+			}
+			if (ce >= re) {                 /* trimmed at the back */
+				l->v[i].len = cs - rs;
+				continue;
+			}
+			/* Strictly inside: the range becomes two. */
+			l->v[i].len = cs - rs;
+			if (l->n < l->cap) {
+				l->v[l->n].off = ce;
+				l->v[l->n].len = re - ce;
+				l->n++;
+			}
+		}
+	}
+
+	/* Drop what was emptied, so a later complement does not see zero-length
+	 * ranges and treat their offsets as boundaries. */
+	for (i = 0, k = 0; i < l->n; i++)
+		if (l->v[i].len)
+			l->v[k++] = l->v[i];
+	l->n = k;
+}
+
+/*
  * One structure's claim on part of an object, before and after settling.
  *
  * `rank` breaks a tie when two claimants start at the same offset, and lower

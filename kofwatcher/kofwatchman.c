@@ -201,31 +201,26 @@ static void scan_submission(kof_scanner *sc, struct kof_evt_join *j,
 	hits->e = head;
 
 	/*
-	 * TWICE, AND THE TWO ASK DIFFERENT QUESTIONS.
+	 * ONCE, DECLARED, and the second pass this used to make is gone.
 	 *
-	 * As the bytes SNIFF: a submission that carries an executable is that
-	 * executable, and it wants the modules any executable would get. This
-	 * is the pass that finds a Meterpreter image inside an AMSI event, and
-	 * it is the model a zip entry already uses - the container hands over
-	 * bytes and what they ARE is the engine's question.
+	 * A submission is not a file format - a script block sniffs as nothing -
+	 * so without a declaration every rule written about a submission is
+	 * filtered out before it runs. The caller is the only side that knows
+	 * what this is, and as_format is how it says.
 	 *
-	 * As the FORMAT IT IS: a script block is not a file format and sniffs
-	 * as nothing, so without a declaration every rule written about a
-	 * submission is filtered out before it runs. The caller is the only
-	 * side that knows what this is, and as_format is how it says.
+	 * It used to scan a second time WITHOUT the declaration, so that a
+	 * submission carrying an executable would sniff as that executable and
+	 * reach the modules any executable gets. That was a stopgap and it is
+	 * no longer needed: the AMSI parse now DECLARES the carried image as an
+	 * entry, and the engine's ordinary declared-children walk opens it as a
+	 * PE child of this object - which is the same answer a zip member gets,
+	 * arrived at by the same road. See declare_carried in amsi_parse.c.
 	 *
-	 * A STOPGAP, and worth naming as one. The engine's own answer to "a
-	 * container holding a file" is a child object, so the right shape is an
-	 * unpack-kind module targeting KOF_EVT_AMSI that emits the carried
-	 * image - and then one declared scan would reach both. Until that
-	 * exists, two passes over bytes already in memory is the cheap way not
-	 * to lose either half.
+	 * The second pass was not merely redundant, it was worse than this: it
+	 * scanned the whole submission as though the event's metadata were part
+	 * of the executable, and it reported the image under the event's own
+	 * name rather than as something the event carried.
 	 */
-	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
-	(void)kof_scan_bytes(sc, j->buf, (uint64_t)j->len, name, &opt,
-			     on_object, hits);
-
 	memset(&opt, 0, sizeof opt);
 	opt.all_matches = 1;
 	opt.as_format = KOF_EVT_AMSI;

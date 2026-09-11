@@ -40,6 +40,8 @@
 
 #include <stdint.h>
 #include <kofmod/kofsig.h>
+/* For struct kof_clr_meta, appended to the view below. */
+#include <kofmod/clr.h>
 
 #define KOF_PE_INFO_VERSION 1
 
@@ -191,7 +193,8 @@ enum kof_scan_pe {
  */
 #define KOF_SCAN_PE_CLAIMED (KOF_SCAN_PE_HEADERS | KOF_SCAN_PE_CODE |	\
 			     KOF_SCAN_PE_DATA | KOF_SCAN_PE_RESOURCE |	\
-			     KOF_SCAN_PE_SIGNATURE | KOF_SCAN_PE_OVERLAY)
+			     KOF_SCAN_PE_SIGNATURE | KOF_SCAN_PE_OVERLAY | \
+			     KOF_SCAN_CLR_CLAIMED)
 
 /* Section permissions, from IMAGE_SCN_MEM_*. Same bit meanings as the ELF view's
  * KOF_PERM_*, which is why they are spelled the same way. */
@@ -511,6 +514,21 @@ struct kof_pe_info {
 	 * object and buys not having to think about that again.
 	 */
 	uint32_t layout;
+
+	/*
+	 * THE .NET METADATA, when this image carries any.
+	 *
+	 * Appended for the reason `layout` was: a database is compiled against
+	 * this header and a module reads the struct by offset, so a field added
+	 * anywhere but the end moves every field after it.
+	 *
+	 * kof_clr_present(&info->clr) is the test for "this is a managed
+	 * image". The clr_* fields above are the runtime HEADER - the version
+	 * the image asks for, its entry token - and this is where its heaps
+	 * are; the two are separate because the first is 72 bytes at a
+	 * directory and the second is a structure somewhere else entirely.
+	 */
+	struct kof_clr_meta clr;
 };
 
 /* Non-zero when this view describes an image the loader has already mapped. */
