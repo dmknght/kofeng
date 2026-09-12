@@ -28,12 +28,36 @@
 #include <stdint.h>
 
 /*
- * ABI version. Append only: slots are never removed, reordered, or given new
- * meaning. The host refuses a module built against a newer version than its
- * own, which is why a module never has to check this itself - by the time it
- * runs, the guarantee already holds.
+ * ABI version, and it covers TWO things a module depends on: the vtable it
+ * calls through - struct kof_content - and the LAYOUT of every view struct it
+ * reads, kof_zip_info and the rest.
+ *
+ * TWO NUMBERS, BECAUSE THE TWO BREAK IN OPPOSITE DIRECTIONS.
+ *
+ * The vtable is append only: slots are never removed, reordered, or given new
+ * meaning. So an OLD module in a NEW host is safe by construction - every slot
+ * it knows is still where it was - and only the other direction is a hazard: a
+ * module built against a newer header calls a slot past the end of the host's
+ * table, which is a wild call out of a file. KOFSIG_ABI_VERSION is the ceiling
+ * that refuses it.
+ *
+ * A VIEW STRUCT IS NOT APPEND ONLY, and that is why a ceiling alone was not
+ * enough. When kof_zip_info's entry array became a pointer, every offset after
+ * it moved. An old module in a new host then makes NO wild call - it reads
+ * `z->entry[i]` at the offset its build put there, gets whatever now lives at
+ * that address, and reports on it. No crash, no refusal, no anomaly: a scanner
+ * quietly deciding on the wrong bytes, which is worse than one that stops.
+ *
+ * KOFSIG_ABI_MIN is the floor that refuses that. It is bumped to equal
+ * KOFSIG_ABI_VERSION whenever a view struct's layout changes, and left alone
+ * when only the vtable grows - so an engine update still reads databases built
+ * before it, which is the property the ceiling alone was protecting.
+ *
+ * BUMPING: add a vtable slot -> raise VERSION only. Move, resize or retype any
+ * field of any kof_*_info -> raise both.
  */
 #define KOFSIG_ABI_VERSION 2
+#define KOFSIG_ABI_MIN     2
 
 /*
  * How strongly a finding is asserted.
@@ -55,7 +79,23 @@ enum kof_level {
 	 * straight through; the two enums are one enum written twice, once for
 	 * each side of the ABI.
 	 */
-	KOF_LVL_HEUR    = 2
+	KOF_LVL_HEUR    = 2,
+
+	/*
+	 * FIRED FOR THE ACTION, NOT FOR A VERDICT - see KOF_HEUR_ACT.
+	 *
+	 * The rule's ask is honoured and NOTHING is reported. It is a LEVEL and
+	 * not a declaration on the module because the same rule needs both
+	 * answers on different objects: an ELF carrying a second file is a
+	 * reason to carve every time and a reason to conclude only when the
+	 * passenger is most of the file. One rule, one measurement, two
+	 * outcomes - which cannot be said in KOF_HEUR_WANT, because that is
+	 * read out of the source at build time and is the same on every object.
+	 *
+	 * Above KOF_LVL_HEUR in value and below it in meaning; nothing orders
+	 * these, the host branches on them.
+	 */
+	KOF_LVL_ACT     = 3
 };
 
 /*

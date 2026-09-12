@@ -224,4 +224,37 @@ void kof_heur(const struct kof_obj_ctx *ctx);
 		return;                                                     \
 	} while (0)
 
+/*
+ * FIRE FOR THE ACTION AND MAKE NO CLAIM.
+ *
+ * Same as KOF_HEUR_HIT in every respect but one: the rule's KOF_HEUR_WANT is
+ * honoured - the object is interpreted, or what it carries is opened - and NO
+ * finding is produced. Nothing is printed, nothing is counted, the file is
+ * still clean.
+ *
+ * WHY A RULE WANTS BOTH. Some shapes are a good reason to LOOK and a poor
+ * reason to CONCLUDE, and which one it is depends on the object rather than on
+ * the rule. "This ELF has a whole file glued to the end of it" is always worth
+ * carving the passenger out for, and is evidence of nothing by itself -
+ * /usr/bin/arj carries its own ARJ_SFX stub that way, and so does every
+ * self-extracting archive ever shipped. The same rule, on a file that is
+ * ninety percent passenger, is looking at a dropper.
+ *
+ * SO IT IS A CALL AND NOT A DECLARATION. KOF_HEUR_WANT is read out of the
+ * source at build time and is therefore the same on every object; the choice
+ * between acting and concluding is not. Splitting it into two rules over one
+ * shape was the alternative and it is worse in the way that matters: the same
+ * measurement is then computed twice per object, and the two copies of the
+ * threshold drift.
+ *
+ * The verdict for what was carved out is made by whatever comes OUT, which the
+ * engine scans and names on its own.
+ */
+#define KOF_HEUR_ACT()                                                      \
+	do {                                                                \
+		(ctx)->report((ctx), (uint32_t)KOF_LVL_ACT,                 \
+			      (uint32_t)__LINE__);                          \
+		return;                                                     \
+	} while (0)
+
 #endif /* KOFMOD_HEUR_H */

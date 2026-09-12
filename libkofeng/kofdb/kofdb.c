@@ -227,6 +227,26 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 		REFUSE("modules need ABI %u, this engine provides %u",
 		       h->abi_version, (unsigned)KOFSIG_ABI_VERSION);
 	/*
+	 * AND THE FLOOR, which is the half that was missing.
+	 *
+	 * The ceiling above catches a module that would call a vtable slot this
+	 * host does not have. It cannot catch the opposite hazard, because that
+	 * one makes no call at all: a module built before a VIEW STRUCT changed
+	 * shape reads `z->entry[i]` at the offset its build put there and gets
+	 * whatever now lives at that address. The pack loads, the checksum is
+	 * fine, every module runs - and the answers are drawn from the wrong
+	 * bytes. A scanner that decides wrongly in silence is worse than one
+	 * that refuses, so this refuses.
+	 *
+	 * Zero is a pack written before the field existed, which can only have
+	 * been ABI 1 - see kofpack.h - so it is compared like any other value
+	 * rather than waved through.
+	 */
+	if (h->abi_version < KOFSIG_ABI_MIN)
+		REFUSE("built against ABI %u, which this engine no longer "
+		       "reads (needs %u or newer) - rebuild the database",
+		       h->abi_version, (unsigned)KOFSIG_ABI_MIN);
+	/*
 	 * THE THREE VERSION RULES, and they are three different rules.
 	 *
 	 * major is the layout: anything but an exact match reads the wrong

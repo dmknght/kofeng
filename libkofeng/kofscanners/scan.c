@@ -1380,6 +1380,15 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 				*predict = pf;
 		}
 		/*
+		 * FIRED FOR THE ACTION, NOT FOR A VERDICT - see KOF_HEUR_ACT.
+		 * After `want`, so the ask it fired for is honoured, and after
+		 * the prediction, so the decoder it would have steered is
+		 * still steered. Before the finding, because the finding is
+		 * the whole of what it declines to make.
+		 */
+		if (sc->rep_level == (uint32_t)KOF_LVL_ACT)
+			continue;
+		/*
 		 * A NAMED FAMILY SUPERSEDES A GUESS ABOUT THE SHAPE, and the
 		 * rule is the same one the scored model follows a few functions
 		 * down. The ASK is not suppressed with it: whether the object

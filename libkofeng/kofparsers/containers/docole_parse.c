@@ -59,6 +59,7 @@
  * container's own structures outward to the document's.
  */
 
+#include <stddef.h>
 #include "docole_parse.h"
 #include "../../kofdecomp/ovba.h"
 #include "../runlist.h"
@@ -956,7 +957,56 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	uint64_t root_size = 0, eoff;
 	uint8_t root_type = 0;
 
-	memset(o, 0, sizeof *o);
+	/*
+	 * THE HEADER, THE SCALARS BETWEEN THE ARRAYS, AND THE ONE BITMAP:
+	 * 424 bytes instead of 62888. Same change as zip_parse.c, and the
+	 * fiddliest of the set because this view interleaves nine arrays with
+	 * the counts that bound them.
+	 *
+	 *        0 ..   152   head                    <- cleared
+	 *      152 .. 39064   run[] ent[] ent_run[]   <- skipped, count-bound
+	 *    39064 .. 39076   a count and padding     <- cleared
+	 *    39076 .. 52388   dif[] mfat[] mini[]     <- skipped, count-bound
+	 *    52388 .. 52644   seen[]                  <- CLEARED, see below
+	 *    52644 .. 60836   stack[]                 <- skipped, sp-bound
+	 *    60836 .. 60840   a count and padding     <- cleared
+	 *    60840 .. 62888   dirsec[]                <- skipped, count-bound
+	 *
+	 * seen[] IS THE EXCEPTION AND IT IS NOT OPTIONAL. It is a bitmap of
+	 * directory entries already visited, and it is READ BEFORE IT IS
+	 * WRITTEN - `if (o->seen[w] & b)`. Left dirty it carries the previous
+	 * document's visited set, and the walk then declares entries already
+	 * seen and stops early: a truncated object list with nothing to say it
+	 * was truncated. Every other array here is written before it is read
+	 * and bounded by a count that IS cleared.
+	 *
+	 * stack[] is skipped for exactly that reason - it is pushed before it
+	 * is popped and bounded by sp, which lives in the head.
+	 */
+	{
+		const size_t run_at  = offsetof(struct kof_docole_info, run);
+		const size_t ent_end = offsetof(struct kof_docole_info, ent_run)
+				       + sizeof o->ent_run;
+		const size_t dif_at  = offsetof(struct kof_docole_info, dif);
+		const size_t stk_end = offsetof(struct kof_docole_info, stack)
+				       + sizeof o->stack;
+		const size_t dir_at  = offsetof(struct kof_docole_info, dirsec);
+
+		_Static_assert(offsetof(struct kof_docole_info, dirsec) +
+			       sizeof ((struct kof_docole_info *)0)->dirsec ==
+			       sizeof(struct kof_docole_info),
+			       "kof_docole_info gained a field after dirsec[]: "
+			       "nothing below clears it");
+		_Static_assert(offsetof(struct kof_docole_info, seen) >
+			       offsetof(struct kof_docole_info, dif),
+			       "the docole view was reordered; the spans "
+			       "below no longer describe it");
+
+		memset(o, 0, run_at);
+		memset((char *)o + ent_end, 0, dif_at - ent_end);
+		memset(o->seen, 0, sizeof o->seen);
+		memset((char *)o + stk_end, 0, dir_at - stk_end);
+	}
 	o->version = KOF_DOCOLE_INFO_VERSION;
 
 	if (!kof_docole_sniff(file))

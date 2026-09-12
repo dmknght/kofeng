@@ -321,6 +321,29 @@ static void mut_abi(uint8_t *img, size_t *len)
 	HDR(img)->abi_version = KOFSIG_ABI_VERSION + 1u;
 }
 
+/*
+ * THE OTHER DIRECTION, and it is a different hazard rather than the same one
+ * mirrored.
+ *
+ * A pack from BEFORE a view struct changed shape makes no wild call: its
+ * modules read a field at the offset their build put there, and after a layout
+ * change that offset holds something else. Nothing crashes and nothing is
+ * refused - the scan simply decides on the wrong bytes. The ceiling above
+ * cannot see it, because the number is lower and not higher.
+ *
+ * Untestable while KOFSIG_ABI_MIN is 1: there is no value below it to write.
+ * The test says so rather than passing vacuously - a check that cannot fail is
+ * not evidence, and this one becomes real the moment a layout change bumps the
+ * floor.
+ */
+#if KOFSIG_ABI_MIN > 1
+static void mut_abi_old(uint8_t *img, size_t *len)
+{
+	(void)len;
+	HDR(img)->abi_version = KOFSIG_ABI_MIN - 1u;
+}
+#endif
+
 static void mut_machine(uint8_t *img, size_t *len)
 {
 	(void)len;
@@ -792,6 +815,9 @@ int main(void)
 		{ "major",         mut_major,             1 },
 		{ "minor_newer",   mut_minor_newer,       1 },
 		{ "abi",           mut_abi,               1 },
+#if KOFSIG_ABI_MIN > 1
+		{ "abi-too-old",   mut_abi_old,           1 },
+#endif
 		{ "machine",       mut_machine,           1 },
 		{ "machine_none",  mut_machine_none,      1 },
 		{ "kind",          mut_kind,              1 },
