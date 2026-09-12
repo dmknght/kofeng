@@ -63,7 +63,7 @@ static void usage(void)
 	      "\n"
 	      "  --channel NAME   publish under this name instead of the\n"
 	      "                   default, for running two sensors at once\n"
-	      "  --ring N         records in flight (default 16384, 512B each).\n"
+	      "  --ring N         records in flight (default 16384, 640B each).\n"
 	      "                   THIS IS THE MEMORY BUDGET: 16384 slots is 8MB,\n"
 	      "                   plus about 2MB of fixed tables. Nothing here\n"
 	      "                   grows under load and nothing allocates on the\n"

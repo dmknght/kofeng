@@ -225,6 +225,7 @@ const char *kofw_provider_name(uint8_t prov)
 	 * working path.
 	 */
 	case KOFW_PROV_AMSI:    return "amsi";
+	case KOFW_PROV_DNS:     return "dns";
 	default:                return "?";
 	}
 }
@@ -241,6 +242,7 @@ const char *kofw_sub_name(uint32_t one_bit)
 	case KOFW_SUB_THREAD:     return "thread";
 	case KOFW_SUB_FILE_OPEN:  return "file-open";
 	case KOFW_SUB_AMSI:       return "amsi";
+	case KOFW_SUB_DNS:        return "dns";
 	default:                  return "";
 	}
 }
@@ -332,8 +334,8 @@ void kofw_evt_to_kof(const struct kofw_evt *in, struct kof_evt *out)
 		struct kof_evt_net *nt = kof_evt_set_net(out);
 
 		if (nt) {
-			nt->daddr = in->net_daddr;
-			nt->saddr = in->net_saddr;
+			memcpy(nt->daddr, in->net_daddr, sizeof nt->daddr);
+			memcpy(nt->saddr, in->net_saddr, sizeof nt->saddr);
 			nt->size  = in->net_size;
 			nt->dport = in->net_dport;
 			nt->sport = in->net_sport;
@@ -348,8 +350,12 @@ void kofw_evt_to_kof(const struct kofw_evt *in, struct kof_evt *out)
 			 * file event - see KOFW_FLD_FILE_KEY - and `net_size`
 			 * was where a write's length went. Both get names
 			 * here. */
-			fl->key  = in->addr;
-			fl->size = in->net_size;
+			fl->key    = in->addr;
+			fl->size   = in->net_size;
+			/* The write's offset, which arrives in a field of its
+			 * own on both sides precisely so that neither of the
+			 * two borrowings above happens a third time. */
+			fl->offset = in->file_offset;
 		}
 		break;
 	}

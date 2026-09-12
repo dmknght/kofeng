@@ -668,6 +668,25 @@ static int enable_providers(struct kofw_mon *m, uint32_t subs)
 			m->sub_enabled |= KOFW_SUB_AMSI;
 	}
 
+	/*
+	 * THE RESOLVER, ENABLED WHOLE AND WITH NO KEYWORD, and the zero is a
+	 * decision rather than a placeholder.
+	 *
+	 * Microsoft-Windows-DNS-Client publishes its events under keywords this
+	 * build has not established, and a keyword mask that names a bit the
+	 * provider does not publish enables NOTHING while succeeding - the same
+	 * silent failure the registry GUID comment above describes. Zero means
+	 * every keyword, which for this provider is a handful of lookups a
+	 * second on a busy desktop and is the only mask that cannot be wrong.
+	 *
+	 * Narrow it once `--schema` has said which keyword the completion event
+	 * actually carries.
+	 */
+	if (subs & KOFW_SUB_DNS) {
+		if (enable_one(m, &KOFW_GUID_DNS, 0, NULL, 0) == 0)
+			m->sub_enabled |= KOFW_SUB_DNS;
+	}
+
 	return m->sub_enabled ? 0 : KOFW_ERR_PROVIDER;
 }
 

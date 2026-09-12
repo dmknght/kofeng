@@ -306,6 +306,30 @@ enum kof_evt_verb {
 	 */
 	KOF_EVT_CONT = 20,
 
+	/*
+	 * A NAME WAS LOOKED UP - the one network fact worth more than the
+	 * address it resolves to.
+	 *
+	 * An IP is a rented thing. The domain is what the operator chose, what
+	 * they paid for, what they reuse across campaigns and what is still
+	 * searchable a year later when the address has been handed to somebody
+	 * else. A trace that has the connection and not the name has the least
+	 * durable half of the evidence.
+	 *
+	 * The object is the name that was asked about. The addresses that came
+	 * back go in the net payload when the record carries them, so one
+	 * lookup can say "this name is now this address" - which is the join a
+	 * report needs to attribute a connection to a domain, and which no
+	 * amount of looking at connections alone can reconstruct.
+	 *
+	 * TWENTY-ONE AND NOT BESIDE THE OTHER NETWORK VERBS, which is where it
+	 * belongs conceptually. Renumbering 8..11 to make room would silently
+	 * reinterpret every recorded trace in existence as something else, and
+	 * a verb's number is not worth that. The kind table below is what
+	 * groups it with them.
+	 */
+	KOF_EVT_DNS_QUERY = 21,
+
 	KOF_EVT_TYPE_COUNT
 };
 
@@ -322,6 +346,11 @@ enum kof_evt_source {
 	KOF_SRC_NET,
 	KOF_SRC_REGISTRY,
 	KOF_SRC_AMSI,
+
+	/* The resolver. Its own subsystem and not KOF_SRC_NET, because the two
+	 * answer different questions and a raw id is only unique within one of
+	 * these - see kof_evt.source. */
+	KOF_SRC_DNS,
 	KOF_SRC_COUNT
 };
 
@@ -508,16 +537,70 @@ const char *kof_attack_name(uint16_t att);
 uint8_t kof_classify(const char *path, uint16_t *att);
 uint8_t kof_classify_path(const char *path);
 
+/* --------------------------------------------------------------- addresses */
+
+/* Enough for the longest IPv6 text form plus a NUL. */
+#define KOF_IP_STR_MAX 46u
+
+/*
+ * ONE ADDRESS, AS TEXT, and it is here rather than in the renderer because
+ * three consumers need the same spelling.
+ *
+ * A trace line, a report's IOC table and whatever reads a recorded log all
+ * have to produce the SAME string for the same sixteen bytes, or the same
+ * connection appears as two indicators and a text search for one misses the
+ * other. That is the identical argument kofevtfmt.h makes for rendering an
+ * event, one level down.
+ *
+ * An IPv4-mapped address prints as a dotted quad and not as ::ffff:1.2.3.4,
+ * because that is what an operator pastes into a search box. IPv6 is
+ * lower-case hex with the longest run of zero groups collapsed once, as RFC
+ * 5952 requires - a canonical form exists precisely so two tools agree.
+ *
+ * Returns `out`, always NUL terminated, "" for a NULL address. Never NULL, so
+ * it can be used directly as a printf argument.
+ */
+const char *kof_evt_ip_str(const uint8_t addr[16], char *out, size_t cap);
+
+/* Is this address IPv6 proper, rather than an IPv4 one carried IPv4-mapped. */
+int kof_evt_ip_is_v6(const uint8_t addr[16]);
+
+/* Is this address all zero - which is "the event named none", and is also the
+ * legal unspecified address. The caller's context decides which; the record
+ * cannot. */
+int kof_evt_ip_is_unset(const uint8_t addr[16]);
+
+/* Put an IPv4 address, in network byte order, into the 16-byte field in the
+ * one representation the record uses. What a collector holding a UINT32 from
+ * a provider calls. */
+void kof_evt_ip_set_v4(uint8_t addr[16], uint32_t be_v4);
+
 /* ------------------------------------------------------------- the record */
 
 /* Absent, for the text offsets below. Zero is a legal offset into text[], so
  * it cannot double as the sentinel. */
 #define KOF_TEXT_NONE 0xffffu
 
-/* One record. Fixed, so a producer that cannot allocate cannot fail, and so a
- * recorded log is a fixed-record file - see kofevtlog.h. */
-#define KOF_EVT_SIZE 512u
-#define KOF_EVT_HEAD 72u
+/*
+ * One record. Fixed, so a producer that cannot allocate cannot fail, and so a
+ * recorded log is a fixed-record file - see kofevtlog.h.
+ *
+ * 640 AND NOT 512, AND THE EXTRA 128 BYTES BOUGHT A DECISION RATHER THAN ROOM.
+ *
+ * Sixteen-byte addresses and a write's offset cost 32 bytes of head. Held at
+ * 512 that came out of text[], which is where the paths are - so supporting
+ * IPv6 would have been paid for with more truncated paths, in a record whose
+ * whole evidence IS the paths. That trade is backwards, and it is the kind that
+ * looks free because KOF_EF_TRUNCATED reports the damage honestly.
+ *
+ * Growing instead costs 25% more per record in the ring and in a log, which is
+ * a number a `--ring` argument can answer. kofevtlog.h's header carries
+ * `rec_size` precisely so that this can happen without orphaning a reader:
+ * growth is the anticipated change, and a reader that finds a size it does not
+ * know refuses the file instead of decoding every field from the wrong offset.
+ */
+#define KOF_EVT_SIZE 640u
+#define KOF_EVT_HEAD 96u
 
 /* kof_evt.flags */
 enum {
@@ -669,7 +752,27 @@ struct kof_evt_mem {
  * - see the property names in wevt_decode.c - and the ports are in NETWORK
  * byte order, as the packet had them. */
 struct kof_evt_net {
-	uint32_t daddr, saddr;
+	/*
+	 * SIXTEEN BYTES EACH, AND ONE REPRESENTATION FOR BOTH FAMILIES.
+	 *
+	 * These were uint32_t, which made every IPv6 destination
+	 * unrepresentable - and an address that cannot be recorded is a C2 that
+	 * does not appear in the evidence at all. That is not a gap a reader
+	 * can notice: the trace simply shows a process that talked to nobody.
+	 *
+	 * An IPv4 address is stored IPv4-MAPPED - ::ffff:a.b.c.d, as RFC 4291
+	 * writes it - rather than in the first four bytes with the rest zero.
+	 * The difference matters because it makes "is this v6" a test on the
+	 * bytes instead of a flag somebody has to remember to set, and because
+	 * the all-zero prefix is itself a legal v6 address (:: is the
+	 * unspecified one), so the alternative encoding cannot tell an IPv4
+	 * address from an unset one.
+	 *
+	 * Network byte order, like the ports, and for the same reason: the
+	 * record agrees with the packet it describes, and whoever prints one
+	 * converts. kof_evt_ip_str is that printer.
+	 */
+	uint8_t  daddr[16], saddr[16];
 	uint32_t size;
 	uint16_t dport, sport;
 };
@@ -684,6 +787,25 @@ struct kof_evt_net {
  */
 struct kof_evt_file {
 	uint64_t key;
+
+	/*
+	 * WHERE IN THE FILE THE WRITE LANDED, for FILE_WRITE.
+	 *
+	 * FileIo Write carries ByteOffset beside IOSize and the collector was
+	 * dropping it, which left every write saying how much without saying
+	 * where. With both, a write is a RANGE, and a range is the difference
+	 * between "this process modified hosts" and "this process wrote these
+	 * bytes at this place in hosts" - the second is evidence and can be
+	 * read back, the first is a sentence.
+	 *
+	 * Note what it does NOT make available: the bytes. No event on either
+	 * platform carries file content. A consumer that wants the data reads
+	 * the range back off disk afterwards and must say that it did - the
+	 * bytes there at the end of a run are not provably the bytes this write
+	 * put there.
+	 */
+	uint64_t offset;
+
 	/*
 	 * Bytes written, for FILE_WRITE.
 	 *

@@ -68,6 +68,7 @@ void kof_evt_count(const struct kof_evt *e, struct kof_evt_tally *t)
 	case KOF_EVT_THREAD_START:   t->thread++;   break;
 	case KOF_EVT_THREAD_STOP:                   break;
 	case KOF_EVT_AMSI_SCAN:      t->amsi++;     break;
+	case KOF_EVT_DNS_QUERY:      t->dns++;      break;
 	/*
 	 * A CONTINUATION IS NOT AN EVENT and is counted as nothing.
 	 *
@@ -202,8 +203,16 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 
 		fprintf(out, "  [%s] %s", kof_loc_name(e->loc),
 		       kof_evt_object(e));
+		/*
+		 * THE RANGE AND NOT JUST THE LENGTH. "wrote 64 bytes to hosts"
+		 * and "wrote 64 bytes at 0x1a2 in hosts" are a sentence and a
+		 * piece of evidence respectively: only the second can be read
+		 * back off the file afterwards, which is the whole reason
+		 * kof_evt_file carries an offset.
+		 */
 		if (f && f->size)
-			fprintf(out, "  %lu bytes", (unsigned long)f->size);
+			fprintf(out, "  %lu bytes @%llu", (unsigned long)f->size,
+				(unsigned long long)f->offset);
 		break;
 	}
 
@@ -221,28 +230,59 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 	case KOF_EVT_NET_CONNECT:
 	case KOF_EVT_NET_DISCONNECT:
 	case KOF_EVT_NET_SEND:
-	case KOF_EVT_NET_RECV: {
+	case KOF_EVT_NET_RECV:
+	case KOF_EVT_DNS_QUERY: {
 		/*
-		 * The address arrives as four bytes in the order they sit in the
-		 * packet and the port in network byte order. Swapped here rather
-		 * than in the record, for the reason kofw_evt gives: a record
-		 * that silently disagreed with the packet would be worse than
-		 * one a printer has to swap.
+		 * The address sits in the record in the order it sits in the
+		 * packet and the port in network byte order. Turned into text
+		 * here rather than stored that way, for the reason kofw_evt
+		 * gives: a record that silently disagreed with the packet would
+		 * be worse than one a printer has to convert.
+		 *
+		 * kof_evt_ip_str and not four %lu, because the same sixteen
+		 * bytes have to come out as the same string here, in a report's
+		 * IOC table and in a viewer - and a v6 address written by hand
+		 * in three places is written three ways.
 		 */
 		const struct kof_evt_net *n = kof_evt_as_net(e);
-		uint32_t d;
+		char  ip[KOF_IP_STR_MAX];
 		uint16_t dp;
 
 		if (!n)
 			break;
-		d  = n->daddr;
 		dp = (uint16_t)((n->dport >> 8) | (n->dport << 8));
 
-		fprintf(out, "  %lu.%lu.%lu.%lu:%u",
-		       (unsigned long)(d & 0xffu),
-		       (unsigned long)((d >> 8) & 0xffu),
-		       (unsigned long)((d >> 16) & 0xffu),
-		       (unsigned long)((d >> 24) & 0xffu), (unsigned)dp);
+		/*
+		 * A LOOKUP PRINTS THE NAME IT ASKED ABOUT AND THEN THE ANSWER.
+		 *
+		 * The name is the object, which is why it is printed here and
+		 * not by the address code below: for every other verb in this
+		 * group the destination IS the subject of the line, and for
+		 * this one the destination is the answer to it.
+		 *
+		 * An unset address is a lookup that FAILED, and that gets a
+		 * word rather than a blank - a name that resolves to nothing is
+		 * itself worth seeing, because it is what a domain-generation
+		 * algorithm looks like while it is hunting for the one that is
+		 * registered.
+		 */
+		if (e->verb == KOF_EVT_DNS_QUERY) {
+			fprintf(out, "  %s", kof_evt_object(e));
+			if (kof_evt_ip_is_unset(n->daddr))
+				fputs("  -> no answer", out);
+			else
+				fprintf(out, "  -> %s",
+					kof_evt_ip_str(n->daddr, ip, sizeof ip));
+			break;
+		}
+
+		/* Brackets around a v6 address before the port, because
+		 * 2001:db8::1:443 cannot be read and [2001:db8::1]:443 can. */
+		kof_evt_ip_str(n->daddr, ip, sizeof ip);
+		if (kof_evt_ip_is_v6(n->daddr))
+			fprintf(out, "  [%s]:%u", ip, (unsigned)dp);
+		else
+			fprintf(out, "  %s:%u", ip, (unsigned)dp);
 		if (n->size)
 			fprintf(out, "  %lu bytes", (unsigned long)n->size);
 		break;
@@ -337,6 +377,7 @@ void kof_evt_print_tally(const struct kof_evt_tally *t, double secs,
 		"   files written     : %llu\n"
 		"   registry changes  : %llu\n"
 		"   amsi submissions  : %llu\n"
+		"   names looked up   : %llu\n"
 		"   connections       : %llu\n"
 		"   bytes sent/recv   : %llu / %llu\n"
 		"   threads started   : %llu\n"
@@ -350,6 +391,7 @@ void kof_evt_print_tally(const struct kof_evt_tally *t, double secs,
 		(unsigned long long)t->file_wr,
 		(unsigned long long)t->reg,
 		(unsigned long long)t->amsi,
+		(unsigned long long)t->dns,
 		(unsigned long long)t->conn,
 		(unsigned long long)t->bytes_sent,
 		(unsigned long long)t->bytes_recv,
@@ -690,14 +732,19 @@ static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
 	{
 		const struct kof_evt_net *nt = kof_evt_as_net(e);
 
-		if (nt && (nt->daddr || nt->dport)) {
-			uint32_t d = nt->daddr;
+		if (nt && (!kof_evt_ip_is_unset(nt->daddr) || nt->dport)) {
+			char ip[KOF_IP_STR_MAX];
 
-			ROWF("peer", u.net.daddr, "%lu.%lu.%lu.%lu",
-			     (unsigned long)(d & 0xffu),
-			     (unsigned long)((d >> 8) & 0xffu),
-			     (unsigned long)((d >> 16) & 0xffu),
-			     (unsigned long)((d >> 24) & 0xffu));
+			/*
+			 * The row covers all sixteen bytes whether the address
+			 * is v4 or v6, because that is the extent the field
+			 * occupies - an IPv4-mapped address is the low four
+			 * bytes of a sixteen-byte field, and lighting only
+			 * those would tell a reader the record is shaped some
+			 * other way than it is.
+			 */
+			ROWF("peer", u.net.daddr, "%s",
+			     kof_evt_ip_str(nt->daddr, ip, sizeof ip));
 		}
 		if (nt && nt->dport) {
 			/* Network order on the wire, host order to read. */
@@ -718,6 +765,12 @@ static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
 		if (fl && fl->size)
 			ROWF("bytes", u.file.size, "%lu",
 			     (unsigned long)fl->size);
+		/* Zero is a legal offset - a write at the start of a file - so
+		 * the row is offered whenever there is a length to go with it
+		 * rather than whenever the offset is non-zero. */
+		if (fl && fl->size)
+			ROWF("at offset", u.file.offset, "%llu",
+			     (unsigned long long)fl->offset);
 		if (fl && fl->key)
 			ROWF("file key", u.file.key, "0x%llx",
 			     (unsigned long long)fl->key);

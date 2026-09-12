@@ -89,6 +89,34 @@ const GUID KOFW_GUID_KERNEL_FILE = {
 	{ 0xb9, 0x70, 0xc2, 0x56, 0x0f, 0xb5, 0xc2, 0x89 }
 };
 
+/*
+ * Microsoft-Windows-DNS-Client, {1C95126E-7EEA-49A9-A3FE-A378B03DDB4D}.
+ *
+ * ESTABLISHED THE WAY THE REGISTRY COMMENT ABOVE ASKS FOR, because a wrong
+ * GUID here is silent in exactly the way that one describes - the session
+ * starts, the keyword is accepted, and nothing ever arrives, which reads as a
+ * machine that resolves no names:
+ *
+ *     logman query providers | findstr DNS
+ *
+ * printed this pairing on the machine this was written on. Verify it rather
+ * than trusting the constant if a run comes back with no `dns` shape at all.
+ *
+ * WHY THE RESOLVER AND NOT JUST THE NETWORK STACK. An address is rented; the
+ * domain is what the operator chose and pays for, and it is what is still
+ * searchable a year later. A trace holding connections and no lookups kept the
+ * half that expires.
+ *
+ * Like AMSI, it is USER MODE: it sees what went through the client resolver, so
+ * a payload that speaks DNS itself, or over HTTPS, is absent here and still
+ * visible to the network subscription. Two providers, two different blind
+ * spots, and neither substitutes for the other.
+ */
+const GUID KOFW_GUID_DNS = {
+	0x1c95126e, 0x7eea, 0x49a9,
+	{ 0xa3, 0xfe, 0xa3, 0x78, 0xb0, 0x3d, 0xdb, 0x4d }
+};
+
 uint8_t kofw_provider_of(const GUID *g)
 {
 	if (!memcmp(g, &KOFW_GUID_KERNEL_PROCESS, sizeof *g))
@@ -101,6 +129,8 @@ uint8_t kofw_provider_of(const GUID *g)
 		return KOFW_PROV_REGISTRY;
 	if (!memcmp(g, &KOFW_GUID_AMSI, sizeof *g))
 		return KOFW_PROV_AMSI;
+	if (!memcmp(g, &KOFW_GUID_DNS, sizeof *g))
+		return KOFW_PROV_DNS;
 	return KOFW_PROV_NONE;
 }
 
@@ -180,6 +210,44 @@ static uint8_t field_of(const wchar_t *name, uint16_t type, uint8_t prov)
 			return KOFW_FLD_PID;
 		/* appname and contentname are context and would otherwise
 		 * overwrite the buffer. Visible in --schema; not carried. */
+		return KOFW_FLD_SKIP;
+	}
+
+	/*
+	 * DNS NEXT, AND FOR THE SAME REASON AMSI IS FIRST: its payload holds
+	 * several strings that can CO-OCCUR, and the walk's last match wins.
+	 *
+	 * Microsoft-Windows-DNS-Client's completion event carries QueryName -
+	 * what was asked about - beside QueryResults, which is the answer as a
+	 * semicolon-separated STRING. Both are text, and mapping both to the
+	 * object would mean a reader sees whichever the provider happened to
+	 * list last. The name is the half worth keeping: an address expires and
+	 * the domain is what an operator paid for.
+	 *
+	 * QueryResults IS NOT DECODED INTO net_daddr, deliberately. It is text
+	 * that would have to be split and parsed, and the event id it arrives
+	 * under has not been established the way type_of() demands - so a
+	 * parser written now would be guessing at which id it applies to. It
+	 * stays visible in --schema, which is exactly what a discovery run
+	 * needs in order to finish the job.
+	 */
+	if (prov == KOFW_PROV_DNS) {
+		/*
+		 * BOTH SPELLINGS, AND THEY ARE ALTERNATIVES RATHER THAN
+		 * CO-OCCURRING - which is the test this function's header sets
+		 * for sharing a field. One payload has one of these, never
+		 * both, so whichever arrives lands in the object and nothing
+		 * competes for the slot.
+		 *
+		 * Two because the provider exports no template and its message
+		 * string says only "for the name %1". `wanted()` asks for the
+		 * object on a typed lookup, so a third spelling shows up as a
+		 * PARTIAL record rather than as a resolution of nothing.
+		 */
+		if (name_is(name, "QueryName") || name_is(name, "Name"))
+			return KOFW_FLD_OBJECT;
+		if (name_is(name, "ProcessID") || name_is(name, "PID"))
+			return KOFW_FLD_PID;
 		return KOFW_FLD_SKIP;
 	}
 
@@ -271,6 +339,15 @@ static uint8_t field_of(const wchar_t *name, uint16_t type, uint8_t prov)
 	if (name_is(name, "FileKey") || name_is(name, "FileObject"))
 		return KOFW_FLD_FILE_KEY;
 
+	/*
+	 * WHERE IN THE FILE A WRITE LANDED. FileIo Write's id 16 declares
+	 * ByteOffset first and it was being skipped, which left every write
+	 * saying how much without saying where - a length with no offset cannot
+	 * be read back, so the write was a claim rather than evidence.
+	 */
+	if (name_is(name, "ByteOffset") || name_is(name, "Offset"))
+		return KOFW_FLD_FILE_OFFSET;
+
 	if (name_is(name, "ImageSize"))
 		return KOFW_FLD_ADDR_SIZE;
 
@@ -292,6 +369,34 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 		case EVID_PROCESS_STOP:  return KOF_EVT_PROC_STOP;
 		case EVID_IMAGE_LOAD:    return KOF_EVT_IMAGE_LOAD;
 		case EVID_IMAGE_UNLOAD:  return KOF_EVT_IMAGE_UNLOAD;
+		/*
+		 * THE THREAD PAIR, ESTABLISHED - and it was the last thing
+		 * standing between `--thread` and the only in-box view of an
+		 * in-memory load.
+		 *
+		 * From the provider's own manifest on this machine, which
+		 * names the task of every id:
+		 *
+		 *     wevtutil gp Microsoft-Windows-Kernel-Process /ge /f:xml
+		 *
+		 *     id 1 ProcessStart   id 3 ThreadStart   id 5 ImageLoad
+		 *     id 2 ProcessStop    id 4 ThreadStop    id 6 ImageUnload
+		 *
+		 * Corroborated by an ordered trace rather than taken on the
+		 * manifest's word: nslookup.kevt has FOUR id-3 records in the
+		 * first 17ms, each carrying a Win32StartAddr, and FOUR id-4
+		 * records at 0.123s immediately before ProcessStop. Matched
+		 * counts, right order, and the addresses are only on the pair
+		 * that should have them.
+		 *
+		 * WHAT CHANGES BY TYPING THEM: nothing about volume - these
+		 * records were already arriving and already being decoded, as
+		 * RAW. What changes is that KOF_EF_UNBACKED now lands on a
+		 * THREAD_START instead of on an untyped record, so a
+		 * reflectively loaded payload is visible as what it is.
+		 */
+		case 3u:                 return KOF_EVT_THREAD_START;
+		case 4u:                 return KOF_EVT_THREAD_STOP;
 		default: break;
 		}
 	} else if (prov == KOFW_PROV_NET) {
@@ -304,11 +409,74 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 		 * separate receive, and typing it as one would double every byte
 		 * count computed from this stream.
 		 */
+		/*
+		 * THE WHOLE TABLE NOW, FROM THE PROVIDER'S OWN MANIFEST - and
+		 * it confirms every id the ordered trace above had established
+		 * and adds the two thirds that were missing.
+		 *
+		 *     wevtutil gp Microsoft-Windows-Kernel-Network /ge /f:xml
+		 *
+		 * prints an opcode and a task and a keyword for each id, and
+		 * the three together name the event with no guessing left:
+		 *
+		 *   task TCPIP(10)             task UDPIP(11)
+		 *   v4   v6   opcode           v4   v6   opcode
+		 *   10   26   SEND             42   58   SENDUDP
+		 *   11   27   RECV             43   59   RECVUDP
+		 *   12   28   CONNECT          49   49   FAILUDP
+		 *   13   29   DISCONNECT
+		 *   14   30   RETRANSMIT
+		 *   15   31   ACCEPT
+		 *   16   32   RECONNECT
+		 *   17   17   FAIL
+		 *   18   34   TCPCOPY
+		 *
+		 * TWO THINGS THIS SETTLES THAT WERE OPEN.
+		 *
+		 * IPv6 was not "separate ids that have not been established" -
+		 * they are the same opcodes under the v6 keyword, 16 higher.
+		 * Without them a v6 peer was not merely unrepresentable in the
+		 * record, its EVENT was untyped, which is the difference
+		 * between a gap and a silence.
+		 *
+		 * And id 18 was left untyped on the guess that it "is most
+		 * likely the copy-to-user step rather than a separate
+		 * receive". The manifest calls it TCPCOPY. The guess was right
+		 * and the caution was right: typing it as a receive would have
+		 * doubled every byte count computed from this stream.
+		 *
+		 * WHAT IS STILL NOT TYPED, AND WHY EACH ONE.
+		 *
+		 *   TCPCOPY (18, 34)   the copy step, as above.
+		 *   ACCEPT (15, 31)    a connection ARRIVING. There is no verb
+		 *                      for it - KOF_EVT_NET_CONNECT means this
+		 *                      process reached out - and filing an
+		 *                      inbound connection as an outbound one
+		 *                      would invert the direction of the most
+		 *                      important fact about it. A backdoor
+		 *                      listening and a dropper calling home
+		 *                      are not the same finding.
+		 *   RETRANSMIT, RECONNECT, FAIL, FAILUDP
+		 *                      each is a fact about a connection this
+		 *                      stream already reported. They arrive as
+		 *                      RAW with their id, which is what a
+		 *                      discovery run needs and more honest
+		 *                      than folding them into a verb they are
+		 *                      not.
+		 *
+		 * The UDP pair is corroborated by nslookup.kevt: three id-42
+		 * records strictly alternating with three id-43, which is a
+		 * resolver asking three questions and being answered three
+		 * times - and nslookup produces UDP and no TCP at all, which
+		 * is also why that trace holds no DNS-client events.
+		 */
 		switch (id) {
-		case 12: return KOF_EVT_NET_CONNECT;
-		case 10: return KOF_EVT_NET_SEND;
-		case 11: return KOF_EVT_NET_RECV;
-		case 13: return KOF_EVT_NET_DISCONNECT;
+		case 12: case 28: return KOF_EVT_NET_CONNECT;
+		case 10: case 26:
+		case 42: case 58: return KOF_EVT_NET_SEND;
+		case 11: case 27:
+		case 43: case 59: return KOF_EVT_NET_RECV;
+		case 13: case 29: return KOF_EVT_NET_DISCONNECT;
 		default: break;
 		}
 	} else if (prov == KOFW_PROV_FILE) {
@@ -334,26 +502,53 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 		}
 	} else if (prov == KOFW_PROV_REGISTRY) {
 		/*
-		 * EMPTY ON PURPOSE, AND THIS IS NOT A TODO LEFT LYING ABOUT.
+		 * ESTABLISHED, AND BY A ROUTE THAT IS BETTER THAN READING AN
+		 * ORDERED TRACE - this provider declares ONE KEYWORD PER
+		 * EVENT, and the keywords have names.
 		 *
-		 * Kernel-Registry's ids have not been established on a real
-		 * machine, and the two other providers in this file say in
-		 * their own comments how that is done: one operation at a
-		 * time, a second apart, under `kofmontrace --raw --schema`,
-		 * reading the id off the ordered trace. Numbers copied from
-		 * documentation are how a table ends up decoding CREATE as
-		 * SETVALUE - which is silent, because an event typed as the
-		 * wrong thing is still a typed event.
+		 *     wevtutil gp Microsoft-Windows-Kernel-Registry /ge /f:xml
 		 *
-		 * Until then every registry record arrives as RAW carrying its
-		 * provider, id, version and key path, which is exactly what a
-		 * discovery run needs and is strictly more honest than a
-		 * guess. Filling this switch in afterwards is three lines.
+		 * gives each id a keyword mask, and wevt_etw.c already has the
+		 * named table those masks come from. The two together are a
+		 * 1:1 map, so the id is not inferred from when it arrived:
 		 *
-		 *   case <id>: return KOF_EVT_REG_CREATE;
-		 *   case <id>: return KOF_EVT_REG_SET_VALUE;
-		 *   case <id>: return KOF_EVT_REG_DELETE;
+		 *   id 1  0x1000 CreateKey       id  9 0x0010 EnumerateValueKey
+		 *   id 2  0x2000 OpenKey         id 10 0x0020 QueryMultipleValueKey
+		 *   id 3  0x4000 DeleteKey       id 11 0x0040 SetInformationKey
+		 *   id 4  0x8000 QueryKey        id 12 0x0080 FlushKey
+		 *   id 5  0x0100 SetValueKey     id 13 0x0001 CloseKey
+		 *   id 6  0x0200 DeleteValueKey  id 14 0x0002 QuerySecurityKey
+		 *   id 7  0x0400 QueryValueKey   id 15 0x0004 SetSecurityKey
+		 *   id 8  0x0800 EnumerateKey
+		 *
+		 * Which is why nothing but id 1 has ever arrived here: the
+		 * session asks for KW_REG_MUTATE, and of those four keywords
+		 * only CreateKey fires when a program merely reads. That is
+		 * exactly what nslookup.kevt shows - eight id-1 records for
+		 * \REGISTRY\MACHINE\SYSTEM\...\Tcpip\Parameters, a key nslookup
+		 * only ever reads.
+		 *
+		 * SO CREATE IS NOT A CHANGE, and this is the one thing a
+		 * consumer of these verbs has to know. RegCreateKeyEx opens an
+		 * existing key as readily as it makes a new one, and the kernel
+		 * raises CreateKey either way - so KOF_EVT_REG_CREATE means
+		 * "a key was opened with create disposition" and is worth very
+		 * little on its own. The event that establishes persistence is
+		 * SetValueKey. A report that treated the two alike would list
+		 * every key a program touched as a registry modification.
+		 *
+		 * DeleteKey and DeleteValueKey both map to one verb because
+		 * kofevt.h has one, and the distinction it loses - a key
+		 * against a value - is recoverable from the path, which is in
+		 * the record either way.
 		 */
+		switch (id) {
+		case 1u: return KOF_EVT_REG_CREATE;
+		case 5u: return KOF_EVT_REG_SET_VALUE;
+		case 3u:
+		case 6u: return KOF_EVT_REG_DELETE;
+		default: break;
+		}
 	} else if (prov == KOFW_PROV_AMSI) {
 		/*
 		 * ESTABLISHED, on this machine, the same way as every other id
@@ -389,6 +584,51 @@ static uint16_t type_of(uint8_t prov, uint16_t id)
 		 * moment the id is typed - and until then these arrive as RAW
 		 * with the content already visible, which is most of the value.
 		 */
+	} else if (prov == KOFW_PROV_DNS) {
+		/*
+		 * ESTABLISHED FROM THE PROVIDER'S OWN MESSAGE STRINGS, which
+		 * name every event on this machine without an elevated prompt:
+		 *
+		 *     wevtutil gp Microsoft-Windows-DNS-Client /ge /gm:true
+		 *
+		 *   3006  "DNS query is called for the name %1, type %2, ..."
+		 *   3008  "DNS query is completed for the name %1, type %2,
+		 *          query options %3 with status %4 Results %5"
+		 *   3010  "DNS Query sent to DNS Server %3 for name %1 ..."
+		 *   3011  "Received response from DNS Server %3 for name %1 ..."
+		 *   3018  "Cache lookup for name %1 ... returned %4 ..."
+		 *   3019  "Query wire called for name %1 ..."
+		 *   3020  "Query response for name %1 ... returned %5 ..."
+		 *
+		 * 3008 AND ONLY 3008, and the restraint is the whole decision.
+		 * A single resolution raises most of that list: the call, the
+		 * cache lookup, the wire, the server's answer, the completion.
+		 * Typing two of them would report one lookup as two, and a
+		 * report counting names would then say a sample resolved twice
+		 * as many hosts as it did. 3008 is the one that carries the
+		 * name AND the status AND the results, which is the whole fact
+		 * - the others are stages of it.
+		 *
+		 * WHY THE nslookup TRACE HOLDS NONE OF THESE, because it is
+		 * the obvious thing to check and the answer is not a bug:
+		 * nslookup does not use the Windows resolver. It builds its own
+		 * queries and sends them to the server itself, which is why
+		 * nslookup.kevt has three UDP send/receive pairs and not one
+		 * DNS-client record. A program that resolves names the ordinary
+		 * way - ping, curl, anything calling GetAddrInfo - is what
+		 * produces these.
+		 *
+		 * WHAT IS NOT CONFIRMED: the PROPERTY NAMES. This provider
+		 * exports no templates, so field_of matches on both spellings
+		 * a DNS payload is known to use and `wanted()` asks for the
+		 * object - meaning a record whose name field is called
+		 * something else arrives FLAGGED PARTIAL rather than arriving
+		 * empty and looking like a lookup of nothing. Confirm with
+		 * `kofmontrace --schema ping example.com` and add the spelling
+		 * to field_of if it is a third one.
+		 */
+		if (id == 3008u)
+			return KOF_EVT_DNS_QUERY;
 	}
 	return KOF_EVT_RAW;
 }
@@ -420,6 +660,19 @@ static uint32_t wanted(uint16_t type)
 		 * the provider never sends would flag every file event as
 		 * damaged. */
 		return KOFW_F_OBJECT;
+	case KOF_EVT_DNS_QUERY:
+		/*
+		 * The name, and the pid - which this provider DOES repeat,
+		 * unlike Kernel-File: it is a user-mode provider, so the
+		 * process in the header is the one that called the resolver and
+		 * the payload names it too. Asking for both means a record with
+		 * neither is reported as damaged rather than as a lookup by
+		 * nobody.
+		 *
+		 * Unreachable until type_of() learns the id. Written now so
+		 * that typing it is the one line that comment promises.
+		 */
+		return KOFW_F_PID | KOFW_F_OBJECT;
 	default:
 		/* A RAW event is by definition one whose shape this build does
 		 * not know, so there is nothing it can be said to be missing.
@@ -876,13 +1129,36 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 				want &= ~(uint32_t)KOFW_F_CREATE_TIME;
 			}
 			break;
+		/*
+		 * BY THE LENGTH THE PROVIDER DECLARED, WHICH IS HOW IPv6 GETS
+		 * IN WITHOUT AN ESTABLISHED EVENT ID.
+		 *
+		 * Kernel-Network raises its v6 events under ids of their own,
+		 * and this build has not established them the way type_of()
+		 * requires - one operation at a time under --raw --schema. But
+		 * the PROPERTY is still called daddr and still arrives with its
+		 * declared size, so taking 16 bytes when 16 bytes are offered
+		 * puts the peer in the record either way. A v6 connection then
+		 * shows up as a RAW event with the address on it, rather than
+		 * not showing up at all.
+		 *
+		 * Four bytes go in IPv4-mapped, so the record has one
+		 * representation and a reader never has to ask which family it
+		 * is holding - see struct kof_evt_net.
+		 */
 		case KOFW_FLD_DADDR:
-			if (len >= 4)
-				out->net_daddr = rd_u32(base + off);
+			if (len >= 16)
+				memcpy(out->net_daddr, base + off, 16);
+			else if (len >= 4)
+				kof_evt_ip_set_v4(out->net_daddr,
+						  rd_u32(base + off));
 			break;
 		case KOFW_FLD_SADDR:
-			if (len >= 4)
-				out->net_saddr = rd_u32(base + off);
+			if (len >= 16)
+				memcpy(out->net_saddr, base + off, 16);
+			else if (len >= 4)
+				kof_evt_ip_set_v4(out->net_saddr,
+						  rd_u32(base + off));
 			break;
 		case KOFW_FLD_DPORT:
 			if (len >= 2)
@@ -895,6 +1171,18 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 		case KOFW_FLD_SIZE:
 			if (len >= 4)
 				out->net_size = rd_u32(base + off);
+			break;
+		case KOFW_FLD_FILE_OFFSET:
+			/* Declared as a 64-bit signed integer by FileIo Write.
+			 * Taken as eight bytes where there are eight, because
+			 * an offset truncated to 32 bits does not look wrong -
+			 * it looks like an offset near the start of a large
+			 * file, which is exactly where a reader would then
+			 * read the wrong bytes back. */
+			if (len >= 8)
+				out->file_offset = rd_u64(base + off);
+			else if (len >= 4)
+				out->file_offset = rd_u32(base + off);
 			break;
 		case KOFW_FLD_FILE_KEY:
 			/* Into `addr`, which a file event never uses for
@@ -1114,6 +1402,7 @@ static const char *field_name(uint8_t f)
 	case KOFW_FLD_ADDR_SIZE:   return "-> addr_size";
 	case KOFW_FLD_IMAGE:       return "-> image";
 	case KOFW_FLD_OBJECT:      return "-> object";
+	case KOFW_FLD_FILE_OFFSET: return "-> file_offset";
 	default:                   return "";
 	}
 }
