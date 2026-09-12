@@ -438,6 +438,21 @@ static void write_fp(struct kof_report *r, FILE *out,
 			fprintf(out, "              %llu bytes, sha256 %s\n",
 				(unsigned long long)b->file_size,
 				b->file_sha256[0] ? b->file_sha256 : "?");
+			/*
+			 * WHERE THE BYTES CAME FROM, when it is not the
+			 * obvious place. Everything else in this report is
+			 * read off the disk after the tree is dead;
+			 * these were copied while the sample was still
+			 * running, because by the end there was nothing left
+			 * to read. That is a weaker claim - the sample may
+			 * have written the file again after the copy - and a
+			 * reader who is not told cannot know to make it.
+			 */
+			if (f->flags & KOF_FP_F_SPILLED)
+				fprintf(out, "              %scaptured DURING "
+					     "the run, before it was deleted - "
+					     "not the end state%s\n",
+					k->dim, k->off);
 			if (b->stored[0])
 				fprintf(out, "              kept as %s\n",
 					b->stored);

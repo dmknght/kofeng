@@ -175,7 +175,62 @@ struct kof_chan_sub;
  * its record is not one this build can decode - `why` gets a short reason and
  * may be NULL.
  */
-struct kof_chan_sub *kof_chan_sub_open(const char *name, const char **why);
+/*
+ * LET ONE GROUP SUBSCRIBE, on the hosts where a channel has an owner.
+ *
+ * A channel is created private to the account that published it. That is right
+ * for a sensor and a consumer running as the same user, and wrong the moment
+ * the sensor is a root service and the consumer is a CLI - the subscriber is
+ * refused by a channel that is working. This widens it to one named group, and
+ * it is a call rather than a default because the widening has a price: the
+ * group can READ every path the sensor reports, and can WRITE the cursor and
+ * so make the sensor believe records were consumed. It still cannot forge a
+ * record; the data section stays read-only to a subscriber, which is the one
+ * property this design exists to hold. The implementation says the rest.
+ *
+ * 0 on success, -1 with errno set. On Windows this returns -1/ENOSYS: an
+ * access decision there is an ACL on the mapping, which is a different
+ * mechanism and not a group name.
+ */
+int kof_chan_publish_grant(struct kof_chan_pub *, const char *group);
+
+/*
+ * THE SAME WIDENING, AIMED AT WHOEVER IS AT THE CONTROLLING TERMINAL, and
+ * their login name written into `who` so a caller can say what it did.
+ *
+ * `sudo kofwatchtower` and then `kofwatchman` as yourself is how this is
+ * actually run, and without this it does not work: the channel belongs to
+ * root. A flag that has to be passed every time is a default in disguise, so
+ * the default does it - and says so.
+ *
+ * 0 on success. -1 with errno ENOTTY when there is no controlling terminal,
+ * which is the case for a service and is exactly when the channel SHOULD stay
+ * private; EPERM when the terminal belongs to root already.
+ *
+ * Windows returns -1/ENOSYS, as with the group form.
+ */
+int kof_chan_publish_grant_console(struct kof_chan_pub *, char *who,
+				   size_t who_cap);
+
+/*
+ * WHY AN ATTACH FAILED, as a code rather than only as prose.
+ *
+ * Because the ADVICE differs and a caller was giving the wrong one: told that
+ * a channel exists but is not readable, it still printed "start kofwatchtower
+ * first", which is the one thing that cannot help - the sensor is already
+ * running. A string is for a human to read; this is for the caller to branch
+ * on.
+ */
+enum kof_chan_why {
+	KOF_CHAN_WHY_NONE = 0,
+	KOF_CHAN_WHY_ABSENT,    /* nothing is published under that name */
+	KOF_CHAN_WHY_DENIED,    /* it is there and this account may not use it */
+	KOF_CHAN_WHY_BROKEN     /* it is there and is not usable by this build */
+};
+
+/* `reason` may be NULL; it gets a kof_chan_why. */
+struct kof_chan_sub *kof_chan_sub_open(const char *name, const char **why,
+				       int *reason);
 
 /* The publisher's header, for a subscriber reporting what it is attached to. */
 const struct kof_chan_hdr *kof_chan_sub_header(const struct kof_chan_sub *);

@@ -30,6 +30,7 @@
 #endif
 
 #include <stddef.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -319,6 +320,21 @@ static void usage(void)
 	      "  --stats-every N  a health line every N seconds (0 = never,\n"
 	      "                   which is the default)\n"
 	      "  --health         one health line at exit\n"
+	      "  --channel-private  keep the channel to this account only.\n"
+	      "                   By default a sensor started from a terminal\n"
+	      "                   also lets THAT terminal's owner subscribe,\n"
+	      "                   because `sudo kofwatchtower` and then\n"
+	      "                   `kofwatchman` as yourself is how this is run.\n"
+	      "                   A sensor with no terminal - a service - is\n"
+	      "                   private already and this changes nothing.\n"
+	      "  --channel-group G  let members of unix group G subscribe.\n"
+	      "                   A channel is private to the account that\n"
+	      "                   published it, so a root sensor and a CLI run\n"
+	      "                   as somebody else cannot meet without this.\n"
+	      "                   It is not free: G can READ every path this\n"
+	      "                   sensor reports, and can WRITE the cursor and\n"
+	      "                   so make the sensor believe records were\n"
+	      "                   consumed. It cannot forge one.\n"
 	      "\n"
 	      "THERE ARE NO PROVIDER FLAGS, and that is deliberate. What a\n"
 	      "sensor collects is a property of the product, not of a command\n"
@@ -368,6 +384,20 @@ int main(int argc, char **argv)
 	int      do_print = 0, show_health = 0;
 	struct kof_chan_pub *chan = NULL;
 	const char *chan_name = NULL;
+	/*
+	 * WHO MAY SUBSCRIBE, or NULL for "only this account".
+	 *
+	 * A sensor normally runs as root and a consumer normally does not, and
+	 * the channel is created private to whoever published it - so the
+	 * ordinary deployment is refused by a channel that is working. This is
+	 * the operator saying which group may read it, which is the moment
+	 * they decide who gets to see every path on the machine. See
+	 * kof_chan_publish_grant for the second cost, which is the cursor.
+	 */
+	const char *chan_group = NULL;
+	/* Keep the channel to this account even when the default would widen
+	 * it. For an operator who knows the consumer runs as the same user. */
+	int chan_private = 0;
 	uint32_t ring;
 	int      i;
 
@@ -397,6 +427,10 @@ int main(int argc, char **argv)
 			ring = (uint32_t)strtoul(argv[++i], NULL, 10);
 		else if (!strcmp(argv[i], "--channel") && i + 1 < argc)
 			chan_name = argv[++i];
+		else if (!strcmp(argv[i], "--channel-group") && i + 1 < argc)
+			chan_group = argv[++i];
+		else if (!strcmp(argv[i], "--channel-private"))
+			chan_private = 1;
 		else if (!strcmp(argv[i], "--print"))
 			do_print = 1;
 		else if (!strcmp(argv[i], "--health"))
@@ -443,6 +477,75 @@ int main(int argc, char **argv)
 		      "sensor may already be running\n", stderr);
 		sensor_close(&sen);
 		return 1;
+	}
+
+	/*
+	 * FATAL WHEN IT WAS ASKED FOR AND DID NOT HAPPEN.
+	 *
+	 * The whole reason to pass it is that a subscriber cannot otherwise
+	 * attach; carrying on would produce a sensor that collects correctly
+	 * and hands nothing to anybody, which is the failure this flag exists
+	 * to prevent and is invisible from the outside.
+	 */
+	if (chan_group) {
+		/*
+		 * ASKED FOR EXPLICITLY, SO A FAILURE IS FATAL. The whole
+		 * reason to pass it is that a subscriber cannot otherwise
+		 * attach; carrying on would produce a sensor that collects
+		 * correctly and hands nothing to anybody, which is the failure
+		 * this flag exists to prevent and is invisible from outside.
+		 */
+		if (kof_chan_publish_grant(chan, chan_group) != 0) {
+			fprintf(stderr, "kofwatchtower: cannot grant '%s' "
+				"access to the channel: %s\n",
+				chan_group, strerror(errno));
+			kof_chan_publish_close(chan);
+			sensor_close(&sen);
+			return 1;
+		}
+		fprintf(stderr, "kofwatchtower: group '%s' may subscribe\n",
+			chan_group);
+	} else if (!chan_private) {
+		/*
+		 * NOBODY NAMED ONE, so widen to whoever is at the terminal -
+		 * see kof_chan_publish_grant_console for why that is the
+		 * controlling terminal and not descriptor 0, and why it is not
+		 * SUDO_UID.
+		 *
+		 * NOT FATAL HERE, because nothing was asked for. No terminal
+		 * means a service, and a service's channel staying private is
+		 * the right answer rather than a problem to report.
+		 *
+		 * ANNOUNCED EITHER WAY. Whether this channel can be read by a
+		 * second account is a fact about the machine, and a sensor
+		 * that widened access silently would be the wrong kind of
+		 * convenient.
+		 */
+		char who[64];
+
+		if (kof_chan_publish_grant_console(chan, who, sizeof who) == 0) {
+			fprintf(stderr, "kofwatchtower: '%s' may subscribe "
+				"(the terminal's owner; --channel-private to "
+				"refuse, --channel-group to choose)\n", who);
+		} else if (errno != ENOSYS) {
+			/*
+			 * SAY SO NOW AND SAY WHAT TO TYPE.
+			 *
+			 * The alternative is that this stays quiet and the
+			 * problem is discovered from the OTHER side, minutes
+			 * later, as kofwatchman refusing to attach - at which
+			 * point the sensor has to be restarted anyway. A
+			 * service with no terminal is the ordinary case for
+			 * this and is not a fault, so it is one line and not
+			 * a warning.
+			 */
+			fputs("kofwatchtower: the channel is private to this "
+			      "account.\n", stderr);
+			fputs("  Only a process running as the same user can "
+			      "subscribe. To let another:\n"
+			      "      kofwatchtower --channel-group <group>\n",
+			      stderr);
+		}
 	}
 
 	/*

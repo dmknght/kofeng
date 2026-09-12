@@ -313,6 +313,190 @@ static void stop_on_signal(void)
 }
 #endif
 
+/* ------------------------------------------------------------- the spiller */
+
+/*
+ * COPY A CREATED FILE WHILE IT STILL EXISTS.
+ *
+ * THE PROBLEM THIS SOLVES, precisely. Collection happens after the traced tree
+ * is dead - kofrepart.c opens with why, and the reasons are right: a file read
+ * while its writer runs hashes to something that was never on the disk, and
+ * unbounded I/O on the drain path costs a full ring rather than a queue. But a
+ * dropper that writes its second stage and deletes it has nothing left to
+ * collect by then, and that is not an unusual sample, it is the common one.
+ * Every metasploit payload that stages through a file cleans up after itself.
+ *
+ * So the copy happens HERE, on the event, and it stays a FALLBACK: the report
+ * still reads the disk at the end and only reaches for this when the original
+ * is gone. See kof_report_spill.
+ *
+ * AND IT IS BOUNDED, because the objection in kofrepart.c does not stop being
+ * true just because the copy is useful:
+ *
+ *   - one copy per path, not per event: a build tool writing a file in a loop
+ *     costs one copy, not a thousand
+ *   - a per-file ceiling and a total budget, both small by default
+ *   - a fixed table, so a sample that touches ten thousand paths runs out of
+ *     slots rather than out of disk
+ *   - NOTHING UNDER THE REPORT DIRECTORY is ever copied. The copies live
+ *     there, and copying them would raise events that produce more copies -
+ *     a loop that fills a disk at the speed of the ring.
+ */
+#define SPILL_MAX_FILES  256u
+#define SPILL_MAX_ONE    (16u * 1024u * 1024u)
+#define SPILL_MAX_TOTAL  (256u * 1024u * 1024u)
+
+struct spiller {
+	char     dir[512];      /* <report>/spill */
+	char     guard[512];    /* the report root: never copy from under it */
+	size_t   guard_len;
+	uint32_t n;
+	uint64_t bytes, skipped_big, skipped_full, failed;
+	int      ready;
+	/* Paths already copied. Hashes only - the strings live in the report's
+	 * arena and this table exists to answer "again?" in one compare. */
+	uint64_t seen[SPILL_MAX_FILES * 2u];
+};
+
+static uint64_t spill_hash(const char *s)
+{
+	uint64_t h = 1469598103934665603ull;
+
+	for (; *s; s++) {
+		h ^= (uint64_t)(unsigned char)*s;
+		h *= 1099511628211ull;
+	}
+	return h ? h : 1ull;   /* 0 means an empty slot */
+}
+
+static int spill_seen(struct spiller *sp, const char *path)
+{
+	uint64_t h = spill_hash(path);
+	size_t   n = sizeof sp->seen / sizeof sp->seen[0];
+	size_t   i = (size_t)(h % n);
+	size_t   k;
+
+	for (k = 0; k < n; k++, i = (i + 1) % n) {
+		if (!sp->seen[i]) {
+			sp->seen[i] = h;
+			return 0;
+		}
+		if (sp->seen[i] == h)
+			return 1;
+	}
+	return 1;   /* full: treat everything as seen rather than thrash */
+}
+
+static void spill_init(struct spiller *sp, const char *rep_dir)
+{
+	memset(sp, 0, sizeof *sp);
+	if (!rep_dir || !*rep_dir)
+		return;
+	snprintf(sp->guard, sizeof sp->guard, "%s", rep_dir);
+	sp->guard_len = strlen(sp->guard);
+	snprintf(sp->dir, sizeof sp->dir, "%s/spill", rep_dir);
+	sp->ready = (kof_report_mkpath(sp->dir) == 0);
+	if (!sp->ready)
+		fprintf(stderr, "kofmontrace: cannot make %s - a file the "
+			"sample deletes will not be captured\n", sp->dir);
+}
+
+static void spill_take(struct spiller *sp, struct kof_report *rep,
+		       const struct kof_evt *e)
+{
+	const char *path;
+	char  out[640];
+	FILE *in, *dst;
+	unsigned char buf[64u * 1024u];
+	uint64_t wrote = 0;
+	size_t   got;
+
+	if (!sp->ready || !rep)
+		return;
+	if (e->verb != KOF_EVT_FILE_NEW && e->verb != KOF_EVT_FILE_WRITE)
+		return;
+	path = kof_evt_object(e);
+	if (!path || !*path)
+		return;
+	/* Our own copies, and the report we are writing into. */
+	if (sp->guard_len && !strncmp(path, sp->guard, sp->guard_len))
+		return;
+	if (sp->n >= SPILL_MAX_FILES) {
+		sp->skipped_full++;
+		return;
+	}
+	if (spill_seen(sp, path))
+		return;
+
+	in = fopen(path, "rb");
+	if (!in) {
+		/* Already gone, or not ours to read. Not an error: the report
+		 * will say the bytes were not captured, which is true. */
+		sp->failed++;
+		return;
+	}
+	snprintf(out, sizeof out, "%s/%04u.bin", sp->dir, sp->n);
+	dst = fopen(out, "wb");
+	if (!dst) {
+		fclose(in);
+		sp->failed++;
+		return;
+	}
+	while ((got = fread(buf, 1, sizeof buf, in)) > 0) {
+		if (wrote + got > SPILL_MAX_ONE ||
+		    sp->bytes + wrote + got > SPILL_MAX_TOTAL) {
+			/*
+			 * A TRUNCATED COPY IS WORSE THAN NONE. Its digest
+			 * would name bytes that were never a file, and every
+			 * tool downstream treats a digest as an identity. So
+			 * the partial copy is removed and the report goes on
+			 * saying the bytes were not captured.
+			 */
+			fclose(dst);
+			fclose(in);
+			remove(out);
+			sp->skipped_big++;
+			return;
+		}
+		if (fwrite(buf, 1, got, dst) != got) {
+			fclose(dst);
+			fclose(in);
+			remove(out);
+			sp->failed++;
+			return;
+		}
+		wrote += got;
+	}
+	fclose(in);
+	if (fclose(dst) != 0 || kof_report_spill(rep, path, out) != 0) {
+		remove(out);
+		sp->failed++;
+		return;
+	}
+	sp->n++;
+	sp->bytes += wrote;
+}
+
+static void spill_report(const struct spiller *sp, FILE *out)
+{
+	if (!sp->ready || (!sp->n && !sp->skipped_big && !sp->skipped_full &&
+			   !sp->failed))
+		return;
+	fprintf(out, "   %u file(s) copied during the run, %.2f MB",
+		sp->n, (double)sp->bytes / 1048576.0);
+	if (sp->skipped_big)
+		fprintf(out, "; %llu over the per-file ceiling",
+			(unsigned long long)sp->skipped_big);
+	if (sp->skipped_full)
+		fprintf(out, "; %llu past the table",
+			(unsigned long long)sp->skipped_full);
+	if (sp->failed)
+		fprintf(out, "; %llu unreadable",
+			(unsigned long long)sp->failed);
+	fputs("\n   These stand in ONLY where the original was deleted before "
+	      "the run ended.\n", out);
+}
+
 /* ------------------------------------------------------------ the subject */
 
 /*
@@ -350,9 +534,29 @@ struct tracer {
 	const struct kof_mon_api *api;
 	pid_t                     kid, group;
 	uint32_t                  asked, granted;
-	uint64_t                  out_of_scope;
+	uint64_t                  out_of_scope, unattributed;
 	int                       running;
 	int                       unscoped;
+
+	/*
+	 * WHAT WE LEARNED WHILE THE ANSWER STILL EXISTED.
+	 *
+	 * getpgid() on a process that has exited returns -1, and an event
+	 * arrives AFTER the thing that caused it - so a program that writes a
+	 * file and exits inside one poll interval can no longer be asked which
+	 * group it was in. That is not an edge case, it is the shape of a
+	 * dropper: the trace was losing exactly the events it exists to catch.
+	 *
+	 * So every resolution is remembered. A pid seen once while it lived is
+	 * still answerable after it dies, which covers everything that raised
+	 * more than one event or lived longer than one drain.
+	 *
+	 * Open addressing, fixed size, no allocation on the event path. A full
+	 * table is not an error: an entry is overwritten and the pid becomes
+	 * unknown again, which falls back to the rule below rather than to a
+	 * wrong answer.
+	 */
+	struct { uint32_t pid; uint8_t known, in; } seen[512];
 #endif
 	uint32_t root_pid;
 };
@@ -570,6 +774,46 @@ static void tracer_resume(struct tracer *t)
 }
 
 /* The next record, already neutral and already scoped. */
+#ifndef _WIN32
+#define TRACER_SEEN (sizeof ((struct tracer *)0)->seen / \
+		     sizeof ((struct tracer *)0)->seen[0])
+
+/* Was this pid in the traced group? 1 yes, 0 no, -1 never resolved. */
+static int seen_get(const struct tracer *t, uint32_t pid)
+{
+	size_t i = (size_t)(pid * 2654435761u) % TRACER_SEEN;
+	size_t n;
+
+	for (n = 0; n < 8; n++, i = (i + 1) % TRACER_SEEN) {
+		if (!t->seen[i].known)
+			return -1;
+		if (t->seen[i].pid == pid)
+			return t->seen[i].in;
+	}
+	return -1;
+}
+
+static void seen_put(struct tracer *t, uint32_t pid, int in)
+{
+	size_t i = (size_t)(pid * 2654435761u) % TRACER_SEEN;
+	size_t n;
+
+	for (n = 0; n < 8; n++, i = (i + 1) % TRACER_SEEN) {
+		if (!t->seen[i].known || t->seen[i].pid == pid) {
+			t->seen[i].pid = pid;
+			t->seen[i].known = 1;
+			t->seen[i].in = (uint8_t)(in ? 1 : 0);
+			return;
+		}
+	}
+	/* Every probe taken: overwrite the first. See the note on the table. */
+	i = (size_t)(pid * 2654435761u) % TRACER_SEEN;
+	t->seen[i].pid = pid;
+	t->seen[i].known = 1;
+	t->seen[i].in = (uint8_t)(in ? 1 : 0);
+}
+#endif
+
 static int tracer_next(struct tracer *t, struct kof_evt *out, uint32_t wait_ms,
 		       int all)
 {
@@ -585,11 +829,45 @@ static int tracer_next(struct tracer *t, struct kof_evt *out, uint32_t wait_ms,
 			return 0;
 		if (all || t->unscoped)
 			return 1;
-		/* In scope exactly when the kernel says so. */
-		if (!(out->miss & KOF_F_PID) &&
-		    getpgid((pid_t)out->pid) == t->group)
+		if (out->miss & KOF_F_PID) {
+			t->out_of_scope++;
+			continue;
+		}
+		{
+			pid_t g = getpgid((pid_t)out->pid);
+			int known;
+
+			if (g >= 0) {
+				/* The kernel still knows. Answer, and
+				 * remember for after it exits. */
+				seen_put(t, out->pid, g == t->group);
+				if (g == t->group)
+					return 1;
+				t->out_of_scope++;
+				continue;
+			}
+			/*
+			 * IT HAS EXITED. Answer from what was learned while it
+			 * lived, and when nothing was - a process that wrote
+			 * one file and was gone before the drain - SHOW IT.
+			 *
+			 * That is the deliberate choice: a trace that drops
+			 * what it cannot prove drops the dropper, and the
+			 * whole run is then clean for the one reason nobody
+			 * would suspect. Counted separately and reported at
+			 * the end, so nothing here is mistaken for attributed.
+			 */
+			known = seen_get(t, out->pid);
+			if (known == 1)
+				return 1;
+			if (known == 0) {
+				t->out_of_scope++;
+				continue;
+			}
+			t->unattributed++;
+			out->miss |= KOF_F_PID;
 			return 1;
-		t->out_of_scope++;
+		}
 	}
 #endif
 }
@@ -789,6 +1067,25 @@ static int tracer_resolve(const char *name, char *out, size_t cap)
 			return 1;
 	}
 	return 0;
+#endif
+}
+
+/*
+ * HOW MANY RECORDS WERE SHOWN WITHOUT BEING ATTRIBUTED - see tracer_next.
+ * Zero on Windows, which tracks processes and therefore always knows.
+ */
+static void tracer_report_unattributed(struct tracer *t, FILE *out)
+{
+#ifdef _WIN32
+	(void)t; (void)out;
+#else
+	if (!t->unattributed)
+		return;
+	fprintf(out, "   %llu event(s) shown but NOT attributed: the process "
+		"that caused them had already exited\n"
+		"   and was never seen alive, so it could not be placed in or "
+		"out of the traced group.\n",
+		(unsigned long long)t->unattributed);
 #endif
 }
 
@@ -1025,6 +1322,7 @@ static void usage(void)
 int main(int argc, char **argv)
 {
 	struct tracer         tr;
+	struct spiller        spill;
 	struct kof_evt_health nh;
 	struct kof_evt        ke;
 	struct kof_evt_tally  tally;
@@ -1487,6 +1785,8 @@ int main(int argc, char **argv)
 	 * missing database is reported before a live sample has been run - not
 	 * after, when the run cannot be taken back.
 	 */
+	spill_init(&spill, rep_dir);
+
 	if (rep_dir) {
 		struct kof_report_info ri;
 
@@ -1626,6 +1926,9 @@ int main(int argc, char **argv)
 					log ? rep_index : KOF_REP_NO_INDEX);
 			if (log)
 				rep_index++;
+			/* AFTER the feed, because the fingerprint the copy
+			 * attaches to is what the feed just created. */
+			spill_take(&spill, rep, &ke);
 		}
 
 		if (!quiet)
@@ -1699,6 +2002,8 @@ tick:
 	 * neutral half, because a reader deciding whether to trust a quiet run
 	 * needs both. */
 	tracer_extra(&tr, stderr);
+	tracer_report_unattributed(&tr, stderr);
+	spill_report(&spill, stderr);
 
 	/*
 	 * THE SHAPES, AND WHY THIS IS ON THE TOOL PEOPLE ACTUALLY DEBUG WITH.

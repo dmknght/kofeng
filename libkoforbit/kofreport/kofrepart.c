@@ -444,19 +444,50 @@ static int collect_file(struct kof_report *r, const struct kof_report_stage *st,
 	FILE    *in, *out;
 	unsigned char buf[32u * 1024u];
 	int      rc = 0;
+	/* Where the bytes are actually read from - the path the sample used,
+	 * or the copy somebody took while it still existed. */
+	const char *src = f->text;
+	int      from_spill = 0;
 
-	if (kof_sha256_file(f->text, f->bytes.file_sha256, &size) != 0) {
-		/* The one place the two outcomes are told apart by errno,
-		 * because fopen is what failed inside. */
-		f->bytes.why_not = (errno == ENOENT) ? KOF_FP_WHY_GONE
-						     : KOF_FP_WHY_DENIED;
-		f->bytes.file_sha256[0] = '\0';
-		return -1;
+	if (kof_sha256_file(src, f->bytes.file_sha256, &size) != 0) {
+		/*
+		 * GONE, AND SOMEBODY SAW IT GO. A self-deleting dropper is the
+		 * case this whole fallback exists for: the file was real, it
+		 * was reported, and by the time the tree is dead there is
+		 * nothing left to hash. When a host copied it during the run -
+		 * see kof_report_spill - those bytes are what is left of it.
+		 *
+		 * Only on ENOENT. A file that is merely unreadable is still
+		 * there, and reporting a copy for it would be answering a
+		 * different question.
+		 */
+		if (errno == ENOENT && f->spill && f->spill[0] &&
+		    kof_sha256_file(f->spill, f->bytes.file_sha256,
+				    &size) == 0) {
+			src = f->spill;
+			from_spill = 1;
+		} else {
+			/* The one place the two outcomes are told apart by
+			 * errno, because fopen is what failed inside. */
+			f->bytes.why_not = (errno == ENOENT)
+					   ? KOF_FP_WHY_GONE
+					   : KOF_FP_WHY_DENIED;
+			f->bytes.file_sha256[0] = '\0';
+			return -1;
+		}
 	}
 	f->bytes.file_size = size;
 	f->bytes.got       = size;
 	f->bytes.claimed   = size;
-	f->bytes.at_finish = 1;
+	/*
+	 * `at_finish` IS THE WHOLE CLAIM OF THIS FIELD, so a spilled copy must
+	 * clear it: these bytes are what was there DURING the run, which is
+	 * a different assertion and a weaker one - the sample may have written
+	 * the file again after the copy was taken.
+	 */
+	f->bytes.at_finish = (uint8_t)(from_spill ? 0 : 1);
+	if (from_spill)
+		f->flags |= (uint8_t)(KOF_FP_F_SPILLED | KOF_FP_F_SELF_DEL);
 	f->bytes.why_not   = KOF_FP_WHY_OK;
 
 	/* The preview comes from the head of the file whether or not it is
@@ -465,7 +496,7 @@ static int collect_file(struct kof_report *r, const struct kof_report_stage *st,
 	{
 		uint8_t why = KOF_FP_WHY_OK;
 		unsigned char head[KOF_FP_PREVIEW];
-		uint64_t got = read_range(f->text, 0, sizeof head, head, &why);
+		uint64_t got = read_range(src, 0, sizeof head, head, &why);
 
 		if (got)
 			set_preview(&f->bytes, head, got);
@@ -497,7 +528,7 @@ static int collect_file(struct kof_report *r, const struct kof_report_stage *st,
 		}
 	}
 
-	in = fopen(f->text, "rb");
+	in = fopen(src, "rb");
 	if (!in) {
 		f->bytes.why_not = KOF_FP_WHY_DENIED;
 		return -1;
@@ -705,7 +736,17 @@ int kof_report_finish(struct kof_report *r, const struct kof_report_stage *st)
 			if (collect_file(r, st, f, dir, max_file) != 0)
 				r->collect_failed++;
 			else if (f->bytes.stored[0] || f->bytes.file_sha256[0])
-				ask_engine(st, f->text, &f->verdict);
+				/*
+				 * THE PATH THE BYTES CAME FROM. When the
+				 * original is gone and a copy stood in for it,
+				 * asking the engine about the original gets
+				 * "unanswered" for precisely the file the
+				 * fallback was built to rescue.
+				 */
+				ask_engine(st,
+					   (f->flags & KOF_FP_F_SPILLED)
+						   ? f->spill : f->text,
+					   &f->verdict);
 			break;
 
 		case KOF_FP_FILE_WRITE:

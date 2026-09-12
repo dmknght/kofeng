@@ -382,6 +382,25 @@ struct kof_fingerprint {
 	const char *text;
 
 	/*
+	 * A COPY TAKEN WHILE THE SAMPLE RAN, or "".
+	 *
+	 * Collection happens after the tree is dead, for the reasons at the
+	 * top of kofrepart.c - and that is exactly when a self-deleting
+	 * dropper's second stage no longer exists. A host that watched the
+	 * write happen could copy it there and then; this is where it says so,
+	 * and collect_file falls back to it when the original is gone.
+	 *
+	 * FALLBACK AND NOT PREFERENCE. While the writer is alive the file can
+	 * change between the copy and the next write, so what is on the disk at
+	 * the end is still the better account whenever there IS one. This only
+	 * turns "the bytes were not captured" into bytes.
+	 *
+	 * Bytes that came from here are marked: kof_fp_bytes.at_finish is 0 and
+	 * KOF_FP_F_SELF_DEL is set, so nothing reads them as the end state.
+	 */
+	const char *spill;
+
+	/*
 	 * THE PART THAT WOULD SURVIVE ANOTHER RUN, for a volatile fingerprint -
 	 * "\AppData\Local\Temp\*.tmp" for a random temp name, the value name
 	 * without its data, the domain without its label.
@@ -445,7 +464,14 @@ enum {
 	 * set - and without the flag a signature draft would declare that
 	 * basename with KOF_DEFINE_STR and match nothing.
 	 */
-	KOF_FP_F_WIDE     = 1u << 4
+	KOF_FP_F_WIDE     = 1u << 4,
+
+	/*
+	 * THE BYTES CAME FROM A COPY TAKEN DURING THE RUN, not off the disk at
+	 * the end - see kof_fingerprint.spill. Set together with SELF_DEL,
+	 * because the only reason to fall back is that the original was gone.
+	 */
+	KOF_FP_F_SPILLED  = 1u << 5
 };
 
 /* kof_fingerprint.in_sample */
@@ -577,6 +603,22 @@ int kof_report_mkpath(const char *dir);
  * no file and asks the OS nothing.
  */
 #define KOF_REP_NO_INDEX 0xffffffffffffffffull
+/*
+ * SAY THAT A COPY OF `path` WAS TAKEN, and where it is. 0 on success, -1 when
+ * no fingerprint for that path exists yet - which is a caller ordering error:
+ * feed the event first, then spill.
+ *
+ * COPYING IS THE CALLER'S JOB AND THAT IS DELIBERATE. This library does no I/O
+ * on the drain path, for the reason kofrepart.c opens with: unbounded reading
+ * there does not cost a queue, it costs a full ring, and the events dropped
+ * are everybody else's. A host that wants a self-deleting dropper's bytes
+ * decides its own ceiling, copies within it, and records the result here.
+ *
+ * `alt` is copied into the report's arena; the file it names must outlive
+ * kof_report_finish.
+ */
+int kof_report_spill(struct kof_report *, const char *path, const char *alt);
+
 void kof_report_feed(struct kof_report *, const struct kof_evt *,
 		     uint64_t index);
 

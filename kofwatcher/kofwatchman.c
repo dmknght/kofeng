@@ -362,6 +362,13 @@ int main(int argc, char **argv)
 	struct wm_source src;
 	const struct kofevt_log_hdr *h = NULL;
 	const char *chan_name = NULL;
+	/*
+	 * PLAIN int AND NOT THE ENUM. kofchan.h is included only by a build
+	 * that HAS a channel, so naming kof_chan_why here breaks the build
+	 * that has none - which is the configuration this variable exists to
+	 * be harmless in.
+	 */
+	int chan_denied = 0;
 	const char *why = "";
 	kof_engine  *eng = NULL;
 	kof_scanner *sc  = NULL;
@@ -415,7 +422,12 @@ int main(int argc, char **argv)
 	 */
 	if (!replay_path) {
 #ifdef KOF_HAVE_CHAN
-		src.chan = kof_chan_sub_open(chan_name, &why);
+		{
+			int reason = 0;
+
+			src.chan = kof_chan_sub_open(chan_name, &why, &reason);
+			chan_denied = (reason == KOF_CHAN_WHY_DENIED);
+		}
 #else
 		(void)chan_name;
 		why = "this build has no live channel - it is a Windows "
@@ -426,8 +438,27 @@ int main(int argc, char **argv)
 				       (uint32_t)KOFENG_BUILD,
 				       "verdicts over an event stream");
 			fprintf(stderr, "\nkofwatchman: %s\n", why);
-			fputs("  start kofwatchtower first, or pass --log FILE "
-			      "to read a recording.\n", stderr);
+			/*
+			 * THE ADVICE HAS TO MATCH THE REASON. Told that a
+			 * channel exists and is not readable, this used to
+			 * answer "start kofwatchtower first" - the one action
+			 * that cannot help, because the sensor is already
+			 * running. Somebody following it starts a second
+			 * sensor, which is refused, and now has two wrong
+			 * answers.
+			 */
+			if (chan_denied)
+				fputs("  The sensor is ALREADY RUNNING. A "
+				      "channel is private to the account that\n"
+				      "  published it, so a root sensor cannot "
+				      "be read by an ordinary user\n"
+				      "  unless it was told to allow one:\n"
+				      "      kofwatchtower --channel-group "
+				      "<your group>\n", stderr);
+			else
+				fputs("  start kofwatchtower first, or pass "
+				      "--log FILE to read a recording.\n",
+				      stderr);
 			return 1;
 		}
 	} else {

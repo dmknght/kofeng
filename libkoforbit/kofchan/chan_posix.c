@@ -38,6 +38,8 @@
 #define _GNU_SOURCE
 
 #include <errno.h>
+#include <grp.h>
+#include <pwd.h>
 #include <fcntl.h>
 #include <semaphore.h>
 #include <stdatomic.h>
@@ -163,6 +165,164 @@ static void *map_rw(int fd, uint64_t bytes)
 }
 
 /* --------------------------------------------------------------- publisher */
+
+/*
+ * LET ONE GROUP SUBSCRIBE. 0 on success, -1 with errno set.
+ *
+ * WHY THIS IS A CALL AND NOT THE DEFAULT. The channel is created 0600, so a
+ * sensor running as root publishes a channel only root can read - which is the
+ * right default and the wrong outcome when the consumer is a CLI somebody runs
+ * as themselves. Widening it is a DECISION with two costs, and an operator
+ * naming a group is how they take both:
+ *
+ *   THE DATA SECTION BECOMES READABLE by that group, and it carries a path for
+ *   every file event on the machine. That is a map of what everyone is doing.
+ *
+ *   THE CURSOR BECOMES WRITABLE by that group, because a subscriber has to
+ *   record what it consumed. A member can therefore move the cursor and make
+ *   the sensor believe records were taken that nobody read. It cannot forge a
+ *   record - the data section stays read-only to it, which is the property
+ *   kofchan.h is built around - so the worst it buys is silence, not a lie.
+ *
+ * Those are not the same risk and both are real, which is why this asks for a
+ * group rather than taking 0666 and saying nothing.
+ *
+ * LINUX-SHAPED IN ONE PLACE: the semaphore has no descriptor to fchmod, so it
+ * is reached through /dev/shm/sem.<name>, which is where glibc puts it. A
+ * failure there is not fatal - the subscriber falls back to sleeping.
+ */
+/*
+ * The two chowns and the two chmods, once the gid is settled.
+ *
+ * ERRNO IS SET EXPLICITLY ON EVERY FAILURE PATH, and that is not belt and
+ * braces. Measured in a container: fchown on a shm descriptor returned -1
+ * WITHOUT setting errno, and the caller then printed whatever errno happened
+ * to hold - "Invalid argument", from a call that had succeeded. A diagnostic
+ * that invents a cause is worse than one that says it does not know.
+ */
+static int grant_gid(struct kof_chan_pub *p, gid_t gid)
+{
+	char        sem_path[320];
+	const char *bare;
+
+	/* Owner keeps read/write; the group gets exactly what each section
+	 * needs and nothing else. World gets nothing, on both. */
+	errno = 0;
+	if (fchown(p->fd_data, (uid_t)-1, gid) != 0 ||
+	    fchmod(p->fd_data, 0640) != 0) {
+		if (!errno) errno = EPERM;
+		return -1;
+	}
+	errno = 0;
+	if (fchown(p->fd_cur, (uid_t)-1, gid) != 0 ||
+	    fchmod(p->fd_cur, 0660) != 0) {
+		if (!errno) errno = EPERM;
+		return -1;
+	}
+
+	bare = p->n_wake[0] == '/' ? p->n_wake + 1 : p->n_wake;
+	snprintf(sem_path, sizeof sem_path, "/dev/shm/sem.%s", bare);
+	(void)chown(sem_path, (uid_t)-1, gid);
+	(void)chmod(sem_path, 0660);
+
+	/*
+	 * PROVE IT RATHER THAN ASSUME IT. Everything above can report success
+	 * and leave the mode unchanged - a filesystem that ignores it, a
+	 * sandbox that stubs it out. The whole point of the call is that a
+	 * second account can open these, so the last thing it does is look.
+	 */
+	{
+		struct stat sd, sc;
+
+		if (fstat(p->fd_data, &sd) != 0 ||
+		    fstat(p->fd_cur, &sc) != 0) {
+			if (!errno) errno = EPERM;
+			return -1;
+		}
+		if (sd.st_gid != gid || sc.st_gid != gid ||
+		    !(sd.st_mode & S_IRGRP) || !(sc.st_mode & S_IWGRP)) {
+			errno = EPERM;
+			return -1;
+		}
+	}
+	return 0;
+}
+
+/*
+ * GRANT TO WHOEVER IS AT THE CONTROLLING TERMINAL. 0 on success, -1 with
+ * errno; ENOTTY when there is no terminal and EPERM when its owner is root
+ * anyway, and neither is a failure worth stopping for.
+ *
+ * WHY THIS EXISTS. `sudo kofwatchtower` from somebody's shell and then
+ * `kofwatchman` as themselves is not an exotic deployment, it is THE
+ * deployment, and it does not work: the channel belongs to root. Requiring a
+ * flag for the only way anybody runs it is a flag that is always passed, which
+ * is a default wearing a disguise.
+ *
+ * /dev/tty AND NOT FILE DESCRIPTOR 0, and the difference is the whole security
+ * of it. Descriptor 0 is whatever the caller redirected it to - including a
+ * file an attacker owns, which would name an attacker's group. The
+ * CONTROLLING TERMINAL is kernel state, set at session leader time, and a
+ * redirect cannot change it.
+ *
+ * AND NOT SUDO_UID EITHER, which is the obvious answer and is an environment
+ * variable: readable and writable by whoever arranged the invocation, which is
+ * exactly the party this decision must not be delegated to.
+ */
+int kof_chan_publish_grant_console(struct kof_chan_pub *p, char *who,
+				   size_t who_cap)
+{
+	struct passwd  pw, *res = NULL;
+	char           buf[4096];
+	struct stat    st;
+	int            fd;
+
+	if (who && who_cap)
+		who[0] = '\0';
+	if (!p) {
+		errno = EINVAL;
+		return -1;
+	}
+	fd = open("/dev/tty", O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		errno = ENOTTY;
+		return -1;
+	}
+	if (fstat(fd, &st) != 0) {
+		close(fd);
+		return -1;
+	}
+	close(fd);
+	if (st.st_uid == 0) {
+		/* Root is already the owner; there is nothing to widen to and
+		 * widening to root's group would be a real change for nothing. */
+		errno = EPERM;
+		return -1;
+	}
+	if (getpwuid_r(st.st_uid, &pw, buf, sizeof buf, &res) != 0 || !res) {
+		errno = ENOENT;
+		return -1;
+	}
+	if (who && who_cap)
+		snprintf(who, who_cap, "%s", pw.pw_name);
+	return grant_gid(p, pw.pw_gid);
+}
+
+int kof_chan_publish_grant(struct kof_chan_pub *p, const char *group)
+{
+	struct group  gr, *res = NULL;
+	char          buf[4096];
+
+	if (!p || !group || !*group) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (getgrnam_r(group, &gr, buf, sizeof buf, &res) != 0 || !res) {
+		errno = ENOENT;
+		return -1;
+	}
+	return grant_gid(p, gr.gr_gid);
+}
 
 struct kof_chan_pub *kof_chan_publish_open(const char *name, uint32_t capacity)
 {
@@ -310,13 +470,15 @@ void kof_chan_publish_close(struct kof_chan_pub *p)
 
 /* -------------------------------------------------------------- subscriber */
 
-struct kof_chan_sub *kof_chan_sub_open(const char *name, const char **why)
+struct kof_chan_sub *kof_chan_sub_open(const char *name, const char **why,
+				       int *reason)
 {
 	struct kof_chan_sub *s;
 	char nd[64], nc[64], nw[64];
 	struct stat st;
 
 	if (why) *why = "";
+	if (reason) *reason = KOF_CHAN_WHY_BROKEN;
 	if (!chan_names(name, nd, nc, nw, sizeof nd)) {
 		if (why) *why = "the channel name is not usable";
 		return NULL;
@@ -336,12 +498,36 @@ struct kof_chan_sub *kof_chan_sub_open(const char *name, const char **why)
 	 */
 	s->fd_data = shm_open(nd, O_RDONLY, 0);
 	if (s->fd_data < 0) {
-		if (why) *why = "no sensor is publishing";
+		/*
+		 * EACCES IS NOT "NOTHING IS THERE", and telling them apart is
+		 * the difference between starting a sensor and being told who
+		 * may read the one already running. A root sensor's channel is
+		 * created 0600 and owned by root, so an unprivileged
+		 * subscriber gets refused by a channel that is working
+		 * perfectly - and the old message sent them off to start a
+		 * second one.
+		 */
+		if (errno == EACCES || errno == EPERM) {
+			if (why)
+				*why = "a sensor is publishing but this "
+				       "account may not read its channel";
+			if (reason) *reason = KOF_CHAN_WHY_DENIED;
+		} else {
+			if (why) *why = "no sensor is publishing";
+			if (reason) *reason = KOF_CHAN_WHY_ABSENT;
+		}
 		goto fail;
 	}
 	s->fd_cur = shm_open(nc, O_RDWR, 0);
 	if (s->fd_cur < 0) {
-		if (why) *why = "the channel has no cursor section";
+		if (errno == EACCES || errno == EPERM) {
+			if (why)
+				*why = "a sensor is publishing but this "
+				       "account may not write its cursor";
+			if (reason) *reason = KOF_CHAN_WHY_DENIED;
+		} else {
+			if (why) *why = "the channel has no cursor section";
+		}
 		goto fail;
 	}
 	if (fstat(s->fd_data, &st) != 0 ||
@@ -367,6 +553,7 @@ struct kof_chan_sub *kof_chan_sub_open(const char *name, const char **why)
 	if (atomic_load_explicit((_Atomic uint32_t *)s->hdr_raw,
 				 memory_order_acquire) != KOF_CHAN_MAGIC) {
 		if (why) *why = "no sensor is publishing";
+		if (reason) *reason = KOF_CHAN_WHY_ABSENT;
 		goto fail;
 	}
 	if (s->hdr->version != KOF_CHAN_VERSION) {

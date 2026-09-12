@@ -2,6 +2,7 @@
  * wchan.c - see wchan.h.
  */
 
+#include <errno.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,6 +91,29 @@ static uint32_t round_pow2(uint32_t v)
 }
 
 /* ---------------------------------------------------------------- publish */
+
+/*
+ * NOT A GROUP NAME ON THIS HOST. Who may open a mapping here is an ACL on the
+ * object, set at creation; there is no chown to make after the fact and a unix
+ * group is not the vocabulary. Refused rather than silently ignored, so a
+ * caller that asked to widen the channel learns it did not happen.
+ */
+int kof_chan_publish_grant(struct kof_chan_pub *p, const char *group)
+{
+	(void)p; (void)group;
+	errno = ENOSYS;
+	return -1;
+}
+
+int kof_chan_publish_grant_console(struct kof_chan_pub *p, char *who,
+				   size_t who_cap)
+{
+	(void)p;
+	if (who && who_cap)
+		who[0] = '\0';
+	errno = ENOSYS;
+	return -1;
+}
 
 struct kof_chan_pub *kof_chan_publish_open(const char *name,
 					     uint32_t capacity)
@@ -234,13 +258,16 @@ void kof_chan_publish_close(struct kof_chan_pub *p)
 
 /* -------------------------------------------------------------- subscribe */
 
-struct kof_chan_sub *kof_chan_sub_open(const char *name, const char **why)
+struct kof_chan_sub *kof_chan_sub_open(const char *name, const char **why,
+				       int *reason)
 {
 	wchar_t nd[256], nc[256], nw[256];
 	struct kof_chan_sub *s;
 
 	if (why)
 		*why = "";
+	if (reason)
+		*reason = KOF_CHAN_WHY_BROKEN;
 	if (!chan_names(name, nd, nc, nw, 256)) {
 		if (why) *why = "the channel name is too long";
 		return NULL;
@@ -258,12 +285,28 @@ struct kof_chan_sub *kof_chan_sub_open(const char *name, const char **why)
 	 */
 	s->h_data = OpenFileMappingW(FILE_MAP_READ, FALSE, nd);
 	if (!s->h_data) {
-		if (why) *why = "no sensor is publishing";
+		/* ERROR_ACCESS_DENIED means the mapping is there and this
+		 * token may not open it - a different problem from there
+		 * being no sensor, and a different thing to tell somebody. */
+		if (GetLastError() == ERROR_ACCESS_DENIED) {
+			if (why) *why = "a sensor is publishing but this "
+					"account may not read its channel";
+			if (reason) *reason = KOF_CHAN_WHY_DENIED;
+		} else {
+			if (why) *why = "no sensor is publishing";
+			if (reason) *reason = KOF_CHAN_WHY_ABSENT;
+		}
 		goto fail;
 	}
 	s->h_cur = OpenFileMappingW(FILE_MAP_WRITE, FALSE, nc);
 	if (!s->h_cur) {
-		if (why) *why = "the cursor is not there";
+		if (GetLastError() == ERROR_ACCESS_DENIED) {
+			if (why) *why = "a sensor is publishing but this "
+					"account may not write its cursor";
+			if (reason) *reason = KOF_CHAN_WHY_DENIED;
+		} else {
+			if (why) *why = "the cursor is not there";
+		}
 		goto fail;
 	}
 	s->h_wake = OpenEventW(SYNCHRONIZE, FALSE, nw);

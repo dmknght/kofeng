@@ -530,6 +530,7 @@ static struct kof_fingerprint *intern(struct kof_report *r, uint8_t kind,
 			f->text = kofrep_arena_str(&r->arena, text);
 			f->norm = "";
 			f->why  = "";
+			f->spill = "";
 			f->bytes.why_not = KOF_FP_WHY_NOT_ASKED;
 			r->slot[at] = ++r->n_fp;
 			r->order_stale = 1;
@@ -569,6 +570,42 @@ struct kof_fingerprint *kofrep_find(struct kof_report *r, uint8_t kind,
 			return &r->fp[ix - 1u];
 	}
 	return NULL;
+}
+
+int kof_report_spill(struct kof_report *r, const char *path, const char *alt)
+{
+	/*
+	 * BOTH COLLECTED KINDS, because one path can be interned under each:
+	 * a dropper CREATES a file and then WRITES it, and the finish phase
+	 * collects both rows. Attaching to only one leaves the other reporting
+	 * that the bytes were not captured, next to a row saying they were.
+	 */
+	static const uint8_t kinds[] = { KOF_FP_FILE_NEW, KOF_FP_FILE_WRITE };
+	const char *copy = NULL;
+	unsigned k;
+	int hit = 0;
+
+	if (!r || !path || !*path || !alt || !*alt)
+		return -1;
+	for (k = 0; k < sizeof kinds / sizeof kinds[0]; k++) {
+		struct kof_fingerprint *f = kofrep_find(r, kinds[k], path);
+
+		if (!f)
+			continue;
+		hit = 1;
+		/* First copy wins. A file written ten thousand times would
+		 * otherwise cost ten thousand arena strings for a fallback
+		 * only one of them can be. */
+		if (f->spill && f->spill[0])
+			continue;
+		if (!copy) {
+			copy = kofrep_arena_str(&r->arena, alt);
+			if (!copy)
+				return -1;
+		}
+		f->spill = copy;
+	}
+	return hit ? 0 : -1;
 }
 
 /* ---- opening and closing ------------------------------------------------- */
