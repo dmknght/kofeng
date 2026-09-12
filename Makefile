@@ -1217,10 +1217,19 @@ kofwatchman: $(OUT)/bin/kofwatchman$(EXE)
 #
 # $(WINLIB) comes in through WATCHMAN_CHAN, which is empty off Windows - so this
 # rule exists everywhere and the target below is only offered where it links.
+#
+# -Ilibkofgrille IS NAMED HERE, and that is the point rather than a detail. It
+# used to arrive through WATCHMAN_CHAN, which is the variable that says how this
+# host talks to a sensor - so the include path for wproc.h was riding on a
+# variable about something else entirely. The day the channel moved into
+# libkoforbit that flag went with it and this tool stopped compiling, while a
+# binary from the previous build sat in build/release/bin looking like it had
+# worked. A prerequisite that is real is cheaper stated than inherited.
 $(OUT)/bin/kofmemscan$(EXE): kofwatcher/kofmemscan.c $(KOFRIDGE_SRC) $(LIB) \
                              $(SDK_HDR) $(STAMP)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofeng -Ilibkofeng/kofparsers \
+	      -Ilibkofgrille \
 	      -Ilibkoforbit/koffridge -Ilibkoforbit/kofevt $< \
 	      $(KOFRIDGE_SRC) $(LIB) -o $@ $(LDFLAGS) $(WATCHMAN_CHAN)
 
