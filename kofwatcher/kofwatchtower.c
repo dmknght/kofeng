@@ -524,23 +524,37 @@ int main(int argc, char **argv)
 		char who[64];
 
 		if (kof_chan_publish_grant_console(chan, who, sizeof who) == 0) {
-			fprintf(stderr, "kofwatchtower: '%s' may subscribe "
-				"(the terminal's owner; --channel-private to "
-				"refuse, --channel-group to choose)\n", who);
+			fprintf(stderr, "kofwatchtower: the channel belongs to "
+				"'%s' - that account may subscribe\n"
+				"  (whoever logged in; --channel-private to "
+				"refuse, --channel-group for a team)\n", who);
 		} else if (errno != ENOSYS) {
 			/*
-			 * SAY SO NOW AND SAY WHAT TO TYPE.
+			 * SAY SO NOW, SAY WHICH REASON, AND SAY WHAT TO TYPE.
 			 *
-			 * The alternative is that this stays quiet and the
-			 * problem is discovered from the OTHER side, minutes
-			 * later, as kofwatchman refusing to attach - at which
-			 * point the sensor has to be restarted anyway. A
-			 * service with no terminal is the ordinary case for
-			 * this and is not a fault, so it is one line and not
-			 * a warning.
+			 * The three causes were one message, and that was not
+			 * enough to act on: "no terminal" is a service and is
+			 * correct, "the terminal belongs to root" is a root
+			 * shell rather than sudo from a user's one, and a
+			 * refused chown is neither. They need different
+			 * responses and only one of them is a fault.
+			 *
+			 * Said HERE and not left for the other side: the
+			 * problem would otherwise be found minutes later as
+			 * kofwatchman refusing to attach, by which point the
+			 * sensor has to be restarted anyway.
 			 */
-			fputs("kofwatchtower: the channel is private to this "
-			      "account.\n", stderr);
+			const char *because =
+				errno == ENOTTY
+				? "nothing identifies a login session, so "
+				  "there is nobody to grant it to"
+				: errno == EPERM
+				? "the login session is root's own"
+				: "the channel's ownership could not be "
+				  "changed on this filesystem";
+
+			fprintf(stderr, "kofwatchtower: the channel is private "
+				"to this account: %s.\n", because);
 			fputs("  Only a process running as the same user can "
 			      "subscribe. To let another:\n"
 			      "      kofwatchtower --channel-group <group>\n",

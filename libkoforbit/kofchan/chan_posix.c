@@ -200,30 +200,40 @@ static void *map_rw(int fd, uint64_t bytes)
  * to hold - "Invalid argument", from a call that had succeeded. A diagnostic
  * that invents a cause is worse than one that says it does not know.
  */
-static int grant_gid(struct kof_chan_pub *p, gid_t gid)
+static int grant_uid(struct kof_chan_pub *p, uid_t uid, gid_t gid)
 {
 	char        sem_path[320];
 	const char *bare;
 
-	/* Owner keeps read/write; the group gets exactly what each section
-	 * needs and nothing else. World gets nothing, on both. */
+	/*
+	 * THE DATA SECTION IS READ-ONLY TO THEM AND THE CURSOR IS NOT, which
+	 * is the asymmetry the whole design rests on - see kofchan.h. A
+	 * subscriber cannot write a record because it does not hold the access
+	 * to, and that survives being handed ownership: the mode is what the
+	 * PUBLISHER sets, and it sets r-- on the data.
+	 *
+	 * 0400 and 0600 rather than 0640 and 0660: with the object handed to
+	 * the person by NAME there is nothing for a group bit to add, and a
+	 * group bit on a distro that puts every account in `users` would hand
+	 * the machine's file activity to all of them.
+	 */
 	errno = 0;
-	if (fchown(p->fd_data, (uid_t)-1, gid) != 0 ||
-	    fchmod(p->fd_data, 0640) != 0) {
+	if (fchown(p->fd_data, uid, gid) != 0 ||
+	    fchmod(p->fd_data, 0400) != 0) {
 		if (!errno) errno = EPERM;
 		return -1;
 	}
 	errno = 0;
-	if (fchown(p->fd_cur, (uid_t)-1, gid) != 0 ||
-	    fchmod(p->fd_cur, 0660) != 0) {
+	if (fchown(p->fd_cur, uid, gid) != 0 ||
+	    fchmod(p->fd_cur, 0600) != 0) {
 		if (!errno) errno = EPERM;
 		return -1;
 	}
 
 	bare = p->n_wake[0] == '/' ? p->n_wake + 1 : p->n_wake;
 	snprintf(sem_path, sizeof sem_path, "/dev/shm/sem.%s", bare);
-	(void)chown(sem_path, (uid_t)-1, gid);
-	(void)chmod(sem_path, 0660);
+	(void)chown(sem_path, uid, gid);
+	(void)chmod(sem_path, 0600);
 
 	/*
 	 * PROVE IT RATHER THAN ASSUME IT. Everything above can report success
@@ -239,8 +249,8 @@ static int grant_gid(struct kof_chan_pub *p, gid_t gid)
 			if (!errno) errno = EPERM;
 			return -1;
 		}
-		if (sd.st_gid != gid || sc.st_gid != gid ||
-		    !(sd.st_mode & S_IRGRP) || !(sc.st_mode & S_IWGRP)) {
+		if (sd.st_uid != uid || sc.st_uid != uid ||
+		    !(sd.st_mode & S_IRUSR) || !(sc.st_mode & S_IWUSR)) {
 			errno = EPERM;
 			return -1;
 		}
@@ -248,10 +258,94 @@ static int grant_gid(struct kof_chan_pub *p, gid_t gid)
 	return 0;
 }
 
+/* The group form, for --channel-group: ownership stays with the publisher and
+ * the group is what is widened, so a whole team can subscribe. */
+static int grant_group(struct kof_chan_pub *p, gid_t gid)
+{
+	char        sem_path[320];
+	const char *bare;
+	struct stat sd, sc;
+
+	errno = 0;
+	if (fchown(p->fd_data, (uid_t)-1, gid) != 0 ||
+	    fchmod(p->fd_data, 0640) != 0) {
+		if (!errno) errno = EPERM;
+		return -1;
+	}
+	errno = 0;
+	if (fchown(p->fd_cur, (uid_t)-1, gid) != 0 ||
+	    fchmod(p->fd_cur, 0660) != 0) {
+		if (!errno) errno = EPERM;
+		return -1;
+	}
+	bare = p->n_wake[0] == '/' ? p->n_wake + 1 : p->n_wake;
+	snprintf(sem_path, sizeof sem_path, "/dev/shm/sem.%s", bare);
+	(void)chown(sem_path, (uid_t)-1, gid);
+	(void)chmod(sem_path, 0660);
+
+	if (fstat(p->fd_data, &sd) != 0 || fstat(p->fd_cur, &sc) != 0) {
+		if (!errno) errno = EPERM;
+		return -1;
+	}
+	if (sd.st_gid != gid || sc.st_gid != gid ||
+	    !(sd.st_mode & S_IRGRP) || !(sc.st_mode & S_IWGRP)) {
+		errno = EPERM;
+		return -1;
+	}
+	return 0;
+}
+
 /*
- * GRANT TO WHOEVER IS AT THE CONTROLLING TERMINAL. 0 on success, -1 with
- * errno; ENOTTY when there is no terminal and EPERM when its owner is root
- * anyway, and neither is a failure worth stopping for.
+ * WHO IS THE PERSON BEHIND THIS PROCESS, or (uid_t)-1 when nothing says.
+ *
+ * /proc/self/loginuid IS THE ANSWER AND IT IS NOT A GUESS. The kernel's audit
+ * subsystem records the uid that authenticated at login, PAM sets it once per
+ * session, and it is INHERITED ACROSS setuid - so a process running as root
+ * under sudo still reports the human who typed the password. It is kernel
+ * state: a program cannot set it without CAP_AUDIT_CONTROL, and unlike
+ * SUDO_UID it is not something the party being authorised can write.
+ *
+ * That is the whole reason this is the first source tried. The controlling
+ * terminal is the fallback, and it is a weaker answer: a terminal can be owned
+ * by root in a root shell, and a container hands out /dev/tty owned by nobody -
+ * measured, in this tree's own sandbox, where it reads uid 65534.
+ *
+ * (uid_t)-1 when the audit uid is unset, which is what a kernel built without
+ * CONFIG_AUDIT and what a process outside any login session both report.
+ */
+static uid_t human_behind(void)
+{
+	FILE *f = fopen("/proc/self/loginuid", "r");
+	unsigned long v;
+
+	if (f) {
+		int got = fscanf(f, "%lu", &v);
+
+		fclose(f);
+		/* 4294967295 is "unset" - the audit uid has never been
+		 * assigned, so it names nobody rather than naming root. */
+		if (got == 1 && v != 0xffffffffUL && v != 0)
+			return (uid_t)v;
+	}
+	{
+		struct stat st;
+		int fd = open("/dev/tty", O_RDONLY | O_CLOEXEC);
+
+		if (fd >= 0) {
+			int ok = fstat(fd, &st) == 0;
+
+			close(fd);
+			if (ok && st.st_uid != 0)
+				return st.st_uid;
+		}
+	}
+	return (uid_t)-1;
+}
+
+/*
+ * GRANT TO THE PERSON BEHIND THIS PROCESS. 0 on success, -1 with errno;
+ * ENOTTY when nothing identifies them and EPERM when it is root anyway, and
+ * neither is a failure worth stopping for.
  *
  * WHY THIS EXISTS. `sudo kofwatchtower` from somebody's shell and then
  * `kofwatchman` as themselves is not an exotic deployment, it is THE
@@ -274,8 +368,7 @@ int kof_chan_publish_grant_console(struct kof_chan_pub *p, char *who,
 {
 	struct passwd  pw, *res = NULL;
 	char           buf[4096];
-	struct stat    st;
-	int            fd;
+	uid_t          uid;
 
 	if (who && who_cap)
 		who[0] = '\0';
@@ -283,29 +376,29 @@ int kof_chan_publish_grant_console(struct kof_chan_pub *p, char *who,
 		errno = EINVAL;
 		return -1;
 	}
-	fd = open("/dev/tty", O_RDONLY | O_CLOEXEC);
-	if (fd < 0) {
+	uid = human_behind();
+	if (uid == (uid_t)-1) {
 		errno = ENOTTY;
 		return -1;
 	}
-	if (fstat(fd, &st) != 0) {
-		close(fd);
-		return -1;
-	}
-	close(fd);
-	if (st.st_uid == 0) {
-		/* Root is already the owner; there is nothing to widen to and
-		 * widening to root's group would be a real change for nothing. */
-		errno = EPERM;
-		return -1;
-	}
-	if (getpwuid_r(st.st_uid, &pw, buf, sizeof buf, &res) != 0 || !res) {
+	if (getpwuid_r(uid, &pw, buf, sizeof buf, &res) != 0 || !res) {
 		errno = ENOENT;
 		return -1;
 	}
 	if (who && who_cap)
 		snprintf(who, who_cap, "%s", pw.pw_name);
-	return grant_gid(p, pw.pw_gid);
+
+	/*
+	 * THE USER AND THEN THE GROUP, in that order and both.
+	 *
+	 * Group alone was not enough: it makes the objects readable by every
+	 * member of that group, which on a distro giving each user a group of
+	 * their own is exactly one person - and on a distro that puts everyone
+	 * in `users` is everyone. Handing OWNERSHIP to the person named makes
+	 * the answer the same on both, and it is what lets the mode below drop
+	 * group and world entirely.
+	 */
+	return grant_uid(p, uid, pw.pw_gid);
 }
 
 int kof_chan_publish_grant(struct kof_chan_pub *p, const char *group)
@@ -321,7 +414,7 @@ int kof_chan_publish_grant(struct kof_chan_pub *p, const char *group)
 		errno = ENOENT;
 		return -1;
 	}
-	return grant_gid(p, gr.gr_gid);
+	return grant_group(p, gr.gr_gid);
 }
 
 struct kof_chan_pub *kof_chan_publish_open(const char *name, uint32_t capacity)
