@@ -857,7 +857,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/binaries/sym_any.c \
            libkofeng/kofparsers/kofformat.c \
            libkofeng/kofparsers/events/amsi_parse.c \
-           libkofeng/kofparsers/events/proc_parse.c \
+           libkofeng/kofparsers/processes/proc_parse.c \
            libkofeng/kofdisasm/xref.c \
            libkofeng/kofparsers/binaries/pe_sym.c \
            libkofeng/kofparsers/binaries/pe_parse.c \
