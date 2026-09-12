@@ -11559,32 +11559,45 @@ static void view_show_decl(struct view *v, const struct decl *d, uint64_t off)
 
 static void view_show(struct view *v, uint64_t file_off)
 {
-	uint64_t r = view_unmap(v, file_off);
 	uint64_t per = (uint64_t)(v->per > 0 ? v->per : 16);
-	uint64_t row;
+	uint64_t r, row;
+	uint32_t best = node_at(v, v->node[v->sel_node].obj, file_off);
 
 	/*
-	 * The offset may not be in the region being looked at.
+	 * THE TREE MOVES TO THE ROW THAT HOLDS THE OFFSET, ALWAYS - not only
+	 * when the row it is on cannot reach it.
 	 *
-	 * A marker is chosen from a list that belongs to the OBJECT, and the
-	 * tree may be sitting on a region that does not contain it - in which
-	 * case there was nowhere to scroll to and the jump did nothing at all.
-	 * So the tree moves first, to a row of this object that holds the
-	 * offset, preferring a region over the whole-object row: the narrower
-	 * answer is the more useful place to land.
+	 * This used to run only after view_unmap had already FAILED, and that
+	 * is the bug: when the current row could reach the offset, the hex pane
+	 * scrolled to the bytes and the tree stayed where it was. Clicking a
+	 * marker on the status bar while the whole-object row was selected did
+	 * exactly that - the bytes appeared, and the region containing them was
+	 * never selected, so the object panel said nothing about where the
+	 * reader had just landed.
+	 *
+	 * The whole-object row reaches every offset in the object, so the
+	 * failure path could not fire for it: the one row that most needs
+	 * narrowing was the one row that never got it.
+	 *
+	 * node_at already prefers a REGION over the object row - "the narrower
+	 * answer is the more useful place to land", which was the intent here
+	 * all along - so asking it unconditionally is what makes the two jump
+	 * paths agree. view_show_in does the same for a symbol half, and this
+	 * is now the same behaviour for a file offset: one answer to "take me
+	 * there", whether the caller came from the strings table or from the
+	 * status bar.
+	 *
+	 * Guarded on best != sel_node, so a jump inside the row already
+	 * selected costs nothing and does not redraw the tree.
 	 */
-	if (r == KOF_BROKEN) {
-		uint32_t best = node_at(v, v->node[v->sel_node].obj, file_off);
-
-		if (best >= v->n_node)
-			return;
+	if (best < v->n_node && best != v->sel_node) {
 		v->node[v->sel_node].at = v->rgn_at;
 		v->sel_node = best;
 		view_select(v);
-		r = view_unmap(v, file_off);
-		if (r == KOF_BROKEN)
-			return;
 	}
+	r = view_unmap(v, file_off);
+	if (r == KOF_BROKEN)
+		return;
 	row = r / per;
 	v->rgn_at = row > JUMP_LEAD ? (row - JUMP_LEAD) * per : 0;
 	if (v->rgn_at > hex_max(v))
