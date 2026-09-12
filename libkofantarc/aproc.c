@@ -284,16 +284,17 @@ static void a_read_cmdline(uint32_t pid, char *buf, size_t cap)
  * would otherwise decide how long this takes before the interesting question
  * is even asked.
  */
-static void a_read_fds(uint32_t pid, uint32_t *n_fd, uint32_t *n_socket,
-		       uint32_t *flags)
+static void a_read_fds(uint32_t pid, struct kofa_proc *out,
+		       char std[3][KOFA_FDLINK_MAX])
 {
-	char path[64], link[256];
+	char path[64], link[KOFA_FDLINK_MAX];
 	DIR *d;
 	struct dirent *de;
 	int i;
 
-	*n_fd = 0;
-	*n_socket = 0;
+	out->n_fd = 0;
+	out->n_socket = 0;
+	std[0][0] = std[1][0] = std[2][0] = '\0';
 
 	for (i = 0; i < 3; i++) {
 		ssize_t n;
@@ -303,9 +304,25 @@ static void a_read_fds(uint32_t pid, uint32_t *n_fd, uint32_t *n_socket,
 		if (n <= 0)
 			continue;
 		link[n] = '\0';
+		memcpy(std[i], link, (size_t)n + 1u);
 		if (!strncmp(link, "socket:", 7))
-			*flags |= KOFA_PF_STDIO_SOCKET;
+			out->flags |= KOFA_PF_STDIO_SOCKET;
 	}
+
+	/*
+	 * THE SAME SOCKET ON BOTH ENDS, which is the whole finding - see
+	 * KOFA_PF_STDIO_SAME_SOCKET. A string compare, because the kernel
+	 * writes the inode into the link and two descriptors on one object
+	 * therefore spell it identically.
+	 */
+	if (!strncmp(std[0], "socket:", 7) && !strcmp(std[0], std[1]))
+		out->flags |= KOFA_PF_STDIO_SAME_SOCKET;
+
+	/* All three on one terminal. Read the warning on the flag before
+	 * using it: this is also every login shell on the machine. */
+	if (!strncmp(std[0], "/dev/pts/", 9) &&
+	    !strcmp(std[0], std[1]) && !strcmp(std[1], std[2]))
+		out->flags |= KOFA_PF_STDIO_SAME_TTY;
 
 	snprintf(path, sizeof path, "/proc/%u/fd", (unsigned)pid);
 	d = opendir(path);
@@ -324,16 +341,43 @@ static void a_read_fds(uint32_t pid, uint32_t *n_fd, uint32_t *n_socket,
 
 		if (!isdigit((unsigned char)de->d_name[0]))
 			continue;
-		(*n_fd)++;
+		out->n_fd++;
 
 		n = readlinkat(dirfd(d), de->d_name, link, sizeof link - 1);
 		if (n <= 0)
 			continue;
 		link[n] = '\0';
 		if (!strncmp(link, "socket:", 7))
-			(*n_socket)++;
+			out->n_socket++;
 	}
 	closedir(d);
+}
+
+/*
+ * IS THE FILE BEING RUN A SHELL, by name - see KOFA_PF_SHELL.
+ *
+ * The list is short on purpose and holds interpreters of COMMAND LINES, not
+ * interpreters in general: python and perl spawn reverse shells too, and
+ * including them would make the flag mean "a scripting language is installed".
+ * busybox is here because its shell applet is how most embedded droppers get
+ * one.
+ */
+static int a_is_shell(const char *exe)
+{
+	static const char *const names[] = {
+		"sh", "bash", "dash", "zsh", "ksh", "ash", "busybox",
+		"fish", "csh", "tcsh", "mksh", NULL
+	};
+	const char *base = strrchr(exe, '/');
+	int i;
+
+	if (!exe[0])
+		return 0;
+	base = base ? base + 1 : exe;
+	for (i = 0; names[i]; i++)
+		if (!strcmp(base, names[i]))
+			return 1;
+	return 0;
 }
 
 /*
@@ -357,6 +401,7 @@ struct kofa_plist {
 	char comm[64];
 	char exe[APATH_MAX];
 	char cmdline[4096];
+	char std[3][KOFA_FDLINK_MAX];
 };
 
 struct kofa_plist *kofa_plist_open(const struct kofa_plist_option *opt,
@@ -426,9 +471,13 @@ int kofa_plist_next(struct kofa_plist *l, struct kofa_proc *out)
 			l->comm[0] = '\0';
 			l->exe[0] = '\0';
 			l->cmdline[0] = '\0';
+			l->std[0][0] = l->std[1][0] = l->std[2][0] = '\0';
 			out->comm = l->comm;
 			out->exe = l->exe;
 			out->cmdline = l->cmdline;
+			out->fd_stdin = l->std[0];
+			out->fd_stdout = l->std[1];
+			out->fd_stderr = l->std[2];
 			return 1;
 		}
 		if (rc != KOFA_OK)
@@ -477,9 +526,18 @@ int kofa_plist_next(struct kofa_plist *l, struct kofa_proc *out)
 		 * process the kernel does NOT call a kernel thread, which is
 		 * the whole point - see KOFA_PF_FAKE_KTHREAD.
 		 */
+		/*
+		 * The name against the kernel's own bit, AND an executable
+		 * that actually resolves on disk - a real kernel thread has no
+		 * exe link, so requiring one keeps a failed readlink from
+		 * reading as a masquerade. See KOFA_PF_FAKE_KTHREAD.
+		 */
 		if (!(out->flags & KOFA_PF_KERNEL) &&
-		    a_looks_bracketed(l->comm))
+		    a_looks_bracketed(l->comm) && l->exe[0] == '/')
 			out->flags |= KOFA_PF_FAKE_KTHREAD;
+
+		if (a_is_shell(l->exe))
+			out->flags |= KOFA_PF_SHELL;
 
 		/*
 		 * A deleted executable whose path has not come back. One
@@ -496,13 +554,16 @@ int kofa_plist_next(struct kofa_plist *l, struct kofa_proc *out)
 			a_read_cmdline(out->pid, l->cmdline,
 				       sizeof l->cmdline);
 
+		l->std[0][0] = l->std[1][0] = l->std[2][0] = '\0';
 		if (!l->o.no_fds && !(out->flags & KOFA_PF_KERNEL))
-			a_read_fds(out->pid, &out->n_fd, &out->n_socket,
-				   &out->flags);
+			a_read_fds(out->pid, out, l->std);
 
 		out->comm = l->comm;
 		out->exe = l->exe;
 		out->cmdline = l->cmdline;
+		out->fd_stdin = l->std[0];
+		out->fd_stdout = l->std[1];
+		out->fd_stderr = l->std[2];
 		return 1;
 	}
 

@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 
 #include "aproc.h"
@@ -385,9 +386,148 @@ static void test_dirty_code(void)
 	waitpid(kid, NULL, 0);
 }
 
+/*
+ * Find a process by pid in a fresh plist walk. Returns 1 and fills *out.
+ * Strings in *out point into the list, so it stays open until the caller is
+ * done - hence the handle coming back rather than being closed here.
+ */
+static int find_proc(struct kofa_plist *l, pid_t pid, struct kofa_proc *out)
+{
+	while (kofa_plist_next(l, out))
+		if (out->pid == (uint32_t)pid)
+			return 1;
+	return 0;
+}
+
+/*
+ * THE REVERSE SHELL, AND THE THING THAT IS NOT ONE.
+ *
+ * Two children with socket stdio, differing in one respect: the first has ONE
+ * socket duplicated onto stdin and stdout, which is what `>&` produces and what
+ * a reverse shell is; the second has the two ends of a socketpair, which is
+ * what every spawned language server on this desktop has. Eight of those were
+ * false positives before the same-socket test existed, and this is the case
+ * that keeps them out.
+ */
+static void test_reverse_shell_shape(void)
+{
+	int sp[2], sp2[2];
+	pid_t dup_kid, pair_kid;
+
+	printf("\nreverse shell shape (same socket vs socketpair):\n");
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp))
+		return;
+	dup_kid = fork();
+	if (dup_kid == 0) {
+		/* ONE socket on both ends - the reverse shell. */
+		dup2(sp[1], 0);
+		dup2(sp[1], 1);
+		execl("/bin/sh", "sh", "-c", "read x", (char *)NULL);
+		_exit(1);
+	}
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp2)) {
+		kill(dup_kid, 9);
+		return;
+	}
+	pair_kid = fork();
+	if (pair_kid == 0) {
+		/* TWO sockets, one per direction - an ordinary spawned
+		 * child. */
+		dup2(sp2[0], 0);
+		dup2(sp2[1], 1);
+		execl("/bin/sh", "sh", "-c", "read x", (char *)NULL);
+		_exit(1);
+	}
+	usleep(250000);
+
+	{
+		struct kofa_plist *l;
+		struct kofa_proc p;
+		int err = 0;
+
+		l = kofa_plist_open(NULL, &err);
+		if (l && find_proc(l, dup_kid, &p)) {
+			ok((p.flags & KOFA_PF_STDIO_SAME_SOCKET) != 0,
+			   "one socket on both ends is SAME_SOCKET");
+			ok((p.flags & KOFA_PF_SHELL) != 0,
+			   "and the exe is recognised as a shell");
+			ok(!strcmp(p.fd_stdin, p.fd_stdout),
+			   "the raw links agree, so the flag can be checked");
+		} else {
+			ok(0, "found the dup'd-socket child");
+		}
+		kofa_plist_close(l);
+
+		l = kofa_plist_open(NULL, &err);
+		if (l && find_proc(l, pair_kid, &p)) {
+			ok((p.flags & KOFA_PF_STDIO_SOCKET) != 0,
+			   "a socketpair child still has socket stdio");
+			ok(!(p.flags & KOFA_PF_STDIO_SAME_SOCKET),
+			   "but is NOT SAME_SOCKET - the eight false positives");
+		} else {
+			ok(0, "found the socketpair child");
+		}
+		kofa_plist_close(l);
+	}
+
+	kill(dup_kid, 9); kill(pair_kid, 9);
+	waitpid(dup_kid, NULL, 0); waitpid(pair_kid, NULL, 0);
+	close(sp[0]); close(sp[1]); close(sp2[0]); close(sp2[1]);
+}
+
+/* A userland process wearing a kernel thread's name. */
+static void test_fake_kthread(void)
+{
+	int fd[2];
+	pid_t kid;
+	unsigned long go = 0;
+
+	printf("\nkernel thread masquerade:\n");
+
+	if (pipe(fd))
+		return;
+	kid = fork();
+	if (kid == 0) {
+		close(fd[0]);
+		prctl(PR_SET_NAME, "[kworker/0:9]", 0, 0, 0);
+		write(fd[1], &go, sizeof go);
+		pause();
+		_exit(0);
+	}
+	close(fd[1]);
+	read(fd[0], &go, sizeof go);
+	usleep(150000);
+
+	{
+		struct kofa_plist *l;
+		struct kofa_proc p;
+		int err = 0;
+
+		l = kofa_plist_open(NULL, &err);
+		if (l && find_proc(l, kid, &p)) {
+			ok((p.flags & KOFA_PF_FAKE_KTHREAD) != 0,
+			   "a bracketed name without PF_KTHREAD is caught");
+			ok(!(p.flags & KOFA_PF_KERNEL),
+			   "and the kernel's own bit says it is not one");
+			ok(p.exe[0] == '/',
+			   "it has a real executable, which the flag requires");
+		} else {
+			ok(0, "found the masquerading child");
+		}
+		kofa_plist_close(l);
+	}
+
+	kill(kid, 9);
+	waitpid(kid, NULL, 0);
+}
+
 int main(void)
 {
 	test_comm_trap();
+	test_reverse_shell_shape();
+	test_fake_kthread();
 	test_dirty_code();
 	test_prot_none();
 	test_zero_page();

@@ -148,11 +148,16 @@ int main(int argc, char **argv)
 				t.refused++;
 				continue;
 			}
+			/*
+			 * Only the strong forms. STDIO_SOCKET alone is eight
+			 * legitimate processes on this desktop and printing it
+			 * teaches a reader to skip the list.
+			 */
 			if (p.flags & (KOFA_PF_EXE_MEMFD |
 				       KOFA_PF_EXE_UNLINKED |
 				       KOFA_PF_FAKE_KTHREAD |
-				       KOFA_PF_STDIO_SOCKET)) {
-				printf("  ! pid %-7u %-16s%s%s%s%s\n",
+				       KOFA_PF_STDIO_SAME_SOCKET)) {
+				printf("  ! pid %-7u %-14s%s%s%s%s%s\n",
 				       p.pid, p.comm,
 				       (p.flags & KOFA_PF_EXE_MEMFD)
 					       ? " MEMFD" : "",
@@ -160,10 +165,14 @@ int main(int argc, char **argv)
 					       ? " SELF-DELETED" : "",
 				       (p.flags & KOFA_PF_FAKE_KTHREAD)
 					       ? " FAKE-KTHREAD" : "",
-				       (p.flags & KOFA_PF_STDIO_SOCKET)
-					       ? " STDIO-SOCKET" : "");
+				       (p.flags & KOFA_PF_STDIO_SAME_SOCKET)
+					       ? " SAME-SOCKET" : "",
+				       (p.flags & KOFA_PF_SHELL)
+					       ? " SHELL" : "");
 				printf("      exe %s\n", p.exe);
-				printf("      cmd %.120s\n", p.cmdline);
+				printf("      cmd %.110s\n", p.cmdline);
+				printf("      fd0 %s\n      fd1 %s\n",
+				       p.fd_stdin, p.fd_stdout);
 				printf("      fds %u (%u socket)\n",
 				       p.n_fd, p.n_socket);
 			}
