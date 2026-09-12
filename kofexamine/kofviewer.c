@@ -1168,6 +1168,9 @@ struct view {
 #define PROC_SEEN_MAX 256u
 	char        seen_path[PROC_SEEN_MAX][256];
 	uint32_t    n_seen;
+	/* Mapped files this view declined to read, and the bytes it did. */
+	uint32_t    proc_skipped;
+	uint64_t    proc_skipped_bytes;
 
 	/*
 	 * THE DISASSEMBLY PANEL.
@@ -1696,6 +1699,18 @@ struct view {
 	 */
 	char        dlg_line[DLG_ROWS][DLG_COLS];
 	int         dlg_rows;
+	/*
+	 * WHICH LINE OF THE LIST each recorded row came from, and -1 when the
+	 * recorder was not told.
+	 *
+	 * The recording is of the VISIBLE WINDOW, rebuilt every frame, so a row
+	 * number means "third row on screen" and not "third line of the page".
+	 * A selection stored as a row number therefore slid onto whatever the
+	 * scroll had put there - the text under the highlight changed while the
+	 * highlight stayed still. Anchoring on this instead makes a selection
+	 * belong to the LINE it was made on, wherever that line goes.
+	 */
+	int         dlg_src[DLG_ROWS];
 	int         dlg_y0, dlg_x0;
 	int         dlg_ar, dlg_ac, dlg_br, dlg_bc;
 	int         dlg_have;
@@ -2080,6 +2095,17 @@ static const char *base_name(const char *p);
  * path is offered, 0 afterwards. A fixed table, because a process with more
  * mapped files than this has more rows than anybody reads.
  */
+/*
+ * WHAT A PROCESS VIEW MAY READ OFF THE DISK.
+ *
+ * 64MB for one mapped file, matching the per-region ceiling so the two halves
+ * of an address space are cut at the same size, and 512MB for the whole view.
+ * Guards against a pathological process rather than budgets anybody measured -
+ * the same honesty the collector's own ceilings are written with.
+ */
+#define PROC_FILE_MAX    (64ull * 1024ull * 1024ull)
+#define PROC_FILE_BUDGET (512ull * 1024ull * 1024ull)
+
 static int proc_seen_path(struct view *v, const char *path)
 {
 	uint32_t i;
@@ -2176,6 +2202,45 @@ static void proc_collect(struct view *v, kof_engine *eng, uint32_t pid)
 						close(ffd);
 						continue;
 					}
+					/*
+					 * AND A CEILING, WHICH THIS PATH HAD
+					 * NONE OF.
+					 *
+					 * Every distinct mapped file was
+					 * mapped and run through the WHOLE
+					 * engine - every module, every
+					 * unpacker - on nothing but "is it a
+					 * regular file with bytes in it". A
+					 * process that maps a database, a
+					 * model file or a large archive
+					 * therefore scanned it in full before
+					 * the first frame was drawn, which is
+					 * a viewer that does not open.
+					 *
+					 * The memory regions grew a bound when
+					 * MAP took EXEC_ONLY away from them;
+					 * this one never had one, because a
+					 * mapped file looked like a small
+					 * thing until somebody mapped
+					 * something that was not.
+					 *
+					 * SKIPPED AND COUNTED, not truncated:
+					 * half a library is not a library,
+					 * and a partial scan reported as a
+					 * scan is the answer this tree refuses
+					 * everywhere else.
+					 */
+					if ((uint64_t)fst.st_size >
+					    PROC_FILE_MAX ||
+					    v->proc_skipped_bytes +
+					    (uint64_t)fst.st_size >
+					    PROC_FILE_BUDGET) {
+						close(ffd);
+						v->proc_skipped++;
+						continue;
+					}
+					v->proc_skipped_bytes +=
+						(uint64_t)fst.st_size;
 					fm = kof_map_file_ro(ffd,
 						(uint64_t)fst.st_size);
 					close(ffd);
@@ -2189,6 +2254,22 @@ static void proc_collect(struct view *v, kof_engine *eng, uint32_t pid)
 						&opt, on_object, v);
 					kof_unmap_file(fm,
 						(uint64_t)fst.st_size);
+					/*
+					 * WHICH PATH THIS ROW CAME FROM,
+					 * plus one so that zero still means
+					 * "not a mapped file".
+					 *
+					 * The object's own name carries only
+					 * the basename - it is a tree row and
+					 * a full path would not fit one - so
+					 * the panel would have had to guess
+					 * the directory back. seen_path
+					 * already holds the whole thing, in
+					 * the order the process mapped them.
+					 */
+					if (v->n_obj)
+						v->obj[v->n_obj - 1u].proc_path
+							= v->n_seen;
 				}
 				if (v->n_obj >= MAX_OBJ)
 					break;
@@ -11363,7 +11444,16 @@ static void draw_bar(struct out *o, struct view *v);
 static void draw_help(struct out *o, struct view *v);
 
 #define PROP_MAX  600
-#define PROP_W    200
+/*
+ * BYTES, NOT COLUMNS, and the difference is what cut a table's border.
+ *
+ * A line carries its own colour escapes and its glyphs may be multi-byte: a
+ * 70-column rule drawn from U+2500 is 210 bytes on its own, so at 200 the top
+ * and bottom of every wide table lost their right-hand corner while the rows
+ * between them - mostly ASCII - fitted and kept theirs. A frame with three
+ * sides reads as a drawing bug, which is what it was.
+ */
+#define PROP_W    512
 
 /* A LINE CARRIES ITS OWN COLOURS, INSIDE ITS TEXT - see prop_put, which draws
  * one. Declared here rather than beside the properties page because more than
@@ -11401,6 +11491,7 @@ static void draw_prop(struct out *o, struct view *v);
 /* Defined with the rest of the dialog selection layer, below - the properties
  * page draws before it and records into it. */
 static void dlg_rec_begin(struct view *v, int y0, int x0);
+static void dlg_rec_src(struct view *v, uint32_t idx);
 static void dlg_rec_text(struct view *v, const char *plain);
 static void dlg_paint_sel(struct out *o, struct view *v);
 /* A row without its colour escapes: what the terminal actually shows, which is
@@ -13456,15 +13547,473 @@ static const char *proc_str(const struct object *ob, uint32_t off)
 	return p;
 }
 
+/*
+ * A TABLE INSIDE THE DASHBOARD, DECLARED RATHER THAN DRAWN BY HAND.
+ *
+ * The environment and the connection list are the same widget with different
+ * columns: a heading row, a window of rows, and a scroll of its own so a
+ * process with forty variables does not push everything below it off the page.
+ * Written twice they would drift - one would learn to say how many rows it cut
+ * and the other would not - so they are declared, and this draws them.
+ *
+ * THE SCROLL OFFSET LIVES IN THE VIEW AND IS NAMED BY THE TABLE, because a
+ * panel is rebuilt from scratch every frame: an offset kept here would reset
+ * to zero on the next keystroke, which is a table that cannot be scrolled at
+ * all. Each table names its slot, so adding one is adding an enum value and a
+ * declaration - no new drawing code and no new state plumbing.
+ *
+ * `cell` hands back one column of one row as text it does not own. Returning
+ * pointers rather than copying is what lets a caller answer straight out of
+ * the record's arena, which is where every string here already lives.
+ */
+enum prop_tab_id {
+	PROP_TAB_FD = 0,
+	PROP_TAB_ENV,
+	PROP_TAB_NET,
+	PROP_TAB_LIB,
+	PROP_TAB_COUNT
+};
+
+#define PROP_TAB_COLS 4u
+/* The widest a table may be, in columns. The rules are drawn from a glyph that
+ * is three bytes, so this is what sizes their buffer. */
+#define PROP_TAB_MAX_W 120u
+
+struct prop_table {
+	/* The label in the left column, on the heading row only - every other
+	 * row is blank there, the way the fd table already reads. */
+	const char *name;
+	const char *col[PROP_TAB_COLS];
+	uint8_t     width[PROP_TAB_COLS];   /* 0 = take what is left */
+	/*
+	 * WHICH COLUMNS MOVE WITH shift+wheel. Non-zero for the ones that hold
+	 * something long.
+	 *
+	 * Sideways used to move every cell, and that is wrong for the shape
+	 * these tables actually have: a variable NAME is short and a variable
+	 * VALUE is a PATH. Scrolling both took the names off the screen to
+	 * reach the tail of a value, so the reader lost the only thing telling
+	 * them which row they were reading. Marking the long column moves it
+	 * under a heading that still names it.
+	 */
+	uint8_t     hscroll[PROP_TAB_COLS];
+	uint32_t    n_col;
+	uint32_t    n_row;
+	uint32_t    visible;                /* rows shown at once */
+	enum prop_tab_id id;                /* which scroll offset is ours */
+	/* Fill `out` with n_col cells for `row`. Cells may be NULL for "". */
+	void      (*cell)(void *user, uint32_t row, const char **out);
+	void       *user;
+};
+
+static uint32_t g_prop_tab_off[PROP_TAB_COUNT];
+/*
+ * HOW FAR EACH TABLE IS SCROLLED SIDEWAYS, in columns.
+ *
+ * A value is routinely wider than the column it is in - a PATH or an
+ * LD_LIBRARY_PATH runs past any width worth giving it - and the page itself
+ * does not scroll sideways, so without this the tail of such a value is
+ * unreachable. Shift and the wheel, which is the gesture every terminal
+ * already uses for it.
+ */
+static uint32_t g_prop_tab_hoff[PROP_TAB_COUNT];
+/* Where each table was drawn, so a wheel over one scrolls THAT one. Reset
+ * every time the page is built, because a table that is no longer drawn must
+ * not keep catching the pointer. */
+static int      g_prop_tab_row0[PROP_TAB_COUNT];
+static int      g_prop_tab_rows[PROP_TAB_COUNT];
+static int      g_prop_tab_wid[PROP_TAB_COUNT];
+/*
+ * WHERE EACH COLUMN OF EACH TABLE STARTS AND HOW WIDE IT IS, in the columns of
+ * the recorded line - so a click can be turned back into a CELL.
+ *
+ * Recorded as the table is drawn because that is the only place the geometry
+ * exists: the widths are the declaration's and the prefix is this function's,
+ * and a second copy of that sum in the click handler would be a second thing
+ * to keep in step.
+ */
+static int      g_prop_tab_cx[PROP_TAB_COUNT][PROP_TAB_COLS];
+static int      g_prop_tab_cw[PROP_TAB_COUNT][PROP_TAB_COLS];
+static int      g_prop_tab_ncol[PROP_TAB_COUNT];
+
+/*
+ * Which table the pointer is over, or -1.
+ *
+ * Asked in SCREEN rows and answered from where each table was drawn, which is
+ * recorded as the page is built. The page scrolls, so a table's rows move: the
+ * offset of the page is taken off here rather than being baked into what was
+ * recorded, so one number moves both.
+ */
+static int prop_tab_at(const struct view *v, int row)
+{
+	int rr = row - v->dlg_y0;
+	int i, r;
+
+	/*
+	 * Through the recording, which already maps a screen row to the line
+	 * of the page showing there - see view.dlg_src. Computing it from the
+	 * page offset instead would be a second copy of that arithmetic, and
+	 * the two would disagree the first time either changed.
+	 */
+	if (rr < 0 || rr >= v->dlg_rows)
+		return -1;
+	r = v->dlg_src[rr];
+	if (r < 0)
+		return -1;
+
+	for (i = 0; i < PROP_TAB_COUNT; i++)
+		if (g_prop_tab_rows[i] > 0 && r >= g_prop_tab_row0[i] &&
+		    r < g_prop_tab_row0[i] + g_prop_tab_rows[i])
+			return i;
+	return -1;
+}
+
+/*
+ * Below this a table is drawn WITHOUT its frame - the heading and the rows and
+ * nothing else.
+ *
+ * A border, a scrollbar and a "1-3 of 3" line around three values is more
+ * furniture than data: it says "there is more here" when there is not, and it
+ * costs three rows to say it. The frame earns its place only once the window
+ * is actually a window.
+ */
+#define PROP_TAB_FRAME_MIN 6u
+
+static void prop_table(const struct prop_table *t)
+{
+	uint32_t off, shown, i, k;
+	int framed = t->n_row >= PROP_TAB_FRAME_MIN;
+	char line[PROP_W];
+
+	if (!t->n_row) {
+		g_prop_tab_rows[t->id] = 0;
+		return;
+	}
+	off = g_prop_tab_off[t->id];
+	if (off + t->visible > t->n_row)
+		off = t->n_row > t->visible ? t->n_row - t->visible : 0u;
+	g_prop_tab_off[t->id] = off;
+
+	/*
+	 * A BORDER, BECAUSE A TABLE WITHOUT ONE IS JUST INDENTED ROWS.
+	 *
+	 * The panel is a column of label/value rows, so a window of six rows
+	 * with a heading read as six more of the same - and the "1-6 of 111"
+	 * line under it looked like a value whose name was blank. A rule above
+	 * and below and a wall down each side says where the widget starts and
+	 * stops, which is the whole of what was confusing.
+	 */
+	{
+		/*
+		 * SIZED IN BYTES FOR A WIDTH IN GLYPHS. G_H is three bytes, so
+		 * a 200-byte buffer holds 66 columns of rule while the rows
+		 * beside it were 70 wide - the corner fell off the end and the
+		 * frame had a gap where its right side should be.
+		 */
+		char rule[PROP_TAB_MAX_W * 3u + 1u];
+		uint32_t wid = 0, n = 0;
+
+		for (k = 0; k < t->n_col; k++)
+			wid += (t->width[k] ? t->width[k] : 24u) + 1u;
+		if (wid > PROP_TAB_MAX_W)
+			wid = PROP_TAB_MAX_W;
+		g_prop_tab_wid[t->id] = (int)wid;
+		while (n < wid) {
+			memcpy(rule + n * 3u, G_H, sizeof G_H - 1u);
+			n++;
+		}
+		rule[n * (sizeof G_H - 1u)] = 0;
+		if (framed)
+			prop_add(A_DIM "  %-11s " G_TL "%s" G_TR A_OFF,
+				 t->name, rule);
+	}
+
+	/* The heading. */
+	{
+		int n = snprintf(line, sizeof line, "  %-11s " A_DIM "%s"
+				 A_OFF, framed ? "" : t->name,
+				 framed ? G_V : " ");
+
+		for (k = 0; k < t->n_col && n > 0 && (size_t)n < sizeof line;
+		     k++)
+			n += snprintf(line + n, sizeof line - (size_t)n,
+				      A_DIM "%-*.*s " A_OFF,
+				      t->width[k] ? t->width[k] : 24,
+				      t->width[k] ? t->width[k] : 24,
+				      t->col[k] ? t->col[k] : "");
+		if (framed && n > 0 && (size_t)n < sizeof line)
+			snprintf(line + n, sizeof line - (size_t)n,
+				 A_DIM G_V A_OFF);
+		prop_add("%s", line);
+	}
+
+	/* The row this table starts on, for the wheel. prop_add has just
+	 * written the heading, so the first data row is the next one. */
+	g_prop_tab_row0[t->id] = (int)g_n_prop;
+	{
+		/* "  " + an 11-wide label + " " + the wall. */
+		/* "  " + an 11-wide label + " " + one column of wall or
+		 * blank - the same width either way, which is what keeps a
+		 * framed and an unframed table's columns lined up. */
+		int x = 2 + 11 + 1 + 1;
+
+		for (k = 0; k < t->n_col && k < PROP_TAB_COLS; k++) {
+			int w = t->width[k] ? t->width[k] : 24;
+
+			g_prop_tab_cx[t->id][k] = x;
+			g_prop_tab_cw[t->id][k] = w;
+			x += w + 1;
+		}
+		g_prop_tab_ncol[t->id] = (int)t->n_col;
+	}
+
+	shown = t->n_row - off;
+	if (shown > t->visible)
+		shown = t->visible;
+	for (i = 0; i < shown; i++) {
+		const char *cell[PROP_TAB_COLS] = { NULL, NULL, NULL, NULL };
+		uint32_t hoff = g_prop_tab_hoff[t->id];
+		int n;
+
+		t->cell(t->user, off + i, cell);
+		n = snprintf(line, sizeof line, "  %-11s " A_DIM "%s" A_OFF,
+			     "", framed ? G_V : " ");
+		for (k = 0; k < t->n_col && n > 0 && (size_t)n < sizeof line;
+		     k++) {
+			const char *c = cell[k] ? cell[k] : "";
+			uint32_t w = t->width[k] ? t->width[k] : 24u;
+
+			/*
+			 * SIDEWAYS IS PER CELL, not per row: shifting the
+			 * whole line would slide the columns out of their
+			 * headings. Each cell shows a later part of ITSELF,
+			 * so the table keeps its shape and a long value walks
+			 * under a heading that still names it.
+			 */
+			if (hoff && t->hscroll[k]) {
+				size_t cl = strlen(c);
+
+				c = hoff < cl ? c + hoff : "";
+			}
+			n += snprintf(line + n, sizeof line - (size_t)n,
+				      A_ID "%-*.*s" A_OFF " ",
+				      (int)w, (int)w, c);
+		}
+		/*
+		 * THE SCROLLBAR, IN THE WALL ITSELF. One cell of it per row,
+		 * so a reader sees both where the window is and how much there
+		 * is without a line of arithmetic. Drawn only when there is
+		 * more than fits - a full-height thumb says nothing.
+		 */
+		if (framed && n > 0 && (size_t)n < sizeof line) {
+			const char *bar = G_V;
+
+			if (t->n_row > t->visible) {
+				uint32_t last = t->n_row - t->visible;
+				uint32_t thumb = (off * (t->visible - 1u) +
+						  last / 2u) / last;
+
+				/*
+				 * A GLYPH AND NOT A REVERSED SPACE: a space
+				 * in reverse video is the thumb everywhere
+				 * else in this tree, and in a one-column wall
+				 * it reads as a HOLE in the border rather
+				 * than as a marker on it.
+				 */
+				bar = (i == thumb) ? G_THUMB : G_V;
+			}
+			snprintf(line + n, sizeof line - (size_t)n,
+				 A_DIM "%s" A_OFF, bar);
+		}
+		prop_add("%s", line);
+	}
+	g_prop_tab_rows[t->id] = (int)shown;
+
+	/*
+	 * WHERE IN THE LIST THIS WINDOW IS, whenever there is more than fits.
+	 * A table that just stopped reads as a process with six variables; the
+	 * count is the difference between a window and a wrong answer.
+	 */
+	if (framed) {
+		char rule[PROP_TAB_MAX_W * 3u + 1u];
+		uint32_t wid = (uint32_t)g_prop_tab_wid[t->id], n = 0;
+
+		while (n < wid) {
+			memcpy(rule + n * 3u, G_H, sizeof G_H - 1u);
+			n++;
+		}
+		rule[n * (sizeof G_H - 1u)] = 0;
+		/*
+		 * THE COUNT GOES IN THE LABEL COLUMN, UNDER THE TABLE'S NAME.
+		 *
+		 * It used to trail the bottom rule as a sentence - the range
+		 * and an instruction about shift and the wheel - and that was
+		 * wrong twice. A table wide enough to be worth scrolling puts
+		 * that sentence past the right edge of the panel, so the
+		 * advice was cut off in exactly the case it was written for.
+		 * And nobody writes the gesture on the furniture: a scrollbar
+		 * with a thumb already says the widget scrolls, and a reader
+		 * who wants sideways tries shift the way they do everywhere
+		 * else.
+		 *
+		 * The left column is empty on every row but the first, which
+		 * is room already paid for, and "1-6/111" under "env" reads as
+		 * a caption on the thing above it.
+		 */
+		char cap[24];
+
+		/*
+		 * ACROSS TWO ROWS, because the label column is eleven wide.
+		 * "1-6/111" fits and "121-126/1024" does not, and a count that
+		 * is cut is worse than no count. The range on the rule's own
+		 * row, the total under it - the rule is one row and the widget
+		 * is several, so there is a row below to use.
+		 */
+		cap[0] = 0;
+		if (t->n_row > t->visible)
+			snprintf(cap, sizeof cap, "%lu-%lu",
+				 (unsigned long)(off + 1u),
+				 (unsigned long)(off + shown));
+		prop_add(A_DIM "  %-11s " G_BL "%s" G_BR A_OFF, cap, rule);
+		if (t->n_row > t->visible) {
+			snprintf(cap, sizeof cap, "of %lu",
+				 (unsigned long)t->n_row);
+			prop_add(A_DIM "  %-11s" A_OFF, cap);
+		}
+	}
+}
+
 /* Rows of connection shown before the panel says how many more there are. */
-#define PROC_NET_ROWS 12u
+#define PROC_NET_ROWS 6u
 /* Same reasoning, and a session hands a child about forty of these. */
-#define PROC_ENV_ROWS 16u
+#define PROC_ENV_ROWS 6u
 /* A process maps a dozen libraries and a pile of locale files; this is the
  * screenful, and the rest is counted. */
 #define PROC_LIB_ROWS 20u
 
-static void prop_proc(const struct object *ob)
+/*
+ * The two lists the record carries are flat text with a separator - the
+ * environment is one space between assignments, the connection list one
+ * newline between rows - so both feeders are "find the nth piece". Counting
+ * and fetching are the same walk, which is why they are one function: a count
+ * that disagreed with the fetch would show a row the table could not fill.
+ */
+struct prop_list {
+	const char *text;
+	char        sep;
+	/* Wide enough for the longest cell either feeder writes: a raw net
+	 * line is bounded by the collector at 256, and a value is cut to what
+	 * a column can show anyway. */
+	char        buf[4][256];
+};
+
+static const char *plist_nth(const char *t, char sep, uint32_t n,
+			     char *out, size_t cap)
+{
+	uint32_t i = 0;
+
+	out[0] = 0;
+	while (*t) {
+		const char *e = strchr(t, sep);
+		size_t len = e ? (size_t)(e - t) : strlen(t);
+
+		if (i == n) {
+			if (len >= cap)
+				len = cap - 1u;
+			memcpy(out, t, len);
+			out[len] = 0;
+			return out;
+		}
+		i++;
+		if (!e)
+			break;
+		t = e + 1;
+	}
+	return out;
+}
+
+static uint32_t plist_count(const char *t, char sep)
+{
+	uint32_t n = 0;
+
+	while (*t) {
+		const char *e = strchr(t, sep);
+
+		n++;
+		if (!e)
+			break;
+		t = e + 1;
+	}
+	return n;
+}
+
+/* NAME=value split into two columns - the whole reason the environment is a
+ * table and not a list: the names line up, so the eye finds LD_PRELOAD without
+ * reading a single value. */
+static void env_cell(void *user, uint32_t row, const char **out)
+{
+	struct prop_list *l = user;
+	char *eq;
+
+	plist_nth(l->text, l->sep, row, l->buf[0], sizeof l->buf[0]);
+	eq = strchr(l->buf[0], '=');
+	if (eq) {
+		*eq = 0;
+		snprintf(l->buf[1], sizeof l->buf[1], "%s", eq + 1);
+	} else {
+		l->buf[1][0] = 0;
+	}
+	out[0] = l->buf[0];
+	out[1] = l->buf[1];
+}
+
+/* "TCP 1.2.3.4:1 -> 5.6.7.8:2 STATE" into four columns. */
+static void net_cell(void *user, uint32_t row, const char **out)
+{
+	struct prop_list *l = user;
+	char raw[256];
+
+	plist_nth(l->text, l->sep, row, raw, sizeof raw);
+	l->buf[0][0] = l->buf[1][0] = l->buf[2][0] = l->buf[3][0] = 0;
+	if (sscanf(raw, "%15s %63s -> %63s %31s", l->buf[0], l->buf[1],
+		   l->buf[2], l->buf[3]) < 3)
+		snprintf(l->buf[0], sizeof l->buf[0], "%s", raw);
+	out[0] = l->buf[0];
+	out[1] = l->buf[1];
+	out[2] = l->buf[2];
+	out[3] = l->buf[3];
+}
+
+/* The three standard descriptors, by name, out of the record's arena - they
+ * are written consecutively, so each is found by stepping past the one
+ * before. */
+struct prop_fdlist {
+	const struct object *ob;
+	const struct kof_proc_info *pi;
+	char buf[64];
+};
+
+static void fd_cell(void *user, uint32_t row, const char **out)
+{
+	static const char *const names[3] = { "stdin", "stdout", "stderr" };
+	struct prop_fdlist *f = user;
+	uint32_t off = f->pi->off_fd0, k;
+	const char *t = "";
+
+	for (k = 0; k <= row && k < 3u; k++) {
+		t = proc_str(f->ob, off);
+		if (!off || off >= f->ob->buf.n)
+			break;
+		off += (uint32_t)strlen(t) + 1u;
+	}
+	snprintf(f->buf, sizeof f->buf, "%s", t[0] ? t : "(none)");
+	out[0] = names[row < 3u ? row : 2u];
+	out[1] = f->buf;
+}
+
+static void prop_proc_libs(const struct view *v);
+
+static void prop_proc(const struct view *v, const struct object *ob)
 {
 	const struct kof_proc_info *pi = ob->info;
 	const char *cmd;
@@ -13521,137 +14070,123 @@ static void prop_proc(const struct object *ob)
 		prop_add(A_DIM "  %-11s not readable" A_OFF, "fds");
 
 	/*
-	 * THE DESCRIPTORS AS A TABLE, because they are read ACROSS rather than
-	 * down: the question is never "what is fd 1" on its own, it is whether
-	 * two of them name the same thing. Three rows in one column makes a
-	 * reader hold two strings in their head to compare them; a table puts
-	 * them under each other where the eye does it.
+	 * WHAT IT HAS MAPPED, FIRST.
 	 *
-	 * The three are written consecutively into the record's arena, each
-	 * NUL terminated, so the second and third are found by stepping past
-	 * the one before - the same walk the builder wrote them with.
+	 * The order here is the order a reader asks in: what is this running,
+	 * who is it talking to, what does it hold open, and how was it
+	 * launched. The mapped files answer the first and are the widest net -
+	 * a library nobody shipped is visible here and nowhere else in the
+	 * panel.
 	 */
-	{
-		static const char *const names[3] = { "stdin", "stdout",
-						      "stderr" };
-		uint32_t off = pi->off_fd0;
-		unsigned k;
-
-		for (k = 0; k < 3u; k++) {
-			const char *t = proc_str(ob, off);
-
-			prop_add(A_DIM "  %-11s " A_DIM "%-7s" A_OFF A_ID
-				 "%.48s" A_OFF, k ? "" : "fd", names[k],
-				 t[0] ? t : "(none)");
-			if (!off || off >= ob->buf.n)
-				break;
-			off += (uint32_t)strlen(t) + 1u;
-		}
-	}
+	prop_proc_libs(v);
 
 	/*
-	 * THE ENVIRONMENT IT WAS STARTED WITH, one variable per row.
-	 *
-	 * A table and not the raw block: the collector turns the NULs into
-	 * spaces, so the whole thing is one very long line that a panel would
-	 * show the first eighty characters of - and the interesting variable
-	 * is rarely the first one. Split on the spaces between assignments,
-	 * each row is a variable, and a reader can see LD_PRELOAD without
-	 * scrolling a line sideways.
-	 *
-	 * BOUNDED like the connections, and for the same reason: a desktop
-	 * session hands a child forty of these and they would push everything
-	 * below off the screen. The count says what was cut.
+	 * WHO IT IS TALKING TO. Beside the descriptors and not on a page of
+	 * its own, because the two answer one question together: a socket on
+	 * fd 0 is a reverse shell only once you know what it is CONNECTED TO.
 	 */
 	{
-		const char *e = proc_str(ob, pi->off_env);
-		unsigned shown = 0;
+		struct prop_list nl;
+		struct prop_table t;
+		const char *raw = proc_str(ob, pi->off_net);
 
-		while (*e && shown < PROC_ENV_ROWS) {
-			const char *sp = strchr(e, ' ');
-			int len = sp ? (int)(sp - e) : (int)strlen(e);
-
-			if (len > 0)
-				prop_add(A_DIM "  %-11s " A_OFF A_ID "%.*s"
-					 A_OFF, shown ? "" : "env", len, e);
-			shown++;
-			if (!sp)
-				break;
-			e = sp + 1;
-		}
-		if (*e)
-			prop_add(A_DIM "  %-11s ... more" A_OFF, "");
-	}
-
-	/*
-	 * WHO IT IS TALKING TO, one row per connection.
-	 *
-	 * Beside the descriptors and not on a page of its own, because the two
-	 * answer one question together: a socket on fd 0 is a reverse shell
-	 * only once you know what that socket is CONNECTED TO, and a reader
-	 * holding one without the other has half an answer.
-	 *
-	 * BOUNDED, with the count said when it cuts. A process with two
-	 * hundred connections has more rows than belong on a first screen, and
-	 * a list that silently stopped would read as a process with twelve.
-	 */
-	{
-		const char *ln = proc_str(ob, pi->off_net);
-		unsigned shown = 0;
-
-		if (ln[0]) {
-			/*
-			 * A TABLE, because the eye compares DOWN a column.
-			 *
-			 * The collector writes one line per connection and
-			 * the line reads left to right; a reader asking "is
-			 * anything talking to the same host twice" has to
-			 * scan across every row to find the remote. Split
-			 * into fixed columns the remotes stack under each
-			 * other and the question answers itself.
-			 */
-			prop_add(A_DIM "  %-11s %-5s %-21s %-21s %s" A_OFF,
-				 "net", "proto", "local", "remote", "state");
-			while (*ln && shown < PROC_NET_ROWS) {
-				const char *e = strchr(ln, '\n');
-				int len = e ? (int)(e - ln) : (int)strlen(ln);
-				char row[256], pr[8], lo[64], re[64], st[24];
-
-				if (len >= (int)sizeof row)
-					len = (int)sizeof row - 1;
-				memcpy(row, ln, (size_t)len);
-				row[len] = 0;
-				st[0] = 0;
-				if (sscanf(row, "%7s %63s -> %63s %23s",
-					   pr, lo, re, st) >= 3)
-					prop_add("  %-11s " A_DIM "%-5s" A_OFF
-						 " " A_ID "%-21.21s" A_OFF " "
-						 A_LOC "%-21.21s" A_OFF " "
-						 A_DIM "%s" A_OFF,
-						 "", pr, lo, re, st);
-				else
-					prop_add("  %-11s " A_ID "%s" A_OFF,
-						 "", row);
-				shown++;
-				if (!e)
-					break;
-				ln = e + 1;
-			}
-			if (*ln)
-				prop_add(A_DIM "  %-11s ... more, of %lu "
-					 "socket(s)" A_OFF, "",
-					 (unsigned long)pi->n_socket);
+		if (raw[0]) {
+			memset(&nl, 0, sizeof nl);
+			nl.text = raw;
+			nl.sep = '\n';
+			memset(&t, 0, sizeof t);
+			t.name = "net";
+			t.col[0] = "proto";  t.width[0] = 6;
+			t.col[1] = "local";  t.width[1] = 24;
+			t.col[2] = "remote"; t.width[2] = 24;
+			t.col[3] = "state";  t.width[3] = 12;
+			/* Both addresses, because an IPv6 pair is longer than
+			 * any width worth giving it and the proto and state
+			 * columns are what keep the row readable. */
+			t.hscroll[1] = t.hscroll[2] = 1;
+			t.n_col = 4;
+			t.n_row = plist_count(raw, '\n');
+			t.visible = PROC_NET_ROWS;
+			t.id = PROP_TAB_NET;
+			t.cell = net_cell;
+			t.user = &nl;
+			prop_table(&t);
 		} else if (pi->n_socket) {
 			/*
 			 * SOCKETS IT HOLDS AND NOTHING TO SAY ABOUT THEM -
-			 * which is what a unix socket looks like here, and
-			 * what a namespace this could not read looks like.
-			 * Saying the count beats a blank that reads as "none".
+			 * a unix socket, or a namespace this could not read.
+			 * The count beats a blank that reads as "none".
 			 */
 			prop_add(A_DIM "  %-11s %lu socket(s), none in the "
 				 "connection tables" A_OFF, "net",
 				 (unsigned long)pi->n_socket);
 		}
+	}
+
+	/*
+	 * THE DESCRIPTORS, through the same table - see struct prop_table.
+	 *
+	 * They are read ACROSS rather than down: the question is never "what
+	 * is fd 1" on its own, it is whether two of them name the same thing.
+	 * Three rows in one column makes a reader hold two strings in their
+	 * head; a table puts them under each other where the eye does it.
+	 *
+	 * Three rows is under the framing threshold, so it draws as a plain
+	 * heading and three rows - a border round three values is furniture.
+	 * The threshold is the table's, not this caller's: the day the record
+	 * carries every descriptor rather than the standard three, the frame
+	 * and the scroll appear on their own.
+	 */
+	{
+		struct prop_fdlist fl;
+		struct prop_table t;
+
+		fl.ob = ob;
+		fl.pi = pi;
+		memset(&t, 0, sizeof t);
+		t.name = "fd";
+		t.col[0] = "which"; t.width[0] = 8;
+		t.col[1] = "target"; t.width[1] = 56;
+		t.hscroll[1] = 1;
+		t.n_col = 2;
+		t.n_row = 3;
+		t.visible = 3;
+		t.id = PROP_TAB_FD;
+		t.cell = fd_cell;
+		t.user = &fl;
+		prop_table(&t);
+	}
+
+	/*
+	 * THE ENVIRONMENT AND THE CONNECTIONS, both as tables with a scroll of
+	 * their own - see struct prop_table for why they are declared rather
+	 * than drawn here.
+	 */
+	{
+		struct prop_list el;
+		struct prop_table t;
+
+		memset(&el, 0, sizeof el);
+		el.text = proc_str(ob, pi->off_env);
+		el.sep = ' ';
+		memset(&t, 0, sizeof t);
+		t.name = "env";
+		t.col[0] = "variable"; t.width[0] = 28;
+		/* 40 and not the 64 a value can be: the table has to fit the
+		 * panel or its right wall and scrollbar fall off the edge,
+		 * which is the confusion the border was added to remove. What
+		 * a value loses to the width, shift+wheel gets back. */
+		t.col[1] = "value";    t.width[1] = 40;
+		/* Only the value moves: a name is short and is what tells the
+		 * reader which row they are on. */
+		t.hscroll[1] = 1;
+		t.n_col = 2;
+		t.n_row = el.text[0] ? plist_count(el.text, ' ') : 0u;
+		t.visible = PROC_ENV_ROWS;
+		t.id = PROP_TAB_ENV;
+		t.cell = env_cell;
+		t.user = &el;
+		prop_table(&t);
 	}
 
 	/*
@@ -14411,9 +14946,7 @@ static void prop_build(struct view *v)
 			 * they are not.
 			 */
 			if (up[k]->ctx.format == KOF_EVT_PROC && up[k]->info)
-				prop_proc(up[k]);
-			if (up[k]->ctx.format == KOF_EVT_PROC)
-				prop_proc_libs(v);
+				prop_proc(v, up[k]);
 		}
 		if (n_up) {
 			char head[32];
@@ -14432,10 +14965,8 @@ static void prop_build(struct view *v)
 	prop_object_rows(v, ob, 1);
 	/* And when the process record IS the row in front of the reader, the
 	 * same panel in the same place - under the object it describes. */
-	if (ob->ctx.format == KOF_EVT_PROC && ob->info) {
-		prop_proc(ob);
-		prop_proc_libs(v);
-	}
+	if (ob->ctx.format == KOF_EVT_PROC && ob->info)
+		prop_proc(v, ob);
 
 	/*
 	 * AN EVENT'S PAGE IS A DIFFERENT PAGE.
@@ -15031,6 +15562,7 @@ static void page_draw(struct out *o, struct view *v, struct page *p)
 				prop_plain(p->line[idx].text, plain,
 					   sizeof plain);
 				dlg_rec_text(v, plain);
+				dlg_rec_src(v, idx);
 			}
 		} else {
 			for (i = 0; i < inner; i++)
@@ -17096,9 +17628,35 @@ static void dlg_close(struct view *v)
  * showed before. */
 static void dlg_rec_begin(struct view *v, int y0, int x0)
 {
+	int i;
+
 	v->dlg_rows = 0;
 	v->dlg_y0 = y0;
 	v->dlg_x0 = x0;
+	for (i = 0; i < DLG_ROWS; i++)
+		v->dlg_src[i] = -1;
+}
+
+/* Say which line of the list the row just recorded came from. Pages that
+ * scroll call this; ones that do not leave it and get -1, which anchors the
+ * selection to the row as before. */
+static void dlg_rec_src(struct view *v, uint32_t idx)
+{
+	if (v->dlg_rows > 0 && v->dlg_rows <= DLG_ROWS)
+		v->dlg_src[v->dlg_rows - 1] = (int)idx;
+}
+
+/* The recorded row showing that line of the list, or -1. */
+static int dlg_row_of_src(const struct view *v, int src)
+{
+	int r;
+
+	if (src < 0)
+		return -1;
+	for (r = 0; r < v->dlg_rows; r++)
+		if (v->dlg_src[r] == src)
+			return r;
+	return -1;
 }
 
 /* Take the row the clipper just wrote. */
@@ -17120,31 +17678,8 @@ static void dlg_rec_row(struct view *v, struct sclip *c)
  * the plain form of it is a separate call. This is that call, so both kinds of
  * dialog end up in the same recording and the same selection code serves them.
  */
-/*
- * Where one word ends and the next begins, for a click that means "this one".
- *
- * A reader clicking a number, a name or an offset means the whole of it, not
- * the character under the pointer - and having to drag across a value to copy
- * it is the sort of thing that makes people select it out of the terminal
- * instead. Dragging still widens the selection from there.
- */
-static int dlg_break(char c)
-{
-	return c == ' ' || c == '\t' || c == '=' || c == ',';
-}
 
 /* Widen [*a, *b] on a recorded row to the word they land in. */
-static void dlg_word(const char *line, int *a, int *b)
-{
-	int n = (int)strlen(line);
-
-	if (*a < 0 || *a >= n || dlg_break(line[*a]))
-		return;                 /* on a separator: take the one char */
-	while (*a > 0 && !dlg_break(line[*a - 1]))
-		(*a)--;
-	while (*b + 1 < n && !dlg_break(line[*b + 1]))
-		(*b)++;
-}
 
 static void dlg_rec_text(struct view *v, const char *plain)
 {
@@ -17197,10 +17732,39 @@ static void dlg_paint_sel(struct out *o, struct view *v)
 
 	if (!dlg_span(v, &r0, &c0, &r1, &c1))
 		return;
-	for (r = r0; r <= r1 && r < v->dlg_rows; r++) {
-		int len = (int)strlen(v->dlg_line[r]);
-		int from = (r == r0) ? c0 : 0;
-		int to   = (r == r1) ? c1 + 1 : len;
+	for (r = r0; r <= r1; r++) {
+		int row = dlg_row_of_src(v, r);
+		int len;
+		int from, to;
+
+		/* Off the top or the bottom of the window: nothing to paint,
+		 * and the selection is still that line's. */
+		if (row < 0) {
+			if (r >= v->dlg_rows + r0)
+				break;
+			continue;
+		}
+		len = (int)strlen(v->dlg_line[row]);
+		/*
+		 * THE HIGHLIGHT STOPS AT THE LAST CHARACTER, not at the end of
+		 * the padded row.
+		 *
+		 * A table row is a value padded out to its column width and
+		 * then a border glyph, so a drag that ran past the end of a
+		 * short value swept the padding AND the wall into the
+		 * selection - a highlight that leapt from the end of a word to
+		 * a bar several columns away, with nothing between them that
+		 * anybody had pointed at.
+		 *
+		 * Trimmed the same way dlg_copy already trims, so what is
+		 * shown as selected and what lands in the clipboard are the
+		 * same span. They were not: the copy dropped the padding and
+		 * the paint kept it.
+		 */
+		while (len > 0 && v->dlg_line[row][len - 1] == ' ')
+			len--;
+		from = (r == r0) ? c0 : 0;
+		to   = (r == r1) ? c1 + 1 : len;
 
 		if (from < 0)
 			from = 0;
@@ -17208,15 +17772,24 @@ static void dlg_paint_sel(struct out *o, struct view *v)
 			to = len;
 		if (to <= from)
 			continue;
-		out_at(o, v->dlg_y0 + r, v->dlg_x0 + from);
+		out_at(o, v->dlg_y0 + row, v->dlg_x0 + from);
 		out_str(o, A_SEL);
-		out_add(o, v->dlg_line[r] + from, (size_t)(to - from));
+		out_add(o, v->dlg_line[row] + from, (size_t)(to - from));
 		out_str(o, A_OFF);
 	}
 }
 
 /* Which (row, column) of the recorded text a screen position is, or 0 when it
  * is not over the text at all. */
+/*
+ * Screen position to a place in the TEXT: `r` is the line of the list when the
+ * page recorded one, and the recorded row otherwise.
+ *
+ * Answering in content space is what makes a selection survive a scroll - see
+ * view.dlg_src. Everything that paints or copies turns it back into a row with
+ * dlg_row_of_src, and a line scrolled out of the window simply has no row,
+ * which is the honest answer: it is not on the screen.
+ */
 static int dlg_at(const struct view *v, int row, int col, int *r, int *c)
 {
 	int rr = row - v->dlg_y0, cc = col - v->dlg_x0;
@@ -17227,7 +17800,7 @@ static int dlg_at(const struct view *v, int row, int col, int *r, int *c)
 		cc = (int)strlen(v->dlg_line[rr]) - 1;
 	if (cc < 0)
 		return 0;
-	*r = rr;
+	*r = v->dlg_src[rr] >= 0 ? v->dlg_src[rr] : rr;
 	*c = cc;
 	return 1;
 }
@@ -17246,19 +17819,29 @@ static void dlg_copy(struct view *v)
 
 	if (!dlg_span(v, &r0, &c0, &r1, &c1))
 		return;
-	for (r = r0; r <= r1 && r < v->dlg_rows; r++) {
-		int len = (int)strlen(v->dlg_line[r]);
-		int from = (r == r0) ? c0 : 0;
-		int to   = (r == r1) ? c1 + 1 : len;
+	for (r = r0; r <= r1; r++) {
+		int row = dlg_row_of_src(v, r);
+		int len, from, to;
+
+		/* A line the window has scrolled past cannot be copied: the
+		 * recording holds what is on the screen, and inventing bytes
+		 * for a row nobody can see is the one thing worse than
+		 * copying less than was asked for. */
+		if (row < 0)
+			continue;
+		len = (int)strlen(v->dlg_line[row]);
+		from = (r == r0) ? c0 : 0;
+		to   = (r == r1) ? c1 + 1 : len;
 
 		if (to > len)
 			to = len;
-		while (to > from && v->dlg_line[r][to - 1] == ' ')
+		while (to > from && v->dlg_line[row][to - 1] == ' ')
 			to--;
 		if (rows)
 			out_str(&d, "\n");
 		if (to > from)
-			out_add(&d, v->dlg_line[r] + from, (size_t)(to - from));
+			out_add(&d, v->dlg_line[row] + from,
+				(size_t)(to - from));
 		rows++;
 	}
 	if (d.n) {
@@ -19030,12 +19613,10 @@ static void click(struct view *v, int rclick)
 		 * layer the properties page and the symbol table use - these
 		 * pages record their rows for exactly this. */
 		if (dlg_at(v, g_my, g_mx, &r, &c)) {
-			int a = c, b = c;
-
-			dlg_word(v->dlg_line[r], &a, &b);
+			/* The character pressed, not the word around it - see
+			 * the note in on_release. */
 			v->dlg_ar = v->dlg_br = r;
-			v->dlg_ac = a;
-			v->dlg_bc = b;
+			v->dlg_ac = v->dlg_bc = c;
 			v->dlg_have = 1;
 			v->dlg_drag = 1;
 			return;
@@ -19693,11 +20274,45 @@ static int handle_prop_key(struct view *v, int k)
 			v->prop_off++;
 			return 1;
 		case K_WHEEL_UP:
-			v->prop_off = v->prop_off > 3u ? v->prop_off - 3u : 0;
+		case K_WHEEL_DOWN: {
+			/*
+			 * A WHEEL OVER A TABLE SCROLLS THAT TABLE, and the
+			 * page otherwise.
+			 *
+			 * Which is what a reader means by it: a table with its
+			 * own window is a thing to scroll, and scrolling the
+			 * page under the pointer instead moves the table out
+			 * from under it. The page is still what the wheel gets
+			 * anywhere else, and the arrows and PgUp always mean
+			 * the page - so nothing that worked stops working.
+			 */
+			int t = prop_tab_at(v, g_my);
+
+			if (t >= 0) {
+				/*
+				 * SHIFT MEANS SIDEWAYS, which is the gesture
+				 * every terminal already uses for it - and the
+				 * only way to reach the tail of a PATH, since
+				 * the page itself has no horizontal scroll.
+				 */
+				uint32_t *off = g_mod_shift
+						? &g_prop_tab_hoff[t]
+						: &g_prop_tab_off[t];
+				uint32_t step = g_mod_shift ? 8u : 1u;
+
+				if (k == K_WHEEL_UP)
+					*off = *off > step ? *off - step : 0u;
+				else
+					*off += step;
+				return 1;
+			}
+			if (k == K_WHEEL_UP)
+				v->prop_off = v->prop_off > 3u
+					      ? v->prop_off - 3u : 0;
+			else
+				v->prop_off += 3u;
 			return 1;
-		case K_WHEEL_DOWN:
-			v->prop_off += 3u;
-			return 1;
+		}
 		case K_PGUP:
 			v->prop_off = v->prop_off > (uint32_t)room
 				      ? v->prop_off - (uint32_t)room : 0;
@@ -20207,15 +20822,25 @@ static void on_release(struct view *v)
 		 * finally known - a single-character span after a press is
 		 * exactly the case where nothing moved.
 		 */
+		/*
+		 * A PRESS THAT NEVER MOVED SELECTS NOTHING, and that is the
+		 * whole of it.
+		 *
+		 * It used to expand to the word under the pointer, on the
+		 * reasoning that a click on a table of values means the value.
+		 * That reasoning does not survive contact: the "word" is
+		 * whatever dlg_word's separators happen to cut, so clicking a
+		 * path took a fragment of it, clicking a number beside a name
+		 * took one of the two, and which you got depended on where in
+		 * the row you pressed. A selection nobody asked for, of a
+		 * span nobody chose.
+		 *
+		 * So a click places the caret and picks nothing; a DRAG picks
+		 * exactly what was dragged over. One gesture, one meaning.
+		 */
 		if (v->dlg_drag && v->dlg_have &&
-		    v->dlg_ar == v->dlg_br && v->dlg_ac == v->dlg_bc &&
-		    v->dlg_ar >= 0 && v->dlg_ar < v->dlg_rows) {
-			int a = v->dlg_ac, b = v->dlg_bc;
-
-			dlg_word(v->dlg_line[v->dlg_ar], &a, &b);
-			v->dlg_ac = a;
-			v->dlg_bc = b;
-		}
+		    v->dlg_ar == v->dlg_br && v->dlg_ac == v->dlg_bc)
+			v->dlg_have = 0;
 		/* The drag is over; what was picked stays picked, so
 		 * Ctrl+C has something to copy after the button comes up. */
 		v->dlg_drag = 0;

@@ -168,6 +168,7 @@ void out_fmt(struct out *o, const char *fmt, ...);
 #define G_BR "+"
 #define G_H  "-"
 #define G_V  "|"
+#define G_THUMB "#"
 #else
 #define G_TL "\xe2\x95\xad"     /* U+256D */
 #define G_TR "\xe2\x95\xae"     /* U+256E */
@@ -175,6 +176,9 @@ void out_fmt(struct out *o, const char *fmt, ...);
 #define G_BR "\xe2\x95\xaf"     /* U+256F */
 #define G_H  "\xe2\x94\x80"     /* U+2500 */
 #define G_V  "\xe2\x94\x82"     /* U+2502 - the scrollbar's own */
+/* The thumb of a scrollbar drawn INSIDE a border: it has to read as a mark on
+ * the wall rather than as a gap in it, which a reversed space does not. */
+#define G_THUMB "\xe2\x94\x83"  /* U+2503, heavy vertical */
 #endif
 
 /* ---- the colours that mean one thing everywhere --------------------------- */

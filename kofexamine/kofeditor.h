@@ -614,6 +614,13 @@ struct object {
 	 * under the same parent. */
 	int               payload_of;
 	/*
+	 * WHICH MAPPED FILE OF A PROCESS VIEW THIS ROW IS, plus one - zero
+	 * means it is not one. An index into view.seen_path, which holds the
+	 * full path; the object's own name carries the basename because that
+	 * is what fits a tree row.
+	 */
+	uint32_t          proc_path;
+	/*
 	 * WHICH VARIABLE IT CAME OUT OF, and what was wrapped round it.
 	 *
 	 * Kept on the child rather than left in its name: the name says what
