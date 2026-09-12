@@ -60,10 +60,18 @@ struct kof_proc_build {
 	uint32_t plat_a, plat_b;
 
 	const char *exe, *comm, *cmdline;
-	/* The environment it was started with, NULs already spaces. "" when
-	 * the collector could not read it - a permission, not a fact about
-	 * the process. */
+	/*
+	 * The environment it was started with, assignments separated by NUL
+	 * and `environ_len` bytes long. "" when the collector could not read
+	 * it - a permission, not a fact about the process.
+	 *
+	 * NOT SPACE-SEPARATED like the command line: a value may contain a
+	 * space, so a space between assignments is a boundary that cannot be
+	 * told from one inside a value. The arena keeps the NULs and the
+	 * region's extent - off_net minus off_environ - says where it ends.
+	 */
 	const char *environ;
+	uint32_t    environ_len;
 	/* The process's own connections, one per line. "" when there are
 	 * none or they could not be read. */
 	const char *net;

@@ -353,8 +353,10 @@ static void write_fp(struct kof_report *r, FILE *out,
 		 * worth a row: a line reading "in other" tells a reader
 		 * nothing and costs them the second it took to read it.
 		 */
-		if (f->loc && f->loc != KOF_LOC_UNKNOWN &&
-		    f->loc != KOF_LOC_OTHER) {
+		/* KOF_LOC_UNKNOWN is 0, so `f->loc` IS the test for it - the
+		 * spelt-out comparison beside it was the same question asked
+		 * twice. */
+		if (f->loc && f->loc != KOF_LOC_OTHER) {
 			fprintf(out, "              in %s", kof_loc_name(f->loc));
 			any = 1;
 		}

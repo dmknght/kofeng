@@ -337,6 +337,16 @@ struct kofa_proc {
 	 * flag below says which.
 	 */
 	const char *environ;
+	/*
+	 * ITS LENGTH, BECAUSE THE PIECES ARE SEPARATED BY NUL.
+	 *
+	 * The command line beside it has its NULs turned into spaces and is
+	 * read as one string; this one keeps them, because a value may contain
+	 * a space and there is no character that may not, so anything else
+	 * loses a boundary. strlen therefore names the FIRST assignment and
+	 * not the block - this is how long the block is. 0 when there is none.
+	 */
+	uint32_t    environ_len;
 
 	/*
 	 * THE PROCESS'S OWN CONNECTIONS, one per line:

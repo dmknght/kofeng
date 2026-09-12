@@ -40,6 +40,34 @@ static uint16_t put(char *buf, uint32_t cap, uint32_t *at, const char *s,
 	}
 }
 
+/*
+ * The same, for a block that is not one string: the environment, whose
+ * assignments are separated by NUL.
+ *
+ * A terminating NUL is written after it as well, so every offset in the arena
+ * still points at something a reader can treat as a C string - str_ok in the
+ * parse looks for exactly that, and a block with no terminator would fail a
+ * check that is there to catch a truncated record.
+ */
+static uint16_t put_n(char *buf, uint32_t cap, uint32_t *at, const char *s,
+		      uint32_t len, int *overflow)
+{
+	if (!s || !len)
+		return 0;
+	if (*at + len + 1u > cap || *at + len + 1u > 0xffffu) {
+		*overflow = 1;
+		return 0;
+	}
+	memcpy(buf + *at, s, len);
+	buf[*at + len] = '\0';
+	{
+		uint16_t off = (uint16_t)*at;
+
+		*at += len + 1u;
+		return off;
+	}
+}
+
 uint32_t kof_proc_build_rec(const struct kof_proc_build *b, void *buf,
 			    uint32_t cap)
 {
@@ -87,7 +115,8 @@ uint32_t kof_proc_build_rec(const struct kof_proc_build *b, void *buf,
 		r->off_cmdline = put(a, cap, &at, b->cmdline, &over);
 		/* Between the command line and the descriptors, so the arena
 		 * stays in region order - see the partition in proc_parse.c. */
-		r->off_environ = put(a, cap, &at, b->environ, &over);
+		r->off_environ = put_n(a, cap, &at, b->environ,
+				       b->environ_len, &over);
 		r->off_net     = put(a, cap, &at, b->net, &over);
 		r->off_fd0     = put(a, cap, &at, b->fd0, &over);
 		r->off_fd1     = put(a, cap, &at, b->fd1, &over);

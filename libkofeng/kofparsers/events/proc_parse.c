@@ -213,10 +213,22 @@ int kof_proc_parse(kof_buf b, void *view, struct kof_obj_ctx *ctx)
 	 * gives its neighbour the bytes.
 	 */
 	{
-		uint32_t cmd = pi->off_cmdline ? pi->off_cmdline : total;
-		uint32_t env = pi->off_env ? pi->off_env : total;
-		uint32_t net = pi->off_net ? pi->off_net : total;
+		/*
+		 * AN ABSENT SECTION TAKES THE NEXT ONE'S OFFSET, NOT THE END.
+		 *
+		 * Read backwards for that reason. A boundary is "where the
+		 * next section starts", and a process with no connections has
+		 * no off_net - so taking `total` there gave the ENVIRONMENT
+		 * every byte after it, the descriptor links included. That was
+		 * invisible while the environment was one space-separated
+		 * string and strlen ended it; the moment its pieces were
+		 * NUL-separated and the extent had to say where it stopped,
+		 * three descriptor paths showed up as three more variables.
+		 */
 		uint32_t fd  = pi->off_fd0 ? pi->off_fd0 : total;
+		uint32_t net = pi->off_net ? pi->off_net : fd;
+		uint32_t env = pi->off_env ? pi->off_env : net;
+		uint32_t cmd = pi->off_cmdline ? pi->off_cmdline : env;
 
 		/*
 		 * FOUR SECTIONS NOW, AND THE ORDER IS STILL THE PRODUCER'S.

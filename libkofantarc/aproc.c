@@ -284,8 +284,22 @@ static void a_read_exe(uint32_t pid, char *buf, size_t cap, uint32_t *flags)
  * about the process and not a failure. Two copies of this walk would be two
  * chances to disagree about the trailing NUL.
  */
-static void a_read_nul_list(uint32_t pid, const char *what, char *buf,
-			    size_t cap)
+/*
+ * `sep` is what the NULs between the pieces become, and 0 means LEAVE THEM.
+ *
+ * A command line wants spaces: it is read as one sentence, and the argv
+ * boundaries inside it are not what anybody compares against. AN ENVIRONMENT
+ * DOES NOT. Its pieces are NAME=value assignments and a value may contain a
+ * space - a packager's DEBFULLNAME, a browser's argument list, anything a
+ * shell exported with quotes - so a space separator loses the boundary it was
+ * meant to mark, and a reader splitting on it gets one variable shown as two,
+ * the second with no name. There is no character that cannot appear in a
+ * value, which is why the answer is to keep the NUL and carry the length.
+ *
+ * Returns the bytes written, not counting the terminator.
+ */
+static size_t a_read_nul_list(uint32_t pid, const char *what, char *buf,
+			      size_t cap, char sep)
 {
 	char path[64];
 	int fd;
@@ -296,37 +310,41 @@ static void a_read_nul_list(uint32_t pid, const char *what, char *buf,
 	snprintf(path, sizeof path, "/proc/%u/%s", (unsigned)pid, what);
 	fd = open(path, O_RDONLY | O_CLOEXEC);
 	if (fd < 0)
-		return;
+		return 0;
 
 	got = read(fd, buf, cap - 1);
 	close(fd);
 	if (got <= 0) {
 		buf[0] = '\0';
-		return;
+		return 0;
 	}
 
 	/*
 	 * The trailing NUL is a terminator and not a separator, so turning it
 	 * into a space too leaves every command line ending in one - which
-	 * then shows up in every comparison a caller writes.
+	 * then shows up in every comparison a caller writes. Dropped for the
+	 * NUL-separated form as well, so the length names the last piece's
+	 * end rather than an empty piece after it.
 	 */
 	while (got > 0 && buf[got - 1] == '\0')
 		got--;
 
-	for (i = 0; i < (size_t)got; i++)
-		if (buf[i] == '\0')
-			buf[i] = ' ';
+	if (sep)
+		for (i = 0; i < (size_t)got; i++)
+			if (buf[i] == '\0')
+				buf[i] = sep;
 	buf[got] = '\0';
+	return (size_t)got;
 }
 
 static void a_read_cmdline(uint32_t pid, char *buf, size_t cap)
 {
-	a_read_nul_list(pid, "cmdline", buf, cap);
+	(void)a_read_nul_list(pid, "cmdline", buf, cap, ' ');
 }
 
-static void a_read_environ(uint32_t pid, char *buf, size_t cap)
+static size_t a_read_environ(uint32_t pid, char *buf, size_t cap)
 {
-	a_read_nul_list(pid, "environ", buf, cap);
+	return a_read_nul_list(pid, "environ", buf, cap, 0);
 }
 
 /*
@@ -721,9 +739,11 @@ int kofa_plist_next(struct kofa_plist *l, struct kofa_proc *out)
 		/* Same reader as the command line: the file has the same shape
 		 * - NUL separated, trailing NUL - and the same permission. */
 		l->environ[0] = '\0';
+		out->environ_len = 0;
 		if (!l->o.no_environ && !(out->flags & KOFA_PF_KERNEL))
-			a_read_environ(out->pid, l->environ,
-				       sizeof l->environ);
+			out->environ_len =
+				(uint32_t)a_read_environ(out->pid, l->environ,
+							 sizeof l->environ);
 		out->environ = l->environ;
 
 		l->std[0][0] = l->std[1][0] = l->std[2][0] = '\0';

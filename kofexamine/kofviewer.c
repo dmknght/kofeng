@@ -1700,6 +1700,27 @@ struct view {
 	char        dlg_line[DLG_ROWS][DLG_COLS];
 	int         dlg_rows;
 	/*
+	 * WHERE EACH COLUMN OF A RECORDED ROW BEGINS IN ITS BYTES.
+	 *
+	 * The screen counts GLYPHS and the recording holds BYTES, and the two
+	 * stopped agreeing the day these pages grew box rules: G_V is three
+	 * bytes and one column, so from the first wall onwards a click at
+	 * column N landed on byte N, three or six bytes to the left of what
+	 * the reader pointed at. The highlight was drawn from the same wrong
+	 * place, which put its edge in the middle of a glyph - a border that
+	 * appeared several words away, and a stray character where the reverse
+	 * video repainted half of one.
+	 *
+	 * Folding the glyphs down to ASCII in the recording would have squared
+	 * the arithmetic and changed what a selection PAINTS and COPIES, which
+	 * is the thing the recording exists to get right. This keeps the real
+	 * bytes and adds the translation: dlg_bx[row][col] is the first byte of
+	 * that column and dlg_bx[row][cols] is one past the last, so a span in
+	 * columns becomes a span in bytes by two lookups.
+	 */
+	uint16_t    dlg_bx[DLG_ROWS][DLG_COLS + 1];
+	uint16_t    dlg_cols[DLG_ROWS];
+	/*
 	 * WHICH LINE OF THE LIST each recorded row came from, and -1 when the
 	 * recorder was not told.
 	 *
@@ -1715,6 +1736,19 @@ struct view {
 	int         dlg_ar, dlg_ac, dlg_br, dlg_bc;
 	int         dlg_have;
 	int         dlg_drag;
+	/*
+	 * THE LAST PRESS IN A DIALOG, so a second one on the same place can be
+	 * recognised as a double click.
+	 *
+	 * Timed rather than counted, for the reason the hex pane's is: a
+	 * terminal reports two presses and has no notion of a double click to
+	 * pass on. Kept apart from last_click because that one is a byte
+	 * OFFSET in the file and this is a place in a recorded page - the same
+	 * number would mean two different things, and a click in one pane
+	 * would arm a double click in the other.
+	 */
+	int         dlg_click_r, dlg_click_c;
+	uint64_t    dlg_click_ms;
 
 	uint8_t     sym_open;
 	uint64_t    sym_at;
@@ -2249,6 +2283,9 @@ static void proc_collect(struct view *v, kof_engine *eng, uint32_t pid)
 					/* on_object keeps its own copy - heap
 					 * or a spill file - so the mapping is
 					 * only needed for the call. */
+					{
+					uint32_t first = v->n_obj;
+
 					(void)kof_scan_bytes(sc, fm,
 						(uint64_t)fst.st_size, nm,
 						&opt, on_object, v);
@@ -2267,9 +2304,29 @@ static void proc_collect(struct view *v, kof_engine *eng, uint32_t pid)
 					 * already holds the whole thing, in
 					 * the order the process mapped them.
 					 */
-					if (v->n_obj)
-						v->obj[v->n_obj - 1u].proc_path
-							= v->n_seen;
+					/*
+					 * ON THE OBJECT THAT IS THE FILE, and
+					 * that is the FIRST one the scan added
+					 * - not the last.
+					 *
+					 * A scan of one file can produce
+					 * several objects: an ELF with
+					 * something appended to it declares
+					 * the carried object as a child, and
+					 * an archive declares its members. The
+					 * last of those is not the mapping.
+					 * Stamping it gave the CHILD the
+					 * file's path and left the file itself
+					 * without one, so the panel showed the
+					 * path twice over - once against the
+					 * file's own row under its bare name,
+					 * once against a child that was never
+					 * mapped at all.
+					 */
+					if (v->n_obj > first)
+						v->obj[first].proc_path =
+							v->n_seen;
+					}
 				}
 				if (v->n_obj >= MAX_OBJ)
 					break;
@@ -13580,8 +13637,16 @@ enum prop_tab_id {
 #define PROP_TAB_MAX_W 120u
 
 struct prop_table {
-	/* The label in the left column, on the heading row only - every other
-	 * row is blank there, the way the fd table already reads. */
+	/*
+	 * The label in the left column, or NULL when a section heading above
+	 * the table already names it.
+	 *
+	 * Four tables one under the other read as one wall of rows with the
+	 * names lost in the left margin, so each of them gets a heading at the
+	 * same level as "Process" and a blank line before it. That leaves this
+	 * column free for the count, which is the thing that has nowhere else
+	 * to go.
+	 */
 	const char *name;
 	const char *col[PROP_TAB_COLS];
 	uint8_t     width[PROP_TAB_COLS];   /* 0 = take what is left */
@@ -13669,6 +13734,35 @@ static int prop_tab_at(const struct view *v, int row)
 }
 
 /*
+ * The CELL a click landed in, as a span of columns on the recorded row, or 0
+ * when the click was not inside one of the tables' columns.
+ *
+ * The geometry is the drawing's own - see g_prop_tab_cx - so this cannot drift
+ * from where the cell actually is. The span is the column's full width; the
+ * caller trims the padding off the right, which is what makes a double click on
+ * a short value take the value and not the blanks after it.
+ */
+static int prop_cell_span(const struct view *v, int row, int col,
+			  int *c0, int *c1)
+{
+	int id = prop_tab_at(v, row);
+	int k;
+
+	if (id < 0)
+		return 0;
+	for (k = 0; k < g_prop_tab_ncol[id] && k < (int)PROP_TAB_COLS; k++) {
+		int x = g_prop_tab_cx[id][k];
+
+		if (col >= x && col < x + g_prop_tab_cw[id][k]) {
+			*c0 = x;
+			*c1 = x + g_prop_tab_cw[id][k] - 1;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/*
  * Below this a table is drawn WITHOUT its frame - the heading and the rows and
  * nothing else.
  *
@@ -13725,13 +13819,40 @@ static void prop_table(const struct prop_table *t)
 		rule[n * (sizeof G_H - 1u)] = 0;
 		if (framed)
 			prop_add(A_DIM "  %-11s " G_TL "%s" G_TR A_OFF,
-				 t->name, rule);
+				 t->name ? t->name : "", rule);
+	}
+
+	/*
+	 * WHERE IN THE LIST THIS WINDOW IS - UNDER THE TABLE'S NAME.
+	 *
+	 * A table that just stopped reads as a process with six variables; the
+	 * count is the difference between a window and a wrong answer. It sat
+	 * on the bottom rule, twenty rows below the name it belonged to, which
+	 * is far enough away to read as a caption on whatever came next. The
+	 * name is on the top rule, so this goes on the two rows under it.
+	 *
+	 * Across two rows because the label column is eleven wide: "1-6/111"
+	 * fits and "121-126/1024" does not, and a count that is cut is worse
+	 * than no count. The range first, the total under it.
+	 */
+	char cap[2][24];
+
+	cap[0][0] = cap[1][0] = 0;
+	if (t->n_row > t->visible) {
+		snprintf(cap[0], sizeof cap[0], "%lu-%lu",
+			 (unsigned long)(off + 1u),
+			 (unsigned long)(off + (t->n_row - off > t->visible
+					        ? t->visible
+					        : t->n_row - off)));
+		snprintf(cap[1], sizeof cap[1], "of %lu",
+			 (unsigned long)t->n_row);
 	}
 
 	/* The heading. */
 	{
 		int n = snprintf(line, sizeof line, "  %-11s " A_DIM "%s"
-				 A_OFF, framed ? "" : t->name,
+				 A_OFF,
+				 framed ? cap[0] : (t->name ? t->name : ""),
 				 framed ? G_V : " ");
 
 		for (k = 0; k < t->n_col && n > 0 && (size_t)n < sizeof line;
@@ -13777,7 +13898,8 @@ static void prop_table(const struct prop_table *t)
 
 		t->cell(t->user, off + i, cell);
 		n = snprintf(line, sizeof line, "  %-11s " A_DIM "%s" A_OFF,
-			     "", framed ? G_V : " ");
+			     (framed && i == 0) ? cap[1] : "",
+			     framed ? G_V : " ");
 		for (k = 0; k < t->n_col && n > 0 && (size_t)n < sizeof line;
 		     k++) {
 			const char *c = cell[k] ? cell[k] : "";
@@ -13843,43 +13965,9 @@ static void prop_table(const struct prop_table *t)
 			n++;
 		}
 		rule[n * (sizeof G_H - 1u)] = 0;
-		/*
-		 * THE COUNT GOES IN THE LABEL COLUMN, UNDER THE TABLE'S NAME.
-		 *
-		 * It used to trail the bottom rule as a sentence - the range
-		 * and an instruction about shift and the wheel - and that was
-		 * wrong twice. A table wide enough to be worth scrolling puts
-		 * that sentence past the right edge of the panel, so the
-		 * advice was cut off in exactly the case it was written for.
-		 * And nobody writes the gesture on the furniture: a scrollbar
-		 * with a thumb already says the widget scrolls, and a reader
-		 * who wants sideways tries shift the way they do everywhere
-		 * else.
-		 *
-		 * The left column is empty on every row but the first, which
-		 * is room already paid for, and "1-6/111" under "env" reads as
-		 * a caption on the thing above it.
-		 */
-		char cap[24];
-
-		/*
-		 * ACROSS TWO ROWS, because the label column is eleven wide.
-		 * "1-6/111" fits and "121-126/1024" does not, and a count that
-		 * is cut is worse than no count. The range on the rule's own
-		 * row, the total under it - the rule is one row and the widget
-		 * is several, so there is a row below to use.
-		 */
-		cap[0] = 0;
-		if (t->n_row > t->visible)
-			snprintf(cap, sizeof cap, "%lu-%lu",
-				 (unsigned long)(off + 1u),
-				 (unsigned long)(off + shown));
-		prop_add(A_DIM "  %-11s " G_BL "%s" G_BR A_OFF, cap, rule);
-		if (t->n_row > t->visible) {
-			snprintf(cap, sizeof cap, "of %lu",
-				 (unsigned long)t->n_row);
-			prop_add(A_DIM "  %-11s" A_OFF, cap);
-		}
+		/* Nothing in the label column here: the count is up beside the
+		 * name, where a caption belongs. */
+		prop_add(A_DIM "  %-11s " G_BL "%s" G_BR A_OFF, "", rule);
 	}
 }
 
@@ -13900,6 +13988,17 @@ static void prop_table(const struct prop_table *t)
  */
 struct prop_list {
 	const char *text;
+	/*
+	 * HOW LONG THE BLOCK IS, because one of the two separators is NUL.
+	 *
+	 * The environment cannot be split on a space: a value may contain one,
+	 * and a row split there shows one variable as two with the second
+	 * unnamed. The collector therefore keeps the NULs between assignments,
+	 * and a NUL-separated block is not a string - strlen names its first
+	 * piece. 0 means "take strlen", which is what the connection list,
+	 * separated by newlines, wants.
+	 */
+	uint32_t    len;
 	char        sep;
 	/* Wide enough for the longest cell either feeder writes: a raw net
 	 * line is bounded by the collector at 256, and a value is cut to what
@@ -13907,44 +14006,51 @@ struct prop_list {
 	char        buf[4][256];
 };
 
-static const char *plist_nth(const char *t, char sep, uint32_t n,
+/* memchr and not strchr, so the separator may be NUL - see prop_list.len. */
+static const char *plist_nth(const char *t, uint32_t tn, char sep, uint32_t n,
 			     char *out, size_t cap)
 {
-	uint32_t i = 0;
+	uint32_t i = 0, at = 0;
 
 	out[0] = 0;
-	while (*t) {
-		const char *e = strchr(t, sep);
-		size_t len = e ? (size_t)(e - t) : strlen(t);
+	while (at < tn) {
+		const char *e = memchr(t + at, sep, tn - at);
+		size_t len = e ? (size_t)(e - (t + at)) : (size_t)(tn - at);
 
 		if (i == n) {
 			if (len >= cap)
 				len = cap - 1u;
-			memcpy(out, t, len);
+			memcpy(out, t + at, len);
 			out[len] = 0;
 			return out;
 		}
 		i++;
 		if (!e)
 			break;
-		t = e + 1;
+		at = (uint32_t)(e - t) + 1u;
 	}
 	return out;
 }
 
-static uint32_t plist_count(const char *t, char sep)
+static uint32_t plist_count(const char *t, uint32_t tn, char sep)
 {
-	uint32_t n = 0;
+	uint32_t n = 0, at = 0;
 
-	while (*t) {
-		const char *e = strchr(t, sep);
+	while (at < tn) {
+		const char *e = memchr(t + at, sep, tn - at);
 
 		n++;
 		if (!e)
 			break;
-		t = e + 1;
+		at = (uint32_t)(e - t) + 1u;
 	}
 	return n;
+}
+
+/* The block's extent - what the caller declared, or strlen when it did not. */
+static uint32_t plist_len(const struct prop_list *l)
+{
+	return l->len ? l->len : (uint32_t)strlen(l->text);
 }
 
 /* NAME=value split into two columns - the whole reason the environment is a
@@ -13955,7 +14061,8 @@ static void env_cell(void *user, uint32_t row, const char **out)
 	struct prop_list *l = user;
 	char *eq;
 
-	plist_nth(l->text, l->sep, row, l->buf[0], sizeof l->buf[0]);
+	plist_nth(l->text, plist_len(l), l->sep, row, l->buf[0],
+		  sizeof l->buf[0]);
 	eq = strchr(l->buf[0], '=');
 	if (eq) {
 		*eq = 0;
@@ -13973,7 +14080,7 @@ static void net_cell(void *user, uint32_t row, const char **out)
 	struct prop_list *l = user;
 	char raw[256];
 
-	plist_nth(l->text, l->sep, row, raw, sizeof raw);
+	plist_nth(l->text, plist_len(l), l->sep, row, raw, sizeof raw);
 	l->buf[0][0] = l->buf[1][0] = l->buf[2][0] = l->buf[3][0] = 0;
 	if (sscanf(raw, "%15s %63s -> %63s %31s", l->buf[0], l->buf[1],
 		   l->buf[2], l->buf[3]) < 3)
@@ -14070,6 +14177,26 @@ static void prop_proc(const struct view *v, const struct object *ob)
 		prop_add(A_DIM "  %-11s not readable" A_OFF, "fds");
 
 	/*
+	 * The three shapes the rules key on, said in words. A reader looking
+	 * at a panel should be able to see what a rule saw.
+	 *
+	 * STILL IN THE PROCESS SECTION, above the tables: each table now has a
+	 * heading of its own, so a row left after them reads as a footnote to
+	 * whichever one it happens to follow.
+	 */
+	if (pi->fd_same_01)
+		prop_add(A_WARN "  %-11s fd 0 and fd 1 name the SAME object"
+			 A_OFF, "stdio");
+	if (pi->comm_bracketed)
+		prop_add(A_WARN "  %-11s name is bracketed, like a kernel "
+			 "thread" A_OFF, "masquerade");
+	if (pi->flags & KOF_PROC_F_KTHREAD)
+		prop_add(A_DIM "  %-11s kernel thread" A_OFF, "kind");
+	if (!(pi->flags & KOF_PROC_F_EXE_ON_DISK))
+		prop_add(A_WARN "  %-11s the executable is not on disk" A_OFF,
+			 "exe");
+
+	/*
 	 * WHAT IT HAS MAPPED, FIRST.
 	 *
 	 * The order here is the order a reader asks in: what is this running,
@@ -14095,7 +14222,8 @@ static void prop_proc(const struct view *v, const struct object *ob)
 			nl.text = raw;
 			nl.sep = '\n';
 			memset(&t, 0, sizeof t);
-			t.name = "net";
+			prop_head("Connections");
+			t.name = NULL;
 			t.col[0] = "proto";  t.width[0] = 6;
 			t.col[1] = "local";  t.width[1] = 24;
 			t.col[2] = "remote"; t.width[2] = 24;
@@ -14105,7 +14233,7 @@ static void prop_proc(const struct view *v, const struct object *ob)
 			 * columns are what keep the row readable. */
 			t.hscroll[1] = t.hscroll[2] = 1;
 			t.n_col = 4;
-			t.n_row = plist_count(raw, '\n');
+			t.n_row = plist_count(raw, (uint32_t)strlen(raw), '\n');
 			t.visible = PROC_NET_ROWS;
 			t.id = PROP_TAB_NET;
 			t.cell = net_cell;
@@ -14117,8 +14245,9 @@ static void prop_proc(const struct view *v, const struct object *ob)
 			 * a unix socket, or a namespace this could not read.
 			 * The count beats a blank that reads as "none".
 			 */
-			prop_add(A_DIM "  %-11s %lu socket(s), none in the "
-				 "connection tables" A_OFF, "net",
+			prop_head("Connections");
+			prop_add(A_DIM "  %lu socket(s), none in the "
+				 "connection tables" A_OFF,
 				 (unsigned long)pi->n_socket);
 		}
 	}
@@ -14144,8 +14273,9 @@ static void prop_proc(const struct view *v, const struct object *ob)
 		fl.ob = ob;
 		fl.pi = pi;
 		memset(&t, 0, sizeof t);
-		t.name = "fd";
-		t.col[0] = "which"; t.width[0] = 8;
+		prop_head("Descriptors");
+		t.name = NULL;
+		t.col[0] = "stream"; t.width[0] = 8;
 		t.col[1] = "target"; t.width[1] = 56;
 		t.hscroll[1] = 1;
 		t.n_col = 2;
@@ -14166,11 +14296,24 @@ static void prop_proc(const struct view *v, const struct object *ob)
 		struct prop_list el;
 		struct prop_table t;
 
+		uint32_t en = pi->len_env;
+
 		memset(&el, 0, sizeof el);
 		el.text = proc_str(ob, pi->off_env);
-		el.sep = ' ';
+		/*
+		 * NUL-SEPARATED, AND THE EXTENT IS THE REGION'S. The arena
+		 * writes a terminator after the block, and the region runs to
+		 * the next one's offset, so the last byte or two are NULs that
+		 * would each read as an empty variable.
+		 */
+		while (en && !el.text[en - 1u])
+			en--;
+		el.len = en;
+		el.sep = '\0';
 		memset(&t, 0, sizeof t);
-		t.name = "env";
+		if (en)
+			prop_head("Environment");
+		t.name = NULL;
 		t.col[0] = "variable"; t.width[0] = 28;
 		/* 40 and not the 64 a value can be: the table has to fit the
 		 * panel or its right wall and scrollbar fall off the edge,
@@ -14181,7 +14324,7 @@ static void prop_proc(const struct view *v, const struct object *ob)
 		 * reader which row they are on. */
 		t.hscroll[1] = 1;
 		t.n_col = 2;
-		t.n_row = el.text[0] ? plist_count(el.text, ' ') : 0u;
+		t.n_row = en ? plist_count(el.text, en, '\0') : 0u;
 		t.visible = PROC_ENV_ROWS;
 		t.id = PROP_TAB_ENV;
 		t.cell = env_cell;
@@ -14189,21 +14332,6 @@ static void prop_proc(const struct view *v, const struct object *ob)
 		prop_table(&t);
 	}
 
-	/*
-	 * The three shapes the rules key on, said in words. A reader looking
-	 * at a panel should be able to see what a rule saw.
-	 */
-	if (pi->fd_same_01)
-		prop_add(A_WARN "  %-11s fd 0 and fd 1 name the SAME object"
-			 A_OFF, "stdio");
-	if (pi->comm_bracketed)
-		prop_add(A_WARN "  %-11s name is bracketed, like a kernel "
-			 "thread" A_OFF, "masquerade");
-	if (pi->flags & KOF_PROC_F_KTHREAD)
-		prop_add(A_DIM "  %-11s kernel thread" A_OFF, "kind");
-	if (!(pi->flags & KOF_PROC_F_EXE_ON_DISK))
-		prop_add(A_WARN "  %-11s the executable is not on disk" A_OFF,
-			 "exe");
 }
 
 /*
@@ -14221,36 +14349,114 @@ static void prop_proc(const struct view *v, const struct object *ob)
  * viewer already keys on, and a second marker would be a second thing to keep
  * in step.
  */
+/*
+ * The mapped files, as a table like the other three.
+ *
+ * KIND FIRST, THEN SIZE, THEN THE PATH. A reader scanning this column is
+ * asking "what has this process got loaded" - an ELF, a locale table, a cache
+ * - and the answer is the same six characters on most rows, which is what
+ * makes a column worth reading down. The path is last because it is the one
+ * that does not fit, and the one that therefore scrolls.
+ *
+ * THE WHOLE PATH AND NOT THE LEAF. Two mappings named `libc.so.6` may be the
+ * system one and one out of a writable directory, which is the difference
+ * between a normal process and an interesting one, and a basename cannot say
+ * which. It is too wide for any column, so it is the column that moves under
+ * shift and the wheel.
+ */
+struct prop_liblist {
+	const struct view *v;
+	char buf[3][320];
+};
+
+/*
+ * The nth object that IS a mapped file.
+ *
+ * `proc_path` is the test and the only one needed: the walk stamps it on the
+ * object it made from a mapped file and on nothing else, so this excludes the
+ * memory regions (MEM_HEAP and its kind, which have no file behind them) and
+ * the CHILDREN of a mapped file - an appended payload, an archive member -
+ * which are things found INSIDE a mapping rather than mappings.
+ *
+ * Walked per row rather than indexed once, because the list is bounded by
+ * PROC_SEEN_MAX and a table shows twenty rows.
+ */
+static uint32_t lib_obj(const struct view *v, uint32_t row)
+{
+	uint32_t i, n = 0;
+
+	for (i = 1; i < v->n_obj; i++) {
+		if (!v->obj[i].proc_path)
+			continue;
+		if (n++ == row)
+			return i;
+	}
+	return 0;
+}
+
+static uint32_t lib_count(const struct view *v)
+{
+	uint32_t i, n = 0;
+
+	for (i = 1; i < v->n_obj; i++)
+		if (v->obj[i].proc_path)
+			n++;
+	return n;
+}
+
+static void lib_cell(void *user, uint32_t row, const char **out)
+{
+	struct prop_liblist *l = user;
+	uint32_t i = lib_obj(l->v, row);
+	const struct object *o;
+
+	l->buf[0][0] = l->buf[1][0] = l->buf[2][0] = 0;
+	if (!i) {
+		out[0] = out[1] = out[2] = "";
+		return;
+	}
+	o = &l->v->obj[i];
+	if (o->fmt)
+		snprintf(l->buf[0], sizeof l->buf[0], "%s-%s",
+			 kof_format_name(o->ctx.format),
+			 kof_arch_name(o->ctx.arch));
+	else
+		snprintf(l->buf[0], sizeof l->buf[0], "data");
+	snprintf(l->buf[1], sizeof l->buf[1], "%llu",
+		 (unsigned long long)o->buf.n);
+	/* Every row here has a path - it is what put the row in the table. */
+	snprintf(l->buf[2], sizeof l->buf[2], "%s",
+		 l->v->seen_path[o->proc_path - 1u]);
+	out[0] = l->buf[0];
+	out[1] = l->buf[1];
+	out[2] = l->buf[2];
+}
+
 static void prop_proc_libs(const struct view *v)
 {
-	uint32_t i, shown = 0, more = 0;
+	struct prop_liblist ll;
+	struct prop_table t;
 
 	if (!v->n_obj)
 		return;
-	for (i = 1; i < v->n_obj; i++) {
-		const char *leaf = kof_obj_leaf(v->obj[i].name);
-
-		if (!leaf || !strncmp(leaf, "MEM_", 4))
-			continue;
-		if (shown >= PROC_LIB_ROWS) {
-			more++;
-			continue;
-		}
-		if (!shown)
-			prop_add(A_DIM "  %-11s %-32s %10s  %s" A_OFF,
-				 "mapped", "file", "bytes", "format");
-		prop_add("  %-11s " A_ID "%-32.32s" A_OFF A_SIZE "%10llu"
-			 A_OFF "  " A_DIM "%s%s%s" A_OFF, "", leaf,
-			 (unsigned long long)v->obj[i].buf.n,
-			 v->obj[i].fmt
-				 ? kof_format_name(v->obj[i].ctx.format) : "",
-			 v->obj[i].fmt ? "-" : "",
-			 v->obj[i].fmt
-				 ? kof_arch_name(v->obj[i].ctx.arch) : "");
-		shown++;
-	}
-	if (more)
-		prop_add(A_DIM "  %-11s ... %u more" A_OFF, "", more);
+	memset(&t, 0, sizeof t);
+	ll.v = v;
+	prop_head("Mapped files");
+	t.name = NULL;
+	t.col[0] = "type";
+	t.col[1] = "bytes";
+	t.col[2] = "path";
+	t.width[0] = 10;
+	t.width[1] = 10;
+	t.width[2] = 48;
+	t.hscroll[2] = 1;
+	t.n_col = 3;
+	t.n_row = lib_count(v);
+	t.visible = PROC_LIB_ROWS;
+	t.id = PROP_TAB_LIB;
+	t.cell = lib_cell;
+	t.user = &ll;
+	prop_table(&t);
 }
 
 static void prop_elf(const struct object *ob)
@@ -17659,12 +17865,67 @@ static int dlg_row_of_src(const struct view *v, int src)
 	return -1;
 }
 
+/*
+ * Index the row about to be counted: which byte each column starts at.
+ *
+ * Done once per row as it is recorded rather than per click, because every
+ * consumer - the click, the drag, the paint, the copy - asks the same question
+ * about the same rows, and a walk per query is a walk per mouse event.
+ *
+ * A sequence cut short by the end of the buffer is taken as the bytes that are
+ * there. snprintf truncates at a byte boundary, so the last glyph of an
+ * over-long row can be half of one; treating its bytes as columns of their own
+ * is wrong by a column at the far right of a row nobody can see the end of,
+ * and reading past the NUL to find out would be wrong everywhere.
+ */
+static void dlg_index(struct view *v)
+{
+	const char *s = v->dlg_line[v->dlg_rows];
+	uint32_t b = 0, n = 0;
+
+	while (s[b] && n < DLG_COLS) {
+		unsigned char c = (unsigned char)s[b];
+		uint32_t len = 1, k;
+
+		if ((c & 0xe0u) == 0xc0u)
+			len = 2;
+		else if ((c & 0xf0u) == 0xe0u)
+			len = 3;
+		else if ((c & 0xf8u) == 0xf0u)
+			len = 4;
+		for (k = 1; k < len; k++)
+			if (!s[b + k]) {
+				len = k;
+				break;
+			}
+		v->dlg_bx[v->dlg_rows][n++] = (uint16_t)b;
+		b += len;
+	}
+	v->dlg_bx[v->dlg_rows][n] = (uint16_t)b;
+	v->dlg_cols[v->dlg_rows] = (uint16_t)n;
+}
+
+/* The column a byte of a recorded row falls in - for the one place that finds
+ * something in the text with strstr and has to say where it is on screen. */
+static int dlg_col_of_byte(const struct view *v, int row, uint32_t byte)
+{
+	int n;
+
+	if (row < 0 || row >= v->dlg_rows)
+		return -1;
+	for (n = 0; n < (int)v->dlg_cols[row]; n++)
+		if (v->dlg_bx[row][n] >= byte)
+			return n;
+	return (int)v->dlg_cols[row];
+}
+
 /* Take the row the clipper just wrote. */
 static void dlg_rec_row(struct view *v, struct sclip *c)
 {
 	if (v->dlg_rows >= DLG_ROWS)
 		return;
 	c->rec[c->rec_n] = 0;
+	dlg_index(v);
 	v->dlg_rows++;
 }
 
@@ -17690,6 +17951,7 @@ static void dlg_rec_text(struct view *v, const char *plain)
 	 * is at most as wide as the terminal - so what is lost is text nobody
 	 * could have selected. */
 	snprintf(v->dlg_line[v->dlg_rows], DLG_COLS, "%.*s", DLG_COLS - 1, plain);
+	dlg_index(v);
 	v->dlg_rows++;
 }
 
@@ -17744,7 +18006,7 @@ static void dlg_paint_sel(struct out *o, struct view *v)
 				break;
 			continue;
 		}
-		len = (int)strlen(v->dlg_line[row]);
+		len = (int)v->dlg_cols[row];
 		/*
 		 * THE HIGHLIGHT STOPS AT THE LAST CHARACTER, not at the end of
 		 * the padded row.
@@ -17761,7 +18023,8 @@ static void dlg_paint_sel(struct out *o, struct view *v)
 		 * same span. They were not: the copy dropped the padding and
 		 * the paint kept it.
 		 */
-		while (len > 0 && v->dlg_line[row][len - 1] == ' ')
+		while (len > 0 &&
+		       v->dlg_line[row][v->dlg_bx[row][len - 1]] == ' ')
 			len--;
 		from = (r == r0) ? c0 : 0;
 		to   = (r == r1) ? c1 + 1 : len;
@@ -17774,7 +18037,8 @@ static void dlg_paint_sel(struct out *o, struct view *v)
 			continue;
 		out_at(o, v->dlg_y0 + row, v->dlg_x0 + from);
 		out_str(o, A_SEL);
-		out_add(o, v->dlg_line[row] + from, (size_t)(to - from));
+		out_add(o, v->dlg_line[row] + v->dlg_bx[row][from],
+			(size_t)(v->dlg_bx[row][to] - v->dlg_bx[row][from]));
 		out_str(o, A_OFF);
 	}
 }
@@ -17796,8 +18060,8 @@ static int dlg_at(const struct view *v, int row, int col, int *r, int *c)
 
 	if (rr < 0 || rr >= v->dlg_rows || cc < 0)
 		return 0;
-	if (cc >= (int)strlen(v->dlg_line[rr]))
-		cc = (int)strlen(v->dlg_line[rr]) - 1;
+	if (cc >= (int)v->dlg_cols[rr])
+		cc = (int)v->dlg_cols[rr] - 1;
 	if (cc < 0)
 		return 0;
 	*r = v->dlg_src[rr] >= 0 ? v->dlg_src[rr] : rr;
@@ -17829,19 +18093,21 @@ static void dlg_copy(struct view *v)
 		 * copying less than was asked for. */
 		if (row < 0)
 			continue;
-		len = (int)strlen(v->dlg_line[row]);
+		len = (int)v->dlg_cols[row];
 		from = (r == r0) ? c0 : 0;
 		to   = (r == r1) ? c1 + 1 : len;
 
 		if (to > len)
 			to = len;
-		while (to > from && v->dlg_line[row][to - 1] == ' ')
+		while (to > from &&
+		       v->dlg_line[row][v->dlg_bx[row][to - 1]] == ' ')
 			to--;
 		if (rows)
 			out_str(&d, "\n");
 		if (to > from)
-			out_add(&d, v->dlg_line[row] + from,
-				(size_t)(to - from));
+			out_add(&d, v->dlg_line[row] + v->dlg_bx[row][from],
+				(size_t)(v->dlg_bx[row][to] -
+					 v->dlg_bx[row][from]));
 		rows++;
 	}
 	if (d.n) {
@@ -19677,10 +19943,23 @@ static void click(struct view *v, int rclick)
 			 * recognised here by the label it drew, which needs no
 			 * agreement about row numbering between the two paths.
 			 */
-			const char *cp = strstr(v->dlg_line[r], PROP_CP_LABEL);
+			/*
+			 * ON THE RECORDED ROW, WHICH IS NOT `r`.
+			 *
+			 * `r` is a line of the PAGE - dlg_at answers in
+			 * content space so a selection survives a scroll - and
+			 * this page has more lines than the recording has
+			 * rows. Indexing dlg_line with it read past the end of
+			 * the array on any page scrolled far enough, and found
+			 * the label on the wrong row before that.
+			 */
+			int rw = g_my - v->dlg_y0;
+			const char *cp = (rw >= 0 && rw < v->dlg_rows)
+				? strstr(v->dlg_line[rw], PROP_CP_LABEL) : 0;
 
 			if (cp && v->path && v->path[0]) {
-				int x0 = (int)(cp - v->dlg_line[r]);
+				int x0 = dlg_col_of_byte(v, rw,
+					(uint32_t)(cp - v->dlg_line[rw]));
 
 				if (c >= x0 && c < x0 +
 				    (int)(sizeof PROP_CP_LABEL - 1)) {
@@ -19702,12 +19981,51 @@ static void click(struct view *v, int rclick)
 			 * Selecting two columns of one row, or part of one
 			 * value, was not expressible.
 			 *
-			 * The word is still what a plain CLICK gives, because
-			 * that is the useful gesture on a table of values -
-			 * but it is decided on RELEASE, when it is known
-			 * whether the pointer moved. See on_release.
+			 * A plain CLICK leaves one character lit, which is a
+			 * caret: it says where a drag would start. A DOUBLE
+			 * click takes the whole cell, which is the gesture a
+			 * table of values actually wants.
 			 */
 			(void)a; (void)b;
+			/*
+			 * A SECOND PRESS ON THE SAME PLACE TAKES THE WHOLE
+			 * CELL - what a double click means in a table.
+			 *
+			 * Bounded by the CELL and not by the row: a value and
+			 * the name beside it are two facts, and copying the
+			 * name with the value is the thing that made people
+			 * retype the value anyway. The cell's own padding goes
+			 * with it - see the trim - so a short value hands back
+			 * the value and not a run of blanks and the wall.
+			 */
+			{
+				uint64_t now = now_ms();
+				int again = r == v->dlg_click_r &&
+					    c == v->dlg_click_c &&
+					    now - v->dlg_click_ms < 400u;
+				int x0, x1;
+
+				v->dlg_click_r = r;
+				v->dlg_click_c = c;
+				v->dlg_click_ms = now;
+				if (again &&
+				    prop_cell_span(v, g_my, c, &x0, &x1)) {
+					int lim = (int)v->dlg_cols[rw];
+
+					if (x1 >= lim)
+						x1 = lim - 1;
+					while (x1 > x0 &&
+					       v->dlg_line[rw][v->dlg_bx[rw][x1]]
+					       == ' ')
+						x1--;
+					v->dlg_ar = v->dlg_br = r;
+					v->dlg_ac = x0;
+					v->dlg_bc = x1;
+					v->dlg_have = 1;
+					v->dlg_drag = 0;
+					return;
+				}
+			}
 			v->dlg_ar = v->dlg_br = r;
 			v->dlg_ac = v->dlg_bc = c;
 			v->dlg_have = 1;
@@ -20838,9 +21156,16 @@ static void on_release(struct view *v)
 		 * So a click places the caret and picks nothing; a DRAG picks
 		 * exactly what was dragged over. One gesture, one meaning.
 		 */
-		if (v->dlg_drag && v->dlg_have &&
-		    v->dlg_ar == v->dlg_br && v->dlg_ac == v->dlg_bc)
-			v->dlg_have = 0;
+		/*
+		 * A PRESS THAT NEVER MOVED KEEPS ITS ONE CHARACTER.
+		 *
+		 * It used to drop the selection entirely on the reasoning that
+		 * a click picks nothing, and that left a click on a value with
+		 * NO visible answer at all - the page looked as though the
+		 * click had missed. One character lit is a caret: it says
+		 * where the next drag starts from, and a double click on the
+		 * same spot then takes the whole cell.
+		 */
 		/* The drag is over; what was picked stays picked, so
 		 * Ctrl+C has something to copy after the button comes up. */
 		v->dlg_drag = 0;

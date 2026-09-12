@@ -25,6 +25,7 @@
 #include "kofeng.h"
 #include "kofmod/proc.h"
 #include "kofproc.h"
+#include "../../libkofeng/kofparsers/events/proc_parse.h"
 
 static int failures;
 
@@ -217,6 +218,68 @@ int main(int argc, char **argv)
 
 		if (kof_proc_build_rec(&b, rec, (uint32_t)sizeof *r) != 0)
 			fail("a record that cannot fit was written anyway");
+	}
+
+	/* ---- the regions partition the arena, sections missing or not ---- */
+	/*
+	 * WHAT BROKE AND HOW IT LOOKED.
+	 *
+	 * The boundaries were read forwards, each absent section falling back
+	 * to the END of the record. A process with no connections has no
+	 * off_net, so MEM_ENV ran from the environment to the last byte of the
+	 * arena - the descriptor links included. Nothing crashed and nothing
+	 * overlapped, so the partition check above still passed; what happened
+	 * is that a panel listing the environment listed three descriptor
+	 * paths as variables, and a rule scoped to the environment searched
+	 * bytes that were not it.
+	 *
+	 * It was invisible while the environment was one space-separated
+	 * string, because everything read it with strlen and stopped at the
+	 * first NUL. It became visible the moment the environment kept its
+	 * NULs - a value may contain a space, so it had to - and the extent
+	 * became the thing that says where it ends.
+	 */
+	{
+		unsigned char rec[KOF_PROC_REC_MAX];
+		struct kof_obj_ctx ctx;
+		struct kof_proc_info pi;
+		static const char env[] = "A=x y z\0DEBFULLNAME=Dm Knght";
+		uint32_t n;
+
+		memset(&b, 0, sizeof b);
+		b.os = 2; b.pid = 5; b.ppid = 1;
+		b.exe = "/usr/bin/sleep"; b.comm = "sleep";
+		b.cmdline = "sleep 60";
+		b.environ = env;
+		b.environ_len = (uint32_t)(sizeof env - 1u);
+		b.net = "";                    /* no connections - the case */
+		b.fd0 = "/dev/null";
+		b.fd1 = "/dev/null";
+		b.fd2 = "pipe:[1234]";
+		n = kof_proc_build_rec(&b, rec, sizeof rec);
+		if (!n)
+			fail("the record would not build");
+
+		memset(&ctx, 0, sizeof ctx);
+		memset(&pi, 0, sizeof pi);
+		if (!kof_proc_parse(kof_buf_make(rec, n), &pi, &ctx))
+			fail("the record would not parse");
+
+		if (pi.len_env != sizeof env)
+			fail("MEM_ENV is not the environment block - an "
+			     "absent section gave it the rest of the arena");
+		if (pi.len_meta + pi.len_cmdline + pi.len_env +
+		    pi.len_net + pi.len_fd != n)
+			fail("the regions do not cover the record");
+		if (pi.len_fd == 0)
+			fail("the descriptor links fell into another region");
+		/*
+		 * And the block itself still holds both assignments, the one
+		 * with a space in its value included. A space separator turned
+		 * "DEBFULLNAME=Dm Knght" into two rows, the second unnamed.
+		 */
+		if (memcmp(rec + pi.off_env, env, sizeof env - 1u))
+			fail("the environment was not stored verbatim");
 	}
 
 	kof_scanner_free(sc);
