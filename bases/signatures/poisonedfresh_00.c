@@ -14,12 +14,13 @@ KOF_TARGET_NAME(KOF_MALTYPE_ROOTKIT, "PoisonedFresh");
 
 KOF_TARGET_SUBTYPE(KOF_ELF_DYN);
 
-KOF_TARGET_RANGE(scan_range_sym_exp, KOF_SCAN_SYM_EXP);
+KOF_TARGET_RANGE(scan_range_noload, KOF_SCAN_ELF_NOLOAD);
 
-KOF_DEFINE_HEXSTR(s0, "0101001561705F6861636B5F6170");
+KOF_DEFINE_STR(s0, "&FU:'", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
+KOF_DEFINE_HEXSTR(s1, "980E4786FD377A585A");
 
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
-	if (kof_find_str_any(scan_range_sym_exp, s0))
+	if (kof_find_str_all(scan_range_noload, s0, s1))
 		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
 }
