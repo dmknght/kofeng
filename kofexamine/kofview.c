@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 /*
  * kofview.c - the terminal, and what is drawn on it. See kofview.h for the
  * boundary this file is on the far side of.
