@@ -312,7 +312,7 @@ static void test_measured_split(void)
 	 */
 	ok(resident <= virt, "resident never exceeds virtual");
 	printf("       resident %.1f MB of %.1f MB virtual\n",
-	       resident / 1048576.0, virt / 1048576.0);
+	       (double)resident / 1048576.0, (double)virt / 1048576.0);
 }
 
 /*
@@ -599,9 +599,248 @@ static void test_fake_kthread(void)
 	waitpid(kid, NULL, 0);
 }
 
+/*
+ * THE CHUNK WALK, over a layout this test decided.
+ *
+ * The child maps a region and writes a known pattern into it with holes:
+ *
+ *      page 0   content "AAAA..."
+ *      page 1   untouched            <- zero
+ *      page 2   untouched            <- zero
+ *      page 3   content "BBBB..."
+ *      page 4   content "CCCC..."
+ *      page 5   untouched            <- zero
+ *
+ * What must come back is two chunks - page 0, and pages 3-4 together - at the
+ * addresses those pages actually have. Getting the ADDRESS wrong is the
+ * failure this test exists for: a chunk whose bytes are right and whose
+ * address is off by a page sends every finding to the wrong place, and nothing
+ * about the bytes would show it.
+ */
+static void test_chunk_walk(void)
+{
+	int fd[2];
+	pid_t kid;
+	unsigned long base = 0;
+	const size_t PG = 4096, NPG = 6;
+
+	printf("\nchunk walk skips zero pages and keeps addresses:\n");
+
+	if (pipe(fd))
+		return;
+	kid = fork();
+	if (kid == 0) {
+		char *m = mmap(NULL, NPG * PG, PROT_READ | PROT_WRITE,
+			       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+		close(fd[0]);
+		if (m == MAP_FAILED)
+			_exit(1);
+		memset(m + 0 * PG, 'A', PG);
+		memset(m + 3 * PG, 'B', PG);
+		memset(m + 4 * PG, 'C', PG);
+		/*
+		 * READ pages 1, 2 and 5 without writing them. That is what
+		 * makes them PRESENT AND ZERO - a read fault on untouched
+		 * anonymous memory maps the shared zero page - and it is the
+		 * only state in which the zero filter has anything to do.
+		 * Untouched pages never reach it, because pagemap already
+		 * leaves them out.
+		 */
+		{
+			volatile unsigned char sink = 0;
+
+			sink = (unsigned char)(sink + m[1 * PG]);
+			sink = (unsigned char)(sink + m[2 * PG]);
+			sink = (unsigned char)(sink + m[5 * PG]);
+			(void)sink;
+		}
+		base = (unsigned long)(uintptr_t)m;
+		if (write(fd[1], &base, sizeof base) != sizeof base)
+			_exit(1);
+		pause();
+		_exit(0);
+	}
+	close(fd[1]);
+	if (read(fd[0], &base, sizeof base) != (ssize_t)sizeof base)
+		return;
+	usleep(150000);
+
+	{
+		struct kofa_pmem_option o;
+		struct kofa_pmem *m;
+		struct kofa_region r;
+		struct kofa_chunk c;
+		struct kofa_pmem_stat st;
+		int err = 0, found = 0, n = 0;
+		uint64_t seen_a = 0, seen_bc = 0;
+
+		memset(&o, 0, sizeof o);
+		o.want = KOFA_MW_DEFAULT | KOFA_MW_HEAP;
+		o.max_heap_region = NPG * PG;
+		o.pagemap_min = 0;          /* always consult it here */
+
+		m = kofa_pmem_open((uint32_t)kid, 0, &o, &err);
+		if (m) {
+			while (kofa_pmem_next_region(m, &r)) {
+				if (base < r.base || base >= r.base + r.size)
+					continue;
+				found = 1;
+				while (kofa_pmem_next_chunk(m, &r, &c)) {
+					const unsigned char *p = c.p;
+
+					n++;
+					if (p[0] == 'A')
+						seen_a = c.addr;
+					else if (p[0] == 'B')
+						seen_bc = c.addr;
+					/* Nothing handed over may be a zero
+					 * page - that is the whole filter. */
+					if (c.len >= 4096 && !p[0] &&
+					    !p[4095])
+						fails++;
+				}
+				break;
+			}
+			kofa_pmem_stats(m, &st);
+			kofa_pmem_close(m);
+		}
+
+		ok(found, "found the mapping");
+		ok(n == 2, "two chunks: the lone page, and the adjacent pair");
+		ok(seen_a == base, "the first chunk is at the mapping base");
+		ok(seen_bc == base + 3 * PG,
+		   "the second starts at page 3, not where the read did");
+		ok(st.bytes_zero > 0, "zero pages were counted, not just cut");
+		printf("       %d chunk(s), %llu B read, %llu B of it zero\n",
+		       n, (unsigned long long)st.bytes_read,
+		       (unsigned long long)st.bytes_zero);
+	}
+
+	kill(kid, 9);
+	waitpid(kid, NULL, 0);
+}
+
+/*
+ * ONE MAPPED OBJECT IS ONE GROUP, however many VMAs the loader split it into.
+ *
+ * Linux has no AllocationBase - see the top of aproc.h - so this library
+ * groups by adjacency and backing inode, and that guess is the only thing
+ * standing between a caller and reporting one shared object three times. A
+ * loaded .so is r--p for its headers, r-xp for its text and rw-p for its data,
+ * all adjacent and all the same inode; they must share a group_id, and the
+ * next object along must not.
+ *
+ * Measured over this process's own address space rather than a synthetic one:
+ * the layout being tested is the loader's, and a made-up one would be testing
+ * the test.
+ */
+static void test_grouping(void)
+{
+	struct kofa_pmem_option o;
+	struct kofa_pmem *m;
+	struct kofa_region r;
+	int err = 0;
+	uint64_t prev_group = 0, prev_inode = 0, prev_end = 0;
+	int have_prev = 0, multi = 0, split_groups = 0, checked = 0;
+
+	printf("\nthe VMAs of one mapped object share a group:\n");
+
+	memset(&o, 0, sizeof o);
+	o.want = KOFA_MW_PAGEMAP;      /* every region, not just executable */
+
+	m = kofa_pmem_open((uint32_t)getpid(), 0, &o, &err);
+	if (!m) {
+		ok(0, "opened our own process");
+		return;
+	}
+
+	while (kofa_pmem_next_region(m, &r)) {
+		if (have_prev && r.inode && r.inode == prev_inode &&
+		    r.base == prev_end) {
+			/* Adjacent, same file: the loader's own split. */
+			checked++;
+			if (r.group_id == prev_group)
+				multi++;
+			else
+				split_groups++;
+		}
+		prev_group = r.group_id;
+		prev_inode = r.inode;
+		prev_end   = r.base + r.size;
+		have_prev  = 1;
+	}
+	kofa_pmem_close(m);
+
+	ok(checked > 0, "the loader did split at least one object for us");
+	ok(split_groups == 0,
+	   "no adjacent same-inode pair landed in different groups");
+	printf("       %d adjacent same-file pair(s), %d grouped, %d split\n",
+	       checked, multi, split_groups);
+}
+
+/*
+ * THE SWEEP BUDGET STOPS THE WALK AND SAYS SO.
+ *
+ * A budget that merely stopped would be the failure this tree treats as worse
+ * than an error: a caller told it examined everything over a set it abandoned.
+ */
+static void test_sweep_budget(void)
+{
+	struct kofa_sweep sw;
+	struct kofa_pmem_option o;
+	struct kofa_plist *l;
+	struct kofa_proc p;
+	int err = 0;
+	uint64_t read_total = 0;
+
+	printf("\na sweep budget bounds the walk and reports the refusal:\n");
+
+	memset(&sw, 0, sizeof sw);
+	sw.max_bytes = 64u * 1024u;      /* deliberately tiny */
+
+	memset(&o, 0, sizeof o);
+	o.want = KOFA_MW_DEFAULT | KOFA_MW_EXEC_ONLY;
+	o.sweep = &sw;
+
+	l = kofa_plist_open(NULL, &err);
+	if (!l)
+		return;
+	while (kofa_plist_next(l, &p)) {
+		struct kofa_pmem *m;
+		struct kofa_region r;
+		struct kofa_chunk c;
+		struct kofa_pmem_stat st;
+
+		if (p.flags & (KOFA_PF_REFUSED | KOFA_PF_KERNEL))
+			continue;
+		m = kofa_pmem_open(p.pid, p.start_time, &o, &err);
+		if (!m)
+			continue;
+		while (kofa_pmem_next_region(m, &r))
+			while (kofa_pmem_next_chunk(m, &r, &c))
+				;
+		kofa_pmem_stats(m, &st);
+		read_total += st.bytes_read;
+		kofa_pmem_close(m);
+	}
+	kofa_plist_close(l);
+
+	ok(sw.used <= sw.max_bytes, "the walk stayed inside the budget");
+	ok(read_total == sw.used, "and the shared counter agrees with the walk");
+	ok(sw.regions_refused > 0 || sw.refused > 0,
+	   "running out was reported, not silent");
+	printf("       used %llu of %llu B, %u region(s) refused\n",
+	       (unsigned long long)sw.used,
+	       (unsigned long long)sw.max_bytes, sw.regions_refused);
+}
+
 int main(void)
 {
 	test_comm_trap();
+	test_chunk_walk();
+	test_grouping();
+	test_sweep_budget();
 	test_reverse_shell_shape();
 	test_stdio_only_negative();
 	test_fake_kthread();

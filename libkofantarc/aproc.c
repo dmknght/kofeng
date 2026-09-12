@@ -38,7 +38,41 @@
 #define A_DEF_MAX_REGION      (1ULL << 31)   /* 2 GB  */
 #define A_DEF_MAX_HEAP_REGION (1ULL << 20)   /* 1 MB  */
 #define A_DEF_MAX_BYTES       (256ULL << 20) /* 256 MB per process */
-#define A_DEF_PAGEMAP_MIN     (1ULL << 20)   /* 1 MB  */
+
+/*
+ * The largest piece handed over at once. A resident run can be hundreds of
+ * megabytes; 1 MB is large enough that the per-chunk overhead disappears
+ * against the copy and small enough that the handle's buffer is not a thing a
+ * caller has to think about.
+ */
+#define A_DEF_CHUNK_MAX       (1ULL << 20)
+/*
+ * BELOW THIS, READ BLIND. Measured rather than reasoned, which it was not
+ * before: the value here was 1 MB on the argument that "one pread costs more
+ * than reading the region", with no number behind it.
+ *
+ * The measurement is the WORST CASE for pagemap - a fully resident region,
+ * where it saves nothing and is pure overhead - so the crossing point it finds
+ * is the safe one. Times are per call, averaged over 200:
+ *
+ *      region     blind      guided    guided/blind
+ *        4 KB     2.4 us      4.6 us      0.52x   blind wins
+ *       16 KB     4.5 us      7.7 us      0.59x   blind wins
+ *       64 KB    15.6 us     18.8 us      0.83x   blind wins
+ *      256 KB    63.7 us     48.8 us      1.30x   pagemap wins
+ *        1 MB    63.7 us     51.1 us      1.25x   pagemap wins
+ *        4 MB   161.0 us    157.0 us      1.03x   even
+ *       16 MB   1314 us     1326 us       0.99x   even
+ *
+ * So the crossing is between 64 KB and 256 KB, and 1 MB was turning pagemap
+ * OFF across a range where it already paid - while a SPARSE region of that
+ * size is exactly where it pays most: the same walk over real V8 mappings
+ * measured 37x to 887x, because there the guided read skips almost everything.
+ *
+ * 64 KB, then: the last size at which reading blind is measurably cheaper even
+ * when pagemap can save nothing at all.
+ */
+#define A_DEF_PAGEMAP_MIN     (64ULL << 10)   /* 64 KB */
 
 /* ------------------------------------------------------------------ names */
 
@@ -564,6 +598,35 @@ struct kofa_pmem {
 
 	uint64_t budget_used;
 	struct kofa_pmem_stat st;
+
+	/* ---- the chunk walk, per region ---- */
+
+	/*
+	 * The region kofa_pmem_next_chunk is part way through, and where it
+	 * has got to. `chunk_base` is zero when no walk is open, which is why
+	 * a region at address zero could not be walked - and there is no such
+	 * region, because the kernel does not map one.
+	 */
+	uint64_t chunk_base, chunk_size;
+	int      chunk_run;        /* index into runs[] */
+	uint64_t chunk_off;        /* bytes into that run */
+	struct kofa_run chunk_runs[A_RUNS_CACHED];
+	int      chunk_nruns;
+
+	/*
+	 * THE BUFFER AND WHAT IS STILL IN IT.
+	 *
+	 * A read fills chunk_buf with up to chunk_max bytes; one call may
+	 * hand back only the first span of it, so the rest STAYS and the next
+	 * call resumes inside the buffer. Rewinding the run offset and
+	 * reading again was the first version and it moved the tail of every
+	 * read twice - measured on a six-page region: 45 KB pulled out of the
+	 * process for 24 KB of region.
+	 */
+	unsigned char *chunk_buf;  /* chunk_max bytes, allocated on first use */
+	uint64_t chunk_have;       /* valid bytes in it */
+	uint64_t chunk_pos;        /* how far this call has got through them */
+	uint64_t chunk_addr;       /* process address of chunk_buf[0] */
 };
 
 static uint64_t a_opt_or(uint64_t v, uint64_t def) { return v ? v : def; }
@@ -608,6 +671,7 @@ struct kofa_pmem *kofa_pmem_open(uint32_t pid, uint64_t start_time,
 		a_opt_or(m->o.max_heap_region, A_DEF_MAX_HEAP_REGION);
 	m->o.max_bytes = a_opt_or(m->o.max_bytes, A_DEF_MAX_BYTES);
 	m->o.pagemap_min = a_opt_or(m->o.pagemap_min, A_DEF_PAGEMAP_MIN);
+	m->o.chunk_max = a_opt_or(m->o.chunk_max, A_DEF_CHUNK_MAX);
 
 	m->pmfd = -1;
 	m->proc.pid = pid;
@@ -1119,6 +1183,216 @@ int kofa_pmem_runs(struct kofa_pmem *m, const struct kofa_region *r,
 	return pr.runs;
 }
 
+/*
+ * Is this page nothing but zeroes?
+ *
+ * Word at a time rather than byte at a time - measured at 3.67 GB/s over
+ * 1132 MB, which is what makes the filter cheap enough to always run. A plain
+ * byte loop is the obvious version and is several times slower on the only
+ * path that matters, which is the one where the page IS zero and every byte
+ * has to be looked at.
+ */
+static int page_is_zero(const unsigned char *p, size_t n)
+{
+	size_t i = 0;
+
+	while (i + sizeof(uint64_t) <= n) {
+		uint64_t w;
+
+		memcpy(&w, p + i, sizeof w);
+		if (w)
+			return 0;
+		i += sizeof w;
+	}
+	for (; i < n; i++)
+		if (p[i])
+			return 0;
+	return 1;
+}
+
+/*
+ * Take the budgets off `want` and say how much may actually be read. Returns 0
+ * when nothing may, and records the refusal - see kofa_sweep.
+ */
+static uint64_t budget_allow(struct kofa_pmem *m, uint64_t want)
+{
+	uint64_t left;
+
+	if (m->budget_used >= m->o.max_bytes)
+		return 0;
+	left = m->o.max_bytes - m->budget_used;
+	if (want > left)
+		want = left;
+
+	if (m->o.sweep && m->o.sweep->max_bytes) {
+		struct kofa_sweep *sw = m->o.sweep;
+
+		if (sw->used >= sw->max_bytes) {
+			sw->refused += want;
+			return 0;
+		}
+		left = sw->max_bytes - sw->used;
+		if (want > left) {
+			sw->refused += want - left;
+			want = left;
+		}
+	}
+	return want;
+}
+
+int kofa_pmem_next_chunk(struct kofa_pmem *m, const struct kofa_region *r,
+			 struct kofa_chunk *out)
+{
+	if (!m || !r || !out)
+		return 0;
+
+	/* A new region ends whatever walk was open. */
+	if (m->chunk_base != r->base || m->chunk_size != r->size) {
+		int more = 0;
+
+		m->chunk_base = r->base;
+		m->chunk_size = r->size;
+		m->chunk_off  = 0;
+		m->chunk_run  = 0;
+		m->chunk_nruns = 0;
+		m->chunk_have = 0;
+		m->chunk_pos  = 0;
+
+		if (r->flags & KOFA_RGF_UNEXAMINED)
+			return 0;
+
+		/*
+		 * NOTHING IS CHARGED TO THIS REGION, SO THERE IS NOTHING IN IT.
+		 *
+		 * smaps' Rss counts pages charged to the process, and the
+		 * shared zero page is charged to nobody - so a region whose
+		 * pages pagemap calls present and whose Rss is zero holds the
+		 * zero page and nothing else.
+		 *
+		 * THE ONLY PART OF THIS IDEA THAT SURVIVED MEASUREMENT. The
+		 * obvious extension - stop once as many non-zero bytes as Rss
+		 * have been handed over, since Rss must bound the content -
+		 * is WRONG, and transparent huge pages are why. A child that
+		 * wrote 256 KB into a 64 MB mapping and read the rest came
+		 * back with Rss 2.00 MB: THP promoted the write to one 2 MB
+		 * page and charged all of it, zeroes included. So Rss is not a
+		 * bound on content; the budget never emptied, and the walk
+		 * read all 64.00 MB with the bound on exactly as it did with
+		 * it off. It was removed rather than left in place not firing.
+		 *
+		 * Rss EXACTLY ZERO is still sound: nothing is charged at all,
+		 * so there is no huge page to have inflated it.
+		 */
+		if ((r->flags & KOFA_RGF_RSS_MEASURED) && r->rss == 0)
+			return 0;
+
+		m->chunk_nruns = kofa_pmem_runs(m, r, m->chunk_runs,
+						A_RUNS_CACHED, &more);
+		/*
+		 * NO RUNS AND NO PAGEMAP ARE DIFFERENT ANSWERS. Without
+		 * pagemap there is nothing to guide a read, so the region is
+		 * taken whole - one run covering it. With pagemap and no runs,
+		 * nothing is resident and there is nothing to hand over.
+		 */
+		if (!m->chunk_nruns && (r->flags & KOFA_RGF_NO_PAGEMAP)) {
+			m->chunk_runs[0].addr = r->base;
+			m->chunk_runs[0].len  = r->size;
+			m->chunk_nruns = 1;
+		}
+	}
+
+	if (!m->chunk_buf) {
+		m->chunk_buf = malloc((size_t)m->o.chunk_max);
+		if (!m->chunk_buf)
+			return 0;
+	}
+
+	for (;;) {
+		const struct kofa_run *run;
+		uint64_t left, want, got;
+
+		/*
+		 * ANYTHING LEFT IN THE BUFFER FIRST. A read can hold several
+		 * spans separated by zero pages, and each is its own chunk -
+		 * see the note on chunk_have for why they are not re-read.
+		 */
+		while (m->chunk_pos < m->chunk_have) {
+			uint64_t keep_off = 0, keep_len = 0, i;
+
+			for (i = m->chunk_pos; i < m->chunk_have;
+			     i += KOFA_PAGE_SIZE) {
+				size_t pn = (size_t)
+					((m->chunk_have - i < KOFA_PAGE_SIZE)
+					 ? m->chunk_have - i : KOFA_PAGE_SIZE);
+
+				if (page_is_zero(m->chunk_buf + i, pn)) {
+					if (keep_len)
+						break;   /* the span ended */
+					m->st.bytes_zero += pn;
+					continue;
+				}
+				if (!keep_len)
+					keep_off = i;
+				keep_len += pn;
+			}
+
+			if (!keep_len) {
+				m->chunk_pos = m->chunk_have;
+				break;
+			}
+
+			m->chunk_pos = keep_off + keep_len;
+			out->addr = m->chunk_addr + keep_off;
+			out->p    = m->chunk_buf + keep_off;
+			out->len  = keep_len;
+			m->st.chunks++;
+			return 1;
+		}
+
+		/* The buffer is spent; fill it from the run being walked. */
+		if (m->chunk_run >= m->chunk_nruns)
+			return 0;
+
+
+		run = &m->chunk_runs[m->chunk_run];
+		left = run->len - m->chunk_off;
+		if (!left) {
+			m->chunk_run++;
+			m->chunk_off = 0;
+			continue;
+		}
+
+		want = left < m->o.chunk_max ? left : m->o.chunk_max;
+		want = budget_allow(m, want);
+		if (!want) {
+			/*
+			 * The budget ran out mid region. Said rather than
+			 * left as a short walk: a caller has to be able to
+			 * tell "there was no more" from "we stopped".
+			 */
+			m->st.regions_skipped++;
+			if (m->o.sweep)
+				m->o.sweep->regions_refused++;
+			m->chunk_run = m->chunk_nruns;
+			return 0;
+		}
+
+		got = kofa_pmem_read(m, run->addr + m->chunk_off,
+				     m->chunk_buf, (size_t)want);
+		if (!got) {
+			/* The region went away under us, which is ordinary. */
+			m->chunk_run++;
+			m->chunk_off = 0;
+			continue;
+		}
+		m->chunk_addr = run->addr + m->chunk_off;
+		m->chunk_off += got;
+		m->chunk_have = got;
+		m->chunk_pos = 0;
+	}
+	return 0;
+}
+
 size_t kofa_pmem_read(struct kofa_pmem *m, uint64_t addr, void *buf, size_t n)
 {
 	struct iovec local, remote;
@@ -1146,6 +1420,8 @@ size_t kofa_pmem_read(struct kofa_pmem *m, uint64_t addr, void *buf, size_t n)
 
 	m->budget_used += (uint64_t)got;
 	m->st.bytes_read += (uint64_t)got;
+	if (m->o.sweep)
+		m->o.sweep->used += (uint64_t)got;
 	return (size_t)got;
 }
 
@@ -1169,5 +1445,6 @@ void kofa_pmem_close(struct kofa_pmem *m)
 	if (m->pmfd >= 0)
 		close(m->pmfd);
 	free(m->pm_scratch);
+	free(m->chunk_buf);
 	free(m);
 }

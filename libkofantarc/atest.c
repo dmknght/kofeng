@@ -33,7 +33,7 @@ static double now(void)
 
 struct total {
 	uint64_t procs, refused, regions, filtered, skipped;
-	uint64_t virt, res, unmeasured, read, measured;
+	uint64_t virt, res, unmeasured, read, measured, zero, chunks;
 	uint64_t code_regions, code_virt, code_res;
 	uint64_t heap_regions, heap_res;
 	uint64_t deleted, memfd, wx, sparse;
@@ -67,6 +67,19 @@ static void do_proc(uint32_t pid, uint64_t start, int verbose, uint32_t want,
 		if (r.flags & KOFA_RGF_WX)        t->wx++;
 		if (r.flags & KOFA_RGF_SPARSE)    t->sparse++;
 
+		/*
+		 * Pull the region through the chunk walk, which is what a
+		 * scanner would do: it is the only way to see what the engine
+		 * would actually be handed.
+		 */
+		if (r.use == KOFA_USE_CODE ||
+		    (r.flags & (KOFA_RGF_DELETED | KOFA_RGF_MEMFD))) {
+			struct kofa_chunk c;
+
+			while (kofa_pmem_next_chunk(m, &r, &c))
+				;
+		}
+
 		if (r.use == KOFA_USE_CODE) {
 			t->code_regions++;
 			t->code_virt += r.size;
@@ -96,6 +109,8 @@ static void do_proc(uint32_t pid, uint64_t start, int verbose, uint32_t want,
 	t->unmeasured += st.bytes_unmeasured;
 	t->measured += st.regions_measured;
 	t->read     += st.bytes_read;
+	t->zero     += st.bytes_zero;
+	t->chunks   += st.chunks;
 	t->pm_reads += st.pagemap_reads;
 	t->pm_failed += st.pagemap_failed;
 
@@ -182,22 +197,27 @@ int main(int argc, char **argv)
 	printf("regions reported   : %llu  (%llu filtered, %llu unexamined)\n",
 	       (unsigned long long)t.regions, (unsigned long long)t.filtered,
 	       (unsigned long long)t.skipped);
-	printf("  virtual          : %.1f MB\n", t.virt / 1048576.0);
+	printf("  virtual          : %.1f MB\n", (double)t.virt / 1048576.0);
 	printf("  RESIDENT         : %.1f MB  over %llu measured regions\n",
-	       t.res / 1048576.0, (unsigned long long)t.measured);
+	       (double)t.res / 1048576.0, (unsigned long long)t.measured);
 	printf("  unmeasured       : %.1f MB  (upper bound, %llu regions)\n",
-	       t.unmeasured / 1048576.0,
+	       (double)t.unmeasured / 1048576.0,
 	       (unsigned long long)(t.regions - t.measured));
 	printf("\n");
 	printf("unbacked code      : %llu regions, %.1f MB virt -> %.2f MB res\n",
-	       (unsigned long long)t.code_regions, t.code_virt / 1048576.0,
-	       t.code_res / 1048576.0);
+	       (unsigned long long)t.code_regions, (double)t.code_virt / 1048576.0,
+	       (double)t.code_res / 1048576.0);
 	printf("heap               : %llu regions, %.1f MB res\n",
-	       (unsigned long long)t.heap_regions, t.heap_res / 1048576.0);
+	       (unsigned long long)t.heap_regions, (double)t.heap_res / 1048576.0);
 	printf("deleted / memfd    : %llu / %llu\n",
 	       (unsigned long long)t.deleted, (unsigned long long)t.memfd);
 	printf("rwx / sparse       : %llu / %llu\n",
 	       (unsigned long long)t.wx, (unsigned long long)t.sparse);
+	printf("handed to a scanner: %.2f MB in %llu chunk(s)"
+	       "   (%.2f MB read, %.2f MB of it zero = %.1f%%)\n",
+	       (double)(t.read - t.zero) / 1048576.0, (unsigned long long)t.chunks,
+	       (double)t.read / 1048576.0, (double)t.zero / 1048576.0,
+	       t.read ? (double)t.zero * 100.0 / (double)t.read : 0.0);
 	printf("pagemap reads      : %llu  (%llu failed)\n",
 	       (unsigned long long)t.pm_reads,
 	       (unsigned long long)t.pm_failed);
