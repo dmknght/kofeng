@@ -287,6 +287,27 @@ enum kv_cap {
 	 * formatless bytes that may be some - never a container, whose members
 	 * come out by being read rather than by being run. */
 	KV_CAP_UNPACK,
+	/*
+	 * SHELLCODE COULD BE CARRIED HERE, so asking is worth offering.
+	 *
+	 * A CAPABILITY AND NOT A FINDING, which is the whole reason it is in
+	 * this table. "Find shellcode" used to be drawn only when a rule had
+	 * ALREADY reported some - so on the files it exists for, the row was
+	 * missing and a reader was told by its absence that there was nothing
+	 * to ask. That is backwards twice over: the menu is how somebody ASKS,
+	 * and a question that only appears once it has been answered is not a
+	 * question.
+	 *
+	 * So this says where shellcode can live - a native executable image -
+	 * and the action says what is actually there, including "nothing".
+	 *
+	 * NOT KOF_FMT_UNKNOWN, and that is the one difference from KV_CAP_CODE.
+	 * Formatless bytes may well BE shellcode, but then they are the answer
+	 * rather than the place to look for one: offering "find shellcode in
+	 * variables" on a peeled payload asks the reader to search a thing for
+	 * itself. Variables are a fact about a structured image.
+	 */
+	KV_CAP_SHELLCODE,
 	KV_CAP_COUNT
 };
 

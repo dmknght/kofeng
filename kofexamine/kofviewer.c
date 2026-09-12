@@ -12250,24 +12250,28 @@ static int findsc_target(const struct view *v)
 	/*
 	 * AND THE LOADER ITSELF, WHICH IS WHAT THE RULE ACTUALLY ANSWERED.
 	 *
-	 * The two tests above both ask about an EXTRACTED payload - a child
-	 * object that payload_tag() marked. That tag is the narrower fact by
-	 * some way: payload_tag requires the child to exist at all, to be ELF,
-	 * and to have the one-segment no-section shape of a reconstruction. So
-	 * on a file where the heuristic FOUND a loader and the unpacker did not
-	 * produce a child - or produced one this build does not recognise as a
-	 * reconstruction, or produced a PE - the menu went grey and the reader
-	 * was told there was nothing here, while the scan had already said
-	 * where the payload was.
+	 * THIS NO LONGER DECIDES WHETHER THE ROW IS DRAWN - kv_cap does, on the
+	 * format, so the item is offered on every executable image whether or
+	 * not anything was found. What is left here is the other half: WHAT THE
+	 * ACTION ANSWERS with.
 	 *
-	 * payload_at is that answer: the address bases/heur/scloader_00.c
-	 * reported through kof_debug("SCLoader.payload"). It is set on the
-	 * object the RULE fired on, at any depth and whatever the format, so
-	 * asking it is both wider than the tag and stricter than "this is an
-	 * executable" - the item appears exactly when something found a loader.
+	 * The two tests above both ask about an EXTRACTED payload - a child
+	 * object payload_tag() marked, which needs the child to exist, to be
+	 * ELF, and to have the one-segment no-section shape of a
+	 * reconstruction. When the heuristic found a loader and no such child
+	 * came out, the walk would fall through to -1 and the dialog would say
+	 * "No shellcode-like variable here" over a file where the scan had
+	 * already reported the address.
+	 *
+	 * payload_at is that address - what bases/heur/scloader_00.c reported
+	 * through kof_debug("SCLoader.payload"), set on the object the rule
+	 * fired on. Answering with it lets the handler print where and how big
+	 * instead; see the branch there that prints it rather than running
+	 * sc_kind() over the loader's own bytes, which would describe the
+	 * wrong thing confidently.
 	 *
 	 * LAST, so the extracted payload still wins when there is one: its
-	 * bytes are a better thing to show than an address inside the parent.
+	 * bytes are a better answer than an address inside the parent.
 	 */
 	if (v->obj[me].payload_at)
 		return (int)me;
@@ -12343,8 +12347,34 @@ static int bar_shown(struct view *v, int i)
 	}
 	case BI_UNPACKER:
 		return obj_maybe_code(cur_obj(v));
-	case BI_FINDSC:
-		return findsc_target(v) >= 0;
+	case BI_FINDSC: {
+		/*
+		 * DRAWN FOR EVERY EXECUTABLE IMAGE, whether or not a rule has
+		 * said anything. This is FORCE ANALYSIS: the reader asking is
+		 * the reason to look.
+		 *
+		 * IT USED TO ASK findsc_target(), AND THAT WAS THE BUG. That
+		 * walk answers about SCLoader - a payload in a global variable,
+		 * reported by address - which is one shape of loader and not
+		 * the common one. `msfvenom -f elf` emits a 250-byte ELF that
+		 * IS the shellcode, with no sections and no symbols; its
+		 * encoded variants emit a decoder whose payload an unpacker
+		 * produces as a child. Measured on this tree's samples:
+		 * seventeen produce such a child and none has a payload
+		 * symbol, so the row was missing on the entire family this
+		 * menu exists for.
+		 *
+		 * ASKED OF kv_cap AND NOT OF TWO ENUM VALUES HERE, because
+		 * "where can shellcode live" is a fact about the FORMAT and
+		 * belongs in the one table that already answers the other three
+		 * questions of that shape - see enum kv_cap. A format added
+		 * tomorrow gets its answer there, once, rather than from
+		 * whichever menu item remembered to list it.
+		 */
+		const struct object *o = cur_obj(v);
+
+		return o && kv_cap(o->ctx.format, KV_CAP_SHELLCODE);
+	}
 	default:
 		break;
 	}

@@ -372,10 +372,11 @@ int kv_cap(uint8_t format, int cap)
 	case KOF_FMT_ELF:
 	case KOF_FMT_PE:
 	case KOF_FMT_MACHO:
-		/* All three: an executable image has a symbol table, code at an
-		 * entry point, and is the thing a packer packs. */
+		/* All four: an executable image has a symbol table, code at an
+		 * entry point, is the thing a packer packs, and is where a
+		 * loader keeps the payload it will run. */
 		return cap == KV_CAP_SYMBOLS || cap == KV_CAP_CODE ||
-		       cap == KV_CAP_UNPACK;
+		       cap == KV_CAP_UNPACK || cap == KV_CAP_SHELLCODE;
 
 	case KOF_FMT_UNKNOWN:
 		/*
