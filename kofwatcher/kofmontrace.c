@@ -349,6 +349,7 @@ struct tracer {
 	struct kofa_fan          *fan;
 	const struct kof_mon_api *api;
 	pid_t                     kid, group;
+	uint32_t                  asked, granted;
 	uint64_t                  out_of_scope;
 	int                       running;
 	int                       unscoped;
@@ -395,6 +396,31 @@ static int tracer_open(struct tracer *t, unsigned providers, uint32_t ring)
 		}
 		t->api = kofa_fan_api(t->fan);
 		t->api->print_extra(t->api->self, stderr);
+
+		/*
+		 * WHAT THIS HOST CAN ACTUALLY DELIVER, worked out here so the
+		 * REFUSED line below can say the rest out loud.
+		 *
+		 * fanotify watches FILES. It has nothing to say about a
+		 * connection, a name lookup or a thread, and there is no
+		 * registry or AMSI to have an opinion about - so six of the
+		 * ten providers this tool offers can never arrive on Linux.
+		 * The banner used to announce all ten anyway, which is the
+		 * exact failure the note beside it warns about: a trace that
+		 * shows no network activity, truthfully, to somebody who
+		 * asked for network activity and was told they had it.
+		 *
+		 * FILE_WRITE AND IMAGE ARE PRIVILEGE-DEPENDENT. The full mask
+		 * carries FAN_CLOSE_WRITE and FAN_OPEN_EXEC; the unprivileged
+		 * fallback carries neither, so a degraded session reports
+		 * creates, deletes and renames and nothing else. See the mask
+		 * pair in afan.c.
+		 */
+		t->asked = providers;
+		t->granted = providers & TRACER_SUB_FILE;
+		if (kofa_fan_mode(t->fan) != KOFA_FAN_DEGRADED)
+			t->granted |= providers & (TRACER_SUB_FILE_WRITE |
+						   TRACER_SUB_IMAGE);
 		/*
 		 * NOTHING TO SCOPE BY, SAID OUT LOUD.
 		 *
@@ -640,11 +666,8 @@ static void tracer_subs(struct tracer *t, uint32_t *asked, uint32_t *enabled)
 	*asked = h.sub_asked;
 	*enabled = h.sub_enabled;
 #else
-	struct kof_evt_health nh;
-
-	t->api->health(t->api->self, &nh);
-	(void)nh;
-	*asked = *enabled = 1u;
+	*asked = t->asked;
+	*enabled = t->granted;
 #endif
 }
 
@@ -653,8 +676,19 @@ static const char *tracer_sub_name(uint32_t bit)
 #ifdef _WIN32
 	return kofw_sub_name(bit);
 #else
-	(void)bit;
-	return "events";
+	switch (bit) {
+	case TRACER_SUB_PROCESS:    return "process";
+	case TRACER_SUB_IMAGE:      return "image";
+	case TRACER_SUB_FILE:       return "file";
+	case TRACER_SUB_FILE_WRITE: return "file-write";
+	case TRACER_SUB_FILE_OPEN:  return "file-open";
+	case TRACER_SUB_NET:        return "net";
+	case TRACER_SUB_REGISTRY:   return "registry";
+	case TRACER_SUB_AMSI:       return "amsi";
+	case TRACER_SUB_DNS:        return "dns";
+	case TRACER_SUB_THREAD:     return "thread";
+	default:                    return "?";
+	}
 #endif
 }
 
@@ -1356,7 +1390,8 @@ int main(int argc, char **argv)
 		tracer_subs(&tr, &asked, &enabled);
 		missing = asked & ~enabled;
 		if (missing) {
-			fputs("kofmontrace: REFUSED by the provider:", stderr);
+			fputs("kofmontrace: NOT AVAILABLE on this host:",
+			      stderr);
 			for (b = 1u; b; b <<= 1)
 				if (missing & b)
 					fprintf(stderr, " %s",
