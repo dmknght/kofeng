@@ -234,6 +234,76 @@ int main(void)
 			koffridge_close(g);
 		}
 
+		/*
+		 * A NAME WITH NO NUL IN IT, which the file is allowed to
+		 * contain and a caller is not allowed to be handed.
+		 *
+		 * The file is a trust input - the header says so, and says the
+		 * checksum stops nobody who edits it deliberately. This
+		 * rewrites the entry's name field to 224 bytes of 'A',
+		 * recomputes the checksum the way anybody would, and loads it.
+		 * Before the fix that came back unterminated and kofmemscan
+		 * printed it with %s: AddressSanitizer called it a 225-byte
+		 * read past the end of the verdict.
+		 */
+		{
+			FILE *fp = fopen(path, "r+b");
+			long sz;
+			unsigned char *b;
+
+			if (fp) {
+				fseek(fp, 0, SEEK_END);
+				sz = ftell(fp);
+				fseek(fp, 0, SEEK_SET);
+				b = malloc((size_t)sz);
+				if (b && fread(b, 1, (size_t)sz, fp) ==
+				    (size_t)sz) {
+					unsigned hs = *(unsigned short *)(b + 6);
+					unsigned es = *(unsigned *)(b + 8);
+					unsigned ne = *(unsigned *)(b + 12);
+					unsigned long long h =
+						1469598103934665603ull;
+					unsigned char *e = b + hs;
+					long k;
+
+					/* name[] is the tail of every entry. */
+					for (k = 0; k < (long)ne; k++)
+						memset(e + (size_t)k * es +
+						       es - 224, 'A', 224);
+					for (k = 0; k < (long)ne * (long)es;
+					     k++) {
+						h ^= e[k];
+						h *= 1099511628211ull;
+					}
+					memcpy(b + 24, &h, 8);   /* sum */
+					fseek(fp, 0, SEEK_SET);
+					if (fwrite(b, 1, (size_t)sz, fp) !=
+					    (size_t)sz)
+						ck(0, "rewrite the fridge");
+				}
+				free(b);
+				fclose(fp);
+			}
+
+			g = koffridge_open(64, 0x2026090901ull);
+			if (g) {
+				ck(koffridge_load(g, path, &why) > 0,
+				   "a hand-edited file still loads");
+				if (koffridge_get(g, &key_a, sizeof key_a, &v)) {
+					size_t ln = 0;
+
+					while (ln < sizeof v.name &&
+					       v.name[ln])
+						ln++;
+					ck(ln < sizeof v.name,
+					   "and its name is NUL terminated");
+				} else {
+					ck(0, "the edited entry is there");
+				}
+				koffridge_close(g);
+			}
+		}
+
 		/* A missing file is the ordinary first run, not an error. */
 		g = koffridge_open(64, 0x2026090901ull);
 		if (g) {

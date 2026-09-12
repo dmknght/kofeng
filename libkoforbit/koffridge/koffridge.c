@@ -676,6 +676,23 @@ uint32_t koffridge_load(struct koffridge *f, const char *path,
 		if (!e)
 			continue;
 		e->v = buf[i].v;
+		/*
+		 * TERMINATE THE NAME, because nothing on this path has.
+		 *
+		 * koffridge_put does it on the way in - see the memcpy there -
+		 * and the load did not, so the two ways an entry enters the
+		 * table did not agree. A file whose name field holds 224 bytes
+		 * with no NUL is then handed to a caller that prints it with
+		 * %s, and kofmemscan does exactly that: confirmed with
+		 * AddressSanitizer as a 225-byte read past the end of the
+		 * verdict.
+		 *
+		 * The file is a TRUST INPUT and the header above says so: the
+		 * checksum catches a bad sector and stops nobody who edits the
+		 * file on purpose. So this is not about corruption, it is
+		 * about the case the threat model already admits.
+		 */
+		e->v.name[sizeof e->v.name - 1] = '\0';
 		e->used = 0;
 		got++;
 	}
