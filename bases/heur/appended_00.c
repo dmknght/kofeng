@@ -104,7 +104,8 @@ KOF_HEUR_PHASE(KOF_HEUR_EXAMINE);
 KOF_HEUR_NAME("Appended");
 
 /*
- * OPEN WHAT THIS OBJECT CARRIES, and KEEP the finding when it does.
+ * OPEN WHAT THIS OBJECT CARRIES, and KEEP the finding on the objects that make
+ * one.
  *
  * The first, because the run is windowed only when some loaded rule already
  * targets the format the child will turn out to have - and the point of this
@@ -112,9 +113,13 @@ KOF_HEUR_NAME("Appended");
  *
  * The second, because the engine drops a rule's heuristic once the object
  * produces children. That is right for a rule meaning "I could not identify
- * this" and wrong here: the child is an ordinary file that nothing fires on, so
- * the drop does not move the signal, it deletes it. Measured, before the bit
+ * this" and wrong for the verdict below, which is a statement about the
+ * PARENT: the child is an ordinary file that nothing fires on, so the drop
+ * would not move the signal, it would delete it. Measured, before the bit
  * existed: all three samples came back clean with the carried ELF extracted.
+ *
+ * It costs nothing on the objects that take the KOF_HEUR_ACT path, because
+ * there is no finding there to keep.
  */
 KOF_HEUR_WANT(KOF_ENG_OPEN_CARRIED | KOF_ENG_KEEP_ON_OPEN);
 
@@ -132,10 +137,55 @@ KOF_HEUR_WANT(KOF_ENG_OPEN_CARRIED | KOF_ENG_KEEP_ON_OPEN);
  */
 #define MIN_EIGHTHS (8u * 2u)
 
+/*
+ * WHERE IT STOPS BEING AMBIGUOUS, and the second measurement that decides it.
+ *
+ * Everything above finds an ELF with a file glued to it, which is a superb
+ * reason to CARVE and a bad reason to CONCLUDE - /usr/bin/arj carries its own
+ * ARJ_SFX stub that way, and so does every self-extracting archive ever
+ * shipped. A verdict on that shape alone is a false positive on a program
+ * doing exactly what its name says.
+ *
+ * A program with something glued on is a program. A file that is ninety
+ * percent glued-on is not a program carrying a payload, it is a payload
+ * carrying just enough ELF to be started - which is what a dropper IS. That is
+ * the line, and both numbers come from the measurement already recorded above
+ * rather than being invented for it:
+ *
+ *   THE SHARE, 90%.   "Tightened to 90% it is clean - 0 of 4526", the whole
+ *                     clean corpus with nothing over the bar. The same
+ *                     threshold finds 6 of 3775 malware objects, and every one
+ *                     of those six also has a run over a page - so it reaches
+ *                     past nothing this rule was not already looking at.
+ *
+ *   THE ENTROPY, 6.0. The unclaimed entropy of EVERY ONE of the 4526 clean
+ *                     objects is between 0 and 1 bit, so this term cannot cost
+ *                     a clean file whatever the share does. 569 of the 723
+ *                     malware runs clear 5.0, so 6.0 is a high bar rather than
+ *                     a nominal one.
+ *
+ * THE SHARE IS WORTHLESS ALONE and it is the conjunction that is empty on
+ * clean: ratio by itself was tried, found 187 clean objects over 40% and one
+ * at 82%, and was rejected - see the argument above.
+ *
+ * WHAT IT GIVES UP. The third sample this rule was written from is 45%
+ * unclaimed at 4.5 bits and does not clear this, so it no longer produces a
+ * statement about its wrapper. It is still reached - by the ELF carved out of
+ * it and scanned on its own, which is where the evidence actually is.
+ *
+ * [Unverified] How many of the 3775 malware objects clear BOTH terms has not
+ * been counted here, only bounded above by the 6 that clear the share. The
+ * clean side needs no new count: either term alone is already 0 of 4526.
+ */
+#define DOM_EIGHTHS (8u * 6u)
+#define DOM_NUM     9u
+#define DOM_DEN     10u
+
 KOF_DEFINE_HEUR
 {
 	const struct kof_elf_info *e = kof_elf(ctx);
 	struct kof_region_shape u;
+	uint32_t h;
 
 	if (!e || !e->valid)
 		return;
@@ -144,8 +194,20 @@ KOF_DEFINE_HEUR
 	if (u.widest < PAGE)
 		return;
 
-	if (kof_entropy_at(u.widest_off, u.widest) < MIN_EIGHTHS)
+	h = kof_entropy_at(u.widest_off, u.widest);
+	if (h < MIN_EIGHTHS)
 		return;
 
-	KOF_HEUR_HIT();
+	/*
+	 * MULTIPLIED RATHER THAN DIVIDED, so a small object cannot round its
+	 * way over the bar: obj_size is bounded by the scan's own ceiling,
+	 * well under where a multiply by nine matters.
+	 */
+	if (h >= DOM_EIGHTHS && ctx->obj_size &&
+	    u.bytes * DOM_DEN >= (uint64_t)ctx->obj_size * DOM_NUM)
+		KOF_HEUR_HIT();
+
+	/* Carve the passenger and say nothing. The verdict belongs to whatever
+	 * comes out, which the engine scans and names on its own. */
+	KOF_HEUR_ACT();
 }
