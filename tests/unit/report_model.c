@@ -37,6 +37,18 @@
 #include <string.h>
 #include <sys/stat.h>
 
+/*
+ * For rmdir, which the teardown below calls. Windows spells it _rmdir in
+ * <direct.h>; this test only ever ran there, which is why the include was
+ * missing and the Linux build failed on an implicit declaration.
+ */
+#ifdef _WIN32
+#include <direct.h>
+#define rmdir _rmdir
+#else
+#include <unistd.h>
+#endif
+
 #include "../../libkoforbit/kofreport/kofreport.h"
 #include "../../libkofeng/kofeng.h"
 

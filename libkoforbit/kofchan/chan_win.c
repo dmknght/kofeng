@@ -9,25 +9,25 @@
 
 #include <windows.h>
 
-#include "wchan.h"
+#include "kofchan.h"
 #include "kofevtlog.h"
 
 #define CHAN_CAP_MIN 1024u
 #define CHAN_CAP_MAX (1u << 20)
 
-struct kofw_chan_pub {
+struct kof_chan_pub {
 	HANDLE h_data, h_cur, h_wake;
-	struct kofw_chan_hdr    *hdr;
+	struct kof_chan_hdr    *hdr;
 	unsigned char           *rec;
-	struct kofw_chan_cursor *cur;
+	struct kof_chan_cursor *cur;
 	uint32_t capacity, rec_size;
 };
 
-struct kofw_chan_sub {
+struct kof_chan_sub {
 	HANDLE h_data, h_cur, h_wake;
-	const struct kofw_chan_hdr *hdr;
+	const struct kof_chan_hdr *hdr;
 	const unsigned char        *rec;
-	struct kofw_chan_cursor    *cur;
+	struct kof_chan_cursor    *cur;
 
 	/*
 	 * The same mapping as `hdr`, kept non-const for UnmapViewOfFile.
@@ -50,7 +50,7 @@ static int chan_names(const char *base, wchar_t *d, wchar_t *c, wchar_t *w,
 		      size_t cap)
 {
 	static const wchar_t pre[] = L"Local\\";
-	const char *b = (base && *base) ? base : KOFW_CHAN_NAME;
+	const char *b = (base && *base) ? base : KOF_CHAN_NAME;
 	wchar_t stem[192];
 	size_t i = 0, o = 0;
 
@@ -91,11 +91,11 @@ static uint32_t round_pow2(uint32_t v)
 
 /* ---------------------------------------------------------------- publish */
 
-struct kofw_chan_pub *kofw_chan_publish_open(const char *name,
+struct kof_chan_pub *kof_chan_publish_open(const char *name,
 					     uint32_t capacity)
 {
 	wchar_t nd[256], nc[256], nw[256];
-	struct kofw_chan_pub *p;
+	struct kof_chan_pub *p;
 	uint64_t bytes;
 	uint32_t cap = round_pow2(capacity ? capacity : 8192u);
 
@@ -107,7 +107,7 @@ struct kofw_chan_pub *kofw_chan_publish_open(const char *name,
 		return NULL;
 	p->capacity = cap;
 	p->rec_size = (uint32_t)sizeof(struct kof_evt);
-	bytes = sizeof(struct kofw_chan_hdr) +
+	bytes = sizeof(struct kof_chan_hdr) +
 		(uint64_t)cap * p->rec_size;
 
 	p->h_data = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL,
@@ -127,7 +127,7 @@ struct kofw_chan_pub *kofw_chan_publish_open(const char *name,
 
 	p->h_cur = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL,
 				      PAGE_READWRITE, 0,
-				      (DWORD)sizeof(struct kofw_chan_cursor),
+				      (DWORD)sizeof(struct kof_chan_cursor),
 				      nc);
 	if (!p->h_cur || GetLastError() == ERROR_ALREADY_EXISTS)
 		goto fail;
@@ -150,14 +150,14 @@ struct kofw_chan_pub *kofw_chan_publish_open(const char *name,
 	p->hdr->rec_kind  = KOFEVT_REC_KOF;
 	p->hdr->capacity  = cap;
 	p->hdr->pid       = GetCurrentProcessId();
-	p->hdr->version   = KOFW_CHAN_VERSION;
+	p->hdr->version   = KOF_CHAN_VERSION;
 	/*
 	 * The magic LAST, and with a release, so a subscriber that sees it sees
 	 * every field above it. Written first, a subscriber could attach to a
 	 * header whose capacity was still zero and index a ring of no slots.
 	 */
 	atomic_store_explicit((_Atomic uint32_t *)&p->hdr->magic,
-			      KOFW_CHAN_MAGIC, memory_order_release);
+			      KOF_CHAN_MAGIC, memory_order_release);
 	return p;
 
 fail:
@@ -170,7 +170,7 @@ fail:
 	return NULL;
 }
 
-int kofw_chan_publish(struct kofw_chan_pub *p, const struct kof_evt *e)
+int kof_chan_publish(struct kof_chan_pub *p, const struct kof_evt *e)
 {
 	uint32_t h, t, depth;
 
@@ -215,7 +215,7 @@ int kofw_chan_publish(struct kofw_chan_pub *p, const struct kof_evt *e)
 	return 0;
 }
 
-void kofw_chan_publish_close(struct kofw_chan_pub *p)
+void kof_chan_publish_close(struct kof_chan_pub *p)
 {
 	if (!p)
 		return;
@@ -234,10 +234,10 @@ void kofw_chan_publish_close(struct kofw_chan_pub *p)
 
 /* -------------------------------------------------------------- subscribe */
 
-struct kofw_chan_sub *kofw_chan_sub_open(const char *name, const char **why)
+struct kof_chan_sub *kof_chan_sub_open(const char *name, const char **why)
 {
 	wchar_t nd[256], nc[256], nw[256];
-	struct kofw_chan_sub *s;
+	struct kof_chan_sub *s;
 
 	if (why)
 		*why = "";
@@ -277,11 +277,11 @@ struct kofw_chan_sub *kofw_chan_sub_open(const char *name, const char **why)
 	}
 
 	if (atomic_load_explicit((_Atomic uint32_t *)s->hdr_raw,
-				 memory_order_acquire) != KOFW_CHAN_MAGIC) {
+				 memory_order_acquire) != KOF_CHAN_MAGIC) {
 		if (why) *why = "not a kofgrille channel";
 		goto fail;
 	}
-	if (s->hdr->version != KOFW_CHAN_VERSION) {
+	if (s->hdr->version != KOF_CHAN_VERSION) {
 		if (why) *why = "a channel version this build does not know";
 		goto fail;
 	}
@@ -317,12 +317,12 @@ fail:
 	return NULL;
 }
 
-const struct kofw_chan_hdr *kofw_chan_sub_header(const struct kofw_chan_sub *s)
+const struct kof_chan_hdr *kof_chan_sub_header(const struct kof_chan_sub *s)
 {
 	return s ? s->hdr : NULL;
 }
 
-int kofw_chan_next(struct kofw_chan_sub *s, struct kof_evt *out,
+int kof_chan_next(struct kof_chan_sub *s, struct kof_evt *out,
 		   uint32_t wait_ms)
 {
 	uint32_t left = wait_ms;
@@ -334,7 +334,7 @@ int kofw_chan_next(struct kofw_chan_sub *s, struct kof_evt *out,
 		uint32_t t = s->cur->tail;
 		uint32_t h = atomic_load_explicit(
 			(_Atomic uint32_t *)((unsigned char *)s->hdr_raw +
-				offsetof(struct kofw_chan_hdr, head)),
+				offsetof(struct kof_chan_hdr, head)),
 			memory_order_acquire);
 
 		if (h != t) {
@@ -383,7 +383,7 @@ int kofw_chan_next(struct kofw_chan_sub *s, struct kof_evt *out,
 	}
 }
 
-void kofw_chan_sub_close(struct kofw_chan_sub *s)
+void kof_chan_sub_close(struct kof_chan_sub *s)
 {
 	if (!s)
 		return;

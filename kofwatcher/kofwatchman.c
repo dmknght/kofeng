@@ -64,9 +64,16 @@
  * So the channel is compiled in where there is one, and where there is not the
  * recording path is the whole program. That is not a limitation to work
  * around: on a host with no sensor there is nothing live to attach to.
+ *
+ * THE TEST USED TO BE _WIN32 AND IS NOW WHETHER A BACKEND IS LINKED. When the
+ * channel lived in the Windows collector those were the same question; since
+ * it moved to libkoforbit/kofchan they are not, because chan_posix.c is a real
+ * backend on a real host. KOF_HAVE_CHAN is set by the build that links one -
+ * which is the difference between "this OS is Windows" and "this build can
+ * attach to a sensor", and only the second was ever what these sites meant.
  */
-#ifdef _WIN32
-#include "wchan.h"
+#ifdef KOF_HAVE_CHAN
+#include "kofchan.h"
 #endif
 
 /*
@@ -302,8 +309,8 @@ static int looks_openable(const char *p)
  */
 struct wm_source {
 	struct kofevt_log_r  *log;    /* a recording, or NULL */
-#ifdef _WIN32
-	struct kofw_chan_sub *chan;   /* the live sensor, or NULL */
+#ifdef KOF_HAVE_CHAN
+	struct kof_chan_sub *chan;   /* the live sensor, or NULL */
 #else
 	void                 *chan;   /* always NULL off Windows */
 #endif
@@ -323,9 +330,9 @@ struct wm_source {
  */
 static int source_next(struct wm_source *s, struct kof_evt *out)
 {
-#ifdef _WIN32
+#ifdef KOF_HAVE_CHAN
 	if (s->chan)
-		return kofw_chan_next(s->chan, out, 200u) ? 1 : -1;
+		return kof_chan_next(s->chan, out, 200u) ? 1 : -1;
 #endif
 	if (s->log)
 		return kofevt_log_read(s->log, out) ? 1 : 0;
@@ -334,9 +341,9 @@ static int source_next(struct wm_source *s, struct kof_evt *out)
 
 static void source_close(struct wm_source *s)
 {
-#ifdef _WIN32
+#ifdef KOF_HAVE_CHAN
 	if (s->chan)
-		kofw_chan_sub_close(s->chan);
+		kof_chan_sub_close(s->chan);
 #endif
 	if (s->log)
 		kofevt_log_free(s->log);
@@ -407,8 +414,8 @@ int main(int argc, char **argv)
 	 * this: watchman is the client, kofwatchtower is the server.
 	 */
 	if (!replay_path) {
-#ifdef _WIN32
-		src.chan = kofw_chan_sub_open(chan_name, &why);
+#ifdef KOF_HAVE_CHAN
+		src.chan = kof_chan_sub_open(chan_name, &why);
 #else
 		(void)chan_name;
 		why = "this build has no live channel - it is a Windows "
@@ -442,9 +449,9 @@ int main(int argc, char **argv)
 	 * whose provenance nobody stated is a verdict nobody can check.
 	 */
 	fputs("kofwatchman: connected to real-time protection\n", stderr);
-#ifdef _WIN32
+#ifdef KOF_HAVE_CHAN
 	if (src.chan) {
-		const struct kofw_chan_hdr *ch = kofw_chan_sub_header(src.chan);
+		const struct kof_chan_hdr *ch = kof_chan_sub_header(src.chan);
 
 		fprintf(stderr, "  source   live sensor, pid %lu\n",
 			(unsigned long)ch->pid);

@@ -322,6 +322,7 @@ const char *kof_evt_verb_name(uint16_t verb)
 	case KOF_EVT_AMSI_SCAN:     return "AmsiScan";
 	case KOF_EVT_CONT:          return "Cont";
 	case KOF_EVT_DNS_QUERY:     return "DnsQuery";
+	case KOF_EVT_PROC_INFO:     return "ProcInfo";
 	/* Capitalised like every other name in this table. These two were the
 	 * only lower-case ones, which showed wherever verbs sit in a column
 	 * beside each other - and it also put them last in any name ordering,

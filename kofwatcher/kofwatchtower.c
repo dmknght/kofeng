@@ -31,7 +31,7 @@
 #include "kofgrille.h"
 #include "kofevt.h"
 #include "kofevtfmt.h"
-#include "wchan.h"
+#include "kofchan.h"
 
 static volatile LONG g_stop;
 
@@ -129,7 +129,7 @@ int main(int argc, char **argv)
 	 * format.
 	 */
 	int      do_print = 0, show_health = 0;
-	struct kofw_chan_pub *chan = NULL;
+	struct kof_chan_pub *chan = NULL;
 	const char *chan_name = NULL;
 	struct kofw_filter filt;
 	int      err = 0, i;
@@ -254,7 +254,7 @@ int main(int argc, char **argv)
 	 * usual cause is a second sensor already publishing - which is refused
 	 * on purpose, two publishers on one ring interleave into it.
 	 */
-	chan = kofw_chan_publish_open(chan_name, opt.ring_capacity);
+	chan = kof_chan_publish_open(chan_name, opt.ring_capacity);
 	if (!chan) {
 		fputs("kofwatchtower: cannot publish a channel - another "
 		      "sensor may already be running\n", stderr);
@@ -311,7 +311,7 @@ int main(int argc, char **argv)
 		 * keeping up, which is counted in the channel header where the
 		 * subscriber can see it too.
 		 */
-		(void)kofw_chan_publish(chan, &ke);
+		(void)kof_chan_publish(chan, &ke);
 
 		/*
 		 * Counted always, printed only when asked - so a silent run and
@@ -346,7 +346,7 @@ tick:
 	 * nobody is watching is spending the machine's time on nothing - and
 	 * one running as a service has no console at all.
 	 */
-	kofw_chan_publish_close(chan);
+	kof_chan_publish_close(chan);
 
 	if (show_health) {
 		kofw_mon_health(mon, &health);

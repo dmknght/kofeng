@@ -1089,6 +1089,9 @@ KOFEVT_SRC := libkoforbit/kofevt/kofevt.c libkoforbit/kofevt/kofevtfmt.c \
 # what an answer is keyed on and how long it stays good are a host's policy.
 KOFRIDGE_SRC := libkoforbit/koffridge/koffridge.c
 
+# The process record builder, shared by both collectors - see kofproc.h.
+KOFPROC_SRC := libkoforbit/kofproc/kofproc.c
+
 # The report. Orbit for the same reason the cache is: it hashes artefacts and
 # asks the engine what they are, so it depends on libkofeng - and libkofeng
 # must be able to ship without knowing that anything called a report exists.
@@ -1159,10 +1162,21 @@ $(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
 # This is the same trap the note on `tools:` further down describes. It has now
 # caught two things in this file, so: anything referring to a variable the
 # Windows block sets must be deferred, or must be inside the block.
+#
+# ONE CONTRACT, TWO BACKENDS, AND THE HOST PICKS. Until the channel moved into
+# libkoforbit this was "Windows or nothing", because the only transport there
+# had was CreateFileMapping. chan_posix.c is a real one, so a Linux build now
+# attaches to a Linux sensor instead of being recording-only - which is the
+# whole thing the move was for.
+#
+# KOF_HAVE_CHAN is what the client tests. Not _WIN32: that asked which OS this
+# is, and what the code meant was whether a backend is linked.
 ifeq ($(NATIVE_OS),windows)
-WATCHMAN_CHAN = -Ilibkofgrille $(WINLIB) $(WIN_LDLIBS)
+WATCHMAN_CHAN = -DKOF_HAVE_CHAN -Ilibkoforbit/kofchan \
+                libkoforbit/kofchan/chan_win.c $(WINLIB) $(WIN_LDLIBS)
 else
-WATCHMAN_CHAN =
+WATCHMAN_CHAN = -DKOF_HAVE_CHAN -Ilibkoforbit/kofchan \
+                libkoforbit/kofchan/chan_posix.c -lrt
 endif
 
 $(OUT)/bin/kofwatchman$(EXE): kofwatcher/kofwatchman.c $(KOFEVT_SRC) $(LIB) \
@@ -1278,7 +1292,6 @@ WIN_SRC := libkofgrille/wevt_ring.c \
            libkofgrille/wcmdline.c \
            libkofgrille/wproc.c \
            libkofgrille/wtext.c \
-           libkofgrille/wchan.c \
            libkofgrille/wevt_decode.c \
            libkofgrille/wevt_etw.c
 
@@ -1329,11 +1342,17 @@ WIN_LDLIBS := -ltdh -ladvapi32 -lpsapi
 # the collector and nothing else, so it still cross-builds, which is what keeps
 # every line of libkofgrille type-checked on a host with no ETW.
 
-$(OUT)/bin/kofwatchtower$(WIN_EXE): kofwatcher/kofwatchtower.c $(WINLIB) $(STAMP)
+# The channel is no longer part of the collector: it moved to
+# libkoforbit/kofchan, which is one contract with two backends. The sensor
+# names the Windows one.
+$(OUT)/bin/kofwatchtower$(WIN_EXE): kofwatcher/kofwatchtower.c \
+                                    libkoforbit/kofchan/chan_win.c \
+                                    $(WINLIB) $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkoforbit/kofevt -Ikofwatcher \
-	      kofwatcher/kofwatchtower.c $(WINLIB) -o $@ \
-	      $(WIN_LDFLAGS) $(WIN_LDLIBS)
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkoforbit/kofevt \
+	      -Ilibkoforbit/kofchan -Ikofwatcher \
+	      kofwatcher/kofwatchtower.c libkoforbit/kofchan/chan_win.c \
+	      $(WINLIB) -o $@ $(WIN_LDFLAGS) $(WIN_LDLIBS)
 
 kofgrille: $(WINLIB)
 	$(info $(SP)  $<)
@@ -1575,6 +1594,13 @@ $(TEST)/unit_%$(EXE): tests/unit/%.c $(LIB) $(STAMP) | $(TEST)
 # needs the event record with it - see kof_inspect_event.
 # The verdict cache is not in the library either - it is orbit's - so the test
 # over it compiles that source the same way.
+# The process record builder is orbit's too, for the same reason, so the test
+# that drives a process end to end compiles it the same way.
+$(TEST)/unit_proc_rule$(EXE): tests/unit/proc_rule.c $(KOFPROC_SRC) $(LIB) \
+                              $(SDK_HDR) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkoforbit/kofproc -I$(SDK)/include \
+	      tests/unit/proc_rule.c $(KOFPROC_SRC) $(LIB) -o $@ $(LDFLAGS)
+
 $(TEST)/unit_fridge$(EXE): tests/unit/fridge.c $(KOFRIDGE_SRC) $(LIB) $(STAMP) \
                            | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) tests/unit/fridge.c $(KOFRIDGE_SRC) $(LIB) \
@@ -1593,8 +1619,23 @@ $(TEST)/unit_fridge$(EXE): tests/unit/fridge.c $(KOFRIDGE_SRC) $(LIB) $(STAMP) \
 # tested. These records are a recorded trace that never needed a machine.
 $(TEST)/unit_report_model$(EXE): tests/unit/report_model.c $(KOFREPORT_SRC) \
                                  $(KOFEVT_SRC) $(LIB) $(STAMP) | $(TEST)
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkoforbit/kofreport -Ilibkoforbit/kofevt \
-	      -Ilibkofeng -Ilibkofeng/core tests/unit/report_model.c \
+#
+# -D_GNU_SOURCE, AND IT IS NOT DECORATION.
+#
+# kofplatform.h reaches for memmem, lstat and realpath, and the report's own
+# source calls rmdir. None of those is declared under a bare -std=c11, so
+# without this the translation unit compiles them as implicit int and returns a
+# pointer made out of one - four errors that name three different files and say
+# nothing about the cause.
+#
+# It is on this target and not in CFLAGS because the library's own sources do
+# not need it; these are the only two orbit files compiled on a host, and this
+# is the only rule that compiles them here. Anything that later builds
+# libkoforbit/kofreport on Linux needs the same flag - which is the reason this
+# note is longer than the flag.
+	$(CC) $(CFLAGS) -D_GNU_SOURCE $(DEPTO) -Ilibkoforbit/kofreport \
+	      -Ilibkoforbit/kofevt -Ilibkofeng -Ilibkofeng/core \
+	      tests/unit/report_model.c \
 	      $(KOFREPORT_SRC) $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS)
 
 EDITOR_SRC := kofexamine/kofeditor.c kofexamine/kofinspect.c $(KOFEVT_SRC)
@@ -1613,7 +1654,10 @@ EDITOR_SRC := kofexamine/kofeditor.c kofexamine/kofinspect.c $(KOFEVT_SRC)
 # says which file did it. That is the whole enforcement mechanism, and it has
 # already caught one - kofw_evt_image() and kofw_evt_object() were in
 # wevt_decode.c, so wfilter.c could not link without the Windows half.
-# NOT wchan.c: it is a Windows transport and includes windows.h. This list is
+# The channel is not here either, and no longer could be: it left the collector
+# for libkoforbit/kofchan, where the neutral contract has a Windows backend and
+# a POSIX one. chan_posix.c is what this host can actually RUN, which the
+# Windows transport never was. This list is
 # exactly the files whose headers promise they call no OS API, and the promise
 # is worth what compiles it - a file added here that includes windows.h stops
 # the Linux build and names itself.

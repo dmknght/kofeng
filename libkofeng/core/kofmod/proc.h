@@ -132,16 +132,43 @@ struct kof_proc_rec {
 	uint16_t version;      /* KOF_PROC_REC_VERSION */
 	uint16_t head_len;     /* where the text arena starts */
 
+	/*
+	 * WHICH COLLECTOR FILLED THIS - enum kof_evt_platform, one byte.
+	 *
+	 * It is here so that a rule can be written for one platform, for the
+	 * other, or for both, and so that a second collector can fill this
+	 * record WITHOUT the engine changing. That is the whole point of the
+	 * field: libkofgrille and libkofantarc are meant to be developed in
+	 * parallel, and the first version of this struct had POSIX ids sitting
+	 * in the fixed head, which would have forced a core change the day a
+	 * Windows process was first handed over.
+	 *
+	 * The fields above and below are the ones BOTH platforms have. A
+	 * process has a pid, a parent, a start time, an image, a command line
+	 * and three standard streams on either system - a Windows reverse
+	 * shell puts a socket on cmd.exe's handles exactly as a Linux one puts
+	 * it on bash's. What differs goes in the per-platform tail, the way
+	 * kof_evt already keeps a union per verb rather than a flat head with
+	 * everybody's fields in it.
+	 */
+	uint8_t  os;
+	uint8_t  _pad0[3];
+
 	uint32_t pid;
 	uint32_t ppid;
-	uint64_t start_time;   /* field 22 of stat: what makes the pid mean one
-				* process rather than one slot */
-	uint32_t uid;
-	uint32_t gid;
+	uint64_t start_time;   /* Linux: field 22 of stat. Windows: the creation
+				* time. Either way it is what makes the pid name
+				* one process rather than one slot. */
 
-	uint32_t n_fd;         /* descriptors open */
-	uint32_t n_socket;     /* of those, sockets */
-	uint32_t n_like_stdin; /* of those, naming the same object as fd 0 */
+	/*
+	 * THE HANDLE TABLE, counted. Descriptors on Linux, handles on Windows;
+	 * the question "how many does it hold, how many are sockets, and how
+	 * many name the same object as its stdin" has the same meaning and the
+	 * same evidential weight on both.
+	 */
+	uint32_t n_fd;
+	uint32_t n_socket;
+	uint32_t n_like_stdin;
 
 	uint32_t flags;        /* KOF_PROC_F_* */
 
@@ -151,6 +178,31 @@ struct kof_proc_rec {
 	uint16_t off_fd0, off_fd1, off_fd2;
 	uint16_t total_len;    /* head_len + the arena */
 	uint16_t _pad;
+
+	/*
+	 * WHAT ONLY ONE PLATFORM HAS.
+	 *
+	 * Read it only after checking `os`. A union rather than both sets laid
+	 * flat, for the reason kof_evt gives about its own per-verb union: laid
+	 * flat, every record pays for every platform's fields, and a reader
+	 * that forgets to check which one it is holding gets four bytes of
+	 * somebody else's meaning rather than a value it must handle.
+	 */
+	union {
+		struct {
+			uint32_t uid;
+			uint32_t gid;
+		} linux_;
+		struct {
+			/* Session, and the integrity level a token carries.
+			 * Reserved: no Windows collector fills this yet, and
+			 * the space is here so that the one that does needs no
+			 * change to this file. */
+			uint32_t session_id;
+			uint32_t integrity;
+		} windows;
+		uint8_t _reserved[16];
+	} plat;
 };
 
 /*
@@ -168,9 +220,19 @@ struct kof_proc_info {
 
 	uint32_t pid, ppid;
 	uint64_t start_time;
-	uint32_t uid, gid;
 	uint32_t n_fd, n_socket, n_like_stdin;
 	uint32_t flags;        /* KOF_PROC_F_* , copied through */
+
+	/*
+	 * enum kof_evt_platform. A rule that applies to one platform tests
+	 * this; a rule about a shape both share - a shell holding one socket
+	 * on both ends of its stdio - does not, and should not.
+	 */
+	uint8_t  os;
+	uint8_t  _pad0[3];
+
+	/* The per-platform tail, already selected by `os`. */
+	uint32_t plat_a, plat_b;
 
 	/*
 	 * fd 0 AND fd 1 NAME THE SAME OBJECT.

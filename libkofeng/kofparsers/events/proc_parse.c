@@ -81,12 +81,19 @@ int kof_proc_parse(kof_buf b, void *view, struct kof_obj_ctx *ctx)
 	pi->pid          = r->pid;
 	pi->ppid         = r->ppid;
 	pi->start_time   = r->start_time;
-	pi->uid          = r->uid;
-	pi->gid          = r->gid;
+	pi->os           = r->os;
 	pi->n_fd         = r->n_fd;
 	pi->n_socket     = r->n_socket;
 	pi->n_like_stdin = r->n_like_stdin;
 	pi->flags        = r->flags;
+
+	/* The tail is two words whatever the platform; which two they are is
+	 * what `os` says. Copied rather than interpreted - a parser that knew
+	 * what a Windows integrity level meant would be a parser that has to
+	 * change when Windows adds one. */
+	memcpy(&pi->plat_a, &r->plat, sizeof pi->plat_a);
+	memcpy(&pi->plat_b, (const uint8_t *)&r->plat + sizeof pi->plat_a,
+	       sizeof pi->plat_b);
 
 	pi->off_exe     = r->off_exe;
 	pi->off_comm    = r->off_comm;
@@ -155,7 +162,31 @@ int kof_proc_parse(kof_buf b, void *view, struct kof_obj_ctx *ctx)
 	}
 
 	pi->valid = 1;
+
+	/*
+	 * THE PARSE SETS THE FORMAT, and the declared path relies on it.
+	 *
+	 * scan.c deliberately does NOT set ctx->format for a format that has a
+	 * parser: a declaration whose parse then refuses would otherwise leave
+	 * the id set and file_header NULL, and the first module reached for
+	 * that format would dereference nothing. So the id is the PARSER's to
+	 * grant, and forgetting it here is not a crash - it is silence. Every
+	 * rule targeting KOF_EVT_PROC simply never ran, and the object came
+	 * back clean.
+	 */
+	ctx->format = KOF_EVT_PROC;
 	ctx->obj_size = total;
+
+	/*
+	 * AND THE VIEW, which is what kof_proc(ctx) casts.
+	 *
+	 * Forgetting this is the same failure as forgetting the format and has
+	 * the same symptom: every rule ran, every rule found a NULL view, and
+	 * every rule returned without deciding. The scan reported two modules
+	 * examined and nothing found, which reads exactly like a database that
+	 * has nothing to say about this object.
+	 */
+	ctx->file_header = pi;
 	return 1;
 }
 
