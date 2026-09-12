@@ -19,6 +19,7 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
+#include <fcntl.h>
 #include <sys/wait.h>
 
 #include "aproc.h"
@@ -420,9 +421,21 @@ static void test_reverse_shell_shape(void)
 		return;
 	dup_kid = fork();
 	if (dup_kid == 0) {
-		/* ONE socket on both ends - the reverse shell. */
+		int f;
+
+		/*
+		 * ONE socket on all three - what `>&` produces. All three,
+		 * and every inherited descriptor closed, because that is the
+		 * shape being modelled: a fork+exec that leaves the test's own
+		 * descriptors open produces a child holding things no reverse
+		 * shell holds, and then STDIO_ONLY is correctly off and the
+		 * test is wrong rather than the library.
+		 */
 		dup2(sp[1], 0);
 		dup2(sp[1], 1);
+		dup2(sp[1], 2);
+		for (f = 3; f < 64; f++)
+			close(f);
 		execl("/bin/sh", "sh", "-c", "read x", (char *)NULL);
 		_exit(1);
 	}
@@ -433,10 +446,14 @@ static void test_reverse_shell_shape(void)
 	}
 	pair_kid = fork();
 	if (pair_kid == 0) {
+		int f;
+
 		/* TWO sockets, one per direction - an ordinary spawned
 		 * child. */
 		dup2(sp2[0], 0);
 		dup2(sp2[1], 1);
+		for (f = 3; f < 64; f++)
+			close(f);
 		execl("/bin/sh", "sh", "-c", "read x", (char *)NULL);
 		_exit(1);
 	}
@@ -455,6 +472,8 @@ static void test_reverse_shell_shape(void)
 			   "and the exe is recognised as a shell");
 			ok(!strcmp(p.fd_stdin, p.fd_stdout),
 			   "the raw links agree, so the flag can be checked");
+			ok((p.flags & KOFA_PF_STDIO_ONLY) != 0,
+			   "and it holds nothing but that socket");
 		} else {
 			ok(0, "found the dup'd-socket child");
 		}
@@ -475,6 +494,63 @@ static void test_reverse_shell_shape(void)
 	kill(dup_kid, 9); kill(pair_kid, 9);
 	waitpid(dup_kid, NULL, 0); waitpid(pair_kid, NULL, 0);
 	close(sp[0]); close(sp[1]); close(sp2[0]); close(sp2[1]);
+}
+
+/*
+ * STDIO_ONLY IS ABOUT HOLDING NOTHING ELSE, AND THIS IS THE CASE THAT SAYS SO.
+ *
+ * A child with the same socket on stdin and stdout - so SAME_SOCKET fires -
+ * but also holding one ordinary file open. A relay like netcat or socat is
+ * this shape and more: it keeps its listening socket as well as the accepted
+ * one. The flag has to stay off, or "it has only its stdio" means nothing.
+ */
+static void test_stdio_only_negative(void)
+{
+	int sp[2];
+	pid_t kid;
+
+	printf("\nSTDIO_ONLY is off when anything else is held:\n");
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp))
+		return;
+	kid = fork();
+	if (kid == 0) {
+		int f;
+
+		dup2(sp[1], 0);
+		dup2(sp[1], 1);
+		dup2(sp[1], 2);
+		for (f = 3; f < 64; f++)
+			close(f);
+		/* One extra descriptor on something that is not the socket -
+		 * which is the least a relay holds. */
+		if (open("/dev/null", O_RDONLY) < 0)
+			_exit(1);
+		execl("/bin/sh", "sh", "-c", "read x", (char *)NULL);
+		_exit(1);
+	}
+	usleep(250000);
+
+	{
+		struct kofa_plist *l;
+		struct kofa_proc p;
+		int err = 0;
+
+		l = kofa_plist_open(NULL, &err);
+		if (l && find_proc(l, kid, &p)) {
+			ok((p.flags & KOFA_PF_STDIO_SAME_SOCKET) != 0,
+			   "SAME_SOCKET still fires");
+			ok(!(p.flags & KOFA_PF_STDIO_ONLY),
+			   "STDIO_ONLY does not - it holds a file too");
+		} else {
+			ok(0, "found the child");
+		}
+		kofa_plist_close(l);
+	}
+
+	kill(kid, 9);
+	waitpid(kid, NULL, 0);
+	close(sp[0]); close(sp[1]);
 }
 
 /* A userland process wearing a kernel thread's name. */
@@ -527,6 +603,7 @@ int main(void)
 {
 	test_comm_trap();
 	test_reverse_shell_shape();
+	test_stdio_only_negative();
 	test_fake_kthread();
 	test_dirty_code();
 	test_prot_none();

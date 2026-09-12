@@ -290,7 +290,7 @@ static void a_read_fds(uint32_t pid, struct kofa_proc *out,
 	char path[64], link[KOFA_FDLINK_MAX];
 	DIR *d;
 	struct dirent *de;
-	int i;
+	int i, same = 1;
 
 	out->n_fd = 0;
 	out->n_socket = 0;
@@ -310,10 +310,15 @@ static void a_read_fds(uint32_t pid, struct kofa_proc *out,
 	}
 
 	/*
-	 * THE SAME SOCKET ON BOTH ENDS, which is the whole finding - see
-	 * KOFA_PF_STDIO_SAME_SOCKET. A string compare, because the kernel
-	 * writes the inode into the link and two descriptors on one object
-	 * therefore spell it identically.
+	 * THE SAME SOCKET ON fd 0 AND fd 1. A string compare, because the
+	 * kernel writes the inode into the link and two descriptors on one
+	 * object therefore spell it identically.
+	 *
+	 * THESE TWO DESCRIPTORS AND NO OTHERS. Widening it to any pair in the
+	 * table costs four false positives on this desktop alone - claude
+	 * keeps fd 7 on its stdout and fd 8 on its stderr, code keeps fd 30 on
+	 * fd 10 - and fd 1 against fd 2 is what every `2>&1` looks like. See
+	 * KOFA_PF_STDIO_SAME_SOCKET.
 	 */
 	if (!strncmp(std[0], "socket:", 7) && !strcmp(std[0], std[1]))
 		out->flags |= KOFA_PF_STDIO_SAME_SOCKET;
@@ -344,13 +349,29 @@ static void a_read_fds(uint32_t pid, struct kofa_proc *out,
 		out->n_fd++;
 
 		n = readlinkat(dirfd(d), de->d_name, link, sizeof link - 1);
-		if (n <= 0)
+		if (n <= 0) {
+			/* A descriptor that could not be read is a descriptor
+			 * this walk cannot vouch for, so it breaks the "every
+			 * one is the same object" claim below. */
+			same = 0;
 			continue;
+		}
 		link[n] = '\0';
 		if (!strncmp(link, "socket:", 7))
 			out->n_socket++;
+		if (strcmp(link, std[0]))
+			same = 0;
 	}
 	closedir(d);
+
+	/*
+	 * Nothing open but the one socket - see KOFA_PF_STDIO_ONLY. Requires
+	 * fd 0 to BE a socket, so a process holding only three copies of
+	 * /dev/null does not qualify, and requires at least one descriptor so
+	 * an empty or unreadable table is not read as "holds only this".
+	 */
+	if (same && out->n_fd > 0 && !strncmp(std[0], "socket:", 7))
+		out->flags |= KOFA_PF_STDIO_ONLY;
 }
 
 /*

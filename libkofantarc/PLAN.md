@@ -486,12 +486,56 @@ Quét toàn máy `stdin == stdout == socket`: **đúng 1 process, là reverse sh
 | cờ | ý nghĩa | FP trên desktop sạch |
 |---|---|---|
 | `KOFA_PF_STDIO_SOCKET` | bất kỳ fd 0/1/2 là socket | **8** — gần như vô dụng |
-| `KOFA_PF_STDIO_SAME_SOCKET` | stdin **và** stdout cùng một socket | **0** |
+| `KOFA_PF_STDIO_SAME_SOCKET` | **fd 0 và fd 1** cùng một socket | **0** |
+| `KOFA_PF_STDIO_ONLY` | **mọi** fd đều là cùng object với fd 0 | **0** |
 | `KOFA_PF_SHELL` | exe là sh/bash/dash/zsh/ksh/ash/busybox/fish/csh/tcsh/mksh | nhiều, chỉ là nửa thứ hai |
+
+### KHÔNG ĐƯỢC nới ra cả bảng fd — đo được 4 FP ngay
+
+Cám dỗ hiển nhiên là "hai fd bất kỳ dùng chung socket". Sai trên phần mềm
+thường, đo trên desktop này, không có gì độc đang chạy:
+
+```
+claude  fd 1 va fd 7 cung mot socket; fd 2 va fd 8 cung mot socket  (x3 process)
+code    fd 10 va fd 30 cung mot socket
+```
+
+Đó là chương trình giữ thêm handle cho stdout/stderr của chính nó — bình thường.
+Cũng không được dùng fd 1 vs fd 2: đó là hình dạng của mọi `2>&1` trong mọi script.
+**Neo vào đúng fd 0 và fd 1.**
+
+### "Chỉ 3 fd" — đúng ý, sai con số
+
+`bash -i >& /dev/tcp/...` có **4 fd, không phải 3**:
+
+```
+fd 0 -> socket:[14908548]
+fd 1 -> socket:[14908548]
+fd 2 -> socket:[14908548]
+fd 255 -> socket:[14908548]     <- ban sao terminal cho job control cua bash
+```
+
+dash/sh có 3, bash có 4, shell khác có thể 5 — một con số ở đây là mã hoá "rule
+này viết cho shell nào". `KOFA_PF_STDIO_ONLY` viết thành **thuộc tính**: *mọi*
+fd đều trỏ tới cùng object với fd 0. Đúng với tất cả, và tự động **không** bắt
+netcat/ncat/socat vì relay giữ ít nhất listening socket + accepted socket — fd
+của nó không phải một object. Đó là chủ ý: tool relay là hình dạng khác, cần
+luật khác.
 
 `fd_stdin` / `fd_stdout` / `fd_stderr` được trả về **nguyên văn** bên cạnh cờ,
 theo cùng lý do `kofa_region` giữ `path` cạnh phân loại: cờ là quyết định có
 thể sai, chuỗi thô là thứ duy nhất cho phép kiểm chứng.
+
+### Heur này chỉ cover COMMON CASE, không phải coverage
+
+Ghi rõ trong header: không bắt shell được nối bằng dup2 sang fd rời; không bắt
+netcat/ncat/socat (relay, fd không phải một object); không bắt cái đã nâng lên
+pty; không bắt payload re-exec rồi sắp xếp lại fd; không bắt socket nhận qua
+SCM_RIGHTS. **Một lượt quét im lặng nghĩa là hình dạng này vắng mặt, không có
+nghĩa là sạch.**
+
+Và kể cả khi bắn cũng không phải verdict: service kiểu inetd được đưa một socket
+làm stdio có đúng hình dạng này và đang làm đúng việc của nó.
 
 ### `KOFA_PF_STDIO_SAME_TTY` — đã thu, nhưng CẨN THẬN
 

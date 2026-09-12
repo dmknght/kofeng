@@ -157,7 +157,7 @@ int main(int argc, char **argv)
 				       KOFA_PF_EXE_UNLINKED |
 				       KOFA_PF_FAKE_KTHREAD |
 				       KOFA_PF_STDIO_SAME_SOCKET)) {
-				printf("  ! pid %-7u %-14s%s%s%s%s%s\n",
+				printf("  ! pid %-7u %-14s%s%s%s%s%s%s\n",
 				       p.pid, p.comm,
 				       (p.flags & KOFA_PF_EXE_MEMFD)
 					       ? " MEMFD" : "",
@@ -168,7 +168,9 @@ int main(int argc, char **argv)
 				       (p.flags & KOFA_PF_STDIO_SAME_SOCKET)
 					       ? " SAME-SOCKET" : "",
 				       (p.flags & KOFA_PF_SHELL)
-					       ? " SHELL" : "");
+					       ? " SHELL" : "",
+				       (p.flags & KOFA_PF_STDIO_ONLY)
+					       ? " STDIO-ONLY" : "");
 				printf("      exe %s\n", p.exe);
 				printf("      cmd %.110s\n", p.cmdline);
 				printf("      fd0 %s\n      fd1 %s\n",
