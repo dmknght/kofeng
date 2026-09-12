@@ -621,6 +621,15 @@ struct object {
 	 */
 	uint32_t          proc_path;
 	/*
+	 * THE MARKER PASS HAS BEEN RUN ON THIS OBJECT.
+	 *
+	 * Its own flag and not `n_touch != 0`, because "no marker of any rule
+	 * is in these bytes" is a real answer and a common one - a heap page
+	 * usually has none - and treating it as "not asked yet" would re-run
+	 * the search over the same megabytes on every selection.
+	 */
+	uint8_t           touched;
+	/*
 	 * WHICH VARIABLE IT CAME OUT OF, and what was wrapped round it.
 	 *
 	 * Kept on the child rather than left in its name: the name says what

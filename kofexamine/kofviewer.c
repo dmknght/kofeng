@@ -2137,6 +2137,32 @@ static const char *base_name(const char *p);
  * Guards against a pathological process rather than budgets anybody measured -
  * the same honesty the collector's own ceilings are written with.
  */
+/* Defined with the input loop; the status line ages a message with it and the
+ * process collection below bounds itself with it. */
+static uint64_t now_ms(void);
+
+/*
+ * AND A CLOCK, WHICH THE BYTE BUDGETS ARE NOT A SUBSTITUTE FOR.
+ *
+ * The budgets bound how MUCH is read; they say nothing about how long reading
+ * it takes. Measured here: a 350 MB python with 162 mappings takes 6.3 seconds
+ * to open, all of it before the first frame is drawn, because every anonymous
+ * region is copied out of the other process and run through the engine. A
+ * browser tab with thousands of mappings is minutes of that, and a viewer that
+ * draws nothing for minutes is a viewer that has hung - there is no way for the
+ * reader to tell the difference, and no way to stop it.
+ *
+ * So the collection stops taking new items after this, and says how many it
+ * left. Three seconds is long enough that an ordinary process finishes whole -
+ * the sleep and the python above both do - and short enough that the worst case
+ * is a page that opens and tells you it is incomplete rather than one that
+ * never opens at all.
+ *
+ * STOPPED AND COUNTED, not truncated: what was collected was collected in full,
+ * and the count is the honest statement that there was more.
+ */
+#define PROC_COLLECT_MS  3000u
+
 #define PROC_FILE_MAX    (64ull * 1024ull * 1024ull)
 #define PROC_FILE_BUDGET (512ull * 1024ull * 1024ull)
 
@@ -2164,6 +2190,7 @@ static void proc_collect(struct view *v, kof_engine *eng, uint32_t pid)
 	kof_scanner *sc;
 	uint32_t     pids[1];
 	int          err = 0;
+	uint64_t     t0;
 
 	memset(&opt, 0, sizeof opt);
 	opt.all_matches = 1;
@@ -2187,6 +2214,7 @@ static void proc_collect(struct view *v, kof_engine *eng, uint32_t pid)
 		kof_scanner_free(sc);
 		return;
 	}
+	t0 = now_ms();
 	if (w->next_proc(w->self, &b)) {
 		/*
 		 * The record first, as the object the file would have been.
@@ -2201,6 +2229,16 @@ static void proc_collect(struct view *v, kof_engine *eng, uint32_t pid)
 
 		while (w->next_item(w->self, &it)) {
 			char nm[KOF_DUMP_PATH_ROOM];
+
+			/*
+			 * Out of time. Every remaining item is counted so the
+			 * panel can say the list is short, and the ones
+			 * already taken are whole.
+			 */
+			if (now_ms() - t0 > PROC_COLLECT_MS) {
+				v->proc_skipped++;
+				continue;
+			}
 
 			/*
 			 * THE FILES BEHIND THE MAPPINGS ARE OBJECTS TOO - the
@@ -2827,9 +2865,14 @@ static void payload_tag(struct view *v, uint32_t at)
  * node and it produces more. Re-examining the earlier ones would allocate a
  * second view for each and leak the first.
  */
+/* `eng` is the view's, taken as an argument only so the two call sites read
+ * the same; nothing here needs it since the marker pass moved to
+ * object_touch. */
 static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 {
 	uint32_t i;
+
+	(void)eng;
 
 	for (i = from; i < v->n_obj; i++) {
 		struct object *o = &v->obj[i];
@@ -2879,11 +2922,17 @@ static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 		    (o->ctx.format == KOF_FMT_ELF ||
 		     o->ctx.format == KOF_FMT_PE))
 			sym_build(o);
-		if (eng &&
-		    !kof_touch_object(eng, o->buf, &o->ctx, o->fmt,
-				      o->finding, o->n_finding,
-				      &o->touch, &o->n_touch))
-			o->n_touch = 0;
+		/*
+		 * THE MARKER PASS IS NOT DONE HERE - see object_touch.
+		 *
+		 * It searches the object for every marker in the database, and
+		 * it was the whole cost of opening a process: measured at 330
+		 * ms per megabyte, 6.8 of the 6.9 seconds a 350 MB python took
+		 * to open, over fifty objects of which the reader looks at one.
+		 * Collecting that process takes 90 ms; this was the rest, and
+		 * it was spent before the first frame was drawn on forty-nine
+		 * objects nobody had asked about yet.
+		 */
 		payload_tag(v, i);
 	}
 }
@@ -2902,6 +2951,35 @@ static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
  * selection is past the end, which hit_kind already reads as "light nothing" -
  * so an unlit pane means no rule matched, and a lit one means one did.
  */
+/*
+ * The marker pass, for one object, once.
+ *
+ * "Which of the database's markers are in these bytes, and for the rules that
+ * did not fire, why" - the question the markers list and the status line ask,
+ * and both ask it about the object the reader is LOOKING at. So it is answered
+ * when that object is selected rather than for every object a view collected:
+ * a file view has one object and notices nothing, and a process view has fifty
+ * and opens in a tenth of the time.
+ *
+ * Idempotent: the flag is the record that it ran, so selecting back and forth
+ * between two rows searches each of them once.
+ */
+static void object_touch(struct view *v, uint32_t at)
+{
+	struct object *o;
+
+	if (at >= v->n_obj)
+		return;
+	o = &v->obj[at];
+	if (o->touched || !v->eng || !o->buf.p || !o->buf.n)
+		return;
+	o->touched = 1;
+	if (!kof_touch_object(v->eng, o->buf, &o->ctx, o->fmt,
+			      o->finding, o->n_finding,
+			      &o->touch, &o->n_touch))
+		o->n_touch = 0;
+}
+
 static uint32_t touch_default(const struct object *ob)
 {
 	uint32_t i;
@@ -4987,6 +5065,7 @@ static void evt_load(struct view *v)
 					 * this one, because it had no bytes
 					 * when that pass ran.
 					 */
+					c->touched = 1;
 					if (!kof_touch_object(v->eng, c->buf,
 							      &c->ctx, c->fmt,
 							      c->finding,
@@ -5038,8 +5117,13 @@ static void evt_load(struct view *v)
 
 static void view_select(struct view *v)
 {
-	struct object *o = cur_obj(v);
+	struct object *o;
 	uint32_t i;
+
+	/* Before anything reads o->touch: this is the one place every path
+	 * that changes the selection goes through. */
+	object_touch(v, v->node[v->sel_node].obj);
+	o = cur_obj(v);
 
 	/* The one UI fact the model is told - see kof_editor.cur. */
 	v->ed.cur = v->node[v->sel_node].obj;
@@ -5214,8 +5298,11 @@ static void goto_node(struct view *v, uint32_t k)
 	 * another region makes them about different ones. */
 	v->dis_have = 0;
 	v->dragging = 0;
-	if (v->node[k].obj != was)
+	if (v->node[k].obj != was) {
+		/* touch_default reads the list, so the list has to exist. */
+		object_touch(v, v->node[k].obj);
 		v->sel_touch = touch_default(&v->obj[v->node[k].obj]);
+	}
 	view_select(v);
 }
 
@@ -5413,16 +5500,39 @@ static const char *tree_colour(const struct view *v, const struct node *n)
 	return ob->n_finding ? A_HIT1 : A_BOLD;
 }
 
+/*
+ * WHICH NODE THE TREE LAST SCROLLED ITSELF TO.
+ *
+ * The panel used to pull itself back to the selection on every frame, which is
+ * right when the selection MOVED and wrong when the reader moved the panel: a
+ * wheel that scrolls and a draw that scrolls back is a panel that does not
+ * scroll at all. Snapping only when this disagrees with sel_node keeps the
+ * arrow keys and a click on a marker bringing their row into view, and leaves
+ * the wheel alone.
+ */
+static uint32_t g_tree_followed = 0xffffffffu;
+
 static void draw_tree(struct out *o, struct view *v)
 {
 	int top = hex_top(), bot = hex_bot();
 	int rows = bot - top + 1;
 	uint32_t i;
 
-	if (v->sel_node < v->tree_top)
-		v->tree_top = v->sel_node;
-	if (rows > 0 && v->sel_node >= v->tree_top + (uint32_t)rows)
-		v->tree_top = v->sel_node - (uint32_t)rows + 1;
+	if (v->sel_node != g_tree_followed) {
+		g_tree_followed = v->sel_node;
+		if (v->sel_node < v->tree_top)
+			v->tree_top = v->sel_node;
+		if (rows > 0 && v->sel_node >= v->tree_top + (uint32_t)rows)
+			v->tree_top = v->sel_node - (uint32_t)rows + 1;
+	}
+	/* Never past the end, whichever moved it - a tree that shrank under a
+	 * scrolled panel would otherwise draw a page of blanks. */
+	if (rows > 0 && v->n_node > (uint32_t)rows) {
+		if (v->tree_top > v->n_node - (uint32_t)rows)
+			v->tree_top = v->n_node - (uint32_t)rows;
+	} else {
+		v->tree_top = 0;
+	}
 
 	for (i = 0; (int)i < rows; i++) {
 		uint32_t k = v->tree_top + i;
@@ -5905,9 +6015,6 @@ static void touch_name(const struct kof_touch *t, char *out, size_t cap)
 		snprintf(out + at, cap - at, " (%u matchers)", t->n_names);
 	}
 }
-
-/* Defined with the input loop; the status line needs it to age a message. */
-static uint64_t now_ms(void);
 
 static const char *touch_colour(const struct kof_touch *t)
 {
@@ -13700,6 +13807,24 @@ static int      g_prop_tab_wid[PROP_TAB_COUNT];
 static int      g_prop_tab_cx[PROP_TAB_COUNT][PROP_TAB_COLS];
 static int      g_prop_tab_cw[PROP_TAB_COUNT][PROP_TAB_COLS];
 static int      g_prop_tab_ncol[PROP_TAB_COUNT];
+/*
+ * THE TABLE'S LEFT AND RIGHT EDGE, and whether it has anywhere to scroll.
+ *
+ * A wheel over a table scrolls the table - but "over" was answered by the ROW
+ * alone, and the page is far wider than any table. Everything to the right of
+ * a table, all the way to the border, is a row of that table by that test, so
+ * the wheel in the empty half of the page went to a widget the pointer was
+ * nowhere near.
+ *
+ * And a table with nothing to scroll swallowed it anyway: the offset moved and
+ * the draw clamped it straight back, so the page did not move and neither did
+ * the table. That is the "sometimes it works" - it worked below the last table,
+ * where no table claimed the row, and nowhere else.
+ */
+static int      g_prop_tab_x0[PROP_TAB_COUNT];
+static int      g_prop_tab_x1[PROP_TAB_COUNT];
+static int      g_prop_tab_scroll_v[PROP_TAB_COUNT];
+static int      g_prop_tab_scroll_h[PROP_TAB_COUNT];
 
 /*
  * Which table the pointer is over, or -1.
@@ -13709,9 +13834,10 @@ static int      g_prop_tab_ncol[PROP_TAB_COUNT];
  * offset of the page is taken off here rather than being baked into what was
  * recorded, so one number moves both.
  */
-static int prop_tab_at(const struct view *v, int row)
+static int prop_tab_at(const struct view *v, int row, int col)
 {
 	int rr = row - v->dlg_y0;
+	int cc = col - v->dlg_x0;
 	int i, r;
 
 	/*
@@ -13728,7 +13854,8 @@ static int prop_tab_at(const struct view *v, int row)
 
 	for (i = 0; i < PROP_TAB_COUNT; i++)
 		if (g_prop_tab_rows[i] > 0 && r >= g_prop_tab_row0[i] &&
-		    r < g_prop_tab_row0[i] + g_prop_tab_rows[i])
+		    r < g_prop_tab_row0[i] + g_prop_tab_rows[i] &&
+		    cc >= g_prop_tab_x0[i] && cc <= g_prop_tab_x1[i])
 			return i;
 	return -1;
 }
@@ -13745,7 +13872,7 @@ static int prop_tab_at(const struct view *v, int row)
 static int prop_cell_span(const struct view *v, int row, int col,
 			  int *c0, int *c1)
 {
-	int id = prop_tab_at(v, row);
+	int id = prop_tab_at(v, row, col);
 	int k;
 
 	if (id < 0)
@@ -13878,6 +14005,7 @@ static void prop_table(const struct prop_table *t)
 		 * framed and an unframed table's columns lined up. */
 		int x = 2 + 11 + 1 + 1;
 
+		g_prop_tab_x0[t->id] = x - 1;   /* the wall, or the blank */
 		for (k = 0; k < t->n_col && k < PROP_TAB_COLS; k++) {
 			int w = t->width[k] ? t->width[k] : 24;
 
@@ -13886,6 +14014,20 @@ static void prop_table(const struct prop_table *t)
 			x += w + 1;
 		}
 		g_prop_tab_ncol[t->id] = (int)t->n_col;
+		/* Up to and including the right wall, which is where the
+		 * scrollbar is - a wheel on the bar is a wheel on the table. */
+		g_prop_tab_x1[t->id] = x;
+		/*
+		 * WHAT THIS TABLE CAN ACTUALLY DO WITH A WHEEL. Sideways is a
+		 * property of the declaration and downwards of the data, and a
+		 * table that can do neither has to let the wheel past or the
+		 * page stops scrolling wherever a table happens to be.
+		 */
+		g_prop_tab_scroll_v[t->id] = t->n_row > t->visible;
+		g_prop_tab_scroll_h[t->id] = 0;
+		for (k = 0; k < t->n_col && k < PROP_TAB_COLS; k++)
+			if (t->hscroll[k])
+				g_prop_tab_scroll_h[t->id] = 1;
 	}
 
 	shown = t->n_row - off;
@@ -14175,6 +14317,20 @@ static void prop_proc(const struct view *v, const struct object *ob)
 			 (unsigned long)pi->n_socket);
 	else
 		prop_add(A_DIM "  %-11s not readable" A_OFF, "fds");
+
+	/*
+	 * WHAT WAS NOT COLLECTED, WHERE THE THINGS THAT WERE ARE LISTED.
+	 *
+	 * The tables below are a list of what this process has, and a list
+	 * that quietly stops is read as the whole of it. Saying the number
+	 * here turns "these are its mappings" into "these are the ones that
+	 * were taken", which is the true statement and the one a reader needs
+	 * before concluding a library is absent.
+	 */
+	if (v->proc_skipped)
+		prop_add(A_WARN "  %-11s %lu mapping(s) not collected" A_OFF
+			 A_DIM " - too large, or past the time this may take"
+			 A_OFF, "partial", (unsigned long)v->proc_skipped);
 
 	/*
 	 * The three shapes the rules key on, said in words. A reader looking
@@ -15609,6 +15765,10 @@ static void prop_put(struct out *o, const char *s, int room, int sa, int sb)
  * how far a page can scroll is a fact about the box and the caller does not
  * know the box until this has drawn it.
  */
+/* Narrower than this and the title, the close control and the position on the
+ * bottom rule stop fitting on their own rows. */
+#define PAGE_MIN_W 60
+
 static void page_draw(struct out *o, struct view *v, struct page *p)
 {
 	static const char close[] = "[ Close ]";
@@ -15618,16 +15778,41 @@ static void page_draw(struct out *o, struct view *v, struct page *p)
 
 	p->btn_y = -1;
 	if (p->full) {
+		/*
+		 * FULL HEIGHT, BUT ONLY AS WIDE AS IT HAS ANYTHING TO SAY.
+		 *
+		 * The page is a column of label/value rows about a hundred
+		 * columns wide at most; on a wide terminal the rest was empty
+		 * box - half a screen of border round nothing, which reads as
+		 * a page that failed to fill itself rather than as a page that
+		 * is this wide. The height still fills, because the whole
+		 * point of `full` is that the sections below the fold are the
+		 * ones a reader has to go looking for.
+		 */
 		p->top = 2;
-		p->left = 2;
-		p->w = g_cols - 4;
+		p->w = PAGE_MIN_W;
+		for (k = 0; k < p->n; k++) {
+			int len = vis_cols(p->line[k].text) + 4;
+
+			if (len > p->w)
+				p->w = len;
+		}
+		if (p->w > g_cols - 4)
+			p->w = g_cols - 4;
+		/* Centred, now that it is not the width of the screen: a box
+		 * pinned to the left with a screen's worth of gap on the right
+		 * reads as a box that failed to fill rather than one that is
+		 * this wide. */
+		p->left = (g_cols - p->w) / 2;
+		if (p->left < 2)
+			p->left = 2;
 		p->h = g_rows - 3;
 	} else {
 		int maxrows = g_rows - 8, want;
 
 		if (maxrows < 3)
 			maxrows = 3;
-		p->w = 60;
+		p->w = PAGE_MIN_W;
 		for (k = 0; k < p->n; k++) {
 			int len = vis_cols(p->line[k].text) + 4;
 
@@ -20604,8 +20789,16 @@ static int handle_prop_key(struct view *v, int k)
 			 * anywhere else, and the arrows and PgUp always mean
 			 * the page - so nothing that worked stops working.
 			 */
-			int t = prop_tab_at(v, g_my);
+			int t = prop_tab_at(v, g_my, g_mx);
 
+			/*
+			 * ONLY IF IT CAN MOVE. A table with fewer rows than it
+			 * shows has no scroll to take, and taking the wheel
+			 * anyway left the page stuck under it.
+			 */
+			if (t >= 0 && !(g_mod_shift ? g_prop_tab_scroll_h[t]
+						    : g_prop_tab_scroll_v[t]))
+				t = -1;
 			if (t >= 0) {
 				/*
 				 * SHIFT MEANS SIDEWAYS, which is the gesture
@@ -21217,7 +21410,7 @@ static void on_release(struct view *v)
  */
 static void on_wheel(struct view *v, int k)
 {
-		int down = k == K_WHEEL_DOWN, n;
+		int down = k == K_WHEEL_DOWN;
 
 		/*
 		 * The dialog first, wherever the pointer is.
@@ -21378,9 +21571,28 @@ static void on_wheel(struct view *v, int k)
 			}
 		} else if (g_mx <= TREE_W && g_my >= hex_top() &&
 			   g_my <= hex_bot()) {
-			for (n = 0; n < 3; n++)
-				goto_node(v, down ? v->sel_node + 1u
-						  : v->sel_node - 1u);
+			/*
+			 * THE WHEEL SCROLLS THE PANEL. IT DOES NOT SELECT.
+			 *
+			 * It used to step the selection - three objects per
+			 * notch - so looking down a process with sixty mapped
+			 * libraries meant opening and parsing every one of
+			 * them on the way past, and whatever was being read in
+			 * the hex pane was gone. A wheel is how you LOOK
+			 * somewhere else; a click is how you go there. Every
+			 * other panel in this tool already draws that line.
+			 */
+			int rows = hex_bot() - hex_top() + 1;
+			uint32_t max = (rows > 0 &&
+					v->n_node > (uint32_t)rows)
+				       ? v->n_node - (uint32_t)rows : 0u;
+
+			if (down)
+				v->tree_top = v->tree_top + 3u > max
+					      ? max : v->tree_top + 3u;
+			else
+				v->tree_top = v->tree_top > 3u
+					      ? v->tree_top - 3u : 0u;
 		} else if (g_decl_rows && g_my > decl_top() &&
 			   g_my < mark_row()) {
 			/* The draft grows past its pane long before the object
@@ -21896,6 +22108,18 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 
 	if (v->eng)
 		proc_collect(v, v->eng, pid);
+	/*
+	 * SAID ON THE STATUS LINE AS WELL AS ON THE PAGE. A short list is only
+	 * misleading while nobody knows it is short, and the page is two
+	 * keystrokes away - this is the line a reader is already looking at.
+	 */
+	if (v->proc_skipped) {
+		v->act_ok = 0;
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "pid %lu: %lu mapping(s) not collected - too large, "
+			 "or past the time this may take",
+			 (unsigned long)pid, (unsigned long)v->proc_skipped);
+	}
 	if (!v->n_obj) {
 		struct object *o = &v->obj[0];
 
