@@ -794,7 +794,6 @@ help:
 	$(info $(SP)  kofwatchman   verdicts over a recorded event log)
 	$(info $(SP)  kofwatchtower the event sensor)
 	$(info $(SP)  kofmontrace   run a program and trace it)
-	$(info $(SP)  kofmemscan    scan the memory of running processes (Windows only))
 	$(info $(SP)  tools         all six of the above)
 	$(info $(SP)  databases     compile bases/ into the shipping databases)
 	$(info $(SP)                                                 -> $(OUT)/databases)
@@ -1075,22 +1074,47 @@ SCANNER_SRC := kofscanner/kofscanner.c
 # DEFERRED, NOT IMMEDIATE, and the file says why a few hundred lines up: a
 # variable referring to one the blocks BELOW set must be `=` or it expands to
 # nothing here. ANTARC_SRC and KOFPROC_SRC are defined after this rule.
+#
+# THE WALK IS THE ONLY THING THAT DIFFERS, and it is one file each.
+#
+# libkofantarc/awalk.c and libkofgrille/wwalk.c both define kof_walk_open; a
+# host compiles exactly one of them and kofscanner.c is #ifdef-free for it. The
+# collector sources come along because the walk calls them.
+#
+# NEITHER WALK IS IN ITS LIBRARY'S ARCHIVE. Both call engine code - wwalk.c
+# un-maps a PE - and the archives are linked by tools that have no engine in
+# them. Compiled into the scanner instead, where the engine already is.
 ifeq ($(NATIVE_OS),windows)
-SCANNER_EXTRA =
-SCANNER_INC   =
+SCANNER_EXTRA = libkofgrille/wwalk.c libkofgrille/wproc.c \
+                libkofgrille/wcmdline.c libkofgrille/wtext.c \
+                $(KOFPROC_SRC) $(KOFRIDGE_SRC) $(KOFEVT_SRC)
+SCANNER_INC   = -Ilibkofgrille -Ilibkoforbit/kofevt -Ilibkoforbit/kofmon \
+                -Ilibkoforbit/kofproc -Ilibkoforbit/koffridge \
+                -Ilibkoforbit/kofwalk
+#
+# NAMED HERE, NOT INHERITED. wproc.c enumerates modules through psapi and reads
+# a token through advapi32, and this is the first rule outside the collector's
+# own block that links it. $(WIN_LDLIBS) would have been the tempting thing to
+# reach for and it is set hundreds of lines below, inside the cross-build
+# guard - so it would expand to nothing here and the link would fail naming
+# two symbols instead of the missing flag. See the note beside kofmemscan's
+# old rule for the last time that happened.
+SCANNER_LIBS  = -ladvapi32 -lpsapi
 else
 SCANNER_EXTRA = $(ANTARC_SRC) libkofantarc/awalk.c $(KOFPROC_SRC) \
                 $(KOFRIDGE_SRC) $(KOFEVT_SRC)
 SCANNER_INC   = -Ilibkofantarc -Ilibkoforbit/kofevt -Ilibkoforbit/kofmon \
                 -Ilibkoforbit/kofproc -Ilibkoforbit/koffridge \
                 -Ilibkoforbit/kofwalk
+SCANNER_LIBS  =
 endif
 
 $(OUT)/bin/kofscanner$(EXE): $(SCANNER_SRC) $(SCANNER_EXTRA) $(LIB) \
                              $(SDK_HDR) $(STAMP)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(SCANNER_INC) \
-	      $(SCANNER_SRC) $(SCANNER_EXTRA) $(LIB) -o $@ $(LDFLAGS)
+	      $(SCANNER_SRC) $(SCANNER_EXTRA) $(LIB) -o $@ $(LDFLAGS) \
+	      $(SCANNER_LIBS)
 
 # --------------------------------------------------------------- the examiner
 #
@@ -1230,37 +1254,16 @@ kofwatchman: $(OUT)/bin/kofwatchman$(EXE)
 	@$(NOOP)
 
 #
-# kofmemscan: THE ENGINE AND THE SNAPSHOT IN ONE PROGRAM, so Windows only.
+# kofmemscan WAS HERE, and it is gone rather than renamed.
 #
-# It is the first tool that needs both halves - libkofgrille to find what is
-# mapped, libkofeng to say what it is - and it is built with the NATIVE
-# compiler rather than the cross one, because it has to run on the machine it is
-# inspecting. That is why it appears here beside kofwatchman and not in the
-# cross-build block: the cross block produces binaries for a Windows host, and
-# this one is only ever built ON that host.
+# It was the engine and the snapshot in one program: walk the processes, read
+# what is mapped, scan it. `kofscanner --scan-procs` is now that same program
+# on both platforms, and the decisions kofmemscan held - which regions are
+# worth reading, how runs group back into allocations, when a mapped image has
+# to be un-mapped first - moved into libkofgrille/wwalk.c, beside the Linux
+# answers in libkofantarc/awalk.c. Two tools holding one set of decisions is
+# how the two drift apart.
 #
-# $(WINLIB) comes in through WATCHMAN_CHAN, which is empty off Windows - so this
-# rule exists everywhere and the target below is only offered where it links.
-#
-# -Ilibkofgrille IS NAMED HERE, and that is the point rather than a detail. It
-# used to arrive through WATCHMAN_CHAN, which is the variable that says how this
-# host talks to a sensor - so the include path for wproc.h was riding on a
-# variable about something else entirely. The day the channel moved into
-# libkoforbit that flag went with it and this tool stopped compiling, while a
-# binary from the previous build sat in build/release/bin looking like it had
-# worked. A prerequisite that is real is cheaper stated than inherited.
-$(OUT)/bin/kofmemscan$(EXE): kofwatcher/kofmemscan.c $(KOFRIDGE_SRC) $(LIB) \
-                             $(SDK_HDR) $(STAMP)
-	@$(call MKDIR,$(dir $@))
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofeng -Ilibkofeng/kofparsers \
-	      -Ilibkofgrille \
-	      -Ilibkoforbit/koffridge -Ilibkoforbit/kofevt $< \
-	      $(KOFRIDGE_SRC) $(LIB) -o $@ $(LDFLAGS) $(WATCHMAN_CHAN)
-
-kofmemscan: $(OUT)/bin/kofmemscan$(EXE)
-	$(info $(SP)  $<)
-	@$(NOOP)
-
 # kofmontrace is built like this one and for the same reason - it links the
 # engine now - but its rule cannot live here: the target name needs $(WIN_EXE)
 # and $(WINLIB), which the Windows block sets hundreds of lines BELOW. See the
@@ -1386,7 +1389,7 @@ WIN_LDLIBS := -ltdh -ladvapi32 -lpsapi
 # event, the tally, the health lines.
 #
 # ONLY THE SENSOR IS BUILT HERE NOW. kofmontrace grew a dependency on the
-# engine and moved up beside kofmemscan, which is where the tools that link
+# engine and moved up beside kofwatchman, which is where the tools that link
 # both halves live - see the note there for what that cost. The sensor links
 # the collector and nothing else, so it still cross-builds, which is what keeps
 # every line of libkofgrille type-checked on a host with no ETW.
@@ -1426,7 +1429,7 @@ kofgrille: $(WINLIB)
 # expands a rule's prerequisites when it READS the rule, hundreds of lines
 # above this, where none of these variables are set yet.
 ifeq ($(NATIVE_OS),windows)
-tools: kofwatchtower kofmontrace kofmemscan
+tools: kofwatchtower kofmontrace
 
 #
 # kofmontrace: OUT OF THE CROSS BUILD, AND IT COST SOMETHING.
@@ -1438,13 +1441,13 @@ tools: kofwatchtower kofmontrace kofmemscan
 # - and $(LIB) is built by $(CC) for the host, so a cross-build would hand a
 # Linux archive to a mingw linker.
 #
-# So it is native, like kofmemscan: engine and collector in one binary, built
+# So it is native, like kofscanner: engine and collector in one binary, built
 # only on the machine it runs on. What is lost is the cross type-check for
 # THIS FILE. kofwatchtower stays above and still covers every line of
 # libkofgrille, which is where the platform actually lives.
 #
 # AND IT IS HERE, INSIDE THIS ifeq, FOR THE REASON THE NOTE ABOVE GIVES ABOUT
-# `tools`. Placed up beside kofmemscan it expanded $(WIN_EXE) to NOTHING -
+# `tools`. Placed up beside kofwatchman it expanded $(WIN_EXE) to NOTHING -
 # make expands a rule's target and prerequisites when it READS them, and
 # WIN_EXE is set in this block. The rule then existed for a target called
 # `kofmontrace` with no extension, `make kofmontrace` found the real .exe

@@ -82,6 +82,32 @@ struct kof_walk_item {
 	uint64_t    addr;
 	const void *p;
 	uint64_t    len;
+
+	/*
+	 * WHAT THE BYTES CANNOT SAY ABOUT THEMSELVES, for KOF_WALK_BYTES.
+	 * Zero when there is nothing to declare, which is the ordinary case
+	 * and what a memset gives.
+	 *
+	 * THIS EXISTS BECAUSE OF ONE FACT THAT IS SILENT WHEN IT IS WRONG. An
+	 * executable image a loader mapped states its file offsets and its
+	 * virtual addresses in the same section table, and which pair is
+	 * correct depends on how the bytes were obtained - which the bytes
+	 * themselves do not record. Resolve them from the wrong pair and every
+	 * scan region points at another section's bytes: no error, no anomaly,
+	 * and no rule matches. The walk read the memory, so the walk is the
+	 * only thing that knows, and this is how it says so.
+	 *
+	 * The fields are kof_scan_option's own - `as_format` and the view
+	 * behind it - and a caller copies them straight across. They are typed
+	 * as a byte and a blob HERE on purpose: this header names no format
+	 * and no platform, so a Windows walk declaring a mapped PE and a Linux
+	 * walk declaring nothing need no vocabulary in common.
+	 *
+	 * `as_view` is borrowed on the same terms as `p`.
+	 */
+	uint8_t     as_format;
+	const void *as_view;
+	uint32_t    as_view_len;
 };
 
 /*

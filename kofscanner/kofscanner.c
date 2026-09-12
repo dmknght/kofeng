@@ -547,9 +547,22 @@ static void usage(const char *argv0)
 {
 	fprintf(stderr,
 		"usage: %s --db <dir-or-blob> --scan-files <path> [options]\n"
+		"       %s --db <dir-or-blob> --scan-procs [options]\n"
 		"\n"
 		"  --db            module database: a directory of them, or one blob\n"
 		"  --scan-files    file to scan, or directory to scan recursively\n"
+		"  --scan-procs    scan what is RUNNING instead of what is on the\n"
+		"                  disk: every process this user may open, its own\n"
+		"                  record, the files behind its mappings, and the\n"
+		"                  executable memory no file holds\n"
+		"  --pid N         only this process; repeatable, up to 64. Not a\n"
+		"                  filter over the table - the walk opens only what\n"
+		"                  was named, which is the point when something else\n"
+		"                  already decided a process is interesting\n"
+		"  --cache-file F  carry the verdict cache between runs in F. Caching\n"
+		"                  within a run is always on and has no flag; this\n"
+		"                  makes it outlive the run, and whoever can write F\n"
+		"                  decides what this scanner calls clean\n"
 		"  --max-depth N   directory depth limit\n"
 		"  --object-depth N  how deep to descend INSIDE a file: an\n"
 		"                  archive's entries, a dropper's payload. 0 is\n"
@@ -584,7 +597,7 @@ static void usage(const char *argv0)
 		"  -v              also report objects that came back clean\n"
 		"\n"
 		"exit: 0 nothing found, 1 something found, 2 could not scan\n",
-		argv0);
+		argv0, argv0);
 }
 
 /*
@@ -794,12 +807,27 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 			if (it.kind == KOF_WALK_FILE) {
 				ps_file(&p, it.path);
 			} else if (it.kind == KOF_WALK_BYTES) {
+				struct kof_scan_option bo = *opt;
 				char nm[320];
 
 				snprintf(nm, sizeof nm, "%s//%016llx", who,
 					 (unsigned long long)it.addr);
+				/*
+				 * WHAT THE WALK KNOWS AND THE BYTES DO NOT -
+				 * copied straight across, never interpreted
+				 * here. On Linux nothing is declared and this
+				 * is three zero assignments; on Windows it is
+				 * what stops every region of a loader-mapped
+				 * PE resolving to another section's bytes.
+				 * See kof_walk_item.as_format.
+				 */
+				if (it.as_format) {
+					bo.as_format   = it.as_format;
+					bo.as_view     = it.as_view;
+					bo.as_view_len = it.as_view_len;
+				}
 				(void)kof_scan_bytes(sc, it.p, it.len, nm,
-						     opt, on_object, r);
+						     &bo, on_object, r);
 				p.chunks++;
 				p.chunk_bytes += it.len;
 			}
@@ -854,7 +882,6 @@ int main(int argc, char **argv)
 	/* The file-level tallies, computed from the per-file map for the summary
 	 * and read again by the exit code after the map is gone. */
 	uint64_t inf_f = 0, sus_f = 0, broken_objs = 0;
-#ifndef _WIN32
 	/*
 	 * WHERE THE VERDICT CACHE IS KEPT BETWEEN RUNS, or NULL.
 	 *
@@ -875,7 +902,6 @@ int main(int argc, char **argv)
 	const char *cache_path = NULL;
 	uint32_t pids[64];
 	uint32_t n_pids = 0;
-#endif
 	int i, rc;
 	/*
 	 * What --emu asked for, held back until every argument has been read.
@@ -982,7 +1008,6 @@ int main(int argc, char **argv)
 			}
 			jobs = (unsigned)v;
 		}
-#ifndef _WIN32
 		else if (strcmp(argv[i], "--scan-procs") == 0)
 			want_procs = 1;
 		else if (strcmp(argv[i], "--cache-file") == 0 && i + 1 < argc)
@@ -1001,7 +1026,6 @@ int main(int argc, char **argv)
 				i++;
 			want_procs = 1;
 		}
-#endif
 		else if (strcmp(argv[i], "--stats") == 0)
 			r.stats = 1;
 		else if (strcmp(argv[i], "-v") == 0)
@@ -1027,12 +1051,8 @@ int main(int argc, char **argv)
 			opt.emu_forbidden = 1;
 	}
 
-#ifdef _WIN32
-	if (!db || !target) {
-#else
 	/* --scan-procs names its own target: what is running. */
 	if (!db || (!target && !want_procs)) {
-#endif
 		usage(argv[0]);
 		return 2;
 	}
@@ -1135,7 +1155,6 @@ int main(int argc, char **argv)
 	r.color = isatty(1) ? 1 : 0;
 
 	clock_gettime(CLOCK_MONOTONIC, &t0);
-#ifndef _WIN32
 	/*
 	 * WHAT IS RUNNING, rather than what is on the disk. A different
 	 * source of bytes and the same scan - see scan_procs.
@@ -1148,9 +1167,7 @@ int main(int argc, char **argv)
 		/* The cache is only true of one database - see koffridge.h. */
 		rc = scan_procs(&r, sc, &opt, dv.build, cache_path,
 				pids, n_pids);
-	} else
-#endif
-	if (jobs > 1)
+	} else if (jobs > 1)
 		rc = kof_scan_path_mt(scs, jobs, target, &opt, on_object, &r);
 	else
 		rc = kof_scan_path(sc, target, &opt, on_object, &r);
