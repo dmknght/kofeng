@@ -24,7 +24,7 @@
 #include "kofeng.h"
 #include "kofmod/proc.h"
 #include "kofproc.h"
-#include "../../libkofeng/kofparsers/events/proc_parse.h"
+#include "../../libkofeng/kofparsers/processes/proc_parse.h"
 
 static int failures;
 

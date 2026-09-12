@@ -13,7 +13,7 @@
 #include "containers/rtf_parse.h"
 #include "containers/pdf_parse.h"
 #include "events/amsi_parse.h"
-#include "events/proc_parse.h"
+#include "processes/proc_parse.h"
 
 /*
  * Each parser takes its own view type; the table takes one signature. The casts
@@ -211,7 +211,7 @@ static const struct kof_parser formats[] = {
 	/*
 	 * A PROCESS SNAPSHOT. Like the row above it this never sniffs and is
 	 * reached only through kof_parser_of(KOF_EVT_PROC), by a caller that
-	 * built the record. See events/proc_parse.h.
+	 * built the record. See processes/proc_parse.h.
 	 */
 	{ KOF_EVT_PROC, (uint32_t)sizeof(struct kof_proc_info),
 	  kof_proc_sniff, proc_parse_thunk,
