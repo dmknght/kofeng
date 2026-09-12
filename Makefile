@@ -1092,6 +1092,22 @@ KOFRIDGE_SRC := libkoforbit/koffridge/koffridge.c
 # The process record builder, shared by both collectors - see kofproc.h.
 KOFPROC_SRC := libkoforbit/kofproc/kofproc.c
 
+#
+# THE LINUX COLLECTOR. Both halves: the snapshot walk over /proc and the
+# fanotify stream. It is the mirror of libkofgrille and builds only on Linux,
+# the way that one builds only for Windows - a collector is the one part of
+# this tree that cannot be platform-neutral, which is why everything it hands
+# over is.
+ANTARC_SRC := libkofantarc/aproc.c \
+              libkofantarc/apagemap.c \
+              libkofantarc/afan.c
+
+ifeq ($(NATIVE_OS),windows)
+ANTARC_INC :=
+else
+ANTARC_INC := -Ilibkofantarc -Ilibkoforbit/kofevt -Ilibkoforbit/kofmon
+endif
+
 # The report. Orbit for the same reason the cache is: it hashes artefacts and
 # asks the engine what they are, so it depends on libkofeng - and libkofeng
 # must be able to ship without knowing that anything called a report exists.
@@ -1876,3 +1892,20 @@ clean:
 .PHONY: all sdk sigs databases unit fixtures test-sigs clean \
         kofscanner kofexamine ksigbuilder kofviewer kofgrille kofwatchtower kofwatchman \
         kofmontrace tools help
+
+#
+# THE LINUX COLLECTOR'S OWN TESTS.
+#
+# They fork, write files in a scratch directory and read the events back, so
+# they need the collector's sources rather than the library - libkofantarc is
+# not in $(LIB), for the same reason libkofgrille is not: a collector belongs
+# to one platform and the engine belongs to neither.
+#
+# THEY RUN UNPRIVILEGED, AND THAT IS THE POINT. fanotify's unprivileged mode
+# reports dirent events and hides the actor - see afan.h - which is useless as
+# a sensor and is exactly enough to exercise the event walk, the name assembly,
+# the verb mapping and the record. A CI has no root and this still tests.
+$(TEST)/unit_antarc_fan$(EXE): tests/unit/antarc_fan.c $(ANTARC_SRC) \
+                               $(KOFEVT_SRC) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) $(ANTARC_INC) tests/unit/antarc_fan.c \
+	      $(ANTARC_SRC) $(KOFEVT_SRC) -o $@ $(LDFLAGS)
