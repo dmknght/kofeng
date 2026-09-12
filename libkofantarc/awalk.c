@@ -66,6 +66,8 @@ static void to_build(const struct kofa_proc *p, struct kof_proc_build *b)
 	b->exe = p->exe;
 	b->comm = p->comm;
 	b->cmdline = p->cmdline;
+	b->environ = p->environ;
+	b->net = p->net;
 	b->fd0 = p->fd_stdin;
 	b->fd1 = p->fd_stdout;
 	b->fd2 = p->fd_stderr;
@@ -139,10 +141,38 @@ static int open_mem_for(struct awalk *w, const struct kofa_proc *p)
 	 * running a browser, and an object with no bytes is a row that opens
 	 * onto an empty pane.
 	 */
-	if (w->o.intent == KOF_WALK_MAP)
+	if (w->o.intent == KOF_WALK_MAP) {
 		po.want = KOFA_MW_DEFAULT | KOFA_MW_HEAP;
-	else
+		/*
+		 * AND A CEILING, BECAUSE MAP TOOK THE ONE THAT SCAN HAD.
+		 *
+		 * EXEC_ONLY is what kept the scan path small: a program's
+		 * executable memory is megabytes whatever else it is holding.
+		 * Dropping it to show the heap drops that bound with it, and
+		 * nothing else was set - w->sweep is zeroed, and zero means NO
+		 * LIMIT. A process with a gigabyte of heap was therefore read
+		 * in full, scanned in full by every module, and then spilled
+		 * to a temporary file by the caller keeping it. Three
+		 * expensive things, none of them bounded, on a tool that shows
+		 * twenty rows at a time.
+		 *
+		 * 64MB per region matches W_MAX_SPAN in wwalk.c so the two
+		 * platforms cut at the same place. 512MB for the process is
+		 * the same kind of number: a guard against a pathological
+		 * address space, not a budget anybody measured - the header's
+		 * own words about the defaults it replaces, and still true.
+		 *
+		 * What is cut is REPORTED: a region over the ceiling comes
+		 * back flagged KOFA_RGF_UNEXAMINED and the sweep counts the
+		 * bytes it refused, so a caller can say what it did not look
+		 * at instead of implying it looked at everything.
+		 */
+		po.max_region = 64ull * 1024ull * 1024ull;
+		if (!w->sweep.max_bytes)
+			w->sweep.max_bytes = 512ull * 1024ull * 1024ull;
+	} else {
 		po.want = KOFA_MW_DEFAULT | KOFA_MW_EXEC_ONLY;
+	}
 	po.sweep = &w->sweep;
 
 	w->mem = kofa_pmem_open(p->pid, p->start_time, &po, &err);

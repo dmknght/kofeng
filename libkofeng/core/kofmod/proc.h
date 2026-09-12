@@ -36,7 +36,10 @@
 #include <kofmod/kofsig.h>
 
 #define KOF_PROC_REC_MAGIC   0x434f5250u   /* "PROC", little-endian */
-#define KOF_PROC_REC_VERSION 1u
+/* 2: the arena gained the environment between the command line and the
+ * descriptors - see off_environ. The parse refuses a version it does not
+ * know, so an old record never reads as a new one. */
+#define KOF_PROC_REC_VERSION 3u
 #define KOF_PROC_INFO_VERSION 1
 
 /*
@@ -74,6 +77,31 @@ enum kof_scan_proc {
 	KOF_SCAN_PROC_CMDLINE = 1u << 2,
 
 	/*
+	 * THE ENVIRONMENT IT WAS STARTED WITH, NULs already spaces.
+	 *
+	 * Attacker-controlled text like the command line, and reached by the
+	 * same searching: LD_PRELOAD naming a path nobody shipped, a payload
+	 * passed in a variable precisely to keep it off the command line where
+	 * everybody looks.
+	 *
+	 * THE INITIAL BLOCK, NOT THE LIVE ONE. The kernel exposes what the
+	 * process was started with; setenv afterwards changes the process's
+	 * own copy and not this. A rule keyed here is making a claim about how
+	 * the process was LAUNCHED.
+	 */
+	KOF_SCAN_PROC_ENV = 1u << 4,
+
+	/*
+	 * WHO IT IS TALKING TO: one line per connection, joined from the
+	 * process's own network namespace.
+	 *
+	 * Worth searching for the address itself - a signature naming a
+	 * command-and-control host matches here and nowhere else in a process
+	 * record - and worth showing whatever a rule does with it.
+	 */
+	KOF_SCAN_PROC_NET = 1u << 5,
+
+	/*
 	 * WHAT ITS STANDARD DESCRIPTORS POINT AT: the three link targets
 	 * verbatim - "socket:[14899490]", "/dev/pts/3", "pipe:[123]".
 	 *
@@ -109,10 +137,13 @@ enum kof_scan_proc {
  * where a reader wants them. Not being a scan region is a statement about
  * what a SIGNATURE can target, not about what is worth knowing.
  */
-#define KOF_SCAN_PROC_CLAIMED (KOF_SCAN_PROC_CMDLINE)
+#define KOF_SCAN_PROC_CLAIMED \
+	(KOF_SCAN_PROC_CMDLINE | KOF_SCAN_PROC_ENV | KOF_SCAN_PROC_NET)
 
 #define KOF_SCAN_PROC_LIST(X) \
-	X(KOF_SCAN_PROC_CMDLINE)
+	X(KOF_SCAN_PROC_CMDLINE)  \
+	X(KOF_SCAN_PROC_ENV)      \
+	X(KOF_SCAN_PROC_NET)
 
 /*
  * WHAT THE COLLECTOR OBSERVED AND COULD NOT INFER - the flags half.
@@ -197,6 +228,15 @@ struct kof_proc_rec {
 	/* Offsets into the record, from its start. Zero means absent - the
 	 * head is never at zero, so zero cannot be a real string offset. */
 	uint16_t off_exe, off_comm, off_cmdline;
+	/*
+	 * THE ENVIRONMENT, written between the command line and the
+	 * descriptors so the arena stays in region order - see the partition
+	 * in proc_parse.c, which takes its boundaries from these offsets
+	 * rather than assuming them.
+	 */
+	uint16_t off_environ;
+	/* After the environment, before the descriptors - region order. */
+	uint16_t off_net;
 	uint16_t off_fd0, off_fd1, off_fd2;
 	uint16_t total_len;    /* head_len + the arena */
 	uint16_t _pad;
@@ -291,7 +331,13 @@ struct kof_proc_info {
 	/* Where the arena's strings are, for a rule that wants to scope a
 	 * search rather than read a scalar. */
 	uint32_t off_exe, off_comm, off_cmdline, off_fd0;
+	/* Appended, not inserted: a field added at the TAIL cannot move the
+	 * ones a database compiled earlier reads by offset. */
+	uint32_t off_env;
+	uint32_t off_net;
 	uint32_t len_meta, len_cmdline, len_fd;
+	uint32_t len_env;
+	uint32_t len_net;
 };
 
 /*

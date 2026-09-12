@@ -316,6 +316,44 @@ struct kofa_proc {
 	const char *cmdline;
 
 	/*
+	 * THE ENVIRONMENT, NULs turned into spaces exactly like the command
+	 * line above, and "" when it could not be read.
+	 *
+	 * WORTH READING FOR THE SAME REASON THE COMMAND LINE IS, and one more.
+	 * It is attacker-controlled text that travels with the process, so the
+	 * same searching applies - LD_PRELOAD naming a path nobody shipped, a
+	 * payload somebody passed in a variable to keep it off the command
+	 * line, credentials a dropper left behind.
+	 *
+	 * IT IS A SNAPSHOT OF THE INITIAL environ AND NOT THE LIVE ONE. The
+	 * kernel exposes the block the process was STARTED with; a program
+	 * that calls setenv afterwards changes its own copy and not this. That
+	 * is a limit worth stating rather than a failure: what it shows is how
+	 * the process was launched, which is the half an analyst is asking
+	 * about.
+	 *
+	 * READABLE ONLY BY SOMEBODY WHO COULD PTRACE IT - same permission as
+	 * the command line, so on another user's process this is "" and the
+	 * flag below says which.
+	 */
+	const char *environ;
+
+	/*
+	 * THE PROCESS'S OWN CONNECTIONS, one per line:
+	 *
+	 *     TCP 10.0.0.5:54321 -> 93.184.216.34:443 ESTABLISHED
+	 *
+	 * "" when there are none, when the descriptors could not be read, or
+	 * when the tables were not asked for.
+	 *
+	 * READ THROUGH /proc/<pid>/net, which is that process's NETWORK
+	 * NAMESPACE. Joining against the host's /proc/net instead matches
+	 * nothing for a process in a container - or matches an unrelated
+	 * socket that happens to share an inode number, which is worse.
+	 */
+	const char *net;
+
+	/*
 	 * WHAT ITS FILE DESCRIPTORS ARE, counted rather than listed.
 	 *
 	 * `n_fd` is how many it has open; `n_socket` how many of those are
@@ -413,6 +451,25 @@ struct kofa_plist_option {
 	 * and never less: the opposite default hides facts from whoever did
 	 * not know to ask, which is exactly who needs them.
 	 */
+	/*
+	 * Read /proc/<pid>/environ. ON by default, negative sense like the two
+	 * above, for the reason stated there: a caller who did not know to ask
+	 * should get more and never less.
+	 */
+	int no_environ;
+
+	/*
+	 * Join the descriptor list against /proc/<pid>/net. ON by default,
+	 * negative sense like the rest.
+	 *
+	 * The cost is four sequential reads of that process's namespace
+	 * tables and a linear probe per row - NOT a read per socket, which is
+	 * the quadratic version of the same join. It rides on the descriptor
+	 * walk, so turning off no_fds turns this off with it: there are no
+	 * inodes to join on.
+	 */
+	int no_net;
+
 	int no_fds;
 
 	/*

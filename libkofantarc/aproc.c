@@ -275,7 +275,17 @@ static void a_read_exe(uint32_t pid, char *buf, size_t cap, uint32_t *flags)
  * EMPTY for a kernel thread and for a zombie - which is a fact about the
  * process, not a failure, so "" is the honest answer and not an error.
  */
-static void a_read_cmdline(uint32_t pid, char *buf, size_t cap)
+/*
+ * /proc/<pid>/<what> into `buf`, NULs turned into spaces.
+ *
+ * ONE READER FOR cmdline AND environ, because the two files have exactly the
+ * same shape - a run of NUL-terminated strings with a trailing NUL - the same
+ * permission, and the same "" for a kernel thread or a zombie, which is a fact
+ * about the process and not a failure. Two copies of this walk would be two
+ * chances to disagree about the trailing NUL.
+ */
+static void a_read_nul_list(uint32_t pid, const char *what, char *buf,
+			    size_t cap)
 {
 	char path[64];
 	int fd;
@@ -283,7 +293,7 @@ static void a_read_cmdline(uint32_t pid, char *buf, size_t cap)
 	size_t i;
 
 	buf[0] = '\0';
-	snprintf(path, sizeof path, "/proc/%u/cmdline", (unsigned)pid);
+	snprintf(path, sizeof path, "/proc/%u/%s", (unsigned)pid, what);
 	fd = open(path, O_RDONLY | O_CLOEXEC);
 	if (fd < 0)
 		return;
@@ -309,6 +319,16 @@ static void a_read_cmdline(uint32_t pid, char *buf, size_t cap)
 	buf[got] = '\0';
 }
 
+static void a_read_cmdline(uint32_t pid, char *buf, size_t cap)
+{
+	a_read_nul_list(pid, "cmdline", buf, cap);
+}
+
+static void a_read_environ(uint32_t pid, char *buf, size_t cap)
+{
+	a_read_nul_list(pid, "environ", buf, cap);
+}
+
 /*
  * Count the process's file descriptors and record what its stdio points at.
  *
@@ -322,8 +342,145 @@ static void a_read_cmdline(uint32_t pid, char *buf, size_t cap)
  * otherwise decide how long this takes before the three that matter are even
  * looked at.
  */
+/* How many socket inodes one process's connection list may join on. A process
+ * with more sockets than this has more rows than anybody reads, and the count
+ * in n_socket still tells the truth about how many there were. */
+#define A_NET_MAX_SOCK 256u
+
+/*
+ * THE PROCESS'S OWN CONNECTIONS, as text, one per line:
+ *
+ *     TCP 10.0.0.5:54321 -> 93.184.216.34:443 ESTABLISHED
+ *
+ * READ FROM /proc/<pid>/net AND NOT FROM /proc/net, and that is correctness
+ * rather than tidiness: those tables are per NETWORK NAMESPACE, so a process
+ * in a container joined against the host's table matches nothing, or worse
+ * matches an unrelated socket that happens to share an inode number. The
+ * per-pid path is the same file seen through that process's namespace.
+ *
+ * ONE PASS PER TABLE, JOINED ON THE INODE. The descriptor walk has already
+ * collected this process's socket inodes - it was counting them anyway - so
+ * the cost here is four sequential reads and a linear probe per row, not a
+ * read per socket. A read per socket is the quadratic version and is the one
+ * mistake worth naming.
+ */
+static int a_sock_known(const uint64_t *ino, uint32_t n, uint64_t want)
+{
+	uint32_t i;
+
+	for (i = 0; i < n; i++)
+		if (ino[i] == want)
+			return 1;
+	return 0;
+}
+
+/* "0100007F:1F90" - the address is hex, in the byte order the kernel writes
+ * it, which for v4 is one little-endian word. */
+static void a_net_addr(const char *hex, char *out, size_t cap, int v6)
+{
+	unsigned b[16];
+	unsigned i, n = v6 ? 16u : 4u;
+
+	for (i = 0; i < n; i++) {
+		unsigned hi, lo;
+		char c;
+
+		c = hex[i * 2u];
+		hi = (unsigned)(c <= '9' ? c - '0' : (c | 32) - 'a' + 10);
+		c = hex[i * 2u + 1u];
+		lo = (unsigned)(c <= '9' ? c - '0' : (c | 32) - 'a' + 10);
+		b[i] = (hi << 4) | lo;
+	}
+	if (!v6) {
+		snprintf(out, cap, "%u.%u.%u.%u", b[3], b[2], b[1], b[0]);
+		return;
+	}
+	/* Each 32-bit word is little-endian, the words in order. */
+	snprintf(out, cap,
+		 "%02x%02x:%02x%02x:%02x%02x:%02x%02x:"
+		 "%02x%02x:%02x%02x:%02x%02x:%02x%02x",
+		 b[3], b[2], b[1], b[0], b[7], b[6], b[5], b[4],
+		 b[11], b[10], b[9], b[8], b[15], b[14], b[13], b[12]);
+}
+
+static const char *a_tcp_state(unsigned st)
+{
+	switch (st) {
+	case 1:  return "ESTABLISHED";
+	case 2:  return "SYN_SENT";
+	case 3:  return "SYN_RECV";
+	case 4:  return "FIN_WAIT1";
+	case 5:  return "FIN_WAIT2";
+	case 6:  return "TIME_WAIT";
+	case 7:  return "CLOSE";
+	case 8:  return "CLOSE_WAIT";
+	case 9:  return "LAST_ACK";
+	case 10: return "LISTEN";
+	case 11: return "CLOSING";
+	default: return "?";
+	}
+}
+
+static void a_net_table(uint32_t pid, const char *what, const char *proto,
+			int v6, const uint64_t *ino, uint32_t n_ino,
+			char *buf, size_t cap, size_t *at)
+{
+	char path[64], line[512];
+	FILE *f;
+
+	snprintf(path, sizeof path, "/proc/%u/net/%s", (unsigned)pid, what);
+	f = fopen(path, "r");
+	if (!f)
+		return;
+	/* The header row. */
+	if (!fgets(line, sizeof line, f)) {
+		fclose(f);
+		return;
+	}
+	while (fgets(line, sizeof line, f)) {
+		char lh[48], rh[48], ls[64], rs[64];
+		unsigned lp, rp, st;
+		unsigned long long inode = 0;
+		int w;
+
+		/* sl local:port rem:port st ... then seven fields to inode. */
+		if (sscanf(line,
+			   " %*u: %47[0-9A-Fa-f]:%x %47[0-9A-Fa-f]:%x %x "
+			   "%*x:%*x %*x:%*x %*x %*u %*u %llu",
+			   lh, &lp, rh, &rp, &st, &inode) != 6)
+			continue;
+		if (!inode || !a_sock_known(ino, n_ino, (uint64_t)inode))
+			continue;
+		a_net_addr(lh, ls, sizeof ls, v6);
+		a_net_addr(rh, rs, sizeof rs, v6);
+		w = snprintf(buf + *at, cap - *at, "%s %s:%u -> %s:%u %s\n",
+			     proto, ls, lp, rs, rp,
+			     proto[0] == 'T' ? a_tcp_state(st) : "");
+		if (w < 0 || (size_t)w >= cap - *at)
+			break;
+		*at += (size_t)w;
+	}
+	fclose(f);
+}
+
+static void a_read_net(uint32_t pid, const uint64_t *ino, uint32_t n_ino,
+		       char *buf, size_t cap)
+{
+	size_t at = 0;
+
+	buf[0] = '\0';
+	if (!n_ino)
+		return;
+	a_net_table(pid, "tcp",  "TCP",  0, ino, n_ino, buf, cap, &at);
+	a_net_table(pid, "tcp6", "TCP6", 1, ino, n_ino, buf, cap, &at);
+	a_net_table(pid, "udp",  "UDP",  0, ino, n_ino, buf, cap, &at);
+	a_net_table(pid, "udp6", "UDP6", 1, ino, n_ino, buf, cap, &at);
+	buf[at] = '\0';
+}
+
 static void a_read_fds(uint32_t pid, struct kofa_proc *out,
-		       char std[3][KOFA_FDLINK_MAX])
+		       char std[3][KOFA_FDLINK_MAX],
+		       uint64_t *ino, uint32_t *n_ino)
 {
 	char path[64], link[KOFA_FDLINK_MAX];
 	DIR *d;
@@ -370,8 +527,19 @@ static void a_read_fds(uint32_t pid, struct kofa_proc *out,
 		if (n <= 0)
 			continue;
 		link[n] = '\0';
-		if (!strncmp(link, "socket:", 7))
+		if (!strncmp(link, "socket:", 7)) {
 			out->n_socket++;
+			/* Collected HERE because this walk is already
+			 * readlinking every descriptor to count them; a second
+			 * pass to find the same inodes would double the one
+			 * loop that scales with a busy daemon's fd table. */
+			if (ino && n_ino && *n_ino < A_NET_MAX_SOCK) {
+				unsigned long long v = 0;
+
+				if (sscanf(link, "socket:[%llu]", &v) == 1)
+					ino[(*n_ino)++] = (uint64_t)v;
+			}
+		}
 		if (std[0][0] && !strcmp(link, std[0]))
 			out->n_like_stdin++;
 	}
@@ -388,6 +556,15 @@ struct kofa_plist {
 	char comm[64];
 	char exe[APATH_MAX];
 	char cmdline[4096];
+	/* Bigger than the command line because an environment routinely is -
+	 * a desktop session hands a child forty variables. Truncated rather
+	 * than grown: what is past this is not worth a second allocation on a
+	 * path that runs once per process. */
+	char environ[8192];
+	/* One line per connection; a process with more than this many rows has
+	 * more than anybody reads, and n_socket still says how many there
+	 * were. */
+	char net[4096];
 	char std[3][KOFA_FDLINK_MAX];
 };
 
@@ -541,9 +718,27 @@ int kofa_plist_next(struct kofa_plist *l, struct kofa_proc *out)
 			a_read_cmdline(out->pid, l->cmdline,
 				       sizeof l->cmdline);
 
+		/* Same reader as the command line: the file has the same shape
+		 * - NUL separated, trailing NUL - and the same permission. */
+		l->environ[0] = '\0';
+		if (!l->o.no_environ && !(out->flags & KOFA_PF_KERNEL))
+			a_read_environ(out->pid, l->environ,
+				       sizeof l->environ);
+		out->environ = l->environ;
+
 		l->std[0][0] = l->std[1][0] = l->std[2][0] = '\0';
 		if (!l->o.no_fds && !(out->flags & KOFA_PF_KERNEL))
-			a_read_fds(out->pid, out, l->std);
+		{
+			uint64_t ino[A_NET_MAX_SOCK];
+			uint32_t n_ino = 0;
+
+			a_read_fds(out->pid, out, l->std, ino, &n_ino);
+			l->net[0] = '\0';
+			if (!l->o.no_net)
+				a_read_net(out->pid, ino, n_ino, l->net,
+					   sizeof l->net);
+			out->net = l->net;
+		}
 
 		out->comm = l->comm;
 		out->exe = l->exe;

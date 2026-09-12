@@ -60,6 +60,13 @@ struct kof_proc_build {
 	uint32_t plat_a, plat_b;
 
 	const char *exe, *comm, *cmdline;
+	/* The environment it was started with, NULs already spaces. "" when
+	 * the collector could not read it - a permission, not a fact about
+	 * the process. */
+	const char *environ;
+	/* The process's own connections, one per line. "" when there are
+	 * none or they could not be read. */
+	const char *net;
 	const char *fd0, *fd1, *fd2;
 };
 

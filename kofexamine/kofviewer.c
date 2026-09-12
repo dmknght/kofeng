@@ -13456,6 +13456,14 @@ static const char *proc_str(const struct object *ob, uint32_t off)
 	return p;
 }
 
+/* Rows of connection shown before the panel says how many more there are. */
+#define PROC_NET_ROWS 12u
+/* Same reasoning, and a session hands a child about forty of these. */
+#define PROC_ENV_ROWS 16u
+/* A process maps a dozen libraries and a pile of locale files; this is the
+ * screenful, and the rest is counted. */
+#define PROC_LIB_ROWS 20u
+
 static void prop_proc(const struct object *ob)
 {
 	const struct kof_proc_info *pi = ob->info;
@@ -13542,6 +13550,111 @@ static void prop_proc(const struct object *ob)
 	}
 
 	/*
+	 * THE ENVIRONMENT IT WAS STARTED WITH, one variable per row.
+	 *
+	 * A table and not the raw block: the collector turns the NULs into
+	 * spaces, so the whole thing is one very long line that a panel would
+	 * show the first eighty characters of - and the interesting variable
+	 * is rarely the first one. Split on the spaces between assignments,
+	 * each row is a variable, and a reader can see LD_PRELOAD without
+	 * scrolling a line sideways.
+	 *
+	 * BOUNDED like the connections, and for the same reason: a desktop
+	 * session hands a child forty of these and they would push everything
+	 * below off the screen. The count says what was cut.
+	 */
+	{
+		const char *e = proc_str(ob, pi->off_env);
+		unsigned shown = 0;
+
+		while (*e && shown < PROC_ENV_ROWS) {
+			const char *sp = strchr(e, ' ');
+			int len = sp ? (int)(sp - e) : (int)strlen(e);
+
+			if (len > 0)
+				prop_add(A_DIM "  %-11s " A_OFF A_ID "%.*s"
+					 A_OFF, shown ? "" : "env", len, e);
+			shown++;
+			if (!sp)
+				break;
+			e = sp + 1;
+		}
+		if (*e)
+			prop_add(A_DIM "  %-11s ... more" A_OFF, "");
+	}
+
+	/*
+	 * WHO IT IS TALKING TO, one row per connection.
+	 *
+	 * Beside the descriptors and not on a page of its own, because the two
+	 * answer one question together: a socket on fd 0 is a reverse shell
+	 * only once you know what that socket is CONNECTED TO, and a reader
+	 * holding one without the other has half an answer.
+	 *
+	 * BOUNDED, with the count said when it cuts. A process with two
+	 * hundred connections has more rows than belong on a first screen, and
+	 * a list that silently stopped would read as a process with twelve.
+	 */
+	{
+		const char *ln = proc_str(ob, pi->off_net);
+		unsigned shown = 0;
+
+		if (ln[0]) {
+			/*
+			 * A TABLE, because the eye compares DOWN a column.
+			 *
+			 * The collector writes one line per connection and
+			 * the line reads left to right; a reader asking "is
+			 * anything talking to the same host twice" has to
+			 * scan across every row to find the remote. Split
+			 * into fixed columns the remotes stack under each
+			 * other and the question answers itself.
+			 */
+			prop_add(A_DIM "  %-11s %-5s %-21s %-21s %s" A_OFF,
+				 "net", "proto", "local", "remote", "state");
+			while (*ln && shown < PROC_NET_ROWS) {
+				const char *e = strchr(ln, '\n');
+				int len = e ? (int)(e - ln) : (int)strlen(ln);
+				char row[256], pr[8], lo[64], re[64], st[24];
+
+				if (len >= (int)sizeof row)
+					len = (int)sizeof row - 1;
+				memcpy(row, ln, (size_t)len);
+				row[len] = 0;
+				st[0] = 0;
+				if (sscanf(row, "%7s %63s -> %63s %23s",
+					   pr, lo, re, st) >= 3)
+					prop_add("  %-11s " A_DIM "%-5s" A_OFF
+						 " " A_ID "%-21.21s" A_OFF " "
+						 A_LOC "%-21.21s" A_OFF " "
+						 A_DIM "%s" A_OFF,
+						 "", pr, lo, re, st);
+				else
+					prop_add("  %-11s " A_ID "%s" A_OFF,
+						 "", row);
+				shown++;
+				if (!e)
+					break;
+				ln = e + 1;
+			}
+			if (*ln)
+				prop_add(A_DIM "  %-11s ... more, of %lu "
+					 "socket(s)" A_OFF, "",
+					 (unsigned long)pi->n_socket);
+		} else if (pi->n_socket) {
+			/*
+			 * SOCKETS IT HOLDS AND NOTHING TO SAY ABOUT THEM -
+			 * which is what a unix socket looks like here, and
+			 * what a namespace this could not read looks like.
+			 * Saying the count beats a blank that reads as "none".
+			 */
+			prop_add(A_DIM "  %-11s %lu socket(s), none in the "
+				 "connection tables" A_OFF, "net",
+				 (unsigned long)pi->n_socket);
+		}
+	}
+
+	/*
 	 * The three shapes the rules key on, said in words. A reader looking
 	 * at a panel should be able to see what a rule saw.
 	 */
@@ -13556,6 +13669,53 @@ static void prop_proc(const struct object *ob)
 	if (!(pi->flags & KOF_PROC_F_EXE_ON_DISK))
 		prop_add(A_WARN "  %-11s the executable is not on disk" A_OFF,
 			 "exe");
+}
+
+/*
+ * WHAT THE PROCESS HAS MAPPED, one row per file.
+ *
+ * The tree already carries these as objects, so this is not a second walk of
+ * anything - it reads the rows that are already there. It is worth a table
+ * anyway: the tree interleaves them with the memory regions in address order,
+ * which is the order the address space has and not an order anybody reads, and
+ * the question "what did this load" wants them together.
+ *
+ * TOLD APART FROM THE MEMORY REGIONS BY NAME, which is the convention the walk
+ * establishes: a region is MEM_<something> and a mapped file is its basename.
+ * A name test rather than a flag because the name is what the rest of the
+ * viewer already keys on, and a second marker would be a second thing to keep
+ * in step.
+ */
+static void prop_proc_libs(const struct view *v)
+{
+	uint32_t i, shown = 0, more = 0;
+
+	if (!v->n_obj)
+		return;
+	for (i = 1; i < v->n_obj; i++) {
+		const char *leaf = kof_obj_leaf(v->obj[i].name);
+
+		if (!leaf || !strncmp(leaf, "MEM_", 4))
+			continue;
+		if (shown >= PROC_LIB_ROWS) {
+			more++;
+			continue;
+		}
+		if (!shown)
+			prop_add(A_DIM "  %-11s %-32s %10s  %s" A_OFF,
+				 "mapped", "file", "bytes", "format");
+		prop_add("  %-11s " A_ID "%-32.32s" A_OFF A_SIZE "%10llu"
+			 A_OFF "  " A_DIM "%s%s%s" A_OFF, "", leaf,
+			 (unsigned long long)v->obj[i].buf.n,
+			 v->obj[i].fmt
+				 ? kof_format_name(v->obj[i].ctx.format) : "",
+			 v->obj[i].fmt ? "-" : "",
+			 v->obj[i].fmt
+				 ? kof_arch_name(v->obj[i].ctx.arch) : "");
+		shown++;
+	}
+	if (more)
+		prop_add(A_DIM "  %-11s ... %u more" A_OFF, "", more);
 }
 
 static void prop_elf(const struct object *ob)
@@ -14238,6 +14398,22 @@ static void prop_build(struct view *v)
 			snprintf(head, sizeof head, "Enclosing %u", k);
 			prop_head(head);
 			prop_object_rows(v, up[k], 0);
+			/*
+			 * THE PROCESS FACTS BELONG TO THE OBJECT THEY ARE
+			 * ABOUT, which is the enclosing one - the record.
+			 *
+			 * Drawn here rather than at the foot of the page: a
+			 * reader standing on MEM_HEAP reads down from the
+			 * outermost object inwards, and the pid and the
+			 * command line are part of what that outermost object
+			 * IS. At the bottom they read as an afterthought about
+			 * the row in front of them, which is the one thing
+			 * they are not.
+			 */
+			if (up[k]->ctx.format == KOF_EVT_PROC && up[k]->info)
+				prop_proc(up[k]);
+			if (up[k]->ctx.format == KOF_EVT_PROC)
+				prop_proc_libs(v);
 		}
 		if (n_up) {
 			char head[32];
@@ -14254,6 +14430,12 @@ static void prop_build(struct view *v)
 		}
 	}
 	prop_object_rows(v, ob, 1);
+	/* And when the process record IS the row in front of the reader, the
+	 * same panel in the same place - under the object it describes. */
+	if (ob->ctx.format == KOF_EVT_PROC && ob->info) {
+		prop_proc(ob);
+		prop_proc_libs(v);
+	}
 
 	/*
 	 * AN EVENT'S PAGE IS A DIFFERENT PAGE.
@@ -14289,9 +14471,9 @@ static void prop_build(struct view *v)
 			prop_pe(ob);
 		else if (ob->ctx.format == KOF_FMT_PDF)
 			prop_pdf(ob);
-		else if (ob->ctx.format == KOF_EVT_PROC)
-			prop_proc(ob);
 	}
+
+
 
 	/*
 	 * The regions, which is the engine's own division of the file and the
@@ -20773,6 +20955,31 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 		v->n_obj = 1;
 	}
 	objects_examine(v, v->eng);
+	/*
+	 * THE PROCESS IS THE ARCHITECTURE OF WHAT IT IS RUNNING.
+	 *
+	 * AFTER objects_examine AND NOT BEFORE: that pass identifies every
+	 * object, and identifying one memsets its ctx - so an arch written
+	 * ahead of it is zeroed again before anything draws it. Found by the
+	 * panel still reading "any" with the assignment plainly there.
+	 *
+	 * The record carries no machine word - it is pids and counts - so the
+	 * object came out "any", which is true of the RECORD and says nothing
+	 * about the process. The first child with a format is the executable
+	 * the walk reported first, and its arch is the process's: a 64-bit
+	 * program is a 64-bit process.
+	 *
+	 * Copied rather than parsed again, so the two can never disagree.
+	 */
+	if (v->n_obj > 1 && v->obj[0].ctx.format == KOF_EVT_PROC) {
+		uint32_t k;
+
+		for (k = 1; k < v->n_obj; k++)
+			if (v->obj[k].fmt && v->obj[k].ctx.arch) {
+				v->obj[0].ctx.arch = v->obj[k].ctx.arch;
+				break;
+			}
+	}
 	/* The rows the reader sees are built from the objects, not the same
 	 * thing - see tree_build. Missed at first, and the shape of the miss
 	 * is worth keeping: twenty-seven objects were collected, examined and

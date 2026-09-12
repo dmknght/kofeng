@@ -7,7 +7,9 @@
 
 /* One - see KOF_SCAN_PROC_CLAIMED for why the head and the descriptors are
  * facts on a panel rather than bytes to search. */
-const uint32_t kof_proc_regions[1] = { KOF_SCAN_PROC_CMDLINE };
+const uint32_t kof_proc_regions[3] = {
+	KOF_SCAN_PROC_CMDLINE, KOF_SCAN_PROC_ENV, KOF_SCAN_PROC_NET
+};
 
 /*
  * REFUSES EVERYTHING. A snapshot is declared, never recognised - see the
@@ -52,6 +54,18 @@ static uint32_t proc_resolve_scan(const struct kof_obj_ctx *ctx,
 		n++;
 	}
 	at += pi->len_cmdline;
+	if ((mask & KOF_SCAN_PROC_ENV) && pi->len_env && n < cap) {
+		ext[n].off = at;
+		ext[n].len = pi->len_env;
+		n++;
+	}
+	at += pi->len_env;
+	if ((mask & KOF_SCAN_PROC_NET) && pi->len_net && n < cap) {
+		ext[n].off = at;
+		ext[n].len = pi->len_net;
+		n++;
+	}
+	at += pi->len_net;
 	if ((mask & KOF_SCAN_PROC_FD) && pi->len_fd && n < cap) {
 		ext[n].off = at;
 		ext[n].len = pi->len_fd;
@@ -144,6 +158,8 @@ int kof_proc_parse(kof_buf b, void *view, struct kof_obj_ctx *ctx)
 	pi->off_exe     = r->off_exe;
 	pi->off_comm    = r->off_comm;
 	pi->off_cmdline = r->off_cmdline;
+	pi->off_env     = r->off_environ;
+	pi->off_net     = r->off_net;
 	pi->off_fd0     = r->off_fd0;
 
 	/*
@@ -154,6 +170,8 @@ int kof_proc_parse(kof_buf b, void *view, struct kof_obj_ctx *ctx)
 	if (!str_ok(b, r->off_exe, total))     pi->off_exe = 0;
 	if (!str_ok(b, r->off_comm, total))    pi->off_comm = 0;
 	if (!str_ok(b, r->off_cmdline, total)) pi->off_cmdline = 0;
+	if (!str_ok(b, r->off_environ, total)) pi->off_env = 0;
+	if (!str_ok(b, r->off_net, total)) pi->off_net = 0;
 
 	if (str_ok(b, r->off_fd0, total)) {
 		pi->fd0_socket = (uint8_t)starts_socket(b, r->off_fd0);
@@ -196,14 +214,29 @@ int kof_proc_parse(kof_buf b, void *view, struct kof_obj_ctx *ctx)
 	 */
 	{
 		uint32_t cmd = pi->off_cmdline ? pi->off_cmdline : total;
+		uint32_t env = pi->off_env ? pi->off_env : total;
+		uint32_t net = pi->off_net ? pi->off_net : total;
 		uint32_t fd  = pi->off_fd0 ? pi->off_fd0 : total;
 
+		/*
+		 * FOUR SECTIONS NOW, AND THE ORDER IS STILL THE PRODUCER'S.
+		 * Each boundary is clamped forward from the one before, so a
+		 * record whose offsets are out of order loses the section
+		 * rather than the partition: a missing piece gives its bytes
+		 * to its neighbour and nothing overlaps.
+		 */
 		if (cmd > total) cmd = total;
-		if (fd < cmd)    fd = cmd;
+		if (env < cmd)   env = cmd;
+		if (env > total) env = total;
+		if (net < env)   net = env;
+		if (net > total) net = total;
+		if (fd < net)    fd = net;
 		if (fd > total)  fd = total;
 
 		pi->len_meta    = cmd;
-		pi->len_cmdline = fd - cmd;
+		pi->len_cmdline = env - cmd;
+		pi->len_env     = net - env;
+		pi->len_net     = fd - net;
 		pi->len_fd      = total - fd;
 	}
 
@@ -251,6 +284,8 @@ const char *kof_proc_region_name(uint32_t bit)
 	 */
 	case KOF_SCAN_PROC_META:    return "MEM_META";
 	case KOF_SCAN_PROC_CMDLINE: return "MEM_CMDLINE";
+	case KOF_SCAN_PROC_ENV:     return "MEM_ENV";
+	case KOF_SCAN_PROC_NET:     return "MEM_NET";
 	case KOF_SCAN_PROC_FD:      return "MEM_FD";
 	default:                    return "?";
 	}
