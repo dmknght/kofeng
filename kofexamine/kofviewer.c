@@ -12247,6 +12247,30 @@ static int findsc_target(const struct view *v)
 		    v->obj[k].name[pn] == '/' && v->obj[k].payload_of)
 			return (int)k;
 	}
+	/*
+	 * AND THE LOADER ITSELF, WHICH IS WHAT THE RULE ACTUALLY ANSWERED.
+	 *
+	 * The two tests above both ask about an EXTRACTED payload - a child
+	 * object that payload_tag() marked. That tag is the narrower fact by
+	 * some way: payload_tag requires the child to exist at all, to be ELF,
+	 * and to have the one-segment no-section shape of a reconstruction. So
+	 * on a file where the heuristic FOUND a loader and the unpacker did not
+	 * produce a child - or produced one this build does not recognise as a
+	 * reconstruction, or produced a PE - the menu went grey and the reader
+	 * was told there was nothing here, while the scan had already said
+	 * where the payload was.
+	 *
+	 * payload_at is that answer: the address bases/heur/scloader_00.c
+	 * reported through kof_debug("SCLoader.payload"). It is set on the
+	 * object the RULE fired on, at any depth and whatever the format, so
+	 * asking it is both wider than the tag and stricter than "this is an
+	 * executable" - the item appears exactly when something found a loader.
+	 *
+	 * LAST, so the extracted payload still wins when there is one: its
+	 * bytes are a better thing to show than an address inside the parent.
+	 */
+	if (v->obj[me].payload_at)
+		return (int)me;
 	return -1;
 }
 
@@ -15469,6 +15493,34 @@ static void bar_run(struct view *v, int i)
 		if (found < 0) {
 			snprintf(v->act_msg, sizeof v->act_msg, "%s",
 				 "No shellcode-like variable here");
+			v->act_ok = 1;
+			v->menu_open = 0;
+			return;
+		}
+		/*
+		 * THE LOADER, NOT AN EXTRACTED PAYLOAD. There is no child
+		 * object to describe, so what is shown is the answer the rule
+		 * gave - where and how big - rather than sc_kind() over the
+		 * loader's own bytes, which would describe the wrong thing
+		 * with complete confidence.
+		 */
+		if (!v->obj[kid].payload_of && v->obj[kid].payload_at) {
+			if (v->obj[kid].payload_bits)
+				snprintf(v->act_msg, sizeof v->act_msg,
+					 "payload at 0x%llx, %llu byte(s), "
+					 "%u-bit",
+					 (unsigned long long)
+						 v->obj[kid].payload_at,
+					 (unsigned long long)
+						 v->obj[kid].payload_len,
+					 (unsigned)v->obj[kid].payload_bits);
+			else
+				snprintf(v->act_msg, sizeof v->act_msg,
+					 "payload at 0x%llx, %llu byte(s)",
+					 (unsigned long long)
+						 v->obj[kid].payload_at,
+					 (unsigned long long)
+						 v->obj[kid].payload_len);
 			v->act_ok = 1;
 			v->menu_open = 0;
 			return;
