@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * kofpath.h - where a host keeps what it must keep between runs.
  *

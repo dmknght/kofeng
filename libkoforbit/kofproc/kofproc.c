@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /* See kofproc.h. */
 
 #include <string.h>

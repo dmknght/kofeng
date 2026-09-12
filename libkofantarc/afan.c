@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /* See afan.h, which carries the measurements this file is built on. */
 
 #define _GNU_SOURCE

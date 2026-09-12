@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /* The parser list. See kofformat.h for why there is only one of it. */
 
 #include "kofformat.h"

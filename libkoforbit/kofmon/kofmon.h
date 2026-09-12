@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * kofmon.h - what a sensor needs from a collector, and nothing about which
  * collector it is.

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /* See aproc.h. */
 
 #define _GNU_SOURCE

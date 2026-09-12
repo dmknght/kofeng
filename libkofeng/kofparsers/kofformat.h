@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * WHICH PARSERS EXIST, AND IN WHAT ORDER THEY GET ASKED.
  *

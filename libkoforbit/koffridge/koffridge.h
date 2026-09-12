@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * koffridge.h - what has already been scanned, and what it came to.
  *

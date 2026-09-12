@@ -1,17 +1,19 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
- * atest - drive libkofantarc's snapshot half and print what it found.
+ * antarc_dump - drive libkofantarc's snapshot half and print what it found.
  *
- * TEMPORARY. It exists so the walk can be run and checked against the
- * measurements in PLAN.md before kofmemscan is touched - that file is shared
- * with the Windows collector and is being edited elsewhere. It goes away when
- * the walk is wired into kofmemscan.
+ * A HAND TOOL, NOT A TEST. It asserts nothing: it walks the live machine and
+ * prints what the collector saw, which is how the numbers quoted in aproc.h
+ * were measured and how a disagreement between the walk and /proc is found.
+ * `make unit` does not build or run it - the assertions live next door in
+ * tests/unit/antarc_walk.c. Built on demand:
  *
- *   atest              summary over every readable process
- *   atest -v           one line per interesting region
- *   atest -p <pid>     one process, every region
- *   atest --heap       include heap regions, capped
- *   atest --blind      no pagemap, to measure what it saves
+ *     make build/test/antarc_dump
+ *
+ *   antarc_dump              summary over every readable process
+ *   antarc_dump -v           one line per interesting region
+ *   antarc_dump -p <pid>     one process, every region
+ *   antarc_dump --heap       include heap regions, capped
+ *   antarc_dump --blind      no pagemap, to measure what it saves
  */
 
 #define _GNU_SOURCE

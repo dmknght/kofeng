@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * kofantarc.h - collecting what Linux is doing, as seen from outside.
  *

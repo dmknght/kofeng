@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * proc.h - one running process, presented as a scannable object.
  *

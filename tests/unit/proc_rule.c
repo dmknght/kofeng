@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * proc_rule.c - the process path, end to end, over synthetic records.
  *

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * apagemap.h - which pages of a mapping actually exist.
  *

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * view_reuse.c - a parse must not report the PREVIOUS file's entries.
  *

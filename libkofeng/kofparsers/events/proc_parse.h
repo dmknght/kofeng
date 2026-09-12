@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * proc_parse.h - one collected process snapshot, presented as a scannable
  * object.

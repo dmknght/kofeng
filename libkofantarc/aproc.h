@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * aproc.h - what is running right now on Linux, and what is inside it.
  *

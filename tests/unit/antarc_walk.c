@@ -1,9 +1,5 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
- * atest_unit - guard the four things that actually broke.
- *
- * TEMPORARY, like atest.c: this moves to tests/unit/ when the Makefile is
- * touched, which is waiting on the libkofgrille session.
+ * antarc_walk - guard the four things that actually broke in the /proc walk.
  *
  * Every case here is a bug that was real, not a hypothetical. Three were found
  * by running the walk and comparing it against /proc by hand, and the fourth is

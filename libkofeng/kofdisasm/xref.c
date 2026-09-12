@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /* One sweep of the code, and what it did with each address. See disasm_xref.h. */
 
 #include "xref.h"

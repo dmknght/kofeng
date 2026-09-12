@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * clr_parse.h - read the CLI metadata of an assembly, whoever is carrying it.
  *

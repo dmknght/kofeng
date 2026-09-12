@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /* See amsi_parse.h for why this parser refuses to sniff. */
 
 #include <string.h>

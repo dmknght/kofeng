@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * kofwalk.h - what a scanner needs from a machine's running processes, and
  * nothing about which machine it is.

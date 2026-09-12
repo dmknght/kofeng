@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * kofproc.h - build the record the engine scans a process as.
  *

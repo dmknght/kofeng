@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /* See kofpath.h. */
 
 #define _GNU_SOURCE

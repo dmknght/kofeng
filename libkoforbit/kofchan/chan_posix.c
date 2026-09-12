@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * chan_posix.c - the POSIX backend of the channel. See kofchan.h for the
  * contract, which is the same one chan_win.c implements.

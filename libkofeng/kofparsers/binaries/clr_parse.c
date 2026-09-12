@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * clr_parse.c - see clr_parse.h for why this is not inside pe_parse.c.
  *

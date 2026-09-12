@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * antarc_fan.c - the Linux file-event collector, over its own writes.
  *

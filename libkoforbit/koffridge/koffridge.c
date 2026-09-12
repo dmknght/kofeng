@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * koffridge.c - the verdict cache. See koffridge.h for what it is keyed on and
  * why that is the only decision that matters.

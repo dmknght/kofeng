@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /* See proc_parse.h. */
 
 #include <string.h>

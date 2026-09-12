@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * awalk.c - libkofantarc's answer to libkoforbit/kofwalk/kofwalk.h.
  *

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * amsi_parse.h - one collected AMSI event, presented as a scannable object.
  *

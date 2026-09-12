@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * xref.h - which code refers to a data address, and how.
  *

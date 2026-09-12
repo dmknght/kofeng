@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * afan.h - what the filesystem is doing, from fanotify.
  *

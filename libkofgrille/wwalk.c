@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * wwalk.c - libkofgrille's answer to libkoforbit/kofwalk/kofwalk.h.
  *
