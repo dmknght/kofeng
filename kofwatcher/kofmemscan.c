@@ -93,6 +93,18 @@
 
 struct opt {
 	const char *db;
+
+	/*
+	 * WHERE THE VERDICT CACHE LIVES BETWEEN RUNS, or NULL for "nowhere".
+	 *
+	 * No default, and that is deliberate rather than unfinished: whoever
+	 * can write this file decides what this scanner calls clean, so the
+	 * operator naming the path is the moment they decide who can write it.
+	 * A built-in default would make that decision for them, silently, in a
+	 * directory chosen for convenience. See koffridge.h.
+	 */
+	const char *cache;
+
 	uint32_t only_pid;
 	int level;          /* 1 scans, 2 gathers and analyses */
 	int scan_heap;
@@ -119,6 +131,14 @@ struct run {
 	uint64_t relocs_undone;
 	uint64_t patched_modules; /* modules whose bytes differ from their file */
 	uint64_t patched_bytes;
+
+	/*
+	 * Modules whose load delta could not be established, so the comparison
+	 * against their file was not attempted - see diff_module. Its own line
+	 * in the summary, because a module nobody could check is not a module
+	 * that came back clean, and one total would read as the latter.
+	 */
+	uint64_t base_unknown;
 };
 
 /*
@@ -195,40 +215,13 @@ static void sink_init(struct sink *s, struct run *r)
 	s->rank = -1;
 }
 
-/* ------------------------------------------------------- a file's identity */
-
 /*
- * NOT ITS PATH. The volume and file index are the kernel's own name for a file;
- * the size and write time move whenever it is replaced. A cache keyed on the
- * path says "System32\foo.dll was clean an hour ago" about a file that has been
- * swapped since. See koffridge.h for what this bargain does and does not buy.
- *
- * Zero on failure, and then the caller scans WITHOUT caching rather than
- * caching under a key it could not establish.
+ * A file's identity comes from koffridge_identify, which is where the struct
+ * it fills is declared. It used to be a private static here - Windows only, in
+ * a Windows-only tool - which left the Linux half of a documented contract with
+ * no implementation and left every other tool unable to compute the key. See
+ * koffridge.h.
  */
-static int file_identity(const char *path, struct koffridge_fileid *out)
-{
-	BY_HANDLE_FILE_INFORMATION bi;
-	HANDLE h;
-
-	memset(out, 0, sizeof *out);
-	h = CreateFileA(path, 0,
-			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-			NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-	if (h == INVALID_HANDLE_VALUE)
-		return 0;
-	if (!GetFileInformationByHandle(h, &bi)) {
-		CloseHandle(h);
-		return 0;
-	}
-	CloseHandle(h);
-	out->volume = bi.dwVolumeSerialNumber;
-	out->index  = ((uint64_t)bi.nFileIndexHigh << 32) | bi.nFileIndexLow;
-	out->size   = ((uint64_t)bi.nFileSizeHigh  << 32) | bi.nFileSizeLow;
-	out->mtime  = ((uint64_t)bi.ftLastWriteTime.dwHighDateTime << 32) |
-		      bi.ftLastWriteTime.dwLowDateTime;
-	return 1;
-}
 
 static void scan_module_file(struct run *r, const char *path)
 {
@@ -241,7 +234,7 @@ static void scan_module_file(struct run *r, const char *path)
 	if (r->o.no_files || !path || !path[0])
 		return;
 
-	have_id = file_identity(path, &id);
+	have_id = koffridge_identify(path, &id);
 	if (have_id && koffridge_get(r->fridge, &id, sizeof id, &v)) {
 		/*
 		 * A CACHED ENTRY HOLDS THE VERDICT, NOT THE REPORT - one name,
@@ -307,17 +300,35 @@ static void unmap_and_scan(struct run *r, const uint8_t *img, uint64_t len,
 	uint64_t back_len = 0;
 	char name[224];
 
-	if (!kof_pe_unmap(kof_buf_make(img, len), mapped_at, MEM_MAX_READ,
-			  &back, &back_len, &ui))
+	/*
+	 * NO PREFERRED BASE TO GIVE, and that is right here rather than a gap.
+	 *
+	 * This path is for an allocation that begins with a PE header and is
+	 * backed by no file - a reflective loader's payload, a manual map, an
+	 * image unpacked in place. There IS no file to read a base out of, and
+	 * the header in front of us is the only account of one.
+	 *
+	 * Which is also the case where that account is usually right: a
+	 * reflective loader applies the relocations and does not trouble itself
+	 * to rewrite ImageBase afterwards, so the header still asks for the
+	 * base the payload was built for and the delta comes out correct. Where
+	 * it does not - a loader thorough enough to fix the field too - the
+	 * un-map reports base_ambiguous and the count below says how often.
+	 */
+	if (!kof_pe_unmap(kof_buf_make(img, len), mapped_at, 0,
+			  MEM_MAX_READ, &back, &back_len, &ui))
 		return;
 	r->unmapped++;
 	r->relocs_undone += ui.relocs_undone;
+	if (ui.base_ambiguous)
+		r->base_unknown++;
 
 	if (r->o.verbose)
 		printf("  unmapped %s -> %llu bytes, %u reloc(s) undone, "
-		       "delta 0x%llx\n", parent, (unsigned long long)back_len,
+		       "delta 0x%llx%s\n", parent, (unsigned long long)back_len,
 		       ui.relocs_undone,
-		       (unsigned long long)(uint64_t)ui.delta);
+		       (unsigned long long)(uint64_t)ui.delta,
+		       ui.base_ambiguous ? " (base unknowable)" : "");
 
 	snprintf(name, sizeof name, "%s//unmapped", parent);
 	sink_init(&s, r);
@@ -476,27 +487,64 @@ static void diff_module(struct run *r, struct kofw_pmem *m,
 	unsigned char *file = NULL;
 	uint8_t *back = NULL;
 	uint64_t back_len = 0, flen = 0, iat_lo = 0, iat_hi = 0;
+	uint64_t pref;
 	uint32_t i, patches = 0;
 	size_t got;
 
 	if (!md->path[0] || !md->size || md->size > MEM_MAX_READ)
 		return;
-	if (!grow(r, (size_t)md->size))
+
+	/*
+	 * THE FILE IS READ FIRST, AND THE ORDER IS THE FIX.
+	 *
+	 * The un-map needs the base the FILE asks for in order to work out the
+	 * load delta, because the Windows loader overwrote that field in the
+	 * copy that is in memory - see pe_unmap.h. This used to un-map first
+	 * and read the file afterwards, so the only number that could have
+	 * produced a correct delta was fetched one step too late and the delta
+	 * came out zero for every module on the machine. Every relocated
+	 * pointer then survived into the comparison below and was reported as
+	 * a patch.
+	 */
+	file = slurp(md->path, &flen);
+	if (!file)
 		return;
+	pref = kof_pe_file_image_base(kof_buf_make(file, flen));
+
+	if (!grow(r, (size_t)md->size)) {
+		free(file);
+		return;
+	}
 
 	got = kofw_pmem_read(m, md->base, r->buf, (size_t)md->size);
-	if (got < 0x400u)
+	if (got < 0x400u) {
+		free(file);
 		return;
+	}
 	r->bytes_read += got;
 
-	if (!kof_pe_unmap(kof_buf_make(r->buf, (uint64_t)got), md->base,
-			  MEM_MAX_READ, &back, &back_len, &ui))
+	if (!kof_pe_unmap(kof_buf_make(r->buf, (uint64_t)got), md->base, pref,
+			  MEM_MAX_READ, &back, &back_len, &ui)) {
+		free(file);
 		return;
+	}
 	r->unmapped++;
 	r->relocs_undone += ui.relocs_undone;
 
-	file = slurp(md->path, &flen);
-	if (!file) {
+	/*
+	 * A DELTA NOBODY COULD ESTABLISH IS NOT A CLEAN MODULE, AND IT IS NOT A
+	 * PATCHED ONE EITHER.
+	 *
+	 * Without the file's base the relocations stay applied, and then every
+	 * relocated pointer differs from the file for a reason that has nothing
+	 * to do with anybody tampering. Reporting those would be reporting the
+	 * un-map's own failure as a finding, so this counts it and says nothing
+	 * - the difference between "checked and clean" and "could not check"
+	 * belongs in the summary, which is where unexplained goes.
+	 */
+	if (ui.base_ambiguous) {
+		r->base_unknown++;
+		free(file);
 		free(back);
 		return;
 	}
@@ -826,6 +874,12 @@ static void usage(const char *me)
 	       "               through there, so a match says it TOUCHED them\n"
 	       "               and not that it made them.\n"
 	       "  --no-files   skip the module-file half; memory only\n"
+	       "  --cache F    keep verdicts in F between runs, so a repeat\n"
+	       "               sweep does not rescan files it has already\n"
+	       "               answered for. Discarded whole when the database\n"
+	       "               changes. NO DEFAULT ON PURPOSE: whoever can\n"
+	       "               write F decides what this calls clean, so put it\n"
+	       "               somewhere only this account can write.\n"
 	       "  -v           say what was refused and why\n", me);
 }
 
@@ -859,6 +913,8 @@ int main(int argc, char **argv)
 			r.o.scan_heap = 1;
 		else if (!strcmp(argv[i], "--no-files"))
 			r.o.no_files = 1;
+		else if (!strcmp(argv[i], "--cache") && i + 1 < argc)
+			r.o.cache = argv[++i];
 		else if (!strcmp(argv[i], "-v"))
 			r.o.verbose = 1;
 		else {
@@ -887,6 +943,27 @@ int main(int argc, char **argv)
 	if (!r.sc || !r.fridge) {
 		fprintf(stderr, "%s: out of memory\n", argv[0]);
 		return 2;
+	}
+
+	/*
+	 * WHAT THE LAST RUN ALREADY ANSWERED.
+	 *
+	 * Measured here: 3103 mappings across the machine are 539 distinct
+	 * files, and scanning those files is 2.65 of the sweep's 3.26 seconds.
+	 * Without this, every sweep pays that again for an answer it had. The
+	 * load refuses the whole file when the database has changed, which is
+	 * the only reason a stored verdict stops being true - see koffridge.h.
+	 */
+	if (r.o.cache) {
+		const char *why = "";
+		uint32_t n = koffridge_load(r.fridge, r.o.cache, &why);
+
+		if (r.o.verbose || !n)
+			printf("cache: %s (%s)\n",
+			       n ? "loaded" : "not used", why);
+		if (n)
+			printf("cache: %lu verdict(s) carried over from a"
+			       " previous run\n", (unsigned long)n);
 	}
 
 	memset(&lo, 0, sizeof lo);
@@ -923,10 +1000,18 @@ int main(int argc, char **argv)
 		       " - a difference, not a verdict\n",
 		       (unsigned long long)r.patched_modules,
 		       (unsigned long long)r.patched_bytes);
+		if (r.base_unknown)
+			printf("%llu image(s) whose load delta could not be"
+			       " established - NOT compared, and not clean\n",
+			       (unsigned long long)r.base_unknown);
 	}
 	koffridge_describe(r.fridge, line, sizeof line);
 	printf("%s\n", line);
 	printf("%llu finding(s)\n", (unsigned long long)r.findings);
+
+	if (r.o.cache && !koffridge_save(r.fridge, r.o.cache))
+		fprintf(stderr, "%s: could not write the cache to %s\n",
+			argv[0], r.o.cache);
 
 	koffridge_close(r.fridge);
 	kof_scanner_free(r.sc);

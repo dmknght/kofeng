@@ -97,6 +97,26 @@ struct koffridge_fileid {
 };
 
 /*
+ * Fill `out` with the identity of the file at `path`. Non-zero on success.
+ *
+ * ONE IMPLEMENTATION FOR BOTH PLATFORMS, and it is here because the struct
+ * above is here. The paragraph describing what each field is on Windows and on
+ * Linux was written before either was implemented, and the only code that ever
+ * filled it in was a private static inside kofmemscan - which is a Windows-only
+ * tool, so half of a documented contract had no implementation at all and the
+ * other half could not be reached by anything else. A cache whose key nobody
+ * else can compute is a cache nobody else can use.
+ *
+ * Windows: one GetFileInformationByHandle. POSIX: one stat. Neither reads a
+ * byte of the content, which is the property the whole bargain rests on.
+ *
+ * ZERO ON FAILURE, and a caller that gets zero must scan WITHOUT caching rather
+ * than cache under a key it could not establish - a key built from a failed
+ * query is a key that collides with every other failed query.
+ */
+int koffridge_identify(const char *path, struct koffridge_fileid *out);
+
+/*
  * THE ANSWER, WHICH IS THE VERDICT AND NOT THE REPORT.
  *
  * One name, not the list. The engine's default is to stop at the first finding
@@ -171,6 +191,80 @@ int koffridge_put(struct koffridge *, const void *id, uint32_t id_len,
 
 /* Forget everything. The table keeps its capacity. */
 void koffridge_clear(struct koffridge *);
+
+/* ------------------------------------------------------------ persistence */
+
+/*
+ * A SWEEP THAT REPEATS IS THE POINT, AND IN MEMORY THE CACHE DIES WITH THE
+ * PROCESS.
+ *
+ * Measured on this tree's build host, a whole-machine memory scan: 3103 modules
+ * across 53 processes collapse to 539 distinct files, and scanning those files
+ * is 2.65 of the 3.26 seconds the sweep takes - 81% of it. Walking the memory
+ * is the other 0.61. So a second sweep five minutes later pays the 2.65 again
+ * to reach an answer it already had, and on a sensor that sweeps periodically
+ * that is nearly all the work it will ever do.
+ *
+ * Saved and reloaded, the same sweep is the 0.61 plus a single read of a few
+ * hundred KB. That is what makes a periodic memory scan something a machine can
+ * actually run.
+ *
+ *
+ * WHAT INVALIDATES THE WHOLE FILE, wholesale and without argument:
+ *
+ *   - a different `db_stamp`. A database update can change any verdict in it,
+ *     including every clean one, so one changed database discards the lot.
+ *     This is what koffridge_open's db_stamp argument was always for.
+ *   - a different entry layout or version. The entries are written as the
+ *     structs they are, so a build whose struct differs cannot read them.
+ *
+ * Nothing is partially salvaged in either case. A cache that kept the entries
+ * it could still parse would be a cache that answers from a contract it has
+ * already admitted it does not share.
+ *
+ *
+ * IT IS A TRUST INPUT, AND THAT IS NOT A DETAIL TO FIND OUT LATER.
+ *
+ * Whoever can write this file decides what this scanner calls clean. An
+ * attacker who can put one entry in it - the identity of their own payload,
+ * with findings 0 - has turned the scanner off for that file and left no trace
+ * in any report, because a served hit looks exactly like a file that was
+ * examined.
+ *
+ * So: it belongs somewhere only the account running the scanner can write, it
+ * must never be read from a path an unprivileged process can influence, and a
+ * scanner must not enable it by DEFAULT - the operator says where it lives,
+ * which is the moment they decide who can write it. That is why there is no
+ * built-in path here and why kofmemscan requires --cache to be given.
+ *
+ * The stored checksum is NOT security. It catches a truncated write and a
+ * corrupted sector; anyone editing the file deliberately recomputes it in four
+ * lines. Said plainly because a checksum in a file format invites exactly the
+ * wrong conclusion.
+ */
+
+/*
+ * Write the cache to `path`. Non-zero on success.
+ *
+ * Written to a temporary beside the target and renamed over it, so an
+ * interrupted save leaves the previous cache rather than a half of this one.
+ */
+int koffridge_save(const struct koffridge *, const char *path);
+
+/*
+ * Load entries from `path` into the cache, returning how many were admitted.
+ *
+ * Zero is the ordinary answer the first time and is not an error; `*why`
+ * explains it either way and is never NULL-terminated nonsense - it is a
+ * literal. `why` itself may be NULL.
+ *
+ * Entries go in through the same insertion the live path uses, so capacity,
+ * probing and eviction behave identically - a loaded entry is an ordinary
+ * entry. They are marked as the OLDEST, so anything this run touches outlives
+ * them when the table has to make room.
+ */
+uint32_t koffridge_load(struct koffridge *, const char *path,
+			const char **why);
 
 /*
  * WHAT IT DID, AND WHY IT IS NOT OPTIONAL.

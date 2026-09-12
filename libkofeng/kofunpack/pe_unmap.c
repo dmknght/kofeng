@@ -261,14 +261,42 @@ static void undo_relocs(kof_buf img, const struct hdr *h,
 	}
 }
 
-int kof_pe_unmap(kof_buf img, uint64_t mapped_at, uint64_t cap,
-		 uint8_t **out, uint64_t *out_len,
+/*
+ * Does this image carry a base relocation table at all.
+ *
+ * Only asked to tell an honest zero delta from an unknowable one - see
+ * base_ambiguous. An image with no relocation table had nothing to undo
+ * whatever its base was, so there is nothing to be ambiguous about.
+ */
+static int has_relocs(kof_buf img, const struct hdr *h)
+{
+	uint32_t rva = 0, len = 0;
+
+	if (h->n_dirs <= DIR_BASERELOC)
+		return 0;
+	if (!kof_rd_u32(img, h->dir_base + DIR_BASERELOC * 8u,      0, &rva) ||
+	    !kof_rd_u32(img, h->dir_base + DIR_BASERELOC * 8u + 4u, 0, &len))
+		return 0;
+	return len != 0 && kof_in_range(img, rva, len);
+}
+
+uint64_t kof_pe_file_image_base(kof_buf file)
+{
+	struct hdr h;
+
+	if (!read_hdr(file, &h))
+		return 0;
+	return h.image_base;
+}
+
+int kof_pe_unmap(kof_buf img, uint64_t mapped_at, uint64_t preferred_base,
+		 uint64_t cap, uint8_t **out, uint64_t *out_len,
 		 struct kof_pe_unmap_info *info)
 {
 	struct hdr h;
 	struct sec *sec;
 	uint8_t *file;
-	uint64_t file_len, hdr_copy;
+	uint64_t file_len, hdr_copy, base;
 	int64_t delta;
 	uint32_t i;
 
@@ -351,12 +379,60 @@ int kof_pe_unmap(kof_buf img, uint64_t mapped_at, uint64_t cap,
 		memcpy(file + sec[i].ptr, img.p + sec[i].rva, (size_t)have);
 	}
 
-	delta = mapped_at ? (int64_t)(mapped_at - h.image_base) : 0;
+	/*
+	 * WHICH BASE THE DELTA RESTS ON, and the caller's wins when it has one.
+	 *
+	 * The buffer's header is the fallback and not the truth: the Windows
+	 * loader rewrites ImageBase in the copy it maps, so for a loaded module
+	 * the header says exactly where it is and the subtraction yields zero.
+	 * A caller holding the file passes the file's base and gets the real
+	 * delta; see the header for the measurement that forced this.
+	 */
+	base = preferred_base ? preferred_base : h.image_base;
+	delta = mapped_at ? (int64_t)(mapped_at - base) : 0;
+
+	/*
+	 * PUT ImageBase BACK, when the caller said what it should be.
+	 *
+	 * The loader rewrote that field on the way in, so a file built from
+	 * these bytes carries the address the image happened to occupy rather
+	 * than the one it asks for. Undoing the relocations and leaving this
+	 * behind would produce a file that differs from the original in exactly
+	 * one field - which is enough to break a hash comparison, and enough to
+	 * make a caller diffing against the file report a patch in the header.
+	 *
+	 * Only when told. Deriving it is the thing that cannot be done, which
+	 * is the whole reason `preferred_base` is an argument.
+	 */
+	if (preferred_base) {
+		uint64_t at = h.plus ? h.opt + 24u : h.opt + 28u;
+		uint32_t n = h.plus ? 8u : 4u;
+
+		if (at + n <= file_len && at + n <= hdr_copy) {
+			uint32_t k;
+
+			for (k = 0; k < n; k++)
+				file[at + k] = (uint8_t)(preferred_base >>
+							 (8u * k));
+		}
+	}
 	if (info) {
-		info->image_base = h.image_base;
+		info->image_base = base;
+		info->hdr_image_base = h.image_base;
 		info->mapped_at = mapped_at;
 		info->delta = delta;
 		info->sections = h.nsec;
+		info->base_told = preferred_base ? 1u : 0u;
+		/*
+		 * Nobody told us, the header points at where the image already
+		 * is, and there ARE relocations. Then a zero delta is either
+		 * "it loaded where it asked" or "the header was rewritten and
+		 * the real delta is gone" - and this cannot tell which, so it
+		 * says that instead of implying the first.
+		 */
+		info->base_ambiguous = (!preferred_base && mapped_at &&
+					mapped_at == h.image_base &&
+					has_relocs(img, &h)) ? 1u : 0u;
 	}
 	if (delta)
 		undo_relocs(img, &h, sec, file, file_len, delta, info);

@@ -169,6 +169,109 @@ int main(void)
 	printf("  %s\n", line);
 	ck(st.capacity == 64, "capacity is what was asked for");
 
+	/*
+	 * 6. SAVED AND RELOADED, and every refusal path taken deliberately.
+	 *
+	 * The cache exists to be reused across runs - measured, it is the
+	 * difference between a 4.4 second whole-machine sweep and a 0.75 second
+	 * one - which means the file format is now something a wrong answer can
+	 * come out of. Each check below is a way that could happen.
+	 */
+	{
+		const char *path = "build/test/fridge_persist.bin";
+		const char *why = "";
+		struct koffridge *g;
+		uint32_t key_a = 0x1234u, key_b = 0x5678u;
+		uint32_t n;
+
+		koffridge_clear(f);
+		memset(&res, 0, sizeof res);
+		res.n = 1;
+		res.v[0].level = KOF_LEVEL_INFECT;
+		snprintf(res.v[0].name, sizeof res.v[0].name,
+			 "PE-x86/Trojan:Kept#1");
+		ck(koffridge_put(f, &key_a, sizeof key_a, &res) == 1,
+		   "store before save");
+		ck(koffridge_put(f, &key_b, sizeof key_b, NULL) == 1,
+		   "store clean before save");
+		ck(koffridge_save(f, path) == 1, "save");
+
+		/* Same db stamp: both verdicts must come back intact. */
+		g = koffridge_open(64, 0x2026090901ull);
+		ck(g != NULL, "reopen");
+		if (g) {
+			n = koffridge_load(g, path, &why);
+			ck(n == 2, "both entries loaded");
+			ck(koffridge_get(g, &key_a, sizeof key_a, &v) == 1,
+			   "loaded entry hits");
+			ck(v.findings == 1 &&
+			   strcmp(v.name, "PE-x86/Trojan:Kept#1") == 0,
+			   "loaded verdict is the one stored");
+			ck(koffridge_get(g, &key_b, sizeof key_b, &v) == 1 &&
+			   v.findings == 0, "loaded clean verdict is clean");
+			/*
+			 * A load is not work this run did. Counting it as
+			 * stores would have the summary claim the very work the
+			 * cache exists to avoid.
+			 */
+			koffridge_stats(g, &st);
+			ck(st.stores == 0, "a load reports no stores");
+			koffridge_close(g);
+		}
+
+		/*
+		 * A DIFFERENT DATABASE DISCARDS THE FILE WHOLE. The entries are
+		 * readable and every one of them was reached by rules this run
+		 * does not have, which is the one refusal here that is about
+		 * trust rather than corruption.
+		 */
+		g = koffridge_open(64, 0x2026091299ull);
+		if (g) {
+			ck(koffridge_load(g, path, &why) == 0,
+			   "a changed database loads nothing");
+			ck(koffridge_get(g, &key_a, sizeof key_a, &v) == 0,
+			   "and leaves no entry behind");
+			koffridge_close(g);
+		}
+
+		/* A missing file is the ordinary first run, not an error. */
+		g = koffridge_open(64, 0x2026090901ull);
+		if (g) {
+			ck(koffridge_load(g, "build/test/no_such_fridge.bin",
+					  &why) == 0, "absent file loads none");
+			koffridge_close(g);
+		}
+
+		/*
+		 * ONE FLIPPED BYTE ANYWHERE IN THE ENTRIES DISCARDS ALL OF
+		 * THEM. A partially-trusted cache is the failure this guards:
+		 * the entry that survived corruption would answer for a file
+		 * whose verdict came out of a damaged record.
+		 */
+		{
+			FILE *fp = fopen(path, "r+b");
+
+			if (fp) {
+				int c;
+
+				/* Past the header, into the first entry. */
+				ck(fseek(fp, 48, SEEK_SET) == 0, "seek entry");
+				c = fgetc(fp);
+				ck(fseek(fp, 48, SEEK_SET) == 0, "seek back");
+				fputc(c ^ 0xff, fp);
+				fclose(fp);
+
+				g = koffridge_open(64, 0x2026090901ull);
+				if (g) {
+					ck(koffridge_load(g, path, &why) == 0,
+					   "a flipped byte loads nothing");
+					koffridge_close(g);
+				}
+			}
+		}
+		remove(path);
+	}
+
 	koffridge_close(f);
 	printf("fridge: %s\n", fails ? "FAILED" : "ok");
 	return fails != 0;

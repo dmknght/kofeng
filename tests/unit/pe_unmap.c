@@ -129,6 +129,99 @@ static uint32_t relocate(unsigned char *img, uint64_t img_len,
 	return done;
 }
 
+/*
+ * Write `base` into the image's own ImageBase field - the loader's other half.
+ *
+ * Written from the format here rather than shared with anything under test, for
+ * the reason relocate() is: a test that borrows the code's idea of where a
+ * field lives cannot catch the code being wrong about it.
+ */
+static void put_hdr_base(unsigned char *img, const struct kof_pe_info *p,
+			 uint64_t base)
+{
+	uint32_t lfanew;
+	uint16_t magic;
+	uint64_t opt;
+	unsigned n, k;
+
+	(void)p;
+	memcpy(&lfanew, img + 0x3c, 4);
+	opt = (uint64_t)lfanew + 4u + 20u;      /* sig + COFF header */
+	memcpy(&magic, img + opt, 2);
+	if (magic == 0x20b) {                   /* PE32+ */
+		opt += 24u;
+		n = 8;
+	} else {                                /* PE32 */
+		opt += 28u;
+		n = 4;
+	}
+	for (k = 0; k < n; k++)
+		img[opt + k] = (unsigned char)(base >> (8u * k));
+}
+
+/*
+ * Un-map and check the result IS the file again, byte for byte.
+ *
+ * Returns 0 when the un-map refused, so the caller stops rather than reading an
+ * output that was never produced. `*ui` is left filled in either way.
+ */
+static int round_trip(const char *path, const unsigned char *file, size_t flen,
+		      const unsigned char *img, uint64_t img_len,
+		      const struct kof_pe_info *p, uint32_t applied,
+		      uint64_t mapped_at, uint64_t preferred,
+		      struct kof_pe_unmap_info *ui)
+{
+	uint8_t *back = NULL;
+	uint64_t back_len = 0;
+	uint32_t i;
+
+	if (!kof_pe_unmap(kof_buf_make(img, img_len), mapped_at, preferred,
+			  1ull << 30, &back, &back_len, ui)) {
+		fail(path, "unmap refused a mapped image");
+		return 0;
+	}
+
+	if (applied && ui->relocs_undone == 0)
+		fail(path, "relocations were applied and none were undone");
+	if (ui->delta != (int64_t)DELTA)
+		fail(path, "delta not as declared");
+
+	/* the headers - ImageBase included, which is why the un-map restores
+	 * it: a file that differs from the original in one field still fails a
+	 * hash comparison and still reads as a patched header. */
+	{
+		uint64_t h = p->size_of_headers;
+
+		if (h > flen)
+			h = flen;
+		if (h > back_len)
+			h = back_len;
+		if (h && memcmp(back, file, (size_t)h) != 0)
+			fail(path, "headers differ");
+	}
+
+	/* every section's content */
+	for (i = 0; i < p->sec_count; i++) {
+		uint64_t off = p->sec[i].file_off;
+		uint64_t len = p->sec[i].file_size;
+
+		if (!len || off + len > flen || off + len > back_len)
+			continue;
+		if (memcmp(back + off, file + off, (size_t)len) != 0) {
+			char why[128];
+
+			snprintf(why, sizeof why,
+				 "section %u (%.8s) content differs", i,
+				 p->sec[i].name);
+			fail(path, why);
+			break;
+		}
+	}
+
+	free(back);
+	return 1;
+}
+
 static void one_file(const char *path)
 {
 	struct kof_pe_info info;
@@ -185,58 +278,73 @@ static void one_file(const char *path)
 	if (applied)
 		with_relocs++;
 
-	if (!kof_pe_unmap(kof_buf_make(img, img_len), info.image_base + DELTA,
-			  1ull << 30, &back, &back_len, &ui)) {
-		fail(path, "unmap refused a mapped image");
-		free(img);
-		free(file);
-		return;
-	}
-
-	if (applied && ui.relocs_undone == 0)
-		fail(path, "relocations were applied and none were undone");
-	if (ui.delta != (int64_t)DELTA)
-		fail(path, "delta not as declared");
-
-	/* the headers */
-	{
-		uint64_t h = info.size_of_headers;
-
-		if (h > flen)
-			h = flen;
-		if (h > back_len)
-			h = back_len;
-		if (h && memcmp(back, file, (size_t)h) != 0)
-			fail(path, "headers differ");
-	}
-
-	/* every section's content */
-	for (i = 0; i < info.sec_count; i++) {
-		uint64_t off = info.sec[i].file_off;
-		uint64_t len = info.sec[i].file_size;
-
-		if (!len || off + len > flen || off + len > back_len)
-			continue;
-		if (memcmp(back + off, file + off, (size_t)len) != 0) {
-			char why[128];
-
-			snprintf(why, sizeof why,
-				 "section %u (%.8s) content differs", i,
-				 info.sec[i].name);
-			fail(path, why);
-			break;
-		}
-	}
-
-	free(back);
+	/*
+	 * SHAPE ONE: MAPPED BY HAND. The relocations are applied and the header
+	 * still asks for the base the image was built for, which is what a
+	 * reflective loader leaves behind - it fixes the pointers and does not
+	 * trouble itself with the field. Here the header IS the preferred base,
+	 * so a caller that has no file to consult still gets the right delta.
+	 */
+	if (!round_trip(path, file, flen, img, img_len, &info, applied,
+			info.image_base + DELTA, 0, &ui))
+		goto done;
+	if (ui.base_told)
+		fail(path, "base reported as told when it was not");
 
 	/*
-	 * A second pass with no address given must copy the bytes and touch no
-	 * relocation - which is what a caller that does not know where the
-	 * image was mapped has to get, since a wrong delta is worse than none.
+	 * SHAPE TWO: MAPPED BY THE WINDOWS LOADER, which is the shape this test
+	 * did not have and the reason a real bug lived under a green result.
+	 *
+	 * The loader writes the address it actually mapped the image at into
+	 * the mapped copy's ImageBase. Measured on a live process, every module
+	 * reports ImageBase == its own load address while the file on disk asks
+	 * for 0x180000000. So `mapped_at - header_base` is ZERO for every
+	 * loaded module on the machine, nothing is undone, and the count comes
+	 * back 0 looking exactly like the innocent "this image has no
+	 * relocation table".
+	 *
+	 * Simulating the mapping without this write is what made the old test
+	 * agree with the code about something neither of them had checked.
+	 */
+	put_hdr_base(img, &info, info.image_base + DELTA);
+
+	/* Told nothing: it must undo NOTHING and must SAY it could not know. */
+	back = NULL;
+	if (!kof_pe_unmap(kof_buf_make(img, img_len), info.image_base + DELTA,
+			  0, 1ull << 30, &back, &back_len, &ui)) {
+		fail(path, "unmap refused a loader-mapped image");
+		goto done;
+	}
+	if (ui.delta != 0)
+		fail(path, "a rewritten header did not yield a zero delta");
+	if (ui.relocs_undone != 0)
+		fail(path, "relocations undone from a base nobody supplied");
+	if (applied && !ui.base_ambiguous)
+		fail(path, "a zero delta over a relocated image was not"
+			   " reported as unknowable");
+	if (!applied && ui.base_ambiguous)
+		fail(path, "an image with no relocations was called ambiguous");
+	free(back);
+	back = NULL;
+
+	/* Told the file's base: it must undo everything and round-trip. */
+	if (!round_trip(path, file, flen, img, img_len, &info, applied,
+			info.image_base + DELTA, info.image_base, &ui))
+		goto done;
+	if (!ui.base_told)
+		fail(path, "base was told and not reported as such");
+	if (ui.base_ambiguous)
+		fail(path, "a supplied base was still called ambiguous");
+	if (ui.hdr_image_base != info.image_base + DELTA)
+		fail(path, "the header's own base was not reported");
+
+	/*
+	 * No address given must copy the bytes and touch no relocation - what a
+	 * caller that does not know where the image was mapped has to get,
+	 * since a wrong delta is worse than none.
 	 */
 	back = NULL;
-	if (kof_pe_unmap(kof_buf_make(img, img_len), 0, 1ull << 30, &back,
+	if (kof_pe_unmap(kof_buf_make(img, img_len), 0, 0, 1ull << 30, &back,
 			 &back_len, &ui)) {
 		if (ui.relocs_undone != 0)
 			fail(path, "relocations undone with no address given");
@@ -245,6 +353,7 @@ static void one_file(const char *path)
 		fail(path, "unmap refused with no address given");
 	}
 
+done:
 	free(img);
 	free(file);
 }
@@ -279,17 +388,17 @@ static void refusals(void)
 	for (i = 0; i < sizeof junk; i++)
 		junk[i] = (unsigned char)(i * 7u + 3u);
 
-	if (kof_pe_unmap(kof_buf_make(junk, sizeof junk), 0, 1u << 20, &out, &n,
+	if (kof_pe_unmap(kof_buf_make(junk, sizeof junk), 0, 0, 1u << 20, &out, &n,
 			 NULL))
 		fail("<junk>", "unmap accepted arbitrary bytes");
 
 	junk[0] = 'M';
 	junk[1] = 'Z';
-	if (kof_pe_unmap(kof_buf_make(junk, sizeof junk), 0, 1u << 20, &out, &n,
+	if (kof_pe_unmap(kof_buf_make(junk, sizeof junk), 0, 0, 1u << 20, &out, &n,
 			 NULL))
 		fail("<MZ only>", "unmap accepted an MZ with no PE header");
 
-	if (kof_pe_unmap(kof_buf_make(junk, 0), 0, 1u << 20, &out, &n, NULL))
+	if (kof_pe_unmap(kof_buf_make(junk, 0), 0, 0, 1u << 20, &out, &n, NULL))
 		fail("<empty>", "unmap accepted an empty buffer");
 }
 

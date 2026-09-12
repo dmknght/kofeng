@@ -23,6 +23,98 @@
 #include "koffridge.h"
 
 /*
+ * THE ONE PLATFORM-DEPENDENT THING IN THIS FILE, and it is confined to the
+ * function below.
+ *
+ * Everything else here is a hash table over opaque keys and compiles the same
+ * everywhere. What a file's identity IS, though, is a question only the
+ * operating system answers, and the two answers are the same four numbers
+ * reached through different calls - so the split is at the call and not at the
+ * structure, and no caller learns which platform it is on.
+ */
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#endif
+
+int koffridge_identify(const char *path, struct koffridge_fileid *out)
+{
+	if (!out)
+		return 0;
+	memset(out, 0, sizeof *out);
+	if (!path || !path[0])
+		return 0;
+
+#ifdef _WIN32
+	{
+		BY_HANDLE_FILE_INFORMATION bi;
+		HANDLE h;
+
+		/*
+		 * Zero access rights: this asks for METADATA and opens nothing
+		 * it could read. That is what lets it identify a file the
+		 * caller has no right to the contents of, and it is why the
+		 * share mode allows delete - a file somebody else is in the
+		 * middle of replacing must not have its identification blocked,
+		 * and must certainly not have its replacement blocked by this.
+		 */
+		h = CreateFileA(path, 0,
+				FILE_SHARE_READ | FILE_SHARE_WRITE |
+				FILE_SHARE_DELETE,
+				NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+				NULL);
+		if (h == INVALID_HANDLE_VALUE)
+			return 0;
+		if (!GetFileInformationByHandle(h, &bi)) {
+			CloseHandle(h);
+			return 0;
+		}
+		CloseHandle(h);
+
+		out->volume = bi.dwVolumeSerialNumber;
+		out->index  = ((uint64_t)bi.nFileIndexHigh << 32) |
+			      bi.nFileIndexLow;
+		out->size   = ((uint64_t)bi.nFileSizeHigh << 32) |
+			      bi.nFileSizeLow;
+		out->mtime  = ((uint64_t)bi.ftLastWriteTime.dwHighDateTime
+			       << 32) | bi.ftLastWriteTime.dwLowDateTime;
+		return 1;
+	}
+#else
+	{
+		struct stat st;
+
+		/*
+		 * stat and not lstat, on purpose: two paths that reach the same
+		 * file through different links ARE the same file and should
+		 * share one answer, which is the whole point of keying on
+		 * st_dev and st_ino rather than on the path. A symlink of its
+		 * own has no content to scan.
+		 */
+		if (stat(path, &st) != 0)
+			return 0;
+		if (!S_ISREG(st.st_mode))
+			return 0;
+
+		out->volume = (uint64_t)st.st_dev;
+		out->index  = (uint64_t)st.st_ino;
+		out->size   = (uint64_t)st.st_size;
+		/*
+		 * Seconds, not the nanosecond field. st_mtim is not in plain
+		 * POSIX.1-2001 and is spelled differently on the systems that
+		 * have it, and a second is finer than the thing this guards
+		 * against - a file replaced with one of identical length whose
+		 * timestamp was then restored defeats nanoseconds just as well.
+		 * The honest statement of that hole is in the header.
+		 */
+		out->mtime  = (uint64_t)st.st_mtime;
+		return 1;
+	}
+#endif
+}
+
+/*
  * 4096 entries, about 1.2MB.
  *
  * Chosen against the thing it is for: the distinct modules behind every mapping
@@ -209,19 +301,31 @@ static void fill_verdict(struct koffridge_verdict *v,
 	v->name[sizeof v->name - 1] = '\0';
 }
 
-int koffridge_put(struct koffridge *f, const void *id, uint32_t id_len,
-		  const struct kof_result *res)
+/*
+ * The slot this identity should be written to, with the key already in place.
+ *
+ * EXTRACTED SO THERE IS ONE COPY OF IT. Two callers store entries now - a scan
+ * reporting a verdict and a cache file being loaded - and the probe, the
+ * "rescanned wins" rule and the eviction choice are subtle enough that a second
+ * copy would be a second set of behaviours the moment either was touched. The
+ * only thing the callers differ on is what they put in `v` and what they set
+ * `used` to, so that is all they are left to do.
+ *
+ * NULL when the identity cannot be stored, with `refused` already counted.
+ */
+static struct entry *slot_for(struct koffridge *f, const void *id,
+			      uint32_t id_len)
 {
 	uint64_t h;
 	uint32_t i, slot, victim = 0;
 	uint64_t victim_used = 0;
 	int have_victim = 0;
-	struct entry *e;
+	struct entry *e = NULL;
 
 	if (!f || !id || !id_len || id_len > KOFFRIDGE_ID_MAX) {
 		if (f)
 			f->st.refused++;
-		return 0;
+		return NULL;
 	}
 	h = hash_id(id, id_len);
 	slot = (uint32_t)h & f->mask;
@@ -233,10 +337,10 @@ int koffridge_put(struct koffridge *f, const void *id, uint32_t id_len,
 		if (!e->h) {
 			f->used++;
 			f->st.used = f->used;
-			goto store;
+			goto claim;
 		}
 		if (same_id(e, h, id, id_len))
-			goto store;      /* rescanned: the newer answer wins */
+			return e;        /* rescanned: the newer answer wins */
 		if (!have_victim || e->used < victim_used) {
 			victim = at;
 			victim_used = e->used;
@@ -252,17 +356,27 @@ int koffridge_put(struct koffridge *f, const void *id, uint32_t id_len,
 	 */
 	if (!have_victim) {
 		f->st.refused++;
-		return 0;
+		return NULL;
 	}
 	e = &f->e[victim];
 	f->st.evictions++;
 
-store:
+claim:
 	e->h = h;
 	e->id_len = id_len;
 	memcpy(e->id, id, id_len);
 	if (id_len < KOFFRIDGE_ID_MAX)
 		memset(e->id + id_len, 0, KOFFRIDGE_ID_MAX - id_len);
+	return e;
+}
+
+int koffridge_put(struct koffridge *f, const void *id, uint32_t id_len,
+		  const struct kof_result *res)
+{
+	struct entry *e = slot_for(f, id, id_len);
+
+	if (!e)
+		return 0;
 	fill_verdict(&e->v, res);
 	e->used = ++f->tick;
 	f->st.stores++;
@@ -304,4 +418,271 @@ size_t koffridge_describe(const struct koffridge *f, char *buf, size_t cap)
 	if (n < 0)
 		return 0;
 	return (size_t)n < cap ? (size_t)n : cap - 1u;
+}
+
+/* ------------------------------------------------------------ persistence */
+
+/*
+ * "KRFG". The whole point of a magic is that a file which is not one is
+ * refused before anything in it is believed, so it is checked first and the
+ * version straight after.
+ */
+#define FILE_MAGIC   0x4746524bu
+#define FILE_VERSION 1u
+
+/*
+ * A CAP ON WHAT A FILE MAY ASK THIS TO ALLOCATE, and it is here because
+ * n_entries is a number read out of a file.
+ *
+ * Nothing is allocated from it - entries are read one at a time into one
+ * struct - so this only bounds how long a corrupt count can keep the loop
+ * going. A file claiming four billion entries is refused rather than read
+ * until it runs out.
+ */
+#define FILE_ENTRIES_MAX (1u << 22)
+
+struct file_hdr {
+	uint32_t magic;
+	uint16_t version;
+	uint16_t hdr_size;
+
+	/*
+	 * sizeof(struct entry), because the entries are written AS the structs
+	 * they are. A build whose entry differs by one byte would read every
+	 * field of every entry from the wrong place, and there is no way to
+	 * notice that from the values - so it is refused on the size instead.
+	 */
+	uint32_t entry_size;
+	uint32_t n_entries;
+
+	/*
+	 * THE DATABASE THESE VERDICTS CAME FROM. A mismatch discards the file,
+	 * for the reason in the header: a database update can change any
+	 * verdict in here, and most of all the clean ones.
+	 */
+	uint64_t db_stamp;
+
+	/* FNV-1a over the entry array only. Catches a truncated write and a
+	 * bad sector; see the header on why it is not security. */
+	uint64_t sum;
+
+	uint64_t reserved;
+};
+
+static uint64_t fnv(const void *p, size_t n, uint64_t h)
+{
+	const uint8_t *b = p;
+	size_t i;
+
+	for (i = 0; i < n; i++) {
+		h ^= b[i];
+		h *= 1099511628211ull;
+	}
+	return h;
+}
+
+#define FNV_SEED 1469598103934665603ull
+
+int koffridge_save(const struct koffridge *f, const char *path)
+{
+	struct file_hdr h;
+	char tmp[1024];
+	FILE *fp;
+	uint32_t i, n = 0;
+	uint64_t sum = FNV_SEED;
+
+	if (!f || !path || !path[0])
+		return 0;
+	if (snprintf(tmp, sizeof tmp, "%s.tmp", path) >= (int)sizeof tmp)
+		return 0;
+
+	for (i = 0; i < f->cap; i++)
+		if (f->e[i].h)
+			n++;
+
+	/* The checksum is over what will be written, so it is computed on the
+	 * same pass shape the write uses rather than trusting the two loops to
+	 * stay in step. */
+	for (i = 0; i < f->cap; i++)
+		if (f->e[i].h)
+			sum = fnv(&f->e[i], sizeof f->e[i], sum);
+
+	memset(&h, 0, sizeof h);
+	h.magic      = FILE_MAGIC;
+	h.version    = FILE_VERSION;
+	h.hdr_size   = (uint16_t)sizeof h;
+	h.entry_size = (uint32_t)sizeof(struct entry);
+	h.n_entries  = n;
+	h.db_stamp   = f->db_stamp;
+	h.sum        = sum;
+
+	/*
+	 * WRITTEN BESIDE THE TARGET AND RENAMED OVER IT.
+	 *
+	 * A save that is interrupted - the machine goes down, the disk fills -
+	 * must leave the PREVIOUS cache intact rather than half of this one.
+	 * Half a cache is worse than none: the header would describe entries
+	 * that are not there, and the checksum is the only thing standing
+	 * between that and a table full of whatever the tail of the file was.
+	 */
+	fp = fopen(tmp, "wb");
+	if (!fp)
+		return 0;
+	if (fwrite(&h, 1, sizeof h, fp) != sizeof h)
+		goto bad;
+	for (i = 0; i < f->cap; i++) {
+		if (!f->e[i].h)
+			continue;
+		if (fwrite(&f->e[i], 1, sizeof f->e[i], fp) !=
+		    sizeof f->e[i])
+			goto bad;
+	}
+	if (fclose(fp) != 0)
+		goto bad_closed;
+
+	remove(path);            /* rename onto an existing file fails on
+				  * Windows; removing first is what makes this
+				  * one line portable */
+	if (rename(tmp, path) != 0)
+		goto bad_closed;
+	return 1;
+
+bad:
+	fclose(fp);
+bad_closed:
+	remove(tmp);
+	return 0;
+}
+
+uint32_t koffridge_load(struct koffridge *f, const char *path,
+			const char **why)
+{
+	struct file_hdr h;
+	FILE *fp;
+	uint32_t i, got = 0;
+	uint64_t sum = FNV_SEED, stores_before;
+	struct entry *buf;
+
+	if (why)
+		*why = "";
+	if (!f || !path || !path[0]) {
+		if (why)
+			*why = "no cache path";
+		return 0;
+	}
+	fp = fopen(path, "rb");
+	if (!fp) {
+		if (why)
+			*why = "no cache yet";
+		return 0;
+	}
+	if (fread(&h, 1, sizeof h, fp) != sizeof h) {
+		fclose(fp);
+		if (why)
+			*why = "too short to hold a header";
+		return 0;
+	}
+	if (h.magic != FILE_MAGIC) {
+		fclose(fp);
+		if (why)
+			*why = "not a fridge file";
+		return 0;
+	}
+	if (h.version != FILE_VERSION || h.hdr_size != sizeof h) {
+		fclose(fp);
+		if (why)
+			*why = "written by a different version";
+		return 0;
+	}
+	if (h.entry_size != sizeof(struct entry)) {
+		fclose(fp);
+		if (why)
+			*why = "written by a build with a different entry";
+		return 0;
+	}
+	/*
+	 * THE ONE REFUSAL THAT IS NOT ABOUT CORRUPTION.
+	 *
+	 * Everything above says the file cannot be read. This says it can be
+	 * read and must not be believed: different database, so every verdict
+	 * in it was reached by rules this run does not have.
+	 */
+	if (h.db_stamp != f->db_stamp) {
+		fclose(fp);
+		if (why)
+			*why = "database changed since it was written";
+		return 0;
+	}
+	if (h.n_entries > FILE_ENTRIES_MAX) {
+		fclose(fp);
+		if (why)
+			*why = "claims more entries than a cache can hold";
+		return 0;
+	}
+
+	/*
+	 * READ IT ALL BEFORE ADMITTING ANY OF IT, because the checksum covers
+	 * the whole array and is the only thing that catches a truncated save.
+	 * Inserting as it went would put half a cache into the table and then
+	 * discover the half was all there was.
+	 */
+	buf = h.n_entries ? calloc(h.n_entries, sizeof *buf) : NULL;
+	if (h.n_entries && !buf) {
+		fclose(fp);
+		if (why)
+			*why = "out of memory";
+		return 0;
+	}
+	for (i = 0; i < h.n_entries; i++) {
+		if (fread(&buf[i], 1, sizeof *buf, fp) != sizeof *buf) {
+			fclose(fp);
+			free(buf);
+			if (why)
+				*why = "ends before the entries it declares";
+			return 0;
+		}
+		sum = fnv(&buf[i], sizeof *buf, sum);
+	}
+	fclose(fp);
+
+	if (sum != h.sum) {
+		free(buf);
+		if (why)
+			*why = "checksum does not match - discarded whole";
+		return 0;
+	}
+
+	/*
+	 * Through the same slot search the live path uses, so a loaded entry is
+	 * an ordinary entry in every respect - see slot_for.
+	 *
+	 * `used` is 0 rather than a tick: these are the OLDEST things in the
+	 * table, so the first entry this run touches survives eviction ahead of
+	 * any of them. A tick from the previous run would be a number from a
+	 * different sequence.
+	 *
+	 * `stores` is put back afterwards. A loaded entry was not stored by
+	 * this run, and counting it as one would make the summary claim work
+	 * that the load is the whole point of not doing.
+	 */
+	stores_before = f->st.stores;
+	for (i = 0; i < h.n_entries; i++) {
+		struct entry *e;
+
+		if (!buf[i].h || !buf[i].id_len ||
+		    buf[i].id_len > KOFFRIDGE_ID_MAX)
+			continue;       /* the file disagrees with itself */
+		e = slot_for(f, buf[i].id, buf[i].id_len);
+		if (!e)
+			continue;
+		e->v = buf[i].v;
+		e->used = 0;
+		got++;
+	}
+	f->st.stores = stores_before;
+	free(buf);
+
+	if (why)
+		*why = got ? "loaded" : "held nothing usable";
+	return got;
 }
