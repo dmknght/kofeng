@@ -1,0 +1,1017 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* See aproc.h. */
+
+#define _GNU_SOURCE
+
+#include <ctype.h>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/uio.h>
+
+#include "aproc.h"
+#include "apagemap.h"
+
+#define APATH_MAX 4096
+
+/* PF_KTHREAD, from the kernel's sched.h. Field 9 of /proc/<pid>/stat. */
+#define A_PF_KTHREAD 0x00200000u
+
+/*
+ * How many runs a region's pagemap scan records before it stops recording and
+ * only counts. 256 covers every region measured on a real desktop - the worst
+ * observed was 30 runs in a 64 MB V8 mapping - and costs 4 KB in the handle.
+ */
+#define A_RUNS_CACHED 256
+
+/* Pagemap entries read per pread. 4096 entries is 32 KB and covers 16 MB of
+ * address space per syscall, so a 512 MB region costs 32 reads rather than one
+ * 1 MB allocation. */
+#define A_PM_BATCH 4096
+
+/* Defaults for kofa_pmem_option, all reasoned in aproc.h. */
+#define A_DEF_MAX_REGION      (1ULL << 31)   /* 2 GB  */
+#define A_DEF_MAX_HEAP_REGION (1ULL << 20)   /* 1 MB  */
+#define A_DEF_MAX_BYTES       (256ULL << 20) /* 256 MB per process */
+#define A_DEF_PAGEMAP_MIN     (1ULL << 20)   /* 1 MB  */
+
+/* ------------------------------------------------------------------ names */
+
+const char *kofa_err_name(int err)
+{
+	switch (err) {
+	case KOFA_OK:              return "ok";
+	case KOFA_ERR_GONE:        return "gone";
+	case KOFA_ERR_DENIED:      return "denied";
+	case KOFA_ERR_NOMEM:       return "nomem";
+	case KOFA_ERR_UNSUPPORTED: return "unsupported";
+	case KOFA_ERR_OS:          return "os";
+	default:                   return "?";
+	}
+}
+
+const char *kofa_rgn_use_name(uint8_t use)
+{
+	switch (use) {
+	case KOFA_USE_IMAGE: return "image";
+	case KOFA_USE_CODE:  return "code";
+	case KOFA_USE_HEAP:  return "heap";
+	case KOFA_USE_STACK: return "stack";
+	case KOFA_USE_DATA:  return "data";
+	default:             return "?";
+	}
+}
+
+size_t kofa_region_describe(const struct kofa_region *r, char *buf, size_t cap)
+{
+	char prot[5];
+	int n;
+
+	if (!buf || !cap)
+		return 0;
+	if (!r) {
+		buf[0] = '\0';
+		return 0;
+	}
+
+	prot[0] = (r->flags & KOFA_RGF_READ)  ? 'r' : '-';
+	prot[1] = (r->flags & KOFA_RGF_WRITE) ? 'w' : '-';
+	prot[2] = (r->flags & KOFA_RGF_EXEC)  ? 'x' : '-';
+	prot[3] = 'p';
+	prot[4] = '\0';
+
+	n = snprintf(buf, cap, "%016llx %8lluK res %7lluK%s %s %-5s%s%s%s%s%s%s%s%s%s",
+		     (unsigned long long)r->base,
+		     (unsigned long long)(r->size >> 10),
+		     (unsigned long long)(r->rss >> 10),
+		     (r->flags & KOFA_RGF_RSS_MEASURED) ? " " : "?",
+		     prot, kofa_rgn_use_name(r->use),
+		     (r->flags & KOFA_RGF_UNBACKED)   ? " unbacked" : "",
+		     (r->flags & KOFA_RGF_DELETED)    ? " deleted"  : "",
+		     (r->flags & KOFA_RGF_MEMFD)      ? " memfd"    : "",
+		     (r->flags & KOFA_RGF_WX)         ? " wx"       : "",
+		     (r->flags & KOFA_RGF_UNEXAMINED) ? " skipped"  : "",
+		     (r->flags & KOFA_RGF_ZERO_HEAVY) ? " zeroes"   : "",
+		     (r->flags & KOFA_RGF_DIRTY_CODE) ? " DIRTY"    : "",
+		     (r->path && r->path[0]) ? " " : "",
+		     (r->path && r->path[0]) ? r->path : "");
+
+	if (n < 0)
+		return 0;
+	return ((size_t)n >= cap) ? cap - 1 : (size_t)n;
+}
+
+/* -------------------------------------------------------------- /proc/stat */
+
+/*
+ * Parse the fields this library wants out of /proc/<pid>/stat.
+ *
+ * THE COMM FIELD IS WHY THIS IS NOT A scanf. It is the executable's name in
+ * parentheses, it is not escaped, and it may contain both spaces and
+ * parentheses - a process can be called "foo) 1 2 3 (bar". Every parser that
+ * splits on whitespace gets a wrong ppid for those, and only for those, which
+ * is the kind of bug that survives for years. The only correct split is at the
+ * LAST ')' in the line.
+ */
+struct a_stat {
+	uint32_t ppid;
+	uint32_t flags;
+	uint64_t start_time;
+	char     comm[64];
+};
+
+static int a_read_stat(uint32_t pid, struct a_stat *out)
+{
+	char path[64], buf[2048], *close_paren, *p;
+	int fd;
+	ssize_t got;
+	int field;
+
+	snprintf(path, sizeof path, "/proc/%u/stat", (unsigned)pid);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return (errno == EACCES) ? KOFA_ERR_DENIED : KOFA_ERR_GONE;
+
+	got = read(fd, buf, sizeof buf - 1);
+	close(fd);
+	if (got <= 0)
+		return KOFA_ERR_GONE;
+	buf[got] = '\0';
+
+	close_paren = strrchr(buf, ')');
+	if (!close_paren)
+		return KOFA_ERR_OS;
+
+	/* comm, between the first '(' and that last ')'. */
+	p = strchr(buf, '(');
+	if (p && p < close_paren) {
+		size_t n = (size_t)(close_paren - p - 1);
+
+		if (n >= sizeof out->comm)
+			n = sizeof out->comm - 1;
+		memcpy(out->comm, p + 1, n);
+		out->comm[n] = '\0';
+	} else {
+		out->comm[0] = '\0';
+	}
+
+	/*
+	 * After the ')' the fields are, numbered as procfs numbers them:
+	 * 3 state, 4 ppid, ... 9 flags, ... 22 starttime. So counting tokens
+	 * from zero after the paren, ppid is 1, flags is 6 and starttime is 19.
+	 */
+	out->ppid = 0;
+	out->flags = 0;
+	out->start_time = 0;
+
+	p = close_paren + 1;
+	for (field = 0; field <= 19; field++) {
+		char *end;
+		unsigned long long v;
+
+		while (*p == ' ')
+			p++;
+		if (!*p)
+			return KOFA_ERR_OS;
+
+		if (field == 0) {   /* state, not a number */
+			while (*p && *p != ' ')
+				p++;
+			continue;
+		}
+
+		v = strtoull(p, &end, 10);
+		if (end == p)
+			return KOFA_ERR_OS;
+		p = end;
+
+		if (field == 1)
+			out->ppid = (uint32_t)v;
+		else if (field == 6)
+			out->flags = (uint32_t)v;
+		else if (field == 19)
+			out->start_time = (uint64_t)v;
+	}
+
+	return KOFA_OK;
+}
+
+/*
+ * readlink /proc/<pid>/exe into `buf`, stripping a " (deleted)" suffix and
+ * reporting what it meant in *flags.
+ *
+ * The suffix is stripped HERE, once, because a path ending in " (deleted)" is
+ * not a path anything can open, and a caller that has to notice a magic suffix
+ * before using a string is a caller that will one day forget. A memfd path is
+ * left alone: it is not a filesystem path at all and there is nothing to
+ * recover by trimming it.
+ */
+static void a_read_exe(uint32_t pid, char *buf, size_t cap, uint32_t *flags)
+{
+	char path[64];
+	ssize_t n;
+
+	buf[0] = '\0';
+	snprintf(path, sizeof path, "/proc/%u/exe", (unsigned)pid);
+
+	n = readlink(path, buf, cap - 1);
+	if (n <= 0) {
+		buf[0] = '\0';
+		return;
+	}
+	buf[n] = '\0';
+
+	if (n > 10 && !strcmp(buf + n - 10, " (deleted)")) {
+		buf[n - 10] = '\0';
+		*flags |= KOFA_PF_EXE_GONE;
+	}
+	if (!strncmp(buf, "/memfd:", 7))
+		*flags |= KOFA_PF_EXE_MEMFD;
+}
+
+/* -------------------------------------------------------------- the plist */
+
+struct kofa_plist {
+	DIR *d;
+	struct kofa_plist_option o;
+	char comm[64];
+	char exe[APATH_MAX];
+};
+
+struct kofa_plist *kofa_plist_open(const struct kofa_plist_option *opt,
+				   int *err)
+{
+	struct kofa_plist *l = calloc(1, sizeof *l);
+
+	if (!l) {
+		if (err)
+			*err = KOFA_ERR_NOMEM;
+		return NULL;
+	}
+
+	if (opt) {
+		l->o = *opt;
+	} else {
+		l->o.want_kernel = 0;
+		l->o.want_refused = 1;
+	}
+
+	l->d = opendir("/proc");
+	if (!l->d) {
+		free(l);
+		if (err)
+			*err = KOFA_ERR_OS;
+		return NULL;
+	}
+
+	if (err)
+		*err = KOFA_OK;
+	return l;
+}
+
+int kofa_plist_next(struct kofa_plist *l, struct kofa_proc *out)
+{
+	struct dirent *de;
+
+	if (!l || !out)
+		return 0;
+
+	while ((de = readdir(l->d)) != NULL) {
+		struct a_stat st;
+		struct stat sb;
+		char path[64];
+		unsigned long pid;
+		char *end;
+		int rc;
+
+		if (!isdigit((unsigned char)de->d_name[0]))
+			continue;
+		pid = strtoul(de->d_name, &end, 10);
+		if (*end || !pid)
+			continue;
+
+		memset(out, 0, sizeof *out);
+		out->pid = (uint32_t)pid;
+
+		rc = a_read_stat(out->pid, &st);
+		if (rc == KOFA_ERR_GONE)
+			continue;          /* exited while we walked. Normal. */
+		if (rc == KOFA_ERR_DENIED) {
+			if (!l->o.want_refused)
+				continue;
+			out->flags |= KOFA_PF_REFUSED;
+			l->comm[0] = '\0';
+			l->exe[0] = '\0';
+			out->comm = l->comm;
+			out->exe = l->exe;
+			return 1;
+		}
+		if (rc != KOFA_OK)
+			continue;
+
+		if (st.flags & A_PF_KTHREAD) {
+			if (!l->o.want_kernel)
+				continue;
+			out->flags |= KOFA_PF_KERNEL;
+		}
+
+		out->ppid = st.ppid;
+		out->start_time = st.start_time;
+
+		memcpy(l->comm, st.comm, sizeof l->comm);
+		l->comm[sizeof l->comm - 1] = '\0';
+
+		l->exe[0] = '\0';
+		if (!(out->flags & KOFA_PF_KERNEL))
+			a_read_exe(out->pid, l->exe, sizeof l->exe,
+				   &out->flags);
+
+		snprintf(path, sizeof path, "/proc/%u", (unsigned)out->pid);
+		if (stat(path, &sb) == 0) {
+			out->uid = sb.st_uid;
+			out->gid = sb.st_gid;
+		}
+
+		/*
+		 * Refused is decided by whether the ADDRESS SPACE can be read,
+		 * not by whether /proc/<pid>/stat could - stat is world
+		 * readable and maps is not, so a walk that judged from stat
+		 * would call every other user's process readable and only find
+		 * out later, per region.
+		 */
+		snprintf(path, sizeof path, "/proc/%u/maps", (unsigned)out->pid);
+		if (!(out->flags & KOFA_PF_KERNEL) &&
+		    access(path, R_OK) != 0) {
+			if (!l->o.want_refused)
+				continue;
+			out->flags |= KOFA_PF_REFUSED;
+		}
+
+		out->comm = l->comm;
+		out->exe = l->exe;
+		return 1;
+	}
+
+	return 0;
+}
+
+void kofa_plist_close(struct kofa_plist *l)
+{
+	if (!l)
+		return;
+	if (l->d)
+		closedir(l->d);
+	free(l);
+}
+
+/* --------------------------------------------------------------- the pmem */
+
+struct kofa_pmem {
+	struct kofa_pmem_option o;
+	struct kofa_proc proc;
+	char comm[64];
+	char exe[APATH_MAX];
+
+	FILE *maps;
+	int use_smaps;
+	int pmfd;
+
+	/*
+	 * ONE REGION OF LOOKAHEAD, which reading smaps forces.
+	 *
+	 * smaps gives a maps line followed by a block of counters belonging to
+	 * it, so a region is only complete when the NEXT region's header
+	 * arrives (or the file ends). maps needs no lookahead at all - hence
+	 * the flag, rather than two walks.
+	 */
+	int pending_valid;
+	struct kofa_region pending;
+	char pending_path[APATH_MAX];
+
+	uint64_t *pm_scratch;
+	struct kofa_run runs[A_RUNS_CACHED];
+
+	/* Which region self->runs currently describes, so kofa_pmem_runs does
+	 * not read the pagemap a second time for the region the caller just
+	 * received. Zero size means "nothing cached". */
+	uint64_t cached_base, cached_size;
+	int cached_runs, cached_more;
+
+	char line[APATH_MAX + 256];
+	char path[APATH_MAX];
+
+	/* Grouping state - see kofa_region.group_id. */
+	uint64_t prev_end, prev_inode, group_id;
+	int have_prev, prev_anon;
+
+	uint64_t budget_used;
+	struct kofa_pmem_stat st;
+};
+
+static uint64_t a_opt_or(uint64_t v, uint64_t def) { return v ? v : def; }
+
+struct kofa_pmem *kofa_pmem_open(uint32_t pid, uint64_t start_time,
+				 const struct kofa_pmem_option *opt, int *err)
+{
+	struct kofa_pmem *m;
+	struct a_stat st;
+	char path[64];
+	int rc;
+
+	rc = a_read_stat(pid, &st);
+	if (rc != KOFA_OK) {
+		if (err)
+			*err = rc;
+		return NULL;
+	}
+
+	/*
+	 * THE PID HAS BEEN REUSED CHECK, and it is the reason every entry
+	 * point here takes a pair. A pid names a slot, not a process.
+	 */
+	if (start_time && st.start_time != start_time) {
+		if (err)
+			*err = KOFA_ERR_GONE;
+		return NULL;
+	}
+
+	m = calloc(1, sizeof *m);
+	if (!m) {
+		if (err)
+			*err = KOFA_ERR_NOMEM;
+		return NULL;
+	}
+
+	if (opt)
+		m->o = *opt;
+	m->o.want = m->o.want ? m->o.want : KOFA_MW_DEFAULT;
+	m->o.max_region = a_opt_or(m->o.max_region, A_DEF_MAX_REGION);
+	m->o.max_heap_region =
+		a_opt_or(m->o.max_heap_region, A_DEF_MAX_HEAP_REGION);
+	m->o.max_bytes = a_opt_or(m->o.max_bytes, A_DEF_MAX_BYTES);
+	m->o.pagemap_min = a_opt_or(m->o.pagemap_min, A_DEF_PAGEMAP_MIN);
+
+	m->pmfd = -1;
+	m->proc.pid = pid;
+	m->proc.ppid = st.ppid;
+	m->proc.start_time = st.start_time;
+	memcpy(m->comm, st.comm, sizeof m->comm);
+	m->comm[sizeof m->comm - 1] = '\0';
+	a_read_exe(pid, m->exe, sizeof m->exe, &m->proc.flags);
+	m->proc.comm = m->comm;
+	m->proc.exe = m->exe;
+
+	m->use_smaps = (m->o.want & KOFA_MW_SMAPS) != 0;
+	snprintf(path, sizeof path, "/proc/%u/%s", (unsigned)pid,
+		 m->use_smaps ? "smaps" : "maps");
+	m->maps = fopen(path, "re");
+	if (!m->maps && m->use_smaps) {
+		/* smaps needs CONFIG_PROC_PAGE_MONITOR too. Falling back keeps
+		 * the walk working on a kernel without it, with rss coming
+		 * from pagemap and reading looser. */
+		m->use_smaps = 0;
+		snprintf(path, sizeof path, "/proc/%u/maps", (unsigned)pid);
+		m->maps = fopen(path, "re");
+	}
+	if (!m->maps) {
+		int e = (errno == EACCES || errno == EPERM) ? KOFA_ERR_DENIED
+							    : KOFA_ERR_GONE;
+		free(m);
+		if (err)
+			*err = e;
+		return NULL;
+	}
+
+	if (m->o.want & KOFA_MW_PAGEMAP) {
+		int pe = KOFA_OK;
+
+		m->pmfd = kofa_pm_open(pid, &pe);
+		if (m->pmfd >= 0) {
+			m->pm_scratch = malloc((size_t)A_PM_BATCH * 8);
+			if (!m->pm_scratch) {
+				close(m->pmfd);
+				m->pmfd = -1;
+			}
+		}
+		/*
+		 * A missing pagemap is NOT a failure to open the process. The
+		 * walk still works, every region comes back flagged
+		 * KOFA_RGF_NO_PAGEMAP, and reads are blind - slower, and
+		 * honestly labelled.
+		 */
+	}
+
+	if (err)
+		*err = KOFA_OK;
+	return m;
+}
+
+const struct kofa_proc *kofa_pmem_proc(const struct kofa_pmem *m)
+{
+	return m ? &m->proc : NULL;
+}
+
+/*
+ * Decide what a region is, from the maps line alone. No bytes are read here.
+ *
+ * THE ORDER OF THESE TESTS IS THE WHOLE FUNCTION. [vdso] and [vsyscall] are
+ * anonymous and executable, so a classifier that asks "executable with no file"
+ * first files the vDSO of every process on the machine as unbacked code -
+ * measured: 34 of them on this desktop, one per process, every one a false
+ * positive that no amount of later filtering can undo because the fact was
+ * recorded wrong.
+ */
+static void a_classify(struct kofa_region *r, const char *name)
+{
+	int exec = (r->flags & KOFA_RGF_EXEC) != 0;
+	int write = (r->flags & KOFA_RGF_WRITE) != 0;
+	int read = (r->flags & KOFA_RGF_READ) != 0;
+	int anon = (r->inode == 0);
+
+	/*
+	 * NO ACCESS AT ALL, FIRST, because these are enormous and because
+	 * everything below would give one of them a confident wrong answer.
+	 * Chromium reserves seven of them at roughly 1.3 TB each. They hold
+	 * nothing and cannot be read; see aproc.h.
+	 */
+	if (!read && !write && !exec) {
+		r->use = KOFA_USE_UNKNOWN;
+		return;
+	}
+
+	/* The kernel's own mappings, named in brackets. None of them is
+	 * interesting and two of them are executable. */
+	if (name[0] == '[') {
+		if (!strcmp(name, "[stack]")) {
+			r->use = KOFA_USE_STACK;
+			return;
+		}
+		if (!strcmp(name, "[heap]")) {
+			r->use = KOFA_USE_HEAP;
+			return;
+		}
+		/* [vdso] [vvar] [vsyscall] [vvar_vclock] and anything else the
+		 * kernel adds later. Data, whatever its protection says. */
+		r->use = KOFA_USE_DATA;
+		return;
+	}
+
+	if (exec) {
+		if (anon) {
+			r->use = KOFA_USE_CODE;
+			r->flags |= KOFA_RGF_UNBACKED;
+		} else {
+			r->use = KOFA_USE_IMAGE;
+			/* A file that has been unlinked, or was never a file:
+			 * the bytes are here and nothing on disk holds them,
+			 * so this is code a file scanner cannot reach. */
+			if (r->flags & (KOFA_RGF_DELETED | KOFA_RGF_MEMFD))
+				r->flags |= KOFA_RGF_UNBACKED;
+		}
+		return;
+	}
+
+	if (anon && write) {
+		r->use = KOFA_USE_HEAP;
+		return;
+	}
+
+	r->use = KOFA_USE_DATA;
+}
+
+/*
+ * Parse one line of /proc/<pid>/maps.
+ *
+ * The pathname is the rest of the line after five whitespace-separated fields,
+ * and it MAY CONTAIN SPACES - " (deleted)" is itself a space and a word glued
+ * onto a path by the kernel. So the split is by field count, never by the last
+ * token.
+ */
+static int a_parse_maps(char *line, struct kofa_region *r, char *pathbuf,
+			size_t pathcap)
+{
+	unsigned long long lo, hi, off, ino;
+	unsigned maj, min;
+	char perms[8];
+	char *p = line;
+	int n = 0;
+	size_t len;
+
+	memset(r, 0, sizeof *r);
+	pathbuf[0] = '\0';
+
+	if (sscanf(line, "%llx-%llx %7s %llx %x:%x %llu%n",
+		   &lo, &hi, perms, &off, &maj, &min, &ino, &n) < 7)
+		return 0;
+	if (hi <= lo)
+		return 0;
+
+	r->base = lo;
+	r->size = hi - lo;
+	r->file_off = off;
+	r->inode = ino;
+	r->dev = ((uint64_t)maj << 8) | min;
+
+	if (perms[0] == 'r') r->flags |= KOFA_RGF_READ;
+	if (perms[1] == 'w') r->flags |= KOFA_RGF_WRITE;
+	if (perms[2] == 'x') r->flags |= KOFA_RGF_EXEC;
+	if ((r->flags & KOFA_RGF_WRITE) && (r->flags & KOFA_RGF_EXEC))
+		r->flags |= KOFA_RGF_WX;
+
+	p = line + n;
+	while (*p == ' ' || *p == '\t')
+		p++;
+
+	len = strlen(p);
+	while (len && (p[len - 1] == '\n' || p[len - 1] == '\r'))
+		p[--len] = '\0';
+
+	if (!len)
+		return 1;
+
+	if (len >= pathcap)
+		len = pathcap - 1;
+	memcpy(pathbuf, p, len);
+	pathbuf[len] = '\0';
+
+	if (len > 10 && !strcmp(pathbuf + len - 10, " (deleted)")) {
+		pathbuf[len - 10] = '\0';
+		len -= 10;
+		r->flags |= KOFA_RGF_DELETED;
+	}
+
+	if (!strncmp(pathbuf, "/memfd:", 7)) {
+		r->flags |= KOFA_RGF_MEMFD;
+		/*
+		 * A memfd never had a file, so the "deleted" the kernel
+		 * appends to it does not mean what it means anywhere else.
+		 * Withdrawn here so a caller counting unlinked files does not
+		 * count these twice under two different stories.
+		 */
+		r->flags &= ~(uint32_t)KOFA_RGF_DELETED;
+	} else if (!strncmp(pathbuf, "/dev/shm/", 9) ||
+		   !strncmp(pathbuf, "/run/", 5)) {
+		r->flags |= KOFA_RGF_VOLATILE;
+	}
+
+	return 1;
+}
+
+/* Is this a maps/smaps region header rather than one of smaps' counter
+ * lines? A header starts with a hex address and has a '-' before its first
+ * space; a counter line starts with a capital letter. */
+static int a_is_header(const char *line)
+{
+	const char *p = line;
+
+	if (!isxdigit((unsigned char)*p))
+		return 0;
+	while (*p && *p != ' ') {
+		if (*p == '-')
+			return 1;
+		p++;
+	}
+	return 0;
+}
+
+/* "Rss:                 360 kB" -> bytes. */
+static uint64_t a_kb_line(const char *line)
+{
+	const char *p = strchr(line, ':');
+
+	if (!p)
+		return 0;
+	return (uint64_t)strtoull(p + 1, NULL, 10) * 1024u;
+}
+
+/*
+ * The next region as the kernel describes it, with smaps' Rss folded in when
+ * this walk is reading smaps. No filtering, no pagemap, no budgets - those
+ * belong to the caller below, which needs to see EVERY region to group them
+ * even when it will report only some.
+ */
+static int a_next_raw(struct kofa_pmem *m, struct kofa_region *r)
+{
+	if (!m->use_smaps) {
+		while (fgets(m->line, (int)sizeof m->line, m->maps))
+			if (a_parse_maps(m->line, r, m->path, sizeof m->path))
+				return 1;
+		return 0;
+	}
+
+	for (;;) {
+		if (!fgets(m->line, (int)sizeof m->line, m->maps)) {
+			if (!m->pending_valid)
+				return 0;
+			*r = m->pending;
+			memcpy(m->path, m->pending_path, sizeof m->path);
+			m->pending_valid = 0;
+			return 1;
+		}
+
+		if (a_is_header(m->line)) {
+			struct kofa_region nr;
+			char np[APATH_MAX];
+
+			if (!a_parse_maps(m->line, &nr, np, sizeof np))
+				continue;
+
+			if (m->pending_valid) {
+				*r = m->pending;
+				memcpy(m->path, m->pending_path,
+				       sizeof m->path);
+				m->pending = nr;
+				memcpy(m->pending_path, np, sizeof np);
+				return 1;
+			}
+			m->pending = nr;
+			memcpy(m->pending_path, np, sizeof np);
+			m->pending_valid = 1;
+			continue;
+		}
+
+		/*
+		 * Rss is the one counter this walk wants, and it is the one
+		 * pagemap cannot give: it EXCLUDES the shared zero page. See
+		 * KOFA_MW_SMAPS.
+		 */
+		if (m->pending_valid && !strncmp(m->line, "Rss:", 4)) {
+			m->pending.rss = a_kb_line(m->line);
+			m->pending.flags |= KOFA_RGF_RSS_MEASURED;
+			continue;
+		}
+
+		/*
+		 * Private_Dirty on an executable file-backed region is code
+		 * somebody wrote to - see KOFA_RGF_DIRTY_CODE. Free, because
+		 * smaps is already open for Rss.
+		 */
+		if (m->pending_valid &&
+		    !strncmp(m->line, "Private_Dirty:", 14) &&
+		    (m->pending.flags & KOFA_RGF_EXEC) &&
+		    m->pending.inode != 0 &&
+		    a_kb_line(m->line) > 0)
+			m->pending.flags |= KOFA_RGF_DIRTY_CODE;
+	}
+}
+
+int kofa_pmem_next_region(struct kofa_pmem *m, struct kofa_region *out)
+{
+	struct kofa_region r_scratch;
+
+	if (!m || !out || !m->maps)
+		return 0;
+
+	while (a_next_raw(m, &r_scratch)) {
+		struct kofa_region r = r_scratch;
+		int anon, want_it, have_smaps;
+		uint64_t smaps_rss;
+
+		a_classify(&r, m->path);
+		r.loc = kof_classify_path(m->path);
+		r.path = m->path;
+
+		/*
+		 * GROUPING RUNS FIRST, AND BEFORE FILTERING.
+		 *
+		 * One mapped shared object is three or four VMAs split where
+		 * the protection changes. They are grouped by being adjacent
+		 * and sharing a backing inode - or by being adjacent and both
+		 * anonymous.
+		 *
+		 * It must happen before the filter, because adjacency is a
+		 * property of the WHOLE map. A caller asking for executable
+		 * regions only still needs its r-xp region grouped with the
+		 * r--p header it follows, and that header is a line the filter
+		 * is about to discard.
+		 */
+		anon = (r.inode == 0);
+		if (m->have_prev && r.base == m->prev_end &&
+		    ((anon && m->prev_anon) ||
+		     (!anon && !m->prev_anon && r.inode == m->prev_inode))) {
+			r.group_id = m->group_id;
+		} else {
+			m->group_id = r.base;
+			r.group_id = r.base;
+		}
+		m->have_prev = 1;
+		m->prev_end = r.base + r.size;
+		m->prev_inode = r.inode;
+		m->prev_anon = anon;
+
+		/* ------------------------------------------- the filter */
+
+		want_it = 1;
+		if (r.use == KOFA_USE_UNKNOWN &&
+		    !(m->o.want & KOFA_MW_RESERVED))
+			want_it = 0;
+		if ((m->o.want & KOFA_MW_EXEC_ONLY) &&
+		    !(r.flags & KOFA_RGF_EXEC))
+			want_it = 0;
+		if (r.use == KOFA_USE_HEAP && !(m->o.want & KOFA_MW_HEAP))
+			want_it = 0;
+
+		if (!want_it) {
+			m->st.regions_filtered++;
+			continue;
+		}
+
+		/* ------------------------------------ how much is really there */
+
+		/*
+		 * TWO SOURCES ANSWERING TWO QUESTIONS.
+		 *
+		 * smaps' Rss, already folded in by a_next_raw, says HOW MUCH
+		 * of this region is real - it is the only one of the two that
+		 * excludes the shared zero page. pagemap says WHERE, which
+		 * smaps cannot say at all. When only pagemap is available its
+		 * count stands in for both, and is a looser bound.
+		 */
+		smaps_rss = (r.flags & KOFA_RGF_RSS_MEASURED) ? r.rss : 0;
+		have_smaps = (r.flags & KOFA_RGF_RSS_MEASURED) != 0;
+
+		if (!have_smaps)
+			r.rss = r.size;
+		m->cached_base = 0;
+		m->cached_size = 0;
+		m->cached_runs = 0;
+		m->cached_more = 0;
+
+		if (m->pmfd < 0) {
+			if (m->o.want & KOFA_MW_PAGEMAP)
+				r.flags |= KOFA_RGF_NO_PAGEMAP;
+		} else if (r.size < m->o.pagemap_min) {
+			/* Deliberately not consulted: one pread of the map
+			 * costs more than reading the region. Not flagged
+			 * NO_PAGEMAP, which means "could not", not "chose
+			 * not". */
+		} else if (r.size > m->o.max_region) {
+			/* Not examined at all, and the pagemap read is itself
+			 * proportional to the size we are refusing. */
+			r.flags |= KOFA_RGF_UNEXAMINED;
+			m->st.regions_skipped++;
+		} else {
+			struct kofa_pm_result pr;
+			int rc = kofa_pm_scan(m->pmfd, r.base, r.size,
+					      m->pm_scratch, A_PM_BATCH,
+					      m->runs, A_RUNS_CACHED, &pr);
+
+			m->st.pagemap_reads++;
+			if (rc != KOFA_OK) {
+				m->st.pagemap_failed++;
+				r.flags |= KOFA_RGF_NO_PAGEMAP;
+			} else {
+				if (!have_smaps) {
+					r.rss = pr.resident;
+					r.flags |= KOFA_RGF_RSS_MEASURED;
+				}
+				m->cached_base = r.base;
+				m->cached_size = r.size;
+				m->cached_runs = pr.runs;
+				m->cached_more = pr.more;
+
+				/*
+				 * pagemap points at far more than smaps
+				 * charges: the excess is shared zero pages,
+				 * so the runs are mostly 4096 zeroes each.
+				 * The margin is deliberately generous - THP
+				 * already makes pagemap overshoot by up to
+				 * 2 MB per touch, and that is not this.
+				 */
+				if (have_smaps &&
+				    pr.resident > smaps_rss * 2 + (1u << 20))
+					r.flags |= KOFA_RGF_ZERO_HEAVY;
+
+				if (r.rss * 10 < r.size)
+					r.flags |= KOFA_RGF_SPARSE;
+			}
+		}
+
+		/* ------------------------------------------- the budgets */
+
+		if (r.use == KOFA_USE_HEAP && r.rss > m->o.max_heap_region) {
+			r.flags |= KOFA_RGF_UNEXAMINED;
+			m->st.regions_skipped++;
+		}
+
+		m->st.regions_seen++;
+		m->st.bytes_virtual += r.size;
+
+		/*
+		 * MEASURED AND ASSUMED GO IN DIFFERENT COLUMNS. Adding an
+		 * upper bound to a measurement produces a number that is
+		 * neither, and reports it with the authority of the one it is
+		 * not - see KOFA_RGF_RSS_MEASURED.
+		 */
+		if (r.flags & KOFA_RGF_RSS_MEASURED) {
+			m->st.bytes_resident += r.rss;
+			m->st.regions_measured++;
+		} else {
+			m->st.bytes_unmeasured += r.size;
+		}
+
+		*out = r;
+		out->path = m->path;
+		return 1;
+	}
+
+	return 0;
+}
+
+int kofa_pmem_runs(struct kofa_pmem *m, const struct kofa_region *r,
+		   struct kofa_run *out, int max, int *more)
+{
+	struct kofa_pm_result pr;
+	int rc, n;
+
+	if (more)
+		*more = 0;
+	if (!m || !r || !out || max < 1)
+		return 0;
+
+	/*
+	 * The region the caller just received is already described, because
+	 * next_region had to read its pagemap to learn rss. Serving it from
+	 * there is not a cache in the hopeful sense - it is the same answer,
+	 * and reading it again would be a second pass over the same map in the
+	 * overwhelmingly common call pattern of "walk, then read what was
+	 * interesting".
+	 */
+	if (m->cached_size && r->base == m->cached_base &&
+	    r->size == m->cached_size) {
+		n = m->cached_runs < max ? m->cached_runs : max;
+		memcpy(out, m->runs, (size_t)n * sizeof *out);
+		if (more)
+			*more = m->cached_more || n < m->cached_runs;
+		return n;
+	}
+
+	if (m->pmfd < 0 || !m->pm_scratch)
+		return 0;
+
+	rc = kofa_pm_scan(m->pmfd, r->base, r->size, m->pm_scratch,
+			  A_PM_BATCH, out, max, &pr);
+	m->st.pagemap_reads++;
+	if (rc != KOFA_OK) {
+		m->st.pagemap_failed++;
+		return 0;
+	}
+	if (more)
+		*more = pr.more;
+	return pr.runs;
+}
+
+size_t kofa_pmem_read(struct kofa_pmem *m, uint64_t addr, void *buf, size_t n)
+{
+	struct iovec local, remote;
+	ssize_t got;
+
+	if (!m || !buf || !n)
+		return 0;
+
+	if (m->budget_used >= m->o.max_bytes)
+		return 0;
+	if (n > m->o.max_bytes - m->budget_used)
+		n = (size_t)(m->o.max_bytes - m->budget_used);
+
+	local.iov_base = buf;
+	local.iov_len = n;
+	remote.iov_base = (void *)(uintptr_t)addr;
+	remote.iov_len = n;
+
+	got = process_vm_readv(m->proc.pid, &local, 1, &remote, 1, 0);
+	if (got <= 0)
+		return 0;
+
+	m->budget_used += (uint64_t)got;
+	m->st.bytes_read += (uint64_t)got;
+	return (size_t)got;
+}
+
+void kofa_pmem_stats(const struct kofa_pmem *m, struct kofa_pmem_stat *out)
+{
+	if (!out)
+		return;
+	if (!m) {
+		memset(out, 0, sizeof *out);
+		return;
+	}
+	*out = m->st;
+}
+
+void kofa_pmem_close(struct kofa_pmem *m)
+{
+	if (!m)
+		return;
+	if (m->maps)
+		fclose(m->maps);
+	if (m->pmfd >= 0)
+		close(m->pmfd);
+	free(m->pm_scratch);
+	free(m);
+}
