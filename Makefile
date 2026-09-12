@@ -2014,3 +2014,18 @@ $(TEST)/unit_antarc_fan$(EXE): tests/unit/antarc_fan.c $(ANTARC_SRC) \
                                $(KOFEVT_SRC) $(STAMP) | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) $(ANTARC_INC) tests/unit/antarc_fan.c \
 	      $(ANTARC_SRC) $(KOFEVT_SRC) -o $@ $(LDFLAGS)
+
+# The /proc walk's own unit test. It forks children into known shapes - a
+# memfd exec, a socket on stdin, a deleted binary - and checks the walk reports
+# them, so it needs libkofantarc and nothing else.
+$(TEST)/unit_antarc_walk$(EXE): tests/unit/antarc_walk.c $(ANTARC_SRC) \
+                                $(KOFEVT_SRC) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) $(ANTARC_INC) tests/unit/antarc_walk.c \
+	      $(ANTARC_SRC) $(KOFEVT_SRC) -o $@ $(LDFLAGS)
+
+# A hand tool, not a test: it prints what the walk saw on the live machine and
+# asserts nothing, so it is built on demand and never by `make unit`.
+$(TEST)/antarc_dump$(EXE): tests/tools/antarc_dump.c $(ANTARC_SRC) \
+                           $(KOFEVT_SRC) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) $(ANTARC_INC) tests/tools/antarc_dump.c \
+	      $(ANTARC_SRC) $(KOFEVT_SRC) -o $@ $(LDFLAGS)
