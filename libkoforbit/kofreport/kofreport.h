@@ -545,6 +545,21 @@ struct kof_report *kof_report_open(const struct kof_report_info *info);
 void kof_report_close(struct kof_report *);
 
 /*
+ * MAKE THE REPORT DIRECTORY, AND EVERY LEVEL ABOVE IT. Returns 0, or
+ * KOF_ERR_OPEN.
+ *
+ * Exposed because the moment to find out that a path cannot be written is
+ * BEFORE the sample runs, not after. kof_report_finish makes the directory too
+ * - it has to, since it writes into it - but by then a live sample has been
+ * executed, its artefacts have been collected, and the only thing left to do
+ * with a failure is print it. A host that intends to write a report calls this
+ * while it can still decline to run anything.
+ *
+ * Content with the directory already existing, so it is safe to call twice.
+ */
+int kof_report_mkpath(const char *dir);
+
+/*
  * ONE EVENT. Called once per event the run KEPT, before it is rendered.
  *
  * `index` is the record's position in the log, or KOF_REP_NO_INDEX when

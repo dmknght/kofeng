@@ -260,17 +260,27 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 		 * group the destination IS the subject of the line, and for
 		 * this one the destination is the answer to it.
 		 *
-		 * An unset address is a lookup that FAILED, and that gets a
-		 * word rather than a blank - a name that resolves to nothing is
-		 * itself worth seeing, because it is what a domain-generation
-		 * algorithm looks like while it is hunting for the one that is
-		 * registered.
+		 * AN UNSET ADDRESS PRINTS NOTHING, and it used to print
+		 * "-> no answer".
+		 *
+		 * That read as a lookup that failed, which would be a real and
+		 * interesting finding - a name resolving to nothing is what a
+		 * domain-generation algorithm looks like while it hunts for the
+		 * one that is registered. It is not what the field means. The
+		 * Windows resolver reports its answers in a STRING property
+		 * (QueryResults, "Results %5" in the provider's own message)
+		 * which this build does not parse into an address, so unset
+		 * here means "not decoded" and every successful lookup on the
+		 * machine was being labelled a failure.
+		 *
+		 * So the line says the name, which is the durable half and the
+		 * half that is certainly correct, and says nothing it cannot
+		 * support. When QueryResults is decoded the answer appears here
+		 * and an unset address becomes meaningful again.
 		 */
 		if (e->verb == KOF_EVT_DNS_QUERY) {
 			fprintf(out, "  %s", kof_evt_object(e));
-			if (kof_evt_ip_is_unset(n->daddr))
-				fputs("  -> no answer", out);
-			else
+			if (!kof_evt_ip_is_unset(n->daddr))
 				fprintf(out, "  -> %s",
 					kof_evt_ip_str(n->daddr, ip, sizeof ip));
 			break;

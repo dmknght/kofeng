@@ -662,17 +662,25 @@ static uint32_t wanted(uint16_t type)
 		return KOFW_F_OBJECT;
 	case KOF_EVT_DNS_QUERY:
 		/*
-		 * The name, and the pid - which this provider DOES repeat,
-		 * unlike Kernel-File: it is a user-mode provider, so the
-		 * process in the header is the one that called the resolver and
-		 * the payload names it too. Asking for both means a record with
-		 * neither is reported as damaged rather than as a lookup by
-		 * nobody.
+		 * THE NAME, AND NOT THE PID - corrected against a real trace,
+		 * and the mistake is the one this function's own default warns
+		 * about two cases down.
 		 *
-		 * Unreachable until type_of() learns the id. Written now so
-		 * that typing it is the one line that comment promises.
+		 * It asked for both on the assumption that a user-mode provider
+		 * repeats the pid in its payload the way Kernel-Network does.
+		 * It does not: dns.kevt has every 3008 record arriving
+		 * `[miss 0x1]`, which is KOFW_F_PID, so every resolution on the
+		 * machine was being flagged as a damaged record. The pid is in
+		 * the event HEADER, where it is correct and where the decode
+		 * already takes it from.
+		 *
+		 * Which is exactly what the file-event case says: asking for a
+		 * field the provider never sends flags every event of that kind
+		 * as damaged. The flag is not cosmetic - KOFW_EF_PARTIAL is
+		 * what a consumer reads to decide whether a record can be
+		 * trusted.
 		 */
-		return KOFW_F_PID | KOFW_F_OBJECT;
+		return KOFW_F_OBJECT;
 	default:
 		/* A RAW event is by definition one whose shape this build does
 		 * not know, so there is nothing it can be said to be missing.

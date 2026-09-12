@@ -484,6 +484,29 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
+	/*
+	 * THE REPORT DIRECTORY, MADE NOW - BEFORE A LIVE SAMPLE IS EXECUTED.
+	 *
+	 * kof_report_finish makes it too, because it writes into it. But that
+	 * runs at the END, and a failure there means the sample has already
+	 * been run on this machine, its artefacts have been collected, and the
+	 * only thing left to do with the error is print it. `--report out\dns`
+	 * with no `out` did exactly that: three "cannot write" lines after the
+	 * run, blaming the files rather than the missing directory.
+	 *
+	 * So it is created here and a failure REFUSES TO RUN ANYTHING. That is
+	 * the right way round for a tool whose first line of documentation is
+	 * that it executes what you give it: being unable to record the
+	 * evidence is a reason not to create the evidence.
+	 */
+	if (rep_dir && kof_report_mkpath(rep_dir) != 0) {
+		fprintf(stderr, "kofmontrace: cannot create the report "
+			"directory '%s' - refusing to run the target, because "
+			"there would be nowhere to write what it did\n",
+			rep_dir);
+		return 2;
+	}
+
 	/* The target and its arguments, re-joined. Quoted only where a space
 	 * makes it necessary, which is enough for a test harness and is not a
 	 * general command-line composer. */
@@ -760,9 +783,36 @@ int main(int argc, char **argv)
 	if (rep_dir) {
 		struct kof_report_info ri;
 
+		/*
+		 * THE SUBJECT AS A PATH THAT CAN BE OPENED, not as it was
+		 * typed.
+		 *
+		 * `--report out\dns cmd /c ping ...` gave a report whose
+		 * subject was "cmd" with "sha256: not computed - the subject
+		 * could not be read", because a bare name is resolved by
+		 * CreateProcess against PATH and nothing had resolved it here.
+		 * Everything the report does with the subject needs a real
+		 * file: the digest, the engine's verdict, and the search that
+		 * decides whether an observed string is in its bytes. Without
+		 * one, every candidate comes back "unchecked".
+		 *
+		 * SearchPath and not the image path from the trace, which is
+		 * the other candidate and is worse: the kernel reports
+		 * \Device\HarddiskVolume14\... , and a device path cannot be
+		 * handed to fopen. This resolves it the same way the launch
+		 * did, which is the only answer that is certainly the same
+		 * file.
+		 */
+		static char subj[1024];
+		const char *subject = argv[first];
+
+		if (SearchPathA(NULL, argv[first], ".exe", sizeof subj, subj,
+				NULL))
+			subject = subj;
+
 		memset(&ri, 0, sizeof ri);
 		ri.tool        = "kofmontrace";
-		ri.subject     = argv[first];
+		ri.subject     = subject;
 		ri.subject_cmd = cmd;
 		ri.root_pid    = root_pid;
 		ri.build       = (uint32_t)KOFENG_BUILD;

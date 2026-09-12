@@ -677,6 +677,29 @@ static struct kof_rep_proc *proc_add(struct kof_report *r, const struct kof_evt 
 	p->cmd_raced   = (e->flags & KOF_EF_CMDLINE_RACED) ? 1u : 0u;
 
 	/*
+	 * THE ROOT'S COMMAND LINE FROM THE HOST, WHEN THE TRACE LOST IT.
+	 *
+	 * The collector reads a command line out of the new process's PEB and
+	 * that is the one field on a record which can lose a race - a process
+	 * that exits in milliseconds is gone before it can be read, and `ping`
+	 * is exactly that. So a report of the run that was asked for printed
+	 * "[unread: the process was gone before it could be read]" for the
+	 * command the OPERATOR TYPED.
+	 *
+	 * For the root of the tree the host is authoritative: it composed the
+	 * command line and passed it to CreateProcess. Taking it from there is
+	 * not the report inventing evidence, it is the report using the one
+	 * source that cannot have lost it. Only for the root, and only when the
+	 * trace has nothing: a child's command line is not something the host
+	 * knows, and guessing there WOULD be invention.
+	 */
+	if ((!p->cmdline || !*p->cmdline) && p->pid == r->info.root_pid &&
+	    r->info.subject_cmd && *r->info.subject_cmd) {
+		p->cmdline   = r->info.subject_cmd;
+		p->cmd_raced = 0;
+	}
+
+	/*
 	 * DEPTH FROM THE PARENT ALREADY IN THE TABLE, computed once here
 	 * rather than by a printer walking the tree.
 	 *
@@ -715,7 +738,26 @@ static struct kof_fingerprint *note(struct kof_report *r, uint8_t kind,
 	if (!f->count) {
 		f->first_seen  = e->stamp;
 		f->first_index = index;
-		f->actor_pid   = e->actor_pid ? e->actor_pid : e->pid;
+		/*
+		 * THE ACTOR, EXCEPT FOR A PROCESS - where the actor is the
+		 * PARENT and the line is about the child.
+		 *
+		 * kof_evt.actor_pid is who CAUSED an event, which for a file
+		 * write is the writer and is the single most important fact on
+		 * the record. For a ProcessStart it is whoever called
+		 * CreateProcess - which for the root of a traced tree is
+		 * kofmontrace itself. The report printed
+		 * "process ...\cmd.exe pid=10000" against a tree whose only
+		 * pids were 19184 and 19824: a number belonging to no process
+		 * in the report, on the line naming the process.
+		 *
+		 * Parentage is not lost by choosing the subject here - the
+		 * process tree above shows it, and it shows it better, indented.
+		 */
+		f->actor_pid   = (kind == KOF_FP_PROCESS)
+					 ? e->pid
+					 : (e->actor_pid ? e->actor_pid
+							 : e->pid);
 		f->loc         = e->loc;
 		f->attack      = e->attack;
 		classify(r, kind, e->loc, f->text, &f->group, &f->why,
@@ -798,6 +840,13 @@ void kof_report_feed(struct kof_report *r, const struct kof_evt *e,
 		 */
 		{
 			const char *cl = kof_evt_cmdline(e);
+
+			/* The root's, from the host, when the trace lost the
+			 * race - see proc_add, which does the same for the
+			 * process entry and explains why only the root. */
+			if ((!cl || !*cl) && e->pid == r->info.root_pid &&
+			    r->info.subject_cmd && *r->info.subject_cmd)
+				cl = r->info.subject_cmd;
 
 			note(r, KOF_FP_PROCESS, (cl && *cl) ? cl
 							   : kof_evt_image(e),
@@ -1071,6 +1120,30 @@ void kof_report_feed(struct kof_report *r, const struct kof_evt *e,
 	case KOF_EVT_RAW:
 		if (e->source == KOF_SRC_REGISTRY)
 			note(r, KOF_FP_REGISTRY, kof_evt_object(e), e, index);
+		/*
+		 * A NAMED PIPE, WHICH ARRIVES WITH NO VERB BY DESIGN.
+		 *
+		 * kofevt.h refuses a verb for "a file was opened" on purpose -
+		 * the test it sets is whether a detection can be stated in one
+		 * sentence using it, and that one cannot. Kernel-File's id 12
+		 * (Create|FileIo, per the provider's keyword table) is
+		 * therefore untyped and always will be.
+		 *
+		 * But a pipe is only ever visible through it. kofgrille.h
+		 * subscribes to file opens for exactly this reason and says so:
+		 * a pipe is how one process makes another act for it, and
+		 * getsystem creates a pipe, has a SYSTEM service connect, and
+		 * impersonates the token that arrives. Without this line the
+		 * whole technique produces a report that mentions nothing.
+		 *
+		 * The LOCATION is what makes it safe to file: wfilter.c
+		 * classifies the object of every event including an untyped
+		 * one, and \Device\NamedPipe\ is the first row of kofevt.c's
+		 * table. So this is not guessing at an id - it is reading a
+		 * classification that already happened.
+		 */
+		else if (e->source == KOF_SRC_FILE && e->loc == KOF_LOC_PIPE)
+			note(r, KOF_FP_PIPE, kof_evt_object(e), e, index);
 		/*
 		 * DNS IS NOT FILED FROM A RAW RECORD, AND IT USED TO BE.
 		 *

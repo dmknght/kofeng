@@ -77,13 +77,81 @@ static void joinp(char *out, size_t cap, const char *a, const char *b)
 
 /* mkdir that is content with the directory already being there, which is the
  * normal case for the second file collected into it. */
-static int ensure_dir(const char *path)
+static int mkdir_one(const char *path)
 {
 	if (!path || !*path)
 		return 0;
 	if (kof_mkdir(path, 0777) == 0)
 		return 0;
 	return (errno == EEXIST) ? 0 : -1;
+}
+
+/*
+ * EVERY LEVEL OF IT, because a caller says `--report out/2026-09-12/sample`
+ * and means it.
+ *
+ * mkdir makes one level. The first version called it once, which worked only
+ * when every parent already happened to exist - so `--report out\dns` created
+ * the report when `out` was there and failed with three "cannot write" lines
+ * when it was not. That is a bad failure twice over: it happens AFTER the
+ * sample has been run, so the evidence is collected and then dropped on the
+ * floor, and the message blames the files rather than the missing directory.
+ *
+ * WHAT IT DELIBERATELY DOES NOT DO: interpret the path. A prefix that is a
+ * drive letter, a UNC root or a leading separator is skipped rather than
+ * created - "C:" is not a directory anybody makes, and calling mkdir on it
+ * would fail in a way that has to be told apart from a real failure. Walking
+ * separators and creating what lies between them is the whole of it.
+ */
+int kofrep_ensure_dir(const char *path)
+{
+	char  buf[1024];
+	size_t n, i;
+
+	if (!path || !*path)
+		return 0;
+
+	n = strlen(path);
+	if (n >= sizeof buf)
+		return -1;
+	memcpy(buf, path, n + 1u);
+
+	/*
+	 * Start past any root. "C:\x" begins at index 3, "\\host\share\x" and
+	 * "/x" at their first non-separator - and a relative path has no root
+	 * to skip, which is the common case.
+	 */
+	i = 0;
+	if (n >= 2u && buf[1] == ':')
+		i = 2u;
+	while (buf[i] == '/' || buf[i] == '\\')
+		i++;
+
+	for (; i <= n; i++) {
+		char c = buf[i];
+
+		if (c != '/' && c != '\\' && c != '\0')
+			continue;
+		/* A trailing separator, or two in a row, names the directory
+		 * that was just made. */
+		if (i && (buf[i - 1u] == '/' || buf[i - 1u] == '\\'))
+			continue;
+
+		buf[i] = '\0';
+		if (mkdir_one(buf) != 0)
+			return -1;
+		if (c == '\0')
+			break;
+		buf[i] = c;
+	}
+	return 0;
+}
+
+int kof_report_mkpath(const char *dir)
+{
+	if (!dir || !*dir)
+		return 0;
+	return kofrep_ensure_dir(dir) == 0 ? 0 : KOF_ERR_OPEN;
 }
 
 /* ---- reading bytes ------------------------------------------------------- */
@@ -694,15 +762,15 @@ int kof_report_finish(struct kof_report *r, const struct kof_report_stage *st)
 	 * found nothing, which is a different fact.
 	 */
 	if (dir && *dir) {
-		if (ensure_dir(dir) != 0)
+		if (kofrep_ensure_dir(dir) != 0)
 			return KOF_ERR_OPEN;
 		if (st->collect) {
 			char sub[512];
 
 			joinp(sub, sizeof sub, dir, "files");
-			(void)ensure_dir(sub);
+			(void)kofrep_ensure_dir(sub);
 			joinp(sub, sizeof sub, dir, "evidence");
-			(void)ensure_dir(sub);
+			(void)kofrep_ensure_dir(sub);
 		}
 	}
 

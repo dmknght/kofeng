@@ -972,6 +972,85 @@ static void t_trace(void)
  * actor_pid held a tid, because both are uint32 and both are plausible.
  */
 /*
+ * THE UNBACKED CLAIM, AND THE THREE THINGS THAT HAVE TO BE TRUE BEFORE IT IS
+ * MADE.
+ *
+ * KOFW_EF_UNBACKED is the one field the collector is not told - it is a
+ * conclusion drawn from where images were mapped and where a thread began, and
+ * it means "a payload was manually mapped into this process". That makes a
+ * false positive expensive in a way a missed one is not: it accuses a program.
+ *
+ * It had one. Records cross CPUs out of order, so an ImageLoad that happened
+ * before a ProcessStart can be DELIVERED after it - and when it is delivered
+ * first there is no process-table entry yet, so the module is not recorded.
+ * ProcessStart then arrives, empties the list, and raises mods_whole over
+ * nothing. The next record is the main thread starting at the executable's
+ * entry point, mods_contain is asked about an empty list, and it says no. In
+ * dns.kevt that flagged the first thread of both cmd.exe and PING.EXE: two
+ * injections reported in a trace of `ping`.
+ *
+ * So: the session must have seen the process start, the list must not have
+ * overflowed, AND the list must not be empty. The last one is checked here
+ * because it is the one that was missing, and because every Windows process
+ * maps ntdll - an empty list is always loads that were missed.
+ */
+static void t_unbacked(void)
+{
+	struct kofw_ptab   t;
+	struct kofw_filter f;
+	struct kofw_evt    e;
+
+	kofw_ptab_init(&t);
+	memset(&f, 0, sizeof f);
+
+	/* A process this session saw start, and then a thread - with no module
+	 * load in between, which is the shape the race produces. */
+	mk(&e, KOF_EVT_PROC_START, 700, 4);
+	(void)kofw_filter_apply(&t, &f, &e, NULL);
+
+	mk(&e, KOF_EVT_THREAD_START, 700, 0);
+	e.addr = 0x7ff600001000ull;
+	(void)kofw_filter_apply(&t, &f, &e, NULL);
+	if (e.flags & KOFW_EF_UNBACKED)
+		fail("unbacked", "claimed an entry point was in no mapped "
+				 "image while the module list was EMPTY - "
+				 "which is a list of loads that were missed");
+
+	/* Now record a module, and a thread inside it is backed. */
+	mk(&e, KOF_EVT_IMAGE_LOAD, 700, 0);
+	e.addr      = 0x7ff600000000ull;
+	e.addr_size = 0x10000u;
+	(void)kofw_filter_apply(&t, &f, &e, NULL);
+
+	mk(&e, KOF_EVT_THREAD_START, 700, 0);
+	e.addr = 0x7ff600001000ull;
+	(void)kofw_filter_apply(&t, &f, &e, NULL);
+	if (e.flags & KOFW_EF_UNBACKED)
+		fail("unbacked", "flagged a thread whose entry point IS inside "
+				 "a recorded module");
+
+	/* And one outside every recorded module, which is the finding this
+	 * whole mechanism exists for. The list is non-empty now, so the
+	 * negative claim is supportable. */
+	mk(&e, KOF_EVT_THREAD_START, 700, 0);
+	e.addr = 0x000001b400000000ull;
+	(void)kofw_filter_apply(&t, &f, &e, NULL);
+	if (!(e.flags & KOFW_EF_UNBACKED))
+		fail("unbacked", "did NOT flag an entry point outside every "
+				 "recorded module - the guard is too strong "
+				 "and the detection is gone");
+
+	/* A process the session never saw start supports no claim at all,
+	 * whatever its threads do. */
+	mk(&e, KOF_EVT_THREAD_START, 909, 0);
+	e.addr = 0x000001b400000000ull;
+	(void)kofw_filter_apply(&t, &f, &e, NULL);
+	if (e.flags & KOFW_EF_UNBACKED)
+		fail("unbacked", "claimed something about a process whose "
+				 "start was never seen");
+}
+
+/*
  * PRINTING AN EVENT AND COUNTING ONE MUST AGREE - the trap that has now caught
  * two callers in this tree.
  *
@@ -1839,6 +1918,7 @@ int main(void)
 	t_scope();
 	t_ftab();
 	t_pid_reuse();
+	t_unbacked();
 	t_tally();
 	t_addr();
 	t_convert();

@@ -161,7 +161,14 @@ static const struct kof_fingerprint *look(struct kof_report *r, uint8_t kind,
 
 int main(void)
 {
-	const char *dir     = "report_model.tmp";
+	/*
+	 * NESTED ON PURPOSE. A caller says `--report out/2026-09-12/sample` and
+	 * means it, and the first version of the directory code called mkdir
+	 * once - so a path whose parents did not exist produced a report with
+	 * nowhere to go, discovered after the sample had run. Two levels here
+	 * is the smallest case that would have caught it.
+	 */
+	const char *dir     = "report_model.tmp/deep/nest";
 	const char *subject = "report_model.tmp.subject";
 	const char *victim  = "report_model.tmp.victim";
 	struct kof_report_info ri;
@@ -680,6 +687,9 @@ int main(void)
 			fail("cleanup", "the report directory could not be "
 					"removed - something in it was not "
 					"named here");
+		/* The levels the path needed, innermost first. */
+		rmdir("report_model.tmp/deep");
+		rmdir("report_model.tmp");
 	}
 
 	printf("report: feed, grouping, read-back and the three outputs %s\n",
