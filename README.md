@@ -131,4 +131,3 @@ The code written for this project is under the **MIT License** — see
 |------|-------|
 | engine, tools, tests | MIT |
 | `libkofemu/bddisasm/` | Apache License 2.0, Bitdefender — see [THIRD-PARTY.md](THIRD-PARTY.md) |
-| `bases/` signatures | MIT, the same as the engine |
