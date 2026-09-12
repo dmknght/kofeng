@@ -11206,8 +11206,36 @@ static void redraw(struct view *v)
 		 * after the first string was taken - the one order of work the
 		 * tool happened to be built around.
 		 */
-		g_decl_rows = (int)(want < v->ed.dr.decl_cap ? want : v->ed.dr.decl_cap)
-			      + 2;
+		/*
+		 * AND NEVER TALLER THAN THE SCREEN IT IS DRAWN ON.
+		 *
+		 * decl_cap is a PREFERENCE - 12 by default, or whatever the
+		 * divider was last dragged to - and it was compared only
+		 * against how many rows the draft has. Neither of those knows
+		 * how tall the terminal is NOW. A draft of twelve rows on a
+		 * twelve-row terminal gave g_decl_rows = 14, and then
+		 * decl_top() is g_rows - g_decl_rows = -2 and hex_bot() is -4:
+		 * every pane below is laid out from a negative row.
+		 *
+		 * It has to be re-applied on every frame rather than when the
+		 * cap is set, because the screen shrinks underneath a cap that
+		 * was legal when it was chosen - which is exactly what a
+		 * vertical resize is.
+		 *
+		 * g_rows - 8 is not a new number: it is the same ceiling the
+		 * divider drag already applies when it sets the cap. The two
+		 * disagreed only because one of them ran again after a resize
+		 * and the other did not.
+		 */
+		int rows = (int)(want < v->ed.dr.decl_cap ? want
+							  : v->ed.dr.decl_cap);
+		int room = g_rows - 8;
+
+		if (room < 1)
+			room = 1;
+		if (rows > room)
+			rows = room;
+		g_decl_rows = rows + 2;
 		if (g_decl_rows) {
 			/* The furthest it can be scrolled, computed before the
 			 * comparison rather than inside it: adding the window
