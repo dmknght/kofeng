@@ -12,6 +12,7 @@
  * which filter chain codes it.
  */
 
+#include <stddef.h>
 #include <string.h>
 
 #include "xz_parse.h"
@@ -213,7 +214,27 @@ int kof_xz_parse(kof_buf file, struct kof_xz_info *x, struct kof_obj_ctx *ctx)
 	uint64_t count, i;
 	int ok;
 
-	memset(x, 0, sizeof *x);
+	/*
+	 * THE HEADER ONLY, NOT THE 39008 BYTES OF ARRAYS BEHIND IT - the same
+	 * change, for the same reason, as the one at the top of zip_parse.c.
+	 *
+	 * Smaller here than there, and worth it for the same reason: it is the
+	 * per-object cost of every XZ scanned, and it buys nothing. Nothing
+	 * reads past a count, every consumer loops on the count, and both
+	 * counts are in the header that IS cleared - so a parse that gives up
+	 * early reads as "nothing found" rather than as the last file's.
+	 *
+	 * THE ASSERT IS THE GUARD: the two arrays are the last two members and
+	 * this clears everything before them. A field added after them would
+	 * silently stop being cleared; adding one breaks the build instead.
+	 */
+	_Static_assert(offsetof(struct kof_xz_info, run) +
+		       sizeof ((struct kof_xz_info *)0)->run +
+		       sizeof ((struct kof_xz_info *)0)->block ==
+		       sizeof(struct kof_xz_info),
+		       "kof_xz_info gained a field after its arrays: the header-only "
+		       "clear below would not reach it");
+	memset(x, 0, offsetof(struct kof_xz_info, run));
 	x->version = KOF_XZ_INFO_VERSION;
 
 	if (!kof_xz_sniff(file))

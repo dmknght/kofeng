@@ -34,6 +34,7 @@
  * the cursor moves.
  */
 
+#include <stddef.h>
 #include "sevenzip_parse.h"
 #include "../../kofdecomp/lzma.h"
 
@@ -852,7 +853,42 @@ int kof_7z_parse(kof_buf file, struct kof_7z_info *z, struct kof_obj_ctx *ctx)
 	uint64_t off = 0, size = 0;
 	uint8_t first = 0;
 
-	memset(z, 0, sizeof *z);
+	/*
+	 * EVERYTHING BUT THE TWO ARRAYS: 112 bytes instead of 12912 - the same
+	 * change as the one at the top of zip_parse.c.
+	 *
+	 * TWO SPANS AND NOT ONE, because folder[] and pack[] are NOT adjacent:
+	 * there are eight bytes of scalar between them. The single-span version
+	 * of this was written first and the static assert below rejected it,
+	 * which is the entire reason the assert is written as an equality over
+	 * the whole struct rather than as a comment.
+	 *
+	 *        0 .. 104     head                 <- cleared
+	 *      104 .. 2664    folder[]             <- skipped
+	 *     2664 .. 2672    a count and padding  <- cleared
+	 *     2672 .. 12912   pack[]               <- skipped
+	 *
+	 * Nothing reads past a count and both counts are in the cleared spans,
+	 * so a parse that gives up early reads as "nothing found".
+	 */
+	{
+		const size_t fold_end = offsetof(struct kof_7z_info, folder) +
+					sizeof z->folder;
+
+		_Static_assert(offsetof(struct kof_7z_info, pack) +
+			       sizeof ((struct kof_7z_info *)0)->pack ==
+			       sizeof(struct kof_7z_info),
+			       "kof_7z_info gained a field after pack[]: the "
+			       "clear below would not reach it");
+		_Static_assert(offsetof(struct kof_7z_info, pack) >=
+			       offsetof(struct kof_7z_info, folder) +
+			       sizeof ((struct kof_7z_info *)0)->folder,
+			       "folder[] and pack[] are out of order");
+
+		memset(z, 0, offsetof(struct kof_7z_info, folder));
+		memset((char *)z + fold_end, 0,
+		       offsetof(struct kof_7z_info, pack) - fold_end);
+	}
 	z->version = KOF_7Z_INFO_VERSION;
 
 	if (!kof_7z_sniff(file))

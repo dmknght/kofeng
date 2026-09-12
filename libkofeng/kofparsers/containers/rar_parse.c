@@ -23,6 +23,7 @@
  * land inside it.
  */
 
+#include <stddef.h>
 #include <string.h>
 
 #include "rar_parse.h"
@@ -620,7 +621,33 @@ int kof_rar_parse(kof_buf file, struct kof_rar_info *r, struct kof_obj_ctx *ctx)
 	uint64_t at;
 	int saw_end = 0;
 
-	memset(r, 0, sizeof *r);
+	/*
+	 * THE HEADER ONLY, NOT THE 311384 BYTES OF ARRAYS BEHIND IT.
+	 *
+	 * The same change, for the same reason, as the one at the top of
+	 * zip_parse.c: this cleared the whole view for every RAR object
+	 * scanned, whatever was in it, and the two arrays at the tail are all
+	 * but a few hundred bytes of it.
+	 *
+	 * WHAT MAKES IT SAFE TO LEAVE THE TAIL DIRTY: nothing reads past the
+	 * count. Every consumer - this parser, kofexamine, bases/decomp - loops
+	 * `i < r->n_entries`, and the runs go through kof_runs_* which bounds
+	 * on n_runs. Both counts are IN the header, so both start at zero here:
+	 * a parse that gives up early leaves the arrays untouched AND the counts
+	 * at zero, which reads as "no entries" rather than as the last file's.
+	 * Each slot is cleared as it is claimed.
+	 *
+	 * THE ASSERT IS THE GUARD. The two arrays are the last two members and
+	 * this clears everything before them; a field added AFTER them would
+	 * silently stop being cleared. Adding one breaks the build instead.
+	 */
+	_Static_assert(offsetof(struct kof_rar_info, run) +
+		       sizeof ((struct kof_rar_info *)0)->run +
+		       sizeof ((struct kof_rar_info *)0)->entry ==
+		       sizeof(struct kof_rar_info),
+		       "kof_rar_info gained a field after its arrays: the header-only "
+		       "clear below would not reach it");
+	memset(r, 0, offsetof(struct kof_rar_info, run));
 	r->version = KOF_RAR_INFO_VERSION;
 
 	if (!kof_rar_sniff(file))

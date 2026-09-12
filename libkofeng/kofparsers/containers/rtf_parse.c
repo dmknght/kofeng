@@ -12,6 +12,7 @@
  * instead is bound every loop by the object and record what did not make sense.
  */
 
+#include <stddef.h>
 #include <string.h>
 
 #include "rtf_parse.h"
@@ -306,7 +307,27 @@ int kof_rtf_parse(kof_buf file, struct kof_rtf_info *r, struct kof_obj_ctx *ctx)
 	uint32_t pending_class_len = 0;
 	int pending_update = 0;
 
-	memset(r, 0, sizeof *r);
+	/*
+	 * THE HEADER ONLY, NOT THE 34880 BYTES OF ARRAYS BEHIND IT - the same
+	 * change, for the same reason, as the one at the top of zip_parse.c.
+	 *
+	 * Smaller here than there, and worth it for the same reason: it is the
+	 * per-object cost of every RTF scanned, and it buys nothing. Nothing
+	 * reads past a count, every consumer loops on the count, and both
+	 * counts are in the header that IS cleared - so a parse that gives up
+	 * early reads as "nothing found" rather than as the last file's.
+	 *
+	 * THE ASSERT IS THE GUARD: the two arrays are the last two members and
+	 * this clears everything before them. A field added after them would
+	 * silently stop being cleared; adding one breaks the build instead.
+	 */
+	_Static_assert(offsetof(struct kof_rtf_info, run) +
+		       sizeof ((struct kof_rtf_info *)0)->run +
+		       sizeof ((struct kof_rtf_info *)0)->obj ==
+		       sizeof(struct kof_rtf_info),
+		       "kof_rtf_info gained a field after its arrays: the header-only "
+		       "clear below would not reach it");
+	memset(r, 0, offsetof(struct kof_rtf_info, run));
 	r->version = KOF_RTF_INFO_VERSION;
 
 	if (!kof_rtf_sniff(file)) {
