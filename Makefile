@@ -792,8 +792,8 @@ help:
 	$(info $(SP)  ksigbuilder   the database builder)
 	$(info $(SP)  kofviewer     the file examiner, navigable)
 	$(info $(SP)  kofwatchman   verdicts over a recorded event log)
-	$(info $(SP)  kofwatchtower the event sensor             (cross-builds w/ mingw))
-	$(info $(SP)  kofmontrace   run a program and trace it          (Windows only))
+	$(info $(SP)  kofwatchtower the event sensor)
+	$(info $(SP)  kofmontrace   run a program and trace it)
 	$(info $(SP)  kofmemscan    scan the memory of running processes (Windows only))
 	$(info $(SP)  tools         all six of the above)
 	$(info $(SP)  databases     compile bases/ into the shipping databases)
@@ -1064,9 +1064,33 @@ sdk: $(LIB) $(SDK_HDR)
 
 SCANNER_SRC := kofscanner/kofscanner.c
 
-$(OUT)/bin/kofscanner$(EXE): $(SCANNER_SRC) $(LIB) $(SDK_HDR) $(STAMP)
+#
+# THE SCANNER LINKS THE LINUX COLLECTOR ON LINUX.
+#
+# --scan-procs is the same scan over a different source of bytes, so it belongs
+# in the scanner rather than in a tool of its own - see scan_procs. On Windows
+# the collector is libkofgrille and that half is not wired here yet, so the
+# option does not exist there and the sources are not linked.
+#
+# DEFERRED, NOT IMMEDIATE, and the file says why a few hundred lines up: a
+# variable referring to one the blocks BELOW set must be `=` or it expands to
+# nothing here. ANTARC_SRC and KOFPROC_SRC are defined after this rule.
+ifeq ($(NATIVE_OS),windows)
+SCANNER_EXTRA =
+SCANNER_INC   =
+else
+SCANNER_EXTRA = $(ANTARC_SRC) libkofantarc/awalk.c $(KOFPROC_SRC) \
+                $(KOFRIDGE_SRC) $(KOFEVT_SRC)
+SCANNER_INC   = -Ilibkofantarc -Ilibkoforbit/kofevt -Ilibkoforbit/kofmon \
+                -Ilibkoforbit/kofproc -Ilibkoforbit/koffridge \
+                -Ilibkoforbit/kofwalk
+endif
+
+$(OUT)/bin/kofscanner$(EXE): $(SCANNER_SRC) $(SCANNER_EXTRA) $(LIB) \
+                             $(SDK_HDR) $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(SCANNER_SRC) $(LIB) -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(SCANNER_INC) \
+	      $(SCANNER_SRC) $(SCANNER_EXTRA) $(LIB) -o $@ $(LDFLAGS)
 
 # --------------------------------------------------------------- the examiner
 #
@@ -1383,13 +1407,8 @@ kofgrille: $(WINLIB)
 	$(info $(SP)  $<)
 	@$(NOOP)
 
-kofwatchtower: $(OUT)/bin/kofwatchtower$(WIN_EXE)
-	$(info $(SP)  $<)
-	@$(NOOP)
 
-kofmontrace: $(OUT)/bin/kofmontrace$(WIN_EXE)
-	$(info $(SP)  $<)
-	@$(NOOP)
+
 
 # Added to `tools` here rather than in its own line above, because a
 # prerequisite naming a variable this block sets would expand to nothing:
@@ -1605,6 +1624,60 @@ else
 UNIT_LIBS_inflate_diff := -lz
 endif
 
+#
+# $(EXE) AND NOT $(WIN_EXE). These two used to name the cross-built PE
+# unconditionally, which on Linux meant `make kofwatchtower` demanded mingw and
+# `make kofmontrace` was a Windows-only line in the help - both tools now build
+# for the host, and the name has to follow the host or the native binary has no
+# way to be asked for. On Windows $(EXE) IS .exe, so the cross build is
+# unchanged.
+kofwatchtower: $(OUT)/bin/kofwatchtower$(EXE)
+	$(info $(SP)  $<)
+	@$(NOOP)
+
+kofmontrace: $(OUT)/bin/kofmontrace$(EXE)
+	$(info $(SP)  $<)
+	@$(NOOP)
+
+#
+# THE SAME TOOLS, BUILT NATIVELY, ON A HOST THAT HAS A COLLECTOR FOR ITSELF.
+#
+# ONE SOURCE FILE EACH, NOT TWO. kofwatchtower.c and kofmontrace.c each carry a
+# single adapter block that names the host's collector and how a subject is
+# started and contained; everything below it is the same code on both. What
+# changes between these recipes is therefore the LIBRARY and the INCLUDES, not
+# the file - which is the only arrangement in which a fix to the drain loop
+# cannot land on one platform and miss the other.
+ifneq ($(NATIVE_OS),windows)
+
+POSIX_TOOL_INC = -Ilibkofantarc -Ilibkoforbit/kofevt -Ilibkoforbit/kofmon \
+                 -Ilibkoforbit/kofchan
+
+$(OUT)/bin/kofwatchtower$(EXE): kofwatcher/kofwatchtower.c $(ANTARC_SRC) \
+                                libkoforbit/kofchan/chan_posix.c \
+                                $(KOFEVT_SRC) $(STAMP)
+	@$(call MKDIR,$(dir $@))
+	$(CC) $(CFLAGS) $(DEPTO) $(POSIX_TOOL_INC) \
+	      kofwatcher/kofwatchtower.c $(ANTARC_SRC) \
+	      libkoforbit/kofchan/chan_posix.c $(KOFEVT_SRC) \
+	      -o $@ $(LDFLAGS) -lrt
+
+# Links the ENGINE for the same reason the Windows recipe below does: the
+# report hashes what the traced program created and asks what those files are.
+$(OUT)/bin/kofmontrace$(EXE): kofwatcher/kofmontrace.c $(ANTARC_SRC) \
+                              $(KOFREPORT_SRC) $(KOFEVT_SRC) $(LIB) $(STAMP)
+	@$(call MKDIR,$(dir $@))
+	$(CC) $(CFLAGS) $(DEPTO) $(POSIX_TOOL_INC) -Ilibkofeng \
+	      -Ilibkofeng/core -Ilibkoforbit/kofreport -Ikofwatcher \
+	      kofwatcher/kofmontrace.c $(ANTARC_SRC) $(KOFREPORT_SRC) \
+	      $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS)
+
+# The host's own binaries, so they belong in `tools` here - the Windows block
+# below adds the .exe pair for the same reason and by the same mechanism.
+tools: kofwatchtower kofmontrace
+
+endif
+
 $(TEST)/unit_%$(EXE): tests/unit/%.c $(LIB) $(STAMP) | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) $< $(LIB) -o $@ $(LDFLAGS) $(UNIT_LIBS_$*)
 
@@ -1645,20 +1718,18 @@ $(TEST)/unit_fridge$(EXE): tests/unit/fridge.c $(KOFRIDGE_SRC) $(LIB) $(STAMP) \
 $(TEST)/unit_report_model$(EXE): tests/unit/report_model.c $(KOFREPORT_SRC) \
                                  $(KOFEVT_SRC) $(LIB) $(STAMP) | $(TEST)
 #
-# -D_GNU_SOURCE, AND IT IS NOT DECORATION.
+# NO -D_GNU_SOURCE HERE ANY MORE, and that is the fix rather than the omission.
 #
-# kofplatform.h reaches for memmem, lstat and realpath, and the report's own
-# source calls rmdir. None of those is declared under a bare -std=c11, so
-# without this the translation unit compiles them as implicit int and returns a
-# pointer made out of one - four errors that name three different files and say
-# nothing about the cause.
-#
-# It is on this target and not in CFLAGS because the library's own sources do
-# not need it; these are the only two orbit files compiled on a host, and this
-# is the only rule that compiles them here. Anything that later builds
-# libkoforbit/kofreport on Linux needs the same flag - which is the reason this
-# note is longer than the flag.
-	$(CC) $(CFLAGS) -D_GNU_SOURCE $(DEPTO) -Ilibkoforbit/kofreport \
+# kofplatform.h reaches for memmem, lstat and realpath and this test calls
+# rmdir; none of those is declared under a bare -std=c11, and without them the
+# translation unit compiles them as implicit int - four errors naming three
+# files and saying nothing about the cause. The flag used to live here, with a
+# note saying anything that later built libkoforbit/kofreport on Linux would
+# need it too. Something did: the native kofmontrace. So the declaration moved
+# INTO the two sources that need it, where it cannot be left off a new recipe,
+# and is guarded there because those recipes also build sources that define it
+# themselves.
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkoforbit/kofreport \
 	      -Ilibkoforbit/kofevt -Ilibkofeng -Ilibkofeng/core \
 	      tests/unit/report_model.c \
 	      $(KOFREPORT_SRC) $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS)

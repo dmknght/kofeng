@@ -38,6 +38,18 @@
  * reason about and a silence.
  */
 
+/*
+ * memmem, lstat and realpath - reached for by kofplatform.h below - are GNU
+ * extensions and none of them is declared under a bare -std=c11. Declared
+ * HERE, in the file that needs them, rather than as a flag on one Makefile
+ * recipe: this file is now compiled by three of them, and a flag that has to
+ * be remembered once per recipe is a flag that gets forgotten. Guarded
+ * because some of those recipes also build sources that define it themselves.
+ */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

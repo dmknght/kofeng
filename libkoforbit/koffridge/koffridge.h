@@ -79,7 +79,16 @@
  *
  * On Windows: dwVolumeSerialNumber, nFileIndexHigh:nFileIndexLow, nFileSize,
  * ftLastWriteTime, all from one GetFileInformationByHandle on the handle that
- * is already open. On Linux: st_dev, st_ino, st_size, st_mtime from one stat.
+ * is already open. On Linux: st_dev, st_ino, st_size and st_mtim from one stat.
+ *
+ * `mtime` IS IN NANOSECONDS on both, and the unit is not decoration. It was
+ * whole seconds, and three rewrites of one file in place - same inode, same
+ * length - produced three identical identities, so the cache served the first
+ * scan's verdict for the third file's bytes. A write takes microseconds; an
+ * attacker did not have to restore anything, only to be quick. Measured:
+ *
+ *     mtime seconds  1789209554 1789209554 1789209554
+ *     mtime nsec      370836748  371003014  371007003
  *
  * IT IS NOT A HASH OF THE CONTENT and does not pretend to be. A file rewritten
  * in place with the same length and a restored timestamp has the same identity
@@ -88,6 +97,32 @@
  * the work the cache exists to avoid. A caller that cannot accept it passes a
  * content hash as the identity instead - this struct is a convention, not a
  * requirement, and nothing here reads its fields.
+ *
+ *
+ * ON SOME SYSTEMS THE TIMESTAMP IS NOT A FIELD AT ALL, AND THE HOLE IS WIDER
+ * THAN THE PARAGRAPH ABOVE DESCRIBES.
+ *
+ * That paragraph assumes an attacker has to RESTORE the timestamp, which costs
+ * them a step. On a machine that normalises mtimes there is no step to take -
+ * the timestamp is already the same on every file and contributes nothing.
+ *
+ * Measured on the development host, which uses an overlay store of the kind
+ * reproducible builds produce:
+ *
+ *     /usr/lib/x86_64-linux-gnu/libc.so.6    mtime=0
+ *     /bin/ls                                mtime=0
+ *     1465 of 1962 system files              mtime=0   (74%)
+ *
+ * There the identity is effectively (dev, ino, size), and a file rewritten in
+ * place at the same length is indistinguishable from the original. Nix stores,
+ * many container images and any tree built for bit-reproducibility are in this
+ * state; an ordinary distribution install is not, and /etc on the same machine
+ * has real timestamps.
+ *
+ * A HOST THAT CANNOT ACCEPT THAT PASSES A CONTENT HASH, which this struct
+ * already permits and which kof_sha256_file already computes. What that costs
+ * is a read of every file - the work the cache exists to avoid - so it is a
+ * decision about the machine rather than a default anything here can pick.
  */
 struct koffridge_fileid {
 	uint64_t volume;

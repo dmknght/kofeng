@@ -60,19 +60,42 @@
  */
 static const char *meta_user(void)
 {
-	const char *u = getenv("USER");
+	const char *u = NULL;
 
+	/*
+	 * THE PASSWORD DATABASE FIRST, AND THE ENVIRONMENT ONLY AFTER IT.
+	 *
+	 * It was the other way round. $USER describes whoever set it, which is
+	 * the parent process, and a parent can set it to anything - so a
+	 * signature draft could be stamped with an author who never touched
+	 * it. That is not a security boundary here, it is provenance, and
+	 * provenance taken from a string somebody else chose is not
+	 * provenance.
+	 *
+	 * geteuid, not getuid, so the name is the account the tool is acting
+	 * as. See libkoforbit/kofpath/kofpath.h for the same argument where
+	 * it does decide a security boundary.
+	 */
+#ifdef _WIN32
+	u = getenv("USERNAME");
+#else
+	{
+		struct passwd pw, *res = NULL;
+		static char namebuf[256];
+		char buf[4096];
+
+		if (getpwuid_r(geteuid(), &pw, buf, sizeof buf, &res) == 0 &&
+		    res && pw.pw_name && pw.pw_name[0]) {
+			snprintf(namebuf, sizeof namebuf, "%s", pw.pw_name);
+			u = namebuf;
+		}
+	}
+	/* Only when the database could not answer - a container with no
+	 * passwd entry for the running uid is the real case. */
+	if (!u || !u[0])
+		u = getenv("USER");
 	if (!u || !u[0])
 		u = getenv("LOGNAME");
-#ifdef _WIN32
-	if (!u || !u[0])
-		u = getenv("USERNAME");
-#else
-	if (!u || !u[0]) {
-		struct passwd *pw = getpwuid(getuid());
-
-		u = pw && pw->pw_name ? pw->pw_name : "";
-	}
 #endif
 	return u ? u : "";
 }

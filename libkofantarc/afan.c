@@ -529,9 +529,16 @@ struct kofa_fan *kofa_fan_open(const struct kofa_fan_option *opt, int *err)
 				(void)add_watch(f, o.dirs[i], dirent_mask);
 		}
 		if (!f->n_watch) {
-			const char *t = getenv("TMPDIR");
-
-			(void)add_watch(f, t && *t ? t : "/tmp", dirent_mask);
+			/*
+			 * A LITERAL, NOT $TMPDIR. What a sensor watches is not
+			 * a thing the environment gets to choose: a parent
+			 * that set TMPDIR would be deciding where the machine
+			 * is watched, and the degraded mode this falls back to
+			 * is a test surface where "somewhere writable" is the
+			 * whole requirement. A caller that wants elsewhere
+			 * says so in kofa_fan_option.dirs.
+			 */
+			(void)add_watch(f, "/tmp", dirent_mask);
 		}
 		if (!f->n_watch) {
 			close(f->fd);

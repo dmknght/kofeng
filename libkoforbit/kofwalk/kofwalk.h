@@ -1,0 +1,161 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * kofwalk.h - what a scanner needs from a machine's running processes, and
+ * nothing about which machine it is.
+ *
+ * WHY IT IS THIS SMALL.
+ *
+ * The obvious interface is the collector's own: a process struct, a region
+ * struct, a flag vocabulary, an iterator for each. Both collectors already
+ * have all of that - kofw_proc and kofa_proc, kofw_region and kofa_region -
+ * and a neutral copy would be a THIRD vocabulary that has to be kept in step
+ * with two that are already correct for their own platform.
+ *
+ * So this is not the union of them. It is what the SCANNER actually asks,
+ * which turns out to be two questions:
+ *
+ *     what process is this, in the form the engine scans one     (next_proc)
+ *     and what is in it that I should look at                    (next_item)
+ *
+ * and the second has exactly two answers: a FILE, which is scanned as a file
+ * and remembered by its identity, or BYTES, which exist only in that process
+ * and must be scanned every time. Everything a collector knows that does not
+ * change one of those answers stays in the collector.
+ *
+ *
+ * next_proc HANDS BACK A kof_proc_build, WHICH IS NOT AN ACCIDENT.
+ *
+ * That struct is what libkoforbit/kofproc turns into the record the engine
+ * scans a process as, and it is already platform-neutral with a per-platform
+ * tail - see kofmod/proc.h. Handing it back directly means the walk fills the
+ * thing the scanner was going to fill anyway, and there is no third struct
+ * between them that somebody has to remember to copy a field into.
+ *
+ *
+ * A FILE IS NOT READ OUT OF THE PROCESS, and that is the whole performance
+ * story. Measured on this tree's Linux host: 5795 file-backed mappings behind
+ * 335 distinct files, libc mapped a hundred times. A walk that handed over
+ * bytes for those would ask the engine to scan libc a hundred times; handing
+ * over the PATH lets the caller identify it once and never look again. See
+ * koffridge.h, which is where the caller puts the answer.
+ */
+
+#ifndef KOFORBIT_KOFWALK_H
+#define KOFORBIT_KOFWALK_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#include "kofproc.h"
+
+/* What next_item found. */
+enum kof_walk_kind {
+	/* Nothing more in this process. */
+	KOF_WALK_END = 0,
+
+	/*
+	 * A FILE BEHIND A MAPPING. Scan the file, not the mapping: its pages
+	 * are shared with every other process that mapped it precisely
+	 * BECAUSE they are identical to it, and the file has an identity a
+	 * cache can key on while a mapping has none.
+	 */
+	KOF_WALK_FILE,
+
+	/*
+	 * BYTES THAT ARE IN NO FILE. A payload mapped into place, a
+	 * decompressed stub, plain shellcode. This copy exists in one process
+	 * at one instant, so there is nothing to key a cache on and nothing
+	 * to come back to - it is scanned now or not at all.
+	 */
+	KOF_WALK_BYTES
+};
+
+struct kof_walk_item {
+	int kind;                  /* enum kof_walk_kind */
+
+	/* KOF_WALK_FILE. Borrowed, valid until the next call. */
+	const char *path;
+
+	/* KOF_WALK_BYTES. `p` is borrowed and valid until the next call;
+	 * `addr` is where it is in the process, which is what a finding has
+	 * to be reported against. */
+	uint64_t    addr;
+	const void *p;
+	uint64_t    len;
+};
+
+/*
+ * WHICH PROCESSES. NULL means every one the walk can open.
+ *
+ * A LIST IS NOT A CONVENIENCE HERE. "Scan the machine" is one job and "scan
+ * this pid" is another: the second is what a host does when something else
+ * already decided a process is interesting - an event arrived, an operator
+ * asked, a rule fired on a file that process had open - and walking four
+ * hundred processes to reach one of them is the whole cost of the sweep paid
+ * for nothing.
+ *
+ * A pid in the list that does not exist, or that this walk may not open, is
+ * skipped like any other refusal and counted in the stats. It is not an error:
+ * the process may have exited between the caller deciding and the walk
+ * starting, which is the ordinary case for exactly the processes worth asking
+ * about.
+ */
+struct kof_walk_option {
+	const uint32_t *pids;
+	uint32_t        n_pids;
+
+	/* Report processes that could not be opened, so a caller can tell
+	 * "clean" from "never looked at". On by default when the struct is
+	 * zeroed - see the negative sense. */
+	int no_refused;
+};
+
+/*
+ * The walk, as a scanner sees it. `self` is the collector's own handle and
+ * every call takes it back - a vtable and a handle, for the reason
+ * kof_mon_api is one.
+ */
+struct kof_walk_api {
+	void *self;
+
+	/*
+	 * The next process, filled into the form the engine scans one.
+	 * 1 on success, 0 at the end of the walk.
+	 *
+	 * The strings in *out are BORROWED from the walk and are replaced by
+	 * the next call, so a caller that keeps them keeps a copy. That is
+	 * the same contract kofa_plist_next and kofw_plist_next already have,
+	 * and the reason neither allocates.
+	 */
+	int (*next_proc)(void *self, struct kof_proc_build *out);
+
+	/*
+	 * The next thing worth looking at in the process next_proc returned.
+	 * 1 and *out filled, or 0 when there is nothing more.
+	 *
+	 * Calling it after next_proc has moved on is a caller error and
+	 * returns 0; the walk does not keep two processes open.
+	 */
+	int (*next_item)(void *self, struct kof_walk_item *out);
+
+	/* Numbers a caller reports: processes seen and refused, regions, and
+	 * bytes actually read out of processes. May be NULL. */
+	void (*stats)(void *self, uint64_t *procs, uint64_t *refused,
+		      uint64_t *regions, uint64_t *bytes);
+
+	void (*close)(void *self);
+};
+
+/*
+ * Open a walk. NULL on failure with *err set to the collector's own error
+ * code - kofa_err_name or kofw_err_name will name it, and a caller that wants
+ * to print one already knows which collector it linked.
+ *
+ * DECLARED HERE AND DEFINED PER PLATFORM: libkofantarc provides it on Linux,
+ * libkofgrille on Windows, and a host links exactly one of them. That is the
+ * whole of the platform decision - everything above this line is the same
+ * code on both.
+ */
+struct kof_walk_api *kof_walk_open(const struct kof_walk_option *, int *err);
+
+#endif /* KOFORBIT_KOFWALK_H */

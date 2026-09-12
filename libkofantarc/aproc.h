@@ -652,7 +652,24 @@ enum {
 	 * and so is any legitimate runtime patching. It is a fact at the
 	 * strength of a fact that is normally zero.
 	 */
-	KOFA_RGF_DIRTY_CODE = 1u << 13
+	KOFA_RGF_DIRTY_CODE = 1u << 13,
+
+	/*
+	 * THE KERNEL PUT THIS HERE, not the program: [vdso], [vsyscall],
+	 * [vvar] and their relatives.
+	 *
+	 * [vdso] IS EXECUTABLE AND HAS NO FILE, which is the exact shape of
+	 * the thing this library exists to find - measured, 31 of them on this
+	 * machine, one per process. What separates them from shellcode is not
+	 * anything about the bytes: it is that the kernel maps them into
+	 * everybody, identically, and no program chose their contents.
+	 *
+	 * Carried as a flag rather than left to whoever looks at the path,
+	 * because the alternative is every consumer testing for a leading '['
+	 * privately, and one of them forgetting. A rule that means "executable
+	 * with no file behind it" has to exclude these, and now it can say so.
+	 */
+	KOFA_RGF_KERNEL_MAPPED = 1u << 14
 };
 
 struct kofa_region {
@@ -885,9 +902,23 @@ struct kofa_pmem_option {
 	 */
 	uint64_t max_heap_region;
 
-	/* Total bytes read out of this one process. 0 takes the default.
+	/*
+	 * Total bytes read out of this one process. 0 takes the default.
 	 * Reaching it flags the remaining regions KOFA_RGF_UNEXAMINED rather
-	 * than ending the walk, so the caller still learns they exist. */
+	 * than ending the walk, so the caller still learns they exist.
+	 *
+	 * THE DEFAULT IS NOT MEASURED, AND SAYING SO IS THE POINT. Every other
+	 * number in this file came from a measurement on this machine, taken
+	 * as an ordinary user - which sees 34 processes. A privileged sweep
+	 * sees roughly ten times as many, and the shape of what it finds is
+	 * not known: the per-process ceiling and kofa_sweep.max_bytes were
+	 * both picked to be obviously large rather than to be right.
+	 *
+	 * What would settle them is one run of the walk as root, reporting
+	 * bytes_resident and bytes_read per process. Until that exists these
+	 * two are guards against a pathological process, not a budget anybody
+	 * measured.
+	 */
 	uint64_t max_bytes;
 
 	/*

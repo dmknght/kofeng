@@ -764,6 +764,12 @@ static void a_classify(struct kofa_region *r, const char *name)
 	/* The kernel's own mappings, named in brackets. None of them is
 	 * interesting and two of them are executable. */
 	if (name[0] == '[') {
+		/*
+		 * The kernel's own mappings. Flagged as well as classified,
+		 * because [vdso] is executable with no file and a consumer
+		 * that only looked at those two facts would call it shellcode.
+		 */
+		r->flags |= KOFA_RGF_KERNEL_MAPPED;
 		if (!strcmp(name, "[stack]")) {
 			r->use = KOFA_USE_STACK;
 			return;

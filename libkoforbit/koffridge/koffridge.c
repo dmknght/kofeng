@@ -100,15 +100,41 @@ int koffridge_identify(const char *path, struct koffridge_fileid *out)
 		out->volume = (uint64_t)st.st_dev;
 		out->index  = (uint64_t)st.st_ino;
 		out->size   = (uint64_t)st.st_size;
+
 		/*
-		 * Seconds, not the nanosecond field. st_mtim is not in plain
-		 * POSIX.1-2001 and is spelled differently on the systems that
-		 * have it, and a second is finer than the thing this guards
-		 * against - a file replaced with one of identical length whose
-		 * timestamp was then restored defeats nanoseconds just as well.
-		 * The honest statement of that hole is in the header.
+		 * NANOSECONDS, AND THE SECOND WAS NOT ENOUGH.
+		 *
+		 * This used to take st_mtime - whole seconds - on the argument
+		 * that a second is finer than the thing being guarded against.
+		 * Measured, it is not. Three rewrites of one file, in place,
+		 * same inode, same length:
+		 *
+		 *     mtime seconds  1789209554 1789209554 1789209554
+		 *     mtime nsec      370836748  371003014  371007003
+		 *
+		 * At second granularity all three are the same file, so the
+		 * cache serves the first scan's verdict for the third file's
+		 * bytes. An attacker does not have to restore a timestamp for
+		 * that - they have to be quick, and a write takes microseconds.
+		 *
+		 * The nanosecond field costs nothing: it arrives in the same
+		 * stat. Windows needs no change, its FILETIME is already in
+		 * 100ns units.
+		 *
+		 * WHAT IT STILL DOES NOT FIX is a filesystem that normalises
+		 * timestamps - measured, 74% of the system files on this host
+		 * have mtime 0, and their nsec is 0 too. See the header.
 		 */
-		out->mtime  = (uint64_t)st.st_mtime;
+#if defined(st_mtime) || defined(_BSD_SOURCE) || defined(_SVID_SOURCE) || \
+    (defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 200809L) || \
+    defined(_GNU_SOURCE) || defined(__APPLE__)
+		out->mtime  = (uint64_t)st.st_mtime * 1000000000ull +
+			      (uint64_t)st.st_mtim.tv_nsec;
+#else
+		/* No sub-second field on this system: the coarse answer, and
+		 * the same units, so the two cannot be compared by accident. */
+		out->mtime  = (uint64_t)st.st_mtime * 1000000000ull;
+#endif
 		return 1;
 	}
 #endif
@@ -428,7 +454,20 @@ size_t koffridge_describe(const struct koffridge *f, char *buf, size_t cap)
  * version straight after.
  */
 #define FILE_MAGIC   0x4746524bu
-#define FILE_VERSION 1u
+/*
+ * TWO, because the KEY changed meaning.
+ *
+ * koffridge_identify now puts nanoseconds where it put seconds, so every entry
+ * a version-1 file holds is keyed on a number this build would never compute.
+ * Those entries are not wrong, they are unreachable - they would load, sit in
+ * the table, and never match anything again.
+ *
+ * A cache that silently holds entries nobody can hit is worse than no cache:
+ * it occupies the capacity the working set needs and reports a hit rate that
+ * looks like a tuning problem. So the version refuses them, which is what the
+ * field is for.
+ */
+#define FILE_VERSION 2u
 
 /*
  * A CAP ON WHAT A FILE MAY ASK THIS TO ALLOCATE, and it is here because

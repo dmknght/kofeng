@@ -28,6 +28,23 @@
 #include "../libkofeng/kofeng.h"
 
 /*
+ * SCANNING WHAT IS RUNNING, on the platform that has a collector for it.
+ *
+ * libkofantarc is the Linux collector and builds only there, the way
+ * libkofgrille builds only for Windows. The scan itself is the same scan - see
+ * scan_procs below - so what is guarded is the collector, not the idea.
+ */
+/*
+ * THE PROCESS WALK IS A CONTRACT, NOT A PLATFORM. kof_walk_open is declared
+ * once and defined by whichever collector this host links - libkofantarc on
+ * Linux, libkofgrille on Windows. Nothing in this file is #ifdef'd for it.
+ */
+#include "kofwalk.h"
+#include "kofproc.h"
+#include "koffridge.h"
+#include <kofmod/proc.h>
+
+/*
  * COLOUR, and only when the output is a terminal.
  *
  * A pipe, a log or a grep must get the bytes it always did, so every escape goes
@@ -622,6 +639,207 @@ static int heur_bad(const char *argv0, const char *v)
 	return 2;
 }
 
+/* ------------------------------------------------- scanning what is running
+ *
+ * WHY THIS IS IN THE SCANNER AND NOT A TOOL OF ITS OWN.
+ *
+ * A process is another place bytes live. Everything else about the scan is the
+ * same - the same database, the same verdict, the same rollup - and the only
+ * thing that differs is where the bytes come from. Splitting it out would give
+ * two programs that must agree about what "infected" means.
+ *
+ *
+ * AND WHY THE WALK IS NOT IN HERE.
+ *
+ * Deciding that a file-backed mapping is scanned as its FILE, that an
+ * anonymous executable region is scanned as BYTES, and that a kernel mapping
+ * is neither, are answers about an operating system's process table. They
+ * belong to the collector that owns that table - libkofantarc on Linux,
+ * libkofgrille on Windows - and this file asks for them through
+ * libkoforbit/kofwalk/kofwalk.h. It was written the other way round first,
+ * and the cost of that would have been making all three decisions a second
+ * time, slightly differently, for the other platform.
+ *
+ *
+ * THE CACHE IS THE WHOLE REASON THIS IS AFFORDABLE, and the number is why.
+ *
+ * Measured on this machine: 5795 file-backed mappings across the readable
+ * processes, and 335 distinct files behind them - 17.3 to one. libc.so.6 is
+ * mapped a hundred times. Scanning each mapping would scan libc a hundred
+ * times to reach the same answer a hundred times.
+ *
+ * So a file is identified - one stat - and looked up; on a miss it is scanned
+ * and the answer remembered. That needs no process tree and no relationship
+ * between processes: the key is the file's identity, so two processes sharing
+ * a library share an answer by construction.
+ *
+ * WHAT CANNOT BE CACHED IS WHAT MATTERS MOST, and that is not a coincidence.
+ * Bytes with no file behind them exist in one process at one instant. They are
+ * read and scanned every time, and there is little of them - measured, about
+ * 48 MB across this machine.
+ */
+
+struct procscan {
+	struct run       *r;
+	kof_scanner      *sc;
+	struct koffridge *fridge;
+	struct kof_scan_option *opt;
+
+	uint64_t files_scanned, files_cached;
+	uint64_t chunks, chunk_bytes;
+};
+
+/* One file behind a mapping: scan it only if this sweep has not already
+ * answered for it. */
+static void ps_file(struct procscan *p, const char *path)
+{
+	struct koffridge_fileid id;
+	struct koffridge_verdict v;
+
+	if (!path || !path[0])
+		return;
+	if (!koffridge_identify(path, &id)) {
+		/*
+		 * No identity, so no caching - see koffridge.h on why a key
+		 * that could not be established must not be invented. The file
+		 * is still scanned, it is simply scanned every time.
+		 */
+		(void)kof_scan_path(p->sc, path, p->opt, on_object, p->r);
+		p->files_scanned++;
+		return;
+	}
+	if (koffridge_get(p->fridge, &id, sizeof id, &v)) {
+		p->files_cached++;
+		return;
+	}
+	(void)kof_scan_path(p->sc, path, p->opt, on_object, p->r);
+	p->files_scanned++;
+	/*
+	 * Stored as the clean answer, because kof_scan_path reports findings
+	 * through on_object and hands none back here. A verdict that was not
+	 * clean has already been reported by then; what the cache is for is
+	 * not scanning the other seventeen copies of a file whose answer is
+	 * already out.
+	 */
+	(void)koffridge_put(p->fridge, &id, sizeof id, NULL);
+}
+
+/* Returns 0, or a KOF_ERR_*. */
+static int scan_procs(struct run *r, kof_scanner *sc,
+		      struct kof_scan_option *opt, uint64_t db_stamp,
+		      const char *cache_path, const uint32_t *pids,
+		      uint32_t n_pids)
+{
+	struct procscan p;
+	struct kof_walk_api *w;
+	struct kof_walk_option wo;
+	struct kof_proc_build b;
+	struct kof_walk_item it;
+	unsigned char rec[KOF_PROC_REC_MAX];
+	uint64_t procs = 0, refused = 0, regions = 0, bytes = 0;
+	char line[160];
+	int err = 0;
+
+	memset(&p, 0, sizeof p);
+	p.r = r;
+	p.sc = sc;
+	p.opt = opt;
+	p.fridge = koffridge_open(4096, db_stamp);
+	if (!p.fridge)
+		return KOF_ERR_OPEN;
+
+	if (cache_path) {
+		const char *why = "";
+		uint32_t n = koffridge_load(p.fridge, cache_path, &why);
+
+		fprintf(stderr, "cache: %u entr%s loaded (%s)\n",
+			n, n == 1 ? "y" : "ies", why);
+	}
+
+	memset(&wo, 0, sizeof wo);
+	wo.pids = pids;
+	wo.n_pids = n_pids;
+
+	w = kof_walk_open(&wo, &err);
+	if (!w) {
+		koffridge_close(p.fridge);
+		fprintf(stderr, "cannot walk the process table (%d)\n", err);
+		return KOF_ERR_OPEN;
+	}
+
+	while (w->next_proc(w->self, &b)) {
+		char who[256];
+		uint32_t n;
+
+		snprintf(who, sizeof who, "pid:%u/%s", b.pid,
+			 b.comm && b.comm[0] ? b.comm : "?");
+
+		/*
+		 * THE PROCESS ITSELF IS AN OBJECT, and the rules about one
+		 * live in the database like every other rule - see
+		 * kofmod/proc.h. That is what makes "a shell holding one
+		 * socket on both ends of its stdio" a finding somebody can add
+		 * without rebuilding the scanner.
+		 */
+		n = kof_proc_build_rec(&b, rec, sizeof rec);
+		if (n) {
+			struct kof_scan_option po = *opt;
+
+			po.as_format = KOF_EVT_PROC;
+			(void)kof_scan_bytes(sc, rec, n, who, &po,
+					     on_object, r);
+		}
+
+		while (w->next_item(w->self, &it)) {
+			if (it.kind == KOF_WALK_FILE) {
+				ps_file(&p, it.path);
+			} else if (it.kind == KOF_WALK_BYTES) {
+				char nm[320];
+
+				snprintf(nm, sizeof nm, "%s//%016llx", who,
+					 (unsigned long long)it.addr);
+				(void)kof_scan_bytes(sc, it.p, it.len, nm,
+						     opt, on_object, r);
+				p.chunks++;
+				p.chunk_bytes += it.len;
+			}
+		}
+	}
+
+	if (w->stats)
+		w->stats(w->self, &procs, &refused, &regions, &bytes);
+	w->close(w->self);
+
+	if (cache_path && !koffridge_save(p.fridge, cache_path))
+		fprintf(stderr, "cache: could not be written to %s\n",
+			cache_path);
+
+	printf("\n--- processes ---\n");
+	printf("walked    %llu process(es)", (unsigned long long)procs);
+	if (refused)
+		printf(", %llu refused", (unsigned long long)refused);
+	printf("\n");
+	printf("regions   %llu, %.2f MB read out of them\n",
+	       (unsigned long long)regions, (double)bytes / 1048576.0);
+	printf("modules   %llu scanned, %llu served from cache",
+	       (unsigned long long)p.files_scanned,
+	       (unsigned long long)p.files_cached);
+	if (p.files_scanned + p.files_cached)
+		printf("  (%.1f%% saved)",
+		       (double)p.files_cached * 100.0 /
+		       (double)(p.files_scanned + p.files_cached));
+	printf("\n");
+	printf("unbacked  %llu chunk(s), %.2f MB\n",
+	       (unsigned long long)p.chunks,
+	       (double)p.chunk_bytes / 1048576.0);
+	koffridge_describe(p.fridge, line, sizeof line);
+	printf("%s\n", line);
+
+	koffridge_close(p.fridge);
+	return 0;
+}
+
+
 int main(int argc, char **argv)
 {
 	const char *db = NULL, *target = NULL;
@@ -636,6 +854,28 @@ int main(int argc, char **argv)
 	/* The file-level tallies, computed from the per-file map for the summary
 	 * and read again by the exit code after the map is gone. */
 	uint64_t inf_f = 0, sus_f = 0, broken_objs = 0;
+#ifndef _WIN32
+	/*
+	 * WHERE THE VERDICT CACHE IS KEPT BETWEEN RUNS, or NULL.
+	 *
+	 * CACHING ITSELF IS NOT OPTIONAL AND HAS NO FLAG. A process sweep
+	 * meets the same file many times - measured, 5795 mappings behind 335
+	 * distinct files, with libc mapped a hundred times - so scanning each
+	 * mapping would scan libc a hundred times for one answer. The
+	 * in-memory cache is what makes the sweep finish and it is always on.
+	 *
+	 * This names a FILE to carry that across runs, and it is off by
+	 * default for a reason that is about trust rather than speed: whoever
+	 * can write the file decides what this scanner calls clean, and a
+	 * served hit looks exactly like a file that was examined. The operator
+	 * says where it lives, which is the moment they decide who can write
+	 * it. See koffridge.h.
+	 */
+	int want_procs = 0;
+	const char *cache_path = NULL;
+	uint32_t pids[64];
+	uint32_t n_pids = 0;
+#endif
 	int i, rc;
 	/*
 	 * What --emu asked for, held back until every argument has been read.
@@ -742,6 +982,26 @@ int main(int argc, char **argv)
 			}
 			jobs = (unsigned)v;
 		}
+#ifndef _WIN32
+		else if (strcmp(argv[i], "--scan-procs") == 0)
+			want_procs = 1;
+		else if (strcmp(argv[i], "--cache-file") == 0 && i + 1 < argc)
+			cache_path = argv[++i];
+		/*
+		 * ONE PROCESS, OR A FEW. Naming them is not a filter over the
+		 * whole table - the walk opens only what was named, which is
+		 * the whole point when something else has already decided a
+		 * process is interesting. See kof_walk_option.
+		 */
+		else if (strcmp(argv[i], "--pid") == 0 && i + 1 < argc) {
+			if (n_pids < (uint32_t)(sizeof pids / sizeof pids[0]))
+				pids[n_pids++] =
+					(uint32_t)strtoul(argv[++i], NULL, 10);
+			else
+				i++;
+			want_procs = 1;
+		}
+#endif
 		else if (strcmp(argv[i], "--stats") == 0)
 			r.stats = 1;
 		else if (strcmp(argv[i], "-v") == 0)
@@ -767,7 +1027,12 @@ int main(int argc, char **argv)
 			opt.emu_forbidden = 1;
 	}
 
+#ifdef _WIN32
 	if (!db || !target) {
+#else
+	/* --scan-procs names its own target: what is running. */
+	if (!db || (!target && !want_procs)) {
+#endif
 		usage(argv[0]);
 		return 2;
 	}
@@ -870,6 +1135,21 @@ int main(int argc, char **argv)
 	r.color = isatty(1) ? 1 : 0;
 
 	clock_gettime(CLOCK_MONOTONIC, &t0);
+#ifndef _WIN32
+	/*
+	 * WHAT IS RUNNING, rather than what is on the disk. A different
+	 * source of bytes and the same scan - see scan_procs.
+	 */
+	if (want_procs) {
+		struct kof_db_version dv;
+
+		memset(&dv, 0, sizeof dv);
+		(void)kof_engine_db_version(eng, &dv);
+		/* The cache is only true of one database - see koffridge.h. */
+		rc = scan_procs(&r, sc, &opt, dv.build, cache_path,
+				pids, n_pids);
+	} else
+#endif
 	if (jobs > 1)
 		rc = kof_scan_path_mt(scs, jobs, target, &opt, on_object, &r);
 	else

@@ -45,14 +45,85 @@
  * means it.
  */
 
+/*
+ * _GNU_SOURCE, not _POSIX_C_SOURCE, and only on the POSIX side. kofplatform.h
+ * uses memmem, and the collector needs the fanotify declarations - both are
+ * GNU extensions, and asking for strict POSIX here hides them and leaves
+ * implicit declarations that link to the wrong prototype.
+ */
+#ifndef _WIN32
+#define _GNU_SOURCE
+#endif
+
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * ONE TRACER, TWO PLATFORMS, AND ONE PLACE THAT KNOWS WHICH.
+ *
+ * Everything below the adapter is the same code on both: the same options,
+ * the same drain loop, the same report. What differs is the collector and how
+ * a subject is started, scoped and contained - and it differs HERE rather
+ * than at the forty-odd call sites it used to.
+ */
+#ifdef _WIN32
 #include <windows.h>
 
 #include "kofgrille.h"
+#else
+#include <errno.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include "kofantarc.h"
+#include "afan.h"
+#endif
+
+/*
+ * THE COLLECTOR'S OWN VERSION, recorded in a log header so a reader can tell
+ * which producer wrote it. Two collectors, two numbers, one name here.
+ */
+#ifdef _WIN32
+#define TRACER_MAJOR KOFW_MAJOR
+#define TRACER_MINOR KOFW_MINOR
+#else
+#define TRACER_MAJOR KOFA_MAJOR
+#define TRACER_MINOR KOFA_MINOR
+#endif
+
+/*
+ * WHAT WAS ASKED FOR, in one vocabulary, because the FLAGS ARE THE SAME ON
+ * BOTH PLATFORMS and a flag that exists on one host only is a flag somebody
+ * has to remember the host for. On Windows each of these is a distinct ETW
+ * subscription. On Linux fanotify answers the file ones and nothing answers
+ * the rest - the banner still prints what was asked, and the health line at
+ * the end is where a run learns that it got less than it asked for.
+ */
+#ifdef _WIN32
+#define TRACER_SUB_PROCESS    KOFW_SUB_PROCESS
+#define TRACER_SUB_IMAGE      KOFW_SUB_IMAGE
+#define TRACER_SUB_FILE       KOFW_SUB_FILE
+#define TRACER_SUB_FILE_WRITE KOFW_SUB_FILE_WRITE
+#define TRACER_SUB_FILE_OPEN  KOFW_SUB_FILE_OPEN
+#define TRACER_SUB_NET        KOFW_SUB_NET
+#define TRACER_SUB_REGISTRY   KOFW_SUB_REGISTRY
+#define TRACER_SUB_AMSI       KOFW_SUB_AMSI
+#define TRACER_SUB_DNS        KOFW_SUB_DNS
+#define TRACER_SUB_THREAD     KOFW_SUB_THREAD
+#else
+#define TRACER_SUB_PROCESS    (1u << 0)
+#define TRACER_SUB_IMAGE      (1u << 1)
+#define TRACER_SUB_FILE       (1u << 2)
+#define TRACER_SUB_FILE_WRITE (1u << 3)
+#define TRACER_SUB_FILE_OPEN  (1u << 4)
+#define TRACER_SUB_NET        (1u << 5)
+#define TRACER_SUB_REGISTRY   (1u << 6)
+#define TRACER_SUB_AMSI       (1u << 7)
+#define TRACER_SUB_DNS        (1u << 8)
+#define TRACER_SUB_THREAD     (1u << 9)
+#endif
 #include "kofevt.h"
 #include "kofevtfmt.h"
 #include "kofevtlog.h"
@@ -219,6 +290,7 @@ static int rep_ask(void *user, const char *path, struct kof_fp_verdict *v)
 	return 0;
 }
 
+#ifdef _WIN32
 static volatile LONG g_stop;
 
 static BOOL WINAPI on_ctrl(DWORD type)
@@ -226,6 +298,532 @@ static BOOL WINAPI on_ctrl(DWORD type)
 	(void)type;
 	InterlockedExchange(&g_stop, 1);
 	return TRUE;
+}
+
+static void stop_on_signal(void) { SetConsoleCtrlHandler(on_ctrl, TRUE); }
+#else
+static volatile sig_atomic_t g_stop;
+
+static void on_ctrl(int sig) { (void)sig; g_stop = 1; }
+
+static void stop_on_signal(void)
+{
+	signal(SIGINT, on_ctrl);
+	signal(SIGTERM, on_ctrl);
+}
+#endif
+
+/* ------------------------------------------------------------ the subject */
+
+/*
+ * WHAT A TRACER NEEDS: a collector scoped to one program, and a way to start,
+ * hold and end that program. The two platforms answer both differently and
+ * nothing below this block says so.
+ *
+ * SCOPING IS THE INTERESTING HALF. Windows is told about every process start
+ * and keeps a tracked set - see kofw_mon_track. Linux has no such stream
+ * without the netlink connector, which needs CAP_NET_ADMIN and drops records
+ * under load, so the scope is a PROCESS GROUP: the child gets its own with
+ * setpgid, every descendant inherits it, and an event is in scope exactly when
+ * getpgid(pid) returns it. One syscall per event, nothing to build, nothing to
+ * poll, and the kernel is not going to forget which group a process is in.
+ *
+ * WHAT ESCAPES THAT, plainly: a process that calls setsid() leaves the group
+ * and stops being reported. That is the hole a daemonising payload walks
+ * through, and it is why the Windows side tracks instead of grouping. The
+ * honest position is that this scopes a well-behaved subject.
+ *
+ * AND WITHOUT PRIVILEGE THERE IS NOTHING TO SCOPE BY: an unprivileged fanotify
+ * listener is handed pid 0 for every event it did not cause itself. A degraded
+ * run reports what it can see and attributes none of it - see afan.h.
+ */
+struct tracer {
+#ifdef _WIN32
+	struct kofw_mon    *mon;
+	struct kofw_evt     raw;
+	STARTUPINFOA        si;
+	PROCESS_INFORMATION pi;
+	HANDLE              job;
+	char                cmd[8192];
+#else
+	struct kofa_fan          *fan;
+	const struct kof_mon_api *api;
+	pid_t                     kid, group;
+	uint64_t                  out_of_scope;
+	int                       running;
+	int                       unscoped;
+#endif
+	uint32_t root_pid;
+};
+
+static int tracer_open(struct tracer *t, unsigned providers, uint32_t ring)
+{
+	int err = 0;
+
+	memset(t, 0, sizeof *t);
+#ifdef _WIN32
+	{
+		struct kofw_mon_option opt;
+
+		memset(&opt, 0, sizeof opt);
+		opt.providers = providers;
+		opt.ring_capacity = ring;
+		opt.trace_self = 1;   /* our own CreateProcess raises the most
+				       * important event in the run */
+		t->mon = kofw_mon_open(&opt, &err);
+		if (!t->mon) {
+			fprintf(stderr, "kofmontrace: %s\n",
+				kofw_err_name(err));
+			return 0;
+		}
+	}
+#else
+	{
+		struct kofa_fan_option fo;
+
+		(void)providers; (void)ring;
+		memset(&fo, 0, sizeof fo);
+		/* Our own events are the only ones carrying a pid in a
+		 * degraded session, and the group test below is what scopes -
+		 * so the self-filter must not drop them first. */
+		fo.trace_self = 1;
+		t->fan = kofa_fan_open(&fo, &err);
+		if (!t->fan) {
+			fprintf(stderr, "kofmontrace: %s\n",
+				kofa_err_name(err));
+			return 0;
+		}
+		t->api = kofa_fan_api(t->fan);
+		t->api->print_extra(t->api->self, stderr);
+		/*
+		 * NOTHING TO SCOPE BY, SAID OUT LOUD.
+		 *
+		 * Unprivileged, every record about another process arrives
+		 * with KOF_F_PID in `miss` - so the group test below has
+		 * nothing to test and would refuse the entire trace, which
+		 * looks exactly like a program that did nothing. Showing
+		 * everything and saying so is the only honest answer: the
+		 * lines are real, the attribution is not, and a reader told
+		 * that can still use them.
+		 */
+		if (kofa_fan_mode(t->fan) == KOFA_FAN_DEGRADED) {
+			t->unscoped = 1;
+			fputs("kofmontrace: UNSCOPED: this session cannot "
+			      "attribute events, so every record below is "
+			      "shown and NONE is known to belong to the "
+			      "traced program - run as root to scope it\n",
+			      stderr);
+		}
+	}
+#endif
+	return 1;
+}
+
+/*
+ * Start it, STOPPED, so that "the subject is known" happens strictly before
+ * "the subject can do anything". Windows creates it suspended; POSIX raises
+ * SIGSTOP on itself after setpgid and before exec.
+ */
+static int tracer_start(struct tracer *t, char **argv, const char *cmdline)
+{
+#ifdef _WIN32
+	memset(&t->si, 0, sizeof t->si);
+	t->si.cb = sizeof t->si;
+	memset(&t->pi, 0, sizeof t->pi);
+	snprintf(t->cmd, sizeof t->cmd, "%s", cmdline);
+	if (!CreateProcessA(NULL, t->cmd, NULL, NULL, FALSE,
+			    CREATE_SUSPENDED, NULL, NULL, &t->si, &t->pi)) {
+		fprintf(stderr, "kofmontrace: cannot run '%s' (error %lu)\n",
+			argv[0], (unsigned long)GetLastError());
+		return 0;
+	}
+	t->root_pid = t->pi.dwProcessId;
+	return 1;
+#else
+	(void)cmdline;
+	t->kid = fork();
+	if (t->kid < 0) {
+		perror("kofmontrace: fork");
+		return 0;
+	}
+	if (t->kid == 0) {
+		setpgid(0, 0);
+		raise(SIGSTOP);
+		execvp(argv[0], argv);
+		fprintf(stderr, "kofmontrace: cannot run %s: %s\n",
+			argv[0], strerror(errno));
+		_exit(127);
+	}
+	/* Set on both sides: whichever runs first, the group is right before
+	 * the child can produce an event. */
+	setpgid(t->kid, t->kid);
+	t->group = t->kid;
+	t->root_pid = (uint32_t)t->kid;
+	t->running = 1;
+
+	/*
+	 * WAIT FOR IT TO ACTUALLY BE STOPPED, and this is not belt and braces.
+	 *
+	 * A SIGCONT delivered before the child reaches raise(SIGSTOP) is not
+	 * queued and not remembered - it is simply gone, and the child then
+	 * stops and never starts again. The tracer sits out its whole timeout
+	 * watching a process that never ran, and the trace is empty for a
+	 * reason nothing in it mentions. WUNTRACED returns when the child has
+	 * stopped, which is the only point at which SIGCONT is certain to be
+	 * seen.
+	 */
+	{
+		int st;
+
+		if (waitpid(t->kid, &st, WUNTRACED) == t->kid &&
+		    !WIFSTOPPED(st)) {
+			/* It exited before it ever stopped: exec failed, or
+			 * the program is gone. Nothing to trace and nothing
+			 * to resume. */
+			t->running = 0;
+			fprintf(stderr, "kofmontrace: %s did not start\n",
+				argv[0]);
+			return 0;
+		}
+	}
+	return 1;
+#endif
+}
+
+/* Scope the collector to it. Windows is told; POSIX already is, by the group. */
+static int tracer_track(struct tracer *t, const char *leaf)
+{
+#ifdef _WIN32
+	return kofw_mon_track(t->mon, t->root_pid, leaf) == 0;
+#else
+	(void)t; (void)leaf;
+	return 1;
+#endif
+}
+
+/*
+ * Contain the lifetime, BEFORE it runs - a child created before the container
+ * exists is outside it forever. Non-zero when contained.
+ */
+static int tracer_contain(struct tracer *t)
+{
+#ifdef _WIN32
+	JOBOBJECT_EXTENDED_LIMIT_INFORMATION eli;
+
+	t->job = CreateJobObjectW(NULL, NULL);
+	if (t->job) {
+		memset(&eli, 0, sizeof eli);
+		eli.BasicLimitInformation.LimitFlags =
+			JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+		if (!SetInformationJobObject(t->job,
+					     JobObjectExtendedLimitInformation,
+					     &eli, sizeof eli) ||
+		    !AssignProcessToJobObject(t->job, t->pi.hProcess)) {
+			CloseHandle(t->job);
+			t->job = NULL;
+		}
+	}
+	return t->job != NULL;
+#else
+	/* The group was created at fork and every descendant inherits it, so
+	 * there is nothing to assign and nothing that can be created outside
+	 * it - which is the one respect in which this is stronger than the
+	 * job object it replaces. */
+	(void)t;
+	return 1;
+#endif
+}
+
+static void tracer_resume(struct tracer *t)
+{
+#ifdef _WIN32
+	ResumeThread(t->pi.hThread);
+#else
+	kill(t->kid, SIGCONT);
+#endif
+}
+
+/* The next record, already neutral and already scoped. */
+static int tracer_next(struct tracer *t, struct kof_evt *out, uint32_t wait_ms,
+		       int all)
+{
+#ifdef _WIN32
+	(void)all;
+	if (!kofw_mon_next(t->mon, &t->raw, wait_ms))
+		return 0;
+	kofw_evt_to_kof(&t->raw, out);
+	return 1;
+#else
+	for (;;) {
+		if (!kof_mon_next(t->api, out, wait_ms))
+			return 0;
+		if (all || t->unscoped)
+			return 1;
+		/* In scope exactly when the kernel says so. */
+		if (!(out->miss & KOF_F_PID) &&
+		    getpgid((pid_t)out->pid) == t->group)
+			return 1;
+		t->out_of_scope++;
+	}
+#endif
+}
+
+/*
+ * The image name for the pid of the record tracer_next last returned. It reads
+ * the RAW record rather than the neutral one because the Windows lookup is
+ * keyed on (pid, create_time) and create_time is a collector field - a pid on
+ * its own names whoever holds it now, which after a reuse is the wrong
+ * process. Linux has no such map and returns the empty string, which
+ * kof_evt_render already treats as "not known".
+ */
+static const char *tracer_name_of(struct tracer *t)
+{
+#ifdef _WIN32
+	return kofw_mon_name_of(t->mon, t->raw.pid,
+				t->raw.type == KOF_EVT_PROC_START ||
+				t->raw.type == KOF_EVT_PROC_STOP
+					? t->raw.create_time : 0);
+#else
+	(void)t;
+	return "";
+#endif
+}
+
+static int tracer_alive(struct tracer *t)
+{
+#ifdef _WIN32
+	return kofw_mon_tracked_alive(t->mon) != 0;
+#else
+	int st;
+
+	if (!t->running)
+		return 0;
+	if (waitpid(t->kid, &st, WNOHANG) == t->kid)
+		t->running = 0;
+	return t->running;
+#endif
+}
+
+static void tracer_health(struct tracer *t, struct kof_evt_health *nh)
+{
+#ifdef _WIN32
+	kofw_mon_health_neutral(t->mon, nh);
+#else
+	t->api->health(t->api->self, nh);
+#endif
+}
+
+static void tracer_extra(struct tracer *t, FILE *out)
+{
+#ifdef _WIN32
+	struct kofw_health h;
+
+	kofw_mon_health(t->mon, &h);
+	kofw_health_print_extra(out, &h);
+#else
+	t->api->print_extra(t->api->self, out);
+#endif
+}
+
+/*
+ * WHAT THE COLLECTOR WAS ASKED FOR AND WHAT IT GOT. Windows can refuse a
+ * provider one at a time; the Linux collector is one subscription that either
+ * opened or did not, and tracer_open has already failed if it did not - so
+ * asked and enabled are equal and the "REFUSED" report never fires.
+ */
+static void tracer_subs(struct tracer *t, uint32_t *asked, uint32_t *enabled)
+{
+#ifdef _WIN32
+	struct kofw_health h;
+
+	kofw_mon_health(t->mon, &h);
+	*asked = h.sub_asked;
+	*enabled = h.sub_enabled;
+#else
+	struct kof_evt_health nh;
+
+	t->api->health(t->api->self, &nh);
+	(void)nh;
+	*asked = *enabled = 1u;
+#endif
+}
+
+static const char *tracer_sub_name(uint32_t bit)
+{
+#ifdef _WIN32
+	return kofw_sub_name(bit);
+#else
+	(void)bit;
+	return "events";
+#endif
+}
+
+/*
+ * The output filter. Windows applies it inside the collector, which is where
+ * dropping belongs when the collector is the thing producing the volume.
+ * fanotify has no such knob - the mask is set at open and there is nothing
+ * per-event to tune - so the flags that matter there are carried on the tracer
+ * and applied by tracer_next.
+ */
+static void tracer_filter(struct tracer *t, uint32_t root_pid, int no_scope,
+			  int show_all_img, int show_raw, int amsi_anywhere)
+{
+#ifdef _WIN32
+	struct kofw_filter f;
+
+	memset(&f, 0, sizeof f);
+	/*
+	 * NO SCOPE AT ALL, when asked.
+	 *
+	 * Scoping to a tree is what makes a trace readable, and it has one
+	 * failure that is not a bug and cannot be fixed from inside:
+	 * parentage. A payload that migrates is running in a process that is
+	 * nobody's descendant, and everything it does from there - including
+	 * every process it goes on to create - is attributed outside the tree
+	 * and dropped. The trace shows a clean subtree and says nothing about
+	 * the thing that walked out of it.
+	 *
+	 * There is no clever repair for that: no event says "this process is
+	 * now running somebody else's code". So the honest option is to turn
+	 * the scope off and take the noise, which on a quiet test machine is a
+	 * fair trade.
+	 */
+	f.root_pid = no_scope ? 0u : root_pid;
+	if (!show_all_img)
+		f.drop_loc = 1u << KOF_LOC_SYSTEM;
+	if (!show_raw)
+		f.types = ~(uint32_t)(1u << KOF_EVT_RAW);
+	if (amsi_anywhere)
+		f.scope_exempt_prov = 1u << KOFW_PROV_AMSI;
+	kofw_mon_filter(t->mon, &f);
+#else
+	(void)t; (void)root_pid; (void)no_scope;
+	(void)show_all_img; (void)show_raw; (void)amsi_anywhere;
+#endif
+}
+
+/*
+ * THE SUBJECT AS A PATH THAT CAN BE OPENED. Both hosts resolve a bare name
+ * against PATH before running it, so the report has to resolve it the same
+ * way or every digest in it is "could not be read". Non-zero when `out` holds
+ * a path.
+ */
+static int tracer_resolve(const char *name, char *out, size_t cap)
+{
+#ifdef _WIN32
+	return SearchPathA(NULL, name, ".exe", (DWORD)cap, out, NULL) != 0;
+#else
+	const char *path, *p, *e;
+	size_t nlen = strlen(name);
+
+	if (strchr(name, '/')) {   /* already a path: execvp does not search */
+		if (nlen >= cap)
+			return 0;
+		memcpy(out, name, nlen + 1);
+		return access(out, X_OK) == 0;
+	}
+	/*
+	 * The search this has to match is execvp's, which falls back to
+	 * confstr when PATH is unset - so the fallback is the same one, not a
+	 * guess at /bin:/usr/bin.
+	 */
+	path = getenv("PATH");
+	if (!path || !*path) {
+		static char def[1024];
+
+		if (confstr(_CS_PATH, def, sizeof def) == 0)
+			return 0;
+		path = def;
+	}
+	for (p = path; *p; p = (*e ? e + 1 : e)) {
+		size_t dlen;
+
+		e = strchr(p, ':');
+		if (!e)
+			e = p + strlen(p);
+		dlen = (size_t)(e - p);
+		if (dlen == 0) {   /* an empty field means "." */
+			p = ".";
+			dlen = 1;
+		}
+		if (dlen + 1 + nlen >= cap)
+			continue;
+		memcpy(out, p, dlen);
+		out[dlen] = '/';
+		memcpy(out + dlen + 1, name, nlen + 1);
+		if (access(out, X_OK) == 0)
+			return 1;
+	}
+	return 0;
+#endif
+}
+
+/* How many records the scope refused - the one number that says whether a
+ * quiet trace was quiet or merely narrow. */
+static uint64_t tracer_filtered_scope(struct tracer *t)
+{
+#ifdef _WIN32
+	struct kofw_health h;
+
+	kofw_mon_health(t->mon, &h);
+	return h.filtered_scope;
+#else
+	return t->out_of_scope;
+#endif
+}
+
+/* Two Windows-only readouts. Both have no Linux counterpart and say so by
+ * being empty rather than by being printed wrong. */
+static int tracer_describe(struct tracer *t, char *buf, size_t cap)
+{
+#ifdef _WIN32
+	return kofw_mon_describe(t->mon, buf, cap) != 0;
+#else
+	(void)t; (void)buf; (void)cap;
+	return 0;
+#endif
+}
+
+static const char *tracer_tracked_nth(struct tracer *t, uint32_t k,
+				      uint32_t *pid)
+{
+#ifdef _WIN32
+	return kofw_mon_tracked_nth(t->mon, k, pid);
+#else
+	(void)t; (void)k; (void)pid;
+	return NULL;
+#endif
+}
+
+/* End the run. The container is what makes this one call rather than a hunt. */
+static void tracer_stop(struct tracer *t)
+{
+#ifdef _WIN32
+	if (t->job) {
+		TerminateJobObject(t->job, 1);
+		CloseHandle(t->job);
+		t->job = NULL;
+	}
+#else
+	kill(-t->group, SIGKILL);
+	if (t->running) {
+		int st;
+
+		(void)waitpid(t->kid, &st, 0);
+		t->running = 0;
+	}
+#endif
+}
+
+static void tracer_close(struct tracer *t)
+{
+#ifdef _WIN32
+	if (t->pi.hThread)  CloseHandle(t->pi.hThread);
+	if (t->pi.hProcess) CloseHandle(t->pi.hProcess);
+	kofw_mon_close(t->mon);
+#else
+	kof_mon_close(t->api);
+#endif
 }
 
 static void usage(void)
@@ -392,15 +990,10 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
-	struct kofw_mon_option opt;
-	struct kofw_mon   *mon;
-	struct kofw_health health;
+	struct tracer         tr;
 	struct kof_evt_health nh;
-	struct kofw_evt    e;
-	struct kof_evt     ke;
-	struct kof_evt_tally tally;
-	STARTUPINFOA        si;
-	PROCESS_INFORMATION pi;
+	struct kof_evt        ke;
+	struct kof_evt_tally  tally;
 	char     cmd[8192];
 	/*
 	 * NOTHING STOPS THIS ON ITS OWN, and both defaults got there the same
@@ -423,7 +1016,7 @@ int main(int argc, char **argv)
 	double   secs = 0.0, ev_secs = 0.0;
 	uint64_t t_wall0, t_ev0 = 0;
 	uint32_t root_pid, alive = 1;
-	HANDLE   job = NULL;
+	int      contained;
 	/*
 	 * AMSI FROM EVERYWHERE, ON BY DEFAULT.
 	 *
@@ -468,7 +1061,9 @@ int main(int argc, char **argv)
 	int      show_raw = 1, show_all_img = 0, show_schema = 0, quiet = 0;
 	const char *log_path = NULL;
 	struct kofevt_log_w *log = NULL;
-	int      err = 0, i, first;
+	unsigned providers;
+	uint32_t ring;
+	int      i, first;
 	size_t   n;
 
 	/*
@@ -497,12 +1092,11 @@ int main(int argc, char **argv)
 	uint64_t rep_index = 0;
 	enum kof_rep_end how = KOF_END_UNKNOWN;
 
-	memset(&opt, 0, sizeof opt);
 	memset(&tally, 0, sizeof tally);
 	/* 32MB. The old 16384 was sized for process events alone; with the
 	 * registry in the same session a burst fills that in well under a
 	 * second, and a ring drop is a record nothing can get back. */
-	opt.ring_capacity = 65536u;
+	ring = 65536u;
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--timeout") && i + 1 < argc)
@@ -510,7 +1104,7 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "--grace") && i + 1 < argc)
 			grace = atof(argv[++i]);
 		else if (!strcmp(argv[i], "--ring") && i + 1 < argc)
-			opt.ring_capacity = (uint32_t)strtoul(argv[++i],
+			ring = (uint32_t)strtoul(argv[++i],
 							      NULL, 10);
 		else if (!strcmp(argv[i], "--raw"))
 			show_raw = 1;          /* the default; kept so an old
@@ -668,28 +1262,21 @@ int main(int argc, char **argv)
 		n += (size_t)w;
 	}
 
-	SetConsoleCtrlHandler(on_ctrl, TRUE);
+	stop_on_signal();
 
-	opt.providers = KOFW_SUB_PROCESS |
-			(want_image ? KOFW_SUB_IMAGE : 0u) |
-			(want_file  ? KOFW_SUB_FILE  : 0u) |
-			(want_write ? KOFW_SUB_FILE_WRITE : 0u) |
-			(want_net   ? KOFW_SUB_NET   : 0u) |
-			(want_reg   ? KOFW_SUB_REGISTRY : 0u) |
-			(want_amsi  ? KOFW_SUB_AMSI : 0u) |
-			(want_dns   ? KOFW_SUB_DNS  : 0u) |
-			(want_thread ? KOFW_SUB_THREAD : 0u) |
-			(want_open  ? KOFW_SUB_FILE_OPEN : 0u);
-	opt.trace_self = 1;   /* see the header comment */
+	providers = TRACER_SUB_PROCESS |
+			(want_image ? TRACER_SUB_IMAGE : 0u) |
+			(want_file  ? TRACER_SUB_FILE  : 0u) |
+			(want_write ? TRACER_SUB_FILE_WRITE : 0u) |
+			(want_net   ? TRACER_SUB_NET   : 0u) |
+			(want_reg   ? TRACER_SUB_REGISTRY : 0u) |
+			(want_amsi  ? TRACER_SUB_AMSI : 0u) |
+			(want_dns   ? TRACER_SUB_DNS  : 0u) |
+			(want_thread ? TRACER_SUB_THREAD : 0u) |
+			(want_open  ? TRACER_SUB_FILE_OPEN : 0u);
 
-	mon = kofw_mon_open(&opt, &err);
-	if (!mon) {
-		fprintf(stderr, "kofmontrace: %s\n", kofw_err_name(err));
-		if (err == KOFW_ERR_ACCESS)
-			fputs("kofmontrace: run this from an elevated prompt.\n",
-			      stderr);
+	if (!tracer_open(&tr, providers, ring))
 		return 1;
-	}
 
 	/*
 	 * SUSPENDED, THEN RESUMED AFTER THE PID IS RECORDED.
@@ -701,61 +1288,26 @@ int main(int argc, char **argv)
 	 * makes "the subtree is known" happen strictly before "the subtree can
 	 * do anything", which is the only ordering with no hole in it.
 	 */
-	memset(&si, 0, sizeof si);
-	si.cb = sizeof si;
-	memset(&pi, 0, sizeof pi);
-
-	if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_SUSPENDED,
-			    NULL, NULL, &si, &pi)) {
-		fprintf(stderr, "kofmontrace: cannot run '%s' (error %lu)\n",
-			argv[first], (unsigned long)GetLastError());
-		kofw_mon_close(mon);
+	if (!tracer_start(&tr, argv + first, cmd)) {
+		tracer_close(&tr);
 		return 1;
 	}
 
-	root_pid = pi.dwProcessId;
+	root_pid = tr.root_pid;
 
 	/*
 	 * SCOPE IT BEFORE IT RUNS. The process is still suspended here, so
 	 * "the subtree is known" happens strictly before "the subtree can do
 	 * anything" - the only ordering with no hole in it.
 	 */
-	if (kofw_mon_track(mon, root_pid, kof_path_leaf(argv[first])) != 0) {
+	if (!tracer_track(&tr, kof_path_leaf(argv[first]))) {
 		fputs("kofmontrace: could not track the root process\n", stderr);
-		TerminateProcess(pi.hProcess, 1);
-		kofw_mon_close(mon);
+		tracer_stop(&tr);
+		tracer_close(&tr);
 		return 1;
 	}
-	{
-		struct kofw_filter f;
-
-		memset(&f, 0, sizeof f);
-		/*
-		 * NO SCOPE AT ALL, when asked.
-		 *
-		 * Scoping to a tree is what makes a trace readable, and it has
-		 * one failure that is not a bug and cannot be fixed from
-		 * inside: parentage. A payload that migrates is running in a
-		 * process that is nobody's descendant, and everything it does
-		 * from there - including every process it goes on to create -
-		 * is attributed outside the tree and dropped. The trace shows a
-		 * clean subtree and says nothing about the thing that walked
-		 * out of it.
-		 *
-		 * There is no clever repair for that: no event says "this
-		 * process is now running somebody else's code". So the honest
-		 * option is to turn the scope off and take the noise, which on
-		 * a quiet test machine is a fair trade.
-		 */
-		f.root_pid = no_scope ? 0u : root_pid;
-		if (!show_all_img)
-			f.drop_loc = 1u << KOF_LOC_SYSTEM;
-		if (!show_raw)
-			f.types = ~(uint32_t)(1u << KOF_EVT_RAW);
-		if (amsi_anywhere)
-			f.scope_exempt_prov = 1u << KOFW_PROV_AMSI;
-		kofw_mon_filter(mon, &f);
-	}
+	tracer_filter(&tr, root_pid, no_scope, show_all_img, show_raw,
+		      amsi_anywhere);
 
 	/* Said out loud, because it breaks the promise the rest of the output
 	 * makes: with this on, not every line below belongs to the traced
@@ -799,69 +1351,44 @@ int main(int argc, char **argv)
 		      "(--all-images to show them)\n", stderr);
 
 	{
-		struct kofw_health h0;
-		uint32_t missing, b;
+		uint32_t asked, enabled, missing, b;
 
-		kofw_mon_health(mon, &h0);
-		missing = h0.sub_asked & ~h0.sub_enabled;
+		tracer_subs(&tr, &asked, &enabled);
+		missing = asked & ~enabled;
 		if (missing) {
 			fputs("kofmontrace: REFUSED by the provider:", stderr);
 			for (b = 1u; b; b <<= 1)
 				if (missing & b)
 					fprintf(stderr, " %s",
-						kofw_sub_name(b));
+						tracer_sub_name(b));
 			fputs("\n\n", stderr);
 		}
 	}
 
 	/*
-	 * A JOB OBJECT, ASSIGNED WHILE THE TARGET IS STILL SUSPENDED.
+	 * CONTAINED WHILE THE TARGET IS STILL STOPPED.
 	 *
-	 * Ctrl-C used to stop the tracer and leave the sample running. The
-	 * console sends CTRL_C_EVENT to the process group, so a well-behaved
-	 * console child dies with it - but a sample is not a well-behaved
-	 * console child, and anything it spawned into its own group never got
-	 * the event at all. Somebody stopping a trace reasonably believes they
-	 * stopped the run.
+	 * Ctrl-C used to stop the tracer and leave the sample running. Killing
+	 * the root alone would not have fixed it either: it kills one process
+	 * and orphans the tree under it, which for a dropper is the half that
+	 * matters. So the container holds the whole descendancy - a job object
+	 * on Windows, a process group on Linux, see tracer_contain.
 	 *
-	 * TerminateProcess on the root would not have fixed it either: it kills
-	 * one process and orphans the tree under it, which for a dropper is the
-	 * half that matters. A job holds the whole descendancy, and
-	 * KILL_ON_JOB_CLOSE means the kernel does the killing when the last
-	 * handle goes - so it still happens if this tracer crashes or is killed
-	 * itself, which is exactly when it is most needed.
-	 *
-	 * Assigned before ResumeThread for the same reason the pid is recorded
+	 * Here, before the resume, for the same reason the pid is recorded
 	 * before it: after that instruction the target can create children, and
-	 * a child created before the job exists is outside it forever.
+	 * a child created before the container exists is outside it forever.
 	 */
-	if (!leave_running) {
-		JOBOBJECT_EXTENDED_LIMIT_INFORMATION eli;
-
-		job = CreateJobObjectW(NULL, NULL);
-		if (job) {
-			memset(&eli, 0, sizeof eli);
-			eli.BasicLimitInformation.LimitFlags =
-				JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-			if (!SetInformationJobObject(
-				    job, JobObjectExtendedLimitInformation,
-				    &eli, sizeof eli) ||
-			    !AssignProcessToJobObject(job, pi.hProcess)) {
-				CloseHandle(job);
-				job = NULL;
-			}
-		}
-		/*
-		 * Loud, not silent. Without the job this tool leaves whatever
-		 * it ran behind when it exits, and that is a fact about the
-		 * machine somebody has to know before they trust the trace to
-		 * have ended the run.
-		 */
-		if (!job)
-			fputs("kofmontrace: WARNING could not contain the "
-			      "target in a job object; it and anything it "
-			      "starts will SURVIVE this tracer\n", stderr);
-	}
+	contained = leave_running ? 1 : tracer_contain(&tr);
+	/*
+	 * Loud, not silent. Without the container this tool leaves whatever it
+	 * ran behind when it exits, and that is a fact about the machine
+	 * somebody has to know before they trust the trace to have ended the
+	 * run.
+	 */
+	if (!contained)
+		fputs("kofmontrace: WARNING could not contain the target; "
+		      "it and anything it starts will SURVIVE this tracer\n",
+		      stderr);
 
 	/*
 	 * OPENED AFTER THE SESSION AND BEFORE THE TARGET RUNS.
@@ -879,10 +1406,10 @@ int main(int argc, char **argv)
 	 * by the scope filter before they ever reach the writer.
 	 */
 	if (log_path) {
-		struct kofw_health h1;
 		struct kofevt_log_info li;
+		uint32_t asked, enabled;
 
-		kofw_mon_health(mon, &h1);
+		tracer_subs(&tr, &asked, &enabled);
 		memset(&li, 0, sizeof li);
 		/* The record this collector produces, named as well as sized:
 		 * another collector's 640-byte record is not this one. */
@@ -894,15 +1421,15 @@ int main(int argc, char **argv)
 		li.len_off     = (uint16_t)offsetof(struct kof_evt, text_len);
 		li.rec_kind    = KOFEVT_REC_KOF;
 		li.build       = (uint32_t)KOFENG_BUILD;
-		li.src_major   = KOFW_MAJOR;
-		li.src_minor   = KOFW_MINOR;
+		li.src_major   = TRACER_MAJOR;
+		li.src_minor   = TRACER_MINOR;
 		/* 0 asks kofevt for this host, so the tool does not have
 		 * to know how to spell it. */
 		li.platform    = 0u;
 		li.arch        = 0u;
 		li.root_pid    = root_pid;
-		li.sub_asked   = h1.sub_asked;
-		li.sub_enabled = h1.sub_enabled;
+		li.sub_asked   = asked;
+		li.sub_enabled = enabled;
 		li.started     = kof_evt_now();
 		log = kofevt_log_create(log_path, &li);
 		if (!log)
@@ -951,8 +1478,7 @@ int main(int argc, char **argv)
 		static char subj[1024];
 		const char *subject = argv[first];
 
-		if (SearchPathA(NULL, argv[first], ".exe", sizeof subj, subj,
-				NULL))
+		if (tracer_resolve(argv[first], subj, sizeof subj))
 			subject = subj;
 
 		memset(&ri, 0, sizeof ri);
@@ -969,11 +1495,11 @@ int main(int argc, char **argv)
 		ri.dir         = rep_dir;
 		ri.log         = log_path;
 		{
-			struct kofw_health h2;
+			uint32_t asked, enabled;
 
-			kofw_mon_health(mon, &h2);
-			ri.sub_asked   = h2.sub_asked;
-			ri.sub_enabled = h2.sub_enabled;
+			tracer_subs(&tr, &asked, &enabled);
+			ri.sub_asked   = asked;
+			ri.sub_enabled = enabled;
 		}
 
 		rep = kof_report_open(&ri);
@@ -1009,18 +1535,18 @@ int main(int argc, char **argv)
 	}
 
 	t_wall0 = kof_evt_now();
-	ResumeThread(pi.hThread);
+	tracer_resume(&tr);
 
 	while (!g_stop) {
 
-		if (!kofw_mon_next(mon, &e, 200)) {
+		if (!tracer_next(&tr, &ke, 200, no_scope)) {
 			secs = kof_evt_secs_since(t_wall0, kof_evt_now());
 			goto tick;
 		}
 
 		if (t_ev0 == 0)
-			t_ev0 = e.stamp;
-		ev_secs = kof_evt_secs_since(t_ev0, e.stamp);
+			t_ev0 = ke.stamp;
+		ev_secs = kof_evt_secs_since(t_ev0, ke.stamp);
 		/* The deadline clock still has to advance while events flow, or
 		 * a program that never stops producing them never times out. */
 		secs = kof_evt_secs_since(t_wall0, kof_evt_now());
@@ -1029,7 +1555,7 @@ int main(int argc, char **argv)
 		 * Everything that decides WHETHER this record belongs to the
 		 * tree - growing the set on a ProcessStart, retiring it on a
 		 * ProcessStop, refusing everything outside it - happened inside
-		 * kofw_mon_next. What arrives here is already scoped.
+		 * tracer_next. What arrives here is already scoped.
 		 */
 		/* Recorded before it is rendered, so a --quiet run and a loud
 		 * one produce the same file. */
@@ -1041,8 +1567,6 @@ int main(int argc, char **argv)
 		 * viewer prints from it is produced by the same code that
 		 * printed it live.
 		 */
-		kofw_evt_to_kof(&e, &ke);
-
 		if (log)
 			(void)kofevt_log_write(log, &ke);
 
@@ -1070,17 +1594,13 @@ int main(int argc, char **argv)
 		}
 
 		if (!quiet)
-			kof_evt_render(&ke, ev_secs,
-				  kofw_mon_name_of(mon, e.pid,
-						   e.type == KOF_EVT_PROC_START ||
-						   e.type == KOF_EVT_PROC_STOP
-							   ? e.create_time : 0),
+			kof_evt_render(&ke, ev_secs, tracer_name_of(&tr),
 				  stdout, &tally);
 		else
 			kof_evt_count(&ke, &tally);
 
 tick:
-		alive = kofw_mon_tracked_alive(mon);
+		alive = (uint32_t)tracer_alive(&tr);
 		/*
 		 * THE SUBTREE EMPTYING IS NOT A REASON TO STOP, unless asked.
 		 *
@@ -1134,16 +1654,16 @@ tick:
 
 		snprintf(what, sizeof what, "subtree of pid %lu",
 			 (unsigned long)root_pid);
-		kofw_mon_health(mon, &health);
 		kof_evt_print_tally(&tally, secs, what, stderr);
 	}
 
-	kofw_mon_health_neutral(mon, &nh);
+	tracer_health(&tr, &nh);
 	kof_evt_health_print(stderr, &nh, secs);
-	/* And the half only this collector has - see kofw_health_print_extra
-	 * for why the unbacked count and the reasons it may be unanswerable
-	 * belong on the same screen. */
-	kofw_health_print_extra(stderr, &health);
+	/* And the half only this collector has - the unbacked count on
+	 * Windows, the queue and permission state on Linux. Same screen as the
+	 * neutral half, because a reader deciding whether to trust a quiet run
+	 * needs both. */
+	tracer_extra(&tr, stderr);
 
 	/*
 	 * THE SHAPES, AND WHY THIS IS ON THE TOOL PEOPLE ACTUALLY DEBUG WITH.
@@ -1157,7 +1677,7 @@ tick:
 	if (show_schema) {
 		static char shapes[16384];
 
-		if (kofw_mon_describe(mon, shapes, sizeof shapes))
+		if (tracer_describe(&tr, shapes, sizeof shapes))
 			fprintf(stderr, "\n-- payload shapes learned:\n%s",
 				shapes);
 	}
@@ -1187,7 +1707,7 @@ tick:
 
 		fprintf(stderr, "   %lu process(es) still running at exit:\n",
 			(unsigned long)alive);
-		for (k = 0; (nm = kofw_mon_tracked_nth(mon, k, &pid)) != NULL;
+		for (k = 0; (nm = tracer_tracked_nth(&tr, k, &pid)) != NULL;
 		     k++)
 			fprintf(stderr, "     pid %-6lu %s\n",
 				(unsigned long)pid, *nm ? nm : "?");
@@ -1201,17 +1721,18 @@ tick:
 	 * Closing the job handle would do it on its own - that is what
 	 * KILL_ON_JOB_CLOSE is - but doing it explicitly means the processes are
 	 * gone before this returns rather than at some point during exit, and it
-	 * gives the line below something true to say.
+	 * gives the line below something true to say. The process group the
+	 * Linux side kills has no such fallback, so there it is the only thing
+	 * that ends the run.
 	 */
-	if (job) {
+	if (contained && !leave_running) {
 		if (alive)
 			fprintf(stderr, "   terminating %lu process(es) still "
 				"in the traced tree\n", (unsigned long)alive);
-		TerminateJobObject(job, 1);
-		CloseHandle(job);
+		tracer_stop(&tr);
 	} else if (alive) {
-		fputs("   WARNING those processes were NOT terminated: this "
-		      "run had no job object\n", stderr);
+		fputs("   WARNING those processes were NOT terminated\n",
+		      stderr);
 	}
 
 	if (log) {
@@ -1247,7 +1768,7 @@ tick:
 		int   rc;
 
 		kof_report_ended(rep, how, secs);
-		kof_report_health(rep, &nh, health.filtered_scope);
+		kof_report_health(rep, &nh, tracer_filtered_scope(&tr));
 
 		struct kof_rep_engine rep_eng;
 
@@ -1327,8 +1848,6 @@ tick:
 	if (eng)
 		kof_engine_close(eng);
 
-	CloseHandle(pi.hThread);
-	CloseHandle(pi.hProcess);
-	kofw_mon_close(mon);
+	tracer_close(&tr);
 	return 0;
 }
