@@ -97,8 +97,18 @@ enum kofevt_rec_kind {
  * build does not read one; nothing has shipped, so there is nothing to keep
  * compatible with, and a reader that guessed would read every field of every
  * record from the wrong offset.
+ *
+ * 3 - the network addresses changed MEANING, which is the case this counter
+ * exists for. They were two uint32 in host layout and are now sixteen bytes
+ * each, with IPv4 carried IPv4-mapped. `rec_size` grew too and would have been
+ * enough to make a v2 file refuse - but it would have refused it for the wrong
+ * reason, and a size check cannot catch the change that matters here: a reader
+ * that took the first four bytes of a 16-byte field would find 0.0.0.0 on
+ * every v4 connection and report a trace full of talking to nobody. That is
+ * precisely the failure mode this format is built to refuse, so it gets the
+ * bump, and the write offset arriving in the same change comes along free.
  */
-#define KOFEVT_LOG_VERSION 2u
+#define KOFEVT_LOG_VERSION 3u
 
 #define KOFEVT_LOG_HDR_SIZE 64u
 

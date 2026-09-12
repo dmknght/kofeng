@@ -522,7 +522,35 @@ static int filter_decide(struct kofw_ptab *t, const struct kofw_filter *f,
 		 * collector has both, and only it knows whether the module list
 		 * is complete enough for the answer to mean anything.
 		 */
+		/*
+		 * AN EMPTY LIST CANNOT SUPPORT THE NEGATIVE CLAIM EITHER, and
+		 * leaving that out produced a false UNBACKED on the FIRST
+		 * THREAD OF EVERY PROCESS.
+		 *
+		 * mods_whole says this session saw the process start, so every
+		 * image it ever maps is downstream of that record. That is true
+		 * about the STREAM and not about the ORDER: ETW buffers are per
+		 * processor, records cross CPUs out of order, and an ImageLoad
+		 * that happened before the ProcessStart in real time can be
+		 * DELIVERED after it. When it is delivered first,
+		 * kofw_ptab_of() has no entry for the pid yet and the module is
+		 * not recorded; then ProcessStart arrives, mods_release()
+		 * empties the list, and mods_whole goes up over nothing.
+		 *
+		 * The next record is the main thread starting at the
+		 * executable's entry point, `mods_contain` is asked about an
+		 * empty list, and it answers no. Measured: dns.kevt flagged the
+		 * first thread of both cmd.exe and PING.EXE, which is two
+		 * injections reported in a trace of `ping`.
+		 *
+		 * Every Windows process maps at least ntdll, so an empty list
+		 * is a list of loads that were MISSED, never a process with no
+		 * modules - and this is the same withdrawal mods_full already
+		 * performs one function up, for the same reason. A manually
+		 * mapped payload still loads ntdll, so nothing real is lost.
+		 */
 		if (p && p->mods_whole && !p->mods_full &&
+		    p->mods != KOFW_MODBLK_NONE &&
 		    !mods_contain(t, p, e->addr)) {
 			e->flags |= KOFW_EF_UNBACKED;
 			t->unbacked++;

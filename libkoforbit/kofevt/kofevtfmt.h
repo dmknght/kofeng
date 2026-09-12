@@ -34,7 +34,7 @@
 struct kof_evt_tally {
 	uint64_t proc, image, thread;
 	uint64_t file_new, file_del, file_ren, file_wr;
-	uint64_t reg, amsi;
+	uint64_t reg, amsi, dns;
 	uint64_t conn, bytes_sent, bytes_recv;
 	uint64_t raw;
 };

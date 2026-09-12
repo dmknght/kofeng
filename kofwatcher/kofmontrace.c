@@ -57,6 +57,23 @@
 #include "kofevtfmt.h"
 #include "kofevtlog.h"
 
+/*
+ * AND THE ENGINE, WHICH THIS TOOL DID NOT USED TO LINK.
+ *
+ * It links it for the report: a trace says which files the program created and
+ * which strings it used, and only the bytes say what those files ARE and
+ * whether those strings are in the sample at all. Hashing an artefact, naming
+ * the packer that produced it and checking a candidate string against the
+ * subject's bytes are all engine work, and doing them anywhere else would mean
+ * a second opinion on questions the engine already answers.
+ *
+ * The cost is in the Makefile and is written down there: this stopped
+ * cross-building, because $(LIB) is built for the host. kofwatchtower stays in
+ * the cross block and keeps libkofgrille type-checked on a machine with no ETW.
+ */
+#include "kofeng.h"
+#include "kofreport.h"
+
 static volatile LONG g_stop;
 
 static BOOL WINAPI on_ctrl(DWORD type)
@@ -69,7 +86,7 @@ static BOOL WINAPI on_ctrl(DWORD type)
 static void usage(void)
 {
 	kof_evt_banner(stderr, "kofmontrace", (uint32_t)KOFENG_BUILD,
-		       "process, image, file, network, registry, amsi");
+		       "process, image, file, network, registry, amsi, dns");
 	fputs("\nusage: kofmontrace [options] <program> [args...]\n"
 	      "\n"
 	      "EVERY PROVIDER IS ON BY DEFAULT, and so is --raw. This is a tool\n"
@@ -97,14 +114,42 @@ static void usage(void)
 	      "                  delivered up to a flush timer late, so the\n"
 	      "                  last thing a process did routinely arrives\n"
 	      "                  after its own ProcessStop.\n"
-	      "  --ring N        records in flight (default 65536, 512B each)\n"
+	      "  --ring N        records in flight (default 65536, 640B each)\n"
 	      "  --log FILE      record every event this run KEPT into FILE, as\n"
-	      "                  fixed 512-byte records behind a header. The\n"
+	      "                  fixed 640-byte records behind a header. The\n"
 	      "                  point is replay: a rule that cannot be run\n"
 	      "                  again over a recorded trace cannot be\n"
 	      "                  regression tested, and a false positive nobody\n"
 	      "                  can reproduce cannot be fixed. The file reads\n"
 	      "                  on a host with no ETW at all.\n"
+	      "  --report DIR    after the run, write a report into DIR: what\n"
+	      "     (-r DIR)     the program left behind, deduplicated, with\n"
+	      "                  the bytes of the files it created and of the\n"
+	      "                  ranges it wrote into files that already\n"
+	      "                  existed. Three files: report.txt to read,\n"
+	      "                  report.json for a pipeline, and\n"
+	      "                  candidates.tsv - the observed strings, each\n"
+	      "                  marked with whether it is ACTUALLY in the\n"
+	      "                  sample's bytes, which is what makes it usable\n"
+	      "                  as signature material.\n"
+	      "                  OFF by default, unlike every provider: a trace\n"
+	      "                  prints what it sees and changes nothing, while\n"
+	      "                  this scans and writes copies of what a live\n"
+	      "                  sample produced onto this disk.\n"
+	      "                  Nothing is filtered out of it. Fingerprints\n"
+	      "                  that hold a random name, a pid or a user\n"
+	      "                  profile are GROUPED as such, with the reason\n"
+	      "                  and the invariant part of each - a dropped\n"
+	      "                  candidate is a judgement nobody can check.\n"
+	      "  --db PATH       the database the report identifies artefacts\n"
+	      "                  with (default build/release/databases).\n"
+	      "                  Without one the report still has every\n"
+	      "                  fingerprint and every digest, and identifies\n"
+	      "                  nothing - and says so rather than showing\n"
+	      "                  empty columns.\n"
+	      "  --no-collect    report on the files the tree created without\n"
+	      "                  copying them into DIR. They are still hashed\n"
+	      "                  and scanned in place.\n"
 	      "  --schema        at exit, print every payload shape that\n"
 	      "                  arrived, with a record count for each\n"
 	      "  --all-images    do not suppress system module loads\n"
@@ -128,6 +173,15 @@ static void usage(void)
 	      "                  this only when you mean to leave a sample\n"
 	      "                  running on the machine.\n"
 	      "  --no-registry   do not subscribe to registry create/set/delete\n"
+	      "  --no-dns        do not subscribe to name lookups. ON by\n"
+	      "                  default, and it is the network evidence worth\n"
+	      "                  most: an address is rented and reassigned,\n"
+	      "                  while the domain is what the operator chose\n"
+	      "                  and paid for, and is still searchable a year\n"
+	      "                  later. User-mode provider like AMSI, so a\n"
+	      "                  payload that resolves names itself or over\n"
+	      "                  HTTPS does not appear here and its connection\n"
+	      "                  still does under --net.\n"
 	      "  --no-scope      show events from EVERY process, not only the\n"
 	      "                  launched tree. Use this when the subject can\n"
 	      "                  MIGRATE: a payload that moves into another\n"
@@ -177,8 +231,12 @@ static void usage(void)
 
 	      "  --no-raw        hide events this build has no type for\n"
 	      "\n"
-	      "Registry events currently arrive UNTYPED, so --no-raw hides them\n"
-	      "entirely. See the note in wevt_decode.c on establishing the ids.\n"
+	      "Registry, thread and the IPv6 and UDP network events are all\n"
+	      "typed now. What still arrives untyped is a short list - an\n"
+	      "accepted connection, a retransmit, the TCP copy step, the\n"
+	      "resolver's intermediate stages - and --no-raw hides exactly\n"
+	      "those. See type_of() in wevt_decode.c for what each one is and\n"
+	      "why it is not a verb.\n"
 	      "\n"
 	      "Requires an elevated prompt.\n"
 	      "\n"
@@ -261,12 +319,38 @@ int main(int argc, char **argv)
 	 * somebody remember a flag to see those is making them miss them.
 	 */
 	int      want_write = 1, want_reg = 1, want_thread = 1, want_open = 1;
-	int      want_amsi = 1;
+	int      want_amsi = 1, want_dns = 1;
 	int      show_raw = 1, show_all_img = 0, show_schema = 0, quiet = 0;
 	const char *log_path = NULL;
 	struct kofevt_log_w *log = NULL;
 	int      err = 0, i, first;
 	size_t   n;
+
+	/*
+	 * THE REPORT, AND WHY IT IS A DIRECTORY RATHER THAN A FILE.
+	 *
+	 * Because there are bytes to keep. A report that only wrote text would
+	 * name the files the sample created and leave a reader with nothing to
+	 * scan, and copying them somewhere requires somewhere - so the option
+	 * takes a directory, the report goes in it, the collected artefacts go
+	 * under it, and the whole thing can be sent to somebody as one folder.
+	 *
+	 * OFF BY DEFAULT, unlike every provider above. A trace prints what it
+	 * sees and changes nothing; a report EXECUTES a scan and WRITES copies
+	 * of what a live sample produced onto the disk of whoever ran it. That
+	 * is not a default anybody should get by not reading the options.
+	 */
+	const char *rep_dir = NULL;
+	const char *db_path = "build/release/databases";
+	int      want_collect = 1;
+	struct kof_report *rep = NULL;
+	kof_engine  *eng = NULL;
+	kof_scanner *sc  = NULL;
+	/* Which record in the log the report should point a fingerprint at.
+	 * The count of records WRITTEN, so it is the log's own index and not
+	 * an event count - a run with no log passes KOF_REP_NO_INDEX. */
+	uint64_t rep_index = 0;
+	enum kof_rep_end how = KOF_END_UNKNOWN;
 
 	memset(&opt, 0, sizeof opt);
 	memset(&tally, 0, sizeof tally);
@@ -314,6 +398,15 @@ int main(int argc, char **argv)
 			want_amsi = 0;
 		else if (!strcmp(argv[i], "--no-registry"))
 			want_reg = 0;
+		else if (!strcmp(argv[i], "--no-dns"))
+			want_dns = 0;
+		else if ((!strcmp(argv[i], "--report") ||
+			  !strcmp(argv[i], "-r")) && i + 1 < argc)
+			rep_dir = argv[++i];
+		else if (!strcmp(argv[i], "--db") && i + 1 < argc)
+			db_path = argv[++i];
+		else if (!strcmp(argv[i], "--no-collect"))
+			want_collect = 0;
 		else if (!strcmp(argv[i], "--no-thread"))
 			want_thread = 0;
 		else if (!strcmp(argv[i], "--no-pipe"))
@@ -391,6 +484,29 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
+	/*
+	 * THE REPORT DIRECTORY, MADE NOW - BEFORE A LIVE SAMPLE IS EXECUTED.
+	 *
+	 * kof_report_finish makes it too, because it writes into it. But that
+	 * runs at the END, and a failure there means the sample has already
+	 * been run on this machine, its artefacts have been collected, and the
+	 * only thing left to do with the error is print it. `--report out\dns`
+	 * with no `out` did exactly that: three "cannot write" lines after the
+	 * run, blaming the files rather than the missing directory.
+	 *
+	 * So it is created here and a failure REFUSES TO RUN ANYTHING. That is
+	 * the right way round for a tool whose first line of documentation is
+	 * that it executes what you give it: being unable to record the
+	 * evidence is a reason not to create the evidence.
+	 */
+	if (rep_dir && kof_report_mkpath(rep_dir) != 0) {
+		fprintf(stderr, "kofmontrace: cannot create the report "
+			"directory '%s' - refusing to run the target, because "
+			"there would be nowhere to write what it did\n",
+			rep_dir);
+		return 2;
+	}
+
 	/* The target and its arguments, re-joined. Quoted only where a space
 	 * makes it necessary, which is enough for a test harness and is not a
 	 * general command-line composer. */
@@ -416,6 +532,7 @@ int main(int argc, char **argv)
 			(want_net   ? KOFW_SUB_NET   : 0u) |
 			(want_reg   ? KOFW_SUB_REGISTRY : 0u) |
 			(want_amsi  ? KOFW_SUB_AMSI : 0u) |
+			(want_dns   ? KOFW_SUB_DNS  : 0u) |
 			(want_thread ? KOFW_SUB_THREAD : 0u) |
 			(want_open  ? KOFW_SUB_FILE_OPEN : 0u);
 	opt.trace_self = 1;   /* see the header comment */
@@ -505,11 +622,12 @@ int main(int argc, char **argv)
 	fprintf(stderr, "kofmontrace: build %llu\n",
 		(unsigned long long)KOFENG_BUILD);
 	fprintf(stderr, "kofmontrace: %s\nkofmontrace: root pid %lu, providers:"
-		" process%s%s%s%s%s%s%s%s\n\n",
+		" process%s%s%s%s%s%s%s%s%s\n\n",
 		cmd, (unsigned long)root_pid,
 		want_image ? " image" : "", want_file ? " file" : "",
 		want_write ? " file-write" : "", want_net ? " net" : "",
 		want_reg ? " registry" : "", want_amsi ? " amsi" : "",
+		want_dns ? " dns" : "",
 		/* thread and file-open were subscribed and not announced, which
 		 * is the one thing this line exists to prevent: when a provider
 		 * enables and then delivers nothing, the banner is what says
@@ -622,7 +740,7 @@ int main(int argc, char **argv)
 		kofw_mon_health(mon, &h1);
 		memset(&li, 0, sizeof li);
 		/* The record this collector produces, named as well as sized:
-		 * another collector's 512-byte record is not this one. */
+		 * another collector's 640-byte record is not this one. */
 		li.rec_size    = (uint32_t)sizeof(struct kof_evt);
 		/* The shape, so the log can write only the text a record
 		 * actually has - offsetof at the one place that knows the
@@ -648,6 +766,101 @@ int main(int argc, char **argv)
 		else
 			fprintf(stderr, "kofmontrace: recording to %s\n",
 				log_path);
+	}
+
+	/*
+	 * THE REPORT, OPENED BEFORE THE TARGET RUNS.
+	 *
+	 * Same reason the log is: the first thing a dropper does is the part
+	 * nothing else can get, and a report whose accumulator started after
+	 * ResumeThread would be missing exactly the writes that happen in the
+	 * first milliseconds.
+	 *
+	 * The engine is opened here too rather than at the end, so that a
+	 * missing database is reported before a live sample has been run - not
+	 * after, when the run cannot be taken back.
+	 */
+	if (rep_dir) {
+		struct kof_report_info ri;
+
+		/*
+		 * THE SUBJECT AS A PATH THAT CAN BE OPENED, not as it was
+		 * typed.
+		 *
+		 * `--report out\dns cmd /c ping ...` gave a report whose
+		 * subject was "cmd" with "sha256: not computed - the subject
+		 * could not be read", because a bare name is resolved by
+		 * CreateProcess against PATH and nothing had resolved it here.
+		 * Everything the report does with the subject needs a real
+		 * file: the digest, the engine's verdict, and the search that
+		 * decides whether an observed string is in its bytes. Without
+		 * one, every candidate comes back "unchecked".
+		 *
+		 * SearchPath and not the image path from the trace, which is
+		 * the other candidate and is worse: the kernel reports
+		 * \Device\HarddiskVolume14\... , and a device path cannot be
+		 * handed to fopen. This resolves it the same way the launch
+		 * did, which is the only answer that is certainly the same
+		 * file.
+		 */
+		static char subj[1024];
+		const char *subject = argv[first];
+
+		if (SearchPathA(NULL, argv[first], ".exe", sizeof subj, subj,
+				NULL))
+			subject = subj;
+
+		memset(&ri, 0, sizeof ri);
+		ri.tool        = "kofmontrace";
+		ri.subject     = subject;
+		ri.subject_cmd = cmd;
+		ri.root_pid    = root_pid;
+		ri.build       = (uint32_t)KOFENG_BUILD;
+		/* Asked of kofevt rather than spelled here, so this tool and
+		 * the log header cannot name the same machine differently. */
+		ri.platform    = kof_evt_platform_self();
+		ri.arch        = kof_evt_arch_self();
+		ri.started     = kof_evt_now();
+		ri.dir         = rep_dir;
+		ri.log         = log_path;
+		{
+			struct kofw_health h2;
+
+			kofw_mon_health(mon, &h2);
+			ri.sub_asked   = h2.sub_asked;
+			ri.sub_enabled = h2.sub_enabled;
+		}
+
+		rep = kof_report_open(&ri);
+		if (!rep) {
+			fprintf(stderr, "kofmontrace: cannot open a report - "
+				"continuing without one\n");
+		} else {
+			eng = kof_engine_open(db_path);
+			if (eng)
+				sc = kof_scanner_new(eng);
+			if (!sc) {
+				/*
+				 * NOT FATAL, AND NOT SILENT. Without the
+				 * engine the report still has every
+				 * fingerprint, every process and every
+				 * digest-less artefact; what it loses is the
+				 * identification and the check of whether an
+				 * observed string is in the sample's bytes.
+				 * The report says so in its own
+				 * completeness section rather than showing
+				 * empty columns.
+				 */
+				if (eng) {
+					kof_engine_close(eng);
+					eng = NULL;
+				}
+				fprintf(stderr, "kofmontrace: no database at "
+					"%s - the report will identify "
+					"nothing (use --db)\n", db_path);
+			}
+			fprintf(stderr, "kofmontrace: report -> %s\n", rep_dir);
+		}
 	}
 
 	t_wall0 = kof_evt_now();
@@ -688,6 +901,29 @@ int main(int argc, char **argv)
 		if (log)
 			(void)kofevt_log_write(log, &ke);
 
+		/*
+		 * FED HERE, BESIDE THE LOG AND BEFORE THE RENDERER.
+		 *
+		 * Not inside the `if (!quiet)` below, and that is the one thing
+		 * about this line worth a comment: the tally used to be counted
+		 * inside the print switch, so a --quiet run came back with
+		 * different numbers from a loud one - the totals were a side
+		 * effect of somebody looking at them. See the note at the top
+		 * of kofevtfmt.h. A report fed from the printing path would
+		 * reproduce that bug with a whole report instead of a counter.
+		 *
+		 * The index is the log's, so every [#N] in the report is a
+		 * record `kofviewer` can be pointed at. It advances only when
+		 * a record was actually written: an event index would look the
+		 * same and refer to nothing.
+		 */
+		if (rep) {
+			kof_report_feed(rep, &ke,
+					log ? rep_index : KOF_REP_NO_INDEX);
+			if (log)
+				rep_index++;
+		}
+
 		if (!quiet)
 			kof_evt_render(&ke, ev_secs,
 				  kofw_mon_name_of(mon, e.pid,
@@ -723,11 +959,28 @@ tick:
 		 * ProcessStop. Stopping the instant the subtree is empty
 		 * truncates exactly the tail that matters.
 		 */
-		if (exited_at >= 0.0 && secs - exited_at >= grace)
+		if (exited_at >= 0.0 && secs - exited_at >= grace) {
+			how = KOF_END_TREE_EXIT;
 			break;
-		if (timeout > 0.0 && secs >= timeout)
+		}
+		if (timeout > 0.0 && secs >= timeout) {
+			how = KOF_END_TIMEOUT;
 			break;
+		}
 	}
+
+	/*
+	 * WHY THE RUN ENDED, RECORDED RATHER THAN INFERRED.
+	 *
+	 * A reader of the report has to know this before reading anything
+	 * else: a trace that hit a deadline may have stopped in the middle of
+	 * the interesting part, and one that ended because the tree exited is
+	 * probably complete. Nothing in the records themselves says which, and
+	 * `how` is still KOF_END_UNKNOWN here only if the loop left by the
+	 * while condition - which is Ctrl-C.
+	 */
+	if (how == KOF_END_UNKNOWN)
+		how = KOF_END_INTERRUPT;
 
 	fflush(stdout);
 
@@ -822,6 +1075,105 @@ tick:
 		fprintf(stderr, "   recorded %llu event(s) to %s\n",
 			(unsigned long long)nrec, log_path);
 	}
+
+	/*
+	 * THE REPORT, AND IT HAPPENS HERE FOR ONE REASON: THE TREE IS DEAD.
+	 *
+	 * Everything below opens files the sample wrote, hashes them, copies
+	 * them and hands them to the engine, and not one of those is safe or
+	 * even meaningful while the sample is still running:
+	 *
+	 *   - a file being written as it is read hashes to a value that was
+	 *     never on the disk,
+	 *   - a file can change between the hash and the scan, so the report
+	 *     would name one thing and describe another,
+	 *   - and a process still executing is still producing artefacts, so
+	 *     the collection would be of a moment nobody can reproduce.
+	 *
+	 * TerminateJobObject above is the first instant none of that is true.
+	 * It is also why this is after the log is closed: the log is evidence
+	 * too, and a report that referenced records still sitting in a stdio
+	 * buffer would point at a file that does not have them yet.
+	 */
+	if (rep) {
+		struct kof_report_stage stage;
+		char path[1024];
+		FILE *f;
+		int   rc;
+
+		kof_report_ended(rep, how, secs);
+		kof_report_health(rep, &nh, health.filtered_scope);
+
+		memset(&stage, 0, sizeof stage);
+		stage.collect = want_collect ? 1u : 0u;
+		stage.engine  = eng;
+		stage.scanner = sc;
+
+		fprintf(stderr, "\nkofmontrace: collecting artefacts...\n");
+		rc = kof_report_finish(rep, &stage);
+		if (rc < 0)
+			fprintf(stderr, "kofmontrace: the artefact phase could "
+				"not use '%s' (%d) - the report is written "
+				"without collected files\n", rep_dir, rc);
+
+		/*
+		 * THREE FILES, AND EACH HAS A DIFFERENT READER.
+		 *
+		 * A failure to write one is reported and does not stop the
+		 * others: a full disk must not cost the text report because
+		 * the JSON could not be written.
+		 */
+		snprintf(path, sizeof path, "%s/report.txt", rep_dir);
+		f = fopen(path, "wb");
+		if (f) {
+			/* No colour into a file. The escapes would make it
+			 * ungreppable, which is the one thing a report of this
+			 * shape is read with. */
+			kof_report_write_text(rep, f, 0);
+			fclose(f);
+			fprintf(stderr, "   %s\n", path);
+		} else {
+			fprintf(stderr, "   cannot write %s\n", path);
+		}
+
+		snprintf(path, sizeof path, "%s/report.json", rep_dir);
+		f = fopen(path, "wb");
+		if (f) {
+			kof_report_write_json(rep, f);
+			fclose(f);
+			fprintf(stderr, "   %s\n", path);
+		} else {
+			fprintf(stderr, "   cannot write %s\n", path);
+		}
+
+		snprintf(path, sizeof path, "%s/candidates.tsv", rep_dir);
+		f = fopen(path, "wb");
+		if (f) {
+			kof_report_write_candidates(rep, f);
+			fclose(f);
+			fprintf(stderr, "   %s\n", path);
+		} else {
+			fprintf(stderr, "   cannot write %s\n", path);
+		}
+
+		/*
+		 * AND TO THE TERMINAL, IN COLOUR, because the person who just
+		 * ran a live sample is sitting there and the first question is
+		 * "what did it do". Making them open a file to find out is
+		 * making them not look.
+		 *
+		 * stderr, like every other summary this tool prints, so that a
+		 * run whose stdout was redirected to a file still shows it.
+		 */
+		kof_report_write_text(rep, stderr, 1);
+
+		kof_report_close(rep);
+	}
+
+	if (sc)
+		kof_scanner_free(sc);
+	if (eng)
+		kof_engine_close(eng);
 
 	CloseHandle(pi.hThread);
 	CloseHandle(pi.hProcess);

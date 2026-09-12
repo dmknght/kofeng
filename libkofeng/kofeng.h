@@ -1152,6 +1152,59 @@ uint32_t kof_entropy_eighths(const void *bytes, uint64_t n);
  */
 uint32_t kof_entropy_hist(const uint32_t hist[256], uint64_t total);
 
+/* ------------------------------------------------------------------- digest */
+
+/*
+ * SHA-256, AND WHY A SCANNING ENGINE HANDS ONE OUT.
+ *
+ * Because naming bytes is not a detection question and every tool around this
+ * one has it. An event report names a file a traced process created; kofeditor
+ * writes a `Test sample:` line into every generated signature source; a
+ * verdict cache keys on an identity its caller supplies; a walk that meets the
+ * same bytes by two paths has to notice. Four callers, one answer, and four
+ * private copies would be four chances to print a digest nobody reproduces.
+ *
+ * It sits beside kof_entropy_eighths for the same reason that does: a
+ * primitive over bytes that says nothing about malice, useful to a host
+ * precisely because it is not a verdict. See core/kofhash.c for why SHA-256 is
+ * the only one here and why there are no intrinsics behind it.
+ */
+struct kof_sha256 {
+	uint32_t h[8];
+	uint64_t len;          /* bytes fed, before padding */
+	uint32_t n;            /* bytes sitting in buf */
+	uint8_t  buf[64];
+};
+
+/*
+ * Streaming, because the thing worth hashing does not always fit and is not
+ * always in one place: a file arrives in chunks, and a region of a mapped
+ * image is several ranges of one object.
+ *
+ * A state that has been through kof_sha256_final is FINISHED, not resumable -
+ * the padding has been folded in. Init again for another digest.
+ */
+void kof_sha256_init(struct kof_sha256 *);
+void kof_sha256_update(struct kof_sha256 *, const void *bytes, uint64_t n);
+void kof_sha256_final(struct kof_sha256 *, uint8_t out[32]);
+
+/* The 32 bytes as 64 lower-case hex characters plus a NUL. Lower case is not
+ * a preference - see core/kofhash.c. */
+void kof_sha256_hex(const uint8_t digest[32], char out[65]);
+
+/* One buffer, straight to hex. Returns 0, or KOF_ERR_ARG. */
+int  kof_sha256_bytes(const void *bytes, uint64_t n, char out[65]);
+
+/*
+ * One file, straight to hex, with the size it hashed when `size` is not NULL.
+ *
+ * Returns 0, KOF_ERR_OPEN, or KOF_ERR_READ - and a read error is returned
+ * rather than hashing what arrived, because a digest over part of a file names
+ * bytes that were never the artefact. That is the case a tool hashing a file
+ * some other process is still writing will actually hit.
+ */
+int  kof_sha256_file(const char *path, char out[65], uint64_t *size);
+
 int kof_scan_path_mt(kof_scanner **, unsigned n_scanners, const char *path,
 		     const struct kof_scan_option *, kof_on_object cb, void *user);
 

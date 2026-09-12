@@ -294,6 +294,7 @@ const char *kof_evt_source_name(uint8_t src)
 	case KOF_SRC_NET:      return "net";
 	case KOF_SRC_REGISTRY: return "registry";
 	case KOF_SRC_AMSI:     return "amsi";
+	case KOF_SRC_DNS:      return "dns";
 	default:               return "?";
 	}
 }
@@ -320,6 +321,7 @@ const char *kof_evt_verb_name(uint16_t verb)
 	case KOF_EVT_THREAD_STOP:   return "ThreadEnd";
 	case KOF_EVT_AMSI_SCAN:     return "AmsiScan";
 	case KOF_EVT_CONT:          return "Cont";
+	case KOF_EVT_DNS_QUERY:     return "DnsQuery";
 	/* Capitalised like every other name in this table. These two were the
 	 * only lower-case ones, which showed wherever verbs sit in a column
 	 * beside each other - and it also put them last in any name ordering,
@@ -365,15 +367,21 @@ enum kof_evt_kind kof_evt_kind_of(uint16_t verb)
 	/*
 	 * AN UNTYPED EVENT IS READ AS AN ADDRESS, because that is the one
 	 * numeric thing the collector takes from a shape it does not
-	 * recognise, and because thread events arrive here today: type_of()
-	 * has not been given their ids, so `--thread` produces RAW records
-	 * whose whole point is the entry point in `addr`.
+	 * recognise.
+	 *
+	 * It used to say "and because thread events arrive here today" - they
+	 * no longer do. Kernel-Process ids 3 and 4 are established and typed,
+	 * so a thread start is a THREAD_START and gets the MEM payload by
+	 * being one rather than by defaulting into it.
 	 *
 	 * THE COST IS STATED RATHER THAN HIDDEN: an untyped event that also
-	 * had ports or a size loses them, because there is no way to carry
-	 * two shapes for something whose shape is unknown. The fix is not a
-	 * bigger payload, it is naming the id in type_of() so the event stops
-	 * being raw.
+	 * had ports or a size loses them, because there is no way to carry two
+	 * shapes for something whose shape is unknown. The fix is not a bigger
+	 * payload, it is naming the id in type_of() so the event stops being
+	 * raw - and that is now what has happened to the network provider's
+	 * whole table, IPv6 and UDP included. What is left untyped there
+	 * (accept, retransmit, the copy step) carries no peer this drops, or
+	 * carries one under a verb that does not exist yet.
 	 */
 	case KOF_EVT_RAW:
 		return KOF_EK_MEM;
@@ -382,6 +390,12 @@ enum kof_evt_kind kof_evt_kind_of(uint16_t verb)
 	case KOF_EVT_NET_DISCONNECT:
 	case KOF_EVT_NET_SEND:
 	case KOF_EVT_NET_RECV:
+	/*
+	 * A lookup belongs here because what it carries IS an address - the
+	 * one that came back. The name it asked about is in the object arena,
+	 * where every verb's strings live.
+	 */
+	case KOF_EVT_DNS_QUERY:
 		return KOF_EK_NET;
 
 	case KOF_EVT_FILE_NEW:
@@ -712,4 +726,138 @@ void kof_evt_health_print(FILE *out, const struct kof_evt_health *h,
 				fprintf(out, " 0x%x", (unsigned)b);
 		fputs("\n", out);
 	}
+}
+
+/* ---- addresses ---------------------------------------------------------- */
+
+/*
+ * THE IPv4-MAPPED PREFIX, ::ffff:0:0/96, and it is the whole of why these
+ * four functions are short.
+ *
+ * One representation in the record means the record cannot be ambiguous about
+ * which family it holds, and it means a v4 address is never confused with an
+ * unset one - :: is a legal address, so "the first four bytes and zeroes
+ * elsewhere" could not have told those apart.
+ */
+static const uint8_t V4_PREFIX[12] = {
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff
+};
+
+int kof_evt_ip_is_unset(const uint8_t addr[16])
+{
+	unsigned i;
+
+	if (!addr)
+		return 1;
+	for (i = 0; i < 16u; i++)
+		if (addr[i])
+			return 0;
+	return 1;
+}
+
+int kof_evt_ip_is_v6(const uint8_t addr[16])
+{
+	if (!addr || kof_evt_ip_is_unset(addr))
+		return 0;
+	return memcmp(addr, V4_PREFIX, sizeof V4_PREFIX) != 0;
+}
+
+void kof_evt_ip_set_v4(uint8_t addr[16], uint32_t be_v4)
+{
+	if (!addr)
+		return;
+	memcpy(addr, V4_PREFIX, sizeof V4_PREFIX);
+	memcpy(addr + 12, &be_v4, 4);
+}
+
+const char *kof_evt_ip_str(const uint8_t addr[16], char *out, size_t cap)
+{
+	unsigned i, best = 0, best_len = 0, run = 0, run_at = 0;
+	uint16_t g[8];
+	size_t   at = 0;
+
+	if (!out || !cap)
+		return "";
+	out[0] = '\0';
+
+	if (kof_evt_ip_is_unset(addr))
+		return out;
+
+	if (!kof_evt_ip_is_v6(addr)) {
+		/* A dotted quad, because that is what somebody pastes into a
+		 * search box. Printing ::ffff:1.2.3.4 would be equally correct
+		 * and would match nothing anybody looks for. */
+		snprintf(out, cap, "%u.%u.%u.%u", addr[12], addr[13],
+			 addr[14], addr[15]);
+		return out;
+	}
+
+	for (i = 0; i < 8u; i++)
+		g[i] = (uint16_t)(((uint16_t)addr[2u * i] << 8) |
+				   (uint16_t)addr[2u * i + 1u]);
+
+	/*
+	 * THE LONGEST RUN OF ZERO GROUPS, COLLAPSED ONCE, and only when it is
+	 * at least two groups long - RFC 5952. A canonical form exists so that
+	 * two tools produce the same text for the same address; without it a
+	 * report and a trace line can disagree about the same C2 and a search
+	 * for one misses the other.
+	 */
+	for (i = 0; i < 8u; i++) {
+		if (g[i] == 0) {
+			if (!run++)
+				run_at = i;
+			if (run > best_len) {
+				best_len = run;
+				best     = run_at;
+			}
+		} else {
+			run = 0;
+		}
+	}
+	if (best_len < 2u)
+		best_len = 0;
+
+	/*
+	 * "::" IS WRITTEN WHOLE, AND A SEPARATOR FLAG DECIDES THE REST.
+	 *
+	 * The first version tried to treat each colon of the pair as a
+	 * neighbouring group's separator, and got ::1 wrong - it printed ":1",
+	 * because a run at the START has no group in front of it to have
+	 * written the first colon. The failure is the kind this whole file is
+	 * careful about: ":1" is not a plausible-looking address, but it is
+	 * also not an obviously broken one, and the report and the trace line
+	 * would have agreed with each other about it.
+	 *
+	 * So the pair is emitted as one token and `first` says whether the next
+	 * group needs a colon in front of it. The four shapes that have to
+	 * work are ::1, 2001:db8::1, 1:: and an address with no run at all.
+	 */
+	{
+		int first = 1;
+
+		i = 0;
+		while (i < 8u) {
+			int n;
+
+			if (best_len && i == best) {
+				if (at + 2u >= cap)
+					break;
+				out[at++] = ':';
+				out[at++] = ':';
+				i    += best_len;
+				first = 1;
+				continue;
+			}
+			n = snprintf(out + at, cap - at, "%s%x",
+				     first ? "" : ":", (unsigned)g[i]);
+			if (n < 0 || (size_t)n >= cap - at)
+				break;
+			at   += (size_t)n;
+			first = 0;
+			i++;
+		}
+	}
+	out[at < cap ? at : cap - 1u] = '\0';
+	return out;
 }

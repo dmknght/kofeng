@@ -633,9 +633,30 @@ int main(int argc, char **argv)
 		if (rec)
 			(void)kofevt_log_write(rec, &e);
 
-		kof_evt_count(&e, &tally);
+		/*
+		 * COUNTED ONCE, AND IT WAS BEING COUNTED TWICE.
+		 *
+		 * kof_evt_render COUNTS as well as printing - kofevtfmt.h says
+		 * so where it declares them - so calling both added every
+		 * event to the tally twice whenever --all was given. The
+		 * symptom was a summary that disagreed with its own trace: a
+		 * replay of nslookup.kevt printed one ProcStart and reported
+		 * "processes started : 2", and reported 48 untyped events over
+		 * 26 records.
+		 *
+		 * Which is the bug kofevtfmt.h was split out to fix, arriving
+		 * from the other side. There it was a tally counted inside a
+		 * print switch, so --quiet and loud disagreed; here it is a
+		 * caller counting first and then asking a renderer that counts
+		 * too. The lesson is the same one, so the note is here as well:
+		 * kof_evt_render is not a printer, it is a printer AND a
+		 * counter, and a caller that wants only the count asks for
+		 * kof_evt_count INSTEAD.
+		 */
 		if (show_all)
 			kof_evt_render(&e, secs, "", stdout, &tally);
+		else
+			kof_evt_count(&e, &tally);
 
 		/*
 		 * GATHER, AND SCAN WHEN THE CHAIN ENDS.

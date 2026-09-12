@@ -971,6 +971,237 @@ static void t_trace(void)
  * Checked field by field on purpose. A memcpy-shaped test would pass while
  * actor_pid held a tid, because both are uint32 and both are plausible.
  */
+/*
+ * THE UNBACKED CLAIM, AND THE THREE THINGS THAT HAVE TO BE TRUE BEFORE IT IS
+ * MADE.
+ *
+ * KOFW_EF_UNBACKED is the one field the collector is not told - it is a
+ * conclusion drawn from where images were mapped and where a thread began, and
+ * it means "a payload was manually mapped into this process". That makes a
+ * false positive expensive in a way a missed one is not: it accuses a program.
+ *
+ * It had one. Records cross CPUs out of order, so an ImageLoad that happened
+ * before a ProcessStart can be DELIVERED after it - and when it is delivered
+ * first there is no process-table entry yet, so the module is not recorded.
+ * ProcessStart then arrives, empties the list, and raises mods_whole over
+ * nothing. The next record is the main thread starting at the executable's
+ * entry point, mods_contain is asked about an empty list, and it says no. In
+ * dns.kevt that flagged the first thread of both cmd.exe and PING.EXE: two
+ * injections reported in a trace of `ping`.
+ *
+ * So: the session must have seen the process start, the list must not have
+ * overflowed, AND the list must not be empty. The last one is checked here
+ * because it is the one that was missing, and because every Windows process
+ * maps ntdll - an empty list is always loads that were missed.
+ */
+static void t_unbacked(void)
+{
+	struct kofw_ptab   t;
+	struct kofw_filter f;
+	struct kofw_evt    e;
+
+	kofw_ptab_init(&t);
+	memset(&f, 0, sizeof f);
+
+	/* A process this session saw start, and then a thread - with no module
+	 * load in between, which is the shape the race produces. */
+	mk(&e, KOF_EVT_PROC_START, 700, 4);
+	(void)kofw_filter_apply(&t, &f, &e, NULL);
+
+	mk(&e, KOF_EVT_THREAD_START, 700, 0);
+	e.addr = 0x7ff600001000ull;
+	(void)kofw_filter_apply(&t, &f, &e, NULL);
+	if (e.flags & KOFW_EF_UNBACKED)
+		fail("unbacked", "claimed an entry point was in no mapped "
+				 "image while the module list was EMPTY - "
+				 "which is a list of loads that were missed");
+
+	/* Now record a module, and a thread inside it is backed. */
+	mk(&e, KOF_EVT_IMAGE_LOAD, 700, 0);
+	e.addr      = 0x7ff600000000ull;
+	e.addr_size = 0x10000u;
+	(void)kofw_filter_apply(&t, &f, &e, NULL);
+
+	mk(&e, KOF_EVT_THREAD_START, 700, 0);
+	e.addr = 0x7ff600001000ull;
+	(void)kofw_filter_apply(&t, &f, &e, NULL);
+	if (e.flags & KOFW_EF_UNBACKED)
+		fail("unbacked", "flagged a thread whose entry point IS inside "
+				 "a recorded module");
+
+	/* And one outside every recorded module, which is the finding this
+	 * whole mechanism exists for. The list is non-empty now, so the
+	 * negative claim is supportable. */
+	mk(&e, KOF_EVT_THREAD_START, 700, 0);
+	e.addr = 0x000001b400000000ull;
+	(void)kofw_filter_apply(&t, &f, &e, NULL);
+	if (!(e.flags & KOFW_EF_UNBACKED))
+		fail("unbacked", "did NOT flag an entry point outside every "
+				 "recorded module - the guard is too strong "
+				 "and the detection is gone");
+
+	/* A process the session never saw start supports no claim at all,
+	 * whatever its threads do. */
+	mk(&e, KOF_EVT_THREAD_START, 909, 0);
+	e.addr = 0x000001b400000000ull;
+	(void)kofw_filter_apply(&t, &f, &e, NULL);
+	if (e.flags & KOFW_EF_UNBACKED)
+		fail("unbacked", "claimed something about a process whose "
+				 "start was never seen");
+}
+
+/*
+ * PRINTING AN EVENT AND COUNTING ONE MUST AGREE - the trap that has now caught
+ * two callers in this tree.
+ *
+ * kof_evt_render PRINTS AND COUNTS. kofevtfmt.h was split out of the tracer
+ * because the tally used to be computed inside a print switch, so a --quiet
+ * run and a loud one came back with different totals - the numbers were a side
+ * effect of somebody looking at them. The fix moved the counting into a
+ * function of its own, and then kofwatchman called BOTH: it counted every
+ * event and then handed it to the renderer, which counted it again. A replay
+ * printed one ProcStart and summarised "processes started : 2".
+ *
+ * So the property is checked directly rather than trusted: the same stream
+ * through kof_evt_count and through kof_evt_render has to produce the same
+ * tally, field for field. A caller that wants only the count calls
+ * kof_evt_count INSTEAD of rendering, never as well.
+ */
+static void t_tally(void)
+{
+	struct kof_evt_tally a, b;
+	struct kof_evt e;
+	FILE *sink;
+	unsigned i;
+	static const uint16_t VERBS[] = {
+		KOF_EVT_PROC_START, KOF_EVT_PROC_STOP, KOF_EVT_IMAGE_LOAD,
+		KOF_EVT_FILE_NEW, KOF_EVT_FILE_WRITE, KOF_EVT_REG_SET_VALUE,
+		KOF_EVT_NET_CONNECT, KOF_EVT_NET_SEND, KOF_EVT_DNS_QUERY,
+		KOF_EVT_AMSI_SCAN, KOF_EVT_THREAD_START, KOF_EVT_CONT,
+		KOF_EVT_RAW
+	};
+
+	memset(&a, 0, sizeof a);
+	memset(&b, 0, sizeof b);
+
+	/* A sink rather than stdout: the point is the tally, and a test that
+	 * printed thirteen event lines would bury its own result. */
+	sink = fopen("grille_tally.tmp", "wb");
+	if (!sink) {
+		fail("tally", "could not open a sink to render into");
+		return;
+	}
+
+	for (i = 0; i < sizeof VERBS / sizeof VERBS[0]; i++) {
+		/* Built here rather than through mk_kof, which is declared
+		 * further down this file with the other kof_evt helpers. Three
+		 * lines is cheaper than moving a helper that three other tests
+		 * already use. */
+		memset(&e, 0, sizeof e);
+		e.verb        = VERBS[i];
+		e.pid         = 100u + i;
+		e.off_image   = KOF_TEXT_NONE;
+		e.off_object  = KOF_TEXT_NONE;
+		e.off_cmdline = KOF_TEXT_NONE;
+
+		kof_evt_count(&e, &a);
+		kof_evt_render(&e, (double)i, "who", sink, &b);
+	}
+	fclose(sink);
+	remove("grille_tally.tmp");
+
+	if (memcmp(&a, &b, sizeof a)) {
+		fail("tally", "counting a stream and rendering it produce "
+			      "different totals");
+		printf("    count: proc=%llu raw=%llu   render: proc=%llu "
+		       "raw=%llu\n",
+		       (unsigned long long)a.proc, (unsigned long long)a.raw,
+		       (unsigned long long)b.proc, (unsigned long long)b.raw);
+	}
+}
+
+/*
+ * ONE ADDRESS, ONE SPELLING - and this test exists because the first version
+ * of the formatter got ::1 wrong.
+ *
+ * It printed ":1". That is the failure mode this record's design is built to
+ * refuse: not a crash and not an obviously broken string, but a plausible one
+ * that everything downstream would have agreed about. The trace line, the
+ * report's IOC table and a viewer all call kof_evt_ip_str, so they would have
+ * been consistently wrong, and a search for the real address would have found
+ * none of them.
+ *
+ * The shapes below are the ones the collapsing rule can get wrong: a zero run
+ * at the start (nothing in front of it to have written the first colon), one
+ * at the end, one in the middle, one too short to collapse at all, and an IPv4
+ * address which must come out as a dotted quad rather than as ::ffff:a.b.c.d -
+ * because the dotted quad is what somebody pastes into a search box.
+ */
+static void t_addr(void)
+{
+	static const struct { uint8_t a[16]; const char *want; } V[] = {
+		{ { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1 }, "::1" },
+		{ { 0x20,0x01,0x0d,0xb8,0,0,0,0,0,0,0,0,0,0,0,1 },
+		  "2001:db8::1" },
+		{ { 0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0 }, "1::" },
+		{ { 0x20,0x01,0x0d,0xb8,0,0,0,1,0,0,0,0,0,0,0,2 },
+		  "2001:db8:0:1::2" },
+		{ { 0x20,0x01,0,1,0,2,0,3,0,4,0,5,0,6,0,7 },
+		  "2001:1:2:3:4:5:6:7" },
+		/* A single zero group is NOT collapsed: "::" for one group is
+		 * legal to write and RFC 5952 forbids it, because two tools
+		 * that disagree about when to collapse produce two strings for
+		 * one address. */
+		{ { 0x20,0x01,0,0,0,3,0,4,0,5,0,6,0,7,0,8 },
+		  "2001:0:3:4:5:6:7:8" }
+	};
+	char ip[KOF_IP_STR_MAX];
+	unsigned i;
+	uint8_t  a[16];
+	uint32_t be;
+	unsigned char q[4] = { 93u, 184u, 216u, 34u };
+
+	for (i = 0; i < sizeof V / sizeof V[0]; i++) {
+		kof_evt_ip_str(V[i].a, ip, sizeof ip);
+		if (strcmp(ip, V[i].want)) {
+			printf("  FAIL addr: got %s, want %s\n", ip, V[i].want);
+			failures++;
+		}
+		if (!kof_evt_ip_is_v6(V[i].a))
+			fail("addr", "a v6 address was not reported as v6");
+	}
+
+	/* IPv4, carried IPv4-mapped, printed as a quad. */
+	memcpy(&be, q, 4);
+	kof_evt_ip_set_v4(a, be);
+	kof_evt_ip_str(a, ip, sizeof ip);
+	if (strcmp(ip, "93.184.216.34")) {
+		printf("  FAIL addr v4: got %s\n", ip);
+		failures++;
+	}
+	if (kof_evt_ip_is_v6(a))
+		fail("addr", "an IPv4-mapped address was reported as v6");
+	if (kof_evt_ip_is_unset(a))
+		fail("addr", "a set IPv4 address was reported as unset");
+
+	/*
+	 * ALL ZERO IS "the event named none", and it has to be distinguishable
+	 * from a v4 address of 0.0.0.0 - which is why v4 goes in IPv4-mapped
+	 * rather than in the low four bytes. Stored the other way these two
+	 * would be the same sixteen bytes.
+	 */
+	memset(a, 0, sizeof a);
+	if (!kof_evt_ip_is_unset(a))
+		fail("addr", "an all-zero address was not reported as unset");
+	kof_evt_ip_str(a, ip, sizeof ip);
+	if (ip[0])
+		fail("addr", "an unset address printed as something");
+
+	kof_evt_ip_set_v4(a, 0u);
+	if (kof_evt_ip_is_unset(a))
+		fail("addr", "0.0.0.0 is indistinguishable from unset");
+}
+
 static void t_convert(void)
 {
 	struct kofw_evt in;
@@ -985,7 +1216,7 @@ static void t_convert(void)
 	in.exit_code   = 0u;
 	in.addr        = 0x7ff600001000ull;
 	in.addr_size   = 4096u;
-	in.net_daddr   = 0x08080808u;
+	kof_evt_ip_set_v4(in.net_daddr, 0x08080808u);
 	in.net_dport   = 0x5000u;      /* 80, network order */
 	in.net_size    = 1500u;
 	in.raw_id      = 30u;
@@ -1080,7 +1311,19 @@ static void t_convert(void)
 			if (!nt)
 				fail("conv", "a net event has no net payload");
 			else {
-				eq_u64("conv daddr", nt->daddr, 0x08080808u);
+				/* 8.8.8.8, carried IPv4-mapped: the low four
+				 * bytes are the address and the twelve above
+				 * them are the ::ffff: prefix. Checked as text
+				 * rather than as bytes, because the text is
+				 * what every consumer of this record sees. */
+				{
+					char ip[KOF_IP_STR_MAX];
+
+					if (strcmp(kof_evt_ip_str(nt->daddr, ip,
+								  sizeof ip),
+						   "8.8.8.8"))
+						fail("conv daddr", ip);
+				}
 				eq_u64("conv dport", nt->dport, 0x5000u);
 				eq_u64("conv size", nt->size, 1500u);
 			}
@@ -1378,7 +1621,7 @@ static void t_browse(void)
 			if (!nt)
 				fail("extent", "a net event has no net payload");
 			else {
-				nt->daddr = 0x0100007fu;
+				kof_evt_ip_set_v4(nt->daddr, 0x0100007fu);
 				nt->dport = 0xbb01u;   /* 443, network order */
 				nt->size  = 4096u;
 			}
@@ -1675,6 +1918,9 @@ int main(void)
 	t_scope();
 	t_ftab();
 	t_pid_reuse();
+	t_unbacked();
+	t_tally();
+	t_addr();
 	t_convert();
 	t_trace();
 	t_browse();

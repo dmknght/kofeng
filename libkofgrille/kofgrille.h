@@ -143,6 +143,14 @@ enum kofw_provider {
 	KOFW_PROV_NET,
 	KOFW_PROV_REGISTRY,
 	KOFW_PROV_AMSI,
+
+	/*
+	 * The resolver - Microsoft-Windows-DNS-Client, which is neither a
+	 * kernel provider nor the network one. Its own entry and not folded
+	 * into KOFW_PROV_NET because a raw id is only unique within a
+	 * subsystem, which is the whole reason kof_evt carries `source`.
+	 */
+	KOFW_PROV_DNS,
 	KOFW_PROV_COUNT
 };
 
@@ -239,8 +247,18 @@ enum {
  * fail, and the memory the monitor uses is settled at open() rather than by
  * whatever the machine does next. What is left for text after the fields below
  * is what an image path gets; a longer one is cut and flagged.
+ *
+ * 640 AND NOT 512, AND THE REASON IS WHAT IT WOULD HAVE COME OUT OF.
+ *
+ * Sixteen-byte addresses for IPv6 and a write's offset cost 32 bytes above
+ * text[]. Held at 512 those bytes come out of the arena - so IPv6 support
+ * would have been bought with more truncated PATHS, in a record collected for
+ * evidence whose evidence is largely paths. The ring costs 25% more per record
+ * for it, which is a number `--ring` can answer, and kofevtlog.h's header
+ * carries rec_size so that a reader refuses an unfamiliar size rather than
+ * decoding every field from the wrong offset.
  */
-#define KOFW_REC_SIZE 512u
+#define KOFW_REC_SIZE 640u
 
 /* Everything above text[], so the arena can be sized to fill the record
  * exactly. Asserted against the real offset in the .c. */
@@ -252,16 +270,21 @@ enum {
  *
  * The second time was off_cmdline. Two more bytes obviously make the header two
  * bytes bigger, so this went to 106 and the assert refused it: the uint16 landed
- * in the two bytes of padding that were already sitting between `attack` and
- * `net_daddr` waiting for the latter's 4-byte alignment. The field is free and
- * the header did not move at all.
+ * in two bytes of padding that were already sitting before the addresses,
+ * waiting for their 4-byte alignment. The field was free and the header did not
+ * move at all.
+ *
+ * That padding is gone now, because the addresses became byte arrays and a
+ * byte array has no alignment to pad for. Which is the third lesson from the
+ * same assert: the free space a field lands in is a property of the fields
+ * AROUND it, so a later change can take it away and nothing says so.
  *
  * Which is the argument for the assert rather than for arithmetic. Nobody
  * tracks padding by hand across a struct this size, and the failure it prevents
  * is not a crash - it is every string in every record starting two bytes off,
  * which reads as data.
  */
-#define KOFW_REC_HEAD 112u
+#define KOFW_REC_HEAD 144u
 
 struct kofw_evt {
 	/*
@@ -426,18 +449,44 @@ struct kofw_evt {
 	uint16_t attack;
 
 	/*
-	 * THE OTHER END, for a network event and nothing else.
+	 * THE OTHER END, for a network event and for a lookup's answer.
 	 *
-	 * IPv4 only so far: the addresses arrive as UINT32 on the ids this build
-	 * has typed, and the IPv6 events are separate ids that have not been
-	 * established the same way. Ports arrive in NETWORK byte order and are
-	 * kept that way here, because swapping them at the edge would make the
-	 * record disagree with the packet it describes; whoever prints one swaps
-	 * it.
+	 * SIXTEEN BYTES EACH, IN THE ONE REPRESENTATION kof_evt USES: an IPv4
+	 * address is stored IPv4-mapped, ::ffff:a.b.c.d, which is what
+	 * kof_evt_ip_set_v4 writes and what kof_evt_ip_str reads back.
+	 *
+	 * These were UINT32, which is what the ids this build has typed deliver
+	 * - and it made every IPv6 peer unrepresentable. That is the worst
+	 * shape a gap can have: nothing errors, no field is missing, the trace
+	 * simply shows a process that talked to nobody. The decode now takes
+	 * the address by the SIZE the provider declared, so a 16-byte daddr
+	 * lands here whole whether or not its event id has been typed yet -
+	 * which means a v6 connection is visible as a RAW record with the peer
+	 * on it, instead of not being visible at all.
+	 *
+	 * Ports arrive in NETWORK byte order and are kept that way, because
+	 * swapping them at the edge would make the record disagree with the
+	 * packet it describes; whoever prints one swaps it.
 	 */
-	uint32_t net_daddr, net_saddr;
+	uint8_t  net_daddr[16], net_saddr[16];
 	uint16_t net_dport, net_sport;
 	uint32_t net_size;
+
+	/*
+	 * WHERE IN THE FILE A WRITE LANDED - FileIo Write's ByteOffset.
+	 *
+	 * Its own field rather than borrowed space, and the borrowing is the
+	 * mistake this pair already made once: a write's LENGTH lived in
+	 * net_size, where nothing named after the network could be expected to
+	 * hold it. `addr` was the obvious second place to put this - it is a
+	 * spare uint64 on any file event - and it would have been the same
+	 * mistake with a different field.
+	 *
+	 * With the length, a write is a range, and a range can be read back off
+	 * the file afterwards. That is what makes "what did it write into
+	 * hosts" a question with an answer.
+	 */
+	uint64_t file_offset;
 
 	/*
 	 * AN ADDRESS THE EVENT NAMED, when it named one.
@@ -599,6 +648,29 @@ enum {
 	 */
 	KOFW_SUB_AMSI    = 1u << 8,
 
+	/*
+	 * WHICH NAMES WERE LOOKED UP - the most durable network evidence there
+	 * is, and the one thing the network provider cannot tell anybody.
+	 *
+	 * An address is rented and reassigned. The domain is what the operator
+	 * chose, paid for, reuses between campaigns, and what is still
+	 * searchable a year later when the address belongs to a shop. A trace
+	 * that has the connections and not the lookups kept the half that
+	 * expires.
+	 *
+	 * Microsoft-Windows-DNS-Client, and it is a USER-MODE provider like
+	 * AMSI, with the same consequence: it reports what went through the
+	 * client's resolver, so a payload that speaks DNS itself over a raw
+	 * socket, or uses DNS-over-HTTPS, does not appear here. That is a
+	 * reason to keep the network subscription and not a reason to skip
+	 * this one - the connection is still visible either way, and this is
+	 * what turns an address into a name when the resolver was used.
+	 *
+	 * Low volume: a lookup per distinct name per TTL, which on a busy
+	 * desktop is single digits a second.
+	 */
+	KOFW_SUB_DNS     = 1u << 9,
+
 	/* Everything this build can collect. What kofmontrace takes by default
 	 * - see the note there on why a discovery tool defaults to loud. */
 	/*
@@ -628,12 +700,14 @@ enum {
 	 */
 	KOFW_SUB_SENSOR = KOFW_SUB_PROCESS | KOFW_SUB_IMAGE | KOFW_SUB_FILE |
 			  KOFW_SUB_FILE_WRITE | KOFW_SUB_NET |
-			  KOFW_SUB_REGISTRY | KOFW_SUB_AMSI,
+			  KOFW_SUB_REGISTRY | KOFW_SUB_AMSI |
+			  KOFW_SUB_DNS,
 
 	KOFW_SUB_ALL = KOFW_SUB_PROCESS | KOFW_SUB_IMAGE | KOFW_SUB_FILE |
 		       KOFW_SUB_FILE_WRITE | KOFW_SUB_NET |
 		       KOFW_SUB_REGISTRY | KOFW_SUB_THREAD |
-		       KOFW_SUB_FILE_OPEN | KOFW_SUB_AMSI
+		       KOFW_SUB_FILE_OPEN | KOFW_SUB_AMSI |
+		       KOFW_SUB_DNS
 };
 
 /* "process", "image", "file", ... for one KOFW_SUB_* bit. "" for anything

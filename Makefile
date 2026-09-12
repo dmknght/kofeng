@@ -890,7 +890,8 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofscanners/scan.c \
            libkofeng/kofscanners/objtree.c \
            libkofeng/kofscanners/objctx.c \
-           libkofeng/kofscanners/objsrc.c
+           libkofeng/kofscanners/objsrc.c \
+           libkofeng/core/kofhash.c
 
 LIB_OBJ := $(patsubst libkofeng/%.c,$(INT)/lib_%.o,$(LIB_SRC))
 LIB     := $(SDK)/lib/libkofeng.a
@@ -1086,6 +1087,13 @@ KOFEVT_SRC := libkoforbit/kofevt/kofevt.c libkoforbit/kofevt/kofevtfmt.c \
 # what an answer is keyed on and how long it stays good are a host's policy.
 KOFRIDGE_SRC := libkoforbit/koffridge/koffridge.c
 
+# The report. Orbit for the same reason the cache is: it hashes artefacts and
+# asks the engine what they are, so it depends on libkofeng - and libkofeng
+# must be able to ship without knowing that anything called a report exists.
+KOFREPORT_SRC := libkoforbit/kofreport/kofreport.c \
+                 libkoforbit/kofreport/kofrepart.c \
+                 libkoforbit/kofreport/kofrepfmt.c
+
 EXAMINE_SRC := kofexamine/kofexamine.c kofexamine/kofinspect.c kofexamine/kofeditor.c
 
 $(OUT)/bin/kofexamine$(EXE): $(EXAMINE_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
@@ -1187,6 +1195,11 @@ $(OUT)/bin/kofmemscan$(EXE): kofwatcher/kofmemscan.c $(KOFRIDGE_SRC) $(LIB) \
 kofmemscan: $(OUT)/bin/kofmemscan$(EXE)
 	$(info $(SP)  $<)
 	@$(NOOP)
+
+# kofmontrace is built like this one and for the same reason - it links the
+# engine now - but its rule cannot live here: the target name needs $(WIN_EXE)
+# and $(WINLIB), which the Windows block sets hundreds of lines BELOW. See the
+# note beside `tools:` down there, where it is.
 
 $(OUT)/bin/ksigbuilder$(EXE): ksigbuilder/ksigbuilder.c $(LIB) $(SDK_HDR) $(STAMP)
 	@$(call MKDIR,$(dir $@))
@@ -1305,19 +1318,19 @@ WIN_LDLIBS := -ltdh -ladvapi32 -lpsapi
 # SENSOR - it watches the machine and does nothing else with what it sees -
 # and kofmontrace watches one program it launches. They are separate binaries
 # because their arguments, lifetimes and exit conditions have nothing in common,
-# and wshared.c holds the part that is genuinely the same - rendering an event,
-# the process-name table, the summary.
+# and kofevtfmt.c holds the part that is genuinely the same - rendering an
+# event, the tally, the health lines.
+#
+# ONLY THE SENSOR IS BUILT HERE NOW. kofmontrace grew a dependency on the
+# engine and moved up beside kofmemscan, which is where the tools that link
+# both halves live - see the note there for what that cost. The sensor links
+# the collector and nothing else, so it still cross-builds, which is what keeps
+# every line of libkofgrille type-checked on a host with no ETW.
 
 $(OUT)/bin/kofwatchtower$(WIN_EXE): kofwatcher/kofwatchtower.c $(WINLIB) $(STAMP)
 	@$(call MKDIR,$(dir $@))
 	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkoforbit/kofevt -Ikofwatcher \
 	      kofwatcher/kofwatchtower.c $(WINLIB) -o $@ \
-	      $(WIN_LDFLAGS) $(WIN_LDLIBS)
-
-$(OUT)/bin/kofmontrace$(WIN_EXE): kofwatcher/kofmontrace.c $(WINLIB) $(STAMP)
-	@$(call MKDIR,$(dir $@))
-	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkoforbit/kofevt -Ikofwatcher \
-	      kofwatcher/kofmontrace.c $(WINLIB) -o $@ \
 	      $(WIN_LDFLAGS) $(WIN_LDLIBS)
 
 kofgrille: $(WINLIB)
@@ -1349,6 +1362,37 @@ kofmontrace: $(OUT)/bin/kofmontrace$(WIN_EXE)
 # above this, where none of these variables are set yet.
 ifeq ($(NATIVE_OS),windows)
 tools: kofwatchtower kofmontrace kofmemscan
+
+#
+# kofmontrace: OUT OF THE CROSS BUILD, AND IT COST SOMETHING.
+#
+# It used to build with $(WIN_CC) beside kofwatchtower above, which meant a
+# Linux tree with mingw installed type-checked every line of it. It now links
+# the ENGINE - it hashes what the traced program created, asks what those files
+# are, and checks whether an observed string is actually in the sample's bytes
+# - and $(LIB) is built by $(CC) for the host, so a cross-build would hand a
+# Linux archive to a mingw linker.
+#
+# So it is native, like kofmemscan: engine and collector in one binary, built
+# only on the machine it runs on. What is lost is the cross type-check for
+# THIS FILE. kofwatchtower stays above and still covers every line of
+# libkofgrille, which is where the platform actually lives.
+#
+# AND IT IS HERE, INSIDE THIS ifeq, FOR THE REASON THE NOTE ABOVE GIVES ABOUT
+# `tools`. Placed up beside kofmemscan it expanded $(WIN_EXE) to NOTHING -
+# make expands a rule's target and prerequisites when it READS them, and
+# WIN_EXE is set in this block. The rule then existed for a target called
+# `kofmontrace` with no extension, `make kofmontrace` found the real .exe
+# up to date with no rule to rebuild it, and printed a success line for a
+# binary it had not touched. Which is this file's own trap, caught a third
+# time: anything naming a variable this block sets must be inside it.
+$(OUT)/bin/kofmontrace$(WIN_EXE): kofwatcher/kofmontrace.c $(KOFREPORT_SRC) \
+                                  $(LIB) $(WINLIB) $(SDK_HDR) $(STAMP)
+	@$(call MKDIR,$(dir $@))
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofeng -Ilibkofeng/core -Ilibkofgrille \
+	      -Ilibkoforbit/kofevt -Ilibkoforbit/kofreport -Ikofwatcher \
+	      kofwatcher/kofmontrace.c $(KOFREPORT_SRC) $(WINLIB) $(LIB) \
+	      -o $@ $(LDFLAGS) $(WIN_LDLIBS)
 
 #
 # THE COLLECTOR IS A PREREQUISITE OF kofwatchman ON WINDOWS, declared here
@@ -1533,6 +1577,23 @@ $(TEST)/unit_fridge$(EXE): tests/unit/fridge.c $(KOFRIDGE_SRC) $(LIB) $(STAMP) \
                            | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) tests/unit/fridge.c $(KOFRIDGE_SRC) $(LIB) \
 	      -o $@ $(LDFLAGS)
+
+#
+# The report, over synthetic records and NOT over a trace.
+#
+# kofmontrace needs an elevated prompt, a live sample and an ETW session, so
+# the report cannot be exercised by running the tool - and the collector is not
+# the half worth testing anyway. What this covers is everything that happens
+# after an event arrives, and it covers it by writing struct kof_evt by hand.
+#
+# Which is the property the fixed record was chosen for, and kofevtlog.h says
+# so: a rule that cannot be run against a recorded trace cannot be regression
+# tested. These records are a recorded trace that never needed a machine.
+$(TEST)/unit_report_model$(EXE): tests/unit/report_model.c $(KOFREPORT_SRC) \
+                                 $(KOFEVT_SRC) $(LIB) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkoforbit/kofreport -Ilibkoforbit/kofevt \
+	      -Ilibkofeng -Ilibkofeng/core tests/unit/report_model.c \
+	      $(KOFREPORT_SRC) $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS)
 
 EDITOR_SRC := kofexamine/kofeditor.c kofexamine/kofinspect.c $(KOFEVT_SRC)
 
