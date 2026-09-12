@@ -241,7 +241,13 @@ static int open_mem_for(struct wwalk *w, const struct kofw_proc *p)
 	 * KOFW_MW_HEAP, and the measurement on the Linux side that a parent
 	 * shell's heap matched a string that had merely passed through it.
 	 */
-	po.want = KOFW_MW_PATHS | KOFW_MW_DIRTY | KOFW_MW_EXEC_ONLY;
+	/* The purpose decides the set - see enum kof_walk_intent and the note
+	 * beside the same choice in awalk.c. MAP adds the heap and drops
+	 * EXEC_ONLY, because a reader opened this to look at it. */
+	if (w->o.intent == KOF_WALK_MAP)
+		po.want = KOFW_MW_PATHS | KOFW_MW_DIRTY | KOFW_MW_HEAP;
+	else
+		po.want = KOFW_MW_PATHS | KOFW_MW_DIRTY | KOFW_MW_EXEC_ONLY;
 	po.max_region = W_MAX_SPAN;
 
 	w->mem = kofw_pmem_open(p->pid, p->create_time, &po, &err);

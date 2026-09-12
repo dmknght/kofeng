@@ -71,6 +71,9 @@
 #include "kofevtlog.h"
 #include "kofinspect.h"
 #include "kofview.h"
+#include "kofwalk.h"
+#include "kofproc.h"
+#include <kofmod/proc.h>
 #include "kofeditor.h"
 
 /* The disassembler the emulator already carries: the viewer links the same
@@ -1158,6 +1161,13 @@ struct view {
 	 * of length zero.
 	 */
 	uint64_t    sel_a, sel_b;
+	/* The process this view is showing, or 0 when it is a file. What makes
+	 * next/prev step through pids instead of through a directory. */
+	uint32_t    proc_pid;
+	/* The mapped files already given a row - see proc_seen_path. */
+#define PROC_SEEN_MAX 256u
+	char        seen_path[PROC_SEEN_MAX][256];
+	uint32_t    n_seen;
 
 	/*
 	 * THE DISASSEMBLY PANEL.
@@ -2035,6 +2045,204 @@ static void on_debug(uint32_t fact, const char *what, uint64_t value, void *user
 		v->pend_paybits = (uint32_t)value;
 }
 
+/*
+ * A RUNNING PROCESS AS A THING TO LOOK AT.
+ *
+ * WHY THIS IS A SNAPSHOT AND NOT AN ATTACH. Everything above and below assumes
+ * the bytes are stable and re-readable: the hex pane re-reads as it scrolls,
+ * the disassembler re-reads, a dump writes them out, "scan this object again"
+ * scans them again. A live process changes underneath all of that - two reads
+ * of one address differ, and the pane would show a frame that never existed in
+ * the process while the dump beside it showed a third thing. So each region is
+ * read ONCE, here, and everything afterwards is an ordinary object.
+ *
+ * Nothing stops the process while this runs. process_vm_readv does not need
+ * the target stopped, and ptrace-attach - which would - changes the thing
+ * being observed. A region read while it is being written is torn, and that is
+ * the honest cost of not stopping it.
+ *
+ * THE ROOT IS THE PROCESS RECORD, not one of its regions. kofmod/proc.h is
+ * already a scannable object with META, CMDLINE and FD regions, so the
+ * dashboard gets the pid, the parent, the user, the command line and the
+ * standard descriptors by the same path every other format's panel is filled -
+ * no second way of showing facts.
+ *
+ * THE REGIONS ARE CHILDREN, named "<root>//<address>" so kof_obj_depth reads
+ * them as one level down and every existing row, jump and dump works on them
+ * unchanged. on_object already decides what to KEEP - small on the heap, large
+ * spilled to a temporary file and mapped, nothing past OBJ_BUDGET - so the
+ * memory bound a process needs is the bound the viewer already has.
+ */
+static const char *base_name(const char *p);
+
+/*
+ * Have these bytes already been listed under this process? 1 the first time a
+ * path is offered, 0 afterwards. A fixed table, because a process with more
+ * mapped files than this has more rows than anybody reads.
+ */
+static int proc_seen_path(struct view *v, const char *path)
+{
+	uint32_t i;
+
+	for (i = 0; i < v->n_seen; i++)
+		if (!strcmp(v->seen_path[i], path))
+			return 0;
+	if (v->n_seen >= PROC_SEEN_MAX)
+		return 0;
+	snprintf(v->seen_path[v->n_seen], sizeof v->seen_path[0], "%s", path);
+	v->n_seen++;
+	return 1;
+}
+
+static void proc_collect(struct view *v, kof_engine *eng, uint32_t pid)
+{
+	struct kof_scan_option opt;
+	struct kof_walk_option wo;
+	struct kof_walk_api   *w;
+	struct kof_proc_build  b;
+	struct kof_walk_item   it;
+	kof_scanner *sc;
+	uint32_t     pids[1];
+	int          err = 0;
+
+	memset(&opt, 0, sizeof opt);
+	opt.all_matches = 1;
+	opt.heur_level = v->heur_off ? 0u : KOF_HEUR_LEVEL_MAX;
+	opt.heur_off = v->heur_off ? 1u : 0u;
+	opt.emu_use = KOF_EMU_NEVER;
+
+	sc = kof_scanner_new(eng);
+	if (!sc)
+		return;
+	kof_scanner_on_debug(sc, on_debug, v);
+
+	memset(&wo, 0, sizeof wo);
+	pids[0] = pid;
+	wo.pids = pids;
+	wo.n_pids = 1;
+	/* A reader, not a scan - see enum kof_walk_intent. */
+	wo.intent = KOF_WALK_MAP;
+	w = kof_walk_open(&wo, &err);
+	if (!w) {
+		kof_scanner_free(sc);
+		return;
+	}
+	if (w->next_proc(w->self, &b)) {
+		/*
+		 * The record first, as the object the file would have been.
+		 * v->map already points at it - see proc_open - so on_object
+		 * takes its depth-0 branch and does not copy it again.
+		 */
+		struct kof_scan_option po = opt;
+
+		po.as_format = KOF_EVT_PROC;
+		(void)kof_scan_bytes(sc, v->map, v->map_len, v->path, &po,
+				     on_object, v);
+
+		while (w->next_item(w->self, &it)) {
+			char nm[KOF_DUMP_PATH_ROOM];
+
+			/*
+			 * THE FILES BEHIND THE MAPPINGS ARE OBJECTS TOO - the
+			 * program and every library it loaded, each one row.
+			 *
+			 * DEDUPED BY PATH, and that is not tidiness. Measured
+			 * on this machine: 5795 file-backed mappings behind
+			 * 335 distinct files, with libc mapped a hundred
+			 * times. One row per mapping would be a tree nobody
+			 * can read, listing the same library over and over.
+			 *
+			 * The FILE is opened rather than the mapped copy being
+			 * read back. On Linux they are the same bytes - the
+			 * EXEC pages measured 0% different from the file - and
+			 * the file is cheaper, cacheable, and is what a
+			 * signature was written against.
+			 */
+			if (it.kind == KOF_WALK_FILE && it.path && it.path[0]) {
+				if (!proc_seen_path(v, it.path))
+					continue;
+				snprintf(nm, sizeof nm, "%s//%.80s", v->path,
+					 base_name(it.path));
+				{
+					struct stat fst;
+					void *fm;
+					int   ffd = open(it.path, O_RDONLY);
+
+					if (ffd < 0)
+						continue;
+					if (fstat(ffd, &fst) != 0 ||
+					    !S_ISREG(fst.st_mode) ||
+					    fst.st_size <= 0) {
+						close(ffd);
+						continue;
+					}
+					fm = kof_map_file_ro(ffd,
+						(uint64_t)fst.st_size);
+					close(ffd);
+					if (!fm)
+						continue;
+					/* on_object keeps its own copy - heap
+					 * or a spill file - so the mapping is
+					 * only needed for the call. */
+					(void)kof_scan_bytes(sc, fm,
+						(uint64_t)fst.st_size, nm,
+						&opt, on_object, v);
+					kof_unmap_file(fm,
+						(uint64_t)fst.st_size);
+				}
+				if (v->n_obj >= MAX_OBJ)
+					break;
+				continue;
+			}
+			if (it.kind != KOF_WALK_BYTES || !it.p || !it.len)
+				continue;
+			/*
+			 * THE WORD, AND ONLY THE WORD - see
+			 * kof_walk_item.label. "00007fce21b7f000" is where it
+			 * is, not what it is, and a tree of addresses reads as
+			 * a list of numbers nobody can act on.
+			 *
+			 * NO ADDRESS APPENDED EITHER. Two heaps then share a
+			 * row name, which is the objection to dropping it and
+			 * is worth less than it looks: the rows carry their
+			 * sizes, they are listed in the order the address
+			 * space has them, and the address itself is one key
+			 * away on the object. A name that is half a word and
+			 * half a hex number is neither.
+			 */
+			if (it.label && it.label[0])
+				snprintf(nm, sizeof nm, "%s//%s", v->path,
+					 it.label);
+			else
+				snprintf(nm, sizeof nm, "%s//%016llx",
+					 v->path,
+					 (unsigned long long)it.addr);
+			/*
+			 * The walk's declaration goes with the bytes: on
+			 * Windows a region that is a loader-mapped PE says so,
+			 * and resolving its regions from the file layout would
+			 * point every one of them at another section's bytes.
+			 * Zero on Linux, where nothing needs declaring.
+			 */
+			{
+				struct kof_scan_option ro = opt;
+
+				if (it.as_format) {
+					ro.as_format   = it.as_format;
+					ro.as_view     = it.as_view;
+					ro.as_view_len = it.as_view_len;
+				}
+				(void)kof_scan_bytes(sc, it.p, it.len, nm,
+						     &ro, on_object, v);
+			}
+			if (v->n_obj >= MAX_OBJ)
+				break;
+		}
+	}
+	w->close(w->self);
+	kof_scanner_free(sc);
+}
+
 static void objects_collect(struct view *v, kof_engine *eng)
 {
 	struct kof_scan_option opt;
@@ -2505,7 +2713,20 @@ static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 		if (!o->buf.p || !o->buf.n)
 			continue;
 
-		o->fmt = kof_inspect_identify(o->buf, &o->ctx, &o->info);
+		/*
+		 * THE PROCESS RECORD IS DECLARED, NOT SNIFFED. It carries no
+		 * magic a sniff could accept - see kof_inspect_declare - so
+		 * identify answers Raw for it, and the root row of a process
+		 * view then reads as unidentified bytes with no panel.
+		 * Object 0 of a process view is the only object this applies
+		 * to: everything else in the tree is a file or a region.
+		 */
+		if (i == 0 && v->proc_pid)
+			o->fmt = kof_inspect_declare(o->buf, KOF_EVT_PROC,
+						     &o->ctx, &o->info);
+		else
+			o->fmt = kof_inspect_identify(o->buf, &o->ctx,
+						      &o->info);
 		if (!o->fmt)
 			o->ctx.obj_size = o->buf.n;
 
@@ -2721,7 +2942,31 @@ static void obj_label(const struct object *o, char *out, size_t cap)
 		 o->fmt ? kof_format_name(o->ctx.format) : "Raw",
 		 o->fmt ? "-" : "",
 		 o->fmt ? kof_arch_name(o->ctx.arch) : "");
-	if (o->depth == 0) {
+	if (o->depth == 0 && o->ctx.format == KOF_EVT_PROC) {
+		/*
+		 * A PROCESS SAYS SO, AND SAYS WHICH ONE.
+		 *
+		 * The root of a process view is the snapshot RECORD, so the
+		 * format name reads as a file format and the size beside it is
+		 * the record's few bytes rather than anything about the
+		 * process. Both true, neither what a reader wants from the top
+		 * row.
+		 *
+		 * The OS comes from the RECORD and not from this build,
+		 * because a snapshot opened here may have been taken on the
+		 * other one - the same reason kof_evt carries its own platform.
+		 */
+		const struct kof_proc_info *pi = o->info;
+		const char *id = o->name;
+
+		while (*id && *id != ':')
+			id++;
+		if (*id == ':')
+			id++;
+		snprintf(out, cap, "%s_PROC [%.16s]",
+			 (pi && pi->valid && pi->os == KOF_PLAT_WINDOWS)
+				 ? "WIN" : "NIX", id);
+	} else if (o->depth == 0) {
 		snprintf(out, cap, "%s", what);
 	} else if (o->payload_of) {
 		/*
@@ -3316,11 +3561,32 @@ static void tree_build(struct view *v)
 		 * search all key off the row's object and mask.
 		 */
 		{
-			uint32_t at = o->depth * 2u;
-
-			if (o->depth && !o->fmt)
-				at = o->depth * 2u - 1u;
-			tree_add(v, at, i, 0,
+			/*
+			 * ONE COLUMN PER LEVEL, AND A CHILD OBJECT IS A CHILD
+			 * OF THE OBJECT - not of the object's last region.
+			 *
+			 * This used to indent an object by depth * 2 and its
+			 * regions by depth * 2 + 1, which puts a child object
+			 * TWO columns in while a region goes one. A reader
+			 * then sees the root, the root's regions one in, and
+			 * the root's children TWO in - reading as though every
+			 * child belonged to the region above it. Measured on a
+			 * process view: MEM_CMDLINE at column 1 with the
+			 * executable at column 2 under it, which says the ELF
+			 * is part of the command line.
+			 *
+			 * With one column per level the tree says what it
+			 * means: an object's regions and an object's children
+			 * are both one level in, because both belong to IT,
+			 * and a child's own regions are one further.
+			 *
+			 * THE -1 FOR A FORMATLESS CHILD IS GONE WITH IT, and
+			 * nothing is lost: it existed to pull a decoded page
+			 * stream back to its parent's region level, and at one
+			 * column per level that is where a child already is.
+			 * The special case was compensating for the doubling.
+			 */
+			tree_add(v, o->depth, i, 0,
 				 o->buf.n ? o->buf.n : o->ctx.obj_size, label);
 		}
 		/*
@@ -3346,7 +3612,7 @@ static void tree_build(struct view *v)
 				continue;
 			/* kof_region_label and not the last underscore - see
 			 * the note on it in kofinspect.h for what that cost. */
-			tree_add(v, o->depth * 2u + 1u, i,
+			tree_add(v, o->depth + 1u, i,
 				 o->fmt->regions[k], total,
 				 kof_region_label(rn));
 		}
@@ -3392,7 +3658,7 @@ static void tree_build(struct view *v)
 					      v->ext, KOF_SCAN_MAX_EXTENTS,
 					      &bytes))
 					continue;
-				tree_add_sym(v, o->depth * 2u + 1u, i, bytes,
+				tree_add_sym(v, o->depth + 1u, i, bytes,
 					     which[h], lab[h]);
 			}
 		}
@@ -3449,7 +3715,7 @@ static void tree_build(struct view *v)
 				 */
 				if (child_of_entry(v, i, tab[e].index))
 					continue;
-				tree_add_ent(v, o->depth * 2u + 1u, i,
+				tree_add_ent(v, o->depth + 1u, i,
 					     tab[e].index, tab[e].off,
 					     tab[e].len,
 					     ent_label(o, &tab[e]));
@@ -13162,6 +13428,136 @@ static void prop_claimed(const char *label, uint32_t have, uint32_t claimed)
 		 have == claimed ? A_SIZE : A_WARN, have, claimed);
 }
 
+/*
+ * THE PROCESS PANEL.
+ *
+ * Shaped like prop_elf and prop_pe beside it: one function per format, reading
+ * that format's info struct off ob->info and writing rows. Nothing here knows
+ * where the facts came from - the collector filled a record, the parser turned
+ * it into kof_proc_info, and this draws it - which is the same three steps
+ * every other panel on this page is made of.
+ *
+ * THIS IS WHERE THE HEAD AND THE DESCRIPTORS LIVE NOW. They used to be scan
+ * REGIONS as well, and they were dropped from that: see KOF_SCAN_PROC_CLAIMED
+ * for why a packed struct of integers is not something a signature searches.
+ * Not being searchable is not a reason to hide them from a reader, and this is
+ * the place a reader looks.
+ *
+ * The strings are read out of the record's own arena by offset, because the
+ * parse already checked those offsets are inside it - `valid` is that check.
+ */
+static const char *proc_str(const struct object *ob, uint32_t off)
+{
+	const char *p;
+
+	if (!off || off >= ob->buf.n)
+		return "";
+	p = (const char *)ob->buf.p + off;
+	return p;
+}
+
+static void prop_proc(const struct object *ob)
+{
+	const struct kof_proc_info *pi = ob->info;
+	const char *cmd;
+
+	if (!pi || !pi->valid)
+		return;
+
+	prop_head("Process");
+	prop_add(A_DIM "  %-11s " A_SIZE "%lu" A_OFF A_DIM "  parent " A_OFF
+		 A_SIZE "%lu" A_OFF, "pid", (unsigned long)pi->pid,
+		 (unsigned long)pi->ppid);
+	prop_add(A_DIM "  %-11s " A_ID "%s" A_OFF, "exe",
+		 proc_str(ob, pi->off_exe));
+	prop_add(A_DIM "  %-11s " A_ID "%s" A_OFF, "name",
+		 proc_str(ob, pi->off_comm));
+	cmd = proc_str(ob, pi->off_cmdline);
+	/*
+	 * SAID EVEN WHEN IT IS EMPTY, because an empty command line and one
+	 * nobody could read are different facts and only one of them is about
+	 * the program - the same distinction KOFW_PF_CMDLINE_LOST draws.
+	 */
+	prop_add(A_DIM "  %-11s " A_ID "%s" A_OFF, "cmdline",
+		 cmd[0] ? cmd : "(none recorded)");
+
+	/*
+	 * The per-platform tail, named by the record's OWN os rather than by
+	 * this build: a snapshot taken on the other platform reads correctly
+	 * here, which is the reason kof_proc_rec carries the byte at all.
+	 */
+	if (pi->os == KOF_PLAT_WINDOWS)
+		prop_add(A_DIM "  %-11s " A_SIZE "%lu" A_OFF A_DIM
+			 "  integrity " A_OFF A_SIZE "%lu" A_OFF, "session",
+			 (unsigned long)pi->plat_a,
+			 (unsigned long)pi->plat_b);
+	else
+		prop_add(A_DIM "  %-11s " A_SIZE "%lu" A_OFF A_DIM "  gid "
+			 A_OFF A_SIZE "%lu" A_OFF, "uid",
+			 (unsigned long)pi->plat_a,
+			 (unsigned long)pi->plat_b);
+
+	/*
+	 * THE COUNTS, AND WHETHER THEY WERE READ AT ALL.
+	 *
+	 * KOF_PROC_F_FDS_READ is what separates "this process holds no
+	 * descriptors" from "nobody was allowed to look", and a panel that
+	 * printed 0 for both would be inventing the first.
+	 */
+	if (pi->flags & KOF_PROC_F_FDS_READ)
+		prop_add(A_DIM "  %-11s " A_SIZE "%lu" A_OFF A_DIM
+			 "  sockets " A_OFF A_SIZE "%lu" A_OFF, "fds",
+			 (unsigned long)pi->n_fd,
+			 (unsigned long)pi->n_socket);
+	else
+		prop_add(A_DIM "  %-11s not readable" A_OFF, "fds");
+
+	/*
+	 * THE DESCRIPTORS AS A TABLE, because they are read ACROSS rather than
+	 * down: the question is never "what is fd 1" on its own, it is whether
+	 * two of them name the same thing. Three rows in one column makes a
+	 * reader hold two strings in their head to compare them; a table puts
+	 * them under each other where the eye does it.
+	 *
+	 * The three are written consecutively into the record's arena, each
+	 * NUL terminated, so the second and third are found by stepping past
+	 * the one before - the same walk the builder wrote them with.
+	 */
+	{
+		static const char *const names[3] = { "stdin", "stdout",
+						      "stderr" };
+		uint32_t off = pi->off_fd0;
+		unsigned k;
+
+		for (k = 0; k < 3u; k++) {
+			const char *t = proc_str(ob, off);
+
+			prop_add(A_DIM "  %-11s " A_DIM "%-7s" A_OFF A_ID
+				 "%.48s" A_OFF, k ? "" : "fd", names[k],
+				 t[0] ? t : "(none)");
+			if (!off || off >= ob->buf.n)
+				break;
+			off += (uint32_t)strlen(t) + 1u;
+		}
+	}
+
+	/*
+	 * The three shapes the rules key on, said in words. A reader looking
+	 * at a panel should be able to see what a rule saw.
+	 */
+	if (pi->fd_same_01)
+		prop_add(A_WARN "  %-11s fd 0 and fd 1 name the SAME object"
+			 A_OFF, "stdio");
+	if (pi->comm_bracketed)
+		prop_add(A_WARN "  %-11s name is bracketed, like a kernel "
+			 "thread" A_OFF, "masquerade");
+	if (pi->flags & KOF_PROC_F_KTHREAD)
+		prop_add(A_DIM "  %-11s kernel thread" A_OFF, "kind");
+	if (!(pi->flags & KOF_PROC_F_EXE_ON_DISK))
+		prop_add(A_WARN "  %-11s the executable is not on disk" A_OFF,
+			 "exe");
+}
+
 static void prop_elf(const struct object *ob)
 {
 	const struct kof_elf_info *e = ob->info;
@@ -13526,7 +13922,24 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 	{
 		char id[64];
 
-		if (top) {
+		if (top && ob->ctx.format == KOF_EVT_PROC && ob->info) {
+			/*
+			 * A PROCESS IS NAMED BY WHAT IT IS RUNNING, and then
+			 * by which instance of it.
+			 *
+			 * "pid:185262" is the object's internal name and says
+			 * nothing a reader wants: the interesting half is the
+			 * program, and the number only distinguishes one run
+			 * of it from another. So the binary leads and the pid
+			 * qualifies it, which is the order a person says it in.
+			 */
+			const struct kof_proc_info *pi = ob->info;
+			const char *exe = proc_str(ob, pi->off_exe);
+
+			snprintf(id, sizeof id, "%.36s [pid %lu]",
+				 exe[0] ? kof_path_base(exe) : "?",
+				 (unsigned long)pi->pid);
+		} else if (top) {
 			/* `nm` and not `base`: there is a basedir-ish `base`
 			 * further out in this function's scope. */
 			const char *nm = kof_path_base(ob->name);
@@ -13571,7 +13984,27 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 	 */
 	if (top && v->path && v->path[0]) {
 		char dir[KOF_DUMP_PATH_ROOM];
-		const char *slash = kof_path_sep_last(v->path);
+		/*
+		 * FOR A PROCESS, THE FOLDER IS WHERE THE BINARY LIVES.
+		 *
+		 * v->path is "pid:185262", which has no separator, so this row
+		 * said "./" - a directory that exists and is not the one the
+		 * program was started from. The record carries the executable's
+		 * full path, and that is the only filesystem location a
+		 * process has.
+		 */
+		const char *from = v->path;
+		const char *slash;
+
+		if (ob->ctx.format == KOF_EVT_PROC && ob->info) {
+			const char *exe =
+				proc_str(ob, ((const struct kof_proc_info *)
+					      ob->info)->off_exe);
+
+			if (exe[0])
+				from = exe;
+		}
+		slash = kof_path_sep_last(from);
 
 		/* Ending in a separator, always: a directory row and a name row
 		 * sit one above the other in the same column, and without it the
@@ -13579,11 +14012,11 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 		if (!slash) {
 			snprintf(dir, sizeof dir, "./");
 		} else {
-			size_t n = (size_t)(slash - v->path) + 1u;
+			size_t n = (size_t)(slash - from) + 1u;
 
 			if (n >= sizeof dir)
 				n = sizeof dir - 1u;
-			memcpy(dir, v->path, n);
+			memcpy(dir, from, n);
 			dir[n] = 0;
 		}
 		/*
@@ -13856,6 +14289,8 @@ static void prop_build(struct view *v)
 			prop_pe(ob);
 		else if (ob->ctx.format == KOF_FMT_PDF)
 			prop_pdf(ob);
+		else if (ob->ctx.format == KOF_EVT_PROC)
+			prop_proc(ob);
 	}
 
 	/*
@@ -13913,14 +14348,28 @@ static void prop_build(struct view *v)
 		 * has a unit - bits per byte, 0 to 8 - and printing it bare
 		 * left people guessing at the scale as well as the name.
 		 */
-		prop_add("  " A_ID "%-11s" A_OFF A_SIZE "%-10llu" A_OFF
+		prop_add("  " A_ID "%-11s " A_OFF A_SIZE "%-10llu" A_OFF
 			 A_LOC "%5.1f%%" A_OFF A_DIM "  %.1f/8 bits" A_OFF,
 			 n->label, (unsigned long long)n->bytes,
 			 total ? 100.0 * (double)n->bytes / (double)total : 0.0,
 			 (double)kof_inspect_region_entropy(&ob->ctx, ob->buf,
 							    n->mask) / 8.0);
 	}
-	if (total != ob->buf.n)
+	/*
+	 * THE SUM ONLY MEANS SOMETHING WHERE THE FORMAT CLAIMS TO PARTITION.
+	 *
+	 * Every file format here divides an object completely - that is what
+	 * UNCLAIMED is for - so a total short of the size is a real defect and
+	 * is shouted about. A process record does NOT: its head and its
+	 * descriptor links are deliberately not scan regions - see
+	 * KOF_SCAN_PROC_CLAIMED - because a packed struct of integers is not
+	 * something a signature searches. The bytes are still there and still
+	 * on this page; they simply are not a region.
+	 *
+	 * Without this the panel reported MISMATCH on every process, which is
+	 * a defect being claimed about a decision.
+	 */
+	if (total != ob->buf.n && ob->ctx.format != KOF_EVT_PROC)
 		prop_add(A_BAD "  %-11s regions sum to %llu of %llu" A_OFF,
 			 "MISMATCH", (unsigned long long)total,
 			 (unsigned long long)ob->buf.n);
@@ -20195,7 +20644,17 @@ static void usage(void)
 	"kofviewer - the engine's view of a file, navigable\n"
 	"\n"
 	"  kofviewer [--db <dir>] [--heur 0|1|2] <file|folder>\n"
+	"  kofviewer [--db <dir>] --pid <N>\n"
 	"\n"
+	"  --pid N     open a RUNNING PROCESS instead of a file: its own\n"
+	"              record as the root, the program and every library it\n"
+	"              mapped as objects, and the heap, stack and anonymous\n"
+	"              regions at their addresses.\n"
+	"              A SNAPSHOT - every region is read once, when this\n"
+	"              opens. The process is not stopped, so a region written\n"
+	"              while it was read is torn; nothing here re-reads, so\n"
+	"              what is on screen is what was there at that moment and\n"
+	"              stays that way.\n"
 	"  --db D      load that database. Without it there is one object and\n"
 	"              no markers: unpacking is what modules do, and modules\n"
 	"              live in a database.\n"
@@ -20219,6 +20678,111 @@ static void usage(void)
  * directory outlive any one file, and freeing them here is what would make a
  * file switch cost a database load again.
  */
+static void file_close(struct view *v);
+
+/*
+ * OPEN A RUNNING PROCESS. 1 when there is something to look at.
+ *
+ * Shaped like file_open deliberately: it resets the view the same way, sets
+ * v->map to the bytes the ROOT object is made of, and leaves the rest to the
+ * same two passes - proc_collect instead of objects_collect, then
+ * objects_examine unchanged. Everything after this point in the program does
+ * not know a process from a file, which is the property that makes the panes,
+ * the jumps, the dumps and the drafting work without a second implementation.
+ *
+ * v->map IS THE PROCESS RECORD and not a mapping, so file_close must not
+ * unmap it - see the owned flag there.
+ */
+static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
+{
+	struct kof_walk_option wo;
+	struct kof_walk_api   *w;
+	struct kof_proc_build  b;
+	static uint8_t rec[KOF_PROC_REC_MAX];
+	uint32_t n = 0, pids[1];
+	int err = 0;
+	struct kof_range *ext   = v->ext;
+	struct kof_range *probe = v->probe;
+	uint32_t          cap   = v->ed.dr.decl_cap;
+	char basedir[sizeof v->basedir];
+	char dbdir[sizeof v->dbdir];
+	int  heur_off = v->heur_off;
+
+	/*
+	 * ASKED ONCE HERE, BEFORE ANYTHING IS TORN DOWN. A pid that cannot be
+	 * opened must leave the view the reader already had, not an empty one:
+	 * stepping to the next pid over a process that exited between the list
+	 * and the open is the ordinary case, not an error.
+	 */
+	memset(&wo, 0, sizeof wo);
+	pids[0] = pid;
+	wo.pids = pids;
+	wo.n_pids = 1;
+	/* A reader, not a scan - see enum kof_walk_intent. */
+	wo.intent = KOF_WALK_MAP;
+	w = kof_walk_open(&wo, &err);
+	if (w) {
+		if (w->next_proc(w->self, &b))
+			n = kof_proc_build_rec(&b, rec, sizeof rec);
+		w->close(w->self);
+	}
+	if (!n) {
+		v->act_ok = 0;
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "pid %lu cannot be opened", (unsigned long)pid);
+		return 0;
+	}
+
+	snprintf(basedir, sizeof basedir, "%s", v->basedir);
+	snprintf(dbdir, sizeof dbdir, "%s", v->dbdir);
+
+	file_close(v);
+	memset(v, 0, sizeof *v);
+
+	v->eng   = eng;
+	v->ext   = ext;
+	v->probe = probe;
+	v->ed.dr.decl_cap = cap;
+	editor_attach(v);
+	snprintf(v->basedir, sizeof v->basedir, "%s", basedir);
+	snprintf(v->dbdir, sizeof v->dbdir, "%s", dbdir);
+	v->heur_off = heur_off;
+
+	v->sel_a = v->sel_b = KOF_BROKEN;
+	v->find_at = KOF_BROKEN;
+	v->bar_open = -1;
+	v->bar_sel = -1;
+	v->bar_sub = -1;
+	v->into_obj = -1;
+	v->pending_ver = -1;
+
+	v->proc_pid = pid;
+	snprintf(v->pathbuf, sizeof v->pathbuf, "pid:%lu", (unsigned long)pid);
+	v->path = v->pathbuf;
+	v->map = rec;
+	v->map_len = n;
+
+	if (v->eng)
+		proc_collect(v, v->eng, pid);
+	if (!v->n_obj) {
+		struct object *o = &v->obj[0];
+
+		memset(o, 0, sizeof *o);
+		snprintf(o->name, sizeof o->name, "%s", v->path);
+		o->buf = kof_buf_make(v->map, v->map_len);
+		v->n_obj = 1;
+	}
+	objects_examine(v, v->eng);
+	/* The rows the reader sees are built from the objects, not the same
+	 * thing - see tree_build. Missed at first, and the shape of the miss
+	 * is worth keeping: twenty-seven objects were collected, examined and
+	 * correct, and the tree pane was empty because nothing had turned them
+	 * into rows. */
+	tree_build(v);
+	view_select(v);
+	return 1;
+}
+
 static void file_close(struct view *v)
 {
 	uint32_t i;
@@ -20257,7 +20821,14 @@ static void file_close(struct view *v)
 			kof_unmap_file(o->mapped, o->mapped_len);
 	}
 	v->n_obj = 0;
-	if (v->map) {
+	/*
+	 * ONLY A MAPPING IS UNMAPPED. A process view's v->map is the process
+	 * RECORD - static storage in proc_open, not a file this ever mapped -
+	 * and handing that to munmap is a page it does not own. proc_pid is
+	 * what tells the two apart, because it is the one field that is set
+	 * for one and clear for the other.
+	 */
+	if (v->map && !v->proc_pid) {
 		kof_unmap_file(v->map, v->map_len);
 		v->map = NULL;
 		v->map_len = 0;
@@ -20550,6 +21121,8 @@ int main(int argc, char **argv)
 	 * said to put it.
 	 */
 	const char *path = NULL, *db = NULL, *base = "";
+	/* The process to open instead of a file, or 0. */
+	uint32_t    want_pid = 0;
 	uint64_t last_paint = 0;
 	/*
 	 * ON THE HEAP, BECAUSE IT DOES NOT FIT ON THE STACK.
@@ -20579,6 +21152,7 @@ int main(int argc, char **argv)
 	/* -1 is "nowhere", and zero is a real object index - see into_obj. A
 	 * memset alone would have aimed every scan's root at the file. */
 	v->into_obj = -1;
+	/* The process to open instead of a file, or 0. */
 	/* The one preference that is not zero at rest. Everything else file_open
 	 * sets, for the first file and for every one after it. */
 	v->ed.dr.decl_cap = 12;
@@ -20593,7 +21167,9 @@ int main(int argc, char **argv)
 	editor_attach(v);
 
 	for (i = 1; i < argc; i++) {
-		if (!strcmp(argv[i], "--db") && i + 1 < argc)
+		if (!strcmp(argv[i], "--pid") && i + 1 < argc)
+			want_pid = (uint32_t)strtoul(argv[++i], NULL, 10);
+		else if (!strcmp(argv[i], "--db") && i + 1 < argc)
 			db = argv[++i];
 		/*
 		 * Three values, refused rather than clamped - the same
@@ -20627,7 +21203,7 @@ int main(int argc, char **argv)
 			return 2;
 		}
 	}
-	if (!path) {
+	if (!path && !want_pid) {
 		usage();
 		return 2;
 	}
@@ -20664,7 +21240,7 @@ int main(int argc, char **argv)
 	 * reads as the program having failed to load a file it never had; a line
 	 * on stderr says what is actually true.
 	 */
-	if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+	if (path && stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
 		static char first[KOF_DUMP_PATH_ROOM];
 
 		if (!dir_pick(path, NULL, PICK_FIRST, first, sizeof first)) {
@@ -20688,7 +21264,10 @@ int main(int argc, char **argv)
 			fprintf(stderr, "kofviewer: cannot load a database from "
 					"%s\n", db);
 	}
-	if (!file_open(v, path, v->eng)) {
+	/* A pid and a path are two ways of naming what to look at; the pid
+	 * wins when both are given, because it is the more specific ask. */
+	if (want_pid ? !proc_open(v, want_pid, v->eng)
+		     : !file_open(v, path, v->eng)) {
 		fprintf(stderr, "kofviewer: %s\n", v->act_msg);
 		kof_engine_close(v->eng);
 		free(v->ext);

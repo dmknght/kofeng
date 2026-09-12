@@ -414,6 +414,25 @@ struct kofa_plist_option {
 	 * not know to ask, which is exactly who needs them.
 	 */
 	int no_fds;
+
+	/*
+	 * JUST THIS PROCESS, and nothing else. 0 walks every one of them.
+	 *
+	 * WHY IT IS HERE AND NOT LEFT TO THE CALLER FILTERING. A caller that
+	 * wants one pid is answering "something already decided this process
+	 * is interesting" - an event arrived, an operator asked - and walking
+	 * four hundred entries to reach one is the whole cost of a sweep paid
+	 * for nothing. It is also what kofw_plist_option has had all along,
+	 * so the two collectors now answer the same question the same way.
+	 *
+	 * THE POINT IS THE DETAIL, NOT THE SPEED. kofa_pmem_open fills a
+	 * kofa_proc with pid, ppid, start_time, comm and exe, because that is
+	 * all a MEMORY handle needs - no cmdline, no descriptors, no uid. A
+	 * caller that asked for one pid through pmem therefore got a process
+	 * record with the interesting half missing, which is what a process
+	 * panel drawn from it looked like.
+	 */
+	uint32_t only_pid;
 };
 
 struct kofa_plist;

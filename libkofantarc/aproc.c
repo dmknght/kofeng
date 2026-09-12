@@ -444,6 +444,16 @@ int kofa_plist_next(struct kofa_plist *l, struct kofa_proc *out)
 		pid = strtoul(de->d_name, &end, 10);
 		if (*end || !pid)
 			continue;
+		/*
+		 * ONE PID, WHEN ONE WAS ASKED FOR - see
+		 * kofa_plist_option.only_pid. Filtered here rather than by the
+		 * caller so everything below it still runs: the cmdline, the
+		 * descriptors and the ownership are read by THIS loop, and a
+		 * caller that filtered afterwards would have had to reach them
+		 * some other way.
+		 */
+		if (l->o.only_pid && (uint32_t)pid != l->o.only_pid)
+			continue;
 
 		memset(out, 0, sizeof *out);
 		out->pid = (uint32_t)pid;

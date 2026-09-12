@@ -20,7 +20,7 @@
 #include "../../core/kofmod/kofsig.h"
 #include "../../core/kofmod/proc.h"
 
-extern const uint32_t kof_proc_regions[3];
+extern const uint32_t kof_proc_regions[1];
 
 int         kof_proc_sniff(kof_buf b);
 int         kof_proc_parse(kof_buf b, void *view, struct kof_obj_ctx *ctx);

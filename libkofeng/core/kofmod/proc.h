@@ -84,13 +84,35 @@ enum kof_scan_proc {
 	KOF_SCAN_PROC_FD = 1u << 3
 };
 
-#define KOF_SCAN_PROC_CLAIMED \
-	(KOF_SCAN_PROC_META | KOF_SCAN_PROC_CMDLINE | KOF_SCAN_PROC_FD)
+/*
+ * ONE REGION, AND THE OTHER TWO ARE NOT SCANNED.
+ *
+ * A REGION EXISTS SO A PATTERN SEARCH CAN BE SCOPED. META is the fixed head -
+ * pid, ppid, start_time, counts, flags - which is to say a packed struct of
+ * INTEGERS, and searching bytes in one is searching for a pattern in a
+ * layout. The two rules that use these facts, proc_revshell and proc_kthread,
+ * read them as FIELDS through kof_proc(ctx) and never as bytes; they would not
+ * notice if the region vanished, which is the test that decided this.
+ *
+ * FD is three link targets - "socket:[14899490]", "/dev/pts/3" - and it is
+ * weak for the same reason with an extra cost: to be worth searching it would
+ * have to carry EVERY descriptor rather than the standard three, which means a
+ * table like the symbol block and a lookup written for it. That is real work
+ * for a detection nobody has asked for, so the three stay FIELDS.
+ *
+ * CMDLINE stays, and it is the one that earns it: the attacker-controlled
+ * half, where every living-off-the-land technique is visible as text, and
+ * where a decoder can later be run over what somebody base64'd into an
+ * argument.
+ *
+ * THE HEAD AND THE DESCRIPTORS ARE STILL SHOWN - they are on the dashboard,
+ * where a reader wants them. Not being a scan region is a statement about
+ * what a SIGNATURE can target, not about what is worth knowing.
+ */
+#define KOF_SCAN_PROC_CLAIMED (KOF_SCAN_PROC_CMDLINE)
 
 #define KOF_SCAN_PROC_LIST(X) \
-	X(KOF_SCAN_PROC_META)     \
-	X(KOF_SCAN_PROC_CMDLINE)  \
-	X(KOF_SCAN_PROC_FD)
+	X(KOF_SCAN_PROC_CMDLINE)
 
 /*
  * WHAT THE COLLECTOR OBSERVED AND COULD NOT INFER - the flags half.

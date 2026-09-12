@@ -1176,7 +1176,27 @@ $(OUT)/bin/kofexamine$(EXE): $(EXAMINE_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
 # kofinspect, and what differs is only how a pane and a line are drawn.
 #
 
-VIEWER_SRC := kofexamine/kofviewer.c kofexamine/kofview.c kofexamine/kofinspect.c kofexamine/kofeditor.c
+#
+# THE VIEWER NOW LINKS THE HOST'S COLLECTOR, which it did not before.
+#
+# It can open a running process - see proc_collect - and that needs the same
+# kof_walk_open the scanner uses: libkofantarc on Linux, libkofgrille on
+# Windows. The walk is the only thing it takes from there, and it is the same
+# file kofscanner compiles, so the two cannot disagree about what a region is.
+ifeq ($(NATIVE_OS),windows)
+VIEWER_PROC := libkofgrille/wwalk.c libkofgrille/wproc.c \
+               libkofgrille/wcmdline.c libkofgrille/wtext.c $(KOFPROC_SRC)
+VIEWER_PROC_INC := -Ilibkofgrille
+VIEWER_PROC_LIB := -ladvapi32 -lpsapi
+else
+VIEWER_PROC := $(ANTARC_SRC) libkofantarc/awalk.c $(KOFPROC_SRC)
+VIEWER_PROC_INC := -Ilibkofantarc
+VIEWER_PROC_LIB :=
+endif
+VIEWER_PROC_INC += -Ilibkoforbit/kofwalk -Ilibkoforbit/kofproc \
+                   -Ilibkoforbit/kofmon
+
+VIEWER_SRC := kofexamine/kofviewer.c kofexamine/kofview.c kofexamine/kofinspect.c kofexamine/kofeditor.c $(VIEWER_PROC)
 
 # EMU_INC because the viewer disassembles: bddisasm's definitions are already
 # inside $(LIB) - the emulator put them there - so what is missing is only the
@@ -1190,7 +1210,9 @@ $(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
                             $(STAMP)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include -Ilibkoforbit/kofevt $(EMU_INC) \
-	      $(VIEWER_SRC) $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS)
+	      $(VIEWER_PROC_INC) \
+	      $(VIEWER_SRC) $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS) \
+	      $(VIEWER_PROC_LIB)
 
 # ----------------------------------------------------- the database toolchain
 #

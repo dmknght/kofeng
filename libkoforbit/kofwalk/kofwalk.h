@@ -108,6 +108,23 @@ struct kof_walk_item {
 	uint8_t     as_format;
 	const void *as_view;
 	uint32_t    as_view_len;
+
+	/*
+	 * WHAT KIND OF MEMORY THIS IS, for KOF_WALK_BYTES: "MEM_HEAP",
+	 * "MEM_STACK", "MEM_ANON" and so on. "" when the walk has no word for
+	 * it.
+	 *
+	 * A CALLER SHOWING THIS TO SOMEBODY NEEDS A WORD, NOT AN ADDRESS. The
+	 * address is in `addr` and is what a finding is reported against, but
+	 * a row reading "00007fce21b7f000" tells a reader nothing they can act
+	 * on - they have to go and work out what lives there, which is
+	 * precisely what the collector already knows.
+	 *
+	 * Borrowed, valid until the next call, like every other string here.
+	 * Spelled in the region vocabulary this tree uses - capitals, MEM_ for
+	 * what came from the running process rather than from a file.
+	 */
+	const char *label;
 };
 
 /*
@@ -126,9 +143,39 @@ struct kof_walk_item {
  * starting, which is the ordinary case for exactly the processes worth asking
  * about.
  */
+/*
+ * WHAT THE CALLER IS DOING, because the right set of regions is not the same
+ * for both and is not a matter of taste.
+ *
+ * A SCANNER wants code with no file behind it: a reflective loader's payload,
+ * a decompressed stub, plain shellcode. The rest of an address space is the
+ * process's own working data, and searching it reports what a process TOUCHED
+ * rather than what it is - measured on this tree: a parent shell's heap
+ * matched a string that had merely passed through it.
+ *
+ * SOMEBODY LOOKING wants the address space. The heap is where a decrypted
+ * configuration lives and is exactly what an analyst opens a process to read;
+ * refusing it because a SCAN would false-positive on it is answering a
+ * question nobody asked.
+ *
+ * A PURPOSE AND NOT A FLAG SET, so this header still names no platform. The
+ * two collectors have their own vocabularies for this - KOFA_MW_* and
+ * KOFW_MW_* - and each maps the purpose onto its own, where the reasoning is
+ * visible beside the flags it chooses.
+ */
+enum kof_walk_intent {
+	/* Zero, so an option struct that was memset keeps the behaviour every
+	 * existing caller already has. */
+	KOF_WALK_SCAN = 0,
+	KOF_WALK_MAP
+};
+
 struct kof_walk_option {
 	const uint32_t *pids;
 	uint32_t        n_pids;
+
+	/* enum kof_walk_intent. */
+	int intent;
 
 	/* Report processes that could not be opened, so a caller can tell
 	 * "clean" from "never looked at". On by default when the struct is

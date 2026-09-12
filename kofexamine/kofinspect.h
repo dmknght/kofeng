@@ -60,6 +60,11 @@
  * then failed. A parser loosened later would change that, and this is the place
  * the answer would have to come back through.
  */
+/* The same, for an object whose format the CALLER knows and no sniff can tell
+ * - a process record, an AMSI submission. NULL when that parser refuses it. */
+const struct kof_parser *kof_inspect_declare(kof_buf, uint8_t format,
+					     struct kof_obj_ctx *, void **);
+
 const struct kof_parser *kof_inspect_identify(kof_buf, struct kof_obj_ctx *,
 						   void **view_out);
 

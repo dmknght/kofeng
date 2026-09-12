@@ -297,6 +297,39 @@ const char *kof_inspect_subtype_name(uint8_t fmt, uint8_t sub)
  * info struct - there is nothing to tear down - so free() is the whole of the
  * release and no kof_inspect_release exists to wrap it.
  */
+/*
+ * THE SAME THING FOR AN OBJECT THAT CANNOT BE SNIFFED.
+ *
+ * A process record and an AMSI submission carry no magic anybody could sniff -
+ * they are reached by a caller that already KNOWS what it is holding, which is
+ * why kofformat.c gives them rows whose sniff never accepts. identify() walks
+ * the sniffs, so it answers "Raw" for both, and a viewer then shows a process
+ * as unidentified bytes with no panel of its own.
+ *
+ * Declared rather than guessed, and only by a caller that built the bytes.
+ */
+const struct kof_parser *kof_inspect_declare(kof_buf buf, uint8_t format,
+					     struct kof_obj_ctx *ctx,
+					     void **view_out)
+{
+	const struct kof_parser *p = kof_parser_of(format);
+	void *view;
+
+	*view_out = NULL;
+	memset(ctx, 0, sizeof *ctx);
+	if (!p)
+		return NULL;
+	view = malloc(p->view_size);
+	if (!view)
+		return NULL;
+	if (!p->parse(buf, view, ctx)) {
+		free(view);
+		return NULL;
+	}
+	*view_out = view;
+	return p;
+}
+
 const struct kof_parser *kof_inspect_identify(kof_buf buf,
 						   struct kof_obj_ctx *ctx,
 						   void **view_out)

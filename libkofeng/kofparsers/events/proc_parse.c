@@ -5,15 +5,61 @@
 
 #include "proc_parse.h"
 
-const uint32_t kof_proc_regions[3] = {
-	KOF_SCAN_PROC_META, KOF_SCAN_PROC_CMDLINE, KOF_SCAN_PROC_FD
-};
+/* One - see KOF_SCAN_PROC_CLAIMED for why the head and the descriptors are
+ * facts on a panel rather than bytes to search. */
+const uint32_t kof_proc_regions[1] = { KOF_SCAN_PROC_CMDLINE };
 
 /*
  * REFUSES EVERYTHING. A snapshot is declared, never recognised - see the
  * header. Returning 0 here is what keeps this row out of the way of every
  * object that is merely bytes.
  */
+/*
+ * WHERE THE THREE REGIONS ARE, which the parse already worked out and used to
+ * keep to itself.
+ *
+ * The lengths were computed below and stored on the view, and nothing ever
+ * turned them into extents - ctx->resolve_scan was left NULL, so
+ * kof_scan_resolve_range answered "no extents" for all three. The regions were
+ * therefore DECLARED and NAMED and empty: a rule targeting the command line
+ * had nowhere to search, and a viewer drew a process with no region rows at
+ * all while every other format had them. amsi_parse.c, the other declared
+ * format, has always set this.
+ *
+ * They PARTITION the record - see the note beside the lengths - so a mask of
+ * several is several extents and every byte of the arena is in exactly one.
+ */
+static uint32_t proc_resolve_scan(const struct kof_obj_ctx *ctx,
+				  uint32_t mask, struct kof_range *ext,
+				  uint32_t cap)
+{
+	const struct kof_proc_info *pi = ctx->file_header;
+	uint32_t n = 0;
+	uint64_t at;
+
+	if (!pi || !pi->valid)
+		return 0;
+	at = 0;
+	if ((mask & KOF_SCAN_PROC_META) && pi->len_meta && n < cap) {
+		ext[n].off = at;
+		ext[n].len = pi->len_meta;
+		n++;
+	}
+	at += pi->len_meta;
+	if ((mask & KOF_SCAN_PROC_CMDLINE) && pi->len_cmdline && n < cap) {
+		ext[n].off = at;
+		ext[n].len = pi->len_cmdline;
+		n++;
+	}
+	at += pi->len_cmdline;
+	if ((mask & KOF_SCAN_PROC_FD) && pi->len_fd && n < cap) {
+		ext[n].off = at;
+		ext[n].len = pi->len_fd;
+		n++;
+	}
+	return n;
+}
+
 int kof_proc_sniff(kof_buf b)
 {
 	(void)b;
@@ -187,15 +233,25 @@ int kof_proc_parse(kof_buf b, void *view, struct kof_obj_ctx *ctx)
 	 * has nothing to say about this object.
 	 */
 	ctx->file_header = pi;
+	/* After file_header, which the resolver reads. */
+	ctx->resolve_scan = proc_resolve_scan;
 	return 1;
 }
 
 const char *kof_proc_region_name(uint32_t bit)
 {
 	switch (bit) {
-	case KOF_SCAN_PROC_META:    return "meta";
-	case KOF_SCAN_PROC_CMDLINE: return "cmdline";
-	case KOF_SCAN_PROC_FD:      return "fd";
+	/*
+	 * UPPERCASE WITH A MEM_ PREFIX, like every other region name in this
+	 * tree - HEADERS, CODE, DATA - because capitals here mean REGION and a
+	 * lowercase word in that column reads as an object. The prefix says
+	 * these came from the RUNNING process rather than from the file: a row
+	 * beside CODE and DATA otherwise looks like part of the image on disk,
+	 * and it is not - it is what the snapshot found about the instance.
+	 */
+	case KOF_SCAN_PROC_META:    return "MEM_META";
+	case KOF_SCAN_PROC_CMDLINE: return "MEM_CMDLINE";
+	case KOF_SCAN_PROC_FD:      return "MEM_FD";
 	default:                    return "?";
 	}
 }

@@ -121,7 +121,28 @@ static int open_mem_for(struct awalk *w, const struct kofa_proc *p)
 	 * working data, and see the note on KOFA_MW_HEAP for why searching it
 	 * says what a process TOUCHED rather than what it is.
 	 */
-	po.want = KOFA_MW_DEFAULT | KOFA_MW_EXEC_ONLY;
+	/*
+	 * THE PURPOSE DECIDES THE SET - see enum kof_walk_intent.
+	 *
+	 * SCAN: executable only. What a memory scan is looking for is code
+	 * with no file behind it; the rest of an address space is the
+	 * process's own working data, and see KOFA_MW_HEAP for why searching
+	 * it says what a process TOUCHED rather than what it is.
+	 *
+	 * MAP: the heap as well, and no EXEC_ONLY. Somebody looking at a
+	 * process has opened it to read the heap - a decrypted configuration
+	 * lives there - and the false positives that keep a SCAN out of it are
+	 * not a reason to hide it from a reader.
+	 *
+	 * KOFA_MW_RESERVED stays off in both. A `---p` reservation cannot be
+	 * read and holds nothing, there are 9.1 TB of them on a desktop
+	 * running a browser, and an object with no bytes is a row that opens
+	 * onto an empty pane.
+	 */
+	if (w->o.intent == KOF_WALK_MAP)
+		po.want = KOFA_MW_DEFAULT | KOFA_MW_HEAP;
+	else
+		po.want = KOFA_MW_DEFAULT | KOFA_MW_EXEC_ONLY;
 	po.sweep = &w->sweep;
 
 	w->mem = kofa_pmem_open(p->pid, p->start_time, &po, &err);
@@ -151,12 +172,83 @@ static int a_next_proc(void *self, struct kof_proc_build *out)
 
 			/* start_time 0: the caller named a pid and means
 			 * whatever holds it now - see kofa_pmem_open. */
-			m = kofa_pmem_open(pid, 0, NULL, &err);
+			/*
+			 * THE DETAIL COMES FROM THE LIST, NOT FROM THE MEMORY
+			 * HANDLE.
+			 *
+			 * kofa_pmem_open fills pid, ppid, start_time, comm and
+			 * exe - what a MEMORY handle needs - and nothing else.
+			 * A caller asking for one pid used to take its whole
+			 * process record from there and got one with no
+			 * cmdline, no descriptors and no ownership: the fields
+			 * a process panel is made of, all absent, with nothing
+			 * saying they had not been asked for.
+			 *
+			 * only_pid reads exactly this entry, so the table is
+			 * still not walked - see the note on kof_walk_option.
+			 */
+			{
+				struct kofa_plist_option lo;
+				int lerr = 0;
+				int got = 0;
+
+				/*
+				 * HELD IN w->list, NOT CLOSED HERE.
+				 *
+				 * kofa_proc's strings - exe, comm, cmdline,
+				 * the descriptor links - are BORROWED from the
+				 * handle that produced them. Closing it here
+				 * and handing w->proc on was the same
+				 * use-after-free this file already had once,
+				 * reintroduced from the other end: the fields
+				 * came back as garbage instead of as nothing,
+				 * which is the worse of the two failures.
+				 *
+				 * One handle per pid, replaced on the way to
+				 * the next and closed by a_close.
+				 */
+				if (w->list) {
+					kofa_plist_close(w->list);
+					w->list = NULL;
+				}
+				memset(&lo, 0, sizeof lo);
+				lo.only_pid = pid;
+				w->list = kofa_plist_open(&lo, &lerr);
+				if (w->list)
+					got = kofa_plist_next(w->list,
+							      &w->proc);
+				if (!got) {
+					w->refused++;
+					continue;
+				}
+			}
+			m = kofa_pmem_open(pid, w->proc.start_time, NULL,
+					   &err);
 			if (!m) {
 				w->refused++;
 				continue;
 			}
-			w->proc = *kofa_pmem_proc(m);
+			/*
+			 * COPIED OUT, THEN THE SESSION THAT OWNS THE STRINGS
+			 * IS REOPENED AND READ AGAIN.
+			 *
+			 * kofa_proc carries BORROWED pointers - image, cmdline,
+			 * the standard descriptors - into the handle that
+			 * produced them. This used to copy the struct and then
+			 * close that handle, which left every string in
+			 * w->proc pointing at freed memory; to_build then
+			 * handed them to the record builder. Found by
+			 * AddressSanitizer as a heap-use-after-free in
+			 * kofproc.c's put(), reached the moment a caller asked
+			 * for a pid by name rather than walking the table - so
+			 * it was latent in kofscanner --pid and in every
+			 * kof_walk_open with a pid list.
+			 *
+			 * The struct is still copied first, because
+			 * open_mem_for needs the pid and start_time out of it;
+			 * what is HANDED OUT comes from the session that stays
+			 * open.
+			 */
 			kofa_pmem_close(m);
 
 			if (!open_mem_for(w, &w->proc)) {
@@ -191,6 +283,27 @@ static int a_next_proc(void *self, struct kof_proc_build *out)
 	return 0;
 }
 
+/*
+ * The word for a region, in this tree's region vocabulary - see
+ * kof_walk_item.label. Capitals because a capitalised name means REGION here,
+ * and MEM_ because these came from the running process rather than a file.
+ */
+static const char *a_label(const struct kofa_region *rg)
+{
+	if (rg->flags & KOFA_RGF_MEMFD)
+		return "MEM_MEMFD";
+	if (rg->flags & KOFA_RGF_DELETED)
+		return "MEM_DELETED";
+	switch (rg->use) {
+	case KOFA_USE_HEAP:  return "MEM_HEAP";
+	case KOFA_USE_STACK: return "MEM_STACK";
+	case KOFA_USE_CODE:  return "MEM_CODE";
+	case KOFA_USE_DATA:  return "MEM_DATA";
+	case KOFA_USE_IMAGE: return "MEM_IMAGE";
+	default:             return "MEM_ANON";
+	}
+}
+
 static int a_next_item(void *self, struct kof_walk_item *out)
 {
 	struct awalk *w = self;
@@ -208,6 +321,7 @@ static int a_next_item(void *self, struct kof_walk_item *out)
 			out->addr = c.addr;
 			out->p = c.p;
 			out->len = c.len;
+			out->label = a_label(&w->rg);
 			return 1;
 		}
 		w->have_rg = 0;
@@ -215,6 +329,17 @@ static int a_next_item(void *self, struct kof_walk_item *out)
 		if (!kofa_pmem_next_region(w->mem, &w->rg))
 			return 0;
 
+		/*
+		 * MAPPING THE ADDRESS SPACE: every region with bytes in it is
+		 * worth a row, not only the ones with no file behind them. The
+		 * file-backed ones are already offered as FILE items below, so
+		 * what this adds is the heap, the stack and the anonymous
+		 * mappings - which is what "view the memory map" means.
+		 */
+		if (w->o.intent == KOF_WALK_MAP && !w->rg.inode) {
+			w->have_rg = 1;
+			continue;
+		}
 		if (w->rg.flags & KOFA_RGF_UNBACKED) {
 			/* Nothing on disk holds these bytes, so they are read
 			 * out of the process - chunk by chunk, skipping pages

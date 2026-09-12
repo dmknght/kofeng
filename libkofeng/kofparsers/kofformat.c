@@ -216,7 +216,7 @@ static const struct kof_parser formats[] = {
 	 */
 	{ KOF_EVT_PROC, (uint32_t)sizeof(struct kof_proc_info),
 	  kof_proc_sniff, proc_parse_thunk,
-	  kof_proc_regions, 3u,
+	  kof_proc_regions, 1u,
 	  kof_proc_region_name, kof_proc_anomaly_name, kof_proc_anomalies }
 };
 
