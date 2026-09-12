@@ -47,7 +47,8 @@ struct kofa_fan {
 
 	uint64_t seq;
 	uint64_t dropped;     /* FAN_Q_OVERFLOW records */
-	uint64_t seen;
+	uint64_t records;     /* fanotify records read */
+	uint64_t produced;    /* kof_evt records emitted - see the counter */
 
 	char path[1024];      /* assembled for the record being built */
 
@@ -302,7 +303,7 @@ static int fan_next(void *self, struct kof_evt *out, uint32_t wait_ms)
 				int self_ev = (m->pid > 0 &&
 					       (uint32_t)m->pid == f->self_pid);
 
-				f->seen++;
+				f->records++;
 				if (m->mask & FAN_Q_OVERFLOW) {
 					/*
 					 * The kernel's queue filled and it
@@ -334,8 +335,23 @@ static int fan_next(void *self, struct kof_evt *out, uint32_t wait_ms)
 				f->have -= m->event_len;
 				continue;
 			}
-			if (to_evt(f, m, verb, out))
+			if (to_evt(f, m, verb, out)) {
+				/*
+				 * COUNTED WHERE IT IS EMITTED, not where the
+				 * fanotify record was read.
+				 *
+				 * They are different numbers because one
+				 * record carries several verbs - measured,
+				 * 4000 records came out as 8000 events - and
+				 * `produced` has one job: to be the number a
+				 * consumer can check its own `seq` against. A
+				 * count of records would have made every
+				 * consumer conclude it had lost half the
+				 * stream.
+				 */
+				f->produced++;
 				return 1;
+			}
 		}
 
 		f->have = 0;
@@ -404,7 +420,7 @@ static void fan_health(void *self, struct kof_evt_health *out)
 	memset(out, 0, sizeof *out);
 	if (!f)
 		return;
-	out->produced = f->seen;
+	out->produced = f->produced;
 	out->dropped  = f->dropped;
 }
 
@@ -417,6 +433,9 @@ static void fan_print_extra(void *self, FILE *out)
 		return;
 	fprintf(out, "  fanotify: %s mode, %u path(s) watched\n",
 		kofa_fan_mode_name(f->mode), f->n_watch);
+	fprintf(out, "    %llu kernel record(s) -> %llu event(s)\n",
+		(unsigned long long)f->records,
+		(unsigned long long)f->produced);
 	for (i = 0; i < f->n_watch; i++)
 		fprintf(out, "    %s\n", f->watch[i]);
 	if (f->mode == KOFA_FAN_DEGRADED)
