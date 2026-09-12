@@ -530,6 +530,22 @@ struct object {
 	 */
 	uint8_t           emu_why;
 	/*
+	 * SHA-256 OF THIS OBJECT'S BYTES, hex, or "" before it is computed.
+	 *
+	 * OF THE BYTES AND NOT OF THE FILE, which is the whole reason it is
+	 * here rather than taken from the path. A child - an unpacked payload,
+	 * a stream out of a PDF, a PE an event carried - has no path at all,
+	 * and its hash is the one somebody actually wants to look up: it is
+	 * the IOC for the thing that was hidden, not for the wrapper anybody
+	 * can rebuild. For the top-level object the two are the same.
+	 *
+	 * COMPUTED ONCE, BESIDE THE PARSE, for the reason emu_why is: the
+	 * property pane is repainted on every keystroke, and hashing a
+	 * hundred-megabyte mapping per frame is not a slow feature, it is an
+	 * unusable one.
+	 */
+	char              sha256[65];
+	/*
 	 * The version that module read out of the object, or -1 for none.
 	 *
 	 * Signed and not a flag beside a uint, because 0 is a version a container

@@ -234,6 +234,121 @@ static void a_read_exe(uint32_t pid, char *buf, size_t cap, uint32_t *flags)
 		*flags |= KOFA_PF_EXE_MEMFD;
 }
 
+/*
+ * /proc/<pid>/cmdline into `buf`, NULs turned into spaces.
+ *
+ * The file is a run of NUL-terminated arguments with a trailing NUL, and it is
+ * EMPTY for a kernel thread and for a zombie - which is a fact about the
+ * process, not a failure, so "" is the honest answer and not an error.
+ */
+static void a_read_cmdline(uint32_t pid, char *buf, size_t cap)
+{
+	char path[64];
+	int fd;
+	ssize_t got;
+	size_t i;
+
+	buf[0] = '\0';
+	snprintf(path, sizeof path, "/proc/%u/cmdline", (unsigned)pid);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return;
+
+	got = read(fd, buf, cap - 1);
+	close(fd);
+	if (got <= 0) {
+		buf[0] = '\0';
+		return;
+	}
+
+	/*
+	 * The trailing NUL is a terminator and not a separator, so turning it
+	 * into a space too leaves every command line ending in one - which
+	 * then shows up in every comparison a caller writes.
+	 */
+	while (got > 0 && buf[got - 1] == '\0')
+		got--;
+
+	for (i = 0; i < (size_t)got; i++)
+		if (buf[i] == '\0')
+			buf[i] = ' ';
+	buf[got] = '\0';
+}
+
+/*
+ * Count the process's file descriptors, and say whether its stdio is a socket.
+ *
+ * stdin, stdout and stderr are checked by NAME rather than by walking the
+ * directory, because those three are the ones that carry the meaning - see
+ * KOFA_PF_STDIO_SOCKET - and because a process with four thousand descriptors
+ * would otherwise decide how long this takes before the interesting question
+ * is even asked.
+ */
+static void a_read_fds(uint32_t pid, uint32_t *n_fd, uint32_t *n_socket,
+		       uint32_t *flags)
+{
+	char path[64], link[256];
+	DIR *d;
+	struct dirent *de;
+	int i;
+
+	*n_fd = 0;
+	*n_socket = 0;
+
+	for (i = 0; i < 3; i++) {
+		ssize_t n;
+
+		snprintf(path, sizeof path, "/proc/%u/fd/%d", (unsigned)pid, i);
+		n = readlink(path, link, sizeof link - 1);
+		if (n <= 0)
+			continue;
+		link[n] = '\0';
+		if (!strncmp(link, "socket:", 7))
+			*flags |= KOFA_PF_STDIO_SOCKET;
+	}
+
+	snprintf(path, sizeof path, "/proc/%u/fd", (unsigned)pid);
+	d = opendir(path);
+	if (!d)
+		return;
+
+	/*
+	 * readlinkat against the open directory rather than a path built per
+	 * entry: a d_name is up to 255 bytes and the path buffer is 64, so the
+	 * built form was a truncation the compiler was right to complain
+	 * about. It is also one fewer path walk per descriptor, on the loop
+	 * that runs thousands of times for a busy daemon.
+	 */
+	while ((de = readdir(d)) != NULL) {
+		ssize_t n;
+
+		if (!isdigit((unsigned char)de->d_name[0]))
+			continue;
+		(*n_fd)++;
+
+		n = readlinkat(dirfd(d), de->d_name, link, sizeof link - 1);
+		if (n <= 0)
+			continue;
+		link[n] = '\0';
+		if (!strncmp(link, "socket:", 7))
+			(*n_socket)++;
+	}
+	closedir(d);
+}
+
+/*
+ * comm is "[something]" while PF_KTHREAD is not set - see
+ * KOFA_PF_FAKE_KTHREAD. The caller has already decided whether the process is
+ * a real kernel thread, from the kernel's own bit, so this only has to look at
+ * the string.
+ */
+static int a_looks_bracketed(const char *comm)
+{
+	size_t n = strlen(comm);
+
+	return n >= 3u && comm[0] == '[' && comm[n - 1] == ']';
+}
+
 /* -------------------------------------------------------------- the plist */
 
 struct kofa_plist {
@@ -241,6 +356,7 @@ struct kofa_plist {
 	struct kofa_plist_option o;
 	char comm[64];
 	char exe[APATH_MAX];
+	char cmdline[4096];
 };
 
 struct kofa_plist *kofa_plist_open(const struct kofa_plist_option *opt,
@@ -260,6 +376,8 @@ struct kofa_plist *kofa_plist_open(const struct kofa_plist_option *opt,
 		l->o.want_kernel = 0;
 		l->o.want_refused = 1;
 	}
+	/* no_cmdline and no_fds are negative by design - a zeroed option
+	 * struct asks for everything. See kofa_plist_option. */
 
 	l->d = opendir("/proc");
 	if (!l->d) {
@@ -307,8 +425,10 @@ int kofa_plist_next(struct kofa_plist *l, struct kofa_proc *out)
 			out->flags |= KOFA_PF_REFUSED;
 			l->comm[0] = '\0';
 			l->exe[0] = '\0';
+			l->cmdline[0] = '\0';
 			out->comm = l->comm;
 			out->exe = l->exe;
+			out->cmdline = l->cmdline;
 			return 1;
 		}
 		if (rc != KOFA_OK)
@@ -352,8 +472,37 @@ int kofa_plist_next(struct kofa_plist *l, struct kofa_proc *out)
 			out->flags |= KOFA_PF_REFUSED;
 		}
 
+		/*
+		 * THE NAME AGAINST THE KERNEL'S OWN BIT. Only meaningful for a
+		 * process the kernel does NOT call a kernel thread, which is
+		 * the whole point - see KOFA_PF_FAKE_KTHREAD.
+		 */
+		if (!(out->flags & KOFA_PF_KERNEL) &&
+		    a_looks_bracketed(l->comm))
+			out->flags |= KOFA_PF_FAKE_KTHREAD;
+
+		/*
+		 * A deleted executable whose path has not come back. One
+		 * access() and only for the processes that carry the deleted
+		 * mark at all, which is a handful - see KOFA_PF_EXE_UNLINKED.
+		 */
+		if ((out->flags & KOFA_PF_EXE_GONE) &&
+		    !(out->flags & KOFA_PF_EXE_MEMFD) && l->exe[0] &&
+		    access(l->exe, F_OK) != 0)
+			out->flags |= KOFA_PF_EXE_UNLINKED;
+
+		l->cmdline[0] = '\0';
+		if (!l->o.no_cmdline && !(out->flags & KOFA_PF_KERNEL))
+			a_read_cmdline(out->pid, l->cmdline,
+				       sizeof l->cmdline);
+
+		if (!l->o.no_fds && !(out->flags & KOFA_PF_KERNEL))
+			a_read_fds(out->pid, &out->n_fd, &out->n_socket,
+				   &out->flags);
+
 		out->comm = l->comm;
 		out->exe = l->exe;
+		out->cmdline = l->cmdline;
 		return 1;
 	}
 
@@ -984,7 +1133,10 @@ size_t kofa_pmem_read(struct kofa_pmem *m, uint64_t addr, void *buf, size_t n)
 	remote.iov_base = (void *)(uintptr_t)addr;
 	remote.iov_len = n;
 
-	got = process_vm_readv(m->proc.pid, &local, 1, &remote, 1, 0);
+	/* pid_t is signed and a pid never is. The cast is explicit so the
+	 * tree's -Wsign-conversion does not have to guess whether it was
+	 * meant. */
+	got = process_vm_readv((pid_t)m->proc.pid, &local, 1, &remote, 1, 0);
 	if (got <= 0)
 		return 0;
 
