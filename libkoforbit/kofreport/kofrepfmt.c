@@ -158,7 +158,7 @@ static void write_head(struct kof_report *r, FILE *out,
 		if (v->children)
 			fprintf(out, ", %lu object(s) came out of it",
 				(unsigned long)v->children);
-		fprintf(out, ", entropy %u.%u bits, %lu module(s) ran",
+		fprintf(out, ", entropy %u.%u/8 bits, %lu module(s) ran",
 			(unsigned)(v->entropy8 / 8u),
 			(unsigned)((v->entropy8 % 8u) * 125u / 100u),
 			(unsigned long)v->examined);

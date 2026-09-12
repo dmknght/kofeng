@@ -13839,8 +13839,15 @@ static void prop_build(struct view *v)
 		 * 7.9 is a file somebody appended, the same region at 0.0 is
 		 * alignment, and the size alone does not tell them apart.
 		 */
+		/*
+		 * "H 4.8" MEANT NOTHING TO A READER, and the column is the
+		 * whole point of the row. H is the physicist's letter for
+		 * entropy and nobody outside that habit reads it; the number
+		 * has a unit - bits per byte, 0 to 8 - and printing it bare
+		 * left people guessing at the scale as well as the name.
+		 */
 		prop_add("  " A_ID "%-11s" A_OFF A_SIZE "%-10llu" A_OFF
-			 A_LOC "%5.1f%%" A_OFF A_DIM "  H %.1f" A_OFF,
+			 A_LOC "%5.1f%%" A_OFF A_DIM "  %.1f/8 bits" A_OFF,
 			 n->label, (unsigned long long)n->bytes,
 			 total ? 100.0 * (double)n->bytes / (double)total : 0.0,
 			 (double)kof_inspect_region_entropy(&ob->ctx, ob->buf,
@@ -15607,13 +15614,42 @@ static int g_mod_ctrl;          /* and control, which slides text sideways */
  * viewer that only speaks SGR looks to its user like a viewer whose mouse does
  * nothing at all. Which is exactly how it looked.
  */
+/*
+ * ONE BYTE, AND AN INTERRUPTED READ IS NOT THE END OF INPUT.
+ *
+ * THE BUG THIS EXISTS TO KILL. Every read in this file used to be written as
+ * `read(...) != 1`, and the caller turned that into K_NONE - which the main
+ * loop treats as end of input and QUITS on. A terminal resize interrupts a
+ * blocked read with EINTR, so resizing the window closed the viewer: no
+ * message, no crash, exit status 0. Measured: one vertical resize, gone.
+ *
+ * The first read in read_key still wants to SURFACE a resize rather than hide
+ * it, so it asks separately. Everywhere else - the tail of an escape sequence,
+ * the digits of a mouse report - the bytes are already in the terminal's
+ * buffer and the only right answer is to go back and get them.
+ *
+ * Returns 1 with *c filled, or 0 for a real end: EOF, or an error that is not
+ * a signal.
+ */
+static int read_byte(unsigned char *c)
+{
+	for (;;) {
+		ssize_t n = read(STDIN_FILENO, c, 1);
+
+		if (n == 1)
+			return 1;
+		if (n < 0 && errno == EINTR)
+			continue;
+		return 0;
+	}
+}
+
 static int read_mouse_x10(void)
 {
 	unsigned char t[3];
 	int b;
 
-	if (read(STDIN_FILENO, t, 1) != 1 || read(STDIN_FILENO, t + 1, 1) != 1 ||
-	    read(STDIN_FILENO, t + 2, 1) != 1)
+	if (!read_byte(t) || !read_byte(t + 1) || !read_byte(t + 2))
 		return K_NONE;
 	b = t[0] - 32;
 	g_mx = t[1] - 32;
@@ -15640,7 +15676,7 @@ static int read_mouse(void)
 	int b, x, y;
 
 	while (n + 1 < sizeof t) {
-		if (read(STDIN_FILENO, t + n, 1) != 1)
+		if (!read_byte((unsigned char *)t + n))
 			return K_NONE;
 		if (t[n] == 'M' || t[n] == 'm')
 			break;
@@ -15696,11 +15732,29 @@ static int read_key(void)
 	 * terminal on most desktops, which is why it showed up after leaving it
 	 * alone rather than while working.
 	 */
-	n = read(STDIN_FILENO, &c, 1);
-	if (n != 1) {
-		if (n < 0 && errno == EINTR && kof_tty_resize_pending())
+	/*
+	 * THE ONLY READ THAT MAY REPORT A RESIZE, and the only one that blocks
+	 * for a person rather than for the rest of a sequence.
+	 *
+	 * ANY interrupted read here means a resize, whether or not the flag
+	 * still says so. It used to be `EINTR && kof_tty_resize_pending()`,
+	 * and the flag is cleared by the DRAW - so a second resize arriving in
+	 * the window between the draw clearing it and this read blocking left
+	 * EINTR with the flag already at zero. That fell through to K_NONE and
+	 * the loop quit. Measured, with the flag logged: `read n=-1 errno=4
+	 * winch_pending=0`, on an ordinary resize.
+	 *
+	 * Reporting a resize that has already been drawn costs one repaint of
+	 * an unchanged screen. Getting it wrong the other way closes the
+	 * program somebody was working in.
+	 */
+	for (;;) {
+		n = read(STDIN_FILENO, &c, 1);
+		if (n == 1)
+			break;
+		if (n < 0 && errno == EINTR)
 			return K_RESIZE;
-		return K_NONE;
+		return K_NONE;   /* 0 is EOF; anything else is a real error */
 	}
 	if (c != 27)
 		return c;
