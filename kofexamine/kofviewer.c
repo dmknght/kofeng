@@ -18222,6 +18222,11 @@ static int click_panel_rows(struct view *v)
  * click and 0 to let the chain carry on, which is exactly what the `return`
  * and the fall-through meant where this used to sit.
  */
+/* Defined below; the properties modal hands the mouse to the selection layer
+ * rather than swallowing it - see the K_DRAG case there. */
+static void on_drag(struct view *v);
+static void on_release(struct view *v);
+
 static int click_marker_line(struct view *v, struct object *ob)
 {
 	if (g_my == mark_row()) {
@@ -18475,10 +18480,24 @@ static void click(struct view *v, int rclick)
 				}
 			}
 
-			dlg_word(v->dlg_line[r], &a, &b);
+			/*
+			 * ANCHORED ON THE CHARACTER PRESSED, not on the word
+			 * around it.
+			 *
+			 * This used to expand to the whole word here, so every
+			 * press picked a column's value and a drag then
+			 * extended from a boundary the reader had not chosen.
+			 * Selecting two columns of one row, or part of one
+			 * value, was not expressible.
+			 *
+			 * The word is still what a plain CLICK gives, because
+			 * that is the useful gesture on a table of values -
+			 * but it is decided on RELEASE, when it is known
+			 * whether the pointer moved. See on_release.
+			 */
+			(void)a; (void)b;
 			v->dlg_ar = v->dlg_br = r;
-			v->dlg_ac = a;
-			v->dlg_bc = b;
+			v->dlg_ac = v->dlg_bc = c;
 			v->dlg_have = 1;
 			v->dlg_drag = 1;
 			return;
@@ -19064,13 +19083,27 @@ static int handle_prop_key(struct view *v, int k)
 			v->prop_off = 0xffffffu;
 			return 1;
 		case K_DRAG:
-		case K_RELEASE:
 			/*
-			 * The drag and the release belong to the selection
-			 * layer, which the click handler already fed - see the
-			 * dlg_drag branch there. Swallowed rather than passed
-			 * on, because a modal owns the mouse while it is up.
+			 * THE DRAG HAS TO REACH THE SELECTION LAYER, and this
+			 * is where it did not.
+			 *
+			 * It was swallowed here on the reasoning that the
+			 * click handler had "already fed" the selection. The
+			 * click only sets the ANCHOR; extending it is
+			 * on_drag's dlg_drag branch, and that branch was never
+			 * reached while this page was up. So dragging across
+			 * the dashboard picked out exactly what the press had
+			 * picked and no more - which looked like a viewer with
+			 * no drag selection at all.
+			 *
+			 * A modal still owns the mouse: this is handed to the
+			 * selection layer and then swallowed, rather than
+			 * falling through to the panes underneath.
 			 */
+			on_drag(v);
+			return 1;
+		case K_RELEASE:
+			on_release(v);
 			return 1;
 		case 0x03:                      /* Ctrl+C */
 			dlg_copy(v);
@@ -19532,6 +19565,26 @@ static void on_drag(struct view *v)
  */
 static void on_release(struct view *v)
 {
+		/*
+		 * A PRESS THAT NEVER MOVED IS A CLICK, and a click on a table
+		 * of values means the value.
+		 *
+		 * The anchor was laid on the exact character so that a DRAG
+		 * can express any span; that leaves a plain click selecting
+		 * one character, which is not what anyone means by clicking a
+		 * field. The word is restored here, where "did it move" is
+		 * finally known - a single-character span after a press is
+		 * exactly the case where nothing moved.
+		 */
+		if (v->dlg_drag && v->dlg_have &&
+		    v->dlg_ar == v->dlg_br && v->dlg_ac == v->dlg_bc &&
+		    v->dlg_ar >= 0 && v->dlg_ar < v->dlg_rows) {
+			int a = v->dlg_ac, b = v->dlg_bc;
+
+			dlg_word(v->dlg_line[v->dlg_ar], &a, &b);
+			v->dlg_ac = a;
+			v->dlg_bc = b;
+		}
 		/* The drag is over; what was picked stays picked, so
 		 * Ctrl+C has something to copy after the button comes up. */
 		v->dlg_drag = 0;
