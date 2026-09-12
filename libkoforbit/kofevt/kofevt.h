@@ -330,6 +330,31 @@ enum kof_evt_verb {
 	 */
 	KOF_EVT_DNS_QUERY = 21,
 
+	/*
+	 * A PROCESS AS IT IS RIGHT NOW - a snapshot, not something that
+	 * happened.
+	 *
+	 * Every other verb here names an EVENT: a thing the machine did, at an
+	 * instant, which a collector witnessed. This one names a STATE, and it
+	 * is a verb anyway for one mechanical reason - the target axis a rule
+	 * declares is the verb's own number (see KOF_TARGET_FIRST_EVENT in
+	 * kofsig.h), so a shape worth writing rules against has to have one.
+	 *
+	 * It is the snapshot half of libkofantarc: a machine compromised on
+	 * Tuesday with a sensor installed on Thursday produces a perfectly
+	 * clean event stream, because everything that mattered happened before
+	 * anything was watching. What is still RESIDENT has raised no event
+	 * since and is only visible by looking.
+	 *
+	 * TWENTY-TWO AND NOT BESIDE KOF_EVT_PROC_START, which is where it
+	 * belongs conceptually. PROC_START is 1, and 1 is KOF_FMT_ELF on the
+	 * target axis - the low half belongs to file formats - so it can never
+	 * be a target until the boundary moves. The same argument DNS_QUERY
+	 * makes two entries up: a verb's number is not worth renumbering a
+	 * recorded trace for.
+	 */
+	KOF_EVT_PROC_INFO = 22,
+
 	KOF_EVT_TYPE_COUNT
 };
 

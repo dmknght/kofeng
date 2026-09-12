@@ -74,6 +74,151 @@
 #include "kofeng.h"
 #include "kofreport.h"
 
+/* ---------------------------------------------- answering the report's question
+ *
+ * WHY THIS LIVES HERE AND NOT IN libkoforbit.
+ *
+ * It used to sit in kofrepart.c, which made a library in orbit the place that
+ * decided a host's scan policy: which options, which ceiling, whether the
+ * interpreter runs. koffridge.h states the rule for the whole of orbit - it
+ * may know the engine's TYPES, never drive it - and holding a kof_scanner and
+ * calling kof_scan_path is driving it.
+ *
+ * So orbit now declares struct kof_rep_engine and this supplies one. The four
+ * lines that build the options are the same four lines; what changed is that
+ * they are the host's, which is the side that owns the scanner and knows what
+ * a scan of a collected artefact is allowed to cost here.
+ */
+
+struct scan_sink {
+	struct kof_fp_verdict *v;
+	uint32_t               depth0_seen;
+	uint32_t               f_version;
+};
+
+static void on_note(uint32_t fact, const char *what, uint64_t value, void *user)
+{
+	struct scan_sink *s = (struct scan_sink *)user;
+
+	if (!s || !s->v || !what)
+		return;
+
+	/*
+	 * THE FIRST NOTE FROM A MODULE WHOSE NAME IS ITS PACKER'S.
+	 *
+	 * `what` is authored text - "UPX.ELF.version", "Rar.entries" - and the
+	 * part before the first dot is the module. Taken whole up to the last
+	 * dot, so "UPX.ELF" survives and the field name does not: which packer
+	 * AND which of its variants is the useful half, and a report saying
+	 * "UPX" where the module said "UPX.ELF" would be throwing away the one
+	 * thing that distinguishes two unpackers.
+	 *
+	 * First wins. A scan of a nested object emits notes from every layer,
+	 * and the outermost is the one the artefact IS.
+	 */
+	if (!s->v->packer[0]) {
+		const char *dot = strrchr(what, '.');
+		size_t      n   = dot ? (size_t)(dot - what) : strlen(what);
+
+		if (n >= sizeof s->v->packer)
+			n = sizeof s->v->packer - 1u;
+		memcpy(s->v->packer, what, n);
+		s->v->packer[n] = '\0';
+	}
+
+	if (!s->f_version)
+		s->f_version = kof_fact_id("version");
+	if (fact == s->f_version && !s->v->packer_version)
+		s->v->packer_version = value;
+}
+
+static int on_object(const char *name, const void *bytes, uint64_t len,
+		     const struct kof_result *res, void *user)
+{
+	struct scan_sink *s = (struct scan_sink *)user;
+
+	(void)name;
+	if (!s || !s->v || !res)
+		return 0;
+
+	/*
+	 * THE FIRST OBJECT IS THE ONE THE REPORT IS ABOUT; the rest are what
+	 * came out of it.
+	 *
+	 * A file scan reports the file and then every child the engine
+	 * produced, in that order, so the first callback is the artefact itself
+	 * and each later one is evidence that something was inside it. Counting
+	 * children rather than describing them is deliberate: a report about a
+	 * dropped file needs to say "packed, one payload came out"; describing
+	 * the payload is a scan of the payload, which is a thing somebody asks
+	 * for separately.
+	 */
+	if (!s->depth0_seen++) {
+		s->v->asked    = 1;
+		s->v->examined = res->examined;
+		s->v->broken   = res->broken;
+		s->v->depth    = res->heur_depth;
+		s->v->packed   = (res->heur_depth || res->from_packer) ? 1u : 0u;
+		if (bytes && len)
+			s->v->entropy8 = kof_entropy_eighths(bytes, len);
+		if (res->n)
+			snprintf(s->v->finding, sizeof s->v->finding, "%s",
+				 res->v[0].name);
+	} else {
+		s->v->children++;
+		/* A CHILD IS WHAT PROVES THE PARENT WAS PACKED, and the parent's
+		 * own record may not say so: from_packer is set on the object
+		 * an unpacker PRODUCED, not on the one it read. */
+		if (res->from_packer)
+			s->v->packed = 1;
+		/*
+		 * A FINDING ON A CHILD IS THE FINDING, when the parent had
+		 * none. That is the normal shape of a packed sample: the stub
+		 * matches nothing and the payload matches a family, and a
+		 * report that showed only the parent's verdict would say
+		 * "nothing known" about a recognised trojan.
+		 */
+		if (!s->v->finding[0] && res->n)
+			snprintf(s->v->finding, sizeof s->v->finding, "%s",
+				 res->v[0].name);
+	}
+	return 0;
+}
+
+/*
+ * DESCEND, AND DO NOT INTERPRET.
+ *
+ * A report wants to know what came out of a collected file, so the static
+ * unpackers and the container walk are on. Emulation is not: kofeng.h measures
+ * a UPX-with-LZMA sample at forty million instructions and the worst in its
+ * corpus at two hundred and fifty, and a report over a dozen collected files
+ * would inherit all of it. A caller who wants that scans the collected file,
+ * which is what the files are collected FOR.
+ *
+ * The note callback is installed and then PUT BACK, because a host that had
+ * one of its own must not lose it to this.
+ */
+static int rep_ask(void *user, const char *path, struct kof_fp_verdict *v)
+{
+	kof_scanner            *sc = (kof_scanner *)user;
+	struct kof_scan_option  opt;
+	struct scan_sink        sink;
+
+	if (!sc || !path || !*path || !v)
+		return -1;
+
+	memset(&sink, 0, sizeof sink);
+	sink.v = v;
+
+	memset(&opt, 0, sizeof opt);
+	opt.emu_use = KOF_EMU_NEVER;
+
+	kof_scanner_on_debug(sc, on_note, &sink);
+	(void)kof_scan_path(sc, path, &opt, on_object, &sink);
+	kof_scanner_on_debug(sc, NULL, NULL);
+	return 0;
+}
+
 static volatile LONG g_stop;
 
 static BOOL WINAPI on_ctrl(DWORD type)
@@ -1104,10 +1249,17 @@ tick:
 		kof_report_ended(rep, how, secs);
 		kof_report_health(rep, &nh, health.filtered_scope);
 
+		struct kof_rep_engine rep_eng;
+
 		memset(&stage, 0, sizeof stage);
 		stage.collect = want_collect ? 1u : 0u;
-		stage.engine  = eng;
-		stage.scanner = sc;
+
+		/* The report asks through an interface; this supplies one over
+		 * the scanner this program already owns. NULL when there is no
+		 * engine, which is a legal report - see kof_report_stage. */
+		rep_eng.user = sc;
+		rep_eng.ask  = rep_ask;
+		stage.engine = (eng && sc) ? &rep_eng : NULL;
 
 		fprintf(stderr, "\nkofmontrace: collecting artefacts...\n");
 		rc = kof_report_finish(rep, &stage);

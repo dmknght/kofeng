@@ -466,14 +466,11 @@ static void test_reverse_shell_shape(void)
 
 		l = kofa_plist_open(NULL, &err);
 		if (l && find_proc(l, dup_kid, &p)) {
-			ok((p.flags & KOFA_PF_STDIO_SAME_SOCKET) != 0,
-			   "one socket on both ends is SAME_SOCKET");
-			ok((p.flags & KOFA_PF_SHELL) != 0,
-			   "and the exe is recognised as a shell");
-			ok(!strcmp(p.fd_stdin, p.fd_stdout),
-			   "the raw links agree, so the flag can be checked");
-			ok((p.flags & KOFA_PF_STDIO_ONLY) != 0,
-			   "and it holds nothing but that socket");
+			ok(!strncmp(p.fd_stdin, "socket:", 7) &&
+			   !strcmp(p.fd_stdin, p.fd_stdout),
+			   "fd 0 and fd 1 name one socket");
+			ok(p.fds_read && p.n_fd && p.n_like_stdin == p.n_fd,
+			   "every descriptor names that same object");
 		} else {
 			ok(0, "found the dup'd-socket child");
 		}
@@ -481,10 +478,11 @@ static void test_reverse_shell_shape(void)
 
 		l = kofa_plist_open(NULL, &err);
 		if (l && find_proc(l, pair_kid, &p)) {
-			ok((p.flags & KOFA_PF_STDIO_SOCKET) != 0,
+			ok(!strncmp(p.fd_stdin, "socket:", 7),
 			   "a socketpair child still has socket stdio");
-			ok(!(p.flags & KOFA_PF_STDIO_SAME_SOCKET),
-			   "but is NOT SAME_SOCKET - the eight false positives");
+			ok(strcmp(p.fd_stdin, p.fd_stdout) != 0,
+			   "but the two ends differ - the eight false "
+			   "positives");
 		} else {
 			ok(0, "found the socketpair child");
 		}
@@ -538,10 +536,11 @@ static void test_stdio_only_negative(void)
 
 		l = kofa_plist_open(NULL, &err);
 		if (l && find_proc(l, kid, &p)) {
-			ok((p.flags & KOFA_PF_STDIO_SAME_SOCKET) != 0,
-			   "SAME_SOCKET still fires");
-			ok(!(p.flags & KOFA_PF_STDIO_ONLY),
-			   "STDIO_ONLY does not - it holds a file too");
+			ok(!strcmp(p.fd_stdin, p.fd_stdout),
+			   "fd 0 and fd 1 still name one object");
+			ok(p.fds_read && p.n_like_stdin < p.n_fd,
+			   "but not every descriptor does - it holds a file "
+			   "too");
 		} else {
 			ok(0, "found the child");
 		}
@@ -583,12 +582,13 @@ static void test_fake_kthread(void)
 
 		l = kofa_plist_open(NULL, &err);
 		if (l && find_proc(l, kid, &p)) {
-			ok((p.flags & KOFA_PF_FAKE_KTHREAD) != 0,
-			   "a bracketed name without PF_KTHREAD is caught");
-			ok(!(p.flags & KOFA_PF_KERNEL),
+			ok(p.comm[0] == '[' &&
+			   p.comm[strlen(p.comm) - 1] == ']',
+			   "the name it chose looks like a kernel thread's");
+			ok(!p.is_kthread,
 			   "and the kernel's own bit says it is not one");
-			ok(p.exe[0] == '/',
-			   "it has a real executable, which the flag requires");
+			ok(p.exe_on_disk,
+			   "while an executable of its own resolves on disk");
 		} else {
 			ok(0, "found the masquerading child");
 		}

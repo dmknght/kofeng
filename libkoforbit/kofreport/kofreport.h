@@ -598,6 +598,38 @@ void kof_report_health(struct kof_report *, const struct kof_evt_health *,
  * a corpus, and because a tool that copies without a ceiling is one bad sample
  * away from filling a disk.
  */
+/*
+ * WHAT A REPORT NEEDS FROM A SCANNER, AND NOTHING ABOUT WHAT A SCANNER IS.
+ *
+ * THE RULE THIS RESTORES. koffridge.h states it for the whole of libkoforbit:
+ * orbit may know the engine's TYPES, the engine must never know orbit's. This
+ * file used to go a step past that - it held a kof_scanner, built a
+ * kof_scan_option, installed a debug callback and called kof_scan_path. That
+ * is not knowing a type, it is DRIVING the engine, and driving it is a host's
+ * job: the host owns the scanner, its options, its database and its stats, and
+ * it is the only side that knows what a scan of a collected artefact should
+ * cost.
+ *
+ * WHAT CHANGES FOR A CALLER. It writes the four lines it was already writing,
+ * somewhere else: build the options, install the note sink, call the scanner,
+ * put the sink back. What it gains is that the POLICY is now its own - a host
+ * that wants emulation on, a deeper walk, or a different ceiling no longer has
+ * to change a file in libkoforbit to get it.
+ *
+ * WHAT THE REPORT GAINS is that it can be driven by something that is not the
+ * engine at all: a cache of verdicts already known, a remote service, a stub
+ * in a test that returns a fixed answer. The last one is the one that pays
+ * immediately - the artefact phase was untestable without a database on disk.
+ *
+ * `ask` fills `*out` and returns 0, or non-zero to say it could not. Leaving
+ * `out->asked` at zero is how "no answer" is spelt, and it is what every
+ * column downstream reads to print "unanswered" rather than a blank.
+ */
+struct kof_rep_engine {
+	void *user;
+	int (*ask)(void *user, const char *path, struct kof_fp_verdict *out);
+};
+
 struct kof_report_stage {
 	/* Copy files the tree created into <dir>/files/<digest>. Off means
 	 * they are still hashed and reported, just not kept. */
@@ -614,16 +646,16 @@ struct kof_report_stage {
 	uint64_t max_evidence_bytes;
 
 	/*
-	 * The engine, or NULL. NULL is a legal, useful report: no digest gets
-	 * a verdict, no dropped file gets a format, no string gets checked
-	 * against the sample's bytes, and every one of those says
+	 * WHO CAN ANSWER "WHAT IS THIS FILE", or NULL.
+	 *
+	 * NULL is a legal, useful report: no digest gets a verdict, no
+	 * collected file gets a format, and every one of those says
 	 * "unanswered" rather than showing an empty column.
 	 *
-	 * The scanner is the caller's because it carries the caller's options
-	 * and its stats; this borrows it for the duration of the call.
+	 * Borrowed for the duration of the call. See struct kof_rep_engine for
+	 * why this is an interface and not a scanner.
 	 */
-	kof_engine  *engine;
-	kof_scanner *scanner;
+	const struct kof_rep_engine *engine;
 };
 
 /*

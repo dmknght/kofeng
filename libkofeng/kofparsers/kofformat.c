@@ -14,6 +14,7 @@
 #include "containers/rtf_parse.h"
 #include "containers/pdf_parse.h"
 #include "events/amsi_parse.h"
+#include "events/proc_parse.h"
 
 /*
  * Each parser takes its own view type; the table takes one signature. The casts
@@ -72,6 +73,11 @@ static int rtf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 static int pdf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
 	return kof_pdf_parse(b, (struct kof_pdf_info *)v, c);
+}
+
+static int proc_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_proc_parse(b, v, c);
 }
 
 static int amsi_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
@@ -201,7 +207,17 @@ static const struct kof_parser formats[] = {
 	{ KOF_EVT_AMSI, (uint32_t)sizeof(struct kof_amsi_view),
 	  kof_amsi_sniff, amsi_parse_thunk,
 	  kof_amsi_regions, 2u,
-	  kof_amsi_region_name, kof_amsi_anomaly_name, kof_amsi_anomalies }
+	  kof_amsi_region_name, kof_amsi_anomaly_name, kof_amsi_anomalies },
+
+	/*
+	 * A PROCESS SNAPSHOT. Like the row above it this never sniffs and is
+	 * reached only through kof_parser_of(KOF_EVT_PROC), by a caller that
+	 * built the record. See events/proc_parse.h.
+	 */
+	{ KOF_EVT_PROC, (uint32_t)sizeof(struct kof_proc_info),
+	  kof_proc_sniff, proc_parse_thunk,
+	  kof_proc_regions, 3u,
+	  kof_proc_region_name, kof_proc_anomaly_name, kof_proc_anomalies }
 };
 
 

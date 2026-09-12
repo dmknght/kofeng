@@ -149,34 +149,27 @@ int main(int argc, char **argv)
 				continue;
 			}
 			/*
-			 * Only the strong forms. STDIO_SOCKET alone is eight
-			 * legitimate processes on this desktop and printing it
-			 * teaches a reader to skip the list.
+			 * FACTS, NOT A VERDICT. This tool prints the rows a
+			 * rule would be written over; deciding which
+			 * combination means something is bases/heur's job and
+			 * not a collector's. The filter here is only about
+			 * what is worth a reader's screen.
 			 */
-			if (p.flags & (KOFA_PF_EXE_MEMFD |
-				       KOFA_PF_EXE_UNLINKED |
-				       KOFA_PF_FAKE_KTHREAD |
-				       KOFA_PF_STDIO_SAME_SOCKET)) {
-				printf("  ! pid %-7u %-14s%s%s%s%s%s%s\n",
-				       p.pid, p.comm,
-				       (p.flags & KOFA_PF_EXE_MEMFD)
-					       ? " MEMFD" : "",
-				       (p.flags & KOFA_PF_EXE_UNLINKED)
-					       ? " SELF-DELETED" : "",
-				       (p.flags & KOFA_PF_FAKE_KTHREAD)
-					       ? " FAKE-KTHREAD" : "",
-				       (p.flags & KOFA_PF_STDIO_SAME_SOCKET)
-					       ? " SAME-SOCKET" : "",
-				       (p.flags & KOFA_PF_SHELL)
-					       ? " SHELL" : "",
-				       (p.flags & KOFA_PF_STDIO_ONLY)
-					       ? " STDIO-ONLY" : "");
+			if ((p.flags & KOFA_PF_EXE_MEMFD) ||
+			    ((p.flags & KOFA_PF_EXE_GONE) && !p.exe_on_disk) ||
+			    (p.fds_read && p.n_fd && p.n_like_stdin == p.n_fd)) {
+				printf("  . pid %-7u %-14s kthread=%u "
+				       "exe_on_disk=%u memfd=%u gone=%u\n",
+				       p.pid, p.comm, p.is_kthread,
+				       p.exe_on_disk,
+				       (p.flags & KOFA_PF_EXE_MEMFD) ? 1u : 0u,
+				       (p.flags & KOFA_PF_EXE_GONE) ? 1u : 0u);
 				printf("      exe %s\n", p.exe);
 				printf("      cmd %.110s\n", p.cmdline);
 				printf("      fd0 %s\n      fd1 %s\n",
 				       p.fd_stdin, p.fd_stdout);
-				printf("      fds %u (%u socket)\n",
-				       p.n_fd, p.n_socket);
+				printf("      fds %u (%u socket, %u like fd0)\n",
+				       p.n_fd, p.n_socket, p.n_like_stdin);
 			}
 			do_proc(p.pid, p.start_time, verbose, want, &t);
 		}

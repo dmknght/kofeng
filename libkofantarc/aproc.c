@@ -276,13 +276,17 @@ static void a_read_cmdline(uint32_t pid, char *buf, size_t cap)
 }
 
 /*
- * Count the process's file descriptors, and say whether its stdio is a socket.
+ * Count the process's file descriptors and record what its stdio points at.
  *
- * stdin, stdout and stderr are checked by NAME rather than by walking the
- * directory, because those three are the ones that carry the meaning - see
- * KOFA_PF_STDIO_SOCKET - and because a process with four thousand descriptors
- * would otherwise decide how long this takes before the interesting question
- * is even asked.
+ * DECIDES NOTHING. It reads the three links that carry meaning, counts the
+ * table, and counts how many entries name the same object as fd 0 - that last
+ * one only because nothing outside this walk can see fd 7 or fd 255, so a rule
+ * could not compute it for itself.
+ *
+ * stdin, stdout and stderr are read by NAME rather than picked out of the
+ * directory walk, because a process with four thousand descriptors would
+ * otherwise decide how long this takes before the three that matter are even
+ * looked at.
  */
 static void a_read_fds(uint32_t pid, struct kofa_proc *out,
 		       char std[3][KOFA_FDLINK_MAX])
@@ -290,10 +294,12 @@ static void a_read_fds(uint32_t pid, struct kofa_proc *out,
 	char path[64], link[KOFA_FDLINK_MAX];
 	DIR *d;
 	struct dirent *de;
-	int i, same = 1;
+	int i;
 
 	out->n_fd = 0;
 	out->n_socket = 0;
+	out->n_like_stdin = 0;
+	out->fds_read = 0;
 	std[0][0] = std[1][0] = std[2][0] = '\0';
 
 	for (i = 0; i < 3; i++) {
@@ -305,29 +311,7 @@ static void a_read_fds(uint32_t pid, struct kofa_proc *out,
 			continue;
 		link[n] = '\0';
 		memcpy(std[i], link, (size_t)n + 1u);
-		if (!strncmp(link, "socket:", 7))
-			out->flags |= KOFA_PF_STDIO_SOCKET;
 	}
-
-	/*
-	 * THE SAME SOCKET ON fd 0 AND fd 1. A string compare, because the
-	 * kernel writes the inode into the link and two descriptors on one
-	 * object therefore spell it identically.
-	 *
-	 * THESE TWO DESCRIPTORS AND NO OTHERS. Widening it to any pair in the
-	 * table costs four false positives on this desktop alone - claude
-	 * keeps fd 7 on its stdout and fd 8 on its stderr, code keeps fd 30 on
-	 * fd 10 - and fd 1 against fd 2 is what every `2>&1` looks like. See
-	 * KOFA_PF_STDIO_SAME_SOCKET.
-	 */
-	if (!strncmp(std[0], "socket:", 7) && !strcmp(std[0], std[1]))
-		out->flags |= KOFA_PF_STDIO_SAME_SOCKET;
-
-	/* All three on one terminal. Read the warning on the flag before
-	 * using it: this is also every login shell on the machine. */
-	if (!strncmp(std[0], "/dev/pts/", 9) &&
-	    !strcmp(std[0], std[1]) && !strcmp(std[1], std[2]))
-		out->flags |= KOFA_PF_STDIO_SAME_TTY;
 
 	snprintf(path, sizeof path, "/proc/%u/fd", (unsigned)pid);
 	d = opendir(path);
@@ -349,70 +333,18 @@ static void a_read_fds(uint32_t pid, struct kofa_proc *out,
 		out->n_fd++;
 
 		n = readlinkat(dirfd(d), de->d_name, link, sizeof link - 1);
-		if (n <= 0) {
-			/* A descriptor that could not be read is a descriptor
-			 * this walk cannot vouch for, so it breaks the "every
-			 * one is the same object" claim below. */
-			same = 0;
+		if (n <= 0)
 			continue;
-		}
 		link[n] = '\0';
 		if (!strncmp(link, "socket:", 7))
 			out->n_socket++;
-		if (strcmp(link, std[0]))
-			same = 0;
+		if (std[0][0] && !strcmp(link, std[0]))
+			out->n_like_stdin++;
 	}
 	closedir(d);
-
-	/*
-	 * Nothing open but the one socket - see KOFA_PF_STDIO_ONLY. Requires
-	 * fd 0 to BE a socket, so a process holding only three copies of
-	 * /dev/null does not qualify, and requires at least one descriptor so
-	 * an empty or unreadable table is not read as "holds only this".
-	 */
-	if (same && out->n_fd > 0 && !strncmp(std[0], "socket:", 7))
-		out->flags |= KOFA_PF_STDIO_ONLY;
+	out->fds_read = 1;
 }
 
-/*
- * IS THE FILE BEING RUN A SHELL, by name - see KOFA_PF_SHELL.
- *
- * The list is short on purpose and holds interpreters of COMMAND LINES, not
- * interpreters in general: python and perl spawn reverse shells too, and
- * including them would make the flag mean "a scripting language is installed".
- * busybox is here because its shell applet is how most embedded droppers get
- * one.
- */
-static int a_is_shell(const char *exe)
-{
-	static const char *const names[] = {
-		"sh", "bash", "dash", "zsh", "ksh", "ash", "busybox",
-		"fish", "csh", "tcsh", "mksh", NULL
-	};
-	const char *base = strrchr(exe, '/');
-	int i;
-
-	if (!exe[0])
-		return 0;
-	base = base ? base + 1 : exe;
-	for (i = 0; names[i]; i++)
-		if (!strcmp(base, names[i]))
-			return 1;
-	return 0;
-}
-
-/*
- * comm is "[something]" while PF_KTHREAD is not set - see
- * KOFA_PF_FAKE_KTHREAD. The caller has already decided whether the process is
- * a real kernel thread, from the kernel's own bit, so this only has to look at
- * the string.
- */
-static int a_looks_bracketed(const char *comm)
-{
-	size_t n = strlen(comm);
-
-	return n >= 3u && comm[0] == '[' && comm[n - 1] == ']';
-}
 
 /* -------------------------------------------------------------- the plist */
 
@@ -543,32 +475,22 @@ int kofa_plist_next(struct kofa_plist *l, struct kofa_proc *out)
 		}
 
 		/*
-		 * THE NAME AGAINST THE KERNEL'S OWN BIT. Only meaningful for a
-		 * process the kernel does NOT call a kernel thread, which is
-		 * the whole point - see KOFA_PF_FAKE_KTHREAD.
+		 * TWO FACTS ABOUT THE EXECUTABLE, REPORTED APART.
+		 *
+		 * The link said "(deleted)" - KOFA_PF_EXE_GONE, read where the
+		 * link was read. Whether the path resolves NOW is this. A
+		 * package upgrade produces the first without the second; a
+		 * program that unlinked itself produces both. Which of those
+		 * happened is a question for a rule, and joining them here
+		 * would answer it in the one place nobody can disagree with.
+		 *
+		 * Likewise the kernel's own PF_KTHREAD, copied out as a field:
+		 * comparing it against a name that looks like "[kworker/0:2]"
+		 * is a join, and the join belongs to a rule.
 		 */
-		/*
-		 * The name against the kernel's own bit, AND an executable
-		 * that actually resolves on disk - a real kernel thread has no
-		 * exe link, so requiring one keeps a failed readlink from
-		 * reading as a masquerade. See KOFA_PF_FAKE_KTHREAD.
-		 */
-		if (!(out->flags & KOFA_PF_KERNEL) &&
-		    a_looks_bracketed(l->comm) && l->exe[0] == '/')
-			out->flags |= KOFA_PF_FAKE_KTHREAD;
-
-		if (a_is_shell(l->exe))
-			out->flags |= KOFA_PF_SHELL;
-
-		/*
-		 * A deleted executable whose path has not come back. One
-		 * access() and only for the processes that carry the deleted
-		 * mark at all, which is a handful - see KOFA_PF_EXE_UNLINKED.
-		 */
-		if ((out->flags & KOFA_PF_EXE_GONE) &&
-		    !(out->flags & KOFA_PF_EXE_MEMFD) && l->exe[0] &&
-		    access(l->exe, F_OK) != 0)
-			out->flags |= KOFA_PF_EXE_UNLINKED;
+		out->is_kthread  = (out->flags & KOFA_PF_KERNEL) ? 1u : 0u;
+		out->exe_on_disk = (l->exe[0] == '/' &&
+				    access(l->exe, F_OK) == 0) ? 1u : 0u;
 
 		l->cmdline[0] = '\0';
 		if (!l->o.no_cmdline && !(out->flags & KOFA_PF_KERNEL))

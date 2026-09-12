@@ -258,6 +258,21 @@ enum kof_format {
 	KOF_EVT_AMSI    = 19,
 
 	/*
+	 * A RUNNING PROCESS, as libkofantarc reads it out of /proc.
+	 *
+	 * Its own target rather than a subtype of anything, because the SHAPE
+	 * of a rule about one is unlike every other row here: it is a
+	 * comparison of scalars and of two kernel strings, not a search through
+	 * bytes. See kofmod/proc.h.
+	 *
+	 * TWENTY-TWO, which is KOF_EVT_PROC_INFO - the value IS the verb, so
+	 * the byte a client filters records on is the byte the prefilter rules
+	 * modules on. Above KOF_TARGET_FIRST_EVENT, asserted below with the
+	 * other one.
+	 */
+	KOF_EVT_PROC    = 22,
+
+	/*
 	 * One past the last FILE FORMAT, so a host can size a per-format table.
 	 * Not a format: nothing is ever this.
 	 *
@@ -411,6 +426,7 @@ static inline int kof_format_from_name(const char *s, uint8_t *out)
 	KOF_FMT_X_FROM(KOF_FMT_IMAGE,   KOF_FMT_IMAGE)
 	KOF_FMT_X_FROM(KOF_FMT_FONT,    KOF_FMT_FONT)
 	KOF_FMT_X_FROM(KOF_EVT_AMSI,    KOF_EVT_AMSI)
+	KOF_FMT_X_FROM(KOF_EVT_PROC,    KOF_EVT_PROC)
 #undef KOF_FMT_X_FROM
 	return 0;
 }
@@ -432,6 +448,7 @@ static inline const char *kof_format_name(uint8_t fmt)
 	case KOF_FMT_RAR:    return "RAR";
 	case KOF_FMT_XZ:     return "xz";
 	case KOF_EVT_AMSI:   return "AMSI";
+	case KOF_EVT_PROC:   return "Process";
 	case KOF_FMT_RTF:    return "RTF";
 	case KOF_FMT_PDF:    return "PDF";
 	case KOF_FMT_IMAGE:  return "Image";

@@ -858,6 +858,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/binaries/sym_any.c \
            libkofeng/kofparsers/kofformat.c \
            libkofeng/kofparsers/events/amsi_parse.c \
+           libkofeng/kofparsers/events/proc_parse.c \
            libkofeng/kofdisasm/xref.c \
            libkofeng/kofparsers/binaries/pe_sym.c \
            libkofeng/kofparsers/binaries/pe_parse.c \
@@ -1041,6 +1042,7 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/rtf.h \
            $(SDK)/include/kofmod/pdf.h \
            $(SDK)/include/kofmod/amsi.h \
+           $(SDK)/include/kofmod/proc.h \
            $(SDK)/include/kofmod/clr.h
 
 $(SDK)/include/kofeng.h: libkofeng/kofeng.h

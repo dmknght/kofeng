@@ -4570,7 +4570,12 @@ static int artefact_load(struct artefact *a, const char *blob_path)
 enum pack_bucket {
 	BUCKET_NONE = -1,
 	BUCKET_ELF = 0, BUCKET_PE, BUCKET_MACHO,
-	BUCKET_ARCHIVE, BUCKET_DOC, BUCKET_TEXT, BUCKET_RAW
+	BUCKET_ARCHIVE, BUCKET_DOC, BUCKET_TEXT, BUCKET_RAW,
+
+	/* Event targets, which are not file formats at all - see
+	 * KOF_TARGET_FIRST_EVENT. A pack of their own so a host that never
+	 * scans a process does not load rules about one. */
+	BUCKET_PROC
 };
 
 static int bucket_of_format(uint32_t fmt)
@@ -4603,6 +4608,7 @@ static int bucket_of_format(uint32_t fmt)
 	case KOF_FMT_SCRIPT:
 	case KOF_FMT_TEXT:    return BUCKET_TEXT;
 	case KOF_FMT_UNKNOWN: return BUCKET_RAW;
+	case KOF_EVT_PROC:    return BUCKET_PROC;
 	default:              return BUCKET_NONE;
 	}
 }
@@ -4617,6 +4623,7 @@ static const char *bucket_name(int b)
 	case BUCKET_DOC:     return "doc";
 	case BUCKET_TEXT:    return "text";
 	case BUCKET_RAW:     return "raw";
+	case BUCKET_PROC:    return "proc";
 	default:             return "";
 	}
 }
