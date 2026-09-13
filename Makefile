@@ -1085,7 +1085,7 @@ SCANNER_SRC := kofscanner/kofscanner.c
 # un-maps a PE - and the archives are linked by tools that have no engine in
 # them. Compiled into the scanner instead, where the engine already is.
 ifeq ($(NATIVE_OS),windows)
-SCANNER_EXTRA = libkofgrille/wwalk.c libkofgrille/wproc.c \
+SCANNER_EXTRA = libkofgrille/wwalk.c libkofgrille/wdiff.c libkofgrille/wproc.c \
                 libkofgrille/wcmdline.c libkofgrille/wtext.c \
                 $(KOFPROC_SRC) $(KOFRIDGE_SRC) $(KOFEVT_SRC)
 #
@@ -1193,7 +1193,7 @@ $(OUT)/bin/kofexamine$(EXE): $(EXAMINE_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
 # Windows. The walk is the only thing it takes from there, and it is the same
 # file kofscanner compiles, so the two cannot disagree about what a region is.
 ifeq ($(NATIVE_OS),windows)
-VIEWER_PROC := libkofgrille/wwalk.c libkofgrille/wproc.c \
+VIEWER_PROC := libkofgrille/wwalk.c libkofgrille/wdiff.c libkofgrille/wproc.c \
                libkofgrille/wcmdline.c libkofgrille/wtext.c $(KOFPROC_SRC)
 # -Ilibkofeng for the same reason SCANNER_INC needs it: wwalk.c reaches
 # kofunpack/pe_unmap.h, which the SDK include directory does not carry.
@@ -1658,7 +1658,7 @@ fixtures: | $(TEST)
 # tests/unit/grille_host.c - so it builds and runs on either host. When one
 # genuinely needs Windows, it goes in UNIT_SKIP_POSIX.
 UNIT_SKIP_WINDOWS := antarc_fan antarc_walk
-UNIT_SKIP_POSIX   :=
+UNIT_SKIP_POSIX   := hostile_mem
 
 ifeq ($(NATIVE_OS),windows)
 UNIT_SKIP := $(UNIT_SKIP_WINDOWS)
@@ -1759,6 +1759,24 @@ $(TEST)/unit_%$(EXE): tests/unit/%.c $(LIB) $(STAMP) | $(TEST)
 # over it compiles that source the same way.
 # The process record builder is orbit's too, for the same reason, so the test
 # that drives a process end to end compiles it the same way.
+#
+# hostile_mem drives the WINDOWS memory comparison, so it compiles the collector
+# alongside the engine the way kofscanner does - see SCANNER_EXTRA.
+#
+# Named in UNIT_SKIP_POSIX rather than guarded inside the file with an #ifdef,
+# because a test that compiles to an empty main on the other platform is a test
+# that LOOKS like it ran. A skipped one is visibly absent.
+$(TEST)/unit_hostile_mem$(EXE): tests/unit/hostile_mem.c \
+                                libkofgrille/wdiff.c libkofgrille/wproc.c \
+                                libkofgrille/wcmdline.c libkofgrille/wtext.c \
+                                $(KOFEVT_SRC) $(LIB) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng \
+	      -Ilibkoforbit/kofevt \
+	      tests/unit/hostile_mem.c libkofgrille/wdiff.c \
+	      libkofgrille/wproc.c libkofgrille/wcmdline.c \
+	      libkofgrille/wtext.c $(KOFEVT_SRC) $(LIB) -o $@ \
+	      $(LDFLAGS) -ladvapi32 -lpsapi
+
 $(TEST)/unit_proc_rule$(EXE): tests/unit/proc_rule.c $(KOFPROC_SRC) $(LIB) \
                               $(SDK_HDR) $(STAMP) | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) -Ilibkoforbit/kofproc -I$(SDK)/include \

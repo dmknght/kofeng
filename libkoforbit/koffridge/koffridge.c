@@ -19,7 +19,19 @@
 #include <string.h>
 #include <stdio.h>
 
+/*
+ * pthreads, because that is what this tree already threads with - see the work
+ * queue in libkofeng/kofscanners/scan.c - and because every target that
+ * compiles this file already links -pthread. On Windows that resolves through
+ * winpthreads, statically, for the reason the Makefile gives beside the flag.
+ */
+#include <pthread.h>
+
 #include "koffridge.h"
+
+/* kof_mkdir and KOF_PATH_SEP - the two things a default path needs and the
+ * one place this tree already says how they differ per platform. */
+#include "../../libkofeng/core/kofplatform.h"
 
 /*
  * THE ONE PLATFORM-DEPENDENT THING IN THIS FILE, and it is confined to the
@@ -169,14 +181,59 @@ struct entry {
 	struct koffridge_verdict v;
 };
 
-struct koffridge {
+/*
+ * ONE INDEPENDENT TABLE PER LOCK, rather than one table behind one lock.
+ *
+ * The header used to say this was deliberately not thread safe, and gave a
+ * reason worth keeping: a single mutex would put a contended lock on the fast
+ * path of every object looked up. That reason was right about a single mutex
+ * and wrong as an argument for not doing it at all, and the caller it said had
+ * not appeared has now appeared - the scanner runs several threads.
+ *
+ * Sharding answers the original objection directly instead of ignoring it.
+ * Each shard is a whole small table: its own entries, its own mask, its own
+ * eviction tick, its own counters. A key belongs to exactly one, so a probe
+ * run and the eviction it may perform never cross a lock boundary, and two
+ * threads working on different keys almost never meet.
+ *
+ * SIXTEEN, and the number is a trade between contention and eviction quality.
+ * More shards mean less contention and SMALLER shards; a shard has to hold
+ * several probe runs or it starts evicting keys it had room for. At the
+ * default 4096 total that is 256 entries each, which is sixteen probe runs.
+ */
+#define KOF_SHARDS 16u
+
+struct shard {
 	struct entry *e;
 	uint32_t cap;           /* a power of two */
 	uint32_t mask;
 	uint32_t used;
 	uint64_t tick;
-	uint64_t db_stamp;
 	struct koffridge_stat st;
+	pthread_mutex_t lock;
+};
+
+struct koffridge {
+	struct shard s[KOF_SHARDS];
+
+	/*
+	 * HOW MANY OF THOSE ARE IN USE, which is not always all of them.
+	 *
+	 * A shard has to hold several probe runs or it evicts keys it had room
+	 * for, so there is a floor on how small one can usefully be - and
+	 * sixteen shards of that floor is more memory than a caller asking for
+	 * a small cache budgeted. Forcing the floor anyway turned a request for
+	 * 64 entries into 512: eight times the memory, silently.
+	 *
+	 * So the SHARD COUNT gives way, not the capacity. A small fridge gets
+	 * fewer, larger shards and the size it asked for; a big one gets all
+	 * sixteen. Always a power of two, because shard_of masks with it.
+	 */
+	uint32_t n_shards;
+	uint32_t mask_shards;
+
+	uint32_t cap;           /* the total across every shard */
+	uint64_t db_stamp;
 };
 
 /*
@@ -209,29 +266,82 @@ static uint32_t round_pow2(uint32_t n)
 	return p;
 }
 
+/*
+ * WHICH SHARD A KEY BELONGS TO - the HIGH bits of the hash.
+ *
+ * The low bits already choose the slot inside a shard, so reusing them here
+ * would put every key that collides in a shard on the same slot within it, and
+ * the probe run would do the work twice.
+ */
+static uint32_t shard_of(const struct koffridge *f, uint64_t h)
+{
+	return (uint32_t)(h >> 56) & f->mask_shards;
+}
+
 struct koffridge *koffridge_open(uint32_t capacity, uint64_t db_stamp)
 {
 	struct koffridge *f = calloc(1, sizeof *f);
+	uint32_t total, per, i;
 
 	if (!f)
 		return NULL;
-	f->cap = round_pow2(capacity ? capacity : KOF_FRIDGE_DEFAULT);
-	f->mask = f->cap - 1u;
-	f->e = calloc(f->cap, sizeof *f->e);
-	if (!f->e) {
-		free(f);
-		return NULL;
+
+	/*
+	 * THE CAPACITY IS WHAT WAS ASKED FOR; THE SHARD COUNT IS WHAT GIVES.
+	 *
+	 * Each shard needs room for a few probe runs, so a fixed sixteen of
+	 * them imposes a floor on the total - and a caller asking for 64
+	 * entries would have been handed 512. Dividing the other way round
+	 * keeps the number the caller budgeted and spends fewer locks on a
+	 * small table, which is the right trade: a small table is not the one
+	 * with contention to relieve.
+	 */
+	total = round_pow2(capacity ? capacity : KOF_FRIDGE_DEFAULT);
+	f->n_shards = total / (KOF_PROBE * 2u);
+	if (f->n_shards > KOF_SHARDS)
+		f->n_shards = KOF_SHARDS;
+	if (f->n_shards < 1u)
+		f->n_shards = 1u;
+	f->n_shards = round_pow2(f->n_shards);
+	f->mask_shards = f->n_shards - 1u;
+
+	per = total / f->n_shards;
+	if (per < 1u)
+		per = 1u;
+	per = round_pow2(per);
+
+	for (i = 0; i < f->n_shards; i++) {
+		struct shard *s = &f->s[i];
+
+		s->cap = per;
+		s->mask = per - 1u;
+		s->e = calloc(per, sizeof *s->e);
+		if (!s->e || pthread_mutex_init(&s->lock, NULL) != 0) {
+			free(s->e);
+			s->e = NULL;
+			while (i-- > 0) {
+				pthread_mutex_destroy(&f->s[i].lock);
+				free(f->s[i].e);
+			}
+			free(f);
+			return NULL;
+		}
 	}
+	f->cap = per * f->n_shards;
 	f->db_stamp = db_stamp;
-	f->st.capacity = f->cap;
 	return f;
 }
 
 void koffridge_close(struct koffridge *f)
 {
+	uint32_t i;
+
 	if (!f)
 		return;
-	free(f->e);
+	for (i = 0; i < f->n_shards; i++) {
+		pthread_mutex_destroy(&f->s[i].lock);
+		free(f->s[i].e);
+	}
 	free(f);
 }
 
@@ -242,11 +352,19 @@ uint64_t koffridge_db_stamp(const struct koffridge *f)
 
 void koffridge_clear(struct koffridge *f)
 {
+	uint32_t i;
+
 	if (!f)
 		return;
-	memset(f->e, 0, (size_t)f->cap * sizeof *f->e);
-	f->used = 0;
-	f->st.used = 0;
+	for (i = 0; i < f->n_shards; i++) {
+		struct shard *s = &f->s[i];
+
+		pthread_mutex_lock(&s->lock);
+		memset(s->e, 0, (size_t)s->cap * sizeof *s->e);
+		s->used = 0;
+		s->st.used = 0;
+		pthread_mutex_unlock(&s->lock);
+	}
 }
 
 static int same_id(const struct entry *e, uint64_t h, const void *id,
@@ -259,19 +377,37 @@ static int same_id(const struct entry *e, uint64_t h, const void *id,
 int koffridge_get(struct koffridge *f, const void *id, uint32_t id_len,
 		  struct koffridge_verdict *out)
 {
+	struct shard *s;
 	uint64_t h;
 	uint32_t i, slot;
+	int found = 0;
 
 	if (!f || !id || !id_len || id_len > KOFFRIDGE_ID_MAX) {
-		if (f)
-			f->st.misses++;
+		if (f) {
+			/* Charged to shard 0: a key this could not hash has no
+			 * shard of its own, and the miss still has to be
+			 * counted somewhere the total will find it. */
+			pthread_mutex_lock(&f->s[0].lock);
+			f->s[0].st.misses++;
+			pthread_mutex_unlock(&f->s[0].lock);
+		}
 		return 0;
 	}
 	h = hash_id(id, id_len);
-	slot = (uint32_t)h & f->mask;
+	s = &f->s[shard_of(f, h)];
+	slot = (uint32_t)h & s->mask;
 
+	/*
+	 * A LOOK-UP TAKES THE LOCK, AND THAT IS NOT AVOIDABLE BY BEING CLEVER.
+	 *
+	 * It reads an entry that another thread may be overwriting through
+	 * eviction, and it WRITES - `used` is what keeps an entry alive, so a
+	 * hit that did not record itself would make the thing most looked up
+	 * the first thing dropped.
+	 */
+	pthread_mutex_lock(&s->lock);
 	for (i = 0; i < KOF_PROBE; i++) {
-		struct entry *e = &f->e[(slot + i) & f->mask];
+		struct entry *e = &s->e[(slot + i) & s->mask];
 
 		/*
 		 * A free slot ends the run. Nothing here ever deletes an entry
@@ -281,15 +417,18 @@ int koffridge_get(struct koffridge *f, const void *id, uint32_t id_len,
 		if (!e->h)
 			break;
 		if (same_id(e, h, id, id_len)) {
-			e->used = ++f->tick;
+			e->used = ++s->tick;
 			if (out)
 				*out = e->v;
-			f->st.hits++;
-			return 1;
+			s->st.hits++;
+			found = 1;
+			break;
 		}
 	}
-	f->st.misses++;
-	return 0;
+	if (!found)
+		s->st.misses++;
+	pthread_mutex_unlock(&s->lock);
+	return found;
 }
 
 /*
@@ -338,30 +477,35 @@ static void fill_verdict(struct koffridge_verdict *v,
  *
  * NULL when the identity cannot be stored, with `refused` already counted.
  */
-static struct entry *slot_for(struct koffridge *f, const void *id,
+/*
+ * The slot this identity should be written to, with the key already in place.
+ *
+ * TAKES A SHARD AND A HASH, NOT THE FRIDGE. Both callers have already chosen
+ * the shard and taken its lock - and both have to, because the probe below
+ * reads every entry in the run and may overwrite one. Passing the hash in
+ * rather than recomputing it also keeps the shard choice and the slot choice
+ * derived from the same number, which is the thing that must not drift.
+ *
+ * The caller holds `s->lock`. NULL when the identity cannot be stored, with
+ * `refused` already counted.
+ */
+static struct entry *slot_for(struct shard *s, uint64_t h, const void *id,
 			      uint32_t id_len)
 {
-	uint64_t h;
 	uint32_t i, slot, victim = 0;
 	uint64_t victim_used = 0;
 	int have_victim = 0;
 	struct entry *e = NULL;
 
-	if (!f || !id || !id_len || id_len > KOFFRIDGE_ID_MAX) {
-		if (f)
-			f->st.refused++;
-		return NULL;
-	}
-	h = hash_id(id, id_len);
-	slot = (uint32_t)h & f->mask;
+	slot = (uint32_t)h & s->mask;
 
 	for (i = 0; i < KOF_PROBE; i++) {
-		uint32_t at = (slot + i) & f->mask;
+		uint32_t at = (slot + i) & s->mask;
 
-		e = &f->e[at];
+		e = &s->e[at];
 		if (!e->h) {
-			f->used++;
-			f->st.used = f->used;
+			s->used++;
+			s->st.used = s->used;
 			goto claim;
 		}
 		if (same_id(e, h, id, id_len))
@@ -380,11 +524,11 @@ static struct entry *slot_for(struct koffridge *f, const void *id,
 	 * construction the one in this run that has gone longest unwanted.
 	 */
 	if (!have_victim) {
-		f->st.refused++;
+		s->st.refused++;
 		return NULL;
 	}
-	e = &f->e[victim];
-	f->st.evictions++;
+	e = &s->e[victim];
+	s->st.evictions++;
 
 claim:
 	e->h = h;
@@ -398,29 +542,70 @@ claim:
 int koffridge_put(struct koffridge *f, const void *id, uint32_t id_len,
 		  const struct kof_result *res)
 {
-	struct entry *e = slot_for(f, id, id_len);
+	struct shard *s;
+	struct entry *e;
+	uint64_t h;
 
-	if (!e)
+	if (!f || !id || !id_len || id_len > KOFFRIDGE_ID_MAX) {
+		if (f) {
+			pthread_mutex_lock(&f->s[0].lock);
+			f->s[0].st.refused++;
+			pthread_mutex_unlock(&f->s[0].lock);
+		}
 		return 0;
-	fill_verdict(&e->v, res);
-	e->used = ++f->tick;
-	f->st.stores++;
-	return 1;
+	}
+	h = hash_id(id, id_len);
+	s = &f->s[shard_of(f, h)];
+
+	pthread_mutex_lock(&s->lock);
+	e = slot_for(s, h, id, id_len);
+	if (e) {
+		fill_verdict(&e->v, res);
+		e->used = ++s->tick;
+		s->st.stores++;
+	}
+	pthread_mutex_unlock(&s->lock);
+	return e != NULL;
 }
 
-void koffridge_stats(const struct koffridge *f, struct koffridge_stat *out)
+void koffridge_stats(struct koffridge *f, struct koffridge_stat *out)
 {
+	uint32_t i;
+
 	if (!out)
 		return;
-	if (!f) {
-		memset(out, 0, sizeof *out);
+	memset(out, 0, sizeof *out);
+	if (!f)
 		return;
+
+	/*
+	 * SUMMED SHARD BY SHARD, EACH UNDER ITS OWN LOCK.
+	 *
+	 * So the totals are not a torn read of counters another thread is
+	 * incrementing. They are still not an INSTANT: by the time the last
+	 * shard is added the first may have moved on. That is the right answer
+	 * for what these are - a report of a walk, read when it is over - and
+	 * stopping every thread to get a consistent snapshot would cost more
+	 * than the number is worth.
+	 */
+	for (i = 0; i < f->n_shards; i++) {
+		struct shard *s = &f->s[i];
+
+		pthread_mutex_lock(&s->lock);
+		out->hits      += s->st.hits;
+		out->misses    += s->st.misses;
+		out->stores    += s->st.stores;
+		out->evictions += s->st.evictions;
+		out->refused   += s->st.refused;
+		out->used      += s->used;
+		out->capacity  += s->cap;
+		pthread_mutex_unlock(&s->lock);
 	}
-	*out = f->st;
 }
 
-size_t koffridge_describe(const struct koffridge *f, char *buf, size_t cap)
+size_t koffridge_describe(struct koffridge *f, char *buf, size_t cap)
 {
+	struct koffridge_stat st;
 	uint64_t look;
 	int n;
 
@@ -430,16 +615,17 @@ size_t koffridge_describe(const struct koffridge *f, char *buf, size_t cap)
 		buf[0] = '\0';
 		return 0;
 	}
-	look = f->st.hits + f->st.misses;
+	koffridge_stats(f, &st);
+	look = st.hits + st.misses;
 	n = snprintf(buf, cap,
 		     "fridge: %llu hit, %llu miss (%.1f%%), %llu stored, "
 		     "%llu evicted, %u/%u used",
-		     (unsigned long long)f->st.hits,
-		     (unsigned long long)f->st.misses,
-		     look ? (double)f->st.hits * 100.0 / (double)look : 0.0,
-		     (unsigned long long)f->st.stores,
-		     (unsigned long long)f->st.evictions,
-		     f->st.used, f->st.capacity);
+		     (unsigned long long)st.hits,
+		     (unsigned long long)st.misses,
+		     look ? (double)st.hits * 100.0 / (double)look : 0.0,
+		     (unsigned long long)st.stores,
+		     (unsigned long long)st.evictions,
+		     st.used, st.capacity);
 	if (n < 0)
 		return 0;
 	return (size_t)n < cap ? (size_t)n : cap - 1u;
@@ -521,7 +707,7 @@ static uint64_t fnv(const void *p, size_t n, uint64_t h)
 
 #define FNV_SEED 1469598103934665603ull
 
-int koffridge_save(const struct koffridge *f, const char *path)
+int koffridge_save(struct koffridge *f, const char *path)
 {
 	struct file_hdr h;
 	char tmp[1024];
@@ -534,25 +720,14 @@ int koffridge_save(const struct koffridge *f, const char *path)
 	if (snprintf(tmp, sizeof tmp, "%s.tmp", path) >= (int)sizeof tmp)
 		return 0;
 
-	for (i = 0; i < f->cap; i++)
-		if (f->e[i].h)
-			n++;
-
-	/* The checksum is over what will be written, so it is computed on the
-	 * same pass shape the write uses rather than trusting the two loops to
-	 * stay in step. */
-	for (i = 0; i < f->cap; i++)
-		if (f->e[i].h)
-			sum = fnv(&f->e[i], sizeof f->e[i], sum);
-
 	memset(&h, 0, sizeof h);
 	h.magic      = FILE_MAGIC;
 	h.version    = FILE_VERSION;
 	h.hdr_size   = (uint16_t)sizeof h;
 	h.entry_size = (uint32_t)sizeof(struct entry);
-	h.n_entries  = n;
+	/* n_entries and sum are filled after the entries are written - see
+	 * below. The placeholder header is only there to reserve the space. */
 	h.db_stamp   = f->db_stamp;
-	h.sum        = sum;
 
 	/*
 	 * WRITTEN BESIDE THE TARGET AND RENAMED OVER IT.
@@ -563,18 +738,54 @@ int koffridge_save(const struct koffridge *f, const char *path)
 	 * that are not there, and the checksum is the only thing standing
 	 * between that and a table full of whatever the tail of the file was.
 	 */
+	/*
+	 * ONE PASS, AND THE HEADER IS PATCHED AFTERWARDS.
+	 *
+	 * It used to count the entries, then checksum them, then write them -
+	 * three walks of the table, which was fine while nothing else could
+	 * touch it. With shards under their own locks it is not: another thread
+	 * storing a verdict between the count and the write would leave a
+	 * header describing a different number of entries than the file holds,
+	 * and the reader would take the tail of the file as an entry.
+	 *
+	 * So the entries go out first, counted and summed as they go, and the
+	 * header is written last over the space left for it. Each shard is held
+	 * only while its own entries are written.
+	 */
 	fp = fopen(tmp, "wb");
 	if (!fp)
 		return 0;
 	if (fwrite(&h, 1, sizeof h, fp) != sizeof h)
 		goto bad;
-	for (i = 0; i < f->cap; i++) {
-		if (!f->e[i].h)
-			continue;
-		if (fwrite(&f->e[i], 1, sizeof f->e[i], fp) !=
-		    sizeof f->e[i])
+
+	for (i = 0; i < f->n_shards; i++) {
+		struct shard *s = &f->s[i];
+		uint32_t j;
+		int failed = 0;
+
+		pthread_mutex_lock(&s->lock);
+		for (j = 0; j < s->cap; j++) {
+			if (!s->e[j].h)
+				continue;
+			if (fwrite(&s->e[j], 1, sizeof s->e[j], fp) !=
+			    sizeof s->e[j]) {
+				failed = 1;
+				break;
+			}
+			sum = fnv(&s->e[j], sizeof s->e[j], sum);
+			n++;
+		}
+		pthread_mutex_unlock(&s->lock);
+		if (failed)
 			goto bad;
 	}
+
+	h.n_entries = n;
+	h.sum = sum;
+	if (fseek(fp, 0, SEEK_SET) != 0)
+		goto bad;
+	if (fwrite(&h, 1, sizeof h, fp) != sizeof h)
+		goto bad;
 	if (fclose(fp) != 0)
 		goto bad_closed;
 
@@ -598,7 +809,7 @@ uint32_t koffridge_load(struct koffridge *f, const char *path,
 	struct file_hdr h;
 	FILE *fp;
 	uint32_t i, got = 0;
-	uint64_t sum = FNV_SEED, stores_before;
+	uint64_t sum = FNV_SEED;
 	struct entry *buf;
 
 	if (why)
@@ -703,41 +914,117 @@ uint32_t koffridge_load(struct koffridge *f, const char *path,
 	 * this run, and counting it as one would make the summary claim work
 	 * that the load is the whole point of not doing.
 	 */
-	stores_before = f->st.stores;
 	for (i = 0; i < h.n_entries; i++) {
+		uint64_t kh;
+		struct shard *s;
 		struct entry *e;
 
 		if (!buf[i].h || !buf[i].id_len ||
 		    buf[i].id_len > KOFFRIDGE_ID_MAX)
 			continue;       /* the file disagrees with itself */
-		e = slot_for(f, buf[i].id, buf[i].id_len);
-		if (!e)
-			continue;
-		e->v = buf[i].v;
-		/*
-		 * TERMINATE THE NAME, because nothing on this path has.
-		 *
-		 * koffridge_put does it on the way in - see the memcpy there -
-		 * and the load did not, so the two ways an entry enters the
-		 * table did not agree. A file whose name field holds 224 bytes
-		 * with no NUL is then handed to a caller that prints it with
-		 * %s, and kofmemscan does exactly that: confirmed with
-		 * AddressSanitizer as a 225-byte read past the end of the
-		 * verdict.
-		 *
-		 * The file is a TRUST INPUT and the header above says so: the
-		 * checksum catches a bad sector and stops nobody who edits the
-		 * file on purpose. So this is not about corruption, it is
-		 * about the case the threat model already admits.
-		 */
-		e->v.name[sizeof e->v.name - 1] = '\0';
-		e->used = 0;
-		got++;
+
+		kh = hash_id(buf[i].id, buf[i].id_len);
+		s = &f->s[shard_of(f, kh)];
+
+		pthread_mutex_lock(&s->lock);
+		e = slot_for(s, kh, buf[i].id, buf[i].id_len);
+		if (e) {
+			e->v = buf[i].v;
+			/*
+			 * TERMINATE THE NAME, because nothing on this path has.
+			 *
+			 * koffridge_put does it on the way in - see the memcpy
+			 * there - and the load did not, so the two ways an
+			 * entry enters the table did not agree. A file whose
+			 * name field holds 224 bytes with no NUL is then handed
+			 * to a caller that prints it with %s: confirmed with
+			 * AddressSanitizer as a 225-byte read past the end of
+			 * the verdict.
+			 *
+			 * The file is a TRUST INPUT and the header above says
+			 * so: the checksum catches a bad sector and stops
+			 * nobody who edits the file on purpose. So this is not
+			 * about corruption, it is about the case the threat
+			 * model already admits.
+			 */
+			e->v.name[sizeof e->v.name - 1] = '\0';
+			e->used = 0;
+			got++;
+		}
+		pthread_mutex_unlock(&s->lock);
 	}
-	f->st.stores = stores_before;
+	/*
+	 * NO `stores` TO PUT BACK ANY MORE, and that is the sharding paying for
+	 * itself rather than an omission.
+	 *
+	 * This used to snapshot the counter and restore it, because a loaded
+	 * entry is not work this run did and counting it as a store would have
+	 * the summary claim the very work the cache exists to avoid. The
+	 * insertion above goes through slot_for, which counts evictions and
+	 * refusals and NOT stores - only koffridge_put does that - so there is
+	 * nothing to correct.
+	 */
 	free(buf);
 
 	if (why)
 		*why = got ? "loaded" : "held nothing usable";
 	return got;
+}
+
+/* ---------------------------------------------------- where it lives */
+
+/*
+ * The per-user cache directory, created if missing - see the header for why
+ * the location IS the safety property.
+ */
+int koffridge_default_path(char *buf, size_t cap)
+{
+	const char *home;
+	char dir[768];
+	int n;
+
+	if (!buf || cap == 0)
+		return 0;
+	buf[0] = '\0';
+
+#ifdef _WIN32
+	/*
+	 * LOCALAPPDATA rather than APPDATA: a cache is machine-local state and
+	 * has no business following a roaming profile onto other machines,
+	 * where its file identities - a volume serial and a file index - mean
+	 * nothing at all and would miss on every lookup.
+	 */
+	home = getenv("LOCALAPPDATA");
+	if (!home || !home[0])
+		return 0;
+	n = snprintf(dir, sizeof dir, "%s\\kofeng", home);
+#else
+	home = getenv("XDG_CACHE_HOME");
+	if (home && home[0]) {
+		n = snprintf(dir, sizeof dir, "%s/kofeng", home);
+	} else {
+		home = getenv("HOME");
+		if (!home || !home[0])
+			return 0;
+		n = snprintf(dir, sizeof dir, "%s/.cache/kofeng", home);
+	}
+#endif
+	if (n < 0 || (size_t)n >= sizeof dir)
+		return 0;
+
+	/*
+	 * 0700, so the answer holds even on a system whose umask is generous.
+	 * An existing directory is fine - what is NOT checked is whether it was
+	 * already there with wider permissions, because a cache cannot repair a
+	 * home directory somebody else can write, and pretending to would be
+	 * worse than not claiming it.
+	 */
+	(void)kof_mkdir(dir, 0700);
+
+	n = snprintf(buf, cap, "%s%ckofscan.fridge", dir, KOF_PATH_SEP);
+	if (n < 0 || (size_t)n >= cap) {
+		buf[0] = '\0';
+		return 0;
+	}
+	return 1;
 }
