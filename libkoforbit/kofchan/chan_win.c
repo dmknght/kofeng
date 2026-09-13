@@ -9,6 +9,8 @@
 #include <stdatomic.h>
 
 #include <windows.h>
+#include <sddl.h>
+#include <aclapi.h>
 
 #include "kofchan.h"
 #include "kofevtlog.h"
@@ -18,6 +20,10 @@
 
 struct kof_chan_pub {
 	HANDLE h_data, h_cur, h_wake;
+	/* The private namespace these live in, and the boundary that gates it.
+	 * Both are held for the publisher's lifetime: closing the namespace
+	 * takes the objects' names with it. */
+	HANDLE h_ns, bd;
 	struct kof_chan_hdr    *hdr;
 	unsigned char           *rec;
 	struct kof_chan_cursor *cur;
@@ -26,6 +32,7 @@ struct kof_chan_pub {
 
 struct kof_chan_sub {
 	HANDLE h_data, h_cur, h_wake;
+	HANDLE h_ns, bd;
 	const struct kof_chan_hdr *hdr;
 	const unsigned char        *rec;
 	struct kof_chan_cursor    *cur;
@@ -43,14 +50,100 @@ struct kof_chan_sub {
 };
 
 /*
+ * THE CHANNEL LIVES IN A PRIVATE NAMESPACE BOUND TO Administrators.
+ *
+ * WHAT WAS WRONG WITH A NAME. The objects were called Local\kofwatchtower.*
+ * and the publisher defended the name by refusing to attach to one that
+ * already existed - which is a real defence and only covers one direction.
+ * The SUBSCRIBER had none: it opened by name and checked magic, version and
+ * layout, and nothing asked WHO CREATED IT. Anything that made those three
+ * names before the sensor started became the sensor, as far as the client was
+ * concerned - free to report a quiet machine, or to name files the client
+ * would then open and scan.
+ *
+ * A private namespace makes that unrepresentable rather than detectable. The
+ * boundary descriptor carries a SID, and a process whose token does not hold
+ * it cannot create the namespace OR open it - so an unprivileged process
+ * cannot squat a name it cannot reach. Measured on this host, unelevated:
+ *
+ *     boundary SID = Administrators   CreatePrivateNamespaceW -> err 5
+ *     no boundary SID                 CreatePrivateNamespaceW -> succeeds
+ *
+ * The control is the second line: without the SID the same call works, so the
+ * refusal is the boundary doing its job and not something else in the way.
+ *
+ * Local\ ALSO HAD TO GO for the deployment this is for - a sensor running as a
+ * service is in session 0 and a client is not, so a session-local name is one
+ * neither can share. A private namespace is not session-scoped.
+ *
+ * NO FALLBACK TO Local\ IF THIS FAILS. A downgrade path is a weakness an
+ * attacker can force: make the namespace unavailable and the channel reappears
+ * under a name anyone can squat. It fails and says why instead.
+ */
+static const wchar_t KOF_CHAN_NS[] = L"kofeng";
+
+#ifndef PRIVATE_NAMESPACE_FLAG_DESTROY
+#define PRIVATE_NAMESPACE_FLAG_DESTROY 0x00000001
+#endif
+
+/*
+ * WHO MAY TOUCH THE OBJECTS, written out rather than inherited.
+ *
+ * Every object was created with SECURITY_ATTRIBUTES of NULL, which means the
+ * default DACL of whatever token happened to create it. That is not a decision,
+ * it is the absence of one, and it made the access rules depend on how the
+ * publisher was started.
+ *
+ * SYSTEM and the built-in Administrators, and nobody else. `P` makes the DACL
+ * protected so nothing is inherited into it.
+ *
+ * NO MANDATORY LABEL, deliberately. A label would stop a low-integrity process
+ * writing the cursor - but a process that is not elevated carries Administrators
+ * as DENY-ONLY, so the DACL above already refuses it, and a label that changes
+ * nothing is a line that has to be explained every time somebody reads it.
+ */
+static const wchar_t KOF_CHAN_SDDL[] = L"D:P(A;;GA;;;SY)(A;;GA;;;BA)";
+
+/*
+ * The boundary descriptor, bound to the built-in Administrators alias.
+ *
+ * Both ends of this channel are privileged by design - the sensor is a service
+ * and the decider is elevated, see the three-tier note in kofchan.h - so the
+ * alias is exactly the set that should be able to reach it, and an ordinary
+ * user token cannot.
+ */
+static HANDLE chan_boundary(void)
+{
+	SID_IDENTIFIER_AUTHORITY nt = { SECURITY_NT_AUTHORITY };
+	PSID admins = NULL;
+	HANDLE bd;
+
+	bd = CreateBoundaryDescriptorW(KOF_CHAN_NS, 0);
+	if (!bd)
+		return NULL;
+	if (!AllocateAndInitializeSid(&nt, 2, SECURITY_BUILTIN_DOMAIN_RID,
+				      DOMAIN_ALIAS_RID_ADMINS,
+				      0, 0, 0, 0, 0, 0, &admins)) {
+		DeleteBoundaryDescriptor(bd);
+		return NULL;
+	}
+	if (!AddSIDToBoundaryDescriptor(&bd, admins)) {
+		FreeSid(admins);
+		DeleteBoundaryDescriptor(bd);
+		return NULL;
+	}
+	FreeSid(admins);
+	return bd;
+}
+
+/*
  * The three object names, derived from one base so a caller names the channel
- * once. Local\ rather than Global\ - see the note in wchan.h on what that
- * contains and what it does not.
+ * once, and qualified by the private namespace above.
  */
 static int chan_names(const char *base, wchar_t *d, wchar_t *c, wchar_t *w,
 		      size_t cap)
 {
-	static const wchar_t pre[] = L"Local\\";
+	static const wchar_t pre[] = L"kofeng\\";
 	const char *b = (base && *base) ? base : KOF_CHAN_NAME;
 	wchar_t stem[192];
 	size_t i = 0, o = 0;
@@ -79,6 +172,67 @@ static int chan_names(const char *base, wchar_t *d, wchar_t *c, wchar_t *w,
 		w[o + k] = 0;
 	}
 	return 1;
+}
+
+/* The DACL above, as a SECURITY_ATTRIBUTES the create calls can take. */
+static int chan_sd(SECURITY_ATTRIBUTES *sa, PSECURITY_DESCRIPTOR *sd)
+{
+	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+		    KOF_CHAN_SDDL, SDDL_REVISION_1, sd, NULL))
+		return 0;
+	sa->nLength = (DWORD)sizeof *sa;
+	sa->lpSecurityDescriptor = *sd;
+	sa->bInheritHandle = FALSE;
+	return 1;
+}
+
+/*
+ * IS THIS OBJECT OWNED BY SOMETHING PRIVILEGED.
+ *
+ * Defence in depth behind the namespace, and it answers the question the
+ * subscriber never used to ask: not "does this look like a channel" - magic and
+ * version answer that and an impostor can write both - but "who made it".
+ *
+ * An unprivileged process cannot create an object owned by SYSTEM or by the
+ * Administrators alias, so an owner drawn from that set is a fact about the
+ * publisher's privilege that the publisher cannot fake downward.
+ *
+ * Kept even though the namespace already gates creation, because the two fail
+ * in different ways: the namespace is configuration and this is a property of
+ * the object in hand.
+ */
+static int chan_owner_ok(HANDLE h)
+{
+	SID_IDENTIFIER_AUTHORITY nt = { SECURITY_NT_AUTHORITY };
+	PSECURITY_DESCRIPTOR sd = NULL;
+	PSID owner = NULL, sys = NULL, adm = NULL;
+	int ok = 0;
+
+	if (GetSecurityInfo(h, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION,
+			    &owner, NULL, NULL, NULL, &sd) != ERROR_SUCCESS)
+		return 0;
+	if (!owner)
+		goto done;
+
+	if (AllocateAndInitializeSid(&nt, 1, SECURITY_LOCAL_SYSTEM_RID,
+				     0, 0, 0, 0, 0, 0, 0, &sys) &&
+	    EqualSid(owner, sys))
+		ok = 1;
+	if (!ok &&
+	    AllocateAndInitializeSid(&nt, 2, SECURITY_BUILTIN_DOMAIN_RID,
+				     DOMAIN_ALIAS_RID_ADMINS,
+				     0, 0, 0, 0, 0, 0, &adm) &&
+	    EqualSid(owner, adm))
+		ok = 1;
+
+done:
+	if (sys)
+		FreeSid(sys);
+	if (adm)
+		FreeSid(adm);
+	if (sd)
+		LocalFree(sd);
+	return ok;
 }
 
 static uint32_t round_pow2(uint32_t v)
@@ -120,6 +274,8 @@ struct kof_chan_pub *kof_chan_publish_open(const char *name,
 {
 	wchar_t nd[256], nc[256], nw[256];
 	struct kof_chan_pub *p;
+	SECURITY_ATTRIBUTES sa;
+	PSECURITY_DESCRIPTOR sd = NULL;
 	uint64_t bytes;
 	uint32_t cap = round_pow2(capacity ? capacity : 8192u);
 
@@ -134,7 +290,29 @@ struct kof_chan_pub *kof_chan_publish_open(const char *name,
 	bytes = sizeof(struct kof_chan_hdr) +
 		(uint64_t)cap * p->rec_size;
 
-	p->h_data = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL,
+	/*
+	 * THE NAMESPACE FIRST: nothing below can be created until it exists,
+	 * and a failure here is the one worth naming - it means this process
+	 * is not privileged enough to publish, which is a configuration
+	 * mistake rather than a missing sensor.
+	 */
+	p->bd = chan_boundary();
+	if (!p->bd)
+		goto fail;
+	if (!chan_sd(&sa, &sd))
+		goto fail;
+	p->h_ns = CreatePrivateNamespaceW(&sa, p->bd, KOF_CHAN_NS);
+	if (!p->h_ns) {
+		/*
+		 * Already there: another publisher owns this channel, or
+		 * something is holding the namespace. Opening it would be
+		 * attaching to a ring this process does not own - refused for
+		 * the same reason an existing section is.
+		 */
+		goto fail;
+	}
+
+	p->h_data = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa,
 				       PAGE_READWRITE,
 				       (DWORD)(bytes >> 32),
 				       (DWORD)(bytes & 0xffffffffu), nd);
@@ -149,15 +327,21 @@ struct kof_chan_pub *kof_chan_publish_open(const char *name,
 	if (!p->h_data || GetLastError() == ERROR_ALREADY_EXISTS)
 		goto fail;
 
-	p->h_cur = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL,
+	p->h_cur = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa,
 				      PAGE_READWRITE, 0,
 				      (DWORD)sizeof(struct kof_chan_cursor),
 				      nc);
 	if (!p->h_cur || GetLastError() == ERROR_ALREADY_EXISTS)
 		goto fail;
 
-	p->h_wake = CreateEventW(NULL, FALSE, FALSE, nw);
-	if (!p->h_wake)
+	/*
+	 * THE SAME SQUAT CHECK THE TWO SECTIONS GET, which this did not have.
+	 * The defence covered two of the three objects, so a name the sections
+	 * refused could still be pre-made here - and the wake handle is the one
+	 * a subscriber blocks on.
+	 */
+	p->h_wake = CreateEventW(&sa, FALSE, FALSE, nw);
+	if (!p->h_wake || GetLastError() == ERROR_ALREADY_EXISTS)
 		goto fail;
 
 	p->hdr = MapViewOfFile(p->h_data, FILE_MAP_WRITE, 0, 0, 0);
@@ -182,14 +366,32 @@ struct kof_chan_pub *kof_chan_publish_open(const char *name,
 	 */
 	atomic_store_explicit((_Atomic uint32_t *)&p->hdr->magic,
 			      KOF_CHAN_MAGIC, memory_order_release);
+	/*
+	 * The descriptor was COPIED INTO each object when it was created, so
+	 * the objects keep their DACL after this. Freeing it here rather than
+	 * holding it for the publisher's life keeps the lifetime where the use
+	 * is - and the fail path below frees it for the same reason.
+	 */
+	LocalFree(sd);
 	return p;
 
 fail:
+	if (sd) LocalFree(sd);
 	if (p->hdr) UnmapViewOfFile(p->hdr);
 	if (p->cur) UnmapViewOfFile(p->cur);
 	if (p->h_wake) CloseHandle(p->h_wake);
 	if (p->h_cur)  CloseHandle(p->h_cur);
 	if (p->h_data) CloseHandle(p->h_data);
+	/*
+	 * DESTROYED, not merely closed - and only ever one this process
+	 * CREATED, because h_ns is NULL when the create failed. A sensor that
+	 * stopped and left the namespace behind would leave its names taken,
+	 * and the next publisher's squat check would correctly read that as an
+	 * attack.
+	 */
+	if (p->h_ns) ClosePrivateNamespace(p->h_ns,
+					   PRIVATE_NAMESPACE_FLAG_DESTROY);
+	if (p->bd)   DeleteBoundaryDescriptor(p->bd);
 	free(p);
 	return NULL;
 }
@@ -253,6 +455,16 @@ void kof_chan_publish_close(struct kof_chan_pub *p)
 	if (p->h_wake) CloseHandle(p->h_wake);
 	if (p->h_cur)  CloseHandle(p->h_cur);
 	if (p->h_data) CloseHandle(p->h_data);
+	/*
+	 * DESTROYED, not merely closed - and only ever one this process
+	 * CREATED, because h_ns is NULL when the create failed. A sensor that
+	 * stopped and left the namespace behind would leave its names taken,
+	 * and the next publisher's squat check would correctly read that as an
+	 * attack.
+	 */
+	if (p->h_ns) ClosePrivateNamespace(p->h_ns,
+					   PRIVATE_NAMESPACE_FLAG_DESTROY);
+	if (p->bd)   DeleteBoundaryDescriptor(p->bd);
 	free(p);
 }
 
@@ -283,6 +495,30 @@ struct kof_chan_sub *kof_chan_sub_open(const char *name, const char **why,
 	 * record because it does not hold the access to, not because it has
 	 * been asked not to.
 	 */
+	/*
+	 * THE NAMESPACE BEFORE THE OBJECTS. A token that does not hold the
+	 * boundary SID cannot open it, so this is where an unprivileged
+	 * subscriber is turned away - by the operating system, before any name
+	 * in this process has been resolved.
+	 */
+	s->bd = chan_boundary();
+	if (!s->bd) {
+		if (why) *why = "cannot build the channel's boundary";
+		goto fail;
+	}
+	s->h_ns = OpenPrivateNamespaceW(s->bd, KOF_CHAN_NS);
+	if (!s->h_ns) {
+		if (GetLastError() == ERROR_ACCESS_DENIED) {
+			if (why) *why = "this account may not reach the "
+					"sensor's channel";
+			if (reason) *reason = KOF_CHAN_WHY_DENIED;
+		} else {
+			if (why) *why = "no sensor is publishing";
+			if (reason) *reason = KOF_CHAN_WHY_ABSENT;
+		}
+		goto fail;
+	}
+
 	s->h_data = OpenFileMappingW(FILE_MAP_READ, FALSE, nd);
 	if (!s->h_data) {
 		/* ERROR_ACCESS_DENIED means the mapping is there and this
@@ -309,6 +545,22 @@ struct kof_chan_sub *kof_chan_sub_open(const char *name, const char **why,
 		}
 		goto fail;
 	}
+	/*
+	 * WHO MADE THIS, ASKED BEFORE ANY OF IT IS BELIEVED.
+	 *
+	 * Checked on BOTH sections. The data section is what records are read
+	 * from and the cursor is what this process writes; an impostor holding
+	 * either one is a different attack, and owning only one of them must
+	 * not pass. Done before the mapping is looked at, so a header written
+	 * by something unprivileged is never parsed at all.
+	 */
+	if (!chan_owner_ok(s->h_data) || !chan_owner_ok(s->h_cur)) {
+		if (why) *why = "the channel is not owned by a privileged "
+				"account - refusing to trust it";
+		if (reason) *reason = KOF_CHAN_WHY_DENIED;
+		goto fail;
+	}
+
 	s->h_wake = OpenEventW(SYNCHRONIZE, FALSE, nw);
 
 	s->hdr_raw = MapViewOfFile(s->h_data, FILE_MAP_READ, 0, 0, 0);
@@ -356,6 +608,10 @@ fail:
 	if (s->h_wake) CloseHandle(s->h_wake);
 	if (s->h_cur)  CloseHandle(s->h_cur);
 	if (s->h_data) CloseHandle(s->h_data);
+	/* CLOSED, never destroyed: a subscriber did not create this
+	 * namespace and must not take it away from the sensor. */
+	if (s->h_ns) ClosePrivateNamespace(s->h_ns, 0);
+	if (s->bd)   DeleteBoundaryDescriptor(s->bd);
 	free(s);
 	return NULL;
 }
@@ -435,5 +691,9 @@ void kof_chan_sub_close(struct kof_chan_sub *s)
 	if (s->h_wake) CloseHandle(s->h_wake);
 	if (s->h_cur)  CloseHandle(s->h_cur);
 	if (s->h_data) CloseHandle(s->h_data);
+	/* CLOSED, never destroyed: a subscriber did not create this
+	 * namespace and must not take it away from the sensor. */
+	if (s->h_ns) ClosePrivateNamespace(s->h_ns, 0);
+	if (s->bd)   DeleteBoundaryDescriptor(s->bd);
 	free(s);
 }
