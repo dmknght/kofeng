@@ -26,6 +26,7 @@
 #include <time.h>
 
 #include "../libkofeng/kofeng.h"
+#include "../libkofeng/core/kofplatform.h"
 
 /*
  * SCANNING WHAT IS RUNNING, on the platform that has a collector for it.
@@ -924,6 +925,17 @@ int main(int argc, char **argv)
 	unsigned jobs = 1;
 	kof_scanner **scs = NULL;
 	unsigned made = 0;
+
+	/*
+	 * BEFORE A BYTE OF argv IS READ OR A PATH IS OPENED.
+	 *
+	 * On Windows argv has already lost every character outside the machine's
+	 * ANSI codepage by the time main is entered, and the narrow path
+	 * functions would not find the file even if it had not. A scanner that
+	 * cannot open a file is not a scanner that found it clean - see
+	 * kof_utf8_init. No-op on POSIX, where a path is just bytes.
+	 */
+	kof_utf8_init(&argc, &argv);
 
 	memset(&r, 0, sizeof r);
 	memset(&opt, 0, sizeof opt);

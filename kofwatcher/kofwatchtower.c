@@ -46,6 +46,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include "kofgrille.h"
+#include "../libkofeng/core/kofplatform.h"
 #else
 #include <signal.h>
 #include "kofantarc.h"
@@ -400,6 +401,8 @@ int main(int argc, char **argv)
 	int chan_private = 0;
 	uint32_t ring;
 	int      i;
+
+	kof_utf8_init(&argc, &argv);
 
 	memset(&tally, 0, sizeof tally);
 	/*

@@ -249,8 +249,8 @@ int main(int argc, char **argv)
 		b.os = 2; b.pid = 5; b.ppid = 1;
 		b.exe = "/usr/bin/sleep"; b.comm = "sleep";
 		b.cmdline = "sleep 60";
-		b.environ = env;
-		b.environ_len = (uint32_t)(sizeof env - 1u);
+		b.env = env;
+		b.env_len = (uint32_t)(sizeof env - 1u);
 		b.net = "";                    /* no connections - the case */
 		b.fd0 = "/dev/null";
 		b.fd1 = "/dev/null";

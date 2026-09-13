@@ -22525,6 +22525,16 @@ int main(int argc, char **argv)
 	struct stat st;
 	int i, rc = 0;
 
+	/*
+	 * Before argv is read and before the console is touched.
+	 *
+	 * Two things on Windows: argv gets the name the command line actually
+	 * carried rather than what the ANSI codepage could spell, and the
+	 * console output page becomes UTF-8 so the bytes this prints are the
+	 * characters a reader sees. See kof_utf8_init.
+	 */
+	kof_utf8_init(&argc, &argv);
+
 	v = calloc(1, sizeof *v);
 	if (!v) {
 		fprintf(stderr, "kofviewer: out of memory\n");

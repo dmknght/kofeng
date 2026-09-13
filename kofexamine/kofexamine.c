@@ -2163,6 +2163,11 @@ int main(int argc, char **argv)
 	int dump = 0, verbose = 0, markers = 0, colour = -1;
 	int i, files = 0, bad = 0;
 
+	/* Before argv is read: on Windows it has already lost anything outside
+	 * the ANSI codepage, and a path it cannot spell is a file this could
+	 * not open. See kof_utf8_init. */
+	kof_utf8_init(&argc, &argv);
+
 	/* First pass: the options, wherever they are. */
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--dump") == 0) {

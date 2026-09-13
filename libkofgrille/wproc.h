@@ -101,18 +101,28 @@
  * a given one of those resolves is different for each. A rule written as "not
  * under System32" is wrong for three of the four unless it knows which it is
  * looking at.
+ *
+ *
+ * THE VOCABULARY IS kofevt's, AND THIS FILE NO LONGER HAS ONE OF ITS OWN.
+ *
+ * There was an enum kofw_arch here - UNKNOWN, X86, X64, ARM, ARM64 - and it was
+ * a value-for-value copy of enum kof_evt_arch, which kofevt.h already declares
+ * and which this header already has in scope. Nothing was gained by the second
+ * spelling and one thing was risked: kofw_proc.arch is a uint8_t that a record
+ * or a report will eventually be filled from, and those fields are typed as
+ * kof_evt_arch. The two agreed today by coincidence of ordering, so the
+ * conversion compiled, ran, and would have gone on being right until either
+ * list gained a value.
+ *
+ * That is the failure kofgrille.h describes at its own top, about verbs: two
+ * copies of one list "works exactly until the two copies disagree - and then
+ * the conversion between them compiles, runs, and files every module load as a
+ * process start". One list, declared where the neutral vocabulary lives.
+ *
+ * So: KOF_EARCH_* and kof_evt_arch_name. What stays local is enum
+ * kofw_integrity below, because a mandatory label is a Windows concept and
+ * there is no neutral one to defer to.
  */
-enum kofw_arch {
-	KOFW_ARCH_UNKNOWN = 0,
-	KOFW_ARCH_X86,
-	KOFW_ARCH_X64,
-	KOFW_ARCH_ARM,
-	KOFW_ARCH_ARM64,
-	KOFW_ARCH_COUNT
-};
-
-/* "x86", "x64", "arm", "arm64", or "?". Never NULL. */
-const char *kofw_arch_name(uint8_t arch);
 
 /*
  * The mandatory label, which is the cheapest answer to "could this have
@@ -211,7 +221,7 @@ struct kofw_proc {
 	uint32_t threads;      /* as of the snapshot */
 	uint32_t flags;        /* KOFW_PF_* */
 
-	uint8_t  arch;         /* enum kofw_arch */
+	uint8_t  arch;         /* enum kof_evt_arch - kofevt.h, not a local copy */
 	uint8_t  integrity;    /* enum kofw_integrity */
 	uint8_t  loc;          /* enum kof_evt_loc, of `image` */
 	uint8_t  reserved;

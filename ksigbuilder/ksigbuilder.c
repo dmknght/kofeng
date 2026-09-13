@@ -5958,6 +5958,10 @@ done:
 }
 int main(int argc, char **argv)
 {
+	/* Before either mode reads argv - see kof_utf8_init. A signature source
+	 * tree under a path with a non-codepage character was unreachable. */
+	kof_utf8_init(&argc, &argv);
+
 	if (argc > 1 && strcmp(argv[1], "--tree") == 0)
 		return tree_main(argc, argv);
 	return pack_main(argc, argv);

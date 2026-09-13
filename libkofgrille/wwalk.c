@@ -112,6 +112,37 @@ struct wwalk {
 	int      span_pe, have_span;
 
 	/*
+	 * WHAT THE SPAN IS, carried so the item can be NAMED.
+	 *
+	 * A span is several runs of one allocation, and the caller showing it
+	 * to somebody needs a word rather than an address - see
+	 * kof_walk_item.label. `use` is taken from the run that opened the
+	 * span, because that run is the allocation's base and is what the
+	 * allocation was made for; `flags` is OR-ed across every run, because
+	 * a PE header in the first page and executable code in the third are
+	 * both facts about the one thing.
+	 */
+	uint8_t  span_use;
+	uint32_t span_flags;
+
+	/*
+	 * WHERE THE FIRST WANTED RUN OF THE SPAN ACTUALLY BEGINS.
+	 *
+	 * `span_base` is the ALLOCATION base, deliberately: for a hand-mapped
+	 * image the PE header sits there and the executable runs do not, so a
+	 * span that began at the first executable run would hand the parser a
+	 * fragment starting nowhere near a header. Reaching back is the point.
+	 *
+	 * But an allocation base is not always readable. A thread stack is one
+	 * allocation whose lowest pages are RESERVED and never committed, so
+	 * the read at span_base returns nothing and take_span dropped the whole
+	 * span - measured, every stack in the process: 29 threads, 0 MEM_STACK
+	 * rows. This is what it falls back to, so an allocation whose base
+	 * cannot be read still yields the part that can.
+	 */
+	uint64_t span_first;
+
+	/*
 	 * THE UN-MAPPED COPY, held so it can be handed over as the item AFTER
 	 * the mapped one. next_item returns a single item, and a mapped image
 	 * is worth scanning twice - as the loader left it, and as its file
@@ -355,14 +386,63 @@ static int w_next_proc(void *self, struct kof_proc_build *out)
 }
 
 /* Read one span and hand it over. 0 when there was nothing readable in it. */
+/*
+ * The word for a region, in this tree's region vocabulary - see
+ * kof_walk_item.label, and a_label() in libkofantarc/awalk.c, which this
+ * deliberately mirrors.
+ *
+ * THE SAME WORDS ON BOTH PLATFORMS, and that is the whole point of writing it
+ * here rather than letting the caller invent them. A viewer showing a Linux
+ * process and a Windows one is one panel; if the two collectors spell the heap
+ * differently then a reader has to learn which machine they are looking at
+ * before they can read the tree, and every rule or filter written against the
+ * word has to know both spellings.
+ *
+ * This did not exist, so `label` was NULL on Windows and every region row fell
+ * back to being named by its address - which is the thing kof_walk_item.label
+ * says in as many words is useless to a reader: "a row reading
+ * 00007fce21b7f000 tells a reader nothing they can act on".
+ *
+ * The three flag cases come first because they are what is worth seeing: a
+ * module laid out by hand, code running out of a data mapping, and an image
+ * page somebody wrote to. Each of those is a fact about HOW the memory got
+ * that way, which outranks what it is nominally for.
+ */
+static const char *w_label(uint8_t use, uint32_t flags)
+{
+	if (flags & KOFW_RGF_PE)
+		return "MEM_MANUALMAP";
+	if (flags & KOFW_RGF_DATA_EXEC)
+		return "MEM_DATAEXEC";
+	/*
+	 * An executable image page that has stopped being shared is one
+	 * somebody WROTE - an inline hook, a blown-away AMSI stub, a hollowed
+	 * section. wproc only computes this for executable image regions, so
+	 * the word is never spent on ordinary copy-on-write in .data.
+	 */
+	if (flags & KOFW_RGF_DIRTY_IMAGE)
+		return "MEM_IMAGE_DIRTY";
+
+	switch (use) {
+	case KOFW_USE_HEAP:  return "MEM_HEAP";
+	case KOFW_USE_STACK: return "MEM_STACK";
+	case KOFW_USE_CODE:  return "MEM_CODE";
+	case KOFW_USE_DATA:  return "MEM_DATA";
+	case KOFW_USE_IMAGE: return "MEM_IMAGE";
+	default:             return "MEM_ANON";
+	}
+}
+
 static int take_span(struct wwalk *w, struct kof_walk_item *out)
 {
-	uint64_t size = w->span_end - w->span_base;
+	uint64_t at = w->span_base;
+	uint64_t size;
 	size_t want, got;
 
 	w->have_span = 0;
-	if (!size)
+	if (w->span_end <= at)
 		return 0;
+	size = w->span_end - at;
 	want = size > W_MAX_SPAN ? (size_t)W_MAX_SPAN : (size_t)size;
 	if (!grow(w, want))
 		return 0;
@@ -374,15 +454,39 @@ static int take_span(struct wwalk *w, struct kof_walk_item *out)
 	 * what it got, and thirty-nine pages of forty are still worth
 	 * scanning.
 	 */
-	got = kofw_pmem_read(w->mem, w->span_base, w->buf, want);
+	got = kofw_pmem_read(w->mem, at, w->buf, want);
+
+	/*
+	 * NOTHING AT THE ALLOCATION BASE IS NOT AN EMPTY SPAN.
+	 *
+	 * The lowest pages of an allocation can be reserved rather than
+	 * committed - every thread stack is shaped that way - and then the read
+	 * above returns zero for a span that has perfectly readable bytes
+	 * further up. Dropping it was silent: 29 threads in this process and
+	 * not one MEM_STACK row, because each stack's span started at a base
+	 * that cannot be read.
+	 *
+	 * So the first WANTED run is the second attempt. It is only a fallback
+	 * and not the first choice, because starting there loses the reach back
+	 * to a PE header that span_base exists for.
+	 */
+	if (!got && w->span_first > at && w->span_first < w->span_end) {
+		at   = w->span_first;
+		size = w->span_end - at;
+		want = size > W_MAX_SPAN ? (size_t)W_MAX_SPAN : (size_t)size;
+		if (!grow(w, want))
+			return 0;
+		got = kofw_pmem_read(w->mem, at, w->buf, want);
+	}
 	if (!got)
 		return 0;
 	w->bytes += got;
 
-	out->kind = KOF_WALK_BYTES;
-	out->addr = w->span_base;
-	out->p    = w->buf;
-	out->len  = (uint64_t)got;
+	out->kind  = KOF_WALK_BYTES;
+	out->addr  = at;
+	out->p     = w->buf;
+	out->len   = (uint64_t)got;
+	out->label = w_label(w->span_use, w->span_flags);
 
 	if (w->span_pe) {
 		/*
@@ -443,6 +547,15 @@ static int take_nameless_module(struct wwalk *w, const struct kofw_module *md,
 	out->addr = md->base;
 	out->p    = w->buf;
 	out->len  = (uint64_t)got;
+	/*
+	 * A module the loader lists and no file holds - it was deleted or
+	 * renamed after the load, or it never had a name. Its own word, because
+	 * it is neither ordinary image memory nor an anonymous allocation, and
+	 * because that is a fact worth seeing in a tree. awalk.c spells the
+	 * same shape MEM_DELETED.
+	 */
+	out->label = (md->flags & KOFW_MDF_NO_FILE) ? "MEM_DELETED"
+						    : "MEM_UNNAMED";
 
 	memset(&w->hint, 0, sizeof w->hint);
 	w->hint.layout   = KOF_PE_LAYOUT_MAPPED;
@@ -508,6 +621,37 @@ static int w_next_item(void *self, struct kof_walk_item *out)
 		 */
 		want_it = (w->rg.use == KOFW_USE_CODE) ||
 			  (w->rg.flags & KOFW_RGF_DATA_EXEC) != 0;
+
+		/*
+		 * MAPPING THE ADDRESS SPACE IS A DIFFERENT QUESTION FROM
+		 * SCANNING IT, and the set above is the answer to the second
+		 * one only.
+		 *
+		 * A reader who opened a process wants to see what is IN it -
+		 * the heap, the stacks, the private data - not just the two
+		 * kinds of memory a rule would be run over. awalk.c makes
+		 * exactly this distinction on Linux and says why: "every region
+		 * with bytes in it is worth a row, not only the ones with no
+		 * file behind them... which is what view the memory map means".
+		 *
+		 * Windows had no such branch, so the viewer opening a process
+		 * here got the files behind the mappings and the unbacked
+		 * executable spans and NOTHING ELSE - no heap, no stack, no
+		 * memory map. The same panel on Linux showed all three.
+		 *
+		 * The test is "nothing on disk accounts for these bytes", which
+		 * is `path` being empty - the Windows counterpart of awalk's
+		 * `!rg.inode`. A file-backed region is already offered as a
+		 * FILE item, so including it here would list it twice.
+		 *
+		 * IT COSTS NOTHING ON A SWEEP. A scan asks for KOF_WALK_SCAN
+		 * and never reaches this line; only a caller that asked to map
+		 * one process pays for it, and that caller has its own time
+		 * bound - see PROC_COLLECT_MS in kofviewer.
+		 */
+		if (w->o.intent == KOF_WALK_MAP && !w->rg.path[0])
+			want_it = 1;
+
 		if (w->rg.flags & KOFW_RGF_GUARD)
 			want_it = 0;
 
@@ -523,14 +667,20 @@ static int w_next_item(void *self, struct kof_walk_item *out)
 			continue;
 
 		if (!w->have_span) {
-			w->span_base = w->rg.alloc_base;
-			w->span_end  = w->rg.base + w->rg.size;
-			w->span_pe   = (w->rg.flags & KOFW_RGF_PE) != 0;
-			w->have_span = 1;
+			w->span_base  = w->rg.alloc_base;
+			w->span_first = w->rg.base;
+			w->span_end   = w->rg.base + w->rg.size;
+			w->span_pe    = (w->rg.flags & KOFW_RGF_PE) != 0;
+			w->span_use   = w->rg.use;
+			w->span_flags = w->rg.flags;
+			w->have_span  = 1;
 		} else {
 			if (w->rg.base + w->rg.size > w->span_end)
 				w->span_end = w->rg.base + w->rg.size;
 			w->span_pe |= (w->rg.flags & KOFW_RGF_PE) != 0;
+			/* OR-ed, not replaced: see span_flags. `use` stays the
+			 * opening run's, which is the allocation's base. */
+			w->span_flags |= w->rg.flags;
 		}
 	}
 

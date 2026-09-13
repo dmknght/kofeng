@@ -114,8 +114,8 @@ uint32_t kof_proc_build_rec(const struct kof_proc_build *b, void *buf,
 		r->off_cmdline = put(a, cap, &at, b->cmdline, &over);
 		/* Between the command line and the descriptors, so the arena
 		 * stays in region order - see the partition in proc_parse.c. */
-		r->off_environ = put_n(a, cap, &at, b->environ,
-				       b->environ_len, &over);
+		r->off_environ = put_n(a, cap, &at, b->env,
+				       b->env_len, &over);
 		r->off_net     = put(a, cap, &at, b->net, &over);
 		r->off_fd0     = put(a, cap, &at, b->fd0, &over);
 		r->off_fd1     = put(a, cap, &at, b->fd1, &over);

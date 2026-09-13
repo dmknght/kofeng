@@ -65,8 +65,8 @@ static void to_build(const struct kofa_proc *p, struct kof_proc_build *b)
 	b->exe = p->exe;
 	b->comm = p->comm;
 	b->cmdline = p->cmdline;
-	b->environ = p->environ;
-	b->environ_len = p->environ_len;
+	b->env = p->environ;
+	b->env_len = p->environ_len;
 	b->net = p->net;
 	b->fd0 = p->fd_stdin;
 	b->fd1 = p->fd_stdout;

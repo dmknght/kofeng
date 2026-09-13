@@ -58,6 +58,143 @@
 #include <io.h>
 
 #include <string.h>
+#include <locale.h>
+
+/*
+ * A FILE THIS COULD NOT OPEN IS A FILE NOBODY SCANNED, AND ON WINDOWS THAT WAS
+ * EVERY FILE WHOSE NAME LEFT THE ANSI CODEPAGE.
+ *
+ * Two separate losses, and both happen before any code in this tree runs.
+ *
+ * ARGV ARRIVES ALREADY DESTROYED. A Windows process is given its command line
+ * as UTF-16 and the C runtime converts it to the ANSI codepage to build the
+ * narrow argv that main() receives. Anything the codepage cannot spell is
+ * best-fit mapped or replaced with a question mark, irreversibly. Measured on
+ * this host, ACP 1252, the path "chartest\hoa don Duc.bin" with Vietnamese
+ * diacritics:
+ *
+ *     narrow argv   68 F3 61 20 64 6F 6E 20 D0 3F 63    "h.a don .?c"
+ *     wide, as UTF-8 68 C3 B3 61 20 C4 91 C6 A1 6E 20 C4 90 E1 BB A9 63
+ *
+ * `don` was `don` with two diacritics, `Duc` had three; one became 0x3F. The
+ * name is gone, so fopen(argv[1]) fails and the tool reports a file it cannot
+ * open - which is indistinguishable from a permission error and is NOT
+ * indistinguishable from a clean scan, but is very much indistinguishable from
+ * "this file was checked" in a summary that counts what it managed.
+ *
+ * THE NARROW PATH FUNCTIONS DO NOT SPEAK UTF-8 EITHER. Even handed correct
+ * UTF-8 bytes, fopen and stat convert them through the ANSI codepage and look
+ * for a file that does not exist. Measured: fopen FAILED, stat FAILED, on the
+ * name above, with the bytes correct.
+ *
+ * So a payload named with one character outside the machine's codepage cannot
+ * be opened by any tool in this tree. That is not a display problem; it is a
+ * hole a person can walk a file through, and it costs them one keystroke.
+ *
+ *
+ * WHAT THIS DOES, AND WHY IT IS TWO CALLS AND NOT A REWRITE.
+ *
+ * setlocale(LC_CTYPE, ".UTF8") makes the UCRT's narrow path functions - fopen,
+ * open, stat, opendir, every one of them - interpret their argument as UTF-8.
+ * Measured: fopen OK, stat OK, on bytes that failed a line earlier. The whole
+ * open/stat/readdir surface is fixed without a single call site changing, which
+ * is the entire reason this is one line instead of a wide-character port.
+ *
+ * LC_CTYPE AND NOT LC_ALL, and the difference is not tidiness. LC_ALL would
+ * take LC_NUMERIC with it, and on a machine whose locale uses a decimal comma
+ * every "%.1f" in every report would change what it prints and every strtod
+ * would change what it reads. Character classification is the only part of the
+ * locale this needs.
+ *
+ * GetACP() is deliberately left alone - it still reports 1252 here afterwards.
+ * Nothing else in the process changes behaviour; only the CRT's idea of what
+ * its own narrow strings are encoded in.
+ *
+ * Then argv is rebuilt from the command line Windows actually gave, which is
+ * the only copy that still has the name in it.
+ */
+static inline void kof_utf8_restore_cp(void);
+
+static UINT kof_saved_out_cp;
+
+static inline void kof_utf8_restore_cp(void)
+{
+	if (kof_saved_out_cp)
+		SetConsoleOutputCP(kof_saved_out_cp);
+}
+
+static inline void kof_utf8_init(int *argc, char ***argv)
+{
+	wchar_t **wv;
+	char **nv;
+	int wc = 0, i;
+
+	setlocale(LC_CTYPE, ".UTF8");
+
+	/*
+	 * So the bytes this now prints are the characters a reader sees. The
+	 * previous code page is put back at exit: it is console state that
+	 * outlives the process, and a tool that leaves a shell in a mode it
+	 * did not ask for has broken something it does not own.
+	 */
+	kof_saved_out_cp = GetConsoleOutputCP();
+	if (kof_saved_out_cp && kof_saved_out_cp != CP_UTF8) {
+		if (SetConsoleOutputCP(CP_UTF8))
+			atexit(kof_utf8_restore_cp);
+		else
+			kof_saved_out_cp = 0;
+	} else {
+		kof_saved_out_cp = 0;
+	}
+
+	if (!argc || !argv)
+		return;
+
+	wv = CommandLineToArgvW(GetCommandLineW(), &wc);
+	if (!wv || wc <= 0)
+		return;              /* keep the lossy argv: it is all there is */
+
+	nv = calloc((size_t)wc + 1u, sizeof *nv);
+	if (!nv) {
+		LocalFree(wv);
+		return;
+	}
+	for (i = 0; i < wc; i++) {
+		int n = WideCharToMultiByte(CP_UTF8, 0, wv[i], -1, NULL, 0,
+					    NULL, NULL);
+
+		if (n <= 0)
+			goto give_up;
+		nv[i] = malloc((size_t)n);
+		if (!nv[i])
+			goto give_up;
+		if (WideCharToMultiByte(CP_UTF8, 0, wv[i], -1, nv[i], n,
+					NULL, NULL) <= 0)
+			goto give_up;
+	}
+	nv[wc] = NULL;
+	LocalFree(wv);
+	/*
+	 * NOT FREED, and that is deliberate rather than overlooked: this is
+	 * argv, it is read for the whole life of the process, and the process
+	 * is about to exit when it stops being read. Freeing it would need a
+	 * teardown hook in every tool for memory the OS reclaims anyway.
+	 */
+	*argc = wc;
+	*argv = nv;
+	return;
+
+give_up:
+	/*
+	 * A PARTIAL argv IS WORSE THAN A LOSSY ONE. Half-converted arguments
+	 * would have a tool scanning one path and skipping another with no
+	 * indication, so the original is kept whole.
+	 */
+	for (i = 0; i < wc; i++)
+		free(nv[i]);
+	free(nv);
+	LocalFree(wv);
+}
 
 /* See the header comment: not a verified equivalent, only the closest
  * available primitive until reparse-point behaviour is checked for real. */
@@ -277,6 +414,22 @@ static inline const void *kof_memmem(const void *hay, size_t hlen,
 static inline int kof_mkdir(const char *path, int mode)
 {
 	return mkdir(path, (mode_t)mode);
+}
+
+/*
+ * NOTHING TO DO, and the reason is worth one line rather than a bare no-op.
+ *
+ * A POSIX path is a byte string. The kernel neither knows nor cares what
+ * encoding those bytes are in, argv carries them through untouched, and open()
+ * hands them back exactly as given - so a name in UTF-8, in Shift-JIS, or in
+ * no encoding at all opens either way. There is no conversion here to get
+ * wrong, which is precisely why the Windows half of this file needs two calls
+ * to reach the same place.
+ */
+static inline void kof_utf8_init(int *argc, char ***argv)
+{
+	(void)argc;
+	(void)argv;
 }
 
 static inline int kof_lstat(const char *path, struct stat *st)

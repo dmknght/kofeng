@@ -98,17 +98,6 @@
 
 /* ------------------------------------------------------------------ names */
 
-const char *kofw_arch_name(uint8_t arch)
-{
-	switch (arch) {
-	case KOFW_ARCH_X86:   return "x86";
-	case KOFW_ARCH_X64:   return "x64";
-	case KOFW_ARCH_ARM:   return "arm";
-	case KOFW_ARCH_ARM64: return "arm64";
-	default:              return "?";
-	}
-}
-
 const char *kofw_integrity_name(uint8_t integ)
 {
 	switch (integ) {
@@ -274,11 +263,11 @@ static pfn_wow64_2 resolve_wow64_2(void)
 static uint8_t arch_of_machine(USHORT machine)
 {
 	switch (machine) {
-	case IMAGE_FILE_MACHINE_I386:  return KOFW_ARCH_X86;
-	case IMAGE_FILE_MACHINE_AMD64: return KOFW_ARCH_X64;
-	case IMAGE_FILE_MACHINE_ARMNT: return KOFW_ARCH_ARM;
-	case IMAGE_FILE_MACHINE_ARM64: return KOFW_ARCH_ARM64;
-	default:                       return KOFW_ARCH_UNKNOWN;
+	case IMAGE_FILE_MACHINE_I386:  return KOF_EARCH_X86;
+	case IMAGE_FILE_MACHINE_AMD64: return KOF_EARCH_X86_64;
+	case IMAGE_FILE_MACHINE_ARMNT: return KOF_EARCH_ARM;
+	case IMAGE_FILE_MACHINE_ARM64: return KOF_EARCH_ARM64;
+	default:                       return KOF_EARCH_UNKNOWN;
 	}
 }
 
@@ -313,7 +302,7 @@ static void fill_arch(HANDLE h, struct kofw_proc *p)
 	}
 
 	if (IsWow64Process(h, &wow) && wow) {
-		p->arch = KOFW_ARCH_X86;
+		p->arch = KOF_EARCH_X86;
 		p->flags |= KOFW_PF_WOW64;
 	}
 }

@@ -1088,7 +1088,16 @@ ifeq ($(NATIVE_OS),windows)
 SCANNER_EXTRA = libkofgrille/wwalk.c libkofgrille/wproc.c \
                 libkofgrille/wcmdline.c libkofgrille/wtext.c \
                 $(KOFPROC_SRC) $(KOFRIDGE_SRC) $(KOFEVT_SRC)
-SCANNER_INC   = -Ilibkofgrille -Ilibkoforbit/kofevt -Ilibkoforbit/kofmon \
+#
+# -Ilibkofeng IS IN THIS LIST AND NOT LEFT TO $(SDK)/include.
+#
+# wwalk.c includes kofunpack/pe_unmap.h - it un-maps a hand-mapped image before
+# handing it over, which is the whole point of it - and kofunpack is NOT among
+# the headers copied into the SDK include directory. kofeng.h and kofmod/pe.h
+# are, which is why those two resolved and this one did not, and why the failure
+# read as a missing file rather than as a missing flag.
+SCANNER_INC   = -Ilibkofgrille -Ilibkofeng -Ilibkoforbit/kofevt \
+                -Ilibkoforbit/kofmon \
                 -Ilibkoforbit/kofproc -Ilibkoforbit/koffridge \
                 -Ilibkoforbit/kofwalk
 #
@@ -1186,7 +1195,9 @@ $(OUT)/bin/kofexamine$(EXE): $(EXAMINE_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
 ifeq ($(NATIVE_OS),windows)
 VIEWER_PROC := libkofgrille/wwalk.c libkofgrille/wproc.c \
                libkofgrille/wcmdline.c libkofgrille/wtext.c $(KOFPROC_SRC)
-VIEWER_PROC_INC := -Ilibkofgrille
+# -Ilibkofeng for the same reason SCANNER_INC needs it: wwalk.c reaches
+# kofunpack/pe_unmap.h, which the SDK include directory does not carry.
+VIEWER_PROC_INC := -Ilibkofgrille -Ilibkofeng
 VIEWER_PROC_LIB := -ladvapi32 -lpsapi
 else
 VIEWER_PROC := $(ANTARC_SRC) libkofantarc/awalk.c $(KOFPROC_SRC)
@@ -1627,7 +1638,36 @@ FIXTURES := $(TEST)/fixtures
 fixtures: | $(TEST)
 	@$(MKFIXTURES) $(FIXTURES)
 
-UNIT_SRC := $(wildcard tests/unit/*.c)
+#
+# A WILDCARD, MINUS THE TESTS THIS HOST CANNOT BUILD.
+#
+# The wildcard is right - a test added to tests/unit is a test that runs, with
+# nothing to remember to edit - and it was picking up two that cannot compile
+# here. antarc_fan drives fanotify and antarc_walk forks children and reads
+# /proc; both link libkofantarc, which is the LINUX collector. On Windows they
+# are not failing tests, they are tests for another platform, and `make unit`
+# stopping on them is a gate that cannot pass rather than a finding.
+#
+# NAMED, NOT GUESSED FROM THE FILENAME. A prefix rule - "anything called
+# antarc_* is Linux" - is the kind of convention that silently excludes the
+# first test somebody names badly, and a test that never runs is worse than a
+# test that fails. Adding a row here is the cost of that.
+#
+# The reverse list is empty today: every test that exercises the Windows
+# collector does it through the parts with no Windows API in them - see
+# tests/unit/grille_host.c - so it builds and runs on either host. When one
+# genuinely needs Windows, it goes in UNIT_SKIP_POSIX.
+UNIT_SKIP_WINDOWS := antarc_fan antarc_walk
+UNIT_SKIP_POSIX   :=
+
+ifeq ($(NATIVE_OS),windows)
+UNIT_SKIP := $(UNIT_SKIP_WINDOWS)
+else
+UNIT_SKIP := $(UNIT_SKIP_POSIX)
+endif
+
+UNIT_SRC := $(filter-out $(addprefix tests/unit/,$(addsuffix .c,$(UNIT_SKIP))),\
+                         $(wildcard tests/unit/*.c))
 UNIT_BIN := $(patsubst tests/unit/%.c,$(TEST)/unit_%$(EXE),$(UNIT_SRC))
 
 # Linked against the library, so a unit test can exercise it rather than only

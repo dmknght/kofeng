@@ -48,6 +48,7 @@
 #include <string.h>
 
 #include "kofeng.h"
+#include "core/kofplatform.h"
 #include <kofmod/kofsig.h>   /* KOF_EVT_AMSI - the target a submission is */
 #include "kofevt.h"
 #include "kofevtfmt.h"
@@ -378,6 +379,9 @@ int main(int argc, char **argv)
 	uint64_t t0 = 0;
 	int      have_t0 = 0;
 	struct hit_ctx hits;
+
+	/* argv and a log path, before either is read - see kof_utf8_init. */
+	kof_utf8_init(&argc, &argv);
 
 	memset(&tally, 0, sizeof tally);
 	memset(&hits, 0, sizeof hits);

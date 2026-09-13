@@ -143,6 +143,7 @@
  * the cross block and keeps libkofgrille type-checked on a machine with no ETW.
  */
 #include "kofeng.h"
+#include "core/kofplatform.h"
 #include "kofreport.h"
 
 /* ---------------------------------------------- answering the report's question
@@ -1423,6 +1424,8 @@ int main(int argc, char **argv)
 	 * an event count - a run with no log passes KOF_REP_NO_INDEX. */
 	uint64_t rep_index = 0;
 	enum kof_rep_end how = KOF_END_UNKNOWN;
+
+	kof_utf8_init(&argc, &argv);
 
 	memset(&tally, 0, sizeof tally);
 	/* 32MB. The old 16384 was sized for process events alone; with the
