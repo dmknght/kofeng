@@ -6227,11 +6227,27 @@ static int save_ok(struct view *v)
 		return 0;
 	if (draft_missing_of(&v->ed, 0))
 		return 0;
-	/* A draft with a file behind it: only an actual change is worth
-	 * writing. Without a file it is a new module, and the thing to refuse
-	 * is one the tree already holds. */
+	/*
+	 * WHETHER ANYTHING CHANGED IS NOT A REASON TO REFUSE.
+	 *
+	 * This used to answer draft_dirty for a draft that already has a file,
+	 * and the result was a Save button that was grey when it should not
+	 * have been. draft_dirty is a HASH of what the editor thinks the draft
+	 * is, and a hash that does not cover every editable field says "nothing
+	 * changed" after a change - which is exactly what was seen: edit a
+	 * value inside a matcher and Save goes grey, switch which signature is
+	 * being viewed and it comes back.
+	 *
+	 * A hash that has to enumerate every field to stay correct is a thing
+	 * that will drift again the next time a field is added, and the cost of
+	 * being wrong is the reader losing work. Writing a file that happens to
+	 * be identical costs a write. So the change test is gone and only the
+	 * VALIDITY tests remain - a missing family name, a string no matcher
+	 * uses, a matcher no condition uses, a bad region. Those describe a
+	 * draft that cannot be written correctly, which is a real refusal.
+	 */
 	if (v->ed.dr.gen_path[0])
-		return draft_dirty(&v->ed);
+		return 1;
 	return !(draft_dup(&v->ed, &near_miss) && !near_miss);
 }
 
@@ -6241,7 +6257,10 @@ static int save_as_ok(struct view *v)
 
 	if (!v->ed.basedir || !v->ed.basedir[0])
 		return 0;
-	if (draft_missing_of(&v->ed, 1) || !v->ed.dr.gen_path[0] || !draft_dirty(&v->ed))
+	/* No change test here either - see save_ok. Save As still needs a file
+	 * to be a copy OF, and still refuses a copy that would duplicate
+	 * something the tree already holds. */
+	if (draft_missing_of(&v->ed, 1) || !v->ed.dr.gen_path[0])
 		return 0;
 	return !(draft_dup(&v->ed, &near_miss) && !near_miss);
 }
@@ -8654,7 +8673,6 @@ static void draw_decl_head(struct out *o, struct view *v)
 		const char *why = draft_missing(&v->ed);
 		int near_miss = 0;
 		const char *dup = why ? NULL : draft_dup(&v->ed, &near_miss);
-		int changed = draft_dirty(&v->ed);
 
 		c = 2 + (int)o->col_hint;
 		if (!v->ed.dr.gen_path[0]) {
@@ -8681,7 +8699,7 @@ static void draw_decl_head(struct out *o, struct view *v)
 		 * button they pushed the controls sideways as they changed
 		 * length, on the row that already carries every declaration.
 		 */
-		(void)why; (void)dup; (void)near_miss; (void)changed;
+		(void)why; (void)dup; (void)near_miss;
 	}
 
 	/* No label: the box says what it is, and the row is already a line of
@@ -18736,36 +18754,148 @@ static void symd_open(struct view *v)
  */
 
 
-static int goto_top(void)
-{
-	return g_rows - GOTO_H - 1;
-}
-
-/* A row of the box, from column one so the border owns the left edge. */
-static void goto_row(struct out *o, int y)
-{
-	out_at(o, y, 1);
-	o->col_hint = 0;
-}
-
-static int find_top(void)
-{
-	return g_rows - FIND_H - 1;
-}
+/*
+ * A CENTRED BOX WITH A SMOOTH BORDER - the frame three dialogs were each
+ * drawing for themselves.
+ *
+ * Find drew no border at all and cleared to the end of the line; Go to drew a
+ * full-width box out of G_TL/G_H/G_TR by hand; the properties page has its own
+ * inside page_draw. Three implementations of one rectangle, and they disagreed
+ * about where a dialog sits - two of them pinned to the bottom edge, which is
+ * where a status bar goes, not where a question goes.
+ *
+ * THE ROWS ARE NOT PRE-FILLED, and that is the constraint the API is shaped
+ * around. A frame that painted blank rows for the caller to overwrite would put
+ * every row through a blank state inside one frame, which is exactly the
+ * flicker-while-typing that find_row's comment records. So a row is opened,
+ * written by the caller, and closed - the same three steps goto_row and
+ * goto_edge already had, generalised to a box that is not the width of the
+ * screen.
+ */
+struct dframe {
+	int y, x;                       /* top-left of the box itself */
+	int w, h;                       /* including the border */
+	int ix;                         /* first column INSIDE, for a row */
+	int iw;                         /* columns available inside */
+	int btn_y, btn_x0, btn_x1;      /* the close control, or -1 */
+};
 
 /*
- * A row of the dialog: positioned, written, then cleared to the edge.
- *
- * Not cleared first. Every row here used to erase to the end of the line before
- * anything was written into it, so each keystroke put the whole dialog through
- * a blank state before it came back - which is what the flicker while typing
- * was.
+ * Position and draw the top rule. Returns 0 when the terminal is too small to
+ * draw the box honestly, and the caller draws nothing at all - a box clipped to
+ * a screen that cannot hold it is worse than no box.
  */
-static void find_row(struct out *o, int y)
+static int dframe_begin(struct out *o, struct dframe *f, const char *title,
+			int want_w, int want_h, int close)
 {
-	out_at(o, y, 3);
+	static const char btn[] = "[ Close ]";
+	int i, fill;
+
+	f->btn_y = f->btn_x0 = f->btn_x1 = -1;
+	f->w = want_w;
+	if (f->w > g_cols - 4)
+		f->w = g_cols - 4;
+	f->h = want_h;
+	if (f->h > g_rows - 4)
+		f->h = g_rows - 4;
+	if (f->w < 24 || f->h < 3)
+		return 0;
+	f->x = (g_cols - f->w) / 2 + 1;
+	if (f->x < 2)
+		f->x = 2;
+	/*
+	 * A THIRD OF THE WAY DOWN, not halfway.
+	 *
+	 * A box centred vertically sits over the hex pane's middle, which is
+	 * where the reader was looking when they opened it. Higher leaves the
+	 * rows under the cursor visible, and a dialog that asks about what is
+	 * on screen should not be standing on it.
+	 */
+	f->y = (g_rows - f->h) / 3;
+	if (f->y < 2)
+		f->y = 2;
+	f->ix = f->x + 2;
+	f->iw = f->w - 4;
+
+	out_at(o, f->y, f->x);
+	o->col_hint = 0;
+	out_str(o, A_DIM);
+	out_glyph(o, G_TL);
+	out_glyph(o, G_H);
+	out_fmt(o, A_OFF A_BOLD " %s " A_OFF A_DIM, title ? title : "");
+	fill = f->w - 4 - (title ? (int)strlen(title) : 0) - 2;
+	if (close)
+		fill -= (int)sizeof btn;
+	if (fill < 0)
+		fill = 0;
+	for (i = 0; i < fill; i++)
+		out_glyph(o, G_H);
+	if (close) {
+		f->btn_y = f->y;
+		f->btn_x0 = f->x + (int)o->col_hint;
+		out_fmt(o, A_OFF A_ID "%s" A_OFF A_DIM, btn);
+		f->btn_x1 = f->x + (int)o->col_hint - 1;
+	}
+	out_glyph(o, G_H);
+	out_glyph(o, G_TR);
+	out_str(o, A_OFF);
+	return 1;
+}
+
+/* Open row `r` (0 based, inside the frame): the left wall, then the cursor
+ * where the caller writes. */
+static void dframe_row(struct out *o, const struct dframe *f, int r)
+{
+	out_at(o, f->y + 1 + r, f->x);
+	o->col_hint = 0;
+	out_str(o, A_DIM);
+	out_glyph(o, G_V);
+	out_str(o, A_OFF " ");
+	out_at(o, f->y + 1 + r, f->ix);
 	o->col_hint = 0;
 }
+
+/* Close the row the caller has just written: pad to the edge, then the wall. */
+static void dframe_edge(struct out *o, const struct dframe *f)
+{
+	while ((int)o->col_hint < f->iw)
+		out_str(o, " ");
+	out_str(o, A_DIM " ");
+	out_glyph(o, G_V);
+	out_str(o, A_OFF);
+}
+
+/* The bottom rule, with an optional caption sitting on it. */
+static void dframe_end(struct out *o, const struct dframe *f, const char *foot)
+{
+	int i, fill;
+
+	out_at(o, f->y + f->h - 1, f->x);
+	o->col_hint = 0;
+	out_str(o, A_DIM);
+	out_glyph(o, G_BL);
+	out_glyph(o, G_H);
+	if (foot && foot[0])
+		out_fmt(o, " %s ", foot);
+	fill = f->w - 3 - (foot && foot[0] ? (int)strlen(foot) + 2 : 0);
+	for (i = 0; i < fill; i++)
+		out_glyph(o, G_H);
+	out_glyph(o, G_BR);
+	out_str(o, A_OFF);
+}
+
+/* The close control's box is recorded in the frame for whoever draws one; no
+ * dialog here asks for it yet, so the hit test lives with its first caller
+ * rather than sitting unused. */
+
+/*
+ * WHERE EACH DIALOG'S BOX ENDED UP, recorded as it is drawn and read when it is
+ * clicked - the same arrangement g_prop_tab_* uses for the tables, and for the
+ * same reason: the geometry exists in one place, the drawing, and a second copy
+ * of the arithmetic in the click handler is a second thing to keep in step.
+ */
+static struct dframe g_goto_f, g_find_f;
+
 
 /*
  * The number typed in, or KOF_BROKEN when it is not one.
@@ -18844,30 +18974,14 @@ static void goto_take(struct view *v)
  * before Enter commits to it.
  */
 /* Fill the row out to the right border and close it. */
-static void goto_edge(struct out *o)
-{
-	while ((int)o->col_hint < g_cols - 1)
-		out_str(o, " ");
-	out_glyph(o, G_V);
-}
-
 static void draw_goto(struct out *o, struct view *v)
 {
-	int top = goto_top(), i;
+	struct dframe *f = &g_goto_f;
 	uint64_t val = goto_value(v);
 	int ok = val != KOF_BROKEN;
 
-	if (top < 1 || g_cols < 24)
-		return;                 /* no room to draw a box honestly */
-
-	/* Top border. */
-	goto_row(o, top);
-	out_str(o, A_DIM);
-	out_glyph(o, G_TL);
-	for (i = 0; i < g_cols - 2; i++)
-		out_glyph(o, G_H);
-	out_glyph(o, G_TR);
-	out_str(o, A_OFF);
+	if (!dframe_begin(o, f, "Go to", 64, GOTO_H, 0))
+		return;
 
 	/*
 	 * The field and what the number is measured from.
@@ -18878,11 +18992,8 @@ static void draw_goto(struct out *o, struct view *v)
 	 * dialog's boxes have been two columns off for exactly that reason -
 	 * see the note on col_base - and this box is not going to repeat it.
 	 */
-	goto_row(o, top + 1);
-	out_str(o, A_DIM);
-	out_glyph(o, G_V);
-	out_str(o, A_OFF);
-	out_fmt(o, A_DIM " Go to " A_OFF);
+	dframe_row(o, f, 0);
+	out_fmt(o, A_DIM "Go to " A_OFF);
 	v->g_txt[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, "%s[", v->edit == 520 ? A_SEL : A_ID);
 	field_draw(o, v->gotobuf, v->caret, &v->goto_off, 18,
@@ -18893,9 +19004,7 @@ static void draw_goto(struct out *o, struct view *v)
 	v->g_mode[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, "%s[%s]" A_OFF, A_ID, v->goto_file ? "File" : "Region");
 	v->g_mode[1] = o->col_base + (int)o->col_hint - 1;
-	out_str(o, A_DIM);
-	goto_edge(o);
-	out_str(o, A_OFF);
+	dframe_edge(o, f);
 
 	/*
 	 * WHAT THE NUMBER RESOLVED TO, while it is being typed.
@@ -18905,29 +19014,20 @@ static void draw_goto(struct out *o, struct view *v)
 	 * commits to it, and a field that is not a number says so rather than
 	 * waiting for the jump to fail.
 	 */
-	goto_row(o, top + 2);
-	out_str(o, A_DIM);
-	out_glyph(o, G_V);
-	out_str(o, A_OFF);
+	dframe_row(o, f, 1);
 	if (!v->gotobuf[0])
-		out_fmt(o, A_DIM " hex by default - 0x for hex, 0n for decimal"
+		out_fmt(o, A_DIM "hex by default - 0x for hex, 0n for decimal"
 			A_OFF);
 	else if (!ok)
-		out_fmt(o, " %snot a number" A_OFF, A_WARN);
+		out_fmt(o, "%snot a number" A_OFF, A_WARN);
 	else
-		out_fmt(o, A_DIM " = " A_OFF "%s0x%llx" A_OFF A_DIM
+		out_fmt(o, A_DIM "= " A_OFF "%s0x%llx" A_OFF A_DIM
 			" = %llu, from the %s" A_OFF, A_ID,
 			(unsigned long long)val, (unsigned long long)val,
 			v->goto_file ? "file" : "region");
-	out_str(o, A_DIM);
-	goto_edge(o);
-	out_str(o, A_OFF);
+	dframe_edge(o, f);
 
-	goto_row(o, top + 3);
-	out_str(o, A_DIM);
-	out_glyph(o, G_V);
-	out_str(o, A_OFF);
-	out_str(o, " ");
+	dframe_row(o, f, 2);
 	v->g_go[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, "%s[ Go ]" A_OFF, ok ? A_ID : A_DIM);
 	v->g_go[1] = o->col_base + (int)o->col_hint - 1;
@@ -18935,18 +19035,9 @@ static void draw_goto(struct out *o, struct view *v)
 	v->g_cancel[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, A_ID "[ Cancel ]" A_OFF);
 	v->g_cancel[1] = o->col_base + (int)o->col_hint - 1;
-	out_str(o, A_DIM);
-	goto_edge(o);
-	out_str(o, A_OFF);
+	dframe_edge(o, f);
 
-	/* Bottom border. */
-	goto_row(o, top + 4);
-	out_str(o, A_DIM);
-	out_glyph(o, G_BL);
-	for (i = 0; i < g_cols - 2; i++)
-		out_glyph(o, G_H);
-	out_glyph(o, G_BR);
-	out_str(o, A_OFF);
+	dframe_end(o, f, NULL);
 }
 
 /*
@@ -18957,9 +19048,13 @@ static void draw_goto(struct out *o, struct view *v)
  */
 static int goto_click(struct view *v)
 {
-	int top = goto_top();
+	const struct dframe *f = &g_goto_f;
+	int top = f->y;
 
-	if (g_my < top || g_my >= top + GOTO_H) {
+	/* The box's own geometry, not a second guess at it - the frame was
+	 * recorded where it was drawn. */
+	if (!f->w || g_my < top || g_my >= top + f->h ||
+	    g_mx < f->x || g_mx >= f->x + f->w) {
 		v->edit = 0;
 		return 0;
 	}
@@ -18988,22 +19083,32 @@ static int goto_click(struct view *v)
 
 static void draw_find(struct out *o, struct view *v)
 {
-	int top = find_top(), y, i;
+	struct dframe *f = &g_find_f;
 
-	find_row(o, top + 1);
+	/*
+	 * Wide enough for the widest row, which is the three checkboxes:
+	 * "[ ] Regex" + "[ ] Ignore case" + "[x] Search whole object" and two
+	 * gaps of three. Counted rather than rounded up, so the box is as wide
+	 * as it has to be and no wider.
+	 */
+	if (!dframe_begin(o, f, "Find", 9 + 3 + 15 + 3 + 24 + 4, FIND_H, 0))
+		return;
+
+	dframe_row(o, f, 0);
 	out_fmt(o, A_DIM "Find " A_OFF);
 	v->f_txt[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, "%s[", v->edit == 500 ? A_SEL : A_ID);
-	field_draw(o, v->find, v->caret, &v->find_off, 40, v->edit == 500, "", v->field_all);
+	field_draw(o, v->find, v->caret, &v->find_off, 30, v->edit == 500, "",
+		   v->field_all);
 	out_str(o, "]" A_OFF);
 	v->f_txt[1] = o->col_base + (int)o->col_hint - 1;
 	out_fmt(o, A_DIM "  as " A_OFF);
 	v->f_mode[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, "%s[%s]" A_OFF, A_WARN, v->find_hex ? "Hex" : "Text");
 	v->f_mode[1] = o->col_base + (int)o->col_hint - 1;
-	out_str(o, "\033[K");
+	dframe_edge(o, f);
 
-	find_row(o, top + 2);
+	dframe_row(o, f, 1);
 	v->f_rx[0] = o->col_base + (int)o->col_hint;
 	/* Bright black on white, not on bright black: the same colour twice is
 	 * a grey block where a label should be. */
@@ -19022,9 +19127,9 @@ static void draw_find(struct out *o, struct view *v)
 	out_fmt(o, "%s[%s] Search whole object" A_OFF, A_ID,
 		v->find_scope ? "x" : " ");
 	v->f_all[1] = o->col_base + (int)o->col_hint - 1;
-	out_str(o, "\033[K");
+	dframe_edge(o, f);
 
-	find_row(o, top + 3);
+	dframe_row(o, f, 2);
 	v->f_next[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, "%s[ Find next ]" A_OFF, v->find[0] ? A_ID : A_DIM);
 	v->f_next[1] = o->col_base + (int)o->col_hint - 1;
@@ -19038,31 +19143,9 @@ static void draw_find(struct out *o, struct view *v)
 	v->f_cancel[1] = o->col_base + (int)o->col_hint - 1;
 	/* Where the hit is belongs on the status line, which says it already.
 	 * Saying it twice made the dialog a row taller for no new fact. */
-	out_str(o, "\033[K");
+	dframe_edge(o, f);
 
-	/*
-	 * The frame, drawn after the content because the content rows clear to
-	 * the end of the line and would take the right edge with them.
-	 *
-	 * Light box drawing rounded at the corners, the same glyphs the Go to
-	 * box and the scrollbar use - a row of ASCII dashes beside a U+2502
-	 * scrollbar looked like two different programs.
-	 */
-	for (y = top; y < top + FIND_H; y++) {
-		out_at(o, y, 1);
-		out_str(o, A_DIM);
-		if (y == top || y == top + FIND_H - 1) {
-			out_str(o, y == top ? G_TL : G_BL);
-			for (i = 2; i < g_cols; i++)
-				out_str(o, G_H);
-			out_str(o, y == top ? G_TR : G_BR);
-			out_str(o, A_OFF);
-			continue;
-		}
-		out_str(o, G_V " " A_OFF);
-		out_at(o, y, g_cols);
-		out_str(o, A_DIM G_V A_OFF);
-	}
+	dframe_end(o, f, NULL);
 }
 
 /* Which control a click landed on. */
@@ -19077,9 +19160,12 @@ static void draw_find(struct out *o, struct view *v)
  */
 static int find_click(struct view *v)
 {
-	int top = find_top();
+	const struct dframe *f = &g_find_f;
+	int top = f->y;
 
-	if (g_my < top || g_my >= top + FIND_H) {
+	/* The box's own geometry, recorded where it was drawn - see g_find_f. */
+	if (!f->w || g_my < top || g_my >= top + f->h ||
+	    g_mx < f->x || g_mx >= f->x + f->w) {
 		v->edit = 0;            /* the field loses the caret, not the
 					 * dialog its place */
 		return 0;
@@ -19425,7 +19511,20 @@ static int click_list(struct view *v, struct object *ob)
 			if (k < ob->n_touch) {
 				v->show_list = 0;
 				v->list_depth = 0;
-				if (draft_dirty(&v->ed))
+				/*
+				 * ASKED WHENEVER THERE IS A DRAFT, not when a
+				 * hash says it changed.
+				 *
+				 * This is the same draft_dirty the Save gate
+				 * used, and the same objection applies with a
+				 * worse consequence: a hash that misses an
+				 * edited field answers "not dirty", the switch
+				 * happens without asking, and the edit is
+				 * gone. The prompt's first answer is "Keep
+				 * editing", so asking once too often costs a
+				 * keystroke and never costs work.
+				 */
+				if (v->ed.dr.n_decl)
 					ch_open(v, CH_SWITCH, k,
 						g_rows - 6, 4);
 				else

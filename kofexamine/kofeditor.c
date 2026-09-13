@@ -3721,20 +3721,16 @@ void generate(struct kof_editor *e, int as_new)
 			return;
 		}
 		/*
-		 * Nothing to write either way.
+		 * NO "NOTHING CHANGED" REFUSAL - see save_ok in kofviewer.c.
 		 *
-		 * For Save As a copy would be a duplicate; for Save the file
-		 * on disk already says this. Repeated clicks used to rewrite
-		 * it each time, which was harmless and looked like nothing was
-		 * happening.
+		 * This asked draft_dirty, which is a hash of the fields the
+		 * editor knows to hash. A field it does not cover changes
+		 * nothing about the hash, so an edit to one came back as
+		 * "nothing changed since the last save" and the write did not
+		 * happen. Rewriting a file that is already identical costs one
+		 * write; refusing a write the reader asked for costs them the
+		 * edit, and they only find out later.
 		 */
-		if (!draft_dirty(e) && e->dr.gen_path[0]) {
-			say_note(e, "%s",
-				 as_new ? "Nothing changed - a copy would be a "
-					  "duplicate"
-					: "Nothing changed since the last save");
-			return;
-		}
 	}
 	struct object *ob = &e->obj[e->dr.decl[0].obj];
 	char path[400], safe[48], fname[48];
