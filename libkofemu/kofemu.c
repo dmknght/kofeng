@@ -162,6 +162,24 @@ struct kof_emu {
 	 */
 	uint64_t tsc_last_insn;
 	uint32_t tsc_spin;
+	/*
+	 * WHAT THE RUN HAD PRODUCED at the previous clock read.
+	 *
+	 * The instruction gap alone was the wrong test and a measured one: a
+	 * loop with sixty nops in its body between the two reads walked past
+	 * it, because sixty is more than the window and nops are free to
+	 * write. Measured on this build - pad 0, 16 and 32 escaped in 77, 365
+	 * and 653 instructions; pad 60 and up burnt 4 194 305 and ended
+	 * STALLED, which is not a hang but IS the run being killed at the
+	 * delay loop with the payload still packed.
+	 *
+	 * Junk is junk because it PRODUCES nothing, so that is what to ask
+	 * about. last_new_page already records the run's unit of progress for
+	 * KOF_EMU_IDLE; this remembers where it stood last time the guest
+	 * asked the time, and a read with no new page since the last one is a
+	 * wait however many instructions were spent looking busy.
+	 */
+	uint64_t tsc_last_page;
 
 	/* Thread ids handed to clone, none of which ever run. */
 	uint64_t next_tid;
@@ -670,12 +688,37 @@ int kof_emu_next_snapshot(struct kof_emu *e, uint32_t *it, uint64_t *va,
 /* The jump a recognised delay loop is granted, doubling while it persists. */
 #define TSC_SPIN_MIN  (1u << 16)
 #define TSC_SPIN_AT   8u
+/*
+ * The widest gap between two clock reads that may still be called a wait.
+ *
+ * Not a tuning knob so much as the line between "looking busy" and "being
+ * busy". Padding a delay loop is free - nops, dead arithmetic, an opaque
+ * predicate - so any bound here can be padded past; what cannot be padded past
+ * is the productivity test beside it, and this exists only so that a loop doing
+ * thousands of instructions of genuine register work per iteration is left to
+ * run at the honest rate.
+ */
+#define TSC_SPIN_GAP  4096u
 
 static uint64_t tsc_read(struct kof_emu *e)
 {
 	uint64_t gap = e->insn - e->tsc_last_insn;
+	/*
+	 * A WAIT IS A READ THAT FOLLOWS NO PROGRESS, not a read that follows
+	 * few instructions - see tsc_last_page.
+	 *
+	 * The instruction gap stays as a GUARD rather than as the test. A loop
+	 * whose body is thousands of instructions of real computation and which
+	 * happens to touch no new page is doing work, and its own timing
+	 * condition will be satisfied at the honest rate soon enough; it is not
+	 * something to hurry along. TSC_SPIN_GAP is far above any padding that
+	 * is worth writing - the whole point of junk is that it is cheap - and
+	 * far below a body that is actually computing something.
+	 */
+	int idle = e->last_new_page == e->tsc_last_page && gap < TSC_SPIN_GAP;
 
-	if (gap < 64u) {
+	e->tsc_last_page = e->last_new_page;
+	if (idle) {
 		/* Asked again having done nothing: a wait, not a measurement. */
 		if (++e->tsc_spin > TSC_SPIN_AT) {
 			uint32_t k = e->tsc_spin - TSC_SPIN_AT;
@@ -1185,8 +1228,94 @@ enum {
 	EMU_SYS_GETTIMEOFDAY = 96, EMU_SYS_TIME = 201, EMU_SYS_GETCPU = 309,
 	EMU_SYS_CLOCK_NANOSLEEP = 230, EMU_SYS_ALARM = 37, EMU_SYS_SETITIMER = 38,
 	EMU_SYS_TIMER_CREATE = 222, EMU_SYS_TIMER_SETTIME = 223, EMU_SYS_PTRACE = 101,
-	EMU_SYS_PAUSE = 34, EMU_SYS_SELECT = 23, EMU_SYS_POLL = 7, EMU_SYS_KILL = 62
+	EMU_SYS_PAUSE = 34, EMU_SYS_SELECT = 23, EMU_SYS_POLL = 7, EMU_SYS_KILL = 62,
+	/*
+	 * WHAT A STUB ASKS BEFORE IT UNPACKS ANYTHING.
+	 *
+	 * None of these move a byte of payload, and that is exactly why they
+	 * were worth adding: a packer asks who it is running as, on what
+	 * kernel, with how much memory and from where, and -ENOSYS to any of
+	 * them is an answer no real Linux ever gives. A stub that checks gets
+	 * a louder signal from the refusal than it would from a slow machine -
+	 * the same reasoning the sleep above is written under.
+	 */
+	EMU_SYS_UNAME = 63, EMU_SYS_GETUID = 102, EMU_SYS_GETGID = 104,
+	EMU_SYS_GETEUID = 107, EMU_SYS_GETEGID = 108, EMU_SYS_GETPPID = 110,
+	EMU_SYS_SYSINFO = 99, EMU_SYS_TIMES = 100, EMU_SYS_CLOCK_GETRES = 229,
+	EMU_SYS_GETCWD = 79, EMU_SYS_PRCTL = 157, EMU_SYS_PERSONALITY = 135,
+	EMU_SYS_GETRLIMIT = 97, EMU_SYS_SETRLIMIT = 160,
+	EMU_SYS_ACCESS = 21, EMU_SYS_FACCESSAT = 269, EMU_SYS_FACCESSAT2 = 439,
+	EMU_SYS_READLINKAT = 267, EMU_SYS_STAT = 4, EMU_SYS_LSTAT = 6,
+	EMU_SYS_STATFS = 137, EMU_SYS_FSTATFS = 138,
+	/*
+	 * DESCRIPTORS, WHICH AN IN-MEMORY LOADER ACTUALLY USES.
+	 *
+	 * memfd_create, write the payload into it, dup it somewhere known,
+	 * fexecve - that is the whole of a fileless ELF loader, and two of
+	 * those four were already here. Every descriptor this emulator hands
+	 * out names the same one file, so duplicating one is answering with a
+	 * number; what matters is that the call succeeds.
+	 */
+	EMU_SYS_DUP = 32, EMU_SYS_DUP2 = 33, EMU_SYS_DUP3 = 292,
+	EMU_SYS_FCNTL = 72, EMU_SYS_WRITEV = 20, EMU_SYS_READV = 19,
+	EMU_SYS_PWRITE64 = 18, EMU_SYS_PIPE = 22, EMU_SYS_PIPE2 = 293,
+	/* Growing a decompression buffer in place, which is what a stub does
+	 * when it guessed the unpacked size too low. */
+	EMU_SYS_MREMAP = 25
 };
+
+/*
+ * A GUEST WORD, because half of these write a struct of longs and a long is
+ * four bytes to a 32-bit guest.
+ *
+ * The stat above writes an amd64 struct whatever the guest is, which is safe
+ * only because nothing reads past st_size. A struct of longs is different: a
+ * 32-bit caller allocated half the bytes, so writing the 64-bit layout scribbles
+ * past what it gave us - into its own heap, with the emulator as the corruptor.
+ */
+static unsigned gw(const struct kof_emu *e)
+{
+	return e->bits == 32 ? 4u : 8u;
+}
+
+/*
+ * A stat, of the size the guest allocated for one.
+ *
+ * The only field anybody here reads is st_size - a stub asking how big it is -
+ * and the rest stays zero. The SIZE matters though, and it used to not: this
+ * wrote the 144-byte amd64 struct whatever the guest was, so a 32-bit caller
+ * that allocated a 96-byte struct stat64 had forty-eight bytes of its own
+ * memory overwritten by the emulator answering its question. st_size sits at a
+ * different offset in each, which is the other half of the same fact.
+ */
+static uint64_t stat_out(struct kof_emu *e, uint64_t va);
+
+/* Put one guest-sized word into a byte buffer and advance the cursor. */
+static void gw_put(const struct kof_emu *e, uint8_t *b, unsigned *at, uint64_t v)
+{
+	if (gw(e) == 4u) {
+		uint32_t w = (uint32_t)v;
+
+		memcpy(b + *at, &w, 4);
+		*at += 4u;
+	} else {
+		memcpy(b + *at, &v, 8);
+		*at += 8u;
+	}
+}
+
+static uint64_t stat_out(struct kof_emu *e, uint64_t va)
+{
+	uint8_t st[144];
+	unsigned n   = e->bits == 32 ? 96u : 144u;
+	unsigned off = e->bits == 32 ? 44u : 48u;
+
+	memset(st, 0, sizeof st);
+	memcpy(st + off, &e->self_n, 8);
+	if (!mem_wr(e, va, st, n))
+		return (uint64_t)-14;
+	return 0;
+}
 
 /* The descriptor an emulated process gets for itself, and for anything else it
  * opens - there is only one file here and pretending otherwise would need a
@@ -1262,6 +1391,52 @@ static uint64_t i386_nr(uint64_t nr)
 	switch (nr) {
 	case 1:   return EMU_SYS_EXIT;
 	case 2:   return EMU_SYS_GETPID;        /* fork; nothing here forks */
+	/*
+	 * THE ROWS ADDED WITH THE CALLS THEY REACH - see the note above about
+	 * the two tables drifting apart. Numbers read out of asm/unistd_32.h.
+	 *
+	 * The *64 variants are DELIBERATELY ABSENT where their struct differs
+	 * from the one the dispatcher writes: i386 stat64 and statfs64 carry
+	 * 64-bit fields that a guest-word layout would fill wrongly, and a
+	 * wrongly filled struct is worse than -ENOSYS because the guest
+	 * believes it. The 16-bit id calls are absent for the same reason in
+	 * reverse - nothing modern asks for them.
+	 */
+	case 21:  return EMU_SYS_ACCESS;
+	case 22:  return EMU_SYS_PIPE;
+	case 25:  return EMU_SYS_GETPID;        /* stime; not ours to set */
+	case 33:  return EMU_SYS_ACCESS;
+	case 41:  return EMU_SYS_DUP;
+	case 42:  return EMU_SYS_PIPE;
+	case 43:  return EMU_SYS_TIMES;
+	case 55:  return EMU_SYS_FCNTL;
+	case 63:  return EMU_SYS_DUP2;
+	case 64:  return EMU_SYS_GETPPID;
+	case 75:  return EMU_SYS_SETRLIMIT;
+	case 76:  return EMU_SYS_GETRLIMIT;
+	case 99:  return EMU_SYS_STATFS;
+	case 100: return EMU_SYS_FSTATFS;
+	case 116: return EMU_SYS_SYSINFO;
+	case 122: return EMU_SYS_UNAME;
+	case 136: return EMU_SYS_PERSONALITY;
+	case 145: return EMU_SYS_READV;
+	case 146: return EMU_SYS_WRITEV;
+	case 163: return EMU_SYS_MREMAP;
+	case 172: return EMU_SYS_PRCTL;
+	case 181: return EMU_SYS_PWRITE64;
+	case 183: return EMU_SYS_GETCWD;
+	case 191: return EMU_SYS_GETRLIMIT;     /* ugetrlimit */
+	case 199: return EMU_SYS_GETUID;
+	case 200: return EMU_SYS_GETGID;
+	case 201: return EMU_SYS_GETEUID;
+	case 202: return EMU_SYS_GETEGID;
+	case 221: return EMU_SYS_FCNTL;         /* fcntl64 */
+	case 266: return EMU_SYS_CLOCK_GETRES;
+	case 305: return EMU_SYS_READLINKAT;
+	case 307: return EMU_SYS_FACCESSAT;
+	case 330: return EMU_SYS_DUP3;
+	case 331: return EMU_SYS_PIPE2;
+	case 439: return EMU_SYS_FACCESSAT2;
 	case 3:   return EMU_SYS_READ;
 	case 4:   return EMU_SYS_WRITE;
 	case 5:   return EMU_SYS_OPEN;
@@ -1637,6 +1812,331 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 	case EMU_SYS_OPEN:
 	case EMU_SYS_OPENAT:
 		return EMU_SELF_FD;
+	/*
+	 * EVERY PATH EXISTS AND IS READABLE, which is the same lie open()
+	 * above already tells and is the consistent one. A stub checking for
+	 * /proc/self/status before it will run gets the answer a real machine
+	 * gives; -ENOENT here and a successful open two lines later would be
+	 * an inconsistency worth noticing.
+	 */
+	case EMU_SYS_ACCESS:
+	case EMU_SYS_FACCESSAT:
+	case EMU_SYS_FACCESSAT2:
+		return 0;
+	case EMU_SYS_STAT:
+	case EMU_SYS_LSTAT:
+		return stat_out(e, a1);
+	case EMU_SYS_STATFS:
+	case EMU_SYS_FSTATFS: {
+		/*
+		 * AN ORDINARY DISK, and the choice of magic is the whole point.
+		 *
+		 * A sandbox check does not ask whether the filesystem works, it
+		 * asks what KIND it is: overlayfs (0x794c7630) says container,
+		 * tmpfs (0x01021994) says the file was dropped into RAM by
+		 * something. ext4 says a machine somebody uses.
+		 */
+		uint8_t sf[120];
+		unsigned at = 0;
+
+		memset(sf, 0, sizeof sf);
+		gw_put(e, sf, &at, 0xEF53u);          /* f_type: ext2/3/4    */
+		gw_put(e, sf, &at, 4096u);            /* f_bsize             */
+		gw_put(e, sf, &at, 26214400u);        /* f_blocks: 100 GB    */
+		gw_put(e, sf, &at, 13107200u);        /* f_bfree:  half free */
+		gw_put(e, sf, &at, 13107200u);        /* f_bavail            */
+		gw_put(e, sf, &at, 6553600u);         /* f_files             */
+		gw_put(e, sf, &at, 6000000u);         /* f_ffree             */
+		if (!mem_wr(e, (nr == EMU_SYS_FSTATFS) ? a1
+						      : e->gpr[KOF_EMU_RSI],
+			    sf, at))
+			return (uint64_t)-14;
+		return 0;
+	}
+	case EMU_SYS_READLINKAT: {
+		/* readlink's answer, one argument along. */
+		static const char path[] = "/proc/self/exe";
+		uint64_t n = sizeof path - 1u, room = sysarg(e, 0);
+
+		if (n > room)
+			n = room;
+		if (!mem_wr(e, e->gpr[KOF_EMU_RDX], path, (unsigned)n))
+			return (uint64_t)-14;
+		return n;
+	}
+	case EMU_SYS_GETCWD: {
+		static const char cwd[] = "/tmp";
+		uint64_t n = sizeof cwd;              /* the NUL is included */
+
+		if (n > a1)
+			return (uint64_t)-34;           /* ERANGE */
+		if (!mem_wr(e, a0, cwd, (unsigned)n))
+			return (uint64_t)-14;
+		return n;
+	}
+	case EMU_SYS_UNAME: {
+		/*
+		 * SIX FIXED-WIDTH NAMES, and a plausible one in each.
+		 *
+		 * A stub reads `machine` to pick a code path and `release` to
+		 * decide whether a syscall it wants exists. A kernel version
+		 * old enough to lack memfd_create would send a loader down a
+		 * path this emulator then has to carry, so the release named
+		 * here is recent enough that the modern path is the one taken.
+		 */
+		char u[6 * 65];
+		unsigned i;
+		static const char *fld[6] = {
+			"Linux", "localhost", "6.1.0-18-amd64",
+			"#1 SMP PREEMPT_DYNAMIC Debian 6.1.76-1",
+			NULL, ""
+		};
+
+		memset(u, 0, sizeof u);
+		for (i = 0; i < 6u; i++) {
+			const char *t = fld[i];
+
+			if (i == 4u)
+				t = e->bits == 32 ? "i686" : "x86_64";
+			memcpy(u + i * 65u, t, strlen(t));
+		}
+		if (!mem_wr(e, a0, u, sizeof u))
+			return (uint64_t)-14;
+		return 0;
+	}
+	/*
+	 * ROOT-LESS AND ORDINARY. uid 1000 rather than 0: a stub that only
+	 * unpacks when it is root would otherwise take a path this emulator
+	 * cannot follow to anywhere useful, and a stub that refuses to run AS
+	 * root - malware avoiding an analyst's box - would refuse.
+	 */
+	case EMU_SYS_GETUID:
+	case EMU_SYS_GETEUID:  return 1000;
+	case EMU_SYS_GETGID:
+	case EMU_SYS_GETEGID:  return 1000;
+	case EMU_SYS_GETPPID:  return 1;
+	case EMU_SYS_SYSINFO: {
+		/*
+		 * A MACHINE SOMEBODY USES, measured against what a sandbox
+		 * check looks for: too little RAM and too short an uptime are
+		 * the two it keys on. Eight gigabytes and eleven days.
+		 */
+		uint8_t si[128];
+		unsigned at = 0;
+
+		memset(si, 0, sizeof si);
+		gw_put(e, si, &at, 987654u);                  /* uptime, s    */
+		gw_put(e, si, &at, 12000u);                   /* loads[0]     */
+		gw_put(e, si, &at, 14000u);
+		gw_put(e, si, &at, 16000u);
+		gw_put(e, si, &at, 8ull * 1024 * 1024 * 1024);/* totalram     */
+		gw_put(e, si, &at, 3ull * 1024 * 1024 * 1024);/* freeram      */
+		gw_put(e, si, &at, 0);                        /* sharedram    */
+		gw_put(e, si, &at, 512ull * 1024 * 1024);     /* bufferram    */
+		gw_put(e, si, &at, 2ull * 1024 * 1024 * 1024);/* totalswap    */
+		gw_put(e, si, &at, 2ull * 1024 * 1024 * 1024);/* freeswap     */
+		si[at++] = 214; si[at++] = 0;                 /* procs        */
+		at += 2u;                                     /* pad          */
+		if (gw(e) == 8u)
+			at += 4u;                             /* alignment    */
+		gw_put(e, si, &at, 0);                        /* totalhigh    */
+		gw_put(e, si, &at, 0);                        /* freehigh     */
+		at += 4u;                                     /* mem_unit = 1 */
+		si[at - 4u] = 1;
+		if (!mem_wr(e, a0, si, at))
+			return (uint64_t)-14;
+		return 0;
+	}
+	case EMU_SYS_TIMES: {
+		/* Four clock_t of CPU time, from the same clock as everything
+		 * else. 100 ticks a second is what _SC_CLK_TCK is everywhere
+		 * this matters. */
+		uint64_t t = tsc_ns(e) / 10000000u;
+		uint8_t tms[32];
+		unsigned at = 0;
+
+		memset(tms, 0, sizeof tms);
+		gw_put(e, tms, &at, t);
+		gw_put(e, tms, &at, t / 4u);
+		gw_put(e, tms, &at, 0);
+		gw_put(e, tms, &at, 0);
+		if (a0 && !mem_wr(e, a0, tms, at))
+			return (uint64_t)-14;
+		return t;
+	}
+	case EMU_SYS_CLOCK_GETRES: {
+		/* A nanosecond, which is the unit the clock here counts in. */
+		uint8_t ts[16];
+		unsigned at = 0;
+
+		gw_put(e, ts, &at, 0);
+		gw_put(e, ts, &at, 1);
+		if (a1 && !mem_wr(e, a1, ts, at))
+			return (uint64_t)-14;
+		return 0;
+	}
+	case EMU_SYS_PRCTL: {
+		/*
+		 * PR_GET_DUMPABLE answers 1 - a process being traced by
+		 * somebody would read 0, and that is the check. Everything
+		 * else is a setter and succeeds.
+		 */
+		if (a0 == 3u) {                         /* PR_GET_DUMPABLE */
+			uint32_t one = 1u;
+
+			if (a1 && !mem_wr(e, a1, &one, 4))
+				return (uint64_t)-14;
+			return 1;
+		}
+		return 0;
+	}
+	case EMU_SYS_PERSONALITY:
+		/* The previous personality, which was the ordinary one. Some
+		 * packers turn ASLR off before mapping; nothing here moves. */
+		return 0;
+	case EMU_SYS_GETRLIMIT:
+	case EMU_SYS_SETRLIMIT: {
+		uint8_t lim[16];
+		unsigned at = 0;
+
+		if (nr == EMU_SYS_SETRLIMIT)
+			return 0;
+		gw_put(e, lim, &at, 8ull * 1024 * 1024);      /* soft: stack */
+		gw_put(e, lim, &at, ~(uint64_t)0);            /* hard        */
+		if (a1 && !mem_wr(e, a1, lim, at))
+			return (uint64_t)-14;
+		return 0;
+	}
+	/*
+	 * There is one file and one descriptor for it, so a duplicate is a
+	 * number. dup2 and dup3 are told which number to answer with and are
+	 * obliged to; dup picks one that is not already spoken for.
+	 */
+	case EMU_SYS_DUP:   return EMU_SELF_FD;
+	case EMU_SYS_DUP2:
+	case EMU_SYS_DUP3:  return a1;
+	case EMU_SYS_FCNTL:
+		switch (a1) {
+		case 0:  return EMU_SELF_FD;            /* F_DUPFD      */
+		case 1:  return 0;                      /* F_GETFD      */
+		case 3:  return 0;                      /* F_GETFL: RDONLY */
+		default: return 0;                      /* every setter */
+		}
+	case EMU_SYS_PIPE:
+	case EMU_SYS_PIPE2: {
+		/* Both ends name the same file, like every other descriptor
+		 * here. A stub that pipes to itself makes progress; one that
+		 * expects to read back what it wrote does not, and neither
+		 * outcome unpacks anything. */
+		uint32_t fds[2] = { EMU_SELF_FD, EMU_SELF_FD };
+
+		if (!mem_wr(e, a0, fds, sizeof fds))
+			return (uint64_t)-14;
+		return 0;
+	}
+	case EMU_SYS_PWRITE64:
+		return e->gpr[KOF_EMU_RDX];             /* wrote it all */
+	case EMU_SYS_WRITEV:
+	case EMU_SYS_READV: {
+		/*
+		 * A VECTOR OF (base, len) IN GUEST WORDS. glibc writes through
+		 * writev rather than write, so a stub that prints anything at
+		 * all arrives here and not at WRITE - and answering -ENOSYS
+		 * made the common case of "it told us what it was doing" into
+		 * a stop.
+		 */
+		uint64_t vec = a1, n = e->gpr[KOF_EMU_RDX], i, done = 0;
+		unsigned w = gw(e);
+
+		if (n > 1024u)
+			n = 1024u;
+		for (i = 0; i < n; i++) {
+			uint8_t ent[16];
+			uint64_t base = 0, len = 0;
+
+			if (!mem_rd(e, vec + i * 2u * w, ent, 2u * w))
+				break;
+			if (w == 4u) {
+				uint32_t b32, l32;
+
+				memcpy(&b32, ent, 4);
+				memcpy(&l32, ent + 4, 4);
+				base = b32; len = l32;
+			} else {
+				memcpy(&base, ent, 8);
+				memcpy(&len, ent + 8, 8);
+			}
+			if (nr == EMU_SYS_WRITEV) {
+				/* Kept, up to what the say buffer holds, the
+				 * same way WRITE keeps it. */
+				if (a0 <= 2u && e->n_say < KOF_EMU_SAY) {
+					uint64_t room = KOF_EMU_SAY - e->n_say;
+
+					if (len < room)
+						room = len;
+					if (mem_rd(e, base,
+						   e->say + e->n_say,
+						   (unsigned)room))
+						e->n_say += (uint32_t)room;
+				}
+				done += len;
+			} else {
+				uint64_t got = self_read(e, base, len,
+							 e->self_pos);
+
+				e->self_pos += got;
+				done += got;
+				if (got < len)
+					break;
+			}
+		}
+		return done;
+	}
+	case EMU_SYS_MREMAP: {
+		/*
+		 * GROW BY MOVING, because nothing here ever gives memory back -
+		 * see MUNMAP, which is a no-op. So the old mapping stays where
+		 * it is and the new one is somewhere else with the bytes copied
+		 * across, which is what MREMAP_MAYMOVE promises anyway.
+		 *
+		 * Without that flag a kernel would try to extend in place and
+		 * answer -ENOMEM when it cannot; the guest handles that, and
+		 * pretending to succeed would hand it an address it believes
+		 * is contiguous with something it is not.
+		 */
+		uint64_t old_len = (a1 + KOF_EMU_PAGE - 1u) &
+				   ~(uint64_t)(KOF_EMU_PAGE - 1u);
+		uint64_t new_len = (e->gpr[KOF_EMU_RDX] + KOF_EMU_PAGE - 1u) &
+				   ~(uint64_t)(KOF_EMU_PAGE - 1u);
+		uint64_t flags = sysarg(e, 0), at, done;
+
+		if (!new_len)
+			return (uint64_t)-22;                   /* EINVAL */
+		if (new_len <= old_len)
+			return a0;                    /* shrink in place */
+		if (!(flags & 1u))
+			return (uint64_t)-12;                   /* ENOMEM */
+		if (!e->mmap_next)
+			e->mmap_next = EMU_MMAP_BASE;
+		at = e->mmap_next;
+		e->mmap_next += new_len + KOF_EMU_PAGE;
+		if (!vma_add(e, at, new_len, 0,
+			     KOF_EMU_R | KOF_EMU_W, 0))
+			return (uint64_t)-12;
+		for (done = 0; done < old_len; ) {
+			uint8_t page[KOF_EMU_PAGE];
+			uint64_t chunk = old_len - done;
+
+			if (chunk > KOF_EMU_PAGE)
+				chunk = KOF_EMU_PAGE;
+			if (!mem_rd(e, a0 + done, page, (unsigned)chunk))
+				break;
+			if (!mem_wr(e, at + done, page, (unsigned)chunk))
+				break;
+			done += chunk;
+		}
+		return at;
+	}
 	case EMU_SYS_READLINK: {
 		/* Whatever was asked about is this process. The path only has to
 		 * be openable, and every open here answers with the same file. */
@@ -1661,17 +2161,9 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 		return self_read(e, a1, sysarg(e, 0), e->gpr[KOF_EMU_RDX]);
 	case EMU_SYS_FSTAT:
 	case EMU_SYS_NEWFSTATAT: {
-		/* struct stat is 144 bytes on amd64 and the only field a stub
-		 * reads is st_size at offset 48. The rest stays zero, which is
-		 * a stat nobody here will look at twice. */
 		uint64_t at = (nr == EMU_SYS_FSTAT) ? a1 : e->gpr[KOF_EMU_RDX];
-		uint8_t st[144];
 
-		memset(st, 0, sizeof st);
-		memcpy(st + 48, &e->self_n, 8);
-		if (!mem_wr(e, at, st, sizeof st))
-			return (uint64_t)-14;
-		return 0;
+		return stat_out(e, at);
 	}
 	case EMU_SYS_WRITE: {
 		uint64_t n = e->gpr[KOF_EMU_RDX];

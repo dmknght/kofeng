@@ -15,9 +15,20 @@
  * for: read the arguments, set the policy, print what comes back.
  */
 
-/* Before any include, not after: clock_gettime is POSIX, and a feature test macro
- * placed after the first include has no effect at all. */
-#define _POSIX_C_SOURCE 200809L
+/*
+ * Before any include, not after: a feature test macro placed after the first
+ * system header has no effect at all.
+ *
+ * _GNU_SOURCE and not _POSIX_C_SOURCE, because this file includes
+ * kofplatform.h and that header calls memmem and realpath - neither of which
+ * POSIX 2008 declares on glibc. The header says so where it defines the
+ * wrapper, and deliberately does not define the macro itself: a feature test
+ * macro belongs to the translation unit, not to a header included partway
+ * through one. This is that translation unit saying it.
+ */
+#ifndef _WIN32
+#define _GNU_SOURCE
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>

@@ -41,6 +41,18 @@
  * needs the fact layer, and this file is where it will be consumed.
  */
 
+/*
+ * Before the first system header, or it does nothing.
+ *
+ * This file includes kofplatform.h, which calls memmem, lstat and realpath -
+ * GNU or POSIX extensions that a bare -std=c11 does not declare. The header
+ * deliberately does not define the macro for its includers; the translation
+ * unit that needs it says so, which is here.
+ */
+#ifndef _WIN32
+#define _GNU_SOURCE
+#endif
+
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>

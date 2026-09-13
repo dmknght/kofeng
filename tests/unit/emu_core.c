@@ -28,6 +28,90 @@ static void fail(const char *what)
 #define CODE_VA  0x400000ull
 #define DATA_VA  0x401000ull
 #define STACK_VA 0x7ffff000ull
+
+/*
+ * EVERY SYSCALL A STUB ASKS BEFORE IT UNPACKS MUST BE ANSWERED, and -ENOSYS is
+ * the one answer that is never right.
+ *
+ * None of these move a byte of payload. They are what a packer asks FIRST -
+ * who am I running as, what kernel is this, how much memory is here, where am
+ * I on disk - and on a real Linux none of them fails. A refusal is therefore
+ * not a missing feature but a SIGNAL: the stub learns it is not on a machine,
+ * and the interesting ones stop there. That is a failure mode with no symptom
+ * except a payload that never appears, which is why it is asserted rather than
+ * left to be noticed.
+ *
+ * The call is made with plausible arguments and the RESULT is not checked -
+ * only that it is not -ENOSYS. What each one should say is the dispatcher's
+ * business; that it says anything at all is this test's.
+ */
+static void syscalls_answered(void)
+{
+	static const struct { unsigned nr; const char *name; } want[] = {
+		{ 63, "uname" },      { 102, "getuid" },   { 107, "geteuid" },
+		{ 104, "getgid" },    { 108, "getegid" },  { 110, "getppid" },
+		{ 99, "sysinfo" },    { 100, "times" },    { 229, "clock_getres" },
+		{ 79, "getcwd" },     { 157, "prctl" },    { 135, "personality" },
+		{ 97, "getrlimit" },  { 160, "setrlimit" },{ 21, "access" },
+		{ 269, "faccessat" }, { 439, "faccessat2" },
+		{ 267, "readlinkat" },{ 4, "stat" },       { 6, "lstat" },
+		{ 137, "statfs" },    { 138, "fstatfs" },  { 32, "dup" },
+		{ 33, "dup2" },       { 292, "dup3" },     { 72, "fcntl" },
+		{ 20, "writev" },     { 19, "readv" },     { 18, "pwrite64" },
+		{ 22, "pipe" },       { 293, "pipe2" },    { 25, "mremap" },
+		/* The ones that were always here, so a rewrite of the
+		 * dispatcher cannot quietly drop them either. */
+		{ 9, "mmap" },        { 10, "mprotect" },  { 12, "brk" },
+		{ 35, "nanosleep" },  { 228, "clock_gettime" },
+		{ 319, "memfd_create" }
+	};
+	const uint64_t buf = 0x410000ull;
+	unsigned i, refused = 0;
+
+	for (i = 0; i < sizeof want / sizeof want[0]; i++) {
+		uint8_t code[64];
+		unsigned n = 0;
+		struct kof_emu_cfg cfg = { 0 };
+
+		cfg.max_insn = 100000;
+		struct kof_emu *e = kof_emu_new(&cfg);
+		uint64_t ret;
+
+		if (!e) { fail("out of memory"); return; }
+		/* mov rax,nr / mov rdi,buf / mov rsi,buf+0x800 /
+		 * mov rdx,buf+0x1000 / mov r10,4096 / syscall / hlt */
+		code[n++] = 0x48; code[n++] = 0xC7; code[n++] = 0xC0;
+		memcpy(code + n, &want[i].nr, 4); n += 4;
+		code[n++] = 0x48; code[n++] = 0xBF;
+		memcpy(code + n, &(uint64_t){ buf }, 8); n += 8;
+		code[n++] = 0x48; code[n++] = 0xBE;
+		memcpy(code + n, &(uint64_t){ buf + 0x800u }, 8); n += 8;
+		code[n++] = 0x48; code[n++] = 0xBA;
+		memcpy(code + n, &(uint64_t){ buf + 0x1000u }, 8); n += 8;
+		code[n++] = 0x49; code[n++] = 0xC7; code[n++] = 0xC2;
+		memcpy(code + n, &(uint32_t){ 4096u }, 4); n += 4;
+		code[n++] = 0x0F; code[n++] = 0x05;
+		code[n++] = 0xF4;                       /* hlt: stop here */
+
+		kof_emu_map(e, CODE_VA, code, n, 0x1000,
+			    KOF_EMU_R | KOF_EMU_X);
+		kof_emu_map(e, buf, NULL, 0, 0x3000, KOF_EMU_R | KOF_EMU_W);
+		kof_emu_map(e, STACK_VA, NULL, 0, 0x1000,
+			    KOF_EMU_R | KOF_EMU_W);
+		kof_emu_set_rip(e, CODE_VA);
+		kof_emu_set_reg(e, KOF_EMU_RSP, STACK_VA + 0x800);
+		(void)kof_emu_run(e);
+		ret = kof_emu_get_reg(e, KOF_EMU_RAX);
+		if ((int64_t)ret == -38) {              /* ENOSYS */
+			printf("  FAIL %s answered -ENOSYS\n", want[i].name);
+			failures++;
+			refused++;
+		}
+		kof_emu_free(e);
+	}
+	printf("  %zu syscall(s) a stub asks first, %u refused\n",
+	       sizeof want / sizeof want[0], refused);
+}
 #define KEY      0x5Au
 
 int main(void)
@@ -55,11 +139,14 @@ int main(void)
 	uint8_t cipher[16];
 	/* This stub really does hand off by jumping into what it wrote, which is
 	 * the case the option exists for. */
-	struct kof_emu_cfg cfg = { 100000, 0, 1 };
+	struct kof_emu_cfg cfg = { 0 };
 	struct kof_emu *e;
 	enum kof_emu_stop st;
 	uint32_t it = 0, runs = 0;
 	uint64_t va, len;
+
+	cfg.max_insn = 100000;
+	cfg.stop_on_written_jump = 1;
 	const uint8_t *bytes;
 	int found = 0, i;
 
@@ -110,6 +197,9 @@ int main(void)
 	       runs, found ? "yes" : "NO");
 
 	kof_emu_free(e);
+
+	syscalls_answered();
+
 	printf("emu core: %s\n", failures ? "FAILED" : "ok");
 	return failures != 0;
 }

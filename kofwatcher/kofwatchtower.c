@@ -51,6 +51,11 @@
 #include <signal.h>
 #include "kofantarc.h"
 #include "afan.h"
+/* The POSIX half needs this too: kof_utf8_init is called on both paths and is
+ * declared here for both. It used to be reached only from the _WIN32 branch,
+ * which left the call on this side with no declaration at all - invisible
+ * until something forced this file to be compiled again. */
+#include "../libkofeng/core/kofplatform.h"
 #endif
 
 #include "kofevt.h"
