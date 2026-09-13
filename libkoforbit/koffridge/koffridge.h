@@ -48,10 +48,32 @@
  * different ones to.
  *
  *
- * NOT THREAD SAFE, deliberately. It is a per-walk object like a kof_scanner,
- * and a caller that runs several scanners shares nothing between them except
- * the engine. Locking it internally would put a contended lock on the fast
- * path of every object to serve a caller who has not appeared.
+ * THREAD SAFE, AND IT WAS DELIBERATELY NOT.
+ *
+ * What stood here said so, and gave a reason worth keeping: a lock on the fast
+ * path of every object looked up, to serve "a caller who has not appeared".
+ * That caller has appeared - the scanner threads, and the work it would
+ * parallelise is measured at four fifths of a whole-machine sweep - so the
+ * premise expired and the decision went with it.
+ *
+ * The objection was answered rather than overruled. The table is SHARDED: a
+ * key belongs to exactly one shard, each shard is an independent small table
+ * with its own lock, and a probe run and any eviction it performs stay inside
+ * one. Two threads working on different keys do not meet. See struct shard.
+ *
+ * WHAT IS SAFE: koffridge_get, koffridge_put and koffridge_identify, from any
+ * number of threads at once.
+ *
+ * WHAT IS NOT, and is not worth making so: open, close and clear are lifecycle,
+ * and a caller that clears a cache while another thread reads it has a problem
+ * no lock here can fix. save and load take each shard's lock in turn, so they
+ * are safe against concurrent use and are not an INSTANT of it - a save that
+ * overlaps a scan writes a cache from somewhere in the middle of it, which is
+ * a true cache and not a snapshot.
+ *
+ * The statistics are summed shard by shard for the same reason: correct, and
+ * not simultaneous. They are read when a walk is over, which is when that
+ * distinction stops mattering.
  */
 #ifndef KOFFRIDGE_H
 #define KOFFRIDGE_H
@@ -265,11 +287,25 @@ void koffridge_clear(struct koffridge *);
  * in any report, because a served hit looks exactly like a file that was
  * examined.
  *
- * So: it belongs somewhere only the account running the scanner can write, it
- * must never be read from a path an unprivileged process can influence, and a
- * scanner must not enable it by DEFAULT - the operator says where it lives,
- * which is the moment they decide who can write it. That is why there is no
- * built-in path here and why kofmemscan requires --cache to be given.
+ * So it belongs somewhere only the account running the scanner can write, and
+ * it must never be read from a path an unprivileged process can influence.
+ *
+ * THAT IS A CONSTRAINT ON THE PATH, NOT AN ARGUMENT FOR A FLAG.
+ *
+ * This used to say a scanner must not enable it by default, so that "the
+ * operator says where it lives, which is the moment they decide who can write
+ * it". That reasoning was wrong in a way worth naming: it moved a safety
+ * property out of the code and into a decision somebody has to make correctly
+ * every time, and the cost of not making it is a sweep five times slower -
+ * measured, 5.21s against 1.03s. A protection that is off by default for most
+ * people is not a protection with a good default; it is a fast path most people
+ * never get, guarded by a question most people answer by not asking it.
+ *
+ * The property is kept by CHOOSING the path instead. koffridge_default_path
+ * gives a per-user location - %LOCALAPPDATA% on Windows, $XDG_CACHE_HOME or
+ * ~/.cache elsewhere - which no other unprivileged account can write. An
+ * operator who wants it somewhere else still says so, and now that is an
+ * override rather than a precondition.
  *
  * The stored checksum is NOT security. It catches a truncated write and a
  * corrupted sector; anyone editing the file deliberately recomputes it in four
@@ -283,7 +319,16 @@ void koffridge_clear(struct koffridge *);
  * Written to a temporary beside the target and renamed over it, so an
  * interrupted save leaves the previous cache rather than a half of this one.
  */
-int koffridge_save(const struct koffridge *, const char *path);
+/*
+ * NOT const, AND THE REASON IS THE LOCKS.
+ *
+ * These three read the table, and reading it means taking each shard's mutex -
+ * see the note beside struct shard. A pointer-to-const that locks is a
+ * declaration that says the object does not change while the code changes it,
+ * and the cast needed to make it compile is the compiler being told to stop
+ * noticing. The signature tells the truth instead.
+ */
+int koffridge_save(struct koffridge *, const char *path);
 
 /*
  * Load entries from `path` into the cache, returning how many were admitted.
@@ -297,6 +342,22 @@ int koffridge_save(const struct koffridge *, const char *path);
  * entry. They are marked as the OLDEST, so anything this run touches outlives
  * them when the table has to make room.
  */
+/*
+ * Where the cache lives when nobody said otherwise. Non-zero on success.
+ *
+ * A PER-USER DIRECTORY, and that is the whole of the safety argument above:
+ * %LOCALAPPDATA%\kofeng on Windows, $XDG_CACHE_HOME/kofeng or ~/.cache/kofeng
+ * elsewhere. No other unprivileged account can write there, so a cache found
+ * at this path was written by this user or by something already running as
+ * them - at which point the cache is not the weakest thing they can reach.
+ *
+ * The directory is created if it is missing. Zero when there is no home to put
+ * it in, and a caller that gets zero runs WITHOUT a cache rather than falling
+ * back to somewhere writable - a temporary directory shared with every other
+ * account is exactly the path this is avoiding.
+ */
+int koffridge_default_path(char *buf, size_t cap);
+
 uint32_t koffridge_load(struct koffridge *, const char *path,
 			const char **why);
 
@@ -319,11 +380,11 @@ struct koffridge_stat {
 	uint32_t capacity;
 };
 
-void koffridge_stats(const struct koffridge *, struct koffridge_stat *);
+void koffridge_stats(struct koffridge *, struct koffridge_stat *);
 
 /* One line: "fridge: 3921 hit, 57 miss (98.6%), 57 stored, 0 evicted". Returns
  * bytes written excluding the NUL, and never writes past `cap`. Here rather
  * than in each tool for the reason kofw_region_describe is where it is. */
-size_t koffridge_describe(const struct koffridge *, char *buf, size_t cap);
+size_t koffridge_describe(struct koffridge *, char *buf, size_t cap);
 
 #endif /* KOFFRIDGE_H */

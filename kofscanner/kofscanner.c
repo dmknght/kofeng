@@ -571,10 +571,29 @@ static void usage(const char *argv0)
 		"                  filter over the table - the walk opens only what\n"
 		"                  was named, which is the point when something else\n"
 		"                  already decided a process is interesting\n"
-		"  --cache-file F  carry the verdict cache between runs in F. Caching\n"
-		"                  within a run is always on and has no flag; this\n"
-		"                  makes it outlive the run, and whoever can write F\n"
-		"                  decides what this scanner calls clean\n"
+		"                  With --scan-procs, level 2 additionally compares\n"
+		"                  every loaded module that has been WRITTEN TO\n"
+		"                  against the file it was mapped from, and scans\n"
+		"                  whatever differs - which is the only way to see\n"
+		"                  an inline hook, a security stub patched out in a\n"
+		"                  process's own address space, or a hollowed\n"
+		"                  section. None of those exist in any file, and\n"
+		"                  none of them raise an event, because patching\n"
+		"                  the reporting path is what stops the events\n"
+		"  --cache-file F  keep the verdict cache in F instead of the\n"
+		"                  default. The cache OUTLIVES THE RUN by default,\n"
+		"                  in a per-user directory no other unprivileged\n"
+		"                  account can write, because it is the difference\n"
+		"                  between a 5.2s sweep and a 1.0s one. Whoever can\n"
+		"                  write F decides what this scanner calls clean,\n"
+		"                  so a path given here should be no more reachable\n"
+		"                  than the default is\n"
+		"  --no-cache      do not carry anything between runs. For a scan\n"
+		"                  that must answer from this database and these\n"
+		"                  bytes alone - a first look at a machine somebody\n"
+		"                  else has been on. Caching WITHIN a run stays on\n"
+		"                  and has no flag: without it one sweep scans the\n"
+		"                  same ntdll.dll once per process\n"
 		"  --max-depth N   directory depth limit\n"
 		"  --object-depth N  how deep to descend INSIDE a file: an\n"
 		"                  archive's entries, a dropper's payload. 0 is\n"
@@ -712,6 +731,10 @@ struct procscan {
 
 	uint64_t files_scanned, files_cached;
 	uint64_t chunks, chunk_bytes;
+	/* Runs of a loaded module that differ from the file it was mapped
+	 * from - see wdiff.h. Its own line, because an unbacked allocation
+	 * and a modified module are different findings. */
+	uint64_t patches, patch_bytes;
 };
 
 /* One file behind a mapping: scan it only if this sweep has not already
@@ -753,7 +776,7 @@ static void ps_file(struct procscan *p, const char *path)
 static int scan_procs(struct run *r, kof_scanner *sc,
 		      struct kof_scan_option *opt, uint64_t db_stamp,
 		      const char *cache_path, const uint32_t *pids,
-		      uint32_t n_pids)
+		      uint32_t n_pids, int compare_modules)
 {
 	struct procscan p;
 	struct kof_walk_api *w;
@@ -763,9 +786,12 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 	unsigned char rec[KOF_PROC_REC_MAX];
 	uint64_t procs = 0, refused = 0, regions = 0, bytes = 0;
 	char line[160];
+	/* Filled from the walk BEFORE it is closed - see there. */
+	char note[256];
 	int err = 0;
 
 	memset(&p, 0, sizeof p);
+	note[0] = 0;
 	p.r = r;
 	p.sc = sc;
 	p.opt = opt;
@@ -784,6 +810,7 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 	memset(&wo, 0, sizeof wo);
 	wo.pids = pids;
 	wo.n_pids = n_pids;
+	wo.compare_modules = compare_modules;
 
 	w = kof_walk_open(&wo, &err);
 	if (!w) {
@@ -822,8 +849,32 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 				struct kof_scan_option bo = *opt;
 				char nm[320];
 
-				snprintf(nm, sizeof nm, "%s//%016llx", who,
-					 (unsigned long long)it.addr);
+				/*
+				 * THE WORD AS WELL AS THE ADDRESS.
+				 *
+				 * This named findings by address alone, which
+				 * is what kof_walk_item.label exists to fix:
+				 * "powershell.exe//00007ffdbf644690" says
+				 * where and never what, so a reader has to go
+				 * and work out what lives there - and a report
+				 * a week later has lost the chance entirely,
+				 * because that address means nothing once the
+				 * process is gone.
+				 *
+				 * The address STAYS. It is what a finding is
+				 * reported against and what a second tool
+				 * would be pointed at; the word is what makes
+				 * the line readable, not a replacement for it.
+				 */
+				if (it.label && it.label[0])
+					snprintf(nm, sizeof nm,
+						 "%s//%s@%016llx", who,
+						 it.label,
+						 (unsigned long long)it.addr);
+				else
+					snprintf(nm, sizeof nm, "%s//%016llx",
+						 who,
+						 (unsigned long long)it.addr);
 				/*
 				 * WHAT THE WALK KNOWS AND THE BYTES DO NOT -
 				 * copied straight across, never interpreted
@@ -840,14 +891,57 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 				}
 				(void)kof_scan_bytes(sc, it.p, it.len, nm,
 						     &bo, on_object, r);
-				p.chunks++;
-				p.chunk_bytes += it.len;
+				/*
+				 * COUNTED HERE AND NOT IN THE WALK'S STATS.
+				 *
+				 * kof_walk_api.stats carries four numbers every
+				 * platform has. "How many modules differ from
+				 * their file" is not one of them today - Linux
+				 * measured its EXEC pages 0% different - and
+				 * widening a neutral signature for one
+				 * platform's concept is how a neutral header
+				 * stops being one. The label is already in the
+				 * item, so the host can count what it cares
+				 * about without anything being added anywhere.
+				 *
+				 * AND IT IS AN "ELSE", WHICH IT WAS NOT.
+				 *
+				 * A modified run is image memory that differs
+				 * from its file; unbacked memory is memory no
+				 * file holds at all. Adding the first to the
+				 * second's counter made turning --modified on
+				 * read as though the unbacked count had gone
+				 * from 98 to 649 - a six-fold jump in the one
+				 * number on that summary that is closest to an
+				 * alarm, caused by nothing changing in the
+				 * process at all.
+				 */
+				if (it.label &&
+				    strcmp(it.label, "MEM_PATCH") == 0) {
+					p.patches++;
+					p.patch_bytes += it.len;
+				} else {
+					p.chunks++;
+					p.chunk_bytes += it.len;
+				}
 			}
 		}
 	}
 
 	if (w->stats)
 		w->stats(w->self, &procs, &refused, &regions, &bytes);
+	/*
+	 * TAKEN BEFORE close, like the stats above it.
+	 *
+	 * This was read from the summary further down, after the walk had been
+	 * closed and freed - a use-after-free that did not crash and did not
+	 * print either, because the freed struct happened to read back as a
+	 * walk with the comparison turned off. A silent wrong answer out of
+	 * freed memory is the worst shape this could have taken: it looked
+	 * exactly like a collector with nothing to say.
+	 */
+	if (w->describe)
+		(void)w->describe(w->self, note, sizeof note);
 	w->close(w->self);
 
 	if (cache_path && !koffridge_save(p.fridge, cache_path))
@@ -872,6 +966,27 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 	printf("unbacked  %llu chunk(s), %.2f MB\n",
 	       (unsigned long long)p.chunks,
 	       (double)p.chunk_bytes / 1048576.0);
+	/*
+	 * Only when there were any. A zero here would read as "checked and
+	 * none", and on a platform whose walk does not compare modules at all
+	 * it would be claiming a check that never ran - see wdiff.h, which is
+	 * Windows only.
+	 */
+	if (p.patches)
+		printf("modified  %llu run(s) in loaded module(s), %llu byte(s)"
+		       " - differs from the file, which is not yet a verdict\n",
+		       (unsigned long long)p.patches,
+		       (unsigned long long)p.patch_bytes);
+	/*
+	 * WHAT THE COLLECTOR HAS TO SAY THAT THE FOUR NUMBERS CANNOT.
+	 *
+	 * Optional and empty on a collector with nothing extra, so this prints
+	 * nothing rather than an empty heading. It is where a count of modules
+	 * that could NOT be compared appears - a number that existed and
+	 * reached nobody until there was a line for it.
+	 */
+	if (note[0])
+		printf("%s\n", note);
 	koffridge_describe(p.fridge, line, sizeof line);
 	printf("%s\n", line);
 
@@ -911,7 +1026,20 @@ int main(int argc, char **argv)
 	 * it. See koffridge.h.
 	 */
 	int want_procs = 0;
+	/*
+	 * WHERE THE VERDICT CACHE IS KEPT BETWEEN RUNS.
+	 *
+	 * On by default at a per-user path - see koffridge_default_path, which
+	 * is also where the reason the DEFAULT is safe is written down. It used
+	 * to be off unless a path was given, and that made a five-fold
+	 * difference in sweep time depend on somebody knowing to ask.
+	 *
+	 * --cache-file overrides the path; --no-cache turns it off, for a run
+	 * that must answer from nothing but this database and these bytes.
+	 */
 	const char *cache_path = NULL;
+	char cache_buf[1024];
+	int  no_cache = 0;
 	uint32_t pids[64];
 	uint32_t n_pids = 0;
 	int i, rc;
@@ -1033,8 +1161,11 @@ int main(int argc, char **argv)
 		}
 		else if (strcmp(argv[i], "--scan-procs") == 0)
 			want_procs = 1;
+
 		else if (strcmp(argv[i], "--cache-file") == 0 && i + 1 < argc)
 			cache_path = argv[++i];
+		else if (strcmp(argv[i], "--no-cache") == 0)
+			no_cache = 1;
 		/*
 		 * ONE PROCESS, OR A FEW. Naming them is not a filter over the
 		 * whole table - the walk opens only what was named, which is
@@ -1188,8 +1319,47 @@ int main(int argc, char **argv)
 		memset(&dv, 0, sizeof dv);
 		(void)kof_engine_db_version(eng, &dv);
 		/* The cache is only true of one database - see koffridge.h. */
+		/*
+		 * THE COMPARISON IS WHAT --heur 2 MEANS HERE.
+		 *
+		 * Level 2 is already the rung that says "do the expensive thing
+		 * that finds what the cheap things cannot" - it is where the
+		 * interpreter runs. Comparing a written-to module against its
+		 * file is exactly that shape: it is the only way to see an
+		 * inline hook, and it costs reads no sweep should pay by
+		 * default. A separate flag would have been a second dial
+		 * meaning the same thing.
+		 */
+		/*
+		 * --jobs DOES NOTHING HERE, AND SAYS SO.
+		 *
+		 * The process walk is sequential: one collector handle, one
+		 * fridge, one address space open at a time. A flag that is
+		 * accepted and ignored is worse than one that is refused -
+		 * somebody sets it, measures no change, and concludes the
+		 * machine is the limit. Measured, the thing it WOULD help is
+		 * real: of a 5.2s sweep, 4.2s is scanning the distinct module
+		 * files, and those are independent of each other.
+		 */
+		if (jobs > 1)
+			fprintf(stderr, "%s: --jobs is ignored with "
+				"--scan-procs; the process walk is "
+				"sequential\n", argv[0]);
+		/*
+		 * The default path is worked out here rather than inside
+		 * scan_procs, so that "no cache" and "a cache nobody could
+		 * find a home for" are one state at the call rather than two
+		 * behaviours inside it.
+		 */
+		if (no_cache)
+			cache_path = NULL;
+		else if (!cache_path &&
+			 koffridge_default_path(cache_buf, sizeof cache_buf))
+			cache_path = cache_buf;
+
 		rc = scan_procs(&r, sc, &opt, dv.build, cache_path,
-				pids, n_pids);
+				pids, n_pids,
+				!opt.heur_off && opt.heur_level >= 2);
 	} else if (jobs > 1)
 		rc = kof_scan_path_mt(scs, jobs, target, &opt, on_object, &r);
 	else

@@ -48,15 +48,26 @@
  * make every collector consumer link the engine.
  *
  *
- * WHAT kofmemscan DID THAT THIS DOES NOT: the image-against-its-file diff. At
- * its level 2 it read a module whose pages had gone private, read the file
- * behind it, and reported WHICH bytes differed - which is how hollowing and an
- * inline patch are told apart from each other and from a relocated image. That
- * is a comparison producing a finding, not a source of bytes to scan, so it
- * does not fit behind next_item at all; it belongs in a rule that is given both
- * copies. Said here rather than quietly dropped.
+ * 4. AND A MODULE THAT WAS WRITTEN TO IS COMPARED AGAINST ITS FILE. See
+ *    wdiff.h. This was kofmemscan's level 2 and was lost in the merge that
+ *    produced this file; the note here used to say it did not fit behind
+ *    next_item, which was only true of the REPORT. The bytes fit perfectly
+ *    well: each differing run is handed over as ordinary KOF_WALK_BYTES,
+ *    labelled MEM_PATCH, so every rule in the database reaches an inline hook
+ *    without anything new being taught to the scanner. What genuinely does not
+ *    fit - which section, how far from its file, how many runs - goes to the
+ *    callback in wdiff.h instead.
+ *
+ *    It runs only for modules the region walk saw a written-to page in, and
+ *    reads only THOSE PAGES. Both halves are needed: a written-to image page
+ *    is not rare on Windows - the loader's import optimisation writes into
+ *    .text, so ntdll is written to in every process on the machine - and the
+ *    first version of this read whole modules for it, which cost 1676MB a
+ *    sweep. Reading the dirty extents instead costs 62MB and finds more. See
+ *    wdiff.h.
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -67,6 +78,7 @@
 #include "kofunpack/pe_unmap.h"
 
 #include "wproc.h"
+#include "wdiff.h"
 #include "kofwalk.h"
 
 /*
@@ -83,6 +95,33 @@
 /* Under this a span cannot hold a PE header, so there is nothing to un-map and
  * the un-map would only report a failure nobody can act on. */
 #define W_MIN_IMAGE 0x400u
+
+/*
+ * How many written-to modules one process may have noted, and how many
+ * differing runs one module may hand back.
+ *
+ * Both are small on purpose and both report their own overflow rather than
+ * silently truncating - see wwalk.dirty_over and kofw_diff_stat.capped. A
+ * module with more than thirty-two differing runs has been rewritten rather
+ * than hooked, and THAT is the finding; the list stops being what a reader
+ * needs long before the count does.
+ */
+#define W_DIRTY_MAX 64u
+
+/*
+ * 256, and it was 32.
+ *
+ * The cap bounds how many runs are handed out as items to scan, and at 32 it
+ * was also silently bounding what the SUMMARY said: one mscoree.dll produced
+ * 119 differing runs and the line read "33". A number that is the smaller of
+ * what was found and an internal array size is not a count of anything.
+ *
+ * Raising it is nearly free because a run is a few bytes - 119 of them in that
+ * module came to 190 bytes in total - so the cost of scanning them all is
+ * nothing next to the reads that found them. Past 256 the module has been
+ * rewritten rather than patched, and THAT is the finding.
+ */
+#define W_PATCH_MAX 256u
 
 /* Where next_item is in its walk of one process. */
 enum w_stage {
@@ -141,6 +180,39 @@ struct wwalk {
 	 * cannot be read still yields the part that can.
 	 */
 	uint64_t span_first;
+
+	/*
+	 * THE MODULES WITH A WRITTEN-TO PAGE IN THEM, gathered in the span
+	 * stage and read in the module stage - see the note where it is filled.
+	 *
+	 * A FIXED SET, because it is small by construction: a process with more
+	 * than a few dozen written-to modules is not a process this list would
+	 * help with, and a walk must not start allocating per process. `over`
+	 * says the set filled up, so a caller learns the comparison was skipped
+	 * for some rather than that they were clean.
+	 */
+	struct kofw_diff_range dirty[W_DIRTY_MAX];
+	uint64_t dirty_mod[W_DIRTY_MAX];
+	uint32_t n_dirty;
+	uint32_t dirty_over;
+
+	/* Parsed once per distinct file, reused across every process that
+	 * mapped it - see wdiff.h. */
+	struct kofw_diff_cache *dcache;
+
+	/* The runs the last comparison produced, handed out one per item. */
+	struct kofw_diff_run patch[W_PATCH_MAX];
+	uint32_t n_patch, i_patch;
+	uint64_t patch_at;      /* the module they belong to */
+
+	/* What the comparisons came to, for whoever reports the walk. */
+	uint64_t diff_modules, diff_runs, diff_bytes, diff_small, diff_unknown;
+	/* Differing bytes the image's own dynamic relocation table accounts
+	 * for. Shown, not hidden - see kofw_diff_stat.dvrt_explained. */
+	uint64_t diff_dvrt;
+	/* Dirty extents the fixed set could not hold, summed over every
+	 * process - each one is a module that was NOT compared. */
+	uint64_t diff_skipped;
 
 	/*
 	 * THE UN-MAPPED COPY, held so it can be handed over as the item AFTER
@@ -243,6 +315,27 @@ static void close_mem(struct wwalk *w)
 	w->have_rg = 0;
 	w->have_span = 0;
 	w->stage = W_STAGE_DONE;
+
+	/*
+	 * THE DIRTY SET BELONGS TO THE PROCESS THAT FILLED IT.
+	 *
+	 * It was not cleared here, and the consequence was not a leak - it was
+	 * a WRONG ANSWER, because of ASLR. A system DLL sits at the same
+	 * address in every process on the machine for the life of a boot, so
+	 * an entry left behind by process A matched the same module in process
+	 * B by base, and B's copy was then compared over a range that nothing
+	 * had established was written to in B.
+	 *
+	 * Measured: 9 regions were ever recorded, and 174 modules matched one -
+	 * so all but nine of those comparisons were run on another process's
+	 * evidence. The reads were real, the ranges were real, and the
+	 * attribution was not.
+	 */
+	w->diff_skipped += w->dirty_over;
+	w->n_dirty = 0;
+	w->dirty_over = 0;
+	w->n_patch = 0;
+	w->i_patch = 0;
 }
 
 static int wanted(const struct wwalk *w, uint32_t pid)
@@ -274,10 +367,21 @@ static int open_mem_for(struct wwalk *w, const struct kofw_proc *p)
 	/* The purpose decides the set - see enum kof_walk_intent and the note
 	 * beside the same choice in awalk.c. MAP adds the heap and drops
 	 * EXEC_ONLY, because a reader opened this to look at it. */
+	/*
+	 * DIRTY IS ASKED FOR ONLY WHERE SOMETHING READS THE ANSWER.
+	 *
+	 * It costs a working-set query per executable image region - one array
+	 * entry per page - and it was being asked for on every walk. A MAP
+	 * walk reads it: the viewer labels such a region MEM_IMAGE_DIRTY. A
+	 * SCAN walk reads it only when the module comparison is on, which is
+	 * heur 2; below that the flag was computed, paid for, and looked at by
+	 * nobody.
+	 */
 	if (w->o.intent == KOF_WALK_MAP)
 		po.want = KOFW_MW_PATHS | KOFW_MW_DIRTY | KOFW_MW_HEAP;
 	else
-		po.want = KOFW_MW_PATHS | KOFW_MW_DIRTY | KOFW_MW_EXEC_ONLY;
+		po.want = KOFW_MW_PATHS | KOFW_MW_EXEC_ONLY |
+			  (w->o.compare_modules ? KOFW_MW_DIRTY : 0u);
 	po.max_region = W_MAX_SPAN;
 
 	w->mem = kofw_pmem_open(p->pid, p->create_time, &po, &err);
@@ -433,6 +537,133 @@ static const char *w_label(uint8_t use, uint32_t flags)
 	}
 }
 
+/*
+ * THE EXTENT, NOT JUST THE MODULE.
+ *
+ * This kept only the allocation base, so the comparison knew WHICH module had
+ * been written to and nothing about WHERE - and then read the whole module to
+ * find out. Keeping the region's own base and length is what lets the
+ * comparison read a few pages instead of two megabytes; see wdiff.h for the
+ * measurement that forced it.
+ *
+ * Several regions of one module are several entries, deliberately. Merging
+ * them into one bounding range would put every clean page between two dirty
+ * ones back into the read.
+ */
+/*
+ * The trace, resolved once. It found three of the four bugs this walk had, so
+ * it stays - but getenv sits in a path called per dirty region and per module,
+ * and a lookup per call to answer a question that cannot change mid-run is the
+ * kind of cost that arrives without anybody choosing it.
+ */
+static int trace_on(void)
+{
+	static int v = -1;
+
+	if (v < 0)
+		v = getenv("KOFW_DIFF_TRACE") ? 1 : 0;
+	return v;
+}
+
+static void dirty_add(struct wwalk *w, uint64_t mod_base, uint64_t base,
+		      uint64_t len)
+{
+	uint32_t i;
+
+	if (!mod_base || !len)
+		return;
+	for (i = 0; i < w->n_dirty; i++)
+		if (w->dirty[i].addr == base && w->dirty[i].len == len)
+			return;
+	if (w->n_dirty >= W_DIRTY_MAX) {
+		w->dirty_over++;
+		return;
+	}
+	if (trace_on())
+		fprintf(stderr, "DIRTY mod=%llx base=%llx len=%llu\n",
+			(unsigned long long)mod_base,
+			(unsigned long long)base, (unsigned long long)len);
+	w->dirty_mod[w->n_dirty]    = mod_base;
+	w->dirty[w->n_dirty].addr   = base;
+	w->dirty[w->n_dirty].len    = len;
+	w->n_dirty++;
+}
+
+/* The dirty extents belonging to one module, gathered for the comparison. */
+static uint32_t dirty_of(const struct wwalk *w, uint64_t mod_base,
+			 struct kofw_diff_range *out, uint32_t cap)
+{
+	uint32_t i, n = 0;
+
+	for (i = 0; i < w->n_dirty && n < cap; i++)
+		if (w->dirty_mod[i] == mod_base)
+			out[n++] = w->dirty[i];
+	return n;
+}
+
+/*
+ * THE CALLBACK THE COMPARISON REPORTS THROUGH, and all it does is keep the
+ * runs so the walk can hand them out one item at a time.
+ *
+ * It does not scan and does not decide. next_item returns ONE item, and a
+ * module may differ in several places, so the runs are collected here and
+ * drained by w_next_item on the following calls - the same shape back_pending
+ * already uses for the un-mapped copy of a span.
+ */
+static int patch_seen(const struct kofw_diff_run *r, const uint8_t *mem,
+		      const uint8_t *file, void *user)
+{
+	struct wwalk *w = user;
+
+	(void)file;
+	(void)mem;
+	if (w->n_patch >= W_PATCH_MAX)
+		return 1;               /* enough: stop the comparison */
+	w->patch[w->n_patch++] = *r;
+	return 0;
+}
+
+/*
+ * Hand over the next differing run as bytes to be scanned.
+ *
+ * THE BYTES COME OUT OF THE PROCESS, not out of the un-mapped copy the
+ * comparison built. What a rule should be run over is what is actually
+ * executing in that address space - the un-map exists to make the COMPARISON
+ * possible by putting the loader's relocations back, and a scan of its output
+ * would be a scan of a reconstruction.
+ *
+ * Undeclared, so it reaches the modules written for unidentified bytes. A
+ * sixty-byte patch is not a PE and declaring it one would send it to a parser
+ * that will refuse it.
+ */
+static int take_patch(struct wwalk *w, struct kof_walk_item *out)
+{
+	const struct kofw_diff_run *r;
+	size_t got;
+
+	while (w->i_patch < w->n_patch) {
+		r = &w->patch[w->i_patch++];
+		if (!r->len || r->len > W_MAX_SPAN)
+			continue;
+		if (!grow(w, r->len))
+			continue;
+		got = kofw_pmem_read(w->mem, r->addr, w->buf, r->len);
+		if (!got)
+			continue;
+		w->bytes += got;
+
+		out->kind  = KOF_WALK_BYTES;
+		out->addr  = r->addr;
+		out->p     = w->buf;
+		out->len   = (uint64_t)got;
+		out->label = "MEM_PATCH";
+		return 1;
+	}
+	w->n_patch = 0;
+	w->i_patch = 0;
+	return 0;
+}
+
 static int take_span(struct wwalk *w, struct kof_walk_item *out)
 {
 	uint64_t at = w->span_base;
@@ -571,6 +802,66 @@ static int take_nameless_module(struct wwalk *w, const struct kofw_module *md,
 	return 1;
 }
 
+/*
+ * Read the module out of the process and compare it against its file.
+ *
+ * The runs land in w->patch and are drained by w_next_item. Nothing is
+ * reported here, because a difference is not a verdict: see wdiff.h.
+ */
+static void diff_dirty_module(struct wwalk *w, const struct kofw_module *md)
+{
+	struct kofw_diff_option dopt;
+	struct kofw_diff_stat   dst;
+	struct kofw_diff_range  rg[W_DIRTY_MAX];
+	uint32_t n;
+
+	w->n_patch = 0;
+	w->i_patch = 0;
+
+	n = dirty_of(w, md->base, rg, W_DIRTY_MAX);
+	if (trace_on()) {
+		uint64_t tot = 0;
+		uint32_t k;
+
+		for (k = 0; k < n; k++)
+			tot += rg[k].len;
+		fprintf(stderr, "DIFF base=%llx ranges=%u bytes=%llu over=%u"
+			" ndirty=%u %s\n",
+			(unsigned long long)md->base, n,
+			(unsigned long long)tot, w->dirty_over, w->n_dirty,
+			md->path);
+	}
+	if (!n)
+		return;
+
+	memset(&dopt, 0, sizeof dopt);
+	dopt.max_runs = W_PATCH_MAX;
+	memset(&dst, 0, sizeof dst);
+	(void)kofw_diff_module(w->mem, md, rg, n, w->dcache, &dopt,
+			       patch_seen, w, &dst);
+	if (trace_on())
+		fprintf(stderr, "  -> runs=%u mem=%llu file=%llu relok=%llu"
+			" relbad=%llu\n", dst.runs,
+			(unsigned long long)dst.mem_read,
+			(unsigned long long)dst.file_read,
+			(unsigned long long)dst.reloc_explained,
+			(unsigned long long)dst.reloc_wrong);
+
+	/*
+	 * The bytes the comparison read count toward the walk's own total, so
+	 * the summary's "read out of them" stays the truth about what this
+	 * walk actually pulled out of processes.
+	 */
+	w->bytes        += dst.mem_read;
+	w->patch_at      = md->base;
+	w->diff_modules += (dst.runs != 0);
+	w->diff_runs    += dst.runs;
+	w->diff_bytes   += dst.bytes;
+	w->diff_small   += dst.small_runs;
+	w->diff_dvrt    += dst.dvrt_explained;
+	w->diff_unknown += (uint64_t)(dst.base_unknown != 0);
+}
+
 static int w_next_item(void *self, struct kof_walk_item *out)
 {
 	struct wwalk *w = self;
@@ -592,6 +883,14 @@ static int w_next_item(void *self, struct kof_walk_item *out)
 	drop_back(w);
 	memset(out, 0, sizeof *out);
 
+	/*
+	 * The runs a comparison found, one per call. Drained BEFORE the stage
+	 * loop, because the module that produced them was handed over on the
+	 * previous call and the walk has already moved past it.
+	 */
+	if (w->i_patch < w->n_patch && take_patch(w, out))
+		return 1;
+
 	while (w->stage == W_STAGE_SPANS) {
 		int want_it;
 
@@ -605,6 +904,24 @@ static int w_next_item(void *self, struct kof_walk_item *out)
 			break;
 		}
 		w->regions++;
+
+		/*
+		 * WHICH MODULES HAVE BEEN WRITTEN TO, NOTED NOW BECAUSE THE
+		 * REGION WALK IS GONE BY THE TIME THE MODULES ARE.
+		 *
+		 * The two stages share one pass over the process: by the time
+		 * W_STAGE_MODULES runs, kofw_pmem_next_region is exhausted and
+		 * there is no second chance to ask which image pages had stopped
+		 * being shared. So the answer is carried across in a small set.
+		 *
+		 * It is what makes the comparison affordable at all. Reading and
+		 * diffing every module against its file would be eight thousand
+		 * file reads a sweep; diffing only the ones with a written-to
+		 * page is a handful - measured, 2 of 77 in one powershell.exe.
+		 */
+		if (w->o.compare_modules &&
+		    (w->rg.flags & KOFW_RGF_DIRTY_IMAGE))
+			dirty_add(w, w->rg.alloc_base, w->rg.base, w->rg.size);
 
 		/*
 		 * WHAT IS WORTH READING, and the set is small on purpose.
@@ -693,6 +1010,26 @@ static int w_next_item(void *self, struct kof_walk_item *out)
 		}
 		if (md.path && md.path[0]) {
 			/*
+			 * A MODULE SOMEBODY WROTE TO IS COMPARED AGAINST ITS
+			 * FILE, and only that module.
+			 *
+			 * The file is offered below whatever happens, because
+			 * the file is what the module mostly IS. What the
+			 * comparison adds is the part the file does not have -
+			 * the inline hook, the blown-away stub, the hollowed
+			 * section - and those bytes exist in no file, so
+			 * nothing else in this walk would ever reach them.
+			 *
+			 * Only for modules the region walk saw a written-to
+			 * page in. A module whose pages are all still shared is
+			 * byte-identical to its file by construction, so the
+			 * comparison could only report nothing at the cost of
+			 * reading the file twice.
+			 */
+			if (w->o.compare_modules)
+				diff_dirty_module(w, &md);
+
+			/*
 			 * THE FILE, NOT THE MAPPING. Its pages are shared with
 			 * every other process that mapped it precisely BECAUSE
 			 * they are identical to it, and the file has an
@@ -705,6 +1042,45 @@ static int w_next_item(void *self, struct kof_walk_item *out)
 	}
 	w->stage = W_STAGE_DONE;
 	return 0;
+}
+
+/*
+ * The module comparison's own numbers, which the four in w_stats cannot hold.
+ *
+ * Empty when the comparison did not run, so a sweep below heur 2 prints no
+ * line about a thing it did not do rather than a line of zeroes - a zero there
+ * would read as "compared, nothing found".
+ */
+static size_t w_describe(void *self, char *buf, size_t cap)
+{
+	struct wwalk *w = self;
+	uint32_t held = 0;
+	uint64_t asked = 0, parsed = 0;
+	int n;
+
+	if (!buf || !cap)
+		return 0;
+	buf[0] = '\0';
+	if (!w || !w->o.compare_modules)
+		return 0;
+
+	kofw_diff_cache_stats(w->dcache, &held, &asked, &parsed);
+	n = snprintf(buf, cap,
+		     "compare: %llu module(s) differ, %llu run(s), %llu byte(s)"
+		     ", %llu short; %llu byte(s) the image rewrites itself;"
+		     " %llu unreadable; file info %llu asked "
+		     "%llu parsed (%u held)",
+		     (unsigned long long)w->diff_modules,
+		     (unsigned long long)w->diff_runs,
+		     (unsigned long long)w->diff_bytes,
+		     (unsigned long long)w->diff_small,
+		     (unsigned long long)w->diff_dvrt,
+		     (unsigned long long)(w->diff_unknown + w->diff_skipped),
+		     (unsigned long long)asked, (unsigned long long)parsed,
+		     held);
+	if (n < 0)
+		return 0;
+	return (size_t)n < cap ? (size_t)n : cap - 1u;
 }
 
 static void w_stats(void *self, uint64_t *procs, uint64_t *refused,
@@ -729,6 +1105,7 @@ static void w_close(void *self)
 	close_mem(w);
 	if (w->list)
 		kofw_plist_close(w->list);
+	kofw_diff_cache_close(w->dcache);
 	free(w->buf);
 	free(w);
 }
@@ -763,9 +1140,24 @@ struct kof_walk_api *kof_walk_open(const struct kof_walk_option *opt, int *err)
 		}
 	}
 
+	/*
+	 * ONE PARSE PER DISTINCT FILE FOR THE WHOLE WALK.
+	 *
+	 * The same thirty or so system DLLs are mapped by every process on the
+	 * machine, and what the comparison needs from a file - its section
+	 * table, its relocation directory - is the same in all of them.
+	 * Measured before this existed: 561 comparisons over 31 distinct files.
+	 *
+	 * A failure is not fatal. Every comparison then parses for itself,
+	 * which is slower and identical in what it concludes.
+	 */
+	if (w->o.compare_modules)
+		w->dcache = kofw_diff_cache_open(0);
+
 	w->api.self      = w;
 	w->api.next_proc = w_next_proc;
 	w->api.next_item = w_next_item;
+	w->api.describe  = w_describe;
 	w->api.stats     = w_stats;
 	w->api.close     = w_close;
 

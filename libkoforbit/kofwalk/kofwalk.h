@@ -180,6 +180,34 @@ struct kof_walk_option {
 	 * "clean" from "never looked at". On by default when the struct is
 	 * zeroed - see the negative sense. */
 	int no_refused;
+
+	/*
+	 * COMPARE A LOADED MODULE AGAINST THE FILE IT WAS MAPPED FROM, and
+	 * offer whatever differs as bytes.
+	 *
+	 * The question is not platform-specific even though only one collector
+	 * answers it today: "does the code running in this process still match
+	 * the file it came from" is the only way to see an inline hook, a
+	 * security stub patched out in a process's own address space, or a
+	 * hollowed section - none of which exist in any file and none of which
+	 * raise an event, because patching the reporting path is precisely what
+	 * stops the events.
+	 *
+	 * OFF BY DEFAULT, AND THE REASON IS MEASURED. Answering it means
+	 * reading the module out of the process - per process, because the
+	 * modified page is PRIVATE to that process and there is nothing to
+	 * share or cache. On this host a whole-machine sweep went from 5.25s
+	 * and 41MB read to 9.71s and 1676MB read, and produced 1860 runs of
+	 * which most are Windows' own import optimisation. That is a fair
+	 * trade for an investigation and a bad one for a sweep, so the caller
+	 * says which it is doing.
+	 *
+	 * The Linux walk ignores it today and is right to: an ELF's PT_LOAD
+	 * segments are mapped at the file's own offsets with no relocation
+	 * applied to them, and its EXEC pages measured 0% different from the
+	 * file. There is nothing there for the comparison to find yet.
+	 */
+	int compare_modules;
 };
 
 /*
@@ -212,6 +240,28 @@ struct kof_walk_api {
 
 	/* Numbers a caller reports: processes seen and refused, regions, and
 	 * bytes actually read out of processes. May be NULL. */
+	/*
+	 * WHAT THIS COLLECTOR HAS TO SAY THAT THE FOUR NUMBERS CANNOT, as one
+	 * line of text. MAY BE NULL, and is on a collector with nothing extra.
+	 *
+	 * Returns bytes written, excluding the NUL.
+	 *
+	 * TEXT RATHER THAN MORE OUT-PARAMETERS, and the reason is that the
+	 * things worth saying here are not the same on two platforms. Windows
+	 * has a module comparison with a count of runs, a count of the ones too
+	 * short to tell from the loader's own patching, and a count of modules
+	 * whose comparison was SKIPPED because a fixed set filled up. Linux has
+	 * none of those and will have others. Widening stats() for each would
+	 * make a neutral signature the union of every platform's bookkeeping,
+	 * and every collector would have to know about the rest.
+	 *
+	 * What made this necessary rather than tidy: those counts existed and
+	 * reached nobody. A walk that skipped comparing some modules reported
+	 * exactly what a walk that compared them all and found nothing
+	 * reported.
+	 */
+	size_t (*describe)(void *self, char *buf, size_t cap);
+
 	void (*stats)(void *self, uint64_t *procs, uint64_t *refused,
 		      uint64_t *regions, uint64_t *bytes);
 

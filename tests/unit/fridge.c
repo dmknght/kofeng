@@ -24,6 +24,8 @@
 #include <string.h>
 #include <stdlib.h>
 
+#include <pthread.h>
+
 #include "../../libkoforbit/koffridge/koffridge.h"
 
 static int fails;
@@ -47,6 +49,122 @@ static void result_with(struct kof_result *r, uint32_t n,
 		r->v[i].level = levels[i];
 		snprintf(r->v[i].name, sizeof r->v[i].name, "%s", names[i]);
 	}
+}
+
+/*
+ * SEVERAL THREADS ON ONE FRIDGE, and the assertion is not "it did not crash".
+ *
+ * A lock that is missing shows up as a crash only sometimes; what it shows up
+ * as reliably is a WRONG ANSWER - an entry half written by one thread and read
+ * by another, so a key comes back with somebody else's verdict. That is
+ * invisible in a scanner, because a verdict that is merely wrong looks exactly
+ * like a verdict.
+ *
+ * So every thread uses keys only IT writes, with a verdict name derived from
+ * the key. Any hit must carry the name that key was stored with. A torn entry
+ * fails that, and so does a probe that walked into another shard.
+ *
+ * The keys are sized so the table cannot hold them all: eviction runs
+ * throughout, which is the path that WRITES to slots other lookups are reading
+ * and is therefore the one worth racing.
+ */
+#define HAM_THREADS 8
+#define HAM_KEYS    2000
+
+struct hammer {
+	struct koffridge *f;
+	uint32_t          id;      /* which thread */
+	uint64_t          wrong;   /* a hit that carried the wrong verdict */
+	uint64_t          hits;
+};
+
+static void ham_name(char *out, size_t cap, uint32_t who, uint32_t k)
+{
+	snprintf(out, cap, "PE-x86/Test:T%uK%u", who, k);
+}
+
+static void *ham_run(void *arg)
+{
+	struct hammer *h = arg;
+	struct kof_result res;
+	struct koffridge_verdict v;
+	uint32_t pass, k;
+
+	for (pass = 0; pass < 4; pass++) {
+		for (k = 0; k < HAM_KEYS; k++) {
+			uint64_t key = ((uint64_t)h->id << 32) | k;
+			char want[64];
+
+			ham_name(want, sizeof want, h->id, k);
+			memset(&res, 0, sizeof res);
+			res.n = 1;
+			res.v[0].level = KOF_LEVEL_INFECT;
+			snprintf(res.v[0].name, sizeof res.v[0].name, "%s",
+				 want);
+			(void)koffridge_put(h->f, &key, sizeof key, &res);
+
+			if (koffridge_get(h->f, &key, sizeof key, &v)) {
+				h->hits++;
+				if (strcmp(v.name, want) != 0)
+					h->wrong++;
+			}
+		}
+	}
+	return NULL;
+}
+
+static void concurrent(void)
+{
+	pthread_t     th[HAM_THREADS];
+	struct hammer hm[HAM_THREADS];
+	struct koffridge *f = koffridge_open(1024, 0x2026091301ull);
+	struct koffridge_stat st;
+	uint64_t wrong = 0, hits = 0;
+	int i, made = 0;
+
+	ck(f != NULL, "open for the concurrent pass");
+	if (!f)
+		return;
+
+	for (i = 0; i < HAM_THREADS; i++) {
+		memset(&hm[i], 0, sizeof hm[i]);
+		hm[i].f = f;
+		hm[i].id = (uint32_t)i;
+		if (pthread_create(&th[i], NULL, ham_run, &hm[i]) == 0)
+			made++;
+		else
+			break;
+	}
+	for (i = 0; i < made; i++)
+		pthread_join(th[i], NULL);
+
+	ck(made == HAM_THREADS, "every thread started");
+	for (i = 0; i < made; i++) {
+		wrong += hm[i].wrong;
+		hits  += hm[i].hits;
+	}
+	ck(wrong == 0, "no key ever answered with another key's verdict");
+	ck(hits > 0, "the concurrent pass hit at least once");
+
+	/*
+	 * The totals have to add up to what was actually done. Eight threads
+	 * times four passes times the key count is the number of puts, and a
+	 * counter updated without its lock loses some of them.
+	 */
+	koffridge_stats(f, &st);
+	ck(st.stores + st.refused ==
+	   (uint64_t)made * 4ull * HAM_KEYS,
+	   "every put is counted exactly once");
+	ck(st.hits + st.misses == (uint64_t)made * 4ull * HAM_KEYS,
+	   "every get is counted exactly once");
+	ck(st.used <= st.capacity, "never more entries than slots");
+
+	printf("  concurrent: %d thread(s), %llu hit(s), %llu wrong, "
+	       "%llu stored, %llu evicted\n", made,
+	       (unsigned long long)hits, (unsigned long long)wrong,
+	       (unsigned long long)st.stores,
+	       (unsigned long long)st.evictions);
+	koffridge_close(f);
 }
 
 int main(void)
@@ -343,6 +461,10 @@ int main(void)
 	}
 
 	koffridge_close(f);
+
+	/* 7. SEVERAL THREADS AT ONCE - see the note on struct hammer. */
+	concurrent();
+
 	printf("fridge: %s\n", fails ? "FAILED" : "ok");
 	return fails != 0;
 }
