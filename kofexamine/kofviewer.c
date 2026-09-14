@@ -6213,6 +6213,34 @@ static uint64_t txt_line_of(struct view *v, const uint8_t *base,
 	return n;
 }
 
+/*
+ * THE FURTHEST THE PANE MAY BE SCROLLED - the top line that still leaves a full
+ * screen of text under it.
+ *
+ * Walked back from the last line rather than counted forward from the first,
+ * because the answer is a fixed number of lines from the END and the number of
+ * lines before it is not needed at all. That is a screen's worth of stepping,
+ * whatever the object's size.
+ *
+ * Without it the step below stopped only when the NEXT line would pass the end,
+ * so the last line of a script could be scrolled up to the top row and the rest
+ * of the pane was blank - the reader could keep pressing down long after there
+ * was anything left to see.
+ */
+static uint64_t txt_max_top(struct view *v, const uint8_t *base,
+			    uint64_t base_n, int rows)
+{
+	uint64_t a;
+	int i;
+
+	if (!v->rgn_len)
+		return 0;
+	a = txt_line_start(v, base, base_n, v->rgn_len - 1u);
+	for (i = 1; i < rows && a > 0; i++)
+		a = txt_line_start(v, base, base_n, a - 1u);
+	return a;
+}
+
 /* Where the text starts, past the line-number gutter. */
 #define TXT_GUTTER 8
 static int txt_x0(void) { return TREE_W + 3 + TXT_GUTTER + 2; }
@@ -6379,6 +6407,18 @@ static void draft_seed_target(struct view *v)
 		v->ed.dr.opt_on[OPT_SUBTYPE] = 1;
 		v->ed.dr.opt_val[OPT_SUBTYPE] = fo->ctx.subtype;
 	}
+}
+
+/* The furthest the text pane scrolls, for whatever object is in hand. */
+static uint64_t txt_home_end(struct view *v)
+{
+	struct object *ob = cur_obj(v);
+	uint64_t n = ob ? ob->buf.n : 0;
+	const uint8_t *b = ob ? ob->buf.p : NULL;
+
+	if (!b)
+		n = 0;
+	return txt_max_top(v, b, n, hex_last() - hex_top() + 1);
 }
 
 /* Non-zero when the pane in hand is showing text rather than a hex dump. */
@@ -19529,12 +19569,14 @@ static void hex_step(struct view *v, long lines)
 
 		if (!b)
 			n = 0;
+		uint64_t top;
+
 		a = txt_line_start(v, b, n, v->rgn_at);
 		while (lines > 0 && a < v->rgn_len) {
 			uint64_t nx = txt_line_end(v, b, n, a);
 
 			if (nx >= v->rgn_len)
-				break;  /* the last line stays on screen */
+				break;
 			a = nx;
 			lines--;
 		}
@@ -19542,7 +19584,10 @@ static void hex_step(struct view *v, long lines)
 			a = txt_line_start(v, b, n, a - 1u);
 			lines++;
 		}
-		v->rgn_at = a;
+		/* And never past the point where the last line is on the
+		 * bottom row - see txt_max_top. */
+		top = txt_max_top(v, b, n, hex_last() - hex_top() + 1);
+		v->rgn_at = a > top ? top : a;
 		return;
 	}
 
@@ -24677,7 +24722,12 @@ case 'k': case K_UP:
 	case ' ': case K_PGDN: hex_step(v,  page); break;
 	case 'b': case K_PGUP: hex_step(v, -page); break;
 	case 'g': case K_HOME: v->rgn_at = 0; break;
-	case 'G': case K_END:  v->rgn_at = hex_max(v); break;
+	case 'G': case K_END:
+		/* The end means the same thing in both layouts and is found two
+		 * different ways - hex_max counts rows of `per` bytes, which a
+		 * line is not. Both answer in one step rather than walking. */
+		v->rgn_at = text_pane(v) ? txt_home_end(v) : hex_max(v);
+		break;
 	/*
 	 * SIDEWAYS, AND ONLY WHERE THERE IS A SIDEWAYS TO GO.
 	 *

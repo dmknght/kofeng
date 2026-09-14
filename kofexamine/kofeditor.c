@@ -1931,6 +1931,33 @@ const char *draft_dup(struct kof_editor *e, int *near_miss)
 
 		if (e->dr.gen_path[0] && !strcmp(g_src[i].path, e->dr.gen_path))
 			continue;
+		/*
+		 * THE SAME TARGET TEST THE EXACT MATCH ABOVE MAKES, which this
+		 * loop did not make at all.
+		 *
+		 * So a php draft was compared against every rule in the tree
+		 * and named whichever one happened to share all but one
+		 * pattern - an msf shellcode rule aimed at a binary, say. The
+		 * reading offered is "you are about to write something that
+		 * mostly repeats this", and that is only true of a rule run
+		 * against the same kind of object: the same bytes aimed at
+		 * another format are a sibling rule, which is exactly what the
+		 * note above the exact-match test says.
+		 *
+		 * It surfaced when the panel began seeding the subtype from the
+		 * object, because that made `tgt` narrower: the exact loop
+		 * started declining rules this one still accepted.
+		 */
+		if (g_src[i].tgt != tgt)
+			continue;
+		/*
+		 * n_pat == n + 1 passes here and matches nothing below - the
+		 * inner test only covers a source with one pattern FEWER than
+		 * the draft. "They have one we do not" is a question worth
+		 * asking and is not asked; left as it stands rather than
+		 * guessed at, because answering it means deciding which of
+		 * THEIR patterns to drop and that is a different search.
+		 */
 		if (g_src[i].n_pat + 1u != n && g_src[i].n_pat != n + 1u)
 			continue;
 		for (k = 0; k < e->dr.n_decl; k++) {
