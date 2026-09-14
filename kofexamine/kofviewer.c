@@ -536,6 +536,25 @@ static int hex_last(void)
 #define OBJ_BUDGET  (256ull << 20)
 /* "[ Discard ]" with a space in front, so the note box can leave room. */
 #define NEW_BTN_W 12
+
+/*
+ * THE HEADING ROW IS LAID OUT AGAINST FIXED MARKS, NOT AGAINST THE CURSOR.
+ *
+ * Every box on it used to be as wide as its contents and every box after it
+ * started wherever the last one stopped, so the row rearranged itself as the
+ * draft was typed into - and clicking a field, which widened it, shoved
+ * everything to its right along with it. On a narrow terminal that pushed the
+ * Generate button off the end of the row entirely.
+ *
+ * So: the fields are a fixed width, the buttons are anchored to the RIGHT edge,
+ * and the comment takes exactly the gap between them. Nothing on the row moves
+ * unless the terminal is resized.
+ */
+#define FAM_W     24    /* the family box, focused or not */
+#define GEN_BTN_W 12    /* "[ Generate ]" */
+/* "[ Save ]" + two + "[ Save As ]" - what replaces Generate once the draft has
+ * a file behind it. */
+#define SAVE_BTN_W (8 + 2 + 11)
 /*
  * Where the string editor's codes live in view.edit.
  *
@@ -6319,6 +6338,48 @@ static int text_under(struct view *v, int row, int col, uint64_t *out,
 	return 1;
 }
 
+/*
+ * WHAT THE RULE APPLIES TO, SEEDED FROM THE OBJECT THE FIRST MARKER CAME OFF.
+ *
+ * That object's format is the one format the reader has already shown they
+ * care about. Seeded rather than fixed: everything after this is theirs to add
+ * and remove on the Format row.
+ *
+ * AND THE SUBTYPE WITH IT, FOR A SCRIPT AND NOT FOR AN EXECUTABLE, because the
+ * word means different things on the two axes:
+ *
+ *   - for a script the subtype is the LANGUAGE, and a marker taken out of a
+ *     php file is a php marker. Left off, the rule declares no subtype, and a
+ *     rule with no subtype is offered every script on the machine - every
+ *     python file, every shell script - to be told no. That is the cost the
+ *     subtype axis exists to avoid, and paying it by ACCIDENT, because a field
+ *     was left blank, is the worst way to pay it.
+ *
+ *   - for an ELF or a PE the subtype is a LAYOUT VARIANT - relocatable,
+ *     executable, shared - and the same bytes routinely appear in all three.
+ *     Seeding it there would narrow the rule to whichever kind happened to be
+ *     open, and lose the other two silently. So it is not seeded.
+ *
+ * KV_CAP_TEXT is exactly that line: the formats whose subtype is what the file
+ * IS WRITTEN IN rather than how it is laid out.
+ */
+static void draft_seed_target(struct view *v)
+{
+	struct object *fo = cur_obj(v);
+	uint8_t fmt;
+
+	if (v->ed.dr.fmt_mask)
+		return;
+	fmt = (uint8_t)((fo && fo->fmt && fo->ctx.format < KOF_FMT_COUNT)
+			? fo->ctx.format : KOF_FMT_UNKNOWN);
+	v->ed.dr.fmt_mask = 1u << fmt;
+	if (fo && fo->ctx.subtype && kv_cap(fmt, KV_CAP_TEXT) &&
+	    !v->ed.dr.opt_on[OPT_SUBTYPE]) {
+		v->ed.dr.opt_on[OPT_SUBTYPE] = 1;
+		v->ed.dr.opt_val[OPT_SUBTYPE] = fo->ctx.subtype;
+	}
+}
+
 /* Non-zero when the pane in hand is showing text rather than a hex dump. */
 static int text_pane(struct view *v)
 {
@@ -9706,6 +9767,21 @@ static void hit_head_discard(struct view *v, uint32_t arg)
 	}
 }
 
+/*
+ * The column the Generate/Save block starts at - see the marks above.
+ *
+ * One function because two places need the same number: the block draws itself
+ * there, and the comment box measures the gap up to it. Two copies of this
+ * arithmetic is how the comment came to overlap the buttons in the first place.
+ */
+static int head_btn_x(const struct view *v)
+{
+	int w = v->ed.dr.gen_path[0] ? SAVE_BTN_W : GEN_BTN_W;
+	int x = g_cols - NEW_BTN_W - w;
+
+	return x < 2 ? 2 : x;
+}
+
 static void draw_decl_head(struct out *o, struct view *v)
 {
 	int top = decl_top();
@@ -9724,11 +9800,23 @@ static void draw_decl_head(struct out *o, struct view *v)
 	v->t_c0 = c; v->t_c1 = (int)o->col_hint;
 	hit_add(v, top, c, (int)o->col_hint, hit_head_type, 0);
 
+	/*
+	 * A FIXED WIDTH, FOCUSED OR NOT.
+	 *
+	 * This was 24 while it had the caret and the length of its text
+	 * otherwise, so clicking it widened the box - and everything drawn
+	 * after it on the row moved sideways to make room, including the
+	 * comment box, whose own width is measured from where this one ended.
+	 * A control that jumps when you point at it is a control you have to
+	 * chase.
+	 *
+	 * The text still scrolls inside the box; field_draw has done that for
+	 * every field here from the start. What is fixed is the HOLE it is
+	 * drawn in, which is the thing the rest of the row is laid out against.
+	 */
 	c = 2 + (int)o->col_hint;
 	out_fmt(o, A_DIM "  Family " A_OFF "%s[", v->edit == 1 ? A_SEL : A_ID);
-	field_draw(o, v->ed.dr.family, v->caret, &v->fam_off,
-		   v->edit == 1 ? 24 : (int)strlen(v->ed.dr.family[0] ? v->ed.dr.family
-								: "?"),
+	field_draw(o, v->ed.dr.family, v->caret, &v->fam_off, FAM_W,
 		   v->edit == 1, "?", v->field_all);
 	out_str(o, "]" A_OFF);
 	v->f_c0 = c; v->f_c1 = (int)o->col_hint;
@@ -9747,10 +9835,18 @@ static void draw_decl_head(struct out *o, struct view *v)
 		 * available is known here and nowhere else.
 		 */
 		size_t len = strlen(v->ed.dr.note);
-		/* Less what the New button needs at the right hand end: the
-		 * note takes what is left of the row, and something else now
-		 * has the end of it. */
-		int room = g_cols - c - 3 - NEW_BTN_W;
+		/*
+		 * IT TAKES THE GAP, and the gap has two fixed ends.
+		 *
+		 * This took the row minus the Discard button, and the buttons
+		 * between the two were painted AFTER it from wherever it left
+		 * the cursor - so the comment ate their columns and Generate
+		 * was pushed off the end of the row. Now the buttons are
+		 * anchored to the right edge and this is measured against where
+		 * they start, so the two cannot overlap however long the note
+		 * gets.
+		 */
+		int room = head_btn_x(v) - c - 3;
 		uint32_t off;
 
 		if (room < 8)
@@ -9779,24 +9875,36 @@ static void draw_decl_head(struct out *o, struct view *v)
 		int near_miss = 0;
 		const char *dup = why ? NULL : draft_dup(&v->ed, &near_miss);
 
-		c = 2 + (int)o->col_hint;
+		/*
+		 * ANCHORED TO THE RIGHT EDGE, BESIDE DISCARD.
+		 *
+		 * Drawn with out_at rather than after whatever the comment box
+		 * left behind, which is what let a long note push it off the
+		 * row. Beside Discard because the three of them are what you do
+		 * WITH a finished draft, and a reader looking for "now what"
+		 * should find them together rather than one of them adrift in
+		 * the middle of the row.
+		 */
+		c = head_btn_x(v);
+		out_at(o, top, c);
 		if (!v->ed.dr.gen_path[0]) {
-			out_fmt(o, "  %s[ Generate ]" A_OFF,
+			out_fmt(o, "%s[ Generate ]" A_OFF,
 				save_ok(v) ? "\033[42;30m" : "\033[47;90m");
-			v->g_c0 = c; v->g_c1 = (int)o->col_hint;
-			hit_add(v, top, c, (int)o->col_hint, hit_head_gen, 0);
+			v->g_c0 = c; v->g_c1 = c + GEN_BTN_W - 1;
+			hit_add(v, top, v->g_c0, v->g_c1, hit_head_gen, 0);
 			v->sv_c0 = v->sv_c1 = -1;
 		} else {
-			out_fmt(o, "  %s[ Save ]" A_OFF,
+			out_fmt(o, "%s[ Save ]" A_OFF,
 				save_ok(v) ? "\033[42;30m" : "\033[47;90m");
-			v->g_c0 = c; v->g_c1 = (int)o->col_hint;
-			hit_add(v, top, c, (int)o->col_hint, hit_head_gen, 0);
-			c = 2 + (int)o->col_hint;
-			out_fmt(o, "  %s[ Save As ]" A_OFF,
+			v->g_c0 = c; v->g_c1 = c + 7;
+			hit_add(v, top, v->g_c0, v->g_c1, hit_head_gen, 0);
+			out_str(o, "  ");
+			v->sv_c0 = c + 10;
+			v->sv_c1 = c + SAVE_BTN_W - 1;
+			out_fmt(o, "%s[ Save As ]" A_OFF,
 				save_as_ok(v) ? "\033[42;30m"
 					      : "\033[47;90m");
-			v->sv_c0 = c; v->sv_c1 = (int)o->col_hint;
-			hit_add(v, top, c, (int)o->col_hint, hit_head_gen, 1);
+			hit_add(v, top, v->sv_c0, v->sv_c1, hit_head_gen, 1);
 		}
 		/*
 		 * What is wrong, what is missing, what would be a duplicate and
@@ -12894,21 +13002,7 @@ static void decl_add_text(struct view *v, const char *text, size_t n)
 	 * declaration and turns that into a sentence the reader sees while
 	 * they are still looking at what they declared.
 	 */
-	/*
-	 * AND THE FORMAT THE RULE APPLIES TO, seeded once.
-	 *
-	 * The first string is declared on an object, and that object's format
-	 * is the one format the reader has already shown they care about.
-	 * Seeded rather than fixed: everything after this is theirs to add and
-	 * remove on the Format row.
-	 */
-	if (!v->ed.dr.fmt_mask) {
-		struct object *fo = cur_obj(v);
-
-		v->ed.dr.fmt_mask = 1u << ((fo && fo->fmt &&
-					    fo->ctx.format < KOF_FMT_COUNT)
-					   ? fo->ctx.format : KOF_FMT_UNKNOWN);
-	}
+	draft_seed_target(v);
 	decl_locate(&v->ed, d);
 	if (d->at == KOF_BROKEN) {
 		v->act_ok = 0;
@@ -13036,13 +13130,7 @@ static void decl_add(struct view *v, int hex)
 	(void)g;
 	v->ed.dr.warn[0] = 0;
 	v->ed.dr.sel_decl = v->ed.dr.n_decl;
-	if (!v->ed.dr.fmt_mask) {
-		struct object *fo = cur_obj(v);
-
-		v->ed.dr.fmt_mask = 1u << ((fo && fo->fmt &&
-					    fo->ctx.format < KOF_FMT_COUNT)
-					   ? fo->ctx.format : KOF_FMT_UNKNOWN);
-	}
+	draft_seed_target(v);
 	v->ed.dr.n_decl++;
 	/*
 	 * LOCATED, like every other path that produces a declaration.
@@ -24403,7 +24491,27 @@ static int handle(struct view *v, int k)
 		if (n) {
 			copy_osc52(sel, n);
 			copy_said(v, n);
+			break;
 		}
+		/*
+		 * AND OTHERWISE WHAT IS PICKED IN THE BYTES PANE.
+		 *
+		 * There was no other branch, so Ctrl+C over a selection did
+		 * nothing at all and the only way to copy it was the right
+		 * button. That was survivable while the pane was a hex dump -
+		 * "copy these bytes" is a question with two answers, hex or
+		 * ascii, and a menu is where a question with two answers
+		 * belongs. It is not survivable now the pane can be TEXT:
+		 * selecting a line of a script and pressing the chord every
+		 * editor has is not a thing a reader will think to look in a
+		 * menu for.
+		 *
+		 * The menu's own action, not a second copy written here: what
+		 * the chord does and what the item does cannot then disagree
+		 * about what "the selection" is.
+		 */
+		if (v->sel_a != KOF_BROKEN)
+			menu_run(v, M_COPY_ASCII);
 		break;
 	}
 	/*
