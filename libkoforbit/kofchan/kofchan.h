@@ -61,16 +61,82 @@
  * carries on, exactly as the in-process ring does and for a stronger reason.
  *
  *
+ * THIS RING IS BETWEEN TWO PRIVILEGED PROCESSES, AND THAT IS THE ANSWER TO
+ * THE QUESTION IT USED TO BE STUCK ON.
+ *
+ * What stood here said the channel was "not yet fit to run as a service with
+ * user-level subscribers", and proposed a per-session ring so an unprivileged
+ * client could see only its own session. That was solving the wrong problem.
+ *
+ * Raw telemetry is not something an unprivileged process should hold ANY of.
+ * It carries process starts across every session, command lines - which are
+ * where credentials turn up - and AMSI submissions, which are literally what
+ * other users are executing. Slicing it per session narrows the disclosure
+ * without changing its kind, and it blinds the client to session 0, where a
+ * service-borne payload lives.
+ *
+ * So there are THREE tiers, not two, because there are two different
+ * boundaries and one of them cannot do the other's job:
+ *
+ *   SENSOR    a service, SYSTEM. Collects, normalises, publishes. Never
+ *             scans, so its work stays bounded and the drain never stalls -
+ *             see the stability argument at the top of kofwatchman.c, which
+ *             is why the sensor and the decider are two programs.
+ *   DECIDER   privileged. Subscribes to THIS ring, scans files, will evaluate
+ *             rules. Unbounded work, behind a boundary, so a slow scan costs
+ *             a queue and not a stream.
+ *   AGENT     an ordinary user. Receives VERDICTS about its own session over
+ *             a different channel, and sends requests up over a third. Never
+ *             touches this ring.
+ *
+ * Which is why this ring's access control is now simple: a private namespace
+ * bound to Administrators, a DACL of SYSTEM and Administrators, and an owner
+ * check on the subscriber - see chan_win.c. There is no group to administer
+ * and no per-session slicing, because there is no unprivileged reader.
+ *
+ *
  * WHAT THIS VERSION DOES NOT DO, SAID PLAINLY
  *
- * One ring, and every subscriber sees all of it. A per-session ring, so that a
- * subscriber running as one logged-on user sees only that session's events, is
- * the thing that makes this safe to expose to a user-level process at all -
- * kof_evt.session_id is collected and ready for it - and it is not built. The
- * names are in the Local\ namespace, so today publisher and subscriber must
- * share a session, which contains the exposure by accident rather than by
- * design. Read that as: not yet fit to run as a service with user-level
- * subscribers.
+ * The other two channels do not exist. The verdict channel down to an agent
+ * and the control channel back up from it are designed and not built, and the
+ * second is the one to be careful with: a request path from an unprivileged
+ * process into a privileged one is where a protection product gets turned off.
+ * It wants a named pipe rather than this ring - request/response, and a
+ * caller that can be impersonated - a closed command set rather than strings,
+ * and a privileged side that acts AS THE CALLER whenever a caller-supplied
+ * path is involved. Settings that weaken protection must be gated on the
+ * impersonated token, not on the pipe's DACL.
+ *
+ *
+ * AND THE ONE THAT BITES EVERY PRODUCT THAT GETS THIS FAR: REMOVAL.
+ *
+ * There is no disinfection feature yet, and this is written before there is
+ * one because it is a constraint on the PROTOCOL, which is decided first. The
+ * request "this file is malware, delete it" arriving from an unprivileged
+ * agent at a privileged decider is the confused deputy in its classic form -
+ * the caller chooses the target and the deputy supplies the privilege - and
+ * arbitrary-delete-as-SYSTEM is the single most recurring CVE class in
+ * security products. Deleting is not the gentle end of writing; a file the
+ * caller could not open is a file it must not be able to unlink either.
+ *
+ * Two rules, and the second is the one that is easy to miss:
+ *
+ *   A PATH IS NOT AN IDENTITY. The agent must not name the target at all. It
+ *   references a VERDICT the decider itself issued - an opaque id for a scan
+ *   this side performed - and the decider removes the object it convicted, not
+ *   a string it was handed. A protocol that carries a path has already lost,
+ *   because every check on that path happens before the delete rather than to
+ *   the thing deleted.
+ *
+ *   IMPERSONATION ALONE IS NOT ENOUGH, because the filesystem moves. Between
+ *   the scan that convicted a file and the unlink that removes it, the
+ *   directory is writable by the attacker in exactly the case that matters -
+ *   their own temp directory - and a junction, symlink or rename put there in
+ *   the gap redirects the unlink onto something else. So: impersonate the
+ *   caller for the open, refuse to follow reparse points on the way, and
+ *   verify the opened object is the SAME OBJECT that was scanned - volume and
+ *   file index, the identity koffridge already computes - before anything is
+ *   removed. Act on the handle from then on, never on the name again.
  */
 
 #ifndef KOFORBIT_KOFCHAN_H
@@ -87,12 +153,16 @@
 /*
  * The default base name.
  *
- * On Windows it goes in the Local\ namespace - see the note above on why that
- * contains the exposure by accident rather than by design. On POSIX it becomes
- * /<name>-d and /<name>-c under shm, created 0600, so the containment is the
- * owning user rather than the session. Neither is a per-session ring, which is
- * what this still needs before a service may expose it to user-level
- * subscribers.
+ * On Windows it is a stem inside the PRIVATE NAMESPACE, not in Local\: the
+ * namespace is bound to Administrators, so the name cannot be created - or
+ * squatted - by an unprivileged process, and it is not a name the rest of the
+ * session can even enumerate. On POSIX it becomes /<name>-d and /<name>-c
+ * under shm, created 0600, so the containment is the owning user.
+ *
+ * Neither is a per-session ring, and neither needs to be: both ends of this
+ * channel are privileged. The unprivileged reader this once tried to serve is
+ * the AGENT, and it is served by a different channel - see the three tiers
+ * above.
  */
 #define KOF_CHAN_NAME "kofwatchtower"
 

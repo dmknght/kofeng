@@ -4575,7 +4575,7 @@ enum pack_bucket {
 	/* Event targets, which are not file formats at all - see
 	 * KOF_TARGET_FIRST_EVENT. A pack of their own so a host that never
 	 * scans a process does not load rules about one. */
-	BUCKET_PROC
+	BUCKET_PROC, BUCKET_AMSI
 };
 
 static int bucket_of_format(uint32_t fmt)
@@ -4609,6 +4609,7 @@ static int bucket_of_format(uint32_t fmt)
 	case KOF_FMT_TEXT:    return BUCKET_TEXT;
 	case KOF_FMT_UNKNOWN: return BUCKET_RAW;
 	case KOF_EVT_PROC:    return BUCKET_PROC;
+	case KOF_EVT_AMSI:    return BUCKET_AMSI;
 	default:              return BUCKET_NONE;
 	}
 }
@@ -4624,6 +4625,7 @@ static const char *bucket_name(int b)
 	case BUCKET_TEXT:    return "text";
 	case BUCKET_RAW:     return "raw";
 	case BUCKET_PROC:    return "proc";
+	case BUCKET_AMSI:    return "amsi";
 	default:             return "";
 	}
 }
