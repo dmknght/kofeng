@@ -11792,6 +11792,10 @@ static const struct {
 
 #define MENU_W 24
 
+/* Could these bytes be code - defined with the menu-bar rules below, which ask
+ * the same question about the same object. See the note there. */
+static int obj_maybe_code(const struct object *o);
+
 static int menu_shown(struct view *v, int a)
 {
 	/*
@@ -11809,6 +11813,26 @@ static int menu_shown(struct view *v, int a)
 	 * menu_gap counts only SHOWN rows, so that follows on its own.
 	 */
 	if (v->log && a == M_DISASM)
+		return 0;
+	/*
+	 * AND NEITHER HAS A SCRIPT.
+	 *
+	 * The same question, asked of the object rather than of the log flag: a
+	 * PHP file, a shell script, a JSP page are TEXT, and asking what a run
+	 * of their bytes does as instructions produces a page of plausible
+	 * x86 that corresponds to nothing. The log rule above was written for
+	 * event records and stopped there, so every text format kept the item -
+	 * greyed at best, because menu_enabled tests the arch and a script has
+	 * none, and a greyed row is still a row that says the tool thinks this
+	 * might be code.
+	 *
+	 * obj_maybe_code is the answer the disassembler and the emulator
+	 * already share, and it is the parse's own claim rather than anything
+	 * worked out here: where the format was named and the name is not code,
+	 * no; where nothing named it, yes, because unclaimed bytes are exactly
+	 * what a peeled payload looks like.
+	 */
+	if (a == M_DISASM && !obj_maybe_code(cur_obj(v)))
 		return 0;
 	return (menu_item[a].ctx & v->menu_ctx) != 0;
 }
