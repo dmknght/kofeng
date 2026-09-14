@@ -577,7 +577,36 @@ enum {
 	/* The region is larger than kofw_pmem_option.max_region, so its
 	 * contents were not examined for the flags that need reading. Said,
 	 * rather than left as an absence, for the usual reason. */
-	KOFW_RGF_UNEXAMINED  = 1u << 8
+	KOFW_RGF_UNEXAMINED  = 1u << 8,
+
+	/*
+	 * AN IMAGE THE LOADER DOES NOT ADMIT TO HAVING.
+	 *
+	 * The region is a real image section - the kernel mapped it with
+	 * SEC_IMAGE and there is a file behind it - but its allocation base is
+	 * not in the process's module list. That is the shape of LDR
+	 * UNLINKING: a module loaded normally and then removed from the
+	 * loader's own lists so that anything asking the loader is told it is
+	 * not there.
+	 *
+	 * WHY THIS IS NOT KOFW_RGF_UNBACKED, and the distinction is the whole
+	 * point. `UNBACKED` asks "is there a FILE behind this executable
+	 * memory", which catches a payload copied into VirtualAlloc. An
+	 * unlinked module answers that question perfectly well - it has a file,
+	 * GetMappedFileNameW names it - so it was never questioned. The
+	 * question this asks is a different one: "does the LOADER know about
+	 * it". Two lists that should agree and do not.
+	 *
+	 * BOTH SETS WERE ALREADY COLLECTED. The region walk had them and the
+	 * module walk had them and nothing compared the two, which is why a
+	 * technique that leaves both halves intact went unseen.
+	 *
+	 * NOT A VERDICT ON ITS OWN. A resource-only image - a .mui, anything
+	 * mapped with LOAD_LIBRARY_AS_IMAGE_RESOURCE - is deliberately absent
+	 * from the module list and is entirely ordinary. See the note in
+	 * wproc.c on what separates the two and on what the measured rate is.
+	 */
+	KOFW_RGF_UNLINKED    = 1u << 9
 };
 
 struct kofw_region {
@@ -686,7 +715,33 @@ enum {
 	 * execute is KOFW_USE_CODE and was never a heap by this library's
 	 * reading.
 	 */
-	KOFW_MW_HEAP      = 1u << 3
+	KOFW_MW_HEAP      = 1u << 3,
+
+	/*
+	 * FILL A MODULE'S SIZE AND ENTRY POINT - off by default, and it is the
+	 * most expensive thing in a module walk by a wide margin.
+	 *
+	 * It costs one GetModuleInformation per module, measured at 57
+	 * MICROSECONDS each over 4323 modules on this machine - 247ms, which
+	 * was a fifth of a whole warm sweep. That is the same order as the
+	 * loader path query beside it and is paid for the same reason: it is a
+	 * cross-process query into somebody else's loader data.
+	 *
+	 * AND NOTHING IN THE PRODUCT READ THE RESULT. wwalk.c - the one
+	 * consumer of the module walk - uses `flags` and `path` and neither
+	 * `size` nor `entry`. The fields were being computed for every module
+	 * of every process so that a unit test could pick a module big enough
+	 * to be worth mutating.
+	 *
+	 * `base` IS NOT BEHIND THIS BIT, because it costs nothing: on Windows
+	 * an HMODULE IS the base address, and the enumeration already returned
+	 * it. Only the size and the entry point need the call.
+	 *
+	 * This is the rule the top of this header states - every field that
+	 * costs a syscall is behind a bit - applied to the one place it had
+	 * not been.
+	 */
+	KOFW_MW_MOD_EXTENT = 1u << 4
 };
 
 struct kofw_pmem_option {

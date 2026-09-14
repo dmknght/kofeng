@@ -299,13 +299,27 @@ int main(void)
 	 */
 	uint32_t accepted = 0, saw_reloc = 0;
 	uint64_t total_runs = 0;
+	struct kofw_pmem_option mo;
 	double worst = 0.0;
 
 	/*
 	 * ITS OWN PROCESS, because the memory half has to be real and because a
 	 * test may not go rummaging in somebody else's.
 	 */
-	m = kofw_pmem_open((uint32_t)GetCurrentProcessId(), 0, NULL, &err);
+	/*
+	 * ASKING FOR THE MODULE EXTENT, because this test picks a module by
+	 * SIZE and that field is behind a bit now - see KOFW_MW_MOD_EXTENT.
+	 * The product does not read it, so the product does not pay for it;
+	 * this does read it, so it says so.
+	 *
+	 * Passing NULL here took the default and left `size` zero, which made
+	 * the picker below reject every module and the whole case skip itself
+	 * - a test that passes by testing nothing, which is the failure this
+	 * file's own reach counters exist to catch.
+	 */
+	memset(&mo, 0, sizeof mo);
+	mo.want = KOFW_MW_DEFAULT | KOFW_MW_MOD_EXTENT;
+	m = kofw_pmem_open((uint32_t)GetCurrentProcessId(), 0, &mo, &err);
 	if (!m) {
 		/* The number, not kofw_err_name: that lives in the ETW
 		 * collector, and linking a trace session into a test about
@@ -313,6 +327,46 @@ int main(void)
 		printf("hostile mem: cannot open self (err %d) - nothing "
 		       "tested\n", err);
 		return 1;
+	}
+
+	/*
+	 * THE LOADER-LIST CHECK, AND IT IS ASSERTED AS A REACH BEFORE IT IS
+	 * ASSERTED AS AN ANSWER.
+	 *
+	 * KOFW_RGF_UNLINKED marks an image region the loader does not list -
+	 * the shape of a module unlinked from the PEB/LDR chain. On a machine
+	 * with nothing hiding, the right answer is ZERO, and zero is exactly
+	 * what a check that never ran also produces. This feature shipped that
+	 * false zero twice while it was being written: once because the flag
+	 * was set in a region the walk never offered to a caller, and once
+	 * before anybody had counted how often the test was even reached.
+	 *
+	 * So both halves are asserted. `img_exec` must be non-zero or this case
+	 * has gone hollow and is testing nothing; `unlinked` must be zero,
+	 * because every module of this process IS in this process's own module
+	 * list and a flag here would be a false positive on the most ordinary
+	 * program there is.
+	 */
+	{
+		struct kofw_region r;
+		uint64_t img_exec = 0, unlinked = 0;
+
+		while (kofw_pmem_next_region(m, &r)) {
+			if (r.kind == KOFW_RGN_IMAGE &&
+			    (r.flags & KOFW_RGF_EXEC))
+				img_exec++;
+			if (r.flags & KOFW_RGF_UNLINKED)
+				unlinked++;
+		}
+		ck(img_exec > 0,
+		   "the loader-list check was reached at all");
+		ck(unlinked == 0,
+		   "no image of this process is missing from its own "
+		   "module list");
+		printf("  loader list: %llu executable image region(s) "
+		       "checked, %llu unlinked\n",
+		       (unsigned long long)img_exec,
+		       (unsigned long long)unlinked);
 	}
 
 	/*
