@@ -2154,6 +2154,13 @@ struct view {
 	 */
 	uint64_t    txt_anchor;     /* a byte offset whose line number is known */
 	uint64_t    txt_anchor_ln;  /* that line number, 0 based */
+	/*
+	 * The longest line the last frame drew, so sideways scrolling can stop
+	 * where the text does. Without it the pane scrolls into blank space and
+	 * the reader is left pressing a key that empties the screen - which
+	 * reads as the key not working rather than as the end of the line.
+	 */
+	uint32_t    txt_maxlen;
 };
 
 static struct object *cur_obj(struct view *v)
@@ -5771,7 +5778,20 @@ static void draw_frame(struct out *o, struct view *v)
 
 	for (i = hex_top(); i <= hex_bot(); i++) {
 		out_at(o, i, TREE_W + 1);
-		out_str(o, A_DIM "|" A_OFF);
+		/*
+		 * THE BLANK AFTER THE DIVIDER IS PAINTED TOO.
+		 *
+		 * Both bytes panes start their rows at TREE_W + 3, and this
+		 * drew only TREE_W + 1 - so the column between them was
+		 * written by NOBODY on a normal frame. Anything that landed
+		 * there stayed: close a dialog whose box reached that column
+		 * and one character of its border was left behind in the line
+		 * number gutter, with nothing in the repaint to remove it.
+		 *
+		 * A column that no drawer owns is a column that keeps whatever
+		 * was last put in it, so this one is given an owner.
+		 */
+		out_str(o, A_DIM "|" A_OFF " ");
 	}
 	/*
 	 * The divider, which is also the handle that resizes the draft panel.
@@ -6241,9 +6261,17 @@ static uint64_t txt_max_top(struct view *v, const uint8_t *base,
 	return a;
 }
 
-/* Where the text starts, past the line-number gutter. */
-#define TXT_GUTTER 8
-static int txt_x0(void) { return TREE_W + 3 + TXT_GUTTER + 2; }
+/*
+ * Where the text starts, past the line-number gutter.
+ *
+ * Six digits and one space. It was eight and two, which is ten columns spent on
+ * a number that is three digits in almost every script - a tenth of a narrow
+ * terminal, taken from the text, to line up a case that does not occur. Six
+ * still holds a million lines; past that the field grows and the text shifts,
+ * which is a file nobody is reading by eye anyway.
+ */
+#define TXT_GUTTER 6
+static int txt_x0(void) { return TREE_W + 3 + TXT_GUTTER + 1; }
 
 /*
  * ONE BYTE, ONE COLUMN, AND NO INTERPRETATION - the same rule the hex pane's
@@ -6280,6 +6308,7 @@ static void draw_text(struct out *o, struct view *v)
 
 	at = txt_line_start(v, base, base_n, v->rgn_at);
 	ln = txt_line_of(v, base, base_n, at);
+	v->txt_maxlen = 0;
 
 	for (row = top; row <= bot; row++) {
 		uint64_t end, k;
@@ -6290,10 +6319,27 @@ static void draw_text(struct out *o, struct view *v)
 			out_str(o, "\033[K");
 			continue;
 		}
-		out_fmt(o, A_LOC "%*llu" A_OFF "  ", TXT_GUTTER,
+		out_fmt(o, A_LOC "%*llu" A_OFF " ", TXT_GUTTER,
 			(unsigned long long)(ln + 1u));
 
 		end = txt_line_end(v, base, base_n, at);
+		/* How far right there is anything to see, so the sideways
+		 * scroll can stop there - see txt_maxlen. The newline is not
+		 * part of the line's width. */
+		{
+			uint64_t len = end - at;
+
+			while (len && at + len - 1u < v->rgn_len) {
+				uint64_t fo = view_map(v, at + len - 1u, 0);
+				uint8_t bv = fo < base_n ? base[fo] : 0;
+
+				if (bv != '\n' && bv != '\r')
+					break;
+				len--;
+			}
+			if (len > v->txt_maxlen)
+				v->txt_maxlen = (uint32_t)len;
+		}
 		/*
 		 * SCROLLED SIDEWAYS, and the skip is over BYTES because a
 		 * column is a byte here - see txt_glyph. A line shorter than
@@ -19462,8 +19508,26 @@ static int read_key(void)
 	 */
 	for (;;) {
 		n = read(STDIN_FILENO, &c, 1);
-		if (n == 1)
+		if (n == 1) {
+			/*
+			 * A NUL BYTE IS A KEY, AND IT IS THIS FUNCTION'S OWN
+			 * "NO KEY".
+			 *
+			 * A terminal sends 0x00 for Ctrl+Space (and Ctrl+@),
+			 * and K_NONE is 0 - so the byte was returned, the loop
+			 * read it as end of input, and the program CLOSED on a
+			 * chord nobody had bound. A stray Ctrl+Space over a
+			 * draft that had not been generated lost the draft.
+			 *
+			 * Nothing here wants the key, so it is dropped rather
+			 * than given a value: inventing one would put it in the
+			 * same namespace as every real binding, and the next
+			 * key added there would inherit this.
+			 */
+			if (c == 0)
+				continue;
 			break;
+		}
 		if (n < 0 && errno == EINTR)
 			return K_RESIZE;
 		return K_NONE;   /* 0 is EOF; anything else is a real error */
@@ -24778,8 +24842,23 @@ case 'k': case K_UP:
 			v->txt_col = v->txt_col >= 8u ? v->txt_col - 8u : 0u;
 		break;
 	case K_RIGHT:
-		if (text_pane(v))
-			v->txt_col += 8u;
+		/*
+		 * AND IT STOPS WHERE THE TEXT DOES.
+		 *
+		 * Unbounded, this scrolled into blank space: past the longest
+		 * line on screen every row is empty, and a key that empties the
+		 * pane reads as a key that broke rather than as the end of the
+		 * line. txt_maxlen is what the last frame actually drew.
+		 */
+		if (text_pane(v)) {
+			int wide = g_cols - txt_x0();
+
+			if (wide < 1)
+				wide = 1;
+			if (v->txt_col + 8u + (uint32_t)wide <=
+			    v->txt_maxlen + 8u)
+				v->txt_col += 8u;
+		}
 		break;
 	default:
 		break;
