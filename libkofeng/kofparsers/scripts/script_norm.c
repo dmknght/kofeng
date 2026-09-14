@@ -168,6 +168,36 @@ static int has_multiline(const struct kof_lex *lx, const uint8_t *p, uint32_t n)
 	return 0;
 }
 
+/*
+ * WOULD CLOSING THESE TWO UP MAKE A LONGER TOKEN.
+ *
+ * "$a + +$b" must not become "$a++$b" and "$a / /re/" must not become a
+ * comment. Both are pairs of non-word bytes - but so is "= \"", which closes up
+ * perfectly well, so "both non-word" is too blunt a rule and refused far more
+ * than it had to.
+ *
+ * What actually glues is a byte followed by ITSELF - ++ -- // ** << >> && || ::
+ * .. == are all of that shape - or a pair that spells a comment opener in this
+ * language. Everything else is safe.
+ */
+static int glues(const struct kof_lex *lx, uint8_t a, uint8_t b)
+{
+	char pair[3];
+	int k;
+
+	if (a == b)
+		return 1;
+	pair[0] = (char)a;
+	pair[1] = (char)b;
+	pair[2] = 0;
+	if (lx->blk_open && !strcmp(pair, lx->blk_open))
+		return 1;
+	for (k = 0; k < 3; k++)
+		if (lx->line_cmt[k] && !strcmp(pair, lx->line_cmt[k]))
+			return 1;
+	return 0;
+}
+
 enum { ST_OUT = 0, ST_SQ, ST_DQ, ST_BLK };
 
 uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
@@ -295,6 +325,16 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 		    le == body + 1u && in[body] == '{' && w > 0 &&
 		    out[w - 1u] == '\n') {
 			w--;                    /* take back the newline */
+			/*
+			 * AND THE "DID THIS LINE EMIT ANYTHING" MARK MOVES WITH
+			 * IT. start_w was taken before this, so after taking
+			 * the newline back and writing the brace, w was equal
+			 * to it again - the test at the foot of the loop then
+			 * read the line as having produced nothing and dropped
+			 * the newline that should follow the brace. The next
+			 * line was appended to it.
+			 */
+			start_w = w;
 		}
 
 		/* ---- the line itself ---- */
@@ -341,21 +381,23 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 						prev = w ? out[w - 1u] : 0;
 						next = in[e];
 						/*
-						 * CLOSED UP ONLY WHEN EXACTLY
-						 * ONE SIDE IS A WORD BYTE.
+						 * CLOSED UP UNLESS THE TWO
+						 * WOULD BECOME ONE TOKEN.
 						 *
-						 * Both word would glue two
-						 * names into one. Both
-						 * non-word would glue two
-						 * operators into a longer one:
-						 * "$a + +$b" becomes "++" and
-						 * "$a / /re/" becomes a
-						 * comment. One of each is the
-						 * "eval (" case and is safe.
+						 * Two word bytes glue into one
+						 * name. Two bytes that spell a
+						 * longer operator glue into it
+						 * - see glues. Everything else
+						 * closes up, which is the
+						 * "eval (" case and also
+						 * "$s = \"", where the pair is
+						 * non-word on both sides and
+						 * perfectly safe.
 						 */
-						if (!lx->ws_significant &&
-						    w && is_word(prev) !=
-							 is_word(next))
+						if (!lx->ws_significant && w &&
+						    !(is_word(prev) &&
+						      is_word(next)) &&
+						    !glues(lx, prev, next))
 							;       /* closed up */
 						else
 							out[w++] = ' ';
