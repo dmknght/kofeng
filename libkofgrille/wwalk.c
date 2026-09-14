@@ -516,6 +516,16 @@ static const char *w_label(uint8_t use, uint32_t flags)
 {
 	if (flags & KOFW_RGF_PE)
 		return "MEM_MANUALMAP";
+	/*
+	 * BEFORE DATA_EXEC AND DIRTY, because it says something neither of them
+	 * can: this image is one the LOADER does not list. A hidden module is
+	 * still an ordinary image in every other respect - it has a file, its
+	 * pages are shared, it is not written to - so if any of the words below
+	 * won the race it would be labelled as the ordinary thing it is
+	 * pretending to be.
+	 */
+	if (flags & KOFW_RGF_UNLINKED)
+		return "MEM_UNLINKED";
 	if (flags & KOFW_RGF_DATA_EXEC)
 		return "MEM_DATAEXEC";
 	/*
@@ -938,6 +948,24 @@ static int w_next_item(void *self, struct kof_walk_item *out)
 		 */
 		want_it = (w->rg.use == KOFW_USE_CODE) ||
 			  (w->rg.flags & KOFW_RGF_DATA_EXEC) != 0;
+
+		/*
+		 * AND AN IMAGE THE LOADER DOES NOT LIST, which this set would
+		 * otherwise have excluded by being right about everything else.
+		 *
+		 * The two tests above ask "is there no file behind this" and
+		 * "is this a data mapping being executed". An unlinked module
+		 * answers no to both - it is a genuine image with a genuine
+		 * file - so the flag was being set in wproc and never reaching
+		 * a caller. Nothing errored; the region simply was not offered,
+		 * and a check that cannot surface is a check that is not there.
+		 *
+		 * Measured before this line: zero MEM_UNLINKED rows on a
+		 * machine, which read as a clean noise floor and was an empty
+		 * result.
+		 */
+		if (w->rg.flags & KOFW_RGF_UNLINKED)
+			want_it = 1;
 
 		/*
 		 * MAPPING THE ADDRESS SPACE IS A DIFFERENT QUESTION FROM
