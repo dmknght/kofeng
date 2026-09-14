@@ -6647,7 +6647,7 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		/* Last, because it is the one that is not a search: it compares
 		 * at one offset, and it is the only rule that constrains the
 		 * matcher to a single marker. */
-		ch_add(c, "find_str_at (at offset)");
+		ch_add(c, "find_str_at (file offset)");
 	} else if (what == CH_RANGE) {
 		/*
 		 * WHICH DEFINED RANGE THIS MATCHER SEARCHES.
@@ -7127,6 +7127,20 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		c->col = g_cols - c->w;
 	if (c->col < 1)
 		c->col = 1;
+
+	/*
+	 * NO ROW IS THE CURSOR YET, and that is the whole of it.
+	 *
+	 * The list opened on row zero highlighted, which claims something the
+	 * reader has not done: they pressed a control to SEE the choices, not
+	 * to hover the first one. Worse on a submenu - the highlight jumped off
+	 * the category they had just clicked and onto a row of the list it
+	 * opened, so the thing they chose stopped looking chosen.
+	 *
+	 * -1 is "the keyboard is not here". An arrow key brings it to row zero;
+	 * a click names its own row and never consults this.
+	 */
+	c->sel = -1;
 }
 
 
@@ -7736,10 +7750,16 @@ static void draw_one_chooser(struct out *o, const struct chooser *c, int live)
 		if (c->row + i > g_rows)
 			break;
 		out_at(o, c->row + i, c->col);
-		/* The parent keeps its highlight so the line the submenu is
-		 * qualifying stays pointed at, but in a colour that says the
-		 * keyboard is not there any more. */
-		out_str(o, i == c->sel ? (live ? BAR_CUR : BAR_ON) : BAR_ON);
+		/*
+		 * The parent keeps the cursor on the row whose list is open -
+		 * the same thing the menu bar does with sel2, and the reason is
+		 * the same: the row that was chosen has to go on looking
+		 * chosen while its children are being read.
+		 *
+		 * A chooser with sel == -1 highlights nothing. See ch_open.
+		 */
+		(void)live;
+		out_str(o, i == c->sel ? BAR_CUR : BAR_ON);
 		/* The ">" sits at the far edge, as the menu bar draws it. */
 		if (c->sub[i])
 			out_fmt(o, " %-*.*s>", c->w - 3, c->w - 3, c->item[i]);
@@ -7828,7 +7848,9 @@ static void cnd_seq(struct view *v)
 enum prow_kind {
 	RW_OPT = 0, RW_RANGES, RW_STRHDR, RW_STR, RW_ADDM,
 	RW_MATCH, RW_MARKERS, RW_ADDC, RW_COND, RW_CMATCH,
-	RW_MATHDR, RW_CNDHDR, RW_CJOIN
+	RW_MATHDR, RW_CNDHDR, RW_CJOIN,
+	/* The format row and the [+ Options] button - see prow_build. */
+	RW_FMTS, RW_OPTBTN
 };
 
 static void prow_add(struct view *v, int kind, uint32_t idx)
@@ -7846,9 +7868,30 @@ static void prow_build(struct view *v)
 	uint32_t i;
 
 	v->n_prow = 0;
-	for (i = 0; i < (uint32_t)OPT_COUNT; i++)
-		if (v->ed.dr.opt_on[i])
-			prow_add(v, RW_OPT, i);
+	/*
+	 * IN THE ORDER THE PANEL DRAWS THEM - see the chain in draw_decl(),
+	 * which is fmts, ranges, optbtn, opts, strings, matchers, conds. The
+	 * head row is not here because it is not scrolled: draw_decl_head takes
+	 * no row number and paints at a fixed line.
+	 *
+	 * ONLY THE COUNT IS READ. prow_kind and prow_idx are written and
+	 * nothing looks at them, so what this really produces is how many rows
+	 * the panel has - and that number sizes the panel and bounds its
+	 * scroll. A row the draw emits and this does not is a row that CANNOT
+	 * BE REACHED: g_decl_rows comes out short by exactly that many, and the
+	 * rows that fall off are the ones at the bottom.
+	 *
+	 * That is not hypothetical. The Format row and the [+ Options] button
+	 * were added to the draw and not to here, and the panel lost its last
+	 * two rows - which are the Conditions heading and [+ Condition]. The
+	 * draft then could not be finished at all: Save says "Add a condition
+	 * first" and the only control that adds one had no row to be drawn on.
+	 *
+	 * So the order is kept faithful to the draw even though nothing reads
+	 * it, because the next person to add a row will copy whichever of the
+	 * two lists they read first.
+	 */
+	prow_add(v, RW_FMTS, 0);
 	/*
 	 * The scan range row while there is ANY range to show, which is not the
 	 * same as "while there is a matcher".
@@ -7871,6 +7914,10 @@ static void prow_build(struct view *v)
 	 * with it, so this one does not disappear.
 	 */
 	prow_add(v, RW_RANGES, 0);
+	prow_add(v, RW_OPTBTN, 0);
+	for (i = 0; i < (uint32_t)OPT_COUNT; i++)
+		if (v->ed.dr.opt_on[i])
+			prow_add(v, RW_OPT, i);
 	if (v->ed.dr.n_decl) {
 		prow_add(v, RW_STRHDR, 0);
 		for (i = 0; i < v->ed.dr.n_decl; i++)
@@ -18083,6 +18130,65 @@ enum key {
 	K_CLICK, K_RCLICK, K_WHEEL_UP, K_WHEEL_DOWN, K_DRAG, K_RELEASE
 };
 
+/*
+ * ---- navigating a list that may have submenus -------------------------------
+ *
+ * ONE KEY TABLE FOR EVERY MENU HERE, because there are two of them and they
+ * were drifting. The menu bar grew Left/Right for submenus; the draft panel's
+ * choosers grew the same thing again later, spelled separately - two bodies of
+ * code that have to agree and nothing making them. What a reader learns
+ * pressing one menu has to hold for the other, and that only stays true while
+ * the mapping has one home.
+ *
+ * WHAT IS SHARED IS THE MEANING, NOT THE ACTION. Right is "go inward" in both,
+ * but inward opens a submenu in a chooser and, on the menu bar with no submenu
+ * under the cursor, steps to the next top-level menu. The caller carries out
+ * the intent; it does not get to decide which key produced it.
+ */
+enum kv_nav {
+	KV_NAV_NONE = 0,   /* not a navigation key */
+	KV_NAV_PREV,       /* up */
+	KV_NAV_NEXT,       /* down */
+	KV_NAV_IN,         /* right: into the submenu of the current row */
+	KV_NAV_OUT,        /* left: back out to the list this one came from */
+	KV_NAV_TAKE,       /* enter */
+	KV_NAV_DISMISS     /* escape */
+};
+
+static enum kv_nav kv_nav_key(int key)
+{
+	switch (key) {
+	case K_UP:    case 'k': return KV_NAV_PREV;
+	case K_DOWN:  case 'j': return KV_NAV_NEXT;
+	case K_RIGHT: case 'l': return KV_NAV_IN;
+	case K_LEFT:  case 'h': return KV_NAV_OUT;
+	case '\r': case '\n':   return KV_NAV_TAKE;
+	case 27:                return KV_NAV_DISMISS;
+	default:                return KV_NAV_NONE;
+	}
+}
+
+/*
+ * Move a cursor over `n` rows, where -1 means NO CURSOR YET.
+ *
+ * A list opens with no row selected - pressing a control to see the choices is
+ * not the same as pointing at the first one - so the first arrow BRINGS THE
+ * CURSOR IN rather than moving it. Down lands on the first row and Up on the
+ * last, which is the end nearest the control these lists are drawn above.
+ *
+ * Anything but PREV and NEXT returns the cursor unchanged.
+ */
+static int kv_nav_step(int sel, int n, enum kv_nav nav)
+{
+	if (n <= 0)
+		return -1;
+	if (nav == KV_NAV_NEXT)
+		return sel < 0 ? 0 : (sel + 1 < n ? sel + 1 : sel);
+	if (nav == KV_NAV_PREV)
+		return sel < 0 ? n - 1 : (sel > 0 ? sel - 1 : sel);
+	return sel;
+}
+
 static char   g_paste[4096];    /* the last bracketed paste */
 static size_t g_paste_n;
 
@@ -22277,8 +22383,11 @@ static int bar_key(struct view *v, int k)
 {
 	if (v->bar_open < 0)
 		return 0;
-	switch (k) {
-	case K_LEFT:
+	/* The same vocabulary the choosers use - see kv_nav_key. The MEANINGS
+	 * below are the bar's own: sideways with no submenu open walks the bar,
+	 * which is a thing only a bar can do. */
+	switch (kv_nav_key(k)) {
+	case KV_NAV_OUT:
 		/*
 		 * Out of a submenu first, and only then along the bar.
 		 *
@@ -22296,7 +22405,7 @@ static int bar_key(struct view *v, int k)
 					 BM_COUNT);
 		}
 		return 1;
-	case K_RIGHT:
+	case KV_NAV_IN:
 		/* Into the selected submenu when there is one; along the bar
 		 * when there is not. */
 		if (v->bar_sub < 0 && v->bar_sel >= 0 &&
@@ -22307,20 +22416,19 @@ static int bar_key(struct view *v, int k)
 		else
 			bar_open_menu(v, (v->bar_open + 1) % BM_COUNT);
 		return 1;
-	case K_UP:
+	case KV_NAV_PREV:
 		/* Inside an open submenu the arrows walk it; the submenu draws
 		 * its own selection, so leave the bar cursor alone. */
 		bar_move_item(v, -1);
 		return 1;
-	case K_DOWN:
+	case KV_NAV_NEXT:
 		bar_move_item(v, +1);
 		return 1;
-	case '\r':
-	case '\n':
+	case KV_NAV_TAKE:
 		if (v->bar_sel >= 0)
 			bar_run(v, v->bar_sel);
 		return 1;
-	case 27:
+	case KV_NAV_DISMISS:
 		/*
 		 * ONE PRESS LEAVES THE BAR, from however deep in it.
 		 *
@@ -22731,16 +22839,47 @@ static int handle_chooser_key(struct view *v, int k)
 	if (k >= K_CLICK && k <= K_RELEASE)
 		;                       /* fall through to the router below */
 	else if (v->ch.open) {
-		if (k == 'j' || k == K_DOWN) {
-			if (v->ch.sel + 1 < v->ch.n)
-				v->ch.sel++;
-		} else if (k == 'k' || k == K_UP) {
-			if (v->ch.sel)
-				v->ch.sel--;
-		} else if (k == '\r' || k == '\n') {
-			ch_take(v);
-		} else if (k == 27 || k == 'q') {
+		enum kv_nav nav = kv_nav_key(k);
+
+		switch (nav) {
+		case KV_NAV_PREV:
+		case KV_NAV_NEXT:
+			v->ch.sel = kv_nav_step(v->ch.sel, v->ch.n, nav);
+			break;
+		case KV_NAV_IN:
+			/*
+			 * ch_take is what opens a submenu - the same call the
+			 * click makes - so there is ONE path that builds one
+			 * and the two ways in cannot drift. On a row that acts
+			 * rather than opening, this does nothing: a sideways
+			 * key that sometimes carries out the highlighted item
+			 * is a key nobody can press with confidence.
+			 */
+			if (v->ch.sel >= 0 && v->ch.sel < v->ch.n &&
+			    v->ch.sub[v->ch.sel])
+				ch_take(v);
+			break;
+		case KV_NAV_OUT:
+			/* Back to the list this one came from, landing on the
+			 * row that opened it - where its cursor already is. */
+			if (v->ch_up.open) {
+				v->ch = v->ch_up;
+				v->ch_up.open = 0;
+			}
+			break;
+		case KV_NAV_TAKE:
+			/* Nothing is highlighted until an arrow says so, so
+			 * there is nothing for Enter to take. */
+			if (v->ch.sel >= 0)
+				ch_take(v);
+			break;
+		case KV_NAV_DISMISS:
 			v->ch.open = 0;
+			break;
+		default:
+			if (k == 'q')
+				v->ch.open = 0;
+			break;
 		}
 		return 1;
 	} else if (v->edit) {
