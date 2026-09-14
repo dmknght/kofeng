@@ -138,6 +138,16 @@ struct wwalk {
 	struct kofw_proc   proc;
 	int                have_proc;
 
+	/*
+	 * ONE PER WALK, handed to every process opened below. It holds the
+	 * answers that are the machine's rather than any process's - the
+	 * device-to-drive map and whether a module's file still exists - and a
+	 * sweep asks for both thousands of times. See kofw_pcache in wproc.h
+	 * for the measurement. NULL if it could not be allocated, which costs
+	 * time and nothing else.
+	 */
+	struct kofw_pcache *cache;
+
 	/* Where we are in the caller's pid list, when there is one. */
 	uint32_t idx;
 
@@ -383,6 +393,7 @@ static int open_mem_for(struct wwalk *w, const struct kofw_proc *p)
 		po.want = KOFW_MW_PATHS | KOFW_MW_EXEC_ONLY |
 			  (w->o.compare_modules ? KOFW_MW_DIRTY : 0u);
 	po.max_region = W_MAX_SPAN;
+	po.cache      = w->cache;
 
 	w->mem = kofw_pmem_open(p->pid, p->create_time, &po, &err);
 	if (!w->mem) {
@@ -1183,6 +1194,7 @@ static void w_close(void *self)
 	if (w->list)
 		kofw_plist_close(w->list);
 	kofw_diff_cache_close(w->dcache);
+	kofw_pcache_close(w->cache);
 	free(w->buf);
 	free(w);
 }
@@ -1230,6 +1242,13 @@ struct kof_walk_api *kof_walk_open(const struct kof_walk_option *opt, int *err)
 	 */
 	if (w->o.compare_modules)
 		w->dcache = kofw_diff_cache_open(0);
+
+	/*
+	 * AND THE ANSWERS THAT ARE THE MACHINE'S - opened unconditionally,
+	 * because both things it holds are asked for by every walk and not
+	 * only by a comparing one. See kofw_pcache.
+	 */
+	w->cache = kofw_pcache_open();
 
 	w->api.self      = w;
 	w->api.next_proc = w_next_proc;

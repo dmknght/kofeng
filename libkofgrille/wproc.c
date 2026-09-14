@@ -165,12 +165,20 @@ static void wide_to_buf(const wchar_t *w, char *dst, size_t cap, int *cut)
  * given "C:", what device is that - so the table is built by asking about
  * every drive letter that exists and matching prefixes against it.
  *
- * PER HANDLE RATHER THAN STATIC, because a static cache shared by two threads
- * scanning two processes is a data race for a table that costs twenty-six fast
- * calls to build. It is also not a cache that can go stale into a wrong answer
- * that way: a volume mounted during a walk is simply missing from that walk's
- * table, and a path that matches no device is passed through unchanged rather
- * than guessed at.
+ * NEVER STATIC, because a static table shared by two threads scanning two
+ * processes is a data race. It was PER HANDLE for that reason, on the argument
+ * that twenty-six fast calls are cheap - and the arithmetic that argument
+ * skipped is the number of handles: a sweep of this machine opens 83, so it
+ * built the same table 83 times and made 2158 calls to describe one machine.
+ *
+ * So it is per handle only when the caller has nothing better to offer. A
+ * caller doing a sweep opens ONE kofw_pcache and hands it to every process,
+ * which is not a static - its lifetime is the sweep's, and two sweeps in two
+ * threads hold two of them.
+ *
+ * It is still not a cache that can go stale into a wrong answer: a volume
+ * mounted during a walk is simply missing from that walk's table, and a path
+ * that matches no device is passed through unchanged rather than guessed at.
  */
 struct dosmap {
 	int      built;
@@ -181,6 +189,97 @@ struct dosmap {
 		char     drive[3];
 	} e[26];
 };
+
+/*
+ * THE SWEEP'S SHARE OF WHAT THE MACHINE KNOWS - see wproc.h for the
+ * measurements that asked for it.
+ *
+ * The path table is open-addressed over a 64-bit hash and stores no path. That
+ * is a deliberate trade and it is worth stating: a collision would hand one
+ * path another's answer, and the answer is "does this file still exist", which
+ * feeds KOFW_MDF_NO_FILE. With 660 live paths in 2048 slots the chance of any
+ * 64-bit collision at all is around one in 10^14 - far below the rate at which
+ * the question itself goes stale, since the file can be deleted between the
+ * query and the caller reading the flag. Storing the paths would cost 170KB
+ * and buy an improvement that is not measurable against that.
+ *
+ * FULL MEANS STOP MEMOISING, not evict. An eviction policy here would have to
+ * be right about which of 660 system DLLs is asked for next, and getting it
+ * wrong costs a syscall - exactly what happens anyway when the table is full.
+ * So there is no policy: past capacity every query goes through.
+ */
+#define PCACHE_SLOTS 2048u
+
+enum { PC_EMPTY = 0, PC_GONE = 1, PC_THERE = 2 };
+
+struct kofw_pcache {
+	struct dosmap dos;
+	uint64_t      key[PCACHE_SLOTS];
+	uint8_t       state[PCACHE_SLOTS];
+	uint32_t      used;
+};
+
+struct kofw_pcache *kofw_pcache_open(void)
+{
+	struct kofw_pcache *c = calloc(1, sizeof *c);
+
+	return c;
+}
+
+void kofw_pcache_close(struct kofw_pcache *c)
+{
+	free(c);
+}
+
+static uint64_t path_hash(const char *s)
+{
+	uint64_t h = 1469598103934665603ull;
+
+	for (; *s; s++) {
+		h ^= (uint64_t)(unsigned char)*s;
+		h *= 1099511628211ull;
+	}
+	/* A zero hash would be indistinguishable from an empty slot. */
+	return h ? h : 1ull;
+}
+
+/*
+ * Does the file at this UTF-8 path exist, asked once per distinct path per
+ * sweep when a cache was supplied and every time when one was not.
+ */
+static int path_there(struct kofw_pcache *c, const char *utf8)
+{
+	wchar_t  w[PATH_CAP];
+	uint64_t h = 0;
+	uint32_t i = 0, probe;
+	int      there;
+
+	if (c) {
+		h = path_hash(utf8);
+		i = (uint32_t)(h & (PCACHE_SLOTS - 1u));
+		for (probe = 0; probe < PCACHE_SLOTS; probe++) {
+			uint32_t s = (i + probe) & (PCACHE_SLOTS - 1u);
+
+			if (c->state[s] == PC_EMPTY) {
+				i = s;
+				break;
+			}
+			if (c->key[s] == h)
+				return c->state[s] == PC_THERE;
+		}
+	}
+
+	if (!MultiByteToWideChar(CP_UTF8, 0, utf8, -1, w, PATH_CAP))
+		return 1; /* unreadable as a path: not evidence of anything */
+	there = GetFileAttributesW(w) != INVALID_FILE_ATTRIBUTES;
+
+	if (c && c->used < PCACHE_SLOTS / 2u && c->state[i] == PC_EMPTY) {
+		c->key[i]   = h;
+		c->state[i] = there ? PC_THERE : PC_GONE;
+		c->used++;
+	}
+	return there;
+}
 
 static void dosmap_build(struct dosmap *m)
 {
@@ -579,7 +678,15 @@ struct kofw_pmem {
 	uint64_t addr;
 	int      done;
 	char     rgn_path[PATH_CAP];
-	struct dosmap dos;
+	/*
+	 * THE SHARED ONE WHEN THERE IS ONE, AND ITS OWN WHEN THERE IS NOT.
+	 * `dos` is the fallback storage for a caller that passed no cache;
+	 * `dosp` is what dosify is actually handed, so neither path in this
+	 * file has to know which of the two it got. See kofw_pcache.
+	 */
+	struct kofw_pcache *cache;
+	struct dosmap  dos;
+	struct dosmap *dosp;
 
 	/*
 	 * WHERE THE LAST GUARD RUN ENDED, which is the whole of the stack test.
@@ -672,6 +779,14 @@ struct kofw_pmem *kofw_pmem_open(uint32_t pid, uint64_t create_time,
 	m->want = (opt && opt->want) ? opt->want : KOFW_MW_DEFAULT;
 	m->max_region = (opt && opt->max_region) ? opt->max_region
 						 : MAX_REGION_DEFAULT;
+
+	/*
+	 * The caller's table if it offered one, this process's own if not - so
+	 * every reader below is written against `dosp` and neither case is a
+	 * special case. A NULL cache is the whole of the old behaviour.
+	 */
+	m->cache = opt ? opt->cache : NULL;
+	m->dosp  = m->cache ? &m->cache->dos : &m->dos;
 
 	GetSystemInfo(&si);
 	m->page = si.dwPageSize ? si.dwPageSize : 4096u;
@@ -922,7 +1037,7 @@ int kofw_pmem_next_module(struct kofw_pmem *m, struct kofw_module *out)
 				       (DWORD)(sizeof wdev / sizeof wdev[0]))) {
 			wide_to_buf(wdev, dev, sizeof dev, &cut);
 			if (dev[0])
-				dosify(&m->dos, dev, m->mod_path,
+				dosify(m->dosp, dev, m->mod_path,
 				       sizeof m->mod_path);
 		}
 		if (!m->mod_path[0] &&
@@ -942,21 +1057,18 @@ int kofw_pmem_next_module(struct kofw_pmem *m, struct kofw_module *out)
 		 * GetFileAttributesW does not take a device path, and asking it
 		 * with one would report every module on the machine as deleted.
 		 */
+		/*
+		 * ONCE PER DISTINCT PATH IN A SWEEP, not once per module -
+		 * path_there holds the answer when the caller supplied a
+		 * cache, and this is the query that made one worth having. The
+		 * widening back through UTF-8 lives there too: mod_path is
+		 * UTF-8 because dosify wrote it, and a byte-wise widen is
+		 * right for ASCII and silently wrong for every path with a
+		 * non-ASCII character in it - which would then fail the query
+		 * and be reported as a file that is not there.
+		 */
 		if (m->mod_path[0]) {
-			wchar_t wcheck[PATH_CAP];
-
-			/*
-			 * BACK THROUGH UTF-8, not widened a byte at a time.
-			 * mod_path is UTF-8 - dosify wrote it - so a byte-wise
-			 * widen is right for ASCII and silently wrong for
-			 * every path with a non-ASCII character in it, which
-			 * would then fail the attribute query and be reported
-			 * as a file that is not there.
-			 */
-			if (MultiByteToWideChar(CP_UTF8, 0, m->mod_path, -1,
-						wcheck, PATH_CAP) &&
-			    GetFileAttributesW(wcheck) ==
-				    INVALID_FILE_ATTRIBUTES) {
+			if (!path_there(m->cache, m->mod_path)) {
 				/*
 				 * GONE - BUT IS ANYTHING AT ITS ORIGINAL PATH?
 				 *
@@ -1148,7 +1260,7 @@ static void region_path(struct kofw_pmem *m, uint64_t base)
 
 	wide_to_buf(wdev, dev, sizeof dev, NULL);
 	if (dev[0])
-		dosify(&m->dos, dev, m->rgn_path, sizeof m->rgn_path);
+		dosify(m->dosp, dev, m->rgn_path, sizeof m->rgn_path);
 }
 
 int kofw_pmem_next_region(struct kofw_pmem *m, struct kofw_region *out)

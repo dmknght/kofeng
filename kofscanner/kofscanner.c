@@ -812,18 +812,36 @@ static void report_cached(struct procscan *p, const char *path,
 	struct fent *e;
 	char tag[64];
 
-	progress_clear(r);
 	r->files_total++;
-	r->found_objects++;
 
-	if (v->findings > 1u)
-		snprintf(tag, sizeof tag, "%s +%u more", v->name,
-			 v->findings - 1u);
-	else
-		snprintf(tag, sizeof tag, "%s", v->name);
+	/*
+	 * A CACHED ANSWER PRINTS ON THE SAME RULE A FRESH ONE DOES.
+	 *
+	 * This used to count and print unconditionally, and the two verdicts
+	 * that reach here are not alike: findings are a detection, broken with
+	 * no finding is only "nothing further could be read". on_object shows
+	 * the second under -v and nowhere else, and does not move
+	 * found_objects for it. Printing it here regardless put rows in the
+	 * report that the same file, scanned rather than recalled, would never
+	 * have produced - so a warm cache grew the report instead of only
+	 * making it faster, and the detection count grew with it.
+	 */
+	if (v->findings)
+		r->found_objects++;
 
-	printf("%s%-*s%s %s %s(cached)%s\n", col(r, level_col(v->level)),
-	       W_TAG, tag, col(r, C_RST), path, col(r, C_DIM), col(r, C_RST));
+	if (v->findings || r->verbose) {
+		progress_clear(r);
+
+		if (v->findings > 1u)
+			snprintf(tag, sizeof tag, "%s +%u more", v->name,
+				 v->findings - 1u);
+		else
+			snprintf(tag, sizeof tag, "%s", v->name);
+
+		printf("%s%-*s%s %s %s(cached)%s\n",
+		       col(r, level_col(v->level)), W_TAG, tag, col(r, C_RST),
+		       path, col(r, C_DIM), col(r, C_RST));
+	}
 
 	e = fmap_get(&r->files, path, strlen(path));
 	if (e) {

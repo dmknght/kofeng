@@ -795,7 +795,57 @@ struct kofw_pmem_option {
 	 * asked.
 	 */
 	uint64_t max_region;
+
+	/*
+	 * THE ANSWERS THAT ARE THE MACHINE'S, NOT THIS PROCESS'S - shared by
+	 * every process in one sweep, or NULL to let each one work them out
+	 * again. See kofw_pcache below. Optional: a NULL here changes nothing
+	 * but the time.
+	 */
+	struct kofw_pcache *cache;
 };
+
+/*
+ * WHAT EVERY PROCESS IN A SWEEP ASKS AND GETS THE SAME ANSWER TO.
+ *
+ * Two questions in a module walk do not depend on which process is being
+ * walked, and both were being asked once per process - or once per MODULE -
+ * for an answer that could not differ:
+ *
+ *   - the device-to-drive-letter map, rebuilt from 26 QueryDosDeviceW calls
+ *     in every process opened. Measured: 83 processes, 2158 calls, for one
+ *     table that describes the machine. Those calls are 1.1us each, so this
+ *     half is worth about 2ms and is here because the map had to be shared
+ *     for the other half to have somewhere to live - not because it was
+ *     costing anything.
+ *
+ *   - does the file behind this module still exist. 4696 modules are 660
+ *     distinct paths, because a system DLL is mapped into most of them: 7.1 of
+ *     every 8 calls asked a question that had already been answered, to find
+ *     the three modules whose file was gone.
+ *
+ *     WORTH 40ms OF A 700ms SWEEP, AND THE ISOLATED FIGURE SAYS 230ms. Both
+ *     numbers are real and the difference is the point: GetFileAttributesW
+ *     measures at 48 MICROSECONDS in a loop that calls it on 4696 paths, but
+ *     Windows caches attribute lookups itself, so most of what this skips was
+ *     already cheap. 6% for a 32KB table is worth having and it is not the
+ *     order of magnitude the per-call cost suggests - which is why the end to
+ *     end A/B is the number written down here.
+ *
+ * OWNED BY THE CALLER AND PASSED IN, not a static in this file. A sweep opens
+ * one, hands it to every kofw_pmem_open, and closes it: the lifetime is
+ * visible, the memory is the caller's, and two sweeps running at once do not
+ * share a table. Its size is fixed and small; when the path table fills it
+ * stops memoising and the queries go through, which is slower and never wrong.
+ *
+ * NOT A VERDICT CACHE. Nothing here survives the sweep - see koffridge.h for
+ * the one that does, and for why that one is keyed on a file's identity and
+ * stamped with the database it was decided under.
+ */
+struct kofw_pcache;
+
+struct kofw_pcache *kofw_pcache_open(void);
+void kofw_pcache_close(struct kofw_pcache *);
 
 struct kofw_pmem;
 
