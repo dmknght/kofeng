@@ -25,6 +25,7 @@
 #define KOFENG_EMU_UNPACK_H
 
 #include <kofmod/elf.h>
+#include <kofmod/pe.h>
 #include <kofmod/kofsig.h>
 #include "../../libkofemu/kofemu.h"
 
@@ -79,7 +80,45 @@ enum kof_emu_unp_why {
 	 * it. What it catches is the RC4/AES-wrapped payload an interpreter can
 	 * decrypt by running the loader that was written to decrypt it.
 	 */
-	KOF_EMU_UNP_WHY_LOADER = 3
+	KOF_EMU_UNP_WHY_LOADER = 3,
+	/*
+	 * THE ENTRY POINT IS IN THE LAST SECTION, and there is compressed data
+	 * somewhere in the file. A PE reason; the ELF gate never returns it.
+	 *
+	 * This is the shape a packer leaves whatever its codec: it appends a
+	 * stub section, points AddressOfEntryPoint at it, and puts the
+	 * compressed original wherever it likes. A linker does the opposite -
+	 * code goes first and the entry goes with it.
+	 *
+	 * Measured over 2678 clean x86/x64 PEs from System32 and SysWOW64, and
+	 * the distribution is not close:
+	 *
+	 *   entry in section 0                  2331
+	 *   entry in section 1                     7
+	 *   entry in no section at all           340   (resource-only DLLs)
+	 *   ENTRY IN THE LAST SECTION              0
+	 *
+	 *   a >= 16KB high-entropy blob          144   (5.4%)
+	 *   both together                          0
+	 *
+	 * WHY IT IS HERE AND DENSE WAS NOT ENOUGH. DENSE measures the entropy
+	 * of EXECUTABLE sections, so it only sees a packer that leaves its
+	 * compressed data somewhere the CPU could run from. The record this
+	 * project kept of its own ASPack sample says that one did not: it had
+	 * "the zero-raw section without the writable-executable one" - the
+	 * compressed original was not in an executable section, so DENSE reads
+	 * the stub, finds ordinary code entropy, and says no. A whole family
+	 * of packers was therefore invisible to the gate while matching the
+	 * most obvious structural tell there is.
+	 *
+	 * IT SELECTS "PACKED", NOT "MALICIOUS", and that is the right job for
+	 * a gate: it decides whether to spend an emulation budget. A legitimate
+	 * installer that is genuinely packed will fire, and firing on it is
+	 * correct - it IS packed. The corpus above is Microsoft system
+	 * binaries, which is a narrow sample of "clean" and is named rather
+	 * than dressed up as the whole world.
+	 */
+	KOF_EMU_UNP_WHY_APPENDED = 4
 };
 
 /* What the run did, for the caller to report rather than guess at. */
@@ -102,6 +141,22 @@ struct kof_emu_unp_report {
 	 * differs by width.
 	 */
 	uint64_t             stack_lo, stack_hi;
+	/*
+	 * THE STUB RETURNED TO ITS CALLER - a PE ending, and a successful one.
+	 *
+	 * An ELF entry point is jumped to and finishes by calling exit or by
+	 * handing off; a PE entry point is CALLED, so the ordinary way for one
+	 * to finish is `ret`. build_stack_pe puts an unmapped sentinel there
+	 * deliberately, which means that ordinary ending arrives as
+	 * KOF_EMU_STOP_FAULT - the same stop as "ran off into nothing", which
+	 * it is not.
+	 *
+	 * Set when the run faulted at exactly that sentinel, so a caller can
+	 * tell the two apart without parsing `detail` and without the harvest
+	 * having to treat every fault as a finished run. Never set by the ELF
+	 * path, where returning is not how a stub ends.
+	 */
+	int                  returned;
 	const char          *detail;     /* the emulator's own last word */
 	/*
 	 * Why no run was attempted at all, or NULL if one was.
@@ -133,5 +188,61 @@ struct kof_emu *kof_emu_unp_run(const uint8_t *file, uint64_t n,
 				const struct kof_elf_info *info,
 				uint64_t max_insn, uint64_t max_pages,
 				struct kof_emu_unp_report *rep);
+
+/*
+ * ---- THE SAME TWO JOBS, FOR A PE -----------------------------------------
+ *
+ * WHY THIS EXISTS AT ALL, GIVEN WHAT kofemu.h SAYS
+ *
+ * kofemu.h states the position plainly: on ELF the boundary worth stubbing is
+ * the syscall, and "the Windows API surface that makes emulation an arms race
+ * is simply not present here". That is still true and nothing below changes
+ * it. What it does NOT say, and what was being read into it, is that a PE
+ * cannot usefully be run at all.
+ *
+ * A stub does two things: it computes, and it calls. The computing half - the
+ * XOR loop, the LZ decompressor, the RC4 schedule - is arithmetic over the
+ * file's own bytes and needs no API whatsoever. The calling half is where an
+ * API layer would be needed, and it comes AFTER: a packer must decode its
+ * payload before it has anything to allocate for, so the API call marks the
+ * END of the part worth emulating rather than the start.
+ *
+ * So a run with no API layer is not a crippled run. It is a run that goes
+ * exactly as far as the arithmetic and then stops - and kof_emu_unp_run's
+ * contract already says a stop is not a failure: every snapshot and every
+ * written page is collected whatever the reason, because the whole design is
+ * "a memory dumper with a budget". A stub that decodes 400 KB and then faults
+ * reading the PEB has still decoded 400 KB.
+ *
+ * WHAT THIS THEREFORE DOES AND DOES NOT REACH
+ *
+ * Reaches: single-stage crypters and stub decoders whose work is arithmetic -
+ * the shape most custom packers have, and the shape a static unpacker cannot
+ * follow because nobody wrote a module for that one packer.
+ *
+ * Does not reach: anything whose decode is driven THROUGH the API - a stub
+ * that allocates first and decodes into what it got back stops at the
+ * allocation with nothing written. Nor anything resolving imports by walking
+ * the PEB, which faults on the first read. Those need the PEB/LDR and the
+ * handful of memory APIs, and that is a separate decision to make on evidence
+ * this produces rather than ahead of it.
+ *
+ * x86 AND x86-64 ONLY, because bddisasm decodes those. An ARM64 PE is refused
+ * by the gate rather than started and left to fault on its first instruction.
+ *
+ * TWO REASONS, NOT THREE. The gate answers DENSE or BROKEN and never LOADER:
+ * the conjunction that reason is built on loses its discriminating half on
+ * Windows, where 16.6% of clean system binaries name VirtualAlloc. The
+ * measurement is beside kof_emu_unp_gate_pe in the .c, along with what a
+ * Windows-shaped replacement would have to be.
+ */
+enum kof_emu_unp_why kof_emu_unp_gate_pe(const struct kof_obj_ctx *ctx,
+					 const struct kof_pe_info *info,
+					 const uint8_t *file, uint64_t n);
+
+struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
+				   const struct kof_pe_info *info,
+				   uint64_t max_insn, uint64_t max_pages,
+				   struct kof_emu_unp_report *rep);
 
 #endif /* KOFENG_EMU_UNPACK_H */

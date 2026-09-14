@@ -2931,25 +2931,49 @@ static int emu_give(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n)
 uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	const struct kof_elf_info *info;
 	struct kof_emu_unp_report rep;
 	struct kof_emu *e;
 	kof_buf b;
 	uint32_t it;
 	uint64_t va, len, built_lo = ~0ull, built_hi = 0;
 	const uint8_t *bytes;
-	int any, built = 0;
+	int any, built = 0, is_pe;
 
-	if (!sc || !sc->cur_src || ctx->format != KOF_FMT_ELF || !ctx->file_header)
+	if (!sc || !sc->cur_src || !ctx->file_header)
+		return 0;
+	/*
+	 * TWO FORMATS NOW, and the PE half arrived long after the ELF one.
+	 *
+	 * This read `ctx->format != KOF_FMT_ELF`, which was right when the
+	 * bridge could only build an ELF process image. emu_unpack.h carries
+	 * the argument for running a PE with no Windows API behind it; what
+	 * matters here is that the two are the same shape from this side - a
+	 * gate, a run, and a set of written pages to harvest - so the only
+	 * thing that forks is which pair is called.
+	 */
+	if (ctx->format != KOF_FMT_ELF && ctx->format != KOF_FMT_PE)
 		return 0;
 	if (!can_produce(sc))
 		return 0;
+	is_pe = ctx->format == KOF_FMT_PE;
 	b = kof_src_buf(sc->cur_src);
-	info = kof_elf(ctx);
-	if (!force && kof_emu_unp_gate(ctx, info, b.p, b.n) == KOF_EMU_UNP_NO)
-		return 0;
+	if (is_pe) {
+		const struct kof_pe_info *info = kof_pe(ctx);
 
-	e = kof_emu_unp_run(b.p, b.n, info, emu_insn(b.n), emu_pages(sc), &rep);
+		if (!force && kof_emu_unp_gate_pe(ctx, info, b.p, b.n) ==
+			      KOF_EMU_UNP_NO)
+			return 0;
+		e = kof_emu_unp_run_pe(b.p, b.n, info, emu_insn(b.n),
+				       emu_pages(sc), &rep);
+	} else {
+		const struct kof_elf_info *info = kof_elf(ctx);
+
+		if (!force && kof_emu_unp_gate(ctx, info, b.p, b.n) ==
+			      KOF_EMU_UNP_NO)
+			return 0;
+		e = kof_emu_unp_run(b.p, b.n, info, emu_insn(b.n),
+				    emu_pages(sc), &rep);
+	}
 	if (!e) {
 		/*
 		 * No image could be built, and the reasons are all statements
@@ -2988,11 +3012,42 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 		uint8_t *file = NULL;
 		uint64_t flen = 0;
 
-		if (len < 4 || memcmp(bytes, "\177ELF", 4))
-			continue;
-		if (!kof_elf_rebuild(va, emu_rd, e, sc->obj_cap, &file, &flen,
-				     &built_lo, &built_hi))
-			continue;
+		if (is_pe) {
+			/*
+			 * THE PE HALF REBUILDS FROM THE REGION, not through a
+			 * reader, and the difference is not a shortcut.
+			 *
+			 * kof_elf_rebuild walks a guest's segments by
+			 * ADDRESS because an ELF image is several mappings
+			 * that a stub placed itself - it has to be able to
+			 * reach across them. A PE that a stub built is one
+			 * contiguous image at one base, because that is the
+			 * only shape the Windows loader takes and a packer
+			 * reproducing it has no reason to scatter it. So the
+			 * region IS the image, and kof_pe_rebuild - which
+			 * already serves the in-memory path above - takes it
+			 * as it stands.
+			 *
+			 * An image genuinely spread over several regions is
+			 * not rebuilt and falls through to being handed over
+			 * as raw bytes, which is what happened to every
+			 * snapshot before any of this existed.
+			 */
+			if (len < 2 || bytes[0] != 'M' || bytes[1] != 'Z')
+				continue;
+			if (!kof_pe_rebuild(kof_buf_make(bytes, len),
+					    sc->obj_cap, &file, &flen))
+				continue;
+			built_lo = va;
+			built_hi = va + len;
+		} else {
+			if (len < 4 || memcmp(bytes, "\177ELF", 4))
+				continue;
+			if (!kof_elf_rebuild(va, emu_rd, e, sc->obj_cap,
+					     &file, &flen, &built_lo,
+					     &built_hi))
+				continue;
+		}
 		if (emu_novel(ctx, file, flen) && emu_give(ctx, file, flen))
 			c_child(ctx);
 		free(file);
@@ -3056,9 +3111,27 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	 * - so nothing in that collection stalls with unharvested memory, and
 	 * the clean corpus gains no findings.
 	 */
+	/*
+	 * AND A PE STUB THAT RETURNED, which is the fourth way to finish and
+	 * the only one that had no entry in this list.
+	 *
+	 * The three stops above are how an ELF stub ends: it exits, it hands
+	 * off, or it stalls. A PE entry point is CALLED by the loader, so the
+	 * ordinary ending for one is `ret` - and that arrives here as a fault,
+	 * because the return address the run was given points at nothing on
+	 * purpose. Without this the most normal successful PE run in existence
+	 * was classified with "ran off into nothing" and had its output thrown
+	 * away; measured on a stub that decodes a buffer and returns, the
+	 * plaintext was in the written set and never handed over.
+	 *
+	 * It is `rep.returned` and not `stop == FAULT`, so this stays a
+	 * statement about one specific address rather than an amnesty for
+	 * every run that went somewhere it should not have.
+	 */
 	if (!any && (rep.stop == KOF_EMU_STOP_EXIT ||
 		     rep.stop == KOF_EMU_STOP_HANDOFF ||
-		     rep.stop == KOF_EMU_STOP_STALLED))
+		     rep.stop == KOF_EMU_STOP_STALLED ||
+		     rep.returned))
 		for (it = 0; kof_emu_next_written(e, &it, &va, &bytes, &len); ) {
 			if (va >= built_lo && va < built_hi)
 				continue;
