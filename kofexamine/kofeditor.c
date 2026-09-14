@@ -1929,6 +1929,8 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 			return e->dr.cnd[i].variant[0]
 			       ? "Variant: letters, digits, - and _ only"
 			       : "Custom variant needs a name";
+	if (!e->dr.fmt_mask)
+		return "Name at least one target format";
 	if (!e->dr.n_decl)
 		return "Declare a string";
 	if (!e->dr.n_grp)
@@ -3721,20 +3723,16 @@ void generate(struct kof_editor *e, int as_new)
 			return;
 		}
 		/*
-		 * Nothing to write either way.
+		 * NO "NOTHING CHANGED" REFUSAL - see save_ok in kofviewer.c.
 		 *
-		 * For Save As a copy would be a duplicate; for Save the file
-		 * on disk already says this. Repeated clicks used to rewrite
-		 * it each time, which was harmless and looked like nothing was
-		 * happening.
+		 * This asked draft_dirty, which is a hash of the fields the
+		 * editor knows to hash. A field it does not cover changes
+		 * nothing about the hash, so an edit to one came back as
+		 * "nothing changed since the last save" and the write did not
+		 * happen. Rewriting a file that is already identical costs one
+		 * write; refusing a write the reader asked for costs them the
+		 * edit, and they only find out later.
 		 */
-		if (!draft_dirty(e) && e->dr.gen_path[0]) {
-			say_note(e, "%s",
-				 as_new ? "Nothing changed - a copy would be a "
-					  "duplicate"
-					: "Nothing changed since the last save");
-			return;
-		}
 	}
 	struct object *ob = &e->obj[e->dr.decl[0].obj];
 	char path[400], safe[48], fname[48];
@@ -3973,9 +3971,34 @@ void generate(struct kof_editor *e, int as_new)
 
 	/* The format the object actually is, so the host can rule the module
 	 * out without entering it - and so the regions above mean something. */
-	fprintf(f, "KOF_TARGET_FORMAT(%s);\n",
-		(ob->fmt && ob->ctx.format < FMT_WORD_N)
-		? fmt_word[ob->ctx.format] : "KOF_FMT_ANY");
+	/*
+	 * EVERY FORMAT THE DRAFT NAMES, as the OR ksigbuilder reads.
+	 *
+	 * It used to be the format of whatever object the draft happened to be
+	 * built on - one value, because this emitter had one, not because the
+	 * engine does: KOF_TARGET_FORMAT has always taken a mask and
+	 * resolve_format loops over the names, erroring with "use one
+	 * declaration with '|'". The same marker lives in an ELF that carries a
+	 * command, in the script that is one, and in the plaintext decoded out
+	 * of a base64 run, and a rule pinned to one of those missed the others.
+	 */
+	{
+		uint32_t m = e->dr.fmt_mask;
+		int fi, first = 1;
+
+		fprintf(f, "KOF_TARGET_FORMAT(");
+		for (fi = 0; fi < (int)FMT_WORD_N; fi++) {
+			if (!(m & (1u << fi)))
+				continue;
+			fprintf(f, "%s%s", first ? "" : " | ", fmt_word[fi]);
+			first = 0;
+		}
+		/* An empty mask cannot be written - draft_missing_of refuses it
+		 * - so this is the belt on a draft that reached here anyway. */
+		if (first)
+			fprintf(f, "KOF_FMT_ANY");
+		fprintf(f, ");\n");
+	}
 	fprintf(f, "KOF_TARGET_NAME(%s, \"%s\");\n\n",
 		kof_maltype_ident(e->dr.maltype), safe);
 

@@ -395,6 +395,26 @@ struct kof_draft {
 	uint64_t    opt_val[OPT_COUNT];
 	char        family[64];
 	uint32_t    maltype;
+	/*
+	 * WHICH OBJECT FORMATS THE RULE APPLIES TO, as a bit per format.
+	 *
+	 * A MASK AND NOT ONE VALUE, because the engine's target always was one:
+	 * KOF_TARGET_FORMAT takes an OR and ksigbuilder loops over the names -
+	 * see resolve_format, which errors with "use one declaration with '|'".
+	 * What was single was this editor, which emitted the format of whatever
+	 * object the draft happened to be built on.
+	 *
+	 * That is the wrong shape for the markers people actually write. The
+	 * same command string lives in an ELF that carries it, in a shell
+	 * script that is it, and in the plaintext this program decodes out of a
+	 * base64 run - three formats, one marker, and a rule pinned to one of
+	 * them misses the other two.
+	 *
+	 * Seeded from the object the first string is declared on, because that
+	 * is the one format the reader has already demonstrated they care
+	 * about; everything after that is theirs to add and remove.
+	 */
+	uint32_t    fmt_mask;
 	char        expr[96];
 	int         gen_ok;
 	int         from_rule;
