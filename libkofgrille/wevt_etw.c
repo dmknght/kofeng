@@ -32,6 +32,7 @@
 #include "wevt_ring.h"
 #include "wevt_decode.h"
 #include "wfilter.h"
+#include "koffridge.h"
 #include "wcmdline.h"
 
 /*
@@ -188,6 +189,23 @@ struct kofw_mon {
 	struct kofw_ftab   ftab;
 	uint64_t           filtered;
 	uint64_t           filtered_loc, filtered_scope, filtered_type;
+
+	/*
+	 * THE SAME FACT, RESTATED. See koffridge.h.
+	 *
+	 * Lives on the session rather than in the process table because it is
+	 * per-RUN state with a lifetime: it must be created and destroyed, and
+	 * it must NOT survive one - an identity remembered across sessions
+	 * would suppress the first record of the next one.
+	 *
+	 * NULL when the caller turned it off, and every use below is guarded,
+	 * so "no deduplication" is a working configuration rather than a
+	 * degraded one.
+	 */
+	struct koffridge_seen    *seen;
+	int                dedup_unavailable;
+	uint64_t           filtered_dup;
+	uint64_t           filtered_coarse;
 	uint64_t           seq_expect, seq_gaps;
 	uint64_t           cmdline_got, cmdline_lost;
 	int                seq_started;
@@ -726,6 +744,23 @@ static struct kofw_mon *mon_alloc(const struct kofw_mon_option *o)
 
 	m->self_pid   = GetCurrentProcessId();
 	m->trace_self = o->trace_self;
+
+	/*
+	 * ON UNLESS ASKED OTHERWISE, which is the polarity a noisy default
+	 * needs: the duplicates are the common case, so a collector that had
+	 * to be TOLD to collapse them would ship spamming by default and every
+	 * caller would have to know.
+	 *
+	 * A failure here is not fatal. The table is a reduction, not a
+	 * correctness property - every use is guarded - so a machine that could
+	 * not allocate it collects everything rather than collecting nothing.
+	 */
+	if (!o->dedup_off) {
+		m->seen = koffridge_seen_open(o->dedup_max, o->dedup_window);
+		if (!m->seen)
+			m->dedup_unavailable = 1;
+	}
+
 	kofw_ptab_init(&m->ptab);
 	kofw_ftab_init(&m->ftab);
 	atomic_init(&m->skipped_self, 0u);
@@ -757,6 +792,7 @@ static struct kofw_mon *mon_alloc(const struct kofw_mon_option *o)
 		if (m->wake)
 			CloseHandle(m->wake);
 		free(m->qprops);
+		koffridge_seen_close(m->seen);
 		kofw_ring_free(&m->ring);
 		free(m);
 		return NULL;
@@ -819,6 +855,7 @@ fail:
 	if (m->wake)
 		CloseHandle(m->wake);
 	free(m->qprops);
+	koffridge_seen_close(m->seen);
 	kofw_ring_free(&m->ring);
 	free(m);
 	if (err)
@@ -910,6 +947,55 @@ int kofw_mon_next(struct kofw_mon *m, struct kofw_evt *out, uint32_t wait_ms)
 				if (kofw_filter_apply(&m->ptab, &m->filter,
 						      out, &why)) {
 					/*
+					 * THE SAME FACT AGAIN.
+					 *
+					 * AFTER the filter and not before, for
+					 * the reason the command line is read
+					 * after it: work spent on a record the
+					 * caller is about to throw away is
+					 * spent twice over on a scoped trace.
+					 *
+					 * A verb that must never collapse comes
+					 * back from kofw_evt_ident with zero
+					 * bytes, so the decision about which
+					 * ones those are stays in one place -
+					 * see may_collapse.
+					 */
+					if (m->seen) {
+						unsigned char id[512];
+						size_t idn;
+						int coarse = 0;
+
+						idn = kofw_evt_ident(out, id,
+								     sizeof id,
+								     &coarse);
+						if (idn &&
+						    koffridge_seen_mark(m->seen, id,
+								 (uint32_t)idn,
+								 out->stamp)) {
+							m->filtered_dup++;
+							/*
+							 * COUNTED APART. A
+							 * precise suppression
+							 * dropped a record that
+							 * said the same thing;
+							 * a coarse one dropped a
+							 * record about a
+							 * DIFFERENT object this
+							 * process touched. The
+							 * second is the traded
+							 * precision, and a
+							 * trade nobody can see
+							 * the size of is not a
+							 * trade.
+							 */
+							if (coarse)
+								m->filtered_coarse++;
+							m->filtered++;
+							continue;
+						}
+					}
+					/*
 					 * AFTER the filter, never before. This
 					 * opens a handle and reads another
 					 * process's memory, so doing it for
@@ -972,6 +1058,16 @@ void kofw_mon_health(struct kofw_mon *m, struct kofw_health *h)
 	h->filtered_loc   = m->filtered_loc;
 	h->filtered_scope = m->filtered_scope;
 	h->filtered_type  = m->filtered_type;
+	h->filtered_dup   = m->filtered_dup;
+	h->filtered_coarse = m->filtered_coarse;
+	{
+		struct koffridge_seen_stat ds;
+
+		koffridge_seen_stats(m->seen, &ds);
+		h->dedup_evicted = ds.evicted;
+		h->dedup_used    = ds.used;
+		h->dedup_cap     = ds.cap;
+	}
 	h->untracked      = m->ptab.overflow;
 	h->unbacked_threads   = m->ptab.unbacked;
 	h->late_loads         = m->ptab.late_loads;
@@ -1062,11 +1158,31 @@ void kofw_health_print_extra(FILE *out, const struct kofw_health *h)
 
 	if (h->filtered)
 		fprintf(out, "   filtered out %llu  (location %llu, out of "
-			     "tree %llu, type %llu)\n",
+			     "tree %llu, type %llu, repeated %llu)\n",
 			(unsigned long long)h->filtered,
 			(unsigned long long)h->filtered_loc,
 			(unsigned long long)h->filtered_scope,
-			(unsigned long long)h->filtered_type);
+			(unsigned long long)h->filtered_type,
+			(unsigned long long)h->filtered_dup);
+
+	if (h->filtered_coarse)
+		fprintf(out, "   of those, %llu named a DIFFERENT object the "
+			     "same process touched - collapsed because the "
+			     "object is somewhere no rule names\n",
+			(unsigned long long)h->filtered_coarse);
+
+	/*
+	 * SAID ONLY WHEN IT IS HAPPENING, and said as the action it calls for.
+	 * A table that never evicted has nothing to report; one that is
+	 * evicting is telling the operator this machine has more distinct
+	 * activity than the default was sized for.
+	 */
+	if (h->dedup_evicted)
+		fprintf(out, "   the repeat table is too small for this "
+			     "machine: %llu identity(s) forgotten, %u of %u "
+			     "slots in use - raise dedup_max (48 bytes each)\n",
+			(unsigned long long)h->dedup_evicted,
+			(unsigned)h->dedup_used, (unsigned)h->dedup_cap);
 
 	if (h->skipped_self)
 		fprintf(out, "   %llu event(s) of this process refused\n",
@@ -1135,7 +1251,7 @@ const char *kofw_mon_tracked_nth(struct kofw_mon *m, uint32_t i, uint32_t *pid)
 			continue;
 		if (pid)
 			*pid = p->pid;
-		return p->image;
+		return kofw_pent_image(&m->ptab, p);
 	}
 	return NULL;
 }
@@ -1148,7 +1264,7 @@ const char *kofw_mon_name_of(struct kofw_mon *m, uint32_t pid,
 	if (!m)
 		return "";
 	p = kofw_ptab_of(&m->ptab, pid, create_time);
-	return p ? p->image : "";
+	return p ? kofw_pent_image(&m->ptab, p) : "";
 }
 
 size_t kofw_mon_describe(struct kofw_mon *m, char *buf, size_t cap)
@@ -1199,6 +1315,7 @@ void kofw_mon_close(struct kofw_mon *m)
 	if (m->wake)
 		CloseHandle(m->wake);
 	free(m->qprops);
+	koffridge_seen_close(m->seen);
 	kofw_ring_free(&m->ring);
 	free(m);
 }

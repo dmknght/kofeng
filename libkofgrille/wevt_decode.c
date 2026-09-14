@@ -252,6 +252,74 @@ static uint8_t field_of(const wchar_t *name, uint16_t type, uint8_t prov)
 	}
 
 	/*
+	 * THE REGISTRY, FOR THE REASON AMSI IS FIRST: its payload holds names
+	 * that CO-OCCUR, and the walk's last match wins.
+	 *
+	 * ESTABLISHED FROM THE MANIFEST rather than guessed - the provider
+	 * exports no templates through `wevtutil gp /ge`, but the event log API
+	 * has them, which is the route this came from:
+	 *
+	 *   (Get-WinEvent -ListProvider Microsoft-Windows-Kernel-Registry).Events
+	 *
+	 *   id 1  CreateKey       BaseObject KeyObject Status Disposition
+	 *                         BaseName RelativeName
+	 *   id 3  DeleteKey       KeyObject Status KeyName
+	 *   id 5  SetValueKey     KeyObject Status Type DataSize KeyName
+	 *                         ValueName CapturedDataSize CapturedData
+	 *                         PreviousDataType PreviousDataSize
+	 *                         PreviousDataCapturedSize PreviousData
+	 *   id 6  DeleteValueKey  KeyObject Status KeyName ValueName
+	 *
+	 * Three things follow, and the first is why this branch exists at all.
+	 *
+	 * THE TARGET IS TWO PROPERTIES, NOT ONE. They are adjacent and in that
+	 * order, so the first takes `object` and the second extends it - see
+	 * KOFW_FLD_PATH_MORE. Before this branch both were KOFW_FLD_OBJECT and
+	 * the key path was overwritten by the value name every time.
+	 *
+	 * THE DATA IS IN THE EVENT. CapturedData is the bytes that were
+	 * written, and its length is CapturedDataSize - a PropertyParamLength
+	 * the shape already resolves, so the walk can step it. An autorun
+	 * event can therefore say what it persists without anybody reading the
+	 * registry back, and a read-back would not be the same evidence: what
+	 * is in the key at the end of a run is not provably what this write
+	 * put there.
+	 *
+	 * `Type` AND `DataSize` ARE GENERIC NAMES and would collide with other
+	 * providers if they were tested below, which is the second reason this
+	 * is a branch and not four more lines in the common list.
+	 *
+	 * PreviousData and its three companions are deliberately not carried.
+	 * They are what the value HELD, which is a different event that already
+	 * happened, and a record that mixed the two would let a rule match on
+	 * bytes nobody wrote today.
+	 */
+	if (prov == KOFW_PROV_REGISTRY) {
+		if (name_is(name, "KeyName") || name_is(name, "BaseName"))
+			return KOFW_FLD_OBJECT;
+		if (name_is(name, "RelativeName"))
+			return KOFW_FLD_PATH_MORE;
+		if (name_is(name, "ValueName"))
+			return KOFW_FLD_REG_VALUE;
+		if (name_is(name, "CapturedData"))
+			return KOFW_FLD_REG_DATA;
+		if (name_is(name, "Type"))
+			return KOFW_FLD_REG_TYPE;
+		if (name_is(name, "DataSize"))
+			return KOFW_FLD_REG_SIZE;
+		if (name_is(name, "Disposition"))
+			return KOFW_FLD_REG_DISP;
+		/*
+		 * KeyObject and BaseObject are kernel pointers. They used to be
+		 * mapped to the object slot, which was harmless only because
+		 * the walk ignores a non-string there - but it said this build
+		 * expected a path from them, and it does not: every registry
+		 * event that names a target names it as text.
+		 */
+		return KOFW_FLD_SKIP;
+	}
+
+	/*
 	 * TWO SPELLINGS OF THE SAME FIELD, and the second one cost a whole
 	 * debugging session.
 	 *
@@ -273,18 +341,16 @@ static uint8_t field_of(const wchar_t *name, uint16_t type, uint8_t prov)
 	/*
 	 * Whatever this provider calls the path it acted on.
 	 *
-	 * FileName is Kernel-File's spelling. KeyName, ValueName and
-	 * RelativeName are Kernel-Registry's, and having all three here is
-	 * deliberate: which one carries the useful text differs by event, and
-	 * the walk fills `object` from whichever it reaches. The others are
-	 * here because a RAW event is worth rendering with its path rather
-	 * than without - which is the whole of what makes a discovery run
-	 * readable.
+	 * FileName is Kernel-File's spelling and the rest are the same path
+	 * under the names a rename gives its two ends.
+	 *
+	 * KEYNAME, VALUENAME AND RELATIVENAME USED TO BE HERE and are not any
+	 * more. They are Kernel-Registry's, they CO-OCCUR, and sharing one slot
+	 * meant the walk kept whichever came last - see the registry branch
+	 * above for what that cost and what replaced it.
 	 */
 	if (name_is(name, "FileName") || name_is(name, "FilePath") ||
-	    name_is(name, "OldFileName") || name_is(name, "NewFileName") ||
-	    name_is(name, "KeyName") || name_is(name, "ValueName") ||
-	    name_is(name, "RelativeName") || name_is(name, "KeyObject"))
+	    name_is(name, "OldFileName") || name_is(name, "NewFileName"))
 		return KOFW_FLD_OBJECT;
 
 	if (name_is(name, "daddr")) return KOFW_FLD_DADDR;
@@ -990,6 +1056,95 @@ static size_t measure(uint16_t in_type, const uint8_t *p, size_t left)
 	}
 }
 
+/*
+ * EXTEND THE OBJECT PATH WITH THE SECOND NAME THE EVENT CARRIED.
+ *
+ * A registry target is two properties - see the registry branch of field_of -
+ * and this is what joins them into the one path a rule is written against:
+ *
+ *   \REGISTRY\MACHINE\...\CurrentVersion\Run  +  Updater
+ *   -> \REGISTRY\MACHINE\...\CurrentVersion\Run\Updater
+ *
+ * ONLY EVER EXTENDS WHAT THIS SAME WALK JUST WROTE. The first name is the
+ * previous property and therefore the last thing in the arena, so the append
+ * is in place. If anything else has been written since - or if no object was
+ * taken at all - this does nothing rather than splicing a name onto an
+ * unrelated string, which would produce a path that never existed and that
+ * nothing downstream could tell from one that did.
+ *
+ * THREE CASES THAT ARE NOT A SEPARATOR PLUS A NAME, each of which produces a
+ * wrong path if it is not handled:
+ *
+ *   AN EMPTY FIRST NAME. CreateKey carries BaseName "" when the caller opened
+ *   by absolute path. A separator written there makes "\\REGISTRY\..." out of
+ *   a name that was already absolute, so the second name replaces it instead.
+ *
+ *   AN ALREADY-ABSOLUTE SECOND NAME, for the same reason from the other side.
+ *
+ *   AN EMPTY VALUE NAME, which is the key's DEFAULT value and is a real target
+ *   - so `dflt` appends "(Default)" rather than letting the path stop at the
+ *   key. An empty RelativeName means the create named nothing beyond its base
+ *   and there is genuinely nothing to add, which is why the caller says which
+ *   of the two this is.
+ */
+static void path_more(struct kofw_evt *out, size_t *tnext,
+		      const uint8_t *base, size_t off, size_t len,
+		      uint16_t in_type, int dflt)
+{
+	char   name[256];
+	size_t at, room, n = 0;
+	int    cut = 0;
+
+	if (out->off_object == KOF_TEXT_NONE || *tnext == 0 ||
+	    out->text_len != (uint16_t)*tnext)
+		return;
+
+	if (in_type == TDH_INTYPE_UNICODESTRING)
+		n = kofw_utf16_to_utf8((const uint16_t *)(const void *)
+					       (base + off),
+				       len / 2u, name, sizeof name, &cut);
+	else if (in_type == TDH_INTYPE_ANSISTRING)
+		n = kofw_ansi_to_text(base + off, len, name, sizeof name, &cut);
+	else
+		return;
+
+	if (!n) {
+		static const char d[] = "(Default)";
+
+		if (!dflt)
+			return;
+		memcpy(name, d, sizeof d);
+		n = sizeof d - 1u;
+	}
+
+	at = *tnext - 1u;                  /* onto the NUL the first name ended with */
+	if (out->text[out->off_object] == '\0')
+		at = out->off_object;      /* empty base - replace, do not join */
+	else if (name[0] != '\\') {
+		if (at + 2u >= sizeof out->text) {
+			out->flags |= KOFW_EF_TRUNCATED;
+			return;
+		}
+		out->text[at++] = '\\';
+	}
+
+	room = sizeof out->text - at;
+	if (room < 2u) {
+		out->flags |= KOFW_EF_TRUNCATED;
+		return;
+	}
+	if (n > room - 1u) {
+		n = room - 1u;
+		cut = 1;
+	}
+	memcpy(out->text + at, name, n);
+	out->text[at + n] = '\0';
+	*tnext = at + n + 1u;
+	out->text_len = (uint16_t)*tnext;
+	if (cut)
+		out->flags |= KOFW_EF_TRUNCATED;
+}
+
 int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 		struct kofw_evt *out, struct kofw_spill *spill)
 {
@@ -1046,6 +1201,15 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 	 * its command line, and that reads like data.
 	 */
 	out->off_cmdline = KOF_TEXT_NONE;
+	/*
+	 * NONE RATHER THAN THE ZERO THE MEMSET LEFT, for the same reason the
+	 * three above are: zero is a valid offset into text[], so a record that
+	 * carried no registry data would answer with whatever sits at offset 0,
+	 * which is the object path. data_len being 0 is what a reader checks,
+	 * but a reader that checked the offset first would find one that looks
+	 * real.
+	 */
+	out->off_data    = KOF_TEXT_NONE;
 
 	/*
 	 * THE SUBJECT DEFAULTS TO WHOEVER RAISED THE EVENT.
@@ -1219,6 +1383,72 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 			else if (len >= 4)
 				out->addr_size = rd_u32(base + off);
 			break;
+
+		case KOFW_FLD_PATH_MORE:
+			path_more(out, &tnext, base, off, len, pr->in_type, 0);
+			break;
+		case KOFW_FLD_REG_VALUE:
+			path_more(out, &tnext, base, off, len, pr->in_type, 1);
+			break;
+
+		/*
+		 * NARROWED, NOT TRUNCATED. A registry type is winnt.h's small
+		 * enum - REG_NONE through REG_QWORD - so a byte holds every
+		 * value there is, and a value outside it would be a provider
+		 * this build does not understand rather than a number worth
+		 * keeping the high bits of.
+		 */
+		case KOFW_FLD_REG_TYPE:
+			if (len >= 4) {
+				uint32_t v = rd_u32(base + off);
+
+				out->reg_type = v > 0xffu ? 0xffu : (uint8_t)v;
+			}
+			break;
+		case KOFW_FLD_REG_SIZE:
+			if (len >= 4)
+				out->reg_data_size = rd_u32(base + off);
+			break;
+		case KOFW_FLD_REG_DISP:
+			if (len >= 4) {
+				uint32_t v = rd_u32(base + off);
+
+				out->reg_disp = v > 0xffu ? 0xffu : (uint8_t)v;
+			}
+			break;
+
+		/*
+		 * THE BYTES THAT WERE WRITTEN, into a slot of their own.
+		 *
+		 * Verbatim, for the reason the AMSI buffer below is verbatim: a
+		 * REG_SZ is UTF-16 and a REG_BINARY is arbitrary, and either one
+		 * sanitised at the collector is evidence destroyed before the
+		 * half that scans it ever sees it.
+		 *
+		 * WHAT THE LENGTHS MEAN APART. `len` is what the provider
+		 * captured, reg_data_size is what the value actually is, and
+		 * data_len is what fit here. The flag is set when the last is
+		 * short of the first, so a rule that matched a prefix can tell
+		 * it was a prefix.
+		 */
+		case KOFW_FLD_REG_DATA: {
+			size_t take = len, room;
+
+			if (!len || tnext + 1u >= sizeof out->text)
+				break;
+			room = sizeof out->text - tnext;
+			if (take > room - 1u) {
+				take = room - 1u;
+				out->flags |= KOFW_EF_TRUNCATED;
+			}
+			memcpy(out->text + tnext, base + off, take);
+			out->text[tnext + take] = '\0';
+			out->off_data = (uint16_t)tnext;
+			out->data_len = (uint16_t)take;
+			tnext += take + 1u;
+			out->text_len = (uint16_t)tnext;
+			break;
+		}
 
 		/*
 		 * A STRING NOBODY CLAIMED, remembered in case nothing does.

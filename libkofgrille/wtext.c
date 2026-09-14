@@ -359,6 +359,16 @@ void kofw_evt_to_kof(const struct kofw_evt *in, struct kof_evt *out)
 		}
 		break;
 	}
+	case KOF_EK_REG: {
+		struct kof_evt_reg *rg = kof_evt_set_reg(out);
+
+		if (rg) {
+			rg->data_size = in->reg_data_size;
+			rg->type      = in->reg_type;
+			rg->disp      = in->reg_disp;
+		}
+		break;
+	}
 	case KOF_EK_NONE:
 	default:
 		break;
@@ -401,4 +411,22 @@ void kofw_evt_to_kof(const struct kofw_evt *in, struct kof_evt *out)
 	out->off_image   = (in->off_image   < n) ? in->off_image   : KOF_TEXT_NONE;
 	out->off_object  = (in->off_object  < n) ? in->off_object  : KOF_TEXT_NONE;
 	out->off_cmdline = (in->off_cmdline < n) ? in->off_cmdline : KOF_TEXT_NONE;
+
+	/*
+	 * THE REGISTRY DATA, WITH ITS LENGTH CLAMPED TO WHAT ARRIVED - the same
+	 * treatment content_len gets above and for the same reason: a length
+	 * that outran the arena would hand a scanner bytes that are not there.
+	 *
+	 * The offset going absent takes the length with it. They are one fact
+	 * in two fields, and a length left standing beside an absent offset is
+	 * the shape that gets read as "there is data at zero".
+	 */
+	out->off_data = (in->off_data < n) ? in->off_data : KOF_TEXT_NONE;
+	if (out->off_data == KOF_TEXT_NONE) {
+		out->data_len = 0;
+	} else {
+		out->data_len = in->data_len;
+		if ((size_t)out->off_data + out->data_len > n)
+			out->data_len = (uint16_t)(n - out->off_data);
+	}
 }

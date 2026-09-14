@@ -1276,11 +1276,13 @@ WATCHMAN_CHAN = -DKOF_HAVE_CHAN -Ilibkoforbit/kofchan \
                 libkoforbit/kofchan/chan_posix.c -lrt
 endif
 
-$(OUT)/bin/kofwatchman$(EXE): kofwatcher/kofwatchman.c $(KOFEVT_SRC) $(LIB) \
-                              $(SDK_HDR) $(STAMP)
+$(OUT)/bin/kofwatchman$(EXE): kofwatcher/kofwatchman.c $(KOFEVT_SRC) \
+                              $(KOFRIDGE_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofeng -Ilibkoforbit/kofevt $< \
-	      $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS) $(WATCHMAN_CHAN)
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofeng -Ilibkoforbit/kofevt \
+	      -Ilibkoforbit/koffridge $< \
+	      $(KOFEVT_SRC) $(KOFRIDGE_SRC) $(LIB) -o $@ $(LDFLAGS) \
+	      $(WATCHMAN_CHAN)
 
 kofwatchman: $(OUT)/bin/kofwatchman$(EXE)
 	$(info $(SP)  $<)
@@ -1389,19 +1391,39 @@ WIN_SRC := libkofgrille/wevt_ring.c \
 WIN_SRC += libkoforbit/kofevt/kofevt.c libkoforbit/kofevt/kofevtfmt.c \
            libkoforbit/kofevt/kofevtlog.c
 
+#
+# THE VERDICT CACHE, which now also holds the duplicate-event table.
+#
+# AND THIS LINE COSTS SOMETHING THAT IS WORTH NAMING. koffridge.h includes
+# kofeng.h, because a verdict is a struct kof_result. So compiling it into the
+# collector puts the ENGINE'S header into libkofgrille - and kofgrille.h's first
+# paragraph says it never includes kofeng.h, because the collector collects and
+# does not judge.
+#
+# The dedup half needs none of that: it is stdint and stdlib. The dependency
+# arrives with the half beside it, purely because the two now share a file.
+WIN_SRC += libkoforbit/koffridge/koffridge.c
+
 WIN_OBJ := $(patsubst libkofgrille/%.c,$(INT)/win_%.o,\
                       $(filter libkofgrille/%,$(WIN_SRC))) \
            $(patsubst libkoforbit/kofevt/%.c,$(INT)/win_evt_%.o,\
-                      $(filter libkoforbit/kofevt/%,$(WIN_SRC)))
+                      $(filter libkoforbit/kofevt/%,$(WIN_SRC))) \
+           $(patsubst libkoforbit/koffridge/%.c,$(INT)/win_frg_%.o,\
+                      $(filter libkoforbit/koffridge/%,$(WIN_SRC)))
 
 $(INT)/win_evt_%.o: libkoforbit/kofevt/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
 	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkoforbit/kofevt -c $< -o $@
+
+$(INT)/win_frg_%.o: libkoforbit/koffridge/%.c $(STAMP) | $(INT)
+	@$(call MKDIR,$(dir $@))
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkoforbit/koffridge -c $< -o $@
 WINLIB  := $(SDK)/lib/libkofgrille.a
 
 $(INT)/win_%.o: libkofgrille/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
-	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkoforbit/kofevt -c $< -o $@
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkoforbit/kofevt \
+	      -Ilibkoforbit/koffridge -c $< -o $@
 
 $(WINLIB): $(WIN_OBJ)
 	@$(call MKDIR,$(dir $@))
@@ -1658,7 +1680,7 @@ fixtures: | $(TEST)
 # tests/unit/grille_host.c - so it builds and runs on either host. When one
 # genuinely needs Windows, it goes in UNIT_SKIP_POSIX.
 UNIT_SKIP_WINDOWS := antarc_fan antarc_walk
-UNIT_SKIP_POSIX   := hostile_mem
+UNIT_SKIP_POSIX   := hostile_mem reg_event
 
 ifeq ($(NATIVE_OS),windows)
 UNIT_SKIP := $(UNIT_SKIP_WINDOWS)
@@ -1776,6 +1798,24 @@ $(TEST)/unit_hostile_mem$(EXE): tests/unit/hostile_mem.c \
 	      libkofgrille/wproc.c libkofgrille/wcmdline.c \
 	      libkofgrille/wtext.c $(KOFEVT_SRC) $(LIB) -o $@ \
 	      $(LDFLAGS) -ladvapi32 -lpsapi
+
+#
+# THE REGISTRY DECODE, over records built by hand.
+#
+# -ltdh is the whole reason this is a rule of its own: the test hands a
+# synthetic EVENT_RECORD to kofw_decode, which asks TdhGetEventInformation to
+# describe it against the manifest Windows already has registered. That is the
+# real learn path against the real template, which is what makes a hand-built
+# record worth anything - a test that carried its own idea of the shape would
+# agree with itself forever and say nothing about what the provider sends.
+$(TEST)/unit_reg_event$(EXE): tests/unit/reg_event.c \
+                              libkofgrille/wevt_decode.c libkofgrille/wtext.c \
+                              $(KOFEVT_SRC) $(LIB) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng \
+	      -Ilibkoforbit/kofevt \
+	      tests/unit/reg_event.c libkofgrille/wevt_decode.c \
+	      libkofgrille/wtext.c $(KOFEVT_SRC) $(LIB) -o $@ \
+	      $(LDFLAGS) -ltdh -ladvapi32
 
 $(TEST)/unit_proc_rule$(EXE): tests/unit/proc_rule.c $(KOFPROC_SRC) $(LIB) \
                               $(SDK_HDR) $(STAMP) | $(TEST)

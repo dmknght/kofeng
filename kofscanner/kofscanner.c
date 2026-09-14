@@ -147,6 +147,33 @@ struct run {
 	uint64_t    files_total;
 
 	/*
+	 * HOW MANY OBJECTS CAME BACK WITH SOMETHING ON THEM.
+	 *
+	 * Not a statistic - it is what lets a caller that hands work to
+	 * kof_scan_path find out afterwards whether that work found anything.
+	 * The callback reports findings and the call itself returns nothing
+	 * about them, so without this a caller can only assume, and ps_file
+	 * assumed clean.
+	 */
+	uint64_t    found_objects;
+
+	/*
+	 * THE WORST THING THE CURRENT FILE TURNED OUT TO BE, so it can be
+	 * written into the cache.
+	 *
+	 * Kept here rather than read back out of `files` after the scan,
+	 * because fmap_get CREATES the entry it does not find - asking it about
+	 * a clean file would invent one and the summary counts it. A caller
+	 * that needs the answer has to be told it, not go looking.
+	 *
+	 * Reset by whoever is about to scan; `last_level` is -1 for nothing.
+	 */
+	int         last_level;
+	uint32_t    last_broken;
+	uint32_t    last_findings;
+	char        last_name[224];
+
+	/*
 	 * The progress line: how many objects have gone by, when it was last
 	 * drawn, and whether to draw it at all.
 	 *
@@ -396,6 +423,22 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	if (flen == strlen(name))
 		r->files_total++;
 
+	/* Counted at every level, not only at a root: a finding on a child is
+	 * still a finding this scan produced, and the file that carried it must
+	 * not be remembered as clean. */
+	if (res->n)
+		r->found_objects++;
+
+	/*
+	 * AND REMEMBERED, so the cache can be told what this file IS rather
+	 * than only that it was not clean. Accumulated across the whole file
+	 * including its children - a finding three layers down is what that
+	 * file is, which is the same roll-up the summary does.
+	 */
+	r->last_findings += res->n;
+	if (res->broken && !r->last_broken)
+		r->last_broken = res->broken;
+
 	/*
 	 * The findings, in full, at the object that carries them - a child three
 	 * layers down still prints with its own "//"-joined name, so a reader sees
@@ -450,6 +493,15 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	 * into the clean count by subtraction - which is exactly the silence
 	 * being fixed.
 	 */
+	if (worst >= 0 &&
+	    (r->last_level < 0 ||
+	     kof_level_rank((uint32_t)worst) >
+		     kof_level_rank((uint32_t)r->last_level))) {
+		r->last_level = worst;
+		snprintf(r->last_name, sizeof r->last_name, "%s",
+			 worst_name ? worst_name : "");
+	}
+
 	if (res->n || res->broken || !res->examined || r->verbose) {
 		struct fent *e = fmap_get(&r->files, name, flen);
 
@@ -729,7 +781,7 @@ struct procscan {
 	struct koffridge *fridge;
 	struct kof_scan_option *opt;
 
-	uint64_t files_scanned, files_cached;
+	uint64_t files_scanned, files_cached, files_recalled;
 	uint64_t chunks, chunk_bytes;
 	/* Runs of a loaded module that differ from the file it was mapped
 	 * from - see wdiff.h. Its own line, because an unbacked allocation
@@ -739,10 +791,54 @@ struct procscan {
 
 /* One file behind a mapping: scan it only if this sweep has not already
  * answered for it. */
+/*
+ * REPORT A FILE THIS RUN DID NOT SCAN, because a previous one did.
+ *
+ * IT SAYS WHERE THE ANSWER CAME FROM, and that is not decoration. The cache
+ * keeps one name out of however many the scan produced, so this line is
+ * SHORTER than the one a scan prints - and a reader who could not tell the two
+ * apart would read the short one as "only one thing wrong with it". The tag
+ * carries the count when there were more.
+ *
+ * It also has to do the bookkeeping on_object would have done, or the summary
+ * disagrees with the lines above it: the file is counted, it gets an entry with
+ * its verdict, and found_objects moves so that anything measuring a delta
+ * across a scan still measures the right thing.
+ */
+static void report_cached(struct procscan *p, const char *path,
+			  const struct koffridge_verdict *v)
+{
+	struct run *r = p->r;
+	struct fent *e;
+	char tag[64];
+
+	progress_clear(r);
+	r->files_total++;
+	r->found_objects++;
+
+	if (v->findings > 1u)
+		snprintf(tag, sizeof tag, "%s +%u more", v->name,
+			 v->findings - 1u);
+	else
+		snprintf(tag, sizeof tag, "%s", v->name);
+
+	printf("%s%-*s%s %s %s(cached)%s\n", col(r, level_col(v->level)),
+	       W_TAG, tag, col(r, C_RST), path, col(r, C_DIM), col(r, C_RST));
+
+	e = fmap_get(&r->files, path, strlen(path));
+	if (e) {
+		e->level    = (int)v->level;
+		e->broken   = v->broken;
+		e->examined = 1;
+		snprintf(e->name, sizeof e->name, "%s", v->name);
+	}
+}
+
 static void ps_file(struct procscan *p, const char *path)
 {
 	struct koffridge_fileid id;
 	struct koffridge_verdict v;
+	uint64_t before;
 
 	if (!path || !path[0])
 		return;
@@ -756,20 +852,96 @@ static void ps_file(struct procscan *p, const char *path)
 		p->files_scanned++;
 		return;
 	}
+	/*
+	 * A CACHED ANSWER IS ONLY A REASON TO SKIP WHEN IT IS CLEAN.
+	 *
+	 * The verdict used to be fetched and never looked at, so ANY hit meant
+	 * skip. Combined with the store below - which used to record clean
+	 * unconditionally - that made a persistent cache actively harmful: a
+	 * file found infected in one run was written down as clean, the cache
+	 * was saved at the end of that run, and every later run skipped it
+	 * without scanning or reporting. The detection silenced itself, and it
+	 * did it permanently and with no message.
+	 *
+	 * A non-clean verdict rescans rather than being re-reported from the
+	 * cache, which is what koffridge.h says a caller wanting the whole
+	 * finding list does: the table keeps one name, the scan produces all of
+	 * them, and infected files are rare enough that paying for the scan
+	 * once each costs nothing.
+	 */
 	if (koffridge_get(p->fridge, &id, sizeof id, &v)) {
-		p->files_cached++;
+		if (v.findings == 0u && v.broken == 0u) {
+			p->files_cached++;
+			return;
+		}
+		/*
+		 * KNOWN BAD, AND SAID WITHOUT SCANNING IT AGAIN.
+		 *
+		 * This used to rescan, on the argument koffridge.h makes: the
+		 * table keeps ONE name and a scan produces the whole list, so
+		 * rescanning buys a better report for a file that is rare. That
+		 * argument is about report quality and it is still true - what
+		 * it got wrong is that it made the cache useless for exactly
+		 * the case a reader cares most about. A machine with forty
+		 * copies of one bad DLL mapped into two hundred processes
+		 * rescanned it two hundred times to print the same name.
+		 *
+		 * So it is reported from the cache, and the report SAYS SO -
+		 * see report_cached. A reader who wants the full finding list
+		 * of a known file scans that file directly, which is a
+		 * deliberate act rather than something paid for on every sweep.
+		 */
+		report_cached(p, path, &v);
+		p->files_recalled++;
 		return;
 	}
+
+	before = p->r->found_objects;
+	p->r->last_level    = -1;
+	p->r->last_broken   = 0;
+	p->r->last_findings = 0;
+	p->r->last_name[0]  = '\0';
 	(void)kof_scan_path(p->sc, path, p->opt, on_object, p->r);
 	p->files_scanned++;
+
 	/*
-	 * Stored as the clean answer, because kof_scan_path reports findings
-	 * through on_object and hands none back here. A verdict that was not
-	 * clean has already been reported by then; what the cache is for is
-	 * not scanning the other seventeen copies of a file whose answer is
-	 * already out.
+	 * WHAT IT WAS, NOT WHETHER IT WAS CLEAN.
+	 *
+	 * kof_scan_path reports through on_object and returns nothing about
+	 * what it found, so the fields that callback fills are what make this
+	 * knowable at all - see run.last_level.
+	 *
+	 * THE ORDER THIS ARRIVED IN IS WORTH KEEPING. It stored clean
+	 * unconditionally, which silenced detections through a persistent
+	 * cache. The fix was to store nothing for a file that had a finding -
+	 * safe, and it made the cache useless for known-bad files. Storing the
+	 * verdict itself is what both of those were reaching for: a clean file
+	 * is skipped, a bad one is reported without being scanned again, and
+	 * neither answer is invented.
 	 */
-	(void)koffridge_put(p->fridge, &id, sizeof id, NULL);
+	if (p->r->found_objects == before && !p->r->last_broken) {
+		(void)koffridge_put(p->fridge, &id, sizeof id, NULL);
+	} else {
+		struct kof_result res;
+
+		memset(&res, 0, sizeof res);
+		/*
+		 * The COUNT the scan produced, beside the ONE name kept. A
+		 * reader of the cached answer can then see that there were
+		 * more, which is the difference between a short report and a
+		 * report that pretends to be complete.
+		 */
+		res.n      = p->r->last_findings;
+		res.broken = p->r->last_broken;
+		if (p->r->last_level >= 0) {
+			if (!res.n)
+				res.n = 1;
+			res.v[0].level = (uint32_t)p->r->last_level;
+			snprintf(res.v[0].name, sizeof res.v[0].name, "%s",
+				 p->r->last_name);
+		}
+		(void)koffridge_put(p->fridge, &id, sizeof id, &res);
+	}
 }
 
 /* Returns 0, or a KOF_ERR_*. */
@@ -955,13 +1127,24 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 	printf("\n");
 	printf("regions   %llu, %.2f MB read out of them\n",
 	       (unsigned long long)regions, (double)bytes / 1048576.0);
-	printf("modules   %llu scanned, %llu served from cache",
+	printf("modules   %llu scanned, %llu clean from cache",
 	       (unsigned long long)p.files_scanned,
 	       (unsigned long long)p.files_cached);
-	if (p.files_scanned + p.files_cached)
+	/*
+	 * COUNTED APART FROM THE CLEAN ONES. Both skipped a scan, but one of
+	 * them produced a FINDING out of the cache, and a reader totalling
+	 * "served from cache" against "scanned" would otherwise have no way to
+	 * see that some of this run's verdicts were remembered rather than
+	 * reached.
+	 */
+	if (p.files_recalled)
+		printf(", %llu recalled as known bad",
+		       (unsigned long long)p.files_recalled);
+	if (p.files_scanned + p.files_cached + p.files_recalled)
 		printf("  (%.1f%% saved)",
-		       (double)p.files_cached * 100.0 /
-		       (double)(p.files_scanned + p.files_cached));
+		       (double)(p.files_cached + p.files_recalled) * 100.0 /
+		       (double)(p.files_scanned + p.files_cached +
+				p.files_recalled));
 	printf("\n");
 	printf("unbacked  %llu chunk(s), %.2f MB\n",
 	       (unsigned long long)p.chunks,

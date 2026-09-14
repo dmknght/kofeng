@@ -546,10 +546,14 @@ static void mk(struct kofw_evt *e, uint16_t type, uint32_t pid, uint32_t ppid)
 	e->raiser_pid = ppid;
 	e->off_image   = KOF_TEXT_NONE;
 	e->off_object  = KOF_TEXT_NONE;
-	/* All THREE, because 0 is a legal offset: a record that left this at
+	/* All FOUR, because 0 is a legal offset: a record that left this at
 	 * zero would report the object string as the command line, which is
-	 * exactly what this test caught the first time it ran. */
+	 * exactly what this test caught the first time it ran. off_data is the
+	 * newest and the same reasoning made it - a registry value read from
+	 * offset zero is the key path, and bytes are not obviously wrong the
+	 * way a wrong number is. */
 	e->off_cmdline = KOF_TEXT_NONE;
+	e->off_data    = KOF_TEXT_NONE;
 }
 
 static void set_obj(struct kofw_evt *e, const char *path)
@@ -561,9 +565,258 @@ static void set_obj(struct kofw_evt *e, const char *path)
 	e->text_len   = (uint16_t)(n + 1);
 }
 
+/*
+ * WHAT MAKES TWO EVENTS THE SAME EVENT - kofw_evt_ident.
+ *
+ * This function decides what the collector THROWS AWAY, so its failure modes
+ * are asymmetric and only one of them is visible. An identity that is too
+ * COARSE merges two different facts and deletes one, silently, with no counter
+ * that says so. An identity that is too FINE merely fails to reduce, which
+ * shows up as volume.
+ *
+ * So every case here is a pair that must NOT collapse, plus one that must -
+ * because a function that returned a distinct identity for everything would
+ * pass all of the first kind and do nothing.
+ */
+static int ident_same(const struct kofw_evt *a, const struct kofw_evt *b)
+{
+	unsigned char ia[512], ib[512];
+	size_t na, nb;
+
+	na = kofw_evt_ident(a, ia, sizeof ia, NULL);
+	nb = kofw_evt_ident(b, ib, sizeof ib, NULL);
+	if (!na || !nb)
+		return 0;
+	return na == nb && !memcmp(ia, ib, na);
+}
+
+static void t_ident(void)
+{
+	struct kofw_evt a, b;
+	unsigned char buf[512];
+
+	/*
+	 * THE VERBS THAT MUST NEVER COLLAPSE answer with zero bytes, which is
+	 * how the caller is told not to deduplicate rather than being handed an
+	 * identity it would then use.
+	 *
+	 * Each of these was refused for its own reason - see may_collapse - and
+	 * the two that would cost the most are here: a beacon IS a repeated
+	 * connection, and a byte total IS a sum of repeats.
+	 */
+	mk(&a, KOF_EVT_NET_CONNECT, 100u, 1u);
+	set_obj(&a, "1.2.3.4");
+	if (kofw_evt_ident(&a, buf, sizeof buf, NULL) != 0)
+		fail("ident", "a connection was offered as collapsible - "
+		     "a beacon is a repeated connection");
+
+	mk(&a, KOF_EVT_NET_SEND, 100u, 1u);
+	if (kofw_evt_ident(&a, buf, sizeof buf, NULL) != 0)
+		fail("ident", "a send was offered as collapsible - the tally "
+		     "sums their sizes");
+
+	mk(&a, KOF_EVT_DNS_QUERY, 100u, 1u);
+	set_obj(&a, "evil.example");
+	if (kofw_evt_ident(&a, buf, sizeof buf, NULL) != 0)
+		fail("ident", "a lookup was offered as collapsible");
+
+	mk(&a, KOF_EVT_FILE_WRITE, 100u, 1u);
+	set_obj(&a, "C:\\a.txt");
+	if (kofw_evt_ident(&a, buf, sizeof buf, NULL) != 0)
+		fail("ident", "a write was offered as collapsible - two writes "
+		     "of one length at one offset are two writes");
+
+	mk(&a, KOF_EVT_PROC_START, 100u, 1u);
+	if (kofw_evt_ident(&a, buf, sizeof buf, NULL) != 0)
+		fail("ident", "a process start was offered as collapsible");
+
+	/* THE REDUCTION ITSELF. Without this the rest is satisfied by a
+	 * function that never matches anything. */
+	mk(&a, KOF_EVT_REG_SET_VALUE, 100u, 1u);
+	a.create_time = 777ull;
+	set_obj(&a, "\\REGISTRY\\MACHINE\\...\\Run\\Updater");
+	/*
+	 * CLASSIFIED, as every record reaching this code is: filter_decide
+	 * fills obj_loc and attack before the deduplicator runs. Leaving them
+	 * zero describes a record that cannot occur, and the cases below would
+	 * then be testing the coarse path while claiming to test the precise
+	 * one - which is exactly what they were doing.
+	 */
+	a.attack  = KOF_ATT_RUN_KEY;
+	a.obj_loc = KOF_LOC_AUTOSTART;
+	b = a;
+	b.stamp = a.stamp + 50000ull;   /* the one field that always differs */
+	b.tid   = a.tid + 1u;
+	if (!ident_same(&a, &b))
+		fail("ident", "the same registry write twice was not one "
+		     "identity - a stamp or a thread id is in the identity");
+
+	/* A DIFFERENT SUBJECT IS A DIFFERENT EVENT. */
+	b = a;
+	b.pid = 101u;
+	if (ident_same(&a, &b))
+		fail("ident", "two processes writing one key collapsed");
+
+	/*
+	 * AND A REUSED PID IS A DIFFERENT SUBJECT. Windows hands pids back out
+	 * quickly; without create_time a new process inherits whatever
+	 * suppression the previous holder of that number earned.
+	 */
+	b = a;
+	b.create_time = 888ull;
+	if (ident_same(&a, &b))
+		fail("ident", "a reused pid inherited the old process's "
+		     "identity");
+
+	/* A DIFFERENT KEY. */
+	b = a;
+	set_obj(&b, "\\REGISTRY\\MACHINE\\...\\Run\\Other");
+	if (ident_same(&a, &b))
+		fail("ident", "two different keys collapsed");
+
+	/*
+	 * THE DATA IS PART OF IT, and this is the case that is easy to leave
+	 * out: setting ONE value to TWO different commands is two events, and
+	 * the second is the one that changed something.
+	 */
+	{
+		static const char one[] = "C:\\good.exe";
+		static const char two[] = "C:\\evil.exe";
+		size_t at;
+
+		mk(&a, KOF_EVT_REG_SET_VALUE, 100u, 1u);
+		set_obj(&a, "\\REGISTRY\\MACHINE\\...\\Run\\Updater");
+		/*
+		 * CLASSIFIED, because in production it always is: filter_decide
+		 * fills obj_loc and attack before the deduplicator ever sees
+		 * the record. A test that left them zero was describing an
+		 * event that cannot reach this code, and it got the coarse
+		 * answer for that reason rather than because anything was
+		 * wrong - see object_matters.
+		 */
+		a.attack  = KOF_ATT_RUN_KEY;
+		a.obj_loc = KOF_LOC_AUTOSTART;
+		at = a.text_len;
+		memcpy(a.text + at, one, sizeof one);
+		a.off_data = (uint16_t)at;
+		a.data_len = (uint16_t)(sizeof one - 1u);
+		a.text_len = (uint16_t)(at + sizeof one);
+
+		b = a;
+		memcpy(b.text + at, two, sizeof two);
+
+		if (ident_same(&a, &b))
+			fail("ident", "one value set to two different commands "
+			     "collapsed into one event");
+	}
+
+	/*
+	 * A MODULE'S BASE COUNTS, and only for the image verbs. `addr` is a
+	 * borrowed field: on a file event it holds the FileKey, a kernel
+	 * pointer that can differ between two records naming one file, so
+	 * folding it in everywhere would stop file identities ever matching -
+	 * the collapser would go quiet for half its verbs and nothing would
+	 * say so.
+	 */
+	mk(&a, KOF_EVT_IMAGE_LOAD, 100u, 1u);
+	a.create_time = 777ull;
+	set_obj(&a, "C:\\Windows\\System32\\ntdll.dll");
+	a.addr = 0x180000000ull;
+	b = a;
+	if (!ident_same(&a, &b))
+		fail("ident", "one module at one base twice was not one "
+		     "identity");
+	b.addr = 0x190000000ull;
+	if (ident_same(&a, &b))
+		fail("ident", "one module at two bases collapsed");
+
+	mk(&a, KOF_EVT_FILE_NEW, 100u, 1u);
+	a.create_time = 777ull;
+	set_obj(&a, "C:\\Users\\x\\AppData\\Local\\Temp\\a.exe");
+	a.addr = 0xdeadbeefull;         /* a FileKey */
+	b = a;
+	b.addr = 0xfeedfaceull;         /* the same file, a different key */
+	if (!ident_same(&a, &b))
+		fail("ident", "one file with two FileKeys did not collapse - "
+		     "addr leaked into a non-image identity");
+
+	/*
+	 * THE COARSE FORM, WHICH IS A DELIBERATE TRADE AND THEREFORE NEEDS
+	 * BOTH HALVES ASSERTED.
+	 *
+	 * Registry churn to somewhere no rule names collapses per PROCESS, so
+	 * a service restating its own configuration all day occupies one entry
+	 * instead of thousands and cannot evict everything else. The same
+	 * process the moment it writes somewhere that IS named keeps its exact
+	 * identity.
+	 *
+	 * The half that would be easy to break silently is the second: if the
+	 * significance test ever stopped working, every registry write would
+	 * collapse per process and a Run key would vanish into the churn. One
+	 * assertion alone would not notice - a gate welded shut and a gate
+	 * welded open each satisfy one of these.
+	 */
+	{
+		int c1 = 0, c2 = 0;
+		unsigned char i1[512], i2[512];
+		size_t n1, n2;
+
+		mk(&a, KOF_EVT_REG_SET_VALUE, 100u, 1u);
+		a.create_time = 777ull;
+		set_obj(&a, "\\REGISTRY\\MACHINE\\SOFTWARE\\Vendor\\State\\A");
+		b = a;
+		set_obj(&b, "\\REGISTRY\\MACHINE\\SOFTWARE\\Vendor\\State\\B");
+
+		n1 = kofw_evt_ident(&a, i1, sizeof i1, &c1);
+		n2 = kofw_evt_ident(&b, i2, sizeof i2, &c2);
+		if (!c1 || !c2)
+			fail("ident", "unclassified registry churn was not "
+			     "collapsed per process");
+		if (n1 != n2 || memcmp(i1, i2, n1))
+			fail("ident", "two unremarkable keys from one process "
+			     "did not collapse");
+
+		/* Now the same pair, somewhere a rule names. */
+		a.attack  = KOF_ATT_RUN_KEY;
+		a.obj_loc = KOF_LOC_AUTOSTART;
+		b.attack  = KOF_ATT_RUN_KEY;
+		b.obj_loc = KOF_LOC_AUTOSTART;
+		n1 = kofw_evt_ident(&a, i1, sizeof i1, &c1);
+		n2 = kofw_evt_ident(&b, i2, sizeof i2, &c2);
+		if (c1 || c2)
+			fail("ident", "a classified location was collapsed "
+			     "per process - the significance gate is open");
+		if (n1 == n2 && !memcmp(i1, i2, n1))
+			fail("ident", "two DIFFERENT autostart keys collapsed");
+
+		/* A file event is never coarse, whatever its location. */
+		mk(&a, KOF_EVT_FILE_NEW, 100u, 1u);
+		set_obj(&a, "C:\\some\\ordinary\\file.txt");
+		(void)kofw_evt_ident(&a, i1, sizeof i1, &c1);
+		if (c1)
+			fail("ident", "a file event was collapsed per process "
+			     "- only the registry churn may be");
+	}
+
+	/*
+	 * A SHORT BUFFER TRUNCATES RATHER THAN OVERRUNNING. A caller with less
+	 * room gets a coarser identity, which over-collapses - so the cap is
+	 * chosen once, at the call site, and never by accident.
+	 */
+	mk(&a, KOF_EVT_REG_CREATE, 100u, 1u);
+	set_obj(&a, "\\REGISTRY\\MACHINE\\SOFTWARE\\Some\\Fairly\\Long\\Key");
+	if (kofw_evt_ident(&a, buf, 8u, NULL) != 8u)
+		fail("ident", "a short buffer was not filled exactly");
+}
+
 static void t_scope(void)
 {
-	struct kofw_ptab   t;
+	/* STATIC, NOT ON THE STACK. This table is over a megabyte and
+	 * Windows gives a thread one by default, so a stack copy kills the
+	 * process before main prints a line - silently, which is how it
+	 * presented. kofw_ptab_init memsets it, so one copy reused across
+	 * these cases is exactly as clean as a fresh one. */
+	static struct kofw_ptab t;
 	struct kofw_filter f;
 	struct kofw_evt    e;
 
@@ -671,9 +924,57 @@ static void t_scope(void)
  * they were kept, a write was a byte count against an address nobody could
  * resolve.
  */
+/*
+ * THE SAME NAME, OVER AND OVER, MUST NOT CONSUME THE POOL.
+ *
+ * The names live in an append-only pool, and this table is fed by every file
+ * the machine opens - the same key arriving with the same path constantly. If
+ * an unchanged name were appended each time, the pool would fill in seconds and
+ * force a recycle that throws away every name in it, so paths would stop
+ * resolving on a busy machine and on a quiet one would look fine.
+ *
+ * ASSERTED SEPARATELY BECAUSE IT IS NOT A CORRECTNESS PROPERTY. Remove the
+ * comparison in kofw_ftab_add and every answer this table gives is still
+ * right - it simply stops working under load. That is the shape of bug the
+ * eviction-index defect in koffridge already taught this session: a table can
+ * answer every question correctly and be useless, and only a test about
+ * EFFICIENCY notices.
+ */
+static void t_ftab_pool(void)
+{
+	static struct kofw_ftab t;   /* 320KB - too big for a stack */
+	const char *path = "C:\\Windows\\System32\\drivers\\etc\\hosts";
+	uint32_t after_one;
+	unsigned i;
+
+	kofw_ftab_init(&t);
+	kofw_ftab_add(&t, 0x1234ull, path);
+	after_one = t.names_used;
+	if (!after_one)
+		fail("ftab pool", "one name consumed nothing");
+
+	for (i = 0; i < 10000u; i++)
+		kofw_ftab_add(&t, 0x1234ull, path);
+
+	if (t.names_used != after_one) {
+		printf("  FAIL ftab pool: 10000 identical adds grew the pool "
+		       "from %lu to %lu\n", (unsigned long)after_one,
+		       (unsigned long)t.names_used);
+		failures++;
+	}
+	if (t.recycled)
+		fail("ftab pool", "identical adds forced a recycle");
+
+	/* A DIFFERENT name for the same key does append - it has to, or a file
+	 * that was renamed would keep answering with its old path. */
+	kofw_ftab_add(&t, 0x1234ull, "C:\\Windows\\System32\\drivers\\etc\\x");
+	if (t.names_used <= after_one)
+		fail("ftab pool", "a changed name was not stored");
+}
+
 static void t_ftab(void)
 {
-	struct kofw_ftab t;
+	static struct kofw_ftab t;   /* 320KB - too big for a stack */
 	struct kofw_evt  e;
 
 	kofw_ftab_init(&t);
@@ -731,7 +1032,7 @@ static void t_ftab(void)
  */
 static void t_pid_reuse(void)
 {
-	struct kofw_ptab t;
+	static struct kofw_ptab t;   /* see the note above - too big for a stack */
 
 	kofw_ptab_init(&t);
 	(void)kofw_ptab_add(&t, 1234, 111, "first.exe", 1);
@@ -996,7 +1297,12 @@ static void t_trace(void)
  */
 static void t_unbacked(void)
 {
-	struct kofw_ptab   t;
+	/* STATIC, NOT ON THE STACK. This table is over a megabyte and
+	 * Windows gives a thread one by default, so a stack copy kills the
+	 * process before main prints a line - silently, which is how it
+	 * presented. kofw_ptab_init memsets it, so one copy reused across
+	 * these cases is exactly as clean as a fresh one. */
+	static struct kofw_ptab t;
 	struct kofw_filter f;
 	struct kofw_evt    e;
 
@@ -1915,8 +2221,10 @@ int main(void)
 	t_bytes();
 	t_classify();
 	t_ring();
+	t_ident();
 	t_scope();
 	t_ftab();
+	t_ftab_pool();
 	t_pid_reuse();
 	t_unbacked();
 	t_tally();

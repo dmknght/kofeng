@@ -37,6 +37,77 @@ static void print_sanitised(FILE *out, const char *p, size_t n, size_t cap)
 	}
 }
 
+/* The value's type, as the word winnt.h uses for it. */
+static const char *reg_type_name(uint8_t t)
+{
+	switch (t) {
+	case 1u:  return "SZ";
+	case 2u:  return "EXPAND_SZ";
+	case 3u:  return "BINARY";
+	case 4u:  return "DWORD";
+	case 7u:  return "MULTI_SZ";
+	case 11u: return "QWORD";
+	default:  return "?";
+	}
+}
+
+/*
+ * PRINT A REGISTRY VALUE THE WAY ITS DECLARED TYPE SAYS TO READ IT.
+ *
+ * Not a guess about the bytes: the event carries the type, so a REG_SZ is
+ * known to be UTF-16 and printing it as raw bytes would put a dot between
+ * every character - `C.:.\.a...e.x.e` for a path a reader is trying to read.
+ * That is the one case where rendering by type is not interpretation, because
+ * the provider said which it is.
+ *
+ * Everything else goes through print_sanitised unchanged, and so does a string
+ * whose characters are not one ASCII byte and a zero - which is exactly what
+ * that function would have made of them anyway.
+ */
+static void print_reg_data(FILE *out, const struct kof_evt *e)
+{
+	const struct kof_evt_reg *r = kof_evt_as_reg(e);
+	const char *p;
+	size_t n, i;
+
+	if (!r || e->off_data == KOF_TEXT_NONE || !e->data_len)
+		return;
+	p = e->text + e->off_data;
+	n = e->data_len;
+
+	fprintf(out, " = [%s] ", reg_type_name(r->type));
+
+	if (r->type == 1u || r->type == 2u || r->type == 7u) {
+		for (i = 0; i + 1u < n && i < 240u; i += 2u) {
+			unsigned char lo = (unsigned char)p[i];
+			unsigned char hi = (unsigned char)p[i + 1u];
+
+			if (!lo && !hi)
+				break;   /* the terminator, not a character */
+			fputc((!hi && lo >= 0x20u && lo < 0x7fu)
+				      ? (int)lo : '.', out);
+		}
+	} else if (r->type == 4u && n >= 4u) {
+		uint32_t v;
+
+		memcpy(&v, p, sizeof v);
+		fprintf(out, "0x%08lx", (unsigned long)v);
+	} else {
+		print_sanitised(out, p, n, 120u);
+	}
+
+	/*
+	 * SAID WHEN IT IS A PREFIX. The provider captures a bounded amount and
+	 * the record bounds it again, so a reader comparing what it sees
+	 * against what was written needs to be told the difference - a value
+	 * that looks complete and is not is the shape a rule matches and is
+	 * wrong about.
+	 */
+	if (r->data_size > n)
+		fprintf(out, "... (%lu of %lu bytes)", (unsigned long)n,
+			(unsigned long)r->data_size);
+}
+
 void kof_evt_count(const struct kof_evt *e, struct kof_evt_tally *t)
 {
 	switch (e->verb) {
@@ -223,9 +294,21 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 	 */
 	case KOF_EVT_REG_CREATE:
 	case KOF_EVT_REG_SET_VALUE:
-	case KOF_EVT_REG_DELETE:
+	case KOF_EVT_REG_DELETE: {
+		const struct kof_evt_reg *r = kof_evt_as_reg(e);
+
 		fprintf(out, "  %s", kof_evt_object(e));
+		/*
+		 * WHETHER A CREATE CREATED ANYTHING. RegCreateKeyEx opens an
+		 * existing key as readily as it makes one, so an unmarked
+		 * create is a line that says a program touched a key - which
+		 * is most lines. Only the new one is worth the reader's eye.
+		 */
+		if (e->verb == KOF_EVT_REG_CREATE && r && r->disp == 1u)
+			fputs("  (new)", out);
+		print_reg_data(out, e);
 		break;
+	}
 
 	case KOF_EVT_NET_CONNECT:
 	case KOF_EVT_NET_DISCONNECT:
@@ -786,6 +869,36 @@ static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
 			     (unsigned long long)fl->key);
 	}
 	{
+		const struct kof_evt_reg *rg = kof_evt_as_reg(e);
+
+		/*
+		 * OFFERED WHENEVER THERE IS DATA, not whenever the type is
+		 * non-zero: REG_NONE is 0 and is a value somebody can write, so
+		 * keying the row on the type would hide exactly the write that
+		 * was trying not to look like one.
+		 */
+		if (rg && e->data_len)
+			ROWF("value type", u.reg.type, "%s",
+			     reg_type_name(rg->type));
+		/*
+		 * THE FULL SIZE, and only when it disagrees with what arrived.
+		 * Equal, it is a second copy of a number already on screen;
+		 * different, it is the one row that says the bytes above are a
+		 * prefix - which is the difference between a rule that matched
+		 * a value and a rule that matched the start of one.
+		 */
+		if (rg && e->data_len && rg->data_size > e->data_len)
+			ROWF("value size", u.reg.data_size, "%lu",
+			     (unsigned long)rg->data_size);
+		/*
+		 * ONLY THE CREATE THAT CREATED. An opened-existing key is what
+		 * RegCreateKeyEx does most of the time, so a row saying so on
+		 * every create is a row that trains a reader to skip it.
+		 */
+		if (rg && e->verb == KOF_EVT_REG_CREATE && rg->disp == 1u)
+			ROWF("disposition", u.reg.disp, "%s", "created new");
+	}
+	{
 		const struct kof_evt_mem *mm = kof_evt_as_mem(e);
 
 		if (mm && mm->addr)
@@ -1035,6 +1148,43 @@ int kof_evt_content(const struct kof_evt *e, const char **text, size_t *len)
 		return 1;
 	}
 	return 0;
+}
+
+/*
+ * THE BYTES A REGISTRY WRITE PUT INTO A VALUE.
+ *
+ * A SIBLING OF kof_evt_content AND NOT THE SAME FUNCTION, because the two are
+ * at different offsets and mean different things. Content is what an object IS
+ * - an AMSI submission, sitting at off_object with no path beside it. Registry
+ * data sits at off_data BESIDE a path, because a registry event has both: the
+ * key it wrote to and what it wrote. Folding them into one accessor would make
+ * "the object" mean one thing for one verb and another for the next, which is
+ * the confusion off_image and off_object were split to prevent.
+ *
+ * The guard is the one kof_evt_content's note describes, and it is here for the
+ * same reason rather than by analogy: the conversion from the collector's
+ * record sets an offset ABSENT when it fell outside the bytes that were copied,
+ * and a length left standing beside an absent offset is read as "there is data
+ * at zero" - which is the object path, and a scanner would have matched on it.
+ */
+int kof_evt_reg_data(const struct kof_evt *e, const char **data, size_t *len)
+{
+	size_t room, n;
+
+	if (data) *data = NULL;
+	if (len)  *len  = 0;
+
+	if (!e || !e->data_len || e->off_data == KOF_TEXT_NONE ||
+	    e->off_data >= sizeof e->text)
+		return 0;
+
+	room = sizeof e->text - e->off_data;
+	n    = e->data_len;
+	if (n > room)
+		n = room;
+	if (data) *data = e->text + e->off_data;
+	if (len)  *len  = n;
+	return n != 0;
 }
 
 int kof_evt_content_looks_binary(const struct kof_evt *e)

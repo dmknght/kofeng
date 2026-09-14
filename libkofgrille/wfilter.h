@@ -55,6 +55,46 @@
  */
 #define KOFW_LATE_LOAD_TICKS 50000000ull
 
+/*
+ * HOW MUCH OF A PROCESS IMAGE PATH IS KEPT.
+ *
+ * WAS 120, AND THAT WAS MEASURED TO BE TOO SHORT. On this desktop, of 75
+ * processes with a readable path: mean 62 characters, longest 155, and FIVE of
+ * them - one in fifteen - longer than 119. Through ETW it is worse than that
+ * ratio suggests, because the collector is handed DEVICE paths:
+ * \Device\HarddiskVolume3\ in place of C:\ is twenty-one characters more on
+ * every one of them, which pushes roughly one process in seven over the edge.
+ *
+ * 256 rather than 260. MAX_PATH is the number Windows conventionally stops at
+ * and 256 is the power of two under it, which is past everything measured with
+ * room to spare - and a path longer than this is a long-path executable, which
+ * is worth the flag beside it rather than four more kilobytes a process.
+ *
+ * AND IT COSTS NOTHING PER ENTRY, because the path is not in the entry - see
+ * kofw_pent.image_off. This is a bound on one path, not a field multiplied by
+ * KOFW_PTAB_MAX, which is what made the old number a trade at all:
+ *
+ *   inline at 120   992KB, and one process in seven cut
+ *   inline at 256  1568KB, nothing cut
+ *   pooled at 256   704KB, nothing cut
+ *
+ * The first row is where this started. Raising the bound alone made it worse
+ * before the pool made it better than either, which is the argument for fixing
+ * the shape rather than tuning the number.
+ *
+ * Contrast KOFW_FNAME_MAX, which stays inline and stays small for a reason that
+ * does not apply here: a cut FILE path still names the directory written to,
+ * which is the fact a rule uses. A cut PROCESS image loses the executable's
+ * name, which is the whole of what it is for.
+ */
+#define KOFW_IMAGE_MAX 256u
+
+/*
+ * THE POOL EVERY IMAGE PATH GOES INTO - see kofw_ptab.names for the sizing,
+ * and kofw_pent.image_off for why it is a pool at all.
+ */
+#define KOFW_NAME_POOL (128u * 1024u)
+
 struct kofw_modblk {
 	uint64_t base[KOFW_MODS_PER_BLK];
 	uint32_t size[KOFW_MODS_PER_BLK];
@@ -86,7 +126,38 @@ struct kofw_pent {
 	uint8_t  mods_full;
 	uint16_t mods;          /* head block, or KOFW_MODBLK_NONE */
 
-	char     image[120];
+	/*
+	 * THE IMAGE WAS TOO LONG AND WAS CUT.
+	 *
+	 * Said rather than left to be discovered, for the reason kofw_evt.flags
+	 * gives for the same condition: a truncated path still LOOKS like a
+	 * path, so a reader comparing it against anything gets an answer that
+	 * is wrong without appearing to be.
+	 *
+	 * The copy was always bounded - there is no overflow here and never
+	 * was - but it was silent, and silent is the half that matters.
+	 */
+	uint8_t  image_cut;
+
+	/*
+	 * THE IMAGE PATH LIVES IN A POOL, NOT IN THIS STRUCT.
+	 *
+	 * Inline it was 256 bytes times KOFW_PTAB_MAX, which is 1.1MB held to
+	 * store paths averaging 62 characters for the seventy-odd processes a
+	 * real machine runs. Measured: 21KB of this table in use out of 1568KB
+	 * allocated - one and a third per cent.
+	 *
+	 * The pool is the same answer kofw_modblk already gives one struct
+	 * above, and for the same reason its comment gives: a fixed array sized
+	 * for the worst case is mostly waste multiplied by every process in the
+	 * table. Module RANGES got that treatment; the string beside them did
+	 * not, and it was the larger half.
+	 *
+	 * An offset and not a pointer, so the table stays memcpy-able and has
+	 * nothing to fix up when it is cleared.
+	 */
+	uint32_t image_off;    /* into kofw_ptab.names */
+	uint16_t image_len;    /* 0 when there is no image */
 };
 
 struct kofw_ptab {
@@ -104,6 +175,31 @@ struct kofw_ptab {
 	 * and "we stopped being able to tell" are different results.
 	 */
 	uint64_t mod_undecoded;
+
+	/* Image paths that did not fit KOFW_IMAGE_MAX. Non-zero means at least
+	 * one process is named by a path that is not its whole path. */
+	uint64_t image_cuts;
+
+	/*
+	 * WHERE THE IMAGE PATHS ACTUALLY ARE.
+	 *
+	 * Sized for what a machine holds rather than for the worst case an
+	 * entry could hold: 128KB is about fifteen hundred paths at the
+	 * measured average, against a table that has never been seen to hold
+	 * more than a few hundred live processes. Inline, the same coverage
+	 * cost 1.1MB.
+	 *
+	 * FULL MEANS NEW ENTRIES LOSE THEIR NAME, not that anything already
+	 * stored moves. Offsets already handed out stay valid for the life of
+	 * the table, and the only moment they are all invalidated at once is
+	 * the whole-table recycle - which clears every entry in the same
+	 * statement, so there is nothing left pointing in here. Counted in
+	 * names_full, because a process with no name is a column a reader
+	 * cannot fill and should be told about.
+	 */
+	char     names[KOFW_NAME_POOL];
+	uint32_t names_used;
+	uint64_t names_full;
 
 	struct kofw_modblk blk[KOFW_MODBLK_MAX];
 	uint16_t blk_free;      /* head of the free list */
@@ -149,24 +245,61 @@ struct kofw_ptab {
  * job is to be a cache.
  */
 #define KOFW_FTAB_MAX  4096u
+
 /*
- * 128 and not 200. Measured: the table is KOFW_FTAB_MAX of these, so every
- * byte here is four kilobytes of a service's resident set, and 200 cost 852KB
- * to hold names that are almost all shorter than 128. A name that does not fit
- * is cut, and a cut path in a WRITE event still says which directory was
- * written to - which is the fact a rule uses.
+ * HOW LONG ONE FILE PATH MAY BE - and it is no longer a memory trade.
+ *
+ * WHAT THIS USED TO SAY, and the reasoning was sound for the shape it had:
+ * "128 and not 200 ... every byte here is four kilobytes of a service's
+ * resident set, and 200 cost 852KB to hold names that are almost all shorter
+ * than 128. A name that does not fit is cut, and a cut path in a WRITE event
+ * still says which directory was written to."
+ *
+ * THE PREMISE WAS MEASURED AND IS WRONG. Sixteen thousand real file paths from
+ * System32, Windows, Program Files and LocalAppData: mean 83, longest 218, and
+ * 26% of them longer than 128. Through ETW it is worse again, because those are
+ * device paths - \Device\HarddiskVolume3\ for C:\ - so roughly a THIRD of file
+ * names were being cut, not the handful "almost all shorter than 128" implies.
+ *
+ * And the trade the old number was making no longer exists: the bytes live in a
+ * pool now, so this is a bound on ONE path rather than a field multiplied by
+ * KOFW_FTAB_MAX. Raising it costs nothing per entry.
  */
-#define KOFW_FNAME_MAX 128u
+#define KOFW_FNAME_MAX 256u
+
+/*
+ * THE POOL THOSE PATHS LIVE IN.
+ *
+ * Sized from the same measurement and from when the table recycles: it is
+ * emptied at half full, so at most KOFW_FTAB_MAX/2 names are ever live, and at
+ * the measured average plus a device prefix that is about 215KB. 256KB is that
+ * with room, against 544KB for the inline form that truncated a third of them.
+ */
+#define KOFW_FPOOL     (256u * 1024u)
 
 struct kofw_fent {
 	uint64_t key;
-	char     name[KOFW_FNAME_MAX];
+	uint32_t off;     /* into kofw_ftab.names */
+	uint16_t len;     /* 0 when this entry has no name */
 };
 
 struct kofw_ftab {
 	struct kofw_fent e[KOFW_FTAB_MAX];
 	uint32_t n;
 	uint64_t resolved, unresolved, recycled;
+
+	/*
+	 * APPEND ONLY, for the reason kofw_ptab's pool is: an entry being
+	 * refreshed must not disturb the offsets handed to every other entry.
+	 * A name identical to the one already stored is therefore not appended
+	 * again - which matters here far more than it does for processes,
+	 * because this runs on every file the machine opens and the same key
+	 * arrives with the same name constantly.
+	 */
+	char     names[KOFW_FPOOL];
+	uint32_t names_used;
+	uint64_t names_full;   /* names dropped for want of pool */
+	uint64_t name_cuts;    /* paths longer than KOFW_FNAME_MAX */
 };
 
 void kofw_ftab_init(struct kofw_ftab *);
@@ -199,6 +332,16 @@ struct kofw_pent *kofw_ptab_add(struct kofw_ptab *, uint32_t pid,
  * has no discriminator and the pid alone has to do. */
 struct kofw_pent *kofw_ptab_of(struct kofw_ptab *, uint32_t pid,
 			       uint64_t create_time);
+
+/*
+ * The image path of a process, or "" when it has none.
+ *
+ * The entry holds an OFFSET into the table's pool rather than the bytes - see
+ * kofw_pent.image_off - so the table is the only thing that can resolve it, and
+ * that is why this takes both.
+ */
+const char *kofw_pent_image(const struct kofw_ptab *,
+			    const struct kofw_pent *);
 
 /*
  * WHY A RECORD WAS REFUSED, not merely that it was.
@@ -238,5 +381,24 @@ enum kofw_refuse {
  */
 int kofw_filter_apply(struct kofw_ptab *, const struct kofw_filter *,
 		      struct kofw_evt *, uint8_t *why);
+
+/*
+ * THE BYTES THAT MAKE TWO EVENTS THE SAME EVENT, written into `buf`.
+ *
+ * Returns how many were written, or 0 when this verb must never be collapsed -
+ * see may_collapse in the .c, which is where the reasoning lives and where the
+ * damage would be if the list were wrong. A caller that gets 0 has been told
+ * "do not deduplicate this", not "the buffer was too small".
+ *
+ * WHAT IS DELIBERATELY ABSENT FROM THE IDENTITY: the stamp, the sequence
+ * number and the thread. Those differ on every record by construction, so
+ * including any of them would mean nothing ever matches and the whole
+ * mechanism would quietly do nothing while appearing to work.
+ *
+ * The result is fed to koffridge_seen, which hashes it - see koffridge.h for why the
+ * bytes are not stored.
+ */
+size_t kofw_evt_ident(const struct kofw_evt *, void *buf, size_t cap,
+		      int *coarse);
 
 #endif /* KOFGRILLE_WFILTER_H */

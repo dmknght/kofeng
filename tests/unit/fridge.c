@@ -167,6 +167,324 @@ static void concurrent(void)
 	koffridge_close(f);
 }
 
+/* ===================== THE SAME FACT, SEEN AGAIN =====================
+ *
+ * The dedup table lives in koffridge, so its cases live in koffridge s test.
+ * They were a separate file for as long as it was a separate module.
+ */
+static void sfail(const char *what)
+{
+	printf("  FAIL %s\n", what);
+	fails++;
+}
+
+#define WINDOW 1000ull
+
+/* ------------------------------------------------------------------- basics */
+
+static void first_then_repeat(void)
+{
+	struct koffridge_seen *s = koffridge_seen_open(256u, WINDOW);
+	struct koffridge_seen_stat st;
+
+	if (!s) {
+		sfail("no table");
+		return;
+	}
+
+	if (koffridge_seen_mark(s, "alpha", 5u, 100ull) != 0)
+		sfail("the first sighting was not fresh");
+	if (koffridge_seen_mark(s, "alpha", 5u, 101ull) != 1)
+		sfail("the second sighting was not the first repeat");
+	if (koffridge_seen_mark(s, "alpha", 5u, 102ull) != 2)
+		sfail("the third sighting did not count");
+
+	/* A different identity is not the same identity. */
+	if (koffridge_seen_mark(s, "beta", 4u, 103ull) != 0)
+		sfail("a different identity was called a repeat");
+
+	koffridge_seen_stats(s, &st);
+	if (st.asked != 4u || st.fresh != 2u || st.repeat != 2u)
+		printf("  FAIL the tally says asked=%llu fresh=%llu "
+		       "repeat=%llu\n", (unsigned long long)st.asked,
+		       (unsigned long long)st.fresh,
+		       (unsigned long long)st.repeat);
+	fails += (st.asked != 4u || st.fresh != 2u || st.repeat != 2u);
+
+	koffridge_seen_close(s);
+}
+
+/*
+ * A PREFIX IS NOT THE SAME IDENTITY, which is the bug a length-less hash has.
+ * "Run" and "Run\Updater" are a real pair here: one is a key and the other is a
+ * value under it, and collapsing them would report the value write and hide the
+ * key, or the reverse.
+ */
+static void length_matters(void)
+{
+	struct koffridge_seen *s = koffridge_seen_open(256u, WINDOW);
+
+	if (!s) {
+		sfail("no table");
+		return;
+	}
+	if (koffridge_seen_mark(s, "Run", 3u, 1ull) != 0)
+		sfail("first");
+	if (koffridge_seen_mark(s, "Run\\Updater", 11u, 2ull) != 0)
+		sfail("a longer identity with the same prefix was suppressed");
+	koffridge_seen_close(s);
+}
+
+/* ------------------------------------------------------------- the window */
+
+/*
+ * PAST THE WINDOW IT IS FRESH AGAIN, and this is the case that keeps a watchdog
+ * visible. Something re-establishing persistence every few seconds must not
+ * become one line for the whole run - see kofseen.h.
+ */
+static void window_expires(void)
+{
+	struct koffridge_seen *s = koffridge_seen_open(256u, WINDOW);
+
+	if (!s) {
+		sfail("no table");
+		return;
+	}
+	if (koffridge_seen_mark(s, "x", 1u, 1000ull) != 0)
+		sfail("first");
+	if (koffridge_seen_mark(s, "x", 1u, 1500ull) != 1)
+		sfail("a repeat inside the window was not suppressed");
+	/* 1000 past the LAST sighting, which is 1500. */
+	if (koffridge_seen_mark(s, "x", 1u, 2501ull) != 0)
+		sfail("a repeat past the window was still suppressed");
+	/* And the count started over rather than carrying across. */
+	if (koffridge_seen_mark(s, "x", 1u, 2502ull) != 1)
+		sfail("the count did not restart with the new window");
+	koffridge_seen_close(s);
+}
+
+/*
+ * AN OUT-OF-ORDER STAMP MUST NOT EXPIRE ANYTHING.
+ *
+ * ETW buffers are per processor, so a record stamped earlier than one already
+ * seen is normal traffic and not corruption. The interval is unsigned: computed
+ * the wrong way round it wraps to something astronomically larger than any
+ * window, and every late record would read as fresh - which would turn the
+ * collapser off precisely on the busy machines that need it, because that is
+ * when reordering happens.
+ */
+static void out_of_order(void)
+{
+	struct koffridge_seen *s = koffridge_seen_open(256u, WINDOW);
+
+	if (!s) {
+		sfail("no table");
+		return;
+	}
+	if (koffridge_seen_mark(s, "y", 1u, 5000ull) != 0)
+		sfail("first");
+	if (koffridge_seen_mark(s, "y", 1u, 4000ull) != 1)
+		sfail("a record stamped EARLIER was treated as past the window");
+	if (koffridge_seen_mark(s, "y", 1u, 1ull) != 2)
+		sfail("a much earlier stamp expired the entry");
+	koffridge_seen_close(s);
+}
+
+/* ---------------------------------------------------------------- eviction */
+
+/*
+ * WHEN IT RUNS OUT OF ROOM IT MUST FAIL TOWARDS NOISE.
+ *
+ * Far more distinct identities than the table holds, then the oldest one again.
+ * Whatever happened in between, the answer for a forgotten identity has to be
+ * "fresh" - one duplicate reported. The unacceptable outcome is the reverse: a
+ * NEW identity landing on an evicted slot and being told it is a repeat, which
+ * would delete an event that never happened before.
+ */
+static void eviction_fails_safe(void)
+{
+	struct koffridge_seen *s = koffridge_seen_open(256u, WINDOW);
+	struct koffridge_seen_stat st;
+	char key[32];
+	unsigned i;
+	int wrong = 0;
+
+	if (!s) {
+		sfail("no table");
+		return;
+	}
+
+	/*
+	 * EVERY ONE OF THESE IS NEW, so every answer must be 0. A single
+	 * non-zero is the fatal direction: it means an identity nobody had
+	 * ever seen was suppressed.
+	 */
+	for (i = 0; i < 4000u; i++) {
+		int n = snprintf(key, sizeof key, "id-%u", i);
+
+		if (koffridge_seen_mark(s, key, (uint32_t)n, 1000ull + i) != 0)
+			wrong++;
+	}
+	if (wrong)
+		printf("  FAIL %d identity(s) that were new came back as "
+		       "repeats\n", wrong);
+	fails += wrong ? 1 : 0;
+
+	koffridge_seen_stats(s, &st);
+	if (st.used > st.cap)
+		sfail("the table reports more entries than it holds");
+	if (!st.evicted)
+		sfail("4000 identities into a 256-entry table evicted nothing - "
+		     "the table is not bounded");
+
+	koffridge_seen_close(s);
+}
+
+/*
+ * AND THE REDUCTION HAS TO ACTUALLY REDUCE. A table that evicted so eagerly
+ * that nothing was ever recognised would pass every assertion above - each one
+ * is about not suppressing - and be useless. This is the other side: a small
+ * working set, repeated, must collapse.
+ */
+static void reduces(void)
+{
+	struct koffridge_seen *s = koffridge_seen_open(256u, WINDOW);
+	struct koffridge_seen_stat st;
+	char key[32];
+	unsigned i, k;
+
+	if (!s) {
+		sfail("no table");
+		return;
+	}
+	/* Eight distinct facts, restated a hundred times each - which is the
+	 * shape the registry provider actually produces. */
+	for (k = 0; k < 100u; k++) {
+		for (i = 0; i < 8u; i++) {
+			int n = snprintf(key, sizeof key, "fact-%u", i);
+
+			koffridge_seen_mark(s, key, (uint32_t)n, 2000ull);
+		}
+	}
+	koffridge_seen_stats(s, &st);
+	if (st.fresh != 8u)
+		printf("  FAIL 8 distinct facts produced %llu fresh\n",
+		       (unsigned long long)st.fresh);
+	fails += (st.fresh != 8u) ? 1 : 0;
+	if (st.repeat != 792u)
+		printf("  FAIL expected 792 suppressions, got %llu\n",
+		       (unsigned long long)st.repeat);
+	fails += (st.repeat != 792u) ? 1 : 0;
+
+	koffridge_seen_close(s);
+}
+
+/*
+ * A TABLE THAT IS NOT FULL MUST NOT FORGET ANYTHING.
+ *
+ * THIS IS THE TEST THAT WAS MISSING, and its absence is why a real defect
+ * shipped past every case above: all of them assert CORRECTNESS - the right
+ * answer for an identity that is present - and a table can give every one of
+ * those right answers while quietly being useless.
+ *
+ * The defect was the index. Slots were chosen from the HIGH bits of an FNV
+ * hash, and FNV mixes upward, so short inputs sharing a suffix - which every
+ * registry path does, being a long common prefix and a short tail - landed in
+ * the same probe runs. At a quarter full the table was evicting: 2000
+ * identities into 8192 slots produced 56112 evictions and suppressed 71.5% of
+ * a stream it should have suppressed 99% of.
+ *
+ * Nothing about that is visible from a correctness test. It is visible here,
+ * because at a quarter load the only acceptable number of evictions is none.
+ */
+static void not_full_forgets_nothing(void)
+{
+	struct koffridge_seen *s = koffridge_seen_open(8192u, 1000000ull);
+	struct koffridge_seen_stat st;
+	char key[96];
+	unsigned pass, i;
+
+	if (!s) {
+		sfail("no table");
+		return;
+	}
+
+	/*
+	 * Registry-shaped keys on purpose: a long shared prefix and a short
+	 * distinguishing tail is the input that broke it, and a test using
+	 * "id-1", "id-2" would not have.
+	 */
+	for (pass = 0; pass < 3u; pass++) {
+		for (i = 0; i < 2000u; i++) {
+			int n = snprintf(key, sizeof key,
+				"REGISTRY/MACHINE/SOFTWARE/Microsoft/Windows/"
+				"CurrentVersion/Uninstall/Product%u", i);
+
+			koffridge_seen_mark(s, key, (uint32_t)n, 1000ull + pass);
+		}
+	}
+
+	koffridge_seen_stats(s, &st);
+	if (st.evicted)
+		printf("  FAIL 2000 identities in 8192 slots evicted %llu - "
+		       "the index is clustering\n",
+		       (unsigned long long)st.evicted);
+	fails += st.evicted ? 1 : 0;
+
+	/* Two passes over 2000 known identities must be 4000 suppressions. */
+	if (st.fresh != 2000u || st.repeat != 4000u)
+		printf("  FAIL expected 2000 fresh and 4000 repeats, got "
+		       "%llu and %llu\n", (unsigned long long)st.fresh,
+		       (unsigned long long)st.repeat);
+	fails += (st.fresh != 2000u || st.repeat != 4000u) ? 1 : 0;
+
+	koffridge_seen_close(s);
+}
+
+/* ------------------------------------------------------------------ hostile */
+
+/*
+ * THE CALLS NOBODY MEANS TO MAKE. A collector under load is where a null or a
+ * zero-length identity would come from - a record whose object failed to decode
+ * - and a table that crashed there would take the sensor down.
+ */
+static void hostile(void)
+{
+	struct koffridge_seen *s = koffridge_seen_open(0u, 0ull);   /* both defaults */
+	char big[4096];
+
+	if (!s) {
+		sfail("no table with default sizes");
+		return;
+	}
+	if (koffridge_seen_mark(NULL, "a", 1u, 1ull) != 0)
+		sfail("a null table did not answer fresh");
+	if (koffridge_seen_mark(s, NULL, 4u, 1ull) != 0)
+		sfail("a null identity did not answer fresh");
+	if (koffridge_seen_mark(s, "a", 0u, 1ull) != 0)
+		sfail("a zero-length identity did not answer fresh");
+
+	/* An identity far longer than any path, twice. */
+	memset(big, 'k', sizeof big);
+	if (koffridge_seen_mark(s, big, (uint32_t)sizeof big, 1ull) != 0)
+		sfail("a very long identity was not fresh");
+	if (koffridge_seen_mark(s, big, (uint32_t)sizeof big, 2ull) != 1)
+		sfail("a very long identity did not match itself");
+
+	/* Stamp zero, and the largest stamp there is. */
+	if (koffridge_seen_mark(s, "z", 1u, 0ull) != 0)
+		sfail("a zero stamp was not fresh");
+	if (koffridge_seen_mark(s, "z", 1u, ~0ull) != 0)
+		sfail("a jump to the maximum stamp did not expire the entry");
+
+	koffridge_seen_stats(s, NULL);       /* must not crash */
+	koffridge_seen_clear(s);
+	if (koffridge_seen_mark(s, "z", 1u, 5ull) != 0)
+		sfail("clear did not forget");
+	koffridge_seen_close(s);
+	koffridge_seen_close(NULL);          /* must not crash */
+}
+
 int main(void)
 {
 	struct koffridge *f;
@@ -234,6 +552,44 @@ int main(void)
 		ck(koffridge_put(f, &k, 1, &res) == 1, "store broken");
 		ck(koffridge_get(f, &k, 1, &v) == 1, "hit broken");
 		ck(v.findings == 0 && v.broken == 7, "broken carried");
+	}
+
+	/*
+	 * WHEN A HIT IS A REASON TO SKIP, which is the question every caller
+	 * actually has and the one that was got wrong.
+	 *
+	 * A `get` whose result nobody reads compiles, runs, and silences the
+	 * detection it just made - measured as 613 infected files in one run
+	 * and 1 in the next, with the cache in between. koffridge_skip makes
+	 * the check the return value so there is nothing to forget; these are
+	 * the three answers it has to give.
+	 */
+	{
+		unsigned char kc = 20, ki = 21, kb = 22;
+
+		ck(koffridge_put(f, &kc, 1, NULL) == 1, "store clean");
+		memset(&res, 0, sizeof res);
+		res.n = 1;
+		res.v[0].level = KOF_LEVEL_INFECT;
+		snprintf(res.v[0].name, sizeof res.v[0].name, "Test:Thing");
+		ck(koffridge_put(f, &ki, 1, &res) == 1, "store infected");
+		memset(&res, 0, sizeof res);
+		res.broken = 3;
+		ck(koffridge_put(f, &kb, 1, &res) == 1, "store broken");
+
+		ck(koffridge_skip(f, &kc, 1) == 1, "a clean hit skips");
+		/* THE ONE THAT MATTERS. */
+		ck(koffridge_skip(f, &ki, 1) == 0,
+		   "an INFECTED hit must NOT skip - this is the bug");
+		/* A scan that stopped looking did not find nothing. */
+		ck(koffridge_skip(f, &kb, 1) == 0, "a broken hit must not skip");
+		/* And a miss is not a hit. */
+		{
+			unsigned char miss = 99;
+
+			ck(koffridge_skip(f, &miss, 1) == 0, "a miss scans");
+		}
+		ck(koffridge_skip(NULL, &kc, 1) == 0, "no table scans");
 	}
 
 	/* 4. too long is refused */
@@ -464,6 +820,16 @@ int main(void)
 
 	/* 7. SEVERAL THREADS AT ONCE - see the note on struct hammer. */
 	concurrent();
+
+	/* The dedup half of this module. */
+	first_then_repeat();
+	length_matters();
+	window_expires();
+	out_of_order();
+	eviction_fails_safe();
+	reduces();
+	not_full_forgets_nothing();
+	hostile();
 
 	printf("fridge: %s\n", fails ? "FAILED" : "ok");
 	return fails != 0;

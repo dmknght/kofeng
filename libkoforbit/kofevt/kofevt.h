@@ -625,7 +625,7 @@ void kof_evt_ip_set_v4(uint8_t addr[16], uint32_t be_v4);
  * know refuses the file instead of decoding every field from the wrong offset.
  */
 #define KOF_EVT_SIZE 640u
-#define KOF_EVT_HEAD 96u
+#define KOF_EVT_HEAD 100u
 
 /* kof_evt.flags */
 enum {
@@ -843,13 +843,54 @@ struct kof_evt_file {
 	uint32_t reserved;
 };
 
+/*
+ * A REGISTRY WRITE, WHICH USED TO OWN NO PAYLOAD AT ALL.
+ *
+ * The three registry verbs carried a path and nothing else, and that made the
+ * one Windows persistence event the collector sees say less than a file write
+ * does. What was missing was not detail - it was the difference between
+ * reporting that persistence was established and reporting WHAT was persisted.
+ *
+ * The data itself is not here. It is bytes of arbitrary length, so it lives in
+ * the text arena at off_data like every other variable-length thing; these are
+ * the scalars that say how to read it.
+ */
+struct kof_evt_reg {
+	/*
+	 * THE VALUE'S FULL SIZE, WHICH IS NOT data_len. The provider captures a
+	 * bounded prefix and the record bounds it again, so a rule that matched
+	 * the bytes can still tell whether it saw all of them - compare the two
+	 * and read KOF_EF_TRUNCATED.
+	 */
+	uint32_t data_size;
+
+	/* REG_SZ, REG_EXPAND_SZ, REG_BINARY, REG_DWORD - winnt.h's small enum,
+	 * so "a string was written here" is a question about a number rather
+	 * than about the bytes. */
+	uint8_t  type;
+
+	/*
+	 * WHETHER THE KEY WAS ACTUALLY CREATED, and it is what makes the CREATE
+	 * verb mean anything.
+	 *
+	 * RegCreateKeyEx opens an existing key as readily as it makes a new one
+	 * and Windows raises CreateKey either way, so without this every key a
+	 * program merely touched arrived as a registry change - and a report
+	 * that lists those is a report nobody reads twice. 0 says the event did
+	 * not state it; 1 is created-new, 2 is opened-existing.
+	 */
+	uint8_t  disp;
+	uint16_t reserved;
+};
+
 /* Which payload a verb owns. */
 enum kof_evt_kind {
-	KOF_EK_NONE = 0,   /* registry, AMSI, continuation, raw - no payload */
+	KOF_EK_NONE = 0,   /* AMSI, continuation, raw - no payload */
 	KOF_EK_PROC,
 	KOF_EK_MEM,
 	KOF_EK_NET,
-	KOF_EK_FILE
+	KOF_EK_FILE,
+	KOF_EK_REG
 };
 
 /* Never guesses: a verb this build does not know is KOF_EK_NONE, so its
@@ -957,7 +998,31 @@ struct kof_evt {
 		struct kof_evt_mem  mem;
 		struct kof_evt_net  net;
 		struct kof_evt_file file;
+		struct kof_evt_reg  reg;
 	} u;
+
+	/*
+	 * WHAT A REGISTRY WRITE WROTE - a second variable-length slot, and the
+	 * first event here to need one.
+	 *
+	 * `object` holds WHERE and this holds WHAT, and neither substitutes for
+	 * the other: the path says persistence was established, the data says
+	 * what it persists. An AMSI submission needed only one slot because its
+	 * metadata is deliberately not carried - see content_len.
+	 *
+	 * APPENDED AFTER THE UNION, WHICH IS NOT COSMETIC. This record is
+	 * written to a file and read back by a different build; a field added
+	 * anywhere above moves every field below it, and a path decoded at the
+	 * wrong offset still looks like a path. Appended, every older field
+	 * keeps the offset it had, and KOF_EVT_HEAD's assertion catches it if
+	 * this claim ever stops being true.
+	 *
+	 * RAW BYTES: a REG_SZ is UTF-16 and has a NUL at index 1, so `data_len`
+	 * is the length and the NUL written after it is only so that anything
+	 * walking the arena as strings cannot run off the end.
+	 */
+	uint16_t off_data;     /* into text[], or KOF_TEXT_NONE */
+	uint16_t data_len;
 
 	char     text[KOF_EVT_SIZE - KOF_EVT_HEAD];
 };
@@ -986,6 +1051,7 @@ const struct kof_evt_proc *kof_evt_as_proc(const struct kof_evt *);
 const struct kof_evt_mem  *kof_evt_as_mem(const struct kof_evt *);
 const struct kof_evt_net  *kof_evt_as_net(const struct kof_evt *);
 const struct kof_evt_file *kof_evt_as_file(const struct kof_evt *);
+const struct kof_evt_reg  *kof_evt_as_reg(const struct kof_evt *);
 
 /*
  * The same, to write - so a producer cannot fill in a payload the verb does
@@ -999,6 +1065,7 @@ struct kof_evt_proc *kof_evt_set_proc(struct kof_evt *);
 struct kof_evt_mem  *kof_evt_set_mem(struct kof_evt *);
 struct kof_evt_net  *kof_evt_set_net(struct kof_evt *);
 struct kof_evt_file *kof_evt_set_file(struct kof_evt *);
+struct kof_evt_reg  *kof_evt_set_reg(struct kof_evt *);
 
 _Static_assert(sizeof(struct kof_evt) == KOF_EVT_SIZE,
 	       "struct kof_evt is not KOF_EVT_SIZE bytes");

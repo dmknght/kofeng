@@ -64,6 +64,7 @@
 #include <kofmod/kofsig.h>   /* KOF_EVT_AMSI - the target a submission is */
 #include "kofevt.h"
 #include "kofevtfmt.h"
+#include "koffridge.h"
 #include "kofevtlog.h"
 
 /*
@@ -289,6 +290,40 @@ static int already_scanned(const char *path)
 }
 
 /*
+ * SHOULD THIS FILE BE SCANNED - the verdict cache, which this tool did not use.
+ *
+ * WHY THE PATH LIST ABOVE IS NOT ENOUGH, and it is a detection hole rather than
+ * a performance note. It remembers a PATH, so a file written once, scanned
+ * clean, and then OVERWRITTEN is never looked at again - which is a dropper's
+ * whole sequence: put something harmless where it will be scanned, let it pass,
+ * replace it. The identity this uses is (volume, index, size, mtime), so a file
+ * that changed is a different key and is scanned again.
+ *
+ * It is also what makes the realtime half agree with the on-demand half. They
+ * were answering the same question with two different mechanisms and only one
+ * of them could be right.
+ *
+ * THE DISCIPLINE IS koffridge.h's, AND IT IS THERE BECAUSE IT WAS GOT WRONG:
+ * skip only on a CLEAN hit, and store clean only after a scan that found
+ * nothing. The path list is kept in front of it as a cheap first filter - it
+ * costs no file handle, and a burst naming one path is the common case - but
+ * nothing is skipped on its say-so alone any more.
+ */
+static int scan_needed(struct koffridge *fr, const char *path,
+		       struct koffridge_fileid *id)
+{
+	if (!fr || !koffridge_identify(path, id)) {
+		/*
+		 * No identity, so no caching - koffridge.h says a key that
+		 * could not be established must not be invented. Scanned every
+		 * time, which is the safe direction.
+		 */
+		return 1;
+	}
+	return !koffridge_skip(fr, id, sizeof *id);
+}
+
+/*
  * A path from an event is not a path a scanner can open.
  *
  * ETW delivers device paths - \Device\HarddiskVolume3\Windows\... - and a
@@ -387,7 +422,8 @@ int main(int argc, char **argv)
 	kof_scanner *sc  = NULL;
 	struct kof_evt e;
 	struct kof_evt_tally tally;
-	uint64_t n = 0, scanned = 0, skipped = 0;
+	uint64_t n = 0, scanned = 0, skipped = 0, cached = 0;
+	struct koffridge *fridge = NULL;
 	uint64_t t0 = 0;
 	int      have_t0 = 0;
 	struct hit_ctx hits;
@@ -639,6 +675,34 @@ int main(int argc, char **argv)
 				kof_engine_close(eng);
 				eng = NULL;
 				do_scan = 0;
+			} else {
+				struct kof_db_version dv;
+
+				/*
+				 * KEYED ON THE DATABASE, which is not optional:
+				 * every verdict in the table is only true of
+				 * one signature build, so a cache that outlived
+				 * one would serve answers the current rules no
+				 * longer give.
+				 *
+				 * IN MEMORY ONLY, AND THAT IS A DECISION. The
+				 * on-demand scanner writes its cache to a
+				 * per-user file; this one runs as a service, so
+				 * WHERE that file lives is a security question
+				 * - a table something else can write is a table
+				 * that can mark malware clean - and it is not
+				 * one to answer as a side effect of a
+				 * performance change. So the saving costs are
+				 * paid within a run and nothing is written.
+				 *
+				 * A failure is not fatal: the cache is a
+				 * reduction, never a correctness property, and
+				 * scan_needed answers "scan it" when there is
+				 * no table.
+				 */
+				memset(&dv, 0, sizeof dv);
+				(void)kof_engine_db_version(eng, &dv);
+				fridge = koffridge_open(4096u, dv.build);
 			}
 		}
 	}
@@ -752,9 +816,31 @@ int main(int argc, char **argv)
 		if (already_scanned(obj))
 			continue;
 
-		hits.e = &e;
-		(void)kof_scan_path(sc, obj, NULL, on_object, &hits);
-		scanned++;
+		{
+			struct koffridge_fileid id;
+			uint64_t before;
+
+			if (!scan_needed(fridge, obj, &id)) {
+				cached++;
+				continue;
+			}
+
+			hits.e = &e;
+			before = hits.n;
+			(void)kof_scan_path(sc, obj, NULL, on_object, &hits);
+			scanned++;
+
+			/*
+			 * ONLY A CLEAN SCAN IS REMEMBERED AS CLEAN. The engine
+			 * reports through the callback and returns nothing, so
+			 * the hit counter is what makes this knowable - see the
+			 * note on koffridge_get for what storing the wrong
+			 * answer here costs.
+			 */
+			if (fridge && hits.n == before)
+				(void)koffridge_put(fridge, &id, sizeof id,
+						    NULL);
+		}
 	}
 
 	/* A run that ended mid-chain still has bytes worth looking at, and they
@@ -764,15 +850,23 @@ int main(int argc, char **argv)
 
 	if (do_scan) {
 		kof_scanner_free(sc);
+		koffridge_close(fridge);
 		kof_engine_close(eng);
 	}
 
 	kof_evt_print_tally(&tally,
 			    have_t0 ? kof_evt_secs_since(t0, e.stamp) : 0.0,
 			    "the log", stderr);
+	/*
+	 * `cached` IS REPORTED, not merely acted on. It is the number of files
+	 * this run did NOT open because the verdict cache had already answered
+	 * for that exact file - and a reader who cannot see it cannot tell a
+	 * quiet interval from a cache that is answering for everything.
+	 */
 	fprintf(stderr, "   read %llu event(s), scanned %llu file(s), "
-		"skipped %llu unopenable path(s), matched %llu\n",
+		"cached %llu, skipped %llu unopenable path(s), matched %llu\n",
 		(unsigned long long)n, (unsigned long long)scanned,
+		(unsigned long long)cached,
 		(unsigned long long)skipped, (unsigned long long)hits.n);
 
 	if (rec) {

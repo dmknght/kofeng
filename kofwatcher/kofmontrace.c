@@ -576,6 +576,19 @@ static int tracer_open(struct tracer *t, unsigned providers, uint32_t ring)
 		opt.ring_capacity = ring;
 		opt.trace_self = 1;   /* our own CreateProcess raises the most
 				       * important event in the run */
+		/*
+		 * A DISCOVERY RUN SEES THE STREAM AS IT IS, so the duplicate
+		 * collapser is off here and nowhere else.
+		 *
+		 * This tool exists to answer "what does the machine actually
+		 * emit and what does it cost" - the same reason it defaults to
+		 * every provider. A reduction would answer a different
+		 * question, and it would hide the very measurement that
+		 * justifies the reduction: eight identical CreateKey records
+		 * from one nslookup is a fact somebody had to be able to see
+		 * before anyone could argue for collapsing it.
+		 */
+		opt.dedup_off = 1;
 		t->mon = kofw_mon_open(&opt, &err);
 		if (!t->mon) {
 			fprintf(stderr, "kofmontrace: %s\n",

@@ -205,7 +205,49 @@ enum kofw_field {
 	KOFW_FLD_ADDR,
 	KOFW_FLD_ADDR_SIZE,
 	KOFW_FLD_FILE_KEY,
-	KOFW_FLD_FILE_OFFSET
+	KOFW_FLD_FILE_OFFSET,
+
+	/*
+	 * A SECOND NAME THAT EXTENDS THE FIRST, which is what a registry event
+	 * carries and no other provider here does.
+	 *
+	 * Kernel-Registry names its target in two properties that CO-OCCUR:
+	 * KeyName and ValueName on a set, BaseName and RelativeName on a
+	 * create. Mapping both to KOFW_FLD_OBJECT - which is what happened
+	 * until this existed - means the walk's last match wins and the record
+	 * keeps only the second: the value name "Updater" with no trace of the
+	 * Run key it was written under. That is the exact mistake field_of's
+	 * own AMSI note forbids, made in the one place where the two halves are
+	 * a path and the thing it points at.
+	 *
+	 * So the first lands in `object` and the second is APPENDED to it with
+	 * a separator, giving one path of the shape every Windows tool shows
+	 * and every rule author expects. See path_more.
+	 */
+	KOFW_FLD_PATH_MORE,
+
+	/*
+	 * THE SAME, FOR A VALUE NAME, and the difference is what an EMPTY one
+	 * means.
+	 *
+	 * An empty RelativeName is a create that named nothing beyond its base,
+	 * so there is nothing to append. An empty ValueName is the key's
+	 * DEFAULT value, which is a real target an attacker writes to - so it
+	 * is appended as "(Default)" rather than dropped, because a path that
+	 * silently ends at the key would say the key was touched and hide which
+	 * value was set.
+	 */
+	KOFW_FLD_REG_VALUE,
+
+	/* The bytes that were written - Kernel-Registry's CapturedData. The
+	 * only payload on this provider, and the whole of what makes an autorun
+	 * event say WHAT it persists. */
+	KOFW_FLD_REG_DATA,
+
+	KOFW_FLD_REG_TYPE,   /* REG_SZ, REG_BINARY, ... */
+	KOFW_FLD_REG_SIZE,   /* the value's full size, which CapturedData is
+			      * a bounded prefix of */
+	KOFW_FLD_REG_DISP    /* created new, or merely opened - see reg_disp */
 };
 
 /*

@@ -81,7 +81,26 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#include "../../libkofeng/kofeng.h"
+/*
+ * DECLARED, NOT INCLUDED, and the difference is a dependency this header used
+ * to force on everybody who reads it.
+ *
+ * The only engine type here is `const struct kof_result *` on koffridge_put -
+ * a POINTER, so the compiler needs to know the name and nothing else. Every
+ * other field of a verdict is a plain uint32_t or a char array; the KOF_LEVEL_*
+ * and kof_broken mentioned in the comments below are the VALUES stored in
+ * those, not the types.
+ *
+ * WHY IT MATTERS HERE. The Windows collector compiles this file, because the
+ * duplicate table at the bottom of it is on the path of every record. Including
+ * kofeng.h put the whole engine header into libkofgrille - and kofgrille.h's
+ * first paragraph says it never does that, because the collector collects and
+ * does not judge. The rule survived for as long as the two halves were separate
+ * files and was broken by merging them; this is what puts it back.
+ *
+ * koffridge.c includes kofeng.h itself, because it DEREFERENCES the result.
+ */
+struct kof_result;
 
 /*
  * The longest identity a key may be.
@@ -231,8 +250,60 @@ uint64_t koffridge_db_stamp(const struct koffridge *);
  * optimisation worth reaching for: the copy is 240 bytes and the caller almost
  * always wants it.
  */
+/*
+ * A HIT IS NOT A REASON TO SKIP. READ THE VERDICT.
+ *
+ * Written here because the one caller this cache had did not, and the shape of
+ * what followed is worth stating in full - it is the worst failure a cache can
+ * have and none of it looked like a failure.
+ *
+ * That caller fetched the verdict, never examined it, and treated ANY hit as
+ * "already answered, move on". Beside it, the store below was called with NULL
+ * - the clean answer - after every scan, including the scans that had just
+ * found something. On its own, inside one run, neither was visible: the finding
+ * had already been printed by the time the clean answer was written.
+ *
+ * Then the cache became persistent and automatic. A file found infected was
+ * written down as clean, the table was saved at the end of that run, and every
+ * later run skipped it without scanning and without reporting. Measured on a
+ * real machine: 613 infected and 23 suspected in the first run, 1 and 0 in the
+ * second. The detection silenced itself, permanently, with no message.
+ *
+ * So, for any caller:
+ *
+ *   SKIP ONLY ON A CLEAN HIT - findings == 0 AND broken == 0. A non-clean
+ *   verdict means rescan, which is what the note on `findings` above says a
+ *   caller wanting the whole list does, and it is cheap because infected files
+ *   are rare.
+ *
+ *   STORE CLEAN ONLY WHEN THE SCAN WAS CLEAN. The engine reports findings
+ *   through a callback and hands the caller nothing back, so a caller that
+ *   wants to know must count what the callback saw. Storing nothing for a file
+ *   that had a finding costs one rescan; storing clean for it costs the
+ *   detection.
+ */
 int koffridge_get(struct koffridge *, const void *id, uint32_t id_len,
 		  struct koffridge_verdict *out);
+
+/*
+ * IS THIS ALREADY ANSWERED, CLEANLY - the question a caller skipping work
+ * actually has, asked so that it cannot be got wrong.
+ *
+ * 1 only when there is a hit AND that hit is clean: no findings and not broken.
+ * Everything else is 0, which means scan it.
+ *
+ * WHY THIS EXISTS RATHER THAN THE TWO-LINE TEST AT EACH CALL SITE. The bug
+ * above was not a misunderstanding of the rule - it was a `get` whose result
+ * nobody looked at, which is a shape the compiler is happy with and a reviewer
+ * reads straight past. There is no way to call this and forget the check,
+ * because the check is the return value. The same reasoning kofchan.h gives for
+ * splitting its cursor out of its data section: a rule that cannot be expressed
+ * wrongly beats a rule that is merely written down.
+ *
+ * A caller that wants the verdict itself - to report it, to log it - still uses
+ * koffridge_get and is then responsible for reading what it asked for.
+ */
+int koffridge_skip(struct koffridge *, const void *id, uint32_t id_len);
 
 /*
  * Remember what a scan came to. 1 if it was stored, 0 if it was not - the
@@ -386,5 +457,77 @@ void koffridge_stats(struct koffridge *, struct koffridge_stat *);
  * bytes written excluding the NUL, and never writes past `cap`. Here rather
  * than in each tool for the reason kofw_region_describe is where it is. */
 size_t koffridge_describe(struct koffridge *, char *buf, size_t cap);
+
+
+/* ------------------------------------------- the same fact, seen again
+ *
+ * A SECOND TABLE IN THIS MODULE, NOT A MODULE OF ITS OWN. It asks the same
+ * shape of question over the same mechanism; what differs is what an entry
+ * means. See the block above these functions in the .c for the two
+ * differences that matter - no database stamp, and nothing on disk.
+ */
+struct koffridge_seen;
+
+/*
+ * ONE CONSUMER THREAD, and that is a statement about the caller rather than a
+ * property that will hold forever.
+ *
+ * This sits on the path of EVERY record, which on a busy machine is six figures
+ * a second, and koffridge's own header explains what a single mutex does to a
+ * path like that. The collector drains and classifies on one thread, so there
+ * is nothing to protect.
+ *
+ * koffridge SAID THE SAME THING AND WAS LATER WRONG - "the caller it said had
+ * not appeared has now appeared". So the way out is written down rather than
+ * rediscovered: shard it exactly as koffridge is sharded, sixteen independent
+ * tables chosen by the high bits of the hash, each with its own lock. The entry
+ * layout here is already per-shard-able; nothing about this interface changes.
+ */
+
+/*
+ * `capacity` entries, rounded up to a power of two; 0 takes a default.
+ *
+ * `window` is in the caller's own stamp units - FILETIME ticks for the Windows
+ * collector - and 0 takes a default. An identity last seen longer ago than this
+ * is fresh again. See the header note on why suppressing forever is wrong.
+ */
+struct koffridge_seen *koffridge_seen_open(uint32_t capacity, uint64_t window);
+void koffridge_seen_close(struct koffridge_seen *);
+
+/*
+ * RECORD THAT THIS IDENTITY WAS SEEN, AND SAY WHETHER IT IS NEW.
+ *
+ * 0 means fresh - never seen, or not since the window - and the caller should
+ * let the record through. Anything else is how many times it has been seen
+ * inside the window already, so a caller can both suppress and say how much it
+ * suppressed.
+ *
+ * `id`/`id_len` is whatever the caller decided makes two events the same. It is
+ * HASHED AND NOT STORED, because an event identity is mostly a path and storing
+ * one per entry would make the table an order of magnitude bigger than the
+ * thing it is saving. Two independent hashes are kept instead, so a false
+ * "already seen" needs a collision in both - which for a table of this size is
+ * far below the rate at which the ring drops records anyway. The cost is stated
+ * rather than hidden: a collision suppresses one real event, and the counter
+ * says a suppression happened but not that it was wrong.
+ */
+uint32_t koffridge_seen_mark(struct koffridge_seen *, const void *id, uint32_t id_len,
+		      uint64_t stamp);
+
+struct koffridge_seen_stat {
+	uint64_t asked;    /* identities offered */
+	uint64_t fresh;    /* let through - new, or past the window */
+	uint64_t repeat;   /* suppressed, which is the number this exists for */
+	uint64_t evicted;  /* forgotten to make room; each costs one repeat
+			    * being reported as fresh, never the reverse */
+	uint32_t used;
+	uint32_t cap;
+};
+
+void koffridge_seen_stats(const struct koffridge_seen *, struct koffridge_seen_stat *);
+
+/* Forget everything; the table keeps its capacity. */
+void koffridge_seen_clear(struct koffridge_seen *);
+void koffridge_seen_clear(struct koffridge_seen *);
 
 #endif /* KOFFRIDGE_H */

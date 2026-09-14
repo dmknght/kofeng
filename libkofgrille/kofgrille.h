@@ -49,10 +49,21 @@
  *
  * WHAT THIS DELIBERATELY DOES NOT DO YET
  *
- * No autologger, so activity before it starts is not seen. No file, registry or
- * network provider. No detection of any kind. The point of the first version is
- * to find out what the stream actually looks like and what it costs, and every
- * one of those additions changes both.
+ * No autologger, so activity before the session starts is not seen - which is
+ * the gap that matters most, because a payload that runs at boot runs before
+ * this does.
+ *
+ * WHAT THIS PARAGRAPH USED TO SAY, and did for long after it stopped being
+ * true: "No file, registry or network provider. No detection of any kind."
+ * There are six providers now - process, file, registry, network, DNS and
+ * AMSI - and kofwatchman scans what they carry. A header that undersells the
+ * library is not harmless: it is the first thing anybody reads, and somebody
+ * deciding whether to add a registry rule would have concluded there was
+ * nothing to write one against.
+ *
+ * What remains absent is DETECTION CONTENT rather than collection. The
+ * providers deliver; the database has almost nothing written against what they
+ * deliver, and that is the honest statement of where this stands.
  */
 
 #ifndef KOFGRILLE_H
@@ -284,7 +295,7 @@ enum {
  * is not a crash - it is every string in every record starting two bytes off,
  * which reads as data.
  */
-#define KOFW_REC_HEAD 144u
+#define KOFW_REC_HEAD 156u
 
 struct kofw_evt {
 	/*
@@ -516,6 +527,65 @@ struct kofw_evt {
 	 */
 	uint64_t addr_size;
 
+	/*
+	 * WHAT WAS WRITTEN INTO A REGISTRY VALUE, and why it is a second
+	 * variable-length slot rather than the one `content_len` describes.
+	 *
+	 * A registry set names TWO things and neither substitutes for the
+	 * other: WHERE it wrote - a path, which belongs in `object` like every
+	 * other path - and WHAT it wrote, which for the autorun case IS the
+	 * detection. `...\CurrentVersion\Run\Updater` says persistence was
+	 * established; only the data says what it persists, and a rule that
+	 * cannot read it reports that something happened and never what.
+	 *
+	 * An AMSI submission needed one slot because its metadata is
+	 * deliberately not carried. This is the first event where a path and a
+	 * payload are both evidence, so it is the first that needs both -
+	 * and borrowing `addr` or `net_size` would repeat the mistake
+	 * file_offset above already records.
+	 *
+	 * APPENDED HERE, AT THE END, AND THAT IS NOT COSMETIC. Fields added in
+	 * the middle move every field below them, and a recorded trace read
+	 * back by this build would then decode at the wrong offsets - the
+	 * failure KOFW_REC_HEAD's note describes, which does not look like an
+	 * error because a path read from the wrong place still looks like a
+	 * path. Appended, every older field keeps the offset it had.
+	 *
+	 * RAW BYTES, NOT A STRING, for the reason content_len gives: a REG_SZ
+	 * is UTF-16 and has a NUL at index 1, a REG_BINARY is arbitrary, and
+	 * either read as a string comes back as one character. `data_len` is
+	 * the length; a NUL is written after it anyway so that anything walking
+	 * the arena as strings cannot run off the end.
+	 */
+	uint16_t off_data;     /* into text[], or KOF_TEXT_NONE */
+	uint16_t data_len;     /* bytes at off_data; the NUL is not counted */
+
+	/* REG_SZ, REG_EXPAND_SZ, REG_BINARY, REG_DWORD... the small enum
+	 * winnt.h defines, so a rule can ask "a string was written here"
+	 * without parsing the bytes to find out. */
+	uint8_t  reg_type;
+
+	/*
+	 * DID THE KEY ACTUALLY GET CREATED - Kernel-Registry's Disposition,
+	 * and it is what makes KOF_EVT_REG_CREATE mean anything at all.
+	 *
+	 * RegCreateKeyEx opens an existing key as readily as it makes a new
+	 * one and the kernel raises CreateKey either way, so without this every
+	 * key a program merely TOUCHED arrived as a registry change. 0 is "the
+	 * event did not say", 1 REG_CREATED_NEW_KEY, 2 REG_OPENED_EXISTING_KEY.
+	 */
+	uint8_t  reg_disp;
+	uint16_t reg_reserved;
+
+	/*
+	 * THE VALUE'S FULL SIZE AS THE KERNEL REPORTED IT, which is not
+	 * data_len: one is what was written, the other is what reached this
+	 * record. The provider captures a bounded prefix and this record bounds
+	 * it again, so a consumer that needs to know it saw all of it compares
+	 * the two - and KOFW_EF_TRUNCATED is set when they differ.
+	 */
+	uint32_t reg_data_size;
+
 	char     text[KOFW_REC_SIZE - KOFW_REC_HEAD];
 };
 
@@ -741,6 +811,34 @@ struct kofw_mon_option {
 	uint32_t ring_capacity;
 
 	/*
+	 * COLLAPSING THE SAME FACT WHEN IT IS RESTATED - on by default, and the
+	 * polarity is the point.
+	 *
+	 * ETW repeats itself constantly: ONE nslookup produces eight identical
+	 * CreateKey records for a key it only reads, and registry is the
+	 * loudest provider here by a wide margin. A collector that had to be
+	 * TOLD to collapse those would ship spamming, and every caller would
+	 * have to know to ask.
+	 *
+	 * Set `dedup_off` for a DISCOVERY run, where the question is what the
+	 * stream really looks like and a reduction is the wrong answer -
+	 * kofmontrace is that caller, for the same reason it defaults to loud.
+	 *
+	 * WHICH VERBS ARE AFFECTED IS NOT A CHOICE HERE, deliberately. Some
+	 * repeats are the evidence - a beacon is the same connection at a
+	 * regular interval, and byte counts are sums of repeats - so the list
+	 * lives in one place next to its reasoning and is not something a
+	 * caller can widen by accident. See may_collapse in wfilter.c.
+	 *
+	 * `dedup_max` is how many distinct identities are remembered and
+	 * `dedup_window` how long a repeat stays suppressed, in the same units
+	 * as a record's stamp. 0 takes the defaults in koffridge_seen.c.
+	 */
+	uint32_t dedup_off;
+	uint32_t dedup_max;
+	uint64_t dedup_window;
+
+	/*
 	 * The session's name, which OUTLIVES THIS PROCESS.
 	 *
 	 * An ETW session is a kernel object owned by nobody: if this process dies
@@ -887,6 +985,54 @@ struct kofw_health {
 	uint64_t filtered_loc;    /* the object's location was being dropped */
 	uint64_t filtered_scope;  /* the subject was outside the tracked tree */
 	uint64_t filtered_type;   /* the caller did not ask for that type */
+
+	/*
+	 * RECORDS THAT SAID WHAT AN EARLIER ONE ALREADY SAID.
+	 *
+	 * COUNTED AND NOT MERELY DROPPED, which is the rule the ring already
+	 * follows for a full buffer and wdiff follows for a relocation it
+	 * explained away: a report that stops showing something leaves a reader
+	 * unable to tell a quiet machine from a filter that swallowed the
+	 * evidence. A large number here is normal and is the reduction working;
+	 * a number that is a large FRACTION of everything collected is worth
+	 * knowing, because it says the stream is mostly restatement.
+	 */
+	uint64_t filtered_dup;
+
+	/*
+	 * OF THOSE, HOW MANY WERE DROPPED UNDER A COARSE IDENTITY - a record
+	 * about a DIFFERENT object the same process touched, collapsed because
+	 * the object was somewhere no rule cares about. This is the precision
+	 * deliberately traded to keep the table from being filled by service
+	 * churn, and it is counted so the size of the trade is visible rather
+	 * than assumed. See object_matters in wfilter.c.
+	 */
+	uint64_t filtered_coarse;
+
+	/*
+	 * WHEN THE STREAM HAS MORE DISTINCT FACTS THAN THE TABLE HOLDS.
+	 *
+	 * The duplicate table does not GROW - it is one allocation made at open
+	 * and it evicts instead. So the cost of a very diverse stream is not
+	 * memory, it is that the reduction stops working while still being paid
+	 * for: a hash and a probe per record, for a table that no longer
+	 * remembers anything long enough to match.
+	 *
+	 * That degradation is INVISIBLE from the outside - the collector looks
+	 * like it is working and the event count simply stays high - which is
+	 * why the number is here. Measured against a synthetic stream of 200k
+	 * events into a table of 8192:
+	 *
+	 *   2000 distinct   99% suppressed, no evictions
+	 *   8000 distinct   94% suppressed
+	 *  50000 distinct   53% suppressed, and the evictions say so
+	 *
+	 * A large `dedup_evicted` beside a small `filtered_dup` means the table
+	 * is too small for this machine - kofw_mon_option.dedup_max is the
+	 * answer, and the memory is 48 bytes an entry.
+	 */
+	uint64_t dedup_evicted;
+	uint32_t dedup_used, dedup_cap;
 
 	/* Processes a tracked tree could not admit because its table was full.
 	 * Non-zero means the scoped view is INCOMPLETE. */

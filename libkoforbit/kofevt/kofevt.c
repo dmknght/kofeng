@@ -406,9 +406,24 @@ enum kof_evt_kind kof_evt_kind_of(uint16_t verb)
 		return KOF_EK_FILE;
 
 	/*
-	 * Registry, AMSI, continuations and raw events carry no payload of
-	 * their own - what they are about is the object path or the content,
-	 * which lives in the arena where every verb's strings live.
+	 * THE REGISTRY, WHICH USED TO BE IN THE LIST BELOW.
+	 *
+	 * It was there because a registry event carried a path and nothing
+	 * else, and that was the gap rather than the design: the one Windows
+	 * persistence event the collector sees said WHERE something was written
+	 * and never WHAT. With the value's type, its full size and its
+	 * disposition there is a payload to own, and the bytes themselves sit
+	 * at off_data in the arena.
+	 */
+	case KOF_EVT_REG_CREATE:
+	case KOF_EVT_REG_SET_VALUE:
+	case KOF_EVT_REG_DELETE:
+		return KOF_EK_REG;
+
+	/*
+	 * AMSI, continuations and raw events carry no payload of their own -
+	 * what they are about is the object path or the content, which lives
+	 * in the arena where every verb's strings live.
 	 *
 	 * The default lands here too, and must: a verb from a NEWER build is
 	 * one this one cannot name, so its payload is bytes of unknown shape.
@@ -438,6 +453,7 @@ AS(proc, KOF_EK_PROC, proc, struct kof_evt_proc)
 AS(mem,  KOF_EK_MEM,  mem,  struct kof_evt_mem)
 AS(net,  KOF_EK_NET,  net,  struct kof_evt_net)
 AS(file, KOF_EK_FILE, file, struct kof_evt_file)
+AS(reg,  KOF_EK_REG,  reg,  struct kof_evt_reg)
 
 #undef AS
 

@@ -140,6 +140,13 @@ int kof_evt_field_extent(const struct kof_evt *, unsigned i,
 int kof_evt_content(const struct kof_evt *, const char **text, size_t *len);
 
 /*
+ * The bytes a registry write put into a value, or 0 when the event is not one
+ * or carried none. A sibling of kof_evt_content and not the same call - see
+ * the implementation for why the two offsets must not be folded together.
+ */
+int kof_evt_reg_data(const struct kof_evt *, const char **data, size_t *len);
+
+/*
  * IS THIS BUFFER UTF-16LE - a NUL above every character.
  *
  * Asked because it changes how the bytes should be SHOWN, and in two places
