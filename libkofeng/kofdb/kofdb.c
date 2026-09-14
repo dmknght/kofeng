@@ -1119,6 +1119,42 @@ struct kof_engine *kof_db_load(const char *path)
 			e->unp = sm;
 	}
 
+	/*
+	 * The per-format index, once the module array is final.
+	 *
+	 * A counting sort: count the bits, run the counts into offsets, place.
+	 * Failure is not fatal - mod_by_target NULL means the scan walks the
+	 * flat array as it always did, which is slower and identical.
+	 */
+	{
+		uint32_t b, i, total = 0, *fill;
+
+		for (b = 0; b <= KOF_TARGET_BITS; b++)
+			e->mod_at[b] = 0;
+		for (i = 0; i < e->n_mods; i++)
+			for (b = 0; b < KOF_TARGET_BITS; b++)
+				if (e->mods[i].target_mask & (1u << b))
+					e->mod_at[b + 1u]++;
+		for (b = 0; b < KOF_TARGET_BITS; b++)
+			e->mod_at[b + 1u] += e->mod_at[b];
+		total = e->mod_at[KOF_TARGET_BITS];
+
+		fill = calloc(KOF_TARGET_BITS, sizeof *fill);
+		e->mod_by_target = total ? calloc(total, sizeof *e->mod_by_target)
+					 : NULL;
+		if (fill && (e->mod_by_target || !total)) {
+			for (i = 0; i < e->n_mods; i++)
+				for (b = 0; b < KOF_TARGET_BITS; b++)
+					if (e->mods[i].target_mask & (1u << b))
+						e->mod_by_target[e->mod_at[b] +
+								 fill[b]++] = i;
+		} else {
+			free(e->mod_by_target);
+			e->mod_by_target = NULL;
+		}
+		free(fill);
+	}
+
 	/* Written once, then executable. */
 	if (kof_mprotect_rx(e->code, e->code_cap) != 0) {
 		fprintf(stderr, "kofdb: cannot make the code executable\n");
@@ -1195,6 +1231,7 @@ void kof_db_free(struct kof_engine *e)
 	if (!e)
 		return;
 	free(e->mods);
+	free(e->mod_by_target);
 	free(e->unp);
 	free(e->heur);
 	kof_multimatch_free(e->multi);

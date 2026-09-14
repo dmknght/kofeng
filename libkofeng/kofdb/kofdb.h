@@ -247,6 +247,33 @@ struct kof_engine {
 	struct kof_module   *mods;
 	uint32_t             n_mods;
 
+	/*
+	 * THE DETECTORS GROUPED BY THE FORMAT THEY TARGET.
+	 *
+	 * The scan used to walk every module for every object and let
+	 * kof_module_precond throw most of them away. That is a few integer
+	 * compares each, which sounds free and is not: the cost is
+	 * objects x modules, and the module table stops fitting in cache long
+	 * before the record count gets interesting. Measured on a synthetic base
+	 * of four million records packed sixty four to a module - 62 500 modules
+	 * - a corpus of 2999 small text files spent 187 million evaluations and
+	 * 4.55 s, which is 11 MB/s, while the same wall clock scanned 2896 MB of
+	 * large samples. The cost is per FILE, not per byte.
+	 *
+	 * A module cannot match an object whose format bit is absent from its
+	 * target_mask - that is the first line of kof_module_precond - so the
+	 * grouping is exact rather than a filter that has to be re-checked.
+	 * `mod_at[b] .. mod_at[b + 1]` is the run of module indices for target
+	 * bit b, in the same order the flat walk had them, so what runs and in
+	 * what order does not change.
+	 *
+	 * A module targeting several formats appears in several runs; the total
+	 * is the sum of the popcounts, which for a real base is barely more than
+	 * the module count because a rule names one format.
+	 */
+	uint32_t            *mod_by_target;
+	uint32_t             mod_at[KOF_TARGET_BITS + 1u];
+
 	struct kof_module   *unp;
 	uint32_t             n_unp;
 

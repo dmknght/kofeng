@@ -1494,7 +1494,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 			const char *inherit_predict, uint8_t as_fmt)
 {
 	struct kof_obj_ctx ctx;
-	uint32_t present, i, want;
+	uint32_t present, want;
 	const char *predict = NULL;
 
 	out->from_packer = (uint8_t)(from_packer != 0);
@@ -1559,8 +1559,27 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * modules' own calls are about to read. */
 	multi_prepass(sc, &ctx, present);
 
-	for (i = 0; i < sc->eng->n_mods; i++) {
-		const struct kof_module *m = &sc->eng->mods[i];
+	/*
+	 * ONLY THE MODULES THAT COULD TARGET THIS FORMAT - see kof_engine.mod_at.
+	 * The ones outside the run are excluded for exactly the reason
+	 * kof_module_precond would have excluded them, so they are counted as
+	 * such and the stats keep meaning what they meant.
+	 */
+	{
+		const struct kof_engine *e = sc->eng;
+		uint32_t lo = 0, hi = e->n_mods, k;
+		const uint32_t *ix = NULL;
+
+		if (e->mod_by_target && ctx.format < KOF_TARGET_BITS) {
+			ix = e->mod_by_target;
+			lo = e->mod_at[ctx.format];
+			hi = e->mod_at[ctx.format + 1u];
+			sc->st.considered += e->n_mods - (hi - lo);
+			sc->st.by_target  += e->n_mods - (hi - lo);
+		}
+
+	for (k = lo; k < hi; k++) {
+		const struct kof_module *m = &e->mods[ix ? ix[k] : k];
 
 		if (!prefilter(m, &ctx, present, &sc->st, out))
 			continue;
@@ -1594,6 +1613,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 		 */
 		if (!opt->all_matches)
 			break;
+	}
 	}
 
 	/* Before the next kof_match_begin clears them. */
