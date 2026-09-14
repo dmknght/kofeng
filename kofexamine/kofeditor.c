@@ -181,7 +181,23 @@ const char *const fmt_word[] = {
 	"KOF_FMT_GZIP", "KOF_FMT_DOCOLE", "KOF_FMT_ZIP",
 	"KOF_FMT_DOCZIP", "KOF_FMT_TAR", "KOF_FMT_7Z",
 	"KOF_FMT_RAR", "KOF_FMT_XZ", "KOF_FMT_RTF",
-	"KOF_FMT_PDF"
+	"KOF_FMT_PDF",
+	/*
+	 * THESE TWO WERE MISSING AND THE FAILURE WAS SILENT.
+	 *
+	 * KOF_FMT_COUNT went from 16 to 18 when IMAGE and FONT were added, and
+	 * this list did not - it is the THIRD hand copy of the format names in
+	 * the tree, after kof_format_from_name and kof_format_name, and it is
+	 * the one nothing checks. The generator loops to FMT_WORD_N, so a draft
+	 * that targeted an image or a font simply had those bits dropped out of
+	 * the KOF_TARGET_FORMAT line it wrote: a rule narrower than the panel
+	 * said, with nothing failing and nothing printed.
+	 *
+	 * The durable fix is one X-macro list in kofsig.h that all three expand,
+	 * the way KOF_SCRIPT_TYPE_LIST and KOF_MALTYPE_LIST already work. Until
+	 * that lands this at least says out loud that it is a copy.
+	 */
+	"KOF_FMT_IMAGE", "KOF_FMT_FONT"
 };
 
 

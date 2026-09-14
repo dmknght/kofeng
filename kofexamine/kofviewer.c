@@ -2110,6 +2110,30 @@ struct view {
 	 */
 	int         field_all;
 	int         per;            /* bytes a hex row shows, for click mapping */
+
+	/*
+	 * THE TEXT PANE, which is this same pane rendered for something meant
+	 * to be read - see KV_CAP_TEXT. Same region, same rgn_at, same
+	 * selection, same menu; what changes is the layout and what the status
+	 * line counts in.
+	 *
+	 * rgn_at STAYS THE BYTE OFFSET OF THE TOP OF THE PANE, exactly as the
+	 * hex view leaves it. That is what lets goto, find, a marker jump and
+	 * every scroll key keep working unchanged: they move a byte offset, and
+	 * this pane rounds it down to the start of its line to draw.
+	 */
+	uint32_t    txt_col;        /* horizontal origin, in columns */
+	/*
+	 * THE LINE NUMBER OF THE TOP ROW, and an anchor to compute it from.
+	 *
+	 * Counting newlines from the start of the region every frame is one
+	 * pass over the whole region per keystroke - three milliseconds on a
+	 * ten megabyte script, on every arrow key. So the last answer is kept
+	 * and the next one is counted FROM it, which is a few bytes when
+	 * scrolling and a full rescan only when something jumps.
+	 */
+	uint64_t    txt_anchor;     /* a byte offset whose line number is known */
+	uint64_t    txt_anchor_ln;  /* that line number, 0 based */
 };
 
 static struct object *cur_obj(struct view *v)
@@ -5492,6 +5516,10 @@ static void view_select(struct view *v)
 
 	/* A remembered place is re-clamped rather than trusted: the pane may be
 	 * a different height than it was when the row was left. */
+	/* A new row is a new place, so the sideways origin goes back to the
+	 * left margin - carrying it over shows the middle of lines in a region
+	 * the reader has not looked at yet. */
+	v->txt_col = 0;
 	v->rgn_at = v->node[v->sel_node].at;
 	if (v->rgn_at > hex_max(v))
 		v->rgn_at = hex_max(v);
@@ -6091,6 +6119,214 @@ static void sym_shn_str(const uint8_t *r, char *out, size_t n)
 		snprintf(out, n, "%s", "ABS");
 	else
 		snprintf(out, n, "%u", x);
+}
+
+/* ---- the text pane --------------------------------------------------------
+ *
+ * The bytes pane, drawn for something a person reads. Everything structural is
+ * the hex pane's and is reached through the same calls - view_map for the file
+ * offset of a region offset, in_sel/hit_kind/decl_kind for what a byte is
+ * wearing, rgn_at for where the top of the pane is. What differs is two things
+ * and no more: a row is a LINE rather than a fixed run of bytes, and the number
+ * in the gutter counts lines rather than bytes.
+ */
+
+/* The byte the line containing `at` starts on. */
+static uint64_t txt_line_start(struct view *v, const uint8_t *base,
+			       uint64_t base_n, uint64_t at)
+{
+	while (at > 0) {
+		uint64_t fo = view_map(v, at - 1u, 0);
+
+		if (fo < base_n && base[fo] == '\n')
+			break;
+		at--;
+	}
+	return at;
+}
+
+/* The byte after the line containing `at` ends, newline included. */
+static uint64_t txt_line_end(struct view *v, const uint8_t *base,
+			     uint64_t base_n, uint64_t at)
+{
+	while (at < v->rgn_len) {
+		uint64_t fo = view_map(v, at, 0);
+
+		at++;
+		if (fo < base_n && base[fo] == '\n')
+			break;
+	}
+	return at;
+}
+
+/*
+ * The 0 based line number of `at`, counted from the nearest thing already
+ * known - see txt_anchor. The anchor moves to the answer, so scrolling costs
+ * the distance scrolled and nothing else.
+ */
+static uint64_t txt_line_of(struct view *v, const uint8_t *base,
+			    uint64_t base_n, uint64_t at)
+{
+	uint64_t i, n;
+
+	if (v->txt_anchor > v->rgn_len)
+		v->txt_anchor = v->txt_anchor_ln = 0;
+	if (at >= v->txt_anchor) {
+		n = v->txt_anchor_ln;
+		for (i = v->txt_anchor; i < at; i++) {
+			uint64_t fo = view_map(v, i, 0);
+
+			if (fo < base_n && base[fo] == '\n')
+				n++;
+		}
+	} else {
+		n = v->txt_anchor_ln;
+		for (i = at; i < v->txt_anchor; i++) {
+			uint64_t fo = view_map(v, i, 0);
+
+			if (fo < base_n && base[fo] == '\n')
+				n--;
+		}
+	}
+	v->txt_anchor = at;
+	v->txt_anchor_ln = n;
+	return n;
+}
+
+/* Where the text starts, past the line-number gutter. */
+#define TXT_GUTTER 8
+static int txt_x0(void) { return TREE_W + 3 + TXT_GUTTER + 2; }
+
+/*
+ * ONE BYTE, ONE COLUMN, AND NO INTERPRETATION - the same rule the hex pane's
+ * ascii gutter states for itself.
+ *
+ * A tab is drawn as a space rather than expanded, because expanding it makes a
+ * column stop being a byte and every click, every selection and every offset
+ * this pane reports would need a second mapping to undo. What the reader loses
+ * is the alignment of indented code; what they keep is that the column the
+ * status line names is the byte a marker would be taken from.
+ */
+static char txt_glyph(uint8_t c)
+{
+	if (c == '\t')
+		return ' ';
+	return (c >= 32 && c < 127) ? (char)c : '.';
+}
+
+static void draw_text(struct out *o, struct view *v)
+{
+	struct object *ob = cur_obj(v);
+	int top = hex_top(), bot = hex_last();
+	int gut = TREE_W + 3, x0 = txt_x0();
+	int wide = g_cols - x0;
+	uint64_t base_n = ob->buf.n;
+	const uint8_t *base = ob->buf.p;
+	uint64_t at, ln;
+	int row;
+
+	if (!base)
+		base_n = 0;
+	if (wide < 1)
+		wide = 1;
+
+	at = txt_line_start(v, base, base_n, v->rgn_at);
+	ln = txt_line_of(v, base, base_n, at);
+
+	for (row = top; row <= bot; row++) {
+		uint64_t end, k;
+		int c;
+
+		out_at(o, row, gut);
+		if (at >= v->rgn_len) {
+			out_str(o, "\033[K");
+			continue;
+		}
+		out_fmt(o, A_LOC "%*llu" A_OFF "  ", TXT_GUTTER,
+			(unsigned long long)(ln + 1u));
+
+		end = txt_line_end(v, base, base_n, at);
+		/*
+		 * SCROLLED SIDEWAYS, and the skip is over BYTES because a
+		 * column is a byte here - see txt_glyph. A line shorter than
+		 * the origin draws nothing, which is what a reader scrolled
+		 * past the end of it should see.
+		 */
+		k = at + (uint64_t)v->txt_col;
+		for (c = 0; c < wide && k < end; c++, k++) {
+			uint64_t fo = view_map(v, k, 0);
+			uint8_t bv = fo < base_n ? base[fo] : 0;
+			int h;
+			const char *ec;
+
+			if (bv == '\n' || bv == '\r')
+				break;
+			h = hit_kind(v, fo);
+			ec = evt_byte_colour(v, k);
+			/* The same ladder the hex pane paints a byte with, in
+			 * the same order: what the reader picked beats what the
+			 * engine found beats what the draft declared. */
+			out_str(o, in_sel(v, k) ? A_SELB :
+				h ? (h == 1 ? A_HIT1 : A_HIT2)
+				  : ec ? ec
+				  : decl_kind(v, fo) ? A_HIT3
+				  : byte_colour(bv));
+			out_fmt(o, "%c", txt_glyph(bv));
+			out_str(o, A_OFF);
+		}
+		out_str(o, "\033[K");
+		at = end;
+		ln++;
+	}
+}
+
+/* Which byte a click landed on, and where it is in the line. Mirrors
+ * byte_under, which answers the same question for the hex layout. */
+static int text_under(struct view *v, int row, int col, uint64_t *out,
+		      uint64_t *out_line, uint32_t *out_col)
+{
+	struct object *ob = cur_obj(v);
+	uint64_t base_n = ob ? ob->buf.n : 0;
+	const uint8_t *base = ob ? ob->buf.p : NULL;
+	uint64_t at, end, ln;
+	int r, x0 = txt_x0();
+
+	if (!base)
+		base_n = 0;
+	if (row < hex_top() || row > hex_last() || col < x0)
+		return 0;
+
+	at = txt_line_start(v, base, base_n, v->rgn_at);
+	ln = txt_line_of(v, base, base_n, at);
+	for (r = hex_top(); r < row; r++) {
+		if (at >= v->rgn_len)
+			return 0;
+		at = txt_line_end(v, base, base_n, at);
+		ln++;
+	}
+	if (at >= v->rgn_len)
+		return 0;
+	end = txt_line_end(v, base, base_n, at);
+	at += (uint64_t)v->txt_col + (uint64_t)(col - x0);
+	if (at >= end || at >= v->rgn_len)
+		return 0;
+	if (out)
+		*out = at;
+	if (out_line)
+		*out_line = ln + 1u;
+	if (out_col)
+		*out_col = (uint32_t)(v->txt_col + (uint32_t)(col - x0) + 1u);
+	return 1;
+}
+
+/* Non-zero when the pane in hand is showing text rather than a hex dump. */
+static int text_pane(struct view *v)
+{
+	struct object *ob = cur_obj(v);
+
+	if (!ob || sym_view(v) || evt_live(v))
+		return 0;
+	return ob->fmt && kv_cap(ob->ctx.format, KV_CAP_TEXT);
 }
 
 static void draw_hex(struct out *o, struct view *v)
@@ -11195,7 +11431,35 @@ static void draw_marker_line(struct out *o, struct view *v)
 				 (unsigned long long)(hi - lo + 1u),
 				 (unsigned long long)view_map(v, lo, 0),
 				 (unsigned long long)lo);
-		else if (v->find_n && v->find_i)
+		/*
+		 * A LINE AND A COLUMN, for something a person reads.
+		 *
+		 * The byte offset of a character in a php file is not a fact
+		 * anybody uses: what a reader wants when they point at
+		 * something in a script is where it is in the source, which is
+		 * what every editor and every error message they have ever seen
+		 * says. The byte offset is still what the selection IS - see
+		 * the note on rgn_at - and it is still shown, second, because
+		 * it is what a marker is taken at.
+		 */
+		else if (text_pane(v)) {
+			struct object *tob = cur_obj(v);
+			uint64_t tn = tob ? tob->buf.n : 0;
+			const uint8_t *tb = tob ? tob->buf.p : NULL;
+			uint64_t ls, line;
+
+			if (!tb)
+				tn = 0;
+			ls = txt_line_start(v, tb, tn, lo);
+			line = txt_line_of(v, tb, tn, ls) + 1u;
+			snprintf(right, sizeof right,
+				 "%llu B   line %llu col %llu   "
+				 "(offset 0x%08llx)",
+				 (unsigned long long)(hi - lo + 1u),
+				 (unsigned long long)line,
+				 (unsigned long long)(lo - ls + 1u),
+				 (unsigned long long)view_map(v, lo, 0));
+		} else if (v->find_n && v->find_i)
 			snprintf(right, sizeof right,
 				 "match %u of %u   %llu B   offset 0x%08llx "
 				 "(region: 0x%08llx)",
@@ -13364,7 +13628,12 @@ static void redraw(struct view *v)
 		out_clip_restore(&o, cl);
 		cl = out_clip_set(&o, hex_top(), TREE_W + 1, hex_last(),
 				  g_cols);
-		draw_hex(&o, v);
+		/* One pane, two renderings - see KV_CAP_TEXT. Everything
+		 * around it, this clip included, is the same either way. */
+		if (text_pane(v))
+			draw_text(&o, v);
+		else
+			draw_hex(&o, v);
 		out_clip_restore(&o, cl);
 		/*
 		 * WHERE THE RIGHT BUTTON MEANS SOMETHING, declared by the pane
@@ -13474,6 +13743,18 @@ static int byte_under(struct view *v, int row, int col, uint64_t *out)
 	int asci = hexs + 3 * per + 2;
 	int k;
 	uint64_t at;
+
+	/*
+	 * ANSWERED HERE AND NOT AT EVERY CALL SITE.
+	 *
+	 * "Which byte is under the pointer" is one question, and the pane has
+	 * two layouts. Dispatching inside it means the press, the drag and
+	 * anything added later all get the right answer without each having to
+	 * remember there are two - which is exactly how the draft panel's
+	 * column tests drifted apart.
+	 */
+	if (text_pane(v))
+		return text_under(v, row, col, out, NULL, NULL);
 
 	if (row < hex_top() || row > hex_last())
 		return 0;
@@ -19106,9 +19387,47 @@ static int read_key(void)
 
 static void hex_step(struct view *v, long lines)
 {
-	long per = v->per > 0 ? v->per : 16;
-	long long at = (long long)v->rgn_at + lines * per;
-	uint64_t max = hex_max(v);
+	long per;
+	long long at;
+	uint64_t max;
+
+	/*
+	 * A ROW IS A LINE WHEN THE PANE IS SHOWING TEXT, and a line is not a
+	 * fixed number of bytes - so the step is walked rather than multiplied.
+	 *
+	 * Here rather than at the five places that scroll, for the reason
+	 * byte_under dispatches internally too: the wheel, the arrows and both
+	 * page keys all come through this one call, and a second layout they
+	 * each had to know about is a layout one of them would forget.
+	 */
+	if (text_pane(v)) {
+		struct object *ob = cur_obj(v);
+		uint64_t n = ob ? ob->buf.n : 0;
+		const uint8_t *b = ob ? ob->buf.p : NULL;
+		uint64_t a;
+
+		if (!b)
+			n = 0;
+		a = txt_line_start(v, b, n, v->rgn_at);
+		while (lines > 0 && a < v->rgn_len) {
+			uint64_t nx = txt_line_end(v, b, n, a);
+
+			if (nx >= v->rgn_len)
+				break;  /* the last line stays on screen */
+			a = nx;
+			lines--;
+		}
+		while (lines < 0 && a > 0) {
+			a = txt_line_start(v, b, n, a - 1u);
+			lines++;
+		}
+		v->rgn_at = a;
+		return;
+	}
+
+	per = v->per > 0 ? v->per : 16;
+	at = (long long)v->rgn_at + lines * per;
+	max = hex_max(v);
 
 	if (at < 0)
 		at = 0;
@@ -24217,6 +24536,23 @@ case 'k': case K_UP:
 	case 'b': case K_PGUP: hex_step(v, -page); break;
 	case 'g': case K_HOME: v->rgn_at = 0; break;
 	case 'G': case K_END:  v->rgn_at = hex_max(v); break;
+	/*
+	 * SIDEWAYS, AND ONLY WHERE THERE IS A SIDEWAYS TO GO.
+	 *
+	 * A hex row is as wide as the pane by construction, so these keys have
+	 * nothing to do there and have always done nothing. A line of source
+	 * does not fit - a minified script is one line of two hundred thousand
+	 * characters - so the text pane is the one thing here that can be
+	 * scrolled across, and it takes the keys that were free.
+	 */
+	case K_LEFT:
+		if (text_pane(v))
+			v->txt_col = v->txt_col >= 8u ? v->txt_col - 8u : 0u;
+		break;
+	case K_RIGHT:
+		if (text_pane(v))
+			v->txt_col += 8u;
+		break;
 	default:
 		break;
 	}

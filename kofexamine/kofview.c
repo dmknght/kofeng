@@ -528,6 +528,19 @@ void kv_menu_draw(struct out *o, const struct kv_menu *m, int top, int left,
 int kv_cap(uint8_t format, int cap)
 {
 	switch (format) {
+	/*
+	 * THE TWO FORMATS THAT ARE MEANT TO BE READ.
+	 *
+	 * A script and a text file have no structure to dump - no header at a
+	 * fixed place, no table to line up in columns - and a person is the
+	 * thing that reads them. They can be nothing else on this table: no
+	 * symbol table, no entry point, nothing to unpack, and shellcode in
+	 * them is a string rather than a section.
+	 */
+	case KOF_FMT_SCRIPT:
+	case KOF_FMT_TEXT:
+		return cap == KV_CAP_TEXT;
+
 	case KOF_FMT_ELF:
 	case KOF_FMT_PE:
 	case KOF_FMT_MACHO:

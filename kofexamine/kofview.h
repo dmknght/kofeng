@@ -360,6 +360,28 @@ enum kv_cap {
 	 * itself. Variables are a fact about a structured image.
 	 */
 	KV_CAP_SHELLCODE,
+	/*
+	 * IT IS MEANT TO BE READ AS TEXT, so the bytes pane shows lines rather
+	 * than a hex dump.
+	 *
+	 * A hex dump is how you look at a structure: two columns of numbers and
+	 * an ascii gutter sixteen characters wide, which is the right shape for
+	 * a header and the wrong one for a program somebody wrote by hand. A
+	 * php shell read sixteen characters at a time is unreadable, and the
+	 * whole point of the pane is that a person reads it.
+	 *
+	 * A CAPABILITY AND NOT A FORMAT TEST, for the same reason as the rest of
+	 * this table: the pane asks what KIND of thing it has rather than
+	 * carrying a list of formats that has to be extended every time one is
+	 * added. Everything else about the pane is unchanged - same region, same
+	 * scrolling, same selection, same menu; only the rendering and what the
+	 * status line counts in.
+	 *
+	 * NOT KOF_FMT_UNKNOWN. Bytes nothing claimed are as likely to be a
+	 * peeled payload as a note, and the hex dump is the honest view of
+	 * something whose shape is not known.
+	 */
+	KV_CAP_TEXT,
 	KV_CAP_COUNT
 };
 
