@@ -621,11 +621,9 @@ int kof_hex_walk(kof_buf d, uint64_t start, const uint8_t *prog)
 
 /* ---- searching ranges ----------------------------------------------------- */
 
-static int is_word_byte(uint8_t c)
-{
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-	       (c >= '0' && c <= '9') || c == '_';
-}
+/* The boundary question lives in kofpack.h beside the flags that ask it -
+ * there were two copies of this and three spellings of the test. */
+#define is_word_byte(c) kof_str_word_byte(c)
 
 /*
  * Search one range for a pattern of either kind.
@@ -661,7 +659,7 @@ static int match_one(struct kof_match_ctx *m, uint64_t base, uint64_t span,
 		if (!find_range(m, base + from, span - from, bytes, len,
 				(flags & KOF_STR_ICASE) != 0, &hit))
 			return 0;
-		if (!(flags & KOF_STR_FULLWORD)) {
+		if (!(flags & KOF_STR_BOUNDED)) {
 			if (at)
 				*at = hit;
 			return 1;
@@ -678,9 +676,9 @@ static int match_one(struct kof_match_ctx *m, uint64_t base, uint64_t span,
 			int lok = (flags & KOF_STR_WIDE)
 				? (hit < base + 2u ||
 				   m->data.p[hit - 1] != 0 ||
-				   !is_word_byte(m->data.p[hit - 2]))
+				   !kof_str_abuts(m->data.p[hit - 2], flags))
 				: ((hit == base) ||
-				   !is_word_byte(m->data.p[hit - 1]));
+				   !kof_str_abuts(m->data.p[hit - 1], flags));
 			/*
 			 * `end >= m->data.n` before the read, not only
 			 * `end >= base + span`.
@@ -699,7 +697,7 @@ static int match_one(struct kof_match_ctx *m, uint64_t base, uint64_t span,
 			 * half, so this side only gains the "a whole character
 			 * has to follow" condition. */
 			int rok = (end >= base + span) || end >= m->data.n ||
-				  !is_word_byte(m->data.p[end]) ||
+				  !kof_str_abuts(m->data.p[end], flags) ||
 				  ((flags & KOF_STR_WIDE) &&
 				   (end + 1u >= m->data.n ||
 				    m->data.p[end + 1u] != 0));
@@ -930,7 +928,7 @@ int kof_match_at(struct kof_match_ctx *m, uint64_t off,
 	 *
 	 * Hex carries no word option; see the same note in match_one.
 	 */
-	if (flags & KOF_STR_FULLWORD) {
+	if (flags & KOF_STR_BOUNDED) {
 		/*
 		 * AND A WIDE MATCH IS BOUNDED BY CHARACTERS, NOT BY BYTES.
 		 *
@@ -948,12 +946,13 @@ int kof_match_at(struct kof_match_ctx *m, uint64_t off,
 		 */
 		int lok = (flags & KOF_STR_WIDE)
 			? (off < 2u || m->data.p[off - 1] != 0 ||
-			   !is_word_byte(m->data.p[off - 2]))
-			: (off == 0 || !is_word_byte(m->data.p[off - 1]));
+			   !kof_str_abuts(m->data.p[off - 2], flags))
+			: (off == 0 ||
+			   !kof_str_abuts(m->data.p[off - 1], flags));
 		/* The trailing byte is already the next character's low half,
 		 * so this side only gains "a whole character has to follow". */
 		int rok = (off + len >= m->data.n) ||
-			  !is_word_byte(m->data.p[off + len]) ||
+			  !kof_str_abuts(m->data.p[off + len], flags) ||
 			  ((flags & KOF_STR_WIDE) &&
 			   (off + len + 1u >= m->data.n ||
 			    m->data.p[off + len + 1u] != 0));

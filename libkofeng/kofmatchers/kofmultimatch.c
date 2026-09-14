@@ -78,12 +78,6 @@ static uint8_t fold_byte(uint8_t c)
  * where the region ends has no following byte, and neither has one ending at
  * the end of the object.
  */
-static int is_word_byte(uint8_t c)
-{
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-	       (c >= '0' && c <= '9') || c == '_';
-}
-
 static int pat_at(const struct kof_match_ctx *m, const struct kof_multimatch_pat *p,
 		  uint64_t at, uint64_t base, uint64_t span)
 {
@@ -141,7 +135,7 @@ static int pat_at(const struct kof_match_ctx *m, const struct kof_multimatch_pat
 	} else if (memcmp(m->data.p + at, p->b, p->len) != 0) {
 		return 0;
 	}
-	if (!(p->flags & KOF_STR_FULLWORD))
+	if (!(p->flags & KOF_STR_BOUNDED))
 		return 1;
 
 	/*
@@ -162,13 +156,13 @@ static int pat_at(const struct kof_match_ctx *m, const struct kof_multimatch_pat
 	 */
 	if (p->flags & KOF_STR_WIDE) {
 		if (at >= base + 2u && m->data.p[at - 1] == 0 &&
-		    is_word_byte(m->data.p[at - 2]))
+		    kof_str_abuts(m->data.p[at - 2], p->flags))
 			return 0;
-	} else if (at > base && is_word_byte(m->data.p[at - 1])) {
+	} else if (at > base && kof_str_abuts(m->data.p[at - 1], p->flags)) {
 		return 0;
 	}
 	if (end < base + span && end < m->data.n &&
-	    is_word_byte(m->data.p[end])) {
+	    kof_str_abuts(m->data.p[end], p->flags)) {
 		/* Wide: only when a whole character follows. A word byte with a
 		 * non-zero byte above it is not a UTF-16 character. */
 		if (!(p->flags & KOF_STR_WIDE) ||

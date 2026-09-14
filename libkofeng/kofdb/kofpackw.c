@@ -75,6 +75,21 @@ static int buf_add(struct buf *b, const void *data, size_t len, uint32_t *out_of
 struct dedup {
 	struct {
 		uint32_t off, len, uid;
+		/*
+		 * PART OF THE KEY, because bytes alone are not the identity.
+		 *
+		 * The uid is what the scan memo is keyed by, so two entries
+		 * that share one answer must be two entries that ASK THE SAME
+		 * QUESTION. Identical bytes with different options do not:
+		 * "<%" as a substring, as a fullword and as a token are three
+		 * different questions about the same two bytes.
+		 *
+		 * Measured before the fix: a module asking all three in one
+		 * range got the first one's answer three times, and swapping
+		 * the order of the calls swapped the answer. Both readings
+		 * looked like a working rule.
+		 */
+		uint8_t  tag;
 		uint8_t  used;
 	} *slot;
 	uint32_t mask;
@@ -116,14 +131,16 @@ static void dedup_free(struct dedup *d)
  * the same offset are declaring the same pattern, and the uid is that stated in a
  * form the scan path can index with.
  */
-static int pool_intern(struct dedup *d, struct buf *pool, const void *data,
-		       uint32_t len, uint32_t *out_off, uint32_t *out_uid)
+static int pool_intern_tag(struct dedup *d, struct buf *pool, const void *data,
+			   uint32_t len, uint8_t tag, uint32_t *out_off,
+			   uint32_t *out_uid)
 {
-	uint32_t h = kof_crc32(data, len) & d->mask;
+	uint32_t h = (kof_crc32(data, len) ^ ((uint32_t)tag * 0x9e3779b9u)) &
+		     d->mask;
 	uint32_t probes = 0;
 
 	while (d->slot[h].used) {
-		if (d->slot[h].len == len &&
+		if (d->slot[h].len == len && d->slot[h].tag == tag &&
 		    memcmp(pool->p + d->slot[h].off, data, len) == 0) {
 			*out_off = d->slot[h].off;
 			*out_uid = d->slot[h].uid;
@@ -137,10 +154,18 @@ static int pool_intern(struct dedup *d, struct buf *pool, const void *data,
 		return 0;
 	d->slot[h].off  = *out_off;
 	d->slot[h].len  = len;
+	d->slot[h].tag  = tag;
 	d->slot[h].uid  = d->next_uid++;
 	d->slot[h].used = 1;
 	*out_uid = d->slot[h].uid;
 	return 1;
+}
+
+/* Bytes with no options of their own - the name pool. */
+static int pool_intern(struct dedup *d, struct buf *pool, const void *data,
+		       uint32_t len, uint32_t *out_off, uint32_t *out_uid)
+{
+	return pool_intern_tag(d, pool, data, len, 0u, out_off, out_uid);
 }
 
 /*
@@ -421,8 +446,14 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 				 * aligned - so each gets an id of its own and shares
 				 * with nothing. */
 				uid = ds.next_uid++;
-			} else if (!pool_intern(&ds, &b->str_pool, s->bytes, s->len,
-						&off, &uid)) {
+			/* The options are part of the identity - see dedup.tag.
+			 * Same bytes, different options: two entries, two uids,
+			 * two memo slots. The pool holds the bytes twice, which
+			 * is a handful of bytes for a question that was being
+			 * answered wrongly. */
+			} else if (!pool_intern_tag(&ds, &b->str_pool, s->bytes,
+						    s->len, s->flags,
+						    &off, &uid)) {
 				goto out;
 			}
 			b->str[si].uid   = uid;

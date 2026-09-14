@@ -35,6 +35,7 @@
 #include "../libkofeng/core/kofplatform.h"
 #include "../libkofeng/kofmatchers/kofmatch.h"
 #include "../libkofeng/kofscanners/scan.h"
+#include <kofmod/script.h>
 #include "../libkofeng/kofparsers/kofformat.h"
 
 /*
@@ -282,6 +283,10 @@ const char *kof_inspect_subtype_name(uint8_t fmt, uint8_t sub)
 		case KOF_AMSI_COMMAND: return "command";
 		default:               return 0;
 		}
+	/* Nothing for KOF_SCRIPT_ANY: "Script Script" says less than "Script",
+	 * and the kind is only worth a word when a word was found. */
+	if (fmt == KOF_FMT_SCRIPT)
+		return sub == KOF_SCRIPT_ANY ? 0 : kof_script_type_name(sub);
 	return 0;
 }
 

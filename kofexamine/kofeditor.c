@@ -356,8 +356,10 @@ int decl_pattern(const struct decl *d, uint8_t *prog,
 		if (!d->hex) {
 			if (d->icase)
 				*flags |= KOF_STR_ICASE;
-			if (d->fullword)
+			if (d->fullword == KOF_WORD_FULLWORD)
 				*flags |= KOF_STR_FULLWORD;
+			else if (d->fullword == KOF_WORD_TOKEN)
+				*flags |= KOF_STR_TOKEN;
 		}
 	}
 	return *pat && *plen && *plen <= 0xffffu;
@@ -3254,8 +3256,15 @@ no_head:
 				memcpy(d->bytes, text, d->len);
 				d->nbytes = d->len;
 				d->icase = strstr(line, "KOF_CASE_ICASE") != 0;
-				d->fullword = strstr(line,
-						     "KOF_WORD_FULLWORD") != 0;
+				/* TOKEN first: it is the newer spelling and
+				 * neither string contains the other, so the
+				 * order is only about reading the specific
+				 * answer before the general one. */
+				d->fullword = strstr(line, "KOF_WORD_TOKEN")
+					    ? KOF_WORD_TOKEN
+					    : strstr(line, "KOF_WORD_FULLWORD")
+					    ? KOF_WORD_FULLWORD
+					    : KOF_WORD_SUBSTRING;
 			}
 			d->obj = e->cur;
 			d->grp = 0;
@@ -3700,7 +3709,9 @@ void draft_from_touch(struct kof_editor *e, const struct kof_touch *t)
 			d->nbytes = d->len;
 		}
 		d->icase = (st->flags & KOF_STR_ICASE) != 0;
-		d->fullword = (st->flags & KOF_STR_FULLWORD) != 0;
+		d->fullword = (st->flags & KOF_STR_TOKEN) ? KOF_WORD_TOKEN
+			    : (st->flags & KOF_STR_FULLWORD) ? KOF_WORD_FULLWORD
+			    : KOF_WORD_SUBSTRING;
 		d->obj = e->cur;
 		/*
 		 * THE RANGE THE MODULE DECLARED, which the pack does keep.
@@ -4249,8 +4260,11 @@ void generate(struct kof_editor *e, int as_new)
 			decl_put_literal(f, d->bytes, d->nbytes);
 			fprintf(f, "\", %s, %s);\n",
 				d->icase ? "KOF_CASE_ICASE" : "KOF_CASE_EXACT",
-				d->fullword ? "KOF_WORD_FULLWORD"
-					    : "KOF_WORD_SUBSTRING");
+				d->fullword == KOF_WORD_TOKEN
+					? "KOF_WORD_TOKEN"
+					: d->fullword == KOF_WORD_FULLWORD
+					? "KOF_WORD_FULLWORD"
+					: "KOF_WORD_SUBSTRING");
 		}
 	}
 

@@ -6514,7 +6514,16 @@ static const struct fmt_cat g_fmt_cat[] = {
 	 * opens is the list. "Media" and "Other" take no s. */
 	{ "Executables", FMT_B(KOF_FMT_ELF) | FMT_B(KOF_FMT_PE) |
 			 FMT_B(KOF_FMT_MACHO) },
-	{ "Scripts",     FMT_B(KOF_FMT_SCRIPT) | FMT_B(KOF_FMT_TEXT) },
+	/*
+	 * TEXT IS NOT A SCRIPT, it is the absence of one.
+	 *
+	 * KOF_FMT_SCRIPT says "these bytes are meant to be run"; KOF_FMT_TEXT
+	 * says only "these bytes are readable" - a log, a config, a README.
+	 * Grouping them put every text file one click away from a menu of
+	 * interpreters, which reads as a claim about it. It falls into Other
+	 * by subtraction; see fmt_cat_other.
+	 */
+	{ "Scripts",     FMT_B(KOF_FMT_SCRIPT) },
 	{ "Documents",   FMT_B(KOF_FMT_DOCOLE) | FMT_B(KOF_FMT_DOCZIP) |
 			 FMT_B(KOF_FMT_RTF) | FMT_B(KOF_FMT_PDF) },
 	{ "Archives",    FMT_B(KOF_FMT_ZIP) | FMT_B(KOF_FMT_TAR) |
@@ -7042,8 +7051,22 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		if (!c->n)
 			return;
 	} else if (what == CH_WORD) {
-		ch_add(c, "substring");
+		/*
+		 * MOST SPECIFIC FIRST, and the order is not the enum's.
+		 *
+		 * A list is read top down and the top row is where the eye
+		 * starts, so it holds the answer that is usually right - a
+		 * marker is a whole token far more often than it is a fragment
+		 * of one. The row index is therefore NOT the value; see the
+		 * table in ch_take, which is the only place the two meet.
+		 *
+		 * "pattern" rather than "substring" because that is what it is
+		 * from the author's side: bytes to be found wherever they sit,
+		 * with no claim about what surrounds them.
+		 */
+		ch_add(c, "token");
 		ch_add(c, "fullword");
+		ch_add(c, "pattern");
 	} else if (what == CH_CASE) {
 		ch_add(c, "exact-case");
 		ch_add(c, "ignore-case");
@@ -7436,7 +7459,20 @@ static void ch_take(struct view *v)
 		if (c->arg >= v->ed.dr.n_decl)
 			return;
 		if (c->what == CH_WORD)
-			v->ed.dr.decl[c->arg].fullword = c->sel;
+			{
+				/* The list is ordered for reading, not by
+				 * value - see CH_WORD where it is built. */
+				static const int word_of_row[] = {
+					KOF_WORD_TOKEN, KOF_WORD_FULLWORD,
+					KOF_WORD_SUBSTRING
+				};
+
+				if (c->sel >= 0 &&
+				    (size_t)c->sel < sizeof word_of_row /
+						     sizeof word_of_row[0])
+					v->ed.dr.decl[c->arg].fullword =
+						word_of_row[c->sel];
+			}
 		else
 			v->ed.dr.decl[c->arg].icase = c->sel;
 		return;
@@ -9754,7 +9790,9 @@ static int draw_decl_strings(struct out *o, struct view *v, int r)
 			out_fmt(o, A_DIM "%-21s" A_OFF, "");
 		else
 			out_fmt(o, A_WARN "%-9s %-11s" A_OFF,
-				d->fullword ? "fullword" : "substring",
+				d->fullword == KOF_WORD_TOKEN ? "token"
+				: d->fullword == KOF_WORD_FULLWORD
+				? "fullword" : "pattern",
 				d->icase ? "ignore-case" : "exact-case");
 		v->str_wc[i][1] = (int)o->col_hint;
 		/*
@@ -12087,16 +12125,17 @@ static void decl_add_text(struct view *v, const char *text, size_t n)
 	 */
 	d->wide = v->evt_wide;
 	/*
-	 * SUBSTRING, not fullword, and this is the opposite default to
-	 * decl_add's.
+	 * TOKEN, like every other declaration - see decl_add.
 	 *
-	 * That one is declaring a name, a path, a format string - something
-	 * with edges. This is declaring a fragment a reader dragged out of the
-	 * middle of a script, where the character before it is as likely to be
-	 * a letter as a quote. A fullword default here would silently narrow
-	 * most of these to nothing.
+	 * This used to be SUBSTRING while decl_add used FULLWORD, on the
+	 * argument that a fragment dragged out of the middle of a script has
+	 * no edges. TOKEN is the answer that argument was reaching for and
+	 * could not express: it breaks on whitespace and on nothing else, so a
+	 * marker surrounded by quotes, brackets or dollars is still whole,
+	 * while one that is half of a longer word is not. The two defaults
+	 * disagreeing was itself a thing to remember.
 	 */
-	d->fullword = 0;
+	d->fullword = KOF_WORD_TOKEN;
 	d->obj = v->node[v->sel_node].obj;
 	d->at = KOF_BROKEN;
 	snprintf(d->rgn, sizeof d->rgn, "%s", "OBJDATA");
@@ -12180,10 +12219,15 @@ static void decl_add(struct view *v, int hex)
 	}
 	d->nbytes = d->len;
 	d->hex = hex;
-	/* Fullword by default. A marker is a name, a path, a format string -
-	 * something with edges - far more often than it is a fragment of one,
-	 * and the default that is usually right is the one worth having. */
-	d->fullword = 1;
+	/*
+	 * TOKEN by default. A marker is a name, a path, a format string -
+	 * something with edges - far more often than it is a fragment of one.
+	 * TOKEN says that without FULLWORD's assumption that the edges are
+	 * made of letters: "$_POST[" and "<?php" are whole markers whose
+	 * neighbours are punctuation, and FULLWORD would have let either match
+	 * inside a longer run of it.
+	 */
+	d->fullword = KOF_WORD_TOKEN;
 	d->obj = n->obj;
 	/*
 	 * The region the bytes are in, looked up from the bytes.

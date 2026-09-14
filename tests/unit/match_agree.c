@@ -47,9 +47,10 @@ static void fail(const char *why)
 
 	if (failures < 3) {
 		printf("  FAIL %s: %s\n", g_case, why);
-		printf("       flags=%s%s%s  off=%llu len=%llu span=%u\n",
+		printf("       flags=%s%s%s%s  off=%llu len=%llu span=%u\n",
 		       (g_flags & KOF_STR_ICASE) ? "ICASE " : "",
 		       (g_flags & KOF_STR_WIDE) ? "WIDE " : "",
+		       (g_flags & KOF_STR_TOKEN) ? "TOKEN " : "",
 		       (g_flags & KOF_STR_FULLWORD) ? "FULLWORD" : "",
 		       (unsigned long long)g_off, (unsigned long long)g_len,
 		       g_span);
@@ -107,15 +108,32 @@ static uint32_t make_hay(uint8_t *h)
  * `n` is the haystack, needed because the wide tests read one byte further out
  * than the byte-level ones do.
  */
+/*
+ * The reference has to know BOTH boundary classes, for the reason it had to be
+ * taught the wide one: randomising a flag the check does not model proves only
+ * that the matcher differs from a check that was never told about it.
+ *
+ * The alphabet is {A, B, 0x00, 0xFF} plus a space injected below, so "word" is
+ * A or B and "space" is the space. KOF_STR_TOKEN asks the opposite question -
+ * anything that is not whitespace continues the run.
+ */
 static int is_word(uint8_t c) { return c == 'A' || c == 'B'; }
+static int is_space(uint8_t c) { return c == ' ' || c == '\t' || c == '\n'; }
+
+static int abuts_ref(uint8_t c, int token)
+{
+	return token ? !is_space(c) : is_word(c);
+}
 
 static int word_ok_in_range(const uint8_t *h, uint64_t p, uint32_t span,
-			    uint64_t off, uint64_t len, uint64_t n, int wide)
+			    uint64_t off, uint64_t len, uint64_t n, int wide,
+			    int token)
 {
 	int lok = wide
-		? (p < off + 2u || h[p - 1] != 0 || !is_word(h[p - 2]))
-		: ((p == off) || !is_word(h[p - 1]));
-	int rok = (p + span >= off + len) || !is_word(h[p + span]) ||
+		? (p < off + 2u || h[p - 1] != 0 ||
+		   !abuts_ref(h[p - 2], token))
+		: ((p == off) || !abuts_ref(h[p - 1], token));
+	int rok = (p + span >= off + len) || !abuts_ref(h[p + span], token) ||
 		  (wide && (p + span + 1u >= n || h[p + span + 1u] != 0));
 
 	return lok && rok;
@@ -198,6 +216,13 @@ static void one_round(void)
 		 * agree, and any pattern exercises that.
 		 */
 		if (rnd_n(2)) flags |= KOF_STR_WIDE;
+		/* TOKEN instead of FULLWORD, never both - they are alternative
+		 * answers to "what breaks a run", and the build refuses a
+		 * pattern that sets both. */
+		if ((flags & KOF_STR_FULLWORD) && rnd_n(2) == 0) {
+			flags &= ~(unsigned)KOF_STR_FULLWORD;
+			flags |= KOF_STR_TOKEN;
+		}
 		g_case = "literal";
 	}
 
@@ -215,7 +240,7 @@ static void one_round(void)
 	 * comparison would be against the wrong contract.
 	 */
 	n_brute = brute(&m, hn, use, (uint16_t)plen, kind,
-			(uint8_t)(flags & ~(unsigned)KOF_STR_FULLWORD),
+			(uint8_t)(flags & ~(unsigned)KOF_STR_BOUNDED),
 			brute_at, HAY_MAX);
 
 	/*
@@ -232,11 +257,12 @@ static void one_round(void)
 	 * The reference is word_ok_in_range over the WHOLE object, which is
 	 * exactly what "the boundary is the object" means.
 	 */
-	if (flags & KOF_STR_FULLWORD) {
+	if (flags & KOF_STR_BOUNDED) {
 		for (i = 0; i < n_brute; i++) {
 			uint64_t p = brute_at[i];
 			int want = word_ok_in_range(hay, p, span, 0, hn, hn,
-						    (flags & KOF_STR_WIDE) != 0);
+						    (flags & KOF_STR_WIDE) != 0,
+						    (flags & KOF_STR_TOKEN) != 0);
 			int got = kof_match_at(&m, p, use, (uint16_t)plen,
 					       kind, flags);
 
@@ -278,12 +304,13 @@ static void one_round(void)
 		 * differ by contract.
 		 */
 		if (!kof_match_at(&m, at, use, (uint16_t)plen, kind,
-				  (uint8_t)(flags & ~(unsigned)KOF_STR_FULLWORD)))
+				  (uint8_t)(flags & ~(unsigned)KOF_STR_BOUNDED)))
 			fail("kof_match_at says no at the offset "
 			     "kof_match_where returned");
-		if ((flags & KOF_STR_FULLWORD) &&
+		if ((flags & KOF_STR_BOUNDED) &&
 		    !word_ok_in_range(hay, at, span, off, len, hn,
-				      (flags & KOF_STR_WIDE) != 0))
+				      (flags & KOF_STR_WIDE) != 0,
+				      (flags & KOF_STR_TOKEN) != 0))
 			fail("kof_match_where returned a hit the word rule "
 			     "should have refused");
 		for (i = 0; i < n_brute; i++) {
@@ -296,10 +323,11 @@ static void one_round(void)
 			 */
 			if (brute_at[i] >= off &&
 			    brute_at[i] + span <= off + len &&
-			    (!(flags & KOF_STR_FULLWORD) ||
+			    (!(flags & KOF_STR_BOUNDED) ||
 			     word_ok_in_range(hay, brute_at[i], span, off,
 					      len, hn,
-					      (flags & KOF_STR_WIDE) != 0)))
+					      (flags & KOF_STR_WIDE) != 0,
+				      (flags & KOF_STR_TOKEN) != 0)))
 				fail("kof_match_where skipped an earlier "
 				     "match inside the range");
 		}
@@ -315,10 +343,11 @@ static void one_round(void)
 		for (i = 0; i < n_brute; i++)
 			if (brute_at[i] >= off &&
 			    brute_at[i] + span <= off + len &&
-			    (!(flags & KOF_STR_FULLWORD) ||
+			    (!(flags & KOF_STR_BOUNDED) ||
 			     word_ok_in_range(hay, brute_at[i], span, off,
 					      len, hn,
-					      (flags & KOF_STR_WIDE) != 0)))
+					      (flags & KOF_STR_WIDE) != 0,
+				      (flags & KOF_STR_TOKEN) != 0)))
 				fail("kof_match_where found nothing where "
 				     "kof_match_at finds a match");
 	}

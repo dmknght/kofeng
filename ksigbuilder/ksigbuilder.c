@@ -87,7 +87,8 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
-#include <kofmod/kofsig.h>   /* KOF_SCAN_ALL, the per-module maxima */
+#include <kofmod/kofsig.h>
+#include <kofmod/script.h>   /* KOF_SCAN_ALL, the per-module maxima */
 #include <kofmod/elf.h>      /* the ELF region names a range may be built from */
 #include <kofmod/pe.h>       /* and the PE image kinds, for --subtype-mask */
 #include <kofmod/amsi.h>     /* and what an AMSI submission is */
@@ -104,6 +105,7 @@
 #include "../libkofeng/kofparsers/containers/sevenzip_parse.h"
 #include "../libkofeng/kofparsers/containers/rar_parse.h"
 #include "../libkofeng/kofparsers/containers/xz_parse.h"
+#include "../libkofeng/kofparsers/scripts/script_parse.h"
 #include "../libkofeng/kofparsers/containers/rtf_parse.h"
 #include "../libkofeng/kofparsers/containers/pdf_parse.h"
 #include <kofmod/pe.h>       /* and the PE ones */
@@ -277,6 +279,7 @@ static const struct rgn_name rgn_names[] = {
 	XZ_REGIONS(RGN)
 	RTF_REGIONS(RGN)
 	PDF_REGIONS(RGN)
+	SCRIPT_REGIONS(RGN)
 	AMSI_REGIONS(RGN)
 
 	/*
@@ -650,8 +653,11 @@ static int read_hex_text(const char *p, int line, char *out, size_t cap)
 }
 
 /* Read a single enum name from argument `which`, matched against a table. */
-static int read_enum(const char *p, int which, int line, const char *what,
-		     const char *n0, const char *n1, int *out)
+/* n2 is optional - pass NULL for a two-valued option. The word option grew a
+ * third value (KOF_WORD_TOKEN) and a second copy of this loop to read it would
+ * be a second place for the spelling of an option to drift. */
+static int read_enum3(const char *p, int which, int line, const char *what,
+		      const char *n0, const char *n1, const char *n2, int *out)
 {
 	const char *a = nth_arg(p, which, line);
 	char tok[64];
@@ -672,10 +678,22 @@ static int read_enum(const char *p, int which, int line, const char *what,
 	tok[n] = 0;
 	if (strcmp(tok, n0) == 0) { *out = 0; return 1; }
 	if (strcmp(tok, n1) == 0) { *out = 1; return 1; }
-	fprintf(stderr, "%s:%d: error: %s must be %s or %s, not \"%s\"\n",
-		src_name, line, what, n0, n1, tok);
+	if (n2 && strcmp(tok, n2) == 0) { *out = 2; return 1; }
+	if (n2)
+		fprintf(stderr,
+			"%s:%d: error: %s must be %s, %s or %s, not \"%s\"\n",
+			src_name, line, what, n0, n1, n2, tok);
+	else
+		fprintf(stderr, "%s:%d: error: %s must be %s or %s, not \"%s\"\n",
+			src_name, line, what, n0, n1, tok);
 	errors++;
 	return 0;
+}
+
+static int read_enum(const char *p, int which, int line, const char *what,
+		     const char *n0, const char *n1, int *out)
+{
+	return read_enum3(p, which, line, what, n0, n1, NULL, out);
 }
 
 /* Read the declared name, argument 1. It becomes a C identifier, so it has to be
@@ -1502,6 +1520,7 @@ static void resolve_subtype(void)
 	int want_elf = (g_target_mask & (1u << KOF_FMT_ELF)) != 0;
 	int want_pe = (g_target_mask & (1u << KOF_FMT_PE)) != 0;
 	int want_amsi = (g_target_mask & (1u << KOF_EVT_AMSI)) != 0;
+	int want_script = (g_target_mask & (1u << KOF_FMT_SCRIPT)) != 0;
 
 	if (!d->count)
 		return;
@@ -1527,6 +1546,14 @@ static void resolve_subtype(void)
 				snprintf(msg, sizeof msg,
 					 "KOF_TARGET_SUBTYPE names %s but the "
 					 "module does not target PE", one);
+				err(d->line, msg);
+				return;
+			}
+		} else if (kof_script_type_from_name(one, &v)) {
+			if (!want_script) {
+				snprintf(msg, sizeof msg,
+					 "KOF_TARGET_SUBTYPE names %s but the "
+					 "module does not target SCRIPT", one);
 				err(d->line, msg);
 				return;
 			}
@@ -1976,9 +2003,9 @@ static void scan_line(char *at, size_t line_len, int lineno)
 		if (!read_enum(p, 3, lineno, "the case option",
 			       "KOF_CASE_EXACT", "KOF_CASE_ICASE", &o->icase))
 			return;
-		if (!read_enum(p, 4, lineno, "the word option",
-			       "KOF_WORD_SUBSTRING", "KOF_WORD_FULLWORD",
-			       &o->fullword))
+		if (!read_enum3(p, 4, lineno, "the word option",
+				"KOF_WORD_SUBSTRING", "KOF_WORD_FULLWORD",
+				"KOF_WORD_TOKEN", &o->fullword))
 			return;
 
 		if (m->kind == DECL_STRWIDE && !widen(o, lineno))
@@ -4358,7 +4385,8 @@ static int strs_load(struct artefact *a)
 			a->str[a->n_str].kind  = KOF_STR_LITERAL;
 			a->str[a->n_str].flags = (uint8_t)
 				((icase ? KOF_STR_ICASE : 0u) |
-				 (fullw ? KOF_STR_FULLWORD : 0u));
+				 (fullw == 1 ? KOF_STR_FULLWORD :
+				  fullw == 2 ? KOF_STR_TOKEN : 0u));
 			a->n_str++;
 			bytes_len += len;
 		/* w <id> <icase> <fullword> <len> <literal as hex digits> - a
@@ -4437,7 +4465,8 @@ static int strs_load(struct artefact *a)
 			a->str[a->n_str].kind  = KOF_STR_LITERAL;
 			a->str[a->n_str].flags = (uint8_t)
 				((icase ? KOF_STR_ICASE : 0u) |
-				 (fullw ? KOF_STR_FULLWORD : 0u) |
+				 (fullw == 1 ? KOF_STR_FULLWORD :
+				  fullw == 2 ? KOF_STR_TOKEN : 0u) |
 				 (wide  ? KOF_STR_WIDE     : 0u));
 			a->n_str++;
 			bytes_len += len;

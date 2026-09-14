@@ -702,6 +702,65 @@ enum kof_pack_str_kind {
 #define KOF_STR_WIDE     (1u << 2)
 
 /*
+ * BOUNDED BY WHITESPACE RATHER THAN BY WORD CHARACTERS.
+ *
+ * KOF_STR_FULLWORD asks whether the neighbour is [A-Za-z0-9_], which is the
+ * right question for a name and the wrong one for anything punctuated. "<%" is
+ * a whole marker in classic ASP and a PREFIX of "<%@" in ASP.NET, and FULLWORD
+ * cannot tell them apart: "@" is not a word byte, so the neighbour test passes
+ * and the shorter pattern matches inside the longer tag. The same holds for
+ * "$_GET" against "$_GETX" only by luck - there the next byte is a word byte -
+ * and fails for every marker whose neighbours are punctuation.
+ *
+ * So this is the other question: the match must be a WHOLE WHITESPACE
+ * DELIMITED RUN. Space, tab, newline, carriage return, form feed and vertical
+ * tab break it; every other byte, punctuation included, continues it. The edge
+ * of the object - or of the range, where the caller has one - breaks it too.
+ *
+ * The two are alternatives, not a scale: FULLWORD is for identifiers, this is
+ * for tokens with punctuation in them. A pattern that sets both is refused by
+ * the build rather than given a precedence nobody would remember.
+ */
+#define KOF_STR_TOKEN    (1u << 3)
+
+/*
+ * ONE DEFINITION OF THE BOUNDARY, because there were two and are about to be
+ * more.
+ *
+ * kofmatch.c and kofmultimatch.c each carried their own is_word_byte, and the
+ * three entry points that apply the rule each spelled the test out again. A
+ * second class doubles that into four copies of a question every one of them
+ * has to answer identically or one door disagrees with another about what a
+ * marker means - which is the exact fault the wide boundary turned out to be.
+ *
+ * `abuts` answers the only question any of them asks: does this neighbouring
+ * byte CONTINUE the run, so that the match is not a whole one? Callers still
+ * own the stepping - which byte is the neighbour differs for a wide match - and
+ * nothing else.
+ */
+static inline int kof_str_word_byte(uint8_t c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+	       (c >= '0' && c <= '9') || c == '_';
+}
+
+static inline int kof_str_space_byte(uint8_t c)
+{
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+	       c == '\f' || c == '\v';
+}
+
+static inline int kof_str_abuts(uint8_t c, uint8_t flags)
+{
+	if (flags & KOF_STR_TOKEN)
+		return !kof_str_space_byte(c);
+	return kof_str_word_byte(c);
+}
+
+/* Whether the flags ask for any boundary at all. */
+#define KOF_STR_BOUNDED  (KOF_STR_FULLWORD | KOF_STR_TOKEN)
+
+/*
  * One declared string: where its bytes are, and how to match them.
  *
  * A pool with (offset, length) rather than an inline buffer. Measured on the

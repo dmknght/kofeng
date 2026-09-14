@@ -259,6 +259,13 @@ struct decl {
 	 * a byte that may be a wildcard means nothing, and a word boundary is a
 	 * notion of text.
 	 */
+	/*
+	 * WHICH BOUNDARY, not a boolean any more: 0 pattern (match anywhere),
+	 * 1 fullword, 2 token. The name stays `fullword` because every reader
+	 * of it is a line of this panel and renaming the field would touch
+	 * more than it explains; the VALUES are KOF_WORD_* and the panel spells
+	 * them out. See KOF_WORD_TOKEN in kofsig.h.
+	 */
 	int      fullword;
 	int      icase;
 

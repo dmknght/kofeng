@@ -12,6 +12,7 @@
 #include "containers/xz_parse.h"
 #include "containers/rtf_parse.h"
 #include "containers/pdf_parse.h"
+#include "scripts/script_parse.h"
 #include "events/amsi_parse.h"
 #include "processes/proc_parse.h"
 
@@ -62,6 +63,11 @@ static int rar_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 static int xz_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
 	return kof_xz_parse(b, (struct kof_xz_info *)v, c);
+}
+
+static int script_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_script_parse(b, (struct kof_script_info *)v, c);
 }
 
 static int rtf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
@@ -138,6 +144,14 @@ static uint64_t anom_pdf(const void *v)
 	return ((const struct kof_pdf_info *)v)->anomalies;
 }
 
+/* Required, not optional: both readers call it without a null check, so a row
+ * that left it out segfaulted on the first object it claimed. None are defined
+ * for a script yet; the word is there so the row can answer. */
+static uint64_t anom_script(const void *v)
+{
+	return ((const struct kof_script_info *)v)->anomalies;
+}
+
 static uint64_t anom_rtf(const void *v)
 {
 	return ((const struct kof_rtf_info *)v)->anomalies;
@@ -193,6 +207,19 @@ static const struct kof_parser formats[] = {
 	  kof_pdf_sniff, pdf_parse_thunk,
 	  kof_pdf_region_bits, KOF_PDF_REGION_COUNT,
 	  kof_pdf_region_name, kof_pdf_anomaly_name, anom_pdf },
+
+	/*
+	 * AFTER EVERY FORMAT WITH A MAGIC NUMBER, which is what makes its sniff
+	 * safe to write loosely. A script has no magic - "#!" is two bytes that
+	 * occur in plenty of binaries - so it only gets to look at what nothing
+	 * structured has claimed. Moving this row up would let a shebang beat a
+	 * real header, which is the one mistake the order of this table exists
+	 * to prevent. See script_parse.h.
+	 */
+	{ KOF_FMT_SCRIPT, (uint32_t)sizeof(struct kof_script_info),
+	  kof_script_sniff, script_parse_thunk,
+	  kof_script_region_bits, KOF_SCRIPT_REGION_COUNT,
+	  kof_script_region_name, kof_script_anomaly_name, anom_script },
 
 	/*
 	 * LAST, AND ITS SNIFF NEVER ACCEPTS.

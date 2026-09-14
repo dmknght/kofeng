@@ -199,7 +199,26 @@ static inline enum kof_precond kof_module_precond(const struct kof_module *m,
 	if (m->arch_mask &&
 	    (ctx->arch >= 32 || !(m->arch_mask & (1u << ctx->arch))))
 		return KOF_PRECOND_ARCH;
-	if (m->subtype_mask &&
+	/*
+	 * FILTER ON POSITIVE KNOWLEDGE ONLY - subtype 0 is "not known", and a
+	 * thing not known must never cost a detection.
+	 *
+	 * Without the middle test this axis silently loses rules. A PHP web
+	 * shell whose "<?php" sits past the sniff window, or a fragment with no
+	 * tag at all, comes out as a script of no particular kind; a PHP rule
+	 * then declined it, and nothing anywhere said so. That is a worse
+	 * failure than running the rule, because the saving is a few
+	 * microseconds and the cost is the whole point of the scanner.
+	 *
+	 * So the mask only ever removes an object whose kind IS known and is
+	 * not one the module asked for - a Python file with a shebang, tested
+	 * against a PHP rule. Recognition quality becomes a dial on
+	 * performance instead of a dial on coverage: better sniffing declines
+	 * more, worse sniffing declines less, and neither changes what is
+	 * found. Zero is also what every container reports, so this is the same
+	 * rule those already relied on.
+	 */
+	if (m->subtype_mask && ctx->subtype != 0 &&
 	    (ctx->subtype >= 32 || !(m->subtype_mask & (1u << ctx->subtype))))
 		return KOF_PRECOND_SUBTYPE;
 	return KOF_PRECOND_OK;

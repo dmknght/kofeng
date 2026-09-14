@@ -2923,7 +2923,22 @@ enum kof_str_case {
  */
 enum kof_str_word {
 	KOF_WORD_SUBSTRING = 0,  /* match anywhere */
-	KOF_WORD_FULLWORD  = 1   /* neither neighbour is a word byte */
+	KOF_WORD_FULLWORD  = 1,  /* neither neighbour is a word byte */
+	/*
+	 * A WHOLE WHITESPACE-DELIMITED TOKEN - see KOF_STR_TOKEN in kofpack.h.
+	 *
+	 * FULLWORD asks whether the neighbour is [A-Za-z0-9_], which is right
+	 * for an identifier and useless for a marker made of punctuation: "<%"
+	 * is a whole tag in classic ASP and a PREFIX of ASP.NET's "<%@", and
+	 * "@" is not a word byte, so FULLWORD lets the short one match inside
+	 * the long one. This asks the other question - only space, tab,
+	 * newline, CR, FF and VT break a run - so "<%" declared this way does
+	 * not match "<%@".
+	 *
+	 * Pick by what the marker is made of, not by which is stricter: a name
+	 * wants FULLWORD, a punctuated token wants this.
+	 */
+	KOF_WORD_TOKEN     = 2
 };
 
 /*
