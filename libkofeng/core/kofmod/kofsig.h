@@ -355,6 +355,27 @@ enum kof_format {
 #define KOF_TARGET_BITS        32u
 
 /*
+ * AND THE LINE IS CHECKED, not just described.
+ *
+ * The note above says moving it is two steps: raise the line, and confirm no
+ * event target fell below it. The second step is asserted in kofevt.h, by every
+ * event target. The FIRST had nothing - so adding a nineteenth file format
+ * would make KOF_FMT_COUNT pass the line and collide with KOF_EVT_AMSI at 19,
+ * and the only symptom would be an AMSI rule running on that new format and a
+ * rule for that format running on AMSI records. Nothing would fail to build and
+ * nothing would crash; two prefilters would simply agree about the wrong bit.
+ *
+ * The second assert is the ceiling the whole axis rests on: the mask is a
+ * uint32 in the pack, and `1u << KOF_FMT_COUNT` in ksigbuilder's KOF_FMT_ANY is
+ * undefined the moment the count reaches 32.
+ */
+_Static_assert(KOF_FMT_COUNT <= KOF_TARGET_FIRST_EVENT,
+	       "a file format was added past the line event targets start on "
+	       "- raise KOF_TARGET_FIRST_EVENT and check kofevt.h's asserts");
+_Static_assert(KOF_TARGET_BITS <= 32u,
+	       "the target is a uint32 mask in the pack");
+
+/*
  * Architecture, normalised across formats.
  *
  * This is the only place a module can ask about architecture without importing

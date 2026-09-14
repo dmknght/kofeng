@@ -1929,6 +1929,8 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 			return e->dr.cnd[i].variant[0]
 			       ? "Variant: letters, digits, - and _ only"
 			       : "Custom variant needs a name";
+	if (!e->dr.fmt_mask)
+		return "Name at least one target format";
 	if (!e->dr.n_decl)
 		return "Declare a string";
 	if (!e->dr.n_grp)
@@ -3969,9 +3971,34 @@ void generate(struct kof_editor *e, int as_new)
 
 	/* The format the object actually is, so the host can rule the module
 	 * out without entering it - and so the regions above mean something. */
-	fprintf(f, "KOF_TARGET_FORMAT(%s);\n",
-		(ob->fmt && ob->ctx.format < FMT_WORD_N)
-		? fmt_word[ob->ctx.format] : "KOF_FMT_ANY");
+	/*
+	 * EVERY FORMAT THE DRAFT NAMES, as the OR ksigbuilder reads.
+	 *
+	 * It used to be the format of whatever object the draft happened to be
+	 * built on - one value, because this emitter had one, not because the
+	 * engine does: KOF_TARGET_FORMAT has always taken a mask and
+	 * resolve_format loops over the names, erroring with "use one
+	 * declaration with '|'". The same marker lives in an ELF that carries a
+	 * command, in the script that is one, and in the plaintext decoded out
+	 * of a base64 run, and a rule pinned to one of those missed the others.
+	 */
+	{
+		uint32_t m = e->dr.fmt_mask;
+		int fi, first = 1;
+
+		fprintf(f, "KOF_TARGET_FORMAT(");
+		for (fi = 0; fi < (int)FMT_WORD_N; fi++) {
+			if (!(m & (1u << fi)))
+				continue;
+			fprintf(f, "%s%s", first ? "" : " | ", fmt_word[fi]);
+			first = 0;
+		}
+		/* An empty mask cannot be written - draft_missing_of refuses it
+		 * - so this is the belt on a draft that reached here anyway. */
+		if (first)
+			fprintf(f, "KOF_FMT_ANY");
+		fprintf(f, ");\n");
+	}
 	fprintf(f, "KOF_TARGET_NAME(%s, \"%s\");\n\n",
 		kof_maltype_ident(e->dr.maltype), safe);
 

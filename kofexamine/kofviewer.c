@@ -552,6 +552,53 @@ static int hex_last(void)
 		   4 * MAX_GROUP)
 
 /*
+ * How much encoded text the decoder will hold.
+ *
+ * A base64 payload out of a dropper is a few hundred bytes; this is past every
+ * one measured and still a field a terminal can scroll through without the
+ * caret arithmetic becoming the slow part.
+ */
+#define ENC_IN_MAX 8192u
+
+/*
+ * THE CODINGS THE STRING DECODER OFFERS.
+ *
+ * Up here, above the chooser that lists them, because the list and the box are
+ * two places and the vocabulary is one. Every one of these either has no key or
+ * has a key somebody can TYPE - a coding whose key has to be RECOVERED is a
+ * different problem and belongs in a module that derives it, the way
+ * bases/unp/ezuri.c does.
+ */
+enum enc_codec {
+	ENC_B64 = 0,
+	ENC_HEX,
+	ENC_XOR,          /* one byte, typed */
+	ENC_ADD,          /* byte + n, typed - subsumes a byte rotate */
+	/*
+	 * CAESAR, AND IT REPLACES BOTH A BIT ROTATE AND A FIXED ROT13.
+	 *
+	 * They were two controls for one idea and neither was the useful half.
+	 * ROT13 is Caesar with the key written into its name, so it cannot
+	 * decode the rot-7 next to it; a BIT rotate turns text into bytes
+	 * outside ASCII almost every time, which is the opposite of what a
+	 * box that decodes encoded TEXT is for.
+	 *
+	 * One coding with a typed key covers rot13 by typing 13, and every
+	 * other shift by typing it.
+	 */
+	ENC_CAESAR,
+	ENC_REVERSE,
+	ENC_CODEC_COUNT
+};
+
+static const char *enc_codec_name(int c);
+static int enc_takes_key(uint32_t t);
+
+/* The two text fields, by the edit id the rest of this file uses for focus. */
+#define ED_ENC_IN  540
+#define ED_ENC_KEY 541
+
+/*
  * DLG_ROWS / DLG_COLS - what a dialog's recorded text can hold.
  *
  * Sized from the boxes themselves: neither is taller than 28 rows and the
@@ -646,7 +693,28 @@ static int literal_safe(const uint8_t *b, uint32_t n)
  * around its items.
  */
 #define CH_ITEMS (MAX_DECL + 2)
+
+/*
+ * ONE PALETTE FOR EVERY POPUP - the menu bar's, which is the darker one.
+ *
+ * The choosers and the right-click menu were drawn on white (47), the bar on
+ * bright black (100). Side by side on a dark terminal the white ones glare,
+ * and two panels that do the same job should not look like two different
+ * programs. Defined here rather than beside the bar because the popups are
+ * drawn first and a define is only visible below itself.
+ */
+#define BAR_ON   "\033[100;97m"    /* an item that can be used */
+#define BAR_OFF  "\033[100;37m"    /* the same panel, dimmer text */
+#define BAR_CUR  "\033[107;30m"    /* the row under the cursor */
+
+/*
+ * The widest a list may get. It is a CAP, not the width: the drawn width is
+ * chooser.w, measured from the longest row, so a list of "ELF / PE / MachO"
+ * is three columns wider than "MachO" rather than thirty-eight wide with
+ * thirty columns of empty highlight after it.
+ */
 #define CH_W     38
+#define CH_W_MIN 12
 
 enum ch_what {
 	CH_NONE = 0,
@@ -662,6 +730,10 @@ enum ch_what {
 	 */
 	CH_RANGE4,
 	CH_RANGE_ADD,   /* which region to declare as a new range */
+	CH_ENC_TYPE,    /* which coding the decoder should apply */
+	CH_FMT,         /* what to do with one target format */
+	CH_FMT_CAT,     /* which KIND of format - the first half of adding one */
+	CH_FMT_ADD,     /* which format of that kind */
 	CH_RANGE_EXT,   /* which region to extend the subject range with */
 	CH_RANGE_DROP,  /* which region to drop off the subject range */
 	CH_LEVEL,       /* infect or suspect */
@@ -702,6 +774,13 @@ struct chooser {
 	int      what;
 	uint32_t arg;               /* which group it is about */
 	int      n, sel;
+	/*
+	 * THE DRAWN WIDTH, measured from the rows once they are all added.
+	 * Every place that asks how wide the list is - the draw, the click
+	 * test, and where a submenu is opened beside it - reads this, so a
+	 * list cannot be drawn one width and clicked at another.
+	 */
+	int      w;
 	uint32_t arg2;              /* the narrowest range, for CH_RANGE */
 	char     item[CH_ITEMS][CH_W];
 	/*
@@ -1448,6 +1527,12 @@ struct view {
 	uint32_t    n_rng_hs;
 	int         rga_c0, rga_c1; /* "[+ Add scan range]" at the row's end */
 	int         rgf_c0, rgf_c1; /* "Update string regions" - where they are */
+	/* The target formats on their row: each name's columns, and the button
+	 * that adds one. Recorded where they are drawn, read where they are
+	 * clicked - the arrangement every other control here uses. */
+	int         fmt_hs[KOF_FMT_COUNT][2];
+	uint32_t    n_fmt_hs;
+	int         fma_c0, fma_c1;
        /* the region the range menu was built on */
 	/*
 	 * Ranges the draft declares that no matcher names yet.
@@ -1577,6 +1662,13 @@ struct view {
 	/* Set while a sub-scan runs: swallow its echo of the object it was
 	 * given. See on_object. */
 	int         skip_root;
+	/*
+	 * WHERE THE OBJECT LIST ENDED BEFORE A RERUN, or 0 for an ordinary
+	 * collect. See the dedup in on_object: everything below this index was
+	 * already in the tree when the rerun started, so a child that matches
+	 * one of them is the same child reported twice.
+	 */
+	uint32_t    dedup_from;
 
 	/* Which top-level item's submenu is showing, -1 for none. */
 	int         bar_sub;
@@ -1606,6 +1698,40 @@ struct view {
 	 */
 	int         help_off;
 	int         help_btn_y, help_btn_x0, help_btn_x1;
+	/*
+	 * THE DECODER, AND IT IS A FORM RATHER THAN A REPORT.
+	 *
+	 * Text in, a coding chosen, a key when the coding takes one, plaintext
+	 * out - the shape of every decoder tab an analyst already knows.
+	 *
+	 * A FORM AND NOT AN AUTOMATIC TABLE, and the reason is where the text
+	 * comes from: usually NOT this file. It is pasted - out of a log, a
+	 * pcap, a mail, a screenshot somebody typed back in - and a box that
+	 * could only work on bytes already in the object would be closed again
+	 * immediately. "Decode selection" fills the field from the hex pane,
+	 * which is the convenience; typing or pasting is the normal case.
+	 */
+	int         enc_open;
+	char        enc_in[ENC_IN_MAX];        /* the encoded text */
+	char        enc_key[32];               /* for codings that take one */
+	uint32_t    enc_in_off, enc_key_off;   /* how far each field scrolled */
+	uint32_t    enc_type;                  /* which coding */
+	uint32_t    enc_res_n;                 /* plaintext bytes, 0 for none */
+	int         enc_done;                  /* Decode has been pressed */
+	/* The controls, recorded where they are drawn and read where they are
+	 * clicked - the arrangement every other dialog here uses. */
+	int         e_in[2], e_type[2], e_key[2], e_go[2], e_help[2];
+	/*
+	 * THE PLAINTEXT WINDOW: how far down and how far across.
+	 *
+	 * A decoded script is longer than any box and its lines are longer than
+	 * any width, so the result is a WINDOW over it rather than a preview of
+	 * it. Both offsets are the reader's, moved by the wheel and by dragging
+	 * a selection past the edge, and both are clamped where the window is
+	 * drawn - which is the only place that knows how much fits.
+	 */
+	uint32_t    enc_voff, enc_hoff;
+	int         enc_txt_y, enc_txt_x, enc_txt_w, enc_txt_h;
 	int         prop_open;      /* the properties page is up */
 	uint32_t    prop_off;       /* the first of its lines on screen */
 	int         prop_x0, prop_x1, prop_y;   /* its close control */
@@ -1903,6 +2029,49 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	if (v->skip_root) {
 		v->skip_root = 0;
 		return 0;
+	}
+
+	/*
+	 * A RERUN'S DUPLICATES, dropped.
+	 *
+	 * emu_here rescans the SELECTED OBJECT'S OWN BYTES to put the
+	 * interpreter in front of them, and a scan runs every producer rather
+	 * than only the one that was asked for - so a child another module had
+	 * already carved out of those bytes on the first pass is reported again
+	 * and appended beside itself. Measured: an ELF carrying a "base64 -d"
+	 * command showed two identical "//0:SCRIPT base64" rows after one press
+	 * of Unpack with emulator.
+	 *
+	 * NOT FIXED BY ASKING THE ENGINE FOR EMULATOR OUTPUT ONLY. It already
+	 * is asked that - opt.emu_use is KOF_EMU_ONLY - and that governs which
+	 * UNPACKER runs, not which producers do; and a child the interpreter
+	 * genuinely recovers may be one another module could also have found,
+	 * so producer is the wrong thing to filter on anyway. What makes a row
+	 * a duplicate is that the same object is already in the list: same
+	 * engine name, same length, same bytes.
+	 *
+	 * The pendings are dropped with it. on_debug holds a producer's name
+	 * for the next object announced, and returning without taking it would
+	 * hand this object's note to whatever came next - so a dropped
+	 * duplicate would rename its own successor.
+	 */
+	if (v->dedup_from) {
+		uint32_t k;
+
+		for (k = 0; k < v->dedup_from && k < v->n_obj; k++) {
+			const struct object *e = &v->obj[k];
+
+			if (e->buf.n != len || strcmp(e->name, name) != 0)
+				continue;
+			if (!e->buf.p ||
+			    memcmp(e->buf.p, bytes, (size_t)len) != 0)
+				continue;
+			v->pending[0] = 0;
+			v->pending_ver = -1;
+			v->pend_payload = v->pend_paylen = 0;
+			v->pend_paybits = 0;
+			return 0;
+		}
 	}
 
 	/*
@@ -6308,6 +6477,63 @@ static void ch_add_verb_sub(struct chooser *c, const char *t, unsigned verb)
  * offers stays next to what picking from it does - two halves of one decision,
  * which drift apart the moment they live in different functions.
  */
+/*
+ * FORMATS BY KIND, because eighteen names in one column is a list nobody reads.
+ *
+ * The grouping is the reader's question and not the enum's order: somebody
+ * adding a format to a rule is thinking "this also applies to documents", not
+ * "this also applies to number nine". The enum stays in whatever order the
+ * engine needs; this says how to present it.
+ *
+ * A format missing from every row here would be unreachable, so the last row is
+ * a catch-all built by subtraction rather than written out - a format added to
+ * the engine turns up under Other until somebody files it, instead of
+ * disappearing.
+ */
+struct fmt_cat {
+	const char *name;
+	uint32_t    mask;
+};
+
+#define FMT_B(f) (1u << (f))
+
+static const struct fmt_cat g_fmt_cat[] = {
+	/* PLURAL, because each row is a GROUP of formats and the submenu it
+	 * opens is the list. "Media" and "Other" take no s. */
+	{ "Executables", FMT_B(KOF_FMT_ELF) | FMT_B(KOF_FMT_PE) |
+			 FMT_B(KOF_FMT_MACHO) },
+	{ "Scripts",     FMT_B(KOF_FMT_SCRIPT) | FMT_B(KOF_FMT_TEXT) },
+	{ "Documents",   FMT_B(KOF_FMT_DOCOLE) | FMT_B(KOF_FMT_DOCZIP) |
+			 FMT_B(KOF_FMT_RTF) | FMT_B(KOF_FMT_PDF) },
+	{ "Archives",    FMT_B(KOF_FMT_ZIP) | FMT_B(KOF_FMT_TAR) |
+			 FMT_B(KOF_FMT_7Z) | FMT_B(KOF_FMT_RAR) |
+			 FMT_B(KOF_FMT_XZ) | FMT_B(KOF_FMT_GZIP) },
+	{ "Media",       FMT_B(KOF_FMT_IMAGE) | FMT_B(KOF_FMT_FONT) }
+};
+
+#define FMT_CAT_N (sizeof g_fmt_cat / sizeof g_fmt_cat[0])
+
+/* Everything the rows above do not name, so nothing can be unreachable. */
+static uint32_t fmt_cat_other(void)
+{
+	uint32_t all = (uint32_t)((1u << KOF_FMT_COUNT) - 1u), i;
+
+	for (i = 0; i < FMT_CAT_N; i++)
+		all &= ~g_fmt_cat[i].mask;
+	return all;
+}
+
+/* The mask of category `i`, with the catch-all last. */
+static uint32_t fmt_cat_mask(uint32_t i)
+{
+	return i < FMT_CAT_N ? g_fmt_cat[i].mask : fmt_cat_other();
+}
+
+static const char *fmt_cat_name(uint32_t i)
+{
+	return i < FMT_CAT_N ? g_fmt_cat[i].name : "Other";
+}
+
 static void ch_open(struct view *v, int what, uint32_t arg, int row, int col);
 /* The removable scan ranges, listed the same way where the menu is built and
  * where a pick is carried out. Defined beside rng_apply, used here first. */
@@ -6675,6 +6901,62 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		 * means is a sentence they read once and then read past. */
 		ch_add(c, "or");
 		ch_add(c, "and");
+	} else if (what == CH_FMT) {
+		/*
+		 * ONE FORMAT'S OWN MENU: swap it for another, or drop it.
+		 *
+		 * `arg` is which of the set was clicked, counted in format
+		 * order - the same walk that drew the names, so the row pressed
+		 * and the row acted on cannot drift apart.
+		 *
+		 * Every other format is offered as a SWITCH rather than as an
+		 * add, because that is what clicking a name means: this one,
+		 * changed. Adding is the button at the end of the row.
+		 */
+		uint8_t f;
+
+		for (f = 0; f < KOF_FMT_COUNT; f++)
+			if (!(v->ed.dr.fmt_mask & (1u << f))) {
+				char t[CH_W];
+
+				snprintf(t, sizeof t, "Switch to %.20s",
+					 kof_format_name(f));
+				ch_add(c, t);
+			}
+		ch_add(c, "Remove this format");
+	} else if (what == CH_FMT_CAT) {
+		/* Only the kinds that still have something to offer - a row
+		 * that opens an empty submenu is a row that wastes a click. */
+		uint32_t ci;
+
+		for (ci = 0; ci <= FMT_CAT_N; ci++)
+			if (fmt_cat_mask(ci) & ~v->ed.dr.fmt_mask)
+				/* Each opens a list rather than acting, so
+				 * each carries the menu bar's ">" - see
+				 * chooser.sub. */
+				ch_add_verb_sub(c, fmt_cat_name(ci), 0);
+	} else if (what == CH_FMT_ADD) {
+		/* One kind's formats, and only what is not already there: a
+		 * list that offers what it will refuse lies about itself. */
+		uint32_t have = fmt_cat_mask(arg) & ~v->ed.dr.fmt_mask;
+		uint8_t f;
+
+		for (f = 0; f < KOF_FMT_COUNT; f++)
+			if (have & (1u << f))
+				ch_add(c, kof_format_name(f));
+	} else if (what == CH_ENC_TYPE) {
+		/*
+		 * A LIST, NOT A CYCLE. Stepping a control through seven values
+		 * to reach the one you want is a control that has to be poked
+		 * six times and watched while you do it. The chooser is already
+		 * here, every other multi-valued field in this file uses it,
+		 * and it shows all seven at once with the current one marked.
+		 */
+		int t;
+
+		for (t = 0; t < ENC_CODEC_COUNT; t++)
+			ch_add(c, enc_codec_name(t));
+		c->sel = (int)v->enc_type;
 	} else if (what == CH_SWITCH) {
 		/*
 		 * Three answers, and the one that loses work is not the first.
@@ -6778,9 +7060,35 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		c->row = g_rows - c->n;
 	if (c->row < 1)
 		c->row = 1;
+	/*
+	 * Wide enough for the longest row and no wider. A row is drawn as a
+	 * leading space, the text, then either two columns of padding or one
+	 * plus the submenu ">" - so the text field is w - 2, or w - 3 when
+	 * any row in the list opens another.
+	 */
+	{
+		int wi, longest = 0, any_sub = 0;
+
+		for (wi = 0; wi < c->n; wi++) {
+			int l = (int)strlen(c->item[wi]);
+
+			if (l > longest)
+				longest = l;
+			if (c->sub[wi])
+				any_sub = 1;
+		}
+		c->w = longest + (any_sub ? 4 : 3);
+		if (c->w < CH_W_MIN)
+			c->w = CH_W_MIN;
+		if (c->w > CH_W)
+			c->w = CH_W;
+		if (c->w > g_cols - 2)
+			c->w = g_cols - 2;
+	}
+
 	c->col = col;
-	if (c->col + CH_W > g_cols)
-		c->col = g_cols - CH_W;
+	if (c->col + c->w > g_cols)
+		c->col = g_cols - c->w;
 	if (c->col < 1)
 		c->col = 1;
 }
@@ -6812,6 +7120,104 @@ static void ch_take(struct view *v)
 	v->ch_up.open = 0;
 	if (c->what == CH_TYPE) {
 		v->ed.dr.maltype = (uint32_t)c->sel;
+		return;
+	}
+	if (c->what == CH_FMT_CAT) {
+		/* The nth kind that still has something to offer - the same
+		 * walk that built the list. Picking one opens its formats
+		 * beside it, the way every other two-level menu here does. */
+		uint32_t ci, n = 0;
+		struct chooser up = *c;
+
+		for (ci = 0; ci <= FMT_CAT_N; ci++) {
+			if (!(fmt_cat_mask(ci) & ~v->ed.dr.fmt_mask))
+				continue;
+			if ((int)n == c->sel) {
+				up.open = 1;
+				ch_open(v, CH_FMT_ADD, ci,
+					up.row + up.sel + 1, up.col + up.w);
+				v->ch_up = up;
+				return;
+			}
+			n++;
+		}
+		return;
+	}
+	if (c->what == CH_FMT || c->what == CH_FMT_ADD) {
+		uint8_t f, n = 0, pick = KOF_FMT_COUNT;
+		uint32_t which = c->arg;
+		uint32_t pool = c->what == CH_FMT_ADD
+			      ? (fmt_cat_mask(c->arg) & ~v->ed.dr.fmt_mask)
+			      : ~v->ed.dr.fmt_mask;
+
+		/* The nth format the list offered, walked again rather than
+		 * remembered so the two cannot disagree. */
+		for (f = 0; f < KOF_FMT_COUNT; f++)
+			if (pool & (1u << f)) {
+				if ((int)n == c->sel)
+					pick = f;
+				n++;
+			}
+		if (c->what == CH_FMT_ADD) {
+			if (pick < KOF_FMT_COUNT)
+				v->ed.dr.fmt_mask |= 1u << pick;
+			return;
+		}
+		/* The nth format that IS in the set - the one whose name was
+		 * clicked. */
+		{
+			uint8_t cur = KOF_FMT_COUNT;
+
+			n = 0;
+			for (f = 0; f < KOF_FMT_COUNT; f++)
+				if (v->ed.dr.fmt_mask & (1u << f)) {
+					if (n == which)
+						cur = f;
+					n++;
+				}
+			if (cur >= KOF_FMT_COUNT)
+				return;
+			if (c->sel >= 0 && pick < KOF_FMT_COUNT) {
+				v->ed.dr.fmt_mask &= ~(1u << cur);
+				v->ed.dr.fmt_mask |= 1u << pick;
+			} else {
+				/* The last row is Remove, and it is allowed to
+				 * empty the set - an empty one is refused by
+				 * draft_missing_of, which says so in words
+				 * rather than by a control that will not
+				 * respond. */
+				v->ed.dr.fmt_mask &= ~(1u << cur);
+			}
+		}
+		return;
+	}
+	if (c->what == CH_ENC_TYPE) {
+		if (c->sel >= 0 && c->sel < ENC_CODEC_COUNT)
+			v->enc_type = (uint32_t)c->sel;
+		/* The result belonged to the coding that produced it. */
+		v->enc_res_n = 0;
+		v->enc_done = 0;
+		/*
+		 * AND THE CARET GOES WHERE THE READER WILL TYPE NEXT.
+		 *
+		 * Picking from the chooser goes through the general click path,
+		 * which clears the focus on the way past - "any click leaves
+		 * whatever was being typed". So after choosing a coding there
+		 * was no field with the caret at all, and the next Tab moved to
+		 * the input rather than to the key: choosing caesar and typing
+		 * the shift put the shift into the encoded text.
+		 *
+		 * A coding with a key wants the key next; one without wants the
+		 * text. Saying so here is also the answer to "what did picking
+		 * this actually do", which a blank caret does not give.
+		 */
+		if (enc_takes_key(v->enc_type)) {
+			v->edit = ED_ENC_KEY;
+			v->caret = (uint32_t)strlen(v->enc_key);
+		} else {
+			v->edit = ED_ENC_IN;
+			v->caret = (uint32_t)strlen(v->enc_in);
+		}
 		return;
 	}
 	if (c->what == CH_ARCH) {
@@ -6896,7 +7302,7 @@ static void ch_take(struct view *v)
 
 				up.open = 1;
 				ch_open(v, CH_RANGE_EXT, cur,
-					up.row + up.sel + 1, up.col + CH_W);
+					up.row + up.sel + 1, up.col + up.w);
 				v->ch_up = up;
 			}
 			return;
@@ -6906,7 +7312,7 @@ static void ch_take(struct view *v)
 
 			up.open = 1;
 			ch_open(v, CH_RANGE_DROP, cur,
-				up.row + up.sel + 1, up.col + CH_W);
+				up.row + up.sel + 1, up.col + up.w);
 			v->ch_up = up;
 			return;
 		}
@@ -7042,7 +7448,7 @@ static void ch_take(struct view *v)
 
 			up.open = 1;
 			ch_open(v, CH_CSWAP, c->arg,
-				up.row + up.sel + 1, up.col + CH_W);
+				up.row + up.sel + 1, up.col + up.w);
 			v->ch_up = up;
 			return;
 		}
@@ -7145,13 +7551,12 @@ static void draw_one_chooser(struct out *o, const struct chooser *c, int live)
 		/* The parent keeps its highlight so the line the submenu is
 		 * qualifying stays pointed at, but in a colour that says the
 		 * keyboard is not there any more. */
-		out_str(o, i == c->sel ? (live ? A_SEL : "\033[100;97m")
-				       : "\033[47;30m");
+		out_str(o, i == c->sel ? (live ? BAR_CUR : BAR_ON) : BAR_ON);
 		/* The ">" sits at the far edge, as the menu bar draws it. */
 		if (c->sub[i])
-			out_fmt(o, " %-*.*s>", CH_W - 3, CH_W - 3, c->item[i]);
+			out_fmt(o, " %-*.*s>", c->w - 3, c->w - 3, c->item[i]);
 		else
-			out_fmt(o, " %-*.*s", CH_W - 2, CH_W - 2, c->item[i]);
+			out_fmt(o, " %-*.*s", c->w - 2, c->w - 2, c->item[i]);
 		out_str(o, A_OFF);
 	}
 }
@@ -8637,9 +9042,20 @@ static void draw_decl_head(struct out *o, struct view *v)
 	int top = decl_top();
 	int c;
 
+	/*
+	 * TYPE FIRST, THEN FAMILY, and the order is the name a verdict is read
+	 * in: "Trojan:mirai" says what KIND before it says which one. The row
+	 * used to lead with the family, so the eye met a name with nothing to
+	 * hang it on.
+	 */
 	row_start(o, top, 1);
 	c = 2 + (int)o->col_hint;
-	out_fmt(o, A_DIM " Family " A_OFF "%s[", v->edit == 1 ? A_SEL : A_ID);
+	out_fmt(o, A_DIM " Type " A_OFF A_ID "[%s]" A_OFF,
+		maltype_word[v->ed.dr.maltype % MALTYPE_N]);
+	v->t_c0 = c; v->t_c1 = (int)o->col_hint;
+
+	c = 2 + (int)o->col_hint;
+	out_fmt(o, A_DIM "  Family " A_OFF "%s[", v->edit == 1 ? A_SEL : A_ID);
 	field_draw(o, v->ed.dr.family, v->caret, &v->fam_off,
 		   v->edit == 1 ? 24 : (int)strlen(v->ed.dr.family[0] ? v->ed.dr.family
 								: "?"),
@@ -8647,17 +9063,34 @@ static void draw_decl_head(struct out *o, struct view *v)
 	out_str(o, "]" A_OFF);
 	v->f_c0 = c; v->f_c1 = (int)o->col_hint;
 
-	c = 2 + (int)o->col_hint;
-	out_fmt(o, A_DIM "  Type " A_OFF A_ID "[%s]" A_OFF,
-		maltype_word[v->ed.dr.maltype % MALTYPE_N]);
-	v->t_c0 = c; v->t_c1 = (int)o->col_hint;
+	/* No label: the box says what it is, and the row is already a line of
+	 * labels. */
+	out_str(o, "  ");
+	c = 1 + (int)o->col_hint;
+	{
+		/*
+		 * As wide as the row has left, and scrolled within that.
+		 *
+		 * A fixed width would either waste the space on a wide terminal
+		 * or cut the text short on a narrow one; what is actually
+		 * available is known here and nowhere else.
+		 */
+		size_t len = strlen(v->ed.dr.note);
+		/* Less what the New button needs at the right hand end: the
+		 * note takes what is left of the row, and something else now
+		 * has the end of it. */
+		int room = g_cols - c - 3 - NEW_BTN_W;
+		uint32_t off;
 
-	c = 2 + (int)o->col_hint;
-	/* Disabled keeps the background and loses contrast, it does not lose the
-	 * text - 100;90 is bright black on bright black, the same colour twice,
-	 * which is a grey block where a label should be. */
-	out_fmt(o, "  " A_ID "[+ Option]" A_OFF);
-	v->o_c0 = c; v->o_c1 = (int)o->col_hint;
+		if (room < 8)
+			room = 8;
+		(void)len; (void)off;
+		out_fmt(o, "%s[", v->edit == 501 ? A_SEL : A_DIM);
+		field_draw(o, v->ed.dr.note, v->caret, &v->note_off, room,
+			   v->edit == 501, "Comment...", v->field_all);
+		out_str(o, "]" A_OFF);
+	}
+	v->nt_c0 = c; v->nt_c1 = (int)o->col_hint;
 
 	{
 		/*
@@ -8701,36 +9134,6 @@ static void draw_decl_head(struct out *o, struct view *v)
 		 */
 		(void)why; (void)dup; (void)near_miss;
 	}
-
-	/* No label: the box says what it is, and the row is already a line of
-	 * labels. */
-	out_str(o, "  ");
-	c = 1 + (int)o->col_hint;
-	{
-		/*
-		 * As wide as the row has left, and scrolled within that.
-		 *
-		 * A fixed width would either waste the space on a wide terminal
-		 * or cut the text short on a narrow one; what is actually
-		 * available is known here and nowhere else.
-		 */
-		size_t len = strlen(v->ed.dr.note);
-		/* Less what the New button needs at the right hand end: the
-		 * note takes what is left of the row, and something else now
-		 * has the end of it. */
-		int room = g_cols - c - 3 - NEW_BTN_W;
-		uint32_t off;
-
-		if (room < 8)
-			room = 8;
-		(void)len; (void)off;
-		out_fmt(o, "%s[", v->edit == 501 ? A_SEL : A_DIM);
-		field_draw(o, v->ed.dr.note, v->caret, &v->note_off, room,
-			   v->edit == 501, "Comment...", v->field_all);
-		out_str(o, "]" A_OFF);
-	}
-	v->nt_c0 = c; v->nt_c1 = (int)o->col_hint;
-
 	/*
 	 * THROW THE DRAFT AWAY, at the far right of the row.
 	 *
@@ -8749,9 +9152,59 @@ static void draw_decl_head(struct out *o, struct view *v)
 	out_fmt(o, " %s[ Discard ]" A_OFF,
 		v->ed.dr.n_decl || v->ed.dr.family[0] ? A_ID : "\033[47;90m");
 	v->nw_c1 = g_cols;
+}
 
+/*
+ * draw_decl_fmts - what object formats the rule applies to.
+ *
+ * Its own row above the options, because it is not optional: a module must say
+ * what it applies to or ksigbuilder refuses it, and a required declaration
+ * drawn among the optional ones reads as one more thing you may skip.
+ *
+ * Shaped like the scan ranges below it on purpose - a list of names, each one a
+ * control for itself, and a button at the END of the list rather than flushed
+ * right. The two rows answer the same kind of question and a reader who learns
+ * one has learned the other.
+ */
+static int draw_decl_fmts(struct out *o, struct view *v, int r)
+{
+	if (PR_VIS(r)) {
+		uint8_t f;
+		int c;
 
-	/* The optional declarations, one per row, each removable. */
+		row_start(o, PR(r), 1);
+		out_fmt(o, A_DIM " Format " A_OFF);
+		v->n_fmt_hs = 0;
+		for (f = 0; f < KOF_FMT_COUNT; f++) {
+			int c0;
+
+			if (!(v->ed.dr.fmt_mask & (1u << f)))
+				continue;
+			out_str(o, " ");
+			c0 = o->col_base + (int)o->col_hint;
+			out_fmt(o, A_LOC "%s" A_OFF, kof_format_name(f));
+			if (v->n_fmt_hs < KOF_FMT_COUNT) {
+				v->fmt_hs[v->n_fmt_hs][0] = c0;
+				v->fmt_hs[v->n_fmt_hs][1] =
+					o->col_base + (int)o->col_hint - 1;
+				v->n_fmt_hs++;
+			}
+		}
+		/* WARN and not DIM: a draft with no format cannot be written,
+		 * and the row that says so should not look like a row with
+		 * nothing interesting on it. */
+		if (!v->n_fmt_hs)
+			out_str(o, A_WARN " None" A_OFF);
+
+		out_str(o, "  ");
+		c = o->col_base + (int)o->col_hint;
+		out_fmt(o, "\033[100;97m[+ Formats]" A_OFF);
+		v->fma_c0 = c;
+		v->fma_c1 = o->col_base + (int)o->col_hint - 1;
+
+	}
+	r++;                            /* the target format row, always */
+	return r;
 }
 
 /*
@@ -8762,6 +9215,29 @@ static void draw_decl_head(struct out *o, struct view *v)
  * scope and could reach each other's locals; `r` is the panel's running row
  * number and it is now passed in and handed back rather than shared.
  */
+/*
+ * The button that adds an optional declaration, on a row of its own under the
+ * formats.
+ *
+ * NOT on the Format row and not on the name row above it. It belongs to the
+ * list it extends - the optional declarations drawn below - and the list has no
+ * row at all until one exists, so the button has to carry the row itself.
+ */
+static int draw_decl_optbtn(struct out *o, struct view *v, int r)
+{
+	if (PR_VIS(r)) {
+		int c;
+
+		row_start(o, PR(r), 1);
+		out_fmt(o, A_DIM " Option " A_OFF);
+		c = o->col_base + (int)o->col_hint;
+		out_fmt(o, " " A_ID "[+ Options]" A_OFF);
+		v->o_c0 = c; v->o_c1 = o->col_base + (int)o->col_hint - 1;
+	}
+	r++;                            /* the option button row, always */
+	return r;
+}
+
 static int draw_decl_opts(struct out *o, struct view *v, int r)
 {
 	uint32_t i;
@@ -8836,7 +9312,7 @@ static int draw_decl_ranges(struct out *o, struct view *v, int r)
 		uint32_t nr = rng_all(&v->ed, rm, ru, 2u * MAX_GROUP), k;
 
 		row_start(o, PR(r), 1);
-		out_fmt(o, A_DIM " Scan ranges " A_OFF);
+		out_fmt(o, A_DIM " Region " A_OFF);
 		/*
 		 * EACH NAME IS A CONTROL, and its own subject.
 		 *
@@ -8869,7 +9345,7 @@ static int draw_decl_ranges(struct out *o, struct view *v, int r)
 			}
 		}
 		if (!nr)
-			out_str(o, A_DIM " none yet" A_OFF);
+			out_str(o, A_DIM " None" A_OFF);
 		/*
 		 * And a way to declare one more, at the END of the names rather
 		 * than flushed to the right edge: it belongs to the list it
@@ -8881,7 +9357,7 @@ static int draw_decl_ranges(struct out *o, struct view *v, int r)
 
 			out_str(o, "  ");
 			c0 = o->col_base + (int)o->col_hint;
-			out_fmt(o, "\033[100;97m[+ Scan range]" A_OFF);
+			out_fmt(o, "\033[100;97m[+ Scan region]" A_OFF);
 			v->rga_c0 = c0;
 			v->rga_c1 = o->col_base + (int)o->col_hint - 1;
 		}
@@ -9618,8 +10094,10 @@ static void draw_decl(struct out *o, struct view *v)
 
 	/* ---- what the module declares ---- */
 	draw_decl_head(o, v);
-	r = draw_decl_opts(o, v, r);
+	r = draw_decl_fmts(o, v, r);
 	r = draw_decl_ranges(o, v, r);
+	r = draw_decl_optbtn(o, v, r);
+	r = draw_decl_opts(o, v, r);
 	r = draw_decl_strings(o, v, r);
 	r = draw_decl_matchers(o, v, r);
 	r = draw_decl_conds(o, v, r);
@@ -10444,6 +10922,15 @@ enum menu_action {
 	M_DECL_STR,
 	M_DECL_HEX,
 	M_DISASM,
+	/*
+	 * The selected bytes, put into the Decoder's input field.
+	 *
+	 * On the bytes and not the offset column: it is a question about
+	 * CONTENTS. It does not decode anything by itself - it fills the field
+	 * and opens the box, because which coding these bytes are is the
+	 * reader's to say and not this menu's to guess.
+	 */
+	M_DECODE,
 	M_GOTO,
 	M_FIND_STR,
 	M_FIND_HEX,
@@ -10462,6 +10949,16 @@ enum menu_action {
 	M_EVT_COPY,
 	M_EVT_COPY_ALL,
 	M_EVT_DECL,
+	/*
+	 * THE STRING DECODER'S PLAINTEXT WINDOW, and its own two items for the
+	 * reason the event box has its own two: what is selected there is a run
+	 * of CHARACTERS in something this program decoded, not a range of bytes
+	 * in the file, so "Copy text" over there would mean a different thing
+	 * from "Copy text" here. One item that means two things depending on
+	 * where the reader right-clicked is an item nobody can predict.
+	 */
+	M_DEC_COPY,
+	M_DEC_DECL,
 	M_COUNT
 };
 
@@ -10474,6 +10971,15 @@ enum menu_action {
  * place; `ctx` is a mask, 1 for the bytes and 2 for the offset column, and the
  * items that make sense on either carry both.
  */
+/* The Decoder: defined with the other dialogs, reached from the menu bar, from
+ * the hex pane's own menu, and from the draw loop. */
+static void draw_enc(struct out *o, struct view *v);
+static int  enc_click(struct view *v, int rclick);
+static int  enc_in_text(const struct view *v, int y, int x);
+static int  click_menu(struct view *v);
+static size_t enc_sel_text(struct view *v, char *out, size_t cap);
+static void enc_open_with(struct view *v, const uint8_t *p, uint32_t n);
+
 static const struct {
 	const char *label;
 	int         ctx;
@@ -10514,6 +11020,7 @@ static const struct {
 	 * exists to move to - which is the case it earns its place on.
 	 */
 	{ "View disassembly",     1, 2 },
+	{ "Decode selection", 1 | 4, 2 },
 	{ "Go to",                3, 3 },
 	/*
 	 * Offered in the panel too: looking at an instruction and wanting to
@@ -10541,7 +11048,9 @@ static const struct {
 	 * different item and does not exist yet.
 	 */
 	{ "Copy all text",        8, 0 },
-	{ "Declare as text",      8, 1 }
+	{ "Declare as text",      8, 1 },
+	{ "Copy text",           16, 0 },
+	{ "Declare as string",   16, 1 }
 };
 
 #define MENU_W 24
@@ -10588,6 +11097,9 @@ static int menu_enabled(struct view *v, int a)
 		 */
 		return v->dis_open && v->dis_lines > 0 &&
 		       (v->dis_have || dis_hex_sel(v));
+	if (a == M_DECODE)
+		/* Bytes to put in the field is the whole requirement. */
+		return v->sel_a != KOF_BROKEN && v->sel_b != KOF_BROKEN;
 	if (a == M_DISASM) {
 		struct object *ob = cur_obj(v);
 
@@ -10669,6 +11181,11 @@ static int menu_enabled(struct view *v, int a)
 
 		return evt_sel_text(v, sel, sizeof sel) != 0;
 	}
+	if (a == M_DEC_COPY || a == M_DEC_DECL) {
+		char sel[8];
+
+		return enc_sel_text(v, sel, sizeof sel) != 0;
+	}
 	if (a == M_EVT_COPY_ALL) {
 		/* Hidden rather than greyed for a binary payload: greying it
 		 * would say "not yet", and the answer is not "not yet". */
@@ -10730,9 +11247,9 @@ static struct kv_menu ctx_menu(struct view *v)
 	m.rule_above = cm_rule;
 	m.label = cm_label;
 	m.w = MENU_W;
-	m.c_on  = "\033[47;30m";
-	m.c_off = "\033[47;90m";
-	m.c_cur = A_SEL;
+	m.c_on  = BAR_ON;
+	m.c_off = BAR_OFF;
+	m.c_cur = BAR_CUR;
 	return m;
 }
 
@@ -11335,6 +11852,45 @@ static void decl_add_text(struct view *v, const char *text, size_t n)
 	snprintf(d->rgn, sizeof d->rgn, "%s", "OBJDATA");
 	v->ed.dr.n_decl++;
 	v->ed.dr.sel_decl = v->ed.dr.n_decl - 1u;
+	/*
+	 * LOOKED FOR AT ONCE, and said so when it is not there.
+	 *
+	 * Nothing downstream asks whether a declared string is actually IN the
+	 * object: draft_missing_of checks ten things and presence is not one of
+	 * them, so a string that is nowhere still gets a matcher, a condition,
+	 * a generated source and a module that compiles - and never fires. The
+	 * failure has no symptom at all.
+	 *
+	 * It cannot bite a marker dragged out of the hex pane, because those
+	 * bytes came from the object. It bites every time on text this program
+	 * DECODED: the plaintext of a base64 run does not exist in the file,
+	 * only the base64 does. Locating it here costs one search per
+	 * declaration and turns that into a sentence the reader sees while
+	 * they are still looking at what they declared.
+	 */
+	/*
+	 * AND THE FORMAT THE RULE APPLIES TO, seeded once.
+	 *
+	 * The first string is declared on an object, and that object's format
+	 * is the one format the reader has already shown they care about.
+	 * Seeded rather than fixed: everything after this is theirs to add and
+	 * remove on the Format row.
+	 */
+	if (!v->ed.dr.fmt_mask) {
+		struct object *fo = cur_obj(v);
+
+		v->ed.dr.fmt_mask = 1u << ((fo && fo->fmt &&
+					    fo->ctx.format < KOF_FMT_COUNT)
+					   ? fo->ctx.format : KOF_FMT_UNKNOWN);
+	}
+	decl_locate(&v->ed, d);
+	if (d->at == KOF_BROKEN) {
+		v->act_ok = 0;
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "Declared, but these bytes are not in this object - "
+			 "a rule on them cannot fire here");
+		return;
+	}
 	snprintf(v->act_msg, sizeof v->act_msg,
 		 "declared %u character(s)%s", (unsigned)n,
 		 v->evt_wide ? " as a wide string" : "");
@@ -11449,6 +12005,13 @@ static void decl_add(struct view *v, int hex)
 	(void)g;
 	v->ed.dr.warn[0] = 0;
 	v->ed.dr.sel_decl = v->ed.dr.n_decl;
+	if (!v->ed.dr.fmt_mask) {
+		struct object *fo = cur_obj(v);
+
+		v->ed.dr.fmt_mask = 1u << ((fo && fo->fmt &&
+					    fo->ctx.format < KOF_FMT_COUNT)
+					   ? fo->ctx.format : KOF_FMT_UNKNOWN);
+	}
 	v->ed.dr.n_decl++;
 	/*
 	 * LOCATED, like every other path that produces a declaration.
@@ -11496,6 +12059,21 @@ static void menu_run(struct view *v, int a)
 		v->menu_open = 0;
 		return;
 	}
+	if (a == M_DEC_COPY || a == M_DEC_DECL) {
+		char sel[512];
+		size_t sn = enc_sel_text(v, sel, sizeof sel);
+
+		if (sn) {
+			if (a == M_DEC_COPY) {
+				copy_osc52(sel, sn);
+				copy_said(v, sn);
+			} else {
+				decl_add_text(v, sel, sn);
+			}
+		}
+		v->menu_open = 0;
+		return;
+	}
 	if (a == M_EVT_COPY || a == M_EVT_DECL) {
 		char sel[512];
 		size_t sn = evt_sel_text(v, sel, sizeof sel);
@@ -11514,6 +12092,57 @@ static void menu_run(struct view *v, int a)
 	if (a == M_COPY_DISASM) {
 		dis_copy(v);
 		v->menu_open = 0;
+		return;
+	}
+	if (a == M_DECODE) {
+		uint64_t bn = 0;
+		const uint8_t *bp = view_bytes(v, &bn);
+		uint64_t a0 = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
+		uint64_t b0 = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
+		uint64_t fa = view_map(v, a0, NULL);
+		uint64_t fb = view_map(v, b0, NULL);
+
+		v->menu_open = 0;
+		/*
+		 * Refused when the selection is not contiguous in the object:
+		 * a region is a list of extents, and a selection spanning two
+		 * of them is two ranges with a gap - handing that over as one
+		 * string would put bytes in the field that are not next to
+		 * each other in the file.
+		 */
+		if (!bp || fa == KOF_BROKEN || fb == KOF_BROKEN || fb < fa ||
+		    fb - fa != b0 - a0 || fb >= bn) {
+			say_note(&v->ed,
+				 "That selection is not one run of bytes");
+			return;
+		}
+		/*
+		 * AND IT HAS TO BE TEXT, which is not a restriction so much as
+		 * what the field is.
+		 *
+		 * The input holds a C string, so a NUL in the selection ends it
+		 * - and a selection out of an ELF's data usually starts with
+		 * one. Filling the field with that put an EMPTY box on the
+		 * screen with no reason given, which is the worst of the three
+		 * possible behaviours. Refusing and saying why is the honest
+		 * one: what this decodes is encoded TEXT, and bytes that are
+		 * not text were never going to be base64 or hex.
+		 */
+		{
+			uint64_t i;
+
+			for (i = fa; i <= fb; i++) {
+				uint8_t c = bp[i];
+
+				if (c == '\t' || c == '\n' || c == '\r' ||
+				    (c >= 0x20u && c <= 0x7eu))
+					continue;
+				say_note(&v->ed, "The selection is not text - "
+					 "this decodes encoded text");
+				return;
+			}
+		}
+		enc_open_with(v, bp + fa, (uint32_t)(fb - fa + 1u));
 		return;
 	}
 	if (a == M_DISASM) {
@@ -11936,6 +12565,17 @@ static void redraw(struct view *v)
 		draw_marker_line(&o, v);
 		if (v->show_list)
 			draw_list(&o, v);
+		/*
+		 * THE DECODER BEFORE THE CONTEXT MENU, because its plaintext
+		 * window has a menu of its own.
+		 *
+		 * Drawn after it, the box painted over the menu it had just
+		 * opened - the right-click did everything it was supposed to
+		 * and nothing appeared, which reads as a dead menu item. A
+		 * modal goes under whatever it pops up, not over it.
+		 */
+		if (v->enc_open)
+			draw_enc(&o, v);
 		if (v->menu_open)
 			draw_menu(&o, v);
 		draw_bar(&o, v);
@@ -12432,6 +13072,12 @@ enum bar_item {
 	 * bases/heur/scloader_00.c and on_debug.
 	 */
 	BI_FINDSC,
+	/*
+	 * The decoder. Beside BI_FINDSC because it answers the same kind of
+	 * question - "what is in here that is not in plain sight" - and above
+	 * the rules that act, because it only looks.
+	 */
+	BI_ENCSTR,
 	BI_UNPACKER,
 	/*
 	 * TWO DUMPS, AND ONLY ONE OF THEM IS EVER DRAWN.
@@ -12511,7 +13157,8 @@ static const struct {
 	{ "Symbols",           BM_ANALYSIS, -1, 0 },
 	{ "Disassembly",       BM_ANALYSIS, -1, 0 },
 	{ "Find shellcode in variables", BM_ANALYSIS, -1, 0 },
-	{ "Use ... unpacker",  BM_ANALYSIS, -1, 1 },
+	{ "String decoder",           BM_ANALYSIS, -1, 0 },
+	{ "Unpack with ...",   BM_ANALYSIS, -1, 1 },
 	{ "Dump",              BM_ANALYSIS, -1, 0 },
 	{ "Static unpacker",   BM_ANALYSIS, BI_DUMP, 0 },
 	{ "Emu unpacker",      BM_ANALYSIS, BI_DUMP, 0 },
@@ -12657,21 +13304,21 @@ static int bar_filt_verb(int i)
 static const char *bar_label(struct view *v, int i)
 {
 	/*
-	 * "Use X unpacker", naming the tool that will open the file.
+	 * "Unpack with X", naming the ACTION first and the tool second.
 	 *
-	 * Two earlier wordings were worse in the same way. "Reopen with"
-	 * named the mechanism rather than the result. "Examine with emulator"
-	 * named the result but read as though the menu would open the emulator
-	 * and show its insides - when what changes is only which unpacker is in
-	 * front of the same object. What the reader picks here is who does the
-	 * opening, and the label now says exactly that.
+	 * Three earlier wordings were worse. "Reopen with" named the mechanism
+	 * rather than the result. "Examine with emulator" read as though the
+	 * menu would open the emulator and show its insides. "Use Emu unpacker"
+	 * put the tool first and the verb nowhere - a row that begins "Use"
+	 * does not say what happens, and "Emu unpacker" as a noun is a thing
+	 * this program never calls anything anywhere else.
 	 *
-	 * "Emu" rather than "emulator" because the column is narrow and the
-	 * word is one a researcher reads without expanding.
+	 * "emulator" in full: the row is the widest in its menu either way, so
+	 * the abbreviation bought nothing and cost a reader the word.
 	 */
 	if (i == BI_UNPACKER) {
 		(void)v;
-		return "Use Emu unpacker";
+		return "Unpack with emulator";
 	}
 	/* Says which way the toggle goes, for the reason above. */
 	if (i == BI_DISASM)
@@ -13072,6 +13719,9 @@ static int bar_enabled(struct view *v, int i)
 	 */
 	case BI_FINDSC:    return 1;    /* shown only when there is one */
 	case BI_SYMS:      return 1;    /* shown only when there are symbols */
+	/* Always: the text it decodes usually comes from outside the file, so
+	 * there is nothing about the object that could make it unavailable. */
+	case BI_ENCSTR:    return 1;
 	case BI_KEYS:
 	case BI_ABOUT:     return 1;
 	/*
@@ -13112,9 +13762,6 @@ static int bar_enabled(struct view *v, int i)
  * the cursor is the one row that inverts, stated explicitly instead of reversing
  * whatever the terminal was left holding.
  */
-#define BAR_ON   "\033[100;97m"    /* an item that can be used */
-#define BAR_OFF  "\033[100;37m"    /* the same panel, dimmer text */
-#define BAR_CUR  "\033[107;30m"    /* the row under the cursor */
 
 /*
  * 37 and not 90 for the disabled row, which is the whole trick.
@@ -16145,9 +16792,14 @@ static void emu_here(struct view *v)
 	opt.emu_use = KOF_EMU_ONLY;
 	v->pending_ver = -1;
 	v->skip_root = 1;
+	/* Everything already in the list belongs to the first pass - see the
+	 * dedup in on_object. Zero afterwards, because an ordinary collect
+	 * starts from an empty list and has nothing to compare against. */
+	v->dedup_from = v->n_obj;
 	kof_scanner_on_debug(sc, on_debug, v);
 	kof_scan_bytes(sc, o->buf.p, o->buf.n, o->name, &opt, on_object, v);
 	kof_scanner_free(sc);
+	v->dedup_from = 0;
 	v->skip_root = 0;
 	/*
 	 * Marked whatever came of it. A run that recovered nothing has still
@@ -17170,6 +17822,10 @@ static void bar_run(struct view *v, int i)
 	case BI_PREV:    open_step(v, -1); break;
 	case BI_SEPARATE: separate_now(v); break;
 	case BI_REBUILD: rebuild_db(v); break;
+	case BI_ENCSTR:
+		enc_open_with(v, NULL, 0);      /* keeps whatever was typed */
+		v->act_msg[0] = 0;
+		break;
 	case BI_DASH:
 		/* Whatever the last copy or dump said belongs to the screen
 		 * it was said on, not to a page opened afterwards. */
@@ -18894,7 +19550,648 @@ static void dframe_end(struct out *o, const struct dframe *f, const char *foot)
  * same reason: the geometry exists in one place, the drawing, and a second copy
  * of the arithmetic in the click handler is a second thing to keep in step.
  */
-static struct dframe g_goto_f, g_find_f;
+static struct dframe g_goto_f, g_find_f, g_enc_f;
+
+/* ---- the decoder ---------------------------------------------------------
+ *
+ * WHAT IT IS FOR. A dropper carries its second stage encoded, and until the
+ * bytes are decoded every rule written against what the command DOES is written
+ * against something that is not in the file. The scanner extracts the case a
+ * decoder named itself - see bases/decomp/cmdb64_00.c - and that is the only
+ * case a scanner may take, because a run with no anchor is a guess and a
+ * scanner that guesses produces children nobody asked for.
+ *
+ * A PERSON TYPING INTO A FIELD IS NOT A GUESS. So this takes whatever they give
+ * it, applies whichever coding they name, and shows what comes out. Nothing
+ * here decides anything.
+ *
+ * THE CODINGS ARE THE ONES WITH NO KEY OR A KEY SOMEBODY CAN TYPE. That is the
+ * whole selection rule. A coding whose key has to be RECOVERED is a different
+ * problem and belongs in a module that derives it - see the note in
+ * bases/unp/ezuri.c, which does exactly that and is the shape to copy.
+ */
+
+/* What one decoding may produce. Past this it is not something a box on a
+ * terminal has anything to say about, and Extract re-runs from the field. */
+#define ENC_OUT_MAX (64u << 10)
+
+static uint8_t g_encbuf[ENC_OUT_MAX];
+
+static const char *enc_codec_name(int c)
+{
+	switch (c) {
+	case ENC_B64:     return "base64";
+	case ENC_HEX:     return "hex";
+	case ENC_XOR:     return "xor";
+	case ENC_ADD:     return "add";
+	case ENC_CAESAR:  return "caesar";
+	case ENC_REVERSE: return "reverse";
+	default:          return "?";
+	}
+}
+
+static int enc_b64v(uint8_t c)
+{
+	if (c >= 'A' && c <= 'Z') return c - 'A';
+	if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+	if (c >= '0' && c <= '9') return c - '0' + 52;
+	if (c == '+') return 62;
+	if (c == '/') return 63;
+	return -1;
+}
+
+static int enc_hexv(uint8_t c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+/*
+ * Run one coding over `len` bytes at `p`, into g_encbuf. Returns what it
+ * produced; 0 means this coding cannot read that text at all.
+ */
+static uint32_t enc_run(const uint8_t *p, uint32_t len, int codec, uint32_t key)
+{
+	uint32_t out = 0, acc = 0, have = 0, i;
+
+	switch (codec) {
+	case ENC_B64:
+		for (i = 0; i < len && out < ENC_OUT_MAX; i++) {
+			int v = enc_b64v(p[i]);
+
+			/* Padding, and the wrapping a 76-column encoder puts
+			 * in - both belong to the text and neither is data. */
+			if (v < 0) {
+				if (p[i] == '=' || p[i] == '\n' ||
+				    p[i] == '\r' || p[i] == ' ' ||
+				    p[i] == '\t')
+					continue;
+				return 0;       /* not base64 at all */
+			}
+			acc = (acc << 6) | (uint32_t)v;
+			have += 6u;
+			if (have >= 8u) {
+				have -= 8u;
+				g_encbuf[out++] = (uint8_t)(acc >> have);
+			}
+		}
+		return out;
+	case ENC_HEX:
+		for (i = 0; i < len && out < ENC_OUT_MAX; i++) {
+			int v = enc_hexv(p[i]);
+
+			if (v < 0) {
+				if (p[i] == ' ' || p[i] == '\n' ||
+				    p[i] == '\r' || p[i] == '\t' ||
+				    p[i] == ':' || p[i] == ',')
+					continue;
+				return 0;
+			}
+			acc = (acc << 4) | (uint32_t)v;
+			have += 4u;
+			if (have >= 8u) {
+				have -= 8u;
+				g_encbuf[out++] = (uint8_t)acc;
+			}
+		}
+		return have ? 0 : out;  /* an odd digit is not a byte string */
+	case ENC_XOR:
+		for (i = 0; i < len && out < ENC_OUT_MAX; i++)
+			g_encbuf[out++] = (uint8_t)(p[i] ^ (uint8_t)key);
+		return out;
+	case ENC_ADD:
+		for (i = 0; i < len && out < ENC_OUT_MAX; i++)
+			g_encbuf[out++] = (uint8_t)(p[i] + (uint8_t)key);
+		return out;
+	case ENC_CAESAR:
+		/*
+		 * The key is how far the text was shifted, so decoding shifts
+		 * BACK by it - a reader who knows a sample was rot-7 types 7,
+		 * not 19. Nothing but letters moves; digits, punctuation and
+		 * the spaces stay where they are, which is what makes a
+		 * shifted command still look like a command.
+		 */
+		key %= 26u;
+		if (!key)
+			return 0;       /* a shift of nothing is not a coding */
+		for (i = 0; i < len && out < ENC_OUT_MAX; i++) {
+			uint8_t c = p[i];
+
+			if (c >= 'a' && c <= 'z')
+				c = (uint8_t)('a' + (c - 'a' + 26u - key) % 26u);
+			else if (c >= 'A' && c <= 'Z')
+				c = (uint8_t)('A' + (c - 'A' + 26u - key) % 26u);
+			g_encbuf[out++] = c;
+		}
+		return out;
+	case ENC_REVERSE:
+		for (i = 0; i < len && out < ENC_OUT_MAX; i++)
+			g_encbuf[out++] = p[len - 1u - i];
+		return out;
+	default:
+		return 0;
+	}
+}
+
+/*
+ * Codings whose key is text the reader TYPES.
+ *
+ * A key this searched for would be a guess the tool makes; a typed one is a
+ * fact the reader brought. The two want different controls, and only the second
+ * belongs in a form.
+ */
+static int enc_takes_key(uint32_t t)
+{
+	return t == ENC_XOR || t == ENC_ADD || t == ENC_CAESAR;
+}
+
+/* The key field as a number. Hex without a prefix, because a key written down
+ * anywhere is written in hex - and 0x is accepted for the reader who types it
+ * out of habit. */
+static uint32_t enc_key_val(const struct view *v)
+{
+	uint32_t k = 0;
+	const char *p = v->enc_key;
+
+	if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
+		p += 2;
+	for (; *p; p++) {
+		int d = enc_hexv((uint8_t)*p);
+
+		if (d < 0)
+			return k;
+		k = (k << 4) | (uint32_t)d;
+	}
+	return k;
+}
+
+static void enc_do(struct view *v)
+{
+	uint32_t len = (uint32_t)strlen(v->enc_in);
+
+	v->enc_res_n = 0;
+	v->enc_done = 1;
+	if (!len)
+		return;
+	v->enc_res_n = enc_run((const uint8_t *)v->enc_in, len,
+			       (int)v->enc_type,
+			       enc_takes_key(v->enc_type) ? enc_key_val(v) : 0);
+}
+
+/*
+ * The plaintext as LINES, walked rather than indexed.
+ *
+ * An index would be an array sized for the worst case and rebuilt on every
+ * decode; the walk is over at most ENC_OUT_MAX bytes and happens once a frame,
+ * which is far below what a redraw already costs.
+ */
+static uint32_t enc_lines(const struct view *v)
+{
+	uint32_t i, n = 1;
+
+	if (!v->enc_res_n)
+		return 0;
+	for (i = 0; i < v->enc_res_n; i++)
+		if (g_encbuf[i] == '\n')
+			n++;
+	return n;
+}
+
+/* Where line `want` starts and how long it is, not counting its newline. */
+static void enc_line(const struct view *v, uint32_t want, uint32_t *off,
+		     uint32_t *len)
+{
+	uint32_t i, n = 0, beg = 0;
+
+	*off = *len = 0;
+	for (i = 0; i <= v->enc_res_n; i++) {
+		if (i == v->enc_res_n || g_encbuf[i] == '\n') {
+			if (n == want) {
+				*off = beg;
+				*len = i - beg;
+				return;
+			}
+			n++;
+			beg = i + 1u;
+		}
+	}
+}
+
+/* The widest line, which is how far sideways the window may go. */
+static uint32_t enc_widest(const struct view *v)
+{
+	uint32_t i, w = 0, run = 0;
+
+	for (i = 0; i < v->enc_res_n; i++) {
+		if (g_encbuf[i] == '\n') {
+			run = 0;
+			continue;
+		}
+		if (++run > w)
+			w = run;
+	}
+	return w;
+}
+
+/* Rows of plaintext the box shows. Enough for a dropper's script to be read
+ * without scrolling, few enough that the form stays on one screen. */
+#define ENC_RES_ROWS 8
+
+
+static void draw_enc(struct out *o, struct view *v)
+{
+	struct dframe *f = &g_enc_f;
+
+	/* Four form rows, the count line, then the window: its two rules and
+	 * the text between them. Plus the box's own two. */
+	if (!dframe_begin(o, f, "String decoder", 100, ENC_RES_ROWS + 8, 1))
+		return;
+
+	dframe_row(o, f, 0);
+	out_fmt(o, A_DIM "%-9s" A_OFF, "encoded");
+	v->e_in[0] = o->col_base + (int)o->col_hint;
+	out_fmt(o, "%s[", v->edit == ED_ENC_IN ? A_SEL : A_ID);
+	field_draw(o, v->enc_in, v->caret, &v->enc_in_off, f->iw - 13,
+		   v->edit == ED_ENC_IN, "paste or type the encoded text",
+		   v->field_all);
+	out_str(o, "]" A_OFF);
+	v->e_in[1] = o->col_base + (int)o->col_hint - 1;
+	dframe_edge(o, f);
+
+	dframe_row(o, f, 1);
+	out_fmt(o, A_DIM "%-9s" A_OFF, "type");
+	v->e_type[0] = o->col_base + (int)o->col_hint;
+	out_fmt(o, A_ID "[ %-7s ]" A_OFF, enc_codec_name((int)v->enc_type));
+	v->e_type[1] = o->col_base + (int)o->col_hint - 1;
+	if (enc_takes_key(v->enc_type)) {
+		out_fmt(o, A_DIM "   key " A_OFF);
+		v->e_key[0] = o->col_base + (int)o->col_hint;
+		out_fmt(o, "%s[", v->edit == ED_ENC_KEY ? A_SEL : A_ID);
+		field_draw(o, v->enc_key, v->caret, &v->enc_key_off, 10,
+			   v->edit == ED_ENC_KEY,
+			   v->enc_type == ENC_CAESAR ? "1-25" : "hex",
+			   v->field_all);
+		out_str(o, "]" A_OFF);
+		v->e_key[1] = o->col_base + (int)o->col_hint - 1;
+	} else {
+		v->e_key[0] = v->e_key[1] = -1;
+		out_fmt(o, A_DIM "   this coding has no key" A_OFF);
+	}
+	dframe_edge(o, f);
+
+	dframe_row(o, f, 2);
+	out_fmt(o, "%-9s", "");
+	v->e_go[0] = o->col_base + (int)o->col_hint;
+	out_fmt(o, "%s[ Decode ]" A_OFF,
+		v->enc_in[0] ? "\033[42;30m" : "\033[47;90m");
+	v->e_go[1] = o->col_base + (int)o->col_hint - 1;
+	dframe_edge(o, f);
+
+	dframe_row(o, f, 3);
+	if (v->enc_res_n)
+		out_fmt(o, A_DIM "%-9s" A_OFF A_SIZE "%lu" A_OFF A_DIM
+			" bytes, %lu line(s)" A_OFF, "plain",
+			(unsigned long)v->enc_res_n,
+			(unsigned long)enc_lines(v));
+	else if (v->enc_done && v->enc_in[0])
+		out_fmt(o, A_DIM "%-9s" A_OFF A_WARN "%s" A_OFF, "plain",
+			"that coding cannot read this text");
+	else
+		out_fmt(o, A_DIM "%-9s" A_OFF, "plain");
+	dframe_edge(o, f);
+
+	/*
+	 * THE PLAINTEXT IN A WINDOW OF ITS OWN, with its own two scrollbars.
+	 *
+	 * A decoded script is longer than any box and its lines are longer than
+	 * any width, so showing a prefix would send the reader somewhere else
+	 * for the thing this just produced. A window with a border says where
+	 * the text starts and stops, and the two bars say how much of it is off
+	 * the screen - which a box that simply ran out of rows does not.
+	 *
+	 * RECORDED INTO THE SELECTION LAYER as it is drawn, so dragging through
+	 * it and Ctrl+C work exactly as they do on the properties page. That is
+	 * the whole reason the layer is not part of any one dialog.
+	 */
+	{
+		uint32_t nl = enc_lines(v), wide = enc_widest(v);
+		uint32_t shown = nl > (uint32_t)ENC_RES_ROWS
+			       ? (uint32_t)ENC_RES_ROWS : nl;
+		int iw = f->iw - 4;             /* the window's inside */
+		int r;
+		char rule[PROP_TAB_MAX_W * 3u + 1u];
+		uint32_t k = 0;
+
+		if (iw < 8)
+			iw = 8;
+		if ((uint32_t)iw > PROP_TAB_MAX_W)
+			iw = (int)PROP_TAB_MAX_W;
+		/* Clamped here, where how much fits is finally known. */
+		if (nl > (uint32_t)ENC_RES_ROWS) {
+			if (v->enc_voff > nl - (uint32_t)ENC_RES_ROWS)
+				v->enc_voff = nl - (uint32_t)ENC_RES_ROWS;
+		} else {
+			v->enc_voff = 0;
+		}
+		if (wide > (uint32_t)iw) {
+			if (v->enc_hoff > wide - (uint32_t)iw)
+				v->enc_hoff = wide - (uint32_t)iw;
+		} else {
+			v->enc_hoff = 0;
+		}
+
+		while (k < (uint32_t)iw) {
+			memcpy(rule + k * 3u, G_H, sizeof G_H - 1u);
+			k++;
+		}
+		rule[k * (sizeof G_H - 1u)] = 0;
+
+		dframe_row(o, f, 4);
+		out_fmt(o, "  " A_DIM G_TL "%s" G_TR A_OFF, rule);
+		dframe_edge(o, f);
+
+		/* Where the window is, for the click and the wheel. */
+		v->enc_txt_y = f->y + 6;
+		v->enc_txt_x = f->ix + 3;
+		v->enc_txt_w = iw;
+		v->enc_txt_h = ENC_RES_ROWS;
+		dlg_rec_begin(v, v->enc_txt_y, v->enc_txt_x);
+
+		for (r = 0; r < ENC_RES_ROWS; r++) {
+			char line[PROP_W];
+			uint32_t off = 0, len = 0, n = 0;
+			const char *bar = G_V;
+
+			dframe_row(o, f, 5 + r);
+			out_fmt(o, "  " A_DIM G_V A_OFF);
+			if ((uint32_t)r < shown) {
+				enc_line(v, v->enc_voff + (uint32_t)r,
+					 &off, &len);
+				if (v->enc_hoff < len) {
+					off += v->enc_hoff;
+					len -= v->enc_hoff;
+				} else {
+					len = 0;
+				}
+				if (len > (uint32_t)iw)
+					len = (uint32_t)iw;
+				for (n = 0; n < len; n++) {
+					uint8_t c = g_encbuf[off + n];
+
+					line[n] = (c >= 0x20u && c <= 0x7eu)
+						? (char)c : '.';
+				}
+			}
+			line[n] = 0;
+			out_fmt(o, A_ID "%-*.*s" A_OFF, iw, iw, line);
+			dlg_rec_text(v, line);
+			dlg_rec_src(v, v->enc_voff + (uint32_t)r);
+			/*
+			 * THE VERTICAL BAR LIVES IN THE WALL, one cell per row -
+			 * the same thumb the dashboard's tables use, and drawn
+			 * only when there is more than fits. A full-height thumb
+			 * says nothing.
+			 */
+			if (nl > (uint32_t)ENC_RES_ROWS) {
+				uint32_t last = nl - (uint32_t)ENC_RES_ROWS;
+				uint32_t th = (v->enc_voff *
+					       ((uint32_t)ENC_RES_ROWS - 1u) +
+					       last / 2u) / last;
+
+				bar = ((uint32_t)r == th) ? G_THUMB : G_V;
+			}
+			out_fmt(o, A_DIM "%s" A_OFF, bar);
+			dframe_edge(o, f);
+		}
+
+		/*
+		 * AND SIDEWAYS ON THE BOTTOM RULE, where a horizontal bar goes.
+		 * Drawn as a run of thumb glyphs over the rule so the rule
+		 * still reads as the window's edge.
+		 */
+		dframe_row(o, f, 5 + ENC_RES_ROWS);
+		out_fmt(o, "  " A_DIM G_BL A_OFF);
+		if (wide > (uint32_t)iw) {
+			uint32_t span = (uint32_t)iw * (uint32_t)iw / wide;
+			uint32_t at = v->enc_hoff * (uint32_t)iw / wide;
+			int c;
+
+			if (!span)
+				span = 1;
+			for (c = 0; c < iw; c++)
+				out_fmt(o, A_DIM "%s" A_OFF,
+					((uint32_t)c >= at &&
+					 (uint32_t)c < at + span) ? G_THUMB
+								 : G_H);
+		} else {
+			out_fmt(o, A_DIM "%s" A_OFF, rule);
+		}
+		out_fmt(o, A_DIM G_BR A_OFF);
+		dframe_edge(o, f);
+
+		dlg_paint_sel(o, v);
+	}
+
+	{
+		/*
+		 * THE KEYS MOVED OFF THE RULE AND INTO A BUTTON.
+		 *
+		 * A line of chording written on the furniture is a line that
+		 * says the same thing every time the box opens, to a reader who
+		 * needed it once. The button is where somebody looks when they
+		 * do need it, and the rule goes back to being the edge.
+		 */
+		static const char help[] = "[ ? ]";
+		int pad = f->w - 4 - (int)(sizeof help - 1);
+
+		out_at(o, f->y + f->h - 1, f->x);
+		o->col_hint = 0;
+		out_str(o, A_DIM);
+		out_glyph(o, G_BL);
+		out_glyph(o, G_H);
+		while (pad-- > 0)
+			out_glyph(o, G_H);
+		v->e_help[0] = f->x + (int)o->col_hint;
+		out_fmt(o, A_OFF A_ID "%s" A_OFF A_DIM, help);
+		v->e_help[1] = f->x + (int)o->col_hint - 1;
+		out_glyph(o, G_H);
+		out_glyph(o, G_BR);
+		out_str(o, A_OFF);
+	}
+}
+
+/* Non-zero when a click landed on the frame's close control. */
+static int dframe_hit_close(const struct dframe *f, int my, int mx)
+{
+	return f->btn_y >= 0 && my == f->btn_y &&
+	       mx >= f->btn_x0 && mx <= f->btn_x1;
+}
+
+/* Open the box, optionally filled from a range of the object. */
+static void enc_open_with(struct view *v, const uint8_t *p, uint32_t n)
+{
+	uint32_t i;
+
+	if (p && n) {
+		if (n > ENC_IN_MAX - 1u)
+			n = ENC_IN_MAX - 1u;
+		for (i = 0; i < n; i++)
+			v->enc_in[i] = (char)p[i];
+		v->enc_in[n] = 0;
+		v->enc_in_off = 0;
+		v->enc_res_n = 0;
+		v->enc_done = 0;
+	}
+	v->enc_open = 1;
+	v->edit = ED_ENC_IN;
+	v->caret = (uint32_t)strlen(v->enc_in);
+}
+
+/* Non-zero when a screen position is inside the plaintext window. */
+static int enc_in_text(const struct view *v, int y, int x)
+{
+	return v->enc_txt_h > 0 && y >= v->enc_txt_y &&
+	       y < v->enc_txt_y + v->enc_txt_h &&
+	       x >= v->enc_txt_x && x < v->enc_txt_x + v->enc_txt_w;
+}
+
+/* The selected plaintext, as bytes. The same span dlg_copy takes, handed back
+ * instead of being put on the clipboard - so Copy and Declare cannot disagree
+ * about what was picked. */
+static size_t enc_sel_text(struct view *v, char *out, size_t cap)
+{
+	int r0, c0, r1, c1, r;
+	size_t n = 0;
+
+	if (!dlg_span(v, &r0, &c0, &r1, &c1))
+		return 0;
+	for (r = r0; r <= r1 && n + 1u < cap; r++) {
+		int row = dlg_row_of_src(v, r), len, from, to;
+
+		if (row < 0)
+			continue;
+		len = (int)v->dlg_cols[row];
+		from = (r == r0) ? c0 : 0;
+		to   = (r == r1) ? c1 + 1 : len;
+		if (to > len)
+			to = len;
+		while (to > from &&
+		       v->dlg_line[row][v->dlg_bx[row][to - 1]] == ' ')
+			to--;
+		if (n && n + 1u < cap)
+			out[n++] = '\n';
+		while (from < to && n + 1u < cap)
+			out[n++] = v->dlg_line[row][v->dlg_bx[row][from++]];
+	}
+	out[n] = 0;
+	return n;
+}
+
+/* A click in the Decoder: a control, or nothing. */
+static int enc_click(struct view *v, int rclick)
+{
+	const struct dframe *f = &g_enc_f;
+
+	/*
+	 * THE CHOOSER IS ON TOP, SO IT GETS THE MOUSE FIRST.
+	 *
+	 * The coding list opens ABOVE the control it belongs to, which puts its
+	 * lower rows over this box - and this runs before the chooser's own
+	 * handler, so it swallowed them. The last row was the worst case: click
+	 * "reverse" and nothing happened, the list stayed up, and every click
+	 * after it was eaten the same way. It read as a frozen menu.
+	 */
+	if (v->ch.open)
+		return 0;
+	/*
+	 * AN OPEN MENU GETS THE CLICK, WHEREVER IT LANDED.
+	 *
+	 * This box swallows every click inside its frame, and the menu its own
+	 * plaintext window opens is drawn over that frame - so a click meant to
+	 * dismiss the menu was eaten here and the menu stayed up. Clicking
+	 * again ate it again: a menu that could not be closed, and a repaint
+	 * with nothing changed on every attempt.
+	 *
+	 * click_menu is the one place that decides what a click on an open menu
+	 * means - run the item under it, or dismiss - and calling it here is
+	 * what keeps that decision in one place.
+	 */
+	if (v->menu_open)
+		return click_menu(v);
+	if (!f->w)
+		return 0;
+	/*
+	 * A RIGHT-CLICK IN THE PLAINTEXT OPENS ITS OWN MENU, and the selection
+	 * is left alone: right-clicking to copy what you just selected is the
+	 * gesture, and moving the selection first would copy the wrong thing.
+	 */
+	if (rclick && enc_in_text(v, g_my, g_mx)) {
+		v->menu_ctx = 16;
+		menu_open_at(v, g_my, g_mx);
+		return 1;
+	}
+	if (dframe_hit_close(f, g_my, g_mx)) {
+		v->enc_open = 0;
+		v->edit = 0;
+		return 1;
+	}
+	if (g_my < f->y || g_my >= f->y + f->h ||
+	    g_mx < f->x || g_mx >= f->x + f->w)
+		return 0;
+	if (g_my == f->y + 1 && g_mx >= v->e_in[0] && g_mx <= v->e_in[1]) {
+		v->edit = ED_ENC_IN;
+		v->caret = (uint32_t)strlen(v->enc_in);
+		return 1;
+	}
+	if (g_my == f->y + 2) {
+		if (g_mx >= v->e_type[0] && g_mx <= v->e_type[1]) {
+			ch_open(v, CH_ENC_TYPE, 0, g_my, v->e_type[0]);
+			return 1;
+		}
+		if (v->e_key[0] >= 0 && g_mx >= v->e_key[0] &&
+		    g_mx <= v->e_key[1]) {
+			v->edit = ED_ENC_KEY;
+			v->caret = (uint32_t)strlen(v->enc_key);
+			return 1;
+		}
+	}
+	if (g_my == f->y + 3) {
+		if (g_mx >= v->e_go[0] && g_mx <= v->e_go[1])
+			enc_do(v);
+		return 1;
+	}
+	if (g_my == f->y + f->h - 1 && g_mx >= v->e_help[0] &&
+	    g_mx <= v->e_help[1]) {
+		v->help_open = 1;       /* the keyboard page, which lists these */
+		v->help_off = 0;
+		return 1;
+	}
+	/*
+	 * A PRESS IN THE PLAINTEXT STARTS A SELECTION, through the same layer
+	 * the properties page and the symbol table use - the window records its
+	 * rows as it draws them for exactly this.
+	 */
+	if (enc_in_text(v, g_my, g_mx)) {
+		int r, c;
+
+		if (dlg_at(v, g_my, g_mx, &r, &c)) {
+			if ((g_mod_shift || g_mod_ctrl) && v->dlg_have) {
+				v->dlg_br = r;
+				v->dlg_bc = c;
+			} else {
+				v->dlg_ar = v->dlg_br = r;
+				v->dlg_ac = v->dlg_bc = c;
+				v->dlg_have = 1;
+			}
+			v->dlg_drag = 1;
+		}
+		return 1;
+	}
+	return 1;
+}
+
 
 
 /*
@@ -19662,6 +20959,64 @@ static int click_panel_rows(struct view *v)
 		if (!PR_VIS(want))
 			return 1;
 
+		/*
+		 * THE FORMAT ROW, first, because it is drawn first.
+		 *
+		 * This walk and draw_decl_panel are two readings of one row
+		 * order, and the rule is that they are kept in the same order
+		 * rather than kept in sync by arithmetic. A row added to the
+		 * drawing and not to this walk does not misbehave subtly: every
+		 * click below it lands one row out, so removing a marker
+		 * removes the one under it.
+		 */
+		if (r == want) {
+			uint32_t h;
+
+			for (h = 0; h < v->n_fmt_hs; h++)
+				if (g_mx >= v->fmt_hs[h][0] &&
+				    g_mx <= v->fmt_hs[h][1]) {
+					ch_open(v, CH_FMT, h, g_my, g_mx);
+					return 1;
+				}
+			if (g_mx >= v->fma_c0 && g_mx <= v->fma_c1)
+				ch_open(v, CH_FMT_CAT, 0, g_my, g_mx);
+			return 1;
+		}
+		r++;                            /* the format row, always */
+
+		{
+			if (r == want) {
+				uint32_t h;
+
+				/*
+				 * A NAME IS THE SUBJECT. Which range was
+				 * pressed is passed as the menu's argument, so
+				 * every item it offers is about that one.
+				 */
+				for (h = 0; h < v->n_rng_hs; h++)
+					if (g_mx >= v->rng_hs[h][0] &&
+					    g_mx <= v->rng_hs[h][1]) {
+						ch_open(v, CH_RANGE2, h,
+							g_my, g_mx);
+						return 1;
+					}
+				if (g_mx >= v->rga_c0 && g_mx <= v->rga_c1)
+					ch_open(v, CH_RANGE_ADD, 0, g_my, g_mx);
+				return 1;
+			}
+			r++;
+		/*
+		 * The row that only carries [+ Option]. It exists whether or
+		 * not any option is declared - see draw_decl_optbtn - so it is
+		 * one row here unconditionally.
+		 */
+		if (r == want) {
+			if (g_mx >= v->o_c0 && g_mx <= v->o_c1)
+				ch_open(v, CH_OPT, 0, g_my, g_mx);
+			return 1;
+		}
+		r++;                            /* the option button row */
+
 		for (i = 0; i < (uint32_t)OPT_COUNT; i++) {
 			if (!v->ed.dr.opt_on[i])
 				continue;
@@ -19698,27 +21053,6 @@ static int click_panel_rows(struct view *v)
 			}
 			r++;
 		}
-		{
-			if (r == want) {
-				uint32_t h;
-
-				/*
-				 * A NAME IS THE SUBJECT. Which range was
-				 * pressed is passed as the menu's argument, so
-				 * every item it offers is about that one.
-				 */
-				for (h = 0; h < v->n_rng_hs; h++)
-					if (g_mx >= v->rng_hs[h][0] &&
-					    g_mx <= v->rng_hs[h][1]) {
-						ch_open(v, CH_RANGE2, h,
-							g_my, g_mx);
-						return 1;
-					}
-				if (g_mx >= v->rga_c0 && g_mx <= v->rga_c1)
-					ch_open(v, CH_RANGE_ADD, 0, g_my, g_mx);
-				return 1;
-			}
-			r++;
 		}
 		if (v->ed.dr.n_decl) {
 			if (r == want) {
@@ -20067,7 +21401,37 @@ static int click_hex(struct view *v, int rclick)
 
 			v->last_click = at;
 			v->last_click_ms = now;
-			v->sel_a = v->sel_b = at;
+			/*
+			 * SHIFT (OR CTRL) EXTENDS, the way it does in a text
+			 * editor: the anchor stays and the far end comes to the
+			 * click.
+			 *
+			 * A base64 payload is a hundred bytes and more, and
+			 * dragging over one that runs off the bottom of the
+			 * pane means dragging into the edge and waiting for it
+			 * to scroll. Click the start, wheel down, shift-click
+			 * the end.
+			 *
+			 * CTRL AS WELL AS SHIFT, and that is not a convenience.
+			 * Measured here: xterm and VTE take Shift as "bypass
+			 * mouse reporting and do the terminal's OWN selection",
+			 * so on those the shift-click never arrives - the
+			 * terminal highlights the text itself instead. Ctrl is
+			 * not claimed that way and does arrive, so it is the
+			 * binding that works; shift stays accepted because a
+			 * reader whose terminal passes it should not have to
+			 * learn that this one program wants something else.
+
+			 *
+			 * Only when there IS an anchor: a modified click on a
+			 * pane with no selection is an ordinary click, not an
+			 * extension from nowhere.
+			 */
+			if ((g_mod_shift || g_mod_ctrl) &&
+			    v->sel_a != KOF_BROKEN)
+				v->sel_b = at;
+			else
+				v->sel_a = v->sel_b = at;
 			v->sel_from_dis = 0;    /* the hex pane owns it now */
 			dis_bias_to_sel(v);
 			v->dragging = 1;
@@ -20139,7 +21503,16 @@ static void click(struct view *v, int rclick)
 			 */
 			(evt_live(v) && g_my >= evt_box_top(v) &&
 			 g_my < evt_box_top(v) + EVT_BOX_ROWS &&
-			 g_mx > TREE_W && !v->show_list && !v->menu_open)))
+			 g_mx > TREE_W && !v->show_list && !v->menu_open) ||
+			/*
+			 * AND THE STRING DECODER'S PLAINTEXT WINDOW, for the
+			 * same reason and found the same way: the menu opened,
+			 * the item ran, and nothing happened - because the
+			 * click was refused here, three screens above anything
+			 * that could have told the reader so.
+			 */
+			(v->enc_open && !v->menu_open &&
+			 enc_in_text(v, g_my, g_mx))))
 		return;
 
 	/*
@@ -20271,6 +21644,15 @@ static void click(struct view *v, int rclick)
 			 * table of values actually wants.
 			 */
 			(void)a; (void)b;
+			/* Shift (or ctrl) extends from where the selection
+			 * already starts - the same gesture as in the hex
+			 * pane, including why ctrl is accepted too. */
+			if ((g_mod_shift || g_mod_ctrl) && v->dlg_have) {
+				v->dlg_br = r;
+				v->dlg_bc = c;
+				v->dlg_drag = 1;
+				return;
+			}
 			/*
 			 * A SECOND PRESS ON THE SAME PLACE TAKES THE WHOLE
 			 * CELL - what a double click means in a table.
@@ -20319,6 +21701,8 @@ static void click(struct view *v, int rclick)
 		v->dlg_have = 0;
 		v->dlg_drag = 0;
 	}
+	if (v->enc_open && enc_click(v, rclick))
+		return;
 	if (v->sym_open && symd_click(v))
 		return;
 	if (v->goto_open && goto_click(v))
@@ -20352,14 +21736,44 @@ static void click(struct view *v, int rclick)
 	if (v->ch.open) {
 		int k = g_my - v->ch.row;
 
-		if (g_mx >= v->ch.col && g_mx < v->ch.col + CH_W &&
+		if (g_mx >= v->ch.col && g_mx < v->ch.col + v->ch.w &&
 		    k >= 0 && k < v->ch.n) {
 			v->ch.sel = k;
 			ch_take(v);
-		} else {
-			v->ch.open = 0;
-			v->ch_up.open = 0;
+			return;
 		}
+		/*
+		 * A CLICK ON THE PARENT MENU MOVES TO THAT ROW, it does not
+		 * dismiss everything.
+		 *
+		 * Only the front chooser was tested, so with a submenu open a
+		 * click on another row of the list that opened it fell through
+		 * to "outside the menu" and closed both. Picking Document and
+		 * then Executable made the whole thing vanish rather than
+		 * showing the other list, which reads as a menu that cannot be
+		 * changed your mind about.
+		 *
+		 * Re-running the parent row is what reopens the child, so the
+		 * switch costs no new code path - it is the same call the first
+		 * pick made.
+		 */
+		if (v->ch_up.open) {
+			int ku = g_my - v->ch_up.row;
+
+			if (g_mx >= v->ch_up.col &&
+			    g_mx < v->ch_up.col + v->ch_up.w &&
+			    ku >= 0 && ku < v->ch_up.n) {
+				struct chooser up = v->ch_up;
+
+				up.sel = ku;
+				v->ch = up;             /* it is the front one */
+				v->ch_up.open = 0;
+				ch_take(v);
+				return;
+			}
+		}
+		v->ch.open = 0;
+		v->ch_up.open = 0;
 		return;
 	}
 	if (click_menu(v))
@@ -20851,6 +22265,82 @@ static int handle_symd_key(struct view *v, int k)
 	 * does not land on the draft behind it.
 	 */
 	return -1;
+}
+
+/*
+ * The Decoder owns the keyboard while it is up.
+ *
+ * A FORM, so Tab moves between its controls and Enter runs it - the two things
+ * a form does everywhere else. Esc closes; every other key goes to whichever
+ * field has the caret, which is how a pasted string gets in.
+ */
+static int handle_enc_key(struct view *v, int k)
+{
+	if (!v->enc_open)
+		return -1;
+	switch (k) {
+	case 27:
+		v->enc_open = 0;
+		v->edit = 0;
+		return 1;
+	/*
+	 * TAB MOVES, THE ARROWS CHOOSE - and keeping those apart is not a
+	 * detail. They were one key at first: Tab cycled the coding when the
+	 * caret was in the input, which meant that once it reached xor there
+	 * was no way back to the input that did not also leave xor. A key that
+	 * moves focus and changes a value depending on where the focus is
+	 * cannot be pressed twice with the same meaning.
+	 */
+	case '\t':
+		if (v->edit == ED_ENC_IN && enc_takes_key(v->enc_type)) {
+			v->edit = ED_ENC_KEY;
+			v->caret = (uint32_t)strlen(v->enc_key);
+		} else {
+			v->edit = ED_ENC_IN;
+			v->caret = (uint32_t)strlen(v->enc_in);
+		}
+		return 1;
+	case K_LEFT:
+	case K_RIGHT:
+		v->enc_type = k == K_RIGHT
+			    ? (v->enc_type + 1u) % (uint32_t)ENC_CODEC_COUNT
+			    : (v->enc_type + (uint32_t)ENC_CODEC_COUNT - 1u) %
+			      (uint32_t)ENC_CODEC_COUNT;
+		v->enc_res_n = 0;
+		v->enc_done = 0;
+		if (!enc_takes_key(v->enc_type) && v->edit == ED_ENC_KEY)
+			v->edit = ED_ENC_IN;
+		return 1;
+	case '\r': case '\n':
+		enc_do(v);
+		return 1;
+	case 0x03:                      /* Ctrl+C */
+		dlg_copy(v);
+		return 1;
+	/*
+	 * THE WHEEL MOVES THE PLAINTEXT, sideways with shift - the window is
+	 * the only thing in this box that has anywhere to scroll.
+	 */
+	case K_WHEEL_UP:
+	case K_WHEEL_DOWN: {
+		uint32_t *off = g_mod_shift ? &v->enc_hoff : &v->enc_voff;
+		uint32_t step = g_mod_shift ? 8u : 1u;
+
+		if (k == K_WHEEL_UP)
+			*off = *off > step ? *off - step : 0u;
+		else
+			*off += step;   /* clamped where the window is drawn */
+		return 1;
+	}
+	case K_CLICK: case K_RCLICK: case K_DRAG: case K_RELEASE:
+		return -1;              /* the mouse goes to enc_click */
+	default:
+		if (v->edit == ED_ENC_KEY)
+			return field_key(v, v->enc_key, sizeof v->enc_key, k,
+					 NULL);
+		v->edit = ED_ENC_IN;
+		return field_key(v, v->enc_in, sizeof v->enc_in, k, NULL);
+	}
 }
 
 /*
@@ -21840,6 +23330,12 @@ static int handle(struct view *v, int k)
 	}
 	{
 		int r = handle_copy_key(v, k);
+
+		if (r >= 0)
+			return r;
+	}
+	{
+		int r = handle_enc_key(v, k);
 
 		if (r >= 0)
 			return r;
