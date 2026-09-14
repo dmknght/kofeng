@@ -34,9 +34,30 @@ struct kofa_fan {
 	int      watch_fd[AFAN_MAX_WATCH];
 	uint32_t n_watch;
 
-	/* The current read buffer and where the walk is inside it, so one
-	 * read can serve many next() calls without re-entering the kernel. */
-	char     buf[AFAN_BUF];
+	/*
+	 * The current read buffer and where the walk is inside it, so one
+	 * read can serve many next() calls without re-entering the kernel.
+	 *
+	 * ALIGNED, because the kernel writes structs into it and the walk
+	 * reads them in place. It was a plain char array, which C aligns for
+	 * characters and nothing more: placed after the watch table it landed
+	 * on a four-byte boundary, and every record read out of it was a
+	 * misaligned access to a type that requires eight. Undefined behaviour
+	 * that x86 happens to tolerate and several architectures do not - found
+	 * by UBSAN the moment this test could be built at all:
+	 *
+	 *   afan.c:292: member access within misaligned address ... for type
+	 *   'const struct fanotify_event_metadata', which requires 8 byte
+	 *   alignment
+	 *
+	 * The union names the type that sets the requirement rather than
+	 * hard-coding a number, so it stays right if the kernel's record grows
+	 * a wider member.
+	 */
+	union {
+		char buf[AFAN_BUF];
+		struct fanotify_event_metadata align;
+	} rb;
 	ssize_t  have;
 	char    *at;
 
@@ -397,11 +418,11 @@ static int fan_next(void *self, struct kof_evt *out, uint32_t wait_ms)
 			pf.revents = 0;
 			rc = poll(&pf, 1, (int)wait_ms);
 			if (rc > 0) {
-				ssize_t n = read(f->fd, f->buf, sizeof f->buf);
+				ssize_t n = read(f->fd, f->rb.buf, sizeof f->rb.buf);
 
 				if (n > 0) {
 					f->have = n;
-					f->at = f->buf;
+					f->at = f->rb.buf;
 					continue;
 				}
 			}

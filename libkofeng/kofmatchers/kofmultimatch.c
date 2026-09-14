@@ -409,17 +409,269 @@ static int collect_region(const struct kof_engine *e, uint32_t bit,
 	return 1;
 }
 
-static int build_gram(struct kof_multimatch *t, const struct kof_multimatch_pat *pat)
+
+/* ---- BISECT: the same buckets, searched instead of walked ---------------- */
+
+/*
+ * qsort has no context argument, so the two things the comparison needs are
+ * file scope. THE BUILD IS SINGLE THREADED - kof_multimatch_build runs once,
+ * from kof_db_load, before any scanner exists - which is the only reason this
+ * is allowed to be written this way. A second builder on another thread would
+ * have to carry its own.
+ */
+static const struct kof_multimatch_pat *g_ord_pat;
+static const struct kof_multimatch     *g_ord_tab;
+
+/* Folded when any marker in the table folds, so the search can use the same
+ * order. pat_at still applies each marker's own flags, so a case-exact marker
+ * that this order puts beside a folded one is found and then refused. */
+static int ord_cmp(const void *A, const void *B)
+{
+	uint32_t x = *(const uint32_t *)A, y = *(const uint32_t *)B;
+	const struct kof_multimatch_pat *p = &g_ord_pat[g_ord_tab->idx[x]];
+	const struct kof_multimatch_pat *q = &g_ord_pat[g_ord_tab->idx[y]];
+	uint16_t n = p->len < q->len ? p->len : q->len, i;
+	const int fold = g_ord_tab->fold;
+
+	for (i = 0; i < n; i++) {
+		uint8_t a = fold ? fold_byte(p->b[i]) : p->b[i];
+		uint8_t b = fold ? fold_byte(q->b[i]) : q->b[i];
+
+		if (a != b)
+			return a < b ? -1 : 1;
+	}
+	return (int)p->len - (int)q->len;
+}
+
+/* Is `a` a proper prefix of `b`, in the same folded order as ord_cmp. */
+static int is_prefix_of(const struct kof_multimatch_pat *a,
+			const struct kof_multimatch_pat *b, int fold)
+{
+	uint16_t i;
+
+	if (a->len >= b->len)
+		return 0;
+	for (i = 0; i < a->len; i++) {
+		uint8_t x = fold ? fold_byte(a->b[i]) : a->b[i];
+		uint8_t y = fold ? fold_byte(b->b[i]) : b->b[i];
+
+		if (x != y)
+			return 0;
+	}
+	return 1;
+}
+
+static int build_bisect(struct kof_multimatch *t,
+			const struct kof_multimatch_pat *pat)
+{
+	uint32_t i, *fill = NULL, *stk = NULL;
+
+	t->bits = bits_for(t->n_pat, 8);
+	t->nb = 1u << t->bits;
+	t->max_chain = 0;
+	t->seen  = calloc(t->nb / 8u, 1);
+	t->start = calloc((size_t)t->nb + 1u, sizeof *t->start);
+	t->ord   = calloc(t->n_pat, sizeof *t->ord);
+	t->pfx   = malloc((size_t)t->n_pat * sizeof *t->pfx);
+	fill     = calloc(t->nb, sizeof *fill);
+	stk      = malloc((size_t)t->n_pat * sizeof *stk);
+	if (!t->seen || !t->start || !t->ord || !t->pfx || !fill || !stk)
+		goto fail;
+	t->bytes += t->nb / 8u + ((size_t)t->nb + 1u) * sizeof *t->start +
+		    (size_t)t->n_pat * (sizeof *t->ord + sizeof *t->pfx);
+
+	/* Counting sort into buckets: count, run the counts into offsets, place. */
+	for (i = 0; i < t->n_pat; i++) {
+		uint32_t b = key_gram(pat[t->idx[i]].b, t->bits, t->fold);
+
+		t->start[b + 1u]++;
+	}
+	for (i = 0; i < t->nb; i++) {
+		if (t->start[i + 1u] > t->max_chain)
+			t->max_chain = t->start[i + 1u];
+		t->start[i + 1u] += t->start[i];
+	}
+	for (i = 0; i < t->n_pat; i++) {
+		uint32_t b = key_gram(pat[t->idx[i]].b, t->bits, t->fold);
+
+		t->ord[t->start[b] + fill[b]++] = i;
+		t->seen[b >> 3] |= (uint8_t)(1u << (b & 7));
+	}
+	free(fill);
+	fill = NULL;
+
+	for (i = 0; i < t->nb; i++) {
+		uint32_t a = t->start[i], n = t->start[i + 1u] - a, j, sp = 0;
+
+		if (n > 1u) {
+			g_ord_pat = pat;
+			g_ord_tab = t;
+			qsort(t->ord + a, n, sizeof *t->ord, ord_cmp);
+		}
+		/*
+		 * THE LONGEST PROPER PREFIX BELOW EACH ENTRY, by a stack over
+		 * the sorted run.
+		 *
+		 * The adjacent entry is NOT the answer and taking it was wrong:
+		 * sorted order puts "ab" "abb" "abc", so "ab" is a prefix of
+		 * "abc" with a non-prefix between them. Measured against brute
+		 * force it found 23 markers where 45 are present. Anything
+		 * still on the stack is a prefix of what comes next, because
+		 * sorted order visits a string's extensions right after it.
+		 */
+		for (j = 0; j < n; j++) {
+			const struct kof_multimatch_pat *cur =
+				&pat[t->idx[t->ord[a + j]]];
+
+			while (sp && !is_prefix_of(&pat[t->idx[t->ord[a + stk[sp - 1u]]]],
+						   cur, t->fold))
+				sp--;
+			t->pfx[a + j] = sp ? (int32_t)(a + stk[sp - 1u]) : -1;
+			stk[sp++] = j;
+		}
+	}
+	free(stk);
+	return 1;
+fail:
+	free(fill);
+	free(stk);
+	return 0;
+}
+
+static void sweep_bisect(const struct kof_multimatch *t,
+			 const struct kof_multimatch_pat *pat,
+			 struct kof_match_ctx *m, uint64_t base, uint64_t span,
+			 uint32_t bitmask, uint32_t *found)
+{
+	uint64_t i, end = base + span;
+	const int fold = t->fold;
+
+	if (span < KOF_MULTIMATCH_KEY)
+		return;
+	for (i = base; i + KOF_MULTIMATCH_KEY <= end; i++) {
+		uint32_t b = key_gram(m->data.p + i, t->bits, fold);
+		uint32_t a, n, lo, hi;
+		int32_t j;
+
+		if (!((t->seen[b >> 3] >> (b & 7)) & 1))
+			continue;
+		a = t->start[b];
+		n = t->start[b + 1u] - a;
+
+		/*
+		 * The last entry that is not GREATER than the haystack here.
+		 *
+		 * A marker longer than what is left compares GREATER, which
+		 * keeps the order the sort used total: running out of haystack
+		 * is the haystack being the shorter string. Without that the
+		 * search can land on the wrong side near the end of an extent
+		 * and miss the marker below it.
+		 */
+		lo = 0; hi = n;
+		while (lo < hi) {
+			uint32_t mid = lo + (hi - lo) / 2u;
+			const struct kof_multimatch_pat *p =
+				&pat[t->idx[t->ord[a + mid]]];
+			uint64_t avail = end - i;
+			uint16_t k;
+			int c = 0;
+
+			for (k = 0; k < p->len; k++) {
+				uint8_t x, y;
+
+				if (k >= avail) { c = 1; break; }
+				x = fold ? fold_byte(p->b[k]) : p->b[k];
+				y = fold ? fold_byte(m->data.p[i + k])
+					 : m->data.p[i + k];
+				if (x != y) { c = x < y ? -1 : 1; break; }
+			}
+			if (c <= 0) lo = mid + 1u; else hi = mid;
+		}
+		if (!lo)
+			continue;
+		/* That entry, then every shorter marker that is a prefix of it -
+		 * those are the other markers present at this position. */
+		for (j = (int32_t)(a + lo - 1u); j >= 0; j = t->pfx[j]) {
+			uint32_t slot = t->idx[t->ord[j]];
+
+			if ((found[slot] & bitmask) == 0 &&
+			    pat_at(m, &pat[slot], i, base, span))
+				found[slot] |= bitmask;
+		}
+	}
+}
+
+/*
+ * Where to take each marker's key: the four bytes that the fewest OTHER markers
+ * in this table share.
+ *
+ * Two passes and a 64K counter table. The counts do not have to be exact - a
+ * hash into 64K conflates some - because they are never read as a number, only
+ * compared to pick the smaller. A slightly wrong choice costs a longer chain,
+ * not a wrong answer.
+ *
+ * Hex markers are left at zero: their `b` is the anchor run the compiler
+ * already chose, and pat_at reads `at` as the anchor's position.
+ */
+#define KOFF_FREQ_BITS 16u
+
+static void pick_key_off(const struct kof_multimatch *t,
+			 const struct kof_multimatch_pat *pat, uint16_t *out)
+{
+	uint32_t *freq = calloc(1u << KOFF_FREQ_BITS, sizeof *freq);
+	uint32_t i, j;
+
+	if (!freq)
+		return;                 /* every offset stays 0 - the plain key */
+	for (i = 0; i < t->n_pat; i++) {
+		const struct kof_multimatch_pat *q = &pat[t->idx[i]];
+
+		if (q->is_hex)
+			continue;
+		for (j = 0; j + KOF_MULTIMATCH_KEY <= q->len; j++)
+			freq[key_gram(q->b + j, KOFF_FREQ_BITS, t->fold)]++;
+	}
+	for (i = 0; i < t->n_pat; i++) {
+		const struct kof_multimatch_pat *q = &pat[t->idx[i]];
+		uint32_t best = 0, bf = 0xffffffffu;
+
+		if (q->is_hex)
+			continue;
+		for (j = 0; j + KOF_MULTIMATCH_KEY <= q->len; j++) {
+			uint32_t f = freq[key_gram(q->b + j, KOFF_FREQ_BITS,
+						   t->fold)];
+
+			if (f < bf) { bf = f; best = j; }
+		}
+		out[i] = (uint16_t)best;
+	}
+	free(freq);
+}
+
+/*
+ * Fill the bucket chains. mkoff NULL keys every marker on its first four bytes;
+ * otherwise marker i is keyed mkoff[i] bytes in.
+ */
+static int fill_gram(struct kof_multimatch *t,
+		     const struct kof_multimatch_pat *pat,
+		     const uint16_t *mkoff)
 {
 	uint32_t i, chain = 1;
 
 	t->bits = bits_for(t->n_pat, 8);
 	t->nb = 1u << t->bits;
+	t->max_chain = 0;
 	t->seen = calloc(t->nb / 8u, 1);
 	t->head = calloc(t->nb, sizeof *t->head);
 	t->ids  = calloc((size_t)t->n_pat + 1, sizeof *t->ids);
 	t->next = calloc((size_t)t->n_pat + 1, sizeof *t->next);
 	t->tag  = calloc((size_t)t->n_pat + 1, sizeof *t->tag);
+	if (mkoff) {
+		t->koff = calloc((size_t)t->n_pat + 1, sizeof *t->koff);
+		if (!t->koff)
+			return 0;
+		t->bytes += ((size_t)t->n_pat + 1) * sizeof *t->koff;
+	}
 	if (!t->seen || !t->head || !t->ids || !t->next || !t->tag)
 		return 0;
 	t->bytes += t->nb / 8u + (size_t)t->nb * sizeof *t->head +
@@ -428,15 +680,21 @@ static int build_gram(struct kof_multimatch *t, const struct kof_multimatch_pat 
 
 	for (i = 0; i < t->n_pat; i++) {
 		const struct kof_multimatch_pat *q = &pat[t->idx[i]];
-		uint32_t b = key_gram(q->b, t->bits, t->fold);
+		uint32_t o = mkoff ? mkoff[i] : 0u;
+		uint32_t b = key_gram(q->b + o, t->bits, t->fold);
+		uint32_t nx = o + KOF_MULTIMATCH_KEY;
 
 		t->seen[b >> 3] |= (uint8_t)(1u << (b & 7));
 		t->ids[chain] = i;
 		t->next[chain] = t->head[b];
-		t->tag[chain] = q->len > KOF_MULTIMATCH_KEY
-				? (t->fold ? fold_byte(q->b[KOF_MULTIMATCH_KEY])
-					   : q->b[KOF_MULTIMATCH_KEY])
+		/* The byte past the key, wherever the key now sits. */
+		t->tag[chain] = q->len > nx
+				? (t->fold ? fold_byte(q->b[nx]) : q->b[nx])
 				: (uint16_t)KOF_MULTIMATCH_NOTAG;
+		/* Chain-indexed, not marker-indexed: the walk has the chain
+		 * index in hand and nothing else. */
+		if (mkoff)
+			t->koff[chain] = (uint16_t)o;
 		t->head[b] = chain;
 		chain++;
 	}
@@ -448,6 +706,78 @@ static int build_gram(struct kof_multimatch *t, const struct kof_multimatch_pat 
 		if (c > t->max_chain)
 			t->max_chain = c;
 	}
+	return 1;
+}
+
+/*
+ * Fill the plain table, and hand the region to BISECT when that came out
+ * clustered.
+ *
+ * PREDICTING WHICH IS NEEDED IS THE POINT, and the prediction is made from the
+ * table that was ACTUALLY BUILT rather than from a guess about the base: the
+ * shape that decides it - the longest bucket - is not knowable from the marker
+ * count or their lengths, only from hashing them. Building the cheap one first
+ * costs milliseconds and tells the truth.
+ */
+/* Drop whatever the plain attempt allocated, so the next shape starts clean. */
+static void gram_discard(struct kof_multimatch *t, size_t bytes_was)
+{
+	free(t->seen); free(t->head); free(t->ids);
+	free(t->next); free(t->tag);  free(t->koff);
+	t->seen = NULL; t->head = NULL; t->ids = NULL;
+	t->next = NULL; t->tag = NULL; t->koff = NULL;
+	t->bytes = bytes_was;
+}
+
+/*
+ * Build the plain table, and move to a shape that survives when it clustered.
+ *
+ * THE PREDICTION IS MADE FROM THE TABLE THAT WAS ACTUALLY BUILT. The thing that
+ * decides - the longest bucket - cannot be read off the marker count or their
+ * lengths; only hashing them says. Building the cheap shape first costs
+ * milliseconds and tells the truth, and it is also the shape that wins whenever
+ * it is not clustered, so the common base pays nothing at all.
+ *
+ * Which replacement is chosen is the one measurement that IS a marker-count
+ * question - see KOF_MULTIMATCH_REKEY_MIN_PAT.
+ */
+static int build_gram(struct kof_multimatch *t, const struct kof_multimatch_pat *pat)
+{
+	/* BEFORE the first attempt: what it allocates is about to be freed, so
+	 * it is not part of what this table costs. Captured after, the stats
+	 * reported a switched table at twice its size. */
+	size_t bytes_was = t->bytes;
+
+	if (!fill_gram(t, pat, NULL))
+		return 0;
+	if (t->max_chain <= KOF_MULTIMATCH_BISECT_CHAIN)
+		return 1;                       /* the plain key was fine */
+
+	if (t->n_pat >= KOF_MULTIMATCH_REKEY_MIN_PAT) {
+		uint16_t *mkoff = calloc((size_t)t->n_pat + 1, sizeof *mkoff);
+		uint32_t chain_was = t->max_chain;
+
+		if (mkoff) {
+			pick_key_off(t, pat, mkoff);
+			gram_discard(t, bytes_was);
+			if (!fill_gram(t, pat, mkoff)) {
+				free(mkoff);
+				return 0;
+			}
+			free(mkoff);
+			/* A rekey that did not help is not worth its cost, and
+			 * the sorted shape is the other answer. */
+			if (t->max_chain < chain_was) {
+				t->kind = KOF_MULTIMATCH_REKEY;
+				return 1;
+			}
+		}
+	}
+
+	gram_discard(t, bytes_was);
+	if (!build_bisect(t, pat))
+		return 0;               /* the region falls back to per-marker */
+	t->kind = KOF_MULTIMATCH_BISECT;
 	return 1;
 }
 
@@ -520,6 +850,10 @@ static void tab_free(struct kof_multimatch *t)
 	free(t->ids);
 	free(t->next);
 	free(t->tag);
+	free(t->koff);
+	free(t->start);
+	free(t->ord);
+	free(t->pfx);
 	free(t->shift);
 	free(t->idx);
 	memset(t, 0, sizeof *t);
@@ -705,6 +1039,55 @@ static void sweep_gram(const struct kof_multimatch *t,
 	}
 }
 
+/*
+ * The same walk as sweep_gram, for a table whose keys were moved.
+ *
+ * A COPY RATHER THAN A FLAG, because the difference is two instructions in the
+ * innermost loop in the engine and a branch there is paid at every chain step
+ * of every haystack position. The two must stay in step; what keeps them honest
+ * is that both are checked against brute force in the harness.
+ */
+static void sweep_rekey(const struct kof_multimatch *t,
+		       const struct kof_multimatch_pat *pat,
+		       struct kof_match_ctx *m, uint64_t base, uint64_t span,
+		       uint32_t bitmask, uint32_t *found)
+{
+	uint64_t i, end = base + span;
+	const int fold = t->fold;
+	uint16_t nb;
+
+	if (span < KOF_MULTIMATCH_KEY)
+		return;
+	for (i = base; i + KOF_MULTIMATCH_KEY <= end; i++) {
+		uint32_t b = key_gram(m->data.p + i, t->bits, fold);
+		uint32_t k;
+
+		if (!((t->seen[b >> 3] >> (b & 7)) & 1))
+			continue;
+		/* The byte past the key, once, for every entry on the chain.
+		 * Only when it is inside the extent: at the very end there is
+		 * no such byte and pat_at's bounds test is the right answer. */
+		nb = (i + KOF_MULTIMATCH_KEY < end)
+		     ? (fold ? fold_byte(m->data.p[i + KOF_MULTIMATCH_KEY])
+			     : m->data.p[i + KOF_MULTIMATCH_KEY])
+		     : (uint16_t)KOF_MULTIMATCH_NOTAG;
+		for (k = t->head[b]; k; k = t->next[k]) {
+			uint32_t slot = t->idx[t->ids[k]];
+
+			if (t->tag[k] != KOF_MULTIMATCH_NOTAG &&
+			    nb != KOF_MULTIMATCH_NOTAG && t->tag[k] != nb)
+				continue;
+			/* The hit is on the KEY; the marker begins koff bytes
+			 * before it. */
+			if (i < t->koff[k])
+				continue;
+			if ((found[slot] & bitmask) == 0 &&
+			    pat_at(m, &pat[slot], i - t->koff[k], base, span))
+				found[slot] |= bitmask;
+		}
+	}
+}
+
 static void sweep_wm(const struct kof_multimatch *t,
 		     const struct kof_multimatch_pat *pat,
 		     struct kof_match_ctx *m, uint64_t base, uint64_t span,
@@ -765,6 +1148,10 @@ uint64_t kof_multimatch_sweep(const struct kof_multimatch_set *set, uint32_t bit
 		walked += len;
 		if (kind == KOF_MULTIMATCH_WUMANBER)
 			sweep_wm(t, set->pat, m, off, len, bitmask, found);
+		else if (kind == KOF_MULTIMATCH_BISECT)
+			sweep_bisect(t, set->pat, m, off, len, bitmask, found);
+		else if (kind == KOF_MULTIMATCH_REKEY)
+			sweep_rekey(t, set->pat, m, off, len, bitmask, found);
 		else
 			sweep_gram(t, set->pat, m, off, len, bitmask, found);
 	}

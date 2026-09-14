@@ -1844,10 +1844,31 @@ $(TEST)/unit_proc_rule$(EXE): tests/unit/proc_rule.c $(KOFPROC_SRC) $(LIB) \
 	$(CC) $(CFLAGS) $(DEPTO) -Ilibkoforbit/kofproc -I$(SDK)/include \
 	      tests/unit/proc_rule.c $(KOFPROC_SRC) $(LIB) -o $@ $(LDFLAGS)
 
+# The sanitized twin of the rule above. It exists because the generic
+# $(TEST)/asan_% pattern links a test against the library and nothing else, so
+# every test that needs extra sources or an include path had no way to build
+# under ASAN - `make unit-asan` stopped at the first of them and had done for
+# as long as they have existed.
+$(TEST)/asan_proc_rule$(EXE): tests/unit/proc_rule.c $(KOFPROC_SRC) \
+                              $(ASAN_LIB) $(SDK_HDR) $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) -Ilibkoforbit/kofproc \
+	       -I$(SDK)/include tests/unit/proc_rule.c $(KOFPROC_SRC) \
+	       $(ASAN_LIB) -o $@ $(LDFLAGS)
+
 $(TEST)/unit_fridge$(EXE): tests/unit/fridge.c $(KOFRIDGE_SRC) $(LIB) $(STAMP) \
                            | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) tests/unit/fridge.c $(KOFRIDGE_SRC) $(LIB) \
 	      -o $@ $(LDFLAGS)
+
+# The sanitized twin of the rule above. It exists because the generic
+# $(TEST)/asan_% pattern links a test against the library and nothing else, so
+# every test that needs extra sources or an include path had no way to build
+# under ASAN - `make unit-asan` stopped at the first of them and had done for
+# as long as they have existed.
+$(TEST)/asan_fridge$(EXE): tests/unit/fridge.c $(KOFRIDGE_SRC) $(ASAN_LIB) \
+                           $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) tests/unit/fridge.c $(KOFRIDGE_SRC) \
+	       $(ASAN_LIB) -o $@ $(LDFLAGS)
 
 #
 # The report, over synthetic records and NOT over a trace.
@@ -1878,6 +1899,14 @@ $(TEST)/unit_report_model$(EXE): tests/unit/report_model.c $(KOFREPORT_SRC) \
 	      -Ilibkoforbit/kofevt -Ilibkofeng -Ilibkofeng/core \
 	      tests/unit/report_model.c \
 	      $(KOFREPORT_SRC) $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS)
+
+# The sanitized twin - see the note on asan_fridge.
+$(TEST)/asan_report_model$(EXE): tests/unit/report_model.c $(KOFREPORT_SRC) \
+                                 $(KOFEVT_SRC) $(ASAN_LIB) $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) -Ilibkoforbit/kofreport \
+	       -Ilibkoforbit/kofevt -Ilibkofeng -Ilibkofeng/core \
+	       tests/unit/report_model.c \
+	       $(KOFREPORT_SRC) $(KOFEVT_SRC) $(ASAN_LIB) -o $@ $(LDFLAGS)
 
 EDITOR_SRC := kofexamine/kofeditor.c kofexamine/kofinspect.c $(KOFEVT_SRC)
 
@@ -2155,6 +2184,16 @@ $(TEST)/unit_antarc_fan$(EXE): tests/unit/antarc_fan.c $(ANTARC_SRC) \
 	$(CC) $(CFLAGS) $(DEPTO) $(ANTARC_INC) tests/unit/antarc_fan.c \
 	      $(ANTARC_SRC) $(KOFEVT_SRC) -o $@ $(LDFLAGS)
 
+# The sanitized twin of the rule above. It exists because the generic
+# $(TEST)/asan_% pattern links a test against the library and nothing else, so
+# every test that needs extra sources or an include path had no way to build
+# under ASAN - `make unit-asan` stopped at the first of them and had done for
+# as long as they have existed.
+$(TEST)/asan_antarc_fan$(EXE): tests/unit/antarc_fan.c $(ANTARC_SRC) \
+                               $(KOFEVT_SRC) $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) $(ANTARC_INC) tests/unit/antarc_fan.c \
+	       $(ANTARC_SRC) $(KOFEVT_SRC) -o $@ $(LDFLAGS)
+
 # The /proc walk's own unit test. It forks children into known shapes - a
 # memfd exec, a socket on stdin, a deleted binary - and checks the walk reports
 # them, so it needs libkofantarc and nothing else.
@@ -2162,6 +2201,16 @@ $(TEST)/unit_antarc_walk$(EXE): tests/unit/antarc_walk.c $(ANTARC_SRC) \
                                 $(KOFEVT_SRC) $(STAMP) | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) $(ANTARC_INC) tests/unit/antarc_walk.c \
 	      $(ANTARC_SRC) $(KOFEVT_SRC) -o $@ $(LDFLAGS)
+
+# The sanitized twin of the rule above. It exists because the generic
+# $(TEST)/asan_% pattern links a test against the library and nothing else, so
+# every test that needs extra sources or an include path had no way to build
+# under ASAN - `make unit-asan` stopped at the first of them and had done for
+# as long as they have existed.
+$(TEST)/asan_antarc_walk$(EXE): tests/unit/antarc_walk.c $(ANTARC_SRC) \
+                                $(KOFEVT_SRC) $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) $(ANTARC_INC) tests/unit/antarc_walk.c \
+	       $(ANTARC_SRC) $(KOFEVT_SRC) -o $@ $(LDFLAGS)
 
 # A hand tool, not a test: it prints what the walk saw on the live machine and
 # asserts nothing, so it is built on demand and never by `make unit`.

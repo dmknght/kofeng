@@ -205,7 +205,42 @@ struct kof_module;
 enum kof_multimatch_kind {
 	KOF_MULTIMATCH_NONE = 0,
 	KOF_MULTIMATCH_HASH4,        /* 4-gram buckets, every position tested */
-	KOF_MULTIMATCH_WUMANBER      /* block hash with a skip, long markers only */
+	KOF_MULTIMATCH_WUMANBER,     /* block hash with a skip, long markers only */
+	/*
+	 * SAME BUCKETS, SEARCHED INSTEAD OF WALKED.
+	 *
+	 * Markers share PREFIXES, so a bucket keyed on the first four bytes is
+	 * not a filter for them: measured on 800k markers taken from system
+	 * binaries, 24028 begin with the same four bytes, 7609 with "unc_",
+	 * 5491 with "gtk_". HASH4 walks that bucket at every haystack position
+	 * that hashes to it, so a 3 MB text file dropped to 4.8 MB/s at fifty
+	 * thousand markers and a 10 MB one took 25 SECONDS at eight hundred
+	 * thousand.
+	 *
+	 * The bucket is not the problem; walking it is. Sorted by bytes it is
+	 * searched in log2(24028) = 15 steps, and the same file runs at 31
+	 * MB/s. Markers that are prefixes of one another can match at one
+	 * position together and are 9% of a real set, so each entry carries a
+	 * link to the longest marker below it that is its prefix - a trie's
+	 * suffix link, flattened into the array at build time.
+	 */
+	KOF_MULTIMATCH_BISECT,
+	/*
+	 * THE SAME CHAIN, KEYED WHERE THE MARKER IS RAREST.
+	 *
+	 * BISECT makes a clustered bucket cheap to search; this stops it being
+	 * clustered. Each marker is keyed on the four bytes that the fewest
+	 * other markers in the table share rather than on its first four, so
+	 * the 24028-deep bucket that "    " produces becomes 90. The sweep then
+	 * hits the KEY, and the marker begins koff bytes earlier.
+	 *
+	 * It is not strictly better than BISECT and that is why both are here:
+	 * measured in this engine, BISECT wins at two hundred thousand markers
+	 * (121 against 72 MB/s) and this wins at eight hundred thousand (26
+	 * against 19). The count is what decides - see the table on
+	 * KOF_MULTIMATCH_REKEY_MIN_PAT.
+	 */
+	KOF_MULTIMATCH_REKEY
 };
 
 /*
@@ -261,6 +296,38 @@ enum kof_multimatch_kind {
 #define KOF_MULTIMATCH_BITS_MAX   22u
 
 /*
+ * WHEN THE WALK STOPS BEING CHEAPER THAN THE SEARCH.
+ *
+ * Below this a chain is a handful of entries and walking it beats a binary
+ * search's branches; above it the walk is what collapses. Measured on real
+ * markers at 3 MB of text, longest chain in brackets:
+ *
+ *      1 000 markers  [356]   walk  66.2 MB/s   bisect 344.3 MB/s
+ *     10 000 markers [1458]   walk  16.7        bisect 157.1
+ *    800 000 markers [24028]  walk   0.4        bisect  31.2
+ *
+ * A bucket of 128 is already 128 full compares at one haystack position, and
+ * no small base produces one.
+ */
+#define KOF_MULTIMATCH_BISECT_CHAIN 128u
+
+/*
+ * ABOVE THIS MANY MARKERS, REKEYING BEATS BISECTING.
+ *
+ * Both fix the same collapse and neither dominates. Measured in this engine on
+ * markers taken from system binaries, 50 KB of text:
+ *
+ *      markers   chain   plain   bisect   rekey
+ *      200 000    6702    22.5    121.4    72.3
+ *      800 000   24028     4.5     18.5    26.2
+ *
+ * Bisect pays log2(chain) branchy compares per hit and rekey pays one offset
+ * load per chain step, so the deeper the chain the more rekey's flatter buckets
+ * are worth. The crossover is measured below, not guessed.
+ */
+#define KOF_MULTIMATCH_REKEY_MIN_PAT 400000u
+
+/*
  * One REGION's plan and, when it has one, its table.
  *
  * A region and not a region MASK, and the difference is the whole cost of the
@@ -307,6 +374,26 @@ struct kof_multimatch {
 	 * verified in full.
 	 */
 	uint16_t *tag;
+	/*
+	 * BISECT ONLY. `start` is cumulative, so a bucket is
+	 * [start[b], start[b+1]) and there is no separate count array to hold -
+	 * which is what keeps this shape cheaper than the chain it replaces:
+	 * it drops `next` and `tag`, four and two bytes a marker, and adds
+	 * `pfx`, four.
+	 *
+	 * `ord` holds marker indices sorted by their bytes within each bucket;
+	 * `pfx` is parallel to `ord` and gives the position of the longest
+	 * entry below this one that is a prefix of it, or -1.
+	 */
+	uint32_t *start;
+	uint32_t *ord;
+	int32_t  *pfx;
+	/*
+	 * REKEY ONLY, chain-indexed: how far into the marker its key was taken.
+	 * NULL for every other shape, which is how the plain sweep knows the
+	 * hit IS the marker's start.
+	 */
+	uint16_t *koff;
 	uint8_t  *shift;         /* Wu-Manber only: bytes the next block may skip */
 	uint32_t  nb, bits;
 	uint32_t  max_chain;     /* longest bucket - what bounds the worst case */
