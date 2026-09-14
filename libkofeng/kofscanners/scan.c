@@ -764,6 +764,31 @@ static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ct
 			if (!sc->view[p->format])
 				return;
 		}
+		/*
+		 * ZEROED HERE TOO, AND THE REASON THE SNIFF PATH WAS EXEMPT HAS
+		 * EXPIRED.
+		 *
+		 * The exemption was written down: a view is reused across
+		 * objects and the sniff path can do that "because each of those
+		 * parsers fills every field it later reads". That stopped being
+		 * true when a parser gained a field the CALLER fills -
+		 * kof_pe_info.layout, which pe_parse deliberately preserves
+		 * across its own memset because clearing it would make every
+		 * declared mapped image parse as a file.
+		 *
+		 * A sniffed object has no caller-supplied anything, so it must
+		 * not inherit one. It did: scanning a manually-mapped image
+		 * (declared MAPPED) left that in the view, and the next PE this
+		 * scanner SNIFFED - an ordinary file - was parsed as though its
+		 * sections were at virtual addresses. Every region then resolved
+		 * to the wrong bytes, quietly, for the rest of that scanner's
+		 * life or until another declared scan happened to reset it.
+		 *
+		 * Measured as a heuristic firing twice on one module: once on
+		 * the mapped image and once on the file-layout copy un-mapped
+		 * from it, which cannot be mapped and said it was.
+		 */
+		memset(sc->view[p->format], 0, p->view_size);
 		if (p->parse(buf, sc->view[p->format], ctx))
 			return;
 	}

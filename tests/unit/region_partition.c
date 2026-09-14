@@ -190,6 +190,17 @@ static void one_file(const char *path, struct tally *t)
 		 * eleven. */
 		view = malloc(fmts[k].view_size);
 		if (view) {
+			/*
+			 * ZEROED, because a view carries fields the PARSE DOES
+			 * NOT WRITE - kof_pe_info.layout is one, and pe_parse
+			 * deliberately preserves it across its own memset. Out
+			 * of malloc that is uninitialised heap, and if it read
+			 * as MAPPED this test would compute a partition for an
+			 * image layout over bytes that are a file. The answer
+			 * would be wrong, and wrong differently on different
+			 * runs, which is the one result a test must never give.
+			 */
+			memset(view, 0, fmts[k].view_size);
 			memset(&ctx, 0, sizeof ctx);
 			if (fmts[k].parse(buf, view, &ctx)) {
 				int r = check(path, buf, &ctx, fmts[k].regions,

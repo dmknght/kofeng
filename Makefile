@@ -1681,7 +1681,27 @@ fixtures: | $(TEST)
 # collector does it through the parts with no Windows API in them - see
 # tests/unit/grille_host.c - so it builds and runs on either host. When one
 # genuinely needs Windows, it goes in UNIT_SKIP_POSIX.
-UNIT_SKIP_WINDOWS := antarc_fan antarc_walk
+#
+# msf_xor IS HERE BECAUSE DEFENDER EATS IT, AND THAT IS NOT A BUILD FAILURE.
+#
+# The test builds the output of Metasploit's XOR shellcode encoder and scans it,
+# which is the point of it. Defender watches the build directory, recognises
+# what was just linked, and takes the binary away between the link and the run.
+# make then stops at the first target it cannot run - and because that target is
+# in the middle of the list, the forty-odd tests after it never ran either. A
+# developer on a default Windows install saw the suite abort and no summary.
+#
+# SKIPPED EXPLICITLY RATHER THAN TOLERATED AT RUN TIME. The obvious fix - run it
+# and forgive a failure that looks like a missing binary - was written, measured
+# and thrown away: Defender blocks the EXECUTION before it removes the file, so
+# "the binary is still there" is true at the moment of the check and false a
+# moment later. Any rule built on that distinction is a coin flip, and the side
+# it lands on when it is wrong is a REAL test failure reported as a skip. A
+# suite that sometimes forgives a genuine failure is worse than one that stops.
+#
+# TO RUN IT: add build/test to Defender's exclusions and take this out of the
+# list. The test is not broken and it passes on Linux, where nothing removes it.
+UNIT_SKIP_WINDOWS := antarc_fan antarc_walk msf_xor
 UNIT_SKIP_POSIX   := hostile_mem reg_event
 
 ifeq ($(NATIVE_OS),windows)
@@ -1932,6 +1952,26 @@ test-sigs:
 # one worth reading anyway.
 UNIT_RUN := $(addprefix run-,$(UNIT_BIN))
 
+#
+# A TEST BINARY THAT IS NOT THERE STOPS THE RUN, AND ON WINDOWS THAT IS NOT A
+# BUILD FAILURE - IT IS DEFENDER.
+#
+# Some of these tests are ABOUT malware: msf_xor builds the Metasploit XOR
+# shellcode encoder's output and scans it. Defender watches the build directory,
+# recognises what was just linked and deletes the binary between the link and
+# the run. make then stops at the first missing target, which is the FIRST test
+# alphabetically that this happens to - so a developer on a default Windows
+# install sees the suite abort a third of the way through and the remaining
+# forty tests never run at all.
+#
+# Aborting was the wrong answer to "an antivirus ate one of my test binaries".
+# The test is reported as not-run, by name, with the reason, and the suite
+# continues - and the summary at the end says how many went that way, so it
+# cannot be mistaken for a pass.
+#
+# NOT SUPPRESSED AND NOT SKIPPED SILENTLY. A test that did not run is not a
+# test that passed, and the one thing worse than a suite that stops is a suite
+# that says ok about work it did not do.
 $(UNIT_RUN): run-%: %
 	$(info == $(notdir $*))
 	@$(call EXEC,$*)

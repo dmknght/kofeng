@@ -652,11 +652,21 @@ int kof_pe_parse(kof_buf file, struct kof_pe_info *info, struct kof_obj_ctx *ctx
 	 * its regions to the wrong bytes. Read it, wipe, put it back.
 	 */
 	uint32_t layout = info ? info->layout : 0u;
+	/* The second caller-owned field, saved across the wipe for the same
+	 * reason - see kof_pe_info.mem_origin. */
+	uint32_t origin = info ? info->mem_origin : 0u;
 
 	memset(info, 0, sizeof *info);
 	info->version = KOF_PE_INFO_VERSION;
 	info->layout  = layout == KOF_PE_LAYOUT_MAPPED ? KOF_PE_LAYOUT_MAPPED
 						       : KOF_PE_LAYOUT_FILE;
+	/*
+	 * ONLY MEANINGFUL FOR A MAPPED IMAGE. A file-layout parse that
+	 * inherited an origin would be claiming something about bytes that came
+	 * off a disk, which is the shape of the bug the sniff path's memset was
+	 * added to close.
+	 */
+	info->mem_origin = (info->layout == KOF_PE_LAYOUT_MAPPED) ? origin : 0u;
 
 	ctx->obj_size    = file.n;
 	ctx->entry_off   = KOF_NA;

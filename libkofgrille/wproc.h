@@ -333,7 +333,39 @@ enum {
 	KOFW_MDF_NO_FILE = 1u << 1,
 
 	/* No path at all: the loader has no name for this one. */
-	KOFW_MDF_UNNAMED = 1u << 2
+	KOFW_MDF_UNNAMED = 1u << 2,
+
+	/*
+	 * THE MAPPED FILE IS GONE AND SOMETHING ELSE IS AT ITS PATH NOW.
+	 *
+	 * A module was updated underneath a running process: the old file was
+	 * unlinked - it stays alive because the mapping holds it - and a new
+	 * one was written at the same path. The process goes on running the old
+	 * bytes until it restarts.
+	 *
+	 * IT IS THE SAME OBSERVATION AS KOFW_MDF_NO_FILE AND A DIFFERENT FACT,
+	 * which is the whole reason it has its own bit. Both say "the file this
+	 * mapping came from has been unlinked". Only one of them says anybody
+	 * removed anything: here the path still resolves, to a NEWER file, and
+	 * that is what an update looks like from the outside.
+	 *
+	 * MEASURED, and it is why this exists. Three modules on this machine
+	 * had NO_FILE set - VCRUNTIME140, VCRUNTIME140_1 and MSVCP140, all
+	 * inside Office ClickToRun, all mapped from \$Extend\$Deleted, and all
+	 * three of their original paths still holding a file. Office had
+	 * updated its own runtime while its process was running. A rule reading
+	 * NO_FILE as "a dropper removed its payload" fires on every machine
+	 * with Office on it and is right about none of them.
+	 *
+	 * COMMON ON LINUX, WHERE IT HAS ALWAYS BEEN KNOWN. aproc.h says it of
+	 * KOFA_RGF_DELETED in as many words - "what every in-place package
+	 * upgrade leaves behind, which is why it is a fact and not a finding",
+	 * measured at 94 mappings on an ordinary desktop. Every apt upgrade of
+	 * a running service produces them. The Windows half said the opposite
+	 * about the same condition; this is the distinction that lets both be
+	 * right.
+	 */
+	KOFW_MDF_REPLACED = 1u << 3
 };
 
 struct kofw_module {
@@ -832,6 +864,16 @@ const struct kofw_proc *kofw_pmem_proc(const struct kofw_pmem *);
  *                  which is also why there is so little of it.
  */
 int kofw_pmem_next_module(struct kofw_pmem *, struct kofw_module *out);
+
+/*
+ * ONE MODULE'S SizeOfImage, for a caller that needs it after deciding it cares.
+ *
+ * Zero when it could not be asked. The walk leaves kofw_module.size zero unless
+ * KOFW_MW_MOD_EXTENT was set - see that bit for why - so this is how the few
+ * callers that genuinely need an extent get one without every module on the
+ * machine paying a cross-process query for it.
+ */
+uint64_t kofw_pmem_module_size(struct kofw_pmem *, uint64_t base);
 
 /*
  * The next committed region. 1 if one was filled in, 0 at the end.

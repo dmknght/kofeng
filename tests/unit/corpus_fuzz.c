@@ -222,6 +222,16 @@ static void fuzz_file(const char *path, uint32_t rounds, struct pc_report *rep,
 	view = malloc(big);
 	if (!view)
 		goto out;
+	/*
+	 * ZEROED ONCE, WHICH IS ENOUGH HERE. A view carries fields the parse
+	 * does not write - kof_pe_info.layout, which pe_parse deliberately
+	 * preserves across its own memset because a caller owns it. Nothing in
+	 * this file ever sets one, so zero at the start stays zero, and zero is
+	 * FILE layout. Out of malloc it would be uninitialised heap instead,
+	 * and a PE read as a mapped image walks a different parser - on a
+	 * fuzzer whose seed is fixed precisely so a failure can be run again.
+	 */
+	memset(view, 0, big);
 
 	fd = open(path, O_RDONLY);
 	if (fd < 0)

@@ -738,7 +738,9 @@ static int take_span(struct wwalk *w, struct kof_walk_item *out)
 		 * reads by offset.
 		 */
 		memset(&w->hint, 0, sizeof w->hint);
-		w->hint.layout  = KOF_PE_LAYOUT_MAPPED;
+		w->hint.layout     = KOF_PE_LAYOUT_MAPPED;
+		/* A PE in executable memory no file accounts for. */
+		w->hint.mem_origin = KOF_PE_ORIGIN_MANUAL;
 		out->as_format  = KOF_FMT_PE;
 		out->as_view    = &w->hint;
 		out->as_view_len = (uint32_t)sizeof w->hint;
@@ -773,13 +775,29 @@ static int take_span(struct wwalk *w, struct kof_walk_item *out)
 static int take_nameless_module(struct wwalk *w, const struct kofw_module *md,
 				struct kof_walk_item *out)
 {
-	size_t got;
+	size_t   got;
+	uint64_t size = md->size;
 
-	if (!md->size || md->size > W_MAX_SPAN)
+	/*
+	 * ASKED FOR, BECAUSE THE WALK DOES NOT PAY FOR IT UP FRONT.
+	 *
+	 * A module's size costs a cross-process query each and nothing else in
+	 * this file reads it, so KOFW_MW_MOD_EXTENT leaves it zero - see the
+	 * bit. This function is the exception, it reaches here for the few
+	 * modules whose file is gone, and it asks for that one.
+	 *
+	 * IT USED TO RETURN INSTEAD. When the bit was added this line read
+	 * `if (!md->size)` and every module arrived with zero, so the whole
+	 * deleted-payload path stopped running - no error, no count, just a
+	 * kind of finding that quietly never appeared again.
+	 */
+	if (!size)
+		size = kofw_pmem_module_size(w->mem, md->base);
+	if (!size || size > W_MAX_SPAN)
 		return 0;
-	if (!grow(w, (size_t)md->size))
+	if (!grow(w, (size_t)size))
 		return 0;
-	got = kofw_pmem_read(w->mem, md->base, w->buf, (size_t)md->size);
+	got = kofw_pmem_read(w->mem, md->base, w->buf, (size_t)size);
 	if (got < W_MIN_IMAGE)
 		return 0;
 	w->bytes += got;
@@ -795,11 +813,24 @@ static int take_nameless_module(struct wwalk *w, const struct kofw_module *md,
 	 * because that is a fact worth seeing in a tree. awalk.c spells the
 	 * same shape MEM_DELETED.
 	 */
-	out->label = (md->flags & KOFW_MDF_NO_FILE) ? "MEM_DELETED"
-						    : "MEM_UNNAMED";
+	/*
+	 * THREE WORDS FOR THREE FACTS, because a reader acts on them
+	 * differently. REPLACED used to fall through to UNNAMED, which was
+	 * wrong about the one thing it says: an updated module HAS a name, and
+	 * the name is how anybody would check what happened to it.
+	 */
+	out->label = (md->flags & KOFW_MDF_REPLACED) ? "MEM_REPLACED"
+		   : (md->flags & KOFW_MDF_NO_FILE)   ? "MEM_DELETED"
+						      : "MEM_UNNAMED";
 
 	memset(&w->hint, 0, sizeof w->hint);
-	w->hint.layout   = KOF_PE_LAYOUT_MAPPED;
+	w->hint.layout     = KOF_PE_LAYOUT_MAPPED;
+	/* The loader lists it; the file behind it is gone or was never
+	 * named. Far commoner than a manual map - see kof_pe_origin. */
+	w->hint.mem_origin = (md->flags & KOFW_MDF_REPLACED)
+			   ? KOF_PE_ORIGIN_REPLACED
+			   : (md->flags & KOFW_MDF_NO_FILE)
+			   ? KOF_PE_ORIGIN_DELETED : KOF_PE_ORIGIN_UNNAMED;
 	out->as_format   = KOF_FMT_PE;
 	out->as_view     = &w->hint;
 	out->as_view_len = (uint32_t)sizeof w->hint;
@@ -1031,7 +1062,25 @@ static int w_next_item(void *self, struct kof_walk_item *out)
 
 	while (w->stage == W_STAGE_MODULES &&
 	       kofw_pmem_next_module(w->mem, &md)) {
-		if (md.flags & (KOFW_MDF_UNNAMED | KOFW_MDF_NO_FILE)) {
+		/*
+		 * READ FROM MEMORY WHENEVER THE FILE IS NOT WHAT IS RUNNING.
+		 *
+		 * REPLACED BELONGS HERE AND WAS MISSED, which cost the walk its
+		 * correctness for exactly the case that flag was added to name.
+		 * An updated module's path resolves perfectly well - to the NEW
+		 * file, which the process is not running and will not run until
+		 * it restarts. Scanning that is scanning the wrong bytes, and it
+		 * is worse than scanning nothing because it comes back clean
+		 * about something nobody examined.
+		 *
+		 * Before REPLACED existed these modules were NO_FILE and took
+		 * this branch; separating them sent them down the file path.
+		 * The lesson is the flag's, not the branch's: all three of these
+		 * mean "the bytes in this process have no file that matches
+		 * them", which is the only question this branch asks.
+		 */
+		if (md.flags & (KOFW_MDF_UNNAMED | KOFW_MDF_NO_FILE |
+				KOFW_MDF_REPLACED)) {
 			if (take_nameless_module(w, &md, out))
 				return 1;
 			continue;

@@ -1155,6 +1155,15 @@ int main(int argc, char **argv)
 	view = malloc(big);
 	if (!view)
 		return 1;
+	/*
+	 * ZEROED, for the reason corpus_fuzz's is: a view carries fields the
+	 * parse does not write, and out of malloc those are uninitialised heap.
+	 * This file picks its format at random from a seeded generator so that
+	 * a failing round can be reproduced from the seed alone - which it
+	 * cannot be if the parse also depends on what the allocator handed
+	 * back.
+	 */
+	memset(view, 0, big);
 
 	rng_state = seed ? seed : 1;
 

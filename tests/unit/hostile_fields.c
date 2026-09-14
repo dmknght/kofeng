@@ -493,6 +493,18 @@ int main(void)
 				return 1;
 			view_cap = tg->p->view_size;
 		}
+		/*
+		 * ZEROED PER TARGET, not per parse, which is both enough and
+		 * the only version that does not lie about the timings.
+		 *
+		 * A view carries fields the parse does not write - see
+		 * kof_pe_info.layout - so out of malloc it starts as
+		 * uninitialised heap. Nothing here ever sets one, so clearing
+		 * it once leaves it clear. Clearing before every parse instead
+		 * would put a 7.6KB memset inside the loop that decides whether
+		 * a parse was too slow, and this file fails a case on its time.
+		 */
+		memset(view, 0, view_cap);
 		seed_len = tg->seed(obj);
 		base = baseline_ms(tg, obj, view);
 

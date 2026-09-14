@@ -327,6 +327,28 @@ const struct kof_parser *kof_inspect_declare(kof_buf buf, uint8_t format,
 	view = malloc(p->view_size);
 	if (!view)
 		return NULL;
+	/*
+	 * ZEROED BEFORE THE PARSE, AND IT WAS NOT.
+	 *
+	 * Most fields of a view are the parser's own answers and it does not
+	 * matter what they held first. Some are INPUTS the caller fills -
+	 * kof_pe_info.layout and kof_amsi_view.obj_off are the two today - and
+	 * a parser reads those rather than writing them. pe_parse deliberately
+	 * carries `layout` across its own memset, so whatever was in this
+	 * allocation IS the answer.
+	 *
+	 * Straight out of malloc that answer is uninitialised heap. If it
+	 * happened to equal KOF_PE_LAYOUT_MAPPED, a file read off a disk was
+	 * parsed as though its sections sat at their virtual addresses, and
+	 * every region resolved to the wrong bytes - nondeterministically,
+	 * which is worse than consistently wrong because it cannot be
+	 * reproduced.
+	 *
+	 * THIS IS THE SAME BUG THE SCANNER HAD at its sniff path, found first
+	 * and fixed there. Both entry points are now the same rule: a parse
+	 * that was given no input must not find one.
+	 */
+	memset(view, 0, p->view_size);
 	if (!p->parse(buf, view, ctx)) {
 		free(view);
 		return NULL;
@@ -352,6 +374,10 @@ const struct kof_parser *kof_inspect_identify(kof_buf buf,
 		if (!parsers[i].sniff(buf))
 			continue;
 		view = malloc(parsers[i].view_size);
+		/* Zeroed for the reason kof_inspect_declare's is - a sniffed
+		 * object supplied no inputs, so the parse must not find any. */
+		if (view)
+			memset(view, 0, parsers[i].view_size);
 		if (view && parsers[i].parse(buf, view, ctx)) {
 			*view_out = view;
 			return &parsers[i];

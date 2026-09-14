@@ -25,6 +25,9 @@
 #include <stdlib.h>
 
 #include "../../kofexamine/kofeditor.h"
+#include "../../kofexamine/kofinspect.h"
+#include <kofmod/pe.h>
+#include "../../libkofeng/kofparsers/binaries/pe_parse.h"
 
 static int fails;
 
@@ -220,6 +223,99 @@ static void emitting(void)
 	EQ(emit("!;1"), "kof_find_str_any(scan_range_whole_file, s0)");
 }
 
+/*
+ * A ZEROED VIEW MEANS FILE LAYOUT, AND A MAPPED ONE SURVIVES THE PARSE.
+ *
+ * THIS IS THE CONTRACT EVERY CALLER RELIES ON, and it is worth pinning because
+ * it is the opposite of what a parser normally does. pe_parse memsets its view
+ * like the others - and then puts `layout` BACK, because that field is an INPUT
+ * the caller owns and clearing it would make every declared mapped image parse
+ * as a file and resolve its regions to the wrong bytes.
+ *
+ * The consequence is that whatever was in the allocation IS the answer, so
+ * every caller must hand over a view it has cleared. Three did not, at
+ * different times:
+ *
+ *   scan.c's SNIFF path reused one persistent view per format without clearing
+ *   it. That bug was ACTIVE and was seen: scanning a manually-mapped image left
+ *   MAPPED in the view, and the very next PE the scanner sniffed - a file, off
+ *   a disk - was parsed as an image. Measured as a heuristic firing twice on
+ *   one module, once on bytes that could not possibly be mapped.
+ *
+ *   kofinspect's two entry points malloc'd a view and parsed straight into it.
+ *   That one is LATENT rather than active: the view is 7.6KB, and on the
+ *   allocator here a block of that size comes back zeroed, so the wrong answer
+ *   happens to be the right one. It is still undefined behaviour and still
+ *   wrong under any allocator that fills freed memory - a debug CRT writes
+ *   0xCD - so it is fixed, but honesty requires saying it was never observed
+ *   failing.
+ *
+ * WHAT THIS TEST DOES AND DOES NOT COVER. It pins the parser's half
+ * deterministically: cleared means FILE, set means MAPPED. It does NOT catch a
+ * caller that forgets to clear, because that needs the allocator to hand back
+ * dirty memory on demand and it will not - the first version of this case tried
+ * exactly that, poisoned a block, freed it, and got a fresh zeroed one back. A
+ * probabilistic test that usually fails to reproduce the defect is worse than
+ * none, so it was replaced with this.
+ *
+ * Here rather than in a file of its own because this is the one test that
+ * already links kofinspect.
+ */
+static void view_inputs(void)
+{
+	static const unsigned char pe[] = {
+		/* Enough of a PE for the sniff to accept: MZ, e_lfanew at 0x3c
+		 * pointing at "PE" and two NULs, one section, a PE32 optional header. */
+		0x4d,0x5a,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+		0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+		0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+		0,0,0,0, 0,0,0,0, 0,0,0,0, 0x40,0,0,0,
+		0x50,0x45,0,0,
+		0x4c,0x01, 0x01,0x00,
+		0,0,0,0, 0,0,0,0, 0,0,0,0,
+		0xe0,0x00, 0x02,0x01,
+		0x0b,0x01
+	};
+	struct kof_pe_info info;
+	struct kof_obj_ctx ctx;
+
+	/*
+	 * CLEARED MEANS FILE. This is what every caller buys by zeroing the
+	 * view before handing it over, and what the three that did not were
+	 * accidentally relying on the allocator for.
+	 */
+	memset(&info, 0, sizeof info);
+	memset(&ctx, 0, sizeof ctx);
+	if (!kof_pe_parse(kof_buf_make(pe, sizeof pe), &info, &ctx)) {
+		printf("  note: the minimal PE did not parse; the view input "
+		       "case did not run\n");
+		return;
+	}
+	CK(info.layout == KOF_PE_LAYOUT_FILE);
+
+	/*
+	 * AND SET MEANS SET. The parse memsets its view and must put this one
+	 * field back - a version that cleared it would make every declared
+	 * mapped image resolve its regions at file offsets, silently.
+	 */
+	memset(&info, 0, sizeof info);
+	memset(&ctx, 0, sizeof ctx);
+	info.layout = KOF_PE_LAYOUT_MAPPED;
+	if (kof_pe_parse(kof_buf_make(pe, sizeof pe), &info, &ctx))
+		CK(info.layout == KOF_PE_LAYOUT_MAPPED);
+
+	/*
+	 * mem_origin RIDES WITH IT, and is cleared when the layout is not
+	 * mapped - an origin on bytes that came off a disk would be a claim
+	 * about where they were read from, which nobody made.
+	 */
+	memset(&info, 0, sizeof info);
+	memset(&ctx, 0, sizeof ctx);
+	info.mem_origin = KOF_PE_ORIGIN_MANUAL;
+	if (kof_pe_parse(kof_buf_make(pe, sizeof pe), &info, &ctx))
+		CK(info.mem_origin == KOF_PE_ORIGIN_NONE);
+}
+
 int main(void)
 {
 	reading();
@@ -227,8 +323,9 @@ int main(void)
 	switching();
 	canon();
 	emitting();
+	view_inputs();
 
-	printf("condition expressions: read, rewrite, switch, canon, emit%s\n",
-	       fails ? "" : " - ok");
+	printf("condition expressions: read, rewrite, switch, canon, emit, "
+	       "view inputs%s\n", fails ? "" : " - ok");
 	return fails != 0;
 }

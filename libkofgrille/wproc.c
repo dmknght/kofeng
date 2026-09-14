@@ -794,6 +794,35 @@ static int mods_load(struct kofw_pmem *m)
 }
 
 /*
+ * ONE MODULE'S SIZE, ASKED FOR BY ITSELF.
+ *
+ * KOFW_MW_MOD_EXTENT turns the size and entry off for the whole walk because
+ * almost nothing reads them - and "almost" is the word that made this
+ * necessary. A caller that needs the extent of ONE module, having decided from
+ * its flags or its path that it cares, asks here and pays for that one.
+ *
+ * WRITTEN BECAUSE THE BIT BROKE SOMETHING. take_nameless_module reads a
+ * module's whole image out of memory, which needs its size, and it reaches that
+ * code for perhaps three modules on a machine - the ones whose file is gone.
+ * With the extent off for the walk it got zero and returned, silently, so the
+ * one path that recovers a deleted payload stopped running and nothing said so.
+ *
+ * Lazy rather than re-enabling the bit for everybody: three queries against
+ * four thousand six hundred is the difference the bit exists for.
+ */
+uint64_t kofw_pmem_module_size(struct kofw_pmem *m, uint64_t base)
+{
+	MODULEINFO mi;
+
+	if (!m || !base)
+		return 0;
+	if (!GetModuleInformation(m->h, (HMODULE)(uintptr_t)base, &mi,
+				  (DWORD)sizeof mi))
+		return 0;
+	return (uint64_t)mi.SizeOfImage;
+}
+
+/*
  * IS THIS ALLOCATION ONE THE LOADER LISTS - the anchor, and it runs on every
  * image region, so it does nothing but halve an array.
  *
@@ -915,13 +944,53 @@ int kofw_pmem_next_module(struct kofw_pmem *m, struct kofw_module *out)
 		 */
 		if (m->mod_path[0]) {
 			wchar_t wcheck[PATH_CAP];
-			size_t  i;
 
-			for (i = 0; i + 1u < PATH_CAP && m->mod_path[i]; i++)
-				wcheck[i] = (wchar_t)(unsigned char)m->mod_path[i];
-			wcheck[i] = 0;
-			if (GetFileAttributesW(wcheck) == INVALID_FILE_ATTRIBUTES)
-				out->flags |= KOFW_MDF_NO_FILE;
+			/*
+			 * BACK THROUGH UTF-8, not widened a byte at a time.
+			 * mod_path is UTF-8 - dosify wrote it - so a byte-wise
+			 * widen is right for ASCII and silently wrong for
+			 * every path with a non-ASCII character in it, which
+			 * would then fail the attribute query and be reported
+			 * as a file that is not there.
+			 */
+			if (MultiByteToWideChar(CP_UTF8, 0, m->mod_path, -1,
+						wcheck, PATH_CAP) &&
+			    GetFileAttributesW(wcheck) ==
+				    INVALID_FILE_ATTRIBUTES) {
+				/*
+				 * GONE - BUT IS ANYTHING AT ITS ORIGINAL PATH?
+				 *
+				 * The name above came from the memory manager,
+				 * so for an unlinked file it is NTFS's internal
+				 * one - \$Extend\$Deleted\<id> - and says
+				 * nothing about where the module came from. The
+				 * LOADER still has that, and it is the one
+				 * question that separates an update from a
+				 * removal: a path that still resolves means a
+				 * newer file was written over it.
+				 *
+				 * ASKED ONLY HERE, which is what makes it
+				 * affordable. GetModuleFileNameExW costs 58
+				 * microseconds and this reaches it for three
+				 * modules out of four and a half thousand.
+				 */
+				uint32_t f = KOFW_MDF_NO_FILE;
+
+				if (GetModuleFileNameExW(
+					    m->h, m->mods[m->i_mod], wpath,
+					    (DWORD)(sizeof wpath /
+						    sizeof wpath[0])) &&
+				    GetFileAttributesW(wpath) !=
+					    INVALID_FILE_ATTRIBUTES) {
+					f = KOFW_MDF_REPLACED;
+					/* The path a reader wants is the one
+					 * the module was loaded from, not the
+					 * internal name of its corpse. */
+					wide_to_buf(wpath, m->mod_path,
+						    sizeof m->mod_path, &cut);
+				}
+				out->flags |= f;
+			}
 		}
 	}
 	if (!m->mod_path[0])

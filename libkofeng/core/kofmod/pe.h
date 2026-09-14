@@ -529,6 +529,61 @@ struct kof_pe_info {
 	 * directory and the second is a structure somewhere else entirely.
 	 */
 	struct kof_clr_meta clr;
+
+	/*
+	 * WHY THESE BYTES HAVE NO FILE. INPUT, like `layout`, and appended for
+	 * the same reason it is.
+	 *
+	 * `layout` says the bytes were read out of memory. It does not say
+	 * WHICH of three very different things put them there, and a rule that
+	 * cannot tell them apart has to treat the rarest and the most common
+	 * as one:
+	 *
+	 *   KOF_PE_ORIGIN_MANUAL   a PE in executable memory that is not an
+	 *                          image section and has no file behind it.
+	 *                          Reflective loading. Measured across 83
+	 *                          processes and 51573 regions on an ordinary
+	 *                          desktop: ZERO.
+	 *
+	 *   KOF_PE_ORIGIN_DELETED  a module the loader lists whose file is
+	 *                          gone. A classic dropper move - and also what
+	 *                          Office ClickToRun does routinely: three on
+	 *                          that same machine, all from AppVShNotify,
+	 *                          their files POSIX-deleted into NTFS's
+	 *                          \$Extend\$Deleted while still mapped.
+	 *
+	 *   KOF_PE_ORIGIN_UNNAMED  the loader has no path for it at all.
+	 *
+	 * The base rates differ by orders of magnitude, so the verdicts have to
+	 * be allowed to differ too. Without this a rule written for the first
+	 * fires on every machine with Office on it.
+	 */
+	uint32_t mem_origin;
+};
+
+/*
+ * WHAT PUT A MAPPED IMAGE IN MEMORY WITH NO FILE BEHIND IT - see
+ * kof_pe_info.mem_origin. Zero is "the caller did not say", which is what an
+ * ordinary file scan leaves and what a rule must read as "no claim".
+ */
+enum kof_pe_origin {
+	KOF_PE_ORIGIN_NONE = 0,
+	KOF_PE_ORIGIN_MANUAL,
+	KOF_PE_ORIGIN_DELETED,
+	KOF_PE_ORIGIN_UNNAMED,
+
+	/*
+	 * THE MAPPED FILE WAS UNLINKED AND A NEWER ONE IS AT ITS PATH: an
+	 * update underneath a running process.
+	 *
+	 * Its own value rather than folded into DELETED, because only one of
+	 * the two means anybody removed anything. Every in-place package
+	 * upgrade on Linux produces this, and so does Office updating its own
+	 * runtime on Windows - measured as three modules on an ordinary
+	 * desktop, all of them VC++ runtimes inside ClickToRun. See
+	 * KOFW_MDF_REPLACED.
+	 */
+	KOF_PE_ORIGIN_REPLACED
 };
 
 /* Non-zero when this view describes an image the loader has already mapped. */
