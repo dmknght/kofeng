@@ -551,6 +551,7 @@ static int hex_last(void)
  * unless the terminal is resized.
  */
 #define FAM_W     24    /* the family box, focused or not */
+#define NOTE_W    40    /* the comment box - a remark, not a paragraph */
 #define GEN_BTN_W 12    /* "[ Generate ]" */
 /* "[ Save ]" + two + "[ Save As ]" - what replaces Generate once the draft has
  * a file behind it. */
@@ -9849,6 +9850,21 @@ static void draw_decl_head(struct out *o, struct view *v)
 		int room = head_btn_x(v) - c - 3;
 		uint32_t off;
 
+		/*
+		 * AND NO WIDER THAN A NOTE NEEDS TO BE.
+		 *
+		 * Filling the gap made the box as wide as the terminal - on a
+		 * 140 column screen, ninety columns of empty bracket for a
+		 * one-line remark. The gap is what it may not EXCEED, not what
+		 * it should take: past a point a longer box stops being more
+		 * room and starts being a hole in the row.
+		 *
+		 * The text still scrolls inside it, so a long note is not cut
+		 * off, it is read by moving through it - which is what every
+		 * other field on this row does.
+		 */
+		if (room > NOTE_W)
+			room = NOTE_W;
 		if (room < 8)
 			room = 8;
 		(void)len; (void)off;
@@ -13149,11 +13165,56 @@ static void decl_add(struct view *v, int hex)
 	v->sel_a = v->sel_b = KOF_BROKEN;
 }
 
-static void menu_run(struct view *v, int a)
+/*
+ * THE BYTE SELECTION, ONTO THE CLIPBOARD.
+ *
+ * Its own function because two things ask for it and one of them is not a menu
+ * item. Ctrl+C went through menu_run, which opens with a menu_enabled test -
+ * and that test asks whether the item is in the CONTEXT MENU THAT IS OPEN.
+ * With no menu open the context is whatever a previous right-click left behind,
+ * so the chord did nothing at all and did it silently.
+ *
+ * The gate belongs to the menu, not to the copy.
+ */
+static void copy_selection(struct view *v, int as_hex)
 {
-	uint64_t lo, hi, k, n;
+	uint64_t lo, hi, k, n, bn = 0;
+	const uint8_t *bp;
 	struct out t = { 0 };
 
+	if (v->sel_a == KOF_BROKEN || v->sel_b == KOF_BROKEN)
+		return;
+	lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
+	hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
+	n = hi - lo + 1u;
+	bp = view_bytes(v, &bn);
+
+	for (k = 0; k < n; k++) {
+		uint64_t bf = view_map(v, lo + k, 0);
+		uint8_t c = (bp && bf < bn) ? bp[bf] : 0;
+
+		if (as_hex) {
+			char x[3];
+
+			snprintf(x, sizeof x, "%02X", c);
+			out_add(&t, x, 2);
+		} else {
+			/* The bytes as they are, not as they print. A marker is
+			 * bytes, and turning the unprintable ones into dots
+			 * would put something in the clipboard that is not what
+			 * was selected. */
+			out_add(&t, (const char *)&c, 1);
+		}
+	}
+	if (t.n) {
+		copy_osc52(t.p, t.n);
+		copy_said(v, t.n);
+	}
+	free(t.p);
+}
+
+static void menu_run(struct view *v, int a)
+{
 	if (!menu_enabled(v, a))
 		return;
 	if (a == M_COPY_OFF_HEX || a == M_COPY_OFF_DEC) {
@@ -13312,35 +13373,7 @@ static void menu_run(struct view *v, int a)
 		v->ed.dr.warn[0] = 0;
 		return;
 	}
-	lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
-	hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
-	n = hi - lo + 1u;
-
-	uint64_t bn = 0;
-	const uint8_t *bp = view_bytes(v, &bn);
-
-	for (k = 0; k < n; k++) {
-		uint64_t bf = view_map(v, lo + k, 0);
-		uint8_t c = (bp && bf < bn) ? bp[bf] : 0;
-
-		if (a == M_COPY_HEX) {
-			char x[3];
-
-			snprintf(x, sizeof x, "%02X", c);
-			out_add(&t, x, 2);
-		} else {
-			/* The bytes as they are, not as they print. A marker is
-			 * bytes, and turning the unprintable ones into dots
-			 * would put something in the clipboard that is not what
-			 * was selected. */
-			out_add(&t, (const char *)&c, 1);
-		}
-	}
-	if (t.n) {
-		copy_osc52(t.p, t.n);
-		copy_said(v, t.n);
-	}
-	free(t.p);
+	copy_selection(v, a == M_COPY_HEX);
 	v->menu_open = 0;
 }
 
@@ -24506,12 +24539,13 @@ static int handle(struct view *v, int k)
 		 * editor has is not a thing a reader will think to look in a
 		 * menu for.
 		 *
-		 * The menu's own action, not a second copy written here: what
-		 * the chord does and what the item does cannot then disagree
-		 * about what "the selection" is.
+		 * The same call the menu item makes, so what the chord does and
+		 * what the item does cannot disagree about what "the selection"
+		 * is - but not through menu_run, whose first act is to ask
+		 * whether the item is in the menu that is open. There is no
+		 * menu open here.
 		 */
-		if (v->sel_a != KOF_BROKEN)
-			menu_run(v, M_COPY_ASCII);
+		copy_selection(v, 0);
 		break;
 	}
 	/*
