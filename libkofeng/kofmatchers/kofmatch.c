@@ -36,7 +36,25 @@
  * holds. Measured on 400 binaries, 22 bits saturated on the files above 1MB and cost
  * 5x the wall time; 26 bits was slower again from TLB pressure.
  */
-#define GRAM_BITS  24
+/*
+ * THE BIGGEST the presence table may get, not the size it is.
+ *
+ * It used to be the size: every scanner that built one allocated 2^24 stamps -
+ * 32 MB - whether the object was ten kilobytes or ten megabytes, and calloc's
+ * laziness does not save it because stamping writes scattered across the whole
+ * table and faults the pages in for real.
+ *
+ * The table is sized from the OBJECT instead, because that is what fills it:
+ * after stamping n bytes it is about 1 - e^(-n/slots) full, so slots of about
+ * n / ln2 is the smallest table that is still under half full. A 64 KB object
+ * gets 128 K slots - 256 KB - instead of 32 MB.
+ *
+ * It grows and never shrinks within a scanner, so a walk that meets one large
+ * object pays for one large table and every object after it reuses it. The cap
+ * is what makes that bounded.
+ */
+#define GRAM_BITS      24               /* the cap: 2^24 stamps = 32 MB */
+#define GRAM_BITS_MIN  12               /* 4096 stamps = 8 KB */
 #define GRAM_SLOTS (1u << GRAM_BITS)
 #ifndef GRAM_MIN_PATTERNS
 #define GRAM_MIN_PATTERNS 140
@@ -781,13 +799,34 @@ static int match_ranges(struct kof_match_ctx *m, const struct kof_range *ext,
  * and never used, should not pay for a table it does not touch. Returns whether one
  * is available.
  */
+/* The smallest table that holds `n` bytes under half full, up to `cap`. */
+static uint8_t gram_bits_for(uint64_t n, uint8_t cap)
+{
+	uint8_t b = GRAM_BITS_MIN;
+
+	while (b < cap && (uint64_t)(1u << b) * 693u / 1000u < n)
+		b++;
+	return b;
+}
+
 static int gram_ensure(struct kof_match_ctx *m)
 {
-	if (m->gram)
-		return 1;
+	uint8_t cap = m->gram_bits ? m->gram_bits : GRAM_BITS;
+	uint8_t want;
+
 	if (m->gram_patterns < (m->gram_min ? m->gram_min : GRAM_MIN_PATTERNS))
 		return 0;
-	m->gram = gram_new(m->gram_bits ? m->gram_bits : GRAM_BITS);
+	want = gram_bits_for(m->data.n, cap);
+	/*
+	 * Reused when it is big enough, replaced when it is not. Never shrunk:
+	 * a scanner that met one large object will meet others, and giving the
+	 * memory back only to ask for it again is the allocation this exists to
+	 * avoid.
+	 */
+	if (m->gram && m->gram->bits >= want)
+		return 1;
+	gram_free(m->gram);
+	m->gram = gram_new(want);
 	return m->gram != NULL;
 }
 
