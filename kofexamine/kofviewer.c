@@ -974,6 +974,13 @@ static void hit_row_addmatcher(struct view *v, uint32_t arg);
 static void hit_row_addcond(struct view *v, uint32_t arg);
 static void hit_row_cond(struct view *v, uint32_t g);
 static void hit_row_none(struct view *v, uint32_t arg);
+/* The heading row's controls. One span each, registered where each is drawn -
+ * see the note above draw_decl_head on what sharing a field cost. */
+static void hit_head_type(struct view *v, uint32_t arg);
+static void hit_head_family(struct view *v, uint32_t arg);
+static void hit_head_note(struct view *v, uint32_t arg);
+static void hit_head_gen(struct view *v, uint32_t as_new);
+static void hit_head_discard(struct view *v, uint32_t arg);
 /* Reached by the row callbacks above, defined with the panel below them. */
 static void decl_edit_open(struct view *v, uint32_t i);
 static void view_show_decl(struct view *v, const struct decl *d, uint64_t off);
@@ -1615,7 +1622,7 @@ struct view {
 	 * they are asked to qualify it.
 	 */
 	struct chooser ch_up;
-	int         a_c0, a_c1, b_c0, b_c1, o_c0, o_c1;
+	int         a_c0, a_c1, b_c0, b_c1;
 	/*
 	 * "[+ String]" - ONE PAIR PER MATCHER, because its column depends on
 	 * how many marker ids that matcher's row already printed. A single
@@ -9392,6 +9399,58 @@ static void dis_toggle(struct view *v, uint64_t at, uint64_t len)
  * scope and could reach each other's locals; `r` is the panel's running row
  * number and it is now passed in and handed back rather than shared.
  */
+/*
+ * THE HEADING ROW'S CONTROLS, one callback each.
+ *
+ * This row was the last one still answering clicks by walking a chain of
+ * column pairs, and it is what that chain costs: it tested o_c0/o_c1 - the
+ * "[+ Options]" button, which is drawn on a DIFFERENT ROW - and those columns
+ * (9..20) sit on top of "[Virus]" (7..13). Clicking the type therefore opened
+ * the options list, because the options branch came first.
+ *
+ * Exactly the bug the comment on n_c0 already recorded, in the same chain, for
+ * the same reason: a column pair that outlives the row it was measured on is
+ * read by whatever else happens to be at those columns. A span registered by
+ * the row that painted it cannot be read by another row at all.
+ */
+static void hit_head_type(struct view *v, uint32_t arg)
+{
+	(void)arg;
+	ch_open(v, CH_TYPE, 0, g_my, g_mx);
+}
+
+static void hit_head_family(struct view *v, uint32_t arg)
+{
+	(void)arg;
+	v->edit = 1;
+}
+
+static void hit_head_note(struct view *v, uint32_t arg)
+{
+	(void)arg;
+	v->edit = 501;
+}
+
+/* Generate, Save and Save As are one button in three wordings - see the draw -
+ * so they are one callback, told apart by what it is asked to write. */
+static void hit_head_gen(struct view *v, uint32_t as_new)
+{
+	generate(&v->ed, (int)as_new);
+}
+
+static void hit_head_discard(struct view *v, uint32_t arg)
+{
+	(void)arg;
+	/* No confirmation. The panel is a draft, not a document: what it holds
+	 * was either loaded from a file that still exists or typed a moment
+	 * ago, and a dialog between the button and the blank sheet is a step in
+	 * the way of the thing the button is for. */
+	if (v->ed.dr.n_decl || v->ed.dr.family[0]) {
+		draft_reset(&v->ed);
+		v->prow_home = 1;
+	}
+}
+
 static void draw_decl_head(struct out *o, struct view *v)
 {
 	int top = decl_top();
@@ -9408,6 +9467,7 @@ static void draw_decl_head(struct out *o, struct view *v)
 	out_fmt(o, A_DIM " Type " A_OFF A_ID "[%s]" A_OFF,
 		maltype_word[v->ed.dr.maltype % MALTYPE_N]);
 	v->t_c0 = c; v->t_c1 = (int)o->col_hint;
+	hit_add(v, top, c, (int)o->col_hint, hit_head_type, 0);
 
 	c = 2 + (int)o->col_hint;
 	out_fmt(o, A_DIM "  Family " A_OFF "%s[", v->edit == 1 ? A_SEL : A_ID);
@@ -9417,6 +9477,7 @@ static void draw_decl_head(struct out *o, struct view *v)
 		   v->edit == 1, "?", v->field_all);
 	out_str(o, "]" A_OFF);
 	v->f_c0 = c; v->f_c1 = (int)o->col_hint;
+	hit_add(v, top, c, (int)o->col_hint, hit_head_family, 0);
 
 	/* No label: the box says what it is, and the row is already a line of
 	 * labels. */
@@ -9446,6 +9507,7 @@ static void draw_decl_head(struct out *o, struct view *v)
 		out_str(o, "]" A_OFF);
 	}
 	v->nt_c0 = c; v->nt_c1 = (int)o->col_hint;
+	hit_add(v, top, c, (int)o->col_hint, hit_head_note, 0);
 
 	{
 		/*
@@ -9467,16 +9529,19 @@ static void draw_decl_head(struct out *o, struct view *v)
 			out_fmt(o, "  %s[ Generate ]" A_OFF,
 				save_ok(v) ? "\033[42;30m" : "\033[47;90m");
 			v->g_c0 = c; v->g_c1 = (int)o->col_hint;
+			hit_add(v, top, c, (int)o->col_hint, hit_head_gen, 0);
 			v->sv_c0 = v->sv_c1 = -1;
 		} else {
 			out_fmt(o, "  %s[ Save ]" A_OFF,
 				save_ok(v) ? "\033[42;30m" : "\033[47;90m");
 			v->g_c0 = c; v->g_c1 = (int)o->col_hint;
+			hit_add(v, top, c, (int)o->col_hint, hit_head_gen, 0);
 			c = 2 + (int)o->col_hint;
 			out_fmt(o, "  %s[ Save As ]" A_OFF,
 				save_as_ok(v) ? "\033[42;30m"
 					      : "\033[47;90m");
 			v->sv_c0 = c; v->sv_c1 = (int)o->col_hint;
+			hit_add(v, top, c, (int)o->col_hint, hit_head_gen, 1);
 		}
 		/*
 		 * What is wrong, what is missing, what would be a duplicate and
@@ -9507,6 +9572,7 @@ static void draw_decl_head(struct out *o, struct view *v)
 	out_fmt(o, " %s[ Discard ]" A_OFF,
 		v->ed.dr.n_decl || v->ed.dr.family[0] ? A_ID : "\033[47;90m");
 	v->nw_c1 = g_cols;
+	hit_add(v, decl_top(), v->nw_c0, g_cols, hit_head_discard, 0);
 }
 
 /*
@@ -9553,7 +9619,11 @@ static int draw_decl_fmts(struct out *o, struct view *v, int r)
 
 		out_str(o, "  ");
 		c = o->col_base + (int)o->col_hint;
-		out_fmt(o, "\033[100;97m[+ Formats]" A_OFF);
+		/* A_ID, the same as [+ Options], [+ Matcher], [+ String] and
+		 * [+ Condition]. It used to wear the menu bar's grey, which
+		 * made two of the five add-buttons look like a different kind
+		 * of control from the other three. */
+		out_fmt(o, A_ID "[+ Formats]" A_OFF);
 		v->fma_c0 = c;
 		v->fma_c1 = o->col_base + (int)o->col_hint - 1;
 
@@ -9833,13 +9903,15 @@ static int draw_decl_optbtn(struct out *o, struct view *v, int r)
 		c = o->col_base + (int)o->col_hint;
 		out_fmt(o, " " A_ID "[+ Options]" A_OFF);
 		/*
-		 * REGISTERED HERE, and o_c0 is still written because the head
-		 * row reads it too - one field for two different rows, which is
-		 * its own hazard and goes when that row is migrated as well.
+		 * ONE SPAN, ON THIS ROW, AND NOWHERE ELSE.
+		 *
+		 * o_c0/o_c1 used to be written here as well, because the
+		 * heading row's click chain read them - and those columns land
+		 * on "[Virus]" up there, so the type box opened this list
+		 * instead of its own. The field is gone with that chain.
 		 */
 		hit_add(v, PR(r), c, o->col_base + (int)o->col_hint - 1,
 			hit_optbtn, 0);
-		v->o_c0 = c; v->o_c1 = o->col_base + (int)o->col_hint - 1;
 	}
 	r++;                            /* the option button row, always */
 	return r;
@@ -9965,7 +10037,8 @@ static int draw_decl_ranges(struct out *o, struct view *v, int r)
 
 			out_str(o, "  ");
 			c0 = o->col_base + (int)o->col_hint;
-			out_fmt(o, "\033[100;97m[+ Scan region]" A_OFF);
+			/* A_ID, like every other add-button - see [+ Formats]. */
+			out_fmt(o, A_ID "[+ Scan region]" A_OFF);
 			v->rga_c0 = c0;
 			v->rga_c1 = o->col_base + (int)o->col_hint - 1;
 		}
@@ -21656,51 +21729,6 @@ static int click_list(struct view *v, struct object *ob)
 	return 0;
 }
 
-/*
- * click_panel_head - a click on the draft panel's heading row.
- *
- * Lifted out of click() whole. It answers 1 when it has dealt with the
- * click and 0 to let the chain carry on, which is exactly what the `return`
- * and the fall-through meant where this used to sit.
- */
-static int click_panel_head(struct view *v)
-{
-	if (g_decl_rows && g_my == decl_top()) {
-		if (g_mx >= v->f_c0 && g_mx <= v->f_c1)
-			v->edit = 1;
-		else if (g_mx >= v->o_c0 && g_mx <= v->o_c1)
-			ch_open(v, CH_OPT, 0, g_my + 1, g_mx);
-		else if (g_mx >= v->t_c0 && g_mx <= v->t_c1)
-			ch_open(v, CH_TYPE, 0, g_my, g_mx);
-		/*
-		 * n_c0/n_c1 is NOT tested here: it is the "[+ Matcher]" button
-		 * and it is recorded on the MATCHERS row, not on this one. Read
-		 * on the header row it claimed columns 2..12, which with a short
-		 * or empty family is the blank space just right of the Family
-		 * box - so a click there created a matcher nobody asked for. The
-		 * matchers row tests it, where it was drawn.
-		 */
-		else if (g_mx >= v->g_c0 && g_mx <= v->g_c1)
-			generate(&v->ed, 0);
-		else if (v->sv_c0 > 0 && g_mx >= v->sv_c0 && g_mx <= v->sv_c1)
-			generate(&v->ed, 1);
-		else if (g_mx >= v->nw_c0 && g_mx <= v->nw_c1) {
-			/* No confirmation. The panel is a draft, not a
-			 * document: what it holds was either loaded from a file
-			 * that still exists or typed a moment ago, and a dialog
-			 * between the button and the blank sheet is a step in
-			 * the way of the thing the button is for. */
-			if (v->ed.dr.n_decl || v->ed.dr.family[0]) {
-				draft_reset(&v->ed);
-				v->prow_home = 1;
-			}
-		} else if (g_mx >= v->nt_c0 && g_mx <= v->nt_c1)
-			v->edit = 501;
-		return 1;
-	}
-	return 0;
-}
-
 /* Forget last frame's spans. Called where the panel starts drawing. */
 static void hit_reset(struct view *v)
 {
@@ -22429,18 +22457,21 @@ static void click(struct view *v, int rclick)
 		return;
 	if (g_decl_rows && g_my >= decl_top() && g_my < mark_row())
 		v->pane = 3;
-	if (click_panel_head(v))
-		return;
 	/*
 	 * THE PANEL SWALLOWS ITS OWN AREA.
 	 *
-	 * Every row between the heading and the marker line belongs to the
+	 * Every row FROM the heading down to the marker line belongs to the
 	 * draft, whether or not a control is drawn on it, so a click that
 	 * found nothing registered stops here rather than falling through to
 	 * the hex pane underneath - which is what the unconditional `return 1`
 	 * at the foot of the walk this replaced did.
+	 *
+	 * The heading is inside this test rather than answered before it: it
+	 * had its own routine reading a chain of column pairs, one of which
+	 * belonged to another row, and the type box opened the options list
+	 * because of it. Every row of the panel is now read the one way.
 	 */
-	if (g_decl_rows && g_my > decl_top() && g_my < mark_row()) {
+	if (g_decl_rows && g_my >= decl_top() && g_my < mark_row()) {
 		hit_run(v);
 		return;
 	}
