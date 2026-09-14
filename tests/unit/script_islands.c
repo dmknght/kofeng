@@ -109,6 +109,78 @@ static void check_partition(const char *what, const char *src)
 	}
 }
 
+/*
+ * THE WAY A DECLARATION ASKS, WHICH IS ONE BIT AT A TIME.
+ *
+ * kof_region_map_build walks the format's region list and resolves each bit on
+ * its own - see kofinspect.c - and that is the call every declared marker is
+ * located through. A resolver that is only right when asked for everything at
+ * once puts a marker in the wrong region, or in none, and the panel then says
+ * the bytes are not in the object they were just taken from.
+ *
+ * So each bit is asked for separately here and the three answers are summed:
+ * they must still tile the object exactly, with no byte in two of them.
+ */
+static void check_per_bit(const char *what, const char *src)
+{
+	static const uint32_t bit[3] = {
+		KOF_SCAN_SCRIPT_HEADER, KOF_SCAN_SCRIPT_BODY,
+		KOF_SCAN_SCRIPT_MARKUP
+	};
+	struct kof_script_info info;
+	struct kof_obj_ctx ctx;
+	struct kof_range r[128];
+	kof_buf f;
+	uint32_t n = 0, b, i, j;
+	uint64_t at = 0;
+
+	memset(&ctx, 0, sizeof ctx);
+	f.p = (const uint8_t *)src;
+	f.n = strlen(src);
+	if (!kof_script_sniff(f) || !kof_script_parse(f, &info, &ctx)) {
+		fail(what, "sniff or parse refused it");
+		return;
+	}
+	for (b = 0; b < 3u; b++) {
+		uint32_t got = ctx.resolve_scan(&ctx, bit[b], r + n,
+						(uint32_t)(sizeof r /
+							   sizeof r[0]) - n);
+
+		if (bit[b] == KOF_SCAN_SCRIPT_BODY && info.n_island &&
+		    got != info.n_island) {
+			printf("  FAIL %-26s BODY alone gave %u extents, "
+			       "wanted %u (one per island)\n",
+			       what, got, info.n_island);
+			fails++;
+		}
+		n += got;
+	}
+	for (i = 0; i < n; i++)
+		for (j = i + 1u; j < n; j++)
+			if (r[j].off < r[i].off) {
+				struct kof_range t = r[i];
+
+				r[i] = r[j];
+				r[j] = t;
+			}
+	for (i = 0; i < n; i++) {
+		if (r[i].off != at) {
+			printf("  FAIL %-26s per-bit extent %u at %llu, "
+			       "wanted %llu\n", what, i,
+			       (unsigned long long)r[i].off,
+			       (unsigned long long)at);
+			fails++;
+			return;
+		}
+		at += r[i].len;
+	}
+	if (at != f.n) {
+		printf("  FAIL %-26s per-bit covers %llu of %llu\n", what,
+		       (unsigned long long)at, (unsigned long long)f.n);
+		fails++;
+	}
+}
+
 /* How many bytes the header took, or (uint32_t)-1 when nothing claimed it. */
 static uint32_t header_len(const char *src, uint16_t *n_island)
 {
@@ -167,6 +239,10 @@ int main(void)
 	check_partition("jsp page", page);
 	check_partition("classic asp", classic);
 	check_partition("markup first", leading_markup);
+
+	check_per_bit("jsp page per bit", page);
+	check_per_bit("classic asp per bit", classic);
+	check_per_bit("markup first per bit", leading_markup);
 
 	/*
 	 * THE DIRECTIVE BLOCK IS THE HEADER. Both directives and the newline
