@@ -930,6 +930,56 @@ struct node {
 	uint64_t at;
 };
 
+/*
+ * One clickable span of the draft panel, and what pressing it does.
+ *
+ * A CALLBACK RATHER THAN A CODE, so the action lives beside the row that draws
+ * it instead of in a switch somewhere else that has to be kept in step. `arg`
+ * is whatever that row needs - a marker index, a matcher id, a region bit.
+ */
+struct view;
+
+struct hit {
+	int16_t   y, x0, x1;
+	void    (*fn)(struct view *, uint32_t arg);
+	uint32_t  arg;
+};
+
+/*
+ * Enough for the busiest panel a draft can have: every marker row carries
+ * three spans and every matcher four, and MAX_DECL and MAX_GROUP bound both.
+ * Registering past it is dropped rather than written past the end - a control
+ * that cannot be clicked is a visible fault; a smashed stack is not.
+ */
+#define HIT_MAX 512u
+
+/* Where the last click was. Declared here because the row callbacks are
+ * written beside the rows that register them, which is above its definition. */
+static int g_mx, g_my;
+
+static void hit_reset(struct view *v);
+static void hit_add(struct view *v, int y, int x0, int x1,
+		    void (*fn)(struct view *, uint32_t), uint32_t arg);
+static int  hit_run(struct view *v);
+
+/* The row callbacks, declared here because a row registers its own and the
+ * draw that does so comes before the bodies. */
+static void hit_row_fmts(struct view *v, uint32_t arg);
+static void hit_row_opt(struct view *v, uint32_t i);
+static void hit_row_strhdr(struct view *v, uint32_t arg);
+static void hit_row_str(struct view *v, uint32_t i);
+static void hit_row_matcher(struct view *v, uint32_t g);
+static void hit_row_markers(struct view *v, uint32_t g);
+static void hit_row_addmatcher(struct view *v, uint32_t arg);
+static void hit_row_addcond(struct view *v, uint32_t arg);
+static void hit_row_cond(struct view *v, uint32_t g);
+static void hit_row_none(struct view *v, uint32_t arg);
+/* Reached by the row callbacks above, defined with the panel below them. */
+static void decl_edit_open(struct view *v, uint32_t i);
+static void view_show_decl(struct view *v, const struct decl *d, uint64_t off);
+static void hit_row_ranges(struct view *v, uint32_t arg);
+static void hit_optbtn(struct view *v, uint32_t arg);
+
 struct view {
 	/* The signature generator's model - see kofeditor.h. */
 	struct kof_editor ed;
@@ -1573,6 +1623,29 @@ struct view {
 	 * matcher's button answered a click and the earlier rows' buttons were
 	 * dead while blank space at the last row's column was live.
 	 */
+	/*
+	 * WHERE EVERY CLICKABLE THING IS, RECORDED WHILE IT IS DRAWN.
+	 *
+	 * The panel's clicks used to be a second walk over the same rows -
+	 * click_panel_rows, 390 lines - counting rows in the order the draw
+	 * emits them and reaching the controls by a field the draw had left
+	 * behind. Two walks of one shape, and nothing making them agree: adding
+	 * the Format and [+ Options] rows to the draw and not to the other walk
+	 * shifted every click below them by two, and the same drift in
+	 * prow_build cost the panel its Conditions rows outright.
+	 *
+	 * A span is registered by whoever paints it, at the moment it knows
+	 * where it landed, and a click is a lookup. The draw becomes the only
+	 * place that knows the layout, which is the property the two walks
+	 * could not have.
+	 *
+	 * Last match wins on overlap: rows are painted top down and a later
+	 * span is drawn over an earlier one, so the reader is pointing at the
+	 * later one.
+	 */
+	struct hit  hit[HIT_MAX];
+	uint32_t    n_hit;
+
 	int         p_c0[MAX_GROUP][2];
 	int         opt_c0[OPT_COUNT], opt_c1[OPT_COUNT];
 
@@ -7776,7 +7849,17 @@ static void ch_take(struct view *v)
 
 static void draw_one_chooser(struct out *o, const struct chooser *c, int live)
 {
-	int i;
+	struct out_clip cl;
+	int i, rows = c->n;
+
+	/* Its own box: c->w columns from where it opened, and one row an item
+	 * - cut short by the screen, which is what the loop below already
+	 * checks for each row. Stated once here so the rows cannot be wrong
+	 * about it one at a time. */
+	if (c->row + rows - 1 > g_rows)
+		rows = g_rows - c->row + 1;
+	cl = out_clip_set(o, c->row, c->col, c->row + rows - 1,
+			  c->col + c->w - 1);
 
 	for (i = 0; i < c->n; i++) {
 		/* ch_open lifts a long list up the screen and stops at row one,
@@ -7803,6 +7886,7 @@ static void draw_one_chooser(struct out *o, const struct chooser *c, int live)
 			out_fmt(o, " %-*.*s", c->w - 2, c->w - 2, c->item[i]);
 		out_str(o, A_OFF);
 	}
+	out_clip_restore(o, cl);
 }
 
 static void draw_chooser(struct out *o, struct view *v)
@@ -9473,6 +9557,7 @@ static int draw_decl_fmts(struct out *o, struct view *v, int r)
 		v->fma_c0 = c;
 		v->fma_c1 = o->col_base + (int)o->col_hint - 1;
 
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_fmts, 0);
 	}
 	r++;                            /* the target format row, always */
 	return r;
@@ -9494,6 +9579,250 @@ static int draw_decl_fmts(struct out *o, struct view *v, int r)
  * list it extends - the optional declarations drawn below - and the list has no
  * row at all until one exists, so the button has to carry the row itself.
  */
+static void hit_row_opt(struct view *v, uint32_t i)
+{
+	if (g_mx >= g_cols - 4) {
+		v->ed.dr.opt_on[i] = 0;
+	} else if (g_mx >= v->opt_c0[i] && g_mx <= v->opt_c1[i]) {
+		if (i == OPT_ARCH)
+			ch_open(v, CH_ARCH, 0, g_my, g_mx);
+		else if (i == OPT_SUBTYPE)
+			ch_open(v, CH_SUBTYPE, 0, g_my, g_mx);
+		else {
+			/* A size is typed, so the field starts from what it
+			 * says rather than empty. */
+			snprintf(v->num, sizeof v->num, "%llu",
+				 (unsigned long long)v->ed.dr.opt_val[i]);
+			/* Opened by a click, so it starts selected: the first
+			 * digit replaces rather than extends, which is what
+			 * clicking a number and typing one means everywhere
+			 * else. */
+			v->num_fresh = 1;
+			v->edit = 200 + (int)i;
+		}
+	}
+}
+
+static void hit_row_str(struct view *v, uint32_t i)
+{
+	v->ed.dr.sel_decl = i;
+	if (g_mx >= g_cols - (int)STR_BTN_X) {
+		decl_remove(&v->ed, i);
+	} else if (g_mx >= g_cols - (int)STR_BTN_E &&
+		   g_mx < g_cols - (int)STR_BTN_E + 3) {
+		decl_edit_open(v, i);
+	} else if (v->ed.dr.decl[i].n_hits > 1u &&
+		   g_mx >= g_cols - (int)STR_BTN_PREV &&
+		   g_mx < g_cols - (int)STR_BTN_PREV
+			   + 3) {
+		struct decl *d = &v->ed.dr.decl[i];
+
+		d->cur_hit = (d->cur_hit + d->n_hits
+			      - 1u) % d->n_hits;
+		view_show_decl(v, d, d->hits[d->cur_hit]);
+	} else if (v->ed.dr.decl[i].n_hits > 1u &&
+		   g_mx >= g_cols - (int)STR_BTN_NEXT &&
+		   g_mx < g_cols - (int)STR_BTN_NEXT
+			   + 3) {
+		struct decl *d = &v->ed.dr.decl[i];
+
+		d->cur_hit = (d->cur_hit + 1u)
+			     % d->n_hits;
+		view_show_decl(v, d, d->hits[d->cur_hit]);
+	} else if (v->edit == ED_STR + (int)i &&
+		   g_mx >= v->str_by[i][0]) {
+		/* A click inside the open field is a click in a text box, not
+		 * a request to jump to the bytes. */
+		return;
+	} else if (!v->ed.dr.decl[i].hex &&
+		   g_mx >= v->str_wc[i][0] &&
+		   g_mx <= v->str_wc[i][0] + 8) {
+		ch_open(v, CH_WORD, i, g_my, g_mx);
+	} else if (!v->ed.dr.decl[i].hex &&
+		   g_mx >= v->str_wc[i][0] + 10 &&
+		   g_mx <= v->str_wc[i][1]) {
+		ch_open(v, CH_CASE, i, g_my, g_mx);
+	} else if (g_mx >= v->str_by[i][0] &&
+		   g_mx <= v->str_by[i][1]) {
+		/*
+		 * The bytes are the one part of the row
+		 * that names a place, so clicking them
+		 * goes there - and the pane lights the
+		 * run, which is the confirmation that
+		 * it is the right one.
+		 */
+		/*
+		 * BACK TO THE ONE YOU WERE ON.
+		 *
+		 * Not to the first: after stepping to
+		 * an occurrence and scrolling the pane
+		 * elsewhere, clicking the row is how
+		 * you return to it. The first is where
+		 * cur_hit starts, so nothing changes
+		 * for a marker that occurs once.
+		 */
+		struct decl *d = &v->ed.dr.decl[i];
+
+		if (d->n_hits) {
+			if (d->cur_hit >= d->n_hits)
+				d->cur_hit = 0;
+			view_show_decl(v, d, d->hits[d->cur_hit]);
+		} else if (d->at != KOF_BROKEN) {
+			view_show_decl(v, d, d->at);
+		} else {
+			say_note(&v->ed, "String %u is "
+				 "not in this object",
+				 i + 1u);
+		}
+	}
+}
+
+/* [+ Matcher] - a new matcher, whose rule is chosen before it has anything. */
+static void hit_row_addmatcher(struct view *v, uint32_t arg)
+{
+	(void)arg;
+	if (g_mx >= v->n_c0 && g_mx <= v->n_c1)
+		ch_open(v, CH_RULE, MAX_GROUP, g_my, g_mx);
+}
+
+static void hit_row_matcher(struct view *v, uint32_t g)
+{
+	v->ed.dr.cur_grp = g;
+	v->ed.dr.warn[0] = 0;
+	if (g_mx >= g_cols - 4)
+		grp_remove(&v->ed, g);
+	else if (g_mx >= v->grp_rl[g][0] &&
+		 g_mx <= v->grp_rl[g][1])
+		ch_open(v, CH_RULE, g, g_my, g_mx);
+	else if (g_mx >= v->grp_rg[g][0] &&
+		 g_mx <= v->grp_rg[g][1])
+		/* The same half of the row, asking the
+		 * question that half asks for this
+		 * rule: which region, or which of the
+		 * marker's occurrences. */
+		ch_open(v,
+			grp_is_at(v->ed.dr.grp[g].rule)
+			? CH_ATOFF : CH_RANGE,
+			g, g_my, g_mx);
+	else if (v->grp_th[g][0] > 0 &&
+		 g_mx >= v->grp_th[g][0] &&
+		 g_mx <= v->grp_th[g][1])
+		ch_open(v, CH_THRESH, g, g_my - 2,
+			g_mx);
+	else if (v->grp_nt[g][0] > 0 &&
+		 g_mx >= v->grp_nt[g][0] &&
+		 g_mx <= v->grp_nt[g][1])
+		v->edit = 300 + (int)g;
+	
+}
+
+static void hit_row_markers(struct view *v, uint32_t g)
+{
+	uint32_t i;
+
+
+	/* Where the ids start: past "     Markers: ". */
+	int c2 = 15;
+
+	v->ed.dr.cur_grp = g;
+	if (v->p_c0[g][0] > 0 &&
+	    g_mx >= v->p_c0[g][0] &&
+	    g_mx <= v->p_c0[g][1]) {
+		ch_open(v, CH_MARKER, g, g_my - 3,
+			g_mx);
+		return;
+	}
+	/*
+	 * An id on this row is a marker; clicking it
+	 * takes it back out of the matcher.
+	 *
+	 * EACH ID IS MEASURED. Three columns apiece
+	 * assumed every id was one digit and the row
+	 * prints ", %u": from the first two-digit id on
+	 * - MAX_DECL is 32, so ids reach 32 - every id
+	 * after it drifted one column further left, and
+	 * the click removed the wrong marker or none.
+	 * The hit window is the digits only, not the
+	 * ", " that joins them, so the gap between two
+	 * ids is dead rather than belonging to
+	 * whichever is nearer.
+	 *
+	 * The condition rows below gave up on measuring
+	 * and record the columns as they draw them
+	 * (view.cnd_ids), which is the better answer
+	 * and the one to reach for if this row's
+	 * separator ever changes the way theirs did.
+	 */
+	for (i = 0; i < v->ed.dr.n_decl; i++) {
+		char num[8];
+		int w;
+
+		if (!(v->ed.dr.decl[i].grp & (1u << g)))
+			continue;
+		w = snprintf(num, sizeof num, "%u",
+			     i + 1u);
+		if (g_mx >= c2 && g_mx < c2 + w) {
+			v->ed.dr.decl[i].grp &= ~(1u << g);
+			return;
+		}
+		c2 += w + 2;    /* the ", " after it */
+	}
+}
+
+/* The Strings heading carries [Update string regions] - see where it is drawn. */
+static void hit_row_strhdr(struct view *v, uint32_t arg)
+{
+	(void)arg;
+	if (g_mx >= v->rgf_c0 && g_mx <= v->rgf_c1)
+		draft_refresh(&v->ed);
+}
+
+/*
+ * ONE SPAN PER ROW, and the row's own column tests inside it.
+ *
+ * The defect was never the column arithmetic - that was written beside the
+ * paint and proved. It was the ROW COUNTER: click_panel_rows re-derived which
+ * row is which by counting in the order the draw emits them, so a row added to
+ * one and not the other shifted every click below it. Registering the row where
+ * it is painted removes the counting; the tests below are the walk's, verbatim.
+ */
+static void hit_row_fmts(struct view *v, uint32_t arg)
+{
+	uint32_t h;
+
+	(void)arg;
+	for (h = 0; h < v->n_fmt_hs; h++)
+		if (g_mx >= v->fmt_hs[h][0] && g_mx <= v->fmt_hs[h][1]) {
+			ch_open(v, CH_FMT, h, g_my, g_mx);
+			return;
+		}
+	if (g_mx >= v->fma_c0 && g_mx <= v->fma_c1)
+		ch_open(v, CH_FMT_CAT, 0, g_my, g_mx);
+}
+
+static void hit_row_ranges(struct view *v, uint32_t arg)
+{
+	uint32_t h;
+
+	(void)arg;
+	/* A NAME IS THE SUBJECT. Which range was pressed is passed as the
+	 * menu's argument, so every item it offers is about that one. */
+	for (h = 0; h < v->n_rng_hs; h++)
+		if (g_mx >= v->rng_hs[h][0] && g_mx <= v->rng_hs[h][1]) {
+			ch_open(v, CH_RANGE2, h, g_my, g_mx);
+			return;
+		}
+	if (g_mx >= v->rga_c0 && g_mx <= v->rga_c1)
+		ch_open(v, CH_RANGE_ADD, 0, g_my, g_mx);
+}
+
+/* [+ Options] - the only control on its row. */
+static void hit_optbtn(struct view *v, uint32_t arg)
+{
+	(void)arg;
+	ch_open(v, CH_OPT, 0, g_my, g_mx);
+}
+
 static int draw_decl_optbtn(struct out *o, struct view *v, int r)
 {
 	if (PR_VIS(r)) {
@@ -9503,6 +9832,13 @@ static int draw_decl_optbtn(struct out *o, struct view *v, int r)
 		out_fmt(o, A_DIM " Option " A_OFF);
 		c = o->col_base + (int)o->col_hint;
 		out_fmt(o, " " A_ID "[+ Options]" A_OFF);
+		/*
+		 * REGISTERED HERE, and o_c0 is still written because the head
+		 * row reads it too - one field for two different rows, which is
+		 * its own hazard and goes when that row is migrated as well.
+		 */
+		hit_add(v, PR(r), c, o->col_base + (int)o->col_hint - 1,
+			hit_optbtn, 0);
 		v->o_c0 = c; v->o_c1 = o->col_base + (int)o->col_hint - 1;
 	}
 	r++;                            /* the option button row, always */
@@ -9553,6 +9889,7 @@ static int draw_decl_opts(struct out *o, struct view *v, int r)
 		v->opt_c1[i] = (int)o->col_hint;
 		out_at(o, y, g_cols - 4);
 		out_str(o, A_BAD "[x]" A_OFF);
+		hit_add(v, y, 0, g_cols - 1, hit_row_opt, i);
 	}
 
 	/*
@@ -9632,6 +9969,7 @@ static int draw_decl_ranges(struct out *o, struct view *v, int r)
 			v->rga_c0 = c0;
 			v->rga_c1 = o->col_base + (int)o->col_hint - 1;
 		}
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_ranges, 0);
 	}
 	r++;                            /* the scan ranges row, always */
 	return r;
@@ -9753,6 +10091,7 @@ static int draw_decl_strings(struct out *o, struct view *v, int r)
 				v->rgf_c0 = v->rgf_c1 = -1;
 			}
 		}
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_strhdr, 0);
 	} else if (!v->ed.dr.n_decl) {
 		v->rgf_c0 = v->rgf_c1 = -1;
 	}
@@ -9926,17 +10265,21 @@ static int draw_decl_strings(struct out *o, struct view *v, int r)
 			v->edit == ED_STR + (int)i ? A_SEL : A_ID);
 		out_at(o, PR(r), g_cols - (int)STR_BTN_X);
 		out_str(o, A_BAD "[x]" A_OFF);
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_str, i);
 	}
 
 	/* ---- the matchers: what to look for ---- */
-	if (PR_VIS(r))
+	if (PR_VIS(r)) {
 		sec_bar(o, v, PR(r), " Matchers");
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_none, 0);
+	}
 	r++;
 	if (PR_VIS(r)) {
 		row_start(o, PR(r), 1);
 		v->n_c0 = 2;
 		out_fmt(o, " " A_ID "[+ Matcher]" A_OFF);
 		v->n_c1 = (int)o->col_hint;
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_addmatcher, 0);
 	}
 	r++;
 	return r;
@@ -10069,6 +10412,7 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 			v->grp_nt[g][1] = (int)o->col_hint;
 			out_at(o, PR(r), g_cols - 4);
 			out_str(o, A_BAD "[x]" A_OFF);
+			hit_add(v, PR(r), 0, g_cols - 1, hit_row_matcher, g);
 		}
 		r++;
 
@@ -10096,12 +10440,15 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 			out_fmt(o, "   " A_ID "[+ String]" A_OFF);
 			v->p_c0[g][1] = (int)o->col_hint;
 		}
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_markers, g);
 		r++;
 	}
 
 	/* ---- the conditions: what it means ---- */
-	if (PR_VIS(r))
+	if (PR_VIS(r)) {
 		sec_bar(o, v, PR(r), " Conditions");
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_none, 0);
+	}
 	r++;
 	if (PR_VIS(r)) {
 		row_start(o, PR(r), 1);
@@ -10117,6 +10464,7 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 		 * row needs no number at all.
 		 */
 		v->b_c0 = v->b_c1 = -1;
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_addcond, 0);
 	}
 	r++;
 	return r;
@@ -10153,6 +10501,7 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 			continue;
 		}
 		row_start(o, PR(r), 1);
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_cond, g);
 
 		if (v->cseq_kind[g] == CS_COND) {
 			char lab[16], lead[24];
@@ -10381,6 +10730,8 @@ static void draw_decl(struct out *o, struct view *v)
 	 */
 
 	/* ---- what the module declares ---- */
+	/* Last frame's spans are gone with the rows that registered them. */
+	hit_reset(v);
 	draw_decl_head(o, v);
 	r = draw_decl_fmts(o, v, r);
 	r = draw_decl_ranges(o, v, r);
@@ -10988,6 +11339,7 @@ static void draw_list(struct out *o, struct view *v)
 	struct object *ob = cur_obj(v);
 	const struct kof_touch *t = v->sel_touch < ob->n_touch
 				   ? &ob->touch[v->sel_touch] : NULL;
+	struct out_clip cl;
 	int top, w = g_cols - 4;
 	uint32_t shown, i, total;
 	char range[40];
@@ -10996,6 +11348,9 @@ static void draw_list(struct out *o, struct view *v)
 	shown = list_shown(v);
 	top = list_top(v);
 	total = list_total(v);
+	/* Heading plus one row an entry, three columns in and w wide: the same
+	 * numbers the rows below are positioned with, said once. */
+	cl = out_clip_set(o, top, 3, top + (int)shown + 1, 2 + w);
 
 	/* A window of four over a list of thirty has to say so somewhere, or it
 	 * reads as a list of four. */
@@ -11180,6 +11535,7 @@ static void draw_list(struct out *o, struct view *v)
 			out_str(o, A_OFF);
 		}
 	}
+	out_clip_restore(o, cl);
 	draw_list_box(o, v);
 }
 
@@ -12613,6 +12969,18 @@ static void redraw(struct view *v)
 
 	g_fld.room = 0;
 	term_size();
+	/*
+	 * THE SCREEN, as the outermost bound every drawer is inside.
+	 *
+	 * Set here and not in out_add's defaults because a struct out is also
+	 * used as a plain string builder - the clipboard is assembled with the
+	 * same calls - and a builder that silently dropped what did not fit on
+	 * a screen would be a builder that corrupts a copy.
+	 *
+	 * Set AFTER term_size, because this is the size the frame is being
+	 * drawn for.
+	 */
+	out_clip_set(&o, 1, 1, g_rows, g_cols);
 	if (kof_tty_resize_pending()) {
 		/*
 		 * The cached frame describes a screen of the old size, and the
@@ -12850,13 +13218,43 @@ static void redraw(struct view *v)
 
 	out_str(&o, "\033[?2026h");
 	if (under) {
+		/*
+		 * EACH PANE INSIDE ITS OWN RECTANGLE.
+		 *
+		 * The frame is drawn first and unclipped because it is what
+		 * SEPARATES the panes - the dividers belong to no one of them.
+		 * Everything after it is given the region it is about, so a row
+		 * that measures wrong is short rather than written across its
+		 * neighbour. The rectangles are the same expressions the click
+		 * routing tests, so a pane cannot draw where it cannot be
+		 * clicked.
+		 */
+		struct out_clip cl;
+
 		draw_frame(&o, v);
+		cl = out_clip_set(&o, hex_top(), 1, hex_bot(), TREE_W);
 		draw_tree(&o, v);
+		out_clip_restore(&o, cl);
+		cl = out_clip_set(&o, hex_top(), TREE_W + 1, hex_last(),
+				  g_cols);
 		draw_hex(&o, v);
+		out_clip_restore(&o, cl);
+		cl = out_clip_set(&o, dis_top() - 1, TREE_W + 1, hex_bot(),
+				  g_cols);
 		draw_disasm(&o, v);
+		out_clip_restore(&o, cl);
+		cl = out_clip_set(&o, evt_top() - 1, TREE_W + 1, hex_bot(),
+				  g_cols);
 		draw_evt(&o, v);
+		out_clip_restore(&o, cl);
+		cl = out_clip_set(&o, decl_top(), 1, g_rows - 1, g_cols);
 		draw_decl(&o, v);
+		out_clip_restore(&o, cl);
+		/* Two rows: the status line, and the rule above it that
+		 * closes the draft panel - see draw_marker_line. */
+		cl = out_clip_set(&o, mark_row() - 1, 1, mark_row(), g_cols);
 		draw_marker_line(&o, v);
+		out_clip_restore(&o, cl);
 		if (v->show_list)
 			draw_list(&o, v);
 		/*
@@ -16731,6 +17129,7 @@ static void prop_put(struct out *o, const char *s, int room, int sa, int sb)
 static void page_draw(struct out *o, struct view *v, struct page *p)
 {
 	static const char close[] = "[ Close ]";
+	struct out_clip cl;
 	int room, inner, y, i;
 	uint32_t k;
 	char pos[48];
@@ -16791,6 +17190,11 @@ static void page_draw(struct out *o, struct view *v, struct page *p)
 	}
 	if (p->w < 30 || p->h < 6)
 		return;                 /* no room to draw a box honestly */
+
+	/* Everything from here down is inside the box, which is now stated
+	 * once rather than trusted to each row's own width arithmetic. */
+	cl = out_clip_set(o, p->top, p->left, p->top + p->h - 1,
+			  p->left + p->w - 1);
 
 	room = p->full ? p->h - 2 : p->h - 4;
 	if (room < 1)
@@ -16925,6 +17329,7 @@ static void page_draw(struct out *o, struct view *v, struct page *p)
 	/* Last, so the selection is over everything the box drew. */
 	if (p->record)
 		dlg_paint_sel(o, v);
+	out_clip_restore(o, cl);
 }
 
 static void draw_prop(struct out *o, struct view *v)
@@ -18269,7 +18674,7 @@ static size_t paste_src(int k, const char **out)
 	return g_clip_n;
 }
 
-static int g_mx, g_my;          /* where the last click was, 1 based */
+/* g_mx, g_my are declared beside struct hit - the row callbacks need them. */
 static int g_mod_shift;         /* shift was held for it */
 static int g_mod_ctrl;          /* and control, which slides text sideways */
 
@@ -19341,10 +19746,15 @@ static void draw_symbols(struct out *o, struct view *v)
 	const uint32_t *rec = symd_rows_of(v, &n);
 	int wd = 8, sw, fixed, nw = 0, natural, vis, hmax;
 	struct sclip sc;
+	struct out_clip cl;
 	const struct object *ob = cur_obj(v);
 
 	if (w < 40 || h < 8)
 		return;                 /* no room to draw a box honestly */
+
+	/* The box, stated once. Every row below positions itself from x and w,
+	 * and this is what says those two are the whole of it. */
+	cl = out_clip_set(o, y, x, y + h - 1, x + w - 1);
 
 	/*
 	 * Re-clamped every frame rather than only when it is scrolled, because
@@ -19648,6 +20058,7 @@ static void draw_symbols(struct out *o, struct view *v)
 			  v->sym_at, n, (uint64_t)rows);
 	/* Last, so the selection is over everything else the box drew. */
 	dlg_paint_sel(o, v);
+	out_clip_restore(o, cl);
 }
 
 /*
@@ -19787,6 +20198,8 @@ struct dframe {
 	int ix;                         /* first column INSIDE, for a row */
 	int iw;                         /* columns available inside */
 	int btn_y, btn_x0, btn_x1;      /* the close control, or -1 */
+	/* What the clip was before the box took it - see dframe_begin. */
+	struct out_clip save;
 };
 
 /*
@@ -19825,6 +20238,10 @@ static int dframe_begin(struct out *o, struct dframe *f, const char *title,
 		f->y = 2;
 	f->ix = f->x + 2;
 	f->iw = f->w - 4;
+	/* The box owns these rows and these columns and nothing else. Set
+	 * before the first thing is drawn and given back by dframe_done. */
+	f->save = out_clip_set(o, f->y, f->x, f->y + f->h - 1,
+			       f->x + f->w - 1);
 
 	out_at(o, f->y, f->x);
 	o->col_hint = 0;
@@ -19853,6 +20270,13 @@ static int dframe_begin(struct out *o, struct dframe *f, const char *title,
 
 /* Open row `r` (0 based, inside the frame): the left wall, then the cursor
  * where the caller writes. */
+/* Hand the screen back. Every drawer that got a 1 out of dframe_begin calls
+ * this, whether or not it drew a bottom rule. */
+static void dframe_done(struct out *o, struct dframe *f)
+{
+	out_clip_restore(o, f->save);
+}
+
 static void dframe_row(struct out *o, const struct dframe *f, int r)
 {
 	out_at(o, f->y + 1 + r, f->x);
@@ -20373,6 +20797,7 @@ static void draw_enc(struct out *o, struct view *v)
 		out_glyph(o, G_BR);
 		out_str(o, A_OFF);
 	}
+	dframe_done(o, f);
 }
 
 /* Non-zero when a click landed on the frame's close control. */
@@ -20688,6 +21113,7 @@ static void draw_goto(struct out *o, struct view *v)
 	dframe_edge(o, f);
 
 	dframe_end(o, f, NULL);
+	dframe_done(o, f);
 }
 
 /*
@@ -20796,6 +21222,7 @@ static void draw_find(struct out *o, struct view *v)
 	dframe_edge(o, f);
 
 	dframe_end(o, f, NULL);
+	dframe_done(o, f);
 }
 
 /* Which control a click landed on. */
@@ -21274,402 +21701,142 @@ static int click_panel_head(struct view *v)
 	return 0;
 }
 
-/*
- * click_panel_rows - a click on one of the draft panel's rows.
- *
- * Lifted out of click() whole. It answers 1 when it has dealt with the
- * click and 0 to let the chain carry on, which is exactly what the `return`
- * and the fall-through meant where this used to sit.
- */
-static int click_panel_rows(struct view *v)
+/* Forget last frame's spans. Called where the panel starts drawing. */
+static void hit_reset(struct view *v)
 {
-	if (g_decl_rows && g_my > decl_top() && g_my < mark_row()) {
-		/*
-		 * Which row is which is a walk, not arithmetic - and it is the
-		 * same walk that drew them. Two copies of that shape would be
-		 * two things to keep in step, and the one that drifts is the
-		 * one nobody is looking at.
-		 */
-		int want = g_my - decl_top() - 1 + (int)v->prow_off, r = 0;
-		uint32_t g, i;
+	v->n_hit = 0;
+}
 
-		/*
-		 * AND IT MUST BE A ROW THAT IS ON THE SCREEN.
-		 *
-		 * The row test above accepts everything up to mark_row() - 1,
-		 * which is one row MORE than PR_VIS lays out: the last of those
-		 * is the dashed rule draw_marker_line paints, not a draft row.
-		 * So a click on the rule resolved to prow_off + g_decl_rows - 2
-		 * - the first row past the window - and the walk below happily
-		 * found whatever marker, matcher or condition sits there. At the
-		 * far right of the row (g_mx >= g_cols - 4) that is the remove
-		 * button, so clicking the separator DELETED something that was
-		 * not on the screen and could not be seen to go.
-		 *
-		 * Tested against PR_VIS, the same predicate the drawing uses, so
-		 * the two cannot disagree about which rows exist.
-		 */
-		if (!PR_VIS(want))
-			return 1;
+/*
+ * Register a span. `x1` is inclusive, as every other hit test in this file is.
+ *
+ * A row that is scrolled out registers nothing: it is drawn by nobody, so
+ * PR_VIS guards the call the same way it guards the paint.
+ */
+static void hit_add(struct view *v, int y, int x0, int x1,
+		    void (*fn)(struct view *, uint32_t), uint32_t arg)
+{
+	struct hit *h;
 
-		/*
-		 * THE FORMAT ROW, first, because it is drawn first.
-		 *
-		 * This walk and draw_decl_panel are two readings of one row
-		 * order, and the rule is that they are kept in the same order
-		 * rather than kept in sync by arithmetic. A row added to the
-		 * drawing and not to this walk does not misbehave subtly: every
-		 * click below it lands one row out, so removing a marker
-		 * removes the one under it.
-		 */
-		if (r == want) {
-			uint32_t h;
+	if (v->n_hit >= HIT_MAX || x1 < x0 || y < 0)
+		return;
+	h = &v->hit[v->n_hit++];
+	h->y = (int16_t)y;
+	h->x0 = (int16_t)x0;
+	h->x1 = (int16_t)x1;
+	h->fn = fn;
+	h->arg = arg;
+}
 
-			for (h = 0; h < v->n_fmt_hs; h++)
-				if (g_mx >= v->fmt_hs[h][0] &&
-				    g_mx <= v->fmt_hs[h][1]) {
-					ch_open(v, CH_FMT, h, g_my, g_mx);
-					return 1;
-				}
-			if (g_mx >= v->fma_c0 && g_mx <= v->fma_c1)
-				ch_open(v, CH_FMT_CAT, 0, g_my, g_mx);
+/*
+ * Run whatever was registered under the pointer, if anything.
+ *
+ * Backwards, so the LAST span registered at a position wins - the one painted
+ * over the others, which is the one the reader can see.
+ */
+static int hit_run(struct view *v)
+{
+	uint32_t i = v->n_hit;
+
+	while (i--) {
+		const struct hit *h = &v->hit[i];
+
+		if (g_my == h->y && g_mx >= h->x0 && g_mx <= h->x1) {
+			h->fn(v, h->arg);
 			return 1;
 		}
-		r++;                            /* the format row, always */
-
-		{
-			if (r == want) {
-				uint32_t h;
-
-				/*
-				 * A NAME IS THE SUBJECT. Which range was
-				 * pressed is passed as the menu's argument, so
-				 * every item it offers is about that one.
-				 */
-				for (h = 0; h < v->n_rng_hs; h++)
-					if (g_mx >= v->rng_hs[h][0] &&
-					    g_mx <= v->rng_hs[h][1]) {
-						ch_open(v, CH_RANGE2, h,
-							g_my, g_mx);
-						return 1;
-					}
-				if (g_mx >= v->rga_c0 && g_mx <= v->rga_c1)
-					ch_open(v, CH_RANGE_ADD, 0, g_my, g_mx);
-				return 1;
-			}
-			r++;
-		/*
-		 * The row that only carries [+ Option]. It exists whether or
-		 * not any option is declared - see draw_decl_optbtn - so it is
-		 * one row here unconditionally.
-		 */
-		if (r == want) {
-			if (g_mx >= v->o_c0 && g_mx <= v->o_c1)
-				ch_open(v, CH_OPT, 0, g_my, g_mx);
-			return 1;
-		}
-		r++;                            /* the option button row */
-
-		for (i = 0; i < (uint32_t)OPT_COUNT; i++) {
-			if (!v->ed.dr.opt_on[i])
-				continue;
-			if (r == want) {
-				if (g_mx >= g_cols - 4)
-					v->ed.dr.opt_on[i] = 0;
-				else if (g_mx >= v->opt_c0[i] &&
-					 g_mx <= v->opt_c1[i]) {
-					if (i == OPT_ARCH)
-						ch_open(v, CH_ARCH, 0, g_my,
-							g_mx);
-					else if (i == OPT_SUBTYPE)
-						ch_open(v, CH_SUBTYPE, 0,
-							g_my, g_mx);
-					else {
-						/* A size is typed, so the
-						 * field starts from what it
-						 * says rather than empty. */
-						snprintf(v->num, sizeof v->num,
-							 "%llu",
-							 (unsigned long long)
-							 v->ed.dr.opt_val[i]);
-						/* Opened by a click, so it
-						 * starts selected: the first
-						 * digit replaces rather than
-						 * extends, which is what
-						 * clicking a number and typing
-						 * one means everywhere else. */
-						v->num_fresh = 1;
-						v->edit = 200 + (int)i;
-					}
-				}
-				return 1;
-			}
-			r++;
-		}
-		}
-		if (v->ed.dr.n_decl) {
-			if (r == want) {
-				/* The heading carries [Update string regions]
-				 * now - see where it is drawn. */
-				if (g_mx >= v->rgf_c0 && g_mx <= v->rgf_c1)
-					draft_refresh(&v->ed);
-				return 1;
-			}
-			r++;                    /* the "Strings" heading */
-			for (i = 0; i < v->ed.dr.n_decl; i++, r++) {
-				if (r != want)
-					continue;
-				v->ed.dr.sel_decl = i;
-				if (g_mx >= g_cols - (int)STR_BTN_X) {
-					decl_remove(&v->ed, i);
-				} else if (g_mx >= g_cols - (int)STR_BTN_E &&
-					   g_mx < g_cols - (int)STR_BTN_E + 3) {
-					decl_edit_open(v, i);
-				} else if (v->ed.dr.decl[i].n_hits > 1u &&
-					   g_mx >= g_cols - (int)STR_BTN_PREV &&
-					   g_mx < g_cols - (int)STR_BTN_PREV
-						   + 3) {
-					struct decl *d = &v->ed.dr.decl[i];
-
-					d->cur_hit = (d->cur_hit + d->n_hits
-						      - 1u) % d->n_hits;
-					view_show_decl(v, d, d->hits[d->cur_hit]);
-				} else if (v->ed.dr.decl[i].n_hits > 1u &&
-					   g_mx >= g_cols - (int)STR_BTN_NEXT &&
-					   g_mx < g_cols - (int)STR_BTN_NEXT
-						   + 3) {
-					struct decl *d = &v->ed.dr.decl[i];
-
-					d->cur_hit = (d->cur_hit + 1u)
-						     % d->n_hits;
-					view_show_decl(v, d, d->hits[d->cur_hit]);
-				} else if (v->edit == ED_STR + (int)i &&
-					   g_mx >= v->str_by[i][0]) {
-					/* A click inside the open field is a
-					 * click in a text box, not a request to
-					 * jump to the bytes. */
-					return 1;
-				} else if (!v->ed.dr.decl[i].hex &&
-					   g_mx >= v->str_wc[i][0] &&
-					   g_mx <= v->str_wc[i][0] + 8) {
-					ch_open(v, CH_WORD, i, g_my, g_mx);
-				} else if (!v->ed.dr.decl[i].hex &&
-					   g_mx >= v->str_wc[i][0] + 10 &&
-					   g_mx <= v->str_wc[i][1]) {
-					ch_open(v, CH_CASE, i, g_my, g_mx);
-				} else if (g_mx >= v->str_by[i][0] &&
-					   g_mx <= v->str_by[i][1]) {
-					/*
-					 * The bytes are the one part of the row
-					 * that names a place, so clicking them
-					 * goes there - and the pane lights the
-					 * run, which is the confirmation that
-					 * it is the right one.
-					 */
-					/*
-					 * BACK TO THE ONE YOU WERE ON.
-					 *
-					 * Not to the first: after stepping to
-					 * an occurrence and scrolling the pane
-					 * elsewhere, clicking the row is how
-					 * you return to it. The first is where
-					 * cur_hit starts, so nothing changes
-					 * for a marker that occurs once.
-					 */
-					struct decl *d = &v->ed.dr.decl[i];
-
-					if (d->n_hits) {
-						if (d->cur_hit >= d->n_hits)
-							d->cur_hit = 0;
-						view_show_decl(v, d, d->hits[d->cur_hit]);
-					} else if (d->at != KOF_BROKEN) {
-						view_show_decl(v, d, d->at);
-					} else {
-						say_note(&v->ed, "String %u is "
-							 "not in this object",
-							 i + 1u);
-					}
-				}
-				return 1;
-			}
-		}
-
-		if (r == want)
-			return 1;                 /* the matchers heading */
-		r++;
-		if (r == want) {
-			if (g_mx >= v->n_c0 && g_mx <= v->n_c1)
-				ch_open(v, CH_RULE, MAX_GROUP, g_my, g_mx);
-			return 1;
-		}
-		r++;
-
-		for (g = 0; g < v->ed.dr.n_grp; g++) {
-			if (r == want) {
-				v->ed.dr.cur_grp = g;
-				v->ed.dr.warn[0] = 0;
-				if (g_mx >= g_cols - 4)
-					grp_remove(&v->ed, g);
-				else if (g_mx >= v->grp_rl[g][0] &&
-					 g_mx <= v->grp_rl[g][1])
-					ch_open(v, CH_RULE, g, g_my, g_mx);
-				else if (g_mx >= v->grp_rg[g][0] &&
-					 g_mx <= v->grp_rg[g][1])
-					/* The same half of the row, asking the
-					 * question that half asks for this
-					 * rule: which region, or which of the
-					 * marker's occurrences. */
-					ch_open(v,
-						grp_is_at(v->ed.dr.grp[g].rule)
-						? CH_ATOFF : CH_RANGE,
-						g, g_my, g_mx);
-				else if (v->grp_th[g][0] > 0 &&
-					 g_mx >= v->grp_th[g][0] &&
-					 g_mx <= v->grp_th[g][1])
-					ch_open(v, CH_THRESH, g, g_my - 2,
-						g_mx);
-				else if (v->grp_nt[g][0] > 0 &&
-					 g_mx >= v->grp_nt[g][0] &&
-					 g_mx <= v->grp_nt[g][1])
-					v->edit = 300 + (int)g;
-				return 1;
-			}
-			r++;
-			if (r == want) {
-				/* Where the ids start: past "     Markers: ". */
-				int c2 = 15;
-
-				v->ed.dr.cur_grp = g;
-				if (v->p_c0[g][0] > 0 &&
-				    g_mx >= v->p_c0[g][0] &&
-				    g_mx <= v->p_c0[g][1]) {
-					ch_open(v, CH_MARKER, g, g_my - 3,
-						g_mx);
-					return 1;
-				}
-				/*
-				 * An id on this row is a marker; clicking it
-				 * takes it back out of the matcher.
-				 *
-				 * EACH ID IS MEASURED. Three columns apiece
-				 * assumed every id was one digit and the row
-				 * prints ", %u": from the first two-digit id on
-				 * - MAX_DECL is 32, so ids reach 32 - every id
-				 * after it drifted one column further left, and
-				 * the click removed the wrong marker or none.
-				 * The hit window is the digits only, not the
-				 * ", " that joins them, so the gap between two
-				 * ids is dead rather than belonging to
-				 * whichever is nearer.
-				 *
-				 * The condition rows below gave up on measuring
-				 * and record the columns as they draw them
-				 * (view.cnd_ids), which is the better answer
-				 * and the one to reach for if this row's
-				 * separator ever changes the way theirs did.
-				 */
-				for (i = 0; i < v->ed.dr.n_decl; i++) {
-					char num[8];
-					int w;
-
-					if (!(v->ed.dr.decl[i].grp & (1u << g)))
-						continue;
-					w = snprintf(num, sizeof num, "%u",
-						     i + 1u);
-					if (g_mx >= c2 && g_mx < c2 + w) {
-						v->ed.dr.decl[i].grp &= ~(1u << g);
-						return 1;
-					}
-					c2 += w + 2;    /* the ", " after it */
-				}
-				return 1;
-			}
-			r++;
-		}
-
-		if (r == want)
-			return 1;                 /* the conditions heading */
-		r++;
-		if (r == want) {
-			if (v->ed.dr.n_grp && g_mx >= v->a_c0 && g_mx <= v->a_c1)
-				cnd_add(&v->ed, 0);
-			return 1;
-		}
-		r++;
-
-		for (g = 0; g < v->n_cseq; g++, r++) {
-			uint32_t ci = v->cseq_idx[g];
-
-			if (r != want)
-				continue;
-			v->ed.dr.cur_cnd = ci;
-
-			if (v->cseq_kind[g] == CS_JOIN) {
-				/*
-				 * Only on the word itself, and through a list.
-				 *
-				 * A whole row that flips the meaning of a
-				 * signature when it is clicked anywhere is a
-				 * row that gets flipped by accident, and the
-				 * accident leaves nothing behind to notice.
-				 */
-				if (v->cnd_jn[ci][0] > 0 &&
-				    g_mx >= v->cnd_jn[ci][0] &&
-				    g_mx <= v->cnd_jn[ci][1])
-					ch_open(v, CH_LOGIC, ci, g_my - 2,
-						g_mx);
-				return 1;
-			}
-			if (v->cseq_kind[g] == CS_ADD) {
-				if (v->ed.dr.n_grp && v->cnd_kid[ci][0] > 0 &&
-				    g_mx >= v->cnd_kid[ci][0] &&
-				    g_mx <= v->cnd_kid[ci][1])
-					cnd_add(&v->ed, 1);
-				return 1;
-			}
-			if (v->cseq_kind[g] == CS_MATCH) {
-				if (v->cnd_mt[ci][0] > 0 &&
-				    g_mx >= v->cnd_mt[ci][0] &&
-				    g_mx <= v->cnd_mt[ci][1])
-					ch_open(v, CH_CMATCH, ci, g_my - 3,
-						g_mx);
-				else if (v->cnd_op[ci][0] > 0 &&
-					 g_mx >= v->cnd_op[ci][0] &&
-					 g_mx <= v->cnd_op[ci][1])
-					v->ed.dr.cnd[ci].op = !v->ed.dr.cnd[ci].op;
-				/* A typed expression is a FIELD, not a list of
-				 * ids - so it takes the caret rather than
-				 * having one of its characters removed. */
-				else if (v->cnd_ex[ci][0] > 0 &&
-					 g_mx >= v->cnd_ex[ci][0] &&
-					 g_mx <= v->cnd_ex[ci][1])
-					v->edit = 103 + (int)ci;
-				else
-					cnd_id_click(v, ci);
-				return 1;
-			}
-
-			/* CS_COND */
-			if (g_mx >= g_cols - 4) {
-				cnd_remove(&v->ed, ci);
-				return 1;
-			}
-			if (g_mx >= v->cnd_lv[ci][0] &&
-			    g_mx <= v->cnd_lv[ci][1])
-				ch_open(v, CH_LEVEL, ci, g_my, g_mx);
-			else if (v->cnd_vr[ci][0] > 0 &&
-				 g_mx >= v->cnd_vr[ci][0] &&
-				 g_mx <= v->cnd_vr[ci][1])
-				ch_open(v, CH_VARIANT, ci, g_my, g_mx);
-			else if (v->cnd_nm[ci][0] > 0 &&
-				 g_mx >= v->cnd_nm[ci][0] &&
-				 g_mx <= v->cnd_nm[ci][1])
-				v->edit = 4 + (int)ci;
-			return 1;
-		}
-		return 1;
 	}
 	return 0;
+}
+
+/*
+ * The rest of the draft panel's rows, as callbacks written beside nothing at
+ * all - they are reached only through the spans the draw registers, so the
+ * question "which row is this" is never asked twice. What used to sit here was
+ * a 390-line walk that re-counted the rows in the drawing's order; the count
+ * and the drawing were two readings of one row order, and a row added to one
+ * and not the other made every click below it land one row out.
+ */
+
+/* A row that is a heading: it belongs to the panel, and it does nothing. */
+static void hit_row_none(struct view *v, uint32_t arg)
+{
+	(void)v;
+	(void)arg;
+}
+
+/* [+ Condition] under the Conditions bar - a new top-level one. */
+static void hit_row_addcond(struct view *v, uint32_t arg)
+{
+	(void)arg;
+	if (v->ed.dr.n_grp && g_mx >= v->a_c0 && g_mx <= v->a_c1)
+		cnd_add(&v->ed, 0);
+}
+
+/*
+ * One row of the condition tree. `g` is the row's place in the drawn
+ * sequence, which is what says which of the four shapes it is; cseq_idx turns
+ * that into the condition it is about.
+ */
+static void hit_row_cond(struct view *v, uint32_t g)
+{
+	uint32_t ci;
+
+	if (g >= v->n_cseq)
+		return;
+	ci = v->cseq_idx[g];
+	v->ed.dr.cur_cnd = ci;
+
+	if (v->cseq_kind[g] == CS_JOIN) {
+		/*
+		 * Only on the word itself, and through a list.
+		 *
+		 * A whole row that flips the meaning of a signature when it is
+		 * clicked anywhere is a row that gets flipped by accident, and
+		 * the accident leaves nothing behind to notice.
+		 */
+		if (v->cnd_jn[ci][0] > 0 && g_mx >= v->cnd_jn[ci][0] &&
+		    g_mx <= v->cnd_jn[ci][1])
+			ch_open(v, CH_LOGIC, ci, g_my - 2, g_mx);
+		return;
+	}
+	if (v->cseq_kind[g] == CS_ADD) {
+		if (v->ed.dr.n_grp && v->cnd_kid[ci][0] > 0 &&
+		    g_mx >= v->cnd_kid[ci][0] && g_mx <= v->cnd_kid[ci][1])
+			cnd_add(&v->ed, 1);
+		return;
+	}
+	if (v->cseq_kind[g] == CS_MATCH) {
+		if (v->cnd_mt[ci][0] > 0 && g_mx >= v->cnd_mt[ci][0] &&
+		    g_mx <= v->cnd_mt[ci][1])
+			ch_open(v, CH_CMATCH, ci, g_my - 3, g_mx);
+		else if (v->cnd_op[ci][0] > 0 && g_mx >= v->cnd_op[ci][0] &&
+			 g_mx <= v->cnd_op[ci][1])
+			v->ed.dr.cnd[ci].op = !v->ed.dr.cnd[ci].op;
+		/* A typed expression is a FIELD, not a list of ids - so it
+		 * takes the caret rather than having one of its characters
+		 * removed. */
+		else if (v->cnd_ex[ci][0] > 0 && g_mx >= v->cnd_ex[ci][0] &&
+			 g_mx <= v->cnd_ex[ci][1])
+			v->edit = 103 + (int)ci;
+		else
+			cnd_id_click(v, ci);
+		return;
+	}
+
+	/* CS_COND */
+	if (g_mx >= g_cols - 4) {
+		cnd_remove(&v->ed, ci);
+		return;
+	}
+	if (g_mx >= v->cnd_lv[ci][0] && g_mx <= v->cnd_lv[ci][1])
+		ch_open(v, CH_LEVEL, ci, g_my, g_mx);
+	else if (v->cnd_vr[ci][0] > 0 && g_mx >= v->cnd_vr[ci][0] &&
+		 g_mx <= v->cnd_vr[ci][1])
+		ch_open(v, CH_VARIANT, ci, g_my, g_mx);
+	else if (v->cnd_nm[ci][0] > 0 && g_mx >= v->cnd_nm[ci][0] &&
+		 g_mx <= v->cnd_nm[ci][1])
+		v->edit = 4 + (int)ci;
 }
 
 /*
@@ -22264,8 +22431,19 @@ static void click(struct view *v, int rclick)
 		v->pane = 3;
 	if (click_panel_head(v))
 		return;
-	if (click_panel_rows(v))
+	/*
+	 * THE PANEL SWALLOWS ITS OWN AREA.
+	 *
+	 * Every row between the heading and the marker line belongs to the
+	 * draft, whether or not a control is drawn on it, so a click that
+	 * found nothing registered stops here rather than falling through to
+	 * the hex pane underneath - which is what the unconditional `return 1`
+	 * at the foot of the walk this replaced did.
+	 */
+	if (g_decl_rows && g_my > decl_top() && g_my < mark_row()) {
+		hit_run(v);
 		return;
+	}
 	if (click_marker_line(v, ob))
 		return;
 	if (click_hex(v, rclick))
@@ -23057,94 +23235,34 @@ static int handle_chooser_key(struct view *v, int k)
 			 * one of the newer key protocols, and a control that
 			 * works on some terminals is worse than a button.
 			 */
-			size_t n = strlen(v->find);
+			/*
+			 * ONE EDITOR, and the two things this field does that
+			 * the others do not.
+			 *
+			 * The body used to be an eighty-line copy of field_key
+			 * - the same caret, the same selection, the same paste
+			 * - written out again because of those two. It is the
+			 * copy that drifts: Ctrl+A here selected a field that
+			 * a later fix to field_key had already taught to be
+			 * selected differently.
+			 *
+			 * ESCAPE also puts the dialog away, not just the
+			 * caret. ENTER searches and LEAVES THE FIELD OPEN, so
+			 * pressing it again searches again - field_key closes
+			 * on Enter because every other field is finished by
+			 * it, and this one is not.
+			 */
+			int esc = k == 27, run = k == '\r' || k == '\n';
+			int r2 = field_key(v, v->find, sizeof v->find, k, NULL);
 
-			if (v->edit != v->edit_prev) {
-				v->edit_prev = v->edit;
-				v->caret = (uint32_t)n;
-				v->field_all = 0;
-			}
-			if (v->caret > n)
-				v->caret = (uint32_t)n;
-			if (k == 0x01) {
-				v->field_all = n != 0;
-				return 1;
-			}
-			if (k == 0x03) {
-				copy_osc52(v->find, n);
-				copy_said(v, n);
-				return 1;
-			}
-			/* K_DEL belongs with backspace here: with the whole
-			 * field selected, either one means "get rid of it". */
-			if (v->field_all && (k == 127 || k == 8 || k == K_DEL ||
-					     k == 0x16 || k == K_PASTE ||
-					     (k >= 0x20 && k < 0x7f))) {
-				v->find[0] = 0;
-				n = 0;
-				v->caret = 0;
-				v->field_all = 0;
-				if (k == 127 || k == 8 || k == K_DEL)
-					return 1;
-			}
-			if (v->field_all && (k == K_LEFT || k == K_RIGHT ||
-					     k == K_HOME || k == K_END ||
-					     k == 27 || k == '\r' || k == '\n'))
-				v->field_all = 0;
-			if (k == 0x16 || k == K_PASTE) {
-				const char *src;
-				size_t sn = paste_src(k, &src), i;
-
-				for (i = 0; i < sn && n + 2u < sizeof v->find;
-				     i++) {
-					char c2 = src[i];
-
-					if (c2 < 0x20 || c2 >= 0x7f)
-						continue;
-					memmove(v->find + v->caret + 1u,
-						v->find + v->caret,
-						n - v->caret + 1u);
-					v->find[v->caret++] = c2;
-					n++;
-				}
-				return 1;
-			}
-			if (k == K_LEFT) {
-				if (v->caret)
-					v->caret--;
-			} else if (k == K_RIGHT) {
-				if (v->caret < n)
-					v->caret++;
-			} else if (k == K_HOME) {
-				v->caret = 0;
-			} else if (k == K_END) {
-				v->caret = (uint32_t)n;
-			} else if (k == 27) {
-				v->edit = 0;
+			if (esc) {
 				v->find_open = 0;
-			} else if (k == '\r' || k == '\n') {
+			} else if (run) {
+				v->edit = 500;
 				v->find_at = KOF_BROKEN;
 				find_run(v, 0);
-			} else if (k == 0x08 || k == 127) {
-				if (v->caret) {
-					memmove(v->find + v->caret - 1u,
-						v->find + v->caret,
-						n - v->caret + 1u);
-					v->caret--;
-				}
-			} else if (k == K_DEL) {
-				if (v->caret < n)
-					memmove(v->find + v->caret,
-						v->find + v->caret + 1u,
-						n - v->caret);
-			} else if (k >= 0x20 && k < 0x7f &&
-				   n + 2u < sizeof v->find) {
-				memmove(v->find + v->caret + 1u,
-					v->find + v->caret,
-					n - v->caret + 1u);
-				v->find[v->caret++] = (char)k;
 			}
-			return 1;
+			return r2;
 		}
 		if (v->edit >= ED_STR && v->edit < ED_STR + MAX_DECL) {
 			uint32_t si = (uint32_t)(v->edit - ED_STR);

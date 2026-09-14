@@ -145,7 +145,46 @@ void term_size(void)
  * being assembled, and the flicker looks like a bug in the tool.
  */
 
-void out_add(struct out *o, const char *s, size_t n)
+/*
+ * The rectangle, and it narrows only.
+ *
+ * An unset one (cl_b == 0) is replaced outright, which is how the frame's
+ * first call establishes the screen; after that every call is an intersection,
+ * so a drawer cannot widen the region it was given by the drawer above it.
+ */
+struct out_clip out_clip_set(struct out *o, int t, int l, int b, int r)
+{
+	struct out_clip prev;
+
+	prev.t = o->cl_t; prev.l = o->cl_l;
+	prev.b = o->cl_b; prev.r = o->cl_r;
+	if (!o->cl_b)
+		o->cl_w = r;            /* the screen, set once per frame */
+	if (o->cl_b) {
+		if (t < o->cl_t) t = o->cl_t;
+		if (l < o->cl_l) l = o->cl_l;
+		if (b > o->cl_b) b = o->cl_b;
+		if (r > o->cl_r) r = o->cl_r;
+	}
+	/* An empty intersection has to stay empty rather than wrap around:
+	 * b < t with b non-zero refuses every cell, which is the answer. */
+	o->cl_t = t; o->cl_l = l;
+	o->cl_b = b < t ? t - 1 : b;
+	o->cl_r = r;
+	if (!o->cl_b)
+		o->cl_b = -1;   /* "set, and admits nothing" */
+	return prev;
+}
+
+void out_clip_restore(struct out *o, struct out_clip prev)
+{
+	o->cl_t = prev.t; o->cl_l = prev.l;
+	o->cl_b = prev.b; o->cl_r = prev.r;
+}
+
+/* Bytes straight into the buffer, with no counting and no clipping: the two
+ * places that know they are writing an escape rather than a cell. */
+static void out_raw(struct out *o, const char *s, size_t n)
 {
 	if (o->n + n + 1 > o->cap) {
 		size_t want = o->cap ? o->cap * 2 : 8192;
@@ -161,35 +200,137 @@ void out_add(struct out *o, const char *s, size_t n)
 	o->n += n;
 }
 
-void out_str(struct out *o, const char *s)
+/*
+ * EVERY CELL THE SCREEN GETS COMES THROUGH HERE.
+ *
+ * Escapes are passed through untouched - dropping an SGR because the text it
+ * colours was clipped would leave the colour state wrong for whatever is drawn
+ * next - and printable cells are emitted only where the rectangle allows.
+ *
+ * A CELL, NOT A BYTE: a box-drawing character is three bytes in one column, so
+ * the clip decision is made on the lead byte and the continuation bytes follow
+ * it. Splitting one at the right edge would put half a character on the screen,
+ * which is worse than the overflow the clip is there to stop.
+ *
+ * col_hint still counts per byte, the way it always has - the layout
+ * arithmetic above is built on that count and out_glyph exists precisely
+ * because of it.
+ *
+ * Runs, not bytes: the common case is a whole string inside the rectangle, and
+ * it is appended with one memcpy the way it was before.
+ */
+void out_add(struct out *o, const char *s, size_t n)
 {
-	const char *p;
+	size_t i = 0, run = 0;
+	int row_ok = !o->cl_b ||
+		     (o->row_hint >= o->cl_t && o->row_hint <= o->cl_b);
+	int cell_ok = 1;
 
-	out_add(o, s, strlen(s));
-	for (p = s; *p; p++) {
-		if (*p == '\033') {
-			while (*p && *p != 'm' && *p != 'H' && *p != 'K')
-				p++;
-			if (!*p)
-				break;
+	while (i < n) {
+		unsigned char b = (unsigned char)s[i];
+
+		if (b == 0x1b) {
+			size_t j = i + 1u;
+
+			if (run) {
+				out_raw(o, s + i - run, run);
+				run = 0;
+			}
+			while (j < n && s[j] != 'm' && s[j] != 'H' &&
+			       s[j] != 'K')
+				j++;
+			if (j < n)
+				j++;
+			/*
+			 * ERASE TO END OF LINE IS A DRAW, and it draws to the
+			 * edge of the SCREEN. Inside a box narrower than the
+			 * screen it would blank the pane to the right of it,
+			 * so it is refused there - a box paints its own width
+			 * and has no use for it.
+			 */
+			if (s[j - 1u] == 'K' && o->cl_b &&
+			    o->cl_r < o->cl_w) {
+				/*
+				 * ERASED ONLY AS FAR AS THE RECTANGLE GOES.
+				 *
+				 * Passing it through would blank the pane to
+				 * the right - which is what the tree pane was
+				 * doing to the divider drawn beside it, every
+				 * frame - and refusing it outright would leave
+				 * the row's old text standing when a shorter
+				 * one is drawn over it. So it is spaces to the
+				 * edge of the region, and then the cursor is
+				 * put back, because an erase does not move it.
+				 */
+				int c = o->cl_col;
+
+				if (row_ok && c <= o->cl_r) {
+					char t[32];
+					int m;
+
+					while (c <= o->cl_r) {
+						out_raw(o, " ", 1);
+						c++;
+					}
+					m = snprintf(t, sizeof t,
+						     "\033[%d;%dH",
+						     o->row_hint, o->cl_col);
+					if (m > 0)
+						out_raw(o, t, (size_t)m);
+				}
+				o->cl_drop++;
+			} else {
+				out_raw(o, s + i, j - i);
+			}
+			i = j;
 			continue;
 		}
+		if ((b & 0xc0u) != 0x80u) {
+			/* A new cell. Control bytes take no column: they are
+			 * passed through and left out of the reckoning. */
+			if (b < 0x20u) {
+				cell_ok = 1;
+				if (b == '\n')
+					o->row_hint++;
+				if (b == '\n' || b == '\r')
+					o->cl_col = 1;
+			} else {
+				cell_ok = !o->cl_b ||
+					  (row_ok && o->cl_col >= o->cl_l &&
+					   o->cl_col <= o->cl_r);
+				o->cl_col++;
+			}
+		}
+		if (cell_ok) {
+			run++;
+		} else {
+			if (run) {
+				out_raw(o, s + i - run, run);
+				run = 0;
+			}
+			o->cl_drop++;
+		}
 		o->col_hint++;
+		i++;
 	}
+	if (run)
+		out_raw(o, s + n - run, run);
 }
 
-/*
- * One GLYPH: several bytes, one column.
- *
- * out_str counts col_hint per byte, which is right for ASCII and wrong for
- * anything else - a three byte box character would advance the column count by
- * three and every width and click box computed from it after that would be out.
- * The scrollbar gets away with out_str because it writes one glyph and then
- * repositions; a border cannot.
- */
+void out_str(struct out *o, const char *s)
+{
+	out_add(o, s, strlen(s));
+}
+
 void out_glyph(struct out *o, const char *g)
 {
-	out_add(o, g, strlen(g));
+	if (!o->cl_b ||
+	    (o->row_hint >= o->cl_t && o->row_hint <= o->cl_b &&
+	     o->cl_col >= o->cl_l && o->cl_col <= o->cl_r))
+		out_raw(o, g, strlen(g));
+	else
+		o->cl_drop++;
+	o->cl_col++;
 	o->col_hint++;
 }
 
@@ -215,6 +356,7 @@ void out_at(struct out *o, int row, int col)
 	out_fmt(o, "\033[%d;%dH", row, col);
 	o->row_hint = row;
 	o->col_base = col;
+	o->cl_col = col;
 }
 
 /*
@@ -330,7 +472,24 @@ int kv_menu_step(const struct kv_menu *m, int cur, int d)
 void kv_menu_draw(struct out *o, const struct kv_menu *m, int top, int left,
 		  int sel, int sel2)
 {
-	int i, y = top, k;
+	int i, y = top, k, rows = 0;
+	struct out_clip cl;
+
+	/*
+	 * A MENU IS A BOX AND IT STAYS IN IT.
+	 *
+	 * Its height is however many of its items are shown plus a row for each
+	 * rule, and its width is the one it was laid out to - both of which it
+	 * has to count before it draws, because a menu opened near the bottom
+	 * or the right edge would otherwise write past it and the terminal
+	 * would wrap the overflow onto the row below, which scrolls the screen.
+	 */
+	for (i = 0; i < m->n; i++) {
+		if (!kv_shown(m, i))
+			continue;
+		rows += kv_rule(m, i) ? 2 : 1;
+	}
+	cl = out_clip_set(o, top, left, top + rows - 1, left + m->w);
 
 	for (i = 0; i < m->n; i++) {
 		if (!kv_shown(m, i))
@@ -361,6 +520,7 @@ void kv_menu_draw(struct out *o, const struct kv_menu *m, int top, int left,
 				m->label(m->ud, i));
 		out_str(o, A_OFF);
 	}
+	out_clip_restore(o, cl);
 }
 
 /* ---- what a format can be asked - see kofview.h ---------------------------- */
