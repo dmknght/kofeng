@@ -931,16 +931,31 @@ struct node {
 };
 
 /*
- * One clickable span of the draft panel, and what pressing it does.
+ * One clickable RECTANGLE, and what pressing it does.
  *
- * A CALLBACK RATHER THAN A CODE, so the action lives beside the row that draws
- * it instead of in a switch somewhere else that has to be kept in step. `arg`
- * is whatever that row needs - a marker index, a matcher id, a region bit.
+ * A CALLBACK RATHER THAN A CODE, so the action lives beside the thing that
+ * draws it instead of in a switch somewhere else that has to be kept in step.
+ * `arg` is whatever that drawer needs - a marker index, a matcher id, a region
+ * bit, a menu context.
+ *
+ * WHICH BUTTON, because the right one is not the left one with a different
+ * name. Most spans are left-only; a pane that has a context menu declares a
+ * rectangle for the right button and nothing else does. See the note on the
+ * right-button gate in click().
+ *
+ * A ROW IS y0 == y1. Most controls are one row of one drawer, and hit_add is
+ * for those; a PANE is many rows and declares itself with hit_zone.
  */
 struct view;
 
+enum {
+	HIT_L = 1u << 0,
+	HIT_R = 1u << 1
+};
+
 struct hit {
-	int16_t   y, x0, x1;
+	int16_t   y0, y1, x0, x1;
+	uint8_t   btn;
 	void    (*fn)(struct view *, uint32_t arg);
 	uint32_t  arg;
 };
@@ -960,7 +975,11 @@ static int g_mx, g_my;
 static void hit_reset(struct view *v);
 static void hit_add(struct view *v, int y, int x0, int x1,
 		    void (*fn)(struct view *, uint32_t), uint32_t arg);
-static int  hit_run(struct view *v);
+static void hit_zone(struct view *v, int y0, int x0, int y1, int x1,
+		     uint8_t btn, void (*fn)(struct view *, uint32_t),
+		     uint32_t arg);
+static int  hit_run(struct view *v, int rclick);
+static int  hit_probe(const struct view *v, int rclick);
 
 /* The row callbacks, declared here because a row registers its own and the
  * draw that does so comes before the bodies. */
@@ -10803,8 +10822,9 @@ static void draw_decl(struct out *o, struct view *v)
 	 */
 
 	/* ---- what the module declares ---- */
-	/* Last frame's spans are gone with the rows that registered them. */
-	hit_reset(v);
+	/* The registry is cleared once for the whole frame - see redraw - and
+	 * not here: the panes drawn before this one register their own
+	 * rectangles, and clearing at the panel would throw them away. */
 	draw_decl_head(o, v);
 	r = draw_decl_fmts(o, v, r);
 	r = draw_decl_ranges(o, v, r);
@@ -13054,6 +13074,16 @@ static void redraw(struct view *v)
 	 * drawn for.
 	 */
 	out_clip_set(&o, 1, 1, g_rows, g_cols);
+	/*
+	 * AND THE POINTER MAP IS CLEARED WITH IT.
+	 *
+	 * Every rectangle in it describes where something was PAINTED, so it
+	 * lives exactly as long as the frame does. Cleared here rather than in
+	 * the draft panel, which is where it started: the panes drawn before
+	 * the panel register rectangles too, and a clear halfway through the
+	 * frame throws away whatever came first.
+	 */
+	hit_reset(v);
 	if (kof_tty_resize_pending()) {
 		/*
 		 * The cached frame describes a screen of the old size, and the
@@ -13312,14 +13342,32 @@ static void redraw(struct view *v)
 				  g_cols);
 		draw_hex(&o, v);
 		out_clip_restore(&o, cl);
+		/*
+		 * WHERE THE RIGHT BUTTON MEANS SOMETHING, declared by the pane
+		 * that drew it - see the gate at the top of click().
+		 *
+		 * The same rectangle the clip above uses, so the pane cannot be
+		 * right-clickable where it cannot draw.
+		 */
+		hit_zone(v, hex_top(), TREE_W + 1, hex_last(), g_cols,
+			 HIT_R, NULL, 0);
 		cl = out_clip_set(&o, dis_top() - 1, TREE_W + 1, hex_bot(),
 				  g_cols);
 		draw_disasm(&o, v);
 		out_clip_restore(&o, cl);
+		if (g_disasm_rows)
+			hit_zone(v, dis_top(), TREE_W + 1, hex_bot(), g_cols,
+				 HIT_R, NULL, 0);
 		cl = out_clip_set(&o, evt_top() - 1, TREE_W + 1, hex_bot(),
 				  g_cols);
 		draw_evt(&o, v);
 		out_clip_restore(&o, cl);
+		/* The event panel's TEXT BOX, not the whole panel: the field
+		 * table above it has no menu. */
+		if (evt_live(v))
+			hit_zone(v, evt_box_top(v), TREE_W + 1,
+				 evt_box_top(v) + EVT_BOX_ROWS - 1, g_cols,
+				 HIT_R, NULL, 0);
 		cl = out_clip_set(&o, decl_top(), 1, g_rows - 1, g_cols);
 		draw_decl(&o, v);
 		out_clip_restore(&o, cl);
@@ -13339,8 +13387,16 @@ static void redraw(struct view *v)
 		 * and nothing appeared, which reads as a dead menu item. A
 		 * modal goes under whatever it pops up, not over it.
 		 */
-		if (v->enc_open)
+		if (v->enc_open) {
 			draw_enc(&o, v);
+			/* Its plaintext window, whose geometry the draw just
+			 * settled - see enc_in_text, which is this rectangle. */
+			if (v->enc_txt_h > 0)
+				hit_zone(v, v->enc_txt_y, v->enc_txt_x,
+					 v->enc_txt_y + v->enc_txt_h - 1,
+					 v->enc_txt_x + v->enc_txt_w - 1,
+					 HIT_R, NULL, 0);
+		}
 		if (v->menu_open)
 			draw_menu(&o, v);
 		draw_bar(&o, v);
@@ -21729,52 +21785,88 @@ static int click_list(struct view *v, struct object *ob)
 	return 0;
 }
 
-/* Forget last frame's spans. Called where the panel starts drawing. */
+/* Forget last frame's rectangles. Called where the frame starts drawing. */
 static void hit_reset(struct view *v)
 {
 	v->n_hit = 0;
 }
 
 /*
- * Register a span. `x1` is inclusive, as every other hit test in this file is.
+ * The general form: a rectangle and which buttons it answers.
  *
- * A row that is scrolled out registers nothing: it is drawn by nobody, so
- * PR_VIS guards the call the same way it guards the paint.
+ * `x1` and `y1` are inclusive, as every other hit test in this file is.
+ * Anything scrolled or clipped out registers nothing - it is drawn by nobody,
+ * so the same predicate that guards the paint guards the call.
  */
-static void hit_add(struct view *v, int y, int x0, int x1,
-		    void (*fn)(struct view *, uint32_t), uint32_t arg)
+static void hit_zone(struct view *v, int y0, int x0, int y1, int x1,
+		     uint8_t btn, void (*fn)(struct view *, uint32_t),
+		     uint32_t arg)
 {
 	struct hit *h;
 
-	if (v->n_hit >= HIT_MAX || x1 < x0 || y < 0)
+	if (v->n_hit >= HIT_MAX || x1 < x0 || y1 < y0 || y0 < 0)
 		return;
 	h = &v->hit[v->n_hit++];
-	h->y = (int16_t)y;
+	h->y0 = (int16_t)y0;
+	h->y1 = (int16_t)y1;
 	h->x0 = (int16_t)x0;
 	h->x1 = (int16_t)x1;
+	h->btn = btn;
 	h->fn = fn;
 	h->arg = arg;
 }
 
-/*
- * Run whatever was registered under the pointer, if anything.
- *
- * Backwards, so the LAST span registered at a position wins - the one painted
- * over the others, which is the one the reader can see.
- */
-static int hit_run(struct view *v)
+/* One row, left button - what almost every control is. */
+static void hit_add(struct view *v, int y, int x0, int x1,
+		    void (*fn)(struct view *, uint32_t), uint32_t arg)
 {
+	hit_zone(v, y, x0, y, x1, HIT_L, fn, arg);
+}
+
+/* Which rectangle is under the pointer for this button, or none. */
+static const struct hit *hit_at(const struct view *v, int rclick)
+{
+	uint8_t want = rclick ? (uint8_t)HIT_R : (uint8_t)HIT_L;
 	uint32_t i = v->n_hit;
 
+	/*
+	 * Backwards, so the LAST rectangle registered at a position wins - the
+	 * one painted over the others, which is the one the reader can see. It
+	 * is also why a pane may declare itself whole and a control inside it
+	 * still answer: the control is drawn later.
+	 */
 	while (i--) {
 		const struct hit *h = &v->hit[i];
 
-		if (g_my == h->y && g_mx >= h->x0 && g_mx <= h->x1) {
-			h->fn(v, h->arg);
-			return 1;
-		}
+		if ((h->btn & want) && g_my >= h->y0 && g_my <= h->y1 &&
+		    g_mx >= h->x0 && g_mx <= h->x1)
+			return h;
 	}
-	return 0;
+	return NULL;
+}
+
+/*
+ * Run whatever is there, if anything.
+ *
+ * A rectangle registered with NO callback is a DECLARATION and not an action:
+ * it says the button means something here and leaves the handling to the chain
+ * below. hit_probe counts it, this does not run it, and the click carries on.
+ */
+static int hit_run(struct view *v, int rclick)
+{
+	const struct hit *h = hit_at(v, rclick);
+
+	if (!h || !h->fn)
+		return 0;
+	h->fn(v, h->arg);
+	return 1;
+}
+
+/* Ask without running: the right-button gate needs to know whether the press
+ * means anything here before the chain below it starts changing state. */
+static int hit_probe(const struct view *v, int rclick)
+{
+	return hit_at(v, rclick) != NULL;
 }
 
 /*
@@ -22039,34 +22131,25 @@ static void click(struct view *v, int rclick)
 	 * button that duplicates another teaches nothing and surprises whoever
 	 * expected a menu.
 	 */
-	if (rclick && !((g_my >= hex_top() && g_my <= hex_last() &&
-			 g_mx > TREE_W && !v->show_list && !v->menu_open) ||
-			(g_disasm_rows && g_my >= dis_top() &&
-			 g_my <= hex_bot() && g_mx > TREE_W &&
-			 !v->show_list && !v->menu_open) ||
-			/*
-			 * AND THE EVENT PANEL'S TEXT BOX, which was left out
-			 * and made its menu unreachable.
-			 *
-			 * This gate is the rule that the right button belongs
-			 * to the panes that have a menu, and the box grew one -
-			 * so it has to be named here or the click is refused
-			 * before anything downstream sees it. It sits below
-			 * hex_last(), which is what put it outside the first
-			 * test even though it is inside the hex column.
-			 */
-			(evt_live(v) && g_my >= evt_box_top(v) &&
-			 g_my < evt_box_top(v) + EVT_BOX_ROWS &&
-			 g_mx > TREE_W && !v->show_list && !v->menu_open) ||
-			/*
-			 * AND THE STRING DECODER'S PLAINTEXT WINDOW, for the
-			 * same reason and found the same way: the menu opened,
-			 * the item ran, and nothing happened - because the
-			 * click was refused here, three screens above anything
-			 * that could have told the reader so.
-			 */
-			(v->enc_open && !v->menu_open &&
-			 enc_in_text(v, g_my, g_mx))))
+	/*
+	 * ASKED OF THE FRAME, NOT OF A LIST KEPT HERE.
+	 *
+	 * This was four rectangles written out in this condition, and every
+	 * pane that grew a context menu had to be added to them. Twice it was
+	 * not: the event panel's text box and the string decoder's plaintext
+	 * window both opened a menu, ran the item, and did nothing - because
+	 * the press was refused here, three screens above anything that could
+	 * have told the reader so, and the rectangle that would have allowed it
+	 * lived in a different function from the code that drew the box.
+	 *
+	 * Now a pane declares its own right-button rectangle where it paints
+	 * it - see hit_zone in redraw - so the two cannot disagree, and a pane
+	 * that forgets is broken only in itself.
+	 *
+	 * show_list and menu_open stay here: they are not a property of any
+	 * pane but of what is on top of all of them.
+	 */
+	if (rclick && (v->show_list || v->menu_open || !hit_probe(v, 1)))
 		return;
 
 	/*
@@ -22472,7 +22555,7 @@ static void click(struct view *v, int rclick)
 	 * because of it. Every row of the panel is now read the one way.
 	 */
 	if (g_decl_rows && g_my >= decl_top() && g_my < mark_row()) {
-		hit_run(v);
+		hit_run(v, rclick);
 		return;
 	}
 	if (click_marker_line(v, ob))
