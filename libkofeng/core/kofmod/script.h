@@ -139,6 +139,27 @@ static inline const char *kof_script_type_name(uint8_t v)
 #define KOF_SCAN_SCRIPT_BODY   (1u << 2)
 
 /*
+ * AND THE THIRD, WHICH ONLY A SERVER PAGE HAS.
+ *
+ * A .jsp or .asp is not a program with some text in it, it is TEXT WITH CODE
+ * ISLANDS: markup, and inside it runs of "<% ... %>" that the server executes.
+ * The two are different languages in one file, and treating the whole of it as
+ * the program is wrong in both directions - normalising markup by Java's rules
+ * turns "http://x" in an href into a comment, and a marker meant for the
+ * program is offered every byte of the page.
+ *
+ * So BODY keeps its meaning - THE PROGRAM - and becomes several extents, one
+ * per island; the markup between them is this. A file with no islands (a shell
+ * script, a .php that is all code) has an empty MARKUP and one BODY, which is
+ * exactly what it had before this bit existed.
+ *
+ * Bit 3, which is DATA in the shared region axis - see the note above. Inert
+ * content that the thing is about but does not execute is what DATA means in
+ * an ELF too, so a rule written over both reads the same way.
+ */
+#define KOF_SCAN_SCRIPT_MARKUP (1u << 3)
+
+/*
  * The view a module reached for KOF_FMT_SCRIPT gets.
  *
  * Small on purpose: there is no structure here to describe. `kind` is the same
@@ -147,12 +168,34 @@ static inline const char *kof_script_type_name(uint8_t v)
  * where. `tag_len` is how many bytes the thing that named the interpreter took -
  * the shebang line, or "<?php" - so a rule can skip it.
  */
+/*
+ * HOW MANY CODE ISLANDS ARE KEPT SEPARATELY.
+ *
+ * A page with more than this many "<% ... %>" runs is not wrong, it is just
+ * past what is worth describing one at a time: beyond the cap the last island
+ * is extended to the end of the object, which keeps the partition exact -
+ * every byte still belongs to exactly one region - at the cost of calling some
+ * markup code. Erring that way rather than the other is deliberate: markup
+ * scanned as code costs a few false candidates, code scanned as markup would
+ * be code no rule ever sees.
+ */
+#define KOF_SCRIPT_MAX_ISLAND 32u
+
 struct kof_script_info {
 	uint8_t  kind;          /* enum kof_script_type */
 	uint8_t  from_shebang;  /* 1 when a "#!" line named it */
-	uint16_t reserved;
+	uint16_t n_island;      /* 0 for anything that is not a server page */
 	uint32_t tag_len;
 	uint64_t anomalies;     /* none defined yet; kept so the row has one */
+	/*
+	 * The islands, in file order and never merged. Two runs of code with
+	 * markup between them are two things a rule may want to talk about
+	 * separately - a marker that happens to span the gap would be matching
+	 * across text the server never executes together.
+	 */
+	struct {
+		uint32_t off, len;
+	} island[KOF_SCRIPT_MAX_ISLAND];
 };
 
 #endif /* KOFENG_SCRIPT_H */

@@ -53,10 +53,12 @@ const char *kof_script_anomaly_name(unsigned index);
  * signature writes back into a bit from this list instead of a hand copy. */
 #define SCRIPT_REGIONS(X)          \
 	X(KOF_SCAN_SCRIPT_HEADER)  \
-	X(KOF_SCAN_SCRIPT_BODY)
+	X(KOF_SCAN_SCRIPT_BODY)    \
+	X(KOF_SCAN_SCRIPT_MARKUP)
 
-/* Two regions, and they partition the object exactly - see script_parse.c. */
+/* Three regions, and they partition the object exactly - see script_parse.c.
+ * MARKUP is empty for everything that is not a server page. */
 extern const uint32_t kof_script_region_bits[];
-#define KOF_SCRIPT_REGION_COUNT 2u
+#define KOF_SCRIPT_REGION_COUNT 3u
 
 #endif /* KOFENG_SCRIPT_PARSE_H */

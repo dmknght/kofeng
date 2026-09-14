@@ -17,7 +17,7 @@
 #include "script_parse.h"
 
 const uint32_t kof_script_region_bits[] = {
-	KOF_SCAN_SCRIPT_HEADER, KOF_SCAN_SCRIPT_BODY
+	KOF_SCAN_SCRIPT_HEADER, KOF_SCAN_SCRIPT_BODY, KOF_SCAN_SCRIPT_MARKUP
 };
 
 const char *kof_script_region_name(uint32_t bit)
@@ -25,6 +25,7 @@ const char *kof_script_region_name(uint32_t bit)
 	switch (bit) {
 	case KOF_SCAN_SCRIPT_HEADER: return "KOF_SCAN_SCRIPT_HEADER";
 	case KOF_SCAN_SCRIPT_BODY:   return "KOF_SCAN_SCRIPT_BODY";
+	case KOF_SCAN_SCRIPT_MARKUP: return "KOF_SCAN_SCRIPT_MARKUP";
 	default:                     return NULL;
 	}
 }
@@ -59,11 +60,61 @@ static uint32_t script_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask
 		out[n].len = hdr;
 		n++;
 	}
-	if ((mask & KOF_SCAN_SCRIPT_BODY) && hdr < ctx->obj_size &&
-	    n < max_out) {
-		out[n].off = hdr;
-		out[n].len = ctx->obj_size - hdr;
-		n++;
+
+	/*
+	 * NO ISLANDS: the shape this format had before server pages, and the
+	 * one every shebang script still has. The body is the rest and there is
+	 * no markup.
+	 */
+	if (!s->n_island) {
+		if ((mask & KOF_SCAN_SCRIPT_BODY) && hdr < ctx->obj_size &&
+		    n < max_out) {
+			out[n].off = hdr;
+			out[n].len = ctx->obj_size - hdr;
+			n++;
+		}
+		return n;
+	}
+
+	/*
+	 * A SERVER PAGE, WALKED ONCE. The islands are in file order and do not
+	 * overlap, so one walk emits both regions: each island is BODY and each
+	 * gap before it is MARKUP. `at` is where the last region ended, which
+	 * is what makes the union exact without a second pass to check it.
+	 *
+	 * Running out of `max_out` stops the walk rather than skipping ahead,
+	 * because a caller that asked for fewer extents than the page has is
+	 * asking for a prefix of it, not for a partition with a hole in it.
+	 */
+	{
+		uint64_t at = hdr;
+		uint16_t i;
+
+		for (i = 0; i < s->n_island && n < max_out; i++) {
+			uint64_t io = s->island[i].off;
+			uint64_t il = s->island[i].len;
+
+			if (io < at)
+				continue;       /* inside the header */
+			if ((mask & KOF_SCAN_SCRIPT_MARKUP) && io > at) {
+				out[n].off = at;
+				out[n].len = io - at;
+				if (++n == max_out)
+					break;
+			}
+			if ((mask & KOF_SCAN_SCRIPT_BODY) && il) {
+				out[n].off = io;
+				out[n].len = il;
+				n++;
+			}
+			at = io + il;
+		}
+		if ((mask & KOF_SCAN_SCRIPT_MARKUP) && at < ctx->obj_size &&
+		    n < max_out) {
+			out[n].off = at;
+			out[n].len = ctx->obj_size - at;
+			n++;
+		}
 	}
 	return n;
 }
@@ -189,6 +240,163 @@ static uint8_t pct_kind(kof_buf f, uint64_t look)
 	return KOF_SCRIPT_ANY;
 }
 
+/*
+ * IS THE TAG CLOSED - which is what makes "<%" a magic number at all.
+ *
+ * "<%" on its own is two bytes of punctuation and it occurs in prose. Measured,
+ * on this machine: it claimed 208 .pm, 76 .pod, 70 .py and 62 .tmpl files,
+ * because Perl's POD writes a hash as C<%dependencies> and Mako opens a
+ * template with <%inherit file="..."/>. Every one of those became
+ * KOF_FMT_SCRIPT with no kind, which is the worst of both - the rules for TEXT
+ * no longer saw them, and subtype 0 is never filtered, so every script rule
+ * did.
+ *
+ * What none of them has is the OTHER HALF. A server page is "<% ... %>": the
+ * pair is balanced by definition, because the server has to know where the code
+ * ends. C<%dependencies> closes with ">" and the Mako tag with "/>", and
+ * neither writes "%>" anywhere in the file - checked, zero occurrences across
+ * the four sampled.
+ *
+ * So the magic is the PAIR, not the opener. That keeps every real page and
+ * drops the prose, and it needs no guess about what the bytes in between are.
+ *
+ * "<?php" needs no such test: five bytes that do not occur in passing, and a
+ * PHP file is allowed to end without "?>" - most style guides ask for it.
+ */
+static int pct_closed(kof_buf f, uint64_t at, uint64_t look)
+{
+	uint64_t j;
+
+	for (j = at + 2u; j + 2u <= look; j++)
+		if (f.p[j] == '%' && f.p[j + 1u] == '>')
+			return 1;
+	return 0;
+}
+
+/*
+ * HOW LONG THE DIRECTIVE BLOCK IS, from the "<%@" at `at`.
+ *
+ * A page does not declare itself in three characters. It declares itself in a
+ * RUN of directives, and reading only the "<%@" put every one of them in the
+ * body:
+ *
+ *     <%@ Page Language="C#" Debug="true" %>     <-- header was these 3 bytes
+ *     <%@ Import Namespace="System.Diagnostics" %>
+ *     <%@ Import Namespace="System.IO" %>
+ *     <script Language="c#" runat="server">      <-- and all of this was body
+ *
+ * So a rule asking for the PROGRAM was handed the directives as well, and the
+ * directives - "Import Namespace=System.Diagnostics" is about as loud as an
+ * ASP.NET marker gets - could not be named as a region at all.
+ *
+ * The run ends at the first thing that is not another directive, which is what
+ * separates the two shapes that occur: a page whose directives are followed by
+ * markup, and one whose "<%@ Language=VBScript %>" is followed by a plain "<%"
+ * opening code. Whitespace between directives belongs to the run; anything else
+ * ends it.
+ *
+ * The same rule the shebang branch already follows - the header is the whole of
+ * what declared the interpreter, not the punctuation that opened it.
+ *
+ * Bounded by `look`, like everything else here. An unterminated directive ends
+ * the run where it started rather than swallowing the file: a header that runs
+ * to the end leaves no body, and a file that is all header is not what an
+ * unterminated tag means.
+ */
+static uint32_t pct_directives(kof_buf f, uint64_t at, uint64_t look)
+{
+	uint64_t i = at, end = at;
+
+	for (;;) {
+		uint64_t j;
+
+		while (i < look && (f.p[i] == ' ' || f.p[i] == '\t' ||
+				    f.p[i] == '\r' || f.p[i] == '\n'))
+			i++;
+		if (!tag_at(f, i, "<%@", 3u))
+			break;
+		for (j = i + 3u; j + 2u <= look; j++)
+			if (f.p[j] == '%' && f.p[j + 1u] == '>')
+				break;
+		if (j + 2u > look)
+			break;          /* unterminated - the run stops here */
+		i = j + 2u;
+		/*
+		 * THE RUN ENDS AT THE LAST "%>", not where the search for the
+		 * next directive gave up.
+		 *
+		 * The whitespace between two directives belongs to the block;
+		 * the whitespace after the LAST one belongs to whatever comes
+		 * next. Returning `i` handed the header the newline under the
+		 * final directive - and a page with ten blank lines under it
+		 * would have handed over all ten.
+		 */
+		end = i;
+	}
+	return end > at ? (uint32_t)(end - at) : 3u;
+}
+
+/*
+ * THE CODE ISLANDS, over the WHOLE object and not just the sniff window.
+ *
+ * A page is markup with runs of "<% ... %>" in it, and where those runs are is
+ * not a property of the first eight kilobytes - a shell at the foot of a long
+ * template is the case that matters. So this is the one walk here that reads
+ * everything, and it is a scan for one byte until it finds "<%".
+ *
+ * "<%--" IS NOT AN ISLAND. It opens a JSP comment, and a comment is not what
+ * the server runs; recorded as code it would be normalised by Java's rules and
+ * offered to every rule about the program. Skipped, it falls into the gap
+ * either side, which is MARKUP - where a comment belongs.
+ *
+ * An unterminated run takes the rest of the object. It is the same choice the
+ * cap makes and for the same reason: a tail called code costs candidates, a
+ * tail called markup would be code nothing ever looks at.
+ */
+static uint16_t pct_islands(kof_buf f, uint64_t from,
+			    struct kof_script_info *info)
+{
+	uint64_t i = from;
+	uint16_t n = 0;
+
+	while (i + 2u <= f.n && n < KOF_SCRIPT_MAX_ISLAND) {
+		uint64_t open, close;
+
+		while (i + 2u <= f.n &&
+		       !(f.p[i] == '<' && f.p[i + 1u] == '%'))
+			i++;
+		if (i + 2u > f.n)
+			break;
+		open = i;
+		for (close = open + 2u; close + 2u <= f.n; close++)
+			if (f.p[close] == '%' && f.p[close + 1u] == '>')
+				break;
+		if (close + 2u > f.n) {
+			if (!tag_at(f, open, "<%--", 4u)) {
+				info->island[n].off = (uint32_t)open;
+				info->island[n].len = (uint32_t)(f.n - open);
+				n++;
+			}
+			break;
+		}
+		if (!tag_at(f, open, "<%--", 4u)) {
+			info->island[n].off = (uint32_t)open;
+			info->island[n].len =
+				(uint32_t)(close + 2u - open);
+			n++;
+		}
+		i = close + 2u;
+	}
+	/* Past the cap, the last island swallows the tail - see the note on
+	 * KOF_SCRIPT_MAX_ISLAND. */
+	if (n == KOF_SCRIPT_MAX_ISLAND &&
+	    (uint64_t)info->island[n - 1].off +
+	    info->island[n - 1].len < f.n)
+		info->island[n - 1].len =
+			(uint32_t)(f.n - info->island[n - 1].off);
+	return n;
+}
+
 static uint64_t find_tag(kof_buf f, uint64_t look, uint8_t *kind,
 			 uint32_t *taglen)
 {
@@ -203,10 +411,26 @@ static uint64_t find_tag(kof_buf f, uint64_t look, uint8_t *kind,
 		if (tag_at(f, i, "<?=", 3u)) {
 			*kind = KOF_SCRIPT_PHP; *taglen = 3u; return i;
 		}
+		/*
+		 * ONE RULE FOR THE WHOLE "<%" FAMILY, because the SYNTAX is
+		 * theirs together - classic ASP, ASP.NET and JSP all declare
+		 * themselves in "<%@ ... %>" and differ only in what they put
+		 * inside it. Which of the three it is stays pct_kind's
+		 * question; how far the declarations run is this one, and
+		 * answering it per kind would be three copies of one answer.
+		 */
 		if (tag_at(f, i, "<%@", 3u)) {
-			*kind = pct_kind(f, look); *taglen = 3u; return i;
+			/* Not `break`: an unclosed one earlier in the window
+			 * must not hide a real page later in it. */
+			if (!pct_closed(f, i, look))
+				continue;
+			*kind = pct_kind(f, look);
+			*taglen = pct_directives(f, i, look);
+			return i;
 		}
 		if (tag_at(f, i, "<%", 2u)) {
+			if (!pct_closed(f, i, look))
+				continue;
 			*kind = pct_kind(f, look); *taglen = 2u; return i;
 		}
 		/* ColdFusion: every tag is "<cf" and nothing else opens with
@@ -391,6 +615,23 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 			info->kind = kind;
 			if (!info->tag_len)
 				info->tag_len = (uint32_t)(tag + tl);
+			/*
+			 * ONLY THE "<%" FAMILY HAS ISLANDS.
+			 *
+			 * A "<?php" file is a program that may end with some
+			 * markup; a page is markup that CONTAINS programs, and
+			 * only the second shape needs the body split. Left to
+			 * the simple two-region partition, "<?php" behaves
+			 * exactly as it did.
+			 *
+			 * The offsets are 32 bit, so an object that could not
+			 * be described by them keeps the old partition rather
+			 * than a truncated new one.
+			 */
+			if (tag_at(file, tag, "<%", 2u) &&
+			    file.n <= 0xffffffffu)
+				info->n_island =
+					pct_islands(file, info->tag_len, info);
 		}
 	}
 
