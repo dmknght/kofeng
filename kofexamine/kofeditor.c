@@ -27,6 +27,7 @@
 #include <time.h>
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
+#include <kofmod/script.h>
 
 #include "kofeditor.h"
 #include "../libkofeng/kofmatchers/hexprog.h"
@@ -165,6 +166,22 @@ const char *const elf_sub[] = { KOF_ELF_TYPE_LIST(ELF_SUB_X) };
 #define PE_SUB_X(name, val) &#name[sizeof "KOF_PE_" - 1],
 const char *const pe_sub[]  = { KOF_PE_IMAGE_LIST(PE_SUB_X) };
 #undef PE_SUB_X
+
+/*
+ * AND THE SCRIPT KINDS, WHICH THE GENERATOR HAD NO NAMES FOR.
+ *
+ * KOF_TARGET_SUBTYPE was written for ELF and for PE and for nothing else, so a
+ * draft that declared a script kind had it DROPPED from the source - the panel
+ * said the rule was about php and the file written did not say so. Silent, and
+ * the same shape as the format list that stopped at KOF_FMT_PDF.
+ *
+ * From KOF_SCRIPT_TYPE_LIST, like the two above come from theirs, so a kind
+ * added to that list is a name here without anyone remembering to add it.
+ */
+#define SCRIPT_SUB_X(name, val) &#name[sizeof "KOF_SCRIPT_" - 1],
+const char *const script_sub[] = { KOF_SCRIPT_TYPE_LIST(SCRIPT_SUB_X) };
+#undef SCRIPT_SUB_X
+const uint32_t script_sub_n = sizeof script_sub / sizeof script_sub[0];
 
 
 
@@ -4200,6 +4217,11 @@ void generate(struct kof_editor *e, int as_new)
 				pe_sub[e->dr.opt_val[OPT_SUBTYPE] <
 				       pe_sub_n
 				       ? e->dr.opt_val[OPT_SUBTYPE] : 0]);
+		else if (fm == KOF_FMT_SCRIPT)
+			fprintf(f, "KOF_TARGET_SUBTYPE(KOF_SCRIPT_%s);\n",
+				script_sub[e->dr.opt_val[OPT_SUBTYPE] <
+					   script_sub_n
+					   ? e->dr.opt_val[OPT_SUBTYPE] : 0]);
 	}
 	if (e->dr.opt_on[OPT_SIZE_MIN] || e->dr.opt_on[OPT_ARCH] ||
 	    e->dr.opt_on[OPT_SUBTYPE])

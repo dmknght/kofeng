@@ -828,6 +828,9 @@ extern const char *const elf_sub[];
 extern const uint32_t elf_sub_n;
 extern const char *const pe_sub[];
 extern const uint32_t pe_sub_n;
+/* The script kinds, for the same job - see script_sub in kofeditor.c. */
+extern const char *const script_sub[];
+extern const uint32_t script_sub_n;
 extern const char *const fmt_word[];
 extern const uint32_t fmt_word_n;
 extern const char *const maltype_word[];

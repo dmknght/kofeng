@@ -13026,17 +13026,15 @@ static void decl_add_text(struct view *v, const char *text, size_t n)
 	 */
 	d->wide = v->evt_wide;
 	/*
-	 * TOKEN, like every other declaration - see decl_add.
+	 * SUBSTRING - see the note in decl_add on why TOKEN is not a default.
 	 *
-	 * This used to be SUBSTRING while decl_add used FULLWORD, on the
-	 * argument that a fragment dragged out of the middle of a script has
-	 * no edges. TOKEN is the answer that argument was reaching for and
-	 * could not express: it breaks on whitespace and on nothing else, so a
-	 * marker surrounded by quotes, brackets or dollars is still whole,
-	 * while one that is half of a longer word is not. The two defaults
-	 * disagreeing was itself a thing to remember.
+	 * Here it is not even a question: what was dragged out of the box is a
+	 * run of TEXT the reader picked by eye, so its edges are wherever the
+	 * pointer stopped and a boundary rule over them is a claim nobody made.
+	 * decl_add can look at the bytes either side and decide; this cannot,
+	 * because the rendering it came from is not the object.
 	 */
-	d->fullword = KOF_WORD_TOKEN;
+	d->fullword = KOF_WORD_SUBSTRING;
 	d->obj = v->node[v->sel_node].obj;
 	d->at = KOF_BROKEN;
 	snprintf(d->rgn, sizeof d->rgn, "%s", "OBJDATA");
@@ -13107,14 +13105,52 @@ static void decl_add(struct view *v, int hex)
 	d->nbytes = d->len;
 	d->hex = hex;
 	/*
-	 * TOKEN by default. A marker is a name, a path, a format string -
-	 * something with edges - far more often than it is a fragment of one.
-	 * TOKEN says that without FULLWORD's assumption that the edges are
-	 * made of letters: "$_POST[" and "<?php" are whole markers whose
-	 * neighbours are punctuation, and FULLWORD would have let either match
-	 * inside a longer run of it.
+	 * THE DEFAULT IS READ OFF THE BYTES THEMSELVES, not assumed.
+	 *
+	 * It was KOF_WORD_TOKEN unconditionally, and the comment that stood
+	 * here said TOKEN "breaks on whitespace and on nothing else, so a
+	 * marker surrounded by quotes, brackets or dollars is still whole".
+	 * That is the opposite of what TOKEN does. kof_str_abuts counts EVERY
+	 * non-space neighbour as continuing the run, so a marker with a "(" or
+	 * a quote next to it is NOT whole and cannot match - and a selection
+	 * dragged out of source almost always has one.
+	 *
+	 * Measured on the first rule written this way:
+	 *
+	 *     @eval(@gzuncompress(@x(@base64_decode($m[1]),$k)));
+	 *                          ^ the byte after the marker
+	 *
+	 * The generated signature was correct in every other respect and hit
+	 * nothing, which is the failure this tree calls out everywhere else: a
+	 * rule that silently never matches looks exactly like one that works.
+	 *
+	 * So the neighbours are looked at. Where they are whitespace or the
+	 * edge, TOKEN holds and is kept - it is a free narrowing on a marker
+	 * that really is a whole token, "<?php" being the case it was written
+	 * for. Where they are not, the marker is a FRAGMENT and gets
+	 * SUBSTRING, which is what a fragment is. Either way the answer cannot
+	 * be one that fails to match where it was taken from.
 	 */
-	d->fullword = KOF_WORD_TOKEN;
+	{
+		uint64_t bn2 = 0;
+		const uint8_t *bp2 = view_bytes(v, &bn2);
+		uint64_t before = lo, after = hi + 1u;
+		int whole = 1;
+
+		if (lo > 0) {
+			uint64_t f = view_map(v, before - 1u, 0);
+
+			if (bp2 && f < bn2 && !kof_str_space_byte(bp2[f]))
+				whole = 0;
+		}
+		if (whole && after < v->rgn_len) {
+			uint64_t f = view_map(v, after, 0);
+
+			if (bp2 && f < bn2 && !kof_str_space_byte(bp2[f]))
+				whole = 0;
+		}
+		d->fullword = whole ? KOF_WORD_TOKEN : KOF_WORD_SUBSTRING;
+	}
 	d->obj = n->obj;
 	/*
 	 * The region the bytes are in, looked up from the bytes.
