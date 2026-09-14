@@ -1855,6 +1855,21 @@ $(TEST)/asan_proc_rule$(EXE): tests/unit/proc_rule.c $(KOFPROC_SRC) \
 	       -I$(SDK)/include tests/unit/proc_rule.c $(KOFPROC_SRC) \
 	       $(ASAN_LIB) -o $@ $(LDFLAGS)
 
+# The terminal writer, which is a tool source rather than a library one.
+#
+# kofview.c is the viewer's drawing layer - it lives beside the tool because
+# nothing that scans needs it - so a test over it has to compile that source
+# the same way the draft-model test compiles kofeditor.c.
+$(TEST)/unit_out_clip$(EXE): tests/unit/out_clip.c kofexamine/kofview.c \
+                             $(LIB) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) tests/unit/out_clip.c kofexamine/kofview.c \
+	      $(LIB) -o $@ $(LDFLAGS)
+
+$(TEST)/asan_out_clip$(EXE): tests/unit/out_clip.c kofexamine/kofview.c \
+                             $(ASAN_LIB) $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) tests/unit/out_clip.c \
+	       kofexamine/kofview.c $(ASAN_LIB) -o $@ $(LDFLAGS)
+
 $(TEST)/unit_fridge$(EXE): tests/unit/fridge.c $(KOFRIDGE_SRC) $(LIB) $(STAMP) \
                            | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) tests/unit/fridge.c $(KOFRIDGE_SRC) $(LIB) \

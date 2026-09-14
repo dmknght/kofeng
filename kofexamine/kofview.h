@@ -98,7 +98,55 @@ struct out {
 	 */
 	int    col_base;
 	int    row_hint;
+	/*
+	 * WHERE DRAWING IS ALLOWED TO LAND, as a 1-based inclusive rectangle.
+	 *
+	 * A pane is a region of the screen and a dialog is a box on top of it,
+	 * and neither has anything to say outside its own bounds - but nothing
+	 * said so. Every drawer worked out its own last column and trusted
+	 * itself to stop there, so one row that measured wrong wrote across
+	 * the pane beside it, or past the right edge, where a terminal wraps
+	 * it onto the next line and scrolls the screen.
+	 *
+	 * So it is the writer that refuses: a cell outside the rectangle is
+	 * not emitted. The COLUMN BOOKKEEPING IS UNCHANGED - col_hint still
+	 * counts the character as though it had been drawn - because the
+	 * layout arithmetic above is about where a thing would go, and a
+	 * caller that measured a row must get the same answer whether or not
+	 * the row happened to run off the edge.
+	 *
+	 * `cl_b == 0` is no rectangle at all, which is what a zeroed struct
+	 * means: the two scratch buffers that build a clipboard string with
+	 * this API are not a screen and must not lose bytes to it.
+	 */
+	int      cl_t, cl_l, cl_b, cl_r;
+	/* How wide the screen is, taken from the first rectangle set on the
+	 * frame. It is what says whether a later one is NARROWER than the
+	 * screen, which is the case in which an erase-to-end-of-line would
+	 * rub out cells to the right of the box that asked for it. */
+	int      cl_w;
+	/*
+	 * THE COLUMN THE NEXT CELL LANDS IN, which col_hint cannot say.
+	 *
+	 * col_hint counts what a caller has emitted since it last chose to
+	 * reset it - out_at does not - so "col_base + col_hint" is the real
+	 * column only for the callers that keep it that way. The clip needs
+	 * the real one on every write, so it keeps its own: set by out_at,
+	 * advanced one per CELL, and a cell is a whole UTF-8 sequence rather
+	 * than each of its bytes.
+	 */
+	int      cl_col;
+	uint32_t cl_drop;   /* cells refused - what a test can look at */
 };
+
+/*
+ * A rectangle is set for the length of one drawer and put back after it, and
+ * setting one INTERSECTS with what is already in force: a box inside a pane
+ * cannot give itself more room than the pane it is in by asking for it.
+ */
+struct out_clip { int t, l, b, r; };
+struct out_clip out_clip_set(struct out *o, int t, int l, int b, int r);
+void out_clip_restore(struct out *o, struct out_clip prev);
 
 /* Bytes with no interpretation - a caller that has already decided where an
  * escape ends and text begins. out_str is this with strlen. */
