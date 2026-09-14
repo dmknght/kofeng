@@ -37,6 +37,24 @@ struct kof_match_ctx {
 	 * object while the table itself is kept.
 	 */
 	struct kof_gram *gram_use;
+	/*
+	 * THE PRESENCE SET IS NOT BUILT UNTIL THE SEARCHING HAS EARNED IT.
+	 *
+	 * It used to be stamped for every object in kof_match_begin, before
+	 * anything knew whether a single search would follow. That is a full
+	 * pass over the object, and measured against the shipping base it was
+	 * pure cost: a corpus of 3024 samples took 9.8 s with it and 1.7 s
+	 * without, for identical detections, because the multi-pattern tables
+	 * had already answered everything and the residue it filtered was 76 MB
+	 * against the 2896 MB the stamping read.
+	 *
+	 * At a large base the same filter is what keeps the residue affordable,
+	 * so the answer is not to remove it but to stop GUESSING which case
+	 * this object is in. `gram_want` says it may be built; it is built at
+	 * the first search that finds the unfiltered searching has already
+	 * read more than the stamping would - see gram_late.
+	 */
+	uint8_t          gram_want;
 	uint32_t         gram_patterns;   /* what the engine declared; 0 -> no table */
 	/*
 	 * HOW BIG A TABLE, and HOW MANY PATTERNS MAKE IT WORTH ONE. Zero on

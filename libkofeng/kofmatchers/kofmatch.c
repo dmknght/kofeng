@@ -113,12 +113,52 @@ void kof_match_begin(struct kof_match_ctx *m, kof_buf data)
 	 * an object are fewer than its length and the true occupancy is below the
 	 * estimate. The threshold errs towards keeping the filter.
 	 */
-	if (data.n <= (m->gram_bits
-		       ? (uint64_t)(1u << m->gram_bits) * 693u / 1000u
-		       : GRAM_MAX_BYTES) && gram_ensure(m))
-		m->gram_use = m->gram;
+	/*
+	 * ELIGIBLE, NOT BUILT. Whether it is worth stamping this object cannot
+	 * be known here: it depends on how much searching follows, and nothing
+	 * has searched yet. See kof_match_ctx.gram_want and gram_late.
+	 */
+	m->gram_want = data.n <= (m->gram_bits
+				  ? (uint64_t)(1u << m->gram_bits) * 693u / 1000u
+				  : GRAM_MAX_BYTES);
+	m->gram_use = NULL;
+	m->n_bytes_indexed = 0;
+}
 
-	m->n_bytes_indexed = gram_build(m->gram_use, data);
+/*
+ * Stamp the object now, if the searching done so far says it would have paid.
+ *
+ * THE EVIDENCE IS THE BYTES ALREADY SEARCHED. Stamping reads the object once;
+ * an unfiltered search reads the region it was given. So once the searches have
+ * read more of this object than stamping it would, the filter has demonstrated
+ * its own case and the ones still to come get it. An object that never searches
+ * that much never pays for it.
+ *
+ * This is a heuristic about the FUTURE and is stated as one: the bytes already
+ * spent are used as the estimate of the bytes still to come. What it guarantees
+ * is the bound - at most GRAM_EARN object-reads of unfiltered searching are
+ * lost before the filter turns on, against a cost today of one stamping pass on
+ * every object whether or not anything searches it.
+ *
+ * It also removes a constant that could only ever be right for one database
+ * size. GRAM_MIN_PATTERNS asked "are there enough markers to bother"; a base of
+ * 43 records answered yes and lost 5.8x, and a base of four million would have
+ * answered yes for the right reason. The question the object can answer for
+ * itself is the better one.
+ */
+#define GRAM_EARN 2u
+
+static void gram_late(struct kof_match_ctx *m)
+{
+	if (m->gram_use || !m->gram_want || !m->data.n)
+		return;
+	if (m->n_bytes_scanned < (uint64_t)GRAM_EARN * m->data.n)
+		return;
+	m->gram_want = 0;               /* decided, one way or the other */
+	if (!gram_ensure(m))
+		return;
+	m->gram_use = m->gram;
+	m->n_bytes_indexed = gram_build(m->gram_use, m->data);
 }
 
 static uint8_t fold(uint8_t c)
@@ -854,6 +894,7 @@ int kof_match_lookup(struct kof_match_ctx *m, uint32_t slot,
 			return known;
 	}
 
+	gram_late(m);
 	if (!gram_admits(m->gram_use, bytes, len, kind, flags)) {
 		if (answered_without_scan)
 			(*answered_without_scan)++;
