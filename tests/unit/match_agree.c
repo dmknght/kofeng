@@ -47,8 +47,9 @@ static void fail(const char *why)
 
 	if (failures < 3) {
 		printf("  FAIL %s: %s\n", g_case, why);
-		printf("       flags=%s%s  off=%llu len=%llu span=%u\n",
+		printf("       flags=%s%s%s  off=%llu len=%llu span=%u\n",
 		       (g_flags & KOF_STR_ICASE) ? "ICASE " : "",
+		       (g_flags & KOF_STR_WIDE) ? "WIDE " : "",
 		       (g_flags & KOF_STR_FULLWORD) ? "FULLWORD" : "",
 		       (unsigned long long)g_off, (unsigned long long)g_len,
 		       g_span);
@@ -99,12 +100,23 @@ static uint32_t make_hay(uint8_t *h)
  * and that difference is the contract, not a fault: so the brute force below
  * has to apply the range rule when it is checking a range search.
  */
+/*
+ * AND A WIDE PATTERN IS BOUNDED BY CHARACTERS - the reference has to know the
+ * rule too, or randomising KOF_STR_WIDE only proves the matcher differs from a
+ * check that was never taught it. The expressions mirror match_one's exactly;
+ * `n` is the haystack, needed because the wide tests read one byte further out
+ * than the byte-level ones do.
+ */
+static int is_word(uint8_t c) { return c == 'A' || c == 'B'; }
+
 static int word_ok_in_range(const uint8_t *h, uint64_t p, uint32_t span,
-			    uint64_t off, uint64_t len)
+			    uint64_t off, uint64_t len, uint64_t n, int wide)
 {
-	int lok = (p == off) || !(h[p - 1] == 'A' || h[p - 1] == 'B');
-	int rok = (p + span >= off + len) ||
-		  !(h[p + span] == 'A' || h[p + span] == 'B');
+	int lok = wide
+		? (p < off + 2u || h[p - 1] != 0 || !is_word(h[p - 2]))
+		: ((p == off) || !is_word(h[p - 1]));
+	int rok = (p + span >= off + len) || !is_word(h[p + span]) ||
+		  (wide && (p + span + 1u >= n || h[p + span + 1u] != 0));
 
 	return lok && rok;
 }
@@ -173,6 +185,19 @@ static void one_round(void)
 		span = plen;
 		if (rnd_n(2)) flags |= KOF_STR_ICASE;
 		if (rnd_n(3) == 0) flags |= KOF_STR_FULLWORD;
+		/*
+		 * WIDE TOO, because it CHANGES THE WORD BOUNDARY and the three
+		 * doors have to change it the same way.
+		 *
+		 * It was never set here, and that is how kof_match_at kept a
+		 * byte-level leading test while match_one used a character
+		 * level one: wide FULLWORD "IEX" inside UTF-16 "PIEX." was
+		 * absent to _in and _where and present to _at. The flag is set
+		 * on ordinary random patterns rather than on hand-built UTF-16
+		 * ones on purpose - what is under test is that the three
+		 * agree, and any pattern exercises that.
+		 */
+		if (rnd_n(2)) flags |= KOF_STR_WIDE;
 		g_case = "literal";
 	}
 
@@ -192,6 +217,42 @@ static void one_round(void)
 	n_brute = brute(&m, hn, use, (uint16_t)plen, kind,
 			(uint8_t)(flags & ~(unsigned)KOF_STR_FULLWORD),
 			brute_at, HAY_MAX);
+
+	/*
+	 * 6  kof_match_at's OWN word rule, checked against the object boundary
+	 *    it declares - which nothing here did.
+	 *
+	 * Every other use of _at below deliberately clears FULLWORD, because at
+	 * the edge of a range the two calls answer to different boundaries by
+	 * contract. That left the flag's behaviour ON THIS CALL untested, and a
+	 * wide literal is where it showed: _at applied a byte-level leading test
+	 * where match_one applies a character-level one, so wide FULLWORD "IEX"
+	 * was absent to _in and _where and present to _at.
+	 *
+	 * The reference is word_ok_in_range over the WHOLE object, which is
+	 * exactly what "the boundary is the object" means.
+	 */
+	if (flags & KOF_STR_FULLWORD) {
+		for (i = 0; i < n_brute; i++) {
+			uint64_t p = brute_at[i];
+			int want = word_ok_in_range(hay, p, span, 0, hn, hn,
+						    (flags & KOF_STR_WIDE) != 0);
+			int got = kof_match_at(&m, p, use, (uint16_t)plen,
+					       kind, flags);
+
+			if (kind == KOF_STR_HEX)
+				break;  /* hex carries no word option */
+			if (!got != !want) {
+				g_off = p; g_len = 0;
+				fail(want
+				     ? "kof_match_at refused a match the word "
+				       "rule allows"
+				     : "kof_match_at allowed a match the word "
+				       "rule refuses");
+				break;
+			}
+		}
+	}
 
 	/* --- a random sub range, because a module names its own --- */
 	off = rnd_n(hn);
@@ -221,7 +282,8 @@ static void one_round(void)
 			fail("kof_match_at says no at the offset "
 			     "kof_match_where returned");
 		if ((flags & KOF_STR_FULLWORD) &&
-		    !word_ok_in_range(hay, at, span, off, len))
+		    !word_ok_in_range(hay, at, span, off, len, hn,
+				      (flags & KOF_STR_WIDE) != 0))
 			fail("kof_match_where returned a hit the word rule "
 			     "should have refused");
 		for (i = 0; i < n_brute; i++) {
@@ -236,7 +298,8 @@ static void one_round(void)
 			    brute_at[i] + span <= off + len &&
 			    (!(flags & KOF_STR_FULLWORD) ||
 			     word_ok_in_range(hay, brute_at[i], span, off,
-					      len)))
+					      len, hn,
+					      (flags & KOF_STR_WIDE) != 0)))
 				fail("kof_match_where skipped an earlier "
 				     "match inside the range");
 		}
@@ -254,7 +317,8 @@ static void one_round(void)
 			    brute_at[i] + span <= off + len &&
 			    (!(flags & KOF_STR_FULLWORD) ||
 			     word_ok_in_range(hay, brute_at[i], span, off,
-					      len)))
+					      len, hn,
+					      (flags & KOF_STR_WIDE) != 0)))
 				fail("kof_match_where found nothing where "
 				     "kof_match_at finds a match");
 	}

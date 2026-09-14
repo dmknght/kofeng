@@ -26,6 +26,14 @@
 
 #include <pthread.h>
 
+/*
+ * The engine header, which koffridge.h deliberately no longer drags in: it
+ * forward-declares struct kof_result so the Windows collector need not compile
+ * the whole engine ABI - see the note at the top of that header. A test that
+ * BUILDS a verdict needs the real type and the KOF_LEVEL_* values, so it asks
+ * for them itself.
+ */
+#include "../../libkofeng/kofeng.h"
 #include "../../libkoforbit/koffridge/koffridge.h"
 
 static int fails;

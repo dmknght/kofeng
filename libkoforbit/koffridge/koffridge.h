@@ -528,6 +528,5 @@ void koffridge_seen_stats(const struct koffridge_seen *, struct koffridge_seen_s
 
 /* Forget everything; the table keeps its capacity. */
 void koffridge_seen_clear(struct koffridge_seen *);
-void koffridge_seen_clear(struct koffridge_seen *);
 
 #endif /* KOFFRIDGE_H */

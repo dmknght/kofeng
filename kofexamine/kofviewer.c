@@ -66,6 +66,9 @@
 #include "../kofparsers/binaries/pe_sym.h"
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
+/* kof_parser_of: the region NAMES are per format, and a multi-format draft has
+ * to be able to ask each of its formats what a region bit means there. */
+#include "../libkofeng/kofparsers/kofformat.h"
 
 #include "kofevtfmt.h"
 #include "kofevtlog.h"
@@ -719,6 +722,15 @@ static int literal_safe(const uint8_t *b, uint32_t n)
 enum ch_what {
 	CH_NONE = 0,
 	CH_RULE,        /* find all / any / multi, for a new or existing group */
+	/*
+	 * WHICH OCCURRENCE an AT matcher compares at.
+	 *
+	 * The marker already knows every place it appears - decl.hits, built by
+	 * decl_locate - so the offset is CHOSEN from that list rather than
+	 * typed. A number typed by hand is a number that can be wrong in a way
+	 * nothing checks; every row here is a place the bytes really are.
+	 */
+	CH_ATOFF,
 	CH_RANGE,       /* which declared range a condition searches */
 	CH_RANGE2,      /* what to do to the scan ranges */
 	/*
@@ -6608,10 +6620,34 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 	c->what = what;
 	c->arg = arg;
 
-	if (what == CH_RULE) {
+	if (what == CH_ATOFF) {
+		const struct decl *d = NULL;
+		char t[CH_W];
+
+		for (i = 0; i < v->ed.dr.n_decl; i++)
+			if (v->ed.dr.decl[i].grp & (1u << arg)) {
+				d = &v->ed.dr.decl[i];
+				break;
+			}
+		if (!d)
+			return;
+		for (i = 0; i < d->n_hits; i++) {
+			snprintf(t, sizeof t, "0x%llx",
+				 (unsigned long long)d->hits[i]);
+			ch_add(c, t);
+		}
+		/* A marker whose bytes are not in this object has no offsets to
+		 * offer, and a list of nothing is a menu that looks broken. */
+		if (!c->n)
+			return;
+	} else if (what == CH_RULE) {
 		ch_add(c, "find_all");
 		ch_add(c, "find_any");
 		ch_add(c, "find_multi (>=N)");
+		/* Last, because it is the one that is not a search: it compares
+		 * at one offset, and it is the only rule that constrains the
+		 * matcher to a single marker. */
+		ch_add(c, "find_str_at (at offset)");
 	} else if (what == CH_RANGE) {
 		/*
 		 * WHICH DEFINED RANGE THIS MATCHER SEARCHES.
@@ -7096,6 +7132,127 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 
 
 
+/*
+ * AN OFFSET IS A FACT ABOUT ONE LAYOUT, so say so when the draft has two.
+ *
+ * kof_find_str_at names a raw file offset and consults no region - see
+ * c_find_str_at, which reaches straight for the object's bytes. That is exactly
+ * right for "the stub at the entry point of an ELF" and meaningless the moment
+ * the same rule also targets a bash script: byte 0x400 of a script is wherever
+ * the author happened to stop typing.
+ *
+ * A NOTE AND NOT A REFUSAL. There are rules where it is deliberate - two
+ * formats that genuinely share a header - and deciding which is which is the
+ * researcher's job, not this panel's. What the panel owes them is that the
+ * question was asked.
+ *
+ * Said when the situation is CREATED - a second format added, or a matcher
+ * switched to at - because that is the moment the author can still mean
+ * something else by it.
+ */
+/* Does this format define every region bit in the mask - see the note below on
+ * why "no" and "called something else" are different answers. The symbol halves
+ * belong to no format and are always known; see rng_name_of. */
+static int rgn_bits_known(const struct kof_parser *p, uint32_t mask)
+{
+	uint32_t b, k;
+
+	mask &= ~(uint32_t)KOF_SCAN_SYM;
+	for (b = 0; b < 30u; b++) {
+		int found = 0;
+
+		if (!(mask & (1u << b)))
+			continue;
+		if (p)
+			for (k = 0; k < p->n_regions; k++)
+				found |= p->regions[k] == (1u << b);
+		if (!found)
+			return 0;
+	}
+	return 1;
+}
+
+static void at_warn_if_multi(struct view *v)
+{
+	uint32_t m = v->ed.dr.fmt_mask, g;
+	int n_fmt = 0;
+
+	for (; m; m >>= 1)
+		n_fmt += (int)(m & 1u);
+	if (n_fmt < 2)
+		return;
+
+	/*
+	 * DO THE REGIONS STILL MEAN THE SAME THING - the louder of the two.
+	 *
+	 * The region axis is ONE bit space shared by every format, and that is
+	 * what makes a signature over PE and ELF work at all: bit 1 is HEADERS
+	 * in both, bit 2 CODE, bit 3 DATA, each format resolving it to its own
+	 * extents. A rule about a cross-platform build is written once against
+	 * those bits and is right in both.
+	 *
+	 * The correspondence STOPS AFTER BIT 3, and it stops silently. Bit 5 is
+	 * UNCLAIMED in an ELF and OVERLAY in a PE; bit 4 is NOLOAD, SIGNATURE,
+	 * PACKED or CONTENT depending on who is asked. Such a matcher does not
+	 * fail to fire - it searches a DIFFERENT REAL REGION, which is the one
+	 * answer worth interrupting for. So the names are compared rather than
+	 * the bits, because the name is the thing the author meant.
+	 */
+	for (g = 0; g < v->ed.dr.n_grp; g++) {
+		char first[64] = "", other[64];
+		uint32_t want = grp_mask(&v->ed, g);
+		uint8_t ff = 0, f;
+
+		if (!grp_has_range(&v->ed, g) || (want & KOF_SCAN_ALL))
+			continue;
+		for (f = 0; f < KOF_FMT_COUNT; f++) {
+			if (!(v->ed.dr.fmt_mask & (1u << f)))
+				continue;
+			/*
+			 * ABSENT IS NOT THE SAME AS NAMED DIFFERENTLY, and
+			 * rng_name_of cannot tell them apart: a bit the format
+			 * does not define is skipped, and a mask that named
+			 * nothing falls out of it as "WHOLE-FILE". Reported
+			 * from that string alone this would have said a
+			 * matcher searches the whole file where it in fact
+			 * searches NOTHING - kof_scan_resolve_range returns no
+			 * extents - which is the opposite mistake.
+			 */
+			if (!rgn_bits_known(kof_parser_of(f), want)) {
+				say_err(&v->ed,
+					"matcher %u searches nothing in %s - "
+					"that format has no such region",
+					g + 1u, kof_format_name(f));
+				return;
+			}
+			rng_name_of(kof_parser_of(f), want, other,
+				    sizeof other);
+			if (!first[0]) {
+				snprintf(first, sizeof first, "%s", other);
+				ff = f;
+				continue;
+			}
+			if (strcmp(first, other)) {
+				say_err(&v->ed,
+					"matcher %u: that region is %s in %s "
+					"and %s in %s", g + 1u, first,
+					kof_format_name(ff), other,
+					kof_format_name(f));
+				return;
+			}
+		}
+	}
+
+	for (g = 0; g < v->ed.dr.n_grp; g++)
+		if (grp_is_at(v->ed.dr.grp[g].rule)) {
+			say_note(&v->ed,
+				 "find_str_at is one offset - it means a "
+				 "different place in each of %d formats",
+				 n_fmt);
+			return;
+		}
+}
+
 /* Which regions the object HAS, as a mask - what a range may be built from. */
 static uint32_t rng_object_regions(struct view *v)
 {
@@ -7161,6 +7318,10 @@ static void ch_take(struct view *v)
 		if (c->what == CH_FMT_ADD) {
 			if (pick < KOF_FMT_COUNT)
 				v->ed.dr.fmt_mask |= 1u << pick;
+			/* Only here: the other site SWAPS one format for
+			 * another, so the count - which is what makes an
+			 * offset ambiguous - does not change. */
+			at_warn_if_multi(v);
 			return;
 		}
 		/* The nth format that IS in the set - the one whose name was
@@ -7276,6 +7437,8 @@ static void ch_take(struct view *v)
 		q->rule = c->sel;
 		if (c->sel == 2)
 			q->thresh = 2;
+		/* Nothing in it yet, so there is no marker to seed from - the
+		 * offset arrives with the first one. See grp_seed_at. */
 		return;
 	}
 	if (c->what == CH_RANGE2) {
@@ -7507,6 +7670,10 @@ static void ch_take(struct view *v)
 			if ((int)n++ != c->sel)
 				continue;
 			v->ed.dr.decl[i].grp |= 1u << c->arg;
+			/* An AT matcher built rule-first has no offset until it
+			 * has a marker; this is when it gets one. */
+			if (grp_is_at(v->ed.dr.grp[c->arg].rule))
+				grp_seed_at(&v->ed, c->arg);
 			break;
 		}
 	} else if (c->what == CH_THRESH) {
@@ -7517,10 +7684,28 @@ static void ch_take(struct view *v)
 
 		q->rule = 2;
 		q->thresh = (uint32_t)c->sel + lo;
+	} else if (c->what == CH_ATOFF) {
+		const struct decl *d = NULL;
+		uint32_t i;
+
+		for (i = 0; i < v->ed.dr.n_decl; i++)
+			if (v->ed.dr.decl[i].grp & (1u << c->arg)) {
+				d = &v->ed.dr.decl[i];
+				break;
+			}
+		if (d && c->sel >= 0 && (uint32_t)c->sel < d->n_hits)
+			q->at_off = d->hits[c->sel];
 	} else if (c->what == CH_RULE) {
 		q->rule = c->sel;
 		if (c->sel == 2 && q->thresh < 2u)
 			q->thresh = 2;
+		/* Chosen now, from whatever marker the matcher already holds -
+		 * see grp_seed_at. Switching away and back does not lose it,
+		 * because it is only ever written here and by the offset menu. */
+		if (grp_is_at(c->sel)) {
+			grp_seed_at(&v->ed, c->arg);
+			at_warn_if_multi(v);
+		}
 	} else if (c->what == CH_RANGE) {
 		/*
 		 * The same list the menu was built from, walked in the same
@@ -7533,6 +7718,9 @@ static void ch_take(struct view *v)
 
 		q->mask = (c->sel >= 0 && (uint32_t)c->sel < nr)
 			? rm[c->sel] : KOF_SCAN_ALL;
+		/* Choosing the region is the other moment the correspondence
+		 * can break - see at_warn_if_multi. */
+		at_warn_if_multi(v);
 	}
 }
 
@@ -9692,6 +9880,8 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 			snprintf(rl, sizeof rl, "find_any");
 		else if (q->rule == 2)
 			snprintf(rl, sizeof rl, "find_multi");
+		else if (grp_is_at(q->rule))
+			snprintf(rl, sizeof rl, "find_str_at");
 		else
 			snprintf(rl, sizeof rl, "find_all");
 
@@ -9710,7 +9900,19 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 			/* Nothing to name only when there is neither a marker
 			 * to derive a range from nor a range that was
 			 * chosen. */
-			if (grp_has_range(&v->ed, g))
+			/*
+			 * AN AT MATCHER SHOWS WHERE, NOT WHICH REGION.
+			 *
+			 * It names no range - see group.at_off - so the field
+			 * that would hold one holds the offset instead, and the
+			 * preposition changes with it. The control keeps the
+			 * same click span, because it is the same half of the
+			 * row: the thing that says where this matcher looks.
+			 */
+			if (grp_is_at(q->rule))
+				snprintf(nm, sizeof nm, "0x%llx",
+					 (unsigned long long)q->at_off);
+			else if (grp_has_range(&v->ed, g))
 				rng_name_of(cur_obj(v)->fmt, grp_mask(&v->ed, g), nm,
 					    sizeof nm);
 			else
@@ -9730,7 +9932,8 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 			v->grp_rl[g][0] = 1 + (int)o->col_hint;
 			out_fmt(o, "%s%s" A_OFF, A_WARN, rl);
 			v->grp_rl[g][1] = (int)o->col_hint;
-			out_str(o, A_DIM " in " A_OFF);
+			out_str(o, grp_is_at(q->rule) ? A_DIM " at " A_OFF
+						      : A_DIM " in " A_OFF);
 			v->grp_rg[g][0] = 1 + (int)o->col_hint;
 			out_fmt(o, "%s%s" A_OFF, A_LOC, nm);
 			v->grp_rg[g][1] = (int)o->col_hint;
@@ -21162,8 +21365,14 @@ static int click_panel_rows(struct view *v)
 					ch_open(v, CH_RULE, g, g_my, g_mx);
 				else if (g_mx >= v->grp_rg[g][0] &&
 					 g_mx <= v->grp_rg[g][1])
-					ch_open(v, CH_RANGE, g,
-						g_my, g_mx);
+					/* The same half of the row, asking the
+					 * question that half asks for this
+					 * rule: which region, or which of the
+					 * marker's occurrences. */
+					ch_open(v,
+						grp_is_at(v->ed.dr.grp[g].rule)
+						? CH_ATOFF : CH_RANGE,
+						g, g_my, g_mx);
 				else if (v->grp_th[g][0] > 0 &&
 					 g_mx >= v->grp_th[g][0] &&
 					 g_mx <= v->grp_th[g][1])

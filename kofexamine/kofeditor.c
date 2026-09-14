@@ -1260,6 +1260,20 @@ uint32_t grp_count(struct kof_editor *e, uint32_t g)
 
 int grp_has_range(struct kof_editor *e, uint32_t g)
 {
+	/*
+	 * AN AT MATCHER HAS NONE, and saying otherwise emits a range nothing
+	 * uses.
+	 *
+	 * kof_find_str_at names no region, so a KOF_TARGET_RANGE written for it
+	 * would be a declaration no call references - which the panel already
+	 * calls an unused range - and worse, it becomes part of the module's
+	 * scan_mask, which the engine uses as a PRECONDITION: the module is
+	 * skipped outright on an object that has no such region. A matcher that
+	 * looks at one offset would have been silently deciding which objects
+	 * the whole rule is even offered.
+	 */
+	if (grp_is_at(e->dr.grp[g].rule))
+		return 0;
 	return grp_count(e, g) != 0 || e->dr.grp[g].mask != 0;
 }
 
@@ -1516,8 +1530,36 @@ uint32_t cnd_children(struct kof_editor *e, uint32_t i)
  * into a count would therefore make a rule slower - unless the count is already
  * being computed for something else, which is exactly and only when this folds.
  */
+/*
+ * The offset an AT matcher should start at: the one its marker is sitting on.
+ *
+ * Seeded rather than asked for, because the researcher clicked a marker they
+ * were already looking at and the offset they mean is that one. decl.at is the
+ * occurrence the marker's own row reports on - the one inside the region the
+ * rule searches, when there is one - so the panel and the matcher agree about
+ * which of several occurrences is "the" one without either being told.
+ *
+ * KOF_BROKEN means the bytes are not in this object at all - a marker carried
+ * over from another sample. Left at zero then, which is a place that exists,
+ * rather than writing a sentinel into generated C.
+ */
+void grp_seed_at(struct kof_editor *e, uint32_t g)
+{
+	uint32_t i;
+
+	for (i = 0; i < e->dr.n_decl; i++)
+		if (e->dr.decl[i].grp & (1u << g)) {
+			uint64_t at = e->dr.decl[i].at;
+
+			e->dr.grp[g].at_off = at == KOF_BROKEN ? 0u : at;
+			return;
+		}
+}
+
 uint32_t grp_thresh_eff(struct kof_editor *e, uint32_t g)
 {
+	if (grp_is_at(e->dr.grp[g].rule))
+		return 1u;                      /* one comparison, one answer */
 	if (e->dr.grp[g].rule == 1)
 		return 1u;                      /* any: at least one */
 	if (e->dr.grp[g].rule == 2)
@@ -1532,8 +1574,24 @@ int grp_same_set(struct kof_editor *e, uint32_t a, uint32_t b)
 
 	if (a == b)
 		return 1;
-	if (grp_mask(e, a) != grp_mask(e, b))
+	/*
+	 * AN AT MATCHER IS KEYED ON ITS OFFSET, NOT ON A RANGE.
+	 *
+	 * `mask` is meaningless to it - it names no range - so comparing masks
+	 * would make every AT matcher over one marker identical to every other,
+	 * whatever offsets they name. "the stub at the entry point" and "the
+	 * stub at 0x400" are two different questions and the duplicate check
+	 * has to see them that way. An AT and a search are never the same
+	 * question either, however the markers line up.
+	 */
+	if (grp_is_at(e->dr.grp[a].rule) != grp_is_at(e->dr.grp[b].rule))
 		return 0;
+	if (grp_is_at(e->dr.grp[a].rule)) {
+		if (e->dr.grp[a].at_off != e->dr.grp[b].at_off)
+			return 0;
+	} else if (grp_mask(e, a) != grp_mask(e, b)) {
+		return 0;
+	}
 	/* The same markers, and no others. Order is not part of the question:
 	 * a matcher is a set. */
 	for (i = 0; i < e->dr.n_decl; i++) {
@@ -1553,6 +1611,10 @@ int grp_shared(struct kof_editor *e, uint32_t g)
 {
 	uint32_t i, n = 0, multi = 0;
 
+	/* An AT matcher has no count to share: kof_find_str_at answers whether,
+	 * and the fold that makes sharing worth anything is over find_multi. */
+	if (grp_is_at(e->dr.grp[g].rule))
+		return 0;
 	for (i = 0; i < e->dr.n_grp; i++) {
 		if (!grp_same_set(e, i, g))
 			continue;
@@ -1967,6 +2029,18 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 	for (i = 0; i < e->dr.n_grp; i++)
 		if (!grp_count(e, i))
 			return "Every matcher needs a string";
+	/*
+	 * AND AN AT MATCHER NEEDS EXACTLY ONE.
+	 *
+	 * kof_find_str_at takes a single str_id - there is no _at_any and no
+	 * _at_all, because "these four, all at the same offset" is a question
+	 * only one of them can answer yes to. The emit takes the first marker
+	 * it finds, so without this a second one would be dropped silently and
+	 * the panel would show a matcher the generated code does not contain.
+	 */
+	for (i = 0; i < e->dr.n_grp; i++)
+		if (grp_is_at(e->dr.grp[i].rule) && grp_count(e, i) != 1u)
+			return "find_str_at takes exactly one string";
 	/*
 	 * What one call can hold.
 	 *
@@ -2517,6 +2591,29 @@ void emit_call_as(FILE *f, struct kof_editor *e, uint32_t g, int force_multi)
 	char nm[RNG_IDENT_MAX];
 	uint32_t i;
 
+	/*
+	 * AN OFFSET WHERE THE OTHERS TAKE A RANGE, and one marker where they
+	 * take a list.
+	 *
+	 * kof_find_str_at(off, s) is the whole shape: no range identifier is
+	 * emitted, because the call names none, and exactly one marker goes in
+	 * - which draft_missing_of refuses to let be anything else. Written as
+	 * hex because that is how every other offset in this panel is read.
+	 *
+	 * force_multi cannot reach here: it exists to give a shared call a
+	 * count, and grp_shared already refuses an AT.
+	 */
+	if (grp_is_at(q->rule)) {
+		fprintf(f, "kof_find_str_at(0x%llx",
+			(unsigned long long)q->at_off);
+		for (i = 0; i < e->dr.n_decl; i++)
+			if (e->dr.decl[i].grp & (1u << g)) {
+				fprintf(f, ", s%u", i);
+				break;
+			}
+		fprintf(f, ")");
+		return;
+	}
 	rng_ident(e->obj[e->cur].fmt, grp_mask(e, g), nm, sizeof nm);
 	fprintf(f, "kof_find_str_%s(%s",
 		force_multi ? "multi" : grp_rule_word(q->rule), nm);
@@ -3357,6 +3454,18 @@ shc_done:
 				rule = 1;
 			else if (!strncmp(q, "multi", 5))
 				rule = 2;
+			/*
+			 * "at" cannot be confused with "all": the two differ at
+			 * the second character. It has to be read, and reading
+			 * it wrong is not a cosmetic fault - left out, a
+			 * generated kof_find_str_at came back as find_all over
+			 * a range named "0x400", which names no range, so the
+			 * matcher silently became "all of these, anywhere" and
+			 * Generate wrote that back. Opening a rule and saving
+			 * it would have replaced it with a different rule.
+			 */
+			else if (!strncmp(q, "at", 2))
+				rule = 3;
 			if (e->dr.n_grp >= MAX_GROUP || cur < 0) {
 				skipped++;
 				continue;
@@ -3367,10 +3476,22 @@ shc_done:
 			q = strchr(p, '(');
 			if (!q)
 				continue;
-			q = src_ident(q + 1, id, sizeof id);
-			for (i = 0; i < n_rng; i++)
-				if (!strcmp(rng[i].id, id))
-					g->mask = rng[i].mask;
+			/*
+			 * THE FIRST ARGUMENT IS A NUMBER, NOT A RANGE, for this
+			 * one call - see group.at_off. Base 0 so the hex the
+			 * emitter writes and a decimal somebody typed both read.
+			 */
+			if (grp_is_at(rule)) {
+				char *end = NULL;
+
+				g->at_off = (uint64_t)strtoull(q + 1, &end, 0);
+				q = end ? end : q + 1;
+			} else {
+				q = src_ident(q + 1, id, sizeof id);
+				for (i = 0; i < n_rng; i++)
+					if (!strcmp(rng[i].id, id))
+						g->mask = rng[i].mask;
+			}
 			while (*q == ',' || *q == ' ') {
 				char sid[48];
 				uint32_t k;

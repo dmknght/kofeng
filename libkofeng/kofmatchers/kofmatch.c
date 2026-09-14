@@ -931,9 +931,34 @@ int kof_match_at(struct kof_match_ctx *m, uint64_t off,
 	 * Hex carries no word option; see the same note in match_one.
 	 */
 	if (flags & KOF_STR_FULLWORD) {
-		if (off > 0 && is_word_byte(m->data.p[off - 1]))
-			return 0;
-		if (off + len < m->data.n && is_word_byte(m->data.p[off + len]))
+		/*
+		 * AND A WIDE MATCH IS BOUNDED BY CHARACTERS, NOT BY BYTES.
+		 *
+		 * The same refinement match_one carries, and leaving it out
+		 * here reproduced the very fault the note above describes, one
+		 * flag further along. A byte-level leading test on a UTF-16
+		 * match reads the zero high half of the PRECEDING character,
+		 * and a zero is never a word byte - so it passed on every
+		 * match. Measured: wide FULLWORD "IEX" against UTF-16 "PIEX.",
+		 * where kof_match_in and kof_match_where both correctly answer
+		 * no, and this said yes.
+		 *
+		 * Untested until now because neither matcher test ever set
+		 * KOF_STR_WIDE; match_agree randomises FULLWORD but not this.
+		 */
+		int lok = (flags & KOF_STR_WIDE)
+			? (off < 2u || m->data.p[off - 1] != 0 ||
+			   !is_word_byte(m->data.p[off - 2]))
+			: (off == 0 || !is_word_byte(m->data.p[off - 1]));
+		/* The trailing byte is already the next character's low half,
+		 * so this side only gains "a whole character has to follow". */
+		int rok = (off + len >= m->data.n) ||
+			  !is_word_byte(m->data.p[off + len]) ||
+			  ((flags & KOF_STR_WIDE) &&
+			   (off + len + 1u >= m->data.n ||
+			    m->data.p[off + len + 1u] != 0));
+
+		if (!lok || !rok)
 			return 0;
 	}
 	if (flags & KOF_STR_ICASE) {

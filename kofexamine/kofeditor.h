@@ -325,12 +325,37 @@ struct range {
  */
 static inline const char *grp_rule_word(int rule)
 {
-	return rule == 1 ? "any" : rule == 2 ? "multi" : "all";
+	/*
+	 * "str_at" reads oddly here and is right at both ends: every consumer
+	 * spells it "find_" + this word, so the chooser row says find_str_at
+	 * and the emitted call is kof_find_str_at. The emitter special-cases
+	 * the ARGUMENTS - an offset and one marker, not a range and a list -
+	 * but not the name.
+	 */
+	return rule == 1 ? "any" : rule == 2 ? "multi"
+	     : rule == 3 ? "str_at" : "all";
 }
 
+/* Whether a matcher compares at one offset rather than searching a range. */
+static inline int grp_is_at(int rule) { return rule == 3; }
+
 struct group {
-	int      rule;              /* 0 ALL, 1 ANY, 2 threshold */
+	int      rule;              /* 0 ALL, 1 ANY, 2 threshold, 3 AT */
 	uint32_t thresh;
+	/*
+	 * WHERE, for rule 3 - the offset kof_find_str_at compares at.
+	 *
+	 * A matcher with this rule does not search: it is one comparison the
+	 * length of the pattern, at a place the author names. So it carries an
+	 * offset where the others carry a range, and `mask` means nothing to
+	 * it - see grp_same_set, which has to ask about this instead.
+	 *
+	 * Seeded from the marker's own `at` when the rule is chosen, because
+	 * the offset a researcher wants is almost always the one they are
+	 * looking at. Every other occurrence is on the marker too - decl.hits -
+	 * so the offset control offers those rather than asking for typing.
+	 */
+	uint64_t at_off;
 	char     note[512];         /* the author's note, emitted as a comment */
 	/* How far it is scrolled inside its own box, for the same reason the
 	 * module's comment has one: sliding the whole panel to read the end of
@@ -736,6 +761,7 @@ void cnd_add(struct kof_editor *e, int nested);
 void cnd_remove(struct kof_editor *e, uint32_t i);
 uint32_t cnd_children(struct kof_editor *e, uint32_t i);
 uint32_t grp_thresh_eff(struct kof_editor *e, uint32_t g);
+void grp_seed_at(struct kof_editor *e, uint32_t g);
 int grp_same_set(struct kof_editor *e, uint32_t a, uint32_t b);
 int grp_shared(struct kof_editor *e, uint32_t g);
 uint32_t draft_hash(struct kof_editor *e);
