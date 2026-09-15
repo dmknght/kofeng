@@ -15754,7 +15754,17 @@ static void draw_help(struct out *o, struct view *v)
 		"Ctrl+C     copy the field",  "Ctrl+V     paste",
 		"Ctrl+O     open a file",     "Ctrl+Q     quit",
 		"Ctrl+]     previous file",   "Ctrl+\\     next file",
-		"Tab        next pane",       "m          the marker list"
+		/*
+		 * TAB AND "m" ARE GONE FROM HERE BECAUSE THEY ARE GONE.
+		 *
+		 * Tab moved the focus between panes and "m" opened the marker
+		 * list, both from before this had a mouse. Every bare character
+		 * binding was taken out - see the note in handle() - so a page
+		 * still listing them would be teaching a key that does nothing,
+		 * which is worse than listing nothing at all. The marker list
+		 * is the words on the marker line; the panes take a click.
+		 */
+		"Ctrl+Space read as text or as hex"
 	};
 	static struct prop_line g_keys[sizeof keys / sizeof keys[0]];
 	struct page pg;
