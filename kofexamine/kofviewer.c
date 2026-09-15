@@ -968,9 +968,24 @@ struct node {
  */
 struct view;
 
+/*
+ * WHICH GESTURE A RECTANGLE ANSWERS.
+ *
+ * The wheel is here for the same reason the right button is: "what is under the
+ * pointer" is one question, and answering it in a chain of geometry tests
+ * somewhere else means every new scrollable area has to be added to that chain.
+ * It was not, twice, for the right button; the wheel's chain had the same shape
+ * and the text pane was missing from it in both directions.
+ *
+ * WHICH WAY it turned is g_wheel, read by the callback the way g_mx and g_my
+ * already are - a direction is not a different rectangle, so it does not belong
+ * in the mask.
+ */
 enum {
-	HIT_L = 1u << 0,
-	HIT_R = 1u << 1
+	HIT_L      = 1u << 0,
+	HIT_R      = 1u << 1,
+	HIT_WHEEL  = 1u << 2,   /* the wheel, plain */
+	HIT_HWHEEL = 1u << 3    /* the wheel with shift or ctrl - sideways */
 };
 
 struct hit {
@@ -991,6 +1006,10 @@ struct hit {
 /* Where the last click was. Declared here because the row callbacks are
  * written beside the rows that register them, which is above its definition. */
 static int g_mx, g_my;
+/* Which way the wheel last turned: +1 down, -1 up. Beside g_mx for the same
+ * reason - a wheel callback asks it exactly as a click callback asks where the
+ * pointer was. */
+static int g_wheel;
 
 static void hit_reset(struct view *v);
 static void hit_add(struct view *v, int y, int x0, int x1,
@@ -998,8 +1017,8 @@ static void hit_add(struct view *v, int y, int x0, int x1,
 static void hit_zone(struct view *v, int y0, int x0, int y1, int x1,
 		     uint8_t btn, void (*fn)(struct view *, uint32_t),
 		     uint32_t arg);
-static int  hit_run(struct view *v, int rclick);
-static int  hit_probe(const struct view *v, int rclick);
+static int  hit_run(struct view *v, uint8_t want);
+static int  hit_probe(const struct view *v, uint8_t want);
 
 /* The row callbacks, declared here because a row registers its own and the
  * draw that does so comes before the bodies. */
@@ -1013,6 +1032,9 @@ static void hit_row_addmatcher(struct view *v, uint32_t arg);
 static void hit_row_addcond(struct view *v, uint32_t arg);
 static void hit_row_cond(struct view *v, uint32_t g);
 static void hit_row_none(struct view *v, uint32_t arg);
+/* The bytes pane's wheel, when it is showing text - see hit_wheel_text. */
+static void hit_wheel_text(struct view *v, uint32_t arg);
+static void hit_hwheel_text(struct view *v, uint32_t arg);
 /* The heading row's controls. One span each, registered where each is drawn -
  * see the note above draw_decl_head on what sharing a field cost. */
 static void hit_head_type(struct view *v, uint32_t arg);
@@ -6453,6 +6475,40 @@ static void draft_seed_target(struct view *v)
 		v->ed.dr.opt_on[OPT_SUBTYPE] = 1;
 		v->ed.dr.opt_val[OPT_SUBTYPE] = fo->ctx.subtype;
 	}
+}
+
+/*
+ * SIDEWAYS, AND IT STOPS WHERE THE TEXT DOES.
+ *
+ * One function because two things ask for it - the arrow keys and the modified
+ * wheel - and a clamp written twice is a clamp that ends up different in the
+ * two. Unbounded, this scrolls into blank space: past the longest line on
+ * screen every row is empty, and a control that empties the pane reads as one
+ * that broke rather than as the end of the line.
+ *
+ * txt_maxlen is what the LAST FRAME actually drew, so the limit follows the
+ * text as the reader moves through it rather than being a property of the whole
+ * object - which would mean measuring every line of a ten megabyte script to
+ * answer a keypress.
+ */
+static void txt_hscroll(struct view *v, int by)
+{
+	int wide = g_cols - txt_x0();
+	uint32_t max;
+
+	if (wide < 1)
+		wide = 1;
+	max = v->txt_maxlen > (uint32_t)wide
+	      ? v->txt_maxlen - (uint32_t)wide : 0u;
+	if (by < 0) {
+		uint32_t n = (uint32_t)(-by);
+
+		v->txt_col = v->txt_col >= n ? v->txt_col - n : 0u;
+	} else {
+		v->txt_col += (uint32_t)by;
+	}
+	if (v->txt_col > max)
+		v->txt_col = max;
 }
 
 /* The furthest the text pane scrolls, for whatever object is in hand. */
@@ -13887,6 +13943,20 @@ static void redraw(struct view *v)
 		 */
 		hit_zone(v, hex_top(), TREE_W + 1, hex_last(), g_cols,
 			 HIT_R, NULL, 0);
+		/*
+		 * AND THE WHEEL, BOTH WAYS, when the pane is showing text.
+		 *
+		 * A hex row is as wide as the pane by construction, so sideways
+		 * means nothing there and the plain wheel is answered by the
+		 * chain in on_wheel as it always was. A line of source is not,
+		 * and neither direction reached this pane before.
+		 */
+		if (text_pane(v)) {
+			hit_zone(v, hex_top(), TREE_W + 1, hex_last(), g_cols,
+				 HIT_WHEEL, hit_wheel_text, 0);
+			hit_zone(v, hex_top(), TREE_W + 1, hex_last(), g_cols,
+				 HIT_HWHEEL, hit_hwheel_text, 0);
+		}
 		cl = out_clip_set(&o, dis_top() - 1, TREE_W + 1, hex_bot(),
 				  g_cols);
 		draw_disasm(&o, v);
@@ -19702,6 +19772,26 @@ static void hex_step(struct view *v, long lines)
 	v->rgn_at = (uint64_t)at;
 }
 
+/*
+ * THE TEXT PANE'S TWO WHEELS, registered where the pane is drawn.
+ *
+ * Three lines each, and that is the point: what used to decide this was a
+ * chain of geometry tests inside on_wheel that every scrollable area had to be
+ * added to. The pane declares what it answers, beside the rectangle it answers
+ * in - which is the same rectangle it clips its drawing to.
+ */
+static void hit_wheel_text(struct view *v, uint32_t arg)
+{
+	(void)arg;
+	hex_step(v, g_wheel > 0 ? 3 : -3);
+}
+
+static void hit_hwheel_text(struct view *v, uint32_t arg)
+{
+	(void)arg;
+	txt_hscroll(v, g_wheel > 0 ? 4 : -4);
+}
+
 /* A click says which pane as well as which row, so it moves the focus too:
  * clicking a row nobody is looking at and having nothing happen is the one
  * behaviour a mouse must not have. */
@@ -22432,10 +22522,9 @@ static void hit_add(struct view *v, int y, int x0, int x1,
 	hit_zone(v, y, x0, y, x1, HIT_L, fn, arg);
 }
 
-/* Which rectangle is under the pointer for this button, or none. */
-static const struct hit *hit_at(const struct view *v, int rclick)
+/* Which rectangle is under the pointer for this gesture, or none. */
+static const struct hit *hit_at(const struct view *v, uint8_t want)
 {
-	uint8_t want = rclick ? (uint8_t)HIT_R : (uint8_t)HIT_L;
 	uint32_t i = v->n_hit;
 
 	/*
@@ -22461,9 +22550,9 @@ static const struct hit *hit_at(const struct view *v, int rclick)
  * it says the button means something here and leaves the handling to the chain
  * below. hit_probe counts it, this does not run it, and the click carries on.
  */
-static int hit_run(struct view *v, int rclick)
+static int hit_run(struct view *v, uint8_t want)
 {
-	const struct hit *h = hit_at(v, rclick);
+	const struct hit *h = hit_at(v, want);
 
 	if (!h || !h->fn)
 		return 0;
@@ -22473,9 +22562,9 @@ static int hit_run(struct view *v, int rclick)
 
 /* Ask without running: the right-button gate needs to know whether the press
  * means anything here before the chain below it starts changing state. */
-static int hit_probe(const struct view *v, int rclick)
+static int hit_probe(const struct view *v, uint8_t want)
 {
-	return hit_at(v, rclick) != NULL;
+	return hit_at(v, want) != NULL;
 }
 
 /*
@@ -22758,7 +22847,7 @@ static void click(struct view *v, int rclick)
 	 * show_list and menu_open stay here: they are not a property of any
 	 * pane but of what is on top of all of them.
 	 */
-	if (rclick && (v->show_list || v->menu_open || !hit_probe(v, 1)))
+	if (rclick && (v->show_list || v->menu_open || !hit_probe(v, HIT_R)))
 		return;
 
 	/*
@@ -23164,7 +23253,7 @@ static void click(struct view *v, int rclick)
 	 * because of it. Every row of the panel is now read the one way.
 	 */
 	if (g_decl_rows && g_my >= decl_top() && g_my < mark_row()) {
-		hit_run(v, rclick);
+		hit_run(v, rclick ? (uint8_t)HIT_R : (uint8_t)HIT_L);
 		return;
 	}
 	if (click_marker_line(v, ob))
@@ -24235,6 +24324,27 @@ static void on_wheel(struct view *v, int k)
 		int down = k == K_WHEEL_DOWN;
 
 		/*
+		 * WHATEVER IS UNDER THE POINTER SAID SO ITSELF.
+		 *
+		 * Asked before the chain below, which is the same chain of
+		 * geometry tests the right button used to have at the top of
+		 * click() - and it had the same fault: an area that grew a
+		 * scroll had to be added to a list in this function, and the
+		 * text pane was missing from both directions of it.
+		 *
+		 * Areas still in the chain keep working; they are migrated by
+		 * declaring a rectangle where they are drawn, and each one that
+		 * moves is a branch that leaves here. The modal below is asked
+		 * FIRST and stays there, because a modal is not one of the
+		 * panels the pointer chooses between.
+		 */
+		g_wheel = down ? 1 : -1;
+		if (!v->sym_open &&
+		    hit_run(v, (g_mod_shift || g_mod_ctrl)
+			       ? (uint8_t)HIT_HWHEEL : (uint8_t)HIT_WHEEL))
+			return;
+
+		/*
 		 * The dialog first, wherever the pointer is.
 		 *
 		 * The rule below - the wheel turns whatever it is over - is
@@ -24275,14 +24385,35 @@ static void on_wheel(struct view *v, int k)
 			 * every other column narrower, so the panel takes the
 			 * modified wheel too.
 			 */
-			uint32_t *h = (v->show_list && g_my > list_top(v) &&
-				       g_my <= list_top(v) +
-					       (int)list_shown(v))
-				      ? &v->list_hoff :
-				      (g_decl_rows && g_my > decl_top() &&
-				       g_my < mark_row())
-				      ? &v->decl_hoff :
-				      (g_mx <= TREE_W) ? &v->tree_hoff : NULL;
+			uint32_t *h;
+
+			/*
+			 * THE TEXT PANE TAKES IT TOO, and it was the one pane
+			 * with anything to scroll across.
+			 *
+			 * This chain knew the marker list, the draft panel and
+			 * the tree, and answered NULL for the bytes pane -
+			 * which was right while that pane was a hex dump, since
+			 * a hex row is as wide as the pane by construction.
+			 * A line of source is not, and a minified script is one
+			 * line of two hundred thousand characters.
+			 *
+			 * Through txt_hscroll rather than by moving txt_col
+			 * here, so the wheel and the arrow keys cannot end up
+			 * with different ideas of where the text stops.
+			 */
+			if (text_pane(v) && g_mx > TREE_W &&
+			    g_my >= hex_top() && g_my <= hex_last()) {
+				txt_hscroll(v, down ? 4 : -4);
+				return;
+			}
+			h = (v->show_list && g_my > list_top(v) &&
+			     g_my <= list_top(v) + (int)list_shown(v))
+			    ? &v->list_hoff :
+			    (g_decl_rows && g_my > decl_top() &&
+			     g_my < mark_row())
+			    ? &v->decl_hoff :
+			    (g_mx <= TREE_W) ? &v->tree_hoff : NULL;
 
 			if (h) {
 				if (down)
@@ -24839,26 +24970,11 @@ case 'k': case K_UP:
 	 */
 	case K_LEFT:
 		if (text_pane(v))
-			v->txt_col = v->txt_col >= 8u ? v->txt_col - 8u : 0u;
+			txt_hscroll(v, -8);
 		break;
 	case K_RIGHT:
-		/*
-		 * AND IT STOPS WHERE THE TEXT DOES.
-		 *
-		 * Unbounded, this scrolled into blank space: past the longest
-		 * line on screen every row is empty, and a key that empties the
-		 * pane reads as a key that broke rather than as the end of the
-		 * line. txt_maxlen is what the last frame actually drew.
-		 */
-		if (text_pane(v)) {
-			int wide = g_cols - txt_x0();
-
-			if (wide < 1)
-				wide = 1;
-			if (v->txt_col + 8u + (uint32_t)wide <=
-			    v->txt_maxlen + 8u)
-				v->txt_col += 8u;
-		}
+		if (text_pane(v))
+			txt_hscroll(v, 8);
 		break;
 	default:
 		break;
