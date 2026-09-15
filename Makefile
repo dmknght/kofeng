@@ -1147,7 +1147,8 @@ KOFEVT_SRC := libkoforbit/kofevt/kofevt.c libkoforbit/kofevt/kofevtfmt.c \
 
 # The verdict cache. Orbit, not the engine, for the reason koffridge.h gives:
 # what an answer is keyed on and how long it stays good are a host's policy.
-KOFRIDGE_SRC := libkoforbit/koffridge/koffridge.c
+KOFRIDGE_SRC := libkoforbit/koffridge/koffridge.c \
+                libkoforbit/koffridge/fidset.c
 
 # The process record builder, shared by both collectors - see kofproc.h.
 KOFPROC_SRC := libkoforbit/kofproc/kofproc.c
@@ -1160,7 +1161,8 @@ KOFPROC_SRC := libkoforbit/kofproc/kofproc.c
 # over is.
 ANTARC_SRC := libkofantarc/aproc.c \
               libkofantarc/apagemap.c \
-              libkofantarc/afan.c
+              libkofantarc/afan.c \
+              libkofantarc/afid.c
 
 ifeq ($(NATIVE_OS),windows)
 ANTARC_INC :=
@@ -1870,6 +1872,17 @@ $(TEST)/asan_out_clip$(EXE): tests/unit/out_clip.c kofexamine/kofview.c \
                              $(ASAN_LIB) $(STAMP) | $(TEST)
 	@$(CC) $(CFLAGS) $(ASAN_FLAGS) tests/unit/out_clip.c \
 	       kofexamine/kofview.c $(ASAN_LIB) -o $@ $(LDFLAGS)
+
+# The clean-file set, which is its own source beside the fridge - see fidset.h.
+$(TEST)/unit_fidset$(EXE): tests/unit/fidset.c libkoforbit/koffridge/fidset.c \
+                           $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) tests/unit/fidset.c \
+	      libkoforbit/koffridge/fidset.c -o $@ $(LDFLAGS)
+
+$(TEST)/asan_fidset$(EXE): tests/unit/fidset.c libkoforbit/koffridge/fidset.c \
+                           $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) tests/unit/fidset.c \
+	       libkoforbit/koffridge/fidset.c -o $@ $(LDFLAGS)
 
 $(TEST)/unit_fridge$(EXE): tests/unit/fridge.c $(KOFRIDGE_SRC) $(LIB) $(STAMP) \
                            | $(TEST)

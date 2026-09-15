@@ -1233,6 +1233,36 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	if (opt->heur_off)
 		return;
 
+	/*
+	 * AN ELF THE MODEL WAS MEASURED ON, WHICH IS AN EXECUTABLE OR A SHARED
+	 * OBJECT AND NOT A RELOCATABLE ONE.
+	 *
+	 * Every weight in kofheur.c came from a population of 6523 malware and
+	 * 13638 clean ELF objects, and that population is programs. An ET_REL is
+	 * a different shape: no program headers, no entry point, sections that
+	 * the module loader relocates rather than maps. Asking the table about
+	 * one is asking it a question it was never measured against, and the
+	 * answer it gives is the one a machine sees most - every .ko under
+	 * /lib/modules came back "ELF-x64/Heur:Truncated".
+	 *
+	 * The bar is what makes that serious. 747 centinats was chosen because
+	 * no clean object in the measured corpus reached it; a population that
+	 * was not in the corpus has no such guarantee, and a false positive on
+	 * kernel modules is a false positive on the largest single group of ELF
+	 * files most Linux hosts have.
+	 *
+	 * ONLY THE SCORE STOPS. The parse still records every anomaly and an
+	 * examiner still prints them - what is withheld is a VERDICT from a
+	 * model that has no evidence about this kind of object.
+	 */
+	if (ctx->format == KOF_FMT_ELF) {
+		const struct kof_elf_info *ei = kof_elf(ctx);
+
+		if (!ei || (ei->e_type != KOF_ELF_EXEC &&
+			    ei->e_type != KOF_ELF_DYN))
+			return;
+	}
+
 	memset(&f, 0, sizeof f);
 	f.format       = ctx->format;
 	/*
@@ -1758,6 +1788,10 @@ struct walk {
 	int      aborted;
 	int      out_of_memory;
 	uint64_t objects;
+	/* Objects that reported something, or that the scan could not finish.
+	 * Read across one file by scan_file - see the note there on why a file
+	 * with either is never remembered. */
+	uint64_t found;
 
 	/* Set only on the producer of a parallel walk: where a regular file goes
 	 * instead of being scanned here. NULL in every single threaded walk, and
@@ -1972,6 +2006,17 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 		}
 
 		w->objects++;
+		/*
+		 * WHETHER THIS FILE PRODUCED ANYTHING, counted where the answer
+		 * is - see scan_file, which will not remember a file that did.
+		 *
+		 * `broken` counts too. An object the scan could not finish is
+		 * not a clean one: remembering it would turn a truncated read,
+		 * a budget that ran out or a parse that gave up into a
+		 * permanent verdict of "nothing here".
+		 */
+		if (res.n || res.broken)
+			w->found++;
 		{
 			kof_buf ob = kof_src_buf(src);
 
@@ -2104,15 +2149,47 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 static void scan_file(struct walk *w, const char *path)
 {
 	struct kof_objsrc *src;
+	uint64_t before;
 	int err = 0;
+
+	/*
+	 * ALREADY ANSWERED - asked here because here is where a file is about
+	 * to be opened, and the point of asking is not to open it.
+	 *
+	 * The engine does not know what answers. It calls out and is told yes
+	 * or no; the key, where it is kept and whether it can be trusted are
+	 * the caller's, for the reasons set out beside cache_seen in kofeng.h.
+	 */
+	if (w->opt->cache_seen &&
+	    w->opt->cache_seen(w->opt->cache_user, path)) {
+		w->sc->st.cached++;
+		return;
+	}
 
 	src = kof_src_file(path, &err);
 	if (!src) {
 		w->sc->st.unreadable++;
 		return;
 	}
+	before = w->found;
 	scan_tree(w, src, path);
 	kof_src_unref(src);
+
+	/*
+	 * KEPT ONLY WHEN NOTHING WAS FOUND, and that is the whole rule.
+	 *
+	 * Storing a file that HAD a finding would mean skipping it next time,
+	 * and skipping something already known to be bad is the one outcome a
+	 * cache must never produce. It has been produced here before: an
+	 * earlier version stored clean unconditionally, so a detection wrote
+	 * itself down as clean and every later run passed over it in silence.
+	 *
+	 * So a file with a finding is simply not remembered. It is scanned
+	 * again next time and reported in full, which is also what makes the
+	 * stored set a set - present or absent, no verdict to go stale.
+	 */
+	if (w->opt->cache_keep && w->found == before)
+		w->opt->cache_keep(w->opt->cache_user, path);
 }
 
 static void read_dir(struct walk *w, const char *dir, uint32_t depth)

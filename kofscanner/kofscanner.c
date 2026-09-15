@@ -54,6 +54,8 @@
 #include "kofwalk.h"
 #include "kofproc.h"
 #include "koffridge.h"
+#include "fidset.h"
+#include "afid.h"
 #include <kofmod/proc.h>
 
 /*
@@ -645,7 +647,16 @@ static void usage(const char *argv0)
 		"                  bytes alone - a first look at a machine somebody\n"
 		"                  else has been on. Caching WITHIN a run stays on\n"
 		"                  and has no flag: without it one sweep scans the\n"
-		"                  same ntdll.dll once per process\n"
+		"                  same ntdll.dll once per process.\n"
+		"                  USE IT ON A MACHINE YOU DO NOT TRUST. A cached\n"
+		"                  file is recognised by what the filesystem says\n"
+		"                  about it - where it is, how big, when written -\n"
+		"                  and every one of those is settable by whoever\n"
+		"                  already has rights there. A file patched in\n"
+		"                  place at the same length with its timestamps\n"
+		"                  put back has the same identity and is skipped.\n"
+		"                  That is sound while something is watching for\n"
+		"                  writes and not otherwise\n"
 		"  --max-depth N   directory depth limit\n"
 		"  --object-depth N  how deep to descend INSIDE a file: an\n"
 		"                  archive's entries, a dropper's payload. 0 is\n"
@@ -669,7 +680,12 @@ static void usage(const char *argv0)
 		"                  level of its own and never a family\n"
 		"  --jobs N        scan on N threads (default 1). The objects come\n"
 	    "                  back in whatever order the workers finish them,\n"
-	    "                  which is the one thing this changes besides speed\n"
+	    "                  which is the one thing this changes besides speed.\n"
+	    "                  A FILE SWEEP DOES NOT CACHE ON MORE THAN ONE\n"
+	    "                  THREAD: the clean set is not written for\n"
+	    "                  concurrent add, and a cache that lost entries\n"
+	    "                  under workers would be slower the more it was\n"
+	    "                  given\n"
 		"  --stats         report what the prefilter and the presence set earned\n"
 		"  --emu MODE      overrides what --heur chose: never interprets\n"
 	    "                  nothing, auto is what --heur 2 turns on, only\n"
@@ -778,10 +794,18 @@ static int heur_bad(const char *argv0, const char *v)
 struct procscan {
 	struct run       *r;
 	kof_scanner      *sc;
-	struct koffridge *fridge;
+	/*
+	 * THE SAME SET THE FILE SWEEP USES - see fidset.h.
+	 *
+	 * It was a koffridge here and nothing at all on the file path, so the
+	 * two sweeps cached by different rules with different failure modes and
+	 * only one of them was ever exercised. One mechanism now, asked through
+	 * the engine, so a fault in it is a fault in both and gets found.
+	 */
+	struct kof_fidset *fs;
 	struct kof_scan_option *opt;
 
-	uint64_t files_scanned, files_cached, files_recalled;
+	uint64_t files_scanned, files_cached;
 	uint64_t chunks, chunk_bytes;
 	/* Runs of a loaded module that differ from the file it was mapped
 	 * from - see wdiff.h. Its own line, because an unbacked allocation
@@ -791,175 +815,67 @@ struct procscan {
 
 /* One file behind a mapping: scan it only if this sweep has not already
  * answered for it. */
+
 /*
- * REPORT A FILE THIS RUN DID NOT SCAN, because a previous one did.
+ * THE TWO ANSWERS THE ENGINE ASKS FOR - see cache_seen in kofeng.h.
  *
- * IT SAYS WHERE THE ANSWER CAME FROM, and that is not decoration. The cache
- * keeps one name out of however many the scan produced, so this line is
- * SHORTER than the one a scan prints - and a reader who could not tell the two
- * apart would read the short one as "only one thing wrong with it". The tag
- * carries the count when there were more.
+ * This is the whole of what the engine knows about caching: two functions and
+ * an opaque pointer. It does not know the key is a file identity, that the
+ * identity comes from a stat, that the set lives in a file, or that anything
+ * called a fridge exists. All of that is a property of a MACHINE, and the
+ * engine is the part that is the same everywhere.
  *
- * It also has to do the bookkeeping on_object would have done, or the summary
- * disagrees with the lines above it: the file is counted, it gets an entry with
- * its verdict, and found_objects moves so that anything measuring a delta
- * across a scan still measures the right thing.
+ * An identity that cannot be established means no caching for that file - not a
+ * zeroed key. A key that could not be computed must not be invented: every
+ * unidentifiable file would share it, and one of them being called clean would
+ * speak for all of them.
  */
-static void report_cached(struct procscan *p, const char *path,
-			  const struct koffridge_verdict *v)
+static int fid_seen(void *user, const char *path)
 {
-	struct run *r = p->r;
-	struct fent *e;
-	char tag[64];
+	struct kof_fid id;
 
-	r->files_total++;
-
-	/*
-	 * A CACHED ANSWER PRINTS ON THE SAME RULE A FRESH ONE DOES.
-	 *
-	 * This used to count and print unconditionally, and the two verdicts
-	 * that reach here are not alike: findings are a detection, broken with
-	 * no finding is only "nothing further could be read". on_object shows
-	 * the second under -v and nowhere else, and does not move
-	 * found_objects for it. Printing it here regardless put rows in the
-	 * report that the same file, scanned rather than recalled, would never
-	 * have produced - so a warm cache grew the report instead of only
-	 * making it faster, and the detection count grew with it.
-	 */
-	if (v->findings)
-		r->found_objects++;
-
-	if (v->findings || r->verbose) {
-		progress_clear(r);
-
-		if (v->findings > 1u)
-			snprintf(tag, sizeof tag, "%s +%u more", v->name,
-				 v->findings - 1u);
-		else
-			snprintf(tag, sizeof tag, "%s", v->name);
-
-		printf("%s%-*s%s %s %s(cached)%s\n",
-		       col(r, level_col(v->level)), W_TAG, tag, col(r, C_RST),
-		       path, col(r, C_DIM), col(r, C_RST));
-	}
-
-	e = fmap_get(&r->files, path, strlen(path));
-	if (e) {
-		e->level    = (int)v->level;
-		e->broken   = v->broken;
-		e->examined = 1;
-		snprintf(e->name, sizeof e->name, "%s", v->name);
-	}
+	if (!user || !kofa_fid_of(path, &id))
+		return 0;
+	return kof_fidset_has((struct kof_fidset *)user, kof_fid_key(&id));
 }
 
+static void fid_keep(void *user, const char *path)
+{
+	struct kof_fid id;
+
+	if (!user || !kofa_fid_of(path, &id))
+		return;
+	(void)kof_fidset_add((struct kof_fidset *)user, kof_fid_key(&id));
+}
+
+/*
+ * ONE FILE BEHIND A MAPPING.
+ *
+ * WHAT THIS USED TO BE was a second implementation of the cache - identify,
+ * look up, decide, scan, store - written here because the engine had no way to
+ * ask. It has one now, and the whole of that logic is in scan_file where the
+ * walk already meets every file. So this is the engine's own path with the same
+ * two callbacks the file sweep uses, and there is no second copy left to drift.
+ *
+ * The counters still live here because they are the report's, not the engine's:
+ * `cached` comes back through kof_stats, and this only has to add it up.
+ */
 static void ps_file(struct procscan *p, const char *path)
 {
-	struct koffridge_fileid id;
-	struct koffridge_verdict v;
-	uint64_t before;
+	uint64_t before_cached = 0;
+	const struct kof_stats *st;
 
-	if (!path || !path[0])
+	if (!p || !path || !path[0])
 		return;
-	if (!koffridge_identify(path, &id)) {
-		/*
-		 * No identity, so no caching - see koffridge.h on why a key
-		 * that could not be established must not be invented. The file
-		 * is still scanned, it is simply scanned every time.
-		 */
-		(void)kof_scan_path(p->sc, path, p->opt, on_object, p->r);
-		p->files_scanned++;
-		return;
-	}
-	/*
-	 * A CACHED ANSWER IS ONLY A REASON TO SKIP WHEN IT IS CLEAN.
-	 *
-	 * The verdict used to be fetched and never looked at, so ANY hit meant
-	 * skip. Combined with the store below - which used to record clean
-	 * unconditionally - that made a persistent cache actively harmful: a
-	 * file found infected in one run was written down as clean, the cache
-	 * was saved at the end of that run, and every later run skipped it
-	 * without scanning or reporting. The detection silenced itself, and it
-	 * did it permanently and with no message.
-	 *
-	 * A non-clean verdict rescans rather than being re-reported from the
-	 * cache, which is what koffridge.h says a caller wanting the whole
-	 * finding list does: the table keeps one name, the scan produces all of
-	 * them, and infected files are rare enough that paying for the scan
-	 * once each costs nothing.
-	 */
-	if (koffridge_get(p->fridge, &id, sizeof id, &v)) {
-		if (v.findings == 0u && v.broken == 0u) {
-			p->files_cached++;
-			return;
-		}
-		/*
-		 * KNOWN BAD, AND SAID WITHOUT SCANNING IT AGAIN.
-		 *
-		 * This used to rescan, on the argument koffridge.h makes: the
-		 * table keeps ONE name and a scan produces the whole list, so
-		 * rescanning buys a better report for a file that is rare. That
-		 * argument is about report quality and it is still true - what
-		 * it got wrong is that it made the cache useless for exactly
-		 * the case a reader cares most about. A machine with forty
-		 * copies of one bad DLL mapped into two hundred processes
-		 * rescanned it two hundred times to print the same name.
-		 *
-		 * So it is reported from the cache, and the report SAYS SO -
-		 * see report_cached. A reader who wants the full finding list
-		 * of a known file scans that file directly, which is a
-		 * deliberate act rather than something paid for on every sweep.
-		 */
-		report_cached(p, path, &v);
-		p->files_recalled++;
-		return;
-	}
-
-	before = p->r->found_objects;
-	p->r->last_level    = -1;
-	p->r->last_broken   = 0;
-	p->r->last_findings = 0;
-	p->r->last_name[0]  = '\0';
+	st = kof_scanner_stats(p->sc);
+	if (st)
+		before_cached = st->cached;
 	(void)kof_scan_path(p->sc, path, p->opt, on_object, p->r);
-	p->files_scanned++;
-
-	/*
-	 * WHAT IT WAS, NOT WHETHER IT WAS CLEAN.
-	 *
-	 * kof_scan_path reports through on_object and returns nothing about
-	 * what it found, so the fields that callback fills are what make this
-	 * knowable at all - see run.last_level.
-	 *
-	 * THE ORDER THIS ARRIVED IN IS WORTH KEEPING. It stored clean
-	 * unconditionally, which silenced detections through a persistent
-	 * cache. The fix was to store nothing for a file that had a finding -
-	 * safe, and it made the cache useless for known-bad files. Storing the
-	 * verdict itself is what both of those were reaching for: a clean file
-	 * is skipped, a bad one is reported without being scanned again, and
-	 * neither answer is invented.
-	 */
-	if (p->r->found_objects == before && !p->r->last_broken) {
-		(void)koffridge_put(p->fridge, &id, sizeof id, NULL);
-	} else {
-		struct kof_result res;
-
-		memset(&res, 0, sizeof res);
-		/*
-		 * The COUNT the scan produced, beside the ONE name kept. A
-		 * reader of the cached answer can then see that there were
-		 * more, which is the difference between a short report and a
-		 * report that pretends to be complete.
-		 */
-		res.n      = p->r->last_findings;
-		res.broken = p->r->last_broken;
-		if (p->r->last_level >= 0) {
-			if (!res.n)
-				res.n = 1;
-			res.v[0].level = (uint32_t)p->r->last_level;
-			snprintf(res.v[0].name, sizeof res.v[0].name, "%s",
-				 p->r->last_name);
-		}
-		(void)koffridge_put(p->fridge, &id, sizeof id, &res);
-	}
+	st = kof_scanner_stats(p->sc);
+	if (st && st->cached != before_cached)
+		p->files_cached++;
+	else
+		p->files_scanned++;
 }
 
 /* Returns 0, or a KOF_ERR_*. */
@@ -985,16 +901,25 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 	p.r = r;
 	p.sc = sc;
 	p.opt = opt;
-	p.fridge = koffridge_open(4096, db_stamp);
-	if (!p.fridge)
-		return KOF_ERR_OPEN;
-
+	/*
+	 * NO CACHE IS A STATE, NOT A FAILURE. The sweep runs either way; it
+	 * simply opens every file. Returning an error because a cache could not
+	 * be opened would make a missing cache directory stop a scan.
+	 */
 	if (cache_path) {
-		const char *why = "";
-		uint32_t n = koffridge_load(p.fridge, cache_path, &why);
+		p.fs = kof_fidset_open(db_stamp);
+		if (p.fs) {
+			struct kof_fidset_stat fst;
 
-		fprintf(stderr, "cache: %u entr%s loaded (%s)\n",
-			n, n == 1 ? "y" : "ies", why);
+			(void)kof_fidset_load(p.fs, cache_path);
+			kof_fidset_stats(p.fs, &fst);
+			fprintf(stderr, "cache: %llu entr%s loaded\n",
+				(unsigned long long)fst.mapped,
+				fst.mapped == 1u ? "y" : "ies");
+			opt->cache_seen = fid_seen;
+			opt->cache_keep = fid_keep;
+			opt->cache_user = p.fs;
+		}
 	}
 
 	memset(&wo, 0, sizeof wo);
@@ -1004,7 +929,12 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 
 	w = kof_walk_open(&wo, &err);
 	if (!w) {
-		koffridge_close(p.fridge);
+		/* The option still points at what is about to be freed, and it
+		 * is the caller's struct - it outlives this function. */
+		opt->cache_seen = NULL;
+		opt->cache_keep = NULL;
+		opt->cache_user = NULL;
+		kof_fidset_close(p.fs);
 		fprintf(stderr, "cannot walk the process table (%d)\n", err);
 		return KOF_ERR_OPEN;
 	}
@@ -1134,7 +1064,7 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 		(void)w->describe(w->self, note, sizeof note);
 	w->close(w->self);
 
-	if (cache_path && !koffridge_save(p.fridge, cache_path))
+	if (p.fs && cache_path && !kof_fidset_save(p.fs, cache_path))
 		fprintf(stderr, "cache: could not be written to %s\n",
 			cache_path);
 
@@ -1155,14 +1085,10 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 	 * see that some of this run's verdicts were remembered rather than
 	 * reached.
 	 */
-	if (p.files_recalled)
-		printf(", %llu recalled as known bad",
-		       (unsigned long long)p.files_recalled);
-	if (p.files_scanned + p.files_cached + p.files_recalled)
+	if (p.files_scanned + p.files_cached)
 		printf("  (%.1f%% saved)",
-		       (double)(p.files_cached + p.files_recalled) * 100.0 /
-		       (double)(p.files_scanned + p.files_cached +
-				p.files_recalled));
+		       (double)p.files_cached * 100.0 /
+		       (double)(p.files_scanned + p.files_cached));
 	printf("\n");
 	printf("unbacked  %llu chunk(s), %.2f MB\n",
 	       (unsigned long long)p.chunks,
@@ -1188,10 +1114,31 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 	 */
 	if (note[0])
 		printf("%s\n", note);
-	koffridge_describe(p.fridge, line, sizeof line);
-	printf("%s\n", line);
+	if (p.fs) {
+		struct kof_fidset_stat fst;
 
-	koffridge_close(p.fridge);
+		kof_fidset_stats(p.fs, &fst);
+		snprintf(line, sizeof line,
+			 "cache     %llu known, %llu added, %llu hit, %llu miss",
+			 (unsigned long long)fst.mapped,
+			 (unsigned long long)fst.added,
+			 (unsigned long long)fst.hit,
+			 (unsigned long long)fst.miss);
+		printf("%s\n", line);
+	}
+
+	/*
+	 * CLEARED BEFORE THE SET IS FREED, and `opt` is the CALLER'S - it
+	 * outlives this function and is reused by whatever runs next. Leaving
+	 * the pointers behind would hand a freed set to the following scan,
+	 * which is the one shape of use-after-free that would not crash: the
+	 * lookup would read whatever the allocator put there and answer yes or
+	 * no from it.
+	 */
+	opt->cache_seen = NULL;
+	opt->cache_keep = NULL;
+	opt->cache_user = NULL;
+	kof_fidset_close(p.fs);
 	return 0;
 }
 
@@ -1561,10 +1508,60 @@ int main(int argc, char **argv)
 		rc = scan_procs(&r, sc, &opt, dv.build, cache_path,
 				pids, n_pids,
 				!opt.heur_off && opt.heur_level >= 2);
-	} else if (jobs > 1)
-		rc = kof_scan_path_mt(scs, jobs, target, &opt, on_object, &r);
-	else
-		rc = kof_scan_path(sc, target, &opt, on_object, &r);
+	} else {
+		/*
+		 * THE SAME CACHE THE PROCESS SWEEP HAS, on the path that meets
+		 * far more files.
+		 *
+		 * It was only ever wired into --scan-procs, and the help text
+		 * describes it as a property of the scanner - so a directory
+		 * sweep re-read the whole database against every unchanged file
+		 * on every run, while the help said it would not.
+		 *
+		 * ONE JOB ONLY, FOR NOW. The set is not written for concurrent
+		 * add, and a cache that loses entries under --jobs would be a
+		 * cache that is slower the more workers it is given - the exact
+		 * opposite of what asking for workers means. Making it
+		 * thread-safe is a measurement, not a guess: it needs to be
+		 * shown that the contention costs less than the sweep it saves.
+		 */
+		struct kof_fidset *fs = NULL;
+		struct kof_db_version fdv;
+
+		memset(&fdv, 0, sizeof fdv);
+		(void)kof_engine_db_version(eng, &fdv);
+		if (!no_cache && jobs <= 1) {
+			if (!cache_path &&
+			    koffridge_default_path(cache_buf, sizeof cache_buf))
+				cache_path = cache_buf;
+			if (cache_path) {
+				fs = kof_fidset_open(fdv.build);
+				if (fs) {
+					(void)kof_fidset_load(fs, cache_path);
+					opt.cache_seen = fid_seen;
+					opt.cache_keep = fid_keep;
+					opt.cache_user = fs;
+				}
+			}
+		}
+		if (jobs > 1)
+			rc = kof_scan_path_mt(scs, jobs, target, &opt,
+					      on_object, &r);
+		else
+			rc = kof_scan_path(sc, target, &opt, on_object, &r);
+		if (fs) {
+			if (!kof_fidset_save(fs, cache_path))
+				fprintf(stderr,
+					"cache: could not be written to %s\n",
+					cache_path);
+			/* Before the free, and for the same reason scan_procs
+			 * does it: `opt` lives past this block. */
+			opt.cache_seen = NULL;
+			opt.cache_keep = NULL;
+			opt.cache_user = NULL;
+			kof_fidset_close(fs);
+		}
+	}
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 	progress_clear(&r);
 	if (rc < 0)
@@ -1594,6 +1591,7 @@ int main(int argc, char **argv)
 				sum.objects        += one->objects;
 				sum.object_bytes   += one->object_bytes;
 				sum.unreadable     += one->unreadable;
+				sum.cached         += one->cached;
 				sum.considered     += one->considered;
 				sum.ran            += one->ran;
 				sum.by_target      += one->by_target;
@@ -1844,6 +1842,15 @@ int main(int argc, char **argv)
 	if (unreadable)
 		printf("skipped   %llu object(s) that could not be read\n",
 		       (unsigned long long)unreadable);
+	/*
+	 * SAID OUT LOUD, because a sweep that opened a tenth of what it was
+	 * pointed at and printed nothing about the rest reads as a sweep of a
+	 * tree with nothing in it. It is also the number that says whether the
+	 * cache is earning anything.
+	 */
+	if (st && st->cached)
+		printf("cached    %llu file(s) unchanged since the last scan\n",
+		       (unsigned long long)st->cached);
 	if (r.dropped)
 		printf("note      %llu finding(s) over the per-object cap\n",
 		       (unsigned long long)r.dropped);

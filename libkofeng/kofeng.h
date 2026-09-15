@@ -439,6 +439,14 @@ struct kof_stats {
 	 * scan that found nothing there. */
 	uint64_t unreadable;
 
+	/*
+	 * Files the walk did not open because the caller said it already had an
+	 * answer - see cache_seen. Counted for the same reason `unreadable` is:
+	 * a scan that quietly visits a tenth of what it was pointed at reads as
+	 * a scan of a tree that has nothing in it.
+	 */
+	uint64_t cached;
+
 	uint64_t considered, ran;
 	uint64_t by_target, by_size, by_arch, by_subtype, by_region;
 
@@ -1015,6 +1023,40 @@ struct kof_scan_option {
 	uint64_t max_produced_bytes;
 	uint64_t max_object_bytes;
 	uint32_t max_children;     /* 0 -> a built-in ceiling applies */
+
+	/*
+	 * ALREADY ANSWERED, AND THE ENGINE NEVER LEARNS WHAT ANSWERED IT.
+	 *
+	 * A sweep of a machine meets the same files every time, and reading the
+	 * whole database against a file that has not changed since the last run
+	 * is the work a cache exists to avoid. The walk that meets those files
+	 * is in here - see kof_scan_path, and the note there on why a directory
+	 * and an archive are the same shape - so the question has to be asked
+	 * from in here too.
+	 *
+	 * WHAT MUST NOT BE IN HERE IS THE CACHE. Two reasons, and they point
+	 * the same way:
+	 *
+	 *   - THE LAYERING. libkoforbit may know this library's types; this
+	 *     library must never know orbit's. An identity is whatever the
+	 *     PLATFORM says about a file, and a platform is the thing libkofeng
+	 *     is deliberately free of - it takes bytes and says what they are.
+	 *
+	 *   - THE TRUST. Whoever can write a cache decides what this scanner
+	 *     calls clean. That is a policy about a machine, and it belongs to
+	 *     the tool that was configured for that machine rather than to an
+	 *     engine that is the same everywhere.
+	 *
+	 * So the engine asks two questions through pointers and is told nothing
+	 * else: `seen` before opening a file, `keep` after finding it clean.
+	 * The key is opaque bytes; the engine does not compute it, read it, or
+	 * know what it is made of.
+	 *
+	 * Both NULL - the default - and nothing is cached and nothing is asked.
+	 */
+	int  (*cache_seen)(void *user, const char *path);
+	void (*cache_keep)(void *user, const char *path);
+	void  *cache_user;
 };
 
 /*

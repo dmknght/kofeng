@@ -187,23 +187,8 @@ enum kof_emu_unp_why kof_emu_unp_gate(const struct kof_obj_ctx *ctx,
 	 * Broken first, because it is the stronger statement. A file whose
 	 * header cannot be loaded has already defeated every module that needs
 	 * structure, and the density test would not even find its code.
-	 *
-	 * AND ONLY FOR SOMETHING THAT WAS SUPPOSED TO LOAD. Every anomaly in
-	 * `unloadable` says the same thing - no PT_LOAD, an entry point that is
-	 * not mapped, an entry point that is not executable - and none of that
-	 * is wrong with an ET_REL. A kernel module HAS no load segments and no
-	 * entry point: it is an object file, and the thing that loads it is the
-	 * module loader, which relocates it first. So the whole set fired on
-	 * every .ko on the machine and each one was reported as a possible
-	 * packer.
-	 *
-	 * elf.h already says this about two of the bits - NO_LOAD_SEGMENT is
-	 * marked "ET_EXEC and ET_DYN only" and ENTRY_ZERO "ET_EXEC only" - and
-	 * the note beside the subtype list says a .ko is exactly the ET_REL
-	 * case. The gate was reading them anyway.
 	 */
-	if ((info->e_type == KOF_ELF_EXEC || info->e_type == KOF_ELF_DYN) &&
-	    (info->anomalies & unloadable))
+	if (info->anomalies & unloadable)
 		return KOF_EMU_UNP_WHY_BROKEN;
 
 	memset(hist, 0, sizeof hist);
