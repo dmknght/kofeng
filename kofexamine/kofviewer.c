@@ -2183,6 +2183,15 @@ struct view {
 	 * reads as the key not working rather than as the end of the line.
 	 */
 	uint32_t    txt_maxlen;
+	/*
+	 * THE READER ASKED FOR BYTES, on something this would otherwise show
+	 * as text.
+	 *
+	 * Sticky rather than per object: it is a preference about how to read,
+	 * not a fact about a file, and a setting that resets when you step to
+	 * the next node is one you set again on every node.
+	 */
+	uint8_t     hex_forced;
 };
 
 static struct object *cur_obj(struct view *v)
@@ -6523,12 +6532,43 @@ static uint64_t txt_home_end(struct view *v)
 	return txt_max_top(v, b, n, hex_last() - hex_top() + 1);
 }
 
+/*
+ * CAN THIS OBJECT BE READ BOTH WAYS - which is a property of the FORMAT and
+ * not of what the pane is doing right now.
+ *
+ * Asked by the menu item, by the chord and by nothing else, so the two ways in
+ * cannot disagree about when the choice exists. Not text_pane: that answers
+ * "which reading am I getting", and if the item were gated on it there would be
+ * no way back once it had been used.
+ */
+static int view_can_text(struct view *v)
+{
+	const struct object *ob = cur_obj(v);
+
+	return ob && ob->fmt && !sym_view(v) && !evt_live(v) &&
+	       kv_cap(ob->ctx.format, KV_CAP_TEXT);
+}
+
+/*
+ * Swap the reading. rgn_at is left alone on purpose: it is a BYTE OFFSET in
+ * both layouts - that is the whole reason it is one field - so where the pane
+ * is looking survives the change, and only the sideways origin, which means
+ * nothing to a hex dump, goes back to zero.
+ */
+static void view_toggle_text(struct view *v)
+{
+	if (!view_can_text(v))
+		return;
+	v->hex_forced = !v->hex_forced;
+	v->txt_col = 0;
+}
+
 /* Non-zero when the pane in hand is showing text rather than a hex dump. */
 static int text_pane(struct view *v)
 {
 	struct object *ob = cur_obj(v);
 
-	if (!ob || sym_view(v) || evt_live(v))
+	if (!ob || sym_view(v) || evt_live(v) || v->hex_forced)
 		return 0;
 	return ob->fmt && kv_cap(ob->ctx.format, KV_CAP_TEXT);
 }
@@ -12190,6 +12230,15 @@ enum menu_action {
 	M_DECL_HEX,
 	M_DISASM,
 	/*
+	 * READ THESE BYTES THE OTHER WAY - text, or a hex dump.
+	 *
+	 * Offered only where both readings mean something, which is a script or
+	 * a text file: a hex dump of a php shell is unreadable and the text of
+	 * an ELF is a column of dots. One item whose word flips, because it is
+	 * one question - see the table.
+	 */
+	M_VIEW_HEX,
+	/*
 	 * The selected bytes, put into the Decoder's input field.
 	 *
 	 * On the bytes and not the offset column: it is a question about
@@ -12287,7 +12336,15 @@ static const struct {
 	 * exists to move to - which is the case it earns its place on.
 	 */
 	{ "View disassembly",     1, 2 },
-	{ "Decode selection", 1 | 4, 2 },
+	/*
+	 * THE LABEL FLIPS - see cm_label. One item, because it is one question
+	 * asked from either side: a script can be read as text or as bytes, and
+	 * whichever it is showing, the item offers the other. Two items, one of
+	 * them always greyed, would be a menu describing a mode rather than
+	 * offering a change.
+	 */
+	{ "View hex",         1 | 2, 2 },
+	{ "Decode string",    1 | 4, 2 },
 	{ "Go to",                3, 3 },
 	/*
 	 * Offered in the panel too: looking at an instruction and wanting to
@@ -12364,6 +12421,14 @@ static int menu_shown(struct view *v, int a)
 	 */
 	if (a == M_DISASM && !obj_maybe_code(cur_obj(v)))
 		return 0;
+	/*
+	 * BOTH READINGS HAVE TO MEAN SOMETHING, and that is a property of the
+	 * FORMAT rather than of what the pane is doing right now - otherwise
+	 * the item would vanish the moment it was used and there would be no
+	 * way back.
+	 */
+	if (a == M_VIEW_HEX && !view_can_text(v))
+		return 0;
 	return (menu_item[a].ctx & v->menu_ctx) != 0;
 }
 
@@ -12388,6 +12453,8 @@ static int menu_enabled(struct view *v, int a)
 		 */
 		return v->dis_open && v->dis_lines > 0 &&
 		       (v->dis_have || dis_hex_sel(v));
+	if (a == M_VIEW_HEX)
+		return 1;       /* nothing to select first: it is a reading */
 	if (a == M_DECODE)
 		/* Bytes to put in the field is the whole requirement. */
 		return v->sel_a != KOF_BROKEN && v->sel_b != KOF_BROKEN;
@@ -12502,7 +12569,12 @@ static int cm_shown(void *ud, int i)   { return menu_shown((struct view *)ud, i)
 static int cm_enabled(void *ud, int i) { return menu_enabled((struct view *)ud, i); }
 static const char *cm_label(void *ud, int i)
 {
-	(void)ud;
+	/* The one item whose word depends on what the pane is doing: it always
+	 * names the reading you are NOT getting, which is the one the click
+	 * would give you. */
+	if (i == M_VIEW_HEX)
+		return text_pane((struct view *)ud) ? "View hex"
+						    : "View script";
 	return menu_item[i].label;
 }
 
@@ -13397,6 +13469,11 @@ static void menu_run(struct view *v, int a)
 		return;
 	if (a == M_COPY_OFF_HEX || a == M_COPY_OFF_DEC) {
 		copy_offset(v, a == M_COPY_OFF_HEX);
+		v->menu_open = 0;
+		return;
+	}
+	if (a == M_VIEW_HEX) {
+		view_toggle_text(v);
 		v->menu_open = 0;
 		return;
 	}
@@ -19301,6 +19378,15 @@ static void bar_run(struct view *v, int i)
 enum key {
 	K_NONE = 0, K_UP = 256, K_DOWN, K_LEFT, K_RIGHT, K_PGUP, K_PGDN,
 	K_HOME, K_END,
+	/*
+	 * CTRL+SPACE, which a terminal sends as a NUL byte.
+	 *
+	 * Named up here rather than passed through as 0, because 0 is this
+	 * reader's "no key" - returning the byte closed the program on a chord
+	 * nobody had bound. The two meanings needed separating before the key
+	 * could be given a job.
+	 */
+	K_CTRL_SPACE,
 	/* Not a key: the terminal changed size while nothing was being typed,
 	 * and the loop has to be told so it repaints. */
 	K_RESIZE,
@@ -19354,10 +19440,10 @@ enum kv_nav {
 static enum kv_nav kv_nav_key(int key)
 {
 	switch (key) {
-	case K_UP:    case 'k': return KV_NAV_PREV;
-	case K_DOWN:  case 'j': return KV_NAV_NEXT;
-	case K_RIGHT: case 'l': return KV_NAV_IN;
-	case K_LEFT:  case 'h': return KV_NAV_OUT;
+	case K_UP:    return KV_NAV_PREV;
+	case K_DOWN:  return KV_NAV_NEXT;
+	case K_RIGHT: return KV_NAV_IN;
+	case K_LEFT:  return KV_NAV_OUT;
 	case '\r': case '\n':   return KV_NAV_TAKE;
 	case 27:                return KV_NAV_DISMISS;
 	default:                return KV_NAV_NONE;
@@ -19589,13 +19675,11 @@ static int read_key(void)
 			 * chord nobody had bound. A stray Ctrl+Space over a
 			 * draft that had not been generated lost the draft.
 			 *
-			 * Nothing here wants the key, so it is dropped rather
-			 * than given a value: inventing one would put it in the
-			 * same namespace as every real binding, and the next
-			 * key added there would inherit this.
+			 * So it is given a name of its own, above the byte
+			 * values, and the sentinel keeps 0 to itself.
 			 */
 			if (c == 0)
-				continue;
+				return K_CTRL_SPACE;
 			break;
 		}
 		if (n < 0 && errno == EINTR)
@@ -23584,7 +23668,9 @@ static int handle_symd_key(struct view *v, int k)
 		int pg = symd_rows() > 1 ? symd_rows() - 1 : 1;
 
 		switch (k) {
-		case 27: case 'q': case 'Q':
+		/* Escape and the close button, and no letter - see the note on
+		 * bare keys in handle(). */
+		case 27:
 			dlg_close(v);
 			break;
 		case '\t':
@@ -23806,7 +23892,6 @@ static int handle_prop_key(struct view *v, int k)
 			dlg_copy(v);
 			return 1;
 		case 27:
-		case 'q':
 		case '\r':
 		case '\n':
 			v->prop_open = 0;
@@ -24742,7 +24827,6 @@ static int handle(struct view *v, int k)
 		case 27:                /* Esc */
 		case '\r':
 		case '\n':
-		case 'q':
 			v->help_open = 0;
 			break;
 		case K_UP:
@@ -24873,16 +24957,15 @@ static int handle(struct view *v, int k)
 		say_note(&v->ed, "No file picker - pass the file on the "
 			    "command line");
 		break;
-	case 'q':
-		if (v->show_list) {
-			v->show_list = 0;
-			break;
-		}
-		return 0;
-	case 'm':
-		v->show_list = !v->show_list && cur_obj(v)->n_touch;
-		v->list_depth = 0;
-		v->list_filter = 0;
+	/*
+	 * READ IT THE OTHER WAY - the same thing the context menu offers.
+	 *
+	 * Ctrl+Space because it is free, it is not a letter, and a terminal
+	 * gives it to us unaltered. See K_CTRL_SPACE for why it took until now
+	 * to be usable.
+	 */
+	case K_CTRL_SPACE:
+		view_toggle_text(v);
 		break;
 	case '\r': case '\n':
 		if (v->menu_open) {
@@ -24899,13 +24982,16 @@ static int handle(struct view *v, int k)
 		v->show_list = 0;
 		v->list_depth = 0;
 		break;
-	case '\t':
-		v->pane = (v->pane + 1) % 3;
-		break;
+	/*
+	 * TAB IS A CHARACTER TOO, and it went with the letters.
+	 *
+	 * It moved the focus between the three panes, from before a click did.
+	 * A click does now - see the note in click() on the pane a press
+	 * selects - so the keyboard-only route it was is a route nobody takes,
+	 * and a viewer that swallows Tab cannot have a field in it that wants
+	 * one. Shift+Tab goes with it: half a pair is worse than neither.
+	 */
 	case K_BACKTAB:
-		/* + 2 rather than - 1: pane is an int, and C's modulo of a
-		 * negative one is negative. */
-		v->pane = (v->pane + 2) % 3;
 		break;
 	case K_RESIZE:
 		break;                  /* the loop redraws after every key */
@@ -24944,16 +25030,27 @@ case K_RELEASE:
 case K_WHEEL_DOWN:
 		on_wheel(v, k);
 		break;
-case 'j': case K_DOWN:
+	/*
+	 * NO BARE LETTERS, and no bare space or tab.
+	 *
+	 * j k g G b m q, space and tab were all bound here - vi's keys plus a
+	 * few - from before this had a mouse, a menu bar or a text pane. Every
+	 * one of them is a character somebody may want to TYPE, and a viewer
+	 * that acts on a letter is one you cannot put a text field in without
+	 * first remembering which letters are safe. The arrows, the page keys,
+	 * Home, End, Escape and the Ctrl chords cover all of it and none of
+	 * them is a character.
+	 */
+	case K_DOWN:
 		on_cursor_down(v);
 		break;
-case 'k': case K_UP:
+	case K_UP:
 		on_cursor_up(v);
 		break;
-	case ' ': case K_PGDN: hex_step(v,  page); break;
-	case 'b': case K_PGUP: hex_step(v, -page); break;
-	case 'g': case K_HOME: v->rgn_at = 0; break;
-	case 'G': case K_END:
+	case K_PGDN: hex_step(v,  page); break;
+	case K_PGUP: hex_step(v, -page); break;
+	case K_HOME: v->rgn_at = 0; break;
+	case K_END:
 		/* The end means the same thing in both layouts and is found two
 		 * different ways - hex_max counts rows of `per` bytes, which a
 		 * line is not. Both answer in one step rather than walking. */
