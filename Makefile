@@ -1088,8 +1088,15 @@ SCANNER_SRC := kofscanner/kofscanner.c
 # un-maps a PE - and the archives are linked by tools that have no engine in
 # them. Compiled into the scanner instead, where the engine already is.
 ifeq ($(NATIVE_OS),windows)
+#
+# wfid.c is the Windows half of kof_fid_of, whose Linux half rides in
+# $(ANTARC_SRC) - one name, one definition per host, the way the walk already
+# works. Without it the scanner referenced a symbol only libkofantarc defined
+# and this build did not get as far as the link: kofscanner.c included afid.h,
+# which is not on the Windows include path at all.
 SCANNER_EXTRA = libkofgrille/wwalk.c libkofgrille/wdiff.c libkofgrille/wproc.c \
                 libkofgrille/wcmdline.c libkofgrille/wtext.c \
+                libkofgrille/wfid.c \
                 $(KOFPROC_SRC) $(KOFRIDGE_SRC) $(KOFEVT_SRC)
 #
 # -Ilibkofeng IS IN THIS LIST AND NOT LEFT TO $(SDK)/include.
@@ -1704,7 +1711,16 @@ fixtures: | $(TEST)
 #
 # TO RUN IT: add build/test to Defender's exclusions and take this out of the
 # list. The test is not broken and it passes on Linux, where nothing removes it.
-UNIT_SKIP_WINDOWS := antarc_fan antarc_walk msf_xor
+#
+# ko_anomalies IS SKIPPED FOR A DIFFERENT REASON FROM THE THREE ABOVE, and it
+# is the ordinary one: there is nothing here for it to measure. It walks
+# /lib/modules and reports which anomalies the ET_REL objects on THIS machine
+# trip, so on Windows it would have no population to look at even if it built -
+# and it does not build, because lstat is not a function mingw declares.
+#
+# It is not a test that could be made portable. A kernel module is a Linux
+# object and the false positive it guards against is a Linux one.
+UNIT_SKIP_WINDOWS := antarc_fan antarc_walk msf_xor ko_anomalies
 UNIT_SKIP_POSIX   := hostile_mem reg_event
 
 ifeq ($(NATIVE_OS),windows)

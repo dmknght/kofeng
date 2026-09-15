@@ -52,7 +52,7 @@ static void from_stat(const struct stat *st, struct kof_fid *out)
 		       (uint64_t)st->st_mtim.tv_nsec;
 }
 
-int kofa_fid_of(const char *path, struct kof_fid *out)
+int kof_fid_of(const char *path, struct kof_fid *out)
 {
 	struct stat st;
 

@@ -55,7 +55,7 @@
 #include "kofproc.h"
 #include "koffridge.h"
 #include "fidset.h"
-#include "afid.h"
+
 #include <kofmod/proc.h>
 
 /*
@@ -834,7 +834,7 @@ static int fid_seen(void *user, const char *path)
 {
 	struct kof_fid id;
 
-	if (!user || !kofa_fid_of(path, &id))
+	if (!user || !kof_fid_of(path, &id))
 		return 0;
 	return kof_fidset_has((struct kof_fidset *)user, kof_fid_key(&id));
 }
@@ -843,7 +843,7 @@ static void fid_keep(void *user, const char *path)
 {
 	struct kof_fid id;
 
-	if (!user || !kofa_fid_of(path, &id))
+	if (!user || !kof_fid_of(path, &id))
 		return;
 	(void)kof_fidset_add((struct kof_fidset *)user, kof_fid_key(&id));
 }
@@ -1530,6 +1530,20 @@ int main(int argc, char **argv)
 
 		memset(&fdv, 0, sizeof fdv);
 		(void)kof_engine_db_version(eng, &fdv);
+		/*
+		 * AND IT SAYS SO, because the alternative is a silent one.
+		 *
+		 * --jobs turns the persistent cache off for the reason above,
+		 * and without a word a reader sees a second run take as long
+		 * as the first and has nothing to connect it to. The sweep
+		 * already prints exactly this sentence when --jobs meets
+		 * --scan-procs; a flag that quietly disables another flag is
+		 * the kind of thing this cache has been burned by before.
+		 */
+		if (!no_cache && jobs > 1)
+			fprintf(stderr, "%s: --jobs turns the between-run "
+				"cache off; it is not written for concurrent "
+				"add\n", argv[0]);
 		if (!no_cache && jobs <= 1) {
 			if (!cache_path &&
 			    koffridge_default_path(cache_buf, sizeof cache_buf))

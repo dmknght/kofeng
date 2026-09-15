@@ -26,18 +26,17 @@
 #include "../libkoforbit/koffridge/fidset.h"
 
 /*
- * Fill `out` with the identity of the file at `path`. Non-zero on success.
+ * kof_fid_of ITSELF IS DECLARED IN fidset.h, not here.
  *
- * ZERO ON FAILURE, AND A CALLER THAT GETS ZERO MUST NOT CACHE. A key that could
- * not be established must not be invented: a zeroed struct is a perfectly good
- * key that every unidentifiable file would share, and one of them being called
- * clean would speak for all of them.
+ * It is one name with two definitions - this file's and libkofgrille/wfid.c's -
+ * so it is declared once beside the struct it fills, the way kof_walk_open is.
+ * A caller includes fidset.h and calls the name; it never includes this header
+ * to reach it and never learns which platform answered.
  *
  * NANOSECONDS, not seconds. Two writes inside the same second are two different
  * contents, and a one-second identity cannot tell them apart - which is a
  * window an attacker chooses rather than one they have to wait for.
  */
-int kofa_fid_of(const char *path, struct kof_fid *out);
 
 /* The same for a file already open, which is what a scanner holds by the time
  * it wants to ask. Saves a second path lookup and closes the window between

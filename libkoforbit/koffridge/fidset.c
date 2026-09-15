@@ -226,6 +226,29 @@ struct kof_fidset *kof_fidset_open(uint64_t db_stamp)
 	return s;
 }
 
+/*
+ * Move `tmp` onto `path`, REPLACING whatever is there. Non-zero on success.
+ *
+ * WHY NOT rename(). POSIX rename replaces the destination atomically and this
+ * file used it on both platforms. Measured on Windows 11 ARM64:
+ *
+ *     rename(tmp, path) with path present   -1, errno 17 EEXIST
+ *
+ * ISO C leaves the case undefined and the Microsoft runtime refuses it. So the
+ * FIRST save of a cache worked, every save after it failed, and the failure
+ * was silent from the outside - the set simply never grew past its first run.
+ * The unit test caught it as three failures in a row and the middle one names
+ * the symptom exactly: "the merge lost or duplicated keys".
+ */
+static int replace_file(const char *tmp, const char *path)
+{
+#ifdef _WIN32
+	return MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+	return rename(tmp, path) == 0;
+#endif
+}
+
 static void unmap(struct kof_fidset *s)
 {
 #ifndef _WIN32
@@ -538,11 +561,36 @@ int kof_fidset_save(struct kof_fidset *s, const char *path)
 	 * RENAMED INTO PLACE, so a reader sees the whole of the old file or the
 	 * whole of the new one. A half written cache that still parses is the
 	 * worst outcome available here - it would answer, and be wrong.
+	 *
+	 * THE MAPPING GOES FIRST, AND ON WINDOWS THAT IS NOT TIDINESS.
+	 *
+	 * Measured on Windows 11 ARM64, replacing a file this process still has
+	 * mapped - opened with FILE_SHARE_DELETE, which is supposed to allow
+	 * exactly this:
+	 *
+	 *     MoveFileEx(MOVEFILE_REPLACE_EXISTING)   0, error 5 ACCESS_DENIED
+	 *
+	 * The share mode governs the FILE; an open section object is a separate
+	 * reference and the replace is refused while one exists. So the old
+	 * mapping is released before the new file takes its place, and the set
+	 * re-reads it afterwards - which also leaves `add` merged into `key`
+	 * rather than counted twice by a later save.
+	 *
+	 * A failed re-map is not a failed save. The file on disk is correct and
+	 * complete; this set simply has nothing mapped, which fidset.h already
+	 * defines as "every lookup will miss".
 	 */
-	if (rename(tmp, path) != 0) {
+	unmap(s);
+	if (!replace_file(tmp, path)) {
 		remove(tmp);
+		(void)kof_fidset_load(s, path);   /* put back what was there */
 		return 0;
 	}
+	s->n_add = 0;
+	free(s->idx);
+	s->idx = NULL;
+	s->n_idx = 0;
+	(void)kof_fidset_load(s, path);
 	return 1;
 }
 
