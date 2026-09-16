@@ -1918,11 +1918,22 @@ struct view {
 	char        enc_key[32];               /* for codings that take one */
 	uint32_t    enc_in_off, enc_key_off;   /* how far each field scrolled */
 	uint32_t    enc_type;                  /* which coding */
+	/*
+	 * WHICH WAY - 0 decodes, 1 encodes.
+	 *
+	 * The box was a decoder only, which is half of what a researcher does
+	 * with a coding: the pattern that goes into a signature is the ENCODED
+	 * form, so "what does cmd.exe look like in hex" is asked as often as
+	 * "what does this hex say". One control, because the two directions
+	 * share every other field on the form.
+	 */
+	int         enc_way;
 	uint32_t    enc_res_n;                 /* plaintext bytes, 0 for none */
 	int         enc_done;                  /* Decode has been pressed */
 	/* The controls, recorded where they are drawn and read where they are
 	 * clicked - the arrangement every other dialog here uses. */
 	int         e_in[2], e_type[2], e_key[2], e_go[2], e_help[2];
+	int         e_way[2];
 	/*
 	 * THE PLAINTEXT WINDOW: how far down and how far across.
 	 *
@@ -2206,13 +2217,36 @@ struct view {
 	uint32_t    caret;
 	int         edit_prev;
 	/*
-	 * The whole field is selected, so the next thing typed replaces it.
+	 * WHAT IS SELECTED IN THE OPEN FIELD - a RANGE, unordered.
 	 *
-	 * A one line field has nowhere to draw a range, so "selected" is all or
-	 * nothing and is shown by reversing the field. That is what Ctrl+A means
-	 * here and what every dialog box does with it.
+	 * It was one flag meaning "all of it", which is what Ctrl+A needs and
+	 * is not what a text box is. Dragging the pointer through a pattern to
+	 * take half of it, which is how anyone copies part of a string
+	 * anywhere else, had nothing to express: the box answered a click with
+	 * a caret and that was all it did. So the flag became the two ends of a
+	 * range, and Ctrl+A is now the case where they are 0 and the length.
+	 *
+	 * `fld_a` is the anchor and is NOT normalised - a drag leftwards leaves
+	 * b before a, and normalising as it moves would pin the anchor to
+	 * whichever end the pointer passed last. Read them through fsel_lo and
+	 * fsel_hi.
+	 *
+	 * Only the field that is OPEN can carry one, so they are cleared
+	 * wherever the caret is placed afresh.
 	 */
-	int         field_all;
+	uint32_t    fld_a, fld_b;
+	int         fld_drag;       /* the pointer is extending it */
+	/*
+	 * WHICH FIELD THE RANGE BELONGS TO - `edit` as it was when the range
+	 * was made.
+	 *
+	 * Without it a range outlives the box it was dragged in: open another
+	 * field and the old offsets are painted into it, over text they were
+	 * never about. Clearing at every place that assigns `edit` would be a
+	 * rule thirty call sites have to remember; comparing is a rule kept in
+	 * one place - see fsel_range.
+	 */
+	int         fld_of;
 	int         per;            /* bytes a hex row shows, for click mapping */
 
 	/*
@@ -9389,6 +9423,45 @@ static struct {
 } g_fld;
 
 /*
+ * AND WHAT IS SELECTED IN IT, for the same reason and in the same shape.
+ *
+ * field_draw paints the range and does not own it - the view does, across
+ * keystrokes and pointer motion - so it is copied here once a frame beside
+ * g_fld rather than added to twelve call sites that have nothing to say about
+ * it. Normalised on the way in, because painting reads it and a paint has no
+ * business knowing which end the drag started at.
+ */
+static struct { uint32_t lo, hi; } g_fsel;
+
+/*
+ * THE SELECTED RANGE, OR NOTHING - the one place both questions are answered.
+ *
+ * Nothing when the two ends meet, and nothing when the range was made in a
+ * field that is no longer the open one: see fld_of.
+ */
+static int fsel_range(const struct view *v, uint32_t *lo, uint32_t *hi)
+{
+	if (v->fld_of != v->edit || v->fld_a == v->fld_b)
+		return 0;
+	*lo = v->fld_a < v->fld_b ? v->fld_a : v->fld_b;
+	*hi = v->fld_a < v->fld_b ? v->fld_b : v->fld_a;
+	return 1;
+}
+
+static void fsel_clear(struct view *v)
+{
+	v->fld_a = v->fld_b = 0;
+}
+
+/* Anchor a new range in the field that is open now. */
+static void fsel_set(struct view *v, uint32_t a, uint32_t b)
+{
+	v->fld_a = a;
+	v->fld_b = b;
+	v->fld_of = v->edit;
+}
+
+/*
  * HOW WIDE A BOX HAS TO BE FOR WHAT IS IN IT - never wider, never past `max`.
  *
  * A field drawn at a fixed width sits in a run of blank brackets, which reads
@@ -9425,8 +9498,7 @@ static int field_room(const char *text, const char *ph, int editing, int max)
 }
 
 static void field_draw(struct out *o, const char *text, uint32_t caret,
-		       uint32_t *off, int room, int editing, const char *ph,
-		       int all)
+		       uint32_t *off, int room, int editing, const char *ph)
 {
 	uint32_t len = (uint32_t)strlen(text), i;
 
@@ -9497,10 +9569,28 @@ static void field_draw(struct out *o, const char *text, uint32_t caret,
 		 */
 		t[0] = at < len ? text[at] : ' ';
 		t[1] = 0;
-		if (editing && all && at < len) {
-			out_str(o, "\033[7m");
-			out_str(o, t);
+		/*
+		 * THE SELECTION CANCELS THE BOX'S REVERSE, it does not add
+		 * another one.
+		 *
+		 * AN OPEN FIELD IS DRAWN IN A_SEL BY ITS CALLER - every one of
+		 * them does it - and A_SEL is reverse video. Reversing the
+		 * selected span again is a no-op that LOOKS like one too: the
+		 * old Ctrl+A did exactly that, and the only visible effect was
+		 * that the "\033[27m" at the end of it turned the box's own
+		 * reverse off for everything after the selection.
+		 *
+		 * So selected text is drawn upright on the inverted box, which
+		 * is what a terminal does with a selection inside an inverted
+		 * region, and the box's reverse is put back after it. No colour
+		 * pair, because a pair would end in A_OFF and take the rest of
+		 * the field back to plain.
+		 */
+		if (editing && at < len &&
+		    at >= g_fsel.lo && at < g_fsel.hi) {
 			out_str(o, "\033[27m");
+			out_str(o, t);
+			out_str(o, "\033[7m");
 		} else if (editing && at == caret) {
 			out_str(o, "\033[4m");
 			out_str(o, t);
@@ -10822,7 +10912,7 @@ static void draw_decl_head(struct out *o, struct view *v)
 		out_fmt(o, A_DIM "  Family " A_OFF "%s[",
 			v->edit == 1 ? A_SEL : A_ID);
 		field_draw(o, v->ed.dr.family, v->caret, &v->fam_off, fw,
-			   v->edit == 1, "?", v->field_all);
+			   v->edit == 1, "?");
 		out_str(o, "]" A_OFF);
 		/*
 		 * The click range is the box as DRAWN, not the space it
@@ -10890,7 +10980,7 @@ static void draw_decl_head(struct out *o, struct view *v)
 				  v->edit == 501, room);
 		out_fmt(o, "%s[", v->edit == 501 ? A_SEL : A_DIM);
 		field_draw(o, v->ed.dr.note, v->caret, &v->note_off, room,
-			   v->edit == 501, "Comment...", v->field_all);
+			   v->edit == 501, "Comment...");
 		out_str(o, "]" A_OFF);
 	}
 	v->nt_c0 = c; v->nt_c1 = (int)o->col_hint;
@@ -11352,7 +11442,7 @@ static int draw_decl_opts(struct out *o, struct view *v, int r)
 		v->opt_c0[i] = 1 + (int)o->col_hint;
 		if (v->edit == 200 + (int)i) {
 			out_str(o, A_SEL);
-			field_draw(o, v->num, v->caret, &v->num_off, 18, 1, "", v->field_all);
+			field_draw(o, v->num, v->caret, &v->num_off, 18, 1, "");
 			out_str(o, A_OFF);
 		} else {
 			out_fmt(o, "%s%s" A_OFF, A_ID, val);
@@ -11690,9 +11780,25 @@ static int draw_decl_strings(struct out *o, struct view *v, int r)
 
 			if (room < 8)
 				room = 8;
+			/*
+			 * IN A_SEL, LIKE EVERY OTHER OPEN FIELD.
+			 *
+			 * This was the one box on the panel drawn without it -
+			 * the family name, the comment, the variant and both
+			 * dialog fields all light up when they take the caret,
+			 * and the pattern, which is the field a researcher
+			 * spends the most time in, did not. It read as text
+			 * that happened to be on the row rather than as a
+			 * control that is open.
+			 *
+			 * field_draw needs it too: a selection inside the box
+			 * is drawn by CANCELLING the reverse, which is what
+			 * makes it visible against it.
+			 */
+			out_str(o, A_SEL);
 			field_draw(o, v->ed.dr.sedit, v->caret, &v->ed.dr.sedit_off, room,
-				   1, d->hex ? "hex pairs" : "text",
-				   v->field_all);
+				   1, d->hex ? "hex pairs" : "text");
+			out_str(o, A_OFF);
 		} else if (d->hexs[0]) {
 			uint32_t n = (uint32_t)strlen(d->hexs);
 			uint32_t from = v->decl_hoff > n ? n : v->decl_hoff;
@@ -11884,7 +11990,7 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 				field_draw(o, q->note, v->caret,
 					   &v->ed.dr.grp[g].note_off, room,
 					   v->edit == 300 + (int)g,
-					   "comment...", v->field_all);
+					   "comment...");
 				out_str(o, "]" A_OFF);
 			}
 			v->grp_nt[g][1] = (int)o->col_hint;
@@ -12097,7 +12203,7 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 							? c2->variant
 							: "name..."),
 						   v->edit == 4 + (int)ci,
-						   "name...", v->field_all);
+						   "name...");
 					out_str(o, "]" A_OFF);
 					v->cnd_nm[ci][1] = (int)o->col_hint;
 				}
@@ -12156,7 +12262,7 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 						   ? 24
 						   : (int)strlen(c2->expr),
 						   v->edit == 103 + (int)ci,
-						   "", v->field_all);
+						   "");
 					out_str(o, A_OFF);
 					v->cnd_ex[ci][1] = (int)o->col_hint;
 					goto ids_done;
@@ -13158,6 +13264,17 @@ enum menu_action {
 	 * reader's to say and not this menu's to guess.
 	 */
 	M_DECODE,
+	/*
+	 * The same bytes, the same box, the other way through it.
+	 *
+	 * A separate item rather than a mode on the one above, because the two
+	 * are different questions about the selection: "what does this say"
+	 * and "what would this look like encoded". The second is what a
+	 * researcher asks while WRITING a rule - the pattern to match is the
+	 * encoded form - and a reader who wanted it had to open the box, then
+	 * find a toggle.
+	 */
+	M_ENCODE,
 	M_GOTO,
 	M_FIND_STR,
 	M_FIND_HEX,
@@ -13198,8 +13315,9 @@ enum menu_action {
  * place; `ctx` is a mask, 1 for the bytes and 2 for the offset column, and the
  * items that make sense on either carry both.
  */
-/* The Decoder: defined with the other dialogs, reached from the menu bar, from
- * the hex pane's own menu, and from the draw loop. */
+/* The codec box - both directions, see enc_way. Defined with the other dialogs,
+ * reached from the menu bar, from the hex pane's own menu, and from the draw
+ * loop. */
 static void draw_enc(struct out *o, struct view *v);
 static int  enc_click(struct view *v, int rclick);
 static int  enc_in_text(const struct view *v, int y, int x);
@@ -13256,6 +13374,7 @@ static const struct {
 	 */
 	{ "View hex",         1 | 2, 2 },
 	{ "Decode string",    1 | 4, 2 },
+	{ "Encode string",    1 | 4, 2 },
 	{ "Go to",                3, 3 },
 	/*
 	 * Offered in the panel too: looking at an instruction and wanting to
@@ -13449,7 +13568,7 @@ static int menu_enabled(struct view *v, int a)
 		       (v->dis_have || dis_hex_sel(v));
 	if (a == M_VIEW_HEX)
 		return 1;       /* nothing to select first: it is a reading */
-	if (a == M_DECODE)
+	if (a == M_DECODE || a == M_ENCODE)
 		/* Bytes to put in the field is the whole requirement. */
 		return v->sel_a != KOF_BROKEN && v->sel_b != KOF_BROKEN;
 	if (a == M_DISASM) {
@@ -14597,7 +14716,7 @@ static void menu_run(struct view *v, int a)
 		v->menu_open = 0;
 		return;
 	}
-	if (a == M_DECODE) {
+	if (a == M_DECODE || a == M_ENCODE) {
 		uint64_t bn = 0;
 		const uint8_t *bp = view_bytes(v, &bn);
 		uint64_t a0 = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
@@ -14641,10 +14760,14 @@ static void menu_run(struct view *v, int a)
 				    (c >= 0x20u && c <= 0x7eu))
 					continue;
 				say_note(&v->ed, "The selection is not text - "
-					 "this decodes encoded text");
+					 "this box takes text");
 				return;
 			}
 		}
+		/* The item that was chosen says which way, so the box opens
+		 * doing what its name said rather than doing whatever it was
+		 * left set to. */
+		v->enc_way = (a == M_ENCODE);
 		enc_open_with(v, bp + fa, (uint32_t)(fb - fa + 1u));
 		return;
 	}
@@ -14793,6 +14916,10 @@ static void redraw(struct view *v)
 	int wiped = 0, under;
 
 	g_fld.room = 0;
+	/* What field_draw paints as selected, normalised once rather than at
+	 * every character - see g_fsel. */
+	if (!fsel_range(v, &g_fsel.lo, &g_fsel.hi))
+		g_fsel.lo = g_fsel.hi = 0;
 	term_size();
 	/*
 	 * THE SCREEN, as the outermost bound every drawer is inside.
@@ -15792,7 +15919,7 @@ static const struct {
 	{ "Symbols",           BM_ANALYSIS, -1, 0 },
 	{ "Disassembly",       BM_ANALYSIS, -1, 0 },
 	{ "Find shellcode in variables", BM_ANALYSIS, -1, 0 },
-	{ "String decoder",           BM_ANALYSIS, -1, 0 },
+	{ "String codec",             BM_ANALYSIS, -1, 0 },
 	{ "Unpack with ...",   BM_ANALYSIS, -1, 1 },
 	{ "Dump",              BM_ANALYSIS, -1, 0 },
 	{ "Static unpacker",   BM_ANALYSIS, BI_DUMP, 0 },
@@ -22460,6 +22587,95 @@ static int enc_hexv(uint8_t c)
 }
 
 /*
+ * THE OTHER DIRECTION, for the codings that have one.
+ *
+ * A decoder answers "what does this say"; an encoder answers "what would this
+ * look like written that way", and a researcher writing a signature needs the
+ * second as often as the first: the pattern to be matched is the ENCODED form,
+ * and typing "cmd.exe" to get "636D642E657865" is the whole of what a hex box
+ * is for.
+ *
+ * WHICH INVERSE EACH ONE HAS is not the same question for all of them:
+ *
+ *   base64, hex   a real encoder - bytes in, text out
+ *   xor, reverse  their own inverse, so the same pass runs both ways
+ *   add           decoding ADDS the key, so encoding subtracts it
+ *   caesar        decoding shifts back, so encoding shifts forward
+ *
+ * Returns what it produced, or 0 when this coding cannot do it.
+ */
+static uint32_t enc_encode(const uint8_t *p, uint32_t len, int codec,
+			   uint32_t key)
+{
+	static const char b64[] =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	static const char hexd[] = "0123456789ABCDEF";
+	uint32_t out = 0, i;
+
+	switch (codec) {
+	case ENC_B64:
+		for (i = 0; i < len && out + 4u <= ENC_OUT_MAX; i += 3u) {
+			uint32_t n = len - i < 3u ? len - i : 3u;
+			uint32_t w = (uint32_t)p[i] << 16;
+
+			if (n > 1u)
+				w |= (uint32_t)p[i + 1u] << 8;
+			if (n > 2u)
+				w |= p[i + 2u];
+			g_encbuf[out++] = (uint8_t)b64[(w >> 18) & 63u];
+			g_encbuf[out++] = (uint8_t)b64[(w >> 12) & 63u];
+			/* Padded, because a decoder that counts on it is the
+			 * common case and one that ignores it reads this
+			 * anyway. */
+			g_encbuf[out++] = n > 1u
+					? (uint8_t)b64[(w >> 6) & 63u] : '=';
+			g_encbuf[out++] = n > 2u
+					? (uint8_t)b64[w & 63u] : '=';
+		}
+		return out;
+	case ENC_HEX:
+		/*
+		 * UPPER CASE AND NO SEPARATOR, which is the form a pattern is
+		 * written in - KOF_DEFINE_HEXSTR takes exactly this, so what
+		 * comes out of the box can be pasted into a signature.
+		 */
+		for (i = 0; i < len && out + 2u <= ENC_OUT_MAX; i++) {
+			g_encbuf[out++] = (uint8_t)hexd[p[i] >> 4];
+			g_encbuf[out++] = (uint8_t)hexd[p[i] & 15u];
+		}
+		return out;
+	case ENC_XOR:
+		for (i = 0; i < len && out < ENC_OUT_MAX; i++)
+			g_encbuf[out++] = (uint8_t)(p[i] ^ (uint8_t)key);
+		return out;
+	case ENC_ADD:
+		for (i = 0; i < len && out < ENC_OUT_MAX; i++)
+			g_encbuf[out++] = (uint8_t)(p[i] - (uint8_t)key);
+		return out;
+	case ENC_CAESAR:
+		key %= 26u;
+		if (!key)
+			return 0;
+		for (i = 0; i < len && out < ENC_OUT_MAX; i++) {
+			uint8_t c = p[i];
+
+			if (c >= 'a' && c <= 'z')
+				c = (uint8_t)('a' + (c - 'a' + key) % 26u);
+			else if (c >= 'A' && c <= 'Z')
+				c = (uint8_t)('A' + (c - 'A' + key) % 26u);
+			g_encbuf[out++] = c;
+		}
+		return out;
+	case ENC_REVERSE:
+		for (i = 0; i < len && out < ENC_OUT_MAX; i++)
+			g_encbuf[out++] = p[len - 1u - i];
+		return out;
+	default:
+		return 0;
+	}
+}
+
+/*
  * Run one coding over `len` bytes at `p`, into g_encbuf. Returns what it
  * produced; 0 means this coding cannot read that text at all.
  */
@@ -22581,14 +22797,17 @@ static uint32_t enc_key_val(const struct view *v)
 static void enc_do(struct view *v)
 {
 	uint32_t len = (uint32_t)strlen(v->enc_in);
+	uint32_t key = enc_takes_key(v->enc_type) ? enc_key_val(v) : 0;
 
 	v->enc_res_n = 0;
 	v->enc_done = 1;
 	if (!len)
 		return;
-	v->enc_res_n = enc_run((const uint8_t *)v->enc_in, len,
-			       (int)v->enc_type,
-			       enc_takes_key(v->enc_type) ? enc_key_val(v) : 0);
+	v->enc_res_n = v->enc_way
+		     ? enc_encode((const uint8_t *)v->enc_in, len,
+				  (int)v->enc_type, key)
+		     : enc_run((const uint8_t *)v->enc_in, len,
+			       (int)v->enc_type, key);
 }
 
 /*
@@ -22657,16 +22876,20 @@ static void draw_enc(struct out *o, struct view *v)
 
 	/* Four form rows, the count line, then the window: its two rules and
 	 * the text between them. Plus the box's own two. */
-	if (!dframe_begin(o, f, "String decoder", 100, ENC_RES_ROWS + 8, 1))
+	if (!dframe_begin(o, f, "String codec", 100, ENC_RES_ROWS + 8, 1))
 		return;
 
 	dframe_row(o, f, 0);
-	out_fmt(o, A_DIM "%-9s" A_OFF, "encoded");
+	/* The two labels swap with the direction: what goes IN is encoded text
+	 * when decoding and plain bytes when encoding, and a form that says so
+	 * needs no sentence explaining it. */
+	out_fmt(o, A_DIM "%-9s" A_OFF, v->enc_way ? "plain" : "encoded");
 	v->e_in[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, "%s[", v->edit == ED_ENC_IN ? A_SEL : A_ID);
 	field_draw(o, v->enc_in, v->caret, &v->enc_in_off, f->iw - 13,
-		   v->edit == ED_ENC_IN, "paste or type the encoded text",
-		   v->field_all);
+		   v->edit == ED_ENC_IN,
+		   v->enc_way ? "type the text to encode"
+			      : "paste or type the encoded text");
 	out_str(o, "]" A_OFF);
 	v->e_in[1] = o->col_base + (int)o->col_hint - 1;
 	dframe_edge(o, f);
@@ -22676,14 +22899,19 @@ static void draw_enc(struct out *o, struct view *v)
 	v->e_type[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, A_ID "[ %-7s ]" A_OFF, enc_codec_name((int)v->enc_type));
 	v->e_type[1] = o->col_base + (int)o->col_hint - 1;
+	/* Beside the coding, because it is the same question: which coding,
+	 * and which way through it. */
+	out_fmt(o, A_DIM "   way " A_OFF);
+	v->e_way[0] = o->col_base + (int)o->col_hint;
+	out_fmt(o, A_ID "[ %-6s ]" A_OFF, v->enc_way ? "encode" : "decode");
+	v->e_way[1] = o->col_base + (int)o->col_hint - 1;
 	if (enc_takes_key(v->enc_type)) {
 		out_fmt(o, A_DIM "   key " A_OFF);
 		v->e_key[0] = o->col_base + (int)o->col_hint;
 		out_fmt(o, "%s[", v->edit == ED_ENC_KEY ? A_SEL : A_ID);
 		field_draw(o, v->enc_key, v->caret, &v->enc_key_off, 10,
 			   v->edit == ED_ENC_KEY,
-			   v->enc_type == ENC_CAESAR ? "1-25" : "hex",
-			   v->field_all);
+			   v->enc_type == ENC_CAESAR ? "1-25" : "hex");
 		out_str(o, "]" A_OFF);
 		v->e_key[1] = o->col_base + (int)o->col_hint - 1;
 	} else {
@@ -22695,22 +22923,26 @@ static void draw_enc(struct out *o, struct view *v)
 	dframe_row(o, f, 2);
 	out_fmt(o, "%-9s", "");
 	v->e_go[0] = o->col_base + (int)o->col_hint;
-	out_fmt(o, "%s[ Decode ]" A_OFF,
-		v->enc_in[0] ? "\033[42;30m" : "\033[47;90m");
+	out_fmt(o, "%s[ %s ]" A_OFF,
+		v->enc_in[0] ? "\033[42;30m" : "\033[47;90m",
+		v->enc_way ? "Encode" : "Decode");
 	v->e_go[1] = o->col_base + (int)o->col_hint - 1;
 	dframe_edge(o, f);
 
 	dframe_row(o, f, 3);
 	if (v->enc_res_n)
 		out_fmt(o, A_DIM "%-9s" A_OFF A_SIZE "%lu" A_OFF A_DIM
-			" bytes, %lu line(s)" A_OFF, "plain",
+			" bytes, %lu line(s)" A_OFF,
+			v->enc_way ? "encoded" : "plain",
 			(unsigned long)v->enc_res_n,
 			(unsigned long)enc_lines(v));
 	else if (v->enc_done && v->enc_in[0])
-		out_fmt(o, A_DIM "%-9s" A_OFF A_WARN "%s" A_OFF, "plain",
-			"that coding cannot read this text");
+		out_fmt(o, A_DIM "%-9s" A_OFF A_WARN "%s" A_OFF,
+			v->enc_way ? "encoded" : "plain",
+			v->enc_way ? "that coding cannot write this text"
+				   : "that coding cannot read this text");
 	else
-		out_fmt(o, A_DIM "%-9s" A_OFF, "plain");
+		out_fmt(o, A_DIM "%-9s" A_OFF, v->enc_way ? "encoded" : "plain");
 	dframe_edge(o, f);
 
 	/*
@@ -23002,6 +23234,14 @@ static int enc_click(struct view *v, int rclick)
 			ch_open(v, CH_ENC_TYPE, 0, g_my, v->e_type[0]);
 			return 1;
 		}
+		if (g_mx >= v->e_way[0] && g_mx <= v->e_way[1]) {
+			v->enc_way = !v->enc_way;
+			/* The old answer was about the other direction, so it
+			 * is not an answer any more - see enc_done. */
+			v->enc_res_n = 0;
+			v->enc_done = 0;
+			return 1;
+		}
 		if (v->e_key[0] >= 0 && g_mx >= v->e_key[0] &&
 		    g_mx <= v->e_key[1]) {
 			v->edit = ED_ENC_KEY;
@@ -23148,7 +23388,7 @@ static void draw_goto(struct out *o, struct view *v)
 	v->g_txt[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, "%s[", v->edit == 520 ? A_SEL : A_ID);
 	field_draw(o, v->gotobuf, v->caret, &v->goto_off, 18,
-		   v->edit == 520, "offset", v->field_all);
+		   v->edit == 520, "offset");
 	out_str(o, "]" A_OFF);
 	v->g_txt[1] = o->col_base + (int)o->col_hint - 1;
 	out_fmt(o, A_DIM "  as " A_OFF);
@@ -23250,8 +23490,7 @@ static void draw_find(struct out *o, struct view *v)
 	out_fmt(o, A_DIM "Find " A_OFF);
 	v->f_txt[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, "%s[", v->edit == 500 ? A_SEL : A_ID);
-	field_draw(o, v->find, v->caret, &v->find_off, 30, v->edit == 500, "",
-		   v->field_all);
+	field_draw(o, v->find, v->caret, &v->find_off, 30, v->edit == 500, "");
 	out_str(o, "]" A_OFF);
 	v->f_txt[1] = o->col_base + (int)o->col_hint - 1;
 	out_fmt(o, A_DIM "  as " A_OFF);
@@ -23433,7 +23672,18 @@ static int click_field(struct view *v)
 		uint32_t k = g_fld.off + (uint32_t)(g_mx - g_fld.col);
 
 		v->caret = k > g_fld.len ? g_fld.len : k;
-		v->field_all = 0;
+		/*
+		 * AND THE PRESS IS THE ANCHOR OF A DRAG.
+		 *
+		 * An empty range, so a plain click still reads as "put the
+		 * caret here" and selects nothing; the motion handler moves the
+		 * far end while the button is down. This is what makes a box on
+		 * this panel behave like the text box it looks like - part of a
+		 * pattern can be dragged through and taken, rather than all of
+		 * it or none.
+		 */
+		fsel_set(v, v->caret, v->caret);
+		v->fld_drag = 1;
 		/*
 		 * And the field counts as already open.
 		 *
@@ -24597,7 +24847,7 @@ static int field_key(struct view *v, char *buf, size_t cap, int k,
 	if (v->edit != v->edit_prev) {
 		v->edit_prev = v->edit;
 		v->caret = (uint32_t)n;
-		v->field_all = 0;
+		fsel_clear(v);
 	}
 	if (v->caret > n)
 		v->caret = (uint32_t)n;
@@ -24610,13 +24860,30 @@ static int field_key(struct view *v, char *buf, size_t cap, int k,
 	 * to take - and taking them is what makes a text field here
 	 * behave like a text field anywhere else.
 	 */
-	if (k == 0x01) {                /* Ctrl+A */
-		v->field_all = n != 0;
+	if (k == 0x01) {                /* Ctrl+A - the whole of it */
+		fsel_set(v, 0, (uint32_t)n);
 		return 1;
 	}
 	if (k == 0x03) {                /* Ctrl+C */
-		copy_osc52(buf, n);
-		copy_said(v, n);
+		/*
+		 * THE SELECTION WHEN THERE IS ONE, the whole field when there
+		 * is not.
+		 *
+		 * Copying all of it regardless is what this used to do, and it
+		 * is wrong the moment a range can exist: a reader who drags
+		 * through half a pattern and presses Ctrl+C is asking for that
+		 * half. With nothing selected the field IS the selection, which
+		 * is the convention a one-line box gets to keep.
+		 */
+		uint32_t lo, hi;
+
+		if (fsel_range(v, &lo, &hi) && hi <= n) {
+			copy_osc52(buf + lo, hi - lo);
+			copy_said(v, hi - lo);
+		} else {
+			copy_osc52(buf, n);
+			copy_said(v, n);
+		}
 		return 1;
 	}
 	/*
@@ -24626,20 +24893,29 @@ static int field_key(struct view *v, char *buf, size_t cap, int k,
 	 * a field that is shown as selected and then appends is worse
 	 * than one that never offered selection.
 	 */
-	if (v->field_all && (k == 127 || k == 8 || k == K_DEL ||
-			     k == 0x16 || k == K_PASTE ||
-			     (k >= 0x20 && k < 0x7f))) {
-		buf[0] = 0;
-		n = 0;
-		v->caret = 0;
-		v->field_all = 0;
-		if (k == 127 || k == 8 || k == K_DEL)
-			return 1;
+	{
+		uint32_t lo, hi;
+
+		if (fsel_range(v, &lo, &hi) &&
+		    (k == 127 || k == 8 || k == K_DEL || k == 0x16 ||
+		     k == K_PASTE || (k >= 0x20 && k < 0x7f))) {
+			if (hi > n)
+				hi = (uint32_t)n;
+			if (lo > hi)
+				lo = hi;
+			memmove(buf + lo, buf + hi, n - hi + 1u);
+			n -= hi - lo;
+			v->caret = lo;
+			fsel_clear(v);
+			if (k == 127 || k == 8 || k == K_DEL)
+				return 1;
+		} else if (fsel_range(v, &lo, &hi) &&
+			   (k == K_LEFT || k == K_RIGHT || k == K_HOME ||
+			    k == K_END || k == 27 || k == '\r' ||
+			    k == '\n')) {
+			fsel_clear(v);
+		}
 	}
-	if (v->field_all && (k == K_LEFT || k == K_RIGHT ||
-			     k == K_HOME || k == K_END || k == 27 ||
-			     k == '\r' || k == '\n'))
-		v->field_all = 0;
 	if (k == 0x16 || k == K_PASTE) {        /* Ctrl+V, or a paste */
 		/*
 		 * A bracketed paste is the terminal handing over the system
@@ -25274,7 +25550,7 @@ static int handle_chooser_key(struct view *v, int k)
 			if (v->edit != v->edit_prev) {
 				v->edit_prev = v->edit;
 				v->caret = (uint32_t)nn;
-				v->field_all = 0;
+				fsel_clear(v);
 			}
 			if (k == 27) {
 				v->goto_open = 0;
@@ -25450,6 +25726,32 @@ static void on_drag(struct view *v)
 			v->dlg_move->dy = v->dlg_mdy + (g_my - v->dlg_my);
 			return;
 		}
+		/*
+		 * A DRAG THROUGH THE OPEN TEXT FIELD.
+		 *
+		 * Only the far end moves - `fld_a` stays where the press put
+		 * it - and the caret follows it, which is what a text box does
+		 * and what makes the following keystroke land where the pointer
+		 * stopped. The ROW is not tested: a one-line box has only one,
+		 * and a pointer that strayed a row up or down mid-drag is still
+		 * dragging through this field. The column is clamped to the
+		 * box, so dragging off either end selects to that end rather
+		 * than stopping.
+		 */
+		if (v->fld_drag && v->edit && g_fld.room > 0) {
+			int c = g_mx - g_fld.col;
+			uint32_t k;
+
+			if (c < 0)
+				c = 0;
+			if (c > g_fld.room)
+				c = g_fld.room;
+			k = g_fld.off + (uint32_t)c;
+			fsel_set(v, v->fld_a,
+				 k > g_fld.len ? g_fld.len : k);
+			v->caret = v->fld_b;
+			return;
+		}
 		if (v->dlg_drag) {
 			int r, c;
 
@@ -25591,6 +25893,9 @@ static void on_release(struct view *v)
 		 * gesture that in every other pane changes nothing.
 		 */
 		v->evt_txt_drag = 0;
+		/* Same rule for the panel's text boxes: the range stays, and
+		 * Ctrl+C is what takes it. */
+		v->fld_drag = 0;
 		if (v->dis_dragging) {
 			v->dis_dragging = 0;
 			return;
