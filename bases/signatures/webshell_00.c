@@ -14,13 +14,29 @@ KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, "Webshell");
 
 KOF_TARGET_SUBTYPE(KOF_SCRIPT_ASP);
 
-KOF_TARGET_RANGE(scan_range_body, KOF_SCAN_SCRIPT_BODY);
+/*
+ * THE WHOLE OBJECT, not the code region.
+ *
+ * This was KOF_SCAN_SCRIPT_BODY, which is what kofviewer offered when a marker
+ * was taken from a row showing the body. Measured over 101 shells in the
+ * sample tree, that scope is the wrong trade for a script:
+ *
+ *   BODY holds 91% of the bytes, so it saves 9% of the searching;
+ *   it takes 365 extents where the object takes 101, and 63% of those
+ *     extents hold 1.2% of the bytes - most of the calls buy no work;
+ *   and 2 of the 101 files carry a marker that appears ONLY in markup, so a
+ *     BODY-scoped rule loses those files outright.
+ *
+ * A binary's CODE and DATA are worth telling apart - the same bytes in the
+ * wrong one mean something else. A script's body and markup are not that.
+ */
+KOF_TARGET_RANGE(scan_range_whole, KOF_SCAN_ALL);
 
 KOF_DEFINE_STR(s0, "ActiveXObject(\"WScript.Shell\");", KOF_CASE_EXACT, KOF_WORD_TOKEN);
 KOF_DEFINE_STR(s1, "shell.Exec(\"%comspec%", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
-	if (kof_find_str_all(scan_range_body, s0, s1))
+	if (kof_find_str_all(scan_range_whole, s0, s1))
 		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
 }
