@@ -1907,8 +1907,9 @@ struct view {
 	int         enc_done;                  /* Decode has been pressed */
 	/* The controls, recorded where they are drawn and read where they are
 	 * clicked - the arrangement every other dialog here uses. */
-	int         e_in[2], e_type[2], e_key[2], e_go[2], e_help[2];
-	int         e_way[2];
+	int         e_in[2], e_type[2], e_key[2], e_go[2];
+	/* The second button - see draw_enc. `e_go` is Decode. */
+	int         e_enc[2];
 	/*
 	 * THE PLAINTEXT WINDOW: how far down and how far across.
 	 *
@@ -13239,17 +13240,6 @@ enum menu_action {
 	 * reader's to say and not this menu's to guess.
 	 */
 	M_DECODE,
-	/*
-	 * The same bytes, the same box, the other way through it.
-	 *
-	 * A separate item rather than a mode on the one above, because the two
-	 * are different questions about the selection: "what does this say"
-	 * and "what would this look like encoded". The second is what a
-	 * researcher asks while WRITING a rule - the pattern to match is the
-	 * encoded form - and a reader who wanted it had to open the box, then
-	 * find a toggle.
-	 */
-	M_ENCODE,
 	M_GOTO,
 	M_FIND_STR,
 	M_FIND_HEX,
@@ -13290,7 +13280,7 @@ enum menu_action {
  * place; `ctx` is a mask, 1 for the bytes and 2 for the offset column, and the
  * items that make sense on either carry both.
  */
-/* The codec box - both directions, see enc_way. Defined with the other dialogs,
+/* The Decoder - both directions, see enc_way. Defined with the other dialogs,
  * reached from the menu bar, from the hex pane's own menu, and from the draw
  * loop. */
 static void draw_enc(struct out *o, struct view *v);
@@ -13349,7 +13339,6 @@ static const struct {
 	 */
 	{ "View hex",         1 | 2, 2 },
 	{ "Decode string",    1 | 4, 2 },
-	{ "Encode string",    1 | 4, 2 },
 	{ "Go to",                3, 3 },
 	/*
 	 * Offered in the panel too: looking at an instruction and wanting to
@@ -13543,7 +13532,7 @@ static int menu_enabled(struct view *v, int a)
 		       (v->dis_have || dis_hex_sel(v));
 	if (a == M_VIEW_HEX)
 		return 1;       /* nothing to select first: it is a reading */
-	if (a == M_DECODE || a == M_ENCODE)
+	if (a == M_DECODE)
 		/* Bytes to put in the field is the whole requirement. */
 		return v->sel_a != KOF_BROKEN && v->sel_b != KOF_BROKEN;
 	if (a == M_DISASM) {
@@ -14691,7 +14680,7 @@ static void menu_run(struct view *v, int a)
 		v->menu_open = 0;
 		return;
 	}
-	if (a == M_DECODE || a == M_ENCODE) {
+	if (a == M_DECODE) {
 		uint64_t bn = 0;
 		const uint8_t *bp = view_bytes(v, &bn);
 		uint64_t a0 = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
@@ -14739,10 +14728,10 @@ static void menu_run(struct view *v, int a)
 				return;
 			}
 		}
-		/* The item that was chosen says which way, so the box opens
-		 * doing what its name said rather than doing whatever it was
-		 * left set to. */
-		v->enc_way = (a == M_ENCODE);
+		/* The item says decode, so the box opens set to decode rather
+		 * than to whatever the last use of it left behind. Encoding is
+		 * the button beside it once the box is open. */
+		v->enc_way = 0;
 		enc_open_with(v, bp + fa, (uint32_t)(fb - fa + 1u));
 		return;
 	}
@@ -15894,7 +15883,7 @@ static const struct {
 	{ "Symbols",           BM_ANALYSIS, -1, 0 },
 	{ "Disassembly",       BM_ANALYSIS, -1, 0 },
 	{ "Find shellcode in variables", BM_ANALYSIS, -1, 0 },
-	{ "String codec",             BM_ANALYSIS, -1, 0 },
+	{ "Decode string",            BM_ANALYSIS, -1, 0 },
 	{ "Unpack with ...",   BM_ANALYSIS, -1, 1 },
 	{ "Dump",              BM_ANALYSIS, -1, 0 },
 	{ "Static unpacker",   BM_ANALYSIS, BI_DUMP, 0 },
@@ -22616,35 +22605,41 @@ static void draw_enc(struct out *o, struct view *v)
 
 	/* Four form rows, the count line, then the window: its two rules and
 	 * the text between them. Plus the box's own two. */
-	if (!dframe_begin(o, f, "String codec", 100, ENC_RES_ROWS + 8, 1))
+	if (!dframe_begin(o, f, "Decode string", 100, ENC_RES_ROWS + 8, 1))
 		return;
 
 	dframe_row(o, f, 0);
-	/* The two labels swap with the direction: what goes IN is encoded text
-	 * when decoding and plain bytes when encoding, and a form that says so
-	 * needs no sentence explaining it. */
-	out_fmt(o, A_DIM "%-9s" A_OFF, v->enc_way ? "plain" : "encoded");
+	/*
+	 * "string", AND IT DOES NOT CHANGE.
+	 *
+	 * It used to read "encoded" or "plain" depending on which way the box
+	 * was set, which was a label describing a MODE rather than the field
+	 * under it - and with a button for each direction there is no mode
+	 * left to describe. What goes in the field is a string; which way it
+	 * is read is the button that is pressed.
+	 */
+	out_fmt(o, A_DIM "%-9s" A_OFF, "string");
 	v->e_in[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, "%s[", v->edit == ED_ENC_IN ? A_SEL : A_ID);
 	field_draw(o, v->enc_in, v->caret, &v->enc_in_off, f->iw - 13,
-		   v->edit == ED_ENC_IN,
-		   v->enc_way ? "type the text to encode"
-			      : "paste or type the encoded text");
+		   v->edit == ED_ENC_IN, "paste or type a string");
 	out_str(o, "]" A_OFF);
 	v->e_in[1] = o->col_base + (int)o->col_hint - 1;
 	dframe_edge(o, f);
 
+	/*
+	 * THE CODING, AND NOTHING ELSE ON THE ROW.
+	 *
+	 * It carried a "way" switch and, for the codings with no key, the
+	 * sentence "this coding has no key" - a control for a question the
+	 * buttons below now answer, and a line of prose saying that a box
+	 * which is not drawn is not drawn. The row asks one thing.
+	 */
 	dframe_row(o, f, 1);
 	out_fmt(o, A_DIM "%-9s" A_OFF, "type");
 	v->e_type[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, A_ID "[ %-7s ]" A_OFF, kof_codec_name(v->enc_type));
 	v->e_type[1] = o->col_base + (int)o->col_hint - 1;
-	/* Beside the coding, because it is the same question: which coding,
-	 * and which way through it. */
-	out_fmt(o, A_DIM "   way " A_OFF);
-	v->e_way[0] = o->col_base + (int)o->col_hint;
-	out_fmt(o, A_ID "[ %-6s ]" A_OFF, v->enc_way ? "encode" : "decode");
-	v->e_way[1] = o->col_base + (int)o->col_hint - 1;
 	if (kof_codec_keyed(v->enc_type)) {
 		out_fmt(o, A_DIM "   key " A_OFF);
 		v->e_key[0] = o->col_base + (int)o->col_hint;
@@ -22656,33 +22651,44 @@ static void draw_enc(struct out *o, struct view *v)
 		v->e_key[1] = o->col_base + (int)o->col_hint - 1;
 	} else {
 		v->e_key[0] = v->e_key[1] = -1;
-		out_fmt(o, A_DIM "   this coding has no key" A_OFF);
 	}
 	dframe_edge(o, f);
 
+	/*
+	 * ONE BUTTON PER DIRECTION, because they are two things to do with
+	 * this string rather than two settings of one thing. Pressing one
+	 * says which way as well as go.
+	 */
 	dframe_row(o, f, 2);
 	out_fmt(o, "%-9s", "");
 	v->e_go[0] = o->col_base + (int)o->col_hint;
-	out_fmt(o, "%s[ %s ]" A_OFF,
-		v->enc_in[0] ? "\033[42;30m" : "\033[47;90m",
-		v->enc_way ? "Encode" : "Decode");
+	out_fmt(o, "%s[ Decode ]" A_OFF,
+		v->enc_in[0] ? "\033[42;30m" : "\033[47;90m");
 	v->e_go[1] = o->col_base + (int)o->col_hint - 1;
+	out_str(o, "  ");
+	v->e_enc[0] = o->col_base + (int)o->col_hint;
+	out_fmt(o, "%s[ Encode ]" A_OFF,
+		v->enc_in[0] ? "\033[42;30m" : "\033[47;90m");
+	v->e_enc[1] = o->col_base + (int)o->col_hint - 1;
 	dframe_edge(o, f);
 
+	/*
+	 * WHAT CAME BACK, and nothing at all before anything has.
+	 *
+	 * The row used to open with the word "plain" whether or not there was
+	 * any - a label with nothing under it and nothing to do, on a form
+	 * where every other row is a control.
+	 */
 	dframe_row(o, f, 3);
 	if (v->enc_res_n)
-		out_fmt(o, A_DIM "%-9s" A_OFF A_SIZE "%lu" A_OFF A_DIM
-			" bytes, %lu line(s)" A_OFF,
-			v->enc_way ? "encoded" : "plain",
+		out_fmt(o, "%-9s" A_SIZE "%lu" A_OFF A_DIM
+			" bytes, %lu line(s)" A_OFF, "",
 			(unsigned long)v->enc_res_n,
 			(unsigned long)enc_lines(v));
 	else if (v->enc_done && v->enc_in[0])
-		out_fmt(o, A_DIM "%-9s" A_OFF A_WARN "%s" A_OFF,
-			v->enc_way ? "encoded" : "plain",
-			v->enc_way ? "that coding cannot write this text"
-				   : "that coding cannot read this text");
-	else
-		out_fmt(o, A_DIM "%-9s" A_OFF, v->enc_way ? "encoded" : "plain");
+		out_fmt(o, "%-9s" A_WARN "%s" A_OFF, "",
+			v->enc_way ? "that coding cannot write this string"
+				   : "that coding cannot read this string");
 	dframe_edge(o, f);
 
 	/*
@@ -22817,32 +22823,16 @@ static void draw_enc(struct out *o, struct view *v)
 		dlg_paint_sel(o, v);
 	}
 
-	{
-		/*
-		 * THE KEYS MOVED OFF THE RULE AND INTO A BUTTON.
-		 *
-		 * A line of chording written on the furniture is a line that
-		 * says the same thing every time the box opens, to a reader who
-		 * needed it once. The button is where somebody looks when they
-		 * do need it, and the rule goes back to being the edge.
-		 */
-		static const char help[] = "[ ? ]";
-		int pad = f->w - 4 - (int)(sizeof help - 1);
-
-		out_at(o, f->y + f->h - 1, f->x);
-		o->col_hint = 0;
-		out_str(o, A_DIM);
-		out_glyph(o, G_BL);
-		out_glyph(o, G_H);
-		while (pad-- > 0)
-			out_glyph(o, G_H);
-		v->e_help[0] = f->x + (int)o->col_hint;
-		out_fmt(o, A_OFF A_ID "%s" A_OFF A_DIM, help);
-		v->e_help[1] = f->x + (int)o->col_hint - 1;
-		out_glyph(o, G_H);
-		out_glyph(o, G_BR);
-		out_str(o, A_OFF);
-	}
+	/*
+	 * NO HELP BUTTON ON THIS BOX.
+	 *
+	 * It opened the keyboard page, which is a list of the viewer's chords
+	 * and says nothing about a coding - so on this form it was a control
+	 * that led away from the only thing the reader came here to do. The
+	 * page is still on the menu bar, where a reader looking for keys
+	 * looks.
+	 */
+	dframe_end(o, f, NULL);
 	dframe_done(o, f);
 }
 
@@ -22974,14 +22964,6 @@ static int enc_click(struct view *v, int rclick)
 			ch_open(v, CH_ENC_TYPE, 0, g_my, v->e_type[0]);
 			return 1;
 		}
-		if (g_mx >= v->e_way[0] && g_mx <= v->e_way[1]) {
-			v->enc_way = !v->enc_way;
-			/* The old answer was about the other direction, so it
-			 * is not an answer any more - see enc_done. */
-			v->enc_res_n = 0;
-			v->enc_done = 0;
-			return 1;
-		}
 		if (v->e_key[0] >= 0 && g_mx >= v->e_key[0] &&
 		    g_mx <= v->e_key[1]) {
 			v->edit = ED_ENC_KEY;
@@ -22990,14 +22972,14 @@ static int enc_click(struct view *v, int rclick)
 		}
 	}
 	if (g_my == f->y + 3) {
-		if (g_mx >= v->e_go[0] && g_mx <= v->e_go[1])
+		/* The button IS the direction - see draw_enc. */
+		if (g_mx >= v->e_go[0] && g_mx <= v->e_go[1]) {
+			v->enc_way = 0;
 			enc_do(v);
-		return 1;
-	}
-	if (g_my == f->y + f->h - 1 && g_mx >= v->e_help[0] &&
-	    g_mx <= v->e_help[1]) {
-		v->help_open = 1;       /* the keyboard page, which lists these */
-		v->help_off = 0;
+		} else if (g_mx >= v->e_enc[0] && g_mx <= v->e_enc[1]) {
+			v->enc_way = 1;
+			enc_do(v);
+		}
 		return 1;
 	}
 	/*
