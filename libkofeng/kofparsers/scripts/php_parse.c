@@ -8,26 +8,57 @@
 #include "scantext.h"
 
 /*
- * THE TAGS, and only the ones that cannot be anything else.
+ * THE TAGS - how long the one at `at` is, or 0 for no tag.
  *
  * "<?php" is five bytes that do not occur in passing and "<?=" is the echo
- * shorthand. The bare "<?" short tag is NOT here: it is three quarters of
- * "<?xml", which is the opening of every XML document on the machine, and
- * telling the two apart needs a rule this has not been measured against.
+ * shorthand. The third is the bare "<?" SHORT TAG, and it needs a rule because
+ * it is three quarters of "<?xml".
+ *
+ * THE RULE IS THE WHITESPACE AFTER IT, and it comes from XML rather than from
+ * php: a processing instruction is "<?target ... ?>" and the TARGET FOLLOWS THE
+ * "<?" IMMEDIATELY - no space is allowed there. So "<?xml", "<?xml-stylesheet"
+ * and every other PI carry a letter in the third byte, and "<? " or "<?\n"
+ * cannot be one.
+ *
+ * MEASURED BEFORE IT WAS BELIEVED. Over 6264 files of real documentation, XML,
+ * desktop entries and this source tree, five hold "<?" followed by whitespace
+ * and every one of them is BINARY - four git objects and an object file - so
+ * the sniff's own text test refuses them and the rule claims nothing it should
+ * not. In the sample tree the only file it newly claims is the one it is for:
+ * Cyber Shell.php, a 2006 shell that opens with a bare "<?" and was coming back
+ * as an object no module targets.
+ *
+ * It is ONE rule in one place because two callers ask - the sniff and the
+ * island walk - and a short tag recognised by one and not the other would make
+ * a page whose blocks nothing can find.
  */
+static uint32_t php_open_at(kof_buf f, uint64_t at, uint64_t end)
+{
+	if (kof_txt_tag_at(f, at, "<?php", 5u))
+		return 5u;
+	if (kof_txt_tag_at(f, at, "<?=", 3u))
+		return 3u;
+	if (at + 3u <= end && f.p[at] == '<' && f.p[at + 1u] == '?') {
+		uint8_t c = f.p[at + 2u];
+
+		if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+			return 2u;
+	}
+	return 0;
+}
+
 uint64_t kof_php_find_tag(kof_buf f, uint64_t look, uint32_t *taglen)
 {
 	uint64_t i;
 
 	for (i = 0; i + 2u <= look; i++) {
+		uint32_t n;
+
 		if (f.p[i] != '<')
 			continue;
-		if (kof_txt_tag_at(f, i, "<?php", 5u)) {
-			*taglen = 5u;
-			return i;
-		}
-		if (kof_txt_tag_at(f, i, "<?=", 3u)) {
-			*taglen = 3u;
+		n = php_open_at(f, i, look);
+		if (n) {
+			*taglen = n;
 			return i;
 		}
 	}
@@ -255,14 +286,9 @@ void kof_php_islands(kof_buf f, uint64_t from, struct kof_script_info *info)
 		 * kof_php_find_tag: that searches from the start of the object
 		 * and would keep answering with a run already passed. */
 		for (open = i; open + 3u <= f.n; open++) {
-			if (kof_txt_tag_at(f, open, "<?php", 5u)) {
-				o_len = 5u;
+			o_len = php_open_at(f, open, f.n);
+			if (o_len)
 				break;
-			}
-			if (kof_txt_tag_at(f, open, "<?=", 3u)) {
-				o_len = 3u;
-				break;
-			}
 		}
 		if (open + 3u > f.n)
 			break;

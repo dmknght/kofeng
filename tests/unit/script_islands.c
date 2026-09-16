@@ -706,6 +706,89 @@ int main(void)
 	}
 
 	/*
+	 * THE BARE "<?" SHORT TAG, AND THE XML IT MUST NOT CLAIM.
+	 *
+	 * A 2006 shell opens with "<?" and nothing else, and the file was
+	 * coming back as an object no module targets - not a script at all.
+	 * The rule is the whitespace after it: an XML processing instruction
+	 * puts its target straight after the "<?", so "<?xml" can never be
+	 * the php short tag and "<?\n" can never be a PI.
+	 */
+	{
+		static const char shorttag[] =
+			"<?\n$x = 1;\necho $x;\n?>\n";
+		static const char xmldoc[] =
+			"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+			"<note><to>reader</to></note>\n";
+		static const char xmlpi[] =
+			"<?xml-stylesheet type=\"text/xsl\" href=\"a.xsl\"?>\n"
+			"<doc/>\n";
+		struct kof_script_info info;
+		struct kof_obj_ctx ctx;
+		kof_buf f;
+
+		memset(&ctx, 0, sizeof ctx);
+		f.p = (const uint8_t *)shorttag;
+		f.n = strlen(shorttag);
+		if (!kof_script_sniff(f)) {
+			fail("short tag", "\"<?\" was not taken as php");
+		} else if (!kof_script_parse(f, &info, &ctx)) {
+			fail("short tag", "sniffed and then would not parse");
+		} else {
+			if (info.kind != KOF_SCRIPT_PHP)
+				fail("short tag", "a short tag file is not php");
+			if (info.tag_off != 0u || info.tag_len != 2u)
+				fail("short tag", "the tag is not the two bytes "
+				     "that opened it");
+			/* php has no header, so the tag opens the body. */
+			if (info.head_len)
+				fail("short tag", "a short tag was given a "
+				     "header");
+		}
+		check_partition("short tag", shorttag);
+
+		f.p = (const uint8_t *)xmldoc;
+		f.n = strlen(xmldoc);
+		if (kof_script_sniff(f))
+			fail("xml is not php", "\"<?xml\" was taken as a "
+			     "short tag");
+		f.p = (const uint8_t *)xmlpi;
+		f.n = strlen(xmlpi);
+		if (kof_script_sniff(f))
+			fail("xml pi is not php",
+			     "a processing instruction was taken as php");
+	}
+
+	/*
+	 * AND A PAGE WHOSE BLOCKS ARE SHORT TAGS IS STILL A PAGE.
+	 *
+	 * The island walk asks the same question the sniff does, so a short
+	 * tag recognised by one and not the other would leave a page whose
+	 * code nothing can find.
+	 */
+	{
+		static const char shortpage[] =
+			"<html>\n<body>\n"
+			"<?\n$rows = load();\nforeach ($rows as $r) {\n?>\n"
+			"<p>row</p>\n"
+			"<?\n}\n?>\n"
+			"</body>\n</html>\n";
+		struct kof_script_info info;
+		struct kof_obj_ctx ctx;
+		kof_buf f;
+
+		memset(&ctx, 0, sizeof ctx);
+		f.p = (const uint8_t *)shortpage;
+		f.n = strlen(shortpage);
+		if (!kof_script_sniff(f) || !kof_script_parse(f, &info, &ctx))
+			fail("short tag page", "not taken as a script");
+		else if (!info.n_island)
+			fail("short tag page",
+			     "the walk found no code in a page of short tags");
+		check_partition("short tag page", shortpage);
+	}
+
+	/*
 	 * AND THE OTHER HALF HAS TO BE THERE. "<%" is two bytes of punctuation
 	 * that occur in prose - measured, it claimed 208 .pm and 76 .pod files
 	 * on one machine, because POD writes a hash as C<%name>. What none of
@@ -726,6 +809,7 @@ int main(void)
 		return 1;
 	}
 	printf("script islands: partition, directive block, comment, "
-	       "bare tag, blocks kept, emptied blocks, closing half - ok\n");
+	       "bare tag, short tag, blocks kept, emptied blocks, "
+	       "closing half - ok\n");
 	return 0;
 }
