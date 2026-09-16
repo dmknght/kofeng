@@ -20,8 +20,30 @@ uint8_t kof_svr_kind(kof_buf f, uint64_t look)
 	    kof_txt_has(f, look, "<%@ Import") ||
 	    kof_txt_has(f, look, "System.Web"))
 		return KOF_SCRIPT_ASPX;
+	/*
+	 * AND CLASSIC ASP WITHOUT A DIRECTIVE, which is a shape that exists:
+	 * a .asp may open with a bare "<%" and never declare a language,
+	 * because VBScript is what the server assumes.
+	 *
+	 * Both of the markers below are VBScript-through-ASP intrinsics, and
+	 * the list is what the corpus supports rather than what reads well.
+	 * Over 103 sampled pages:
+	 *
+	 *   CreateObject(             16 of 17 .asp, 0 of 5 .aspx, 0 of 5
+	 *                             .jsp, 0 of 76 .php
+	 *   Request.ServerVariables   16 of 17 .asp, and 0 of every other
+	 *
+	 * "Response.Write" was the obvious third and is not here: it is in all
+	 * five .aspx as well, so it names the FAMILY and not the member.
+	 *
+	 * ASP.NET IS ASKED FIRST, above, so a page carrying runat="server",
+	 * "<asp:" or System.Web keeps that answer however it builds its COM
+	 * objects. This is the fallback for a page that said nothing else.
+	 */
 	if (kof_txt_has(f, look, "<%@ Language") ||
 	    kof_txt_has(f, look, "Server.CreateObject") ||
+	    kof_txt_has(f, look, "CreateObject(") ||
+	    kof_txt_has(f, look, "Request.ServerVariables") ||
 	    kof_txt_has(f, look, "<%@ LANGUAGE"))
 		return KOF_SCRIPT_ASP;
 	return KOF_SCRIPT_ANY;
@@ -168,10 +190,12 @@ static uint64_t svr_element(kof_buf f, uint64_t i, uint64_t *body, uint64_t *end
 	return f.n;
 }
 
-uint64_t kof_svr_find_tag(kof_buf f, uint64_t look, uint32_t *taglen)
+uint64_t kof_svr_find_tag(kof_buf f, uint64_t look, uint32_t *taglen,
+			  uint32_t *headlen)
 {
 	uint64_t i;
 
+	*headlen = 0;
 	for (i = 0; i + 2u <= look; i++) {
 		if (f.p[i] != '<')
 			continue;
@@ -181,11 +205,16 @@ uint64_t kof_svr_find_tag(kof_buf f, uint64_t look, uint32_t *taglen)
 			if (!pct_closed(f, i, look))
 				continue;
 			*taglen = pct_directives(f, i, look);
+			/* The directives declare the page and nothing runs
+			 * them - see the header note on this function. */
+			*headlen = *taglen;
 			return i;
 		}
 		if (kof_txt_tag_at(f, i, "<%", 2u)) {
 			if (!pct_closed(f, i, look))
 				continue;
+			/* A bare "<%" opens code, so it has no header and the
+			 * island walk must start ON it, not after it. */
 			*taglen = 2u;
 			return i;
 		}

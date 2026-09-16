@@ -588,6 +588,124 @@ int main(void)
 	}
 
 	/*
+	 * A BARE "<%" IS NOT A HEADER, AND THE WALK MUST START ON IT.
+	 *
+	 * "<%@ ... %>" declares the page and is not code, so it is a header.
+	 * "<%" OPENS A BLOCK of code, exactly as "<?php" does. Reporting two
+	 * bytes of header for it started the island walk one byte inside the
+	 * first block: the "<%" that opened it was never seen, the block ran
+	 * to the file's end as markup, and the form pass copied it verbatim -
+	 * measured on kacak.asp, 2691 bytes of VBScript declared to be page
+	 * text while the rest of the same file was formed.
+	 */
+	{
+		static const char bare[] =
+			"<html>\n<body>\n"
+			"<%\nDim x\nx = CreateObject(\"WScript.Shell\")\n%>\n"
+			"<p>done</p>\n";
+		struct kof_script_info info;
+		struct kof_obj_ctx ctx;
+		kof_buf f;
+
+		memset(&ctx, 0, sizeof ctx);
+		f.p = (const uint8_t *)bare;
+		f.n = strlen(bare);
+		if (!kof_script_sniff(f) || !kof_script_parse(f, &info, &ctx)) {
+			fail("bare <%", "sniff or parse refused it");
+		} else {
+			if (info.head_len)
+				fail("bare <%", "a bare \"<%\" was given a "
+				     "header");
+			if (!info.n_island ||
+			    info.island[0].off != info.tag_off)
+				fail("bare <%", "the first island does not "
+				     "start at the tag that opened it");
+			/* And it is classic ASP, said by a second marker
+			 * rather than by a directive there is none of. */
+			if (info.kind != KOF_SCRIPT_ASP)
+				fail("bare <%", "a page with no directive came "
+				     "back with no kind");
+		}
+		check_partition("bare <%", bare);
+	}
+
+	/*
+	 * A BLOCK OF CODE IS NOT ABSORBED BY THE TAG AROUND IT.
+	 *
+	 * One element that wraps code is one block of markup - that is what
+	 * the merge is for, and every island it was written for is a FRAGMENT
+	 * on a line of html. A block that owns its lines is not a fragment,
+	 * and "<p>" around it does not make it page text: newaspcmd.asp kept
+	 * its shell that way, never formed, while the rest of the file was.
+	 */
+	{
+		static const char inline_frag[] =
+			"<%@ Language=VBScript %>\n<table>\n"
+			"<tr><td><% =row %></td></tr>\n"
+			"</table>\n";
+		static const char block_in_p[] =
+			"<%@ Language=VBScript %>\n<p>\n"
+			"<% szCMD = request(\"cmd\")\n"
+			"Response.Write(szCMD)%>\n"
+			"</p>\n";
+		struct kof_script_info info;
+		struct kof_obj_ctx ctx;
+		kof_buf f;
+
+		memset(&ctx, 0, sizeof ctx);
+		f.p = (const uint8_t *)inline_frag;
+		f.n = strlen(inline_frag);
+		if (kof_script_sniff(f) && kof_script_parse(f, &info, &ctx) &&
+		    info.n_island)
+			fail("inline fragment",
+			     "a one line fragment inside <table> stayed code");
+
+		memset(&ctx, 0, sizeof ctx);
+		f.p = (const uint8_t *)block_in_p;
+		f.n = strlen(block_in_p);
+		if (!kof_script_sniff(f) || !kof_script_parse(f, &info, &ctx) ||
+		    !info.n_island)
+			fail("block in <p>",
+			     "a multi line block inside <p> became markup");
+		check_partition("block in <p>", block_in_p);
+	}
+
+	/*
+	 * AND A BLOCK THE FORM PASS EMPTIED IS EMPTY.
+	 *
+	 * A block holding one comment forms to "<%\n%>" - a code region with
+	 * no code in it. The comment was how the file was typed and so was the
+	 * block that was opened to hold it.
+	 */
+	{
+		if (!kof_script_block_bare(KOF_SCRIPT_ASP,
+					   (const uint8_t *)"<%\n%>", 5u))
+			fail("bare block", "\"<%\\n%>\" is not empty");
+		if (!kof_script_block_bare(KOF_SCRIPT_PHP,
+					   (const uint8_t *)"<?php\n?>", 8u))
+			fail("bare block", "\"<?php\\n?>\" is not empty");
+		/* Joined neighbours, which is what the whitespace join makes
+		 * of two emptied blocks. */
+		if (!kof_script_block_bare(KOF_SCRIPT_ASP,
+					   (const uint8_t *)"<%\n%>\n<%\n%>",
+					   11u))
+			fail("bare block", "two emptied blocks are not empty");
+		/* And nothing that has a program in it. */
+		if (kof_script_block_bare(KOF_SCRIPT_ASP,
+					  (const uint8_t *)"<%Next%>", 8u))
+			fail("bare block", "\"<%Next%>\" was called empty");
+		if (kof_script_block_bare(KOF_SCRIPT_ASP,
+					  (const uint8_t *)"<%=x%>", 6u))
+			fail("bare block", "a value block was called empty");
+		/* A kind with no delimiter pair is never bare: its island is
+		 * code with nothing wrapped around it. */
+		if (kof_script_block_bare(KOF_SCRIPT_SHELL,
+					  (const uint8_t *)"", 0u))
+			fail("bare block", "an empty buffer was called a "
+			     "block");
+	}
+
+	/*
 	 * AND THE OTHER HALF HAS TO BE THERE. "<%" is two bytes of punctuation
 	 * that occur in prose - measured, it claimed 208 .pm and 76 .pod files
 	 * on one machine, because POD writes a hash as C<%name>. What none of
@@ -608,6 +726,6 @@ int main(void)
 		return 1;
 	}
 	printf("script islands: partition, directive block, comment, "
-	       "closing half - ok\n");
+	       "bare tag, blocks kept, emptied blocks, closing half - ok\n");
 	return 0;
 }

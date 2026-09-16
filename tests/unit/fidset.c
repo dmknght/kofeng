@@ -158,6 +158,64 @@ int main(void)
 	kof_fidset_close(s);
 
 	/*
+	 * ---- TAKING ONE OUT, which is the only way this set shrinks ----
+	 *
+	 * The run that learns a cached file is not clean is the one that did
+	 * not ask the cache - a --no-cache sweep, or one under a newer
+	 * database. If the entry survives that, the next ordinary run skips a
+	 * file something was just found in.
+	 */
+	s = kof_fidset_open(0xABCDu);
+	if (!kof_fidset_load(s, path))
+		bad("the set did not load for the drop");
+	if (!kof_fidset_drop(s, key[3]))
+		bad("drop refused");
+	if (kof_fidset_has(s, key[3]))
+		bad("a dropped key still answers present");
+	if (!kof_fidset_has(s, key[4]))
+		bad("dropping one key took another with it");
+	/* Dropping the same key twice is free, like adding one twice. */
+	kof_fidset_drop(s, key[3]);
+	kof_fidset_stats(s, &st);
+	if (st.dropped != 1u)
+		bad("dropping a key twice counted twice");
+	if (!kof_fidset_save(s, path))
+		bad("the save after a drop refused");
+	kof_fidset_close(s);
+
+	s = kof_fidset_open(0xABCDu);
+	if (!kof_fidset_load(s, path))
+		bad("the file did not load after a drop");
+	kof_fidset_stats(s, &st);
+	if (st.mapped != N - 1u)
+		bad("the saved file did not lose exactly the dropped key");
+	if (kof_fidset_has(s, key[3]))
+		bad("a dropped key came back from the file");
+	for (i = 0; i < N; i++) {
+		if (i == 3u)
+			continue;
+		if (!kof_fidset_has(s, key[i])) {
+			bad("a drop took an unrelated key with it");
+			break;
+		}
+	}
+	/* And it can be put back: a file that is clean again is cacheable
+	 * again, and the drop list must not outlive the save. */
+	kof_fidset_add(s, key[3]);
+	if (!kof_fidset_has(s, key[3]))
+		bad("a key added after a drop is not there");
+	kof_fidset_close(s);
+
+	s = kof_fidset_open(0xABCDu);
+	(void)kof_fidset_load(s, path);
+	kof_fidset_drop(s, key[9]);
+	kof_fidset_close(s);       /* dropped, never saved: the file is intact */
+	s = kof_fidset_open(0xABCDu);
+	if (!kof_fidset_load(s, path) || !kof_fidset_has(s, key[9]))
+		bad("a drop that was never saved changed the file");
+	kof_fidset_close(s);
+
+	/*
 	 * ---- a different database reads nothing ----
 	 */
 	s = kof_fidset_open(0xABCDu + 1u);
@@ -192,7 +250,7 @@ int main(void)
 		printf("fidset: %d check(s) failed\n", fails);
 		return 1;
 	}
-	printf("fidset: keys, blocks, round trip, merge, db stamp, "
+	printf("fidset: keys, blocks, round trip, merge, drop, db stamp, "
 	       "truncation - ok\n");
 	return 0;
 }

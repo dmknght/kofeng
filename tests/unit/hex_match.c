@@ -213,6 +213,74 @@ int main(void)
 	check("alt-three",   "( 01 | 02 | e8 ) 11",  hay, 2);
 	check("alt-then-gap", "( e8 | e9 ) [2-3] 44", hay, 2);
 
+	/*
+	 * --- a group is a CHOICE AT THIS POSITION, not a jump ---
+	 *
+	 * YARA's own examples, because that is the syntax this claims to be:
+	 * "F4 23 ( 62 B4 | 56 ) 45" matches F42362B445 and F4235645. The third
+	 * case is the one that says it is not a gap - a byte BETWEEN the group
+	 * and what follows it must not match.
+	 */
+	check("yara-alt-long",  "f4 23 ( 62 b4 | 56 ) 45",
+	      "00 f4 23 62 b4 45", 1);
+	check("yara-alt-short", "f4 23 ( 62 b4 | 56 ) 45",
+	      "00 f4 23 56 45", 1);
+	check("alt-is-not-gap", "f4 23 ( 62 b4 | 56 ) 45",
+	      "00 f4 23 56 99 45", -1);
+	check("yara-alt-wild",  "f4 23 ( 62 b4 | 56 | 45 ?? 67 ) 45",
+	      "00 f4 23 45 99 67 45", 1);
+
+	/*
+	 * --- "!" is a byte that is anything BUT this ---
+	 *
+	 * YARA 4.3 spells it "~" and both are read. The nibble form is the one
+	 * worth pinning: "!?0" excludes only the low nibble, so a byte that
+	 * differs in the HIGH nibble and still ends in 0 must not match.
+	 */
+	check("not-byte",      "f4 23 !00 62 b4", "f4 23 01 62 b4", 0);
+	check("not-byte-miss", "f4 23 !00 62 b4", "f4 23 00 62 b4", -1);
+	check("not-tilde",     "f4 23 ~00 62 b4", "f4 23 ff 62 b4", 0);
+	check("not-nibble",    "f4 23 !?0 62 b4", "f4 23 11 62 b4", 0);
+	check("not-nibble-lo", "f4 23 !?0 62 b4", "f4 23 10 62 b4", -1);
+	check("not-nibble-hi", "f4 23 !?0 62 b4", "f4 23 a0 62 b4", -1);
+	check("not-in-alt",    "41 ( !42 | 43 ) 44", "41 43 44", 0);
+	check("not-in-alt-no", "41 ( !42 42 | 43 43 ) 44", "41 42 42 44", -1);
+
+	/*
+	 * A NEGATED BYTE IS NOT A CONCRETE ONE. It names every value but one,
+	 * so counting it into the anchor would have the matcher search for a
+	 * byte the pattern forbids - and then find the pattern nowhere. The run
+	 * here is "62 b4", after the exclusion, not "f4 23 !00 62 b4".
+	 */
+	{
+		uint8_t prog[KOF_HEX_MAX_PROG];
+		struct kof_hex_stat st;
+
+		memset(&st, 0, sizeof st);
+		if (!kof_hex_compile("f4 !00 62 b4 c1", prog, sizeof prog, &st))
+			fail("not-anchor", kof_hex_error());
+		else if (st.anchor_len != 3u)
+			fail("not-anchor",
+			     "the anchor run counted a negated byte");
+	}
+
+	/*
+	 * --- a word folded per character, which is what the cap is for ---
+	 *
+	 * "cmd.exe" in quotes is nine parts. At a cap of eight the first thing
+	 * anybody writes was refused; see KOF_HEX_MAX_STEPS for why raising it
+	 * costs almost nothing.
+	 */
+	check("icase-word",
+	      "22(63|43)(6d|4d)(64|44)2e(65|45)(78|58)(65|45)22",
+	      "00 22 63 6d 64 2e 65 78 65 22", 1);
+	check("icase-word-mixed",
+	      "22(63|43)(6d|4d)(64|44)2e(65|45)(78|58)(65|45)22",
+	      "00 22 43 6d 44 2e 45 78 65 22", 1);
+	check("icase-word-miss",
+	      "22(63|43)(6d|4d)(64|44)2e(65|45)(78|58)(65|45)22",
+	      "00 22 63 6d 64 78 65 78 65 22", -1);
+
 	/* --- edges --- */
 	check("at-start",    "90 90 e8",             hay, 0);
 	check("at-end",      "5d c3 90",             hay, 7);
@@ -234,11 +302,22 @@ int main(void)
 	refuse("unclosed-gap", "e8 [2-4 90");
 	refuse("backwards-gap", "e8 [6-2] 90");
 	refuse("huge-gap",    "e8 [4000-5000] 90");
+	/* "not any byte" is satisfied by no byte at all. */
+	refuse("not-any",     "e8 !?? 90");
+	/* And the cap is still a cap: one part per group, past the limit. */
+	refuse("too-many-parts",
+	       "(41|42)(41|42)(41|42)(41|42)(41|42)(41|42)(41|42)(41|42)"
+	       "(41|42)(41|42)(41|42)(41|42)(41|42)(41|42)(41|42)(41|42)"
+	       "(41|42)(41|42)(41|42)(41|42)(41|42)(41|42)(41|42)(41|42)"
+	       "(41|42)");
 
 	/* --- offsets a module could compute from a hostile file --- */
 	bounds("bounds-plain", "e8 11 22 33");
 	bounds("bounds-gap",   "e8 [1-8] 33");
 	bounds("bounds-alt",   "( e8 | e9 ) [1-4] 33 44 55");
+	/* The negation array is a third read per byte - the one place a
+	 * malformed program could send the walk past the mapping. */
+	bounds("bounds-not",   "e8 !00 !?0 33 44 55");
 
 	printf("hex: compile and match %s\n", failures ? "FAILED" : "ok");
 	return failures != 0;

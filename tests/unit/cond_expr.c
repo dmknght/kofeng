@@ -224,6 +224,108 @@ static void emitting(void)
 }
 
 /*
+ * HOW TWO BLOCKS JOIN, AND THE ONE THAT IS NOT AN OR.
+ *
+ * The panel drew "logic [and]" between two conditions and the generator wrote
+ * two separate ifs - which is two detections, either of which fires on its own.
+ * The word said the opposite of the file, and nothing compares the two.
+ *
+ * So the property here is the conjunction itself: one if, both terms, one
+ * verdict, and the OTHER two words still producing what they always did.
+ */
+static const char *emit_block(void)
+{
+	static char buf[1024];
+	FILE *f;
+	long n;
+	uint32_t k;
+
+	memset(buf, 0, sizeof buf);
+	f = tmpfile();
+	if (!f)
+		return "";
+	for (k = 0; k < E.dr.n_cnd; k++) {
+		if (E.dr.cnd[k].parent >= 0)
+			continue;
+		k = emit_cond(f, &E, k, 0);
+	}
+	n = ftell(f);
+	if (n < 0 || (size_t)n >= sizeof buf)
+		n = 0;
+	rewind(f);
+	if (fread(buf, 1u, (size_t)n, f) != (size_t)n)
+		n = 0;
+	buf[n] = 0;
+	fclose(f);
+	return buf;
+}
+
+static void joining(void)
+{
+	/* emitting() left two matchers declared; two leaf conditions over
+	 * them, each concluding, is the shape that was generated wrong. */
+	E.dr.n_cnd = 2;
+	memset(E.dr.cnd, 0, sizeof E.dr.cnd[0] * 2u);
+	E.dr.cnd[0].parent = E.dr.cnd[1].parent = -1;
+	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1");
+	snprintf(E.dr.cnd[1].expr, sizeof E.dr.cnd[1].expr, "%s", "2");
+	E.dr.cnd[0].level = E.dr.cnd[1].level = LV_INFECT;
+
+	/* ONE if, BOTH terms, ONE verdict. */
+	E.dr.cnd[0].join = JN_AND;
+	EQ(emit_block(),
+	   "if (kof_find_str_any(scan_range_whole_file, s0) && "
+	   "kof_find_str_multi(scan_range_whole_file, s1) >= 2)\n"
+	   "\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n");
+
+	/*
+	 * AND "or" IS TWO BRANCHES, WITH NO "else" IN IT.
+	 *
+	 * A verdict returns, so the second if is reached exactly when the first
+	 * declined - which is what an else would have said, less directly and
+	 * wrongly for a gate. There is no third join value to test because
+	 * there is nothing a third one could mean.
+	 */
+	E.dr.cnd[0].join = JN_OR;
+	EQ(emit_block(),
+	   "if (kof_find_str_any(scan_range_whole_file, s0))\n"
+	   "\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n"
+	   "if (kof_find_str_multi(scan_range_whole_file, s1) >= 2)\n"
+	   "\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n");
+	CK(strstr(emit_block(), "else") == NULL);
+
+	/* A TERM HOLDING AN "or" IS BRACKETED: "&&" binds tighter than "||",
+	 * so without them the second block would swallow half the first. */
+	E.dr.cnd[0].join = JN_AND;
+	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1|2");
+	EQ(emit_block(),
+	   "if ((kof_find_str_any(scan_range_whole_file, s0) || "
+	   "kof_find_str_multi(scan_range_whole_file, s1) >= 2) && "
+	   "kof_find_str_multi(scan_range_whole_file, s1) >= 2)\n"
+	   "\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n");
+
+	/* THE RUN'S VERDICT IS ITS LAST MEMBER'S - the one reached when the
+	 * whole conjunction holds. */
+	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1");
+	E.dr.cnd[1].level = LV_SUSPECT;
+	CK(strstr(emit_block(), "KOF_SCAN_SUSPECT(KOF_MALVAR_AUTO);") != NULL);
+	CK(strstr(emit_block(), "KOF_SCAN_INFECT") == NULL);
+
+	/* AND A GATE IS NOT A TERM. cnd[1] gains a child, so it is a brace
+	 * around branches rather than a value to "&&" - the run ends at
+	 * cnd[0] and both are emitted as themselves. */
+	E.dr.cnd[1].level = LV_INFECT;
+	E.dr.n_cnd = 3;
+	memset(&E.dr.cnd[2], 0, sizeof E.dr.cnd[2]);
+	E.dr.cnd[2].parent = 1;
+	E.dr.cnd[2].level = LV_INFECT;
+	snprintf(E.dr.cnd[2].expr, sizeof E.dr.cnd[2].expr, "%s", "2");
+	CK(cnd_and_run(&E, 0) == 0);
+	CK(strstr(emit_block(), " && ") == NULL);
+	E.dr.n_cnd = 0;
+}
+
+/*
  * A ZEROED VIEW MEANS FILE LAYOUT, AND A MAPPED ONE SURVIVES THE PARSE.
  *
  * THIS IS THE CONTRACT EVERY CALLER RELIES ON, and it is worth pinning because
@@ -323,9 +425,10 @@ int main(void)
 	switching();
 	canon();
 	emitting();
+	joining();
 	view_inputs();
 
 	printf("condition expressions: read, rewrite, switch, canon, emit, "
-	       "view inputs%s\n", fails ? "" : " - ok");
+	       "joins, view inputs%s\n", fails ? "" : " - ok");
 	return fails != 0;
 }

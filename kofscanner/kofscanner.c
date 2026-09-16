@@ -642,7 +642,12 @@ static void usage(const char *argv0)
 		"                  write F decides what this scanner calls clean,\n"
 		"                  so a path given here should be no more reachable\n"
 		"                  than the default is\n"
-		"  --no-cache      do not carry anything between runs. For a scan\n"
+		"  --no-cache      do not TRUST anything carried between runs.\n"
+		"                  A file is scanned whatever the cache says\n"
+		"                  about it and nothing new is written down -\n"
+		"                  but a file this run finds something in is\n"
+		"                  REMOVED from the cache, so the next ordinary\n"
+		"                  run cannot skip it on a stale entry. For a scan\n"
 		"                  that must answer from this database and these\n"
 		"                  bytes alone - a first look at a machine somebody\n"
 		"                  else has been on. Caching WITHIN a run stays on\n"
@@ -849,6 +854,23 @@ static void fid_keep(void *user, const char *path)
 }
 
 /*
+ * AND THE THIRD ANSWER: this file is not clean, so whatever the set says about
+ * it is wrong - see kof_fidset_drop.
+ *
+ * Wired even when the set is not being READ, which is the case it is for: a
+ * --no-cache run is the one that reaches a file an older entry would have
+ * skipped, and its finding has to outlive the run that made it.
+ */
+static void fid_drop(void *user, const char *path)
+{
+	struct kof_fid id;
+
+	if (!user || !kof_fid_of(path, &id))
+		return;
+	(void)kof_fidset_drop((struct kof_fidset *)user, kof_fid_key(&id));
+}
+
+/*
  * ONE FILE BEHIND A MAPPING.
  *
  * WHAT THIS USED TO BE was a second implementation of the cache - identify,
@@ -881,7 +903,7 @@ static void ps_file(struct procscan *p, const char *path)
 /* Returns 0, or a KOF_ERR_*. */
 static int scan_procs(struct run *r, kof_scanner *sc,
 		      struct kof_scan_option *opt, uint64_t db_stamp,
-		      const char *cache_path, const uint32_t *pids,
+		      const char *cache_path, int trust, const uint32_t *pids,
 		      uint32_t n_pids, int compare_modules)
 {
 	struct procscan p;
@@ -913,11 +935,25 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 
 			(void)kof_fidset_load(p.fs, cache_path);
 			kof_fidset_stats(p.fs, &fst);
-			fprintf(stderr, "cache: %llu entr%s loaded\n",
-				(unsigned long long)fst.mapped,
-				fst.mapped == 1u ? "y" : "ies");
-			opt->cache_seen = fid_seen;
-			opt->cache_keep = fid_keep;
+			/*
+			 * LOADED EVEN WHEN IT IS NOT TRUSTED, and that is what
+			 * --no-cache means here.
+			 *
+			 * Not trusting it is `seen` and `keep` staying unset:
+			 * nothing is skipped on its word and nothing new is
+			 * written down. What remains is `drop` - a file this
+			 * run finds something in must not be left behind in a
+			 * set the NEXT run will believe, and the set has to be
+			 * in hand to take it out of.
+			 */
+			if (trust) {
+				fprintf(stderr, "cache: %llu entr%s loaded\n",
+					(unsigned long long)fst.mapped,
+					fst.mapped == 1u ? "y" : "ies");
+				opt->cache_seen = fid_seen;
+				opt->cache_keep = fid_keep;
+			}
+			opt->cache_drop = fid_drop;
 			opt->cache_user = p.fs;
 		}
 	}
@@ -933,6 +969,7 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 		 * is the caller's struct - it outlives this function. */
 		opt->cache_seen = NULL;
 		opt->cache_keep = NULL;
+		opt->cache_drop = NULL;
 		opt->cache_user = NULL;
 		kof_fidset_close(p.fs);
 		fprintf(stderr, "cannot walk the process table (%d)\n", err);
@@ -1064,9 +1101,22 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 		(void)w->describe(w->self, note, sizeof note);
 	w->close(w->self);
 
-	if (p.fs && cache_path && !kof_fidset_save(p.fs, cache_path))
-		fprintf(stderr, "cache: could not be written to %s\n",
-			cache_path);
+	if (p.fs && cache_path) {
+		struct kof_fidset_stat fst;
+
+		/* An untrusted run writes the set back ONLY to take something
+		 * out of it - see the load above. */
+		kof_fidset_stats(p.fs, &fst);
+		if ((trust || fst.dropped) &&
+		    !kof_fidset_save(p.fs, cache_path))
+			fprintf(stderr, "cache: could not be written to %s\n",
+				cache_path);
+		if (fst.dropped)
+			fprintf(stderr, "cache: %llu entr%s dropped - found "
+				"something in a file the cache called clean\n",
+				(unsigned long long)fst.dropped,
+				fst.dropped == 1u ? "y" : "ies");
+	}
 
 	printf("\n--- processes ---\n");
 	printf("walked    %llu process(es)", (unsigned long long)procs);
@@ -1119,9 +1169,11 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 
 		kof_fidset_stats(p.fs, &fst);
 		snprintf(line, sizeof line,
-			 "cache     %llu known, %llu added, %llu hit, %llu miss",
+			 "cache     %llu known, %llu added, %llu dropped, "
+			 "%llu hit, %llu miss",
 			 (unsigned long long)fst.mapped,
 			 (unsigned long long)fst.added,
+			 (unsigned long long)fst.dropped,
 			 (unsigned long long)fst.hit,
 			 (unsigned long long)fst.miss);
 		printf("%s\n", line);
@@ -1499,13 +1551,15 @@ int main(int argc, char **argv)
 		 * find a home for" are one state at the call rather than two
 		 * behaviours inside it.
 		 */
-		if (no_cache)
-			cache_path = NULL;
-		else if (!cache_path &&
-			 koffridge_default_path(cache_buf, sizeof cache_buf))
+		if (!cache_path &&
+		    koffridge_default_path(cache_buf, sizeof cache_buf))
 			cache_path = cache_buf;
 
-		rc = scan_procs(&r, sc, &opt, dv.build, cache_path,
+		/* --no-cache does not mean "there is no cache file": it means
+		 * this run answers from these bytes alone. The set is still
+		 * where it was, and a finding here has to reach it. */
+		rc = scan_procs(&r, sc, &opt, kof_engine_db_stamp(eng),
+				cache_path, !no_cache,
 				pids, n_pids,
 				!opt.heur_off && opt.heur_level >= 2);
 	} else {
@@ -1526,10 +1580,6 @@ int main(int argc, char **argv)
 		 * shown that the contention costs less than the sweep it saves.
 		 */
 		struct kof_fidset *fs = NULL;
-		struct kof_db_version fdv;
-
-		memset(&fdv, 0, sizeof fdv);
-		(void)kof_engine_db_version(eng, &fdv);
 		/*
 		 * AND IT SAYS SO, because the alternative is a silent one.
 		 *
@@ -1544,16 +1594,27 @@ int main(int argc, char **argv)
 			fprintf(stderr, "%s: --jobs turns the between-run "
 				"cache off; it is not written for concurrent "
 				"add\n", argv[0]);
-		if (!no_cache && jobs <= 1) {
+		if (jobs <= 1) {
 			if (!cache_path &&
 			    koffridge_default_path(cache_buf, sizeof cache_buf))
 				cache_path = cache_buf;
 			if (cache_path) {
-				fs = kof_fidset_open(fdv.build);
+				/* The DATABASE, not the date on it - see
+				 * kof_engine_db_stamp for what a build number
+				 * failed to notice. */
+				fs = kof_fidset_open(kof_engine_db_stamp(eng));
 				if (fs) {
 					(void)kof_fidset_load(fs, cache_path);
-					opt.cache_seen = fid_seen;
-					opt.cache_keep = fid_keep;
+					/*
+					 * --no-cache takes the two that
+					 * BELIEVE the set and leaves the one
+					 * that corrects it - see fid_drop.
+					 */
+					if (!no_cache) {
+						opt.cache_seen = fid_seen;
+						opt.cache_keep = fid_keep;
+					}
+					opt.cache_drop = fid_drop;
 					opt.cache_user = fs;
 				}
 			}
@@ -1564,14 +1625,27 @@ int main(int argc, char **argv)
 		else
 			rc = kof_scan_path(sc, target, &opt, on_object, &r);
 		if (fs) {
-			if (!kof_fidset_save(fs, cache_path))
+			struct kof_fidset_stat fst;
+
+			kof_fidset_stats(fs, &fst);
+			/* A run that was told to trust nothing writes the set
+			 * back only when it has something to TAKE OUT of it. */
+			if ((!no_cache || fst.dropped) &&
+			    !kof_fidset_save(fs, cache_path))
 				fprintf(stderr,
 					"cache: could not be written to %s\n",
 					cache_path);
+			if (fst.dropped)
+				fprintf(stderr, "cache: %llu entr%s dropped - "
+					"found something in a file the cache "
+					"called clean\n",
+					(unsigned long long)fst.dropped,
+					fst.dropped == 1u ? "y" : "ies");
 			/* Before the free, and for the same reason scan_procs
 			 * does it: `opt` lives past this block. */
 			opt.cache_seen = NULL;
 			opt.cache_keep = NULL;
+			opt.cache_drop = NULL;
 			opt.cache_user = NULL;
 			kof_fidset_close(fs);
 		}

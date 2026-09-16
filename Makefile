@@ -857,6 +857,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/binaries/sym_any.c \
            libkofeng/kofparsers/kofformat.c \
            libkofeng/kofparsers/scripts/scantext.c \
+           libkofeng/kofparsers/scripts/markup_parse.c \
            libkofeng/kofparsers/scripts/php_parse.c \
            libkofeng/kofparsers/scripts/svrpage_parse.c \
            libkofeng/kofparsers/scripts/script_parse.c \
@@ -1061,6 +1062,57 @@ $(SDK)/include/kofmod/%.h: libkofeng/core/kofmod/%.h
 sdk: $(LIB) $(SDK_HDR)
 	$(info $(SP)  $(LIB))
 
+# ----------------------------------------------------- what the tools link in
+#
+# EVERY SHARED SOURCE LIST IS SET HERE, ABOVE THE FIRST RULE THAT NAMES ONE.
+#
+# A variable used before it is set expands to NOTHING, and in a prerequisite
+# list that is silent: the rule still builds, because the recipe is expanded
+# later and names the files, but make no longer knows the target depends on
+# them. The file has now been caught by this three times, and the third was
+# the worst of them - $(KOFRIDGE_SRC) was empty in kofscanner's prerequisites,
+# so editing the verdict cache never relinked the scanner and a measurement of
+# the change measured the previous build.
+#
+# So the lists live here, before the tools, rather than beside whichever tool
+# reached for one first.
+
+# The event-log format, linked into anything that reads one.
+KOFEVT_SRC := libkoforbit/kofevt/kofevt.c libkoforbit/kofevt/kofevtfmt.c \
+              libkoforbit/kofevt/kofevtlog.c
+
+# The verdict cache. Orbit, not the engine, for the reason koffridge.h gives:
+# what an answer is keyed on and how long it stays good are a host's policy.
+KOFRIDGE_SRC := libkoforbit/koffridge/koffridge.c \
+                libkoforbit/koffridge/fidset.c
+
+# The process record builder, shared by both collectors - see kofproc.h.
+KOFPROC_SRC := libkoforbit/kofproc/kofproc.c
+
+#
+# THE LINUX COLLECTOR. Both halves: the snapshot walk over /proc and the
+# fanotify stream. It is the mirror of libkofgrille and builds only on Linux,
+# the way that one builds only for Windows - a collector is the one part of
+# this tree that cannot be platform-neutral, which is why everything it hands
+# over is.
+ANTARC_SRC := libkofantarc/aproc.c \
+              libkofantarc/apagemap.c \
+              libkofantarc/afan.c \
+              libkofantarc/afid.c
+
+ifeq ($(NATIVE_OS),windows)
+ANTARC_INC :=
+else
+ANTARC_INC := -Ilibkofantarc -Ilibkoforbit/kofevt -Ilibkoforbit/kofmon
+endif
+
+# The report. Orbit for the same reason the cache is: it hashes artefacts and
+# asks the engine what they are, so it depends on libkofeng - and libkofeng
+# must be able to ship without knowing that anything called a report exists.
+KOFREPORT_SRC := libkoforbit/kofreport/kofreport.c \
+                 libkoforbit/kofreport/kofrepart.c \
+                 libkoforbit/kofreport/kofrepfmt.c
+
 # --------------------------------------------------------------- the scanner
 #
 # Built from the staged SDK, not from the source tree. That is what keeps the
@@ -1148,45 +1200,6 @@ $(OUT)/bin/kofscanner$(EXE): $(SCANNER_SRC) $(SCANNER_EXTRA) $(LIB) \
 # database what it already knows about an object. Separate because a second
 # consumer is coming - the viewer - and because the two halves reach for
 # different things: the printer wants the parse, this wants the engine.
-# The event-log format, linked into anything that reads one. Defined here
-# rather than beside its first user because two rules need it and a variable
-# used before it is set expands to nothing - the trap this file has now been
-# caught by twice.
-KOFEVT_SRC := libkoforbit/kofevt/kofevt.c libkoforbit/kofevt/kofevtfmt.c \
-              libkoforbit/kofevt/kofevtlog.c
-
-# The verdict cache. Orbit, not the engine, for the reason koffridge.h gives:
-# what an answer is keyed on and how long it stays good are a host's policy.
-KOFRIDGE_SRC := libkoforbit/koffridge/koffridge.c \
-                libkoforbit/koffridge/fidset.c
-
-# The process record builder, shared by both collectors - see kofproc.h.
-KOFPROC_SRC := libkoforbit/kofproc/kofproc.c
-
-#
-# THE LINUX COLLECTOR. Both halves: the snapshot walk over /proc and the
-# fanotify stream. It is the mirror of libkofgrille and builds only on Linux,
-# the way that one builds only for Windows - a collector is the one part of
-# this tree that cannot be platform-neutral, which is why everything it hands
-# over is.
-ANTARC_SRC := libkofantarc/aproc.c \
-              libkofantarc/apagemap.c \
-              libkofantarc/afan.c \
-              libkofantarc/afid.c
-
-ifeq ($(NATIVE_OS),windows)
-ANTARC_INC :=
-else
-ANTARC_INC := -Ilibkofantarc -Ilibkoforbit/kofevt -Ilibkoforbit/kofmon
-endif
-
-# The report. Orbit for the same reason the cache is: it hashes artefacts and
-# asks the engine what they are, so it depends on libkofeng - and libkofeng
-# must be able to ship without knowing that anything called a report exists.
-KOFREPORT_SRC := libkoforbit/kofreport/kofreport.c \
-                 libkoforbit/kofreport/kofrepart.c \
-                 libkoforbit/kofreport/kofrepfmt.c
-
 EXAMINE_SRC := kofexamine/kofexamine.c kofexamine/kofinspect.c kofexamine/kofeditor.c
 
 $(OUT)/bin/kofexamine$(EXE): $(EXAMINE_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \

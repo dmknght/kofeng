@@ -44,6 +44,7 @@
 /* The script folding pass and the lexical table it is driven from - see
  * kof_scan_script_fold below. */
 #include "../kofparsers/scripts/script_norm.h"
+#include "../kofparsers/scripts/script_parse.h"
 /*
  * The one format header the scan path includes, and it is not a shortcut.
  *
@@ -3135,6 +3136,18 @@ static uint32_t script_form(const struct kof_obj_ctx *ctx,
 			held = verbatim(out, held, cap, s.p, s.n);
 			continue;
 		}
+		/*
+		 * AND A BLOCK THAT CAME OUT EMPTY GOES WITH WHAT EMPTIED IT.
+		 *
+		 * A block holding one comment forms to "<%\n%>" - a code
+		 * region with no code in it. The comment was how the file was
+		 * typed, the block around it was typed to hold the comment, and
+		 * the pass that removes the one removes the other. Dropped
+		 * whole: `at` is already past it, so the markup either side
+		 * joins up and the partition stays exact.
+		 */
+		if (kof_script_block_bare(ctx->subtype, out + held + 1u, w))
+			continue;
 		if (held && out[held - 1] != '\n' && out[held + 1u] != '\n') {
 			out[held] = '\n';
 			held += w + 1u;

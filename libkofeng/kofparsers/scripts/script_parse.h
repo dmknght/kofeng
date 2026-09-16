@@ -45,6 +45,30 @@ int kof_script_sniff(kof_buf file);
 int kof_script_parse(kof_buf file, struct kof_script_info *info,
 		     struct kof_obj_ctx *ctx);
 
+/*
+ * IS THIS BLOCK OF CODE EMPTY - nothing but the delimiters that open and close
+ * it, and whitespace?
+ *
+ *     <%
+ *     ' Information on folder
+ *     %>
+ *
+ * is three lines in the file and NOTHING to a reader once the comment is gone,
+ * which is the first thing the form pass takes out. What was left was "<%\n%>"
+ * - a code region holding no code, a row in the tree, an extent for the matcher
+ * and a thing nobody can do anything with. An author closing the code to write
+ * a note is exactly the "how it was typed" the pass exists to remove, so the
+ * emptied block goes with the note that emptied it.
+ *
+ * ASKED OF THE FORMED BYTES, NOT THE SOURCE. The source is never empty - it has
+ * the comment in it - so this is a question about what came out.
+ *
+ * `kind` picks the delimiter pair, and a kind that has no pair - a shebang
+ * script, a <script runat="server"> island whose tags stayed in the markup -
+ * is never bare: its content is code with nothing wrapped around it.
+ */
+int kof_script_block_bare(uint8_t kind, const uint8_t *p, uint32_t n);
+
 const char *kof_script_region_name(uint32_t bit);
 const char *kof_script_anomaly_name(unsigned index);
 

@@ -45,11 +45,25 @@ uint8_t kof_svr_kind(kof_buf f, uint64_t look);
 /*
  * The offset of the tag that opens a server page, or (uint64_t)-1.
  *
- * `taglen` is how far the header runs from there: the whole directive block for
- * "<%@", the two bytes of a bare "<%", and the whole opening tag for a page
- * that leads with <script runat="server">.
+ * `taglen` is how long the tag itself is - the whole directive block for "<%@",
+ * two bytes for a bare "<%".
+ *
+ * `headlen` IS NOT THE SAME NUMBER, and the two were one for a while.
+ *
+ * "<%@ Page Language=..." DECLARES the page. It is not code, nothing runs it,
+ * and a rule asking for the program does not want it - that is a header.
+ * A bare "<%" declares nothing: it OPENS A BLOCK OF CODE, exactly as "<?php"
+ * does, so it belongs to the body it opens and the header is empty.
+ *
+ * Reporting 2 for it cost more than a mislabelled pair of bytes, because the
+ * island walk starts at the end of the header: it began one byte INSIDE the
+ * first block, missed the "<%" that opened it, and the whole first block
+ * became markup. Measured on a real shell - kacak.asp - that was 2691 bytes of
+ * VBScript, its base64 encoder included, declared to be page text and copied
+ * through the form pass untouched.
  */
-uint64_t kof_svr_find_tag(kof_buf f, uint64_t look, uint32_t *taglen);
+uint64_t kof_svr_find_tag(kof_buf f, uint64_t look, uint32_t *taglen,
+			  uint32_t *headlen);
 
 /* The code islands of a page, filled into info. `from` is the end of the
  * header, so the directives are not code. */

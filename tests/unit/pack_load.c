@@ -35,6 +35,7 @@
 #include "../../libkofeng/kofdb/kofdb.h"
 #include "../../libkofeng/kofdb/kofpack.h"
 #include "../../libkofeng/kofdb/kofpackw.h"
+#include "../../libkofeng/kofeng.h"
 
 static int failures;
 static char root[256];
@@ -804,6 +805,112 @@ static void check_order(void)
 	rmdir(dir);
 }
 
+/*
+ * THE DATABASE STAMP, which is what a verdict cache is keyed on.
+ *
+ * It used to be the build number, and a build number is a DATE: it is the
+ * oldest pack's, to an hour, so a database with a whole family removed reported
+ * the same one as the database it came from. A cache written under one was then
+ * read under the other, and the file that was clean without those signatures
+ * stayed clean with them. That is the one mistake a verdict cache must not
+ * make, and nothing about it is visible in a report.
+ *
+ * So the property here is CONTENT: two databases that differ in any pack, or in
+ * how many packs they have, do not share a stamp.
+ */
+static void check_stamp(void)
+{
+	static const uint8_t code[] = { 0x90, 0xc3 };
+	char dir[512];
+	char pa[640], pb[640];
+	struct kof_engine *e;
+	uint64_t one = 0, two = 0, changed = 0;
+	uint8_t *img;
+	size_t len = 0;
+	struct kof_pw_mod m;
+	int ok = 1;
+
+	snprintf(dir, sizeof dir, "build/kof_stamp_XXXXXX");
+	if (!mkdtemp(dir)) {
+		fail("stamp", "cannot make a directory for the case");
+		return;
+	}
+	snprintf(pa, sizeof pa, "%.480s/a.ksig", dir);
+	snprintf(pb, sizeof pb, "%.480s/b.ksig", dir);
+
+	memset(&m, 0, sizeof m);
+	m.code = code;
+	m.code_len = (uint32_t)sizeof code;
+	m.target_mask = 1;
+	m.size_min = 1;
+	img = kof_pack_build(KOF_PACK_DETECT, &m, 1, &len);
+	ok = img && write_pack(dir, "a.ksig", img, len);
+	free(img);
+
+	if (ok) {
+		e = kof_db_load(dir);
+		if (!e)
+			ok = 0;
+		else {
+			one = kof_engine_db_stamp(e);
+			kof_db_free(e);
+		}
+	}
+	/* A SECOND PACK. One more file in the directory is a different
+	 * database, whatever date is on either of them. */
+	if (ok) {
+		m.size_min = 2;
+		len = 0;
+		img = kof_pack_build(KOF_PACK_DETECT, &m, 1, &len);
+		ok = img && write_pack(dir, "b.ksig", img, len);
+		free(img);
+	}
+	if (ok) {
+		e = kof_db_load(dir);
+		if (!e)
+			ok = 0;
+		else {
+			two = kof_engine_db_stamp(e);
+			kof_db_free(e);
+		}
+	}
+	/* AND ONE PACK REBUILT WITH SOMETHING ELSE IN IT - the case a build
+	 * number cannot see at all, because both were built in the same hour
+	 * by the same build. */
+	if (ok) {
+		m.size_min = 99;
+		len = 0;
+		img = kof_pack_build(KOF_PACK_DETECT, &m, 1, &len);
+		ok = img && write_pack(dir, "b.ksig", img, len);
+		free(img);
+	}
+	if (ok) {
+		e = kof_db_load(dir);
+		if (!e)
+			ok = 0;
+		else {
+			changed = kof_engine_db_stamp(e);
+			kof_db_free(e);
+		}
+	}
+	if (!ok) {
+		fail("stamp", "the case could not be built");
+	} else {
+		if (!one || !two || !changed)
+			fail("stamp", "a loaded database answered zero");
+		if (one == two)
+			fail("stamp", "adding a pack did not change the stamp");
+		if (two == changed)
+			fail("stamp",
+			     "rebuilding a pack did not change the stamp");
+		if (one == changed)
+			fail("stamp", "two different databases share a stamp");
+	}
+	unlink(pa);
+	unlink(pb);
+	rmdir(dir);
+}
+
 int main(void)
 {
 	static const struct {
@@ -894,6 +1001,7 @@ int main(void)
 
 	check_mixed(good, good_len);
 	check_order();
+	check_stamp();
 
 	free(good);
 	rmdir(root);

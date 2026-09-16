@@ -87,7 +87,30 @@
  * gap of 256 and four gaps of 64 cost the same, and only the total appears in the
  * work bound.
  */
-#define KOF_HEX_MAX_STEPS     8u
+/*
+ * STEPS ENTER THE WORK BOUND ADDITIVELY, WHICH IS WHY THIS ONE IS NOT SMALL.
+ *
+ * It was 8, chosen as "far above what a readable pattern uses" against patterns
+ * of two or three parts. One shape breaks that estimate on its first line: a
+ * case-insensitive word written per character. "cmd.exe" is
+ *
+ *     (63|43)(6D|4D)(64|44) 2E (65|45)(78|58)(65|45)
+ *
+ * which is eight parts before any context around it is written, so the very
+ * first thing a researcher tries was refused.
+ *
+ * Raising it costs almost nothing, and the reason is that the walk's expense is
+ * carried by the OTHER two caps. Work is the sum over steps of
+ * (positions x gap span x alternatives), positions are capped by
+ * KOF_HEX_MAX_REACH and the gap spans are capped SUMMED over the whole pattern
+ * by KOF_HEX_MAX_GAP_TOTAL - so steps contribute one term each rather than
+ * multiplying the rest: the bound goes as (KOF_HEX_MAX_GAP_TOTAL + n_steps),
+ * and 8 to 24 moves that from 264 to 280. Six percent, not three times.
+ *
+ * A case-folded word needs no gap at all, so its walk carries ONE position: 24
+ * steps of two alternatives is 48 byte comparisons per candidate.
+ */
+#define KOF_HEX_MAX_STEPS     24u
 #define KOF_HEX_MAX_ALTS      8u    /* per step */
 #define KOF_HEX_MAX_ALT_LEN   256u  /* bytes in one alternative */
 #define KOF_HEX_MAX_GAP_TOTAL 256u  /* summed (gap_max - gap_min) over the pattern */
@@ -159,6 +182,26 @@ struct kof_hex_step {
  * hex pattern to make one rare kind marginally simpler.
  */
 #define KOF_HEX_ALT_MASKED 1u
+
+/*
+ * A BYTE THAT IS ANYTHING BUT THIS - "!00", "!?0" - the "~" of YARA 4.3, spelt
+ * with the character this tree prefers.
+ *
+ * `len` negation bytes follow the mask area, one per byte, 0 or 1. A byte with
+ * a 1 matches when the masked comparison FAILS, which is the whole of it:
+ *
+ *     plain    (d ^ b) & m == 0
+ *     negated  (d ^ b) & m != 0
+ *
+ * NEG IMPLIES MASKED, always, even for "!00" whose mask is 0xff. The mask says
+ * which bits the comparison is about, and a negated byte needs that as much as
+ * a positive one does - "!?0" is "the low nibble is not 0" and nothing about
+ * the high nibble.
+ *
+ * The unmasked memcmp path is untouched: a pattern with no "?" and no "!" is
+ * still one comparison the compiler vectorises.
+ */
+#define KOF_HEX_ALT_NEG    2u
 
 struct kof_hex_alt {
 	uint16_t len;

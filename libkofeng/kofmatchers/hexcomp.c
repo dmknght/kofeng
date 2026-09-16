@@ -12,6 +12,7 @@
  * in the scan path references this one, so it never reaches a scanner binary.
  */
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -31,8 +32,10 @@
 struct hx_alt {
 	uint32_t len;
 	int      masked;
+	int      negged;                     /* any "!" byte in this run */
 	uint8_t  b[KOF_HEX_MAX_ALT_LEN];
 	uint8_t  m[KOF_HEX_MAX_ALT_LEN];
+	uint8_t  n[KOF_HEX_MAX_ALT_LEN];     /* 1 where the byte is negated */
 };
 
 struct hx_step {
@@ -56,9 +59,21 @@ const char *kof_hex_error(void)
 	return hex_msg;
 }
 
-static int hex_err(const char *msg)
+/*
+ * SHORT, AND WITH THE NUMBER IN IT.
+ *
+ * These are read on a build line beside a file and a line number, so what earns
+ * its place is the limit that was hit and what to write instead - not a
+ * paragraph explaining the design. The reasoning lives in hexprog.h, where
+ * somebody who wants it will look.
+ */
+static int hex_err(const char *fmt, ...)
 {
-	snprintf(hex_msg, sizeof hex_msg, "%s", msg);
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(hex_msg, sizeof hex_msg, fmt, ap);
+	va_end(ap);
 	return 0;
 }
 
@@ -76,12 +91,24 @@ static int hex_digit(char c, uint8_t *out)
  * A nibble wildcard is a mask like any other; there is no separate representation
  * for it, which is why "?A" and "??" cost the same to match.
  */
-static int hex_byte(const char **pp, uint8_t *val, uint8_t *mask)
+static int hex_byte(const char **pp, uint8_t *val, uint8_t *mask, int *neg)
 {
 	const char *p = *pp;
 	uint8_t hi = 0, lo = 0;
 	int hi_any = 0, lo_any = 0;
 
+	*neg = 0;
+
+	/*
+	 * "!" NEGATES THE BYTE THAT FOLLOWS IT - "!00" is any byte but zero,
+	 * "!?0" any byte whose low nibble is not zero. YARA spells this "~";
+	 * both are read, because a pattern copied from a YARA rule should not
+	 * have to be retyped to be compiled here.
+	 */
+	if (p[0] == '!' || p[0] == '~') {
+		*neg = 1;
+		p++;
+	}
 	if (p[0] == '?')
 		hi_any = 1;
 	else if (!hex_digit(p[0], &hi))
@@ -93,18 +120,28 @@ static int hex_byte(const char **pp, uint8_t *val, uint8_t *mask)
 
 	*val  = (uint8_t)((hi << 4) | lo);
 	*mask = (uint8_t)((hi_any ? 0x00u : 0xf0u) | (lo_any ? 0x00u : 0x0fu));
+	/* "!??" is "not any byte", which no byte satisfies - a pattern that can
+	 * never match, and a typo rather than an intention. */
+	if (*neg && *mask == 0)
+		return hex_err("\"!??\" excludes every byte, so nothing can "
+			       "match it");
 	*pp = p + 2;
 	return 1;
 }
 
-static int hx_alt_push(struct hx_alt *a, uint8_t v, uint8_t m)
+static int hx_alt_push(struct hx_alt *a, uint8_t v, uint8_t m, int neg)
 {
 	if (a->len >= KOF_HEX_MAX_ALT_LEN)
 		return hex_err("a single run of bytes is too long");
 	a->b[a->len] = v;
 	a->m[a->len] = m;
-	if (m != 0xff)
+	a->n[a->len] = (uint8_t)(neg ? 1 : 0);
+	/* A negated byte is a comparison against a mask however wide the mask
+	 * is, so it leaves the memcmp path with the masked ones. */
+	if (m != 0xff || neg)
 		a->masked = 1;
+	if (neg)
+		a->negged = 1;
 	a->len++;
 	return 1;
 }
@@ -114,8 +151,8 @@ static struct hx_step *hx_new_step(uint32_t gap_min, uint32_t gap_max)
 	struct hx_step *st;
 
 	if (hx_n_steps >= KOF_HEX_MAX_STEPS) {
-		hex_err("too many parts; a pattern is capped so that matching it "
-			      "stays bounded - see KOF_HEX_MAX_STEPS");
+		hex_err("too many parts: %u at most, and each (..) is one",
+			KOF_HEX_MAX_STEPS);
 		return NULL;
 	}
 	st = &hx_step[hx_n_steps++];
@@ -231,9 +268,9 @@ static int hex_parse(const char *text)
 			}
 			gap_total += hi - lo;
 			if (gap_total > KOF_HEX_MAX_GAP_TOTAL)
-				return hex_err("the jumps in this pattern span too "
-						     "much; matching it would not stay "
-						     "bounded");
+				return hex_err("jumps span too much: %u bytes "
+					       "in total at most",
+					       KOF_HEX_MAX_GAP_TOTAL);
 			pend_lo = lo;
 			pend_hi = hi;
 			pending = 1;
@@ -273,6 +310,7 @@ static int hex_parse(const char *text)
 
 				for (;;) {
 					uint8_t v, m;
+					int neg;
 
 					while (*p == ' ' || *p == '\t' || *p == '\n' ||
 					       *p == '\r' || *p == '\\')
@@ -281,16 +319,15 @@ static int hex_parse(const char *text)
 						break;
 					if (*p == '[')
 						return hex_err("a jump inside an "
-								     "alternative is not "
-								     "supported: an "
-								     "alternative has to "
-								     "have a length");
+							       "alternative: each "
+							       "one needs a "
+							       "length");
 					if (*p == '(')
 						return hex_err("nested alternatives "
 								     "are not supported");
-					if (!hex_byte(&p, &v, &m))
+					if (!hex_byte(&p, &v, &m, &neg))
 						return 0;
-					if (!hx_alt_push(a, v, m))
+					if (!hx_alt_push(a, v, m, neg))
 						return 0;
 				}
 				if (a->len == 0)
@@ -322,10 +359,11 @@ static int hex_parse(const char *text)
 
 		{
 			uint8_t v, m;
+			int neg;
 
-			if (!hex_byte(&p, &v, &m))
+			if (!hex_byte(&p, &v, &m, &neg))
 				return 0;
-			if (!hx_alt_push(&cur, v, m))
+			if (!hx_alt_push(&cur, v, m, neg))
 				return 0;
 		}
 	}
@@ -383,7 +421,12 @@ static uint32_t hex_pick_anchor(uint32_t *out_step, uint32_t *out_before_min,
 			const struct hx_alt *a = &st->alt[0];
 
 			for (j = 0; j < a->len; j++) {
-				if (a->m[j] != 0xff) {
+				/* A NEGATED BYTE IS NOT A KNOWN BYTE. Its mask
+				 * is 0xff and it names every value but one, so
+				 * counting it into the run would have the
+				 * matcher search for a byte the pattern
+				 * forbids. */
+				if (a->m[j] != 0xff || a->n[j]) {
 					run = 0;
 					continue;
 				}
@@ -450,7 +493,8 @@ static int hex_emit(uint8_t *img, uint32_t cap, struct kof_hex_stat *stat)
 
 		for (j = 0; j < st->n_alts; j++) {
 			const struct hx_alt *a = &st->alt[j];
-			data_len += a->len + (a->masked ? a->len : 0);
+			data_len += a->len + (a->masked ? a->len : 0) +
+				    (a->negged ? a->len : 0);
 			if (a->len < lo) lo = a->len;
 			if (a->len > hi) hi = a->len;
 		}
@@ -470,13 +514,11 @@ static int hex_emit(uint8_t *img, uint32_t cap, struct kof_hex_stat *stat)
 	anchor_len = hex_pick_anchor(&anchor_step, &anchor_lo, &anchor_hi,
 				     &anchor_in_alt);
 	if (anchor_len == 0)
-		return hex_err("no concrete byte outside an alternative: there is "
-			       "nothing to search for. Add a fixed byte, or write "
-			       "the alternatives as separate patterns and join them "
-			       "with kof_find_str_any");
+		return hex_err("nothing to search for: add a fixed byte outside "
+			       "the alternatives");
 	if (anchor_hi - anchor_lo > KOF_HEX_MAX_GAP_TOTAL)
-		return hex_err("the anchor can sit too many distances from the "
-			       "start of a match");
+		return hex_err("the fixed bytes sit too many distances from the "
+			       "start");
 
 	memset(img, 0, total);
 
@@ -513,13 +555,21 @@ static int hex_emit(uint8_t *img, uint32_t cap, struct kof_hex_stat *stat)
 					      alt_i * sizeof(struct kof_hex_alt);
 
 				put_u16(ap + 0, a->len);
-				put_u16(ap + 2, a->masked ? KOF_HEX_ALT_MASKED : 0u);
+				put_u16(ap + 2,
+					(a->masked ? KOF_HEX_ALT_MASKED : 0u) |
+					(a->negged ? KOF_HEX_ALT_NEG : 0u));
 				put_u32(ap + 4, data_off + wr);
 
 				memcpy(img + data_off + wr, a->b, a->len);
 				wr += a->len;
 				if (a->masked) {
 					memcpy(img + data_off + wr, a->m, a->len);
+					wr += a->len;
+				}
+				/* After the masks, because NEG implies MASKED -
+				 * see KOF_HEX_ALT_NEG. */
+				if (a->negged) {
+					memcpy(img + data_off + wr, a->n, a->len);
 					wr += a->len;
 				}
 			}

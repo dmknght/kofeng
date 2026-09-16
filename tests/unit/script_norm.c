@@ -230,6 +230,38 @@ int main(void)
 	   "$p=\"a\nb\";if($x){}\n", KOF_NORM_ALL,
 	   "and the code after it is formed again");
 
+	/*
+	 * ---- CLASSIC ASP IS VBSCRIPT, AND VBSCRIPT IS NOT C ----
+	 *
+	 * Two bytes the "<%" family disagreed about, both found on one real
+	 * shell (cmdasp.asp) and both inverting the pass for the rest of the
+	 * file once they fired.
+	 *
+	 *   "'"  opens a COMMENT in VBScript and a character literal in C# and
+	 *        Java. Read as a quote, every comment in an asp file opened a
+	 *        string that never closed.
+	 *   "\"   is not an escape at all. "C:\" is a whole string; read as an
+	 *        escaped quote it swallows the closing one and runs on.
+	 *
+	 * What either one produces is the same and is the worst possible shape:
+	 * code read as value and value read as code, so the spacing rules run
+	 * over the INSIDE of strings and stop running over the code.
+	 */
+	eq(KOF_SCRIPT_ASP,
+	   "  ' a remark with a man's apostrophe\n"
+	   "  szTempFile = \"C:\\\" & oFileSys.GetTempName( )\n"
+	   "  Call oScript.Run (\"cmd.exe /c \" & szCMD, 0, True)\n",
+	   "szTempFile=\"C:\\\"&oFileSys.GetTempName()\n"
+	   "Call oScript.Run(\"cmd.exe /c \"&szCMD,0,True)\n",
+	   KOF_NORM_ALL,
+	   "vbs: ' is a comment and \\ is not an escape");
+
+	/* And the same bytes in a JSP island are C: there "'" IS a literal. */
+	eq(KOF_SCRIPT_JSP,
+	   "  char c = 'x';  int n = 1;\n",
+	   "char c='x';int n=1;\n", KOF_NORM_ALL,
+	   "jsp: ' is a character literal");
+
 	/* ---- when it refuses ---- */
 
 	refused(KOF_SCRIPT_ANY, "$a = 1;\n",

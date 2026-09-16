@@ -387,12 +387,11 @@ struct cond {
 	 *
 	 * `op` joins the matcher ids INSIDE this condition - "1 and 2" against
 	 * "1 or 2". `join` says how the next condition at this level attaches
-	 * to this one: as an alternative tried only when this one misses, or as
-	 * a separate test made anyway. A join has nothing to combine unless
+	 * to this one - see enum cnd_join. A join has nothing to combine unless
 	 * there is a sibling below, so it exists only when there is one.
 	 */
 	int      op;                /* 0 and, 1 or - between this one's ids */
-	int      join;              /* 0 alternative, 1 checked as well */
+	int      join;              /* enum cnd_join */
 	int      level;             /* enum cnd_level */
 	int      var_kind;          /* 0 AUTO, 1 GENERIC, 2 custom */
 	char     variant[48];
@@ -773,6 +772,26 @@ int grp_same_set(struct kof_editor *e, uint32_t a, uint32_t b);
 int grp_shared(struct kof_editor *e, uint32_t g);
 uint32_t draft_hash(struct kof_editor *e);
 const char *draft_sample(struct kof_editor *e);
+
+/*
+ * THE SAMPLE LINE: its name AND the hash of the bytes it was written from.
+ *
+ *     Test sample: shell.asp  sha256:9f86d081...
+ *
+ * A name is what a file was called on one machine. Two researchers comparing
+ * rules, or one of them coming back to this a year later, cannot tell from
+ * "shell.asp" whether they are holding the same bytes - and the hash is already
+ * computed for the object, beside the parse, so recording it costs nothing.
+ *
+ * IT IS THE HASH OF THE OBJECT THE RULE IS BEING WRITTEN ABOUT, which for a
+ * carried payload is the payload and not the dropper around it - see
+ * struct object's sha256, which says why that is the useful one.
+ *
+ * Written as one string because it is one fact about one sample: the reader
+ * takes the rest of the line as the entry, so the pair survives a round trip
+ * without a second list to keep in step with the first.
+ */
+void meta_sample_line(struct kof_editor *e, char *out, size_t cap);
 int draft_edited(struct kof_editor *e);
 int draft_dirty(struct kof_editor *e);
 void src_index(struct kof_editor *e);
@@ -843,7 +862,16 @@ void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g);
 void emit_expr(FILE *f, struct kof_editor *e, const char *expr);
 void emit_note(FILE *f, const char *note, int depth);
 void emit_verdict(FILE *f, const struct cond *c, int depth);
-void emit_cond(FILE *f, struct kof_editor *e, uint32_t i, int depth, int chained);
+/*
+ * Emits the condition at `i` AND the rest of its JN_AND run, and answers the
+ * last index it wrote - so a caller walking siblings continues from there
+ * rather than emitting a run member a second time on its own.
+ */
+uint32_t emit_cond(FILE *f, struct kof_editor *e, uint32_t i, int depth);
+
+/* The last member of the JN_AND run that starts at `i`, which is `i` itself
+ * when this condition is joined to the next by anything else. */
+uint32_t cnd_and_run(struct kof_editor *e, uint32_t i);
 void draft_reset(struct kof_editor *e);
 int draft_from_source(struct kof_editor *e, const char *path);
 void draft_from_touch(struct kof_editor *e, const struct kof_touch *t);
@@ -891,6 +919,54 @@ void generate(struct kof_editor *e, int as_new);
  * fine" in a chain of alternatives. It also lets a gate stay a gate.
  */
 enum cnd_level { LV_INFECT = 0, LV_SUSPECT, LV_NONE, LV_COUNT };
+
+/*
+ * HOW THE NEXT CONDITION AT THIS LEVEL ATTACHES TO THIS ONE.
+ *
+ * TWO ANSWERS, BECAUSE THERE ARE TWO THINGS TO SAY.
+ *
+ *   JN_OR    a separate branch. Either can fire, and each is written as its
+ *            own "if".
+ *   JN_AND   one test with this one: BOTH have to hold, and the pair
+ *            concludes once - "if (this && next)".
+ *
+ * THERE IS NO THIRD, AND THERE WAS FOR A WHILE. It was "also" - a fresh "if"
+ * as against "else if" - and it is not a distinction: A VERDICT RETURNS. A
+ * branch that concluded never reaches the next one, whichever way the next one
+ * is written, so "tried only when this missed" and "tried anyway" are the same
+ * branch spelt two ways. A menu that offers both makes the reader choose
+ * between two words that do the same thing.
+ *
+ * SO NOTHING GENERATED SAYS "else". Every branch is its own "if", which is
+ * also the only form that stays correct for a GATE - a branch with children
+ * and no verdict of its own concludes nothing when its children all decline,
+ * and an "else if" after one would skip a detection that was meant to be
+ * tried. A hand-written "else if" reads back as JN_OR, because that is what it
+ * means.
+ *
+ * JN_AND used to be spelt as that third value and drawn as the word "and",
+ * which generated
+ *
+ *     if (A) INFECT;
+ *     if (B) INFECT;
+ *
+ * for two blocks the panel said were ANDed - two detections either of which
+ * fires on its own, which is an OR. The word now means what it says.
+ *
+ * ONLY LEAVES CAN BE CONJOINED. A gate is a brace around branches rather than
+ * a test with a value, and there is nothing to "&&" it with; a run that reaches
+ * one ends there and the gate is emitted as itself.
+ *
+ * THE RUN'S VERDICT IS ITS LAST MEMBER'S, because that is the one reached when
+ * the whole conjunction holds. The verdicts of the members before it cannot
+ * fire - the panel says so on their rows rather than keeping a control that
+ * does nothing.
+ *
+ * A saved run comes back as ONE condition over both matchers, which is the
+ * same rule written the way this format already had for it: the reader builds
+ * a condition per "if", and "if (A && B)" is one if.
+ */
+enum cnd_join { JN_OR = 0, JN_AND, JN_COUNT };
 
 void draft_clear(struct kof_editor *e);
 int meta_take(struct kof_editor *e, const char *t);

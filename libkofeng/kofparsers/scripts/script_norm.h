@@ -61,6 +61,28 @@ struct kof_lex {
 	/* Does a backslash escape inside '...' - sh: no, php: only \' and \\,
 	 * js and python: yes. Only whether the NEXT byte is skipped. */
 	uint8_t     sq_escapes;
+	/*
+	 * AND A LANGUAGE WHERE A BACKSLASH IS NEVER AN ESCAPE.
+	 *
+	 * sq_escapes asks whether '...' escapes; "..." was assumed to, always,
+	 * because every C shaped language does. VBScript and cmd do not: a
+	 * quote inside a VBScript string is written by DOUBLING it, and
+	 * "C:\" is a complete string holding three characters.
+	 *
+	 * Read as an escape that backslash swallows the closing quote, so the
+	 * string runs on into the next line and the pass has code and value the
+	 * wrong way round from there to the end of the file. Measured on
+	 * cmdasp.asp, where the line after `szTempFile = "C:\"` had the spaces
+	 * taken out of its quoted command and the space left in front of its
+	 * "(" - both halves inverted.
+	 *
+	 * SPELLED AS A NEGATIVE on purpose. These rows are designated
+	 * initialisers and a row that does not mention a field gets zero; a
+	 * positive "has_bs_escape" would therefore turn escaping OFF for every
+	 * language whose row nobody remembered to edit, which is the silent
+	 * half of the fault this field exists to fix.
+	 */
+	uint8_t     no_bs_escape;
 	/* ';' where a statement ends with one, 0 where a newline ends it. */
 	uint8_t     stmt_end;
 	/*

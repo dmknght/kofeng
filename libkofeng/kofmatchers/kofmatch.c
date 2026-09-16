@@ -477,11 +477,21 @@ static int alt_at(kof_buf d, uint64_t at, const uint8_t *prog,
 		return memcmp(d.p + at, b, a->len) == 0;
 	{
 		const uint8_t *msk = b + a->len;
+		/* Only when the flag says so - see KOF_HEX_ALT_NEG. An
+		 * alternative without it has no third array to read. */
+		const uint8_t *neg = (a->flags & KOF_HEX_ALT_NEG)
+				     ? msk + a->len : NULL;
 		uint16_t i;
 
-		for (i = 0; i < a->len; i++)
-			if (((d.p[at + i] ^ b[i]) & msk[i]) != 0)
+		for (i = 0; i < a->len; i++) {
+			int differs = ((d.p[at + i] ^ b[i]) & msk[i]) != 0;
+
+			/* A plain byte matches when it does NOT differ, a
+			 * negated one when it does. One comparison either
+			 * way. */
+			if (differs != (neg && neg[i]))
 				return 0;
+		}
 		return 1;
 	}
 }

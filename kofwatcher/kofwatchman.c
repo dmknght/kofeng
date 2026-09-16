@@ -676,8 +676,6 @@ int main(int argc, char **argv)
 				eng = NULL;
 				do_scan = 0;
 			} else {
-				struct kof_db_version dv;
-
 				/*
 				 * KEYED ON THE DATABASE, which is not optional:
 				 * every verdict in the table is only true of
@@ -700,9 +698,13 @@ int main(int argc, char **argv)
 				 * scan_needed answers "scan it" when there is
 				 * no table.
 				 */
-				memset(&dv, 0, sizeof dv);
-				(void)kof_engine_db_version(eng, &dv);
-				fridge = koffridge_open(4096u, dv.build);
+				/* Keyed on the DATABASE, not on the date
+				 * printed on it - see kof_engine_db_stamp. In
+				 * memory and never saved, so the stamp only has
+				 * to outlive this run; it costs nothing to be
+				 * right about it anyway. */
+				fridge = koffridge_open(4096u,
+							kof_engine_db_stamp(eng));
 			}
 		}
 	}

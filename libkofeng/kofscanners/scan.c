@@ -2243,6 +2243,19 @@ static void scan_file(struct walk *w, const char *path)
 	 */
 	if (w->opt->cache_keep && w->found == before)
 		w->opt->cache_keep(w->opt->cache_user, path);
+	/*
+	 * AND A FINDING IS TOLD TO THE CACHE TOO, which is not the same
+	 * statement as not remembering it.
+	 *
+	 * Not remembering leaves whatever an EARLIER run wrote down. This file
+	 * was reached because nothing was consulted or because what was
+	 * consulted did not answer for it - and if a set somewhere still calls
+	 * it clean, the next run that does trust that set walks past a
+	 * detection this one just reported. Saying so is the caller's to act
+	 * on; the engine knows no more than the path it just scanned.
+	 */
+	else if (w->opt->cache_drop && w->found != before)
+		w->opt->cache_drop(w->opt->cache_user, path);
 }
 
 static void read_dir(struct walk *w, const char *dir, uint32_t depth)

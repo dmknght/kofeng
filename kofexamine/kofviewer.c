@@ -572,8 +572,12 @@ static int hex_last(void)
  * counted once: the panel grew three kinds of row after this array was sized,
  * and a table that silently stops short is a panel whose bottom cannot be
  * scrolled to. */
+/* The condition rows are the last term, and a condition became THREE rows -
+ * matchers, verdict, variant - plus its JOIN and its ADD. Spelled from the
+ * limits for the reason the note above gives: a table that silently stops short
+ * is a panel whose bottom cannot be scrolled to. */
 #define MAX_PROW  (OPT_COUNT + 1 + 2 + MAX_DECL + 2 + 2 * MAX_GROUP + 2 + \
-		   4 * MAX_GROUP)
+		   6 * MAX_GROUP)
 
 /*
  * How much encoded text the decoder will hold.
@@ -2137,8 +2141,10 @@ struct view {
 	int         grp_th[MAX_GROUP][2];
 	int         cnd_kid[MAX_GROUP][2];
 	int         cnd_jn[MAX_GROUP][2], cnd_op[MAX_GROUP][2];
-	uint8_t     cseq_kind[4 * MAX_GROUP];
-	uint32_t    cseq_idx[4 * MAX_GROUP];
+	/* Six per condition: its three rows, a JOIN, an ADD and a spare - a
+	 * block is three lines now, not two. */
+	uint8_t     cseq_kind[6 * MAX_GROUP];
+	uint32_t    cseq_idx[6 * MAX_GROUP];
 	uint32_t    n_cseq;
 	/*
 	 * WHERE EACH MATCHER ID ON A CONDITION'S ROW WAS DRAWN.
@@ -6000,19 +6006,85 @@ static int bar_thumb(int top, int bot, uint64_t off, uint64_t total,
  * Every pane's bar comes through here, so there is one style rather than one per
  * caller.
  */
+/*
+ * THE THUMB IN HALF CELLS, which is what makes the bar track smoothly.
+ *
+ * Whole cells are too coarse to read as motion: on a forty row pane over a
+ * long file a whole page of scrolling moves the thumb by nothing, then by one
+ * row. Counting in halves and drawing the odd end with a half block doubles the
+ * resolution, and two is enough - the eye reads it as continuous and the cost
+ * is one glyph.
+ *
+ * Returns the first half covered and writes how many halves the thumb is, or -1
+ * when there is nothing to scroll.
+ */
+static int bar_halves(int cells, uint64_t off, uint64_t total, uint64_t shown,
+		      int *out_len)
+{
+	int halves = cells * 2, t1;
+	uint64_t max;
+
+	if (cells < 2 || !total || shown >= total)
+		return -1;
+	max = total - shown;
+	t1 = (int)((uint64_t)halves * shown / total);
+	if (t1 < 1)
+		t1 = 1;
+	*out_len = t1;
+	return (int)((uint64_t)(halves - t1) * (off < max ? off : max) / max);
+}
+
 static void scrollbar(struct out *o, int col, int top, int bot,
 		      uint64_t off, uint64_t total, uint64_t shown)
 {
-	int rows = bot - top + 1, i, t0, t1;
+	int rows = bot - top + 1, i, h0, h1;
 
-	t0 = bar_thumb(top, bot, off, total, shown, &t1);
-	if (t0 < 0)
+	h0 = bar_halves(rows, off, total, shown, &h1);
+	if (h0 < 0)
 		return;
 	for (i = 0; i < rows; i++) {
+		int a = i * 2, b = a + 1;          /* this cell's two halves */
+		int hi = a >= h0 && a < h0 + h1;   /* upper half covered */
+		int lo = b >= h0 && b < h0 + h1;   /* lower half covered */
+
 		out_at(o, top + i, col);
-		out_str(o, i >= t0 && i < t0 + t1
-			   ? A_BOLD G_V A_OFF
-			   : A_DIM G_V A_OFF);
+		if (hi && lo)
+			out_str(o, A_BOLD G_THUMB A_OFF);
+		else if (hi)
+			out_str(o, A_BOLD G_HALF_T A_OFF);
+		else if (lo)
+			out_str(o, A_BOLD G_HALF_B A_OFF);
+		else
+			out_str(o, A_DIM G_V A_OFF);
+	}
+}
+
+/*
+ * The same bar lying down. A pane whose lines run off the right has no other
+ * way to say how far right they go, or where in that width the reader is.
+ */
+static void scrollbar_h(struct out *o, int row, int left, int right,
+			uint64_t off, uint64_t total, uint64_t shown)
+{
+	int cols = right - left + 1, i, h0, h1;
+
+	h0 = bar_halves(cols, off, total, shown, &h1);
+	if (h0 < 0)
+		return;
+	out_at(o, row, left);
+	for (i = 0; i < cols; i++) {
+		int a = i * 2, b = a + 1;
+		int lf = a >= h0 && a < h0 + h1;
+		int rt = b >= h0 && b < h0 + h1;
+
+		if (lf && rt)
+			out_str(o, A_BOLD G_THUMB A_OFF);
+		else if (lf)
+			out_str(o, A_BOLD G_HALF_L A_OFF);
+		else if (rt)
+			out_str(o, A_BOLD G_HALF_R A_OFF);
+		else
+			out_str(o, A_DIM G_HBAR A_OFF);
 	}
 }
 
@@ -6580,6 +6652,30 @@ static uint64_t txt_max_top(struct view *v, const uint8_t *base,
 static int txt_x0(void) { return TREE_W + 3 + TXT_GUTTER + 1; }
 
 /*
+ * DOES THE SCRIPT PANE SHOW A HORIZONTAL BAR, and therefore have one row fewer
+ * for text?
+ *
+ * One function because three places need the same answer and they must not
+ * disagree: the drawer, the click mapping and the scroll limit. A pane that
+ * drew forty rows while clicks were mapped against forty-one puts the caret one
+ * line off, which is the kind of fault that looks like the mouse is broken.
+ *
+ * Measured against the width WITH a vertical bar, so the answer does not depend
+ * on whether that one is shown - otherwise each would need the other first.
+ */
+static int txt_hbar_on(const struct view *v)
+{
+	int wide = g_cols - txt_x0() - 1;
+
+	return wide > 0 && v->txt_maxlen > (uint32_t)wide;
+}
+
+static int txt_bot(const struct view *v)
+{
+	return hex_last() - (txt_hbar_on(v) ? 1 : 0);
+}
+
+/*
  * ONE BYTE, ONE COLUMN, AND NO INTERPRETATION - the same rule the hex pane's
  * ascii gutter states for itself.
  *
@@ -6647,11 +6743,26 @@ static int txt_mark_in(const uint64_t *p, uint32_t n, uint64_t lo, uint64_t hi)
 /*
  * The two marks. Backgrounds rather than foregrounds, so they read as a mark on
  * the number and not as a different KIND of number - the gutter already uses
- * colour to mean "this is a place". Neither is used elsewhere in this file, so
- * neither can be confused with a button, a selection or a search hit.
+ * colour to mean "this is a place".
+ *
+ * AND OUT OF THE VERDICT FAMILY, which is the constraint that picks them. A
+ * reader is looking for where a marker matched, and those are red, yellow and
+ * magenta:
+ *
+ *     A_HIT1  41   counted by the module
+ *     A_HIT2  43   present, outside its regions
+ *     A_HIT3  45   declared by the draft
+ *
+ * so 41, 43, 45 and their bright forms 101, 103, 105 are spoken for. A mark in
+ * one of them says "something matched here" to an eye that has learnt the pane,
+ * and these two say nothing of the kind - they are structure. The first choice
+ * here was 105, one shade off A_HIT3, which is exactly that mistake.
+ *
+ * Two cool colours, neither of them any hit's, and far enough apart in hue to
+ * tell code from markup at a glance.
  */
-#define A_T_BODY "\033[46;30m"   /* a run of code starts here */
-#define A_T_MARK "\033[105;30m"  /* a run of markup starts here */
+#define A_T_BODY "\033[46;30m"   /* cyan - a run of code starts here */
+#define A_T_MARK "\033[104;30m"  /* blue - a run of markup starts here */
 
 static void draw_text(struct out *o, struct view *v)
 {
@@ -6661,15 +6772,45 @@ static void draw_text(struct out *o, struct view *v)
 	int wide = g_cols - x0;
 	uint64_t base_n = ob->buf.n;
 	const uint8_t *base = ob->buf.p;
-	uint64_t at, ln;
-	int row;
+	uint64_t at, ln, maxtop;
+	int row, vbar, hbar;
 	struct txt_marks marks;
 
 	if (!base)
 		base_n = 0;
+	txt_marks_of(v, &marks);
+
+	/*
+	 * THE TWO BARS, AND EACH ONLY WHEN THERE IS SOMETHING OFF SCREEN.
+	 *
+	 * A pane of text says nothing about how much of the file it is showing
+	 * or where in it the reader is; the hex pane has had a bar for that all
+	 * along and this one had neither. Sideways matters at least as much
+	 * here - a minified shell is one line of forty kilobytes, and without a
+	 * bar there is nothing to say that the line continues, let alone how
+	 * far.
+	 *
+	 * Each takes its space from the text only when it is drawn, so a file
+	 * that fits keeps every column and every row.
+	 *
+	 * DOWN THE PAGE THE SCALE IS BYTES, not lines. Counting the lines of a
+	 * region means walking it, which is a pass over the object on every
+	 * frame; the byte offset is already known and moves monotonically with
+	 * the line, so the thumb sits in the right place and costs nothing.
+	 * txt_max_top is the furthest it can be scrolled, so the bytes still
+	 * below the top of the pane are what is left to see.
+	 */
+	/* txt_maxlen is last frame's widest line - the only width there is
+	 * before the rows are walked, and it changes only when the view does. */
+	hbar = txt_hbar_on(v);
+	if (hbar)
+		bot--;
+	maxtop = txt_max_top(v, base, base_n, bot - top + 1);
+	vbar = v->rgn_len > 0 && maxtop > 0;
+	if (vbar)
+		wide--;
 	if (wide < 1)
 		wide = 1;
-	txt_marks_of(v, &marks);
 
 	at = txt_line_start(v, base, base_n, v->rgn_at);
 	ln = txt_line_of(v, base, base_n, at);
@@ -6755,6 +6896,27 @@ static void draw_text(struct out *o, struct view *v)
 		at = end;
 		ln++;
 	}
+	if (vbar)
+		scrollbar(o, g_cols, top, bot, v->rgn_at, v->rgn_len,
+			  v->rgn_len - maxtop);
+	if (hbar) {
+		scrollbar_h(o, bot + 1, x0, g_cols - (vbar ? 1 : 0),
+			    v->txt_col, v->txt_maxlen, (uint64_t)wide);
+		/*
+		 * AND THE CORNER WHERE THEY MEET, which neither bar owns.
+		 *
+		 * The vertical one stops at the last text row and the
+		 * horizontal one stops one column short of it, so the cell
+		 * between them was painted by nobody - a notch out of the
+		 * bottom right that reads as the bar having run out. A column
+		 * no drawer owns is also a column that keeps whatever was last
+		 * in it, which this file has been bitten by before.
+		 */
+		if (vbar) {
+			out_at(o, bot + 1, g_cols);
+			out_str(o, A_DIM G_V A_OFF);
+		}
+	}
 }
 
 /* Which byte a click landed on, and where it is in the line. Mirrors
@@ -6770,7 +6932,8 @@ static int text_under(struct view *v, int row, int col, uint64_t *out,
 
 	if (!base)
 		base_n = 0;
-	if (row < hex_top() || row > hex_last() || col < x0)
+	/* Not the horizontal bar's row - see txt_bot. */
+	if (row < hex_top() || row > txt_bot(v) || col < x0)
 		return 0;
 
 	at = txt_line_start(v, base, base_n, v->rgn_at);
@@ -6881,7 +7044,7 @@ static uint64_t txt_home_end(struct view *v)
 
 	if (!b)
 		n = 0;
-	return txt_max_top(v, b, n, hex_last() - hex_top() + 1);
+	return txt_max_top(v, b, n, txt_bot(v) - hex_top() + 1);
 }
 
 /*
@@ -7953,11 +8116,18 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		if (!c->n)
 			return;
 	} else if (what == CH_LOGIC) {
-		/* The operators, unglossed. They are the two words a signature
-		 * author already thinks in, and a sentence explaining what "or"
-		 * means is a sentence they read once and then read past. */
-		ch_add(c, "or");
-		ch_add(c, "and");
+		/*
+		 * TWO, IN THE ORDER OF enum cnd_join.
+		 *
+		 * There were three for a while, and the third - "also" - said
+		 * nothing the first did not: a verdict returns, so two blocks
+		 * either of which can fire are two branches however the second
+		 * one is written. The pair that is left is the pair that
+		 * differs, and each is glossed because "or" and "and" between
+		 * two BLOCKS is exactly what was being read wrong.
+		 */
+		ch_add(c, "or    either one can fire");
+		ch_add(c, "and   both must hold, fires once");
 	} else if (what == CH_FMT) {
 		/*
 		 * ONE FORMAT'S OWN MENU: swap it for another, or drop it.
@@ -9002,7 +9172,16 @@ static void draw_chooser(struct out *o, struct view *v)
  * rule that joins one top level condition to the next above that condition's
  * children rather than below them, which is where it belonged.
  */
-enum cseq_kind { CS_COND = 0, CS_MATCH, CS_JOIN, CS_ADD };
+/*
+ * A CONDITION IS THREE LINES, IN THE ORDER IT IS DECIDED.
+ *
+ * It was two - the verdict and its variant on one row, the matchers on the
+ * next - which reads backwards. The rows now go matchers, variant name,
+ * verdict: what the condition IS, what its answer will be CALLED, and the
+ * answer. Each row says one thing, and the conclusion is at the foot of the
+ * block where a conclusion belongs.
+ */
+enum cseq_kind { CS_COND = 0, CS_MATCH, CS_VAR, CS_JOIN, CS_ADD };
 
 static void cseq_put(struct view *v, int kind, uint32_t idx)
 {
@@ -9021,13 +9200,15 @@ static void cnd_seq(struct view *v)
 	for (t = 0; t < v->ed.dr.n_cnd; t++) {
 		if (v->ed.dr.cnd[t].parent >= 0)
 			continue;
-		cseq_put(v, CS_COND, t);
 		cseq_put(v, CS_MATCH, t);
+		cseq_put(v, CS_VAR, t);
+		cseq_put(v, CS_COND, t);
 		for (c = 0; c < v->ed.dr.n_cnd; c++) {
 			if (v->ed.dr.cnd[c].parent != (int)t)
 				continue;
-			cseq_put(v, CS_COND, c);
 			cseq_put(v, CS_MATCH, c);
+			cseq_put(v, CS_VAR, c);
+			cseq_put(v, CS_COND, c);
 			if (cnd_more_siblings(&v->ed, c))
 				cseq_put(v, CS_JOIN, c);
 		}
@@ -9118,17 +9299,28 @@ static void prow_build(struct view *v)
 		for (i = 0; i < v->ed.dr.n_decl; i++)
 			prow_add(v, RW_STR, i);
 	}
+	/*
+	 * THE ADD BUTTON AFTER THE THINGS IT ADDS TO, not before them.
+	 *
+	 * It sat under the heading, so the list a reader is building grew
+	 * DOWNWARDS FROM UNDER THE BUTTON: the thing just added appeared below
+	 * it, the button stayed where it was, and the eye had to go back up to
+	 * add the next one. At the foot of the block the button is where the
+	 * last thing added is, which is where the reader is already looking -
+	 * and it is the shape the condition block has always had, where
+	 * CS_ADD closes the block.
+	 */
 	prow_add(v, RW_MATHDR, 0);
-	prow_add(v, RW_ADDM, 0);
 	for (i = 0; i < v->ed.dr.n_grp; i++) {
 		prow_add(v, RW_MATCH, i);
 		prow_add(v, RW_MARKERS, i);
 	}
+	prow_add(v, RW_ADDM, 0);
 	prow_add(v, RW_CNDHDR, 0);
-	prow_add(v, RW_ADDC, 0);
 	cnd_seq(v);
 	for (i = 0; i < v->n_cseq; i++)
 		prow_add(v, RW_COND, i);
+	prow_add(v, RW_ADDC, 0);
 }
 
 /*
@@ -11780,6 +11972,9 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 				v->cnd_lv[ci][0] = v->cnd_lv[ci][1] = -1;
 				v->cnd_ex[ci][0] = v->cnd_ex[ci][1] = -1;
 				v->cnd_vr[ci][0] = v->cnd_vr[ci][1] = -1;
+			} else if (v->cseq_kind[g] == CS_VAR) {
+				v->cnd_vr[ci][0] = v->cnd_vr[ci][1] = -1;
+				v->cnd_nm[ci][0] = v->cnd_nm[ci][1] = -1;
 			} else if (v->cseq_kind[g] == CS_MATCH) {
 				v->cnd_mt[ci][0] = v->cnd_mt[ci][1] = -1;
 			}
@@ -11790,13 +11985,6 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 		hit_add(v, PR(r), 0, g_cols - 1, hit_row_cond, g);
 
 		if (v->cseq_kind[g] == CS_COND) {
-			char lab[16], lead[24];
-
-			/*
-			 * A connector, not just an indent: two spaces of margin
-			 * is a difference the eye has to measure, a line drawn
-			 * from the parent to the child is one it reads.
-			 */
 			/*
 			 * One vertical rail and nothing else.
 			 *
@@ -11806,24 +11994,85 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 			 * them. Four kinds of line art to say one thing: these
 			 * rows are inside that one. A single bar in a fixed
 			 * column says it without being read as anything.
+			 *
+			 * The label sits on the block's FIRST row now - see the
+			 * matchers branch - so this one continues the rail like
+			 * every other row inside the block.
 			 */
-			cnd_label(&v->ed, ci, lab, sizeof lab);
-			out_fmt(o, "%*s", deep ? 6 : 1, "");
-			out_fmt(o, "%s%-6.6s" A_OFF,
-				ci == v->ed.dr.cur_cnd ? A_SEL : A_DIM, lab);
-			(void)lead;
+			cnd_rail(o, deep, cnd_more_siblings(&v->ed, ci));
 
 			out_str(o, A_DIM "Verdict: " A_OFF);
 			v->cnd_lv[ci][0] = 1 + (int)o->col_hint;
+			/*
+			 * A BLOCK ANDED TO THE NEXT ONE HAS NO VERDICT OF ITS
+			 * OWN, and the row says so rather than offering a
+			 * control that cannot fire.
+			 *
+			 * "and" makes the two blocks one test - "if (A && B)"
+			 * - and one test reports once, when the whole of it
+			 * holds. That is the LAST block in the run; a verdict
+			 * set on an earlier one would have to fire on A alone,
+			 * which is the OR this row's word says it is not.
+			 */
+			if (cnd_and_run(&v->ed, ci) != ci) {
+				out_str(o, A_DIM "with the block below" A_OFF);
+				v->cnd_lv[ci][0] = v->cnd_lv[ci][1] = -1;
+				out_at(o, PR(r), g_cols - 4);
+				out_str(o, A_BAD "[x]" A_OFF);
+				r++;
+				continue;
+			}
+			/*
+			 * NO VERDICT IS STILL A CHOICE, so it is drawn like
+			 * one.
+			 *
+			 * It was A_DIM, which is what this panel uses for text
+			 * that cannot be acted on - a label, a rule, a word
+			 * beside a control. A reader who had set a condition to
+			 * skip then saw its verdict in the colour of furniture
+			 * and had no reason to think it could be clicked back.
+			 *
+			 * A_ID is the colour of a name a reader picked, which
+			 * is exactly what this is; the other two keep the
+			 * colours of what they mean.
+			 */
 			out_fmt(o, "%s%s" A_OFF,
 				c2->level == LV_SUSPECT ? A_WARN :
-				c2->level == LV_NONE ? A_DIM : A_BAD,
+				c2->level == LV_NONE ? A_ID : A_BAD,
 				lvl_word[c2->level % LV_COUNT]);
 			v->cnd_lv[ci][1] = (int)o->col_hint;
+			/* Removing the condition belongs beside the thing it
+			 * removes, and the verdict row is the one carrying its
+			 * label - see the click handler, which reads this
+			 * column on this row. */
+			out_at(o, PR(r), g_cols - 4);
+			out_str(o, A_BAD "[x]" A_OFF);
+			r++;
+			continue;
+		} else if (v->cseq_kind[g] == CS_VAR) {
+			/*
+			 * THE VARIANT NAMES THE VERDICT, so it follows it on a
+			 * row of its own rather than sharing one.
+			 *
+			 * THE ROW STAYS WHEN THERE IS NO VERDICT. It used to be
+			 * left blank, and a block that loses a line when a
+			 * control above it changes reads as a bug: the reader
+			 * cannot tell whether the setting went away or the
+			 * drawing did. So the label is always there, and what
+			 * follows it says why there is nothing to set - a
+			 * condition that concludes nothing has no name to give.
+			 */
+			cnd_rail(o, deep, cnd_more_siblings(&v->ed, ci));
 			v->cnd_vr[ci][0] = v->cnd_vr[ci][1] = -1;
 			v->cnd_nm[ci][0] = v->cnd_nm[ci][1] = -1;
-			if (c2->level != LV_NONE) {
-				out_str(o, A_DIM "   Variant name: " A_OFF);
+			out_str(o, A_DIM "Variant: " A_OFF);
+			/* Nothing to name where there is no verdict to name -
+			 * see the verdict row above. */
+			if (cnd_and_run(&v->ed, ci) != ci) {
+				out_str(o, A_DIM "None" A_OFF);
+			} else if (c2->level == LV_NONE) {
+				out_str(o, A_DIM "None" A_OFF);
+			} else {
 				v->cnd_vr[ci][0] = 1 + (int)o->col_hint;
 				out_fmt(o, "%s%s" A_OFF, A_ID,
 					c2->var_kind == 2 ? "Custom" :
@@ -11853,11 +12102,6 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 					v->cnd_nm[ci][1] = (int)o->col_hint;
 				}
 			}
-			/* The comment lives on the row below, beside the
-			 * matchers it explains. Two boxes on two rows of one
-			 * condition was one box too many to look at. */
-			out_at(o, PR(r), g_cols - 4);
-			out_str(o, A_BAD "[x]" A_OFF);
 			r++;
 			continue;
 		}
@@ -11865,10 +12109,25 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 		if (v->cseq_kind[g] == CS_MATCH) {
 			uint32_t m2;
 
-			/* Indented under the condition it belongs to, and
-			 * continuing the stroke while a sibling is still
-			 * below. */
-			cnd_rail(o, deep, 1);
+			/*
+			 * THE BLOCK'S NAME GOES ON ITS FIRST ROW, which this
+			 * now is. A label on the last line names a thing the
+			 * reader has already read past; on the first it says
+			 * what they are about to read, and it is the mark that
+			 * shows which condition the cursor is on.
+			 *
+			 * Same width as the rail it replaces - indent plus six
+			 * columns - so the rows under it still line up.
+			 */
+			{
+				char lab2[16];
+
+				cnd_label(&v->ed, ci, lab2, sizeof lab2);
+				out_fmt(o, "%*s", deep ? 6 : 1, "");
+				out_fmt(o, "%s%-6.6s" A_OFF,
+					ci == v->ed.dr.cur_cnd ? A_SEL : A_DIM,
+					lab2);
+			}
 			out_str(o, A_DIM "Matchers: " A_OFF);
 			for (m2 = 0; m2 < MAX_GROUP; m2++)
 				v->cnd_ids[ci][m2][0] =
@@ -11938,9 +12197,9 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 				if (first2)
 					out_fmt(o, A_DIM "%s" A_OFF,
 						cnd_children(&v->ed, ci)
-						? "group only" : "none yet");
+						? "group only" : "None");
 			} else {
-				out_str(o, A_DIM "none defined yet" A_OFF);
+				out_str(o, A_DIM "None" A_OFF);
 			}
 ids_done:
 			v->cnd_mt[ci][0] = v->cnd_mt[ci][1] = -1;
@@ -11975,8 +12234,8 @@ ids_done:
 			out_str(o, A_DIM "logic " A_OFF);
 			v->cnd_jn[ci][0] = 1 + (int)o->col_hint;
 			out_fmt(o, "%s[%s]" A_OFF,
-				c2->join ? A_AND : A_OR,
-				c2->join ? "and" : "or");
+				c2->join == JN_AND ? A_AND : A_OR,
+				c2->join == JN_AND ? "and" : "or");
 			v->cnd_jn[ci][1] = (int)o->col_hint;
 			r++;
 			continue;
@@ -13329,18 +13588,37 @@ static void menu_open_at(struct view *v, int row, int col)
 	if (v->menu_col < 1)
 		v->menu_col = 1;
 
-	/* Open on something choosable, so Enter always does what is highlighted. */
-	{
-		struct kv_menu m = ctx_menu(v);
-
-		v->menu_sel = kv_menu_first(&m);
-	}
+	/*
+	 * OPEN WITH NOTHING HIGHLIGHTED.
+	 *
+	 * It opened on the first choosable row, so that Enter always had
+	 * something to do. What that actually does is point at an item the
+	 * reader did not choose: the menu appears under the pointer with one
+	 * row already lit, which reads as "this is what will happen" - and the
+	 * row it lands on is whatever happens to be first, today "View hex".
+	 *
+	 * A menu opened by a right click is a list to look at. The highlight is
+	 * the reader's answer, so it starts empty and the first arrow key or
+	 * the pointer puts it somewhere. Enter with nothing chosen does
+	 * nothing, which is what "I have not chosen" should do.
+	 */
+	v->menu_sel = -1;
 }
 
 static void menu_step(struct view *v, int d)
 {
 	struct kv_menu m = ctx_menu(v);
 
+	/*
+	 * FROM NOTHING, EITHER END. The menu opens with no row lit, so the
+	 * first key has to enter the list rather than step within it - down
+	 * from the top, up from the bottom, which is what the key means.
+	 */
+	if (v->menu_sel < 0) {
+		v->menu_sel = d > 0 ? kv_menu_first(&m)
+				    : kv_menu_step(&m, kv_menu_rows(&m), -1);
+		return;
+	}
 	v->menu_sel = kv_menu_step(&m, v->menu_sel, d);
 }
 
@@ -13830,12 +14108,35 @@ static void decl_edit_open(struct view *v, uint32_t i)
 						      d->bytes[k]);
 		}
 	} else {
-		uint32_t k, n = d->nbytes;
+		/*
+		 * TAB, NEWLINE AND RETURN AS ESCAPES, because the box is ONE
+		 * LINE. A marker that crosses a line is declarable now, and a
+		 * raw newline dropped into a single-line field is a character
+		 * the reader can neither see nor delete. Spelled the way the
+		 * generated source spells them, so what is on screen is what is
+		 * in the file; decl_edit_commit reads them back.
+		 *
+		 * A backslash is escaped too, or a marker holding the two
+		 * characters "\" and "n" would come back as a newline.
+		 */
+		uint32_t k;
+		size_t n = 0;
 
-		if (n >= sizeof v->ed.dr.sedit)
-			n = (uint32_t)sizeof v->ed.dr.sedit - 1u;
-		for (k = 0; k < n; k++)
-			v->ed.dr.sedit[k] = (char)d->bytes[k];
+		for (k = 0; k < d->nbytes &&
+			    n + 2u < sizeof v->ed.dr.sedit; k++) {
+			uint8_t c = d->bytes[k];
+			const char *esc = c == '\t' ? "\\t" :
+					  c == '\n' ? "\\n" :
+					  c == '\r' ? "\\r" :
+					  c == '\\' ? "\\\\" : NULL;
+
+			if (esc) {
+				v->ed.dr.sedit[n++] = esc[0];
+				v->ed.dr.sedit[n++] = esc[1];
+			} else {
+				v->ed.dr.sedit[n++] = (char)c;
+			}
+		}
 		v->ed.dr.sedit[n] = 0;
 	}
 	v->ed.dr.sedit_off = 0;
@@ -14951,35 +15252,22 @@ static uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off)
 		if (v->node[k].obj != obj)
 			continue;
 		/*
-		 * A PIECE ROW IS NEVER WHERE A JUMP LANDS.
+		 * A ROW THAT OWNS ITS BYTES IS ASKED ABOUT THOSE BYTES, and
+		 * not about its mask.
 		 *
-		 * This function answers "where should the tree go for this
-		 * offset", and every caller of it MOVES the cursor there. For a
-		 * binary the answer is the narrowest region, and narrowing is
-		 * the useful thing: CODE and DATA are far apart and landing in
-		 * the right one is most of what the reader wanted to know.
+		 * Every piece row of a region carries that region's mask, so
+		 * resolving it answers about all the runs at once and the first
+		 * such row would claim every offset in the region. An entry row
+		 * has the same fault: its mask is KOF_SCAN_ALL.
 		 *
-		 * A script's piece rows are not that. They are one presentation
-		 * of the file - code, markup, code - and a page has eighty of
-		 * them. Narrowing into one drags the reader out of the object
-		 * they were searching and into a fragment of it: a search over
-		 * the whole file put the cursor in the first run of code, and
-		 * the next Find then started from a row whose extents hold
-		 * almost none of the file.
-		 *
-		 * So a piece is skipped and the object row is the answer, which
-		 * is the row the reader was on. It is still selectable by
-		 * clicking it - that is a reader asking for one run, which is a
-		 * different thing from a jump arriving at one.
-		 *
-		 * An ENTRY row keeps the old treatment and is asked about its
-		 * own bytes: it is a thing the file CONTAINS rather than a way
-		 * of looking at it, and its mask - KOF_SCAN_ALL - would
-		 * otherwise make the first one claim every offset.
+		 * WHERE the cursor should end up is a separate question, and
+		 * not this function's - see the `narrow` argument to view_show.
+		 * Answering it here, by refusing to name a piece row at all,
+		 * fixed a search over the whole file and broke a search inside
+		 * one region: the reader was thrown out to the object row
+		 * because that was the only answer left.
 		 */
-		if (v->node[k].piece)
-			continue;
-		if (v->node[k].ent) {
+		if (v->node[k].piece || v->node[k].ent) {
 			if (file_off >= v->node[k].ent_off &&
 			    file_off < v->node[k].ent_off +
 				       v->node[k].ent_len)
@@ -15005,7 +15293,7 @@ static uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off)
 	return best;
 }
 
-static void view_show(struct view *v, uint64_t file_off);
+static void view_show(struct view *v, uint64_t file_off, int narrow);
 
 /*
  * Jump to where a DECLARATION sits, whichever space that is in.
@@ -15019,14 +15307,14 @@ static void view_show(struct view *v, uint64_t file_off);
  * symbol row.
  */
 static void view_show_in(struct view *v, uint32_t obj, uint8_t sym,
-			 uint64_t off)
+			 uint64_t off, int narrow)
 {
 	uint64_t per = (uint64_t)(v->per > 0 ? v->per : 16);
 	uint64_t r, row;
 	uint32_t k;
 
 	if (!sym) {
-		view_show(v, off);
+		view_show(v, off, narrow);
 		return;
 	}
 	for (k = 0; k < v->n_node; k++)
@@ -15052,10 +15340,10 @@ static void view_show_in(struct view *v, uint32_t obj, uint8_t sym,
 
 static void view_show_decl(struct view *v, const struct decl *d, uint64_t off)
 {
-	view_show_in(v, d->obj, sym_which_of(d->sym), off);
+	view_show_in(v, d->obj, sym_which_of(d->sym), off, 1);
 }
 
-static void view_show(struct view *v, uint64_t file_off)
+static void view_show(struct view *v, uint64_t file_off, int narrow)
 {
 	uint64_t per = (uint64_t)(v->per > 0 ? v->per : 16);
 	uint64_t r, row;
@@ -15088,6 +15376,32 @@ static void view_show(struct view *v, uint64_t file_off)
 	 * Guarded on best != sel_node, so a jump inside the row already
 	 * selected costs nothing and does not redraw the tree.
 	 */
+	/*
+	 * A SEARCH DOES NOT MOVE THE READER, AND A MARKER CLICK DOES.
+	 *
+	 * They are two different asks and this used to answer both the same
+	 * way, which broke whichever one was not being looked at:
+	 *
+	 *   narrow  clicking a marker in the strings table or on the status
+	 *           bar means "take me to it", and the narrowest region
+	 *           holding it is the useful place to land. Keeping the cursor
+	 *           put there left the bytes on screen with the panel still
+	 *           describing somewhere else.
+	 *   not     a SEARCH is asked from a row the reader chose. Narrowing
+	 *           then throws them out of it: searching a whole file landed
+	 *           the cursor in the first run of code, and - once that was
+	 *           "fixed" by refusing to name a run at all - searching
+	 *           INSIDE one region threw them out to the whole file. Both
+	 *           are the same mistake, made in opposite directions.
+	 *
+	 * So a search stays wherever it already is, as long as that row can
+	 * show the offset; view_unmap answers exactly that. When it cannot -
+	 * a hit in another region with the scope set to the whole object - the
+	 * tree moves, because the alternative is a hit that cannot be looked
+	 * at.
+	 */
+	if (!narrow && view_unmap(v, file_off) != KOF_BROKEN)
+		best = v->sel_node;
 	if (best < v->n_node && best != v->sel_node) {
 		v->node[v->sel_node].at = v->rgn_at;
 		v->sel_node = best;
@@ -15293,7 +15607,9 @@ static void find_run(struct view *v, int back)
 	/* The search ran over whatever the row shows, so the hit is an offset in
 	 * that space - view_show alone would fall back to placing it in the
 	 * file when the row is a symbol half. */
-	view_show_in(v, v->node[v->sel_node].obj, v->node[v->sel_node].sym, at);
+	/* A SEARCH stays on the row the reader chose - see view_show. */
+	view_show_in(v, v->node[v->sel_node].obj, v->node[v->sel_node].sym, at,
+		     0);
 	{
 		uint64_t r = view_unmap(v, at);
 
@@ -19806,16 +20122,15 @@ static void bar_open_menu(struct view *v, int menu)
 {
 	int items[BI_COUNT], n = bar_items_of(v, menu, items, BI_COUNT), i;
 
+	/*
+	 * AND A BAR MENU OPENS EMPTY TOO, for the reason menu_open_at gives.
+	 * This lit the first enabled item, so opening the bar with the pointer
+	 * pointed at a command nobody had chosen.
+	 */
+	(void)items; (void)n; (void)i;
 	v->bar_open = menu;
 	v->bar_sub = -1;
 	v->bar_sel = -1;
-	for (i = 0; i < n; i++)
-		if (bar_enabled(v, items[i])) {
-			v->bar_sel = items[i];
-			break;
-		}
-	if (v->bar_sel < 0 && n)
-		v->bar_sel = items[0];
 }
 
 /* Move the cursor up or down within the open menu, skipping disabled rows so
@@ -19831,6 +20146,14 @@ static void bar_move_item(struct view *v, int dir)
 	for (i = 0; i < n; i++)
 		if (items[i] == v->bar_sel)
 			cur = i;
+	/*
+	 * FROM NOTHING, EITHER END - see menu_step. A menu now opens with no
+	 * item lit, and `cur` is then -1: stepping down must land on the first
+	 * item and stepping up on the LAST, which -1 gives for down and not
+	 * for up.
+	 */
+	if (cur < 0 && dir < 0)
+		cur = 0;
 	for (step = 0; step < n; step++) {
 		cur = (cur + dir + n) % n;
 		if (bar_enabled(v, items[cur])) {
@@ -20653,7 +20976,7 @@ static void hex_step(struct view *v, long lines)
 		}
 		/* And never past the point where the last line is on the
 		 * bottom row - see txt_max_top. */
-		top = txt_max_top(v, b, n, hex_last() - hex_top() + 1);
+		top = txt_max_top(v, b, n, txt_bot(v) - hex_top() + 1);
 		v->rgn_at = a > top ? top : a;
 		return;
 	}
@@ -22775,8 +23098,10 @@ static void goto_take(struct view *v)
 			return;
 		}
 	}
+	/* GOTO is the reader naming a place, from the row they are on - the
+	 * same ask as a search, so it answers the same way. */
 	view_show_in(v, v->node[v->sel_node].obj,
-		     v->node[v->sel_node].sym, fo);
+		     v->node[v->sel_node].sym, fo, 0);
 	{
 		uint64_t r = view_unmap(v, fo);
 
@@ -23405,7 +23730,7 @@ static int click_list(struct view *v, struct object *ob)
 						     v->node[v->sel_node].obj,
 						     sym_which_of(
 							t->str[k].sym),
-						     t->str[k].at);
+						     t->str[k].at, 1);
 				} else {
 					/*
 					 * A marker the module declares and
@@ -23592,19 +23917,27 @@ static void hit_row_cond(struct view *v, uint32_t g)
 		return;
 	}
 
+	if (v->cseq_kind[g] == CS_VAR) {
+		/* The variant row - see cseq_kind for why it is its own. */
+		if (v->cnd_vr[ci][0] > 0 && g_mx >= v->cnd_vr[ci][0] &&
+		    g_mx <= v->cnd_vr[ci][1])
+			ch_open(v, CH_VARIANT, ci, g_my, g_mx);
+		else if (v->cnd_nm[ci][0] > 0 && g_mx >= v->cnd_nm[ci][0] &&
+			 g_mx <= v->cnd_nm[ci][1])
+			v->edit = 4 + (int)ci;
+		return;
+	}
+
 	/* CS_COND */
 	if (g_mx >= g_cols - 4) {
 		cnd_remove(&v->ed, ci);
 		return;
 	}
-	if (g_mx >= v->cnd_lv[ci][0] && g_mx <= v->cnd_lv[ci][1])
+	/* -1 is a row that drew no control - a block ANDed to the next one has
+	 * no verdict of its own to pick. */
+	if (v->cnd_lv[ci][0] > 0 && g_mx >= v->cnd_lv[ci][0] &&
+	    g_mx <= v->cnd_lv[ci][1])
 		ch_open(v, CH_LEVEL, ci, g_my, g_mx);
-	else if (v->cnd_vr[ci][0] > 0 && g_mx >= v->cnd_vr[ci][0] &&
-		 g_mx <= v->cnd_vr[ci][1])
-		ch_open(v, CH_VARIANT, ci, g_my, g_mx);
-	else if (v->cnd_nm[ci][0] > 0 && g_mx >= v->cnd_nm[ci][0] &&
-		 g_mx <= v->cnd_nm[ci][1])
-		v->edit = 4 + (int)ci;
 }
 
 /*
@@ -25478,7 +25811,7 @@ static void on_wheel(struct view *v, int k)
 						  v->node[v->sel_node].obj,
 						  sym_which_of(
 						   lt->str[v->sel_str].sym),
-						  lt->str[v->sel_str].at);
+						  lt->str[v->sel_str].at, 1);
 				}
 			} else if (down && v->sel_touch >=
 					   cur_obj(v)->n_touch) {
@@ -25563,7 +25896,7 @@ static void on_cursor_down(struct view *v)
 				view_show_in(v, v->node[v->sel_node].obj,
 					     sym_which_of(
 						t2->str[v->sel_str].sym),
-					     t2->str[v->sel_str].at);
+					     t2->str[v->sel_str].at, 1);
 		} else if (v->show_list) {
 			if (v->sel_touch + 1 < cur_obj(v)->n_touch)
 				v->sel_touch++;
@@ -25616,7 +25949,7 @@ static void on_cursor_up(struct view *v)
 				view_show_in(v, v->node[v->sel_node].obj,
 					     sym_which_of(
 						t2->str[v->sel_str].sym),
-					     t2->str[v->sel_str].at);
+					     t2->str[v->sel_str].at, 1);
 		} else if (v->show_list) {
 			if (v->sel_touch)
 				v->sel_touch--;
@@ -25856,7 +26189,10 @@ static int handle(struct view *v, int k)
 		break;
 	case '\r': case '\n':
 		if (v->menu_open) {
-			menu_run(v, v->menu_sel);
+			/* Nothing is lit until the reader lights it - see
+			 * menu_open_at - and Enter on nothing does nothing. */
+			if (v->menu_sel >= 0)
+				menu_run(v, v->menu_sel);
 			v->menu_open = 0;
 			break;
 		}

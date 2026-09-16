@@ -18,10 +18,68 @@
 #include "scantext.h"
 #include "php_parse.h"
 #include "svrpage_parse.h"
+#include "markup_parse.h"
 
 const uint32_t kof_script_region_bits[] = {
 	KOF_SCAN_SCRIPT_HEADER, KOF_SCAN_SCRIPT_BODY, KOF_SCAN_SCRIPT_MARKUP
 };
+
+/*
+ * THE DELIMITERS OF ONE CODE BLOCK, longest first.
+ *
+ * Longest first because "<%" is a prefix of "<%=" and of "<%@": matching the
+ * short one would leave a stray "=" behind and call a block that prints a value
+ * something other than empty.
+ */
+static const char *const bare_php[] = { "<?php", "<?=", "<?", "?>", NULL };
+static const char *const bare_pct[] = { "<%=", "<%@", "<%", "%>", NULL };
+
+int kof_script_block_bare(uint8_t kind, const uint8_t *p, uint32_t n)
+{
+	const char *const *d;
+	kof_buf b;
+	uint32_t i;
+
+	if (!p || !n)
+		return 0;
+	switch (kind) {
+	case KOF_SCRIPT_PHP:                     d = bare_php; break;
+	case KOF_SCRIPT_ASP:
+	case KOF_SCRIPT_ASPX:
+	case KOF_SCRIPT_JSP:                     d = bare_pct; break;
+	default:                                 return 0;
+	}
+	b.p = p;
+	b.n = n;
+	/*
+	 * EVERY delimiter in the run, not just the first and the last, because
+	 * the join pass puts neighbours separated by nothing but whitespace
+	 * into one island: two emptied blocks arrive here as "<%\n%>\n<%\n%>",
+	 * and that is as empty as one of them.
+	 */
+	for (i = 0; i < n; ) {
+		uint8_t c = p[i];
+		uint32_t k;
+		int hit = 0;
+
+		if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+			i++;
+			continue;
+		}
+		for (k = 0; d[k]; k++) {
+			uint32_t dl = (uint32_t)strlen(d[k]);
+
+			if (kof_txt_tag_at(b, i, d[k], dl)) {
+				i += dl;
+				hit = 1;
+				break;
+			}
+		}
+		if (!hit)
+			return 0;
+	}
+	return 1;
+}
 
 const char *kof_script_region_name(uint32_t bit)
 {
@@ -217,15 +275,16 @@ static int looks_like_text(kof_buf f, uint64_t n)
 enum { FAM_NONE = 0, FAM_PHP, FAM_SVR };
 
 static uint64_t find_tag(kof_buf f, uint64_t look, uint8_t *kind,
-			 uint32_t *taglen, int *fam)
+			 uint32_t *taglen, uint32_t *headlen, int *fam)
 {
 	uint64_t php, svr, i;
-	uint32_t pl = 0, sl = 0;
+	uint32_t pl = 0, sl = 0, sh = 0;
 
 	*fam = FAM_NONE;
+	*headlen = 0;
 
 	php = kof_php_find_tag(f, look, &pl);
-	svr = kof_svr_find_tag(f, look, &sl);
+	svr = kof_svr_find_tag(f, look, &sl, &sh);
 	/*
 	 * WHICHEVER COMES FIRST, because a file is opened by one language and
 	 * the other marker is then content. A jsp that prints the string
@@ -235,12 +294,15 @@ static uint64_t find_tag(kof_buf f, uint64_t look, uint8_t *kind,
 	if (php != (uint64_t)-1 && (svr == (uint64_t)-1 || php <= svr)) {
 		*kind = KOF_SCRIPT_PHP;
 		*taglen = pl;
+		/* "<?php" opens a block of code, so it has no header at all -
+		 * see KOF_SCAN_SCRIPT_HEADER. */
 		*fam = FAM_PHP;
 		return php;
 	}
 	if (svr != (uint64_t)-1) {
 		*kind = kof_svr_kind(f, look);
 		*taglen = sl;
+		*headlen = sh;
 		*fam = FAM_SVR;
 		return svr;
 	}
@@ -258,7 +320,8 @@ static uint64_t find_tag(kof_buf f, uint64_t look, uint8_t *kind,
 		    kof_txt_tag_at(f, i, "<cfquery", 8u) ||
 		    kof_txt_tag_at(f, i, "<cfscript", 9u) ||
 		    kof_txt_tag_at(f, i, "<cfparam", 8u)) {
-			*kind = KOF_SCRIPT_CFM; *taglen = 3u; return i;
+			*kind = KOF_SCRIPT_CFM; *taglen = 3u;
+			*headlen = 3u; return i;
 		}
 	}
 	/*
@@ -294,9 +357,9 @@ int kof_script_sniff(kof_buf file)
 
 	{
 		uint8_t kind = KOF_SCRIPT_ANY;
-		uint32_t tl = 0;
+		uint32_t tl = 0, hl = 0;
 		int fam = FAM_NONE;
-		uint64_t tag = find_tag(file, look, &kind, &tl, &fam);
+		uint64_t tag = find_tag(file, look, &kind, &tl, &hl, &fam);
 
 		if (tag != (uint64_t)-1)
 			return looks_like_text(file, tag + tl);
@@ -430,25 +493,26 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 	 */
 	{
 		uint8_t kind = KOF_SCRIPT_ANY;
-		uint32_t tl = 0;
+		uint32_t tl = 0, hl = 0;
 		int fam = FAM_NONE;
 
-		tag = find_tag(file, look, &kind, &tl, &fam);
+		tag = find_tag(file, look, &kind, &tl, &hl, &fam);
 		if (tag != (uint64_t)-1) {
 			info->kind = kind;
 			if (!info->tag_len) {
 				info->tag_off = (uint32_t)tag;
 				info->tag_len = tl;
 				/*
-				 * AND THE HEADER IS THE "<%@" FAMILY'S ALONE.
+				 * AND THE HEADER IS THE DIRECTIVE'S ALONE.
 				 *
-				 * There `tl` is the whole run of directives,
-				 * which declares the page and is not code. A
-				 * php tag opens a block of code, so it has no
-				 * header and belongs to the body it opens - see
-				 * KOF_SCAN_SCRIPT_HEADER.
+				 * "<%@ ... %>" declares the page and is not
+				 * code; "<?php" and a bare "<%" OPEN A BLOCK OF
+				 * code, so they belong to the body they open -
+				 * see KOF_SCAN_SCRIPT_HEADER, and
+				 * kof_svr_find_tag for what calling a bare "<%"
+				 * a header did to the first block of a page.
 				 */
-				info->head_len = fam == FAM_PHP ? 0u : tl;
+				info->head_len = hl;
 			}
 			/*
 			 * BOTH FAMILIES HAVE ISLANDS, and php has them only
@@ -480,6 +544,31 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 				} else if (fam == FAM_SVR) {
 					kof_svr_islands(file, from, info);
 				}
+				/*
+				 * AND ONE HTML ELEMENT THAT WRAPS CODE IS ONE
+				 * BLOCK. A table emitted by a loop is a table,
+				 * not five regions - see markup_parse.h for
+				 * the two limits that keep it from being the
+				 * whole file.
+				 */
+				/*
+				 * THE ELEMENT WALK GOES FIRST, and the order
+				 * is the difference between a fragment and a
+				 * block.
+				 *
+				 * The walk absorbs an island only when it sits
+				 * on one line - see mk_inline. Joining first
+				 * put "<% Next %>", a blank line and "<% For
+				 * each %>" into ONE island with a newline in
+				 * it, so a pair of loop fragments around a
+				 * table read as a block and the rule they were
+				 * written for no longer reached them.
+				 *
+				 * So: absorb the fragments, then join what
+				 * survives.
+				 */
+				kof_markup_merge(file, from, info);
+				kof_isl_join_ws(file, from, info);
 			}
 		}
 	}

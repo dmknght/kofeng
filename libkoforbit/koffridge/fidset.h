@@ -146,6 +146,23 @@ int kof_fidset_has(struct kof_fidset *, uint64_t key);
 int kof_fidset_add(struct kof_fidset *, uint64_t key);
 
 /*
+ * TAKE A KEY OUT - this file is not clean after all.
+ *
+ * The only way a set learns that. Nothing that is skipped is ever scanned, so
+ * the news arrives from a run that did NOT consult this set: a --no-cache sweep
+ * of a machine somebody else has been on, or one under a newer database. Both
+ * are exactly the runs whose findings the stored set would otherwise outlive,
+ * and a cache that keeps calling a detected file clean is worse than no cache.
+ *
+ * Dropped keys are held apart from the mapping, which is read only: a lookup
+ * answers no for them from this point, and the next save writes the set without
+ * them. Dropping a key that is not there is free, changes nothing, and is not
+ * counted - every file a scan finds something in is offered here, and on a tree
+ * of samples almost none of them were ever cached.
+ */
+int kof_fidset_drop(struct kof_fidset *, uint64_t key);
+
+/*
  * Write the mapped set and this run's additions out as one sorted file.
  *
  * Through a temporary and a rename, so a reader either sees the whole of the
@@ -157,6 +174,7 @@ int kof_fidset_save(struct kof_fidset *, const char *path);
 struct kof_fidset_stat {
 	uint64_t mapped;    /* keys in the file that was loaded */
 	uint64_t added;     /* keys this run put in */
+	uint64_t dropped;   /* keys this run took out - see kof_fidset_drop */
 	uint64_t hit;
 	uint64_t miss;
 	uint64_t pages;     /* how many distinct pages lookups have touched */

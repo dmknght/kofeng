@@ -3028,19 +3028,36 @@ enum kof_str_word {
 #define KOF_DEFINE_STR_WIDE(name, lit, casing, word)
 
 /*
- * Declare a byte pattern with wildcards, jumps and alternatives.
+ * Declare a byte pattern with wildcards, jumps, alternatives and exclusions.
  *
  *     KOF_DEFINE_HEXSTR(call32,  "E8 ?? ?? ?? ?? 5D C3");
  *     KOF_DEFINE_HEXSTR(nibble,  "E8 ?4 4?");
  *     KOF_DEFINE_HEXSTR(spaced,  "6A 40 [4-6] 8D 4D");
  *     KOF_DEFINE_HEXSTR(anyjmp,  "6A 40 [-] 8D 4D");
  *     KOF_DEFINE_HEXSTR(opcodes, "( E8 | E9 ) ?? ?? ?? ??");
+ *     KOF_DEFINE_HEXSTR(notzero, "F4 23 !00 62 B4");
+ *     KOF_DEFINE_HEXSTR(notlow,  "F4 23 !?0 62 B4");
  *
  * The syntax is YARA's, because it is the one researchers already write and it
- * covers the cases that come up: "??" and "?4" are masks, "[4-6]" is a gap, and a
- * group is a set of alternatives. Used with kof_find_str and its _any / _all /
- * _multi forms exactly like a literal - the call site does not know which kind it
- * named, which is the point.
+ * covers the cases that come up: "??" and "?4" are masks, "[4-6]" is a gap, a
+ * group is a set of alternatives, and "!" excludes. Used with kof_find_str and
+ * its _any / _all / _multi forms exactly like a literal - the call site does not
+ * know which kind it named, which is the point.
+ *
+ * A GROUP IS A CHOICE AT THAT POSITION, NOT A GAP. "F4 23 ( 62 B4 | 56 ) 45"
+ * matches F42362B445 and F4235645 and nothing else - the alternatives may be of
+ * different lengths and may carry wildcards, and what follows the group sits
+ * immediately after whichever one matched.
+ *
+ * "!" IS A BYTE THAT IS ANYTHING BUT THIS. "!00" is any byte except zero and
+ * "!?0" any byte whose low nibble is not zero - YARA 4.3 spells it "~" and both
+ * characters are accepted. "!??" excludes every byte and is refused.
+ *
+ * CASE-INSENSITIVE TEXT IS NOT WHAT THIS IS FOR. A word written per character -
+ * "(63|43)(6D|4D)(64|44)" for "cmd" - works and costs one part per character,
+ * but KOF_DEFINE_STR with KOF_CASE_ICASE says the same thing in one pattern and
+ * gives the matcher a whole word to search for. Reach for the hex form when the
+ * case fold has to sit inside a pattern that also has wildcards or a jump.
  *
  * Compiled at build time, so a malformed pattern is a build error naming a line
  * rather than a search that silently matches nothing. What the compiler refuses:
@@ -3048,6 +3065,7 @@ enum kof_str_word {
  *   a gap inside an alternative      an alternative has to have a length
  *   a leading or trailing gap        that is not a pattern, it is a shorter pattern
  *   no concrete byte anywhere        it would match everything
+ *   "!??"                            no byte satisfies it
  *   more parts than the caps allow   see hexprog.h; the bound is what keeps
  *                                    matching a hostile object affordable
  *
@@ -3059,6 +3077,12 @@ enum kof_str_word {
  * object without touching it - keys on four. A pattern whose longest run is shorter
  * than that is searched on every object of its format. The compiler prints the run
  * length for each pattern so this is visible at build time rather than in a profile.
+ *
+ * A NEGATED BYTE IS NOT A CONCRETE ONE and does not count toward that run: it
+ * names every value but one, so there is nothing to search for. Nor is a byte
+ * inside a group. A per-character case fold therefore has an anchor of one byte
+ * unless something fixed sits beside it - another reason to prefer ICASE on a
+ * literal when the whole pattern is a word.
  */
 #define KOF_DEFINE_HEXSTR(name, hex)
 

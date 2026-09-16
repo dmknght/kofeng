@@ -78,11 +78,13 @@ static const struct kof_lex lex_shell = {
 	.var_sigil = 0, .concat = 0
 };
 
+/* cmd has no backslash escape either - a path IS backslashes - so "C:\" is a
+ * whole string there too. Same fault, same flag. */
 static const struct kof_lex lex_batch = {
 	.line_cmt = { "REM", "::", NULL },
 	.quotes = "\"", .ml_open = { NULL, NULL, NULL },
-	.sq_escapes = 0, .stmt_end = 0, .ws_significant = 1,
-	.var_sigil = 0, .concat = 0
+	.sq_escapes = 0, .no_bs_escape = 1, .stmt_end = 0,
+	.ws_significant = 1, .var_sigil = 0, .concat = 0
 };
 
 static const struct kof_lex lex_psh = {
@@ -93,9 +95,39 @@ static const struct kof_lex lex_psh = {
 };
 
 /*
- * The "<%" family. One row, because the SYNTAX inside the islands is what this
- * pass sees and all three are C shaped there - see the note in script_parse.c
- * on why the family is handled together.
+ * CLASSIC ASP IS VBSCRIPT, AND VBSCRIPT IS NOT C SHAPED.
+ *
+ * The "<%" family shared one row on the argument that the syntax inside the
+ * islands is the same for all three. It is not, and the one byte they disagree
+ * about is the worst one to get wrong: in C# and Java "'" opens a CHARACTER
+ * LITERAL, and in VBScript it opens a COMMENT.
+ *
+ * Read as a quote, every comment in an asp file opens a string that never
+ * closes. The state machine is then inverted for the rest of the file - what is
+ * code is read as string and what is string is read as code - so the spacing
+ * rules ran over string VALUES. Measured on cmdasp.asp, whose header is eight
+ * lines of "'" comments:
+ *
+ *     Call oScript.Run ("cmd.exe /c " & szCMD & " > " & szTempFile, 0, True)
+ *  -> Call oScript.Run ("cmd.exe/c" & szCMD & ">" & szTempFile, 0, True)
+ *
+ * The spaces inside the quoted command were removed - which changes the command
+ * - and the space before "(" survived, because by then the pass believed it was
+ * inside a string. Both halves wrong, from one byte in a table.
+ *
+ * NO BLOCK COMMENT AND NO BACKSLASH ESCAPE either: VBScript has neither, and an
+ * embedded quote is written by doubling it.
+ */
+static const struct kof_lex lex_vbs = {
+	.line_cmt = { "'", "REM", NULL },
+	.quotes = "\"", .ml_open = { NULL, NULL, NULL },
+	.sq_escapes = 0, .no_bs_escape = 1, .stmt_end = 0,
+	.ws_significant = 0, .var_sigil = 0, .concat = '&'
+};
+
+/*
+ * ASP.NET and JSP, whose islands hold C# and Java. Those two really are C
+ * shaped, so they keep one row - and "'" is a character literal in both.
  */
 static const struct kof_lex lex_svr = {
 	.line_cmt = { "//", NULL, NULL }, .blk_open = "/*", .blk_close = "*/",
@@ -116,6 +148,9 @@ const struct kof_lex *kof_lex_for(uint8_t script_kind)
 	case KOF_SCRIPT_BAT:    return &lex_batch;
 	case KOF_SCRIPT_PSH:    return &lex_psh;
 	case KOF_SCRIPT_ASP:
+	/* A .vbs file is the same language outside a page, and had no row at
+	 * all - so nothing was ever formed in one. */
+	case KOF_SCRIPT_VBS:    return &lex_vbs;
 	case KOF_SCRIPT_ASPX:
 	case KOF_SCRIPT_JSP:    return &lex_svr;
 	/* KOF_SCRIPT_ANY and everything this build has no row for. Not
@@ -329,6 +364,7 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 				uint8_t c = in[j];
 
 				if (c == '\\' &&
+				    !lx->no_bs_escape &&
 				    (st == ST_DQ || lx->sq_escapes) &&
 				    j + 1u < le) {
 					out[w++] = c;
@@ -568,6 +604,7 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 				}
 				/* Inside a string: every byte is a value. */
 				if (c == '\\' &&
+				    !lx->no_bs_escape &&
 				    (st == ST_DQ || lx->sq_escapes) &&
 				    j + 1u < le) {
 					out[w++] = c;
@@ -707,7 +744,8 @@ static int read_literal(struct folder *f, uint32_t *i, struct val *out)
 	uint8_t q = f->in[*i];
 	uint32_t j = *i + 1u;
 	uint32_t start = f->a_n;
-	int esc = q == '"' || f->lx->sq_escapes;
+	int esc = !f->lx->no_bs_escape &&
+		  (q == '"' || f->lx->sq_escapes);
 
 	while (j < f->n && f->in[j] != q) {
 		uint8_t c = f->in[j];

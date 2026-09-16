@@ -146,9 +146,17 @@ static int hex_prog_valid(const uint8_t *p, uint32_t len)
 
 			if (a->len == 0 || a->len > KOF_HEX_MAX_ALT_LEN)
 				return 0;
-			if (a->flags & ~KOF_HEX_ALT_MASKED)
+			if (a->flags & ~(KOF_HEX_ALT_MASKED | KOF_HEX_ALT_NEG))
+				return 0;
+			/* NEG implies MASKED: the negation array sits after
+			 * the mask array, and one without the other would have
+			 * the matcher read the masks as negations. */
+			if ((a->flags & KOF_HEX_ALT_NEG) &&
+			    !(a->flags & KOF_HEX_ALT_MASKED))
 				return 0;
 			if (a->flags & KOF_HEX_ALT_MASKED)
+				need += a->len;
+			if (a->flags & KOF_HEX_ALT_NEG)
 				need += a->len;
 			if (a->data_off < h->data_off || a->data_off > len ||
 			    need > len - a->data_off)

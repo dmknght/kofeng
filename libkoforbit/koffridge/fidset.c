@@ -103,6 +103,17 @@ struct kof_fidset {
 	uint32_t *idx;          /* open addressing over `add`, 1 based */
 	uint64_t  n_idx;        /* power of two */
 
+	/*
+	 * WHAT THIS RUN TOOK OUT - see kof_fidset_drop.
+	 *
+	 * A plain array walked linearly, and no table over it, because of what
+	 * is in it: one entry per file a scan actually found something in. A
+	 * sweep that fills this has bigger news than its cache. The empty case
+	 * is what every lookup pays, and that is one test of n_drop.
+	 */
+	uint64_t *drop;
+	uint64_t  n_drop, cap_drop;
+
 	struct kof_fidset_stat st;
 };
 
@@ -164,6 +175,16 @@ static int add_has(const struct kof_fidset *s, uint64_t key)
 			return 1;
 		h = (h + 1u) & (s->n_idx - 1u);
 	}
+	return 0;
+}
+
+static int drop_has(const struct kof_fidset *s, uint64_t key)
+{
+	uint64_t i;
+
+	for (i = 0; i < s->n_drop; i++)
+		if (s->drop[i] == key)
+			return 1;
 	return 0;
 }
 
@@ -286,6 +307,7 @@ void kof_fidset_close(struct kof_fidset *s)
 	unmap(s);
 	free(s->add);
 	free(s->idx);
+	free(s->drop);
 	free(s);
 }
 
@@ -441,6 +463,10 @@ int kof_fidset_has(struct kof_fidset *s, uint64_t key)
 
 	if (!s || !key)
 		return 0;
+	/* Taken out this run, whatever the file says. Counted as a miss below,
+	 * which is what it is to the caller. */
+	if (s->n_drop && drop_has(s, key))
+		return ++s->st.miss, 0;
 	r = add_has(s, key) || map_has(s, key);
 	if (r)
 		s->st.hit++;
@@ -486,6 +512,37 @@ int kof_fidset_add(struct kof_fidset *s, uint64_t key)
 	return 1;
 }
 
+int kof_fidset_drop(struct kof_fidset *s, uint64_t key)
+{
+	if (!s || !key)
+		return 0;
+	if (drop_has(s, key))
+		return 1;
+	/*
+	 * A KEY THAT IS NOT THERE IS NOT A REMOVAL, and the count says so.
+	 *
+	 * Every file a scan finds something in is offered here, and on a tree
+	 * of samples that is most of them - none of which the cache ever held.
+	 * Recording those would report "68 entries dropped" about a set that
+	 * lost nothing, and the one number worth reading is how many stale
+	 * clean answers this run actually took out.
+	 */
+	if (!add_has(s, key) && !map_has(s, key))
+		return 1;
+	if (s->n_drop + 1u > s->cap_drop) {
+		uint64_t want = s->cap_drop ? s->cap_drop * 2u : 64u;
+		uint64_t *nd = realloc(s->drop, (size_t)want * sizeof *nd);
+
+		if (!nd)
+			return 0;
+		s->drop = nd;
+		s->cap_drop = want;
+	}
+	s->drop[s->n_drop++] = key;
+	s->st.dropped = s->n_drop;
+	return 1;
+}
+
 /* ---- writing it back ------------------------------------------------------ */
 
 static int cmp_u64(const void *a, const void *b)
@@ -505,15 +562,25 @@ int kof_fidset_save(struct kof_fidset *s, const char *path)
 
 	if (!s || !path || !path[0])
 		return 0;
+	/*
+	 * NOTHING TO SAY, and a set that only LOST keys is not that: the run
+	 * kof_fidset_drop exists for adds nothing, because it was told to trust
+	 * nothing. There is still no file to write when the mapping is empty
+	 * too, which is what this tests.
+	 */
 	if (!s->n_add && !s->n_key)
-		return 1;       /* nothing to say */
+		return 1;
 
 	/*
 	 * TWO SORTED RUNS, MERGED. The mapping is already in order and the
 	 * additions are sorted here, so the result is one linear pass rather
 	 * than a sort of everything on every save.
+	 *
+	 * `add` may be NULL here - a run that only dropped never allocated it -
+	 * and qsort is declared never to take one, whatever the count says.
 	 */
-	qsort(s->add, (size_t)s->n_add, sizeof *s->add, cmp_u64);
+	if (s->n_add)
+		qsort(s->add, (size_t)s->n_add, sizeof *s->add, cmp_u64);
 	out = malloc((size_t)(s->n_key + s->n_add) * sizeof *out);
 	if (!out)
 		return 0;
@@ -524,6 +591,9 @@ int kof_fidset_save(struct kof_fidset *s, const char *path)
 			v = s->key[i++];
 		else
 			v = s->add[j++];
+		/* Taken out this run: written by neither side. */
+		if (s->n_drop && drop_has(s, v))
+			continue;
 		/* Both sides may hold it, and the run may hold it twice. */
 		if (!n || out[n - 1u] != v)
 			out[n++] = v;
@@ -590,6 +660,10 @@ int kof_fidset_save(struct kof_fidset *s, const char *path)
 	free(s->idx);
 	s->idx = NULL;
 	s->n_idx = 0;
+	/* The file no longer holds them, so neither does the list: keeping it
+	 * would make a second save re-filter keys that are already gone and
+	 * would answer "not here" for a key added back afterwards. */
+	s->n_drop = 0;
 	(void)kof_fidset_load(s, path);
 	return 1;
 }

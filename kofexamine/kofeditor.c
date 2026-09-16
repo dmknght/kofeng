@@ -185,6 +185,65 @@ const uint32_t script_sub_n = sizeof script_sub / sizeof script_sub[0];
 
 
 
+/*
+ * THE SUBTYPE VOCABULARY OF A FORMAT: the prefix its identifiers carry, and the
+ * words that may follow it.
+ *
+ * One function because two places need it and they disagreed: generate() wrote
+ * "KOF_TARGET_SUBTYPE(KOF_SCRIPT_PHP)" and draft_from_source knew only ELF and
+ * PE, so a saved rule reopened with its subtype silently missing. Asking one
+ * function makes a format that can be written a format that can be read.
+ *
+ * A function rather than a table because the counts are const variables built
+ * from the X-macro lists, which C will not put in a static initialiser.
+ */
+/*
+ * Is this identifier in the line, as a WHOLE identifier?
+ *
+ * strstr alone would match KOF_FMT_PE inside a longer name, and the format
+ * table is generated from a list that anyone may add to - so the test is
+ * written to survive the addition rather than to work on today's names.
+ */
+static int src_word_in(const char *line, const char *word)
+{
+	size_t n = strlen(word);
+	const char *p = line;
+
+	while ((p = strstr(p, word)) != NULL) {
+		char before = p == line ? ' ' : p[-1];
+		char after = p[n];
+
+		if (!isalnum((unsigned char)before) && before != '_' &&
+		    !isalnum((unsigned char)after) && after != '_')
+			return 1;
+		p += n;
+	}
+	return 0;
+}
+
+static const char *const *sub_vocab(uint8_t fmt, const char **prefix,
+				    uint32_t *n)
+{
+	if (fmt == KOF_FMT_ELF) {
+		*prefix = "KOF_ELF_";
+		*n = elf_sub_n;
+		return elf_sub;
+	}
+	if (fmt == KOF_FMT_PE) {
+		*prefix = "KOF_PE_";
+		*n = pe_sub_n;
+		return pe_sub;
+	}
+	if (fmt == KOF_FMT_SCRIPT) {
+		*prefix = "KOF_SCRIPT_";
+		*n = script_sub_n;
+		return script_sub;
+	}
+	*prefix = NULL;
+	*n = 0;
+	return NULL;
+}
+
 /* The subtypes, per format. The values overlap between formats, which is why
  * naming one format's values while targeting another is a build error. */
 const char *const fmt_word[] = {
@@ -999,15 +1058,35 @@ uint32_t src_str_idx(struct sname *tab, uint32_t n, const char *id)
  * only answer that does not quietly change the marker. Hex has no such problem
  * and is always editable - that is what hex is for.
  */
+/*
+ * THE SAME SET THE FILE ACCEPTS, which is printable ASCII and the three
+ * whitespace bytes.
+ *
+ * This refused anything outside 0x20..0x7e, and that matched literal_safe until
+ * literal_safe grew tab, newline and carriage return - a marker that crosses a
+ * line is an ordinary thing to declare and is now written as "\t", "\n", "\r".
+ * The two halves then disagreed: the panel would DECLARE such a marker and
+ * then refuse to let it be edited, saying it was not text about something that
+ * plainly is.
+ *
+ * The box shows them as escapes and decl_edit_commit reads them back - see
+ * decl_edit_open - because a raw newline in a one-line field is not editable
+ * whatever this answers.
+ */
 int decl_text_editable(const struct decl *d)
 {
 	uint32_t i;
 
 	if (d->hex)
 		return 1;
-	for (i = 0; i < d->nbytes; i++)
-		if (d->bytes[i] < 0x20 || d->bytes[i] >= 0x7f)
+	for (i = 0; i < d->nbytes; i++) {
+		uint8_t c = d->bytes[i];
+
+		if (c == '\t' || c == '\n' || c == '\r')
+			continue;
+		if (c < 0x20 || c >= 0x7f)
 			return 0;
+	}
 	return 1;
 }
 
@@ -1174,11 +1253,29 @@ void say_note(struct kof_editor *e, const char *fmt, ...)
 }
 
 /* Is this sample already in the rule's history. */
+void meta_sample_line(struct kof_editor *e, char *out, size_t cap)
+{
+	const char *base = draft_sample(e);
+	const struct object *ob = &e->obj[e->cur];
+
+	if (ob->sha256[0])
+		snprintf(out, cap, "%s  sha256:%s", base, ob->sha256);
+	else
+		snprintf(out, cap, "%s", base);
+}
+
 int meta_has_sample(struct kof_editor *e)
 {
-	const char *w = draft_sample(e);
+	char w[128];
 	uint32_t i;
 
+	/*
+	 * COMPARED WHOLE, hash included. A file of the same name holding
+	 * different bytes is a different sample, and a rule confirmed against
+	 * it has something new to record - which is exactly what this answer
+	 * decides.
+	 */
+	meta_sample_line(e, w, sizeof w);
 	for (i = 0; i < *e->n_sample; i++)
 		if (!strcmp(e->sample[i], w))
 			return 1;
@@ -1450,6 +1547,45 @@ int cnd_more_siblings(struct kof_editor *e, uint32_t i)
 		if (e->dr.cnd[k].parent == e->dr.cnd[i].parent)
 			return 1;
 	return 0;
+}
+
+/* The next condition at this one's level, or n_cnd. */
+static uint32_t cnd_sib_next(struct kof_editor *e, uint32_t i)
+{
+	uint32_t k;
+
+	for (k = i + 1u; k < e->dr.n_cnd; k++)
+		if (e->dr.cnd[k].parent == e->dr.cnd[i].parent)
+			return k;
+	return e->dr.n_cnd;
+}
+
+/*
+ * THE LAST MEMBER OF THE "AND" RUN THAT STARTS AT `i` - see enum cnd_join.
+ *
+ * A run extends while each member says JN_AND and BOTH ends of the link are a
+ * leaf with a test of its own. A gate has no value to conjoin - it is a brace
+ * around branches - and a leaf with no expression tests nothing, so either one
+ * ends the run rather than being written into it as "1 && ...".
+ */
+uint32_t cnd_and_run(struct kof_editor *e, uint32_t i)
+{
+	uint32_t cur = i;
+
+	if (i >= e->dr.n_cnd)
+		return i;
+	for (;;) {
+		uint32_t nx;
+
+		if (e->dr.cnd[cur].join != JN_AND ||
+		    cnd_children(e, cur) || !e->dr.cnd[cur].expr[0])
+			return cur;
+		nx = cnd_sib_next(e, cur);
+		if (nx >= e->dr.n_cnd || cnd_children(e, nx) ||
+		    !e->dr.cnd[nx].expr[0])
+			return cur;
+		cur = nx;
+	}
 }
 
 /* How deep a condition sits. Two levels is the whole of it: a third would be a
@@ -2646,12 +2782,31 @@ void decl_edit_commit(struct kof_editor *e, uint32_t i)
 			return;
 		}
 	} else {
+		size_t r, w = 0;
+
 		nb = realloc(d->bytes, n + 1u);
 		if (!nb)
 			return;
 		d->bytes = nb;
-		memcpy(d->bytes, e->dr.sedit, n);
-		d->len = (uint32_t)n;
+		/*
+		 * The escapes the box shows, read back - see decl_edit_open.
+		 * Only ever shortens, so the buffer sized for the text holds
+		 * the bytes.
+		 */
+		for (r = 0; r < n; r++) {
+			char c = e->dr.sedit[r];
+
+			if (c == '\\' && r + 1u < n) {
+				char nx = e->dr.sedit[r + 1u];
+
+				if (nx == 't') { c = '\t'; r++; }
+				else if (nx == 'n') { c = '\n'; r++; }
+				else if (nx == 'r') { c = '\r'; r++; }
+				else if (nx == '\\') { c = '\\'; r++; }
+			}
+			d->bytes[w++] = (uint8_t)c;
+		}
+		d->len = (uint32_t)w;
 		d->nbytes = d->len;
 	}
 	if (!d->len) {
@@ -2903,22 +3058,92 @@ void emit_verdict(FILE *f, const struct cond *c, int depth)
 /*
  * One branch, and the ones nested under it.
  *
- * `chained` makes this an "else if" rather than an "if". Conditions nested
- * under a gate are alternatives to each other - which variant of the thing the
- * gate established - so they chain, and the gate's own verdict becomes the else
- * that catches the case where the gate held and none of the alternatives did.
- * Without that else a gate with children concluded nothing at all when its
- * children all missed, which is the one outcome a gate is worth writing for.
+ * EVERY BRANCH IS ITS OWN "if" AND NOTHING HERE CHAINS - see enum cnd_join.
+ * A verdict returns, so a branch that concluded is the last thing that runs;
+ * "else if" after it would say the same as "if" and say it less directly. It
+ * also has a case where it is WRONG: a gate that matched and whose children
+ * all declined concludes nothing, and an "else if" after that gate would skip
+ * a branch that was meant to be tried.
  *
- * Top level conditions do not chain: they are separate detections that happen
- * to live in one module, not alternatives to one another.
+ * The gate's own verdict follows its children for the same reason - not as an
+ * else, which bound to the last child alone.
  */
-void emit_cond(FILE *f, struct kof_editor *e, uint32_t i, int depth,
-		      int chained)
+/*
+ * A RUN OF CONDITIONS CONJOINED - "if (A && B)", once, with one verdict.
+ *
+ * Each member's expression is a term, and a term holding a "|" is bracketed:
+ * "&&" binds tighter than "||" in C, so "m1 || m2 && m3" is not the condition
+ * the panel drew.
+ *
+ * The verdict is the LAST member's - see enum cnd_join.
+ */
+static void emit_and_run(FILE *f, struct kof_editor *e, uint32_t i,
+			 uint32_t last, int depth)
+{
+	uint32_t k, g;
+	int d, first = 1;
+
+	/* Every matcher any member uses, named once: the notes describe the
+	 * searches this one branch now makes. */
+	for (g = 0; g < e->dr.n_grp; g++) {
+		char t[120];
+		uint32_t m;
+		int used = 0;
+
+		if (!e->dr.grp[g].note[0])
+			continue;
+		for (m = i; m <= last; m++)
+			if (e->dr.cnd[m].parent == e->dr.cnd[i].parent &&
+			    cnd_uses(&e->dr.cnd[m], g))
+				used = 1;
+		if (!used)
+			continue;
+		snprintf(t, sizeof t, "matcher %u: %s", g + 1u,
+			 e->dr.grp[g].note);
+		emit_note(f, t, depth);
+	}
+	for (d = 0; d < depth; d++)
+		fputc('\t', f);
+	fprintf(f, "if (");
+	for (k = i; k <= last; k++) {
+		const struct cond *m = &e->dr.cnd[k];
+
+		if (m->parent != e->dr.cnd[i].parent)
+			continue;
+		if (!first)
+			fprintf(f, " && ");
+		first = 0;
+		if (strchr(m->expr, '|')) {
+			fputc('(', f);
+			emit_expr(f, e, m->expr);
+			fputc(')', f);
+		} else {
+			emit_expr(f, e, m->expr);
+		}
+	}
+	fprintf(f, ")");
+	if (e->dr.cnd[last].level == LV_NONE) {
+		fprintf(f, " {\n");
+		emit_verdict(f, &e->dr.cnd[last], depth + 1);
+		for (d = 0; d < depth; d++)
+			fputc('\t', f);
+		fprintf(f, "}\n");
+		return;
+	}
+	fprintf(f, "\n");
+	emit_verdict(f, &e->dr.cnd[last], depth + 1);
+}
+
+uint32_t emit_cond(FILE *f, struct kof_editor *e, uint32_t i, int depth)
 {
 	const struct cond *c = &e->dr.cnd[i];
-	uint32_t k;
+	uint32_t k, last = cnd_and_run(e, i);
 	int d;
+
+	if (last != i) {
+		emit_and_run(f, e, i, last, depth);
+		return last;
+	}
 
 	/*
 	 * A matcher's note goes above the branch that uses it, not beside the
@@ -2964,7 +3189,7 @@ void emit_cond(FILE *f, struct kof_editor *e, uint32_t i, int depth,
 		 */
 		fprintf(f, "{\n");
 	} else {
-		fprintf(f, "%sif (", chained ? "else " : "");
+		fprintf(f, "if (");
 		emit_expr(f, e, c->expr);
 		fprintf(f, ")");
 	}
@@ -2976,33 +3201,22 @@ void emit_cond(FILE *f, struct kof_editor *e, uint32_t i, int depth,
 			for (d = 0; d < depth; d++)
 				fputc('\t', f);
 			fprintf(f, "}\n");
-			return;
+			return i;
 		}
 		fprintf(f, "\n");
 		emit_verdict(f, c, depth + 1);
-		return;
+		return i;
 	}
 
 	if (c->expr[0])
 		fprintf(f, " {\n");
-	{
-		uint32_t prev = e->dr.n_cnd;
-
-		for (k = 0; k < e->dr.n_cnd; k++) {
-			if (e->dr.cnd[k].parent != (int)i)
-				continue;
-			/*
-			 * Chained or not, as the rule between them says.
-			 *
-			 * It used to be decided by depth - nested siblings
-			 * always chained, top level ones never did - which made
-			 * the same two rows on screen mean two different things
-			 * depending on where they sat.
-			 */
-			emit_cond(f, e, k, depth + 1,
-				  prev < e->dr.n_cnd && !e->dr.cnd[prev].join);
-			prev = k;
-		}
+	for (k = 0; k < e->dr.n_cnd; k++) {
+		if (e->dr.cnd[k].parent != (int)i)
+			continue;
+		/* Each child is its own "if" - see enum cnd_join for why
+		 * nothing here chains. `k` moves to the last member of a
+		 * conjoined run so it is not emitted twice. */
+		k = emit_cond(f, e, k, depth + 1);
 	}
 	/*
 	 * The gate's own verdict, after the children rather than as an else.
@@ -3021,6 +3235,7 @@ void emit_cond(FILE *f, struct kof_editor *e, uint32_t i, int depth,
 	for (d = 0; d < depth; d++)
 		fputc('\t', f);
 	fprintf(f, "}\n");
+	return i;
 }
 
 /*
@@ -3306,26 +3521,66 @@ no_head:
 				}
 			continue;
 		}
-		if ((p = strstr(line, "KOF_TARGET_SUBTYPE(")) != NULL) {
-			const char *const *tab = NULL;
-			const char *sub;
-			char w[32];
-			uint32_t n = 0, k;
+		/*
+		 * THE FORMATS THE RULE DECLARES, which were written and never
+		 * read.
+		 *
+		 * generate() emits KOF_TARGET_FORMAT as an OR of names and
+		 * nothing here parsed it, so every draft reopened with an EMPTY
+		 * format mask: the panel had no format to key its rows on, the
+		 * subtype row it gates went with it, and saving again wrote
+		 * whatever the object under the cursor happened to be. A rule
+		 * came back narrower or wider than the one that was saved.
+		 *
+		 * Read as a set of names rather than a single one, because that
+		 * is what the line is - see the note over the writer.
+		 */
+		if ((p = strstr(line, "KOF_TARGET_FORMAT(")) != NULL) {
+			uint32_t fi;
 
-			if ((sub = strstr(p, "KOF_ELF_")) != NULL) {
-				tab = elf_sub;
-				n = elf_sub_n;
-				src_ident(sub + 8, w, sizeof w);
-			} else if ((sub = strstr(p, "KOF_PE_")) != NULL) {
-				tab = pe_sub;
-				n = pe_sub_n;
-				src_ident(sub + 7, w, sizeof w);
+			for (fi = 0; fi < FMT_WORD_N; fi++)
+				if (src_word_in(p, fmt_word[fi]))
+					e->dr.fmt_mask |= 1u << fi;
+			continue;
+		}
+		if ((p = strstr(line, "KOF_TARGET_SUBTYPE(")) != NULL) {
+			char w[32];
+			uint32_t n = 0, k, fi;
+
+			/*
+			 * EVERY FORMAT THAT HAS A SUBTYPE, from the same table
+			 * the writer uses.
+			 *
+			 * This knew KOF_ELF_ and KOF_PE_ and was written when
+			 * those were the only two. KOF_SCRIPT_ was added to the
+			 * WRITER and not here, so a rule saved with a script
+			 * subtype reopened without one - the field was simply
+			 * gone from the panel, and saving again dropped it from
+			 * the file. A reader that knows a smaller vocabulary
+			 * than the writer loses exactly what the writer was
+			 * added for.
+			 */
+			for (fi = 0; fi < KOF_FMT_COUNT; fi++) {
+				const char *pre;
+				const char *const *tab =
+					sub_vocab((uint8_t)fi, &pre, &n);
+				const char *sub;
+
+				if (!tab)
+					continue;
+				sub = strstr(p, pre);
+				if (!sub)
+					continue;
+				src_ident(sub + strlen(pre), w, sizeof w);
+				for (k = 0; k < n; k++)
+					if (!strcmp(tab[k], w)) {
+						e->dr.opt_on[OPT_SUBTYPE] = 1;
+						e->dr.opt_val[OPT_SUBTYPE] = k;
+						break;
+					}
+				if (e->dr.opt_on[OPT_SUBTYPE])
+					break;
 			}
-			for (k = 0; tab && k < n; k++)
-				if (!strcmp(tab[k], w)) {
-					e->dr.opt_on[OPT_SUBTYPE] = 1;
-					e->dr.opt_val[OPT_SUBTYPE] = k;
-				}
 			continue;
 		}
 		if ((p = strstr(line, "KOF_DEFINE_STR(")) != NULL ||
@@ -3418,7 +3673,7 @@ no_head:
 				c->parent = parent;
 				c->level = LV_NONE;
 				if (cur >= 0 && e->dr.cnd[cur].parent == parent)
-					e->dr.cnd[cur].join = 1;
+					e->dr.cnd[cur].join = JN_OR;
 				cur = (int)e->dr.n_cnd;
 				pend_if = -1;
 				e->dr.n_cnd++;
@@ -3437,15 +3692,18 @@ no_head:
 			c->level = LV_NONE;
 			c->op = strstr(line, "||") != NULL;
 			/*
-			 * How the previous condition at this level joins to
-			 * this one, read off the source rather than assumed:
-			 * "else if" chains, a fresh "if" does not. Assuming
-			 * one turned three independent branches into a chain
-			 * on the way back out - the same behaviour, since
-			 * verdicts return, but not the same file.
+			 * A SEPARATE BRANCH, whichever way the source wrote it.
+			 *
+			 * This used to read the word "else" and keep the answer
+			 * apart from a plain "if". It is not a difference worth
+			 * a field: a verdict returns, so a branch that
+			 * concluded never reaches this one either way - see
+			 * enum cnd_join. A conjunction is not read here at all,
+			 * because "if (A && B)" is ONE if and comes back as one
+			 * condition over both matchers.
 			 */
 			if (cur >= 0 && e->dr.cnd[cur].parent == parent)
-				e->dr.cnd[cur].join = strstr(line, "else") == NULL;
+				e->dr.cnd[cur].join = JN_OR;
 			cur = (int)e->dr.n_cnd;
 			pend_if = cur;
 			e->dr.n_cnd++;
@@ -4123,7 +4381,7 @@ void generate(struct kof_editor *e, int as_new)
 		 * part that identifies the sample.
 		 */
 		const char *base = draft_sample(e);
-		char today[24];
+		char today[24], line[128];
 		uint32_t m;
 
 		/*
@@ -4132,7 +4390,19 @@ void generate(struct kof_editor *e, int as_new)
 		 * out of the block when the rule was opened. Testing a rule
 		 * against a second sample used to erase the first.
 		 */
-		meta_add(e->sample, &(*e->n_sample), MAX_META, base);
+		meta_sample_line(e, line, sizeof line);
+		/*
+		 * An entry this build wrote before hashes were recorded is the
+		 * SAME sample, so it is replaced rather than joined: two lines
+		 * for one file, one of them saying less, is not a record of two
+		 * samples.
+		 */
+		for (m = 0; m < (*e->n_sample); m++)
+			if (!strcmp(e->sample[m], base)) {
+				snprintf(e->sample[m], 128, "%s", line);
+				break;
+			}
+		meta_add(e->sample, &(*e->n_sample), MAX_META, line);
 		meta_add_who(e->who, &(*e->n_who), MAX_META,
 			     meta_user());
 		meta_today(today, sizeof today);
@@ -4286,21 +4556,18 @@ void generate(struct kof_editor *e, int as_new)
 			fm = b;
 		}
 
-		if (fm == KOF_FMT_ELF)
-			fprintf(f, "KOF_TARGET_SUBTYPE(KOF_ELF_%s);\n",
-				elf_sub[e->dr.opt_val[OPT_SUBTYPE] <
-					elf_sub_n
-					? e->dr.opt_val[OPT_SUBTYPE] : 0]);
-		else if (fm == KOF_FMT_PE)
-			fprintf(f, "KOF_TARGET_SUBTYPE(KOF_PE_%s);\n",
-				pe_sub[e->dr.opt_val[OPT_SUBTYPE] <
-				       pe_sub_n
-				       ? e->dr.opt_val[OPT_SUBTYPE] : 0]);
-		else if (fm == KOF_FMT_SCRIPT)
-			fprintf(f, "KOF_TARGET_SUBTYPE(KOF_SCRIPT_%s);\n",
-				script_sub[e->dr.opt_val[OPT_SUBTYPE] <
-					   script_sub_n
-					   ? e->dr.opt_val[OPT_SUBTYPE] : 0]);
+		/* Through the same vocabulary the reader uses - see sub_vocab
+		 * for what it cost when these were two separate lists. */
+		{
+			const char *pre;
+			uint32_t n;
+			const char *const *tab = sub_vocab(fm, &pre, &n);
+
+			if (tab)
+				fprintf(f, "KOF_TARGET_SUBTYPE(%s%s);\n", pre,
+					tab[e->dr.opt_val[OPT_SUBTYPE] < n
+					    ? e->dr.opt_val[OPT_SUBTYPE] : 0]);
+		}
 	}
 	if (e->dr.opt_on[OPT_SIZE_MIN] || e->dr.opt_on[OPT_ARCH] ||
 	    e->dr.opt_on[OPT_SUBTYPE])
@@ -4470,16 +4737,10 @@ void generate(struct kof_editor *e, int as_new)
 		if (wrote)
 			fprintf(f, "\n");
 	}
-	{
-		uint32_t prev = e->dr.n_cnd;
-
-		for (k = 0; k < e->dr.n_cnd; k++) {
-			if (e->dr.cnd[k].parent >= 0)
-				continue;
-			emit_cond(f, e, k, 1,
-				  prev < e->dr.n_cnd && !e->dr.cnd[prev].join);
-			prev = k;
-		}
+	for (k = 0; k < e->dr.n_cnd; k++) {
+		if (e->dr.cnd[k].parent >= 0)
+			continue;
+		k = emit_cond(f, e, k, 1);
 	}
 	fprintf(f, "}\n");
 

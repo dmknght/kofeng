@@ -47,4 +47,25 @@ int kof_isl_add(struct kof_script_info *info, uint64_t off, uint64_t len);
  */
 void kof_isl_seal(struct kof_script_info *info, uint64_t size);
 
+/*
+ * JOIN ISLANDS THAT NOTHING SEPARATES.
+ *
+ * Two runs of code with only whitespace between them are one run of code with a
+ * blank line in it. Carved apart they produce a markup region holding "\n" -
+ * 54 of the 279 markup runs in the measured corpus are four bytes or fewer, and
+ * a region of two whitespace bytes is a row in the tree, an extent for the
+ * matcher and a thing a reader has to look at and dismiss.
+ *
+ * THE ENDS COUNT TOO. The run before the first island and the run after the
+ * last are gaps like any other, and a page whose directives are followed by a
+ * newline, or which ends with one, produced a one-byte markup region at the top
+ * or the bottom. `from` is where the code may start, so the leading gap can be
+ * measured from something.
+ *
+ * A MERGE AND NOTHING ELSE: the whitespace becomes part of the island it sat
+ * beside, so every byte still belongs to exactly one region and none of them
+ * moves.
+ */
+void kof_isl_join_ws(kof_buf f, uint64_t from, struct kof_script_info *info);
+
 #endif /* KOFENG_SCRIPTS_SCANTEXT_H */

@@ -106,6 +106,48 @@ void kof_engine_version(struct kof_version *out)
  * beside them. Nothing stores these values anywhere, which is the point - one
  * source, and it is the file.
  */
+uint64_t kof_engine_db_stamp(const kof_engine *e)
+{
+	uint64_t acc = 0;
+	uint32_t i, n = 0;
+
+	if (!e)
+		return 0;
+	for (i = 0; i < e->n_packs; i++) {
+		const struct kof_pack_hdr *h = e->packs[i].map;
+		uint64_t m;
+
+		if (!h)
+			continue;
+		/*
+		 * THE CHECKSUM IS THE PACK'S CONTENT, already computed and
+		 * already verified at load - see kofpack.h, step 5. The length
+		 * and the build go in beside it so that two files could not
+		 * agree by a crc collision alone.
+		 */
+		m = (uint64_t)h->crc32;
+		m = m * 1099511628211ull + h->file_len;
+		m = m * 1099511628211ull + h->build;
+		m = m * 1099511628211ull +
+		    (((uint64_t)h->major << 48) | ((uint64_t)h->minor << 32) |
+		     h->machine);
+		/*
+		 * ADDED, NOT CHAINED, so the answer does not depend on the
+		 * order a directory walk happened to hand the packs over in -
+		 * two runs over one database must agree, and nothing promises
+		 * readdir order.
+		 */
+		acc += m;
+		n++;
+	}
+	if (!n)
+		return 0;
+	/* The COUNT as well, so that a pack removed is not hidden by one added
+	 * whose mix happens to sum the same. */
+	acc = acc * 1099511628211ull + n;
+	return acc ? acc : 1ull;
+}
+
 int kof_engine_db_version(const kof_engine *e, struct kof_db_version *out)
 {
 	uint32_t i;

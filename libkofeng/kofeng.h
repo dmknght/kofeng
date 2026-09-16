@@ -701,6 +701,36 @@ struct kof_db_version {
 
 int         kof_engine_db_version(const kof_engine *, struct kof_db_version *);
 
+/*
+ * ONE NUMBER FOR THE DATABASE AS IT IS LOADED, for a cache to key on. Zero when
+ * nothing is loaded.
+ *
+ * WHY THE BUILD STAMP IS NOT THAT NUMBER. kof_engine_db_version reports the
+ * OLDEST pack's build, to an hour, and a build stamp is a date rather than a
+ * description of content:
+ *
+ *   - removing a pack leaves the oldest one where it was, so a database with a
+ *     whole family taken out of it has the same stamp as the one it came from.
+ *     Measured: a cache written with the text signatures present was reused by
+ *     a scan of the same tree without them, and the other way about, which is
+ *     the case a verdict cache must never get wrong;
+ *   - adding a newer pack does not move a minimum either;
+ *   - and two builds in one hour share a stamp whatever changed between them.
+ *
+ * So this is over CONTENT: every loaded pack's checksum, length and build,
+ * combined so that the ORDER packs were loaded in cannot change the answer -
+ * a directory walk is not required to hand them over twice the same way. The
+ * checksums are already computed and verified at load, so this costs no read
+ * of the database and no hash of it.
+ *
+ * A DIFFERENT ANSWER MEANS RESCAN, NOT REFUSE. A database update is an update:
+ * every stored verdict predates it and is worth nothing, and the cache that
+ * holds them is discarded and rebuilt. Nothing about the scan is blocked - see
+ * kof_fidset_load, which reads a set written under another stamp as an empty
+ * one.
+ */
+uint64_t    kof_engine_db_stamp(const kof_engine *);
+
 /* One scanner per thread. The engine it is made from must outlive it. */
 kof_scanner *kof_scanner_new(const kof_engine *);
 void         kof_scanner_free(kof_scanner *);
@@ -1047,15 +1077,26 @@ struct kof_scan_option {
 	 *     the tool that was configured for that machine rather than to an
 	 *     engine that is the same everywhere.
 	 *
-	 * So the engine asks two questions through pointers and is told nothing
-	 * else: `seen` before opening a file, `keep` after finding it clean.
-	 * The key is opaque bytes; the engine does not compute it, read it, or
-	 * know what it is made of.
+	 * So the engine says three things through pointers and is told nothing
+	 * else: `seen` before opening a file, `keep` after finding it clean,
+	 * `drop` after finding it not. The key is opaque bytes; the engine does
+	 * not compute it, read it, or know what it is made of.
 	 *
-	 * Both NULL - the default - and nothing is cached and nothing is asked.
+	 * WHY `drop` EXISTS, WHICH IS NOT SYMMETRY WITH `keep`.
+	 *
+	 * A finding on a file that a cache elsewhere calls clean is the one
+	 * piece of news a cache must not miss. It arrives whenever the scan
+	 * that found it did not consult that cache - a run told not to trust it
+	 * on a machine somebody else has been on, or one under a database whose
+	 * answers the stored ones predate. Without this the deep run reports the
+	 * detection, the stale entry survives it, and the NEXT ordinary run
+	 * skips the file in silence.
+	 *
+	 * All NULL - the default - and nothing is cached and nothing is asked.
 	 */
 	int  (*cache_seen)(void *user, const char *path);
 	void (*cache_keep)(void *user, const char *path);
+	void (*cache_drop)(void *user, const char *path);
 	void  *cache_user;
 };
 

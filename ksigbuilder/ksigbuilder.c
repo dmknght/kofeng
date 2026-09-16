@@ -603,10 +603,13 @@ static int read_mask(const char *p, int line, struct rng *out)
 					break;
 			if (!rgn_names[i].name) {
 				int k;
-				fprintf(stderr, "%s:%d: error: region \"%s\" is not a "
-					"known region name; a range must be an OR of "
-					"region names so the host knows where to "
-					"search and when it can skip. Known:\n",
+				/* The list below is the useful half; the
+				 * sentence that used to be here explained why
+				 * a range is an OR of names, which is not what
+				 * a reader needs at the moment they mistyped
+				 * one. */
+				fprintf(stderr, "%s:%d: error: unknown region "
+					"\"%s\". Known:\n",
 					src_name, line, tok);
 				for (k = 0; rgn_names[k].name; k++)
 					fprintf(stderr, "    %s\n", rgn_names[k].name);
@@ -1169,8 +1172,7 @@ static int read_variant(const char *p, int line, char *out, size_t cap)
 	int n;
 
 	if (!g_have_name) {
-		err(line, "KOF_SCAN_INFECT/SUSPECT used before KOF_TARGET_NAME is "
-			  "declared; declare the type and family first");
+		err(line, "KOF_SCAN_INFECT/SUSPECT before KOF_TARGET_NAME");
 		return 0;
 	}
 
@@ -1246,10 +1248,9 @@ static int read_variant(const char *p, int line, char *out, size_t cap)
 			}
 			auto_suffix(raw);
 		} else {
-			fprintf(stderr, "%s:%d: error: the argument to "
-					"KOF_SCAN_INFECT/SUSPECT must be a quoted "
-					"variant name, KOF_MALVAR_AUTO, or "
-					"KOF_MALVAR_GENERIC, not \"%s\"\n",
+			fprintf(stderr, "%s:%d: error: \"%s\" is not a verdict "
+				"argument: want a quoted name, "
+				"KOF_MALVAR_AUTO or KOF_MALVAR_GENERIC\n",
 				src_name, line, raw);
 			errors++;
 			return 0;
@@ -1798,9 +1799,8 @@ static int widen(struct pat *o, int line)
 	 */
 	for (i = 0; i < o->len; i++) {
 		if (o->bytes[i] >= 0x80u) {
-			err(line, "a wide pattern must be ASCII - a byte above "
-				  "0x7F is not one UTF-16 unit, so it cannot be "
-				  "widened by interleaving zeros");
+			err(line, "a wide pattern must be ASCII: a byte above "
+				  "0x7F is not one UTF-16 unit");
 			return 0;
 		}
 	}
@@ -2044,9 +2044,10 @@ static void scan_line(char *at, size_t line_len, int lineno)
 /*
  * THE MARKER, INSIDE A C COMMENT THAT IT MUST NOT BE ABLE TO CLOSE.
  *
- * The bytes were written straight into "/* ... *\/", and a marker is allowed to
- * contain anything printable - including the two characters that END a comment.
- * "/* payload *\/ eval(" is an ordinary thing to cut out of a shell, and
+ * The bytes were written straight into a comment, and a marker is allowed to
+ * contain anything printable - including the two characters that END one. A
+ * marker holding a block-comment terminator is an ordinary thing to cut out of
+ * a shell, and
  * declaring it emitted a header whose comment stopped in the middle of the
  * string; the compiler then read the rest as code and the build died on a
  * missing quote, pointing at a generated file the researcher never wrote.
@@ -3209,8 +3210,7 @@ static int subtype_mask_main(int argc, char **argv)
 	}
 	if (saw_elf && saw_pe) {
 		fprintf(stderr, "ksigbuilder: --subtype-mask mixes ELF and PE "
-				"subtypes; their values collide on purpose and "
-				"mean different things\n");
+				"subtypes; their values collide\n");
 		return 1;
 	}
 	printf("%lu %s\n", (unsigned long)mask, saw_elf ? "ELF" : "PE");
@@ -3357,9 +3357,7 @@ static int kind_checks(int kind)
 		}
 		if (n_kind) {
 			fprintf(stderr, "FAIL: KOF_UNPACK_KIND on a detector; "
-					"it describes an unpacker, and a "
-					"detector declaring one has "
-					"misunderstood what it is writing\n");
+					"it describes an unpacker\n");
 			return 0;
 		}
 		return 1;
@@ -3392,15 +3390,13 @@ static int kind_checks(int kind)
 	}
 	if (g_heur_want && g_heur_phase != 0) {
 		fprintf(stderr, "FAIL: KOF_HEUR_WANT at KOF_HEUR_VERDICT; the "
-				"object has already been opened by then, so "
-				"there is nothing left to ask for\n");
+				"object is already open by then\n");
 		return 0;
 	}
 	if (src_has("KOF_SCAN_INFECT(") || src_has("KOF_SCAN_SUSPECT(") ||
 	    src_has("KOF_SCAN_MATCH(")) {
 		fprintf(stderr, "FAIL: a heuristic rule reports KOF_HEUR_HIT "
-				"and nothing above it; naming a family is what "
-				"a signature does\n");
+				"and nothing above it\n");
 		return 0;
 	}
 	if (src_has("KOF_TARGET_NAME(")) {
@@ -4906,8 +4902,8 @@ static void warn_duplicate_patterns(struct artefact *arts, uint32_t n_arts)
 		if (!arts[fps[i].idx].n_str && !arts[fps[i + 1].idx].n_str)
 			continue;
 		fprintf(stderr,
-			"ksigbuilder: warning: %s and %s declare the same target, "
-			"region and pattern set - one may be redundant\n",
+			"ksigbuilder: warning: %s and %s have the same target, "
+			"region and patterns\n",
 			arts[fps[i].idx].stem, arts[fps[i + 1].idx].stem);
 	}
 	free(fps);

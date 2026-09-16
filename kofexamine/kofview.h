@@ -217,6 +217,22 @@ void out_fmt(struct out *o, const char *fmt, ...);
 #define G_H  "-"
 #define G_V  "|"
 #define G_THUMB "#"
+/*
+ * HALF CELLS, so a thumb can start and stop BETWEEN rows.
+ *
+ * A bar whose thumb moves a whole row at a time jumps: on a forty row pane a
+ * page of a long file scrolls the thumb by nothing at all and then by a row,
+ * which reads as a control that is not tracking. Half cells double the
+ * resolution, which is enough for the eye to see it move continuously.
+ *
+ * There is nothing to halve in the ASCII fallback, so it keeps the whole mark
+ * and the bar stays as it was.
+ */
+#define G_HALF_T "#"
+#define G_HALF_B "#"
+#define G_HALF_L "#"
+#define G_HALF_R "#"
+#define G_HBAR   "-"
 #else
 #define G_TL "\xe2\x95\xad"     /* U+256D */
 #define G_TR "\xe2\x95\xae"     /* U+256E */
@@ -227,6 +243,23 @@ void out_fmt(struct out *o, const char *fmt, ...);
 /* The thumb of a scrollbar drawn INSIDE a border: it has to read as a mark on
  * the wall rather than as a gap in it, which a reversed space does not. */
 #define G_THUMB "\xe2\x94\x83"  /* U+2503, heavy vertical */
+/*
+ * Half cells - see the note in the ASCII branch for what they buy.
+ *
+ * FROM BOX DRAWING, NOT FROM BLOCK ELEMENTS. The obvious pick is the half
+ * blocks - U+2580 and U+2584 - and they came out as empty white squares: the
+ * terminal font has the box drawing the rest of this file uses and not the
+ * block elements, which are a different range and a different level of support.
+ *
+ * These are the heavy partial strokes from the SAME range as G_V and G_THUMB,
+ * so a font that draws the bar at all draws these, and they say the same thing:
+ * a heavy mark covering one end of the cell.
+ */
+#define G_HALF_T "\xe2\x95\xb9"   /* U+2579, heavy stroke upward */
+#define G_HALF_B "\xe2\x95\xbb"   /* U+257B, heavy stroke downward */
+#define G_HALF_L "\xe2\x95\xb8"   /* U+2578, heavy stroke leftward */
+#define G_HALF_R "\xe2\x95\xba"   /* U+257A, heavy stroke rightward */
+#define G_HBAR   "\xe2\x94\x80"   /* U+2500, the horizontal bar's rail */
 #endif
 
 /* ---- the colours that mean one thing everywhere --------------------------- */
