@@ -6016,8 +6016,33 @@ static void scrollbar(struct out *o, int col, int top, int bot,
 	}
 }
 
+/*
+ * Is the tree showing a scrollbar? The same question bar_thumb answers for
+ * drawing it, asked here so the divider can get out of its way.
+ */
+static int tree_bar_on(const struct view *v)
+{
+	int t1;
+
+	return bar_thumb(hex_top(), hex_bot(), v->tree_top, v->n_node,
+			 (uint64_t)(hex_bot() - hex_top() + 1), &t1) >= 0;
+}
+
 static void draw_frame(struct out *o, struct view *v)
 {
+	/*
+	 * THE SCROLLBAR IS THE BORDER WHEN THERE IS ONE.
+	 *
+	 * The bar is drawn in the tree's last column and the divider in the
+	 * next, so a tree long enough to scroll showed TWO vertical lines side
+	 * by side - one of them saying nothing the other did not. A bar already
+	 * separates the panes; a second rule beside it is decoration.
+	 *
+	 * The column is still PAINTED when the divider is not drawn, with a
+	 * space. A column no drawer owns keeps whatever was last put in it -
+	 * see the note below, which is the bug that taught this file so.
+	 */
+	int bar = tree_bar_on(v);
 	int i;
 
 	for (i = hex_top(); i <= hex_bot(); i++) {
@@ -6035,7 +6060,7 @@ static void draw_frame(struct out *o, struct view *v)
 		 * A column that no drawer owns is a column that keeps whatever
 		 * was last put in it, so this one is given an owner.
 		 */
-		out_str(o, A_DIM "|" A_OFF " ");
+		out_str(o, bar ? "  " : A_DIM "|" A_OFF " ");
 	}
 	/*
 	 * The divider, which is also the handle that resizes the draft panel.
@@ -6571,6 +6596,63 @@ static char txt_glyph(uint8_t c)
 	return (c >= 32 && c < 127) ? (char)c : '.';
 }
 
+/*
+ * WHERE A RUN OF CODE OR OF MARKUP BEGINS, so the gutter can say so.
+ *
+ * A page alternates all the way down and the text alone does not show it: a
+ * reader scrolling through eighty runs cannot see where one ended and the next
+ * started without reading the tags. The LINE NUMBER is marked instead of the
+ * line, because the line is the file's bytes and colouring those would be this
+ * pane inventing emphasis the file does not have - the same reason a tab is
+ * drawn as one space rather than expanded.
+ *
+ * Only the starts are collected, and only the first KOF_SCRIPT_MAX_ISLAND of
+ * each: they are the boundaries, and a boundary is a point rather than a span.
+ */
+struct txt_marks {
+	uint64_t body[KOF_SCRIPT_MAX_ISLAND + 2u];
+	uint64_t mark[KOF_SCRIPT_MAX_ISLAND + 2u];
+	uint32_t n_body, n_mark;
+};
+
+static void txt_marks_of(struct view *v, struct txt_marks *m)
+{
+	struct object *ob = cur_obj(v);
+	struct kof_range r[KOF_SCRIPT_MAX_ISLAND + 2u];
+	uint32_t cap = KOF_SCRIPT_MAX_ISLAND + 2u, n, i;
+
+	m->n_body = m->n_mark = 0;
+	if (ob->ctx.format != KOF_FMT_SCRIPT || !ob->ctx.resolve_scan ||
+	    !kof_script_islands_of(&ob->ctx))
+		return;
+	n = ob->ctx.resolve_scan(&ob->ctx, KOF_SCAN_SCRIPT_BODY, r, cap);
+	for (i = 0; i < n && i < cap; i++)
+		m->body[m->n_body++] = r[i].off;
+	n = ob->ctx.resolve_scan(&ob->ctx, KOF_SCAN_SCRIPT_MARKUP, r, cap);
+	for (i = 0; i < n && i < cap; i++)
+		m->mark[m->n_mark++] = r[i].off;
+}
+
+/* Does a run of this kind begin inside [lo, hi)? */
+static int txt_mark_in(const uint64_t *p, uint32_t n, uint64_t lo, uint64_t hi)
+{
+	uint32_t i;
+
+	for (i = 0; i < n; i++)
+		if (p[i] >= lo && p[i] < hi)
+			return 1;
+	return 0;
+}
+
+/*
+ * The two marks. Backgrounds rather than foregrounds, so they read as a mark on
+ * the number and not as a different KIND of number - the gutter already uses
+ * colour to mean "this is a place". Neither is used elsewhere in this file, so
+ * neither can be confused with a button, a selection or a search hit.
+ */
+#define A_T_BODY "\033[46;30m"   /* a run of code starts here */
+#define A_T_MARK "\033[105;30m"  /* a run of markup starts here */
+
 static void draw_text(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
@@ -6581,11 +6663,13 @@ static void draw_text(struct out *o, struct view *v)
 	const uint8_t *base = ob->buf.p;
 	uint64_t at, ln;
 	int row;
+	struct txt_marks marks;
 
 	if (!base)
 		base_n = 0;
 	if (wide < 1)
 		wide = 1;
+	txt_marks_of(v, &marks);
 
 	at = txt_line_start(v, base, base_n, v->rgn_at);
 	ln = txt_line_of(v, base, base_n, at);
@@ -6600,10 +6684,28 @@ static void draw_text(struct out *o, struct view *v)
 			out_str(o, "\033[K");
 			continue;
 		}
-		out_fmt(o, A_LOC "%*llu" A_OFF " ", TXT_GUTTER,
-			(unsigned long long)(ln + 1u));
-
 		end = txt_line_end(v, base, base_n, at);
+		{
+			/*
+			 * Through view_map, because `at` counts along the
+			 * REGION being shown and a run's offset is into the
+			 * object. On the whole-file row the two are the same
+			 * number; on any other row they are not, and comparing
+			 * them raw would mark whichever line sat at the same
+			 * distance from zero.
+			 */
+			uint64_t fo = view_map(v, at, 0);
+			const char *a = A_LOC;
+
+			if (txt_mark_in(marks.body, marks.n_body, fo,
+					fo + (end - at)))
+				a = A_T_BODY;
+			else if (txt_mark_in(marks.mark, marks.n_mark, fo,
+					     fo + (end - at)))
+				a = A_T_MARK;
+			out_fmt(o, "%s%*llu" A_OFF " ", a, TXT_GUTTER,
+				(unsigned long long)(ln + 1u));
+		}
 		/* How far right there is anything to see, so the sideways
 		 * scroll can stop there - see txt_maxlen. The newline is not
 		 * part of the line's width. */
@@ -14849,20 +14951,35 @@ static uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off)
 		if (v->node[k].obj != obj)
 			continue;
 		/*
-		 * A ROW THAT OWNS ITS BYTES IS ASKED ABOUT THOSE BYTES, and not
-		 * about its mask.
+		 * A PIECE ROW IS NEVER WHERE A JUMP LANDS.
 		 *
-		 * A piece row is one RUN of a region and every run of that
-		 * region carries the same mask, so resolving it answers about
-		 * all of them at once - and the first such row then claimed
-		 * every offset in the region. A search that landed in the
-		 * fortieth run of a page's code jumped to the first, whose
-		 * extents do not contain it, so the pane could not go there and
-		 * the hit read as "not found". An entry row has the same shape
-		 * and the same fault: its mask is KOF_SCAN_ALL, which covers
-		 * the whole object.
+		 * This function answers "where should the tree go for this
+		 * offset", and every caller of it MOVES the cursor there. For a
+		 * binary the answer is the narrowest region, and narrowing is
+		 * the useful thing: CODE and DATA are far apart and landing in
+		 * the right one is most of what the reader wanted to know.
+		 *
+		 * A script's piece rows are not that. They are one presentation
+		 * of the file - code, markup, code - and a page has eighty of
+		 * them. Narrowing into one drags the reader out of the object
+		 * they were searching and into a fragment of it: a search over
+		 * the whole file put the cursor in the first run of code, and
+		 * the next Find then started from a row whose extents hold
+		 * almost none of the file.
+		 *
+		 * So a piece is skipped and the object row is the answer, which
+		 * is the row the reader was on. It is still selectable by
+		 * clicking it - that is a reader asking for one run, which is a
+		 * different thing from a jump arriving at one.
+		 *
+		 * An ENTRY row keeps the old treatment and is asked about its
+		 * own bytes: it is a thing the file CONTAINS rather than a way
+		 * of looking at it, and its mask - KOF_SCAN_ALL - would
+		 * otherwise make the first one claim every offset.
 		 */
-		if (v->node[k].piece || v->node[k].ent) {
+		if (v->node[k].piece)
+			continue;
+		if (v->node[k].ent) {
 			if (file_off >= v->node[k].ent_off &&
 			    file_off < v->node[k].ent_off +
 				       v->node[k].ent_len)
