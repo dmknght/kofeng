@@ -171,6 +171,50 @@ static uint32_t line_cmt_at(const struct kof_lex *lx, const uint8_t *p,
 	return 0;
 }
 
+/*
+ * A HEREDOC OPENER IS "<<" AND A LABEL. The label is not decoration - the
+ * shell, php, perl and ruby all need it to know where the thing ENDS - so a
+ * "<<" with nothing name-shaped after it is not one.
+ *
+ * Which matters because the openers that begin with "<" are the only ambiguous
+ * ones, and they collide with two things that are everywhere:
+ *
+ *     [] >>>>>>>>> c0d3d by lionaneesh <<<<<<<<<<      an ascii banner
+ *     $a << 2                                          a left shift
+ *
+ * Read as a heredoc, either one makes this pass refuse the whole extent it is
+ * in, and a refusal is total: the bytes are kept as they were typed, so the one
+ * decorative line in a comment cost the file its entire form. Measured on this
+ * corpus: 5 of 76 php shells contain "<<<" and no heredoc anywhere, 914 KB of
+ * them, every byte unformed because of a row of angle brackets.
+ *
+ * ONLY the "<" family is tested this way. Python's \"\"\", a js backtick and
+ * PowerShell's @" are openers entire - there is no label to look for and
+ * demanding one would let every one of them through.
+ */
+static int ml_opens_at(const struct kof_lex *lx, const uint8_t *p, uint32_t n,
+		       uint32_t i, const char *op)
+{
+	uint32_t j;
+
+	(void)lx;
+	if (!at_text(p, n, i, op))
+		return 0;
+	if (op[0] != '<')
+		return 1;
+	j = i + text_len(op);
+	/* "<<-EOF" and "<<~EOF" indent-strip the body and are still heredocs. */
+	if (j < n && (p[j] == '-' || p[j] == '~'))
+		j++;
+	while (j < n && (p[j] == ' ' || p[j] == '\t'))
+		j++;
+	/* The label may be quoted, which is what turns off interpolation. */
+	if (j < n && (p[j] == '"' || p[j] == '\''))
+		j++;
+	return j < n && ((p[j] >= 'a' && p[j] <= 'z') ||
+			 (p[j] >= 'A' && p[j] <= 'Z') || p[j] == '_');
+}
+
 static int has_multiline(const struct kof_lex *lx, const uint8_t *p, uint32_t n)
 {
 	uint32_t i;
@@ -180,7 +224,7 @@ static int has_multiline(const struct kof_lex *lx, const uint8_t *p, uint32_t n)
 		if (!lx->ml_open[k])
 			continue;
 		for (i = 0; i < n; i++)
-			if (at_text(p, n, i, lx->ml_open[k]))
+			if (ml_opens_at(lx, p, n, i, lx->ml_open[k]))
 				return 1;
 	}
 	return 0;
@@ -216,6 +260,60 @@ static int glues(const struct kof_lex *lx, uint8_t a, uint8_t b)
 	return 0;
 }
 
+/*
+ * IS THIS MARKUP RATHER THAN A PROGRAM - asked of bytes, not of a file.
+ *
+ * WHAT IT IS FOR. The folding pass answers "what does this script build out of
+ * its own literals", and the answer is only worth an object when what it built
+ * is a PROGRAM. In a pure php shell the html is not written as markup, it is
+ * ECHOED from a string - and that string is a constant, so folding joins it and
+ * hands over a page of boilerplate. Measured on a shell whose entire body was
+ * one echoed page: the fold produced 134 bytes of html, which cleared the
+ * 64-byte floor, became the object, and displaced the formed file - so the
+ * @system($_GET["c"]) two lines below it never reached the tree at all.
+ *
+ * THE EVIDENCE IS A CLOSED TAG, TWICE. "<" followed by a letter - or by "/" and
+ * a letter - and a ">" within reach of it. Two of them, because one is what an
+ * expression like "$a < $b" or a shell redirect produces by accident, and two
+ * in the same constant is somebody writing markup.
+ *
+ * DELIBERATELY NOT A LANGUAGE TEST. A constant holding html is html whichever
+ * language assembled it, and asking the lexical table instead would have said
+ * nothing about the bytes in hand.
+ */
+int kof_script_is_markup(const uint8_t *p, uint32_t n)
+{
+	uint32_t i, tags = 0;
+
+	if (!p || n < 8u)
+		return 0;
+	for (i = 0; i + 2u < n; i++) {
+		uint32_t j;
+		uint8_t c;
+
+		if (p[i] != '<')
+			continue;
+		j = i + 1u;
+		if (p[j] == '/')
+			j++;
+		if (j >= n)
+			break;
+		c = p[j];
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')))
+			continue;
+		/*
+		 * AND IT HAS TO CLOSE, within a tag's worth of bytes. Without
+		 * the bound a single "<" anywhere would find the ">" of a
+		 * comparison half a file away and call it a tag.
+		 */
+		while (j < n && j < i + 64u && p[j] != '>')
+			j++;
+		if (j < n && j < i + 64u && p[j] == '>' && ++tags >= 2u)
+			return 1;
+	}
+	return 0;
+}
+
 enum { ST_OUT = 0, ST_SQ, ST_DQ, ST_BLK };
 
 uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
@@ -224,6 +322,11 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 {
 	uint32_t i = 0, w = 0;
 	int st = ST_OUT;
+	/*
+	 * DID THE LINE JUST EMITTED END INSIDE A LINE COMMENT - which the brace
+	 * rule below has to know and did not. See the note there.
+	 */
+	int cmt_tail = 0;
 
 	if (!lx || !in || !out || !n || cap < n)
 		return 0;
@@ -240,11 +343,73 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 	while (i < n) {
 		uint32_t ls = i, le, body, start_w = w;
 		int only_cmt = 0, blank;
+		int resumed = st == ST_SQ || st == ST_DQ;
+		int tail = 0;
 
 		/* Where this line ends, newline excluded. */
 		le = ls;
 		while (le < n && in[le] != '\n')
 			le++;
+
+		/*
+		 * A STRING THAT IS STILL OPEN OWNS THE LINE, and this is the
+		 * case the pass used to assert could not happen.
+		 *
+		 * It can. A double-quoted php string may hold real newlines -
+		 * echoing a block of html is the ordinary way to do it - and
+		 * has_multiline does not see one, because it looks for heredoc
+		 * and backtick openers and a plain quote is neither. The state
+		 * was then thrown away at the end of every line, so the SECOND
+		 * line of such a string was walked AS CODE. Measured on a page
+		 * echoed from one literal:
+		 *
+		 *   - its indentation was stripped, its runs of spaces closed
+		 *     up and its blank lines dropped - all of it string VALUE;
+		 *   - and a line of it reading "// this is not a comment, it is
+		 *     text" was DELETED, because at the start of a line a "//"
+		 *     is read as a comment. A pass that silently removes a line
+		 *     of a file is the one outcome worth never producing.
+		 *
+		 * So the state carries, and a line that begins inside a string
+		 * is copied byte for byte - newline included - until the quote
+		 * that closes it. None of the line rules below are asked about
+		 * such a line: a blank line is data, an indent is data, and a
+		 * comment opener is text.
+		 */
+		if (resumed) {
+			uint32_t j = ls;
+
+			while (j < le) {
+				uint8_t c = in[j];
+
+				if (c == '\\' &&
+				    (st == ST_DQ || lx->sq_escapes) &&
+				    j + 1u < le) {
+					out[w++] = c;
+					out[w++] = in[j + 1u];
+					j += 2u;
+					continue;
+				}
+				out[w++] = c;
+				j++;
+				if ((st == ST_SQ && c == '\'') ||
+				    (st == ST_DQ && c == '"')) {
+					st = ST_OUT;
+					break;
+				}
+			}
+			if (st != ST_OUT) {
+				/* Still open at the end of the line: the
+				 * newline is part of the value. */
+				if (le < n)
+					out[w++] = '\n';
+				i = le < n ? le + 1u : le;
+				continue;
+			}
+			/* Closed part way along: what follows is code, and it
+			 * is walked below without the line rules. */
+			ls = j;
+		}
 
 		/*
 		 * A BLOCK COMMENT THAT IS STILL OPEN OWNS THE WHOLE LINE.
@@ -277,11 +442,11 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 		while (body < le && is_ws(in[body]))
 			body++;
 		blank = body == le;
-		if (blank && (what & KOF_NORM_BLANK)) {
+		if (blank && !resumed && (what & KOF_NORM_BLANK)) {
 			i = le < n ? le + 1u : le;
 			continue;
 		}
-		if (what & KOF_NORM_INDENT)
+		if (!resumed && (what & KOF_NORM_INDENT))
 			ls = body;
 
 		/*
@@ -295,7 +460,7 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 		 * MIDDLE of a line is a different question and this pass does
 		 * not ask it.
 		 */
-		if ((what & KOF_NORM_COMMENT) && !blank) {
+		if ((what & KOF_NORM_COMMENT) && !blank && !resumed) {
 			if (line_cmt_at(lx, in, n, body))
 				only_cmt = 1;
 			else if (lx->blk_open &&
@@ -339,7 +504,24 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 		 * language where whitespace is syntax - in sh "{" is a command
 		 * group and needs the separator it is losing.
 		 */
-		if ((what & KOF_NORM_BRACE) && !lx->ws_significant &&
+		/*
+		 * AND NEVER ONTO A LINE THAT ENDS IN A COMMENT.
+		 *
+		 * The brace is appended after whatever the line above left, and
+		 * what a line comment leaves is "everything to the end of the
+		 * line is not code". Joined there the brace is INSIDE the
+		 * comment - the block it opened is gone and the program the
+		 * form describes is not the program in the file. Found in a
+		 * real shell:
+		 *
+		 *   function Zip($source, $destination) // Thanks to Alix Axel
+		 *   {
+		 *
+		 * became "...$destination)// Thanks to Alix Axel{", and every
+		 * brace after it was one level out.
+		 */
+		if ((what & KOF_NORM_BRACE) && !lx->ws_significant && !resumed &&
+		    !cmt_tail &&
 		    le == body + 1u && in[body] == '{' && w > 0 &&
 		    out[w - 1u] == '\n') {
 			w--;                    /* take back the newline */
@@ -378,6 +560,7 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 						 * only. */
 						while (j < le)
 							out[w++] = in[j++];
+						tail = 1;
 						break;
 					}
 					if (lx->quotes &&
@@ -453,14 +636,12 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 				j++;
 			}
 			/*
-			 * A STRING CANNOT REACH THE NEXT LINE - has_multiline
-			 * ruled out every construct that would let it, so an
-			 * open quote here is a malformed file rather than a
-			 * span, and carrying the state on would take the rest
-			 * of the file into it.
+			 * AND AN OPEN STRING CARRIES TO THE NEXT LINE, which
+			 * is the whole of the fix above. This used to reset
+			 * it, on the argument that has_multiline had ruled the
+			 * case out - it had not, and the reset is what let a
+			 * string's second line be walked as code.
 			 */
-			if (st == ST_SQ || st == ST_DQ)
-				st = ST_OUT;
 		}
 
 		/* A line that emitted nothing but was not dropped - all of it
@@ -469,6 +650,7 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 			i = le < n ? le + 1u : le;
 			continue;
 		}
+		cmt_tail = tail;
 		if (le < n)
 			out[w++] = '\n';
 		i = le < n ? le + 1u : le;

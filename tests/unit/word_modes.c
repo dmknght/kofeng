@@ -123,11 +123,65 @@ int main(void)
 	want("whole token, TOKEN: found", "@ob_start();\n$o=1;\n",
 	     "@ob_start();", KOF_STR_TOKEN, 1);
 
+	/*
+	 * ---- THE CASE THE VIEWER'S DEFAULT USED TO MISS ----
+	 *
+	 * A whole NAME with punctuation either side. This is most of what a
+	 * researcher drags out of a script, and it is neither of the two
+	 * answers the default used to give: TOKEN refuses it because "(" is not
+	 * whitespace, and SUBSTRING is looser than it needs to be. FULLWORD is
+	 * the right answer and was not reachable from the automatic choice at
+	 * all.
+	 */
+	want("name in punctuation, TOKEN: refused", weevely, "gzuncompress",
+	     KOF_STR_TOKEN, 0);
+	want("name in punctuation, FULLWORD: found", weevely, "gzuncompress",
+	     KOF_STR_FULLWORD, 1);
+
+	/* And FULLWORD still earns its keep - it refuses the fragment of a
+	 * name that SUBSTRING would take. */
+	want("name fragment, FULLWORD: refused", weevely, "gzuncompres",
+	     KOF_STR_FULLWORD, 0);
+	want("name fragment, SUBSTRING: found", weevely, "gzuncompres",
+	     0, 1);
+
+	/*
+	 * ---- THE NESTING THE LADDER RESTS ON ----
+	 *
+	 * The viewer picks the strictest mode whose boundary the sample
+	 * satisfies, and that is only safe if the modes NEST: whitespace is
+	 * also a non-word byte, so anything TOKEN accepts FULLWORD accepts too.
+	 * If that ever stopped holding, the default could tighten a marker into
+	 * one that no longer matches where it was taken from - the exact
+	 * failure this file was opened for.
+	 *
+	 * Asserted on the property rather than on an example, over every byte.
+	 */
+	{
+		unsigned c;
+
+		for (c = 0; c < 256u; c++) {
+			int tok = kof_str_abuts((uint8_t)c, KOF_STR_TOKEN);
+			int fw  = kof_str_abuts((uint8_t)c, KOF_STR_FULLWORD);
+
+			/* A byte that BREAKS a token run must also break a
+			 * word run - that is TOKEN => FULLWORD. */
+			if (!tok && fw) {
+				printf("  FAIL byte 0x%02x breaks TOKEN but "
+				       "continues FULLWORD - the modes do not "
+				       "nest\n", c);
+				fails++;
+				break;
+			}
+		}
+	}
+
 	if (fails) {
 		printf("word modes: %d check(s) failed\n", fails);
 		return 1;
 	}
-	printf("word modes: both boundaries refuse a fragment, "
-	       "token tells <%% from <%%@ - ok\n");
+	printf("word modes: both boundaries refuse a fragment, fullword takes "
+	       "a name in punctuation, token tells <%% from <%%@, "
+	       "the modes nest - ok\n");
 	return 0;
 }

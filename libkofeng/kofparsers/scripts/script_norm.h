@@ -120,6 +120,14 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 			 uint32_t what);
 
 /*
+ * Are these bytes MARKUP rather than a program?
+ *
+ * Two closed tags is the whole test - see the note over the definition for why
+ * the folding pass has to ask it, and what it cost not to.
+ */
+int kof_script_is_markup(const uint8_t *p, uint32_t n);
+
+/*
  * THE SECOND PASS: what the script BUILDS out of its own literals.
  *
  * The form pass above is about how a program was typed. This is about a

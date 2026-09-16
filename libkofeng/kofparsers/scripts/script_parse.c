@@ -15,6 +15,9 @@
 #include <string.h>
 
 #include "script_parse.h"
+#include "scantext.h"
+#include "php_parse.h"
+#include "svrpage_parse.h"
 
 const uint32_t kof_script_region_bits[] = {
 	KOF_SCAN_SCRIPT_HEADER, KOF_SCAN_SCRIPT_BODY, KOF_SCAN_SCRIPT_MARKUP,
@@ -179,281 +182,75 @@ static int looks_like_text(kof_buf f, uint64_t n)
 	return 1;
 }
 
-/* Case-insensitive compare of a fixed-length tag, for "<?PHP" and friends. */
-static int tag_at(kof_buf f, uint64_t at, const char *tag, uint32_t len)
-{
-	uint32_t i;
-
-	if (at + len > f.n)
-		return 0;
-	for (i = 0; i < len; i++) {
-		uint8_t a = f.p[at + i], b = (uint8_t)tag[i];
-
-		if (a >= 'A' && a <= 'Z')
-			a = (uint8_t)(a + 32);
-		if (b >= 'A' && b <= 'Z')
-			b = (uint8_t)(b + 32);
-		if (a != b)
-			return 0;
-	}
-	return 1;
-}
-
 /*
- * THE OPENING TAGS, which are the only content that names a language outright.
+ * WHICH LANGUAGE CLAIMS THE FILE - asked of each in turn, and NOT answered
+ * here.
  *
- *     <?php  <?=     PHP
- *     <%@            ASP.NET  - a page directive, "<%@ Page Language=..."
- *     <%             classic ASP
+ *     <?php  <?=                     php_parse.c
+ *     <%@  <%                        svrpage_parse.c   (asp, aspx, jsp)
+ *     <cfoutput and friends          ColdFusion
+ *     @echo off                      batch
  *
- * "<%@" is tested before "<%" because it is a prefix of it and the longer one
- * is the more specific answer. Everything here is a thing a file says about
- * itself; nothing is inferred from what the code looks like.
+ * The first two are a call each because the rule for where a tag ends is the
+ * LANGUAGE's - php's is five bytes, a server page's is the whole run of
+ * directives - and a table of tags could only have said the short answer. The
+ * last two are here because there is nothing more to them than the marker: no
+ * regions to carve, no islands, and so no file to put them in.
+ *
+ * ASKED IN LENGTH ORDER WITHIN A FAMILY, which each file does for itself: "<%@"
+ * before "<%" because the longer one is the more specific answer.
  */
-/* Is this text anywhere in the window? Case-insensitive, because every marker
- * below is written both ways in real files. */
-static int has_text(kof_buf f, uint64_t look, const char *t)
-{
-	uint32_t len = 0;
-	uint64_t i;
-
-	while (t[len])
-		len++;
-	if (look < len)
-		return 0;
-	for (i = 0; i + len <= look; i++)
-		if (tag_at(f, i, t, len))
-			return 1;
-	return 0;
-}
-
 /*
- * WHICH OF THE "<%" LANGUAGES, decided by a SECOND marker or not at all.
- *
- * "<%@" opens an ASP.NET page, a JSP page and plenty of classic ASP, so on its
- * own it is not an answer - taking it as one named cmdjsp.jsp "ASP.NET" and
- * cmdasp.asp the same, and a wrong kind makes every rule for the real language
- * decline the file. Each marker below belongs to exactly one of the three.
- *
- * Returning ANY is the correct outcome when none of them is present: the object
- * is still a script and kind 0 is never filtered on.
+ * `fam` is the FAMILY and `kind` the language, and they are two answers because
+ * a page can have the first without the second: kof_svr_kind declines when a
+ * page carries no marker naming which of the three it is, and KOF_SCRIPT_ANY is
+ * a correct answer there. The family is what decides how the file is CARVED, so
+ * carving on the kind would have left exactly those pages unsplit.
  */
-static uint8_t pct_kind(kof_buf f, uint64_t look)
-{
-	if (has_text(f, look, "<jsp:") || has_text(f, look, "<%@ taglib") ||
-	    has_text(f, look, "java.lang") || has_text(f, look, "java.io") ||
-	    has_text(f, look, "Runtime.getRuntime"))
-		return KOF_SCRIPT_JSP;
-	if (has_text(f, look, "runat=\"server\"") ||
-	    has_text(f, look, "<asp:") || has_text(f, look, "<%@ Import") ||
-	    has_text(f, look, "System.Web"))
-		return KOF_SCRIPT_ASPX;
-	if (has_text(f, look, "<%@ Language") ||
-	    has_text(f, look, "Server.CreateObject") ||
-	    has_text(f, look, "<%@ LANGUAGE"))
-		return KOF_SCRIPT_ASP;
-	return KOF_SCRIPT_ANY;
-}
-
-/*
- * IS THE TAG CLOSED - which is what makes "<%" a magic number at all.
- *
- * "<%" on its own is two bytes of punctuation and it occurs in prose. Measured,
- * on this machine: it claimed 208 .pm, 76 .pod, 70 .py and 62 .tmpl files,
- * because Perl's POD writes a hash as C<%dependencies> and Mako opens a
- * template with <%inherit file="..."/>. Every one of those became
- * KOF_FMT_SCRIPT with no kind, which is the worst of both - the rules for TEXT
- * no longer saw them, and subtype 0 is never filtered, so every script rule
- * did.
- *
- * What none of them has is the OTHER HALF. A server page is "<% ... %>": the
- * pair is balanced by definition, because the server has to know where the code
- * ends. C<%dependencies> closes with ">" and the Mako tag with "/>", and
- * neither writes "%>" anywhere in the file - checked, zero occurrences across
- * the four sampled.
- *
- * So the magic is the PAIR, not the opener. That keeps every real page and
- * drops the prose, and it needs no guess about what the bytes in between are.
- *
- * "<?php" needs no such test: five bytes that do not occur in passing, and a
- * PHP file is allowed to end without "?>" - most style guides ask for it.
- */
-static int pct_closed(kof_buf f, uint64_t at, uint64_t look)
-{
-	uint64_t j;
-
-	for (j = at + 2u; j + 2u <= look; j++)
-		if (f.p[j] == '%' && f.p[j + 1u] == '>')
-			return 1;
-	return 0;
-}
-
-/*
- * HOW LONG THE DIRECTIVE BLOCK IS, from the "<%@" at `at`.
- *
- * A page does not declare itself in three characters. It declares itself in a
- * RUN of directives, and reading only the "<%@" put every one of them in the
- * body:
- *
- *     <%@ Page Language="C#" Debug="true" %>     <-- header was these 3 bytes
- *     <%@ Import Namespace="System.Diagnostics" %>
- *     <%@ Import Namespace="System.IO" %>
- *     <script Language="c#" runat="server">      <-- and all of this was body
- *
- * So a rule asking for the PROGRAM was handed the directives as well, and the
- * directives - "Import Namespace=System.Diagnostics" is about as loud as an
- * ASP.NET marker gets - could not be named as a region at all.
- *
- * The run ends at the first thing that is not another directive, which is what
- * separates the two shapes that occur: a page whose directives are followed by
- * markup, and one whose "<%@ Language=VBScript %>" is followed by a plain "<%"
- * opening code. Whitespace between directives belongs to the run; anything else
- * ends it.
- *
- * The same rule the shebang branch already follows - the header is the whole of
- * what declared the interpreter, not the punctuation that opened it.
- *
- * Bounded by `look`, like everything else here. An unterminated directive ends
- * the run where it started rather than swallowing the file: a header that runs
- * to the end leaves no body, and a file that is all header is not what an
- * unterminated tag means.
- */
-static uint32_t pct_directives(kof_buf f, uint64_t at, uint64_t look)
-{
-	uint64_t i = at, end = at;
-
-	for (;;) {
-		uint64_t j;
-
-		while (i < look && (f.p[i] == ' ' || f.p[i] == '\t' ||
-				    f.p[i] == '\r' || f.p[i] == '\n'))
-			i++;
-		if (!tag_at(f, i, "<%@", 3u))
-			break;
-		for (j = i + 3u; j + 2u <= look; j++)
-			if (f.p[j] == '%' && f.p[j + 1u] == '>')
-				break;
-		if (j + 2u > look)
-			break;          /* unterminated - the run stops here */
-		i = j + 2u;
-		/*
-		 * THE RUN ENDS AT THE LAST "%>", not where the search for the
-		 * next directive gave up.
-		 *
-		 * The whitespace between two directives belongs to the block;
-		 * the whitespace after the LAST one belongs to whatever comes
-		 * next. Returning `i` handed the header the newline under the
-		 * final directive - and a page with ten blank lines under it
-		 * would have handed over all ten.
-		 */
-		end = i;
-	}
-	return end > at ? (uint32_t)(end - at) : 3u;
-}
-
-/*
- * THE CODE ISLANDS, over the WHOLE object and not just the sniff window.
- *
- * A page is markup with runs of "<% ... %>" in it, and where those runs are is
- * not a property of the first eight kilobytes - a shell at the foot of a long
- * template is the case that matters. So this is the one walk here that reads
- * everything, and it is a scan for one byte until it finds "<%".
- *
- * "<%--" IS NOT AN ISLAND. It opens a JSP comment, and a comment is not what
- * the server runs; recorded as code it would be normalised by Java's rules and
- * offered to every rule about the program. Skipped, it falls into the gap
- * either side, which is MARKUP - where a comment belongs.
- *
- * An unterminated run takes the rest of the object. It is the same choice the
- * cap makes and for the same reason: a tail called code costs candidates, a
- * tail called markup would be code nothing ever looks at.
- */
-static uint16_t pct_islands(kof_buf f, uint64_t from,
-			    struct kof_script_info *info)
-{
-	uint64_t i = from;
-	uint16_t n = 0;
-
-	while (i + 2u <= f.n && n < KOF_SCRIPT_MAX_ISLAND) {
-		uint64_t open, close;
-
-		while (i + 2u <= f.n &&
-		       !(f.p[i] == '<' && f.p[i + 1u] == '%'))
-			i++;
-		if (i + 2u > f.n)
-			break;
-		open = i;
-		for (close = open + 2u; close + 2u <= f.n; close++)
-			if (f.p[close] == '%' && f.p[close + 1u] == '>')
-				break;
-		if (close + 2u > f.n) {
-			if (!tag_at(f, open, "<%--", 4u)) {
-				info->island[n].off = (uint32_t)open;
-				info->island[n].len = (uint32_t)(f.n - open);
-				n++;
-			}
-			break;
-		}
-		if (!tag_at(f, open, "<%--", 4u)) {
-			info->island[n].off = (uint32_t)open;
-			info->island[n].len =
-				(uint32_t)(close + 2u - open);
-			n++;
-		}
-		i = close + 2u;
-	}
-	/* Past the cap, the last island swallows the tail - see the note on
-	 * KOF_SCRIPT_MAX_ISLAND. */
-	if (n == KOF_SCRIPT_MAX_ISLAND &&
-	    (uint64_t)info->island[n - 1].off +
-	    info->island[n - 1].len < f.n)
-		info->island[n - 1].len =
-			(uint32_t)(f.n - info->island[n - 1].off);
-	return n;
-}
+enum { FAM_NONE = 0, FAM_PHP, FAM_SVR };
 
 static uint64_t find_tag(kof_buf f, uint64_t look, uint8_t *kind,
-			 uint32_t *taglen)
+			 uint32_t *taglen, int *fam)
 {
-	uint64_t i;
+	uint64_t php, svr, i;
+	uint32_t pl = 0, sl = 0;
 
+	*fam = FAM_NONE;
+
+	php = kof_php_find_tag(f, look, &pl);
+	svr = kof_svr_find_tag(f, look, &sl);
+	/*
+	 * WHICHEVER COMES FIRST, because a file is opened by one language and
+	 * the other marker is then content. A jsp that prints the string
+	 * "<?php" in its markup is a jsp; asking php first would have made it a
+	 * php file with a body of Java.
+	 */
+	if (php != (uint64_t)-1 && (svr == (uint64_t)-1 || php <= svr)) {
+		*kind = KOF_SCRIPT_PHP;
+		*taglen = pl;
+		*fam = FAM_PHP;
+		return php;
+	}
+	if (svr != (uint64_t)-1) {
+		*kind = kof_svr_kind(f, look);
+		*taglen = sl;
+		*fam = FAM_SVR;
+		return svr;
+	}
+
+	/* ColdFusion: every tag is "<cf" and nothing else opens with it, so
+	 * unlike "<%" one marker is the whole answer. No islands - the code is
+	 * in attributes as often as between tags, and carving that has not been
+	 * measured. */
 	for (i = 0; i + 2u <= look; i++) {
 		if (f.p[i] != '<')
 			continue;
-		if (tag_at(f, i, "<?php", 5u)) {
-			*kind = KOF_SCRIPT_PHP; *taglen = 5u; return i;
-		}
-		if (tag_at(f, i, "<?=", 3u)) {
-			*kind = KOF_SCRIPT_PHP; *taglen = 3u; return i;
-		}
-		/*
-		 * ONE RULE FOR THE WHOLE "<%" FAMILY, because the SYNTAX is
-		 * theirs together - classic ASP, ASP.NET and JSP all declare
-		 * themselves in "<%@ ... %>" and differ only in what they put
-		 * inside it. Which of the three it is stays pct_kind's
-		 * question; how far the declarations run is this one, and
-		 * answering it per kind would be three copies of one answer.
-		 */
-		if (tag_at(f, i, "<%@", 3u)) {
-			/* Not `break`: an unclosed one earlier in the window
-			 * must not hide a real page later in it. */
-			if (!pct_closed(f, i, look))
-				continue;
-			*kind = pct_kind(f, look);
-			*taglen = pct_directives(f, i, look);
-			return i;
-		}
-		if (tag_at(f, i, "<%", 2u)) {
-			if (!pct_closed(f, i, look))
-				continue;
-			*kind = pct_kind(f, look); *taglen = 2u; return i;
-		}
-		/* ColdFusion: every tag is "<cf" and nothing else opens with
-		 * it, so unlike "<%" one marker is the whole answer. */
-		if (tag_at(f, i, "<cfoutput", 9u) ||
-		    tag_at(f, i, "<cfexecute", 10u) ||
-		    tag_at(f, i, "<cfset", 6u) || tag_at(f, i, "<cfquery", 8u) ||
-		    tag_at(f, i, "<cfscript", 9u) || tag_at(f, i, "<cfparam", 8u)) {
+		if (kof_txt_tag_at(f, i, "<cfoutput", 9u) ||
+		    kof_txt_tag_at(f, i, "<cfexecute", 10u) ||
+		    kof_txt_tag_at(f, i, "<cfset", 6u) ||
+		    kof_txt_tag_at(f, i, "<cfquery", 8u) ||
+		    kof_txt_tag_at(f, i, "<cfscript", 9u) ||
+		    kof_txt_tag_at(f, i, "<cfparam", 8u)) {
 			*kind = KOF_SCRIPT_CFM; *taglen = 3u; return i;
 		}
 	}
@@ -462,7 +259,7 @@ static uint64_t find_tag(kof_buf f, uint64_t look, uint8_t *kind,
 	 * the first line of most of them and is not a construct in any of the
 	 * other languages here. Only near the start, where a first line is.
 	 */
-	if (has_text(f, look < 256u ? look : 256u, "@echo off")) {
+	if (kof_txt_has(f, look < 256u ? look : 256u, "@echo off")) {
 		*kind = KOF_SCRIPT_BAT; *taglen = 0u; return 0;
 	}
 	return (uint64_t)-1;
@@ -491,7 +288,8 @@ int kof_script_sniff(kof_buf file)
 	{
 		uint8_t kind = KOF_SCRIPT_ANY;
 		uint32_t tl = 0;
-		uint64_t tag = find_tag(file, look, &kind, &tl);
+		int fam = FAM_NONE;
+		uint64_t tag = find_tag(file, look, &kind, &tl, &fam);
 
 		if (tag != (uint64_t)-1)
 			return looks_like_text(file, tag + tl);
@@ -588,41 +386,6 @@ static uint8_t kind_of_interp(const char *w)
 	return KOF_SCRIPT_ANY;
 }
 
-/*
- * THE CLOSING TAG AT THE END OF THE FILE, measured backwards from it.
- *
- * "?>" is the other half of "<?php" and belongs with it rather than with the
- * last statement - see KOF_SCAN_SCRIPT_FOOTER. Trailing whitespace goes with
- * it: an editor's final newline sits after the tag in almost every real file,
- * and a footer that stopped at ">" would leave that newline as the body's last
- * byte, which is the thing the region exists to stop.
- *
- * AT THE END AND NOWHERE ELSE. A "?>" in the middle of a file opens markup
- * that more code follows, and that shape is a page - BODY and MARKUP already
- * describe it. Reading a middle "?>" as a footer would call everything after
- * it a closing tag.
- *
- * NOT FOR THE "<%" FAMILY. There the "%>" is an island's own end, which
- * pct_islands already measured, and a page's last bytes are markup.
- */
-static uint32_t closing_tag(kof_buf f, const struct kof_script_info *info)
-{
-	uint64_t e = f.n;
-
-	if (info->n_island || f.n < 2u)
-		return 0;
-	while (e > 0 && (f.p[e - 1] == '\n' || f.p[e - 1] == '\r' ||
-			 f.p[e - 1] == ' ' || f.p[e - 1] == '\t'))
-		e--;
-	if (e < 2u || f.p[e - 2] != '?' || f.p[e - 1] != '>')
-		return 0;
-	/* The whole of it has to sit after the header, or a file that is
-	 * nothing but "<?php ?>" would have two regions claiming one byte. */
-	if (e - 2u < info->tag_len)
-		return 0;
-	return (uint32_t)(f.n - (e - 2u));
-}
-
 int kof_script_parse(kof_buf file, struct kof_script_info *info,
 		     struct kof_obj_ctx *ctx)
 {
@@ -659,33 +422,49 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 	{
 		uint8_t kind = KOF_SCRIPT_ANY;
 		uint32_t tl = 0;
+		int fam = FAM_NONE;
 
-		tag = find_tag(file, look, &kind, &tl);
+		tag = find_tag(file, look, &kind, &tl, &fam);
 		if (tag != (uint64_t)-1) {
 			info->kind = kind;
 			if (!info->tag_len)
 				info->tag_len = (uint32_t)(tag + tl);
 			/*
-			 * ONLY THE "<%" FAMILY HAS ISLANDS.
+			 * BOTH FAMILIES HAVE ISLANDS, and php has them only
+			 * when it is a page.
 			 *
-			 * A "<?php" file is a program that may end with some
-			 * markup; a page is markup that CONTAINS programs, and
-			 * only the second shape needs the body split. Left to
-			 * the simple two-region partition, "<?php" behaves
-			 * exactly as it did.
+			 * "<% ... %>" is a page by construction - the syntax
+			 * exists to put code inside markup - so its body is
+			 * always split. "<?php" is a program in most files and
+			 * a page in some, and php_is_page is what tells them
+			 * apart: content after a "?>" and nothing else.
+			 *
+			 * A php program keeps the partition it had, which is
+			 * what makes its closing tag a FOOTER; a php page is
+			 * split like any other page, and its trailing markup
+			 * is markup rather than the end of a program.
 			 *
 			 * The offsets are 32 bit, so an object that could not
-			 * be described by them keeps the old partition rather
-			 * than a truncated new one.
+			 * be described by them keeps the simple partition
+			 * rather than a truncated split one.
 			 */
-			if (tag_at(file, tag, "<%", 2u) &&
-			    file.n <= 0xffffffffu)
-				info->n_island =
-					pct_islands(file, info->tag_len, info);
+			if (file.n <= 0xffffffffu) {
+				if (fam == FAM_PHP) {
+					if (kof_php_is_page(file,
+							    info->tag_len))
+						kof_php_islands(file,
+								info->tag_len,
+								info);
+				} else if (fam == FAM_SVR) {
+					kof_svr_islands(file, info->tag_len,
+							info);
+				}
+			}
 		}
 	}
 
-	info->foot_len = closing_tag(file, info);
+	info->foot_len = info->kind == KOF_SCRIPT_PHP
+			 ? kof_php_footer(file, info) : 0u;
 
 	/* obj_size is the PARSER's to set - see any other collector. Leaving it
 	 * zero made both regions come back empty, because the body is

@@ -95,6 +95,37 @@ int main(void)
 	   "function x($t){\nreturn$t;\n}\n", KOF_NORM_ALL,
 	   "a lone brace joins the line above");
 
+	/*
+	 * BUT NOT ONTO A LINE THAT ENDS IN A COMMENT, or the brace is inside it
+	 * and the block it opened is gone. Found in a real shell, where it put
+	 * every brace after it one level out.
+	 */
+	eq(KOF_SCRIPT_PHP,
+	   "function Zip($s) // Thanks to Alix Axel\n{\nreturn 1;\n}\n",
+	   "function Zip($s)// Thanks to Alix Axel\n{\nreturn 1;\n}\n",
+	   KOF_NORM_ALL,
+	   "a brace does not join into a comment");
+
+	/*
+	 * "<<" IS A HEREDOC ONLY WITH A LABEL AFTER IT.
+	 *
+	 * A refusal is total - the extent keeps the bytes it was typed with -
+	 * so reading an ascii banner as a heredoc costs a whole file its form.
+	 * Measured: 5 of 76 php shells in the corpus contain "<<<" and no
+	 * heredoc anywhere, 914 KB of them.
+	 */
+	eq(KOF_SCRIPT_PHP,
+	   "/* >>>>> banner <<<<<<<<<< */\n$a = 1;\n",
+	   "$a=1;\n", KOF_NORM_ALL,
+	   "a row of angle brackets is not a heredoc");
+
+	/* And "<<2" is the right answer, not "<< 2": "<" and "2" do not spell a
+	 * longer token, so they close up like every other such pair. */
+	eq(KOF_SCRIPT_PHP,
+	   "$a = $b << 2;\n",
+	   "$a=$b<<2;\n", KOF_NORM_ALL,
+	   "a left shift is not a heredoc either");
+
 	/* ---- what must NOT be touched ---- */
 
 	/*
@@ -171,6 +202,33 @@ int main(void)
 	   "a='x\\' ; echo  b\n",
 	   "a='x\\' ; echo b\n", KOF_NORM_ALL,
 	   "sh: backslash in '...' is not an escape");
+
+	/*
+	 * ---- A STRING THAT CROSSES A LINE ----
+	 *
+	 * Legal php, and the ordinary way a pure shell emits its page: html
+	 * echoed from one literal. The pass used to assert this could not
+	 * happen - has_multiline looks for heredoc and backtick openers and a
+	 * plain quote is neither - and threw the string state away at every
+	 * newline, so the second line of such a string was walked AS CODE.
+	 *
+	 * Every rule then did the wrong thing to a VALUE, and one of them did
+	 * it destructively: a line reading "// x" inside the string was deleted
+	 * as a comment-only line. The bytes of a file disappearing is the one
+	 * outcome worth never producing, so all four are pinned here.
+	 */
+	eq(KOF_SCRIPT_PHP,
+	   "$p = \"<b>\n  // not a comment\n\n  a   b\n</b>\";\n$x = 1;\n",
+	   "$p=\"<b>\n  // not a comment\n\n  a   b\n</b>\";\n$x=1;\n",
+	   KOF_NORM_ALL,
+	   "a string crossing a line is all value");
+
+	/* And the code AFTER it is still code - the state has to come back, or
+	 * the rest of the file is copied as though it were a string. */
+	eq(KOF_SCRIPT_PHP,
+	   "$p = \"a\nb\";  if ( $x )  { }\n",
+	   "$p=\"a\nb\";if($x){}\n", KOF_NORM_ALL,
+	   "and the code after it is formed again");
 
 	/* ---- when it refuses ---- */
 
@@ -285,11 +343,56 @@ int main(void)
 			bad2("js folded without a sigil to go on");
 	}
 
+	/*
+	 * ---- MARKUP IS NOT A PROGRAM ----
+	 *
+	 * The folding pass asks this before it hands its answer over. A pure
+	 * php shell echoes its page from a constant, so folding joins that
+	 * constant and produces a screen of html - which cleared the size floor
+	 * and became the object, displacing the formed file and with it the
+	 * code the shell runs.
+	 *
+	 * The negatives matter as much: a comparison and a shell redirect both
+	 * put "<" and ">" in a constant, and reading either as markup would
+	 * throw away a real folded program.
+	 */
+	{
+		static const struct {
+			const char *s;
+			int markup;
+			const char *why;
+		} m[] = {
+			{ "<html><body>hello</body></html>", 1,
+			  "plain html" },
+			{ "<div class='x'>\n  <p>hi</p>\n</div>", 1,
+			  "html over several lines" },
+			{ "$k=\"4e4d\";function x($t,$k){$c=strlen($k);}", 0,
+			  "php: no tags at all" },
+			{ "if ($a < $b && $c > $d) { return $a; }", 0,
+			  "a comparison is not a tag" },
+			{ "cat /etc/passwd > /tmp/o 2>&1 < /dev/null", 0,
+			  "a shell redirect is not a tag" },
+			{ "for ($i=0;$i<$l;$i++){ $o.=$t[$i]^$k[$j]; }", 0,
+			  "a loop bound is not a tag" }
+		};
+		unsigned k;
+
+		for (k = 0; k < sizeof m / sizeof m[0]; k++) {
+			int got = kof_script_is_markup((const uint8_t *)m[k].s,
+						       (uint32_t)strlen(m[k].s));
+
+			if (got != m[k].markup)
+				printf("  FAIL is_markup said %d for %-28s "
+				       "(%s)\n", got, m[k].why, m[k].s),
+				fails++;
+		}
+	}
+
 	if (fails) {
 		printf("script norm: %d check(s) failed\n", fails);
 		return 1;
 	}
-	printf("script norm: form, strings, operators, shell, refusals, "
-	       "folding - ok\n");
+	printf("script norm: form, strings, multi-line values, operators, "
+	       "shell, refusals, folding, markup - ok\n");
 	return 0;
 }

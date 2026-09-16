@@ -221,6 +221,26 @@ static const char classic[] =
 	"%>\n"
 	"<html><body>done</body></html>\n";
 
+/*
+ * THE OTHER PLACE AN ASP.NET PAGE KEEPS CODE, and where its shells are: a
+ * <script runat="server"> holding the whole program.
+ *
+ * The second <script> is the control: no "runat", so it is client-side
+ * JavaScript that the server copies out. It must stay in the markup - claiming
+ * it as server code would form JavaScript by the server language's rules.
+ */
+static const char aspx_el[] =
+	"<%@ Page Language=\"C#\" %>\n"
+	"<html>\n"
+	"<script Language=\"c#\" runat=\"server\">\n"
+	"  void Page_Load(object s, EventArgs e)\n"
+	"  {\n"
+	"      Process.Start(\"cmd.exe\", Request[\"c\"]);\n"
+	"  }\n"
+	"</script>\n"
+	"<script>var t = 1;</script>\n"
+	"</html>\n";
+
 /* Markup first. A page is not required to lead with its directive. */
 static const char leading_markup[] =
 	"<html>\n<body>\n"
@@ -232,6 +252,33 @@ static const char pod_like[] =
 	"=item C<%dependencies>\n"
 	"\n"
 	"Holds the factored dependencies.\n";
+
+/*
+ * PHP HAS BOTH SHAPES AND THE PARTITION DIFFERS BETWEEN THEM.
+ *
+ * A PROGRAM - code, and a closing tag that ends the file. Nothing follows the
+ * "?>", so there is no markup and the tag is the FOOTER.
+ */
+static const char php_prog[] =
+	"<?php\n"
+	"  $c = $_GET[\"c\"];\n"
+	"  @system($c);\n"
+	"?>\n";
+
+/*
+ * A PAGE - html with code cut into it. The href is the reason this matters:
+ * "//" in it is not a comment, and the form pass would read it as one if the
+ * markup were handed to it as php.
+ */
+static const char php_page[] =
+	"<?php\n"
+	"  $c = $_GET[\"c\"];\n"
+	"?>\n"
+	"<html><a href=http://plain.example/p>link</a>\n"
+	"<?php\n"
+	"  @system($c);\n"
+	"?>\n"
+	"</html>\n";
 
 int main(void)
 {
@@ -273,6 +320,111 @@ int main(void)
 	if (isl != 1u)
 		printf("  FAIL %-26s %u islands, wanted 1\n",
 		       "asp islands", isl), fails++;
+
+	check_partition("aspx script element", aspx_el);
+	check_per_bit("aspx script el per bit", aspx_el);
+
+	/*
+	 * ONE ISLAND AND IT IS THE SERVER ONE. Two <script> elements, and only
+	 * the one carrying "runat" is code - so a second island here would mean
+	 * client-side JavaScript had been claimed as the server's.
+	 */
+	hl = header_len(aspx_el, &isl);
+	if (isl != 1u)
+		printf("  FAIL %-26s %u islands, wanted 1 - only the "
+		       "runat=\"server\" script is code\n",
+		       "aspx script islands", isl), fails++;
+
+	/*
+	 * AND THE ISLAND IS THE CODE, NOT THE ELEMENT. The opening tag is a
+	 * list of attributes; formed by the server language's rules its spaces
+	 * would close up and `Language="c#" runat="server"` would become one
+	 * token. So the tags belong to the markup and the island starts after
+	 * the ">".
+	 */
+	{
+		struct kof_script_info info;
+		struct kof_obj_ctx ctx;
+		kof_buf f;
+
+		memset(&ctx, 0, sizeof ctx);
+		f.p = (const uint8_t *)aspx_el;
+		f.n = strlen(aspx_el);
+		if (kof_script_sniff(f) && kof_script_parse(f, &info, &ctx) &&
+		    info.n_island == 1u) {
+			const char *p = aspx_el + info.island[0].off;
+
+			if (p[0] != '\n' || p[1] != ' ')
+				printf("  FAIL %-26s island starts \"%.12s\", "
+				       "wanted the code after the tag\n",
+				       "aspx island is the code", p), fails++;
+		}
+	}
+
+	check_partition("php program", php_prog);
+	check_partition("php page", php_page);
+	check_per_bit("php program per bit", php_prog);
+	check_per_bit("php page per bit", php_page);
+
+	/*
+	 * A PROGRAM IS NOT SPLIT. Its closing tag is the end of the file, and
+	 * splitting it into an island would put the tag inside BODY and leave
+	 * the FOOTER region - the whole reason the region exists - empty.
+	 */
+	hl = header_len(php_prog, &isl);
+	if (hl != (uint32_t)strlen("<?php"))
+		printf("  FAIL %-26s header is %u bytes\n",
+		       "php program header", hl), fails++;
+	if (isl != 0u)
+		printf("  FAIL %-26s %u islands, wanted 0 - a program that "
+		       "ends with \"?>\" is not a page\n",
+		       "php program islands", isl), fails++;
+
+	/*
+	 * A PAGE IS. Two runs of code with html between them, and the FIRST one
+	 * has to be there: its opener is the tag that identified the file, so a
+	 * walk that looked for an opener after the header would have started at
+	 * the second and called the first block markup.
+	 */
+	hl = header_len(php_page, &isl);
+	if (isl != 2u)
+		printf("  FAIL %-26s %u islands, wanted 2\n",
+		       "php page islands", isl), fails++;
+
+	/*
+	 * AND THE MARKUP IS NOT CODE. The bytes of the href have to come back
+	 * under MARKUP, because that is what stops the form pass reading "//"
+	 * in it as a comment and taking the rest of the line with it.
+	 */
+	{
+		struct kof_script_info info;
+		struct kof_obj_ctx ctx;
+		struct kof_range r[32];
+		kof_buf f;
+		uint32_t n, i;
+		int found = 0;
+
+		memset(&ctx, 0, sizeof ctx);
+		f.p = (const uint8_t *)php_page;
+		f.n = strlen(php_page);
+		if (kof_script_sniff(f) && kof_script_parse(f, &info, &ctx)) {
+			n = ctx.resolve_scan(&ctx, KOF_SCAN_SCRIPT_MARKUP, r,
+					     (uint32_t)(sizeof r / sizeof r[0]));
+			for (i = 0; i < n; i++) {
+				const char *p = php_page + r[i].off;
+
+				if (r[i].len >= 5u &&
+				    memchr(p, '<', (size_t)r[i].len) &&
+				    strstr(php_page, "href=http://") >=  p &&
+				    strstr(php_page, "href=http://") <
+				    p + r[i].len)
+					found = 1;
+			}
+		}
+		if (!found)
+			fail("php page markup",
+			     "the href is not in a MARKUP extent");
+	}
 
 	/*
 	 * AND THE OTHER HALF HAS TO BE THERE. "<%" is two bytes of punctuation

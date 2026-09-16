@@ -514,15 +514,34 @@ static int read_literal(const char *p, int line, struct pat *out)
 		char c = *q;
 
 		if (c == '\\') {
-			/* The escape's own character, not a value: these three
-			 * stand for themselves and that is the whole set. */
-			if (q[1] != '\\' && q[1] != '"' && q[1] != '?') {
-				err(line, "only \\\\, \\\" and \\? are supported in "
-					  "patterns - use a hex pattern for "
-					  "anything else");
+			/*
+			 * SIX ESCAPES AND NO MORE.
+			 *
+			 * Three stand for themselves - a backslash, a quote and
+			 * a question mark, which C would otherwise read as part
+			 * of the syntax. Three are whitespace, because a marker
+			 * that crosses a line has a newline in it and a
+			 * researcher must be able to declare one; they are
+			 * spelled the way C spells them, so this file means the
+			 * same thing to a compiler as it does here.
+			 *
+			 * Not \\x: it is greedy, so "\\x41BC" is one escape
+			 * rather than a byte and three letters, and a pattern
+			 * whose length depends on what follows it is a pattern
+			 * nobody can read. Hex patterns exist for bytes that
+			 * are not text.
+			 */
+			switch (q[1]) {
+			case '\\': case '"': case '?': c = q[1]; break;
+			case 't': c = '\t'; break;
+			case 'n': c = '\n'; break;
+			case 'r': c = '\r'; break;
+			default:
+				err(line, "only \\\\, \\\", \\?, \\t, \\n and \\r "
+					  "are supported in patterns - use a hex "
+					  "pattern for anything else");
 				return 0;
 			}
-			c = q[1];
 			q++;
 		}
 		if (n >= MAX_LITERAL) {

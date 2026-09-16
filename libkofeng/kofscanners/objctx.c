@@ -3071,53 +3071,106 @@ static int script_foot_emit(const struct kof_obj_ctx *ctx, uint8_t last)
 	return 1;
 }
 
+/* Copy bytes the pass must not touch. Answers 0 only when there is no room,
+ * which cannot happen while the output is bounded by the input. */
+static uint32_t verbatim(uint8_t *out, uint32_t held, uint32_t cap,
+			 const uint8_t *p, uint64_t n)
+{
+	if (!p || !n || held + n > cap)
+		return held;
+	memcpy(out + held, p, (size_t)n);
+	return held + (uint32_t)n;
+}
+
 /*
- * HOW THE PROGRAM WAS TYPED, TAKEN OUT OF IT - the form pass.
+ * HOW THE PROGRAM WAS TYPED, TAKEN OUT OF IT - the form pass, over the WHOLE
+ * object.
  *
  * A signature is bytes, and bytes carry the indentation, the blank lines, the
  * comments and the spacing of whichever copy the researcher had. Every one of
  * those is free for an author to change and none of them changes what the
  * program does, so a marker cut from one copy misses the next. This produces
- * the same program with all of that removed, once, and a marker taken from
- * THAT copy matches every way of typing it.
+ * the same file with all of that removed, once, and a marker taken from THAT
+ * copy matches every way of typing it.
  *
- * ONLY THE BODY. A server page is code inside markup - the parse already says
- * which bytes are which - and the rules here are the language's, not HTML's:
- * "//" in an unquoted href is not a comment and closing up spaces in text
- * changes it. So the pass is applied to the BODY extents and the markup is left
- * exactly where the parse found it, which also makes the several islands of a
- * jsp one program rather than several.
+ * THE PASS RUNS ON BODY AND ON NOTHING ELSE, AND THE REST IS COPIED.
  *
- * Writes into `out`, which must hold b.n, and answers how long the result is
- * and through `raw` how long the bytes it came from were. 0 means the object
- * has no body to work on.
+ * Those are two rules, not one, and the second is what this used to get wrong.
+ * It walked the BODY extents and emitted only those, so a page came out as its
+ * code with the html deleted - and the result was no longer the file. It could
+ * not be shown as one either: re-parsed it had one BODY and no MARKUP, so the
+ * reader lost where the code had been cut into the page, which is the first
+ * thing worth seeing about a page.
+ *
+ * So the walk is over the whole object. What lies between the BODY extents is
+ * the complement of them - the header, the markup gaps, the closing tag - and
+ * every byte of it is copied exactly as the parse found it. That is not
+ * conservatism, it is correctness: the rules here are the LANGUAGE's, and
+ * applied to markup they are wrong in both directions - "//" in an unquoted
+ * href is not a comment, and closing up the spaces in a sentence changes it.
+ *
+ * Because the complement is copied, the result re-parses into the same regions
+ * the input had, and the viewer draws a page as a page.
+ *
+ * A NEWLINE AT A BOUNDARY THAT WOULD OTHERWISE GLUE. The first thing the pass
+ * removes from a body is the blank line under the tag that opened it, so
+ * "<?php" and the first statement ran together into "<?php$u=" - which sniffs
+ * as php, parses as php here, and is a syntax error in php. One rule covers it
+ * and the closing tag at the other end: at a boundary between a copied run and
+ * a formed one, in either direction, put back a newline unless one of the two
+ * sides already has one.
+ *
+ * Writes into `out`, which must hold b.n, and answers how long the result is.
  */
 static uint32_t script_form(const struct kof_obj_ctx *ctx,
 			    struct kof_scanner *sc, const struct kof_lex *lx,
-			    kof_buf b, uint8_t *out, uint32_t *raw)
+			    kof_buf b, uint8_t *out, uint32_t cap)
 {
 	struct kof_range *ext;
 	uint32_t n_ext, i, held = 0;
+	uint64_t at = 0;
 
-	*raw = 0;
 	ext = sc->ext_gather;
 	n_ext = kof_scan_resolve_range(ctx, KOF_SCAN_SCRIPT_BODY, ext);
 	if (!n_ext)
 		return 0;
 	/*
 	 * Built whole before anything is emitted, because whether to emit at
-	 * all is a question about the whole of it: an extent that normalised to
+	 * all is a question about the whole of it: an extent that formed to
 	 * itself says nothing about the next one.
 	 */
 	for (i = 0; i < n_ext; i++) {
 		kof_buf s = kof_slice(b, ext[i].off, ext[i].len);
 		uint32_t w;
 
+		/* Everything since the last body extent, exactly as it is. */
+		if (ext[i].off > at)
+			held = verbatim(out, held, cap, b.p + at,
+					ext[i].off - at);
+		at = ext[i].off + ext[i].len;
 		if (!s.p || !s.n || s.n > 0xffffffffu)
 			continue;
-		*raw += (uint32_t)s.n;
-		w = kof_script_norm(lx, s.p, (uint32_t)s.n, out + held,
-				    (uint32_t)b.n - held, KOF_NORM_ALL);
+		if (held + 1u >= cap)
+			break;
+		/*
+		 * FORMED ONE BYTE ALONG, SO THE BOUNDARY IS DECIDED ON WHAT
+		 * CAME OUT.
+		 *
+		 * Whether a separator is needed is a question about the first
+		 * byte of the FORMED run, not of the input's - and the two
+		 * differ exactly where it matters. A body opens with the
+		 * newline under its tag, which reads as "already separated";
+		 * the pass then removes that newline as a blank line and the
+		 * tag ends up welded to the first statement. Measured as
+		 * "<?php$u=" - sniffs as php, parses as php here, and is a
+		 * syntax error in php.
+		 *
+		 * So a byte is reserved, the pass writes past it, and the byte
+		 * is either filled in or closed up once there is something to
+		 * look at.
+		 */
+		w = kof_script_norm(lx, s.p, (uint32_t)s.n, out + held + 1u,
+				    cap - held - 1u, KOF_NORM_ALL);
 		/*
 		 * A REFUSAL KEEPS THE BYTES. kof_script_norm answers 0 when it
 		 * will not touch an extent - a heredoc in it, no room - and the
@@ -3126,12 +3179,23 @@ static uint32_t script_form(const struct kof_obj_ctx *ctx,
 		 * with a hole in it and call it the same program.
 		 */
 		if (!w) {
-			if (held + s.n > b.n)
-				break;
-			memcpy(out + held, s.p, (size_t)s.n);
-			w = (uint32_t)s.n;
+			held = verbatim(out, held, cap, s.p, s.n);
+			continue;
 		}
-		held += w;
+		if (held && out[held - 1] != '\n' && out[held + 1u] != '\n') {
+			out[held] = '\n';
+			held += w + 1u;
+		} else {
+			memmove(out + held, out + held + 1u, (size_t)w);
+			held += w;
+		}
+	}
+	/* The closing tag, the markup after the last island, or nothing. */
+	if (at < b.n) {
+		if (held && out[held - 1] != '\n' && b.p[at] != '\n')
+			held = verbatim(out, held, cap,
+					(const uint8_t *)"\n", 1u);
+		held = verbatim(out, held, cap, b.p + at, b.n - at);
 	}
 	return held;
 }
@@ -3176,17 +3240,20 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 	const struct kof_lex *lx = NULL;
 	uint8_t *out = NULL, *tmp = NULL;
 	kof_buf b;
-	uint32_t n = 0, raw = 0;
+	uint32_t n = 0, raw = 0, cap;
 
 	if (!script_pass_open(ctx, &sc, &lx, &b))
 		return 0;
 	/*
 	 * Neither pass can make anything longer than what it was given - every
-	 * rule in both removes bytes or leaves them - so one allocation of the
-	 * object's size is the whole budget either needs, and neither can be
+	 * rule in both removes bytes or leaves them - except the ONE newline
+	 * the form pass may put back at each boundary between a copied run and
+	 * a formed one. There are at most two boundaries per body extent and
+	 * the extents are capped, so the slack is a constant and cannot be
 	 * made to grow by a crafted file.
 	 */
-	out = malloc((size_t)b.n);
+	cap = (uint32_t)b.n + 2u * KOF_SCRIPT_MAX_ISLAND + 2u;
+	out = malloc((size_t)cap);
 	if (!out)
 		return 0;
 
@@ -3200,7 +3267,39 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 		 * shells this was built against and longer than the strings
 		 * ordinary code assembles.
 		 */
-		if (n < 64u) {
+		/*
+		 * AND IT ONLY DISPLACES THE FORMED FILE WHEN IT IS MOST OF THE
+		 * FILE.
+		 *
+		 * The fold answers "what does this script build out of its own
+		 * literals", and there are two very different files that
+		 * answer it:
+		 *
+		 *   A BUILDER, whose whole purpose is to assemble a program -
+		 *   the pieces ARE the file, and what they build is the thing
+		 *   worth signing.
+		 *   A PROGRAM THAT HOLDS A CONSTANT - a blob, a page, a config
+		 *   string - which is incidental to it.
+		 *
+		 * Handing the second one over as the object replaced the file
+		 * with a scrap of it. Measured on Ani-Shell.php: 87075 bytes of
+		 * shell, and the child was the 3144-byte base64 python backdoor
+		 * it carries - so all 87 KB of the code a researcher came to
+		 * read was not in the tree at all.
+		 *
+		 * The share separates them and the corpus says so without being
+		 * asked nicely. Over 30 php shells that fold to anything, the
+		 * coverage is 0-16% for twenty-three of them and 57-99% for the
+		 * other seven, with NOTHING in between. A third is the middle
+		 * of that empty band, so the threshold does not sit on top of
+		 * any measured file.
+		 *
+		 * AND MARKUP IS NEVER A PROGRAM, whatever its share. A pure php
+		 * shell echoes its page from one constant, which can be most of
+		 * a small file and is still a screen of html.
+		 */
+		if (n < 64u || (uint64_t)n * 3u < b.n ||
+		    kof_script_is_markup(out, n)) {
 			n = 0;
 		} else {
 			tmp = malloc((size_t)n);
@@ -3220,37 +3319,51 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 			}
 		}
 	}
-	if (!n) {
-		n = script_form(ctx, sc, lx, b, out, &raw);
-		/*
-		 * ONLY WHEN THE FORM WAS ACTUALLY DIFFERENT, and by more than a
-		 * byte.
-		 *
-		 * The pass only ever REMOVES, so how much shorter the result is
-		 * says exactly how much of this file's form was removable - and
-		 * that is the number that decides whether a second copy is
-		 * worth a node in the tree and a pass of the matcher.
-		 *
-		 * Sixteen, because below it there was nothing for a marker to
-		 * trip over: a real shell whose body is almost entirely string
-		 * literals came out ONE byte shorter - the blank line after its
-		 * tag - and a marker taken from the raw file matches that copy
-		 * already. The child worth making is the one where indentation,
-		 * comments and spacing were there to remove.
-		 *
-		 * The folded form above is not held to this. It is not a
-		 * reformatting of the file, it is a different program.
-		 */
-		if (n < 32u || raw < n || raw - n < 16u)
-			n = 0;
-	}
 	if (n) {
+		/*
+		 * THE FOLD'S OUTPUT IS NOT A FILE, so it is given the tag its
+		 * parent opened with. The form pass below needs none of this -
+		 * it produces the whole object, header and markup and closing
+		 * tag included, because it copied them.
+		 */
 		c_child_kind(ctx, KOF_ENT_NORMALIZED);
 		if (!script_head_emit(ctx) || !emu_give(ctx, out, n) ||
 		    !script_foot_emit(ctx, out[n - 1u]))
 			n = 0;
 		else
 			c_child(ctx);
+		free(out);
+		return n;
+	}
+
+	n = script_form(ctx, sc, lx, b, out, cap);
+	/*
+	 * ONLY WHEN THE FORM WAS ACTUALLY DIFFERENT, and by more than a byte.
+	 *
+	 * Over the whole object, because the whole object is what this
+	 * produces: a page whose html is most of it and whose few lines of code
+	 * were already tight has nothing here for a marker to trip over, and a
+	 * copy of it would be a node in the tree that says the same as its
+	 * parent.
+	 *
+	 * Sixteen, because below it there was nothing to gain: a real shell
+	 * whose body is almost entirely string literals came out ONE byte
+	 * shorter - the blank line under its tag - and a marker taken from the
+	 * raw file matches that copy already. The child worth making is the one
+	 * where indentation, comments and spacing were there to remove.
+	 *
+	 * The folded form above is not held to this. It is not a reformatting
+	 * of the file, it is a different program.
+	 */
+	raw = (uint32_t)b.n;
+	if (n < 32u || raw < n || raw - n < 16u)
+		n = 0;
+	if (n) {
+		c_child_kind(ctx, KOF_ENT_NORMALIZED);
+		if (emu_give(ctx, out, n))
+			c_child(ctx);
+		else
+			n = 0;
 	}
 	free(out);
 	return n;
