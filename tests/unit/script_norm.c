@@ -343,56 +343,11 @@ int main(void)
 			bad2("js folded without a sigil to go on");
 	}
 
-	/*
-	 * ---- MARKUP IS NOT A PROGRAM ----
-	 *
-	 * The folding pass asks this before it hands its answer over. A pure
-	 * php shell echoes its page from a constant, so folding joins that
-	 * constant and produces a screen of html - which cleared the size floor
-	 * and became the object, displacing the formed file and with it the
-	 * code the shell runs.
-	 *
-	 * The negatives matter as much: a comparison and a shell redirect both
-	 * put "<" and ">" in a constant, and reading either as markup would
-	 * throw away a real folded program.
-	 */
-	{
-		static const struct {
-			const char *s;
-			int markup;
-			const char *why;
-		} m[] = {
-			{ "<html><body>hello</body></html>", 1,
-			  "plain html" },
-			{ "<div class='x'>\n  <p>hi</p>\n</div>", 1,
-			  "html over several lines" },
-			{ "$k=\"4e4d\";function x($t,$k){$c=strlen($k);}", 0,
-			  "php: no tags at all" },
-			{ "if ($a < $b && $c > $d) { return $a; }", 0,
-			  "a comparison is not a tag" },
-			{ "cat /etc/passwd > /tmp/o 2>&1 < /dev/null", 0,
-			  "a shell redirect is not a tag" },
-			{ "for ($i=0;$i<$l;$i++){ $o.=$t[$i]^$k[$j]; }", 0,
-			  "a loop bound is not a tag" }
-		};
-		unsigned k;
-
-		for (k = 0; k < sizeof m / sizeof m[0]; k++) {
-			int got = kof_script_is_markup((const uint8_t *)m[k].s,
-						       (uint32_t)strlen(m[k].s));
-
-			if (got != m[k].markup)
-				printf("  FAIL is_markup said %d for %-28s "
-				       "(%s)\n", got, m[k].why, m[k].s),
-				fails++;
-		}
-	}
-
 	if (fails) {
 		printf("script norm: %d check(s) failed\n", fails);
 		return 1;
 	}
 	printf("script norm: form, strings, multi-line values, operators, "
-	       "shell, refusals, folding, markup - ok\n");
+	       "shell, refusals, folding - ok\n");
 	return 0;
 }

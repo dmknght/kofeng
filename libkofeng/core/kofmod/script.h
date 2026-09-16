@@ -131,9 +131,21 @@ static inline const char *kof_script_type_name(uint8_t v)
  * therefore name one range and have it mean the right thing in both, which is
  * the whole reason the numbering corresponds.
  *
- * HEADER is the line that named the interpreter: the "#!" line, or up to and
- * including the "<?php" tag. It is what a rule skips when it wants the program
- * and what it names when it wants the shebang itself.
+ * HEADER is the line that named the interpreter - and ONLY where that line is a
+ * thing apart from the program:
+ *
+ *   a "#!" line            names an interpreter and is not a statement.
+ *   a "<%@ ... %>" run     declares the page; the server does not run it as
+ *                          code, and its directives are worth naming alone.
+ *
+ * PHP HAS NO HEADER, and calling its first tag one was wrong about what the
+ * file is. "<?php" OPENS A BLOCK OF CODE - it is the first byte of a body, the
+ * same as every other "<?php" further down - so a file with several blocks had
+ * one of them arbitrarily cut in half and the first piece named something else.
+ * The tag belongs to the block it opens, and "?>" to the block it closes.
+ *
+ * There is no FOOTER for the same reason: "?>" is the end of a body, not a
+ * region of its own.
  */
 #define KOF_SCAN_SCRIPT_HEADER (1u << 1)
 #define KOF_SCAN_SCRIPT_BODY   (1u << 2)
@@ -159,24 +171,6 @@ static inline const char *kof_script_type_name(uint8_t v)
  */
 #define KOF_SCAN_SCRIPT_MARKUP (1u << 3)
 
-/*
- * AND THE CLOSING TAG, WHICH IS NOT THE PROGRAM EITHER.
- *
- * "?>" ends a php file the way "<?php" opens it, and leaving it in BODY made
- * the body a thing that could not be handed anywhere on its own: a form of the
- * program with a stray "?>" welded to its last statement, and a marker taken
- * from the end of a file carrying two bytes of punctuation that say nothing
- * about what the program does.
- *
- * The trailing whitespace after it belongs to the footer for the same reason
- * the shebang's line ending belongs to the header - it is part of the thing
- * that closed the file, not a statement.
- *
- * Bit 4, which is NOLOAD in an ELF and the certificate table in a PE: present
- * in the file, and not part of what runs. That is exactly what this is, so a
- * rule written across formats reads the same way.
- */
-#define KOF_SCAN_SCRIPT_FOOTER (1u << 4)
 
 /*
  * The view a module reached for KOF_FMT_SCRIPT gets.
@@ -190,27 +184,79 @@ static inline const char *kof_script_type_name(uint8_t v)
 /*
  * HOW MANY CODE ISLANDS ARE KEPT SEPARATELY.
  *
- * A page with more than this many "<% ... %>" runs is not wrong, it is just
- * past what is worth describing one at a time: beyond the cap the last island
- * is extended to the end of the object, which keeps the partition exact -
- * every byte still belongs to exactly one region - at the cost of calling some
- * markup code. Erring that way rather than the other is deliberate: markup
- * scanned as code costs a few false candidates, code scanned as markup would
- * be code no rule ever sees.
+ * MEASURED, because the first number was guessed and a real shell walked
+ * straight past it. Over 100 webshells that carry closing tags the island
+ * count is 3 at the median, 19 at the ninetieth centile and 122 at the
+ * maximum - Ani-Shell.php, which is an ordinary 87 KB php shell and not an
+ * outlier in any other respect. Four of the hundred need more than 32.
+ *
+ * 256 is twice the largest thing measured. The cost is 8 bytes an island in a
+ * view the host allocates once per format, so 2 KB - which buys the whole
+ * measured population with room over it.
+ *
+ * WHAT HAPPENS PAST IT CHANGED TOO, and that was the damage. The overflow used
+ * to EXTEND THE LAST ISLAND TO THE END OF THE OBJECT, on the argument that
+ * markup scanned as code costs a few false candidates while code scanned as
+ * markup is code no rule sees. That argument assumed the cap was rarely
+ * reached. At 32 it was reached by a real shell and the last island swallowed
+ * 67697 of 87075 bytes - 78% of the file, nearly all of it html, declared to
+ * be code.
+ *
+ * And it is no longer only about candidates. The form pass runs the LANGUAGE's
+ * rules over whatever BODY names, so markup called code is markup rewritten by
+ * php's rules: "//" in an unquoted href read as a comment, the spaces in a
+ * sentence closed up. A tail left as MARKUP is still searched by every rule
+ * with a whole-object range, which is most of them.
+ *
+ * So the tail past the cap is markup, and KOF_SCRIPT_ANOM_ISLANDS_FULL says
+ * so - a silent cliff is what made the first one survive this long.
  */
-#define KOF_SCRIPT_MAX_ISLAND 32u
+#define KOF_SCRIPT_MAX_ISLAND 256u
+
+/*
+ * The parse had more code islands than it can describe one at a time.
+ *
+ * Everything past the cap is reported as markup - see the note above - so a
+ * rule targeting BODY does not see it. The bit exists so that is a thing the
+ * examiner prints rather than a thing a reader has to deduce from a region
+ * that looks short.
+ */
+#define KOF_SCRIPT_ANOM_ISLANDS_FULL (1u << 0)
 
 struct kof_script_info {
 	uint8_t  kind;          /* enum kof_script_type */
 	uint8_t  from_shebang;  /* 1 when a "#!" line named it */
 	uint16_t n_island;      /* 0 for anything that is not a server page */
+	/*
+	 * WHERE THE HEADER STARTS, which is not always zero.
+	 *
+	 * A page opens with html and reaches its "<?php" wherever it reaches
+	 * it. The header was [0, tag_len) - everything up TO and including the
+	 * tag - so all of that leading markup was declared to be the header.
+	 * Measured: 20 of 103 files in the corpus, up to 4072 bytes of html in
+	 * one. A header is the thing that NAMED the language, not whatever
+	 * happened to come before it, and the bytes before it are markup like
+	 * any other markup.
+	 */
+	uint32_t tag_off;
+	/*
+	 * HOW LONG THE TAG ITSELF IS - 5 for "<?php", 2 for "<%", the whole
+	 * line for a "#!".
+	 *
+	 * This used to hold where the header ENDED, counted from zero, which is
+	 * a different number and disagreed with the name of the field for every
+	 * file whose tag is not at offset zero. Two facts now sit in two fields.
+	 */
 	uint32_t tag_len;
 	/*
-	 * How many bytes at the END the closing tag and what follows it take -
-	 * 0 when the file does not end with one, which most php does not.
-	 * Measured from the end, so the footer is [size - foot_len, size).
+	 * And how long the HEADER REGION is, from tag_off.
+	 *
+	 * Separate because they differ: a "<%@" page's header is the whole run
+	 * of directives and its tag is three bytes, and php's header is nothing
+	 * at all while its tag is five. Zero means the format has no header -
+	 * see the note on KOF_SCAN_SCRIPT_HEADER.
 	 */
-	uint32_t foot_len;
+	uint32_t head_len;
 	uint64_t anomalies;     /* none defined yet; kept so the row has one */
 	/*
 	 * The islands, in file order and never merged. Two runs of code with
@@ -222,5 +268,28 @@ struct kof_script_info {
 		uint32_t off, len;
 	} island[KOF_SCRIPT_MAX_ISLAND];
 };
+
+/*
+ * The parse's answer for this object, the way every other format's header hands
+ * one over - so nothing outside the parser casts ctx->file_header by hand.
+ *
+ * NULL is possible here and is not for most formats: a script is identified by
+ * a tag or a shebang and nothing else, so an object can be KOF_FMT_SCRIPT with
+ * a parse that refused. Callers check.
+ */
+static inline const struct kof_script_info *kof_script(
+					const struct kof_obj_ctx *ctx)
+{
+	return (const struct kof_script_info *)ctx->file_header;
+}
+
+/* How many code islands the parse found, and 0 for a program - which is the
+ * question "is this a page" asked of the object rather than of its bytes. */
+static inline uint32_t kof_script_islands_of(const struct kof_obj_ctx *ctx)
+{
+	const struct kof_script_info *s = kof_script(ctx);
+
+	return s ? s->n_island : 0u;
+}
 
 #endif /* KOFENG_SCRIPT_H */

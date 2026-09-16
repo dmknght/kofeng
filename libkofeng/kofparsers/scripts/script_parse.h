@@ -54,13 +54,12 @@ const char *kof_script_anomaly_name(unsigned index);
 #define SCRIPT_REGIONS(X)          \
 	X(KOF_SCAN_SCRIPT_HEADER)  \
 	X(KOF_SCAN_SCRIPT_BODY)    \
-	X(KOF_SCAN_SCRIPT_MARKUP)  \
-	X(KOF_SCAN_SCRIPT_FOOTER)
+	X(KOF_SCAN_SCRIPT_MARKUP)
 
-/* Four regions, and they partition the object exactly - see script_parse.c.
- * MARKUP is empty for everything that is not a server page, and FOOTER for
- * everything that does not end with a closing tag. */
+/* Three regions, and they partition the object exactly - see script_parse.c.
+ * MARKUP is empty for everything that is not a server page, and HEADER for
+ * php, which has none - see KOF_SCAN_SCRIPT_HEADER. */
 extern const uint32_t kof_script_region_bits[];
-#define KOF_SCRIPT_REGION_COUNT 4u
+#define KOF_SCRIPT_REGION_COUNT 3u
 
 #endif /* KOFENG_SCRIPT_PARSE_H */

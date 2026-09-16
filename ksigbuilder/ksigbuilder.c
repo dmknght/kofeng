@@ -2041,11 +2041,47 @@ static void scan_line(char *at, size_t line_len, int lineno)
  * bytes belong in the record beside the blob and the module only needs the index.
  * The blob got smaller and stopped carrying the literals it looks for.
  */
+/*
+ * THE MARKER, INSIDE A C COMMENT THAT IT MUST NOT BE ABLE TO CLOSE.
+ *
+ * The bytes were written straight into "/* ... *\/", and a marker is allowed to
+ * contain anything printable - including the two characters that END a comment.
+ * "/* payload *\/ eval(" is an ordinary thing to cut out of a shell, and
+ * declaring it emitted a header whose comment stopped in the middle of the
+ * string; the compiler then read the rest as code and the build died on a
+ * missing quote, pointing at a generated file the researcher never wrote.
+ *
+ * The slash is what terminates, so the slash is what is broken. A backslash
+ * before it means nothing inside a comment, so the text still reads as itself.
+ *
+ * Control bytes are spelled out for a second reason: a marker holding a newline
+ * would otherwise put the rest of itself on another line of the header, where
+ * it is no longer inside the comment at all.
+ */
+static void put_comment(FILE *out, const uint8_t *b, uint32_t n)
+{
+	uint32_t i;
+
+	for (i = 0; i < n; i++) {
+		uint8_t c = b[i];
+
+		if (c == '/' && i && b[i - 1u] == '*') {
+			fputs("\\/", out);
+			continue;
+		}
+		if (c == '\n') { fputs("\\n", out); continue; }
+		if (c == '\r') { fputs("\\r", out); continue; }
+		if (c == '\t') { fputs("\\t", out); continue; }
+		fputc(c < 0x20u || c > 0x7eu ? '.' : (int)c, out);
+	}
+}
+
 static void emit_str_id(FILE *out, const struct pat *p, int idx)
 {
-	fprintf(out, "/* line %d: \"%.*s\"%s%s%s */\n", p->line,
-		p->wide ? (int)strlen(p->shown) : (int)p->len,
-		p->wide ? p->shown : (const char *)p->bytes,
+	fprintf(out, "/* line %d: \"", p->line);
+	put_comment(out, p->wide ? (const uint8_t *)p->shown : p->bytes,
+		    p->wide ? (uint32_t)strlen(p->shown) : p->len);
+	fprintf(out, "\"%s%s%s */\n",
 		p->wide ? " wide" : "",
 		p->icase ? " icase" : "",
 		p->fullword ? " fullword" : "");

@@ -20,8 +20,7 @@
 #include "svrpage_parse.h"
 
 const uint32_t kof_script_region_bits[] = {
-	KOF_SCAN_SCRIPT_HEADER, KOF_SCAN_SCRIPT_BODY, KOF_SCAN_SCRIPT_MARKUP,
-	KOF_SCAN_SCRIPT_FOOTER
+	KOF_SCAN_SCRIPT_HEADER, KOF_SCAN_SCRIPT_BODY, KOF_SCAN_SCRIPT_MARKUP
 };
 
 const char *kof_script_region_name(uint32_t bit)
@@ -30,7 +29,6 @@ const char *kof_script_region_name(uint32_t bit)
 	case KOF_SCAN_SCRIPT_HEADER: return "KOF_SCAN_SCRIPT_HEADER";
 	case KOF_SCAN_SCRIPT_BODY:   return "KOF_SCAN_SCRIPT_BODY";
 	case KOF_SCAN_SCRIPT_MARKUP: return "KOF_SCAN_SCRIPT_MARKUP";
-	case KOF_SCAN_SCRIPT_FOOTER: return "KOF_SCAN_SCRIPT_FOOTER";
 	default:                     return NULL;
 	}
 }
@@ -54,23 +52,34 @@ static uint32_t script_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask
 	const struct kof_script_info *s =
 		(const struct kof_script_info *)ctx->file_header;
 	uint32_t n = 0;
-	uint64_t hdr, foot, end;
+	uint64_t hdr, end, lead;
 
 	if (!s || !out || max_out == 0)
 		return 0;
-	hdr = s->tag_len < ctx->obj_size ? s->tag_len : ctx->obj_size;
 	/*
-	 * The footer is measured from the end and the header from the start, so
-	 * a small object could have them overlap - and two regions claiming one
-	 * byte is the one thing the partition may not do. The header wins,
-	 * because it is what identified the object.
+	 * THREE MARKS: what the page opened with before its tag, where the
+	 * header ends, and where the code starts. For php the last two are the
+	 * same - it has no header, so its tag opens a body block like every
+	 * other one.
 	 */
-	foot = s->foot_len < ctx->obj_size - hdr ? s->foot_len : 0;
-	end = ctx->obj_size - foot;
+	lead = s->tag_off < ctx->obj_size ? s->tag_off : ctx->obj_size;
+	hdr = lead + s->head_len;
+	if (hdr > ctx->obj_size)
+		hdr = ctx->obj_size;
+	end = ctx->obj_size;
 
-	if ((mask & KOF_SCAN_SCRIPT_HEADER) && hdr > 0) {
+	/*
+	 * THE MARKUP A PAGE OPENS WITH, before it reaches its tag. Not the
+	 * header: see kof_script_info.tag_off for what calling it one cost.
+	 */
+	if ((mask & KOF_SCAN_SCRIPT_MARKUP) && lead > 0) {
 		out[n].off = 0;
-		out[n].len = hdr;
+		out[n].len = lead;
+		n++;
+	}
+	if ((mask & KOF_SCAN_SCRIPT_HEADER) && hdr > lead && n < max_out) {
+		out[n].off = lead;
+		out[n].len = hdr - lead;
 		n++;
 	}
 
@@ -84,11 +93,6 @@ static uint32_t script_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask
 		    n < max_out) {
 			out[n].off = hdr;
 			out[n].len = end - hdr;
-			n++;
-		}
-		if ((mask & KOF_SCAN_SCRIPT_FOOTER) && foot && n < max_out) {
-			out[n].off = end;
-			out[n].len = foot;
 			n++;
 		}
 		return n;
@@ -139,7 +143,10 @@ static uint32_t script_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask
 
 const char *kof_script_anomaly_name(unsigned index)
 {
-	(void)index;
+	/* By BIT POSITION, like every other format's - the reader walks the
+	 * anomaly word and asks for each bit it finds set. */
+	if (index == 0)
+		return "ISLANDS_FULL";
 	return NULL;
 }
 
@@ -408,7 +415,9 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 			info->kind = kind_of_interp(word);
 			info->from_shebang = 1;
 		}
+		info->tag_off = 0;
 		info->tag_len = (uint32_t)e;
+		info->head_len = (uint32_t)e;
 	}
 
 	/*
@@ -427,8 +436,20 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 		tag = find_tag(file, look, &kind, &tl, &fam);
 		if (tag != (uint64_t)-1) {
 			info->kind = kind;
-			if (!info->tag_len)
-				info->tag_len = (uint32_t)(tag + tl);
+			if (!info->tag_len) {
+				info->tag_off = (uint32_t)tag;
+				info->tag_len = tl;
+				/*
+				 * AND THE HEADER IS THE "<%@" FAMILY'S ALONE.
+				 *
+				 * There `tl` is the whole run of directives,
+				 * which declares the page and is not code. A
+				 * php tag opens a block of code, so it has no
+				 * header and belongs to the body it opens - see
+				 * KOF_SCAN_SCRIPT_HEADER.
+				 */
+				info->head_len = fam == FAM_PHP ? 0u : tl;
+			}
 			/*
 			 * BOTH FAMILIES HAVE ISLANDS, and php has them only
 			 * when it is a page.
@@ -449,22 +470,19 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 			 * rather than a truncated split one.
 			 */
 			if (file.n <= 0xffffffffu) {
+				uint64_t from = (uint64_t)info->tag_off +
+						info->head_len;
+
 				if (fam == FAM_PHP) {
-					if (kof_php_is_page(file,
-							    info->tag_len))
-						kof_php_islands(file,
-								info->tag_len,
+					if (kof_php_is_page(file, from))
+						kof_php_islands(file, from,
 								info);
 				} else if (fam == FAM_SVR) {
-					kof_svr_islands(file, info->tag_len,
-							info);
+					kof_svr_islands(file, from, info);
 				}
 			}
 		}
 	}
-
-	info->foot_len = info->kind == KOF_SCRIPT_PHP
-			 ? kof_php_footer(file, info) : 0u;
 
 	/* obj_size is the PARSER's to set - see any other collector. Leaving it
 	 * zero made both regions come back empty, because the body is

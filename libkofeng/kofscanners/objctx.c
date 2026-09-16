@@ -2985,94 +2985,47 @@ static int script_pass_open(const struct kof_obj_ctx *ctx,
  * was measured, not feared - the folded form of a real shell examined as
  * "unrecognised, 160 bytes".
  *
- * THE FILE'S OWN HEADER REGION AND NOT A TAG CHOSEN HERE. "<?php" is right for
- * php and wrong for a shell, whose header is a shebang naming an interpreter
- * this code would have to invent. The parse already carved the bytes that
- * opened THIS file, so they are the ones that go back on: they name the same
- * language because they are the same file's.
- *
- * It does mean the child is not a contiguous run of the parent - the header
- * came from the top and the body from wherever the pass found it. That is
- * already what a produced object is; the alternative was a child nothing looks
- * at.
+ * THE TAG FROM THE PARSE, NOT THE HEADER REGION. It used to resolve
+ * KOF_SCAN_SCRIPT_HEADER, which worked only while php was credited with a
+ * header; it has none now - its tag opens a body block - so the region is
+ * empty and the wrapper would have been too. tag_off and tag_len are the fact
+ * itself and are right for all three shapes: "<?php", a "<%@ ... %>" directive
+ * run, and a "#!" line.
  */
 static int script_head_emit(const struct kof_obj_ctx *ctx)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	struct kof_range *ext = sc->ext_gather;
+	const struct kof_script_info *si = kof_script(ctx);
 	kof_buf b = kof_src_buf(sc->cur_src);
-	uint32_t n, i;
-	uint8_t last = 0;
+	kof_buf s;
 
-	n = kof_scan_resolve_range(ctx, KOF_SCAN_SCRIPT_HEADER, ext);
-	for (i = 0; i < n; i++) {
-		kof_buf s = kof_slice(b, ext[i].off, ext[i].len);
-
-		if (!s.p || !s.n)
-			continue;
-		if (!emu_give(ctx, s.p, s.n))
-			return 0;
-		last = s.p[s.n - 1];
-	}
+	if (!si || !si->tag_len)
+		return 1;               /* nothing named it; nothing to put back */
+	s = kof_slice(b, si->tag_off, si->tag_len);
+	if (!s.p || !s.n)
+		return 1;
+	if (!emu_give(ctx, s.p, s.n))
+		return 0;
 	/*
 	 * AND A NEWLINE AFTER IT, WHICH THE LANGUAGE REQUIRES.
 	 *
 	 * "<?php" is not a tag php accepts on its own - it has to be followed
-	 * by whitespace, and the body's own leading newline is the first thing
-	 * the form pass removes as a blank line. Joining the two without this
-	 * produced "<?php$p='...", which sniffs as php, parses as php here, and
-	 * is a syntax error in php: a form nobody could run and a researcher
-	 * would have to repair by hand before testing a draft against it.
+	 * by whitespace, and the first thing the form pass removes is the blank
+	 * line under it. Joining the two produced "<?php$p='...", which sniffs
+	 * as php, parses as php here, and is a syntax error in php.
 	 *
-	 * Only when the header did not already end in one, so a shebang - which
+	 * Only when the tag did not already end in one, so a shebang - which
 	 * carries its line ending with it - does not gain a blank line the pass
 	 * would have taken out.
 	 */
-	if (last != '\n' && !emu_give(ctx, (const uint8_t *)"\n", 1u))
+	if (s.p[s.n - 1u] != '\n' &&
+	    !emu_give(ctx, (const uint8_t *)"\n", 1u))
 		return 0;
 	return 1;
 }
 
-/*
- * AND THE CLOSING TAG BACK ON THE END, on a line of its own.
- *
- * Same argument as the header and the same failure without it: "}?>" is the
- * body's last statement welded to punctuation that is not part of it, and a
- * marker taken from the end of the form would carry both. The parse already
- * separated them - KOF_SCAN_SCRIPT_FOOTER - so this puts back what the file
- * had, where the file had it.
- *
- * Nothing when the file did not end with one, which most php does not.
- *
- * `last` is the byte the body ended on, for the same reason the header pass
- * looks at its own: a separator added to a body that already ended in a
- * newline is a blank line, and a blank line is the first thing the form pass
- * removes. It would be the one place the output was not in the form the pass
- * promises.
- */
-static int script_foot_emit(const struct kof_obj_ctx *ctx, uint8_t last)
-{
-	struct kof_scanner *sc = kof_scan_of(ctx);
-	struct kof_range *ext = sc->ext_gather;
-	kof_buf b = kof_src_buf(sc->cur_src);
-	uint32_t n, i;
-
-	n = kof_scan_resolve_range(ctx, KOF_SCAN_SCRIPT_FOOTER, ext);
-	if (!n)
-		return 1;
-	if (last != '\n' && !emu_give(ctx, (const uint8_t *)"\n", 1u))
-		return 0;
-	for (i = 0; i < n; i++) {
-		kof_buf s = kof_slice(b, ext[i].off, ext[i].len);
-
-		if (s.p && s.n && !emu_give(ctx, s.p, s.n))
-			return 0;
-	}
-	return 1;
-}
-
-/* Copy bytes the pass must not touch. Answers 0 only when there is no room,
- * which cannot happen while the output is bounded by the input. */
+/* Copy bytes the pass must not touch. Answers `held` unchanged when there is no
+ * room, which cannot happen while the output is bounded by the input. */
 static uint32_t verbatim(uint8_t *out, uint32_t held, uint32_t cap,
 			 const uint8_t *p, uint64_t n)
 {
@@ -3294,12 +3247,16 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 		 * of that empty band, so the threshold does not sit on top of
 		 * any measured file.
 		 *
-		 * AND MARKUP IS NEVER A PROGRAM, whatever its share. A pure php
-		 * shell echoes its page from one constant, which can be most of
-		 * a small file and is still a screen of html.
+		 * AND NOTHING HERE LOOKS INSIDE THE CONSTANT. There was a test
+		 * for "does this look like html", so that a shell echoing its
+		 * page from one string did not hand that page over as the
+		 * child. It is gone: deciding what a value CONTAINS is parsing
+		 * data, and a pass that cuts on its own reading of data is a
+		 * pass that can corrupt it. An echo is a command, its string is
+		 * a value, and the share above is a fact about the FILE rather
+		 * than a guess about the bytes.
 		 */
-		if (n < 64u || (uint64_t)n * 3u < b.n ||
-		    kof_script_is_markup(out, n)) {
+		if (n < 64u || (uint64_t)n * 3u < b.n) {
 			n = 0;
 		} else {
 			tmp = malloc((size_t)n);
@@ -3327,8 +3284,7 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 		 * tag included, because it copied them.
 		 */
 		c_child_kind(ctx, KOF_ENT_NORMALIZED);
-		if (!script_head_emit(ctx) || !emu_give(ctx, out, n) ||
-		    !script_foot_emit(ctx, out[n - 1u]))
+		if (!script_head_emit(ctx) || !emu_give(ctx, out, n))
 			n = 0;
 		else
 			c_child(ctx);

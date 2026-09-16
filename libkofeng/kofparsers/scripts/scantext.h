@@ -39,11 +39,11 @@ int kof_isl_add(struct kof_script_info *info, uint64_t off, uint64_t len);
 /*
  * Close the list against the end of the object.
  *
- * Past the cap the last island is extended to the end, which keeps the
- * partition exact - every byte still belongs to exactly one region - at the
- * cost of calling some markup code. Erring that way rather than the other is
- * deliberate: markup scanned as code costs a few false candidates, code
- * scanned as markup would be code no rule ever sees.
+ * The partition stays exact without doing anything to the extents: the
+ * resolver makes the run after the last island MARKUP, which is what the
+ * remainder of a page is. What this records is that the list is SHORT - see
+ * KOF_SCRIPT_ANOM_ISLANDS_FULL for why the alternative was worse and why a
+ * silent cap is the part that actually hurt.
  */
 void kof_isl_seal(struct kof_script_info *info, uint64_t size);
 

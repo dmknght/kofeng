@@ -59,6 +59,5 @@ void kof_isl_seal(struct kof_script_info *info, uint64_t size)
 	if (n != KOF_SCRIPT_MAX_ISLAND)
 		return;
 	if ((uint64_t)info->island[n - 1].off + info->island[n - 1].len < size)
-		info->island[n - 1].len =
-			(uint32_t)(size - info->island[n - 1].off);
+		info->anomalies |= KOF_SCRIPT_ANOM_ISLANDS_FULL;
 }

@@ -260,60 +260,6 @@ static int glues(const struct kof_lex *lx, uint8_t a, uint8_t b)
 	return 0;
 }
 
-/*
- * IS THIS MARKUP RATHER THAN A PROGRAM - asked of bytes, not of a file.
- *
- * WHAT IT IS FOR. The folding pass answers "what does this script build out of
- * its own literals", and the answer is only worth an object when what it built
- * is a PROGRAM. In a pure php shell the html is not written as markup, it is
- * ECHOED from a string - and that string is a constant, so folding joins it and
- * hands over a page of boilerplate. Measured on a shell whose entire body was
- * one echoed page: the fold produced 134 bytes of html, which cleared the
- * 64-byte floor, became the object, and displaced the formed file - so the
- * @system($_GET["c"]) two lines below it never reached the tree at all.
- *
- * THE EVIDENCE IS A CLOSED TAG, TWICE. "<" followed by a letter - or by "/" and
- * a letter - and a ">" within reach of it. Two of them, because one is what an
- * expression like "$a < $b" or a shell redirect produces by accident, and two
- * in the same constant is somebody writing markup.
- *
- * DELIBERATELY NOT A LANGUAGE TEST. A constant holding html is html whichever
- * language assembled it, and asking the lexical table instead would have said
- * nothing about the bytes in hand.
- */
-int kof_script_is_markup(const uint8_t *p, uint32_t n)
-{
-	uint32_t i, tags = 0;
-
-	if (!p || n < 8u)
-		return 0;
-	for (i = 0; i + 2u < n; i++) {
-		uint32_t j;
-		uint8_t c;
-
-		if (p[i] != '<')
-			continue;
-		j = i + 1u;
-		if (p[j] == '/')
-			j++;
-		if (j >= n)
-			break;
-		c = p[j];
-		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')))
-			continue;
-		/*
-		 * AND IT HAS TO CLOSE, within a tag's worth of bytes. Without
-		 * the bound a single "<" anywhere would find the ">" of a
-		 * comparison half a file away and call it a tag.
-		 */
-		while (j < n && j < i + 64u && p[j] != '>')
-			j++;
-		if (j < n && j < i + 64u && p[j] == '>' && ++tags >= 2u)
-			return 1;
-	}
-	return 0;
-}
-
 enum { ST_OUT = 0, ST_SQ, ST_DQ, ST_BLK };
 
 uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,

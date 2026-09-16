@@ -66,6 +66,7 @@
 #include "../kofparsers/binaries/pe_sym.h"
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
+#include <kofmod/script.h>
 /* kof_parser_of: the region NAMES are per format, and a multi-format draft has
  * to be able to ask each of its formats what a region bit means there. */
 #include "../libkofeng/kofparsers/kofformat.h"
@@ -949,7 +950,25 @@ struct node {
 	 * once.
 	 */
 	uint8_t  ent;               /* the row IS an entry */
+	/*
+	 * THE ROW IS ONE RUN OF A REGION, not the region.
+	 *
+	 * A page's code is not one extent and neither is its markup: they
+	 * alternate down the file, and one row per KIND showed them
+	 * concatenated - every island of a php shell joined end to end, with
+	 * the html that sits between them spliced out. What a reader is reading
+	 * is a RUN, so a run is a row.
+	 *
+	 * It keeps its region `mask`, unlike `sym` and `ent` which have none:
+	 * the run really is part of that region, so a marker taken here still
+	 * declares the right scan target. What it does not do is resolve that
+	 * mask for its bytes - see view_select - because resolving would answer
+	 * about every run at once, which is the thing being undone.
+	 */
+	uint8_t  piece;
 	uint32_t ent_i;             /* which row of ctx->entries */
+	/* The exact bytes of an entry row or of a piece row. Shared because the
+	 * two ask the same thing of them: these bytes, not a resolve. */
 	uint64_t ent_off, ent_len;
 	uint64_t bytes;
 
@@ -992,6 +1011,7 @@ struct node {
  * for those; a PANE is many rows and declares itself with hit_zone.
  */
 struct view;
+struct dframe;
 
 /*
  * WHICH GESTURE A RECTANGLE ANSWERS.
@@ -2040,6 +2060,17 @@ struct view {
 	int         dlg_ar, dlg_ac, dlg_br, dlg_bc;
 	int         dlg_have;
 	int         dlg_drag;
+	/*
+	 * THE BOX BEING MOVED, and where the grab started.
+	 *
+	 * A pointer to the frame rather than a code for which dialog: every box
+	 * goes through dframe, the frames are static, and a code would be a
+	 * second list to keep in step with the first. NULL when nothing is
+	 * being moved.
+	 */
+	struct dframe *dlg_move;
+	int         dlg_mx, dlg_my;     /* where the pointer took hold */
+	int         dlg_mdx, dlg_mdy;   /* the box's offset when it did */
 	/*
 	 * THE LAST PRESS IN A DIALOG, so a second one on the same place can be
 	 * recognised as a double click.
@@ -3450,6 +3481,7 @@ static void tree_add(struct view *v, uint32_t depth, uint32_t obj,
 	 * flag that is only ever SET would stay set on whatever row inherited
 	 * the slot. */
 	n->ent = 0;
+	n->piece = 0;
 	n->ent_i = 0;
 	n->ent_off = n->ent_len = 0;
 	n->bytes = bytes;
@@ -3478,6 +3510,51 @@ static void tree_add_ent(struct view *v, uint32_t depth, uint32_t obj,
 		n->ent_off = off;
 		n->ent_len = len;
 	}
+}
+
+/*
+ * One RUN of a region, as a row of its own - see node.piece.
+ *
+ * The mask is the real region bit, so the row is still a scan target a marker
+ * can be declared against; the offset and length are this run's alone.
+ */
+static void tree_add_piece(struct view *v, uint32_t depth, uint32_t obj,
+			   uint32_t mask, uint64_t off, uint64_t len,
+			   const char *label)
+{
+	tree_add(v, depth, obj, mask, len, label);
+	if (v->n_node) {
+		struct node *n = &v->node[v->n_node - 1u];
+
+		n->piece = 1;
+		n->ent_off = off;
+		n->ent_len = len;
+	}
+}
+
+/*
+ * One region as a single row: every run of it, added up.
+ *
+ * What the tree has always done, and still the right shape for a region that is
+ * one run - or several that a reader has no reason to step through separately.
+ */
+static void region_row(struct view *v, const struct object *o, uint32_t i,
+		       uint32_t bit)
+{
+	const char *rn = o->fmt->region_name(bit);
+	uint64_t total = 0;
+	uint32_t j, n;
+
+	if (!rn)
+		return;
+	n = kof_scan_resolve_range(&o->ctx, bit, v->ext);
+	for (j = 0; j < n; j++)
+		total += v->ext[j].len;
+	if (!total)
+		return;
+	/* kof_region_label and not the last underscore - see the note on it in
+	 * kofinspect.h for what that cost. */
+	tree_add(v, o->depth + 1u, i, bit, total, kof_region_label(rn));
 }
 
 /* The symbol row, marked as such. Separate from tree_add because `at` is
@@ -3541,10 +3618,34 @@ static void obj_label(const struct object *o, char *out, size_t cap)
 		return;
 	}
 
-	snprintf(what, sizeof what, "%s%s%s",
-		 o->fmt ? kof_format_name(o->ctx.format) : "Raw",
-		 o->fmt ? "-" : "",
-		 o->fmt ? kof_arch_name(o->ctx.arch) : "");
+	/*
+	 * WHAT FOLLOWS THE FORMAT IS THE FORMAT'S OWN SECOND FACT.
+	 *
+	 * For everything with machine code that is the ARCHITECTURE, which is
+	 * what the row has always said. A script has no architecture, so it
+	 * said "any" - "Script-any" on every php file on the machine, which is
+	 * the one word on the row carrying no information.
+	 *
+	 * Its second fact is the LANGUAGE, and it is the one a reader is
+	 * actually looking for: "Script-PHP" says which rules apply, which
+	 * subtype a signature must declare, and why the panel is offering the
+	 * options it is. ctx->subtype already holds it - see script.h - so this
+	 * is naming what the parse already knew.
+	 *
+	 * Subtype 0 is KOF_SCRIPT_ANY and is a real answer, not a blank: the
+	 * file IS a script and no marker in it named the language. The row says
+	 * "Script" alone there rather than inventing a second word.
+	 */
+	if (o->fmt && o->ctx.format == KOF_FMT_SCRIPT)
+		snprintf(what, sizeof what, "Script%s%s",
+			 o->ctx.subtype ? "-" : "",
+			 o->ctx.subtype ? kof_script_type_name(o->ctx.subtype)
+					: "");
+	else
+		snprintf(what, sizeof what, "%s%s%s",
+			 o->fmt ? kof_format_name(o->ctx.format) : "Raw",
+			 o->fmt ? "-" : "",
+			 o->fmt ? kof_arch_name(o->ctx.arch) : "");
 	if (o->depth == 0 && o->ctx.format == KOF_EVT_PROC) {
 		/*
 		 * A PROCESS SAYS SO, AND SAYS WHICH ONE.
@@ -4200,24 +4301,83 @@ static void tree_build(struct view *v)
 		 */
 		if (!o->fmt || !v->ext)
 			continue;
-		for (k = 0; k < o->fmt->n_regions; k++) {
-			const char *rn = o->fmt->region_name(o->fmt->regions[k]);
-			uint32_t j, n;
-			uint64_t total = 0;
+		/*
+		 * A PAGE IS SHOWN AS IT IS LAID OUT: code, markup, code.
+		 *
+		 * One row per region KIND is right for a file whose regions are
+		 * each one run - an ELF's CODE, a zip's NAMES - and wrong for a
+		 * page, where code and markup alternate all the way down. There
+		 * the two rows showed CONCATENATIONS: every island of a php
+		 * shell joined end to end with the html between them spliced
+		 * out, and the html likewise. A reader stepping through that is
+		 * reading a thing the file does not contain.
+		 *
+		 * So when a script has islands the two are walked together in
+		 * FILE ORDER and each run gets its own row. The tree gets long -
+		 * a real shell is 120 islands, so 241 rows - and that is the
+		 * trade: a long list of real runs beats two short rows of
+		 * something assembled.
+		 *
+		 * Every other format, and a script that is one program, are
+		 * unchanged: the else branch is what this has always done.
+		 */
+		if (o->ctx.format == KOF_FMT_SCRIPT && o->ctx.resolve_scan &&
+		    kof_script_islands_of(&o->ctx)) {
+			/*
+			 * BOUNDED LOCALS, AND resolve_scan CALLED DIRECTLY.
+			 *
+			 * kof_scan_resolve_range writes into an array it
+			 * assumes is KOF_SCAN_MAX_EXTENTS long, so it cannot be
+			 * given a small one - and the two scratch arrays this
+			 * file owns are both spoken for, v->probe being the
+			 * editor's scratch as well. A page has at most
+			 * KOF_SCRIPT_MAX_ISLAND islands and one gap either side
+			 * of each, so the two lists have a real bound and it is
+			 * cheap to stand them on the stack. Neither bit is
+			 * KOF_SCAN_ALL, which is the only thing the wrapper
+			 * adds.
+			 */
+			struct kof_range bo[KOF_SCRIPT_MAX_ISLAND + 2u];
+			struct kof_range mk[KOF_SCRIPT_MAX_ISLAND + 2u];
+			uint32_t cap = KOF_SCRIPT_MAX_ISLAND + 2u;
+			uint32_t nb = o->ctx.resolve_scan(&o->ctx,
+					KOF_SCAN_SCRIPT_BODY, bo, cap);
+			uint32_t nm = o->ctx.resolve_scan(&o->ctx,
+					KOF_SCAN_SCRIPT_MARKUP, mk, cap);
+			uint32_t a = 0, b = 0;
 
-			if (!rn)
-				continue;
-			n = kof_scan_resolve_range(&o->ctx, o->fmt->regions[k],
-						   v->ext);
-			for (j = 0; j < n; j++)
-				total += v->ext[j].len;
-			if (!total)
-				continue;
-			/* kof_region_label and not the last underscore - see
-			 * the note on it in kofinspect.h for what that cost. */
-			tree_add(v, o->depth + 1u, i,
-				 o->fmt->regions[k], total,
-				 kof_region_label(rn));
+			/* The header first, where the format has one - it is
+			 * one run, so it gains nothing from being split. php
+			 * has none: its tag opens a body block. */
+			region_row(v, o, i, KOF_SCAN_SCRIPT_HEADER);
+			/*
+			 * A two way merge, because both lists are already
+			 * sorted - the resolver emits them in file order and
+			 * the partition says they do not overlap. So the row
+			 * order is the file's order, with no sort to get wrong.
+			 */
+			while (a < nb || b < nm) {
+				int take_body = b >= nm ||
+						(a < nb &&
+						 bo[a].off < mk[b].off);
+
+				if (take_body) {
+					tree_add_piece(v, o->depth + 1u, i,
+						       KOF_SCAN_SCRIPT_BODY,
+						       bo[a].off, bo[a].len,
+						       "BODY");
+					a++;
+				} else {
+					tree_add_piece(v, o->depth + 1u, i,
+						       KOF_SCAN_SCRIPT_MARKUP,
+						       mk[b].off, mk[b].len,
+						       "MARKUP");
+					b++;
+				}
+			}
+		} else {
+			for (k = 0; k < o->fmt->n_regions; k++)
+				region_row(v, o, i, o->fmt->regions[k]);
 		}
 		/*
 		 * Last, and only when there is something in it.
@@ -5559,6 +5719,23 @@ static void view_select(struct view *v)
 			b2--;
 			v->ext[a] = v->ext[b2];
 			v->ext[b2] = t;
+		}
+	} else if (v->node[v->sel_node].piece) {
+		/*
+		 * ONE RUN, THE ROW'S OWN. Resolving its mask would answer about
+		 * every run of that region at once, which is the concatenation
+		 * this row exists to take apart.
+		 */
+		uint64_t off = v->node[v->sel_node].ent_off;
+		uint64_t len = v->node[v->sel_node].ent_len;
+		uint64_t n = o->buf.n ? o->buf.n : o->ctx.obj_size;
+
+		if (off < n) {
+			if (len > n - off)
+				len = n - off;
+			v->ext[0].off = off;
+			v->ext[0].len = len;
+			v->n_ext = len ? 1u : 0u;
 		}
 	} else if (v->node[v->sel_node].ent) {
 		/*
@@ -13820,13 +13997,42 @@ static void decl_add(struct view *v, int hex)
 		uint32_t rk = at == KOF_BROKEN ? v->n_node
 					       : node_at(v, n->obj, at);
 		const struct node *rn = rk < v->n_node ? &v->node[rk] : n;
-
-		d->mask = d->mask0 = rn->mask ? rn->mask : KOF_SCAN_ALL;
-		/* The column is narrow and a region word is short; a label
-		 * long enough to overrun it is one that would not have fit
-		 * on the row either. */
-		snprintf(d->rgn, sizeof d->rgn, "%.23s",
-			 rn->mask ? rn->label : "WHOLE-FILE");
+		/*
+		 * A SCRIPT'S REGIONS ARE FOR READING IT, NOT FOR SCOPING A
+		 * RULE TO, so a marker taken out of one is declared over the
+		 * WHOLE OBJECT.
+		 *
+		 * For a binary the region a marker sits in is a real narrowing:
+		 * CODE and DATA are far apart, the same bytes in the wrong one
+		 * mean something else, and a rule that says which is a stronger
+		 * rule. A script's BODY and MARKUP are not that. Measured over
+		 * 101 shells in this corpus:
+		 *
+		 *   BODY is 91% of the bytes, so scoping to it saves 9%;
+		 *   it takes 365 extents where the whole object takes 101, and
+		 *     63% of those extents hold 1.2% of the bytes - most of the
+		 *     matcher calls buy almost no work;
+		 *   and 2 of the 101 files carry a marker that appears ONLY in
+		 *     markup, so a BODY-scoped rule loses those files outright.
+		 *
+		 * Worse for detection, barely better for cost, and the reader
+		 * did not ask for it - they clicked the run they happened to be
+		 * reading. The default is therefore the object, and a
+		 * researcher who really wants "in the code, not in the page"
+		 * still says so with the range control on the row.
+		 */
+		if (v->obj[n->obj].ctx.format == KOF_FMT_SCRIPT) {
+			d->mask = d->mask0 = KOF_SCAN_ALL;
+			snprintf(d->rgn, sizeof d->rgn, "WHOLE-FILE");
+		} else {
+			d->mask = d->mask0 = rn->mask ? rn->mask
+						      : KOF_SCAN_ALL;
+			/* The column is narrow and a region word is short; a
+			 * label long enough to overrun it is one that would not
+			 * have fit on the row either. */
+			snprintf(d->rgn, sizeof d->rgn, "%.23s",
+				 rn->mask ? rn->label : "WHOLE-FILE");
+		}
 	}
 	d->grp = 0;
 	/* Not on a symbol row: there `lo` is a block offset and this field is
@@ -14642,6 +14848,27 @@ static uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off)
 
 		if (v->node[k].obj != obj)
 			continue;
+		/*
+		 * A ROW THAT OWNS ITS BYTES IS ASKED ABOUT THOSE BYTES, and not
+		 * about its mask.
+		 *
+		 * A piece row is one RUN of a region and every run of that
+		 * region carries the same mask, so resolving it answers about
+		 * all of them at once - and the first such row then claimed
+		 * every offset in the region. A search that landed in the
+		 * fortieth run of a page's code jumped to the first, whose
+		 * extents do not contain it, so the pane could not go there and
+		 * the hit read as "not found". An entry row has the same shape
+		 * and the same fault: its mask is KOF_SCAN_ALL, which covers
+		 * the whole object.
+		 */
+		if (v->node[k].piece || v->node[k].ent) {
+			if (file_off >= v->node[k].ent_off &&
+			    file_off < v->node[k].ent_off +
+				       v->node[k].ent_len)
+				return k;
+			continue;
+		}
 		if (!v->node[k].mask) {
 			if (best == v->n_node)
 				best = k;               /* the object row */
@@ -21574,6 +21801,17 @@ static void symd_open(struct view *v)
  * screen.
  */
 struct dframe {
+	/*
+	 * WHERE THE READER PUT IT, as an offset from where it would otherwise
+	 * open.
+	 *
+	 * An offset and not an absolute position, so a box that has been moved
+	 * still follows the terminal when it is resized rather than ending up
+	 * off the edge or pinned to a corner. Kept across opens - a reader who
+	 * moved the find box out of the way meant it to stay out of the way -
+	 * and each box has its own, because they are separate globals.
+	 */
+	int dx, dy;
 	int y, x;                       /* top-left of the box itself */
 	int w, h;                       /* including the border */
 	int ix;                         /* first column INSIDE, for a row */
@@ -21617,6 +21855,21 @@ static int dframe_begin(struct out *o, struct dframe *f, const char *title,
 	f->y = (g_rows - f->h) / 3;
 	if (f->y < 2)
 		f->y = 2;
+	/*
+	 * AND THEN WHEREVER THE READER DRAGGED IT, clamped so the whole box
+	 * stays on screen. Clamped rather than refused: a terminal that shrank
+	 * under a moved box should bring it back into view, not lose it.
+	 */
+	f->x += f->dx;
+	f->y += f->dy;
+	if (f->x + f->w - 1 > g_cols)
+		f->x = g_cols - f->w + 1;
+	if (f->x < 1)
+		f->x = 1;
+	if (f->y + f->h - 1 > g_rows)
+		f->y = g_rows - f->h + 1;
+	if (f->y < 1)
+		f->y = 1;
 	f->ix = f->x + 2;
 	f->iw = f->w - 4;
 	/* The box owns these rows and these columns and nothing else. Set
@@ -22606,6 +22859,33 @@ static void draw_find(struct out *o, struct view *v)
 	dframe_done(o, f);
 }
 
+/*
+ * A PRESS ON A BOX'S TITLE ROW TAKES HOLD OF THE BOX.
+ *
+ * The title row is the handle, which is the gesture every windowed thing has
+ * used for forty years - nothing has to be drawn to explain it. The close
+ * control sits on that row too and is a BUTTON, so it is excluded: a handle
+ * that also closed the box would make the box impossible to grab by its right
+ * hand end.
+ *
+ * Generic, on the frame rather than on any one dialog, so find and goto and the
+ * decoder all gain it from the same nine lines - and a box added later gains it
+ * without anybody remembering to.
+ */
+static int dframe_grab(struct view *v, struct dframe *f)
+{
+	if (g_my != f->y || g_mx < f->x || g_mx > f->x + f->w - 1)
+		return 0;
+	if (f->btn_y == f->y && g_mx >= f->btn_x0 && g_mx <= f->btn_x1)
+		return 0;
+	v->dlg_move = f;
+	v->dlg_mx = g_mx;
+	v->dlg_my = g_my;
+	v->dlg_mdx = f->dx;
+	v->dlg_mdy = f->dy;
+	return 1;
+}
+
 /* Which control a click landed on. */
 /*
  * Which control a click landed on, and whether the dialog wanted it at all.
@@ -23589,6 +23869,15 @@ static void click(struct view *v, int rclick)
 		v->dlg_have = 0;
 		v->dlg_drag = 0;
 	}
+	/*
+	 * MOVING THE BOX IS ASKED ABOUT FIRST, because the title row carries no
+	 * other control and a box being dragged must not also be acting on the
+	 * press that is dragging it.
+	 */
+	if ((v->enc_open && dframe_grab(v, &g_enc_f)) ||
+	    (v->goto_open && dframe_grab(v, &g_goto_f)) ||
+	    (v->find_open && dframe_grab(v, &g_find_f)))
+		return;
 	if (v->enc_open && enc_click(v, rclick))
 		return;
 	if (v->sym_open && symd_click(v))
@@ -24701,6 +24990,16 @@ static void on_drag(struct view *v)
 		 * dragging past the last row extends to it rather than stopping
 		 * the moment the pointer leaves the box.
 		 */
+		/*
+		 * A BOX BEING MOVED OWNS THE MOTION, before anything else looks
+		 * at it - including a dialog's own text selection, which is the
+		 * other thing a drag inside a dialog means.
+		 */
+		if (v->dlg_move) {
+			v->dlg_move->dx = v->dlg_mdx + (g_mx - v->dlg_mx);
+			v->dlg_move->dy = v->dlg_mdy + (g_my - v->dlg_my);
+			return;
+		}
 		if (v->dlg_drag) {
 			int r, c;
 
@@ -24787,6 +25086,8 @@ static void on_drag(struct view *v)
  */
 static void on_release(struct view *v)
 {
+		/* Letting go of a box's title row puts it down where it is. */
+		v->dlg_move = NULL;
 		/*
 		 * A PRESS THAT NEVER MOVED IS A CLICK, and a click on a table
 		 * of values means the value.

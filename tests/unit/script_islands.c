@@ -57,7 +57,11 @@ static void check_partition(const char *what, const char *src)
 {
 	struct kof_script_info info;
 	struct kof_obj_ctx ctx;
-	struct kof_range r[128];
+	/* Room for a page at the island cap: one extent per island and one per
+	 * gap, plus the header and the footer. r[128] was written when the cap
+	 * was 32 and would have made the overflow case fail as a hole in the
+	 * partition rather than as what it is. */
+	struct kof_range r[2u * KOF_SCRIPT_MAX_ISLAND + 8u];
 	kof_buf f;
 	uint32_t n, i, j;
 	uint64_t at = 0;
@@ -76,8 +80,7 @@ static void check_partition(const char *what, const char *src)
 	}
 	n = ctx.resolve_scan(&ctx, KOF_SCAN_SCRIPT_HEADER |
 				   KOF_SCAN_SCRIPT_BODY |
-				   KOF_SCAN_SCRIPT_MARKUP |
-				   KOF_SCAN_SCRIPT_FOOTER,
+				   KOF_SCAN_SCRIPT_MARKUP,
 			     r, (uint32_t)(sizeof r / sizeof r[0]));
 	if (!n) {
 		fail(what, "no regions at all");
@@ -126,12 +129,16 @@ static void check_per_bit(const char *what, const char *src)
 {
 	static const uint32_t bit[] = {
 		KOF_SCAN_SCRIPT_HEADER, KOF_SCAN_SCRIPT_BODY,
-		KOF_SCAN_SCRIPT_MARKUP, KOF_SCAN_SCRIPT_FOOTER
+		KOF_SCAN_SCRIPT_MARKUP
 	};
 	static const uint32_t n_bit = (uint32_t)(sizeof bit / sizeof bit[0]);
 	struct kof_script_info info;
 	struct kof_obj_ctx ctx;
-	struct kof_range r[128];
+	/* Room for a page at the island cap: one extent per island and one per
+	 * gap, plus the header and the footer. r[128] was written when the cap
+	 * was 32 and would have made the overflow case fail as a hole in the
+	 * partition rather than as what it is. */
+	struct kof_range r[2u * KOF_SCRIPT_MAX_ISLAND + 8u];
 	kof_buf f;
 	uint32_t n = 0, b, i, j;
 	uint64_t at = 0;
@@ -183,7 +190,8 @@ static void check_per_bit(const char *what, const char *src)
 	}
 }
 
-/* How many bytes the header took, or (uint32_t)-1 when nothing claimed it. */
+/* How many bytes the HEADER REGION takes, or (uint32_t)-1 when nothing claimed
+ * the object. Zero for php, which has no header - see KOF_SCAN_SCRIPT_HEADER. */
 static uint32_t header_len(const char *src, uint16_t *n_island)
 {
 	struct kof_script_info info;
@@ -197,7 +205,7 @@ static uint32_t header_len(const char *src, uint16_t *n_island)
 		return (uint32_t)-1;
 	if (n_island)
 		*n_island = info.n_island;
-	return info.tag_len;
+	return info.head_len;
 }
 
 /* Two directives, markup, a comment, two code runs and an expression. */
@@ -241,7 +249,12 @@ static const char aspx_el[] =
 	"<script>var t = 1;</script>\n"
 	"</html>\n";
 
-/* Markup first. A page is not required to lead with its directive. */
+/*
+ * Markup first. A page is not required to lead with its directive - and what it
+ * opens with is MARKUP, not header. The header was [0, tag_end), so every byte
+ * before the tag was declared part of it: measured at 20 of 103 corpus files
+ * and up to 4072 bytes of html in one.
+ */
 static const char leading_markup[] =
 	"<html>\n<body>\n"
 	"<% y = 2 %>\n"
@@ -288,6 +301,31 @@ int main(void)
 	check_partition("jsp page", page);
 	check_partition("classic asp", classic);
 	check_partition("markup first", leading_markup);
+	{
+		struct kof_script_info info;
+		struct kof_obj_ctx ctx;
+		struct kof_range r[8];
+		kof_buf f;
+		uint32_t n;
+
+		memset(&ctx, 0, sizeof ctx);
+		f.p = (const uint8_t *)leading_markup;
+		f.n = strlen(leading_markup);
+		if (kof_script_sniff(f) && kof_script_parse(f, &info, &ctx)) {
+			n = ctx.resolve_scan(&ctx, KOF_SCAN_SCRIPT_MARKUP, r,
+					     (uint32_t)(sizeof r / sizeof r[0]));
+			/*
+			 * What a page opens with before its tag is MARKUP. It
+			 * was the HEADER - [0, tag_end) - so every byte before
+			 * the tag was declared part of it: measured at 20 of
+			 * 103 corpus files, up to 4072 bytes of html in one.
+			 */
+			if (!n || r[0].off != 0u || !r[0].len)
+				printf("  FAIL %-26s the html before the tag is "
+				       "not the first markup extent\n",
+				       "markup before the tag"), fails++;
+		}
+	}
 
 	check_per_bit("jsp page per bit", page);
 	check_per_bit("classic asp per bit", classic);
@@ -304,13 +342,25 @@ int main(void)
 		       "jsp directive block", hl), fails++;
 
 	/*
-	 * TWO ISLANDS AND AN EXPRESSION, AND NOT THE COMMENT. "<%--" is skipped
-	 * outright, so three runs of code are recorded and the comment is left
-	 * in the markup around it.
+	 * TWO BLOCKS. NOT THE COMMENT, AND NOT THE EXPRESSION.
+	 *
+	 * Three things in this page open "<%" and only two of them are the
+	 * program:
+	 *
+	 *   <% int total = 0; %>        owns its line - a block
+	 *   <% total = total + 1; %>    owns its line - a block
+	 *   <p>total <%= total %></p>   INSIDE a line of markup - glue
+	 *   <%-- a comment --%>         not code at all
+	 *
+	 * The expression is the case the glue rule exists for: it is a value
+	 * dropped into a sentence, and splitting the line at it produced three
+	 * rows - "<p>total ", the expression, "</p>" - none of which is a thing
+	 * anybody reads. Left unrecorded it falls into the markup around it and
+	 * the line stays one line.
 	 */
-	if (isl != 3u)
-		printf("  FAIL %-26s %u islands, wanted 3 "
-		       "(the <%%-- comment must not be one)\n",
+	if (isl != 2u)
+		printf("  FAIL %-26s %u islands, wanted 2 (a block each, and "
+		       "neither the <%%-- comment nor the <%%= expression)\n",
 		       "jsp islands", isl), fails++;
 
 	hl = header_len(classic, &isl);
@@ -361,20 +411,69 @@ int main(void)
 		}
 	}
 
+	/*
+	 * ---- A "?>" THAT DOES NOT CLOSE ANYTHING ----
+	 *
+	 * Searching for the two bytes finds them wherever they are, and in a
+	 * webshell they are very often inside a string: a dropper carrying the
+	 * source of the file it writes. Measured on this corpus: 66 of them in
+	 * 15 of 75 php files. Each ended an island early, so the code after it
+	 * was called markup - and the form pass leaves markup alone, so the
+	 * wrong label is now a wrong normalisation as well.
+	 */
+	{
+		static const char in_str[] =
+			"<?php\n"
+			"$tpl = \"<?php eval($_POST[x]); ?>\";\n"
+			"@system($_GET['c']);\n"
+			"?>\n"
+			"<html>real markup</html>\n";
+		struct kof_script_info info;
+		struct kof_obj_ctx ctx;
+		struct kof_range r[8];
+		kof_buf f;
+		uint32_t n;
+
+		memset(&ctx, 0, sizeof ctx);
+		f.p = (const uint8_t *)in_str;
+		f.n = strlen(in_str);
+		if (kof_script_sniff(f) && kof_script_parse(f, &info, &ctx)) {
+			n = ctx.resolve_scan(&ctx, KOF_SCAN_SCRIPT_BODY, r,
+					     (uint32_t)(sizeof r / sizeof r[0]));
+			/*
+			 * The @system call has to be INSIDE the body. Ended at
+			 * the string's "?>" the island stops before it and the
+			 * call is markup - which is the whole failure.
+			 */
+			if (n != 1u ||
+			    !memmem(in_str + r[0].off, (size_t)r[0].len,
+				    "@system", 7u))
+				printf("  FAIL %-26s %u body extent(s), and the "
+				       "call after the string is not in one\n",
+				       "?> inside a string", n), fails++;
+		} else {
+			fail("?> inside a string", "sniff or parse refused it");
+		}
+		check_partition("?> inside a string", in_str);
+	}
+
 	check_partition("php program", php_prog);
 	check_partition("php page", php_page);
 	check_per_bit("php program per bit", php_prog);
 	check_per_bit("php page per bit", php_page);
 
 	/*
-	 * A PROGRAM IS NOT SPLIT. Its closing tag is the end of the file, and
-	 * splitting it into an island would put the tag inside BODY and leave
-	 * the FOOTER region - the whole reason the region exists - empty.
+	 * A PROGRAM IS NOT SPLIT: one run of code, and it is already the body.
+	 *
+	 * AND PHP HAS NO HEADER. "<?php" opens a block of code - it is the
+	 * first byte of a body, the same as every "<?php" further down - so
+	 * naming the first one a header cut one block in half and called the
+	 * pieces different things.
 	 */
 	hl = header_len(php_prog, &isl);
-	if (hl != (uint32_t)strlen("<?php"))
-		printf("  FAIL %-26s header is %u bytes\n",
-		       "php program header", hl), fails++;
+	if (hl != 0u)
+		printf("  FAIL %-26s header is %u bytes, wanted none\n",
+		       "php has no header", hl), fails++;
 	if (isl != 0u)
 		printf("  FAIL %-26s %u islands, wanted 0 - a program that "
 		       "ends with \"?>\" is not a page\n",
@@ -424,6 +523,68 @@ int main(void)
 		if (!found)
 			fail("php page markup",
 			     "the href is not in a MARKUP extent");
+	}
+
+	/*
+	 * ---- MORE ISLANDS THAN THE TABLE HOLDS ----
+	 *
+	 * The cap used to be 32 and the overflow used to EXTEND THE LAST ISLAND
+	 * TO THE END OF THE OBJECT. A real 87 KB shell needs 122 islands, so
+	 * the last one swallowed 67697 bytes - 78% of the file, nearly all of
+	 * it html, declared to be code and then formed by php's rules.
+	 *
+	 * Two things are pinned. The tail past the cap is MARKUP, which is what
+	 * the remainder of a page is; and the parse SAYS the list is short,
+	 * because a silent cap is what let the first one survive.
+	 *
+	 * EACH ISLAND OWNS ITS LINE, and that is not incidental to the fixture.
+	 * An island sharing a line with markup is INTERPOLATION - see php_block -
+	 * and is not recorded at all, so the first version of this fixture wrote
+	 * three hundred of them and produced one island. The test caught it,
+	 * which is the only reason this note is here rather than a wrong number.
+	 */
+	{
+		static char many[64u * 1024u];
+		struct kof_script_info info;
+		struct kof_obj_ctx ctx;
+		kof_buf f;
+		uint32_t at = 0;
+		int i;
+
+		at += (uint32_t)snprintf(many, sizeof many, "<?php $x=1; ?>\n");
+		for (i = 0; i < (int)KOF_SCRIPT_MAX_ISLAND + 8 &&
+			    at < sizeof many - 64u; i++)
+			at += (uint32_t)snprintf(many + at, sizeof many - at,
+						 "<p>r%d</p>\n<?php echo $x; ?>\n",
+						 i);
+		snprintf(many + at, sizeof many - at, "<p>tail</p>\n");
+
+		memset(&ctx, 0, sizeof ctx);
+		f.p = (const uint8_t *)many;
+		f.n = strlen(many);
+		if (!kof_script_sniff(f) || !kof_script_parse(f, &info, &ctx)) {
+			fail("island overflow", "sniff or parse refused it");
+		} else {
+			if (!(info.anomalies & KOF_SCRIPT_ANOM_ISLANDS_FULL))
+				fail("island overflow",
+				     "the parse did not say the list is short");
+			if (info.n_island != KOF_SCRIPT_MAX_ISLAND)
+				printf("  FAIL %-26s %u islands, wanted the "
+				       "cap\n", "island overflow",
+				       info.n_island), fails++;
+			/*
+			 * AND THE LAST ISLAND DID NOT EAT THE TAIL. That is the
+			 * regression itself: its length must still be one run of
+			 * code, not the distance to the end of the object.
+			 */
+			if ((uint64_t)info.island[info.n_island - 1].off +
+			    info.island[info.n_island - 1].len >= f.n - 16u)
+				fail("island overflow",
+				     "the last island swallowed the tail");
+		}
+		/* And the partition still holds over the whole of it. */
+		check_partition("island overflow", many);
+		check_per_bit("island overflow per bit", many);
 	}
 
 	/*
