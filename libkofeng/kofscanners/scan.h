@@ -413,6 +413,14 @@ void kof_mod_unpack_mode(struct kof_obj_ctx *, int on);
  */
 uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force);
 
+/*
+ * The script in the form a signature should be written on, handed over as ONE
+ * child: how it was typed taken out of it, and with `deep` what it builds out
+ * of its own literals built first. Answers the child's length, or 0 when there
+ * was nothing worth a child. See the note over the definition.
+ */
+uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep);
+
 
 /* Turn a named range into extents. objctx.c needs it; the parse is what knows. */
 uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *, uint32_t scan_mask,

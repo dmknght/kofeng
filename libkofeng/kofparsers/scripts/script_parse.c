@@ -17,7 +17,8 @@
 #include "script_parse.h"
 
 const uint32_t kof_script_region_bits[] = {
-	KOF_SCAN_SCRIPT_HEADER, KOF_SCAN_SCRIPT_BODY, KOF_SCAN_SCRIPT_MARKUP
+	KOF_SCAN_SCRIPT_HEADER, KOF_SCAN_SCRIPT_BODY, KOF_SCAN_SCRIPT_MARKUP,
+	KOF_SCAN_SCRIPT_FOOTER
 };
 
 const char *kof_script_region_name(uint32_t bit)
@@ -26,6 +27,7 @@ const char *kof_script_region_name(uint32_t bit)
 	case KOF_SCAN_SCRIPT_HEADER: return "KOF_SCAN_SCRIPT_HEADER";
 	case KOF_SCAN_SCRIPT_BODY:   return "KOF_SCAN_SCRIPT_BODY";
 	case KOF_SCAN_SCRIPT_MARKUP: return "KOF_SCAN_SCRIPT_MARKUP";
+	case KOF_SCAN_SCRIPT_FOOTER: return "KOF_SCAN_SCRIPT_FOOTER";
 	default:                     return NULL;
 	}
 }
@@ -49,11 +51,19 @@ static uint32_t script_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask
 	const struct kof_script_info *s =
 		(const struct kof_script_info *)ctx->file_header;
 	uint32_t n = 0;
-	uint64_t hdr;
+	uint64_t hdr, foot, end;
 
 	if (!s || !out || max_out == 0)
 		return 0;
 	hdr = s->tag_len < ctx->obj_size ? s->tag_len : ctx->obj_size;
+	/*
+	 * The footer is measured from the end and the header from the start, so
+	 * a small object could have them overlap - and two regions claiming one
+	 * byte is the one thing the partition may not do. The header wins,
+	 * because it is what identified the object.
+	 */
+	foot = s->foot_len < ctx->obj_size - hdr ? s->foot_len : 0;
+	end = ctx->obj_size - foot;
 
 	if ((mask & KOF_SCAN_SCRIPT_HEADER) && hdr > 0) {
 		out[n].off = 0;
@@ -63,14 +73,19 @@ static uint32_t script_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask
 
 	/*
 	 * NO ISLANDS: the shape this format had before server pages, and the
-	 * one every shebang script still has. The body is the rest and there is
-	 * no markup.
+	 * one every shebang script still has. The body is the rest, less a
+	 * closing tag if there is one, and there is no markup.
 	 */
 	if (!s->n_island) {
-		if ((mask & KOF_SCAN_SCRIPT_BODY) && hdr < ctx->obj_size &&
+		if ((mask & KOF_SCAN_SCRIPT_BODY) && hdr < end &&
 		    n < max_out) {
 			out[n].off = hdr;
-			out[n].len = ctx->obj_size - hdr;
+			out[n].len = end - hdr;
+			n++;
+		}
+		if ((mask & KOF_SCAN_SCRIPT_FOOTER) && foot && n < max_out) {
+			out[n].off = end;
+			out[n].len = foot;
 			n++;
 		}
 		return n;
@@ -573,6 +588,41 @@ static uint8_t kind_of_interp(const char *w)
 	return KOF_SCRIPT_ANY;
 }
 
+/*
+ * THE CLOSING TAG AT THE END OF THE FILE, measured backwards from it.
+ *
+ * "?>" is the other half of "<?php" and belongs with it rather than with the
+ * last statement - see KOF_SCAN_SCRIPT_FOOTER. Trailing whitespace goes with
+ * it: an editor's final newline sits after the tag in almost every real file,
+ * and a footer that stopped at ">" would leave that newline as the body's last
+ * byte, which is the thing the region exists to stop.
+ *
+ * AT THE END AND NOWHERE ELSE. A "?>" in the middle of a file opens markup
+ * that more code follows, and that shape is a page - BODY and MARKUP already
+ * describe it. Reading a middle "?>" as a footer would call everything after
+ * it a closing tag.
+ *
+ * NOT FOR THE "<%" FAMILY. There the "%>" is an island's own end, which
+ * pct_islands already measured, and a page's last bytes are markup.
+ */
+static uint32_t closing_tag(kof_buf f, const struct kof_script_info *info)
+{
+	uint64_t e = f.n;
+
+	if (info->n_island || f.n < 2u)
+		return 0;
+	while (e > 0 && (f.p[e - 1] == '\n' || f.p[e - 1] == '\r' ||
+			 f.p[e - 1] == ' ' || f.p[e - 1] == '\t'))
+		e--;
+	if (e < 2u || f.p[e - 2] != '?' || f.p[e - 1] != '>')
+		return 0;
+	/* The whole of it has to sit after the header, or a file that is
+	 * nothing but "<?php ?>" would have two regions claiming one byte. */
+	if (e - 2u < info->tag_len)
+		return 0;
+	return (uint32_t)(f.n - (e - 2u));
+}
+
 int kof_script_parse(kof_buf file, struct kof_script_info *info,
 		     struct kof_obj_ctx *ctx)
 {
@@ -634,6 +684,8 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 					pct_islands(file, info->tag_len, info);
 		}
 	}
+
+	info->foot_len = closing_tag(file, info);
 
 	/* obj_size is the PARSER's to set - see any other collector. Leaving it
 	 * zero made both regions come back empty, because the body is

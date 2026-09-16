@@ -41,6 +41,9 @@
 #include "../kofdecomp/rar3.h"
 #include "../kofdecomp/rar5.h"
 #include "../kofdecomp/bcj2.h"
+/* The script folding pass and the lexical table it is driven from - see
+ * kof_scan_script_fold below. */
+#include "../kofparsers/scripts/script_norm.h"
 /*
  * The one format header the scan path includes, and it is not a shortcut.
  *
@@ -2926,6 +2929,331 @@ static int emu_give(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n)
 		at += chunk;
 	}
 	return 1;
+}
+
+/* ---- the two forms of a script ---------------------------------------------- */
+
+/*
+ * The one setup both passes below need, and the one place their refusals are
+ * written down.
+ *
+ * `b` comes back as the object's bytes and `lx` as the table for its language.
+ * Answers 0 when there is nothing to do, and the reasons are all of the form
+ * "this is not a script this build can read", never "this script is clean".
+ */
+static int script_pass_open(const struct kof_obj_ctx *ctx,
+			    struct kof_scanner **psc, const struct kof_lex **plx,
+			    kof_buf *b)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	const struct kof_script_info *si;
+
+	if (!sc || !sc->cur_src || !ctx->file_header)
+		return 0;
+	if (ctx->format != KOF_FMT_SCRIPT || !can_produce(sc))
+		return 0;
+	/*
+	 * A FORM OF A FORM IS THE FORM. Both passes below declare what they
+	 * produce as KOF_ENT_NORMALIZED, and running either on its own output
+	 * costs a walk over the object to arrive at bytes that are already in
+	 * the tree - the normalised form of a normalised form is itself, and
+	 * what a folded constant builds its parent already built.
+	 */
+	if (kof_src_kind_of(sc->cur_src) == KOF_ENT_NORMALIZED)
+		return 0;
+	si = (const struct kof_script_info *)ctx->file_header;
+	*plx = kof_lex_for(si->kind);
+	if (!*plx)
+		return 0;       /* no table for the kind: nothing is guessed */
+
+	*b = kof_src_buf(sc->cur_src);
+	if (!b->p || !b->n || b->n > sc->obj_cap || b->n > 0xffffffffu)
+		return 0;
+	*psc = sc;
+	return 1;
+}
+
+/*
+ * THE TAG THE FILE OPENED WITH, IN FRONT OF WHAT THE PASS PRODUCED.
+ *
+ * A produced form has to be READABLE AS THE LANGUAGE IT IS, and this is not a
+ * nicety - it is the difference between the child being scanned and not.
+ * kof_script_sniff accepts a script on a shebang at offset zero or on an
+ * opening tag, and it has nothing else to go on: a bare "$k="4e4d..." is a
+ * fragment that no sniff claims, so the child came out KOF_FMT_UNKNOWN and
+ * every rule written about a PHP script was filtered out before it ran. That
+ * was measured, not feared - the folded form of a real shell examined as
+ * "unrecognised, 160 bytes".
+ *
+ * THE FILE'S OWN HEADER REGION AND NOT A TAG CHOSEN HERE. "<?php" is right for
+ * php and wrong for a shell, whose header is a shebang naming an interpreter
+ * this code would have to invent. The parse already carved the bytes that
+ * opened THIS file, so they are the ones that go back on: they name the same
+ * language because they are the same file's.
+ *
+ * It does mean the child is not a contiguous run of the parent - the header
+ * came from the top and the body from wherever the pass found it. That is
+ * already what a produced object is; the alternative was a child nothing looks
+ * at.
+ */
+static int script_head_emit(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	struct kof_range *ext = sc->ext_gather;
+	kof_buf b = kof_src_buf(sc->cur_src);
+	uint32_t n, i;
+	uint8_t last = 0;
+
+	n = kof_scan_resolve_range(ctx, KOF_SCAN_SCRIPT_HEADER, ext);
+	for (i = 0; i < n; i++) {
+		kof_buf s = kof_slice(b, ext[i].off, ext[i].len);
+
+		if (!s.p || !s.n)
+			continue;
+		if (!emu_give(ctx, s.p, s.n))
+			return 0;
+		last = s.p[s.n - 1];
+	}
+	/*
+	 * AND A NEWLINE AFTER IT, WHICH THE LANGUAGE REQUIRES.
+	 *
+	 * "<?php" is not a tag php accepts on its own - it has to be followed
+	 * by whitespace, and the body's own leading newline is the first thing
+	 * the form pass removes as a blank line. Joining the two without this
+	 * produced "<?php$p='...", which sniffs as php, parses as php here, and
+	 * is a syntax error in php: a form nobody could run and a researcher
+	 * would have to repair by hand before testing a draft against it.
+	 *
+	 * Only when the header did not already end in one, so a shebang - which
+	 * carries its line ending with it - does not gain a blank line the pass
+	 * would have taken out.
+	 */
+	if (last != '\n' && !emu_give(ctx, (const uint8_t *)"\n", 1u))
+		return 0;
+	return 1;
+}
+
+/*
+ * AND THE CLOSING TAG BACK ON THE END, on a line of its own.
+ *
+ * Same argument as the header and the same failure without it: "}?>" is the
+ * body's last statement welded to punctuation that is not part of it, and a
+ * marker taken from the end of the form would carry both. The parse already
+ * separated them - KOF_SCAN_SCRIPT_FOOTER - so this puts back what the file
+ * had, where the file had it.
+ *
+ * Nothing when the file did not end with one, which most php does not.
+ *
+ * `last` is the byte the body ended on, for the same reason the header pass
+ * looks at its own: a separator added to a body that already ended in a
+ * newline is a blank line, and a blank line is the first thing the form pass
+ * removes. It would be the one place the output was not in the form the pass
+ * promises.
+ */
+static int script_foot_emit(const struct kof_obj_ctx *ctx, uint8_t last)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	struct kof_range *ext = sc->ext_gather;
+	kof_buf b = kof_src_buf(sc->cur_src);
+	uint32_t n, i;
+
+	n = kof_scan_resolve_range(ctx, KOF_SCAN_SCRIPT_FOOTER, ext);
+	if (!n)
+		return 1;
+	if (last != '\n' && !emu_give(ctx, (const uint8_t *)"\n", 1u))
+		return 0;
+	for (i = 0; i < n; i++) {
+		kof_buf s = kof_slice(b, ext[i].off, ext[i].len);
+
+		if (s.p && s.n && !emu_give(ctx, s.p, s.n))
+			return 0;
+	}
+	return 1;
+}
+
+/*
+ * HOW THE PROGRAM WAS TYPED, TAKEN OUT OF IT - the form pass.
+ *
+ * A signature is bytes, and bytes carry the indentation, the blank lines, the
+ * comments and the spacing of whichever copy the researcher had. Every one of
+ * those is free for an author to change and none of them changes what the
+ * program does, so a marker cut from one copy misses the next. This produces
+ * the same program with all of that removed, once, and a marker taken from
+ * THAT copy matches every way of typing it.
+ *
+ * ONLY THE BODY. A server page is code inside markup - the parse already says
+ * which bytes are which - and the rules here are the language's, not HTML's:
+ * "//" in an unquoted href is not a comment and closing up spaces in text
+ * changes it. So the pass is applied to the BODY extents and the markup is left
+ * exactly where the parse found it, which also makes the several islands of a
+ * jsp one program rather than several.
+ *
+ * Writes into `out`, which must hold b.n, and answers how long the result is
+ * and through `raw` how long the bytes it came from were. 0 means the object
+ * has no body to work on.
+ */
+static uint32_t script_form(const struct kof_obj_ctx *ctx,
+			    struct kof_scanner *sc, const struct kof_lex *lx,
+			    kof_buf b, uint8_t *out, uint32_t *raw)
+{
+	struct kof_range *ext;
+	uint32_t n_ext, i, held = 0;
+
+	*raw = 0;
+	ext = sc->ext_gather;
+	n_ext = kof_scan_resolve_range(ctx, KOF_SCAN_SCRIPT_BODY, ext);
+	if (!n_ext)
+		return 0;
+	/*
+	 * Built whole before anything is emitted, because whether to emit at
+	 * all is a question about the whole of it: an extent that normalised to
+	 * itself says nothing about the next one.
+	 */
+	for (i = 0; i < n_ext; i++) {
+		kof_buf s = kof_slice(b, ext[i].off, ext[i].len);
+		uint32_t w;
+
+		if (!s.p || !s.n || s.n > 0xffffffffu)
+			continue;
+		*raw += (uint32_t)s.n;
+		w = kof_script_norm(lx, s.p, (uint32_t)s.n, out + held,
+				    (uint32_t)b.n - held, KOF_NORM_ALL);
+		/*
+		 * A REFUSAL KEEPS THE BYTES. kof_script_norm answers 0 when it
+		 * will not touch an extent - a heredoc in it, no room - and the
+		 * contract there is that the caller uses the input as it
+		 * stands. Dropping the extent instead would hand over a program
+		 * with a hole in it and call it the same program.
+		 */
+		if (!w) {
+			if (held + s.n > b.n)
+				break;
+			memcpy(out + held, s.p, (size_t)s.n);
+			w = (uint32_t)s.n;
+		}
+		held += w;
+	}
+	return held;
+}
+
+/*
+ * THE SCRIPT IN THE FORM A SIGNATURE SHOULD BE WRITTEN ON - one child, and the
+ * last form, not every form on the way to it.
+ *
+ * Two passes make that form and they compose in one direction:
+ *
+ *   form    how the program was TYPED, removed. Indentation, blank lines,
+ *           comment-only lines, spacing outside strings. Always run.
+ *   fold    what the program BUILDS out of its own literals, built. A
+ *           generator that cuts a shell into pieces, scatters them over
+ *           variables and joins them at run time leaves no byte string that
+ *           survives two builds - the separator, the names, the cut points and
+ *           the join order all change. Measured on two builds of one php
+ *           obfuscator: not one shared substring in the raw files, and the
+ *           same 65 bytes after folding. Costs a walk over every assignment,
+ *           so it is `deep` - level 2 - only.
+ *
+ * WHEN THE FOLD FIRES, THE FORM OF THE FOLD IS THE ONLY CHILD. Emitting both
+ * put two nodes in the viewer's tree for one file and left the reader to work
+ * out which one to take a marker from - and the answer was always the same one,
+ * the last. So the fold's output goes through the form pass and that is what is
+ * handed over; the intermediate never becomes an object.
+ *
+ * THE FOLD READS THE WHOLE OBJECT, the form pass only its BODY. The pieces of a
+ * built program are literals wherever they were assigned, and a server page
+ * that assigns one in an island and joins it in the next has a join that
+ * folding island by island would miss.
+ *
+ * A PACKER'S SHAPE, HERE AND NOT IN A DATABASE MODULE. An unpacker in bases/ is
+ * a compiled blob that reaches the host through ctx->content, and both passes
+ * need the parser's own lexical table - kof_lex_for - which is not in that
+ * vocabulary and should not be: adding it would put a language table in the
+ * module ABI.
+ */
+uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
+{
+	struct kof_scanner *sc = NULL;
+	const struct kof_lex *lx = NULL;
+	uint8_t *out = NULL, *tmp = NULL;
+	kof_buf b;
+	uint32_t n = 0, raw = 0;
+
+	if (!script_pass_open(ctx, &sc, &lx, &b))
+		return 0;
+	/*
+	 * Neither pass can make anything longer than what it was given - every
+	 * rule in both removes bytes or leaves them - so one allocation of the
+	 * object's size is the whole budget either needs, and neither can be
+	 * made to grow by a crafted file.
+	 */
+	out = malloc((size_t)b.n);
+	if (!out)
+		return 0;
+
+	if (deep) {
+		n = kof_script_fold(lx, b.p, (uint32_t)b.n, out, (uint32_t)b.n);
+		/*
+		 * A SHORT CONSTANT IS NOT A PROGRAM. Every script builds small
+		 * strings - a path, a message, a separator - and handing each
+		 * one over as an object would bury the one that matters under
+		 * them. Sixty-four bytes is shorter than the smallest of the
+		 * shells this was built against and longer than the strings
+		 * ordinary code assembles.
+		 */
+		if (n < 64u) {
+			n = 0;
+		} else {
+			tmp = malloc((size_t)n);
+			if (tmp) {
+				uint32_t w = kof_script_norm(lx, out, n, tmp, n,
+							     KOF_NORM_ALL);
+
+				/* 0 is "I will not touch this", and the
+				 * contract there is to keep the input. */
+				if (w) {
+					free(out);
+					out = tmp;
+					n = w;
+				} else {
+					free(tmp);
+				}
+			}
+		}
+	}
+	if (!n) {
+		n = script_form(ctx, sc, lx, b, out, &raw);
+		/*
+		 * ONLY WHEN THE FORM WAS ACTUALLY DIFFERENT, and by more than a
+		 * byte.
+		 *
+		 * The pass only ever REMOVES, so how much shorter the result is
+		 * says exactly how much of this file's form was removable - and
+		 * that is the number that decides whether a second copy is
+		 * worth a node in the tree and a pass of the matcher.
+		 *
+		 * Sixteen, because below it there was nothing for a marker to
+		 * trip over: a real shell whose body is almost entirely string
+		 * literals came out ONE byte shorter - the blank line after its
+		 * tag - and a marker taken from the raw file matches that copy
+		 * already. The child worth making is the one where indentation,
+		 * comments and spacing were there to remove.
+		 *
+		 * The folded form above is not held to this. It is not a
+		 * reformatting of the file, it is a different program.
+		 */
+		if (n < 32u || raw < n || raw - n < 16u)
+			n = 0;
+	}
+	if (n) {
+		c_child_kind(ctx, KOF_ENT_NORMALIZED);
+		if (!script_head_emit(ctx) || !emu_give(ctx, out, n) ||
+		    !script_foot_emit(ctx, out[n - 1u]))
+			n = 0;
+		else
+			c_child(ctx);
+	}
+	free(out);
+	return n;
 }
 
 uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)

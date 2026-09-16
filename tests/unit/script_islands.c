@@ -76,7 +76,8 @@ static void check_partition(const char *what, const char *src)
 	}
 	n = ctx.resolve_scan(&ctx, KOF_SCAN_SCRIPT_HEADER |
 				   KOF_SCAN_SCRIPT_BODY |
-				   KOF_SCAN_SCRIPT_MARKUP,
+				   KOF_SCAN_SCRIPT_MARKUP |
+				   KOF_SCAN_SCRIPT_FOOTER,
 			     r, (uint32_t)(sizeof r / sizeof r[0]));
 	if (!n) {
 		fail(what, "no regions at all");
@@ -118,15 +119,16 @@ static void check_partition(const char *what, const char *src)
  * once puts a marker in the wrong region, or in none, and the panel then says
  * the bytes are not in the object they were just taken from.
  *
- * So each bit is asked for separately here and the three answers are summed:
- * they must still tile the object exactly, with no byte in two of them.
+ * So each bit is asked for separately here and the answers are summed: they
+ * must still tile the object exactly, with no byte in two of them.
  */
 static void check_per_bit(const char *what, const char *src)
 {
-	static const uint32_t bit[3] = {
+	static const uint32_t bit[] = {
 		KOF_SCAN_SCRIPT_HEADER, KOF_SCAN_SCRIPT_BODY,
-		KOF_SCAN_SCRIPT_MARKUP
+		KOF_SCAN_SCRIPT_MARKUP, KOF_SCAN_SCRIPT_FOOTER
 	};
+	static const uint32_t n_bit = (uint32_t)(sizeof bit / sizeof bit[0]);
 	struct kof_script_info info;
 	struct kof_obj_ctx ctx;
 	struct kof_range r[128];
@@ -141,7 +143,7 @@ static void check_per_bit(const char *what, const char *src)
 		fail(what, "sniff or parse refused it");
 		return;
 	}
-	for (b = 0; b < 3u; b++) {
+	for (b = 0; b < n_bit; b++) {
 		uint32_t got = ctx.resolve_scan(&ctx, bit[b], r + n,
 						(uint32_t)(sizeof r /
 							   sizeof r[0]) - n);

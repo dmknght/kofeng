@@ -1561,6 +1561,18 @@ enum kof_entry_kind {
 	KOF_ENT_FONT,         /* a program for a rasteriser */
 	KOF_ENT_EMBEDDED,     /* a file the container carries AS a file */
 	KOF_ENT_STRUCTURE,    /* the container's own index or graph, coded */
+	/*
+	 * THE SAME PROGRAM, WRITTEN ONE WAY. Not a thing the container carried
+	 * but a form of the object itself - reindented, uncommented, or with
+	 * the literals it joins at run time already joined.
+	 *
+	 * It is a kind rather than a flag because the pass that makes these has
+	 * to recognise its own output: normalising a normalised form yields the
+	 * same bytes, and folding one yields what folding its parent already
+	 * did, so without a mark every script would be walked twice for a child
+	 * that already exists.
+	 */
+	KOF_ENT_NORMALIZED,
 	KOF_ENT_KIND_COUNT
 };
 
@@ -1634,6 +1646,7 @@ static inline const char *kof_entry_kind_name(uint32_t kind)
 	case KOF_ENT_FONT:      return "FONT";
 	case KOF_ENT_EMBEDDED:  return "EMBEDDED";
 	case KOF_ENT_STRUCTURE: return "STRUCTURE";
+	case KOF_ENT_NORMALIZED: return "NORMALIZED";
 	default:                return "?";
 	}
 }

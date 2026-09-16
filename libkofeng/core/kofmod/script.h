@@ -160,6 +160,25 @@ static inline const char *kof_script_type_name(uint8_t v)
 #define KOF_SCAN_SCRIPT_MARKUP (1u << 3)
 
 /*
+ * AND THE CLOSING TAG, WHICH IS NOT THE PROGRAM EITHER.
+ *
+ * "?>" ends a php file the way "<?php" opens it, and leaving it in BODY made
+ * the body a thing that could not be handed anywhere on its own: a form of the
+ * program with a stray "?>" welded to its last statement, and a marker taken
+ * from the end of a file carrying two bytes of punctuation that say nothing
+ * about what the program does.
+ *
+ * The trailing whitespace after it belongs to the footer for the same reason
+ * the shebang's line ending belongs to the header - it is part of the thing
+ * that closed the file, not a statement.
+ *
+ * Bit 4, which is NOLOAD in an ELF and the certificate table in a PE: present
+ * in the file, and not part of what runs. That is exactly what this is, so a
+ * rule written across formats reads the same way.
+ */
+#define KOF_SCAN_SCRIPT_FOOTER (1u << 4)
+
+/*
  * The view a module reached for KOF_FMT_SCRIPT gets.
  *
  * Small on purpose: there is no structure here to describe. `kind` is the same
@@ -186,6 +205,12 @@ struct kof_script_info {
 	uint8_t  from_shebang;  /* 1 when a "#!" line named it */
 	uint16_t n_island;      /* 0 for anything that is not a server page */
 	uint32_t tag_len;
+	/*
+	 * How many bytes at the END the closing tag and what follows it take -
+	 * 0 when the file does not end with one, which most php does not.
+	 * Measured from the end, so the footer is [size - foot_len, size).
+	 */
+	uint32_t foot_len;
 	uint64_t anomalies;     /* none defined yet; kept so the row has one */
 	/*
 	 * The islands, in file order and never merged. Two runs of code with

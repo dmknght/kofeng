@@ -25775,6 +25775,24 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	/*
+	 * SAY SO WHEN THERE IS NO DATABASE, because every silence that follows
+	 * looks like an answer.
+	 *
+	 * Without one there is no scanner at all - kof_scanner_new refuses a
+	 * null engine - so nothing is unpacked, no script is normalised, no
+	 * rule is asked and the tree holds one node. All of which is exactly
+	 * what a clean file looks like. It cost a reader a round trip of
+	 * "nothing changed" against a build where the thing they were looking
+	 * for was working, so the one frame that can still explain it does.
+	 */
+	if (!v->eng) {
+		v->act_ok = 0;
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "No database: pass --db to unpack, normalise and "
+			 "match");
+	}
+
 	if (!term_setup()) {
 		rc = 1;
 		goto out;

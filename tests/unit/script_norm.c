@@ -22,6 +22,12 @@
 
 static int fails;
 
+static void bad2(const char *why)
+{
+	printf("  FAIL %s\n", why);
+	fails++;
+}
+
 static void eq(uint8_t kind, const char *in, const char *want,
 	       uint32_t what, const char *why)
 {
@@ -177,10 +183,113 @@ int main(void)
 	refused(KOF_SCRIPT_JS, "var s = `a\n  b`;\n",
 		"a backtick anywhere: the whole input is left alone");
 
+	/* ---- the folding pass ---- */
+
+	/*
+	 * THE MEASUREMENT THIS WAS BUILT FOR.
+	 *
+	 * Two builds of one generator share no byte string: the separator, the
+	 * variable names, where the cuts fall and the order the pieces are
+	 * joined in are all different. These two are that shape, cut down from
+	 * weevely's cleartext obfuscator - one uses "T|" and the other "+T",
+	 * and neither the names nor the cuts line up.
+	 *
+	 * If folding works they reduce to THE SAME BYTES, and one marker on
+	 * those bytes covers both builds and every other build of the same
+	 * generator. If it does not, no static signature can cover more than
+	 * one of them and the whole pass is not worth its cost.
+	 */
+	{
+		static const char b1[] =
+			"<?php\n"
+			"$p='T|functiT|on x($t,$k){$c=T|strlen($k);';\n"
+			"$v='$k=\"4e4d6c33\";T|$kh=\"2b6fe62a63af\";';\n"
+			"$U=str_replace('T|','',$v.$p);\n";
+		static const char b2[] =
+			"<?php\n"
+			"$Y='$k=\"4e4d+T6c33\";$kh=\"2b6+Tfe62a63af\";';\n"
+			"$P='func+Ttion x($t,$k){$c+T=strlen($k);';\n"
+			"$u=str_replace('+T','',$Y.$P);\n";
+		const struct kof_lex *lx = kof_lex_for(KOF_SCRIPT_PHP);
+		uint8_t o1[512], o2[512];
+		uint32_t n1 = kof_script_fold(lx, (const uint8_t *)b1,
+					      (uint32_t)strlen(b1), o1,
+					      (uint32_t)sizeof o1);
+		uint32_t n2 = kof_script_fold(lx, (const uint8_t *)b2,
+					      (uint32_t)strlen(b2), o2,
+					      (uint32_t)sizeof o2);
+
+		if (!n1 || !n2) {
+			printf("  FAIL folding produced nothing (%u, %u)\n",
+			       n1, n2);
+			fails++;
+		} else if (n1 != n2 || memcmp(o1, o2, n1) != 0) {
+			printf("  FAIL two builds did not reduce to one form\n"
+			       "        b1 -> \"%.*s\"\n"
+			       "        b2 -> \"%.*s\"\n",
+			       (int)n1, (char *)o1, (int)n2, (char *)o2);
+			fails++;
+		} else {
+			printf("  two poly builds reduce to one %u byte form: "
+			       "\"%.*s\"\n", n1, (int)n1, (char *)o1);
+		}
+	}
+
+	/* An escaped literal decodes - the "phar://" case, written as octal and
+	 * hex so the seven bytes never appear. */
+	{
+		static const char esc[] =
+			"<?php $a=\"\\160\\x68\\141\\x72\\72\\57\\57\";\n";
+		const struct kof_lex *lx = kof_lex_for(KOF_SCRIPT_PHP);
+		uint8_t o[64];
+		uint32_t n = kof_script_fold(lx, (const uint8_t *)esc,
+					     (uint32_t)strlen(esc), o,
+					     (uint32_t)sizeof o);
+
+		if (n != 7u || memcmp(o, "phar://", 7u) != 0) {
+			printf("  FAIL escapes: got %u \"%.*s\", wanted "
+			       "\"phar://\"\n", n, (int)n, (char *)o);
+			fails++;
+		}
+	}
+
+	/*
+	 * NOTHING IS RUN AND NOTHING FROM OUTSIDE IS FOLLOWED. A value that
+	 * comes from the request is not a constant, and a pass that treated one
+	 * as if it were would be inventing bytes that were never in the file.
+	 */
+	{
+		static const char live[] =
+			"<?php $a=$_POST['x']; $b='lit'.$a;\n";
+		const struct kof_lex *lx = kof_lex_for(KOF_SCRIPT_PHP);
+		uint8_t o[64];
+		uint32_t n = kof_script_fold(lx, (const uint8_t *)live,
+					     (uint32_t)strlen(live), o,
+					     (uint32_t)sizeof o);
+
+		if (n && memcmp(o, "lit", n < 3u ? n : 3u) == 0 && n > 3u) {
+			printf("  FAIL a runtime value was folded as if it "
+			       "were constant\n");
+			fails++;
+		}
+	}
+
+	/* A language with no sigil declines rather than guessing which bare
+	 * name is a variable - see var_sigil. */
+	{
+		const struct kof_lex *lx = kof_lex_for(KOF_SCRIPT_JS);
+		uint8_t o[64];
+
+		if (kof_script_fold(lx, (const uint8_t *)"var a='x'+'y';",
+				    14u, o, (uint32_t)sizeof o))
+			bad2("js folded without a sigil to go on");
+	}
+
 	if (fails) {
 		printf("script norm: %d check(s) failed\n", fails);
 		return 1;
 	}
-	printf("script norm: form, strings, operators, shell, refusals - ok\n");
+	printf("script norm: form, strings, operators, shell, refusals, "
+	       "folding - ok\n");
 	return 0;
 }

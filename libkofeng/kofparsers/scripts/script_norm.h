@@ -71,6 +71,19 @@ struct kof_lex {
 	 * non-word byte. No lexical rule separates them, so it is stated.
 	 */
 	uint8_t     ws_significant;
+	/*
+	 * HOW THE LANGUAGE SPELLS A VARIABLE AND A JOIN, which the folding pass
+	 * below needs and the form pass does not.
+	 *
+	 * `var_sigil` is '$' where a variable is marked as one and 0 where it is
+	 * a bare name. Zero means the folding pass DOES NOT RUN for that
+	 * language: without a sigil, telling `foo` the variable from `foo` the
+	 * function needs a parse, and a parse is what this file exists to avoid.
+	 * php and perl have one; js and python do not, and are left for a later
+	 * pass that earns the cost.
+	 */
+	char        var_sigil;
+	char        concat;    /* '.' in php and perl, '+' in js */
 };
 
 /* The table for a kind, or NULL when this build has no row for it. NULL for
@@ -105,5 +118,45 @@ enum {
 uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 			 uint32_t n, uint8_t *out, uint32_t cap,
 			 uint32_t what);
+
+/*
+ * THE SECOND PASS: what the script BUILDS out of its own literals.
+ *
+ * The form pass above is about how a program was typed. This is about a
+ * program that was written down in pieces so that it would not read as itself:
+ *
+ *     $a='fun'; $b='ction x('; $c=str_replace('|','',$a.'|'.$b);
+ *
+ * Every build of a generator like that differs in the separator, the variable
+ * names, where the cuts fall and what order the pieces are joined in - so no
+ * byte string survives two builds. What DOES survive is the thing they build,
+ * and after this it is bytes like any other.
+ *
+ * WHAT IT DOES, AND THE LIST IS THE WHOLE OF IT:
+ *
+ *   - decodes "\x41" and "\101" inside a literal
+ *   - joins literals written next to each other
+ *   - joins variables that hold literals
+ *   - applies str_replace(literal, literal, constant)
+ *
+ * WHAT IT DOES NOT DO, and each of these is where a static reader has to stop:
+ * it runs nothing, decodes no base64, inflates nothing, and follows no value
+ * that came from outside the file. A constant is folded because its value is
+ * written in the file; anything else is a program, and running one is the
+ * emulator's job.
+ *
+ * NEVER LONGER THAN THE INPUT. Every fold removes bytes - an escape becomes
+ * one byte, a join drops the quotes and the operator, a replace only deletes -
+ * so the largest constant a file can build is bounded by the literals it
+ * contains. There is no bomb here and no cap is needed for one.
+ *
+ * Answers the length of the LARGEST constant built, or 0 when the script
+ * builds none. That one is written to `out`; a file that assembles two is
+ * assembling one payload and one separator, and the long one is the payload.
+ *
+ * Returns 0 when the language has no var_sigil - see the note there.
+ */
+uint32_t kof_script_fold(const struct kof_lex *lx, const uint8_t *in,
+			 uint32_t n, uint8_t *out, uint32_t cap);
 
 #endif /* KOFENG_SCRIPT_NORM_H */
