@@ -347,17 +347,48 @@ static uint32_t pat_of(const uint8_t *b, uint32_t n, int hex)
 /*
  * One marker's bytes, as the inside of a C string literal.
  *
- * Only the three that have to be: a quote and a backslash because C would
+ * THREE THAT CANNOT BE WRITTEN RAW: a quote and a backslash because C would
  * otherwise read the literal differently, and "?" because two of them in a row
  * form a trigraph. Escaping every "?" rather than only the pairs keeps this a
  * property of the byte instead of a property of its neighbour - the pair rule is
  * the kind that is right until somebody edits the string next to it.
+ *
+ * AND THREE THAT ARE WHITESPACE, which used to be refused instead of written.
+ *
+ * A marker is bytes, and a marker that crosses a line has a newline in it. It
+ * was not declarable at all: literal_safe took anything outside printable ASCII
+ * as "cannot be a literal", so a selection that happened to include the line
+ * ending was greyed out while the same text without it was not. The reader saw
+ * one string that could sometimes be declared and sometimes not, with nothing
+ * on screen either way.
+ *
+ * Written as \t \n \r rather than as a hex escape on purpose. They are
+ * standard C, they mean the same bytes to a compiler and to ksigbuilder, and
+ * they leave the literal READABLE - which is the whole reason a marker is a
+ * literal and not a hex program. \x is not usable here even if it were wanted:
+ * it is greedy, so "\x41BC" is one escape rather than a byte and three
+ * letters.
+ *
+ * Anything else outside printable ASCII is still not a literal, and hex is the
+ * honest form for it.
  */
 void decl_put_literal(FILE *f, const uint8_t *b, uint32_t n)
 {
 	uint32_t i;
 
 	for (i = 0; i < n; i++) {
+		if (b[i] == '\t') {
+			fputs("\\t", f);
+			continue;
+		}
+		if (b[i] == '\n') {
+			fputs("\\n", f);
+			continue;
+		}
+		if (b[i] == '\r') {
+			fputs("\\r", f);
+			continue;
+		}
 		if (b[i] == '"' || b[i] == '\\' || b[i] == '?')
 			fputc('\\', f);
 		fputc(b[i], f);
@@ -913,12 +944,26 @@ int src_quoted(const char *p, char *out, size_t cap)
 
 	if (!q)
 		return 0;
+	/* The same six escapes decl_put_literal writes and ksigbuilder reads.
+	 * A marker holding a newline comes back as a newline here or a saved
+	 * draft reopens with the letter "n" where its line break was. */
 	for (q++; *q && *q != '"'; q++) {
-		if (*q == '\\' &&
-		    (q[1] == '"' || q[1] == '\\' || q[1] == '?'))
-			q++;
+		char c = *q;
+
+		if (c == '\\' && q[1]) {
+			switch (q[1]) {
+			case '"': case '\\': case '?': c = q[1]; q++; break;
+			case 't': c = '\t'; q++; break;
+			case 'n': c = '\n'; q++; break;
+			case 'r': c = '\r'; q++; break;
+			/* Anything else is passed through as written: this is a
+			 * reader, and the build is where a bad escape is an
+			 * error. */
+			default: break;
+			}
+		}
 		if (n + 1 < cap)
-			out[n++] = *q;
+			out[n++] = c;
 	}
 	out[n] = 0;
 	return *q == '"';
@@ -4205,7 +4250,41 @@ void generate(struct kof_editor *e, int as_new)
 			arch_word[e->dr.opt_val[OPT_ARCH] < ARCH_N
 				  ? e->dr.opt_val[OPT_ARCH] : 0].word);
 	if (e->dr.opt_on[OPT_SUBTYPE]) {
+		/*
+		 * THE FORMAT THE SUBTYPE IS ABOUT IS THE DECLARED ONE, and it
+		 * was the OBJECT's.
+		 *
+		 * Those agreed for as long as a subtype could only be set from
+		 * the object - seeded from its own parse, or picked from a
+		 * menu that only offered it for executables. Both now have a
+		 * second source: Format > Scripts names a language, which sets
+		 * the format and the subtype together, and it can be used while
+		 * looking at something that is not a script.
+		 *
+		 * Keyed on the object, that wrote the script language's INDEX
+		 * through the PE table - "KOF_TARGET_SUBTYPE(KOF_PE_DLL)" on a
+		 * rule the researcher wrote for php, which compiles and targets
+		 * the wrong thing. The subtype axis is per format, so the
+		 * format it is read against has to be the one the rule
+		 * DECLARES.
+		 *
+		 * Only when the rule declares exactly one. A subtype means
+		 * nothing across two formats - the values overlap - and the
+		 * object is the best remaining answer for a draft that names
+		 * none.
+		 */
 		uint8_t fm = ob->ctx.format;
+		uint32_t only = e->dr.fmt_mask;
+
+		if (only && (only & (only - 1u)) == 0) {
+			uint8_t b = 0;
+
+			while (!(only & 1u)) {
+				only >>= 1;
+				b++;
+			}
+			fm = b;
+		}
 
 		if (fm == KOF_FMT_ELF)
 			fprintf(f, "KOF_TARGET_SUBTYPE(KOF_ELF_%s);\n",

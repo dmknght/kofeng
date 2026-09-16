@@ -679,23 +679,45 @@ static const char *const lvl_word[LV_COUNT] = {
  * as the string it is in every tool that shows markers - because of one "?" and
  * one quote.
  */
-/* A byte that reads as text. The same set literal_safe accepts, kept separate
- * because they answer different questions: this one is about what a person is
- * looking at, that one about what can be written down. */
+/*
+ * A byte that reads as text - what a person is LOOKING AT.
+ *
+ * Narrower than literal_safe, which is about what can be WRITTEN DOWN: a tab or
+ * a newline can be spelled in a literal and cannot be drawn in a hex pane's
+ * text column, where they would move the cursor rather than fill a cell. The
+ * two were the same set and the comment here said so; they answer different
+ * questions and one of them has since grown.
+ */
 static int byte_text(uint8_t c)
 {
 	return c >= 0x20u && c <= 0x7eu;
 }
 
+/*
+ * AND THE THREE WHITESPACE BYTES, which this used to refuse.
+ *
+ * A marker is bytes and a marker that crosses a line has a newline in it.
+ * Taking "outside printable ASCII" as "cannot be a literal" meant a selection
+ * that happened to include the line ending was refused while the same text
+ * without it was accepted - so one string could be declared or not depending on
+ * where a drag stopped, with nothing said either way. decl_put_literal writes
+ * them as \t \n \r and ksigbuilder reads them back.
+ *
+ * Everything else outside printable ASCII is still not a literal. Hex is the
+ * honest form for it, and the menu offers that instead.
+ */
 static int literal_safe(const uint8_t *b, uint32_t n)
 {
 	uint32_t i;
 
 	if (!n)
 		return 0;
-	for (i = 0; i < n; i++)
+	for (i = 0; i < n; i++) {
+		if (b[i] == '\t' || b[i] == '\n' || b[i] == '\r')
+			continue;
 		if (b[i] < 0x20u || b[i] > 0x7eu)
 			return 0;
+	}
 	return 1;
 }
 
@@ -763,9 +785,12 @@ enum ch_what {
 	CH_RANGE4,
 	CH_RANGE_ADD,   /* which region to declare as a new range */
 	CH_ENC_TYPE,    /* which coding the decoder should apply */
-	CH_FMT,         /* what to do with one target format */
+	CH_FMT,         /* what to do with one target format - by KIND */
+	CH_FMT_SW,      /* which format of that kind to switch to */
+	CH_FMT_SW_LANG, /* which language to switch to - a script and its subtype */
 	CH_FMT_CAT,     /* which KIND of format - the first half of adding one */
 	CH_FMT_ADD,     /* which format of that kind */
+	CH_FMT_LANG,    /* which scripting language - format and subtype at once */
 	CH_RANGE_EXT,   /* which region to extend the subject range with */
 	CH_RANGE_DROP,  /* which region to drop off the subject range */
 	CH_LEVEL,       /* infect or suspect */
@@ -5578,6 +5603,17 @@ static void view_select(struct view *v)
 	 * left margin - carrying it over shows the middle of lines in a region
 	 * the reader has not looked at yet. */
 	v->txt_col = 0;
+	/*
+	 * AND THE LINE-NUMBER ANCHOR GOES WITH IT, for the same reason and a
+	 * worse consequence.
+	 *
+	 * txt_anchor is "the line number of this byte offset", and both halves
+	 * of that are about the region that was showing: the offset is in its
+	 * address space and the count is of ITS newlines. Carried into the next
+	 * row it is a fact about somewhere else, and txt_line_of then does
+	 * arithmetic on it - see the note there for what the reader saw.
+	 */
+	v->txt_anchor = v->txt_anchor_ln = 0;
 	v->rgn_at = v->node[v->sel_node].at;
 	if (v->rgn_at > hex_max(v))
 		v->rgn_at = hex_max(v);
@@ -6235,29 +6271,66 @@ static uint64_t txt_line_end(struct view *v, const uint8_t *base,
  * known - see txt_anchor. The anchor moves to the answer, so scrolling costs
  * the distance scrolled and nothing else.
  */
+/* The newlines in [from, to), in the region's own address space. */
+static uint64_t txt_line_count(struct view *v, const uint8_t *base,
+			       uint64_t base_n, uint64_t from, uint64_t to)
+{
+	uint64_t i, n = 0;
+
+	for (i = from; i < to; i++) {
+		uint64_t fo = view_map(v, i, 0);
+
+		if (fo < base_n && base[fo] == '\n')
+			n++;
+	}
+	return n;
+}
+
 static uint64_t txt_line_of(struct view *v, const uint8_t *base,
 			    uint64_t base_n, uint64_t at)
 {
-	uint64_t i, n;
+	uint64_t n = 0;
+	int bad = 0;
 
 	if (v->txt_anchor > v->rgn_len)
 		v->txt_anchor = v->txt_anchor_ln = 0;
 	if (at >= v->txt_anchor) {
-		n = v->txt_anchor_ln;
-		for (i = v->txt_anchor; i < at; i++) {
-			uint64_t fo = view_map(v, i, 0);
-
-			if (fo < base_n && base[fo] == '\n')
-				n++;
-		}
+		n = v->txt_anchor_ln +
+		    txt_line_count(v, base, base_n, v->txt_anchor, at);
 	} else {
-		n = v->txt_anchor_ln;
-		for (i = at; i < v->txt_anchor; i++) {
-			uint64_t fo = view_map(v, i, 0);
+		uint64_t back = txt_line_count(v, base, base_n, at,
+					       v->txt_anchor);
 
-			if (fo < base_n && base[fo] == '\n')
-				n--;
-		}
+		/*
+		 * AN ANCHOR THAT CANNOT PAY FOR THE LINES BEHIND IT IS NOT THIS
+		 * VIEW'S, and subtracting anyway is where the huge numbers came
+		 * from.
+		 *
+		 * This counted down from the anchor in a uint64_t, so an anchor
+		 * holding a line number from a DIFFERENT region - the reader
+		 * had been looking at BODY and picked MARKUP, which changes
+		 * view_map under a cache nothing reset - underflowed to
+		 * 18446744073709551000-odd. Scrolling down then incremented it
+		 * back through zero, so the gutter showed twenty-digit numbers
+		 * and "started from 0" a dozen lines later. Seen on the MARKUP
+		 * of Ani-Shell.php, where the line was really 3591.
+		 */
+		if (back > v->txt_anchor_ln)
+			bad = 1;
+		else
+			n = v->txt_anchor_ln - back;
+	}
+	/*
+	 * AND THE ANSWER IS CHECKED AGAINST A BOUND THAT CANNOT LIE. Every line
+	 * costs at least its newline, so the count can never be larger than the
+	 * offset it was counted to. That catches a stale anchor in the FORWARD
+	 * direction as well, which nothing else here can see - and makes the
+	 * cache unable to produce a wrong answer rather than merely unlikely
+	 * to.
+	 */
+	if (bad || n > at) {
+		v->txt_anchor = v->txt_anchor_ln = 0;
+		n = txt_line_count(v, base, base_n, 0, at);
 	}
 	v->txt_anchor = at;
 	v->txt_anchor_ln = n;
@@ -7084,6 +7157,17 @@ static void ch_add_verb_sub(struct chooser *c, const char *t, unsigned verb)
 struct fmt_cat {
 	const char *name;
 	uint32_t    mask;
+	/*
+	 * THIS ROW OPENS LANGUAGES, NOT FORMATS.
+	 *
+	 * One row has a submenu that is not a list of formats: Scripts holds a
+	 * single format and the thing a researcher is choosing between is the
+	 * LANGUAGE - php, aspx, jsp. Those are subtypes, so picking one sets the
+	 * format AND the subtype together, which is the pair that actually
+	 * describes the object. A submenu with one row reading "Script" offered
+	 * the reader a click for no information.
+	 */
+	uint8_t     langs;
 };
 
 #define FMT_B(f) (1u << (f))
@@ -7092,7 +7176,7 @@ static const struct fmt_cat g_fmt_cat[] = {
 	/* PLURAL, because each row is a GROUP of formats and the submenu it
 	 * opens is the list. "Media" and "Other" take no s. */
 	{ "Executables", FMT_B(KOF_FMT_ELF) | FMT_B(KOF_FMT_PE) |
-			 FMT_B(KOF_FMT_MACHO) },
+			 FMT_B(KOF_FMT_MACHO), 0 },
 	/*
 	 * TEXT IS NOT A SCRIPT, it is the absence of one.
 	 *
@@ -7102,13 +7186,18 @@ static const struct fmt_cat g_fmt_cat[] = {
 	 * interpreters, which reads as a claim about it. It falls into Other
 	 * by subtraction; see fmt_cat_other.
 	 */
-	{ "Scripts",     FMT_B(KOF_FMT_SCRIPT) },
+	{ "Scripts",     FMT_B(KOF_FMT_SCRIPT), 1 },
 	{ "Documents",   FMT_B(KOF_FMT_DOCOLE) | FMT_B(KOF_FMT_DOCZIP) |
-			 FMT_B(KOF_FMT_RTF) | FMT_B(KOF_FMT_PDF) },
+			 FMT_B(KOF_FMT_RTF) | FMT_B(KOF_FMT_PDF), 0 },
 	{ "Archives",    FMT_B(KOF_FMT_ZIP) | FMT_B(KOF_FMT_TAR) |
 			 FMT_B(KOF_FMT_7Z) | FMT_B(KOF_FMT_RAR) |
-			 FMT_B(KOF_FMT_XZ) | FMT_B(KOF_FMT_GZIP) },
-	{ "Media",       FMT_B(KOF_FMT_IMAGE) | FMT_B(KOF_FMT_FONT) }
+			 FMT_B(KOF_FMT_XZ) | FMT_B(KOF_FMT_GZIP), 0 },
+	/*
+	 * "Media" KEEPS ITS SHAPE: it is already the plural of "medium", so
+	 * "Medias" would be the one row in this table that is not English. The
+	 * rule is that a row names a group, not that a row ends in s.
+	 */
+	{ "Media",       FMT_B(KOF_FMT_IMAGE) | FMT_B(KOF_FMT_FONT), 0 }
 };
 
 #define FMT_CAT_N (sizeof g_fmt_cat / sizeof g_fmt_cat[0])
@@ -7131,7 +7220,72 @@ static uint32_t fmt_cat_mask(uint32_t i)
 
 static const char *fmt_cat_name(uint32_t i)
 {
-	return i < FMT_CAT_N ? g_fmt_cat[i].name : "Other";
+	/* Plural like every row above it - the catch-all is a GROUP of formats
+	 * and was the one row that read as a single thing. */
+	return i < FMT_CAT_N ? g_fmt_cat[i].name : "Others";
+}
+
+/* Does this row open a list of languages rather than of formats? */
+static int fmt_cat_langs(uint32_t i)
+{
+	return i < FMT_CAT_N && g_fmt_cat[i].langs;
+}
+
+/*
+ * TWO NUMBERS IN ONE `arg`, because a switch submenu needs both and the
+ * chooser carries one.
+ *
+ * The low byte is WHICH of the draft's formats was clicked - the row being
+ * switched away from - and the high byte is which CATEGORY the reader then
+ * opened. Packed rather than stashed in `struct view`: the chooser already
+ * carries its own argument down to the taker, and a second copy living beside
+ * it is a second thing to keep in step. Both fit easily - there are eighteen
+ * formats and seven categories.
+ */
+#define FMT_SW_PACK(cat, which) (((cat) << 8) | ((which) & 0xffu))
+#define FMT_SW_CAT(a)           ((a) >> 8)
+#define FMT_SW_WHICH(a)         ((a) & 0xffu)
+
+/*
+ * The language a switch list must leave out: the one already in use.
+ *
+ * script_sub_n when there is none to leave out, which is a draft that does not
+ * target a script yet - there every language is a real choice. A draft that
+ * does target one but declared no subtype is using KOF_SCRIPT_ANY, which is
+ * row 0.
+ */
+static uint32_t fmt_lang_skip(const struct view *v)
+{
+	if (!(v->ed.dr.fmt_mask & (1u << KOF_FMT_SCRIPT)))
+		return script_sub_n;
+	/* opt_val is 64 bit because a size bound lives in the same array; a
+	 * subtype is one of sixteen. */
+	return v->ed.dr.opt_on[OPT_SUBTYPE]
+	       ? (uint32_t)v->ed.dr.opt_val[OPT_SUBTYPE] : 0u;
+}
+
+/* Put one format in place of another, and say nothing when either is absent. */
+static void fmt_swap(struct view *v, uint32_t which, uint8_t pick)
+{
+	uint8_t f, n = 0, cur = KOF_FMT_COUNT;
+
+	for (f = 0; f < KOF_FMT_COUNT; f++)
+		if (v->ed.dr.fmt_mask & (1u << f)) {
+			if (n == which)
+				cur = f;
+			n++;
+		}
+	if (cur >= KOF_FMT_COUNT)
+		return;
+	v->ed.dr.fmt_mask &= ~(1u << cur);
+	if (pick < KOF_FMT_COUNT)
+		v->ed.dr.fmt_mask |= 1u << pick;
+	/*
+	 * A SWAP KEEPS THE COUNT, so the ambiguity warning that an add needs is
+	 * not needed here - see the note where CH_FMT_ADD raises it. Removing
+	 * is allowed to empty the set: draft_missing_of refuses an empty one in
+	 * words, which beats a control that will not respond.
+	 */
 }
 
 static void ch_open(struct view *v, int what, uint32_t arg, int row, int col);
@@ -7537,28 +7691,97 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		 * add, because that is what clicking a name means: this one,
 		 * changed. Adding is the button at the end of the row.
 		 */
+		/*
+		 * BY KIND, THE SAME SHAPE AS "+ Formats", because it is the
+		 * same question asked about the same eighteen names.
+		 *
+		 * This was one flat list of "Switch to <name>" - seventeen rows
+		 * in whatever order the enum happens to be in, which is the
+		 * list fmt_cat exists to avoid presenting. The ACT is still a
+		 * swap and not an add; only the way the choice is laid out
+		 * changed, so a reader who has learnt one of these two menus
+		 * has learnt both.
+		 *
+		 * THE FORMAT IN USE CANNOT BE OFFERED, and not by a test: every
+		 * pool below is masked with ~fmt_mask, so the row being
+		 * switched FROM is absent by construction.
+		 */
+		uint32_t ci;
+
+		for (ci = 0; ci <= FMT_CAT_N; ci++)
+			if (fmt_cat_langs(ci) ||
+			    (fmt_cat_mask(ci) & ~v->ed.dr.fmt_mask))
+				ch_add_verb_sub(c, fmt_cat_name(ci), 0);
+		/* Last, and the one row that acts rather than opening a list. */
+		ch_add(c, "Remove this format");
+	} else if (what == CH_FMT_SW) {
+		/* One kind's formats, minus what the draft already targets. */
 		uint8_t f;
+		uint32_t have = fmt_cat_mask(FMT_SW_CAT(arg)) &
+				~v->ed.dr.fmt_mask;
 
 		for (f = 0; f < KOF_FMT_COUNT; f++)
-			if (!(v->ed.dr.fmt_mask & (1u << f))) {
-				char t[CH_W];
+			if (have & (1u << f))
+				ch_add(c, kof_format_name(f));
+	} else if (what == CH_FMT_SW_LANG) {
+		/*
+		 * AND FOR SCRIPTS THE CHOICE IS A LANGUAGE, so what the switch
+		 * list leaves out is the LANGUAGE in use, not the format.
+		 * Masking with ~fmt_mask would hide the whole Scripts row the
+		 * moment a draft targeted a script - which is exactly when the
+		 * reader wants to change which script it is.
+		 */
+		uint32_t k, skip = fmt_lang_skip(v);
 
-				snprintf(t, sizeof t, "Switch to %.20s",
-					 kof_format_name(f));
-				ch_add(c, t);
-			}
-		ch_add(c, "Remove this format");
+		for (k = 0; k < script_sub_n; k++) {
+			if (k == skip)
+				continue;
+			ch_add(c, k == 0 ? "Any language" : script_sub[k]);
+		}
 	} else if (what == CH_FMT_CAT) {
 		/* Only the kinds that still have something to offer - a row
 		 * that opens an empty submenu is a row that wastes a click. */
 		uint32_t ci;
 
 		for (ci = 0; ci <= FMT_CAT_N; ci++)
-			if (fmt_cat_mask(ci) & ~v->ed.dr.fmt_mask)
+			/*
+			 * A row is offered while it has a format left to add -
+			 * AND the languages row is offered always, because what
+			 * it sets is the subtype as much as the format. With
+			 * the format already in the set it is still the way to
+			 * say which language, and hiding it there left the
+			 * reader with the menu they wanted gone from the menu
+			 * bar.
+			 */
+			if (fmt_cat_langs(ci) ||
+			    (fmt_cat_mask(ci) & ~v->ed.dr.fmt_mask))
 				/* Each opens a list rather than acting, so
 				 * each carries the menu bar's ">" - see
 				 * chooser.sub. */
 				ch_add_verb_sub(c, fmt_cat_name(ci), 0);
+	} else if (what == CH_FMT_LANG) {
+		/*
+		 * THE LANGUAGES, and picking one states TWO things: the format
+		 * is a script and the subtype is that language.
+		 *
+		 * They belong together because a rule that says "script" and
+		 * nothing else is offered every script on the machine - every
+		 * .sh, every .py - which is the cost the subtype axis exists to
+		 * avoid. The menu that sets the format is the place to avoid
+		 * it, rather than a second row the reader has to know to go and
+		 * find afterwards.
+		 *
+		 * Row 0 is KOF_SCRIPT_ANY, which is a real answer and not a
+		 * blank: "a script, whichever language". It is spelled so
+		 * rather than left as the enum's word, and it CLEARS the
+		 * subtype instead of setting it to zero - a declared subtype of
+		 * ANY and no declared subtype are the same filter, and only one
+		 * of them is honest about what was chosen.
+		 */
+		uint32_t k;
+
+		for (k = 0; k < script_sub_n; k++)
+			ch_add(c, k == 0 ? "Any language" : script_sub[k]);
 	} else if (what == CH_FMT_ADD) {
 		/* One kind's formats, and only what is not already there: a
 		 * list that offers what it will refuse lies about itself. */
@@ -7903,11 +8126,13 @@ static void ch_take(struct view *v)
 		struct chooser up = *c;
 
 		for (ci = 0; ci <= FMT_CAT_N; ci++) {
-			if (!(fmt_cat_mask(ci) & ~v->ed.dr.fmt_mask))
+			if (!fmt_cat_langs(ci) &&
+			    !(fmt_cat_mask(ci) & ~v->ed.dr.fmt_mask))
 				continue;
 			if ((int)n == c->sel) {
 				up.open = 1;
-				ch_open(v, CH_FMT_ADD, ci,
+				ch_open(v, fmt_cat_langs(ci) ? CH_FMT_LANG
+							     : CH_FMT_ADD, ci,
 					up.row + up.sel + 1, up.col + up.w);
 				v->ch_up = up;
 				return;
@@ -7916,12 +8141,107 @@ static void ch_take(struct view *v)
 		}
 		return;
 	}
-	if (c->what == CH_FMT || c->what == CH_FMT_ADD) {
+	if (c->what == CH_FMT_LANG) {
+		/*
+		 * The format and the language in one act - see the note where
+		 * the list is built.
+		 */
+		if (c->sel >= 0 && (uint32_t)c->sel < script_sub_n) {
+			v->ed.dr.fmt_mask |= 1u << KOF_FMT_SCRIPT;
+			if (c->sel == 0) {
+				v->ed.dr.opt_on[OPT_SUBTYPE] = 0;
+				v->ed.dr.opt_val[OPT_SUBTYPE] = 0;
+			} else {
+				v->ed.dr.opt_on[OPT_SUBTYPE] = 1;
+				v->ed.dr.opt_val[OPT_SUBTYPE] =
+					(uint32_t)c->sel;
+			}
+			/* Same reason as the format taker below: adding one
+			 * can make the target set ambiguous for an offset. */
+			at_warn_if_multi(v);
+		}
+		return;
+	}
+	if (c->what == CH_FMT) {
+		/*
+		 * The nth kind the list offered, walked again rather than
+		 * remembered so the two cannot disagree - and past them, the
+		 * Remove row.
+		 */
+		uint32_t ci, n = 0;
+		struct chooser up = *c;
+
+		for (ci = 0; ci <= FMT_CAT_N; ci++) {
+			if (!fmt_cat_langs(ci) &&
+			    !(fmt_cat_mask(ci) & ~v->ed.dr.fmt_mask))
+				continue;
+			if ((int)n == c->sel) {
+				up.open = 1;
+				ch_open(v, fmt_cat_langs(ci) ? CH_FMT_SW_LANG
+							     : CH_FMT_SW,
+					FMT_SW_PACK(ci, c->arg),
+					up.row + up.sel + 1, up.col + up.w);
+				v->ch_up = up;
+				return;
+			}
+			n++;
+		}
+		/*
+		 * Past every kind is the Remove row, and it is TESTED for
+		 * rather than fallen into: a row added after it some day would
+		 * otherwise quietly start removing the format instead.
+		 */
+		if (c->sel == c->n - 1)
+			fmt_swap(v, c->arg, KOF_FMT_COUNT);
+		return;
+	}
+	if (c->what == CH_FMT_SW) {
 		uint8_t f, n = 0, pick = KOF_FMT_COUNT;
-		uint32_t which = c->arg;
-		uint32_t pool = c->what == CH_FMT_ADD
-			      ? (fmt_cat_mask(c->arg) & ~v->ed.dr.fmt_mask)
-			      : ~v->ed.dr.fmt_mask;
+		uint32_t pool = fmt_cat_mask(FMT_SW_CAT(c->arg)) &
+				~v->ed.dr.fmt_mask;
+
+		for (f = 0; f < KOF_FMT_COUNT; f++)
+			if (pool & (1u << f)) {
+				if ((int)n == c->sel)
+					pick = f;
+				n++;
+			}
+		if (pick < KOF_FMT_COUNT)
+			fmt_swap(v, FMT_SW_WHICH(c->arg), pick);
+		return;
+	}
+	if (c->what == CH_FMT_SW_LANG) {
+		/*
+		 * A SCRIPT AND ITS LANGUAGE, in place of whatever was clicked.
+		 * The same walk the list was built with, minus the language
+		 * already in use - see fmt_lang_skip.
+		 */
+		uint32_t k, n = 0, skip = fmt_lang_skip(v), pick = script_sub_n;
+
+		for (k = 0; k < script_sub_n; k++) {
+			if (k == skip)
+				continue;
+			if ((int)n == c->sel) {
+				pick = k;
+				break;
+			}
+			n++;
+		}
+		if (pick >= script_sub_n)
+			return;
+		fmt_swap(v, FMT_SW_WHICH(c->arg), KOF_FMT_SCRIPT);
+		if (pick == 0) {
+			v->ed.dr.opt_on[OPT_SUBTYPE] = 0;
+			v->ed.dr.opt_val[OPT_SUBTYPE] = 0;
+		} else {
+			v->ed.dr.opt_on[OPT_SUBTYPE] = 1;
+			v->ed.dr.opt_val[OPT_SUBTYPE] = pick;
+		}
+		return;
+	}
+	if (c->what == CH_FMT_ADD) {
+		uint8_t f, n = 0, pick = KOF_FMT_COUNT;
+		uint32_t pool = fmt_cat_mask(c->arg) & ~v->ed.dr.fmt_mask;
 
 		/* The nth format the list offered, walked again rather than
 		 * remembered so the two cannot disagree. */
@@ -7931,41 +8251,11 @@ static void ch_take(struct view *v)
 					pick = f;
 				n++;
 			}
-		if (c->what == CH_FMT_ADD) {
-			if (pick < KOF_FMT_COUNT)
-				v->ed.dr.fmt_mask |= 1u << pick;
-			/* Only here: the other site SWAPS one format for
-			 * another, so the count - which is what makes an
-			 * offset ambiguous - does not change. */
-			at_warn_if_multi(v);
-			return;
-		}
-		/* The nth format that IS in the set - the one whose name was
-		 * clicked. */
-		{
-			uint8_t cur = KOF_FMT_COUNT;
-
-			n = 0;
-			for (f = 0; f < KOF_FMT_COUNT; f++)
-				if (v->ed.dr.fmt_mask & (1u << f)) {
-					if (n == which)
-						cur = f;
-					n++;
-				}
-			if (cur >= KOF_FMT_COUNT)
-				return;
-			if (c->sel >= 0 && pick < KOF_FMT_COUNT) {
-				v->ed.dr.fmt_mask &= ~(1u << cur);
-				v->ed.dr.fmt_mask |= 1u << pick;
-			} else {
-				/* The last row is Remove, and it is allowed to
-				 * empty the set - an empty one is refused by
-				 * draft_missing_of, which says so in words
-				 * rather than by a control that will not
-				 * respond. */
-				v->ed.dr.fmt_mask &= ~(1u << cur);
-			}
-		}
+		if (pick < KOF_FMT_COUNT)
+			v->ed.dr.fmt_mask |= 1u << pick;
+		/* Only here: a SWITCH leaves the count alone, and the count is
+		 * what makes an offset ambiguous. */
+		at_warn_if_multi(v);
 		return;
 	}
 	if (c->what == CH_ENC_TYPE) {
@@ -8627,6 +8917,42 @@ static struct {
 	uint32_t off, len;
 } g_fld;
 
+/*
+ * HOW WIDE A BOX HAS TO BE FOR WHAT IS IN IT - never wider, never past `max`.
+ *
+ * A field drawn at a fixed width sits in a run of blank brackets, which reads
+ * as a control still waiting for input rather than one holding an answer:
+ * "mirai" in a 24 column box is five characters and nineteen spaces. So the
+ * brackets close on the text.
+ *
+ * THREE CASES AND EACH IS A DIFFERENT NUMBER:
+ *
+ *   - empty and not focused: the PLACEHOLDER is what shows, so the box is as
+ *     wide as that. Sized on the text instead, "Comment..." came out clipped to
+ *     one character.
+ *   - focused: one past the text, because the caret may sit after the last
+ *     character - the same allowance field_draw makes when it decides how far
+ *     to scroll.
+ *   - otherwise the text.
+ *
+ * `max` is the cap, and past it field_draw scrolls the text inside the box as
+ * it always has. Callers that are laid out against a fixed mark pad the
+ * difference back AFTER the closing bracket, so the row does not move as the
+ * field is typed into - see the note in draw_decl_head.
+ */
+static int field_room(const char *text, const char *ph, int editing, int max)
+{
+	int n = (int)strlen(text);
+
+	if (!n && !editing)
+		n = ph ? (int)strlen(ph) : 1;
+	else if (editing)
+		n++;
+	if (n > max)
+		n = max;
+	return n < 1 ? 1 : n;
+}
+
 static void field_draw(struct out *o, const char *text, uint32_t caret,
 		       uint32_t *off, int room, int editing, const char *ph,
 		       int all)
@@ -8634,7 +8960,16 @@ static void field_draw(struct out *o, const char *text, uint32_t caret,
 	uint32_t len = (uint32_t)strlen(text), i;
 
 	if (!text[0] && !editing) {
-		out_fmt(o, "%-.*s", room, ph);
+		/*
+		 * PADDED TO THE BOX, which "%-.*s" does not do: the star there
+		 * is a PRECISION and the width is absent, so this painted
+		 * strlen(ph) columns and left the rest of its own box
+		 * unwritten. Every other branch below fills `room` exactly, and
+		 * a caller that lays out against the box - or draws it over
+		 * something, as a dialog does - got a hole showing whatever was
+		 * underneath.
+		 */
+		out_fmt(o, "%-*.*s", room, room, ph);
 		return;
 	}
 	if (room < 1)
@@ -9984,26 +10319,50 @@ static void draw_decl_head(struct out *o, struct view *v)
 	hit_add(v, top, c, (int)o->col_hint, hit_head_type, 0);
 
 	/*
-	 * A FIXED WIDTH, FOCUSED OR NOT.
+	 * THE BRACKETS HUG THE NAME; THE SPACE THEY GIVE BACK IS PADDED AFTER
+	 * THEM.
 	 *
-	 * This was 24 while it had the caret and the length of its text
-	 * otherwise, so clicking it widened the box - and everything drawn
-	 * after it on the row moved sideways to make room, including the
-	 * comment box, whose own width is measured from where this one ended.
-	 * A control that jumps when you point at it is a control you have to
-	 * chase.
+	 * Two rules that look like one and are not. A family is a word -
+	 * "mirai", "Meterp" - and drawn in a fixed 24 column hole it sat in
+	 * eighteen columns of blank bracket, which reads as a field waiting for
+	 * more rather than a field holding an answer. So the box is as wide as
+	 * the name, up to FAM_W; past that the text scrolls inside it as it
+	 * always has.
 	 *
-	 * The text still scrolls inside the box; field_draw has done that for
-	 * every field here from the start. What is fixed is the HOLE it is
-	 * drawn in, which is the thing the rest of the row is laid out against.
+	 * What must NOT follow from that is the row moving. This was once
+	 * FAM_W while focused and the text's length otherwise, so clicking the
+	 * field widened it and shoved the comment box and the buttons
+	 * sideways - a control you have to chase. The fix then was to fix the
+	 * width; the fix now is narrower than that: the columns the box does
+	 * not use are emitted as SPACES after its closing bracket, so the row
+	 * consumes exactly FAM_W either way and everything downstream is laid
+	 * out against the same mark it always was. The width also no longer
+	 * depends on focus - only on the name - so pointing at it still changes
+	 * nothing.
+	 *
+	 * One column past the text while editing, because the caret may sit one
+	 * past the last character - the same allowance field_draw makes when it
+	 * decides how far to scroll.
 	 */
-	c = 2 + (int)o->col_hint;
-	out_fmt(o, A_DIM "  Family " A_OFF "%s[", v->edit == 1 ? A_SEL : A_ID);
-	field_draw(o, v->ed.dr.family, v->caret, &v->fam_off, FAM_W,
-		   v->edit == 1, "?", v->field_all);
-	out_str(o, "]" A_OFF);
-	v->f_c0 = c; v->f_c1 = (int)o->col_hint;
-	hit_add(v, top, c, (int)o->col_hint, hit_head_family, 0);
+	{
+		int fw = field_room(v->ed.dr.family, "?", v->edit == 1, FAM_W);
+
+		c = 2 + (int)o->col_hint;
+		out_fmt(o, A_DIM "  Family " A_OFF "%s[",
+			v->edit == 1 ? A_SEL : A_ID);
+		field_draw(o, v->ed.dr.family, v->caret, &v->fam_off, fw,
+			   v->edit == 1, "?", v->field_all);
+		out_str(o, "]" A_OFF);
+		/*
+		 * The click range is the box as DRAWN, not the space it
+		 * reserves. A reader clicks what they can see; the blank
+		 * columns past the bracket belong to the row.
+		 */
+		v->f_c0 = c; v->f_c1 = (int)o->col_hint;
+		hit_add(v, top, c, (int)o->col_hint, hit_head_family, 0);
+		while (fw++ < FAM_W)
+			out_str(o, " ");
+	}
 
 	/* No label: the box says what it is, and the row is already a line of
 	 * labels. */
@@ -10050,6 +10409,14 @@ static void draw_decl_head(struct out *o, struct view *v)
 		if (room < 8)
 			room = 8;
 		(void)len; (void)off;
+		/*
+		 * AND NO WIDER THAN WHAT IS IN IT. The gap above is the most it
+		 * MAY take; this is what it needs. Nothing is padded back
+		 * because what follows on this row is drawn at an absolute
+		 * column - see head_btn_x - so a shorter box cannot move it.
+		 */
+		room = field_room(v->ed.dr.note, "Comment...",
+				  v->edit == 501, room);
 		out_fmt(o, "%s[", v->edit == 501 ? A_SEL : A_DIM);
 		field_draw(o, v->ed.dr.note, v->caret, &v->note_off, room,
 			   v->edit == 501, "Comment...", v->field_all);
@@ -11034,6 +11401,12 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 
 				if (room < 8)
 					room = 8;
+				/* Hugging, like every other box - see
+				 * field_room. The [x] that ends the row is
+				 * drawn at an absolute column. */
+				room = field_room(q->note, "comment...",
+						  v->edit == 300 + (int)g,
+						  room);
 				out_fmt(o, "%s[",
 					v->edit == 300 + (int)g ? A_SEL
 								: A_DIM);
@@ -12432,6 +12805,89 @@ static int menu_shown(struct view *v, int a)
 	return (menu_item[a].ctx & v->menu_ctx) != 0;
 }
 
+/*
+ * WHY A DECLARATION WOULD BE REFUSED, in a sentence, or NULL when it would not.
+ *
+ * ONE FUNCTION FOR THE TEST AND FOR THE REASON, because they were two things
+ * and only the test existed. The menu greyed the row and menu_run returned, so
+ * a declaration that could not be made produced NOTHING ON SCREEN - and a
+ * feature that silently does nothing is indistinguishable from a broken one.
+ * That is exactly how it was reported: "<td colspan=\"2\"> sometimes declares
+ * and sometimes does not", which is a selection that sometimes included the
+ * line ending and a refusal that never said so.
+ *
+ * The answer is a sentence the reader can act on - shorten the selection, use
+ * hex, remove a marker - rather than a control that has gone quiet.
+ *
+ * Nothing is said on SUCCESS. The row appearing in the panel is the
+ * confirmation, and a tool that reports its successes teaches the reader to
+ * stop reading its messages.
+ */
+static const char *decl_why(struct view *v, int hex)
+{
+	static char why[160];
+	uint64_t lo, hi, k, bn = 0;
+	const uint8_t *bp;
+	uint8_t t[DECL_BYTES_MAX];
+	uint32_t n = 0;
+
+	if (v->sel_a == KOF_BROKEN || v->sel_b == KOF_BROKEN)
+		return "Select the bytes first - drag over them in the pane";
+	if (v->ed.dr.n_decl >= MAX_DECL) {
+		snprintf(why, sizeof why,
+			 "This draft already holds %u markers, which is all a "
+			 "rule may have", (unsigned)MAX_DECL);
+		return why;
+	}
+	lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
+	hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
+	/* Bounded whichever kind it is. Unbounded, a drag over a whole object
+	 * declared a marker whose spelling no field could hold and no row
+	 * could show. */
+	if (hi - lo + 1u > DECL_BYTES_MAX) {
+		snprintf(why, sizeof why,
+			 "%llu bytes selected - a marker holds at most %u",
+			 (unsigned long long)(hi - lo + 1u),
+			 (unsigned)DECL_BYTES_MAX);
+		return why;
+	}
+	if (hex)
+		return NULL;
+
+	/*
+	 * Through view_bytes, or this judges the wrong bytes.
+	 *
+	 * It read the object's buffer at what view_map returns, which on a
+	 * symbol row is an offset into the built block - so literal_safe was
+	 * asked about unrelated file bytes at the same number and said no over
+	 * a selection that was plain ASCII on screen.
+	 */
+	bp = view_bytes(v, &bn);
+	if (!bp)
+		return "These bytes are not in this object";
+	for (k = lo; k <= hi; k++) {
+		uint64_t f = view_map(v, k, 0);
+
+		if (f >= bn)
+			return "Part of this selection is not in this object";
+		t[n++] = bp[f];
+	}
+	if (!literal_safe(t, n)) {
+		uint32_t i;
+
+		for (i = 0; i < n; i++)
+			if (!(t[i] == '\t' || t[i] == '\n' || t[i] == '\r') &&
+			    (t[i] < 0x20u || t[i] > 0x7eu))
+				break;
+		snprintf(why, sizeof why,
+			 "Byte %u of the selection is 0x%02x, which is not "
+			 "text - declare these bytes as hex instead",
+			 (unsigned)i + 1u, i < n ? t[i] : 0);
+		return why;
+	}
+	return NULL;
+}
+
 static int menu_enabled(struct view *v, int a)
 {
 	if (!menu_shown(v, a))
@@ -12477,60 +12933,8 @@ static int menu_enabled(struct view *v, int a)
 		return v->sel_a != KOF_BROKEN;
 	if (a == M_COPY_OFF_HEX || a == M_COPY_OFF_DEC)
 		return 1;
-	if (a == M_DECL_HEX) {
-		uint64_t lo, hi;
-
-		if (v->sel_a == KOF_BROKEN || v->ed.dr.n_decl >= MAX_DECL)
-			return 0;
-		lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
-		hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
-		/* Bounded like the literal beside it. Unbounded, a drag over a
-		 * whole object declared a marker whose spelling no field could
-		 * hold and no row could show. */
-		return hi - lo + 1u <= DECL_BYTES_MAX;
-	}
-	if (a == M_DECL_STR) {
-		/* Greyed when the bytes cannot BE a literal, which is a
-		 * property of the bytes and not of the user - saying so here
-		 * beats a build error two steps later. */
-		uint64_t lo, hi, k;
-		uint8_t t[512];
-		uint32_t n = 0;
-
-		if (v->sel_a == KOF_BROKEN || v->ed.dr.n_decl >= MAX_DECL)
-			return 0;
-		lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
-		hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
-		if (hi - lo + 1u > sizeof t)
-			return 0;
-		{
-			/*
-			 * Through view_bytes, or this judges the wrong bytes.
-			 *
-			 * It read the object's buffer at what view_map returns,
-			 * which on a symbol row is an offset into the built
-			 * block - so literal_safe was asked about unrelated
-			 * file bytes at the same number, said no, and the item
-			 * greyed out over a selection that was plain ASCII on
-			 * screen. The failure was silent in the worst way: the
-			 * menu simply did nothing, with no way to tell that
-			 * from "not implemented".
-			 */
-			uint64_t bn = 0;
-			const uint8_t *bp = view_bytes(v, &bn);
-
-			if (!bp)
-				return 0;
-			for (k = lo; k <= hi; k++) {
-				uint64_t f = view_map(v, k, 0);
-
-				if (f >= bn)
-					return 0;
-				t[n++] = bp[f];
-			}
-		}
-		return literal_safe(t, n);
-	}
+	if (a == M_DECL_HEX || a == M_DECL_STR)
+		return decl_why(v, a == M_DECL_HEX) == NULL;
 	if (a == M_EVT_COPY || a == M_EVT_DECL) {
 		/* Both act on a selection, so neither is live without one -
 		 * a greyed row says "select something first", which is the
@@ -13298,32 +13702,67 @@ static void decl_add(struct view *v, int hex)
 	 * nothing, which is the failure this tree calls out everywhere else: a
 	 * rule that silently never matches looks exactly like one that works.
 	 *
-	 * So the neighbours are looked at. Where they are whitespace or the
-	 * edge, TOKEN holds and is kept - it is a free narrowing on a marker
-	 * that really is a whole token, "<?php" being the case it was written
-	 * for. Where they are not, the marker is a FRAGMENT and gets
-	 * SUBSTRING, which is what a fragment is. Either way the answer cannot
-	 * be one that fails to match where it was taken from.
+	 * So the neighbours are looked at, and there are THREE answers because
+	 * there are three modes - this used to give two, and the one it left
+	 * out is the common case in a script.
+	 *
+	 *   TOKEN      both neighbours are whitespace or the edge. The marker
+	 *              is a whole whitespace-delimited run - "<?php" is the
+	 *              case it was written for.
+	 *   FULLWORD   both neighbours are non-word bytes or the edge. The
+	 *              marker is a whole NAME: punctuation beside it is a
+	 *              boundary, whitespace beside it is too. This is what a
+	 *              selection dragged out of source usually is -
+	 *
+	 *                  @eval(@gzuncompress($m));
+	 *                        ^--- gzuncompress ---^
+	 *
+	 *              bounded by "(" on one side and "(" on the other, so
+	 *              TOKEN cannot hold and FULLWORD can.
+	 *   SUBSTRING  a neighbour is a word byte, so the marker is a FRAGMENT
+	 *              of a longer name and no boundary describes it.
+	 *
+	 * THE STRICTEST ONE THAT HOLDS, and the ladder is sound because the
+	 * modes nest: whitespace IS a non-word byte, so anything TOKEN accepts
+	 * FULLWORD accepts too, and anything FULLWORD accepts SUBSTRING
+	 * accepts. Going up the ladder can only ever NARROW what the marker
+	 * matches, never widen it - so a default picked here cannot turn a rule
+	 * into one that fires on more than the researcher asked for, and it
+	 * cannot fail to match where it was taken from.
+	 *
+	 * The mode is still a field on the row and the researcher still
+	 * overrides it; what changed is that the offer is now the tightest
+	 * true one rather than the loosest.
 	 */
 	{
 		uint64_t bn2 = 0;
 		const uint8_t *bp2 = view_bytes(v, &bn2);
-		uint64_t before = lo, after = hi + 1u;
-		int whole = 1;
+		uint64_t after = hi + 1u;
+		int spaced = 1, worded = 0;
 
 		if (lo > 0) {
-			uint64_t f = view_map(v, before - 1u, 0);
+			uint64_t f = view_map(v, lo - 1u, 0);
 
-			if (bp2 && f < bn2 && !kof_str_space_byte(bp2[f]))
-				whole = 0;
+			if (bp2 && f < bn2) {
+				if (!kof_str_space_byte(bp2[f]))
+					spaced = 0;
+				if (kof_str_word_byte(bp2[f]))
+					worded = 1;
+			}
 		}
-		if (whole && after < v->rgn_len) {
+		if (after < v->rgn_len) {
 			uint64_t f = view_map(v, after, 0);
 
-			if (bp2 && f < bn2 && !kof_str_space_byte(bp2[f]))
-				whole = 0;
+			if (bp2 && f < bn2) {
+				if (!kof_str_space_byte(bp2[f]))
+					spaced = 0;
+				if (kof_str_word_byte(bp2[f]))
+					worded = 1;
+			}
 		}
-		d->fullword = whole ? KOF_WORD_TOKEN : KOF_WORD_SUBSTRING;
+		d->fullword = spaced ? KOF_WORD_TOKEN
+			    : worded ? KOF_WORD_SUBSTRING
+				     : KOF_WORD_FULLWORD;
 	}
 	d->obj = n->obj;
 	/*
@@ -13465,6 +13904,26 @@ static void copy_selection(struct view *v, int as_hex)
 
 static void menu_run(struct view *v, int a)
 {
+	/*
+	 * A REFUSED DECLARATION SAYS WHY, and every other refusal stays quiet.
+	 *
+	 * The row is greyed either way - that is what tells the reader it is
+	 * unavailable before they click. What was missing is the reason, and
+	 * without it the two states a reader cares about, "I cannot do this
+	 * here" and "this is broken", look identical. Only this action is
+	 * treated so: the rest are greyed for reasons the reader can see on
+	 * screen, and a message for each would be noise.
+	 */
+	if ((a == M_DECL_STR || a == M_DECL_HEX) && !menu_enabled(v, a)) {
+		const char *why = decl_why(v, a == M_DECL_HEX);
+
+		if (why) {
+			v->act_ok = 0;
+			snprintf(v->act_msg, sizeof v->act_msg, "%s", why);
+		}
+		v->menu_open = 0;
+		return;
+	}
 	if (!menu_enabled(v, a))
 		return;
 	if (a == M_COPY_OFF_HEX || a == M_COPY_OFF_DEC) {
