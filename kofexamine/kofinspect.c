@@ -1852,3 +1852,226 @@ uint32_t kof_pdf_text(const uint8_t *p, uint64_t n, int hex,
 	out[w] = 0;
 	return w;
 }
+
+/* ---- the string codings - see kofinspect.h -------------------------------- */
+
+const char *kof_codec_name(uint32_t codec)
+{
+	switch (codec) {
+	case KOF_CODEC_B64:     return "base64";
+	case KOF_CODEC_HEX:     return "hex";
+	case KOF_CODEC_XOR:     return "xor";
+	case KOF_CODEC_ADD:     return "add";
+	case KOF_CODEC_CAESAR:  return "caesar";
+	case KOF_CODEC_REVERSE: return "reverse";
+	default:                return "?";
+	}
+}
+
+int kof_codec_keyed(uint32_t codec)
+{
+	return codec == KOF_CODEC_XOR || codec == KOF_CODEC_ADD ||
+	       codec == KOF_CODEC_CAESAR;
+}
+
+static int codec_b64v(uint8_t c)
+{
+	if (c >= 'A' && c <= 'Z') return c - 'A';
+	if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+	if (c >= '0' && c <= '9') return c - '0' + 52;
+	if (c == '+') return 62;
+	if (c == '/') return 63;
+	return -1;
+}
+
+static int codec_hexv(uint8_t c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+uint32_t kof_codec_key(const char *text)
+{
+	uint32_t k = 0;
+
+	if (!text)
+		return 0;
+	if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+		text += 2;
+	for (; *text; text++) {
+		int d = codec_hexv((uint8_t)*text);
+
+		if (d < 0)
+			return k;
+		k = (k << 4) | (uint32_t)d;
+	}
+	return k;
+}
+
+/* Writing the coding: bytes in, its own form out. */
+static uint32_t codec_write(const uint8_t *p, uint32_t len, uint32_t codec,
+			    uint32_t key, uint8_t *out, uint32_t cap)
+{
+	static const char b64[] =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	static const char hexd[] = "0123456789ABCDEF";
+	uint32_t w = 0, i;
+
+	switch (codec) {
+	case KOF_CODEC_B64:
+		for (i = 0; i < len && w + 4u <= cap; i += 3u) {
+			uint32_t n = len - i < 3u ? len - i : 3u;
+			uint32_t acc = (uint32_t)p[i] << 16;
+
+			if (n > 1u)
+				acc |= (uint32_t)p[i + 1u] << 8;
+			if (n > 2u)
+				acc |= p[i + 2u];
+			out[w++] = (uint8_t)b64[(acc >> 18) & 63u];
+			out[w++] = (uint8_t)b64[(acc >> 12) & 63u];
+			/* Padded, because a decoder that counts on it is the
+			 * common case and one that ignores it reads this
+			 * anyway. */
+			out[w++] = n > 1u ? (uint8_t)b64[(acc >> 6) & 63u]
+					  : (uint8_t)'=';
+			out[w++] = n > 2u ? (uint8_t)b64[acc & 63u]
+					  : (uint8_t)'=';
+		}
+		return w;
+	case KOF_CODEC_HEX:
+		/*
+		 * UPPER CASE AND NO SEPARATOR, which is the form a pattern is
+		 * written in - KOF_DEFINE_HEXSTR takes exactly this, so what
+		 * comes out of here can be pasted into a signature.
+		 */
+		for (i = 0; i < len && w + 2u <= cap; i++) {
+			out[w++] = (uint8_t)hexd[p[i] >> 4];
+			out[w++] = (uint8_t)hexd[p[i] & 15u];
+		}
+		return w;
+	case KOF_CODEC_XOR:
+		for (i = 0; i < len && w < cap; i++)
+			out[w++] = (uint8_t)(p[i] ^ (uint8_t)key);
+		return w;
+	case KOF_CODEC_ADD:
+		for (i = 0; i < len && w < cap; i++)
+			out[w++] = (uint8_t)(p[i] - (uint8_t)key);
+		return w;
+	case KOF_CODEC_CAESAR:
+		key %= 26u;
+		if (!key)
+			return 0;
+		for (i = 0; i < len && w < cap; i++) {
+			uint8_t c = p[i];
+
+			if (c >= 'a' && c <= 'z')
+				c = (uint8_t)('a' + (c - 'a' + key) % 26u);
+			else if (c >= 'A' && c <= 'Z')
+				c = (uint8_t)('A' + (c - 'A' + key) % 26u);
+			out[w++] = c;
+		}
+		return w;
+	case KOF_CODEC_REVERSE:
+		for (i = 0; i < len && w < cap; i++)
+			out[w++] = p[len - 1u - i];
+		return w;
+	default:
+		return 0;
+	}
+}
+
+/* Reading the coding: its form in, bytes out. */
+static uint32_t codec_read(const uint8_t *p, uint32_t len, uint32_t codec,
+			   uint32_t key, uint8_t *out, uint32_t cap)
+{
+	uint32_t w = 0, acc = 0, have = 0, i;
+
+	switch (codec) {
+	case KOF_CODEC_B64:
+		for (i = 0; i < len && w < cap; i++) {
+			int v = codec_b64v(p[i]);
+
+			/* Padding, and the wrapping a 76-column encoder puts
+			 * in - both belong to the text and neither is data. */
+			if (v < 0) {
+				if (p[i] == '=' || p[i] == '\n' ||
+				    p[i] == '\r' || p[i] == ' ' ||
+				    p[i] == '\t')
+					continue;
+				return 0;       /* not base64 at all */
+			}
+			acc = (acc << 6) | (uint32_t)v;
+			have += 6u;
+			if (have >= 8u) {
+				have -= 8u;
+				out[w++] = (uint8_t)(acc >> have);
+			}
+		}
+		return w;
+	case KOF_CODEC_HEX:
+		for (i = 0; i < len && w < cap; i++) {
+			int v = codec_hexv(p[i]);
+
+			if (v < 0) {
+				if (p[i] == ' ' || p[i] == '\n' ||
+				    p[i] == '\r' || p[i] == '\t' ||
+				    p[i] == ':' || p[i] == ',')
+					continue;
+				return 0;
+			}
+			acc = (acc << 4) | (uint32_t)v;
+			have += 4u;
+			if (have >= 8u) {
+				have -= 8u;
+				out[w++] = (uint8_t)acc;
+			}
+		}
+		return have ? 0 : w;  /* an odd digit is not a byte string */
+	case KOF_CODEC_XOR:
+		for (i = 0; i < len && w < cap; i++)
+			out[w++] = (uint8_t)(p[i] ^ (uint8_t)key);
+		return w;
+	case KOF_CODEC_ADD:
+		for (i = 0; i < len && w < cap; i++)
+			out[w++] = (uint8_t)(p[i] + (uint8_t)key);
+		return w;
+	case KOF_CODEC_CAESAR:
+		/*
+		 * The key is how far the text was shifted, so decoding shifts
+		 * BACK by it - a reader who knows a sample was rot-7 types 7,
+		 * not 19. Nothing but letters moves; digits, punctuation and
+		 * the spaces stay where they are, which is what makes a
+		 * shifted command still look like a command.
+		 */
+		key %= 26u;
+		if (!key)
+			return 0;       /* a shift of nothing is not a coding */
+		for (i = 0; i < len && w < cap; i++) {
+			uint8_t c = p[i];
+
+			if (c >= 'a' && c <= 'z')
+				c = (uint8_t)('a' + (c - 'a' + 26u - key) % 26u);
+			else if (c >= 'A' && c <= 'Z')
+				c = (uint8_t)('A' + (c - 'A' + 26u - key) % 26u);
+			out[w++] = c;
+		}
+		return w;
+	case KOF_CODEC_REVERSE:
+		for (i = 0; i < len && w < cap; i++)
+			out[w++] = p[len - 1u - i];
+		return w;
+	default:
+		return 0;
+	}
+}
+
+uint32_t kof_codec_run(const uint8_t *in, uint32_t n, uint32_t codec,
+		       uint32_t key, int encode, uint8_t *out, uint32_t cap)
+{
+	if (!in || !out || !n || !cap)
+		return 0;
+	return encode ? codec_write(in, n, codec, key, out, cap)
+		      : codec_read(in, n, codec, key, out, cap);
+}

@@ -2009,6 +2009,22 @@ $(TEST)/asan_grille_host$(EXE): tests/unit/grille_host.c $(GRILLE_HOST_SRC) \
 	      -Ilibkoforbit/kofevt $< $(GRILLE_HOST_SRC) -o $@ \
 	      $(LDFLAGS) $(ASAN_FLAGS)
 
+# The string codings, which are an API rather than a dialog - see kofinspect.h.
+# Linked against kofinspect.c alone: nothing in them touches the terminal, and a
+# test that had to drag the panel in would be saying the opposite.
+$(TEST)/unit_codec_forms$(EXE): tests/unit/codec_forms.c \
+                                kofexamine/kofinspect.c $(KOFEVT_SRC) $(LIB) \
+                                $(SDK_HDR) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $< kofexamine/kofinspect.c \
+	      $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS)
+
+$(TEST)/asan_codec_forms$(EXE): tests/unit/codec_forms.c \
+                                kofexamine/kofinspect.c $(KOFEVT_SRC) \
+                                $(ASAN_LIB) $(SDK_HDR) $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) -I$(SDK)/include $< \
+	       kofexamine/kofinspect.c $(KOFEVT_SRC) $(ASAN_LIB) -o $@ \
+	       $(LDFLAGS)
+
 $(TEST)/unit_cond_expr$(EXE): tests/unit/cond_expr.c $(EDITOR_SRC) $(LIB) \
                               $(SDK_HDR) $(STAMP) | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $< $(EDITOR_SRC) $(LIB) \

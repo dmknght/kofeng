@@ -589,38 +589,13 @@ static int hex_last(void)
 #define ENC_IN_MAX 8192u
 
 /*
- * THE CODINGS THE STRING DECODER OFFERS.
+ * THE CODINGS THE STRING BOX OFFERS - enum kof_codec, in kofinspect.h.
  *
- * Up here, above the chooser that lists them, because the list and the box are
- * two places and the vocabulary is one. Every one of these either has no key or
- * has a key somebody can TYPE - a coding whose key has to be RECOVERED is a
- * different problem and belongs in a module that derives it, the way
- * bases/unp/ezuri.c does.
+ * The list, the names and both directions live there, because a coding is bytes
+ * in and bytes out: it has no terminal in it and nothing about it is this
+ * panel's. What is here is the FORM - a field, a chooser, a button and where
+ * the answer is drawn.
  */
-enum enc_codec {
-	ENC_B64 = 0,
-	ENC_HEX,
-	ENC_XOR,          /* one byte, typed */
-	ENC_ADD,          /* byte + n, typed - subsumes a byte rotate */
-	/*
-	 * CAESAR, AND IT REPLACES BOTH A BIT ROTATE AND A FIXED ROT13.
-	 *
-	 * They were two controls for one idea and neither was the useful half.
-	 * ROT13 is Caesar with the key written into its name, so it cannot
-	 * decode the rot-7 next to it; a BIT rotate turns text into bytes
-	 * outside ASCII almost every time, which is the opposite of what a
-	 * box that decodes encoded TEXT is for.
-	 *
-	 * One coding with a typed key covers rot13 by typing 13, and every
-	 * other shift by typing it.
-	 */
-	ENC_CAESAR,
-	ENC_REVERSE,
-	ENC_CODEC_COUNT
-};
-
-static const char *enc_codec_name(int c);
-static int enc_takes_key(uint32_t t);
 
 /* The two text fields, by the edit id the rest of this file uses for focus. */
 #define ED_ENC_IN  540
@@ -8282,10 +8257,10 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		 * here, every other multi-valued field in this file uses it,
 		 * and it shows all seven at once with the current one marked.
 		 */
-		int t;
+		uint32_t t;
 
-		for (t = 0; t < ENC_CODEC_COUNT; t++)
-			ch_add(c, enc_codec_name(t));
+		for (t = 0; t < (uint32_t)KOF_CODEC_COUNT; t++)
+			ch_add(c, kof_codec_name(t));
 		c->sel = (int)v->enc_type;
 	} else if (what == CH_SWITCH) {
 		/*
@@ -8742,7 +8717,7 @@ static void ch_take(struct view *v)
 		return;
 	}
 	if (c->what == CH_ENC_TYPE) {
-		if (c->sel >= 0 && c->sel < ENC_CODEC_COUNT)
+		if (c->sel >= 0 && c->sel < KOF_CODEC_COUNT)
 			v->enc_type = (uint32_t)c->sel;
 		/* The result belonged to the coding that produced it. */
 		v->enc_res_n = 0;
@@ -8761,7 +8736,7 @@ static void ch_take(struct view *v)
 		 * text. Saying so here is also the answer to "what did picking
 		 * this actually do", which a blank caret does not give.
 		 */
-		if (enc_takes_key(v->enc_type)) {
+		if (kof_codec_keyed(v->enc_type)) {
 			v->edit = ED_ENC_KEY;
 			v->caret = (uint32_t)strlen(v->enc_key);
 		} else {
@@ -22551,263 +22526,28 @@ static struct dframe g_goto_f, g_find_f, g_enc_f;
 
 /* What one decoding may produce. Past this it is not something a box on a
  * terminal has anything to say about, and Extract re-runs from the field. */
+/*
+ * WHERE THE ANSWER LANDS. Sized for a decoded script rather than for a string:
+ * a dropper's payload is the thing worth reading, and a box that truncated it
+ * would send the reader somewhere else for what it just produced.
+ */
 #define ENC_OUT_MAX (64u << 10)
 
 static uint8_t g_encbuf[ENC_OUT_MAX];
 
-static const char *enc_codec_name(int c)
-{
-	switch (c) {
-	case ENC_B64:     return "base64";
-	case ENC_HEX:     return "hex";
-	case ENC_XOR:     return "xor";
-	case ENC_ADD:     return "add";
-	case ENC_CAESAR:  return "caesar";
-	case ENC_REVERSE: return "reverse";
-	default:          return "?";
-	}
-}
-
-static int enc_b64v(uint8_t c)
-{
-	if (c >= 'A' && c <= 'Z') return c - 'A';
-	if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-	if (c >= '0' && c <= '9') return c - '0' + 52;
-	if (c == '+') return 62;
-	if (c == '/') return 63;
-	return -1;
-}
-
-static int enc_hexv(uint8_t c)
-{
-	if (c >= '0' && c <= '9') return c - '0';
-	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-	return -1;
-}
-
-/*
- * THE OTHER DIRECTION, for the codings that have one.
- *
- * A decoder answers "what does this say"; an encoder answers "what would this
- * look like written that way", and a researcher writing a signature needs the
- * second as often as the first: the pattern to be matched is the ENCODED form,
- * and typing "cmd.exe" to get "636D642E657865" is the whole of what a hex box
- * is for.
- *
- * WHICH INVERSE EACH ONE HAS is not the same question for all of them:
- *
- *   base64, hex   a real encoder - bytes in, text out
- *   xor, reverse  their own inverse, so the same pass runs both ways
- *   add           decoding ADDS the key, so encoding subtracts it
- *   caesar        decoding shifts back, so encoding shifts forward
- *
- * Returns what it produced, or 0 when this coding cannot do it.
- */
-static uint32_t enc_encode(const uint8_t *p, uint32_t len, int codec,
-			   uint32_t key)
-{
-	static const char b64[] =
-		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-	static const char hexd[] = "0123456789ABCDEF";
-	uint32_t out = 0, i;
-
-	switch (codec) {
-	case ENC_B64:
-		for (i = 0; i < len && out + 4u <= ENC_OUT_MAX; i += 3u) {
-			uint32_t n = len - i < 3u ? len - i : 3u;
-			uint32_t w = (uint32_t)p[i] << 16;
-
-			if (n > 1u)
-				w |= (uint32_t)p[i + 1u] << 8;
-			if (n > 2u)
-				w |= p[i + 2u];
-			g_encbuf[out++] = (uint8_t)b64[(w >> 18) & 63u];
-			g_encbuf[out++] = (uint8_t)b64[(w >> 12) & 63u];
-			/* Padded, because a decoder that counts on it is the
-			 * common case and one that ignores it reads this
-			 * anyway. */
-			g_encbuf[out++] = n > 1u
-					? (uint8_t)b64[(w >> 6) & 63u] : '=';
-			g_encbuf[out++] = n > 2u
-					? (uint8_t)b64[w & 63u] : '=';
-		}
-		return out;
-	case ENC_HEX:
-		/*
-		 * UPPER CASE AND NO SEPARATOR, which is the form a pattern is
-		 * written in - KOF_DEFINE_HEXSTR takes exactly this, so what
-		 * comes out of the box can be pasted into a signature.
-		 */
-		for (i = 0; i < len && out + 2u <= ENC_OUT_MAX; i++) {
-			g_encbuf[out++] = (uint8_t)hexd[p[i] >> 4];
-			g_encbuf[out++] = (uint8_t)hexd[p[i] & 15u];
-		}
-		return out;
-	case ENC_XOR:
-		for (i = 0; i < len && out < ENC_OUT_MAX; i++)
-			g_encbuf[out++] = (uint8_t)(p[i] ^ (uint8_t)key);
-		return out;
-	case ENC_ADD:
-		for (i = 0; i < len && out < ENC_OUT_MAX; i++)
-			g_encbuf[out++] = (uint8_t)(p[i] - (uint8_t)key);
-		return out;
-	case ENC_CAESAR:
-		key %= 26u;
-		if (!key)
-			return 0;
-		for (i = 0; i < len && out < ENC_OUT_MAX; i++) {
-			uint8_t c = p[i];
-
-			if (c >= 'a' && c <= 'z')
-				c = (uint8_t)('a' + (c - 'a' + key) % 26u);
-			else if (c >= 'A' && c <= 'Z')
-				c = (uint8_t)('A' + (c - 'A' + key) % 26u);
-			g_encbuf[out++] = c;
-		}
-		return out;
-	case ENC_REVERSE:
-		for (i = 0; i < len && out < ENC_OUT_MAX; i++)
-			g_encbuf[out++] = p[len - 1u - i];
-		return out;
-	default:
-		return 0;
-	}
-}
-
-/*
- * Run one coding over `len` bytes at `p`, into g_encbuf. Returns what it
- * produced; 0 means this coding cannot read that text at all.
- */
-static uint32_t enc_run(const uint8_t *p, uint32_t len, int codec, uint32_t key)
-{
-	uint32_t out = 0, acc = 0, have = 0, i;
-
-	switch (codec) {
-	case ENC_B64:
-		for (i = 0; i < len && out < ENC_OUT_MAX; i++) {
-			int v = enc_b64v(p[i]);
-
-			/* Padding, and the wrapping a 76-column encoder puts
-			 * in - both belong to the text and neither is data. */
-			if (v < 0) {
-				if (p[i] == '=' || p[i] == '\n' ||
-				    p[i] == '\r' || p[i] == ' ' ||
-				    p[i] == '\t')
-					continue;
-				return 0;       /* not base64 at all */
-			}
-			acc = (acc << 6) | (uint32_t)v;
-			have += 6u;
-			if (have >= 8u) {
-				have -= 8u;
-				g_encbuf[out++] = (uint8_t)(acc >> have);
-			}
-		}
-		return out;
-	case ENC_HEX:
-		for (i = 0; i < len && out < ENC_OUT_MAX; i++) {
-			int v = enc_hexv(p[i]);
-
-			if (v < 0) {
-				if (p[i] == ' ' || p[i] == '\n' ||
-				    p[i] == '\r' || p[i] == '\t' ||
-				    p[i] == ':' || p[i] == ',')
-					continue;
-				return 0;
-			}
-			acc = (acc << 4) | (uint32_t)v;
-			have += 4u;
-			if (have >= 8u) {
-				have -= 8u;
-				g_encbuf[out++] = (uint8_t)acc;
-			}
-		}
-		return have ? 0 : out;  /* an odd digit is not a byte string */
-	case ENC_XOR:
-		for (i = 0; i < len && out < ENC_OUT_MAX; i++)
-			g_encbuf[out++] = (uint8_t)(p[i] ^ (uint8_t)key);
-		return out;
-	case ENC_ADD:
-		for (i = 0; i < len && out < ENC_OUT_MAX; i++)
-			g_encbuf[out++] = (uint8_t)(p[i] + (uint8_t)key);
-		return out;
-	case ENC_CAESAR:
-		/*
-		 * The key is how far the text was shifted, so decoding shifts
-		 * BACK by it - a reader who knows a sample was rot-7 types 7,
-		 * not 19. Nothing but letters moves; digits, punctuation and
-		 * the spaces stay where they are, which is what makes a
-		 * shifted command still look like a command.
-		 */
-		key %= 26u;
-		if (!key)
-			return 0;       /* a shift of nothing is not a coding */
-		for (i = 0; i < len && out < ENC_OUT_MAX; i++) {
-			uint8_t c = p[i];
-
-			if (c >= 'a' && c <= 'z')
-				c = (uint8_t)('a' + (c - 'a' + 26u - key) % 26u);
-			else if (c >= 'A' && c <= 'Z')
-				c = (uint8_t)('A' + (c - 'A' + 26u - key) % 26u);
-			g_encbuf[out++] = c;
-		}
-		return out;
-	case ENC_REVERSE:
-		for (i = 0; i < len && out < ENC_OUT_MAX; i++)
-			g_encbuf[out++] = p[len - 1u - i];
-		return out;
-	default:
-		return 0;
-	}
-}
-
-/*
- * Codings whose key is text the reader TYPES.
- *
- * A key this searched for would be a guess the tool makes; a typed one is a
- * fact the reader brought. The two want different controls, and only the second
- * belongs in a form.
- */
-static int enc_takes_key(uint32_t t)
-{
-	return t == ENC_XOR || t == ENC_ADD || t == ENC_CAESAR;
-}
-
-/* The key field as a number. Hex without a prefix, because a key written down
- * anywhere is written in hex - and 0x is accepted for the reader who types it
- * out of habit. */
-static uint32_t enc_key_val(const struct view *v)
-{
-	uint32_t k = 0;
-	const char *p = v->enc_key;
-
-	if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
-		p += 2;
-	for (; *p; p++) {
-		int d = enc_hexv((uint8_t)*p);
-
-		if (d < 0)
-			return k;
-		k = (k << 4) | (uint32_t)d;
-	}
-	return k;
-}
-
 static void enc_do(struct view *v)
 {
 	uint32_t len = (uint32_t)strlen(v->enc_in);
-	uint32_t key = enc_takes_key(v->enc_type) ? enc_key_val(v) : 0;
+	uint32_t key = kof_codec_keyed(v->enc_type)
+		     ? kof_codec_key(v->enc_key) : 0;
 
 	v->enc_res_n = 0;
 	v->enc_done = 1;
 	if (!len)
 		return;
-	v->enc_res_n = v->enc_way
-		     ? enc_encode((const uint8_t *)v->enc_in, len,
-				  (int)v->enc_type, key)
-		     : enc_run((const uint8_t *)v->enc_in, len,
-			       (int)v->enc_type, key);
+	v->enc_res_n = kof_codec_run((const uint8_t *)v->enc_in, len,
+				     v->enc_type, key, v->enc_way,
+				     g_encbuf, ENC_OUT_MAX);
 }
 
 /*
@@ -22897,7 +22637,7 @@ static void draw_enc(struct out *o, struct view *v)
 	dframe_row(o, f, 1);
 	out_fmt(o, A_DIM "%-9s" A_OFF, "type");
 	v->e_type[0] = o->col_base + (int)o->col_hint;
-	out_fmt(o, A_ID "[ %-7s ]" A_OFF, enc_codec_name((int)v->enc_type));
+	out_fmt(o, A_ID "[ %-7s ]" A_OFF, kof_codec_name(v->enc_type));
 	v->e_type[1] = o->col_base + (int)o->col_hint - 1;
 	/* Beside the coding, because it is the same question: which coding,
 	 * and which way through it. */
@@ -22905,13 +22645,13 @@ static void draw_enc(struct out *o, struct view *v)
 	v->e_way[0] = o->col_base + (int)o->col_hint;
 	out_fmt(o, A_ID "[ %-6s ]" A_OFF, v->enc_way ? "encode" : "decode");
 	v->e_way[1] = o->col_base + (int)o->col_hint - 1;
-	if (enc_takes_key(v->enc_type)) {
+	if (kof_codec_keyed(v->enc_type)) {
 		out_fmt(o, A_DIM "   key " A_OFF);
 		v->e_key[0] = o->col_base + (int)o->col_hint;
 		out_fmt(o, "%s[", v->edit == ED_ENC_KEY ? A_SEL : A_ID);
 		field_draw(o, v->enc_key, v->caret, &v->enc_key_off, 10,
 			   v->edit == ED_ENC_KEY,
-			   v->enc_type == ENC_CAESAR ? "1-25" : "hex");
+			   v->enc_type == KOF_CODEC_CAESAR ? "1-25" : "hex");
 		out_str(o, "]" A_OFF);
 		v->e_key[1] = o->col_base + (int)o->col_hint - 1;
 	} else {
@@ -25213,7 +24953,7 @@ static int handle_enc_key(struct view *v, int k)
 	 * cannot be pressed twice with the same meaning.
 	 */
 	case '\t':
-		if (v->edit == ED_ENC_IN && enc_takes_key(v->enc_type)) {
+		if (v->edit == ED_ENC_IN && kof_codec_keyed(v->enc_type)) {
 			v->edit = ED_ENC_KEY;
 			v->caret = (uint32_t)strlen(v->enc_key);
 		} else {
@@ -25224,12 +24964,12 @@ static int handle_enc_key(struct view *v, int k)
 	case K_LEFT:
 	case K_RIGHT:
 		v->enc_type = k == K_RIGHT
-			    ? (v->enc_type + 1u) % (uint32_t)ENC_CODEC_COUNT
-			    : (v->enc_type + (uint32_t)ENC_CODEC_COUNT - 1u) %
-			      (uint32_t)ENC_CODEC_COUNT;
+			    ? (v->enc_type + 1u) % (uint32_t)KOF_CODEC_COUNT
+			    : (v->enc_type + (uint32_t)KOF_CODEC_COUNT - 1u) %
+			      (uint32_t)KOF_CODEC_COUNT;
 		v->enc_res_n = 0;
 		v->enc_done = 0;
-		if (!enc_takes_key(v->enc_type) && v->edit == ED_ENC_KEY)
+		if (!kof_codec_keyed(v->enc_type) && v->edit == ED_ENC_KEY)
 			v->edit = ED_ENC_IN;
 		return 1;
 	case '\r': case '\n':
