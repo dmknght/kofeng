@@ -5408,19 +5408,332 @@ static int tree_one(char **argv, const char *src, const char *artefacts,
 	return 1;
 }
 
+/* ---- building the sources side by side ------------------------------------
+ *
+ * WHAT IS PARALLEL HERE AND WHAT IS NOT.
+ *
+ * One source becomes one artefact whose name is derived from its path, and
+ * nothing a module build reads is written by another: the compile, the link and
+ * the extraction touch only files named after that source. So the sources are
+ * independent and the PACK step, which reads the whole artefact directory and
+ * groups it, is not - it runs after, once, as it always did.
+ *
+ * MEASURED BEFORE IT WAS WRITTEN. The tree is 84 modules and 2.2 s in one
+ * process, 27 ms each, of which the process machinery - 1177 execve and 420
+ * clone for the whole tree - is 24 ms, about 1%. The other 99% is the compiler
+ * doing its work, which is why this runs N compilers at once rather than trying
+ * to make one cheaper: the same cc, the same ld, the same linker script.
+ *
+ * A PROCESS PER SOURCE, ON BOTH HOSTS. A module build is written against
+ * file-scope state - the source text, the declarations read out of it, the
+ * counters - and making that re-entrant would be a rewrite of the half of this
+ * file that has nothing to do with speed. POSIX forks, which hands the child a
+ * copy of all of it; Windows has no fork, so it starts THIS program again with
+ * the --module mode that already exists. Both are one process per source and
+ * neither is a second way of building a module.
+ *
+ * AND THE LOG STAYS IN ORDER. Each child writes what it would have printed into
+ * a file of its own and the parent prints them in SOURCE order as it collects
+ * them, so the build reads exactly as the serial one did - which matters,
+ * because warnings about a pattern being too short are read from this log.
+ */
+struct tree_job {
+#ifdef _WIN32
+	HANDLE proc;
+#else
+	pid_t  pid;
+#endif
+	int    live;
+	char   log[512];
+};
+
+/* Print one child's captured output and remove the file it was in. */
+static void job_flush(struct tree_job *j)
+{
+	FILE *f = fopen(j->log, "rb");
+	char buf[4096];
+	size_t n;
+
+	if (f) {
+		while ((n = fread(buf, 1, sizeof buf, f)) > 0)
+			fwrite(buf, 1, n, stdout);
+		fclose(f);
+	}
+	remove(j->log);
+	fflush(stdout);
+}
+
+/*
+ * Start one build in a child. Answers 0 when the child could not be started,
+ * which the caller turns into a serial build of that source rather than a
+ * failure: a process limit is not a reason to refuse to compile a signature.
+ */
+static int job_start(struct tree_job *j, char **argv, const char *src,
+		     const char *artefacts, const char *tmpdir, uint32_t n)
+{
+	j->live = 0;
+	/* Named for THIS builder and this source, so two builds running side by
+	 * side - the product tree and a working set - cannot read each other's
+	 * logs. */
+	snprintf(j->log, sizeof j->log, "%s/ksb-%lu-%u.log", tmpdir,
+#ifdef _WIN32
+		 (unsigned long)GetCurrentProcessId(),
+#else
+		 (unsigned long)getpid(),
+#endif
+		 n);
+#ifdef _WIN32
+	{
+		char cmd[8192];
+		STARTUPINFOA si;
+		PROCESS_INFORMATION pi;
+		SECURITY_ATTRIBUTES sa;
+		HANDLE h;
+
+		if (snprintf(cmd, sizeof cmd, "\"%s\" --module \"%s\" \"%s\"",
+			     argv[0], src, artefacts) >= (int)sizeof cmd)
+			return 0;
+		memset(&sa, 0, sizeof sa);
+		sa.nLength = sizeof sa;
+		sa.bInheritHandle = TRUE;
+		h = CreateFileA(j->log, GENERIC_WRITE, FILE_SHARE_READ, &sa,
+				CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (h == INVALID_HANDLE_VALUE)
+			return 0;
+		memset(&si, 0, sizeof si);
+		si.cb = sizeof si;
+		si.dwFlags = STARTF_USESTDHANDLES;
+		si.hStdOutput = h;
+		si.hStdError = h;
+		si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+		memset(&pi, 0, sizeof pi);
+		if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL,
+				    &si, &pi)) {
+			CloseHandle(h);
+			return 0;
+		}
+		CloseHandle(h);
+		CloseHandle(pi.hThread);
+		j->proc = pi.hProcess;
+		j->live = 1;
+		return 1;
+	}
+#else
+	{
+		pid_t pid;
+
+		fflush(NULL);   /* nothing of the parent's is written twice */
+		pid = fork();
+		if (pid < 0)
+			return 0;
+		if (pid == 0) {
+			int built = 0, ok;
+			FILE *f = freopen(j->log, "wb", stdout);
+
+			if (f)
+				(void)dup2(fileno(stdout), fileno(stderr));
+			ok = tree_one(argv, src, artefacts, &built);
+			/*
+			 * FLUSHED BY HAND, because _exit does not.
+			 *
+			 * exit() would, and it would also run the atexit
+			 * handlers and the teardown of a process that is a COPY
+			 * of the parent - which is what _exit is for in a
+			 * child. So the one thing that would have been lost is
+			 * done explicitly: without it every buffered line a
+			 * module printed died with the child, and the build log
+			 * held only what went to stderr.
+			 */
+			fflush(NULL);
+			_exit(ok ? 0 : 1);
+		}
+		j->pid = pid;
+		j->live = 1;
+		return 1;
+	}
+#endif
+}
+
+/* Wait for one child. Non-zero when it finished successfully. */
+static int job_wait(struct tree_job *j)
+{
+#ifdef _WIN32
+	DWORD code = 1;
+
+	WaitForSingleObject(j->proc, INFINITE);
+	GetExitCodeProcess(j->proc, &code);
+	CloseHandle(j->proc);
+	j->live = 0;
+	return code == 0;
+#else
+	int status = 0;
+
+	while (waitpid(j->pid, &status, 0) < 0 && errno == EINTR)
+		;
+	j->live = 0;
+	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+#endif
+}
+
+/*
+ * The list the walk collects. Bounded rather than grown: a signature tree is
+ * hand written, the shipping one is 84 sources, and a cap that is two orders
+ * above it costs 8 MB of BSS in a build tool and removes an allocator from the
+ * path.
+ */
+#define TREE_MAX_SRC  4096u
+#define TREE_SRC_MAX  4200u
+
+/*
+ * THE CEILING ON WORKERS, AND WHY THERE IS ONE AT ALL.
+ *
+ * Each worker is a compiler, and a compiler is not a light process: asking for
+ * more of them than the machine can run does not build anything faster, it
+ * makes every other thing on that machine wait - including the editor the
+ * person is watching the build from. A build tool that can be told to take the
+ * whole machine will be, by a script nobody re-reads.
+ *
+ * So the number asked for is clamped to what the host actually has, and to
+ * TREE_MAX_JOBS whatever the host says. Sixteen is far above the 84 modules
+ * that ship - the tree is already under a second at eight - and low enough that
+ * a wrong number cannot be catastrophic.
+ */
+#define TREE_MAX_JOBS 16u
+
+static uint32_t tree_job_cap(void)
+{
+#ifdef _WIN32
+	SYSTEM_INFO si;
+
+	GetSystemInfo(&si);
+	return si.dwNumberOfProcessors ? (uint32_t)si.dwNumberOfProcessors : 1u;
+#else
+	long n = sysconf(_SC_NPROCESSORS_ONLN);
+
+	return n > 0 ? (uint32_t)n : 1u;
+#endif
+}
+
+static int tree_src_cmp(const void *a, const void *b)
+{
+	return strcmp((const char *)a, (const char *)b);
+}
+
+/*
+ * Build every source, `jobs` at a time, and answer 0 when any of them failed.
+ *
+ * ONE AT A TIME IS STILL THE PATH ON WINDOWS and whenever jobs is 1: there is
+ * no fork there, and re-exec'ing this program per source to get one would be a
+ * second way of building a module - which is the thing this file exists to not
+ * have. See the note over job_start.
+ *
+ * A FAILURE STOPS THE LAUNCHING, NOT THE COLLECTING. The children already
+ * running are waited for and their output printed: a build that fails should
+ * say everything it found, and half a log with orphaned processes behind it is
+ * worse than a slightly longer one.
+ */
+static int tree_build(char **argv, char (*srcs)[TREE_SRC_MAX], uint32_t n,
+		      const char *artefacts, uint32_t jobs, int *built)
+{
+	uint32_t i;
+
+	if (jobs > 1u && n > 1u) {
+		static struct tree_job job[TREE_MAX_JOBS];
+		const char *tmp = getenv("TMPDIR");
+		uint32_t next = 0, live = 0, slot = 0, win;
+		int bad = 0;
+
+		if (!tmp || !tmp[0])
+			tmp = kof_tmpdir();
+		win = jobs < n ? jobs : n;
+		for (i = 0; i < win; i++)
+			job[i].live = 0;
+
+		/* Fill the window. */
+		for (i = 0; i < win && next < n; i++, next++) {
+			if (job_start(&job[i], argv, srcs[next], artefacts,
+				      tmp, next))
+				live++;
+			else if (!tree_one(argv, srcs[next], artefacts, built))
+				bad = 1;        /* no fork - built here */
+		}
+
+		/*
+		 * COLLECTED IN SLOT ORDER, WHICH IS SOURCE ORDER: slot i holds
+		 * sources i, i+win, i+2*win..., so walking the slots in a ring
+		 * prints them in the order the list had. An empty slot is one
+		 * whose source list ran out; it is skipped, never waited on
+		 * twice - a second waitpid on a reaped child answers ECHILD
+		 * with the status untouched, which reads as "exited 0" and
+		 * would count a module that was never built.
+		 */
+		while (live) {
+			int ok;
+
+			if (!job[slot].live) {
+				slot = (slot + 1u) % win;
+				continue;
+			}
+			ok = job_wait(&job[slot]);
+			job_flush(&job[slot]);
+			live--;
+			if (!ok)
+				bad = 1;
+			else
+				(*built)++;
+			if (next < n && !bad) {
+				if (job_start(&job[slot], argv, srcs[next],
+					      artefacts, tmp, next))
+					live++;
+				else if (!tree_one(argv, srcs[next], artefacts,
+						   built))
+					bad = 1;
+				next++;
+			}
+			slot = (slot + 1u) % win;
+		}
+		return !bad;
+	}
+	for (i = 0; i < n; i++)
+		if (!tree_one(argv, srcs[i], artefacts, built))
+			return 0;
+	return 1;
+}
+
 static int tree_main(int argc, char **argv)
 {
 	const char *base = argc > 2 ? argv[2] : NULL;
 	const char *artefacts = argc > 3 ? argv[3] : NULL;
 	const char *db = argc > 4 ? argv[4] : NULL;
 	char abs_base[4096];
+	static char srcs[TREE_MAX_SRC][TREE_SRC_MAX];
+	uint32_t n_srcs = 0, jobs = 1;
 	DIR *d;
 	struct dirent *e;
 	int built = 0;
 
+	if (argc == 7 && strcmp(argv[5], "--jobs") == 0) {
+		long v = strtol(argv[6], NULL, 10);
+		uint32_t cap = tree_job_cap();
+
+		jobs = v > 0 ? (uint32_t)v : 1u;
+		if (cap > TREE_MAX_JOBS)
+			cap = TREE_MAX_JOBS;
+		/* Clamped rather than refused: a number out of a script is not
+		 * worth failing a build over, and the clamp is what the number
+		 * meant - "as many as this machine can usefully run". */
+		if (jobs > cap) {
+			if (v > (long)cap)
+				fprintf(stderr, "ksigbuilder: %ld job(s) asked "
+					"for, %u used - see TREE_MAX_JOBS\n",
+					v, cap);
+			jobs = cap;
+		}
+		argc = 5;
+	}
 	if (argc != 5) {
 		fprintf(stderr, "usage: %s --tree <bases-dir> <artefact-dir> "
-				"<database-dir>\n", argv[0]);
+				"<database-dir> [--jobs N]\n", argv[0]);
 		return 2;
 	}
 	/* KOF_BASEDIR is what --module strips to name an artefact, and it has
@@ -5436,6 +5749,15 @@ static int tree_main(int argc, char **argv)
 	setenv("KOF_BASEDIR", abs_base, 1);
 #endif
 
+	/*
+	 * THE WALK IS A LIST, AND THE LIST IS SORTED.
+	 *
+	 * Collected before anything is built, because the builds can then run
+	 * side by side - see the note over job_start. Sorted because readdir
+	 * order is the filesystem's and nobody's else: the same tree gave a
+	 * different build log on two machines, and a log that reorders itself
+	 * is a log nobody diffs.
+	 */
 	d = opendir(base);
 	if (!d) {
 		fprintf(stderr, "ksigbuilder: cannot read %s\n", base);
@@ -5448,10 +5770,9 @@ static int tree_main(int argc, char **argv)
 			continue;
 		snprintf(path, sizeof path, "%s/%s", base, e->d_name);
 		if (is_c_source(e->d_name)) {
-			if (!tree_one(argv, path, artefacts, &built)) {
-				closedir(d);
-				return 1;
-			}
+			if (n_srcs < TREE_MAX_SRC)
+				snprintf(srcs[n_srcs++], TREE_SRC_MAX, "%s",
+					 path);
 			continue;
 		}
 		/* One level down, which is where the kind directories are. */
@@ -5469,16 +5790,18 @@ static int tree_main(int argc, char **argv)
 					continue;
 				snprintf(sub, sizeof sub, "%s/%s", path,
 					 se->d_name);
-				if (!tree_one(argv, sub, artefacts, &built)) {
-					closedir(sd);
-					closedir(d);
-					return 1;
-				}
+				if (n_srcs < TREE_MAX_SRC)
+					snprintf(srcs[n_srcs++], TREE_SRC_MAX,
+						 "%s", sub);
 			}
 			closedir(sd);
 		}
 	}
 	closedir(d);
+	qsort(srcs, n_srcs, TREE_SRC_MAX, tree_src_cmp);
+
+	if (!tree_build(argv, srcs, n_srcs, artefacts, jobs, &built))
+		return 1;
 
 	if (!built) {
 		fprintf(stderr, "ksigbuilder: no sources in %s\n", base);

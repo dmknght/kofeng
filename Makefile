@@ -1652,7 +1652,13 @@ export LD                := $(LD_FOR_SIGS)
 export CC
 
 #
-# One process for the whole tree - see ksigbuilder's --tree.
+# One process for the whole tree - see ksigbuilder's --tree - which builds the
+# sources $(JOBS) at a time and packs what comes out once, serially.
+#
+# $(JOBS) IS THIS RECIPE'S OWN, not make's. `make -j` cannot divide this: the
+# walk, the order and the packing are one program's decisions, so the recipe is
+# one command whatever -j says, and the parallelism it has is the number passed
+# here. ksigbuilder clamps it to the host's processors - see TREE_MAX_JOBS.
 #
 # This was a shell loop over $(SIGS) calling --module once per source, which
 # needed `for`, `||` and a variable prefix, none of which mean anything to
@@ -1665,7 +1671,7 @@ databases: $(OUT)/bin/ksigbuilder$(EXE) $(SDK_HDR)
 	@$(call RMRF,$(DB))
 	@$(call MKDIR,$(ARTEFACTS))
 	@$(call MKDIR,$(DB))
-	@$(call EXEC,$(OUT)/bin/ksigbuilder$(EXE)) --tree $(BASEDIR) $(ARTEFACTS) $(DB)
+	@$(call EXEC,$(OUT)/bin/ksigbuilder$(EXE)) --tree $(BASEDIR) $(ARTEFACTS) $(DB) --jobs $(JOBS)
 	$(info $(SP)   scan with: $(OUT)/bin/kofscanner$(EXE) --db $(DB) --scan-files <path>)
 
 # Kept as a name because it is in muscle memory and in scripts; the artefacts
