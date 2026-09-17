@@ -11828,14 +11828,6 @@ static int draw_decl_strings(struct out *o, struct view *v, int r)
 		hit_add(v, PR(r), 0, g_cols - 1, hit_row_none, 0);
 	}
 	r++;
-	if (PR_VIS(r)) {
-		row_start(o, PR(r), 1);
-		v->n_c0 = 2;
-		out_fmt(o, " " A_ID "[+ Matcher]" A_OFF);
-		v->n_c1 = (int)o->col_hint;
-		hit_add(v, PR(r), 0, g_cols - 1, hit_row_addmatcher, 0);
-	}
-	r++;
 	return r;
 }
 
@@ -12004,27 +11996,30 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 		r++;
 	}
 
+	/*
+	 * AND THE BUTTON THAT ADDS ONE, AT THE FOOT OF THEM.
+	 *
+	 * It sat under the heading, above the list, which is where a button
+	 * goes when the list is empty and the wrong place ever after: adding
+	 * the fourth matcher meant going back up past the three already
+	 * there, and the new row then appeared at the far end from the button
+	 * that made it. At the foot it is beside the last thing added, which
+	 * is where the reader is already looking - and it is the shape the
+	 * condition block has always had, where the add row closes the block.
+	 */
+	if (PR_VIS(r)) {
+		row_start(o, PR(r), 1);
+		v->n_c0 = 2;
+		out_fmt(o, " " A_ID "[+ Matcher]" A_OFF);
+		v->n_c1 = (int)o->col_hint;
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_addmatcher, 0);
+	}
+	r++;
+
 	/* ---- the conditions: what it means ---- */
 	if (PR_VIS(r)) {
 		sec_bar(o, v, PR(r), " Conditions");
 		hit_add(v, PR(r), 0, g_cols - 1, hit_row_none, 0);
-	}
-	r++;
-	if (PR_VIS(r)) {
-		row_start(o, PR(r), 1);
-		v->a_c0 = 2;
-		out_fmt(o, " %s[+ Condition]" A_OFF,
-			v->ed.dr.n_grp ? A_ID : A_DIM);
-		v->a_c1 = (int)o->col_hint;
-		/*
-		 * Nesting is added from the condition it nests inside, not from
-		 * here. "[add inside 1]" up here had to name its parent, which
-		 * meant reading a number off one row to know what a button on
-		 * another would do; the same button sitting on the parent's own
-		 * row needs no number at all.
-		 */
-		v->b_c0 = v->b_c1 = -1;
-		hit_add(v, PR(r), 0, g_cols - 1, hit_row_addcond, 0);
 	}
 	r++;
 	return r;
@@ -12332,6 +12327,26 @@ ids_done:
 		v->cnd_kid[ci][1] = (int)o->col_hint;
 		r++;
 	}
+
+	/*
+	 * AND THE BUTTON THAT ADDS A TOP-LEVEL CONDITION, at the foot of them
+	 * all - the same move the matchers just made, and for the same reason.
+	 *
+	 * Nesting is added from the condition it nests inside, not from here:
+	 * "[add inside 1]" up here had to name its parent, which meant reading
+	 * a number off one row to know what a button on another would do. The
+	 * same button sitting on the parent's own row needs no number at all.
+	 */
+	if (PR_VIS(r)) {
+		row_start(o, PR(r), 1);
+		v->a_c0 = 2;
+		out_fmt(o, " %s[+ Condition]" A_OFF,
+			v->ed.dr.n_grp ? A_ID : A_DIM);
+		v->a_c1 = (int)o->col_hint;
+		v->b_c0 = v->b_c1 = -1;
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_addcond, 0);
+	}
+	r++;
 	return r;
 }
 
