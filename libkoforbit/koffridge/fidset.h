@@ -122,11 +122,29 @@ int kof_fid_of(const char *path, struct kof_fid *out);
 struct kof_fidset;
 
 /*
- * `db_stamp` is the database these answers belong to. A file written under a
- * different one is not merged, not partially salvaged and not read: a database
- * update can change any verdict in it, including every clean one.
+ * TWO STAMPS, BECAUSE TWO THINGS CAN MAKE A STORED ANSWER WRONG.
+ *
+ * `db_stamp` is the DATABASE these answers belong to. A database update can
+ * change any verdict in it, including every clean one.
+ *
+ * `eng_stamp` is the ENGINE that produced them, and it is not the same
+ * question. The rules can be identical and the answer still change: what a
+ * parser calls a region, what a normalise pass produces, which bytes an
+ * unpacker hands over - all of that is the engine's, and a file called clean by
+ * an older one was called clean about bytes a newer one carves differently.
+ * Measured on this tree in one afternoon: recognising the "<?" short tag,
+ * carving ColdFusion tags, and refusing to hand a literal over as a child each
+ * changed what a scan finds with the database untouched.
+ *
+ * A file written under a different value of EITHER is not merged, not partially
+ * salvaged and not read - see kof_fidset_load.
+ *
+ * WHAT THE ENGINE STAMP CANNOT DO. It is a version, and a version moves when
+ * somebody moves it: two builds of an hour apart share one, so a developer
+ * changing a parser between two scans is not protected by it. That is what
+ * --no-cache is for, and it is why this is a stamp rather than a promise.
  */
-struct kof_fidset *kof_fidset_open(uint64_t db_stamp);
+struct kof_fidset *kof_fidset_open(uint64_t db_stamp, uint64_t eng_stamp);
 void kof_fidset_close(struct kof_fidset *);
 
 /*
@@ -175,6 +193,16 @@ struct kof_fidset_stat {
 	uint64_t mapped;    /* keys in the file that was loaded */
 	uint64_t added;     /* keys this run put in */
 	uint64_t dropped;   /* keys this run took out - see kof_fidset_drop */
+	/*
+	 * WHEN THE FILE THAT WAS LOADED WAS WRITTEN - seconds since the epoch,
+	 * 0 when no file was loaded or it did not say.
+	 *
+	 * Reported, never acted on: what makes a cache stale is the DATABASE it
+	 * was built against, and an age that expired entries would be a second
+	 * rule saying what the stamp already says. This is here so a person can
+	 * ask how old the answers are.
+	 */
+	uint64_t made;
 	uint64_t hit;
 	uint64_t miss;
 	uint64_t pages;     /* how many distinct pages lookups have touched */

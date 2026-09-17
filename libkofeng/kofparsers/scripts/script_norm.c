@@ -41,9 +41,18 @@ static const struct kof_lex lex_js = {
 	.var_sigil = 0, .concat = '+'
 };
 
+/*
+ * PYTHON, WHOSE TRIPLE QUOTE CLOSES ITSELF.
+ *
+ * The same token opens and ends it, so the row can name its own closer and
+ * the literal is copied verbatim rather than costing the whole file - see
+ * ml_close. A docstring is the first thing in most python files, so before
+ * this the pass declined most of them outright.
+ */
 static const struct kof_lex lex_python = {
 	.line_cmt = { "#", NULL, NULL },
 	.quotes = "\"'", .ml_open = { "\"\"\"", "'''", NULL },
+	.ml_close = { "\"\"\"", "'''", NULL },
 	.sq_escapes = 1,
 	.stmt_end = 0,          /* a newline ends a statement */
 	.ws_significant = 0, .var_sigil = 0, .concat = '+'

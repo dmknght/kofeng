@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "fidset.h"
 
@@ -36,7 +37,13 @@
 #endif
 
 #define FID_MAGIC        "KOFFIDS1"
-#define FID_VERSION      1u
+/*
+ * 3. The header grew `made` and then `eng_stamp`, and each is a different
+ * layout: a reader that took an older file at its word would find the key count
+ * where a timestamp now is. The version is what stops that being found out by
+ * reading the wrong field.
+ */
+#define FID_VERSION      3u
 /*
  * HOW MANY KEYS ONE FENCE ENTRY COVERS.
  *
@@ -45,11 +52,36 @@
  */
 #define FENCE_STRIDE     512u
 
+/*
+ * THE HEADER SAYS WHAT THE FILE IS, WHAT IT IS TRUE OF, AND WHEN IT WAS MADE.
+ *
+ *   magic     what this file is, before any field of it is believed
+ *   version   THIS format. A file of another one is refused whole rather
+ *             than read with the fields of a different layout.
+ *   stride    the fence's, checked because the search reads it
+ *   db_stamp  WHICH DATABASE these answers belong to - see
+ *             kof_engine_db_stamp. Not a build date: a date cannot tell one
+ *             database from another built the same hour, and removing a pack
+ *             does not move it at all.
+ *   eng_stamp WHICH ENGINE produced them. The rules can be identical and the
+ *             answer still change - see kof_fidset_open.
+ *   made      WHEN, as seconds since the epoch - an INTEGER, not text. A
+ *             timestamp written as text is a parser, a locale and a decision
+ *             about what "now" is spelled like; as a number it is eight bytes
+ *             that every reader agrees about and that sorts. Nothing decides
+ *             anything by it: the DATABASE is what invalidates a cache, and an
+ *             age that expired entries would be a second rule saying something
+ *             the stamp already says. It is here to be READ - by a person
+ *             asking how old this file is, and by a tool reporting it.
+ *   n         how many keys follow
+ */
 struct fid_hdr {
 	char     magic[8];
 	uint32_t version;
 	uint32_t stride;
 	uint64_t db_stamp;
+	uint64_t eng_stamp;
+	uint64_t made;
 	uint64_t n;
 };
 
@@ -64,8 +96,8 @@ struct fid_hdr {
  * would produce a file the other side reads as truncated - and the failure
  * would be a cache that silently never loads.
  */
-_Static_assert(sizeof(struct fid_hdr) == 32,
-	       "fid_hdr has padding: the on-disk header is not 32 bytes");
+_Static_assert(sizeof(struct fid_hdr) == 48,
+	       "fid_hdr has padding: the on-disk header is not 48 bytes");
 
 /*
  * BYTE ORDER IS NOT CHECKED AND DOES NOT NEED TO BE. The numbers are written
@@ -76,6 +108,7 @@ _Static_assert(sizeof(struct fid_hdr) == 32,
 
 struct kof_fidset {
 	uint64_t db_stamp;
+	uint64_t eng_stamp;
 
 	/* the mapped file, or nothing */
 	void          *map;
@@ -237,13 +270,14 @@ static int map_has(struct kof_fidset *s, uint64_t key)
 
 /* ---- open, load, close ---------------------------------------------------- */
 
-struct kof_fidset *kof_fidset_open(uint64_t db_stamp)
+struct kof_fidset *kof_fidset_open(uint64_t db_stamp, uint64_t eng_stamp)
 {
 	struct kof_fidset *s = calloc(1, sizeof *s);
 
 	if (!s)
 		return NULL;
 	s->db_stamp = db_stamp;
+	s->eng_stamp = eng_stamp;
 	return s;
 }
 
@@ -298,6 +332,7 @@ static void unmap(struct kof_fidset *s)
 	 * would read the previous run's answer.
 	 */
 	s->st.mapped = 0;
+	s->st.made   = 0;
 }
 
 void kof_fidset_close(struct kof_fidset *s)
@@ -342,7 +377,7 @@ int kof_fidset_load(struct kof_fidset *s, const char *path)
 	 */
 	if (memcmp(h.magic, FID_MAGIC, sizeof h.magic) != 0 ||
 	    h.version != FID_VERSION || h.stride != FENCE_STRIDE ||
-	    h.db_stamp != s->db_stamp) {
+	    h.db_stamp != s->db_stamp || h.eng_stamp != s->eng_stamp) {
 		close(fd);
 		return 0;
 	}
@@ -366,6 +401,8 @@ int kof_fidset_load(struct kof_fidset *s, const char *path)
 		s->key = s->fence + n_fence;
 		s->n_key = h.n;
 		s->st.mapped = h.n;
+	s->st.made   = h.made;
+		s->st.made   = h.made;
 		/*
 		 * AN EMPTY SET IS NOT A LOADED ONE. Answering 0 while holding a
 		 * mapping would leave the caller believing there is nothing to
@@ -421,7 +458,8 @@ int kof_fidset_load(struct kof_fidset *s, const char *path)
 	}
 	if (memcmp(h.magic, FID_MAGIC, sizeof h.magic) != 0 ||
 	    h.version != FID_VERSION || h.stride != FENCE_STRIDE ||
-	    h.db_stamp != s->db_stamp || h.n == 0) {
+	    h.db_stamp != s->db_stamp || h.eng_stamp != s->eng_stamp ||
+	    h.n == 0) {
 		CloseHandle(fh);
 		return 0;
 	}
@@ -451,6 +489,7 @@ int kof_fidset_load(struct kof_fidset *s, const char *path)
 	s->key = s->fence + n_fence;
 	s->n_key = h.n;
 	s->st.mapped = h.n;
+	s->st.made   = h.made;
 	return 1;
 #endif
 }
@@ -604,6 +643,15 @@ int kof_fidset_save(struct kof_fidset *s, const char *path)
 	h.version = FID_VERSION;
 	h.stride = FENCE_STRIDE;
 	h.db_stamp = s->db_stamp;
+	h.eng_stamp = s->eng_stamp;
+	/* Seconds since the epoch, and a clock that refuses is a zero rather
+	 * than a guess: a file whose age cannot be read is better than one that
+	 * claims an age it does not have. */
+	{
+		time_t now = time(NULL);
+
+		h.made = now == (time_t)-1 ? 0u : (uint64_t)now;
+	}
 	h.n = n;
 
 	if (snprintf(tmp, sizeof tmp, "%s.tmp", path) >= (int)sizeof tmp) {

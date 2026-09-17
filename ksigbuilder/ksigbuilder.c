@@ -4650,7 +4650,7 @@ static int artefact_load(struct artefact *a, const char *blob_path)
 enum pack_bucket {
 	BUCKET_NONE = -1,
 	BUCKET_ELF = 0, BUCKET_PE, BUCKET_MACHO,
-	BUCKET_ARCHIVE, BUCKET_DOC, BUCKET_TEXT, BUCKET_RAW,
+	BUCKET_ARCHIVE, BUCKET_DOC, BUCKET_SCRIPT, BUCKET_RAW,
 
 	/* Event targets, which are not file formats at all - see
 	 * KOF_TARGET_FIRST_EVENT. A pack of their own so a host that never
@@ -4685,8 +4685,18 @@ static int bucket_of_format(uint32_t fmt)
 	case KOF_FMT_DOCOLE:
 	case KOF_FMT_RTF:
 	case KOF_FMT_PDF:     return BUCKET_DOC;
+	/*
+	 * ONE BUCKET FOR BOTH, AND IT IS NAMED AFTER THE ONE THAT HAS RULES.
+	 *
+	 * KOF_FMT_TEXT is a file nothing claimed that reads as text;
+	 * KOF_FMT_SCRIPT is a file that named its own interpreter. They share a
+	 * pack because a rule for one is prefiltered against the other for
+	 * free, and the pack is called "script" because that is what every
+	 * module in it targets - a reader looking for the webshells was being
+	 * pointed at a file called "text".
+	 */
 	case KOF_FMT_SCRIPT:
-	case KOF_FMT_TEXT:    return BUCKET_TEXT;
+	case KOF_FMT_TEXT:    return BUCKET_SCRIPT;
 	case KOF_FMT_UNKNOWN: return BUCKET_RAW;
 	case KOF_EVT_PROC:    return BUCKET_PROC;
 	case KOF_EVT_AMSI:    return BUCKET_AMSI;
@@ -4702,7 +4712,7 @@ static const char *bucket_name(int b)
 	case BUCKET_MACHO:   return "macho";
 	case BUCKET_ARCHIVE: return "archive";
 	case BUCKET_DOC:     return "doc";
-	case BUCKET_TEXT:    return "text";
+	case BUCKET_SCRIPT:  return "script";
 	case BUCKET_RAW:     return "raw";
 	case BUCKET_PROC:    return "proc";
 	case BUCKET_AMSI:    return "amsi";

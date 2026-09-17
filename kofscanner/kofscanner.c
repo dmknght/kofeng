@@ -861,6 +861,49 @@ static void fid_keep(void *user, const char *path)
  * --no-cache run is the one that reaches a file an older entry would have
  * skipped, and its finding has to outlive the run that made it.
  */
+/*
+ * "written 3 h ago", or nothing when the file did not say.
+ *
+ * The header keeps seconds since the epoch - an integer, for the reasons the
+ * field's own note gives - and a person reading a build log wants an age, so
+ * the conversion is here, in the tool that prints, and not in the format.
+ */
+static void cache_age(uint64_t made, char *out, size_t cap)
+{
+	time_t now = time(NULL);
+	long long age;
+
+	out[0] = 0;
+	if (!made || now == (time_t)-1)
+		return;
+	age = (long long)now - (long long)made;
+	if (age < 0)
+		age = 0;
+	if (age < 90)
+		snprintf(out, cap, ", written %llds ago", age);
+	else if (age < 90 * 60)
+		snprintf(out, cap, ", written %lldm ago", age / 60);
+	else if (age < 48 * 3600)
+		snprintf(out, cap, ", written %lldh ago", age / 3600);
+	else
+		snprintf(out, cap, ", written %lld day(s) ago", age / 86400);
+}
+
+/*
+ * THE ENGINE THESE ANSWERS CAME FROM, as one number - see kof_fidset_open.
+ *
+ * Version and build together: the build alone moves every hour and the version
+ * alone does not move between releases of the same number.
+ */
+static uint64_t engine_stamp(void)
+{
+	struct kof_version v;
+
+	memset(&v, 0, sizeof v);
+	kof_engine_version(&v);
+	return ((uint64_t)v.major << 48) | ((uint64_t)v.minor << 32) | v.build;
+}
+
 static void fid_drop(void *user, const char *path)
 {
 	struct kof_fid id;
@@ -929,7 +972,7 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 	 * be opened would make a missing cache directory stop a scan.
 	 */
 	if (cache_path) {
-		p.fs = kof_fidset_open(db_stamp);
+		p.fs = kof_fidset_open(db_stamp, engine_stamp());
 		if (p.fs) {
 			struct kof_fidset_stat fst;
 
@@ -947,9 +990,12 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 			 * in hand to take it out of.
 			 */
 			if (trust) {
-				fprintf(stderr, "cache: %llu entr%s loaded\n",
+				char when[64];
+
+				cache_age(fst.made, when, sizeof when);
+				fprintf(stderr, "cache: %llu entr%s loaded%s\n",
 					(unsigned long long)fst.mapped,
-					fst.mapped == 1u ? "y" : "ies");
+					fst.mapped == 1u ? "y" : "ies", when);
 				opt->cache_seen = fid_seen;
 				opt->cache_keep = fid_keep;
 			}
@@ -1602,9 +1648,32 @@ int main(int argc, char **argv)
 				/* The DATABASE, not the date on it - see
 				 * kof_engine_db_stamp for what a build number
 				 * failed to notice. */
-				fs = kof_fidset_open(kof_engine_db_stamp(eng));
+				fs = kof_fidset_open(kof_engine_db_stamp(eng),
+						       engine_stamp());
 				if (fs) {
+					struct kof_fidset_stat fst;
+					char when[64];
+
 					(void)kof_fidset_load(fs, cache_path);
+					/*
+					 * SAID ON THE WAY IN, because a sweep
+					 * that reuses answers should say whose
+					 * and how old before it reports
+					 * anything. An empty set says nothing:
+					 * a first run has no news.
+					 */
+					kof_fidset_stats(fs, &fst);
+					if (fst.mapped) {
+						cache_age(fst.made, when,
+							  sizeof when);
+						fprintf(stderr,
+							"cache: %llu entr%s "
+							"loaded%s\n",
+							(unsigned long long)
+							fst.mapped,
+							fst.mapped == 1u
+							? "y" : "ies", when);
+					}
 					/*
 					 * --no-cache takes the two that
 					 * BELIEVE the set and leaves the one

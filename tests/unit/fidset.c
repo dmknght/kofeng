@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 
 #include "../../libkoforbit/koffridge/fidset.h"
 
@@ -49,6 +50,11 @@ static struct kof_fid fid_of(uint64_t i)
 }
 
 #define N 5000u          /* ~10 blocks of 512 */
+
+/* The engine these answers belong to - see kof_fidset_open. Fixed here, and
+ * changed in one case below, because it invalidates a file exactly as the
+ * database stamp does. */
+#define ENG 0x900DC0DEu
 
 int main(void)
 {
@@ -82,7 +88,7 @@ int main(void)
 	remove(path);
 
 	/* ---- in memory, before anything is written ---- */
-	s = kof_fidset_open(0xABCDu);
+	s = kof_fidset_open(0xABCDu, ENG);
 	if (!s)
 		return printf("  FAIL open\n"), 1;
 	for (i = 0; i < N; i += 2u)
@@ -107,7 +113,7 @@ int main(void)
 	kof_fidset_close(s);
 
 	/* ---- back from the file ---- */
-	s = kof_fidset_open(0xABCDu);
+	s = kof_fidset_open(0xABCDu, ENG);
 	if (!kof_fidset_load(s, path))
 		bad("the file did not load");
 	kof_fidset_stats(s, &st);
@@ -137,7 +143,7 @@ int main(void)
 		bad("the second save refused");
 	kof_fidset_close(s);
 
-	s = kof_fidset_open(0xABCDu);
+	s = kof_fidset_open(0xABCDu, ENG);
 	if (!kof_fidset_load(s, path))
 		bad("the merged file did not load");
 	kof_fidset_stats(s, &st);
@@ -158,6 +164,30 @@ int main(void)
 	kof_fidset_close(s);
 
 	/*
+	 * ---- WHAT THE HEADER SAYS ABOUT THE FILE ITSELF ----
+	 *
+	 * A cache is read by a person as well as by a scanner: "how old are
+	 * these answers" is asked of every cache that ever surprised anybody.
+	 * The field is an integer of seconds and nothing decides anything by it
+	 * - see the note on `made` - so what is checked here is that it is
+	 * WRITTEN and comes back, not that it expires something.
+	 */
+	{
+		uint64_t before = (uint64_t)time(NULL);
+
+		s = kof_fidset_open(0xABCDu, ENG);
+		if (!kof_fidset_load(s, path))
+			bad("the file did not load for the header check");
+		kof_fidset_stats(s, &st);
+		if (!st.made)
+			bad("the file does not say when it was written");
+		else if (st.made + 300u < before || st.made > before + 300u)
+			bad("the time in the header is not the time it was "
+			    "written");
+		kof_fidset_close(s);
+	}
+
+	/*
 	 * ---- TAKING ONE OUT, which is the only way this set shrinks ----
 	 *
 	 * The run that learns a cached file is not clean is the one that did
@@ -165,7 +195,7 @@ int main(void)
 	 * database. If the entry survives that, the next ordinary run skips a
 	 * file something was just found in.
 	 */
-	s = kof_fidset_open(0xABCDu);
+	s = kof_fidset_open(0xABCDu, ENG);
 	if (!kof_fidset_load(s, path))
 		bad("the set did not load for the drop");
 	if (!kof_fidset_drop(s, key[3]))
@@ -183,7 +213,7 @@ int main(void)
 		bad("the save after a drop refused");
 	kof_fidset_close(s);
 
-	s = kof_fidset_open(0xABCDu);
+	s = kof_fidset_open(0xABCDu, ENG);
 	if (!kof_fidset_load(s, path))
 		bad("the file did not load after a drop");
 	kof_fidset_stats(s, &st);
@@ -206,19 +236,33 @@ int main(void)
 		bad("a key added after a drop is not there");
 	kof_fidset_close(s);
 
-	s = kof_fidset_open(0xABCDu);
+	s = kof_fidset_open(0xABCDu, ENG);
 	(void)kof_fidset_load(s, path);
 	kof_fidset_drop(s, key[9]);
 	kof_fidset_close(s);       /* dropped, never saved: the file is intact */
-	s = kof_fidset_open(0xABCDu);
+	s = kof_fidset_open(0xABCDu, ENG);
 	if (!kof_fidset_load(s, path) || !kof_fidset_has(s, key[9]))
 		bad("a drop that was never saved changed the file");
 	kof_fidset_close(s);
 
 	/*
+	 * ---- A DIFFERENT ENGINE READS NOTHING EITHER ----
+	 *
+	 * Same rules, same files, a build whose parsers carve differently: a
+	 * verdict from the old one is about bytes the new one may not agree
+	 * are there. The file is refused whole, like a database change.
+	 */
+	s = kof_fidset_open(0xABCDu, ENG + 1u);
+	if (kof_fidset_load(s, path))
+		bad("a set written by another engine build was loaded");
+	if (kof_fidset_has(s, key[0]))
+		bad("a set written by another engine build answered a query");
+	kof_fidset_close(s);
+
+	/*
 	 * ---- a different database reads nothing ----
 	 */
-	s = kof_fidset_open(0xABCDu + 1u);
+	s = kof_fidset_open(0xABCDu + 1u, ENG);
 	if (kof_fidset_load(s, path))
 		bad("a set written under another database was loaded");
 	if (kof_fidset_has(s, key[0]))
@@ -236,7 +280,7 @@ int main(void)
 
 				fclose(f);
 				if (truncate(path, n - 16) == 0) {
-					s = kof_fidset_open(0xABCDu);
+					s = kof_fidset_open(0xABCDu, ENG);
 					if (kof_fidset_load(s, path))
 						bad("a truncated file loaded");
 					kof_fidset_close(s);
@@ -250,7 +294,7 @@ int main(void)
 		printf("fidset: %d check(s) failed\n", fails);
 		return 1;
 	}
-	printf("fidset: keys, blocks, round trip, merge, drop, db stamp, "
-	       "truncation - ok\n");
+	printf("fidset: keys, blocks, round trip, merge, drop, header, "
+	       "db and engine stamps, truncation - ok\n");
 	return 0;
 }
