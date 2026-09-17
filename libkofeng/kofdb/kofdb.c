@@ -340,7 +340,7 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 		       (unsigned long long)h->sec[id_].len,                    \
 		       (unsigned)(count_), (unsigned)(unit_))
 
-	STRIDE(KOF_SEC_PRE_TARGET,  h->n_mods,  4);
+	STRIDE(KOF_SEC_PRE_TARGET,  h->n_mods,  KOF_PRE_TARGET_STRIDE);
 	STRIDE(KOF_SEC_PRE_SCAN,    h->n_mods,  4);
 	STRIDE(KOF_SEC_PRE_ARCH,    h->n_mods,  4);
 	STRIDE(KOF_SEC_PRE_SIZE,    h->n_mods,  8);
@@ -589,12 +589,40 @@ static const char **collect_packs(const char *dir, uint32_t *out_n)
  * slice is written as an offset into the engine's table, not the pack's, so
  * nothing on the scan path has to know which pack a module came from.
  */
+/*
+ * Fold one module's targets into the presence set - see any_target.
+ *
+ * A module with NO targets is for everything, so it sets every bit: that is
+ * what KOF_FMT_ANY compiles to, and reading it as "targets nothing" would turn
+ * the engine's cheapest early-out into a silent refusal to open children.
+ *
+ * Ids of 64 and above are not representable here and are simply not recorded.
+ * The set is an OPTIMISATION - it answers "is anything interested in this
+ * target at all" - so a missing bit costs a walk that finds nothing, never a
+ * module that does not run. The assert beside KOF_TARGET_COUNT is what says
+ * when this needs to become an array.
+ */
+static void any_target_add(uint64_t *set, const struct kof_module *m)
+{
+	uint8_t i;
+
+	if (!m->n_target) {
+		*set = ~(uint64_t)0;
+		return;
+	}
+	for (i = 0; i < m->n_target; i++)
+		if (m->target[i] < 64u)
+			*set |= (uint64_t)1 << m->target[i];
+}
+
 static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		   size_t code_at, uint32_t pack_id)
 {
 	const uint8_t *base = mp->map;
 	const struct kof_pack_hdr *h = mp->map;
-	const uint32_t *pt = (const void *)(base + h->sec[KOF_SEC_PRE_TARGET].off);
+	/* Rows of bytes, not a uint32 array: a count and the ids it counts.
+	 * See KOF_SEC_PRE_TARGET. */
+	const uint8_t  *pt = base + h->sec[KOF_SEC_PRE_TARGET].off;
 	const uint32_t *ps = (const void *)(base + h->sec[KOF_SEC_PRE_SCAN].off);
 	const uint32_t *pa = (const void *)(base + h->sec[KOF_SEC_PRE_ARCH].off);
 	const uint32_t *pk = (const void *)(base + h->sec[KOF_SEC_PRE_SUBTYPE].off);
@@ -624,7 +652,19 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		 * so the blob's place in the arena is the entry point. */
 		m->fn = (kof_scan_fn)(void *)(e->code + code_at + pm[i].code_off);
 
-		m->target_mask = pt[i];
+		/*
+		 * THE COUNT IS WHAT BOUNDS THE READ, which is the whole reason
+		 * it is stored beside the ids rather than derived from them.
+		 * A row that claims more targets than the row holds is clamped
+		 * here - the pack is a file, and a file can say anything.
+		 */
+		{
+			const uint8_t *row = pt + (size_t)i * KOF_PRE_TARGET_STRIDE;
+
+			m->n_target = row[0] > KOF_TARGET_LIST_MAX
+				    ? (uint8_t)KOF_TARGET_LIST_MAX : row[0];
+			memcpy(m->target, row + 1, m->n_target);
+		}
 		m->scan_mask   = ps[i];
 		m->arch_mask   = pa[i];
 		m->subtype_mask = pk[i];
@@ -1139,23 +1179,24 @@ struct kof_engine *kof_db_load(const char *path)
 		 * shadowed the loader's own. */
 		uint32_t b, m, total = 0, *fill;
 
-		for (b = 0; b <= KOF_TARGET_BITS; b++)
+		for (b = 0; b <= KOF_TARGET_COUNT; b++)
 			e->mod_at[b] = 0;
 		for (m = 0; m < e->n_mods; m++)
-			for (b = 0; b < KOF_TARGET_BITS; b++)
-				if (e->mods[m].target_mask & (1u << b))
+			for (b = 0; b < KOF_TARGET_COUNT; b++)
+				if (kof_module_targets(&e->mods[m], (uint8_t)b))
 					e->mod_at[b + 1u]++;
-		for (b = 0; b < KOF_TARGET_BITS; b++)
+		for (b = 0; b < KOF_TARGET_COUNT; b++)
 			e->mod_at[b + 1u] += e->mod_at[b];
-		total = e->mod_at[KOF_TARGET_BITS];
+		total = e->mod_at[KOF_TARGET_COUNT];
 
-		fill = calloc(KOF_TARGET_BITS, sizeof *fill);
+		fill = calloc(KOF_TARGET_COUNT, sizeof *fill);
 		e->mod_by_target = total ? calloc(total, sizeof *e->mod_by_target)
 					 : NULL;
 		if (fill && (e->mod_by_target || !total)) {
 			for (m = 0; m < e->n_mods; m++)
-				for (b = 0; b < KOF_TARGET_BITS; b++)
-					if (e->mods[m].target_mask & (1u << b))
+				for (b = 0; b < KOF_TARGET_COUNT; b++)
+					if (kof_module_targets(&e->mods[m],
+							       (uint8_t)b))
 						e->mod_by_target[e->mod_at[b] +
 								 fill[b]++] = m;
 		} else {
@@ -1215,11 +1256,11 @@ struct kof_engine *kof_db_load(const char *path)
 
 			e->any_target = 0;
 			for (j = 0; j < e->n_mods; j++)
-				e->any_target |= e->mods[j].target_mask;
+				any_target_add(&e->any_target, &e->mods[j]);
 			for (j = 0; j < e->n_unp; j++)
-				e->any_target |= e->unp[j].target_mask;
+				any_target_add(&e->any_target, &e->unp[j]);
 			for (j = 0; j < e->n_heur; j++)
-				e->any_target |= e->heur[j].target_mask;
+				any_target_add(&e->any_target, &e->heur[j]);
 		}
 	}
 out:

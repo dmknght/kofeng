@@ -25,13 +25,13 @@
  *
  * GROUPING
  *
- * One pack per (kind, target_mask, arch_mask). Every part of that key is derived
+ * One pack per (kind, target set, arch_mask). Every part of that key is derived
  * from an artefact - kind from which entry point the module exported, the rest from
  * the .meta record - so nobody decides where a module goes and there is nowhere for
  * a decision to be wrong.
  *
  * By the exact mask value, not by "a format". A pack holding exactly the modules
- * whose target_mask is M has any_target == M, so testing an object against the pack
+ * whose targets are M has any_target == M, so testing an object against the pack
  * gives the same answer as testing it against every module in it: the pack-level
  * test skips exactly what the per-module test would have skipped, at one comparison
  * instead of N. Any coarser grouping - by platform, by family, by category - forces
@@ -343,7 +343,7 @@ static const struct macro macros[] = {
 
 
 /*
- * KOF_TARGET_NAME's two fields, file scoped like target_mask and its siblings: one
+ * KOF_TARGET_NAME's two fields, file scoped like the target list and its siblings: one
  * file, one family. Unlike those, read at this level rather than by the caller, because
  * composing a detection name is this program's job already - see read_variant.
  */
@@ -1428,10 +1428,53 @@ static void decl_collect(const char *at, int lineno)
 }
 
 /* What the resolution below produces, for the caller that writes .pre. */
-static uint32_t g_target_mask, g_arch_mask, g_subtype_mask;
+/*
+ * The targets as IDS, not as a mask - see n_target in kofdb.h. An empty list
+ * is KOF_FMT_ANY, which is what the engine reads it as, so "everything" costs
+ * nothing to carry and cannot fall behind the enum the way a derived mask did.
+ */
+static uint8_t  g_target[KOF_TARGET_LIST_MAX];
+static uint32_t g_arch_mask, g_subtype_mask;
 static uint64_t g_size_min;
 static int      g_unp_kind, g_heur_phase, g_heur_level, g_heur_want;
 static int      g_n_targets;
+/* KOF_FMT_ANY was written out, as opposed to nothing being written at all -
+ * both are an empty list, and only one of them is a module saying so. */
+static int      g_any_target;
+
+/* Does the resolved list name this target. An empty list that came from
+ * KOF_FMT_ANY names everything; an empty list that came from nowhere names
+ * nothing, and is refused before this is ever asked. */
+static int target_named(uint8_t id)
+{
+	int i;
+
+	if (g_any_target)
+		return 1;
+	for (i = 0; i < g_n_targets; i++)
+		if (g_target[i] == id)
+			return 1;
+	return 0;
+}
+
+/*
+ * The resolved target list as text, for the intermediate file: "4,8,9", or
+ * empty for a module that named everything.
+ *
+ * Ids and not a mask, because that is what the list IS now - and a number per
+ * target is also what lets .pre stay readable when the axis passes 32, which
+ * is the whole point of the change. See n_target in kofdb.h.
+ */
+static void target_text(char *out, size_t cap)
+{
+	size_t n = 0;
+	int i;
+
+	out[0] = 0;
+	for (i = 0; i < g_n_targets && n + 8u < cap; i++)
+		n += (size_t)snprintf(out + n, cap - n, i ? ",%u" : "%u",
+				      (unsigned)g_target[i]);
+}
 
 /* One name at a time out of "A|B|C", which is the only shape these arguments
  * take: the declarations are masks and the language for combining them is '|'. */
@@ -1476,8 +1519,11 @@ static void resolve_format(void)
 	 * happen, which no test notices.
 	 */
 	if (names_ident(d->arg, "KOF_FMT_ANY")) {
-		g_target_mask = (uint32_t)((1u << KOF_FMT_COUNT) - 1u);
-		g_n_targets = KOF_FMT_COUNT;
+		/* An EMPTY LIST, which is how the engine spells "any" - so
+		 * this no longer has to be derived from the enum at all, and
+		 * cannot fall behind it. */
+		g_n_targets = 0;
+		g_any_target = 1;
 		return;
 	}
 	while ((p = decl_next(p, one, sizeof one)) != NULL) {
@@ -1492,8 +1538,19 @@ static void resolve_format(void)
 			err(d->line, msg);
 			return;
 		}
-		g_target_mask |= 1u << fmt;
-		g_n_targets++;
+		if (g_n_targets >= (int)KOF_TARGET_LIST_MAX) {
+			char msg[192];
+
+			/* Refused rather than truncated: a list cut short is a
+			 * rule narrower than its source with nothing printed -
+			 * the failure KOF_TARGET_LIST_MAX's note describes. */
+			snprintf(msg, sizeof msg,
+				 "KOF_TARGET_FORMAT names more than %u formats "
+				 "- use KOF_FMT_ANY", (unsigned)KOF_TARGET_LIST_MAX);
+			err(d->line, msg);
+			return;
+		}
+		g_target[g_n_targets++] = fmt;
 	}
 }
 
@@ -1537,10 +1594,10 @@ static void resolve_subtype(void)
 	const struct simple_decl *d = &g_decl[SD_SUBTYPE];
 	char one[128];
 	const char *p = d->arg;
-	int want_elf = (g_target_mask & (1u << KOF_FMT_ELF)) != 0;
-	int want_pe = (g_target_mask & (1u << KOF_FMT_PE)) != 0;
-	int want_amsi = (g_target_mask & (1u << KOF_EVT_AMSI)) != 0;
-	int want_script = (g_target_mask & (1u << KOF_FMT_SCRIPT)) != 0;
+	int want_elf = target_named(KOF_FMT_ELF);
+	int want_pe = target_named(KOF_FMT_PE);
+	int want_amsi = target_named(KOF_EVT_AMSI);
+	int want_script = target_named(KOF_FMT_SCRIPT);
 
 	if (!d->count)
 		return;
@@ -3281,6 +3338,10 @@ static const struct fmt_hdr fmt_headers[] = {
 	{ "tar",      KOF_FMT_TAR    },
 	{ "sevenzip", KOF_FMT_7Z     },
 	{ "bz2",      KOF_FMT_BZIP2  },
+	{ "chm",      KOF_FMT_CHM    },
+	{ "cab",      KOF_FMT_CAB    },
+	{ "lha",      KOF_FMT_LHA    },
+	{ "arj",      KOF_FMT_ARJ    },
 	/*
 	 * zip.h is deliberately absent, and so are the headers of the other
 	 * formats whose modules target exactly one anyway.
@@ -3301,7 +3362,7 @@ static const struct fmt_hdr fmt_headers[] = {
  * for a format the module does not declare, and the cast is a promise nothing
  * keeps.
  */
-static int check_format_headers(uint32_t target_mask, int n_targets)
+static int check_format_headers(void)
 {
 	int i, n = 0;
 	const char *seen = NULL;
@@ -3311,7 +3372,7 @@ static int check_format_headers(uint32_t target_mask, int n_targets)
 			continue;
 		n++;
 		seen = fmt_headers[i].hdr;
-		if (!(target_mask & (1u << fmt_headers[i].fmt))) {
+		if (!target_named(fmt_headers[i].fmt)) {
 			fprintf(stderr, "FAIL: includes kofmod/%s.h but does "
 					"not target that format\n",
 				fmt_headers[i].hdr);
@@ -3324,12 +3385,12 @@ static int check_format_headers(uint32_t target_mask, int n_targets)
 				"      split it into one module per format\n", n);
 		return 0;
 	}
-	if (n == 1 && n_targets > 1) {
+	if (n == 1 && (g_n_targets > 1 || g_any_target)) {
 		fprintf(stderr, "FAIL: kofmod/%s.h with %d targets is unsound\n"
 				"      kof_<fmt>() casts ctx->file_header; with "
 				"more than one target\n"
 				"      there is no single view it can return\n",
-			seen, n_targets);
+			seen, g_any_target ? (int)KOF_FMT_COUNT : g_n_targets);
 		return 0;
 	}
 	return 1;
@@ -3932,8 +3993,14 @@ static int extract_main(int argc, char **argv)
 	 * into .meta unchanged; see struct kof_pack_mod for where they end up. */
 	/* The declarations this tool now reads itself, for the caller that used
 	 * to grep them out of the source. One parser, with comments stripped. */
-	fprintf(out, "target=%u\n", g_target_mask);
+	{
+		char tl[128];
+
+		target_text(tl, sizeof tl);
+		fprintf(out, "target=%s\n", tl);
+	}
 	fprintf(out, "ntargets=%d\n", g_n_targets);
+	fprintf(out, "anytarget=%d\n", g_any_target);
 	fprintf(out, "arch_mask=%u\n", g_arch_mask);
 	fprintf(out, "subtype_mask=%u\n", g_subtype_mask);
 	fprintf(out, "size_min=%llu\n", (unsigned long long)g_size_min);
@@ -3988,7 +4055,14 @@ struct artefact {
 	uint32_t code_len;
 
 	uint32_t kind;
-	uint32_t target_mask, scan_mask, arch_mask, subtype_mask, unp_kind;
+	/* The targets as ids and a count, the way the pack carries them. An
+	 * empty list is "any", which is why `any_target` is kept beside it -
+	 * "named everything" and "named nothing" are both zero here and only
+	 * one of them is a module. */
+	uint8_t  target[KOF_TARGET_LIST_MAX];
+	uint8_t  n_target;
+	int      any_target;
+	uint32_t scan_mask, arch_mask, subtype_mask, unp_kind;
 	uint32_t heur_phase, heur_want, heur_level;
 	uint64_t size_min;
 
@@ -4134,8 +4208,24 @@ static int meta_load(struct artefact *a)
 	}
 	while (fgets(line, sizeof line, f)) {
 		if (strncmp(line, "target=", 7) == 0) {
-			a->target_mask = (uint32_t)strtoul(line + 7, 0, 10);
+			/* "4,8,9", or empty for a module that named
+			 * everything - see target_text. */
+			char *q = line + 7;
+
+			a->n_target = 0;
+			while (*q && *q != '\n') {
+				if (*q < '0' || *q > '9') {
+					q++;
+					continue;
+				}
+				if (a->n_target >= KOF_TARGET_LIST_MAX)
+					break;
+				a->target[a->n_target++] =
+					(uint8_t)strtoul(q, &q, 10);
+			}
 			have_target = 1;
+		} else if (strncmp(line, "anytarget=", 10) == 0) {
+			a->any_target = atoi(line + 10) != 0;
 		} else if (strncmp(line, "scan_mask=", 10) == 0) {
 			a->scan_mask = (uint32_t)strtoul(line + 10, 0, 10);
 		} else if (strncmp(line, "size_min=", 9) == 0) {
@@ -4214,7 +4304,10 @@ static int meta_load(struct artefact *a)
 	}
 	fclose(f);
 
-	if (!have_target || a->target_mask == 0) {
+	/* An empty list is only legal when the module SAID everything: "any"
+	 * and "nothing was declared" are the same zero, and one of them is a
+	 * source that forgot KOF_TARGET_FORMAT. */
+	if (!have_target || (a->n_target == 0 && !a->any_target)) {
 		fprintf(stderr, "ksigbuilder: %s: record declares no target\n",
 			a->stem);
 		goto out;
@@ -4671,6 +4764,9 @@ static int bucket_of_format(uint32_t fmt)
 	case KOF_FMT_7Z:
 	case KOF_FMT_RAR:
 	case KOF_FMT_XZ:
+	case KOF_FMT_CAB:
+	case KOF_FMT_LHA:
+	case KOF_FMT_ARJ:
 	case KOF_FMT_BZIP2:
 	/*
 	 * DOCZIP IS AN ARCHIVE HERE, not a document, and the distinction is
@@ -4686,6 +4782,7 @@ static int bucket_of_format(uint32_t fmt)
 	case KOF_FMT_DOCZIP:  return BUCKET_ARCHIVE;
 	case KOF_FMT_DOCOLE:
 	case KOF_FMT_RTF:
+	case KOF_FMT_CHM:
 	case KOF_FMT_PDF:     return BUCKET_DOC;
 	/*
 	 * ONE BUCKET FOR BOTH, AND IT IS NAMED AFTER THE ONE THAT HAS RULES.
@@ -4730,17 +4827,24 @@ static const char *bucket_name(int b)
  * it is its own thing - and it keeps its own pack rather than being filed under
  * whichever half was tested first.
  */
-static int bucket_of_mask(uint32_t mask)
+/*
+ * The bucket a whole target LIST belongs to.
+ *
+ * A list now rather than a mask, so the loop is over the ids a module actually
+ * named instead of over every bit position - see n_target in kofdb.h. A module
+ * that named everything belongs in no bucket, which is what BUCKET_NONE says.
+ */
+static int bucket_of_targets(const uint8_t *id, uint8_t n, int any)
 {
 	int b = BUCKET_NONE;
-	uint32_t f;
+	uint8_t f;
 
-	for (f = 0; f < 32u; f++) {
+	if (any)
+		return BUCKET_NONE;
+	for (f = 0; f < n; f++) {
 		int this_b;
 
-		if (!(mask & (1u << f)))
-			continue;
-		this_b = bucket_of_format(f);
+		this_b = bucket_of_format(id[f]);
 		if (this_b == BUCKET_NONE)
 			return BUCKET_NONE;
 		if (b == BUCKET_NONE)
@@ -4751,9 +4855,26 @@ static int bucket_of_mask(uint32_t mask)
 	return b;
 }
 
+/* The targets one artefact names, as a presence set - ksigbuilder's own
+ * bookkeeping for grouping and for naming a pack. It never goes on disk, which
+ * is why 64 bits is room enough here while the pack carries a list. */
+static uint64_t target_set_of(const struct artefact *a)
+{
+	uint64_t set = 0;
+	uint8_t i;
+
+	if (a->any_target)
+		return ~(uint64_t)0;
+	for (i = 0; i < a->n_target; i++)
+		if (a->target[i] < 64u)
+			set |= (uint64_t)1 << a->target[i];
+	return set;
+}
+
 /* A set of artefacts sharing one grouping key, which is one pack. */
 struct group {
-	uint32_t  kind, target_mask, arch_mask;
+	uint32_t  kind, arch_mask;
+	uint64_t  target_set;            /* see target_set_of */
 	int       bucket;                /* enum pack_bucket, or BUCKET_NONE */
 	uint32_t *member;                /* indices into the artefact array */
 	uint32_t  n, cap;
@@ -4816,7 +4937,11 @@ static uint32_t artefact_fingerprint(const struct artefact *a)
 	if (a->n_rng)
 		qsort(rh, a->n_rng, sizeof *rh, cmp_u32);
 
-	precond[0] = a->target_mask;
+	/* The targets as the SET they are: the fingerprint has to be the same
+	 * for two artefacts that fire on the same things, and a set is order
+	 * independent where the list as written is not. */
+	precond[0] = (uint32_t)target_set_of(a) ^
+		     (uint32_t)(target_set_of(a) >> 32);
 	precond[1] = a->subtype_mask;
 	precond[2] = a->arch_mask;
 	precond[3] = (uint32_t)a->size_min;   /* truncated on purpose - a size floor
@@ -4928,8 +5053,8 @@ static int group_cmp(const void *pa, const void *pb)
 
 	if (a->kind != b->kind)
 		return a->kind < b->kind ? -1 : 1;
-	if (a->target_mask != b->target_mask)
-		return a->target_mask < b->target_mask ? -1 : 1;
+	if (a->target_set != b->target_set)
+		return a->target_set < b->target_set ? -1 : 1;
 	if (a->arch_mask != b->arch_mask)
 		return a->arch_mask < b->arch_mask ? -1 : 1;
 	return 0;
@@ -5046,19 +5171,18 @@ static void name_append(char *out, size_t cap, size_t *at, const char *s)
  * itself. Length rather than count is the test because format names differ in
  * length and a fixed count would sometimes fit and sometimes not.
  */
-static int format_list(uint32_t mask, char *out, size_t cap)
+static int format_list(uint64_t set, char *out, size_t cap)
 {
-	uint32_t all = (uint32_t)((1ull << KOF_FMT_COUNT) - 1ull);
 	size_t at = 0;
 	uint32_t f;
 
 	out[0] = 0;
-	if ((mask & all) == all) {
+	if (set == ~(uint64_t)0) {
 		name_append(out, cap, &at, "any");
 		return 1;
 	}
 	for (f = 0; f < KOF_FMT_COUNT; f++) {
-		if (!(mask & (1u << f)))
+		if (!(set & ((uint64_t)1 << f)))
 			continue;
 		name_append(out, cap, &at, kof_format_name((uint8_t)f));
 		return at != 0;
@@ -5172,7 +5296,9 @@ static void module_reset(void)
 	memset(names, 0, sizeof names);
 	npats = nrngs = nnames = errors = 0;
 	scan_mask = 0;
-	g_target_mask = g_arch_mask = g_subtype_mask = 0;
+	g_arch_mask = g_subtype_mask = 0;
+	g_n_targets = g_any_target = 0;
+	memset(g_target, 0, sizeof g_target);
 	g_size_min = 0;
 	g_unp_kind = g_heur_phase = g_heur_level = g_heur_want = 0;
 	g_n_targets = 0;
@@ -5203,6 +5329,7 @@ static int module_main(int argc, char **argv)
 	const char *rel;
 	FILE *f;
 	long blob_len;
+	char target_line[128];
 	int kind, rc;
 
 	if (argc != 4 || !src || !outdir) {
@@ -5291,7 +5418,7 @@ static int module_main(int argc, char **argv)
 			return 1;
 	}
 
-	if (!check_format_headers(g_target_mask, g_n_targets))
+	if (!check_format_headers())
 		return 1;
 	if (!check_size_body())
 		return 1;
@@ -5337,7 +5464,9 @@ static int module_main(int argc, char **argv)
 		fprintf(stderr, "ksigbuilder: cannot write %s\n", meta);
 		return 2;
 	}
-	fprintf(f, "target=%u\n", g_target_mask);
+	target_text(target_line, sizeof target_line);
+	fprintf(f, "target=%s\n", target_line);
+	fprintf(f, "anytarget=%d\n", g_any_target);
 	fprintf(f, "scan_mask=%lu\n", g_scan_mask_out);
 	fprintf(f, "size_min=%llu\n", (unsigned long long)g_size_min);
 	fprintf(f, "arch_mask=%u\n", g_arch_mask);
@@ -5363,10 +5492,11 @@ static int module_main(int argc, char **argv)
 	fprintf(f, "srcpath=%s\n", rel != src ? rel : "");
 	fclose(f);
 
-	printf("== ok  %s  %ld bytes  kind=%s  strs=%d  target=%u scan=0x%lx\n",
+	printf("== ok  %s  %ld bytes  kind=%s  strs=%d  target=%s scan=0x%lx\n",
 	       blob, blob_len,
 	       kind == 2 ? "heur" : kind == 1 ? "unpack" : "detect",
-	       g_nstr_out, g_target_mask, g_scan_mask_out);
+	       g_nstr_out, g_any_target ? "any" : target_line,
+	       g_scan_mask_out);
 	(void)rc;
 	return 0;
 }
@@ -6097,12 +6227,13 @@ static int pack_main(int argc, char **argv)
 	 * property that makes this cheap however large the set gets. */
 	for (a = 0; a < n_arts; a++) {
 		struct group *g = NULL;
-		int ab = bucket_of_mask(arts[a].target_mask);
+		int ab = bucket_of_targets(arts[a].target, arts[a].n_target,
+					   arts[a].any_target);
 
 		/*
 		 * BY BUCKET, AND ARCHITECTURE IS NOT PART OF THE KEY.
 		 *
-		 * It used to be one pack per exact (kind, target_mask,
+		 * It used to be one pack per exact (kind, target set,
 		 * arch_mask), on the reasoning that a pack whose any_target is
 		 * exactly M lets the scanner skip the whole file in one
 		 * comparison instead of N.
@@ -6126,7 +6257,8 @@ static int pack_main(int argc, char **argv)
 			    ((ab != BUCKET_NONE && groups[j].bucket == ab) ||
 			     (ab == BUCKET_NONE &&
 			      groups[j].bucket == BUCKET_NONE &&
-			      groups[j].target_mask == arts[a].target_mask))) {
+			      groups[j].target_set ==
+			      target_set_of(&arts[a])))) {
 				g = &groups[j];
 				break;
 			}
@@ -6143,7 +6275,7 @@ static int pack_main(int argc, char **argv)
 			memset(g, 0, sizeof *g);
 			g->kind        = arts[a].kind;
 			g->bucket      = ab;
-			g->target_mask = arts[a].target_mask;
+			g->target_set  = target_set_of(&arts[a]);
 			g->arch_mask   = arts[a].arch_mask;
 		} else {
 			/*
@@ -6153,7 +6285,7 @@ static int pack_main(int argc, char **argv)
 			 * OR-ing 0 into a specific mask would claim the
 			 * opposite.
 			 */
-			g->target_mask |= arts[a].target_mask;
+			g->target_set |= target_set_of(&arts[a]);
 			if (g->arch_mask == 0u || arts[a].arch_mask == 0u)
 				g->arch_mask = 0u;
 			else
@@ -6201,7 +6333,10 @@ static int pack_main(int argc, char **argv)
 			const struct artefact *s = &arts[g->member[a]];
 			pm[a].code        = s->code;
 			pm[a].code_len    = s->code_len;
-			pm[a].target_mask = s->target_mask;
+			/* Zero targets is ANY, which is what the engine reads
+			 * an empty list as - see n_target in kofdb.h. */
+			pm[a].n_target    = s->any_target ? 0 : s->n_target;
+			memcpy(pm[a].target, s->target, sizeof pm[a].target);
 			pm[a].scan_mask   = s->scan_mask;
 			pm[a].arch_mask   = s->arch_mask;
 			pm[a].subtype_mask = s->subtype_mask;
@@ -6260,10 +6395,11 @@ static int pack_main(int argc, char **argv)
 
 				if (*bn)
 					snprintf(fmt, sizeof fmt, "%s", bn);
-				else if (!format_list(g->target_mask, fmt,
+				else if (!format_list(g->target_set, fmt,
 						      sizeof fmt))
-					snprintf(fmt, sizeof fmt, "x%x",
-						 g->target_mask);
+					snprintf(fmt, sizeof fmt, "x%llx",
+						 (unsigned long long)
+						 g->target_set);
 			}
 
 			/*
@@ -6316,10 +6452,10 @@ static int pack_main(int argc, char **argv)
 				if (strcmp(taken[a], path) != 0)
 					continue;
 				snprintf(path, sizeof path,
-					 "%s/%s-%s-x%x%s%s.ksig", outdir,
+					 "%s/%s-%s-x%llx%s%s.ksig", outdir,
 					 kind_name(g->kind), fmt,
-					 g->target_mask, arch[0] ? "-" : "",
-					 arch);
+					 (unsigned long long)g->target_set,
+					 arch[0] ? "-" : "", arch);
 				break;
 			}
 		}

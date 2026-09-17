@@ -290,7 +290,7 @@ static void run_at(const char *path, const char *what,
 	memset(out, 0, sizeof *out);
 
 	m.fn = fn;
-	m.target_mask = 0xffffffffu;   /* every format, including unidentified */
+	m.n_target = 0;   /* every format, including unidentified */
 	eng.unp = &m;
 	eng.n_unp = 1;
 

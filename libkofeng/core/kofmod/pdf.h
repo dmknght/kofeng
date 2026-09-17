@@ -340,7 +340,7 @@ enum kof_pdf_cat {
  * A page description stream IS operators in ASCII and an XMP packet IS XML, so
  * KOF_FMT_TEXT would be an honest claim. It was made here and then withdrawn,
  * because a format id is not only an identity - IT IS A GATE.
- * kof_module_precond tests `target_mask & (1u << ctx->format)` before anything
+ * kof_module_precond tests the module's target list against ctx->format before anything
  * else, so naming an object more specifically NARROWS who is allowed to look
  * at it.
  *

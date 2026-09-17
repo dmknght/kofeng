@@ -54,7 +54,10 @@ struct kof_pw_mod {
 	const uint8_t *code;
 	uint32_t       code_len;
 
-	uint32_t target_mask;
+	/* What this module is for, as ids and a count of them - see n_target in
+	 * kofdb.h for why it is a list and not a mask. Zero targets is ANY. */
+	uint8_t  n_target;
+	uint8_t  target[KOF_TARGET_LIST_MAX];
 	uint32_t scan_mask;
 	uint32_t arch_mask;
 	uint32_t subtype_mask;

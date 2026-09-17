@@ -65,13 +65,21 @@ static void arch_names(void)
 
 /* ---- what a module may run on -------------------------------------------- */
 
+/*
+ * `target` is still passed as a MASK here, and turned into the list the module
+ * now carries - so every case below reads as it did while the axis was bits,
+ * and what is being tested is the precondition rather than the spelling.
+ */
 static struct kof_module mod_of(uint32_t target, uint32_t arch,
 				uint32_t subtype, uint64_t size_min)
 {
 	struct kof_module m;
+	uint8_t f;
 
 	memset(&m, 0, sizeof m);
-	m.target_mask  = target;
+	for (f = 0; f < 32u && m.n_target < KOF_TARGET_LIST_MAX; f++)
+		if (target & (1u << f))
+			m.target[m.n_target++] = f;
 	m.arch_mask    = arch;
 	m.subtype_mask = subtype;
 	m.size_min     = size_min;

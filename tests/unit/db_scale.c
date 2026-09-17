@@ -329,7 +329,8 @@ static int synth_build(struct synth *s, uint32_t recs, uint32_t mods)
 		s->mod[m].code_len    = BLOB_LEN;
 		/* ELF only, so the object scanned below is rejected by format and
 		 * the sweep measured is the prefilter and nothing else. */
-		s->mod[m].target_mask = 1u << KOF_FMT_ELF;
+		s->mod[m].n_target = 1;
+		s->mod[m].target[0] = KOF_FMT_ELF;
 		s->mod[m].scan_mask   = 1u << 2;
 		s->mod[m].str         = &s->str[(size_t)m * per];
 		s->mod[m].n_str       = per;

@@ -877,6 +877,10 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/containers/rar_parse.c \
            libkofeng/kofparsers/containers/xz_parse.c \
            libkofeng/kofparsers/containers/bz2_parse.c \
+           libkofeng/kofparsers/containers/chm_parse.c \
+           libkofeng/kofparsers/containers/cab_parse.c \
+           libkofeng/kofparsers/containers/lha_parse.c \
+           libkofeng/kofparsers/containers/arj_parse.c \
            libkofeng/kofparsers/containers/rtf_parse.c \
            libkofeng/kofparsers/containers/pdf_parse.c \
            libkofeng/kofunpack/pe_rebuild.c \
@@ -1048,6 +1052,10 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/rar.h \
            $(SDK)/include/kofmod/xz.h \
            $(SDK)/include/kofmod/bz2.h \
+           $(SDK)/include/kofmod/chm.h \
+           $(SDK)/include/kofmod/cab.h \
+           $(SDK)/include/kofmod/lha.h \
+           $(SDK)/include/kofmod/arj.h \
            $(SDK)/include/kofmod/rtf.h \
            $(SDK)/include/kofmod/pdf.h \
            $(SDK)/include/kofmod/amsi.h \
@@ -1795,8 +1803,13 @@ ASAN_LIB := $(TEST)/libkofeng-asan.a
 # in the test rather than a missing DLL.
 ifeq ($(NATIVE_OS),windows)
 UNIT_LIBS_inflate_diff := -Wl,-Bstatic -lz -Wl,-Bdynamic
+UNIT_LIBS_cab_mszip    := -Wl,-Bstatic -lz -Wl,-Bdynamic
 else
 UNIT_LIBS_inflate_diff := -lz
+# The same oracle, used the other way round: cab_mszip COMPRESSES its fixture
+# with zlib, so what the engine hands back is compared against the bytes that
+# went in. Nothing else on this host writes a cabinet.
+UNIT_LIBS_cab_mszip    := -lz
 endif
 
 #

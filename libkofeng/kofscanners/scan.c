@@ -125,15 +125,15 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc->kid_packer);
 	free(sc->kid_family);
 	/*
-	 * KOF_TARGET_BITS AND NOT KOF_FMT_COUNT.
+	 * KOF_TARGET_COUNT AND NOT KOF_FMT_COUNT.
 	 *
-	 * The array is the width of the target axis, and event targets are
-	 * numbered ABOVE the file formats - so a loop bounded by the number of
+	 * The array is the width of the target axis, and event verbs are
+	 * numbered in the same space as the file formats - so a loop bounded by
 	 * formats freed the file-format views and leaked every event one. It
 	 * was one allocation per scanner for AMSI and is now two; the bound
 	 * that sizes the array is the bound that must empty it.
 	 */
-	for (i = 0; i < KOF_TARGET_BITS; i++)
+	for (i = 0; i < KOF_TARGET_COUNT; i++)
 		free(sc->view[i]);
 	free(sc->inf);
 	free(sc->lzw);
@@ -1645,7 +1645,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 		uint32_t lo = 0, hi = e->n_mods, k;
 		const uint32_t *ix = NULL;
 
-		if (e->mod_by_target && ctx.format < KOF_TARGET_BITS) {
+		if (e->mod_by_target && ctx.format < KOF_TARGET_COUNT) {
 			ix = e->mod_by_target;
 			lo = e->mod_at[ctx.format];
 			hi = e->mod_at[ctx.format + 1u];

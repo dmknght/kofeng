@@ -7360,8 +7360,9 @@ static void ch_add_verb_sub(struct chooser *c, const char *t, unsigned verb)
  * disappearing.
  */
 struct fmt_cat {
-	const char *name;
-	uint32_t    mask;
+	/* Which of the engine's groups this row shows - the formats in it and
+	 * the word for it both come from there. */
+	enum kof_format_group group;
 	/*
 	 * THIS ROW OPENS LANGUAGES, NOT FORMATS.
 	 *
@@ -7375,38 +7376,55 @@ struct fmt_cat {
 	uint8_t     langs;
 };
 
-#define FMT_B(f) (1u << (f))
 
+/*
+ * THE ROWS ARE THE ENGINE'S GROUPS, not a list kept here.
+ *
+ * They were a table of masks written out format by format, and the failure was
+ * the one every hand copy has: a format added to the engine was not in it, so
+ * bzip2 was missing from Archives and reachable only through Other - a menu
+ * quietly narrower than the engine it describes.
+ *
+ * kof_format_group answers which row a format belongs in and
+ * kof_format_group_name gives the word, so this array is now only what is
+ * PECULIAR TO THIS PANEL: which rows to show, in which order, and which one
+ * opens languages instead of formats.
+ *
+ * TEXT IS NOT A SCRIPT, it is the absence of one - which is why it is not a row
+ * here even though the engine has a group for it. KOF_FMT_SCRIPT says "these
+ * bytes are meant to be run"; KOF_FMT_TEXT says only "these bytes are
+ * readable" - a log, a config, a README. Grouping them put every text file one
+ * click away from a menu of interpreters, which reads as a claim about it. It
+ * falls into Other by subtraction, along with Raw and the event targets, which
+ * are not file formats a draft can name.
+ */
 static const struct fmt_cat g_fmt_cat[] = {
-	/* PLURAL, because each row is a GROUP of formats and the submenu it
-	 * opens is the list. "Media" and "Other" take no s. */
-	{ "Executables", FMT_B(KOF_FMT_ELF) | FMT_B(KOF_FMT_PE) |
-			 FMT_B(KOF_FMT_MACHO), 0 },
+	{ KOF_FGRP_EXEC,    0 },
 	/*
-	 * TEXT IS NOT A SCRIPT, it is the absence of one.
-	 *
-	 * KOF_FMT_SCRIPT says "these bytes are meant to be run"; KOF_FMT_TEXT
-	 * says only "these bytes are readable" - a log, a config, a README.
-	 * Grouping them put every text file one click away from a menu of
-	 * interpreters, which reads as a claim about it. It falls into Other
-	 * by subtraction; see fmt_cat_other.
+	 * THIS ROW OPENS LANGUAGES - see the langs field. It is the one row
+	 * whose submenu is not a list of formats.
 	 */
-	{ "Scripts",     FMT_B(KOF_FMT_SCRIPT), 1 },
-	{ "Documents",   FMT_B(KOF_FMT_DOCOLE) | FMT_B(KOF_FMT_DOCZIP) |
-			 FMT_B(KOF_FMT_RTF) | FMT_B(KOF_FMT_PDF), 0 },
-	{ "Archives",    FMT_B(KOF_FMT_ZIP) | FMT_B(KOF_FMT_TAR) |
-			 FMT_B(KOF_FMT_7Z) | FMT_B(KOF_FMT_RAR) |
-			 FMT_B(KOF_FMT_XZ) | FMT_B(KOF_FMT_GZIP) |
-			 FMT_B(KOF_FMT_BZIP2), 0 },
-	/*
-	 * "Media" KEEPS ITS SHAPE: it is already the plural of "medium", so
-	 * "Medias" would be the one row in this table that is not English. The
-	 * rule is that a row names a group, not that a row ends in s.
-	 */
-	{ "Media",       FMT_B(KOF_FMT_IMAGE) | FMT_B(KOF_FMT_FONT), 0 }
+	{ KOF_FGRP_SCRIPT,  1 },
+	{ KOF_FGRP_DOC,     0 },
+	{ KOF_FGRP_ARCHIVE, 0 },
+	{ KOF_FGRP_MEDIA,   0 }
 };
 
 #define FMT_CAT_N (sizeof g_fmt_cat / sizeof g_fmt_cat[0])
+
+/* Every format the engine puts in this group, as the mask this panel works in.
+ * Built from the engine each time rather than stored: it is a handful of
+ * comparisons on a menu click, and a stored copy is the thing that went
+ * stale. */
+static uint32_t fmt_cat_of_group(enum kof_format_group g)
+{
+	uint32_t mask = 0, f;
+
+	for (f = 0; f < KOF_FMT_COUNT; f++)
+		if (kof_format_group((uint8_t)f) == g)
+			mask |= 1u << f;
+	return mask;
+}
 
 /* Everything the rows above do not name, so nothing can be unreachable. */
 static uint32_t fmt_cat_other(void)
@@ -7414,21 +7432,23 @@ static uint32_t fmt_cat_other(void)
 	uint32_t all = (uint32_t)((1u << KOF_FMT_COUNT) - 1u), i;
 
 	for (i = 0; i < FMT_CAT_N; i++)
-		all &= ~g_fmt_cat[i].mask;
+		all &= ~fmt_cat_of_group(g_fmt_cat[i].group);
 	return all;
 }
 
 /* The mask of category `i`, with the catch-all last. */
 static uint32_t fmt_cat_mask(uint32_t i)
 {
-	return i < FMT_CAT_N ? g_fmt_cat[i].mask : fmt_cat_other();
+	return i < FMT_CAT_N ? fmt_cat_of_group(g_fmt_cat[i].group)
+			     : fmt_cat_other();
 }
 
 static const char *fmt_cat_name(uint32_t i)
 {
 	/* Plural like every row above it - the catch-all is a GROUP of formats
 	 * and was the one row that read as a single thing. */
-	return i < FMT_CAT_N ? g_fmt_cat[i].name : "Others";
+	return i < FMT_CAT_N ? kof_format_group_name(g_fmt_cat[i].group)
+			     : "Others";
 }
 
 /* Does this row open a list of languages rather than of formats? */
@@ -16440,28 +16460,22 @@ static int vis_cols(const char *s)
  * visible and harmless - the alternative, dropping it, would make the box
  * quietly lie about what the binary can read.
  */
+/*
+ * WHICH SHELF, and the MEMBERS come from the engine.
+ *
+ * This was a second list of formats per shelf, written out here - the same
+ * hand copy the format menu had, with the same failure: a format added to the
+ * engine stayed off the shelf it belonged on until somebody remembered this
+ * function. What is peculiar to this box is the ORDER of the shelves and how
+ * many there are; which formats are on one is kof_format_group's answer.
+ */
 static int fmt_group(uint8_t f)
 {
-	switch (f) {
-	case KOF_FMT_ELF:
-	case KOF_FMT_PE:
-	case KOF_FMT_MACHO:
-		return 0;
-	case KOF_FMT_DOCOLE:
-	case KOF_FMT_RTF:
-	case KOF_FMT_PDF:
-	case KOF_FMT_DOCZIP:
-		return 1;
-	case KOF_FMT_ZIP:
-	case KOF_FMT_TAR:
-	case KOF_FMT_RAR:
-	case KOF_FMT_7Z:
-	case KOF_FMT_GZIP:
-	case KOF_FMT_XZ:
-	case KOF_FMT_BZIP2:
-		return 2;
-	default:
-		return 3;
+	switch (kof_format_group(f)) {
+	case KOF_FGRP_EXEC:    return 0;
+	case KOF_FGRP_DOC:     return 1;
+	case KOF_FGRP_ARCHIVE: return 2;
+	default:               return 3;
 	}
 }
 

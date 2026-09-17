@@ -113,6 +113,10 @@
 #include <kofmod/rar.h>
 #include <kofmod/xz.h>
 #include <kofmod/bz2.h>
+#include <kofmod/chm.h>
+#include <kofmod/cab.h>
+#include <kofmod/lha.h>
+#include <kofmod/arj.h>
 #include <kofmod/rtf.h>
 
 #include "../libkofeng/kofparsers/binaries/elf_parse.h"
@@ -963,6 +967,128 @@ static void print_rar(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
  * difference between a reader seeing what was recognised and seeing a format
  * name with nothing under it. What is inside is the unpacker's line below.
  */
+/*
+ * The three archives that arrived together, printed the same way.
+ *
+ * WHAT EACH ONE'S SECOND LINE IS FOR: how much of the archive this build can
+ * actually point at. All three keep entries this engine has no decoder for -
+ * a coded CAB folder, an LHA that is not "-lh0-", an ARJ method above zero -
+ * and a report that listed only what it opened would read as an archive with
+ * three files in it when it has thirty. "Opened, coded, skipped" is the honest
+ * shape, and it is the same shape print_chm uses for the same reason.
+ */
+static void print_cab(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
+{
+	const struct kof_cab_info *c = v;
+	uint32_t i, shown = 0;
+
+	(void)ctx;
+
+	printf("  version   %u.%u   set=0x%04x index=%u\n", c->ver_major,
+	       c->ver_minor, c->set_id, c->cab_index);
+	printf("  declared  %llu byte(s)   %u folder(s), %u file(s)\n",
+	       (unsigned long long)c->declared_size, c->n_folders, c->n_files);
+	printf("  files     %u openable, %u coded, %u split across blocks\n",
+	       c->n_entries, c->n_coded, c->n_split);
+	for (i = 0; i < c->n_folders && i < 8u; i++)
+		printf("    folder[%u] off=%-10llu blocks=%-5u %s\n", i,
+		       (unsigned long long)c->folder[i].data_off,
+		       c->folder[i].n_blocks,
+		       c->folder[i].compress == KOF_CAB_C_NONE  ? "stored" :
+		       c->folder[i].compress == KOF_CAB_C_MSZIP ? "MSZIP" :
+		       c->folder[i].compress == KOF_CAB_C_LZX   ? "LZX"
+								: "Quantum");
+	for (i = 0; i < c->n_entries && shown < 12u; i++, shown++) {
+		const struct kof_entry *e = &c->entry[i];
+		int n = e->name_len > 48u ? 48 : (int)e->name_len;
+
+		printf("    [%3u] off=%-10llu size=%-10llu %.*s\n", i,
+		       (unsigned long long)e->off, (unsigned long long)e->len,
+		       n, (const char *)buf.p + e->name_off);
+	}
+	if (c->n_entries > shown)
+		printf("    ... %u more\n", c->n_entries - shown);
+}
+
+static void print_lha(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
+{
+	const struct kof_lha_info *l = v;
+	uint32_t i, shown = 0;
+
+	(void)ctx;
+
+	printf("  header    level %u\n", l->level);
+	printf("  entries   %u openable, %u coded, %u director%s\n",
+	       l->n_entries, l->n_coded, l->n_dirs,
+	       l->n_dirs == 1u ? "y" : "ies");
+	for (i = 0; i < l->n_entries && shown < 12u; i++, shown++) {
+		const struct kof_entry *e = &l->entry[i];
+		int n = e->name_len > 48u ? 48 : (int)e->name_len;
+
+		printf("    [%3u] off=%-10llu size=%-10llu %.*s\n", i,
+		       (unsigned long long)e->off, (unsigned long long)e->len,
+		       n, (const char *)buf.p + e->name_off);
+	}
+	if (l->n_entries > shown)
+		printf("    ... %u more\n", l->n_entries - shown);
+}
+
+static void print_arj(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
+{
+	const struct kof_arj_info *a = v;
+	uint32_t i, shown = 0;
+
+	(void)ctx;
+
+	printf("  archiver  version %u, needs %u   host os %u\n",
+	       a->archiver_ver, a->min_ver, a->host_os);
+	printf("  entries   %u openable, %u coded, %u director%s\n",
+	       a->n_entries, a->n_coded, a->n_dirs,
+	       a->n_dirs == 1u ? "y" : "ies");
+	for (i = 0; i < a->n_entries && shown < 12u; i++, shown++) {
+		const struct kof_entry *e = &a->entry[i];
+		int n = e->name_len > 48u ? 48 : (int)e->name_len;
+
+		printf("    [%3u] off=%-10llu size=%-10llu %.*s\n", i,
+		       (unsigned long long)e->off, (unsigned long long)e->len,
+		       n, (const char *)buf.p + e->name_off);
+	}
+	if (a->n_entries > shown)
+		printf("    ... %u more\n", a->n_entries - shown);
+}
+
+/*
+ * The directory, and how much of it this build can open. n_compressed is the
+ * line that matters most on a real help file: it says how much of the document
+ * sits behind LZX, which this build does not have - see chm.h.
+ */
+static void print_chm(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
+{
+	const struct kof_chm_info *c = v;
+	uint32_t i, shown = 0;
+
+	(void)ctx;
+
+	printf("  version   ITSF %u   lang=0x%04x\n", c->itsf_version,
+	       c->lang_id);
+	printf("  directory off=%llu len=%llu   %u chunk(s) of %u\n",
+	       (unsigned long long)c->dir_off, (unsigned long long)c->dir_len,
+	       c->n_chunks, c->chunk_size);
+	printf("  content   off=%llu\n", (unsigned long long)c->content_off);
+	printf("  entries   %u openable, %u compressed, %u internal\n",
+	       c->n_entries, c->n_compressed, c->n_special);
+	for (i = 0; i < c->n_entries && shown < 12u; i++, shown++) {
+		const struct kof_entry *e = &c->entry[i];
+		int n = e->name_len > 60u ? 60 : (int)e->name_len;
+
+		printf("    [%3u] off=%-10llu size=%-10llu %.*s\n", i,
+		       (unsigned long long)e->off, (unsigned long long)e->len,
+		       n, (const char *)buf.p + e->name_off);
+	}
+	if (c->n_entries > shown)
+		printf("    ... %u more\n", c->n_entries - shown);
+}
+
 static void print_bz2(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 {
 	const struct kof_bz2_info *b = v;
@@ -1117,6 +1243,10 @@ static void print_view(uint8_t format, const void *view,
 	case KOF_FMT_RAR:    print_rar(view, ctx, buf);    break;
 	case KOF_FMT_XZ:     print_xz(view, ctx, buf);     break;
 	case KOF_FMT_BZIP2:  print_bz2(view, ctx, buf);    break;
+	case KOF_FMT_CHM:    print_chm(view, ctx, buf);    break;
+	case KOF_FMT_CAB:    print_cab(view, ctx, buf);    break;
+	case KOF_FMT_LHA:    print_lha(view, ctx, buf);    break;
+	case KOF_FMT_ARJ:    print_arj(view, ctx, buf);    break;
 	case KOF_FMT_RTF:    print_rtf(view, ctx, buf);    break;
 	case KOF_FMT_PDF:    print_pdf(view, ctx, buf);    break;
 	default:                                           break;

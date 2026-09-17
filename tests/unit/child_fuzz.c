@@ -145,7 +145,7 @@ static void one_round(uint64_t round)
 	opt.all_matches        = (int)(rnd() & 1);
 
 	m.fn = mod_random;
-	m.target_mask = 0xffffffffu;
+	m.n_target = 0;      /* every target - see n_target in kofdb.h */
 	eng.unp = &m;
 	eng.n_unp = 1;
 

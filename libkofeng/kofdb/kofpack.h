@@ -308,8 +308,14 @@ enum kof_pack_kind {
  * Keeping them apart is the difference between a prefilter pass touching 80KB and
  * one touching 224KB of strided records at 4000 modules.
  */
+/* The target row: one count byte, then that many ids, padded to a fixed width
+ * so the row for module i is at i * stride - see KOF_SEC_PRE_TARGET. */
+#define KOF_PRE_TARGET_STRIDE (1u + KOF_TARGET_LIST_MAX)
+
 enum kof_pack_sec_id {
-	KOF_SEC_PRE_TARGET = 0,   /* uint32 x n_mods */
+	/* KOF_PRE_TARGET_STRIDE x n_mods - a count and the ids it counts, NOT
+	 * a mask: see n_target in kofdb.h for why the axis stopped being bits. */
+	KOF_SEC_PRE_TARGET = 0,
 	KOF_SEC_PRE_SCAN   = 1,   /* uint32 x n_mods */
 	KOF_SEC_PRE_ARCH   = 2,   /* uint32 x n_mods */
 	KOF_SEC_PRE_SIZE   = 3,   /* uint64 x n_mods */
@@ -486,7 +492,10 @@ struct kof_pack_hdr {
 	 * modules do silently stops running them, and no test notices a detection
 	 * that did not happen.
 	 */
-	uint32_t any_target;      /* OR of every module's target_mask */
+	/* Which target ids anything in this pack is for, one bit per id - a
+	 * presence set, because an id is a number rather than a bit. All ones
+	 * when some module here targets everything. */
+	uint64_t any_target;
 	uint32_t any_scan;        /* OR of every module's scan_mask   */
 	uint32_t any_arch;        /* OR of every module's arch_mask; 0 -> any */
 
@@ -899,8 +908,11 @@ _Static_assert(sizeof(struct kof_pack_idx)  == 8,   "pack index slot grew paddin
  * padding, which is what it is for, but it also failed every time the section table
  * legitimately grew, which taught whoever hit it to update the number rather than to
  * ask why it moved. */
+/* 88 while any_target was a uint32 mask; 96 now that it is a 64 bit presence
+ * set over target ids - see the field, and n_target in kofdb.h for why the
+ * axis stopped being bits. */
 _Static_assert(sizeof(struct kof_pack_hdr) ==
-	       88 + KOF_SEC_COUNT * sizeof(struct kof_pack_sec),
+	       96 + KOF_SEC_COUNT * sizeof(struct kof_pack_sec),
 	       "pack header changed size");
 
 /* The checksum has to start after itself and cover everything else. */

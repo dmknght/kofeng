@@ -82,7 +82,8 @@ static uint8_t *build_good(size_t *len)
 	memset(m, 0, sizeof m);
 	m[0].code = code_a;
 	m[0].code_len = (uint32_t)sizeof code_a;
-	m[0].target_mask = 1;
+	m[0].n_target = 1;
+	m[0].target[0] = KOF_FMT_UNKNOWN;
 	m[0].scan_mask = (1u << 2) | (1u << 3);
 	m[0].size_min = 64;
 	m[0].str = str_a;
@@ -94,7 +95,8 @@ static uint8_t *build_good(size_t *len)
 
 	m[1].code = code_b;
 	m[1].code_len = (uint32_t)sizeof code_b;
-	m[1].target_mask = 1;
+	m[1].n_target = 1;
+	m[1].target[0] = KOF_FMT_UNKNOWN;
 	m[1].scan_mask = 1u << 2;
 	m[1].str = str_b;
 	m[1].n_str = 1;
@@ -743,7 +745,8 @@ static void check_order(void)
 		memset(&m, 0, sizeof m);
 		m.code = code;
 		m.code_len = (uint32_t)sizeof code;
-		m.target_mask = 1;
+		m.n_target = 1;
+		m.target[0] = KOF_FMT_UNKNOWN;
 		m.size_min = (uint64_t)k + 1u;   /* the marker is the name */
 
 		img = kof_pack_build(KOF_PACK_DETECT, &m, 1, &len);
@@ -841,7 +844,8 @@ static void check_stamp(void)
 	memset(&m, 0, sizeof m);
 	m.code = code;
 	m.code_len = (uint32_t)sizeof code;
-	m.target_mask = 1;
+	m.n_target = 1;
+	m.target[0] = KOF_FMT_UNKNOWN;
 	m.size_min = 1;
 	img = kof_pack_build(KOF_PACK_DETECT, &m, 1, &len);
 	ok = img && write_pack(dir, "a.ksig", img, len);

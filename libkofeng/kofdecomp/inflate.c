@@ -520,19 +520,54 @@ static int build_dynamic(struct kof_inflate *s)
 
 /* ---- the stream ------------------------------------------------------------- */
 
-enum kof_decomp_status kof_inflate(struct kof_inflate *s, const uint8_t *in, uint64_t in_len,
+/*
+ * THE SAME DECODE, WITH A HISTORY IN FRONT OF IT.
+ *
+ * A stream that may reference bytes it did not itself produce is not a
+ * pathological case - it is how MSZIP works. A cabinet's MSZIP folder is a
+ * SEQUENCE of deflate streams, one per block, and every block after the first
+ * may reach up to 32KB back into the PREVIOUS block's output. Decoded one at a
+ * time from an empty window, block one is right and everything after it is
+ * plausible and wrong: matches resolve against zeros, so the output is the
+ * correct length and the wrong bytes, and nothing reports a failure.
+ *
+ * So the seed is the previous block's tail, and `produced` starts at its length
+ * - which is the same number the distance check reads, so a reference into the
+ * seed is permitted and one past it is still refused.
+ *
+ * kof_inflate is this with no seed, and is written in terms of it so the two
+ * cannot drift.
+ */
+enum kof_decomp_status kof_inflate_seeded(struct kof_inflate *s,
+		const uint8_t *seed, uint32_t seed_len,
+		const uint8_t *in, uint64_t in_len,
 		kof_inflate_sink sink, void *user,
 		uint64_t *consumed, uint64_t *produced)
 {
 	int status = KOF_DEC_OK, last = 0;
+	uint64_t seed_start;
 
 	memset(s->win, 0, sizeof s->win);
 	s->wpos = s->wpend = 0;
+	s->produced = 0;
+	if (seed && seed_len) {
+		if (seed_len > KOF_INF_WINDOW)
+			seed_len = KOF_INF_WINDOW;
+		memcpy(s->win, seed, seed_len);
+		/*
+		 * wpos is where the next byte goes, which is one past the seed;
+		 * wpend stays zero because NONE OF THE SEED IS OUTPUT - it has
+		 * already been handed to the sink by the block that produced
+		 * it, and emitting it again would duplicate it in the child.
+		 */
+		s->wpos = seed_len & (KOF_INF_WINDOW - 1u);
+		s->produced = seed_len;
+	}
+	seed_start = s->produced;
 	s->in = in;
 	s->in_len = in ? in_len : 0;
 	s->in_pos = 0;
 	s->bitbuf = s->bitcnt = 0;
-	s->produced = 0;
 
 	while (!last) {
 		int type, r;
@@ -582,8 +617,18 @@ enum kof_decomp_status kof_inflate(struct kof_inflate *s, const uint8_t *in, uin
 	 */
 	if (consumed)
 		*consumed = s->in_pos - (s->bitcnt >> 3);
+	/* What THIS call produced, which is not s->produced: that one counts the
+	 * seed as well, because the distance check reads it. */
 	if (produced)
-		*produced = s->produced;
+		*produced = s->produced - seed_start;
 	return status;
+}
+
+enum kof_decomp_status kof_inflate(struct kof_inflate *s, const uint8_t *in,
+		uint64_t in_len, kof_inflate_sink sink, void *user,
+		uint64_t *consumed, uint64_t *produced)
+{
+	return kof_inflate_seeded(s, NULL, 0, in, in_len, sink, user,
+				  consumed, produced);
 }
 

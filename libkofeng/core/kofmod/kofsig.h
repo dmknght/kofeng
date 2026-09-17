@@ -216,7 +216,7 @@ enum kof_format {
 	 * THEY EXIST SO THAT NOTHING OPENS THEM UNTIL SOMETHING WANTS TO, and
 	 * that follows from what a format already does rather than from any new
 	 * policy. A format GATES: a module is offered an object only when
-	 * target_mask names its format. So a child declared KOF_FMT_FONT with
+	 * its target list names its format. So a child declared KOF_FMT_FONT with
 	 * no rule in the database targeting fonts is a child that will be
 	 * produced - inflated, copied, charged to the budget - and then handed
 	 * to nobody. The gate has already said no; fmt_wanted below is that
@@ -263,6 +263,28 @@ enum kof_format {
 	 * enumerator.
 	 */
 	KOF_FMT_BZIP2   = 18,
+
+	/*
+	 * CHM - the HTML Help archive, and the first format added after the
+	 * axis stopped being bits.
+	 *
+	 * It takes 23 and not 19 because nineteen through twenty-two are event
+	 * verbs, which are numbered into records already written and do not
+	 * move. That is all the old "line" amounts to now: four values already
+	 * spoken for, rather than a half of the axis that could run out. See
+	 * chm.h for what the format is and what this build does not do with it.
+	 */
+	KOF_FMT_CHM     = 23,
+
+	/* The Microsoft Cabinet - see cab.h for why this one is worth having
+	 * while the older archives beside it in the corpus are not, yet. */
+	KOF_FMT_CAB     = 24,
+
+	/* LHA/LZH - see lha.h for why a format from 1988 is worth a value. */
+	KOF_FMT_LHA     = 25,
+
+	/* ARJ - see arj.h; its self extractor is why the bytes still turn up. */
+	KOF_FMT_ARJ     = 26,
 
 	/*
 	 * ONE COLLECTED EVENT, not a file.
@@ -334,67 +356,89 @@ enum kof_format {
 	KOF_EVT_PROC    = 22,
 
 	/*
-	 * One past the last FILE FORMAT, so a host can size a per-format table.
-	 * Not a format: nothing is ever this.
+	 * One past the highest FILE FORMAT value, so a host can size a
+	 * per-format table. Not a format: nothing is ever this.
 	 *
-	 * It stops at the file formats on purpose. Event targets are numbered
-	 * above them - see KOF_TARGET_FIRST_EVENT - so this is no longer the
-	 * width of the axis, and anything sizing an array by target value wants
-	 * KOF_TARGET_BITS instead.
+	 * The event targets below continue the SAME numbering, so this is not
+	 * the width of the target axis - KOF_TARGET_COUNT is. A table indexed
+	 * by target value wants that one.
 	 */
-	KOF_FMT_COUNT   = 19
+	KOF_FMT_COUNT   = 27
 };
 
 /*
- * WHERE EVENT TARGETS START, AND WHY THE BOUNDARY IS DECLARED.
+ * THE TARGET AXIS: ORDINARY NUMBERS, NOT BITS.
+ *
+ * A target is what a module declares it is for - a file format, or the verb of
+ * a collected event. The values are plain ordinals: KOF_FMT_ZIP is 8, and 8
+ * means the ninth target, not the ninth bit of anything.
+ *
+ * IT WAS BITS, and that is why this note exists. A module's target was a uint32
+ * MASK, because a module may be for several formats at once - the zip unpacker
+ * is for ZIP and DOCZIP both. One bit per target made the number of things this
+ * engine could EVER target equal to the width of a word: nineteen file formats
+ * and four event verbs share the axis, so the twenty-fourth target could not be
+ * added at all. Adding bzip2 spent the last value under the old scheme, and the
+ * next format would have needed the mask widened, which is a pack format
+ * change to buy thirty-two more of something that will run out again.
+ *
+ * So a module carries a LIST OF IDS and a count of them - see n_target in
+ * kofdb.h. The count is what makes it safe: a reader knows exactly how many
+ * bytes of the row mean anything, so a row cannot be read into the next one.
+ * Multi-target modules stay cheap because the hot path never walks the list -
+ * the loader builds an inverted index from target id to modules and the scan
+ * looks up the bucket for the object in hand.
+ *
+ * NUMBERS ARE ASSIGNED IN ORDER AND NOTHING IS RESERVED. A new file format
+ * takes the next free value, which is KOF_TARGET_COUNT, and raises it. There is
+ * no line between the formats and the verbs any more, because there is nothing
+ * to ration: the axis is as wide as the byte that holds an id.
+ *
+ * WHAT STILL DOES NOT GET A VALUE OF ITS OWN: a file type that shares another's
+ * HEADER AND VIEW. The subtype axis is for exactly that - ctx->subtype - and it
+ * is what tells a .so from an executable, php from python, and would tell two
+ * document kinds apart that a parser reads identically. A second format value
+ * for the same bytes buys a name and costs a parse, a view struct and a row in
+ * every table that lists formats. Spend a format when the PARSE differs; spend
+ * a subtype when only the KIND does.
+ */
+#define KOF_TARGET_COUNT 27u
+
+/*
+ * How many targets one module may name.
+ *
+ * Fifteen, which with the count byte makes a sixteen byte row in the pack. The
+ * widest module in the tree names three (KOF_FMT_ELF | KOF_FMT_PE |
+ * KOF_FMT_UNKNOWN); the widest a person can produce from the editor is the
+ * "Archives" group, which is eight. A module that wants more than fifteen wants
+ * KOF_FMT_ANY, and the builder says so rather than truncating - a silently
+ * shortened list is a rule narrower than its source, with nothing printed.
+ */
+#define KOF_TARGET_LIST_MAX 15u
+
+/*
+ * WHERE EVENT VERBS SIT TODAY, as a fact rather than as a boundary.
  *
  * An event target's value IS its verb - KOF_EVT_AMSI is KOF_EVT_AMSI_SCAN, the
  * same number - so the byte a client filters records on is the byte the
  * prefilter rules modules on, and the two cannot drift apart because they are
- * one number.
+ * one number. That ties the verbs to values already written into stored
+ * records, which is why they are not renumbered: nineteen through twenty-two
+ * are theirs and a file format does not take one.
  *
- * That only works while no verb collides with a file format, and verbs start at
- * 1: KOF_EVT_PROC_START would be KOF_FMT_ELF. So the low half of the axis
- * belongs to file formats and the high half to verbs, and every event target
- * asserts that it is above the line (see kofevt.h). A verb below it simply
- * cannot be given a target until the boundary moves.
- *
- * THE AXIS IS 32 VALUES WIDE AND THAT IS A HARD CEILING: a module's target is a
- * uint32 MASK in the pack, because a module may target more than one thing.
- * Eighteen are spent on file formats and fourteen are left for events - which is
- * ample, because a target is needed per RULE SHAPE and not per verb, and most
- * verbs will never have one.
- *
- * THE LINE MOVED ONCE, 16 to 18, when KOF_FMT_IMAGE and KOF_FMT_FONT were
- * added. What that costs is two of the fourteen values left for verbs, and
- * what it requires is that no event target is below the new line: the only one
- * is KOF_EVT_AMSI at 19, and every event target asserts it is above the line
- * (see kofevt.h), so moving it is checked rather than assumed. Moving it again
- * is the same two steps.
+ * It is no longer a CEILING on anything. Before, everything below this belonged
+ * to formats and everything above to verbs, and the format half was full. Now
+ * the next format takes the next free number - twenty-three - and verbs keep
+ * what they have. The assert below is the whole of the rule that remains.
  */
 #define KOF_TARGET_FIRST_EVENT 19u
-#define KOF_TARGET_BITS        32u
 
-/*
- * AND THE LINE IS CHECKED, not just described.
- *
- * The note above says moving it is two steps: raise the line, and confirm no
- * event target fell below it. The second step is asserted in kofevt.h, by every
- * event target. The FIRST had nothing - so adding a nineteenth file format
- * would make KOF_FMT_COUNT pass the line and collide with KOF_EVT_AMSI at 19,
- * and the only symptom would be an AMSI rule running on that new format and a
- * rule for that format running on AMSI records. Nothing would fail to build and
- * nothing would crash; two prefilters would simply agree about the wrong bit.
- *
- * The second assert is the ceiling the whole axis rests on: the mask is a
- * uint32 in the pack, and `1u << KOF_FMT_COUNT` in ksigbuilder's KOF_FMT_ANY is
- * undefined the moment the count reaches 32.
- */
-_Static_assert(KOF_FMT_COUNT <= KOF_TARGET_FIRST_EVENT,
-	       "a file format was added past the line event targets start on "
-	       "- raise KOF_TARGET_FIRST_EVENT and check kofevt.h's asserts");
-_Static_assert(KOF_TARGET_BITS <= 32u,
-	       "the target is a uint32 mask in the pack");
+/* The rule that no format takes a verb's value is checked per row, beside
+ * KOF_TARGET_LIST - it needs the list, which is declared further down. */
+_Static_assert(KOF_TARGET_COUNT >= KOF_FMT_COUNT,
+	       "the axis must cover every file format");
+_Static_assert(KOF_TARGET_LIST_MAX >= 8u,
+	       "the editor can name eight formats in one rule");
 
 /*
  * Architecture, normalised across formats.
@@ -485,58 +529,166 @@ static inline int kof_streq_(const char *a, const char *b)
  * KOF_FMT_ANY is not here. It is not a format, it is every format at once, and
  * the caller that accepts it has to turn it into a mask rather than a value.
  */
+/*
+ * THE TARGETS, ONCE.
+ *
+ * Written as a macro rather than repeated, for the reason KOF_ARCH_LIST gives
+ * and for one this file has already paid: the identifier, the display word and
+ * the value were spelled out in three places here and a FOURTH in kofeditor,
+ * which the editor's own comment called "the THIRD hand copy ... the one
+ * nothing checks" after two formats went missing from it silently. A rule that
+ * targeted an image was written narrower than its source said, and nothing
+ * failed.
+ *
+ * Three fields: the identifier a signature writes, the value it has, and the
+ * word a finding prints. The value is repeated beside the enumerator on
+ * purpose - it is checked against it below, so this list cannot drift from the
+ * enum without the build stopping.
+ */
+/*
+ * WHAT KIND OF THING A TARGET IS, as the fourth column.
+ *
+ * Not a taxonomy for its own sake: two tools were grouping formats by hand and
+ * both had to be edited whenever one was added - the viewer's format menu
+ * silently lost bzip2 until somebody noticed it missing from a list of
+ * archives. A group belongs beside the format for the same reason the word
+ * does.
+ *
+ * COARSE ON PURPOSE. This answers "where would a reader look for it", which is
+ * a menu and a summary line. It is NOT what decides which pack a module is
+ * written into - ksigbuilder's buckets are finer (one per executable format)
+ * and split DOCZIP the other way, because a pack is about which modules share
+ * a prefilter and not about how a person browses.
+ */
+enum kof_format_group {
+	KOF_FGRP_RAW = 0,     /* nothing claimed it */
+	KOF_FGRP_EXEC,        /* an image a loader runs */
+	KOF_FGRP_SCRIPT,      /* meant to be interpreted */
+	KOF_FGRP_TEXT,        /* readable, and claiming nothing more */
+	KOF_FGRP_DOC,         /* a document, whatever it is built out of */
+	KOF_FGRP_ARCHIVE,     /* carries files that were separately there */
+	KOF_FGRP_MEDIA,       /* pixels or glyphs */
+	KOF_FGRP_EVENT        /* not a file at all - see KOF_EVT_AMSI */
+};
+
+#define KOF_TARGET_LIST(X)                                        \
+	X(KOF_FMT_UNKNOWN,  0, "Raw",     KOF_FGRP_RAW)           \
+	X(KOF_FMT_ELF,      1, "ELF",     KOF_FGRP_EXEC)          \
+	X(KOF_FMT_PE,       2, "PE",      KOF_FGRP_EXEC)          \
+	X(KOF_FMT_MACHO,    3, "MachO",   KOF_FGRP_EXEC)          \
+	X(KOF_FMT_SCRIPT,   4, "Script",  KOF_FGRP_SCRIPT)        \
+	X(KOF_FMT_TEXT,     5, "Text",    KOF_FGRP_TEXT)          \
+	X(KOF_FMT_GZIP,     6, "Gzip",    KOF_FGRP_ARCHIVE)       \
+	X(KOF_FMT_DOCOLE,   7, "DocOLE",  KOF_FGRP_DOC)           \
+	X(KOF_FMT_ZIP,      8, "Zip",     KOF_FGRP_ARCHIVE)       \
+	X(KOF_FMT_DOCZIP,   9, "DocZip",  KOF_FGRP_DOC)           \
+	X(KOF_FMT_TAR,     10, "Tar",     KOF_FGRP_ARCHIVE)       \
+	X(KOF_FMT_7Z,      11, "7z",      KOF_FGRP_ARCHIVE)       \
+	X(KOF_FMT_RAR,     12, "RAR",     KOF_FGRP_ARCHIVE)       \
+	X(KOF_FMT_XZ,      13, "xz",      KOF_FGRP_ARCHIVE)       \
+	X(KOF_FMT_RTF,     14, "RTF",     KOF_FGRP_DOC)           \
+	X(KOF_FMT_PDF,     15, "PDF",     KOF_FGRP_DOC)           \
+	X(KOF_FMT_IMAGE,   16, "Image",   KOF_FGRP_MEDIA)         \
+	X(KOF_FMT_FONT,    17, "Font",    KOF_FGRP_MEDIA)         \
+	X(KOF_FMT_BZIP2,   18, "bzip2",   KOF_FGRP_ARCHIVE)       \
+	X(KOF_EVT_AMSI,    19, "AMSI",    KOF_FGRP_EVENT)         \
+	X(KOF_EVT_PROC,    22, "Process", KOF_FGRP_EVENT)         \
+	X(KOF_FMT_CHM,     23, "CHM",     KOF_FGRP_DOC)           \
+	X(KOF_FMT_CAB,     24, "CAB",     KOF_FGRP_ARCHIVE)       \
+	X(KOF_FMT_LHA,     25, "LHA",     KOF_FGRP_ARCHIVE)       \
+	X(KOF_FMT_ARJ,     26, "ARJ",     KOF_FGRP_ARCHIVE)
+
+#define KOF_TARGET_X_ASSERT(name, val, word, grp)                           \
+	_Static_assert((name) == (val),                                     \
+		       "KOF_TARGET_LIST disagrees with the enum about " #name);
+KOF_TARGET_LIST(KOF_TARGET_X_ASSERT)
+#undef KOF_TARGET_X_ASSERT
+
+/*
+ * NO FILE FORMAT MAY TAKE A VERB'S VALUE, and that is now the whole rule.
+ *
+ * It used to be "every format is below the line", which is stronger than the
+ * axis needs and is what ran out: the line was 19, the formats had filled up to
+ * it, and the nineteenth could not be added at all. What has to hold is only
+ * that two different things never share one id - so a format may take any value
+ * the verbs do not, and the one after CHM is 24.
+ *
+ * Checked per row rather than as one comparison against a count, because a
+ * count only catches a format that walks INTO the band from below. The group
+ * column is what says which rows are verbs.
+ */
+#define KOF_TARGET_X_NOCLASH(name, val, word, grp)                            \
+	_Static_assert((grp) == KOF_FGRP_EVENT ||                             \
+		       (val) < KOF_TARGET_FIRST_EVENT ||                      \
+		       (val) > KOF_EVT_PROC,                                  \
+		       #name " takes a value an event verb already has - "    \
+		       "verbs are numbered into stored records and do not move");
+KOF_TARGET_LIST(KOF_TARGET_X_NOCLASH)
+#undef KOF_TARGET_X_NOCLASH
+
+/* Which group a target is in, or KOF_FGRP_RAW for a value this build has no
+ * row for - which is what an unclaimed object is anyway. */
+static inline enum kof_format_group kof_format_group(uint8_t fmt)
+{
+	switch (fmt) {
+#define KOF_FMT_X_GROUP(name, val, word, grp) case name: return (grp);
+	KOF_TARGET_LIST(KOF_FMT_X_GROUP)
+#undef KOF_FMT_X_GROUP
+	default: return KOF_FGRP_RAW;
+	}
+}
+
+/* The group as a word, for a menu or a summary. Plural where the row names a
+ * SET of formats, which is what those rows are; "Media" is already plural and
+ * "Other" names what is left rather than a group. */
+static inline const char *kof_format_group_name(enum kof_format_group g)
+{
+	switch (g) {
+	case KOF_FGRP_EXEC:    return "Executables";
+	case KOF_FGRP_SCRIPT:  return "Scripts";
+	case KOF_FGRP_TEXT:    return "Text";
+	case KOF_FGRP_DOC:     return "Documents";
+	case KOF_FGRP_ARCHIVE: return "Archives";
+	case KOF_FGRP_MEDIA:   return "Media";
+	case KOF_FGRP_EVENT:   return "Events";
+	case KOF_FGRP_RAW:     return "Other";
+	default:               return "Other";
+	}
+}
+
 static inline int kof_format_from_name(const char *s, uint8_t *out)
 {
-#define KOF_FMT_X_FROM(name, val)                                           \
+#define KOF_FMT_X_FROM(name, val, word, grp)                                \
 	if (kof_streq_(s, #name)) { *out = (uint8_t)(val); return 1; }
-	KOF_FMT_X_FROM(KOF_FMT_UNKNOWN, KOF_FMT_UNKNOWN)
-	KOF_FMT_X_FROM(KOF_FMT_ELF,     KOF_FMT_ELF)
-	KOF_FMT_X_FROM(KOF_FMT_PE,      KOF_FMT_PE)
-	KOF_FMT_X_FROM(KOF_FMT_MACHO,   KOF_FMT_MACHO)
-	KOF_FMT_X_FROM(KOF_FMT_SCRIPT,  KOF_FMT_SCRIPT)
-	KOF_FMT_X_FROM(KOF_FMT_TEXT,    KOF_FMT_TEXT)
-	KOF_FMT_X_FROM(KOF_FMT_GZIP,    KOF_FMT_GZIP)
-	KOF_FMT_X_FROM(KOF_FMT_DOCOLE,  KOF_FMT_DOCOLE)
-	KOF_FMT_X_FROM(KOF_FMT_ZIP,     KOF_FMT_ZIP)
-	KOF_FMT_X_FROM(KOF_FMT_DOCZIP,  KOF_FMT_DOCZIP)
-	KOF_FMT_X_FROM(KOF_FMT_TAR,     KOF_FMT_TAR)
-	KOF_FMT_X_FROM(KOF_FMT_7Z,      KOF_FMT_7Z)
-	KOF_FMT_X_FROM(KOF_FMT_RAR,     KOF_FMT_RAR)
-	KOF_FMT_X_FROM(KOF_FMT_XZ,      KOF_FMT_XZ)
-	KOF_FMT_X_FROM(KOF_FMT_RTF,     KOF_FMT_RTF)
-	KOF_FMT_X_FROM(KOF_FMT_PDF,     KOF_FMT_PDF)
-	KOF_FMT_X_FROM(KOF_FMT_IMAGE,   KOF_FMT_IMAGE)
-	KOF_FMT_X_FROM(KOF_FMT_FONT,    KOF_FMT_FONT)
-	KOF_FMT_X_FROM(KOF_FMT_BZIP2,   KOF_FMT_BZIP2)
-	KOF_FMT_X_FROM(KOF_EVT_AMSI,    KOF_EVT_AMSI)
-	KOF_FMT_X_FROM(KOF_EVT_PROC,    KOF_EVT_PROC)
+	KOF_TARGET_LIST(KOF_FMT_X_FROM)
 #undef KOF_FMT_X_FROM
 	return 0;
+}
+
+/*
+ * The IDENTIFIER, which is what a signature source spells - "KOF_FMT_ZIP".
+ *
+ * The other direction of kof_format_from_name, and the one the editor needs:
+ * it writes KOF_TARGET_FORMAT lines, so it needs the token rather than the
+ * word a finding prints. It had a table of its own for this; now there is one
+ * list and the tools ask.
+ */
+static inline const char *kof_format_ident(uint8_t fmt)
+{
+	switch (fmt) {
+#define KOF_FMT_X_IDENT(name, val, word, grp) case name: return #name;
+	KOF_TARGET_LIST(KOF_FMT_X_IDENT)
+#undef KOF_FMT_X_IDENT
+	default: return 0;
+	}
 }
 
 static inline const char *kof_format_name(uint8_t fmt)
 {
 	switch (fmt) {
-	case KOF_FMT_ELF:    return "ELF";
-	case KOF_FMT_PE:     return "PE";
-	case KOF_FMT_MACHO:  return "MachO";
-	case KOF_FMT_SCRIPT: return "Script";
-	case KOF_FMT_TEXT:   return "Text";
-	case KOF_FMT_GZIP:   return "Gzip";
-	case KOF_FMT_DOCOLE: return "DocOLE";
-	case KOF_FMT_ZIP:    return "Zip";
-	case KOF_FMT_DOCZIP: return "DocZip";
-	case KOF_FMT_TAR:    return "Tar";
-	case KOF_FMT_7Z:     return "7z";
-	case KOF_FMT_RAR:    return "RAR";
-	case KOF_FMT_XZ:     return "xz";
-	case KOF_FMT_BZIP2:  return "bzip2";
-	case KOF_EVT_AMSI:   return "AMSI";
-	case KOF_EVT_PROC:   return "Process";
-	case KOF_FMT_RTF:    return "RTF";
-	case KOF_FMT_PDF:    return "PDF";
-	case KOF_FMT_IMAGE:  return "Image";
-	case KOF_FMT_FONT:   return "Font";
+#define KOF_FMT_X_NAME(name, val, word, grp) case name: return word;
+	KOF_TARGET_LIST(KOF_FMT_X_NAME)
+#undef KOF_FMT_X_NAME
 	/*
 	 * "Raw", not "Unknown", and the two are different answers.
 	 *
@@ -551,7 +703,6 @@ static inline const char *kof_format_name(uint8_t fmt)
 	 * PDF finding and a formatless one were spelled the same in a name and
 	 * in a pack's filename.
 	 */
-	case KOF_FMT_UNKNOWN: return "Raw";
 	default:             return "Unknown";
 	}
 }
@@ -1163,7 +1314,7 @@ struct kof_content {
 	 * smart deep scan on the engine's side.
 	 *
 	 * IT IS NOT A POLICY, IT IS THE GATE ASKED EARLY. A module is offered
-	 * an object only when its target_mask names the object's format, so a
+	 * an object only when its target list names the object's format, so a
 	 * child of a format no loaded rule targets is a child that will be
 	 * produced and handed to nobody. The engine already knew that before
 	 * the inflate started; this is how a producer can know it too. There is
@@ -1300,6 +1451,21 @@ enum kof_unp_form {
 };
 
 enum kof_unp_method {
+	/*
+	 * NO CODING AT ALL - the bytes are already what they are.
+	 *
+	 * Zero has always meant this where a chain is stored (see
+	 * kof_entry.coding, "all zero means STORED"), and naming it makes the
+	 * one case that needs saying expressible: an entry that is stored and
+	 * SCATTERED. A stored entry in one range is a window and costs nothing;
+	 * a stored entry in several is a JOIN, which is a copy and a budget,
+	 * and kof_unpack_entry is where that belongs.
+	 *
+	 * A cabinet is why. Its uncompressed folders are cut into blocks with
+	 * an eight byte header between them, so a stored file larger than a
+	 * block is several ranges - and every stored file over 32KB is.
+	 */
+	KOF_UNP_STORED = 0,
 	KOF_UNP_DEFLATE = 1,   /* RFC 1951; streams, needs no size hint */
 
 	/*
@@ -1460,6 +1626,24 @@ enum kof_unp_method {
 	 * cannot be.
 	 */
 	KOF_UNP_BZIP2 = 14,
+
+	/*
+	 * MSZIP, WHICH IS NOT ONE CODING BUT A SEQUENCE OF THEM.
+	 *
+	 * A cabinet's MSZIP folder is one deflate stream PER BLOCK, each behind
+	 * the two bytes "CK", and every block after the first may reference up
+	 * to 32KB of the previous block's output. So it is decoded through
+	 * kof_unpack_entry rather than kof_unpack_at: what it needs is the list
+	 * of blocks, which resolve_entry answers, and a decoder that can be
+	 * seeded, which kof_inflate_seeded is.
+	 *
+	 * `out_hint` CARRIES TWO NUMBERS for this method: the file's offset
+	 * inside the folder's decoded stream in the high 32 bits, its length in
+	 * the low 32. A CFFILE has both, a range can hold neither, and putting
+	 * them in the entry would be one format's meaning inside the host's
+	 * structure.
+	 */
+	KOF_UNP_MSZIP = 15,
 
 	KOF_UNP_NRV2B_8 = 16, KOF_UNP_NRV2B_16, KOF_UNP_NRV2B_32,
 	KOF_UNP_NRV2D_8,      KOF_UNP_NRV2D_16, KOF_UNP_NRV2D_32,
@@ -1866,7 +2050,7 @@ struct kof_obj_ctx {
 	 * IMAGE_FILE_MACHINE_ARM64. So the values are declared in elf.h and pe.h and
 	 * the numbers COLLIDE between formats - KOF_ELF_REL and KOF_PE_DLL are both 1.
 	 *
-	 * That is safe rather than sloppy, because target_mask is tested first: the
+	 * That is safe rather than sloppy, because the target is tested first: the
 	 * subtype test is only ever reached for an object of a format the module
 	 * already declared. The build refuses a module that names one format's
 	 * subtypes while targeting another, so the collision cannot be reached by

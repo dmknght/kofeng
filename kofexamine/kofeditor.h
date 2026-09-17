@@ -850,7 +850,9 @@ extern const uint32_t pe_sub_n;
 /* The script kinds, for the same job - see script_sub in kofeditor.c. */
 extern const char *const script_sub[];
 extern const uint32_t script_sub_n;
-extern const char *const fmt_word[];
+/* The identifier for a target value - "KOF_FMT_ZIP" - out of the engine's own
+ * list rather than a copy here. See fmt_word in kofeditor.c. */
+const char *fmt_word(uint32_t fmt);
 extern const uint32_t fmt_word_n;
 extern const char *const maltype_word[];
 extern const uint32_t maltype_word_n;

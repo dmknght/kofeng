@@ -71,7 +71,9 @@ static void synth_free(struct synth *s)
 	memset(s, 0, sizeof *s);
 }
 
-static int synth_make(struct synth *s, uint32_t mods, uint32_t target)
+/* `target` is a format id, or -1 for a module that names every target - which
+ * is what an empty list means; see n_target in kofdb.h. */
+static int synth_make(struct synth *s, uint32_t mods, int target)
 {
 	uint32_t i;
 
@@ -104,7 +106,8 @@ static int synth_make(struct synth *s, uint32_t mods, uint32_t target)
 
 		s->mod[i].code        = code;
 		s->mod[i].code_len    = BLOB_LEN;
-		s->mod[i].target_mask = target;
+		s->mod[i].n_target    = target < 0 ? 0u : 1u;
+		s->mod[i].target[0]   = target < 0 ? 0u : (uint8_t)target;
 		/* The whole object: a region bit names a FORMAT's region, and
 		 * the object here is text, which has none. Naming one had
 		 * every module rejected by region before the matcher was
@@ -137,7 +140,7 @@ struct cost {
 };
 
 static int measure(const char *dir, const char *obj, uint32_t mods,
-		   uint32_t target, struct cost *out)
+		   int target, struct cost *out)
 {
 	char pack[512];
 	struct synth s;
@@ -227,8 +230,8 @@ int main(void)
 	 * matcher actually runs. That is the point: a sweep where nothing
 	 * reaches the matcher measures the prefilter and calls it scaling.
 	 */
-	if (!measure(dir, obj, n_small, ~0u, &small) ||
-	    !measure(dir, obj, n_big, ~0u, &big)) {
+	if (!measure(dir, obj, n_small, -1, &small) ||
+	    !measure(dir, obj, n_big, -1, &big)) {
 		printf("scan work: the databases could not be built - nothing "
 		       "was measured\n");
 		remove(obj);
@@ -296,9 +299,8 @@ int main(void)
 
 		memset(&floor_small, 0, sizeof floor_small);
 		memset(&floor_big, 0, sizeof floor_big);
-		if (measure(dir, obj, n_small, 1u << KOF_FMT_ELF,
-			    &floor_small) &&
-		    measure(dir, obj, n_big, 1u << KOF_FMT_ELF, &floor_big)) {
+		if (measure(dir, obj, n_small, KOF_FMT_ELF, &floor_small) &&
+		    measure(dir, obj, n_big, KOF_FMT_ELF, &floor_big)) {
 			printf("  target-rejected: ran %llu of %llu, then "
 			       "%llu of %llu\n",
 			       (unsigned long long)floor_small.ran,

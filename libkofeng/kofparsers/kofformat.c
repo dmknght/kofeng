@@ -11,6 +11,10 @@
 #include "containers/rar_parse.h"
 #include "containers/xz_parse.h"
 #include "containers/bz2_parse.h"
+#include "containers/chm_parse.h"
+#include "containers/cab_parse.h"
+#include "containers/lha_parse.h"
+#include "containers/arj_parse.h"
 #include "containers/rtf_parse.h"
 #include "containers/pdf_parse.h"
 #include "scripts/script_parse.h"
@@ -34,6 +38,26 @@ static int pe_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 static int gzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
 	return kof_gzip_parse(b, (struct kof_gzip_info *)v, c);
+}
+
+static int arj_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_arj_parse(b, (struct kof_arj_info *)v, c);
+}
+
+static int lha_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_lha_parse(b, (struct kof_lha_info *)v, c);
+}
+
+static int cab_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_cab_parse(b, (struct kof_cab_info *)v, c);
+}
+
+static int chm_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_chm_parse(b, (struct kof_chm_info *)v, c);
 }
 
 static int bz2_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
@@ -158,6 +182,26 @@ static uint64_t anom_script(const void *v)
 	return ((const struct kof_script_info *)v)->anomalies;
 }
 
+static uint64_t anom_arj(const void *v)
+{
+	return ((const struct kof_arj_info *)v)->anomalies;
+}
+
+static uint64_t anom_lha(const void *v)
+{
+	return ((const struct kof_lha_info *)v)->anomalies;
+}
+
+static uint64_t anom_cab(const void *v)
+{
+	return ((const struct kof_cab_info *)v)->anomalies;
+}
+
+static uint64_t anom_chm(const void *v)
+{
+	return ((const struct kof_chm_info *)v)->anomalies;
+}
+
 static uint64_t anom_bz2(const void *v)
 {
 	return ((const struct kof_bz2_info *)v)->anomalies;
@@ -210,6 +254,22 @@ static const struct kof_parser formats[] = {
 	  kof_xz_sniff, xz_parse_thunk,
 	  kof_xz_region_bits, KOF_XZ_REGION_COUNT,
 	  kof_xz_region_name, kof_xz_anomaly_name, anom_xz },
+	{ KOF_FMT_ARJ, (uint32_t)sizeof(struct kof_arj_info),
+	  kof_arj_sniff, arj_parse_thunk,
+	  kof_arj_region_bits, KOF_ARJ_REGION_COUNT,
+	  kof_arj_region_name, kof_arj_anomaly_name, anom_arj },
+	{ KOF_FMT_LHA, (uint32_t)sizeof(struct kof_lha_info),
+	  kof_lha_sniff, lha_parse_thunk,
+	  kof_lha_region_bits, KOF_LHA_REGION_COUNT,
+	  kof_lha_region_name, kof_lha_anomaly_name, anom_lha },
+	{ KOF_FMT_CAB, (uint32_t)sizeof(struct kof_cab_info),
+	  kof_cab_sniff, cab_parse_thunk,
+	  kof_cab_region_bits, KOF_CAB_REGION_COUNT,
+	  kof_cab_region_name, kof_cab_anomaly_name, anom_cab },
+	{ KOF_FMT_CHM, (uint32_t)sizeof(struct kof_chm_info),
+	  kof_chm_sniff, chm_parse_thunk,
+	  kof_chm_region_bits, KOF_CHM_REGION_COUNT,
+	  kof_chm_region_name, kof_chm_anomaly_name, anom_chm },
 	{ KOF_FMT_BZIP2, (uint32_t)sizeof(struct kof_bz2_info),
 	  kof_bz2_sniff, bz2_parse_thunk,
 	  kof_bz2_region_bits, KOF_BZ2_REGION_COUNT,

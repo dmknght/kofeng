@@ -246,39 +246,33 @@ static const char *const *sub_vocab(uint8_t fmt, const char **prefix,
 
 /* The subtypes, per format. The values overlap between formats, which is why
  * naming one format's values while targeting another is a build error. */
-const char *const fmt_word[] = {
-	/* Index 0 is the format an object has when nothing identified it, and it
-	 * is a target like any other: a rule written for a decrypted payload
-	 * applies to exactly that and to no ELF. It read KOF_FMT_ANY here, which
-	 * is a different statement - every format - and is spelled where that is
-	 * meant. */
-	"KOF_FMT_UNKNOWN", "KOF_FMT_ELF", "KOF_FMT_PE",
-	"KOF_FMT_MACHO", "KOF_FMT_SCRIPT", "KOF_FMT_TEXT",
-	"KOF_FMT_GZIP", "KOF_FMT_DOCOLE", "KOF_FMT_ZIP",
-	"KOF_FMT_DOCZIP", "KOF_FMT_TAR", "KOF_FMT_7Z",
-	"KOF_FMT_RAR", "KOF_FMT_XZ", "KOF_FMT_RTF",
-	"KOF_FMT_PDF",
+/*
+ * THE IDENTIFIERS ARE THE ENGINE'S NOW, and this is where a hand copy of them
+ * used to be.
+ *
+ * It was the third copy in the tree, after kof_format_from_name and
+ * kof_format_name, and the one nothing checked. KOF_FMT_COUNT went from 16 to
+ * 18 when IMAGE and FONT were added and this list did not, so a draft that
+ * targeted an image had those bits dropped out of the KOF_TARGET_FORMAT line
+ * it wrote: a rule narrower than the panel said, with nothing failing and
+ * nothing printed. The note that stood here called the durable fix one X-macro
+ * list in kofsig.h that every copy expands - that is KOF_TARGET_LIST, the enum
+ * is asserted against it, and kof_format_ident reads it.
+ *
+ * A format added to the engine therefore appears in this panel by itself.
+ */
+const char *fmt_word(uint32_t fmt)
+{
+	const char *s = fmt < KOF_TARGET_COUNT
+		      ? kof_format_ident((uint8_t)fmt) : NULL;
+
 	/*
-	 * THESE TWO WERE MISSING AND THE FAILURE WAS SILENT.
-	 *
-	 * KOF_FMT_COUNT went from 16 to 18 when IMAGE and FONT were added, and
-	 * this list did not - it is the THIRD hand copy of the format names in
-	 * the tree, after kof_format_from_name and kof_format_name, and it is
-	 * the one nothing checks. The generator loops to FMT_WORD_N, so a draft
-	 * that targeted an image or a font simply had those bits dropped out of
-	 * the KOF_TARGET_FORMAT line it wrote: a rule narrower than the panel
-	 * said, with nothing failing and nothing printed.
-	 *
-	 * The durable fix is one X-macro list in kofsig.h that all three expand,
-	 * the way KOF_SCRIPT_TYPE_LIST and KOF_MALTYPE_LIST already work. Until
-	 * that lands this at least says out loud that it is a copy.
+	 * Never NULL to a caller: this feeds snprintf and a string compare, and
+	 * a value with no identifier is a target this build cannot name - which
+	 * reads correctly as the formatless one rather than as a crash.
 	 */
-	"KOF_FMT_IMAGE", "KOF_FMT_FONT",
-	/* And the same copy again for bzip2 - added here at the same time as
-	 * the enumerator, which is the only way this list stays right until
-	 * that X-macro exists. */
-	"KOF_FMT_BZIP2"
-};
+	return s ? s : "KOF_FMT_UNKNOWN";
+}
 
 
 /*
@@ -960,7 +954,7 @@ static const struct kof_parser *src_rule_fmt(FILE *f, uint32_t *mask_out)
 		if (!p)
 			continue;
 		for (fi = 0; fi < FMT_WORD_N; fi++)
-			if (src_word_in(p, fmt_word[fi]))
+			if (src_word_in(p, fmt_word(fi)))
 				mask |= 1u << fi;
 	}
 	rewind(f);
@@ -2215,7 +2209,7 @@ uint32_t draft_tgt(struct kof_editor *e)
 		sub_fm = b;
 	}
 
-	h = tgt_mix(h, (ob->fmt && fm < FMT_WORD_N) ? fmt_word[fm]
+	h = tgt_mix(h, (ob->fmt && fm < FMT_WORD_N) ? fmt_word(fm)
 						    : "KOF_FMT_ANY");
 	snprintf(w, sizeof w, "KOF_MALTYPE_%s",
 		 e->dr.maltype < MALTYPE_N ? maltype_word[e->dr.maltype] : "VIRUS");
@@ -3015,7 +3009,8 @@ void decl_remove(struct kof_editor *e, uint32_t i)
 const uint32_t arch_n         = sizeof arch_word     / sizeof arch_word[0];
 const uint32_t elf_sub_n      = sizeof elf_sub       / sizeof elf_sub[0];
 const uint32_t pe_sub_n       = sizeof pe_sub        / sizeof pe_sub[0];
-const uint32_t fmt_word_n     = sizeof fmt_word      / sizeof fmt_word[0];
+/* Every target value the engine has - see fmt_word above. */
+const uint32_t fmt_word_n     = KOF_TARGET_COUNT;
 const uint32_t maltype_word_n = sizeof maltype_word  / sizeof maltype_word[0];
 
 /* The call itself, without whatever is compared against it. `force_multi` asks
@@ -3729,7 +3724,7 @@ no_head:
 			uint32_t fi;
 
 			for (fi = 0; fi < FMT_WORD_N; fi++)
-				if (src_word_in(p, fmt_word[fi]))
+				if (src_word_in(p, fmt_word(fi)))
 					e->dr.fmt_mask |= 1u << fi;
 			continue;
 		}
@@ -4687,7 +4682,8 @@ void generate(struct kof_editor *e, int as_new)
 		for (fi = 0; fi < (int)FMT_WORD_N; fi++) {
 			if (!(m & (1u << fi)))
 				continue;
-			fprintf(f, "%s%s", first ? "" : " | ", fmt_word[fi]);
+			fprintf(f, "%s%s", first ? "" : " | ",
+				fmt_word((uint32_t)fi));
 			first = 0;
 		}
 		/* An empty mask cannot be written - draft_missing_of refuses it

@@ -1912,6 +1912,166 @@ done:
 	return produced;
 }
 
+/*
+ * What one MSZIP decode is producing: a window onto the folder's stream, and
+ * the history the next block will need.
+ */
+struct mszip_out {
+	const struct kof_obj_ctx *ctx;
+	uint64_t skip, left;      /* of the FILE, inside the folder's stream */
+	uint8_t *hist;            /* the last 32KB produced, for the next block */
+	uint32_t hist_len;
+	uint64_t emitted;
+	int stopped;
+};
+
+/*
+ * THE HISTORY IS KEPT WHATEVER IS EMITTED, and that is the whole subtlety
+ * here: the bytes in front of this file belong to other files and are dropped,
+ * but the NEXT BLOCK may reference them - so they go into the history even
+ * though nothing is done with them. A sink that only remembered what it emitted
+ * would decode the second block against a window with holes in it.
+ */
+static int mszip_sink_fn(void *user, const uint8_t *p, uint32_t n)
+{
+	struct mszip_out *o = user;
+	uint32_t at = 0;
+
+	/* The tail, for the block after this one. */
+	if (n >= KOF_INF_WINDOW) {
+		memcpy(o->hist, p + (n - KOF_INF_WINDOW), KOF_INF_WINDOW);
+		o->hist_len = KOF_INF_WINDOW;
+	} else if (n) {
+		uint32_t keep = KOF_INF_WINDOW - n;
+
+		if (o->hist_len > keep)
+			memmove(o->hist, o->hist + (o->hist_len - keep), keep);
+		else
+			keep = o->hist_len;
+		memcpy(o->hist + keep, p, n);
+		o->hist_len = keep + n;
+	}
+
+	if (o->skip) {
+		uint64_t drop = o->skip < n ? o->skip : n;
+
+		o->skip -= drop;
+		at = (uint32_t)drop;
+	}
+	while (at < n && o->left) {
+		uint32_t take = n - at;
+
+		if ((uint64_t)take > o->left)
+			take = (uint32_t)o->left;
+		if (!c_emit(o->ctx, p + at, take)) {
+			o->stopped = 1;
+			return 0;
+		}
+		o->emitted += take;
+		o->left -= take;
+		at += take;
+	}
+	/* Past the file, and the folder still has blocks: keep decoding only
+	 * while something is still wanted. */
+	return o->left != 0 || o->skip != 0;
+}
+
+/*
+ * MSZIP: A FOLDER OF DEFLATE BLOCKS THAT SHARE A DICTIONARY, and one file cut
+ * out of what they decode to.
+ *
+ * The ranges resolve_entry hands back are the folder's BLOCKS in order, each
+ * "CK" and then a deflate stream. They are not one stream and must not be
+ * joined: every block is its own, and every block after the first may reference
+ * up to 32KB of the previous one's output. So each is decoded separately with
+ * the last block's tail as history - see kof_inflate_seeded, whose note records
+ * what decoding them from an empty window produces instead.
+ *
+ * WHY THE WHOLE FOLDER IS DECODED FOR ONE FILE. A CFFILE names a byte range
+ * inside the folder's decoded stream, and a deflate stream cannot be entered
+ * part way - so reaching a file at offset N means producing the N bytes in
+ * front of it. Those bytes are dropped rather than emitted: they belong to
+ * other files, which arrive as their own children with their own names.
+ *
+ * The cost is one folder decode per file, which is what makes the module's cap
+ * on files per folder a real bound rather than tidiness.
+ */
+static uint64_t unpack_mszip(struct kof_scanner *sc,
+			     const struct kof_obj_ctx *ctx, uint32_t index,
+			     uint64_t out_hint)
+{
+	struct kof_range *ext = sc->ext_gather;
+	struct mszip_out snk;
+	kof_buf b;
+	uint64_t total = 0;
+	uint32_t n, i;
+
+	if (!ctx->resolve_entry || !can_produce(sc))
+		return 0;
+	n = ctx->resolve_entry(ctx, index, ext, KOF_SCAN_MAX_EXTENTS);
+	if (!n)
+		return 0;
+
+	b = kof_src_buf(sc->cur_src);
+	memset(&snk, 0, sizeof snk);
+	snk.ctx = ctx;
+	/*
+	 * `out_hint` carries where the file starts inside the folder and how
+	 * long it is - the two numbers a CFFILE has and a range cannot hold.
+	 * Packed rather than added to the entry: the entry is the host's shape
+	 * and this is one format's business. See KOF_UNP_MSZIP.
+	 */
+	snk.skip = out_hint >> 32;
+	snk.left = out_hint & 0xffffffffu;
+	if (!snk.left)
+		return 0;
+
+	snk.hist = malloc(KOF_INF_WINDOW);
+	if (!snk.hist) {
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+		return 0;
+	}
+	sc->resident += KOF_INF_WINDOW;
+	if (sc->resident > sc->st.peak_resident)
+		sc->st.peak_resident = sc->resident;
+
+	if (!sc->inf) {
+		sc->inf = malloc(sizeof *sc->inf);
+		if (!sc->inf) {
+			scan_broken(sc, KOF_BROKEN_LIMIT);
+			free(snk.hist);
+			sc->resident -= KOF_INF_WINDOW;
+			return 0;
+		}
+	}
+
+	for (i = 0; i < n && snk.left && !snk.stopped; i++) {
+		uint64_t off = ext[i].off, len = kof_clip_len(b.n, off, ext[i].len);
+		enum kof_decomp_status st;
+		uint64_t got = 0;
+
+		/* "CK", which every MSZIP block begins with. A block without it
+		 * is not one, and decoding its first two bytes as deflate is
+		 * how a wrong answer starts. */
+		if (len < 2u || b.p[off] != 'C' || b.p[off + 1u] != 'K') {
+			scan_broken(sc, KOF_BROKEN_DAMAGED);
+			break;
+		}
+		st = kof_inflate_seeded(sc->inf, snk.hist, snk.hist_len,
+					b.p + off + 2u, len - 2u,
+					mszip_sink_fn, &snk, NULL, &got);
+		total += got;
+		if (st != KOF_DEC_OK && st != KOF_DEC_STOPPED) {
+			scan_broken(sc, broken_of_status(st));
+			break;
+		}
+	}
+
+	free(snk.hist);
+	sc->resident -= KOF_INF_WINDOW;
+	return snk.emitted;
+}
+
 static uint64_t c_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 			       uint32_t index, uint64_t out_hint)
 {
@@ -1930,8 +2090,22 @@ static uint64_t c_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 		return unpack_bcj2(sc, ctx, index);
 	if (!ctx->resolve_entry)
 		return 0;
-	if (method != KOF_UNP_OVBA)
-		return 0;              /* the only coding entries are decoded with */
+	/*
+	 * STORED IS A JOIN AND NOT A DECODE, and it is handled below by
+	 * skipping the decoder rather than by a path of its own: the ranges are
+	 * gathered the same way, charged to the same budget, and emitted
+	 * instead of being fed to a coding.
+	 *
+	 * It exists for the entry that is in several pieces for a reason that
+	 * has nothing to do with compression - a cabinet's uncompressed folder
+	 * is cut into blocks with a header between them, so every stored file
+	 * over 32KB is scattered. Without this those files are the one thing a
+	 * scan cannot reach in an archive it otherwise reads completely.
+	 */
+	if (method == KOF_UNP_MSZIP)
+		return unpack_mszip(sc, ctx, index, out_hint);
+	if (method != KOF_UNP_OVBA && method != KOF_UNP_STORED)
+		return 0;              /* the only codings entries are decoded with */
 
 	b = kof_src_buf(sc->cur_src);
 	n = ctx->resolve_entry(ctx, index, ext, KOF_SCAN_MAX_EXTENTS);
@@ -1964,7 +2138,24 @@ static uint64_t c_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 		at += len;
 	}
 
-	{
+	if (method == KOF_UNP_STORED) {
+		/* The joined bytes ARE the object. Emitted in pieces because
+		 * c_emit takes a 32 bit count and a joined entry is not bounded
+		 * by one - the same loop unpack_buffered ends on. */
+		uint64_t off = 0;
+
+		st = KOF_DEC_OK;
+		while (off < at) {
+			uint64_t n2 = at - off;
+
+			if (n2 > (1u << 20))
+				n2 = 1u << 20;
+			if (!c_emit(ctx, in + off, (uint32_t)n2))
+				break;
+			off += n2;
+		}
+		produced = off;
+	} else {
 		struct sink_carry carry = { ctx };
 
 		st = kof_ovba_decode(in, at, inflate_sink, &carry, &produced);
@@ -2579,7 +2770,11 @@ static int c_fmt_wanted(const struct kof_obj_ctx *ctx, uint8_t fmt)
 		return 1;
 	if (!sc->eng->any_target)
 		return 1;
-	return (sc->eng->any_target & (1u << fmt)) != 0;
+	/* A target id past the width of the set is not recorded in it, so it is
+	 * read as "wanted" - the set is an early-out and must never be the
+	 * thing that stops a module running. See any_target_add. */
+	return fmt >= 64u ||
+	       (sc->eng->any_target & ((uint64_t)1 << fmt)) != 0;
 }
 
 /*

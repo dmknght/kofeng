@@ -36,6 +36,10 @@
 #include "../core/kofmod/rar.h"
 #include "../core/kofmod/xz.h"
 #include "../core/kofmod/bz2.h"
+#include "../core/kofmod/chm.h"
+#include "../core/kofmod/cab.h"
+#include "../core/kofmod/lha.h"
+#include "../core/kofmod/arj.h"
 #include "../core/kofmod/rtf.h"
 #include "../core/kofmod/pdf.h"
 
@@ -55,6 +59,10 @@ uint64_t kof_heur_anomalies(const struct kof_obj_ctx *ctx)
 	case KOF_FMT_RAR:    return kof_rar(ctx)->anomalies;
 	case KOF_FMT_XZ:     return kof_xz(ctx)->anomalies;
 	case KOF_FMT_BZIP2:  return kof_bz2(ctx)->anomalies;
+	case KOF_FMT_CHM:    return kof_chm(ctx)->anomalies;
+	case KOF_FMT_CAB:    return kof_cab(ctx)->anomalies;
+	case KOF_FMT_LHA:    return kof_lha(ctx)->anomalies;
+	case KOF_FMT_ARJ:    return kof_arj(ctx)->anomalies;
 	case KOF_FMT_RTF:    return kof_rtf(ctx)->anomalies;
 	case KOF_FMT_PDF:    return kof_pdf(ctx)->anomalies;
 	default:             return 0;

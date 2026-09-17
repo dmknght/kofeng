@@ -68,7 +68,7 @@ struct kof_scanner {
 	 * sized by KOF_FMT_COUNT would be written past by the first event
 	 * scanned.
 	 */
-	void *view[KOF_TARGET_BITS];
+	void *view[KOF_TARGET_COUNT];
 
 	/* Set while a module runs: find_str is called from inside one, and the ids it
 	 * passes are module local, so the host has to know whose they are. */

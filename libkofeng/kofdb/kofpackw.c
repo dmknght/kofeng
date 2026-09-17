@@ -209,7 +209,8 @@ struct built {
 
 	uint32_t n_mods, n_str, n_name, n_rng;
 
-	uint32_t any_target, any_scan, any_arch;
+	uint64_t any_target;
+	uint32_t any_scan, any_arch;
 	uint64_t min_size_min;
 	uint32_t memo_slots;
 };
@@ -483,7 +484,23 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 		 * more than its members do stops running them, and a detection
 		 * that did not happen is not something a test notices.
 		 */
-		b->any_target |= m->target_mask;
+		/*
+		 * The union is a PRESENCE SET over target ids now, not an OR of
+		 * masks: an id is an ordinary number, so "something here is for
+		 * target t" is a bit of this per id rather than the id itself.
+		 * A module that names no target names every one of them.
+		 */
+		if (!m->n_target) {
+			b->any_target = ~(uint64_t)0;
+		} else {
+			uint8_t ti;
+
+			for (ti = 0; ti < m->n_target &&
+				     ti < KOF_TARGET_LIST_MAX; ti++)
+				if (m->target[ti] < 64u)
+					b->any_target |= (uint64_t)1
+							 << m->target[ti];
+		}
 		b->any_scan   |= m->scan_mask;
 		b->any_arch   |= m->arch_mask;
 
@@ -529,7 +546,10 @@ uint8_t *kof_pack_build(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n
 		goto out;
 
 	memset(len, 0, sizeof len);
-	len[KOF_SEC_PRE_TARGET] = (uint64_t)b.n_mods * 4;
+	/* One FIXED row per module: the count, then the ids. Fixed so the row
+	 * for module i is at i * stride and needs no index of its own, and the
+	 * count inside it is what says how much of the row means anything. */
+	len[KOF_SEC_PRE_TARGET] = (uint64_t)b.n_mods * KOF_PRE_TARGET_STRIDE;
 	len[KOF_SEC_PRE_SCAN]   = (uint64_t)b.n_mods * 4;
 	len[KOF_SEC_PRE_ARCH]   = (uint64_t)b.n_mods * 4;
 	len[KOF_SEC_PRE_SUBTYPE] = (uint64_t)b.n_mods * 4;
@@ -563,7 +583,16 @@ uint8_t *kof_pack_build(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n
 		goto out;
 
 	for (i = 0; i < b.n_mods; i++) {
-		((uint32_t *)(img + at[KOF_SEC_PRE_TARGET]))[i] = mods[i].target_mask;
+		{
+			uint8_t *row = img + at[KOF_SEC_PRE_TARGET] +
+				       (size_t)i * KOF_PRE_TARGET_STRIDE;
+			uint8_t nt = mods[i].n_target;
+
+			if (nt > KOF_TARGET_LIST_MAX)
+				nt = KOF_TARGET_LIST_MAX;
+			row[0] = nt;
+			memcpy(row + 1, mods[i].target, nt);
+		}
 		((uint32_t *)(img + at[KOF_SEC_PRE_SCAN]))[i]   = mods[i].scan_mask;
 		((uint32_t *)(img + at[KOF_SEC_PRE_ARCH]))[i]   = mods[i].arch_mask;
 		((uint32_t *)(img + at[KOF_SEC_PRE_SUBTYPE]))[i] =

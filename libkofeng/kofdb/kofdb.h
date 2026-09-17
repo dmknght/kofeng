@@ -107,7 +107,31 @@ struct kof_db_pack {
 struct kof_module {
 	kof_scan_fn fn;
 
-	uint32_t target_mask;
+	/*
+	 * WHAT THIS MODULE IS FOR, AS A LIST OF TARGET IDS.
+	 *
+	 * It was a BITMASK, one bit per format, and that made the number of
+	 * formats this engine could ever have equal to the width of a word.
+	 * Nineteen were spent and four of the remainder were event verbs
+	 * sharing the same numbering, so the twentieth format could not be
+	 * added at all - see kofsig.h, where the axis is described.
+	 *
+	 * A list removes the ceiling without moving it: a target id is an
+	 * ORDINARY NUMBER, so format 3 is 3 rather than the third bit, and the
+	 * space is as wide as the byte holding it. What a mask bought - "does
+	 * this module apply here" in one AND - is not lost either, because that
+	 * question is not asked module by module on the hot path: the loader
+	 * builds an inverted index from target id to modules (see mod_by_target
+	 * below), and the list is walked only by the precondition, where the
+	 * overwhelmingly common case is n_target == 1 and one comparison.
+	 *
+	 * `n_target` of ZERO IS "ANY", which is what KOF_FMT_ANY compiles to. A
+	 * module that named everything used to carry every bit; it now carries
+	 * nothing, which is both smaller and the honest spelling of it.
+	 */
+	uint8_t  n_target;
+	uint8_t  target[KOF_TARGET_LIST_MAX];
+
 	uint32_t scan_mask;   /* 0: names no region, so cannot be skipped that way */
 	uint64_t size_min;    /* 0: no minimum. No maximum by design - see
 			       * KOF_TARGET_SIZE_MIN in kofsig.h. */
@@ -178,6 +202,26 @@ struct kof_module {
  * deliberately collide, and testing target first is what makes reading
  * ctx->subtype safe.
  */
+/*
+ * Does this module name that target id.
+ *
+ * Linear, over at most KOF_TARGET_LIST_MAX entries and in practice over one.
+ * Written here rather than in each caller for the reason kof_module_precond
+ * itself exists: a rule about what a scan DOES, spelled twice, is a tool that
+ * can disagree with the engine about which modules ran.
+ */
+static inline int kof_module_targets(const struct kof_module *m, uint8_t target)
+{
+	uint8_t i;
+
+	if (!m->n_target)
+		return 1;              /* named everything - see n_target */
+	for (i = 0; i < m->n_target; i++)
+		if (m->target[i] == target)
+			return 1;
+	return 0;
+}
+
 enum kof_precond {
 	KOF_PRECOND_OK = 0,
 	KOF_PRECOND_TARGET,      /* targets another format */
@@ -190,7 +234,7 @@ static inline enum kof_precond kof_module_precond(const struct kof_module *m,
 						  const struct kof_obj_ctx *ctx,
 						  uint64_t size)
 {
-	if (!(m->target_mask & (1u << ctx->format)))
+	if (!kof_module_targets(m, ctx->format))
 		return KOF_PRECOND_TARGET;
 	if (size < m->size_min)
 		return KOF_PRECOND_SIZE;
@@ -261,7 +305,7 @@ struct kof_engine {
 	 * large samples. The cost is per FILE, not per byte.
 	 *
 	 * A module cannot match an object whose format bit is absent from its
-	 * target_mask - that is the first line of kof_module_precond - so the
+	 * its target list - that is the first line of kof_module_precond - so the
 	 * grouping is exact rather than a filter that has to be re-checked.
 	 * `mod_at[b] .. mod_at[b + 1]` is the run of module indices for target
 	 * bit b, in the same order the flat walk had them, so what runs and in
@@ -272,7 +316,7 @@ struct kof_engine {
 	 * the module count because a rule names one format.
 	 */
 	uint32_t            *mod_by_target;
-	uint32_t             mod_at[KOF_TARGET_BITS + 1u];
+	uint32_t             mod_at[KOF_TARGET_COUNT + 1u];
 
 	struct kof_module   *unp;
 	uint32_t             n_unp;
@@ -305,7 +349,9 @@ struct kof_engine {
 	 * facts from one. Any of the three is a reason the child is worth
 	 * making.
 	 */
-	uint32_t             any_target;
+	/* One bit per target id - a presence set, since an id is a number and
+	 * not a bit. The same shape kof_pack_hdr.any_target has. */
+	uint64_t             any_target;
 
 	/*
 	 * How many patterns the whole database declares. A COUNT AND NOT A TABLE:

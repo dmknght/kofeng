@@ -131,4 +131,23 @@ enum kof_decomp_status kof_inflate(struct kof_inflate *st, const uint8_t *in, ui
 		kof_inflate_sink sink, void *user,
 		uint64_t *consumed, uint64_t *produced);
 
+/*
+ * The same decode, with `seed_len` bytes of HISTORY the stream may reference.
+ *
+ * For a coding that is a sequence of deflate streams sharing one dictionary,
+ * which is what MSZIP is: a cabinet's folder is one such stream per block, and
+ * every block after the first may reach back into the previous block's output.
+ * Decoded from an empty window instead, those blocks come out the right LENGTH
+ * and the wrong BYTES, with no failure reported anywhere - see the note on the
+ * definition.
+ *
+ * The seed is not emitted: it was already handed to the sink by whoever
+ * produced it. `produced` counts only what this call made.
+ */
+enum kof_decomp_status kof_inflate_seeded(struct kof_inflate *st,
+		const uint8_t *seed, uint32_t seed_len,
+		const uint8_t *in, uint64_t in_len,
+		kof_inflate_sink sink, void *user,
+		uint64_t *consumed, uint64_t *produced);
+
 #endif /* KOFENG_INFLATE_H */
