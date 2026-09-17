@@ -140,13 +140,19 @@ int main(void)
 		ok_(a->archiver_ver == 11u && a->host_os == 2u,
 		    "the archive header's own fields are read");
 		/*
-		 * ONE entry. The archive header is not a file - a parser that
-		 * counts it invents one out of the archive's own name - and the
-		 * coded one has no decoder here.
+		 * TWO entries and not three. The archive header is not a file -
+		 * a parser that counts it invents one out of the archive's own
+		 * name - and the other two are: one stored, one coded with the
+		 * method ARJ's -m1 uses.
+		 *
+		 * The coded one is an entry rather than a count because the
+		 * engine has that coding. It carries the coding in the entry
+		 * and the original size in out_hint, which for this coding is
+		 * what ENDS the stream rather than a guess at its output.
 		 */
-		ok_(a->n_entries == 1u, "the stored file is the only entry");
-		ok_(a->n_coded == 1u, "the coded one is counted");
-		if (a->n_entries == 1u) {
+		ok_(a->n_entries == 2u, "both files are entries");
+		ok_(a->n_coded == 1u, "the coded one is counted as coded");
+		if (a->n_entries == 2u) {
 			const struct kof_entry *e = &a->entry[0];
 
 			ok_(e->len == sizeof BODY - 1u &&
@@ -155,6 +161,14 @@ int main(void)
 			ok_(e->name_len == 10u &&
 			    memcmp(f + e->name_off, "stored.txt", 10) == 0,
 			    "the name is a range in the object");
+			ok_(e->coding[0] == 0,
+			    "a stored entry names no coding");
+
+			e = &a->entry[1];
+			ok_(e->coding[0] == KOF_UNP_LZHUF_ARJ &&
+			    e->out_hint == 8u,
+			    "the coded one names its coding and the size that "
+			    "ends its stream");
 		}
 		{
 			struct kof_range r[16];
@@ -219,8 +233,11 @@ int main(void)
 		f[second + 8u] = 0x01u;         /* GARBLED */
 		memset(&ctx, 0, sizeof ctx);
 		kof_arj_parse(buf_of(f, len), a, &ctx);
+		/* The coded one is still offered - it is not the encrypted
+		 * one - so what this asks is that the ENCRYPTED entry is gone,
+		 * which is the stored one and the only entry with no coding. */
 		ok_((a->anomalies & KOF_ARJ_ANOM_ENCRYPTED) != 0 &&
-		    a->n_entries == 0u,
+		    a->n_entries == 1u && a->entry[0].coding[0] != 0,
 		    "an encrypted entry is said and not pointed at");
 		f[second + 8u] = save;
 	}

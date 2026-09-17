@@ -28,10 +28,25 @@
  *   level 2   a two byte TOTAL header size at offset zero, extension headers
  *             inside it, and no name in the base header at all.
  *
- * WHAT THIS BUILD DOES NOT DO: decode. "-lh0-" is stored and those entries are
- * plain ranges; "-lh1-" through "-lh7-" are LZHUF, which this build has no
- * decoder for, so those are counted and left in the DATA region. The same
- * judgement as every other coding this engine lacks - see cab.h.
+ * WHICH ENTRIES ARE OPENED, and it is decided by the method name.
+ *
+ *   "-lh0-", "-lz4-"          stored: the body IS the file, so the entry is a
+ *                             plain range and the host opens it with no module
+ *                             at all - see kof_objtree_declared.
+ *   "-lh5-", "-lh6-", "-lh7-" one coding under three dictionary sizes, and the
+ *                             one this build decodes. The entry names it in
+ *                             coding[0] and carries the ORIGINAL SIZE in
+ *                             out_hint, because that coding has no end marker
+ *                             and stops on the count - see KOF_UNP_LZHUF_LH5.
+ *                             Decoding is bases/decomp/lha.c's, not the host's.
+ *   the rest                  "-lh1-" through "-lh4-" and "-lzs-" are older,
+ *                             different codings with no decoder here. They are
+ *                             counted in n_coded and left in the DATA region,
+ *                             the same judgement as every other coding this
+ *                             engine lacks - see cab.h.
+ *
+ * n_coded counts EVERY coded entry, opened or not: a reader asking how much of
+ * an archive is behind a coding means that, not how much was left over.
  *
  * Layout rule: append only.
  */
@@ -71,7 +86,9 @@ enum {
 	/* A level 0 or 1 header's checksum does not match its bytes. Recorded
 	 * and not acted on: what it usually means is a file somebody edited. */
 	KOF_LHA_ANOM_BAD_CHECKSUM = 1ull << 2,
-	/* An entry is coded with a method this build does not decode. */
+	/* An entry is coded rather than stored - whether or not this build has
+	 * that coding. A FACT about the archive and not a failure: it says the
+	 * DATA region holds compressed bytes rather than files. */
 	KOF_LHA_ANOM_CODED       = 1ull << 3,
 	/* A name holds ".." or an absolute path. */
 	KOF_LHA_ANOM_TRAVERSAL   = 1ull << 4,
@@ -94,7 +111,7 @@ struct kof_lha_info {
 	uint64_t anomalies;
 
 	uint32_t n_entries;       /* recorded below */
-	uint32_t n_coded;         /* entries this build cannot decode */
+	uint32_t n_coded;         /* entries behind a coding, opened or not */
 	uint32_t n_dirs;          /* "-lhd-": a directory, which has no data */
 	uint8_t  level;           /* of the first header */
 	uint8_t  reserved0[3];

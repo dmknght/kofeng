@@ -971,12 +971,60 @@ static void print_rar(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
  * The three archives that arrived together, printed the same way.
  *
  * WHAT EACH ONE'S SECOND LINE IS FOR: how much of the archive this build can
- * actually point at. All three keep entries this engine has no decoder for -
- * a coded CAB folder, an LHA that is not "-lh0-", an ARJ method above zero -
- * and a report that listed only what it opened would read as an archive with
- * three files in it when it has thirty. "Opened, coded, skipped" is the honest
- * shape, and it is the same shape print_chm uses for the same reason.
+ * actually point at, and how much of it is behind a coding. The two used to be
+ * the same number and are not any more - MSZIP and LZX folders, "-lh5-" and
+ * ARJ's method 1 are all decoded now - so "openable" and "coded" overlap, and
+ * saying so is the point: a report that listed only the stored files would read
+ * as an archive with three files in it when it has thirty.
+ *
+ * A CODED ENTRY IS PRINTED AS ONE. Its `off` is not where its bytes are - for a
+ * cabinet it is not a range of the file at all - so printing a number there
+ * would be printing a zero and calling it an offset.
  */
+
+/* What the entry says it is coded with, as a word. Empty for a stored one,
+ * which is most of them - see kof_unp_method_name. */
+static const char *ent_coding(const struct kof_entry *e)
+{
+	return e->coding[0] ? kof_unp_method_name(e->coding[0]) : "";
+}
+
+/*
+ * One entry row, shared by the four archive printers so that a coded entry
+ * looks the same in all of them.
+ *
+ * TWO THINGS HAVE TO BE SAID RATHER THAN ASSUMED, and both were wrong when each
+ * printer had its own row.
+ *
+ * `size` IS WHAT COMES OUT, not what is in the file. For a stored entry those
+ * are the same number; for a coded one they are not, and an ARJ listing that
+ * printed the compressed length beside a name read as an archive of tiny files.
+ * Every coded entry carries the decoded length in the low half of out_hint -
+ * see KOF_UNP_LZX and KOF_UNP_LZHUF_ARJ - whatever the format.
+ *
+ * AND A SCATTERED ENTRY HAS NO OFFSET. Its bytes are not a range of the object
+ * at all, so `off` is not a number to print; the dash is the honest answer
+ * where a zero would read as the start of the file.
+ */
+static void print_entry_row(uint32_t i, const struct kof_entry *e, kof_buf buf,
+			    int name_max)
+{
+	int n = e->name_len > (uint64_t)name_max ? name_max : (int)e->name_len;
+	unsigned long long size = e->coding[0]
+				? (unsigned long long)(e->out_hint & 0xffffffffu)
+				: (unsigned long long)e->len;
+	char off[32];
+
+	if (e->flags & KOF_ENT_F_SCATTERED)
+		snprintf(off, sizeof off, "off=-");
+	else
+		snprintf(off, sizeof off, "off=%llu",
+			 (unsigned long long)e->off);
+
+	printf("    [%3u] %-8s %-16s size=%-10llu %.*s\n", i,
+	       e->coding[0] ? ent_coding(e) : "stored", off, size, n,
+	       (const char *)buf.p + e->name_off);
+}
 static void print_cab(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 {
 	const struct kof_cab_info *c = v;
@@ -988,24 +1036,27 @@ static void print_cab(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 	       c->ver_minor, c->set_id, c->cab_index);
 	printf("  declared  %llu byte(s)   %u folder(s), %u file(s)\n",
 	       (unsigned long long)c->declared_size, c->n_folders, c->n_files);
-	printf("  files     %u openable, %u coded, %u split across blocks\n",
-	       c->n_entries, c->n_coded, c->n_split);
-	for (i = 0; i < c->n_folders && i < 8u; i++)
+	printf("  files     %u openable, %u behind a coding, %u split across "
+	       "blocks\n", c->n_entries, c->n_coded, c->n_split);
+	for (i = 0; i < c->n_folders && i < 8u; i++) {
+		char coding[24];
+
+		if (c->folder[i].compress == KOF_CAB_C_LZX)
+			snprintf(coding, sizeof coding, "LZX/%u",
+				 c->folder[i].window);
+		else
+			snprintf(coding, sizeof coding, "%s",
+				 c->folder[i].compress == KOF_CAB_C_NONE
+					 ? "stored"
+				 : c->folder[i].compress == KOF_CAB_C_MSZIP
+					 ? "MSZIP"
+					 : "Quantum");
 		printf("    folder[%u] off=%-10llu blocks=%-5u %s\n", i,
 		       (unsigned long long)c->folder[i].data_off,
-		       c->folder[i].n_blocks,
-		       c->folder[i].compress == KOF_CAB_C_NONE  ? "stored" :
-		       c->folder[i].compress == KOF_CAB_C_MSZIP ? "MSZIP" :
-		       c->folder[i].compress == KOF_CAB_C_LZX   ? "LZX"
-								: "Quantum");
-	for (i = 0; i < c->n_entries && shown < 12u; i++, shown++) {
-		const struct kof_entry *e = &c->entry[i];
-		int n = e->name_len > 48u ? 48 : (int)e->name_len;
-
-		printf("    [%3u] off=%-10llu size=%-10llu %.*s\n", i,
-		       (unsigned long long)e->off, (unsigned long long)e->len,
-		       n, (const char *)buf.p + e->name_off);
+		       c->folder[i].n_blocks, coding);
 	}
+	for (i = 0; i < c->n_entries && shown < 12u; i++, shown++)
+		print_entry_row(i, &c->entry[i], buf, 48);
 	if (c->n_entries > shown)
 		printf("    ... %u more\n", c->n_entries - shown);
 }
@@ -1018,17 +1069,11 @@ static void print_lha(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 	(void)ctx;
 
 	printf("  header    level %u\n", l->level);
-	printf("  entries   %u openable, %u coded, %u director%s\n",
+	printf("  entries   %u openable, %u behind a coding, %u director%s\n",
 	       l->n_entries, l->n_coded, l->n_dirs,
 	       l->n_dirs == 1u ? "y" : "ies");
-	for (i = 0; i < l->n_entries && shown < 12u; i++, shown++) {
-		const struct kof_entry *e = &l->entry[i];
-		int n = e->name_len > 48u ? 48 : (int)e->name_len;
-
-		printf("    [%3u] off=%-10llu size=%-10llu %.*s\n", i,
-		       (unsigned long long)e->off, (unsigned long long)e->len,
-		       n, (const char *)buf.p + e->name_off);
-	}
+	for (i = 0; i < l->n_entries && shown < 12u; i++, shown++)
+		print_entry_row(i, &l->entry[i], buf, 48);
 	if (l->n_entries > shown)
 		printf("    ... %u more\n", l->n_entries - shown);
 }
@@ -1042,25 +1087,25 @@ static void print_arj(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 
 	printf("  archiver  version %u, needs %u   host os %u\n",
 	       a->archiver_ver, a->min_ver, a->host_os);
-	printf("  entries   %u openable, %u coded, %u director%s\n",
+	printf("  entries   %u openable, %u behind a coding, %u director%s\n",
 	       a->n_entries, a->n_coded, a->n_dirs,
 	       a->n_dirs == 1u ? "y" : "ies");
-	for (i = 0; i < a->n_entries && shown < 12u; i++, shown++) {
-		const struct kof_entry *e = &a->entry[i];
-		int n = e->name_len > 48u ? 48 : (int)e->name_len;
-
-		printf("    [%3u] off=%-10llu size=%-10llu %.*s\n", i,
-		       (unsigned long long)e->off, (unsigned long long)e->len,
-		       n, (const char *)buf.p + e->name_off);
-	}
+	for (i = 0; i < a->n_entries && shown < 12u; i++, shown++)
+		print_entry_row(i, &a->entry[i], buf, 48);
 	if (a->n_entries > shown)
 		printf("    ... %u more\n", a->n_entries - shown);
 }
 
 /*
- * The directory, and how much of it this build can open. n_compressed is the
- * line that matters most on a real help file: it says how much of the document
- * sits behind LZX, which this build does not have - see chm.h.
+ * The directory, the compressed section, and how much of each this build
+ * reaches.
+ *
+ * THE LZX LINE IS THE ONE THAT MATTERS ON A REAL HELP FILE. Nearly every page
+ * of one is in the coded section, so "27 compressed" without the stream's own
+ * numbers beside it says only that the document is compressed. What decides
+ * whether those pages are reachable is the window, the restart interval and the
+ * reset table - and n_unreachable is what is left when any of the three is
+ * missing.
  */
 static void print_chm(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 {
@@ -1077,14 +1122,19 @@ static void print_chm(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 	printf("  content   off=%llu\n", (unsigned long long)c->content_off);
 	printf("  entries   %u openable, %u compressed, %u internal\n",
 	       c->n_entries, c->n_compressed, c->n_special);
-	for (i = 0; i < c->n_entries && shown < 12u; i++, shown++) {
-		const struct kof_entry *e = &c->entry[i];
-		int n = e->name_len > 60u ? 60 : (int)e->name_len;
-
-		printf("    [%3u] off=%-10llu size=%-10llu %.*s\n", i,
-		       (unsigned long long)e->off, (unsigned long long)e->len,
-		       n, (const char *)buf.p + e->name_off);
-	}
+	if (c->lzx_window_bits || c->n_compressed)
+		printf("  lzx       window 2^%u   restart every %u frame(s) "
+		       "of %llu   %u reset row(s)\n"
+		       "            stream off=%llu len=%llu -> %llu byte(s)"
+		       "   %u entr%s unreachable\n",
+		       c->lzx_window_bits, c->lzx_reset_interval,
+		       (unsigned long long)c->lzx_frame, c->n_reset,
+		       (unsigned long long)c->lzx_off,
+		       (unsigned long long)c->lzx_len,
+		       (unsigned long long)c->lzx_uncomp_len,
+		       c->n_unreachable, c->n_unreachable == 1u ? "y" : "ies");
+	for (i = 0; i < c->n_entries && shown < 12u; i++, shown++)
+		print_entry_row(i, &c->entry[i], buf, 60);
 	if (c->n_entries > shown)
 		printf("    ... %u more\n", c->n_entries - shown);
 }

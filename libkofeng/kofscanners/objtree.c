@@ -92,6 +92,20 @@ uint32_t kof_objtree_declared(const struct kof_obj_ctx *ctx,
 		 */
 		if (e->flags & KOF_ENT_F_SCATTERED)
 			continue;
+		/*
+		 * AND NOT ONE WHOSE BYTES ARE NOT WHAT THEY ARE.
+		 *
+		 * A coding chain says the range holds the file coded, so
+		 * windowing it hands on compressed bytes under the file's name
+		 * - a child that is not the thing it claims to be. Decoding is
+		 * a module's, through kof_unpack_at, for the same reason the
+		 * scattered case is: producing bytes is not pointing at them.
+		 *
+		 * KOF_ENT_F_CODED_UNKNOWN is the same answer with the chain
+		 * left empty, so it is tested beside it rather than after.
+		 */
+		if (e->coding[0] || (e->flags & KOF_ENT_F_CODED_UNKNOWN))
+			continue;
 		if (!e->len)
 			continue;
 		if (e->off > ctx->obj_size || e->len > ctx->obj_size - e->off)

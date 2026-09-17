@@ -57,6 +57,7 @@
 #include <kofmod/sevenzip.h>
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -1773,6 +1774,46 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		return got;
 	}
 
+	if (method >= KOF_UNP_LZHUF_ARJ && method <= KOF_UNP_LZHUF_LH7) {
+		struct expand_sink snk;
+		enum kof_decomp_status st;
+		uint64_t got = 0;
+
+		/*
+		 * OUT_HINT IS NOT A HINT HERE. An LHA or ARJ stream has no end
+		 * marker: it stops when the declared original size has been
+		 * produced. Without one there is nothing to decode against, so
+		 * an entry that does not carry it is refused rather than run
+		 * until something goes wrong.
+		 */
+		if (!out_hint)
+			return 0;
+		if (!sc->lzh) {
+			sc->lzh = malloc(sizeof *sc->lzh);
+			if (!sc->lzh) {
+				scan_broken(sc, KOF_BROKEN_LIMIT);
+				return 0;
+			}
+		}
+		snk.ctx = ctx;
+		snk.left = expand_limit(len, out_hint);
+		st = kof_lzhuf_decode(sc->lzh,
+				      (enum kof_lzhuf_variant)
+					      (method - KOF_UNP_LZHUF_ARJ),
+				      b.p + off, len, out_hint,
+				      expand_sink_fn, &snk, &got);
+		/* Truncation is not an error, for the reason the DEFLATE path
+		 * gives - and here it is also what a declared size larger than
+		 * the stream looks like, which is an archive's claim and not
+		 * this engine's failure. */
+		if (st != KOF_DEC_OK && st != KOF_DEC_TRUNCATED &&
+		    st != KOF_DEC_STOPPED)
+			scan_broken(sc, broken_of_status(st));
+		else if (snk.left == 0)
+			scan_broken(sc, KOF_BROKEN_LIMIT);
+		return got;
+	}
+
 	if (!buffered_method(method))
 		return 0;
 	if (!nrv2_of(method, &variant, &bits))
@@ -2072,6 +2113,189 @@ static uint64_t unpack_mszip(struct kof_scanner *sc,
 	return snk.emitted;
 }
 
+/*
+ * LZX: ONE FILE OUT OF A STREAM THAT CANNOT BE ENTERED PART WAY.
+ *
+ * The first range resolve_entry hands back starts at a RESTART POINT - a
+ * cabinet folder's first block, a help file's reset interval - because that is
+ * the only place an LZX stream can be picked up: its trees are stated as
+ * differences from the previous block's and its window is whatever the last
+ * 32KB produced.
+ *
+ * So the file is reached by decoding from there and dropping what comes before,
+ * which is what the two halves of `out_hint` say. The dropped bytes are other
+ * files; they arrive as their own children with their own names.
+ *
+ * ONE DECODE PER RANGE, AND THE DECODER IS RESET BETWEEN THEM. A restart is not
+ * a place in one stream, it is the start of another: everything the coding
+ * carries between blocks begins again there. A file longer than the distance
+ * between two restarts therefore arrives as several ranges - see chm.h - and
+ * running them together is what a single decode would do. The skip applies to
+ * the first range only, because that is the one the file begins in; what a
+ * range produces comes off `take` and the rest carry on from where it stopped.
+ */
+static uint64_t unpack_lzx_reset(struct kof_scanner *sc,
+				 const struct kof_obj_ctx *ctx, uint32_t index,
+				 uint32_t window_bits, uint64_t out_hint)
+{
+	struct kof_range *ext = sc->ext_gather;
+	struct expand_sink snk;
+	enum kof_decomp_status st = KOF_DEC_OK;
+	kof_buf b;
+	uint64_t skip, take, got = 0;
+	uint32_t n, i;
+
+	if (!ctx->resolve_entry || !can_produce(sc))
+		return 0;
+	n = ctx->resolve_entry(ctx, index, ext, KOF_SCAN_MAX_EXTENTS);
+	if (!n)
+		return 0;
+
+	b = kof_src_buf(sc->cur_src);
+	skip = out_hint >> 32;
+	take = out_hint & 0xffffffffu;
+	if (!take)
+		return 0;
+
+	if (!sc->lzx) {
+		sc->lzx = malloc(sizeof *sc->lzx);
+		if (!sc->lzx) {
+			scan_broken(sc, KOF_BROKEN_LIMIT);
+			return 0;
+		}
+	}
+	snk.ctx = ctx;
+	snk.left = expand_limit(kof_clip_len(b.n, ext[0].off, ext[0].len), take);
+
+	for (i = 0; i < n && take; i++) {
+		uint64_t off = ext[i].off;
+		uint64_t len = kof_clip_len(b.n, off, ext[i].len);
+		uint64_t part = 0;
+
+		if (!len)
+			break;
+		st = kof_lzx_decode(sc->lzx, window_bits, b.p + off, len, skip,
+				    take, expand_sink_fn, &snk, &part);
+		got += part;
+		/*
+		 * Truncation is not an error, for the reason the DEFLATE path
+		 * gives - and on every range but the last it is the ORDINARY
+		 * end: the range holds one interval's bytes and the decoder
+		 * asks for the next one's, which is not there because the next
+		 * range is where they are. UNSUPPORTED is this decoder's way of
+		 * saying the stream asked for x86 call translation, which it
+		 * does not undo - the bytes are right everywhere except a few
+		 * per frame, and saying so is better than either silence or a
+		 * refusal.
+		 */
+		if (st != KOF_DEC_OK && st != KOF_DEC_TRUNCATED &&
+		    st != KOF_DEC_STOPPED)
+			break;
+		if (st == KOF_DEC_STOPPED)
+			break;         /* the receiver has had enough */
+		if (!part)
+			break;         /* no progress: another pass would not
+					* make any either */
+		take -= part;
+		skip = 0;              /* only the first range holds the run-up */
+	}
+
+	if (st != KOF_DEC_OK && st != KOF_DEC_TRUNCATED &&
+	    st != KOF_DEC_STOPPED)
+		scan_broken(sc, broken_of_status(st));
+	else if (snk.left == 0)
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+	return got;
+}
+
+/*
+ * LZX WHERE THE PIECES ARE ONE STREAM, which is what a cabinet folder is.
+ *
+ * A folder is compressed end to end and then cut into CFDATA blocks, each with
+ * a header in front of it. The coding knows nothing about that cut - it is not
+ * a restart, the trees and the window carry straight across it - so the pieces
+ * are joined back into the stream they were and decoded once. That is the whole
+ * difference from unpack_lzx_reset, and getting it the wrong way round decodes
+ * the first piece and produces refuse from the second.
+ *
+ * The join costs a copy of the folder's compressed bytes, charged to the
+ * resident budget the same way the STORED join is. It is not avoidable: the
+ * decoder takes a buffer, and the pieces are not adjacent in the object.
+ */
+static uint64_t unpack_lzx(struct kof_scanner *sc,
+			   const struct kof_obj_ctx *ctx, uint32_t index,
+			   uint32_t window_bits, uint64_t out_hint)
+{
+	struct kof_range *ext = sc->ext_gather;
+	struct expand_sink snk;
+	enum kof_decomp_status st;
+	kof_buf b;
+	uint8_t *in;
+	uint64_t total = 0, at = 0, skip, take, got = 0, room;
+	uint32_t n, i;
+
+	if (!ctx->resolve_entry || !can_produce(sc))
+		return 0;
+	skip = out_hint >> 32;
+	take = out_hint & 0xffffffffu;
+	if (!take)
+		return 0;
+	n = ctx->resolve_entry(ctx, index, ext, KOF_SCAN_MAX_EXTENTS);
+	if (!n)
+		return 0;
+
+	b = kof_src_buf(sc->cur_src);
+	for (i = 0; i < n; i++)
+		total += kof_clip_len(b.n, ext[i].off, ext[i].len);
+	if (!total)
+		return 0;
+
+	room = sc->resident < sc->resident_max
+	     ? sc->resident_max - sc->resident : 0;
+	if (total > room) {
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+		return 0;
+	}
+	if (!sc->lzx) {
+		sc->lzx = malloc(sizeof *sc->lzx);
+		if (!sc->lzx) {
+			scan_broken(sc, KOF_BROKEN_LIMIT);
+			return 0;
+		}
+	}
+	in = malloc((size_t)total);
+	if (!in) {
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+		return 0;
+	}
+	sc->resident += total;
+	if (sc->resident > sc->st.peak_resident)
+		sc->st.peak_resident = sc->resident;
+
+	for (i = 0; i < n; i++) {
+		uint64_t len = kof_clip_len(b.n, ext[i].off, ext[i].len);
+
+		if (!len)
+			continue;
+		memcpy(in + at, b.p + ext[i].off, (size_t)len);
+		at += len;
+	}
+
+	snk.ctx = ctx;
+	snk.left = expand_limit(total, take);
+	st = kof_lzx_decode(sc->lzx, window_bits, in, at, skip, take,
+			    expand_sink_fn, &snk, &got);
+	if (st != KOF_DEC_OK && st != KOF_DEC_TRUNCATED &&
+	    st != KOF_DEC_STOPPED)
+		scan_broken(sc, broken_of_status(st));
+	else if (snk.left == 0)
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+
+	free(in);
+	sc->resident -= total;
+	return got;
+}
+
 static uint64_t c_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 			       uint32_t index, uint64_t out_hint)
 {
@@ -2104,6 +2328,16 @@ static uint64_t c_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 	 */
 	if (method == KOF_UNP_MSZIP)
 		return unpack_mszip(sc, ctx, index, out_hint);
+	if (method > KOF_UNP_LZX_RESET_BASE &&
+	    method <= KOF_UNP_LZX_RESET_BASE + KOF_LZX_MAX_BITS)
+		return unpack_lzx_reset(sc, ctx, index,
+					method -
+						(uint32_t)KOF_UNP_LZX_RESET_BASE,
+					out_hint);
+	if (method > KOF_UNP_LZX_BASE &&
+	    method <= KOF_UNP_LZX_BASE + KOF_LZX_MAX_BITS)
+		return unpack_lzx(sc, ctx, index,
+				  method - (uint32_t)KOF_UNP_LZX_BASE, out_hint);
 	if (method != KOF_UNP_OVBA && method != KOF_UNP_STORED)
 		return 0;              /* the only codings entries are decoded with */
 

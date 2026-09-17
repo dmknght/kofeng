@@ -892,6 +892,8 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofdecomp/textcode.c \
            libkofeng/kofdecomp/lzw.c \
            libkofeng/kofdecomp/bzip2.c \
+           libkofeng/kofdecomp/lzx.c \
+           libkofeng/kofdecomp/lzhuf.c \
            libkofeng/kofdecomp/ovba.c \
            libkofeng/kofdecomp/bcj.c \
            libkofeng/kofdecomp/bcj2.c \

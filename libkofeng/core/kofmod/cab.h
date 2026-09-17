@@ -20,22 +20,30 @@
  * it is a range of something that has to be produced first, and two files in
  * one folder cannot be decoded independently.
  *
- * That decides what this build can do. A folder stored uncompressed IS its
- * bytes, with a block header every few kilobytes; a file that fits inside one
- * block is a plain range and becomes a child. A folder coded with MSZIP,
- * Quantum or LZX is one stream, and this build does not decode any of the
- * three - so those files are counted (n_coded) and left as bytes in the DATA
- * region rather than reported as an engine failure, the judgement pdf.c's
- * image note records after measuring what the opposite did to ordinary files.
+ * That decides the shape of the entry table. A folder stored uncompressed IS
+ * its bytes, with a block header every few kilobytes; a file that fits inside
+ * one block is a plain range and becomes a child with no module involved, and
+ * one that crosses a boundary is KOF_ENT_F_SCATTERED and is joined.
  *
- * MSZIP IS DEFLATE AND IS STILL NOT DECODED HERE, which is worth saying
- * plainly because the engine HAS a DEFLATE decoder. A MSZIP folder is a
- * sequence of blocks, each its own deflate stream, and each one after the first
- * may reference the previous block's last 32KB as history. Decoding them one at
- * a time produces the right bytes for the first block and plausible wrong bytes
- * after it - which is the one outcome this engine must never produce. Doing it
- * properly needs a decoder that can be SEEDED with a window, and that is a
- * change to kofdecomp rather than a line here.
+ * A CODED FOLDER IS DECODED FROM ITS FIRST BLOCK, whichever file is wanted.
+ * Neither MSZIP nor LZX can be entered part way, so the entry's pieces are the
+ * WHOLE FOLDER's blocks and out_hint says where in the decoded stream the file
+ * sits - the high 32 bits its offset, the low 32 its length. Which coding is
+ * in the entry's own `coding[0]`, so a module asks for what the folder
+ * declared rather than keeping a second table of it.
+ *
+ *   MSZIP  - one deflate stream per block, each free to reference the previous
+ *            block's last 32KB as history. Decoding them independently gives
+ *            the right bytes for the first block and plausible wrong ones after
+ *            it, which is the one outcome this engine must never produce; the
+ *            host seeds each stream with the last block's window instead.
+ *   LZX    - one stream across every block, so the blocks are joined back
+ *            together and decoded once. The window is in the folder's
+ *            typeCompress and is carried in the method id.
+ *   QUANTUM - no decoder here. Those files are counted in n_coded and left as
+ *            bytes in the DATA region rather than reported as an engine
+ *            failure, the judgement pdf.c's image note records after measuring
+ *            what the opposite did to ordinary files.
  *
  *
  * SPANNING IS A FACT, NOT A FAILURE. A cabinet may say its content continues in
@@ -65,7 +73,9 @@
  * what a dropper calls its payload searches NAMES.
  *
  * DATA is every CFDATA block: the coded streams and their block headers. It is
- * where a stored payload sits and where a coded one is unreachable.
+ * where a stored payload sits and where a coded one sits coded - a rule over
+ * this region sees a compressed folder as compressed bytes, and its files
+ * arrive decoded as children instead.
  */
 enum kof_scan_cab {
 	KOF_SCAN_CAB_HEADERS   = 1u << 1,  /* CFHEADER, reserves, cabinet names */
@@ -132,7 +142,15 @@ struct kof_cab_folder {
 	uint64_t data_off;      /* first CFDATA of this folder */
 	uint32_t n_blocks;
 	uint16_t compress;      /* KOF_CAB_C_*, the low byte of typeCompress */
-	uint16_t reserved;
+	/*
+	 * The LZX window as a power of two, out of the high byte of
+	 * typeCompress. Zero for every other coding.
+	 *
+	 * It is not in the stream - see lzx.h - so a decoder handed only the
+	 * bytes cannot run, and a cabinet that declares a width this build does
+	 * not have is a folder left unopened rather than one decoded wrongly.
+	 */
+	uint16_t window;
 };
 
 struct kof_cab_info {
@@ -182,14 +200,6 @@ struct kof_cab_info {
 	struct {
 		uint32_t first_run, n_run;
 	} split[KOF_CAB_MAX_FILES];
-
-	/*
-	 * Which entries are in a CODED folder, so the module knows which
-	 * coding to ask for: a scattered entry in a stored folder is a JOIN,
-	 * and one in an MSZIP folder is a decode of the whole folder. Both are
-	 * scattered and the flag alone cannot tell them apart.
-	 */
-	uint8_t coded[KOF_CAB_MAX_FILES];
 
 	/*
 	 * THE PIECES OF THE SCATTERED ENTRIES, in one pool.

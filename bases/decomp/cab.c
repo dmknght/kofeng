@@ -63,15 +63,16 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		/* The name the entry already carries, so the child is called
 		 * what the cabinet calls it rather than a number. */
 		kof_name_next(e->name_off, e->name_len);
-		if (c->coded[i]) {
+		if (e->coding[0]) {
 			/*
 			 * A CODED FOLDER, WHICH IS A DECODE OF ALL OF IT.
 			 *
 			 * The pieces are the folder's blocks and the file is
 			 * somewhere inside what they decode to, so out_hint
-			 * carries where - see KOF_UNP_MSZIP. The parse only
-			 * offers an entry for a coding the host has, so
-			 * reaching here means MSZIP.
+			 * carries where - see KOF_UNP_MSZIP and KOF_UNP_LZX.
+			 * The parse only offers an entry for a coding the host
+			 * has, and names it in the entry, so this asks for what
+			 * the folder declared rather than deciding.
 			 *
 			 * ONE FOLDER DECODE PER FILE, which is why this stops
 			 * after a bounded number of them: a folder holding two
@@ -84,7 +85,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 				continue;
 			}
 			coded_done++;
-			if (!kof_unpack_entry(KOF_UNP_MSZIP, e->index,
+			if (!kof_unpack_entry(e->coding[0], e->index,
 					      e->out_hint))
 				continue;
 		} else if (!kof_unpack_entry(KOF_UNP_STORED, e->index, e->len)) {

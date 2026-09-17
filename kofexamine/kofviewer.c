@@ -4407,10 +4407,31 @@ static void tree_build(struct view *v)
 				 */
 				if (child_of_entry(v, i, tab[e].index))
 					continue;
-				tree_add_ent(v, o->depth + 1u, i,
-					     tab[e].index, tab[e].off,
-					     tab[e].len,
-					     ent_label(o, &tab[e]));
+				/*
+				 * AND A SCATTERED ENTRY HAS NO RANGE TO OPEN.
+				 *
+				 * Its bytes are several pieces of the object,
+				 * or - for a cabinet's coded folder - not a
+				 * range of the object at all, so `off` and
+				 * `len` are not a place and the contract says
+				 * not to read them. Passed on they would put
+				 * the row at offset zero with the DECODED
+				 * length, which is a window onto the start of
+				 * the file under the entry's name.
+				 *
+				 * The row stays, because the entry is still
+				 * the only thing that says this file is in
+				 * there; what it does not do is claim bytes.
+				 */
+				if (tab[e].flags & KOF_ENT_F_SCATTERED)
+					tree_add_ent(v, o->depth + 1u, i,
+						     tab[e].index, 0, 0,
+						     ent_label(o, &tab[e]));
+				else
+					tree_add_ent(v, o->depth + 1u, i,
+						     tab[e].index, tab[e].off,
+						     tab[e].len,
+						     ent_label(o, &tab[e]));
 			}
 		}
 	}

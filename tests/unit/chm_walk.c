@@ -45,7 +45,35 @@ static void ok_(int cond, const char *what)
 #define ITSP_LEN 0x54u
 #define DIR_AT   (ITSF_LEN + ITSP_LEN)
 #define CONTENT_AT (DIR_AT + CHUNK)
-#define FILE_LEN (CONTENT_AT + 64u)
+
+/*
+ * THE CONTENT AREA, laid out so the compressed half is describable.
+ *
+ * A help file's pages are in an LZX stream, and reaching one takes three of the
+ * format's own entries: ControlData for the window, the reset table for where
+ * the stream restarts, and Content for the stream itself. The fixture carries
+ * all three - the stream's BYTES are not LZX and nothing here decodes them, but
+ * every number the placement works from is real, which is what is under test.
+ */
+#define PAGE_AT      0u
+#define PAGE_LEN     32u
+#define NAMELIST_AT  32u
+#define NAMELIST_LEN 16u
+#define CTRL_AT      48u
+#define CTRL_LEN     24u        /* six words */
+#define RESET_AT     80u
+#define RESET_LEN    (0x28u + 8u)   /* the header and one row */
+#define LZX_AT       128u
+#define LZX_LEN      200u
+#define CONTENT_LEN  (LZX_AT + LZX_LEN)
+
+/* What the reset table declares, and what the coded entry asks for inside it. */
+#define FRAME_LEN    32768u
+#define RESET_EVERY  2u         /* frames between restarts */
+#define UNCOMP_LEN   100u
+#define HIDDEN_LEN   99u
+
+#define FILE_LEN (CONTENT_AT + CONTENT_LEN)
 
 static void wr32(uint8_t *p, uint32_t v)
 {
@@ -123,15 +151,51 @@ static uint8_t *build(size_t *len_out)
 	dir = f + DIR_AT;
 	memcpy(dir, "PMGL", 4);
 	at = dir + 0x14u;
-	at += put_entry(at, "/page.htm", 0, 0, 32);
-	at += put_entry(at, "/hidden.htm", 1, 0, 99);
-	at += put_entry(at, "::DataSpace/NameList", 0, 32, 16);
+	at += put_entry(at, "/page.htm", 0, PAGE_AT, PAGE_LEN);
+	at += put_entry(at, "/hidden.htm", 1, 0, HIDDEN_LEN);
+	at += put_entry(at, "::DataSpace/NameList", 0, NAMELIST_AT, NAMELIST_LEN);
+	/*
+	 * The three the compressed section is read through. Matched on the tail
+	 * of the name, which is why the reset table's real path - it sits under
+	 * a GUID no two writers agree on - can be shortened here.
+	 */
+	at += put_entry(at, "::DataSpace/Storage/MSCompressed/ControlData",
+			0, CTRL_AT, CTRL_LEN);
+	at += put_entry(at, "::DataSpace/Storage/MSCompressed/Transform/"
+			"{7FC28940-9D31-11D0-9B27-00A0C91E9C7C}/"
+			"InstanceData/ResetTable", 0, RESET_AT, RESET_LEN);
+	at += put_entry(at, "::DataSpace/Storage/MSCompressed/Content",
+			0, LZX_AT, LZX_LEN);
 	/* Everything after the entries is the chunk's free space, which is what
 	 * the header's second field states - get this wrong and the walk reads
 	 * the quickref area as if it were entries. */
 	wr32(dir + 4, (uint32_t)(CHUNK - (uint32_t)(at - dir)));
 
-	memcpy(f + CONTENT_AT, "kofeng-chm-fixture-page-bytes-32", 32);
+	memcpy(f + CONTENT_AT + PAGE_AT, "kofeng-chm-fixture-page-bytes-32",
+	       PAGE_LEN);
+
+	/*
+	 * ControlData: a length in words, "LZXC", a version, the reset
+	 * interval, the window and a cache size. Version 2 counts the interval
+	 * in frames; the window is in frames too, so one frame is 2^15.
+	 */
+	wr32(f + CONTENT_AT + CTRL_AT + 0, 6);
+	memcpy(f + CONTENT_AT + CTRL_AT + 4, "LZXC", 4);
+	wr32(f + CONTENT_AT + CTRL_AT + 8, 2);
+	wr32(f + CONTENT_AT + CTRL_AT + 12, RESET_EVERY);
+	wr32(f + CONTENT_AT + CTRL_AT + 16, 1);
+	wr32(f + CONTENT_AT + CTRL_AT + 20, 0x8000u);
+
+	/* The reset table: one row, so the whole stream is one interval. */
+	wr32(f + CONTENT_AT + RESET_AT + 0, 2);            /* version */
+	wr32(f + CONTENT_AT + RESET_AT + 4, 1);            /* rows */
+	wr32(f + CONTENT_AT + RESET_AT + 8, 8);            /* bytes a row */
+	wr32(f + CONTENT_AT + RESET_AT + 12, 0x28u);       /* where they start */
+	wr64(f + CONTENT_AT + RESET_AT + 0x10, UNCOMP_LEN);
+	wr64(f + CONTENT_AT + RESET_AT + 0x18, LZX_LEN);
+	wr64(f + CONTENT_AT + RESET_AT + 0x20, FRAME_LEN);
+	wr64(f + CONTENT_AT + RESET_AT + 0x28, 0);         /* frame 0 */
+
 	*len_out = FILE_LEN;
 	return f;
 }
@@ -176,26 +240,61 @@ int main(void)
 		ok_(c->chunk_size == CHUNK && c->n_chunks == 1u,
 		    "the directory header is read");
 		/*
-		 * ONE entry: the page. The compressed one is counted and not
-		 * offered - this build has no LZX, and an entry it cannot point
-		 * at must not become a child of the wrong bytes. The NameList
-		 * is the format's own bookkeeping.
+		 * TWO entries: the page, which is a range, and the one in the
+		 * compressed section, which is not - it is the intervals of the
+		 * stream it sits in. The four ::DataSpace rows are the format's
+		 * own bookkeeping and are not offered as files.
 		 */
-		ok_(c->n_entries == 1u, "one openable entry");
+		ok_(c->n_entries == 2u, "both entries are offered");
 		ok_(c->n_compressed == 1u, "the compressed one is counted");
-		ok_(c->n_special == 1u, "the format's own entry is counted");
-		if (c->n_entries == 1u) {
+		ok_(c->n_unreachable == 0u,
+		    "and the reset table placed it");
+		ok_(c->n_special == 4u, "the format's own entries are counted");
+		ok_(c->lzx_window_bits == 15u &&
+		    c->lzx_reset_interval == RESET_EVERY,
+		    "ControlData says the window and the interval");
+		ok_(c->lzx_uncomp_len == UNCOMP_LEN &&
+		    c->lzx_frame == FRAME_LEN && c->n_reset == 1u,
+		    "the reset table says what the stream comes to");
+		if (c->n_entries == 2u) {
 			const struct kof_entry *e = &c->entry[0];
 
 			ok_(e->kind == KOF_ENT_EMBEDDED,
 			    "an entry is a carried file");
-			ok_(e->off == CONTENT_AT && e->len == 32u,
+			ok_(e->off == CONTENT_AT + PAGE_AT &&
+			    e->len == PAGE_LEN,
 			    "the entry points at its bytes");
 			ok_(e->name_len == 9u &&
 			    memcmp(f + e->name_off, "/page.htm", 9) == 0,
 			    "the name is a range in the object");
 			ok_(memcmp(f + e->off, "kofeng-chm", 10) == 0,
 			    "and the bytes are the ones it named");
+
+			/*
+			 * AND THE CODED ONE IS NOT A RANGE. Its pieces come
+			 * from resolve_entry and its out_hint says where in
+			 * the decoded stream it starts and how long it is -
+			 * which is the whole of what a decoder is told.
+			 */
+			e = &c->entry[1];
+			ok_((e->flags & KOF_ENT_F_SCATTERED) != 0 &&
+			    e->coding[0] == KOF_UNP_LZX_RESET(15u),
+			    "the compressed entry is not a range of the file, "
+			    "and it names the coding and the window");
+			ok_(e->len == HIDDEN_LEN &&
+			    e->out_hint == HIDDEN_LEN,
+			    "it begins at the restart, so nothing is skipped");
+			{
+				struct kof_range r[4];
+				uint32_t n;
+
+				n = ctx.resolve_entry(&ctx, e->index, r, 4u);
+				ok_(n == 1u &&
+				    r[0].off == CONTENT_AT + LZX_AT &&
+				    r[0].len == LZX_LEN,
+				    "and its one piece is the stream from that "
+				    "restart");
+			}
 		}
 		/* The regions partition the object - the property every
 		 * collector here owes. */
@@ -247,16 +346,25 @@ int main(void)
 	/* ---- a name longer than the chunk ------------------------------ */
 	{
 		uint8_t *at = f + DIR_AT + 0x14u;
-		uint8_t save = at[0];
+		uint8_t save[2];
 
-		/* The first entry's name length, made huge. The walk must stop
-		 * at the chunk rather than read the rest of the object. */
-		at[0] = 0x7fu;
+		memcpy(save, at, 2);
+		/*
+		 * The first entry's name length, made larger than the entries
+		 * area it sits in - 512 as a two byte encint. The walk must
+		 * stop at the chunk rather than read the rest of the object.
+		 *
+		 * Not the largest single byte value, which is what this said
+		 * first: 127 fits inside a chunk once the fixture carries the
+		 * compressed section's entries, so the case stopped being one.
+		 */
+		at[0] = 0x84u;
+		at[1] = 0x00u;
 		memset(&ctx, 0, sizeof ctx);
 		kof_chm_parse(buf_of(f, len), c, &ctx);
 		ok_(c->n_entries == 0u,
 		    "a name that does not fit its chunk ends the walk");
-		at[0] = save;
+		memcpy(at, save, 2);
 	}
 
 	/* ---- an entry pointing past the end ---------------------------- */
@@ -310,8 +418,9 @@ int main(void)
 		printf("chm walk: %d check(s) failed\n", failures);
 		return 1;
 	}
-	printf("chm walk: header, directory, entries, regions, a huge count, a "
-	       "bad chunk size, a huge name, a past-the-end entry, traversal - "
-	       "ok\n");
+	printf("chm walk: header, directory, entries, the coded section's three "
+	       "structures and where they place a page, regions, a huge count, "
+	       "a bad chunk size, a huge name, a past-the-end entry, traversal "
+	       "- ok\n");
 	return 0;
 }

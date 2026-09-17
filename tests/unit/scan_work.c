@@ -106,7 +106,7 @@ static int synth_make(struct synth *s, uint32_t mods, int target)
 
 		s->mod[i].code        = code;
 		s->mod[i].code_len    = BLOB_LEN;
-		s->mod[i].n_target    = target < 0 ? 0u : 1u;
+		s->mod[i].n_target    = (uint8_t)(target < 0 ? 0 : 1);
 		s->mod[i].target[0]   = target < 0 ? 0u : (uint8_t)target;
 		/* The whole object: a region bit names a FORMAT's region, and
 		 * the object here is text, which has none. Naming one had

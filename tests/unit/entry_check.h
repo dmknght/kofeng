@@ -76,11 +76,16 @@ static int ec_method_ok(uint32_t m)
 {
 	if (m >= 1u && m <= 13u)
 		return 1;
+	if (m >= KOF_UNP_LZHUF_ARJ && m <= KOF_UNP_LZHUF_LH7)
+		return 1;
 	if (m >= KOF_UNP_NRV2B_8 && m <= KOF_UNP_NRV2E_32)
 		return 1;
 	/* lc + 9*lp + 45*pb, each parameter bounded by the specification, so the
 	 * widest legal id is base + 8 + 36 + 180. */
 	if (m >= KOF_UNP_LZMA && m <= KOF_UNP_LZMA + 224u)
+		return 1;
+	/* Both shapes, each with a window of 15 to 21 bits in the id. */
+	if (KOF_UNP_IS_LZX(m))
 		return 1;
 	return 0;
 }

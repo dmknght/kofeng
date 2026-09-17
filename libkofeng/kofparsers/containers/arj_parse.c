@@ -296,7 +296,22 @@ int kof_arj_parse(kof_buf file, struct kof_arj_info *a, struct kof_obj_ctx *ctx)
 			a->n_dirs++;
 			continue;
 		}
-		if (method != 0u || (flags & ARJ_F_GARBLED) || !csize) {
+		/*
+		 * WHAT THE METHOD MEANS FOR THE ENTRY.
+		 *
+		 * Zero is stored: the body IS the file, and it becomes a child
+		 * with no module at all. One to three are a single coding -
+		 * see KOF_UNP_LZHUF_ARJ - so they become entries too, naming
+		 * that coding and carrying the original size, which is the only
+		 * thing that ends the stream.
+		 *
+		 * Four is a different coding with no decoder here, and a
+		 * GARBLED entry is encrypted: both are counted and left, which
+		 * is the same answer this build gives everywhere it cannot
+		 * open something.
+		 */
+		if ((flags & ARJ_F_GARBLED) || !csize ||
+		    (method != 0u && (method > 3u || !osize))) {
 			a->n_coded++;
 			if (method != 0u)
 				a->anomalies |= KOF_ARJ_ANOM_CODED;
@@ -317,8 +332,14 @@ int kof_arj_parse(kof_buf file, struct kof_arj_info *a, struct kof_obj_ctx *ctx)
 			e->name_len = name_len - 1u;   /* without the NUL */
 			e->off      = body;
 			e->len      = csize;
-			if (osize && osize != csize)
+			if (method != 0u) {
+				a->n_coded++;
+				a->anomalies |= KOF_ARJ_ANOM_CODED;
+				e->coding[0] = KOF_UNP_LZHUF_ARJ;
+				e->out_hint  = osize;
+			} else if (osize && osize != csize) {
 				e->out_hint = osize;
+			}
 			a->n_entries++;
 		}
 	}

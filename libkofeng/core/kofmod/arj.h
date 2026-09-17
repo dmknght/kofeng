@@ -19,10 +19,25 @@
  * The FIRST header is the archive's own - a name and a comment, no data. The
  * ones after it are files, each followed by its body.
  *
- * WHAT THIS BUILD DOES NOT DO: decode. Method 0 is stored and those entries are
- * plain ranges; methods 1 to 4 are ARJ's own LZ77 and Huffman coding, which
- * this build has no decoder for, so they are counted and left in the DATA
- * region - the same judgement as every other coding this engine lacks.
+ * WHICH ENTRIES ARE OPENED, and it is decided by the method number.
+ *
+ *   0         stored: the body IS the file, so the entry is a plain range and
+ *             the host opens it with no module at all - see
+ *             kof_objtree_declared.
+ *   1, 2, 3   one coding - the number is how hard the compressor looked, not
+ *             what a decoder must do - and the one this build decodes. The
+ *             entry names it in coding[0] and carries the ORIGINAL SIZE in
+ *             out_hint, because that coding has no end marker and stops on the
+ *             count - see KOF_UNP_LZHUF_ARJ. Decoding is bases/decomp/arj.c's,
+ *             not the host's.
+ *   4         a different coding with no decoder here.
+ *
+ * A GARBLED entry is encrypted and is not opened whatever its method. Both it
+ * and method 4 are counted in n_coded and left in the DATA region, the same
+ * judgement as every other coding this engine lacks.
+ *
+ * n_coded counts EVERY coded entry, opened or not: a reader asking how much of
+ * an archive is behind a coding means that, not how much was left over.
  *
  * Layout rule: append only.
  */
@@ -50,7 +65,9 @@ enum {
 	/* The first header is not the archive's own, or its basic header is
 	 * shorter than the fields it must hold. */
 	KOF_ARJ_ANOM_BAD_HEADER   = 1ull << 1,
-	/* An entry is coded with a method this build does not decode. */
+	/* An entry is coded rather than stored - whether or not this build has
+	 * that coding. A FACT about the archive and not a failure: it says the
+	 * DATA region holds compressed bytes rather than files. */
 	KOF_ARJ_ANOM_CODED        = 1ull << 2,
 	/* The archive says it is one volume of several: the rest of a file's
 	 * bytes are in another object. */
@@ -83,7 +100,7 @@ struct kof_arj_info {
 	uint8_t  arj_flags;
 
 	uint32_t n_entries;
-	uint32_t n_coded;
+	uint32_t n_coded;         /* entries behind a coding, opened or not */
 	uint32_t n_dirs;
 
 	uint64_t names_off, names_len;

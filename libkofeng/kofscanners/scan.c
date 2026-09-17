@@ -138,6 +138,8 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc->inf);
 	free(sc->lzw);
 	free(sc->bz);
+	free(sc->lzx);
+	free(sc->lzh);
 	kof_xref_free(sc->use);
 	free(sc->sym);
 	free(sc->sym_ext[0]);

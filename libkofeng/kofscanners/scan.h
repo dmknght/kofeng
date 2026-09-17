@@ -34,6 +34,8 @@
 #include "../kofdecomp/textcode.h"
 #include "../kofdecomp/lzw.h"
 #include "../kofdecomp/bzip2.h"
+#include "../kofdecomp/lzx.h"
+#include "../kofdecomp/lzhuf.h"
 #include "../kofdecomp/nrv2.h"
 #include "../kofdecomp/lzma.h"
 
@@ -257,6 +259,21 @@ struct kof_scanner {
 	 * nothing, which is what makes the size affordable.
 	 */
 	struct kof_bunzip  *bz;
+	/*
+	 * And 2.1MB for LZX, on the same terms.
+	 *
+	 * The size is the window: the format allows 2MB of it, a help file is
+	 * free to say so, and the window has to exist before the first match
+	 * can be copied out of it. Sizing it to the stream is not open either -
+	 * the width comes from the container, so a scanner would be
+	 * reallocating whenever a cabinet and a help file disagreed.
+	 */
+	struct kof_lzx     *lzx;
+	/*
+	 * And 90KB for LHA's and ARJ's coding, on the same terms: a dictionary
+	 * wide enough for the largest variant, plus its three decoding tables.
+	 */
+	struct kof_lzhuf   *lzh;
 
 	/*
 	 * Where notes go, when anybody wants them.

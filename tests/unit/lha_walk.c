@@ -119,11 +119,17 @@ int main(void)
 	} else {
 		ok_((l->anomalies & KOF_LHA_ANOM_NO_END) == 0,
 		    "the end mark is found");
-		ok_(l->n_entries == 1u, "the stored entry is a range");
-		ok_(l->n_coded == 1u, "the coded one is counted");
+		/*
+		 * BOTH are entries: "-lh0-" is the file itself and "-lh5-" is
+		 * a coding the engine has - it becomes an entry that NAMES the
+		 * coding and carries the original size, which for this one is
+		 * what ends the stream rather than a guess at its output.
+		 */
+		ok_(l->n_entries == 2u, "both files are entries");
+		ok_(l->n_coded == 1u, "the coded one is counted as coded");
 		ok_((l->anomalies & KOF_LHA_ANOM_CODED) != 0,
 		    "and said");
-		if (l->n_entries == 1u) {
+		if (l->n_entries == 2u) {
 			const struct kof_entry *e = &l->entry[0];
 
 			ok_(e->len == sizeof BODY - 1u &&
@@ -132,6 +138,14 @@ int main(void)
 			ok_(e->name_len == 10u &&
 			    memcmp(f + e->name_off, "stored.txt", 10) == 0,
 			    "the name is a range in the object");
+			ok_(e->coding[0] == 0,
+			    "a stored entry names no coding");
+
+			e = &l->entry[1];
+			ok_(e->coding[0] == KOF_UNP_LZHUF_LH5 &&
+			    e->out_hint == 8u,
+			    "the coded one names its coding and the size that "
+			    "ends its stream");
 		}
 		{
 			struct kof_range r[16];

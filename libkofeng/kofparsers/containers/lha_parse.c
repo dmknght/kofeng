@@ -285,30 +285,63 @@ int kof_lha_parse(kof_buf file, struct kof_lha_info *l, struct kof_obj_ctx *ctx)
 		}
 		l->data_len = body + csize - l->data_off;
 
-		if (strcmp(m, "-lhd-") == 0) {
-			l->n_dirs++;
-		} else if (!lha_stored(m) || !csize) {
-			l->n_coded++;
-			l->anomalies |= KOF_LHA_ANOM_CODED;
-		} else if (l->n_entries >= KOF_LHA_MAX_ENTRIES) {
-			l->anomalies |= KOF_LHA_ANOM_ENTRIES_FULL;
-			break;
-		} else {
-			struct kof_entry *e = &l->entry[l->n_entries];
+		{
+			/*
+			 * WHICH CODING, IF ANY, THE ENTRY NAMES.
+			 *
+			 * "-lh0-" and "-lz4-" are stored: the body IS the file
+			 * and it becomes a child with no module at all.
+			 * "-lh5-", "-lh6-" and "-lh7-" are one coding under
+			 * three dictionary sizes - see KOF_UNP_LZHUF_LH5 - and
+			 * the size is what the name picks.
+			 *
+			 * The older ones, "-lh1-" through "-lh4-" and "-lzs-",
+			 * are different codings with no decoder here; they are
+			 * counted and left, the same answer this build gives
+			 * everywhere it lacks one.
+			 */
+			uint32_t coding = 0;
 
-			memset(e, 0, sizeof *e);
-			e->index    = l->n_entries;
-			e->kind     = KOF_ENT_EMBEDDED;
-			e->format   = KOF_FMT_UNKNOWN;
-			e->name_off = name_at;
-			e->name_len = name_len;
-			e->off      = body;
-			e->len      = csize;
-			/* Stored, so the declared original size is a claim
-			 * that can be checked rather than a hint. */
-			if (osize && osize != csize)
-				e->out_hint = osize;
-			l->n_entries++;
+			if (strcmp(m, "-lh5-") == 0)
+				coding = KOF_UNP_LZHUF_LH5;
+			else if (strcmp(m, "-lh6-") == 0)
+				coding = KOF_UNP_LZHUF_LH6;
+			else if (strcmp(m, "-lh7-") == 0)
+				coding = KOF_UNP_LZHUF_LH7;
+
+			if (strcmp(m, "-lhd-") == 0) {
+				l->n_dirs++;
+			} else if (!csize ||
+				   (!lha_stored(m) && (!coding || !osize))) {
+				l->n_coded++;
+				l->anomalies |= KOF_LHA_ANOM_CODED;
+			} else if (l->n_entries >= KOF_LHA_MAX_ENTRIES) {
+				l->anomalies |= KOF_LHA_ANOM_ENTRIES_FULL;
+				break;
+			} else {
+				struct kof_entry *e = &l->entry[l->n_entries];
+
+				memset(e, 0, sizeof *e);
+				e->index    = l->n_entries;
+				e->kind     = KOF_ENT_EMBEDDED;
+				e->format   = KOF_FMT_UNKNOWN;
+				e->name_off = name_at;
+				e->name_len = name_len;
+				e->off      = body;
+				e->len      = csize;
+				if (!lha_stored(m)) {
+					l->n_coded++;
+					l->anomalies |= KOF_LHA_ANOM_CODED;
+					e->coding[0] = (uint16_t)coding;
+					e->out_hint  = osize;
+				} else if (osize && osize != csize) {
+					/* Stored, so the declared original size
+					 * is a claim that can be checked rather
+					 * than a hint. */
+					e->out_hint = osize;
+				}
+				l->n_entries++;
+			}
 		}
 
 		at = body + csize;

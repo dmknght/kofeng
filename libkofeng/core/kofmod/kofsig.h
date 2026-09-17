@@ -1645,9 +1645,80 @@ enum kof_unp_method {
 	 */
 	KOF_UNP_MSZIP = 15,
 
+	/*
+	 * LZX, AND THE WINDOW IS IN THE ID.
+	 *
+	 * The coding behind a help file's pages and most of a modern cabinet's
+	 * content. Its window is not in the stream - a cabinet states it in the
+	 * folder's compression type, a help file in its ControlData - so a
+	 * decoder handed only the bytes cannot run, and the id carries it the
+	 * way KOF_UNP_LZMA carries its three parameters.
+	 *
+	 * Use KOF_UNP_LZX(bits) or KOF_UNP_LZX_RESET(bits) to build one, with
+	 * bits from 15 to 21.
+	 *
+	 * `out_hint` carries where to start and how much to take: the offset
+	 * INSIDE the decoded stream in the high 32 bits, the length in the low
+	 * 32. A stream can only be entered at a restart point, so a file part
+	 * way in is reached by decoding from that point and dropping what comes
+	 * before - which is the caller's arithmetic, not the decoder's.
+	 *
+	 * TWO IDS, BECAUSE THE PIECES MEAN TWO DIFFERENT THINGS. An entry
+	 * coded with LZX is scattered either way, and what resolve_entry hands
+	 * back is read differently:
+	 *
+	 *   KOF_UNP_LZX       - the pieces are ONE stream, cut up by something
+	 *                       that is not the coding. A cabinet folder is
+	 *                       this: the stream runs from the folder's first
+	 *                       block to its last and the block headers sit in
+	 *                       the middle of it, so the pieces are joined and
+	 *                       decoded once.
+	 *   KOF_UNP_LZX_RESET - each piece is a stream OF ITS OWN, because the
+	 *                       container restarts the coding at intervals and
+	 *                       says where. A help file is this - see chm.h -
+	 *                       and the pieces are decoded one after another
+	 *                       with the decoder starting again at each.
+	 *
+	 * Running a reset container's pieces together decodes the first and
+	 * produces refuse from the second, and joining them would do the same;
+	 * the two cannot share an id and be told apart by the host.
+	 *
+	 * ABOVE THE LZMA RANGE, and that is not spare room being used up. LZMA
+	 * carries three parameters in its id and runs from 64 to 288, so a base
+	 * of 128 - which is what this was - made KOF_UNP_LZX(15) and an LZMA
+	 * stream with a particular lc/lp/pb THE SAME NUMBER. Nothing caught it
+	 * because no parser fills an LZMA chain yet; kof_unp_method_name
+	 * already answered "lzma" for every LZX id.
+	 */
+	KOF_UNP_LZX_BASE = 320,
+	KOF_UNP_LZX_RESET_BASE = 352,
+
 	KOF_UNP_NRV2B_8 = 16, KOF_UNP_NRV2B_16, KOF_UNP_NRV2B_32,
 	KOF_UNP_NRV2D_8,      KOF_UNP_NRV2D_16, KOF_UNP_NRV2D_32,
 	KOF_UNP_NRV2E_8,      KOF_UNP_NRV2E_16, KOF_UNP_NRV2E_32,
+
+	/*
+	 * LZSS WITH BLOCK HUFFMAN - LHA's and ARJ's coding, which is ONE
+	 * coding under four sets of constants. See lzhuf.h.
+	 *
+	 * Four ids and not one with a parameter, because a container names the
+	 * variant and does not name a dictionary size: an archive says "-lh5-"
+	 * or "method 1", and a module that had to turn that into a width would
+	 * be keeping the table this enum already is.
+	 *
+	 * ARJ's methods 1, 2 and 3 are one id: the number says how hard the
+	 * compressor looked, not what a decoder must do. Its method 4 is a
+	 * different coding and has none here.
+	 *
+	 * THE DECODER NEEDS THE OUTPUT LENGTH, unlike every other entry here.
+	 * The stream has no end marker at all - it stops when the declared
+	 * original size has been produced - so out_hint is not a hint for
+	 * these and a caller that does not know it cannot decode at all.
+	 */
+	KOF_UNP_LZHUF_ARJ = 25,   /* ARJ -m1, -m2, -m3 */
+	KOF_UNP_LZHUF_LH5 = 26,   /* LHA -lh5-: 8KB dictionary */
+	KOF_UNP_LZHUF_LH6 = 27,   /* LHA -lh6-: 32KB */
+	KOF_UNP_LZHUF_LH7 = 28,   /* LHA -lh7-: 64KB */
 
 	/*
 	 * LZMA carries three parameters, so the id carries them.
@@ -1681,6 +1752,30 @@ enum kof_unp_method {
 #define KOF_UNP_LZMA_PROPS(lc, lp, pb)                                      \
 	((uint32_t)KOF_UNP_LZMA + (uint32_t)(lc) + 9u * (uint32_t)(lp) +    \
 	 45u * (uint32_t)(pb))
+
+/*
+ * The window sizes LZX defines: 2^15 to 2^21.
+ *
+ * Module facing for the reason KOF_LZMA_MAX_LC is - a module is what reads the
+ * width out of a container, a cabinet's typeCompress or a help file's
+ * ControlData, and has to refuse one the format never defines rather than pass
+ * it on as a method id nothing decodes.
+ */
+#define KOF_LZX_MIN_BITS 15u
+#define KOF_LZX_MAX_BITS 21u
+
+/* The LZX window, in the id - see KOF_UNP_LZX_BASE. `bits` is 15 to 21. */
+#define KOF_UNP_LZX(bits)  ((uint32_t)KOF_UNP_LZX_BASE + (uint32_t)(bits))
+#define KOF_UNP_LZX_RESET(bits) \
+	((uint32_t)KOF_UNP_LZX_RESET_BASE + (uint32_t)(bits))
+
+/* Either shape, which is what a host asks when it only wants to know that the
+ * coding is LZX - a name, a listing, a bound on the window. */
+#define KOF_UNP_IS_LZX(m)                                                   \
+	(((m) > (uint32_t)KOF_UNP_LZX_BASE &&                               \
+	  (m) <= (uint32_t)KOF_UNP_LZX_BASE + 21u) ||                       \
+	 ((m) > (uint32_t)KOF_UNP_LZX_RESET_BASE &&                         \
+	  (m) <= (uint32_t)KOF_UNP_LZX_RESET_BASE + 21u))
 
 /*
  * WHERE IT IS WORTH LOOKING FOR A FILE NOBODY DECLARED.
@@ -1837,6 +1932,8 @@ enum kof_entry_kind {
  */
 static inline const char *kof_unp_method_name(uint32_t m)
 {
+	if (KOF_UNP_IS_LZX(m))
+		return "lzx";
 	if (m >= KOF_UNP_LZMA && m <= KOF_UNP_LZMA + 224u)
 		return "lzma";
 	if (m >= KOF_UNP_NRV2B_8 && m <= KOF_UNP_NRV2B_32)
@@ -1860,6 +1957,10 @@ static inline const char *kof_unp_method_name(uint32_t m)
 	case KOF_UNP_RAR3:          return "rar3";
 	case KOF_UNP_RAR5:          return "rar5";
 	case KOF_UNP_BCJ2:          return "bcj2";
+	case KOF_UNP_LZHUF_ARJ:     return "arj";
+	case KOF_UNP_LZHUF_LH5:     return "lh5";
+	case KOF_UNP_LZHUF_LH6:     return "lh6";
+	case KOF_UNP_LZHUF_LH7:     return "lh7";
 	default:                    return "?";
 	}
 }

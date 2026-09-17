@@ -28,7 +28,23 @@
 #define CAB_FOLDER_LEN 8u
 #define CAB_FILE_MIN   17u      /* the fixed part, plus at least one name byte */
 #define CAB_DATA_HDR   8u       /* csum, cbData, cbUncomp */
-#define CAB_BLOCK_MAX  0x8000u  /* the format's own ceiling on a block */
+/*
+ * THE TWO CEILINGS ON A BLOCK, and they are not the same number.
+ *
+ * A CFDATA holds at most 32768 bytes of OUTPUT - that is what the format fixes,
+ * and it is why a stored file over 32KB is always scattered. What it holds of
+ * INPUT can be larger, because a coding that meets bytes it cannot compress
+ * emits more than it was given; the format allows a block six kilobytes of
+ * slack for that.
+ *
+ * Bounding the compressed side by 32768 was a real loss and a quiet one: a
+ * cabinet's fourth LZX block declares 32795 compressed bytes, the walk stopped
+ * there, and the folder was handed to the decoder three blocks long - which
+ * decodes, comes back short, and looks like a corrupt archive rather than like
+ * a walk that gave up.
+ */
+#define CAB_BLOCK_MAX  0x8000u  /* cbUncomp: the format's ceiling on output */
+#define CAB_CDATA_MAX  0x9800u  /* cbData: that, plus the slack it allows */
 
 /* ---- regions ----------------------------------------------------------------- */
 
@@ -149,7 +165,7 @@ static uint32_t cab_blocks(kof_buf f, struct kof_cab_info *c,
 		if (!kof_rd_u16(f, at + 4u, 0, &comp) ||
 		    !kof_rd_u16(f, at + 6u, 0, &uncomp))
 			break;
-		if (comp > CAB_BLOCK_MAX || uncomp > CAB_BLOCK_MAX ||
+		if (comp > CAB_CDATA_MAX || uncomp > CAB_BLOCK_MAX ||
 		    at + CAB_DATA_HDR + comp > f.n)
 			break;
 		if (c->n_runs >= KOF_CAB_MAX_RUNS) {
@@ -190,7 +206,7 @@ static uint32_t cab_cut(kof_buf f, struct kof_cab_info *c,
 		if (!kof_rd_u16(f, at + 4u, 0, &comp) ||
 		    !kof_rd_u16(f, at + 6u, 0, &uncomp))
 			break;
-		if (comp > CAB_BLOCK_MAX || uncomp > CAB_BLOCK_MAX ||
+		if (comp > CAB_CDATA_MAX || uncomp > CAB_BLOCK_MAX ||
 		    at + CAB_DATA_HDR + comp > f.n)
 			break;
 		if (want >= seen + uncomp) {
@@ -288,7 +304,7 @@ static uint64_t cab_map(kof_buf f, const struct kof_cab_folder *fo,
 		if (!kof_rd_u16(f, at + 4u, 0, &comp) ||
 		    !kof_rd_u16(f, at + 6u, 0, &uncomp))
 			return 0;
-		if (comp > CAB_BLOCK_MAX || uncomp > CAB_BLOCK_MAX)
+		if (comp > CAB_CDATA_MAX || uncomp > CAB_BLOCK_MAX)
 			return 0;
 		if (at + CAB_DATA_HDR + comp > f.n)
 			return 0;
@@ -433,6 +449,11 @@ int kof_cab_parse(kof_buf file, struct kof_cab_info *c, struct kof_obj_ctx *ctx)
 			c->folder[i].data_off = off;
 			c->folder[i].n_blocks = blocks;
 			c->folder[i].compress = (uint16_t)(comp & 0x000fu);
+			/* LZX states its window in the high byte, and nothing
+			 * else uses that byte - see kof_cab_folder. */
+			if (c->folder[i].compress == KOF_CAB_C_LZX)
+				c->folder[i].window = (uint16_t)((comp >> 8) &
+								 0x1fu);
 			if (c->folder[i].compress != KOF_CAB_C_NONE)
 				c->anomalies |= KOF_CAB_ANOM_CODED;
 			if (!c->data_off || off < c->data_off)
@@ -493,48 +514,61 @@ int kof_cab_parse(kof_buf file, struct kof_cab_info *c, struct kof_obj_ctx *ctx)
 		/*
 		 * A CODED FOLDER: the pieces are its BLOCKS, not the file's.
 		 *
-		 * MSZIP is the one this build decodes - see KOF_UNP_MSZIP - and
-		 * what it needs is every block of the folder in order, because
-		 * the file's bytes are somewhere inside what they decode to and
-		 * a deflate stream cannot be entered part way. So the entry is
-		 * scattered over the whole folder and carries where in the
-		 * decoded stream the file sits.
+		 * Neither coding this build has can be entered part way, so
+		 * what they need is every block of the folder in order - the
+		 * file's bytes are somewhere inside what those blocks decode
+		 * to. The entry is therefore scattered over the whole folder
+		 * and carries where in the decoded stream the file sits.
 		 *
-		 * The other two codings, LZX and Quantum, have no decoder here;
-		 * their files are counted and not offered, which is the same
-		 * answer this build gives everywhere it lacks a coding.
+		 * WHICH CODING IS THE ENTRY'S OWN, in coding[0], which is what
+		 * that field is for: MSZIP's blocks are separate streams the
+		 * host seeds one from the next, LZX's are one stream the host
+		 * joins, and the two are told apart by the id rather than by a
+		 * table beside the entries.
+		 *
+		 * Quantum has no decoder here; its files are counted and not
+		 * offered, which is the same answer this build gives everywhere
+		 * it lacks a coding.
 		 */
 		if (c->folder[ifold].compress != KOF_CAB_C_NONE) {
-			uint32_t first = 0, runs;
+			const struct kof_cab_folder *fo = &c->folder[ifold];
+			uint32_t first = 0, runs, method = 0;
 
 			c->n_coded++;
-			if (c->folder[ifold].compress != KOF_CAB_C_MSZIP)
+			if (fo->compress == KOF_CAB_C_MSZIP) {
+				method = KOF_UNP_MSZIP;
+			} else if (fo->compress == KOF_CAB_C_LZX &&
+				   fo->window >= KOF_LZX_MIN_BITS &&
+				   fo->window <= KOF_LZX_MAX_BITS) {
+				method = KOF_UNP_LZX(fo->window);
+			} else {
 				continue;
+			}
 			if (c->n_entries >= KOF_CAB_MAX_FILES) {
 				c->anomalies |= KOF_CAB_ANOM_FILES_FULL;
 				break;
 			}
-			runs = cab_blocks(file, c, &c->folder[ifold], &first);
+			runs = cab_blocks(file, c, fo, &first);
 			if (!runs)
 				continue;
 			{
 				struct kof_entry *e = &c->entry[c->n_entries];
 
 				memset(e, 0, sizeof *e);
-				e->index    = c->n_entries;
-				e->kind     = KOF_ENT_EMBEDDED;
-				e->format   = KOF_FMT_UNKNOWN;
-				e->flags    = KOF_ENT_F_SCATTERED;
-				e->name_off = name_at;
-				e->name_len = nlen - 1u;
-				e->len      = size;
+				e->index     = c->n_entries;
+				e->kind      = KOF_ENT_EMBEDDED;
+				e->format    = KOF_FMT_UNKNOWN;
+				e->flags     = KOF_ENT_F_SCATTERED;
+				e->name_off  = name_at;
+				e->name_len  = nlen - 1u;
+				e->len       = size;
+				e->coding[0] = (uint16_t)method;
 				/* Where the file is inside the folder's decoded
 				 * stream, which is what the decoder is told and
 				 * what a range cannot say. */
 				e->out_hint = ((uint64_t)foff << 32) | size;
 				c->split[c->n_entries].first_run = first;
 				c->split[c->n_entries].n_run = runs;
-				c->coded[c->n_entries] = 1;
 				c->n_entries++;
 			}
 			continue;

@@ -207,7 +207,7 @@ int main(void)
 			const struct kof_entry *e = &c->entry[2];
 
 			ok_((e->flags & KOF_ENT_F_SCATTERED) != 0 &&
-			    c->coded[2] &&
+			    e->coding[0] == KOF_UNP_MSZIP &&
 			    (e->out_hint & 0xffffffffu) == 10u,
 			    "the coded one carries its place in the folder");
 		}
