@@ -115,6 +115,7 @@ KOF_DEFINE_UNPACK
 	const struct kof_pdf_info *p = kof_pdf(ctx);
 	uint32_t i, opened = 0, windowed = 0, unsupported = 0, failed = 0;
 	uint32_t carried = 0, in_region = 0, images = 0, unwanted = 0;
+	uint32_t structural = 0;
 	/* Where the entry walk got to - see the note beside kof_name_next. */
 	uint32_t ent = 0;
 	int encrypted;
@@ -259,6 +260,38 @@ KOF_DEFINE_UNPACK
 		}
 
 		/*
+		 * A CROSS REFERENCE STREAM IS THE FILE'S OWN INDEX, and there
+		 * is nothing in it for a rule.
+		 *
+		 * Decoded, it is a table of byte offsets and generation numbers
+		 * in the widths /W declares - no names, no strings, no code.
+		 * Opening one costs a child and a parse to produce bytes
+		 * nothing will ever match.
+		 *
+		 * What put the test here is the other half: an /XRef stream is
+		 * the one place a PREDICTOR is normal - /Columns 4 /Predictor
+		 * 12 on a 59 byte table - and a predictor is a coding this
+		 * build cannot perform, so the entry carries CODED_UNKNOWN and
+		 * the chain refuses it. That refusal is reported as UNSUPPORTED
+		 * against the DOCUMENT, so three ordinary PDFs in the sample
+		 * tree came out "the engine could not finish" over two xref
+		 * indexes each, while every stream that held anything opened.
+		 *
+		 * Measured before choosing this over writing the predictor:
+		 * 405 PDFs on this machine, 12 ObjStm and 5 XRef streams, and
+		 * the predictor appeared on one XRef and on no ObjStm at all -
+		 * the other 104 predictors in the sample PDFs are on image
+		 * XObjects, which are already skipped. A PNG un-predictor would
+		 * therefore buy the scan nothing it can search, and this says
+		 * plainly what is given up. An ObjStm is NOT skipped: it holds
+		 * object dictionaries, which is where /JS and /Launch live.
+		 */
+		if (o->cat == KOF_PDF_CAT_XREF) {
+			structural++;
+			continue;
+		}
+
+		/*
 		 * A STORED METADATA STREAM IS ALREADY IN A REGION, BYTE FOR
 		 * BYTE, SO A CHILD OF IT IS THE SAME SEARCH TWICE.
 		 *
@@ -398,6 +431,31 @@ KOF_DEFINE_UNPACK
 		}
 
 		/*
+		 * PIXELS ARE NOT OPENED, WHATEVER THEY ARE CODED WITH - and
+		 * this test is what keeps that promise.
+		 *
+		 * It reads as belt and braces beside the skip above, where a
+		 * declared image is already dropped by kof_fmt_wanted, and it
+		 * is not: a stream is only declared an image when its
+		 * dictionary says so, and a /DCTDecode stream whose dictionary
+		 * says nothing arrives here with cat UNKNOWN - which is always
+		 * wanted. Without this it went to the chain, the chain has no
+		 * JPEG decoder, and the host reported the DOCUMENT as one the
+		 * engine could not finish.
+		 *
+		 * Which is the exact outcome the note on PDF_F_IMAGE says was
+		 * measured and rejected over 14147 files. It came back when the
+		 * chain call was put in front of these tests, leaving them
+		 * unreachable: three ordinary PDFs in the sample tree - a
+		 * conference paper and two advisories - were reported broken
+		 * for holding a photograph.
+		 */
+		if (o->filters & PDF_F_IMAGE) {
+			images++;
+			continue;
+		}
+
+		/*
 		 * THE WHOLE CHAIN, IN ORDER, AND THE HOST RUNS IT.
 		 *
 		 * o->filters is a BITMASK - it cannot carry order - and that is
@@ -410,67 +468,41 @@ KOF_DEFINE_UNPACK
 		 * chain needs a buffer between its steps and a module has no
 		 * writable memory.
 		 *
-		 * Asked FIRST, so the single-filter case goes the same way as
-		 * the chain: one path, exercised by every coded stream, rather
-		 * than a common path and a rare one that only malformed input
-		 * reaches. The index is the object's own, which is what
+		 * ONE PATH FOR EVERY CODED STREAM: the single filter case goes
+		 * the same way as the chain rather than down a branch of its
+		 * own that only malformed input would exercise. /FlateDecode is
+		 * zlib in most documents and raw DEFLATE in a few, and the host
+		 * answers both - see KOF_UNP_ZLIB in kofsig.h.
+		 *
+		 * The index is the object's own, which is what
 		 * kof_entry.index holds.
 		 *
 		 * A chain the host refuses reports through it - UNSUPPORTED for
 		 * a coding this build lacks, DAMAGED for data that is not what
-		 * it claims - so nothing here has to decide which.
+		 * it claims - so nothing here has to decide which. What is
+		 * counted here is only which of the two this module can say
+		 * something about: a coding in PDF_F_HIDING is a gap a later
+		 * build closes, and it is the reason this module reports at the
+		 * end when nothing worse was found first.
 		 */
-		if (o->filters) {
-			if (kof_unpack_chain(i)) {
-				if (!kof_child())
-					break;
-				opened++;
-				continue;
-			}
-			failed++;
+		if (kof_unpack_chain(i)) {
+			if (!kof_child())
+				break;
+			opened++;
 			continue;
 		}
-
-		if (o->filters & PDF_F_UNDOABLE) {
-			/*
-			 * /FlateDecode is zlib in most documents and raw
-			 * DEFLATE in a few, and this module does not have to
-			 * know which: kof_unpack_zlib checks the RFC 1950
-			 * header and decodes from the first byte when there is
-			 * none. The framing lives in the host because it is
-			 * standard and shared - see KOF_UNP_ZLIB in kofsig.h.
-			 *
-			 * No size hint. DEFLATE ends where the stream says it
-			 * does and bounds a back reference at 32KB, so the
-			 * decoder runs in fixed memory whatever comes out, and
-			 * a PDF states no uncompressed length this module was
-			 * given. The host's budget is what bounds it.
-			 */
-			if (kof_unpack_zlib(o->stream_off, o->stream_len)) {
-				if (!kof_child())
-					break;
-				opened++;
-				continue;
-			}
-			/*
-			 * Nothing came out: a chain with another coding in
-			 * front of the Flate, or a limit stopped the decode.
-			 * Either way the next stream is unaffected.
-			 */
-			failed++;
-			continue;
-		}
-
 		if (o->filters & PDF_F_HIDING)
 			unsupported++;
-		else if (o->filters & PDF_F_IMAGE)
-			images++;
+		failed++;
 	}
 
 	kof_debug("Pdf.opened", opened);
 	kof_debug("Pdf.windowed", windowed);
 	kof_debug("Pdf.failed", failed);
 	kof_debug("Pdf.images", images);
+	/* The file's own index, skipped whether or not it would decode - see
+	 * the note at the test. */
+	kof_debug("Pdf.structural", structural);
 	/* Streams whose decoded form no loaded rule could be offered - see the
 	 * note on kof_fmt_wanted in the loop. Reported because "not opened"
 	 * and "not there" must never look the same to a reader. */

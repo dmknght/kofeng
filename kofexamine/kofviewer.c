@@ -2928,93 +2928,6 @@ static void objects_collect(struct view *v, kof_engine *eng)
  */
 
 /*
- * Every field is at a constant offset, so these are the whole of the reader.
- *
- * They take a BLOCK rather than an object because there are two of them now -
- * imports and exports - and a reader keyed on the object would have to be told
- * which, in every caller, with nothing to stop it being told wrong.
- */
-static uint32_t sym_count(const uint8_t *b, uint32_t n)
-{
-	if (!b || n < KOF_SYM_HDRLEN)
-		return 0;
-	return (uint32_t)b[KOF_SYM_H_COUNT] |
-	       ((uint32_t)b[KOF_SYM_H_COUNT + 1] << 8) |
-	       ((uint32_t)b[KOF_SYM_H_COUNT + 2] << 16) |
-	       ((uint32_t)b[KOF_SYM_H_COUNT + 3] << 24);
-}
-
-static const uint8_t *sym_rec(const uint8_t *b, uint32_t n, uint32_t i)
-{
-	uint64_t at = (uint64_t)KOF_SYM_HDRLEN + (uint64_t)i * KOF_SYM_RECLEN;
-
-	if (i >= sym_count(b, n) || at + KOF_SYM_RECLEN > n)
-		return 0;
-	return b + at;
-}
-
-static uint64_t sym_u64(const uint8_t *r, uint32_t at)
-{
-	uint64_t v = 0;
-	int k;
-
-	for (k = 7; k >= 0; k--)
-		v = (v << 8) | (uint64_t)r[at + (uint32_t)k];
-	return v;
-}
-
-/* ELF's own names for ELF's own numbering. Spelled here rather than shared with
- * kofexamine because the two print different widths and a shared table would
- * have to be padded for the wider one. */
-static const char *sym_type_str(uint8_t t)
-{
-	switch (t) {
-	case 0:  return "NOTYPE";
-	case 1:  return "OBJECT";
-	case 2:  return "FUNC";
-	case 3:  return "SECTION";
-	case 4:  return "FILE";
-	case 5:  return "COMMON";
-	case 6:  return "TLS";
-	case 10: return "GNU_IFUNC";
-	default: return "?";
-	}
-}
-
-static const char *sym_bind_str(uint8_t b)
-{
-	switch (b) {
-	case 0:  return "LOCAL";
-	case 1:  return "GLOBAL";
-	case 2:  return "WEAK";
-	case 10: return "GNU_UNIQ";
-	default: return "?";
-	}
-}
-
-static const char *sym_vis_str(uint8_t x)
-{
-	switch (x) {
-	case 0:  return "DEFAULT";
-	case 1:  return "INTERNAL";
-	case 2:  return "HIDDEN";
-	case 3:  return "PROTECTED";
-	default: return "?";
-	}
-}
-
-static const char *sym_origin_str(const uint8_t *b, uint32_t n)
-{
-	if (!b || n < KOF_SYM_HDRLEN)
-		return "none";
-	switch (b[KOF_SYM_H_ORIGIN]) {
-	case KOF_SYM_ORIGIN_SYMTAB: return ".symtab";
-	case KOF_SYM_ORIGIN_DYNSYM: return ".dynsym";
-	default:                    return "none";
-	}
-}
-
-/*
  * WHICH FIELD A BYTE OF THE BLOCK BELONGS TO, as a colour.
  *
  * This replaces byte_colour for the two symbol rows, and the reason is that
@@ -5977,128 +5890,6 @@ static void row_start(struct out *o, int row, int col)
 }
 
 /*
- * A vertical scrollbar in one column.
- *
- * Drawn only when there is more than fits, because a bar that is always full
- * height says nothing and costs a column of every pane it is in. The thumb is
- * at least one row so a very long object still shows where it is - proportional
- * alone would round it away and leave the track empty.
- *
- * ASCII, like the pane divider: this is read over ssh on whatever terminal is
- * at the other end.
- */
-static int bar_thumb(int top, int bot, uint64_t off, uint64_t total,
-		     uint64_t shown, int *out_len)
-{
-	int rows = bot - top + 1, t0, t1;
-	uint64_t max;
-
-	if (rows < 2 || !total || shown >= total)
-		return -1;
-	max = total - shown;
-	t1 = (int)((uint64_t)(rows - 1) * shown / total);
-	if (t1 < 1)
-		t1 = 1;
-	t0 = (int)((uint64_t)(rows - t1) * (off < max ? off : max) / max);
-	*out_len = t1;
-	return t0;
-}
-
-/*
- * A BAR, DRAWN AS ONE SHAPE IN TWO WEIGHTS.
- *
- * It was '#' for the thumb and ':' for the track - two different characters, so
- * the eye read it as a column of punctuation rather than as a rule with a
- * position on it. One character throughout, bright where the thumb is and dim
- * elsewhere, reads as what it is; and it is the same shape the panes are divided
- * by, so a vertical line means the same thing everywhere on the screen.
- *
- * Every pane's bar comes through here, so there is one style rather than one per
- * caller.
- */
-/*
- * THE THUMB IN HALF CELLS, which is what makes the bar track smoothly.
- *
- * Whole cells are too coarse to read as motion: on a forty row pane over a
- * long file a whole page of scrolling moves the thumb by nothing, then by one
- * row. Counting in halves and drawing the odd end with a half block doubles the
- * resolution, and two is enough - the eye reads it as continuous and the cost
- * is one glyph.
- *
- * Returns the first half covered and writes how many halves the thumb is, or -1
- * when there is nothing to scroll.
- */
-static int bar_halves(int cells, uint64_t off, uint64_t total, uint64_t shown,
-		      int *out_len)
-{
-	int halves = cells * 2, t1;
-	uint64_t max;
-
-	if (cells < 2 || !total || shown >= total)
-		return -1;
-	max = total - shown;
-	t1 = (int)((uint64_t)halves * shown / total);
-	if (t1 < 1)
-		t1 = 1;
-	*out_len = t1;
-	return (int)((uint64_t)(halves - t1) * (off < max ? off : max) / max);
-}
-
-static void scrollbar(struct out *o, int col, int top, int bot,
-		      uint64_t off, uint64_t total, uint64_t shown)
-{
-	int rows = bot - top + 1, i, h0, h1;
-
-	h0 = bar_halves(rows, off, total, shown, &h1);
-	if (h0 < 0)
-		return;
-	for (i = 0; i < rows; i++) {
-		int a = i * 2, b = a + 1;          /* this cell's two halves */
-		int hi = a >= h0 && a < h0 + h1;   /* upper half covered */
-		int lo = b >= h0 && b < h0 + h1;   /* lower half covered */
-
-		out_at(o, top + i, col);
-		if (hi && lo)
-			out_str(o, A_BOLD G_THUMB A_OFF);
-		else if (hi)
-			out_str(o, A_BOLD G_HALF_T A_OFF);
-		else if (lo)
-			out_str(o, A_BOLD G_HALF_B A_OFF);
-		else
-			out_str(o, A_DIM G_V A_OFF);
-	}
-}
-
-/*
- * The same bar lying down. A pane whose lines run off the right has no other
- * way to say how far right they go, or where in that width the reader is.
- */
-static void scrollbar_h(struct out *o, int row, int left, int right,
-			uint64_t off, uint64_t total, uint64_t shown)
-{
-	int cols = right - left + 1, i, h0, h1;
-
-	h0 = bar_halves(cols, off, total, shown, &h1);
-	if (h0 < 0)
-		return;
-	out_at(o, row, left);
-	for (i = 0; i < cols; i++) {
-		int a = i * 2, b = a + 1;
-		int lf = a >= h0 && a < h0 + h1;
-		int rt = b >= h0 && b < h0 + h1;
-
-		if (lf && rt)
-			out_str(o, A_BOLD G_THUMB A_OFF);
-		else if (lf)
-			out_str(o, A_BOLD G_HALF_L A_OFF);
-		else if (rt)
-			out_str(o, A_BOLD G_HALF_R A_OFF);
-		else
-			out_str(o, A_DIM G_HBAR A_OFF);
-	}
-}
-
-/*
  * Is the tree showing a scrollbar? The same question bar_thumb answers for
  * drawing it, asked here so the divider can get out of its way.
  */
@@ -6106,7 +5897,7 @@ static int tree_bar_on(const struct view *v)
 {
 	int t1;
 
-	return bar_thumb(hex_top(), hex_bot(), v->tree_top, v->n_node,
+	return kv_bar_thumb(hex_top(), hex_bot(), v->tree_top, v->n_node,
 			 (uint64_t)(hex_bot() - hex_top() + 1), &t1) >= 0;
 }
 
@@ -6303,7 +6094,7 @@ static void draw_tree(struct out *o, struct view *v)
 	 * and a depth-one row spends two on indentation - it came out
 	 * "//0 Shellcode-x8", one character short, which is the worst width to
 	 * be since it reads as a different architecture. */
-	scrollbar(o, TREE_W, top, bot, v->tree_top, v->n_node,
+	kv_scrollbar(o, TREE_W, top, bot, v->tree_top, v->n_node,
 		  (uint64_t)(bot - top + 1));
 }
 
@@ -6907,10 +6698,10 @@ static void draw_text(struct out *o, struct view *v)
 		ln++;
 	}
 	if (vbar)
-		scrollbar(o, g_cols, top, bot, v->rgn_at, v->rgn_len,
+		kv_scrollbar(o, g_cols, top, bot, v->rgn_at, v->rgn_len,
 			  v->rgn_len - maxtop);
 	if (hbar) {
-		scrollbar_h(o, bot + 1, x0, g_cols - (vbar ? 1 : 0),
+		kv_scrollbar_h(o, bot + 1, x0, g_cols - (vbar ? 1 : 0),
 			    v->txt_col, v->txt_maxlen, (uint64_t)wide);
 		/*
 		 * AND THE CORNER WHERE THEY MEET, which neither bar owns.
@@ -7258,49 +7049,11 @@ static void draw_hex(struct out *o, struct view *v)
 	 * hex reaches the edge, and a bar drawn over the last ASCII column
 	 * would be a scrollbar that eats the thing it is scrolling. */
 	if (col + 8 + 2 + per * 3 + 2 + per <= g_cols)
-		scrollbar(o, g_cols, top, bot, v->rgn_at, v->rgn_len,
+		kv_scrollbar(o, g_cols, top, bot, v->rgn_at, v->rgn_len,
 			  (uint64_t)(bot - top + 1) * (uint64_t)per);
 }
 
 /* The composed name a scan would print for this module, less the target. */
-/*
- * The name to show, and only as much of it as is known.
- *
- * A variant is what a module REPORTED, so it exists only once it has fired.
- * Showing the first declared one otherwise put "Rootkit:LKM-Diamorphine-x64"
- * beside "hit 0", which reads as a detection that also says it did not detect -
- * and the variant named was simply the first in the file, not one anything had
- * concluded. Without a verdict the family is the whole of what can be said.
- */
-static void touch_name(const struct kof_touch *t, char *out, size_t cap)
-{
-	const char *fam = t->family[0] ? t->family : "?";
-
-	/* The engine's spelling. The "(n matchers)" tail is this panel's own and
-	 * is added after it, never mixed into it - see kof_name_compose. */
-	kof_name_compose(out, cap, NULL, kof_maltype_name(t->maltype), fam,
-			 t->fired_name);
-	if (!t->fired_name && t->n_names > 1u) {
-		size_t at = strlen(out);
-
-		/*
-		 * MATCHERS, which is what this tool calls the find-pattern
-		 * blocks a module is written out of.
-		 *
-		 * The number is the count of verdict names the module can
-		 * report, and it says "matchers" because that is what those
-		 * names correspond to in a module's source: one per block that
-		 * can conclude something. It is not read out of the module's
-		 * code - a compiled blob has no such count to read - so a
-		 * module that reports one name from two blocks will say one.
-		 * Called "variants" before, which named the wrong half: a
-		 * reader wants to know how many ways this module can fire, not
-		 * how many spellings the answer has.
-		 */
-		snprintf(out + at, cap - at, " (%u matchers)", t->n_names);
-	}
-}
-
 static const char *touch_colour(const struct kof_touch *t)
 {
 	return t->fired                        ? A_BAD :
@@ -7755,9 +7508,10 @@ static uint32_t rng_object_regions(struct view *v);
  * and the taker that walks the same list to find which row was picked - and a
  * predicate written twice is a menu that offers what it will refuse.
  *
- * Architecture and subtype belong to executables and to nothing else: a zip has
- * no machine and a PDF has no ET_DYN. Asked of the object in hand rather than
- * from a fixed list, so the menu answers for the file being looked at.
+ * Architecture belongs to executables and to nothing else: a zip has no
+ * machine. Subtype belongs to whatever format HAS one - see the branch that
+ * answers it. Asked of the object in hand rather than from a fixed list, so the
+ * menu answers for the file being looked at.
  */
 static int opt_offerable(struct view *v, int k)
 {
@@ -7799,8 +7553,21 @@ static int opt_offerable(struct view *v, int k)
 		return 0;
 	if (k == OPT_ARCH)
 		return exe && cur_obj(v)->ctx.arch != 0;
+	/*
+	 * SUBTYPE IS NOT AN EXECUTABLE'S ALONE, and gating it on `exe` was a
+	 * rule written when it was: a script's kind - PHP, ASP, JSP - is a
+	 * subtype the engine parses, prefilters on and the generator writes, so
+	 * the one format whose rules most need it was the one that could not
+	 * add it. Rules written from this panel went out targeting every
+	 * script there is, and the subtype had to be typed into the file by
+	 * hand afterwards.
+	 *
+	 * The test that was already here answers it for any format: a name
+	 * exists exactly when this object's subtype is one the vocabulary
+	 * knows, which is what "can this rule say it" means.
+	 */
 	if (k == OPT_SUBTYPE)
-		return exe && kof_inspect_subtype_name(fm,
+		return kof_inspect_subtype_name(fm,
 						cur_obj(v)->ctx.subtype) != NULL;
 	return 1;                       /* the two sizes always apply */
 }
@@ -8288,9 +8055,8 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 			ch_add(c, opt_word[OPT_SIZE_MIN]);
 		if (opt_offerable(v, OPT_SIZE_MAX))
 			ch_add(c, opt_word[OPT_SIZE_MAX]);
-		/* Architecture and subtype belong to executables and to nothing
-		 * else - opt_offerable is where that is decided, for this list
-		 * and for the taker both. */
+		/* Which of these two the object can answer for is decided in
+		 * opt_offerable, for this list and for the taker both. */
 		if (opt_offerable(v, OPT_ARCH))
 			ch_add(c, opt_word[OPT_ARCH]);
 		if (opt_offerable(v, OPT_SUBTYPE))
@@ -10487,7 +10253,7 @@ static void draw_evt(struct out *o, struct view *v)
 			out_str(o, "\033[K");
 		}
 		if (lines > EVT_BOX_ROWS)
-			scrollbar(o, g_cols, evt_box_top(v),
+			kv_scrollbar(o, g_cols, evt_box_top(v),
 				  evt_box_top(v) + EVT_BOX_ROWS - 1,
 				  (uint64_t)v->evt_scroll, (uint64_t)lines,
 				  (uint64_t)EVT_BOX_ROWS);
@@ -10695,7 +10461,7 @@ static void draw_disasm(struct out *o, struct view *v)
 	 * other one - see the note there.
 	 */
 	if (dis_max_bias(v) > 0)
-		scrollbar(o, g_cols, dis_top(), hex_bot(),
+		kv_scrollbar(o, g_cols, dis_top(), hex_bot(),
 			  (uint64_t)v->dis_bias,
 			  (uint64_t)dis_max_bias(v) + dis_span_of(v),
 			  dis_span_of(v));
@@ -12392,7 +12158,7 @@ static void draw_decl(struct out *o, struct view *v)
 			if (y > top)
 				row_start(o, y, 1);
 	}
-	scrollbar(o, g_cols, top + 1, top + g_decl_rows - 2, v->prow_off,
+	kv_scrollbar(o, g_cols, top + 1, top + g_decl_rows - 2, v->prow_off,
 		  v->n_prow, (uint64_t)(g_decl_rows - 2));
 
 }
@@ -12569,7 +12335,7 @@ static void draw_marker_line(struct out *o, struct view *v)
 		 * not, and reading it would be reading one past the array.
 		 */
 		if (v->sel_touch < ob->n_touch) {
-			touch_name(&ob->touch[v->sel_touch], name, sizeof name);
+			kof_touch_name(&ob->touch[v->sel_touch], name, sizeof name);
 			touch_head(&ob->touch[v->sel_touch], head, sizeof head);
 		} else {
 			snprintf(name, sizeof name, "no marker selected");
@@ -13075,7 +12841,7 @@ static void draw_list(struct out *o, struct view *v)
 			e = &ob->touch[idx];
 			char name[80], head[24];
 
-			touch_name(e, name, sizeof name);
+			kof_touch_name(e, name, sizeof name);
 			touch_head(e, head, sizeof head);
 			list_row(o, idx == v->sel_touch, touch_colour(e));
 			{
@@ -14135,52 +13901,6 @@ static void copy_offset(struct view *v, int hex)
 }
 
 
-/*
- * A hex pattern, respaced into pairs.
- *
- * Only when the pattern is nothing but hex digits and spaces. A pattern with
- * structure in it - ??, [4-8], (41|42) - is left exactly as its author wrote
- * it: the digits inside a gap are hex digits too, so pairing them off blindly
- * would turn [4-8] into something else, and an author who has spaced a pattern
- * to show its shape has said something worth keeping.
- */
-static void hex_respace(const char *in, char *out, size_t cap)
-{
-	size_t n = 0;
-	uint32_t half = 0;
-	const char *p;
-
-	for (p = in; *p; p++)
-		if (hexval(*p) < 0 && *p != ' ' && *p != '\t') {
-			snprintf(out, cap, "%s", in);
-			return;
-		}
-	/*
-	 * Respacing GROWS the text by half, and a spelling that would not fit
-	 * after that is left exactly as it was. Spacing is a courtesy; losing
-	 * the tail of a pattern to it is not a trade worth making.
-	 */
-	for (p = in, n = 0; *p; p++)
-		if (*p != ' ' && *p != '\t')
-			n++;
-	if (n + n / 2u + 2u > cap) {
-		snprintf(out, cap, "%s", in);
-		return;
-	}
-	n = 0;
-	for (p = in; *p && n + 4u < cap; p++) {
-		if (*p == ' ' || *p == '\t')
-			continue;
-		if (half == 2u) {
-			out[n++] = ' ';
-			half = 0;
-		}
-		out[n++] = *p;
-		half++;
-	}
-	out[n] = 0;
-}
-
 /* Fill the scratch from a declaration and give it the caret. */
 static void decl_edit_open(struct view *v, uint32_t i)
 {
@@ -14194,7 +13914,7 @@ static void decl_edit_open(struct view *v, uint32_t i)
 	}
 	if (d->hex) {
 		if (d->hexs[0]) {
-			hex_respace(d->hexs, v->ed.dr.sedit, sizeof v->ed.dr.sedit);
+			kof_hex_respace(d->hexs, v->ed.dr.sedit, sizeof v->ed.dr.sedit);
 		} else {
 			uint32_t k;
 			size_t n = 0;
@@ -17486,24 +17206,23 @@ static void prop_table(const struct prop_table *t)
 		 * more than fits - a full-height thumb says nothing.
 		 */
 		if (framed && n > 0 && (size_t)n < sizeof line) {
-			const char *bar = G_V;
+			/*
+			 * A GLYPH AND NOT A REVERSED SPACE: a space in reverse
+			 * video is the thumb everywhere else in this tree, and
+			 * in a one-column wall it reads as a HOLE in the border
+			 * rather than as a marker on it.
+			 *
+			 * Through the shared bar, so this wall tracks the way
+			 * every pane's does - it had a thumb of one row wherever
+			 * it was, which on a long table is a mark that moves and
+			 * says nothing about how much there is.
+			 */
+			const char *bar = kv_bar_at((int)t->visible, (int)i,
+						    off, t->n_row, t->visible,
+						    0);
 
-			if (t->n_row > t->visible) {
-				uint32_t last = t->n_row - t->visible;
-				uint32_t thumb = (off * (t->visible - 1u) +
-						  last / 2u) / last;
-
-				/*
-				 * A GLYPH AND NOT A REVERSED SPACE: a space
-				 * in reverse video is the thumb everywhere
-				 * else in this tree, and in a one-column wall
-				 * it reads as a HOLE in the border rather
-				 * than as a marker on it.
-				 */
-				bar = (i == thumb) ? G_THUMB : G_V;
-			}
-			snprintf(line + n, sizeof line - (size_t)n,
-				 A_DIM "%s" A_OFF, bar);
+			snprintf(line + n, sizeof line - (size_t)n, "%s",
+				 bar ? bar : A_DIM G_V A_OFF);
 		}
 		prop_add("%s", line);
 	}
@@ -19013,7 +18732,7 @@ no_regions:
 		const struct kof_touch *t = &ob->touch[i];
 		char name[80], head[24];
 
-		touch_name(t, name, sizeof name);
+		kof_touch_name(t, name, sizeof name);
 		touch_head(t, head, sizeof head);
 		prop_add("  %s%-44s" A_OFF A_SIZE "%-10s" A_OFF A_WARN
 			 "%s" A_OFF, t->fired ? level_attr(t->fired_level)
@@ -21430,7 +21149,7 @@ static uint64_t symd_max(struct view *v)
 	/*
 	 * The block is fetched on its OWN LINE, and this is not style.
 	 *
-	 * It was `sym_count(symd_block(v, &nb), (uint32_t)nb)`, and the order
+	 * It was `kof_sym_count(symd_block(v, &nb), (uint32_t)nb)`, and the order
 	 * in which a compiler evaluates two arguments is unspecified: `nb` was
 	 * read while it was still zero, sym_count saw a length shorter than a
 	 * header and answered zero records, and so this returned a maximum
@@ -21921,10 +21640,10 @@ static void draw_symbols(struct out *o, struct view *v)
 	/* Same rule as the pane: one width for the whole table, decided by the
 	 * whole table, or the column cannot be read down. */
 	for (i = 0; (uint32_t)i < n; i++) {
-		const uint8_t *r = sym_rec(b, (uint32_t)nb, rec[i]);
+		const uint8_t *r = kof_sym_rec(b, (uint32_t)nb, rec[i]);
 
-		if (r && (sym_u64(r, KOF_SYM_R_VALUE) > 0xffffffffull ||
-			  sym_u64(r, KOF_SYM_R_SIZE) > 0xffffffffull)) {
+		if (r && (kof_sym_u64(r, KOF_SYM_R_VALUE) > 0xffffffffull ||
+			  kof_sym_u64(r, KOF_SYM_R_SIZE) > 0xffffffffull)) {
 			wd = 16;
 			break;
 		}
@@ -21964,7 +21683,7 @@ static void draw_symbols(struct out *o, struct view *v)
 	 * forty-column gutter it never uses.
 	 */
 	for (i = 0; (uint32_t)i < n; i++) {
-		const uint8_t *r = sym_rec(b, (uint32_t)nb, rec[i]);
+		const uint8_t *r = kof_sym_rec(b, (uint32_t)nb, rec[i]);
 		int L = 0;
 
 		if (!r)
@@ -22041,7 +21760,7 @@ static void draw_symbols(struct out *o, struct view *v)
 		v->sy_tab[i][1] = o->col_base + (int)o->col_hint - 1;
 	}
 	out_fmt(o, A_DIM "%s, %u record%s%s" A_OFF,
-		sym_origin_str(b, (uint32_t)nb), n, n == 1 ? "" : "s",
+		kof_sym_origin_name(b, (uint32_t)nb), n, n == 1 ? "" : "s",
 		(nb > KOF_SYM_H_TRUNC && b && b[KOF_SYM_H_TRUNC])
 			? ", TRUNCATED" : "");
 	/* The close button hard against the right edge, where a close button
@@ -22097,7 +21816,7 @@ static void draw_symbols(struct out *o, struct view *v)
 	for (i = 0; i < rows; i++) {
 		uint64_t at = v->sym_at + (uint64_t)i;
 		const uint8_t *r = (at < (uint64_t)n)
-				 ? sym_rec(b, (uint32_t)nb, rec[at]) : 0;
+				 ? kof_sym_rec(b, (uint32_t)nb, rec[at]) : 0;
 		char fl[8], shn[8];
 		const char *mark;
 
@@ -22137,7 +21856,7 @@ static void draw_symbols(struct out *o, struct view *v)
 			 * spelled as an address.
 			 */
 			mark = (ob->payload_at &&
-				sym_u64(r, KOF_SYM_R_VALUE) == ob->payload_at)
+				kof_sym_u64(r, KOF_SYM_R_VALUE) == ob->payload_at)
 			       ? A_S_FOUND : 0;
 			sc.vcol = 0;
 			/*
@@ -22150,11 +21869,11 @@ static void draw_symbols(struct out *o, struct view *v)
 			sclip_fmt(&sc, mark ? mark : A_S_IDX, "%4llu ",
 				  (unsigned long long)at);
 			sclip_fmt(&sc, mark ? mark : A_S_TYPE, "%-7s ",
-				  sym_type_str(r[KOF_SYM_R_TYPE]));
+				  kof_sym_type_name(r[KOF_SYM_R_TYPE]));
 			sclip_fmt(&sc, mark ? mark : A_S_BIND, "%-6s ",
-				  sym_bind_str(r[KOF_SYM_R_BIND]));
+				  kof_sym_bind_name(r[KOF_SYM_R_BIND]));
 			sclip_fmt(&sc, mark ? mark : A_S_VIS, "%-9s ",
-				  sym_vis_str(r[KOF_SYM_R_VIS]));
+				  kof_sym_vis_name(r[KOF_SYM_R_VIS]));
 			sclip_fmt(&sc, mark ? mark : A_S_FLAG, "%-5s ", fl);
 			/*
 			 * The name, in the middle now, and PADDED TO nw so the
@@ -22172,14 +21891,14 @@ static void draw_symbols(struct out *o, struct view *v)
 			sclip_puts(&sc, A_OFF, " ");
 			sclip_fmt(&sc, mark ? mark : A_S_SHN, "%5s ", shn);
 			sclip_fmt(&sc, mark ? mark : A_S_SIZE, "%*llu ", sw,
-				  (unsigned long long)sym_u64(r,
+				  (unsigned long long)kof_sym_u64(r,
 							KOF_SYM_R_SIZE));
 			/* "0x", because this one IS a number out of the file
 			 * and an address at that - and it now sits next to a
 			 * decimal size and a decimal record number, where an
 			 * unmarked base is a guess. */
 			sclip_fmt(&sc, mark ? mark : A_S_VAL, "0x%0*llx", wd,
-				  (unsigned long long)sym_u64(r,
+				  (unsigned long long)kof_sym_u64(r,
 							KOF_SYM_R_VALUE));
 		}
 		symd_edge(o, w);
@@ -22208,7 +21927,7 @@ static void draw_symbols(struct out *o, struct view *v)
 	 * the same rule the panes use.
 	 */
 	if (n > (uint32_t)rows)
-		scrollbar(o, x + w - 1, y + 3, y + 3 + rows - 1,
+		kv_scrollbar(o, x + w - 1, y + 3, y + 3 + rows - 1,
 			  v->sym_at, n, (uint64_t)rows);
 	/* Last, so the selection is over everything else the box drew. */
 	dlg_paint_sel(o, v);
@@ -22798,15 +22517,16 @@ static void draw_enc(struct out *o, struct view *v)
 			 * only when there is more than fits. A full-height thumb
 			 * says nothing.
 			 */
-			if (nl > (uint32_t)ENC_RES_ROWS) {
-				uint32_t last = nl - (uint32_t)ENC_RES_ROWS;
-				uint32_t th = (v->enc_voff *
-					       ((uint32_t)ENC_RES_ROWS - 1u) +
-					       last / 2u) / last;
+			{
+				const char *b = kv_bar_at(ENC_RES_ROWS, r,
+							  v->enc_voff, nl,
+							  (uint32_t)ENC_RES_ROWS,
+							  0);
 
-				bar = ((uint32_t)r == th) ? G_THUMB : G_V;
+				if (b)
+					bar = b;
 			}
-			out_fmt(o, A_DIM "%s" A_OFF, bar);
+			out_str(o, bar);
 			dframe_edge(o, f);
 		}
 
@@ -22818,17 +22538,15 @@ static void draw_enc(struct out *o, struct view *v)
 		dframe_row(o, f, 5 + ENC_RES_ROWS);
 		out_fmt(o, "  " A_DIM G_BL A_OFF);
 		if (wide > (uint32_t)iw) {
-			uint32_t span = (uint32_t)iw * (uint32_t)iw / wide;
-			uint32_t at = v->enc_hoff * (uint32_t)iw / wide;
 			int c;
 
-			if (!span)
-				span = 1;
-			for (c = 0; c < iw; c++)
-				out_fmt(o, A_DIM "%s" A_OFF,
-					((uint32_t)c >= at &&
-					 (uint32_t)c < at + span) ? G_THUMB
-								 : G_H);
+			for (c = 0; c < iw; c++) {
+				const char *b = kv_bar_at(iw, c, v->enc_hoff,
+							  wide, (uint32_t)iw,
+							  1);
+
+				out_str(o, b ? b : A_DIM G_H A_OFF);
+			}
 		} else {
 			out_fmt(o, A_DIM "%s" A_OFF, rule);
 		}
@@ -23544,7 +23262,7 @@ static int click_scrollbar(struct view *v)
 				total = v->n_prow; off = v->prow_off;
 				shown = (uint64_t)(g_decl_rows - 2);
 			}
-			t0 = bar_thumb(top, bot, off, total, shown, &t1);
+			t0 = kv_bar_thumb(top, bot, off, total, shown, &t1);
 			v->bar_drag = which;
 			if (t0 < 0 || g_my < top + t0 || g_my >= top + t0 + t1)
 				bar_to(v, which);

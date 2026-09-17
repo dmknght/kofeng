@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "script_parse.h"
+#include "script_norm.h"
 #include "scantext.h"
 #include "php_parse.h"
 #include "svrpage_parse.h"
@@ -489,12 +490,47 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 	}
 
 	/*
-	 * THE TAG WINS OVER THE SHEBANG, and only in this direction.
+	 * THE TAG WINS OVER THE SHEBANG WHEN THE TAG IS CODE, and only in this
+	 * direction.
 	 *
 	 * "#!/usr/bin/env php" and a "<?php" tag agree. What does not agree is
 	 * a wrapper - a shell script that cats a PHP payload - and there the
 	 * shebang is about the wrapper while the tag is about the bytes a rule
 	 * would match. The bytes win.
+	 *
+	 * THE BYTES, THOUGH - NOT THE MENTION. Written without the test below,
+	 * this typed any file that TALKS ABOUT php as php: ttc.py is a python
+	 * tool that builds a web shell, and its "<?php" is inside a python
+	 * string it will one day print. Typed from that tag, the file came out
+	 * Script/PHP, php rules ran on python, and one of them matched the
+	 * payload template the tool was printing. The detection was right about
+	 * the file by luck and wrong about everything it said, and the subtype
+	 * axis - the thing that keeps a php rule off a python file - had been
+	 * handed the answer backwards.
+	 *
+	 * So the tag has to be code in the language the SHEBANG named, which is
+	 * the only language known at this point and the only one whose string
+	 * and comment syntax can be applied. Where there is no table at all the
+	 * answer is "cannot tell", and the tag wins as it did before.
+	 *
+	 * WHAT THAT DOES TO THE WRAPPER, measured on both spellings of it:
+	 *
+	 *     #!/bin/sh              cat > x.php <<EOF ... <?php ...
+	 *          -> php, as before. A heredoc has no closing TOKEN, so sh's
+	 *             row carries no ml_close for it and the body reads as
+	 *             code, which is what a heredoc body is here.
+	 *
+	 *     #!/bin/sh              echo "<?php ..." > x.php
+	 *          -> shell, where it used to be php. The file IS a shell
+	 *             script and the php is one string in it, so this is the
+	 *             honest answer and the same one the python case wanted.
+	 *             It costs a php rule that declares a subtype its shot at
+	 *             the dropped payload; a rule that declares none still
+	 *             sees the bytes, which is the trade this axis always
+	 *             makes - see kof_module_precond.
+	 *
+	 * Only against a shebang. A file with no shebang has no language to be
+	 * read in, and its tag is the only thing that names one.
 	 */
 	{
 		uint8_t kind = KOF_SCRIPT_ANY;
@@ -502,6 +538,12 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 		int fam = FAM_NONE;
 
 		tag = find_tag(file, look, &kind, &tl, &hl, &fam);
+		if (tag != (uint64_t)-1 && info->from_shebang &&
+		    info->kind != KOF_SCRIPT_ANY && info->kind != kind &&
+		    file.n <= 0xffffffffu &&
+		    !kof_lex_is_code_at(kof_lex_for(info->kind), file.p,
+					(uint32_t)file.n, (uint32_t)tag))
+			tag = (uint64_t)-1;
 		if (tag != (uint64_t)-1) {
 			info->kind = kind;
 			if (!info->tag_len) {

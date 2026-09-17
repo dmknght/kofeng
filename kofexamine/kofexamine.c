@@ -495,40 +495,6 @@ static void print_elf(const void *view, const struct kof_obj_ctx *ctx,
  * needs no legend, because the colours already mean those things on the segment
  * and section rows above.
  */
-static const char *sym_type_name(uint8_t t)
-{
-	switch (t) {
-	case KOF_STT_NOTYPE:  return "NOTYPE";
-	case KOF_STT_OBJECT:  return "OBJECT";
-	case KOF_STT_FUNC:    return "FUNC";
-	case KOF_STT_SECTION: return "SECTION";
-	case KOF_STT_FILE:    return "FILE";
-	case KOF_STT_COMMON:  return "COMMON";
-	case KOF_STT_TLS:     return "TLS";
-	default:              return "?";
-	}
-}
-
-static const char *sym_bind_name(uint8_t b)
-{
-	switch (b) {
-	case KOF_STB_LOCAL:  return "LOCAL";
-	case KOF_STB_GLOBAL: return "GLOBAL";
-	case KOF_STB_WEAK:   return "WEAK";
-	default:             return "?";
-	}
-}
-
-static uint64_t sym_rd64(const uint8_t *p)
-{
-	uint64_t v = 0;
-	int i;
-
-	for (i = 7; i >= 0; i--)
-		v = (v << 8) | p[i];
-	return v;
-}
-
 /*
  * Takes the BUILT BLOCK rather than the file and its parse.
  *
@@ -540,32 +506,27 @@ static uint64_t sym_rd64(const uint8_t *p)
 static void print_syms(const uint8_t *blk, uint32_t w)
 {
 	uint32_t count, i;
-	uint8_t origin;
 
 	if (!blk || w < KOF_SYM_HDRLEN)
 		return;
-	count  = (uint32_t)blk[KOF_SYM_H_COUNT] |
-		 ((uint32_t)blk[KOF_SYM_H_COUNT + 1] << 8) |
-		 ((uint32_t)blk[KOF_SYM_H_COUNT + 2] << 16) |
-		 ((uint32_t)blk[KOF_SYM_H_COUNT + 3] << 24);
-	origin = blk[KOF_SYM_H_ORIGIN];
+	count = kof_sym_count(blk, w);
 	printf("  symbols   %s%s%s  count=%s%u%s%s\n",
-	       C_ID,
-	       origin == KOF_SYM_ORIGIN_SYMTAB ? ".symtab" :
-	       origin == KOF_SYM_ORIGIN_DYNSYM ? ".dynsym" :
-	       origin == KOF_SYM_ORIGIN_PE_DIR ? "imports+exports" : "none",
+	       C_ID, kof_sym_origin_name(blk, w),
 	       C_OFF, C_SIZE, count, C_OFF,
 	       blk[KOF_SYM_H_TRUNC] ? "  (truncated at the record cap)" : "");
 	for (i = 0; i < count; i++) {
-		const uint8_t *r = blk + KOF_SYM_HDRLEN + (size_t)i * KOF_SYM_RECLEN;
-		uint64_t val = sym_rd64(r + KOF_SYM_R_VALUE);
-		uint64_t sz  = sym_rd64(r + KOF_SYM_R_SIZE);
+		const uint8_t *r = kof_sym_rec(blk, w, i);
+
+		if (!r)
+			break;
+		uint64_t val = kof_sym_u64(r, KOF_SYM_R_VALUE);
+		uint64_t sz  = kof_sym_u64(r, KOF_SYM_R_SIZE);
 		uint8_t  fl  = r[KOF_SYM_R_FLAGS];
 
 		printf("     %s%-7s%s %s%-6s%s value=%s0x%-10llx%s size=%s%-8llu%s "
 		       "%s%s%s%s %s%s%s\n",
-		       C_ID,   sym_type_name(r[KOF_SYM_R_TYPE]), C_OFF,
-		       C_WARN, sym_bind_name(r[KOF_SYM_R_BIND]), C_OFF,
+		       C_ID,   kof_sym_type_name(r[KOF_SYM_R_TYPE]), C_OFF,
+		       C_WARN, kof_sym_bind_name(r[KOF_SYM_R_BIND]), C_OFF,
 		       C_LOC,  (unsigned long long)val, C_OFF,
 		       C_SIZE, (unsigned long long)sz,  C_OFF,
 		       C_DIM,

@@ -155,6 +155,16 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 			 uint32_t n, uint8_t *out, uint32_t cap,
 			 uint32_t what);
 
+/*
+ * Is the byte at `at` CODE in this language - outside every string literal and
+ * every comment. See the note beside it for why the sniff asks.
+ *
+ * 1 when there is no table for the language, so a caller gets "cannot tell"
+ * and "is code" as the same answer, which is the safe one here.
+ */
+int kof_lex_is_code_at(const struct kof_lex *lx, const uint8_t *p, uint32_t n,
+		       uint32_t at);
+
 
 /*
  * THE SECOND PASS: what the script BUILDS out of its own literals.

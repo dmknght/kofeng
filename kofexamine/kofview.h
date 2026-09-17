@@ -426,6 +426,27 @@ enum kv_cap {
  * stream, say - is expected to say so itself. */
 int kv_cap(uint8_t format, int cap);
 
+/*
+ * The scrollbars - see kofview.c for what the thumb is counted in.
+ *
+ * kv_scrollbar and kv_scrollbar_h draw one where a pane has room for it;
+ * kv_bar_at hands back the single cell instead, for a caller that is building
+ * its row as a string and draws the wall itself. kv_bar_thumb answers the
+ * geometry alone, in whole rows, for the code that has to decide whether a
+ * click landed on the thumb.
+ *
+ * All four say "nothing to scroll" the same way: a negative row from the two
+ * that return one, NULL from kv_bar_at, and nothing drawn at all.
+ */
+int  kv_bar_thumb(int top, int bot, uint64_t off, uint64_t total,
+		  uint64_t shown, int *out_len);
+const char *kv_bar_at(int cells, int i, uint64_t off, uint64_t total,
+		      uint64_t shown, int horiz);
+void kv_scrollbar(struct out *o, int col, int top, int bot,
+		  uint64_t off, uint64_t total, uint64_t shown);
+void kv_scrollbar_h(struct out *o, int row, int left, int right,
+		    uint64_t off, uint64_t total, uint64_t shown);
+
 /* Drawn rows, rules included - what the caller needs to place the box. */
 int  kv_menu_rows(const struct kv_menu *);
 /* The item on a drawn row, or -1 for a rule and for past the end. */

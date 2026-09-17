@@ -2194,8 +2194,22 @@ uint32_t draft_tgt(struct kof_editor *e)
 	struct object *ob = &e->obj[e->dr.n_decl && e->dr.decl[0].obj < (*e->n_obj)
 				    ? e->dr.decl[0].obj : 0];
 	uint8_t fm = ob->ctx.format;
+	uint8_t sub_fm = fm;
+	uint32_t only = e->dr.fmt_mask;
 	uint32_t h = 0;
 	char w[64];
+
+	/* The one format the draft declares, when it declares exactly one -
+	 * the same resolution the subtype is emitted against. */
+	if (only && (only & (only - 1u)) == 0) {
+		uint8_t b = 0;
+
+		while (!(only & 1u)) {
+			only >>= 1;
+			b++;
+		}
+		sub_fm = b;
+	}
 
 	h = tgt_mix(h, (ob->fmt && fm < FMT_WORD_N) ? fmt_word[fm]
 						    : "KOF_FMT_ANY");
@@ -2209,20 +2223,33 @@ uint32_t draft_tgt(struct kof_editor *e)
 		h = tgt_mix(h, w);
 	}
 	if (e->dr.opt_on[OPT_SUBTYPE]) {
-		uint64_t k = e->dr.opt_val[OPT_SUBTYPE];
+		/*
+		 * SPELLED THE WAY THE FILE SPELLS IT, or this fingerprint does
+		 * not match the file it just wrote.
+		 *
+		 * The two subtype tables written out here were a third hand
+		 * copy of the emitter's, and they were the executable ones
+		 * only, so a script rule hashed NO subtype while its own source
+		 * line said KOF_SCRIPT_PHP. The source side reads whatever
+		 * identifier the line holds, so the draft and the file it saved
+		 * disagreed, and a rule stopped being a duplicate of itself the
+		 * moment it named a language.
+		 *
+		 * Through sub_vocab, which is the table generate() writes from,
+		 * and against the format generate() writes it against - see the
+		 * subtype block there for why that is the DECLARED format
+		 * rather than the object's.
+		 */
+		const char *pre;
+		uint32_t n;
+		const char *const *tab = sub_vocab(sub_fm, &pre, &n);
 
-		if (fm == KOF_FMT_ELF)
-			snprintf(w, sizeof w, "KOF_ELF_%s",
-				 elf_sub[k < elf_sub_n
-					 ? k : 0]);
-		else if (fm == KOF_FMT_PE)
-			snprintf(w, sizeof w, "KOF_PE_%s",
-				 pe_sub[k < pe_sub_n
-					? k : 0]);
-		else
-			w[0] = 0;
-		if (w[0])
+		if (tab) {
+			snprintf(w, sizeof w, "%s%s", pre,
+				 tab[e->dr.opt_val[OPT_SUBTYPE] < n
+				     ? e->dr.opt_val[OPT_SUBTYPE] : 0]);
 			h = tgt_mix(h, w);
+		}
 	}
 	if (e->dr.opt_on[OPT_SIZE_MIN]) {
 		snprintf(w, sizeof w, "SIZE_MIN=%llu",

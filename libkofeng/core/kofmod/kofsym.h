@@ -190,10 +190,15 @@ enum kof_sym_flag {
 
 /* ELF's own values, repeated so a reader of this file need not go and get them.
  * They are the ABI's; do not renumber. */
+/* The two GNU values are in the OS range and they are ordinary in anything
+ * built against glibc - an ifunc resolver is a FUNC that is not one, and a
+ * unique object is a GLOBAL that is not one. A reader that stops at 6 and 2
+ * prints "?" for them. */
 enum { KOF_STT_NOTYPE = 0, KOF_STT_OBJECT = 1, KOF_STT_FUNC = 2,
        KOF_STT_SECTION = 3, KOF_STT_FILE = 4, KOF_STT_COMMON = 5,
-       KOF_STT_TLS = 6 };
-enum { KOF_STB_LOCAL = 0, KOF_STB_GLOBAL = 1, KOF_STB_WEAK = 2 };
+       KOF_STT_TLS = 6, KOF_STT_GNU_IFUNC = 10 };
+enum { KOF_STB_LOCAL = 0, KOF_STB_GLOBAL = 1, KOF_STB_WEAK = 2,
+       KOF_STB_GNU_UNIQUE = 10 };
 enum { KOF_STV_DEFAULT = 0, KOF_STV_INTERNAL = 1, KOF_STV_HIDDEN = 2,
        KOF_STV_PROTECTED = 3 };
 

@@ -892,12 +892,59 @@ int main(void)
 			     "sniff accepted \"<%\" with no \"%>\"");
 	}
 
+	/*
+	 * A MENTION IS NOT A TAG - see the note beside the shebang in
+	 * script_parse.c. Three files that all hold "<?php":
+	 *
+	 *   a python tool that PRINTS one   -> python, the string is data
+	 *   a shell script that echoes one  -> shell, same reason
+	 *   a shell script that heredocs one -> php, the body is not a literal
+	 */
+	{
+		static const char pytool[] =
+			"#!/usr/bin/python\n"
+			"code = raw_input(\"add tags e.g. <?php echo 1; ?>\")\n"
+			"open('x.php','w').write(\"<?php eval($a); ?>\")\n";
+		static const char shecho[] =
+			"#!/bin/sh\n"
+			"echo \"<?php system($_GET[0]); ?>\" > /var/www/x.php\n";
+		static const char shhere[] =
+			"#!/bin/sh\n"
+			"cat > /var/www/x.php <<EOF\n"
+			"<?php system($_GET[0]); ?>\n"
+			"EOF\n";
+		static const struct {
+			const char *what;
+			const char *src;
+			uint8_t     kind;
+		} row[] = {
+			{ "python that prints php", pytool, KOF_SCRIPT_PYTHON },
+			{ "sh that echoes php",     shecho, KOF_SCRIPT_SHELL },
+			{ "sh that heredocs php",   shhere, KOF_SCRIPT_PHP }
+		};
+		struct kof_script_info info;
+		struct kof_obj_ctx ctx;
+		kof_buf f;
+		size_t i;
+
+		for (i = 0; i < sizeof row / sizeof row[0]; i++) {
+			memset(&ctx, 0, sizeof ctx);
+			f.p = (const uint8_t *)row[i].src;
+			f.n = strlen(row[i].src);
+			if (!kof_script_parse(f, &info, &ctx))
+				fail(row[i].what, "would not parse");
+			else if (info.kind != row[i].kind)
+				fail(row[i].what, "the wrong language claimed "
+				     "the file");
+		}
+	}
+
 	if (fails) {
 		printf("script islands: %d check(s) failed\n", fails);
 		return 1;
 	}
 	printf("script islands: partition, directive block, comment, "
 	       "bare tag, short tag, coldfusion, blocks kept, emptied "
-	       "blocks, closing half - ok\n");
+	       "blocks, closing half, a mention is not a tag - ok\n");
 	return 0;
 }

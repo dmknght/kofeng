@@ -409,6 +409,90 @@ static int glues(const struct kof_lex *lx, uint8_t a, uint8_t b)
  */
 enum { ST_OUT = 0, ST_SQ, ST_DQ, ST_BLK, ST_ML };
 
+/*
+ * IS THE BYTE AT `at` CODE, or is it inside a literal or a comment.
+ *
+ * The sniff asks this, and it is the difference between a file that IS php and
+ * a file that TALKS ABOUT php. A python tool that builds a web shell has
+ * "<?php" in it the way this comment has it: in a string, as data it will print
+ * one day. Typed from the tag, that tool is a php file, php rules run on its
+ * python, and the subtype axis says the wrong thing about every object like it.
+ *
+ * A SECOND WALK RATHER THAN A HOOK IN kof_script_norm. The pass above is line
+ * shaped and rewrites as it goes; this only needs the state at one offset, and
+ * an output parameter threaded through a three hundred line loop to answer a
+ * question asked once per file is the more expensive of the two mistakes.
+ *
+ * Answers 1 when there is no table for the language, which is what the callers
+ * want: no table is "this build cannot tell", and a sniff that refuses what it
+ * cannot read would lose the languages it has no row for.
+ */
+int kof_lex_is_code_at(const struct kof_lex *lx, const uint8_t *p, uint32_t n,
+		       uint32_t at)
+{
+	int st = ST_OUT, ml_k = 0;
+	uint32_t i;
+
+	if (!lx || !p || at >= n)
+		return 1;
+	for (i = 0; i < at; i++) {
+		uint8_t c = p[i];
+		uint32_t cl;
+		int k;
+
+		if (st == ST_ML) {
+			if (at_text(p, n, i, lx->ml_close[ml_k])) {
+				i += text_len(lx->ml_close[ml_k]) - 1u;
+				st = ST_OUT;
+			}
+			continue;
+		}
+		if (st == ST_BLK) {
+			if (at_text(p, n, i, lx->blk_close)) {
+				i += text_len(lx->blk_close) - 1u;
+				st = ST_OUT;
+			}
+			continue;
+		}
+		if (st == ST_SQ || st == ST_DQ) {
+			if (c == '\\' && !lx->no_bs_escape &&
+			    (st == ST_DQ || lx->sq_escapes)) {
+				i++;
+				continue;
+			}
+			/* A single-line string ends at the newline too - an
+			 * unterminated quote is a typo in the file, not a
+			 * licence to call the rest of it a string. */
+			if (c == '\n' || (st == ST_SQ && c == '\'') ||
+			    (st == ST_DQ && c == '"'))
+				st = ST_OUT;
+			continue;
+		}
+		cl = line_cmt_at(lx, p, n, i);
+		if (cl) {
+			while (i < at && p[i] != '\n')
+				i++;
+			continue;
+		}
+		if (lx->blk_open && at_text(p, n, i, lx->blk_open)) {
+			i += text_len(lx->blk_open) - 1u;
+			st = ST_BLK;
+			continue;
+		}
+		k = ml_at(lx, p, n, i);
+		if (k >= 0) {
+			i += text_len(lx->ml_open[k]) - 1u;
+			ml_k = k;
+			st = ST_ML;
+			continue;
+		}
+		if (lx->quotes && (c == '"' || c == '\'') &&
+		    strchr(lx->quotes, (int)c))
+			st = c == '\'' ? ST_SQ : ST_DQ;
+	}
+	return st == ST_OUT;
+}
+
 uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 			 uint32_t n, uint8_t *out, uint32_t cap,
 			 uint32_t what)

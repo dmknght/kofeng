@@ -590,6 +590,17 @@ uint32_t kof_pdf_text(const uint8_t *p, uint64_t n, int hex,
 
 const char *kof_touch_kind_name(enum kof_touch_kind);
 
+/*
+ * The name to show, and only as much of it as is known.
+ *
+ * A variant is what a module REPORTED, so it exists only once it has fired.
+ * Showing the first declared one otherwise put "Rootkit:LKM-Diamorphine-x64"
+ * beside "hit 0", which reads as a detection that also says it did not detect -
+ * and the variant named was simply the first in the file, not one anything had
+ * concluded. Without a verdict the family is the whole of what can be said.
+ */
+void kof_touch_name(const struct kof_touch *t, char *out, size_t cap);
+
 /* ---- the string codings ----------------------------------------------------
  *
  * WHAT A SAMPLE WROTE ITS STRINGS IN, both ways through.
@@ -666,6 +677,17 @@ uint32_t kof_codec_key(const char *text);
  */
 uint32_t kof_codec_run(const uint8_t *in, uint32_t n, uint32_t codec,
 		       uint32_t key, int encode, uint8_t *out, uint32_t cap);
+
+/*
+ * A hex pattern, respaced into pairs.
+ *
+ * Only when the pattern is nothing but hex digits and spaces. A pattern with
+ * structure in it - ??, [4-8], (41|42) - is left exactly as its author wrote
+ * it: the digits inside a gap are hex digits too, so pairing them off blindly
+ * would turn [4-8] into something else, and an author who has spaced a pattern
+ * to show its shape has said something worth keeping.
+ */
+void kof_hex_respace(const char *in, char *out, size_t cap);
 
 /* ---- describing one collected event ---------------------------------------
  *
@@ -816,5 +838,22 @@ void kof_inspect_toolchain(const struct kof_obj_ctx *ctx, const void *info,
 			   kof_buf bytes,
 			   const struct kof_inspect_style *st,
 			   kof_inspect_line out, void *user);
+
+/*
+ * THE NAMES FOR A SYMBOL RECORD'S NUMBERS.
+ *
+ * The block itself is read by kofsym.h - kof_sym_count, kof_sym_rec and
+ * kof_sym_u64 are inline there, and both tools had hand copies of all three
+ * beside their own copy of these names.
+ *
+ * The names are here rather than in each tool because the two lists had already
+ * drifted: one knew GNU_IFUNC and GNU_UNIQ, the other knew the PE
+ * import/export origin, and neither knew both, so which names a reader got
+ * depended on which tool they opened.
+ */
+const char *kof_sym_type_name(uint8_t type);
+const char *kof_sym_bind_name(uint8_t bind);
+const char *kof_sym_vis_name(uint8_t vis);
+const char *kof_sym_origin_name(const uint8_t *blk, uint32_t n);
 
 #endif /* KOFENG_KOFINSPECT_H */

@@ -2075,3 +2075,125 @@ uint32_t kof_codec_run(const uint8_t *in, uint32_t n, uint32_t codec,
 	return encode ? codec_write(in, n, codec, key, out, cap)
 		      : codec_read(in, n, codec, key, out, cap);
 }
+
+/* ---- the name a module would report - see kofinspect.h ---- */
+
+void kof_touch_name(const struct kof_touch *t, char *out, size_t cap)
+{
+	const char *fam = t->family[0] ? t->family : "?";
+
+	/* The engine's spelling. The "(n matchers)" tail is this panel's own and
+	 * is added after it, never mixed into it - see kof_name_compose. */
+	kof_name_compose(out, cap, NULL, kof_maltype_name(t->maltype), fam,
+			 t->fired_name);
+	if (!t->fired_name && t->n_names > 1u) {
+		size_t at = strlen(out);
+
+		/*
+		 * MATCHERS, which is what this tool calls the find-pattern
+		 * blocks a module is written out of.
+		 *
+		 * The number is the count of verdict names the module can
+		 * report, and it says "matchers" because that is what those
+		 * names correspond to in a module's source: one per block that
+		 * can conclude something. It is not read out of the module's
+		 * code - a compiled blob has no such count to read - so a
+		 * module that reports one name from two blocks will say one.
+		 * Called "variants" before, which named the wrong half: a
+		 * reader wants to know how many ways this module can fire, not
+		 * how many spellings the answer has.
+		 */
+		snprintf(out + at, cap - at, " (%u matchers)", t->n_names);
+	}
+}
+
+void kof_hex_respace(const char *in, char *out, size_t cap)
+{
+	size_t n = 0;
+	uint32_t half = 0;
+	const char *p;
+
+	for (p = in; *p; p++)
+		if (codec_hexv((uint8_t)*p) < 0 && *p != ' ' && *p != '\t') {
+			snprintf(out, cap, "%s", in);
+			return;
+		}
+	/*
+	 * Respacing GROWS the text by half, and a spelling that would not fit
+	 * after that is left exactly as it was. Spacing is a courtesy; losing
+	 * the tail of a pattern to it is not a trade worth making.
+	 */
+	for (p = in, n = 0; *p; p++)
+		if (*p != ' ' && *p != '\t')
+			n++;
+	if (n + n / 2u + 2u > cap) {
+		snprintf(out, cap, "%s", in);
+		return;
+	}
+	n = 0;
+	for (p = in; *p && n + 4u < cap; p++) {
+		if (*p == ' ' || *p == '\t')
+			continue;
+		if (half == 2u) {
+			out[n++] = ' ';
+			half = 0;
+		}
+		out[n++] = *p;
+		half++;
+	}
+	out[n] = 0;
+}
+
+/* ---- the symbol block - see kofinspect.h ---------------------------------- */
+
+/* ELF's own names for ELF's own numbering, spelled by the constants kofsym.h
+ * declares rather than by the numbers - the two tools had one list each and
+ * only one of them was written from the header. */
+const char *kof_sym_type_name(uint8_t type)
+{
+	switch (type) {
+	case KOF_STT_NOTYPE:     return "NOTYPE";
+	case KOF_STT_OBJECT:     return "OBJECT";
+	case KOF_STT_FUNC:       return "FUNC";
+	case KOF_STT_SECTION:    return "SECTION";
+	case KOF_STT_FILE:       return "FILE";
+	case KOF_STT_COMMON:     return "COMMON";
+	case KOF_STT_TLS:        return "TLS";
+	case KOF_STT_GNU_IFUNC:  return "GNU_IFUNC";
+	default:                 return "?";
+	}
+}
+
+const char *kof_sym_bind_name(uint8_t bind)
+{
+	switch (bind) {
+	case KOF_STB_LOCAL:      return "LOCAL";
+	case KOF_STB_GLOBAL:     return "GLOBAL";
+	case KOF_STB_WEAK:       return "WEAK";
+	case KOF_STB_GNU_UNIQUE: return "GNU_UNIQ";
+	default:                 return "?";
+	}
+}
+
+const char *kof_sym_vis_name(uint8_t vis)
+{
+	switch (vis) {
+	case KOF_STV_DEFAULT:   return "DEFAULT";
+	case KOF_STV_INTERNAL:  return "INTERNAL";
+	case KOF_STV_HIDDEN:    return "HIDDEN";
+	case KOF_STV_PROTECTED: return "PROTECTED";
+	default:                return "?";
+	}
+}
+
+const char *kof_sym_origin_name(const uint8_t *blk, uint32_t n)
+{
+	if (!blk || n < KOF_SYM_HDRLEN)
+		return "none";
+	switch (blk[KOF_SYM_H_ORIGIN]) {
+	case KOF_SYM_ORIGIN_SYMTAB: return ".symtab";
+	case KOF_SYM_ORIGIN_DYNSYM: return ".dynsym";
+	case KOF_SYM_ORIGIN_PE_DIR: return "imports+exports";
+	default:                    return "none";
+	}
+}
