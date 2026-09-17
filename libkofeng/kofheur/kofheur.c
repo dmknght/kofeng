@@ -35,6 +35,7 @@
 #include "../core/kofmod/sevenzip.h"
 #include "../core/kofmod/rar.h"
 #include "../core/kofmod/xz.h"
+#include "../core/kofmod/bz2.h"
 #include "../core/kofmod/rtf.h"
 #include "../core/kofmod/pdf.h"
 
@@ -53,6 +54,7 @@ uint64_t kof_heur_anomalies(const struct kof_obj_ctx *ctx)
 	case KOF_FMT_7Z:     return kof_7z(ctx)->anomalies;
 	case KOF_FMT_RAR:    return kof_rar(ctx)->anomalies;
 	case KOF_FMT_XZ:     return kof_xz(ctx)->anomalies;
+	case KOF_FMT_BZIP2:  return kof_bz2(ctx)->anomalies;
 	case KOF_FMT_RTF:    return kof_rtf(ctx)->anomalies;
 	case KOF_FMT_PDF:    return kof_pdf(ctx)->anomalies;
 	default:             return 0;

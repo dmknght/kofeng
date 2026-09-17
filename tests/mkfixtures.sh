@@ -37,6 +37,7 @@
 #   tar     tar                         nearly always present
 #   gz      gzip                        nearly always present
 #   xz      xz
+#   bz2     bzip2
 #   zip     zip
 #   7z      7z / 7za
 #   rar     rar                         rarely installed
@@ -52,7 +53,7 @@ src=$here/fixtures
 mkdir -p "$out"
 rm -f "$out"/*.bin "$out"/*.exe "$out"/*.so "$out"/*.dll "$out"/*.ovl \
       "$out"/*.pdf "$out"/*.rtf "$out"/*.tar "$out"/*.gz "$out"/*.xz \
-      "$out"/*.zip "$out"/*.7z "$out"/*.rar 2>/dev/null || true
+      "$out"/*.zip "$out"/*.7z "$out"/*.rar "$out"/*.bz2 2>/dev/null || true
 
 built=0
 skipped=""
@@ -183,6 +184,7 @@ arc tar  tar  tar -cf "$out/sample.tar" -C "$(dirname "$payload")" "$(basename "
 if [ -f "$out/sample.tar" ]; then
 	arc gzip gz  sh -c "gzip  -kf '$out/sample.tar' && mv '$out/sample.tar.gz' '$out/sample.gz'"
 	arc xz   xz  sh -c "xz    -kf '$out/sample.tar' && mv '$out/sample.tar.xz' '$out/sample.xz'"
+	arc bzip2 bz2 sh -c "bzip2 -kf '$out/sample.tar' && mv '$out/sample.tar.bz2' '$out/sample.bz2'"
 fi
 arc zip  zip  zip -qj "$out/sample.zip" "$payload"
 if command -v 7z >/dev/null 2>&1; then

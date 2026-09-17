@@ -112,6 +112,7 @@
 #include <kofmod/sevenzip.h>
 #include <kofmod/rar.h>
 #include <kofmod/xz.h>
+#include <kofmod/bz2.h>
 #include <kofmod/rtf.h>
 
 #include "../libkofeng/kofparsers/binaries/elf_parse.h"
@@ -956,6 +957,25 @@ static void print_rar(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 
 /* What an xz says about itself, which is where its blocks are and what codes
  * them - both of which come from the index rather than from the blocks. */
+/*
+ * Four bytes is the whole wrapper, so this is four bytes' worth of report - and
+ * it exists anyway, because "bzip2, level 9, 3849 bytes coded" is the
+ * difference between a reader seeing what was recognised and seeing a format
+ * name with nothing under it. What is inside is the unpacker's line below.
+ */
+static void print_bz2(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
+{
+	const struct kof_bz2_info *b = v;
+
+	(void)ctx;
+	(void)buf;
+
+	printf("  level     %u   block up to %u byte(s)\n",
+	       (unsigned)b->level, b->block_size);
+	printf("  coded     off=%llu len=%llu\n",
+	       (unsigned long long)b->data_off, (unsigned long long)b->data_len);
+}
+
 static void print_xz(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 {
 	const struct kof_xz_info *x = v;
@@ -1096,6 +1116,7 @@ static void print_view(uint8_t format, const void *view,
 	case KOF_FMT_7Z:     print_7z(view, ctx, buf);     break;
 	case KOF_FMT_RAR:    print_rar(view, ctx, buf);    break;
 	case KOF_FMT_XZ:     print_xz(view, ctx, buf);     break;
+	case KOF_FMT_BZIP2:  print_bz2(view, ctx, buf);    break;
 	case KOF_FMT_RTF:    print_rtf(view, ctx, buf);    break;
 	case KOF_FMT_PDF:    print_pdf(view, ctx, buf);    break;
 	default:                                           break;

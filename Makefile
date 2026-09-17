@@ -876,6 +876,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/containers/sevenzip_parse.c \
            libkofeng/kofparsers/containers/rar_parse.c \
            libkofeng/kofparsers/containers/xz_parse.c \
+           libkofeng/kofparsers/containers/bz2_parse.c \
            libkofeng/kofparsers/containers/rtf_parse.c \
            libkofeng/kofparsers/containers/pdf_parse.c \
            libkofeng/kofunpack/pe_rebuild.c \
@@ -886,6 +887,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofdecomp/inflate.c \
            libkofeng/kofdecomp/textcode.c \
            libkofeng/kofdecomp/lzw.c \
+           libkofeng/kofdecomp/bzip2.c \
            libkofeng/kofdecomp/ovba.c \
            libkofeng/kofdecomp/bcj.c \
            libkofeng/kofdecomp/bcj2.c \
@@ -1045,6 +1047,7 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/sevenzip.h \
            $(SDK)/include/kofmod/rar.h \
            $(SDK)/include/kofmod/xz.h \
+           $(SDK)/include/kofmod/bz2.h \
            $(SDK)/include/kofmod/rtf.h \
            $(SDK)/include/kofmod/pdf.h \
            $(SDK)/include/kofmod/amsi.h \

@@ -33,6 +33,7 @@
 #include "../kofdecomp/inflate.h"
 #include "../kofdecomp/textcode.h"
 #include "../kofdecomp/lzw.h"
+#include "../kofdecomp/bzip2.h"
 #include "../kofdecomp/nrv2.h"
 #include "../kofdecomp/lzma.h"
 
@@ -245,6 +246,17 @@ struct kof_scanner {
 	 * the rest - the same treatment `inf` gets, and for the same reason:
 	 * most scans never meet one. */
 	struct kof_lzw     *lzw;
+	/*
+	 * And 3.7MB for bzip2, on the same terms - allocated when the first
+	 * stream needs it and never per stream.
+	 *
+	 * It is two orders of magnitude larger than the other two, and that is
+	 * the format rather than a choice: the last stage is a permutation of a
+	 * whole block, so the block and a link per byte have to exist at once
+	 * before any of it can be produced. A scan that never meets a .bz2 pays
+	 * nothing, which is what makes the size affordable.
+	 */
+	struct kof_bunzip  *bz;
 
 	/*
 	 * Where notes go, when anybody wants them.

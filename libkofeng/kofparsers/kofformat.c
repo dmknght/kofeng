@@ -10,6 +10,7 @@
 #include "containers/sevenzip_parse.h"
 #include "containers/rar_parse.h"
 #include "containers/xz_parse.h"
+#include "containers/bz2_parse.h"
 #include "containers/rtf_parse.h"
 #include "containers/pdf_parse.h"
 #include "scripts/script_parse.h"
@@ -33,6 +34,11 @@ static int pe_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 static int gzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
 	return kof_gzip_parse(b, (struct kof_gzip_info *)v, c);
+}
+
+static int bz2_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_bz2_parse(b, (struct kof_bz2_info *)v, c);
 }
 
 static int docole_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
@@ -152,6 +158,11 @@ static uint64_t anom_script(const void *v)
 	return ((const struct kof_script_info *)v)->anomalies;
 }
 
+static uint64_t anom_bz2(const void *v)
+{
+	return ((const struct kof_bz2_info *)v)->anomalies;
+}
+
 static uint64_t anom_rtf(const void *v)
 {
 	return ((const struct kof_rtf_info *)v)->anomalies;
@@ -199,6 +210,10 @@ static const struct kof_parser formats[] = {
 	  kof_xz_sniff, xz_parse_thunk,
 	  kof_xz_region_bits, KOF_XZ_REGION_COUNT,
 	  kof_xz_region_name, kof_xz_anomaly_name, anom_xz },
+	{ KOF_FMT_BZIP2, (uint32_t)sizeof(struct kof_bz2_info),
+	  kof_bz2_sniff, bz2_parse_thunk,
+	  kof_bz2_region_bits, KOF_BZ2_REGION_COUNT,
+	  kof_bz2_region_name, kof_bz2_anomaly_name, anom_bz2 },
 	{ KOF_FMT_RTF, (uint32_t)sizeof(struct kof_rtf_info),
 	  kof_rtf_sniff, rtf_parse_thunk,
 	  kof_rtf_region_bits, KOF_RTF_REGION_COUNT,

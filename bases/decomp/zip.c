@@ -90,6 +90,24 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			opened++;
 			continue;
 		}
+		/*
+		 * METHOD 12 IS bzip2, AND IT IS THE SAME CALL.
+		 *
+		 * Zip has carried it since 2001 and almost nothing writes it,
+		 * which is exactly why it is worth having: an entry in a method
+		 * a reader was never taught is ordinary content behind an
+		 * unusual wrapper. It goes through the host like deflate does -
+		 * the coding is the only thing that differs.
+		 */
+		if (e->method == KOF_ZIP_M_BZIP2) {
+			if (kof_unpack_at(KOF_UNP_BZIP2, e->data_off, e->csize,
+					  e->usize) == 0)
+				continue;
+			if (!kof_child())
+				break;
+			opened++;
+			continue;
+		}
 		if (e->method != KOF_ZIP_M_DEFLATE) {
 			unsupported++;
 			continue;

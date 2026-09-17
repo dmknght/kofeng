@@ -244,6 +244,27 @@ enum kof_format {
 	KOF_FMT_FONT    = 17,
 
 	/*
+	 * bzip2, AND THE LAST VALUE THE AXIS HAD.
+	 *
+	 * One stream, one member, four bytes of wrapper - there is less to parse
+	 * here than in any other container, and it is a format anyway for the
+	 * reason every container is: format is what the prefilter rules on, so
+	 * without a value nothing targets a .bz2 and the bytes inside it are
+	 * reached by nobody. Measured on the exploit-db binary corpus: 14 of
+	 * 2335 files are a bare BZh stream and every one was skipped with "no
+	 * module targets the format".
+	 *
+	 * WHAT IT COSTS, stated because the next person to add a format needs to
+	 * know before they start: this is 18, KOF_FMT_COUNT is now 19, and
+	 * KOF_TARGET_FIRST_EVENT moved to 19 to match - which puts it exactly on
+	 * KOF_EVT_AMSI_SCAN. There is no twentieth value. A format after this
+	 * one needs the axis WIDENED - the target is a uint32 mask in the pack
+	 * (see kofpackw.c) - and that is a pack format change rather than an
+	 * enumerator.
+	 */
+	KOF_FMT_BZIP2   = 18,
+
+	/*
 	 * ONE COLLECTED EVENT, not a file.
 	 *
 	 * The object is one collected event - what a collector saw happen, with
@@ -321,7 +342,7 @@ enum kof_format {
 	 * width of the axis, and anything sizing an array by target value wants
 	 * KOF_TARGET_BITS instead.
 	 */
-	KOF_FMT_COUNT   = 18
+	KOF_FMT_COUNT   = 19
 };
 
 /*
@@ -351,7 +372,7 @@ enum kof_format {
  * (see kofevt.h), so moving it is checked rather than assumed. Moving it again
  * is the same two steps.
  */
-#define KOF_TARGET_FIRST_EVENT 18u
+#define KOF_TARGET_FIRST_EVENT 19u
 #define KOF_TARGET_BITS        32u
 
 /*
@@ -486,6 +507,7 @@ static inline int kof_format_from_name(const char *s, uint8_t *out)
 	KOF_FMT_X_FROM(KOF_FMT_PDF,     KOF_FMT_PDF)
 	KOF_FMT_X_FROM(KOF_FMT_IMAGE,   KOF_FMT_IMAGE)
 	KOF_FMT_X_FROM(KOF_FMT_FONT,    KOF_FMT_FONT)
+	KOF_FMT_X_FROM(KOF_FMT_BZIP2,   KOF_FMT_BZIP2)
 	KOF_FMT_X_FROM(KOF_EVT_AMSI,    KOF_EVT_AMSI)
 	KOF_FMT_X_FROM(KOF_EVT_PROC,    KOF_EVT_PROC)
 #undef KOF_FMT_X_FROM
@@ -508,6 +530,7 @@ static inline const char *kof_format_name(uint8_t fmt)
 	case KOF_FMT_7Z:     return "7z";
 	case KOF_FMT_RAR:    return "RAR";
 	case KOF_FMT_XZ:     return "xz";
+	case KOF_FMT_BZIP2:  return "bzip2";
 	case KOF_EVT_AMSI:   return "AMSI";
 	case KOF_EVT_PROC:   return "Process";
 	case KOF_FMT_RTF:    return "RTF";
@@ -1415,6 +1438,28 @@ enum kof_unp_method {
 	 * chain - like DEFLATE and for the same reason.
 	 */
 	KOF_UNP_LZW = 13,
+
+	/*
+	 * bzip2, whole streams of it - see kofdecomp/bzip2.h.
+	 *
+	 * A .bz2 file, a zip entry stored with method 12, and the compressed
+	 * half of a .tar.bz2 are all this one coding, and none of them could be
+	 * looked inside before it existed.
+	 *
+	 * THE RANGE IS THE WHOLE STREAM, "BZh" AND ALL - unlike DEFLATE, where
+	 * a caller passes the coded bytes and keeps the wrapper to itself.
+	 * bzip2 has no separable wrapper: the level digit in those four bytes
+	 * states the block size, which the decoder needs before it can read
+	 * anything, and everything after them is a bit stream that is not byte
+	 * aligned. A zip entry stored with method 12 holds a complete stream for
+	 * the same reason, so both callers pass the same thing.
+	 *
+	 * Output is unbounded, so it streams and can only be the LAST step of a
+	 * chain - like DEFLATE and LZW, and for the same reason: an
+	 * intermediate has to be sized from its input and a block sorted coding
+	 * cannot be.
+	 */
+	KOF_UNP_BZIP2 = 14,
 
 	KOF_UNP_NRV2B_8 = 16, KOF_UNP_NRV2B_16, KOF_UNP_NRV2B_32,
 	KOF_UNP_NRV2D_8,      KOF_UNP_NRV2D_16, KOF_UNP_NRV2D_32,

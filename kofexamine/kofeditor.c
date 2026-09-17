@@ -273,7 +273,11 @@ const char *const fmt_word[] = {
 	 * the way KOF_SCRIPT_TYPE_LIST and KOF_MALTYPE_LIST already work. Until
 	 * that lands this at least says out loud that it is a copy.
 	 */
-	"KOF_FMT_IMAGE", "KOF_FMT_FONT"
+	"KOF_FMT_IMAGE", "KOF_FMT_FONT",
+	/* And the same copy again for bzip2 - added here at the same time as
+	 * the enumerator, which is the only way this list stays right until
+	 * that X-macro exists. */
+	"KOF_FMT_BZIP2"
 };
 
 

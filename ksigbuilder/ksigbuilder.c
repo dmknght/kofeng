@@ -3280,6 +3280,7 @@ static const struct fmt_hdr fmt_headers[] = {
 	{ "docole",   KOF_FMT_DOCOLE },
 	{ "tar",      KOF_FMT_TAR    },
 	{ "sevenzip", KOF_FMT_7Z     },
+	{ "bz2",      KOF_FMT_BZIP2  },
 	/*
 	 * zip.h is deliberately absent, and so are the headers of the other
 	 * formats whose modules target exactly one anyway.
@@ -4670,6 +4671,7 @@ static int bucket_of_format(uint32_t fmt)
 	case KOF_FMT_7Z:
 	case KOF_FMT_RAR:
 	case KOF_FMT_XZ:
+	case KOF_FMT_BZIP2:
 	/*
 	 * DOCZIP IS AN ARCHIVE HERE, not a document, and the distinction is
 	 * about what an unpacker targets rather than what a user opens.

@@ -1743,6 +1743,36 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		return got;
 	}
 
+	if (method == KOF_UNP_BZIP2) {
+		struct expand_sink snk;
+		enum kof_decomp_status st;
+		uint64_t got = 0;
+
+		if (!sc->bz) {
+			sc->bz = malloc(sizeof *sc->bz);
+			if (!sc->bz) {
+				scan_broken(sc, KOF_BROKEN_LIMIT);
+				return 0;
+			}
+		}
+		snk.ctx = ctx;
+		snk.left = expand_limit(len, out_hint);
+		st = kof_bunzip_decode(sc->bz, b.p + off, len, expand_sink_fn,
+				       &snk, &got);
+		/*
+		 * Truncation is not an error, for the reason the DEFLATE path
+		 * gives. A CHECKSUM MISMATCH IS - it is the one thing bzip2
+		 * carries that says the bytes came back different from the ones
+		 * that went in, and reporting that as a clean decode would hand
+		 * a rule content the archive never held.
+		 */
+		if (st != KOF_DEC_OK && st != KOF_DEC_TRUNCATED)
+			scan_broken(sc, broken_of_status(st));
+		else if (snk.left == 0)
+			scan_broken(sc, KOF_BROKEN_LIMIT);
+		return got;
+	}
+
 	if (!buffered_method(method))
 		return 0;
 	if (!nrv2_of(method, &variant, &bits))

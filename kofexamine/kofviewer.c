@@ -7396,7 +7396,8 @@ static const struct fmt_cat g_fmt_cat[] = {
 			 FMT_B(KOF_FMT_RTF) | FMT_B(KOF_FMT_PDF), 0 },
 	{ "Archives",    FMT_B(KOF_FMT_ZIP) | FMT_B(KOF_FMT_TAR) |
 			 FMT_B(KOF_FMT_7Z) | FMT_B(KOF_FMT_RAR) |
-			 FMT_B(KOF_FMT_XZ) | FMT_B(KOF_FMT_GZIP), 0 },
+			 FMT_B(KOF_FMT_XZ) | FMT_B(KOF_FMT_GZIP) |
+			 FMT_B(KOF_FMT_BZIP2), 0 },
 	/*
 	 * "Media" KEEPS ITS SHAPE: it is already the plural of "medium", so
 	 * "Medias" would be the one row in this table that is not English. The
@@ -16457,6 +16458,7 @@ static int fmt_group(uint8_t f)
 	case KOF_FMT_7Z:
 	case KOF_FMT_GZIP:
 	case KOF_FMT_XZ:
+	case KOF_FMT_BZIP2:
 		return 2;
 	default:
 		return 3;
