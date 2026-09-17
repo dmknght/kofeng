@@ -71,6 +71,78 @@ static const struct kof_lex lex_ruby = {
  * skipped - reading it as an escape would swallow the closing quote and take
  * the rest of the file into a string that never ends.
  */
+/*
+ * LUA, AND WHAT THIS ROW DOES NOT REACH.
+ *
+ * "--" is the line comment and "--[[ ... ]]" the block one, which is the line
+ * form with a LONG BRACKET after it. The long bracket is also Lua's multi-line
+ * string, and `ml_open` is how a row says "this construct exists" - which in
+ * this pass means REFUSE THE EXTENT, not "handle it": see has_multiline. So a
+ * Lua file containing "[[" anywhere, block comment included, is left exactly as
+ * it was typed.
+ *
+ * THAT IS THE SAFE HALF OF THE TRADE AND IT IS DELIBERATE. Dropping "[[" from
+ * this row would let the pass close up the spacing INSIDE a long string, which
+ * is data - the one thing the form pass may never do. Refusing costs a file
+ * that is not formed; corrupting costs a literal that no longer matches.
+ *
+ * What the row buys is every Lua file with no long bracket in it: comments,
+ * indentation and spacing removed, where before there was no row at all and
+ * kof_lex_for answered NULL for all of them.
+ *
+ * CONCATENATION IS "..", which this row cannot say - `concat` is one char - so
+ * it says nothing rather than claiming ".". A lone "." in Lua is a field
+ * access, and folding "a" . "b" as a join would build a string the program
+ * never had.
+ */
+static const struct kof_lex lex_lua = {
+	.line_cmt = { "--", NULL, NULL },
+	.blk_open = "--[[", .blk_close = "]]",
+	.quotes = "\"'", .ml_open = { "[[", NULL, NULL },
+	.sq_escapes = 1, .stmt_end = 0,
+	.ws_significant = 0, .var_sigil = 0, .concat = 0
+};
+
+/*
+ * TCL, WHERE WHITESPACE IS THE SYNTAX.
+ *
+ * Every command is a list of words separated by spaces - "set x 1" is three
+ * words and "setx 1" is a different command - so this is `ws_significant` for
+ * exactly the reason sh is. What the pass can still take out is the comments
+ * and the indentation, which is what a Tcl file gets here and did not before.
+ *
+ * "#" opens a comment only where a COMMAND may start; Tcl has no block form.
+ * The row cannot express "only at the start of a command", so the pass is
+ * conservative in the way ws_significant already makes it.
+ */
+static const struct kof_lex lex_tcl = {
+	.line_cmt = { "#", NULL, NULL },
+	.quotes = "\"", .ml_open = { NULL, NULL, NULL },
+	.sq_escapes = 1, .stmt_end = 0,
+	.ws_significant = 1, .var_sigil = '$', .concat = 0
+};
+
+/*
+ * COLDFUSION, WHICH IS MARKUP WITH A SCRIPT DIALECT INSIDE IT.
+ *
+ * <cfscript> holds something very close to JavaScript - the C comment pair,
+ * ";" ending a statement, "&" joining strings - and the tags around it are
+ * markup this pass leaves alone anyway.
+ *
+ * THE ISLANDS ARE STILL NOT CARVED for it - see script_parse.c, where a .cfm
+ * is recognised and its code is not split out - so what this row reaches is a
+ * whole-file form rather than a per-block one. That is strictly more than the
+ * nothing it had: a row that does not exist means kof_lex_for answers NULL and
+ * the form pass declines the object entirely.
+ */
+static const struct kof_lex lex_cfm = {
+	.line_cmt = { "//", NULL, NULL },
+	.blk_open = "/*", .blk_close = "*/",
+	.quotes = "\"'", .ml_open = { NULL, NULL, NULL },
+	.sq_escapes = 1, .stmt_end = ';',
+	.ws_significant = 0, .var_sigil = 0, .concat = '&'
+};
+
 static const struct kof_lex lex_shell = {
 	.line_cmt = { "#", NULL, NULL },
 	.quotes = "\"'", .ml_open = { "<<", NULL, NULL },
@@ -146,6 +218,9 @@ const struct kof_lex *kof_lex_for(uint8_t script_kind)
 	case KOF_SCRIPT_RUBY:   return &lex_ruby;
 	case KOF_SCRIPT_SHELL:  return &lex_shell;
 	case KOF_SCRIPT_BAT:    return &lex_batch;
+	case KOF_SCRIPT_LUA:    return &lex_lua;
+	case KOF_SCRIPT_TCL:    return &lex_tcl;
+	case KOF_SCRIPT_CFM:    return &lex_cfm;
 	case KOF_SCRIPT_PSH:    return &lex_psh;
 	case KOF_SCRIPT_ASP:
 	/* A .vbs file is the same language outside a page, and had no row at

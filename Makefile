@@ -1749,6 +1749,27 @@ UNIT_SRC := $(filter-out $(addprefix tests/unit/,$(addsuffix .c,$(UNIT_SKIP))),\
                          $(wildcard tests/unit/*.c))
 UNIT_BIN := $(patsubst tests/unit/%.c,$(TEST)/unit_%$(EXE),$(UNIT_SRC))
 
+#
+# THE SANITISED BUILD'S NAMES, SET HERE AND NOT BESIDE THE TARGET THAT RUNS IT.
+#
+# They were set two hundred lines below the first test rule that names
+# $(ASAN_LIB) in its PREREQUISITES, and a variable used before it is set expands
+# to nothing: six asan binaries - proc_rule, out_clip, fridge, report_model,
+# codec_forms, cond_expr - therefore did not depend on the sanitised library at
+# all. Touching libkofeng-asan.a and asking for one of them answered "up to
+# date", so `make unit-asan` could run a STALE binary against library code it
+# had never linked and report it as passing. A sanitiser suite that can do that
+# is worse than none, because it is believed.
+#
+# This is the third time this file has been caught by the same rule - see the
+# note above the shared source lists - so the fix is the same one: the names go
+# above every rule that uses them.
+#
+ASAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer \
+              -fno-sanitize-recover=undefined
+ASAN_BIN := $(patsubst tests/unit/%.c,$(TEST)/asan_%$(EXE),$(UNIT_SRC))
+ASAN_LIB := $(TEST)/libkofeng-asan.a
+
 # Linked against the library, so a unit test can exercise it rather than only
 # whatever it can compile in on its own.
 #
@@ -2025,6 +2046,19 @@ $(TEST)/asan_codec_forms$(EXE): tests/unit/codec_forms.c \
 	       kofexamine/kofinspect.c $(KOFEVT_SRC) $(ASAN_LIB) -o $@ \
 	       $(LDFLAGS)
 
+# The editor's round trip over the rules that ship - see the test's own note for
+# the three silent losses that motivated it. Linked like cond_expr, because it
+# drives the same model.
+$(TEST)/unit_rule_roundtrip$(EXE): tests/unit/rule_roundtrip.c $(EDITOR_SRC) \
+                                   $(LIB) $(SDK_HDR) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $< $(EDITOR_SRC) $(LIB) \
+	      -o $@ $(LDFLAGS)
+
+$(TEST)/asan_rule_roundtrip$(EXE): tests/unit/rule_roundtrip.c $(EDITOR_SRC) \
+                                   $(ASAN_LIB) $(SDK_HDR) $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) -I$(SDK)/include $< $(EDITOR_SRC) \
+	       $(ASAN_LIB) -o $@ $(LDFLAGS)
+
 $(TEST)/unit_cond_expr$(EXE): tests/unit/cond_expr.c $(EDITOR_SRC) $(LIB) \
                               $(SDK_HDR) $(STAMP) | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $< $(EDITOR_SRC) $(LIB) \
@@ -2159,12 +2193,6 @@ $(BUILD)/%.d: ;
 # Sources are compiled here rather than linked against the release library, so the
 # sanitiser instruments the parsers and decoders themselves and not only the test.
 #
-ASAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer \
-              -fno-sanitize-recover=undefined
-ASAN_BIN := $(patsubst tests/unit/%.c,$(TEST)/asan_%$(EXE),$(UNIT_SRC))
-
-ASAN_LIB := $(TEST)/libkofeng-asan.a
-
 #
 # One flat directory of objects, so a source's path becomes its name.
 #

@@ -651,10 +651,27 @@ int kof_pe_parse(kof_buf file, struct kof_pe_info *info, struct kof_obj_ctx *ctx
 	 * it would make every declared mapped image parse as a file and resolve
 	 * its regions to the wrong bytes. Read it, wipe, put it back.
 	 */
-	uint32_t layout = info ? info->layout : 0u;
-	/* The second caller-owned field, saved across the wipe for the same
-	 * reason - see kof_pe_info.mem_origin. */
-	uint32_t origin = info ? info->mem_origin : 0u;
+	uint32_t layout, origin;
+
+	/*
+	 * THE VIEW IS REQUIRED, AND SAYING SO IS THE POINT.
+	 *
+	 * The two reads below were written "info ? info->x : 0" and the memset
+	 * on the next line dereferenced it anyway - a guard that promised a
+	 * NULL was tolerated and then broke that promise one line later, which
+	 * is worse than no guard: a caller reading the first line would believe
+	 * it. Every parser in the table takes a view it must fill, kof_elf_parse
+	 * does not test for one, and the thunks always pass the engine's. So
+	 * this refuses instead, which is the same contract said honestly.
+	 */
+	if (!info || !ctx)
+		return 0;
+	/* The caller-owned fields, saved across the wipe: `layout` is an INPUT,
+	 * and clearing it would make every declared mapped image parse as a
+	 * file and resolve its regions to the wrong bytes - see above and
+	 * kof_pe_info.mem_origin. */
+	layout = info->layout;
+	origin = info->mem_origin;
 
 	memset(info, 0, sizeof *info);
 	info->version = KOF_PE_INFO_VERSION;

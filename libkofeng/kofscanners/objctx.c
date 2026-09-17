@@ -3253,23 +3253,46 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 		 * it carries - so all 87 KB of the code a researcher came to
 		 * read was not in the tree at all.
 		 *
-		 * The share separates them and the corpus says so without being
-		 * asked nicely. Over 30 php shells that fold to anything, the
-		 * coverage is 0-16% for twenty-three of them and 57-99% for the
-		 * other seven, with NOTHING in between. A third is the middle
-		 * of that empty band, so the threshold does not sit on top of
-		 * any measured file.
+		 * TWO TESTS, AND THE SHARE IS THE WEAKER ONE.
 		 *
-		 * AND NOTHING HERE LOOKS INSIDE THE CONSTANT. There was a test
-		 * for "does this look like html", so that a shell echoing its
-		 * page from one string did not hand that page over as the
-		 * child. It is gone: deciding what a value CONTAINS is parsing
-		 * data, and a pass that cuts on its own reading of data is a
-		 * pass that can corrupt it. An echo is a command, its string is
-		 * a value, and the share above is a fact about the FILE rather
-		 * than a guess about the bytes.
+		 * WAS IT ASSEMBLED AT ALL. The fold hands back the largest
+		 * value the script builds, and "builds" is doing no work when
+		 * that value is ONE LITERAL copied out of the file - the
+		 * generator joined nothing, and what came back is a constant
+		 * the program happens to hold. So: if the folded bytes occur
+		 * VERBATIM in the object, this is not a build.
+		 *
+		 * Measured over the sample tree, of the seven scripts whose
+		 * fold covers more than a third of the file:
+		 *
+		 *   hoho.php, hoho_1, hoho_2   assembled - a real generator,
+		 *                              and the fold is the shell
+		 *   sym403.php, vhost.php,     ONE literal, copied. 99%, 90%,
+		 *   b374k-mini, B374k Beta     68% of the file - and handing
+		 *                              the literal over deleted the
+		 *                              php around it, which is the
+		 *                              whole of what those files are
+		 *
+		 * The share alone called all seven builders. It is kept as the
+		 * second test, because an ASSEMBLED value can still be
+		 * incidental: itsecteam_shell and alfa assemble something that
+		 * is 1% of the file, and handing that over would lose the shell
+		 * for the same reason Ani-Shell.php did - 87075 bytes of code
+		 * replaced by the 3144-byte blob it carries.
+		 *
+		 * Over 30 php shells that fold to anything the coverage is
+		 * 0-16% for twenty-three and 57-99% for seven, with NOTHING in
+		 * between; a third is the middle of that empty band.
+		 *
+		 * AND NOTHING HERE LOOKS INSIDE THE VALUE. There was a test for
+		 * "does this look like html". It is gone: deciding what a value
+		 * CONTAINS is parsing data, and a pass that cuts on its own
+		 * reading of data is a pass that can corrupt it. "Does this
+		 * appear in the file" is not a reading of the bytes - it is the
+		 * same question the fold already answered, asked backwards.
 		 */
-		if (n < 64u || (uint64_t)n * 3u < b.n) {
+		if (n < 64u || (uint64_t)n * 3u < b.n ||
+		    kof_memmem(b.p, (size_t)b.n, out, (size_t)n)) {
 			n = 0;
 		} else {
 			tmp = malloc((size_t)n);

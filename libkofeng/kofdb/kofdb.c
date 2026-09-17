@@ -1135,13 +1135,15 @@ struct kof_engine *kof_db_load(const char *path)
 	 * flat array as it always did, which is slower and identical.
 	 */
 	{
-		uint32_t b, i, total = 0, *fill;
+		/* `m` rather than `i`: it indexes modules, and an `i` here
+		 * shadowed the loader's own. */
+		uint32_t b, m, total = 0, *fill;
 
 		for (b = 0; b <= KOF_TARGET_BITS; b++)
 			e->mod_at[b] = 0;
-		for (i = 0; i < e->n_mods; i++)
+		for (m = 0; m < e->n_mods; m++)
 			for (b = 0; b < KOF_TARGET_BITS; b++)
-				if (e->mods[i].target_mask & (1u << b))
+				if (e->mods[m].target_mask & (1u << b))
 					e->mod_at[b + 1u]++;
 		for (b = 0; b < KOF_TARGET_BITS; b++)
 			e->mod_at[b + 1u] += e->mod_at[b];
@@ -1151,11 +1153,11 @@ struct kof_engine *kof_db_load(const char *path)
 		e->mod_by_target = total ? calloc(total, sizeof *e->mod_by_target)
 					 : NULL;
 		if (fill && (e->mod_by_target || !total)) {
-			for (i = 0; i < e->n_mods; i++)
+			for (m = 0; m < e->n_mods; m++)
 				for (b = 0; b < KOF_TARGET_BITS; b++)
-					if (e->mods[i].target_mask & (1u << b))
+					if (e->mods[m].target_mask & (1u << b))
 						e->mod_by_target[e->mod_at[b] +
-								 fill[b]++] = i;
+								 fill[b]++] = m;
 		} else {
 			free(e->mod_by_target);
 			e->mod_by_target = NULL;

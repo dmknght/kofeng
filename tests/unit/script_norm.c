@@ -375,11 +375,42 @@ int main(void)
 			bad2("js folded without a sigil to go on");
 	}
 
+	/*
+	 * THE THREE KINDS THAT HAD NO ROW AT ALL.
+	 *
+	 * kof_lex_for answered NULL for Lua, Tcl and ColdFusion, and a NULL row
+	 * means the form pass declines the object: those files were recognised
+	 * as scripts and then never formed, so a marker taken from one carried
+	 * whatever spacing and comments the author happened to type.
+	 */
+	eq(KOF_SCRIPT_TCL, "# a note\n    set x 1\n    exec /bin/sh -c $x\n",
+	   "set x 1\nexec /bin/sh -c $x\n", KOF_NORM_ALL,
+	   "tcl: the comment and the indent go, the words stay apart");
+	eq(KOF_SCRIPT_CFM,
+	   "<cfscript>\n  // a note\n  x = \"cmd\" & \".exe\";\n</cfscript>\n",
+	   "<cfscript>\nx=\"cmd\"&\".exe\";\n</cfscript>\n", KOF_NORM_ALL,
+	   "coldfusion: its script dialect forms like the C family");
+	eq(KOF_SCRIPT_LUA, "-- a note\nlocal s = 'cmd'\nos.execute( s )\n",
+	   "local s='cmd'\nos.execute(s)\n", KOF_NORM_ALL,
+	   "lua: comment out, spacing closed");
+	/*
+	 * AND LUA'S LONG BRACKET IS REFUSED RATHER THAN FORMED - see lex_lua.
+	 * "[[" opens a multi-line STRING, the pass has no handling for one, and
+	 * closing up the spacing inside a literal is the corruption this whole
+	 * pass is forbidden to commit. The block comment shares the bracket, so
+	 * it refuses too: a file that is not formed, never a literal that no
+	 * longer matches.
+	 */
+	refused(KOF_SCRIPT_LUA, "local t = [[ a long string ]]\n",
+		"lua: a long string is not formed");
+	refused(KOF_SCRIPT_LUA, "--[[ a block note ]]\nlocal s = 1\n",
+		"lua: a block comment shares the long bracket");
+
 	if (fails) {
 		printf("script norm: %d check(s) failed\n", fails);
 		return 1;
 	}
 	printf("script norm: form, strings, multi-line values, operators, "
-	       "shell, refusals, folding - ok\n");
+	       "shell, lua/tcl/cfm, refusals, folding - ok\n");
 	return 0;
 }

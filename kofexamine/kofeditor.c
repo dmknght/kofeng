@@ -921,6 +921,57 @@ void src_scan(const char *dir, int depth)
 	closedir(d);
 }
 
+/*
+ * THE FORMAT A RULE DECLARES, read before the rest of the file.
+ *
+ * WHY THIS IS A PASS OF ITS OWN. Region names are a FORMAT'S vocabulary -
+ * "KOF_SCAN_ELF_CODE" means something to the ELF parser and nothing to any
+ * other - so reading a range needs the format first. It used to be taken from
+ * the OBJECT the viewer happened to have open, and the failure was silent and
+ * total: open an ELF rule while looking at a php file, save it, and
+ *
+ *     KOF_TARGET_RANGE(scan_range_code, KOF_SCAN_ELF_CODE);
+ *
+ * came back as
+ *
+ *     KOF_TARGET_RANGE(scan_range_whole_file, KOF_SCAN_ALL);
+ *
+ * because the name resolved to an empty mask and an empty mask is written as
+ * whole-file. The rule still compiled, still loaded and still found things -
+ * it just searched everywhere, which is the one property its author had
+ * chosen. 49 of the 52 rules in bases/signatures are region-scoped.
+ *
+ * A pre-pass rather than "read the format line before the range line", because
+ * that is an ORDER the generator happens to write and a hand-written rule owes
+ * nobody.
+ */
+static const struct kof_parser *src_rule_fmt(FILE *f, uint32_t *mask_out)
+{
+	char line[1024];
+	uint32_t mask = 0, fi;
+
+	while (fgets(line, sizeof line, f)) {
+		const char *p = strstr(line, "KOF_TARGET_FORMAT(");
+
+		if (!p)
+			continue;
+		for (fi = 0; fi < FMT_WORD_N; fi++)
+			if (src_word_in(p, fmt_word[fi]))
+				mask |= 1u << fi;
+	}
+	rewind(f);
+	*mask_out = mask;
+	for (fi = 0; fi < FMT_WORD_N; fi++)
+		if (mask & (1u << fi)) {
+			const struct kof_parser *pr =
+				kof_parser_of((uint8_t)fi);
+
+			if (pr)
+				return pr;
+		}
+	return NULL;
+}
+
 uint32_t src_mask_of(const struct kof_parser *fmt, const char *e)
 {
 	uint32_t m = 0, k;
@@ -944,6 +995,98 @@ uint32_t src_mask_of(const struct kof_parser *fmt, const char *e)
 			m |= fmt->regions[k];
 	}
 	return m;
+}
+
+/*
+ * A RANGE EXPRESSION, resolved against every format the rule declares.
+ *
+ * A rule may target more than one - "KOF_FMT_ELF | KOF_FMT_PE" - and then its
+ * range names both vocabularies. Each name belongs to one of them, so the masks
+ * are OR-ed: a name no declared format knows contributes nothing, which is the
+ * same answer it would get from the format that does not have it.
+ *
+ * `fallback` is the open object's parser and is used only when the rule
+ * declares no format at all, which is a draft being written rather than a rule
+ * being read.
+ */
+static uint32_t src_mask_decl(uint32_t fmt_mask,
+			      const struct kof_parser *fallback, const char *e)
+{
+	uint32_t m = 0, fi;
+	int any = 0;
+
+	for (fi = 0; fi < FMT_WORD_N; fi++) {
+		const struct kof_parser *pr;
+
+		if (!(fmt_mask & (1u << fi)))
+			continue;
+		pr = kof_parser_of((uint8_t)fi);
+		if (!pr)
+			continue;
+		any = 1;
+		m |= src_mask_of(pr, e);
+	}
+	return any ? m : src_mask_of(fallback, e);
+}
+
+/*
+ * THE FORMAT THIS DRAFT SPEAKS, for turning a region mask back into a name.
+ *
+ * The draft's own KOF_TARGET_FORMAT when it declares one, and the object under
+ * the cursor when it does not - a draft being written from a sample has no
+ * declared format until the sample gives it one.
+ *
+ * THE READER AND THE WRITER HAVE TO AGREE ABOUT THIS. src_rule_fmt fixed the
+ * half that reads a rule; a writer still asking the OBJECT could resolve
+ * KOF_SCAN_ELF_CODE on the way in and then fail to spell it on the way out,
+ * which is the same loss one step later: the mask is right in the panel and
+ * the file says KOF_SCAN_ALL.
+ */
+static const struct kof_parser *draft_fmt(const struct kof_editor *e,
+					  const struct kof_parser *fallback)
+{
+	uint32_t fi;
+
+	for (fi = 0; fi < FMT_WORD_N; fi++)
+		if (e->dr.fmt_mask & (1u << fi)) {
+			const struct kof_parser *pr =
+				kof_parser_of((uint8_t)fi);
+
+			if (pr)
+				return pr;
+		}
+	return fallback;
+}
+
+/*
+ * What one region BIT is called, asked of every format the draft declares.
+ *
+ * A rule may target two - "KOF_FMT_ELF | KOF_FMT_PE" - and then a mask holds
+ * bits from both vocabularies. Asking one format spells its own bits and drops
+ * the rest, and a dropped bit is a range written narrower than the draft says.
+ */
+static const char *draft_region_word(const struct kof_editor *e,
+				     const struct kof_parser *fallback,
+				     uint32_t bit)
+{
+	uint32_t fi, q;
+
+	for (fi = 0; fi <= FMT_WORD_N; fi++) {
+		const struct kof_parser *pr;
+
+		if (fi == FMT_WORD_N)
+			pr = fallback;       /* last, and only then */
+		else if (!(e->dr.fmt_mask & (1u << fi)))
+			continue;
+		else
+			pr = kof_parser_of((uint8_t)fi);
+		if (!pr)
+			continue;
+		for (q = 0; q < pr->n_regions; q++)
+			if (pr->regions[q] == bit)
+				return pr->region_name(bit);
+	}
+	return NULL;
 }
 
 /*
@@ -2876,7 +3019,8 @@ void emit_call_as(FILE *f, struct kof_editor *e, uint32_t g, int force_multi)
 		fprintf(f, ")");
 		return;
 	}
-	rng_ident(e->obj[e->cur].fmt, grp_mask(e, g), nm, sizeof nm);
+	rng_ident(draft_fmt(e, e->obj[e->cur].fmt), grp_mask(e, g), nm,
+		  sizeof nm);
 	fprintf(f, "kof_find_str_%s(%s",
 		force_multi ? "multi" : grp_rule_word(q->rule), nm);
 	for (i = 0; i < e->dr.n_decl; i++)
@@ -3300,7 +3444,17 @@ int draft_from_source(struct kof_editor *e, const char *path)
 	struct sname str[MAX_DECL];
 	struct { char id[48]; uint32_t mask; } rng[8];
 	uint32_t n_str = 0, n_rng = 0, i;
-	const struct kof_parser *fmt = e->obj[e->cur].fmt;
+	/*
+	 * THE RULE'S OWN FORMAT, not the one the reader happens to be looking
+	 * at - see src_rule_fmt for what taking the object's cost.
+	 *
+	 * `obj_fmt` stays for the things that really are about the object:
+	 * where a marker was found in it, and what to call a region when the
+	 * rule named none.
+	 */
+	const struct kof_parser *obj_fmt = e->obj[e->cur].fmt;
+	uint32_t decl_fmt = 0;
+	const struct kof_parser *fmt;
 	/*
 	 * Which condition owns each brace depth, so a verdict lands on the one
 	 * whose body it is in.
@@ -3333,6 +3487,11 @@ int draft_from_source(struct kof_editor *e, const char *path)
 
 	if (!f)
 		return 0;
+	/* Before anything else is read, because every region name in the file
+	 * is read against it - see src_rule_fmt. */
+	fmt = src_rule_fmt(f, &decl_fmt);
+	if (!fmt)
+		fmt = obj_fmt;
 	pend[0] = 0;
 	head[0] = 0;
 	for (i = 0; i < sizeof owner / sizeof owner[0]; i++)
@@ -3493,7 +3652,7 @@ no_head:
 			const char *q = src_ident(p + 17, rng[n_rng].id,
 						  sizeof rng[0].id);
 
-			rng[n_rng].mask = src_mask_of(fmt, q);
+			rng[n_rng].mask = src_mask_decl(decl_fmt, obj_fmt, q);
 			n_rng++;
 			continue;
 		}
@@ -4601,7 +4760,7 @@ void generate(struct kof_editor *e, int as_new)
 				continue;
 			seen[n_seen++] = m;
 
-			rng_ident(ob->fmt, m, nm, sizeof nm);
+			rng_ident(draft_fmt(e, ob->fmt), m, nm, sizeof nm);
 			fprintf(f, "KOF_TARGET_RANGE(%s, ", nm);
 			/*
 			 * The symbol halves first, and by their own names.
@@ -4624,19 +4783,12 @@ void generate(struct kof_editor *e, int as_new)
 			}
 			if (!(m & KOF_SCAN_ALL))
 				for (b = 0; b < 30u; b++) {
-					const char *w = NULL;
+					const char *w;
 
 					if (!(m & (1u << b)))
 						continue;
-					if (ob->fmt)
-						for (q = 0;
-						     q < ob->fmt->n_regions;
-						     q++)
-							if (ob->fmt->regions[q]
-							    == (1u << b))
-								w = ob->fmt->
-								  region_name(
-								    1u << b);
+					w = draft_region_word(e, ob->fmt,
+							      1u << b);
 					if (!w)
 						continue;
 					fprintf(f, "%s%s",
