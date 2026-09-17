@@ -860,6 +860,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/scripts/markup_parse.c \
            libkofeng/kofparsers/scripts/php_parse.c \
            libkofeng/kofparsers/scripts/svrpage_parse.c \
+           libkofeng/kofparsers/scripts/cfm_parse.c \
            libkofeng/kofparsers/scripts/script_parse.c \
            libkofeng/kofparsers/scripts/script_norm.c \
            libkofeng/kofparsers/events/amsi_parse.c \

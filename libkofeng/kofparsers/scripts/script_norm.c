@@ -99,6 +99,7 @@ static const struct kof_lex lex_lua = {
 	.line_cmt = { "--", NULL, NULL },
 	.blk_open = "--[[", .blk_close = "]]",
 	.quotes = "\"'", .ml_open = { "[[", NULL, NULL },
+	.ml_close = { "]]", NULL, NULL },
 	.sq_escapes = 1, .stmt_end = 0,
 	.ws_significant = 0, .var_sigil = 0, .concat = 0
 };
@@ -325,19 +326,41 @@ static int ml_opens_at(const struct kof_lex *lx, const uint8_t *p, uint32_t n,
 			 (p[j] >= 'A' && p[j] <= 'Z') || p[j] == '_');
 }
 
+/*
+ * A MULTI-LINE CONSTRUCT THIS PASS CANNOT HANDLE - which is now a smaller set
+ * than "any of them".
+ *
+ * An opener with a CLOSER is handled: the literal is copied verbatim and the
+ * code around it is formed - see ml_close and ST_ML. An opener without one is a
+ * heredoc, whose end is a label the file chose, and there the whole extent is
+ * still refused.
+ */
 static int has_multiline(const struct kof_lex *lx, const uint8_t *p, uint32_t n)
 {
 	uint32_t i;
 	int k;
 
 	for (k = 0; k < 3; k++) {
-		if (!lx->ml_open[k])
+		if (!lx->ml_open[k] || lx->ml_close[k])
 			continue;
 		for (i = 0; i < n; i++)
 			if (ml_opens_at(lx, p, n, i, lx->ml_open[k]))
 				return 1;
 	}
 	return 0;
+}
+
+/* Which ml_open starts at `i`, or -1. Only the ones with a closer. */
+static int ml_at(const struct kof_lex *lx, const uint8_t *p, uint32_t n,
+		 uint32_t i)
+{
+	int k;
+
+	for (k = 0; k < 3; k++)
+		if (lx->ml_open[k] && lx->ml_close[k] &&
+		    at_text(p, n, i, lx->ml_open[k]))
+			return k;
+	return -1;
 }
 
 /*
@@ -370,14 +393,19 @@ static int glues(const struct kof_lex *lx, uint8_t a, uint8_t b)
 	return 0;
 }
 
-enum { ST_OUT = 0, ST_SQ, ST_DQ, ST_BLK };
+/*
+ * ST_ML is a multi-line literal being copied verbatim - see ml_close. It is the
+ * only state whose bytes are neither formed nor dropped: inside one, an indent
+ * is data, a blank line is data and a comment opener is data.
+ */
+enum { ST_OUT = 0, ST_SQ, ST_DQ, ST_BLK, ST_ML };
 
 uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 			 uint32_t n, uint8_t *out, uint32_t cap,
 			 uint32_t what)
 {
 	uint32_t i = 0, w = 0;
-	int st = ST_OUT;
+	int st = ST_OUT, ml_k = 0;      /* which ml_open is open - see ST_ML */
 	/*
 	 * DID THE LINE JUST EMITTED END INSIDE A LINE COMMENT - which the brace
 	 * rule below has to know and did not. See the note there.
@@ -473,6 +501,41 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 		 * Nothing on it is code, so it is dropped with the comment
 		 * lines - and the close is looked for as the line is walked.
 		 */
+		/*
+		 * A MULTI-LINE LITERAL THAT IS STILL OPEN OWNS THE LINE, and
+		 * every byte of it is copied exactly - including the newline
+		 * that ends the line, which is part of the string.
+		 */
+		if (st == ST_ML) {
+			uint32_t j = ls;
+
+			while (j < le) {
+				if (at_text(in, n, j, lx->ml_close[ml_k])) {
+					uint32_t t = text_len(lx->ml_close[ml_k]);
+
+					while (t--)
+						out[w++] = in[j++];
+					st = ST_OUT;
+					break;
+				}
+				out[w++] = in[j++];
+			}
+			if (st == ST_ML) {
+				/* Still open: the newline is the literal's. */
+				if (le < n)
+					out[w++] = in[le];
+				i = le < n ? le + 1u : le;
+				continue;
+			}
+			ls = j;
+			if (ls >= le) {
+				if (le < n)
+					out[w++] = '\n';
+				i = le < n ? le + 1u : le;
+				continue;
+			}
+		}
+
 		if (st == ST_BLK) {
 			uint32_t j = ls;
 
@@ -620,6 +683,27 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 						tail = 1;
 						break;
 					}
+					{
+						int k = ml_at(lx, in, n, j);
+
+						/*
+						 * COPIED FROM THE OPENER ON,
+						 * because the opener is part of
+						 * the literal and because what
+						 * follows it may be anything at
+						 * all.
+						 */
+						if (k >= 0) {
+							uint32_t t = text_len(
+								lx->ml_open[k]);
+
+							ml_k = k;
+							st = ST_ML;
+							while (t--)
+								out[w++] = in[j++];
+							continue;
+						}
+					}
 					if (lx->quotes &&
 					    strchr(lx->quotes, (int)c)) {
 						st = c == '\'' ? ST_SQ : ST_DQ;
@@ -666,6 +750,20 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 						c = ' ';
 					out[w++] = c;
 					j++;
+					continue;
+				}
+				if (st == ST_ML) {
+					if (at_text(in, n, j,
+						    lx->ml_close[ml_k])) {
+						uint32_t t = text_len(
+							lx->ml_close[ml_k]);
+
+						while (t--)
+							out[w++] = in[j++];
+						st = ST_OUT;
+					} else {
+						out[w++] = in[j++];
+					}
 					continue;
 				}
 				if (st == ST_BLK) {

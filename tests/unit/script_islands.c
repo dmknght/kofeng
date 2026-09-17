@@ -789,6 +789,94 @@ int main(void)
 	}
 
 	/*
+	 * COLDFUSION, WHOSE TAGS ARE ITS STATEMENTS.
+	 *
+	 * There are no delimiters to carve: a .cfm is html and the program is
+	 * the "<cf...>" tags in it, arguments and all. The parse used to find
+	 * one tag, call it a three byte header and stop - so the whole page,
+	 * html included, came back as BODY and a rule scoped to the code
+	 * searched the text as well. Measured over the four shells in the
+	 * sample tree: 60 tags, 21 "#...#" interpolations, not one <cfscript>.
+	 */
+	{
+		static const char cfm[] =
+			"<html>\n<body>\n"
+			"<cfif isdefined(\"form.cmd\")>\n"
+			"<cfexecute name=\"cmd.exe\" arguments=\"/c #form.cmd#\">\n"
+			"</cfexecute>\n</cfif>\n"
+			"</body>\n</html>\n";
+		struct kof_script_info info;
+		struct kof_obj_ctx ctx;
+		kof_buf f;
+
+		memset(&ctx, 0, sizeof ctx);
+		f.p = (const uint8_t *)cfm;
+		f.n = strlen(cfm);
+		if (!kof_script_sniff(f) || !kof_script_parse(f, &info, &ctx)) {
+			fail("coldfusion", "not taken as a script");
+		} else {
+			if (info.kind != KOF_SCRIPT_CFM)
+				fail("coldfusion", "not recognised as CFML");
+			if (info.head_len)
+				fail("coldfusion", "a <cf> tag is a statement, "
+				     "not a header");
+			if (!info.n_island) {
+				fail("coldfusion",
+				     "the tags were not carved as code");
+			} else {
+				const char *p = cfm + info.island[0].off;
+				uint32_t l = info.island[0].len;
+
+				/* The html above the first tag is markup, and
+				 * the tags themselves are one run of code:
+				 * two adjacent ones are joined, which is what
+				 * the whitespace join is for. */
+				if (info.island[0].off != 14u)
+					fail("coldfusion", "the code does not "
+					     "start at the first tag");
+				if (!l || l > 96u ||
+				    !memmem(p, l, "cfexecute", 9u))
+					fail("coldfusion", "the statement that "
+					     "runs a command is not in the "
+					     "code region");
+			}
+		}
+		check_partition("coldfusion", cfm);
+		check_per_bit("coldfusion per bit", cfm);
+	}
+
+	/*
+	 * AND AN ATTRIBUTE MAY HOLD A ">", which is the shape a shell in a page
+	 * has - "arguments=\"/c dir > out.txt\"". A walk that stopped at the
+	 * first ">" would cut the tag in half and leave the command in markup.
+	 */
+	{
+		static const char redirect[] =
+			"<html>\n"
+			"<cfexecute name=\"cmd\" arguments=\"/c dir > o.txt\">\n"
+			"</cfexecute>\n</html>\n";
+		struct kof_script_info info;
+		struct kof_obj_ctx ctx;
+		kof_buf f;
+
+		memset(&ctx, 0, sizeof ctx);
+		f.p = (const uint8_t *)redirect;
+		f.n = strlen(redirect);
+		if (kof_script_sniff(f) && kof_script_parse(f, &info, &ctx) &&
+		    info.n_island) {
+			const char *p = redirect + info.island[0].off;
+			uint32_t l = info.island[0].len;
+
+			if (l < 40u || !memchr(p, '>', l) ||
+			    memcmp(p + l - 1u, ">", 1u))
+				fail("coldfusion redirect",
+				     "the tag was cut at a \">\" inside an "
+				     "attribute");
+		}
+		check_partition("coldfusion redirect", redirect);
+	}
+
+	/*
 	 * AND THE OTHER HALF HAS TO BE THERE. "<%" is two bytes of punctuation
 	 * that occur in prose - measured, it claimed 208 .pm and 76 .pod files
 	 * on one machine, because POD writes a hash as C<%name>. What none of
@@ -809,7 +897,7 @@ int main(void)
 		return 1;
 	}
 	printf("script islands: partition, directive block, comment, "
-	       "bare tag, short tag, blocks kept, emptied blocks, "
-	       "closing half - ok\n");
+	       "bare tag, short tag, coldfusion, blocks kept, emptied "
+	       "blocks, closing half - ok\n");
 	return 0;
 }

@@ -394,17 +394,36 @@ int main(void)
 	   "local s='cmd'\nos.execute(s)\n", KOF_NORM_ALL,
 	   "lua: comment out, spacing closed");
 	/*
-	 * AND LUA'S LONG BRACKET IS REFUSED RATHER THAN FORMED - see lex_lua.
-	 * "[[" opens a multi-line STRING, the pass has no handling for one, and
-	 * closing up the spacing inside a literal is the corruption this whole
-	 * pass is forbidden to commit. The block comment shares the bracket, so
-	 * it refuses too: a file that is not formed, never a literal that no
-	 * longer matches.
+	 * AND LUA'S LONG BRACKET IS COPIED, NOT FORMED - see ml_close.
+	 *
+	 * "[[ ... ]]" is a multi-line STRING: its indent is data, its spacing is
+	 * data, and a "--" inside it is data. The pass copies it byte for byte
+	 * and goes on forming the code around it. It used to refuse the whole
+	 * file rather than risk touching it, which was safe and cost every Lua
+	 * file with a long bracket in it - block comments included, since they
+	 * share the bracket.
 	 */
-	refused(KOF_SCRIPT_LUA, "local t = [[ a long string ]]\n",
-		"lua: a long string is not formed");
-	refused(KOF_SCRIPT_LUA, "--[[ a block note ]]\nlocal s = 1\n",
-		"lua: a block comment shares the long bracket");
+	eq(KOF_SCRIPT_LUA, "local t = [[ a long string ]]\n",
+	   "local t=[[ a long string ]]\n", KOF_NORM_ALL,
+	   "lua: the literal keeps its spaces, the assignment loses its");
+	eq(KOF_SCRIPT_LUA,
+	   "local a = 1\nlocal s = [[\n  keep   this\n]]\nos.execute( s )\n",
+	   "local a=1\nlocal s=[[\n  keep   this\n]]\nos.execute(s)\n",
+	   KOF_NORM_ALL,
+	   "lua: a literal spanning lines is copied whole");
+	eq(KOF_SCRIPT_LUA, "local s = [[ -- not a comment ]]\nlocal y = 2\n",
+	   "local s=[[ -- not a comment ]]\nlocal y=2\n", KOF_NORM_ALL,
+	   "lua: a comment opener inside a literal is data");
+	eq(KOF_SCRIPT_LUA, "--[[ a block note ]]\nlocal s = 1\n",
+	   "local s=1\n", KOF_NORM_ALL,
+	   "lua: the block comment goes, the code stays");
+	/*
+	 * AND A HEREDOC STILL REFUSES THE WHOLE EXTENT, because its end is a
+	 * LABEL the file chose rather than a token this table can name - see
+	 * has_multiline, which now refuses only the openers with no closer.
+	 */
+	refused(KOF_SCRIPT_SHELL, "cat <<EOF\n  keep me\nEOF\nls -la\n",
+		"sh: a heredoc has no closer to look for");
 
 	if (fails) {
 		printf("script norm: %d check(s) failed\n", fails);

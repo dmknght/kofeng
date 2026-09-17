@@ -19,6 +19,7 @@
 #include "php_parse.h"
 #include "svrpage_parse.h"
 #include "markup_parse.h"
+#include "cfm_parse.h"
 
 const uint32_t kof_script_region_bits[] = {
 	KOF_SCAN_SCRIPT_HEADER, KOF_SCAN_SCRIPT_BODY, KOF_SCAN_SCRIPT_MARKUP
@@ -272,12 +273,12 @@ static int looks_like_text(kof_buf f, uint64_t n)
  * a correct answer there. The family is what decides how the file is CARVED, so
  * carving on the kind would have left exactly those pages unsplit.
  */
-enum { FAM_NONE = 0, FAM_PHP, FAM_SVR };
+enum { FAM_NONE = 0, FAM_PHP, FAM_SVR, FAM_CFM };
 
 static uint64_t find_tag(kof_buf f, uint64_t look, uint8_t *kind,
 			 uint32_t *taglen, uint32_t *headlen, int *fam)
 {
-	uint64_t php, svr, i;
+	uint64_t php, svr;
 	uint32_t pl = 0, sl = 0, sh = 0;
 
 	*fam = FAM_NONE;
@@ -307,21 +308,25 @@ static uint64_t find_tag(kof_buf f, uint64_t look, uint8_t *kind,
 		return svr;
 	}
 
-	/* ColdFusion: every tag is "<cf" and nothing else opens with it, so
-	 * unlike "<%" one marker is the whole answer. No islands - the code is
-	 * in attributes as often as between tags, and carving that has not been
-	 * measured. */
-	for (i = 0; i + 2u <= look; i++) {
-		if (f.p[i] != '<')
-			continue;
-		if (kof_txt_tag_at(f, i, "<cfoutput", 9u) ||
-		    kof_txt_tag_at(f, i, "<cfexecute", 10u) ||
-		    kof_txt_tag_at(f, i, "<cfset", 6u) ||
-		    kof_txt_tag_at(f, i, "<cfquery", 8u) ||
-		    kof_txt_tag_at(f, i, "<cfscript", 9u) ||
-		    kof_txt_tag_at(f, i, "<cfparam", 8u)) {
-			*kind = KOF_SCRIPT_CFM; *taglen = 3u;
-			*headlen = 3u; return i;
+	/*
+	 * COLDFUSION, whose tags ARE its statements - see cfm_parse.h.
+	 *
+	 * This used to name six tags by hand and report three bytes, which is
+	 * neither the tag nor a header: "<cf" is the opening of a statement, so
+	 * there is nothing to call a header and the tag is the whole of what
+	 * named the language. The list is gone too - any "<cf" followed by a
+	 * name is one of the language's tags, and the six that were written out
+	 * were the six somebody happened to think of.
+	 */
+	{
+		uint32_t cl = 0;
+		uint64_t cf = kof_cfm_find_tag(f, look, &cl);
+
+		if (cf != (uint64_t)-1) {
+			*kind = KOF_SCRIPT_CFM;
+			*taglen = cl;
+			*fam = FAM_CFM;
+			return cf;
 		}
 	}
 	/*
@@ -543,6 +548,8 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 								info);
 				} else if (fam == FAM_SVR) {
 					kof_svr_islands(file, from, info);
+				} else if (fam == FAM_CFM) {
+					kof_cfm_islands(file, from, info);
 				}
 				/*
 				 * AND ONE HTML ELEMENT THAT WRAPS CODE IS ONE
@@ -567,7 +574,21 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 				 * So: absorb the fragments, then join what
 				 * survives.
 				 */
-				kof_markup_merge(file, from, info);
+				/*
+				 * AND NOT FOR COLDFUSION, where a one-line
+				 * island is not presentation.
+				 *
+				 * The element walk absorbs an island that sits
+				 * on a single line of html, because in a
+				 * server page that island is "<?= $row ?>" -
+				 * a value being printed. Every CFML statement
+				 * is a one-line tag inside html, so the same
+				 * rule would absorb <cfexecute> into the
+				 * <form> around it and leave the page with no
+				 * code at all.
+				 */
+				if (fam != FAM_CFM)
+					kof_markup_merge(file, from, info);
 				kof_isl_join_ws(file, from, info);
 			}
 		}

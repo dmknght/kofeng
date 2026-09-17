@@ -58,6 +58,20 @@ struct kof_lex {
 	 * to the wrong thing is worse than one that does not normalise.
 	 */
 	const char *ml_open[3];
+	/*
+	 * WHAT CLOSES ml_open[k], WHERE THE LANGUAGE HAS A CLOSER.
+	 *
+	 * NULL is the heredoc shape: "<<EOF" is closed by a LABEL the file
+	 * chooses, so there is no token to look for and the pass refuses the
+	 * whole extent rather than guess - see has_multiline.
+	 *
+	 * A token here is the other shape: Lua's "[[ ... ]]" and python's
+	 * triple quote both name their own end, so the pass can copy the
+	 * literal VERBATIM and keep working on the code around it. That is the
+	 * difference between a file that is not formed at all and one where
+	 * only the literal is left alone, which is what a literal wants anyway.
+	 */
+	const char *ml_close[3];
 	/* Does a backslash escape inside '...' - sh: no, php: only \' and \\,
 	 * js and python: yes. Only whether the NEXT byte is skipped. */
 	uint8_t     sq_escapes;
