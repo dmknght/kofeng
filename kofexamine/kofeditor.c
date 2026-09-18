@@ -2404,10 +2404,35 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 			       : "Custom variant needs a name";
 	if (!e->dr.fmt_mask)
 		return "Name at least one target format";
-	if (!e->dr.n_decl)
+	/*
+	 * A RULE MADE OF BLOCKS DECLARES NO STRINGS, and is not unfinished for
+	 * it.
+	 *
+	 * The two are the same kind of thing - something the rule is written
+	 * from - so the demand is that there be one of EITHER, not that there
+	 * be a string. A draft with a block matcher and no markers is a
+	 * similarity rule, which is a whole rule.
+	 */
+	if (!e->dr.n_decl && !draft_uses_blocks(e))
 		return "Declare a string";
 	if (!e->dr.n_grp)
 		return "Add a matcher";
+	/*
+	 * A DECLARED BLOCK NOTHING NAMES, which is the same fault as an unused
+	 * marker and is refused for the same reason.
+	 *
+	 * Ticking a block declares it; a matcher is what asks a question about
+	 * it. A draft holding one and not the other is a rule whose author
+	 * chose something and then did not say what it was for - and the block
+	 * would be written into the file and never read.
+	 */
+	{
+		uint32_t b;
+
+		for (b = 0; b < e->dr.n_blk; b++)
+			if (blk_usable(e, b) && grp_of_block(e, b) >= MAX_GROUP)
+				return "A ticked block has no matcher";
+	}
 	/*
 	 * TWO MATCHERS THAT ASK THE SAME THING, INCLUDING THE THRESHOLD.
 	 *
@@ -2432,13 +2457,20 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 	for (i = 0; i < e->dr.n_grp; i++) {
 		uint32_t j;
 
+		/* A block matcher holds no markers, so the question "do these
+		 * two search for the same thing" is not about it - what it
+		 * cannot be is two matchers over one block, which the menu
+		 * already refuses at the point of choosing. */
+		if (e->dr.grp[i].kind == GRP_KIND_BLOCK)
+			continue;
 		for (j = i + 1u; j < e->dr.n_grp; j++)
-			if (grp_same_call(e, i, j))
+			if (e->dr.grp[j].kind != GRP_KIND_BLOCK &&
+			    grp_same_call(e, i, j))
 				return "Two matchers ask the same thing - "
 				       "remove one or change a threshold";
 	}
 	for (i = 0; i < e->dr.n_grp; i++)
-		if (!grp_count(e, i))
+		if (e->dr.grp[i].kind != GRP_KIND_BLOCK && !grp_count(e, i))
 			return "Every matcher needs a string";
 	/*
 	 * AND AN AT MATCHER NEEDS EXACTLY ONE.
@@ -3065,9 +3097,116 @@ void emit_call_multi(FILE *f, struct kof_editor *e, uint32_t g)
 	emit_call_as(f, e, g, 1);
 }
 
+/*
+ * IS THIS BLOCK ONE A RULE CAN BE WRITTEN FROM.
+ *
+ * Two facts, and both have to hold: the author TICKED it, and it yields enough
+ * hashes to be scored at all. The menu that offers blocks to a matcher, the
+ * check that refuses a ticked block nothing uses, the emitter and the panel all
+ * ask it - and asked it in five places with the test written out each time,
+ * which is five chances for one of them to drift from the others.
+ */
+int blk_usable(const struct kof_editor *e, uint32_t i)
+{
+	return i < e->dr.n_blk && e->dr.blk[i].picked &&
+	       e->dr.blk[i].n_hash >= KOF_PLAGUE_MIN_HASH;
+}
+
+/*
+ * Does this block clear what the rule demands of it.
+ *
+ * The demand is on the MATCHER that names the block, not on the block - a block
+ * is a run of bytes and has no opinion about how much of it is enough. A block
+ * no matcher names has no demand to clear.
+ */
+int blk_clears(const struct kof_editor *e, uint32_t i)
+{
+	uint32_t g = grp_of_block(e, i);
+
+	return g < MAX_GROUP && i < e->dr.n_blk &&
+	       e->dr.blk[i].score >= e->dr.grp[g].pct;
+}
+
+/*
+ * A BLOCK MOVED, SO WHATEVER NAMES IT MOVES WITH IT.
+ *
+ * A matcher holds the block's INDEX, and the list is rebuilt whenever the
+ * object changes: unticked blocks dropped, ticked ones compacted to the front,
+ * the whole thing sorted into file order. Each of those moves a block to a
+ * different index, and a matcher left pointing at the old one is a matcher
+ * about a different block, or about nothing.
+ *
+ * Called with the OLD index and the new one, before the record is copied, so a
+ * matcher is updated exactly once per move.
+ */
+void blk_moved(struct kof_editor *e, uint32_t from, uint32_t to)
+{
+	uint32_t g;
+
+	if (from == to)
+		return;
+	for (g = 0; g < e->dr.n_grp; g++)
+		if (e->dr.grp[g].kind == GRP_KIND_BLOCK &&
+		    e->dr.grp[g].blk == from)
+			e->dr.grp[g].blk = to;
+}
+
+/*
+ * Which matcher names this block, or MAX_GROUP when none does.
+ *
+ * The question three things ask: the menu that offers a block to a new matcher
+ * and must not offer one twice, the check that refuses a draft holding a
+ * declared block nothing uses, and the table that shows what each block is
+ * measured against.
+ */
+uint32_t grp_of_block(const struct kof_editor *e, uint32_t blk)
+{
+	uint32_t g;
+
+	for (g = 0; g < e->dr.n_grp; g++)
+		if (e->dr.grp[g].kind == GRP_KIND_BLOCK &&
+		    e->dr.grp[g].blk == blk)
+			return g;
+	return MAX_GROUP;
+}
+
+/*
+ * Does this draft name a similarity block at all.
+ *
+ * Asked by three things that must agree: where the rule is written, what it
+ * includes, and whether the block declarations are emitted. A block nobody
+ * named is not used - the tick declares it, the matcher uses it, and
+ * draft_missing_of refuses a draft where the two disagree.
+ */
+int draft_uses_blocks(const struct kof_editor *e)
+{
+	uint32_t g;
+
+	for (g = 0; g < e->dr.n_grp; g++)
+		if (e->dr.grp[g].kind == GRP_KIND_BLOCK &&
+		    e->dr.grp[g].blk < e->dr.n_blk)
+			return 1;
+	return 0;
+}
+
 void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g)
 {
 	const struct group *q = &e->dr.grp[g];
+
+	/*
+	 * A BLOCK MATCHER IS ONE COMPARISON AND NOTHING ELSE.
+	 *
+	 * kof_plague_score is a division over counters the prepass already
+	 * filled, so there is no call to share and no count to compare - see
+	 * struct group.kind. The percentage is the matcher's; the block only
+	 * says which counter.
+	 */
+	if (q->kind == GRP_KIND_BLOCK) {
+		if (q->blk < e->dr.n_blk)
+			fprintf(f, "kof_plague_score(blk_%08x) >= %uu",
+				e->dr.blk[q->blk].id, q->pct);
+		return;
+	}
 
 	/* The call happened once, above; this is only the comparison - and any
 	 * and all become comparisons here too, which is what they are. */
@@ -4473,9 +4612,22 @@ void generate(struct kof_editor *e, int as_new)
 				"with --bases <dir>");
 			return;
 		}
-		snprintf(dir, sizeof dir, "%s/signatures", e->basedir);
-		if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
-			snprintf(dir, sizeof dir, "%s", e->basedir);
+		/*
+		 * A RULE THAT USES A SIMILARITY BLOCK LIVES IN bases/plague.
+		 *
+		 * The packer names its database after the distinction and the
+		 * source tree makes it too - a block rule is a different kind
+		 * of content whatever else it also carries, so one block is
+		 * enough to decide. A rule with none goes where rules have
+		 * always gone.
+		 */
+		if (draft_uses_blocks(e)) {
+			snprintf(dir, sizeof dir, "%s/plague", e->basedir);
+		} else {
+			snprintf(dir, sizeof dir, "%s/signatures", e->basedir);
+			if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
+				snprintf(dir, sizeof dir, "%s", e->basedir);
+		}
 		if (kof_mkdir(dir, 0777) != 0 && errno != EEXIST) {
 			say_err(e, "Cannot create %.90s", dir);
 			return;
@@ -4659,7 +4811,10 @@ void generate(struct kof_editor *e, int as_new)
 			fputc((*q == '*' && q[1] == '/') ? ' ' : *q, f);
 		fprintf(f, "\n */\n");
 	}
-	fprintf(f, "\n#include <kofmod/kofsig.h>\n\n");
+	fprintf(f, "\n#include <kofmod/kofsig.h>\n");
+	if (draft_uses_blocks(e))
+		fprintf(f, "#include <kofmod/kofplague.h>\n");
+	fprintf(f, "\n");
 
 	/* The format the object actually is, so the host can rule the module
 	 * out without entering it - and so the regions above mean something. */
@@ -4856,6 +5011,49 @@ void generate(struct kof_editor *e, int as_new)
 					? "KOF_WORD_FULLWORD"
 					: "KOF_WORD_SUBSTRING");
 		}
+	}
+
+	/*
+	 * AND THE SIMILARITY BLOCKS, after the markers and for the same reason
+	 * they are here at all: a declaration is what the rule is written FROM,
+	 * and the body below names them.
+	 *
+	 * Only the blocks a matcher actually names. A ticked block nothing uses
+	 * is a draft that is not finished - draft_missing_of says so, and the
+	 * button is grey until it is - so one cannot reach here; emitting only
+	 * the used ones is what keeps that true rather than assumed.
+	 *
+	 * Each carries where it was cut from as a comment, which is the one
+	 * thing a reader cannot recover from the numbers.
+	 */
+	{
+		uint32_t g, w, wrote = 0;
+
+		for (g = 0; g < e->dr.n_grp; g++) {
+			const struct group *q = &e->dr.grp[g];
+			const struct plg_block *b;
+
+			if (q->kind != GRP_KIND_BLOCK || q->blk >= e->dr.n_blk)
+				continue;
+			b = &e->dr.blk[q->blk];
+			fprintf(f, "\n/* +0x%llx, %llu bytes, %u hash(es) */\n",
+				(unsigned long long)b->off,
+				(unsigned long long)b->len, b->n_hash);
+			fprintf(f, "KOF_PLAGUE_BLOCK(blk_%08x, %s, "
+				"KOF_PLAGUE_%s,\n", b->id,
+				b->anywhere ? "KOF_SCAN_ALL"
+				: b->rgn_enum[0] ? b->rgn_enum : "KOF_SCAN_ALL",
+				b->norm == KOF_PLAGUE_XOR ? "XOR"
+				: b->norm == KOF_PLAGUE_SUB ? "SUB" : "RAW");
+			for (w = 0; w < b->n_hash; w++)
+				fprintf(f, "%s0x%08xu%s", w % 4u ? " " : "\t",
+					b->hash[w],
+					w + 1u == b->n_hash ? ");\n"
+					: w % 4u == 3u ? ",\n" : ",");
+			wrote = 1;
+		}
+		if (wrote)
+			fprintf(f, "\n");
 	}
 
 	/* Spelled out rather than through KOF_DEFINE_SCAN. The macro expands to
@@ -5178,7 +5376,7 @@ int body_modelled(const char *line)
 /* ---- similarity rules ------------------------------------------------------ */
 
 /*
- * plague_from_source - the counterpart of generate_plague.
+ * plague_from_source - a plague rule read back out of its source.
  *
  * Line-based, exactly as draft_from_source is, and for the same reason: the
  * file is C and the thing being read out of it is a handful of macros, so a
@@ -5187,10 +5385,10 @@ int body_modelled(const char *line)
  * it ignores, which is what lets a rule carry hand-written code beside its
  * blocks - see the note in kofplague.h about an anchor written by hand.
  *
- * The block's NAME carries its identity: generate_plague writes blk_<the fold
- * of its hashes>, so the name and the hashes say the same thing and the panel
- * can show the value without recomputing it. The hashes are read anyway,
- * because they are what the rule actually matches with.
+ * The block's NAME carries its identity: generate() writes blk_<the fold of
+ * its hashes>, so the name and the hashes say the same thing and the panel can
+ * show the value without recomputing it. The hashes are read anyway, because
+ * they are what the rule actually matches with.
  */
 static int plg_src_norm(const char *line)
 {
@@ -5203,7 +5401,8 @@ static int plg_src_norm(const char *line)
 
 int plague_from_source(struct kof_editor *e, const char *path,
 		       struct kof_plague_decl *blk, uint32_t max_blk,
-		       uint32_t *n_blk, uint32_t *pool, uint32_t pool_max)
+		       uint32_t *n_blk, uint32_t *pool, uint32_t pool_max,
+		       struct kof_verdict_decl *verdict)
 {
 	FILE *f;
 	char line[1024];
@@ -5211,9 +5410,11 @@ int plague_from_source(struct kof_editor *e, const char *path,
 	uint32_t n = 0, np = 0, i;
 	int in_block = -1;
 
-	if (!e || !path || !blk || !n_blk || !pool)
+	if (!e || !path || !blk || !n_blk || !pool || !verdict)
 		return 0;
 	*n_blk = 0;
+	memset(verdict, 0, sizeof *verdict);
+	verdict->level = LV_INFECT;
 	f = fopen(path, "r");
 	if (!f)
 		return 0;
@@ -5298,6 +5499,27 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		 * and the operator BEFORE a term is how it attaches to the one
 		 * above - the same ownership the panel draws.
 		 */
+		/*
+		 * WHAT THE RULE REPORTS, taken from the line that reports it.
+		 *
+		 * The three shapes emit_verdict writes, read back as the three
+		 * it writes them from - see struct kof_verdict_decl.
+		 */
+		if ((p = strstr(line, "KOF_SCAN_INFECT(")) != NULL ||
+		    (p = strstr(line, "KOF_SCAN_SUSPECT(")) != NULL) {
+			verdict->level = strstr(line, "SUSPECT") ? LV_SUSPECT
+								 : LV_INFECT;
+			if (strstr(p, "KOF_MALVAR_GENERIC"))
+				verdict->kind = 1;
+			else if (strstr(p, "KOF_MALVAR_AUTO"))
+				verdict->kind = 0;
+			else {
+				verdict->kind = 2;
+				src_quoted(p, verdict->text,
+					   sizeof verdict->text);
+			}
+			continue;
+		}
 		if ((p = strstr(line, "kof_plague_score(")) != NULL) {
 			char w[48];
 			const char *ge = strstr(p, ">=");
@@ -5316,7 +5538,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		}
 	}
 	fclose(f);
-	/* A block whose hashes did not survive the pool is not a block - see
+		/* A block whose hashes did not survive the pool is not a block - see
 	 * the header. */
 	for (i = 0; i < n; i++)
 		if (blk[i].n_hash < KOF_PLAGUE_MIN_HASH) {
@@ -5325,194 +5547,4 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		}
 	*n_blk = n;
 	return n != 0;
-}
-
-int generate_plague(struct kof_editor *e,
-		    const struct kof_plague_decl *blk, uint32_t n_blk,
-		    const char *from_path)
-{
-	char safe[80], fname[80], dir[300], path[400];
-	struct stat st;
-	FILE *f;
-	uint32_t i, j = 0;
-
-	if (!e || !blk || !n_blk)
-		return 0;
-
-	/*
-	 * The family, cleaned the way generate() cleans it and for the same
-	 * reasons: it becomes a filename and a C identifier, while the verdict
-	 * KOF_TARGET_NAME writes keeps the spelling the author gave it.
-	 */
-	for (i = 0; e->dr.family[i] && j + 1u < sizeof safe; i++) {
-		char c = e->dr.family[i];
-
-		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-		    (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-')
-			safe[j++] = c;
-	}
-	safe[j] = 0;
-	if (!j) {
-		say_err(e, "%s", "Name the family first");
-		return 0;
-	}
-	for (i = 0; safe[i]; i++)
-		fname[i] = (char)tolower((unsigned char)safe[i]);
-	fname[i] = 0;
-
-	if (!e->basedir || !e->basedir[0]) {
-		say_err(e, "%s", "No signature tree given - start with "
-			"--bases <dir>");
-		return 0;
-	}
-	/*
-	 * bases/plague, beside signatures/ and decomp/ - a similarity rule is
-	 * its own kind of content and the packer names its database after the
-	 * distinction, so the source tree makes it too.
-	 */
-	snprintf(dir, sizeof dir, "%s/plague", e->basedir);
-	if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
-		if (kof_mkdir(dir, 0777) != 0 && errno != EEXIST) {
-			say_err(e, "Cannot create %.90s", dir);
-			return 0;
-		}
-	}
-	/*
-	 * THE FILE THIS RULE CAME FROM, or the first number nothing is using.
-	 *
-	 * The same rule generate() has, for the same two reasons. Writing
-	 * "<family>_00.c" every time did BOTH halves of it wrong: a second rule
-	 * for a family silently overwrote the first, and a rule opened from a
-	 * file in order to change it - which is what opening an infected sample
-	 * now does - was written back beside itself rather than onto itself,
-	 * unless the family happened to still be spelled the same.
-	 *
-	 * Only a path inside this tree is written back to; anything else is a
-	 * file this session did not create.
-	 */
-	e->dr.gen_ok = 0;
-	if (e->dr.gen_path[0] &&
-	    !strncmp(e->dr.gen_path, dir, strlen(dir))) {
-		snprintf(path, sizeof path, "%.*s", (int)sizeof path - 1,
-			 e->dr.gen_path);
-	} else {
-		static const unsigned wide[] = { 2u, 4u, 5u };
-		unsigned lim[] = { 100u, 10000u, 100000u };
-		size_t w;
-		int free_one = 0;
-
-		for (w = 0; w < sizeof wide / sizeof wide[0] && !free_one; w++) {
-			unsigned q;
-
-			for (q = 0; q < lim[w]; q++) {
-				struct stat es;
-
-				snprintf(path, sizeof path, "%s/%s_%0*u.c",
-					 dir, fname, (int)wide[w], q);
-				if (stat(path, &es) != 0) {
-					free_one = 1;
-					break;
-				}
-			}
-		}
-		if (!free_one) {
-			say_err(e, "%.40s has no free number left", fname);
-			return 0;
-		}
-	}
-
-	f = fopen(path, "w");
-	if (!f) {
-		say_err(e, "Cannot write %.90s", path);
-		return 0;
-	}
-
-	fprintf(f, "/*\n * %s - a similarity rule.\n *\n"
-		   " * Generated from %s. The blocks were carved by the engine\n"
-		   " * and chosen by hand; the thresholds are the author's, set\n"
-		   " * against what each block scored on that sample.\n */\n\n",
-		safe, from_path ? from_path : "an object");
-	fprintf(f, "#include <kofmod/kofsig.h>\n#include <kofmod/kofplague.h>\n\n");
-
-	/* The draft's own format mask, spelled as generate() spells it - one
-	 * declaration, the names ORed. */
-	{
-		uint32_t m = e->dr.fmt_mask;
-		int fi, first = 1;
-
-		fprintf(f, "KOF_TARGET_FORMAT(");
-		for (fi = 0; fi < (int)FMT_WORD_N; fi++) {
-			if (!(m & (1u << fi)))
-				continue;
-			fprintf(f, "%s%s", first ? "" : " | ",
-				fmt_word((uint32_t)fi));
-			first = 0;
-		}
-		if (first)
-			fprintf(f, "KOF_FMT_ANY");
-		fprintf(f, ");\n");
-	}
-	fprintf(f, "KOF_TARGET_NAME(%s, \"%s\");\n\n",
-		kof_maltype_ident(e->dr.maltype), safe);
-
-	for (i = 0; i < n_blk; i++) {
-		const struct kof_plague_decl *b = &blk[i];
-		uint32_t k;
-
-		if (!b->hash || b->n_hash < KOF_PLAGUE_MIN_HASH)
-			continue;
-		fprintf(f, "/* +0x%llx, %llu bytes, %u hash(es) */\n",
-			(unsigned long long)b->off,
-			(unsigned long long)b->len, b->n_hash);
-		fprintf(f, "KOF_PLAGUE_BLOCK(blk_%08x, %s, KOF_PLAGUE_%s,\n",
-			b->id, b->region && b->region[0] ? b->region
-							 : "KOF_SCAN_ALL",
-			b->norm == KOF_PLAGUE_XOR ? "XOR" :
-			b->norm == KOF_PLAGUE_SUB ? "SUB" : "RAW");
-		for (k = 0; k < b->n_hash; k++)
-			fprintf(f, "%s0x%08xu%s", k % 4 ? " " : "\t",
-				b->hash[k],
-				k + 1u == b->n_hash ? ");\n" :
-				(k % 4 == 3 ? ",\n" : ","));
-		fputc('\n', f);
-	}
-
-	fprintf(f, "void kof_scan(const struct kof_obj_ctx *ctx)\n{\n\tif (");
-	for (i = 0, j = 0; i < n_blk; i++) {
-		const struct kof_plague_decl *b = &blk[i];
-
-		if (!b->hash || b->n_hash < KOF_PLAGUE_MIN_HASH)
-			continue;
-		/*
-		 * AND OR OR, AS THE AUTHOR JOINED THEM.
-		 *
-		 * Every block ANDed was the only thing this could write, which
-		 * made one of the two useful shapes unreachable: blocks that
-		 * are alternatives - a payload that appears in either of two
-		 * forms - are an OR, and writing them as an AND produces a rule
-		 * that fires on neither. C's precedence binds && tighter than
-		 * ||, which is the reading the panel shows: a run of ANDed
-		 * blocks is one alternative.
-		 */
-		fprintf(f, "%skof_plague_score(blk_%08x) >= %uu",
-			!j ? "" : b->join ? " &&\n\t    " : " ||\n\t    ",
-			b->id, b->thr);
-		j++;
-	}
-	fprintf(f, ")\n\t\tKOF_SCAN_INFECT(\"%s\");\n}\n", safe);
-	if (fclose(f) != 0) {
-		say_err(e, "Short write to %.90s", path);
-		return 0;
-	}
-	/* say_note, not say_err: this is the thing having WORKED, and painted
-	 * red it reads as the write having failed - the same mistake the note
-	 * above say_err describes. */
-	/* The rule now lives here, so the next Generate writes it back rather
-	 * than starting a numbered copy beside it - the same thing generate()
-	 * records, and what makes the button an edit rather than a fork. */
-	snprintf(e->dr.gen_path, sizeof e->dr.gen_path, "%.*s",
-		 (int)sizeof e->dr.gen_path - 1, path);
-	e->dr.gen_ok = 1;
-	say_note(e, "Wrote %.90s (%u block(s))", path, j);
-	return 1;
 }

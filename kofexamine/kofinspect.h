@@ -350,6 +350,22 @@ struct kof_touch {
 	int                     fired;
 	const char             *fired_name;  /* the variant it reported, if any */
 	/*
+	 * THE VERDICT AS THE ENGINE SPELLED IT, minus the target.
+	 *
+	 * A panel must not compose a name the engine has already composed: the
+	 * two then disagree the moment either learns something. They did -
+	 * a similarity verdict carries the SCORE where a pattern rule carries a
+	 * variant, and a panel rebuilding the name from the module's declared
+	 * names wrote "Gafgyt#Gafgyt" beside a scanner saying
+	 * "Gafgyt#100!Plague".
+	 *
+	 * Copied rather than pointed at, because the findings belong to the
+	 * caller and these rows outlive the call. Empty when the module did not
+	 * fire, which is when there is no verdict to quote and a panel may say
+	 * what the module COULD report instead.
+	 */
+	char                    fired_verdict[224];
+	/*
 	 * AND HOW STRONGLY, which is not the same question as whether.
 	 *
 	 * A module that fired may have reported INFECT, SUSPECT or HEUR, and a

@@ -379,7 +379,33 @@ struct group {
 	 * otherwise, and the only one that cannot go stale.
 	 */
 	uint32_t mask;
+	/*
+	 * WHAT THIS MATCHER LOOKS FOR - 0 the markers in `mask`, 1 ONE
+	 * SIMILARITY BLOCK.
+	 *
+	 * A block matcher is the same kind of thing as the others - a search
+	 * the rule names in a condition - so it lives in the same list and is
+	 * combined by the same conditions. It holds exactly one block: a
+	 * percentage belongs to the block it is about, and a matcher over
+	 * several of them could only carry one. Two blocks with two thresholds
+	 * are two matchers, which is also how "at least one of these" and "both
+	 * of these" are already written.
+	 *
+	 * `rule`, `thresh`, `at_off` and `mask` mean nothing to one.
+	 */
+	uint8_t  kind;
+	uint32_t blk;               /* index into kof_draft.blk */
+	uint8_t  pct;               /* how much of it the rule demands */
 };
+
+/* What a block matcher demands until somebody says otherwise. A placeholder,
+ * not a recommendation: how alike is alike enough is the one thing about a
+ * similarity rule that nothing but the author can answer. */
+#define GRP_PCT_DEFAULT 60u
+
+/* The two kinds, spelled rather than counted at the point of use. */
+#define GRP_KIND_STR   0u
+#define GRP_KIND_BLOCK 1u
 
 struct cond {
 	char     expr[64];          /* over matcher ids */
@@ -411,9 +437,114 @@ struct cond {
  * is the MODEL's: "String 3 would be empty" is a fact about the draft, and the
  * status line only decides where to put it.
  */
+/*
+ * How many similarity blocks one draft can hold - the engine's offers for the
+ * object in front of it, plus whatever a loaded rule declared. Sixty-four is a
+ * table a person can look down; past that the carve is describing the object
+ * rather than offering a choice from it.
+ */
+#define PLG_MAX_BLOCK 64u
+
+/*
+ * One block a researcher has marked on THIS object.
+ *
+ * The hashes are computed when the block is marked, not when the rule is
+ * written, so the table can show what the block actually yields - a span that
+ * produces eleven hashes cannot be a rule and the author should learn that
+ * while they are still choosing the span.
+ */
+struct plg_block {
+	uint64_t off, len;                 /* where it is in this object */
+	uint32_t mask;                     /* the region it was taken from */
+	uint32_t hash[KOF_PLAGUE_MAX_HASH];
+	uint32_t n_hash;
+	/*
+	 * The whole block folded to one value, shown in the table and clicked
+	 * on. Not a hash OF the hashes for any cryptographic reason - it is a
+	 * name, short enough to read off a row and stable enough that the same
+	 * block always shows the same one.
+	 */
+	uint32_t id;
+	/*
+	 * The region's NAME, kept rather than resolved later.
+	 *
+	 * Resolving a bit to a word needs the format's own table, and the block
+	 * outlives the moment that table was in hand - a reader may switch
+	 * objects and come back. The name is a property of where the block came
+	 * from, so it is recorded with it.
+	 */
+	char     rgn[20];
+	/*
+	 * And the region's ENUM SPELLING, which is a different string from the
+	 * label above and is the one a generated rule must carry: the table
+	 * shows "CODE", the source says KOF_SCAN_ELF_CODE, and writing the
+	 * short form into a rule produces a file that does not compile.
+	 */
+	char     rgn_enum[48];
+	/*
+	 * LOOK FOR IT ANYWHERE IN THE FILE, not only in the region it came
+	 * from.
+	 *
+	 * The region is an ANCHOR and it is usually the right one - the same
+	 * bytes in another region are another fact, and a rule that ignored
+	 * that would score on a copy of the block sitting in a resource. But it
+	 * is not always right: a rebuild moves a blob from CODE to DATA, a
+	 * packer moves it into an overlay, and a block anchored to where it was
+	 * the first time then scores nothing on the very sample the rule was
+	 * written to catch.
+	 *
+	 * So it is the author's choice, per block, and the matcher already has
+	 * the case: KOF_SCAN_ALL is a region bit of its own that the scanner
+	 * feeds with the whole file. The fields above stay as the block was
+	 * CARVED, so the choice can be taken back.
+	 */
+	uint8_t  anywhere;
+	/*
+	 * CARRIED FROM ANOTHER SAMPLE, rather than carved from this object.
+	 *
+	 * A block declared by a rule survives moving to another file - that is
+	 * the whole point, and without it the score could only ever be a
+	 * hundred, because a block carved from the object on screen contains
+	 * itself. Its offsets belong to the sample it came from until the carve
+	 * finds it here, which is when it learns where it is.
+	 */
+	uint8_t  kept;
+	uint8_t  norm;                     /* enum kof_plague_norm */
+	uint8_t  picked;                   /* ticked: goes into the rule */
+	uint8_t  lit;                      /* painted in the hex pane */
+	uint8_t  colour;                   /* index into plg_colour */
+	/*
+	 * How much of this block is in the object now on screen.
+	 *
+	 * The number the whole mode exists to show: mark a block on one sample,
+	 * open another, and this says how much of it survived. On the sample it
+	 * was carved from it is a hundred BY CONSTRUCTION - every hash of the
+	 * block came out of those bytes - so there the column says "self"
+	 * rather than printing an arithmetic certainty as though it were a
+	 * measurement. See `kept`.
+	 */
+	uint8_t  score;
+};
+
 struct kof_draft {
 	struct decl  decl[MAX_DECL];
 	uint32_t     n_decl, sel_decl;
+	/*
+	 * THE SIMILARITY BLOCKS, which are declarations like the markers above.
+	 *
+	 * The engine carves them from the object and the author TICKS the ones
+	 * the rule is to be written from - the same relation the markers have
+	 * with the strings an object contains. A ticked block is declared, and
+	 * a declared block no matcher names is an incomplete draft, exactly as
+	 * an unused marker is.
+	 *
+	 * A pointer because the list outlives opening the next file: a block
+	 * ticked on one sample is the QUESTION being asked of the next one, and
+	 * the score column has nothing to measure without it. Allocated once -
+	 * see where ext and probe are.
+	 */
+	struct plg_block *blk;
+	uint32_t     n_blk;
 	char         sedit[DECL_HEXS_CAP];
 	uint32_t     sedit_off;
 	struct range rng[MAX_RANGE];
@@ -913,26 +1044,39 @@ struct kof_plague_decl {
 };
 
 /*
- * Write a similarity rule into the bases tree.
+ * THE VERDICT A RULE REPORTS, as the source spells it.
  *
- * The TYPE, THE FAMILY AND THE FORMAT come from the draft - the header row and
- * the format row mean the same thing here as they do for a pattern rule, which
- * is why the panel keeps them in both modes. Nothing about the rule is invented
- * by this function, and in particular the thresholds are the caller's: a
- * default chosen here would be a second place for one to live.
- *
- * Non-zero on success. On failure the editor's error slot says why, the way
- * generate()'s does.
+ * Read back rather than assumed: a reader that invented one wrote the family
+ * name into the variant and called it custom, so a rule whose source said
+ * KOF_MALVAR_AUTO came back as a hand-typed string and went out again that way.
+ * `kind` is enum cnd_var's - 0 AUTO, 1 GENERIC, 2 the literal in `text`.
  */
+struct kof_verdict_decl {
+	int  level;                /* enum cnd_level */
+	int  kind;
+	char text[48];
+};
+
+/*
+ * Does this draft name a similarity block at all, and which matcher names one.
+ *
+ * Asked by everything that has to agree about it: where the rule is written,
+ * what it includes, which block declarations are emitted, what the matcher menu
+ * may offer, and whether a ticked block is still waiting for a matcher.
+ */
+int draft_uses_blocks(const struct kof_editor *e);
+uint32_t grp_of_block(const struct kof_editor *e, uint32_t blk);
+int blk_usable(const struct kof_editor *e, uint32_t i);
+int blk_clears(const struct kof_editor *e, uint32_t i);
+void blk_moved(struct kof_editor *e, uint32_t from, uint32_t to);
+
 /*
  * READ A PLAGUE RULE BACK, so an infected file opens the rule that caught it.
  *
- * The counterpart of generate_plague, and the same division of labour
- * draft_from_source has with the draft: this turns the FILE into the model, and
- * what the model means is the caller's. It fills the type, the family and the
- * target format straight into the draft - those rows are shared by both modes -
- * and hands the blocks back through `blk`, whose hashes are written into
- * `pool`.
+ * The same division of labour draft_from_source has with the draft: this turns
+ * the FILE into the model, and what the model means is the caller's. It fills
+ * the type, the family and the target format straight into the draft, and hands
+ * the blocks back through `blk`, whose hashes are written into `pool`.
  *
  * `blk[i].hash` points into `pool`, so the pool must outlive the blocks. Blocks
  * past `max_blk`, or hashes past `pool_max`, are DROPPED rather than truncated:
@@ -943,11 +1087,9 @@ struct kof_plague_decl {
  */
 int plague_from_source(struct kof_editor *e, const char *path,
 		       struct kof_plague_decl *blk, uint32_t max_blk,
-		       uint32_t *n_blk, uint32_t *pool, uint32_t pool_max);
+		       uint32_t *n_blk, uint32_t *pool, uint32_t pool_max,
+		       struct kof_verdict_decl *verdict);
 
-int generate_plague(struct kof_editor *e,
-		    const struct kof_plague_decl *blk, uint32_t n_blk,
-		    const char *from_path);
 
 /*
  * How long a scan_range_ identifier can get: the prefix, plus the longest

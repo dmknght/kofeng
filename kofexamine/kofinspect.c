@@ -538,6 +538,24 @@ static int span_is(const struct kof_finding *f,
 	       memcmp(f->name + sp->at, word, sp->n) == 0;
 }
 
+/*
+ * Keep the engine's own spelling of the verdict, minus the target.
+ *
+ * The target is what the object IS and the panel says that elsewhere; what
+ * belongs on a rule's row is the part the rule decided. Everything after the
+ * "/" is copied verbatim - see kof_touch.fired_verdict for why it is copied and
+ * not recomposed.
+ */
+static void quote_verdict(struct kof_touch *t, const struct kof_finding *f)
+{
+	const char *p = f->name;
+	size_t skip = (size_t)f->target.at + f->target.n;
+
+	if (f->target.n && skip < sizeof f->name && p[skip] == '/')
+		p += skip + 1u;
+	snprintf(t->fired_verdict, sizeof t->fired_verdict, "%s", p);
+}
+
 static const char *fired_as(struct kof_touch *t,
 			    const struct kof_finding *finding,
 			    uint32_t n_finding)
@@ -567,6 +585,7 @@ static const char *fired_as(struct kof_touch *t,
 			    span_is(&finding[k], &finding[k].family,
 				    t->family)) {
 				t->fired_level = finding[k].level;
+				quote_verdict(t, &finding[k]);
 				return t->n_names && t->name[0] ? t->name[0]
 								: t->family;
 			}
@@ -583,6 +602,7 @@ static const char *fired_as(struct kof_touch *t,
 				 * matched, not from the module's declaration:
 				 * one module can report either. */
 				t->fired_level = finding[k].level;
+				quote_verdict(t, &finding[k]);
 				return t->name[j];
 			}
 	}
@@ -2109,6 +2129,20 @@ void kof_touch_name(const struct kof_touch *t, char *out, size_t cap)
 {
 	const char *fam = t->family[0] ? t->family : "?";
 
+	/*
+	 * A MODULE THAT FIRED IS QUOTED, NOT RECOMPOSED.
+	 *
+	 * The engine has already spelled this verdict once, and the parts it is
+	 * spelled from are not always the parts a panel can guess: a similarity
+	 * rule reports the SCORE where a pattern rule reports a variant, so
+	 * composing from the module's declared names wrote the family twice.
+	 * What is composed below is a different statement - what a module that
+	 * has NOT fired could report - and that one has no finding to quote.
+	 */
+	if (t->fired && t->fired_verdict[0]) {
+		snprintf(out, cap, "%s", t->fired_verdict);
+		return;
+	}
 	/* The engine's spelling. The "(n matchers)" tail is this panel's own and
 	 * is added after it, never mixed into it - see kof_name_compose. */
 	kof_name_compose(out, cap, NULL, kof_maltype_name(t->maltype), fam,
