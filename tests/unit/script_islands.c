@@ -446,8 +446,8 @@ int main(void)
 			 * call is markup - which is the whole failure.
 			 */
 			if (n != 1u ||
-			    !memmem(in_str + r[0].off, (size_t)r[0].len,
-				    "@system", 7u))
+			    !kof_memmem(in_str + r[0].off, (size_t)r[0].len,
+					"@system", 7u))
 				printf("  FAIL %-26s %u body extent(s), and the "
 				       "call after the string is not in one\n",
 				       "?> inside a string", n), fails++;
@@ -835,7 +835,7 @@ int main(void)
 					fail("coldfusion", "the code does not "
 					     "start at the first tag");
 				if (!l || l > 96u ||
-				    !memmem(p, l, "cfexecute", 9u))
+				    !kof_memmem(p, l, "cfexecute", 9u))
 					fail("coldfusion", "the statement that "
 					     "runs a command is not in the "
 					     "code region");

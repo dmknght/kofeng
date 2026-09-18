@@ -115,6 +115,28 @@ int main(void)
 		       "the fixtures were built, nothing tested\n");
 		return 0;
 	}
+	/*
+	 * AND THE .bz2 ITSELF, which is the fixture this actually opens.
+	 *
+	 * Guarding on the .tar alone says "bzip2 OR tar was missing" and then
+	 * checks only the second of them, so a host with tar and no bzip2 - a
+	 * Windows box until the fixture script learned to make one - ran the
+	 * scan against a file that is not there and reported "the .bz2 was not
+	 * scanned at all". That reads as a broken decoder and is a missing
+	 * tool, which is the exact confusion the skip above exists to prevent.
+	 */
+	{
+		size_t bz_n = 0;
+		uint8_t *probe = slurp(bz, &bz_n);
+
+		free(probe);
+		if (!bz_n) {
+			free(tar);
+			printf("bz2 object: NO FIXTURE - bzip2 was missing when "
+			       "the fixtures were built, nothing tested\n");
+			return 0;
+		}
+	}
 
 	eng = kof_engine_open(db);
 	if (!eng) {
