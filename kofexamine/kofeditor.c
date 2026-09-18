@@ -808,6 +808,8 @@ int src_read(const char *path, struct src_ent *out)
 	out->n_line = 0;
 	out->pat = 0;
 	out->n_pat = 0;
+	out->blk = 0;
+	out->n_blk = 0;
 	out->tgt = 0;
 	while (fgets(line, sizeof line, f)) {
 		char *p, *q;
@@ -853,6 +855,20 @@ int src_read(const char *path, struct src_ent *out)
 					 (unsigned long long)
 					 strtoull(p + 20, NULL, 0));
 				out->tgt = tgt_mix(out->tgt, w);
+			}
+		}
+		/* A block is named by the fold of its hashes - see generate -
+		 * so the name is all that has to be read to know which block
+		 * this is. */
+		if ((p = strstr(line, "KOF_PLAGUE_BLOCK(")) != NULL) {
+			char w[48];
+
+			src_ident(p + 17, w, sizeof w);
+			if (w[0]) {
+				out->blk += (uint32_t)strtoul(
+					strncmp(w, "blk_", 4) ? w : w + 4,
+					NULL, 16);
+				out->n_blk++;
 			}
 		}
 		if ((p = strstr(line, "KOF_DEFINE_STR(")) != NULL ||
@@ -2336,10 +2352,13 @@ uint32_t draft_tgt(struct kof_editor *e)
 const char *draft_dup(struct kof_editor *e, int *near_miss)
 {
 	uint32_t pat = 0, n = 0, i, tgt;
+	uint32_t blk = 0, n_blk = 0;
 
 	if (near_miss)
 		*near_miss = 0;
-	if (!e->dr.n_decl)
+	/* A rule made of blocks alone is still a rule, and two of them are
+	 * still a duplicate - see struct src_ent. */
+	if (!e->dr.n_decl && !draft_uses_blocks(e))
 		return NULL;
 	src_index(e);
 	if (!g_src)
@@ -2349,17 +2368,24 @@ const char *draft_dup(struct kof_editor *e, int *near_miss)
 		pat += decl_pat(&e->dr.decl[i]);
 		n++;
 	}
+	for (i = 0; i < e->dr.n_blk; i++) {
+		if (!e->dr.blk[i].picked)
+			continue;
+		blk += e->dr.blk[i].id;
+		n_blk++;
+	}
 	for (i = 0; i < g_n_src; i++) {
 		if (e->dr.gen_path[0] && !strcmp(g_src[i].path, e->dr.gen_path))
 			continue;
-		if (!g_src[i].n_pat)
+		if (!g_src[i].n_pat && !g_src[i].n_blk)
 			continue;
 		/* Same bytes AND the same thing to run them against. Same
 		 * bytes aimed at another format, another subtype or another
 		 * malware type is a sibling rule, not a copy of this one. */
 		if (g_src[i].tgt != tgt)
 			continue;
-		if (g_src[i].pat == pat && g_src[i].n_pat == n)
+		if (g_src[i].pat == pat && g_src[i].n_pat == n &&
+		    g_src[i].blk == blk && g_src[i].n_blk == n_blk)
 			return g_src[i].path;
 	}
 	/*
@@ -2415,6 +2441,27 @@ const char *draft_dup(struct kof_editor *e, int *near_miss)
 	return NULL;
 }
 
+
+/*
+ * HAS THE AUTHOR STARTED ONE?
+ *
+ * Not "is it finished" and not "has it changed since it was saved" - just
+ * whether anything in the panel was put there by a person. The carve fills the
+ * block table on arrival at every object, so a table with rows in it is not a
+ * draft; a ticked row is.
+ *
+ * The status line asks, because what stops a draft being written is not a
+ * complaint worth making about a draft nobody has begun: a file opened and not
+ * touched showed "Name the family" in the colour of a fault.
+ */
+int draft_started(struct kof_editor *e)
+{
+	if (!e)
+		return 0;
+	if (e->dr.n_decl || e->dr.n_grp || e->dr.family[0] || e->dr.note[0])
+		return 1;
+	return draft_uses_blocks(e);
+}
 
 /*
  * What stops this draft being written, or NULL. `as_new` asks about Save As,
@@ -4541,6 +4588,53 @@ shc_done:
 }
 
 /*
+ * Is this path a file of THIS family - "<family>_<number>.c"?
+ *
+ * By the name alone, because that is the whole of what is being asked: the
+ * contents are the draft in hand. The number is not read here; see
+ * gen_path_num, which is the other half and is kept separate so a name that
+ * does not parse simply is not this family rather than being half of it.
+ */
+static int path_is_family(const char *path, const char *fname)
+{
+	const char *b = strrchr(path, '/');
+	size_t n = strlen(fname);
+
+	b = b ? b + 1 : path;
+	if (strncmp(b, fname, n) || b[n] != '_')
+		return 0;
+	for (b += n + 1; *b && *b != '.'; b++)
+		if (*b < '0' || *b > '9')
+			return 0;
+	return *b == '.';
+}
+
+/* The digits between the underscore and the suffix, or "" when the name is
+ * not of that shape. Kept as TEXT, so the width a file was numbered at is the
+ * width it is renamed at. */
+static void gen_path_num(const char *path, char *out, size_t max)
+{
+	const char *b = strrchr(path, '/');
+	const char *u, *p;
+	size_t n = 0;
+
+	out[0] = 0;
+	b = b ? b + 1 : path;
+	u = strrchr(b, '_');
+	if (!u)
+		return;
+	for (p = u + 1; *p && *p != '.' && n + 1 < max; p++) {
+		if (*p < '0' || *p > '9')
+			return;
+		out[n++] = *p;
+	}
+	out[n] = 0;
+	if (*p != '.')
+		out[0] = 0;
+}
+
+
+/*
  * Fill the draft from a signature that fired on this object.
  *
  * The point is a starting position, not a copy: a researcher writing a variant
@@ -4769,6 +4863,9 @@ void generate(struct kof_editor *e, int as_new)
 	}
 	struct object *ob = &e->obj[e->dr.decl[0].obj];
 	char path[400], safe[48], fname[48];
+	/* The file this Save is replacing because the family was renamed, or
+	 * empty - removed only after the new one is written whole. */
+	char rename_from[400] = { 0 };
 	uint32_t i, k;
 	FILE *f;
 	size_t j = 0;
@@ -4855,7 +4952,8 @@ void generate(struct kof_editor *e, int as_new)
 				snprintf(dir, sizeof dir, "%s", e->basedir);
 		}
 		if (kof_mkdir(dir, 0777) != 0 && errno != EEXIST) {
-			say_err(e, "Cannot create %.90s", dir);
+			say_err(e, "Cannot create %.60s - %s", dir,
+				strerror(errno));
 			return;
 		}
 		/*
@@ -4882,7 +4980,43 @@ void generate(struct kof_editor *e, int as_new)
 		 * make room. Nothing this session did not create is touched.
 		 */
 		e->dr.gen_ok = 0;
+		/*
+		 * RENAMING THE FAMILY RENAMES THE FILE.
+		 *
+		 * The file is named after the family, so a rule whose family is
+		 * corrected keeps a name that says the old one - and the tree
+		 * is then a set of files whose names no longer say what is in
+		 * them, which is the one thing the naming was for. Save writes
+		 * the new name and the old file goes; the number is kept where
+		 * it is free, so a family's rules stay in the order they were
+		 * written.
+		 *
+		 * SAVE AS IS NOT A RENAME. It derives a new rule and leaves the
+		 * original alone, so it takes the branch below like any other
+		 * new file.
+		 */
 		if (!as_new && e->dr.gen_path[0] &&
+		    !strncmp(e->dr.gen_path, dir, strlen(dir)) &&
+		    !path_is_family(e->dr.gen_path, fname)) {
+			char num[16];
+			struct stat es;
+
+			/* The file this Save replaces. Removed at the end, and
+			 * only if the write came out whole. */
+			snprintf(rename_from, sizeof rename_from, "%.*s",
+				 (int)sizeof rename_from - 1, e->dr.gen_path);
+			/* Its own number first, so a family's rules keep the
+			 * order they were written in. Taken, it is numbered
+			 * afresh below like any other new name. */
+			gen_path_num(e->dr.gen_path, num, sizeof num);
+			if (num[0]) {
+				snprintf(path, sizeof path, "%s/%s_%s.c", dir,
+					 fname, num);
+				if (stat(path, &es) != 0)
+					goto have_path;
+			}
+		}
+		if (!rename_from[0] && !as_new && e->dr.gen_path[0] &&
 		    !strncmp(e->dr.gen_path, dir, strlen(dir))) {
 			snprintf(path, sizeof path, "%.*s",
 				 (int)sizeof path - 1, e->dr.gen_path);
@@ -4922,15 +5056,17 @@ void generate(struct kof_editor *e, int as_new)
 				}
 			}
 			if (!free_one) {
-				say_err(e, "%.40s has no free number left",
+				say_err(e, "%.40s_00 to _99999 are all taken",
 					fname);
 				return;
 			}
 		}
+have_path:
+		;
 	}
 	f = fopen(path, "w");
 	if (!f) {
-		say_err(e, "Cannot write %.90s", path);
+		say_err(e, "Cannot write %.60s - %s", path, strerror(errno));
 		return;
 	}
 
@@ -5366,12 +5502,23 @@ void generate(struct kof_editor *e, int as_new)
 	snprintf(e->dr.gen_path, sizeof e->dr.gen_path, "%.*s",
 		 (int)sizeof e->dr.gen_path - 1, path);
 	if (!e->dr.gen_ok) {
-		say_err(e, "Could not write the file");
+		/* The file exists and is short - naming it is the difference
+		 * between "try again" and "go and look at what is there". */
+		say_err(e, "Write failed partway - %.60s is incomplete", path);
 		return;
 	}
 	/* A source has just appeared in the tree, or an existing one has moved
 	 * its lines. Either way what the index knows about where each detection
 	 * name sits is now about the file that was there before. */
+	/*
+	 * AND THE OLD NAME GOES, now that the new one is whole.
+	 *
+	 * After the write and after gen_ok, so a Save that failed leaves both
+	 * files rather than neither: what is being removed is the only other
+	 * copy of this rule.
+	 */
+	if (rename_from[0] && strcmp(rename_from, path))
+		remove(rename_from);
 	src_forget();
 	e->dr.warn[0] = 0;
 	/* What was written is now what is saved. Without this the draft stayed
@@ -5778,13 +5925,27 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		}
 	}
 	fclose(f);
-		/* A block whose hashes did not survive the pool is not a block - see
-	 * the header. */
-	for (i = 0; i < n; i++)
-		if (blk[i].n_hash < KOF_PLAGUE_MIN_HASH) {
-			n = i;
-			break;
+	/*
+	 * A block whose hashes did not survive the pool is not a block - see
+	 * the header. DROPPED ON ITS OWN, not along with everything after it:
+	 * the loop used to cut the list at the first short one, so a rule whose
+	 * second block ran the pool dry lost its third and fourth as well, and
+	 * the panel showed a rule smaller than the file it came from.
+	 */
+	{
+		uint32_t keep = 0;
+
+		for (i = 0; i < n; i++) {
+			if (blk[i].n_hash < KOF_PLAGUE_MIN_HASH)
+				continue;
+			if (keep != i) {
+				blk[keep] = blk[i];
+				memcpy(name[keep], name[i], sizeof name[0]);
+			}
+			keep++;
 		}
+		n = keep;
+	}
 	*n_blk = n;
 	return n != 0;
 }

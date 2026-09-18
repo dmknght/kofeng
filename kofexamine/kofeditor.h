@@ -636,6 +636,20 @@ struct src_ent {
 	 * duplicate and greyed out Save As on the second one.
 	 */
 	uint32_t tgt;
+
+	/*
+	 * AND WHAT IT SCORES AGAINST, counted the same way.
+	 *
+	 * A rule may be nothing but blocks - see draft_uses_blocks - and such a
+	 * rule has no patterns at all, so a duplicate test that reads only
+	 * KOF_DEFINE_STR saw two block rules as two empty files and refused to
+	 * compare them. A block's name IS its content (the fold of its hashes),
+	 * so summing the names answers the same question for blocks that
+	 * summing pat_of answers for strings, and in the same order-independent
+	 * way.
+	 */
+	uint32_t blk;
+	uint32_t n_blk;
 };
 
 extern struct src_ent *g_src;
@@ -943,6 +957,8 @@ const char *draft_sample(struct kof_editor *e);
 void meta_sample_line(struct kof_editor *e, char *out, size_t cap);
 int draft_edited(struct kof_editor *e);
 int draft_dirty(struct kof_editor *e);
+/* Whether anything in the draft was put there by the author - see the note. */
+int draft_started(struct kof_editor *e);
 void src_index(struct kof_editor *e);
 const char *src_of(struct kof_editor *e, const struct kof_touch *t);
 uint32_t draft_tgt(struct kof_editor *e);

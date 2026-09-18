@@ -6275,7 +6275,7 @@ static void plg_segment(struct view *v)
 	 * it may have - see the note below on sharing the table. */
 	uint32_t rgn_mask[PLG_MAX_REGION], quota[PLG_MAX_REGION];
 	uint64_t rgn_bytes[PLG_MAX_REGION];
-	uint32_t n_reg, budget, used, left;
+	uint32_t n_reg, budget, used, left, cap_acc = 0;
 
 	/*
 	 * TICKED BLOCKS ARE CARRIED, everything else is carved again.
@@ -6352,7 +6352,21 @@ static void plg_segment(struct view *v)
 			n_reg++;
 		}
 
-		budget = keep < PLG_MAX_BLOCK ? PLG_MAX_BLOCK - keep : 0u;
+		/*
+		 * THE WHOLE TABLE, WHATEVER IS ALREADY TICKED.
+		 *
+		 * The share-out decides each region's target, the target
+		 * decides where the cuts fall, and the cuts are a property of
+		 * the OBJECT - so nothing the author has ticked may enter this
+		 * sum. Counting the carried blocks out of the budget made the
+		 * quotas smaller, coarsened whichever region had to be
+		 * coarsened, and moved its cuts: the block that had just been
+		 * ticked was no longer produced by a carve of the very file it
+		 * was cut from, so its row never learned where it was and sat
+		 * in the table at offset zero, size zero. Ticking a block must
+		 * not change where the next block begins.
+		 */
+		budget = PLG_MAX_BLOCK;
 		for (i = 0; i < n_reg; i++)
 			quota[i] = rgn_bytes[i] ? 1u : 0u;
 		for (i = 0, used = 0; i < n_reg; i++)
@@ -6390,8 +6404,12 @@ static void plg_segment(struct view *v)
 		max = avg * 4u;
 
 		/* And the row it may not carve past, so one region cannot take
-		 * the rows another was counted for. */
-		cap = v->ed.dr.n_blk + quota[ri];
+		 * the rows another was counted for. Counted from the shares
+		 * themselves rather than from the rows in hand, because the
+		 * carried blocks are already among those rows and would
+		 * otherwise be granted to the first region a second time. */
+		cap_acc += quota[ri];
+		cap = keep + cap_acc;
 		if (cap > PLG_MAX_BLOCK)
 			cap = PLG_MAX_BLOCK;
 
@@ -7977,32 +7995,55 @@ static int plg_load_rule(struct view *v, const char *path)
 	 * condition over every block matcher, with the op the file used - the
 	 * same shape the condition editor would have produced by hand.
 	 */
-	if (v->ed.dr.n_grp && !v->ed.dr.n_cnd) {
+	if (v->ed.dr.n_grp) {
 		struct cond *c;
 		uint32_t g;
-		int used = 0;
+		/*
+		 * A CONDITION THE STRING HALF ALREADY MADE IS THE CONDITION
+		 * THESE MATCHERS JOIN.
+		 *
+		 * A file can hold both - see the loader that calls this - and
+		 * the string reader runs first, so by here there may already be
+		 * a condition carrying the rule's verdict and its markers. It
+		 * used to be skipped entirely: the block matchers were built
+		 * and nothing concluded anything from them, so a mixed rule
+		 * opened with "Matchers: None" under its condition.
+		 */
+		int fresh = !v->ed.dr.n_cnd;
 
-		cnd_add(&v->ed, 0);
-		c = &v->ed.dr.cnd[v->ed.dr.n_cnd - 1u];
-		for (g = 0; g < v->ed.dr.n_grp; g++) {
-			int k = snprintf(c->expr + used,
-					 sizeof c->expr - (size_t)used,
-					 "%s%u", used ? " " : "", g + 1u);
-
-			if (k < 0 || (size_t)k >= sizeof c->expr - (size_t)used)
-				break;
-			used += k;
+		if (fresh) {
+			cnd_add(&v->ed, 0);
+			/* or when any block alone concludes it, and when they
+			 * were ANDed in the file. Only on a condition this
+			 * made: an existing one carries the author's own
+			 * operator and it is not this function's to change. */
+			for (g = 1; g < n; g++)
+				if (!d[g].join)
+					v->ed.dr.cnd[v->ed.dr.n_cnd - 1u].op = 1;
 		}
-		/* or when any block alone concludes it, and when they were
-		 * ANDed in the file. */
-		for (g = 1; g < n; g++)
-			if (!d[g].join)
-				c->op = 1;
+		c = &v->ed.dr.cnd[0];
+		for (g = 0; g < v->ed.dr.n_grp; g++) {
+			size_t l;
+
+			if (v->ed.dr.grp[g].kind != GRP_KIND_BLOCK)
+				continue;
+			if (cnd_uses(c, g))
+				continue;
+			/* The spelling the panel uses when it puts a matcher
+			 * into a condition - see CH_CMATCH. */
+			l = strlen(c->expr);
+			snprintf(c->expr + l, sizeof c->expr - l, "%s%u",
+				 l ? (c->op ? "|" : "&") : "", g + 1u);
+		}
 		/* And what it concludes, as the file said it - not as this
-		 * function would have guessed. */
-		c->level = verdict.level;
-		c->var_kind = verdict.kind;
-		snprintf(c->variant, sizeof c->variant, "%s", verdict.text);
+		 * function would have guessed. An existing condition was read
+		 * from the same file and already has it. */
+		if (fresh) {
+			c->level = verdict.level;
+			c->var_kind = verdict.kind;
+			snprintf(c->variant, sizeof c->variant, "%s",
+				 verdict.text);
+		}
 	}
 
 	/* The rule is in hand; the carve has not run against it yet. */
@@ -8039,31 +8080,28 @@ static void draft_show(struct view *v, uint32_t idx)
 	 */
 	{
 		const char *path = src_of(&v->ed, &ob->touch[idx]);
-		int rc;
+		int rc, blocks;
 
 		/*
-		 * A PLAGUE RULE OPENS IN PLAGUE MODE, and the panel is the same
-		 * panel: the header, the format and the options are shared, and
-		 * what changes is whether the body is markers or blocks. Asked
-		 * first because a plague rule has no markers at all - handed to
-		 * draft_from_source it comes back as an empty draft, which is
-		 * how a rule that plainly fired used to open as a blank sheet.
+		 * BOTH HALVES OF THE FILE, because one file can hold both.
+		 *
+		 * Markers and blocks are two things a rule is written from, not
+		 * two kinds of rule - a signature may search for a string AND
+		 * score a block, and the panel has a row for each. The plague
+		 * reader used to be asked FIRST and its answer taken as final,
+		 * so a rule that had both opened as its blocks alone and Save
+		 * wrote that back over the strings.
+		 *
+		 * Neither reader minds a file that holds nothing for it: each
+		 * answers zero and the other still has its half. The draft came
+		 * from the file when EITHER found something.
 		 */
-		if (path && plg_load_rule(v, path)) {
-			snprintf(v->ed.dr.gen_path, sizeof v->ed.dr.gen_path,
-				 "%.*s", (int)sizeof v->ed.dr.gen_path - 1,
-				 path);
-			v->ed.dr.gen_ok = 1;
-			v->ed.dr.from_rule = 1;
-			v->ed.dr.warn[0] = 0;
-			v->prow_home = 1;
-			return;
-		}
 		rc = path ? draft_from_source(&v->ed, path) : 0;
+		blocks = path ? plg_load_rule(v, path) : 0;
 
 		v->prow_home = 1;       /* a loaded draft opens at its top */
 
-		if (rc) {
+		if (rc || blocks) {
 			/*
 			 * A draft that came from a file belongs to that file:
 			 * generating writes it back rather than starting a
@@ -8076,6 +8114,10 @@ static void draft_show(struct view *v, uint32_t idx)
 				 (int)sizeof v->ed.dr.gen_path - 1, path);
 			v->ed.dr.gen_ok = 1;
 			v->ed.dr.from_rule = 1;
+			/* WHAT WAS READ IS WHAT IS SAVED. Left out on the
+			 * block path, the draft was dirty the moment a block
+			 * rule opened - nothing typed, and everything guarded
+			 * by "finish the draft first" refused. */
 			v->ed.dr.saved_hash = draft_hash(&v->ed);
 			/* The path shows on its own; `warn` is for things that
 			 * are wrong, and a loaded file is not one. */
@@ -9043,18 +9085,27 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 	}
 
 	/*
-	 * Above what was clicked, never on top of it.
+	 * BESIDE WHAT WAS CLICKED, never on top of it, and BELOW IT FIRST.
 	 *
 	 * A list that covers its own control hides the thing being changed, and
 	 * the click that would dismiss it lands on the list instead - so the
 	 * next click goes into closing rather than doing, and the control below
-	 * looks broken. `row` is the row that was clicked; the list ends on the
-	 * one above it.
+	 * looks broken. That much has always been the rule; the direction was
+	 * up, and up is where a panel keeps the heading that says what section
+	 * the control belongs to. Opening [+ Matcher] painted the list straight
+	 * over "Matchers" and the rows under it - the reader lost sight of what
+	 * they were adding to at the moment of adding to it.
+	 *
+	 * So: the row under the control, which is where a list belongs and
+	 * where the eye already is. Above only when the list does not fit
+	 * below, which is the case the screen bottom forces.
 	 */
 	c->open = 1;
-	c->row = row - c->n;
-	if (c->row + c->n > g_rows)
-		c->row = g_rows - c->n;
+	c->row = row + 1;
+	if (c->row + c->n - 1 > g_rows)
+		c->row = row - c->n;
+	if (c->row + c->n - 1 > g_rows)
+		c->row = g_rows - c->n + 1;
 	if (c->row < 1)
 		c->row = 1;
 	/*
@@ -12951,8 +13002,6 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 			if (cnd_and_run(&v->ed, ci) != ci) {
 				out_str(o, A_DIM "with the block below" A_OFF);
 				v->cnd_lv[ci][0] = v->cnd_lv[ci][1] = -1;
-				out_at(o, PR(r), g_cols - 4);
-				out_str(o, A_BAD "[x]" A_OFF);
 				r++;
 				continue;
 			}
@@ -12975,12 +13024,6 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 				c2->level == LV_NONE ? A_ID : A_BAD,
 				lvl_word[c2->level % LV_COUNT]);
 			v->cnd_lv[ci][1] = (int)o->col_hint;
-			/* Removing the condition belongs beside the thing it
-			 * removes, and the verdict row is the one carrying its
-			 * label - see the click handler, which reads this
-			 * column on this row. */
-			out_at(o, PR(r), g_cols - 4);
-			out_str(o, A_BAD "[x]" A_OFF);
 			r++;
 			continue;
 		} else if (v->cseq_kind[g] == CS_VAR) {
@@ -13151,6 +13194,20 @@ ids_done:
 			 * put one remark meant the loader had to guess which,
 			 * and it guessed the condition.
 			 */
+			/*
+			 * REMOVING THE BLOCK BELONGS BESIDE ITS NAME.
+			 *
+			 * It was drawn on the verdict row, which carried the
+			 * label until the label moved to the top of the block;
+			 * afterwards the button sat two rows below the thing it
+			 * names, beside a verdict it has nothing to do with,
+			 * and the row a reader aims at - the one that says
+			 * which condition this is - threw the click away. It is
+			 * on the first row now, from the column every matcher's
+			 * is drawn at.
+			 */
+			out_at(o, PR(r), g_cols - 4);
+			out_str(o, A_BAD "[x]" A_OFF);
 			r++;
 			continue;
 		}
@@ -13480,8 +13537,26 @@ static void plg_sync(struct view *v)
 		if (v->edit >= ED_GRP_PCT &&
 		    v->edit < ED_GRP_PCT + (int)MAX_GROUP)
 			v->edit = 0;
-		v->prow_off = 0;        /* a new list starts at its top */
-		v->prow_seen = v->ed.dr.n_blk;
+		/*
+		 * A NEW LIST STARTS AT ITS TOP, and says so the way every
+		 * other caller does.
+		 *
+		 * It set prow_seen to the number of BLOCKS. prow_seen is
+		 * compared against the number of PANEL ROWS, and the panel is
+		 * the head, the block table, the matchers and the conditions -
+		 * always more rows than there are blocks. So the very next
+		 * frame read "the draft just grew" and jumped the panel to its
+		 * end: opening any object with more blocks than fit showed the
+		 * block table already scrolled, its heading and the Format,
+		 * Region and Option rows above the window.
+		 *
+		 * The row count is not known here - prow_build has not run yet
+		 * - and it does not need to be: prow_home is the flag that
+		 * means this, and the frame records prow_seen from the count it
+		 * has just built.
+		 */
+		v->prow_off = 0;
+		v->prow_home = 1;
 	}
 	/*
 	 * AND THE RULE TARGETS THE FORMAT OF THE FILE IN FRONT OF IT.
@@ -13645,8 +13720,18 @@ rows:
 				(unsigned long long)b->off);
 			hit_add(v, y, c0, (int)o->col_hint, hit_plg_goto, i);
 		}
-		out_fmt(o, A_DIM "  %6llu" A_OFF,
-			(unsigned long long)b->len);
+		/*
+		 * AND ITS SIZE IN THIS FILE, which a carried block also has
+		 * none of. It printed "0" beside a blank offset, and a row
+		 * reading "         0" is read as a block that came out empty
+		 * rather than as one this object does not hold whole. A dash
+		 * says the same thing the blank offset beside it says.
+		 */
+		if (!b->len)
+			out_str(o, A_DIM "       -" A_OFF);
+		else
+			out_fmt(o, A_DIM "  %6llu" A_OFF,
+				(unsigned long long)b->len);
 		/*
 		 * WHERE IT IS LOOKED FOR, and it is a control because that is a
 		 * choice - see plg_block.anywhere. "any" is the whole file;
@@ -14119,7 +14204,11 @@ static void draw_marker_line(struct out *o, struct view *v)
 		goto have_right;
 	}
 	if (v->pane == 3 && g_decl_rows) {
-		const char *why = draft_missing(&v->ed);
+		/* Nothing is wrong with a draft nobody has begun - see
+		 * draft_started. The reasons appear with the first thing the
+		 * author puts in it, which is when they mean anything. */
+		const char *why = draft_started(&v->ed) ? draft_missing(&v->ed)
+							: NULL;
 		int near_miss = 0;
 		const char *dup = why ? NULL : draft_dup(&v->ed, &near_miss);
 
@@ -21791,7 +21880,10 @@ static void bar_run(struct view *v, int i)
 			if (why)
 				say_err(&v->ed, "%s", why);
 			else
-				say_note(&v->ed, "Nothing to write");
+				/* Nothing is wrong and nothing is missing -
+				 * the file on disk already says this. */
+				say_note(&v->ed, "Already saved - no change "
+					 "since the last write");
 		} else {
 			const char *why = bar_why_off(v, i);
 
@@ -25299,6 +25391,12 @@ static void hit_row_cond(struct view *v, uint32_t g)
 		return;
 	}
 	if (v->cseq_kind[g] == CS_MATCH) {
+		/* The block's first row, so it carries the block's remove
+		 * button - see the drawing. */
+		if (g_mx >= g_cols - 4) {
+			cnd_remove(&v->ed, ci);
+			return;
+		}
 		if (v->cnd_mt[ci][0] > 0 && g_mx >= v->cnd_mt[ci][0] &&
 		    g_mx <= v->cnd_mt[ci][1])
 			ch_open(v, CH_CMATCH, ci, g_my - 3, g_mx);
@@ -25327,11 +25425,8 @@ static void hit_row_cond(struct view *v, uint32_t g)
 		return;
 	}
 
-	/* CS_COND */
-	if (g_mx >= g_cols - 4) {
-		cnd_remove(&v->ed, ci);
-		return;
-	}
+	/* CS_COND. The remove button is on the block's first row - see
+	 * CS_MATCH above - so this row has nothing at its right hand end. */
 	/* -1 is a row that drew no control - a block ANDed to the next one has
 	 * no verdict of its own to pick. */
 	if (v->cnd_lv[ci][0] > 0 && g_mx >= v->cnd_lv[ci][0] &&

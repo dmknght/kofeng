@@ -173,16 +173,111 @@ static void two_calls_or(void)
 	unlink(path);
 }
 
+/*
+ * A RULE MADE OF BLOCKS IS STILL A RULE THE INDEX HAS TO SEE.
+ *
+ * src_read read KOF_DEFINE_STR and nothing else, so a plague rule - which
+ * declares no strings at all - was indexed as a file with zero patterns, and
+ * draft_dup, which skipped any source with zero patterns, could not tell two
+ * of them apart. Generating the same block twice raised no duplicate warning.
+ */
+static void src_sees_blocks(void)
+{
+	static const char src[] =
+		"#include <kofmod/kofsig.h>\n"
+		"#include <kofmod/kofplague.h>\n"
+		"KOF_TARGET_FORMAT(KOF_FMT_ELF);\n"
+		"KOF_TARGET_NAME(KOF_MALTYPE_BOTNET, \"Blockly\");\n"
+		"KOF_PLAGUE_BLOCK(blk_dded9322, KOF_SCAN_CODE, "
+			"KOF_PLAGUE_RAW,\n"
+		"\t0x00001000u, 0x00001111u, 0x00001222u, 0x00001333u, 0x00001444u, 0x00001555u, 0x00001666u, 0x00001777u, 0x00001888u, 0x00001999u, 0x00001aaau, 0x00001bbbu, 0x00001cccu, 0x00001dddu, 0x00001eeeu, 0x00001fffu);\n"
+		"KOF_PLAGUE_BLOCK(blk_6fad1193, KOF_SCAN_CODE, "
+			"KOF_PLAGUE_RAW,\n"
+		"\t0x3333u, 0x4444u);\n"
+		"void kof_scan(const struct kof_obj_ctx *ctx)\n"
+		"{\n"
+		"\tif (kof_plague_score(blk_dded9322) >= 60u)\n"
+		"\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n"
+		"}\n";
+	struct src_ent ent;
+	const char *path = write_tmp(src);
+
+	if (!path)
+		return;
+	memset(&ent, 0, sizeof ent);
+	CK(src_read(path, &ent) != 0);
+	CK(ent.n_blk == 2);
+	/* The sum, so the order the two are declared in cannot change it. */
+	CK(ent.blk == 0xdded9322u + 0x6fad1193u);
+	/* And no pattern was invented out of a rule that declares none. */
+	CK(ent.n_pat == 0);
+	unlink(path);
+}
+
+/*
+ * A RULE THAT DOES BOTH. The reader must not lose the half it was not looking
+ * for: a string rule that also scores a block is one rule, and opening it has
+ * to bring back the strings AND the blocks.
+ */
+static void mixed_rule(void)
+{
+	static const char src[] =
+		"#include <kofmod/kofsig.h>\n"
+		"#include <kofmod/kofplague.h>\n"
+		"KOF_TARGET_FORMAT(KOF_FMT_ELF);\n"
+		"KOF_TARGET_NAME(KOF_MALTYPE_BOTNET, \"Mixy\");\n"
+		"KOF_TARGET_RANGE(scan_range_whole_file, KOF_SCAN_ALL);\n"
+		"KOF_DEFINE_STR(s0, \"alpha\", KOF_CASE_EXACT, "
+			"KOF_WORD_SUBSTRING);\n"
+		"KOF_PLAGUE_BLOCK(blk_dded9322, KOF_SCAN_CODE, "
+			"KOF_PLAGUE_RAW,\n"
+		"\t0x00001000u, 0x00001111u, 0x00001222u, 0x00001333u, 0x00001444u, 0x00001555u, 0x00001666u, 0x00001777u, 0x00001888u, 0x00001999u, 0x00001aaau, 0x00001bbbu, 0x00001cccu, 0x00001dddu, 0x00001eeeu, 0x00001fffu);\n"
+		"void kof_scan(const struct kof_obj_ctx *ctx)\n"
+		"{\n"
+		"\tif (kof_find_str_any(scan_range_whole_file, s0) && "
+		"kof_plague_score(blk_dded9322) >= 70u)\n"
+		"\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n"
+		"}\n";
+	struct kof_editor e;
+	struct kof_plague_decl d[4];
+	struct kof_verdict_decl verdict;
+	static uint32_t pool[4 * KOF_PLAGUE_MAX_HASH];
+	uint32_t n = 0;
+	const char *path = write_tmp(src);
+
+	if (!path)
+		return;
+	lend(&e);
+	/* The string half. */
+	CK(draft_from_source(&e, path) != 0);
+	CK(e.dr.n_decl == 1);
+	CK(e.dr.n_grp == 1);
+	EQ(e.dr.family, "Mixy");
+	/* And the block half, off the same file. */
+	CK(plague_from_source(&e, path, d, 4, &n, pool,
+			      (uint32_t)(sizeof pool / sizeof pool[0]),
+			      &verdict) != 0);
+	CK(n == 1);
+	if (n) {
+		CK(d[0].id == 0xdded9322u);
+		CK(d[0].n_hash == 16);
+		CK(d[0].thr == 70);
+	}
+	unlink(path);
+}
+
 int main(void)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
 	two_calls_one_line();
 	two_calls_or();
+	src_sees_blocks();
+	mixed_rule();
 
 	if (fails) {
 		printf("draft source: %d check(s) failed\n", fails);
 		return 1;
 	}
-	printf("draft source: two calls on one line, and or - ok\n");
+	printf("draft source: two calls on one line, or, block index, mixed rule - ok\n");
 	return 0;
 }
