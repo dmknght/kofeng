@@ -3091,6 +3091,39 @@ static uint32_t c_entropy_at(const struct kof_obj_ctx *ctx, uint64_t off,
 	return kof_entropy_eighths(s.p, s.n);
 }
 
+/*
+ * How much of a declared block is in this object.
+ *
+ * The counting happened before any module ran - see the feed in scan.c - so
+ * this is a division, not a search. A module may ask about the same block
+ * repeatedly and in any order for nothing.
+ */
+static uint32_t c_plague_score(const struct kof_obj_ctx *ctx, uint32_t block_id)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	/*
+	 * THE MODULE'S BLOCK ID IS ITS OWN, and the pack it came from was given
+	 * a base when it was loaded - the same arrangement string ids have. A
+	 * module that asked with a raw index would be asking about whatever
+	 * block of whatever other pack happened to sit there.
+	 */
+	{
+		uint32_t pct;
+
+		if (!sc || !sc->cur_mod)
+			return 0;
+		pct = kof_plague_pct(&sc->plague,
+				     sc->cur_mod->block_base + block_id);
+		/* The highest of them, because a rule that names two blocks is
+		 * one verdict and the number beside it should be the strongest
+		 * thing it found rather than whichever call came last. */
+		if ((int)pct > sc->plague_asked)
+			sc->plague_asked = (int)pct;
+		return pct;
+	}
+}
+
 static const struct kof_content kof_detect_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -3099,7 +3132,8 @@ static const struct kof_content kof_detect_vtable = {
 	/* Answered for a detector too. The answer is about the database and
 	 * not about who is asking, and a rule that wants to know whether its
 	 * neighbours care about a format is asking a fair question. */
-	c_fmt_wanted, c_region_shape, c_region_entropy, c_entropy_at
+	c_fmt_wanted, c_region_shape, c_region_entropy, c_entropy_at,
+	c_plague_score
 };
 
 static const struct kof_content kof_unpack_vtable = {
@@ -3109,7 +3143,7 @@ static const struct kof_content kof_unpack_vtable = {
 	c_unpack_chain, c_find_str_where,
 	c_gather, c_name_next, c_incomplete,
 	c_unpack_entry, c_syms, c_data_xref, c_fmt_wanted, c_region_shape,
-	c_region_entropy, c_entropy_at
+	c_region_entropy, c_entropy_at, c_plague_score
 };
 
 /*

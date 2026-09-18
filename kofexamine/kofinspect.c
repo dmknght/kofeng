@@ -544,6 +544,33 @@ static const char *fired_as(struct kof_touch *t,
 {
 	uint32_t j, k;
 
+	/*
+	 * A SIMILARITY VERDICT IS MATCHED WITHOUT ITS VARIANT.
+	 *
+	 * The loop below pairs a finding with the module that made it by
+	 * maltype, family AND variant - the variant being one of the names the
+	 * module declares. A plague verdict does not carry a name there: it
+	 * carries the SCORE, because that is what a reader of such a verdict
+	 * needs - see finding_str. So the three-part test never matched, the
+	 * module came back as not having fired, and a pane that drops a module
+	 * with no markers and no firing dropped it - which is how a file the
+	 * scanner named Botnet:Gafgyt#100!Plague opened on an empty rule list.
+	 *
+	 * The mark is what identifies the shape, and n_block is what keeps a
+	 * pattern rule of the same family from answering for it.
+	 */
+	if (t->mod && t->mod->n_block)
+		for (k = 0; k < n_finding; k++)
+			if (span_is(&finding[k], &finding[k].shape, "Plague") &&
+			    span_is(&finding[k], &finding[k].maltype,
+				    kof_maltype_name(t->maltype)) &&
+			    span_is(&finding[k], &finding[k].family,
+				    t->family)) {
+				t->fired_level = finding[k].level;
+				return t->n_names && t->name[0] ? t->name[0]
+								: t->family;
+			}
+
 	for (j = 0; j < t->n_names; j++) {
 		if (!t->name[j])
 			continue;
@@ -2196,4 +2223,50 @@ const char *kof_sym_origin_name(const uint8_t *blk, uint32_t n)
 	case KOF_SYM_ORIGIN_PE_DIR: return "imports+exports";
 	default:                    return "none";
 	}
+}
+
+/* ---- similarity blocks, for whoever is writing the rule --------------------- */
+
+uint32_t kof_inspect_plague(const struct kof_scanner *sc,
+			    struct kof_plague_view *out, uint32_t max_out)
+{
+	const struct kof_engine *e;
+	uint32_t b, n = 0;
+
+	if (!sc || !out || !max_out)
+		return 0;
+	e = sc->eng;
+	if (!e || !e->n_blk || !sc->plague.set)
+		return 0;
+
+	for (b = 0; b < e->n_blk && n < max_out; b++) {
+		const struct kof_plague_block *blk = &e->blk_tab[b];
+		uint32_t i;
+
+		out[n].block     = b;
+		out[n].scan_mask = blk->scan_mask;
+		out[n].norm      = blk->norm;
+		out[n].n_hash    = blk->n_hash;
+		out[n].score     = (uint8_t)kof_plague_pct(&sc->plague, b);
+		out[n].matched   = kof_plague_matched(&sc->plague, b);
+		out[n].rule      = "";
+		/*
+		 * Which module declared it. A linear walk because the tables
+		 * are tens to hundreds of rules and this runs once per object a
+		 * PERSON asked about, not per object scanned.
+		 */
+		for (i = 0; i < e->n_mods; i++) {
+			const struct kof_module *m = &e->mods[i];
+			const char *fam;
+
+			if (!m->n_block || b < m->block_base ||
+			    b >= m->block_base + m->n_block)
+				continue;
+			fam = kof_db_family(e, m);
+			out[n].rule = fam ? fam : "";
+			break;
+		}
+		n++;
+	}
+	return n;
 }

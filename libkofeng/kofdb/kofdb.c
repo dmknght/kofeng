@@ -52,6 +52,7 @@
 #define _GNU_SOURCE
 
 #include "kofdb.h"
+#include "../kofmatchers/kofplague.h"
 #include "../kofmatchers/kofmultimatch.h"
 #include "../kofmatchers/hexprog.h"
 
@@ -355,6 +356,8 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 	STRIDE(KOF_SEC_STR_DESC,   h->n_str,   sizeof(struct kof_pack_str));
 	STRIDE(KOF_SEC_NAME_DESC,  h->n_names, sizeof(struct kof_pack_name));
 	STRIDE(KOF_SEC_RANGE,      h->n_rng,   4);
+	STRIDE(KOF_SEC_PLAGUE_BLK, h->n_blk,   sizeof(struct kof_plague_block));
+	STRIDE(KOF_SEC_PLAGUE_POOL, h->n_pool, 4);
 #undef STRIDE
 
 	/*
@@ -384,11 +387,28 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 				REFUSE("module %u names code outside the arena", k);
 			if ((uint64_t)m[k].str_first + m[k].n_str > h->n_str ||
 			    (uint64_t)m[k].rng_first + m[k].n_rng > h->n_rng ||
-			    (uint64_t)m[k].name_first + m[k].n_names > h->n_names)
+			    (uint64_t)m[k].name_first + m[k].n_names > h->n_names ||
+			    (uint64_t)m[k].blk_first + m[k].n_blk > h->n_blk)
 				REFUSE("module %u names a table slice that is "
 				       "not there", k);
 			if (m[k].code_off % KOF_PACK_BLOB_ALIGN)
 				REFUSE("module %u is not aligned for a call", k);
+		}
+		for (k = 0; k < h->n_blk; k++) {
+			const struct kof_plague_block *bk = (const void *)
+				(base + h->sec[KOF_SEC_PLAGUE_BLK].off);
+
+			/* A block's hashes are read with no further checking on
+			 * the scan path, so the slice is settled here. */
+			if ((uint64_t)bk[k].first_hash + bk[k].n_hash > h->n_pool)
+				REFUSE("block %u slices hashes that are not "
+				       "there", k);
+			if (bk[k].n_hash < KOF_PLAGUE_MIN_HASH ||
+			    bk[k].n_hash > KOF_PLAGUE_MAX_HASH)
+				REFUSE("block %u has %u hashes", k, bk[k].n_hash);
+			if (bk[k].norm >= KOF_PLAGUE_NORM_COUNT)
+				REFUSE("block %u names normalizer %u", k,
+				       bk[k].norm);
 		}
 		for (k = 0; k < h->n_str; k++) {
 			/*
@@ -630,8 +650,13 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 	const struct kof_pack_mod *pm =
 		(const void *)(base + h->sec[KOF_SEC_MODS].off);
 	const uint32_t *prng = (const void *)(base + h->sec[KOF_SEC_RANGE].off);
+	const struct kof_plague_block *pblk =
+		(const void *)(base + h->sec[KOF_SEC_PLAGUE_BLK].off);
+	const uint32_t *ppool =
+		(const void *)(base + h->sec[KOF_SEC_PLAGUE_POOL].off);
 
 	uint32_t rng0 = e->n_rng;
+	uint32_t blk0 = e->n_blk, pool0 = e->n_blk_pool;
 	uint32_t i;
 	int unpack = (h->kind == KOF_PACK_UNPACK);
 	int heur   = (h->kind == KOF_PACK_HEUR);
@@ -642,6 +667,19 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 	e->n_str += h->n_str;
 	for (i = 0; i < h->n_rng; i++)
 		e->rng_tab[e->n_rng++] = prng[i];
+	/*
+	 * The blocks and their hashes, REBASED into the engine's tables the way
+	 * the packer rebased them into the pack's. Two levels of the same move,
+	 * because there are two levels of pooling: a module's blocks share a
+	 * pack's pool, and a pack's blocks share the engine's.
+	 */
+	for (i = 0; i < h->n_pool; i++)
+		e->blk_pool[e->n_blk_pool++] = ppool[i];
+	for (i = 0; i < h->n_blk; i++) {
+		e->blk_tab[e->n_blk] = pblk[i];
+		e->blk_tab[e->n_blk].first_hash += pool0;
+		e->n_blk++;
+	}
 
 	for (i = 0; i < h->n_mods; i++) {
 		struct kof_module *m = unpack ? &e->unp[e->n_unp++]
@@ -674,6 +712,8 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		m->n_str     = pm[i].n_str;
 		m->rng_base  = rng0  + pm[i].rng_first;
 		m->n_rng     = pm[i].n_rng;
+		m->block_base = blk0 + pm[i].blk_first;
+		m->n_block    = pm[i].n_blk;
 		m->pack_id   = pack_id;
 		m->name_base = pm[i].name_first;    /* within that pack */
 		m->n_names   = pm[i].n_names;
@@ -964,6 +1004,7 @@ struct kof_engine *kof_db_load(const char *path)
 	const char *single[1];
 	uint32_t n_paths = 0, n_ok = 0, i;
 	uint64_t n_mods = 0, n_str = 0, n_rng = 0, code = 0;
+	uint64_t n_blk = 0, n_pool = 0;
 	size_t at = 0;
 	int owned = 0;
 
@@ -1006,6 +1047,8 @@ struct kof_engine *kof_db_load(const char *path)
 		n_mods += h->n_mods;
 		n_str  += h->n_str;
 		n_rng  += h->n_rng;
+		n_blk  += h->n_blk;
+		n_pool += h->n_pool;
 		/* Padded to the same boundary the packer used inside each pool, so
 		 * an aligned offset stays aligned once the pools are concatenated. */
 		/* Each pack's blobs keep the offsets its own header gives them, so
@@ -1026,7 +1069,8 @@ struct kof_engine *kof_db_load(const char *path)
 	 * reject on a number the allocation never uses.
 	 */
 	if (n_mods > 0xffffffffu || n_str > 0xffffffffu ||
-	    n_rng > 0xffffffffu) {
+	    n_rng > 0xffffffffu || n_blk > 0xffffffffu ||
+	    n_pool > 0xffffffffu) {
 		fprintf(stderr, "kofdb: %s: more entries than an index can hold\n",
 			path);
 		goto out;
@@ -1039,6 +1083,8 @@ struct kof_engine *kof_db_load(const char *path)
 	e->unp      = calloc(n_mods ? n_mods : 1, sizeof *e->unp);
 	e->heur     = calloc(n_mods ? n_mods : 1, sizeof *e->heur);
 	e->rng_tab  = calloc(n_rng  ? n_rng  : 1, sizeof *e->rng_tab);
+	e->blk_tab  = calloc(n_blk  ? n_blk  : 1, sizeof *e->blk_tab);
+	e->blk_pool = calloc(n_pool ? n_pool : 1, sizeof *e->blk_pool);
 	if (!e->mods || !e->unp || !e->heur || !e->rng_tab ||
 	    !arena_open(e, (size_t)code)) {
 		kof_db_free(e);
@@ -1052,6 +1098,25 @@ struct kof_engine *kof_db_load(const char *path)
 		at = (size_t)kof_round_up(at, KOF_PACK_BLOB_ALIGN);
 		absorb(e, &mp[i], at, i);
 		at += (size_t)h->sec[KOF_SEC_CODE].len;
+	}
+
+	/*
+	 * The similarity index, built once over every pack's blocks together.
+	 *
+	 * After absorbing rather than per pack, because the whole point of one
+	 * index is that a scan costs the same whatever is loaded - see the note
+	 * on blk_tab in kofdb.h. A build that produces nothing is not an error:
+	 * a database with no plague rules has no blocks and the matcher is never
+	 * consulted.
+	 */
+	if (e->n_blk) {
+		e->plague = kof_plague_build(e->blk_tab, e->n_blk,
+					     e->blk_pool, e->n_blk_pool);
+		if (!e->plague) {
+			fprintf(stderr, "kofdb: the similarity blocks do not "
+				"describe a consistent set\n");
+			goto out;
+		}
 	}
 
 	/*
@@ -1289,6 +1354,9 @@ void kof_db_free(struct kof_engine *e)
 	e->multi = NULL;
 	free(e->rng_tab);
 	free(e->rng_uid);
+	kof_plague_set_free(e->plague);
+	free(e->blk_tab);
+	free(e->blk_pool);
 	if (e->packs) {
 		uint32_t i;
 

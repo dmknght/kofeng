@@ -1420,6 +1420,25 @@ struct kof_content {
 	 */
 	uint32_t (*entropy_at)(const struct kof_obj_ctx *, uint64_t off,
 			       uint64_t len);
+
+	/*
+	 * HOW MUCH OF A DECLARED BLOCK IS IN THIS OBJECT, nought to a hundred.
+	 *
+	 * The argument is an index the build assigned to KOF_PLAGUE_BLOCK, the
+	 * same way find_str's are assigned to KOF_DEFINE_STR - so the hashes are
+	 * neither here nor in the blob, and the host answers from one pass it
+	 * made over the regions any loaded block asked for.
+	 *
+	 * A PERCENTAGE AND NOT A VERDICT. What the number means is the rule's to
+	 * decide, in the rule, beside everything else it decides - see
+	 * kofmod/kofplague.h for why the thresholds are not in the matcher.
+	 *
+	 * Zero for a block nothing could be fed for, which is the same answer as
+	 * "none of it was there". A rule cannot tell those apart and must not
+	 * try: a region that was never resolved and a region with nothing in it
+	 * are one fact about this object.
+	 */
+	uint32_t (*plague_score)(const struct kof_obj_ctx *, uint32_t block_id);
 };
 
 /*
@@ -2517,6 +2536,20 @@ void kof_unpack(const struct kof_obj_ctx *ctx);
 #define kof_find_str(rng, s) KOF_FS_ONE(rng, s)
 
 /*
+ * How much of a declared block is here, nought to a hundred.
+ *
+ * An ordinary expression, so it composes with everything else a rule can say:
+ *
+ *     if (kof_find_str(rng, cmd_exe) && kof_plague_score(cfg) >= 50)
+ *
+ * which is the case that decided the design - a common string as an anchor
+ * beside a block as the measurement. No combining logic lives in the matcher
+ * because this is enough to write it here.
+ */
+#define kof_plague_score(blk)                                              \
+	((ctx)->content->plague_score((ctx), KOF_PASTE(kof_blockid_, blk)))
+
+/*
  * AT AN OFFSET THE MODULE WORKED OUT
  *
  *     if (kof_find_str_at(ctx->entry_off, stub)) ...
@@ -3318,6 +3351,32 @@ enum kof_str_word {
  * At most KOF_MAX_STR_PER_MODULE strings and KOF_MAX_RANGE_PER_MODULE ranges.
  */
 #define KOF_DEFINE_STR(name, lit, casing, word)
+
+/*
+ * Declare a SIMILARITY BLOCK this module measures against.
+ *
+ *     KOF_PLAGUE_BLOCK(cfg, KOF_SCAN_ELF_CODE, KOF_PLAGUE_RAW,
+ *                      0x1a2b3c4d, 0x5e6f7a8b, ...);
+ *
+ *     if (kof_plague_score(cfg) >= 50)
+ *             KOF_SCAN_INFECT("Family");
+ *
+ * The hashes are what a researcher's chosen block came to under
+ * kof_plague_mix - see kofmod/kofplague.h, which also says why the block is a
+ * person's choice and not a computation. They are written out by the generator
+ * in kofviewer; nobody types them.
+ *
+ * THE REGION AND THE NORMALIZER ARE PROPERTIES OF THE BLOCK, so they are here
+ * rather than at the call site - unlike a string, which is worth looking for in
+ * more than one place. A block came from somewhere, hashed a particular way,
+ * and asking about it anywhere else is asking a different question.
+ *
+ * Expands to nothing, like every other declaration here: the build reads it out
+ * of the source, assigns the index, and defines the identifier the call site
+ * names. A block that was never declared is an undefined identifier at compile
+ * time rather than a score that is quietly always zero.
+ */
+#define KOF_PLAGUE_BLOCK(name, scan_mask, norm, ...)
 
 /*
  * Declare a string the target holds as UTF-16LE.

@@ -24,6 +24,7 @@
 #include <stdint.h>
 
 #include <kofmod/kofsig.h>
+#include <kofmod/kofplague.h>
 #include "../core/kofcore.h"   /* kof_crc32, kof_round_up */
 #include "kofpack.h"       /* KOF_STR_MAX_LEN, KOF_BLOB_MAX_CODE */
 
@@ -147,6 +148,17 @@ struct kof_module {
 	uint32_t name_base, n_names;
 	uint32_t str_base,  n_str;
 	uint32_t rng_base,  n_rng;
+	/*
+	 * And where this module's similarity blocks start in the ENGINE's block
+	 * table, which is every loaded pack's blocks laid end to end.
+	 *
+	 * A base rather than a per-pack index because the matcher indexes all of
+	 * them at once: one inverted index over every block any pack brought is
+	 * what makes a scan cost the same whether one pack is loaded or twelve.
+	 * Zero and zero for the overwhelming majority of modules, which declare
+	 * no block at all.
+	 */
+	uint32_t block_base, n_block;
 
 	/* What KOF_TARGET_NAME declared - see struct kof_pack_mod in kofpack.h
 	 * and kof_db_family below. Meaningless and unread for an unpack-kind
@@ -363,6 +375,26 @@ struct kof_engine {
 
 	uint32_t            *rng_tab;   /* a range is just a region mask, but named */
 	uint32_t             n_rng;
+
+	/*
+	 * Every loaded pack's similarity blocks, laid end to end, and the
+	 * hashes they slice.
+	 *
+	 * One table for all packs rather than one per pack, because the matcher
+	 * builds a single inverted index over it - which is what makes a scan
+	 * cost the same whether one pack is loaded or twelve. A module's
+	 * block_base says where its own slice starts.
+	 *
+	 * Empty in every build with no plague rules, and an empty set costs an
+	 * index that is never consulted.
+	 */
+	struct kof_plague_block *blk_tab;
+	uint32_t                 n_blk;
+	uint32_t                *blk_pool;
+	uint32_t                 n_blk_pool;
+	/* The index built over the two above - see kofmatchers/kofplague.h. NULL
+	 * when there are no blocks. */
+	struct kof_plague_set   *plague;
 
 	/*
 	 * The distinct region masks, densely numbered, and the id of each rng_tab

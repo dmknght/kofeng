@@ -181,14 +181,15 @@ struct kof_finding {
 	 * THE SAME NAME, ALREADY TAKEN APART.
 	 *
 	 * Because the alternative was every reader taking it apart again. The
-	 * scanner walked the string for the '?' and then for the '#' to group
+	 * scanner walked the string for the '!' and then for the '#' to group
 	 * heuristics by shape; the examiner cut at the '/' to compare the rest;
 	 * each knew the punctuation the engine had just finished writing. A
 	 * separator that changed - and one has, '-' to '#' - broke them
 	 * silently, one at a time.
 	 *
 	 * The engine knows all five parts before it joins them, so it says so.
-	 * `shape` is the word after the '?' and only a heuristic has one: it is
+	 * `shape` is the word after the '!': a heuristic's shape, or the word
+	 * Plague on a similarity verdict. It is
 	 * what the rule actually recognised, where `family` is only what it
 	 * guesses the object is.
 	 */
@@ -405,7 +406,7 @@ void kof_name_compose(char *out, size_t cap, const char *target,
  * caller that only wants the string - kofinspect builds one to compare against
  * a result it did not produce.
  *
- * `shape` is the heuristic's, appended after a '?'. NULL or empty for a
+ * `shape` is the heuristic's, appended after a '!'. NULL or empty for a
  * detector's finding, which has no such thing to admit.
  */
 void kof_finding_name(struct kof_finding *f, const char *target,

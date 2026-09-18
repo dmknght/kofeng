@@ -120,7 +120,7 @@ struct fent {
 	 * the second and wrong about the first.
 	 *
 	 * Taken from the finding the engine handed over, which carries its own
-	 * parts. This file used to walk the composed name for the '?' and then
+	 * parts. This file used to walk the composed name for the '!' and then
 	 * the '#' to find the same word again.
 	 */
 	char     kind[48];

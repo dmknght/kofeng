@@ -856,4 +856,38 @@ const char *kof_sym_bind_name(uint8_t bind);
 const char *kof_sym_vis_name(uint8_t vis);
 const char *kof_sym_origin_name(const uint8_t *blk, uint32_t n);
 
+/*
+ * WHAT EVERY SIMILARITY BLOCK SCORED ON THE OBJECT JUST SCANNED.
+ *
+ * REQUIRED FOR WRITING A PLAGUE RULE AT ALL, which is why it is here and not a
+ * debugging extra. A rule says `kof_plague_score(blk) >= 50`; the author has no
+ * way to choose that fifty, or to know why a rule did not fire, unless the tool
+ * can show what the block actually came to. A verdict alone answers "did it" and
+ * never "how close was it".
+ *
+ * Read from the scanner AFTER a scan, not recomputed: the prepass already
+ * counted every block for that object, and counting again would be a second
+ * implementation of the thing being inspected - which is how a tool ends up
+ * agreeing with itself and disagreeing with the engine.
+ *
+ * `matched` and `n_hash` are shown beside the percentage because the percentage
+ * of a small block moves in coarse steps: 7 of 20 is 35% and so is 7 of 20 with
+ * one more window, and an author choosing a threshold needs to see which.
+ *
+ * Returns how many were written, at most max_out. Zero when the database
+ * carries no blocks, which is every build with no plague rules.
+ */
+struct kof_plague_view {
+	uint32_t    block;       /* index in the engine's table */
+	uint32_t    scan_mask;   /* the region the block was taken from */
+	uint8_t     norm;        /* enum kof_plague_norm */
+	uint8_t     score;       /* 0..100 */
+	uint32_t    matched;     /* hashes of it found in this object */
+	uint32_t    n_hash;      /* hashes it has */
+	const char *rule;        /* the family the declaring module names */
+};
+
+uint32_t kof_inspect_plague(const struct kof_scanner *sc,
+			    struct kof_plague_view *out, uint32_t max_out);
+
 #endif /* KOFENG_KOFINSPECT_H */

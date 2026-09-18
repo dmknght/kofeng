@@ -34,6 +34,7 @@
 #include <stdint.h>
 #include <kofmod/kofsig.h>
 #include <kofmod/kofsym.h>
+#include <kofmod/kofplague.h>
 #include <kofeng.h>
 #include "kofinspect.h"
 
@@ -520,6 +521,7 @@ uint32_t tgt_mix(uint32_t h, const char *tok);
 struct object {
 	char      name[256];
 
+
 	/*
 	 * WHAT A TREE ROW SHOWS, when the name is not the answer.
 	 *
@@ -878,6 +880,74 @@ void draft_reset(struct kof_editor *e);
 int draft_from_source(struct kof_editor *e, const char *path);
 void draft_from_touch(struct kof_editor *e, const struct kof_touch *t);
 void generate(struct kof_editor *e, int as_new);
+
+/*
+ * ONE BLOCK OF A SIMILARITY RULE, as the caller holds it.
+ *
+ * The editor does not carve blocks and does not score them - that is the
+ * engine's and the viewer's - so it is handed the finished description and
+ * writes the source. Same division generate() has with the draft: the model is
+ * the caller's, the file format is this file's.
+ */
+struct kof_plague_decl {
+	uint32_t    id;            /* what the block is called in the source */
+	const char *region;        /* the KOF_SCAN_* spelling, or NULL for ALL */
+	/*
+	 * Where that spelling LIVES when the decl was read from a file rather
+	 * than built from a panel: a reader has nowhere else to keep it, and a
+	 * pointer into a line buffer would dangle the moment the next line was
+	 * read. Unused by the writer, which is handed names that outlive it.
+	 */
+	char        region_buf[48];
+	uint32_t    norm;          /* enum kof_plague_norm */
+	uint8_t     thr;           /* the percentage the rule will demand */
+	/*
+	 * How this block joins the one BEFORE it - 0 is or, 1 is and, which is
+	 * enum cnd_join's order. Not read for the first block, which has
+	 * nothing before it.
+	 */
+	uint8_t     join;
+	uint64_t    off, len;      /* where it was cut from, for the comment */
+	const uint32_t *hash;
+	uint32_t    n_hash;
+};
+
+/*
+ * Write a similarity rule into the bases tree.
+ *
+ * The TYPE, THE FAMILY AND THE FORMAT come from the draft - the header row and
+ * the format row mean the same thing here as they do for a pattern rule, which
+ * is why the panel keeps them in both modes. Nothing about the rule is invented
+ * by this function, and in particular the thresholds are the caller's: a
+ * default chosen here would be a second place for one to live.
+ *
+ * Non-zero on success. On failure the editor's error slot says why, the way
+ * generate()'s does.
+ */
+/*
+ * READ A PLAGUE RULE BACK, so an infected file opens the rule that caught it.
+ *
+ * The counterpart of generate_plague, and the same division of labour
+ * draft_from_source has with the draft: this turns the FILE into the model, and
+ * what the model means is the caller's. It fills the type, the family and the
+ * target format straight into the draft - those rows are shared by both modes -
+ * and hands the blocks back through `blk`, whose hashes are written into
+ * `pool`.
+ *
+ * `blk[i].hash` points into `pool`, so the pool must outlive the blocks. Blocks
+ * past `max_blk`, or hashes past `pool_max`, are DROPPED rather than truncated:
+ * half a block is a block that scores wrongly, which is worse than a block that
+ * is not shown.
+ *
+ * Non-zero when the file was read and held at least one block.
+ */
+int plague_from_source(struct kof_editor *e, const char *path,
+		       struct kof_plague_decl *blk, uint32_t max_blk,
+		       uint32_t *n_blk, uint32_t *pool, uint32_t pool_max);
+
+int generate_plague(struct kof_editor *e,
+		    const struct kof_plague_decl *blk, uint32_t n_blk,
+		    const char *from_path);
 
 /*
  * How long a scan_range_ identifier can get: the prefix, plus the longest

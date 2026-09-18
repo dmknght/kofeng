@@ -3,15 +3,16 @@
  *
  * Test sample: 5083be49c4a8cb03dad57c64bfa402c3e1afedadfaeb38430d47fa71f0e7bccd
  * Test sample: 72b86cf168181480d745b27f57ef574c8d6208daf36c898eddd0700f41f8a03d
+ * Test sample: VirusShare_664378d10f610552d17e97cc06ade139  sha256:e7c5f3e784e27947e9499b0c7f4de31e5e51584ad282b1742bf9e260526f3332
  * Researcher:  dmknght
- * Created 2026-08-29, updated 2026-08-30
- * Engine:      db format 6, module ABI 2
+ * Created 2026-08-29, updated 2026-09-18
+ * Engine:      db format 1.1, module ABI 2
  */
 
 #include <kofmod/kofsig.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
-KOF_TARGET_NAME(KOF_MALTYPE_VIRUS, "Tsunami");
+KOF_TARGET_NAME(KOF_MALTYPE_BOTNET, "Tsunami");
 
 KOF_TARGET_RANGE(scan_range_code_data, KOF_SCAN_ELF_CODE | KOF_SCAN_ELF_DATA);
 
@@ -28,6 +29,6 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 	/* matcher 1: Suspicious: common strings flooder */
 	if (kof_find_str_any(scan_range_code_data, s1, s4, s5))
 		KOF_SCAN_SUSPECT(KOF_MALVAR_AUTO);
-	else if (kof_find_str_any(scan_range_code_data, s0, s2, s3, s6))
+	if (kof_find_str_any(scan_range_code_data, s0, s2, s3, s6))
 		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
 }

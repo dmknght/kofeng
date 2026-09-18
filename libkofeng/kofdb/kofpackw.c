@@ -206,8 +206,10 @@ struct built {
 	struct kof_pack_str  *str;
 	struct kof_pack_name *name;
 	uint32_t             *rng;
+	struct kof_plague_block *blk;
+	uint32_t                *pool;
 
-	uint32_t n_mods, n_str, n_name, n_rng;
+	uint32_t n_mods, n_str, n_name, n_rng, n_blk, n_pool;
 
 	uint64_t any_target;
 	uint32_t any_scan, any_arch;
@@ -224,6 +226,8 @@ static void built_free(struct built *b)
 	free(b->str);
 	free(b->name);
 	free(b->rng);
+	free(b->blk);
+	free(b->pool);
 }
 
 /*
@@ -239,7 +243,7 @@ static void built_free(struct built *b)
  */
 static int count_all(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 {
-	uint64_t s = 0, r = 0, m = 0;
+	uint64_t s = 0, r = 0, m = 0, bl = 0, pl = 0;
 	uint32_t i;
 
 	b->n_mods = n;
@@ -247,19 +251,24 @@ static int count_all(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 		s += mods[i].n_str;
 		r += mods[i].n_rng;
 		m += mods[i].n_names;
+		bl += mods[i].n_blk;
+		pl += mods[i].n_pool;
 	}
-	if (s > 0xffffffffu || r > 0xffffffffu || m > 0xffffffffu)
+	if (s > 0xffffffffu || r > 0xffffffffu || m > 0xffffffffu ||
+	    bl > 0xffffffffu || pl > 0xffffffffu)
 		return 0;
 	b->n_str  = (uint32_t)s;
 	b->n_rng  = (uint32_t)r;
 	b->n_name = (uint32_t)m;
+	b->n_blk  = (uint32_t)bl;
+	b->n_pool = (uint32_t)pl;
 	return 1;
 }
 
 static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 {
 	struct dedup ds, dn;
-	uint32_t i, k, si = 0, ni = 0, ri = 0;
+	uint32_t i, k, si = 0, ni = 0, ri = 0, bi = 0, pi = 0;
 	int ok = 0;
 
 	memset(&ds, 0, sizeof ds);
@@ -272,6 +281,8 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 	b->str  = calloc(b->n_str  ? b->n_str  : 1, sizeof *b->str);
 	b->name = calloc(b->n_name ? b->n_name : 1, sizeof *b->name);
 	b->rng  = calloc(b->n_rng  ? b->n_rng  : 1, sizeof *b->rng);
+	b->blk  = calloc(b->n_blk  ? b->n_blk  : 1, sizeof *b->blk);
+	b->pool = calloc(b->n_pool ? b->n_pool : 1, sizeof *b->pool);
 	if (!b->mod || !b->str || !b->name || !b->rng)
 		goto out;
 	/*
@@ -320,7 +331,8 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 		if (m->code_len == 0 || m->code_len > KOF_BLOB_MAX_CODE || !m->code)
 			goto out;
 		if ((m->n_str && !m->str) || (m->n_rng && !m->rng) ||
-		    (m->n_names && !m->name))
+		    (m->n_names && !m->name) ||
+		    (m->n_blk && !m->blk) || (m->n_pool && !m->pool))
 			goto out;
 
 		/*
@@ -357,6 +369,8 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 		o->n_str      = m->n_str;
 		o->rng_first  = ri;
 		o->n_rng      = m->n_rng;
+		o->blk_first  = bi;
+		o->n_blk      = m->n_blk;
 		o->name_first = ni;
 		o->n_names    = m->n_names;
 
@@ -465,6 +479,21 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 		}
 		for (k = 0; k < m->n_rng; k++, ri++)
 			b->rng[ri] = m->rng[k];
+		/*
+		 * The blocks, REBASED into the pack's pool as they are copied.
+		 * A module's block records index its own hashes from zero, and
+		 * the pack has one pool for all of them - so first_hash moves
+		 * by however many hashes came before. The same rebasing a
+		 * string offset gets, and the same failure if it is skipped:
+		 * a block that reads another module's hashes and scores
+		 * against them.
+		 */
+		for (k = 0; k < m->n_blk; k++, bi++) {
+			b->blk[bi] = m->blk[k];
+			b->blk[bi].first_hash += pi;
+		}
+		for (k = 0; k < m->n_pool; k++, pi++)
+			b->pool[pi] = m->pool[k];
 		for (k = 0; k < m->n_names; k++, ni++) {
 			const struct kof_pw_name *nm = &m->name[k];
 			uint32_t off, nuid;
@@ -560,6 +589,8 @@ uint8_t *kof_pack_build(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n
 	len[KOF_SEC_NAME_DESC]  = (uint64_t)b.n_name * sizeof(struct kof_pack_name);
 	len[KOF_SEC_NAME_POOL]  = b.name_pool.len;
 	len[KOF_SEC_RANGE]      = (uint64_t)b.n_rng  * 4;
+	len[KOF_SEC_PLAGUE_BLK] = (uint64_t)b.n_blk  * sizeof(struct kof_plague_block);
+	len[KOF_SEC_PLAGUE_POOL] = (uint64_t)b.n_pool * 4;
 	len[KOF_SEC_CODE]       = b.code.len;
 	/* The inverted index is not built yet. Zero length is how a pack says it
 	 * has none, and the loader falls back to asking each module in turn. */
@@ -614,6 +645,12 @@ uint8_t *kof_pack_build(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n
 		       (size_t)len[KOF_SEC_NAME_POOL]);
 	if (len[KOF_SEC_RANGE])
 		memcpy(img + at[KOF_SEC_RANGE], b.rng, (size_t)len[KOF_SEC_RANGE]);
+	if (len[KOF_SEC_PLAGUE_BLK])
+		memcpy(img + at[KOF_SEC_PLAGUE_BLK], b.blk,
+		       (size_t)len[KOF_SEC_PLAGUE_BLK]);
+	if (len[KOF_SEC_PLAGUE_POOL])
+		memcpy(img + at[KOF_SEC_PLAGUE_POOL], b.pool,
+		       (size_t)len[KOF_SEC_PLAGUE_POOL]);
 	if (len[KOF_SEC_CODE])
 		memcpy(img + at[KOF_SEC_CODE], b.code.p, (size_t)len[KOF_SEC_CODE]);
 
@@ -632,6 +669,8 @@ uint8_t *kof_pack_build(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n
 	h->n_str   = b.n_str;
 	h->n_rng   = b.n_rng;
 	h->n_names = b.n_name;
+	h->n_blk   = b.n_blk;
+	h->n_pool  = b.n_pool;
 	h->any_target   = b.any_target;
 	h->any_scan     = b.any_scan;
 	h->any_arch     = b.any_arch;

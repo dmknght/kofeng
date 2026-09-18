@@ -81,6 +81,14 @@ struct kof_pw_mod {
 	uint32_t                  n_rng;
 	const struct kof_pw_name *name;
 	uint32_t                  n_names;
+	/* The similarity blocks this module declared, and the hashes they
+	 * slice. The block records index `pool` from ZERO - the writer rebases
+	 * them into the pack's own pool as it copies, the same way it rebases a
+	 * string's offset. NULL and zero for every module that declared none. */
+	const struct kof_plague_block *blk;
+	uint32_t                       n_blk;
+	const uint32_t                *pool;
+	uint32_t                       n_pool;
 
 	/* What KOF_TARGET_NAME declared - see struct kof_pack_mod in kofpack.h.
 	 * `family` may be NULL or empty for an unpack-kind module; the builder

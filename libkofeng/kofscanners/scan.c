@@ -95,6 +95,16 @@ struct kof_scanner *kof_scan_new(const struct kof_engine *eng)
 	if (!kof_match_state_init(&sc->msym, eng->n_str, 0))
 		goto fail;
 
+	/*
+	 * The similarity counters, when the database brought any blocks.
+	 *
+	 * Skipped entirely when it did not, which is the common case: no
+	 * allocation, and the feed below is never reached because the set is
+	 * NULL. A database with no plague rules costs nothing here.
+	 */
+	if (eng->plague && !kof_plague_ctx_init(&sc->plague, eng->plague))
+		goto fail;
+
 	/* One counter per region, and one word per marker for where it was seen.
 	 * A failure here is not fatal: the prepass needs both and simply does
 	 * not run without them. */
@@ -139,6 +149,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc->lzw);
 	free(sc->bz);
 	free(sc->lzx);
+	kof_plague_ctx_done(&sc->plague);
 	free(sc->lzh);
 	kof_xref_free(sc->use);
 	free(sc->sym);
@@ -344,6 +355,157 @@ static int prefilter(const struct kof_module *m, const struct kof_obj_ctx *ctx,
  * alternative - a survivor list built here and consumed there - is a second
  * representation of the same decision that could disagree with the first.
  */
+/*
+ * Count every declared similarity block against this object, once.
+ *
+ * ONE PASS PER (REGION, NORMALIZER) THAT SOME BLOCK ASKED FOR, and no pass at
+ * all otherwise. The set is NULL unless a pack carried blocks, so a database
+ * without plague rules does not reach this; within it, kof_plague_set_norms
+ * answers which normalizers a region needs, so a pack whose blocks all hash raw
+ * bytes pays one pass rather than three.
+ *
+ * BEFORE ANY MODULE, for the reason multi_prepass runs first: a rule's
+ * kof_plague_score has to be a division rather than a search, and the only way
+ * to make it one is to have counted already. A rule may then ask about the same
+ * block in any order and as often as it likes for nothing.
+ */
+static void plague_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+			   uint32_t present, int from_packer)
+{
+	static const uint32_t all_masks[] = {
+		KOF_SCAN_ALL, 1u << 1, 1u << 2, 1u << 3, 1u << 4, 1u << 5,
+		1u << 6, 1u << 7, 1u << 8, 1u << 9, 1u << 10, 1u << 11,
+		1u << 12, 1u << 13, 1u << 14, 1u << 15
+	};
+	struct kof_range *ext = sc->ext_gather;
+	const struct kof_parser *fp;
+	kof_buf b;
+	size_t mi;
+
+	if (!sc->eng->plague || !sc->plague.set)
+		return;
+	fp = kof_parser_of(ctx->format);
+	kof_plague_begin(&sc->plague);
+	b = kof_src_buf(sc->cur_src);
+	if (!b.p)
+		return;
+
+	/*
+	 * WHAT AN UNPACKER PRODUCED IS FED WHOLE, WITHOUT THE REGION ANCHOR.
+	 *
+	 * Which region a blob lands in after a rebuild is a property of the
+	 * packer, not of the malware - and very often there are no regions at
+	 * all, because nothing parses the output. Anchored, every block would
+	 * score zero on precisely the object the unpacker was run to produce.
+	 * See kof_plague_any_region.
+	 *
+	 * One pass per normalizer over the whole thing, which is also fewer
+	 * passes than the region walk below.
+	 */
+	if (from_packer) {
+		uint32_t norms = kof_plague_set_norms(sc->eng->plague, 0), k;
+
+		kof_plague_any_region(&sc->plague, 1);
+		for (k = 0; k < KOF_PLAGUE_NORM_COUNT; k++)
+			if (norms & (1u << k))
+				kof_plague_feed(&sc->plague,
+						(uint32_t)KOF_SCAN_ALL, k,
+						b.p, b.n);
+		return;
+	}
+
+	for (mi = 0; mi < sizeof all_masks / sizeof all_masks[0]; mi++) {
+		uint32_t mask = all_masks[mi];
+		uint32_t norms = kof_plague_set_norms(sc->eng->plague, mask);
+		uint32_t n, i, k;
+
+		if (!norms)
+			continue;
+		/*
+		 * A region the parse does not have is not fed, and that is the
+		 * same answer as a region with nothing in it - see the note on
+		 * plague_score in kofsig.h about why a rule cannot tell them
+		 * apart and must not try.
+		 */
+		if (mask != KOF_SCAN_ALL && !(present & mask))
+			continue;
+		/*
+		 * KOF_SCAN_ALL IS "WHEREVER IN THE OBJECT", NOT "EVERY BYTE".
+		 *
+		 * A block declared over the whole file has no region to anchor
+		 * it, so the pass that serves it resolves to one extent
+		 * covering everything - headers, symbol tables, alignment gaps
+		 * and all. Nothing is ever cut from a header, so hashing one
+		 * can only produce an accidental match; and the padding in
+		 * NOLOAD and UNCLAIMED is what kof_plague_worth exists to keep
+		 * out. So the whole-object pass is fed the object's REGIONS
+		 * with those left out, and only an object nothing parsed is fed
+		 * as one run of bytes.
+		 */
+		if (mask == KOF_SCAN_ALL && fp && fp->regions && fp->n_regions &&
+		    fp->region_name) {
+			uint32_t ri;
+
+			for (ri = 0; ri < fp->n_regions; ri++) {
+				uint32_t rm = fp->regions[ri];
+				const char *rn = fp->region_name(rm);
+				int loose;
+
+				if (!rn || strstr(rn, "_HEADER") ||
+				    strstr(rn, "_SYM"))
+					continue;
+				if (!(present & rm))
+					continue;
+				loose = strstr(rn, "NOLOAD") != NULL ||
+					strstr(rn, "UNCLAIM") != NULL;
+				n = kof_scan_resolve_range(ctx, rm, ext);
+				for (i = 0; i < n; i++) {
+					uint64_t off = ext[i].off;
+					uint64_t len = kof_clip_len(b.n, off,
+								   ext[i].len);
+
+					if (!len)
+						continue;
+					if (loose &&
+					    !kof_plague_worth(b.p + off, len))
+						continue;
+					for (k = 0; k < KOF_PLAGUE_NORM_COUNT;
+					     k++)
+						if (norms & (1u << k))
+							kof_plague_feed(
+								&sc->plague,
+								mask, k,
+								b.p + off, len);
+				}
+			}
+			continue;
+		}
+		n = kof_scan_resolve_range(ctx, mask, ext);
+		for (i = 0; i < n; i++) {
+			uint64_t off = ext[i].off;
+			uint64_t len = kof_clip_len(b.n, off, ext[i].len);
+
+			if (!len)
+				continue;
+			/* And an anchored block in one of those two regions is
+			 * asked the same question - see kof_plague_worth. */
+			if ((mask & (uint32_t)~KOF_SCAN_ALL) && fp &&
+			    fp->region_name) {
+				const char *rn = fp->region_name(mask);
+
+				if (rn && (strstr(rn, "NOLOAD") ||
+					   strstr(rn, "UNCLAIM")) &&
+				    !kof_plague_worth(b.p + off, len))
+					continue;
+			}
+			for (k = 0; k < KOF_PLAGUE_NORM_COUNT; k++)
+				if (norms & (1u << k))
+					kof_plague_feed(&sc->plague, mask, k,
+							b.p + off, len);
+		}
+	}
+}
+
 static void multi_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			  uint32_t present)
 {
@@ -580,7 +742,18 @@ void kof_finding_name(struct kof_finding *f, const char *target,
 		span_put(f, &f->variant, &at, variant);
 	}
 	if (shape && shape[0]) {
-		sep_put(f, &at, '?');
+		/*
+		 * "!" AND NOT "?".
+		 *
+		 * The mark says HOW the verdict was reached - a shape a
+		 * heuristic recognised, a similarity measurement - and "?"
+		 * reads as doubt about the whole name rather than as a label on
+		 * the part after it. A reader scanning a log sees
+		 * "Heur:Meterp#3!Shellcode" as a finding with its method
+		 * attached, where the same line with a question mark reads as
+		 * the engine being unsure it found anything.
+		 */
+		sep_put(f, &at, '!');
 		span_put(f, &f->shape, &at, shape);
 	}
 	f->name[at] = 0;
@@ -622,6 +795,32 @@ static void finding_str(const struct kof_scanner *sc,
 	char fmtarch[32];
 
 	kof_name_target(fmtarch, sizeof fmtarch, ctx->format, ctx->arch);
+	/*
+	 * A SIMILARITY VERDICT CARRIES ITS SCORE AND SAYS WHAT IT IS.
+	 *
+	 * <target>/<type>:<family>#<score>!Plague. The slot that holds a
+	 * variant for a pattern rule holds the MEASUREMENT for this one,
+	 * because that is what a reader of such a verdict needs: a rule
+	 * demanding fifty and a sample scoring eighty-three are different
+	 * facts, and the variant a hand-written rule could put there cannot
+	 * know either. The mark names the method, exactly as a heuristic's
+	 * does - see kof_finding_name.
+	 *
+	 * Only for a module that actually asked: sc->plague_asked is -1 until
+	 * kof_plague_score is called, so a rule that mixes a string with a
+	 * block still gets the number, and every rule that uses no block is
+	 * named as it always was.
+	 */
+	if (sc->plague_asked >= 0) {
+		char sv[8];
+		int pct = sc->plague_asked > 100 ? 100 : sc->plague_asked;
+
+		snprintf(sv, sizeof sv, "%d", pct);
+		kof_finding_name(f, fmtarch, maltype,
+				 (family && family[0]) ? family : "unknown",
+				 sv, "Plague");
+		return;
+	}
 	kof_finding_name(f, fmtarch, maltype,
 			 (family && family[0]) ? family : "unknown",
 			 variant ? variant : "unknown", NULL);
@@ -1458,6 +1657,10 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			continue;
 
 		sc->rep_valid = 0;
+		/* Nothing asked yet - see scan.h. Reset beside rep_valid
+		 * because it is the same kind of thing: what THIS module
+		 * reported about this object. */
+		sc->plague_asked = -1;
 		sc->cur_mod   = m;
 		m->fn(ctx);
 		sc->cur_mod   = NULL;
@@ -1637,6 +1840,18 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	multi_prepass(sc, &ctx, present);
 
 	/*
+	 * And the same for similarity: every block any loaded rule declared is
+	 * counted here, once, so a module's kof_plague_score is a division.
+	 *
+	 * Gated twice on purpose. The set is NULL unless some pack carried a
+	 * block, so a database without plague rules never reaches this. And
+	 * within it, a region is fed only for the normalizers some block of
+	 * that region actually asked for - a pack whose blocks all hash raw
+	 * bytes pays one pass, not three.
+	 */
+	plague_prepass(sc, &ctx, present, from_packer);
+
+	/*
 	 * ONLY THE MODULES THAT COULD TARGET THIS FORMAT - see kof_engine.mod_at.
 	 * The ones outside the run are excluded for exactly the reason
 	 * kof_module_precond would have excluded them, so they are counted as
@@ -1662,6 +1877,10 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 			continue;
 
 		sc->rep_valid = 0;
+		/* Nothing asked yet - see scan.h. Reset beside rep_valid
+		 * because it is the same kind of thing: what THIS module
+		 * reported about this object. */
+		sc->plague_asked = -1;
 		sc->cur_mod   = m;
 		m->fn(&ctx);
 		sc->cur_mod   = NULL;

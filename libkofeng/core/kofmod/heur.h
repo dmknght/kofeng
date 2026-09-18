@@ -184,9 +184,9 @@ enum kof_eng_want {
  *     KOF_HEUR_NAME("Shellcode")    the SHAPE, which the rule established
  *     KOF_HEUR_PREDICT("Meterp")    the FAMILY it expects, which it has not
  *
- * It is written into the finding after a '?', so the object reads
+ * It is written into the finding after a '!', so the object reads
  *
- *     ELF-x64/Heur:Shellcode?Meterp
+ *     ELF-x64/Heur:Shellcode!Meterp
  *
  * and the question mark is the whole point: this is a prediction and nothing
  * has confirmed it. The moment a signature matches on real bytes - the payload

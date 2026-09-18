@@ -88,6 +88,7 @@
 #include <sys/stat.h>
 
 #include <kofmod/kofsig.h>
+#include <kofmod/kofplague.h>
 #include <kofmod/script.h>   /* KOF_SCAN_ALL, the per-module maxima */
 #include <kofmod/elf.h>      /* the ELF region names a range may be built from */
 #include <kofmod/pe.h>       /* and the PE image kinds, for --subtype-mask */
@@ -183,6 +184,28 @@ struct rng {
 
 static struct rng rngs[MAX_PATTERNS];
 static int nrngs;
+
+/*
+ * A declared similarity block.
+ *
+ * The hashes are written out by the generator, not typed, so the only thing
+ * checked here is that there are enough of them to score with and not more than
+ * a rule may carry - see KOF_PLAGUE_MIN_HASH and KOF_PLAGUE_MAX_HASH. What they
+ * mean is nothing this program can know: they are what one particular block of
+ * one particular sample came to, and the build cannot recompute them without
+ * the sample.
+ */
+struct blk {
+	int      line;
+	char     name[64];
+	uint32_t mask;
+	uint32_t norm;
+	uint32_t hash[KOF_PLAGUE_MAX_HASH];
+	uint32_t n_hash;
+};
+
+static struct blk blks[MAX_PATTERNS];
+static int nblks;
 
 /*
  * Detection names.
@@ -321,7 +344,8 @@ enum decl_kind {
 	DECL_STR,
 	DECL_STRWIDE,
 	DECL_HEXSTR,
-	DECL_NAME
+	DECL_NAME,
+	DECL_PLAGUE
 };
 
 struct macro {
@@ -338,6 +362,7 @@ static const struct macro macros[] = {
 	 * be read as a plain one and silently look for the unencoded bytes. */
 	{ "KOF_DEFINE_STR_WIDE", DECL_STRWIDE },
 	{ "KOF_DEFINE_STR",    DECL_STR     },
+	{ "KOF_PLAGUE_BLOCK",  DECL_PLAGUE  },
 	{ NULL, DECL_RANGE }
 };
 
@@ -772,6 +797,115 @@ static int rng_name_taken(const char *nm)
 		if (strcmp(rngs[i].name, nm) == 0)
 			return 1;
 	return 0;
+}
+
+static int blk_name_taken(const char *nm)
+{
+	int i;
+	for (i = 0; i < nblks; i++)
+		if (strcmp(blks[i].name, nm) == 0)
+			return 1;
+	return 0;
+}
+
+/*
+ * The normalizer, argument 3 of KOF_PLAGUE_BLOCK.
+ *
+ * By name only. The value decides how the hashes were computed, so a rule whose
+ * normalizer disagreed with the one the generator used would produce a block
+ * that matches nothing and reports no error anywhere - which is the failure
+ * every name-not-number rule in this file exists to prevent.
+ */
+static int read_norm(const char *p, int line, struct blk *out)
+{
+	static const struct { const char *name; uint32_t v; } nm[] = {
+		{ "KOF_PLAGUE_RAW", KOF_PLAGUE_RAW },
+		{ "KOF_PLAGUE_XOR", KOF_PLAGUE_XOR },
+		{ "KOF_PLAGUE_SUB", KOF_PLAGUE_SUB },
+		{ NULL, 0 }
+	};
+	const char *a = nth_arg(p, 3, line);
+	char tok[64];
+	size_t n = 0;
+	int i;
+
+	if (!a)
+		return 0;
+	/* nth_arg returns the byte after the comma, so the argument still has
+	 * whatever the author wrote before it - a space, or a newline and a tab
+	 * when the declaration is spread over several lines, which a generated
+	 * one always is. */
+	while (*a == ' ' || *a == '\t' || *a == '\n' || *a == '\r')
+		a++;
+	while (*a && *a != ',' && *a != ')' && *a != ' ' && *a != '\t' &&
+	       *a != '\n' && *a != '\r' && n + 1u < sizeof tok)
+		tok[n++] = *a++;
+	tok[n] = 0;
+	for (i = 0; nm[i].name; i++)
+		if (strcmp(tok, nm[i].name) == 0) {
+			out->norm = nm[i].v;
+			return 1;
+		}
+	err(line, "unknown normalizer; use KOF_PLAGUE_RAW, _XOR or _SUB");
+	return 0;
+}
+
+/*
+ * The hashes: every argument from the fourth on.
+ *
+ * Read as unsigned 32 bit values however they are spelled, because a generator
+ * writes them in hex and a person editing one may not. A value that does not
+ * parse is a hard error rather than a zero, since a zero is a legal hash and
+ * would sit in the block being silently wrong.
+ */
+static int read_hashes(const char *p, int line, struct blk *out)
+{
+	const char *a = nth_arg(p, 4, line);
+
+	if (!a)
+		return 0;
+	out->n_hash = 0;
+	/*
+	 * Walked here rather than by asking nth_arg for argument 5, 6, 7 and so
+	 * on: that call reports "too few arguments" when it runs off the end,
+	 * which is the correct answer for a fixed arity macro and the wrong one
+	 * for a list. The list ends at the closing parenthesis, so that is what
+	 * this looks for.
+	 */
+	for (;;) {
+		char *end;
+		unsigned long long v;
+
+		while (*a == ' ' || *a == '\t' || *a == '\n' || *a == '\r' ||
+		       *a == ',')
+			a++;
+		if (!*a || *a == ')')
+			break;
+		if (out->n_hash >= KOF_PLAGUE_MAX_HASH) {
+			err(line, "more hashes than a block may carry");
+			return 0;
+		}
+		v = strtoull(a, &end, 0);
+		if (end == a) {
+			err(line, "a hash that is not a number");
+			return 0;
+		}
+		if (v > 0xffffffffull) {
+			err(line, "a hash wider than 32 bits");
+			return 0;
+		}
+		out->hash[out->n_hash++] = (uint32_t)v;
+		a = end;
+		/* A generated list writes them as 0x........u; skip whatever
+		 * integer suffix the author or the generator used. */
+		while (*a == 'u' || *a == 'U' || *a == 'l' || *a == 'L')
+			a++;
+	}
+	if (out->n_hash < KOF_PLAGUE_MIN_HASH) {
+		err(line, "too few hashes to score a block with; widen it");
+		return 0;
+	}
+	return 1;
 }
 
 /* Read the detection name into a NUL terminated buffer. */
@@ -2019,6 +2153,38 @@ static void scan_line(char *at, size_t line_len, int lineno)
 		return;
 	}
 
+	if (m->kind == DECL_PLAGUE) {
+		struct blk *b;
+		struct rng tmp;
+
+		if (nblks >= MAX_PATTERNS) {
+			err(lineno, "too many declared blocks");
+			return;
+		}
+		b = &blks[nblks];
+		memset(b, 0, sizeof *b);
+		b->line = lineno;
+		if (!read_ident(p, lineno, b->name, sizeof b->name))
+			return;
+		if (blk_name_taken(b->name)) {
+			err(lineno, "a block with this name is already declared");
+			return;
+		}
+		/* The region is spelled exactly as a range's is, so it is read
+		 * by the same code - a second spelling of the same thing is a
+		 * second place for the two to drift. */
+		memset(&tmp, 0, sizeof tmp);
+		if (!read_mask(p, lineno, &tmp))
+			return;
+		b->mask = tmp.mask;
+		if (!read_norm(p, lineno, b))
+			return;
+		if (!read_hashes(p, lineno, b))
+			return;
+		nblks++;
+		return;
+	}
+
 	if (npats >= MAX_PATTERNS) {
 		err(lineno, "too many declared strings in one source file");
 		return;
@@ -2227,6 +2393,24 @@ static void emit_str_record(FILE *out, const struct pat *p, int idx)
 static void emit_rng_record(FILE *out, const struct rng *r, int idx)
 {
 	fprintf(out, "r\t%d\t%u\n", idx, r->mask);
+}
+
+static void emit_blk_id(FILE *out, const struct blk *b, int idx)
+{
+	fprintf(out, "/* line %d: block, region mask 0x%x, norm %u, %u hash(es) */\n",
+		b->line, b->mask, b->norm, b->n_hash);
+	fprintf(out, "#define kof_blockid_%s %d\n\n", b->name, idx);
+}
+
+/* b <id> <mask> <norm> <n> <hashes in hex, no separator> */
+static void emit_blk_record(FILE *out, const struct blk *b, int idx)
+{
+	uint32_t i;
+
+	fprintf(out, "b\t%d\t%u\t%u\t%u\t", idx, b->mask, b->norm, b->n_hash);
+	for (i = 0; i < b->n_hash; i++)
+		fprintf(out, "%08x", b->hash[i]);
+	fputc('\n', out);
 }
 
 /*
@@ -3961,6 +4145,8 @@ static int extract_main(int argc, char **argv)
 		emit_rng_id(out, &rngs[i], i);
 	for (i = 0; i < npats; i++)
 		emit_str_id(out, &pats[i], i);
+	for (i = 0; i < nblks; i++)
+		emit_blk_id(out, &blks[i], i);
 	fclose(out);
 
 	out = fopen(argv[4], "w");
@@ -4033,6 +4219,8 @@ static int extract_main(int argc, char **argv)
 		emit_rng_record(out, &rngs[i], i);
 	for (i = 0; i < npats; i++)
 		emit_str_record(out, &pats[i], i);
+	for (i = 0; i < nblks; i++)
+		emit_blk_record(out, &blks[i], i);
 	fclose(out);
 
 	printf("   %d string(s), %d range(s), %d name(s), scan_mask=0x%lx\n",
@@ -4087,6 +4275,14 @@ struct artefact {
 	struct kof_pw_name *name;
 	uint32_t            n_names;
 
+	/* The similarity blocks this module declared, and the hashes they are
+	 * slices of. Empty for every module that declared none, which is all of
+	 * them outside bases/plague. */
+	struct kof_plague_block *blk;
+	uint32_t                 n_blk;
+	uint32_t                *pool;
+	uint32_t                 n_pool;
+
 	/* The literals and name texts the descriptors above point into. */
 	uint8_t *str_bytes;
 	char    *name_text;
@@ -4102,6 +4298,8 @@ static void artefact_free(struct artefact *a)
 	free(a->code);
 	free(a->str);
 	free(a->rng);
+	free(a->blk);
+	free(a->pool);
 	free(a->name);
 	free(a->str_bytes);
 	free(a->name_text);
@@ -4464,6 +4662,64 @@ static int strs_load(struct artefact *a)
 				rcap = nc;
 			}
 			a->rng[a->n_rng++] = (uint32_t)strtoul(tab + 1, 0, 10);
+		/* b <id> <mask> <norm> <n> <hashes, 8 hex digits each> */
+		} else if (p[0] == 'b' && p[1] == '\t') {
+			unsigned long v[3];
+			char *hex;
+			uint32_t k;
+			struct kof_plague_block *nb;
+			uint32_t *np;
+
+			p += 2;
+			for (k = 0; k < 3u; k++) {
+				tab = strchr(p, '\t');
+				if (!tab)
+					break;
+				*tab = 0;
+				v[k] = strtoul(p, 0, 10);
+				p = tab + 1;
+			}
+			if (k != 3u)
+				continue;
+			tab = strchr(p, '\t');
+			if (!tab)
+				continue;
+			*tab = 0;
+			{
+				unsigned long n_hash = strtoul(p, 0, 10);
+
+				hex = tab + 1;
+				if (n_hash < KOF_PLAGUE_MIN_HASH ||
+				    n_hash > KOF_PLAGUE_MAX_HASH ||
+				    strlen(hex) < n_hash * 8u)
+					goto out;
+				nb = realloc(a->blk, (a->n_blk + 1u) * sizeof *nb);
+				if (!nb)
+					goto out;
+				a->blk = nb;
+				np = realloc(a->pool,
+					     (a->n_pool + n_hash) * sizeof *np);
+				if (!np)
+					goto out;
+				a->pool = np;
+
+				nb = &a->blk[a->n_blk];
+				memset(nb, 0, sizeof *nb);
+				nb->first_hash = a->n_pool;
+				nb->n_hash = (uint32_t)n_hash;
+				nb->scan_mask = (uint32_t)v[1];
+				nb->norm = (uint8_t)v[2];
+				for (k = 0; k < n_hash; k++) {
+					char one[9];
+
+					memcpy(one, hex + k * 8u, 8u);
+					one[8] = 0;
+					a->pool[a->n_pool + k] =
+						(uint32_t)strtoul(one, 0, 16);
+				}
+				a->n_pool += (uint32_t)n_hash;
+				a->n_blk++;
+			}
 		/* s <id> <icase> <fullword> <len> <literal> */
 		} else if (p[0] == 's' && p[1] == '\t') {
 			unsigned long v[4], icase, fullw, len;
@@ -4874,6 +5130,17 @@ static uint64_t target_set_of(const struct artefact *a)
 /* A set of artefacts sharing one grouping key, which is one pack. */
 struct group {
 	uint32_t  kind, arch_mask;
+	/*
+	 * Whether the members measure a similarity block.
+	 *
+	 * Part of the grouping key and not just of the name. A plague rule is a
+	 * detector by kind - it runs in the same loop, reports the same way -
+	 * but what it carries is a hash pool and what it answers is a
+	 * percentage, and a reader of a directory listing should not have to
+	 * open a pack to find that out. So they group apart and the file says
+	 * so: plague-raw.ksig, not sigs-raw.ksig.
+	 */
+	int       plague;
 	uint64_t  target_set;            /* see target_set_of */
 	int       bucket;                /* enum pack_bucket, or BUCKET_NONE */
 	uint32_t *member;                /* indices into the artefact array */
@@ -5091,6 +5358,8 @@ static int write_file(const char *path, const uint8_t *data, size_t len)
 	return 1;
 }
 
+static const char *group_name(const struct group *g);
+
 static const char *kind_name(uint32_t k)
 {
 	/* "heur" reads as what it is on the filesystem, which is where somebody
@@ -5099,6 +5368,14 @@ static const char *kind_name(uint32_t k)
 	 * named sigs- is a pack of rules nobody knows is there. */
 	return k == KOF_PACK_UNPACK ? "unpack" :
 	       k == KOF_PACK_HEUR   ? "heur" : "sigs";
+}
+
+/* The word a pack's filename starts with. Everything is its kind except a
+ * similarity pack, which is a detector by kind and a different thing to a
+ * reader - see struct group. */
+static const char *group_name(const struct group *g)
+{
+	return g->plague ? "plague" : kind_name(g->kind);
 }
 
 /*
@@ -6254,6 +6531,7 @@ static int pack_main(int argc, char **argv)
 		 */
 		for (j = 0; j < n_groups; j++)
 			if (groups[j].kind == arts[a].kind &&
+			    groups[j].plague == (arts[a].n_blk != 0) &&
 			    ((ab != BUCKET_NONE && groups[j].bucket == ab) ||
 			     (ab == BUCKET_NONE &&
 			      groups[j].bucket == BUCKET_NONE &&
@@ -6277,6 +6555,7 @@ static int pack_main(int argc, char **argv)
 			g->bucket      = ab;
 			g->target_set  = target_set_of(&arts[a]);
 			g->arch_mask   = arts[a].arch_mask;
+			g->plague      = (arts[a].n_blk != 0);
 		} else {
 			/*
 			 * The union, for the name. arch_mask 0 means ANY, so
@@ -6350,6 +6629,10 @@ static int pack_main(int argc, char **argv)
 			pm[a].n_str       = s->n_str;
 			pm[a].rng         = s->rng;
 			pm[a].n_rng       = s->n_rng;
+			pm[a].blk         = s->blk;
+			pm[a].n_blk       = s->n_blk;
+			pm[a].pool        = s->pool;
+			pm[a].n_pool      = s->n_pool;
 			pm[a].name        = s->name;
 			pm[a].n_names     = s->n_names;
 			pm[a].family      = s->family;
@@ -6428,7 +6711,7 @@ static int pack_main(int argc, char **argv)
 			}
 
 			snprintf(path, sizeof path, "%s/%s-%s%s%s.ksig",
-				 outdir, kind_name(g->kind), fmt,
+				 outdir, group_name(g), fmt,
 				 arch[0] ? "-" : "", arch);
 
 			/*
@@ -6453,7 +6736,7 @@ static int pack_main(int argc, char **argv)
 					continue;
 				snprintf(path, sizeof path,
 					 "%s/%s-%s-x%llx%s%s.ksig", outdir,
-					 kind_name(g->kind), fmt,
+					 group_name(g), fmt,
 					 (unsigned long long)g->target_set,
 					 arch[0] ? "-" : "", arch);
 				break;

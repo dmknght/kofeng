@@ -104,6 +104,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <kofmod/kofplague.h>
+
 /* "KOFP", little end first. Byte order is the host's; this only has to differ
  * from whatever else might be handed to the loader by mistake. */
 #define KOF_PACK_MAGIC   0x50464f4bu
@@ -342,7 +344,23 @@ enum kof_pack_sec_id {
 	 * version below is what refuses those instead. */
 	KOF_SEC_PRE_SUBTYPE = 13, /* uint32 x n_mods */
 
-	KOF_SEC_COUNT      = 14
+	/*
+	 * The similarity blocks and the hashes they slice.
+	 *
+	 * Two sections rather than one for the reason STR_DESC and STR_POOL are
+	 * two: a block is a fixed record and the hashes are a variable run, and
+	 * a reader walks the first without touching the second.
+	 *
+	 * Empty in every pack outside bases/plague, and empty costs a section
+	 * table row - which is why they are here rather than being a pack kind
+	 * of their own. A plague rule is an ordinary detector that happens to
+	 * measure a block; giving it a separate pipeline would mean it could not
+	 * say "this string AND that block", which is the shape it exists for.
+	 */
+	KOF_SEC_PLAGUE_BLK  = 14, /* struct kof_plague_block x n_blk */
+	KOF_SEC_PLAGUE_POOL = 15, /* uint32 x n_pool */
+
+	KOF_SEC_COUNT      = 16
 };
 
 /*
@@ -477,6 +495,10 @@ struct kof_pack_hdr {
 	uint32_t n_str;
 	uint32_t n_rng;
 	uint32_t n_names;
+	/* The similarity blocks in this pack, and the hashes they slice - see
+	 * KOF_SEC_PLAGUE_BLK. Zero for every pack that carries none. */
+	uint32_t n_blk;
+	uint32_t n_pool;
 
 	/*
 	 * Preconditions for the pack as a whole: the union of what its modules
@@ -602,6 +624,9 @@ struct kof_pack_mod {
 	uint32_t str_first,  n_str;
 	uint32_t rng_first,  n_rng;
 	uint32_t name_first, n_names;
+	/* This module's slice of KOF_SEC_PLAGUE_BLK. Zero and zero unless it
+	 * declared KOF_PLAGUE_BLOCK. */
+	uint32_t blk_first,  n_blk;
 
 	uint32_t family_off;      /* into KOF_SEC_NAME_POOL, NUL terminated */
 	uint32_t maltype;         /* enum kof_maltype */
@@ -896,10 +921,11 @@ struct kof_pack_idx {
  * entered at the wrong offset. These fail the build instead.
  */
 _Static_assert(sizeof(struct kof_pack_sec)  == 16,  "pack section entry grew padding");
-/* 60 through v8; 64 from v9, which added heur_level. The number moves only
+/* 60 through v8; 64 from v9, which added heur_level; 72 with blk_first and
+ * n_blk, the module's slice of the similarity sections. The number moves only
  * with KOF_PACK_MAJOR or KOF_PACK_MINOR - if it moves without one, the edit is
  * the bug. */
-_Static_assert(sizeof(struct kof_pack_mod)  == 64,  "pack module record grew padding");
+_Static_assert(sizeof(struct kof_pack_mod)  == 72,  "pack module record grew padding");
 _Static_assert(sizeof(struct kof_pack_str)  == 12,  "pack string descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_name) == 8,   "pack name descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_idx)  == 8,   "pack index slot grew padding");
@@ -908,11 +934,12 @@ _Static_assert(sizeof(struct kof_pack_idx)  == 8,   "pack index slot grew paddin
  * padding, which is what it is for, but it also failed every time the section table
  * legitimately grew, which taught whoever hit it to update the number rather than to
  * ask why it moved. */
-/* 88 while any_target was a uint32 mask; 96 now that it is a 64 bit presence
+/* 88 while any_target was a uint32 mask; 96 once it became a 64 bit presence
  * set over target ids - see the field, and n_target in kofdb.h for why the
- * axis stopped being bits. */
+ * axis stopped being bits; 104 with n_blk and n_pool, the two counts the
+ * similarity sections need. */
 _Static_assert(sizeof(struct kof_pack_hdr) ==
-	       96 + KOF_SEC_COUNT * sizeof(struct kof_pack_sec),
+	       104 + KOF_SEC_COUNT * sizeof(struct kof_pack_sec),
 	       "pack header changed size");
 
 /* The checksum has to start after itself and cover everything else. */

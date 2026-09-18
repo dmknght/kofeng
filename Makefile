@@ -850,6 +850,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofdb/kofpackw.c \
            libkofeng/kofheur/kofheur.c \
            libkofeng/kofmatchers/kofmatch.c \
+           libkofeng/kofmatchers/kofplague.c \
            libkofeng/kofmatchers/kofmultimatch.c \
            libkofeng/kofmatchers/hexcomp.c \
            libkofeng/kofparsers/binaries/elf_parse.c \
@@ -1041,6 +1042,7 @@ $(LIB): $(LIB_OBJ) $(EMU_OBJ) $(VENDOR_OBJ)
 
 SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/kofsig.h \
+           $(SDK)/include/kofmod/kofplague.h \
            $(SDK)/include/kofmod/heur.h \
            $(SDK)/include/kofmod/kofsym.h \
            $(SDK)/include/kofmod/wrap.h \

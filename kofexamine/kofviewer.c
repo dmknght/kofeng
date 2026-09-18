@@ -74,6 +74,7 @@
 #include "kofevtfmt.h"
 #include "kofevtlog.h"
 #include "kofinspect.h"
+#include <kofmod/kofplague.h>
 #include "kofview.h"
 #include "kofwalk.h"
 #include "kofproc.h"
@@ -90,6 +91,7 @@
 #include "../libkofeng/kofmatchers/kofmatch.h"
 #include "../libkofeng/kofmatchers/hexprog.h"
 #include "../libkofeng/kofdb/kofpack.h"
+#include "../libkofeng/kofdb/kofdb.h"
 
 
 /*
@@ -412,6 +414,32 @@ static void dis_paint(struct out *o, const char *text)
  */
 #define A_HIT3  "\033[45;97m"
 
+/*
+ * THE PLAGUE PALETTE: one colour per highlighted block, cycled.
+ *
+ * Five, and dim rather than bright. A block is up to a few kilobytes, so a lit
+ * one fills screens of hex - a saturated background over that much text is
+ * unreadable and hurts to look at, which is the opposite of what a highlight is
+ * for. These sit far enough apart to tell two blocks apart and close enough to
+ * the page that the bytes stay legible.
+ *
+ * Cycled by INDEX, so two blocks share a colour only when five lie between
+ * them. Adjacent blocks - the ones a reader is comparing - never collide, which
+ * is the only case where a repeat would mislead.
+ *
+ * The same string is used in two places that must agree: the hex pane paints
+ * with it, and the block table draws its swatch with it. One array, so they
+ * cannot drift.
+ */
+#define PLG_COLOURS 5
+static const char *const plg_colour[PLG_COLOURS] = {
+	"\033[48;5;24m\033[97m",    /* slate blue   */
+	"\033[48;5;58m\033[97m",    /* olive        */
+	"\033[48;5;53m\033[97m",    /* plum         */
+	"\033[48;5;23m\033[97m",    /* deep teal    */
+	"\033[48;5;94m\033[97m"     /* burnt orange */
+};
+
 
 #define TREE_W   31
 
@@ -566,6 +594,9 @@ static int hex_last(void)
  * file learned the hard way when the size editor claimed everything from 200
  * up and swallowed the boxes added above it.
  */
+/* One edit target per block row, so the caret knows which threshold it is in.
+ * Above ED_STR's range, which is per declared string. */
+#define ED_PLG_THR 700
 #define ED_STR    600
 
 /* Every row the draft panel can ever hold, spelled from the limits rather than
@@ -1061,6 +1092,17 @@ static void hit_wheel_text(struct view *v, uint32_t arg);
 static void hit_hwheel_text(struct view *v, uint32_t arg);
 /* The heading row's controls. One span each, registered where each is drawn -
  * see the note above draw_decl_head on what sharing a field cost. */
+static void hit_plg_tick(struct view *v, uint32_t i);
+static void hit_plg_light(struct view *v, uint32_t i);
+static void view_show_in(struct view *v, uint32_t obj, uint8_t sym,
+			 uint64_t off, int narrow);
+static void hit_plg_thr(struct view *v, uint32_t i);
+static void hit_plg_join(struct view *v, uint32_t i);
+static uint32_t plg_n_picked(const struct view *v);
+static void hit_plg_norm(struct view *v, uint32_t i);
+static void hit_plg_wheel(struct view *v, uint32_t arg);
+static void hit_plg_rgn(struct view *v, uint32_t i);
+static void plg_generate(struct view *v);
 static void hit_head_type(struct view *v, uint32_t arg);
 static void hit_head_family(struct view *v, uint32_t arg);
 static void hit_head_note(struct view *v, uint32_t arg);
@@ -1072,7 +1114,187 @@ static void view_show_decl(struct view *v, const struct decl *d, uint64_t off);
 static void hit_row_ranges(struct view *v, uint32_t arg);
 static void hit_optbtn(struct view *v, uint32_t arg);
 
+/*
+ * How many blocks one object may be carved into.
+ *
+ * The ENGINE carves; the researcher ticks. That division is the whole point and
+ * is worth stating because the two are easy to confuse: cutting a file into
+ * blocks is a content question with a right answer, and deciding which block
+ * identifies a family is a judgement with none. Segmenting needs no corpus and
+ * makes no claim; choosing needs a person who has read the bytes.
+ *
+ * Sixty-four because a segmented file has as many blocks as it has distinct
+ * areas, not as many as a person would have drawn by hand. Past that the list
+ * has stopped being something a reader can look down.
+ */
+#define PLG_MAX_BLOCK 64u
+/* How many regions one object's share-out has room for. Every format's table
+ * is far shorter than this; the bound is here so the arrays that hold the
+ * share-out are fixed. */
+#define PLG_MAX_REGION 32u
+
+/*
+ * One block a researcher has marked on THIS object.
+ *
+ * The hashes are computed when the block is marked, not when the rule is
+ * written, so the table can show what the block actually yields - a span that
+ * produces eleven hashes cannot be a rule and the author should learn that
+ * while they are still choosing the span.
+ */
+struct plg_block {
+	uint64_t off, len;                 /* where it is in this object */
+	uint32_t mask;                     /* the region it was taken from */
+	uint32_t hash[KOF_PLAGUE_MAX_HASH];
+	uint32_t n_hash;
+	/*
+	 * The whole block folded to one value, shown in the table and clicked
+	 * on. Not a hash OF the hashes for any cryptographic reason - it is a
+	 * name, short enough to read off a row and stable enough that the same
+	 * block always shows the same one.
+	 */
+	uint32_t id;
+	/*
+	 * The region's NAME, kept rather than resolved later.
+	 *
+	 * Resolving a bit to a word needs the format's own table, and the block
+	 * outlives the moment that table was in hand - a reader may switch
+	 * objects and come back. The name is a property of where the block came
+	 * from, so it is recorded with it.
+	 */
+	char     rgn[20];
+	/*
+	 * And the region's ENUM SPELLING, which is a different string from the
+	 * label above and is the one a generated rule must carry: the table
+	 * shows "CODE", the source says KOF_SCAN_ELF_CODE, and writing the
+	 * short form into a rule produces a file that does not compile.
+	 */
+	char     rgn_enum[48];
+	/*
+	 * LOOK FOR IT ANYWHERE IN THE FILE, not only in the region it came
+	 * from.
+	 *
+	 * The region is an ANCHOR and it is usually the right one - the same
+	 * bytes in another region are another fact, and a rule that ignored
+	 * that would score on a copy of the block sitting in a resource. But it
+	 * is not always right: a rebuild moves a blob from CODE to DATA, a
+	 * packer moves it into an overlay, and a block anchored to where it was
+	 * the first time then scores nothing on the very sample the rule was
+	 * written to catch.
+	 *
+	 * So it is the author's choice, per block, and the matcher already has
+	 * the case: KOF_SCAN_ALL is a region bit of its own that the scanner
+	 * feeds with the whole file. The fields above stay as the block was
+	 * CARVED, so the choice can be taken back.
+	 */
+	uint8_t  anywhere;
+	/*
+	 * HOW THIS BLOCK ATTACHES TO THE ONE ABOVE IT - enum cnd_join, and the
+	 * same vocabulary the draft's conditions use, because it is the same
+	 * question. Two blocks ANDed are one test that needs both; ORed they
+	 * are two rules in one file. The first block in the list has nothing
+	 * above it and its join is not read.
+	 */
+	uint8_t  join;
+	/*
+	 * THE RULE THE DATABASE ALREADY HAS THIS BLOCK IN, if any.
+	 *
+	 * A block has no name in a pack - the source calls it blk_<something>
+	 * and only the numbers are shipped - so the way to recognise one is by
+	 * its CONTENT: carve the sample, fold each block's hashes, and a value
+	 * that matches a declared block IS that declared block. Measured on a
+	 * Gafgyt sample the carve reproduced blk_dded9322 exactly.
+	 *
+	 * This is what a detected file is for: open it, and the rows the rule
+	 * fired on say which rule and what they scored, beside the rows nobody
+	 * has written a rule for yet.
+	 */
+	char     known[24];
+	uint8_t  norm;                     /* enum kof_plague_norm */
+	uint8_t  picked;                   /* ticked: goes into the rule */
+	uint8_t  lit;                      /* painted in the hex pane */
+	uint8_t  colour;                   /* index into plg_colour */
+	/*
+	 * CARRIED FROM ANOTHER SAMPLE, rather than carved from this object.
+	 *
+	 * A ticked block survives moving to another file - that is the whole
+	 * point of the mode, and without it the score below could only ever be
+	 * a hundred, because a block carved from the object on screen contains
+	 * itself. Its offsets belong to the sample it came from, so a carried
+	 * block cannot be lit in the hex pane of this one; `from` is what it
+	 * was carved from, so a table of blocks from three samples still says
+	 * which is which.
+	 */
+	uint8_t  kept;
+	char     from[32];
+	/*
+	 * How much of this block is in the object now on screen.
+	 *
+	 * The number the whole mode exists to show: mark a block on one sample,
+	 * open another, and this says how much of it survived. On the sample it
+	 * was carved from it is a hundred BY CONSTRUCTION - every hash of the
+	 * block came out of those bytes - so there the column says "self"
+	 * rather than printing an arithmetic certainty as though it were a
+	 * measurement. See `kept`.
+	 */
+	uint8_t  score;
+	/*
+	 * THE CONDITION, which is the whole of what a plague rule decides.
+	 *
+	 * A block produces a percentage; this is the percentage at which the
+	 * author says it counts. It is per block and not per rule because two
+	 * blocks in one rule are not the same kind of evidence - a config table
+	 * may be worth demanding almost whole, and an anchor beside it worth
+	 * demanding barely at all.
+	 *
+	 * Fifty to begin with, which is a starting point and is meant to be
+	 * moved: the `here` column beside it is what tells the author where to
+	 * move it to.
+	 */
+	uint8_t  thr;
+};
+
 struct view {
+	/*
+	 * PLAGUE MODE: the same pane, asking a different question.
+	 *
+	 * It replaces the draft panel rather than sitting beside it because the
+	 * two are alternatives - a signature is written out of patterns or out
+	 * of blocks, and a screen offering both at once would be offering a
+	 * choice nobody makes halfway.
+	 */
+	/* The scanner that is running RIGHT NOW, so on_object can ask it what
+	 * the database's blocks scored before it is freed. NULL at every other
+	 * moment, which is what stops anything else from reaching for it. */
+	kof_scanner     *scan_sc;
+	int              plg_on;
+	/*
+	 * A POINTER, so ticked blocks can outlive opening the next file.
+	 *
+	 * Everything else about a view is about the file in front of it and is
+	 * cleared when another is opened. These are not: a block ticked on one
+	 * sample is the QUESTION being asked of the next one, and clearing it
+	 * left the score column with nothing to measure. Held the way ext and
+	 * probe are - allocated once in main, carried across the clear.
+	 */
+	struct plg_block *plg;
+	uint32_t         n_plg;
+	uint32_t         plg_sel;          /* the row the keyboard is on */
+	/*
+	 * What the last scoring pass was about, so a frame that changed
+	 * neither does not redo it.
+	 *
+	 * Scoring walks the object, which is the one thing in this panel that
+	 * is not free - and the answer only moves when the blocks change or
+	 * the reader moves to another object. Both are captured here.
+	 */
+	uint32_t         plg_scored_obj;
+	uint32_t         plg_scored_n;
+	int              plg_scored;
+	/* Which object the table was carved from, so moving to another one
+	 * carves that one instead of showing the last one's blocks. */
+	uint32_t         plg_seg_obj;
+	int              plg_segged;
+
 	/* The signature generator's model - see kofeditor.h. */
 	struct kof_editor ed;
 	const char *path;
@@ -1365,6 +1587,18 @@ struct view {
 	int                  evt_txt_drag;
 
 	struct kof_range *ext;
+	/*
+	 * A SECOND EXTENT BUFFER, for anything that resolves a region that is
+	 * not the one on screen.
+	 *
+	 * `ext` holds the SELECTED region's runs and is what view_map and
+	 * view_unmap read - the hex pane's entire sense of where it is. Plague
+	 * mode resolves other regions to carve and to score, and resolving into
+	 * `ext` overwrote that: the highlight then mapped through the wrong
+	 * runs and landed nowhere, and the pane it was drawn over was reading
+	 * the same wreckage.
+	 */
+	struct kof_range *ext2;
 	uint32_t          n_ext;
 	/*
 	 * A second extent buffer, for asking about a region that is not the one
@@ -1752,6 +1986,26 @@ struct view {
 	uint8_t     prow_kind[MAX_PROW];
 	uint32_t    prow_idx[MAX_PROW];
 	uint32_t    n_prow, prow_off;
+	/*
+	 * PLAGUE MODE SCROLLS THE BLOCK LIST AND NOTHING ELSE.
+	 *
+	 * The condition and what the database scored are written BELOW the
+	 * list, and a carve produces as many as sixty-four blocks against a
+	 * panel a dozen rows tall - so scrolled as one column they went off the
+	 * bottom and the author lost the two rows that say what the ticking is
+	 * building. They are what a reader looks at WHILE ticking, so they hold
+	 * still and the list moves inside them.
+	 *
+	 * plg_above is how many rows sit above the list and plg_win how many
+	 * the list itself gets; the drawing, the clamp, the wheel and the
+	 * scrollbar all read these rather than each deriving them again.
+	 */
+	uint32_t    plg_above, plg_win;
+	/* The threshold being typed, as text - a percentage is edited the way
+	 * every other box here is edited, and committed back to the block on
+	 * each key. */
+	char        plg_thr_buf[8];
+	uint32_t    plg_thr_off;
 	/*
 	 * How many draft rows the panel is allowed to show, and whether the
 	 * divider is being dragged.
@@ -2636,6 +2890,7 @@ static void proc_collect(struct view *v, kof_engine *eng, uint32_t pid)
 	if (!sc)
 		return;
 	kof_scanner_on_debug(sc, on_debug, v);
+	v->scan_sc = sc;
 
 	memset(&wo, 0, sizeof wo);
 	pids[0] = pid;
@@ -2645,6 +2900,7 @@ static void proc_collect(struct view *v, kof_engine *eng, uint32_t pid)
 	wo.intent = KOF_WALK_MAP;
 	w = kof_walk_open(&wo, &err);
 	if (!w) {
+		v->scan_sc = NULL;
 		kof_scanner_free(sc);
 		return;
 	}
@@ -2850,6 +3106,7 @@ static void proc_collect(struct view *v, kof_engine *eng, uint32_t pid)
 		}
 	}
 	w->close(w->self);
+	v->scan_sc = NULL;
 	kof_scanner_free(sc);
 }
 
@@ -2910,6 +3167,7 @@ static void objects_collect(struct view *v, kof_engine *eng)
 	if (!sc)
 		return;
 	kof_scanner_on_debug(sc, on_debug, v);
+	v->scan_sc = sc;
 	kof_scan_path(sc, v->path, &opt, on_object, v);
 	kof_scanner_free(sc);
 }
@@ -3327,14 +3585,36 @@ static void object_touch(struct view *v, uint32_t at)
 		o->n_touch = 0;
 }
 
+/*
+ * THE STRONGEST THING THAT FIRED, not the first.
+ *
+ * Rows are in database order, so "the first that fired" is whichever pack
+ * happened to load first - and a heuristic pack loading before a signature pack
+ * meant a file with a real detection opened showing a guess. Measured on a
+ * Gafgyt sample the scanner names ELF-x64/Botnet:Gafgyt#100!Plague: the panel
+ * opened on Heur:Truncated, the status line said so, and the rule that actually
+ * caught the file was not the one loaded for editing.
+ *
+ * INFECT beats SUSPECT beats HEUR, and within a level the first still wins -
+ * two signatures firing is a thing a reader settles by looking at both.
+ */
 static uint32_t touch_default(const struct object *ob)
 {
-	uint32_t i;
+	uint32_t i, best = ob->n_touch, best_rank = 0;
 
-	for (i = 0; i < ob->n_touch; i++)
-		if (ob->touch[i].fired)
-			return i;
-	return ob->n_touch;             /* nothing fired: select nothing */
+	for (i = 0; i < ob->n_touch; i++) {
+		uint32_t rank;
+
+		if (!ob->touch[i].fired)
+			continue;
+		rank = ob->touch[i].fired_level == KOF_LEVEL_INFECT ? 3u
+		     : ob->touch[i].fired_level == KOF_LEVEL_SUSPECT ? 2u : 1u;
+		if (rank > best_rank) {
+			best_rank = rank;
+			best = i;
+		}
+	}
+	return best;                    /* nothing fired: select nothing */
 }
 
 static void objects_examine(struct view *v, kof_engine *eng)
@@ -5894,6 +6174,622 @@ static uint64_t view_unmap(const struct view *v, uint64_t off)
 	return KOF_BROKEN;
 }
 
+/* ---- plague mode: blocks a researcher marked ------------------------------- */
+
+/*
+ * Hash one span of the object the way the engine will.
+ *
+ * kof_plague_mix and kof_plague_selects come from kofmod/kofplague.h and are
+ * compiled here rather than called through the library ON PURPOSE - the header
+ * says why. A generator that produced values the matcher does not is a rule that
+ * matches nothing and reports no error, so the two sides share the lines rather
+ * than an interface.
+ *
+ * The k smallest DISTINCT values, which is the same cut the matcher expects: a
+ * block and a file both keep their smallest, so the two subsets overlap wherever
+ * the content does.
+ */
+static uint32_t plg_hash_span(const uint8_t *p, uint64_t n, uint32_t norm,
+			      uint32_t *out, uint32_t max_out)
+{
+	uint32_t h = 0, drop = kof_plague_drop_weight(), i, got = 0;
+	uint64_t at;
+	static uint32_t tmp[1u << 14];
+	uint32_t nt = 0;
+
+	if (norm != KOF_PLAGUE_RAW) {
+		if (n < 2u)
+			return 0;
+		n -= 1u;
+	}
+	if (n < KOF_PLAGUE_NG)
+		return 0;
+
+#define PB(k) ((uint32_t)(norm == KOF_PLAGUE_RAW ? p[(k)]                     \
+	       : norm == KOF_PLAGUE_XOR ? (uint8_t)(p[(k)] ^ p[(k) + 1u])     \
+	       : (uint8_t)(p[(k) + 1u] - p[(k)])))
+	for (i = 0; i < KOF_PLAGUE_NG; i++)
+		h = h * KOF_PLAGUE_BASE + PB(i);
+	for (at = 0;; at++) {
+		uint32_t m = kof_plague_mix(h);
+
+		if (kof_plague_selects(m) && !kof_plague_flat(p, at, norm) &&
+		    nt < (uint32_t)(sizeof tmp / sizeof tmp[0]))
+			tmp[nt++] = m;
+		if (at + KOF_PLAGUE_NG >= n)
+			break;
+		h -= PB(at) * drop;
+		h = h * KOF_PLAGUE_BASE + PB(at + KOF_PLAGUE_NG);
+	}
+#undef PB
+	for (i = 1; i < nt; i++) {
+		uint32_t vv = tmp[i], j = i;
+
+		while (j && tmp[j - 1u] > vv) { tmp[j] = tmp[j - 1u]; j--; }
+		tmp[j] = vv;
+	}
+	for (i = 0; i < nt && got < max_out; i++)
+		if (!i || tmp[i] != tmp[i - 1u])
+			out[got++] = tmp[i];
+	return got;
+}
+
+/*
+ * The region a block is MATCHED in, which is not always the one it was cut
+ * from - see plg_block.anywhere. Every place that feeds, scores or writes the
+ * block asks here, so the choice cannot be honoured in one of them and
+ * forgotten in another.
+ */
+/*
+ * REGIONS A SIMILARITY BLOCK IS NEVER CUT FROM.
+ *
+ * A header is a description of the file rather than part of its content: its
+ * bytes are offsets, sizes and flags that a rebuild rewrites and a compiler
+ * changes between two builds of the same source, so a block cut from one
+ * measures the toolchain and not the malware. The symbol regions are not bytes
+ * of the file at all - the host BUILDS those records while parsing - so a block
+ * cut from them has no offsets in any file and could not be looked for.
+ *
+ * Skipped at the carve rather than filtered out of the table afterwards,
+ * because the table's rows are a budget: a region that may not produce a block
+ * must not be counted for a share of it either.
+ */
+/*
+ * The region bit a KOF_SCAN_* spelling names, for THIS object's format.
+ *
+ * A rule read back from a file carries the spelling and not the bit - the bit
+ * is a format's own numbering and means nothing without one - so it is resolved
+ * against the parse in hand. KOF_SCAN_ALL when nothing matches, which is what a
+ * rule written for another format degrades to rather than matching nowhere.
+ */
+static uint32_t plg_mask_of_enum(const struct object *o, const char *word)
+{
+	const struct kof_parser *fp = o ? o->fmt : NULL;
+	uint32_t i;
+
+	if (!word || !word[0] || !fp || !fp->regions || !fp->region_name)
+		return (uint32_t)KOF_SCAN_ALL;
+	for (i = 0; i < fp->n_regions; i++) {
+		const char *rn = fp->region_name(fp->regions[i]);
+
+		if (rn && !strcmp(rn, word))
+			return fp->regions[i];
+	}
+	/*
+	 * A REGION THIS FORMAT HAS NOT GOT MEANS LOOK EVERYWHERE, not look
+	 * nowhere.
+	 *
+	 * The block is a run of bytes and the region is where it sat in the
+	 * sample it was cut from; another build puts the same bytes somewhere
+	 * else, and a format that has no such region at all cannot answer the
+	 * question. Refusing to match there was a rule that goes quiet on
+	 * exactly the objects it was written to reach.
+	 *
+	 * This is the MATCHING mask only. What the rule says stays what the
+	 * rule says - see plg_block.anywhere, which is the author's choice and
+	 * the only thing Generate writes.
+	 */
+	return (uint32_t)KOF_SCAN_ALL;
+}
+
+static int plg_region_skipped(const char *lbl)
+{
+	return !lbl || strstr(lbl, "HEADER") != NULL ||
+	       strncmp(lbl, "SYM", 3) == 0;
+}
+
+/* Is any block in the list one carried from another sample - which is the only
+ * thing the score column has a number for. */
+static int plg_kept_any(const struct view *v)
+{
+	uint32_t i;
+
+	for (i = 0; i < v->n_plg; i++)
+		if (v->plg[i].kept)
+			return 1;
+	return 0;
+}
+
+static uint32_t plg_mask(const struct plg_block *b)
+{
+	return b->anywhere ? (uint32_t)KOF_SCAN_ALL : b->mask;
+}
+
+/* The one value that names a block on screen - see struct plg_block. */
+static uint32_t plg_fold(const uint32_t *h, uint32_t n)
+{
+	uint32_t i, f = 2166136261u;
+
+	for (i = 0; i < n; i++)
+		f = kof_plague_mix(f ^ h[i]);
+	return f;
+}
+
+/*
+ * Is this REGION offset inside a lit block, and in what colour.
+ *
+ * Region offsets rather than file offsets because that is what the hex pane
+ * walks; a block records the file offsets it was cut from, so the comparison
+ * happens in one space after view_unmap. NULL when nothing lit covers it.
+ */
+static const char *plg_lit_at(const struct view *v, uint64_t rgn_off)
+{
+	uint32_t i;
+
+	if (!v->plg_on)
+		return NULL;
+	for (i = 0; i < v->n_plg; i++) {
+		const struct plg_block *b = &v->plg[i];
+		uint64_t lo;
+
+		if (!b->lit || !b->len)
+			continue;
+		lo = view_unmap(v, b->off);
+		if (lo == KOF_BROKEN)
+			continue;
+		if (rgn_off >= lo && rgn_off < lo + b->len)
+			return plg_colour[b->colour % PLG_COLOURS];
+	}
+	return NULL;
+}
+
+/*
+ * Mark the current hex selection as a block.
+ *
+ * The hashes are taken NOW, from the bytes on screen, so the table can say what
+ * the span is worth before the author commits to it. A span that yields eleven
+ * hashes cannot be a rule - KOF_PLAGUE_MIN_HASH is sixteen - and the honest
+ * moment to say so is while the selection is still there to widen.
+ */
+static int plg_mark(struct view *v, const uint8_t *base, uint64_t base_n,
+		    uint64_t lo, uint64_t hi, uint32_t mask, const char *rgn,
+		    const char *rgn_enum, uint32_t norm)
+{
+	struct plg_block *b;
+	uint64_t len;
+
+	if (v->n_plg >= PLG_MAX_BLOCK || lo >= hi || lo >= base_n)
+		return 0;
+	len = hi - lo;
+	if (len > base_n - lo)
+		len = base_n - lo;
+
+	b = &v->plg[v->n_plg];
+	memset(b, 0, sizeof *b);
+	b->off = lo;
+	/* Filled below; the duplicate test needs the hashes first - see the
+	 * end of this function. */
+	b->len = len;
+	b->mask = mask;
+	snprintf(b->rgn, sizeof b->rgn, "%s", rgn ? rgn : "ALL");
+	snprintf(b->rgn_enum, sizeof b->rgn_enum, "%s",
+		 rgn_enum ? rgn_enum : "KOF_SCAN_ALL");
+	b->norm = (uint8_t)norm;
+	/* The sample it was carved from, so a list holding blocks from three
+	 * of them still says which is which - see plg_block.kept. */
+	{
+		const struct object *co = cur_obj(v);
+		const char *nm = co ? co->name : "", *sl;
+
+		for (sl = nm; *sl; sl++)
+			if (*sl == '/' || *sl == '\\')
+				nm = sl + 1;
+		snprintf(b->from, sizeof b->from, "%s", nm);
+	}
+	b->n_hash = plg_hash_span(base + lo, len, norm, b->hash,
+				  KOF_PLAGUE_MAX_HASH);
+	if (b->n_hash < KOF_PLAGUE_MIN_HASH) {
+		/*
+		 * A SPAN THAT CANNOT BE SCORED IS NOT A BLOCK.
+		 *
+		 * Listing it with a warning beside it was the first shape and
+		 * it filled the table with padding: a run of zeroes is one
+		 * distinct window however long it is, and an object's alignment
+		 * gaps are most of what a carve produces. The list is what a
+		 * reader can choose from, so what cannot be chosen is not in
+		 * it.
+		 */
+		return 0;
+	}
+	b->id = plg_fold(b->hash, b->n_hash);
+	{
+		/*
+		 * A BLOCK THE LIST ALREADY HOLDS IS NOT ADDED TWICE.
+		 *
+		 * Opening an infected file loads the rule that caught it, and
+		 * the carve then reproduces the very block the rule declares -
+		 * that it does is the whole reason this works. Both would be
+		 * rows about one block, one of them saying it came from the
+		 * rule and one saying nothing.
+		 */
+		uint32_t d;
+
+		for (d = 0; d < v->n_plg; d++) {
+			if (v->plg[d].id != b->id)
+				continue;
+			/*
+			 * AND THE ROW THAT IS ALREADY THERE LEARNS WHERE IT IS.
+			 *
+			 * A block loaded from a rule has no offsets - they
+			 * belonged to the sample it was cut from - so its row
+			 * showed a size of zero and could not be lit. The carve
+			 * has just found the same block IN THIS FILE, which is
+			 * the position it was missing. Its score stays what was
+			 * measured; only the place is new.
+			 */
+			if (!v->plg[d].len) {
+				v->plg[d].off = b->off;
+				v->plg[d].len = b->len;
+				snprintf(v->plg[d].rgn, sizeof v->plg[d].rgn,
+					 "%s", b->rgn);
+			}
+			return 0;
+		}
+	}
+	/* Cycled by position so neighbours never share - see plg_colour. */
+	b->colour = (uint8_t)(v->n_plg % PLG_COLOURS);
+	b->thr = 50;
+	b->join = JN_AND;
+	v->n_plg++;
+	return 1;
+}
+
+/*
+ * CARVE THE OBJECT INTO BLOCKS. The engine's half of the job.
+ *
+ * Content defined boundaries, not fixed sizes: a cut chosen by a rolling hash
+ * over the bytes reappears in the same place in a variant that had something
+ * inserted before it, and a cut chosen by counting to four kilobytes does not.
+ * That is the property the whole mode rests on - a block has to be recognisable
+ * in the next sample, and a block whose edges move with every byte inserted
+ * ahead of it is not.
+ *
+ * Per REGION, because a block is a place as much as a span - the region is what
+ * a rule anchors to, and a cut that ran across the boundary between code and
+ * data would produce a block belonging to neither.
+ *
+ * NO JUDGEMENT IS MADE HERE. Every block of the object is offered; which of
+ * them identifies anything is the question the tick answers, and the one this
+ * code is deliberately not qualified to.
+ */
+/*
+ * THE BLOCK SIZES FOLLOW FROM THE SAMPLING RATE, they are not a taste.
+ *
+ * One window in 2^KOF_PLAGUE_SEL_BITS is kept - one in thirty-two - so a block
+ * yields about its length over thirty-two hashes, and only from bytes that
+ * VARY: a run of padding is one window repeated and collapses to a single
+ * distinct value however long it is.
+ *
+ * KOF_PLAGUE_MIN_HASH is sixteen, so five hundred bytes is the floor in the
+ * best case and nothing in the ordinary one - measured on a small ELF, 512 byte
+ * blocks came back with one hash each. Eight kilobytes averages 256 and stays
+ * useful through padding and repetition, which is what the numbers below are
+ * for.
+ */
+#define PLG_SEG_AVG   8192u          /* average block, as a power of two mask */
+#define PLG_SEG_MIN   2048u
+#define PLG_SEG_MAX  32768u
+
+static void plg_segment(struct view *v)
+{
+	struct object *o = cur_obj(v);
+	const struct kof_parser *fp;
+	uint32_t ri, keep = 0, i;
+	uint32_t avg, min, max;
+	/* What each region is, how big it is, and how many of the table's rows
+	 * it may have - see the note below on sharing the table. */
+	uint32_t rgn_mask[PLG_MAX_REGION], quota[PLG_MAX_REGION];
+	uint64_t rgn_bytes[PLG_MAX_REGION];
+	uint32_t n_reg, budget, used, left;
+
+	/*
+	 * TICKED BLOCKS ARE CARRIED, everything else is carved again.
+	 *
+	 * Moving to another sample is the measurement: the blocks chosen on the
+	 * first one are fed to the second, and the score column finally says
+	 * something other than a hundred. What is not ticked was the engine's
+	 * suggestion about the object being left behind and has no business in
+	 * a list about this one.
+	 */
+	for (i = 0; i < v->n_plg; i++) {
+		if (!v->plg[i].picked)
+			continue;
+		v->plg[keep] = v->plg[i];
+		v->plg[keep].kept = 1;
+		v->plg[keep].lit = 0;   /* its offsets are another file's */
+		keep++;
+	}
+	v->n_plg = keep;
+	v->plg_scored = 0;
+	if (!o || !o->buf.p || !o->buf.n || !v->ext2)
+		return;
+	fp = o->fmt;
+
+	/*
+	 * EVERY REGION GETS A SHARE OF THE TABLE, in proportion to its size.
+	 *
+	 * The table holds sixty-four blocks and the carve used to fill it in
+	 * region order, so on a 4.1 MB miner whose CODE is 3.85 MB of the 4.4 MB
+	 * the parse claims, CODE took every slot and the loop stopped - DATA,
+	 * the symbols and everything after it produced no block at all, and the
+	 * reader was left asking where the data block was. First come first
+	 * served is the wrong rule for a shared table: what an author wants to
+	 * mark is very often the small region, and the big one is the one that
+	 * can afford to be described coarsely.
+	 *
+	 * So each region is counted first, gets one slot for existing and a
+	 * share of the rest, and is then cut at whatever target makes it fit in
+	 * its own share. A small region keeps the natural eight kilobyte
+	 * granularity; only the region that is most of the object is coarsened,
+	 * which is the one place coarsening costs the least.
+	 */
+	{
+		uint64_t total = 0;
+
+		n_reg = 0;
+		for (ri = 0; ; ri++) {
+			uint32_t mask, cnt, q;
+			uint64_t bytes = 0;
+
+			if (fp && fp->regions && fp->n_regions) {
+				if (ri >= fp->n_regions)
+					break;
+				mask = fp->regions[ri];
+			} else {
+				if (ri)
+					break;
+				mask = KOF_SCAN_ALL;
+			}
+			if (n_reg >= PLG_MAX_REGION)
+				break;
+			{
+				const char *rn0 =
+					(fp && fp->region_name &&
+					 mask != KOF_SCAN_ALL)
+					? fp->region_name(mask) : NULL;
+
+				if (rn0 && plg_region_skipped(
+						kof_region_label(rn0)))
+					continue;
+			}
+			cnt = kof_scan_resolve_range(&o->ctx, mask, v->ext2);
+			for (q = 0; q < cnt; q++)
+				bytes += v->ext2[q].len;
+			rgn_mask[n_reg] = mask;
+			rgn_bytes[n_reg] = bytes;
+			total += bytes;
+			n_reg++;
+		}
+
+		budget = keep < PLG_MAX_BLOCK ? PLG_MAX_BLOCK - keep : 0u;
+		for (i = 0; i < n_reg; i++)
+			quota[i] = rgn_bytes[i] ? 1u : 0u;
+		for (i = 0, used = 0; i < n_reg; i++)
+			used += quota[i];
+		left = budget > used ? budget - used : 0u;
+		for (i = 0; i < n_reg && total; i++)
+			quota[i] += (uint32_t)
+				((uint64_t)left * rgn_bytes[i] / total);
+	}
+
+	for (ri = 0; ri < n_reg && v->n_plg < PLG_MAX_BLOCK; ri++) {
+		uint32_t mask = rgn_mask[ri];
+		const char *rn, *lbl;
+		uint32_t n, k, cap;
+
+		if (!rgn_bytes[ri] || !quota[ri])
+			continue;
+		rn  = (fp && fp->region_name && mask != KOF_SCAN_ALL)
+		    ? fp->region_name(mask) : NULL;
+		lbl = rn ? kof_region_label(rn) : "ALL";
+
+		/*
+		 * THIS REGION'S OWN TARGET, from its own share.
+		 *
+		 * Doubling until the region fits in its quota, so the region
+		 * that is most of the object is the only one described
+		 * coarsely. A region small enough to fit at the natural target
+		 * never enters the loop.
+		 */
+		avg = PLG_SEG_AVG;
+		while (avg < (1u << 22) &&
+		       rgn_bytes[ri] / avg > (uint64_t)quota[ri])
+			avg <<= 1;
+		min = avg / 4u;
+		max = avg * 4u;
+
+		/* And the row it may not carve past, so one region cannot take
+		 * the rows another was counted for. */
+		cap = v->n_plg + quota[ri];
+		if (cap > PLG_MAX_BLOCK)
+			cap = PLG_MAX_BLOCK;
+
+		n = kof_scan_resolve_range(&o->ctx, mask, v->ext2);
+		for (k = 0; k < n && v->n_plg < cap; k++) {
+			uint64_t off = v->ext2[k].off, len = v->ext2[k].len;
+			uint64_t at, cut;
+			uint32_t h = 0, drop = kof_plague_drop_weight(), w;
+
+			if (off >= o->buf.n)
+				continue;
+			if (len > o->buf.n - off)
+				len = o->buf.n - off;
+			/*
+			 * A SHORT EXTENT IS STILL CARVED.
+			 *
+			 * The floor is a TARGET for where to cut, not a rule
+			 * about what may be a block. Used as a rule it threw
+			 * away whole regions - an ELF's 353-byte CODE, its
+			 * 1680-byte DATA, six unclaimed extents of 1.5 KB
+			 * each - and the reader was told the object had
+			 * nothing to carve. What actually disqualifies a span
+			 * is that it cannot be scored, which is a count of
+			 * hashes and not a count of bytes, and plg_mark is
+			 * where that is decided.
+			 */
+
+
+			cut = 0;
+			for (w = 0; w < KOF_PLAGUE_NG && w < len; w++)
+				h = h * KOF_PLAGUE_BASE + o->buf.p[off + w];
+			for (at = KOF_PLAGUE_NG; at < len; at++) {
+				uint32_t m = kof_plague_mix(h);
+				int here = (m & (avg - 1u)) == 0u;
+
+				if ((here && at - cut >= min) ||
+				    at - cut >= max) {
+					plg_mark(v, o->buf.p, o->buf.n,
+						 off + cut, off + at, mask,
+						 lbl, rn, KOF_PLAGUE_RAW);
+					cut = at;
+					if (v->n_plg >= cap)
+						break;
+				}
+				h -= (uint32_t)o->buf.p[off + at - KOF_PLAGUE_NG] * drop;
+				h = h * KOF_PLAGUE_BASE + o->buf.p[off + at];
+			}
+			/* And the tail, whatever is left of the extent - for
+			 * the same reason. */
+			if (cut < len && v->n_plg < cap)
+				plg_mark(v, o->buf.p, o->buf.n, off + cut,
+					 off + len, mask, lbl, rn,
+					 KOF_PLAGUE_RAW);
+		}
+	}
+}
+
+/*
+ * Score every marked block against the object on screen.
+ *
+ * THROUGH THE ENGINE'S OWN MATCHER, not a second implementation. The set is
+ * built from the blocks this view holds and thrown away again - a few hundred
+ * hashes, indexed in microseconds - and then fed exactly the way scan.c feeds
+ * it: one pass per (region, normalizer) a block asked for, and the region
+ * resolved by the object's own parse.
+ *
+ * That matters more than it sounds. A viewer that computed a percentage its own
+ * way would be showing an author a number the engine will not reproduce, and
+ * the author would tune a threshold against it. The only defensible number here
+ * is one produced by the code that will produce it later.
+ *
+ * Re-run only when the blocks or the object changed - see plg_scored_obj.
+ */
+static void plg_rescore(struct view *v)
+{
+	struct kof_plague_block blk[PLG_MAX_BLOCK];
+	uint32_t pool[PLG_MAX_BLOCK * KOF_PLAGUE_MAX_HASH];
+	struct kof_plague_set *set;
+	struct kof_plague_ctx ctx;
+	struct object *o;
+	uint32_t i, j, np = 0, nb = 0;
+
+	if (!v->n_plg || !v->ext2)
+		return;
+	o = cur_obj(v);
+	if (!o || !o->buf.p)
+		return;
+
+	for (i = 0; i < v->n_plg; i++) {
+		const struct plg_block *b = &v->plg[i];
+
+		v->plg[i].score = 0;
+		/* A block too thin to score is not put in the set: the matcher
+		 * refuses one and would refuse the whole set with it. */
+		if (b->n_hash < KOF_PLAGUE_MIN_HASH)
+			continue;
+		memset(&blk[nb], 0, sizeof blk[nb]);
+		blk[nb].first_hash = np;
+		blk[nb].n_hash = b->n_hash;
+		blk[nb].scan_mask = plg_mask(b);
+		blk[nb].norm = b->norm;
+		for (j = 0; j < b->n_hash; j++)
+			pool[np++] = b->hash[j];
+		nb++;
+	}
+	if (!nb)
+		return;
+
+	set = kof_plague_build(blk, nb, pool, np);
+	if (!set)
+		return;
+	if (!kof_plague_ctx_init(&ctx, set)) {
+		kof_plague_set_free(set);
+		return;
+	}
+	kof_plague_begin(&ctx);
+
+	/*
+	 * ONE PASS PER REGION AND NORMALIZER, exactly as scan.c feeds it.
+	 *
+	 * Written as a loop over BLOCKS it fed every block's region again for
+	 * every block - fifty-four passes over half a megabyte where five were
+	 * needed - and the repetition was not merely slow: it is what exposed
+	 * the matcher counting arrivals instead of distinct hashes, because
+	 * fifty-four passes saturated every counter and the panel showed a
+	 * column of hundreds. The region a block was cut from is still what it
+	 * is looked for in; that anchoring is in the mask, not in the loop.
+	 */
+	for (i = 0; i < v->n_plg; i++) {
+		uint32_t mask = plg_mask(&v->plg[i]), norms, n, k, q;
+		int done = 0;
+
+		if (v->plg[i].n_hash < KOF_PLAGUE_MIN_HASH)
+			continue;
+		for (q = 0; q < i; q++)
+			if (plg_mask(&v->plg[q]) == mask &&
+			    v->plg[q].n_hash >= KOF_PLAGUE_MIN_HASH)
+				done = 1;
+		if (done)
+			continue;
+		norms = kof_plague_set_norms(set, mask);
+		if (!norms)
+			continue;
+		n = kof_scan_resolve_range(&o->ctx, mask, v->ext2);
+		for (k = 0; k < n; k++) {
+			uint64_t off = v->ext2[k].off, len = v->ext2[k].len;
+
+			if (off >= o->buf.n)
+				continue;
+			if (len > o->buf.n - off)
+				len = o->buf.n - off;
+			if (!len)
+				continue;
+			for (q = 0; q < KOF_PLAGUE_NORM_COUNT; q++)
+				if (norms & (1u << q))
+					kof_plague_feed(&ctx, mask, q,
+							o->buf.p + off, len);
+		}
+	}
+	for (i = 0, nb = 0; i < v->n_plg; i++) {
+		if (v->plg[i].n_hash < KOF_PLAGUE_MIN_HASH)
+			continue;
+		v->plg[i].score = (uint8_t)kof_plague_pct(&ctx, nb);
+		nb++;
+	}
+	kof_plague_ctx_done(&ctx);
+	kof_plague_set_free(set);
+}
+
 /* ---- panes ---------------------------------------------------------------- */
 
 
@@ -6697,7 +7593,7 @@ static void draw_text(struct out *o, struct view *v)
 			uint64_t fo = view_map(v, k, 0);
 			uint8_t bv = fo < base_n ? base[fo] : 0;
 			int h;
-			const char *ec;
+			const char *ec, *pl;
 
 			if (bv == '\n' || bv == '\r')
 				break;
@@ -6706,7 +7602,12 @@ static void draw_text(struct out *o, struct view *v)
 			/* The same ladder the hex pane paints a byte with, in
 			 * the same order: what the reader picked beats what the
 			 * engine found beats what the draft declared. */
+			/* A lit block sits below the selection and above
+			 * everything else: it is what the reader asked to see
+			 * on this frame, and the engine's markers are what was
+			 * there before they asked. */
 			out_str(o, in_sel(v, k) ? A_SELB :
+				(pl = plg_lit_at(v, k)) ? pl :
 				h ? (h == 1 ? A_HIT1 : A_HIT2)
 				  : ec ? ec
 				  : decl_kind(v, fo) ? A_HIT3
@@ -7016,8 +7917,10 @@ static void draw_hex(struct out *o, struct view *v)
 				 */
 				const char *ec = evt_byte_colour(v,
 							at + (uint64_t)k);
+				const char *pl;
 
 				out_str(o, in_sel(v, at + (uint64_t)k) ? A_SELB :
+					(pl = plg_lit_at(v, at + (uint64_t)k)) ? pl :
 					h ? (h == 1 ? A_HIT1 : A_HIT2)
 					  : ec ? ec
 					  : decl_kind(v, fo) ? A_HIT3
@@ -7033,9 +7936,11 @@ static void draw_hex(struct out *o, struct view *v)
 			uint8_t c = fo < base_n ? base[fo] : 0;
 			int h = hit_kind(v, fo);
 			const char *ec = evt_byte_colour(v, at + (uint64_t)k);
+			const char *pl;
 			char glyph;
 
 			out_str(o, in_sel(v, at + (uint64_t)k) ? A_SELB :
+				(pl = plg_lit_at(v, at + (uint64_t)k)) ? pl :
 				h ? (h == 1 ? A_HIT1 : A_HIT2)
 				  : ec ? ec
 				  : decl_kind(v, fo) ? A_HIT3
@@ -7205,6 +8110,76 @@ static void draft_wipe(struct view *v)
 
 
 /*
+ * LOAD A PLAGUE RULE INTO THE PANEL, the way a pattern rule is loaded.
+ *
+ * Its blocks become the table's, marked as carried - they were cut from
+ * ANOTHER sample, which is exactly what makes the score column mean something -
+ * and ticked, so the condition rows show the rule's own thresholds and joins.
+ * The carve then runs as usual and adds whatever else this object has, minus
+ * anything the rule already holds; a block the rule declares and the carve
+ * reproduces is one block, and plg_mark refuses the second row.
+ *
+ * Zero when the file holds no blocks, which is how the caller tells a plague
+ * rule from a pattern one without knowing where either lives.
+ */
+static int plg_load_rule(struct view *v, const char *path)
+{
+	struct kof_plague_decl d[PLG_MAX_BLOCK];
+	static uint32_t pool[PLG_MAX_BLOCK * KOF_PLAGUE_MAX_HASH];
+	const struct object *o = cur_obj(v);
+	uint32_t n = 0, i, j;
+
+	if (!plague_from_source(&v->ed, path, d, PLG_MAX_BLOCK, &n, pool,
+				(uint32_t)(sizeof pool / sizeof pool[0])))
+		return 0;
+
+	v->n_plg = 0;
+	for (i = 0; i < n && v->n_plg < PLG_MAX_BLOCK; i++) {
+		struct plg_block *b = &v->plg[v->n_plg];
+		const char *rn = d[i].region;
+
+		memset(b, 0, sizeof *b);
+		b->id     = d[i].id;
+		b->norm   = (uint8_t)d[i].norm;
+		b->thr    = d[i].thr;
+		b->join   = d[i].join;
+		b->kept   = 1;
+		b->picked = 1;
+		b->colour = (uint8_t)(v->n_plg % PLG_COLOURS);
+		b->n_hash = d[i].n_hash > KOF_PLAGUE_MAX_HASH
+			  ? KOF_PLAGUE_MAX_HASH : d[i].n_hash;
+		for (j = 0; j < b->n_hash; j++)
+			b->hash[j] = d[i].hash[j];
+		snprintf(b->rgn_enum, sizeof b->rgn_enum, "%s",
+			 rn && rn[0] ? rn : "KOF_SCAN_ALL");
+		snprintf(b->rgn, sizeof b->rgn, "%s",
+			 kof_region_label(b->rgn_enum));
+		/*
+		 * `anywhere` IS THE AUTHOR'S CHOICE AND NOTHING ELSE.
+		 *
+		 * It was being set whenever the region failed to resolve, which
+		 * conflated two different things: where the block is LOOKED FOR
+		 * on this object, which depends on the object, and what the
+		 * rule SAYS, which depends on nobody but whoever wrote it. The
+		 * first falls back to the whole file - see plg_mask_of_enum -
+		 * and the second is only ever changed by clicking the region
+		 * cell.
+		 */
+		b->mask = plg_mask_of_enum(o, b->rgn_enum);
+		b->anywhere = !strcmp(b->rgn_enum, "KOF_SCAN_ALL");
+		snprintf(b->known, sizeof b->known, "%.*s",
+			 (int)sizeof b->known - 1, v->ed.dr.family);
+		v->n_plg++;
+	}
+	/* The rule is in hand; the carve has not run against it yet. */
+	v->plg_on = 1;
+	v->plg_segged = 0;
+	v->plg_scored = 0;
+	v->prow_off = 0;
+	return v->n_plg != 0;
+}
+
+/*
  * Show a signature that fired on this object, in place of whatever is in the
  * panel.
  *
@@ -7231,7 +8206,28 @@ static void draft_show(struct view *v, uint32_t idx)
 	 */
 	{
 		const char *path = src_of(&v->ed, &ob->touch[idx]);
-		int rc = path ? draft_from_source(&v->ed, path) : 0;
+		int rc;
+
+		/*
+		 * A PLAGUE RULE OPENS IN PLAGUE MODE, and the panel is the same
+		 * panel: the header, the format and the options are shared, and
+		 * what changes is whether the body is markers or blocks. Asked
+		 * first because a plague rule has no markers at all - handed to
+		 * draft_from_source it comes back as an empty draft, which is
+		 * how a rule that plainly fired used to open as a blank sheet.
+		 */
+		if (path && plg_load_rule(v, path)) {
+			snprintf(v->ed.dr.gen_path, sizeof v->ed.dr.gen_path,
+				 "%.*s", (int)sizeof v->ed.dr.gen_path - 1,
+				 path);
+			v->ed.dr.gen_ok = 1;
+			v->ed.dr.from_rule = 1;
+			v->ed.dr.warn[0] = 0;
+			v->prow_home = 1;
+			return;
+		}
+		v->plg_on = 0;
+		rc = path ? draft_from_source(&v->ed, path) : 0;
 
 		v->prow_home = 1;       /* a loaded draft opens at its top */
 
@@ -7276,6 +8272,29 @@ static void draft_show(struct view *v, uint32_t idx)
  * file - and pressing it did nothing but set a message, because generate()
  * refused it. Both now read the same answer from here.
  */
+/*
+ * WHAT A PLAGUE RULE IS STILL MISSING, which is not what a pattern rule is
+ * missing.
+ *
+ * draft_missing asks about strings, matchers and conditions - a plague rule has
+ * none of those and never will - so in plague mode the button stayed grey and
+ * the status line said "Declare a string" at an author who had just ticked two
+ * blocks. What this rule needs is a name to report, a format to target and a
+ * block to score.
+ */
+static const char *plg_missing(struct view *v)
+{
+	if (!kof_name_ok(v->ed.dr.family))
+		return v->ed.dr.family[0] ? "Family: letters, digits, - and _ "
+					    "only"
+					  : "Name the family";
+	if (!v->ed.dr.fmt_mask)
+		return "Name at least one target format";
+	if (!plg_n_picked(v))
+		return "Tick a block";
+	return NULL;
+}
+
 static int save_ok(struct view *v)
 {
 	int near_miss = 0;
@@ -7284,6 +8303,8 @@ static int save_ok(struct view *v)
 	 * every other reason below describes the draft. */
 	if (!v->ed.basedir || !v->ed.basedir[0])
 		return 0;
+	if (v->plg_on)
+		return plg_missing(v) == NULL;
 	if (draft_missing_of(&v->ed, 0))
 		return 0;
 	/*
@@ -8976,9 +9997,17 @@ static void draw_chooser(struct out *o, struct view *v)
  * serves both the layout and the scroll position, and a draft longer than its
  * pane does not have to be laid out twice to find out what fits.
  */
-#define PR(rr)     (decl_top() + 1 + (int)(rr) - (int)v->prow_off)
-#define PR_VIS(rr) ((int)(rr) >= (int)v->prow_off && \
-		    (int)(rr) - (int)v->prow_off < g_decl_rows - 2)
+/*
+ * In plague mode `r` is already the row on the panel - draw_plague applies the
+ * scroll to the list it owns and leaves everything else where it is - so the
+ * offset must not be subtracted a second time here.
+ */
+#define PR(rr)     (decl_top() + 1 + (int)(rr) - \
+		    (v->plg_on ? 0 : (int)v->prow_off))
+#define PR_VIS(rr) (v->plg_on \
+		    ? ((int)(rr) >= 0 && (int)(rr) < g_decl_rows - 2) \
+		    : ((int)(rr) >= (int)v->prow_off && \
+		       (int)(rr) - (int)v->prow_off < g_decl_rows - 2))
 
 /*
  * The condition rows, in reading order.
@@ -10614,6 +11643,19 @@ static void hit_head_note(struct view *v, uint32_t arg)
  * so they are one callback, told apart by what it is asked to write. */
 static void hit_head_gen(struct view *v, uint32_t as_new)
 {
+	/*
+	 * ONE GENERATE BUTTON, and it writes whatever the panel is holding.
+	 *
+	 * The header row is shared by both modes - the type, the family and the
+	 * comment mean the same thing to a pattern rule and to a plague one -
+	 * so its button does too. A second Generate on the block table would be
+	 * a second button for the same verb, and a reader would have to know
+	 * which one this panel wanted.
+	 */
+	if (v->plg_on) {
+		plg_generate(v);
+		return;
+	}
 	generate(&v->ed, (int)as_new);
 }
 
@@ -10781,9 +11823,11 @@ static void draw_decl_head(struct out *o, struct view *v)
 		 * markers is a duplicate, and duplicates are made by accident
 		 * rather than on purpose.
 		 */
-		const char *why = draft_missing(&v->ed);
+		const char *why = v->plg_on ? plg_missing(v)
+					    : draft_missing(&v->ed);
 		int near_miss = 0;
-		const char *dup = why ? NULL : draft_dup(&v->ed, &near_miss);
+		const char *dup = (why || v->plg_on) ? NULL
+				: draft_dup(&v->ed, &near_miss);
 
 		/*
 		 * ANCHORED TO THE RIGHT EDGE, BESIDE DISCARD.
@@ -10797,7 +11841,17 @@ static void draw_decl_head(struct out *o, struct view *v)
 		 */
 		c = head_btn_x(v);
 		out_at(o, top, c);
-		if (!v->ed.dr.gen_path[0]) {
+		/*
+		 * PLAGUE MODE ALWAYS SHOWS GENERATE.
+		 *
+		 * Save and Save As appear once the DRAFT has a file behind it,
+		 * and the draft's file has nothing to do with the block table -
+		 * so opening a sample that matched a pattern rule turned the
+		 * plague panel's button into "Save", over that other rule's
+		 * path. A plague rule is written with Generate every time;
+		 * bases/plague names its own file.
+		 */
+		if (v->plg_on || !v->ed.dr.gen_path[0]) {
 			out_fmt(o, "%s[ Generate ]" A_OFF,
 				save_ok(v) ? "\033[42;30m" : "\033[47;90m");
 			v->g_c0 = c; v->g_c1 = c + GEN_BTN_W - 1;
@@ -12160,6 +13214,679 @@ ids_done:
 
 
 
+/*
+ * THE BLOCK TABLE, which is the whole of Plague mode's own screen.
+ *
+ * One row per marked block:
+ *
+ *     [x] 3a7f21c9   1024 B  CODE  raw   112 hash
+ *      ^   ^
+ *      |   the block's name, and what the mouse points at to light it
+ *      the tick: does this block go into the generated rule
+ *
+ * THE NAME IS THE CONTROL, and that is the one thing about this layout worth
+ * arguing for. A row of a table is not obviously clickable and a button labelled
+ * "show" repeated down a column is noise; the value a reader is already looking
+ * at to tell two blocks apart is the thing they reach for. Clicking it lights
+ * the block in the hex pane and paints the value in that block's colour;
+ * clicking it again puts both back.
+ *
+ * THE SWATCH IS THE VALUE ITSELF, not a separate square. Two facts drawn as one
+ * cannot disagree, and a colour chip beside a name is a second place to get the
+ * pairing wrong.
+ */
+/*
+ * Clicking the tick chooses whether the block is written into the rule;
+ * clicking the name lights it. Two controls on one row because they are two
+ * independent questions - a block may be worth looking at and not worth
+ * shipping, and the common case while choosing is exactly that.
+ */
+static void hit_plg_tick(struct view *v, uint32_t i)
+{
+	if (i < v->n_plg)
+		v->plg[i].picked = (uint8_t)!v->plg[i].picked;
+}
+
+static void hit_plg_light(struct view *v, uint32_t i)
+{
+	if (i >= v->n_plg)
+		return;
+	/* A block with no place in this object has nothing to light and
+	 * nowhere to go - see plg_block.kept. */
+	if (!v->plg[i].len)
+		return;
+	v->plg[i].lit = (uint8_t)!v->plg[i].lit;
+	/*
+	 * AND SCROLL TO IT, because a colour the pane is not showing is not a
+	 * highlight.
+	 *
+	 * The blocks a carve produces are spread over the whole object - the
+	 * first one on a small ELF was sixteen kilobytes in - so lighting one
+	 * while the pane sat at the start painted nothing the reader could see,
+	 * which reads exactly like the feature not working. Only on lighting:
+	 * turning a block off is not a request to go anywhere.
+	 */
+	if (v->plg[i].lit)
+		view_show_in(v, v->node[v->sel_node].obj,
+			     v->node[v->sel_node].sym, v->plg[i].off, 0);
+}
+
+/*
+ * THE WHEEL OVER THE BLOCK LIST, declared as a rectangle rather than added to
+ * the chain in on_wheel.
+ *
+ * That chain is a sequence of geometry tests, and the panel's branch in it is
+ * reached only after the marker list has had its say - so over a plague panel
+ * the notch went to a list of matched rules and changed nothing visible, which
+ * reads as a list that will not scroll. A rectangle is asked first and is asked
+ * for exactly where it was painted, which is the migration on_wheel asks for.
+ */
+static void hit_plg_wheel(struct view *v, uint32_t arg)
+{
+	(void)arg;
+	if (g_wheel > 0)
+		v->prow_off += 3u;
+	else
+		v->prow_off = v->prow_off > 3u ? v->prow_off - 3u : 0u;
+}
+
+/* A percentage is digits and nothing else - the box refuses the rest rather
+ * than accepting what it will then have to ignore. */
+static int plg_digit(int c)
+{
+	return c >= '0' && c <= '9';
+}
+
+/* Clicking the threshold puts the caret in it - see the note where it is
+ * drawn. */
+static void hit_plg_thr(struct view *v, uint32_t i)
+{
+	if (i >= v->n_plg)
+		return;
+	v->edit = ED_PLG_THR + (int)i;
+	/*
+	 * THE VALUE STAYS ON SCREEN AND IS SELECTED, so the first digit typed
+	 * replaces it.
+	 *
+	 * Left alone, typing APPENDED the way a text field should - click a box
+	 * reading 50, type 75, and it holds 5075. Emptying the box on the click
+	 * fixed that and broke something worse: the number vanished the moment
+	 * it was clicked, which reads as the control losing the value rather
+	 * than offering to change it. Selecting it is what every other box does
+	 * for Ctrl+A and what field_key already honours - typing over a
+	 * selection replaces it.
+	 *
+	 * edit_prev is set here because field_key's "a field just opened" branch
+	 * would otherwise run on the first key and clear the selection again.
+	 */
+	snprintf(v->plg_thr_buf, sizeof v->plg_thr_buf, "%u", v->plg[i].thr);
+	v->plg_thr_off = 0;
+	v->edit_prev = v->edit;
+	v->caret = (uint32_t)strlen(v->plg_thr_buf);
+	fsel_set(v, 0, v->caret);
+}
+
+/* And how the block below attaches to this one. */
+static void hit_plg_join(struct view *v, uint32_t i)
+{
+	if (i < v->n_plg)
+		v->plg[i].join = (uint8_t)(v->plg[i].join == JN_AND
+					   ? JN_OR : JN_AND);
+}
+
+/*
+ * And the region cell turns the anchor off and on.
+ *
+ * Nothing is re-hashed: the block's hashes are the same bytes either way, and
+ * only the question of WHERE they must be found changes - so this costs a
+ * rescore and not a re-carve.
+ */
+static void hit_plg_rgn(struct view *v, uint32_t i)
+{
+	if (i >= v->n_plg)
+		return;
+	v->plg[i].anywhere = (uint8_t)!v->plg[i].anywhere;
+	v->plg_scored = 0;
+}
+
+/* And the hash column cycles, because it is a choice of three and not a
+ * number. Changing it re-hashes the block: the values depend on it. */
+static void hit_plg_norm(struct view *v, uint32_t i)
+{
+	struct plg_block *b;
+	struct object *o;
+
+	if (i >= v->n_plg)
+		return;
+	b = &v->plg[i];
+	b->norm = (uint8_t)((b->norm + 1u) % KOF_PLAGUE_NORM_COUNT);
+	o = cur_obj(v);
+	if (o && o->buf.p && b->off < o->buf.n) {
+		uint64_t len = b->len;
+
+		if (len > o->buf.n - b->off)
+			len = o->buf.n - b->off;
+		b->n_hash = plg_hash_span(o->buf.p + b->off, len, b->norm,
+					  b->hash, KOF_PLAGUE_MAX_HASH);
+		b->id = plg_fold(b->hash, b->n_hash);
+	}
+	v->plg_scored = 0;
+}
+
+
+
+/*
+ * CARVED AND SCORED BEFORE THE PANEL IS LAID OUT, not while it is drawn.
+ *
+ * The layout decides how tall the panel is from how many blocks there are, so
+ * the carve has to have happened by then. Done inside the drawing it was a
+ * frame late: the first frame sized the panel for no blocks at all and the row
+ * count went from zero to sixty-four, which the draft's "it just grew, show me
+ * its end" rule read as new rows arriving at the bottom - so the table opened
+ * scrolled to its last six blocks and the wheel was already at the stop.
+ *
+ * Carved on arrival at an object, because a list left over from the previous
+ * file would be a list of blocks that are not in this one. Scored separately:
+ * the score also moves when a block's normalizer is changed by hand, which is
+ * not a re-carve.
+ */
+/*
+ * NAME THE CARVED BLOCKS THE DATABASE ALREADY KNOWS.
+ *
+ * Folding every declared block's hashes and comparing with what was just carved
+ * - see plg_block.known. Linear over both, which is tens of blocks against
+ * hundreds, once per object a person opened.
+ *
+ * It is the answer to "a file was detected by a plague rule, now what": the
+ * table is the sample's own blocks, and the ones the rule fired on are labelled
+ * with it, in the same rows that carry their score.
+ */
+static void plg_name_known(struct view *v)
+{
+	const struct kof_engine *e = v->eng;
+	uint32_t b, i;
+
+	for (i = 0; i < v->n_plg; i++)
+		v->plg[i].known[0] = 0;
+	if (!e || !e->plague || !e->n_blk)
+		return;
+	for (b = 0; b < e->n_blk; b++) {
+		uint32_t nh = 0;
+		const uint32_t *h = kof_plague_block_hashes(e->plague, b, &nh);
+		uint32_t id, m;
+
+		if (!h || !nh)
+			continue;
+		id = plg_fold(h, nh);
+		for (i = 0; i < v->n_plg; i++) {
+			if (v->plg[i].id != id || v->plg[i].known[0])
+				continue;
+			for (m = 0; m < e->n_mods; m++) {
+				const struct kof_module *mo = &e->mods[m];
+				const char *fam;
+
+				if (!mo->n_block || b < mo->block_base ||
+				    b >= mo->block_base + mo->n_block)
+					continue;
+				fam = kof_db_family(e, mo);
+				snprintf(v->plg[i].known,
+					 sizeof v->plg[i].known, "%s",
+					 fam ? fam : "?");
+				break;
+			}
+		}
+	}
+}
+
+/*
+ * THE LIST READS IN FILE ORDER.
+ *
+ * A rule loaded for an infected file puts its blocks in first and the carve
+ * appends the rest, so the block the rule fired on sat at the top of the table
+ * whatever its offset - on a Gafgyt sample at 0xf9ce, above five blocks that
+ * come before it in the file. The table is about an object, and an object is
+ * read from its start.
+ *
+ * A block with no place in THIS object - a rule's block that the carve did not
+ * reproduce - has no offset to sort by and goes last, which is also where a
+ * reader looking for it in the hex pane will not be sent hunting.
+ *
+ * Insertion sort: sixty-four rows at most, once per object.
+ */
+static void plg_order(struct view *v)
+{
+	uint32_t i, j;
+
+	for (i = 1; i < v->n_plg; i++) {
+		struct plg_block t = v->plg[i];
+
+		for (j = i; j; j--) {
+			const struct plg_block *p = &v->plg[j - 1u];
+			int after = !p->len ? (t.len != 0)
+				  : (t.len && t.off < p->off);
+
+			if (!after)
+				break;
+			v->plg[j] = v->plg[j - 1u];
+		}
+		v->plg[j] = t;
+	}
+	/* Cycled by POSITION, so neighbours never share - which is a property
+	 * of the order and has to be redone when the order changes. */
+	for (i = 0; i < v->n_plg; i++)
+		v->plg[i].colour = (uint8_t)(i % PLG_COLOURS);
+}
+
+static void plg_sync(struct view *v)
+{
+	if (!v->plg_segged || v->plg_seg_obj != v->node[v->sel_node].obj) {
+		plg_segment(v);
+		plg_order(v);
+		plg_name_known(v);
+		v->plg_segged = 1;
+		v->plg_seg_obj = v->node[v->sel_node].obj;
+		/* The rows just moved; a box open on one of them is open on a
+		 * different block now. */
+		if (v->edit >= ED_PLG_THR &&
+		    v->edit < ED_PLG_THR + (int)PLG_MAX_BLOCK)
+			v->edit = 0;
+		v->prow_off = 0;        /* a new list starts at its top */
+		v->prow_seen = v->n_plg;
+	}
+	/*
+	 * AND THE RULE TARGETS THE FORMAT OF THE FILE IN FRONT OF IT.
+	 *
+	 * The draft seeds this when the first marker is taken; plague mode
+	 * takes no markers, so nothing seeded it and the Format row read "None"
+	 * on an ELF that was plainly an ELF. Same call, same rule: only when
+	 * nothing has been chosen yet, so a format the author set by hand
+	 * stands.
+	 */
+	draft_seed_target(v);
+	if (!v->plg_scored || v->plg_scored_n != v->n_plg ||
+	    v->plg_scored_obj != v->node[v->sel_node].obj) {
+		plg_rescore(v);
+		v->plg_scored = 1;
+		v->plg_scored_n = v->n_plg;
+		v->plg_scored_obj = v->node[v->sel_node].obj;
+	}
+}
+
+static int draw_plague(struct out *o, struct view *v, int r)
+{
+	uint32_t i;
+	char hdr[96];
+
+	/*
+	 * THE TITLE ROW CARRIES THE ACTIONS.
+	 *
+	 * Marking a block and writing the rule act on THIS panel and on nothing
+	 * else, so they sit on it - the same place the draft panel keeps its
+	 * own Generate. They were menu items for one revision and that was
+	 * wrong twice over: a menu row that only works while one panel is open
+	 * is a row that is dead most of the time, and the Analysis menu is
+	 * about the object rather than about whatever pane is showing.
+	 */
+	/*
+	 * EVERY ROW GOES THROUGH PR_VIS, which the draft's drawers already do
+	 * and this did not.
+	 *
+	 * The panel is a window onto a list that is longer than it: the engine
+	 * carves as many blocks as the object has areas, and the panel is a
+	 * dozen rows. Drawing all of them anyway wrote past the bottom, over
+	 * the status line and off the screen - which reads as the table not
+	 * being there at all.
+	 */
+	snprintf(hdr, sizeof hdr, " Plague blocks");
+	if (PR_VIS(r))
+		sec_bar(o, v, PR(r), hdr);
+	r++;
+
+	if (!PR_VIS(r)) {
+		r++;
+		goto rows;
+	}
+	row_start(o, PR(r), 1);
+	/*
+	 * ONLY COLUMNS THAT CARRY A VALUE.
+	 *
+	 * "hash" is the block's VALUE - the thing that names it, is clicked to
+	 * light it, and goes into the rule - and it was called "block" while a
+	 * column called "hash" held the normalizer, which is not a hash and not
+	 * a value. "offset" says where in this file the bytes are, which the
+	 * table had nowhere at all.
+	 *
+	 * "keys" is gone: it was the count of hashes in the block and it reads
+	 * 128 on nearly every row, because the cut keeps the smallest 128 and
+	 * almost every block has more candidates than that. A column that is
+	 * the same number all the way down is a column that answers nothing.
+	 *
+	 * "in file" appears only when some block was CARRIED here from another
+	 * sample, which is the only case it has a number for - see plg_kept_any.
+	 */
+	out_str(o, A_DIM " use  hash      offset        size  region  hashed"
+		A_OFF);
+	if (plg_kept_any(v))
+		out_str(o, A_DIM "  score" A_OFF);
+	r++;
+
+rows:
+	if (!v->n_plg)
+		return r + (int)v->plg_win;
+	/*
+	 * THE WINDOW IS FIXED, so what is written under it does not move.
+	 *
+	 * r advances by the window rather than by the number of blocks drawn:
+	 * the condition and the database rows land on the same lines whether
+	 * the carve found two blocks or sixty-four, and scrolling moves the
+	 * list inside its band instead of dragging everything below it off the
+	 * bottom of the panel.
+	 */
+	{
+	uint32_t shown = 0;
+	int r0 = r;                     /* the first row of the list band */
+
+	/*
+	 * r ADVANCES ONCE PER BLOCK, at the bottom of the body.
+	 *
+	 * It was advancing in the for as well, so every block took two list
+	 * rows: the table drew on every second line of the panel, and the
+	 * erase at the end of draw_decl started from a row past the bottom and
+	 * cleared nothing, which left the rows a longer list had written still
+	 * on screen.
+	 */
+	for (i = v->prow_off; i < v->n_plg && shown < v->plg_win;
+	     i++, shown++, r++) {
+		struct plg_block *b = &v->plg[i];
+		int y, c0;
+		/* What is hashed, which is the column's heading: the bytes
+		 * themselves, or the difference between neighbours. */
+		static const char *const nm[KOF_PLAGUE_NORM_COUNT] = {
+			"bytes", "xor", "sub"
+		};
+
+		if (!PR_VIS(r))
+			continue;
+		y = PR(r);
+		row_start(o, y, 1);
+		/* The tick. */
+		c0 = 2 + (int)o->col_hint;
+		out_fmt(o, " [%c]", b->picked ? 'x' : ' ');
+		hit_add(v, y, c0, (int)o->col_hint, hit_plg_tick, i);
+
+		/*
+		 * The name, in its own colour while lit and plain otherwise -
+		 * which is the whole feedback loop: the table says which colour
+		 * in the hex pane is this block, and it says it by BEING that
+		 * colour.
+		 */
+		/*
+		 * The gap comes FIRST and uncoloured.
+		 *
+		 * Opening the colour before the separating space painted that
+		 * space too, so a lit block was eight characters of value with
+		 * a ninth cell of colour hanging off its left. The highlight is
+		 * the value.
+		 */
+		out_str(o, " ");
+		c0 = 1 + (int)o->col_hint;
+		if (b->lit)
+			out_str(o, plg_colour[b->colour % PLG_COLOURS]);
+		out_fmt(o, "%08x", b->id);
+		if (b->lit)
+			out_str(o, A_OFF);
+		hit_add(v, y, c0, (int)o->col_hint, hit_plg_light, i);
+
+		/*
+		 * WHERE IN THIS FILE IT IS. A carried block has no offset here:
+		 * its bytes belong to the sample it was cut from, which is also
+		 * why it cannot be lit.
+		 */
+		if (!b->len)
+			out_str(o, A_DIM "  " "          " A_OFF);
+		else
+			out_fmt(o, A_DIM "  0x%08llx" A_OFF,
+				(unsigned long long)b->off);
+		out_fmt(o, A_DIM "  %6llu" A_OFF,
+			(unsigned long long)b->len);
+		/*
+		 * WHERE IT IS LOOKED FOR, and it is a control because that is a
+		 * choice - see plg_block.anywhere. "any" is the whole file;
+		 * anything else is the region the block was cut from, which is
+		 * the anchor and the default.
+		 */
+		{
+			int rc = 2 + (int)o->col_hint;
+
+			out_fmt(o, "%s  %-6.6s" A_OFF,
+				b->anywhere ? A_ID : A_DIM,
+				b->anywhere ? "any" : b->rgn);
+			hit_add(v, y, rc, (int)o->col_hint, hit_plg_rgn, i);
+		}
+		/*
+		 * HOW THE BLOCK IS HASHED, and it is a control because it
+		 * changes what the block matches. raw is the bytes; xor and sub
+		 * hash the difference between neighbours, which makes a
+		 * one-byte key over the block disappear - see kofplague.h. An
+		 * obfuscated config is the case that wants one.
+		 */
+		{
+			int hc = 2 + (int)o->col_hint;
+
+			out_fmt(o, A_ID "  %-6s" A_OFF,
+				nm[b->norm % KOF_PLAGUE_NORM_COUNT]);
+			hit_add(v, y, hc, (int)o->col_hint, hit_plg_norm, i);
+		}
+		/*
+		 * HOW MUCH OF IT IS IN THE OBJECT ON SCREEN - the number the
+		 * mode is for. Dim at nothing, plain otherwise: a column of
+		 * zeroes down a list of blocks that do not apply to this file
+		 * should not compete with the one that does.
+		 */
+		{
+			/*
+			 * A HUNDRED PER CENT ON ITS OWN SAMPLE IS NOT A
+			 * MEASUREMENT, so the column is EMPTY there.
+			 *
+			 * Every hash of a block came out of the bytes it was
+			 * carved from, so scoring it against those same bytes
+			 * can only ever answer a hundred - there is no share of
+			 * it that could be missing. A number appears when the
+			 * block was carried here from another sample, which is
+			 * what ticking one and opening the next file does, and
+			 * that it is there at all is what says so.
+			 */
+			/*
+			 * WHAT THIS BLOCK SCORED ON THE OBJECT IN FRONT OF US,
+			 * and green once it clears what the rule demands.
+			 *
+			 * Only for a block that came from somewhere else - the
+			 * rule the file matched, or a sample ticked before this
+			 * one. A block carved from the object on screen scores
+			 * a hundred by construction and the column stays empty
+			 * for it, which is why the heading appears at all only
+			 * when there is something to measure.
+			 */
+			if (b->kept)
+				out_fmt(o, "%s  %3u%%" A_OFF,
+					b->score >= b->thr ? "\033[42;30m"
+					: b->score ? "" : A_DIM, b->score);
+			/*
+			 * AND NOTHING ELSE ON THE ROW.
+			 *
+			 * The threshold was a control here as well, so the one
+			 * number the rule decides by was on the panel twice:
+			 * once in a column and once inside the condition it is
+			 * part of. It lives in the condition - see
+			 * draw_plague_cond - because that is the line that
+			 * becomes the rule.
+			 */
+		}
+	}
+	/* Whatever the window has left over when the list is shorter than it -
+	 * blank, and still accounted for. */
+	for (; shown < v->plg_win; shown++, r++)
+		if (PR_VIS(r))
+			row_start(o, PR(r), 1);
+	hit_zone(v, PR(r0), 1, PR(r - 1), g_cols, (uint8_t)HIT_WHEEL,
+		 hit_plg_wheel, 0);
+	}
+	return r;
+}
+
+/*
+ * THE CONDITION THE RULE WILL CARRY, written out as it will be generated.
+ *
+ * Not a summary of it and not a second wording: the same expression, so an
+ * author reading this row is reading the line that will be in the file. A panel
+ * that described the condition in its own words would be a second place for the
+ * condition to be stated, and the two would drift the first time either changed.
+ *
+ * The ticked blocks, ANDed. Anything past that - a string beside a block, an
+ * alternative - is written by hand afterwards, which is what the matcher having
+ * no combining logic buys.
+ */
+/* How many ticked blocks the condition will name - the height of the section,
+ * and whether there is one at all. */
+static uint32_t plg_n_picked(const struct view *v)
+{
+	uint32_t i, n = 0;
+
+	for (i = 0; i < v->n_plg; i++)
+		if (v->plg[i].picked &&
+		    v->plg[i].n_hash >= KOF_PLAGUE_MIN_HASH)
+			n++;
+	return n;
+}
+
+static int draw_plague_cond(struct out *o, struct view *v, int r)
+{
+	uint32_t i, n = 0, total;
+
+	/*
+	 * THE SECTION IS ALWAYS THERE; WHAT IS EMPTY IS EMPTY.
+	 *
+	 * It held a line reading "tick a block to build one", which is a row
+	 * spent telling someone looking at a column of ticks what a tick is
+	 * for. Dropping the whole section with it went too far the other way:
+	 * the panel then lost a heading as blocks were unticked and grew one
+	 * back as they were ticked, which reads as the condition having
+	 * disappeared. The heading stays and says where the condition is; the
+	 * rows under it are however many tests there are, including none.
+	 */
+	total = plg_n_picked(v);
+	if (PR_VIS(r))
+		sec_bar(o, v, PR(r), " Condition");
+	r++;
+	if (!total)
+		return r;
+
+	/*
+	 * THE SAME SHAPE THE DRAFT'S CONDITIONS HAVE - a test to a row, and the
+	 * word that joins it to the next one on a row of its own.
+	 *
+	 * It was one line of generated C for a while, which was wrong twice: a
+	 * panel says what it means in the words the rest of the tool uses, and
+	 * a single line cannot hold the one control that matters once more than
+	 * one block is ticked. Two blocks are either one test that needs both
+	 * or two rules in one file, and nothing on the panel could say which.
+	 * The vocabulary is the draft's - see enum cnd_join - because it is the
+	 * same question about the same kind of thing.
+	 */
+	for (i = 0; i < v->n_plg; i++) {
+		struct plg_block *b = &v->plg[i];
+		int y, c0;
+
+		if (!b->picked || b->n_hash < KOF_PLAGUE_MIN_HASH)
+			continue;
+		/* The join belongs BETWEEN two tests, so it is drawn before
+		 * every one but the first and is owned by the block above. */
+		if (n) {
+			uint32_t prev = i;
+
+			while (prev-- > 0)
+				if (v->plg[prev].picked &&
+				    v->plg[prev].n_hash >= KOF_PLAGUE_MIN_HASH)
+					break;
+			if (PR_VIS(r)) {
+				y = PR(r);
+				row_start(o, y, 1);
+				out_str(o, A_DIM "  logic " A_OFF);
+				c0 = 1 + (int)o->col_hint;
+				out_fmt(o, "%s[%s]" A_OFF,
+					v->plg[prev].join == JN_AND
+					? A_AND : A_OR,
+					v->plg[prev].join == JN_AND
+					? "and" : "or");
+				hit_add(v, y, c0, (int)o->col_hint,
+					hit_plg_join, prev);
+			}
+			r++;
+		}
+		if (!PR_VIS(r)) {
+			r++;
+			n++;
+			continue;
+		}
+		y = PR(r);
+		row_start(o, y, 1);
+		/* In its own colour while lit, exactly as the table names it -
+		 * the two rows are about the same block and say so the same
+		 * way. */
+		out_str(o, "  ");
+		if (b->lit)
+			out_str(o, plg_colour[b->colour % PLG_COLOURS]);
+		out_fmt(o, "%08x", b->id);
+		if (b->lit)
+			out_str(o, A_OFF);
+		out_str(o, A_DIM "  >=  " A_OFF);
+		c0 = 1 + (int)o->col_hint;
+		/*
+		 * A BOX WITH A NUMBER IN IT, and the unit outside.
+		 *
+		 * The per cent sign belongs to the quantity and not to the
+		 * value being typed - inside the box it is a character the
+		 * typist has to work around, and every other unit in this tool
+		 * is written after the field. The box itself is an ordinary
+		 * text field: it is opened by clicking it and keys go into it
+		 * through field_key like any other - see handle_decl_key.
+		 *
+		 * Green only where the number MEANS something: on a block
+		 * carried from another sample, where the score in the table was
+		 * measured. On the sample the block was cut from that score is
+		 * a hundred by construction, so colouring it would say the rule
+		 * fires on evidence that is not evidence.
+		 */
+		{
+			int editing = v->edit == ED_PLG_THR + (int)i;
+			char txt[8];
+
+			out_fmt(o, "%s[" A_OFF,
+				editing ? A_SEL :
+				b->kept && b->score >= b->thr
+				? "\033[42;30m" : A_ID);
+			if (editing)
+				field_draw(o, v->plg_thr_buf, v->caret,
+					   &v->plg_thr_off, 3, 1, "");
+			else {
+				snprintf(txt, sizeof txt, "%3u", b->thr);
+				out_fmt(o, "%s%s" A_OFF,
+					b->kept && b->score >= b->thr
+					? "\033[42;30m" : A_ID, txt);
+			}
+			out_fmt(o, "%s]" A_OFF,
+				editing ? A_SEL :
+				b->kept && b->score >= b->thr
+				? "\033[42;30m" : A_ID);
+		}
+		hit_add(v, y, c0, (int)o->col_hint, hit_plg_thr, i);
+		out_str(o, A_DIM "%" A_OFF);
+		n++;
+		r++;
+	}
+	return r;
+}
+
 static void draw_decl(struct out *o, struct view *v)
 {
 	int top = decl_top();
@@ -12183,8 +13910,32 @@ static void draw_decl(struct out *o, struct view *v)
 	/* The registry is cleared once for the whole frame - see redraw - and
 	 * not here: the panes drawn before this one register their own
 	 * rectangles, and clearing at the panel would throw them away. */
+	/*
+	 * PLAGUE MODE TAKES THE WHOLE PANEL, header and all.
+	 *
+	 * Not a section added below the draft: the two are alternatives, and a
+	 * screen showing a family name, a condition list and a block table at
+	 * once would be showing a signature that is being written two ways.
+	 */
+	/*
+	 * THE HEADER, THE FORMAT AND THE OPTIONS BELONG TO BOTH MODES.
+	 *
+	 * What a rule is FOR - its type, its family, the format it targets and
+	 * how it is matched - is the same question whichever way the body is
+	 * written. Only the body differs: patterns and conditions, or blocks.
+	 * Replacing the whole panel was wrong; it took the family name away
+	 * from the rule that needs it most, since a plague rule has nothing
+	 * else to be called.
+	 */
 	draw_decl_head(o, v);
 	r = draw_decl_fmts(o, v, r);
+	if (v->plg_on) {
+		r = draw_decl_optbtn(o, v, r);
+		r = draw_decl_opts(o, v, r);
+		r = draw_plague(o, v, r);
+		r = draw_plague_cond(o, v, r);
+		goto tail;
+	}
 	r = draw_decl_ranges(o, v, r);
 	r = draw_decl_optbtn(o, v, r);
 	r = draw_decl_opts(o, v, r);
@@ -12192,6 +13943,7 @@ static void draw_decl(struct out *o, struct view *v)
 	r = draw_decl_matchers(o, v, r);
 	r = draw_decl_conds(o, v, r);
 
+tail:
 	/* Whatever the draft used to reach and no longer does. */
 	{
 		int y = PR(r), bot = top + g_decl_rows - 2;
@@ -12200,8 +13952,17 @@ static void draw_decl(struct out *o, struct view *v)
 			if (y > top)
 				row_start(o, y, 1);
 	}
-	kv_scrollbar(o, g_cols, top + 1, top + g_decl_rows - 2, v->prow_off,
-		  v->n_prow, (uint64_t)(g_decl_rows - 2));
+	/* Over the band that actually moves - in plague mode that is the block
+	 * list, not the whole panel. A thumb drawn down the side of rows that
+	 * cannot scroll describes a scroll that is not happening. */
+	if (v->plg_on)
+		kv_scrollbar(o, g_cols, top + 1 + (int)v->plg_above,
+			  top + (int)v->plg_above + (int)v->plg_win,
+			  v->prow_off, v->n_prow, (uint64_t)v->plg_win);
+	else
+		kv_scrollbar(o, g_cols, top + 1, top + g_decl_rows - 2,
+			  v->prow_off, v->n_prow,
+			  (uint64_t)(g_decl_rows - 2));
 
 }
 
@@ -12495,9 +14256,13 @@ static void draw_marker_line(struct out *o, struct view *v)
 		goto have_right;
 	}
 	if (v->pane == 3 && g_decl_rows) {
-		const char *why = draft_missing(&v->ed);
+		const char *why = v->plg_on ? plg_missing(v)
+					    : draft_missing(&v->ed);
 		int near_miss = 0;
-		const char *dup = why ? NULL : draft_dup(&v->ed, &near_miss);
+		/* A duplicate is a question about the draft's markers, and a
+		 * plague rule has none - see plg_missing. */
+		const char *dup = (why || v->plg_on) ? NULL
+				: draft_dup(&v->ed, &near_miss);
 
 		if (v->ed.dr.warn[0]) {
 			snprintf(right, sizeof right, "%s", v->ed.dr.warn);
@@ -12517,7 +14282,13 @@ static void draw_marker_line(struct out *o, struct view *v)
 					   : "same markers as", dup);
 			rcol = A_WARN;
 		}
-		else if (v->ed.dr.gen_path[0])
+		/*
+		 * gen_path and the dirty mark belong to the DRAFT, which plague
+		 * mode is not writing - the path shown there was whatever
+		 * pattern rule the object happened to match, with "(unsaved)"
+		 * beside it, about a rule the panel is not editing.
+		 */
+		else if (!v->plg_on && v->ed.dr.gen_path[0])
 			snprintf(right, sizeof right, "%.*s%s",
 				 (int)sizeof right - 12, v->ed.dr.gen_path,
 				 draft_dirty(&v->ed) ? "  (unsaved)" : "");
@@ -14707,9 +16478,71 @@ static void redraw(struct view *v)
 		 * restated here: the two used to be separate sums, and the one
 		 * that fell behind was always this one. */
 		uint32_t want;
+		uint32_t plg_above = 0, plg_below = 0;
 
+		if (v->plg_on)
+			plg_sync(v);
 		prow_build(v);
 		want = v->n_prow;
+		/*
+		 * Plague mode's panel is its own height: a heading and one row
+		 * per marked block, or the line that says how to mark one. The
+		 * draft's row model does not describe it, and reusing that
+		 * count would size the panel for a signature that is not being
+		 * written.
+		 */
+		if (v->plg_on) {
+			/*
+			 * COUNTED WHERE THEY ARE DRAWN, every section of it.
+			 *
+			 * The format row and the option button, then whatever
+			 * options are on - those three belong to both modes and
+			 * draw_decl paints them before it branches. Then the
+			 * plague heading and its column names, one row per
+			 * block or the line that says there are none, and the
+			 * condition heading with the expression under it.
+			 *
+			 * A short count here is not a cosmetic error: the
+			 * sections past the cut simply never appear, which is
+			 * how the condition went missing while the table above
+			 * it looked right.
+			 */
+			uint32_t k;
+
+			/* The format row and the option button, then whatever
+			 * options are on, then the heading and the column
+			 * names: everything above the list. */
+			plg_above = 2u;
+			for (k = 0; k < (uint32_t)OPT_COUNT; k++)
+				if (v->ed.dr.opt_on[k])
+					plg_above++;
+			plg_above += 2u;
+			/* The bar, a row per ticked block, and a row between
+			 * each pair for the word that joins them. */
+			/* The bar, which is always there, then a row per
+			 * ticked block and a row between each pair for the
+			 * word that joins them. */
+			plg_below = plg_n_picked(v);
+			if (plg_below)
+				plg_below += plg_below - 1u;
+			plg_below += 1u;
+			want = plg_above + (v->n_plg ? v->n_plg : 1u)
+			     + plg_below;
+			/*
+			 * AND THE PANEL'S ROW COUNT IS THAT, not the draft's.
+			 *
+			 * n_prow is what the scroll clamp and the scrollbar
+			 * read - it means "rows this panel has", and in plague
+			 * mode the panel's rows are the blocks. Left at the
+			 * draft's count the offset clamped to zero and a table
+			 * of sixty-four blocks could only ever show its first
+			 * ten, with a thumb that described something else.
+			 *
+			 * The LIST is what scrolls, so the list is what the
+			 * count describes - see plg_win.
+			 */
+			v->n_prow = v->n_plg;
+		}
 
 		/*
 		 * A draft that just grew shows its new end.
@@ -14769,13 +16602,27 @@ static void redraw(struct view *v)
 		if (rows > room)
 			rows = room;
 		g_decl_rows = rows + 2;
+		if (v->plg_on) {
+			/*
+			 * Whatever is left between the fixed rows is the list's
+			 * window. At least one row: a panel squeezed to nothing
+			 * should still show a block rather than divide by a
+			 * window of zero.
+			 */
+			int win = g_decl_rows - 2 - (int)plg_above
+						  - (int)plg_below;
+
+			v->plg_above = plg_above;
+			v->plg_win = win > 0 ? (uint32_t)win : 1u;
+		}
 		if (g_decl_rows) {
 			/* The furthest it can be scrolled, computed before the
 			 * comparison rather than inside it: adding the window
 			 * to the offset overflows when the offset is the "show
 			 * me the end" sentinel, and an offset of minus one
 			 * draws every row one line too low. */
-			uint32_t vis = (uint32_t)(g_decl_rows - 2);
+			uint32_t vis = v->plg_on ? v->plg_win
+						 : (uint32_t)(g_decl_rows - 2);
 			uint32_t max_off = v->n_prow > vis ? v->n_prow - vis
 							   : 0u;
 
@@ -15606,6 +17453,18 @@ enum bar_item {
 	 * it to do, and an item that does nothing is hidden rather than
 	 * greyed: see the note on `enabled` in kofview.h.
 	 */
+	/*
+	 * The panel stops being a signature draft and becomes a block table.
+	 * Label replaced at draw time, like BI_DISASM's - a menu offering
+	 * "Plague mode" and "Pattern mode" side by side always has one of them
+	 * wrong.
+	 *
+	 * ONE ITEM, and marking a block and generating the rule are NOT here.
+	 * They act on what the panel is showing and belong on it, the way the
+	 * draft panel carries its own Generate. A menu item that only works
+	 * while a particular panel is open is a menu item in the wrong place.
+	 */
+	BI_PLAGUE,
 	BI_SEPARATE,
 	BI_REBUILD,
 	BI_NEXT, BI_PREV,
@@ -15668,6 +17527,7 @@ static const struct {
 	/* The same word, because a reader should not have to care which of the
 	 * two they are looking at - they never see both. */
 	{ "Dump",              BM_ANALYSIS, -1, 0 },
+	{ "Plague mode",       BM_ANALYSIS, -1, 1 },
 	{ "Separate children", BM_ANALYSIS, -1, 0 },
 	{ "Rebuild database",  BM_ANALYSIS, -1, 0 },
 	/*
@@ -15826,6 +17686,9 @@ static const char *bar_label(struct view *v, int i)
 	/* Says which way the toggle goes, for the reason above. */
 	if (i == BI_DISASM)
 		return v->dis_open ? "Hide disassembly" : "Show disassembly";
+	/* The same rule: the row names the mode it switches TO. */
+	if (i == BI_PLAGUE)
+		return v->plg_on ? "Pattern mode" : "Plague mode";
 
 	/*
 	 * A FILTER ROW SHOWS ITS OWN STATE, because it is a checkbox and not a
@@ -16225,6 +18088,14 @@ static int bar_enabled(struct view *v, int i)
 	/* Always: the text it decodes usually comes from outside the file, so
 	 * there is nothing about the object that could make it unavailable. */
 	case BI_ENCSTR:    return 1;
+	/*
+	 * Plague mode applies to any object at all - a block is a span of
+	 * bytes and every object has those. Marking needs a selection and
+	 * generating needs a ticked block, and both are said by bar_enabled
+	 * rather than by hiding the row: a reader who cannot find "Mark block"
+	 * cannot learn that selecting first is what it wants.
+	 */
+	case BI_PLAGUE:    return 1;
 	case BI_KEYS:
 	case BI_ABOUT:     return 1;
 	/*
@@ -19311,6 +21182,7 @@ static void emu_here(struct view *v)
 	 * starts from an empty list and has nothing to compare against. */
 	v->dedup_from = v->n_obj;
 	kof_scanner_on_debug(sc, on_debug, v);
+	v->scan_sc = sc;
 	kof_scan_bytes(sc, o->buf.p, o->buf.n, o->name, &opt, on_object, v);
 	kof_scanner_free(sc);
 	v->dedup_from = 0;
@@ -20104,6 +21976,51 @@ static const char *bar_why_off(struct view *v, int i)
 	}
 }
 
+/*
+ * Hand the ticked blocks to the editor, which writes the source.
+ *
+ * NOTHING ABOUT THE RULE IS DECIDED HERE. The type, the family and the format
+ * are the draft's; the thresholds are the table's; the file layout and where it
+ * goes are generate_plague's. This is the one place that knows which blocks the
+ * reader chose, so it is the only thing this does.
+ */
+static void plg_generate(struct view *v)
+{
+	struct kof_plague_decl d[PLG_MAX_BLOCK];
+	uint32_t i, n = 0, prev = 0;
+
+	for (i = 0; i < v->n_plg && n < PLG_MAX_BLOCK; i++) {
+		const struct plg_block *b = &v->plg[i];
+
+		if (!b->picked || b->n_hash < KOF_PLAGUE_MIN_HASH)
+			continue;
+		/*
+		 * The word BETWEEN this test and the one before it, which the
+		 * panel draws as belonging to the block above - so it is read
+		 * off that block and not this one.
+		 */
+		d[n].join   = n ? v->plg[prev].join : 1u;
+		prev = i;
+		d[n].id     = b->id;
+		d[n].region = b->anywhere ? "KOF_SCAN_ALL"
+			    : b->rgn_enum[0] ? b->rgn_enum : NULL;
+		d[n].norm   = b->norm;
+		d[n].thr    = b->thr;
+		d[n].off    = b->off;
+		d[n].len    = b->len;
+		d[n].hash   = b->hash;
+		d[n].n_hash = b->n_hash;
+		n++;
+	}
+	if (!n) {
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "Tick a block with at least %u hashes first",
+			 KOF_PLAGUE_MIN_HASH);
+		return;
+	}
+	(void)generate_plague(&v->ed, d, n, v->path);
+}
+
 static void bar_run(struct view *v, int i)
 {
 	if (!bar_enabled(v, i)) {
@@ -20130,7 +22047,8 @@ static void bar_run(struct view *v, int i)
 			const char *why = bar_why_off(v, i);
 
 			if (!why)
-				why = draft_missing(&v->ed);
+				why = v->plg_on ? plg_missing(v)
+						: draft_missing(&v->ed);
 			if (why)
 				say_err(&v->ed, "%s", why);
 			else
@@ -20341,6 +22259,19 @@ static void bar_run(struct view *v, int i)
 	case BI_DISASM:   dis_toggle(v, 0, KOF_BROKEN); break;
 	case BI_NEXT:    open_step(v, +1); break;
 	case BI_PREV:    open_step(v, -1); break;
+	case BI_PLAGUE:
+		/*
+		 * Turning the mode off leaves the table alone. A reader flips
+		 * back to look at the draft and returns; throwing the ticks
+		 * away because the panel was showing something else would make
+		 * the mode a mode you cannot leave.
+		 */
+		v->plg_on = !v->plg_on;
+		/* The two panels are different lists; an offset into one means
+		 * nothing in the other. */
+		v->prow_off = 0;
+		v->act_msg[0] = 0;
+		break;
 	case BI_SEPARATE: separate_now(v); break;
 	case BI_REBUILD: rebuild_db(v); break;
 	case BI_ENCSTR:
@@ -20996,6 +22927,12 @@ static void bar_to(struct view *v, int which)
 			return;
 		top = decl_top() + 1;
 		bot = decl_top() + g_decl_rows - 2;
+		if (v->plg_on) {
+			top = decl_top() + 1 + (int)v->plg_above;
+			bot = decl_top() + (int)v->plg_above
+			    + (int)v->plg_win;
+			vis = v->plg_win;
+		}
 		vis = (uint32_t)(g_decl_rows - 2);
 		if (bot <= top || v->n_prow <= vis)
 			return;
@@ -25167,6 +27104,46 @@ static int handle_chooser_key(struct view *v, int k)
 		 * rest of these are prose. See kof_name_char in kofsig.h. */
 		int (*accept)(int) = NULL;
 
+		/*
+		 * THE PLAGUE THRESHOLD, AND IT HAS TO BE ASKED FIRST.
+		 *
+		 * ED_PLG_THR is 700 and the chain below opens with
+		 * "v->edit >= 300", so every key typed into the threshold was
+		 * going into a matcher's note - the box showed nothing changing
+		 * and a comment two panels away filled up with digits.
+		 *
+		 * Committed on every key rather than on leaving the field: the
+		 * score beside it is what the number is being chosen against,
+		 * and a threshold that only took effect afterwards would be a
+		 * number the reader could not see the effect of.
+		 */
+		if (v->edit >= ED_PLG_THR &&
+		    v->edit < ED_PLG_THR + (int)PLG_MAX_BLOCK) {
+			uint32_t bi = (uint32_t)(v->edit - ED_PLG_THR);
+			int r2 = field_key(v, v->plg_thr_buf,
+					   sizeof v->plg_thr_buf, k, plg_digit);
+			unsigned long got = strtoul(v->plg_thr_buf, NULL, 10);
+
+			/*
+			 * THE BOX NEVER HOLDS A NUMBER THAT IS NOT THE VALUE.
+			 *
+			 * Clamping on the way out and leaving the text alone
+			 * meant the box showed 5075 while the rule used 100.
+			 * The text is corrected instead, so what is read off
+			 * the panel is what the rule will demand.
+			 */
+			if (got > 100u) {
+				got = 100u;
+				snprintf(v->plg_thr_buf,
+					 sizeof v->plg_thr_buf, "100");
+				v->caret = 3;
+			}
+			/* An empty box is not a threshold of zero - it is a
+			 * box nothing has been typed into yet. */
+			if (bi < v->n_plg && v->plg_thr_buf[0])
+				v->plg[bi].thr = (uint8_t)got;
+			return r2;
+		}
 		if (v->edit == 501) {
 			buf = v->ed.dr.note;
 			cap = sizeof v->ed.dr.note;
@@ -26165,6 +28142,17 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 	uint32_t n = 0, pids[1];
 	int err = 0;
 	struct kof_range *ext   = v->ext;
+	struct kof_range *ext2  = v->ext2;
+	/*
+	 * The blocks a reader TICKED, and the mode they are in.
+	 *
+	 * Compacted to the front here rather than after the clear, because the
+	 * clear is what takes the count with it. What was not ticked was the
+	 * engine's suggestion about the file being closed and goes with it.
+	 */
+	struct plg_block *plg   = v->plg;
+	uint32_t n_plg = 0;
+	int plg_on = v->plg_on;
 	struct kof_range *probe = v->probe;
 	uint32_t          cap   = v->ed.dr.decl_cap;
 	char basedir[sizeof v->basedir];
@@ -26199,12 +28187,24 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 	snprintf(basedir, sizeof basedir, "%s", v->basedir);
 	snprintf(dbdir, sizeof dbdir, "%s", v->dbdir);
 
+	if (plg) {
+		uint32_t pi;
+
+		for (pi = 0; pi < v->n_plg; pi++)
+			if (plg[pi].picked)
+				plg[n_plg++] = plg[pi];
+	}
+
 	file_close(v);
 	memset(v, 0, sizeof *v);
 
 	v->eng   = eng;
 	v->ext   = ext;
+	v->ext2  = ext2;
 	v->probe = probe;
+	v->plg   = plg;
+	v->n_plg = n_plg;
+	v->plg_on = plg_on;
 	v->ed.dr.decl_cap = cap;
 	editor_attach(v);
 	snprintf(v->basedir, sizeof v->basedir, "%s", basedir);
@@ -26365,6 +28365,17 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	int         fd;
 	/* The session. */
 	struct kof_range *ext   = v->ext;
+	struct kof_range *ext2  = v->ext2;
+	/*
+	 * The blocks a reader TICKED, and the mode they are in.
+	 *
+	 * Compacted to the front here rather than after the clear, because the
+	 * clear is what takes the count with it. What was not ticked was the
+	 * engine's suggestion about the file being closed and goes with it.
+	 */
+	struct plg_block *plg   = v->plg;
+	uint32_t n_plg = 0;
+	int plg_on = v->plg_on;
 	struct kof_range *probe = v->probe;
 	uint32_t          cap   = v->ed.dr.decl_cap;
 	char basedir[sizeof v->basedir];
@@ -26409,12 +28420,24 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	snprintf(basedir, sizeof basedir, "%s", v->basedir);
 	snprintf(dbdir, sizeof dbdir, "%s", v->dbdir);
 
+	if (plg) {
+		uint32_t pi;
+
+		for (pi = 0; pi < v->n_plg; pi++)
+			if (plg[pi].picked)
+				plg[n_plg++] = plg[pi];
+	}
+
 	file_close(v);
 	memset(v, 0, sizeof *v);
 
 	v->eng   = eng;
 	v->ext   = ext;
+	v->ext2  = ext2;
 	v->probe = probe;
+	v->plg   = plg;
+	v->n_plg = n_plg;
+	v->plg_on = plg_on;
 	v->ed.dr.decl_cap = cap;
 	editor_attach(v);       /* the clear above zeroed what it borrows */
 	snprintf(v->basedir, sizeof v->basedir, "%s", basedir);
@@ -26575,13 +28598,29 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 	 */
 	{
 		struct object *o0 = &v->obj[0];
+		/*
+		 * ASKED OF touch_default, not walked again here.
+		 *
+		 * This was a second copy of "the first row that fired", and the
+		 * two then disagreed the moment one of them learned something:
+		 * touch_default came to prefer the strongest verdict and this
+		 * did not, so moving between objects selected the signature and
+		 * OPENING THE FILE selected whichever heuristic happened to sit
+		 * earlier in the database. Measured on a Gafgyt sample - the
+		 * scanner names Botnet:Gafgyt#100!Plague, the panel opened on
+		 * Heur:Truncated.
+		 */
 		uint32_t k;
 
-		for (k = 0; k < o0->n_touch; k++)
-			if (o0->touch[k].fired) {
-				draft_show(v, k);
-				break;
-			}
+		/* The list has to exist before anything can choose from it -
+		 * the same order the node-selection path uses. Without it this
+		 * read an empty list and selected nothing, so a detected file
+		 * opened on a blank panel whenever nothing else had already
+		 * built the list. */
+		object_touch(v, 0);
+		k = touch_default(o0);
+		if (k < o0->n_touch)
+			draft_show(v, k);
 		/*
 		 * AND WHEN NOTHING FIRED, NOTHING IS SELECTED.
 		 *
@@ -26762,8 +28801,10 @@ int main(int argc, char **argv)
 	}
 
 	v->ext = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *v->ext);
+	v->ext2 = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *v->ext2);
 	v->probe = malloc(KOF_SCAN_MAX_EXTENTS * sizeof *v->probe);
-	if (!v->ext || !v->probe) {
+	v->plg = calloc(PLG_MAX_BLOCK, sizeof *v->plg);
+	if (!v->ext || !v->ext2 || !v->probe || !v->plg) {
 		fprintf(stderr, "kofviewer: out of memory\n");
 		return 1;
 	}

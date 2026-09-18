@@ -17,6 +17,7 @@
 #include "../kofeng.h"
 #include "../kofdb/kofdb.h"
 #include "../kofmatchers/kofmatch.h"
+#include "../kofmatchers/kofplague.h"
 #include "../kofparsers/binaries/elf_parse.h"
 #include "../kofparsers/binaries/pe_parse.h"
 #include "../kofunpack/pe_rebuild.h"
@@ -50,6 +51,31 @@ struct kof_scanner {
 	const struct kof_engine *eng;
 
 	struct kof_match_ctx m;
+	/*
+	 * The similarity counters, one set per thread.
+	 *
+	 * Beside the pattern matcher's state and for the same reason: the index
+	 * they count against belongs to the engine and is shared, and only the
+	 * counting is per object. Empty when no loaded block exists, which is
+	 * what keeps a build with no plague rules from allocating anything.
+	 */
+	struct kof_plague_ctx plague;
+	/*
+	 * THE HIGHEST PLAGUE SCORE THE MODULE BEING RUN HAS ASKED ABOUT.
+	 *
+	 * A similarity verdict is a MEASUREMENT, and the name it is reported
+	 * under should carry it: "Botnet:Mirai#83!Plague" says how alike the
+	 * sample was, which is the one thing a reader of such a verdict needs
+	 * and the one thing a hand-written variant cannot know. Recorded where
+	 * it is produced - see c_plague_score - because nothing downstream can
+	 * work out afterwards which block a rule looked at, or whether it
+	 * looked at one at all.
+	 *
+	 * Reset per module, not per object: two rules on one object are two
+	 * verdicts, each naming what IT measured. -1 is "this module has not
+	 * asked", which is what keeps every other rule's name untouched.
+	 */
+	int plague_asked;
 	/*
 	 * One parsed view per format, allocated the first time an object of that
 	 * format is seen and kept for the life of the scanner.

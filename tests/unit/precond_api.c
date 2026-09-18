@@ -193,7 +193,7 @@ static void name_parts(void)
 	ok(strcmp(want, f.name) == 0, "compose and finding_name agree");
 
 	kof_finding_name(&f, "ELF-x64", "Heur", "Meterp", "g7q2x", "Shellcode");
-	ok(strcmp(f.name, "ELF-x64/Heur:Meterp#g7q2x?Shellcode") == 0,
+	ok(strcmp(f.name, "ELF-x64/Heur:Meterp#g7q2x!Shellcode") == 0,
 	   "heuristic name");
 	ok(span_is(&f, &f.family, "Meterp"), "the guessed family");
 	ok(span_is(&f, &f.shape, "Shellcode"), "the shape actually recognised");
