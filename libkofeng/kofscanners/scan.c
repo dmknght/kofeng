@@ -435,12 +435,21 @@ static void plague_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 * A block declared over the whole file has no region to anchor
 		 * it, so the pass that serves it resolves to one extent
 		 * covering everything - headers, symbol tables, alignment gaps
-		 * and all. Nothing is ever cut from a header, so hashing one
-		 * can only produce an accidental match; and the padding in
-		 * NOLOAD and UNCLAIMED is what kof_plague_worth exists to keep
-		 * out. So the whole-object pass is fed the object's REGIONS
-		 * with those left out, and only an object nothing parsed is fed
-		 * as one run of bytes.
+		 * and all. A header describes the object rather than being part
+		 * of what it does and nothing is ever cut from one, so hashing
+		 * it can only produce an accidental match. The symbol regions
+		 * are not bytes of the file at all.
+		 *
+		 * PADDING NEEDS NO RULE HERE, and one was written and taken out
+		 * again. A span too poor to yield hashes never became a block,
+		 * so nothing in the database is anchored to padding, and a
+		 * padding window can only score by colliding with a real
+		 * block's hash - which a test on the region would not prevent
+		 * anyway. What the test WOULD do is disagree with the carve: a
+		 * block cut from a region the test then refuses to feed is a
+		 * rule that matches at the moment it is written and never
+		 * again. The pipeline already decides this at the step that
+		 * takes the hashes; the matcher inherits that decision.
 		 */
 		if (mask == KOF_SCAN_ALL && fp && fp->regions && fp->n_regions &&
 		    fp->region_name) {
@@ -449,15 +458,12 @@ static void plague_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			for (ri = 0; ri < fp->n_regions; ri++) {
 				uint32_t rm = fp->regions[ri];
 				const char *rn = fp->region_name(rm);
-				int loose;
 
 				if (!rn || strstr(rn, "_HEADER") ||
 				    strstr(rn, "_SYM"))
 					continue;
 				if (!(present & rm))
 					continue;
-				loose = strstr(rn, "NOLOAD") != NULL ||
-					strstr(rn, "UNCLAIM") != NULL;
 				n = kof_scan_resolve_range(ctx, rm, ext);
 				for (i = 0; i < n; i++) {
 					uint64_t off = ext[i].off;
@@ -465,9 +471,6 @@ static void plague_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 								   ext[i].len);
 
 					if (!len)
-						continue;
-					if (loose &&
-					    !kof_plague_worth(b.p + off, len))
 						continue;
 					for (k = 0; k < KOF_PLAGUE_NORM_COUNT;
 					     k++)
@@ -487,17 +490,6 @@ static void plague_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 
 			if (!len)
 				continue;
-			/* And an anchored block in one of those two regions is
-			 * asked the same question - see kof_plague_worth. */
-			if ((mask & (uint32_t)~KOF_SCAN_ALL) && fp &&
-			    fp->region_name) {
-				const char *rn = fp->region_name(mask);
-
-				if (rn && (strstr(rn, "NOLOAD") ||
-					   strstr(rn, "UNCLAIM")) &&
-				    !kof_plague_worth(b.p + off, len))
-					continue;
-			}
 			for (k = 0; k < KOF_PLAGUE_NORM_COUNT; k++)
 				if (norms & (1u << k))
 					kof_plague_feed(&sc->plague, mask, k,

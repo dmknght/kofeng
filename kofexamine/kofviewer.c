@@ -6486,9 +6486,15 @@ static int plg_mark(struct view *v, const uint8_t *base, uint64_t base_n,
  * useful through padding and repetition, which is what the numbers below are
  * for.
  */
+/*
+ * The STARTING target. The one actually used is per region and is this doubled
+ * until the region fits the rows it was given - see plg_segment - and the floor
+ * and ceiling are a quarter and four times whatever that came out as. They are
+ * not constants of their own because a region that had to be coarsened needs
+ * its bounds coarsened with it, and two numbers written here would have been
+ * the bounds of a target that is no longer in use.
+ */
 #define PLG_SEG_AVG   8192u          /* average block, as a power of two mask */
-#define PLG_SEG_MIN   2048u
-#define PLG_SEG_MAX  32768u
 
 static void plg_segment(struct view *v)
 {
