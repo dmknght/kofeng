@@ -164,6 +164,40 @@ static uint32_t payload_size(const struct kof_obj_ctx *ctx, uint64_t room)
 	return 0;
 }
 
+/*
+ * IS THIS ONE OF THESE FILES AT ALL - the cheap question, asked first.
+ *
+ *     6a 04           push 4          the System process
+ *     6a 00           push 0          bInheritHandle = FALSE
+ *     68 ff 0f 1f 00  push 0x1f0fff   PROCESS_ALL_ACCESS
+ *
+ * OpenProcess(PROCESS_ALL_ACCESS, FALSE, 4) is the template's anti-analysis
+ * probe and the three pushes are one call's arguments, so CRandomizer - which
+ * inserts whole statements - cannot get between them. Nine contiguous bytes,
+ * measured present in these samples and no other PE.
+ *
+ * WHY A GATE AT ALL. The general unpacker pass runs every eligible module on
+ * every object of its format, so without this the key search below - a cipher
+ * schedule and a full sweep for each 32-to-64 letter run in the file - would
+ * run on every x86 PE the scanner meets, and a Windows EXE's string tables are
+ * full of runs that length. One linear scan for these nine bytes rules the file
+ * out before any of that, the same way the msfvenom decoders test their
+ * entry-point stub before decoding.
+ */
+static int has_template(const struct kof_obj_ctx *ctx, uint64_t n_obj)
+{
+	uint64_t at;
+
+	for (at = 0; at + 9u <= n_obj; at++)
+		if (kof_u8(at)      == 0x6au && kof_u8(at + 1u) == 0x04u &&
+		    kof_u8(at + 2u) == 0x6au && kof_u8(at + 3u) == 0x00u &&
+		    kof_u8(at + 4u) == 0x68u && kof_u8(at + 5u) == 0xffu &&
+		    kof_u8(at + 6u) == 0x0fu && kof_u8(at + 7u) == 0x1fu &&
+		    kof_u8(at + 8u) == 0x00u)
+			return 1;
+	return 0;
+}
+
 KOF_DEFINE_UNPACK
 {
 	uint8_t s[256], key[KEY_MAX], ks[HEAD_N], buf[CHUNK];
@@ -171,6 +205,10 @@ KOF_DEFINE_UNPACK
 	uint32_t klen = 0, size, done, i, j;
 
 	if (n_obj < PLAIN_MIN || n_obj > SCAN_MAX)
+		return;
+
+	/* The cheap gate, before the expensive search - see has_template. */
+	if (!has_template(ctx, n_obj))
 		return;
 
 	/*

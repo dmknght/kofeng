@@ -815,17 +815,23 @@ static void finding_str(const struct kof_scanner *sc,
 			pct = 100u;
 
 		/*
-		 * <family>#<the block>!Plague?<how much of it>.
+		 * <family>#<the blocks>!Plague?<how much of them>.
 		 *
-		 * The variant names the BLOCK, because that is the part of the
-		 * rule that decided - two rules of one family reported the same
-		 * "#83" and a reader could not tell which block, or which rule,
-		 * had said it. The block's name is the fold of its hashes, so
-		 * the verdict leads straight back to the KOF_PLAGUE_BLOCK line
-		 * that produced it.
+		 * The variant names the SET of blocks the rule asked about, not
+		 * one of them: a condition may be "block A and block B", and
+		 * naming it after whichever scored higher described half the
+		 * rule and left the other half unsaid - two rules of one family
+		 * that shared a block then reported the same "#83". The name is
+		 * the fold of the set (kof_plague_name_of sorts it, so the order
+		 * a C expression evaluated the blocks in cannot change it), and
+		 * for one block that fold is the block's own name, so a
+		 * single-block rule reads exactly as before and leads straight
+		 * back to its KOF_PLAGUE_BLOCK line.
 		 *
-		 * The measurement moves in behind the mark, where the rest of
-		 * the engine already puts what a verdict is BASED on.
+		 * The measurement is the set's too - matched hashes over
+		 * declared hashes across every block asked - and moves in behind
+		 * the mark, where the rest of the engine already puts what a
+		 * verdict is BASED on.
 		 */
 		snprintf(sv, sizeof sv, "%08x",
 			 kof_plague_name_of(sc->plague_blk, sc->n_plague_blk));
