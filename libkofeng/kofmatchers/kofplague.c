@@ -199,6 +199,23 @@ const uint32_t *kof_plague_block_hashes(const struct kof_plague_set *s,
 	return s->pool + s->block[block].first_hash;
 }
 
+/*
+ * THE NAME OF A BLOCK, and the only place it is decided.
+ *
+ * A block has no stored name - it is the fold of its own hashes, so the same
+ * bytes carry the same name whoever carved them and whichever pack they were
+ * loaded into. Both the verdict the scanner writes and anyone later asking
+ * which rule a verdict came from must read it from here, or the two spellings
+ * drift and the answer is wrong in a way nothing reports.
+ */
+uint32_t kof_plague_block_id(const struct kof_plague_set *s, uint32_t block)
+{
+	uint32_t nh = 0;
+	const uint32_t *h = kof_plague_block_hashes(s, block, &nh);
+
+	return h ? kof_plague_fold(h, nh) : 0u;
+}
+
 uint32_t kof_plague_set_norms(const struct kof_plague_set *s, uint32_t scan_mask)
 {
 	uint32_t i, m = 0;

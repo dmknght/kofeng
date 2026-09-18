@@ -71,6 +71,9 @@ uint32_t kof_plague_set_norms(const struct kof_plague_set *set, uint32_t scan_ma
  *
  * NULL and *n_hash = 0 for an index the set does not have.
  */
+/* The block's name: the fold of its hashes, as the verdict spells it. */
+uint32_t kof_plague_block_id(const struct kof_plague_set *set, uint32_t block);
+
 const uint32_t *kof_plague_block_hashes(const struct kof_plague_set *set,
 					uint32_t block, uint32_t *n_hash);
 

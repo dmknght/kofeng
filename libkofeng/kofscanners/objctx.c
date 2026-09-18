@@ -3118,8 +3118,13 @@ static uint32_t c_plague_score(const struct kof_obj_ctx *ctx, uint32_t block_id)
 		/* The highest of them, because a rule that names two blocks is
 		 * one verdict and the number beside it should be the strongest
 		 * thing it found rather than whichever call came last. */
-		if ((int)pct > sc->plague_asked)
+		if ((int)pct > sc->plague_asked) {
 			sc->plague_asked = (int)pct;
+			sc->plague_id =
+				kof_plague_block_id(sc->eng->plague,
+						    sc->cur_mod->block_base
+						    + block_id);
+		}
 		return pct;
 	}
 }

@@ -803,13 +803,27 @@ static void finding_str(const struct kof_scanner *sc,
 	 * named as it always was.
 	 */
 	if (sc->plague_asked >= 0) {
-		char sv[8];
+		char sv[16], shape[16];
 		int pct = sc->plague_asked > 100 ? 100 : sc->plague_asked;
 
-		snprintf(sv, sizeof sv, "%d", pct);
+		/*
+		 * <family>#<the block>!Plague?<how much of it>.
+		 *
+		 * The variant names the BLOCK, because that is the part of the
+		 * rule that decided - two rules of one family reported the same
+		 * "#83" and a reader could not tell which block, or which rule,
+		 * had said it. The block's name is the fold of its hashes, so
+		 * the verdict leads straight back to the KOF_PLAGUE_BLOCK line
+		 * that produced it.
+		 *
+		 * The measurement moves in behind the mark, where the rest of
+		 * the engine already puts what a verdict is BASED on.
+		 */
+		snprintf(sv, sizeof sv, "%08x", sc->plague_id);
+		snprintf(shape, sizeof shape, "Plague?%d", pct);
 		kof_finding_name(f, fmtarch, maltype,
 				 (family && family[0]) ? family : "unknown",
-				 sv, "Plague");
+				 sv, shape);
 		return;
 	}
 	kof_finding_name(f, fmtarch, maltype,
@@ -1652,6 +1666,7 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 * because it is the same kind of thing: what THIS module
 		 * reported about this object. */
 		sc->plague_asked = -1;
+		sc->plague_id = 0;
 		sc->cur_mod   = m;
 		m->fn(ctx);
 		sc->cur_mod   = NULL;
@@ -1872,6 +1887,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 		 * because it is the same kind of thing: what THIS module
 		 * reported about this object. */
 		sc->plague_asked = -1;
+		sc->plague_id = 0;
 		sc->cur_mod   = m;
 		m->fn(&ctx);
 		sc->cur_mod   = NULL;

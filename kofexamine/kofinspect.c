@@ -546,6 +546,16 @@ static int span_is(const struct kof_finding *f,
  * "/" is copied verbatim - see kof_touch.fired_verdict for why it is copied and
  * not recomposed.
  */
+/* The shape now carries the measurement behind it - "Plague?83" - so the mark
+ * is matched by its head. */
+static int span_starts(const struct kof_finding *f,
+		       const struct kof_name_span *sp, const char *word)
+{
+	size_t n = strlen(word);
+
+	return sp->n >= n && memcmp(f->name + sp->at, word, n) == 0;
+}
+
 static void quote_verdict(struct kof_touch *t, const struct kof_finding *f)
 {
 	const char *p = f->name;
@@ -557,6 +567,7 @@ static void quote_verdict(struct kof_touch *t, const struct kof_finding *f)
 }
 
 static const char *fired_as(struct kof_touch *t,
+			    const struct kof_engine *eng,
 			    const struct kof_finding *finding,
 			    uint32_t n_finding)
 {
@@ -577,18 +588,39 @@ static const char *fired_as(struct kof_touch *t,
 	 * The mark is what identifies the shape, and n_block is what keeps a
 	 * pattern rule of the same family from answering for it.
 	 */
-	if (t->mod && t->mod->n_block)
-		for (k = 0; k < n_finding; k++)
-			if (span_is(&finding[k], &finding[k].shape, "Plague") &&
-			    span_is(&finding[k], &finding[k].maltype,
-				    kof_maltype_name(t->maltype)) &&
-			    span_is(&finding[k], &finding[k].family,
-				    t->family)) {
+	/*
+	 * MATCHED BY THE BLOCK, not by the family.
+	 *
+	 * Two rules of one family are two rules, and a verdict belongs to
+	 * exactly one of them - so comparing the family alone marked both as
+	 * having fired and the pane counted two matches for one. The finding
+	 * names the block that decided (see finding_str), and a block's name is
+	 * the fold of its hashes, so the module that owns that block is the
+	 * module that fired. Nothing else can claim it.
+	 */
+	if (t->mod && t->mod->n_block && eng)
+		for (k = 0; k < n_finding; k++) {
+			char id[16];
+			uint32_t b;
+			int mine = 0;
+
+			if (!span_starts(&finding[k], &finding[k].shape,
+					 "Plague"))
+				continue;
+			for (b = 0; b < t->mod->n_block && !mine; b++) {
+				snprintf(id, sizeof id, "%08x",
+					 kof_plague_block_id(eng->plague,
+						t->mod->block_base + b));
+				mine = span_is(&finding[k], &finding[k].variant,
+					       id);
+			}
+			if (mine) {
 				t->fired_level = finding[k].level;
 				quote_verdict(t, &finding[k]);
 				return t->n_names && t->name[0] ? t->name[0]
 								: t->family;
 			}
+		}
 
 	for (j = 0; j < t->n_names; j++) {
 		if (!t->name[j])
@@ -849,7 +881,7 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 
 		}
 
-		t->fired_name = fired_as(t, finding, n_finding);
+		t->fired_name = fired_as(t, eng, finding, n_finding);
 		t->fired = t->fired_name != NULL;
 
 		/*

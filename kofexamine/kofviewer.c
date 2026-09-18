@@ -1104,6 +1104,7 @@ static void hit_hwheel_text(struct view *v, uint32_t arg);
  * see the note above draw_decl_head on what sharing a field cost. */
 static void hit_plg_tick(struct view *v, uint32_t i);
 static void hit_plg_light(struct view *v, uint32_t i);
+static void hit_plg_goto(struct view *v, uint32_t i);
 static void view_show_in(struct view *v, uint32_t obj, uint8_t sym,
 			 uint64_t off, int narrow);
 static void hit_grp_pct(struct view *v, uint32_t i);
@@ -6074,6 +6075,31 @@ static int plg_kept_any(const struct view *v)
 	return 0;
 }
 
+/*
+ * WHICH BLOCK COVERS THE BYTE THE MENU WAS OPENED ON.
+ *
+ * menu_off is a REGION offset - it is what the pane was showing - and a block
+ * records where it was cut from in the FILE, so the two meet through view_map,
+ * the same way plg_lit_at meets them through view_unmap going the other way.
+ *
+ * n_blk when nothing covers it, which is most bytes of most objects.
+ */
+static uint32_t plg_at_byte(const struct view *v)
+{
+	uint64_t fo = view_map(v, v->menu_off, 0);
+	uint32_t i;
+
+	if (fo == KOF_BROKEN)
+		return v->ed.dr.n_blk;
+	for (i = 0; i < v->ed.dr.n_blk; i++) {
+		const struct plg_block *b = &v->ed.dr.blk[i];
+
+		if (b->len && fo >= b->off && fo < b->off + b->len)
+			return i;
+	}
+	return v->ed.dr.n_blk;
+}
+
 static uint32_t plg_mask(const struct plg_block *b)
 {
 	return b->anywhere ? (uint32_t)KOF_SCAN_ALL : b->mask;
@@ -8489,10 +8515,11 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 
 			if (!blk_usable(&v->ed, bi))
 				continue;
-			snprintf(t, sizeof t, "%08x  %llu  %.6s",
-				 v->ed.dr.blk[bi].id,
-				 (unsigned long long)v->ed.dr.blk[bi].len,
-				 v->ed.dr.blk[bi].rgn);
+			/* The value alone. Its size and its region are on the
+			 * block's own row, and a menu that repeats them makes
+			 * the reader compare three columns to pick one of
+			 * two. */
+			snprintf(t, sizeof t, "%08x", v->ed.dr.blk[bi].id);
 			ch_add(c, t);
 		}
 	} else if (what == CH_RANGE) {
@@ -10024,10 +10051,9 @@ static void prow_build(struct view *v)
 	prow_add(v, RW_MATHDR, 0);
 	for (i = 0; i < v->ed.dr.n_grp; i++) {
 		prow_add(v, RW_MATCH, i);
-		/* A block matcher has no marker row: it names one block and the
-		 * block is on its own row above. */
-		if (v->ed.dr.grp[i].kind == GRP_KIND_BLOCK)
-			continue;
+		/* Both kinds are two rows: what the matcher IS, and what it is
+		 * about - the markers it searches for, or the block it scores
+		 * against. */
 		prow_add(v, RW_MARKERS, i);
 	}
 	prow_add(v, RW_ADDM, 0);
@@ -11933,15 +11959,16 @@ static void hit_row_matcher(struct view *v, uint32_t g)
 		grp_remove(&v->ed, g);
 	else if (v->ed.dr.grp[g].kind == GRP_KIND_BLOCK) {
 		/*
-		 * The same two halves a search matcher's row has: what KIND of
-		 * matcher this is, and what it is about. The kind is the word
-		 * at the left - clicking it can turn this back into a search -
-		 * and the block is the value beside it.
+		 * The first row holds what a search matcher's first row holds:
+		 * the kind - clicking it can turn this back into a search - and
+		 * the comment. The block it is about is on the row below, with
+		 * the hit test for it in hit_row_markers.
 		 */
-		if (g_mx >= v->grp_rg[g][0] && g_mx <= v->grp_rg[g][1])
-			ch_open(v, CH_BLOCK, g, g_my, g_mx);
-		else if (g_mx >= v->grp_rl[g][0] && g_mx <= v->grp_rl[g][1])
+		if (g_mx >= v->grp_rl[g][0] && g_mx <= v->grp_rl[g][1])
 			ch_open(v, CH_RULE, g, g_my, g_mx);
+		else if (v->grp_nt[g][0] > 0 && g_mx >= v->grp_nt[g][0] &&
+			 g_mx <= v->grp_nt[g][1])
+			v->edit = 300 + (int)g;
 	}
 	else if (g_mx >= v->grp_rl[g][0] &&
 		 g_mx <= v->grp_rl[g][1])
@@ -11977,6 +12004,15 @@ static void hit_row_markers(struct view *v, uint32_t g)
 	int c2 = 15;
 
 	v->ed.dr.cur_grp = g;
+	/* A block matcher's second row names its block, in the place a search
+	 * matcher's names its markers. The percentage beside it registers its
+	 * own span and is answered before this. */
+	if (v->ed.dr.grp[g].kind == GRP_KIND_BLOCK) {
+		if (v->grp_rg[g][0] > 0 && g_mx >= v->grp_rg[g][0] &&
+		    g_mx <= v->grp_rg[g][1])
+			ch_open(v, CH_BLOCK, g, g_my, g_mx);
+		return;
+	}
 	if (v->p_c0[g][0] > 0 &&
 	    g_mx >= v->p_c0[g][0] &&
 	    g_mx <= v->p_c0[g][1]) {
@@ -12543,6 +12579,35 @@ static int draw_decl_strings(struct out *o, struct view *v, int r)
 }
 
 /*
+ * draw_grp_note - the matcher's comment box, at the end of its first row.
+ *
+ * Every matcher has one and every matcher writes it the same way, so it is
+ * written once: a block matcher that spelled its own would have drifted from
+ * the search matchers the first time either changed.
+ */
+static void draw_grp_note(struct out *o, struct view *v, uint32_t g)
+{
+	const struct group *q = &v->ed.dr.grp[g];
+	int room;
+
+	out_str(o, "   ");
+	v->grp_nt[g][0] = 1 + (int)o->col_hint;
+	/* Up to the remove control, which keeps the right hand end of every
+	 * matcher row. */
+	room = g_cols - v->grp_nt[g][0] - 7;
+	if (room < 8)
+		room = 8;
+	/* Hugging, like every other box - see field_room. The [x] that ends
+	 * the row is drawn at an absolute column. */
+	room = field_room(q->note, "comment...", v->edit == 300 + (int)g, room);
+	out_fmt(o, "%s[", v->edit == 300 + (int)g ? A_SEL : A_DIM);
+	field_draw(o, q->note, v->caret, &v->ed.dr.grp[g].note_off, room,
+		   v->edit == 300 + (int)g, "comment...");
+	out_str(o, "]" A_OFF);
+	v->grp_nt[g][1] = (int)o->col_hint;
+}
+
+/*
  * draw_decl_matchers - the matchers, one call each.
  *
  * One section of the draft panel. They were one nine-hundred line function, so
@@ -12604,9 +12669,20 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 		 * named by its hash, which is what the table above calls it and
 		 * what the generated source will call it.
 		 */
+		/*
+		 * A BLOCK MATCHER IS SHAPED LIKE ANY OTHER.
+		 *
+		 * Same two rows: the kind of matcher and its comment, then
+		 * underneath what the matcher is about. It drew as one row with
+		 * the block wedged in beside the word, which put its number in
+		 * a different column from every search matcher's and left it
+		 * the only matcher with nowhere to write a comment.
+		 */
 		if (q->kind == GRP_KIND_BLOCK) {
+			char lead[16];
+
 			if (PR_VIS(r)) {
-				int y = PR(r), c0;
+				int y = PR(r);
 
 				row_start(o, y, 1);
 				/*
@@ -12617,11 +12693,34 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 				 * overlap - see hit_at.
 				 */
 				hit_add(v, y, 0, g_cols - 1, hit_row_matcher, g);
-				out_fmt(o, A_DIM " %u " A_OFF, g + 1u);
+				snprintf(lead, sizeof lead, "  %u.", g + 1u);
+				out_fmt(o, "%s%-6.6s" A_OFF,
+					g == v->ed.dr.cur_grp ? A_SEL : A_DIM,
+					lead);
 				v->grp_rl[g][0] = 1 + (int)o->col_hint;
-				out_fmt(o, A_ID " find_block_sim " A_OFF);
+				out_fmt(o, "%s%s" A_OFF, A_WARN,
+					"find_block_sim");
 				v->grp_rl[g][1] = (int)o->col_hint;
-				out_str(o, " ");
+				draw_grp_note(o, v, g);
+				/* And thrown away the same way as any other
+				 * matcher, from the same column. */
+				out_at(o, y, g_cols - 4);
+				out_str(o, A_BAD "[x]" A_OFF);
+			} else {
+				v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
+				v->grp_nt[g][0] = v->grp_nt[g][1] = -1;
+			}
+			r++;
+			if (!PR_VIS(r)) {
+				v->grp_rg[g][0] = v->grp_rg[g][1] = -1;
+				r++;
+				continue;
+			}
+			{
+				int y = PR(r), c0;
+
+				row_start(o, y, 1);
+				out_str(o, A_DIM "     Block: " A_OFF);
 				/* WHICH BLOCK, and it is a control: a rule with
 				 * several blocks is several matchers, and
 				 * pointing one at a different block is how they
@@ -12642,16 +12741,9 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 				else
 					out_fmt(o, "%3u", q->pct);
 				out_fmt(o, "]" A_OFF);
-				hit_add(v, y, c0, (int)o->col_hint,
-					hit_grp_pct, g);
 				out_str(o, A_DIM "%" A_OFF);
-				/* And thrown away the same way as any other
-				 * matcher, from the same column. */
-				out_at(o, y, g_cols - 4);
-				out_str(o, A_BAD "[x]" A_OFF);
-			} else {
-				v->grp_rg[g][0] = v->grp_rg[g][1] = -1;
-				v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
+				hit_add(v, y, 0, g_cols - 1, hit_row_markers, g);
+				hit_add(v, y, c0, c0 + 4, hit_grp_pct, g);
 			}
 			r++;
 			continue;
@@ -12726,31 +12818,7 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 				out_fmt(o, A_DIM " of " A_OFF "%s%u" A_OFF,
 					A_SIZE, grp_count(&v->ed, g));
 			}
-			out_str(o, "   ");
-			v->grp_nt[g][0] = 1 + (int)o->col_hint;
-			{
-				/* Up to the remove control, which keeps the
-				 * right hand end of every matcher row. */
-				int room = g_cols - v->grp_nt[g][0] - 7;
-
-				if (room < 8)
-					room = 8;
-				/* Hugging, like every other box - see
-				 * field_room. The [x] that ends the row is
-				 * drawn at an absolute column. */
-				room = field_room(q->note, "comment...",
-						  v->edit == 300 + (int)g,
-						  room);
-				out_fmt(o, "%s[",
-					v->edit == 300 + (int)g ? A_SEL
-								: A_DIM);
-				field_draw(o, q->note, v->caret,
-					   &v->ed.dr.grp[g].note_off, room,
-					   v->edit == 300 + (int)g,
-					   "comment...");
-				out_str(o, "]" A_OFF);
-			}
-			v->grp_nt[g][1] = (int)o->col_hint;
+			draw_grp_note(o, v, g);
 			out_at(o, PR(r), g_cols - 4);
 			out_str(o, A_BAD "[x]" A_OFF);
 			hit_add(v, PR(r), 0, g_cols - 1, hit_row_matcher, g);
@@ -13174,6 +13242,23 @@ static void hit_plg_tick(struct view *v, uint32_t i)
 		blk_set_picked(&v->ed, i, !v->ed.dr.blk[i].picked);
 }
 
+/*
+ * GO TO THE BLOCK WITHOUT MARKING IT.
+ *
+ * The offset is a PLACE, so pointing at it means "show me there" and nothing
+ * more. The colour belongs to the hash beside it - that cell is the block's
+ * name and lighting it is what ties the name to the bytes - so a jump that also
+ * lit would take the one gesture that says "mark this" and give it to the one
+ * that says "look at this".
+ */
+static void hit_plg_goto(struct view *v, uint32_t i)
+{
+	if (i >= v->ed.dr.n_blk || !v->ed.dr.blk[i].len)
+		return;
+	view_show_in(v, v->node[v->sel_node].obj, v->node[v->sel_node].sym,
+		     v->ed.dr.blk[i].off, 0);
+}
+
 static void hit_plg_light(struct view *v, uint32_t i)
 {
 	if (i >= v->ed.dr.n_blk)
@@ -13543,11 +13628,23 @@ rows:
 		 * its bytes belong to the sample it was cut from, which is also
 		 * why it cannot be lit.
 		 */
-		if (!b->len)
+		if (!b->len) {
 			out_str(o, A_DIM "  " "          " A_OFF);
-		else
+		} else {
+			/*
+			 * AND THE OFFSET GOES THERE TOO.
+			 *
+			 * It is the one cell on the row that IS a place, so it
+			 * is the one a reader points at to be taken there -
+			 * lighting the block on the way, because a jump that
+			 * left the bytes unmarked would put the pane somewhere
+			 * without saying what at.
+			 */
+			c0 = 2 + (int)o->col_hint;
 			out_fmt(o, A_DIM "  0x%08llx" A_OFF,
 				(unsigned long long)b->off);
+			hit_add(v, y, c0, (int)o->col_hint, hit_plg_goto, i);
+		}
 		out_fmt(o, A_DIM "  %6llu" A_OFF,
 			(unsigned long long)b->len);
 		/*
@@ -14593,6 +14690,16 @@ enum menu_action {
 	M_GOTO,
 	M_FIND_STR,
 	M_FIND_HEX,
+	/*
+	 * WHICH BLOCK THESE BYTES ARE IN, asked from the bytes rather than
+	 * from the table.
+	 *
+	 * The block table answers "where is this block"; a reader looking at a
+	 * run of bytes has the opposite question, and until now had to read
+	 * offsets off the table and compare them by eye. Same pane, same
+	 * gesture, other direction.
+	 */
+	M_PLAGUE_WHICH,
 
 	/*
 	 * THE EVENT BOX'S OWN TWO, and they are separate items rather than the
@@ -14697,6 +14804,7 @@ static const struct {
 	 */
 	{ "Find string",      3 | 4, 3 },
 	{ "Find hex",         3 | 4, 3 },
+	{ "Which plague block",   3, 3 },
 
 	/* Context 8: the event panel's text box. Nothing else offers these and
 	 * they offer nothing else. */
@@ -14927,6 +15035,10 @@ static int menu_enabled(struct view *v, int a)
 	}
 	if (a == M_FIND_STR || a == M_FIND_HEX)
 		return 1;       /* opens the find dialog, in either mode */
+	/* Only when there is an answer: a byte no block covers has none, and
+	 * an item that would say "none" is an item that need not be there. */
+	if (a == M_PLAGUE_WHICH)
+		return plg_at_byte(v) < v->ed.dr.n_blk;
 	/* Not wired to anything yet. Shown because the menu is where they will
 	 * be, and disabled because a menu item that does nothing teaches people
 	 * not to trust the menu. */
@@ -16061,6 +16173,24 @@ static void menu_run(struct view *v, int a)
 		v->menu_open = 0;
 		return;
 	}
+	if (a == M_PLAGUE_WHICH) {
+		/*
+		 * SAID, AND SHOWN. The sentence names the block so the reader
+		 * can find its row, and the block is lit so the extent of it is
+		 * on the screen rather than described.
+		 */
+		uint32_t bi = plg_at_byte(v);
+
+		if (bi < v->ed.dr.n_blk) {
+			v->ed.dr.blk[bi].lit = 1;
+			say_note(&v->ed, "Block %08x, %llu bytes from 0x%llx",
+				 v->ed.dr.blk[bi].id,
+				 (unsigned long long)v->ed.dr.blk[bi].len,
+				 (unsigned long long)v->ed.dr.blk[bi].off);
+		}
+		v->menu_open = 0;
+		return;
+	}
 	if (a == M_GOTO) {
 		/*
 		 * The item was in both menus and in the enum, and nothing ever
@@ -17133,18 +17263,6 @@ enum bar_item {
 	 * it to do, and an item that does nothing is hidden rather than
 	 * greyed: see the note on `enabled` in kofview.h.
 	 */
-	/*
-	 * The panel stops being a signature draft and becomes a block table.
-	 * Label replaced at draw time, like BI_DISASM's - a menu offering
-	 * "Plague mode" and "Pattern mode" side by side always has one of them
-	 * wrong.
-	 *
-	 * ONE ITEM, and marking a block and generating the rule are NOT here.
-	 * They act on what the panel is showing and belong on it, the way the
-	 * draft panel carries its own Generate. A menu item that only works
-	 * while a particular panel is open is a menu item in the wrong place.
-	 */
-	BI_PLAGUE,
 	BI_SEPARATE,
 	BI_REBUILD,
 	BI_NEXT, BI_PREV,
@@ -17207,7 +17325,6 @@ static const struct {
 	/* The same word, because a reader should not have to care which of the
 	 * two they are looking at - they never see both. */
 	{ "Dump",              BM_ANALYSIS, -1, 0 },
-	{ "Plague mode",       BM_ANALYSIS, -1, 1 },
 	{ "Separate children", BM_ANALYSIS, -1, 0 },
 	{ "Rebuild database",  BM_ANALYSIS, -1, 0 },
 	/*
@@ -17366,9 +17483,6 @@ static const char *bar_label(struct view *v, int i)
 	/* Says which way the toggle goes, for the reason above. */
 	if (i == BI_DISASM)
 		return v->dis_open ? "Hide disassembly" : "Show disassembly";
-	/* The same rule: the row names the mode it switches TO. */
-	if (i == BI_PLAGUE)
-
 	/*
 	 * A FILTER ROW SHOWS ITS OWN STATE, because it is a checkbox and not a
 	 * command: a reader has to be able to see what is on before deciding
@@ -17376,10 +17490,8 @@ static const char *bar_label(struct view *v, int i)
 	 * to find out.
 	 *
 	 * The verb's name comes from kof_evt_verb_name, the same one the event
-	 * rows and every other consumer use - a filter labelled differently
-	 * from the rows it filters would be a menu about something else.
-	 *
-	 * Static buffer because this returns a const char * the drawer prints
+	 * panel prints, so the menu and the rows cannot disagree about what a
+	 * verb is called. A row that is off says so; one that is on says so
 	 * immediately, which is the contract the other branches already have.
 	 */
 	{
@@ -17767,14 +17879,6 @@ static int bar_enabled(struct view *v, int i)
 	/* Always: the text it decodes usually comes from outside the file, so
 	 * there is nothing about the object that could make it unavailable. */
 	case BI_ENCSTR:    return 1;
-	/*
-	 * Plague mode applies to any object at all - a block is a span of
-	 * bytes and every object has those. Marking needs a selection and
-	 * generating needs a ticked block, and both are said by bar_enabled
-	 * rather than by hiding the row: a reader who cannot find "Mark block"
-	 * cannot learn that selecting first is what it wants.
-	 */
-	case BI_PLAGUE:    return 1;
 	case BI_KEYS:
 	case BI_ABOUT:     return 1;
 	/*
@@ -21894,18 +21998,6 @@ static void bar_run(struct view *v, int i)
 	case BI_DISASM:   dis_toggle(v, 0, KOF_BROKEN); break;
 	case BI_NEXT:    open_step(v, +1); break;
 	case BI_PREV:    open_step(v, -1); break;
-	case BI_PLAGUE:
-		/*
-		 * Turning the mode off leaves the table alone. A reader flips
-		 * back to look at the draft and returns; throwing the ticks
-		 * away because the panel was showing something else would make
-		 * the mode a mode you cannot leave.
-		 */
-		/* The two panels are different lists; an offset into one means
-		 * nothing in the other. */
-		v->prow_off = 0;
-		v->act_msg[0] = 0;
-		break;
 	case BI_SEPARATE: separate_now(v); break;
 	case BI_REBUILD: rebuild_db(v); break;
 	case BI_ENCSTR:

@@ -77,6 +77,16 @@ struct kof_scanner {
 	 */
 	int plague_asked;
 	/*
+	 * AND WHICH BLOCK THAT WAS, by the name a rule calls it.
+	 *
+	 * Two rules of one family reported the same thing - the family and a
+	 * percentage - so a reader could not tell which of them fired or which
+	 * block did it. The block's name is the fold of its hashes, which is
+	 * exactly what the source writes after blk_, so a verdict can be taken
+	 * back to the line that produced it.
+	 */
+	uint32_t plague_id;
+	/*
 	 * One parsed view per format, allocated the first time an object of that
 	 * format is seen and kept for the life of the scanner.
 	 *
