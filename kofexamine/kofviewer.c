@@ -8008,8 +8008,23 @@ static int plg_load_rule(struct view *v, const char *path)
 		 * used to be skipped entirely: the block matchers were built
 		 * and nothing concluded anything from them, so a mixed rule
 		 * opened with "Matchers: None" under its condition.
+		 *
+		 * ONLY WHEN THERE IS ONE CONDITION TO JOIN INTO. The two readers
+		 * parse independently - plague_from_source recovers a block's
+		 * join but not which condition used it - so with several
+		 * conditions there is no way here to say which one a block
+		 * belongs to, and stapling every block onto the first would be a
+		 * guess dressed as a fact. The proper fix is one reader over the
+		 * whole kof_scan; until then a multi-condition mixed rule opens
+		 * with its blocks unwired, which the panel shows rather than
+		 * hides. No rule this editor generates is of that shape - it
+		 * emits one condition - so this changes nothing a viewer round
+		 * trips today.
 		 */
 		int fresh = !v->ed.dr.n_cnd;
+
+		if (v->ed.dr.n_cnd > 1)
+			goto blocks_done;
 
 		if (fresh) {
 			cnd_add(&v->ed, 0);
@@ -8045,6 +8060,7 @@ static int plg_load_rule(struct view *v, const char *path)
 				 verdict.text);
 		}
 	}
+blocks_done:
 
 	/* The rule is in hand; the carve has not run against it yet. */
 	v->plg_segged = 0;
@@ -16458,18 +16474,21 @@ static void redraw(struct view *v)
 		prow_build(v);
 		want = v->n_prow;
 		/*
-		 * A draft that just grew shows its new end.
+		 * THE SCROLL STAYS WHERE THE READER LEFT IT when the draft
+		 * grows.
 		 *
-		 * What was added is the thing being worked on, and it arrives
-		 * at the bottom. Keeping the top pinned meant the row you asked
-		 * for appeared off the bottom of a panel that looked unchanged,
-		 * which reads as the button having done nothing.
+		 * Adding a matcher or a pattern used to jump the panel to its
+		 * new end, on the reasoning that what was just added is what
+		 * you want to see. In practice it threw the reader off whatever
+		 * they were looking at every time they declared something - the
+		 * panel lurched, and a row they had half-read was gone. Only a
+		 * loaded or switched draft returns to the top (prow_home); an
+		 * edit keeps the offset it had, clamped below to whatever still
+		 * fits.
 		 */
 		if (v->prow_home) {
 			v->prow_off = 0;
 			v->prow_home = 0;
-		} else if (v->n_prow > v->prow_seen) {
-			v->prow_off = 0xffffffffu;      /* clamped below */
 		}
 		v->prow_seen = v->n_prow;
 
