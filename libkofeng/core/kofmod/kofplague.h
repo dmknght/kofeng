@@ -180,45 +180,6 @@ static inline uint8_t kof_plague_byte(const uint8_t *p, uint64_t k,
 	     : (uint8_t)(p[k + 1u] - p[k]);
 }
 
-/*
- * HOW MANY DISTINCT BYTE VALUES AN EXTENT MUST HOLD TO BE WORTH HASHING.
- *
- * NOLOAD and UNCLAIMED are where an object keeps what nothing claimed - debug
- * tables, alignment gaps, the tail after the last section - and most of it is
- * padding or a short repeating table. Hashing it produces values that say
- * "there is padding here", which every object can say.
- *
- * MEASURED, not chosen: 426 extents over 25 samples, counting distinct byte
- * values against whether the extent yielded a block at all.
- *
- *   UNCLAIMED  yielded a block: 234 distinct      yielded none: 1 to 31
- *   NOLOAD     yielded a block: 72 to 256         yielded none: 14 to 45
- *
- * Every extent worth anything held at least 72; every worthless one held at
- * most 45. Sixty-four sits in that gap. An extent is read only until the count
- * is reached, so the common case stops after a few hundred bytes.
- */
-#define KOF_PLAGUE_MIN_VARIETY 64u
-
-static inline int kof_plague_worth(const uint8_t *p, uint64_t n)
-{
-	uint8_t seen[256];
-	uint32_t got = 0, i;
-	uint64_t k;
-
-	if (!p || n < KOF_PLAGUE_NG)
-		return 0;
-	for (i = 0; i < 256u; i++)
-		seen[i] = 0;
-	for (k = 0; k < n; k++)
-		if (!seen[p[k]]) {
-			seen[p[k]] = 1;
-			if (++got >= KOF_PLAGUE_MIN_VARIETY)
-				return 1;
-		}
-	return 0;
-}
-
 static inline int kof_plague_flat(const uint8_t *p, uint64_t at, uint32_t norm)
 {
 	uint8_t b0 = kof_plague_byte(p, at, norm);

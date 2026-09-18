@@ -4,10 +4,9 @@
  *
  * KOF_SCAN_ALL has no region to resolve, so the pass that serves it walks the
  * object's regions instead and leaves out the ones nothing is ever cut from -
- * headers and symbols - and whatever of NOLOAD and UNCLAIMED is not worth
- * hashing. The block below sits in NOLOAD, which is one of the two that walk
- * gates, so a rule naming no region at all must still reach it: the gate is
- * about padding and this span is not padding.
+ * headers and symbols. The block below sits in NOLOAD, which is the region an
+ * object keeps what nothing claimed: a rule naming no region at all must still
+ * reach it, so the walk cannot be narrowed to the regions that look important.
  */
 
 #include <kofmod/kofsig.h>
