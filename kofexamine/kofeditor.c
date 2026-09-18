@@ -2081,8 +2081,14 @@ uint32_t draft_hash(struct kof_editor *e)
 	 * draft that loses them without warning. The block's own name is the
 	 * fold of its hashes, so hashing that covers its content too.
 	 */
+	/*
+	 * ONLY THE TICKED ONES. An unticked block is the ENGINE'S
+	 * OFFER about the object, not part of the draft - and mixing those in
+	 * made the draft dirty the moment a file was opened, because the carve
+	 * runs on arrival. A dirty draft refuses to switch file, so opening a
+	 * second sample needed a Discard first.
+	 */
 	for (i = 0; i < e->dr.n_blk && e->dr.blk; i++) {
-		MIX(e->dr.blk[i].picked);
 		if (!e->dr.blk[i].picked)
 			continue;
 		MIX(e->dr.blk[i].id);
@@ -2091,10 +2097,21 @@ uint32_t draft_hash(struct kof_editor *e)
 	}
 	for (i = 0; i < e->dr.n_grp; i++) {
 		MIX(e->dr.grp[i].kind);
-		if (e->dr.grp[i].kind == GRP_KIND_BLOCK) {
-			MIX(e->dr.grp[i].blk);
-			MIX(e->dr.grp[i].pct);
-		}
+		if (e->dr.grp[i].kind != GRP_KIND_BLOCK)
+			continue;
+		/*
+		 * WHICH BLOCK, BY ITS NAME - not by where it sits in the list.
+		 *
+		 * The index is a position in a list the carve rebuilds and
+		 * sorts into file order every time the object changes, so
+		 * hashing it made the draft look edited the moment a rule was
+		 * opened: the block it names had simply moved. What the rule
+		 * says is the block's name, and that only changes when the
+		 * block does.
+		 */
+		if (e->dr.grp[i].blk < e->dr.n_blk && e->dr.blk)
+			MIX(e->dr.blk[e->dr.grp[i].blk].id);
+		MIX(e->dr.grp[i].pct);
 	}
 	#undef MIX
 	return h;

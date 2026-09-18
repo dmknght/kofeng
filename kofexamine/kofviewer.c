@@ -1878,6 +1878,9 @@ struct view {
 	 * each key. */
 	char        grp_pct_buf[8];
 	uint32_t    grp_pct_off;
+	/* Whether the row-count check is the one showing in `warn` - see the
+	 * foot of draw_decl. */
+	int         rowchk;
 	/*
 	 * How many draft rows the panel is allowed to show, and whether the
 	 * divider is being dragged.
@@ -13439,6 +13442,19 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 	 * the status line and off the screen - which reads as the table not
 	 * being there at all.
 	 */
+	/*
+	 * NO BLOCKS, NO SECTION - the same rule the markers above follow.
+	 *
+	 * A heading over an empty table is two rows saying that the engine
+	 * found nothing to offer, which the empty space says already. It also
+	 * has to match prow_build, which counts these two rows only when there
+	 * are blocks: drawn anyway they put every row below them one out, so
+	 * the last of them could not be scrolled to and clicks landed on the
+	 * neighbour. On a webshell draft that was exactly two rows - see the
+	 * check at the foot of draw_decl, which is what found it.
+	 */
+	if (!v->ed.dr.n_blk)
+		return r;
 	snprintf(hdr, sizeof hdr, " Plague blocks");
 	if (PR_VIS(r))
 		sec_bar(o, v, PR(r), hdr);
@@ -13677,10 +13693,31 @@ static void draw_decl(struct out *o, struct view *v)
 	 * because the person who can act on it is the one looking at the
 	 * screen.
 	 */
-	if (r != (int)v->n_prow)
-		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
-			 "panel rows %d, model %u - a section is miscounted",
-			 r, v->n_prow);
+	/*
+	 * AND IT OWNS ITS OWN MESSAGE, rather than borrowing the author's.
+	 *
+	 * `warn` is where the draft says what is wrong with itself, and writing
+	 * into it every frame the counts disagree both buried whatever the
+	 * author was being told and stayed on screen long after - it appeared
+	 * at whatever they clicked next, which reads as that click having
+	 * caused it. So it writes only when the slot is free or already holds
+	 * this same sentence, and takes it back when the counts agree.
+	 */
+	if (r != (int)v->n_prow) {
+		if (!v->ed.dr.warn[0] || v->rowchk) {
+			snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
+				 "panel rows %d, model %u - a section is "
+				 "miscounted", r, v->n_prow);
+			/* It IS a fault, so it is coloured as one - see
+			 * say_err. A panel that miscounts its rows sends
+			 * clicks to the wrong row. */
+			v->ed.dr.warn_bad = 1;
+		}
+		v->rowchk = 1;
+	} else if (v->rowchk) {
+		v->ed.dr.warn[0] = 0;
+		v->rowchk = 0;
+	}
 
 	/* Whatever the draft used to reach and no longer does. */
 	{
