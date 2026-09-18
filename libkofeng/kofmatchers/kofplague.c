@@ -477,16 +477,42 @@ uint32_t kof_plague_matched(const struct kof_plague_ctx *c, uint32_t b)
 	return (c->stamp[b] == c->gen) ? c->seen[b] : 0u;
 }
 
-uint32_t kof_plague_pct(const struct kof_plague_ctx *c, uint32_t b)
+/*
+ * THE TWO NUMBERS THE SCORE IS A RATIO OF.
+ *
+ * Asked for separately because a rule that names SEVERAL blocks has one score
+ * and it is not an average of theirs: the question is how much of what the rule
+ * is made of is in this object, which is matched hashes over declared hashes
+ * across the whole set. Averaging percentages would let a 200-byte block and a
+ * 20KB one weigh the same.
+ */
+int kof_plague_counts(const struct kof_plague_ctx *c, uint32_t b,
+		      uint32_t *seen, uint32_t *n_hash)
 {
 	const struct kof_plague_block *blk;
-	uint32_t seen;
 
+	if (seen)
+		*seen = 0;
+	if (n_hash)
+		*n_hash = 0;
 	if (!c || !c->set || b >= c->n_block)
 		return 0;
 	blk = &c->set->block[b];
 	if (!blk->n_hash)
 		return 0;
-	seen = (c->stamp[b] == c->gen) ? c->seen[b] : 0u;
-	return seen * 100u / blk->n_hash;
+	if (seen)
+		*seen = (c->stamp[b] == c->gen) ? c->seen[b] : 0u;
+	if (n_hash)
+		*n_hash = blk->n_hash;
+	return 1;
+}
+
+uint32_t kof_plague_pct(const struct kof_plague_ctx *c, uint32_t b)
+{
+	uint32_t seen, n_hash;
+
+	/* One division, defined once - see kof_plague_counts. */
+	if (!kof_plague_counts(c, b, &seen, &n_hash) || !n_hash)
+		return 0;
+	return seen * 100u / n_hash;
 }

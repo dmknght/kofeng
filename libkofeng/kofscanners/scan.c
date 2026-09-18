@@ -802,9 +802,17 @@ static void finding_str(const struct kof_scanner *sc,
 	 * block still gets the number, and every rule that uses no block is
 	 * named as it always was.
 	 */
-	if (sc->plague_asked >= 0) {
+	if (sc->plague_asked >= 0 && sc->n_plague_blk) {
 		char sv[16], shape[16];
-		int pct = sc->plague_asked > 100 ? 100 : sc->plague_asked;
+		/* The SET's containment - see kof_plague_counts - so a rule
+		 * made of two blocks reports how much of both is here rather
+		 * than how much of its better half. */
+		unsigned pct = sc->plague_tot
+			     ? (unsigned)(sc->plague_hit * 100u / sc->plague_tot)
+			     : 0u;
+
+		if (pct > 100u)
+			pct = 100u;
 
 		/*
 		 * <family>#<the block>!Plague?<how much of it>.
@@ -819,8 +827,9 @@ static void finding_str(const struct kof_scanner *sc,
 		 * The measurement moves in behind the mark, where the rest of
 		 * the engine already puts what a verdict is BASED on.
 		 */
-		snprintf(sv, sizeof sv, "%08x", sc->plague_id);
-		snprintf(shape, sizeof shape, "Plague?%d", pct);
+		snprintf(sv, sizeof sv, "%08x",
+			 kof_plague_name_of(sc->plague_blk, sc->n_plague_blk));
+		snprintf(shape, sizeof shape, "Plague?%u", pct);
 		kof_finding_name(f, fmtarch, maltype,
 				 (family && family[0]) ? family : "unknown",
 				 sv, shape);
@@ -1666,7 +1675,9 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 * because it is the same kind of thing: what THIS module
 		 * reported about this object. */
 		sc->plague_asked = -1;
-		sc->plague_id = 0;
+		sc->n_plague_blk = 0;
+		sc->plague_hit = 0;
+		sc->plague_tot = 0;
 		sc->cur_mod   = m;
 		m->fn(ctx);
 		sc->cur_mod   = NULL;
@@ -1887,7 +1898,9 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 		 * because it is the same kind of thing: what THIS module
 		 * reported about this object. */
 		sc->plague_asked = -1;
-		sc->plague_id = 0;
+		sc->n_plague_blk = 0;
+		sc->plague_hit = 0;
+		sc->plague_tot = 0;
 		sc->cur_mod   = m;
 		m->fn(&ctx);
 		sc->cur_mod   = NULL;

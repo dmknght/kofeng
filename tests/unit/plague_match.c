@@ -422,6 +422,34 @@ int main(void)
 		kof_plague_set_free(set);
 	}
 
+	/*
+	 * THE NAME OF A SET OF BLOCKS.
+	 *
+	 * A rule whose condition is "block A and block B" is named after both.
+	 * The order the two are asked in is the order a C expression evaluates
+	 * them, which is not part of the rule - so the name must not depend on
+	 * it. And a rule with one block keeps that block's own name: every
+	 * verdict already written says so.
+	 */
+	{
+		const uint32_t ab[2] = { 0xdded9322u, 0x6fad1193u };
+		const uint32_t ba[2] = { 0x6fad1193u, 0xdded9322u };
+		const uint32_t ac[2] = { 0xdded9322u, 0x00000001u };
+		const uint32_t one[1] = { 0xdded9322u };
+
+		ok_(kof_plague_name_of(one, 1u) == 0xdded9322u,
+		    "one block is named after itself");
+		ok_(kof_plague_name_of(ab, 2u) == kof_plague_name_of(ba, 2u),
+		    "the set's name does not depend on the order asked");
+		ok_(kof_plague_name_of(ab, 2u) != kof_plague_name_of(ac, 2u),
+		    "a different set is a different name");
+		ok_(kof_plague_name_of(ab, 2u) != 0xdded9322u &&
+		    kof_plague_name_of(ab, 2u) != 0x6fad1193u,
+		    "a pair is not named after either half");
+		ok_(kof_plague_name_of(NULL, 0u) == 0u,
+		    "no blocks, no name");
+	}
+
 	if (failures) {
 		printf("plague match: %d check(s) failed\n", failures);
 		return 1;
@@ -429,7 +457,7 @@ int main(void)
 	printf("plague match: whole, absent, region, insertion, damage, "
 	       "reordering (seams only), a constant key, a repeated fragment, "
 	       "padding, the region anchor and dropping it, "
-	       "and two blocks that do not disturb "
-	       "each other - ok\n");
+	       "two blocks that do not disturb "
+	       "each other, and the name of a set of blocks - ok\n");
 	return 0;
 }

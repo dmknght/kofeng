@@ -176,6 +176,9 @@ void kof_plague_feed(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm
  * fact about this object.
  */
 uint32_t kof_plague_pct(const struct kof_plague_ctx *c, uint32_t b);
+/* The same measurement unreduced, for a caller combining several blocks. */
+int kof_plague_counts(const struct kof_plague_ctx *c, uint32_t b,
+		      uint32_t *seen, uint32_t *n_hash);
 
 /*
  * The count the percentage was computed from.

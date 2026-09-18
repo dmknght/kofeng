@@ -204,6 +204,48 @@ static inline uint32_t kof_plague_fold(const uint32_t *h, uint32_t n)
 }
 
 /*
+ * THE NAME OF A SET OF BLOCKS - what a rule that uses several is called.
+ *
+ * A condition may be "block A and block B", and then neither block is the
+ * verdict: what matched is the pair. Naming the verdict after one of them - the
+ * strongest, as it happened - said something true about a part and nothing
+ * about the whole, and two rules of one family that shared their strongest
+ * block reported the same name.
+ *
+ * SORTED FIRST, because the fold is order-dependent and the order blocks are
+ * asked in is the order a C expression happens to evaluate them: the same set
+ * reached by "A && B" and by "B && A" is the same rule and must be called the
+ * same thing.
+ *
+ * ONE BLOCK KEEPS ITS OWN NAME. A rule with a single block is the ordinary case
+ * and its verdict already names that block; folding a one-element set would
+ * rename every such rule for nothing.
+ */
+#define KOF_PLAGUE_NAME_MAX 16u
+
+static inline uint32_t kof_plague_name_of(const uint32_t *id, uint32_t n)
+{
+	uint32_t srt[KOF_PLAGUE_NAME_MAX], i, j;
+
+	if (!id || !n)
+		return 0u;
+	if (n == 1u)
+		return id[0];
+	if (n > KOF_PLAGUE_NAME_MAX)
+		n = KOF_PLAGUE_NAME_MAX;
+	/* Insertion sort: n is a handful - see KOF_PLAGUE_NAME_MAX - and a
+	 * small fixed copy is cheaper to read than a call to qsort. */
+	for (i = 0; i < n; i++) {
+		uint32_t v = id[i];
+
+		for (j = i; j && srt[j - 1u] > v; j--)
+			srt[j] = srt[j - 1u];
+		srt[j] = v;
+	}
+	return kof_plague_fold(srt, n);
+}
+
+/*
  * ARE THESE TWO HASH SETS THE SAME BLOCK.
  *
  * Not "is this the same list" - that is what comparing the fold answers, and it

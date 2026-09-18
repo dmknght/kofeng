@@ -3109,21 +3109,40 @@ static uint32_t c_plague_score(const struct kof_obj_ctx *ctx, uint32_t block_id)
 	 * block of whatever other pack happened to sit there.
 	 */
 	{
-		uint32_t pct;
+		uint32_t b, pct, seen = 0, n_hash = 0, id, i;
 
 		if (!sc || !sc->cur_mod)
 			return 0;
-		pct = kof_plague_pct(&sc->plague,
-				     sc->cur_mod->block_base + block_id);
-		/* The highest of them, because a rule that names two blocks is
-		 * one verdict and the number beside it should be the strongest
-		 * thing it found rather than whichever call came last. */
-		if ((int)pct > sc->plague_asked) {
-			sc->plague_asked = (int)pct;
-			sc->plague_id =
-				kof_plague_block_id(sc->eng->plague,
-						    sc->cur_mod->block_base
-						    + block_id);
+		b = sc->cur_mod->block_base + block_id;
+		pct = kof_plague_pct(&sc->plague, b);
+		if (sc->plague_asked < 0)
+			sc->plague_asked = 0;
+
+		/*
+		 * EVERY BLOCK THE RULE ASKS ABOUT IS PART OF ITS VERDICT.
+		 *
+		 * It used to keep only the highest-scoring one, which named a
+		 * "block A and block B" rule after whichever half happened to
+		 * score better and reported that half's percentage as the
+		 * whole rule's. Both are now the set's: the name is the fold of
+		 * the set (see kof_plague_name_of) and the score is the set's
+		 * own containment, matched hashes over declared hashes, which
+		 * is the same measurement one block's score already is.
+		 *
+		 * ONCE EACH. A module may ask about the same block repeatedly
+		 * and in any order - see the note above - and counting a block
+		 * twice would weight it twice.
+		 */
+		id = kof_plague_block_id(sc->eng->plague, b);
+		for (i = 0; i < sc->n_plague_blk; i++)
+			if (sc->plague_blk[i] == id)
+				return pct;
+		if (sc->n_plague_blk < KOF_PLAGUE_NAME_MAX) {
+			sc->plague_blk[sc->n_plague_blk++] = id;
+			if (kof_plague_counts(&sc->plague, b, &seen, &n_hash)) {
+				sc->plague_hit += seen;
+				sc->plague_tot += n_hash;
+			}
 		}
 		return pct;
 	}

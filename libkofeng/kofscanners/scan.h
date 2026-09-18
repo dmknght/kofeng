@@ -77,15 +77,31 @@ struct kof_scanner {
 	 */
 	int plague_asked;
 	/*
-	 * AND WHICH BLOCK THAT WAS, by the name a rule calls it.
+	 * AND WHICH BLOCKS THOSE WERE - ALL OF THEM, not the best one.
 	 *
 	 * Two rules of one family reported the same thing - the family and a
 	 * percentage - so a reader could not tell which of them fired or which
 	 * block did it. The block's name is the fold of its hashes, which is
 	 * exactly what the source writes after blk_, so a verdict can be taken
 	 * back to the line that produced it.
+	 *
+	 * A CONDITION MAY NAME SEVERAL. "block A and block B" is one verdict
+	 * about the pair: naming it after whichever scored highest described a
+	 * part of the rule and left the other part unmentioned, and two rules
+	 * sharing that one block reported the same name. So every block the
+	 * module asked about is kept, and the verdict is named after the SET -
+	 * see kof_plague_name_of, which sorts them so the order a C expression
+	 * evaluated them in cannot change the answer.
+	 *
+	 * The score is the set's too: `hit` and `tot` are matched hashes and
+	 * declared hashes summed over these blocks, so the percentage says how
+	 * much of what the rule is made of is in this object. A block asked
+	 * about twice is counted once - see c_plague_score.
 	 */
-	uint32_t plague_id;
+	uint32_t plague_blk[KOF_PLAGUE_NAME_MAX];
+	uint32_t n_plague_blk;
+	uint32_t plague_hit;
+	uint32_t plague_tot;
 	/*
 	 * One parsed view per format, allocated the first time an object of that
 	 * format is seen and kept for the life of the scanner.

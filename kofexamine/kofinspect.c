@@ -607,12 +607,33 @@ static const char *fired_as(struct kof_touch *t,
 			if (!span_starts(&finding[k], &finding[k].shape,
 					 "Plague"))
 				continue;
-			for (b = 0; b < t->mod->n_block && !mine; b++) {
+			/*
+			 * THE SET, AND THEN EACH BLOCK.
+			 *
+			 * A verdict is named after the blocks the rule ASKED
+			 * about - all of them, folded (see kof_plague_name_of).
+			 * That is the whole of this module's blocks for a rule
+			 * that ands them, so the set is tried first; a rule
+			 * that ors them may have short-circuited and been named
+			 * after the one block it reached, so each is tried too.
+			 */
+			{
+				uint32_t set[KOF_PLAGUE_NAME_MAX], n = 0;
+
+				for (b = 0; b < t->mod->n_block &&
+					    n < KOF_PLAGUE_NAME_MAX; b++)
+					set[n++] = kof_plague_block_id(
+						eng->plague,
+						t->mod->block_base + b);
 				snprintf(id, sizeof id, "%08x",
-					 kof_plague_block_id(eng->plague,
-						t->mod->block_base + b));
-				mine = span_is(&finding[k], &finding[k].variant,
-					       id);
+					 kof_plague_name_of(set, n));
+				mine = span_is(&finding[k],
+					       &finding[k].variant, id);
+				for (b = 0; b < n && !mine; b++) {
+					snprintf(id, sizeof id, "%08x", set[b]);
+					mine = span_is(&finding[k],
+						       &finding[k].variant, id);
+				}
 			}
 			if (mine) {
 				t->fired_level = finding[k].level;
