@@ -41,7 +41,7 @@ New-Item -ItemType Directory -Force -Path $Out | Out-Null
 $Out = (Resolve-Path $Out).Path
 
 foreach ($pat in '*.bin','*.exe','*.so','*.dll','*.ovl','*.pdf','*.rtf',
-                 '*.tar','*.gz','*.xz','*.zip','*.7z','*.rar') {
+                 '*.tar','*.gz','*.xz','*.zip','*.7z','*.rar','*.bz2') {
     Get-ChildItem -Path $Out -Filter $pat -ErrorAction SilentlyContinue |
         Remove-Item -Force
 }
@@ -250,6 +250,13 @@ Add-Archive "zip" {
 
 foreach ($t in @(
     @{ name = "xz";  tool = "xz";  args = { & xz  -kf $tar; Move-Item -Force (Join-Path $Out "sample.tar.xz") (Join-Path $Out "sample.xz") } },
+    #
+    # bz2 ARRIVED WITH THE DECODER AND NOT WITH THIS SCRIPT, which is the whole
+    # reason it is being added now: the .sh has made one since bzip2 support
+    # landed, this had not, and tests/unit/bz2_object.c therefore failed on
+    # Windows rather than skipping - it looks for sample.bz2 and guards on
+    # sample.tar, so a host with tar and no .bz2 reports a broken decoder.
+    @{ name = "bz2"; tool = "bzip2"; args = { & bzip2 -kf $tar; Move-Item -Force (Join-Path $Out "sample.tar.bz2") (Join-Path $Out "sample.bz2") } },
     @{ name = "7z";  tool = "7z";  args = { & 7z  a -bso0 -bsp0 (Join-Path $Out "sample.7z")  $payload } },
     @{ name = "rar"; tool = "rar"; args = { & rar a -inul     (Join-Path $Out "sample.rar") $payload } })) {
     if (Get-Command $t.tool -ErrorAction SilentlyContinue) {

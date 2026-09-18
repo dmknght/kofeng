@@ -73,6 +73,57 @@ static void synth_free(struct synth *s)
 
 /* `target` is a format id, or -1 for a module that names every target - which
  * is what an empty list means; see n_target in kofdb.h. */
+/*
+ * A MODULE THAT RETURNS, IN THE MACHINE CODE OF THE HOST THAT WILL RUN IT.
+ *
+ * This is not decoration and it is not portability for its own sake: the
+ * engine EXECUTES a module's code. kofdb.c copies it into an arena, flips the
+ * arena to read-execute with kof_mprotect_rx, and calls it through m->fn - so
+ * a synthetic module's blob is not data the loader parses, it is instructions
+ * the CPU runs.
+ *
+ * This wrote 0x90 0x90 ... 0xc3, which is x86: nop, nop, ret. On x86-64 the
+ * module returned and the test measured what it meant to measure. On ARM64
+ * 0x90909090 decodes as nothing, so the scan jumped into the arena and the
+ * process died with STATUS_ILLEGAL_INSTRUCTION - before printing a line, which
+ * is why it read as a crash in the engine rather than as a test that had never
+ * been run on this machine.
+ *
+ * Diagnosed from the faulting address: it was in the heap, not in the image.
+ *
+ * Other tests in this directory build packs with the same x86 bytes -
+ * pack_load.c, pack_fuzz.c, db_scale.c. They do not crash because none of them
+ * SCANS with the pack it built, so the code is loaded and never entered. They
+ * are latent rather than correct, and the first one that learns to scan finds
+ * this out the same way.
+ */
+static void put_noop_module(uint8_t *code)
+{
+#if defined(__aarch64__) || defined(_M_ARM64)
+	/* nop is 0xd503201f and ret is 0xd65f03c0, little endian, four bytes
+	 * each - so the blob is filled in whole instructions and ends in one. */
+	static const uint8_t nop[4] = { 0x1f, 0x20, 0x03, 0xd5 };
+	static const uint8_t ret[4] = { 0xc0, 0x03, 0x5f, 0xd6 };
+	unsigned k;
+
+	_Static_assert(BLOB_LEN % 4u == 0u,
+		       "an arm64 blob must be a whole number of instructions");
+	for (k = 0; k + 4u < BLOB_LEN; k += 4u)
+		memcpy(code + k, nop, sizeof nop);
+	memcpy(code + BLOB_LEN - 4u, ret, sizeof ret);
+#elif defined(__arm__) || defined(_M_ARM)
+	/* bx lr, as A32: 0xe12fff1e. */
+	static const uint8_t bx_lr[4] = { 0x1e, 0xff, 0x2f, 0xe1 };
+	unsigned k;
+
+	for (k = 0; k + 4u <= BLOB_LEN; k += 4u)
+		memcpy(code + k, bx_lr, sizeof bx_lr);
+#else
+	memset(code, 0x90, BLOB_LEN);   /* nop */
+	code[BLOB_LEN - 1] = 0xc3;      /* ret */
+#endif
+}
+
 static int synth_make(struct synth *s, uint32_t mods, int target)
 {
 	uint32_t i;
@@ -95,8 +146,7 @@ static int synth_make(struct synth *s, uint32_t mods, int target)
 
 		snprintf((char *)lit, LIT_LEN, "sig-%010u-body", i);
 		snprintf(text, NAME_LEN, "Trojan.Test.Gen.%u", i);
-		memset(code, 0x90, BLOB_LEN);
-		code[BLOB_LEN - 1] = 0xc3;      /* ret */
+		put_noop_module(code);
 
 		s->str[i].bytes = lit;
 		s->str[i].len   = (uint16_t)strlen((char *)lit);
