@@ -71,4 +71,38 @@
  */
 void kof_markup_merge(kof_buf f, uint64_t from, struct kof_script_info *info);
 
+/*
+ * EVERY <script> BODY IN A DOCUMENT NOBODY SERVES, as islands.
+ *
+ * svrpage_parse.c walks the same element and deliberately SKIPS a <script>
+ * with no runat attribute, and its reason is right for a server page: the
+ * server copies client-side javascript out verbatim, so there it is markup.
+ *
+ * It is not markup in an .hta, a .wsf or a .js-bearing .html. There is no
+ * server, nothing is copied anywhere, and the <script> body is the whole
+ * program - an HTA is an HTML file whose only purpose is to run one. Measured
+ * before this existed: .hta and .wsf came back UNRECOGNISED, so the code in
+ * them was scanned as undifferentiated bytes with no region a rule could
+ * scope to.
+ *
+ * So the same element, read by the document's nature rather than by the tag:
+ * a server page has <% %> or <?php and this is not called; a document that has
+ * neither is not being served, and its scripts are its code.
+ *
+ * THE BODY ONLY, not the tags. An island is what runs, and "<script>" does
+ * not - leaving the tags in the markup gap either side is what keeps the
+ * partition exact and keeps a rule scoped to BODY looking at code.
+ */
+void kof_html_islands(kof_buf f, uint64_t from, struct kof_script_info *info);
+
+/*
+ * Which language a <script> element declares, as a KOF_SCRIPT_*.
+ *
+ * Read from the language= or type= attribute of the FIRST element, because
+ * that is what the host acts on. KOF_SCRIPT_JS when nothing says otherwise:
+ * an omitted language is javascript in every host that runs these documents,
+ * which is a default the format states rather than a guess made here.
+ */
+uint8_t kof_html_script_kind(kof_buf f, uint64_t look);
+
 #endif /* KOFENG_SCRIPTS_MARKUP_PARSE_H */

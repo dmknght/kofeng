@@ -15,6 +15,9 @@
 #include "containers/cab_parse.h"
 #include "containers/lha_parse.h"
 #include "containers/arj_parse.h"
+#include "containers/lnk_parse.h"
+#include "containers/reg_parse.h"
+#include "containers/reg_parse.h"
 #include "containers/rtf_parse.h"
 #include "containers/pdf_parse.h"
 #include "scripts/script_parse.h"
@@ -43,6 +46,16 @@ static int gzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 static int arj_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
 	return kof_arj_parse(b, (struct kof_arj_info *)v, c);
+}
+
+static int lnk_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_lnk_parse(b, (struct kof_lnk_info *)v, c);
+}
+
+static int reg_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
+{
+	return kof_reg_parse(b, (struct kof_reg_info *)v, c);
 }
 
 static int lha_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
@@ -187,6 +200,16 @@ static uint64_t anom_arj(const void *v)
 	return ((const struct kof_arj_info *)v)->anomalies;
 }
 
+static uint64_t anom_lnk(const void *v)
+{
+	return ((const struct kof_lnk_info *)v)->anomalies;
+}
+
+static uint64_t anom_reg(const void *v)
+{
+	return ((const struct kof_reg_info *)v)->anomalies;
+}
+
 static uint64_t anom_lha(const void *v)
 {
 	return ((const struct kof_lha_info *)v)->anomalies;
@@ -282,6 +305,29 @@ static const struct kof_parser formats[] = {
 	  kof_pdf_sniff, pdf_parse_thunk,
 	  kof_pdf_region_bits, KOF_PDF_REGION_COUNT,
 	  kof_pdf_region_name, kof_pdf_anomaly_name, anom_pdf },
+
+	/*
+	 * ABOVE THE SCRIPT ROW, because a shell link HAS a magic and the rule
+	 * of this table is that the formats which can prove what they are go
+	 * first. Its sniff is stricter than most: a fixed size field AND the
+	 * one CLSID, which is twenty bytes that have to agree.
+	 */
+	{ KOF_FMT_LNK, (uint32_t)sizeof(struct kof_lnk_info),
+	  kof_lnk_sniff, lnk_parse_thunk,
+	  kof_lnk_region_bits, KOF_LNK_REGION_COUNT,
+	  kof_lnk_region_name, kof_lnk_anomaly_name, anom_lnk },
+
+	/*
+	 * ALSO ABOVE THE SCRIPT ROW, and for a reason the script sniff makes
+	 * necessary rather than merely tidy: a .reg is text, and the tagless
+	 * rules below read text looking for a language. "Windows Registry
+	 * Editor Version 5.00" is a whole line that only this format has, so
+	 * asking for it first settles the file before anything has to guess.
+	 */
+	{ KOF_FMT_REG, (uint32_t)sizeof(struct kof_reg_info),
+	  kof_reg_sniff, reg_parse_thunk,
+	  kof_reg_region_bits, KOF_REG_REGION_COUNT,
+	  kof_reg_region_name, kof_reg_anomaly_name, anom_reg },
 
 	/*
 	 * AFTER EVERY FORMAT WITH A MAGIC NUMBER, which is what makes its sniff

@@ -2441,7 +2441,106 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 	free(stack);
 }
 
+static void scan_one(struct walk *w, const char *path);
+
+/*
+ * THE FILE'S OTHER STREAMS, EACH SCANNED AS A FILE OF ITS OWN.
+ *
+ * On NTFS a file is a set of named streams and every tool shows one of them.
+ * Measured on this machine: a 218KB PE written to `host.txt:hidden.exe` leaves
+ * host.txt reporting 29 bytes, and a walk that scans what readdir returns
+ * scans those 29 bytes and reports the file clean. The engine could always
+ * READ it - naming the stream by hand parsed it correctly as a PE - so what
+ * was missing was not a parser, it was anybody ever naming it.
+ *
+ * SCANNED AS A FILE, NOT AS A CHILD OBJECT. A stream is not something the file
+ * contains: it has its own size, its own format and its own verdict, and the
+ * only thing it shares with the unnamed stream is a directory entry. So it
+ * goes through the same scan_one - cached, unpacked and reported on the same
+ * terms as anything else, under a name a person can hand back to the scanner
+ * verbatim.
+ *
+ * IT CALLS scan_one AND NOT scan_file, which is what makes the recursion
+ * impossible rather than merely bounded: scan_file is the pair of them and
+ * scan_one enumerates nothing, so a stream is never asked for streams of its
+ * own. On NTFS that question returns the same list again, so a flag guarding
+ * against it would be a flag the correctness depended on.
+ */
+static void scan_streams(struct walk *w, const char *path)
+{
+	struct kof_stream_walk sw;
+	size_t plen;
+	int alias;
+
+	if (w->aborted || w->out_of_memory)
+		return;
+	if (!kof_streams_open(&sw, path))
+		return;
+
+	/*
+	 * `path` MAY BE w->path_buf ITSELF, AND path_reserve REALLOCATES IT.
+	 *
+	 * read_dir builds each entry in w->path_buf and hands that pointer
+	 * straight to scan_file, so by the time this runs `path` is very often
+	 * the buffer about to be grown. The first version reserved inside the
+	 * loop and then did memcpy(w->path_buf, path, plen) - which, on the
+	 * one directory deep enough to make the buffer grow, copied from the
+	 * block realloc had just freed. It segfaulted on
+	 * SysWOW64\WindowsPowerShell and on nothing smaller, which is exactly
+	 * how a use-after-free behaves: harmless until the allocator reuses
+	 * the page.
+	 *
+	 * So the aliasing is settled BEFORE anything can move, and the reserve
+	 * happens ONCE for the longest suffix the enumeration can produce -
+	 * sw.name is a fixed array, so there is a longest. Nothing inside the
+	 * loop can reallocate after that.
+	 */
+	alias = (path == w->path_buf);
+	plen = strlen(path);
+	if (!path_reserve(w, plen + sizeof sw.name + 1u)) {
+		kof_streams_close(&sw);
+		return;
+	}
+	if (!alias)
+		memcpy(w->path_buf, path, plen);
+	/* When it DID alias, realloc preserved the bytes and they are already
+	 * at w->path_buf; `path` is now dangling and is not touched again. */
+
+	while (!w->aborted && !w->out_of_memory && kof_streams_next(&sw)) {
+		size_t nl = strlen(sw.name);
+
+		if (plen + nl + 1u > w->path_cap)
+			break;          /* cannot happen; the reserve sized it */
+		/*
+		 * The suffix is appended verbatim - ":hidden.exe:$DATA" - which
+		 * is what the enumeration returned and what CreateFile accepts.
+		 * Taking it apart to drop the ":$DATA" would be work with a way
+		 * to be wrong and nothing to gain.
+		 */
+		memcpy(w->path_buf + plen, sw.name, nl + 1u);
+		scan_one(w, w->path_buf);
+	}
+	kof_streams_close(&sw);
+}
+
+/*
+ * A FILE IS ITS CONTENT AND ITS OTHER STREAMS, and the split is load bearing.
+ *
+ * scan_one has three early returns - the cache answered, the file would not
+ * open, the scan was aborted - and the streams must be enumerated ANYWAY. The
+ * cache one is the case that matters: it is keyed on the unnamed stream's size
+ * and timestamps, so a file whose content has not changed stays cached while a
+ * new alternate stream appears beside it. Enumerating only after a successful
+ * scan would make that stream invisible for as long as the cache held, which
+ * is exactly the silence this whole feature exists to end.
+ */
 static void scan_file(struct walk *w, const char *path)
+{
+	scan_one(w, path);
+	scan_streams(w, path);
+}
+
+static void scan_one(struct walk *w, const char *path)
 {
 	struct kof_objsrc *src;
 	uint64_t before;

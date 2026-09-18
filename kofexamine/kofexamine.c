@@ -117,6 +117,8 @@
 #include <kofmod/cab.h>
 #include <kofmod/lha.h>
 #include <kofmod/arj.h>
+#include <kofmod/lnk.h>
+#include <kofmod/reg.h>
 #include <kofmod/rtf.h>
 
 #include "../libkofeng/kofparsers/binaries/elf_parse.h"
@@ -1061,6 +1063,106 @@ static void print_cab(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 		printf("    ... %u more\n", c->n_entries - shown);
 }
 
+/*
+ * ONE OF A SHELL LINK'S COUNTED STRINGS, AS TEXT.
+ *
+ * The bytes are UTF-16LE when the header says so, and this prints the ASCII
+ * subset of them: a shortcut's arguments are a command line, and a command
+ * line that matters is overwhelmingly ASCII even when the file is not. A
+ * character outside it becomes '.', which is what the rest of this tool does
+ * with a byte it will not vouch for.
+ *
+ * CLIPPED, because the whole point of an interesting one is that it is long -
+ * an encoded payload in the arguments runs to kilobytes, and a terminal is not
+ * where that gets read. The count is printed beside it so the clip is visible
+ * rather than silent.
+ */
+static void print_lnk_str(const char *label, const struct kof_lnk_str *s,
+			  int unicode, kof_buf buf, unsigned cap)
+{
+	uint64_t step = unicode ? 2u : 1u;
+	uint64_t i, shown = 0;
+
+	if (!s->chars || !s->len)
+		return;
+	printf("  %-9s %u char(s)  ", label, s->chars);
+	for (i = 0; i + step <= s->len && shown < cap; i += step, shown++) {
+		uint8_t c = buf.p[s->off + i];
+
+		/* A UTF-16 unit whose high byte is set is outside what this
+		 * prints; one dot for the character, not two. */
+		if (unicode && buf.p[s->off + i + 1u])
+			c = '.';
+		putchar((c >= 0x20u && c < 0x7fu) ? (int)c : '.');
+	}
+	if (shown < s->chars)
+		printf("...");
+	printf("\n");
+}
+
+static void print_reg(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
+{
+	const struct kof_reg_info *r = v;
+
+	(void)ctx;
+	(void)buf;
+
+	printf("  script    %s\n",
+	       (r->anomalies & KOF_REG_ANOM_OLD_FORMAT)
+	       ? "REGEDIT4, the Windows 9x spelling"
+	       : "Windows Registry Editor Version 5.00");
+	/*
+	 * THE DELETIONS ON THEIR OWN LINE, because n_deletes counts BOTH kinds
+	 * - a "[-HKEY..." key and a "name"=- value - and attributing it to the
+	 * keys said "2 keys, of which 2 remove something" about a file with
+	 * one of each. The number is what the file removes; which of the two
+	 * shapes each one was is what the KEYS and VALUES regions answer.
+	 */
+	printf("  keys      %u\n", r->n_keys);
+	printf("  values    %u, %u of them binary\n", r->n_values, r->n_hex);
+	if (r->n_deletes)
+		printf("  removes   %u entr%s\n", r->n_deletes,
+		       r->n_deletes == 1u ? "y" : "ies");
+	if (r->hex_longest)
+		printf("  longest   %llu byte(s) of hex text\n",
+		       (unsigned long long)r->hex_longest);
+}
+
+static void print_lnk(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
+{
+	const struct kof_lnk_info *k = v;
+	int u = k->unicode != 0;
+
+	(void)ctx;
+
+	printf("  link      flags 0x%08x  show %u  hotkey 0x%04x%s\n",
+	       k->flags, k->show_command, k->hotkey,
+	       (k->flags & KOF_LNK_RUN_AS_USER) ? "  RUN AS USER" : "");
+	printf("  target    %u byte(s) as the link remembers it, "
+	       "attributes 0x%08x\n", k->target_size, k->attributes);
+	if (k->idlist_len)
+		printf("  idlist    %llu byte(s), not decoded\n",
+		       (unsigned long long)k->idlist_len);
+	if (k->info_len)
+		printf("  linkinfo  %llu byte(s)\n",
+		       (unsigned long long)k->info_len);
+
+	/*
+	 * IN THE ORDER THE FORMAT STORES THEM, which is also the order they
+	 * were parsed - so a reader comparing this against a hex dump walks
+	 * the file forwards.
+	 */
+	print_lnk_str("name", &k->name, u, buf, 64u);
+	print_lnk_str("relpath", &k->relpath, u, buf, 96u);
+	print_lnk_str("workdir", &k->workdir, u, buf, 96u);
+	print_lnk_str("arguments", &k->args, u, buf, 160u);
+	print_lnk_str("icon", &k->icon, u, buf, 96u);
+
+	if (k->n_extra)
+		printf("  extra     %u block(s), %llu byte(s)\n", k->n_extra,
+		       (unsigned long long)k->extra_len);
+}
+
 static void print_lha(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 {
 	const struct kof_lha_info *l = v;
@@ -1297,6 +1399,8 @@ static void print_view(uint8_t format, const void *view,
 	case KOF_FMT_CAB:    print_cab(view, ctx, buf);    break;
 	case KOF_FMT_LHA:    print_lha(view, ctx, buf);    break;
 	case KOF_FMT_ARJ:    print_arj(view, ctx, buf);    break;
+	case KOF_FMT_LNK:    print_lnk(view, ctx, buf);    break;
+	case KOF_FMT_REG:    print_reg(view, ctx, buf);    break;
 	case KOF_FMT_RTF:    print_rtf(view, ctx, buf);    break;
 	case KOF_FMT_PDF:    print_pdf(view, ctx, buf);    break;
 	default:                                           break;

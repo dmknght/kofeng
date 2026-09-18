@@ -287,6 +287,19 @@ enum kof_format {
 	KOF_FMT_ARJ     = 26,
 
 	/*
+	 * A Windows shell link - see lnk.h. Not an executable and not a
+	 * container: a small structure whose payload is a command line the
+	 * shell runs.
+	 */
+	KOF_FMT_LNK     = 27,
+
+	/*
+	 * A registry script - see reg.h. Text, and parsed for the same
+	 * reason a shell link is: where a string sits is what it means.
+	 */
+	KOF_FMT_REG     = 28,
+
+	/*
 	 * ONE COLLECTED EVENT, not a file.
 	 *
 	 * The object is one collected event - what a collector saw happen, with
@@ -363,7 +376,7 @@ enum kof_format {
 	 * the width of the target axis - KOF_TARGET_COUNT is. A table indexed
 	 * by target value wants that one.
 	 */
-	KOF_FMT_COUNT   = 27
+	KOF_FMT_COUNT   = 29
 };
 
 /*
@@ -402,7 +415,25 @@ enum kof_format {
  * every table that lists formats. Spend a format when the PARSE differs; spend
  * a subtype when only the KIND does.
  */
-#define KOF_TARGET_COUNT 27u
+/*
+ * RAISED FOR LNK (27) AND REG (28), AND NOT RAISING IT WAS A CRASH.
+ *
+ * This is the width of every table indexed by a target value, and the one that
+ * matters most is kof_scanner.view[KOF_TARGET_COUNT] - the per-format parse
+ * views. A format numbered 27 with the count left at 27 writes its view
+ * POINTER one past the end of that array, over whatever follows it in the
+ * scanner. Nothing complains: the parse works, the scan reports correctly, and
+ * the corruption is only read later.
+ *
+ * Measured: one .reg scanned alone was fine and two in a row segfaulted,
+ * writing to address 0x7B on the second. That is the shape of this mistake -
+ * the damage is done by the first object and collected by a later one, so the
+ * failure points at the wrong file and at the wrong pass.
+ *
+ * The note above says a new format "takes the next free value, which is
+ * KOF_TARGET_COUNT, and raises it". Both halves are the instruction.
+ */
+#define KOF_TARGET_COUNT 29u
 
 /*
  * How many targets one module may name.
@@ -596,13 +627,50 @@ enum kof_format_group {
 	X(KOF_FMT_CHM,     23, "CHM",     KOF_FGRP_DOC)           \
 	X(KOF_FMT_CAB,     24, "CAB",     KOF_FGRP_ARCHIVE)       \
 	X(KOF_FMT_LHA,     25, "LHA",     KOF_FGRP_ARCHIVE)       \
-	X(KOF_FMT_ARJ,     26, "ARJ",     KOF_FGRP_ARCHIVE)
+	X(KOF_FMT_ARJ,     26, "ARJ",     KOF_FGRP_ARCHIVE)      \
+	/*
+	 * SCRIPT, and the group is a judgement worth stating. A .lnk is not
+	 * text and nothing interprets it as a language - but KOF_FGRP_SCRIPT
+	 * is "meant to be interpreted", and what the shell does with a
+	 * shortcut is take a command line out of it and run it. ARCHIVE would
+	 * claim it carries files, EXEC that a loader runs it, DOC that
+	 * somebody reads it; each of those is more wrong than this.
+	 */                                                             \
+	X(KOF_FMT_LNK,     27, "LNK",     KOF_FGRP_SCRIPT)      \
+	/*
+	 * TEXT, and the group is again a judgement. A .reg is read by regedit
+	 * and applied, not interpreted - there is no control flow in it and
+	 * nothing runs - so SCRIPT would overstate it. What it is, is a
+	 * readable file that claims nothing more, which is what TEXT says.
+	 */                                                            \
+	X(KOF_FMT_REG,     28, "REG",     KOF_FGRP_TEXT)
 
 #define KOF_TARGET_X_ASSERT(name, val, word, grp)                           \
 	_Static_assert((name) == (val),                                     \
 		       "KOF_TARGET_LIST disagrees with the enum about " #name);
 KOF_TARGET_LIST(KOF_TARGET_X_ASSERT)
 #undef KOF_TARGET_X_ASSERT
+
+/*
+ * AND EVERY DECLARED TARGET IS INSIDE THE AXIS, checked one value at a time.
+ *
+ * KOF_TARGET_COUNT >= KOF_FMT_COUNT is asserted above and would have caught
+ * nothing when both were left behind: adding LNK at 27 and REG at 28 raised
+ * neither, so 27 >= 27 held while kof_scanner.view[KOF_TARGET_COUNT] was being
+ * indexed at 28. The view POINTER went one and two past the end of that array,
+ * over whatever follows it in the scanner. Nothing complained - the parse
+ * worked and the scan reported correctly - and the damage was collected by a
+ * LATER object: one .reg scanned alone was fine, two in a row segfaulted.
+ *
+ * So the thing that has to be true of each VALUE is asserted about each value.
+ * A format added without raising the count now fails to compile, which is
+ * where that mistake costs nothing.
+ */
+#define KOF_TARGET_X_FITS(name, val, word, grp)                             \
+	_Static_assert((val) < (int)KOF_TARGET_COUNT,                       \
+		       #name " is outside KOF_TARGET_COUNT - raise it");
+KOF_TARGET_LIST(KOF_TARGET_X_FITS)
+#undef KOF_TARGET_X_FITS
 
 /*
  * NO FILE FORMAT MAY TAKE A VERB'S VALUE, and that is now the whole rule.

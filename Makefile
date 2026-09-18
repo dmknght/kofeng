@@ -882,6 +882,8 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/containers/cab_parse.c \
            libkofeng/kofparsers/containers/lha_parse.c \
            libkofeng/kofparsers/containers/arj_parse.c \
+           libkofeng/kofparsers/containers/lnk_parse.c \
+           libkofeng/kofparsers/containers/reg_parse.c \
            libkofeng/kofparsers/containers/rtf_parse.c \
            libkofeng/kofparsers/containers/pdf_parse.c \
            libkofeng/kofunpack/pe_rebuild.c \
@@ -1060,6 +1062,8 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/cab.h \
            $(SDK)/include/kofmod/lha.h \
            $(SDK)/include/kofmod/arj.h \
+           $(SDK)/include/kofmod/lnk.h \
+           $(SDK)/include/kofmod/reg.h \
            $(SDK)/include/kofmod/rtf.h \
            $(SDK)/include/kofmod/pdf.h \
            $(SDK)/include/kofmod/amsi.h \

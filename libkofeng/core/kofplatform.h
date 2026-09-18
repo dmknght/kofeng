@@ -211,6 +211,103 @@ static inline int kof_mkdir(const char *path, int mode)
 	return mkdir(path);
 }
 
+/*
+ * ---- THE OTHER STREAMS OF A FILE ----------------------------------------
+ *
+ * WHAT THIS IS FOR. On NTFS a file is not one run of bytes: it is a set of
+ * named streams, of which the one every tool shows is called ::$DATA and has
+ * no name. Anything can be put in another one. Measured on this machine: a
+ * 218KB PE written to `host.txt:hidden.exe` leaves host.txt reporting 29
+ * bytes, and a directory walk that reads what readdir returns scans those 29
+ * bytes and calls the file clean.
+ *
+ * The engine could already read it - naming the stream explicitly parsed it
+ * as a PE, correctly. What was missing was anyone ever naming it.
+ *
+ * THE ITERATOR IS HERE AND NOT IN THE SCANNER, for the reason everything else
+ * in this header is here: the walk is one loop on both platforms and must not
+ * grow an #ifdef. On POSIX a file has one stream, so open() answers no and the
+ * loop does not run - which is not a stub, it is the correct answer.
+ *
+ * WHAT IT YIELDS is the SUFFIX, not a whole path: ":hidden.exe:$DATA", ready
+ * to be appended to the file's own path. That is what FindFirstStreamW hands
+ * back and it is what CreateFile accepts, so nothing has to be taken apart and
+ * put together again.
+ *
+ * ::$DATA IS NOT YIELDED. It is the file itself, the caller has just scanned
+ * it, and handing it over again would double every file on the machine.
+ */
+struct kof_stream_walk {
+	void *h;              /* HANDLE, or INVALID_HANDLE_VALUE */
+	int   pending;        /* the find already holds an unreported entry */
+	char  name[544];      /* the suffix, UTF-8 */
+};
+
+static inline int kof_streams_next(struct kof_stream_walk *w);
+
+static inline int kof_streams_open(struct kof_stream_walk *w, const char *path)
+{
+	wchar_t wp[1024];
+	WIN32_FIND_STREAM_DATA fd;
+	HANDLE h;
+
+	w->h = INVALID_HANDLE_VALUE;
+	w->pending = 0;
+	w->name[0] = '\0';
+	if (!path || !path[0])
+		return 0;
+	if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, wp,
+				 (int)(sizeof wp / sizeof wp[0])))
+		return 0;
+	h = FindFirstStreamW(wp, FindStreamInfoStandard, &fd, 0);
+	if (h == INVALID_HANDLE_VALUE)
+		return 0;
+	w->h = h;
+	/*
+	 * The first entry is already in hand and is normally ::$DATA. It is
+	 * kept rather than dropped because a file CAN have no unnamed stream,
+	 * and deciding which it is belongs in one place - kof_streams_next.
+	 */
+	if (!WideCharToMultiByte(CP_UTF8, 0, fd.cStreamName, -1, w->name,
+				 (int)sizeof w->name, NULL, NULL))
+		w->name[0] = '\0';
+	w->pending = 1;
+	return 1;
+}
+
+static inline int kof_streams_next(struct kof_stream_walk *w)
+{
+	WIN32_FIND_STREAM_DATA fd;
+
+	if (!w || w->h == INVALID_HANDLE_VALUE)
+		return 0;
+	for (;;) {
+		if (w->pending) {
+			w->pending = 0;
+		} else {
+			if (!FindNextStreamW((HANDLE)w->h, &fd))
+				return 0;
+			if (!WideCharToMultiByte(CP_UTF8, 0, fd.cStreamName, -1,
+						 w->name, (int)sizeof w->name,
+						 NULL, NULL))
+				continue;   /* a name this cannot spell */
+		}
+		if (w->name[0] != ':')
+			continue;       /* not a suffix; nothing to append */
+		if (strcmp(w->name, "::$DATA") == 0)
+			continue;       /* the file itself */
+		return 1;
+	}
+}
+
+static inline void kof_streams_close(struct kof_stream_walk *w)
+{
+	if (w && w->h != INVALID_HANDLE_VALUE) {
+		FindClose((HANDLE)w->h);
+		w->h = INVALID_HANDLE_VALUE;
+	}
+}
+
 static inline uint64_t kof_page_size(void)
 {
 	SYSTEM_INFO si;
@@ -414,6 +511,48 @@ static inline const void *kof_memmem(const void *hay, size_t hlen,
 static inline int kof_mkdir(const char *path, int mode)
 {
 	return mkdir(path, (mode_t)mode);
+}
+
+/*
+ * A POSIX FILE HAS ONE STREAM, so the walk opens nothing and yields nothing.
+ *
+ * NOT A STUB. "There are no other streams" is the true answer here, not a
+ * feature this platform is missing: a regular file is one run of bytes and
+ * there is no second one to have overlooked. The Windows half is where the
+ * question has an answer worth asking - see it for what an alternate data
+ * stream costs a scanner that does not look.
+ *
+ * Extended attributes are NOT this. They are metadata with a size limit,
+ * xattr has its own call, and nothing here has ever scanned one - calling
+ * them streams to make this symmetrical would be inventing a feature to fill
+ * a shape.
+ */
+struct kof_stream_walk {
+	void *h;
+	int   pending;
+	char  name[544];
+};
+
+static inline int kof_streams_open(struct kof_stream_walk *w, const char *path)
+{
+	(void)path;
+	if (w) {
+		w->h = NULL;
+		w->pending = 0;
+		w->name[0] = '\0';
+	}
+	return 0;
+}
+
+static inline int kof_streams_next(struct kof_stream_walk *w)
+{
+	(void)w;
+	return 0;
+}
+
+static inline void kof_streams_close(struct kof_stream_walk *w)
+{
+	(void)w;
 }
 
 /*

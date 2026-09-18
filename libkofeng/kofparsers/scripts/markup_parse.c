@@ -239,3 +239,107 @@ void kof_markup_merge(kof_buf f, uint64_t from, struct kof_script_info *info)
 	}
 	info->n_island = keep;
 }
+
+/* ---- a document nobody serves: its <script> bodies are its code ---------- */
+
+/*
+ * The end of the opening tag, or f.n. `at` is where "<script" starts.
+ *
+ * Attributes are skipped rather than parsed: what is wanted is where the body
+ * begins, and a quoted ">" inside an attribute value would be the only way to
+ * be wrong about that. The loop honours quotes for exactly that reason.
+ */
+static uint64_t mk_tag_end(kof_buf f, uint64_t at)
+{
+	uint8_t q = 0;
+	uint64_t i;
+
+	for (i = at; i < f.n; i++) {
+		uint8_t c = f.p[i];
+
+		if (q) {
+			if (c == q)
+				q = 0;
+			continue;
+		}
+		if (c == '"' || c == '\'') {
+			q = c;
+			continue;
+		}
+		if (c == '>')
+			return i;
+	}
+	return f.n;
+}
+
+/* The next "<script" at or after `i`, or f.n. */
+static uint64_t mk_next_script(kof_buf f, uint64_t i)
+{
+	for (; i + 7u <= f.n; i++)
+		if (kof_txt_tag_at(f, i, "<script", 7u))
+			return i;
+	return f.n;
+}
+
+uint8_t kof_html_script_kind(kof_buf f, uint64_t look)
+{
+	uint64_t at = mk_next_script(f, 0);
+	uint64_t gt;
+
+	if (at >= f.n)
+		return KOF_SCRIPT_JS;
+	gt = mk_tag_end(f, at + 7u);
+	if (gt > look)
+		gt = look;
+	/*
+	 * VBSCRIPT IS THE ONLY ONE WORTH LOOKING FOR. The hosts that run these
+	 * documents ship two engines, and the other one is javascript under
+	 * several spellings - "javascript", "jscript", "text/javascript",
+	 * "module". Matching the exception and defaulting to the rule is
+	 * shorter than a table of the rule's names and does not go stale when
+	 * a new spelling of javascript appears.
+	 */
+	if (at < gt && kof_txt_has(kof_buf_make(f.p + at, gt - at),
+				   gt - at, "vbscript"))
+		return KOF_SCRIPT_VBS;
+	return KOF_SCRIPT_JS;
+}
+
+void kof_html_islands(kof_buf f, uint64_t from, struct kof_script_info *info)
+{
+	uint64_t i = from;
+
+	while (i < f.n && info->n_island < KOF_SCRIPT_MAX_ISLAND) {
+		uint64_t at = mk_next_script(f, i);
+		uint64_t gt, k;
+
+		if (at >= f.n)
+			break;
+		gt = mk_tag_end(f, at + 7u);
+		if (gt >= f.n)
+			break;
+		for (k = gt + 1u; k + 8u <= f.n; k++)
+			if (kof_txt_tag_at(f, k, "</script", 8u))
+				break;
+		/*
+		 * AN UNCLOSED <script> RUNS TO THE END, and that is what the
+		 * host does with it too - an html parser closes an open
+		 * element at end of file. Dropping it instead would leave the
+		 * code of a truncated or hand-written document in MARKUP,
+		 * which is the one place a rule scoped to code will not look.
+		 */
+		if (k + 8u > f.n)
+			k = f.n;
+		if (k > gt + 1u && !kof_isl_add(info, gt + 1u, k - (gt + 1u)))
+			break;
+		i = k + 8u <= f.n ? k + 8u : f.n;
+	}
+	/*
+	 * AND SAY SO IF THE CAP WAS REACHED WITH FILE LEFT, which is what
+	 * every other carver in this directory does and this did not. Past
+	 * KOF_SCRIPT_MAX_ISLAND the remaining <script> bodies fall into the
+	 * markup gap - they are still scanned, as markup - and a reader
+	 * needs to know that a region said "presentation" about code.
+	 */
+	kof_isl_seal(info, f.n);
+}

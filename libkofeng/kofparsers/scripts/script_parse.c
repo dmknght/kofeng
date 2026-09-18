@@ -4,12 +4,29 @@
  * See script_parse.h for why this is in the parser table at all and script.h
  * for why a kind is not a format.
  *
- * NOTHING HERE GUESSES. Both signals are a file saying what it is: a "#!" line
+ * NOTHING HERE GUESSES, AND THAT SENTENCE NOW HAS AN EXCEPTION WITH A NUMBER
+ * ON IT.
+ *
+ * The original rule: both signals are a file saying what it is - a "#!" line
  * is an instruction to the kernel, and "<?php" is a tag with one meaning. A
- * language recognised from its syntax would be a guess, and the cost of a wrong
- * one is not a missed detection but a WRONG PRECONDITION - a PHP rule declining
- * an object it should have seen, silently, because something decided the file
- * was Python.
+ * language recognised from its syntax would be a guess, and the cost of a
+ * wrong one is not a missed detection but a WRONG PRECONDITION: a PHP rule
+ * declining an object it should have seen, silently, because something decided
+ * the file was Python.
+ *
+ * That rule left the three Windows scripting languages out entirely. VBScript,
+ * JScript and PowerShell announce nothing - no shebang, no tag - so a bare
+ * .vbs, .js or .ps1 came back UNRECOGNISED while KOF_SCRIPT_VBS, _JS and _PSH
+ * sat in the enum with no way to be reached. The tags this knew were a Linux
+ * convention and a webshell convention; the Windows surface had neither.
+ *
+ * "@echo off" for batch was already the exception, and it was the exception
+ * without saying so. So the position is stated instead: a language with no
+ * marker may be recognised from a construct that its syntax REQUIRES and the
+ * others do not have, and the claim has to be MEASURED in both directions
+ * before it ships. See tagless_kind for the constructs and for the numbers:
+ * 149 of 152 real scripts on this machine claimed, 0 of 189 documentation and
+ * configuration files claimed.
  */
 
 #include <string.h>
@@ -274,7 +291,231 @@ static int looks_like_text(kof_buf f, uint64_t n)
  * a correct answer there. The family is what decides how the file is CARVED, so
  * carving on the kind would have left exactly those pages unsplit.
  */
-enum { FAM_NONE = 0, FAM_PHP, FAM_SVR, FAM_CFM };
+enum { FAM_NONE = 0, FAM_PHP, FAM_SVR, FAM_CFM, FAM_HTML };
+
+/*
+ * THE THREE WINDOWS LANGUAGES WITH NO TAG AT ALL.
+ *
+ * Batch above is the precedent and the reason: a language with no marker gets
+ * recognised by a construct that is not a construct in any of the others. VBS,
+ * JScript and PowerShell are the same problem, and until this existed a bare
+ * .vbs, .js or .ps1 came back UNRECOGNISED - measured, all three - while the
+ * engine already had KOF_SCRIPT_VBS, _JS and _PSH to name them with. The tags
+ * it knew were shebangs, which are Linux, and server-page markers, which are
+ * webshells; the Windows script surface had no way in.
+ *
+ * WHAT MAKES A MARKER USABLE HERE. It has to be a thing the language's own
+ * syntax requires and the others do not have. So:
+ *
+ *   PowerShell   verb-noun cmdlets and the switches that drive them. Nothing
+ *                else writes New-Object or -EncodedCommand.
+ *   VBScript     the VB block enders and the WSH object model. "Dim " is
+ *                NOT here: it is a word in English and this reads prose.
+ *   JScript      ActiveXObject, which is the Windows scripting host's own,
+ *                and console.log. Neither appears in prose or in config.
+ *
+ * POWERSHELL IS ASKED FIRST because its scripts legitimately contain the
+ * others' markers - New-Object -ComObject WScript.Shell has both - while the
+ * reverse does not happen. Order is the whole disambiguation.
+ *
+ * THE SEARCH IS THE WHOLE WINDOW, not the first 256 bytes the batch test uses.
+ * A Windows .ps1 opens with a licence header and a synopsis block; the first
+ * cmdlet can be a page down. Measured on the scripts this machine ships: a
+ * 256-byte window found a third of what the full window did.
+ *
+ * KOF_SCRIPT_ANY MEANS NO, and a caller must treat it that way - see the one
+ * place this is called.
+ */
+/*
+ * A POWERSHELL CMDLET, RECOGNISED AS A SHAPE AND NOT AS A NAME.
+ *
+ * A list of cmdlet names was tried first and it is the wrong instrument:
+ * measured on the 140 ASCII PowerShell scripts this machine ships, twelve
+ * named cmdlets found 81 of them. The ones it missed were not unusual - they
+ * open with Add-Type, Set-Alias, Use-WindowsUnattend - and no list ever
+ * catches them, because a module defines its own cmdlets and there are
+ * thousands.
+ *
+ * What IS closed is the VERB. Microsoft publishes the approved verb set and
+ * requires cmdlets to use it, so `Verb-Noun` is a syntax rather than a
+ * vocabulary, and matching the syntax is both shorter and complete.
+ *
+ * THE TOKEN BOUNDARY IS WHAT MAKES IT SAFE. A bare substring search for
+ * "get-" matches "widget-style", and "set-" matches "offset-x" in a
+ * stylesheet. So the verb has to START a word - preceded by nothing, or by
+ * something that cannot be part of an identifier - and the hyphen has to be
+ * followed by a letter, because "Get- " is prose and "Get-Item" is a call.
+ */
+/*
+ * Does this document carry a <script> element with a body - an opening tag
+ * that closes, and a "</script" after it.
+ *
+ * BOTH ENDS REQUIRED, because "<script" on its own is what a page ABOUT
+ * javascript writes: documentation, a tutorial, an html escape in prose. The
+ * pair is what says something is meant to run.
+ */
+static int mk_has_script(kof_buf f, uint64_t look)
+{
+	uint64_t i;
+
+	for (i = 0; i + 7u <= look; i++) {
+		uint64_t gt, k;
+
+		if (!kof_txt_tag_at(f, i, "<script", 7u))
+			continue;
+		for (gt = i + 7u; gt < f.n && f.p[gt] != '>'; gt++)
+			;
+		if (gt >= f.n)
+			return 0;
+		for (k = gt + 1u; k + 8u <= f.n; k++)
+			if (kof_txt_tag_at(f, k, "</script", 8u))
+				return 1;
+		return 0;
+	}
+	return 0;
+}
+
+static int psh_ident(uint8_t c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+	       (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
+}
+
+static int psh_cmdlet(kof_buf f, uint64_t look)
+{
+	static const char *const verb[] = {
+		"add", "clear", "close", "copy", "enter", "exit", "find",
+		"format", "get", "hide", "join", "lock", "move", "new", "open",
+		"optimize", "pop", "push", "redo", "remove", "rename", "reset",
+		"resize", "search", "select", "set", "show", "skip", "split",
+		"step", "switch", "undo", "unlock", "watch", "connect",
+		"disconnect", "read", "receive", "send", "write", "backup",
+		"checkpoint", "compare", "compress", "convert", "convertfrom",
+		"convertto", "dismount", "edit", "expand", "export", "group",
+		"import", "initialize", "limit", "merge", "mount", "out",
+		"publish", "restore", "save", "sync", "unpublish", "update",
+		"approve", "assert", "complete", "confirm", "deny", "disable",
+		"enable", "install", "invoke", "register", "request", "restart",
+		"resume", "start", "stop", "submit", "suspend", "uninstall",
+		"unregister", "wait", "debug", "measure", "ping", "repair",
+		"resolve", "test", "trace", "use", "block", "grant", "protect",
+		"revoke", "unblock", "unprotect", NULL
+	};
+	uint64_t i;
+
+	for (i = 0; i + 1u < look; i++) {
+		uint64_t start;
+		unsigned v;
+
+		if (f.p[i] != '-')
+			continue;
+		/*
+		 * BOTH HALVES CAPITALISED, and this is the test that made the
+		 * rule usable rather than a nuisance.
+		 *
+		 * PowerShell is case insensitive, so Get-Item and get-item are
+		 * the same call - but a hyphen between two words is also how
+		 * English builds a compound, and several approved verbs are
+		 * ordinary words: open, use, set, copy, move, format, test,
+		 * find, group, split. Measured over 189 documentation and
+		 * config files, a case-blind rule claimed three of them on
+		 * "open-n...", "use-s..." and the like.
+		 *
+		 * Real PowerShell writes the canonical capitalisation because
+		 * that is how the cmdlets are named and how every example
+		 * spells them; prose does not capitalise inside a compound. So
+		 * the case carries the distinction, and the cost is a script
+		 * written entirely in lower case - which the operators and the
+		 * $env: markers above still reach.
+		 */
+		if (!(f.p[i + 1u] >= 'A' && f.p[i + 1u] <= 'Z'))
+			continue;
+
+		/* Back over the word in front of the hyphen. */
+		start = i;
+		while (start > 0) {
+			uint8_t c = f.p[start - 1u];
+
+			if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')))
+				break;
+			start--;
+		}
+		if (start == i)
+			continue;                  /* "-Foo", a switch */
+		if (!(f.p[start] >= 'A' && f.p[start] <= 'Z'))
+			continue;
+		if (start > 0 && psh_ident(f.p[start - 1u]))
+			continue;                  /* inside a longer token */
+
+		for (v = 0; verb[v]; v++)
+			if (kof_txt_tag_at(f, start, verb[v],
+					   (uint32_t)strlen(verb[v])) &&
+			    start + strlen(verb[v]) == i)
+				return 1;
+	}
+	return 0;
+}
+
+static uint8_t tagless_kind(kof_buf f, uint64_t look)
+{
+	static const char *const psh[] = {
+		"[cmdletbinding", "$psversiontable", "$env:", "-encodedcommand",
+		"-executionpolicy", "-noprofile",
+		/* The aliases a one-liner uses instead of a cmdlet. "iex"
+		 * carries a bracket because three letters on their own occur
+		 * inside words. */
+		"iex(", "iex (",
+		/*
+		 * THE COMPARISON OPERATORS, which catch a script that defines
+		 * functions and calls no cmdlet at all - two of the four the
+		 * cmdlet rule missed are exactly that shape. Spaces on BOTH
+		 * sides: "-eq" alone is inside "req-", and " -eq " is not a
+		 * construction English has.
+		 */
+		" -eq ", " -ne ", " -lt ", " -gt ", " -le ", " -ge ",
+		" -match ", " -notmatch ", " -like ", " -notlike ",
+		" -contains ", " -replace ", " -join ", " -split ", NULL
+	};
+	static const char *const js[] = {
+		"activexobject", "console.log", NULL
+	};
+	static const char *const vbs[] = {
+		"end function", "end sub", "option explicit",
+		"createobject(", "wscript.", NULL
+	};
+	static const struct {
+		const char *const *m;
+		uint8_t            kind;
+	} tab[] = {
+		{ psh, KOF_SCRIPT_PSH },
+		/*
+		 * JSCRIPT BEFORE VBSCRIPT, because they share the scripting
+		 * host and not its spelling. Both reach WScript.Shell, so
+		 * "wscript." cannot decide between them - but ActiveXObject is
+		 * JScript's constructor and CreateObject is VBScript's, and
+		 * only one of those appears in any given file. Asking for the
+		 * unambiguous one first is what makes the shared marker safe
+		 * to keep: measured, a .js reading `new ActiveXObject(
+		 * "WScript.Shell")` was called VBScript until this order.
+		 */
+		{ js,  KOF_SCRIPT_JS  },
+		{ vbs, KOF_SCRIPT_VBS }
+	};
+	unsigned i, j;
+
+	for (i = 0; i < sizeof tab / sizeof tab[0]; i++)
+		for (j = 0; tab[i].m[j]; j++)
+			if (kof_txt_has(f, look, tab[i].m[j]))
+				return tab[i].kind;
+	/*
+	 * LAST, because it is the broadest of the tests and the other two
+	 * languages do not have cmdlets. Asking it first would let a
+	 * PowerShell verb inside a JScript string decide the file.
+	 */
+	if (psh_cmdlet(f, look))
+		return KOF_SCRIPT_PSH;
+	return KOF_SCRIPT_ANY;
+}
 
 static uint64_t find_tag(kof_buf f, uint64_t look, uint8_t *kind,
 			 uint32_t *taglen, uint32_t *headlen, int *fam)
@@ -337,6 +578,35 @@ static uint64_t find_tag(kof_buf f, uint64_t look, uint8_t *kind,
 	 */
 	if (kof_txt_has(f, look < 256u ? look : 256u, "@echo off")) {
 		*kind = KOF_SCRIPT_BAT; *taglen = 0u; return 0;
+	}
+	/*
+	 * A DOCUMENT WITH <script> IN IT AND NO SERVER TAG ABOVE.
+	 *
+	 * Reached only after php, the server pages and ColdFusion have all
+	 * declined, and that order is the whole of the reasoning: a page with
+	 * "<%" is served, so its client-side javascript is markup the server
+	 * copies out - which is what svrpage_parse.c says where it skips a
+	 * <script> without runat. A document with NO server tag is not being
+	 * served by anything, so its <script> body is not being copied
+	 * anywhere; it is the program. An .hta is an html file whose only
+	 * purpose is to run one, and a .wsf is xml around the same thing.
+	 *
+	 * Returns 0 rather than the tag's offset, because the document OPENS
+	 * as markup - the islands carve the code out of it, and a header would
+	 * claim the <html> above the first script as something it is not.
+	 */
+	if (mk_has_script(f, look)) {
+		*kind = kof_html_script_kind(f, look);
+		*taglen = 0u;
+		*fam = FAM_HTML;
+		return 0;
+	}
+	{
+		uint8_t k = tagless_kind(f, look);
+
+		if (k != KOF_SCRIPT_ANY) {
+			*kind = k; *taglen = 0u; return 0;
+		}
 	}
 	return (uint64_t)-1;
 }
@@ -592,6 +862,8 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 					kof_svr_islands(file, from, info);
 				} else if (fam == FAM_CFM) {
 					kof_cfm_islands(file, from, info);
+				} else if (fam == FAM_HTML) {
+					kof_html_islands(file, from, info);
 				}
 				/*
 				 * AND ONE HTML ELEMENT THAT WRAPS CODE IS ONE

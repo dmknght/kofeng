@@ -34,6 +34,8 @@
 #
 #   pdf     written here                always
 #   rtf     written here                always
+#   reg     written here                always
+#   lnk     written here                always
 #   tar     tar                         nearly always present
 #   gz      gzip                        nearly always present
 #   xz      xz
@@ -53,7 +55,7 @@ src=$here/fixtures
 mkdir -p "$out"
 rm -f "$out"/*.bin "$out"/*.exe "$out"/*.so "$out"/*.dll "$out"/*.ovl \
       "$out"/*.pdf "$out"/*.rtf "$out"/*.tar "$out"/*.gz "$out"/*.xz \
-      "$out"/*.zip "$out"/*.7z "$out"/*.rar "$out"/*.bz2 2>/dev/null || true
+      "$out"/*.zip "$out"/*.7z "$out"/*.rar "$out"/*.bz2 "$out"/*.reg "$out"/*.lnk 2>/dev/null || true
 
 built=0
 skipped=""
@@ -167,6 +169,72 @@ built=$((built + 1))
 	printf '{\\*\\objdata 0105000002000000060000006b6f66656e670000}}\n'
 	printf '{\\pict\\wmetafile8\\bin8 kofeng!}\\par done}\n'
 } > "$out/sample.rtf"
+built=$((built + 1))
+
+# A registry script with one of everything reg_parse.c splits apart: a comment,
+# a key, a value, a hex run that CONTINUES across lines, a value deletion and a
+# key deletion. CRLF throughout because that is what Windows writes, and
+# because a blank CRLF line is one byte - the case the parser got wrong first.
+{
+	printf 'Windows Registry Editor Version 5.00\r\n\r\n'
+	printf '; kofeng fixture\r\n'
+	printf '[HKEY_CURRENT_USER\\Software\\Kofeng\\Fixture]\r\n'
+	printf '"Text"="kofeng-fixture-value"\r\n'
+	printf '"Word"=dword:0000002a\r\n'
+	printf '"Blob"=hex:6b,6f,66,65,6e,67,2d,66,69,78,74,75,72,65,\\\r\n'
+	printf '  2d,68,65,78,2d,72,75,6e,2d,63,6f,6e,74,69,6e,75,65,64\r\n'
+	printf '"Gone"=-\r\n\r\n'
+	printf '[-HKEY_CURRENT_USER\\Software\\Kofeng\\Removed]\r\n'
+} > "$out/sample.reg"
+built=$((built + 1))
+
+#
+# A shell link, written as bytes because nothing on a build machine makes one
+# on demand. MS-SHLLINK: a 76 byte header whose first field is its own size and
+# whose second is the one CLSID, then the counted strings the flags declare.
+#
+# THE STRINGS ARE UTF-16LE, which is what IsUnicode says, and a count is
+# CHARACTERS rather than bytes - the mistake this format invites. Written with
+# octal escapes so no host needs a tool that can emit binary.
+#
+lnk_u16() { printf "\\$(printf '%03o' $(( $1 & 255 )))\\$(printf '%03o' $(( ($1 >> 8) & 255 )))"; }
+lnk_u32() {
+	lnk_u16 $(( $1 & 65535 ))
+	lnk_u16 $(( ($1 >> 16) & 65535 ))
+}
+lnk_str() {
+	_s=$1
+	_n=${#_s}
+	lnk_u16 "$_n"
+	_i=1
+	while [ "$_i" -le "$_n" ]; do
+		_c=$(printf '%s' "$_s" | cut -c"$_i")
+		lnk_u16 "$(printf '%d' "'$_c")"
+		_i=$((_i + 1))
+	done
+}
+{
+	lnk_u32 76
+	printf '\001\024\002\000\000\000\000\000\300\000\000\000\000\000\000\106'
+	lnk_u32 $(( 0x04 | 0x08 | 0x10 | 0x20 | 0x40 | 0x80 ))
+	lnk_u32 32                      # FileAttributes
+	lnk_u32 0; lnk_u32 0            # CreationTime
+	lnk_u32 0; lnk_u32 0            # AccessTime
+	lnk_u32 0; lnk_u32 0            # WriteTime
+	lnk_u32 4096                    # FileSize
+	lnk_u32 0                       # IconIndex
+	lnk_u32 1                       # ShowCommand
+	lnk_u16 0                       # HotKey
+	lnk_u16 0                       # Reserved1
+	lnk_u32 0                       # Reserved2
+	lnk_u32 0                       # Reserved3
+	lnk_str 'kofeng fixture link'
+	lnk_str '..\kofeng-fixture.exe'
+	lnk_str 'C:\kofeng'
+	lnk_str '-kofeng-fixture-arguments'
+	lnk_str 'C:\kofeng\icon.ico'
+	lnk_u32 0                       # the terminal ExtraData block
+} > "$out/sample.lnk"
 built=$((built + 1))
 
 arc() {

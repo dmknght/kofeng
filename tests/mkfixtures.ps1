@@ -41,7 +41,8 @@ New-Item -ItemType Directory -Force -Path $Out | Out-Null
 $Out = (Resolve-Path $Out).Path
 
 foreach ($pat in '*.bin','*.exe','*.so','*.dll','*.ovl','*.pdf','*.rtf',
-                 '*.tar','*.gz','*.xz','*.zip','*.7z','*.rar','*.bz2') {
+                 '*.tar','*.gz','*.xz','*.zip','*.7z','*.rar','*.bz2',
+                 '*.reg','*.lnk') {
     Get-ChildItem -Path $Out -Filter $pat -ErrorAction SilentlyContinue |
         Remove-Item -Force
 }
@@ -189,6 +190,62 @@ Write-Ascii (Join-Path $Out "sample.rtf") (
     "{\object\objemb\objupdate{\*\objclass Package}`n" +
     "{\*\objdata 0105000002000000060000006b6f66656e670000}}`n" +
     "{\pict\wmetafile8\bin8 kofeng!}\par done}`n")
+$built += 1
+
+# A registry script with one of everything the parser splits apart: a comment,
+# a key, a value, a hex run that CONTINUES across lines, and a key deletion.
+# CRLF throughout, because that is what Windows writes and because a blank CRLF
+# line is one byte - the case the parser got wrong first time.
+Write-Ascii (Join-Path $Out "sample.reg") (
+    "Windows Registry Editor Version 5.00`r`n`r`n" +
+    "; kofeng fixture`r`n" +
+    "[HKEY_CURRENT_USER\Software\Kofeng\Fixture]`r`n" +
+    "`"Text`"=`"kofeng-fixture-value`"`r`n" +
+    "`"Word`"=dword:0000002a`r`n" +
+    "`"Blob`"=hex:6b,6f,66,65,6e,67,2d,66,69,78,74,75,72,65,\`r`n" +
+    "  2d,68,65,78,2d,72,75,6e,2d,63,6f,6e,74,69,6e,75,65,64`r`n" +
+    "`"Gone`"=-`r`n`r`n" +
+    "[-HKEY_CURRENT_USER\Software\Kofeng\Removed]`r`n")
+$built += 1
+
+#
+# A shell link, built from bytes because nothing on a build machine makes one
+# on demand. The layout is MS-SHLLINK's: a 76 byte header whose first field is
+# its own size and whose second is the one CLSID, then the counted strings the
+# flags say are present. See kofmod/lnk.h.
+#
+# THE STRINGS ARE UTF-16LE, which is what IsUnicode in the flags declares, and
+# getting that wrong is the mistake the format invites - a count is CHARACTERS,
+# not bytes.
+#
+$lnk = New-Object System.Collections.Generic.List[byte]
+function Add-U16([int]$v) { $script:lnk.Add([byte]($v -band 0xff)); $script:lnk.Add([byte](($v -shr 8) -band 0xff)) }
+function Add-U32([long]$v) { 0..3 | ForEach-Object { $script:lnk.Add([byte](($v -shr (8 * $_)) -band 0xff)) } }
+function Add-Str([string]$s) {
+    Add-U16 $s.Length
+    foreach ($c in $s.ToCharArray()) { Add-U16 ([int][char]$c) }
+}
+Add-U32 76                                   # HeaderSize
+foreach ($b in @(0x01,0x14,0x02,0x00,0x00,0x00,0x00,0x00,
+                 0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46)) { $lnk.Add([byte]$b) }
+Add-U32 (0x04 -bor 0x08 -bor 0x10 -bor 0x20 -bor 0x40 -bor 0x80)  # the five
+                                             # strings, and IsUnicode
+Add-U32 0x20                                 # FileAttributes
+0..23 | ForEach-Object { $lnk.Add([byte]0) } # the three FILETIMEs
+Add-U32 4096                                 # FileSize
+Add-U32 0                                    # IconIndex
+Add-U32 1                                    # ShowCommand
+Add-U16 0                                    # HotKey
+Add-U16 0                                    # Reserved1
+Add-U32 0                                    # Reserved2
+Add-U32 0                                    # Reserved3
+Add-Str "kofeng fixture link"                # NAME
+Add-Str "..\\kofeng-fixture.exe"             # RELATIVE_PATH
+Add-Str "C:\\kofeng"                         # WORKING_DIR
+Add-Str "-kofeng-fixture-arguments"          # COMMAND_LINE_ARGUMENTS
+Add-Str "C:\\kofeng\\icon.ico"               # ICON_LOCATION
+Add-U32 0                                    # the terminal ExtraData block
+[System.IO.File]::WriteAllBytes((Join-Path $Out "sample.lnk"), $lnk.ToArray())
 $built += 1
 
 function Add-Archive([string]$Name, [scriptblock]$Make) {

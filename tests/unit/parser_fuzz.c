@@ -47,6 +47,8 @@
 #include "../../libkofeng/kofparsers/containers/xz_parse.h"
 #include "../../libkofeng/kofparsers/containers/rtf_parse.h"
 #include "../../libkofeng/kofparsers/containers/pdf_parse.h"
+#include "../../libkofeng/kofparsers/containers/lnk_parse.h"
+#include "../../libkofeng/kofparsers/containers/reg_parse.h"
 
 /*
  * Big enough to reach the caps.
@@ -1102,6 +1104,157 @@ static uint64_t gen_pdf(uint8_t *b)
  * bits are called - is asked of the engine, so a format that changes there
  * changes here with it.
  */
+/*
+ * A SHELL LINK, with every length the format lets a file state left for the
+ * mutator to break.
+ *
+ * The header is fixed and its two identifying fields are written correctly,
+ * because a file that fails the sniff is not a file this exercises. Everything
+ * after it - the id list's size, the link info's size, five character counts,
+ * a chain of ExtraData block sizes - is a length the file chose, which is
+ * exactly the surface where a parser walks off the end.
+ */
+static uint64_t gen_lnk(uint8_t *b)
+{
+	static const uint8_t clsid[16] = {
+		0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46
+	};
+	uint64_t at = 76u;
+	uint32_t flags = (uint32_t)(rnd() & 0xffu);
+	unsigned i, n_str;
+
+	memset(b, 0, OBJ_MAX);
+	put32(b, 0, 76u);
+	memcpy(b + 4, clsid, sizeof clsid);
+	put32(b, 20, flags);
+	put32(b, 60, (uint32_t)(rnd() % 16u));      /* ShowCommand */
+
+	if (flags & 0x01u) {                        /* HasLinkTargetIDList */
+		uint32_t n = hostile(256u) & 0xffffu;
+
+		put16(b, at, (uint16_t)n);
+		at += 2u;
+		for (i = 0; i < n && at < OBJ_MAX - 16u; i++)
+			b[at++] = (uint8_t)rnd();
+	}
+	if (flags & 0x02u) {                        /* HasLinkInfo */
+		uint32_t n = hostile(256u);
+
+		put32(b, at, n);
+		at += 4u;
+		for (i = 0; i < 48u && at < OBJ_MAX - 16u; i++)
+			b[at++] = (uint8_t)rnd();
+	}
+	/* The five counted strings, in the order the format stores them. */
+	for (n_str = 0; n_str < 5u; n_str++) {
+		uint32_t chars;
+
+		if (!(flags & (0x04u << n_str)))
+			continue;
+		if (at + 2u >= OBJ_MAX - 64u)
+			break;
+		chars = (rnd() % 4u) ? (uint32_t)(rnd() % 48u)
+				     : (hostile(256u) & 0xffffu);
+		put16(b, at, (uint16_t)chars);
+		at += 2u;
+		for (i = 0; i < 48u && at < OBJ_MAX - 16u; i++)
+			b[at++] = (uint8_t)(0x20u + rnd() % 0x5fu);
+	}
+	/* An ExtraData chain, ended - or not - by a size under four. */
+	for (i = 0; i < 4u && at + 16u < OBJ_MAX; i++) {
+		uint32_t sz = (rnd() % 5u) ? (8u + (uint32_t)(rnd() % 32u))
+					   : (uint32_t)(rnd() % 4u);
+		unsigned k;
+
+		put32(b, at, sz);
+		at += 4u;
+		if (sz < 4u)
+			break;
+		for (k = 4u; k < sz && at < OBJ_MAX - 16u; k++)
+			b[at++] = (uint8_t)rnd();
+	}
+	if (at > OBJ_MAX)
+		at = OBJ_MAX;
+	/*
+	 * AND SOMETIMES SHORTER THAN WHAT IT JUST DECLARED, which is the only
+	 * way to reach TRUNCATED and the PAST_EOF bits: every length in this
+	 * file is measured against the object's end, so a header that fits can
+	 * never state one that does not. Cutting the object afterwards leaves
+	 * the declarations intact and takes the bytes away.
+	 */
+	if ((rnd() % 6u) == 0u)
+		at = rnd() % (at ? at : 1u);
+	return at;
+}
+
+/*
+ * A REGISTRY SCRIPT. Text, so the mutator's byte flips land on the line shapes
+ * themselves - a key that never closes, a quote with no partner, a hex run
+ * whose trailing backslash promises a line that is not there.
+ */
+static uint64_t gen_reg(uint8_t *b)
+{
+	static const char *const line[] = {
+		"[HKEY_CURRENT_USER\\Software\\A]\r\n",
+		"[-HKEY_LOCAL_MACHINE\\System\\B]\r\n",
+		"\"Name\"=\"value\"\r\n",
+		"\"Num\"=dword:0000002a\r\n",
+		"\"Gone\"=-\r\n",
+		"@=\"default\"\r\n",
+		"; a comment\r\n",
+		"\r\n",
+		"\"Blob\"=hex:aa,bb,cc,\\\r\n  dd,ee,ff\r\n",
+		"\"Wide\"=hex(2):61,00,62,00,\\\r\n  00,00\r\n",
+		"not a line at all\r\n"
+	};
+	static const char hdr5[] = "Windows Registry Editor Version 5.00\r\n";
+	static const char hdr4[] = "REGEDIT4\r\n";
+	const char *h = (rnd() & 1u) ? hdr5 : hdr4;
+	uint64_t at = strlen(h);
+	/*
+	 * SOMETIMES MORE LINES THAN THE RUN TABLE HOLDS, because
+	 * KOF_REG_MAX_EXTENTS is a real limit and EXTENTS_FULL is the anomaly
+	 * that says it was hit. Two dozen lines can never reach 2048 runs, so
+	 * without this the bit is one the parser sets and nothing ever sees.
+	 */
+	unsigned i, n = (rnd() % 8u) ? (1u + (unsigned)(rnd() % 24u)) : 4000u;
+
+	memcpy(b, h, at);
+	for (i = 0; i < n; i++) {
+		const char *l = line[rnd() % (sizeof line / sizeof line[0])];
+		size_t ll = strlen(l);
+
+		if (at + ll >= OBJ_MAX - 8u)
+			break;
+		memcpy(b + at, l, ll);
+		at += ll;
+	}
+	/*
+	 * AND SOMETIMES ONE VERY LONG HEX RUN, to reach KOF_REG_HEX_LONG. The
+	 * table above is made of short lines, so the longest run it can build
+	 * is a few dozen bytes and the anomaly for a 4KB one is unreachable -
+	 * which is the shape of payload the region exists to isolate.
+	 */
+	if ((rnd() % 5u) == 0u && at + 96u < OBJ_MAX) {
+		static const char open[] = "\"Big\"=hex:";
+		uint64_t room = OBJ_MAX - at - 16u;
+		uint64_t want = 5000u < room ? 5000u : room;
+		uint64_t k;
+
+		memcpy(b + at, open, sizeof open - 1u);
+		at += sizeof open - 1u;
+		for (k = 0; k + 3u < want; k += 3u) {
+			b[at++] = (uint8_t)"0123456789abcdef"[rnd() & 15u];
+			b[at++] = (uint8_t)"0123456789abcdef"[rnd() & 15u];
+			b[at++] = ',';
+		}
+		b[at++] = '\r';
+		b[at++] = '\n';
+	}
+	return at;
+}
+
 static struct fmt {
 	uint8_t  format;
 	uint64_t (*gen)(uint8_t *);
@@ -1118,7 +1271,9 @@ static struct fmt {
 	{ KOF_FMT_RAR, gen_rar, KOF_RAR_ANOM_COUNT, NULL },
 	{ KOF_FMT_XZ, gen_xz, KOF_XZ_ANOM_COUNT, NULL },
 	{ KOF_FMT_RTF, gen_rtf, KOF_RTF_ANOM_COUNT, NULL },
-	{ KOF_FMT_PDF, gen_pdf, KOF_PDF_ANOM_COUNT, NULL }
+	{ KOF_FMT_PDF, gen_pdf, KOF_PDF_ANOM_COUNT, NULL },
+	{ KOF_FMT_LNK, gen_lnk, KOF_LNK_ANOM_COUNT, NULL },
+	{ KOF_FMT_REG, gen_reg, KOF_REG_ANOM_COUNT, NULL }
 };
 #define N_FMT (sizeof fmts / sizeof fmts[0])
 
