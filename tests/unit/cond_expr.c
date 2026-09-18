@@ -418,6 +418,104 @@ static void view_inputs(void)
 		CK(info.mem_origin == KOF_PE_ORIGIN_NONE);
 }
 
+/*
+ * THE WORD BETWEEN THE IDS, AND THE EXPRESSION UNDER IT.
+ *
+ * The row draws a list of ids only while the expression IS the canonical
+ * spelling of that list - see canon() above. `op` decides what the canonical
+ * spelling is, so flipping it without rewriting the expression makes the two
+ * disagree, and the row silently becomes a text box with the old spelling in
+ * it. An author who asked for "or" got a caret.
+ *
+ * The bug reached a person: a condition over two matchers, one click to turn
+ * "and" into "or", and the next click landed in an editor.
+ */
+static void operator_word(void)
+{
+	memset(&E.dr, 0, sizeof E.dr);
+	E.dr.n_cnd = 1;
+	E.dr.n_grp = 3;
+	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1&2");
+
+	cnd_set_op(&E, 0, 1);
+	CK(E.dr.cnd[0].op == 1);
+	EQ(E.dr.cnd[0].expr, "1|2");
+	cnd_set_op(&E, 0, 0);
+	CK(E.dr.cnd[0].op == 0);
+	EQ(E.dr.cnd[0].expr, "1&2");
+
+	/* The negation rides along, because canon writes it. */
+	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "!1&2");
+	cnd_set_op(&E, 0, 1);
+	EQ(E.dr.cnd[0].expr, "!1|2");
+
+	/*
+	 * AN EXPRESSION SOMEBODY TYPED IS THEIRS.
+	 *
+	 * The word is not drawn for one, so it cannot be clicked - and a call
+	 * that arrived anyway must not rewrite what was typed into a list that
+	 * says something else.
+	 */
+	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1&(2|3)");
+	cnd_set_op(&E, 0, 1);
+	EQ(E.dr.cnd[0].expr, "1&(2|3)");
+}
+
+/*
+ * A MATCHER HOLDS A BLOCK BY ITS INDEX, and the list of blocks is rebuilt
+ * whenever the object under the panel changes - dropped, compacted, sorted into
+ * file order. Every one of those moves a block to a different index.
+ *
+ * The bug this guards: a rule loaded over the sample it was cut from lost track
+ * of its own block. The row showed no offset, the block could not be lit, and
+ * the draft reported a ticked block that no matcher named - which is the one
+ * thing that stops it being written.
+ */
+static void block_indices(void)
+{
+	static struct plg_block blk[4];
+
+	memset(&E.dr, 0, sizeof E.dr);
+	E.dr.blk = blk;
+	E.dr.n_blk = 3;
+	E.dr.n_grp = 2;
+	blk[0].picked = blk[1].picked = blk[2].picked = 1;
+	blk[0].n_hash = blk[1].n_hash = blk[2].n_hash = KOF_PLAGUE_MIN_HASH;
+	E.dr.grp[0].kind = (uint8_t)GRP_KIND_BLOCK;
+	E.dr.grp[0].blk = 2;
+	E.dr.grp[1].kind = (uint8_t)GRP_KIND_BLOCK;
+	E.dr.grp[1].blk = 0;
+
+	CK(grp_of_block(&E, 2) == 0);
+	CK(grp_of_block(&E, 0) == 1);
+	CK(grp_of_block(&E, 1) == MAX_GROUP);
+
+	blk_moved(&E, 2, 1);
+	CK(E.dr.grp[0].blk == 1);
+	CK(E.dr.grp[1].blk == 0);
+	blk_moved(&E, 0, 2);
+	CK(E.dr.grp[1].blk == 2);
+	/* A move to where it already is changes nothing. */
+	blk_moved(&E, 1, 1);
+	CK(E.dr.grp[0].blk == 1);
+
+	/* A block is usable when it was TICKED and can be scored - both, and
+	 * the four menus that offer blocks ask this one question. */
+	CK(blk_usable(&E, 0) && blk_usable(&E, 1));
+	blk[1].picked = 0;
+	CK(!blk_usable(&E, 1));
+	blk[1].picked = 1;
+	blk[1].n_hash = KOF_PLAGUE_MIN_HASH - 1u;
+	CK(!blk_usable(&E, 1));
+	CK(!blk_usable(&E, 99));
+
+	/* And a draft uses blocks when a MATCHER names one - a ticked block
+	 * nobody named is not use, which is what draft_missing_of refuses. */
+	CK(draft_uses_blocks(&E));
+	E.dr.n_grp = 0;
+	CK(!draft_uses_blocks(&E));
+}
+
 int main(void)
 {
 	reading();
@@ -427,8 +525,11 @@ int main(void)
 	emitting();
 	joining();
 	view_inputs();
+	operator_word();
+	block_indices();
 
 	printf("condition expressions: read, rewrite, switch, canon, emit, "
-	       "joins, view inputs%s\n", fails ? "" : " - ok");
+	       "joins, view inputs, the operator word, block indices%s\n",
+	       fails ? "" : " - ok");
 	return fails != 0;
 }

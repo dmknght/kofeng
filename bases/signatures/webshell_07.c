@@ -4,7 +4,7 @@
  * Test sample: newaspcmd.asp
  * Test sample: 0:NORMALIZED  sha256:63d300297fb07398350fff6732727573da13dd7ab9c82d2a3cf1ece561b7215f
  * Researcher:  dmknght
- * Created 2026-09-16, updated 2026-09-17
+ * Created 2026-09-16, updated 2026-09-18
  * Engine:      db format 1.1, module ABI 2
  */
 
@@ -24,8 +24,6 @@ KOF_DEFINE_STR(s3, "objCmdExec.StdOut.ReadAll", KOF_CASE_EXACT, KOF_WORD_TOKEN);
 
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
-	if (kof_find_str_any(scan_range_whole_file, s0)) {
-		if (kof_find_str_any(scan_range_whole_file, s1, s2, s3))
-			KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
-	}
+	if (kof_find_str_any(scan_range_whole_file, s0) && kof_find_str_any(scan_range_whole_file, s1, s2, s3))
+		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
 }

@@ -1206,8 +1206,20 @@ static uint32_t hash_resolved_call(const char *kind, const char *args,
  */
 static void capture_find_call(const char *at)
 {
+	/*
+	 * kof_plague_score COUNTS AS A GUARD TOO.
+	 *
+	 * KOF_MALVAR_AUTO derives the variant from whatever the verdict is
+	 * guarded by, and a similarity rule is guarded by a block's score - so
+	 * a rule made of blocks could not use AUTO at all, while the panel that
+	 * writes those rules offered it like any other. What is hashed is the
+	 * call as written, which for a block is its name, and a block's name IS
+	 * the fold of its hashes: two rules over different blocks derive
+	 * different variants, which is the whole requirement.
+	 */
 	static const char *kinds[] = { "kof_find_str_multi", "kof_find_str_all",
-					"kof_find_str_any", NULL };
+					"kof_find_str_any", "kof_plague_score",
+					NULL };
 	const char *best = NULL;
 	const char *best_kind = NULL;
 	const char *open, *after;

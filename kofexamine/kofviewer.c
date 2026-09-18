@@ -8450,33 +8450,23 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		/* Last, because it is the one that is not a search: it compares
 		 * at one offset, and it is the only rule that constrains the
 		 * matcher to a single marker. */
-		ch_add(c, "find_str_at (file offset)");
+		ch_add(c, "find_str_at (offset)");
 		/*
-		 * AND ONE ROW PER TICKED BLOCK, which is how a block matcher is
-		 * made.
+		 * AND find_block_sim, WHEN THERE IS A BLOCK TO BE ABOUT.
 		 *
-		 * Only blocks the author has TICKED: a block the engine merely
-		 * offered is not part of the rule, and a matcher naming one
-		 * would declare it by the back door. Only blocks no matcher
-		 * already names, because a matcher holds exactly one block and
-		 * two matchers over one block are two ways of asking the same
-		 * question - see struct group.kind.
+		 * One row, because this menu chooses what KIND of search a
+		 * matcher is - the four above are the four searches, and this
+		 * is the fifth. WHICH block it is about is chosen on the
+		 * matcher's own row afterwards, the same way a search matcher
+		 * takes its markers afterwards. A row per block here would be
+		 * two questions in one menu.
+		 *
+		 * Absent when nothing is ticked: a block the engine merely
+		 * offered is not part of the rule, so there would be nothing
+		 * for the matcher to be about.
 		 */
-		{
-			uint32_t bi;
-
-			for (bi = 0; bi < v->ed.dr.n_blk; bi++) {
-				char t[CH_W];
-
-				if (!blk_usable(&v->ed, bi))
-					continue;
-				if (grp_of_block(&v->ed, bi) < MAX_GROUP)
-					continue;
-				snprintf(t, sizeof t, "find_block_sim %08x",
-					 v->ed.dr.blk[bi].id);
-				ch_add(c, t);
-			}
-		}
+		if (blk_any_usable(&v->ed))
+			ch_add(c, "find_block_sim");
 	} else if (what == CH_BLOCK) {
 		/*
 		 * EVERY TICKED BLOCK, including the one this matcher already
@@ -8706,8 +8696,7 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		for (i = 0; i < v->ed.dr.n_grp; i++) {
 			if (!cmatch_ok(v, arg, i))
 				continue;
-			snprintf(t, sizeof t, "%u  find_%s", i + 1u,
-				 grp_rule_word(v->ed.dr.grp[i].rule));
+			grp_label(&v->ed, i, t, sizeof t);
 			ch_add(c, t);
 		}
 		if (!c->n)
@@ -8779,8 +8768,7 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		for (i = 0; i < v->ed.dr.n_grp; i++) {
 			if (!cmatch_ok(v, ci, i))
 				continue;
-			snprintf(t, sizeof t, "%u  find_%s", i + 1u,
-				 grp_rule_word(v->ed.dr.grp[i].rule));
+			grp_label(&v->ed, i, t, sizeof t);
 			ch_add(c, t);
 		}
 		if (!c->n)
@@ -9471,6 +9459,18 @@ static void ch_take(struct view *v)
 		if (!v->ed.dr.n_grp)
 			return;
 		q = &v->ed.dr.grp[v->ed.dr.n_grp - 1u];
+		/*
+		 * find_block_sim is a KIND and not a search rule, so it is
+		 * taken the same way here as it is for an existing matcher -
+		 * see the branch below. This path used to write c->sel into
+		 * `rule` whatever it was, so choosing find_block_sim on a NEW
+		 * matcher produced a find_all: a second place that decides what
+		 * a chooser row means, and it did not know about the fifth row.
+		 */
+		if (c->sel >= CH_RULE_BLOCK0) {
+			grp_make_block(&v->ed, v->ed.dr.n_grp - 1u);
+			return;
+		}
 		q->rule = c->sel;
 		if (c->sel == 2)
 			q->thresh = 2;
@@ -9734,25 +9734,12 @@ static void ch_take(struct view *v)
 			q->at_off = d->hits[c->sel];
 	} else if (c->what == CH_RULE) {
 		/*
-		 * Past the four search rules are the ticked blocks, in the same
-		 * order the menu was built in - see there. Choosing one turns
-		 * this matcher into the one that asks about that block.
+		 * Past the four search rules is find_block_sim - see where the
+		 * menu is built.
 		 */
 		if (c->sel >= CH_RULE_BLOCK0) {
-			uint32_t bi, seen = 0;
-
-			for (bi = 0; bi < v->ed.dr.n_blk; bi++) {
-				if (!blk_usable(&v->ed, bi))
-					continue;
-				if (grp_of_block(&v->ed, bi) < MAX_GROUP)
-					continue;
-				if (seen++ != (uint32_t)c->sel - CH_RULE_BLOCK0)
-					continue;
-				q->kind = (uint8_t)GRP_KIND_BLOCK;
-				q->blk  = bi;
-				q->pct  = (uint8_t)GRP_PCT_DEFAULT;
-				break;
-			}
+			grp_make_block(&v->ed, c->arg < MAX_GROUP ? c->arg
+					     : v->ed.dr.n_grp - 1u);
 			return;
 		}
 		q->kind = (uint8_t)GRP_KIND_STR;
@@ -9929,8 +9916,9 @@ enum prow_kind {
 	RW_OPT = 0, RW_RANGES, RW_STRHDR, RW_STR, RW_ADDM,
 	RW_MATCH, RW_MARKERS, RW_ADDC, RW_COND, RW_CMATCH,
 	RW_MATHDR, RW_CNDHDR, RW_CJOIN,
-	/* The block table's heading and its rows - see draw_decl_blocks. */
-	RW_BLKHDR, RW_BLK,
+	/* The block table's heading, its column names and its rows - see
+	 * draw_decl_blocks, which draws TWO rows before the first block. */
+	RW_BLKHDR, RW_BLKCOL, RW_BLK,
 	/* The format row and the [+ Options] button - see prow_build. */
 	RW_FMTS, RW_OPTBTN
 };
@@ -10015,6 +10003,7 @@ static void prow_build(struct view *v)
 	 */
 	if (v->ed.dr.n_blk) {
 		prow_add(v, RW_BLKHDR, 0);
+		prow_add(v, RW_BLKCOL, 0);
 		for (i = 0; i < v->ed.dr.n_blk; i++)
 			prow_add(v, RW_BLK, i);
 	}
@@ -11940,10 +11929,16 @@ static void hit_row_matcher(struct view *v, uint32_t g)
 	if (g_mx >= g_cols - 4)
 		grp_remove(&v->ed, g);
 	else if (v->ed.dr.grp[g].kind == GRP_KIND_BLOCK) {
-		/* The one control on a block matcher's row that is not
-		 * registered on its own span - which block it is about. */
+		/*
+		 * The same two halves a search matcher's row has: what KIND of
+		 * matcher this is, and what it is about. The kind is the word
+		 * at the left - clicking it can turn this back into a search -
+		 * and the block is the value beside it.
+		 */
 		if (g_mx >= v->grp_rg[g][0] && g_mx <= v->grp_rg[g][1])
 			ch_open(v, CH_BLOCK, g, g_my, g_mx);
+		else if (g_mx >= v->grp_rl[g][0] && g_mx <= v->grp_rl[g][1])
+			ch_open(v, CH_RULE, g, g_my, g_mx);
 	}
 	else if (g_mx >= v->grp_rl[g][0] &&
 		 g_mx <= v->grp_rl[g][1])
@@ -12620,7 +12615,10 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 				 */
 				hit_add(v, y, 0, g_cols - 1, hit_row_matcher, g);
 				out_fmt(o, A_DIM " %u " A_OFF, g + 1u);
-				out_fmt(o, A_DIM " find_block_sim  " A_OFF);
+				v->grp_rl[g][0] = 1 + (int)o->col_hint;
+				out_fmt(o, A_ID " find_block_sim " A_OFF);
+				v->grp_rl[g][1] = (int)o->col_hint;
+				out_str(o, " ");
 				/* WHICH BLOCK, and it is a control: a rule with
 				 * several blocks is several matchers, and
 				 * pointing one at a different block is how they
@@ -12650,6 +12648,7 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 				out_str(o, A_BAD "[x]" A_OFF);
 			} else {
 				v->grp_rg[g][0] = v->grp_rg[g][1] = -1;
+				v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
 			}
 			r++;
 			continue;
@@ -13169,7 +13168,7 @@ ids_done:
 static void hit_plg_tick(struct view *v, uint32_t i)
 {
 	if (i < v->ed.dr.n_blk)
-		v->ed.dr.blk[i].picked = (uint8_t)!v->ed.dr.blk[i].picked;
+		blk_set_picked(&v->ed, i, !v->ed.dr.blk[i].picked);
 }
 
 static void hit_plg_light(struct view *v, uint32_t i)
@@ -13260,15 +13259,48 @@ static void hit_plg_norm(struct view *v, uint32_t i)
 	if (i >= v->ed.dr.n_blk)
 		return;
 	b = &v->ed.dr.blk[i];
-	b->norm = (uint8_t)((b->norm + 1u) % KOF_PLAGUE_NORM_COUNT);
 	o = cur_obj(v);
-	if (o && o->buf.p && b->off < o->buf.n) {
+	if (!o || !o->buf.p || b->off >= o->buf.n || !b->len) {
+		/* Nothing here to re-read. A block carried from another sample
+		 * keeps the hashes it was declared with - changing how they
+		 * were taken would need the bytes they were taken from. */
+		say_err(&v->ed, "%s",
+			"This block's bytes are not in the object on screen");
+		return;
+	}
+	{
+		/*
+		 * RE-HASHED INTO A COPY FIRST, because a normalizer can leave
+		 * the block unscoreable.
+		 *
+		 * xor and sub hash the difference between neighbours, and a
+		 * span whose neighbours mostly agree collapses to almost
+		 * nothing - below KOF_PLAGUE_MIN_HASH the block cannot be
+		 * scored at all. Written straight into the block that would
+		 * have left a declared block that no menu offers and no rule
+		 * can use, with nothing said about why.
+		 */
+		uint32_t tmp[KOF_PLAGUE_MAX_HASH], n;
+		uint8_t next = (uint8_t)((b->norm + 1u) %
+					 KOF_PLAGUE_NORM_COUNT);
 		uint64_t len = b->len;
+		static const char *const nm[KOF_PLAGUE_NORM_COUNT] = {
+			"bytes", "xor", "sub"
+		};
 
 		if (len > o->buf.n - b->off)
 			len = o->buf.n - b->off;
-		b->n_hash = kof_plague_hash_span(o->buf.p + b->off, len, b->norm,
-					  b->hash, KOF_PLAGUE_MAX_HASH);
+		n = kof_plague_hash_span(o->buf.p + b->off, len, next, tmp,
+					 KOF_PLAGUE_MAX_HASH);
+		if (n < KOF_PLAGUE_MIN_HASH) {
+			say_err(&v->ed, "Hashed as %s this block yields %u of "
+				"the %u it needs", nm[next], n,
+				KOF_PLAGUE_MIN_HASH);
+			return;
+		}
+		b->norm = next;
+		b->n_hash = n;
+		memcpy(b->hash, tmp, n * sizeof tmp[0]);
 		b->id = kof_plague_fold(b->hash, b->n_hash);
 	}
 	v->plg_scored = 0;
@@ -13629,6 +13661,26 @@ static void draw_decl(struct out *o, struct view *v)
 	r = draw_decl_blocks(o, v, r);
 	r = draw_decl_matchers(o, v, r);
 	r = draw_decl_conds(o, v, r);
+
+	/*
+	 * THE ROW MODEL AND THE DRAWING MUST AGREE, and they say so here.
+	 *
+	 * prow_build declares the panel's rows and the drawers emit them, and
+	 * nothing but this connects the two. When they disagree every row below
+	 * the discrepancy is one out: the clamp stops short, so the last rows
+	 * cannot be scrolled to, and a click lands on the row above or below
+	 * what it pointed at. Both happened the day the block table was added -
+	 * the table draws two heading rows and the model counted one.
+	 *
+	 * Said in the status line rather than asserted, because a panel that
+	 * refuses to draw is worse than one that draws slightly wrong, and
+	 * because the person who can act on it is the one looking at the
+	 * screen.
+	 */
+	if (r != (int)v->n_prow)
+		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
+			 "panel rows %d, model %u - a section is miscounted",
+			 r, v->n_prow);
 
 	/* Whatever the draft used to reach and no longer does. */
 	{
@@ -20672,6 +20724,7 @@ static void editor_attach(struct view *v)
 	v->ed.n_who    = &v->n_meta_who;
 	v->ed.made     = &v->meta_made;
 	v->ed.foreign_w= &v->foreign;
+	v->ed.edit     = &v->edit;
 	v->ed.scratch  = v->probe;
 	v->ed.eng      = v->eng;
 }
@@ -25122,7 +25175,7 @@ static void hit_row_cond(struct view *v, uint32_t g)
 			ch_open(v, CH_CMATCH, ci, g_my - 3, g_mx);
 		else if (v->cnd_op[ci][0] > 0 && g_mx >= v->cnd_op[ci][0] &&
 			 g_mx <= v->cnd_op[ci][1])
-			v->ed.dr.cnd[ci].op = !v->ed.dr.cnd[ci].op;
+			cnd_set_op(&v->ed, ci, !v->ed.dr.cnd[ci].op);
 		/* A typed expression is a FIELD, not a list of ids - so it
 		 * takes the caret rather than having one of its characters
 		 * removed. */

@@ -866,6 +866,21 @@ struct kof_editor {
 	uint32_t          *foreign_w;   /* the same flag, writable */
 	struct kof_range  *scratch;  /* KOF_SCAN_MAX_EXTENTS, the host's */
 	/*
+	 * WHICH FIELD THE HOST HAS OPEN, borrowed the way the tables above are.
+	 *
+	 * The model does not interpret the number - how a host names its boxes
+	 * is the host's business. It only CLEARS it, and only when a row that
+	 * a box could be open on has just gone: removing a matcher shifts every
+	 * one after it, so a caret that was in matcher 3 is now in what used to
+	 * be matcher 4, typing into a rule nobody asked to edit.
+	 *
+	 * Cleared rather than adjusted because after a removal there are two
+	 * cases - the row went, or it moved - and "no box open" is the only
+	 * answer that is right in both. The same fix as blk_moved, for the same
+	 * reason, at the one level that can see every removal.
+	 */
+	int               *edit;
+	/*
 	 * WHICH OBJECT THE DRAFT IS BEING WRITTEN ABOUT.
 	 *
 	 * The one piece of UI state the model genuinely needs: a rule is
@@ -897,6 +912,7 @@ int cnd_more_siblings(struct kof_editor *e, uint32_t i);
 int cnd_depth(struct kof_editor *e, uint32_t i);
 void grp_remove(struct kof_editor *e, uint32_t g);
 void cnd_add(struct kof_editor *e, int nested);
+void cnd_set_op(struct kof_editor *e, uint32_t i, int op);
 void cnd_remove(struct kof_editor *e, uint32_t i);
 uint32_t cnd_children(struct kof_editor *e, uint32_t i);
 uint32_t grp_thresh_eff(struct kof_editor *e, uint32_t g);
@@ -1066,7 +1082,11 @@ struct kof_verdict_decl {
  */
 int draft_uses_blocks(const struct kof_editor *e);
 uint32_t grp_of_block(const struct kof_editor *e, uint32_t blk);
+void grp_label(const struct kof_editor *e, uint32_t g, char *out, size_t cap);
 int blk_usable(const struct kof_editor *e, uint32_t i);
+int blk_any_usable(const struct kof_editor *e);
+int grp_make_block(struct kof_editor *e, uint32_t g);
+void blk_set_picked(struct kof_editor *e, uint32_t i, int on);
 int blk_clears(const struct kof_editor *e, uint32_t i);
 void blk_moved(struct kof_editor *e, uint32_t from, uint32_t to);
 

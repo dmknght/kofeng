@@ -1678,6 +1678,33 @@ void cnd_canon(struct kof_editor *e, uint32_t g, char *out, size_t cap)
 	}
 }
 
+/*
+ * AND OR OR, and the expression rewritten to match.
+ *
+ * The word between two ids is drawn from `op`, but what the rule MEANS is in
+ * `expr` - and the row only draws a list of ids while the two agree. Flipping
+ * `op` alone left "1&2" written against a canonical form that now said "1|2",
+ * so the row decided the expression had been typed by hand: it turned into the
+ * raw text, and the next click on it opened a caret. A reader who asked for
+ * "or" got a text box.
+ *
+ * Only for an expression that IS the list. One somebody typed is theirs, and
+ * the word is not offered for it.
+ */
+void cnd_set_op(struct kof_editor *e, uint32_t i, int op)
+{
+	char canon[64];
+
+	if (i >= e->dr.n_cnd)
+		return;
+	cnd_canon(e, i, canon, sizeof canon);
+	if (e->dr.cnd[i].expr[0] && strcmp(e->dr.cnd[i].expr, canon) != 0)
+		return;
+	e->dr.cnd[i].op = op;
+	cnd_canon(e, i, canon, sizeof canon);
+	snprintf(e->dr.cnd[i].expr, sizeof e->dr.cnd[i].expr, "%s", canon);
+}
+
 /* Is another condition still to come at this one's level, under this parent.
  * The connector below it is drawn or not drawn on the answer. */
 int cnd_more_siblings(struct kof_editor *e, uint32_t i)
@@ -1748,6 +1775,10 @@ int cnd_depth(struct kof_editor *e, uint32_t i)
  */
 void grp_remove(struct kof_editor *e, uint32_t g)
 {
+	/* A box open on a row that is about to move is a box on the wrong
+	 * row - see kof_editor.edit. */
+	if (e->edit)
+		*e->edit = 0;
 	uint32_t i, k;
 
 	if (g >= e->dr.n_grp)
@@ -1820,6 +1851,10 @@ void cnd_add(struct kof_editor *e, int nested)
  */
 void cnd_remove(struct kof_editor *e, uint32_t i)
 {
+	/* A box open on a row that is about to move is a box on the wrong
+	 * row - see kof_editor.edit. */
+	if (e->edit)
+		*e->edit = 0;
 	uint32_t k;
 
 	if (i >= e->dr.n_cnd)
@@ -2036,6 +2071,30 @@ uint32_t draft_hash(struct kof_editor *e)
 			MIX((uint8_t)c->expr[j]);
 		for (j = 0; c->variant[j]; j++)
 			MIX((uint8_t)c->variant[j]);
+	}
+	/*
+	 * AND THE BLOCKS THE RULE IS MADE OF.
+	 *
+	 * Ticking a block, pointing a matcher at a different one or changing
+	 * how one is hashed all change the rule that would be written - so a
+	 * draft that reported itself unchanged after any of them would be a
+	 * draft that loses them without warning. The block's own name is the
+	 * fold of its hashes, so hashing that covers its content too.
+	 */
+	for (i = 0; i < e->dr.n_blk && e->dr.blk; i++) {
+		MIX(e->dr.blk[i].picked);
+		if (!e->dr.blk[i].picked)
+			continue;
+		MIX(e->dr.blk[i].id);
+		MIX(e->dr.blk[i].norm);
+		MIX(e->dr.blk[i].anywhere);
+	}
+	for (i = 0; i < e->dr.n_grp; i++) {
+		MIX(e->dr.grp[i].kind);
+		if (e->dr.grp[i].kind == GRP_KIND_BLOCK) {
+			MIX(e->dr.grp[i].blk);
+			MIX(e->dr.grp[i].pct);
+		}
 	}
 	#undef MIX
 	return h;
@@ -2414,7 +2473,7 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 	 * similarity rule, which is a whole rule.
 	 */
 	if (!e->dr.n_decl && !draft_uses_blocks(e))
-		return "Declare a string";
+		return "Declare a string, or tick a block";
 	if (!e->dr.n_grp)
 		return "Add a matcher";
 	/*
@@ -2427,11 +2486,17 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 	 * would be written into the file and never read.
 	 */
 	{
+		static char why[64];
 		uint32_t b;
 
 		for (b = 0; b < e->dr.n_blk; b++)
-			if (blk_usable(e, b) && grp_of_block(e, b) >= MAX_GROUP)
-				return "A ticked block has no matcher";
+			if (blk_usable(e, b) &&
+			    grp_of_block(e, b) >= MAX_GROUP) {
+				snprintf(why, sizeof why,
+					 "block %08x has no matcher",
+					 e->dr.blk[b].id);
+				return why;
+			}
 	}
 	/*
 	 * TWO MATCHERS THAT ASK THE SAME THING, INCLUDING THE THRESHOLD.
@@ -2469,9 +2534,25 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 				return "Two matchers ask the same thing - "
 				       "remove one or change a threshold";
 	}
-	for (i = 0; i < e->dr.n_grp; i++)
-		if (e->dr.grp[i].kind != GRP_KIND_BLOCK && !grp_count(e, i))
-			return "Every matcher needs a string";
+	/*
+	 * NAMED, because "every matcher" makes a reader check all of them.
+	 *
+	 * A draft holds up to eight and the row numbers are on the screen, so
+	 * saying which one is the difference between a sentence that is read
+	 * and one that is acted on. Same buffer discipline as the string
+	 * message below.
+	 */
+	{
+		static char why[64];
+
+		for (i = 0; i < e->dr.n_grp; i++)
+			if (e->dr.grp[i].kind != GRP_KIND_BLOCK &&
+			    !grp_count(e, i)) {
+				snprintf(why, sizeof why,
+					 "matcher %u has no string", i + 1u);
+				return why;
+			}
+	}
 	/*
 	 * AND AN AT MATCHER NEEDS EXACTLY ONE.
 	 *
@@ -3019,6 +3100,10 @@ void decl_edit_commit(struct kof_editor *e, uint32_t i)
 
 void decl_remove(struct kof_editor *e, uint32_t i)
 {
+	/* A box open on a row that is about to move is a box on the wrong
+	 * row - see kof_editor.edit. */
+	if (e->edit)
+		*e->edit = 0;
 	if (i >= e->dr.n_decl)
 		return;
 	free(e->dr.decl[i].bytes);
@@ -3095,6 +3180,103 @@ void emit_call(FILE *f, struct kof_editor *e, uint32_t g)
 void emit_call_multi(FILE *f, struct kof_editor *e, uint32_t g)
 {
 	emit_call_as(f, e, g, 1);
+}
+
+/*
+ * TICK OR UNTICK A BLOCK, and take the matcher with it.
+ *
+ * The tick is what DECLARES a block, so untickng it undeclares one - and a
+ * matcher over a block nobody declared is the same fault as a matcher over a
+ * marker that was deleted, which decl_remove has always fixed by taking the
+ * marker out of it.
+ *
+ * Here it removes the matcher outright, because a block matcher holds exactly
+ * one block and one with none is a matcher that asks nothing. grp_remove then
+ * fixes the conditions that named it, which is why this is one call and not
+ * three.
+ *
+ * Without it the block simply vanished at the next carve - unticked blocks are
+ * not kept - and its index was reused by whatever moved down into it, so the
+ * matcher came back about a different block and the rule still built.
+ */
+void blk_set_picked(struct kof_editor *e, uint32_t i, int on)
+{
+	uint32_t g;
+
+	if (i >= e->dr.n_blk)
+		return;
+	e->dr.blk[i].picked = (uint8_t)(on != 0);
+	if (on)
+		return;
+	while ((g = grp_of_block(e, i)) < MAX_GROUP)
+		grp_remove(e, g);
+}
+
+/*
+ * TURN A MATCHER INTO A BLOCK MATCHER, on the first block it can have.
+ *
+ * Which block it ends up about is chosen on its own row afterwards - the menu
+ * that creates it chooses the KIND, the way it does for the four search rules,
+ * and a menu that also chose the block would be two questions on one row. The
+ * first ticked block is a starting point, not a decision.
+ *
+ * Zero when there is no block to be about, which is also when the menu does not
+ * offer this at all.
+ */
+int grp_make_block(struct kof_editor *e, uint32_t g)
+{
+	uint32_t b;
+
+	if (g >= e->dr.n_grp)
+		return 0;
+	for (b = 0; b < e->dr.n_blk; b++) {
+		if (!blk_usable(e, b))
+			continue;
+		e->dr.grp[g].kind = (uint8_t)GRP_KIND_BLOCK;
+		e->dr.grp[g].blk = b;
+		e->dr.grp[g].pct = (uint8_t)GRP_PCT_DEFAULT;
+		return 1;
+	}
+	return 0;
+}
+
+/* Is there a block a matcher could be about at all - what the menu asks before
+ * offering the kind. */
+int blk_any_usable(const struct kof_editor *e)
+{
+	uint32_t b;
+
+	for (b = 0; b < e->dr.n_blk; b++)
+		if (blk_usable(e, b))
+			return 1;
+	return 0;
+}
+
+/*
+ * HOW A MATCHER IS NAMED IN A LIST, which is not always its search rule.
+ *
+ * grp_rule_word answers for the four search rules and means nothing to a block
+ * matcher, whose `rule` field is zero - so a menu built from it alone listed a
+ * find_block_sim as "find_all", which is a different matcher that this one is
+ * not. Written once because two menus offer the same list and a third would
+ * have been written the same wrong way.
+ *
+ * The number is the id a condition names it by, one-based, as everything the
+ * reader sees uses.
+ */
+void grp_label(const struct kof_editor *e, uint32_t g, char *out, size_t cap)
+{
+	if (!out || !cap)
+		return;
+	if (g >= e->dr.n_grp) {
+		snprintf(out, cap, "%u", g + 1u);
+		return;
+	}
+	if (e->dr.grp[g].kind == GRP_KIND_BLOCK)
+		snprintf(out, cap, "%u  find_block_sim", g + 1u);
+	else
+		snprintf(out, cap, "%u  find_%s", g + 1u,
+			 grp_rule_word(e->dr.grp[g].rule));
 }
 
 /*
@@ -4135,12 +4317,27 @@ shc_done:
 				break;
 			}
 		}
-		if ((p = strstr(line, "kof_find_str_")) != NULL) {
-			/*
-			 * One call is one matcher, which is exactly the rule
-			 * the panel is built on - a matcher is a single
-			 * find_all/find_any/find_multi over one range.
-			 */
+		/*
+		 * EVERY CALL ON THE LINE, not the first one.
+		 *
+		 * One call is one matcher - that is the rule the panel is built
+		 * on - but one CONDITION may name several, and the generator
+		 * writes those as one line: "if (A && B)". Reading only the
+		 * first left the second matcher and the "&" between them behind,
+		 * so a rule written through [+ Matcher] inside a condition came
+		 * back as half of itself, and saving it again wrote that half
+		 * over the whole. Measured on a webshell rule: two find_str_any
+		 * calls in, one matcher out.
+		 *
+		 * The appends below already put the separator in from the
+		 * condition's `op`, so what was missing was only ever the
+		 * walk.
+		 */
+		if (strstr(line, "kof_find_str_") && cur >= 0 &&
+		    strstr(line, "||") && !strstr(line, "&&"))
+			e->dr.cnd[cur].op = 1;
+		for (p = strstr(line, "kof_find_str_"); p;
+		     p = strstr(p + 13, "kof_find_str_")) {
 			const char *q = p + 13;
 			char id[48];
 			struct group *g;
@@ -4562,7 +4759,19 @@ void generate(struct kof_editor *e, int as_new)
 	/* Kept, not cleared: it is the answer to "which file is this draft's",
 	 * and clearing it here made every generate look like the first one -
 	 * so a draft opened from a file wrote a numbered copy beside it. */
-	if (!e->dr.n_decl || !e->dr.family[0])
+	/*
+	 * NOTHING TO WRITE, AND IT SAYS SO BY WRITING NOTHING.
+	 *
+	 * A SECOND COPY of a rule draft_missing_of already states, and the copy
+	 * was left behind when blocks became a thing a rule can be made of: a
+	 * block-only draft has no markers, so this returned - silently, with
+	 * the button green and the status line showing the rule's path, which
+	 * reads exactly like a Save that worked.
+	 *
+	 * It stays because the key that runs generate is not gated by the
+	 * button, but it asks the same question the button asked.
+	 */
+	if ((!e->dr.n_decl && !draft_uses_blocks(e)) || !e->dr.family[0])
 		return;
 
 	for (i = 0; e->dr.family[i] && j + 1u < sizeof safe; i++)
@@ -5036,7 +5245,11 @@ void generate(struct kof_editor *e, int as_new)
 			if (q->kind != GRP_KIND_BLOCK || q->blk >= e->dr.n_blk)
 				continue;
 			b = &e->dr.blk[q->blk];
-			fprintf(f, "\n/* +0x%llx, %llu bytes, %u hash(es) */\n",
+			/* A blank line BETWEEN blocks, not before the first -
+			 * whatever came above has already left one. */
+			if (wrote)
+				fputc('\n', f);
+			fprintf(f, "/* +0x%llx, %llu bytes, %u hash(es) */\n",
 				(unsigned long long)b->off,
 				(unsigned long long)b->len, b->n_hash);
 			fprintf(f, "KOF_PLAGUE_BLOCK(blk_%08x, %s, "
@@ -5203,6 +5416,16 @@ void draft_clear(struct kof_editor *e)
 	memset(e->dr.opt_on, 0, sizeof e->dr.opt_on);
 	memset(e->dr.opt_val, 0, sizeof e->dr.opt_val);
 	e->dr.n_decl = e->dr.n_grp = e->dr.n_cnd = 0;
+	/*
+	 * THE TICKS GO WITH THE MATCHERS THAT USED THEM.
+	 *
+	 * The blocks themselves stay: they are what the ENGINE carved out of
+	 * the object on screen, and the object has not changed. What a cleared
+	 * draft loses is the choosing - and leaving the ticks behind left a
+	 * blank panel reporting that a block it no longer uses has no matcher.
+	 */
+	for (i = 0; i < e->dr.n_blk && e->dr.blk; i++)
+		e->dr.blk[i].picked = 0;
 	e->dr.n_rng_add = 0;
 	e->dr.cur_grp = e->dr.cur_cnd = e->dr.sel_decl = 0;
 	e->dr.family[0] = 0;

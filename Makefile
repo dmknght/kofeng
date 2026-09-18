@@ -2086,6 +2086,19 @@ $(TEST)/asan_rule_roundtrip$(EXE): tests/unit/rule_roundtrip.c $(EDITOR_SRC) \
 	@$(CC) $(CFLAGS) $(ASAN_FLAGS) -I$(SDK)/include $< $(EDITOR_SRC) \
 	       $(ASAN_LIB) -o $@ $(LDFLAGS)
 
+# The reader and the writer of a signature source are two walks over one format
+# - see the note in the test - so the test over them compiles the editor the
+# same way the condition test does.
+$(TEST)/unit_draft_source$(EXE): tests/unit/draft_source.c $(EDITOR_SRC) \
+                              $(LIB) $(SDK_HDR) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $< $(EDITOR_SRC) $(LIB) \
+	      -o $@ $(LDFLAGS)
+
+$(TEST)/asan_draft_source$(EXE): tests/unit/draft_source.c $(EDITOR_SRC) \
+                              $(ASAN_LIB) $(SDK_HDR) $(STAMP) | $(TEST)
+	$(CC) $(ASAN_CFLAGS) $(DEPTO) -I$(SDK)/include $< $(EDITOR_SRC) \
+	      $(ASAN_LIB) -o $@ $(ASAN_LDFLAGS)
+
 $(TEST)/unit_cond_expr$(EXE): tests/unit/cond_expr.c $(EDITOR_SRC) $(LIB) \
                               $(SDK_HDR) $(STAMP) | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $< $(EDITOR_SRC) $(LIB) \
