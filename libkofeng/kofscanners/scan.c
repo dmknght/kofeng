@@ -459,8 +459,7 @@ static void plague_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 				uint32_t rm = fp->regions[ri];
 				const char *rn = fp->region_name(rm);
 
-				if (!rn || strstr(rn, "_HEADER") ||
-				    strstr(rn, "_SYM"))
+				if (kof_plague_region_excluded(rn))
 					continue;
 				if (!(present & rm))
 					continue;

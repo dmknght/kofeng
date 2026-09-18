@@ -341,3 +341,20 @@ const struct kof_parser *kof_parser_of(uint8_t format)
 			return &formats[i];
 	return NULL;
 }
+
+uint32_t kof_region_mask_of(const struct kof_parser *fp, const char *enum_name)
+{
+	uint32_t i;
+
+	if (!enum_name || !enum_name[0] || !fp || !fp->regions ||
+	    !fp->region_name)
+		return (uint32_t)KOF_SCAN_ALL;
+	for (i = 0; i < fp->n_regions; i++) {
+		const char *rn = fp->region_name(fp->regions[i]);
+
+		if (rn && !strcmp(rn, enum_name))
+			return fp->regions[i];
+	}
+	/* Not a region of this format - see the note on the declaration. */
+	return (uint32_t)KOF_SCAN_ALL;
+}

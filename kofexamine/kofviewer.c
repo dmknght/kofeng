@@ -6177,126 +6177,16 @@ static uint64_t view_unmap(const struct view *v, uint64_t off)
 /* ---- plague mode: blocks a researcher marked ------------------------------- */
 
 /*
- * Hash one span of the object the way the engine will.
- *
- * kof_plague_mix and kof_plague_selects come from kofmod/kofplague.h and are
- * compiled here rather than called through the library ON PURPOSE - the header
- * says why. A generator that produced values the matcher does not is a rule that
- * matches nothing and reports no error, so the two sides share the lines rather
- * than an interface.
- *
- * The k smallest DISTINCT values, which is the same cut the matcher expects: a
- * block and a file both keep their smallest, so the two subsets overlap wherever
- * the content does.
- */
-static uint32_t plg_hash_span(const uint8_t *p, uint64_t n, uint32_t norm,
-			      uint32_t *out, uint32_t max_out)
-{
-	uint32_t h = 0, drop = kof_plague_drop_weight(), i, got = 0;
-	uint64_t at;
-	static uint32_t tmp[1u << 14];
-	uint32_t nt = 0;
-
-	if (norm != KOF_PLAGUE_RAW) {
-		if (n < 2u)
-			return 0;
-		n -= 1u;
-	}
-	if (n < KOF_PLAGUE_NG)
-		return 0;
-
-#define PB(k) ((uint32_t)(norm == KOF_PLAGUE_RAW ? p[(k)]                     \
-	       : norm == KOF_PLAGUE_XOR ? (uint8_t)(p[(k)] ^ p[(k) + 1u])     \
-	       : (uint8_t)(p[(k) + 1u] - p[(k)])))
-	for (i = 0; i < KOF_PLAGUE_NG; i++)
-		h = h * KOF_PLAGUE_BASE + PB(i);
-	for (at = 0;; at++) {
-		uint32_t m = kof_plague_mix(h);
-
-		if (kof_plague_selects(m) && !kof_plague_flat(p, at, norm) &&
-		    nt < (uint32_t)(sizeof tmp / sizeof tmp[0]))
-			tmp[nt++] = m;
-		if (at + KOF_PLAGUE_NG >= n)
-			break;
-		h -= PB(at) * drop;
-		h = h * KOF_PLAGUE_BASE + PB(at + KOF_PLAGUE_NG);
-	}
-#undef PB
-	for (i = 1; i < nt; i++) {
-		uint32_t vv = tmp[i], j = i;
-
-		while (j && tmp[j - 1u] > vv) { tmp[j] = tmp[j - 1u]; j--; }
-		tmp[j] = vv;
-	}
-	for (i = 0; i < nt && got < max_out; i++)
-		if (!i || tmp[i] != tmp[i - 1u])
-			out[got++] = tmp[i];
-	return got;
-}
-
-/*
  * The region a block is MATCHED in, which is not always the one it was cut
  * from - see plg_block.anywhere. Every place that feeds, scores or writes the
  * block asks here, so the choice cannot be honoured in one of them and
  * forgotten in another.
  */
-/*
- * REGIONS A SIMILARITY BLOCK IS NEVER CUT FROM.
- *
- * A header is a description of the file rather than part of its content: its
- * bytes are offsets, sizes and flags that a rebuild rewrites and a compiler
- * changes between two builds of the same source, so a block cut from one
- * measures the toolchain and not the malware. The symbol regions are not bytes
- * of the file at all - the host BUILDS those records while parsing - so a block
- * cut from them has no offsets in any file and could not be looked for.
- *
- * Skipped at the carve rather than filtered out of the table afterwards,
- * because the table's rows are a budget: a region that may not produce a block
- * must not be counted for a share of it either.
- */
-/*
- * The region bit a KOF_SCAN_* spelling names, for THIS object's format.
- *
- * A rule read back from a file carries the spelling and not the bit - the bit
- * is a format's own numbering and means nothing without one - so it is resolved
- * against the parse in hand. KOF_SCAN_ALL when nothing matches, which is what a
- * rule written for another format degrades to rather than matching nowhere.
- */
 static uint32_t plg_mask_of_enum(const struct object *o, const char *word)
 {
-	const struct kof_parser *fp = o ? o->fmt : NULL;
-	uint32_t i;
-
-	if (!word || !word[0] || !fp || !fp->regions || !fp->region_name)
-		return (uint32_t)KOF_SCAN_ALL;
-	for (i = 0; i < fp->n_regions; i++) {
-		const char *rn = fp->region_name(fp->regions[i]);
-
-		if (rn && !strcmp(rn, word))
-			return fp->regions[i];
-	}
-	/*
-	 * A REGION THIS FORMAT HAS NOT GOT MEANS LOOK EVERYWHERE, not look
-	 * nowhere.
-	 *
-	 * The block is a run of bytes and the region is where it sat in the
-	 * sample it was cut from; another build puts the same bytes somewhere
-	 * else, and a format that has no such region at all cannot answer the
-	 * question. Refusing to match there was a rule that goes quiet on
-	 * exactly the objects it was written to reach.
-	 *
-	 * This is the MATCHING mask only. What the rule says stays what the
-	 * rule says - see plg_block.anywhere, which is the author's choice and
-	 * the only thing Generate writes.
-	 */
-	return (uint32_t)KOF_SCAN_ALL;
+	return kof_region_mask_of(o ? o->fmt : NULL, word);
 }
 
-static int plg_region_skipped(const char *lbl)
-{
-	return !lbl || strstr(lbl, "HEADER") != NULL ||
-	       strncmp(lbl, "SYM", 3) == 0;
-}
 
 /* Is any block in the list one carried from another sample - which is the only
  * thing the score column has a number for. */
@@ -6313,16 +6203,6 @@ static int plg_kept_any(const struct view *v)
 static uint32_t plg_mask(const struct plg_block *b)
 {
 	return b->anywhere ? (uint32_t)KOF_SCAN_ALL : b->mask;
-}
-
-/* The one value that names a block on screen - see struct plg_block. */
-static uint32_t plg_fold(const uint32_t *h, uint32_t n)
-{
-	uint32_t i, f = 2166136261u;
-
-	for (i = 0; i < n; i++)
-		f = kof_plague_mix(f ^ h[i]);
-	return f;
 }
 
 /*
@@ -6396,7 +6276,7 @@ static int plg_mark(struct view *v, const uint8_t *base, uint64_t base_n,
 				nm = sl + 1;
 		snprintf(b->from, sizeof b->from, "%s", nm);
 	}
-	b->n_hash = plg_hash_span(base + lo, len, norm, b->hash,
+	b->n_hash = kof_plague_hash_span(base + lo, len, norm, b->hash,
 				  KOF_PLAGUE_MAX_HASH);
 	if (b->n_hash < KOF_PLAGUE_MIN_HASH) {
 		/*
@@ -6411,21 +6291,24 @@ static int plg_mark(struct view *v, const uint8_t *base, uint64_t base_n,
 		 */
 		return 0;
 	}
-	b->id = plg_fold(b->hash, b->n_hash);
+	b->id = kof_plague_fold(b->hash, b->n_hash);
 	{
 		/*
-		 * A BLOCK THE LIST ALREADY HOLDS IS NOT ADDED TWICE.
+		 * ONE BLOCK IS ONE ROW.
 		 *
 		 * Opening an infected file loads the rule that caught it, and
-		 * the carve then reproduces the very block the rule declares -
-		 * that it does is the whole reason this works. Both would be
-		 * rows about one block, one of them saying it came from the
-		 * rule and one saying nothing.
+		 * the carve then finds the same span in the sample. Both would
+		 * be rows about one block. What counts as the same block is
+		 * kof_plague_same_block's to say - see the note there on why it
+		 * is not a comparison of ids.
 		 */
 		uint32_t d;
 
 		for (d = 0; d < v->n_plg; d++) {
-			if (v->plg[d].id != b->id)
+			struct plg_block *o2 = &v->plg[d];
+
+			if (!kof_plague_same_block(o2->hash, o2->n_hash,
+						   b->hash, b->n_hash))
 				continue;
 			/*
 			 * AND THE ROW THAT IS ALREADY THERE LEARNS WHERE IT IS.
@@ -6433,15 +6316,16 @@ static int plg_mark(struct view *v, const uint8_t *base, uint64_t base_n,
 			 * A block loaded from a rule has no offsets - they
 			 * belonged to the sample it was cut from - so its row
 			 * showed a size of zero and could not be lit. The carve
-			 * has just found the same block IN THIS FILE, which is
-			 * the position it was missing. Its score stays what was
-			 * measured; only the place is new.
+			 * has just found it IN THIS FILE, which is the position
+			 * it was missing. Its hashes and its score stay what the
+			 * rule declared and what was measured against them; only
+			 * the place is new.
 			 */
-			if (!v->plg[d].len) {
-				v->plg[d].off = b->off;
-				v->plg[d].len = b->len;
-				snprintf(v->plg[d].rgn, sizeof v->plg[d].rgn,
-					 "%s", b->rgn);
+			if (!o2->len) {
+				o2->off = b->off;
+				o2->len = b->len;
+				snprintf(o2->rgn, sizeof o2->rgn, "%s",
+					 b->rgn);
 			}
 			return 0;
 		}
@@ -6568,16 +6452,11 @@ static void plg_segment(struct view *v)
 			}
 			if (n_reg >= PLG_MAX_REGION)
 				break;
-			{
-				const char *rn0 =
-					(fp && fp->region_name &&
-					 mask != KOF_SCAN_ALL)
-					? fp->region_name(mask) : NULL;
-
-				if (rn0 && plg_region_skipped(
-						kof_region_label(rn0)))
-					continue;
-			}
+			/* Not offered, so not counted for a share of the table
+			 * either - see kof_plague_region_excluded. */
+			if (fp && fp->region_name && mask != KOF_SCAN_ALL &&
+			    kof_plague_region_excluded(fp->region_name(mask)))
+				continue;
 			cnt = kof_scan_resolve_range(&o->ctx, mask, v->ext2);
 			for (q = 0; q < cnt; q++)
 				bytes += v->ext2[q].len;
@@ -13372,9 +13251,9 @@ static void hit_plg_norm(struct view *v, uint32_t i)
 
 		if (len > o->buf.n - b->off)
 			len = o->buf.n - b->off;
-		b->n_hash = plg_hash_span(o->buf.p + b->off, len, b->norm,
+		b->n_hash = kof_plague_hash_span(o->buf.p + b->off, len, b->norm,
 					  b->hash, KOF_PLAGUE_MAX_HASH);
-		b->id = plg_fold(b->hash, b->n_hash);
+		b->id = kof_plague_fold(b->hash, b->n_hash);
 	}
 	v->plg_scored = 0;
 }
@@ -13423,7 +13302,7 @@ static void plg_name_known(struct view *v)
 
 		if (!h || !nh)
 			continue;
-		id = plg_fold(h, nh);
+		id = kof_plague_fold(h, nh);
 		for (i = 0; i < v->n_plg; i++) {
 			if (v->plg[i].id != id || v->plg[i].known[0])
 				continue;

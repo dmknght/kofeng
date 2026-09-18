@@ -74,6 +74,17 @@ uint32_t kof_plague_set_norms(const struct kof_plague_set *set, uint32_t scan_ma
 const uint32_t *kof_plague_block_hashes(const struct kof_plague_set *set,
 					uint32_t block, uint32_t *n_hash);
 
+/*
+ * How many selected windows one call may hold before it starts discarding
+ * them. A span is at most a few tens of kilobytes and one window in
+ * 2^KOF_PLAGUE_SEL_BITS is kept, so this is generous; it exists so the working
+ * array is a fixed size and the call needs no allocation.
+ */
+#define KOF_PLAGUE_SPAN_MAX (1u << 14)
+
+uint32_t kof_plague_hash_span(const uint8_t *p, uint64_t n, uint32_t norm,
+			      uint32_t *out, uint32_t max_out);
+
 /* The mutable side: one per scanner thread. */
 struct kof_plague_ctx {
 	const struct kof_plague_set *set;

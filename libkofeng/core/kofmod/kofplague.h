@@ -180,6 +180,106 @@ static inline uint8_t kof_plague_byte(const uint8_t *p, uint64_t k,
 	     : (uint8_t)(p[k + 1u] - p[k]);
 }
 
+/*
+ * THE NAME A BLOCK CARRIES, folded from its hashes.
+ *
+ * Written into a rule as blk_<this>, read back out of the source by its name
+ * alone, and shown in the panel as the value a reader clicks. It is a NAME and
+ * not a checksum: short enough to read off a row, stable enough that the same
+ * block is always called the same thing, and derived from the content so that
+ * nobody has to invent one.
+ *
+ * Here rather than in whoever happens to need it because the generator, the
+ * reader and the panel must all arrive at the same spelling; two of them
+ * agreeing and one of them not is a rule whose name does not match its own
+ * blocks.
+ */
+static inline uint32_t kof_plague_fold(const uint32_t *h, uint32_t n)
+{
+	uint32_t i, f = 2166136261u;
+
+	for (i = 0; i < n; i++)
+		f = kof_plague_mix(f ^ h[i]);
+	return f;
+}
+
+/*
+ * ARE THESE TWO HASH SETS THE SAME BLOCK.
+ *
+ * Not "is this the same list" - that is what comparing the fold answers, and it
+ * answers it too strictly. The fold covers the WHOLE list, so one hash more or
+ * less names a different block: a rule written before a window rule changed, or
+ * a span whose edge moved by a byte, stops being recognisable as the thing it
+ * plainly is. A rule loaded over the sample it was cut from then failed to find
+ * itself there - no offset, no highlight, and a second row for the same bytes.
+ *
+ * Overlap is what this format measures everywhere else, so it is what sameness
+ * means here too: more than half of the smaller set in the larger. Half is a
+ * wide line and it can afford to be, because the spans being compared do not
+ * overlap each other - a carve does not cut the same bytes twice.
+ *
+ * Both lists must be ASCENDING, which is how a block's hashes are always kept:
+ * the k smallest, in order.
+ */
+static inline int kof_plague_same_block(const uint32_t *a, uint32_t na,
+					const uint32_t *b, uint32_t nb)
+{
+	uint32_t i = 0, j = 0, both = 0, need;
+
+	if (!a || !b || !na || !nb)
+		return 0;
+	while (i < na && j < nb) {
+		if (a[i] < b[j])
+			i++;
+		else if (a[i] > b[j])
+			j++;
+		else {
+			both++;
+			i++;
+			j++;
+		}
+	}
+	need = (na < nb ? na : nb) / 2u;
+	return both > need;
+}
+
+/*
+ * REGIONS A SIMILARITY BLOCK IS NEVER CUT FROM, BY THEIR KOF_SCAN_* SPELLING.
+ *
+ * A header describes the object rather than being part of what it does: its
+ * bytes are offsets, sizes and flags that a rebuild rewrites and a compiler
+ * changes between two builds of one source, so a block cut from one measures
+ * the toolchain. The symbol regions are not bytes of the file at all - the host
+ * BUILDS those records while parsing - so a block cut from them has no offsets
+ * in any file and could not be looked for.
+ *
+ * Asked in two places that must agree: the carve, which must not offer such a
+ * block, and the whole-object pass, which must not feed such a region to a
+ * block that named no region. They were two tests on two different strings -
+ * one on the label a panel shows, one on the enum a rule writes - and they
+ * agreed by luck. The enum spelling is the canonical one: it is what a parser
+ * publishes and what a rule carries.
+ *
+ * A rule may still NAME one of these, and the engine will look there - see
+ * plague_prepass. This is about what is offered and what is swept, not about
+ * what an author is allowed to ask for.
+ */
+static inline int kof_plague_region_excluded(const char *enum_name)
+{
+	const char *p;
+
+	if (!enum_name)
+		return 1;
+	for (p = enum_name; *p; p++) {
+		if (p[0] == '_' && p[1] == 'H' && p[2] == 'E' && p[3] == 'A' &&
+		    p[4] == 'D')
+			return 1;
+		if (p[0] == '_' && p[1] == 'S' && p[2] == 'Y' && p[3] == 'M')
+			return 1;
+	}
+	return 0;
+}
+
 static inline int kof_plague_flat(const uint8_t *p, uint64_t at, uint32_t norm)
 {
 	uint8_t b0 = kof_plague_byte(p, at, norm);

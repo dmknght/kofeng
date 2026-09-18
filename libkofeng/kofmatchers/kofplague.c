@@ -274,6 +274,71 @@ void kof_plague_any_region(struct kof_plague_ctx *c, int on)
 		c->any_region = on != 0;
 }
 
+/*
+ * THE GENERATOR SIDE: hash one span the way the matcher will read it.
+ *
+ * Here rather than in whoever is carving because there is one right answer and
+ * several callers - the panel that offers blocks, anything that wants to
+ * recognise a block it has been handed, a test. A generator that derived a
+ * value differently from kof_plague_feed would produce a rule that matches
+ * nothing and reports no error, and the way to make that impossible is for
+ * there to be one of it.
+ *
+ * The k smallest DISTINCT values, which is the cut the matcher expects: a block
+ * and a file both keep their smallest, so the two subsets overlap wherever the
+ * content does. Windows of one repeated byte are left out on both sides - see
+ * kof_plague_flat.
+ *
+ * Returns how many were written, never more than max_out.
+ */
+uint32_t kof_plague_hash_span(const uint8_t *p, uint64_t n, uint32_t norm,
+			      uint32_t *out, uint32_t max_out)
+{
+	uint32_t h = 0, drop = kof_plague_drop_weight(), i, got = 0;
+	uint64_t at;
+	uint32_t tmp[KOF_PLAGUE_SPAN_MAX];
+	uint32_t nt = 0;
+
+	if (norm != KOF_PLAGUE_RAW) {
+		if (n < 2u)
+			return 0;
+		n -= 1u;
+	}
+	if (n < KOF_PLAGUE_NG)
+		return 0;
+
+	/* One definition of what a normalizer presents - see kofplague.h. The
+	 * macro that used to be here was a second copy of it, and a generator
+	 * that derived a byte differently from the matcher is a rule that
+	 * matches nothing and reports no error. */
+#define PB(k) ((uint32_t)kof_plague_byte(p, (k), norm))
+	for (i = 0; i < KOF_PLAGUE_NG; i++)
+		h = h * KOF_PLAGUE_BASE + PB(i);
+	for (at = 0;; at++) {
+		uint32_t m = kof_plague_mix(h);
+
+		if (kof_plague_selects(m) && !kof_plague_flat(p, at, norm) &&
+		    nt < KOF_PLAGUE_SPAN_MAX)
+			tmp[nt++] = m;
+		if (at + KOF_PLAGUE_NG >= n)
+			break;
+		h -= PB(at) * drop;
+		h = h * KOF_PLAGUE_BASE + PB(at + KOF_PLAGUE_NG);
+	}
+#undef PB
+	for (i = 1; i < nt; i++) {
+		uint32_t vv = tmp[i], j = i;
+
+		while (j && tmp[j - 1u] > vv) { tmp[j] = tmp[j - 1u]; j--; }
+		tmp[j] = vv;
+	}
+	for (i = 0; i < nt && got < max_out; i++)
+		if (!i || tmp[i] != tmp[i - 1u])
+			out[got++] = tmp[i];
+	return got;
+}
+
+
 /* Credit one hash to every block that holds it. */
 static void pl_credit(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm,
 		      uint32_t h)
@@ -362,12 +427,11 @@ void kof_plague_feed(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm
 
 	drop = kof_plague_drop_weight();
 
-#define PL_BYTE(k) ((uint32_t)(norm == KOF_PLAGUE_RAW ? p[(k)]                 \
-		    : norm == KOF_PLAGUE_XOR ? (uint8_t)(p[(k)] ^ p[(k) + 1u])  \
-		    : (uint8_t)(p[(k) + 1u] - p[(k)])))
-
+	/* One definition of what a normalizer presents - see kofplague.h. The
+	 * macro that used to be here was a third copy of it. */
+#define kof_plague_byte_of(k) ((uint32_t)kof_plague_byte(p, (k), norm))
 	for (i = 0; i < KOF_PLAGUE_NG; i++)
-		h = h * KOF_PLAGUE_BASE + PL_BYTE(i);
+		h = h * KOF_PLAGUE_BASE + kof_plague_byte_of(i);
 
 	for (at = 0;; at++) {
 		uint32_t mixed = kof_plague_mix(h);
@@ -381,10 +445,10 @@ void kof_plague_feed(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm
 		}
 		if (at + KOF_PLAGUE_NG >= n)
 			break;
-		h -= PL_BYTE(at) * drop;
-		h = h * KOF_PLAGUE_BASE + PL_BYTE(at + KOF_PLAGUE_NG);
+		h -= kof_plague_byte_of(at) * drop;
+		h = h * KOF_PLAGUE_BASE + kof_plague_byte_of(at + KOF_PLAGUE_NG);
 	}
-#undef PL_BYTE
+#undef kof_plague_byte_of
 }
 
 /* ---- scoring ------------------------------------------------------------ */

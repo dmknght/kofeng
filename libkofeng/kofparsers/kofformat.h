@@ -66,4 +66,21 @@ const struct kof_parser *kof_parser_list(uint32_t *n);
  * and wants its parser rather than a sniff. */
 const struct kof_parser *kof_parser_of(uint8_t format);
 
+/*
+ * The region bit a KOF_SCAN_* SPELLING names, for one format.
+ *
+ * The way back from region_name, and the direction anything reading a rule
+ * needs: a source carries the spelling, because a bit is a format's own
+ * numbering and means nothing without one.
+ *
+ * KOF_SCAN_ALL when the format has no such region, and that is deliberate - a
+ * block is a run of bytes and the region is only where it sat in the sample it
+ * was cut from. Another build puts the same bytes elsewhere; a format that has
+ * no such region at all cannot answer the question, and refusing to look would
+ * be a rule that goes quiet on exactly the objects it was written to reach.
+ * Callers that care what the rule SAYS keep the spelling and ask this only for
+ * where to look.
+ */
+uint32_t kof_region_mask_of(const struct kof_parser *fp, const char *enum_name);
+
 #endif /* KOFFORMAT_H */
