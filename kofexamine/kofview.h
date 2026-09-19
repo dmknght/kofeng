@@ -254,11 +254,23 @@ void out_fmt(struct out *o, const char *fmt, ...);
  * These are the heavy partial strokes from the SAME range as G_V and G_THUMB,
  * so a font that draws the bar at all draws these, and they say the same thing:
  * a heavy mark covering one end of the cell.
+ *
+ * MIXED WEIGHT, NOT A HALF STROKE ON ITS OWN. The obvious pick is U+2579 and
+ * its three siblings - a heavy stroke covering one end and NOTHING at the other
+ * - and that is what these were. It leaves the other half of the cell empty,
+ * which is a HOLE IN THE TRACK rather than a mark on it: the rail does not run
+ * behind the thumb, so the wall simply stops. It is worst where it matters
+ * most, on a long file, because a thumb that rounds down to a single half IS
+ * that one cell and the reader sees a gap where the position marker should be.
+ *
+ * These four carry the light rail in the half the thumb does not cover, so the
+ * track is continuous and the thumb is a weight on it. Same range, and measured
+ * to have exactly the same font coverage as the ones they replace.
  */
-#define G_HALF_T "\xe2\x95\xb9"   /* U+2579, heavy stroke upward */
-#define G_HALF_B "\xe2\x95\xbb"   /* U+257B, heavy stroke downward */
-#define G_HALF_L "\xe2\x95\xb8"   /* U+2578, heavy stroke leftward */
-#define G_HALF_R "\xe2\x95\xba"   /* U+257A, heavy stroke rightward */
+#define G_HALF_T "\xe2\x95\xbf"   /* U+257F, heavy up + light down */
+#define G_HALF_B "\xe2\x95\xbd"   /* U+257D, light up + heavy down */
+#define G_HALF_L "\xe2\x95\xbe"   /* U+257E, heavy left + light right */
+#define G_HALF_R "\xe2\x95\xbc"   /* U+257C, light left + heavy right */
 #define G_HBAR   "\xe2\x94\x80"   /* U+2500, the horizontal bar's rail */
 #endif
 
