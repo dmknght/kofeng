@@ -76,6 +76,8 @@
 #include "kofinspect.h"
 #include <kofmod/kofplague.h>
 #include "kofview.h"
+#include "../libkofeng/kofoverlord/koflib.h"
+#include "../libkofeng/kofparsers/rangelist.h"
 #include "kofwalk.h"
 #include "kofproc.h"
 #include <kofmod/proc.h>
@@ -1115,6 +1117,9 @@ static void hit_head_family(struct view *v, uint32_t arg);
 static void hit_head_note(struct view *v, uint32_t arg);
 static void hit_head_gen(struct view *v, uint32_t as_new);
 static void hit_head_discard(struct view *v, uint32_t arg);
+static int  plg_any_picked(const struct view *v);
+static void hit_plg_shape(struct view *v, uint32_t arg);
+static void hit_plg_smart(struct view *v, uint32_t arg);
 /* Reached by the row callbacks above, defined with the panel below them. */
 static void decl_edit_open(struct view *v, uint32_t i);
 static void view_show_decl(struct view *v, const struct decl *d, uint64_t off);
@@ -1125,6 +1130,10 @@ static void hit_optbtn(struct view *v, uint32_t arg);
  * is far shorter than this; the bound is here so the arrays that hold the
  * share-out are fixed. */
 #define PLG_MAX_REGION 32u
+
+/* The two generator buttons on the Plague blocks heading, as drawn. */
+#define PLG_BTN_STRUCT_W 16
+#define PLG_BTN_SMART_W  14
 
 
 struct view {
@@ -6276,6 +6285,7 @@ static void plg_segment(struct view *v)
 	uint32_t rgn_mask[PLG_MAX_REGION], quota[PLG_MAX_REGION];
 	uint64_t rgn_bytes[PLG_MAX_REGION];
 	uint32_t n_reg, budget, used, left, cap_acc = 0;
+	struct kof_lib_result lib;
 
 	/*
 	 * TICKED BLOCKS ARE CARRIED, everything else is carved again.
@@ -6300,6 +6310,14 @@ static void plg_segment(struct view *v)
 	if (!o || !o->buf.p || !o->buf.n || !v->ext2)
 		return;
 	fp = o->fmt;
+	/* Where the library is, so no block is cut from it - see the note in
+	 * the carve loop. Empty for anything that is not an ELF, and for an ELF
+	 * this cannot place a library in, which is the same answer: cut
+	 * nothing. */
+	memset(&lib, 0, sizeof lib);
+	if (o->ctx.format == KOF_FMT_ELF && o->info)
+		kof_lib_find(o->buf, (const struct kof_elf_info *)o->info,
+			     &lib);
 
 	/*
 	 * EVERY REGION GETS A SHARE OF THE TABLE, in proportion to its size.
@@ -6414,6 +6432,45 @@ static void plg_segment(struct view *v)
 			cap = PLG_MAX_BLOCK;
 
 		n = kof_scan_resolve_range(&o->ctx, mask, v->ext2);
+		/*
+		 * NOT ONE BYTE OF THE STATIC LIBRARY.
+		 *
+		 * A block cut from libc matches every program that linked the
+		 * same libc, so it names a toolchain and not a family. It is
+		 * also, since kof_plague_object, a block the SCORER refuses to
+		 * credit - and a block the carve offers that the matcher will
+		 * never feed is a rule that matches the moment it is written
+		 * and never again. The two have to agree, and this is where.
+		 *
+		 * ALL OR NOTHING PER REGION. A subtraction that does not fit
+		 * the extent table would leave the library bytes in, which is
+		 * the direction that costs a false positive; dropping the
+		 * region costs a block nobody should have been offered.
+		 */
+		if (lib.n) {
+			if (n + lib.n > KOF_SCAN_MAX_EXTENTS) {
+				n = 0;
+			} else {
+				struct kof_rlist rl;
+
+				/*
+				 * CUT HOLES, DO NOT MERGE.
+				 *
+				 * The scorer feeds each resolved extent on its
+				 * own, so a rolling hash never runs across the
+				 * join between two of them. Coalescing here
+				 * would carve blocks over exactly those joins -
+				 * hashes the matcher cannot produce, and a rule
+				 * that scores a hundred in the panel and zero
+				 * on the same file a moment later. Found that
+				 * way round.
+				 */
+				kof_rl_init(&rl, v->ext2, KOF_SCAN_MAX_EXTENTS);
+				rl.n = n;
+				kof_rl_subtract(&rl, lib.span, lib.n);
+				n = rl.n;
+			}
+		}
 		for (k = 0; k < n && v->ed.dr.n_blk < cap; k++) {
 			uint64_t off = v->ext2[k].off, len = v->ext2[k].len;
 			uint64_t at, cut;
@@ -12024,7 +12081,8 @@ static void hit_row_matcher(struct view *v, uint32_t g)
 	v->ed.dr.warn[0] = 0;
 	if (g_mx >= g_cols - 4)
 		grp_remove(&v->ed, g);
-	else if (v->ed.dr.grp[g].kind == GRP_KIND_BLOCK) {
+	else if (v->ed.dr.grp[g].kind == GRP_KIND_BLOCK ||
+		 v->ed.dr.grp[g].kind == GRP_KIND_STRUCT) {
 		/*
 		 * The first row holds what a search matcher's first row holds:
 		 * the kind - clicking it can turn this back into a search - and
@@ -12080,6 +12138,10 @@ static void hit_row_markers(struct view *v, uint32_t g)
 			ch_open(v, CH_BLOCK, g, g_my, g_mx);
 		return;
 	}
+	/* A shape matcher names nothing to choose from: the shape is the
+	 * draft's. Its percentage registered its own span above. */
+	if (v->ed.dr.grp[g].kind == GRP_KIND_STRUCT)
+		return;
 	if (v->p_c0[g][0] > 0 &&
 	    g_mx >= v->p_c0[g][0] &&
 	    g_mx <= v->p_c0[g][1]) {
@@ -12745,6 +12807,69 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 		 * a different column from every search matcher's and left it
 		 * the only matcher with nowhere to write a comment.
 		 */
+		/*
+		 * A SHAPE MATCHER, SHAPED LIKE THE OTHERS.
+		 *
+		 * Two rows again: what the matcher is, then what it is about.
+		 * What it is about is not a block and not a marker - it is the
+		 * object's own geometry, which the draft carries one of, so the
+		 * second row states the shape rather than offering a choice of
+		 * one. The percentage is the only control on it.
+		 */
+		if (q->kind == GRP_KIND_STRUCT) {
+			char lead[16];
+
+			if (PR_VIS(r)) {
+				int y = PR(r);
+
+				row_start(o, y, 1);
+				hit_add(v, y, 0, g_cols - 1, hit_row_matcher, g);
+				snprintf(lead, sizeof lead, "  %u.", g + 1u);
+				out_fmt(o, "%s%-6.6s" A_OFF,
+					g == v->ed.dr.cur_grp ? A_SEL : A_DIM,
+					lead);
+				v->grp_rl[g][0] = 1 + (int)o->col_hint;
+				out_fmt(o, "%s%s" A_OFF, A_WARN, "ovl_shape");
+				v->grp_rl[g][1] = (int)o->col_hint;
+				draw_grp_note(o, v, g);
+				out_at(o, y, g_cols - 4);
+				out_str(o, A_BAD "[x]" A_OFF);
+			} else {
+				v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
+				v->grp_nt[g][0] = v->grp_nt[g][1] = -1;
+			}
+			r++;
+			v->grp_rg[g][0] = v->grp_rg[g][1] = -1;
+			if (!PR_VIS(r)) {
+				r++;
+				continue;
+			}
+			{
+				int y = PR(r), c0;
+				const struct kof_ovl_shape *sh = &v->ed.dr.shp;
+
+				row_start(o, y, 1);
+				out_str(o, A_DIM "     Shape: " A_OFF);
+				out_fmt(o, A_ID "%u region(s), %llu B" A_OFF,
+					sh->n_region,
+					(unsigned long long)sh->fsize);
+				out_str(o, A_DIM "  >=  " A_OFF);
+				c0 = 1 + (int)o->col_hint;
+				out_fmt(o, "%s[", v->edit == ED_GRP_PCT + (int)g
+					? A_SEL : A_ID);
+				if (v->edit == ED_GRP_PCT + (int)g)
+					field_draw(o, v->grp_pct_buf, v->caret,
+						   &v->grp_pct_off, 3, 1, "");
+				else
+					out_fmt(o, "%3u", q->pct);
+				out_fmt(o, "]" A_OFF);
+				out_str(o, A_DIM "%" A_OFF);
+				hit_add(v, y, 0, g_cols - 1, hit_row_markers, g);
+				hit_add(v, y, c0, c0 + 4, hit_grp_pct, g);
+			}
+			r++;
+			continue;
+		}
 		if (q->kind == GRP_KIND_BLOCK) {
 			char lead[16];
 
@@ -13309,10 +13434,162 @@ ids_done:
  * independent questions - a block may be worth looking at and not worth
  * shipping, and the common case while choosing is exactly that.
  */
+/* Is any block ticked? What the Smart blocks button has to work with. */
+static int plg_any_picked(const struct view *v)
+{
+	uint32_t i;
+
+	for (i = 0; i < v->ed.dr.n_blk; i++)
+		if (v->ed.dr.blk[i].picked)
+			return 1;
+	return 0;
+}
+
 static void hit_plg_tick(struct view *v, uint32_t i)
 {
 	if (i < v->ed.dr.n_blk)
 		blk_set_picked(&v->ed, i, !v->ed.dr.blk[i].picked);
+}
+
+/*
+ * Put matcher `g` into the first condition, making one when there is none.
+ *
+ * The spelling is the panel's own - see CH_CMATCH - so a condition this builds
+ * is indistinguishable from one assembled by hand, which is the only way the
+ * two can be edited afterwards by the same code.
+ */
+static void plg_wire(struct view *v, uint32_t g, int level)
+{
+	struct cond *c = NULL;
+	uint32_t i;
+	size_t l;
+
+	/*
+	 * ONE CONDITION PER VERDICT, and that is not tidiness.
+	 *
+	 * Content and shape conclude different things - a block says the object
+	 * holds that family's code, a shape says only that it came out of the
+	 * same builder - so putting them in one condition would make whichever
+	 * was wired first decide for both. It did, the first time this was
+	 * written: a block match came out SUSPECT because the shape matcher got
+	 * there first.
+	 */
+	for (i = 0; i < v->ed.dr.n_cnd; i++)
+		if (v->ed.dr.cnd[i].level == level &&
+		    v->ed.dr.cnd[i].parent < 0) {
+			c = &v->ed.dr.cnd[i];
+			break;
+		}
+	if (!c) {
+		uint32_t before = v->ed.dr.n_cnd;
+
+		cnd_add(&v->ed, 0);
+		if (v->ed.dr.n_cnd == before)
+			return;
+		c = &v->ed.dr.cnd[v->ed.dr.n_cnd - 1u];
+		c->level = level;
+		c->var_kind = 0;              /* AUTO */
+		c->variant[0] = 0;
+	}
+	if (cnd_uses(c, g))
+		return;
+	l = strlen(c->expr);
+	snprintf(c->expr + l, sizeof c->expr - l, "%s%u",
+		 l ? (c->op ? "|" : "&") : "", g + 1u);
+}
+
+/*
+ * FILE STRUCTURE SIG - the object's own geometry as a matcher.
+ *
+ * Reads nothing of the content, which is the whole point: it still answers on a
+ * sample whose payload is encrypted. See kofmod/kofoverlord.h.
+ *
+ * SEVENTY PER CENT, and it is a measurement rather than a taste: that is the
+ * threshold that fired on 71.5% of 925 deduplicated botnet samples and on none
+ * of 3870 clean objects. The author can move it; the number it starts at is one
+ * somebody counted.
+ *
+ * SUSPECT AND NOT INFECT, because a shape says the object came out of the same
+ * BUILDER and not that it is the same family. A Mirai-derived builder that
+ * produced a coinminer is a true shape match and a false family name.
+ */
+static void hit_plg_shape(struct view *v, uint32_t arg)
+{
+	struct object *o = cur_obj(v);
+	struct group *g;
+
+	(void)arg;
+	if (!o || !o->info || o->ctx.format != KOF_FMT_ELF) {
+		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
+			 "a shape is an ELF's geometry; this object has none");
+		v->ed.dr.warn_bad = 1;
+		return;
+	}
+	kof_ovl_shape_of((const struct kof_elf_info *)o->info, o->buf.n,
+			 &v->ed.dr.shp);
+	v->ed.dr.has_shp = v->ed.dr.shp.n_region != 0;
+	if (!v->ed.dr.has_shp) {
+		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
+			 "no loadable region: there is no shape to describe");
+		v->ed.dr.warn_bad = 1;
+		return;
+	}
+	/* One shape to a draft, so one shape matcher - see struct kof_draft. */
+	for (uint32_t i = 0; i < v->ed.dr.n_grp; i++)
+		if (v->ed.dr.grp[i].kind == GRP_KIND_STRUCT) {
+			v->ed.dr.cur_grp = i;
+			return;
+		}
+	if (v->ed.dr.n_grp >= MAX_GROUP)
+		return;
+	g = &v->ed.dr.grp[v->ed.dr.n_grp];
+	memset(g, 0, sizeof *g);
+	g->kind = (uint8_t)GRP_KIND_STRUCT;
+	g->pct  = 70u;
+	v->ed.dr.cur_grp = v->ed.dr.n_grp;
+	v->ed.dr.n_grp++;
+	plg_wire(v, v->ed.dr.cur_grp, LV_SUSPECT);
+}
+
+/*
+ * SMART BLOCK SIGS - every ticked block, wired up in one press.
+ *
+ * The smartness is not here: the carve itself no longer cuts a block out of the
+ * static library, because the scorer no longer credits one - see plg_segment.
+ * What this adds is the step that was three clicks a block: a matcher for each
+ * ticked block and a condition over them.
+ *
+ * TICKED AND NOT ALL. Which spans are worth a rule is the researcher's call and
+ * the panel exists to ask it; a button that ticked everything would answer it
+ * for them, and sixty-four blocks ANDed is a rule that matches one file.
+ */
+static void hit_plg_smart(struct view *v, uint32_t arg)
+{
+	uint32_t i, made = 0;
+
+	(void)arg;
+	for (i = 0; i < v->ed.dr.n_blk && v->ed.dr.n_grp < MAX_GROUP; i++) {
+		struct group *g;
+
+		if (!v->ed.dr.blk[i].picked)
+			continue;
+		if (grp_of_block(&v->ed, i) < MAX_GROUP)
+			continue;            /* already has one */
+		g = &v->ed.dr.grp[v->ed.dr.n_grp];
+		memset(g, 0, sizeof *g);
+		g->kind = (uint8_t)GRP_KIND_BLOCK;
+		g->blk  = i;
+		g->pct  = GRP_PCT_DEFAULT;
+		v->ed.dr.cur_grp = v->ed.dr.n_grp;
+		v->ed.dr.n_grp++;
+		plg_wire(v, v->ed.dr.cur_grp, LV_INFECT);
+		made++;
+	}
+	if (!made) {
+		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
+			 "tick the blocks worth a rule first");
+		v->ed.dr.warn_bad = 1;
+	}
 }
 
 /*
@@ -13632,8 +13909,40 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 	if (!v->ed.dr.n_blk)
 		return r;
 	snprintf(hdr, sizeof hdr, " Plague blocks");
-	if (PR_VIS(r))
-		sec_bar(o, v, PR(r), hdr);
+	if (PR_VIS(r)) {
+		int y = PR(r), c;
+		int has_shape = 0;
+		uint32_t gi;
+
+		sec_bar(o, v, y, hdr);
+		/*
+		 * THE TWO GENERATORS, ON THE ROW THEY ACT ON.
+		 *
+		 * The same reasoning that put Generate on the draft's own row:
+		 * a control that works only while one panel is open belongs on
+		 * that panel and not in a menu that is dead the rest of the
+		 * time. Anchored to the right edge with out_at so neither the
+		 * heading nor a wide table can push them off.
+		 *
+		 * They make MATCHERS, not rules. What a matcher concludes is a
+		 * condition's to say, and the condition editor is right below -
+		 * a button that wrote the verdict too would be deciding the one
+		 * thing this panel exists to ask.
+		 */
+		for (gi = 0; gi < v->ed.dr.n_grp; gi++)
+			if (v->ed.dr.grp[gi].kind == GRP_KIND_STRUCT)
+				has_shape = 1;
+		c = g_cols - (PLG_BTN_STRUCT_W + PLG_BTN_SMART_W + 1);
+		out_at(o, y, c);
+		out_fmt(o, "%s[File structure]" A_OFF,
+			has_shape ? "\033[47;90m" : A_ID);
+		hit_add(v, y, c, c + PLG_BTN_STRUCT_W - 1, hit_plg_shape, 0);
+		c += PLG_BTN_STRUCT_W + 1;
+		out_at(o, y, c);
+		out_fmt(o, "%s[Smart blocks]" A_OFF,
+			plg_any_picked(v) ? A_ID : "\033[47;90m");
+		hit_add(v, y, c, c + PLG_BTN_SMART_W - 1, hit_plg_smart, 0);
+	}
 	r++;
 
 	if (!PR_VIS(r)) {

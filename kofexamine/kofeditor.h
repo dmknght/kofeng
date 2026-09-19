@@ -35,6 +35,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/kofsym.h>
 #include <kofmod/kofplague.h>
+#include <kofmod/kofoverlord.h>
 #include <kofeng.h>
 #include "kofinspect.h"
 
@@ -403,9 +404,27 @@ struct group {
  * similarity rule that nothing but the author can answer. */
 #define GRP_PCT_DEFAULT 60u
 
-/* The two kinds, spelled rather than counted at the point of use. */
-#define GRP_KIND_STR   0u
-#define GRP_KIND_BLOCK 1u
+/* The kinds, spelled rather than counted at the point of use. */
+#define GRP_KIND_STR    0u
+#define GRP_KIND_BLOCK  1u
+/*
+ * THE OBJECT'S SHAPE, which is not a search at all.
+ *
+ * A string matcher and a block matcher both look for something IN the object; a
+ * shape matcher compares the object's own geometry - its size, how many
+ * loadable regions and how big each - against a reference somebody identified.
+ * It reads no bytes, which is the whole reason it exists: it still answers when
+ * the payload is ciphertext. See kofmod/kofoverlord.h.
+ *
+ * It lives in this list and is combined by the same conditions, for the same
+ * reason the block matcher does: a rule names it and concludes from it, and
+ * having its own list would mean a second way to write "this and that".
+ *
+ * `pct` is the threshold, the same field the block matcher uses. `blk`, `rule`,
+ * `thresh`, `at_off` and `mask` mean nothing to one - the shape it is about is
+ * the draft's, since a draft describes one object.
+ */
+#define GRP_KIND_STRUCT 2u
 
 struct cond {
 	char     expr[64];          /* over matcher ids */
@@ -545,6 +564,15 @@ struct kof_draft {
 	 */
 	struct plg_block *blk;
 	uint32_t     n_blk;
+	/*
+	 * THE OBJECT'S SHAPE, read off the sample when the panel offers it.
+	 *
+	 * One per draft and not one per matcher: a draft is written about one
+	 * object, and a second shape would be a second object's - which is a
+	 * second rule.
+	 */
+	struct kof_ovl_shape shp;
+	int          has_shp;
 	char         sedit[DECL_HEXS_CAP];
 	uint32_t     sedit_off;
 	struct range rng[MAX_RANGE];

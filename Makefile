@@ -1047,6 +1047,7 @@ $(LIB): $(LIB_OBJ) $(EMU_OBJ) $(VENDOR_OBJ)
 SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/kofsig.h \
            $(SDK)/include/kofmod/kofplague.h \
+           $(SDK)/include/kofmod/kofoverlord.h \
            $(SDK)/include/kofmod/heur.h \
            $(SDK)/include/kofmod/kofsym.h \
            $(SDK)/include/kofmod/wrap.h \

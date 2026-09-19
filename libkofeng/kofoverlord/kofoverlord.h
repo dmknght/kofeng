@@ -64,6 +64,7 @@
 #include <stdint.h>
 #include <kofcore.h>
 #include <kofmod/kofsig.h>
+#include <kofmod/kofoverlord.h>
 #include "koflib.h"
 
 struct kof_elf_info;
@@ -181,5 +182,23 @@ enum kof_ovl_track {
 
 uint32_t kof_ovl_verdict(const struct kof_ovl_vec *v);
 const char *kof_ovl_track_name(uint32_t track);
+
+/*
+ * A SHAPE A RULE CAN DECLARE, and the one number it is asked about.
+ *
+ * The structure track compares facts a rule can write down - how big the file
+ * is, how many loadable regions and how big each, which program header types
+ * are present - and none of them need the object's bytes. So a rule carries a
+ * shape rather than a whole descriptor: no string pool, a hundred-odd bytes,
+ * and the comparison costs a handful of divisions.
+ *
+ * ONE PERCENTAGE, AND IT IS STILL A CONJUNCTION. kof_ovl_shape_pct answers with
+ * the WORST-agreeing dimension, not an average of them, so `>= 70` means every
+ * dimension agrees to at least seventy percent - which is exactly the rule that
+ * measured zero false positives on 3870 clean objects. An average would let a
+ * perfect match on one dimension pay for a total disagreement on another, which
+ * is the projection this file refuses everywhere else.
+ */
+
 
 #endif /* KOFENG_KOFOVERLORD_H */

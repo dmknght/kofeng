@@ -1217,8 +1217,18 @@ static void capture_find_call(const char *at)
 	 * the fold of its hashes: two rules over different blocks derive
 	 * different variants, which is the whole requirement.
 	 */
+	/*
+	 * AND SO DOES kof_ovl_shape, for the same reason one step further out.
+	 *
+	 * A shape rule is guarded by how near the object is to a reference's
+	 * geometry, and it names that reference - so what is hashed is the
+	 * reference's identifier, and two rules over two samples derive two
+	 * variants. A rule made only of a shape could not use AUTO otherwise,
+	 * while the panel that writes those rules offers it like any other.
+	 */
 	static const char *kinds[] = { "kof_find_str_multi", "kof_find_str_all",
 					"kof_find_str_any", "kof_plague_score",
+					"kof_ovl_shape",
 					NULL };
 	const char *best = NULL;
 	const char *best_kind = NULL;

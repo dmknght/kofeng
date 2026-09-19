@@ -2113,6 +2113,14 @@ uint32_t draft_hash(struct kof_editor *e)
 	}
 	for (i = 0; i < e->dr.n_grp; i++) {
 		MIX(e->dr.grp[i].kind);
+		/* A shape matcher is about the draft's own shape, so what
+		 * changes about it is the percentage and the shape itself. */
+		if (e->dr.grp[i].kind == GRP_KIND_STRUCT) {
+			MIX(e->dr.grp[i].pct);
+			MIX((uint32_t)e->dr.shp.fsize);
+			MIX(e->dr.shp.n_region);
+			continue;
+		}
 		if (e->dr.grp[i].kind != GRP_KIND_BLOCK)
 			continue;
 		/*
@@ -2590,10 +2598,13 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 		 * two search for the same thing" is not about it - what it
 		 * cannot be is two matchers over one block, which the menu
 		 * already refuses at the point of choosing. */
-		if (e->dr.grp[i].kind == GRP_KIND_BLOCK)
+		/* Only a search matcher searches: a block matcher scores one
+		 * block and a shape matcher reads the object's geometry, and
+		 * neither can ask the same question as another. */
+		if (e->dr.grp[i].kind != GRP_KIND_STR)
 			continue;
 		for (j = i + 1u; j < e->dr.n_grp; j++)
-			if (e->dr.grp[j].kind != GRP_KIND_BLOCK &&
+			if (e->dr.grp[j].kind == GRP_KIND_STR &&
 			    grp_same_call(e, i, j))
 				return "Two matchers ask the same thing - "
 				       "remove one or change a threshold";
@@ -2610,7 +2621,7 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 		static char why[64];
 
 		for (i = 0; i < e->dr.n_grp; i++)
-			if (e->dr.grp[i].kind != GRP_KIND_BLOCK &&
+			if (e->dr.grp[i].kind == GRP_KIND_STR &&
 			    !grp_count(e, i)) {
 				snprintf(why, sizeof why,
 					 "matcher %u has no string", i + 1u);
@@ -3435,6 +3446,17 @@ int draft_uses_blocks(const struct kof_editor *e)
 	return 0;
 }
 
+/* Does any matcher ask about the object's shape? */
+static int draft_uses_shape(struct kof_editor *e)
+{
+	uint32_t g;
+
+	for (g = 0; g < e->dr.n_grp; g++)
+		if (e->dr.grp[g].kind == GRP_KIND_STRUCT)
+			return 1;
+	return 0;
+}
+
 void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g)
 {
 	const struct group *q = &e->dr.grp[g];
@@ -3451,6 +3473,16 @@ void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g)
 		if (q->blk < e->dr.n_blk)
 			fprintf(f, "kof_plague_score(blk_%08x) >= %uu",
 				e->dr.blk[q->blk].id, q->pct);
+		return;
+	}
+	/*
+	 * A SHAPE MATCHER IS ALSO ONE COMPARISON, and it reads no bytes at all
+	 * - the arithmetic is inlined from kofmod/kofoverlord.h over facts the
+	 * parse already has. The percentage is the worst-agreeing dimension, so
+	 * this one comparison is a conjunction over all of them.
+	 */
+	if (q->kind == GRP_KIND_STRUCT) {
+		fprintf(f, "kof_ovl_shape(ref_shape) >= %uu", q->pct);
 		return;
 	}
 
@@ -5176,6 +5208,8 @@ have_path:
 	fprintf(f, "\n#include <kofmod/kofsig.h>\n");
 	if (draft_uses_blocks(e))
 		fprintf(f, "#include <kofmod/kofplague.h>\n");
+	if (draft_uses_shape(e))
+		fprintf(f, "#include <kofmod/kofoverlord.h>\n");
 	fprintf(f, "\n");
 
 	/* The format the object actually is, so the host can rule the module
@@ -5426,6 +5460,36 @@ have_path:
 	 * exactly this, and every module in bases/ writes it this way - a
 	 * generated file that does not look like the hand written ones is a
 	 * file people hesitate to edit. */
+	/*
+	 * THE REFERENCE SHAPE, if any matcher asks about it.
+	 *
+	 * File scope and const, so it lands in the module's .rodata - which
+	 * module.ld keeps and .data, which it refuses, would not. Every field
+	 * was read off the sample named in the header above; nobody types one.
+	 */
+	if (draft_uses_shape(e)) {
+		const struct kof_ovl_shape *sh = &e->dr.shp;
+		uint32_t ri;
+
+		fprintf(f, "\n/* The shape of the sample above: what the "
+			"builder produced, not what it says. */\n");
+		fprintf(f, "static const struct kof_ovl_shape ref_shape = {\n");
+		fprintf(f, "\t.fsize    = %lluull,\n",
+			(unsigned long long)sh->fsize);
+		fprintf(f, "\t.ptypes   = 0x%08xu,\n", sh->ptypes);
+		fprintf(f, "\t.etype    = %uu,\n", sh->etype);
+		fprintf(f, "\t.cls      = %uu,\n", sh->cls);
+		fprintf(f, "\t.end      = %uu,\n", sh->end);
+		fprintf(f, "\t.n_region = %uu,\n", sh->n_region);
+		fprintf(f, "\t.region_fsz = {");
+		for (ri = 0; ri < sh->n_region && ri < KOF_OVL_MAX_REGIONS; ri++)
+			fprintf(f, "%s %lluull", ri ? "," : "",
+				(unsigned long long)sh->region_fsz[ri]);
+		fprintf(f, " },\n\t.region_x   = {");
+		for (ri = 0; ri < sh->n_region && ri < KOF_OVL_MAX_REGIONS; ri++)
+			fprintf(f, "%s %uu", ri ? "," : "", sh->region_x[ri]);
+		fprintf(f, " }\n};\n");
+	}
 	fprintf(f, "\nvoid kof_scan(const struct kof_obj_ctx *ctx)\n{\n");
 	/*
 	 * A maximum size is a line in the body, not a declaration.
@@ -5480,10 +5544,41 @@ have_path:
 		if (wrote)
 			fprintf(f, "\n");
 	}
-	for (k = 0; k < e->dr.n_cnd; k++) {
-		if (e->dr.cnd[k].parent >= 0)
-			continue;
-		k = emit_cond(f, e, k, 1);
+	/*
+	 * TOP LEVEL CONDITIONS, STRONGEST VERDICT FIRST.
+	 *
+	 * Every KOF_SCAN_INFECT and KOF_SCAN_SUSPECT reports AND RETURNS, so
+	 * the first condition that holds is the only one that ever speaks. In
+	 * source order that means a draft whose SUSPECT was written first can
+	 * never reach its own INFECT - the weaker answer silently wins, on
+	 * exactly the files where the stronger one was right.
+	 *
+	 * enum cnd_level already numbers them that way - INFECT 0, SUSPECT 1 -
+	 * so this is ascending order, and it is stable within a level so a
+	 * draft that has only one level is emitted exactly as it was built.
+	 *
+	 * A CONJOINED RUN IS STILL ONE if: emit_cond answers with the last
+	 * member it consumed, and those are marked off so the reorder cannot
+	 * emit a member of a run a second time on its own.
+	 */
+	{
+		unsigned char done[MAX_GROUP];
+		int lvl;
+
+		memset(done, 0, sizeof done);
+		for (lvl = 0; lvl < LV_COUNT; lvl++)
+			for (k = 0; k < e->dr.n_cnd; k++) {
+				uint32_t last;
+
+				if (e->dr.cnd[k].parent >= 0 || done[k])
+					continue;
+				if (e->dr.cnd[k].level != lvl)
+					continue;
+				last = emit_cond(f, e, k, 1);
+				for (; k <= last && k < e->dr.n_cnd; k++)
+					done[k] = 1;
+				k = last;
+			}
 	}
 	fprintf(f, "}\n");
 
