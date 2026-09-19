@@ -44,6 +44,8 @@
 #include "../core/kofmod/kofsym.h"
 #include "../kofparsers/kofformat.h"
 #include "../kofdisasm/xref.h"
+#include "../kofoverlord/koflib.h"
+#include "../core/kofmod/elf.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -379,6 +381,7 @@ static void plague_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	};
 	struct kof_range *ext = sc->ext_gather;
 	const struct kof_parser *fp;
+	struct kof_lib_result lib;
 	kof_buf b;
 	size_t mi;
 
@@ -389,6 +392,25 @@ static void plague_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	b = kof_src_buf(sc->cur_src);
 	if (!b.p)
 		return;
+
+	/*
+	 * THE STATIC LIBRARY OF THIS OBJECT IS NOT HASHED.
+	 *
+	 * A block cut from libc matches every program that linked the same libc,
+	 * so it identifies a toolchain and not a family - see kof_plague_object.
+	 * Found here rather than inside the matcher because it needs the parse,
+	 * and handed over rather than subtracted from the ranges below because
+	 * the ranges are also what the region anchor is expressed in: cutting
+	 * holes in them would make a rule's region mean something different for
+	 * an object that happens to have a library in it.
+	 *
+	 * `lib` lives for the rest of this call, which is exactly as long as the
+	 * feeds do.
+	 */
+	if (ctx->format == KOF_FMT_ELF && ctx->file_header) {
+		kof_lib_find(b, kof_elf(ctx), &lib);
+		kof_plague_object(&sc->plague, b.p, lib.span, lib.n);
+	}
 
 	/*
 	 * WHAT AN UNPACKER PRODUCED IS FED WHOLE, WITHOUT THE REGION ANCHOR.

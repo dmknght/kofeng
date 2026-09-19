@@ -26,6 +26,7 @@
 #define KOFENG_KOFPLAGUE_MATCH_H
 
 #include <stdint.h>
+#include <kofmod/kofsig.h>   /* struct kof_range, for the library spans */
 #include <kofmod/kofplague.h>
 
 /*
@@ -117,6 +118,17 @@ struct kof_plague_ctx {
 	 * leak from one object into the next.
 	 */
 	int       any_region;
+	/*
+	 * THE STATIC LIBRARY OF THIS OBJECT, which is not hashed.
+	 *
+	 * See kof_plague_object. Per object and cleared by kof_plague_begin,
+	 * for the same reason any_region is: a span list belongs to the bytes it
+	 * was computed from and carrying it into the next object would cut holes
+	 * in a file it says nothing about.
+	 */
+	const uint8_t      *obj_base;
+	const struct kof_range *lib;
+	uint32_t            n_lib;
 	uint32_t  gen;
 	uint32_t  n_block;
 };
@@ -146,6 +158,33 @@ void kof_plague_begin(struct kof_plague_ctx *c);
  * begin.
  */
 void kof_plague_any_region(struct kof_plague_ctx *c, int on);
+
+/*
+ * DO NOT HASH THE STATIC LIBRARY.
+ *
+ * Two unrelated statically linked binaries share their libc, and that shared
+ * half is most of the file - clean against clean reaches a median similarity of
+ * 0.25 and a 90th percentile of 0.99 through the toolchain alone. A block cut
+ * from those bytes matches every program the same linker ever built, so it is
+ * not a signature of anything; hashing them at scan time is the same mistake
+ * from the other end.
+ *
+ * `base` is the first byte of the OBJECT, so that a feed of a region can be
+ * placed back in the file - the spans koflib produces are file offsets, and the
+ * feeds are interior pointers. `lib` must outlive the object's feeds; it is not
+ * copied.
+ *
+ * Set after kof_plague_begin and before the feeds, and cleared by the next
+ * begin. Passing n_lib = 0 - or not calling this at all - hashes everything,
+ * which is the right behaviour for an object with no library to find and for a
+ * caller that has not looked.
+ *
+ * COSTS NOTHING ON THE HOT PATH. The test runs only for a window that already
+ * passed selection, which is one in a few thousand, so an object with no
+ * library in it pays a comparison against zero.
+ */
+void kof_plague_object(struct kof_plague_ctx *c, const uint8_t *base,
+		       const struct kof_range *lib, uint32_t n_lib);
 
 /*
  * Feed one region's bytes, hashed with one normalizer.

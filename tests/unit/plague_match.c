@@ -422,6 +422,72 @@ int main(void)
 		kof_plague_set_free(set);
 	}
 
+	/* ---- the static library is not hashed ---------------------------- */
+	/*
+	 * A block that lands inside the library must score nothing, because a
+	 * block cut from libc matches every program built against that libc and
+	 * is a signature of the toolchain rather than of anyone - see
+	 * kof_plague_object.
+	 *
+	 * The third case is the one that would be silent if it were wrong: a
+	 * span covering only PART of the block must still suppress it, because
+	 * the windows that straddle the edge are part library, and a hash of
+	 * part of the library is still a hash the toolchain produces.
+	 */
+	{
+		struct kof_range lib[1];
+
+		make_block(blk, 0x77aau);
+		n0 = harvest(blk, BLK, KOF_PLAGUE_RAW, pool,
+			     KOF_PLAGUE_MAX_HASH);
+		blocks[0].first_hash = 0; blocks[0].n_hash = n0;
+		blocks[0].scan_mask = RGN_A; blocks[0].norm = KOF_PLAGUE_RAW;
+		memset(blocks[0].reserved, 0, sizeof blocks[0].reserved);
+
+		set = kof_plague_build(blocks, 1, pool, n0);
+		if (!set || !kof_plague_ctx_init(&ctx, set)) return 1;
+
+		memset(hay, 0xA5, sizeof hay);
+		memcpy(hay + BLK, blk, BLK);
+
+		kof_plague_begin(&ctx);
+		kof_plague_feed(&ctx, RGN_A, KOF_PLAGUE_RAW, hay, sizeof hay);
+		ok_(kof_plague_pct(&ctx, 0u) == 100u,
+		    "with no library declared the block scores whole");
+
+		lib[0].off = BLK;
+		lib[0].len = BLK;
+		kof_plague_begin(&ctx);
+		kof_plague_object(&ctx, hay, lib, 1u);
+		kof_plague_feed(&ctx, RGN_A, KOF_PLAGUE_RAW, hay, sizeof hay);
+		ok_(kof_plague_pct(&ctx, 0u) == 0u,
+		    "a block inside the library scores nothing");
+
+		lib[0].off = BLK;
+		lib[0].len = BLK / 2u;
+		kof_plague_begin(&ctx);
+		kof_plague_object(&ctx, hay, lib, 1u);
+		kof_plague_feed(&ctx, RGN_A, KOF_PLAGUE_RAW, hay, sizeof hay);
+		ok_(kof_plague_pct(&ctx, 0u) < 100u,
+		    "a span over half the block suppresses at least that half");
+
+		lib[0].off = 0;
+		lib[0].len = BLK;          /* the padding, not the block */
+		kof_plague_begin(&ctx);
+		kof_plague_object(&ctx, hay, lib, 1u);
+		kof_plague_feed(&ctx, RGN_A, KOF_PLAGUE_RAW, hay, sizeof hay);
+		ok_(kof_plague_pct(&ctx, 0u) == 100u,
+		    "a span elsewhere leaves the block alone");
+
+		/* And it does not leak into the next object. */
+		kof_plague_begin(&ctx);
+		kof_plague_feed(&ctx, RGN_A, KOF_PLAGUE_RAW, hay, sizeof hay);
+		ok_(kof_plague_pct(&ctx, 0u) == 100u,
+		    "begin clears the library spans");
+		kof_plague_ctx_done(&ctx);
+		kof_plague_set_free(set);
+	}
+
 	/*
 	 * THE NAME OF A SET OF BLOCKS.
 	 *

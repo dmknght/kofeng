@@ -909,6 +909,8 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofscanners/objtree.c \
            libkofeng/kofscanners/objctx.c \
            libkofeng/kofscanners/objsrc.c \
+           libkofeng/kofoverlord/koflib.c \
+           libkofeng/kofoverlord/kofoverlord.c \
            libkofeng/core/kofhash.c
 
 LIB_OBJ := $(patsubst libkofeng/%.c,$(INT)/lib_%.o,$(LIB_SRC))

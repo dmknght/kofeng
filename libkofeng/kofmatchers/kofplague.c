@@ -271,6 +271,9 @@ void kof_plague_begin(struct kof_plague_ctx *c)
 		return;
 	c->gen++;
 	c->any_region = 0;
+	c->obj_base = 0;
+	c->lib = 0;
+	c->n_lib = 0;
 	/*
 	 * Wrapping would make a stale stamp look current. It takes four billion
 	 * objects on one thread to get here and the clear is a millisecond, so
@@ -289,6 +292,41 @@ void kof_plague_any_region(struct kof_plague_ctx *c, int on)
 {
 	if (c)
 		c->any_region = on != 0;
+}
+
+void kof_plague_object(struct kof_plague_ctx *c, const uint8_t *base,
+		       const struct kof_range *lib, uint32_t n_lib)
+{
+	if (!c)
+		return;
+	c->obj_base = base;
+	c->lib      = (base && n_lib) ? lib : 0;
+	c->n_lib    = (base && lib) ? n_lib : 0;
+}
+
+/*
+ * Does the window at file offset `off` touch the library?
+ *
+ * Linear over the spans, which number a few tens at most, and reached only by a
+ * window that already passed selection - so this runs on roughly one window in
+ * a few thousand and an object with no library never reaches it at all.
+ *
+ * ANY OVERLAP DISQUALIFIES, not majority overlap. A window straddling the
+ * boundary is part library, and a hash of part of the library is still a hash
+ * every binary built against that library can produce.
+ */
+static int pl_in_lib(const struct kof_plague_ctx *c, uint64_t off, uint64_t len)
+{
+	uint32_t i;
+
+	for (i = 0; i < c->n_lib; i++) {
+		uint64_t s = c->lib[i].off;
+		uint64_t e = s + c->lib[i].len;
+
+		if (off < e && s < off + len)
+			return 1;
+	}
+	return 0;
 }
 
 /*
@@ -457,9 +495,20 @@ void kof_plague_feed(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm
 		    !kof_plague_flat(p, at, norm)) {
 			uint32_t k = mixed & s->bm_mask;
 
+			/*
+			 * The library is not hashed - see kof_plague_object.
+			 * Tested here and not before the loop because the answer
+			 * is per window, and tested after selection because that
+			 * is what makes it free.
+			 */
+			if (c->n_lib && p >= c->obj_base &&
+			    pl_in_lib(c, (uint64_t)(p - c->obj_base) + at,
+				      KOF_PLAGUE_NG))
+				goto next;
 			if (s->bm[k >> 3] & (1u << (k & 7u)))
 				pl_credit(c, scan_mask, norm, mixed);
 		}
+next:
 		if (at + KOF_PLAGUE_NG >= n)
 			break;
 		h -= kof_plague_byte_of(at) * drop;
