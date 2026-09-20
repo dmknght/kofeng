@@ -13807,6 +13807,48 @@ static uint32_t plg_n_picked(const struct view *v)
  * so the choice is made beside the number that informs it.
  */
 /*
+ * WHAT THE SCORE CAN AND CANNOT SAY, at the size of this reference.
+ *
+ * NOT A DETECTION THRESHOLD, and it does not refuse anything. Both set
+ * measures answer `in * 100 / n_ref`, so one entry is worth 100/n_ref points -
+ * and when n_ref is small that is the whole resolution of the instrument. A
+ * reference of seven runs cannot express "sixty per cent alike": it can say
+ * 57 or 71 and nothing in between, and four generic entries clear any
+ * threshold under 58. The author is the one who decides whether that is worth
+ * using; what they should not have to do is work the arithmetic out from a
+ * percentage that looks continuous.
+ *
+ * MEASURED, and it is the thing that made this worth saying: a loader whose
+ * whole set was `__gmon_start__`, the two `_ITM_*CloneTable` symbols and a
+ * printable run of x86 epilogue bytes scored 100% against /usr/bin/giftext.
+ * The arithmetic was right and the set described the toolchain, not the
+ * author.
+ *
+ * Twenty is where one entry stops being worth five points. It is a legibility
+ * line, not a measurement - which is exactly why it warns and does not gate.
+ */
+static void sim_say_resolution(struct view *v, uint32_t what)
+{
+	uint32_t n;
+
+	if (what == SIM_IT_STRSET)
+		n = v->ed.dr.n_str;
+	else if (what == SIM_IT_BLKSET)
+		n = v->ed.dr.n_blkv;
+	else
+		return;             /* the shape's dimensions are fixed */
+	if (!n || n >= 20u)
+		return;
+	snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
+		 "%s: %u %s - one is worth %u%% of the score, so it has no "
+		 "finer answer than that", sim_it_word(what), n,
+		 what == SIM_IT_STRSET ? "runs" : "windows", 100u / n);
+	/* Not a fault: a small set is a fact about the object, and the author
+	 * may know it is the right one. */
+	v->ed.dr.warn_bad = 0;
+}
+
+/*
  * THE TICK CHOOSES THE MEASURE AND DOES NOTHING ELSE.
  *
  * It used to build a matcher and wire it into a condition, so selecting a
@@ -13836,6 +13878,7 @@ static void hit_sim_tick(struct view *v, uint32_t which)
 				return;
 		}
 		v->ed.dr.sim_use[what] = 1;
+		sim_say_resolution(v, what);
 	}
 	v->plg_scored = 0;
 }
