@@ -50,6 +50,8 @@
 #else
 #include <signal.h>
 #include "kofantarc.h"
+#include <poll.h>
+
 #include "afan.h"
 #include "apev.h"
 /* The POSIX half needs this too: kof_utf8_init is called on both paths and is
@@ -262,6 +264,22 @@ static int sensor_keep(struct sensor *s, struct kof_evt *out)
 	if (!img || !*img)
 		return 1;
 	/*
+	 * AND BEFORE DECIDING, HAND THE PATH OVER.
+	 *
+	 * This record is fanotify's, and fanotify got the path from the kernel
+	 * without racing anything - see kofa_pev_hint_image. The process
+	 * collector is about to need exactly that path for the start it will
+	 * report a moment from now, and its own source for it is /proc, which
+	 * a short-lived process empties before it can be read.
+	 *
+	 * So the answer travels from the collector that has it to the one that
+	 * does not, through the sensor, which is the only place that holds
+	 * both. It is done here rather than after the duplicate test because a
+	 * record that is ABOUT to be dropped as a duplicate is still the one
+	 * carrying the path.
+	 */
+	kofa_pev_hint_image(s->pev, out->pid, img);
+	/*
 	 * No clock is offered: the two collectors stamp from different
 	 * sources - fanotify records carry no time of their own here - so a
 	 * window computed across them would compare two unrelated scales. The
@@ -300,14 +318,55 @@ static int sensor_next(struct sensor *s, struct kof_evt *out, uint32_t wait_ms)
 	 */
 	if (!s->pev_api)
 		return kof_mon_next(s->api, out, wait_ms);
+	/*
+	 * BOTH STREAMS ARE DRAINED FIRST, AND THEN BOTH ARE WAITED ON.
+	 *
+	 * Blocking on one of them was the bug. This alternated which one got
+	 * the wait, so half the time it sat on the file stream for the whole
+	 * 200 ms while process records aged in a socket nobody was reading -
+	 * and the things worth catching do not last that long. Measured:
+	 * `whoami` exists for 0.5 ms and `ls` for 0.74 ms, and their path and
+	 * command line are read out of /proc, which is empty the moment they
+	 * are gone. Every short command therefore came back as
+	 * "[cmd unread: process gone]" whenever the filesystem was quiet.
+	 *
+	 * So nothing blocks inside a collector any more. Both are asked with
+	 * no wait, and if neither had anything the sensor waits on both
+	 * descriptors at once and asks again. A collector that cannot be
+	 * waited on - ETW, where records arrive on a callback thread - says so
+	 * with -1 and keeps the old arrangement.
+	 */
 	s->turn = !s->turn;
 	{
 		const struct kof_mon_api *a = s->turn ? s->pev_api : s->api;
 		const struct kof_mon_api *b = s->turn ? s->api : s->pev_api;
+		struct pollfd pf[2];
+		int nf = 0, fa, fb;
 
+		if (kof_mon_next(a, out, 0))
+			return sensor_keep(s, out);
 		if (kof_mon_next(b, out, 0))
 			return sensor_keep(s, out);
-		if (kof_mon_next(a, out, wait_ms))
+
+		fa = a->pollfd ? a->pollfd(a->self) : -1;
+		fb = b->pollfd ? b->pollfd(b->self) : -1;
+		if (fa < 0 || fb < 0) {
+			/* One of them cannot be waited on, so it has to be
+			 * given the wait directly - and the other is then
+			 * asked again straight after. */
+			if (kof_mon_next(fa < 0 ? a : b, out, wait_ms))
+				return sensor_keep(s, out);
+			if (kof_mon_next(fa < 0 ? b : a, out, 0))
+				return sensor_keep(s, out);
+			return 0;
+		}
+		pf[nf].fd = fa; pf[nf].events = POLLIN; pf[nf++].revents = 0;
+		pf[nf].fd = fb; pf[nf].events = POLLIN; pf[nf++].revents = 0;
+		if (poll(pf, (nfds_t)nf, (int)wait_ms) <= 0)
+			return 0;
+		if ((pf[0].revents & POLLIN) && kof_mon_next(a, out, 0))
+			return sensor_keep(s, out);
+		if ((pf[1].revents & POLLIN) && kof_mon_next(b, out, 0))
 			return sensor_keep(s, out);
 		return 0;
 	}
@@ -318,15 +377,35 @@ static int sensor_next(struct sensor *s, struct kof_evt *out, uint32_t wait_ms)
  * off the RAW record, because the Windows lookup is keyed on (pid,
  * create_time) and a pid alone names whoever holds it now. Linux has no such
  * map and returns the empty string, which kof_evt_render prints as unknown. */
-static const char *sensor_name_of(struct sensor *s)
+static const char *sensor_name_of(struct sensor *s, uint32_t pid)
 {
 #ifdef _WIN32
+	(void)pid;
 	return kofw_mon_name_of(s->mon, s->raw.pid,
 				s->raw.type == KOF_EVT_PROC_START ||
 				s->raw.type == KOF_EVT_PROC_STOP
 					? s->raw.create_time : 0);
 #else
-	(void)s;
+	/*
+	 * THE PROCESS COLLECTOR IS THE ONE THAT KNOWS, and it was never asked.
+	 *
+	 * This returned "" unconditionally, from when Linux had a single
+	 * collector and that collector watched files - a file session has no
+	 * idea what a pid is called. Every live line therefore printed "?" in
+	 * the name column, including the lines that carried a perfectly good
+	 * image two columns further along.
+	 *
+	 * The name comes out of the process collector's own table, which was
+	 * filled from the stream: fanotify's exec-open where there was one,
+	 * /proc only as the fallback.
+	 */
+	if (s->pev_api && s->pev_api->name_of) {
+		const char *n = s->pev_api->name_of(s->pev_api->self,
+						    pid, 0);
+
+		if (n && *n)
+			return kof_path_leaf(n);
+	}
 	return "";
 #endif
 }
@@ -749,7 +828,8 @@ int main(int argc, char **argv)
 		 * effect of somebody looking at them.
 		 */
 		if (do_print)
-			kof_evt_render(&ke, ev_secs, sensor_name_of(&sen),
+			kof_evt_render(&ke, ev_secs,
+				       sensor_name_of(&sen, ke.pid),
 				       stdout, &tally);
 		else
 			kof_evt_count(&ke, &tally);

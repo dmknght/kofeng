@@ -123,6 +123,11 @@ int main(void)
 		 * a dropped event is a gap. */
 		ok(!kofa_pev_is_own_image(NULL, 1, "/bin/true", 0),
 		   "the duplicate test refuses without a session");
+		/* And the hint is safe on one too - the sensor calls it
+		 * whenever fanotify reports an exec-open, including on a host
+		 * where the process collector never opened. */
+		kofa_pev_hint_image(NULL, 1, "/bin/true");
+		ok(1, "the image hint is safe without a session");
 		verbs_are_named();
 		if (p)
 			kofa_pev_close(p);
@@ -213,6 +218,45 @@ int main(void)
 		   "an exec-open of that image is recognised as the duplicate");
 		ok(stop_tid_ok,
 		   "a process stop names the leader task, not a thread");
+
+		/*
+		 * AND THE HINT FILLS A START THAT /proc COULD NOT.
+		 *
+		 * The path fanotify would have supplied is handed over for a
+		 * pid that has not started yet, and the next start on that pid
+		 * must carry it. This is the shape that answers the race an
+		 * obfuscated shell wins - see kofa_pev_hint_image.
+		 */
+		{
+			struct kof_evt e2;
+			int filled = 0, k;
+			pid_t k2;
+
+			kofa_pev_hint_image(p, 0xffffffu, "/bin/true");
+			k2 = fork();
+			if (k2 == 0) {
+				execl("/bin/true", "true", (char *)NULL);
+				execl("/usr/bin/true", "true", (char *)NULL);
+				_exit(127);
+			}
+			kofa_pev_hint_image(p, (uint32_t)k2, "/hinted/path");
+			for (k = 0; k < 200; k++) {
+				if (!kof_mon_next(kofa_pev_api(p), &e2, 50))
+					continue;
+				if (e2.verb == KOF_EVT_PROC_START &&
+				    e2.pid == (uint32_t)k2 &&
+				    e2.off_image != KOF_TEXT_NONE &&
+				    !strcmp(e2.text + e2.off_image,
+					    "/hinted/path"))
+					filled = 1;
+				if (e2.verb == KOF_EVT_PROC_STOP &&
+				    e2.pid == (uint32_t)k2)
+					break;
+			}
+			waitpid(k2, NULL, 0);
+			ok(filled,
+			   "a hinted path fills the start /proc would race");
+		}
 	}
 
 	/*

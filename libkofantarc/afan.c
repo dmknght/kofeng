@@ -142,7 +142,13 @@ static uint16_t verb_take(uint64_t *mask)
 		{ FAN_MODIFY | FAN_CLOSE_WRITE,   KOF_EVT_FILE_WRITE },
 		{ FAN_MOVED_FROM | FAN_MOVED_TO | FAN_MOVE_SELF,
 						  KOF_EVT_FILE_RENAME },
-		{ FAN_DELETE | FAN_DELETE_SELF,   KOF_EVT_FILE_DELETE }
+		{ FAN_DELETE | FAN_DELETE_SELF,   KOF_EVT_FILE_DELETE },
+		/*
+		 * LAST, because the order of this table is the order a thing
+		 * can only have happened in - see the note above - and
+		 * metadata is set on a file that already exists.
+		 */
+		{ FAN_ATTRIB,                     KOF_EVT_FILE_ATTRIB }
 	};
 	unsigned i;
 
@@ -290,7 +296,17 @@ static int to_evt(struct kofa_fan *f,
 	}
 
 	memset(out, 0, sizeof *out);
-	out->stamp = (uint64_t)time(NULL);
+	/*
+	 * IN THE UNIT THE FIELD IS DEFINED IN, which is not seconds.
+	 *
+	 * This was time(NULL) - whole seconds - against a field whose unit is
+	 * KOF_TICKS_PER_SEC, ten million ticks to the second. Every elapsed
+	 * time computed from a Linux record was therefore out by that factor,
+	 * and a live line printed 0.000 for everything because every stamp
+	 * taken inside one second was the same number. kof_evt_now is the one
+	 * clock all of this is meant to take - see the note beside it.
+	 */
+	out->stamp = kof_evt_now();
 	out->seq   = f->seq++;
 	out->verb  = verb;
 	out->os    = KOF_OS_LINUX;
@@ -329,6 +345,32 @@ static int to_evt(struct kofa_fan *f,
 		out->off_image  = KOF_TEXT_NONE;
 		out->off_cmdline = KOF_TEXT_NONE;
 		out->loc = kof_classify(p, &out->attack);
+		/*
+		 * WHAT THE METADATA EVENT DOES NOT SAY IS WHICH FIELD MOVED.
+		 *
+		 * FAN_ATTRIB reports that something about the inode changed -
+		 * mode, owner, link count, an extended attribute - and never
+		 * which. The one that matters for the chain this verb exists
+		 * for is the execute bit, so the mode is read back and written
+		 * into the record where a rule can see it.
+		 *
+		 * IT IS A RACE AND IT SAYS SO. By the time the event is read
+		 * the file may be gone, and then the record carries the path
+		 * and no mode rather than a mode somebody made up.
+		 */
+		if (verb == KOF_EVT_FILE_ATTRIB) {
+			struct stat st;
+			char mode[32];
+
+			if (p && *p && stat(p, &st) == 0) {
+				snprintf(mode, sizeof mode, "mode=%04o%s",
+					 (unsigned)(st.st_mode & 07777),
+					 (st.st_mode & 0111) ? " +x" : "");
+				out->off_image = kof_evt_text_put(out, mode);
+			} else {
+				out->miss |= KOF_F_OBJECT;
+			}
+		}
 	}
 	return 1;
 }
@@ -510,6 +552,14 @@ static void fan_print_extra(void *self, FILE *out)
 			"            do itself - every record says so in miss.\n");
 }
 
+/* The session's own descriptor - see kof_mon_api.pollfd. */
+static int fan_pollfd(void *self)
+{
+	struct kofa_fan *f = (struct kofa_fan *)self;
+
+	return f ? f->fd : -1;
+}
+
 static void fan_close_api(void *self)
 {
 	kofa_fan_close((struct kofa_fan *)self);
@@ -546,9 +596,23 @@ struct kofa_fan *kofa_fan_open(const struct kofa_fan_option *opt, int *err)
 {
 	struct kofa_fan *f;
 	struct kofa_fan_option o;
+	/*
+	 * AND FAN_ATTRIB, which closes the middle of the dropper chain: write
+	 * the payload, make it executable, run it. The first and the third
+	 * were reported and the second was not - see KOF_EVT_FILE_ATTRIB.
+	 *
+	 * ITS VOLUME IS NOT MEASURED HERE. FAN_ATTRIB needs a mount or
+	 * filesystem mark to arrive at all, which needs CAP_SYS_ADMIN, so an
+	 * unprivileged run - the only kind a CI or this sandbox can do -
+	 * cannot see one. A link count changing raises it too, and how often
+	 * that happens on a working machine is the number nobody has yet.
+	 * Whoever runs this privileged should read the tally before trusting
+	 * it in a rule.
+	 */
 	uint64_t full_mask = FAN_CREATE | FAN_DELETE | FAN_DELETE_SELF |
 			     FAN_MOVED_FROM | FAN_MOVED_TO | FAN_MOVE_SELF |
-			     FAN_CLOSE_WRITE | FAN_OPEN_EXEC | FAN_ONDIR;
+			     FAN_CLOSE_WRITE | FAN_OPEN_EXEC | FAN_ATTRIB |
+			     FAN_ONDIR;
 	uint64_t dirent_mask = FAN_CREATE | FAN_DELETE | FAN_MOVED_FROM |
 			       FAN_MOVED_TO | FAN_ONDIR;
 	uint32_t i;
@@ -627,6 +691,7 @@ struct kofa_fan *kofa_fan_open(const struct kofa_fan_option *opt, int *err)
 	f->api.health      = fan_health;
 	f->api.name_of     = NULL;   /* fanotify names files, not processes */
 	f->api.print_extra = fan_print_extra;
+	f->api.pollfd      = fan_pollfd;
 	f->api.close       = fan_close_api;
 
 	if (err) *err = KOFA_OK;

@@ -437,6 +437,29 @@ enum kof_evt_verb {
 	 */
 	KOF_EVT_PROC_CRASH = 27,
 
+	/*
+	 * A FILE'S METADATA CHANGED - its mode, its owner, its extended
+	 * attributes, its link count.
+	 *
+	 * THE MIDDLE OF THE CHAIN, and it was the one link nothing reported.
+	 * The Linux dropper shape is three steps - write a payload, make it
+	 * executable, run it - and this collector saw the first and the third
+	 * while the second was invisible. Each of the other two alone is
+	 * ordinary; a write followed by a chmod +x followed by an exec of the
+	 * same path is not, and a chain cannot be joined through a link that
+	 * raises no record.
+	 *
+	 * WHAT CHANGED IS NOT IN THE EVENT. fanotify's FAN_ATTRIB says that
+	 * metadata moved and not which field, so the collector reads the mode
+	 * back and puts it in the record's text - see afan.c. That read is a
+	 * race it can lose, and losing it is reported rather than guessed.
+	 *
+	 * Windows has the counterpart - a DACL or attribute set through
+	 * Kernel-File's SetInformation - so this is not a Linux-only verb the
+	 * way PROC_SESSION is; nothing fills it there yet.
+	 */
+	KOF_EVT_FILE_ATTRIB = 28,
+
 	KOF_EVT_TYPE_COUNT
 };
 

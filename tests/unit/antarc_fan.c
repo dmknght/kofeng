@@ -163,6 +163,37 @@ int main(void)
 		   "create, rename and delete each map to their own verb");
 	}
 
+	/*
+	 * THE MIDDLE OF THE DROPPER CHAIN HAS A VERB, and it has a name.
+	 *
+	 * FAN_ATTRIB only arrives on a mount or filesystem mark, which needs
+	 * CAP_SYS_ADMIN, so an unprivileged run cannot raise one - the chmod
+	 * below produces nothing here and the test says so rather than
+	 * pretending to have checked. What it CAN check is that the verb
+	 * exists, is named, and is filed as a file event: a verb the neutral
+	 * vocabulary cannot name prints as a number in every log, and one
+	 * filed under the wrong kind hands a reader the wrong half of the
+	 * union.
+	 */
+	{
+		int fd;
+
+		ok(*kof_evt_verb_name(KOF_EVT_FILE_ATTRIB) &&
+		   strcmp(kof_evt_verb_name(KOF_EVT_FILE_ATTRIB), "?"),
+		   "the attribute verb has a name");
+		ok(kof_evt_kind_of(KOF_EVT_FILE_ATTRIB) ==
+		   kof_evt_kind_of(KOF_EVT_FILE_WRITE),
+		   "and is the same kind of record as a write");
+		fd = open(DIR "/chmod.txt", O_CREAT | O_WRONLY, 0600);
+		if (fd >= 0) {
+			close(fd);
+			(void)chmod(DIR "/chmod.txt", 0755);
+			(void)unlink(DIR "/chmod.txt");
+		}
+		printf("       chmod raises no event unprivileged - "
+		       "FAN_ATTRIB needs a mount mark\n");
+	}
+
 	/* A session reports which mode it got rather than pretending. */
 	{
 		const char *dirs[] = { DIR, NULL };

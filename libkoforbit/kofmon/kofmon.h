@@ -113,6 +113,30 @@ struct kof_mon_api {
 	 */
 	void (*print_extra)(void *self, FILE *out);
 
+	/*
+	 * A DESCRIPTOR THAT BECOMES READABLE WHEN next() WOULD ANSWER, or -1
+	 * when this collector cannot be waited on that way. May be NULL.
+	 *
+	 * WHY A SENSOR NEEDS THIS AND A SINGLE COLLECTOR DOES NOT. One
+	 * collector can be given the whole wait: it blocks inside next() and
+	 * nothing else is waiting. Two cannot. A sensor holding two of these
+	 * has to block on SOMETHING, and blocking on one leaves the other
+	 * unread for as long as the wait lasts.
+	 *
+	 * That is not a theoretical cost. Measured on Linux: the sensor waits
+	 * 200 ms, and a short command - `whoami` lives 0.5 ms, `ls` 0.74 ms -
+	 * is gone four hundred times over before the stream that reported it
+	 * is looked at. Its path and command line are read from /proc, and by
+	 * then there is no /proc entry left to read.
+	 *
+	 * So a collector that CAN be waited on says which descriptor, the
+	 * sensor waits on all of them at once, and reads whichever answered.
+	 * One that cannot - ETW hands records to a callback thread, there is
+	 * nothing to poll - returns -1 and the caller falls back to giving it
+	 * the wait directly.
+	 */
+	int (*pollfd)(void *self);
+
 	/* Release the collector. */
 	void (*close)(void *self);
 };

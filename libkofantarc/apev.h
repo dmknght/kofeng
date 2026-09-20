@@ -146,6 +146,32 @@ const struct kof_mon_api *kofa_pev_api(struct kofa_pev *);
 int kofa_pev_is_own_image(struct kofa_pev *, uint32_t pid, const char *path,
 			  uint64_t now_ns);
 
+/*
+ * THE PATH FROM SOMEWHERE THAT DID NOT HAVE TO RACE FOR IT.
+ *
+ * The connector names a pid and nothing else, so this collector reads the
+ * image out of /proc - and a process that has already exited has no /proc
+ * entry left. Observed on a real host: an obfuscated shell running `whoami`
+ * produced three starts and none of them could be named.
+ *
+ * fanotify does not have that problem. FAN_OPEN_EXEC fires when the kernel
+ * opens a binary in order to execute it, it carries the path as a file handle
+ * the kernel resolves, and it arrives BEFORE the exec completes - so a sensor
+ * running both collectors already holds the answer this one is racing for.
+ *
+ * It is a HINT and not an assertion: the pid is recorded against the path and
+ * used for the next start on that pid, and a start that already has an image
+ * keeps it. The caller is the sensor, because the sensor is what has both
+ * streams - see the note on kofa_pev_is_own_image, which the same table
+ * answers.
+ *
+ * WHAT THIS CANNOT FIX IS THE COMMAND LINE. fanotify reports the file, not the
+ * arguments; argv exists only in the exiting process's own memory and in
+ * /proc, so it stays a race that only audit or eBPF can take out. A record
+ * that lost it says so - see KOF_EF_CMDLINE_RACED.
+ */
+void kofa_pev_hint_image(struct kofa_pev *, uint32_t pid, const char *path);
+
 void kofa_pev_close(struct kofa_pev *);
 
 #endif /* KOFANTARC_APEV_H */

@@ -391,6 +391,7 @@ const char *kof_evt_verb_name(uint16_t verb)
 	case KOF_EVT_FILE_DELETE:   return "FileDel";
 	case KOF_EVT_FILE_RENAME:   return "FileRen";
 	case KOF_EVT_FILE_WRITE:    return "FileWrite";
+	case KOF_EVT_FILE_ATTRIB:   return "FileAttrib";
 	case KOF_EVT_REG_CREATE:    return "RegNew";
 	case KOF_EVT_REG_SET_VALUE: return "RegSet";
 	case KOF_EVT_REG_DELETE:    return "RegDel";
@@ -520,6 +521,7 @@ enum kof_evt_kind kof_evt_kind_of(uint16_t verb)
 	case KOF_EVT_FILE_DELETE:
 	case KOF_EVT_FILE_RENAME:
 	case KOF_EVT_FILE_WRITE:
+	case KOF_EVT_FILE_ATTRIB:
 		return KOF_EK_FILE;
 
 	/*

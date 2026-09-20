@@ -128,6 +128,10 @@ void kof_evt_count(const struct kof_evt *e, struct kof_evt_tally *t)
 	case KOF_EVT_FILE_DELETE:    t->file_del++; break;
 	case KOF_EVT_FILE_RENAME:    t->file_ren++; break;
 	case KOF_EVT_FILE_WRITE:     t->file_wr++;  break;
+	/* Counted with the writes: it is the same kind of thing happening to
+	 * the same object, and a tally line of its own would be a column that
+	 * is zero on every Windows run. */
+	case KOF_EVT_FILE_ATTRIB:    t->file_wr++;  break;
 	case KOF_EVT_REG_CREATE:
 	case KOF_EVT_REG_SET_VALUE:
 	case KOF_EVT_REG_DELETE:     t->reg++;      break;

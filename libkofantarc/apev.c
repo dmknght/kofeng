@@ -54,7 +54,17 @@
  * recycled entry costs a column or one unpaired record - never a verdict.
  * What it must not do is grow without bound inside a sensor running for weeks.
  */
-#define APEV_PTAB     4096u
+/*
+ * ONE THOUSAND AND TWENTY-FOUR, not the four thousand the Windows side keeps.
+ *
+ * Each entry now holds the image and the command line - see the note on the
+ * prefetch - so an entry is about 800 bytes where kofgrille's is a handful.
+ * Four thousand of these would be three megabytes of mostly-empty table inside
+ * a sensor that is supposed to be light. A thousand live processes is past
+ * what a busy build host holds at once, and going over costs a recycled entry
+ * which is counted and costs a name, never a verdict.
+ */
+#define APEV_PTAB     1024u
 
 /*
  * HOW LONG AN EXEC IS STILL "THE PROCESS STARTING", in nanoseconds.
@@ -72,7 +82,21 @@ struct apev_ent {
 	uint32_t pid;          /* 0 when free */
 	uint32_t ppid;
 	uint64_t started;      /* the connector's own stamp for the exec */
+	/*
+	 * AND THE STAMP OF THE LAST EXEC REPORTED FOR IT.
+	 *
+	 * Observed on a real host: one `bash -i` produced two identical
+	 * ProcStart records - same pid, same parent, same command line. Two
+	 * execs of one program is a real thing, a shell replacing itself is
+	 * how several techniques work, so the second cannot simply be
+	 * dropped. What CAN be dropped is the same record arriving twice, and
+	 * the connector's own nanosecond stamp is what tells them apart: two
+	 * execs happen at two times.
+	 */
+	uint64_t last_exec_ns;
 	uint8_t  running;      /* a PROC_START was emitted for this pid */
+	uint8_t  got_exe;      /* the prefetch resolved the image */
+	uint8_t  got_cmd;      /* ... and the command line */
 	/*
 	 * As wide as the path read_exe produces, so what the table remembers
 	 * is what the record carried rather than a shortened copy of it -
@@ -80,6 +104,14 @@ struct apev_ent {
 	 * strings and never match.
 	 */
 	char     image[512];
+	/*
+	 * AND THE COMMAND LINE, READ AT THE SAME INSTANT.
+	 *
+	 * Not 540 bytes wide, which is all a record's text arena holds for
+	 * both of these together - see KOF_EVT_SIZE. What is kept is what can
+	 * be carried.
+	 */
+	char     cmd[256];
 };
 
 struct kofa_pev {
@@ -102,6 +134,7 @@ struct kofa_pev {
 	uint64_t produced;    /* kof_evt records emitted */
 	uint64_t dropped;     /* ENOBUFS: the socket buffer overran */
 	uint64_t no_proc;     /* events whose /proc entry was already gone */
+	uint64_t repeats;     /* the same exec delivered more than once */
 
 	struct kof_mon_api api;
 };
@@ -219,6 +252,58 @@ static int read_cmdline(uint32_t pid, char *out, size_t cap)
 	while (n > 0 && (out[n - 1] == ' ' || !out[n - 1]))
 		out[--n] = '\0';
 	return out[0] != '\0';
+}
+
+/*
+ * ============================================================
+ * READ /proc THE INSTANT THE KERNEL HANDS THE RECORD OVER
+ * ============================================================
+ *
+ * The connector names a pid and nothing else - no path, no command line - so
+ * both are read from /proc, and a process that has already exited has no /proc
+ * entry left. That race was lost on EVERY short-lived process, which is the
+ * kind worth catching. Observed on a real host: an obfuscated shell running
+ * `whoami` produced three ProcStart records and not one of them carried an
+ * image, so the live line read
+ *
+ *     ProcStart pid=93285  ?   ppid=89215
+ *
+ * - the exec was seen, and could not be named.
+ *
+ * THE LATENCY WAS THE COLLECTOR'S OWN. One read() brings back many records and
+ * they were resolved one at a time, as the CONSUMER asked for them - and this
+ * consumer scans files between calls. The fiftieth record in a buffer was
+ * being looked up long after its process was gone.
+ *
+ * So the buffer is walked once on arrival and every exec in it is resolved
+ * then, before anything else is allowed to happen. It does not win the race
+ * outright - nothing reading /proc can - but it removes the part of the delay
+ * that was ours rather than the machine's.
+ */
+static void prefetch(struct kofa_pev *p, const char *buf, ssize_t n)
+{
+	const struct nlmsghdr *h = (const struct nlmsghdr *)buf;
+
+	while (NLMSG_OK(h, (size_t)n)) {
+		const struct cn_msg *cn = (const struct cn_msg *)NLMSG_DATA(h);
+		const struct proc_event *ev =
+			(const struct proc_event *)cn->data;
+
+		if (h->nlmsg_type == NLMSG_DONE &&
+		    cn->id.idx == CN_IDX_PROC &&
+		    ev->what == PROC_EVENT_EXEC) {
+			uint32_t tgid = (uint32_t)ev->event_data.exec.process_tgid;
+			struct apev_ent *e = ent_get(p, tgid);
+
+			if (e) {
+				e->got_exe = (uint8_t)read_exe(tgid, e->image,
+							       sizeof e->image);
+				e->got_cmd = (uint8_t)read_cmdline(tgid, e->cmd,
+								   sizeof e->cmd);
+			}
+		}
+		h = NLMSG_NEXT(h, n);
+	}
 }
 
 /* ------------------------------------------------------------ the record */
@@ -354,6 +439,7 @@ static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 {
 	uint32_t pid = ev_tgid(ev);
 	uint32_t tid = ev_tid(ev);
+	uint32_t ppid = 0;
 	/* A task that is not its own group leader is a THREAD of the process
 	 * that leads it - see the note on ev_tgid. */
 	int is_thread = tid && tid != pid;
@@ -387,7 +473,7 @@ static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 			if (!p->trace_self && pid == p->self_pid)
 				return 0;
 			memset(out, 0, sizeof *out);
-			out->stamp  = (uint64_t)time(NULL);
+			out->stamp  = kof_evt_now();
 			out->seq    = p->seq++;
 			out->verb   = KOF_EVT_THREAD_START;
 			out->os     = KOF_OS_LINUX;
@@ -427,7 +513,19 @@ static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 	if (is_thread && verb == KOF_EVT_PROC_STOP)
 		verb = KOF_EVT_THREAD_STOP;
 
-	if (verb == KOF_EVT_PROC_STOP) {
+	if (verb == KOF_EVT_PROC_START) {
+		/*
+		 * THE SAME RECORD TWICE IS NOT TWO EXECS - see last_exec_ns.
+		 * A re-exec carries a later stamp and is reported; a repeat of
+		 * the one already reported carries the same one and is not.
+		 */
+		e = ent_find(p, pid);
+		if (e && e->running && ev->timestamp_ns &&
+		    e->last_exec_ns == ev->timestamp_ns) {
+			p->repeats++;
+			return 0;
+		}
+	} else if (verb == KOF_EVT_PROC_STOP) {
 		/*
 		 * Only for a process this session called started - see the
 		 * note on the table. The entry goes either way: the process is
@@ -451,7 +549,7 @@ static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 		return 0;
 
 	memset(out, 0, sizeof *out);
-	out->stamp  = (uint64_t)time(NULL);
+	out->stamp  = kof_evt_now();
 	out->seq    = p->seq++;
 	out->verb   = verb;
 	out->os     = KOF_OS_LINUX;
@@ -519,6 +617,18 @@ static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 		 */
 		out->actor_pid = pid;
 		/*
+		 * THE PARENT FROM THE RECORD ITSELF, not from the table.
+		 *
+		 * An exit record names its parent, so the answer is IN THE
+		 * STREAM and does not have to be remembered. That also makes
+		 * it right in the two cases the table is wrong about: a
+		 * process whose entry was recycled, and one that was
+		 * reparented after its own parent died. The table is the
+		 * fallback now rather than the source.
+		 */
+		if (ev->event_data.exit.parent_tgid)
+			ppid = (uint32_t)ev->event_data.exit.parent_tgid;
+		/*
 		 * HOW IT ENDED, through the union's own setter - see the note
 		 * on kof_evt's overlapping members, which says never to reach
 		 * into it directly.
@@ -531,24 +641,37 @@ static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 		 */
 		{
 			struct kof_evt_proc *pr = kof_evt_set_proc(out);
+			uint32_t st = (uint32_t)ev->event_data.exit.exit_code;
 
+			/*
+			 * exit_signal IS NOT HOW IT DIED. It is the signal the
+			 * task sends its PARENT when it ends, which is SIGCHLD
+			 * for everything an ordinary program does - so reading
+			 * it as the cause of death reported 17 for every clean
+			 * exit on a real host, which is what a reader saw:
+			 *
+			 *     ProcStop  pid=93288  ?  exit=17
+			 *
+			 * The cause is in exit_code, which is a wait status:
+			 * the low seven bits are the signal that killed it and
+			 * zero when nothing did, and the next eight are what
+			 * the program returned.
+			 */
 			if (pr)
-				pr->exit_code = ev->event_data.exit.exit_signal
-					? (uint32_t)ev->event_data.exit.exit_signal
-					: (uint32_t)ev->event_data.exit.exit_code;
+				pr->exit_code = (st & 0x7fu) ? (st & 0x7fu)
+							     : ((st >> 8) & 0xffu);
 		}
 		e = ent_find(p, pid);
-		if (e) {
-			if (e->ppid)
-				out->ppid = e->ppid;
-			else
-				out->miss |= KOF_F_PPID;
-			if (e->image[0])
-				out->off_image = kof_evt_text_put(out,
-								  e->image);
-			else
-				out->miss |= KOF_F_IMAGE;
-		}
+		if (!ppid && e)
+			ppid = e->ppid;
+		if (ppid)
+			out->ppid = ppid;
+		else
+			out->miss |= KOF_F_PPID;
+		if (e && e->image[0])
+			out->off_image = kof_evt_text_put(out, e->image);
+		else
+			out->miss |= KOF_F_IMAGE;
 		ent_drop(p, pid);
 		p->produced++;
 		return 1;
@@ -556,13 +679,12 @@ static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 
 	/* ---- a start ---- */
 	{
-		char exe[512], cmd[1024];
-
 		e = ent_get(p, pid);
 		if (!e)
 			return 0;
 		e->running = 1;
 		e->started = ev->timestamp_ns;
+		e->last_exec_ns = ev->timestamp_ns;
 		/*
 		 * THE PARENT, FROM THE FORK THIS SESSION ALREADY SAW. Falling
 		 * back to /proc is for a process that forked before the
@@ -607,22 +729,61 @@ static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 			out->miss |= KOF_F_PPID;
 		}
 
-		if (read_exe(pid, exe, sizeof exe)) {
-			out->off_image  = kof_evt_text_put(out, exe);
+		/*
+		 * WHAT THE PREFETCH GOT, and one more attempt when it got
+		 * nothing: a process that outlives the read is still there,
+		 * and the second look costs one readlink on the rare path.
+		 */
+		if (!e->got_exe)
+			e->got_exe = (uint8_t)read_exe(pid, e->image,
+						       sizeof e->image);
+		if (!e->got_cmd)
+			e->got_cmd = (uint8_t)read_cmdline(pid, e->cmd,
+							   sizeof e->cmd);
+		if (e->got_exe) {
+			out->off_image  = kof_evt_text_put(out, e->image);
 			out->off_object = out->off_image;
-			out->loc = kof_classify(exe, &out->attack);
-			snprintf(e->image, sizeof e->image, "%s", exe);
+			out->loc = kof_classify(e->image, &out->attack);
 		} else {
 			out->miss |= KOF_F_IMAGE;
+			e->image[0] = '\0';
 			p->no_proc++;
 		}
-		if (read_cmdline(pid, cmd, sizeof cmd))
-			out->off_cmdline = kof_evt_text_put(out, cmd);
-		else
+		if (e->got_cmd) {
+			out->off_cmdline = kof_evt_text_put(out, e->cmd);
+		} else {
 			out->miss |= KOF_F_CMDLINE;
+			/*
+			 * AND WHICH KIND OF ABSENCE IT WAS. "it had none" and
+			 * "we lost the race" are different facts - see
+			 * KOF_EF_CMDLINE_RACED, which the live line already
+			 * knows how to say and which nothing was setting.
+			 */
+			out->flags |= KOF_EF_CMDLINE_RACED;
+		}
 	}
 	p->produced++;
 	return 1;
+}
+
+void kofa_pev_hint_image(struct kofa_pev *p, uint32_t pid, const char *path)
+{
+	struct apev_ent *e;
+
+	if (!p || !pid || !path || !*path)
+		return;
+	e = ent_get(p, pid);
+	if (!e)
+		return;
+	/*
+	 * A START THAT ALREADY HAS ONE KEEPS IT. The hint is early - the open
+	 * precedes the exec - so this normally fills an empty entry; arriving
+	 * late it must not overwrite what the record actually carried.
+	 */
+	if (e->got_exe && e->running)
+		return;
+	snprintf(e->image, sizeof e->image, "%s", path);
+	e->got_exe = 1;
 }
 
 /*
@@ -742,6 +903,8 @@ static const struct proc_event *stream_next(struct kofa_pev *p,
 					p->dropped++;
 				return NULL;
 			}
+			/* Before anything else looks at it - see prefetch. */
+			prefetch(p, p->rb.buf, n);
 			p->have = n;
 			p->at   = p->rb.buf;
 		}
@@ -829,6 +992,17 @@ static void pev_print_extra(void *self, FILE *out)
 	if (p->recycled)
 		fprintf(out, "  %llu process table entry(ies) recycled\n",
 			(unsigned long long)p->recycled);
+	if (p->repeats)
+		fprintf(out, "  %llu exec record(s) arrived twice\n",
+			(unsigned long long)p->repeats);
+}
+
+/* The session's own descriptor - see kof_mon_api.pollfd. */
+static int pev_pollfd(void *self)
+{
+	struct kofa_pev *p = (struct kofa_pev *)self;
+
+	return p ? p->fd : -1;
 }
 
 static void pev_close(void *self)
@@ -946,6 +1120,7 @@ struct kofa_pev *kofa_pev_open(const struct kofa_pev_option *opt, int *err)
 	p->api.health      = pev_health;
 	p->api.name_of     = pev_name_of;
 	p->api.print_extra = pev_print_extra;
+	p->api.pollfd      = pev_pollfd;
 	p->api.close       = pev_close;
 	return p;
 }
