@@ -32,6 +32,30 @@ struct kofa_fan {
 
 	char     watch[AFAN_MAX_WATCH][256];
 	int      watch_fd[AFAN_MAX_WATCH];
+	/*
+	 * AND THE KERNEL'S OWN NAME FOR EACH ONE, taken when it was marked.
+	 *
+	 * This is what lets the degraded mode say WHICH directory an event
+	 * came from. The event carries a handle for its parent directory and
+	 * nothing else usable - resolving that handle to a path needs
+	 * CAP_DAC_READ_SEARCH, which is the whole reason the mode is degraded.
+	 * But it does not have to be RESOLVED to be RECOGNISED: name_to_handle_at
+	 * needs no privilege, so a handle taken here can be compared byte for
+	 * byte against the one the event reports.
+	 *
+	 * Measured on this kernel, unprivileged: two temporary directories
+	 * marked, a file created in each, and the handle of each event matched
+	 * the handle of the directory it was actually made in.
+	 *
+	 * `ok` rather than assuming it worked: a filesystem that does not
+	 * support handles - and some do not - returns EOPNOTSUPP here, and a
+	 * zero-length handle would compare equal to every other failed one.
+	 */
+	struct {
+		struct file_handle h;
+		unsigned char      space[MAX_HANDLE_SZ];
+	} watch_h[AFAN_MAX_WATCH];
+	uint8_t  watch_h_ok[AFAN_MAX_WATCH];
 	uint32_t n_watch;
 
 	/*
@@ -137,25 +161,6 @@ static uint16_t verb_take(uint64_t *mask)
  * refused rather than cut - a truncated path still looks like a path, and a
  * rule would match it and be wrong without knowing why.
  */
-static uint16_t text_put(struct kof_evt *e, const char *s)
-{
-	size_t n, room = sizeof e->text;
-
-	if (!s || !*s)
-		return KOF_TEXT_NONE;
-	n = strlen(s) + 1u;
-	if ((size_t)e->text_len + n > room) {
-		e->flags |= KOF_EF_TRUNCATED;
-		return KOF_TEXT_NONE;
-	}
-	memcpy(e->text + e->text_len, s, n);
-	{
-		uint16_t off = e->text_len;
-
-		e->text_len = (uint16_t)(e->text_len + n);
-		return off;
-	}
-}
 
 /*
  * The path an event names.
@@ -174,7 +179,7 @@ static uint16_t text_put(struct kof_evt *e, const char *s)
 static const char *event_path(struct kofa_fan *f,
 			      const struct fanotify_event_metadata *m,
 			      const char *name, struct file_handle *fh,
-			      int mount_fd)
+			      int mount_fd, const struct file_handle *dfh)
 {
 	f->path[0] = '\0';
 
@@ -203,15 +208,47 @@ static const char *event_path(struct kofa_fan *f,
 	}
 
 	/*
-	 * No handle to resolve: the directory is one we marked. With more than
-	 * one watch this cannot say WHICH, so it names the first - and that is
-	 * a real limit of the degraded mode rather than something to hide. A
-	 * session that needs the answer runs privileged and gets the handle.
+	 * THE HANDLE COULD NOT BE RESOLVED, SO IT IS RECOGNISED INSTEAD.
+	 *
+	 * The directory is one this session marked, and the event says which
+	 * by carrying its handle - see kofa_fan.watch_h. Comparing that
+	 * against the handles taken at mark time costs no privilege and gives
+	 * the right parent.
+	 *
+	 * It used to name watch[0] whatever the event said, which with more
+	 * than one watch was not a reduced answer but a WRONG one: half the
+	 * records carried a path the file was never at, and kof_classify then
+	 * classified a directory nothing had happened in. A missing path is a
+	 * gap somebody can see; an invented one is a lie the pipeline cannot
+	 * tell from a fact.
 	 */
-	if (f->n_watch && name && *name)
-		snprintf(f->path, sizeof f->path, "%s/%s", f->watch[0], name);
-	else if (name && *name)
-		snprintf(f->path, sizeof f->path, "%s", name);
+	if (name && *name) {
+		uint32_t i, hit = f->n_watch;
+
+		if (dfh && dfh->handle_bytes)
+			for (i = 0; i < f->n_watch; i++)
+				if (f->watch_h_ok[i] &&
+				    f->watch_h[i].h.handle_bytes ==
+					    dfh->handle_bytes &&
+				    !memcmp(f->watch_h[i].h.f_handle,
+					    dfh->f_handle,
+					    dfh->handle_bytes)) {
+					hit = i;
+					break;
+				}
+		/*
+		 * NOTHING MATCHED. One watch means there is only one answer it
+		 * could be; several means there is no answer, and the name
+		 * alone is reported rather than a path under a guess.
+		 */
+		if (hit >= f->n_watch && f->n_watch == 1u)
+			hit = 0;
+		if (hit < f->n_watch)
+			snprintf(f->path, sizeof f->path, "%s/%s",
+				 f->watch[hit], name);
+		else
+			snprintf(f->path, sizeof f->path, "%s", name);
+	}
 
 	(void)m;
 	return f->path;
@@ -275,12 +312,20 @@ static int to_evt(struct kofa_fan *f,
 	}
 
 	{
+		/*
+		 * `fh` is passed twice on purpose, and they are two different
+		 * questions. As the fourth argument it is a handle to RESOLVE,
+		 * which only a privileged session can do; as the fifth it is a
+		 * handle to RECOGNISE against the ones taken at mark time,
+		 * which anybody can - see kofa_fan.watch_h.
+		 */
 		const char *p = event_path(f, m, name,
 					   (f->mode == KOFA_FAN_FULL) ? fh
 								      : NULL,
-					   f->n_watch ? f->watch_fd[0] : -1);
+					   f->n_watch ? f->watch_fd[0] : -1,
+					   fh);
 
-		out->off_object = text_put(out, p);
+		out->off_object = kof_evt_text_put(out, p);
 		out->off_image  = KOF_TEXT_NONE;
 		out->off_cmdline = KOF_TEXT_NONE;
 		out->loc = kof_classify(p, &out->attack);
@@ -484,6 +529,15 @@ static int add_watch(struct kofa_fan *f, const char *dir, uint64_t mask)
 	fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	snprintf(f->watch[f->n_watch], sizeof f->watch[0], "%s", dir);
 	f->watch_fd[f->n_watch] = fd;
+	{
+		int mnt = 0;
+
+		f->watch_h[f->n_watch].h.handle_bytes = MAX_HANDLE_SZ;
+		f->watch_h_ok[f->n_watch] =
+			name_to_handle_at(AT_FDCWD, dir,
+					  &f->watch_h[f->n_watch].h,
+					  &mnt, 0) == 0;
+	}
 	f->n_watch++;
 	return 1;
 }

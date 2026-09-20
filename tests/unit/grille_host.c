@@ -435,6 +435,75 @@ static void t_classify(void)
 		    att != KOF_ATT_STARTUP_DIR)
 			fail("attack", "startup_folder");
 
+		/*
+		 * THE LINUX PERSISTENCE SET, one assertion per location.
+		 *
+		 * Same rule as the Metasploit list above: a coverage claim is
+		 * worth what somebody checked. Thirteen of these matched
+		 * nothing when the table was first walked with them - two of
+		 * them, a zsh rc file and ~/.ssh/rc, came out as ordinary USER
+		 * activity, which is the failure the table's own header warns
+		 * about rather than a gap.
+		 */
+		{
+			static const struct { const char *p; uint8_t loc;
+					      uint16_t att; } LX[] = {
+			{ "/etc/systemd/user/e.service", KOF_LOC_SERVICE,
+			  KOF_ATT_SYSTEMD },
+			{ "/run/systemd/system/e.service", KOF_LOC_SERVICE,
+			  KOF_ATT_SYSTEMD },
+			{ "/etc/rc3.d/S99e", KOF_LOC_SERVICE,
+			  KOF_ATT_RC_SCRIPT },
+			{ "/etc/rc.d/init.d/e", KOF_LOC_SERVICE,
+			  KOF_ATT_RC_SCRIPT },
+			{ "/etc/bash.bashrc", KOF_LOC_SHELL_INIT,
+			  KOF_ATT_SHELL_PROFILE },
+			{ "/home/u/.zshrc", KOF_LOC_SHELL_INIT,
+			  KOF_ATT_SHELL_PROFILE },
+			{ "/etc/zsh/zshenv", KOF_LOC_SHELL_INIT,
+			  KOF_ATT_SHELL_PROFILE },
+			{ "/etc/update-motd.d/99-e", KOF_LOC_SHELL_INIT,
+			  KOF_ATT_SHELL_PROFILE },
+			{ "/etc/xdg/autostart/e.desktop", KOF_LOC_AUTOSTART,
+			  KOF_ATT_STARTUP_DIR },
+			{ "/etc/ld.so.conf.d/e.conf", KOF_LOC_PRELOAD,
+			  KOF_ATT_LD_PRELOAD },
+			{ "/home/u/.ssh/rc", KOF_LOC_SSH,
+			  KOF_ATT_SHELL_PROFILE },
+			{ "/etc/ssh/sshrc", KOF_LOC_SSH,
+			  KOF_ATT_SHELL_PROFILE },
+			{ "/usr/share/nginx/html/s.php", KOF_LOC_WEB_ROOT,
+			  KOF_ATT_WEB_SHELL },
+			{ "/srv/http/s.php", KOF_LOC_WEB_ROOT,
+			  KOF_ATT_WEB_SHELL },
+			{ "/usr/local/bin/e", KOF_LOC_PROGRAMS,
+			  KOF_ATT_NONE },
+			};
+			size_t i;
+
+			for (i = 0; i < sizeof LX / sizeof LX[0]; i++) {
+				uint16_t a2 = 0xffff;
+				uint8_t l = kof_classify(LX[i].p, &a2);
+
+				if (l != LX[i].loc || a2 != LX[i].att) {
+					printf("  FAIL attack %s: loc %u "
+					       "att %u\n", LX[i].p,
+					       (unsigned)l, (unsigned)a2);
+					failures++;
+				}
+			}
+		}
+
+		/*
+		 * AND THE ORDINARY NEIGHBOURS OF THOSE ROWS, because a needle
+		 * is a substring: a row added for one file must not swallow
+		 * the file next to it.
+		 */
+		loc_is("/etc/rc.local", KOF_LOC_SHELL_INIT);
+		loc_is("/home/u/.bash_profile", KOF_LOC_SHELL_INIT);
+		loc_is("/home/u/Documents/zshrc.txt", KOF_LOC_USER);
+		loc_is("/usr/local/share/doc/x", KOF_LOC_OTHER);
+
 		/* Every technique in the list has both an id and a name. */
 		{
 			uint16_t i;

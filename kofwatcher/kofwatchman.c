@@ -166,10 +166,37 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 			continue;
 		c->n++;
 		printf("MALICIOUS  %s\n", res->v[i].name);
-		printf("           %-9s pid=%lu  actor=%lu\n",
+		/*
+		 * WHOSE NUMBER IS THE SECOND ONE, and it is not the same
+		 * question on every verb.
+		 *
+		 * kof_evt.actor_pid is who CAUSED the event. On a file event
+		 * that is the process the event is about, so printing it
+		 * beside the pid put the same number twice under two names;
+		 * on a process START it is whoever launched it, which is the
+		 * PARENT and is worth a word that says so rather than the
+		 * vaguer one the field carries for the platforms where an
+		 * actor can be neither.
+		 *
+		 * So the line names what the number is: the parent of a start,
+		 * an actor only where it differs from the subject, and nothing
+		 * at all where it would repeat.
+		 */
+		printf("           %-9s pid=%lu",
 		       kof_evt_verb_name(c->e->verb),
-		       (unsigned long)c->e->pid,
-		       (unsigned long)c->e->actor_pid);
+		       (unsigned long)c->e->pid);
+		if (c->e->verb == KOF_EVT_PROC_START) {
+			if (c->e->miss & KOF_F_PPID)
+				printf("  parent=?");
+			else
+				printf("  parent=%lu",
+				       (unsigned long)c->e->ppid);
+		} else if (c->e->actor_pid &&
+			   c->e->actor_pid != c->e->pid) {
+			printf("  actor=%lu",
+			       (unsigned long)c->e->actor_pid);
+		}
+		printf("\n");
 		printf("           %s\n", name ? name : "?");
 		if (*kof_evt_cmdline(c->e))
 			printf("           cmdline: %s\n",

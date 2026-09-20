@@ -110,6 +110,9 @@ static const struct {
 	{ "\\Start Menu\\Programs\\Startup\\",
 	  KOF_LOC_AUTOSTART,  KOF_ATT_STARTUP_DIR, 1 },
 	{ "/.config/autostart/", KOF_LOC_AUTOSTART, KOF_ATT_STARTUP_DIR, 0 },
+	/* The system-wide one, which starts for every user who logs in and is
+	 * not under any home directory the row above would reach. */
+	{ "/etc/xdg/autostart/", KOF_LOC_AUTOSTART, KOF_ATT_STARTUP_DIR, 0 },
 
 	{ "\\Winlogon\\Shell", KOF_LOC_AUTOSTART, KOF_ATT_WINLOGON, 1 },
 
@@ -158,18 +161,85 @@ static const struct {
 
 	/* Linux persistence. */
 	{ "/etc/ld.so.preload", KOF_LOC_PRELOAD, KOF_ATT_LD_PRELOAD, 0 },
+	/*
+	 * AND THE DIRECTORY BESIDE IT. A .conf dropped in ld.so.conf.d adds a
+	 * directory to the search path, so the next binary that starts picks
+	 * up an attacker's copy of a library it asked for by name - the same
+	 * technique the preload file is, reached by moving the library instead
+	 * of naming it.
+	 */
+	{ "/etc/ld.so.conf.d/", KOF_LOC_PRELOAD, KOF_ATT_LD_PRELOAD, 0 },
 	{ "/etc/cron", KOF_LOC_SCHEDULE, KOF_ATT_CRON, 0 },
 	{ "/var/spool/cron", KOF_LOC_SCHEDULE, KOF_ATT_CRON, 0 },
 	{ "/etc/systemd/system/", KOF_LOC_SERVICE, KOF_ATT_SYSTEMD, 0 },
 	{ "/lib/systemd/system/", KOF_LOC_SERVICE, KOF_ATT_SYSTEMD, 0 },
 	{ "/.config/systemd/user/", KOF_LOC_SERVICE, KOF_ATT_SYSTEMD, 0 },
+	/*
+	 * THE OTHER TWO UNIT DIRECTORIES, and both are places a unit is put by
+	 * somebody who does not want it found in the obvious one.
+	 *
+	 * /etc/systemd/user is the system-wide USER unit directory - the
+	 * per-user one above is covered, this one was not - and /run/systemd
+	 * holds TRANSIENT units, which systemd-run writes and which vanish on
+	 * reboot. A unit that leaves no file after a restart is a unit nobody
+	 * finds by looking at the disk afterwards.
+	 */
+	{ "/etc/systemd/user/", KOF_LOC_SERVICE, KOF_ATT_SYSTEMD, 0 },
+	{ "/run/systemd/system/", KOF_LOC_SERVICE, KOF_ATT_SYSTEMD, 0 },
 	{ "/etc/rc.local", KOF_LOC_SHELL_INIT, KOF_ATT_RC_SCRIPT, 0 },
 	{ "/etc/init.d/", KOF_LOC_SERVICE, KOF_ATT_RC_SCRIPT, 0 },
+	/*
+	 * THE RUNLEVEL DIRECTORIES, SPELLED OUT. A needle is a substring and
+	 * not a pattern - see the note on the table - so there is no way to
+	 * write /etc/rc?.d in one row, and a row per runlevel is what the
+	 * table's own rule costs here. /etc/rc.d/ is the Red Hat spelling and
+	 * rcS.d the Debian single-user one.
+	 */
+	{ "/etc/rc.d/",  KOF_LOC_SERVICE, KOF_ATT_RC_SCRIPT, 0 },
+	{ "/etc/rcS.d/", KOF_LOC_SERVICE, KOF_ATT_RC_SCRIPT, 0 },
+	{ "/etc/rc0.d/", KOF_LOC_SERVICE, KOF_ATT_RC_SCRIPT, 0 },
+	{ "/etc/rc1.d/", KOF_LOC_SERVICE, KOF_ATT_RC_SCRIPT, 0 },
+	{ "/etc/rc2.d/", KOF_LOC_SERVICE, KOF_ATT_RC_SCRIPT, 0 },
+	{ "/etc/rc3.d/", KOF_LOC_SERVICE, KOF_ATT_RC_SCRIPT, 0 },
+	{ "/etc/rc4.d/", KOF_LOC_SERVICE, KOF_ATT_RC_SCRIPT, 0 },
+	{ "/etc/rc5.d/", KOF_LOC_SERVICE, KOF_ATT_RC_SCRIPT, 0 },
+	{ "/etc/rc6.d/", KOF_LOC_SERVICE, KOF_ATT_RC_SCRIPT, 0 },
 	{ "/.bashrc", KOF_LOC_SHELL_INIT, KOF_ATT_SHELL_PROFILE, 0 },
 	{ "/.bash_profile", KOF_LOC_SHELL_INIT, KOF_ATT_SHELL_PROFILE, 0 },
+	{ "/.bash_logout", KOF_LOC_SHELL_INIT, KOF_ATT_SHELL_PROFILE, 0 },
 	{ "/.profile", KOF_LOC_SHELL_INIT, KOF_ATT_SHELL_PROFILE, 0 },
 	{ "/etc/profile", KOF_LOC_SHELL_INIT, KOF_ATT_SHELL_PROFILE, 0 },
+	/*
+	 * THE SYSTEM-WIDE bashrc, which is not the one above: the needle there
+	 * is "/.bashrc" and /etc/bash.bashrc does not contain it. It was
+	 * filed as OTHER, which is how a write to the file every interactive
+	 * shell on the machine sources read as nothing in particular.
+	 */
+	{ "/etc/bash.bashrc", KOF_LOC_SHELL_INIT, KOF_ATT_SHELL_PROFILE, 0 },
+	/*
+	 * AND ZSH, which was missing entirely. A .zshrc under /home matched
+	 * the generic /home/ row and came out as ordinary user activity -
+	 * exactly the failure the note at the top of this table warns about,
+	 * on the default login shell of macOS and of a good many Linux
+	 * desktops.
+	 */
+	{ "/.zshrc", KOF_LOC_SHELL_INIT, KOF_ATT_SHELL_PROFILE, 0 },
+	{ "/.zshenv", KOF_LOC_SHELL_INIT, KOF_ATT_SHELL_PROFILE, 0 },
+	{ "/.zprofile", KOF_LOC_SHELL_INIT, KOF_ATT_SHELL_PROFILE, 0 },
+	{ "/.zlogin", KOF_LOC_SHELL_INIT, KOF_ATT_SHELL_PROFILE, 0 },
+	{ "/etc/zsh/", KOF_LOC_SHELL_INIT, KOF_ATT_SHELL_PROFILE, 0 },
+	/* Run for every interactive login, and writable scripts rather than
+	 * static text on every distribution that ships it. */
+	{ "/etc/update-motd.d/", KOF_LOC_SHELL_INIT, KOF_ATT_SHELL_PROFILE, 0 },
 	{ "/.ssh/authorized_keys", KOF_LOC_SSH, KOF_ATT_SSH_KEY, 0 },
+	/*
+	 * THE TWO SSH FILES THAT RUN COMMANDS, which authorized_keys is not.
+	 * sshd executes ~/.ssh/rc, or /etc/ssh/sshrc when that is absent, on
+	 * every successful login - so it is persistence that survives the key
+	 * being rotated and leaves the key file untouched.
+	 */
+	{ "/.ssh/rc", KOF_LOC_SSH, KOF_ATT_SHELL_PROFILE, 0 },
+	{ "/etc/ssh/sshrc", KOF_LOC_SSH, KOF_ATT_SHELL_PROFILE, 0 },
 
 	/* Identity and privilege. */
 	{ "/etc/passwd", KOF_LOC_CREDENTIAL, KOF_ATT_ACCOUNT_FILE, 0 },
@@ -188,6 +258,12 @@ static const struct {
 
 	{ "\\inetpub\\wwwroot\\", KOF_LOC_WEB_ROOT, KOF_ATT_WEB_SHELL, 1 },
 	{ "/var/www/", KOF_LOC_WEB_ROOT, KOF_ATT_WEB_SHELL, 0 },
+	/* The other document roots that ship by default: nginx's own, and the
+	 * two under /srv that Arch and SUSE use. A webshell is a webshell
+	 * wherever the server was told to look. */
+	{ "/usr/share/nginx/html/", KOF_LOC_WEB_ROOT, KOF_ATT_WEB_SHELL, 0 },
+	{ "/srv/http/", KOF_LOC_WEB_ROOT, KOF_ATT_WEB_SHELL, 0 },
+	{ "/srv/www/", KOF_LOC_WEB_ROOT, KOF_ATT_WEB_SHELL, 0 },
 
 	/* ---- the generic locations, LAST ---------------------------------- */
 	{ "\\Windows\\System32\\", KOF_LOC_SYSTEM, KOF_ATT_NONE, 1 },
@@ -212,6 +288,11 @@ static const struct {
 	{ "\\PROGRA~2\\", KOF_LOC_PROGRAMS, KOF_ATT_NONE, 1 },
 	{ "/usr/bin/", KOF_LOC_PROGRAMS, KOF_ATT_NONE, 0 },
 	{ "/usr/sbin/", KOF_LOC_PROGRAMS, KOF_ATT_NONE, 0 },
+	/* Where anything not from a package manager is installed, and where a
+	 * dropped binary meant to look installed goes. It fell through to
+	 * OTHER, so a new executable there said less than one in /usr/bin. */
+	{ "/usr/local/bin/", KOF_LOC_PROGRAMS, KOF_ATT_NONE, 0 },
+	{ "/usr/local/sbin/", KOF_LOC_PROGRAMS, KOF_ATT_NONE, 0 },
 	{ "/opt/", KOF_LOC_PROGRAMS, KOF_ATT_NONE, 0 },
 
 	{ "\\Users\\", KOF_LOC_USER, KOF_ATT_NONE, 1 },
@@ -344,6 +425,26 @@ static const char *at(const struct kof_evt *e, uint16_t off)
 const char *kof_evt_image(const struct kof_evt *e)   { return at(e, e ? e->off_image   : KOF_TEXT_NONE); }
 const char *kof_evt_object(const struct kof_evt *e)  { return at(e, e ? e->off_object  : KOF_TEXT_NONE); }
 const char *kof_evt_cmdline(const struct kof_evt *e) { return at(e, e ? e->off_cmdline : KOF_TEXT_NONE); }
+
+uint16_t kof_evt_text_put(struct kof_evt *e, const char *s)
+{
+	size_t n;
+
+	if (!e || !s || !*s)
+		return KOF_TEXT_NONE;
+	n = strlen(s) + 1u;
+	if ((size_t)e->text_len + n > sizeof e->text) {
+		e->flags |= KOF_EF_TRUNCATED;
+		return KOF_TEXT_NONE;
+	}
+	memcpy(e->text + e->text_len, s, n);
+	{
+		uint16_t off = e->text_len;
+
+		e->text_len = (uint16_t)(e->text_len + n);
+		return off;
+	}
+}
 
 /* ---- the per-verb payload ----------------------------------------------- */
 

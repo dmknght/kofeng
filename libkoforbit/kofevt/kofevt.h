@@ -1236,4 +1236,19 @@ const char *kof_evt_image(const struct kof_evt *);
 const char *kof_evt_object(const struct kof_evt *);
 const char *kof_evt_cmdline(const struct kof_evt *);
 
+/*
+ * AND THE OTHER DIRECTION, which a COLLECTOR needs and nothing else does.
+ *
+ * Appends a string to the record's own text block and returns the offset one
+ * of the off_* fields is set to, or KOF_TEXT_NONE when it does not fit - and
+ * then the record is marked KOF_EF_TRUNCATED, because a path that was cut is
+ * not the same claim as a path nobody supplied.
+ *
+ * Here rather than inside a collector: it was a static in libkofantarc's
+ * fanotify half, and the process half needed the same fifteen lines. Two
+ * copies of the code that decides what a record's text block looks like is
+ * two places for the truncation flag to be forgotten in.
+ */
+uint16_t kof_evt_text_put(struct kof_evt *, const char *);
+
 #endif /* KOFEVT_H */

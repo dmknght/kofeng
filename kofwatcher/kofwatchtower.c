@@ -51,6 +51,7 @@
 #include <signal.h>
 #include "kofantarc.h"
 #include "afan.h"
+#include "apev.h"
 /* The POSIX half needs this too: kof_utf8_init is called on both paths and is
  * declared here for both. It used to be reached only from the _WIN32 branch,
  * which left the call on this side with no declaration at all - invisible
@@ -116,6 +117,27 @@ struct sensor {
 #else
 	struct kofa_fan          *fan;
 	const struct kof_mon_api *api;
+	/*
+	 * AND THE PROCESS HALF, which is a SECOND session rather than another
+	 * subscription on the first.
+	 *
+	 * Windows has one ETW session carrying every keyword, so the struct
+	 * above assumed one collector. Linux has two mechanisms that have
+	 * nothing in common - fanotify for files, the netlink connector for
+	 * processes - and neither can report the other's events. A sensor
+	 * that watched only files could see a dropper write its payload and
+	 * never see it run.
+	 *
+	 * OPTIONAL, and that is not a hedge. The connector needs
+	 * CAP_NET_ADMIN and refuses silently - see apev.h - so a host that
+	 * grants CAP_SYS_ADMIN for fanotify and not this one still gets the
+	 * file stream, and is TOLD which half it is missing rather than left
+	 * to infer it from a quiet screen.
+	 */
+	struct kofa_pev          *pev;
+	const struct kof_mon_api *pev_api;
+	int                       pev_err;
+	int                       turn;   /* which stream is asked first */
 #endif
 };
 
@@ -192,9 +214,63 @@ static int sensor_open(struct sensor *s, uint32_t ring)
 		}
 		s->api = kofa_fan_api(s->fan);
 	}
+	{
+		struct kofa_pev_option po;
+
+		memset(&po, 0, sizeof po);
+		/* Off for the reason the file half gives: this process's own
+		 * helpers are not evidence about the host. */
+		s->pev = kofa_pev_open(&po, &s->pev_err);
+		s->pev_api = s->pev ? kofa_pev_api(s->pev) : NULL;
+	}
 #endif
 	return 1;
 }
+
+#ifndef _WIN32
+/*
+ * ONE EXEC, ONE RECORD - the half of the answer only the sensor has.
+ *
+ * The two Linux collectors report the same exec from opposite ends. fanotify
+ * sees the binary opened with intent to execute and files an image load; the
+ * process connector sees the exec and files a process start. Both are correct
+ * and both are wanted - an image load is how a library dropped in /tmp becomes
+ * visible - but the program's OWN binary produces one of each, and a consumer
+ * counting executions would count it twice.
+ *
+ * NEITHER COLLECTOR MAY DECIDE THIS ALONE. afan running by itself is the only
+ * thing reporting that exec at all, so a library that suppressed it would turn
+ * a duplicate into a gap; apev cannot see the image load. The sensor is what
+ * knows both are open, so the sensor is what drops one - and it drops the
+ * IMAGE LOAD rather than the start, because the start carries the parent, the
+ * command line and the verdict-bearing path while the load carries the path
+ * alone.
+ *
+ * Returns 1 to keep the record, and 0 the way `next` reports "nothing this
+ * time" - which the caller's loop already handles, because a wait expiring is
+ * the same answer.
+ */
+static int sensor_keep(struct sensor *s, struct kof_evt *out)
+{
+	const char *img;
+
+	if (!s->pev || out->verb != KOF_EVT_IMAGE_LOAD)
+		return 1;
+	if (out->miss & KOF_F_PID)
+		return 1;              /* degraded fanotify: no pid to match */
+	img = kof_evt_object(out);
+	if (!img || !*img)
+		return 1;
+	/*
+	 * No clock is offered: the two collectors stamp from different
+	 * sources - fanotify records carry no time of their own here - so a
+	 * window computed across them would compare two unrelated scales. The
+	 * image match against a process that is still marked running is what
+	 * decides, and apev drops the entry the moment the process exits.
+	 */
+	return !kofa_pev_is_own_image(s->pev, out->pid, img, 0);
+}
+#endif
 
 static int sensor_next(struct sensor *s, struct kof_evt *out, uint32_t wait_ms)
 {
@@ -209,7 +285,32 @@ static int sensor_next(struct sensor *s, struct kof_evt *out, uint32_t wait_ms)
 	kofw_evt_to_kof(&s->raw, out);
 	return 1;
 #else
-	return kof_mon_next(s->api, out, wait_ms);
+	/*
+	 * TWO STREAMS, AND NEITHER MAY STARVE THE OTHER.
+	 *
+	 * Asking one with the full wait and the other with what is left would
+	 * hand the whole budget to whichever is busier - on a machine doing a
+	 * build that is the file stream, and the process events it is there
+	 * to correlate with would arrive minutes late or not at all.
+	 *
+	 * So each call drains the other one first with no wait at all, and
+	 * only then blocks on one of them; which one blocks alternates. Every
+	 * record that is already queued is taken immediately whichever stream
+	 * holds it, and the wait the caller asked for is still bounded.
+	 */
+	if (!s->pev_api)
+		return kof_mon_next(s->api, out, wait_ms);
+	s->turn = !s->turn;
+	{
+		const struct kof_mon_api *a = s->turn ? s->pev_api : s->api;
+		const struct kof_mon_api *b = s->turn ? s->api : s->pev_api;
+
+		if (kof_mon_next(b, out, 0))
+			return sensor_keep(s, out);
+		if (kof_mon_next(a, out, wait_ms))
+			return sensor_keep(s, out);
+		return 0;
+	}
 #endif
 }
 
@@ -236,6 +337,19 @@ static void sensor_health(struct sensor *s, struct kof_evt_health *nh)
 	kofw_mon_health_neutral(s->mon, nh);
 #else
 	s->api->health(s->api->self, nh);
+	/*
+	 * BOTH SESSIONS' LOSSES IN ONE NUMBER. They are two streams into one
+	 * consumer, and a consumer deciding whether to trust a quiet run
+	 * cares that something was dropped, not which socket dropped it.
+	 */
+	if (s->pev_api && s->pev_api->health) {
+		struct kof_evt_health ph;
+
+		memset(&ph, 0, sizeof ph);
+		s->pev_api->health(s->pev_api->self, &ph);
+		nh->produced += ph.produced;
+		nh->dropped  += ph.dropped;
+	}
 #endif
 }
 
@@ -251,6 +365,8 @@ static void sensor_extra(struct sensor *s, FILE *out)
 	kofw_health_print_extra(out, &h);
 #else
 	s->api->print_extra(s->api->self, out);
+	if (s->pev_api && s->pev_api->print_extra)
+		s->pev_api->print_extra(s->pev_api->self, out);
 #endif
 }
 
@@ -278,7 +394,17 @@ static void sensor_report_refused(struct sensor *s, FILE *out)
 	fputs("\n  a wrong provider is silent, not an error - "
 	      "check with `logman query providers <name>`\n", out);
 #else
-	(void)s; (void)out;
+	/*
+	 * THE FILE HALF EITHER OPENED OR SENSOR_OPEN ALREADY FAILED, so there
+	 * is nothing to say about it. The process half is optional and its
+	 * absence is exactly the kind of thing that makes a run look quiet -
+	 * a host with CAP_SYS_ADMIN and no CAP_NET_ADMIN watches every write
+	 * and sees nothing execute - so it is named.
+	 */
+	if (!s->pev)
+		fprintf(out, "kofwatchtower: no process events (%s) - "
+			"files only; the connector needs CAP_NET_ADMIN\n",
+			kofa_err_name(s->pev_err));
 #endif
 }
 
@@ -288,6 +414,8 @@ static void sensor_close(struct sensor *s)
 	kofw_mon_close(s->mon);
 #else
 	kof_mon_close(s->api);
+	if (s->pev_api)
+		kof_mon_close(s->pev_api);
 #endif
 }
 

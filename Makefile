@@ -1121,6 +1121,7 @@ KOFPROC_SRC := libkoforbit/kofproc/kofproc.c
 ANTARC_SRC := libkofantarc/aproc.c \
               libkofantarc/apagemap.c \
               libkofantarc/afan.c \
+              libkofantarc/apev.c \
               libkofantarc/afid.c
 
 ifeq ($(NATIVE_OS),windows)
@@ -2335,6 +2336,23 @@ $(TEST)/unit_antarc_fan$(EXE): tests/unit/antarc_fan.c $(ANTARC_SRC) \
                                $(KOFEVT_SRC) $(STAMP) | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) $(ANTARC_INC) tests/unit/antarc_fan.c \
 	      $(ANTARC_SRC) $(KOFEVT_SRC) -o $@ $(LDFLAGS)
+
+# THE PROCESS HALF, and it tests the refusal rather than the stream.
+#
+# The connector needs CAP_NET_ADMIN and refuses SILENTLY - every syscall
+# reports success and no event is ever delivered, see apev.h. So what an
+# unprivileged run checks is that kofa_pev_open discovers that by probing and
+# hands back nothing, instead of a session that would report a machine on
+# which nothing ever runs. Run as root the same test drains a real exec.
+$(TEST)/unit_antarc_pev$(EXE): tests/unit/antarc_pev.c $(ANTARC_SRC) \
+                               $(KOFEVT_SRC) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) $(ANTARC_INC) tests/unit/antarc_pev.c \
+	      $(ANTARC_SRC) $(KOFEVT_SRC) -o $@ $(LDFLAGS)
+
+$(TEST)/asan_antarc_pev$(EXE): tests/unit/antarc_pev.c $(ANTARC_SRC) \
+                               $(KOFEVT_SRC) $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) $(ANTARC_INC) tests/unit/antarc_pev.c \
+	       $(ANTARC_SRC) $(KOFEVT_SRC) -o $@ $(LDFLAGS)
 
 # The sanitized twin of the rule above. It exists because the generic
 # $(TEST)/asan_% pattern links a test against the library and nothing else, so

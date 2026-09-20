@@ -186,6 +186,76 @@ int main(void)
 		}
 	}
 
+	/*
+	 * TWO WATCHED DIRECTORIES, AND THE RIGHT ONE IN THE PATH.
+	 *
+	 * The degraded mode cannot RESOLVE the directory handle an event
+	 * carries - that needs CAP_DAC_READ_SEARCH - so it used to name the
+	 * first watch for every event. With two watches that is not a reduced
+	 * answer but a wrong one: half the records carried a path the file was
+	 * never at, and everything downstream classified a directory nothing
+	 * had happened in.
+	 *
+	 * It RECOGNISES the handle instead, against the ones name_to_handle_at
+	 * took when the directories were marked, which costs no privilege.
+	 * This is the test of that, and it is the case the single-directory
+	 * tests above cannot reach.
+	 */
+	{
+		const char *dirs[] = { DIR, DIR "2", NULL };
+		struct kofa_fan_option o;
+		struct kofa_fan *f;
+		int err = 0, seen_a = 0, seen_b = 0, wrong = 0;
+
+		(void)mkdir(DIR, 0700);
+		(void)mkdir(DIR "2", 0700);
+		memset(&o, 0, sizeof o);
+		o.dirs = dirs;
+		o.trace_self = 1;
+		f = kofa_fan_open(&o, &err);
+		if (f && kofa_fan_watch_count(f) >= 2) {
+			struct kof_evt ev;
+			int fd;
+
+			fd = open(DIR "/in_a.txt", O_CREAT | O_WRONLY, 0600);
+			if (fd >= 0) close(fd);
+			fd = open(DIR "2/in_b.txt", O_CREAT | O_WRONLY, 0600);
+			if (fd >= 0) close(fd);
+
+			while (kof_mon_next(kofa_fan_api(f), &ev, 300)) {
+				const char *p;
+
+				if (ev.off_object == KOF_TEXT_NONE)
+					continue;
+				p = ev.text + ev.off_object;
+				if (!*p)
+					continue;
+				if (strstr(p, "in_a.txt")) {
+					if (strstr(p, DIR "2/")) wrong++;
+					else if (strstr(p, DIR "/")) seen_a = 1;
+				} else if (strstr(p, "in_b.txt")) {
+					if (strstr(p, DIR "2/")) seen_b = 1;
+					else wrong++;
+				}
+			}
+			ok(seen_a && seen_b,
+			   "two watches: both directories produce events");
+			ok(!wrong,
+			   "and each event names the directory it happened in");
+			if (wrong)
+				printf("       %d event(s) named the wrong "
+				       "watch\n", wrong);
+			kofa_fan_close(f);
+		} else if (f) {
+			printf("       only %u watch(es) - skipped\n",
+			       kofa_fan_watch_count(f));
+			kofa_fan_close(f);
+		}
+		(void)unlink(DIR "/in_a.txt");
+		(void)unlink(DIR "2/in_b.txt");
+		(void)rmdir(DIR "2");
+	}
+
 	(void)unlink(DIR "/one.txt");
 	(void)rmdir(DIR);
 	printf("antarc fan: %s\n", failures ? "FAILED" : "ok");
