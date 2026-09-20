@@ -1507,6 +1507,36 @@ struct kof_content {
 	 * are one fact about this object.
 	 */
 	uint32_t (*plague_score)(const struct kof_obj_ctx *, uint32_t block_id);
+
+	/*
+	 * HOW MUCH OF A REFERENCE'S STRING SET THIS OBJECT HOLDS, 0..100.
+	 *
+	 * The set is the module's own array - see kof_ovl_strings in
+	 * kofmod/kofoverlord.h - because it is a few hundred 64-bit values and
+	 * a module's .rodata is where the rest of its constants already live.
+	 * A pointer and not an id for the same reason kof_emit takes one: the
+	 * data is the module's, and giving it an id would mean a section in the
+	 * pack, a declaration for the build to learn, and a second place for
+	 * the two to disagree.
+	 *
+	 * THE OBJECT'S OWN SET IS BUILT ONCE, before any module runs, and this
+	 * is a merge over two sorted arrays - so a rule may ask about several
+	 * references, and several rules may ask, for one pass over the bytes.
+	 */
+	uint32_t (*ovl_strings)(const struct kof_obj_ctx *,
+				const uint64_t *ref, uint32_t n_ref);
+
+	/*
+	 * THE SAME QUESTION OVER BLOCK HASHES - see kof_ovl_blocks.
+	 *
+	 * Beside plague_score and not instead of it: that one asks how much of
+	 * ONE declared run of bytes is here and is anchored to the region the
+	 * run was cut from; this asks how much of a reference's WHOLE set is
+	 * here and is anchored to nothing. A rule that means "that exact run"
+	 * wants the first; one that means "built like that object" wants this.
+	 */
+	uint32_t (*ovl_blocks)(const struct kof_obj_ctx *,
+			       const uint32_t *ref, uint32_t n_ref);
 };
 
 /*
@@ -2616,6 +2646,53 @@ void kof_unpack(const struct kof_obj_ctx *ctx);
  */
 #define kof_plague_score(blk)                                              \
 	((ctx)->content->plague_score((ctx), KOF_PASTE(kof_blockid_, blk)))
+
+/*
+ * HOW MUCH OF A REFERENCE'S STRINGS THIS OBJECT HAS.
+ *
+ *     static const uint64_t ref_strings[] = { 0x..., 0x..., };
+ *
+ *     if (kof_ovl_strings(ref_strings) >= 50u)
+ *             KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+ *
+ * The strings are the printable runs of the reference's loadable regions AFTER
+ * its static library was subtracted, hashed and sorted - so what is compared is
+ * what its author wrote, not what the linker brought in. The generator in
+ * kofviewer writes them out; nobody types them.
+ *
+ * LAYOUT-FREE, which is the whole reason this exists beside the block matcher.
+ * A block is a run of bytes and moves when anything before it changes; a set of
+ * strings does not. Measured across architectures, two builds of one botnet
+ * share 0.000 of their code blocks and 0.4 to 0.94 of their strings.
+ */
+/*
+ * HOW MUCH OF A REFERENCE'S BLOCK SET THIS OBJECT HAS.
+ *
+ *     static const uint32_t ref_blocks[] = { 0x..., 0x..., };
+ *
+ *     if (kof_ovl_blocks(ref_blocks) >= 60u)
+ *             KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+ *
+ * The hashes are the selected windows of the reference's loadable regions after
+ * its static library was subtracted - the same windows plague selects, over the
+ * whole object rather than carved into named runs.
+ *
+ * NOT A SUM OF PLAGUE SCORES. A rule could add up kof_plague_score over several
+ * declared blocks and divide, and that would be a different measurement: each
+ * of those is anchored to the region its block came from and each can fire on
+ * its own. This is one set, one containment, one threshold.
+ */
+#define kof_ovl_blocks(ref)                                                \
+	((ctx)->content->ovl_blocks                                        \
+	 ? (ctx)->content->ovl_blocks((ctx), (ref),                        \
+		(uint32_t)(sizeof (ref) / sizeof (ref)[0]))                \
+	 : 0u)
+
+#define kof_ovl_strings(ref)                                               \
+	((ctx)->content->ovl_strings                                       \
+	 ? (ctx)->content->ovl_strings((ctx), (ref),                       \
+		(uint32_t)(sizeof (ref) / sizeof (ref)[0]))                \
+	 : 0u)
 
 /*
  * AT AN OFFSET THE MODULE WORKED OUT

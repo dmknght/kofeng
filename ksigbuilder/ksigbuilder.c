@@ -1228,7 +1228,7 @@ static void capture_find_call(const char *at)
 	 */
 	static const char *kinds[] = { "kof_find_str_multi", "kof_find_str_all",
 					"kof_find_str_any", "kof_plague_score",
-					"kof_ovl_shape",
+					"kof_ovl_shape", "kof_ovl_strings", "kof_ovl_blocks",
 					NULL };
 	const char *best = NULL;
 	const char *best_kind = NULL;

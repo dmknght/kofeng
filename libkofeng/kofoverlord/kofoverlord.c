@@ -7,6 +7,8 @@
 #include <string.h>
 
 #include <kofmod/elf.h>
+#include <kofmod/kofplague.h>
+#include "../kofmatchers/kofplague.h"
 #include "../kofparsers/rangelist.h"
 
 #define PT_LOAD 1u
@@ -44,6 +46,29 @@ static uint64_t str_hash(const uint8_t *p, uint64_t n)
 }
 
 static int printable(uint8_t c) { return c >= 0x20u && c < 0x7fu; }
+
+static void sort_u32(uint32_t *v, uint32_t n)
+{
+	uint32_t i, j;
+
+	for (i = 1; i < n; i++) {
+		uint32_t k = v[i];
+
+		for (j = i; j && v[j - 1] > k; j--)
+			v[j] = v[j - 1];
+		v[j] = k;
+	}
+}
+
+static uint32_t dedup_u32(uint32_t *v, uint32_t n)
+{
+	uint32_t i, w = 0;
+
+	for (i = 0; i < n; i++)
+		if (!w || v[w - 1] != v[i])
+			v[w++] = v[i];
+	return w;
+}
 
 static void sort_u64(uint64_t *v, uint32_t n)
 {
@@ -189,14 +214,25 @@ int kof_ovl_build(struct kof_ovl_desc *d, kof_buf file,
 		kof_rl_normalise(&kl);
 
 		r->str_off = d->n_str;
-		for (k = 0; k < kl.n; k++)
+		for (k = 0; k < kl.n; k++) {
 			collect(d, file.p + keep[k].off, keep[k].len);
+			/* And the block hashes of the same bytes - one pass
+			 * each, over the same span the library is already out
+			 * of. */
+			if (d->n_blk < KOF_OVL_MAX_BLOCKS)
+				d->n_blk += kof_plague_hash_span(
+					file.p + keep[k].off, keep[k].len,
+					KOF_PLAGUE_RAW, d->blk + d->n_blk,
+					KOF_OVL_MAX_BLOCKS - d->n_blk);
+		}
 		sort_u64(d->str + r->str_off, d->n_str - r->str_off);
 		d->n_str = r->str_off +
 			   dedup_u64(d->str + r->str_off, d->n_str - r->str_off);
 		r->str_n = d->n_str - r->str_off;
 		d->n_region++;
 	}
+	sort_u32(d->blk, d->n_blk);
+	d->n_blk = dedup_u32(d->blk, d->n_blk);
 	return d->n_region ? 1 : 0;
 }
 
@@ -400,4 +436,42 @@ const char *kof_ovl_track_name(uint32_t track)
 	case KOF_OVL_ANCHOR:    return "anchor";
 	default:                return track ? "mixed" : "none";
 	}
+}
+
+uint32_t kof_ovl_strings_pct(const uint64_t *obj, uint32_t n_obj,
+			     const uint64_t *ref, uint32_t n_ref)
+{
+	uint32_t i = 0, j = 0, in = 0;
+
+	if (!obj || !ref || !n_obj || !n_ref)
+		return 0;
+	while (i < n_obj && j < n_ref) {
+		if (obj[i] == ref[j]) {
+			in++; i++; j++;
+		} else if (obj[i] < ref[j]) {
+			i++;
+		} else {
+			j++;
+		}
+	}
+	return (uint32_t)(((uint64_t)in * 100u) / n_ref);
+}
+
+uint32_t kof_ovl_blocks_pct(const uint32_t *obj, uint32_t n_obj,
+			    const uint32_t *ref, uint32_t n_ref)
+{
+	uint32_t i = 0, j = 0, in = 0;
+
+	if (!obj || !ref || !n_obj || !n_ref)
+		return 0;
+	while (i < n_obj && j < n_ref) {
+		if (obj[i] == ref[j]) {
+			in++; i++; j++;
+		} else if (obj[i] < ref[j]) {
+			i++;
+		} else {
+			j++;
+		}
+	}
+	return (uint32_t)(((uint64_t)in * 100u) / n_ref);
 }

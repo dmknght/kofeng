@@ -1734,6 +1734,20 @@ int cnd_more_siblings(struct kof_editor *e, uint32_t i)
 }
 
 /* The next condition at this one's level, or n_cnd. */
+static int draft_uses_shape(struct kof_editor *e);
+/* Does any matcher ask about the block vector? */
+static int draft_uses_blkvec(struct kof_editor *e)
+{
+	uint32_t g;
+
+	for (g = 0; g < e->dr.n_grp; g++)
+		if (e->dr.grp[g].kind == GRP_KIND_BLKVEC)
+			return 1;
+	return 0;
+}
+
+static int draft_uses_strshape(struct kof_editor *e);
+
 static uint32_t cnd_sib_next(struct kof_editor *e, uint32_t i)
 {
 	uint32_t k;
@@ -2544,8 +2558,17 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 	 * be a string. A draft with a block matcher and no markers is a
 	 * similarity rule, which is a whole rule.
 	 */
-	if (!e->dr.n_decl && !draft_uses_blocks(e))
-		return "Declare a string, or tick a block";
+	/*
+	 * AND A RULE MADE OF A SHAPE OR A STRING SET DECLARES NEITHER.
+	 *
+	 * Same reasoning one step further out: what the demand is really about
+	 * is that the rule be written from SOMETHING, and there are now four
+	 * things it can be written from. A shape rule reads no content at all
+	 * and is still a whole rule - that is the point of it.
+	 */
+	if (!e->dr.n_decl && !draft_uses_blocks(e) && !draft_uses_shape(e) &&
+	    !draft_uses_strshape(e) && !draft_uses_blkvec(e))
+		return "Declare a string, tick a block, or add a matcher";
 	if (!e->dr.n_grp)
 		return "Add a matcher";
 	/*
@@ -3457,6 +3480,17 @@ static int draft_uses_shape(struct kof_editor *e)
 	return 0;
 }
 
+/* Does any matcher ask about the object's string set? */
+static int draft_uses_strshape(struct kof_editor *e)
+{
+	uint32_t g;
+
+	for (g = 0; g < e->dr.n_grp; g++)
+		if (e->dr.grp[g].kind == GRP_KIND_STRSHAPE)
+			return 1;
+	return 0;
+}
+
 void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g)
 {
 	const struct group *q = &e->dr.grp[g];
@@ -3483,6 +3517,28 @@ void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g)
 	 */
 	if (q->kind == GRP_KIND_STRUCT) {
 		fprintf(f, "kof_ovl_shape(ref_shape) >= %uu", q->pct);
+		return;
+	}
+	/*
+	 * A STRING-SET MATCHER IS ONE COMPARISON TOO, and the set it is about
+	 * is the host's to build - see kof_ovl_strings. The module carries only
+	 * the reference's half.
+	 */
+	if (q->kind == GRP_KIND_STRSHAPE) {
+		fprintf(f, "kof_ovl_strings(ref_strings) >= %uu", q->pct);
+		return;
+	}
+	/*
+	 * THE BLOCK VECTOR, WRITTEN OUT AS THE MEAN IT IS.
+	 *
+	 * One expression over every ticked block rather than one matcher per
+	 * block: what this says is that the object is alike ACROSS them, and a
+	 * per-block threshold cannot say that - each of those fires alone. The
+	 * host has no call for a mean and needs none; the arithmetic is the
+	 * rule's, where a reader can see which blocks it is over.
+	 */
+	if (q->kind == GRP_KIND_BLKVEC) {
+		fprintf(f, "kof_ovl_blocks(ref_blocks) >= %uu", q->pct);
 		return;
 	}
 
@@ -4917,7 +4973,9 @@ void generate(struct kof_editor *e, int as_new)
 	 * It stays because the key that runs generate is not gated by the
 	 * button, but it asks the same question the button asked.
 	 */
-	if ((!e->dr.n_decl && !draft_uses_blocks(e)) || !e->dr.family[0])
+	if ((!e->dr.n_decl && !draft_uses_blocks(e) && !draft_uses_shape(e) &&
+	     !draft_uses_strshape(e) && !draft_uses_blkvec(e)) ||
+	    !e->dr.family[0])
 		return;
 
 	for (i = 0; e->dr.family[i] && j + 1u < sizeof safe; i++)
@@ -5490,6 +5548,44 @@ have_path:
 			fprintf(f, "%s %uu", ri ? "," : "", sh->region_x[ri]);
 		fprintf(f, " }\n};\n");
 	}
+	/*
+	 * THE REFERENCE'S STRINGS, if any matcher asks about them.
+	 *
+	 * Sorted, because the host merges the two sets rather than searching
+	 * one - see kof_ovl_strings_pct. They are hashes and not the text: what
+	 * is compared is which strings, never what they said, and a rule that
+	 * carried the text would carry the sample's secrets into the database.
+	 */
+	if (draft_uses_strshape(e) && e->dr.n_str) {
+		uint32_t si;
+
+		fprintf(f, "\n/* The author's strings of the sample above, "
+			"after its static library was cut. */\n");
+		fprintf(f, "static const uint64_t ref_strings[] = {\n");
+		for (si = 0; si < e->dr.n_str; si++)
+			fprintf(f, "%s0x%016llxull%s", si % 3u ? " " : "\t",
+				(unsigned long long)e->dr.str[si],
+				si + 1u == e->dr.n_str ? "\n};\n"
+				: si % 3u == 2u ? ",\n" : ",");
+	}
+	/*
+	 * THE REFERENCE'S BLOCK HASHES, if any matcher asks about them.
+	 *
+	 * Sorted, like the strings and for the same reason - the host merges
+	 * the two sets rather than searching one.
+	 */
+	if (draft_uses_blkvec(e) && e->dr.n_blkv) {
+		uint32_t bi;
+
+		fprintf(f, "\n/* The selected windows of the sample above, "
+			"after its static library was cut. */\n");
+		fprintf(f, "static const uint32_t ref_blocks[] = {\n");
+		for (bi = 0; bi < e->dr.n_blkv; bi++)
+			fprintf(f, "%s0x%08xu%s", bi % 4u ? " " : "\t",
+				e->dr.blkv[bi],
+				bi + 1u == e->dr.n_blkv ? "\n};\n"
+				: bi % 4u == 3u ? ",\n" : ",");
+	}
 	fprintf(f, "\nvoid kof_scan(const struct kof_obj_ctx *ctx)\n{\n");
 	/*
 	 * A maximum size is a line in the body, not a declaration.
@@ -5884,16 +5980,55 @@ static int plg_src_norm(const char *line)
 int plague_from_source(struct kof_editor *e, const char *path,
 		       struct kof_plague_decl *blk, uint32_t max_blk,
 		       uint32_t *n_blk, uint32_t *pool, uint32_t pool_max,
-		       struct kof_verdict_decl *verdict)
+		       struct kof_verdict_decl *verdict,
+		       uint8_t *shp_pct, int *shp_level,
+		       uint8_t *str_pct, int *str_level,
+		       uint8_t *blkv_pct, int *blkv_level)
 {
 	FILE *f;
 	char line[1024];
 	char name[MAX_DECL][48];
 	uint32_t n = 0, np = 0, i;
 	int in_block = -1;
+	/*
+	 * WHICH MATCHER THE VERDICT ON THE NEXT LINE BELONGS TO.
+	 *
+	 * emit writes `if (<call>)` and the verdict beneath it, so the call
+	 * that was just read is the one the next KOF_SCAN_* concludes from.
+	 * Without this the file's LAST verdict became every matcher's, and a
+	 * rule whose blocks said INFECT and whose shape said SUSPECT opened
+	 * with both saying SUSPECT.
+	 */
+	/*
+	 * WHICH MEASURES ARE WAITING FOR THE VERDICT ON THE NEXT LINE, as a
+	 * MASK and not a single value.
+	 *
+	 * emit writes `if (A || B)` on one line when two measures share a
+	 * verdict, so a reader that stopped at the first call on a line lost
+	 * the second - and the rule opened in the panel missing a matcher the
+	 * file plainly had.
+	 */
+	unsigned pending = 0;   /* 1 blocks 2 shape 4 strings 8 block set */
+	int in_shape = 0, in_strs = 0, in_blkv = 0;
 
 	if (!e || !path || !blk || !n_blk || !pool || !verdict)
 		return 0;
+	if (shp_pct)
+		*shp_pct = 0;
+	if (shp_level)
+		*shp_level = LV_SUSPECT;
+	if (str_pct)
+		*str_pct = 0;
+	if (str_level)
+		*str_level = LV_INFECT;
+	if (blkv_pct)
+		*blkv_pct = 0;
+	if (blkv_level)
+		*blkv_level = LV_INFECT;
+	e->dr.n_str = 0;
+	e->dr.n_blkv = 0;
+	memset(&e->dr.shp, 0, sizeof e->dr.shp);
+	e->dr.has_shp = 0;
 	*n_blk = 0;
 	memset(verdict, 0, sizeof *verdict);
 	verdict->level = LV_INFECT;
@@ -5987,10 +6122,145 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		 * The three shapes emit_verdict writes, read back as the three
 		 * it writes them from - see struct kof_verdict_decl.
 		 */
+		/*
+		 * THE SHAPE, as emit wrote it: one designated initialiser per
+		 * line, so each field is read where it is named rather than by
+		 * counting commas - which is what lets a field be added to the
+		 * struct without this silently reading the next one.
+		 */
+		if (strstr(line, "struct kof_ovl_shape ref_shape")) {
+			in_shape = 1;
+			e->dr.has_shp = 1;
+			continue;
+		}
+		if (in_shape) {
+			const char *q;
+
+			if ((q = strstr(line, ".fsize")) != NULL)
+				e->dr.shp.fsize = strtoull(strchr(q, '=') + 1,
+							   NULL, 0);
+			else if ((q = strstr(line, ".ptypes")) != NULL)
+				e->dr.shp.ptypes = (uint32_t)
+					strtoul(strchr(q, '=') + 1, NULL, 0);
+			else if ((q = strstr(line, ".etype")) != NULL)
+				e->dr.shp.etype = (uint16_t)
+					strtoul(strchr(q, '=') + 1, NULL, 0);
+			else if ((q = strstr(line, ".cls")) != NULL)
+				e->dr.shp.cls = (uint8_t)
+					strtoul(strchr(q, '=') + 1, NULL, 0);
+			else if ((q = strstr(line, ".end")) != NULL)
+				e->dr.shp.end = (uint8_t)
+					strtoul(strchr(q, '=') + 1, NULL, 0);
+			else if ((q = strstr(line, ".n_region")) != NULL)
+				e->dr.shp.n_region = (uint8_t)
+					strtoul(strchr(q, '=') + 1, NULL, 0);
+			else if ((q = strstr(line, ".region_fsz")) != NULL) {
+				const char *r = strchr(q, '{');
+				uint32_t k;
+
+				for (k = 0; r && k < KOF_OVL_MAX_REGIONS; k++) {
+					e->dr.shp.region_fsz[k] =
+						strtoull(r + 1, NULL, 0);
+					r = strchr(r + 1, ',');
+				}
+			} else if ((q = strstr(line, ".region_x")) != NULL) {
+				const char *r = strchr(q, '{');
+				uint32_t k;
+
+				for (k = 0; r && k < KOF_OVL_MAX_REGIONS; k++) {
+					e->dr.shp.region_x[k] = (uint8_t)
+						strtoul(r + 1, NULL, 0);
+					r = strchr(r + 1, ',');
+				}
+			}
+			if (strchr(line, '}') && strchr(line, ';'))
+				in_shape = 0;
+			continue;
+		}
+		if (strstr(line, "uint32_t ref_blocks[]")) {
+			in_blkv = 1;
+			continue;
+		}
+		if (in_blkv) {
+			const char *q = line;
+
+			while ((q = strstr(q, "0x")) != NULL) {
+				if (e->dr.n_blkv < DRAFT_MAX_BLKV)
+					e->dr.blkv[e->dr.n_blkv++] = (uint32_t)
+						strtoul(q, NULL, 16);
+				q += 2;
+			}
+			if (strchr(line, '}'))
+				in_blkv = 0;
+			continue;
+		}
+		if ((p = strstr(line, "kof_ovl_blocks(")) != NULL) {
+			const char *ge = strstr(p, ">=");
+
+			if (blkv_pct)
+				*blkv_pct = ge
+					? (uint8_t)strtoul(ge + 2, NULL, 10)
+					: GRP_PCT_DEFAULT;
+			pending |= 8u;
+		}
+		if (strstr(line, "uint64_t ref_strings[]")) {
+			in_strs = 1;
+			continue;
+		}
+		if (in_strs) {
+			const char *q = line;
+
+			while ((q = strstr(q, "0x")) != NULL) {
+				if (e->dr.n_str < DRAFT_MAX_STR)
+					e->dr.str[e->dr.n_str++] =
+						strtoull(q, NULL, 16);
+				q += 2;
+			}
+			if (strchr(line, '}'))
+				in_strs = 0;
+			continue;
+		}
+		if ((p = strstr(line, "kof_ovl_strings(")) != NULL) {
+			const char *ge = strstr(p, ">=");
+
+			if (str_pct)
+				*str_pct = ge ? (uint8_t)strtoul(ge + 2, NULL, 10)
+					      : 50u;
+			pending |= 4u;
+		}
+		if ((p = strstr(line, "kof_ovl_shape(")) != NULL) {
+			const char *ge = strstr(p, ">=");
+
+			if (shp_pct)
+				*shp_pct = ge ? (uint8_t)strtoul(ge + 2, NULL, 10)
+					      : 70u;
+			pending |= 2u;
+		}
 		if ((p = strstr(line, "KOF_SCAN_INFECT(")) != NULL ||
 		    (p = strstr(line, "KOF_SCAN_SUSPECT(")) != NULL) {
-			verdict->level = strstr(line, "SUSPECT") ? LV_SUSPECT
-								 : LV_INFECT;
+			int lvl = strstr(line, "SUSPECT") ? LV_SUSPECT
+							  : LV_INFECT;
+
+			/* Every measure the line above named concludes this,
+			 * because they shared the `if` that reached it. */
+			if (pending & 2u) {
+				if (shp_level)
+					*shp_level = lvl;
+			}
+			if (pending & 4u) {
+				if (str_level)
+					*str_level = lvl;
+			}
+			if (pending & 8u) {
+				if (blkv_level)
+					*blkv_level = lvl;
+			}
+			if (pending & ~1u) {
+				pending = 0;
+				continue;
+			}
+			pending = 0;
+			verdict->level = lvl;
 			if (strstr(p, "KOF_MALVAR_GENERIC"))
 				verdict->kind = 1;
 			else if (strstr(p, "KOF_MALVAR_AUTO"))
@@ -6016,6 +6286,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 						(strstr(line, "||") ? 0 : 1);
 					break;
 				}
+			pending |= 1u;
 			continue;
 		}
 	}
@@ -6042,5 +6313,8 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		n = keep;
 	}
 	*n_blk = n;
-	return n != 0;
+	/* A rule may be all shape and no block, which is still a rule this
+	 * panel wrote and must be able to open. */
+	return n != 0 || e->dr.has_shp || e->dr.n_str != 0 ||
+	       e->dr.n_blkv != 0;
 }

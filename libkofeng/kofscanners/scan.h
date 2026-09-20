@@ -18,6 +18,7 @@
 #include "../kofdb/kofdb.h"
 #include "../kofmatchers/kofmatch.h"
 #include "../kofmatchers/kofplague.h"
+#include "../kofoverlord/kofoverlord.h"
 #include "../kofparsers/binaries/elf_parse.h"
 #include "../kofparsers/binaries/pe_parse.h"
 #include "../kofunpack/pe_rebuild.h"
@@ -60,6 +61,16 @@ struct kof_scanner {
 	 * what keeps a build with no plague rules from allocating anything.
 	 */
 	struct kof_plague_ctx plague;
+	/*
+	 * THIS OBJECT'S OWN STRING SET, for kof_ovl_strings.
+	 *
+	 * Built once per object in the same prepass the plague feed runs in,
+	 * and only when some loaded module could ask - see ovl_wanted. A
+	 * pointer because the descriptor carries a four-thousand entry pool and
+	 * a scanner that never meets an ELF should not hold one.
+	 */
+	struct kof_ovl_desc *ovl;
+	int                  ovl_ready;
 	/*
 	 * THE HIGHEST PLAGUE SCORE THE MODULE BEING RUN HAS ASKED ABOUT.
 	 *

@@ -85,6 +85,19 @@ struct kof_elf_info;
  */
 #define KOF_OVL_MAX_STRINGS 4096u
 
+/*
+ * Block hashes one descriptor keeps.
+ *
+ * The same selected-window hashes plague cuts its blocks from - see
+ * kof_plague_hash_span - but taken over the whole object rather than carved
+ * into named runs. That is the difference between the two measures: plague
+ * asks how much of ONE declared run is here and is anchored to the region it
+ * was cut from; this asks how much of the reference's WHOLE set is here and is
+ * anchored to nothing, which is what lets it survive a rebuild that moved
+ * everything.
+ */
+#define KOF_OVL_MAX_BLOCKS 8192u
+
 /* The shortest printable run that counts as a string. Six, as measured. */
 #define KOF_OVL_MIN_STRING 6u
 
@@ -113,6 +126,8 @@ struct kof_ovl_desc {
 	struct kof_ovl_region region[KOF_OVL_MAX_REGIONS];
 	uint32_t n_str;
 	uint64_t str[KOF_OVL_MAX_STRINGS];   /* sorted, deduplicated, per region */
+	uint32_t n_blk;
+	uint32_t blk[KOF_OVL_MAX_BLOCKS];    /* sorted, deduplicated             */
 };
 
 /* Which dimensions of a comparison had an answer. */
@@ -181,6 +196,30 @@ enum kof_ovl_track {
 };
 
 uint32_t kof_ovl_verdict(const struct kof_ovl_vec *v);
+
+/*
+ * HOW MUCH OF A REFERENCE'S STRING SET THIS OBJECT HOLDS, nought to a hundred.
+ *
+ * Containment and not Jaccard: a rule names a reference's strings and asks how
+ * many of them are here, the same measurement kof_plague_score already makes of
+ * a block. Jaccard would also punish the object for strings the reference never
+ * had, which is the wrong question - a variant that ADDED a string is still the
+ * same program.
+ *
+ * Both sides sorted, so this is a merge. `ref` is the module's own array, in
+ * its .rodata, and is not written to.
+ */
+uint32_t kof_ovl_strings_pct(const uint64_t *obj, uint32_t n_obj,
+			     const uint64_t *ref, uint32_t n_ref);
+
+/*
+ * THE SAME MEASUREMENT OVER BLOCK HASHES.
+ *
+ * Containment again - how much of the reference's set is here - and for the
+ * same reason: a variant that grew a function is still the same program.
+ */
+uint32_t kof_ovl_blocks_pct(const uint32_t *obj, uint32_t n_obj,
+			    const uint32_t *ref, uint32_t n_ref);
 const char *kof_ovl_track_name(uint32_t track);
 
 /*

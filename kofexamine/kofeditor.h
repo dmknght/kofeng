@@ -404,6 +404,14 @@ struct group {
  * similarity rule that nothing but the author can answer. */
 #define GRP_PCT_DEFAULT 60u
 
+/* How many of a reference's strings a draft keeps. Measured: the median sample
+ * yields 74 and three in four are under 327. */
+#define DRAFT_MAX_STR 1024u
+
+/* And how many block hashes. Larger because a window is selected far more often
+ * than a printable run of six is found. */
+#define DRAFT_MAX_BLKV 2048u
+
 /* The kinds, spelled rather than counted at the point of use. */
 #define GRP_KIND_STR    0u
 #define GRP_KIND_BLOCK  1u
@@ -425,6 +433,38 @@ struct group {
  * the draft's, since a draft describes one object.
  */
 #define GRP_KIND_STRUCT 2u
+/*
+ * THE OBJECT'S STRING SET, which is content without being a place.
+ *
+ * A block matcher scores a RUN OF BYTES and moves when anything before it
+ * changes; this scores a SET, which has no order to disturb. Measured across
+ * architectures, two builds of one botnet share 0.000 of their code blocks and
+ * 0.4 to 0.94 of their strings - so this is the matcher that survives a
+ * recompile for another target, and the block matcher is the one that is exact.
+ *
+ * `pct` is the threshold, as for the other two. The set it is about is the
+ * draft's, like the shape: a draft describes one object.
+ */
+#define GRP_KIND_STRSHAPE 3u
+/*
+ * THE BLOCK VECTOR - how alike the object is across ALL the chosen blocks, not
+ * how much of any one of them is here.
+ *
+ * A block matcher answers about one block and a rule made of several is several
+ * matchers, each with its own threshold and each able to fire alone. That is
+ * the right shape when a researcher picked one run of bytes and means THAT run.
+ * It is the wrong shape for "this object is built like that one": there the
+ * evidence is that the blocks agree TOGETHER, and a mean over them is one
+ * measurement where N thresholds are N.
+ *
+ * Measured: the mean over the chosen blocks beat the best single one - 83.0%
+ * against 81.8% at the same zero false positives - because agreement in every
+ * region is what a rebuild preserves and a coincidence does not.
+ *
+ * It names no block: it is about every block the draft has ticked, and the
+ * generated module writes the mean out as one expression - see emit_matcher.
+ */
+#define GRP_KIND_BLKVEC 4u
 
 struct cond {
 	char     expr[64];          /* over matcher ids */
@@ -573,6 +613,24 @@ struct kof_draft {
 	 */
 	struct kof_ovl_shape shp;
 	int          has_shp;
+	/*
+	 * AND ITS STRINGS, after the static library was subtracted.
+	 *
+	 * A fixed array rather than a pointer: a thousand is well past the 327
+	 * a three-quarters of samples reach, and a draft that is copied about
+	 * should not carry an allocation somebody has to remember to free.
+	 */
+	uint64_t     str[DRAFT_MAX_STR];
+	uint32_t     n_str;
+	/*
+	 * AND ITS BLOCK HASHES, from the same bytes and the same cut.
+	 *
+	 * Not the blocks of the table above: those are named runs a researcher
+	 * picked and each is its own matcher. This is the object's whole set,
+	 * which is what the block-vector measure is over - see GRP_KIND_BLKVEC.
+	 */
+	uint32_t     blkv[DRAFT_MAX_BLKV];
+	uint32_t     n_blkv;
 	char         sedit[DECL_HEXS_CAP];
 	uint32_t     sedit_off;
 	struct range rng[MAX_RANGE];
@@ -1149,10 +1207,21 @@ void blk_moved(struct kof_editor *e, uint32_t from, uint32_t to);
  *
  * Non-zero when the file was read and held at least one block.
  */
+/*
+ * `shp_pct` comes back non-zero when the rule declared a SHAPE and asked about
+ * it, and e->dr.shp holds what it declared - so a rule written by the panel
+ * opens in the panel with the same matchers it was written with. `shp_level` is
+ * that matcher's own verdict, which is not the blocks': a rule concludes
+ * different things from content and from geometry, and reading one verdict for
+ * the file would quietly move one of them.
+ */
 int plague_from_source(struct kof_editor *e, const char *path,
 		       struct kof_plague_decl *blk, uint32_t max_blk,
 		       uint32_t *n_blk, uint32_t *pool, uint32_t pool_max,
-		       struct kof_verdict_decl *verdict);
+		       struct kof_verdict_decl *verdict,
+		       uint8_t *shp_pct, int *shp_level,
+		       uint8_t *str_pct, int *str_level,
+		       uint8_t *blkv_pct, int *blkv_level);
 
 
 /*

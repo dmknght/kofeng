@@ -152,6 +152,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc->bz);
 	free(sc->lzx);
 	kof_plague_ctx_done(&sc->plague);
+	free(sc->ovl);
 	free(sc->lzh);
 	kof_xref_free(sc->use);
 	free(sc->sym);
@@ -1895,6 +1896,16 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * bytes pays one pass, not three.
 	 */
 	plague_prepass(sc, &ctx, present, from_packer);
+	/*
+	 * THIS OBJECT'S STRING SET IS NOT THE LAST ONE'S.
+	 *
+	 * Here and not inside plague_prepass, which returns early when no pack
+	 * carried a block: a database with no plague rules would then have left
+	 * the previous object's set in place, and every kof_ovl_strings rule
+	 * would have measured the wrong file. Built on the first ask - see
+	 * c_ovl_strings - so this costs a store.
+	 */
+	sc->ovl_ready = 0;
 
 	/*
 	 * ONLY THE MODULES THAT COULD TARGET THIS FORMAT - see kof_engine.mod_at.

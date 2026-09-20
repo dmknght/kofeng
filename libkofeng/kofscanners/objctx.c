@@ -32,6 +32,7 @@
 #include "../kofparsers/binaries/pe_sym.h"
 #include "../kofdisasm/xref.h"
 #include "scan.h"
+#include <kofmod/elf.h>
 #include "../kofunpack/emu_unpack.h"
 #include "../kofunpack/elf_rebuild.h"
 
@@ -3148,6 +3149,79 @@ static uint32_t c_plague_score(const struct kof_obj_ctx *ctx, uint32_t block_id)
 	}
 }
 
+/*
+ * HOW MUCH OF A REFERENCE'S STRING SET THIS OBJECT HOLDS.
+ *
+ * BUILT ON FIRST ASK, not in a prepass. The set costs one pass over the
+ * loadable regions and most objects meet no rule that wants one, so the work
+ * happens when somebody asks and never otherwise. Asked twice, the second call
+ * is a merge over two sorted arrays.
+ *
+ * ELF ONLY, because the set is defined by what the static library is not - see
+ * koflib.h - and that subtraction is an ELF answer. Anything else answers zero,
+ * which is the same answer as "none of it was there": a rule cannot tell those
+ * apart and must not try.
+ */
+/*
+ * THE OBJECT'S OWN SETS, built on the first ask and shared by both measures.
+ *
+ * One pass over the loadable regions yields the strings and the block hashes
+ * together - they are cut from the same bytes, with the same library already
+ * out - so asking for either builds both and asking for the second costs
+ * nothing. Returns NULL for anything this cannot describe.
+ */
+static const struct kof_ovl_desc *ovl_of(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc)
+		return 0;
+	if (!sc->ovl_ready) {
+		sc->ovl_ready = 1;
+		if (ctx->format == KOF_FMT_ELF && ctx->file_header) {
+			if (!sc->ovl)
+				sc->ovl = malloc(sizeof *sc->ovl);
+			if (sc->ovl &&
+			    !kof_ovl_build(sc->ovl, mc(ctx)->data,
+					   kof_elf(ctx))) {
+				/* Nothing describable: leave it built and
+				 * empty rather than rebuilding on every ask. */
+				sc->ovl->n_str = 0;
+				sc->ovl->n_blk = 0;
+			}
+		}
+	}
+	return sc->ovl;
+}
+
+static uint32_t c_ovl_strings(const struct kof_obj_ctx *ctx,
+			      const uint64_t *ref, uint32_t n_ref)
+{
+	const struct kof_ovl_desc *d;
+
+	if (!ref || !n_ref)
+		return 0;
+	d = ovl_of(ctx);
+	if (!d || !d->n_str)
+		return 0;
+	return kof_ovl_strings_pct(d->str, d->n_str, ref, n_ref);
+}
+
+/* The same question over block hashes - see c_ovl_strings, which builds the
+ * descriptor both of them read. */
+static uint32_t c_ovl_blocks(const struct kof_obj_ctx *ctx,
+			     const uint32_t *ref, uint32_t n_ref)
+{
+	const struct kof_ovl_desc *d;
+
+	if (!ref || !n_ref)
+		return 0;
+	d = ovl_of(ctx);
+	if (!d || !d->n_blk)
+		return 0;
+	return kof_ovl_blocks_pct(d->blk, d->n_blk, ref, n_ref);
+}
+
 static const struct kof_content kof_detect_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -3157,7 +3231,7 @@ static const struct kof_content kof_detect_vtable = {
 	 * not about who is asking, and a rule that wants to know whether its
 	 * neighbours care about a format is asking a fair question. */
 	c_fmt_wanted, c_region_shape, c_region_entropy, c_entropy_at,
-	c_plague_score
+	c_plague_score, c_ovl_strings, c_ovl_blocks
 };
 
 static const struct kof_content kof_unpack_vtable = {
@@ -3167,7 +3241,8 @@ static const struct kof_content kof_unpack_vtable = {
 	c_unpack_chain, c_find_str_where,
 	c_gather, c_name_next, c_incomplete,
 	c_unpack_entry, c_syms, c_data_xref, c_fmt_wanted, c_region_shape,
-	c_region_entropy, c_entropy_at, c_plague_score
+	c_region_entropy, c_entropy_at, c_plague_score, c_ovl_strings,
+	c_ovl_blocks
 };
 
 /*
