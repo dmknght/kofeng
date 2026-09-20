@@ -1131,9 +1131,18 @@ struct kofw_health {
  * being handed over. Both counters are reported, and a record refused here is
  * counted in kofw_health.filtered rather than vanishing.
  */
+_Static_assert(KOF_EVT_TYPE_COUNT <= 32,
+	       "kofw_filter.types is a 32-bit mask of 1u << verb");
+
 struct kofw_filter {
 	/*
 	 * Types to keep, as 1u << enum kof_evt_verb. Zero keeps all of them.
+	 *
+	 * THIRTY-TWO VERBS IS THE CEILING, and it is asserted because nothing
+	 * about adding a verb would otherwise say so: the shift is in a tool,
+	 * the enum is in another library, and 1u << 32 is undefined behaviour
+	 * rather than a filter that quietly keeps the wrong records. The count
+	 * went from 23 to 28 the day the Linux process verbs landed.
 	 */
 	uint32_t types;
 

@@ -401,6 +401,11 @@ const char *kof_evt_verb_name(uint16_t verb)
 	case KOF_EVT_THREAD_START:  return "ThreadNew";
 	case KOF_EVT_THREAD_STOP:   return "ThreadEnd";
 	case KOF_EVT_AMSI_SCAN:     return "AmsiScan";
+	case KOF_EVT_PROC_ATTACH:   return "ProcAttach";
+	case KOF_EVT_PROC_PRIVILEGE: return "ProcPriv";
+	case KOF_EVT_PROC_SESSION:  return "ProcSession";
+	case KOF_EVT_PROC_RENAME:   return "ProcRename";
+	case KOF_EVT_PROC_CRASH:    return "ProcCrash";
 	case KOF_EVT_CONT:          return "Cont";
 	case KOF_EVT_DNS_QUERY:     return "DnsQuery";
 	case KOF_EVT_PROC_INFO:     return "ProcInfo";
@@ -453,6 +458,17 @@ enum kof_evt_kind kof_evt_kind_of(uint16_t verb)
 	switch (verb) {
 	case KOF_EVT_PROC_START:
 	case KOF_EVT_PROC_STOP:
+	/*
+	 * AND THE FIVE THAT ARE ALSO ABOUT A PROCESS. They carry the same
+	 * payload - a create time, a session, an exit code where there is one -
+	 * and a kind that said otherwise would hand kof_evt_as_proc a NULL for
+	 * a record plainly about a process.
+	 */
+	case KOF_EVT_PROC_ATTACH:
+	case KOF_EVT_PROC_PRIVILEGE:
+	case KOF_EVT_PROC_SESSION:
+	case KOF_EVT_PROC_RENAME:
+	case KOF_EVT_PROC_CRASH:
 		return KOF_EK_PROC;
 
 	/*

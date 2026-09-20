@@ -355,6 +355,88 @@ enum kof_evt_verb {
 	 */
 	KOF_EVT_PROC_INFO = 22,
 
+	/*
+	 * ============================================================
+	 * WHAT A PROCESS DID TO ITSELF OR TO ANOTHER
+	 * ============================================================
+	 *
+	 * Five things the Linux process connector reports that had no verb.
+	 * They arrived as KOF_EVT_RAW with an id and a dictionary entry, which
+	 * is what RAW is for - it let a discovery run see what was actually
+	 * coming out before anybody decided which of it was worth naming. This
+	 * is that decision.
+	 *
+	 * ONLY LINUX FILLS THEM TODAY, AND THAT IS ALLOWED. The registry verbs
+	 * above are Windows-only and always will be; the rule kofantarc.h
+	 * states - do not add without the same thing being true on the other
+	 * platform - is about enum kof_evt_loc, where a location that exists
+	 * on one side and not the other makes the two columns disagree. A verb
+	 * names a thing that happened, and a machine that cannot do the thing
+	 * simply never raises it.
+	 *
+	 * Where Windows HAS a counterpart it is named below, because the day
+	 * somebody wires it up the question will be which verb it is - and the
+	 * answer should already be written down.
+	 *
+	 * TWENTY-THREE AND UP, WHICH MEANS THEY CANNOT BE RULE TARGETS. An
+	 * event target's value IS its verb - see KOF_TARGET_FIRST_EVENT in
+	 * kofsig.h - and the target axis reserved only 19 to 22 for verbs;
+	 * file formats own everything above, starting with CHM at 23. So these
+	 * can be filtered, counted, logged and correlated, and a module cannot
+	 * declare itself to be about one. That is the same position
+	 * KOF_EVT_PROC_START has been in since the beginning, and the fix if it
+	 * ever matters is to widen the axis rather than to renumber records
+	 * already on disk.
+	 */
+
+	/*
+	 * ONE PROCESS ATTACHED TO ANOTHER to inspect or control it.
+	 * Linux: ptrace. Windows: OpenProcess with the debug or VM-write
+	 * rights, which Kernel-Audit-API-Calls reports.
+	 * The ACTOR is the one attaching and the subject is the one attached
+	 * to - see kof_evt.actor_pid, which for this verb is the whole point.
+	 * T1055 is decided by a rule, not here: a debugger is the same event.
+	 */
+	KOF_EVT_PROC_ATTACH = 23,
+
+	/*
+	 * A PROCESS CHANGED THE IDENTITY IT RUNS AS.
+	 * Linux: setuid, setgid and their real/effective halves. Windows: a
+	 * token adjusted or impersonated.
+	 * One verb for both halves because the fact is one - the identity
+	 * moved - and which ids it moved between is detail the record carries
+	 * in its text rather than a second verb.
+	 */
+	KOF_EVT_PROC_PRIVILEGE = 24,
+
+	/*
+	 * A PROCESS LEFT ITS SESSION AND LED A NEW ONE.
+	 * Linux: setsid, which is how a thing daemonises - it is the step that
+	 * detaches from the terminal that started it. No Windows counterpart:
+	 * a session there is assigned at logon and a process does not leave
+	 * one.
+	 */
+	KOF_EVT_PROC_SESSION = 25,
+
+	/*
+	 * A PROCESS CHANGED THE NAME IT REPORTS AS.
+	 * Linux: comm, which every tool from ps to a sensor reads as the
+	 * process's name while the image on disk is unchanged. No Windows
+	 * counterpart for a process; the nearest thing is naming a thread,
+	 * which is a different object.
+	 */
+	KOF_EVT_PROC_RENAME = 26,
+
+	/*
+	 * A PROCESS DUMPED CORE.
+	 * Linux: coredump. Windows: the error-reporting path.
+	 * Low value alone and typed anyway, for the reason IMAGE_UNLOAD gives
+	 * two entries up: the id is already being let through, and arriving as
+	 * RAW it cost the same and told nobody anything. A burst of them is
+	 * also what an exploit that is not working yet looks like.
+	 */
+	KOF_EVT_PROC_CRASH = 27,
+
 	KOF_EVT_TYPE_COUNT
 };
 
@@ -381,6 +463,7 @@ enum kof_evt_source {
 
 /* "process", "file", ... Never NULL. */
 const char *kof_evt_source_name(uint8_t src);
+
 
 /* "ProcStart", "RegSet", ... Never NULL, so a record written by a build that
  * knew one more verb still prints as something. */

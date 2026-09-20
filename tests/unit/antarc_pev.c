@@ -35,6 +35,68 @@ static void ok(int cond, const char *what)
 		failures++;
 }
 
+/*
+ * EVERY VERB THIS COLLECTOR CAN EMIT HAS A NAME, AND THEY ARE ALL DIFFERENT.
+ *
+ * ptrace, setuid, setsid, comm and coredump used to arrive as KOF_EVT_RAW with
+ * an id and a dictionary to explain it. They have verbs now - see the note
+ * above KOF_EVT_PROC_ATTACH - and a verb IS the name, so what has to hold is
+ * that the neutral vocabulary actually knows them: a verb kof_evt_verb_name
+ * cannot name is a record that prints as a number in every log and report.
+ *
+ * Distinctness is checked because these were added as a block, and a
+ * copy-pasted case label returning the neighbour's string is the exact mistake
+ * a block of five invites.
+ */
+static void verbs_are_named(void)
+{
+	static const uint16_t V[] = {
+		KOF_EVT_PROC_START, KOF_EVT_PROC_STOP,
+		KOF_EVT_PROC_ATTACH, KOF_EVT_PROC_PRIVILEGE,
+		KOF_EVT_PROC_SESSION, KOF_EVT_PROC_RENAME,
+		KOF_EVT_PROC_CRASH,
+		/* The collector emits these too - a task that is not its own
+		 * group leader is a thread, see ev_tgid. */
+		KOF_EVT_THREAD_START, KOF_EVT_THREAD_STOP
+	};
+	size_t n = sizeof V / sizeof V[0], i, j;
+	int named = 1, distinct = 1, proc_kind = 1;
+
+	for (i = 0; i < n; i++) {
+		const char *a = kof_evt_verb_name(V[i]);
+
+		if (!a || !*a || !strcmp(a, "?"))
+			named = 0;
+		/*
+		 * AND EACH IS A PROCESS RECORD. kof_evt_kind_of decides which
+		 * half of the union a reader may touch, and a verb plainly
+		 * about a process that answered otherwise would hand
+		 * kof_evt_as_proc a NULL.
+		 */
+		/*
+		 * A THREAD RECORD IS NOT A PROCESS RECORD. kof_evt_kind_of
+		 * files the thread verbs with the image loads, because what
+		 * they name is a place in memory rather than a process's own
+		 * facts - so they are exempt from this check rather than
+		 * quietly expected to fail it.
+		 */
+		if (V[i] != KOF_EVT_THREAD_START &&
+		    V[i] != KOF_EVT_THREAD_STOP &&
+		    kof_evt_kind_of(V[i]) != KOF_EK_PROC)
+			proc_kind = 0;
+		for (j = i + 1; j < n; j++)
+			if (!strcmp(a, kof_evt_verb_name(V[j])))
+				distinct = 0;
+	}
+	ok(named, "every process verb has a name");
+	ok(distinct, "and no two of them share one");
+	ok(proc_kind, "and each is a process-kind record");
+	printf("       ");
+	for (i = 0; i < n; i++)
+		printf("%s ", kof_evt_verb_name(V[i]));
+	printf("\n");
+}
+
 int main(void)
 {
 	struct kofa_pev_option o;
@@ -61,6 +123,7 @@ int main(void)
 		 * a dropped event is a gap. */
 		ok(!kofa_pev_is_own_image(NULL, 1, "/bin/true", 0),
 		   "the duplicate test refuses without a session");
+		verbs_are_named();
 		if (p)
 			kofa_pev_close(p);
 		printf("antarc pev: %s\n", failures ? "FAILED" : "ok");
@@ -82,7 +145,7 @@ int main(void)
 	{
 		struct kof_evt e;
 		int saw_start = 0, saw_path = 0, saw_stop = 0, i;
-		int saw_parent = 0, dedup = 0;
+		int saw_parent = 0, dedup = 0, stop_tid_ok = 1;
 		char img[512];
 		pid_t kid = fork();
 
@@ -124,8 +187,19 @@ int main(void)
 					dedup = 1;
 			}
 			if (e.verb == KOF_EVT_PROC_STOP &&
-			    e.pid == (uint32_t)kid)
+			    e.pid == (uint32_t)kid) {
 				saw_stop = 1;
+				/*
+				 * A PROCESS STOP IS ITS LEADER'S. The task and
+				 * the thread group are the same number there,
+				 * and a record where they differ would be a
+				 * thread's exit filed as the program ending -
+				 * which is what this used to do, dozens of
+				 * times over, on anything threaded.
+				 */
+				if (e.tid && e.tid != e.pid)
+					stop_tid_ok = 0;
+			}
 			if (saw_start && saw_stop)
 				break;
 		}
@@ -137,6 +211,8 @@ int main(void)
 		   "the start names the parent, and the parent is the actor");
 		ok(dedup,
 		   "an exec-open of that image is recognised as the duplicate");
+		ok(stop_tid_ok,
+		   "a process stop names the leader task, not a thread");
 	}
 
 	/*

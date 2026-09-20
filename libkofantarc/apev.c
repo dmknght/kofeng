@@ -224,53 +224,98 @@ static int read_cmdline(uint32_t pid, char *out, size_t cap)
 /* ------------------------------------------------------------ the record */
 
 /*
- * WHAT AN UNTYPED CONNECTOR EVENT SAYS, in one line.
+ * THE CONNECTOR'S BITMASK TO THE VERB THAT NAMES IT.
  *
- * Written into the record's text so the event carries its own meaning: a RAW
- * record is an id and a blob otherwise, and an id nobody has typed yet is
- * exactly the thing a reader is trying to understand - see KOF_EVT_RAW.
+ * These arrived as KOF_EVT_RAW carrying an id while nobody had decided which
+ * of them was worth naming - which is what RAW is for. They have verbs now,
+ * so the id is gone with the dictionary that explained it: a verb IS the name,
+ * and carrying both would be two vocabularies for one fact.
+ *
+ * KOF_EVT_NONE when this build files the event some other way, or not at all.
  */
-static void raw_detail(const struct proc_event *ev, char *out, size_t cap)
+static uint16_t verb_of(uint32_t what)
 {
+	switch (what) {
+	case PROC_EVENT_EXEC:     return KOF_EVT_PROC_START;
+	case PROC_EVENT_EXIT:     return KOF_EVT_PROC_STOP;
+	case PROC_EVENT_PTRACE:   return KOF_EVT_PROC_ATTACH;
+	case PROC_EVENT_UID:
+	case PROC_EVENT_GID:      return KOF_EVT_PROC_PRIVILEGE;
+	case PROC_EVENT_SID:      return KOF_EVT_PROC_SESSION;
+	case PROC_EVENT_COMM:     return KOF_EVT_PROC_RENAME;
+	case PROC_EVENT_COREDUMP: return KOF_EVT_PROC_CRASH;
+	default:                  return KOF_EVT_NONE;
+	}
+}
+
+/*
+ * THE DETAIL THE VERB CANNOT HOLD.
+ *
+ * The verb says what KIND of thing happened and is the same for every record
+ * of that kind. What differs per record - which tracer, which uid, which new
+ * name - goes in the record's own text, because a verb that had to carry it
+ * would be a format string rather than a name.
+ *
+ * Empty for the ones where the verb IS the whole fact: a setsid says a process
+ * led a new session and there is nothing to add, and a line that printed the
+ * verb twice would be noise.
+ */
+static void verb_detail(const struct proc_event *ev, char *out, size_t cap)
+{
+	out[0] = '\0';
 	switch (ev->what) {
 	case PROC_EVENT_PTRACE:
-		snprintf(out, cap, "ptrace tracer=%d",
+		snprintf(out, cap, "tracer=%d",
 			 (int)ev->event_data.ptrace.tracer_tgid);
 		break;
 	case PROC_EVENT_UID:
-		snprintf(out, cap, "uid ruid=%u euid=%u",
+		snprintf(out, cap, "ruid=%u euid=%u",
 			 (unsigned)ev->event_data.id.r.ruid,
 			 (unsigned)ev->event_data.id.e.euid);
 		break;
 	case PROC_EVENT_GID:
-		snprintf(out, cap, "gid rgid=%u egid=%u",
+		snprintf(out, cap, "rgid=%u egid=%u",
 			 (unsigned)ev->event_data.id.r.rgid,
 			 (unsigned)ev->event_data.id.e.egid);
 		break;
-	case PROC_EVENT_SID:
-		snprintf(out, cap, "setsid");
-		break;
 	case PROC_EVENT_COMM:
-		snprintf(out, cap, "comm %.*s", (int)sizeof
+		snprintf(out, cap, "%.*s", (int)sizeof
 			 ev->event_data.comm.comm, ev->event_data.comm.comm);
 		break;
-	case PROC_EVENT_COREDUMP:
-		snprintf(out, cap, "coredump");
-		break;
 	default:
-		snprintf(out, cap, "proc_event 0x%08x", (unsigned)ev->what);
 		break;
 	}
 }
 
 /*
- * THE SUBJECT OF A CONNECTOR RECORD, whichever member of the union it is in.
+ * ============================================================
+ * A TASK IS NOT A PROCESS, AND THE CONNECTOR SAYS WHICH
+ * ============================================================
  *
- * Every one of them names the process it is about in the same two fields under
- * a different member name, and reading the right member per type is four lines
- * of switch that were otherwise going to be repeated in every caller.
+ * Every record carries two numbers: process_pid is the TASK - what Linux
+ * schedules, what userspace calls a thread - and process_tgid is the thread
+ * group it belongs to, which is what everything outside the kernel calls the
+ * process. They are equal for a single-threaded program and for the leader of
+ * a threaded one, and different for every other thread.
+ *
+ * READING ONLY THE TGID, WHICH IS WHAT THIS DID FIRST, IS WRONG IN BOTH
+ * DIRECTIONS:
+ *
+ *   a THREAD exiting arrives as PROC_EVENT_EXIT with pid != tgid, and filed
+ *   under the tgid it says the whole process stopped - on a threaded program
+ *   that is dozens of stops for a process that is still running, and worse,
+ *   the first of them takes the table entry so the REAL stop is then dropped
+ *   as a stop with no start;
+ *
+ *   a THREAD being created arrives as PROC_EVENT_FORK with child_pid !=
+ *   child_tgid, and recorded as a process it overwrites the parent of the
+ *   process that already owns that tgid.
+ *
+ * So the pair is read as a pair, and the difference between them decides which
+ * verb the record gets - see KOF_EVT_THREAD_START, which exists for this and
+ * which the Windows side has filled from the beginning.
  */
-static uint32_t ev_pid(const struct proc_event *ev)
+static uint32_t ev_tgid(const struct proc_event *ev)
 {
 	switch (ev->what) {
 	case PROC_EVENT_FORK:   return (uint32_t)ev->event_data.fork.child_tgid;
@@ -287,10 +332,31 @@ static uint32_t ev_pid(const struct proc_event *ev)
 	}
 }
 
+static uint32_t ev_tid(const struct proc_event *ev)
+{
+	switch (ev->what) {
+	case PROC_EVENT_FORK:   return (uint32_t)ev->event_data.fork.child_pid;
+	case PROC_EVENT_EXEC:   return (uint32_t)ev->event_data.exec.process_pid;
+	case PROC_EVENT_EXIT:   return (uint32_t)ev->event_data.exit.process_pid;
+	case PROC_EVENT_UID:
+	case PROC_EVENT_GID:    return (uint32_t)ev->event_data.id.process_pid;
+	case PROC_EVENT_SID:    return (uint32_t)ev->event_data.sid.process_pid;
+	case PROC_EVENT_PTRACE: return (uint32_t)ev->event_data.ptrace.process_pid;
+	case PROC_EVENT_COMM:   return (uint32_t)ev->event_data.comm.process_pid;
+	case PROC_EVENT_COREDUMP:
+		return (uint32_t)ev->event_data.coredump.process_pid;
+	default:                return 0;
+	}
+}
+
 static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 		  struct kof_evt *out)
 {
-	uint32_t pid = ev_pid(ev);
+	uint32_t pid = ev_tgid(ev);
+	uint32_t tid = ev_tid(ev);
+	/* A task that is not its own group leader is a THREAD of the process
+	 * that leads it - see the note on ev_tgid. */
+	int is_thread = tid && tid != pid;
 	struct apev_ent *e;
 	uint16_t verb;
 
@@ -311,6 +377,34 @@ static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 	 * /proc may already be gone.
 	 */
 	if (ev->what == PROC_EVENT_FORK) {
+		/*
+		 * A THREAD, NOT A PROCESS. clone() with CLONE_THREAD arrives
+		 * here too, and recording it would overwrite the parent of the
+		 * process that already owns this tgid with the thread's own
+		 * creator. It is reported as what it is instead.
+		 */
+		if (is_thread) {
+			if (!p->trace_self && pid == p->self_pid)
+				return 0;
+			memset(out, 0, sizeof *out);
+			out->stamp  = (uint64_t)time(NULL);
+			out->seq    = p->seq++;
+			out->verb   = KOF_EVT_THREAD_START;
+			out->os     = KOF_OS_LINUX;
+			out->source = KOF_SRC_PROCESS;
+			out->pid    = pid;
+			out->tid    = tid;
+			out->actor_pid = pid;
+			out->off_object  = KOF_TEXT_NONE;
+			out->off_image   = KOF_TEXT_NONE;
+			out->off_cmdline = KOF_TEXT_NONE;
+			e = ent_find(p, pid);
+			if (e && e->image[0])
+				out->off_image = kof_evt_text_put(out,
+								  e->image);
+			p->produced++;
+			return 1;
+		}
 		e = ent_get(p, pid);
 		if (e) {
 			e->ppid    = (uint32_t)ev->event_data.fork.parent_tgid;
@@ -319,30 +413,19 @@ static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 		return 0;
 	}
 
-	switch (ev->what) {
-	case PROC_EVENT_EXEC: verb = KOF_EVT_PROC_START; break;
-	case PROC_EVENT_EXIT: verb = KOF_EVT_PROC_STOP;  break;
-	/*
-	 * AND THE ONES WITH NO VERB OF THEIR OWN, kept rather than dropped.
-	 *
-	 * A tracer attaching to another process is T1055 evidence; a
-	 * credential change is T1548; a process renaming itself is T1036. The
-	 * neutral vocabulary has no verb for any of them - adding one is a
-	 * decision about BOTH platforms, see the note at the top of
-	 * kofantarc.h - so they arrive as RAW carrying the connector's own id,
-	 * which is exactly what KOF_EVT_RAW exists for.
-	 */
-	case PROC_EVENT_PTRACE:
-	case PROC_EVENT_UID:
-	case PROC_EVENT_GID:
-	case PROC_EVENT_SID:
-	case PROC_EVENT_COMM:
-	case PROC_EVENT_COREDUMP:
-		verb = KOF_EVT_RAW;
-		break;
-	default:
+	verb = verb_of(ev->what);
+	if (!verb)
 		return 0;
-	}
+	/*
+	 * AND AN EXIT IS A THREAD'S EXIT WHEN THE TASK IS NOT THE LEADER.
+	 *
+	 * Filed as a process stop it says a running program ended, dozens of
+	 * times over on anything threaded - and the first one would take the
+	 * table entry, so the process's own stop would then be dropped as a
+	 * stop with no start.
+	 */
+	if (is_thread && verb == KOF_EVT_PROC_STOP)
+		verb = KOF_EVT_THREAD_STOP;
 
 	if (verb == KOF_EVT_PROC_STOP) {
 		/*
@@ -355,6 +438,12 @@ static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 			ent_drop(p, pid);
 			return 0;
 		}
+	} else if (verb == KOF_EVT_THREAD_STOP) {
+		/* The process is still running, so its entry stays - only the
+		 * thread ended. */
+		e = ent_find(p, pid);
+		if (!e || !e->running)
+			return 0;
 	}
 
 	/* This process's own children, unless asked for - see the option. */
@@ -368,28 +457,54 @@ static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 	out->os     = KOF_OS_LINUX;
 	out->source = KOF_SRC_PROCESS;
 	out->pid    = pid;
+	/*
+	 * WHICH TASK, always. Equal to the pid on a single-threaded program,
+	 * and the one fact that says a record is about a thread when it is
+	 * not - a consumer that only looked at the verb could not tell a
+	 * process's own exit from the exit of its leader thread.
+	 */
+	out->tid    = tid;
 	out->off_object  = KOF_TEXT_NONE;
 	out->off_image   = KOF_TEXT_NONE;
 	out->off_cmdline = KOF_TEXT_NONE;
 
-	if (verb == KOF_EVT_RAW) {
+	if (verb == KOF_EVT_THREAD_STOP) {
+		out->actor_pid = pid;
+		{
+			const struct apev_ent *k = ent_find(p, pid);
+
+			if (k && k->image[0])
+				out->off_image = kof_evt_text_put(out,
+								  k->image);
+		}
+		p->produced++;
+		return 1;
+	}
+	if (verb != KOF_EVT_PROC_START && verb != KOF_EVT_PROC_STOP) {
 		char det[160];
 
-		/* The connector's own id, so a reader can look up what
-		 * arrived - see kof_evt.raw_id. */
-		out->raw_id = (uint16_t)(ev->what & 0xffffu);
-		raw_detail(ev, det, sizeof det);
-		out->off_object = kof_evt_text_put(out, det);
+		verb_detail(ev, det, sizeof det);
+		if (det[0])
+			out->off_object = kof_evt_text_put(out, det);
 		/*
 		 * THE TRACER IS THE ACTOR, and it is the whole point of the
-		 * record: a ptrace event is ABOUT the process being attached
-		 * to and is caused by the one attaching.
+		 * record: an attach is ABOUT the process being attached to and
+		 * is caused by the one attaching.
 		 */
-		if (ev->what == PROC_EVENT_PTRACE)
+		if (verb == KOF_EVT_PROC_ATTACH)
 			out->actor_pid =
 				(uint32_t)ev->event_data.ptrace.tracer_tgid;
 		else
 			out->actor_pid = pid;
+		/* The image, when the table already knows it - these arrive
+		 * about a process that is running, so it usually does. */
+		{
+			const struct apev_ent *k = ent_find(p, pid);
+
+			if (k && k->image[0])
+				out->off_image = kof_evt_text_put(out,
+								  k->image);
+		}
 		p->produced++;
 		return 1;
 	}
@@ -403,6 +518,25 @@ static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 		 * reported missing with.
 		 */
 		out->actor_pid = pid;
+		/*
+		 * HOW IT ENDED, through the union's own setter - see the note
+		 * on kof_evt's overlapping members, which says never to reach
+		 * into it directly.
+		 *
+		 * The connector carries both halves and they are different
+		 * facts: a status from exit(), or the signal that killed it. A
+		 * killed process has exit_code zero and would otherwise read
+		 * as a clean exit, which is the difference between a program
+		 * that finished and one that was stopped.
+		 */
+		{
+			struct kof_evt_proc *pr = kof_evt_set_proc(out);
+
+			if (pr)
+				pr->exit_code = ev->event_data.exit.exit_signal
+					? (uint32_t)ev->event_data.exit.exit_signal
+					: (uint32_t)ev->event_data.exit.exit_code;
+		}
 		e = ent_find(p, pid);
 		if (e) {
 			if (e->ppid)

@@ -111,7 +111,18 @@ static void print_reg_data(FILE *out, const struct kof_evt *e)
 void kof_evt_count(const struct kof_evt *e, struct kof_evt_tally *t)
 {
 	switch (e->verb) {
-	case KOF_EVT_PROC_START:     t->proc++;     break;
+	case KOF_EVT_PROC_START:
+	/*
+	 * THE FIVE THAT ARE ALSO PROCESS EVENTS, counted with the starts
+	 * rather than falling through to `raw`. A tally that filed a ptrace
+	 * under "raw" would say this build had not typed it, which is the one
+	 * thing that is no longer true of it.
+	 */
+	case KOF_EVT_PROC_ATTACH:
+	case KOF_EVT_PROC_PRIVILEGE:
+	case KOF_EVT_PROC_SESSION:
+	case KOF_EVT_PROC_RENAME:
+	case KOF_EVT_PROC_CRASH:     t->proc++;     break;
 	case KOF_EVT_IMAGE_LOAD:     t->image++;    break;
 	case KOF_EVT_FILE_NEW:       t->file_new++; break;
 	case KOF_EVT_FILE_DELETE:    t->file_del++; break;
@@ -226,6 +237,28 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 		if (m)
 			fprintf(out, "  start=0x%llx",
 				(unsigned long long)m->addr);
+		break;
+	}
+	/*
+	 * WHAT MAKES ONE OF THESE READABLE IS THE DETAIL, and the detail is
+	 * the collector's - which tracer, which uid, which new name. It is
+	 * written into the record's text at off_object, so the line prints it
+	 * the way every other object-bearing verb does and this branch only
+	 * has to say that.
+	 */
+	case KOF_EVT_PROC_ATTACH:
+	case KOF_EVT_PROC_PRIVILEGE:
+	case KOF_EVT_PROC_SESSION:
+	case KOF_EVT_PROC_RENAME:
+	case KOF_EVT_PROC_CRASH: {
+		const char *what = kof_evt_object(e);
+
+		if (*what)
+			fprintf(out, "  %s", what);
+		/* An attach names two processes and the second one is the
+		 * point - see kof_evt.actor_pid on this verb. */
+		if (e->verb == KOF_EVT_PROC_ATTACH && e->actor_pid)
+			fprintf(out, "  by=%lu", (unsigned long)e->actor_pid);
 		break;
 	}
 	case KOF_EVT_AMSI_SCAN: {
