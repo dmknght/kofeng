@@ -1734,19 +1734,6 @@ int cnd_more_siblings(struct kof_editor *e, uint32_t i)
 }
 
 /* The next condition at this one's level, or n_cnd. */
-static int draft_uses_shape(struct kof_editor *e);
-/* Does any matcher ask about the block vector? */
-static int draft_uses_blkvec(struct kof_editor *e)
-{
-	uint32_t g;
-
-	for (g = 0; g < e->dr.n_grp; g++)
-		if (e->dr.grp[g].kind == GRP_KIND_BLKVEC)
-			return 1;
-	return 0;
-}
-
-static int draft_uses_strshape(struct kof_editor *e);
 
 static uint32_t cnd_sib_next(struct kof_editor *e, uint32_t i)
 {
@@ -2125,31 +2112,53 @@ uint32_t draft_hash(struct kof_editor *e)
 		MIX(e->dr.blk[i].norm);
 		MIX(e->dr.blk[i].anywhere);
 	}
+	/* Ticking a measure is an edit - see kof_draft.sim_use - so a draft
+	 * that reported itself unchanged after one would lose it silently. */
+	for (i = 0; i < 4u; i++)
+		MIX(e->dr.sim_use[i]);
 	for (i = 0; i < e->dr.n_grp; i++) {
+		uint32_t k;
+
 		MIX(e->dr.grp[i].kind);
-		/* A shape matcher is about the draft's own shape, so what
-		 * changes about it is the percentage and the shape itself. */
-		if (e->dr.grp[i].kind == GRP_KIND_STRUCT) {
-			MIX(e->dr.grp[i].pct);
-			MIX((uint32_t)e->dr.shp.fsize);
-			MIX(e->dr.shp.n_region);
+		if (e->dr.grp[i].kind != GRP_KIND_SIM)
 			continue;
-		}
-		if (e->dr.grp[i].kind != GRP_KIND_BLOCK)
-			continue;
-		/*
-		 * WHICH BLOCK, BY ITS NAME - not by where it sits in the list.
-		 *
-		 * The index is a position in a list the carve rebuilds and
-		 * sorts into file order every time the object changes, so
-		 * hashing it made the draft look edited the moment a rule was
-		 * opened: the block it names had simply moved. What the rule
-		 * says is the block's name, and that only changes when the
-		 * block does.
-		 */
-		if (e->dr.grp[i].blk < e->dr.n_blk && e->dr.blk)
-			MIX(e->dr.blk[e->dr.grp[i].blk].id);
+		/* EVERY ITEM, in order, and the one threshold they share:
+		 * adding a measure, taking one out or moving the number are
+		 * all edits, and a draft that reported itself unchanged after
+		 * any of them would be a draft that loses them without
+		 * warning. */
 		MIX(e->dr.grp[i].pct);
+		MIX(e->dr.grp[i].n_sim);
+		for (k = 0; k < e->dr.grp[i].n_sim; k++) {
+			const struct grp_sim_item *it = &e->dr.grp[i].sim[k];
+
+			MIX(it->what);
+			/*
+			 * WHICH BLOCK, BY ITS NAME - not by where it sits in
+			 * the list.
+			 *
+			 * The index is a position in a list the carve rebuilds
+			 * and sorts into file order every time the object
+			 * changes, so hashing it made the draft look edited the
+			 * moment a rule was opened: the block it names had
+			 * simply moved. What the rule says is the block's name,
+			 * and that only changes when the block does.
+			 */
+			if (it->what == SIM_IT_BLOCK) {
+				if (it->blk < e->dr.n_blk && e->dr.blk)
+					MIX(e->dr.blk[it->blk].id);
+			} else if (it->what == SIM_IT_SHAPE) {
+				/* A whole-object measure is about the draft's
+				 * own description of the object, so what
+				 * changes about it is that description. */
+				MIX((uint32_t)e->dr.shp.fsize);
+				MIX(e->dr.shp.n_region);
+			} else if (it->what == SIM_IT_STRSET) {
+				MIX(e->dr.n_str);
+			} else {
+				MIX(e->dr.n_blkv);
+			}
+		}
 	}
 	#undef MIX
 	return h;
@@ -2566,11 +2575,31 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 	 * things it can be written from. A shape rule reads no content at all
 	 * and is still a whole rule - that is the point of it.
 	 */
-	if (!e->dr.n_decl && !draft_uses_blocks(e) && !draft_uses_shape(e) &&
-	    !draft_uses_strshape(e) && !draft_uses_blkvec(e))
+	if (!e->dr.n_decl && !draft_uses_blocks(e) && !draft_uses_sim(e, SIM_IT_SHAPE) &&
+	    !draft_uses_sim(e, SIM_IT_STRSET) && !draft_uses_sim(e, SIM_IT_BLKSET))
 		return "Declare a string, tick a block, or add a matcher";
 	if (!e->dr.n_grp)
 		return "Add a matcher";
+	/*
+	 * A SIMILARITY MATCHER THAT NAMES NO MEASURE.
+	 *
+	 * It is created empty on purpose - which measures it is about is the
+	 * question its own row asks - so the half-finished state is reachable
+	 * and has to be named. Left alone it would emit a comparison against
+	 * nothing; refused here, the panel says which matcher is waiting.
+	 */
+	{
+		static char why_sim[64];
+		uint32_t g;
+
+		for (g = 0; g < e->dr.n_grp; g++)
+			if (e->dr.grp[g].kind == GRP_KIND_SIM &&
+			    !e->dr.grp[g].n_sim) {
+				snprintf(why_sim, sizeof why_sim,
+					 "matcher %u names no measure", g + 1u);
+				return why_sim;
+			}
+	}
 	/*
 	 * A DECLARED BLOCK NOTHING NAMES, which is the same fault as an unused
 	 * marker and is refused for the same reason.
@@ -2590,6 +2619,17 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 				snprintf(why, sizeof why,
 					 "block %08x has no matcher",
 					 e->dr.blk[b].id);
+				return why;
+			}
+		/* And a ticked MEASURE nobody names, which is the same fault
+		 * one step out: the tick chose it and no matcher asked
+		 * anything about it, so it would be written into the file and
+		 * never read. */
+		for (b = 0; b < 4u; b++)
+			if (e->dr.sim_use[b] &&
+			    grp_sim_of(e, b, 0) >= MAX_GROUP) {
+				snprintf(why, sizeof why,
+					 "%s has no matcher", sim_it_word(b));
 				return why;
 			}
 	}
@@ -3306,48 +3346,166 @@ void blk_set_picked(struct kof_editor *e, uint32_t i, int on)
 	e->dr.blk[i].picked = (uint8_t)(on != 0);
 	if (on)
 		return;
-	while ((g = grp_of_block(e, i)) < MAX_GROUP)
-		grp_remove(e, g);
+	/*
+	 * UNTICKING TAKES THE BLOCK OUT OF THE MATCHERS THAT NAME IT, and
+	 * leaves the matchers alone.
+	 *
+	 * It used to remove the whole matcher, which was the same thing back
+	 * when a matcher was one block. A similarity matcher names several
+	 * measures now, so removing it would throw away the others - and the
+	 * matcher is the author's: they added it by hand and it is theirs to
+	 * remove. An emptied one is refused at Save, which is where it matters.
+	 */
+	while ((g = grp_of_block(e, i)) < MAX_GROUP) {
+		uint32_t k;
+
+		for (k = e->dr.grp[g].n_sim; k--; )
+			if (e->dr.grp[g].sim[k].what == SIM_IT_BLOCK &&
+			    e->dr.grp[g].sim[k].blk == i)
+				grp_sim_del(e, g, k);
+	}
 }
 
 /*
- * TURN A MATCHER INTO A BLOCK MATCHER, on the first block it can have.
+ * TURN A MATCHER INTO A SIMILARITY MATCHER, holding nothing yet.
  *
- * Which block it ends up about is chosen on its own row afterwards - the menu
- * that creates it chooses the KIND, the way it does for the four search rules,
- * and a menu that also chose the block would be two questions on one row. The
- * first ticked block is a starting point, not a decision.
- *
- * Zero when there is no block to be about, which is also when the menu does not
- * offer this at all.
+ * Which measures it ends up about is chosen on its own row afterwards - the
+ * menu that creates it chooses the KIND, the way it does for the four search
+ * rules, and a menu that also chose the measures would be two questions on one
+ * row. It used to be given the first ticked block as a starting point; with
+ * several measures to choose between there is no first item that is not a
+ * guess, so it starts empty and its list row says so, exactly as a fresh
+ * search matcher's says "none yet".
  */
-int grp_make_block(struct kof_editor *e, uint32_t g)
+int grp_make_sim(struct kof_editor *e, uint32_t g)
 {
-	uint32_t b;
-
 	if (g >= e->dr.n_grp)
 		return 0;
-	for (b = 0; b < e->dr.n_blk; b++) {
-		if (!blk_usable(e, b))
-			continue;
-		e->dr.grp[g].kind = (uint8_t)GRP_KIND_BLOCK;
-		e->dr.grp[g].blk = b;
+	e->dr.grp[g].kind  = (uint8_t)GRP_KIND_SIM;
+	e->dr.grp[g].n_sim = 0;
+	if (!e->dr.grp[g].pct)
 		e->dr.grp[g].pct = (uint8_t)GRP_PCT_DEFAULT;
-		return 1;
+	return 1;
+}
+
+uint32_t sim_pct_default(uint32_t what)
+{
+	/*
+	 * EACH WHERE IT WAS MEASURED, not one number for all four.
+	 *
+	 * 70 for the shape: it fired on 71.5% of 925 deduplicated botnet
+	 * samples and on none of 3870 clean objects. 50 for the string set:
+	 * 84.6% of the same samples matched another there, against zero of
+	 * 3850 clean. The two block measures keep GRP_PCT_DEFAULT, which is
+	 * where the plague scorer was measured.
+	 *
+	 * A matcher has one threshold, so this is what the FIRST measure put
+	 * into an empty one sets it to - after that the author owns it.
+	 */
+	switch (what) {
+	case SIM_IT_SHAPE:  return 70u;
+	case SIM_IT_STRSET: return 50u;
+	default:            return GRP_PCT_DEFAULT;
+	}
+}
+
+const char *sim_it_word(uint32_t what)
+{
+	switch (what) {
+	case SIM_IT_SHAPE:  return "file structure";
+	case SIM_IT_STRSET: return "string shape";
+	case SIM_IT_BLKSET: return "smart blocks";
+	default:            return "block";
+	}
+}
+
+int grp_sim_has(const struct kof_editor *e, uint32_t g, uint32_t what,
+		uint32_t blk)
+{
+	uint32_t i;
+
+	if (g >= e->dr.n_grp || e->dr.grp[g].kind != GRP_KIND_SIM)
+		return 0;
+	for (i = 0; i < e->dr.grp[g].n_sim; i++) {
+		const struct grp_sim_item *it = &e->dr.grp[g].sim[i];
+
+		if (it->what != what)
+			continue;
+		/* Only a block is told apart by which one - the other three
+		 * are about the object and there is one of each. */
+		if (what != SIM_IT_BLOCK || it->blk == blk)
+			return 1;
 	}
 	return 0;
 }
 
-/* Is there a block a matcher could be about at all - what the menu asks before
- * offering the kind. */
-int blk_any_usable(const struct kof_editor *e)
+uint32_t grp_sim_of(const struct kof_editor *e, uint32_t what, uint32_t blk)
 {
-	uint32_t b;
+	uint32_t g;
 
-	for (b = 0; b < e->dr.n_blk; b++)
-		if (blk_usable(e, b))
-			return 1;
+	for (g = 0; g < e->dr.n_grp; g++)
+		if (grp_sim_has(e, g, what, blk))
+			return g;
+	return MAX_GROUP;
+}
+
+int draft_uses_sim(const struct kof_editor *e, uint32_t what)
+{
+	uint32_t g, i;
+
+	for (g = 0; g < e->dr.n_grp; g++) {
+		if (e->dr.grp[g].kind != GRP_KIND_SIM)
+			continue;
+		for (i = 0; i < e->dr.grp[g].n_sim; i++)
+			if (e->dr.grp[g].sim[i].what == what) {
+				/* A block item naming a block the carve no
+				 * longer has is not a use of one: the
+				 * declaration emitter would have nothing to
+				 * write and draft_missing_of has to see it. */
+				if (what != SIM_IT_BLOCK ||
+				    e->dr.grp[g].sim[i].blk < e->dr.n_blk)
+					return 1;
+			}
+	}
 	return 0;
+}
+
+int grp_sim_add(struct kof_editor *e, uint32_t g, uint32_t what, uint32_t blk)
+{
+	struct group *q;
+
+	if (g >= e->dr.n_grp)
+		return 0;
+	q = &e->dr.grp[g];
+	if (q->kind != GRP_KIND_SIM)
+		return 0;
+	if (grp_sim_has(e, g, what, blk))
+		return 1;              /* already there, which is success */
+	if (q->n_sim >= GRP_SIM_MAX)
+		return 0;
+	q->sim[q->n_sim].what = (uint8_t)what;
+	q->sim[q->n_sim].blk  = what == SIM_IT_BLOCK ? blk : 0u;
+	/* THE FIRST MEASURE SETS THE THRESHOLD, and only the first: after that
+	 * the number on the row is the author's and adding a second measure
+	 * must not move it under them. */
+	if (!q->n_sim)
+		q->pct = (uint8_t)sim_pct_default(what);
+	q->n_sim++;
+	return 1;
+}
+
+void grp_sim_del(struct kof_editor *e, uint32_t g, uint32_t i)
+{
+	struct group *q;
+
+	if (g >= e->dr.n_grp)
+		return;
+	q = &e->dr.grp[g];
+	if (q->kind != GRP_KIND_SIM || i >= q->n_sim)
+		return;
+	memmove(&q->sim[i], &q->sim[i + 1u],
+		(size_t)(q->n_sim - i - 1u) * sizeof q->sim[0]);
+	q->n_sim--;
 }
 
 /*
@@ -3355,7 +3513,7 @@ int blk_any_usable(const struct kof_editor *e)
  *
  * grp_rule_word answers for the four search rules and means nothing to a block
  * matcher, whose `rule` field is zero - so a menu built from it alone listed a
- * find_block_sim as "find_all", which is a different matcher that this one is
+ * find_similar as "find_all", which is a different matcher that this one is
  * not. Written once because two menus offer the same list and a third would
  * have been written the same wrong way.
  *
@@ -3370,8 +3528,8 @@ void grp_label(const struct kof_editor *e, uint32_t g, char *out, size_t cap)
 		snprintf(out, cap, "%u", g + 1u);
 		return;
 	}
-	if (e->dr.grp[g].kind == GRP_KIND_BLOCK)
-		snprintf(out, cap, "%u  find_block_sim", g + 1u);
+	if (e->dr.grp[g].kind == GRP_KIND_SIM)
+		snprintf(out, cap, "%u  find_similar", g + 1u);
 	else
 		snprintf(out, cap, "%u  find_%s", g + 1u,
 			 grp_rule_word(e->dr.grp[g].rule));
@@ -3403,6 +3561,8 @@ int blk_clears(const struct kof_editor *e, uint32_t i)
 {
 	uint32_t g = grp_of_block(e, i);
 
+	/* The demand is the MATCHER'S threshold, which every measure it names
+	 * has to reach - see struct group.pct. */
 	return g < MAX_GROUP && i < e->dr.n_blk &&
 	       e->dr.blk[i].score >= e->dr.grp[g].pct;
 }
@@ -3425,10 +3585,16 @@ void blk_moved(struct kof_editor *e, uint32_t from, uint32_t to)
 
 	if (from == to)
 		return;
-	for (g = 0; g < e->dr.n_grp; g++)
-		if (e->dr.grp[g].kind == GRP_KIND_BLOCK &&
-		    e->dr.grp[g].blk == from)
-			e->dr.grp[g].blk = to;
+	for (g = 0; g < e->dr.n_grp; g++) {
+		uint32_t i;
+
+		if (e->dr.grp[g].kind != GRP_KIND_SIM)
+			continue;
+		for (i = 0; i < e->dr.grp[g].n_sim; i++)
+			if (e->dr.grp[g].sim[i].what == SIM_IT_BLOCK &&
+			    e->dr.grp[g].sim[i].blk == from)
+				e->dr.grp[g].sim[i].blk = to;
+	}
 }
 
 /*
@@ -3441,13 +3607,7 @@ void blk_moved(struct kof_editor *e, uint32_t from, uint32_t to)
  */
 uint32_t grp_of_block(const struct kof_editor *e, uint32_t blk)
 {
-	uint32_t g;
-
-	for (g = 0; g < e->dr.n_grp; g++)
-		if (e->dr.grp[g].kind == GRP_KIND_BLOCK &&
-		    e->dr.grp[g].blk == blk)
-			return g;
-	return MAX_GROUP;
+	return grp_sim_of(e, SIM_IT_BLOCK, blk);
 }
 
 /*
@@ -3460,35 +3620,7 @@ uint32_t grp_of_block(const struct kof_editor *e, uint32_t blk)
  */
 int draft_uses_blocks(const struct kof_editor *e)
 {
-	uint32_t g;
-
-	for (g = 0; g < e->dr.n_grp; g++)
-		if (e->dr.grp[g].kind == GRP_KIND_BLOCK &&
-		    e->dr.grp[g].blk < e->dr.n_blk)
-			return 1;
-	return 0;
-}
-
-/* Does any matcher ask about the object's shape? */
-static int draft_uses_shape(struct kof_editor *e)
-{
-	uint32_t g;
-
-	for (g = 0; g < e->dr.n_grp; g++)
-		if (e->dr.grp[g].kind == GRP_KIND_STRUCT)
-			return 1;
-	return 0;
-}
-
-/* Does any matcher ask about the object's string set? */
-static int draft_uses_strshape(struct kof_editor *e)
-{
-	uint32_t g;
-
-	for (g = 0; g < e->dr.n_grp; g++)
-		if (e->dr.grp[g].kind == GRP_KIND_STRSHAPE)
-			return 1;
-	return 0;
+	return draft_uses_sim(e, SIM_IT_BLOCK);
 }
 
 void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g)
@@ -3496,49 +3628,76 @@ void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g)
 	const struct group *q = &e->dr.grp[g];
 
 	/*
-	 * A BLOCK MATCHER IS ONE COMPARISON AND NOTHING ELSE.
+	 * A SIMILARITY MATCHER IS ITS ITEMS, ONE COMPARISON APIECE, ALL OF
+	 * THEM AGAINST THE SAME THRESHOLD.
 	 *
-	 * kof_plague_score is a division over counters the prepass already
-	 * filled, so there is no call to share and no count to compare - see
-	 * struct group.kind. The percentage is the matcher's; the block only
-	 * says which counter.
-	 */
-	if (q->kind == GRP_KIND_BLOCK) {
-		if (q->blk < e->dr.n_blk)
-			fprintf(f, "kof_plague_score(blk_%08x) >= %uu",
-				e->dr.blk[q->blk].id, q->pct);
-		return;
-	}
-	/*
-	 * A SHAPE MATCHER IS ALSO ONE COMPARISON, and it reads no bytes at all
-	 * - the arithmetic is inlined from kofmod/kofoverlord.h over facts the
-	 * parse already has. The percentage is the worst-agreeing dimension, so
-	 * this one comparison is a conjunction over all of them.
-	 */
-	if (q->kind == GRP_KIND_STRUCT) {
-		fprintf(f, "kof_ovl_shape(ref_shape) >= %uu", q->pct);
-		return;
-	}
-	/*
-	 * A STRING-SET MATCHER IS ONE COMPARISON TOO, and the set it is about
-	 * is the host's to build - see kof_ovl_strings. The module carries only
-	 * the reference's half.
-	 */
-	if (q->kind == GRP_KIND_STRSHAPE) {
-		fprintf(f, "kof_ovl_strings(ref_strings) >= %uu", q->pct);
-		return;
-	}
-	/*
-	 * THE BLOCK VECTOR, WRITTEN OUT AS THE MEAN IT IS.
+	 * WHICH CALL IS DECIDED BY THE ITEM, not by the matcher: that is the
+	 * whole point of holding them together. Every one of the four is a
+	 * single comparison against a number the engine already has, so there
+	 * is no call to share between them and no count to compare - what the
+	 * item names only says which number.
 	 *
-	 * One expression over every ticked block rather than one matcher per
-	 * block: what this says is that the object is alike ACROSS them, and a
-	 * per-block threshold cannot say that - each of those fires alone. The
-	 * host has no call for a mean and needs none; the arithmetic is the
-	 * rule's, where a reader can see which blocks it is over.
+	 * ANDed, and bracketed whenever there is more than one, because this
+	 * text is dropped into a larger expression whose own operators must not
+	 * reach inside it. Either-of-two is two conditions - see the note on
+	 * GRP_KIND_SIM - and is written that way by the condition editor.
 	 */
-	if (q->kind == GRP_KIND_BLKVEC) {
-		fprintf(f, "kof_ovl_blocks(ref_blocks) >= %uu", q->pct);
+	if (q->kind == GRP_KIND_SIM) {
+		uint32_t i, wrote = 0;
+
+		if (!q->n_sim) {
+			/* Unreachable from the panel - draft_missing_of
+			 * refuses an empty one - so this is what a rule that
+			 * got here another way reads as, rather than an empty
+			 * expression that would not compile. */
+			fprintf(f, "0");
+			return;
+		}
+		if (q->n_sim > 1u)
+			fputc('(', f);
+		for (i = 0; i < q->n_sim; i++) {
+			const struct grp_sim_item *it = &q->sim[i];
+
+			if (it->what == SIM_IT_BLOCK && it->blk >= e->dr.n_blk)
+				continue;
+			if (wrote)
+				fputs(" && ", f);
+			switch (it->what) {
+			case SIM_IT_BLOCK:
+				fprintf(f, "kof_plague_score(blk_%08x) >= %uu",
+					e->dr.blk[it->blk].id, q->pct);
+				break;
+			/*
+			 * THE SHAPE READS NO BYTES AT ALL - the arithmetic is
+			 * inlined from kofmod/kofoverlord.h over facts the
+			 * parse already has. The percentage is the
+			 * worst-agreeing dimension, so this one comparison is
+			 * a conjunction over all of them.
+			 */
+			case SIM_IT_SHAPE:
+				fprintf(f, "kof_ovl_shape(ref_shape) >= %uu",
+					q->pct);
+				break;
+			/*
+			 * THE SET IT IS ABOUT IS THE HOST'S TO BUILD - see
+			 * kof_ovl_strings. The module carries only the
+			 * reference's half.
+			 */
+			case SIM_IT_STRSET:
+				fprintf(f, "kof_ovl_strings(ref_strings) "
+					">= %uu", q->pct);
+				break;
+			default:
+				fprintf(f, "kof_ovl_blocks(ref_blocks) >= %uu",
+					q->pct);
+				break;
+			}
+			wrote++;
+		}
+		if (!wrote)
+			fprintf(f, "0");
+		if (q->n_sim > 1u)
+			fputc(')', f);
 		return;
 	}
 
@@ -4973,8 +5132,8 @@ void generate(struct kof_editor *e, int as_new)
 	 * It stays because the key that runs generate is not gated by the
 	 * button, but it asks the same question the button asked.
 	 */
-	if ((!e->dr.n_decl && !draft_uses_blocks(e) && !draft_uses_shape(e) &&
-	     !draft_uses_strshape(e) && !draft_uses_blkvec(e)) ||
+	if ((!e->dr.n_decl && !draft_uses_blocks(e) && !draft_uses_sim(e, SIM_IT_SHAPE) &&
+	     !draft_uses_sim(e, SIM_IT_STRSET) && !draft_uses_sim(e, SIM_IT_BLKSET)) ||
 	    !e->dr.family[0])
 		return;
 
@@ -5266,7 +5425,7 @@ have_path:
 	fprintf(f, "\n#include <kofmod/kofsig.h>\n");
 	if (draft_uses_blocks(e))
 		fprintf(f, "#include <kofmod/kofplague.h>\n");
-	if (draft_uses_shape(e))
+	if (draft_uses_sim(e, SIM_IT_SHAPE))
 		fprintf(f, "#include <kofmod/kofoverlord.h>\n");
 	fprintf(f, "\n");
 
@@ -5483,13 +5642,24 @@ have_path:
 	{
 		uint32_t g, w, wrote = 0;
 
-		for (g = 0; g < e->dr.n_grp; g++) {
-			const struct group *q = &e->dr.grp[g];
+		for (g = 0; g < e->dr.n_grp * GRP_SIM_MAX; g++) {
+			const struct group *q = &e->dr.grp[g / GRP_SIM_MAX];
+			const struct grp_sim_item *it;
 			const struct plg_block *b;
 
-			if (q->kind != GRP_KIND_BLOCK || q->blk >= e->dr.n_blk)
+			/*
+			 * ONE DECLARATION PER BLOCK ITEM, walked as matcher
+			 * then item so the order is the order they are read
+			 * in. A matcher naming three blocks declares three,
+			 * which is what emit_matcher then scores.
+			 */
+			if (q->kind != GRP_KIND_SIM ||
+			    g % GRP_SIM_MAX >= q->n_sim)
 				continue;
-			b = &e->dr.blk[q->blk];
+			it = &q->sim[g % GRP_SIM_MAX];
+			if (it->what != SIM_IT_BLOCK || it->blk >= e->dr.n_blk)
+				continue;
+			b = &e->dr.blk[it->blk];
 			/* A blank line BETWEEN blocks, not before the first -
 			 * whatever came above has already left one. */
 			if (wrote)
@@ -5525,7 +5695,7 @@ have_path:
 	 * module.ld keeps and .data, which it refuses, would not. Every field
 	 * was read off the sample named in the header above; nobody types one.
 	 */
-	if (draft_uses_shape(e)) {
+	if (draft_uses_sim(e, SIM_IT_SHAPE)) {
 		const struct kof_ovl_shape *sh = &e->dr.shp;
 		uint32_t ri;
 
@@ -5556,7 +5726,7 @@ have_path:
 	 * is compared is which strings, never what they said, and a rule that
 	 * carried the text would carry the sample's secrets into the database.
 	 */
-	if (draft_uses_strshape(e) && e->dr.n_str) {
+	if (draft_uses_sim(e, SIM_IT_STRSET) && e->dr.n_str) {
 		uint32_t si;
 
 		fprintf(f, "\n/* The author's strings of the sample above, "
@@ -5574,7 +5744,7 @@ have_path:
 	 * Sorted, like the strings and for the same reason - the host merges
 	 * the two sets rather than searching one.
 	 */
-	if (draft_uses_blkvec(e) && e->dr.n_blkv) {
+	if (draft_uses_sim(e, SIM_IT_BLKSET) && e->dr.n_blkv) {
 		uint32_t bi;
 
 		fprintf(f, "\n/* The selected windows of the sample above, "

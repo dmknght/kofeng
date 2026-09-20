@@ -778,7 +778,7 @@ static int literal_safe(const uint8_t *b, uint32_t n)
 enum ch_what {
 	CH_NONE = 0,
 	CH_RULE,        /* find all / any / multi, for a new or existing group */
-	CH_BLOCK,       /* which similarity block a find_block_sim names */
+	CH_SIM,         /* which measure a find_similar takes next */
 /* Rows past this one in a CH_RULE menu are the ticked blocks - see where it is
  * built. Four search rules come first. */
 #define CH_RULE_BLOCK0 4
@@ -1090,6 +1090,8 @@ static void hit_row_strhdr(struct view *v, uint32_t arg);
 static void hit_row_str(struct view *v, uint32_t i);
 static void hit_row_matcher(struct view *v, uint32_t g);
 static void hit_row_markers(struct view *v, uint32_t g);
+/* The shared matcher rows - see grp_list, defined with the panel below. */
+static uint32_t glist_hit(const int (*span)[2], uint32_t n);
 static void hit_row_addmatcher(struct view *v, uint32_t arg);
 static void hit_row_addcond(struct view *v, uint32_t arg);
 static void hit_row_cond(struct view *v, uint32_t g);
@@ -1119,14 +1121,24 @@ static void hit_head_note(struct view *v, uint32_t arg);
 static void hit_head_gen(struct view *v, uint32_t as_new);
 static void hit_head_discard(struct view *v, uint32_t arg);
 static void plg_wire(struct view *v, uint32_t g, int level);
-static void hit_plg_shape(struct view *v, uint32_t arg);
-static void hit_plg_strshape(struct view *v, uint32_t arg);
+static int  sim_prepare(struct view *v, uint32_t what);
+static int  sim_have(const struct view *v, uint32_t what);
+static void sim_recarve(struct view *v);
+static void sim_take_out(struct view *v, uint32_t what, uint32_t blk);
+static uint32_t sim_row_what(uint32_t i);
+static void sim_item_name(const struct view *v,
+			  const struct grp_sim_item *it, char *out,
+			  size_t cap);
+static void sim_over_word(const struct view *v, uint32_t what, char *out,
+			  size_t cap);
+static uint32_t sim_offer(struct view *v, uint32_t g,
+			  struct grp_sim_item *out, uint32_t cap);
+static void hit_sim_item_del(struct view *v, uint32_t pk);
 static void hit_sim_tick(struct view *v, uint32_t which);
 static int  blk_row_shown(const struct view *v, uint32_t i);
 static int  sim_row_shown(const struct view *v, uint32_t i);
 static void hit_fold(struct view *v, uint32_t which);
 static uint32_t plg_n_picked(const struct view *v);
-static void hit_plg_smart(struct view *v, uint32_t arg);
 /* Reached by the row callbacks above, defined with the panel below them. */
 static void decl_edit_open(struct view *v, uint32_t i);
 static void view_show_decl(struct view *v, const struct decl *d, uint64_t off);
@@ -1895,6 +1907,12 @@ struct view {
 	uint32_t    n_hit;
 
 	int         p_c0[MAX_GROUP][2];
+	/*
+	 * WHERE EACH ITEM OF A MATCHER'S LIST ROW WAS DRAWN - see grp_list.
+	 * One array for both kinds of matcher, because a matcher is one kind
+	 * or the other and never both.
+	 */
+	int         grp_it[MAX_GROUP][GRP_SIM_MAX][2];
 	int         opt_c0[OPT_COUNT], opt_c1[OPT_COUNT];
 
 	/*
@@ -8127,10 +8145,15 @@ static int plg_load_rule(struct view *v, const char *path)
 			struct group *g = &v->ed.dr.grp[v->ed.dr.n_grp];
 
 			memset(g, 0, sizeof *g);
-			g->kind = (uint8_t)GRP_KIND_BLOCK;
-			g->blk  = v->ed.dr.n_blk;
+			g->kind = (uint8_t)GRP_KIND_SIM;
 			g->pct  = d[i].thr;
 			v->ed.dr.n_grp++;
+			grp_sim_add(&v->ed, v->ed.dr.n_grp - 1u, SIM_IT_BLOCK,
+				    v->ed.dr.n_blk);
+			/* grp_sim_add sets the threshold from the measure when
+			 * the matcher is empty; the file's own number is what
+			 * this one has to keep. */
+			g->pct  = d[i].thr;
 		}
 		v->ed.dr.n_blk++;
 	}
@@ -8188,7 +8211,9 @@ static int plg_load_rule(struct view *v, const char *path)
 		for (g = 0; g < v->ed.dr.n_grp; g++) {
 			size_t l;
 
-			if (v->ed.dr.grp[g].kind != GRP_KIND_BLOCK)
+			if (v->ed.dr.grp[g].kind != GRP_KIND_SIM ||
+			    !grp_sim_has(&v->ed, g, SIM_IT_BLOCK,
+					 v->ed.dr.grp[g].sim[0].blk))
 				continue;
 			if (cnd_uses(c, g))
 				continue;
@@ -8217,32 +8242,59 @@ static int plg_load_rule(struct view *v, const char *path)
 	 * from, so opening a generated rule and saving it again changes
 	 * nothing.
 	 */
-	if (v->ed.dr.n_blkv && blkv_pct && v->ed.dr.n_grp < MAX_GROUP) {
-		struct group *g = &v->ed.dr.grp[v->ed.dr.n_grp];
+	/*
+	 * EACH IN ITS OWN MATCHER, because that is the shape the panel wrote
+	 * the file in: a measure ticked in the Similarity table becomes a
+	 * matcher of its own - see sim_put - and each carries its own
+	 * threshold, which one matcher has one of. Read back into the same two
+	 * rows it was written from, so opening a generated rule and saving it
+	 * again changes nothing.
+	 *
+	 * A rule whose author JOINED two measures into one matcher by hand
+	 * comes back as two, which is the same logic with the operator one
+	 * level out. Recovering the grouping needs one reader over the whole
+	 * kof_scan rather than two that parse independently; until then the
+	 * panel shows what it recovered rather than guessing at the rest.
+	 */
+	{
+		static const uint8_t meas[3] = {
+			SIM_IT_BLKSET, SIM_IT_STRSET, SIM_IT_SHAPE
+		};
+		uint8_t pct[3];
+		int lv[3];
+		uint32_t have[3], k;
 
-		memset(g, 0, sizeof *g);
-		g->kind = (uint8_t)GRP_KIND_BLKVEC;
-		g->pct  = blkv_pct;
-		v->ed.dr.n_grp++;
-		plg_wire(v, v->ed.dr.n_grp - 1u, blkv_level);
-	}
-	if (v->ed.dr.n_str && str_pct && v->ed.dr.n_grp < MAX_GROUP) {
-		struct group *g = &v->ed.dr.grp[v->ed.dr.n_grp];
+		pct[0] = blkv_pct; pct[1] = str_pct; pct[2] = shp_pct;
+		lv[0]  = blkv_level; lv[1] = str_level; lv[2] = shp_level;
+		have[0] = v->ed.dr.n_blkv;
+		have[1] = v->ed.dr.n_str;
+		have[2] = (uint32_t)(v->ed.dr.has_shp != 0);
+		for (k = 0; k < 3u; k++) {
+			struct group *g;
 
-		memset(g, 0, sizeof *g);
-		g->kind = (uint8_t)GRP_KIND_STRSHAPE;
-		g->pct  = str_pct;
-		v->ed.dr.n_grp++;
-		plg_wire(v, v->ed.dr.n_grp - 1u, str_level);
-	}
-	if (v->ed.dr.has_shp && shp_pct && v->ed.dr.n_grp < MAX_GROUP) {
-		struct group *g = &v->ed.dr.grp[v->ed.dr.n_grp];
-
-		memset(g, 0, sizeof *g);
-		g->kind = (uint8_t)GRP_KIND_STRUCT;
-		g->pct  = shp_pct;
-		v->ed.dr.n_grp++;
-		plg_wire(v, v->ed.dr.n_grp - 1u, shp_level);
+			if (!have[k] || !pct[k] || v->ed.dr.n_grp >= MAX_GROUP)
+				continue;
+			g = &v->ed.dr.grp[v->ed.dr.n_grp];
+			memset(g, 0, sizeof *g);
+			g->kind = (uint8_t)GRP_KIND_SIM;
+			v->ed.dr.n_grp++;
+			grp_sim_add(&v->ed, v->ed.dr.n_grp - 1u, meas[k], 0);
+			g->pct = pct[k];
+			/*
+			 * TICKED AND CARRIED, because the rule chose it and
+			 * the description came out of the FILE.
+			 *
+			 * Without the tick, sim_recarve would take this
+			 * measure off whatever object is in front of the
+			 * reader on the next arrival and the rule would
+			 * quietly become about that object instead. It is the
+			 * same pair of facts plg_load_rule sets on a block -
+			 * see plg_block.kept.
+			 */
+			v->ed.dr.sim_use[meas[k]]  = 1;
+			v->ed.dr.sim_kept[meas[k]] = 1;
+			plg_wire(v, v->ed.dr.n_grp - 1u, lv[k]);
+		}
 	}
 blocks_done:
 
@@ -8317,10 +8369,8 @@ static void draft_show(struct view *v, uint32_t idx)
 			uint32_t gi;
 			int sim = 0;
 
-			for (gi = 0; gi < v->ed.dr.n_grp; gi++)
-				sim |= v->ed.dr.grp[gi].kind == GRP_KIND_BLKVEC ||
-				       v->ed.dr.grp[gi].kind == GRP_KIND_STRSHAPE ||
-				       v->ed.dr.grp[gi].kind == GRP_KIND_STRUCT;
+			for (gi = 0; gi < SIM_ROWS; gi++)
+				sim |= v->ed.dr.sim_use[sim_row_what(gi)] != 0;
 			v->blk_fold = 1;
 			v->sim_fold = !sim;
 		}
@@ -8749,47 +8799,61 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		 * matcher to a single marker. */
 		ch_add(c, "find_str_at (offset)");
 		/*
-		 * AND find_block_sim, WHEN THERE IS A BLOCK TO BE ABOUT.
+		 * AND find_similar - ALWAYS, because it covers four measures
+		 * and three of them are about the object itself.
 		 *
-		 * One row, because this menu chooses what KIND of search a
-		 * matcher is - the four above are the four searches, and this
-		 * is the fifth. WHICH block it is about is chosen on the
-		 * matcher's own row afterwards, the same way a search matcher
-		 * takes its markers afterwards. A row per block here would be
-		 * two questions in one menu.
+		 * One row, because this menu chooses what KIND of matcher this
+		 * is - the four above are the four searches, and this is the
+		 * fifth. WHICH measures it is about are chosen on the matcher's
+		 * own row afterwards, the same way a search matcher takes its
+		 * markers afterwards. A row per measure here would be two
+		 * questions in one menu.
 		 *
-		 * Absent when nothing is ticked: a block the engine merely
-		 * offered is not part of the rule, so there would be nothing
-		 * for the matcher to be about.
+		 * It used to be offered only while a block was ticked, from
+		 * when a block was the only thing it could be about. Withheld
+		 * on that test, a rule written from the object's shape alone -
+		 * which reads no content at all, and is the point of the shape
+		 * measure - could not be started.
 		 */
-		if (blk_any_usable(&v->ed))
-			ch_add(c, "find_block_sim");
-	} else if (what == CH_BLOCK) {
+		ch_add(c, "find_similar");
+	} else if (what == CH_SIM) {
 		/*
-		 * EVERY TICKED BLOCK, including the one this matcher already
-		 * names.
+		 * BOTH KINDS OF THING AT ONCE - the ticked blocks and the
+		 * whole-object measures, in one list, because they are one
+		 * question: what else does this matcher measure? The backend
+		 * decides which engine call each one becomes; the reader does
+		 * not have to know that they are different.
 		 *
-		 * Unlike the menu that CREATES a block matcher, this one is
-		 * changing which block an existing matcher is about, so a block
-		 * another matcher holds is still worth offering - swapping two
-		 * matchers over is a thing a reader does. What is not offered
-		 * is a block that was never ticked: that is not part of the
-		 * rule.
+		 * sim_offer is what decides; the labels are written from what
+		 * it returns so the take below cannot disagree with the menu
+		 * about which row is which.
 		 */
-		uint32_t bi;
+		struct grp_sim_item off[MAX_DECL + 4];
+		uint32_t n = sim_offer(v, c->arg, off,
+				       (uint32_t)(sizeof off / sizeof off[0]));
+		uint32_t oi;
 
-		for (bi = 0; bi < v->ed.dr.n_blk; bi++) {
+		if (n > sizeof off / sizeof off[0])
+			n = (uint32_t)(sizeof off / sizeof off[0]);
+		/*
+		 * THE NAME AND NOTHING ELSE. Each row is one thing to pick,
+		 * and how much of it there is belongs to the table the tick
+		 * was made in - a menu that repeats it makes the reader
+		 * compare three columns to pick one of two.
+		 */
+		for (oi = 0; oi < n; oi++) {
 			char t[CH_W];
 
-			if (!blk_usable(&v->ed, bi))
-				continue;
-			/* The value alone. Its size and its region are on the
-			 * block's own row, and a menu that repeats them makes
-			 * the reader compare three columns to pick one of
-			 * two. */
-			snprintf(t, sizeof t, "%08x", v->ed.dr.blk[bi].id);
+			if (off[oi].what == SIM_IT_BLOCK)
+				snprintf(t, sizeof t, "block %08x",
+					 v->ed.dr.blk[off[oi].blk].id);
+			else
+				snprintf(t, sizeof t, "%s",
+					 sim_it_word(off[oi].what));
 			ch_add(c, t);
 		}
+		if (!c->n)
+			return;
 	} else if (what == CH_RANGE) {
 		/*
 		 * WHICH DEFINED RANGE THIS MATCHER SEARCHES.
@@ -9767,15 +9831,15 @@ static void ch_take(struct view *v)
 			return;
 		q = &v->ed.dr.grp[v->ed.dr.n_grp - 1u];
 		/*
-		 * find_block_sim is a KIND and not a search rule, so it is
+		 * find_similar is a KIND and not a search rule, so it is
 		 * taken the same way here as it is for an existing matcher -
 		 * see the branch below. This path used to write c->sel into
-		 * `rule` whatever it was, so choosing find_block_sim on a NEW
-		 * matcher produced a find_all: a second place that decides what
-		 * a chooser row means, and it did not know about the fifth row.
+		 * `rule` whatever it was, so choosing it on a NEW matcher
+		 * produced a find_all: a second place that decides what a
+		 * chooser row means, and it did not know about the fifth row.
 		 */
 		if (c->sel >= CH_RULE_BLOCK0) {
-			grp_make_block(&v->ed, v->ed.dr.n_grp - 1u);
+			grp_make_sim(&v->ed, v->ed.dr.n_grp - 1u);
 			return;
 		}
 		q->rule = c->sel;
@@ -10041,15 +10105,20 @@ static void ch_take(struct view *v)
 			q->at_off = d->hits[c->sel];
 	} else if (c->what == CH_RULE) {
 		/*
-		 * Past the four search rules is find_block_sim - see where the
+		 * Past the four search rules is find_similar - see where the
 		 * menu is built.
 		 */
 		if (c->sel >= CH_RULE_BLOCK0) {
-			grp_make_block(&v->ed, c->arg < MAX_GROUP ? c->arg
-					     : v->ed.dr.n_grp - 1u);
+			grp_make_sim(&v->ed, c->arg < MAX_GROUP ? c->arg
+					   : v->ed.dr.n_grp - 1u);
 			return;
 		}
+		/* Turning a similarity matcher back into a search drops what
+		 * it measured: a search rule has no items, and leaving them in
+		 * place would have them emitted again the moment it was turned
+		 * back. */
 		q->kind = (uint8_t)GRP_KIND_STR;
+		q->n_sim = 0;
 		q->rule = c->sel;
 		if (c->sel == 2 && q->thresh < 2u)
 			q->thresh = 2;
@@ -10060,18 +10129,31 @@ static void ch_take(struct view *v)
 			grp_seed_at(&v->ed, c->arg);
 			at_warn_if_multi(v);
 		}
-	} else if (c->what == CH_BLOCK) {
-		/* The same list the menu was built from, in the same order. */
-		uint32_t bi, seen = 0;
+	} else if (c->what == CH_SIM) {
+		/*
+		 * The same list the menu was built from, in the same order -
+		 * see the note there.
+		 *
+		 * AND THIS IS WHERE THE TWO KINDS PART. A block needs nothing
+		 * taken off the object: the carve already found it. The three
+		 * whole-object measures each need their description in the
+		 * draft first, and sim_prepare is what puts it there - so a
+		 * measure that cannot be taken from this object leaves the
+		 * matcher as it was and says why, rather than being added and
+		 * then emitting a comparison against an empty set.
+		 */
+		struct grp_sim_item off[MAX_DECL + 4];
+		uint32_t n = sim_offer(v, c->arg, off,
+				       (uint32_t)(sizeof off / sizeof off[0]));
 
-		for (bi = 0; bi < v->ed.dr.n_blk; bi++) {
-			if (!blk_usable(&v->ed, bi))
-				continue;
-			if (seen++ != (uint32_t)c->sel)
-				continue;
-			q->blk = bi;
-			break;
-		}
+		if (c->sel < 0 || (uint32_t)c->sel >= n)
+			return;
+		if (!sim_prepare(v, off[c->sel].what))
+			return;
+		grp_sim_add(&v->ed, c->arg, off[c->sel].what, off[c->sel].blk);
+		/* The measures the table shows are recomputed next frame: one
+		 * of them may only now have something to compare against. */
+		v->plg_scored = 0;
 	} else if (c->what == CH_RANGE) {
 		/*
 		 * The same list the menu was built from, walked in the same
@@ -12255,15 +12337,16 @@ static void hit_row_matcher(struct view *v, uint32_t g)
 	v->ed.dr.warn[0] = 0;
 	if (g_mx >= g_cols - 4)
 		grp_remove(&v->ed, g);
-	else if (v->ed.dr.grp[g].kind == GRP_KIND_BLOCK ||
-		 v->ed.dr.grp[g].kind == GRP_KIND_STRUCT ||
-		 v->ed.dr.grp[g].kind == GRP_KIND_STRSHAPE ||
-		 v->ed.dr.grp[g].kind == GRP_KIND_BLKVEC) {
+	else if (v->ed.dr.grp[g].kind == GRP_KIND_SIM) {
 		/*
 		 * The first row holds what a search matcher's first row holds:
-		 * the kind - clicking it can turn this back into a search - and
-		 * the comment. The block it is about is on the row below, with
+		 * the kind - clicking it can turn this back into a search -
+		 * the threshold, and the comment. What it is about is on the
+		 * row below, where a search matcher keeps its markers, with
 		 * the hit test for it in hit_row_markers.
+		 *
+		 * The threshold registered its own span as it was drawn, so it
+		 * is answered there and not here.
 		 */
 		if (g_mx >= v->grp_rl[g][0] && g_mx <= v->grp_rl[g][1])
 			ch_open(v, CH_RULE, g, g_my, g_mx);
@@ -12298,69 +12381,49 @@ static void hit_row_matcher(struct view *v, uint32_t g)
 
 static void hit_row_markers(struct view *v, uint32_t g)
 {
-	uint32_t i;
-
-
-	/* Where the ids start: past "     Markers: ". */
-	int c2 = 15;
+	uint32_t i, slot;
 
 	v->ed.dr.cur_grp = g;
-	/* A block matcher's second row names its block, in the place a search
-	 * matcher's names its markers. The percentage beside it registers its
-	 * own span and is answered before this. */
-	if (v->ed.dr.grp[g].kind == GRP_KIND_BLOCK) {
-		if (v->grp_rg[g][0] > 0 && g_mx >= v->grp_rg[g][0] &&
-		    g_mx <= v->grp_rg[g][1])
-			ch_open(v, CH_BLOCK, g, g_my, g_mx);
-		return;
-	}
-	/* A shape matcher names nothing to choose from: the shape is the
-	 * draft's. Its percentage registered its own span above. */
-	if (v->ed.dr.grp[g].kind == GRP_KIND_STRUCT ||
-	    v->ed.dr.grp[g].kind == GRP_KIND_STRSHAPE ||
-	    v->ed.dr.grp[g].kind == GRP_KIND_BLKVEC)
-		return;
-	if (v->p_c0[g][0] > 0 &&
-	    g_mx >= v->p_c0[g][0] &&
+	/*
+	 * THE BUTTON THAT ADDS ONE, at the end of the row - the same place on
+	 * every kind of matcher, because glist_end puts it there. Which menu
+	 * it opens is the one difference between the two: a search matcher
+	 * offers the markers it has not taken, a similarity matcher offers the
+	 * blocks and measures it has not taken.
+	 */
+	if (v->p_c0[g][0] > 0 && g_mx >= v->p_c0[g][0] &&
 	    g_mx <= v->p_c0[g][1]) {
-		ch_open(v, CH_MARKER, g, g_my - 3,
-			g_mx);
+		ch_open(v, v->ed.dr.grp[g].kind == GRP_KIND_SIM
+			   ? CH_SIM : CH_MARKER, g, g_my - 3, g_mx);
 		return;
 	}
 	/*
-	 * An id on this row is a marker; clicking it
-	 * takes it back out of the matcher.
+	 * AN ITEM ON THIS ROW IS TAKEN BACK OUT BY CLICKING IT, whether it is
+	 * a marker number or a measure.
 	 *
-	 * EACH ID IS MEASURED. Three columns apiece
-	 * assumed every id was one digit and the row
-	 * prints ", %u": from the first two-digit id on
-	 * - MAX_DECL is 32, so ids reach 32 - every id
-	 * after it drifted one column further left, and
-	 * the click removed the wrong marker or none.
-	 * The hit window is the digits only, not the
-	 * ", " that joins them, so the gap between two
-	 * ids is dead rather than belonging to
-	 * whichever is nearer.
-	 *
-	 * The condition rows below gave up on measuring
-	 * and record the columns as they draw them
-	 * (view.cnd_ids), which is the better answer
-	 * and the one to reach for if this row's
-	 * separator ever changes the way theirs did.
+	 * READ BACK FROM WHERE IT WAS DRAWN. This used to re-derive the
+	 * columns - three apiece, which assumed every id was one digit. MAX_DECL
+	 * is 32, so from the first two-digit id on, every id after it drifted a
+	 * column left and the click removed the wrong marker or none. The
+	 * drawing records each span now - see grp_list - so there is one copy
+	 * of the arithmetic and it is the one that painted the row.
 	 */
+	slot = glist_hit(v->grp_it[g], GRP_SIM_MAX);
+	if (slot >= GRP_SIM_MAX)
+		return;
+	if (v->ed.dr.grp[g].kind == GRP_KIND_SIM) {
+		hit_sim_item_del(v, g * GRP_SIM_MAX + slot);
+		return;
+	}
+	/* The slot is a position in the row, so the marker it names is found
+	 * by walking the declarations in the order the row drew them. */
 	for (i = 0; i < v->ed.dr.n_decl; i++) {
-		char num[8];
-		int w;
-
 		if (!(v->ed.dr.decl[i].grp & (1u << g)))
 			continue;
-		w = snprintf(num, sizeof num, "%u",
-			     i + 1u);
-		if (g_mx >= c2 && g_mx < c2 + w) {
+		if (!slot--) {
 			v->ed.dr.decl[i].grp &= ~(1u << g);
 			return;
 		}
-		c2 += w + 2;    /* the ", " after it */
 	}
 }
 
@@ -12915,6 +12978,136 @@ static void draw_grp_note(struct out *o, struct view *v, uint32_t g)
 }
 
 /*
+ * A MATCHER'S LIST ROW, WRITTEN ONCE FOR EVERY KIND OF MATCHER.
+ *
+ * Every matcher has one: the things it is about, joined by commas, with the
+ * button that adds another at the end. A search matcher lists its markers; a
+ * similarity matcher lists the blocks and measures it compares. They are the
+ * same row and they are now drawn by the same code.
+ *
+ * THE SPANS ARE RECORDED AS THEY ARE DRAWN, which is what the marker row's own
+ * note asked for: where an item is on the screen is a fact the drawing has, and
+ * a hit test that re-derives it is a second copy of the arithmetic - which is
+ * exactly how the marker row came to remove the wrong marker once an id reached
+ * two digits.
+ */
+struct grp_list {
+	struct out  *o;
+	struct view *v;
+	int          y;
+	uint32_t     g;
+	int        (*span)[2];      /* where each item landed, by slot */
+	uint32_t     cap;
+	uint32_t     n;             /* how many were drawn */
+};
+
+static void glist_begin(struct grp_list *L, struct out *o, struct view *v,
+			int y, uint32_t g, const char *title,
+			int (*span)[2], uint32_t cap)
+{
+	uint32_t i;
+
+	L->o = o; L->v = v; L->y = y; L->g = g;
+	L->span = span; L->cap = cap; L->n = 0;
+	for (i = 0; i < cap; i++)
+		span[i][0] = span[i][1] = -1;
+	row_start(o, y, 1);
+	out_fmt(o, A_DIM "     %s: " A_OFF, title);
+}
+
+static void glist_item(struct grp_list *L, const char *text)
+{
+	if (L->n)
+		out_str(L->o, A_DIM ", " A_OFF);
+	if (L->n < L->cap)
+		L->span[L->n][0] = 1 + (int)L->o->col_hint;
+	out_fmt(L->o, A_ID "%s" A_OFF, text);
+	if (L->n < L->cap)
+		L->span[L->n][1] = (int)L->o->col_hint;
+	L->n++;
+}
+
+/*
+ * `can_add` is the caller's answer to "is there anything left to offer", which
+ * only the caller can give: for markers it is a free declaration slot, for
+ * measures it is a block or a measure this matcher does not already hold.
+ */
+static void glist_end(struct grp_list *L, int can_add, const char *label)
+{
+	struct view *v = L->v;
+
+	if (!L->n)
+		out_str(L->o, A_DIM "none yet" A_OFF);
+	v->p_c0[L->g][0] = v->p_c0[L->g][1] = -1;
+	if (can_add) {
+		v->p_c0[L->g][0] = 1 + (int)L->o->col_hint;
+		out_fmt(L->o, "   " A_ID "[+ %s]" A_OFF, label);
+		v->p_c0[L->g][1] = (int)L->o->col_hint;
+	}
+	hit_add(v, L->y, 0, g_cols - 1, hit_row_markers, L->g);
+}
+
+/* The row is scrolled out: it has no click targets this frame. */
+static void glist_gone(struct view *v, uint32_t g)
+{
+	uint32_t i;
+
+	for (i = 0; i < GRP_SIM_MAX; i++)
+		v->grp_it[g][i][0] = v->grp_it[g][i][1] = -1;
+	v->p_c0[g][0] = v->p_c0[g][1] = -1;
+}
+
+/*
+ * WHICH ITEM OF A LIST ROW THE POINTER IS ON, or `n` when it is on none.
+ *
+ * The other half of recording the spans: the hit test reads back exactly what
+ * was drawn rather than measuring the row a second time.
+ */
+static uint32_t glist_hit(const int (*span)[2], uint32_t n)
+{
+	uint32_t i;
+
+	for (i = 0; i < n; i++)
+		if (span[i][0] > 0 && g_mx >= span[i][0] && g_mx <= span[i][1])
+			return i;
+	return n;
+}
+
+/*
+ * THE FIRST ROW OF A MATCHER, up to the part that differs.
+ *
+ * The number a condition names it by, then what kind of matcher it is. What
+ * comes after that is the matcher's own business - a range, a threshold, or
+ * nothing - and the tail below closes the row the same way for all of them.
+ */
+static void ghead_lead(struct out *o, struct view *v, int y, uint32_t g,
+		       const char *word)
+{
+	char lead[16];
+
+	row_start(o, y, 1);
+	/*
+	 * THE WHOLE ROW FIRST, so the remove button at the far edge is reached
+	 * on every kind of matcher. Controls registered after this one win
+	 * where they overlap - see hit_at.
+	 */
+	hit_add(v, y, 0, g_cols - 1, hit_row_matcher, g);
+	snprintf(lead, sizeof lead, "  %u.", g + 1u);
+	out_fmt(o, "%s%-6.6s" A_OFF,
+		g == v->ed.dr.cur_grp ? A_SEL : A_DIM, lead);
+	v->grp_rl[g][0] = 1 + (int)o->col_hint;
+	out_fmt(o, "%s%s" A_OFF, A_WARN, word);
+	v->grp_rl[g][1] = (int)o->col_hint;
+}
+
+static void ghead_tail(struct out *o, struct view *v, int y, uint32_t g)
+{
+	draw_grp_note(o, v, g);
+	out_at(o, y, g_cols - 4);
+	out_str(o, A_BAD "[x]" A_OFF);
+}
+
+/*
  * draw_decl_matchers - the matchers, one call each.
  *
  * One section of the draft panel. They were one nine-hundred line function, so
@@ -12949,7 +13142,6 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 	for (g = 0; g < v->ed.dr.n_grp; g++) {
 		const struct group *q = &v->ed.dr.grp[g];
 		char rl[16];
-		int first = 1;
 
 		if (q->rule == 1)
 			snprintf(rl, sizeof rl, "find_any");
@@ -12977,256 +13169,74 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 		 * what the generated source will call it.
 		 */
 		/*
-		 * A BLOCK MATCHER IS SHAPED LIKE ANY OTHER.
+		 * A SIMILARITY MATCHER IS SHAPED LIKE A SEARCH MATCHER,
+		 * BECAUSE IT IS ONE OF THEM.
 		 *
-		 * Same two rows: the kind of matcher and its comment, then
-		 * underneath what the matcher is about. It drew as one row with
-		 * the block wedged in beside the word, which put its number in
-		 * a different column from every search matcher's and left it
-		 * the only matcher with nowhere to write a comment.
-		 */
-		/*
-		 * A SHAPE MATCHER, SHAPED LIKE THE OTHERS.
+		 * The same two rows, through the same helpers: what the matcher
+		 * IS, with its threshold where a find_multi keeps its own, and
+		 * then what it is about - the blocks and measures it compares,
+		 * listed where a search matcher lists its markers, with the
+		 * button that adds one at the end of that row.
 		 *
-		 * Two rows again: what the matcher is, then what it is about.
-		 * What it is about is not a block and not a marker - it is the
-		 * object's own geometry, which the draft carries one of, so the
-		 * second row states the shape rather than offering a choice of
-		 * one. The percentage is the only control on it.
+		 * It was four near-identical two-row drawers, one per measure,
+		 * differing only in the word and the detail beside it; a fifth
+		 * measure meant a fifth copy, and none of them read like the
+		 * search matcher they sit among.
 		 */
-		/*
-		 * A STRING-SET MATCHER, shaped like the rest: what it is, then
-		 * what it is about. What it is about is the draft's own set, so
-		 * the second row states how many strings survived the library
-		 * cut rather than offering a choice.
-		 */
-		/*
-		 * THE BLOCK VECTOR. Two rows like the rest; what it is about is
-		 * every ticked block, so the second row counts them rather than
-		 * naming one.
-		 */
-		if (q->kind == GRP_KIND_BLKVEC) {
-			char lead[16];
-
+		if (q->kind == GRP_KIND_SIM) {
 			if (PR_VIS(r)) {
-				int y = PR(r);
+				int y = PR(r), c0;
 
-				row_start(o, y, 1);
-				hit_add(v, y, 0, g_cols - 1, hit_row_matcher, g);
-				snprintf(lead, sizeof lead, "  %u.", g + 1u);
-				out_fmt(o, "%s%-6.6s" A_OFF,
-					g == v->ed.dr.cur_grp ? A_SEL : A_DIM,
-					lead);
-				v->grp_rl[g][0] = 1 + (int)o->col_hint;
-				out_fmt(o, "%s%s" A_OFF, A_WARN, "block_vector");
-				v->grp_rl[g][1] = (int)o->col_hint;
-				draw_grp_note(o, v, g);
-				out_at(o, y, g_cols - 4);
-				out_str(o, A_BAD "[x]" A_OFF);
+				ghead_lead(o, v, y, g, "find_similar");
+				out_str(o, A_DIM "   Threshold: " A_OFF);
+				v->grp_th[g][0] = 1 + (int)o->col_hint;
+				out_fmt(o, "%s>= [",
+					v->edit == ED_GRP_PCT + (int)g
+					? A_SEL : A_ID);
+				c0 = (int)o->col_hint - 1;
+				if (v->edit == ED_GRP_PCT + (int)g)
+					field_draw(o, v->grp_pct_buf, v->caret,
+						   &v->grp_pct_off, 3, 1, "");
+				else
+					out_fmt(o, "%3u", q->pct);
+				out_fmt(o, "]" A_OFF);
+				out_str(o, A_DIM "%" A_OFF);
+				v->grp_th[g][1] = (int)o->col_hint;
+				ghead_tail(o, v, y, g);
+				/* After the row, so it wins where they overlap
+				 * - see hit_at. */
+				hit_add(v, y, c0, (int)o->col_hint,
+					hit_grp_pct, g);
 			} else {
 				v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
+				v->grp_th[g][0] = v->grp_th[g][1] = -1;
 				v->grp_nt[g][0] = v->grp_nt[g][1] = -1;
 			}
-			r++;
+			/* It names no range: the measures are about the whole
+			 * object, and a block carries the region it was cut
+			 * from. */
 			v->grp_rg[g][0] = v->grp_rg[g][1] = -1;
+			r++;
 			if (!PR_VIS(r)) {
+				glist_gone(v, g);
 				r++;
 				continue;
 			}
 			{
-				int y = PR(r), c0;
+				struct grp_list L;
+				uint32_t k;
 
-				row_start(o, y, 1);
-				out_str(o, A_DIM "     Blocks: " A_OFF);
-				out_fmt(o, A_ID "%u" A_OFF, v->ed.dr.n_blkv);
-				out_str(o, A_DIM "  >=  " A_OFF);
-				c0 = 1 + (int)o->col_hint;
-				out_fmt(o, "%s[", v->edit == ED_GRP_PCT + (int)g
-					? A_SEL : A_ID);
-				if (v->edit == ED_GRP_PCT + (int)g)
-					field_draw(o, v->grp_pct_buf, v->caret,
-						   &v->grp_pct_off, 3, 1, "");
-				else
-					out_fmt(o, "%3u", q->pct);
-				out_fmt(o, "]" A_OFF);
-				out_str(o, A_DIM "%" A_OFF);
-				hit_add(v, y, 0, g_cols - 1, hit_row_markers, g);
-				hit_add(v, y, c0, c0 + 4, hit_grp_pct, g);
-			}
-			r++;
-			continue;
-		}
-		if (q->kind == GRP_KIND_STRSHAPE) {
-			char lead[16];
+				glist_begin(&L, o, v, PR(r), g, "Measures",
+					    v->grp_it[g], GRP_SIM_MAX);
+				for (k = 0; k < q->n_sim; k++) {
+					char nm2[32];
 
-			if (PR_VIS(r)) {
-				int y = PR(r);
-
-				row_start(o, y, 1);
-				hit_add(v, y, 0, g_cols - 1, hit_row_matcher, g);
-				snprintf(lead, sizeof lead, "  %u.", g + 1u);
-				out_fmt(o, "%s%-6.6s" A_OFF,
-					g == v->ed.dr.cur_grp ? A_SEL : A_DIM,
-					lead);
-				v->grp_rl[g][0] = 1 + (int)o->col_hint;
-				out_fmt(o, "%s%s" A_OFF, A_WARN, "ovl_strings");
-				v->grp_rl[g][1] = (int)o->col_hint;
-				draw_grp_note(o, v, g);
-				out_at(o, y, g_cols - 4);
-				out_str(o, A_BAD "[x]" A_OFF);
-			} else {
-				v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
-				v->grp_nt[g][0] = v->grp_nt[g][1] = -1;
-			}
-			r++;
-			v->grp_rg[g][0] = v->grp_rg[g][1] = -1;
-			if (!PR_VIS(r)) {
-				r++;
-				continue;
-			}
-			{
-				int y = PR(r), c0;
-
-				row_start(o, y, 1);
-				out_str(o, A_DIM "     Strings: " A_OFF);
-				out_fmt(o, A_ID "%u" A_OFF, v->ed.dr.n_str);
-				out_str(o, A_DIM "  >=  " A_OFF);
-				c0 = 1 + (int)o->col_hint;
-				out_fmt(o, "%s[", v->edit == ED_GRP_PCT + (int)g
-					? A_SEL : A_ID);
-				if (v->edit == ED_GRP_PCT + (int)g)
-					field_draw(o, v->grp_pct_buf, v->caret,
-						   &v->grp_pct_off, 3, 1, "");
-				else
-					out_fmt(o, "%3u", q->pct);
-				out_fmt(o, "]" A_OFF);
-				out_str(o, A_DIM "%" A_OFF);
-				hit_add(v, y, 0, g_cols - 1, hit_row_markers, g);
-				hit_add(v, y, c0, c0 + 4, hit_grp_pct, g);
-			}
-			r++;
-			continue;
-		}
-		if (q->kind == GRP_KIND_STRUCT) {
-			char lead[16];
-
-			if (PR_VIS(r)) {
-				int y = PR(r);
-
-				row_start(o, y, 1);
-				hit_add(v, y, 0, g_cols - 1, hit_row_matcher, g);
-				snprintf(lead, sizeof lead, "  %u.", g + 1u);
-				out_fmt(o, "%s%-6.6s" A_OFF,
-					g == v->ed.dr.cur_grp ? A_SEL : A_DIM,
-					lead);
-				v->grp_rl[g][0] = 1 + (int)o->col_hint;
-				out_fmt(o, "%s%s" A_OFF, A_WARN, "ovl_shape");
-				v->grp_rl[g][1] = (int)o->col_hint;
-				draw_grp_note(o, v, g);
-				out_at(o, y, g_cols - 4);
-				out_str(o, A_BAD "[x]" A_OFF);
-			} else {
-				v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
-				v->grp_nt[g][0] = v->grp_nt[g][1] = -1;
-			}
-			r++;
-			v->grp_rg[g][0] = v->grp_rg[g][1] = -1;
-			if (!PR_VIS(r)) {
-				r++;
-				continue;
-			}
-			{
-				int y = PR(r), c0;
-				const struct kof_ovl_shape *sh = &v->ed.dr.shp;
-
-				row_start(o, y, 1);
-				out_str(o, A_DIM "     Shape: " A_OFF);
-				out_fmt(o, A_ID "%u region(s), %llu B" A_OFF,
-					sh->n_region,
-					(unsigned long long)sh->fsize);
-				out_str(o, A_DIM "  >=  " A_OFF);
-				c0 = 1 + (int)o->col_hint;
-				out_fmt(o, "%s[", v->edit == ED_GRP_PCT + (int)g
-					? A_SEL : A_ID);
-				if (v->edit == ED_GRP_PCT + (int)g)
-					field_draw(o, v->grp_pct_buf, v->caret,
-						   &v->grp_pct_off, 3, 1, "");
-				else
-					out_fmt(o, "%3u", q->pct);
-				out_fmt(o, "]" A_OFF);
-				out_str(o, A_DIM "%" A_OFF);
-				hit_add(v, y, 0, g_cols - 1, hit_row_markers, g);
-				hit_add(v, y, c0, c0 + 4, hit_grp_pct, g);
-			}
-			r++;
-			continue;
-		}
-		if (q->kind == GRP_KIND_BLOCK) {
-			char lead[16];
-
-			if (PR_VIS(r)) {
-				int y = PR(r);
-
-				row_start(o, y, 1);
-				/*
-				 * THE WHOLE ROW FIRST, so the remove button at
-				 * the far edge is reached the way it is on a
-				 * marker matcher. The controls below are
-				 * registered after it and win where they
-				 * overlap - see hit_at.
-				 */
-				hit_add(v, y, 0, g_cols - 1, hit_row_matcher, g);
-				snprintf(lead, sizeof lead, "  %u.", g + 1u);
-				out_fmt(o, "%s%-6.6s" A_OFF,
-					g == v->ed.dr.cur_grp ? A_SEL : A_DIM,
-					lead);
-				v->grp_rl[g][0] = 1 + (int)o->col_hint;
-				out_fmt(o, "%s%s" A_OFF, A_WARN,
-					"find_block_sim");
-				v->grp_rl[g][1] = (int)o->col_hint;
-				draw_grp_note(o, v, g);
-				/* And thrown away the same way as any other
-				 * matcher, from the same column. */
-				out_at(o, y, g_cols - 4);
-				out_str(o, A_BAD "[x]" A_OFF);
-			} else {
-				v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
-				v->grp_nt[g][0] = v->grp_nt[g][1] = -1;
-			}
-			r++;
-			if (!PR_VIS(r)) {
-				v->grp_rg[g][0] = v->grp_rg[g][1] = -1;
-				r++;
-				continue;
-			}
-			{
-				int y = PR(r), c0;
-
-				row_start(o, y, 1);
-				out_str(o, A_DIM "     Block: " A_OFF);
-				/* WHICH BLOCK, and it is a control: a rule with
-				 * several blocks is several matchers, and
-				 * pointing one at a different block is how they
-				 * are sorted out. */
-				c0 = 1 + (int)o->col_hint;
-				out_fmt(o, A_ID "%08x" A_OFF,
-					q->blk < v->ed.dr.n_blk
-					? v->ed.dr.blk[q->blk].id : 0u);
-				v->grp_rg[g][0] = c0;
-				v->grp_rg[g][1] = (int)o->col_hint;
-				out_str(o, A_DIM "  >=  " A_OFF);
-				c0 = 1 + (int)o->col_hint;
-				out_fmt(o, "%s[", v->edit == ED_GRP_PCT + (int)g
-					? A_SEL : A_ID);
-				if (v->edit == ED_GRP_PCT + (int)g)
-					field_draw(o, v->grp_pct_buf, v->caret,
-						   &v->grp_pct_off, 3, 1, "");
-				else
-					out_fmt(o, "%3u", q->pct);
-				out_fmt(o, "]" A_OFF);
-				out_str(o, A_DIM "%" A_OFF);
-				hit_add(v, y, 0, g_cols - 1, hit_row_markers, g);
-				hit_add(v, y, c0, c0 + 4, hit_grp_pct, g);
+					sim_item_name(v, &q->sim[k], nm2,
+						      sizeof nm2);
+					glist_item(&L, nm2);
+				}
+				glist_end(&L, sim_offer(v, g, NULL, 0) != 0,
+					  "Similarity");
 			}
 			r++;
 			continue;
@@ -13312,27 +13322,25 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 		 * it searches for and not a separate thing that happens to be
 		 * nearby. */
 		if (!PR_VIS(r)) {
+			glist_gone(v, g);
 			r++;
 			continue;
 		}
-		row_start(o, PR(r), 1);
-		out_fmt(o, A_DIM "     Markers: " A_OFF);
-		for (i = 0; i < v->ed.dr.n_decl; i++) {
-			if (!(v->ed.dr.decl[i].grp & (1u << g)))
-				continue;
-			out_fmt(o, "%s%s%u" A_OFF, first ? "" : ", ", A_ID,
-				i + 1u);
-			first = 0;
+		{
+			struct grp_list L;
+
+			glist_begin(&L, o, v, PR(r), g, "Markers",
+				    v->grp_it[g], GRP_SIM_MAX);
+			for (i = 0; i < v->ed.dr.n_decl; i++) {
+				char num[8];
+
+				if (!(v->ed.dr.decl[i].grp & (1u << g)))
+					continue;
+				snprintf(num, sizeof num, "%u", i + 1u);
+				glist_item(&L, num);
+			}
+			glist_end(&L, decl_free(&v->ed) != 0, "String");
 		}
-		if (first)
-			out_str(o, A_DIM "none yet" A_OFF);
-		v->p_c0[g][0] = v->p_c0[g][1] = -1;
-		if (decl_free(&v->ed)) {
-			v->p_c0[g][0] = 1 + (int)o->col_hint;
-			out_fmt(o, "   " A_ID "[+ String]" A_OFF);
-			v->p_c0[g][1] = (int)o->col_hint;
-		}
-		hit_add(v, PR(r), 0, g_cols - 1, hit_row_markers, g);
 		r++;
 	}
 
@@ -13761,19 +13769,23 @@ static int blk_row_shown(const struct view *v, uint32_t i)
 	return !v->blk_fold || v->ed.dr.blk[i].picked;
 }
 
+/*
+ * WHICH MEASURE A ROW OF THE SIMILARITY TABLE IS - written once, because the
+ * drawer, the fold predicate and the tick all have to agree about it and three
+ * copies of a switch is three chances for one of them to drift.
+ */
+static uint32_t sim_row_what(uint32_t i)
+{
+	return i == SIM_BLOCKS ? SIM_IT_BLKSET
+	     : i == SIM_STRING ? SIM_IT_STRSET
+			       : SIM_IT_SHAPE;
+}
+
 static int sim_row_shown(const struct view *v, uint32_t i)
 {
-	uint32_t kind = i == SIM_BLOCKS ? GRP_KIND_BLKVEC
-		      : i == SIM_STRING ? GRP_KIND_STRSHAPE
-					: GRP_KIND_STRUCT;
-	uint32_t g;
-
 	if (!v->sim_fold)
 		return 1;
-	for (g = 0; g < v->ed.dr.n_grp; g++)
-		if (v->ed.dr.grp[g].kind == kind)
-			return 1;
-	return 0;
+	return v->ed.dr.sim_use[sim_row_what(i)] != 0;
 }
 
 /* How many blocks are ticked - what the smart-blocks row is measured over. */
@@ -13794,36 +13806,36 @@ static uint32_t plg_n_picked(const struct view *v)
  * is that the row the reader ticks is the row that says how alike this file is,
  * so the choice is made beside the number that informs it.
  */
+/*
+ * THE TICK CHOOSES THE MEASURE AND DOES NOTHING ELSE.
+ *
+ * It used to build a matcher and wire it into a condition, so selecting a
+ * measure in order to look at its number wrote a rule. Choosing what a rule is
+ * written FROM and writing the rule are two acts, and the block table has
+ * always kept them apart: ticking a block declares it, and a matcher added by
+ * hand names it. This is the same contract for the other three measures.
+ *
+ * Nothing is computed here either. The description is already in the draft -
+ * see sim_recarve, which takes it off the object the way the carve takes the
+ * blocks - so the tick only says which of them the rule is about.
+ */
 static void hit_sim_tick(struct view *v, uint32_t which)
 {
-	/* What the row measures changes with the tick - a string set is taken
-	 * from the object when the row is ticked, and there is nothing to
-	 * measure before that. So the three numbers are recomputed next frame
-	 * rather than left showing the state before the press. */
-	uint32_t kind = which == SIM_BLOCKS ? GRP_KIND_BLKVEC
-		      : which == SIM_STRING ? GRP_KIND_STRSHAPE
-					    : GRP_KIND_STRUCT;
-	uint32_t g;
+	uint32_t what = sim_row_what(which);
 
-	for (g = 0; g < v->ed.dr.n_grp; g++)
-		if (v->ed.dr.grp[g].kind == kind) {
-			/*
-			 * Off again. Every matcher of that kind, because the
-			 * smart-blocks row stands for all of them - and
-			 * backwards, since grp_remove closes the gap and a
-			 * forward walk would step over the matcher that moved
-			 * into the slot just emptied.
-			 */
-			for (g = v->ed.dr.n_grp; g--; )
-				if (v->ed.dr.grp[g].kind == kind)
-					grp_remove(&v->ed, g);
-			v->plg_scored = 0;
-			return;
+	if (v->ed.dr.sim_use[what]) {
+		v->ed.dr.sim_use[what] = 0;
+		sim_take_out(v, what, 0);
+	} else {
+		/* Only where there is something to be about. An object this
+		 * measure cannot be taken from says so rather than being
+		 * ticked for nothing. */
+		if (!sim_have(v, what)) {
+			sim_prepare(v, what);
+			if (!sim_have(v, what))
+				return;
 		}
-	switch (which) {
-	case SIM_BLOCKS: hit_plg_smart(v, 0);    break;
-	case SIM_STRING: hit_plg_strshape(v, 0); break;
-	default:         hit_plg_shape(v, 0);    break;
+		v->ed.dr.sim_use[what] = 1;
 	}
 	v->plg_scored = 0;
 }
@@ -13891,106 +13903,79 @@ static void plg_wire(struct view *v, uint32_t g, int level)
 }
 
 /*
- * FILE STRUCTURE SIG - the object's own geometry as a matcher.
+ * WHAT A MEASURE NEEDS IN THE DRAFT BEFORE A MATCHER CAN NAME IT.
  *
- * Reads nothing of the content, which is the whole point: it still answers on a
- * sample whose payload is encrypted. See kofmod/kofoverlord.h.
+ * The three whole-object measures each compare against a description the draft
+ * has to be carrying: the shape, the string set, or the block set. Taking that
+ * description off the object is a separate act from deciding to measure by it,
+ * and it used to be welded to the button that made the matcher - so the same
+ * work had to be written again the moment a second control wanted the same
+ * measure. This is that half, on its own.
  *
- * SEVENTY PER CENT, and it is a measurement rather than a taste: that is the
- * threshold that fired on 71.5% of 925 deduplicated botnet samples and on none
- * of 3870 clean objects. The author can move it; the number it starts at is one
- * somebody counted.
- *
- * SUSPECT AND NOT INFECT, because a shape says the object came out of the same
- * BUILDER and not that it is the same family. A Mirai-derived builder that
- * produced a coinminer is a true shape match and a false family name.
+ * Zero with dr.warn set, which is what the panel shows. A block needs nothing
+ * prepared - the carve already found it - so it answers yes.
  */
-static void hit_plg_shape(struct view *v, uint32_t arg)
+static int sim_prepare(struct view *v, uint32_t what)
 {
 	struct object *o = cur_obj(v);
-	struct group *g;
-
-	(void)arg;
-	if (!o || !o->info || o->ctx.format != KOF_FMT_ELF) {
-		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
-			 "a shape is an ELF's geometry; this object has none");
-		v->ed.dr.warn_bad = 1;
-		return;
-	}
-	kof_ovl_shape_of((const struct kof_elf_info *)o->info, o->buf.n,
-			 &v->ed.dr.shp);
-	v->ed.dr.has_shp = v->ed.dr.shp.n_region != 0;
-	if (!v->ed.dr.has_shp) {
-		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
-			 "no loadable region: there is no shape to describe");
-		v->ed.dr.warn_bad = 1;
-		return;
-	}
-	/* One shape to a draft, so one shape matcher - see struct kof_draft. */
-	for (uint32_t i = 0; i < v->ed.dr.n_grp; i++)
-		if (v->ed.dr.grp[i].kind == GRP_KIND_STRUCT) {
-			v->ed.dr.cur_grp = i;
-			return;
-		}
-	if (v->ed.dr.n_grp >= MAX_GROUP)
-		return;
-	g = &v->ed.dr.grp[v->ed.dr.n_grp];
-	memset(g, 0, sizeof *g);
-	g->kind = (uint8_t)GRP_KIND_STRUCT;
-	g->pct  = 70u;
-	v->ed.dr.cur_grp = v->ed.dr.n_grp;
-	v->ed.dr.n_grp++;
-	plg_wire(v, v->ed.dr.cur_grp, LV_SUSPECT);
-}
-
-/*
- * STRING SHAPE - the author's strings, as a set.
- *
- * Layout-free, which is the whole reason it sits beside the block matcher
- * rather than replacing it: a block is a run of bytes and moves when anything
- * before it changes, while a set has no order to disturb. Measured across
- * architectures, two builds of one botnet share 0.000 of their code blocks and
- * 0.4 to 0.94 of their strings.
- *
- * THE LIBRARY IS ALREADY OUT. kof_ovl_build subtracts it - see koflib.h - so
- * what lands in the draft is what the author wrote. Where the cut found
- * nothing, it says so: a set that is half libc matches every program built
- * against that libc, and the panel should not offer it silently.
- *
- * FIFTY PER CENT, which is where the measurement was taken: 84.6% of 925
- * deduplicated samples matched another at that threshold, against zero of 3850
- * clean objects.
- */
-static void hit_plg_strshape(struct view *v, uint32_t arg)
-{
-	struct object *o = cur_obj(v);
-	struct kof_lib_result lib;
 	struct kof_ovl_desc *d;
-	struct group *g;
 	uint32_t i;
 
-	(void)arg;
+	if (what == SIM_IT_BLOCK)
+		return 1;
 	if (!o || !o->info || o->ctx.format != KOF_FMT_ELF) {
 		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
-			 "a string set is cut from an ELF's regions; "
-			 "this object has none");
+			 "%s is taken from an ELF's regions; "
+			 "this object has none", sim_it_word(what));
 		v->ed.dr.warn_bad = 1;
-		return;
+		return 0;
 	}
+	/*
+	 * THE SHAPE READS NO CONTENT, which is the whole point: it still
+	 * answers on a sample whose payload is encrypted. See
+	 * kofmod/kofoverlord.h.
+	 */
+	if (what == SIM_IT_SHAPE) {
+		kof_ovl_shape_of((const struct kof_elf_info *)o->info, o->buf.n,
+				 &v->ed.dr.shp);
+		v->ed.dr.has_shp = v->ed.dr.shp.n_region != 0;
+		if (!v->ed.dr.has_shp) {
+			snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
+				 "no loadable region: there is no shape to "
+				 "describe");
+			v->ed.dr.warn_bad = 1;
+			return 0;
+		}
+		return 1;
+	}
+	/*
+	 * THE LIBRARY IS ALREADY OUT of both sets. kof_ovl_build subtracts it -
+	 * see koflib.h - so what lands in the draft is what the author wrote
+	 * and not what the linker did.
+	 */
 	d = malloc(sizeof *d);
 	if (!d)
-		return;
+		return 0;
 	if (!kof_ovl_build(d, o->buf, (const struct kof_elf_info *)o->info) ||
-	    !d->n_str) {
+	    (what == SIM_IT_STRSET ? !d->n_str : !d->n_blk)) {
 		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
-			 "no strings left after the library cut");
+			 "no %s left after the library cut",
+			 what == SIM_IT_STRSET ? "strings" : "blocks");
 		v->ed.dr.warn_bad = 1;
 		free(d);
-		return;
+		return 0;
 	}
-	v->ed.dr.n_str = d->n_str < DRAFT_MAX_STR ? d->n_str : DRAFT_MAX_STR;
-	for (i = 0; i < v->ed.dr.n_str; i++)
-		v->ed.dr.str[i] = d->str[i];
+	if (what == SIM_IT_STRSET) {
+		v->ed.dr.n_str = d->n_str < DRAFT_MAX_STR ? d->n_str
+							  : DRAFT_MAX_STR;
+		for (i = 0; i < v->ed.dr.n_str; i++)
+			v->ed.dr.str[i] = d->str[i];
+	} else {
+		v->ed.dr.n_blkv = d->n_blk < DRAFT_MAX_BLKV ? d->n_blk
+							    : DRAFT_MAX_BLKV;
+		for (i = 0; i < v->ed.dr.n_blkv; i++)
+			v->ed.dr.blkv[i] = d->blk[i];
+	}
 	free(d);
 	/*
 	 * SAY SO WHEN THE CUT FOUND NOTHING. Measured, the marker tier reaches
@@ -13999,87 +13984,210 @@ static void hit_plg_strshape(struct view *v, uint32_t arg)
 	 * offers it anyway, because the researcher may know better than the
 	 * cut; it does not offer it silently.
 	 */
-	kof_lib_find(o->buf, (const struct kof_elf_info *)o->info, &lib);
-	if (!lib.n)
-		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
-			 "%u strings - but no library was found to cut, "
-			 "so some of them are libc", v->ed.dr.n_str);
+	if (what == SIM_IT_STRSET) {
+		struct kof_lib_result lib;
 
-	/* One set to a draft, so one matcher about it. */
-	for (i = 0; i < v->ed.dr.n_grp; i++)
-		if (v->ed.dr.grp[i].kind == GRP_KIND_STRSHAPE) {
-			v->ed.dr.cur_grp = i;
-			return;
-		}
-	if (v->ed.dr.n_grp >= MAX_GROUP)
-		return;
-	g = &v->ed.dr.grp[v->ed.dr.n_grp];
-	memset(g, 0, sizeof *g);
-	g->kind = (uint8_t)GRP_KIND_STRSHAPE;
-	g->pct  = 50u;
-	v->ed.dr.cur_grp = v->ed.dr.n_grp;
-	v->ed.dr.n_grp++;
-	plg_wire(v, v->ed.dr.cur_grp, LV_INFECT);
+		kof_lib_find(o->buf, (const struct kof_elf_info *)o->info,
+			     &lib);
+		if (!lib.n)
+			snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
+				 "%u strings - but no library was found to "
+				 "cut, so some of them are libc",
+				 v->ed.dr.n_str);
+	}
+	return 1;
 }
 
 /*
- * SMART BLOCKS - the block VECTOR, as one matcher.
+ * TAKE A MEASURE BACK OUT OF EVERY MATCHER THAT NAMES IT.
  *
- * ITS OWN MEASURE, not an arithmetic over the table above. A block matcher
- * asks how much of ONE named run is here and is anchored to the region that
- * run came from; this asks how much of the reference's WHOLE set of selected
- * windows is here and is anchored to nothing. Which is why it needs its own
- * set: the blocks a researcher ticked are the ones they meant individually,
- * and the vector is about the object.
- *
- * The library is already out - kof_ovl_build cuts it, see koflib.h - so what
- * is compared is the author's windows and not the linker's.
+ * Every one of them, because the row the reader unticks stands for the measure
+ * and not for one matcher. The matchers themselves are left alone: they are
+ * the author's, added by hand, and an emptied one is refused at Save - which
+ * is the same contract unticking a block has. See blk_set_picked.
  */
-static void hit_plg_smart(struct view *v, uint32_t arg)
+static void sim_take_out(struct view *v, uint32_t what, uint32_t blk)
+{
+	uint32_t g;
+
+	for (g = 0; g < v->ed.dr.n_grp; g++) {
+		struct group *q = &v->ed.dr.grp[g];
+		uint32_t i;
+
+		if (q->kind != GRP_KIND_SIM)
+			continue;
+		for (i = q->n_sim; i--; )
+			if (q->sim[i].what == what &&
+			    (what != SIM_IT_BLOCK || q->sim[i].blk == blk))
+				grp_sim_del(&v->ed, g, i);
+	}
+}
+
+/*
+ * WHAT ONE ITEM OF A SIMILARITY MATCHER IS CALLED.
+ *
+ * A block by its name, which is what the block table calls it; a whole-object
+ * measure by the same words the Similarity table uses. How much of it there is
+ * belongs to those tables and not to this row - the matcher lists what it is
+ * about, the way a search matcher lists marker numbers and not their text.
+ */
+static void sim_item_name(const struct view *v,
+			  const struct grp_sim_item *it, char *out,
+			  size_t cap)
+{
+	if (it->what == SIM_IT_BLOCK)
+		snprintf(out, cap, "%08x",
+			 it->blk < v->ed.dr.n_blk
+			 ? v->ed.dr.blk[it->blk].id : 0u);
+	else
+		snprintf(out, cap, "%s", sim_it_word(it->what));
+}
+
+/*
+ * WHAT THE [+] ON A SIMILARITY MATCHER MAY OFFER.
+ *
+ * BOTH KINDS OF THING THE RULE IS WRITTEN FROM: every block the researcher
+ * ticked, and every measure they ticked. Which call the generated module ends
+ * up making is decided from the item - see emit_matcher - so the menu does not
+ * have to be two menus and the reader does not have to know they are different.
+ *
+ * TICKED, AND ONLY TICKED, for both of them. A block the engine merely offered
+ * is not part of the rule, and neither is a measure nobody asked for; the tick
+ * is what makes either one part of it, and it is made in the table that shows
+ * how alike this object is by that measure - which is where the choice can
+ * actually be judged.
+ *
+ * Not what this matcher already holds either, because adding it twice would
+ * emit the same comparison twice.
+ *
+ * The whole-object measures only where there is an object to take them from:
+ * all three are cut from an ELF's regions.
+ *
+ * `out` may be NULL, in which case this counts - which is what the drawer asks
+ * before deciding whether to draw the button at all.
+ */
+static uint32_t sim_offer(struct view *v, uint32_t g,
+			  struct grp_sim_item *out, uint32_t cap)
+{
+	static const uint8_t whole[3] = {
+		SIM_IT_BLKSET, SIM_IT_STRSET, SIM_IT_SHAPE
+	};
+	const struct object *ob = cur_obj(v);
+	uint32_t n = 0, i;
+
+	if (g >= v->ed.dr.n_grp ||
+	    v->ed.dr.grp[g].kind != GRP_KIND_SIM ||
+	    v->ed.dr.grp[g].n_sim >= GRP_SIM_MAX)
+		return 0;
+	for (i = 0; i < v->ed.dr.n_blk; i++) {
+		if (!blk_usable(&v->ed, i) ||
+		    grp_sim_has(&v->ed, g, SIM_IT_BLOCK, i))
+			continue;
+		if (out && n < cap) {
+			out[n].what = (uint8_t)SIM_IT_BLOCK;
+			out[n].blk  = i;
+		}
+		n++;
+	}
+	if (!ob || ob->ctx.format != KOF_FMT_ELF)
+		return n;
+	for (i = 0; i < 3u; i++) {
+		if (!v->ed.dr.sim_use[whole[i]] ||
+		    grp_sim_has(&v->ed, g, whole[i], 0))
+			continue;
+		if (out && n < cap) {
+			out[n].what = whole[i];
+			out[n].blk  = 0;
+		}
+		n++;
+	}
+	return n;
+}
+
+/*
+ * TAKE THE THREE WHOLE-OBJECT DESCRIPTIONS OFF THE OBJECT IN FRONT OF US -
+ * the other half of what the carve does for blocks.
+ *
+ * TICKED MEASURES ARE CARRIED, everything else is taken again. Word for word
+ * the rule plg_segment applies to blocks, and for the same reason: moving to
+ * another sample is the measurement, and what was ticked on the first one is
+ * what gets fed to the second. What is NOT ticked was a description of the
+ * object being left behind and has no business in a table about this one.
+ *
+ * It used to be done by the tick, so until a measure was chosen the table said
+ * the object had zero strings and zero windows - a count of nothing, under a
+ * heading that promised what the measure is compared over. The reader had to
+ * tick a thing to find out whether it was worth ticking.
+ *
+ * ONE BUILD FOR BOTH SETS, because they come out of the same pass over the
+ * same bytes - see kof_ovl_build - and it is the one expensive thing here.
+ */
+static void sim_recarve(struct view *v)
 {
 	struct object *o = cur_obj(v);
 	struct kof_ovl_desc *d;
-	struct group *g;
 	uint32_t i;
 
-	(void)arg;
-	if (!o || !o->info || o->ctx.format != KOF_FMT_ELF) {
-		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
-			 "the block set is cut from an ELF's regions; "
-			 "this object has none");
-		v->ed.dr.warn_bad = 1;
-		return;
+	for (i = 0; i < 4u; i++)
+		if (v->ed.dr.sim_use[i])
+			v->ed.dr.sim_kept[i] = 1;
+	if (!v->ed.dr.sim_use[SIM_IT_SHAPE]) {
+		memset(&v->ed.dr.shp, 0, sizeof v->ed.dr.shp);
+		v->ed.dr.has_shp = 0;
+		if (o && o->info && o->ctx.format == KOF_FMT_ELF) {
+			kof_ovl_shape_of((const struct kof_elf_info *)o->info,
+					 o->buf.n, &v->ed.dr.shp);
+			v->ed.dr.has_shp = v->ed.dr.shp.n_region != 0;
+		}
 	}
+	if (!v->ed.dr.sim_use[SIM_IT_STRSET])
+		v->ed.dr.n_str = 0;
+	if (!v->ed.dr.sim_use[SIM_IT_BLKSET])
+		v->ed.dr.n_blkv = 0;
+	if (v->ed.dr.sim_use[SIM_IT_STRSET] && v->ed.dr.sim_use[SIM_IT_BLKSET])
+		return;
+	if (!o || !o->info || o->ctx.format != KOF_FMT_ELF)
+		return;
 	d = malloc(sizeof *d);
 	if (!d)
 		return;
-	if (!kof_ovl_build(d, o->buf, (const struct kof_elf_info *)o->info) ||
-	    !d->n_blk) {
-		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
-			 "no blocks left after the library cut");
-		v->ed.dr.warn_bad = 1;
-		free(d);
-		return;
-	}
-	v->ed.dr.n_blkv = d->n_blk < DRAFT_MAX_BLKV ? d->n_blk : DRAFT_MAX_BLKV;
-	for (i = 0; i < v->ed.dr.n_blkv; i++)
-		v->ed.dr.blkv[i] = d->blk[i];
-	free(d);
-
-	for (i = 0; i < v->ed.dr.n_grp; i++)
-		if (v->ed.dr.grp[i].kind == GRP_KIND_BLKVEC) {
-			v->ed.dr.cur_grp = i;
-			return;
+	if (kof_ovl_build(d, o->buf, (const struct kof_elf_info *)o->info)) {
+		if (!v->ed.dr.sim_use[SIM_IT_STRSET]) {
+			v->ed.dr.n_str = d->n_str < DRAFT_MAX_STR
+					 ? d->n_str : DRAFT_MAX_STR;
+			for (i = 0; i < v->ed.dr.n_str; i++)
+				v->ed.dr.str[i] = d->str[i];
 		}
-	if (v->ed.dr.n_grp >= MAX_GROUP)
+		if (!v->ed.dr.sim_use[SIM_IT_BLKSET]) {
+			v->ed.dr.n_blkv = d->n_blk < DRAFT_MAX_BLKV
+					  ? d->n_blk : DRAFT_MAX_BLKV;
+			for (i = 0; i < v->ed.dr.n_blkv; i++)
+				v->ed.dr.blkv[i] = d->blk[i];
+		}
+	}
+	free(d);
+}
+
+/*
+ * CLICKING WHAT A MEASURE NAMES TAKES IT BACK OUT, which is exactly what
+ * clicking a marker number does on a search matcher.
+ *
+ * The matcher stays even when that empties it, for the same reason an emptied
+ * search matcher does: a matcher removed under the pointer would take the row
+ * the pointer is on with it, and the author may be about to choose a different
+ * measure for it. draft_missing_of refuses an empty one at the point it
+ * matters, which is Save.
+ */
+static void hit_sim_item_del(struct view *v, uint32_t pk)
+{
+	uint32_t g = pk / GRP_SIM_MAX, k = pk % GRP_SIM_MAX;
+
+	if (g >= v->ed.dr.n_grp || v->ed.dr.grp[g].kind != GRP_KIND_SIM ||
+	    k >= v->ed.dr.grp[g].n_sim)
 		return;
-	g = &v->ed.dr.grp[v->ed.dr.n_grp];
-	memset(g, 0, sizeof *g);
-	g->kind = (uint8_t)GRP_KIND_BLKVEC;
-	g->pct  = GRP_PCT_DEFAULT;
-	v->ed.dr.cur_grp = v->ed.dr.n_grp;
-	v->ed.dr.n_grp++;
-	plg_wire(v, v->ed.dr.cur_grp, LV_INFECT);
+	v->ed.dr.cur_grp = g;
+	grp_sim_del(&v->ed, g, k);
+	v->plg_scored = 0;
 }
 
 /*
@@ -14133,11 +14241,19 @@ static int plg_digit(int c)
 
 /* Clicking the threshold puts the caret in it - see the note where it is
  * drawn. */
-static void hit_grp_pct(struct view *v, uint32_t i)
+static void hit_grp_pct(struct view *v, uint32_t g)
 {
-	if (i >= v->ed.dr.n_blk)
+	/*
+	 * THE ARGUMENT IS THE MATCHER, not a block.
+	 *
+	 * It used to be the row of the block table and was bounds-checked
+	 * against n_blk, which was the wrong list even when a block matcher
+	 * was the only kind with a threshold: what the box edits is a
+	 * MATCHER'S number.
+	 */
+	if (g >= v->ed.dr.n_grp || v->ed.dr.grp[g].kind != GRP_KIND_SIM)
 		return;
-	v->edit = ED_GRP_PCT + (int)i;
+	v->edit = ED_GRP_PCT + (int)g;
 	/*
 	 * THE VALUE STAYS ON SCREEN AND IS SELECTED, so the first digit typed
 	 * replaces it.
@@ -14154,7 +14270,7 @@ static void hit_grp_pct(struct view *v, uint32_t i)
 	 * would otherwise run on the first key and clear the selection again.
 	 */
 	snprintf(v->grp_pct_buf, sizeof v->grp_pct_buf, "%u",
-		 v->ed.dr.grp[i].pct);
+		 v->ed.dr.grp[g].pct);
 	v->grp_pct_off = 0;
 	v->edit_prev = v->edit;
 	v->caret = (uint32_t)strlen(v->grp_pct_buf);
@@ -14313,6 +14429,9 @@ static void plg_sync(struct view *v)
 	if (!v->plg_segged || v->plg_seg_obj != v->node[v->sel_node].obj) {
 		plg_segment(v);
 		plg_order(v);
+		/* The same arrival, the other half of what it describes - see
+		 * sim_recarve. */
+		sim_recarve(v);
 		v->plg_segged = 1;
 		v->plg_seg_obj = v->node[v->sel_node].obj;
 		/* The rows just moved; a box open on one of them is open on a
@@ -14415,11 +14534,87 @@ static int decl_table_head(struct out *o, struct view *v, int r,
 	return r + 1;
 }
 
+/*
+ * HOW BIG, IN SOMETHING A READER CAN HOLD IN THEIR HEAD.
+ *
+ * "135784 B" is the number the parse has and not the one a person compares
+ * against another sample; two significant figures and a unit is. Powers of two,
+ * because that is what every other size in this tool means.
+ */
+static void sim_size_word(unsigned long long n, char *out, size_t cap)
+{
+	static const char unit[] = "BKMGT";
+	unsigned i = 0;
+
+	while (n >= 10240ull && i + 1u < sizeof unit - 1u) {
+		n /= 1024ull;
+		i++;
+	}
+	/* Under 10240 once the loop has run, so four digits at most - but the
+	 * compiler cannot see that through the loop, and a cast that says it
+	 * would be a claim rather than a fact. Clamped instead. */
+	if (n > 99999ull)
+		n = 99999ull;
+	if (!i)
+		snprintf(out, cap, "%llu B", n);
+	else
+		snprintf(out, cap, "%llu %cB", n, unit[i]);
+}
+
+/*
+ * WHAT A MEASURE IS COMPARED OVER - one column, and never two facts crammed
+ * into one.
+ *
+ * The one thing a threshold cannot be read without: 60% of four runs and 60% of
+ * four hundred are not the same claim. The shape's cell used to read
+ * "1 region(s), 135784 B", which is a count and a size sharing a column under
+ * a heading that named neither; the size is now a size, and the count says
+ * region or regions rather than region(s).
+ *
+ * AND NONE OF THESE BORROW ANOTHER TABLE'S NOUN. Two of the measures are
+ * whole-object vectors and what they are over is not what the tables above
+ * them list: the string set is built from PRINTABLE RUNS the engine found, not
+ * from the strings the author declared in the Strings table, and the block set
+ * is built from SELECTED WINDOWS, not from the blocks the carve offered in the
+ * Plague table. Spelled "460 strings" and "2048 hashes" they read as counts of
+ * those other things - a string shape that claimed four hundred declared
+ * strings, and a vector that claimed two thousand blocks beside a table
+ * showing thirty. They are named for what they actually are.
+ */
+static void sim_over_word(const struct view *v, uint32_t what, char *out,
+			  size_t cap)
+{
+	/* Ten digits, a space, a unit letter, "B" and the terminator is the
+	 * longest this can produce - see sim_size_word. */
+	char sz[14];
+
+	switch (what) {
+	case SIM_IT_SHAPE:
+		sim_size_word(v->ed.dr.shp.fsize, sz, sizeof sz);
+		snprintf(out, cap, "%u region%s, %s", v->ed.dr.shp.n_region,
+			 v->ed.dr.shp.n_region == 1u ? "" : "s", sz);
+		break;
+	case SIM_IT_STRSET:
+		snprintf(out, cap, "%u printable run%s", v->ed.dr.n_str,
+			 v->ed.dr.n_str == 1u ? "" : "s");
+		break;
+	default:
+		snprintf(out, cap, "%u selected window%s", v->ed.dr.n_blkv,
+			 v->ed.dr.n_blkv == 1u ? "" : "s");
+		break;
+	}
+}
+
+/* Is there a description of this measure in the draft at all. */
+static int sim_have(const struct view *v, uint32_t what)
+{
+	return what == SIM_IT_SHAPE  ? v->ed.dr.has_shp != 0
+	     : what == SIM_IT_STRSET ? v->ed.dr.n_str != 0
+				     : v->ed.dr.n_blkv != 0;
+}
+
 static int draw_decl_sim(struct out *o, struct view *v, int r)
 {
-	static const char *const nm[SIM_ROWS] = {
-		"smart blocks", "string shape", "file structure"
-	};
 	struct object *ob = cur_obj(v);
 	uint32_t i;
 
@@ -14429,19 +14624,24 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 		char sum[48];
 		uint32_t g, on = 0;
 
-		for (g = 0; g < v->ed.dr.n_grp; g++)
-			on += v->ed.dr.grp[g].kind == GRP_KIND_BLKVEC ||
-			      v->ed.dr.grp[g].kind == GRP_KIND_STRSHAPE ||
-			      v->ed.dr.grp[g].kind == GRP_KIND_STRUCT;
+		for (g = 0; g < SIM_ROWS; g++)
+			on += v->ed.dr.sim_use[sim_row_what(g)] != 0;
 		snprintf(sum, sizeof sum, " 3 measures, %u in use", on);
+		/*
+		 * THE PERCENTAGE LAST, where the block table already keeps its
+		 * score: it is the answer, and an answer belongs at the end of
+		 * the row rather than wedged between the name and the thing
+		 * the name is measured over.
+		 */
 		r = decl_table_head(o, v, r, " Similarity", v->sim_fold, 1u,
-				    " use  measure           %  of", sum);
+				    " use  measure           over"
+				    "                  match", sum);
 	}
 
 	for (i = 0; i < SIM_ROWS; i++) {
-		char detail[48];
-		uint32_t pct = 0, kind = 0;
-		int on = 0, y, c0;
+		char over[32], mt[8];
+		uint32_t what = sim_row_what(i), pct;
+		int on, y, c0;
 
 		if (!sim_row_shown(v, i))
 			continue;
@@ -14449,40 +14649,32 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 			r++;
 			continue;
 		}
-		switch (i) {
-		case SIM_BLOCKS:
-			pct = v->sim_blk;
-			/*
-			 * KEYED ON THE VECTOR, NOT ON A BLOCK MATCHER. A
-			 * researcher who pointed one matcher at one block has
-			 * not asked for this measure, and a tick that lit up
-			 * because of that would claim they had.
-			 */
-			kind = GRP_KIND_BLKVEC;
-			snprintf(detail, sizeof detail, "%u block hash(es)",
-				 v->ed.dr.n_blkv);
-			break;
-		case SIM_STRING:
-			pct = v->sim_str;
-			kind = GRP_KIND_STRSHAPE;
-			snprintf(detail, sizeof detail, "%u string(s)",
-				 v->ed.dr.n_str);
-			break;
-		default:
-			pct = v->sim_shape;
-			kind = GRP_KIND_STRUCT;
-			snprintf(detail, sizeof detail, "%u region(s), %llu B",
-				 v->ed.dr.shp.n_region,
-				 (unsigned long long)v->ed.dr.shp.fsize);
-			break;
-		}
-		{
-			uint32_t g;
-
-			for (g = 0; g < v->ed.dr.n_grp; g++)
-				if (v->ed.dr.grp[g].kind == kind)
-					on = 1;
-		}
+		pct = i == SIM_BLOCKS ? v->sim_blk
+		    : i == SIM_STRING ? v->sim_str : v->sim_shape;
+		sim_over_word(v, what, over, sizeof over);
+		/*
+		 * A PERCENTAGE ONLY ONCE THERE IS SOMETHING TO COMPARE
+		 * AGAINST, and a dash until then - not a zero, and not the
+		 * hundred that an object compared with itself always gives.
+		 *
+		 * Until a measure is ticked its description is retaken from
+		 * whatever object is in front of the reader, so it matches
+		 * itself; the number means something from the sample AFTER the
+		 * one it was chosen on. That is what sim_kept marks, and it is
+		 * the same rule the block table's score column follows - see
+		 * plg_kept_any.
+		 */
+		if (sim_have(v, what) && v->ed.dr.sim_kept[what])
+			snprintf(mt, sizeof mt, "%u%%", pct);
+		else
+			snprintf(mt, sizeof mt, "-");
+		/*
+		 * KEYED ON THE MEASURE, NOT ON A BLOCK MATCHER. A researcher
+		 * who pointed one matcher at one block has not asked for the
+		 * block VECTOR, and a tick that lit up because of that would
+		 * claim they had.
+		 */
+		on = v->ed.dr.sim_use[what] != 0;
 		y = PR(r);
 		row_start(o, y, 1);
 		/* Past the fold gutter - see decl_table_head. */
@@ -14490,20 +14682,16 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 		c0 = 2 + (int)o->col_hint;
 		out_fmt(o, " [%c]", on ? 'x' : ' ');
 		hit_add(v, y, c0, (int)o->col_hint, hit_sim_tick, i);
-		out_fmt(o, " %s%-16s" A_OFF, on ? A_ID : A_DIM, nm[i]);
-		/*
-		 * NOTHING TO COMPARE AGAINST READS AS A DASH, not as zero. A
-		 * draft that has not been given a string set has no answer
-		 * about strings, and nought is an answer.
-		 */
-		if ((i == SIM_STRING && !v->ed.dr.n_str) ||
-		    (i == SIM_SHAPE && !v->ed.dr.has_shp) ||
-		    (i == SIM_BLOCKS && !v->ed.dr.n_blkv))
-			out_str(o, A_DIM "  -" A_OFF);
-		else
-			out_fmt(o, "%s%3u" A_OFF,
-				pct >= 50u ? A_WARN : A_DIM, pct);
-		out_fmt(o, A_DIM "  %s" A_OFF, detail);
+		/* The cell that puts the row under its own heading - see the
+		 * block table, where the same space is paid for the same
+		 * reason. */
+		out_str(o, " ");
+		out_fmt(o, " %s%-18s" A_OFF, on ? A_ID : A_DIM,
+			sim_it_word(what));
+		out_fmt(o, A_DIM "%-22s" A_OFF, over);
+		out_fmt(o, "%s%5s" A_OFF,
+			!v->ed.dr.sim_kept[what] ? A_DIM
+			: pct >= 50u ? A_WARN : A_DIM, mt);
 		r++;
 	}
 	return r;
@@ -14591,6 +14779,18 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 		c0 = 2 + (int)o->col_hint;
 		out_fmt(o, " [%c]", b->picked ? 'x' : ' ');
 		hit_add(v, y, c0, (int)o->col_hint, hit_plg_tick, i);
+		/*
+		 * AND ONE SPACE THAT PUTS THE ROW UNDER ITS OWN HEADING.
+		 *
+		 * decl_table_head writes the fold handle as " [-]" - four
+		 * cells - and then the column names; the row wrote "    " and
+		 * " [x]", which is five. Every column after the tick therefore
+		 * sat one cell left of the word naming it, all the way across
+		 * both tables. The handle is the odd one out, so the row pays
+		 * the cell here rather than the heading losing a space it
+		 * needs.
+		 */
+		out_str(o, " ");
 
 		/*
 		 * The name, in its own colour while lit and plain otherwise -

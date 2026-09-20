@@ -348,6 +348,81 @@ static inline const char *grp_rule_word(int rule)
 /* Whether a matcher compares at one offset rather than searching a range. */
 static inline int grp_is_at(int rule) { return rule == 3; }
 
+/* The kinds, spelled rather than counted at the point of use. */
+#define GRP_KIND_STR    0u
+/*
+ * HOW ALIKE THIS OBJECT IS TO THE ONE THE RULE WAS WRITTEN FROM.
+ *
+ * Not a search. A string matcher looks for something IN the object; this one
+ * measures the object AGAINST a reference and asks how much of it is here. It
+ * was four separate kinds - one per measure - which made four matchers that
+ * differed only in which number they compared, and a rule that used three of
+ * them read as three unrelated things rather than as three ways of asking one
+ * question.
+ *
+ * IT IS SHAPED LIKE A SEARCH MATCHER AND NOTHING ELSE. It holds ITEMS the way
+ * a string matcher holds markers - one row naming them, with the button that
+ * adds one at the end of it - and it has ONE threshold, on its own row, where a
+ * find_multi keeps its own. `pct` is that threshold and every item has to reach
+ * it.
+ *
+ * Wanting two measures at two thresholds is two matchers, and wanting either of
+ * two is two conditions; that is how the rest of the editor already says both,
+ * and a second way of saying them inside one matcher would be a second grammar.
+ *
+ * `rule`, `thresh`, `at_off` and `mask` mean nothing to one.
+ */
+#define GRP_KIND_SIM    1u
+
+/*
+ * THE MEASURES AN ITEM CAN NAME. Each is computed by the engine, and which
+ * call the generated module makes is decided from `what` alone - see
+ * emit_matcher.
+ */
+/*
+ * ONE NAMED RUN OF BYTES, region-anchored and fuzzy: kof_plague_score. The
+ * item carries which block, by index into kof_draft.blk.
+ */
+#define SIM_IT_BLOCK  0u
+/*
+ * THE OBJECT'S GEOMETRY - size, how many loadable regions and how big each -
+ * against a reference somebody identified: kof_ovl_shape. It reads no bytes,
+ * which is the whole reason it exists: it still answers when the payload is
+ * ciphertext. See kofmod/kofoverlord.h.
+ */
+#define SIM_IT_SHAPE  1u
+/*
+ * THE OBJECT'S STRING SET, which is content without being a place:
+ * kof_ovl_strings. A block scores a RUN and moves when anything before it
+ * changes; a set has no order to disturb. Measured across architectures, two
+ * builds of one botnet share 0.000 of their code blocks and 0.4 to 0.94 of
+ * their strings - so this is the measure that survives a recompile for another
+ * target, and the block is the one that is exact.
+ */
+#define SIM_IT_STRSET 2u
+/*
+ * THE BLOCK VECTOR - how alike the object is across the reference's WHOLE set
+ * of selected windows, not how much of any one named run is here:
+ * kof_ovl_blocks. Its own set, built by kof_ovl_build with the library cut
+ * out; the blocks a researcher ticked are the ones they meant individually.
+ *
+ * Measured: agreement across the set beat the best single block - 83.0%
+ * against 81.8% at the same zero false positives - because agreement in every
+ * region is what a rebuild preserves and a coincidence does not.
+ */
+#define SIM_IT_BLKSET 3u
+
+/* How many measures one similarity matcher can hold. Four kinds and, at most,
+ * one block apiece for the blocks a draft carries; eight is past what any
+ * measured rule has needed, and it is also how many items a list row can hold
+ * a click span for. */
+#define GRP_SIM_MAX 8u
+
+struct grp_sim_item {
+	uint8_t  what;              /* SIM_IT_* */
+	uint32_t blk;               /* SIM_IT_BLOCK only: index into dr.blk */
+};
+
 struct group {
 	int      rule;              /* 0 ALL, 1 ANY, 2 threshold, 3 AT */
 	uint32_t thresh;
@@ -395,8 +470,15 @@ struct group {
 	 * `rule`, `thresh`, `at_off` and `mask` mean nothing to one.
 	 */
 	uint8_t  kind;
-	uint32_t blk;               /* index into kof_draft.blk */
-	uint8_t  pct;               /* how much of it the rule demands */
+	/*
+	 * WHAT A SIMILARITY MATCHER IS ABOUT - one entry per measure, all of
+	 * which have to reach `pct`. Empty until the [+ Similarity] button
+	 * puts something in it, the same way a fresh string matcher holds no
+	 * markers.
+	 */
+	struct grp_sim_item sim[GRP_SIM_MAX];
+	uint8_t  n_sim;
+	uint8_t  pct;               /* how much of each the rule demands */
 };
 
 /* What a block matcher demands until somebody says otherwise. A placeholder,
@@ -412,59 +494,6 @@ struct group {
  * than a printable run of six is found. */
 #define DRAFT_MAX_BLKV 2048u
 
-/* The kinds, spelled rather than counted at the point of use. */
-#define GRP_KIND_STR    0u
-#define GRP_KIND_BLOCK  1u
-/*
- * THE OBJECT'S SHAPE, which is not a search at all.
- *
- * A string matcher and a block matcher both look for something IN the object; a
- * shape matcher compares the object's own geometry - its size, how many
- * loadable regions and how big each - against a reference somebody identified.
- * It reads no bytes, which is the whole reason it exists: it still answers when
- * the payload is ciphertext. See kofmod/kofoverlord.h.
- *
- * It lives in this list and is combined by the same conditions, for the same
- * reason the block matcher does: a rule names it and concludes from it, and
- * having its own list would mean a second way to write "this and that".
- *
- * `pct` is the threshold, the same field the block matcher uses. `blk`, `rule`,
- * `thresh`, `at_off` and `mask` mean nothing to one - the shape it is about is
- * the draft's, since a draft describes one object.
- */
-#define GRP_KIND_STRUCT 2u
-/*
- * THE OBJECT'S STRING SET, which is content without being a place.
- *
- * A block matcher scores a RUN OF BYTES and moves when anything before it
- * changes; this scores a SET, which has no order to disturb. Measured across
- * architectures, two builds of one botnet share 0.000 of their code blocks and
- * 0.4 to 0.94 of their strings - so this is the matcher that survives a
- * recompile for another target, and the block matcher is the one that is exact.
- *
- * `pct` is the threshold, as for the other two. The set it is about is the
- * draft's, like the shape: a draft describes one object.
- */
-#define GRP_KIND_STRSHAPE 3u
-/*
- * THE BLOCK VECTOR - how alike the object is across ALL the chosen blocks, not
- * how much of any one of them is here.
- *
- * A block matcher answers about one block and a rule made of several is several
- * matchers, each with its own threshold and each able to fire alone. That is
- * the right shape when a researcher picked one run of bytes and means THAT run.
- * It is the wrong shape for "this object is built like that one": there the
- * evidence is that the blocks agree TOGETHER, and a mean over them is one
- * measurement where N thresholds are N.
- *
- * Measured: the mean over the chosen blocks beat the best single one - 83.0%
- * against 81.8% at the same zero false positives - because agreement in every
- * region is what a rebuild preserves and a coincidence does not.
- *
- * It names no block: it is about every block the draft has ticked, and the
- * generated module writes the mean out as one expression - see emit_matcher.
- */
-#define GRP_KIND_BLKVEC 4u
 
 struct cond {
 	char     expr[64];          /* over matcher ids */
@@ -627,10 +656,28 @@ struct kof_draft {
 	 *
 	 * Not the blocks of the table above: those are named runs a researcher
 	 * picked and each is its own matcher. This is the object's whole set,
-	 * which is what the block-vector measure is over - see GRP_KIND_BLKVEC.
+	 * which is what the block-vector measure is over - see SIM_IT_BLKSET.
 	 */
 	uint32_t     blkv[DRAFT_MAX_BLKV];
 	uint32_t     n_blkv;
+	/*
+	 * WHICH WHOLE-OBJECT MEASURES THE AUTHOR HAS CHOSEN, and which of them
+	 * are carried - indexed by SIM_IT_*, with the block slot unused
+	 * because a block's tick lives on the block.
+	 *
+	 * The same pair of facts the block table keeps, for the same reasons.
+	 * `sim_use` is the tick: it says this measure is part of the rule, and
+	 * nothing else - a matcher is added by hand and names it afterwards,
+	 * exactly as one names a ticked block.
+	 *
+	 * `sim_kept` says the description in this draft came from somewhere
+	 * other than the object in front of the reader - another sample, or a
+	 * rule that was opened. Until then the percentage beside it is the
+	 * object compared with itself, which is a hundred and means nothing;
+	 * see plg_block.kept, where the score column answers the same way.
+	 */
+	uint8_t      sim_use[4];
+	uint8_t      sim_kept[4];
 	char         sedit[DECL_HEXS_CAP];
 	uint32_t     sedit_off;
 	struct range rng[MAX_RANGE];
@@ -1186,8 +1233,32 @@ int draft_uses_blocks(const struct kof_editor *e);
 uint32_t grp_of_block(const struct kof_editor *e, uint32_t blk);
 void grp_label(const struct kof_editor *e, uint32_t g, char *out, size_t cap);
 int blk_usable(const struct kof_editor *e, uint32_t i);
-int blk_any_usable(const struct kof_editor *e);
-int grp_make_block(struct kof_editor *e, uint32_t g);
+int grp_make_sim(struct kof_editor *e, uint32_t g);
+
+/*
+ * THE ITEMS OF A SIMILARITY MATCHER - added, removed and asked about through
+ * these rather than by reaching into the array.
+ *
+ * Every one of them takes the pair (what, blk) as the item's IDENTITY: `blk`
+ * is read only for SIM_IT_BLOCK, so the three whole-object measures are one
+ * apiece per matcher and a block is one per block. That is what makes "is this
+ * already here" answerable, and a matcher that held the same measure twice
+ * would emit the same comparison twice.
+ */
+int grp_sim_add(struct kof_editor *e, uint32_t g, uint32_t what, uint32_t blk);
+void grp_sim_del(struct kof_editor *e, uint32_t g, uint32_t i);
+int grp_sim_has(const struct kof_editor *e, uint32_t g, uint32_t what,
+		uint32_t blk);
+/* Which matcher holds this item, or MAX_GROUP when none does. */
+uint32_t grp_sim_of(const struct kof_editor *e, uint32_t what, uint32_t blk);
+/* Does any matcher measure this way at all - blk ignored, so it answers for
+ * the three whole-object measures and for "any block". */
+int draft_uses_sim(const struct kof_editor *e, uint32_t what);
+/* The default threshold for a measure: where each was measured, not one
+ * number for all four. See the notes on the SIM_IT_* kinds. */
+uint32_t sim_pct_default(uint32_t what);
+/* What a measure is called on the panel and in a menu. */
+const char *sim_it_word(uint32_t what);
 void blk_set_picked(struct kof_editor *e, uint32_t i, int on);
 int blk_clears(const struct kof_editor *e, uint32_t i);
 void blk_moved(struct kof_editor *e, uint32_t from, uint32_t to);

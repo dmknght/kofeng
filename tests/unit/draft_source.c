@@ -242,6 +242,11 @@ static void mixed_rule(void)
 	struct kof_plague_decl d[4];
 	struct kof_verdict_decl verdict;
 	static uint32_t pool[4 * KOF_PLAGUE_MAX_HASH];
+	/* The three whole-object measures the same reader recovers. This rule
+	 * names none of them, so they come back zero - which is the answer
+	 * that says "the file did not ask for it". */
+	uint8_t shp_pct = 0, str_pct = 0, blkv_pct = 0;
+	int shp_lv = 0, str_lv = 0, blkv_lv = 0;
 	uint32_t n = 0;
 	const char *path = write_tmp(src);
 
@@ -256,13 +261,15 @@ static void mixed_rule(void)
 	/* And the block half, off the same file. */
 	CK(plague_from_source(&e, path, d, 4, &n, pool,
 			      (uint32_t)(sizeof pool / sizeof pool[0]),
-			      &verdict) != 0);
+			      &verdict, &shp_pct, &shp_lv, &str_pct, &str_lv,
+			      &blkv_pct, &blkv_lv) != 0);
 	CK(n == 1);
 	if (n) {
 		CK(d[0].id == 0xdded9322u);
 		CK(d[0].n_hash == 16);
 		CK(d[0].thr == 70);
 	}
+	CK(!shp_pct && !str_pct && !blkv_pct);
 	unlink(path);
 }
 

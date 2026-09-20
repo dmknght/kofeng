@@ -481,23 +481,42 @@ static void block_indices(void)
 	E.dr.n_grp = 2;
 	blk[0].picked = blk[1].picked = blk[2].picked = 1;
 	blk[0].n_hash = blk[1].n_hash = blk[2].n_hash = KOF_PLAGUE_MIN_HASH;
-	E.dr.grp[0].kind = (uint8_t)GRP_KIND_BLOCK;
-	E.dr.grp[0].blk = 2;
-	E.dr.grp[1].kind = (uint8_t)GRP_KIND_BLOCK;
-	E.dr.grp[1].blk = 0;
+	E.dr.grp[0].kind = (uint8_t)GRP_KIND_SIM;
+	E.dr.grp[1].kind = (uint8_t)GRP_KIND_SIM;
+	CK(grp_sim_add(&E, 0, SIM_IT_BLOCK, 2));
+	CK(grp_sim_add(&E, 1, SIM_IT_BLOCK, 0));
 
 	CK(grp_of_block(&E, 2) == 0);
 	CK(grp_of_block(&E, 0) == 1);
 	CK(grp_of_block(&E, 1) == MAX_GROUP);
 
 	blk_moved(&E, 2, 1);
-	CK(E.dr.grp[0].blk == 1);
-	CK(E.dr.grp[1].blk == 0);
+	CK(E.dr.grp[0].sim[0].blk == 1);
+	CK(E.dr.grp[1].sim[0].blk == 0);
 	blk_moved(&E, 0, 2);
-	CK(E.dr.grp[1].blk == 2);
+	CK(E.dr.grp[1].sim[0].blk == 2);
 	/* A move to where it already is changes nothing. */
 	blk_moved(&E, 1, 1);
-	CK(E.dr.grp[0].blk == 1);
+	CK(E.dr.grp[0].sim[0].blk == 1);
+
+	/*
+	 * A MEASURE IS IDENTIFIED BY WHAT IT IS AND, FOR A BLOCK, BY WHICH -
+	 * so the same block twice is one item, two different blocks are two,
+	 * and a whole-object measure is one per matcher whatever `blk` says.
+	 */
+	CK(grp_sim_add(&E, 0, SIM_IT_BLOCK, 1) && E.dr.grp[0].n_sim == 1);
+	CK(grp_sim_add(&E, 0, SIM_IT_SHAPE, 0) && E.dr.grp[0].n_sim == 2);
+	CK(grp_sim_add(&E, 0, SIM_IT_SHAPE, 7) && E.dr.grp[0].n_sim == 2);
+	CK(grp_sim_of(&E, SIM_IT_SHAPE, 0) == 0);
+	CK(grp_sim_of(&E, SIM_IT_STRSET, 0) == MAX_GROUP);
+	CK(draft_uses_sim(&E, SIM_IT_SHAPE));
+	CK(!draft_uses_sim(&E, SIM_IT_BLKSET));
+	/* Taking one out closes the gap rather than leaving a hole for the
+	 * list row to draw. */
+	grp_sim_del(&E, 0, 0);
+	CK(E.dr.grp[0].n_sim == 1 && E.dr.grp[0].sim[0].what == SIM_IT_SHAPE);
+	CK(!draft_uses_sim(&E, SIM_IT_BLOCK) || grp_of_block(&E, 2) == 1);
+	CK(grp_sim_add(&E, 0, SIM_IT_BLOCK, 1) && E.dr.grp[0].n_sim == 2);
 
 	/* A block is usable when it was TICKED and can be scored - both, and
 	 * the four menus that offer blocks ask this one question. */
