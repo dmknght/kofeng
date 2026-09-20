@@ -568,6 +568,16 @@ static int hex_last(void)
 #define OBJ_BUDGET  (256ull << 20)
 /* "[ Discard ]" with a space in front, so the note box can leave room. */
 #define NEW_BTN_W 12
+/*
+ * AND THE LAST COLUMN IS NOT THEIRS.
+ *
+ * Every row of the panel below this one ends in the divider the scrollbar is
+ * drawn on - see draw_decl - and the head row was laid out from g_cols as
+ * though it did not exist, so the closing bracket of Discard was painted on
+ * top of it. One column, and the border was broken on exactly the row a reader
+ * looks at first.
+ */
+#define HEAD_RMARGIN 1
 
 /*
  * THE HEADING ROW IS LAID OUT AGAINST FIXED MARKS, NOT AGAINST THE CURSOR.
@@ -582,7 +592,17 @@ static int hex_last(void)
  * and the comment takes exactly the gap between them. Nothing on the row moves
  * unless the terminal is resized.
  */
-#define FAM_W     24    /* the family box, focused or not */
+/*
+ * The family box, focused or not - and the width the row RESERVES for it,
+ * which is what puts the comment box where it sits.
+ *
+ * Twenty-four was two family names wide. "mirai", "Meterp", "CoinMiner" are
+ * what goes in it, so the row carried a dozen blank columns between the name
+ * and the comment and the two read as unrelated halves of the row. Fourteen
+ * still holds every family name in the tree without scrolling and puts the
+ * comment beside the thing it is a comment about.
+ */
+#define FAM_W     14
 #define NOTE_W    40    /* the comment box - a remark, not a paragraph */
 #define GEN_BTN_W 12    /* "[ Generate ]" */
 /* "[ Save ]" + two + "[ Save As ]" - what replaces Generate once the draft has
@@ -11943,7 +11963,7 @@ static void hit_head_discard(struct view *v, uint32_t arg)
 static int head_btn_x(const struct view *v)
 {
 	int w = v->ed.dr.gen_path[0] ? SAVE_BTN_W : GEN_BTN_W;
-	int x = g_cols - NEW_BTN_W - w;
+	int x = g_cols - NEW_BTN_W - w - HEAD_RMARGIN;
 
 	return x < 2 ? 2 : x;
 }
@@ -12143,12 +12163,14 @@ static void draw_decl_head(struct out *o, struct view *v)
 	 * that write a file wear, this one throws the panel away, and a discard
 	 * next to a commit is how a misclick happens.
 	 */
-	out_at(o, decl_top(), g_cols - NEW_BTN_W + 1);
-	v->nw_c0 = g_cols - NEW_BTN_W + 1;
+	out_at(o, decl_top(), g_cols - NEW_BTN_W + 1 - HEAD_RMARGIN);
+	v->nw_c0 = g_cols - NEW_BTN_W + 1 - HEAD_RMARGIN;
 	out_fmt(o, " %s[ Discard ]" A_OFF,
 		v->ed.dr.n_decl || v->ed.dr.family[0] ? A_ID : "\033[47;90m");
-	v->nw_c1 = g_cols;
-	hit_add(v, decl_top(), v->nw_c0, g_cols, hit_head_discard, 0);
+	/* Where it actually ends, not where the row does - the column past it
+	 * belongs to the border and a click there is not a click on this. */
+	v->nw_c1 = g_cols - HEAD_RMARGIN;
+	hit_add(v, decl_top(), v->nw_c0, v->nw_c1, hit_head_discard, 0);
 }
 
 /*
@@ -19398,13 +19420,51 @@ static int vis_cols(const char *s)
  * function. What is peculiar to this box is the ORDER of the shelves and how
  * many there are; which formats are on one is kof_format_group's answer.
  */
+/*
+ * WHICH ROW OF THE ABOUT BOX A FORMAT BELONGS ON.
+ *
+ * NOT the engine's own grouping, and deliberately so: kof_format_group says
+ * what a format IS to the parser, and this says what a reader is looking for
+ * when they scan the list. The two agree about executables, documents and
+ * archives and part company over the rest.
+ *
+ * SCRIPT IS ITS OWN ROW, beside Document and Archive rather than swept into
+ * "Other" with the media types. It is a whole side of this engine - a
+ * sub-typed format with its own region model - and a box that listed PDF and
+ * RAR by name while filing every scripting language under "other" understated
+ * what the build can open.
+ *
+ * REG AND AMSI SIT WITH IT. To the parser a .reg file is text and an AMSI
+ * buffer is an event, which is right for routing and unhelpful here: both
+ * carry a script, and somebody asking "can this look at PowerShell" wants to
+ * find them next to it.
+ *
+ * LNK DOES NOT. The parser files it under script because what is worth reading
+ * in a shortcut is the command line it carries, which is the same job - but a
+ * .lnk is a binary structure of its own and nothing in it is a script the way
+ * a .ps1 or a .reg is. On a row that then lists PowerShell and Batch beneath
+ * it, it would be read as a scripting language.
+ *
+ * PROCESS IS NOT ON ANY ROW. KOF_EVT_PROC is a live process the scanner is
+ * asked about - see --scan-procs - and not a format a file can be opened as.
+ * Listed among the file formats it reads as one, and there is no file a reader
+ * could bring here to try it.
+ */
+#define ABOUT_ROW_DROP (-1)
 static int fmt_group(uint8_t f)
 {
+	if (f == KOF_EVT_PROC)
+		return ABOUT_ROW_DROP;
+	if (f == KOF_FMT_REG || f == KOF_EVT_AMSI)
+		return 1;
+	if (f == KOF_FMT_LNK)
+		return 4;
 	switch (kof_format_group(f)) {
 	case KOF_FGRP_EXEC:    return 0;
-	case KOF_FGRP_DOC:     return 1;
-	case KOF_FGRP_ARCHIVE: return 2;
-	default:               return 3;
+	case KOF_FGRP_SCRIPT:  return 1;
+	case KOF_FGRP_DOC:     return 2;
+	case KOF_FGRP_ARCHIVE: return 3;
+	default:               return 4;
 	}
 }
 
@@ -19412,7 +19472,9 @@ static int fmt_group(uint8_t f)
  * a collector of its own. */
 static const uint8_t about_extra[] = { KOF_FMT_DOCZIP };
 
-#define ABOUT_MAX  40
+/* The box lost its Project rows the moment the format list grew a row and the
+ * script sub-types under it - abt() drops what does not fit, silently. */
+#define ABOUT_MAX  48
 #define ABOUT_W    200
 
 static struct prop_line g_about[ABOUT_MAX];
@@ -19452,8 +19514,8 @@ static void about_build(struct view *v)
 	const struct kof_parser *fmts;
 	uint32_t nf = 0, k;
 	int g;
-	static const char *const gname[4] = {
-		"Executable", "Document", "Archive", "Other"
+	static const char *const gname[5] = {
+		"Executable", "Script", "Document", "Archive", "Other"
 	};
 
 	g_n_about = 0;
@@ -19550,7 +19612,7 @@ static void about_build(struct view *v)
 
 	abt(A_ID "File formats" A_OFF);
 	fmts = kof_parser_list(&nf);
-	for (g = 0; g < 4; g++) {
+	for (g = 0; g < 5; g++) {
 		char row[ABOUT_W];
 		uint32_t at = 0;
 		int any = 0;
@@ -19558,6 +19620,13 @@ static void about_build(struct view *v)
 		row[0] = 0;
 		for (k = 0; k < nf; k++) {
 			if (fmt_group(fmts[k].format) != g)
+				continue;
+			/* KOF_FMT_SCRIPT is what a script whose language was
+			 * not recognised is, and the row it would sit on is
+			 * already called Script. Naming it again says the word
+			 * twice and nothing else; the languages under the row
+			 * are what there is to read. */
+			if (fmts[k].format == KOF_FMT_SCRIPT)
 				continue;
 			any = 1;
 			if (at + 1u >= sizeof row)
@@ -19587,8 +19656,56 @@ static void about_build(struct view *v)
 						 " %s",
 						 kof_format_name(about_extra[k]));
 		}
-		if (any)
-			abt("  " A_DIM "%-11s" A_OFF "%s", gname[g], row);
+		if (!any)
+			continue;
+		abt("  " A_DIM "%-11s" A_OFF "%s", gname[g], row);
+		/*
+		 * AND WHICH LANGUAGES, under the Script row.
+		 *
+		 * "Script" alone is the one row of this list that says nothing
+		 * useful: every other name on the page is a format a reader
+		 * recognises, and this one is a category. What they want to
+		 * know is whether the build knows PowerShell from Batch - and
+		 * it does, because a signature can target one - so the sub-
+		 * types are named rather than left to be discovered by opening
+		 * a file and reading the header pane.
+		 *
+		 * KOF_SCRIPT_ANY is left out: it is what a script that matched
+		 * no language is, not a language.
+		 *
+		 * Wrapped by hand at the width the box has, because prop_line
+		 * does not wrap and a row past the edge is a row nobody reads.
+		 */
+		if (g == 1) {
+			char sub[ABOUT_W];
+			uint32_t sat = 0, t;
+
+			sub[0] = 0;
+			for (t = KOF_SCRIPT_ANY + 1u;
+			     t < (uint32_t)KOF_SCRIPT_TYPE_COUNT; t++) {
+				const char *nm = kof_script_type_name((uint8_t)t);
+				uint32_t w = (uint32_t)strlen(nm);
+
+				/* Past the width, so this line is emitted and
+				 * the next one starts under the same column. */
+				if (sat && sat + w + 1u > 47u) {
+					/* The leading space the format rows
+					 * get from their own " %s" - without
+					 * it these sit a column left of the
+					 * names they continue. */
+					abt("  " A_DIM "%-11s" A_OFF " %s",
+					    "", sub);
+					sat = 0;
+					sub[0] = 0;
+				}
+				sat += (uint32_t)snprintf(sub + sat,
+							  sizeof sub - sat,
+							  "%s%s",
+							  sat ? " " : "", nm);
+			}
+			if (sat)
+				abt("  " A_DIM "%-11s" A_OFF " %s", "", sub);
+		}
 	}
 	abt("");
 	/*
