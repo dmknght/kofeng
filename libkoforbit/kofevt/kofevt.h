@@ -1274,6 +1274,43 @@ double kof_evt_secs_since(uint64_t t0, uint64_t t);
 const char *kof_path_leaf(const char *path);
 
 /*
+ * ============================================================
+ * A COMMAND LINE, IN THE ONE FORM A RULE IS WRITTEN AGAINST
+ * ============================================================
+ *
+ * HERE RATHER THAN IN A COLLECTOR, and that is the whole point. Both platforms
+ * report command lines - Linux out of /proc, Windows out of the process
+ * event - and a rule that matched one spelling and not the other would be a
+ * rule that works on one operating system by accident. One normaliser means
+ * one form.
+ *
+ * WHAT IT DOES. Every run of whitespace becomes a single space, the ends are
+ * trimmed, and a NUL is treated as an argument separator - which is how Linux
+ * hands argv over and is harmless for a platform that hands over one string.
+ * Control bytes become spaces too.
+ *
+ * WHY FLATTENING IS RIGHT HERE AND WRONG IN A SCRIPT. kof_script_norm guards
+ * what is inside a string literal, because in source `"a   b"` is content a
+ * signature may be taken from. A command line has no literals left to guard:
+ * the shell parsed the quotes before exec, so what remains is the arguments
+ * and the spacing between and inside them is formatting. An obfuscated command
+ * pads with runs of spaces and tabs precisely because they survive into argv,
+ * and flattening them is the purpose rather than a risk.
+ *
+ * AND CONTROL BYTES ARE A CORRECTNESS FIX, not tidying. A newline inside an
+ * argument splits a live log line in two, and the second half is whatever the
+ * attacker put after it: a forged record, written by the thing being watched.
+ *
+ * IT IS LOSSY AND SAYS SO. Two arguments and one argument containing a space
+ * come out the same. A record carries one text arena shared between the image
+ * and the command line, so the raw form is not kept beside it; what is stored
+ * is what a rule matches.
+ *
+ * Answers the length written, and writes "" when there was nothing.
+ */
+size_t kof_cmdline_norm(const void *raw, size_t n, char *out, size_t cap);
+
+/*
  * Now, in the same units an event's stamp uses.
  *
  * Per-platform inside, which is the ONE thing in this directory that has to

@@ -226,32 +226,26 @@ static int read_exe(uint32_t pid, char *out, size_t cap)
 }
 
 /*
- * cmdline is NUL-separated in /proc and a command line is one string
- * everywhere else, so the separators become spaces here rather than at every
- * place that prints one. The trailing NUL the kernel leaves is dropped.
+ * The command line, through the one normaliser both platforms take - see
+ * kof_cmdline_norm, which is in kofevt rather than here for the reason its
+ * note gives: a rule that matched one spelling and not the other would work
+ * on one operating system by accident.
  */
 static int read_cmdline(uint32_t pid, char *out, size_t cap)
 {
-	char path[64];
+	char path[64], raw[2048];
 	int fd;
 	ssize_t n;
-	size_t i;
 
 	snprintf(path, sizeof path, "/proc/%u/cmdline", (unsigned)pid);
 	fd = open(path, O_RDONLY | O_CLOEXEC);
 	if (fd < 0)
 		return 0;
-	n = read(fd, out, cap - 1u);
+	n = read(fd, raw, sizeof raw);
 	close(fd);
 	if (n <= 0)
 		return 0;
-	out[n] = '\0';
-	for (i = 0; i + 1u < (size_t)n; i++)
-		if (!out[i])
-			out[i] = ' ';
-	while (n > 0 && (out[n - 1] == ' ' || !out[n - 1]))
-		out[--n] = '\0';
-	return out[0] != '\0';
+	return kof_cmdline_norm(raw, (size_t)n, out, cap) != 0;
 }
 
 /*
@@ -261,24 +255,17 @@ static int read_cmdline(uint32_t pid, char *out, size_t cap)
  *
  * The connector names a pid and nothing else - no path, no command line - so
  * both are read from /proc, and a process that has already exited has no /proc
- * entry left. That race was lost on EVERY short-lived process, which is the
- * kind worth catching. Observed on a real host: an obfuscated shell running
- * `whoami` produced three ProcStart records and not one of them carried an
- * image, so the live line read
+ * entry left. Observed on a real host: an obfuscated shell running `whoami`
+ * produced three ProcStart records and not one of them carried an image.
  *
- *     ProcStart pid=93285  ?   ppid=89215
+ * PART OF THAT DELAY WAS THIS COLLECTOR'S OWN. One read() brings back many
+ * records and they were resolved one at a time, as the CONSUMER asked for
+ * them. So the buffer is walked once on arrival and every exec in it is
+ * resolved then, before anything else is allowed to happen.
  *
- * - the exec was seen, and could not be named.
- *
- * THE LATENCY WAS THE COLLECTOR'S OWN. One read() brings back many records and
- * they were resolved one at a time, as the CONSUMER asked for them - and this
- * consumer scans files between calls. The fiftieth record in a buffer was
- * being looked up long after its process was gone.
- *
- * So the buffer is walked once on arrival and every exec in it is resolved
- * then, before anything else is allowed to happen. It does not win the race
- * outright - nothing reading /proc can - but it removes the part of the delay
- * that was ours rather than the machine's.
+ * The rest of the delay was the sensor's, and is fixed where it lives - see
+ * kof_mon_api.pollfd. Neither of them wins the race outright: nothing reading
+ * /proc can, and `whoami` exists for half a millisecond.
  */
 static void prefetch(struct kofa_pev *p, const char *buf, ssize_t n)
 {

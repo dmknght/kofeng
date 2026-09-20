@@ -504,6 +504,66 @@ static void t_classify(void)
 		loc_is("/home/u/Documents/zshrc.txt", KOF_LOC_USER);
 		loc_is("/usr/local/share/doc/x", KOF_LOC_OTHER);
 
+		/*
+		 * THE COMMAND-LINE NORMALISER, which is shared vocabulary and
+		 * not either collector's - see kof_cmdline_norm.
+		 *
+		 * It is tested beside kof_classify because both are the same
+		 * kind of thing: one form that a rule is written against, and
+		 * two platforms that must produce it identically. A rule that
+		 * matched one spelling and not the other would work on one
+		 * operating system by accident.
+		 */
+		{
+			static const struct { const char *in; size_t n;
+					      const char *want; } CM[] = {
+			/* argv as Linux hands it over: NUL between, NUL at
+			 * the end, and both become the same space. */
+			{ "bash\0-i\0", 8, "bash -i" },
+			{ "sh\0-c\0curl x|sh\0", 16, "sh -c curl x|sh" },
+			/* The padding obfuscation adds, which survives into
+			 * argv precisely because it is inside an argument. */
+			{ "sh\0-c\0a    b\t\tc\0", 15, "sh -c a b c" },
+			/*
+			 * A NEWLINE INSIDE AN ARGUMENT IS NOT COSMETIC. Left
+			 * alone it splits a live log line in two and the
+			 * second half is whatever was put after it - a forged
+			 * record written by the thing being watched.
+			 */
+			{ "sh\0-c\0echo a\nProcStart pid=1 forged\0", 37,
+			  "sh -c echo a ProcStart pid=1 forged" },
+			/* One string with no NULs at all, which is how
+			 * Windows hands a command line over. */
+			{ "cmd.exe  /c   whoami", 20, "cmd.exe /c whoami" },
+			{ "  sh \0  -c  \0", 14, "sh -c" },
+			{ "", 0, "" },
+			};
+			size_t i;
+
+			for (i = 0; i < sizeof CM / sizeof CM[0]; i++) {
+				char got[256];
+
+				kof_cmdline_norm(CM[i].in, CM[i].n, got,
+						 sizeof got);
+				if (strcmp(got, CM[i].want)) {
+					printf("  FAIL cmdline: got \"%s\" "
+					       "want \"%s\"\n", got,
+					       CM[i].want);
+					failures++;
+				}
+			}
+			/* A buffer too small truncates rather than overruns,
+			 * and still ends where a string must. */
+			{
+				char small[6];
+
+				kof_cmdline_norm("aaaa bbbb", 9, small,
+						 sizeof small);
+				if (strlen(small) >= sizeof small)
+					fail("cmdline", "overran a short cap");
+			}
+		}
+
 		/* Every technique in the list has both an id and a name. */
 		{
 			uint16_t i;

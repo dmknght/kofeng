@@ -432,6 +432,49 @@ const char *kof_evt_image(const struct kof_evt *e)   { return at(e, e ? e->off_i
 const char *kof_evt_object(const struct kof_evt *e)  { return at(e, e ? e->off_object  : KOF_TEXT_NONE); }
 const char *kof_evt_cmdline(const struct kof_evt *e) { return at(e, e ? e->off_cmdline : KOF_TEXT_NONE); }
 
+/*
+ * NOT WORTH A COLUMN OF ITS OWN, in two comparisons.
+ *
+ * This listed the whitespace characters by name and then tested c < 0x20 as
+ * well - which already covers every one of them, since tab through carriage
+ * return are 0x09 to 0x0d. Eight comparisons where two say the same thing,
+ * on a function that runs for every exec on the machine.
+ *
+ * `c <= 0x20` also takes the NUL, so the caller no longer tests for it
+ * separately: an argument separator and a space become the same space, which
+ * is what the run below closes up anyway.
+ */
+#define CMD_SPACE(c) ((c) <= 0x20u || (c) == 0x7fu)
+
+size_t kof_cmdline_norm(const void *raw, size_t n, char *out, size_t cap)
+{
+	const unsigned char *in = (const unsigned char *)raw;
+	size_t i, w = 0;
+
+	if (!out || !cap)
+		return 0;
+	out[0] = '\0';
+	if (!in)
+		return 0;
+	/*
+	 * The NUL between two arguments and the NUL that ends the last one are
+	 * the same byte, so both become the same space and the run below
+	 * closes up whichever it was.
+	 */
+	for (i = 0; i < n && w + 1u < cap; i++) {
+		if (CMD_SPACE(in[i])) {
+			if (w && out[w - 1u] != ' ')
+				out[w++] = ' ';
+			continue;
+		}
+		out[w++] = (char)in[i];
+	}
+	while (w && out[w - 1u] == ' ')
+		w--;
+	out[w] = '\0';
+	return w;
+}
+
 uint16_t kof_evt_text_put(struct kof_evt *e, const char *s)
 {
 	size_t n;
