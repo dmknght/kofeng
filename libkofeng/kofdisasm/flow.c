@@ -530,7 +530,30 @@ static int is_nop(const INSTRUX *ix)
 #define R_RBX 3u
 
 #define R_R8  8u
+#define R_R9  9u
 #define R_RDI 7u
+
+/*
+ * IS THIS NUMBER A WINDOWS PAGE PROTECTION AT ALL.
+ *
+ * The base protections are an ENUMERATION and not a mask: exactly one of
+ * PAGE_NOACCESS 0x01 ... PAGE_EXECUTE_WRITECOPY 0x80, optionally with the
+ * modifier bits PAGE_GUARD 0x100, PAGE_NOCACHE 0x200, PAGE_WRITECOMBINE 0x400
+ * and PAGE_TARGETS_NO_UPDATE 0x40000000 on top.
+ *
+ * That shape is what lets the argument be found without knowing which import
+ * was called - see prot_cap. MEM_COMMIT|MEM_RESERVE is 0x3000 and has nothing
+ * in the low byte, so it cannot be mistaken for one; a pointer has bits
+ * outside the allowed set, so neither can that.
+ */
+static int is_page_prot(uint64_t v)
+{
+	uint64_t base = v & 0xffu;
+
+	if (v & ~0x400007ffull)
+		return 0;
+	return base && (base & (base - 1u)) == 0;
+}
 
 static uint8_t prot_cap(const struct cmap *c, unsigned abi, unsigned bits,
 			int by_call)
@@ -539,16 +562,51 @@ static uint8_t prot_cap(const struct cmap *c, unsigned abi, unsigned bits,
 	int low8;
 
 	/*
-	 * THE THIRD ARGUMENT, wherever this convention keeps it: the stack for
-	 * a 32-bit call, r8 for Microsoft's 64-bit one, rdx for SysV and for
-	 * the Linux syscall ABI.
+	 * WHICH ARGUMENT HOLDS IT DEPENDS ON WHICH FUNCTION WAS CALLED, and by
+	 * the time this runs the name is gone - the resolver answered with a
+	 * capability, which is the whole point of the capability vocabulary.
+	 *
+	 *     VirtualProtect(addr, size, flNewProtect, lpflOld)   third
+	 *     VirtualAlloc(addr, size, flAllocationType, flProt)  FOURTH
+	 *     mmap(addr, len, prot, flags, fd, off)               third
+	 *     mprotect(addr, len, prot)                           third
+	 *
+	 * So on Windows BOTH are tried and the SHAPE OF THE VALUE decides -
+	 * see is_page_prot. Reading the third only made every VirtualAlloc an
+	 * ordinary allocation, which is the quietest possible way to lose the
+	 * strongest term on the platform where it matters most: measured, the
+	 * 39 alloc-exec nodes found in 1500 PE samples were all VirtualProtect
+	 * and not one of them was a VirtualAlloc.
+	 *
+	 * VirtualAllocEx KEEPS IT FIFTH, on the stack and past every register
+	 * this sweep tracks, so it stays an ordinary allocation and is not
+	 * claimed to be anything else.
+	 *
+	 * POSIX needs none of this: prot is the third argument in both calls
+	 * that take one, and its three bits are a mask rather than an
+	 * enumeration, so there is no shape to test.
 	 */
 	if (by_call && bits == 32) {
+		if (abi == KOF_FLOW_MS) {
+			if (!stack_arg(c, 2u, &prot, NULL) ||
+			    !is_page_prot(prot))
+				if (!stack_arg(c, 3u, &prot, NULL) ||
+				    !is_page_prot(prot))
+					return KOF_CAP_ALLOC;
+			return (prot & 0xf0u) ? KOF_CAP_ALLOC_EXEC
+					      : KOF_CAP_ALLOC;
+		}
 		if (!stack_arg(c, 2u, &prot, NULL))
 			return KOF_CAP_ALLOC;
-	} else if (!const_of(c, abi == KOF_FLOW_MS ? R_R8 : R_RDX, &prot,
-			     &low8))
+	} else if (abi == KOF_FLOW_MS) {
+		if (!const_of(c, R_R8, &prot, &low8) || !is_page_prot(prot))
+			if (!const_of(c, R_R9, &prot, &low8) ||
+			    !is_page_prot(prot))
+				return KOF_CAP_ALLOC;
+		return (prot & 0xf0u) ? KOF_CAP_ALLOC_EXEC : KOF_CAP_ALLOC;
+	} else if (!const_of(c, R_RDX, &prot, &low8)) {
 		return KOF_CAP_ALLOC;    /* unknown - claim the weaker thing */
+	}
 	/*
 	 * AND THE WORD MEANS DIFFERENT THINGS. POSIX packs the three
 	 * permissions into three bits and execute is bit 2; Windows enumerates
@@ -557,8 +615,6 @@ static uint8_t prot_cap(const struct cmap *c, unsigned abi, unsigned bits,
 	 * mask written for one reads the other as never executable, which is
 	 * the quietest possible way to lose the strongest term here.
 	 */
-	if (abi == KOF_FLOW_MS)
-		return (prot & 0xf0u) ? KOF_CAP_ALLOC_EXEC : KOF_CAP_ALLOC;
 	return (prot & 4u) ? KOF_CAP_ALLOC_EXEC : KOF_CAP_ALLOC;
 }
 
