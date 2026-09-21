@@ -62,6 +62,10 @@
 #include "kofeng.h"
 #include "core/kofplatform.h"
 #include <kofmod/kofsig.h>   /* KOF_EVT_AMSI - the target a submission is */
+/* The record layout a KOF_EVT_PROC rule is written against, and the one
+ * builder that writes it - see scan_proc_event. */
+#include <kofmod/proc.h>
+#include "kofproc.h"
 #include "kofevt.h"
 #include "kofevtfmt.h"
 #include "koffridge.h"
@@ -115,10 +119,6 @@ static void usage(void)
 	      "Attaches to a running kofwatchtower and keeps deciding until it\n"
 	      "is stopped. It is the client; the sensor is the server.\n"
 	      "\n"
-	      "  --log FILE    WRITE what was received to FILE. This is where a\n"
-	      "                log comes from: the sensor collects and hands\n"
-	      "                over, and what is worth keeping is a decision -\n"
-	      "                so it belongs to the half that is deciding.\n"
 	      "  --replay FILE read a log written earlier instead of attaching\n"
 	      "                to a sensor. For analysing after the fact, and\n"
 	      "                for the CI, which has no sensor to attach to.\n"
@@ -277,6 +277,100 @@ static void scan_submission(kof_scanner *sc, struct kof_evt_join *j,
 	(*scanned)++;
 }
 
+/*
+ * Scan a PUSHED process event, as the process it is about.
+ *
+ * NOT "SCAN PROCESS", WHICH IS A DIFFERENT JOB. kofscanner --scan-procs is an
+ * ON-DEMAND sweep: an operator asks, /proc is walked, every process alive at
+ * that instant is examined. This is the other half - the sensor pushes what
+ * just happened, one record at a time, and nothing was asked. They meet at the
+ * RECORD, not at the code path: both produce a kof_proc_rec and a rule is
+ * written once against it, which is the whole point of the snapshot and the
+ * stream sharing a layout.
+ *
+ * THE COMMAND LINE IS AN OBJECT, and until this existed it was not one. An
+ * event that named a file got that file scanned - which answers "is this
+ * process running something known" and answers nothing at all about
+ * `bash -c exec bash -i &>/dev/tcp/...`, where the image is /usr/bin/bash and
+ * every byte that matters is in the argument. The whole of a living-off-the-
+ * land technique sits in the half nothing was looking at.
+ *
+ * AS A kof_proc_rec AND TARGET KOF_EVT_PROC, which is the record a rule about
+ * a process is written against - identity, command line, environment,
+ * connections, with the partition kofmod/proc.h describes. A rule written for
+ * it runs on a record built from a live start event and on one built from the
+ * /proc snapshot, because they are the same record; the collector that filled
+ * it is not the rule's business.
+ *
+ * kof_proc_build_rec is the one writer, shared with both collectors, for the
+ * reason kofproc.h gives: the region partition only holds because the arena is
+ * written in one order, and a second place writing it is a second opinion
+ * about that order.
+ *
+ * WHAT IS ABSENT STAYS ABSENT. A start event carries who it is and what it was
+ * asked to do; it carries no descriptor table, no environment and no
+ * connections. Those offsets are left zero, which the parse reads as "not
+ * here", and KOF_PROC_F_FDS_READ is NOT set - so proc_revshell, which counts
+ * sockets, sees a record that never claims to have counted any rather than one
+ * claiming zero. A record that lies about what it looked at is worse than a
+ * record with less in it.
+ */
+static void scan_proc_event(kof_scanner *sc, const struct kof_evt *e, int do_scan,
+			 struct hit_ctx *hits, uint64_t *scanned)
+{
+	uint8_t rec[KOF_PROC_REC_MAX];
+	struct kof_proc_build pb;
+	struct kof_scan_option opt;
+	const struct kof_evt_proc *pr;
+	const char *cmd;
+	char name[96];
+	uint32_t n;
+
+	if (!do_scan || !sc || !e)
+		return;
+	if (e->verb != KOF_EVT_PROC_START && e->verb != KOF_EVT_PROC_INFO)
+		return;
+	/*
+	 * NOTHING TO SEARCH, NOTHING TO SCAN. The command line is the whole
+	 * reason this record is built - see KOF_SCAN_PROC_CLAIMED, where the
+	 * head and the descriptors are fields rather than regions - so a start
+	 * whose argv was lost to the race would produce a record with no
+	 * searchable byte in it. Scanning it would cost a scan per process on
+	 * the machine to look through nothing.
+	 */
+	cmd = kof_evt_cmdline(e);
+	if (!cmd || !*cmd)
+		return;
+
+	pr = kof_evt_as_proc(e);
+
+	memset(&pb, 0, sizeof pb);
+	pb.os         = e->os;
+	pb.pid        = e->pid;
+	pb.ppid       = (e->miss & KOF_F_PPID) ? 0u : e->ppid;
+	pb.start_time = pr ? pr->create_time : 0;
+	pb.exe        = kof_evt_image(e);
+	pb.cmdline    = cmd;
+
+	n = kof_proc_build_rec(&pb, rec, sizeof rec);
+	if (!n)
+		return;                 /* refused rather than truncated */
+
+	snprintf(name, sizeof name, "process//%lu//%.40s",
+		 (unsigned long)e->pid, kof_path_leaf(pb.exe ? pb.exe : ""));
+
+	hits->e = e;
+	memset(&opt, 0, sizeof opt);
+	opt.all_matches = 1;
+	/* DECLARED, like a submission: a record has no magic and never sniffs
+	 * as anything - see the note in amsi_parse.h that scan_submission
+	 * points at. */
+	opt.as_format = KOF_EVT_PROC;
+	(void)kof_scan_bytes(sc, rec, (uint64_t)n, name, &opt, on_object, hits);
+	(*scanned)++;
+}
+
+
 struct seen {
 	char     path[512];
 	uint64_t at;
@@ -428,8 +522,7 @@ static void source_close(struct wm_source *s)
 
 int main(int argc, char **argv)
 {
-	const char *replay_path = NULL, *log_path = NULL;
-	struct kofevt_log_w *rec = NULL;
+	const char *replay_path = NULL;
 	const char *db_path  = "build/release/databases";
 	int         show_all = 0, do_scan = 1, i;
 
@@ -464,9 +557,7 @@ int main(int argc, char **argv)
 	memset(&src, 0, sizeof src);
 
 	for (i = 1; i < argc; i++) {
-		if (!strcmp(argv[i], "--log") && i + 1 < argc)
-			log_path = argv[++i];          /* written */
-		else if (!strcmp(argv[i], "--replay") && i + 1 < argc)
+		if (!strcmp(argv[i], "--replay") && i + 1 < argc)
 			replay_path = argv[++i];       /* read */
 		else if (!strcmp(argv[i], "--channel") && i + 1 < argc)
 			chan_name = argv[++i];
@@ -510,7 +601,7 @@ int main(int argc, char **argv)
 #else
 		(void)chan_name;
 		why = "this build has no live channel - it is a Windows "
-		      "transport; pass --log FILE";
+		      "transport; pass --replay FILE";
 #endif
 		if (!src.chan) {
 			kof_evt_banner(stderr, "kofwatchman",
@@ -536,7 +627,7 @@ int main(int argc, char **argv)
 				      "<your group>\n", stderr);
 			else
 				fputs("  start kofwatchtower first, or pass "
-				      "--log FILE to read a recording.\n",
+				      "--replay FILE to read a recording.\n",
 				      stderr);
 			return 1;
 		}
@@ -640,55 +731,6 @@ int main(int argc, char **argv)
 	 * was written, and a reader of the second file must not be told it came
 	 * from here.
 	 */
-	if (log_path) {
-		struct kofevt_log_info li;
-
-		memset(&li, 0, sizeof li);
-		li.rec_size    = (uint32_t)sizeof(struct kof_evt);
-		li.head_size   = (uint16_t)KOF_EVT_HEAD;
-		li.len_off     = (uint16_t)offsetof(struct kof_evt, text_len);
-		li.rec_kind    = KOFEVT_REC_KOF;
-		/*
-		 * From the SOURCE where there is one: a recording made from a
-		 * Windows stream is still a Windows recording however it was
-		 * written, and a reader of the second file must not be told it
-		 * came from here. From a live channel there is no such header
-		 * yet, so 0 asks kofevt for this host - which is correct,
-		 * because for a live channel this host IS the source.
-		 */
-		if (h) {
-			li.build       = h->build;
-			/*
-			 * COPIED FROM THE SOURCE, NOT CLAIMED.
-			 *
-			 * This is a client: it did not collect these records,
-			 * it received them. Replaying a log, the collector that
-			 * wrote it is named in that log's header and is carried
-			 * straight across. On a live channel nothing says which
-			 * collector is at the other end - the channel header
-			 * has no version field yet - so it is left zero, which
-			 * a reader shows as absent rather than as 0.0.
-			 */
-			li.src_major   = h->src_major;
-			li.src_minor   = h->src_minor;
-			li.platform    = (uint8_t)h->platform;
-			li.arch        = (uint8_t)h->arch;
-			li.root_pid    = h->root_pid;
-			li.sub_asked   = h->sub_asked;
-			li.sub_enabled = h->sub_enabled;
-			li.started     = h->started;
-		} else {
-			li.build   = (uint32_t)KOFENG_BUILD;
-			li.started = kof_evt_now();
-		}
-		rec = kofevt_log_create(log_path, &li);
-		if (!rec)
-			fprintf(stderr, "kofwatchman: cannot write '%s' - "
-				"continuing without a log\n", log_path);
-		else
-			fprintf(stderr, "  logging to %s\n", log_path);
-	}
-
 	if (do_scan) {
 		eng = kof_engine_open(db_path);
 		if (!eng) {
@@ -777,8 +819,6 @@ int main(int argc, char **argv)
 		}
 		secs = kof_evt_secs_since(t0, e.stamp);
 
-		if (rec)
-			(void)kofevt_log_write(rec, &e);
 
 		/*
 		 * COUNTED ONCE, AND IT WAS BEING COUNTED TWICE.
@@ -836,6 +876,14 @@ int main(int argc, char **argv)
 			 */
 			continue;
 		}
+
+		/*
+		 * BOTH HALVES OF A START, because they are two different
+		 * questions: what it is running, and what it was told to do.
+		 * The file half below answers the first from the image path;
+		 * this answers the second, and neither substitutes for it.
+		 */
+		scan_proc_event(sc, &e, do_scan, &hits, &scanned);
 
 		if (!do_scan || !looks_openable(obj)) {
 			if (*obj)
@@ -897,13 +945,6 @@ int main(int argc, char **argv)
 		(unsigned long long)n, (unsigned long long)scanned,
 		(unsigned long long)cached,
 		(unsigned long long)skipped, (unsigned long long)hits.n);
-
-	if (rec) {
-		uint64_t nrec = kofevt_log_close(rec);
-
-		fprintf(stderr, "   logged %llu event(s) to %s\n",
-			(unsigned long long)nrec, log_path);
-	}
 
 	source_close(&src);
 	return hits.n ? 1 : 0;

@@ -36,6 +36,9 @@
 #include "../libkofeng/kofmatchers/kofmatch.h"
 #include "../libkofeng/kofscanners/scan.h"
 #include <kofmod/script.h>
+/* KOF_PROC_OS_LIST: the platform a process record is from, which is its
+ * subtype - see the note on that list. */
+#include <kofmod/proc.h>
 #include "../libkofeng/kofparsers/kofformat.h"
 
 /*
@@ -282,6 +285,13 @@ const char *kof_inspect_subtype_name(uint8_t fmt, uint8_t sub)
 		case KOF_AMSI_IMAGE:   return "image";
 		case KOF_AMSI_COMMAND: return "command";
 		default:               return 0;
+		}
+	if (fmt == KOF_EVT_PROC)
+		switch (sub) {
+		case KOF_PROC_OS_WINDOWS: return "windows";
+		case KOF_PROC_OS_LINUX:   return "linux";
+		case KOF_PROC_OS_MACOS:   return "macos";
+		default:                  return 0;
 		}
 	/* Nothing for KOF_SCRIPT_ANY: "Script Script" says less than "Script",
 	 * and the kind is only worth a word when a word was found. */

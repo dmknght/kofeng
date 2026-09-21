@@ -1148,6 +1148,9 @@ extern const uint32_t pe_sub_n;
 /* The script kinds, for the same job - see script_sub in kofeditor.c. */
 extern const char *const script_sub[];
 extern const uint32_t script_sub_n;
+/* And the platforms a process record can be from. */
+extern const char *const proc_sub[];
+extern const uint32_t proc_sub_n;
 /* The identifier for a target value - "KOF_FMT_ZIP" - out of the engine's own
  * list rather than a copy here. See fmt_word in kofeditor.c. */
 const char *fmt_word(uint32_t fmt);

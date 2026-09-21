@@ -173,6 +173,59 @@ enum {
 };
 
 /*
+ * WHICH PLATFORM THE PROCESS IS ON, AS A SUBTYPE - the same axis architecture
+ * and a script's language use, and here for the same reason.
+ *
+ * A COMMAND LINE IS NOT ONE LANGUAGE. `cmd /c copy \\host\share\x.exe %TEMP%`
+ * and `bash -c 'exec 5<>/dev/tcp/...'` share the field and nothing else: the
+ * quoting, the separators, the path shapes and the interpreters are all
+ * different, so a rule written for one is dead weight against the other. There
+ * are two collectors and there will be records from both in one database.
+ *
+ * DECLARED, SO IT FILTERS. The same test written inside kof_scan is correct and
+ * buys nothing - reaching it costs what filtering saves. On this axis the host
+ * drops the module against one integer, before the call.
+ *
+ * THE VALUES ARE enum kof_evt_platform's, and they have to be: `os` in the
+ * record below is that enum, and the parse hands it straight to ctx->subtype.
+ * They are spelled again here rather than included because core/kofmod is what
+ * a compiled module includes and libkoforbit sits outside the engine - the same
+ * convention the `os` field itself already keeps.
+ *
+ * ZERO IS "NOT KNOWN" and filters nothing, which is the rule the subtype axis
+ * already has - see kof_module_precond. A collector that did not say never
+ * costs a detection.
+ */
+/* UNKNOWN FIRST AND AT ZERO, like KOF_AMSI_UNKNOWN and KOF_SCRIPT_ANY. Two
+ * things need it: the precondition treats 0 as "not said" and filters nothing,
+ * and the editor's chooser uses a word's INDEX in this list as its value - so
+ * a list that started at one would write every platform off by one. */
+#define KOF_PROC_OS_LIST(X)         \
+	X(KOF_PROC_OS_UNKNOWN, 0)   \
+	X(KOF_PROC_OS_WINDOWS, 1)   \
+	X(KOF_PROC_OS_LINUX,   2)   \
+	X(KOF_PROC_OS_MACOS,   3)
+
+enum kof_proc_os {
+#define KOF_PROC_OS_X(name, val) name = val,
+	KOF_PROC_OS_LIST(KOF_PROC_OS_X)
+#undef KOF_PROC_OS_X
+	KOF_PROC_OS_COUNT = 4
+};
+
+/* The identifier a signature source writes, to its value - the same shape
+ * kof_amsi_kind_from_name has, so the build tool asks this header rather than
+ * carrying a copy of the list. */
+static inline int kof_proc_os_from_name(const char *s, uint32_t *out)
+{
+#define KOF_PROC_OS_X_FROM(name, val)                                        \
+	if (kof_streq_(s, #name)) { *out = (uint32_t)(val); return 1; }
+	KOF_PROC_OS_LIST(KOF_PROC_OS_X_FROM)
+#undef KOF_PROC_OS_X_FROM
+	return 0;
+}
+
+/*
  * THE RECORD. This IS the object's bytes.
  *
  * Layout rule, as everywhere in this directory: APPEND ONLY. New fields go at

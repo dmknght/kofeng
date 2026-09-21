@@ -63,6 +63,7 @@
 
 #include "kofevt.h"
 #include "kofevtfmt.h"
+#include "kofevtlog.h"
 #include "kofchan.h"
 
 #ifdef _WIN32
@@ -530,6 +531,11 @@ static void usage(void)
 	      "started, and an option for it is one somebody sets by accident.\n"
 	      "\n"
 	      "  --print          per-event lines, for debugging\n"
+	      "  --log FILE       WRITE every record to FILE. The same job as\n"
+	      "                   --print with a different sink, and this is\n"
+	      "                   the half that has the whole stream - so it\n"
+	      "                   is the half that records it. Replay it with\n"
+	      "                   kofwatchman --replay FILE.\n"
 	      "  --stats-every N  a health line every N seconds (0 = never,\n"
 	      "                   which is the default)\n"
 	      "  --health         one health line at exit\n"
@@ -595,6 +601,8 @@ int main(int argc, char **argv)
 	 * format.
 	 */
 	int      do_print = 0, show_health = 0;
+	const char *log_path = NULL;
+	struct kofevt_log_w *rec = NULL;
 	struct kof_chan_pub *chan = NULL;
 	const char *chan_name = NULL;
 	/*
@@ -648,6 +656,8 @@ int main(int argc, char **argv)
 			chan_private = 1;
 		else if (!strcmp(argv[i], "--print"))
 			do_print = 1;
+		else if (!strcmp(argv[i], "--log") && i + 1 < argc)
+			log_path = argv[++i];
 		else if (!strcmp(argv[i], "--health"))
 			show_health = 1;
 		else if (!strcmp(argv[i], "--help") ||
@@ -676,6 +686,52 @@ int main(int argc, char **argv)
 	 * fixed and in --help; what it was refused is not.
 	 */
 	sensor_report_refused(&sen, stderr);
+
+	/*
+	 * THE LOG, AND THIS IS THE HALF THAT CAN HONESTLY WRITE ITS HEADER.
+	 *
+	 * It used to be written by the client, which had to COPY the source
+	 * fields out of whatever it was replaying and leave them zero on a
+	 * live channel - the channel header carries no version - so a
+	 * recording of a live run said nothing about which collector made it.
+	 * Here there is no copying to do: this process IS the collector, so
+	 * the version, the platform, the architecture and what the
+	 * subscription actually got are facts it holds rather than guesses it
+	 * passes on.
+	 *
+	 * A log that cannot be opened is reported and the run continues. A
+	 * sensor that refused to collect because it could not also write a
+	 * file would be trading the job for the record of the job.
+	 */
+	if (log_path) {
+		struct kofevt_log_info li;
+		struct kof_evt_health h0;
+
+		memset(&li, 0, sizeof li);
+		memset(&h0, 0, sizeof h0);
+		li.rec_size  = (uint32_t)sizeof(struct kof_evt);
+		li.head_size = (uint16_t)KOF_EVT_HEAD;
+		li.len_off   = (uint16_t)offsetof(struct kof_evt, text_len);
+		li.rec_kind  = KOFEVT_REC_KOF;
+		li.build     = (uint32_t)KOFENG_BUILD;
+		li.started   = kof_evt_now();
+#ifdef _WIN32
+		li.src_major = (uint16_t)KOFW_MAJOR;
+		li.src_minor = (uint16_t)KOFW_MINOR;
+#else
+		li.src_major = (uint16_t)KOFA_MAJOR;
+		li.src_minor = (uint16_t)KOFA_MINOR;
+#endif
+		/* platform and arch stay 0, which asks kofevt for this host -
+		 * and for a live collector this host IS the source. */
+		sensor_health(&sen, &h0);
+		rec = kofevt_log_create(log_path, &li);
+		if (!rec)
+			fprintf(stderr, "kofwatchtower: cannot write '%s' - "
+				"continuing without a log\n", log_path);
+		else
+			fprintf(stderr, "  logging to %s\n", log_path);
+	}
 
 	/*
 	 * THE CHANNEL, opened before the first event can arrive.
@@ -833,6 +889,17 @@ int main(int argc, char **argv)
 				       stdout, &tally);
 		else
 			kof_evt_count(&ke, &tally);
+		/*
+		 * AND THE SAME RECORD TO THE LOG, if one was asked for.
+		 *
+		 * Beside the render for the reason the option's own note
+		 * gives: writing a record down and printing it are the same
+		 * act with a different sink, and this is the half that has the
+		 * whole stream. Both happen - a run can print and log at once,
+		 * which is what somebody watching a reproduction wants.
+		 */
+		if (rec)
+			(void)kofevt_log_write(rec, &ke);
 
 tick:
 		if (stats_every > 0.0 && secs >= next_stats) {
@@ -872,6 +939,16 @@ tick:
 	 * for why the unbacked count and the reasons it may be unanswerable
 	 * belong on the same screen. */
 	sensor_extra(&sen, stderr);
+
+	/* Closed properly so the header's record count is right - a log cut
+	 * off mid-write is readable, and one that lied about its length would
+	 * not be. */
+	if (rec) {
+		uint64_t nrec = kofevt_log_close(rec);
+
+		fprintf(stderr, "   logged %llu event(s) to %s\n",
+			(unsigned long long)nrec, log_path);
+	}
 
 	sensor_close(&sen);
 	return 0;

@@ -82,6 +82,8 @@
 #include "kofwalk.h"
 #include "kofproc.h"
 #include <kofmod/proc.h>
+/* The two targets a collected record can BE - see evt_decl_target. */
+#include <kofmod/amsi.h>
 #include "kofeditor.h"
 
 /* The disassembler the emulator already carries: the viewer links the same
@@ -7678,6 +7680,10 @@ static int text_under(struct view *v, int row, int col, uint64_t *out,
  * KV_CAP_TEXT is exactly that line: the formats whose subtype is what the file
  * IS WRITTEN IN rather than how it is laid out.
  */
+/* Defined with the event panel, where the record is - see evt_decl_target. */
+#define EVT_TARGET_NONE 0xffu
+static uint8_t evt_decl_target(const struct view *v, uint32_t *mask);
+
 static void draft_seed_target(struct view *v)
 {
 	struct object *fo = cur_obj(v);
@@ -7685,6 +7691,65 @@ static void draft_seed_target(struct view *v)
 
 	if (v->ed.dr.fmt_mask)
 		return;
+	/*
+	 * A RECORD ANSWERS FOR ITSELF, AND IT HAS TO BE ASKED FIRST.
+	 *
+	 * An event node has no parser - log_window builds it out of the
+	 * mapping and nothing sniffs it, because a record has no magic - so
+	 * the line below seeded KOF_FMT_UNKNOWN and the Format row read "Raw".
+	 * That is not a blank label. Raw is a real target: the rule it writes
+	 * is offered every unclaimed byte the scanner meets, and is never
+	 * offered the event it was written from.
+	 *
+	 * SEEDED FIRST WINS, which is why the guard has to be here and not
+	 * only where a marker is declared: a log opens on its root row, this
+	 * runs against that row, and one Raw seed is all it takes - every
+	 * later call sees a mask and leaves it alone.
+	 *
+	 * NOT THE IMAGE THE RECORD CARRIES. `pe_of` is what says which of the
+	 * two rows is in hand - the same test the panel and the scan use - and
+	 * a PE pulled out of a submission is a PE, whatever it arrived in.
+	 */
+	if (v->log && !v->pe_of[v->node[v->sel_node].obj]) {
+		uint8_t t = evt_decl_target(v, NULL);
+
+		if (t != EVT_TARGET_NONE)
+			v->ed.dr.fmt_mask = 1u << t;
+		/*
+		 * AND THE PLATFORM, WHICH THE RECORD ALREADY SAYS.
+		 *
+		 * A command line is not one language - see KOF_PROC_OS_LIST -
+		 * so a rule taken off a bash start has no business being
+		 * offered a cmd.exe start, and this axis is how the host drops
+		 * it before the call rather than inside it.
+		 *
+		 * MAPPED, NOT COPIED. kof_evt.os is a MASK - see enum
+		 * kof_evt_os - and a subtype is an ORDINAL into one. They
+		 * happen to agree on the first two values and would stop
+		 * agreeing the day a third platform is added, which is the
+		 * kind of coincidence that fails silently.
+		 */
+		if (t == KOF_EVT_PROC && !v->ed.dr.opt_on[OPT_SUBTYPE]) {
+			uint32_t sub = KOF_PROC_OS_UNKNOWN;
+
+			if (v->evt.os & KOF_OS_WINDOWS)
+				sub = KOF_PROC_OS_WINDOWS;
+			else if (v->evt.os & KOF_OS_LINUX)
+				sub = KOF_PROC_OS_LINUX;
+			if (sub != KOF_PROC_OS_UNKNOWN) {
+				v->ed.dr.opt_on[OPT_SUBTYPE] = 1;
+				v->ed.dr.opt_val[OPT_SUBTYPE] = sub;
+			}
+		}
+		/*
+		 * AND NOTHING WHEN THE RECORD HAS NO TARGET, which includes
+		 * the log's own row before any record is picked. A log is not
+		 * a scan target - this file already refuses to run the engine
+		 * over one - so it does not get to name what a rule is about
+		 * either.
+		 */
+		return;
+	}
 	fmt = (uint8_t)((fo && fo->fmt && fo->ctx.format < KOF_FMT_COUNT)
 			? fo->ctx.format : KOF_FMT_UNKNOWN);
 	v->ed.dr.fmt_mask = 1u << fmt;
@@ -11583,7 +11648,21 @@ static void draw_evt(struct out *o, struct view *v)
 			int take = (int)n - at;
 			int from = 0, to = 0, a, b;
 
-			out_at(o, evt_box_top(v) + k, evt_box_x());
+			/*
+			 * The panel's own column, with the indent PRINTED
+			 * rather than skipped.
+			 *
+			 * Nothing else draws the two columns in front of the
+			 * box, and the rows above are a table whose offset
+			 * column starts exactly there. Jumping straight to
+			 * evt_box_x() and clearing only to the right of it
+			 * left the first two characters of the PREVIOUS
+			 * record's offset standing in front of the text -
+			 * "0072" in the table became "00bash -c ..." in the
+			 * box when the next record had a shorter table.
+			 */
+			out_at(o, evt_box_top(v) + k, col);
+			out_str(o, "  ");
 			if (at >= (int)n || take <= 0) {
 				out_str(o, "\033[K");
 				continue;
@@ -12527,6 +12606,28 @@ static int draw_decl_optbtn(struct out *o, struct view *v, int r)
 	return r;
 }
 
+/*
+ * THE FORMAT A SUBTYPE IS READ AGAINST - the one the DRAFT declares, not the
+ * one the object under the cursor happens to be.
+ *
+ * generate() settled this already, and its note says why: the reader and the
+ * writer have to agree about which format a subtype belongs to, or the panel
+ * shows one thing and the file says another. This panel had the other answer.
+ *
+ * It shows up first on an event record, which has no format at all - the node
+ * is built straight out of the mapping and never parsed - so the row printed
+ * "?" beside a platform it had already written into the draft correctly.
+ */
+static uint8_t draft_sub_fmt(struct view *v)
+{
+	uint32_t fi;
+
+	for (fi = 0; fi < KOF_FMT_COUNT; fi++)
+		if (v->ed.dr.fmt_mask & (1u << fi))
+			return (uint8_t)fi;
+	return cur_obj(v) ? cur_obj(v)->ctx.format : (uint8_t)KOF_FMT_UNKNOWN;
+}
+
 static int draw_decl_opts(struct out *o, struct view *v, int r)
 {
 	uint32_t i;
@@ -12547,14 +12648,13 @@ static int draw_decl_opts(struct out *o, struct view *v, int r)
 			snprintf(val, sizeof val, "%s",
 				 arch_word[v->ed.dr.opt_val[i] < ARCH_N
 					   ? v->ed.dr.opt_val[i] : 0].word);
-		else if (i == OPT_SUBTYPE)
-			snprintf(val, sizeof val, "%s",
-				 kof_inspect_subtype_name(
-					 cur_obj(v)->ctx.format,
-					 (uint8_t)v->ed.dr.opt_val[i])
-				 ? kof_inspect_subtype_name(
-					   cur_obj(v)->ctx.format,
-					   (uint8_t)v->ed.dr.opt_val[i]) : "?");
+		else if (i == OPT_SUBTYPE) {
+			const char *w = kof_inspect_subtype_name(
+				draft_sub_fmt(v),
+				(uint8_t)v->ed.dr.opt_val[i]);
+
+			snprintf(val, sizeof val, "%s", w ? w : "?");
+		}
 		else
 			snprintf(val, sizeof val, "%llu",
 				 (unsigned long long)v->ed.dr.opt_val[i]);
@@ -16920,6 +17020,80 @@ static void decl_edit_open(struct view *v, uint32_t i)
 
 
 /*
+ * WHAT THE RECORD IN HAND IS ON THE TARGET AXIS, and which of its regions the
+ * box is showing. EVT_TARGET_NONE when nothing can be written about it.
+ *
+ * THE CLIENT'S QUESTION AND NOT THE ENGINE'S, which kofsig.h states where
+ * KOF_EVT_AMSI is defined: a verb is libkoforbit's vocabulary, a target is the
+ * engine's, they are not one axis, and whoever holds the record is the only
+ * side that knows both. This program holds the record.
+ *
+ * THEY ARE NOT ONE TO ONE AND CANNOT BE. KOF_EVT_PROC_START is verb 1, and 1
+ * on the target axis is KOF_FMT_ELF. What a rule about a process start is
+ * written against is not the start event as bytes, it is the PROCESS - pid,
+ * parent, image, command line - and that record already exists as KOF_EVT_PROC
+ * with a CMDLINE region for exactly the text this box is showing. So the verbs
+ * whose subject is a process map there.
+ *
+ * WHAT IT FIXES. The draft used to be seeded from the OBJECT, and an event
+ * node has no format at all - log_window builds it straight out of the mapping
+ * and never parses it - so every string declared out of a record came back
+ * KOF_FMT_UNKNOWN. That is not a missing label. Raw is a real target: the rule
+ * it writes is offered every unclaimed byte the scanner meets, and is never
+ * offered the event it was written from.
+ *
+ * A VERB THIS DOES NOT NAME GETS NOTHING, deliberately. A file event names a
+ * path and a network event names an address - facts about something that is
+ * not a process - and neither has a record shape on the target axis yet.
+ * Refusing is honest; the nearest target would be a rule about something else.
+ */
+static uint8_t evt_decl_target(const struct view *v, uint32_t *mask)
+{
+	int meta[64], warn[64], nm = 0, nw = 0, box;
+	char fname[32], fval[512];
+	uint8_t t;
+
+	if (mask) *mask = 0;
+	if (!evt_have_rec(v))
+		return EVT_TARGET_NONE;
+	switch (v->evt.verb) {
+	case KOF_EVT_AMSI_SCAN:
+		t = KOF_EVT_AMSI;
+		break;
+	case KOF_EVT_PROC_START:
+	case KOF_EVT_PROC_STOP:
+	case KOF_EVT_PROC_INFO:
+		t = KOF_EVT_PROC;
+		break;
+	default:
+		return EVT_TARGET_NONE;
+	}
+
+	/*
+	 * AND THE REGION BIT, from the same classifier the drawer uses, so the
+	 * field the reader dragged text out of is the field this names.
+	 *
+	 * The BIT and not a word. What the row shows and what the emitter
+	 * writes are both derived from it by the editor - rng_name_of for one,
+	 * draft_region_word for the other - so a region word spelled in this
+	 * file would be a third copy, and the one nothing checks.
+	 */
+	box = evt_zones(v, meta, &nm, warn, &nw);
+	if (box >= 0 && kof_evt_field(&v->evt, (unsigned)box, fname,
+				      sizeof fname, fval, sizeof fval)) {
+		uint32_t bit = 0;
+
+		if (t == KOF_EVT_AMSI && !strcmp(fname, "object"))
+			bit = KOF_SCAN_AMSI_OBJ;
+		else if (t == KOF_EVT_PROC && !strcmp(fname, "cmdline"))
+			bit = KOF_SCAN_PROC_CMDLINE;
+		if (bit && mask)
+			*mask = bit;
+	}
+	return t;
+}
+
+/*
  * Declare a marker from the event box's selection.
  *
  * Not decl_add with a flag: that one takes a range of the HEX selection and
@@ -16931,7 +17105,8 @@ static void decl_edit_open(struct view *v, uint32_t i)
  * recorded as one carried from a sample rather than found at an offset in it,
  * which is a state struct decl already has.
  */
-static void decl_add_text(struct view *v, const char *text, size_t n)
+static void decl_add_text(struct view *v, const char *text, size_t n,
+			  int from_evt)
 {
 	struct decl *d;
 
@@ -16967,7 +17142,33 @@ static void decl_add_text(struct view *v, const char *text, size_t n)
 	d->fullword = KOF_WORD_SUBSTRING;
 	d->obj = v->node[v->sel_node].obj;
 	d->at = KOF_BROKEN;
-	snprintf(d->rgn, sizeof d->rgn, "%s", "OBJDATA");
+	/*
+	 * THE TARGET AND THE REGION, TAKEN FROM THE RECORD - see
+	 * evt_decl_target. Seeded here rather than left to
+	 * draft_seed_target because that one answers for the OBJECT under the
+	 * cursor, which is the right answer for the image a record carries
+	 * and the wrong one for the record itself.
+	 *
+	 * Only for text out of the event box. The decode box hands over the
+	 * plaintext of something in the bytes pane, which may be the carried
+	 * PE - a target this has no business overriding.
+	 */
+	{
+		uint32_t rm = 0;
+		uint8_t tgt = from_evt ? evt_decl_target(v, &rm)
+				       : EVT_TARGET_NONE;
+
+		if (tgt != EVT_TARGET_NONE && !v->ed.dr.fmt_mask)
+			v->ed.dr.fmt_mask = 1u << tgt;
+		d->mask = d->mask0 = rm;
+		/* The column's word, from the one function that makes them -
+		 * the same call every other declaration path ends with. */
+		if (rm)
+			rng_name_of(kof_parser_of(tgt), rm, d->rgn,
+				    sizeof d->rgn);
+		else
+			snprintf(d->rgn, sizeof d->rgn, "%s", "OBJDATA");
+	}
 	v->ed.dr.n_decl++;
 	v->ed.dr.sel_decl = v->ed.dr.n_decl - 1u;
 	/*
@@ -17343,7 +17544,7 @@ static void menu_run(struct view *v, int a)
 				copy_osc52(sel, sn);
 				copy_said(v, sn);
 			} else {
-				decl_add_text(v, sel, sn);
+				decl_add_text(v, sel, sn, 0);
 			}
 		}
 		v->menu_open = 0;
@@ -17358,7 +17559,7 @@ static void menu_run(struct view *v, int a)
 				copy_osc52(sel, sn);
 				copy_said(v, sn);
 			} else {
-				decl_add_text(v, sel, sn);
+				decl_add_text(v, sel, sn, 1);
 			}
 		}
 		v->menu_open = 0;
@@ -19031,10 +19232,19 @@ static int bar_shown(struct view *v, int i)
 	 * Symbols, disassembly, the shellcode finder and the unpackers all
 	 * ask questions about a parsed executable. A record is a struct: it
 	 * has no symbol table, no instructions, no variables to search and
-	 * nothing for an unpacker to open. Rebuild is about the signature
-	 * database and has nothing to do with the file at all, but it re-runs
-	 * the scan on it, which for a log means discarding the event window
-	 * and finding nothing.
+	 * nothing for an unpacker to open.
+	 *
+	 * REBUILD IS NOT ONE OF THEM, and it used to be listed here on the
+	 * grounds that it re-runs the scan, which for a log would discard the
+	 * event window and find nothing. That is not what happens: it reopens
+	 * through file_open, and file_open recognises a log and builds the
+	 * event window again - the same road opening one takes.
+	 *
+	 * Hiding it also removed the item at exactly the point a reader wants
+	 * it. A rule declared off a record's command line is generated into
+	 * the source tree, and the next thing anybody would do is build the
+	 * database and look again - which was the one action the menu did not
+	 * offer while a log was open.
 	 *
 	 * THE TEST IS THE OBJECT, NOT THE FILE, and that is the whole
 	 * difference. A PE carried inside a submission is an executable that
@@ -19054,7 +19264,6 @@ static int bar_shown(struct view *v, int i)
 		case BI_UNPACKER:
 		case BI_DUMP_STATIC:
 		case BI_DUMP_EMU:
-		case BI_REBUILD:
 			return 0;
 		default:
 			break;

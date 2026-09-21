@@ -119,6 +119,7 @@
 #include <kofmod/xz.h>
 #include <kofmod/rtf.h>
 #include <kofmod/amsi.h>   /* an event's two regions */
+#include <kofmod/proc.h>   /* and a process record's */
 
 #include "../libkofeng/kofdb/kofpackw.h"
 #include "../libkofeng/kofdb/kofpack.h"
@@ -304,6 +305,23 @@ static const struct rgn_name rgn_names[] = {
 	PDF_REGIONS(RGN)
 	SCRIPT_REGIONS(RGN)
 	AMSI_REGIONS(RGN)
+	/*
+	 * AND A PROCESS'S, which were defined in proc.h and named here by
+	 * nothing - the exact drift the note above says this table was
+	 * generated to stop, caught on the next target that was added.
+	 *
+	 * The consequence was not a weaker rule, it was no rule at all:
+	 * KOF_TARGET_RANGE(cmd, KOF_SCAN_PROC_CMDLINE) failed to build with
+	 * "unknown region", so the command line - the one attacker-controlled
+	 * field in the record, and the only one KOF_SCAN_PROC_CLAIMED offers -
+	 * could not be written about.
+	 *
+	 * Three, not five: META and FD are FIELDS a rule reads through
+	 * kof_proc(ctx), not byte ranges to search. proc.h argues that at
+	 * length and KOF_SCAN_PROC_LIST is where it says so, so this names
+	 * what that list names and does not second-guess it.
+	 */
+	KOF_SCAN_PROC_LIST(RGN)
 
 	/*
 	 * THE SENTINEL, AND WITHOUT IT EVERY LOOKUP HERE WALKS OFF THE END.
@@ -1753,6 +1771,7 @@ static void resolve_subtype(void)
 	int want_elf = target_named(KOF_FMT_ELF);
 	int want_pe = target_named(KOF_FMT_PE);
 	int want_amsi = target_named(KOF_EVT_AMSI);
+	int want_proc = target_named(KOF_EVT_PROC);
 	int want_script = target_named(KOF_FMT_SCRIPT);
 
 	if (!d->count)
@@ -1795,6 +1814,15 @@ static void resolve_subtype(void)
 				snprintf(msg, sizeof msg,
 					 "KOF_TARGET_SUBTYPE names %s but the "
 					 "module does not target AMSI", one);
+				err(d->line, msg);
+				return;
+			}
+		} else if (kof_proc_os_from_name(one, &v)) {
+			if (!want_proc) {
+				snprintf(msg, sizeof msg,
+					 "KOF_TARGET_SUBTYPE names %.40s but "
+					 "the module does not target a "
+					 "process", one);
 				err(d->line, msg);
 				return;
 			}

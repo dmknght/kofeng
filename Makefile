@@ -1329,12 +1329,13 @@ WATCHMAN_CHAN = -DKOF_HAVE_CHAN -Ilibkoforbit/kofchan \
 endif
 
 $(OUT)/bin/kofwatchman$(EXE): kofwatcher/kofwatchman.c $(KOFEVT_SRC) \
+                              $(KOFPROC_SRC) \
                               $(KOFRIDGE_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofeng -Ilibkoforbit/kofevt \
-	      -Ilibkoforbit/koffridge $< \
-	      $(KOFEVT_SRC) $(KOFRIDGE_SRC) $(LIB) -o $@ $(LDFLAGS) \
-	      $(WATCHMAN_CHAN)
+	      -Ilibkoforbit/kofproc -Ilibkoforbit/koffridge $< \
+	      $(KOFEVT_SRC) $(KOFPROC_SRC) $(KOFRIDGE_SRC) $(LIB) -o $@ \
+	      $(LDFLAGS) $(WATCHMAN_CHAN)
 
 kofwatchman: $(OUT)/bin/kofwatchman$(EXE)
 	$(info $(SP)  $<)

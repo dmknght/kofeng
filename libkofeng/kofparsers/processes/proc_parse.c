@@ -265,6 +265,13 @@ int kof_proc_parse(kof_buf b, void *view, struct kof_obj_ctx *ctx)
 	 * back clean.
 	 */
 	ctx->format = KOF_EVT_PROC;
+	/*
+	 * AND THE PLATFORM AS THE SUBTYPE - see KOF_PROC_OS_LIST for why a
+	 * command line is not one language. Straight from the record: the
+	 * collector said which machine it read, and this axis exists so a rule
+	 * can be dropped on that without being entered.
+	 */
+	ctx->subtype = r->os;
 	ctx->obj_size = total;
 
 	/*
@@ -282,25 +289,44 @@ int kof_proc_parse(kof_buf b, void *view, struct kof_obj_ctx *ctx)
 	return 1;
 }
 
+/*
+ * THE KOF_SCAN_* SPELLING, which is what this returns and is not a display
+ * word. kofformat.h states the contract where it declares region_name and
+ * kof_region_mask_of - "a source carries the spelling" - and every other
+ * parser here meets it by stringifying the enumerator.
+ *
+ * IT USED TO RETURN "MEM_CMDLINE", and that was not a shorter label, it was a
+ * different answer to a different question. The consequences were both on the
+ * signature path and both silent:
+ *
+ *   the editor WRITES this word into KOF_TARGET_RANGE, so a rule drafted off
+ *   a process command line was generated as KOF_TARGET_RANGE(x, MEM_CMDLINE)
+ *   and ksigbuilder refused it with "unknown region";
+ *
+ *   the editor READS a rule back by searching the source for this word, so
+ *   KOF_SCAN_PROC_CMDLINE in a hand-written module matched nothing and the
+ *   range came back empty - which saves as a rule that searches everything.
+ *
+ * The display word is DERIVED, by kof_region_label, which takes what follows
+ * KOF_SCAN_<FMT>_ - so the column reads CMDLINE, ENV, NET, exactly as it
+ * reads CODE and DATA for an ELF. Nothing is lost by spelling the enumerator
+ * here; the label was the only thing the short form bought.
+ *
+ * THREE, AND NOT FIVE. kof_proc_regions advertises CMDLINE, ENV and NET, and
+ * KOF_SCAN_PROC_CLAIMED says why META and FD are not regions but fields. A
+ * name for a bit no signature may target is a name that invites one to be
+ * written, so those return NULL - the same answer every other parser gives for
+ * a bit it does not have.
+ */
+#define X_CASE(b) case (b): return #b;
 const char *kof_proc_region_name(uint32_t bit)
 {
 	switch (bit) {
-	/*
-	 * UPPERCASE WITH A MEM_ PREFIX, like every other region name in this
-	 * tree - HEADERS, CODE, DATA - because capitals here mean REGION and a
-	 * lowercase word in that column reads as an object. The prefix says
-	 * these came from the RUNNING process rather than from the file: a row
-	 * beside CODE and DATA otherwise looks like part of the image on disk,
-	 * and it is not - it is what the snapshot found about the instance.
-	 */
-	case KOF_SCAN_PROC_META:    return "MEM_META";
-	case KOF_SCAN_PROC_CMDLINE: return "MEM_CMDLINE";
-	case KOF_SCAN_PROC_ENV:     return "MEM_ENV";
-	case KOF_SCAN_PROC_NET:     return "MEM_NET";
-	case KOF_SCAN_PROC_FD:      return "MEM_FD";
-	default:                    return "?";
+	KOF_SCAN_PROC_LIST(X_CASE)
+	default: return NULL;
 	}
 }
+#undef X_CASE
 
 const char *kof_proc_anomaly_name(unsigned index)
 {

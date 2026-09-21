@@ -28,6 +28,9 @@
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 #include <kofmod/script.h>
+/* KOF_PROC_OS_LIST: the platform a process record is from, which is its
+ * subtype - see the note on that list. */
+#include <kofmod/proc.h>
 
 #include "kofeditor.h"
 #include "../libkofeng/kofmatchers/hexprog.h"
@@ -183,6 +186,16 @@ const char *const script_sub[] = { KOF_SCRIPT_TYPE_LIST(SCRIPT_SUB_X) };
 #undef SCRIPT_SUB_X
 const uint32_t script_sub_n = sizeof script_sub / sizeof script_sub[0];
 
+/*
+ * AND THE PLATFORM A PROCESS RECORD IS FROM, on the same axis for the same
+ * reason - see KOF_PROC_OS_LIST. A command line is not one language, and a
+ * rule about `cmd /c` has no business being offered a bash start.
+ */
+#define PROC_SUB_X(name, val) &#name[sizeof "KOF_PROC_OS_" - 1],
+const char *const proc_sub[] = { KOF_PROC_OS_LIST(PROC_SUB_X) };
+#undef PROC_SUB_X
+const uint32_t proc_sub_n = sizeof proc_sub / sizeof proc_sub[0];
+
 
 
 /*
@@ -238,6 +251,11 @@ static const char *const *sub_vocab(uint8_t fmt, const char **prefix,
 		*prefix = "KOF_SCRIPT_";
 		*n = script_sub_n;
 		return script_sub;
+	}
+	if (fmt == KOF_EVT_PROC) {
+		*prefix = "KOF_PROC_OS_";
+		*n = proc_sub_n;
+		return proc_sub;
 	}
 	*prefix = NULL;
 	*n = 0;
@@ -834,7 +852,8 @@ int src_read(const char *path, struct src_ent *out)
 		 * could drift out of step with the emitter's. */
 		{
 			static const char *const decl[] = {
-				"KOF_TARGET_FORMAT(", "KOF_TARGET_NAME(",
+				"KOF_TARGET_FORMAT(", "KOF_TARGET_EVENT(",
+				"KOF_TARGET_NAME(",
 				"KOF_TARGET_ARCH(", "KOF_TARGET_SUBTYPE("
 			};
 			size_t d;
@@ -959,13 +978,29 @@ void src_scan(const char *dir, int depth)
  * that is an ORDER the generator happens to write and a hand-written rule owes
  * nobody.
  */
+/*
+ * THE TARGET DECLARATION, WHICHEVER OF ITS TWO NAMES A SOURCE SPELLS.
+ *
+ * KOF_TARGET_FORMAT and KOF_TARGET_EVENT are one declaration - kofsig.h says
+ * so and ksigbuilder reads them into one slot - so a reader that knew only the
+ * first would open a rule about a collected record with NO target, show an
+ * empty Format row, and write the emptiness back out on save. One place to ask
+ * rather than the three that each did their own strstr.
+ */
+static char *src_target_line(char *line)
+{
+	char *p = strstr(line, "KOF_TARGET_FORMAT(");
+
+	return p ? p : strstr(line, "KOF_TARGET_EVENT(");
+}
+
 static const struct kof_parser *src_rule_fmt(FILE *f, uint32_t *mask_out)
 {
 	char line[1024];
 	uint32_t mask = 0, fi;
 
 	while (fgets(line, sizeof line, f)) {
-		const char *p = strstr(line, "KOF_TARGET_FORMAT(");
+		const char *p = src_target_line(line);
 
 		if (!p)
 			continue;
@@ -4352,7 +4387,7 @@ no_head:
 		 * Read as a set of names rather than a single one, because that
 		 * is what the line is - see the note over the writer.
 		 */
-		if ((p = strstr(line, "KOF_TARGET_FORMAT(")) != NULL) {
+		if ((p = src_target_line(line)) != NULL) {
 			uint32_t fi;
 
 			for (fi = 0; fi < FMT_WORD_N; fi++)
@@ -5070,6 +5105,31 @@ void draft_from_touch(struct kof_editor *e, const struct kof_touch *t)
 }
 
 
+/*
+ * IS EVERY TARGET THIS DRAFT NAMES A COLLECTED RECORD - asked by generate(),
+ * which has to pick a directory, and by the emitter inside it, which has to
+ * pick between KOF_TARGET_EVENT and KOF_TARGET_FORMAT. One answer, because the
+ * two decisions are the same question, and a rule written as an event rule but
+ * filed with the file rules is exactly the drift this prevents.
+ *
+ * False for an empty mask: a draft with no target is not an event rule, it is
+ * a draft that cannot be written at all - draft_missing_of refuses it.
+ */
+static int draft_all_events(const struct kof_editor *e)
+{
+	uint32_t fi;
+	int n_ev = 0, n_all = 0;
+
+	for (fi = 0; fi < FMT_WORD_N; fi++) {
+		if (!(e->dr.fmt_mask & (1u << fi)))
+			continue;
+		n_all++;
+		if (kof_format_group((uint8_t)fi) == KOF_FGRP_EVENT)
+			n_ev++;
+	}
+	return n_all && n_ev == n_all;
+}
+
 void generate(struct kof_editor *e, int as_new)
 {
 	{
@@ -5193,8 +5253,25 @@ void generate(struct kof_editor *e, int as_new)
 		 * enough to decide. A rule with none goes where rules have
 		 * always gone.
 		 */
+		/*
+		 * A RULE ABOUT A COLLECTED RECORD LIVES IN bases/evts.
+		 *
+		 * The same argument as plague, one axis over: bases/signatures
+		 * holds detections about FILES, and a rule whose target is a
+		 * process start or a submission is not about a file at all. It
+		 * is prefiltered apart by the engine - the target byte sees to
+		 * that - packed apart by ksigbuilder, into sigs-proc and
+		 * sigs-amsi, and it changes for different reasons. A directory
+		 * is what says so to the person reading the tree.
+		 *
+		 * EVERY target, not any: a draft naming a script AND a
+		 * submission is a rule about files as well, and it goes where
+		 * file rules go.
+		 */
 		if (draft_uses_blocks(e)) {
 			snprintf(dir, sizeof dir, "%s/plague", e->basedir);
+		} else if (draft_all_events(e)) {
+			snprintf(dir, sizeof dir, "%s/evts", e->basedir);
 		} else {
 			snprintf(dir, sizeof dir, "%s/signatures", e->basedir);
 			if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
@@ -5442,11 +5519,23 @@ have_path:
 	 * command, in the script that is one, and in the plaintext decoded out
 	 * of a base64 run, and a rule pinned to one of those missed the others.
 	 */
+	/*
+	 * KOF_TARGET_EVENT WHEN EVERY TARGET IS ONE, and it is the same
+	 * declaration - ksigbuilder reads the two names into one slot. The
+	 * spelling is for the reader: a rule about a process start is not
+	 * about a file format, and asking an author to call a collected record
+	 * a format is the thing that second name exists to avoid.
+	 *
+	 * Every one of them, not any: a draft naming a script AND a submission
+	 * is a rule about both, and there is no honest word for that pair
+	 * other than the one the axis is called by.
+	 */
 	{
 		uint32_t m = e->dr.fmt_mask;
 		int fi, first = 1;
 
-		fprintf(f, "KOF_TARGET_FORMAT(");
+		fprintf(f, "%s(", draft_all_events(e) ? "KOF_TARGET_EVENT"
+						      : "KOF_TARGET_FORMAT");
 		for (fi = 0; fi < (int)FMT_WORD_N; fi++) {
 			if (!(m & (1u << fi)))
 				continue;
@@ -6227,7 +6316,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 			src_quoted(p, e->dr.family, sizeof e->dr.family);
 			continue;
 		}
-		if ((p = strstr(line, "KOF_TARGET_FORMAT(")) != NULL) {
+		if ((p = src_target_line(line)) != NULL) {
 			uint32_t fi;
 
 			for (fi = 0; fi < FMT_WORD_N; fi++)
