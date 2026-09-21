@@ -207,6 +207,16 @@ const char *kof_flow_cap_name(uint8_t cap)
  * those eight bits, so the value is usable - and the node says it was, through
  * KOF_FLOWF_LOW8, rather than pretending the register was fully known.
  */
+/*
+ * HOW DEEP THE STACK IS FOLLOWED.
+ *
+ * Sixteen, because what this is for is short: a stub saves a pointer, does
+ * three or four other things, and takes it back. A depth beyond this is a
+ * compiler's frame, and a frame is where the slot model in xref.c belongs
+ * rather than this one.
+ */
+#define NSLOT 16u
+
 struct cmap {
 	uint64_t v[NGPR];
 	uint8_t  known[NGPR];   /* 0, 1, 2, 4 or 8 bytes */
@@ -217,6 +227,33 @@ struct cmap {
 	 * the second builds the chain.
 	 */
 	uint16_t src[NGPR];
+
+	/*
+	 * THE STACK, AND IT IS THE POINT RATHER THAN A DETAIL.
+	 *
+	 * A loader does not keep its mapping in a register across four
+	 * syscalls - it pushes it. Measured on the meterpreter x64 stager:
+	 *
+	 *     syscall            rax = the mapping
+	 *     push rax                 saved
+	 *     ... socket, connect, sleep, retry ...
+	 *     pop  rsi                 taken back
+	 *     jmp  rsi                 and executed
+	 *
+	 * Without following the push the chain breaks in the middle and the
+	 * one edge worth having is lost. Following it is a counter and an
+	 * array - no addresses, no aliasing, no memory model - because push
+	 * and pop are the only two things a stub does with it.
+	 *
+	 * ANYTHING ELSE THAT MOVES rsp THROWS IT AWAY. A `sub rsp, 0x20` is a
+	 * frame being built and what was below it is no longer where this
+	 * thinks it is; guessing there would produce a pointer that is not the
+	 * one that was saved.
+	 */
+	uint64_t sv[NSLOT];
+	uint8_t  sknown[NSLOT];
+	uint16_t ssrc[NSLOT];
+	uint8_t  depth;
 };
 
 static uint32_t gpr_of(const ND_OPERAND *op)
@@ -252,6 +289,61 @@ static void set_const(struct cmap *c, uint32_t r, uint64_t val, uint8_t size)
 		if (c->known[r] < size)
 			c->known[r] = size;
 	}
+}
+
+static void stack_push(struct cmap *c, uint64_t val, uint8_t known,
+		       uint16_t src)
+{
+	if (c->depth < NSLOT) {
+		c->sv[c->depth] = val;
+		c->sknown[c->depth] = known;
+		c->ssrc[c->depth] = src;
+	}
+	if (c->depth < 255u)
+		c->depth++;
+}
+
+/* Deeper than the model goes, so what comes back is not known. */
+static int stack_pop(struct cmap *c, uint64_t *val, uint8_t *known,
+		     uint16_t *src)
+{
+	if (!c->depth)
+		return 0;
+	c->depth--;
+	if (c->depth >= NSLOT)
+		return 0;
+	*val = c->sv[c->depth];
+	*known = c->sknown[c->depth];
+	*src = c->ssrc[c->depth];
+	return 1;
+}
+
+static void stack_drop(struct cmap *c)
+{
+	memset(c->sv, 0, sizeof c->sv);
+	memset(c->sknown, 0, sizeof c->sknown);
+	memset(c->ssrc, 0, sizeof c->ssrc);
+	c->depth = 0;
+}
+
+/*
+ * A JOIN CLEARS THE REGISTERS AND KEEPS THE STACK.
+ *
+ * Both halves are measured rather than assumed. Carrying REGISTERS into a
+ * block that can be entered from elsewhere produced a false edge in gdb - see
+ * the note on the target set. Carrying the STACK does not, because a stub that
+ * branches locally keeps its stack balanced across the branch: the pop that
+ * takes the mapping back in the meterpreter stager IS a branch target, and
+ * clearing there loses the edge the whole file exists to find.
+ *
+ * The asymmetry is a claim about how code is written, so it is checked the way
+ * every other claim here is - by counting false edges on /usr/bin with it on.
+ */
+static void join_clear(struct cmap *c)
+{
+	memset(c->v, 0, sizeof c->v);
+	memset(c->known, 0, sizeof c->known);
+	memset(c->src, 0, sizeof c->src);
 }
 
 static void forget(struct cmap *c, uint32_t r)
@@ -579,9 +671,10 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 		}
 		next = va + ix.Length;
 
-		/* A block something else can jump into knows nothing. */
+		/* A block something else can jump into knows nothing about
+		 * its registers - see join_clear for why the stack stays. */
 		if (t && tset_has(t, va))
-			memset(&c, 0, sizeof c);
+			join_clear(&c);
 
 		/* The normalised step count - see the note in flow.h. */
 		is_push = ix.Instruction == ND_INS_PUSH;
@@ -693,28 +786,82 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 			at += ix.Length;
 			continue;
 		}
-		if (ix.Instruction == ND_INS_PUSH && ix.OperandsCount >= 1 &&
-		    ix.Operands[0].Type == ND_OP_IMM) {
-			/*
-			 * REMEMBERED ON A ONE SLOT STACK, which is all
-			 * `push imm ; pop reg` needs. A deeper one would be a
-			 * stack model, and a stack model without basic blocks
-			 * is a model that is wrong at the first branch.
-			 */
-			c.v[NGPR - 1] = ix.Operands[0].Info.Immediate.Imm;
-			c.known[NGPR - 1] = 8;
+		if (ix.Instruction == ND_INS_PUSH && ix.OperandsCount >= 1) {
+			if (ix.Operands[0].Type == ND_OP_IMM) {
+				stack_push(&c,
+					   ix.Operands[0].Info.Immediate.Imm,
+					   8u, 0u);
+			} else {
+				uint32_t sr = gpr_of(&ix.Operands[0]);
+
+				if (sr < NGPR)
+					stack_push(&c, c.v[sr], c.known[sr],
+						   c.src[sr]);
+				else
+					stack_push(&c, 0, 0, 0);
+			}
 			at += ix.Length;
 			continue;
 		}
 		if (ix.Instruction == ND_INS_POP && ix.OperandsCount >= 1) {
+			uint64_t sval = 0;
+			uint8_t skn = 0;
+			uint16_t ssr = 0;
+
 			dst = gpr_of(&ix.Operands[0]);
-			if (c.known[NGPR - 1])
-				set_const(&c, dst, c.v[NGPR - 1], 8);
-			else
-				forget(&c, dst);
-			c.known[NGPR - 1] = 0;
+			forget(&c, dst);
+			if (stack_pop(&c, &sval, &skn, &ssr) && dst < NGPR) {
+				c.v[dst] = sval;
+				c.known[dst] = skn;
+				c.src[dst] = ssr;
+			}
 			at += ix.Length;
 			continue;
+		}
+
+		/*
+		 * ARITHMETIC ON A KNOWN CONSTANT, and only the four forms a
+		 * hand-written stub uses to build a small number.
+		 *
+		 * i386 selects a socket operation with `xor ebx,ebx` and then
+		 * `inc ebx` twice, so without this every socketcall on that
+		 * ABI is unresolved and every i386 stager loses its network
+		 * nodes - measured: three of them in this corpus.
+		 *
+		 * THE PROVENANCE DOES NOT SURVIVE IT. A number derived from a
+		 * pointer is not that pointer, and treating it as one is how
+		 * an edge gets invented.
+		 */
+		if ((ix.Instruction == ND_INS_INC ||
+		     ix.Instruction == ND_INS_DEC ||
+		     ix.Instruction == ND_INS_ADD ||
+		     ix.Instruction == ND_INS_SUB) &&
+		    ix.OperandsCount >= 1 &&
+		    ix.Operands[0].Type == ND_OP_REG) {
+			uint32_t r = gpr_of(&ix.Operands[0]);
+			int64_t  by = 0;
+			int ok = 0;
+
+			if (ix.Instruction == ND_INS_INC) { by = 1; ok = 1; }
+			else if (ix.Instruction == ND_INS_DEC) { by = -1; ok = 1; }
+			else if (ix.OperandsCount >= 2 &&
+				 ix.Operands[1].Type == ND_OP_IMM) {
+				by = (int64_t)ix.Operands[1].Info.Immediate.Imm;
+				if (ix.Instruction == ND_INS_SUB)
+					by = -by;
+				ok = 1;
+			}
+			if (ok && r < NGPR && c.known[r]) {
+				c.v[r] = (uint64_t)((int64_t)c.v[r] + by);
+				c.src[r] = 0;
+				at += ix.Length;
+				continue;
+			}
+			if (ok && r < NGPR) {
+				forget(&c, r);
+				at += ix.Length;
+				continue;
+			}
 		}
 
 		/*
@@ -836,8 +983,12 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 		    ix.Instruction == ND_INS_JMPNI) {
 			/* Control does not fall through any of these, so what
 			 * follows in ADDRESS order is not what follows in
-			 * execution order. */
-			memset(&c, 0, sizeof c);
+			 * execution order. A return also ends the stack this
+			 * was following; a jump does not. */
+			join_clear(&c);
+			if (ix.Instruction == ND_INS_RETN ||
+			    ix.Instruction == ND_INS_RETF)
+				stack_drop(&c);
 			at += ix.Length;
 			continue;
 		}
