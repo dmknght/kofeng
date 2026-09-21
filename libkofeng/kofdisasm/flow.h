@@ -200,6 +200,24 @@ struct kof_flow;
  */
 uint8_t kof_flow_cap_of_name(const char *sym);
 
+/*
+ * WHICH CALLING CONVENTION THE CODE USES, which a decoder cannot tell from the
+ * bytes and the caller always knows.
+ *
+ * It decides two things and both are wrong without it: which register holds an
+ * argument this cares about - the protection word of a mapping call is the
+ * THIRD argument, which is rdx under SysV and r8 under Microsoft's - and which
+ * registers to look at when asking where an argument came from.
+ *
+ * Measured the day it was missing: the msfvenom PE stub calls VirtualProtect
+ * with PROT constants in r8, this read rdx, and a mapping made executable came
+ * back as an ordinary one.
+ */
+enum kof_flow_abi {
+	KOF_FLOW_SYSV = 0,   /* Linux, and the Linux syscall ABI with it */
+	KOF_FLOW_MS          /* Windows x64 */
+};
+
 struct kof_flow *kof_flow_new(void);
 void kof_flow_free(struct kof_flow *);
 
@@ -227,7 +245,7 @@ void kof_flow_resolver(struct kof_flow *f, kof_flow_resolve_fn fn, void *user);
  * branch target resolvable. `bits` is 32 or 64.
  */
 void kof_flow_add(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
-		  uint64_t code_va, unsigned bits);
+		  uint64_t code_va, unsigned bits, unsigned abi);
 
 /* Finish: sort the function heads, assign nodes to them, apply loop spans.
  * Called once, by the first accessor, so a caller cannot forget it. */
@@ -256,6 +274,7 @@ int kof_flow_full(const struct kof_flow *f);
  * shellcode wants, and what the unit tests use.
  */
 uint32_t kof_flow_scan(const uint8_t *code, uint32_t code_n, uint64_t code_va,
-		       unsigned bits, struct kof_flow_node *out, uint32_t cap);
+		       unsigned bits, unsigned abi, struct kof_flow_node *out,
+		       uint32_t cap);
 
 #endif /* KOFENG_FLOW_H */

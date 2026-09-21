@@ -229,6 +229,17 @@ struct cmap {
 	uint16_t src[NGPR];
 
 	/*
+	 * AND WHETHER THE REGISTER HOLDS AN IMPORT'S ADDRESS.
+	 *
+	 * `mov edi, [IAT] ; ... ; call edi` is how a PE calls the same import
+	 * twice without paying for the slot read each time, and it is what
+	 * real malware does: measured on a VirusSign sample that maps
+	 * executable memory, every API call in the stub is `call *%edi`. A
+	 * reader that only understands `call [slot]` sees none of them.
+	 */
+	uint8_t  rcap[NGPR];
+
+	/*
 	 * THE STACK, AND IT IS THE POINT RATHER THAN A DETAIL.
 	 *
 	 * A loader does not keep its mapping in a register across four
@@ -327,6 +338,35 @@ static void stack_drop(struct cmap *c)
 }
 
 /*
+ * THE Nth ARGUMENT OF A 32-BIT CALL, which is on the STACK and not in a
+ * register.
+ *
+ * stdcall and cdecl both push right to left, so at the call the first argument
+ * is on top and the Nth is N slots down - exactly the array the push/pop model
+ * already maintains. Without this every Windows i386 program is unreadable on
+ * the one axis that matters: measured on 1270 PE samples, 676 call something
+ * that maps memory and ONE of them had a protection word this could read,
+ * because the other 675 put it on the stack.
+ *
+ * The x86-64 conventions pass in registers and do not come here.
+ */
+static int stack_arg(const struct cmap *c, uint32_t nth, uint64_t *out,
+		     uint16_t *src)
+{
+	uint32_t at;
+
+	if (c->depth <= nth)
+		return 0;
+	at = c->depth - 1u - nth;
+	if (at >= NSLOT || !c->sknown[at])
+		return 0;
+	if (out) *out = c->sv[at];
+	if (src) *src = c->ssrc[at];
+	return 1;
+}
+
+
+/*
  * A JOIN CLEARS THE REGISTERS AND KEEPS THE STACK.
  *
  * Both halves are measured rather than assumed. Carrying REGISTERS into a
@@ -344,6 +384,7 @@ static void join_clear(struct cmap *c)
 	memset(c->v, 0, sizeof c->v);
 	memset(c->known, 0, sizeof c->known);
 	memset(c->src, 0, sizeof c->src);
+	memset(c->rcap, 0, sizeof c->rcap);
 }
 
 static void forget(struct cmap *c, uint32_t r)
@@ -352,6 +393,7 @@ static void forget(struct cmap *c, uint32_t r)
 		c->v[r] = 0;
 		c->known[r] = 0;
 		c->src[r] = 0;
+		c->rcap[r] = KOF_CAP_NONE;
 	}
 }
 
@@ -366,12 +408,26 @@ static void forget(struct cmap *c, uint32_t r)
  */
 static const uint8_t arg64[] = { 7u, 6u, 2u, 10u, 8u, 9u, 1u };
 static const uint8_t arg32[] = { 3u, 1u, 2u, 6u, 7u };
+/* rcx, rdx, r8, r9 - Microsoft's four, and no more are in registers. */
+static const uint8_t argms[] = { 1u, 2u, 8u, 9u };
 
-static uint16_t arg_from(const struct cmap *c, unsigned bits)
+static uint16_t arg_from(const struct cmap *c, unsigned bits, unsigned abi,
+			 int by_call)
 {
-	const uint8_t *a = bits == 32 ? arg32 : arg64;
-	size_t n = bits == 32 ? sizeof arg32 : sizeof arg64, i;
+	const uint8_t *a = bits == 32 ? arg32
+				      : (abi == KOF_FLOW_MS ? argms : arg64);
+	size_t n = bits == 32 ? sizeof arg32
+			      : (abi == KOF_FLOW_MS ? sizeof argms
+						    : sizeof arg64), i;
 
+	if (by_call && bits == 32) {
+		uint16_t sr = 0;
+
+		for (i = 0; i < 4u; i++)
+			if (stack_arg(c, (uint32_t)i, NULL, &sr) && sr)
+				return sr;
+		return 0;
+	}
 	for (i = 0; i < n; i++)
 		if (c->src[a[i]])
 			return c->src[a[i]];
@@ -433,13 +489,36 @@ static int is_nop(const INSTRUX *ix)
 #define R_RDX 2u
 #define R_RBX 3u
 
-static uint8_t prot_cap(const struct cmap *c)
+#define R_R8  8u
+#define R_RDI 7u
+
+static uint8_t prot_cap(const struct cmap *c, unsigned abi, unsigned bits,
+			int by_call)
 {
 	uint64_t prot;
 	int low8;
 
-	if (!const_of(c, R_RDX, &prot, &low8))
+	/*
+	 * THE THIRD ARGUMENT, wherever this convention keeps it: the stack for
+	 * a 32-bit call, r8 for Microsoft's 64-bit one, rdx for SysV and for
+	 * the Linux syscall ABI.
+	 */
+	if (by_call && bits == 32) {
+		if (!stack_arg(c, 2u, &prot, NULL))
+			return KOF_CAP_ALLOC;
+	} else if (!const_of(c, abi == KOF_FLOW_MS ? R_R8 : R_RDX, &prot,
+			     &low8))
 		return KOF_CAP_ALLOC;    /* unknown - claim the weaker thing */
+	/*
+	 * AND THE WORD MEANS DIFFERENT THINGS. POSIX packs the three
+	 * permissions into three bits and execute is bit 2; Windows enumerates
+	 * the combinations and every one that can be executed is in the high
+	 * nibble - PAGE_EXECUTE 0x10 through PAGE_EXECUTE_WRITECOPY 0x80. A
+	 * mask written for one reads the other as never executable, which is
+	 * the quietest possible way to lose the strongest term here.
+	 */
+	if (abi == KOF_FLOW_MS)
+		return (prot & 0xf0u) ? KOF_CAP_ALLOC_EXEC : KOF_CAP_ALLOC;
 	return (prot & 4u) ? KOF_CAP_ALLOC_EXEC : KOF_CAP_ALLOC;
 }
 
@@ -540,6 +619,27 @@ static uint64_t branch_target(const INSTRUX *ix, uint64_t next_va)
 	return next_va + (uint64_t)(int64_t)ix->Operands[0].Info.RelativeOffset.Rel;
 }
 
+/*
+ * THE ABSOLUTE ADDRESS A MEMORY OPERAND NAMES, or 0 when it names none this
+ * can work out.
+ *
+ * Two forms and no others: rip-relative, which is how x86-64 reaches an import
+ * slot, and a bare displacement, which is how i386 does. Anything with a base
+ * or an index is an array subscript or a field of something, and guessing an
+ * address out of it would be inventing one.
+ */
+static uint64_t mem_abs(const ND_OPERAND *op, uint64_t next_va)
+{
+	if (op->Type != ND_OP_MEM)
+		return 0;
+	if (op->Info.Memory.IsRipRel)
+		return next_va + (uint64_t)(int64_t)op->Info.Memory.Disp;
+	if (op->Info.Memory.HasDisp && !op->Info.Memory.HasBase &&
+	    !op->Info.Memory.HasIndex)
+		return (uint64_t)op->Info.Memory.Disp;
+	return 0;
+}
+
 static int is_cond_jump(const INSTRUX *ix)
 {
 	return ix->Instruction >= ND_INS_Jcc && ix->Instruction <= ND_INS_Jcc;
@@ -633,13 +733,25 @@ static void find_targets(struct tset *t, const uint8_t *code, uint32_t code_n,
  * kof_flow_scan wants and what a raw blob is.
  */
 static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
-		      uint64_t code_va, unsigned bits,
+		      uint64_t code_va, unsigned bits, unsigned abi,
 		      struct kof_flow_node *out, uint32_t cap)
 {
 	struct cmap c;
 	struct tset *t;
 	uint32_t at = 0, n = 0, step = 0;
 	int in_push_run = 0;
+	/*
+	 * WHICH ADDRESS EACH MAPPING CALL WAS ABOUT.
+	 *
+	 * The other half of the edge, and the only one a Windows stub has:
+	 * VirtualProtect returns a BOOL, not the buffer, so there is no value
+	 * to follow. What ties the shape together is that the address handed
+	 * to it is the address jumped to afterwards - a CONSTANT compared
+	 * against a constant. Sixteen, because a function that maps more than
+	 * sixteen times is not the shape this is for.
+	 */
+	struct { uint64_t addr; uint16_t node; } mapped[16];
+	uint32_t n_mapped = 0;
 
 	memset(&c, 0, sizeof c);
 	t = (struct tset *)calloc(1, sizeof *t);
@@ -732,8 +844,8 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 					 * sweep does not have; there the
 					 * weaker answer stands.
 					 */
-					if (k == KOF_CAP_ALLOC && bits != 32)
-						k = prot_cap(&c);
+					if (k == KOF_CAP_ALLOC)
+						k = prot_cap(&c, abi, bits, 1);
 					if (k != KOF_CAP_NONE) {
 						memset(&out[n], 0,
 						       sizeof out[n]);
@@ -741,8 +853,8 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 						out[n].step = step;
 						out[n].sel  = 0;
 						out[n].cap  = k;
-						out[n].from = arg_from(&c,
-								       bits);
+						out[n].from = arg_from(&c, bits,
+								       abi, 1);
 						n++;
 						/* The call returns in rax on
 						 * both ABIs, and that is the
@@ -750,6 +862,70 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 						forget(&c, R_RAX);
 						c.src[R_RAX] = (uint16_t)n;
 					}
+				}
+			} else if (ix.Instruction == ND_INS_CALLNI ||
+				   ix.Instruction == ND_INS_JMPNI) {
+				/*
+				 * AN IMPORT IS CALLED THROUGH ITS SLOT, and on
+				 * Windows that is the only way it is called:
+				 * `call [rip+X]` where X is the address the
+				 * loader wrote the function into. The ELF side
+				 * reaches a PLT stub with a DIRECT call, so
+				 * both forms have to be asked about or the
+				 * whole of one platform reports nothing.
+				 *
+				 * A tail-call through the slot - `jmp [rip+X]`
+				 * - is the same thing, and a thunk is written
+				 * exactly that way.
+				 */
+				uint32_t q;
+
+				for (q = 0; q < ix.OperandsCount && f->resolve;
+				     q++) {
+					uint64_t slot = mem_abs(&ix.Operands[q],
+							 next);
+					uint8_t k;
+
+					if (!slot)
+						continue;
+					k = f->resolve(slot, f->resolve_user);
+					if (k == KOF_CAP_NONE || n >= cap)
+						continue;
+					/* And whether the mapping can be run
+					 * - the same question the direct-call
+					 * path asks, and forgetting it here
+					 * made every VirtualProtect on
+					 * Windows an ordinary allocation. */
+					if (k == KOF_CAP_ALLOC)
+						k = prot_cap(&c, abi, bits, 1);
+					if ((k == KOF_CAP_ALLOC ||
+					     k == KOF_CAP_ALLOC_EXEC) &&
+					    n_mapped < 16u) {
+						uint64_t a0;
+						int l3;
+
+						if ((bits == 32
+						     ? stack_arg(&c, 0u, &a0,
+								 NULL)
+						     : const_of(&c,
+						       abi == KOF_FLOW_MS ? 1u
+									 : R_RDI,
+						       &a0, &l3)) && a0) {
+							mapped[n_mapped].addr = a0;
+							mapped[n_mapped].node =
+								(uint16_t)(n + 1u);
+							n_mapped++;
+						}
+					}
+					memset(&out[n], 0, sizeof out[n]);
+					out[n].va   = va;
+					out[n].step = step;
+					out[n].cap  = k;
+					out[n].from = arg_from(&c, bits, abi, 1);
+					n++;
+					forget(&c, R_RAX);
+					c.src[R_RAX] = (uint16_t)n;
+					break;
 				}
 			} else if (ix.Instruction == ND_INS_JMPNR ||
 				   is_cond_jump(&ix)) {
@@ -773,6 +949,45 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 					    ? 8u : ix.Operands[0].Size));
 			at += ix.Length;
 			continue;
+		}
+		/*
+		 * A LOAD FROM AN IMPORT SLOT MARKS THE REGISTER, so the call
+		 * through it later can be read - see cmap.rcap.
+		 */
+		if (f && f->resolve && ix.Instruction == ND_INS_MOV &&
+		    ix.OperandsCount >= 2 &&
+		    ix.Operands[0].Type == ND_OP_REG &&
+		    ix.Operands[1].Type == ND_OP_MEM) {
+			uint64_t slot = mem_abs(&ix.Operands[1], next);
+			uint32_t d2 = gpr_of(&ix.Operands[0]);
+
+			if (slot && d2 < NGPR) {
+				uint8_t k2 = f->resolve(slot, f->resolve_user);
+
+				forget(&c, d2);
+				c.rcap[d2] = k2;
+				at += ix.Length;
+				continue;
+			}
+		}
+
+		/*
+		 * A RIP-RELATIVE LEA IS A CONSTANT, and on Windows it is the
+		 * only way a stub names the buffer it is about to make
+		 * executable. Without it `lea rcx,[rip+X]` is an unknown and
+		 * the two ends of that shape cannot be tied together.
+		 */
+		if (ix.Instruction == ND_INS_LEA && ix.OperandsCount >= 2) {
+			uint64_t a = mem_abs(&ix.Operands[1], next);
+
+			dst = gpr_of(&ix.Operands[0]);
+			if (a && dst < NGPR) {
+				forget(&c, dst);
+				c.v[dst] = a;
+				c.known[dst] = 8;
+				at += ix.Length;
+				continue;
+			}
 		}
 		if ((ix.Instruction == ND_INS_XOR ||
 		     ix.Instruction == ND_INS_SUB) &&
@@ -895,13 +1110,25 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 								 (uint32_t)sub);
 					}
 					if (nr == 125 || nr == 192 || nr == 90)
-						k = prot_cap(&c);
+						k = prot_cap(&c, abi, bits, 0);
 				} else {
 					k = look(sys64, sizeof sys64 /
 						 sizeof sys64[0],
 						 (uint32_t)nr);
 					if (nr == 9 || nr == 10)
-						k = prot_cap(&c);
+						k = prot_cap(&c, abi, bits, 0);
+				}
+			}
+			if ((k == KOF_CAP_ALLOC || k == KOF_CAP_ALLOC_EXEC) &&
+			    n_mapped < 16u) {
+				uint64_t a0;
+				int l3;
+
+				if (const_of(&c, bits == 32 ? R_RBX : R_RDI,
+					     &a0, &l3) && a0) {
+					mapped[n_mapped].addr = a0;
+					mapped[n_mapped].node = (uint16_t)(n + 1u);
+					n_mapped++;
 				}
 			}
 			if (k != KOF_CAP_NONE) {
@@ -910,7 +1137,7 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 				out[n].step  = step;
 				out[n].sel   = sel;
 				out[n].cap   = k;
-				out[n].from  = arg_from(&c, bits);
+				out[n].from  = arg_from(&c, bits, abi, 0);
 				out[n].flags = low8 ? KOF_FLOWF_LOW8 : 0;
 				n++;
 			}
@@ -960,6 +1187,43 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 			for (i = 0; i < ix.OperandsCount; i++) {
 				uint32_t r = gpr_of(&ix.Operands[i]);
 				uint16_t sr;
+				uint32_t q;
+
+				/* The register was loaded from an import
+				 * slot: this call IS that import. */
+				if (r < NGPR && c.rcap[r] != KOF_CAP_NONE &&
+				    n < cap) {
+					uint8_t k3 = c.rcap[r];
+
+					if (k3 == KOF_CAP_ALLOC)
+						k3 = prot_cap(&c, abi, bits, 1);
+					if ((k3 == KOF_CAP_ALLOC ||
+					     k3 == KOF_CAP_ALLOC_EXEC) &&
+					    n_mapped < 16u) {
+						uint64_t a0;
+						int l4;
+
+						if ((bits == 32
+						     ? stack_arg(&c, 0u, &a0, NULL)
+						     : const_of(&c,
+						       abi == KOF_FLOW_MS ? 1u
+									 : R_RDI,
+						       &a0, &l4)) && a0) {
+							mapped[n_mapped].addr = a0;
+							mapped[n_mapped].node =
+								(uint16_t)(n + 1u);
+							n_mapped++;
+						}
+					}
+					memset(&out[n], 0, sizeof out[n]);
+					out[n].va   = va;
+					out[n].step = step;
+					out[n].cap  = k3;
+					out[n].from = arg_from(&c, bits, abi, 1);
+					n++;
+					forget(&c, R_RAX);
+					c.src[R_RAX] = (uint16_t)n;
+				}
 
 				if (r >= NGPR || !ix.Operands[i].Access.Read)
 					continue;
@@ -967,6 +1231,15 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 				if (sr && sr <= n)
 					out[sr - 1u].flags |=
 						KOF_FLOWF_EXECUTED;
+				/* Or the branch goes to an address something
+				 * earlier was asked to make executable. */
+				if (!c.known[r])
+					continue;
+				for (q = 0; q < n_mapped; q++)
+					if (mapped[q].addr == c.v[r] &&
+					    mapped[q].node <= n)
+						out[mapped[q].node - 1u].flags
+							|= KOF_FLOWF_EXECUTED;
 			}
 		}
 
@@ -1029,17 +1302,18 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 }
 
 uint32_t kof_flow_scan(const uint8_t *code, uint32_t code_n, uint64_t code_va,
-		       unsigned bits, struct kof_flow_node *out, uint32_t cap)
+		       unsigned bits, unsigned abi, struct kof_flow_node *out,
+		       uint32_t cap)
 {
 	if (!code || !out || !cap)
 		return 0;
 	if (cap > KOF_FLOW_MAX_NODE)
 		cap = KOF_FLOW_MAX_NODE;
-	return sweep(NULL, code, code_n, code_va, bits, out, cap);
+	return sweep(NULL, code, code_n, code_va, bits, abi, out, cap);
 }
 
 void kof_flow_add(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
-		  uint64_t code_va, unsigned bits)
+		  uint64_t code_va, unsigned bits, unsigned abi)
 {
 	if (!f || !code || !code_n || f->finished)
 		return;
@@ -1050,7 +1324,7 @@ void kof_flow_add(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 	/* The run's own start is a head: a blob nothing calls into is still one
 	 * region, which is what raw shellcode is. */
 	add_head(f, code_va);
-	f->n_node += sweep(f, code, code_n, code_va, bits,
+	f->n_node += sweep(f, code, code_n, code_va, bits, abi,
 			   f->node + f->n_node,
 			   KOF_FLOW_MAX_NODE - f->n_node);
 }
