@@ -115,6 +115,20 @@ const char *kof_flow_cap_name(uint8_t cap);
  * costs a detection; inventing it would cost a false one, so the sweep loses.
  */
 #define KOF_FLOWF_EXECUTED (1u << 2)
+/*
+ * THE IMPORT WAS CALLED THROUGH A REGISTER, not through its slot.
+ *
+ * `call [VirtualAlloc]` is what a compiler emits and what a reader of the
+ * import table can see at the call site. `mov edi,[VirtualAlloc] ; ... ; call
+ * edi` reaches the same function while leaving nothing at the call site that
+ * names it - which is the point: it is one of the cheapest ways to make a
+ * static reader lose the reference.
+ *
+ * NOT A VERDICT. A compiler does this too when the same import is called in a
+ * loop, so on its own it says very little. It is a fact about HOW the call was
+ * written, and what it is worth is measured beside the others.
+ */
+#define KOF_FLOWF_VIA_REG  (1u << 3)
 
 struct kof_flow_node {
 	uint64_t va;      /* where the syscall instruction is */

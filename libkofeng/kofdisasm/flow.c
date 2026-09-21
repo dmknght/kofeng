@@ -1216,10 +1216,12 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 						}
 					}
 					memset(&out[n], 0, sizeof out[n]);
-					out[n].va   = va;
-					out[n].step = step;
-					out[n].cap  = k3;
-					out[n].from = arg_from(&c, bits, abi, 1);
+					out[n].va    = va;
+					out[n].step  = step;
+					out[n].cap   = k3;
+					out[n].flags = KOF_FLOWF_VIA_REG;
+					out[n].from  = arg_from(&c, bits, abi,
+								1);
 					n++;
 					forget(&c, R_RAX);
 					c.src[R_RAX] = (uint16_t)n;
