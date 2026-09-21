@@ -1161,17 +1161,44 @@ static uint64_t gen_lnk(uint8_t *b)
 		for (i = 0; i < 48u && at < OBJ_MAX - 16u; i++)
 			b[at++] = (uint8_t)(0x20u + rnd() % 0x5fu);
 	}
-	/* An ExtraData chain, ended - or not - by a size under four. */
+	/*
+	 * An ExtraData chain, ended - or not - by a size under four.
+	 *
+	 * SOMETIMES WITH A SIGNATURE THE PARSER KNOWS, because three of them
+	 * now open the block and read fields at fixed offsets inside it. A
+	 * chain of purely random dwords reaches none of that: the odds of
+	 * hitting 0xA0000001 by chance are what they are, so it is hit on
+	 * purpose here. The SIZE stays random when it is - a real signature on
+	 * a block far too short to hold the structure is the case those
+	 * readers have to survive, and the one a random chain never builds.
+	 */
 	for (i = 0; i < 4u && at + 16u < OBJ_MAX; i++) {
 		uint32_t sz = (rnd() % 5u) ? (8u + (uint32_t)(rnd() % 32u))
 					   : (uint32_t)(rnd() % 4u);
-		unsigned k;
+		unsigned k = 4u;
+		int signed_blk = 0;
 
+		if ((rnd() % 3u) == 0u)
+			sz = 787u + (uint32_t)(rnd() % 3u);
 		put32(b, at, sz);
+		if (sz >= 8u && (rnd() % 2u) == 0u) {
+			static const uint32_t sig[] = {
+				0xA0000001u, 0xA0000003u, 0xA0000007u,
+				0xA0000009u, 0xA000000Cu, 0xA000000Au
+			};
+
+			put32(b, at + 4u,
+			      sig[rnd() % (sizeof sig / sizeof sig[0])]);
+			signed_blk = 1;
+		}
 		at += 4u;
 		if (sz < 4u)
 			break;
-		for (k = 4u; k < sz && at < OBJ_MAX - 16u; k++)
+		if (signed_blk) {       /* already written, step over it */
+			at += 4u;
+			k = 8u;
+		}
+		for (; k < sz && at < OBJ_MAX - 16u; k++)
 			b[at++] = (uint8_t)rnd();
 	}
 	if (at > OBJ_MAX)

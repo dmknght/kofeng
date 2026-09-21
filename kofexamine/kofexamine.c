@@ -1143,9 +1143,27 @@ static void print_lnk(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 	if (k->idlist_len)
 		printf("  idlist    %llu byte(s), not decoded\n",
 		       (unsigned long long)k->idlist_len);
-	if (k->info_len)
-		printf("  linkinfo  %llu byte(s)\n",
-		       (unsigned long long)k->info_len);
+	if (k->info_len) {
+		printf("  linkinfo  %llu byte(s), header %u%s%s\n",
+		       (unsigned long long)k->info_len, k->info_hdr,
+		       (k->info_flags & KOF_LNK_INFO_HAS_LOCAL) ? "  local" : "",
+		       (k->info_flags & KOF_LNK_INFO_HAS_NET) ? "  network" : "");
+		if (k->volume_serial || k->drive_type)
+			printf("  volume    drive type %u  serial %08x\n",
+			       k->drive_type, k->volume_serial);
+		/*
+		 * ANSI, EXPLICITLY, and not the header's unicode flag. That
+		 * flag governs StringData; LinkInfo's own strings are ANSI
+		 * unless the long header form names a unicode twin, which is
+		 * printed as its own line when it is there.
+		 */
+		print_lnk_str("label", &k->vol_label, 0, buf, 64u);
+		print_lnk_str("path", &k->local_path, 0, buf, 160u);
+		print_lnk_str("suffix", &k->path_suffix, 0, buf, 96u);
+		print_lnk_str("path16", &k->local_path_w, 1, buf, 160u);
+		print_lnk_str("suffix16", &k->path_suffix_w, 1, buf, 96u);
+		print_lnk_str("netname", &k->net_name, 0, buf, 160u);
+	}
 
 	/*
 	 * IN THE ORDER THE FORMAT STORES THEM, which is also the order they
@@ -1158,9 +1176,44 @@ static void print_lnk(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)
 	print_lnk_str("arguments", &k->args, u, buf, 160u);
 	print_lnk_str("icon", &k->icon, u, buf, 96u);
 
-	if (k->n_extra)
-		printf("  extra     %u block(s), %llu byte(s)\n", k->n_extra,
+	if (k->n_extra) {
+		/*
+		 * NAMED, because "6 blocks" and "6 blocks one of which is an
+		 * environment target" are different sentences and only the
+		 * second one is worth a person's time.
+		 */
+		static const struct {
+			uint32_t bit;
+			const char *name;
+		} blk[] = {
+			{ KOF_LNK_BLK_ENV,        "env" },
+			{ KOF_LNK_BLK_CONSOLE,    "console" },
+			{ KOF_LNK_BLK_TRACKER,    "tracker" },
+			{ KOF_LNK_BLK_CONSOLE_FE, "console-fe" },
+			{ KOF_LNK_BLK_SPECIAL,    "special-folder" },
+			{ KOF_LNK_BLK_DARWIN,     "darwin" },
+			{ KOF_LNK_BLK_ICONENV,    "icon-env" },
+			{ KOF_LNK_BLK_SHIM,       "shim" },
+			{ KOF_LNK_BLK_PROPSTORE,  "property-store" },
+			{ KOF_LNK_BLK_KNOWNFLDR,  "known-folder" },
+			{ KOF_LNK_BLK_VISTAIDL,   "vista-idlist" },
+			{ KOF_LNK_BLK_UNKNOWN,    "unassigned" }
+		};
+		unsigned i;
+
+		printf("  extra     %u block(s), %llu byte(s):", k->n_extra,
 		       (unsigned long long)k->extra_len);
+		for (i = 0; i < sizeof blk / sizeof blk[0]; i++)
+			if (k->blocks & blk[i].bit)
+				printf(" %s", blk[i].name);
+		printf("\n");
+
+		print_lnk_str("envpath", &k->env_target, 0, buf, 160u);
+		print_lnk_str("envpath16", &k->env_target_w, 1, buf, 160u);
+		print_lnk_str("iconenv", &k->icon_env, 0, buf, 160u);
+		print_lnk_str("iconenv16", &k->icon_env_w, 1, buf, 160u);
+		print_lnk_str("madeon", &k->machine_id, 0, buf, 32u);
+	}
 }
 
 static void print_lha(const void *v, const struct kof_obj_ctx *ctx, kof_buf buf)

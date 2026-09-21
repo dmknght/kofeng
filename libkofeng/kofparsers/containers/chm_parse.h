@@ -6,9 +6,17 @@
  * and the format view, and a parse that never fails - hostile or truncated
  * input yields what was recovered plus anomaly bits.
  *
- * The structure only. Nothing here decodes a compressed section: this build has
- * no LZX, and what that costs is written down in chm.h where a rule author can
- * read it.
+ * THE STRUCTURE ONLY, AND THAT IS NOT THE SAME AS "the content is out of
+ * reach" - which is what this comment used to say, from when it was true.
+ * Nothing in this file decodes LZX. It locates: an entry in the compressed
+ * section becomes a scattered child carrying the intervals it spans, and
+ * bases/decomp/chm.c decodes those. Pointing at bytes and decoding them are
+ * different operations and the host only does the first, the same split a
+ * cabinet's coded folders use.
+ *
+ * Measured over the 25 CHMs on a stock Windows install: every entry of every
+ * one of them openable, none unreachable. What is still not reached is named
+ * in chm.h and counted in n_unreachable.
  */
 
 #ifndef KOFENG_CHM_PARSE_H
