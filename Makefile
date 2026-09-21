@@ -1769,7 +1769,13 @@ fixtures: | $(TEST)
 #
 # It is not a test that could be made portable. A kernel module is a Linux
 # object and the false positive it guards against is a Linux one.
-UNIT_SKIP_WINDOWS := antarc_fan antarc_walk msf_xor ko_anomalies
+#
+# antarc_pev JOINS THE TWO ABOVE IT FOR THE SAME REASON, which is the ordinary
+# one: it is a test of libkofantarc, the LINUX collector. It includes
+# sys/wait.h and sys/uio.h and links aproc.c - none of which exist here - so it
+# is not a test that could be made portable, any more than the fanotify one
+# beside it is.
+UNIT_SKIP_WINDOWS := antarc_fan antarc_walk antarc_pev msf_xor ko_anomalies
 UNIT_SKIP_POSIX   := hostile_mem reg_event
 
 ifeq ($(NATIVE_OS),windows)
@@ -1913,6 +1919,30 @@ $(TEST)/unit_hostile_mem$(EXE): tests/unit/hostile_mem.c \
 	      tests/unit/hostile_mem.c libkofgrille/wdiff.c \
 	      libkofgrille/wproc.c libkofgrille/wcmdline.c \
 	      libkofgrille/wtext.c $(KOFEVT_SRC) $(LIB) -o $@ \
+	      $(LDFLAGS) -ladvapi32 -lpsapi
+
+#
+# THE THREAD CORRELATION, which needs the WALK and not just the collector.
+#
+# wwalk.c is the file under test here and it is not in libkofgrille.a - it
+# calls kof_pe_unmap, so it is compiled into whoever needs it, exactly as the
+# scanner does. That is why this is a rule rather than a line in the wildcard:
+# the same sources the scanner links, minus the scanner.
+#
+$(TEST)/unit_thread_region$(EXE): tests/unit/thread_region.c \
+                                  libkofgrille/wwalk.c libkofgrille/wdiff.c \
+                                  libkofgrille/wproc.c \
+                                  libkofgrille/wcmdline.c \
+                                  libkofgrille/wtext.c \
+                                  $(KOFPROC_SRC) $(KOFEVT_SRC) $(LIB) \
+                                  $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng \
+	      -Ilibkoforbit/kofevt -Ilibkoforbit/kofproc \
+	      -Ilibkoforbit/kofwalk \
+	      tests/unit/thread_region.c libkofgrille/wwalk.c \
+	      libkofgrille/wdiff.c libkofgrille/wproc.c \
+	      libkofgrille/wcmdline.c libkofgrille/wtext.c \
+	      $(KOFPROC_SRC) $(KOFEVT_SRC) $(LIB) -o $@ \
 	      $(LDFLAGS) -ladvapi32 -lpsapi
 
 #

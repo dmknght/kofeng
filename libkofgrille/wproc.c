@@ -212,11 +212,46 @@ struct dosmap {
 
 enum { PC_EMPTY = 0, PC_GONE = 1, PC_THERE = 2 };
 
+/*
+ * THE MACHINE'S THREAD TABLE, taken once - and the reason it is here rather
+ * than in the per-process session is a measurement.
+ *
+ * TH32CS_SNAPTHREAD has no per-process form: every snapshot enumerates EVERY
+ * thread on the machine and the caller filters by owning pid. Taking one per
+ * process therefore costs the whole machine once per process. Measured on this
+ * host, 2854 threads:
+ *
+ *     one snapshot                       23 ms
+ *     one hundred snapshots            2495 ms, 284604 entries walked
+ *
+ * That 2.5s was the entire cost of thread correlation in a sweep, and none of
+ * it was the per-thread query it looked like. It is exactly the mistake the
+ * dosmap above already records - a machine-wide answer worked out again for
+ * every process - made a second time, in the same file.
+ *
+ * START ADDRESSES ARE NOT CACHED HERE. The snapshot is machine-wide but the
+ * query is per thread and needs a handle, so it stays where the process is
+ * open: a sweep that refuses two thirds of the machine should not pay to ask
+ * about their threads.
+ */
+#define PCACHE_THREADS 4096u
+
+struct pcache_thread {
+	uint32_t pid;
+	uint32_t tid;
+};
+
 struct kofw_pcache {
 	struct dosmap dos;
 	uint64_t      key[PCACHE_SLOTS];
 	uint8_t       state[PCACHE_SLOTS];
 	uint32_t      used;
+
+	struct pcache_thread *thr;
+	uint32_t              n_thr;
+	int                   thr_done;   /* the snapshot was taken, however
+					   * it went - so a machine that
+					   * refuses it is asked once */
 };
 
 struct kofw_pcache *kofw_pcache_open(void)
@@ -228,6 +263,8 @@ struct kofw_pcache *kofw_pcache_open(void)
 
 void kofw_pcache_close(struct kofw_pcache *c)
 {
+	if (c)
+		free(c->thr);
 	free(c);
 }
 
@@ -935,6 +972,149 @@ uint64_t kofw_pmem_module_size(struct kofw_pmem *m, uint64_t base)
 				  (DWORD)sizeof mi))
 		return 0;
 	return (uint64_t)mi.SizeOfImage;
+}
+
+/*
+ * ---- the threads -----------------------------------------------------------
+ *
+ * WHERE A THREAD WAS TOLD TO BEGIN, which Win32 does not offer.
+ *
+ * There is no documented call for it. GetThreadTimes, GetThreadContext and the
+ * rest describe a thread that is already running; the CREATION address - what
+ * CreateThread or CreateRemoteThread was handed - is only reachable through
+ * NtQueryInformationThread(ThreadQuerySetWin32StartAddress).
+ *
+ * THAT IS THE SAME BET wcmdline.c TAKES, and it is taken here for the same
+ * reason and with the same guard: resolved by name at run time, and every
+ * caller behaves when it is absent. The information class number has been
+ * stable since NT 4 and the field it returns is one pointer; a Windows that
+ * moved it would make this return zero, which every consumer already handles
+ * because a protected process returns zero too.
+ *
+ * THREAD_QUERY_INFORMATION, AND THE LIMITED RIGHT WAS TRIED FIRST AND DOES NOT
+ * WORK. THREAD_QUERY_LIMITED_INFORMATION is granted far more widely and would
+ * have been the better right to need - but this class refuses it. Measured
+ * against the caller's OWN threads, which nothing should be able to deny:
+ *
+ *     THREAD_QUERY_LIMITED_INFORMATION   status 0xc0000022, 1191 of 1191
+ *     THREAD_QUERY_INFORMATION           status 0, eight bytes, an address
+ *
+ * So the full right it is, and a thread this process may not query comes back
+ * with start == 0 - which is the same answer a protected process gives and is
+ * already what every consumer handles.
+ */
+typedef LONG (WINAPI *pfn_nt_qit)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+
+#define KOFW_THREAD_START_CLASS 9u   /* ThreadQuerySetWin32StartAddress */
+
+static pfn_nt_qit resolve_nt_qit(void)
+{
+	static pfn_nt_qit fn;
+	static int tried;
+
+	if (!tried) {
+		HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+
+		tried = 1;
+		if (nt)
+			fn = (pfn_nt_qit)(void *)GetProcAddress(
+				nt, "NtQueryInformationThread");
+	}
+	return fn;
+}
+
+static uint64_t thread_start(pfn_nt_qit qit, uint32_t tid)
+{
+	HANDLE h;
+	void *addr = NULL;
+	ULONG got = 0;
+
+	if (!qit)
+		return 0;
+	h = OpenThread(THREAD_QUERY_INFORMATION, FALSE, (DWORD)tid);
+	if (!h)
+		return 0;
+	if (qit(h, KOFW_THREAD_START_CLASS, &addr, (ULONG)sizeof addr,
+		&got) < 0 || got != sizeof addr)
+		addr = NULL;
+	CloseHandle(h);
+	return (uint64_t)(uintptr_t)addr;
+}
+
+/*
+ * Take the machine's thread table once. Returns non-zero when there is a table
+ * to read, whether or not this call is the one that built it.
+ *
+ * A FAILED SNAPSHOT IS REMEMBERED AS A FAILURE. Without thr_done a machine
+ * that refuses the snapshot would be asked again for every process, which is
+ * the 2.5 second cost this cache exists to remove, paid for nothing.
+ */
+static int pcache_threads(struct kofw_pcache *c)
+{
+	THREADENTRY32 te;
+	HANDLE snap;
+
+	if (!c)
+		return 0;
+	if (c->thr_done)
+		return c->thr != NULL;
+	c->thr_done = 1;
+
+	snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+	if (snap == INVALID_HANDLE_VALUE)
+		return 0;
+	c->thr = malloc((size_t)PCACHE_THREADS * sizeof *c->thr);
+	if (!c->thr) {
+		CloseHandle(snap);
+		return 0;
+	}
+	memset(&te, 0, sizeof te);
+	te.dwSize = (DWORD)sizeof te;
+	if (Thread32First(snap, &te)) {
+		do {
+			if (c->n_thr == PCACHE_THREADS)
+				break;
+			c->thr[c->n_thr].pid = (uint32_t)te.th32OwnerProcessID;
+			c->thr[c->n_thr].tid = (uint32_t)te.th32ThreadID;
+			c->n_thr++;
+		} while (Thread32Next(snap, &te));
+	}
+	CloseHandle(snap);
+	return 1;
+}
+
+uint32_t kofw_pmem_threads(struct kofw_pmem *m, struct kofw_thread *out,
+			   uint32_t max)
+{
+	pfn_nt_qit qit;
+	uint32_t n = 0, i;
+
+	if (!m || !out || !max)
+		return 0;
+	if (!(m->want & KOFW_MW_THREADS))
+		return 0;
+	/*
+	 * WITHOUT A CACHE THIS ANSWERS NOTHING, and that is deliberate.
+	 *
+	 * The snapshot is machine-wide - see pcache_threads - so a session
+	 * with nowhere to put it would take one per process and spend the
+	 * whole machine on every one. A caller that wants threads passes a
+	 * kofw_pcache; one that does not gets no threads rather than a walk
+	 * that is quietly two seconds slower for every process it opens.
+	 */
+	if (!pcache_threads(m->cache))
+		return 0;
+
+	qit = resolve_nt_qit();
+	for (i = 0; i < m->cache->n_thr && n < max; i++) {
+		if (m->cache->thr[i].pid != m->proc.pid)
+			continue;
+		out[n].tid = m->cache->thr[i].tid;
+		out[n].flags = 0;
+		out[n].start = thread_start(qit, m->cache->thr[i].tid);
+		n++;
+	}
+	return n;
 }
 
 /*

@@ -153,6 +153,32 @@ struct wwalk {
 
 	struct kofw_pmem  *mem;
 	struct kofw_region rg;
+
+	/*
+	 * THE PROCESS'S THREAD START ADDRESSES, fetched once when it is opened
+	 * and looked up per region.
+	 *
+	 * What it buys is the one thing a point-in-time memory walk could not
+	 * say. The walk already finds executable memory no file backs; this
+	 * says whether anything STARTED there - which is the difference
+	 * between an injection and a decoded buffer nobody ever jumped to.
+	 *
+	 * CORRELATED AGAINST THE REGION TABLE AND NOT THE MODULE LIST, and
+	 * that is not arbitrary. Measured while building this: a process whose
+	 * EnumProcessModules came back empty made its one ordinary thread look
+	 * like it began outside every module, when the region walk placed the
+	 * same address inside a perfectly normal image. The loader's list can
+	 * be empty, and an attacker can unlink from it on purpose - that is
+	 * what KOFW_RGF_UNLINKED exists for. The region table is what the
+	 * memory manager says, and it is what this walk is already holding.
+	 *
+	 * A FIXED ARRAY, because this is a filter and not an inventory. A
+	 * process past the cap has more threads than any injection needs and
+	 * the ones past it are simply not correlated - which loses a signal
+	 * and never invents one.
+	 */
+	struct kofw_thread thr[KOFW_MAX_THREADS];
+	uint32_t           n_thr;
 	int                have_rg;    /* w->rg holds a run not yet folded in */
 	int                stage;
 
@@ -394,12 +420,21 @@ static int open_mem_for(struct wwalk *w, const struct kofw_proc *p)
 			  (w->o.compare_modules ? KOFW_MW_DIRTY : 0u);
 	po.max_region = W_MAX_SPAN;
 	po.cache      = w->cache;
+	/*
+	 * THREADS ON A SCAN, NOT ON A MAP. A reader opening one process in the
+	 * viewer wants what is there; a sweep wants to know which of it is
+	 * RUNNING, and that is the whole reason this walk reads memory at all.
+	 * The cost is one OpenThread and one query per thread of the process.
+	 */
+	if (w->o.intent != KOF_WALK_MAP)
+		po.want |= KOFW_MW_THREADS;
 
 	w->mem = kofw_pmem_open(p->pid, p->create_time, &po, &err);
 	if (!w->mem) {
 		w->refused++;
 		return 0;
 	}
+	w->n_thr = kofw_pmem_threads(w->mem, w->thr, KOFW_MAX_THREADS);
 	w->stage = W_STAGE_SPANS;
 	w->have_rg = 0;
 	w->have_span = 0;
@@ -523,10 +558,41 @@ static int w_next_proc(void *self, struct kof_proc_build *out)
  * page somebody wrote to. Each of those is a fact about HOW the memory got
  * that way, which outranks what it is nominally for.
  */
+/*
+ * DID ANY THREAD START INSIDE THIS REGION - a linear walk of a table that is
+ * tens of entries long, per region.
+ *
+ * Linear because the table is small and because sorting it would buy a binary
+ * search over something a memcmp-free loop already crosses in nanoseconds. The
+ * module anchor next door is a binary search because it runs against thousands
+ * of modules; this runs against a process's threads.
+ *
+ * A ZERO START IS NOT AN ADDRESS. A refused query - a protected process, a
+ * thread that exited between the snapshot and the open - reports zero, and
+ * correlating on it would put the flag on whatever region happens to begin at
+ * the bottom of the address space.
+ */
+static void mark_thread_start(struct wwalk *w, struct kofw_region *r)
+{
+	uint32_t i;
+
+	for (i = 0; i < w->n_thr; i++) {
+		uint64_t s = w->thr[i].start;
+
+		if (!s)
+			continue;
+		if (s >= r->base && s < r->base + r->size) {
+			r->flags |= KOFW_RGF_THREAD;
+			return;
+		}
+	}
+}
+
 static const char *w_label(uint8_t use, uint32_t flags)
 {
 	if (flags & KOFW_RGF_PE)
-		return "MEM_MANUALMAP";
+		return (flags & KOFW_RGF_THREAD) ? "MEM_MANUALMAP_THREAD"
+						 : "MEM_MANUALMAP";
 	/*
 	 * BEFORE DATA_EXEC AND DIRTY, because it says something neither of them
 	 * can: this image is one the LOADER does not list. A hidden module is
@@ -536,9 +602,11 @@ static const char *w_label(uint8_t use, uint32_t flags)
 	 * pretending to be.
 	 */
 	if (flags & KOFW_RGF_UNLINKED)
-		return "MEM_UNLINKED";
+		return (flags & KOFW_RGF_THREAD) ? "MEM_UNLINKED_THREAD"
+						 : "MEM_UNLINKED";
 	if (flags & KOFW_RGF_DATA_EXEC)
-		return "MEM_DATAEXEC";
+		return (flags & KOFW_RGF_THREAD) ? "MEM_DATAEXEC_THREAD"
+						 : "MEM_DATAEXEC";
 	/*
 	 * An executable image page that has stopped being shared is one
 	 * somebody WROTE - an inline hook, a blown-away AMSI stub, a hollowed
@@ -551,7 +619,9 @@ static const char *w_label(uint8_t use, uint32_t flags)
 	switch (use) {
 	case KOFW_USE_HEAP:  return "MEM_HEAP";
 	case KOFW_USE_STACK: return "MEM_STACK";
-	case KOFW_USE_CODE:  return "MEM_CODE";
+	case KOFW_USE_CODE:
+		return (flags & KOFW_RGF_THREAD) ? "MEM_CODE_THREAD"
+						 : "MEM_CODE";
 	case KOFW_USE_DATA:  return "MEM_DATA";
 	case KOFW_USE_IMAGE: return "MEM_IMAGE";
 	default:             return "MEM_ANON";
@@ -956,6 +1026,7 @@ static int w_next_item(void *self, struct kof_walk_item *out)
 			break;
 		}
 		w->regions++;
+		mark_thread_start(w, &w->rg);
 
 		/*
 		 * WHICH MODULES HAVE BEEN WRITTEN TO, NOTED NOW BECAUSE THE
