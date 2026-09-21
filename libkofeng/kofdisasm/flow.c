@@ -1,0 +1,1043 @@
+/* See flow.h. */
+
+#include "flow.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "bddisasm.h"
+
+#define NGPR 16u
+
+/*
+ * WHAT A SYSCALL NUMBER MEANS, per ABI.
+ *
+ * Two tables and not one: i386 and x86-64 Linux do not share a numbering, and
+ * a table that pretended they did would report `read` for `write` on half the
+ * samples. Only the numbers a stager uses are here - this is a capability
+ * reader, not a strace.
+ */
+struct sysrow { uint16_t nr; uint8_t cap; };
+
+/* Linux x86-64. */
+static const struct sysrow sys64[] = {
+	{   0, KOF_CAP_READ },
+	{   1, KOF_CAP_WRITE },
+	{   2, KOF_CAP_FILE_OPEN },
+	{   9, KOF_CAP_ALLOC },        /* mmap - prot decides, see prot_cap */
+	{  10, KOF_CAP_ALLOC },        /* mprotect - same */
+	{  35, KOF_CAP_SLEEP },
+	{  41, KOF_CAP_NET_OPEN },
+	{  42, KOF_CAP_NET_CONNECT },
+	{  43, KOF_CAP_NET_ACCEPT },
+	{  44, KOF_CAP_WRITE },        /* sendto */
+	{  45, KOF_CAP_READ },         /* recvfrom */
+	{  56, KOF_CAP_SPAWN },        /* clone */
+	{  57, KOF_CAP_SPAWN },        /* fork */
+	{  58, KOF_CAP_SPAWN },        /* vfork */
+	{  59, KOF_CAP_EXEC_IMAGE },
+	{ 257, KOF_CAP_FILE_OPEN },    /* openat */
+	{ 319, KOF_CAP_MEMFD },
+	{ 322, KOF_CAP_EXEC_IMAGE }    /* execveat */
+};
+
+/* Linux i386. */
+static const struct sysrow sys32[] = {
+	{   2, KOF_CAP_SPAWN },        /* fork */
+	{   3, KOF_CAP_READ },
+	{   4, KOF_CAP_WRITE },
+	{   5, KOF_CAP_FILE_OPEN },
+	{  11, KOF_CAP_EXEC_IMAGE },
+	{  90, KOF_CAP_ALLOC },        /* old_mmap */
+	{ 102, KOF_CAP_NONE },         /* socketcall - the sub-call is in ebx */
+	{ 120, KOF_CAP_SPAWN },        /* clone */
+	{ 125, KOF_CAP_ALLOC },        /* mprotect */
+	{ 162, KOF_CAP_SLEEP },
+	{ 192, KOF_CAP_ALLOC },        /* mmap2 */
+	{ 295, KOF_CAP_FILE_OPEN },    /* openat */
+	{ 356, KOF_CAP_MEMFD },
+	{ 358, KOF_CAP_EXEC_IMAGE }    /* execveat */
+};
+
+/* i386 multiplexes every socket operation through socketcall, with the
+ * operation in ebx. Left as its own table rather than folded into the one
+ * above, because it is a different axis and merging them would need a second
+ * key nothing else uses. */
+static const struct sysrow sockcall[] = {
+	{ 1, KOF_CAP_NET_OPEN },       /* SYS_SOCKET */
+	{ 3, KOF_CAP_NET_CONNECT },
+	{ 5, KOF_CAP_NET_ACCEPT },
+	{ 9, KOF_CAP_WRITE },          /* SYS_SEND */
+	{ 10, KOF_CAP_READ },          /* SYS_RECV */
+	{ 11, KOF_CAP_WRITE },         /* SYS_SENDTO */
+	{ 12, KOF_CAP_READ }           /* SYS_RECVFROM */
+};
+
+static uint8_t look(const struct sysrow *t, uint32_t n, uint32_t nr)
+{
+	uint32_t i;
+
+	for (i = 0; i < n; i++)
+		if (t[i].nr == nr)
+			return t[i].cap;
+	return KOF_CAP_NONE;
+}
+
+/*
+ * WHAT AN IMPORTED NAME IS, in the same vocabulary.
+ *
+ * Longest-sensible match and no prefix guessing: "recv" and "recvfrom" are
+ * both here rather than matched by a prefix, because "recvmmsg" and "recvmsg"
+ * would fall out of a prefix test and so would anything a future libc adds.
+ *
+ * WINDOWS NAMES SIT BESIDE POSIX ONES on purpose. VirtualAlloc and mmap are
+ * the same fact about a program, and a rule written over these words is the
+ * one thing that can be shared between the two platforms - see the note on
+ * enum kof_flow_cap.
+ */
+static const struct { const char *name; uint8_t cap; } names[] = {
+	/* POSIX */
+	{ "mmap",           KOF_CAP_ALLOC },
+	{ "mmap64",         KOF_CAP_ALLOC },
+	{ "mprotect",       KOF_CAP_ALLOC },
+	{ "socket",         KOF_CAP_NET_OPEN },
+	{ "socketpair",     KOF_CAP_NET_OPEN },
+	{ "connect",        KOF_CAP_NET_CONNECT },
+	{ "accept",         KOF_CAP_NET_ACCEPT },
+	{ "accept4",        KOF_CAP_NET_ACCEPT },
+	{ "bind",           KOF_CAP_NET_OPEN },
+	{ "listen",         KOF_CAP_NET_OPEN },
+	{ "recv",           KOF_CAP_READ },
+	{ "recvfrom",       KOF_CAP_READ },
+	{ "recvmsg",        KOF_CAP_READ },
+	{ "read",           KOF_CAP_READ },
+	{ "send",           KOF_CAP_WRITE },
+	{ "sendto",         KOF_CAP_WRITE },
+	{ "sendmsg",        KOF_CAP_WRITE },
+	{ "write",          KOF_CAP_WRITE },
+	{ "open",           KOF_CAP_FILE_OPEN },
+	{ "open64",         KOF_CAP_FILE_OPEN },
+	{ "openat",         KOF_CAP_FILE_OPEN },
+	{ "fopen",          KOF_CAP_FILE_OPEN },
+	{ "memfd_create",   KOF_CAP_MEMFD },
+	{ "execve",         KOF_CAP_EXEC_IMAGE },
+	{ "execv",          KOF_CAP_EXEC_IMAGE },
+	{ "execl",          KOF_CAP_EXEC_IMAGE },
+	{ "execlp",         KOF_CAP_EXEC_IMAGE },
+	{ "execvp",         KOF_CAP_EXEC_IMAGE },
+	{ "system",         KOF_CAP_EXEC_IMAGE },
+	{ "popen",          KOF_CAP_EXEC_IMAGE },
+	{ "fork",           KOF_CAP_SPAWN },
+	{ "vfork",          KOF_CAP_SPAWN },
+	{ "clone",          KOF_CAP_SPAWN },
+	{ "daemon",         KOF_CAP_SPAWN },
+	{ "sleep",          KOF_CAP_SLEEP },
+	{ "usleep",         KOF_CAP_SLEEP },
+	{ "nanosleep",      KOF_CAP_SLEEP },
+	{ "ptrace",         KOF_CAP_PTRACE },
+	/* Windows, for the same words */
+	{ "VirtualAlloc",   KOF_CAP_ALLOC },
+	{ "VirtualAllocEx", KOF_CAP_ALLOC },
+	{ "VirtualProtect", KOF_CAP_ALLOC },
+	{ "WSASocketA",     KOF_CAP_NET_OPEN },
+	{ "WSASocketW",     KOF_CAP_NET_OPEN },
+	{ "InternetOpenA",  KOF_CAP_NET_OPEN },
+	{ "InternetOpenW",  KOF_CAP_NET_OPEN },
+	{ "WSAConnect",     KOF_CAP_NET_CONNECT },
+	{ "InternetConnectA", KOF_CAP_NET_CONNECT },
+	{ "InternetConnectW", KOF_CAP_NET_CONNECT },
+	{ "CreateFileA",    KOF_CAP_FILE_OPEN },
+	{ "CreateFileW",    KOF_CAP_FILE_OPEN },
+	{ "WriteFile",      KOF_CAP_WRITE },
+	{ "ReadFile",       KOF_CAP_READ },
+	{ "CreateProcessA", KOF_CAP_EXEC_IMAGE },
+	{ "CreateProcessW", KOF_CAP_EXEC_IMAGE },
+	{ "WinExec",        KOF_CAP_EXEC_IMAGE },
+	{ "ShellExecuteA",  KOF_CAP_EXEC_IMAGE },
+	{ "ShellExecuteW",  KOF_CAP_EXEC_IMAGE },
+	{ "CreateThread",   KOF_CAP_SPAWN },
+	{ "Sleep",          KOF_CAP_SLEEP }
+};
+
+uint8_t kof_flow_cap_of_name(const char *sym)
+{
+	size_t i;
+
+	if (!sym || !*sym)
+		return KOF_CAP_NONE;
+	/* An ELF import may carry a version suffix - "open64@@GLIBC_2.2.5" is
+	 * the same function as "open64", and the caller should not have to
+	 * know that this file cares. */
+	for (i = 0; i < sizeof names / sizeof names[0]; i++) {
+		const char *a = names[i].name, *b = sym;
+
+		while (*a && *a == *b) { a++; b++; }
+		if (!*a && (!*b || *b == '@'))
+			return names[i].cap;
+	}
+	return KOF_CAP_NONE;
+}
+
+const char *kof_flow_cap_name(uint8_t cap)
+{
+	switch (cap) {
+	case KOF_CAP_ALLOC:        return "alloc";
+	case KOF_CAP_ALLOC_EXEC:   return "alloc-exec";
+	case KOF_CAP_NET_OPEN:     return "net-open";
+	case KOF_CAP_NET_CONNECT:  return "net-connect";
+	case KOF_CAP_NET_ACCEPT:   return "net-accept";
+	case KOF_CAP_READ:         return "read";
+	case KOF_CAP_WRITE:        return "write";
+	case KOF_CAP_FILE_OPEN:    return "file-open";
+	case KOF_CAP_MEMFD:        return "memfd";
+	case KOF_CAP_EXEC_IMAGE:   return "exec-image";
+	case KOF_CAP_SPAWN:        return "spawn";
+	case KOF_CAP_SLEEP:        return "sleep";
+	case KOF_CAP_PTRACE:       return "ptrace";
+	default:                   return "?";
+	}
+}
+
+/*
+ * THE CONSTANT MAP. One value per GPR plus how much of it is known.
+ *
+ * `known` is a byte count and not a flag because of `mov al, 3`, which is what
+ * a hand-written stager uses to save two bytes: the low eight bits are exact
+ * and the rest is whatever was there. A syscall number under 256 is decided by
+ * those eight bits, so the value is usable - and the node says it was, through
+ * KOF_FLOWF_LOW8, rather than pretending the register was fully known.
+ */
+struct cmap {
+	uint64_t v[NGPR];
+	uint8_t  known[NGPR];   /* 0, 1, 2, 4 or 8 bytes */
+	/*
+	 * AND WHERE THE VALUE CAME FROM - the node that returned it, as index
+	 * plus one. A constant and a provenance are different facts about the
+	 * same register and both are wanted: the first resolves a selector,
+	 * the second builds the chain.
+	 */
+	uint16_t src[NGPR];
+};
+
+static uint32_t gpr_of(const ND_OPERAND *op)
+{
+	if (op->Type != ND_OP_REG || op->Info.Register.Type != ND_REG_GPR)
+		return NGPR;
+	return op->Info.Register.Reg < NGPR ? op->Info.Register.Reg : NGPR;
+}
+
+static void set_const(struct cmap *c, uint32_t r, uint64_t val, uint8_t size)
+{
+	if (r >= NGPR)
+		return;
+	/*
+	 * A CONSTANT IS NOT A PRODUCED POINTER, and forgetting to say so was a
+	 * measured bug rather than a hypothetical one: `mov eax, 5` after a
+	 * call left the register still claiming to hold that call's result, so
+	 * an ordinary `call rax` later read as "the thing fopen returned was
+	 * executed". Three /usr/bin binaries reported that edge and none of
+	 * them has it.
+	 */
+	c->src[r] = 0;
+	if (size >= 4) {
+		/* A 32-bit write zeroes the top half on x86-64, and a 64-bit
+		 * one replaces everything; either way the register is known. */
+		c->v[r] = val;
+		c->known[r] = 8;
+	} else {
+		/* Only the low part is known. Keep the value so a number under
+		 * 256 still resolves, and keep the width so the caller can see
+		 * how strong the claim is. */
+		c->v[r] = val & (size == 1 ? 0xffu : 0xffffu);
+		if (c->known[r] < size)
+			c->known[r] = size;
+	}
+}
+
+static void forget(struct cmap *c, uint32_t r)
+{
+	if (r < NGPR) {
+		c->v[r] = 0;
+		c->known[r] = 0;
+		c->src[r] = 0;
+	}
+}
+
+/*
+ * THE ARGUMENT REGISTERS, per ABI.
+ *
+ * Both lists are the calling convention and nothing subtler: a Linux syscall
+ * takes rdi, rsi, rdx, r10, r8, r9 and the SysV call takes rdi, rsi, rdx, rcx,
+ * r8, r9 - the two differ only in the fourth. i386 takes ebx, ecx, edx, esi,
+ * edi. Read only to ask WHICH EARLIER NODE produced one of them, never to work
+ * out what the argument means.
+ */
+static const uint8_t arg64[] = { 7u, 6u, 2u, 10u, 8u, 9u, 1u };
+static const uint8_t arg32[] = { 3u, 1u, 2u, 6u, 7u };
+
+static uint16_t arg_from(const struct cmap *c, unsigned bits)
+{
+	const uint8_t *a = bits == 32 ? arg32 : arg64;
+	size_t n = bits == 32 ? sizeof arg32 : sizeof arg64, i;
+
+	for (i = 0; i < n; i++)
+		if (c->src[a[i]])
+			return c->src[a[i]];
+	return 0;
+}
+
+/* The register a value has to be in to be read as a number, and whether it is
+ * usable at all. Zero-known means the sweep never saw it set. */
+static int const_of(const struct cmap *c, uint32_t r, uint64_t *out, int *low8)
+{
+	if (r >= NGPR || !c->known[r])
+		return 0;
+	*out = c->v[r];
+	*low8 = c->known[r] < 4;
+	return 1;
+}
+
+/*
+ * IS THIS INSTRUCTION NOTHING.
+ *
+ * The forms a compiler and a padder both emit. Not a junk-code detector - see
+ * the note in flow.h about what this does and does not defend against.
+ */
+static int is_nop(const INSTRUX *ix)
+{
+	if (ix->Instruction == ND_INS_NOP)
+		return 1;
+	/* xchg ax, ax and its longer spellings decode as XCHG with both
+	 * operands the same register. */
+	if (ix->Instruction == ND_INS_XCHG && ix->OperandsCount >= 2 &&
+	    ix->Operands[0].Type == ND_OP_REG &&
+	    ix->Operands[1].Type == ND_OP_REG &&
+	    ix->Operands[0].Info.Register.Reg ==
+	    ix->Operands[1].Info.Register.Reg)
+		return 1;
+	/* lea r, [r] - an address generation that changes nothing. */
+	if (ix->Instruction == ND_INS_LEA && ix->OperandsCount >= 2 &&
+	    ix->Operands[1].Type == ND_OP_MEM &&
+	    !ix->Operands[1].Info.Memory.HasIndex &&
+	    !ix->Operands[1].Info.Memory.HasDisp &&
+	    ix->Operands[1].Info.Memory.HasBase &&
+	    ix->Operands[1].Info.Memory.Base ==
+	    ix->Operands[0].Info.Register.Reg)
+		return 1;
+	return 0;
+}
+
+/*
+ * WHICH REGISTER HOLDS WHAT AT A SYSCALL.
+ *
+ * The selector and the one argument this cares about - the protection word,
+ * which is what separates "mapped something" from "mapped something it can
+ * run". Everything else is deliberately not read: a rule about WHERE it
+ * connects needs runtime data, and this file exists because the rule that
+ * matters does not.
+ */
+#define R_RAX 0u
+#define R_RCX 1u
+#define R_RDX 2u
+#define R_RBX 3u
+
+static uint8_t prot_cap(const struct cmap *c)
+{
+	uint64_t prot;
+	int low8;
+
+	if (!const_of(c, R_RDX, &prot, &low8))
+		return KOF_CAP_ALLOC;    /* unknown - claim the weaker thing */
+	return (prot & 4u) ? KOF_CAP_ALLOC_EXEC : KOF_CAP_ALLOC;
+}
+
+
+/* ---- the sweep ------------------------------------------------------------
+ *
+ * ONE PASS, and everything else is bookkeeping over what it saw.
+ *
+ * A linear sweep and not a recursive descent, for the reason xref.c gives: a
+ * recursive walk needs every entry point to be known, and the objects this is
+ * aimed at - a stripped blob, a payload carved out of a variable - have none.
+ * What a linear sweep costs is that data in code decodes as instructions; what
+ * it buys is that nothing has to be reachable to be seen.
+ */
+
+#define MAX_LOOP 4096u
+
+struct loopspan { uint64_t lo, hi; };
+
+struct kof_flow {
+	struct kof_flow_node node[KOF_FLOW_MAX_NODE];
+	uint32_t n_node;
+
+	/* Function heads, in the order met; sorted and deduplicated by
+	 * finish(). The code start of every added run is one, so a blob with
+	 * no calls in it is still one region rather than none. */
+	uint64_t head[KOF_FLOW_MAX_FUNC];
+	uint32_t n_head;
+
+	struct kof_flow_func func[KOF_FLOW_MAX_FUNC];
+	uint32_t n_func;
+
+	struct loopspan loop[MAX_LOOP];
+	uint32_t n_loop;
+
+	kof_flow_resolve_fn resolve;
+	void               *resolve_user;
+
+	uint32_t full;      /* a cap was reached - see kof_flow_full */
+	uint32_t finished;
+};
+
+void kof_flow_resolver(struct kof_flow *f, kof_flow_resolve_fn fn, void *user)
+{
+	if (f) {
+		f->resolve = fn;
+		f->resolve_user = user;
+	}
+}
+
+struct kof_flow *kof_flow_new(void)
+{
+	struct kof_flow *f = (struct kof_flow *)calloc(1, sizeof *f);
+
+	return f;
+}
+
+void kof_flow_free(struct kof_flow *f)
+{
+	free(f);
+}
+
+int kof_flow_full(const struct kof_flow *f)
+{
+	return f ? (int)f->full : 1;
+}
+
+static void add_head(struct kof_flow *f, uint64_t va)
+{
+	if (f->n_head < KOF_FLOW_MAX_FUNC)
+		f->head[f->n_head++] = va;
+	else
+		f->full = 1;
+}
+
+static void add_loop(struct kof_flow *f, uint64_t lo, uint64_t hi)
+{
+	if (f->n_loop < MAX_LOOP) {
+		f->loop[f->n_loop].lo = lo;
+		f->loop[f->n_loop].hi = hi;
+		f->n_loop++;
+	} else {
+		f->full = 1;
+	}
+}
+
+/*
+ * The direct branch target this instruction names, or 0 when it names none.
+ *
+ * Direct only. An indirect branch is the one thing a sweep cannot follow, and
+ * pretending otherwise is how a disassembler invents functions that are not
+ * there - see the note on what this file is not.
+ */
+static uint64_t branch_target(const INSTRUX *ix, uint64_t next_va)
+{
+	if (ix->OperandsCount < 1 || ix->Operands[0].Type != ND_OP_OFFS)
+		return 0;
+	return next_va + (uint64_t)(int64_t)ix->Operands[0].Info.RelativeOffset.Rel;
+}
+
+static int is_cond_jump(const INSTRUX *ix)
+{
+	return ix->Instruction >= ND_INS_Jcc && ix->Instruction <= ND_INS_Jcc;
+}
+
+/*
+ * WHERE CONTROL CAN ARRIVE FROM SOMEWHERE ELSE.
+ *
+ * A linear sweep walks addresses, not paths, so without this it carries what
+ * it knows across a boundary control never crosses. Measured in gdb: a call to
+ * ptrace, then a few instructions later an unconditional jmp out, and then a
+ * DIFFERENT block - entered from elsewhere - doing `call *%rax`. The sweep
+ * joined the two and reported that the value ptrace returned was executed.
+ * Nothing in that function does any such thing.
+ *
+ * So a pre-pass collects every direct branch target, and the sweep clears its
+ * map when it reaches one: a block that can be entered from elsewhere starts
+ * knowing nothing, which is the only honest state for it.
+ *
+ * A FIXED SET, AND COLLISIONS ONLY OVER-CLEAR. Open addressing over a fixed
+ * table, so a full or colliding table makes the sweep forget at an address
+ * that is not a target. That loses facts and cannot invent them, which is the
+ * direction every approximation in this file leans.
+ */
+#define TSET_N 8192u
+
+struct tset { uint64_t k[TSET_N]; };
+
+static void tset_put(struct tset *t, uint64_t va)
+{
+	uint32_t i, h = (uint32_t)((va * 0x9e3779b97f4a7c15ull) >> 49) %
+			TSET_N;
+
+	for (i = 0; i < 8u; i++) {
+		uint32_t at = (h + i) % TSET_N;
+
+		if (!t->k[at] || t->k[at] == va) {
+			t->k[at] = va;
+			return;
+		}
+	}
+}
+
+static int tset_has(const struct tset *t, uint64_t va)
+{
+	uint32_t i, h = (uint32_t)((va * 0x9e3779b97f4a7c15ull) >> 49) %
+			TSET_N;
+
+	for (i = 0; i < 8u; i++) {
+		uint32_t at = (h + i) % TSET_N;
+
+		if (t->k[at] == va)
+			return 1;
+		if (!t->k[at])
+			return 0;
+	}
+	return 0;
+}
+
+/* Decode only, and record where a direct branch can land. */
+static void find_targets(struct tset *t, const uint8_t *code, uint32_t code_n,
+			 uint64_t code_va, unsigned bits)
+{
+	uint32_t at = 0;
+
+	while (at < code_n) {
+		INSTRUX ix;
+		uint64_t va = code_va + at, tg;
+
+		if (!ND_SUCCESS(NdDecodeEx(&ix, code + at, code_n - at,
+					   bits == 32 ? ND_CODE_32 : ND_CODE_64,
+					   bits == 32 ? ND_DATA_32
+						      : ND_DATA_64))) {
+			at++;
+			continue;
+		}
+		if (ix.Instruction == ND_INS_JMPNR ||
+		    ix.Instruction == ND_INS_CALLNR || is_cond_jump(&ix)) {
+			tg = branch_target(&ix, va + ix.Length);
+			if (tg >= code_va && tg < code_va + code_n)
+				tset_put(t, tg);
+		}
+		at += ix.Length;
+	}
+}
+
+/*
+ * ONE SWEEP, shared by both entry points.
+ *
+ * `f` NULL is the simple form - no heads, no loops, one region - which is what
+ * kof_flow_scan wants and what a raw blob is.
+ */
+static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
+		      uint64_t code_va, unsigned bits,
+		      struct kof_flow_node *out, uint32_t cap)
+{
+	struct cmap c;
+	struct tset *t;
+	uint32_t at = 0, n = 0, step = 0;
+	int in_push_run = 0;
+
+	memset(&c, 0, sizeof c);
+	t = (struct tset *)calloc(1, sizeof *t);
+	if (t)
+		find_targets(t, code, code_n, code_va, bits);
+	/* Without it every fact still holds within a straight line; what is
+	 * lost is the clearing at a join, so the sweep is more credulous
+	 * rather than wrong in a new way. */
+
+	while (at < code_n && n < cap) {
+		INSTRUX ix;
+		uint32_t i, dst = NGPR;
+		uint64_t nr, va = code_va + at, next;
+		int low8 = 0, is_push;
+
+		if (!ND_SUCCESS(NdDecodeEx(&ix, code + at, code_n - at,
+					   bits == 32 ? ND_CODE_32 : ND_CODE_64,
+					   bits == 32 ? ND_DATA_32
+						      : ND_DATA_64))) {
+			/*
+			 * ONE BYTE ON AND KEEP GOING. A linear sweep meets
+			 * data in code constantly, and stopping at the first
+			 * undecodable byte would end the sweep in the literal
+			 * pool every real binary has.
+			 */
+			at++;
+			in_push_run = 0;
+			continue;
+		}
+		next = va + ix.Length;
+
+		/* A block something else can jump into knows nothing. */
+		if (t && tset_has(t, va))
+			memset(&c, 0, sizeof c);
+
+		/* The normalised step count - see the note in flow.h. */
+		is_push = ix.Instruction == ND_INS_PUSH;
+		if (is_nop(&ix)) {
+			/* no step */
+		} else if (is_push) {
+			if (!in_push_run)
+				step++;
+		} else {
+			step++;
+		}
+		in_push_run = is_push;
+
+		/*
+		 * STRUCTURE, when a caller asked for it. A direct call names a
+		 * function; a backward direct branch spans a loop. Both are
+		 * recorded and neither is followed - this is still one pass.
+		 */
+		if (f) {
+			uint64_t tgt = 0;
+
+			if (ix.Instruction == ND_INS_CALLNR) {
+				tgt = branch_target(&ix, next);
+				if (tgt >= code_va && tgt < code_va + code_n)
+					add_head(f, tgt);
+				/*
+				 * AND IT MAY BE AN IMPORT. Asked of the
+				 * caller, which is the only side that can
+				 * answer - see kof_flow_resolver. The node is
+				 * placed at the CALL SITE and not at the stub:
+				 * what matters is where in the program the
+				 * thing is asked for.
+				 */
+				if (f->resolve && n < cap) {
+					uint8_t k = f->resolve(tgt,
+							f->resolve_user);
+
+					/*
+					 * AND WHETHER THE MAPPING CAN BE
+					 * RUN, which the name alone does not
+					 * say: mprotect and mmap are the same
+					 * import whatever they are asked for,
+					 * and PROT_EXEC is the whole
+					 * difference between a JIT and a
+					 * stager.
+					 *
+					 * `prot` is the THIRD argument of
+					 * both, which is rdx under SysV - the
+					 * same register the syscall ABI puts
+					 * it in, so one reader serves both.
+					 *
+					 * SIXTY-FOUR BIT ONLY. i386 passes
+					 * arguments on the stack, and reading
+					 * them needs the slot model this
+					 * sweep does not have; there the
+					 * weaker answer stands.
+					 */
+					if (k == KOF_CAP_ALLOC && bits != 32)
+						k = prot_cap(&c);
+					if (k != KOF_CAP_NONE) {
+						memset(&out[n], 0,
+						       sizeof out[n]);
+						out[n].va   = va;
+						out[n].step = step;
+						out[n].sel  = 0;
+						out[n].cap  = k;
+						out[n].from = arg_from(&c,
+								       bits);
+						n++;
+						/* The call returns in rax on
+						 * both ABIs, and that is the
+						 * pointer the chain follows. */
+						forget(&c, R_RAX);
+						c.src[R_RAX] = (uint16_t)n;
+					}
+				}
+			} else if (ix.Instruction == ND_INS_JMPNR ||
+				   is_cond_jump(&ix)) {
+				tgt = branch_target(&ix, next);
+				if (tgt >= code_va && tgt < va)
+					add_loop(f, tgt, va);
+			}
+		}
+
+		/*
+		 * THE THREE FORMS THAT PUT A NUMBER IN A REGISTER, and nothing
+		 * else. This is the whole of the normalisation: `mov eax, 42`,
+		 * `push 42 ; pop rax` and `xor eax, eax` are one fact, and
+		 * which of them a variant used is not a fact about the malware.
+		 */
+		if (ix.Instruction == ND_INS_MOV && ix.OperandsCount >= 2 &&
+		    ix.Operands[1].Type == ND_OP_IMM) {
+			dst = gpr_of(&ix.Operands[0]);
+			set_const(&c, dst, ix.Operands[1].Info.Immediate.Imm,
+				  (uint8_t)(ix.Operands[0].Size > 8u
+					    ? 8u : ix.Operands[0].Size));
+			at += ix.Length;
+			continue;
+		}
+		if ((ix.Instruction == ND_INS_XOR ||
+		     ix.Instruction == ND_INS_SUB) &&
+		    ix.OperandsCount >= 2 &&
+		    ix.Operands[0].Type == ND_OP_REG &&
+		    ix.Operands[1].Type == ND_OP_REG &&
+		    ix.Operands[0].Info.Register.Reg ==
+		    ix.Operands[1].Info.Register.Reg) {
+			dst = gpr_of(&ix.Operands[0]);
+			set_const(&c, dst, 0, 8);
+			at += ix.Length;
+			continue;
+		}
+		if (ix.Instruction == ND_INS_PUSH && ix.OperandsCount >= 1 &&
+		    ix.Operands[0].Type == ND_OP_IMM) {
+			/*
+			 * REMEMBERED ON A ONE SLOT STACK, which is all
+			 * `push imm ; pop reg` needs. A deeper one would be a
+			 * stack model, and a stack model without basic blocks
+			 * is a model that is wrong at the first branch.
+			 */
+			c.v[NGPR - 1] = ix.Operands[0].Info.Immediate.Imm;
+			c.known[NGPR - 1] = 8;
+			at += ix.Length;
+			continue;
+		}
+		if (ix.Instruction == ND_INS_POP && ix.OperandsCount >= 1) {
+			dst = gpr_of(&ix.Operands[0]);
+			if (c.known[NGPR - 1])
+				set_const(&c, dst, c.v[NGPR - 1], 8);
+			else
+				forget(&c, dst);
+			c.known[NGPR - 1] = 0;
+			at += ix.Length;
+			continue;
+		}
+
+		/*
+		 * THE SYSCALL ITSELF. `syscall` on x86-64, `int 0x80` on i386,
+		 * and sysenter is deliberately absent - no sample in this tree
+		 * uses it and a row nothing exercises is a row nothing checks.
+		 */
+		if (ix.Instruction == ND_INS_SYSCALL ||
+		    (ix.Instruction == ND_INS_INT && ix.OperandsCount >= 1 &&
+		     ix.Operands[0].Type == ND_OP_IMM &&
+		     ix.Operands[0].Info.Immediate.Imm == 0x80)) {
+			uint8_t k = KOF_CAP_NONE;
+			uint16_t sel = 0;
+
+			if (const_of(&c, R_RAX, &nr, &low8)) {
+				sel = (uint16_t)nr;
+				if (bits == 32) {
+					k = look(sys32, sizeof sys32 /
+						 sizeof sys32[0],
+						 (uint32_t)nr);
+					if (nr == 102) {
+						uint64_t sub;
+						int l2;
+
+						if (const_of(&c, R_RBX, &sub,
+							     &l2))
+							k = look(sockcall,
+								 sizeof sockcall
+								 / sizeof
+								 sockcall[0],
+								 (uint32_t)sub);
+					}
+					if (nr == 125 || nr == 192 || nr == 90)
+						k = prot_cap(&c);
+				} else {
+					k = look(sys64, sizeof sys64 /
+						 sizeof sys64[0],
+						 (uint32_t)nr);
+					if (nr == 9 || nr == 10)
+						k = prot_cap(&c);
+				}
+			}
+			if (k != KOF_CAP_NONE) {
+				memset(&out[n], 0, sizeof out[n]);
+				out[n].va    = va;
+				out[n].step  = step;
+				out[n].sel   = sel;
+				out[n].cap   = k;
+				out[n].from  = arg_from(&c, bits);
+				out[n].flags = low8 ? KOF_FLOWF_LOW8 : 0;
+				n++;
+			}
+			/*
+			 * THE RETURN VALUE REPLACES THE SELECTOR, and every
+			 * caller-clobbered register is gone. Forgetting is the
+			 * conservative direction - a remembered stale number
+			 * would invent a second syscall that never happens.
+			 *
+			 * But the register is not empty: it now holds what this
+			 * node PRODUCED, and that is what the chain follows.
+			 */
+			forget(&c, R_RAX);
+			forget(&c, R_RCX);
+			if (k != KOF_CAP_NONE)
+				c.src[R_RAX] = (uint16_t)n;
+			at += ix.Length;
+			continue;
+		}
+
+		/*
+		 * A RETURN ENDS WHAT IS KNOWN, and forgetting this was a
+		 * measured false edge rather than a theoretical one.
+		 *
+		 * The sweep is linear over a whole section, so without this
+		 * the map carries across function boundaries: gdb calls
+		 * ptrace, rax is recorded as holding its result, and an
+		 * indirect call in some LATER function - a different function,
+		 * hundreds of instructions on - closed an edge that says the
+		 * value ptrace returned was executed. It was not; the two
+		 * instructions have nothing to do with each other.
+		 *
+		 * A `ret` is where a body ends in every layout this can meet,
+		 * and clearing there bounds every fact to one body without
+		 * needing the two passes a real function partition would take.
+		 * Padding between bodies decodes as whatever it decodes as,
+		 * and cannot resurrect what has been cleared.
+		 */
+		/*
+		 * AND THE EDGE ITSELF: an indirect branch through a register
+		 * that holds what an earlier node produced. See
+		 * KOF_FLOWF_EXECUTED for why this one fact is worth the whole
+		 * file.
+		 */
+		if (ix.Instruction == ND_INS_CALLNI ||
+		    ix.Instruction == ND_INS_JMPNI) {
+			for (i = 0; i < ix.OperandsCount; i++) {
+				uint32_t r = gpr_of(&ix.Operands[i]);
+				uint16_t sr;
+
+				if (r >= NGPR || !ix.Operands[i].Access.Read)
+					continue;
+				sr = c.src[r];
+				if (sr && sr <= n)
+					out[sr - 1u].flags |=
+						KOF_FLOWF_EXECUTED;
+			}
+		}
+
+		/*
+		 * AND ONLY THEN IS THE MAP CLEARED. The edge above has to be
+		 * read BEFORE this, because the instruction that closes it -
+		 * `jmp r13` - is itself one of the transfers that ends the
+		 * block. Clearing first cost the one edge this file exists to
+		 * find, on its own test vector.
+		 */
+		if (ix.Instruction == ND_INS_RETN ||
+		    ix.Instruction == ND_INS_RETF ||
+		    ix.Instruction == ND_INS_JMPNR ||
+		    ix.Instruction == ND_INS_JMPNI) {
+			/* Control does not fall through any of these, so what
+			 * follows in ADDRESS order is not what follows in
+			 * execution order. */
+			memset(&c, 0, sizeof c);
+			at += ix.Length;
+			continue;
+		}
+
+		/*
+		 * A REGISTER TO REGISTER MOVE CARRIES THE PROVENANCE, because
+		 * that is how a returned pointer reaches the register a call
+		 * is made through: `mov r13, rax` and four instructions later
+		 * `call r13`.
+		 */
+		if (ix.Instruction == ND_INS_MOV && ix.OperandsCount >= 2 &&
+		    ix.Operands[0].Type == ND_OP_REG &&
+		    ix.Operands[1].Type == ND_OP_REG) {
+			uint32_t d = gpr_of(&ix.Operands[0]);
+			uint32_t sr = gpr_of(&ix.Operands[1]);
+
+			if (d < NGPR && sr < NGPR) {
+				uint16_t keep = c.src[sr];
+
+				forget(&c, d);
+				c.src[d] = keep;
+				at += ix.Length;
+				continue;
+			}
+		}
+
+		/* Anything else that writes a GPR ends what was known of it. */
+		for (i = 0; i < ix.OperandsCount; i++)
+			if (ix.Operands[i].Access.Write)
+				forget(&c, gpr_of(&ix.Operands[i]));
+		at += ix.Length;
+	}
+	free(t);
+	if (n >= cap)
+		if (f)
+			f->full = 1;
+	return n;
+}
+
+uint32_t kof_flow_scan(const uint8_t *code, uint32_t code_n, uint64_t code_va,
+		       unsigned bits, struct kof_flow_node *out, uint32_t cap)
+{
+	if (!code || !out || !cap)
+		return 0;
+	if (cap > KOF_FLOW_MAX_NODE)
+		cap = KOF_FLOW_MAX_NODE;
+	return sweep(NULL, code, code_n, code_va, bits, out, cap);
+}
+
+void kof_flow_add(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
+		  uint64_t code_va, unsigned bits)
+{
+	if (!f || !code || !code_n || f->finished)
+		return;
+	if (code_n > KOF_FLOW_MAX_CODE) {
+		code_n = KOF_FLOW_MAX_CODE;
+		f->full = 1;
+	}
+	/* The run's own start is a head: a blob nothing calls into is still one
+	 * region, which is what raw shellcode is. */
+	add_head(f, code_va);
+	f->n_node += sweep(f, code, code_n, code_va, bits,
+			   f->node + f->n_node,
+			   KOF_FLOW_MAX_NODE - f->n_node);
+}
+
+static int cmp_u64(const void *a, const void *b)
+{
+	uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+
+	return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+/*
+ * WHICH REGION A NODE IS IN: the nearest head at or before it.
+ *
+ * AN APPROXIMATION, AND NAMED AS ONE. A real partition needs the call graph
+ * and the end of each function; this takes the heads in address order and
+ * gives each node to the last one it passed. It is right whenever a compiler
+ * lays functions out contiguously, which is the ordinary case, and it merges
+ * two functions when the first one's body was never called directly - which
+ * loses separation rather than inventing it.
+ */
+static uint32_t func_of(const struct kof_flow *f, uint64_t va)
+{
+	uint32_t lo = 0, hi = f->n_func;
+
+	while (lo < hi) {
+		uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (f->func[mid].va <= va)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	return lo ? lo - 1u : 0u;
+}
+
+static int in_loop(const struct kof_flow *f, uint64_t va)
+{
+	uint32_t i;
+
+	for (i = 0; i < f->n_loop; i++)
+		if (va >= f->loop[i].lo && va <= f->loop[i].hi)
+			return 1;
+	return 0;
+}
+
+static int cmp_node(const void *a, const void *b)
+{
+	const struct kof_flow_node *x = a, *y = b;
+
+	if (x->func != y->func)
+		return x->func < y->func ? -1 : 1;
+	return x->va < y->va ? -1 : (x->va > y->va ? 1 : 0);
+}
+
+static void finish(struct kof_flow *f)
+{
+	uint32_t i, k;
+
+	if (f->finished)
+		return;
+	f->finished = 1;
+
+	/* Heads, sorted and deduplicated - a function called from ten places
+	 * was added ten times. */
+	qsort(f->head, f->n_head, sizeof f->head[0], cmp_u64);
+	for (i = 0; i < f->n_head; i++) {
+		if (i && f->head[i] == f->head[i - 1])
+			continue;
+		if (f->n_func >= KOF_FLOW_MAX_FUNC) {
+			f->full = 1;
+			break;
+		}
+		memset(&f->func[f->n_func], 0, sizeof f->func[0]);
+		f->func[f->n_func].va = f->head[i];
+		f->n_func++;
+	}
+
+	for (i = 0; i < f->n_node; i++) {
+		f->node[i].func = func_of(f, f->node[i].va);
+		if (in_loop(f, f->node[i].va))
+			f->node[i].flags |= KOF_FLOWF_LOOP;
+	}
+	/* Grouped so a region is a slice and not a search. */
+	qsort(f->node, f->n_node, sizeof f->node[0], cmp_node);
+	for (i = 0; i < f->n_node; i = k) {
+		uint32_t fi = f->node[i].func;
+
+		for (k = i; k < f->n_node && f->node[k].func == fi; k++)
+			f->func[fi].mask |= 1u << f->node[k].cap;
+		f->func[fi].first = i;
+		f->func[fi].n = k - i;
+	}
+}
+
+uint32_t kof_flow_n_func(struct kof_flow *f)
+{
+	if (!f)
+		return 0;
+	finish(f);
+	return f->n_func;
+}
+
+uint32_t kof_flow_n_node(struct kof_flow *f)
+{
+	if (!f)
+		return 0;
+	finish(f);
+	return f->n_node;
+}
+
+const struct kof_flow_func *kof_flow_func_at(struct kof_flow *f, uint32_t i)
+{
+	if (!f)
+		return NULL;
+	finish(f);
+	return i < f->n_func ? &f->func[i] : NULL;
+}
+
+const struct kof_flow_node *kof_flow_node_at(struct kof_flow *f, uint32_t i)
+{
+	if (!f)
+		return NULL;
+	finish(f);
+	return i < f->n_node ? &f->node[i] : NULL;
+}
+
+uint32_t kof_flow_concentration(struct kof_flow *f)
+{
+	uint32_t i, best = 0;
+
+	if (!f)
+		return 0;
+	finish(f);
+	if (!f->n_node)
+		return 0;
+	for (i = 0; i < f->n_func; i++)
+		if (f->func[i].n > best)
+			best = f->func[i].n;
+	return (uint32_t)((uint64_t)best * 1000u / f->n_node);
+}

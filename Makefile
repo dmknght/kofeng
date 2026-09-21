@@ -867,6 +867,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofparsers/events/amsi_parse.c \
            libkofeng/kofparsers/processes/proc_parse.c \
            libkofeng/kofdisasm/xref.c \
+           libkofeng/kofdisasm/flow.c \
            libkofeng/kofparsers/binaries/pe_sym.c \
            libkofeng/kofparsers/binaries/pe_parse.c \
            libkofeng/kofparsers/binaries/clr_parse.c \
@@ -911,6 +912,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/kofscanners/objsrc.c \
            libkofeng/kofoverlord/koflib.c \
            libkofeng/kofoverlord/kofoverlord.c \
+           libkofeng/kofoverlord/ovlflow.c \
            libkofeng/core/kofhash.c
 
 LIB_OBJ := $(patsubst libkofeng/%.c,$(INT)/lib_%.o,$(LIB_SRC))
