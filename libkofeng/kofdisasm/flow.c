@@ -406,31 +406,71 @@ static void forget(struct cmap *c, uint32_t r)
  * edi. Read only to ask WHICH EARLIER NODE produced one of them, never to work
  * out what the argument means.
  */
-static const uint8_t arg64[] = { 7u, 6u, 2u, 10u, 8u, 9u, 1u };
-static const uint8_t arg32[] = { 3u, 1u, 2u, 6u, 7u };
-/* rcx, rdx, r8, r9 - Microsoft's four, and no more are in registers. */
-static const uint8_t argms[] = { 1u, 2u, 8u, 9u };
+/*
+ * THE FIRST FOUR ARGUMENTS, IN ORDER, per convention. Order matters now: the
+ * caller asks which NODE produced argument 1, so the table has to be the
+ * convention's own sequence and not a set of registers to search.
+ */
+static const uint8_t arg_sys64[] = { 7u, 6u, 2u, 10u };   /* rdi rsi rdx r10 */
+static const uint8_t arg_sysv[]  = { 7u, 6u, 2u, 1u };    /* rdi rsi rdx rcx */
+static const uint8_t arg_ms[]    = { 1u, 2u, 8u, 9u };    /* rcx rdx r8  r9  */
+static const uint8_t arg_sys32[] = { 3u, 1u, 2u, 6u };    /* ebx ecx edx esi */
 
-static uint16_t arg_from(const struct cmap *c, unsigned bits, unsigned abi,
-			 int by_call)
+/*
+ * FILL IN WHERE EACH ARGUMENT CAME FROM - a produced value, a constant, or
+ * neither.
+ *
+ * `by_call` picks the convention: a 32-bit CALL passes on the stack, a 32-bit
+ * syscall in registers, and the two 64-bit conventions differ in their fourth.
+ */
+static void arg_scan(const struct cmap *c, unsigned bits, unsigned abi,
+		     int by_call, struct kof_flow_node *out)
 {
-	const uint8_t *a = bits == 32 ? arg32
-				      : (abi == KOF_FLOW_MS ? argms : arg64);
-	size_t n = bits == 32 ? sizeof arg32
-			      : (abi == KOF_FLOW_MS ? sizeof argms
-						    : sizeof arg64), i;
+	const uint8_t *a;
+	uint32_t i;
 
-	if (by_call && bits == 32) {
-		uint16_t sr = 0;
+	if (bits == 32 && by_call) {
+		for (i = 0; i < KOF_FLOW_ARGS; i++) {
+			uint64_t v;
+			uint16_t sr = 0;
 
-		for (i = 0; i < 4u; i++)
-			if (stack_arg(c, (uint32_t)i, NULL, &sr) && sr)
-				return sr;
-		return 0;
+			if (!stack_arg(c, i, &v, &sr))
+				continue;
+			out->from[i] = sr;
+			if (!sr)
+				out->arg_const |= (uint8_t)(1u << i);
+		}
+		return;
 	}
-	for (i = 0; i < n; i++)
-		if (c->src[a[i]])
-			return c->src[a[i]];
+	a = bits == 32 ? arg_sys32
+		       : (by_call ? (abi == KOF_FLOW_MS ? arg_ms : arg_sysv)
+				  : arg_sys64);
+	for (i = 0; i < KOF_FLOW_ARGS; i++) {
+		uint32_t r = a[i];
+
+		if (r >= NGPR)
+			continue;
+		out->from[i] = c->src[r];
+		/*
+		 * A CONSTANT AND A PROVENANCE ARE EXCLUSIVE HERE. set_const
+		 * clears src precisely so that a number written into the
+		 * instruction is never also reported as something an earlier
+		 * call produced.
+		 */
+		if (!c->src[r] && c->known[r])
+			out->arg_const |= (uint8_t)(1u << i);
+	}
+}
+
+uint16_t kof_flow_from_any(const struct kof_flow_node *n)
+{
+	uint32_t i;
+
+	if (!n)
+		return 0;
+	for (i = 0; i < KOF_FLOW_ARGS; i++)
+		if (n->from[i])
+			return n->from[i];
 	return 0;
 }
 
@@ -554,6 +594,36 @@ struct kof_flow {
 	struct loopspan loop[MAX_LOOP];
 	uint32_t n_loop;
 
+	/*
+	 * THE BLOCK GRAPH, which is what turns "A is at a lower address than B"
+	 * into "B can be reached from A". Built by the same sweep that finds
+	 * the nodes - a block ends where control leaves it, and begins where
+	 * control can arrive.
+	 *
+	 * Two successors at most, which is all a direct branch has: the taken
+	 * edge and the fall-through. An indirect branch has neither recorded,
+	 * and a block that ends in one is a dead end HERE without being one in
+	 * the program - which is why what cannot be proved comes back UNKNOWN.
+	 */
+	/*
+	 * CALL EDGES, as addresses. Resolved to function indices by finish(),
+	 * because during the sweep the functions are not numbered yet - the
+	 * heads are still being discovered and are not in order.
+	 */
+	struct cedge { uint64_t from_va, to_va; } edge[KOF_FLOW_MAX_FUNC];
+	uint32_t n_edge;
+
+	uint64_t entry;
+	uint32_t has_entry;
+
+	struct blk {
+		uint64_t lo, hi;        /* [lo, hi) */
+		uint32_t succ[2];
+		uint8_t  n_succ;
+		uint8_t  open_end;      /* left through an indirect branch */
+	} blk[KOF_FLOW_MAX_BLOCK];
+	uint32_t n_blk;
+
 	kof_flow_resolve_fn resolve;
 	void               *resolve_user;
 
@@ -584,6 +654,25 @@ void kof_flow_free(struct kof_flow *f)
 int kof_flow_full(const struct kof_flow *f)
 {
 	return f ? (int)f->full : 1;
+}
+
+static void add_edge(struct kof_flow *f, uint64_t from, uint64_t to)
+{
+	if (f->n_edge < KOF_FLOW_MAX_FUNC) {
+		f->edge[f->n_edge].from_va = from;
+		f->edge[f->n_edge].to_va = to;
+		f->n_edge++;
+	} else {
+		f->full = 1;
+	}
+}
+
+void kof_flow_entry(struct kof_flow *f, uint64_t va)
+{
+	if (f) {
+		f->entry = va;
+		f->has_entry = 1;
+	}
 }
 
 static void add_head(struct kof_flow *f, uint64_t va)
@@ -726,19 +815,120 @@ static void find_targets(struct tset *t, const uint8_t *code, uint32_t code_n,
 	}
 }
 
+/* Open a block at `va`, closing whatever was open. */
+static uint32_t blk_open(struct kof_flow *f, uint64_t va)
+{
+	if (f->n_blk >= KOF_FLOW_MAX_BLOCK) {
+		f->full = 1;
+		return KOF_FLOW_MAX_BLOCK;
+	}
+	memset(&f->blk[f->n_blk], 0, sizeof f->blk[0]);
+	f->blk[f->n_blk].lo = va;
+	f->blk[f->n_blk].hi = va;
+	return f->n_blk++;
+}
+
+static void blk_succ(struct kof_flow *f, uint32_t b, uint64_t va)
+{
+	if (b >= f->n_blk)
+		return;
+	if (f->blk[b].n_succ < 2u)
+		f->blk[b].succ[f->blk[b].n_succ++] = (uint32_t)va;
+}
+
+/* Which block holds this address, or n_blk. Linear because a region's blocks
+ * are few and the array is in address order. */
+static uint32_t blk_of(const struct kof_flow *f, uint64_t va)
+{
+	uint32_t lo = 0, hi = f->n_blk;
+
+	while (lo < hi) {
+		uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (f->blk[mid].lo <= va)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	if (!lo)
+		return f->n_blk;
+	lo--;
+	return va < f->blk[lo].hi ? lo : f->n_blk;
+}
+
 /*
  * ONE SWEEP, shared by both entry points.
  *
  * `f` NULL is the simple form - no heads, no loops, one region - which is what
  * kof_flow_scan wants and what a raw blob is.
  */
+/*
+ * A THREAD ENTRY IS A CALL EDGE.
+ *
+ * CreateThread(.., lpStart, ..), pthread_create(.., start, ..) and
+ * clone(fn, ..) all hand a function pointer to the system and the system
+ * calls it. Read as an ordinary call it is not one: the target never appears
+ * as a branch, and its whole body - which is where a loader does its work -
+ * falls outside every function the sweep found.
+ *
+ * WHICH ARGUMENT HOLDS IT IS NOT FIXED: third for CreateThread and
+ * pthread_create, first for clone. Rather than keep a table of which import
+ * puts it where, every argument is tested against one question - is this
+ * constant an address inside the code being swept - and an argument that is
+ * not a pointer into it cannot pass. [Inference] A constant argument that
+ * happens to fall in range without being a function pointer would add a
+ * spurious head; nothing measured so far has produced one, and the range test
+ * is what keeps it rare rather than a proof that it cannot happen.
+ */
+static void thread_edge(struct kof_flow *f, const struct cmap *c, unsigned bits,
+			unsigned abi, int by_call, uint64_t va,
+			uint64_t code_va, uint32_t code_n, uint8_t cap)
+{
+	const uint8_t *a;
+	uint32_t i;
+
+	if (!f || cap != KOF_CAP_SPAWN)
+		return;
+
+	if (bits == 32 && by_call) {
+		for (i = 0; i < KOF_FLOW_ARGS; i++) {
+			uint64_t v;
+			uint16_t sr = 0;
+
+			if (!stack_arg(c, i, &v, &sr) || sr)
+				continue;
+			/* Strictly inside: a pointer equal to the first byte
+			 * swept is the entry itself, and an edge from a
+			 * function to its own head says nothing. */
+			if (v > code_va && v < code_va + code_n) {
+				add_head(f, v);
+				add_edge(f, va, v);
+			}
+		}
+		return;
+	}
+	a = bits == 32 ? arg_sys32
+		       : (by_call ? (abi == KOF_FLOW_MS ? arg_ms : arg_sysv)
+				  : arg_sys64);
+	for (i = 0; i < KOF_FLOW_ARGS; i++) {
+		uint32_t r = a[i];
+
+		if (r >= NGPR || c->src[r] || c->known[r] < 4u)
+			continue;
+		if (c->v[r] > code_va && c->v[r] < code_va + code_n) {
+			add_head(f, c->v[r]);
+			add_edge(f, va, c->v[r]);
+		}
+	}
+}
+
 static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 		      uint64_t code_va, unsigned bits, unsigned abi,
 		      struct kof_flow_node *out, uint32_t cap)
 {
 	struct cmap c;
 	struct tset *t;
-	uint32_t at = 0, n = 0, step = 0;
+	uint32_t at = 0, n = 0, step = 0, cur_blk = 0;
 	int in_push_run = 0;
 	/*
 	 * WHICH ADDRESS EACH MAPPING CALL WAS ABOUT.
@@ -754,6 +944,7 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 	uint32_t n_mapped = 0;
 
 	memset(&c, 0, sizeof c);
+	cur_blk = f ? blk_open(f, code_va) : 0u;
 	t = (struct tset *)calloc(1, sizeof *t);
 	if (t)
 		find_targets(t, code, code_n, code_va, bits);
@@ -783,10 +974,34 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 		}
 		next = va + ix.Length;
 
-		/* A block something else can jump into knows nothing about
-		 * its registers - see join_clear for why the stack stays. */
-		if (t && tset_has(t, va))
+		/*
+		 * THE SPLIT COMES BEFORE THE INSTRUCTION IS ADDED, and getting
+		 * that order wrong is not a cosmetic bug: extending first put
+		 * the instruction in the PREVIOUS block and then opened a new
+		 * one at an address already inside it, so the ranges
+		 * overlapped, empty blocks appeared between them, and the
+		 * address lookup answered "no block" for a real edge. Every
+		 * relation downstream of that came back UNKNOWN.
+		 */
+		if (t && tset_has(t, va)) {
+			/* A block something else can jump into knows nothing
+			 * about its registers - see join_clear. */
 			join_clear(&c);
+			if (f && cur_blk < f->n_blk &&
+			    f->blk[cur_blk].lo != va) {
+				/*
+				 * The block before falls through into this one
+				 * unless it ended in a transfer - a transfer
+				 * closes by opening a block AT `next`, which is
+				 * this address, and the test above sees that.
+				 */
+				if (f->blk[cur_blk].hi == va)
+					blk_succ(f, cur_blk, va);
+				cur_blk = blk_open(f, va);
+			}
+		}
+		if (f && cur_blk < f->n_blk)
+			f->blk[cur_blk].hi = next;
 
 		/* The normalised step count - see the note in flow.h. */
 		is_push = ix.Instruction == ND_INS_PUSH;
@@ -810,8 +1025,10 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 
 			if (ix.Instruction == ND_INS_CALLNR) {
 				tgt = branch_target(&ix, next);
-				if (tgt >= code_va && tgt < code_va + code_n)
+				if (tgt >= code_va && tgt < code_va + code_n) {
 					add_head(f, tgt);
+					add_edge(f, va, tgt);
+				}
 				/*
 				 * AND IT MAY BE AN IMPORT. Asked of the
 				 * caller, which is the only side that can
@@ -853,8 +1070,11 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 						out[n].step = step;
 						out[n].sel  = 0;
 						out[n].cap  = k;
-						out[n].from = arg_from(&c, bits,
-								       abi, 1);
+						arg_scan(&c, bits, abi, 1,
+							 &out[n]);
+						thread_edge(f, &c, bits, abi,
+							    1, va, code_va,
+							    code_n, k);
 						n++;
 						/* The call returns in rax on
 						 * both ABIs, and that is the
@@ -921,7 +1141,9 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 					out[n].va   = va;
 					out[n].step = step;
 					out[n].cap  = k;
-					out[n].from = arg_from(&c, bits, abi, 1);
+					arg_scan(&c, bits, abi, 1, &out[n]);
+					thread_edge(f, &c, bits, abi, 1, va,
+						    code_va, code_n, k);
 					n++;
 					forget(&c, R_RAX);
 					c.src[R_RAX] = (uint16_t)n;
@@ -932,6 +1154,41 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 				tgt = branch_target(&ix, next);
 				if (tgt >= code_va && tgt < va)
 					add_loop(f, tgt, va);
+			}
+		}
+
+		/*
+		 * A STORE THROUGH A POINTER AN ALLOCATION RETURNED. See
+		 * kof_flow_node.writers: the count is what separates a page a
+		 * JIT emits into from a buffer a loader fills in one call.
+		 *
+		 * READ EARLY, because a store IS one of the forms below - `movb
+		 * $0x90, (%rax)` is a MOV with an immediate source - and those
+		 * consume the instruction and move on. Nothing here changes the
+		 * map, so running it before them costs nothing.
+		 */
+		{
+			uint32_t oi;
+
+			for (oi = 0; oi < ix.OperandsCount; oi++) {
+				const ND_OPERAND *op = &ix.Operands[oi];
+				uint32_t b;
+				uint16_t sr;
+
+				if (op->Type != ND_OP_MEM ||
+				    !op->Access.Write ||
+				    !op->Info.Memory.HasBase)
+					continue;
+				b = op->Info.Memory.Base;
+				if (b >= NGPR)
+					continue;
+				sr = c.src[b];
+				if (!sr || sr > n)
+					continue;
+				if ((out[sr - 1u].cap == KOF_CAP_ALLOC ||
+				     out[sr - 1u].cap == KOF_CAP_ALLOC_EXEC) &&
+				    out[sr - 1u].writers < 255u)
+					out[sr - 1u].writers++;
 			}
 		}
 
@@ -1137,7 +1394,9 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 				out[n].step  = step;
 				out[n].sel   = sel;
 				out[n].cap   = k;
-				out[n].from  = arg_from(&c, bits, abi, 0);
+				arg_scan(&c, bits, abi, 0, &out[n]);
+				thread_edge(f, &c, bits, abi, 0, va, code_va,
+					    code_n, k);
 				out[n].flags = low8 ? KOF_FLOWF_LOW8 : 0;
 				n++;
 			}
@@ -1220,8 +1479,10 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 					out[n].step  = step;
 					out[n].cap   = k3;
 					out[n].flags = KOF_FLOWF_VIA_REG;
-					out[n].from  = arg_from(&c, bits, abi,
-								1);
+					arg_scan(&c, bits, abi, 1,
+						 &out[n]);
+					thread_edge(f, &c, bits, abi, 1, va,
+						    code_va, code_n, k3);
 					n++;
 					forget(&c, R_RAX);
 					c.src[R_RAX] = (uint16_t)n;
@@ -1252,6 +1513,42 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 		 * block. Clearing first cost the one edge this file exists to
 		 * find, on its own test vector.
 		 */
+		/*
+		 * A BLOCK ENDS WHERE CONTROL LEAVES IT, and its successors are
+		 * whatever control can go to. A conditional branch has two: the
+		 * target and the fall-through. An unconditional one has the
+		 * target only. A return has none, and an INDIRECT branch has
+		 * none THAT THIS CAN SEE - which is not the same thing, so the
+		 * block is marked open_end and anything downstream of it is
+		 * UNKNOWN rather than unreachable.
+		 */
+		if (f && cur_blk < f->n_blk) {
+			int closes = 0;
+
+			if (is_cond_jump(&ix)) {
+				uint64_t tg = branch_target(&ix, next);
+
+				if (tg)
+					blk_succ(f, cur_blk, tg);
+				blk_succ(f, cur_blk, next);
+				closes = 1;
+			} else if (ix.Instruction == ND_INS_JMPNR) {
+				uint64_t tg = branch_target(&ix, next);
+
+				if (tg)
+					blk_succ(f, cur_blk, tg);
+				closes = 1;
+			} else if (ix.Instruction == ND_INS_JMPNI) {
+				f->blk[cur_blk].open_end = 1;
+				closes = 1;
+			} else if (ix.Instruction == ND_INS_RETN ||
+				   ix.Instruction == ND_INS_RETF) {
+				closes = 1;
+			}
+			if (closes)
+				cur_blk = blk_open(f, next);
+		}
+
 		if (ix.Instruction == ND_INS_RETN ||
 		    ix.Instruction == ND_INS_RETF ||
 		    ix.Instruction == ND_INS_JMPNR ||
@@ -1420,6 +1717,62 @@ static void finish(struct kof_flow *f)
 		f->func[fi].first = i;
 		f->func[fi].n = k - i;
 	}
+
+	/*
+	 * THE CALL GRAPH, resolved last because only now are the functions
+	 * numbered. The edges were recorded as address pairs during the sweep
+	 * and are rewritten in place into index pairs; nothing reads them as
+	 * addresses afterwards.
+	 */
+	for (i = 0; i < f->n_edge; i++) {
+		uint32_t a = func_of(f, f->edge[i].from_va);
+		uint32_t b = func_of(f, f->edge[i].to_va);
+
+		f->edge[i].from_va = a;
+		f->edge[i].to_va = b;
+		if (a >= f->n_func || b >= f->n_func)
+			continue;
+		f->func[a].n_call++;
+		f->func[b].n_caller++;
+	}
+
+	/*
+	 * DISTANCE FROM THE ENTRY, by relaxation rather than by a queue: the
+	 * edge list is already the graph, and a pass over it that changes
+	 * nothing is the end. A program's call depth is small, so this stops
+	 * after a handful of passes; the bound is there for a graph that is
+	 * one long chain.
+	 */
+	for (i = 0; i < f->n_func; i++)
+		f->func[i].depth = KOF_FLOW_FAR;
+	{
+		uint32_t root = 0, pass;
+
+		if (f->has_entry)
+			root = func_of(f, f->entry);
+		if (root < f->n_func)
+			f->func[root].depth = 0;
+		for (pass = 0; pass < f->n_func; pass++) {
+			uint32_t moved = 0;
+
+			for (i = 0; i < f->n_edge; i++) {
+				uint32_t a = (uint32_t)f->edge[i].from_va;
+				uint32_t b = (uint32_t)f->edge[i].to_va;
+				uint32_t d;
+
+				if (a >= f->n_func || b >= f->n_func ||
+				    f->func[a].depth == KOF_FLOW_FAR)
+					continue;
+				d = f->func[a].depth + 1u;
+				if (d < f->func[b].depth) {
+					f->func[b].depth = (uint16_t)d;
+					moved = 1;
+				}
+			}
+			if (!moved)
+				break;
+		}
+	}
 }
 
 uint32_t kof_flow_n_func(struct kof_flow *f)
@@ -1454,17 +1807,174 @@ const struct kof_flow_node *kof_flow_node_at(struct kof_flow *f, uint32_t i)
 	return i < f->n_node ? &f->node[i] : NULL;
 }
 
-uint32_t kof_flow_concentration(struct kof_flow *f)
+const char *kof_flow_rel_name(uint8_t rel)
+{
+	switch (rel) {
+	case KOF_REL_SAME_BLOCK: return "same-block";
+	case KOF_REL_PATH:       return "path";
+	case KOF_REL_EXCLUSIVE:  return "exclusive";
+	default:                 return "unknown";
+	}
+}
+
+/*
+ * IS B REACHABLE FROM A THROUGH THE BLOCK GRAPH.
+ *
+ * Breadth first over a bounded queue, and the bound is the whole of the
+ * honesty: running out of queue, meeting a block that leaves through an
+ * indirect branch, or finding either end outside the graph all answer
+ * "cannot say" rather than "no". EXCLUSIVE is only returned when the search
+ * COMPLETED and found nothing - which is the only case where "they never run
+ * in this order" is a fact rather than a failure to look.
+ */
+static uint8_t reaches(struct kof_flow *f, uint32_t from, uint32_t to)
+{
+	static uint8_t seen[KOF_FLOW_MAX_BLOCK];
+	uint32_t queue[256], head = 0, tail = 0;
+	int partial = 0;
+
+	if (from >= f->n_blk || to >= f->n_blk)
+		return KOF_REL_UNKNOWN;
+	memset(seen, 0, f->n_blk);
+	queue[tail++] = from;
+	seen[from] = 1;
+	while (head < tail) {
+		uint32_t b = queue[head++], i;
+
+		if (b == to && head > 1u)
+			return KOF_REL_PATH;
+		if (f->blk[b].open_end)
+			partial = 1;
+		for (i = 0; i < f->blk[b].n_succ; i++) {
+			uint32_t nb = blk_of(f, f->blk[b].succ[i]);
+
+			if (nb >= f->n_blk) { partial = 1; continue; }
+			if (nb == to)
+				return KOF_REL_PATH;
+			if (seen[nb])
+				continue;
+			if (tail >= 256u) { partial = 1; break; }
+			seen[nb] = 1;
+			queue[tail++] = nb;
+		}
+	}
+	return partial ? KOF_REL_UNKNOWN : KOF_REL_EXCLUSIVE;
+}
+
+uint8_t kof_flow_relation(struct kof_flow *f, uint32_t a, uint32_t b)
+{
+	uint32_t ba, bb;
+
+	if (!f)
+		return KOF_REL_UNKNOWN;
+	finish(f);
+	if (a >= f->n_node || b >= f->n_node || !f->n_blk)
+		return KOF_REL_UNKNOWN;
+	ba = blk_of(f, f->node[a].va);
+	bb = blk_of(f, f->node[b].va);
+	if (ba >= f->n_blk || bb >= f->n_blk)
+		return KOF_REL_UNKNOWN;
+	if (ba == bb)
+		return f->node[a].va < f->node[b].va ? KOF_REL_SAME_BLOCK
+						     : KOF_REL_EXCLUSIVE;
+	{
+		uint8_t r = reaches(f, ba, bb);
+
+		/* An incomplete graph cannot establish that no path exists -
+		 * the path may be in the part that was not built. */
+		if (r == KOF_REL_EXCLUSIVE && f->full)
+			return KOF_REL_UNKNOWN;
+		return r;
+	}
+}
+
+const char *kof_fact_name(uint8_t v)
+{
+	switch (v) {
+	case KOF_FACT_YES: return "yes";
+	case KOF_FACT_NO:  return "no";
+	default:           return "unknown";
+	}
+}
+
+void kof_flow_mark_partial(struct kof_flow *f)
+{
+	if (f)
+		f->full = 1;
+}
+
+/*
+ * A NEGATIVE ANSWER SURVIVES ONLY A COMPLETE SWEEP.
+ *
+ * One place, so the asymmetry cannot be forgotten at one call site and kept at
+ * another - which is how a rule ends up trusting an absence nobody established.
+ */
+static uint8_t negative(const struct kof_flow *f)
+{
+	return f->full ? KOF_FACT_UNKNOWN : KOF_FACT_NO;
+}
+
+uint8_t kof_flow_has(struct kof_flow *f, uint32_t func, uint8_t cap)
+{
+	uint32_t i;
+
+	if (!f || cap >= KOF_CAP_COUNT)
+		return KOF_FACT_UNKNOWN;
+	finish(f);
+	if (func == KOF_FLOW_ALL_FUNCS) {
+		for (i = 0; i < f->n_func; i++)
+			if (f->func[i].mask & (1u << cap))
+				return KOF_FACT_YES;
+		return negative(f);
+	}
+	if (func >= f->n_func)
+		return KOF_FACT_UNKNOWN;
+	return (f->func[func].mask & (1u << cap)) ? KOF_FACT_YES : negative(f);
+}
+
+uint8_t kof_flow_only(struct kof_flow *f, uint32_t func, uint32_t mask)
+{
+	uint32_t i, seen = 0;
+
+	if (!f)
+		return KOF_FACT_UNKNOWN;
+	finish(f);
+	if (func == KOF_FLOW_ALL_FUNCS) {
+		for (i = 0; i < f->n_func; i++)
+			seen |= f->func[i].mask;
+	} else if (func < f->n_func) {
+		seen = f->func[func].mask;
+	} else {
+		return KOF_FACT_UNKNOWN;
+	}
+	/*
+	 * SOMETHING OUTSIDE THE SET IS A POSITIVE FINDING and stands whatever
+	 * the sweep missed - it cannot have found MORE by looking further.
+	 * Finding nothing outside it is the claim that needs a finished sweep.
+	 */
+	if (seen & ~mask)
+		return KOF_FACT_NO;
+	return negative(f) == KOF_FACT_NO ? KOF_FACT_YES : KOF_FACT_UNKNOWN;
+}
+
+uint8_t kof_flow_concentration(struct kof_flow *f, uint32_t *permille)
 {
 	uint32_t i, best = 0;
 
 	if (!f)
-		return 0;
+		return KOF_FACT_UNKNOWN;
 	finish(f);
-	if (!f->n_node)
-		return 0;
+	/*
+	 * A TRUNCATED SWEEP CONCENTRATES BY CONSTRUCTION: it saw one thing
+	 * because it stopped, not because there was one thing. So this is the
+	 * whole measure, not one side of it, that a cap invalidates.
+	 */
+	if (f->full || !f->n_node)
+		return KOF_FACT_UNKNOWN;
 	for (i = 0; i < f->n_func; i++)
 		if (f->func[i].n > best)
 			best = f->func[i].n;
-	return (uint32_t)((uint64_t)best * 1000u / f->n_node);
+	if (permille)
+		*permille = (uint32_t)((uint64_t)best * 1000u / f->n_node);
+	return KOF_FACT_YES;
 }

@@ -130,26 +130,65 @@ const char *kof_flow_cap_name(uint8_t cap);
  */
 #define KOF_FLOWF_VIA_REG  (1u << 3)
 
+#define KOF_FLOW_ARGS 4u
+
 struct kof_flow_node {
 	uint64_t va;      /* where the syscall instruction is */
 	uint32_t step;    /* the NORMALISED instruction index - see below */
 	uint32_t func;    /* index of the region it was found in */
 	uint16_t sel;     /* the syscall number, or 0 when it did not resolve */
 	/*
-	 * WHICH EARLIER NODE PRODUCED ONE OF THIS ONE'S ARGUMENTS, as index
-	 * plus one, or 0 for none.
+	 * WHICH EARLIER NODE PRODUCED EACH ARGUMENT, as index plus one, or 0.
 	 *
 	 * The chain, and the reason a sequence of capabilities is more than a
 	 * list of them. "alloc-exec, then read, then an indirect jump" is a
 	 * shape half the programs on a machine have somewhere; "read INTO what
 	 * alloc-exec returned, then jump to THAT" is a stager and very little
-	 * else. Consecutive activity being suspicious is exactly this field.
+	 * else.
+	 *
+	 * PER ARGUMENT AND NOT ONE PER NODE, because the arguments say
+	 * different things. `read(fd, buf, len)` has the socket in one and the
+	 * mapping in another, and "reads from the socket it opened" and "reads
+	 * into the memory it mapped" are two separate claims - a single slot
+	 * kept whichever was found first and threw the other away.
 	 */
-	uint16_t from;
+	uint16_t from[KOF_FLOW_ARGS];
+
+	/*
+	 * WHICH ARGUMENTS WERE A KNOWN CONSTANT - bit i for argument i.
+	 *
+	 * A LOADER HARDCODES; A SUBSYSTEM COMPUTES. A JIT maps a region whose
+	 * size is the length of the code it just compiled - a value it worked
+	 * out. A stub maps 0x1000 with prot 7, both written into the
+	 * instruction. That difference survives junk insertion and
+	 * re-encoding, because it is about where the value came from and not
+	 * about how it was spelled.
+	 *
+	 * An argument with neither this bit nor a `from` entry is one the
+	 * sweep could not follow - which is a third state and not a "no".
+	 */
+	uint8_t  arg_const;
 	uint8_t  cap;     /* enum kof_flow_cap */
 	uint8_t  flags;   /* KOF_FLOWF_* */
-	uint8_t  _pad[2];
+
+	/*
+	 * HOW MANY PLACES WRITE INTO WHAT THIS NODE ALLOCATED.
+	 *
+	 * Only meaningful on an ALLOC or ALLOC_EXEC node, and counted as store
+	 * instructions whose base register holds this node's return value.
+	 *
+	 * A LOADER FILLS ITS BUFFER FROM ONE PLACE - a read, a memcpy, a
+	 * decrypt loop - so the count is small or zero, the copy itself having
+	 * been made by a call whose argument provenance already records it. A
+	 * JIT EMITS, so the page it mapped is written from many unrelated
+	 * sites. Saturates at 255.
+	 */
+	uint8_t  writers;
 };
+
+/* The first argument that an earlier node produced, or 0 - the old
+ * one-slot question, for a caller that does not care which argument. */
+uint16_t kof_flow_from_any(const struct kof_flow_node *n);
 
 /*
  * A REGION: one function's own nodes, as a slice of the node array.
@@ -163,8 +202,31 @@ struct kof_flow_func {
 	uint32_t first;   /* index into the node array */
 	uint32_t n;
 	uint32_t mask;    /* 1u << enum kof_flow_cap */
-	uint32_t n_call;  /* direct calls out of it, for the region walk */
+	uint32_t n_call;  /* direct calls out of it */
+
+	/*
+	 * HOW MANY PLACES CALL IT.
+	 *
+	 * A loader stub is called from one place or from none - it IS the
+	 * entry. A subsystem's allocator is called from everywhere. The
+	 * difference is structural and survives everything an obfuscator does
+	 * to the instructions.
+	 */
+	uint32_t n_caller;
+
+	/*
+	 * HOW FAR FROM THE ENTRY POINT, in calls. 0 is the entry itself,
+	 * KOF_FLOW_FAR when no chain of direct calls reaches it.
+	 *
+	 * The stub's work happens at depth 0 or 1. A JIT's mapping call is
+	 * deep, and the depth is not something junk code can change without
+	 * restructuring the program.
+	 */
+	uint16_t depth;
+	uint16_t _pad;
 };
+
+#define KOF_FLOW_FAR 0xffffu
 
 /*
  * THE GAP IS COUNTED IN NORMALISED INSTRUCTIONS, NOT IN BYTES.
@@ -187,6 +249,105 @@ struct kof_flow_func {
  * is an absolute position and moves when the prologue does - measured at 5 and
  * 3 for the same program before and after re-encoding.
  */
+
+/*
+ * WHAT A RELATION BETWEEN TWO NODES IS WORTH, and it is not one thing.
+ *
+ * A LINEAR SWEEP WALKS ADDRESSES, NOT PATHS, and without this it reports an
+ * order that execution never takes:
+ *
+ *     if (cond)  socket();
+ *     else       mmap(PROT_EXEC);
+ *
+ * Two calls that can never both run come out as a chain. That is worse than a
+ * missing fact - a fabricated relation is exactly what a miner would then go
+ * and find a pattern in.
+ *
+ * So every relation carries the domain it is valid in, and a caller that wants
+ * "A then B" has to say which domain it will accept. The four are not degrees
+ * of confidence; they are different statements:
+ *
+ *   SAME_BLOCK   one straight run of instructions. Order and adjacency are
+ *                facts, and so is the gap between them.
+ *   PATH         B is reachable from A through the block graph. Order is a
+ *                fact; adjacency is not, because the path may branch.
+ *   EXCLUSIVE    neither reaches the other. They may both run - in different
+ *                calls of the same function - but NOT in this order and
+ *                possibly not in the same execution at all. Only
+ *                co-occurrence is a fact.
+ *   UNKNOWN      the sweep could not answer: a cap was hit, the flow leaves
+ *                through an indirect branch, or the two are in different
+ *                threads. Must never be read as EXCLUSIVE.
+ *
+ * ACROSS THREADS THERE IS NO ORDER AT ALL, and that is not this file being
+ * careful - kofevt.h states the same thing about collected events, for the
+ * same reason one layer up: "a rule engine that matches A-then-B-then-C
+ * against the arrival order is not matching what the machine did".
+ */
+enum kof_flow_rel {
+	KOF_REL_UNKNOWN = 0,
+	KOF_REL_SAME_BLOCK,
+	KOF_REL_PATH,
+	KOF_REL_EXCLUSIVE
+};
+
+struct kof_flow;
+
+/*
+ * THREE STATES, AND UNKNOWN IS ZERO.
+ *
+ * "It does not do X" and "I could not tell whether it does X" are different
+ * claims, and collapsing them is the quietest way to manufacture a false
+ * positive. The whole value of the strongest term measured so far - a region
+ * that asks the machine for ONE thing and nothing else - rests on the
+ * difference: a packed file, or a sweep that stopped at its bound, also asks
+ * for one thing as far as anyone can see.
+ *
+ * UNKNOWN IS ZERO so that a zeroed structure, a forgotten field and an
+ * unanswered question all read as "do not know" rather than as "no". The safe
+ * value has to be the cheap one, or it will not be the one that gets used.
+ *
+ * TRUNCATION INVALIDATES ABSENCE, NOT PRESENCE. Having found something is
+ * still having found it however early the sweep stopped; having found nothing
+ * means nothing if the sweep did not finish. Every accessor below follows that
+ * asymmetry.
+ */
+enum kof_fact {
+	KOF_FACT_UNKNOWN = 0,
+	KOF_FACT_NO,
+	KOF_FACT_YES
+};
+
+const char *kof_fact_name(uint8_t v);
+
+/*
+ * THE CALLER CAN SAY THE PICTURE IS INCOMPLETE, and often it is the only side
+ * that knows: a packed object sweeps to the end without error and shows almost
+ * nothing, and no amount of looking at the instructions says so. The entropy
+ * gate, the unpacker and the format parse all know. They tell this, the same
+ * way a client tells the engine where an event's content is rather than the
+ * engine learning to read records.
+ *
+ * Once marked, every NO becomes UNKNOWN.
+ */
+void kof_flow_mark_partial(struct kof_flow *f);
+
+const char *kof_flow_rel_name(uint8_t rel);
+
+/*
+ * The relation between two nodes, by index. Order matters: relation(a, b) asks
+ * whether B follows A, and the answer for (b, a) is a different question.
+ */
+uint8_t kof_flow_relation(struct kof_flow *f, uint32_t a, uint32_t b);
+
+/*
+ * THE MOST BLOCKS ONE RUN WILL HOLD.
+ *
+ * Past it the graph is incomplete, `full` is set, and every relation this
+ * cannot prove comes back UNKNOWN rather than EXCLUSIVE - see the note on the
+ * enum for why that direction is the only safe one.
+ */
+#define KOF_FLOW_MAX_BLOCK 8192u
 
 #define KOF_FLOW_MAX_NODE 2048u
 #define KOF_FLOW_MAX_FUNC 4096u
@@ -231,6 +392,13 @@ enum kof_flow_abi {
 	KOF_FLOW_SYSV = 0,   /* Linux, and the Linux syscall ABI with it */
 	KOF_FLOW_MS          /* Windows x64 */
 };
+
+/*
+ * WHERE EXECUTION STARTS, if the caller knows - an ELF's e_entry, a PE's
+ * AddressOfEntryPoint. Without it the lowest address swept is assumed, which
+ * is right for a blob and wrong for a program.
+ */
+void kof_flow_entry(struct kof_flow *f, uint64_t va);
 
 struct kof_flow *kof_flow_new(void);
 void kof_flow_free(struct kof_flow *);
@@ -277,7 +445,33 @@ const struct kof_flow_node *kof_flow_node_at(struct kof_flow *f, uint32_t i);
  * asks for. This is the fact that says WHICH KIND OF THING is in hand, and it
  * costs one pass over an array that is already built.
  */
-uint32_t kof_flow_concentration(struct kof_flow *f);
+/*
+ * Does this region hold the capability. `func` of KOF_FLOW_ALL_FUNCS asks
+ * about the whole object.
+ */
+#define KOF_FLOW_ALL_FUNCS 0xffffffffu
+uint8_t kof_flow_has(struct kof_flow *f, uint32_t func, uint8_t cap);
+
+/*
+ * DOES IT ASK FOR ANYTHING OUTSIDE `mask` - the complement, and the one
+ * question that must never be answered from an incomplete sweep.
+ *
+ * KOF_FACT_NO means "nothing else, and the sweep finished". That is the
+ * statement a rule about a stub is built on.
+ */
+uint8_t kof_flow_only(struct kof_flow *f, uint32_t func, uint32_t mask);
+
+/*
+ * How concentrated the capabilities are, per mille of the object's nodes held
+ * by the busiest region. Returns the fact state; `permille` is written only
+ * when that is KOF_FACT_YES.
+ *
+ * Near 1000 for a stub, where the sequence is the whole program. Low for a
+ * miner or a bot, where the interesting part is a fraction of what the program
+ * asks for. UNKNOWN when the sweep did not finish, because a truncated sweep
+ * concentrates by construction - it saw one thing because it stopped.
+ */
+uint8_t kof_flow_concentration(struct kof_flow *f, uint32_t *permille);
 
 /* Non-zero when a cap stopped the build. A caller that needs "there is no such
  * capability here" rather than "here is one" has to treat that as unknown. */

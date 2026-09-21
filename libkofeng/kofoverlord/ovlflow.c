@@ -181,7 +181,8 @@ int kof_ovlf_align(const struct kof_flow_node *a, uint32_t na,
 				    (b[j - 1u].flags & (KOF_FLOWF_EXECUTED)) &&
 				    out->chained < 255u)
 					out->chained++;
-				else if (a[i - 1u].from && b[j - 1u].from &&
+				else if (kof_flow_from_any(&a[i - 1u]) &&
+					 kof_flow_from_any(&b[j - 1u]) &&
 					 out->chained < 255u)
 					out->chained++;
 			} else if (family(ca) && family(ca) == family(cb)) {
