@@ -145,7 +145,7 @@ static void one_round(uint64_t round)
 	opt.all_matches        = (int)(rnd() & 1);
 
 	m.fn = mod_random;
-	m.n_target = 0;      /* every target - see n_target in kofdb.h */
+	m.n_target = 0;      /* every target - see n_target in dbloader.h */
 	eng.unp = &m;
 	eng.n_unp = 1;
 

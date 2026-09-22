@@ -37,8 +37,8 @@
 
 #include "../../libkofeng/kofcore/kofplatform.h"
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
-#include "../../libkofeng/databases/kofdb.h"
-#include "../../libkofeng/databases/kofpackw.h"
+#include "../../libkofeng/databases/dbloader.h"
+#include "../../libkofeng/databases/dbpacker.h"
 #include "../../libkofeng/detector/matchers/kofmatch.h"
 #include "../../libkofeng/kofeng.h"
 
@@ -72,12 +72,12 @@ static void synth_free(struct synth *s)
 }
 
 /* `target` is a format id, or -1 for a module that names every target - which
- * is what an empty list means; see n_target in kofdb.h. */
+ * is what an empty list means; see n_target in dbloader.h. */
 /*
  * A MODULE THAT RETURNS, IN THE MACHINE CODE OF THE HOST THAT WILL RUN IT.
  *
  * This is not decoration and it is not portability for its own sake: the
- * engine EXECUTES a module's code. kofdb.c copies it into an arena, flips the
+ * engine EXECUTES a module's code. dbloader.c copies it into an arena, flips the
  * arena to read-execute with kof_mprotect_rx, and calls it through m->fn - so
  * a synthetic module's blob is not data the loader parses, it is instructions
  * the CPU runs.

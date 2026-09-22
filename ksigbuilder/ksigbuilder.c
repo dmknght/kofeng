@@ -57,7 +57,7 @@
  * Measured on 4004 modules, this produces 4 packs and skips almost nothing for an
  * ELF object. That is the honest result: grouping is a coarse cut and does not
  * carry scale. What carries scale is the inverted index, which is built here too
- * once it exists - see kofpack.h.
+ * once it exists - see dbcore.h.
  *
  *
  * FAILURE IS FATAL
@@ -121,8 +121,8 @@
 #include <kofmod/amsi.h>   /* an event's two regions */
 #include <kofmod/proc.h>   /* and a process record's */
 
-#include "../libkofeng/databases/kofpackw.h"
-#include "../libkofeng/databases/kofpack.h"
+#include "../libkofeng/databases/dbpacker.h"
+#include "../libkofeng/databases/dbcore.h"
 #include "../libkofeng/detector/matchers/hexprog.h"
 #include "../libkofeng/kofcore/kofcore.h"   /* kof_hash_bytes/kof_hash_step - FNV-1a,
 					    reused for KOF_MALVAR_AUTO's suffix and
@@ -1050,6 +1050,16 @@ static size_t capture_balanced(const char *open, char *out, size_t cap)
 	int depth = 1;
 	size_t n = 0;
 
+	/*
+	 * The terminator below is written at `cap - 1` when the text did not
+	 * fit, and cap 0 makes that SIZE_MAX. The one caller passes
+	 * `sizeof args`, so this is unreachable now and is refused anyway -
+	 * the failure is a write nowhere near the buffer, which is the kind
+	 * that is found much later and somewhere else.
+	 */
+	if (!out || !cap)
+		return 0;
+
 	while (*p && depth > 0) {
 		if (*p == '"') {
 			if (n + 1 < cap) out[n++] = *p;
@@ -1461,7 +1471,7 @@ static int read_variant(const char *p, int line, char *out, size_t cap)
 	 * type into every finding's text repeated that declaration once per
 	 * finding in the name pool. The host composes the full string at
 	 * report time instead, from this variant plus the module's own
-	 * family_off/maltype record - see struct kof_pack_mod in kofpack.h and
+	 * family_off/maltype record - see struct kof_pack_mod in dbcore.h and
 	 * finding_str in scan.c.
 	 */
 	n = snprintf(out, cap, "%s", raw);
@@ -1627,7 +1637,7 @@ static void decl_collect(const char *at, int lineno)
 
 /* What the resolution below produces, for the caller that writes .pre. */
 /*
- * The targets as IDS, not as a mask - see n_target in kofdb.h. An empty list
+ * The targets as IDS, not as a mask - see n_target in dbloader.h. An empty list
  * is KOF_FMT_ANY, which is what the engine reads it as, so "everything" costs
  * nothing to carry and cannot fall behind the enum the way a derived mask did.
  */
@@ -1661,7 +1671,7 @@ static int target_named(uint8_t id)
  *
  * Ids and not a mask, because that is what the list IS now - and a number per
  * target is also what lets .pre stay readable when the axis passes 32, which
- * is the whole point of the change. See n_target in kofdb.h.
+ * is the whole point of the change. See n_target in dbloader.h.
  */
 static void target_text(char *out, size_t cap)
 {
@@ -3074,7 +3084,7 @@ done:
  * they exist is what stops a third being invented:
  *
  *   - Two ranges with the same MASK share one memo column, across the whole
- *     database, not just within a module (kofdb.c gives each distinct mask a
+ *     database, not just within a module (dbloader.c gives each distinct mask a
  *     uid). Declaring the same region twice costs a name and nothing else.
  *   - The same marker declared by two modules is one uid and one answer.
  *
@@ -5223,7 +5233,7 @@ static const char *bucket_name(int b)
  * The bucket a whole target LIST belongs to.
  *
  * A list now rather than a mask, so the loop is over the ids a module actually
- * named instead of over every bit position - see n_target in kofdb.h. A module
+ * named instead of over every bit position - see n_target in dbloader.h. A module
  * that named everything belongs in no bucket, which is what BUCKET_NONE says.
  */
 static int bucket_of_targets(const uint8_t *id, uint8_t n, int any)
@@ -6656,7 +6666,7 @@ static int pack_main(int argc, char **argv)
 		 * any_arch are written into every pack header by the writer and
 		 * are read by NOTHING - grep the tree. What actually filters is
 		 * KOF_SEC_PRE_TARGET and KOF_SEC_PRE_ARCH, the per-module
-		 * columns the scanner sweeps at kofdb.c:569. So the split was
+		 * columns the scanner sweeps at dbloader.c:569. So the split was
 		 * buying a skip that was never wired up, and charging a whole
 		 * file for it: sigs-elf-x86.ksig held ONE module and cost 4164
 		 * bytes, of which 3132 were zeros.
@@ -6750,7 +6760,7 @@ static int pack_main(int argc, char **argv)
 			pm[a].code        = s->code;
 			pm[a].code_len    = s->code_len;
 			/* Zero targets is ANY, which is what the engine reads
-			 * an empty list as - see n_target in kofdb.h. */
+			 * an empty list as - see n_target in dbloader.h. */
 			pm[a].n_target    = s->any_target ? 0 : s->n_target;
 			memcpy(pm[a].target, s->target, sizeof pm[a].target);
 			pm[a].scan_mask   = s->scan_mask;

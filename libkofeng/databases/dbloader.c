@@ -1,5 +1,5 @@
 /*
- * kofdb.c - load packed databases into an immutable engine.
+ * dbloader.c - load packed databases into an immutable engine.
  *
  * A database is one or more .ksig packs. Each is mapped read only, validated, and
  * its tables copied into the engine's - except the detection names, which are left
@@ -27,7 +27,7 @@
  *
  * Reading N packs is N opens and N mmaps whatever they contain.
  *
- * The validation order below is the one kofpack.h specifies, and the order is the
+ * The validation order below is the one dbcore.h specifies, and the order is the
  * point: every step runs before anything it checks is dereferenced, and no step
  * trusts a value a later step has not yet bounded. Every bound comes from the
  * length fstat reported, never from a length the file states about itself.
@@ -51,7 +51,7 @@
  * this file, so nothing else here changes. */
 #define _GNU_SOURCE
 
-#include "kofdb.h"
+#include "dbloader.h"
 #include "../detector/matchers/kofplague.h"
 #include "../detector/matchers/kofmultimatch.h"
 #include "../detector/matchers/hexprog.h"
@@ -213,7 +213,7 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 
 #define REFUSE(...)                                                            \
 	do {                                                                   \
-		fprintf(stderr, "kofdb: %s: ", path);                          \
+		fprintf(stderr, "dbloader: %s: ", path);                          \
 		fprintf(stderr, __VA_ARGS__);                                  \
 		fputc('\n', stderr);                                           \
 		return 0;                                                      \
@@ -248,7 +248,7 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 	 * that refuses, so this refuses.
 	 *
 	 * Zero is a pack written before the field existed, which can only have
-	 * been ABI 1 - see kofpack.h - so it is compared like any other value
+	 * been ABI 1 - see dbcore.h - so it is compared like any other value
 	 * rather than waved through.
 	 */
 	if (h->abi_version < KOFSIG_ABI_MIN)
@@ -284,7 +284,7 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 	 *
 	 * A pack from an older build that could not name its host carries zero.
 	 * The comparison below already refuses it, on every host, because no
-	 * host can itself be zero any more: kofpack.h makes an unrecognised
+	 * host can itself be zero any more: dbcore.h makes an unrecognised
 	 * build machine an #error rather than a value. So this line can never
 	 * change a decision - only what the operator is told. Deleting the
 	 * #error is what would give it teeth again, and then two unrecognised
@@ -345,7 +345,7 @@ static int pack_valid(const void *map, uint64_t len, const char *path)
 	STRIDE(KOF_SEC_PRE_SCAN,    h->n_mods,  4);
 	STRIDE(KOF_SEC_PRE_ARCH,    h->n_mods,  4);
 	STRIDE(KOF_SEC_PRE_SIZE,    h->n_mods,  8);
-	/* Appended after the others, not slotted in - see kofpack.h - and missed
+	/* Appended after the others, not slotted in - see dbcore.h - and missed
 	 * here for exactly that reason: absorb() reads h->n_mods entries from
 	 * this section unconditionally (pk[i] below), so without this check a
 	 * pack declaring a short PRE_SUBTYPE section still passes every other
@@ -477,7 +477,7 @@ static int map_pack(struct kof_db_pack *mp, const char *path)
 
 	fd = open(path, O_RDONLY);
 	if (fd < 0) {
-		fprintf(stderr, "kofdb: cannot open %s\n", path);
+		fprintf(stderr, "dbloader: cannot open %s\n", path);
 		return 0;
 	}
 	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
@@ -490,7 +490,7 @@ static int map_pack(struct kof_db_pack *mp, const char *path)
 	map = kof_map_file_ro(fd, (uint64_t)st.st_size);
 	close(fd);
 	if (!map) {
-		fprintf(stderr, "kofdb: cannot map %s\n", path);
+		fprintf(stderr, "dbloader: cannot map %s\n", path);
 		return 0;
 	}
 	if (!pack_valid(map, (uint64_t)st.st_size, path)) {
@@ -1022,7 +1022,7 @@ struct kof_engine *kof_db_load(const char *path)
 		paths = collect_packs(path, &n_paths);
 		owned = 1;
 		if (!paths || n_paths == 0) {
-			fprintf(stderr, "kofdb: no .ksig packs in %s\n", path);
+			fprintf(stderr, "dbloader: no .ksig packs in %s\n", path);
 			free(paths);
 			return NULL;
 		}
@@ -1078,7 +1078,7 @@ struct kof_engine *kof_db_load(const char *path)
 	if (n_mods > 0xffffffffu || n_str > 0xffffffffu ||
 	    n_rng > 0xffffffffu || n_blk > 0xffffffffu ||
 	    n_pool > 0xffffffffu) {
-		fprintf(stderr, "kofdb: %s: more entries than an index can hold\n",
+		fprintf(stderr, "dbloader: %s: more entries than an index can hold\n",
 			path);
 		goto out;
 	}
@@ -1112,7 +1112,7 @@ struct kof_engine *kof_db_load(const char *path)
 	 *
 	 * After absorbing rather than per pack, because the whole point of one
 	 * index is that a scan costs the same whatever is loaded - see the note
-	 * on blk_tab in kofdb.h. A build that produces nothing is not an error:
+	 * on blk_tab in dbloader.h. A build that produces nothing is not an error:
 	 * a database with no plague rules has no blocks and the matcher is never
 	 * consulted.
 	 */
@@ -1120,7 +1120,7 @@ struct kof_engine *kof_db_load(const char *path)
 		e->plague = kof_plague_build(e->blk_tab, e->n_blk,
 					     e->blk_pool, e->n_blk_pool);
 		if (!e->plague) {
-			fprintf(stderr, "kofdb: the similarity blocks do not "
+			fprintf(stderr, "dbloader: the similarity blocks do not "
 				"describe a consistent set\n");
 			goto out;
 		}
@@ -1280,7 +1280,7 @@ struct kof_engine *kof_db_load(const char *path)
 
 	/* Written once, then executable. */
 	if (kof_mprotect_rx(e->code, e->code_cap) != 0) {
-		fprintf(stderr, "kofdb: cannot make the code executable\n");
+		fprintf(stderr, "dbloader: cannot make the code executable\n");
 		kof_db_free(e);
 		e = NULL;
 	} else {

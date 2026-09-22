@@ -69,6 +69,7 @@
 #include "kofevt.h"
 #include "kofevtfmt.h"
 #include "koffridge.h"
+#include "fidset.h"   /* struct kof_fid, kof_fid_of */
 #include "kofevtlog.h"
 
 /*
@@ -417,8 +418,9 @@ static int already_scanned(const char *path)
  * a performance note. It remembers a PATH, so a file written once, scanned
  * clean, and then OVERWRITTEN is never looked at again - which is a dropper's
  * whole sequence: put something harmless where it will be scanned, let it pass,
- * replace it. The identity this uses is (volume, index, size, mtime), so a file
- * that changed is a different key and is scanned again.
+ * replace it. The identity this uses is struct kof_fid - volume, node, size,
+ * birth and last-write, all in nanoseconds - so a file that changed is a
+ * different key and is scanned again.
  *
  * It is also what makes the realtime half agree with the on-demand half. They
  * were answering the same question with two different mechanisms and only one
@@ -431,13 +433,20 @@ static int already_scanned(const char *path)
  * nothing is skipped on its say-so alone any more.
  */
 static int scan_needed(struct koffridge *fr, const char *path,
-		       struct koffridge_fileid *id)
+		       struct kof_fid *id)
 {
-	if (!fr || !koffridge_identify(path, id)) {
+	if (!fr || !kof_fid_of(path, id)) {
 		/*
 		 * No identity, so no caching - koffridge.h says a key that
 		 * could not be established must not be invented. Scanned every
 		 * time, which is the safe direction.
+		 *
+		 * kof_fid_of ALSO answers zero for a symlink and for anything
+		 * that is not a regular file, which lands here and is right:
+		 * what a link names is another file with its own identity, and
+		 * a link is what an attacker repoints after it was called
+		 * clean. This used to follow the link and cache the target,
+		 * which is faster and is the window that closes.
 		 */
 		return 1;
 	}
@@ -894,7 +903,7 @@ int main(int argc, char **argv)
 			continue;
 
 		{
-			struct koffridge_fileid id;
+			struct kof_fid id;
 			uint64_t before;
 
 			if (!scan_needed(fridge, obj, &id)) {

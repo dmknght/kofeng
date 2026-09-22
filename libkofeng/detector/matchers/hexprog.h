@@ -3,7 +3,7 @@
  *
  * The encoding of a hex string once the build has parsed it: what the signature
  * compiler writes into the pack's string pool and what the matcher walks. It is not
- * part of the pack container - kofpack.h owns that - it is the content of one pool
+ * part of the pack container - dbcore.h owns that - it is the content of one pool
  * entry whose descriptor says KOF_STR_HEX.
  *
  * Both sides consult this file rather than each other, for the same reason the pack

@@ -55,6 +55,44 @@
 #define FLOOR_MS      0.5
 
 /*
+ * TWO JOBS, AND ONLY ONE OF THEM SURVIVES A SANITISER.
+ *
+ * This file is built twice - unit_hostile_unpack and asan_hostile_unpack - and
+ * the two binaries are not the same test:
+ *
+ *   plain   TIME and PRODUCED. The amplification ratio means something here
+ *           because base and dt are measured through the same code.
+ *   asan    MEMORY and PRODUCED. Every use after free, double free and
+ *           out-of-bounds access in the unpackers aborts the run, which is the
+ *           reason this binary exists at all.
+ *
+ * THE RATIO DOES NOT SURVIVE INSTRUMENTATION, and that is not noise to be
+ * re-measured away. ASAN's cost is per allocation and per access, not per
+ * instruction, so it falls on the hostile path - which allocates and reads far
+ * more - much harder than on the clean one it is divided by. Measured on this
+ * host, the same 7z case, machine otherwise idle:
+ *
+ *     plain   75x  78x  75x        AMPLIFY_MAX is 200
+ *     asan   237x 238x 241x  149x
+ *
+ * The amplification did not change; the denominator did. Raising the threshold
+ * to cover it would raise it for the plain build too and stop it catching the
+ * thing it exists to catch, and the numbers are not stable enough for a second
+ * threshold to sit anywhere honest either - 149 and 241 are the same build on
+ * the same machine.
+ *
+ * So the timing half is MEASURED AND REPORTED under the sanitiser and does not
+ * decide the exit status. What decides it there is the produce budget, which
+ * is a count and not a clock, and the sanitiser itself.
+ */
+#if defined(__SANITIZE_ADDRESS__) || \
+    (defined(__has_feature) && __has_feature(address_sanitizer))
+#define TIMING_IS_A_VERDICT 0
+#else
+#define TIMING_IS_A_VERDICT 1
+#endif
+
+/*
  * How many times a case that looks slow is measured again before it is
  * believed - the same guard, for the same reason, as hostile_fields.c.
  *
@@ -125,6 +163,11 @@ struct tally {
 	double worst_amp;
 	char worst[128];
 };
+
+/* What makes this run fail, which is not the same in both builds - see
+ * TIMING_IS_A_VERDICT. `slow` is still counted and still printed either way. */
+#define FAILING(t) (((TIMING_IS_A_VERDICT) ? (t)->slow : 0u) || (t)->over_produce)
+
 
 static uint64_t produced_total;
 
@@ -264,7 +307,8 @@ int main(int argc, char **argv)
 				 * case, and a failure it reports has already
 				 * been counted from the measurement above.
 				 */
-				if (base > 0.0 && dt > FLOOR_MS &&
+				if (TIMING_IS_A_VERDICT &&
+				    base > 0.0 && dt > FLOOR_MS &&
 				    dt / base > AMPLIFY_MAX) {
 					uint32_t r;
 
@@ -296,8 +340,10 @@ int main(int argc, char **argv)
 				}
 				if (dt > FLOOR_MS && amp > AMPLIFY_MAX) {
 					t.slow++;
-					printf("  AMPLIFY %s %s=0x%llx: %.2f ms "
+					printf("  %s %s %s=0x%llx: %.2f ms "
 					       "against %.3f ms (%.0fx)\n",
+					       TIMING_IS_A_VERDICT ? "AMPLIFY"
+							           : "amplify",
 					       tg->name, tg->fields[fi].name,
 					       (unsigned long long)hostile(vi, len),
 					       dt, base, amp);
@@ -328,7 +374,11 @@ int main(int argc, char **argv)
 		       (unsigned long long)t.cases,
 		       (unsigned)(sizeof utargets / sizeof utargets[0]),
 		       (unsigned long long)t.clean_bytes, t.worst_amp, t.worst,
-		       (t.slow || t.over_produce) ? " - FAILED" : "");
+		       (FAILING(&t)) ? " - FAILED" : "");
+	if (!TIMING_IS_A_VERDICT)
+		printf("  (timing measured, NOT asserted: a sanitiser inflates "
+		       "the ratio - see TIMING_IS_A_VERDICT. Memory safety and "
+		       "the produce budget are what this binary decides on.)\n");
 	else
 		printf("hostile unpack: %llu scan(s) over %u format(s) through "
 		       "the real modules, %llu byte(s) recovered from the clean "
@@ -336,7 +386,7 @@ int main(int argc, char **argv)
 		       (unsigned long long)t.cases,
 		       (unsigned)(sizeof utargets / sizeof utargets[0]),
 		       (unsigned long long)t.clean_bytes, FLOOR_MS / 20.0,
-		       (t.slow || t.over_produce) ? " - FAILED" : "");
+		       (FAILING(&t)) ? " - FAILED" : "");
 
-	return (t.slow || t.over_produce) ? 1 : 0;
+	return FAILING(&t) ? 1 : 0;
 }

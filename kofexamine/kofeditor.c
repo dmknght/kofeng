@@ -6107,6 +6107,21 @@ static void meta_add(char tab[][128], uint32_t *n, uint32_t cap, const char *w)
 
 	if (!w || !w[0])
 		return;
+	/* `cap - 1u` below - see meta_add. */
+	if (!cap)
+		return;
+	/*
+	 * `cap - 1u` BELOW, SO A ZERO CAP IS REFUSED FIRST.
+	 *
+	 * With cap 0 the eviction test `*n == cap` is true on an empty table
+	 * and the memmove is handed (0 - 1) * 128 - a length of nearly 2^64 -
+	 * which is not a bounds error the compiler or the caller can see. Both
+	 * callers pass MAX_META and cannot reach it today; the guard is here
+	 * because the next one may pass a variable, and because this is the
+	 * same shape already refused in aproc.c, wproc.c and kofviewer.c.
+	 */
+	if (!cap)
+		return;
 	for (i = 0; i < *n; i++)
 		if (!strcmp(tab[i], w))
 			return;

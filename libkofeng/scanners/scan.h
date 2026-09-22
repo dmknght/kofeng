@@ -15,7 +15,7 @@
 #define KOFENG_SCAN_H
 
 #include "../kofeng.h"
-#include "../databases/kofdb.h"
+#include "../databases/dbloader.h"
 #include "../detector/matchers/kofmatch.h"
 #include "../detector/matchers/kofplague.h"
 #include "../detector/overlord/kofoverlord.h"

@@ -36,6 +36,49 @@
  * is silent: a file that should have been scanned is not, and nothing says so.
  *
  *
+ * ON SOME SYSTEMS THE TIMESTAMP IS NOT A FIELD AT ALL, AND THE HOLE IS WIDER
+ * THAN THE PARAGRAPH ABOVE DESCRIBES.
+ *
+ * That paragraph assumes an attacker has to RESTORE the timestamp, which costs
+ * them a step. On a machine that normalises mtimes there is no step to take -
+ * the timestamp is already the same on every file and contributes nothing.
+ *
+ * Measured on the development host, which uses an overlay store of the kind
+ * reproducible builds produce:
+ *
+ *     /usr/lib/x86_64-linux-gnu/libc.so.6    mtime=0
+ *     /bin/ls                                mtime=0
+ *     1465 of 1962 system files              mtime=0   (74%)
+ *
+ * There the identity is effectively (volume, node, size), and a file rewritten
+ * in place at the same length is indistinguishable from the original. Nix
+ * stores, many container images and any tree built for bit-reproducibility are
+ * in this state; an ordinary distribution install is not, and /etc on the same
+ * machine has real timestamps.
+ *
+ * `born` is what is left on such a machine, and it is why this struct carries
+ * it: a normalised mtime is normalised at build time, and the ctime of the
+ * file as it sits on THIS disk is not - it moved when the package was
+ * installed. It is one field an attacker has to put back rather than one they
+ * find already flat, and on Linux utimensat cannot put it back at all.
+ *
+ * (This paragraph and the measurement in it were written on koffridge.h, over
+ * an identity that had no `born` field to offer as the answer. They are here
+ * now because this is the struct the question is about.)
+ *
+ *
+ * NANOSECONDS, AND THE UNIT IS NOT DECORATION.
+ *
+ * `written` was whole seconds once, and three rewrites of one file in place -
+ * same inode, same length - produced three identical identities, so the cache
+ * served the first scan's verdict for the third file's bytes. A write takes
+ * microseconds; an attacker did not have to restore anything, only to be
+ * quick. Measured:
+ *
+ *     mtime seconds  1789209554 1789209554 1789209554
+ *     mtime nsec      370836748  371003014  371007003
+ *
+ *
  * CLEAN ONLY, AND NOTHING ELSE IS STORED.
  *
  * A key is present or it is not. There is no payload, no verdict, no name and

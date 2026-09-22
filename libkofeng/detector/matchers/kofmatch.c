@@ -23,7 +23,7 @@
 #define _GNU_SOURCE
 
 #include "kofmatch.h"
-#include "../../databases/kofpack.h"   /* KOF_STR_* */
+#include "../../databases/dbcore.h"   /* KOF_STR_* */
 #include "../../kofcore/kofplatform.h"
 
 #include <stdlib.h>
@@ -689,7 +689,7 @@ int kof_hex_walk(kof_buf d, uint64_t start, const uint8_t *prog)
 
 /* ---- searching ranges ----------------------------------------------------- */
 
-/* The boundary question lives in kofpack.h beside the flags that ask it -
+/* The boundary question lives in dbcore.h beside the flags that ask it -
  * there were two copies of this and three spellings of the test. */
 #define is_word_byte(c) kof_str_word_byte(c)
 
@@ -929,7 +929,7 @@ int kof_match_lookup(struct kof_match_ctx *m, uint32_t slot,
 	 *
 	 * This used to `return 0` when the memo was missing or too small - which
 	 * reports the pattern as not present WITHOUT LOOKING, so a database that
-	 * ended up with memo_size 0 (kofdb.c derives it from n_uid * n_masks)
+	 * ended up with memo_size 0 (dbloader.c derives it from n_uid * n_masks)
 	 * would load clean, scan every object and detect nothing at all. The
 	 * memo is a cache; the honest degradation is to answer the question the
 	 * slow way. kof_match_state_init already treats memo_len 0 as success,

@@ -631,7 +631,7 @@ int         kof_engine_multimatch(const kof_engine *, uint64_t *bytes,
 /*
  * 1 - the database loader and writer changed together.
  *
- * kofpackw stopped page aligning the code section and kofdb stopped expecting
+ * dbpacker stopped page aligning the code section and dbloader stopped expecting
  * it to be, which is a change in this library's own code and so belongs here as
  * well as in KOF_PACK_MINOR. It still gates nothing: a pack says its own layout
  * and that is what the loader refuses on.
@@ -656,7 +656,7 @@ int         kof_engine_multimatch(const kof_engine *, uint64_t *bytes,
  * THE DATABASE FORMAT DID NOT MOVE, and that is not an oversight. Everything
  * above rides in fields the pack already had - one more bit in a module's
  * heur_want mask, two more values on the format axis - so KOF_PACK_MINOR
- * stays where it is, exactly as the rule beside it in kofpack.h requires:
+ * stays where it is, exactly as the rule beside it in dbcore.h requires:
  * that number moves when the LAYOUT moves and not when the engine grows a
  * capability. A rebuild is needed; a refusal is not.
  *

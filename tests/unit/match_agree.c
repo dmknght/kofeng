@@ -32,7 +32,7 @@
 #include "../../libkofeng/kofcore/kofcore.h"
 #include "../../libkofeng/detector/matchers/kofmatch.h"
 #include "../../libkofeng/detector/matchers/hexprog.h"
-#include "../../libkofeng/databases/kofpack.h"
+#include "../../libkofeng/databases/dbcore.h"
 
 static int failures;
 static const char *g_case = "?";

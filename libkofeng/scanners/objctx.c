@@ -21,7 +21,7 @@
  */
 
 /* Before any include, and _GNU_SOURCE rather than _POSIX_C_SOURCE, for the
- * reason kofdb.c gives at length: kofplatform.h's POSIX branch has an inline
+ * reason dbloader.c gives at length: kofplatform.h's POSIX branch has an inline
  * kof_memmem whose body calls memmem, which glibc declares only under this
  * macro - and _POSIX_C_SOURCE actively suppresses it. */
 #define _GNU_SOURCE

@@ -25,7 +25,7 @@
 #include <string.h>
 
 #include "../../libkofeng/detector/matchers/kofmatch.h"
-#include "../../libkofeng/databases/kofpack.h"
+#include "../../libkofeng/databases/dbcore.h"
 
 static int failures;
 

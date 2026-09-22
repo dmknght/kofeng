@@ -28,7 +28,7 @@
  *
  * The code section is never mutated. It is opaque native code that the loader
  * cannot validate and the scanner calls, so damaging it and then running is not a
- * finding about the engine - it is the threat model kofpack.h already states, where
+ * finding about the engine - it is the threat model dbcore.h already states, where
  * write access to the database is write access to the process. What is fuzzed is
  * everything the loader does claim to check.
  *
@@ -47,9 +47,9 @@
 #include <sys/stat.h>
 
 #include "../../libkofeng/kofcore/kofplatform.h"
-#include "../../libkofeng/databases/kofdb.h"
-#include "../../libkofeng/databases/kofpack.h"
-#include "../../libkofeng/databases/kofpackw.h"
+#include "../../libkofeng/databases/dbloader.h"
+#include "../../libkofeng/databases/dbcore.h"
+#include "../../libkofeng/databases/dbpacker.h"
 #include "../../libkofeng/detector/matchers/hexprog.h"
 #include "../../libkofeng/detector/matchers/kofmatch.h"
 

@@ -3,7 +3,7 @@
  * on the other side.
  *
  * WHY THIS EXISTS. The target used to be a uint32 bitmask; it is now a count
- * and a list of ids - see n_target in kofdb.h. The reason for the change is
+ * and a list of ids - see n_target in dbloader.h. The reason for the change is
  * that a bit per target made the number of formats this engine could ever have
  * equal to the width of a word, and the reason for THIS TEST is what a list
  * can get wrong that a mask could not:
@@ -32,9 +32,9 @@
 #include <sys/stat.h>
 
 #include "../../libkofeng/kofcore/kofplatform.h"
-#include "../../libkofeng/databases/kofdb.h"
-#include "../../libkofeng/databases/kofpack.h"
-#include "../../libkofeng/databases/kofpackw.h"
+#include "../../libkofeng/databases/dbloader.h"
+#include "../../libkofeng/databases/dbcore.h"
+#include "../../libkofeng/databases/dbpacker.h"
 
 static int failures;
 

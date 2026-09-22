@@ -24,7 +24,7 @@
  * zip.h, pdf.h, tar.h - descriptions of what a SCANNED TARGET looks like, which
  * a compiled module in bases/ includes in order to read one. An event record is
  * none of those things: it is a format this toolset defines for itself, in the
- * same sense databases/kofpack.h defines .ksig, and filing it beside the target
+ * same sense databases/dbcore.h defines .ksig, and filing it beside the target
  * parsers makes both harder to find.
  *
  * The rule, stated so the next file lands correctly: core/kofmod/ is what a

@@ -1,5 +1,5 @@
 /*
- * kofpack.h - the on-disk pack format.
+ * dbcore.h - the on-disk pack format.
  *
  * A pack is one file holding a set of signature modules: their code, the strings
  * they declare, the names they report, and the preconditions the host filters on.
@@ -98,8 +98,8 @@
  * about the blobs inside it, not about mapping it directly.
  */
 
-#ifndef KOFENG_KOFPACK_H
-#define KOFENG_KOFPACK_H
+#ifndef KOFENG_DBCORE_H
+#define KOFENG_DBCORE_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -316,7 +316,7 @@ enum kof_pack_kind {
 
 enum kof_pack_sec_id {
 	/* KOF_PRE_TARGET_STRIDE x n_mods - a count and the ids it counts, NOT
-	 * a mask: see n_target in kofdb.h for why the axis stopped being bits. */
+	 * a mask: see n_target in dbloader.h for why the axis stopped being bits. */
 	KOF_SEC_PRE_TARGET = 0,
 	KOF_SEC_PRE_SCAN   = 1,   /* uint32 x n_mods */
 	KOF_SEC_PRE_ARCH   = 2,   /* uint32 x n_mods */
@@ -954,7 +954,7 @@ _Static_assert(sizeof(struct kof_pack_idx)  == 8,   "pack index slot grew paddin
  * legitimately grew, which taught whoever hit it to update the number rather than to
  * ask why it moved. */
 /* 88 while any_target was a uint32 mask; 96 once it became a 64 bit presence
- * set over target ids - see the field, and n_target in kofdb.h for why the
+ * set over target ids - see the field, and n_target in dbloader.h for why the
  * axis stopped being bits; 104 with n_blk and n_pool, the two counts the
  * similarity sections need. */
 _Static_assert(sizeof(struct kof_pack_hdr) ==
@@ -968,4 +968,4 @@ _Static_assert(offsetof(struct kof_pack_hdr, crc32) + sizeof(uint32_t) ==
 	       KOF_PACK_CRC_FROM,
 	       "crc32 is not the last field outside the checksummed region");
 
-#endif /* KOFENG_KOFPACK_H */
+#endif /* KOFENG_DBCORE_H */

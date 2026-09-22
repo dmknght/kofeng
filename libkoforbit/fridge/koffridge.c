@@ -54,122 +54,18 @@
 #include "../../libkofeng/kofcore/kofplatform.h"
 
 /*
- * THE ONE PLATFORM-DEPENDENT THING IN THIS FILE, and it is confined to the
- * function below.
+ * NOTHING IN THIS FILE IS PLATFORM-DEPENDENT ANY MORE.
  *
- * Everything else here is a hash table over opaque keys and compiles the same
- * everywhere. What a file's identity IS, though, is a question only the
- * operating system answers, and the two answers are the same four numbers
- * reached through different calls - so the split is at the call and not at the
- * structure, and no caller learns which platform it is on.
+ * It used to hold koffridge_identify, one #ifdef over stat and
+ * GetFileInformationByHandle, and that was the whole of the platform in here.
+ * It is gone: the identity a file has is kof_fid_of's answer, declared in
+ * fidset.h and defined per platform beside the collector that knows the
+ * platform. See the note above struct koffridge in the header for what the
+ * duplicate cost while both existed.
+ *
+ * What is left is a hash table over opaque keys, and it compiles the same
+ * everywhere.
  */
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <sys/stat.h>
-#endif
-
-int koffridge_identify(const char *path, struct koffridge_fileid *out)
-{
-	if (!out)
-		return 0;
-	memset(out, 0, sizeof *out);
-	if (!path || !path[0])
-		return 0;
-
-#ifdef _WIN32
-	{
-		BY_HANDLE_FILE_INFORMATION bi;
-		HANDLE h;
-
-		/*
-		 * Zero access rights: this asks for METADATA and opens nothing
-		 * it could read. That is what lets it identify a file the
-		 * caller has no right to the contents of, and it is why the
-		 * share mode allows delete - a file somebody else is in the
-		 * middle of replacing must not have its identification blocked,
-		 * and must certainly not have its replacement blocked by this.
-		 */
-		h = CreateFileA(path, 0,
-				FILE_SHARE_READ | FILE_SHARE_WRITE |
-				FILE_SHARE_DELETE,
-				NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
-				NULL);
-		if (h == INVALID_HANDLE_VALUE)
-			return 0;
-		if (!GetFileInformationByHandle(h, &bi)) {
-			CloseHandle(h);
-			return 0;
-		}
-		CloseHandle(h);
-
-		out->volume = bi.dwVolumeSerialNumber;
-		out->index  = ((uint64_t)bi.nFileIndexHigh << 32) |
-			      bi.nFileIndexLow;
-		out->size   = ((uint64_t)bi.nFileSizeHigh << 32) |
-			      bi.nFileSizeLow;
-		out->mtime  = ((uint64_t)bi.ftLastWriteTime.dwHighDateTime
-			       << 32) | bi.ftLastWriteTime.dwLowDateTime;
-		return 1;
-	}
-#else
-	{
-		struct stat st;
-
-		/*
-		 * stat and not lstat, on purpose: two paths that reach the same
-		 * file through different links ARE the same file and should
-		 * share one answer, which is the whole point of keying on
-		 * st_dev and st_ino rather than on the path. A symlink of its
-		 * own has no content to scan.
-		 */
-		if (stat(path, &st) != 0)
-			return 0;
-		if (!S_ISREG(st.st_mode))
-			return 0;
-
-		out->volume = (uint64_t)st.st_dev;
-		out->index  = (uint64_t)st.st_ino;
-		out->size   = (uint64_t)st.st_size;
-
-		/*
-		 * NANOSECONDS, AND THE SECOND WAS NOT ENOUGH.
-		 *
-		 * This used to take st_mtime - whole seconds - on the argument
-		 * that a second is finer than the thing being guarded against.
-		 * Measured, it is not. Three rewrites of one file, in place,
-		 * same inode, same length:
-		 *
-		 *     mtime seconds  1789209554 1789209554 1789209554
-		 *     mtime nsec      370836748  371003014  371007003
-		 *
-		 * At second granularity all three are the same file, so the
-		 * cache serves the first scan's verdict for the third file's
-		 * bytes. An attacker does not have to restore a timestamp for
-		 * that - they have to be quick, and a write takes microseconds.
-		 *
-		 * The nanosecond field costs nothing: it arrives in the same
-		 * stat. Windows needs no change, its FILETIME is already in
-		 * 100ns units.
-		 *
-		 * WHAT IT STILL DOES NOT FIX is a filesystem that normalises
-		 * timestamps - measured, 74% of the system files on this host
-		 * have mtime 0, and their nsec is 0 too. See the header.
-		 */
-#if defined(st_mtime) || defined(_BSD_SOURCE) || defined(_SVID_SOURCE) || \
-    (defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 200809L) || \
-    defined(_GNU_SOURCE) || defined(__APPLE__)
-		out->mtime  = (uint64_t)st.st_mtime * 1000000000ull +
-			      (uint64_t)st.st_mtim.tv_nsec;
-#else
-		/* No sub-second field on this system: the coarse answer, and
-		 * the same units, so the two cannot be compared by accident. */
-		out->mtime  = (uint64_t)st.st_mtime * 1000000000ull;
-#endif
-		return 1;
-	}
-#endif
-}
 
 /*
  * 4096 entries, about 1.2MB.
@@ -691,8 +587,8 @@ size_t koffridge_describe(struct koffridge *f, char *buf, size_t cap)
 /*
  * TWO, because the KEY changed meaning.
  *
- * koffridge_identify now puts nanoseconds where it put seconds, so every entry
- * a version-1 file holds is keyed on a number this build would never compute.
+ * The identity put nanoseconds where it had put seconds, so every entry a
+ * version-1 file holds is keyed on a number this build would never compute.
  * Those entries are not wrong, they are unreachable - they would load, sit in
  * the table, and never match anything again.
  *
@@ -700,6 +596,18 @@ size_t koffridge_describe(struct koffridge *f, char *buf, size_t cap)
  * it occupies the capacity the working set needs and reports a hit rate that
  * looks like a tuning problem. So the version refuses them, which is what the
  * field is for.
+ *
+ * AND IT STAYED AT TWO WHEN KOFFRIDGE_ID_MAX WENT FROM 48 TO 56, which is
+ * worth saying because the obvious move was to bump it again.
+ *
+ * This field is for a change the file cannot otherwise show: the key means
+ * something new while looking identical. Widening the id is not that. It
+ * changes sizeof(struct entry), the header carries entry_size, and the load
+ * refuses a mismatch with a reason of its own - so the file is already
+ * rejected, by the check that describes the actual difference. Bumping the
+ * version as well would add a second refusal for one cause and a worse
+ * message: "written by a different version" where "written by a build with a
+ * different entry" is the true one.
  */
 #define FILE_VERSION 2u
 

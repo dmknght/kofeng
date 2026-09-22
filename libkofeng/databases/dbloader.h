@@ -1,5 +1,5 @@
 /*
- * kofdb.h - the loaded database.
+ * dbloader.h - the loaded database.
  *
  * Turns whatever the database is on disk into a kof_engine: module code mapped
  * executable, plus the tables the host needs to decide which modules to run and
@@ -17,8 +17,8 @@
  *     it out of here is what stops a 32MB table from being paid per file.
  */
 
-#ifndef KOFENG_KOFDB_H
-#define KOFENG_KOFDB_H
+#ifndef KOFENG_DBLOADER_H
+#define KOFENG_DBLOADER_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -27,7 +27,7 @@
 #include <kofmod/kofplague.h>
 #include <kofmod/script.h>   /* kof_script_fam_mask - the subfamily test below */
 #include "../kofcore/kofcore.h"   /* kof_crc32, kof_round_up */
-#include "kofpack.h"       /* KOF_STR_MAX_LEN, KOF_BLOB_MAX_CODE */
+#include "dbcore.h"       /* KOF_STR_MAX_LEN, KOF_BLOB_MAX_CODE */
 
 /*
  * How many distinct region masks a database may hold.
@@ -171,7 +171,7 @@ struct kof_module {
 	 */
 	uint32_t block_base, n_block;
 
-	/* What KOF_TARGET_NAME declared - see struct kof_pack_mod in kofpack.h
+	/* What KOF_TARGET_NAME declared - see struct kof_pack_mod in dbcore.h
 	 * and kof_db_family below. Meaningless and unread for an unpack-kind
 	 * module, same as on the pack record this is copied from. */
 	uint32_t family_off;
@@ -334,7 +334,7 @@ struct kof_engine {
 	 * Not one array with a kind field: the scan loop walks every detector for
 	 * every object, and the unpack decision walks every unpacker once the
 	 * object has a verdict. Mixed, each loop would step over records it must
-	 * then reject - the same argument kofpack.h makes for one kind per pack,
+	 * then reject - the same argument dbcore.h makes for one kind per pack,
 	 * applied to the loaded form.
 	 */
 	struct kof_module   *mods;
@@ -386,7 +386,7 @@ struct kof_engine {
 	 * for why that is the gate asked early rather than a policy.
 	 *
 	 * COMPUTED HERE AND NOT READ FROM THE PACK, although a pack header
-	 * carries the same union of its own modules (any_target, kofpack.h).
+	 * carries the same union of its own modules (any_target, dbcore.h).
 	 * That field is per pack, and a database is a directory of them split
 	 * by kind and format - sigs-pe, unpack-elf, heur-elf - so the union
 	 * that matters is over everything actually loaded. Walking the three
@@ -515,7 +515,7 @@ struct kof_engine {
 /*
  * Load from a single .ksig pack or a directory of them.
  *
- * A database is one or more packs; kofpack.h defines what is in one. Given a
+ * A database is one or more packs; dbcore.h defines what is in one. Given a
  * directory, every *.ksig in it is loaded and the tables above are the concatenation
  * of theirs - a pack that fails validation is refused on its own and the rest still
  * load, so one corrupt file does not take the database with it.
@@ -580,4 +580,4 @@ const char *kof_db_heur_predict(const struct kof_engine *,
  */
 const char *kof_db_source(const struct kof_engine *, const struct kof_module *);
 
-#endif /* KOFENG_KOFDB_H */
+#endif /* KOFENG_DBLOADER_H */

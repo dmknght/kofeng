@@ -2,7 +2,7 @@
  * kofeng.c - the API boundary.
  *
  * Delegation and nothing else: validate what came in, own the lifetimes, translate
- * between the public types and the internal ones. The work is in kofdb (materialise
+ * between the public types and the internal ones. The work is in dbloader (materialise
  * the database) and scanners (walk an object).
  *
  * Worth being this thin. The public header is the promise; if the promise is kept by
@@ -10,7 +10,7 @@
  */
 
 #include "kofeng.h"
-#include "databases/kofdb.h"
+#include "databases/dbloader.h"
 #include "detector/matchers/kofmultimatch.h"
 #include "scanners/scan.h"
 
@@ -121,7 +121,7 @@ uint64_t kof_engine_db_stamp(const kof_engine *e)
 			continue;
 		/*
 		 * THE CHECKSUM IS THE PACK'S CONTENT, already computed and
-		 * already verified at load - see kofpack.h, step 5. The length
+		 * already verified at load - see dbcore.h, step 5. The length
 		 * and the build go in beside it so that two files could not
 		 * agree by a crc collision alone.
 		 */

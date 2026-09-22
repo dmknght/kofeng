@@ -23,7 +23,7 @@
  * foo.dll was clean an hour ago" about a file that has been replaced since.
  *
  * The key is an IDENTITY the caller supplies: bytes that change when the thing
- * changes. koffridge_fileid below is what that means for a file, and the
+ * changes. struct kof_fid in fidset.h is what that means for a FILE, and the
  * caller fills it because only the caller knows what it is holding. Nothing
  * here interprets the bytes - they are hashed to find the slot and then
  * COMPARED IN FULL, so a hash collision cannot return another object's
@@ -61,7 +61,7 @@
  * with its own lock, and a probe run and any eviction it performs stay inside
  * one. Two threads working on different keys do not meet. See struct shard.
  *
- * WHAT IS SAFE: koffridge_get, koffridge_put and koffridge_identify, from any
+ * WHAT IS SAFE: koffridge_get, koffridge_put and koffridge_skip, from any
  * number of threads at once.
  *
  * WHAT IS NOT, and is not worth making so: open, close and clear are lifecycle,
@@ -111,85 +111,64 @@ struct kof_result;
  * identity that does not fit is not truncated - it is REFUSED, and the caller
  * gets a miss and scans. Truncating would make two different things equal.
  */
-#define KOFFRIDGE_ID_MAX 48u
+/*
+ * 56 AND NOT 48, AND THE NUMBER IS struct kof_fid's.
+ *
+ * It was 48, which is smaller than the identity this tree actually computes:
+ * sizeof(struct kof_fid) is 56, so a caller handing one over was refused by
+ * the id_len check below - a SILENT refusal, because a refused put is a miss
+ * and a miss is just a rescan. The cache would have looked like it was working
+ * and never stored anything.
+ *
+ * That was not hypothetical: it is why koffridge grew a second, narrower
+ * identity of its own that did fit, and why two structs meaning the same thing
+ * lived in this one directory. One of them is gone and this is the bound that
+ * let the other one be deleted.
+ *
+ * WHAT IT COSTS, measured rather than waved at: struct entry goes from 304 to
+ * 312 bytes, because it is dominated by the 236-byte verdict and not by the
+ * key. A hundred thousand entries go from 29.0MB to 29.8MB.
+ *
+ * AND A CACHE WRITTEN BY THE OLD BUILD IS REFUSED, NOT MISREAD. The file
+ * header carries entry_size and koffridge_load compares it, so a saved cache
+ * from a 48-byte build is rejected with "written by a build with a different
+ * entry" and the run rescans. That is the whole cost of the change on disk.
+ */
+#define KOFFRIDGE_ID_MAX 56u
 
 /*
- * WHAT IDENTIFIES A FILE, and the fields are the ones that change when the
- * bytes do without costing a read to obtain.
+ * WHAT IDENTIFIES A FILE IS NOT DEFINED HERE, AND THAT IS THE POINT.
  *
- * On Windows: dwVolumeSerialNumber, nFileIndexHigh:nFileIndexLow, nFileSize,
- * ftLastWriteTime, all from one GetFileInformationByHandle on the handle that
- * is already open. On Linux: st_dev, st_ino, st_size and st_mtim from one stat.
+ * This cache takes an identity as OPAQUE BYTES - it hashes them to find a slot
+ * and compares them in full to confirm one, and it never reads a field. So the
+ * question "what identifies a file" belongs to whoever answers it, which is
+ * fidset.h: struct kof_fid, filled by kof_fid_of, one definition per platform.
  *
- * `mtime` IS IN NANOSECONDS on both, and the unit is not decoration. It was
- * whole seconds, and three rewrites of one file in place - same inode, same
- * length - produced three identical identities, so the cache served the first
- * scan's verdict for the third file's bytes. A write takes microseconds; an
- * attacker did not have to restore anything, only to be quick. Measured:
+ * IT USED TO BE ANSWERED HERE AS WELL, and that is the fault this closes.
+ * There were two structs in this one directory meaning the same thing - struct
+ * kof_fid at 56 bytes and a struct koffridge_fileid at 32 - filled by two
+ * different functions, and the narrower one lost every distinction the wider
+ * one drew:
  *
- *     mtime seconds  1789209554 1789209554 1789209554
- *     mtime nsec      370836748  371003014  371007003
+ *     a symlink        identified as its TARGET, so two links to one file
+ *                      shared a key and calling one clean spoke for both
+ *     a directory      identified as though it had content to cache
+ *     ReFS             a 64-bit index on a filesystem whose ids outgrew it
+ *     ctime / birth    absent, so a file rewritten and stamped back to its
+ *                      old mtime kept its old identity
  *
- * IT IS NOT A HASH OF THE CONTENT and does not pretend to be. A file rewritten
- * in place with the same length and a restored timestamp has the same identity
- * here and would be served a stale verdict. That is a real hole and it is the
- * standard bargain: the alternative is reading and hashing every file, which is
- * the work the cache exists to avoid. A caller that cannot accept it passes a
- * content hash as the identity instead - this struct is a convention, not a
- * requirement, and nothing here reads its fields.
+ * None of those is visible at a call site. Both returned an identity and
+ * neither said which questions it had declined to ask, so the weaker one was
+ * not a smaller version of the stronger - it was the same call with four
+ * silent holes in it. libkoforbit/antarc/afid.h says the same of the SHAPE it
+ * had: declared in orbit and implemented in orbit behind an #ifdef, which is
+ * what kof_fid_of was written to correct.
  *
- *
- * ON SOME SYSTEMS THE TIMESTAMP IS NOT A FIELD AT ALL, AND THE HOLE IS WIDER
- * THAN THE PARAGRAPH ABOVE DESCRIBES.
- *
- * That paragraph assumes an attacker has to RESTORE the timestamp, which costs
- * them a step. On a machine that normalises mtimes there is no step to take -
- * the timestamp is already the same on every file and contributes nothing.
- *
- * Measured on the development host, which uses an overlay store of the kind
- * reproducible builds produce:
- *
- *     /usr/lib/x86_64-linux-gnu/libc.so.6    mtime=0
- *     /bin/ls                                mtime=0
- *     1465 of 1962 system files              mtime=0   (74%)
- *
- * There the identity is effectively (dev, ino, size), and a file rewritten in
- * place at the same length is indistinguishable from the original. Nix stores,
- * many container images and any tree built for bit-reproducibility are in this
- * state; an ordinary distribution install is not, and /etc on the same machine
- * has real timestamps.
- *
- * A HOST THAT CANNOT ACCEPT THAT PASSES A CONTENT HASH, which this struct
- * already permits and which kof_sha256_file already computes. What that costs
- * is a read of every file - the work the cache exists to avoid - so it is a
- * decision about the machine rather than a default anything here can pick.
+ * A caller that needs a file's identity includes fidset.h and calls
+ * kof_fid_of. A caller with its own notion of one - a content hash, a module's
+ * mapped base - passes that instead, because this still takes bytes.
  */
-struct koffridge_fileid {
-	uint64_t volume;
-	uint64_t index;
-	uint64_t size;
-	uint64_t mtime;
-};
 
-/*
- * Fill `out` with the identity of the file at `path`. Non-zero on success.
- *
- * ONE IMPLEMENTATION FOR BOTH PLATFORMS, and it is here because the struct
- * above is here. The paragraph describing what each field is on Windows and on
- * Linux was written before either was implemented, and the only code that ever
- * filled it in was a private static inside kofmemscan - which is a Windows-only
- * tool, so half of a documented contract had no implementation at all and the
- * other half could not be reached by anything else. A cache whose key nobody
- * else can compute is a cache nobody else can use.
- *
- * Windows: one GetFileInformationByHandle. POSIX: one stat. Neither reads a
- * byte of the content, which is the property the whole bargain rests on.
- *
- * ZERO ON FAILURE, and a caller that gets zero must scan WITHOUT caching rather
- * than cache under a key it could not establish - a key built from a failed
- * query is a key that collides with every other failed query.
- */
-int koffridge_identify(const char *path, struct koffridge_fileid *out);
 
 /*
  * THE ANSWER, WHICH IS THE VERDICT AND NOT THE REPORT.

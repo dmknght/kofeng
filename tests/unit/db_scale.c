@@ -82,8 +82,8 @@ int main(void)
 #include <sys/vfs.h>
 
 #include "../../libkofeng/kofcore/kofplatform.h"
-#include "../../libkofeng/databases/kofdb.h"
-#include "../../libkofeng/databases/kofpackw.h"
+#include "../../libkofeng/databases/dbloader.h"
+#include "../../libkofeng/databases/dbpacker.h"
 #include "../../libkofeng/scanners/scan.h"
 #include "../../libkofeng/kofeng.h"
 

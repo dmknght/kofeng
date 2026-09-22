@@ -35,6 +35,7 @@
  */
 #include "../../libkofeng/kofeng.h"
 #include "../../libkoforbit/fridge/koffridge.h"
+#include "../../libkoforbit/fridge/fidset.h"
 
 static int fails;
 
@@ -160,11 +161,16 @@ static void concurrent(void)
 	 * counter updated without its lock loses some of them.
 	 */
 	koffridge_stats(f, &st);
-	ck(st.stores + st.refused ==
-	   (uint64_t)made * 4ull * HAM_KEYS,
-	   "every put is counted exactly once");
-	ck(st.hits + st.misses == (uint64_t)made * 4ull * HAM_KEYS,
-	   "every get is counted exactly once");
+	/* One type throughout: mixing 4ull into uint64_t arithmetic made gcc
+	 * report a sign conversion on every build of this file. */
+	{
+		uint64_t expect = (uint64_t)made * 4u * (uint64_t)HAM_KEYS;
+
+		ck(st.stores + st.refused == expect,
+		   "every put is counted exactly once");
+		ck(st.hits + st.misses == expect,
+		   "every get is counted exactly once");
+	}
 	ck(st.used <= st.capacity, "never more entries than slots");
 
 	printf("  concurrent: %d thread(s), %llu hit(s), %llu wrong, "
@@ -499,7 +505,7 @@ int main(void)
 	struct koffridge_verdict v;
 	struct koffridge_stat st;
 	struct kof_result res;
-	struct koffridge_fileid id;
+	struct kof_fid id;
 	char line[160];
 	uint32_t i;
 
@@ -509,19 +515,53 @@ int main(void)
 		return 1;
 	ck(koffridge_db_stamp(f) == 0x2026090901ull, "db stamp kept");
 
+	/*
+	 * 0. THE IDENTITY THIS CACHE IS ACTUALLY ASKED TO HOLD MUST FIT IN IT.
+	 *
+	 * This is the whole of the bug that produced two identity structs. The
+	 * cache refuses an id longer than KOFFRIDGE_ID_MAX, sizeof(struct
+	 * kof_fid) was 56 and the bound was 48, so the one identity this tree
+	 * computes could never be stored - and a refused put is indistinguish-
+	 * able from a miss, so it looked like a cache that simply never warmed.
+	 *
+	 * Asserted as a compile-time check as well as a runtime one: the next
+	 * field added to struct kof_fid must not be able to reintroduce this
+	 * quietly.
+	 */
+	{
+		static const char fits[sizeof(struct kof_fid) <=
+				       KOFFRIDGE_ID_MAX ? 1 : -1] = { 0 };
+		(void)fits;
+	}
+	ck(sizeof(struct kof_fid) <= KOFFRIDGE_ID_MAX,
+	   "a whole struct kof_fid fits the cache key");
+
 	/* 1. store and retrieve, clean */
 	memset(&id, 0, sizeof id);
-	id.volume = 3; id.index = 77; id.size = 4096; id.mtime = 111;
+	{
+		uint64_t vol = 3, node = 77;
+
+		memcpy(id.volume, &vol, sizeof vol);
+		memcpy(id.node, &node, sizeof node);
+	}
+	id.size = 4096; id.born = 10; id.written = 111;
 	ck(!koffridge_get(f, &id, sizeof id, &v), "miss before store");
 	ck(koffridge_put(f, &id, sizeof id, NULL) == 1, "store clean");
 	ck(koffridge_get(f, &id, sizeof id, &v) == 1, "hit after store");
 	ck(v.findings == 0 && v.name[0] == '\0', "clean verdict is clean");
 
 	/* 2a. one byte different is a different key */
-	id.mtime = 112;
+	id.written = 112;
 	ck(!koffridge_get(f, &id, sizeof id, &v), "mtime change misses");
-	id.mtime = 111;
-	id.index = 78;
+	id.written = 111;
+	id.born = 11;
+	ck(!koffridge_get(f, &id, sizeof id, &v), "ctime change misses");
+	id.born = 10;
+	{
+		uint64_t node = 78;
+
+		memcpy(id.node, &node, sizeof node);
+	}
 	ck(!koffridge_get(f, &id, sizeof id, &v), "index change misses");
 
 	/* 2b. same bytes, different length */

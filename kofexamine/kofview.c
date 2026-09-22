@@ -9,7 +9,7 @@
  * compiler must see declared to compile the body at all, whether or not this
  * translation unit ever calls it. On glibc _POSIX_C_SOURCE does not merely
  * fail to enable memmem, it suppresses it. Same reasoning, same wording, as
- * kofdb.c and kofmatch.c. */
+ * dbloader.c and kofmatch.c. */
 #define _GNU_SOURCE
 
 #include "kofview.h"

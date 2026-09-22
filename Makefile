@@ -455,7 +455,7 @@ LDFLAGS     += -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
 # on an x86_64 host - and a forced machine that is not the compiler's own is
 # what the sysroots below are for. WORTH KNOWING BEFORE SHIPPING: a database
 # is machine-specific, so an ARM64 build now produces packs an x86_64 scanner
-# refuses (kofdb says "built for machine 1, this is 2" and skips the file).
+# refuses (dbloader says "built for machine 1, this is 2" and skips the file).
 # Building what is distributed still means saying KOF_HOST_MACH=x86_64.
 #
 # Both machines build into the same tree, and switching between them is safe
@@ -588,6 +588,10 @@ MKDIR    = if not exist "$(subst /,\,$(1))" mkdir "$(subst /,\,$(1))"
 # and both convert to backslashes: cmd's own file commands do not accept the
 # forward slashes the rest of this Makefile writes.
 RMRF     = if exist "$(subst /,\,$(1))" rmdir /s /q "$(subst /,\,$(1))"
+# One FILE, not a tree - rmdir refuses one here and rm -rf would take a
+# directory by the same name without asking. Used to rebuild an archive from
+# empty; see the note above $(LIB).
+RM       = if exist "$(subst /,\,$(1))" del /q "$(subst /,\,$(1))"
 COPY     = copy /y "$(subst /,\,$(1))" "$(subst /,\,$(2))" >NUL
 #
 # Running a program this build just produced, by the path it was written to.
@@ -628,6 +632,7 @@ MKFIXTURES = powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -
 else
 MKDIR    = mkdir -p '$(1)'
 RMRF     = rm -rf '$(1)'
+RM       = rm -f '$(1)'
 COPY     = cp -f '$(1)' '$(2)'
 EXEC     = $(1)
 QUIET    = >/dev/null
@@ -669,10 +674,10 @@ endif
 #                                  and on the ARM64 this targets; real on a
 #                                  strict-alignment target, so it is a port
 #                                  question rather than a bug here.
-#                                  kofpackw.c, kofemu.c, kofeditor.c,
+#                                  dbpacker.c, kofemu.c, kofeditor.c,
 #                                  kofviewer.c, wevt_etw.c, wchan.c
 #   -Wdouble-promotion         6   float reaching a double parameter.
-#                                  kofemu.c, kofpackw.c
+#                                  kofemu.c, dbpacker.c
 #   -Wformat-nonliteral       10   printf handed a format built at run time.
 #                                  Deliberate in these callers - a column
 #                                  width or a label is chosen and then used -
@@ -846,8 +851,8 @@ $(STAMP): ;
 # ---------------------------------------------------------------- the library
 
 LIB_SRC := libkofeng/kofeng.c \
-           libkofeng/databases/kofdb.c \
-           libkofeng/databases/kofpackw.c \
+           libkofeng/databases/dbloader.c \
+           libkofeng/databases/dbpacker.c \
            libkofeng/detector/heur/kofheur.c \
            libkofeng/detector/matchers/kofmatch.c \
            libkofeng/detector/matchers/kofplague.c \
@@ -1030,8 +1035,24 @@ $(INT)/bdd_%.o: libkofemu/bddisasm/src/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(VENDOR_CFLAGS) $(EMU_INC) -c $< -o $@
 
+#
+# THE ARCHIVE IS REMOVED FIRST, AND THAT IS A FIX RATHER THAN TIDINESS.
+#
+# `ar r` REPLACES a member and adds a new one; it never removes one whose
+# source has gone. So a file renamed between two builds leaves its old object
+# in the archive beside the new one, and every symbol it defines is then in
+# there twice - the stale copy silently winning for any link that reaches it
+# first. Renaming dbloader.c and dbpacker.c produced exactly that: kofdb.o and
+# kofpackw.o sat in libkofeng.a next to their replacements, and nothing said so
+# because a duplicate member is not an error.
+#
+# An archive should hold what its prerequisites say and nothing else, so it is
+# built from empty every time. It costs one unlink; ar then writes the same
+# members it was going to write anyway.
+#
 $(LIB): $(LIB_OBJ) $(EMU_OBJ) $(VENDOR_OBJ)
 	@$(call MKDIR,$(dir $@))
+	@$(call RM,$@)
 	$(AR) rcs $@ $^
 
 # ------------------------------------------------------------------- the SDK
@@ -1113,6 +1134,26 @@ KOFRIDGE_SRC := libkoforbit/fridge/koffridge.c \
 
 # The process record builder, shared by both collectors - see kofproc.h.
 KOFPROC_SRC := libkoforbit/proc/kofproc.c
+
+#
+# THE PLATFORM HALF OF kof_fid_of, AS A NAME ANY TOOL CAN LINK.
+#
+# fidset.h declares kof_fid_of and does not define it: the answer is one stat
+# on Linux and one GetFileInformationByHandle on Windows, so each platform
+# supplies its own, exactly as kof_walk_open does. It was reachable only
+# through a collector's source list, which is why kofwatchman - which links the
+# cache and no collector - could not call it and grew a second, weaker identity
+# of its own instead. That duplicate is gone; this is the line that lets the
+# survivor be linked without dragging a collector in with it.
+#
+# afid.c is stat and string.h, wfid.c is windows.h. Neither pulls in the rest
+# of its collector, which is the property that makes this a variable rather
+# than a dependency on $(ANTARC_SRC).
+ifeq ($(NATIVE_OS),windows)
+KOFFID_SRC := libkoforbit/grille/wfid.c
+else
+KOFFID_SRC := libkoforbit/antarc/afid.c
+endif
 
 #
 # THE LINUX COLLECTOR. Both halves: the snapshot walk over /proc and the
@@ -1332,13 +1373,13 @@ WATCHMAN_CHAN = -DKOF_HAVE_CHAN -Ilibkoforbit/chan \
 endif
 
 $(OUT)/bin/kofwatchman$(EXE): kofwatcher/kofwatchman.c $(KOFEVT_SRC) \
-                              $(KOFPROC_SRC) \
+                              $(KOFPROC_SRC) $(KOFFID_SRC) \
                               $(KOFRIDGE_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofeng -Ilibkoforbit/evt \
 	      -Ilibkoforbit/proc -Ilibkoforbit/fridge $< \
-	      $(KOFEVT_SRC) $(KOFPROC_SRC) $(KOFRIDGE_SRC) $(LIB) -o $@ \
-	      $(LDFLAGS) $(WATCHMAN_CHAN)
+	      $(KOFEVT_SRC) $(KOFPROC_SRC) $(KOFFID_SRC) $(KOFRIDGE_SRC) \
+	      $(LIB) -o $@ $(LDFLAGS) $(WATCHMAN_CHAN)
 
 kofwatchman: $(OUT)/bin/kofwatchman$(EXE)
 	$(info $(SP)  $<)
@@ -1500,6 +1541,7 @@ $(INT)/win_%.o: libkoforbit/grille/%.c $(STAMP) | $(INT)
 
 $(WINLIB): $(WIN_OBJ)
 	@$(call MKDIR,$(dir $@))
+	@$(call RM,$@)
 	$(WIN_AR) rcs $@ $^
 
 # tdh for the one-time schema lookup, advapi32 for the session itself, psapi for
@@ -2327,10 +2369,10 @@ kofwatcher/%.h: ;
 # asks whether it could MAKE one, and left to its built-in rules it decides
 # that it can. `%: %.o` is built in, the object rules above match anything in
 # their own tree, and the chain that falls out is: to get
-# build/temp/lib_kofdb/kofdb.d, first build kofdb.d.o, which needs
-# kofdb.d.c. The empty source rules just above then tell make that file is
+# build/temp/lib_databases/dbloader.d, first build dbloader.d.o, which needs
+# dbloader.d.c. The empty source rules just above then tell make that file is
 # fine, so nothing stops it, and the compiler is handed a name no source ever
-# had - "no such file or directory: libkofeng/databases/kofdb.d.c", once per
+# had - "no such file or directory: libkofeng/databases/dbloader.d.c", once per
 # library, naming a file nobody wrote.
 #
 # Reached whenever such a .d exists at all, because the intermediate .o it
@@ -2404,6 +2446,7 @@ $(ASAN_LIB): $(LIB_SRC) $(EMU_SRC) $(VENDOR_SRC) $(SDK_HDR) | $(TEST)
 		-c $(f) -o $(call asan_obj,$(f))$(NL))
 	@$(foreach f,$(VENDOR_SRC),$(CC) $(VENDOR_CFLAGS) $(ASAN_FLAGS) $(EMU_INC) \
 		-c $(f) -o $(call asan_obj,$(f))$(NL))
+	@$(call RM,$@)
 	@$(AR) rcs $@ $(ASAN_OBJ)
 
 $(TEST)/asan_%$(EXE): tests/unit/%.c $(ASAN_LIB) $(STAMP) | $(TEST)

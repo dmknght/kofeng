@@ -1,18 +1,27 @@
 /*
- * kofpackw.h - build a pack image.
+ * dbpacker.h - build a pack image.
  *
  * Takes modules already in memory and produces the bytes of one pack, laid out
- * exactly as kofpack.h describes. It does no file I/O and knows nothing about
+ * exactly as dbcore.h describes. It does no file I/O and knows nothing about
  * where modules come from: reading sidecars, deciding which modules belong
  * together and writing the result are the toolchain's job, and keeping them out
  * of here is what lets the same builder serve a tool that writes a file and a
  * loader that keeps the image in memory.
  *
- * That second caller is the reason this lives in the library rather than in
- * tools/. Once a loose directory of .blob files is loaded by building a pack
- * image from it, there is one representation of a database instead of two, and
- * the loose path cannot drift from the packed one because it produces the same
- * bytes.
+ * WHY IT LIVES IN THE LIBRARY AND NOT IN tools/, corrected.
+ *
+ * It used to say: because the loader builds a pack image from a loose
+ * directory of .blob files, so there is one representation of a database
+ * instead of two. That caller does not exist - dbloader.c reads .ksig packs
+ * and never calls anything here - and the paragraph had been describing an
+ * intention rather than the tree for long enough to read as fact.
+ *
+ * The reason that does hold is the TESTS. pack_load, pack_fuzz, db_scale,
+ * target_list and scan_work each build a pack image in process and hand it
+ * straight to the loader, so the format is exercised end to end without a tool
+ * and without a file on disk. A builder in tools/ could not be called that
+ * way, and a format whose only round trip runs through a command line is a
+ * format whose round trip is not in the test suite.
  *
  * What the builder decides, and the loader cannot check:
  *
@@ -26,8 +35,8 @@
  * would be a builder that could produce a pack nobody asked for.
  */
 
-#ifndef KOFENG_KOFPACKW_H
-#define KOFENG_KOFPACKW_H
+#ifndef KOFENG_DBPACKER_H
+#define KOFENG_DBPACKER_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -55,7 +64,7 @@ struct kof_pw_mod {
 	uint32_t       code_len;
 
 	/* What this module is for, as ids and a count of them - see n_target in
-	 * kofdb.h for why it is a list and not a mask. Zero targets is ANY. */
+	 * dbloader.h for why it is a list and not a mask. Zero targets is ANY. */
 	uint8_t  n_target;
 	uint8_t  target[KOF_TARGET_LIST_MAX];
 	uint32_t scan_mask;
@@ -93,7 +102,7 @@ struct kof_pw_mod {
 	const uint32_t                *pool;
 	uint32_t                       n_pool;
 
-	/* What KOF_TARGET_NAME declared - see struct kof_pack_mod in kofpack.h.
+	/* What KOF_TARGET_NAME declared - see struct kof_pack_mod in dbcore.h.
 	 * `family` may be NULL or empty for an unpack-kind module; the builder
 	 * interns whatever it is given either way. */
 	const char *family;
@@ -110,4 +119,4 @@ struct kof_pw_mod {
 uint8_t *kof_pack_build(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n,
 			size_t *out_len);
 
-#endif /* KOFENG_KOFPACKW_H */
+#endif /* KOFENG_DBPACKER_H */

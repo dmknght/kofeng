@@ -25,7 +25,7 @@
 #include <stdint.h>
 #include "../libkofeng/kofcore/kofcore.h"
 #include "../libkofeng/kofeng.h"
-#include "../libkofeng/databases/kofdb.h"
+#include "../libkofeng/databases/dbloader.h"
 #include "../libkofeng/analyzer/parsers/kofformat.h"
 #include "../libkoforbit/evt/kofevt.h"
 #include "../libkoforbit/evt/kofevtfmt.h"

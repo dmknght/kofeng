@@ -1035,7 +1035,7 @@ enum kof_decomp_status kof_rar3_decode(const uint8_t *in, uint64_t in_len,
 	 * This was static, on a guess that the tables were too large to be a local.
 	 * They are 5.1KB - the guess was wrong by four times - and a static here
 	 * would make the decoder unusable from two threads at once, which is the one
-	 * property kofdb.h promises about this engine: the database is immutable and
+	 * property dbloader.h promises about this engine: the database is immutable and
 	 * shared, and everything mutable belongs to the thread that made it.
 	 */
 	struct rar3 s;

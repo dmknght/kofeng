@@ -1,5 +1,5 @@
 /*
- * kofpackw.c - build a pack image.
+ * dbpacker.c - build a pack image.
  *
  * Two passes over the modules. The first sizes everything and fills the pools, so
  * that by the end every section's length is known; the second writes the fixed
@@ -19,8 +19,8 @@
 
 #include <kofmod/kofsig.h>   /* the per-module maxima the ABI declares */
 
-#include "kofpackw.h"
-#include "kofpack.h"
+#include "dbpacker.h"
+#include "dbcore.h"
 #include "../detector/matchers/hexprog.h"
 #include "../kofcore/kofcore.h"
 

@@ -32,9 +32,9 @@
 #include <sys/stat.h>
 
 #include "../../libkofeng/kofcore/kofplatform.h"
-#include "../../libkofeng/databases/kofdb.h"
-#include "../../libkofeng/databases/kofpack.h"
-#include "../../libkofeng/databases/kofpackw.h"
+#include "../../libkofeng/databases/dbloader.h"
+#include "../../libkofeng/databases/dbcore.h"
+#include "../../libkofeng/databases/dbpacker.h"
 #include "../../libkofeng/kofeng.h"
 
 static int failures;
@@ -265,7 +265,7 @@ static void mut_magic(uint8_t *img, size_t *len)
  * THE THREE VERSION RULES, one mutation each - and the third is the one worth
  * having a test for.
  *
- * major and a HIGHER minor must be refused, for the reasons kofpack.h gives. A
+ * major and a HIGHER minor must be refused, for the reasons dbcore.h gives. A
  * LOWER minor must be ACCEPTED, and nothing else in this file tests an
  * acceptance: it is the whole reason minor exists, so a change that quietly
  * turned the rule back into an equality would pass every other case here.
@@ -295,7 +295,7 @@ static void mut_minor_older(uint8_t *img, size_t *len)
  *
  * A build that could not name its host would write it, and two such builds on
  * different architectures would then accept each other's native code. The build
- * cannot produce this any more - kofpack.h makes it an #error - but a pack
+ * cannot produce this any more - dbcore.h makes it an #error - but a pack
  * written before that refusal existed can still be on a disk, so the loader
  * refuses the value as well.
  */

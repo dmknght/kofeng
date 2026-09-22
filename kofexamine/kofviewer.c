@@ -95,8 +95,8 @@
 #include "../libkofeng/extractor/unpack/emu_unpack.h"
 #include "../libkofeng/detector/matchers/kofmatch.h"
 #include "../libkofeng/detector/matchers/hexprog.h"
-#include "../libkofeng/databases/kofpack.h"
-#include "../libkofeng/databases/kofdb.h"
+#include "../libkofeng/databases/dbcore.h"
+#include "../libkofeng/databases/dbloader.h"
 
 
 /*

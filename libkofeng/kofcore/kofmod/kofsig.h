@@ -259,7 +259,7 @@ enum kof_format {
 	 * KOF_TARGET_FIRST_EVENT moved to 19 to match - which puts it exactly on
 	 * KOF_EVT_AMSI_SCAN. There is no twentieth value. A format after this
 	 * one needs the axis WIDENED - the target is a uint32 mask in the pack
-	 * (see kofpackw.c) - and that is a pack format change rather than an
+	 * (see dbpacker.c) - and that is a pack format change rather than an
 	 * enumerator.
 	 */
 	KOF_FMT_BZIP2   = 18,
@@ -396,7 +396,7 @@ enum kof_format {
  * change to buy thirty-two more of something that will run out again.
  *
  * So a module carries a LIST OF IDS and a count of them - see n_target in
- * kofdb.h. The count is what makes it safe: a reader knows exactly how many
+ * dbloader.h. The count is what makes it safe: a reader knows exactly how many
  * bytes of the row mean anything, so a row cannot be read into the next one.
  * Multi-target modules stay cheap because the hot path never walks the list -
  * the loader builds an inverted index from target id to modules and the scan
@@ -3372,7 +3372,7 @@ enum kof_maltype {
  * The word a finding shows for one of the values above. Read at report time: the
  * pack stores the enum value and the family text once per module, not composed
  * into a string until a finding actually needs printing - see
- * struct kof_pack_mod in kofpack.h and finding_str in scan.c.
+ * struct kof_pack_mod in dbcore.h and finding_str in scan.c.
  */
 static inline const char *kof_maltype_name(uint32_t maltype)
 {
@@ -3553,7 +3553,7 @@ enum kof_str_word {
 	KOF_WORD_SUBSTRING = 0,  /* match anywhere */
 	KOF_WORD_FULLWORD  = 1,  /* neither neighbour is a word byte */
 	/*
-	 * A WHOLE WHITESPACE-DELIMITED TOKEN - see KOF_STR_TOKEN in kofpack.h.
+	 * A WHOLE WHITESPACE-DELIMITED TOKEN - see KOF_STR_TOKEN in dbcore.h.
 	 *
 	 * FULLWORD asks whether the neighbour is [A-Za-z0-9_], which is right
 	 * for an identifier and useless for a marker made of punctuation: "<%"
