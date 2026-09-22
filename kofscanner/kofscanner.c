@@ -390,8 +390,22 @@ static void progress_draw(struct run *r, const char *name)
 	n = strlen(tail);
 	if (n > 48)
 		tail += n - 48;
-	fprintf(stderr, "\r\033[K  %llu object(s)  %s",
-		(unsigned long long)r->seen, tail);
+	/*
+	 * THE CACHED COUNT IS ON THE LINE, AND ONLY WHEN THERE IS ONE.
+	 *
+	 * Without it a sweep of a tree the cache already answers for reads
+	 * "1 object(s)" for minutes - true, and useless, because the number
+	 * that is moving is the one not shown. With it the reader can tell a
+	 * scan that is working from one that is skipping, which is the
+	 * difference between waiting and worrying.
+	 */
+	if (r->cached_seen)
+		fprintf(stderr, "\r\033[K  %llu object(s)  %llu cached  %s",
+			(unsigned long long)r->seen,
+			(unsigned long long)r->cached_seen, tail);
+	else
+		fprintf(stderr, "\r\033[K  %llu object(s)  %s",
+			(unsigned long long)r->seen, tail);
 	fflush(stderr);
 	r->drawn = 1;
 }
@@ -926,6 +940,21 @@ static int heur_bad(const char *argv0, const char *v)
  * 48 MB across this machine.
  */
 
+/*
+ * WHAT THE CACHE HOOKS ARE GIVEN.
+ *
+ * The set, and the run - and the run is here for one reason: a file the set
+ * answers for never reaches on_object, so it never reaches progress_draw
+ * either. Measured on 300 files from /usr/bin: a cold scan drew the progress
+ * line six times and the second scan, with every file cached, drew it ZERO
+ * times. The scanner did its work and said nothing at all while doing it,
+ * which on a large tree is indistinguishable from being stuck.
+ */
+struct cache_hook {
+	struct kof_fidset *fs;
+	struct run        *r;
+};
+
 struct procscan {
 	struct run       *r;
 	kof_scanner      *sc;
@@ -939,6 +968,7 @@ struct procscan {
 	 */
 	struct kof_fidset *fs;
 	struct kof_scan_option *opt;
+	struct cache_hook hook;
 
 	uint64_t files_scanned, files_cached;
 	uint64_t chunks, chunk_bytes;
@@ -965,21 +995,6 @@ struct procscan {
  * unidentifiable file would share it, and one of them being called clean would
  * speak for all of them.
  */
-/*
- * WHAT THE CACHE HOOKS ARE GIVEN.
- *
- * The set, and the run - and the run is here for one reason: a file the set
- * answers for never reaches on_object, so it never reaches progress_draw
- * either. Measured on 300 files from /usr/bin: a cold scan drew the progress
- * line six times and the second scan, with every file cached, drew it ZERO
- * times. The scanner did its work and said nothing at all while doing it,
- * which on a large tree is indistinguishable from being stuck.
- */
-struct cache_hook {
-	struct kof_fidset *fs;
-	struct run        *r;
-};
-
 static int fid_seen(void *user, const char *path)
 {
 	struct cache_hook *h = user;
@@ -1791,6 +1806,8 @@ int main(int argc, char **argv)
 		 * shown that the contention costs less than the sweep it saves.
 		 */
 		struct kof_fidset *fs = NULL;
+		/* Outlives the scan below, because opt.cache_user points at it. */
+		struct cache_hook hook = { NULL, NULL };
 		/*
 		 * AND IT SAYS SO, because the alternative is a silent one.
 		 *
