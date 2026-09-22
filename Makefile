@@ -105,7 +105,24 @@ else
 CC      ?= cc
 endif
 AR      ?= ar
-CFLAGS  ?= -O2 -g
+#
+# NO -g IN THE RELEASE BUILD, AND IT IS WORTH THE TWO LINES.
+#
+# Measured on this tree: kofscanner is 5.4MB built and 1.8MB stripped, kofviewer
+# 6.7MB and 2.1MB. Two thirds of every shipped binary was debug info, and none
+# of it is read on a machine the tool was delivered to.
+#
+# What is left is not libc - nothing here links it statically; `ldd` shows libc
+# and ld-linux and nothing else. It is libkofeng.a, which is this project's own
+# code, and half of THAT is bddisasm's decode tables: in the stripped binary
+# .rodata is 712KB against .text's 477KB.
+#
+# THE SANITISED BUILDS KEEP IT. A sanitiser report without file and line is a
+# stack of addresses, which is the difference between "there is a leak" and
+# "draft_from_source, kofeditor.c:4478" - so -g moves to SAN_CFLAGS and
+# ASAN_FLAGS rather than disappearing. It is `?=`, so a developer who wants it
+# back for a release build says CFLAGS='-O2 -g' and gets it.
+CFLAGS  ?= -O2
 # The parallel walk in scan.c is pthreads. On this glibc the symbols are in libc
 # and the link succeeds without it - measured, the flag changes the scan's speed
 # by nothing either way - so it is here for the platforms where the link needs
@@ -735,7 +752,7 @@ LDFLAGS ?=
 # build, which is the only form of it anyone acts on.
 ifeq ($(SAN),1)
 SAN_CFLAGS := -fsanitize=address,undefined -fno-sanitize-recover=all \
-              -fno-omit-frame-pointer
+              -fno-omit-frame-pointer -g
 CFLAGS  += $(SAN_CFLAGS)
 LDFLAGS += -fsanitize=address,undefined -fno-sanitize-recover=all
 endif
@@ -836,6 +853,22 @@ $(BUILD) $(OUT) $(INT) $(TEST):
 # needed MSYS2. The comparison is ifneq rather than $(filter-out) because a
 # flag list is one string here and not a list of words: filter-out would
 # compare word by word and call a reordering equal.
+#
+# DEBUG=1 PUTS THE SYMBOLS BACK, AND `make debug` IS THAT SPELLED SHORTER.
+#
+# Same shape as SAN=1 above, and for the same reason: it is a switch on the
+# flags rather than a second tree of objects, so FLAGSIG below picks it up and
+# every object rebuilds when it changes. Nobody has to remember to clean.
+#
+# VENDOR_CFLAGS and WIN_CFLAGS are `:=` and are set HUNDREDS OF LINES BELOW, so
+# appending to them here appends to nothing and the later assignment throws it
+# away. The flag is carried in a variable those two paste in themselves.
+KOF_DEBUG_CFLAGS :=
+ifeq ($(DEBUG),1)
+KOF_DEBUG_CFLAGS  := -g
+CFLAGS += $(KOF_DEBUG_CFLAGS)
+endif
+
 FLAGSIG := $(CC) $(CFLAGS) $(LDFLAGS)
 STAMP   := $(INT)/.flags
 
@@ -863,6 +896,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/analyzer/parsers/binaries/elf_sym.c \
            libkofeng/analyzer/parsers/binaries/sym_any.c \
            libkofeng/analyzer/parsers/kofformat.c \
+           libkofeng/analyzer/normalize/executables.c \
            libkofeng/analyzer/parsers/scripts/scantext.c \
            libkofeng/analyzer/parsers/scripts/markup_parse.c \
            libkofeng/analyzer/parsers/scripts/php_parse.c \
@@ -1014,7 +1048,7 @@ CFLAGS += -DKOFENG_BUILD=$(KOF_BUILD_STAMP)u
 VENDOR_WNO_QUAL := $(if $(call kof_probe,-Wincompatible-pointer-types-discards-qualifiers),\
                         -Wno-incompatible-pointer-types-discards-qualifiers)
 
-VENDOR_CFLAGS := -O2 -g -std=c11 -fno-common -D_LIB -DAMD64 \
+VENDOR_CFLAGS := -O2 $(KOF_DEBUG_CFLAGS) -std=c11 -fno-common -D_LIB -DAMD64 \
                  -Wall -Wextra \
                  -Wno-missing-field-initializers -Wno-missing-braces \
                  -Wno-unused-function \
@@ -1464,7 +1498,7 @@ ifeq ($(NATIVE_OS),windows)
 WIN_CFLAGS  := $(CFLAGS)
 WIN_LDFLAGS := $(LDFLAGS)
 else
-WIN_CFLAGS  := -std=c11 -O2 -g -fno-common \
+WIN_CFLAGS  := -std=c11 -O2 $(KOF_DEBUG_CFLAGS) -fno-common \
                -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
                -Wpointer-arith -Wstrict-prototypes -Wmissing-prototypes \
                $(KOF_WARN_PORTABLE) $(KOF_WARN_GCC) -MMD -MP \
@@ -1881,8 +1915,10 @@ UNIT_BIN := $(patsubst tests/unit/%.c,$(TEST)/unit_%$(EXE),$(UNIT_SRC))
 # note above the shared source lists - so the fix is the same one: the names go
 # above every rule that uses them.
 #
+# -g here and not in CFLAGS: see the note beside the release CFLAGS. A report
+# without file and line is a stack of addresses.
 ASAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer \
-              -fno-sanitize-recover=undefined
+              -fno-sanitize-recover=undefined -g
 ASAN_BIN := $(patsubst tests/unit/%.c,$(TEST)/asan_%$(EXE),$(UNIT_SRC))
 ASAN_LIB := $(TEST)/libkofeng-asan.a
 
@@ -2475,10 +2511,19 @@ unit-asan: fixtures test-sigs $(ASAN_RUN)
 	$(info all $(words $(ASAN_BIN)) sanitized test(s) passed)
 	@$(NOOP)
 
+#
+# EVERYTHING `all` BUILDS, WITH THE SYMBOLS IN.
+#
+# A recursive make rather than a variable, because DEBUG has to be set before
+# CFLAGS is assembled and a target's recipe runs long after that. The stamp
+# handles the rebuild - see FLAGSIG.
+debug:
+	@$(MAKE) --no-print-directory DEBUG=1 all
+
 clean:
 	@$(call RMRF,$(BUILD))
 
-.PHONY: all sdk sigs databases unit fixtures test-sigs clean \
+.PHONY: all debug sdk sigs databases unit fixtures test-sigs clean \
         kofscanner kofexamine ksigbuilder kofviewer kofgrille kofwatchtower kofwatchman \
         kofmontrace tools help
 
