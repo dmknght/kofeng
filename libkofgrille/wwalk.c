@@ -642,18 +642,27 @@ static const char *w_label(uint8_t use, uint32_t flags)
  * ones back into the read.
  */
 /*
- * The trace, resolved once. It found three of the four bugs this walk had, so
- * it stays - but getenv sits in a path called per dirty region and per module,
- * and a lookup per call to answer a question that cannot change mid-run is the
- * kind of cost that arrives without anybody choosing it.
+ * The trace. It found three of the four bugs this walk had, so it stays - as
+ * a BUILD OPTION rather than an environment variable.
+ *
+ * It was getenv("KOFW_DIFF_TRACE"), cached in a static. Two things were wrong
+ * with that and only one of them was the lookup. A LIBRARY that reads the
+ * environment takes behaviour from whatever the host process was started
+ * with, which is the host's decision and not this code's; and one that writes
+ * to stderr on the strength of it prints into a stream the host owns. Neither
+ * is something a caller embedding this engine asked for.
+ *
+ * As a macro the compiler folds it: -DKOFW_DIFF_TRACE=1 gives the developer
+ * exactly what the variable gave them, and a release build has neither the
+ * branch nor the fprintf nor the lookup.
  */
 static int trace_on(void)
 {
-	static int v = -1;
-
-	if (v < 0)
-		v = getenv("KOFW_DIFF_TRACE") ? 1 : 0;
-	return v;
+#ifdef KOFW_DIFF_TRACE
+	return 1;
+#else
+	return 0;
+#endif
 }
 
 static void dirty_add(struct wwalk *w, uint64_t mod_base, uint64_t base,

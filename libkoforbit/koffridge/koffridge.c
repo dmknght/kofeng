@@ -495,8 +495,21 @@ static void fill_verdict(struct koffridge_verdict *v,
 		}
 	}
 	v->level = res->v[best].level;
-	memcpy(v->name, res->v[best].name, sizeof v->name);
-	v->name[sizeof v->name - 1] = '\0';
+	/*
+	 * COPIED TO THE NUL AND NOT BY THE FIELD'S SIZE.
+	 *
+	 * Both arrays are 224 bytes, so a memcpy of the whole field read
+	 * nothing it should not - but it copied the TAIL as well as the name.
+	 * kof_finding_name terminates at the length it wrote and leaves
+	 * everything after it as whatever the result buffer held, and that
+	 * buffer is reused from object to object. The entry then goes to disk
+	 * whole, so the previous object's verdict name travelled into the
+	 * cache file behind this one's NUL.
+	 *
+	 * The struct was zeroed at the top of this function; a bounded string
+	 * copy leaves those zeros in place.
+	 */
+	snprintf(v->name, sizeof v->name, "%s", res->v[best].name);
 }
 
 /*
@@ -786,7 +799,24 @@ int koffridge_save(struct koffridge *f, const char *path)
 	 * header is written last over the space left for it. Each shard is held
 	 * only while its own entries are written.
 	 */
-	fp = fopen(tmp, "wb");
+	/*
+	 * CREATED, NOT OPENED, AND ONLY IF THE NAME WAS FREE.
+	 *
+	 * fopen(tmp, "wb") followed a symlink and took its permissions from
+	 * the umask. The name is "<the cache>.tmp", which anybody can predict,
+	 * and the cache path is the CALLER'S - kofscanner takes --cache-file -
+	 * so it need not be in a directory only this user can write. Planting
+	 * that name as a link to something else made the save write there
+	 * instead. kof_fopen_new refuses a name that already exists, link
+	 * included, and creates with 0600.
+	 */
+	fp = kof_fopen_new(tmp);
+	if (!fp) {
+		/* A stale one from an interrupted save is ours to clear; a
+		 * name that reappears after that is not an accident. */
+		remove(tmp);
+		fp = kof_fopen_new(tmp);
+	}
 	if (!fp)
 		return 0;
 	if (fwrite(&h, 1, sizeof h, fp) != sizeof h)
@@ -823,10 +853,16 @@ int koffridge_save(struct koffridge *f, const char *path)
 	if (fclose(fp) != 0)
 		goto bad_closed;
 
-	remove(path);            /* rename onto an existing file fails on
-				  * Windows; removing first is what makes this
-				  * one line portable */
-	if (rename(tmp, path) != 0)
+	/*
+	 * ONE STEP, so the name never stops existing.
+	 *
+	 * This used to remove the target and then rename onto it, because
+	 * rename over an existing file fails on Windows. On POSIX it does not
+	 * fail, and the remove opened a window in which the cache path was
+	 * free for somebody else to create - as a link, pointing anywhere.
+	 * kof_rename_over replaces in one call on both platforms.
+	 */
+	if (!kof_rename_over(tmp, path))
 		goto bad_closed;
 	return 1;
 
@@ -1013,7 +1049,7 @@ uint32_t koffridge_load(struct koffridge *f, const char *path,
  */
 int koffridge_default_path(char *buf, size_t cap)
 {
-	const char *home;
+	char base[768];
 	char dir[768];
 	int n;
 
@@ -1021,27 +1057,29 @@ int koffridge_default_path(char *buf, size_t cap)
 		return 0;
 	buf[0] = '\0';
 
-#ifdef _WIN32
 	/*
-	 * LOCALAPPDATA rather than APPDATA: a cache is machine-local state and
-	 * has no business following a roaming profile onto other machines,
-	 * where its file identities - a volume serial and a file index - mean
-	 * nothing at all and would miss on every lookup.
+	 * THE SYSTEM IS ASKED, NOT THE ENVIRONMENT.
+	 *
+	 * This read LOCALAPPDATA on Windows and XDG_CACHE_HOME then HOME
+	 * elsewhere. All three are environment variables, and a LIBRARY that
+	 * reads them takes its idea of where the user lives from whatever the
+	 * host process happened to be started with - which is the host's
+	 * decision to make, not this code's. They are also unvalidated input:
+	 * a service started with a planted HOME wrote its cache wherever the
+	 * planter chose, and the cache is a file this code later trusts.
+	 *
+	 * kof_user_cache_dir asks the platform instead - the passwd database
+	 * and the real user id on POSIX, SHGetFolderPathA with
+	 * CSIDL_LOCAL_APPDATA on Windows. LOCAL and not roaming, for the
+	 * reason the old comment gave and which still holds: a cache keyed on
+	 * a volume serial and a file index means nothing on another machine.
 	 */
-	home = getenv("LOCALAPPDATA");
-	if (!home || !home[0])
+	if (!kof_user_cache_dir(base, sizeof base))
 		return 0;
-	n = snprintf(dir, sizeof dir, "%s\\kofeng", home);
+#ifdef _WIN32
+	n = snprintf(dir, sizeof dir, "%s\\kofeng", base);
 #else
-	home = getenv("XDG_CACHE_HOME");
-	if (home && home[0]) {
-		n = snprintf(dir, sizeof dir, "%s/kofeng", home);
-	} else {
-		home = getenv("HOME");
-		if (!home || !home[0])
-			return 0;
-		n = snprintf(dir, sizeof dir, "%s/.cache/kofeng", home);
-	}
+	n = snprintf(dir, sizeof dir, "%s/kofeng", base);
 #endif
 	if (n < 0 || (size_t)n >= sizeof dir)
 		return 0;

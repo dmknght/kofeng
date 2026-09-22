@@ -50,11 +50,14 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 #include <sys/stat.h>
 
 #ifdef _WIN32
 
 #include <windows.h>
+#include <shlobj.h>
 #include <io.h>
 
 #include <string.h>
@@ -493,6 +496,7 @@ static inline const void *kof_memmem(const void *hay_, size_t hlen,
 
 #include <sys/mman.h>
 #include <unistd.h>
+#include <pwd.h>
 #include <fcntl.h>           /* open, O_RDONLY - kof_map_file_ro below */
 #include <string.h>
 
@@ -876,5 +880,139 @@ static inline int kof_truncate_file(const char *path, uint64_t len)
 	return truncate(path, (off_t)len) == 0;
 }
 #endif
+
+/*
+ * THE USER'S OWN DIRECTORY, from the system and not from the environment.
+ *
+ * HOME, XDG_CACHE_HOME and LOCALAPPDATA are all environment variables, and a
+ * library that reads them takes its idea of where the user lives from
+ * whatever the process was started with. That is the host's decision, and it
+ * is also an unvalidated input: a service started with a planted HOME writes
+ * its cache wherever the planter chose.
+ *
+ * The system knows without being told. POSIX has the passwd database and the
+ * real user id, which is what the user IS rather than what the environment
+ * claims. Windows has SHGetFolderPathA and CSIDL_LOCAL_APPDATA, which is the
+ * call the platform documents for exactly this - and LOCAL rather than
+ * roaming, because a cache keyed on a volume serial means nothing on another
+ * machine.
+ *
+ * Returns 0 and leaves `out` untouched when the system will not say.
+ */
+/*
+ * THE BOUNDS ARE CHECKED BY SUBTRACTION, NEVER BY ADDITION.
+ *
+ * "n + need >= cap" reads correctly and is the bug it is meant to prevent: the
+ * sum is a size_t, and a length near the top of the range wraps to something
+ * small, the test passes, and the copy that follows is exactly the overflow
+ * the line was written to stop. "cap - n < need", with n < cap established
+ * first, cannot wrap because both operands are already known to be in range.
+ */
+#ifdef _WIN32
+static inline int kof_user_cache_dir(char *out, size_t cap)
+{
+	char buf[MAX_PATH];
+	size_t n;
+
+	if (SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, buf) != S_OK)
+		return 0;
+	buf[sizeof buf - 1u] = '\0';
+	n = strlen(buf);
+	if (n >= cap || cap - n < 1u)
+		return 0;
+	memcpy(out, buf, n + 1u);
+	return 1;
+}
+#else
+static inline int kof_user_cache_dir(char *out, size_t cap)
+{
+	/*
+	 * getpwuid_r AND NOT getpwuid, because this is a library and the
+	 * engine runs its scan on several threads - see the --jobs option.
+	 * getpwuid returns a pointer into one static record shared by every
+	 * caller in the process, so two threads asking at once read each
+	 * other's answer. The _r form writes into storage the caller owns.
+	 */
+	struct passwd pw, *res = NULL;
+	char pbuf[1024];
+	size_t n;
+	static const char tail[] = "/.cache";
+
+	if (getpwuid_r(getuid(), &pw, pbuf, sizeof pbuf, &res) != 0 || !res)
+		return 0;
+	if (!res->pw_dir || !res->pw_dir[0])
+		return 0;
+	n = strlen(res->pw_dir);
+	/* n bytes, then the tail and its NUL. Subtraction only. */
+	if (n >= cap || cap - n < sizeof tail)
+		return 0;
+	memcpy(out, res->pw_dir, n);
+	memcpy(out + n, tail, sizeof tail);
+	return 1;
+}
+#endif
+
+/*
+ * CREATE A FILE THAT DID NOT EXIST, AND OWN IT ALONE.
+ *
+ * fopen(path, "wb") is the wrong call for anything written beside a target and
+ * renamed over it. It follows a symlink, so a name an attacker can predict -
+ * and "<the cache>.tmp" is exactly that - lets them choose the file the write
+ * lands in. It also takes its permissions from the umask, so a cache of what
+ * this machine has already decided about its own files is commonly world
+ * readable.
+ *
+ * O_CREAT|O_EXCL refuses to open anything that is already there, symlink
+ * included, and 0600 says who the file is for. On Windows the equivalent is
+ * _O_EXCL with _S_IREAD|_S_IWRITE, where the ACL a new file inherits does the
+ * rest.
+ *
+ * Returns NULL when the name is taken, which the caller should treat as a
+ * failure to save and not as a reason to try a different name: a name that is
+ * taken when it should not be is the attack, not an accident.
+ */
+static inline FILE *kof_fopen_new(const char *path)
+{
+	int fd;
+	FILE *fp;
+
+#ifdef _WIN32
+	fd = _open(path, _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY,
+		   _S_IREAD | _S_IWRITE);
+#else
+	fd = open(path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0600);
+#endif
+	if (fd < 0)
+		return NULL;
+#ifdef _WIN32
+	fp = _fdopen(fd, "wb");
+	if (!fp)
+		_close(fd);
+#else
+	fp = fdopen(fd, "wb");
+	if (!fp)
+		close(fd);
+#endif
+	return fp;
+}
+
+/*
+ * REPLACE `to` WITH `from`, atomically where the platform can.
+ *
+ * POSIX rename() already does this over an existing file, and doing it in one
+ * step is the point: removing the target first leaves a window in which the
+ * name does not exist, and a name that does not exist is a name somebody else
+ * can create. Windows refuses rename onto an existing file, so there the
+ * remove is unavoidable - and MoveFileExA with MOVEFILE_REPLACE_EXISTING is
+ * the call that avoids it.
+ */
+static inline int kof_rename_over(const char *from, const char *to)
+{
+#ifdef _WIN32
+	return MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+	return rename(from, to) == 0;
+#endif
+}
 
 #endif /* KOFENG_KOFPLATFORM_H */

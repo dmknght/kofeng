@@ -26,6 +26,7 @@
 #include <time.h>
 
 #include "fidset.h"
+#include "../../libkofeng/core/kofplatform.h"
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -658,7 +659,27 @@ int kof_fidset_save(struct kof_fidset *s, const char *path)
 		free(out);
 		return 0;
 	}
-	f = fopen(tmp, "wb");
+	/*
+	 * CREATED, NOT OPENED, AND ONLY IF THE NAME WAS FREE.
+	 *
+	 * fopen(tmp, "wb") follows a symlink and takes its mode from the
+	 * umask. The name is "<the cache>.tmp" - predictable - and the cache
+	 * path comes from the caller, which for kofscanner is --cache-file and
+	 * so need not be in a directory only this user can write. Planting
+	 * that name as a link made the save write through it: demonstrated,
+	 * the target file came back holding this file's header.
+	 *
+	 * kof_fopen_new refuses any name that already exists, link included.
+	 * The retry after remove() is safe for the same reason it is useful: a
+	 * stale .tmp from an interrupted save is cleared, and if somebody wins
+	 * the race to recreate it the exclusive create fails and nothing is
+	 * written - a lost save, never a write somewhere else.
+	 */
+	f = kof_fopen_new(tmp);
+	if (!f) {
+		remove(tmp);
+		f = kof_fopen_new(tmp);
+	}
 	if (!f) {
 		free(out);
 		return 0;
