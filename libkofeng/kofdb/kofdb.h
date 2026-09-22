@@ -107,6 +107,16 @@ struct kof_db_pack {
  */
 struct kof_module {
 	kof_scan_fn fn;
+	/*
+	 * AND HOW TO UNDO WHAT IT FOUND, or NULL.
+	 *
+	 * Resolved the same way fn is - blob plus an offset the build wrote
+	 * down - because the loader reads no symbols. NULL for nearly every
+	 * module: knowing that a file is infected and knowing how to put it
+	 * back are different pieces of work and only the first is usually
+	 * done. See kof_pack_mod.cure_off.
+	 */
+	kof_scan_fn cure;
 
 	/*
 	 * WHAT THIS MODULE IS FOR, AS A LIST OF TARGET IDS.

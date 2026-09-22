@@ -68,6 +68,9 @@ struct kof_pw_mod {
 	 * kofmod/heur.h. Zero on every other kind. */
 	uint32_t heur_phase;
 	uint32_t heur_level;
+	/* Where kof_cure() sits inside the blob, or 0 - see
+	 * kof_pack_mod.cure_off. */
+	uint32_t cure_off;
 	uint32_t heur_want;
 	/* The family this rule predicts, or NULL. See KOF_HEUR_PREDICT. */
 	const char *heur_predict;

@@ -698,6 +698,25 @@ struct kof_pack_mod {
 	 * A fact the build has should be carried, not re-derived.
 	 */
 	uint32_t src_off;
+
+	/*
+	 * WHERE kof_cure() SITS INSIDE THE BLOB, or zero when the module has
+	 * none.
+	 *
+	 * A module's entry is at offset zero and the loader needs no symbol
+	 * table to find it - that is what module.ld buys. A SECOND entry
+	 * cannot be had that way, and the answer is not to relax the first
+	 * rule: the builder already reads the symbol table, so it resolves
+	 * kof_cure once, at build time, and writes the offset here. At run
+	 * time the host calls blob + cure_off and still reads no symbols.
+	 *
+	 * ZERO MEANS NO CURE, which is most modules. A detector that knows
+	 * how to undo what it found says so by having the function; nothing
+	 * else declares it, because a declaration can disagree with the code
+	 * and an exported symbol cannot - the same reasoning that derives a
+	 * module's KIND from which entry it exports.
+	 */
+	uint32_t cure_off;
 };
 
 /*
@@ -925,7 +944,7 @@ _Static_assert(sizeof(struct kof_pack_sec)  == 16,  "pack section entry grew pad
  * n_blk, the module's slice of the similarity sections. The number moves only
  * with KOF_PACK_MAJOR or KOF_PACK_MINOR - if it moves without one, the edit is
  * the bug. */
-_Static_assert(sizeof(struct kof_pack_mod)  == 72,  "pack module record grew padding");
+_Static_assert(sizeof(struct kof_pack_mod)  == 76,  "pack module record grew padding");
 _Static_assert(sizeof(struct kof_pack_str)  == 12,  "pack string descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_name) == 8,   "pack name descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_idx)  == 8,   "pack index slot grew padding");

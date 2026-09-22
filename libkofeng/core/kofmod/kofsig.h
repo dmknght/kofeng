@@ -1562,6 +1562,52 @@ struct kof_content {
 	 */
 	uint32_t (*ovl_chain)(const struct kof_obj_ctx *,
 			      const struct kof_ovlf_chain *ref);
+
+	/*
+	 * THE MODULE CAN UNDO WHAT IT FOUND, AND HERE IS WHERE THE DAMAGE
+	 * STARTS.
+	 *
+	 * Detection and repair are different claims and only one of them is
+	 * usually available. "This object holds the family's payload" is what
+	 * a block or an unanchored pattern says, and it is not enough to
+	 * repair anything: a repair needs to know WHERE - what to put back
+	 * and what to cut - and a percentage carries no offset at all.
+	 *
+	 * So a module that DID locate the damage says so, with the offset it
+	 * located. The host records it and may call the module's kof_cure()
+	 * afterwards; the verdict is reported exactly as it would have been,
+	 * because being repairable is not a different detection.
+	 *
+	 * A module that found the family but not the place simply does not
+	 * call this, and the object is reported and left alone.
+	 */
+	void (*cure_offer)(const struct kof_obj_ctx *, uint64_t at);
+
+	/*
+	 * WHAT THE REPAIR IS, described rather than performed.
+	 *
+	 * A module is freestanding position-independent code with no way to
+	 * reach a file, and giving it one would be the wrong answer anyway: a
+	 * repair rewrites somebody's binary, and the decision to do that
+	 * belongs to whoever runs the engine, not to a rule in a database.
+	 *
+	 * So kof_cure() says what to change and the host decides whether to.
+	 * Both calls are bounds checked and both may be refused; a module
+	 * that is refused has still said what it would have done, which is
+	 * what a caller offering to show a repair before applying it needs.
+	 *
+	 *   patch     put these bytes at this offset
+	 *   truncate  the object ends here
+	 *
+	 * Nothing else. Between them they express "put the entry point back
+	 * and cut the appended payload", which is what an appending infector
+	 * needs undone, and they express it in a form a caller can print,
+	 * log, or apply.
+	 */
+	int (*cure_patch)(const struct kof_obj_ctx *, uint64_t off,
+			  const uint8_t *bytes, uint32_t n);
+	int (*cure_truncate)(const struct kof_obj_ctx *, uint64_t len);
+
 };
 
 /*
@@ -3704,6 +3750,64 @@ enum kof_str_word {
  */
 #define KOF_MALVAR_AUTO    KOF_MALVAR_AUTO
 #define KOF_MALVAR_GENERIC KOF_MALVAR_GENERIC
+
+/*
+ * SAY THAT THIS ONE CAN BE PUT BACK, and where the damage begins.
+ *
+ *     if (kof_find_str_at(ctx->entry_off, stub)) {
+ *             KOF_SCAN_CURABLE(ctx->entry_off);
+ *             KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+ *     }
+ *
+ * BEFORE THE VERDICT, because a verdict returns. It is not a verdict itself
+ * and reports nothing: the object is still infected and is still named as
+ * such. What it adds is that the module knows how to undo it, which the host
+ * may act on and may equally ignore.
+ *
+ * ONLY WHERE THE MATCH WAS ANCHORED. A pattern found SOMEWHERE in a region
+ * says the payload is present; a pattern found AT an offset the module
+ * worked out says where it is. Only the second can lead to a repair, and
+ * calling this after the first would be offering to cut at an address nobody
+ * established.
+ */
+#define KOF_SCAN_CURABLE(at)                                               \
+	((ctx)->content->cure_offer                                        \
+	 ? (ctx)->content->cure_offer((ctx), (uint64_t)(at)) : (void)0)
+
+/*
+ * THE TWO THINGS A CURE CAN ASK FOR - see kof_content.cure_patch.
+ *
+ *     void kof_cure(const struct kof_obj_ctx *ctx)
+ *     {
+ *             uint8_t b[4];
+ *             uint64_t orig = kof_u32(ctx->entry_off + 1u);
+ *
+ *             b[0] = (uint8_t)orig;  b[1] = (uint8_t)(orig >> 8);
+ *             b[2] = (uint8_t)(orig >> 16); b[3] = (uint8_t)(orig >> 24);
+ *             kof_cure_patch(24, b, 4);        (* e_entry *)
+ *             kof_cure_truncate(ctx->entry_off);
+ *     }
+ *
+ * Both return non-zero when the host accepted the request. A cure that is
+ * refused has still described itself, which is what a caller that wants to
+ * show a repair before applying it reads.
+ */
+#define kof_cure_patch(off, bytes, n)                                      \
+	((ctx)->content->cure_patch                                        \
+	 ? (ctx)->content->cure_patch((ctx), (uint64_t)(off),              \
+				      (const uint8_t *)(bytes),            \
+				      (uint32_t)(n)) : 0)
+
+#define kof_cure_truncate(len)                                             \
+	((ctx)->content->cure_truncate                                     \
+	 ? (ctx)->content->cure_truncate((ctx), (uint64_t)(len)) : 0)
+
+/*
+ * The other entry point a DETECTOR may export: how to undo what kof_scan
+ * found. Called by the host, never from inside the module, and only on an
+ * object whose scan offered one - see KOF_SCAN_CURABLE.
+ */
+void kof_cure(const struct kof_obj_ctx *ctx);
 
 #define KOF_SCAN_INFECT(variant)                                            \
 	do {                                                                \

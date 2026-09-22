@@ -218,10 +218,40 @@ static inline int kof_finding_is_heur(const struct kof_finding *f)
  */
 #define KOF_ENTRY_NONE 0xffffffffu
 
+/*
+ * A REPAIR A MODULE DESCRIBED, and did not perform.
+ *
+ * A rule that recognised an infected file may also know how to undo the
+ * infection - see KOF_SCAN_CURABLE in kofmod/kofsig.h. What it produces is
+ * this: a list of byte ranges to overwrite and, optionally, a length to cut
+ * the object to. Nothing has been written; the caller decides whether to.
+ *
+ * SEPARATE FROM THE FINDINGS because it is not one. The verdict stands
+ * whether or not anybody repairs anything, and a caller that ignores this
+ * field gets exactly the scanner it had before.
+ *
+ * `n_fix` of zero means nothing was offered, which is the ordinary case.
+ */
+#define KOF_MAX_FIX 64u
+
+struct kof_repair {
+	struct {
+		uint64_t off;
+		uint32_t n;
+		uint8_t  b[16];
+	}        fix[KOF_MAX_FIX];
+	uint32_t n_fix;
+	/* Where the object should end, or 0 for "leave the length alone". */
+	uint64_t truncate;
+};
+
 struct kof_result {
 	struct kof_finding v[KOF_MAX_FINDINGS];
 	uint32_t n;
 	uint32_t dropped;
+
+	/* What a module offered to put back - see struct kof_repair. */
+	struct kof_repair repair;
 
 	/*
 	 * The engine stopped before it had finished with this object, because a

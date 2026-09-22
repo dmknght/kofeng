@@ -134,6 +134,7 @@ struct fmap {
 };
 
 struct run {
+	int cure;           /* --cure: apply a repair, not just print it */
 	/* No object counter: the engine already keeps one, and a second copy is a
 	 * second thing that can disagree with it. */
 	uint64_t dropped;
@@ -396,6 +397,37 @@ static void progress_clear(struct run *r)
 	}
 }
 
+/*
+ * Apply a described repair to the file it was described against.
+ *
+ * IN PLACE AND IN ORDER: the patches first, then the length. Opening for
+ * update rather than rewriting means a file that cannot be written is left
+ * exactly as it was rather than half replaced.
+ *
+ * NO BACKUP IS TAKEN HERE. Whether the original is worth keeping is a policy
+ * question with a different answer in a lab and on a mail gateway, and
+ * guessing it in a scanner would be answering it for everybody.
+ */
+static int repair_apply(const char *path, const struct kof_repair *rp)
+{
+	FILE *f = fopen(path, "r+b");
+	uint32_t i;
+	int ok = 1;
+
+	if (!f)
+		return 0;
+	for (i = 0; i < rp->n_fix && ok; i++) {
+		if (fseek(f, (long)rp->fix[i].off, SEEK_SET) != 0 ||
+		    fwrite(rp->fix[i].b, 1, rp->fix[i].n, f) != rp->fix[i].n)
+			ok = 0;
+	}
+	if (fclose(f) != 0)
+		ok = 0;
+	if (ok && rp->truncate)
+		ok = kof_truncate_file(path, rp->truncate);
+	return ok;
+}
+
 static int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user)
 {
@@ -462,6 +494,37 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 			worst_name = res->v[i].name;
 			worst_f = &res->v[i];
 		}
+	}
+
+	/*
+	 * AND THE REPAIR, WHEN A RULE DESCRIBED ONE.
+	 *
+	 * Printed always, applied only when asked. A scanner that repaired
+	 * what it found because it could is a scanner nobody can run twice:
+	 * the second run scans a file the first one rewrote, and whatever the
+	 * first got wrong is no longer recoverable. So the default is to say
+	 * what would be done, and --cure is the sentence the operator has to
+	 * type to have it done.
+	 *
+	 * ONLY AT THE TOP LEVEL. A repair is described against the OBJECT the
+	 * module saw, and for a child that is bytes the engine produced in
+	 * memory, not a file on disk - there is nothing to write it back to.
+	 */
+	if (res->repair.n_fix && flen == strlen(name)) {
+		uint32_t q;
+
+		printf("%s%-*s%s %s\n", col(r, C_DIM), W_TAG,
+		       r->cure ? "  repairing" : "  repairable",
+		       col(r, C_RST), name);
+		for (q = 0; q < res->repair.n_fix; q++)
+			printf("             %*s%llu bytes at %llu\n", 0, "",
+			       (unsigned long long)res->repair.fix[q].n,
+			       (unsigned long long)res->repair.fix[q].off);
+		if (res->repair.truncate)
+			printf("             ends at %llu\n",
+			       (unsigned long long)res->repair.truncate);
+		if (r->cure && !repair_apply(name, &res->repair))
+			printf("             could not be written\n");
 	}
 
 	/*
@@ -691,6 +754,10 @@ static void usage(const char *argv0)
 	    "                  concurrent add, and a cache that lost entries\n"
 	    "                  under workers would be slower the more it was\n"
 	    "                  given\n"
+		"  --cure          APPLY a repair a rule described, instead of\n"
+		"                  only printing it. Rewrites the file in place\n"
+		"                  and takes no backup: what to keep is policy\n"
+		"                  and a scanner is the wrong place to decide it\n"
 		"  --stats         report what the prefilter and the presence set earned\n"
 		"  --emu MODE      overrides what --heur chose: never interprets\n"
 	    "                  nothing, auto is what --heur 2 turns on, only\n"
@@ -1426,6 +1493,8 @@ int main(int argc, char **argv)
 				i++;
 			want_procs = 1;
 		}
+		else if (strcmp(argv[i], "--cure") == 0)
+			r.cure = 1;
 		else if (strcmp(argv[i], "--stats") == 0)
 			r.stats = 1;
 		else if (strcmp(argv[i], "-v") == 0)

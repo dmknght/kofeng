@@ -3292,6 +3292,57 @@ static uint32_t ovl_note(const struct kof_obj_ctx *ctx, uint32_t pct)
 }
 
 /*
+ * The two halves of a described repair - see kof_content.cure_patch.
+ *
+ * BOUNDS CHECKED HERE and not in the module: a module is a rule, and a rule
+ * that could name an offset past the end of the object would be a rule that
+ * could corrupt a file the engine was asked to look at. A request outside the
+ * object is refused and the cure is told so.
+ */
+static int c_cure_patch(const struct kof_obj_ctx *ctx, uint64_t off,
+			const uint8_t *bytes, uint32_t n)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	kof_buf b = mc(ctx)->data;
+
+	if (!sc || !bytes || !n || n > 16u)
+		return 0;
+	if (off > b.n || b.n - off < n)
+		return 0;
+	if (sc->n_cure_fix >= sizeof sc->cure_fix / sizeof sc->cure_fix[0])
+		return 0;
+	sc->cure_fix[sc->n_cure_fix].off = off;
+	sc->cure_fix[sc->n_cure_fix].n = n;
+	memcpy(sc->cure_fix[sc->n_cure_fix].b, bytes, n);
+	sc->n_cure_fix++;
+	return 1;
+}
+
+static int c_cure_truncate(const struct kof_obj_ctx *ctx, uint64_t len)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	kof_buf b = mc(ctx)->data;
+
+	/* Cutting to nothing, or to more than there is, is not a repair. */
+	if (!sc || !len || len >= b.n)
+		return 0;
+	sc->cure_trunc = len;
+	sc->cure_trunc_set = 1;
+	return 1;
+}
+
+/* See kof_content.cure_offer: the module located the damage and says so. */
+static void c_cure_offer(const struct kof_obj_ctx *ctx, uint64_t at)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (sc) {
+		sc->cure_have = 1;
+		sc->cure_at = at;
+	}
+}
+
+/*
  * WHAT A MEASURE COSTS IS WHAT GATES IT.
  *
  * The string set is a pass over bytes the object was going to be read for
@@ -3734,7 +3785,8 @@ static const struct kof_content kof_detect_vtable = {
 	 * not about who is asking, and a rule that wants to know whether its
 	 * neighbours care about a format is asking a fair question. */
 	c_fmt_wanted, c_region_shape, c_region_entropy, c_entropy_at,
-	c_plague_score, c_ovl_strings, c_ovl_blocks, c_ovl_chain
+	c_plague_score, c_ovl_strings, c_ovl_blocks, c_ovl_chain,
+	c_cure_offer, c_cure_patch, c_cure_truncate
 };
 
 static const struct kof_content kof_unpack_vtable = {
@@ -3745,7 +3797,8 @@ static const struct kof_content kof_unpack_vtable = {
 	c_gather, c_name_next, c_incomplete,
 	c_unpack_entry, c_syms, c_data_xref, c_fmt_wanted, c_region_shape,
 	c_region_entropy, c_entropy_at, c_plague_score, c_ovl_strings,
-	c_ovl_blocks, c_ovl_chain
+	c_ovl_blocks, c_ovl_chain, c_cure_offer, c_cure_patch,
+	c_cure_truncate
 };
 
 /*

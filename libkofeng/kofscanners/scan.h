@@ -105,6 +105,40 @@ struct kof_scanner {
 	 * the reader wants is the measurement the verdict could have rested
 	 * on. -1 until something asks.
 	 */
+	/*
+	 * A MODULE OFFERED TO REPAIR THIS OBJECT, and where it says the
+	 * damage starts - see kof_content.cure_offer.
+	 *
+	 * Recorded and not acted on here: what a scan does with an offer is
+	 * the caller's, and a scan that repaired files because it could would
+	 * be a scan nobody could run twice.
+	 */
+	int                  cure_have;
+	uint64_t             cure_at;
+	/*
+	 * AND WHAT THE CURE ASKED FOR, collected and not applied.
+	 *
+	 * A repair rewrites somebody's binary; a scan that did that because
+	 * it could would be a scan nobody could run twice. So the requests
+	 * are gathered here and the caller decides - see kof_content's
+	 * cure_patch and cure_truncate.
+	 *
+	 * SIXTY-FOUR, and eight was the first guess. Putting an entry point
+	 * back is one patch of four, which is what eight was sized for - but
+	 * a repair that cuts a run out of an ELF then has to move every
+	 * section and segment offset that pointed past the cut, and there are
+	 * twenty-six sections in the sample this was measured on. A cap below
+	 * what the format needs is a cap that makes correct repairs
+	 * impossible to express.
+	 */
+	struct {
+		uint64_t off;
+		uint32_t n;
+		uint8_t  b[16];
+	}                    cure_fix[64];
+	uint32_t             n_cure_fix;
+	uint64_t             cure_trunc;
+	int                  cure_trunc_set;
 	int                  ovl_asked;
 	uint32_t             ovl_pct;
 	/*

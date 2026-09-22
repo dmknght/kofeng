@@ -49,7 +49,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <stdlib.h>          /* getenv - kof_tmpdir below */
+#include <stdlib.h>
 #include <sys/stat.h>
 
 #ifdef _WIN32
@@ -716,24 +716,47 @@ static inline int kof_write_all(int fd, const void *buf, uint64_t n)
 	return 1;
 }
 
+/*
+ * WHERE A TEMPORARY FILE MAY GO, from the platform and not from the
+ * environment.
+ *
+ * This read TMPDIR, then TMP and TEMP, and that was wrong twice over. An
+ * engine that is EMBEDDED does not get to decide where the host process
+ * writes by reading that process's environment - the host owns that, and a
+ * variable set for something else silently became engine policy. And an
+ * environment variable is an input nobody validated: wherever the environment
+ * is attacker-influenced, so was this path, and for a scanner started from a
+ * service manager or a cron entry that is not nowhere.
+ *
+ * Windows HAS the call Windows programs are expected to use, and
+ * GetTempPathA consults the documented places itself. POSIX has no such call,
+ * and the honest answer is the standard's own constant: P_tmpdir, which
+ * <stdio.h> defines and which is "/tmp" on every system this builds for. A
+ * constant is not a lookup and cannot be steered.
+ *
+ * Returns a pointer that outlives the call - a static buffer on Windows, a
+ * literal elsewhere - because every caller treats it as one.
+ */
+#ifdef _WIN32
 static inline const char *kof_tmpdir(void)
 {
-	const char *p = getenv("TMPDIR");
+	static char buf[4096];
+	DWORD n = GetTempPathA((DWORD)sizeof buf, buf);
 
-	if (p && p[0])
-		return p;
-#ifdef _WIN32
-	p = getenv("TMP");
-	if (p && p[0])
-		return p;
-	p = getenv("TEMP");
-	if (p && p[0])
-		return p;
-	return ".";
+	if (!n || n >= sizeof buf)
+		return ".";
+	return buf;
+}
+#else
+static inline const char *kof_tmpdir(void)
+{
+#ifdef P_tmpdir
+	return P_tmpdir;
 #else
 	return "/tmp";
 #endif
 }
+#endif
 
 /*
  * IS `path` INSIDE `dir`, and if so, where does the part below it begin?
@@ -822,6 +845,35 @@ static inline int kof_abs_path(const char *in, char *out, size_t cap)
 		return 0;
 	memcpy(out, buf, strlen(buf) + 1u);
 	return 1;
+}
+#endif
+
+/*
+ * Cut a file to `len`, with the platform's own call.
+ *
+ * Here beside the rest of the file primitives because a caller that repairs
+ * an infected binary needs it and there is no portable spelling: POSIX has
+ * truncate, Windows needs a handle and SetEndOfFile.
+ */
+#ifdef _WIN32
+static inline int kof_truncate_file(const char *path, uint64_t len)
+{
+	HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+			       FILE_ATTRIBUTE_NORMAL, NULL);
+	LARGE_INTEGER li;
+	int ok;
+
+	if (h == INVALID_HANDLE_VALUE)
+		return 0;
+	li.QuadPart = (LONGLONG)len;
+	ok = SetFilePointerEx(h, li, NULL, FILE_BEGIN) && SetEndOfFile(h);
+	CloseHandle(h);
+	return ok;
+}
+#else
+static inline int kof_truncate_file(const char *path, uint64_t len)
+{
+	return truncate(path, (off_t)len) == 0;
 }
 #endif
 

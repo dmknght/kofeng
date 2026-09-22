@@ -689,6 +689,13 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		/* Entry offset is zero within each blob; the compiler asserts it,
 		 * so the blob's place in the arena is the entry point. */
 		m->fn = (kof_scan_fn)(void *)(e->code + code_at + pm[i].code_off);
+		/* Zero means the module has none - an offset of zero would be
+		 * kof_scan itself, which is never a cure. */
+		m->cure = pm[i].cure_off
+			  ? (kof_scan_fn)(void *)(e->code + code_at +
+						  pm[i].code_off +
+						  pm[i].cure_off)
+			  : NULL;
 
 		/*
 		 * THE COUNT IS WHAT BOUNDS THE READ, which is the whole reason

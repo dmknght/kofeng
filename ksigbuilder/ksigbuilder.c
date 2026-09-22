@@ -1250,8 +1250,25 @@ static void capture_find_call(const char *at)
 	 * derive two variants. Left out when the measure was added and the
 	 * build refused every chain rule's AUTO until it was put back.
 	 */
+	/*
+	 * AND THE TWO THAT SEARCH AT AN OFFSET THE MODULE WORKED OUT.
+	 *
+	 * kof_find_str_at and kof_find_str_in are search macros like the
+	 * three above; what differs is that one argument is an EXPRESSION
+	 * rather than a declared range - see the note beside them in
+	 * kofsig.h. That makes no difference to what AUTO needs: the pattern
+	 * still folds to its bytes, and the expression folds as the text it
+	 * is, which is as stable across rebuilds as a range name.
+	 *
+	 * Left out, they were the one way to ask "is this pattern AT the
+	 * entry point" and have the build refuse the variant for it - which
+	 * is the question that separates a host that was patched from a file
+	 * that merely carries the payload, so refusing it refused the
+	 * distinction.
+	 */
 	static const char *kinds[] = { "kof_find_str_multi", "kof_find_str_all",
-					"kof_find_str_any", "kof_plague_score",
+					"kof_find_str_any", "kof_find_str_at",
+					"kof_find_str_in", "kof_plague_score",
 					"kof_ovl_shape", "kof_ovl_strings", "kof_ovl_blocks",
 					"kof_ovl_chain",
 					NULL };
@@ -2672,6 +2689,18 @@ struct img_facts {
 	char     entry_name[32];   /* kof_scan / kof_unpack / kof_heur */
 	uint64_t entry_off;
 	int      n_entry;
+	/*
+	 * AND THE SECOND ENTRY, WHICH IS NOT A KIND.
+	 *
+	 * kof_cure is not one of the three above and must not be counted as
+	 * one: a module is still exactly one kind, and a cure is something a
+	 * DETECTOR may additionally know how to do. The loader finds the
+	 * first entry at offset zero and needs no symbols; this one has no
+	 * such place, so its offset is resolved here, once, and written into
+	 * the module's record - see kof_pack_mod.cure_off.
+	 */
+	uint64_t cure_off;
+	int      have_cure;
 	uint64_t blob_off, blob_len;
 	uint64_t data_bytes, bss_bytes;
 };
@@ -2791,10 +2820,15 @@ static int coff_read(const char *path, struct img_facts *out)
 			if (!out->undef[0] &&
 			    (!strcmp(name, "kof_scan") ||
 			     !strcmp(name, "kof_unpack") ||
-			     !strcmp(name, "kof_heur")) == 0)
+			     !strcmp(name, "kof_heur") ||
+			     !strcmp(name, "kof_cure")) == 0)
 				snprintf(out->undef, sizeof out->undef, "%s",
 					 name);
 			goto next;
+		}
+		if (!strcmp(name, "kof_cure")) {
+			out->have_cure = 1;
+			out->cure_off = value;
 		}
 		if (!strcmp(name, "kof_scan") || !strcmp(name, "kof_unpack") ||
 		    !strcmp(name, "kof_heur")) {
@@ -3000,6 +3034,10 @@ static int img_read(const char *path, const char *want_blob,
 					snprintf(out->undef, sizeof out->undef,
 						 "%s", nm);
 				continue;
+			}
+			if (!strcmp(nm, "kof_cure")) {
+				out->have_cure = 1;
+				out->cure_off = value;
 			}
 			if (!strcmp(nm, "kof_scan") || !strcmp(nm, "kof_unpack") ||
 			    !strcmp(nm, "kof_heur")) {
@@ -3741,6 +3779,9 @@ static int check_size_body(void)
 }
 
 static char g_entry_kept[32];
+/* And where kof_cure() landed, 0 when the module has none - see
+ * img_facts.cure_off. */
+static uint64_t g_cure_kept;
 
 /*
  * THE RAW BLOB - the bytes the database stores and the loader jumps into.
@@ -4102,6 +4143,7 @@ static int do_build(const char *src, const char *pat, const char *obj,
 	if (!emit_raw(ld, lds, obj, img, raw, &f))
 		return 0;
 
+	g_cure_kept = f.have_cure ? f.cure_off : 0u;
 	snprintf(g_entry_kept, sizeof g_entry_kept, "%.31s", f.entry_name);
 	*entry_out = g_entry_kept;
 	return 1;
@@ -4309,6 +4351,10 @@ struct artefact {
 	int      any_target;
 	uint32_t scan_mask, arch_mask, subtype_mask, unp_kind;
 	uint32_t heur_phase, heur_want, heur_level;
+	/* Where kof_cure() sits inside the blob, 0 when there is none. Known
+	 * only once the image is linked, so it travels in the metadata file
+	 * beside the blob rather than out of the source. */
+	uint32_t cure_off;
 	uint64_t size_min;
 
 	/* What KOF_TARGET_NAME declared - empty family / maltype 0 for an
@@ -4497,6 +4543,8 @@ static int meta_load(struct artefact *a)
 			a->heur_want = (uint32_t)strtoul(line + 10, 0, 10);
 		} else if (strncmp(line, "heur_level=", 11) == 0) {
 			a->heur_level = (uint32_t)strtoul(line + 11, 0, 10);
+		} else if (strncmp(line, "cure_off=", 9) == 0) {
+			a->cure_off = (uint32_t)strtoul(line + 9, 0, 10);
 		} else if (strncmp(line, "blob_len=", 9) == 0) {
 			blob_len = strtoull(line + 9, 0, 10);
 		} else if (strncmp(line, "kind=", 5) == 0) {
@@ -5809,6 +5857,7 @@ static int module_main(int argc, char **argv)
 	fprintf(f, "heur_phase=%d\n", g_heur_phase);
 	fprintf(f, "heur_want=%d\n", g_heur_want);
 	fprintf(f, "heur_level=%d\n", g_heur_level);
+	fprintf(f, "cure_off=%llu\n", (unsigned long long)g_cure_kept);
 	fprintf(f, "heur_predict=%s\n", g_heur_predict);
 	/* A heuristic rule has no family; its word goes in the same slot, and
 	 * the engine writes "Heur" where a maltype would be. */
@@ -6680,6 +6729,7 @@ static int pack_main(int argc, char **argv)
 			pm[a].heur_phase   = s->heur_phase;
 			pm[a].heur_want    = s->heur_want;
 			pm[a].heur_level   = s->heur_level;
+			pm[a].cure_off     = s->cure_off;
 			pm[a].src          = s->srcpath;
 			pm[a].size_min    = s->size_min;
 			pm[a].str         = s->str;

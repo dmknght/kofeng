@@ -1944,6 +1944,10 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * c_ovl_strings - so this costs a store.
 	 */
 	sc->ovl_ready = 0;
+	sc->cure_have = 0;
+	sc->cure_at = 0;
+	sc->n_cure_fix = 0;
+	sc->cure_trunc_set = 0;
 	sc->ovl_asked = -1;
 	sc->ovl_pct = 0;
 	/* And the swept chains, for the same reason and at the same cost. */
@@ -1988,7 +1992,54 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 		sc->plague_hit = 0;
 		sc->plague_tot = 0;
 		sc->cur_mod   = m;
+		sc->cure_have = 0;
+		sc->cure_at   = 0;
 		m->fn(&ctx);
+
+		/*
+		 * AND, IF IT BOTH FOUND SOMETHING AND KNOWS HOW TO UNDO IT,
+		 * ASK IT WHAT THE REPAIR WOULD BE.
+		 *
+		 * Three conditions and every one of them is needed. The module
+		 * has to have REPORTED, because a repair with no detection
+		 * behind it is a file being rewritten for no stated reason. It
+		 * has to have OFFERED - KOF_SCAN_CURABLE - because finding a
+		 * family says nothing about where its payload starts and a
+		 * repair without an offset has nothing to act on. And it has
+		 * to HAVE a cure at all, which nearly no module does.
+		 *
+		 * WHAT COMES BACK IS A DESCRIPTION, not a changed file: see
+		 * kof_content.cure_patch. Nothing on disk is touched here, by
+		 * anybody, ever. A scan that repaired what it found would be a
+		 * scan nobody could run twice.
+		 */
+		if (sc->rep_valid && sc->cure_have && m->cure) {
+			uint32_t q;
+
+			m->cure(&ctx);
+			/*
+			 * AND OUT TO THE CALLER, once, for the first module
+			 * that described one. A second rule offering a second
+			 * repair of the same object is two rules disagreeing
+			 * about what it is, and applying either would be
+			 * picking a side the engine has no basis to pick.
+			 */
+			if (!out->repair.n_fix && !out->repair.truncate) {
+				for (q = 0; q < sc->n_cure_fix &&
+					    q < KOF_MAX_FIX; q++) {
+					out->repair.fix[q].off =
+						sc->cure_fix[q].off;
+					out->repair.fix[q].n =
+						sc->cure_fix[q].n;
+					memcpy(out->repair.fix[q].b,
+					       sc->cure_fix[q].b,
+					       sc->cure_fix[q].n);
+				}
+				out->repair.n_fix = q;
+				out->repair.truncate = sc->cure_trunc_set
+						       ? sc->cure_trunc : 0u;
+			}
+		}
 		sc->cur_mod   = NULL;
 
 		if (!sc->rep_valid)

@@ -404,42 +404,26 @@ int kof_src_tmpfile(void)
 static int kof_src_tmpfile_in(char *dir_out, size_t dir_cap)
 {
 	/*
-	 * THE VARIABLE AND THE FALLBACKS ARE BOTH PER-PLATFORM.
+	 * THE PLATFORM IS ASKED, NOT THE ENVIRONMENT.
 	 *
-	 * POSIX names the directory in TMPDIR and has two conventional places
-	 * to try when it says nothing. Windows uses TEMP, falls back to TMP,
-	 * and has no path that is guaranteed to exist - C:\Windows\Temp is not
-	 * writable by an ordinary account and hard-coding it would fail in a
-	 * way that reads as "the scanner is broken" rather than "set TEMP".
-	 *
-	 * The list order is what matters and is the same on both: the
-	 * environment first, because a caller who set it meant it - a scan of a
-	 * large archive can produce more than a small /tmp holds.
+	 * This read TMPDIR, TEMP and TMP, and that was wrong for an embedded
+	 * engine: where the host process writes is the host's decision, and
+	 * lifting it out of that process's environment made a variable set for
+	 * something else into engine policy. kof_temp_dir asks the platform -
+	 * GetTempPathA on Windows, the standard's P_tmpdir elsewhere - and the
+	 * conventional second place stays as a fallback below.
 	 */
 #ifdef _WIN32
-	static const char *const dirs[] = { NULL, NULL, "." };
-	const char *env = getenv("TEMP");
-	const char *env2 = getenv("TMP");
+	static const char *const dirs[] = { NULL, "." };
 #else
-	static const char *const dirs[] = { NULL, "/tmp", "/var/tmp" };
-	const char *env = getenv("TMPDIR");
+	static const char *const dirs[] = { NULL, "/var/tmp" };
 #endif
+	const char *env = kof_tmpdir();
 	uint32_t i;
-
-#ifdef _WIN32
-	if (!env || !*env)
-		env = env2;
-#endif
 
 	for (i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
 		const char *d = dirs[i] ? dirs[i] : env;
 
-#ifdef _WIN32
-		/* The second row is the other environment variable, already
-		 * folded into `env` above, so it would repeat the first. */
-		if (i == 1u)
-			continue;
-#endif
 		char path[4096];
 		int fd;
 
