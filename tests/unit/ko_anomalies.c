@@ -99,9 +99,18 @@ static void look(const char *path)
 			for (k = 0; k < (int)N_WATCH; k++)
 				if (info.anomalies & watched[k].bit) {
 					if (!hits[k]) {
+						/* A precision, not a bare %s: a
+						 * module path can be 4096 and
+						 * this buffer is 512. Truncating
+						 * is fine - it is a name printed
+						 * in a summary - but saying so
+						 * is what keeps the build quiet
+						 * about it. */
 						snprintf(first_buf[k],
 							 sizeof first_buf[k],
-							 "%s", path);
+							 "%.*s",
+							 (int)sizeof first_buf[k] - 1,
+							 path);
 						first[k] = first_buf[k];
 					}
 					hits[k]++;

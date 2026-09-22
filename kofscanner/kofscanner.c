@@ -140,6 +140,15 @@ struct run {
 	 * second thing that can disagree with it. */
 	uint64_t dropped;
 	uint64_t by_reason[KOF_BROKEN_COUNT];
+	/* Files a rule repaired. Counted here rather than derived from
+	 * `files` because a verdict says what a file WAS, not what was done
+	 * about it - a repaired file is still reported infected. */
+	uint64_t repaired;
+	/* Files the clean set answered for, counted where the skip happens
+	 * so the progress line can say so. kof_stats counts them too, but
+	 * that arrives at the END of the scan and this is needed during
+	 * it. */
+	uint64_t cached_seen;
 	int verbose;
 	int stats;
 	int color;               /* stdout is a terminal */
@@ -539,16 +548,40 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		uint32_t q;
 		int done = repair_apply(name, &res->repair);
 
-		printf("%s%-*s%s %s\n", col(r, C_DIM), W_TAG,
-		       done ? "  repaired" : "  NOT repaired",
+		/*
+		 * GREEN, AND CAPITALISED, BECAUSE IT IS ADDRESSED TO A PERSON.
+		 *
+		 * Every other tag on this column is the verdict, and the verdict
+		 * speaks in the colour of its level - red for infected and so on.
+		 * This one is not a verdict, it is the only line in the output
+		 * that says the scanner CHANGED something, and the reader wants
+		 * to find it at a glance among the red. Green says it went well;
+		 * a repair that could not be written stays red, because that is
+		 * a file still infected and still needing a hand.
+		 */
+		if (done)
+			r->repaired++;
+		printf("%s%-*s%s %s\n", col(r, done ? C_GRN : C_RED), W_TAG,
+		       done ? "  Repaired" : "  NOT repaired",
 		       col(r, C_RST), name);
-		for (q = 0; q < res->repair.n_fix; q++)
-			printf("             %*s%llu bytes at %llu\n", 0, "",
-			       (unsigned long long)res->repair.fix[q].n,
-			       (unsigned long long)res->repair.fix[q].off);
-		if (res->repair.truncate)
-			printf("             ends at %llu\n",
-			       (unsigned long long)res->repair.truncate);
+		/*
+		 * AND THE BYTES ONLY UNDER -v.
+		 *
+		 * "four bytes at 24" is for somebody checking the repair against
+		 * the rule that described it, which is a thing done once while
+		 * writing the rule and never during a sweep. On a run that cures
+		 * a hundred files it is three hundred lines between the reader
+		 * and the summary.
+		 */
+		if (r->verbose) {
+			for (q = 0; q < res->repair.n_fix; q++)
+				printf("             %llu bytes at %llu\n",
+				       (unsigned long long)res->repair.fix[q].n,
+				       (unsigned long long)res->repair.fix[q].off);
+			if (res->repair.truncate)
+				printf("             ends at %llu\n",
+				       (unsigned long long)res->repair.truncate);
+		}
 		if (!done)
 			printf("             could not be written\n");
 	}
@@ -932,22 +965,51 @@ struct procscan {
  * unidentifiable file would share it, and one of them being called clean would
  * speak for all of them.
  */
+/*
+ * WHAT THE CACHE HOOKS ARE GIVEN.
+ *
+ * The set, and the run - and the run is here for one reason: a file the set
+ * answers for never reaches on_object, so it never reaches progress_draw
+ * either. Measured on 300 files from /usr/bin: a cold scan drew the progress
+ * line six times and the second scan, with every file cached, drew it ZERO
+ * times. The scanner did its work and said nothing at all while doing it,
+ * which on a large tree is indistinguishable from being stuck.
+ */
+struct cache_hook {
+	struct kof_fidset *fs;
+	struct run        *r;
+};
+
 static int fid_seen(void *user, const char *path)
 {
+	struct cache_hook *h = user;
 	struct kof_fid id;
 
-	if (!user || !kof_fid_of(path, &id))
+	if (!h || !h->fs || !kof_fid_of(path, &id))
 		return 0;
-	return kof_fidset_has((struct kof_fidset *)user, kof_fid_key(&id));
+	if (!kof_fidset_has(h->fs, kof_fid_key(&id)))
+		return 0;
+	/*
+	 * SKIPPED, AND SAID SO. The same rate limit the scanned path uses, so
+	 * a cached sweep costs no more terminal writes than a cold one - it
+	 * just stops being silent.
+	 */
+	if (h->r) {
+		h->r->cached_seen++;
+		progress_draw(h->r, path);
+	}
+	return 1;
 }
 
 static void fid_keep(void *user, const char *path)
 {
 	struct kof_fid id;
 
-	if (!user || !kof_fid_of(path, &id))
+	struct cache_hook *h = user;
+
+	if (!h || !h->fs || !kof_fid_of(path, &id))
 		return;
-	(void)kof_fidset_add((struct kof_fidset *)user, kof_fid_key(&id));
+	(void)kof_fidset_add(h->fs, kof_fid_key(&id));
 }
 
 /*
@@ -1005,9 +1067,11 @@ static void fid_drop(void *user, const char *path)
 {
 	struct kof_fid id;
 
-	if (!user || !kof_fid_of(path, &id))
+	struct cache_hook *h = user;
+
+	if (!h || !h->fs || !kof_fid_of(path, &id))
 		return;
-	(void)kof_fidset_drop((struct kof_fidset *)user, kof_fid_key(&id));
+	(void)kof_fidset_drop(h->fs, kof_fid_key(&id));
 }
 
 /*
@@ -1097,7 +1161,11 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 				opt->cache_keep = fid_keep;
 			}
 			opt->cache_drop = fid_drop;
-			opt->cache_user = p.fs;
+			/* The bundle lives as long as the option does - see
+			 * struct cache_hook for why the run is in it. */
+			p.hook.fs = p.fs;
+			p.hook.r  = r;
+			opt->cache_user = &p.hook;
 		}
 	}
 
@@ -1781,7 +1849,9 @@ int main(int argc, char **argv)
 						opt.cache_keep = fid_keep;
 					}
 					opt.cache_drop = fid_drop;
-					opt.cache_user = fs;
+					hook.fs = fs;
+					hook.r  = &r;
+					opt.cache_user = &hook;
 				}
 			}
 		}
@@ -2025,6 +2095,24 @@ int main(int argc, char **argv)
 		printf("suspected %s%llu%s file(s)\n",
 		       sus_f ? col(&r, C_YEL) : "", (unsigned long long)sus_f,
 		       sus_f ? col(&r, C_RST) : "");
+		/*
+		 * REPAIRED, AND ONLY WHEN SOMETHING WAS.
+		 *
+		 * A scan that cured nothing is almost every scan, and a line
+		 * reading "repaired 0" on all of them is the kind of noise that
+		 * trains a reader to stop looking at this block. When it is not
+		 * zero it is the one line here that says the scanner CHANGED the
+		 * disk, so it appears directly under the verdict counts rather
+		 * than at the end, and in the same green the per-file line used.
+		 *
+		 * It is NOT subtracted from `infected`. A repaired file was
+		 * infected and is still reported as such - the verdict says what
+		 * was found, this says what was done about it.
+		 */
+		if (r.repaired)
+			printf("repaired  %s%llu%s file(s)\n",
+			       col(&r, C_GRN), (unsigned long long)r.repaired,
+			       col(&r, C_RST));
 		/*
 		 * HEURISTIC, split by KIND. Printed even at zero when the heuristic
 		 * ran, so a reader can tell "found nothing" from "was switched off".
