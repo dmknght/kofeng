@@ -27,6 +27,8 @@
 #include <stdio.h>
 
 #include "kofrepint.h"
+/* kof_hash_step - the engine's one FNV, see kofcore.h. */
+#include "../../libkofeng/core/kofcore.h"
 
 /* ---- the string arena ---------------------------------------------------- */
 
@@ -494,8 +496,10 @@ static uint32_t hash_of(uint8_t kind, const char *s)
 
 		if (c >= 'A' && c <= 'Z')
 			c = (char)(c + 32);
-		h ^= (uint8_t)c;
-		h *= 16777619u;
+		/* The engine's step, so the prime lives in one place - the
+		 * FOLD stays here because it is this function's question, not
+		 * the hash's. */
+		h = kof_hash_step(h, (uint8_t)c);
 	}
 	return h;
 }

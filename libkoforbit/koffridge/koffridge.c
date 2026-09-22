@@ -46,6 +46,8 @@
 
 #include "../../libkofeng/kofeng.h"
 #include "koffridge.h"
+/* koffridge_seen_evt reads the neutral record - see koffridge.h. */
+#include "../kofevt/kofevt.h"
 
 /* kof_mkdir and KOF_PATH_SEP - the two things a default path needs and the
  * one place this tree already says how they differ per platform. */
@@ -1361,6 +1363,95 @@ uint32_t koffridge_seen_mark(struct koffridge_seen *s, const void *id, uint32_t 
 	e->count = 1u;
 	s->st.fresh++;
 	return 0;
+}
+
+/*
+ * THE IDENTITY OF A NEUTRAL RECORD - see the note in koffridge.h.
+ *
+ * Built into a local buffer and hashed by koffridge_seen_mark, so nothing here
+ * is stored. The object text is taken through kof_evt_object, which bounds it
+ * against the record's arena; the data is taken as raw bytes with its own
+ * length, because a registry value is not a string.
+ */
+uint32_t koffridge_seen_evt(struct koffridge_seen *s, const struct kof_evt *e)
+{
+	unsigned char id[512];
+	size_t n = 0;
+	const char *obj;
+
+	if (!s || !e)
+		return 0;
+
+#define ID_PUT(src, len)                                                      \
+	do {                                                                  \
+		size_t l_ = (len);                                            \
+		if (l_ > sizeof id - n)                                       \
+			l_ = sizeof id - n;                                   \
+		memcpy(id + n, (src), l_);                                    \
+		n += l_;                                                      \
+	} while (0)
+
+	ID_PUT(&e->verb, sizeof e->verb);
+	ID_PUT(&e->actor_pid, sizeof e->actor_pid);
+
+	/*
+	 * THE OBJECT, FOLDED THE WAY ITS OWN PLATFORM COMPARES PATHS.
+	 *
+	 * This is the one field where identical treatment would be a BUG
+	 * rather than a simplification, and it is why this function is
+	 * allowed to be platform specific at all: the fridge is orbit's, and
+	 * orbit is where a host's policy lives.
+	 *
+	 *   WINDOWS compares paths without case and accepts either separator,
+	 *   so C:\X\a.exe and c:/x/A.EXE are ONE file. Hashing the bytes as
+	 *   they arrived makes them two identities, and a program writing one
+	 *   file through two spellings would be suppressed by neither.
+	 *
+	 *   POSIX does not. /X/a and /x/A are two files, and folding them
+	 *   would suppress a real event because a different file happened to
+	 *   differ only in case - a silence with nothing to say it happened.
+	 *
+	 * So the fold is the platform's, and the two are not made to agree.
+	 * (libkofgrille's own older kofw_evt_ident hashes the bytes raw on
+	 * both counts; a collector moved onto this one gains the fold rather
+	 * than losing anything.)
+	 */
+	obj = kof_evt_object(e);
+	if (obj && *obj) {
+#ifdef _WIN32
+		size_t k, l = strlen(obj);
+
+		for (k = 0; k < l && n < sizeof id; k++) {
+			unsigned char c = (unsigned char)obj[k];
+
+			if (c >= 'A' && c <= 'Z')
+				c = (unsigned char)(c + 32);
+			else if (c == '\\')
+				c = '/';
+			id[n++] = c;
+		}
+#else
+		ID_PUT(obj, strlen(obj));
+#endif
+	}
+
+	/*
+	 * AND WHAT WAS WRITTEN, when the record carries it. Bounded against
+	 * the arena the same way every other reader of off_data is - the
+	 * record may have come from a log file, and a length that walks past
+	 * text[] is a length a file can claim.
+	 */
+	if (e->data_len && e->off_data != KOF_TEXT_NONE &&
+	    e->off_data < sizeof e->text) {
+		size_t dn = e->data_len;
+
+		if (dn > sizeof e->text - e->off_data)
+			dn = sizeof e->text - e->off_data;
+		ID_PUT(e->text + e->off_data, dn);
+	}
+#undef ID_PUT
+
+	return koffridge_seen_mark(s, id, (uint32_t)n, e->stamp);
 }
 
 void koffridge_seen_stats(const struct koffridge_seen *s, struct koffridge_seen_stat *out)

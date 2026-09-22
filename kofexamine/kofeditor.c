@@ -377,8 +377,9 @@ uint32_t tgt_mix(uint32_t h, const char *tok)
 
 		if (c >= 'a' && c <= 'z')
 			c = (uint8_t)(c - 'a' + 'A');
-		k ^= c;
-		k = (uint32_t)((uint64_t)k * 16777619u);
+		/* The engine's step - see kofcore.h. The (uint64_t) cast was
+		 * noise: the multiply is unsigned, so it cannot be UB. */
+		k = kof_hash_step(k, c);
 	}
 	return h + k;
 }
@@ -411,8 +412,7 @@ static uint32_t pat_of(const uint8_t *b, uint32_t n, int hex)
 	uint32_t h = 2166136261u, i;
 
 	for (i = 0; i < n; i++) {
-		h ^= b[i];
-		h = (uint32_t)((uint64_t)h * 16777619u);
+		h = kof_hash_step(h, b[i]);
 	}
 	h ^= (uint32_t)hex;
 	return h ? h : 1u;
@@ -2081,8 +2081,9 @@ uint32_t draft_hash(struct kof_editor *e)
 {
 	uint32_t h = 2166136261u, i, j;
 
-	#define MIX(b) do { h ^= (uint32_t)((uint64_t)(b) & 0xffffffffu); \
-			    h = (uint32_t)((uint64_t)h * 16777619u); } while (0)
+	/* One step, the engine's - see kofcore.h. The mask and the cast were
+	 * noise around a byte. */
+	#define MIX(b) (h = kof_hash_step(h, (uint8_t)(b)))
 	for (i = 0; e->dr.family[i]; i++)
 		MIX((uint8_t)e->dr.family[i]);
 	for (i = 0; e->dr.note[i]; i++)

@@ -1124,6 +1124,7 @@ ANTARC_SRC := libkofantarc/aproc.c \
               libkofantarc/apagemap.c \
               libkofantarc/afan.c \
               libkofantarc/apev.c \
+              libkofantarc/amon.c \
               libkofantarc/afid.c
 
 ifeq ($(NATIVE_OS),windows)

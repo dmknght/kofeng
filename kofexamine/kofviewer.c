@@ -4958,8 +4958,7 @@ static unsigned evt_key(const char *name)
 	 * the whole requirement; which of the six it lands on does not matter
 	 * as long as it lands on the same one every time. */
 	for (; *name; name++) {
-		h ^= (unsigned char)*name;
-		h *= 16777619u;
+		h = kof_hash_step(h, (unsigned char)*name);
 	}
 	return h % EVT_PAL_N;
 }
@@ -5543,6 +5542,10 @@ static size_t evt_sel_text(const struct view *v, char *out, size_t cap)
 	if (to <= from)
 		return 0;
 	len = (size_t)(to - from);
+	/* cap 0 makes `cap - 1u` SIZE_MAX and the clamp a no-op - the same
+	 * shape guarded in libkofantarc when it was found there. */
+	if (!cap)
+		return 0;
 	if (len > cap - 1u)
 		len = cap - 1u;
 	memcpy(out, t + from, len);
@@ -20852,7 +20855,7 @@ static const char *plist_nth(const char *t, uint32_t tn, char sep, uint32_t n,
 
 		if (i == n) {
 			if (len >= cap)
-				len = cap - 1u;
+				len = cap ? cap - 1u : 0u;
 			memcpy(out, t + at, len);
 			out[len] = 0;
 			return out;

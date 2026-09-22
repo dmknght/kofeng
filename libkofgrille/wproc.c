@@ -1773,6 +1773,19 @@ size_t kofw_region_describe(const struct kofw_region *r, char *buf, size_t cap)
 	prot[2] = (r->flags & KOFW_RGF_EXEC) ? 'x' : '-';
 	prot[3] = '\0';
 
+	/*
+	 * `cap - 1u` BELOW, SO A ZERO CAP IS REFUSED FIRST.
+	 *
+	 * Three returns in this function hand back cap - 1 as "what was
+	 * written", and with cap 0 that is SIZE_MAX - a length the caller uses.
+	 * No caller passes zero today; the same shape in libkofantarc's
+	 * a_read_exe and a_parse_maps was guarded when it was found there, and
+	 * this is the copy that did not get the fix. Guarded where the
+	 * subtraction is, not where the caller happens to be correct.
+	 */
+	if (!buf || !cap)
+		return 0;
+
 	wrote = snprintf(buf, cap, "0x%016llx %6s %s %s/%s",
 			 (unsigned long long)r->base, sz, prot,
 			 kofw_rgn_kind_name(r->kind),

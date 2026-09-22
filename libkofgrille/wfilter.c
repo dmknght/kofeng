@@ -880,9 +880,41 @@ size_t kofw_evt_ident(const struct kofw_evt *e, void *buf, size_t cap,
 	if (wide)
 		goto done;
 
+	/*
+	 * FOLDED, BECAUSE WINDOWS COMPARES PATHS THAT WAY AND THIS IS WINDOWS.
+	 *
+	 * The bytes used to go in as they arrived, and that is a bug on this
+	 * platform rather than a simplification: NTFS is case insensitive and
+	 * both separators are accepted, so
+	 *
+	 *     C:\Windows\Temp\a.exe
+	 *     c:/windows/temp/A.EXE
+	 *
+	 * are ONE file and were TWO identities. A process writing one file
+	 * through two spellings - which a script does without meaning to, and
+	 * which a sample does on purpose - was suppressed by neither, and the
+	 * suppression this whole table exists for quietly did not happen.
+	 *
+	 * The POSIX collector must NOT do this: /X/a and /x/A are two files
+	 * there, and folding them would drop a real event because an unrelated
+	 * file differed only in case. Same question, two answers, so it is
+	 * answered in each platform's own code rather than in one shared
+	 * helper that would have to be wrong somewhere.
+	 */
 	obj = kofw_evt_object(e);
-	if (obj && *obj)
-		IDENT_PUT(obj, strlen(obj));
+	if (obj && *obj) {
+		size_t k, l = strlen(obj);
+
+		for (k = 0; k < l && n < cap; k++) {
+			unsigned char c = (unsigned char)obj[k];
+
+			if (c >= 'A' && c <= 'Z')
+				c = (unsigned char)(c + 32);
+			else if (c == '\\')
+				c = '/';
+			p[n++] = c;
+		}
+	}
 
 	/*
 	 * WHERE A MODULE LANDED, for the image verbs ONLY.

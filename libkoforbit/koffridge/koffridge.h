@@ -466,6 +466,9 @@ size_t koffridge_describe(struct koffridge *, char *buf, size_t cap);
  * means. See the block above these functions in the .c for the two
  * differences that matter - no database stamp, and nothing on disk.
  */
+/* The neutral record koffridge_seen_evt reads - see below. */
+struct kof_evt;
+
 struct koffridge_seen;
 
 /*
@@ -513,6 +516,34 @@ void koffridge_seen_close(struct koffridge_seen *);
  */
 uint32_t koffridge_seen_mark(struct koffridge_seen *, const void *id, uint32_t id_len,
 		      uint64_t stamp);
+
+/*
+ * THE SAME TEST, OVER A NEUTRAL RECORD, so neither collector writes its own.
+ *
+ * koffridge_seen_mark takes bytes and asks the caller what makes two events
+ * the same - and both collectors answered that question separately. The
+ * Windows one built an identity in wfilter.c and marked it here; the Linux one
+ * had no suppression at all, so a build writing a file ten thousand times
+ * produced ten thousand records. One mechanism written twice and missing once
+ * is the shape this consolidates: the identity comes from the record every
+ * collector already produces, so it is decided in ONE place and both platforms
+ * get the same answer to "is this the same event again".
+ *
+ * WHAT MAKES TWO EVENTS THE SAME, and each of these earns its place:
+ *
+ *   the VERB, so a write and a delete of one path are two facts;
+ *   the ACTOR, so two processes touching one file are two facts - this is
+ *     actor_pid and not pid, because for a process event the subject is the
+ *     new process and the actor is who started it;
+ *   the OBJECT, which is the path or key the event acted on;
+ *   the DATA, when the record carries any - setting one Run value to two
+ *     different commands is two facts, and without this the second write
+ *     disappears, which is precisely the write worth seeing.
+ *
+ * The stamp is the record's own. Returns what koffridge_seen_mark returns: 0
+ * when the record is fresh and should be let through.
+ */
+uint32_t koffridge_seen_evt(struct koffridge_seen *, const struct kof_evt *);
 
 struct koffridge_seen_stat {
 	uint64_t asked;    /* identities offered */

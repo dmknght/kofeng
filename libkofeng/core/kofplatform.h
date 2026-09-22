@@ -646,6 +646,82 @@ static inline void kof_unmap_anon(void *p, uint64_t len)
 #define KOF_PATH_SEP '/'
 #endif
 
+/*
+ * COLLAPSE REPEATED SEPARATORS, and on Windows KEEP THE ONES THAT MEAN
+ * SOMETHING.
+ *
+ * WHY THE ENGINE NEEDS THIS AT ALL. "//" is the separator an object name is
+ * composed with - "archive.zip//3:entry" - and kof_obj_toplevel_len finds the
+ * first one to tell a file from what came out of it. A filesystem path may
+ * carry one too: a shell writing "$dir/" then "/name" makes one. The top level
+ * file then reads as a CHILD of a directory that does not exist, and a caller
+ * that decides anything by "is this the top level" - how many files were
+ * scanned, whether a repair may be written - decides it wrongly.
+ *
+ * WHY IT IS HERE AND NOT IN THE WALK. It was in the walk, spelled for POSIX,
+ * which is the shape this header exists to stop: a separator is '/' on one
+ * platform and '/' or '\' on the other, and kof_path_sep_last three lines
+ * down already knew that. One copy that knows both beats two copies that each
+ * know one.
+ *
+ * AND WINDOWS IS NOT POSIX WITH A DIFFERENT SLASH. Two leading separators are
+ * a PREFIX there, not a doubled one:
+ *
+ *     \\server\share\file     a UNC path - the pair IS the syntax
+ *     \\?\C:\very\long\path   the extended-length prefix
+ *     \\.\PhysicalDrive0       a device path
+ *
+ * Collapsing those turns a working path into one that names something else or
+ * nothing at all, so the leading pair is kept and only what follows is
+ * squashed. POSIX has no such rule - Linux reads "//x" as "/x" - and a name
+ * this engine cannot spell unambiguously is worse than the ordinary spelling,
+ * so there the pair collapses like any other run.
+ *
+ * Returns the length written, or 0 when it would not fit.
+ */
+static inline int kof_is_path_sep(char c)
+{
+#ifdef _WIN32
+	return c == '/' || c == '\\';
+#else
+	return c == '/';
+#endif
+}
+
+static inline size_t kof_path_squash(const char *in, char *out, size_t cap)
+{
+	size_t i = 0, n = 0;
+
+	if (!in || !out || !cap)
+		return 0;
+
+#ifdef _WIN32
+	/* The prefix, verbatim: see the note above. Only a PAIR, and only at
+	 * the very start - three separators is not a longer prefix, it is a
+	 * pair and a stray. */
+	if (kof_is_path_sep(in[0]) && kof_is_path_sep(in[1])) {
+		if (cap < 3u)
+			return 0;
+		out[n++] = in[i++];
+		out[n++] = in[i++];
+	}
+#endif
+	while (in[i]) {
+		char c = in[i++];
+
+		if (kof_is_path_sep(c) && n && kof_is_path_sep(out[n - 1]))
+			continue;
+		if (n + 1u >= cap)
+			return 0;
+		out[n++] = c;
+	}
+	/* And the trailing one, which every caller used to strip by hand. */
+	while (n > 1u && kof_is_path_sep(out[n - 1u]))
+		n--;
+	out[n] = 0;
+	return n;
+}
+
 static inline const char *kof_path_sep_last(const char *p)
 {
 	const char *s = NULL, *q;

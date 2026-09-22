@@ -79,6 +79,9 @@
 #include <sys/wait.h>
 #include "kofantarc.h"
 #include "afan.h"
+/* Both Linux collectors behind one api - see amon.h on why the merge and the
+ * exec de-duplication live in antarc and not in here. */
+#include "amon.h"
 #endif
 
 /*
@@ -542,7 +545,7 @@ struct tracer {
 	HANDLE              job;
 	char                cmd[8192];
 #else
-	struct kofa_fan          *fan;
+	struct kofa_mon          *mon_l;
 	const struct kof_mon_api *api;
 	pid_t                     kid, group;
 	uint32_t                  asked, granted;
@@ -620,14 +623,15 @@ static int tracer_open(struct tracer *t, unsigned providers, uint32_t ring)
 	}
 #else
 	{
-		struct kofa_fan_option fo;
+		struct kofa_mon_option mo;
+		struct kofa_fan_option *fop = &mo.fan;
 
 		(void)providers; (void)ring;
-		memset(&fo, 0, sizeof fo);
+		memset(&mo, 0, sizeof mo);
 		/* Our own events are the only ones carrying a pid in a
 		 * degraded session, and the group test below is what scopes -
 		 * so the self-filter must not drop them first. */
-		fo.trace_self = 1;
+		fop->trace_self = 1;
 		/*
 		 * WHAT --watch NAMED. The list is NULL-terminated and the
 		 * array has a spare slot for that, so a full list is still a
@@ -637,15 +641,23 @@ static int tracer_open(struct tracer *t, unsigned providers, uint32_t ring)
 		 */
 		if (g_n_watch) {
 			g_watch[g_n_watch] = NULL;
-			fo.files = g_watch;
+			fop->files = g_watch;
 		}
-		t->fan = kofa_fan_open(&fo, &err);
-		if (!t->fan) {
+		/*
+		 * BOTH HALVES, which is what makes a Linux trace comparable
+		 * to the Windows one: files from fanotify AND execs and exits
+		 * from the process connector. This used to open the file
+		 * collector alone, so `kofmontrace` on Linux showed no process
+		 * starts at all while the same tool on Windows showed seven
+		 * providers.
+		 */
+		t->mon_l = kofa_mon_open(&mo, &err);
+		if (!t->mon_l) {
 			fprintf(stderr, "kofmontrace: %s\n",
 				kofa_err_name(err));
 			return 0;
 		}
-		t->api = kofa_fan_api(t->fan);
+		t->api = kofa_mon_api(t->mon_l);
 		t->api->print_extra(t->api->self, stderr);
 
 		/*
@@ -669,7 +681,7 @@ static int tracer_open(struct tracer *t, unsigned providers, uint32_t ring)
 		 */
 		t->asked = providers;
 		t->granted = providers & TRACER_SUB_FILE;
-		if (kofa_fan_mode(t->fan) != KOFA_FAN_DEGRADED)
+		if (kofa_fan_mode(kofa_mon_fan(t->mon_l)) != KOFA_FAN_DEGRADED)
 			t->granted |= providers & (TRACER_SUB_FILE_WRITE |
 						   TRACER_SUB_IMAGE);
 		/*
@@ -683,7 +695,7 @@ static int tracer_open(struct tracer *t, unsigned providers, uint32_t ring)
 		 * lines are real, the attribution is not, and a reader told
 		 * that can still use them.
 		 */
-		if (kofa_fan_mode(t->fan) == KOFA_FAN_DEGRADED) {
+		if (kofa_fan_mode(kofa_mon_fan(t->mon_l)) == KOFA_FAN_DEGRADED) {
 			t->unscoped = 1;
 			fputs("kofmontrace: UNSCOPED: this session cannot "
 			      "attribute events, so every record below is "

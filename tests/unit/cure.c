@@ -421,7 +421,7 @@ int main(int argc, char **argv)
 			 * engine produced in memory. Measured before the fix:
 			 * the same infected file reported "repairable"
 			 * through dir/x.elf and nothing at all through
-			 * dir//x.elf, so --cure silently did nothing. A shell
+			 * dir//x.elf, so the repair silently did not happen. A shell
 			 * joining "$dir/" and "/name" writes one by accident.
 			 */
 			{

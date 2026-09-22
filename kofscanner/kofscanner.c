@@ -38,6 +38,8 @@
 
 #include "../libkofeng/kofeng.h"
 #include "../libkofeng/core/kofplatform.h"
+/* kof_hash_bytes - the engine's one FNV, see kofcore.h. */
+#include "../libkofeng/core/kofcore.h"
 
 /*
  * SCANNING WHAT IS RUNNING, on the platform that has a collector for it.
@@ -230,15 +232,15 @@ static const char *level_col(uint32_t level)
 
 /* ---- the per-file verdict map --------------------------------------------- */
 
-static uint32_t fnv_n(const char *s, size_t n)
-{
-	uint32_t h = 2166136261u;
-	size_t i;
-
-	for (i = 0; i < n; i++)
-		h = (h ^ (uint8_t)s[i]) * 16777619u;
-	return h;
-}
+/*
+ * THE ENGINE'S OWN FNV, NOT A SECOND ONE.
+ *
+ * This was a private copy of kof_hash_bytes - same prime, same seed, same
+ * loop - in a file that already includes the header holding it. kofcore.h says
+ * that function exists so a name can be hashed in one place; a copy here made
+ * that claim false and gave a second thing to keep in step.
+ */
+#define fnv_n(s, n) kof_hash_bytes((s), (uint64_t)(n))
 
 /* Find the top-level file's entry, creating it if new. `file` is a substring of a
  * longer name and is `flen` bytes, not NUL-terminated. NULL only on OOM. */
