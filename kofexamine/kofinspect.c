@@ -2250,7 +2250,9 @@ void kof_hex_respace(const char *in, char *out, size_t cap)
 	for (p = in, n = 0; *p; p++)
 		if (*p != ' ' && *p != '\t')
 			n++;
-	if (n + n / 2u + 2u > cap) {
+	/* n/2 + 2 is what the escaping adds; checked against the room left
+	 * rather than added to n first. */
+	if (n > cap || n / 2u + 2u > cap - n) {
 		snprintf(out, cap, "%s", in);
 		return;
 	}

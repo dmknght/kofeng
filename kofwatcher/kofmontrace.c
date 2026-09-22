@@ -436,8 +436,19 @@ static void spill_take(struct spiller *sp, struct kof_report *rep,
 		sp->failed++;
 		return;
 	}
+	/*
+	 * THE NAME MUST NOT ALREADY EXIST, and this is the one tool in the
+	 * tree where that is not a formality.
+	 *
+	 * spill/0000.bin, 0001.bin, ... is a shape the sample can predict, and
+	 * the sample is RUNNING while this writes: it can drop a symlink at
+	 * the next number and have its own bytes copied through it to
+	 * anywhere this process can write. kof_fopen_new refuses a name that
+	 * is taken, symlink included, so a planted name is a failed capture
+	 * instead of a write-what-where.
+	 */
 	snprintf(out, sizeof out, "%s/%04u.bin", sp->dir, sp->n);
-	dst = fopen(out, "wb");
+	dst = kof_fopen_new(out);
 	if (!dst) {
 		fclose(in);
 		sp->failed++;
@@ -2151,9 +2162,13 @@ tick:
 		 * A failure to write one is reported and does not stop the
 		 * others: a full disk must not cost the text report because
 		 * the JSON could not be written.
+		 *
+		 * kof_fopen_trunc, not fopen: these three names are as
+		 * guessable as the spill files and the sample was alive until
+		 * a moment ago. O_NOFOLLOW makes a planted link a refusal.
 		 */
 		snprintf(path, sizeof path, "%s/report.txt", rep_dir);
-		f = fopen(path, "wb");
+		f = kof_fopen_trunc(path);
 		if (f) {
 			/* No colour into a file. The escapes would make it
 			 * ungreppable, which is the one thing a report of this
@@ -2166,7 +2181,7 @@ tick:
 		}
 
 		snprintf(path, sizeof path, "%s/report.json", rep_dir);
-		f = fopen(path, "wb");
+		f = kof_fopen_trunc(path);
 		if (f) {
 			kof_report_write_json(rep, f);
 			fclose(f);
@@ -2176,7 +2191,7 @@ tick:
 		}
 
 		snprintf(path, sizeof path, "%s/candidates.tsv", rep_dir);
-		f = fopen(path, "wb");
+		f = kof_fopen_trunc(path);
 		if (f) {
 			kof_report_write_candidates(rep, f);
 			fclose(f);

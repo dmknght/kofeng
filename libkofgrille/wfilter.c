@@ -891,8 +891,17 @@ size_t kofw_evt_ident(const struct kofw_evt *e, void *buf, size_t cap,
 	 * identity and the second write disappears - which is precisely the
 	 * write worth seeing, because it is the one that changed something.
 	 */
-	if (e->data_len && e->off_data != KOF_TEXT_NONE)
-		IDENT_PUT(e->text + e->off_data, e->data_len);
+	if (e->data_len && e->off_data != KOF_TEXT_NONE &&
+	    e->off_data < sizeof e->text) {
+		/* Clamped like kofw_evt_object and the rest: the identity of a
+		 * record whose offsets are wrong must still be computed from
+		 * bytes inside the record. */
+		size_t dn = e->data_len;
+
+		if (dn > sizeof e->text - e->off_data)
+			dn = sizeof e->text - e->off_data;
+		IDENT_PUT(e->text + e->off_data, dn);
+	}
 
 done:
 #undef IDENT_PUT

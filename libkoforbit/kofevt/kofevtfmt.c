@@ -70,10 +70,24 @@ static void print_reg_data(FILE *out, const struct kof_evt *e)
 	const char *p;
 	size_t n, i;
 
-	if (!r || e->off_data == KOF_TEXT_NONE || !e->data_len)
+	/*
+	 * BOUNDED AGAINST text[], because a record is not always one this
+	 * process wrote.
+	 *
+	 * kofevt_log_read checks that head_size + text_len fits the record and
+	 * nothing else: off_data and data_len are two uint16_t straight out of
+	 * a file on disk, so a log that was truncated, edited or written by an
+	 * older build can name an offset past the arena and a length past the
+	 * record. kof_evt_content and at() clamp for the same reason; this
+	 * printer was the one path that did not.
+	 */
+	if (!r || e->off_data == KOF_TEXT_NONE || !e->data_len ||
+	    e->off_data >= sizeof e->text)
 		return;
 	p = e->text + e->off_data;
 	n = e->data_len;
+	if (n > sizeof e->text - e->off_data)
+		n = sizeof e->text - e->off_data;
 
 	fprintf(out, " = [%s] ", reg_type_name(r->type));
 

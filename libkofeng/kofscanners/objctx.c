@@ -861,8 +861,18 @@ static int c_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 	 * that ignores the answer and emits again simply gets another zero - the
 	 * sink is empty by then, and c_child makes no child out of nothing.
 	 */
-	if (sc->sink_len + sc->sink_spilled + n > sc->obj_cap ||
-	    sc->resident + n > sc->resident_max) {
+	/*
+	 * BY SUBTRACTION, because `n` crosses the module ABI.
+	 *
+	 * sink_len and sink_spilled are the host's own and stay under obj_cap,
+	 * but `n` is a length a module passed in, and the sum of three size_t
+	 * is the one part of this test that a single bogus length can turn
+	 * from a refusal into a pass.
+	 */
+	if (sc->sink_len + sc->sink_spilled > sc->obj_cap ||
+	    n > sc->obj_cap - (sc->sink_len + sc->sink_spilled) ||
+	    sc->resident > sc->resident_max ||
+	    n > sc->resident_max - sc->resident) {
 		c_child(ctx);
 		scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
@@ -881,12 +891,18 @@ static int c_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 		}
 		sc->sink_spilled += n;
 	} else {
-		if (sc->sink_len + n > sc->sink_cap) {
+		if (sc->sink_len > sc->sink_cap ||
+		    n > sc->sink_cap - sc->sink_len) {
 			size_t nc = sc->sink_cap ? sc->sink_cap : 4096;
 			uint8_t *nb;
 
-			while (nc < sc->sink_len + n)
+			while (nc < sc->sink_len + n) {
+				if (nc > (size_t)-1 / 2u) {
+					scan_broken(sc, KOF_BROKEN_LIMIT);
+					return 0;
+				}
 				nc *= 2;
+			}
 			nb = realloc(sc->sink_mem, nc);
 			if (!nb) {
 				scan_broken(sc, KOF_BROKEN_LIMIT);

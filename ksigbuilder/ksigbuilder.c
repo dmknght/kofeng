@@ -4693,11 +4693,15 @@ static int names_load(struct artefact *a)
 			*nl = 0;
 		tl = strlen(tab) + 1;
 
-		if (text_len + tl > text_cap) {
+		if (text_len > text_cap || tl > text_cap - text_len) {
 			size_t nc = text_cap ? text_cap * 2 : 512;
 			char *nt;
-			while (nc < text_len + tl)
+			/* Ceiling as above. */
+			while (nc < text_len + tl) {
+				if (nc > (size_t)-1 / 2u)
+					goto out;
 				nc *= 2;
+			}
 			nt = realloc(a->name_text, nc);
 			if (!nt)
 				goto out;
@@ -4865,11 +4869,18 @@ static int strs_load(struct artefact *a)
 						"literal\n", a->stem, len);
 				goto out;
 			}
-			if (bytes_len + len > bytes_cap) {
+			if (bytes_len > bytes_cap ||
+			    len > bytes_cap - bytes_len) {
 				size_t nc = bytes_cap ? bytes_cap * 2 : 1024;
 				uint8_t *nb;
-				while (nc < bytes_len + len)
+				/* The doubling needs the ceiling, not just the
+				 * test: nc past half of size_t doubles to zero
+				 * and the loop then exits SATISFIED. */
+				while (nc < bytes_len + len) {
+					if (nc > (size_t)-1 / 2u)
+						goto out;
 					nc *= 2;
+				}
 				nb = realloc(a->str_bytes, nc);
 				if (!nb)
 					goto out;
@@ -4936,11 +4947,18 @@ static int strs_load(struct artefact *a)
 					(unsigned)((end - p) / 2));
 				goto out;
 			}
-			if (bytes_len + len > bytes_cap) {
+			if (bytes_len > bytes_cap ||
+			    len > bytes_cap - bytes_len) {
 				size_t nc = bytes_cap ? bytes_cap * 2 : 1024;
 				uint8_t *nb;
-				while (nc < bytes_len + len)
+				/* The doubling needs the ceiling, not just the
+				 * test: nc past half of size_t doubles to zero
+				 * and the loop then exits SATISFIED. */
+				while (nc < bytes_len + len) {
+					if (nc > (size_t)-1 / 2u)
+						goto out;
 					nc *= 2;
+				}
 				nb = realloc(a->str_bytes, nc);
 				if (!nb)
 					goto out;
@@ -5005,11 +5023,18 @@ static int strs_load(struct artefact *a)
 					a->stem, len, (size_t)(end - p));
 				goto out;
 			}
-			if (bytes_len + len > bytes_cap) {
+			if (bytes_len > bytes_cap ||
+			    len > bytes_cap - bytes_len) {
 				size_t nc = bytes_cap ? bytes_cap * 2 : 1024;
 				uint8_t *nb;
-				while (nc < bytes_len + len)
+				/* The doubling needs the ceiling, not just the
+				 * test: nc past half of size_t doubles to zero
+				 * and the loop then exits SATISFIED. */
+				while (nc < bytes_len + len) {
+					if (nc > (size_t)-1 / 2u)
+						goto out;
 					nc *= 2;
+				}
 				nb = realloc(a->str_bytes, nc);
 				if (!nb)
 					goto out;
@@ -5066,6 +5091,12 @@ static int artefact_load(struct artefact *a, const char *blob_path)
 	size_t n = strlen(blob_path), len = 0;
 
 	memset(a, 0, sizeof *a);
+	/* n - 5 is a subtraction on a length this function did not check. The
+	 * only caller rejects a name shorter than ".blob" plus one, so it
+	 * cannot be reached today - but the guard belongs where the arithmetic
+	 * is, not one function away where a second caller would not see it. */
+	if (n < 6u)
+		return 0;
 	a->stem = malloc(n - 5 + 1);
 	if (!a->stem)
 		return 0;

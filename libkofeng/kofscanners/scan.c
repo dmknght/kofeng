@@ -2261,8 +2261,16 @@ static int path_reserve(struct walk *w, size_t need)
 	{
 		size_t nc = w->path_cap ? w->path_cap : 256;
 		char *nv;
-		while (nc < need)
+		/* The ceiling is what keeps this a loop and not a wrap: nc past
+		 * half of size_t doubles to zero, which is not less than `need`
+		 * and so ends the loop with a zero-byte allocation. */
+		while (nc < need) {
+			if (nc > (size_t)-1 / 2u) {
+				w->out_of_memory = 1;
+				return 0;
+			}
 			nc *= 2;
+		}
 		nv = realloc(w->path_buf, nc);
 		if (!nv) {
 			w->out_of_memory = 1;
@@ -2646,7 +2654,9 @@ static void scan_streams(struct walk *w, const char *path)
 	while (!w->aborted && !w->out_of_memory && kof_streams_next(&sw)) {
 		size_t nl = strlen(sw.name);
 
-		if (plen + nl + 1u > w->path_cap)
+		/* Subtraction, so the test cannot be the overflow it guards
+		 * against - see the same form throughout this tree. */
+		if (plen > w->path_cap || nl + 1u > w->path_cap - plen)
 			break;          /* cannot happen; the reserve sized it */
 		/*
 		 * The suffix is appended verbatim - ":hidden.exe:$DATA" - which

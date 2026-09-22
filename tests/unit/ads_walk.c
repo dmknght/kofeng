@@ -22,7 +22,11 @@
  * of bytes, kof_streams_open answers no, and the loop does not run - which is
  * the correct answer rather than a gap, so the test says so and passes.
  */
-#define _POSIX_C_SOURCE 200809L
+/* _GNU_SOURCE, not _POSIX_C_SOURCE: this file includes kofplatform.h, whose
+ * POSIX side calls memmem and realpath - a GNU extension and a function strict
+ * POSIX mode hides - so under 200809L alone the header compiles them implicit.
+ * Same reason, same wording as scan_mt.c. */
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

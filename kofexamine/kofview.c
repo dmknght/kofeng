@@ -186,11 +186,26 @@ void out_clip_restore(struct out *o, struct out_clip prev)
  * places that know they are writing an escape rather than a cell. */
 static void out_raw(struct out *o, const char *s, size_t n)
 {
-	if (o->n + n + 1 > o->cap) {
-		size_t want = o->cap ? o->cap * 2 : 8192;
+	/*
+	 * THE DOUBLING IS WHAT OVERFLOWS, not the comparison.
+	 *
+	 * "while (want < needed) want *= 2" has no ceiling: a `want` past half
+	 * of size_t doubles to zero, the loop then exits because zero is not
+	 * less than the need, and realloc(p, 0) hands back a pointer to
+	 * nothing that the writes below use anyway. The need is computed by
+	 * subtraction for the same reason every other bound here is.
+	 */
+	if (o->n > o->cap || n + 1u > o->cap - o->n) {
+		size_t need = o->n + n + 1u;
+		size_t want = o->cap ? o->cap * 2u : 8192u;
 
-		while (want < o->n + n + 1)
-			want *= 2;
+		if (n + 1u < n)                 /* the need itself wrapped */
+			exit(1);
+		while (want < need) {
+			if (want > (size_t)-1 / 2u)
+				exit(1);
+			want *= 2u;
+		}
 		o->p = realloc(o->p, want);
 		if (!o->p)
 			exit(1);

@@ -283,7 +283,23 @@ static int normalise(const char *in, char *out, size_t cap)
 	int    hit = 0;
 	const char *p = in;
 
-	while (*p && o + 4u < cap) {
+	if (!cap)
+		return 0;
+
+	/*
+	 * THE BOUND IS THE LONGEST WRITE, NOT THE SHORTEST.
+	 *
+	 * This used to read `o + 4u < cap`, which leaves room for four bytes -
+	 * but the \Users\ branch below copies SEVEN and then appends '*', so
+	 * with `in` holding a path whose user prefix lands near the end of the
+	 * window the memcpy runs two bytes past a 512-byte stack buffer and
+	 * the '*' a third. `in` is an event's object text, and a sample
+	 * chooses its own path, so the offset is the sample's to pick.
+	 *
+	 * The terminator below already conceded that o could pass cap. Eight
+	 * is seven plus the '*'; every other branch writes one byte.
+	 */
+	while (*p && cap - o > 8u) {
 		const char *u;
 
 		/* \Users\<somebody>\ - the name is the machine's, not the

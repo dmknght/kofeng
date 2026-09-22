@@ -544,22 +544,38 @@ static uint32_t reloc_width(struct cfile *e, uint64_t rva, uint64_t *start)
 	 * restarts from the front below, so a wrong remembered position costs
 	 * one extra scan and can never produce a wrong answer.
 	 */
-	if (e->rel_hint + 8u <= e->reloc_len) {
+	if (e->rel_hint <= e->reloc_len && e->reloc_len - e->rel_hint >= 8u) {
 		uint32_t page = 0, blk = 0;
 
 		memcpy(&page, e->reloc + e->rel_hint, 4);
 		memcpy(&blk, e->reloc + e->rel_hint + 4, 4);
-		if (blk >= 8u && e->rel_hint + blk <= e->reloc_len &&
+		if (blk >= 8u && blk <= e->reloc_len - e->rel_hint &&
 		    rva >= page && rva < (uint64_t)page + 0x1000u)
 			at = e->rel_hint;
 	}
 
-	while (at + 8u <= e->reloc_len) {
+	/*
+	 * BOUNDED BY SUBTRACTION, NOT BY ADDITION.
+	 *
+	 * `blk` is four bytes read straight out of the relocation table of an
+	 * image that is being examined BECAUSE something about it is already
+	 * suspect. "at + blk" is uint32 arithmetic and wraps: a block length
+	 * near the top of the range makes the sum small, the length test below
+	 * passes, and `at += blk` then moves the cursor BACKWARDS to the
+	 * wrapped offset. Two blocks chosen to map onto each other leave this
+	 * loop walking between them for ever - the walk never returns and the
+	 * watcher stops looking at anything else.
+	 *
+	 * Not a read outside the buffer: the inner loop bounds itself with the
+	 * same wrapped sum, so it simply does not run. A hang, and a hang
+	 * reached from data the subject controls.
+	 */
+	while (at <= e->reloc_len && e->reloc_len - at >= 8u) {
 		uint32_t page, blk, k;
 
 		memcpy(&page, e->reloc + at, 4);
 		memcpy(&blk, e->reloc + at + 4, 4);
-		if (blk < 8u || at + blk > e->reloc_len)
+		if (blk < 8u || blk > e->reloc_len - at)
 			return 0;
 		/* Entries name offsets within one 4KB page. */
 		if (rva < page || rva >= (uint64_t)page + 0x1000u) {

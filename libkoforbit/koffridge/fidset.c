@@ -382,6 +382,25 @@ int kof_fidset_load(struct kof_fidset *s, const char *path)
 		close(fd);
 		return 0;
 	}
+	/*
+	 * h.n IS BOUNDED BY THE BYTES ON DISK BEFORE IT IS USED IN ARITHMETIC.
+	 *
+	 * Without this, "want == the file's size" is not the check it looks
+	 * like. h.n is a uint64 out of the file, so h.n + FENCE_STRIDE - 1
+	 * wraps and (n_fence + h.n) * 8 wraps again, and the two wraps can be
+	 * chosen to land on a real size: h.n = 9205392754131862016 makes
+	 * n_fence 17979282722913793 and want exactly 48, so a 48-byte file is
+	 * accepted with n_key claiming nine quintillion keys over eight bytes
+	 * of mapping. Every lookup after that binary searches whatever follows
+	 * the page.
+	 *
+	 * The file's own size is the one number here that is not the file's
+	 * claim about itself, so it is what the claim is measured against.
+	 */
+	if (h.n > ((uint64_t)st.st_size - sizeof h) / sizeof(uint64_t)) {
+		close(fd);
+		return 0;
+	}
 	{
 		uint64_t n_fence = h.n ? (h.n + FENCE_STRIDE - 1u) / FENCE_STRIDE
 				       : 0u;
@@ -461,6 +480,13 @@ int kof_fidset_load(struct kof_fidset *s, const char *path)
 	    h.version != FID_VERSION || h.stride != FENCE_STRIDE ||
 	    h.db_stamp != s->db_stamp || h.eng_stamp != s->eng_stamp ||
 	    h.n == 0) {
+		CloseHandle(fh);
+		return 0;
+	}
+	/* Bounded against the file's real size first - see the note on the
+	 * POSIX side, the arithmetic below wraps without it. */
+	if ((uint64_t)sz.QuadPart < sizeof h ||
+	    h.n > ((uint64_t)sz.QuadPart - sizeof h) / sizeof(uint64_t)) {
 		CloseHandle(fh);
 		return 0;
 	}
