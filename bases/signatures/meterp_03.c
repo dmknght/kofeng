@@ -4,7 +4,7 @@
  * Test sample: x64_rev_http_clear
  * Test sample: 1020ce1f18a2721b873152fd9f76503dcba5af7b0dd26d80fdb11efaf4878b1a
  * Researcher:  dmknght
- * Created 2026-09-02, updated 2026-09-08
+ * Created 2026-09-02, updated 2026-09-22
  * Engine:      db format 1.0, module ABI 2
  */
 
@@ -23,7 +23,23 @@ KOF_TARGET_RANGE(scan_range_noload, KOF_SCAN_ELF_NOLOAD);
 KOF_DEFINE_STR(s0, "mettle_build_gem", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(s1, "MSF_LICENSE", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(s2, "mettle_start", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
-KOF_DEFINE_STR(s3, "/mettle/src/", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
+/*
+ * A PATTERN, BECAUSE FULLWORD CAN NEVER MATCH THIS ONE.
+ *
+ * "/mettle/src/" is a path PREFIX: what follows it is always a file name, so
+ * the byte after the marker is a word byte and FULLWORD - which requires that
+ * neither neighbour is one - refuses every real occurrence. Measured over the
+ * sample tree: 6 files carry the string and 0 of them matched it. The rule
+ * still fired on all six through s0 and s1, so nothing was lost; the marker
+ * was simply dead.
+ *
+ * A hex pattern rather than KOF_WORD_SUBSTRING: the marker is punctuation and
+ * a path, not an identifier, so it has no word boundary to have an opinion
+ * about - see the note on kof_str_word, "pick by what the marker is made of".
+ *
+ *     2F 6D 65 74 74 6C 65 2F 73 72 63 2F   =  /mettle/src/
+ */
+KOF_DEFINE_HEXSTR(s3, "2F 6D 65 74 74 6C 65 2F 73 72 63 2F");
 
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
