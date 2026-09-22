@@ -80,6 +80,27 @@ struct kof_chan_sub {
 	 * at the teardown sites. */
 	void    *hdr_raw;
 	uint64_t data_bytes;
+
+	/*
+	 * THE HEADER'S NUMBERS, COPIED ONCE, and the consume path uses these
+	 * and never the shared ones.
+	 *
+	 * kof_chan_sub_open validates capacity and rec_size - and then
+	 * kof_chan_next read them back out of SHARED MEMORY, three times in
+	 * one index calculation. Whatever was checked at open is not what is
+	 * used at read: the publisher maps that page writable and can change
+	 * either number afterwards, between two of those three reads. A
+	 * capacity that grows after the power-of-two test turns
+	 * `t & (capacity - 1)` into an index past the end of the ring.
+	 *
+	 * The header is the sensor's and the sensor is the privileged end, so
+	 * this is not the boundary the read-only data section defends. It is
+	 * the other direction - and a decider that can be made to read outside
+	 * its own mapping by the thing it is deciding about is worth one
+	 * struct field.
+	 */
+	uint32_t capacity;
+	uint32_t rec_size;
 };
 
 static uint32_t round_pow2(uint32_t v)
@@ -652,7 +673,18 @@ struct kof_chan_sub *kof_chan_sub_open(const char *name, const char **why,
 		if (why) *why = "the sensor publishes a different version";
 		goto fail;
 	}
-	if (s->hdr->rec_size != (uint32_t)sizeof(struct kof_evt)) {
+	/*
+	 * TAKEN OUT OF SHARED MEMORY ONCE, AND VALIDATED AS TAKEN.
+	 *
+	 * Every test below used to re-read the field it was testing, so what
+	 * passed the check and what the reader later used were two loads of a
+	 * page the publisher can write between them. Validating a copy is what
+	 * makes the check mean anything.
+	 */
+	s->capacity = s->hdr->capacity;
+	s->rec_size = s->hdr->rec_size;
+
+	if (s->rec_size != (uint32_t)sizeof(struct kof_evt)) {
 		if (why) *why = "the sensor publishes a different record size";
 		goto fail;
 	}
@@ -660,9 +692,26 @@ struct kof_chan_sub *kof_chan_sub_open(const char *name, const char **why,
 		if (why) *why = "the sensor publishes a different record";
 		goto fail;
 	}
-	if (s->hdr->capacity == 0u ||
-	    (s->hdr->capacity & (s->hdr->capacity - 1u)) != 0u) {
+	if (s->capacity == 0u ||
+	    (s->capacity & (s->capacity - 1u)) != 0u) {
 		if (why) *why = "the channel capacity is not a power of two";
+		goto fail;
+	}
+
+	/*
+	 * AND THE RING HAS TO FIT IN WHAT WAS MAPPED.
+	 *
+	 * Every field above was checked against what this build expects and
+	 * none of them against the FILE. A publisher declaring a capacity of
+	 * 65536 in a segment holding room for 64 passes all of it, and then
+	 * the first read at a high index lands outside the mapping - a SIGBUS
+	 * on the good day and somebody else's page on the bad one. The size
+	 * is already known: it is what fstat reported.
+	 */
+	if (s->data_bytes < sizeof *s->hdr ||
+	    (s->data_bytes - sizeof *s->hdr) /
+	    (uint64_t)s->rec_size < (uint64_t)s->capacity) {
+		if (why) *why = "the channel is smaller than it declares";
 		goto fail;
 	}
 
@@ -708,12 +757,12 @@ int kof_chan_next(struct kof_chan_sub *s, struct kof_evt *out, uint32_t wait_ms)
 			 * header; what must not happen is reporting a spliced
 			 * record as an event.
 			 */
-			if (h - t > s->hdr->capacity)
-				t = h - s->hdr->capacity;
+			if (h - t > s->capacity)
+				t = h - s->capacity;
 
 			memcpy(out, s->rec +
-				    (uint64_t)(t & (s->hdr->capacity - 1u)) *
-				    s->hdr->rec_size,
+				    (uint64_t)(t & (s->capacity - 1u)) *
+				    s->rec_size,
 			       sizeof *out);
 
 			/* RELEASE, so the publisher cannot begin overwriting

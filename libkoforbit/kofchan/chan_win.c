@@ -47,6 +47,15 @@ struct kof_chan_sub {
 	 * field, set once, used twice.
 	 */
 	void *hdr_raw;
+
+	/*
+	 * THE HEADER'S NUMBERS, COPIED ONCE - see the same field on the POSIX
+	 * side. The consume path read them back out of the shared view, three
+	 * times in one index calculation, so what was validated at open was
+	 * not what was used at read: the publisher maps that view writable.
+	 */
+	uint32_t capacity;
+	uint32_t rec_size;
 };
 
 /*
@@ -585,7 +594,11 @@ struct kof_chan_sub *kof_chan_sub_open(const char *name, const char **why,
 	 * every field from the wrong offset; one of a different KIND decodes at
 	 * the right offsets and means something else. Both are refused.
 	 */
-	if (s->hdr->rec_size != (uint32_t)sizeof(struct kof_evt)) {
+	/* Taken out of the shared view once, and validated as taken. */
+	s->capacity = s->hdr->capacity;
+	s->rec_size = s->hdr->rec_size;
+
+	if (s->rec_size != (uint32_t)sizeof(struct kof_evt)) {
 		if (why) *why = "the sensor's record is a different size";
 		goto fail;
 	}
@@ -593,12 +606,40 @@ struct kof_chan_sub *kof_chan_sub_open(const char *name, const char **why,
 		if (why) *why = "the sensor publishes a different record";
 		goto fail;
 	}
-	if (s->hdr->capacity == 0u ||
-	    (s->hdr->capacity & (s->hdr->capacity - 1u)) != 0u) {
+	if (s->capacity == 0u ||
+	    (s->capacity & (s->capacity - 1u)) != 0u) {
 		if (why) *why = "the channel capacity is not a power of two";
 		goto fail;
 	}
 
+	/*
+	 * AND THE RING HAS TO FIT IN WHAT WAS MAPPED.
+	 *
+	 * Every field above was checked against what this build expects and
+	 * none of them against the VIEW. A publisher declaring a capacity of
+	 * 65536 in a section holding room for 64 passes all of it, and the
+	 * first read at a high index lands outside the mapping.
+	 *
+	 * MapViewOfFile with a length of zero maps to the end of the section
+	 * and does not say how far that is; VirtualQuery on the pointer it
+	 * returned does.
+	 */
+	{
+		MEMORY_BASIC_INFORMATION mbi;
+		SIZE_T have;
+
+		if (!VirtualQuery(s->hdr_raw, &mbi, sizeof mbi)) {
+			if (why) *why = "the channel view cannot be measured";
+			goto fail;
+		}
+		have = mbi.RegionSize;
+		if (have < sizeof *s->hdr ||
+		    (uint64_t)(have - sizeof *s->hdr) / s->rec_size <
+		    (uint64_t)s->capacity) {
+			if (why) *why = "the channel is smaller than it declares";
+			goto fail;
+		}
+	}
 	s->rec = (const unsigned char *)s->hdr + sizeof *s->hdr;
 	return s;
 
@@ -648,12 +689,12 @@ int kof_chan_next(struct kof_chan_sub *s, struct kof_evt *out,
 			 * and is counted in the header - what must not happen
 			 * is reporting a spliced record as an event.
 			 */
-			if (h - t > s->hdr->capacity)
-				t = h - s->hdr->capacity;
+			if (h - t > s->capacity)
+				t = h - s->capacity;
 
-			memcpy(out, s->rec + (uint64_t)(t & (s->hdr->capacity -
-							     1u)) *
-					     s->hdr->rec_size,
+			memcpy(out, s->rec + (uint64_t)(t & (s->capacity -
+						    1u)) *
+					     s->rec_size,
 			       sizeof *out);
 
 			/* RELEASE, so the publisher cannot begin overwriting
