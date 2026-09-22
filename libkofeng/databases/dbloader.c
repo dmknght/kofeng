@@ -52,9 +52,7 @@
 #define _GNU_SOURCE
 
 #include "dbloader.h"
-#include "../detector/matchers/kofplague.h"
-#include "../detector/matchers/kofmultimatch.h"
-#include "../detector/matchers/hexprog.h"
+#include "hexprog.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1002,7 +1000,7 @@ const char *kof_db_source(const struct kof_engine *e, const struct kof_module *m
 	return pool + m->src_off;
 }
 
-struct kof_engine *kof_db_load(const char *path)
+struct kof_engine *kof_db_load_tables(const char *path)
 {
 	struct kof_engine *e = NULL;
 	struct kof_db_pack *mp = NULL;
@@ -1094,7 +1092,7 @@ struct kof_engine *kof_db_load(const char *path)
 	e->blk_pool = calloc(n_pool ? n_pool : 1, sizeof *e->blk_pool);
 	if (!e->mods || !e->unp || !e->heur || !e->rng_tab ||
 	    !arena_open(e, (size_t)code)) {
-		kof_db_free(e);
+		kof_db_free_tables(e);
 		e = NULL;
 		goto out;
 	}
@@ -1105,25 +1103,6 @@ struct kof_engine *kof_db_load(const char *path)
 		at = (size_t)kof_round_up(at, KOF_PACK_BLOB_ALIGN);
 		absorb(e, &mp[i], at, i);
 		at += (size_t)h->sec[KOF_SEC_CODE].len;
-	}
-
-	/*
-	 * The similarity index, built once over every pack's blocks together.
-	 *
-	 * After absorbing rather than per pack, because the whole point of one
-	 * index is that a scan costs the same whatever is loaded - see the note
-	 * on blk_tab in dbloader.h. A build that produces nothing is not an error:
-	 * a database with no plague rules has no blocks and the matcher is never
-	 * consulted.
-	 */
-	if (e->n_blk) {
-		e->plague = kof_plague_build(e->blk_tab, e->n_blk,
-					     e->blk_pool, e->n_blk_pool);
-		if (!e->plague) {
-			fprintf(stderr, "dbloader: the similarity blocks do not "
-				"describe a consistent set\n");
-			goto out;
-		}
 	}
 
 	/*
@@ -1154,7 +1133,7 @@ struct kof_engine *kof_db_load(const char *path)
 
 		e->rng_uid = calloc(e->n_rng ? e->n_rng : 1, sizeof *e->rng_uid);
 		if (!e->rng_uid) {
-			kof_db_free(e);
+			kof_db_free_tables(e);
 			e = NULL;
 			goto out;
 		}
@@ -1180,7 +1159,7 @@ struct kof_engine *kof_db_load(const char *path)
 						/* More region vocabularies than any
 						 * set of formats defines: refuse
 						 * rather than share a slot. */
-						kof_db_free(e);
+						kof_db_free_tables(e);
 						e = NULL;
 						goto out;
 					}
@@ -1281,7 +1260,7 @@ struct kof_engine *kof_db_load(const char *path)
 	/* Written once, then executable. */
 	if (kof_mprotect_rx(e->code, e->code_cap) != 0) {
 		fprintf(stderr, "dbloader: cannot make the code executable\n");
-		kof_db_free(e);
+		kof_db_free_tables(e);
 		e = NULL;
 	} else {
 		/*
@@ -1297,22 +1276,6 @@ struct kof_engine *kof_db_load(const char *path)
 		e->packs = mp;
 		e->n_packs = n_ok;
 		mp = NULL;
-
-		/*
-		 * The multi-pattern matchers, and they have to be built HERE.
-		 *
-		 * It reads marker bytes through kof_db_str, which reads them out
-		 * of the packs - so it cannot run until the engine has taken the
-		 * mappings, four lines above. Built before that it saw no packs
-		 * and collected nothing, silently: every mask came out with no
-		 * markers and the sweep never ran, while the scan stayed correct
-		 * because an unfilled memo cell means "not known yet".
-		 *
-		 * A NULL result is not an error. It is a database that will be
-		 * searched one marker at a time, which is what this engine did
-		 * before these existed.
-		 */
-		e->multi = kof_multimatch_build(e);
 
 		/*
 		 * And what this database has business with - see any_target.
@@ -1349,7 +1312,7 @@ out:
 	return e;
 }
 
-void kof_db_free(struct kof_engine *e)
+void kof_db_free_tables(struct kof_engine *e)
 {
 	if (!e)
 		return;
@@ -1357,11 +1320,8 @@ void kof_db_free(struct kof_engine *e)
 	free(e->mod_by_target);
 	free(e->unp);
 	free(e->heur);
-	kof_multimatch_free(e->multi);
-	e->multi = NULL;
 	free(e->rng_tab);
 	free(e->rng_uid);
-	kof_plague_set_free(e->plague);
 	free(e->blk_tab);
 	free(e->blk_pool);
 	if (e->packs) {

@@ -16,7 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "hexprog.h"
+#include "../../databases/hexprog.h"
 
 /* ============================================================================
  * HEX PATTERNS

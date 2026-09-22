@@ -18,7 +18,7 @@
 #include <stdint.h>
 #include <kofmod/kofsig.h>   /* struct kof_range */
 #include "../../kofcore/kofcore.h"
-#include "hexprog.h"
+#include "../../databases/hexprog.h"
 
 struct kof_match_ctx {
 	kof_buf data;

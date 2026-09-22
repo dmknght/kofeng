@@ -125,7 +125,7 @@ static uint16_t jaccard(const uint64_t *a, uint32_t na,
 		}
 	}
 	uni = na + nb - inter;
-	return uni ? (uint16_t)(((uint64_t)inter * 1000u) / uni) : 0;
+	return (uint16_t)(uni ? ((uint64_t)inter * 1000u) / uni : 0u);
 }
 
 /*
@@ -335,7 +335,7 @@ void kof_ovl_compare(const struct kof_ovl_desc *a, const struct kof_ovl_desc *b,
 		uint32_t ci = popcount32(a->ptypes & b->ptypes);
 		uint32_t cu = popcount32(a->ptypes | b->ptypes);
 
-		v->ptype_jac = cu ? (uint16_t)((ci * 1000u) / cu) : 0;
+		v->ptype_jac = (uint16_t)(cu ? (ci * 1000u) / cu : 0u);
 		v->applied |= KOF_OVL_D_PTYPE;
 	}
 	/*
@@ -347,7 +347,7 @@ void kof_ovl_compare(const struct kof_ovl_desc *a, const struct kof_ovl_desc *b,
 		uint32_t ci = popcount64(a->anomalies & b->anomalies);
 		uint32_t cu = popcount64(a->anomalies | b->anomalies);
 
-		v->anom_jac  = cu ? (uint16_t)((ci * 1000u) / cu) : 0;
+		v->anom_jac  = (uint16_t)(cu ? (ci * 1000u) / cu : 0u);
 		v->anom_both = (a->anomalies && b->anomalies);
 		v->applied |= KOF_OVL_D_ANOM;
 	}

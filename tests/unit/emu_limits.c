@@ -81,7 +81,7 @@ static uint8_t page_loop[] = {
 
 static void run_one(const char *what, uint8_t *code, uint32_t n)
 {
-	struct kof_emu_cfg cfg = { BUDGET, PAGES, 0 };
+	struct kof_emu_cfg cfg = { BUDGET, PAGES, 0, 0 };  /* bits 0 = 64 */
 	struct kof_emu *e = kof_emu_new(&cfg);
 	enum kof_emu_stop st;
 	uint32_t it = 0, snaps = 0;

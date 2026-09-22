@@ -852,6 +852,7 @@ $(STAMP): ;
 
 LIB_SRC := libkofeng/kofeng.c \
            libkofeng/databases/dbloader.c \
+           libkofeng/detector/dbindex.c \
            libkofeng/databases/dbpacker.c \
            libkofeng/detector/heur/kofheur.c \
            libkofeng/detector/matchers/kofmatch.c \

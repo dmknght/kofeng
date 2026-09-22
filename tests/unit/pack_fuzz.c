@@ -50,7 +50,7 @@
 #include "../../libkofeng/databases/dbloader.h"
 #include "../../libkofeng/databases/dbcore.h"
 #include "../../libkofeng/databases/dbpacker.h"
-#include "../../libkofeng/detector/matchers/hexprog.h"
+#include "../../libkofeng/databases/hexprog.h"
 #include "../../libkofeng/detector/matchers/kofmatch.h"
 
 static int failures;

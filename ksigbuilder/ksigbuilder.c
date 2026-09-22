@@ -123,7 +123,7 @@
 
 #include "../libkofeng/databases/dbpacker.h"
 #include "../libkofeng/databases/dbcore.h"
-#include "../libkofeng/detector/matchers/hexprog.h"
+#include "../libkofeng/databases/hexprog.h"
 #include "../libkofeng/kofcore/kofcore.h"   /* kof_hash_bytes/kof_hash_step - FNV-1a,
 					    reused for KOF_MALVAR_AUTO's suffix and
 					    for the whole-module duplicate check */

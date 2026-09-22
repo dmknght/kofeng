@@ -70,7 +70,7 @@ int main(void)
 		0x0F,0x05                                /* 76 syscall        */
 	};
 	uint64_t ts[2] = { SLEEP_SEC, 0 }, out[2] = { 0, 0 };
-	struct kof_emu_cfg cfg = { 2000000, 0, 0 };
+	struct kof_emu_cfg cfg = { 2000000, 0, 0, 0 };  /* bits 0 = 64 */
 	struct kof_emu *e;
 	enum kof_emu_stop st;
 	uint64_t insn;

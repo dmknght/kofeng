@@ -134,7 +134,7 @@
 #include "../libkofeng/analyzer/parsers/containers/pdf_parse.h"
 
 #include "kofinspect.h"
-#include "../libkofeng/detector/matchers/hexprog.h"
+#include "../libkofeng/databases/hexprog.h"
 
 /*
  * What one format offers a tool: how to recognise it, how to parse it, how big

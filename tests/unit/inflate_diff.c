@@ -31,6 +31,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <zlib.h>
 
@@ -88,7 +89,10 @@ static int zlib_deflate_raw(const uint8_t *in, size_t n, int level,
 	if (deflateInit2(&z, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK)
 		return 0;
 	*out = malloc(cap);
-	z.next_in = (Bytef *)in;
+	/* zlib's next_in is not const and never writes through it; the
+	 * uintptr_t step is what keeps -Wcast-qual quiet about a cast the
+	 * API forces. */
+	z.next_in = (Bytef *)(uintptr_t)in;
 	z.avail_in = (uInt)n;
 	z.next_out = *out;
 	z.avail_out = (uInt)cap;
@@ -113,7 +117,10 @@ static size_t zlib_inflate_raw(const uint8_t *in, size_t n, uint8_t **out, int *
 	if (inflateInit2(&z, -15) != Z_OK)
 		return 0;
 	*out = malloc(cap);
-	z.next_in = (Bytef *)in;
+	/* zlib's next_in is not const and never writes through it; the
+	 * uintptr_t step is what keeps -Wcast-qual quiet about a cast the
+	 * API forces. */
+	z.next_in = (Bytef *)(uintptr_t)in;
 	z.avail_in = (uInt)n;
 	for (;;) {
 		enum kof_decomp_status r;

@@ -522,6 +522,41 @@ struct kof_engine {
  *
  * Returns NULL if nothing loaded.
  */
+/*
+ * THE DATABASE, LOADED. TABLES ONLY.
+ *
+ * Packs mapped, modules absorbed, the code arena taken, pattern ids made unique
+ * and region masks made dense. What it does NOT do is build `plague` and
+ * `multi`, which are left NULL: those are indexes the DETECTOR owns, and a
+ * loader that built them would have to call into the layer that consumes it.
+ *
+ * An engine from here is usable for everything that reads the tables and is
+ * not ready to scan with. Use kof_db_load below unless you are the assembler.
+ */
+struct kof_engine *kof_db_load_tables(const char *path);
+
+/*
+ * Free what kof_db_load_tables took. It does not touch `plague` or `multi` -
+ * it cannot, for the same reason it did not build them - so a caller that
+ * built them frees them first. kof_db_free does exactly that.
+ */
+void               kof_db_free_tables(struct kof_engine *);
+
+/*
+ * THE ENGINE, ASSEMBLED: the tables above plus the detector's indexes over
+ * them. This is what everything except the assembler itself should call.
+ *
+ * DECLARED HERE AND DEFINED IN detector/dbindex.c, which is the same
+ * arrangement kof_fid_of has in fidset.h and is here for a related reason: the
+ * name belongs beside struct kof_engine, and the definition belongs in the
+ * layer that knows what an index is. The alternative was the loader calling
+ * kof_plague_build and kof_multimatch_build itself, which made these two
+ * directories mutually dependent - dbloader.c reaching up into
+ * detector/matchers while kofmultimatch.c reached back down for kof_db_str.
+ *
+ * Semantics are unchanged from when this was one function, and the name is
+ * unchanged so that every caller is too.
+ */
 struct kof_engine *kof_db_load(const char *path);
 void               kof_db_free(struct kof_engine *);
 

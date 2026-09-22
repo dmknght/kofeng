@@ -33,7 +33,7 @@
 #include <kofmod/proc.h>
 
 #include "kofeditor.h"
-#include "../libkofeng/detector/matchers/hexprog.h"
+#include "../libkofeng/databases/hexprog.h"
 #include "../libkofeng/detector/matchers/kofmatch.h"
 #include "../libkofeng/kofcore/kofplatform.h"
 

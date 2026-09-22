@@ -217,33 +217,33 @@ static uint32_t n_rtf(const void *v)
 
 static struct target targets[] = {
 	{ "elf",  seed_elf,  f_elf,  sizeof f_elf  / sizeof f_elf[0],
-	  KOF_FMT_ELF, n_elf, ELF_NSEC },
+	  KOF_FMT_ELF, n_elf, ELF_NSEC, NULL },
 	{ "pe",   seed_pe,   f_pe,   sizeof f_pe   / sizeof f_pe[0],
-	  KOF_FMT_PE, n_pe, 1u },
+	  KOF_FMT_PE, n_pe, 1u, NULL },
 	{ "zip",  seed_zip,  f_zip,  sizeof f_zip  / sizeof f_zip[0],
-	  KOF_FMT_ZIP, n_zip, Z_NENT },
+	  KOF_FMT_ZIP, n_zip, Z_NENT, NULL },
 	{ "tar",  seed_tar,  f_tar,  sizeof f_tar  / sizeof f_tar[0],
-	  KOF_FMT_TAR, n_tar, 1u },
+	  KOF_FMT_TAR, n_tar, 1u, NULL },
 	{ "gzip", seed_gzip, f_gzip, sizeof f_gzip / sizeof f_gzip[0],
-	  KOF_FMT_GZIP, NULL, 0 },
+	  KOF_FMT_GZIP, NULL, 0, NULL },
 	{ "7z",   seed_7z,   f_7z,   sizeof f_7z   / sizeof f_7z[0],
-	  KOF_FMT_7Z, NULL, 0 },
+	  KOF_FMT_7Z, NULL, 0, NULL },
 	{ "rar",  seed_rar,  f_rar,  sizeof f_rar  / sizeof f_rar[0],
-	  KOF_FMT_RAR, n_rar, R_NENT },
+	  KOF_FMT_RAR, n_rar, R_NENT, NULL },
 	{ "docole", seed_docole, f_docole,
 	  sizeof f_docole / sizeof f_docole[0],
-	  KOF_FMT_DOCOLE, n_docole, 3u },
+	  KOF_FMT_DOCOLE, n_docole, 3u, NULL },
 	{ "xz",   seed_xz,   f_xz,   sizeof f_xz   / sizeof f_xz[0],
-	  KOF_FMT_XZ, n_xz, 1u },
+	  KOF_FMT_XZ, n_xz, 1u, NULL },
 	/* RAR5 is a second entry rather than a second seed: it shares the parser
 	 * and the region set with RAR3 and nothing else, so the seed, the field
 	 * list and the entry count all have to differ. */
 	{ "rar5", seed_rar5, f_rar5, sizeof f_rar5 / sizeof f_rar5[0],
-	  KOF_FMT_RAR, n_rar, V_NENT },
+	  KOF_FMT_RAR, n_rar, V_NENT, NULL },
 	{ "pdf",  seed_pdf,  f_pdf,  sizeof f_pdf  / sizeof f_pdf[0],
-	  KOF_FMT_PDF, n_pdf, P_NOBJ },
+	  KOF_FMT_PDF, n_pdf, P_NOBJ, NULL },
 	{ "rtf",  seed_rtf,  f_rtf,  sizeof f_rtf  / sizeof f_rtf[0],
-	  KOF_FMT_RTF, n_rtf, T_NOBJ }
+	  KOF_FMT_RTF, n_rtf, T_NOBJ, NULL }
 };
 
 /* ---- the run ------------------------------------------------------------------ */

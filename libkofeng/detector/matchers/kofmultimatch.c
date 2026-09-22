@@ -6,7 +6,7 @@
  */
 
 #include "kofmultimatch.h"
-#include "hexprog.h"
+#include "../../databases/hexprog.h"
 #include "../../databases/dbloader.h"
 
 #include <stdlib.h>

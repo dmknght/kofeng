@@ -179,7 +179,11 @@ static uint64_t seed_elf(uint8_t *b)
 		 * find; the mutation has to reach that state on its own, which is
 		 * what the pairwise pass below is for.
 		 */
-		put64(b, o + 32, i == 1u ? 0x100u : 0x100u);
+		/* Both arms of this were 0x100u - the condition selected
+		 * nothing and gcc said so. Collapsed to the value, which is
+		 * what every build has been using; the comment above is why it
+		 * is deliberately small. */
+		put64(b, o + 32, 0x100u);
 		put64(b, o + 48, 1);                    /* sh_addralign */
 	}
 	return SEED_MAX;

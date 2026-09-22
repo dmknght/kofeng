@@ -31,7 +31,7 @@
 
 #include "../../libkofeng/kofcore/kofcore.h"
 #include "../../libkofeng/detector/matchers/kofmatch.h"
-#include "../../libkofeng/detector/matchers/hexprog.h"
+#include "../../libkofeng/databases/hexprog.h"
 #include "../../libkofeng/databases/dbcore.h"
 
 static int failures;
@@ -220,7 +220,7 @@ static void one_round(void)
 		 * answers to "what breaks a run", and the build refuses a
 		 * pattern that sets both. */
 		if ((flags & KOF_STR_FULLWORD) && rnd_n(2) == 0) {
-			flags &= ~(unsigned)KOF_STR_FULLWORD;
+			flags = (uint8_t)(flags & ~(unsigned)KOF_STR_FULLWORD);
 			flags |= KOF_STR_TOKEN;
 		}
 		g_case = "literal";

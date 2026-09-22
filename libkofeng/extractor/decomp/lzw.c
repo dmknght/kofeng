@@ -99,7 +99,8 @@ enum kof_decomp_status kof_lzw_decode(struct kof_lzw *st, const uint8_t *in,
 			uint64_t at = bitpos + k;
 
 			code = (code << 1) |
-			       ((in[at >> 3] >> (7u - (at & 7u))) & 1u);
+			       (((unsigned)in[at >> 3] >>
+				 (7u - (at & 7u))) & 1u);
 		}
 		bitpos += width;
 

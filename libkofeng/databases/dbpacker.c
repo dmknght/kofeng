@@ -21,7 +21,7 @@
 
 #include "dbpacker.h"
 #include "dbcore.h"
-#include "../detector/matchers/hexprog.h"
+#include "hexprog.h"
 #include "../kofcore/kofcore.h"
 
 /* A growable byte buffer, alive only while building. */

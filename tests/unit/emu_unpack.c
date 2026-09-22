@@ -102,7 +102,7 @@ int main(void)
 	};
 	static const char plain[N] = "KOFENG-UNPACK-K";
 	static uint8_t self[SELF_OFF + 0x1000];
-	struct kof_emu_cfg cfg = { 100000, 0, 0 };
+	struct kof_emu_cfg cfg = { 100000, 0, 0, 0 };  /* bits 0 = 64 */
 	struct kof_emu *e;
 	enum kof_emu_stop st;
 	uint32_t it;

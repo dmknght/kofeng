@@ -1177,7 +1177,7 @@ static struct see *make_esc_freq(struct kof_ppmd *m, uint32_t ctx, uint32_t diff
 		if (idx >= 16u)
 			idx = 15u;
 		psee = &m->see[r][idx];
-		*escfreq = psee->summ >> psee->shift;
+		*escfreq = (uint32_t)psee->summ >> psee->shift;
 		psee->summ = (uint16_t)(psee->summ - *escfreq);
 		if (!*escfreq)
 			*escfreq = 1u;
