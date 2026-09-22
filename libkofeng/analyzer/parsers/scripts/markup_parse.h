@@ -60,7 +60,7 @@
 
 #include <kofmod/script.h>
 
-#include "../../core/kofcore.h"
+#include "../../../kofcore/kofcore.h"
 
 /*
  * Merge the islands that one html element wraps, in place.

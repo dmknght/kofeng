@@ -36,11 +36,11 @@
 
 #include <stddef.h>
 #include "sevenzip_parse.h"
-#include "../../kofdecomp/lzma.h"
+#include "../../../extractor/decomp/lzma.h"
 
 #include <stdlib.h>
-#include "../runlist.h"
-#include "../../kofdecomp/lzma.h"
+#include "../../../kofcore/runlist.h"
+#include "../../../extractor/decomp/lzma.h"
 
 #include <string.h>
 

@@ -6,7 +6,7 @@
  * The set that consumes it - libkoforbit's fidset - must build on both
  * platforms and knows nothing about either. So each side fills the struct its
  * own way and orbit only ever sees the filled struct: this is one stat, and
- * libkofgrille's is one GetFileInformationByHandle.
+ * libkoforbit/grille's is one GetFileInformationByHandle.
  *
  * That split is the correction of a fault the old identity had. It was declared
  * in orbit and implemented there too, with an #ifdef - and the only code that
@@ -23,12 +23,12 @@
 #ifndef KOFANTARC_AFID_H
 #define KOFANTARC_AFID_H
 
-#include "../libkoforbit/koffridge/fidset.h"
+#include "../fridge/fidset.h"
 
 /*
  * kof_fid_of ITSELF IS DECLARED IN fidset.h, not here.
  *
- * It is one name with two definitions - this file's and libkofgrille/wfid.c's -
+ * It is one name with two definitions - this file's and libkoforbit/grille/wfid.c's -
  * so it is declared once beside the struct it fills, the way kof_walk_open is.
  * A caller includes fidset.h and calls the name; it never includes this header
  * to reach it and never learns which platform answered.

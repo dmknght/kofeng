@@ -21,7 +21,7 @@
  * IT IS A PARSER AND SO IT IS IN THE ENGINE, which is the other half of the
  * question. Three steps, three places:
  *
- *   libkofantarc (or libkofgrille)  reads /proc, fills struct kofa_proc
+ *   libkoforbit/antarc (or libkoforbit/grille)  reads /proc, fills struct kofa_proc
  *   libkoforbit/kofproc             normalises it into the record's bytes
  *   THIS                            reads those bytes back as a scannable view
  *
@@ -44,9 +44,9 @@
 #ifndef KOF_PROC_PARSE_H
 #define KOF_PROC_PARSE_H
 
-#include "../../core/kofcore.h"
-#include "../../core/kofmod/kofsig.h"
-#include "../../core/kofmod/proc.h"
+#include "../../../kofcore/kofcore.h"
+#include "../../../kofcore/kofmod/kofsig.h"
+#include "../../../kofcore/kofmod/proc.h"
 
 extern const uint32_t kof_proc_regions[3];
 

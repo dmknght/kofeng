@@ -7,7 +7,7 @@
  * was recovered plus anomaly bits.
  *
  * The wrapper only. Nothing here decodes the stream: that is
- * kofdecomp/bzip2.c, reached by an unpacker through the host, and it is
+ * extractor/decomp/bzip2.c, reached by an unpacker through the host, and it is
  * deliberately not reachable from a collector. Identifying an object must not
  * cost the decompression of it, and for this format that matters more than
  * most - a bzip2 block cannot be partly decoded, so the cheapest question
@@ -19,7 +19,7 @@
 
 #include <kofmod/bz2.h>
 #include <kofmod/kofsig.h>
-#include "../../core/kofcore.h"
+#include "../../../kofcore/kofcore.h"
 
 /*
  * Returns non-zero if the object is bzip2.

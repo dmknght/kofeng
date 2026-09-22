@@ -9,7 +9,7 @@
 #include <kofmod/lnk.h>
 #include <kofmod/kofsig.h>
 
-#include "../../core/kofcore.h"
+#include "../../../kofcore/kofcore.h"
 
 int kof_lnk_parse(kof_buf file, struct kof_lnk_info *info,
 		  struct kof_obj_ctx *ctx);

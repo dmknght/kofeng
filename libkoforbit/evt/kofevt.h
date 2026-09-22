@@ -6,7 +6,7 @@
  * that location IS, the record those go in, and the log those records are
  * written to.
  *
- * WHAT IT DOES NOT OWN: collecting. libkofgrille reads ETW and a Linux twin
+ * WHAT IT DOES NOT OWN: collecting. libkoforbit/grille reads ETW and a Linux twin
  * will read whatever Linux offers; both of them produce what is defined here
  * and neither defines any of it. A tool then picks a collector by what it was
  * built for and reads the same record either way.
@@ -24,7 +24,7 @@
  * zip.h, pdf.h, tar.h - descriptions of what a SCANNED TARGET looks like, which
  * a compiled module in bases/ includes in order to read one. An event record is
  * none of those things: it is a format this toolset defines for itself, in the
- * same sense kofdb/kofpack.h defines .ksig, and filing it beside the target
+ * same sense databases/kofpack.h defines .ksig, and filing it beside the target
  * parsers makes both harder to find.
  *
  * The rule, stated so the next file lands correctly: core/kofmod/ is what a
@@ -34,14 +34,14 @@
  * NOTHING HERE INCLUDES ANYTHING ELSE FROM libkofeng, and that is structural
  * rather than a promise. This directory is under libkofeng because events are
  * the engine's business eventually, but the files use stdint, stddef and stdio
- * and nothing more - so libkofgrille can include them without acquiring a
+ * and nothing more - so libkoforbit/grille can include them without acquiring a
  * dependency on the engine, and kofgrille.h's rule that it never includes
  * kofeng.h stays true.
  *
  *
  * WHERE IT SITS
  *
- *     libkofgrille (Windows)  ---\
+ *     libkoforbit/grille (Windows)  ---\
  *                                 >--- struct kof_evt ---> bases/evts rules
  *     a Linux collector       ---/
  *
@@ -340,7 +340,7 @@ enum kof_evt_verb {
 	 * declares is the verb's own number (see KOF_TARGET_FIRST_EVENT in
 	 * kofsig.h), so a shape worth writing rules against has to have one.
 	 *
-	 * It is the snapshot half of libkofantarc: a machine compromised on
+	 * It is the snapshot half of libkoforbit/antarc: a machine compromised on
 	 * Tuesday with a sensor installed on Thursday produces a perfectly
 	 * clean event stream, because everything that mattered happened before
 	 * anything was watching. What is still RESIDENT has raised no event
@@ -1139,7 +1139,7 @@ struct kof_evt {
  * This record is written to a file and read back by a different build, so a
  * field added above text[] without moving KOF_EVT_HEAD makes every string in
  * every record start at the wrong offset - and a path read from the wrong
- * offset still looks like a path. libkofgrille's header claimed an equivalent
+ * offset still looks like a path. libkoforbit/grille's header claimed an equivalent
  * assertion existed and it did not, for the whole life of the file.
  */
 _Static_assert(offsetof(struct kof_evt, text) == KOF_EVT_HEAD,
@@ -1387,7 +1387,7 @@ const char *kof_evt_cmdline(const struct kof_evt *);
  * then the record is marked KOF_EF_TRUNCATED, because a path that was cut is
  * not the same claim as a path nobody supplied.
  *
- * Here rather than inside a collector: it was a static in libkofantarc's
+ * Here rather than inside a collector: it was a static in libkoforbit/antarc's
  * fanotify half, and the process half needed the same fifteen lines. Two
  * copies of the code that decides what a record's text block looks like is
  * two places for the truncation flag to be forgotten in.

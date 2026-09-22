@@ -57,28 +57,28 @@
 #include <errno.h>
 
 #include <kofeng.h>
-#include "../libkofeng/core/kofplatform.h"
+#include "../libkofeng/kofcore/kofplatform.h"
 #include "goto_parse.h"
 #include <kofcore.h>
 #include <kofmod/kofsig.h>
 #include <kofmod/kofsym.h>
-#include "../kofparsers/binaries/elf_sym.h"
-#include "../kofparsers/binaries/pe_sym.h"
+#include "../libkofeng/analyzer/parsers/binaries/elf_sym.h"
+#include "../libkofeng/analyzer/parsers/binaries/pe_sym.h"
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 #include <kofmod/script.h>
 /* kof_parser_of: the region NAMES are per format, and a multi-format draft has
  * to be able to ask each of its formats what a region bit means there. */
-#include "../libkofeng/kofparsers/kofformat.h"
+#include "../libkofeng/analyzer/parsers/kofformat.h"
 
 #include "kofevtfmt.h"
 #include "kofevtlog.h"
 #include "kofinspect.h"
 #include <kofmod/kofplague.h>
 #include "kofview.h"
-#include "../libkofeng/kofoverlord/koflib.h"
-#include "../libkofeng/kofoverlord/kofoverlord.h"
-#include "../libkofeng/kofparsers/rangelist.h"
+#include "../libkofeng/detector/overlord/koflib.h"
+#include "../libkofeng/detector/overlord/kofoverlord.h"
+#include "../libkofeng/kofcore/rangelist.h"
 #include "kofwalk.h"
 #include "kofproc.h"
 #include <kofmod/proc.h>
@@ -89,14 +89,14 @@
 /* The disassembler the emulator already carries: the viewer links the same
  * library, so this costs an include path and nothing else. */
 #include "bddisasm.h"
-#include "../libkofeng/kofheur/kofheur.h"
-#include "../libkofeng/kofscanners/scan.h"
-#include "../libkofeng/kofscanners/objsrc.h"
-#include "../libkofeng/kofunpack/emu_unpack.h"
-#include "../libkofeng/kofmatchers/kofmatch.h"
-#include "../libkofeng/kofmatchers/hexprog.h"
-#include "../libkofeng/kofdb/kofpack.h"
-#include "../libkofeng/kofdb/kofdb.h"
+#include "../libkofeng/detector/heur/kofheur.h"
+#include "../libkofeng/scanners/scan.h"
+#include "../libkofeng/scanners/objsrc.h"
+#include "../libkofeng/extractor/unpack/emu_unpack.h"
+#include "../libkofeng/detector/matchers/kofmatch.h"
+#include "../libkofeng/detector/matchers/hexprog.h"
+#include "../libkofeng/databases/kofpack.h"
+#include "../libkofeng/databases/kofdb.h"
 
 
 /*
@@ -5543,7 +5543,7 @@ static size_t evt_sel_text(const struct view *v, char *out, size_t cap)
 		return 0;
 	len = (size_t)(to - from);
 	/* cap 0 makes `cap - 1u` SIZE_MAX and the clamp a no-op - the same
-	 * shape guarded in libkofantarc when it was found there. */
+	 * shape guarded in libkoforbit/antarc when it was found there. */
 	if (!cap)
 		return 0;
 	if (len > cap - 1u)

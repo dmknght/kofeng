@@ -47,7 +47,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#include "../core/kofcore.h"
+#include "../kofcore/kofcore.h"
 
 struct kof_objsrc;
 

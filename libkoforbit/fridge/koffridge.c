@@ -38,7 +38,7 @@
 
 /*
  * pthreads, because that is what this tree already threads with - see the work
- * queue in libkofeng/kofscanners/scan.c - and because every target that
+ * queue in libkofeng/scanners/scan.c - and because every target that
  * compiles this file already links -pthread. On Windows that resolves through
  * winpthreads, statically, for the reason the Makefile gives beside the flag.
  */
@@ -47,11 +47,11 @@
 #include "../../libkofeng/kofeng.h"
 #include "koffridge.h"
 /* koffridge_seen_evt reads the neutral record - see koffridge.h. */
-#include "../kofevt/kofevt.h"
+#include "../evt/kofevt.h"
 
 /* kof_mkdir and KOF_PATH_SEP - the two things a default path needs and the
  * one place this tree already says how they differ per platform. */
-#include "../../libkofeng/core/kofplatform.h"
+#include "../../libkofeng/kofcore/kofplatform.h"
 
 /*
  * THE ONE PLATFORM-DEPENDENT THING IN THIS FILE, and it is confined to the
@@ -1412,7 +1412,7 @@ uint32_t koffridge_seen_evt(struct koffridge_seen *s, const struct kof_evt *e)
 	 *   differ only in case - a silence with nothing to say it happened.
 	 *
 	 * So the fold is the platform's, and the two are not made to agree.
-	 * (libkofgrille's own older kofw_evt_ident hashes the bytes raw on
+	 * (libkoforbit/grille's own older kofw_evt_ident hashes the bytes raw on
 	 * both counts; a collector moved onto this one gains the fold rather
 	 * than losing anything.)
 	 */

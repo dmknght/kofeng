@@ -17,7 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/kofparsers/containers/lha_parse.h"
+#include "../../libkofeng/analyzer/parsers/containers/lha_parse.h"
 
 static int failures;
 

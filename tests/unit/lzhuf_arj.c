@@ -32,8 +32,8 @@
 #include <string.h>
 
 #include "../../libkofeng/kofeng.h"
-#include "../../libkofeng/kofparsers/containers/arj_parse.h"
-#include "../../libkofeng/kofdecomp/lzhuf.h"
+#include "../../libkofeng/analyzer/parsers/containers/arj_parse.h"
+#include "../../libkofeng/extractor/decomp/lzhuf.h"
 
 static int failures;
 static int checked;

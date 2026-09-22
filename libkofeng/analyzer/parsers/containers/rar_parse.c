@@ -27,8 +27,8 @@
 #include <string.h>
 
 #include "rar_parse.h"
-#include "../runlist.h"
-#include "../entryname.h"
+#include "../../../kofcore/runlist.h"
+#include "../../../kofcore/entryname.h"
 
 /* ---- the block header, by offset from its own start --------------------------- */
 

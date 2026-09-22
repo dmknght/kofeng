@@ -24,7 +24,7 @@
  * microseconds, which would make this a test of timing rather than of the
  * flag. The thread has to still exist while the walk looks.
  *
- * ON POSIX THERE IS NOTHING TO TEST. The flag is libkofgrille's and the walk it
+ * ON POSIX THERE IS NOTHING TO TEST. The flag is libkoforbit/grille's and the walk it
  * belongs to is Windows's; the test says so and passes rather than pretending.
  */
 #include <stdio.h>

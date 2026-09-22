@@ -4,7 +4,7 @@
  * WHY THIS IS ONE PIECE OF CODE AND NOT ONE PER COLLECTOR.
  *
  * kofmod/proc.h defines the layout; something has to WRITE it. If each
- * collector wrote its own, libkofgrille and libkofantarc would each have a
+ * collector wrote its own, libkoforbit/grille and libkoforbit/antarc would each have a
  * private opinion about where the arena starts, what order its strings go in,
  * and which offsets are zero when a field is absent - and the first time they
  * disagreed, the symptom would not be a build error. It would be a rule that

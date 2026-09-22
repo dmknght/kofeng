@@ -26,7 +26,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/kofplague.h>
 #include <kofmod/script.h>   /* kof_script_fam_mask - the subfamily test below */
-#include "../core/kofcore.h"   /* kof_crc32, kof_round_up */
+#include "../kofcore/kofcore.h"   /* kof_crc32, kof_round_up */
 #include "kofpack.h"       /* KOF_STR_MAX_LEN, KOF_BLOB_MAX_CODE */
 
 /*
@@ -429,7 +429,7 @@ struct kof_engine {
 	uint32_t                 n_blk;
 	uint32_t                *blk_pool;
 	uint32_t                 n_blk_pool;
-	/* The index built over the two above - see kofmatchers/kofplague.h. NULL
+	/* The index built over the two above - see detector/matchers/kofplague.h. NULL
 	 * when there are no blocks. */
 	struct kof_plague_set   *plague;
 

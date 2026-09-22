@@ -1,7 +1,7 @@
 /*
  * afan.h - what the filesystem is doing, from fanotify.
  *
- * THE STREAM HALF of libkofantarc, and the sibling of aproc.h: that one
+ * THE STREAM HALF of libkoforbit/antarc, and the sibling of aproc.h: that one
  * answers "what is here", this one answers "what just happened". A machine
  * compromised before this started produces a perfectly clean stream, which is
  * why both halves exist.
@@ -161,7 +161,7 @@ uint32_t    kofa_fan_watch_count(const struct kofa_fan *);
 const char *kofa_fan_watch_at(const struct kofa_fan *, uint32_t i);
 
 /*
- * The collector as a sensor sees it - see libkoforbit/kofmon/kofmon.h.
+ * The collector as a sensor sees it - see libkoforbit/mon/kofmon.h.
  *
  * Borrowed, valid for the session's life. This is the whole reason the record
  * conversion is in here: the sensor holds one of these and never learns which

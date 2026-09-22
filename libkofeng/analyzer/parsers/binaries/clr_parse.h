@@ -28,11 +28,11 @@
 #ifndef KOF_CLR_PARSE_H
 #define KOF_CLR_PARSE_H
 
-#include "../../core/kofcore.h"
-#include "../../core/kofmod/clr.h"
+#include "../../../kofcore/kofcore.h"
+#include "../../../kofcore/kofmod/clr.h"
 /* For struct kof_rlist and struct kof_range: the two shapes a host already
  * speaks when it settles ownership and resolves regions. */
-#include "../rangelist.h"
+#include "../../../kofcore/rangelist.h"
 
 /*
  * Turn an RVA into an offset in the object, or KOF_BROKEN.

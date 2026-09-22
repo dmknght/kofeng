@@ -45,7 +45,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "../../libkofeng/core/kofplatform.h"
+#include "../../libkofeng/kofcore/kofplatform.h"
 #include "../../libkofeng/kofeng.h"
 
 #define FILES     64u

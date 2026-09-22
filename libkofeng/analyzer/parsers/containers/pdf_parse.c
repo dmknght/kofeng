@@ -14,7 +14,7 @@
 
 #include <stddef.h>
 #include "pdf_parse.h"
-#include "../runlist.h"
+#include "../../../kofcore/runlist.h"
 
 #include <string.h>
 
@@ -1153,7 +1153,7 @@ static void read_chain(kof_buf f, const struct kof_pdf_object *o,
 	 *
 	 * The key decides whether the code width grows one code before the
 	 * table needs it. The default is 1, which is what this build's decoder
-	 * does - see kofdecomp/lzw.h - and a stream that says 0 decodes to
+	 * does - see extractor/decomp/lzw.h - and a stream that says 0 decodes to
 	 * PLAUSIBLE GARBAGE rather than to nothing: the first few hundred bytes
 	 * are right and then it drifts. That is the worst possible failure, so
 	 * it is reported as a coding this build cannot perform, which is what it

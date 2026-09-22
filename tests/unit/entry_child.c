@@ -25,8 +25,8 @@
 #include <string.h>
 
 #include "../../libkofeng/kofeng.h"
-#include "../../libkofeng/core/kofmod/cab.h"
-#include "../../libkofeng/core/kofmod/lha.h"
+#include "../../libkofeng/kofcore/kofmod/cab.h"
+#include "../../libkofeng/kofcore/kofmod/lha.h"
 
 static int failures;
 

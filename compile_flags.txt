@@ -1,4 +1,4 @@
 -std=c11
 -Wall
 -Wextra
--Ilibkofeng/core
+-Ilibkofeng/kofcore

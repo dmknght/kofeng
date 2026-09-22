@@ -39,7 +39,7 @@
 
 /* The .c, not the header: find_lit is static, and a copy here could drift from
  * the one that runs. */
-#include "../../libkofeng/kofmatchers/kofmatch.c"
+#include "../../libkofeng/detector/matchers/kofmatch.c"
 
 /* Same shape, no folding - what nocase=0 has to agree with. */
 static int ref_find_exact(const uint8_t *h, uint64_t hl, const uint8_t *n,

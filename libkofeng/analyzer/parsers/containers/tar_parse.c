@@ -40,8 +40,8 @@
 
 #include <stddef.h>
 #include "tar_parse.h"
-#include "../runlist.h"
-#include "../entryname.h"
+#include "../../../kofcore/runlist.h"
+#include "../../../kofcore/entryname.h"
 
 #include <string.h>
 

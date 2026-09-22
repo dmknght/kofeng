@@ -136,6 +136,13 @@ static void two_calls_one_line(void)
 		CK(e.dr.decl[1].grp == 2u);
 		CK(e.dr.decl[2].grp == 2u);
 	}
+	/*
+	 * draft_clear, NOT just unlink. A draft's literals are heap buffers and
+	 * the editor frees them exactly here; a test that skipped it leaked one
+	 * per KOF_DEFINE_STR it parsed and `make unit-asan` said so - 30 bytes
+	 * across the three functions that do this.
+	 */
+	draft_clear(&e);
 	unlink(path);
 }
 
@@ -170,6 +177,13 @@ static void two_calls_or(void)
 		CK(e.dr.cnd[0].op == 1);
 		EQ(e.dr.cnd[0].expr, "1|2");
 	}
+	/*
+	 * draft_clear, NOT just unlink. A draft's literals are heap buffers and
+	 * the editor frees them exactly here; a test that skipped it leaked one
+	 * per KOF_DEFINE_STR it parsed and `make unit-asan` said so - 30 bytes
+	 * across the three functions that do this.
+	 */
+	draft_clear(&e);
 	unlink(path);
 }
 
@@ -273,6 +287,13 @@ static void mixed_rule(void)
 		CK(d[0].thr == 70);
 	}
 	CK(!shp_pct && !str_pct && !blkv_pct);
+	/*
+	 * draft_clear, NOT just unlink. A draft's literals are heap buffers and
+	 * the editor frees them exactly here; a test that skipped it leaked one
+	 * per KOF_DEFINE_STR it parsed and `make unit-asan` said so - 30 bytes
+	 * across the three functions that do this.
+	 */
+	draft_clear(&e);
 	unlink(path);
 }
 

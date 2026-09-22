@@ -31,10 +31,10 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
-#include "../../libkofeng/core/kofplatform.h"
-#include "../../libkofeng/kofdb/kofdb.h"
-#include "../../libkofeng/kofdb/kofpack.h"
-#include "../../libkofeng/kofdb/kofpackw.h"
+#include "../../libkofeng/kofcore/kofplatform.h"
+#include "../../libkofeng/databases/kofdb.h"
+#include "../../libkofeng/databases/kofpack.h"
+#include "../../libkofeng/databases/kofpackw.h"
 
 static int failures;
 

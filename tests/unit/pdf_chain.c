@@ -28,8 +28,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/core/kofplatform.h"
-#include "../../libkofeng/kofparsers/containers/pdf_parse.h"
+#include "../../libkofeng/kofcore/kofplatform.h"
+#include "../../libkofeng/analyzer/parsers/containers/pdf_parse.h"
 
 static uint32_t fails;
 

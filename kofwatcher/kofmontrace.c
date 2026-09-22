@@ -143,10 +143,10 @@
  *
  * The cost is in the Makefile and is written down there: this stopped
  * cross-building, because $(LIB) is built for the host. kofwatchtower stays in
- * the cross block and keeps libkofgrille type-checked on a machine with no ETW.
+ * the cross block and keeps libkoforbit/grille type-checked on a machine with no ETW.
  */
 #include "kofeng.h"
-#include "core/kofplatform.h"
+#include "kofcore/kofplatform.h"
 #include "kofreport.h"
 
 /* ---------------------------------------------- answering the report's question

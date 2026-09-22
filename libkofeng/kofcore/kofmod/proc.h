@@ -11,7 +11,7 @@
  * with without a build of the product.
  *
  * So the collector COLLECTS and the database DECIDES, which is the same split
- * every format here already has. libkofantarc reads /proc and fills the record
+ * every format here already has. libkoforbit/antarc reads /proc and fills the record
  * below; a rule in bases/heur joins those facts and says what they mean.
  *
  *
@@ -243,7 +243,7 @@ struct kof_proc_rec {
 	 * It is here so that a rule can be written for one platform, for the
 	 * other, or for both, and so that a second collector can fill this
 	 * record WITHOUT the engine changing. That is the whole point of the
-	 * field: libkofgrille and libkofantarc are meant to be developed in
+	 * field: libkoforbit/grille and libkoforbit/antarc are meant to be developed in
 	 * parallel, and the first version of this struct had POSIX ids sitting
 	 * in the fixed head, which would have forced a core change the day a
 	 * Windows process was first handed over.

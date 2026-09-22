@@ -216,7 +216,7 @@ static inline uint32_t kof_ovl_shape_pct(const struct kof_elf_info *e,
  *
  * What the code DOES: which capabilities it asks the system for, in order,
  * which of them carry a program-level flag, and which took an argument an
- * earlier one produced. See kofoverlord/ovlflow.h for how one is read out of
+ * earlier one produced. See detector/overlord/ovlflow.h for how one is read out of
  * code, and kof_ovl_chain in kofmod/kofsig.h for how a rule asks about one.
  *
  * NO ADDRESSES AND NO INDICES. kof_flow_node - the engine's working record -
@@ -229,7 +229,7 @@ static inline uint32_t kof_ovl_shape_pct(const struct kof_elf_info *e,
  * allocation would be one somebody has to remember to free.
  */
 struct kof_ovlf_step {
-	uint8_t cap;    /* enum kof_flow_cap - kofdisasm/flow.h */
+	uint8_t cap;    /* enum kof_flow_cap - analyzer/disasm/flow.h */
 	/*
 	 * The KOF_FLOWF_* bits that are about the PROGRAM: in a loop, the
 	 * value was later branched to, the import was called through a

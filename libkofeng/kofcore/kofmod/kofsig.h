@@ -354,7 +354,7 @@ enum kof_format {
 	KOF_EVT_AMSI    = 19,
 
 	/*
-	 * A RUNNING PROCESS, as libkofantarc reads it out of /proc.
+	 * A RUNNING PROCESS, as libkoforbit/antarc reads it out of /proc.
 	 *
 	 * Its own target rather than a subtype of anything, because the SHAPE
 	 * of a rule about one is unlike every other row here: it is a
@@ -1045,7 +1045,7 @@ struct kof_region_shape {
 	uint32_t reserved;
 };
 
-struct kof_ovlf_chain;   /* kofoverlord/ovlflow.h - see ovl_chain */
+struct kof_ovlf_chain;   /* detector/overlord/ovlflow.h - see ovl_chain */
 
 struct kof_content {
 	uint8_t  (*rd8) (const struct kof_obj_ctx *, uint64_t off);
@@ -1765,7 +1765,7 @@ enum kof_unp_method {
 	KOF_UNP_ASCII85 = 10,
 
 	/*
-	 * The other two transport codings, and see kofdecomp/textcode.h for
+	 * The other two transport codings, and see extractor/decomp/textcode.h for
 	 * why the three belong together.
 	 *
 	 * ASCIIHEX is bounded by its input like ASCII85, so it can be a middle
@@ -1782,7 +1782,7 @@ enum kof_unp_method {
 
 	/*
 	 * LZW as PDF and TIFF write it - most-significant-bit first, which is
-	 * NOT the GIF variant. See kofdecomp/lzw.h.
+	 * NOT the GIF variant. See extractor/decomp/lzw.h.
 	 *
 	 * Worth having because it was superseded: a filter nobody expects is a
 	 * filter a parser was never taught, and that is a cheap way to put
@@ -1794,7 +1794,7 @@ enum kof_unp_method {
 	KOF_UNP_LZW = 13,
 
 	/*
-	 * bzip2, whole streams of it - see kofdecomp/bzip2.h.
+	 * bzip2, whole streams of it - see extractor/decomp/bzip2.h.
 	 *
 	 * A .bz2 file, a zip entry stored with method 12, and the compressed
 	 * half of a .tar.bz2 are all this one coding, and none of them could be
@@ -2788,7 +2788,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx);
  *
  * The chain is the capabilities the reference's code asks the system for, in
  * order, with the links between them - written out by the generator in
- * kofviewer, never typed. See kofoverlord/ovlflow.h for what a step holds and
+ * kofviewer, never typed. See detector/overlord/ovlflow.h for what a step holds and
  * why an address is not one of the things it holds.
  *
  * SUSPECT RATHER THAN INFECT is the generator's default, for the reason the
@@ -2911,7 +2911,7 @@ static inline uint32_t kof_bswap32(uint32_t v)
  * KOF_XREF_CALL, and neither needs a line changed here.
  *
  * A RANGE, because a blob is not referred to at its first byte - see
- * kof_xref_in in kofdisasm/xref.h for the three-load measurement that says so.
+ * kof_xref_in in analyzer/disasm/xref.h for the three-load measurement that says so.
  * Pass the variable's own size; 0 asks about the one address.
  *
  * Zero for a range nothing referred to, and zero for an object with no code to

@@ -55,7 +55,7 @@
  *    Measured: the engine flags its own reconstruction as an msfvenom template.
  *
  * p_filesz MUST NOT EXCEED WHAT IS WRITTEN, or KOF_ELF_ANOM_SEG_PAST_EOF fires
- * and kofheur scores it "Truncated" - the engine detecting its own output.
+ * and detector/heur scores it "Truncated" - the engine detecting its own output.
  * p_memsz may be larger; that is what .bss is. Measured both ways.
  *
  * The width follows the PAYLOAD, not the parent - a 64-bit loader routinely

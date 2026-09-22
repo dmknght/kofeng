@@ -33,7 +33,7 @@
 
 #include <stdint.h>
 
-#include "../core/kofcore.h"
+#include "../../kofcore/kofcore.h"
 #include "decomp.h"
 
 /* DEFLATE's maximum back reference, and therefore the whole of the decoder's

@@ -47,7 +47,7 @@
  * The engine writes these values and a module reads them; one side owning the
  * numbers and the other repeating them is the same mistake in a smaller space.
  */
-#include "../core/kofmod/kofsig.h"
+#include "../../kofcore/kofmod/kofsig.h"
 
 
 /*

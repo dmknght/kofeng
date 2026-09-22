@@ -1778,7 +1778,7 @@ size_t kofw_region_describe(const struct kofw_region *r, char *buf, size_t cap)
 	 *
 	 * Three returns in this function hand back cap - 1 as "what was
 	 * written", and with cap 0 that is SIZE_MAX - a length the caller uses.
-	 * No caller passes zero today; the same shape in libkofantarc's
+	 * No caller passes zero today; the same shape in libkoforbit/antarc's
 	 * a_read_exe and a_parse_maps was guarded when it was found there, and
 	 * this is the copy that did not get the fix. Guarded where the
 	 * subtraction is, not where the caller happens to be correct.

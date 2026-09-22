@@ -26,7 +26,7 @@
 #include <unistd.h>
 #include <time.h>
 
-#include "../../libkoforbit/koffridge/fidset.h"
+#include "../../libkoforbit/fridge/fidset.h"
 
 static int fails;
 

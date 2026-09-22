@@ -28,7 +28,7 @@
 #define KOFENG_SCRIPT_NORM_H
 
 #include <kofmod/script.h>
-#include "../../core/kofcore.h"
+#include "../../../kofcore/kofcore.h"
 
 /*
  * WHAT ONE LANGUAGE NEEDS SAYING ABOUT IT.

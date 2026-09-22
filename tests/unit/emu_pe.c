@@ -30,8 +30,8 @@
 
 #include <kofmod/pe.h>
 #include <kofmod/kofsig.h>
-#include "../../libkofeng/kofparsers/binaries/pe_parse.h"
-#include "../../libkofeng/kofunpack/emu_unpack.h"
+#include "../../libkofeng/analyzer/parsers/binaries/pe_parse.h"
+#include "../../libkofeng/extractor/unpack/emu_unpack.h"
 #include "../../libkofeng/kofeng.h"
 
 #define BASE      0x0000000140000000ull

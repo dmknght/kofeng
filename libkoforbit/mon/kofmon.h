@@ -12,7 +12,7 @@
  *
  * What made it a Windows program anyway was the SHAPE of the calls in that
  * loop: kofw_mon_open, kofw_mon_next, kofw_evt_to_kof. Each is fine and each
- * belongs to libkofgrille, and together they mean the only way to write a
+ * belongs to libkoforbit/grille, and together they mean the only way to write a
  * Linux sensor is to write a second sensor - a second argument parser, a
  * second drain loop, a second set of health lines, and two places for the same
  * bug.
@@ -23,9 +23,9 @@
  *
  * IT HANDS BACK struct kof_evt, WHICH IS THE WHOLE POINT.
  *
- * Not the collector's own record. libkofgrille normalises kofw_evt into
+ * Not the collector's own record. libkoforbit/grille normalises kofw_evt into
  * kof_evt already - kofw_evt_to_kof, and wtext.c calls that direction "to the
- * neutral record" - and libkofantarc will do the same from whatever fanotify
+ * neutral record" - and libkoforbit/antarc will do the same from whatever fanotify
  * and the netlink connector give it. The conversion is each collector's
  * business precisely because only it knows its own fields.
  *

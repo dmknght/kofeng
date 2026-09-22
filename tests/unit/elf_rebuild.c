@@ -21,7 +21,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#include "../../libkofeng/kofunpack/elf_rebuild.h"
+#include "../../libkofeng/extractor/unpack/elf_rebuild.h"
 
 static int failures;
 

@@ -1,5 +1,5 @@
 /*
- * antarc_dump - drive libkofantarc's snapshot half and print what it found.
+ * antarc_dump - drive libkoforbit/antarc's snapshot half and print what it found.
  *
  * A HAND TOOL, NOT A TEST. It asserts nothing: it walks the live machine and
  * prints what the collector saw, which is how the numbers quoted in aproc.h

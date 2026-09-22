@@ -1,5 +1,5 @@
 /*
- * wtrace.h - writing a collected stream to a file, and reading it back.
+ * kofevtlog.h - writing a collected stream to a file, and reading it back.
  *
  * WHY THIS EXISTS AND WHY IT IS THE FILE EVERYTHING ELSE WAITED FOR
  *
@@ -24,23 +24,29 @@
  *
  * THE FORMAT, AND WHAT IT REFUSES
  *
- *   [ struct kofw_trace_hdr ]  [ struct kofw_evt ] [ struct kofw_evt ] ...
+ *   [ struct kofevt_log_hdr ]  [ head | text ] [ head | text ] ...
  *
- * Fixed records, no index, no compression. A reader can seek to record N by
- * multiplying, a writer can append without rewriting anything, and a file
- * truncated by a crash loses its last record and not the ones before it -
- * which for a trace of something that crashed the machine is the case that
- * matters.
+ * No index and no compression. A writer appends without rewriting anything,
+ * and a file truncated by a crash loses its last record and not the ones
+ * before it - which for a trace of something that crashed the machine is the
+ * case that matters.
+ *
+ * A RECORD IS NOT A FIXED STRIDE, and the paragraph that said it was is the
+ * one thing here that was left behind by the format it describes. Each record
+ * is a fixed head followed by that record's OWN text, so record N is not at a
+ * computable offset and a reader cannot seek by multiplying. What replaces
+ * that is a sparse checkpoint index built on the first seek - see
+ * kofevt_log_seek, which is where the cost of the change is written down.
  *
  * The header carries `rec_size` AND `rec_kind`, and a reader REFUSES a file
  * that does not match both rather than reading it anyway. Size alone does not
  * identify a record - two collectors can easily produce different 512-byte
  * records, and reading one as the other is the failure this pair exists to
- * make impossible. That is the whole safety
- * argument of the format: struct kofw_evt is going to grow - it grew twice
- * while this library was being written - and a reader that trusted the layout
- * without checking would decode every field from the wrong offset and produce
- * a trace that looks completely plausible and is entirely wrong.
+ * make impossible. That is the whole safety argument of the format: a
+ * collector's record is going to grow - struct kofw_evt grew twice while this
+ * library was being written - and a reader that trusted the layout without
+ * checking would decode every field from the wrong offset and produce a trace
+ * that looks completely plausible and is entirely wrong.
  *
  * LITTLE-ENDIAN ONLY, stated rather than handled. Both platforms this collects
  * from are little-endian, a byte-swapping reader would be code nothing runs,
@@ -63,13 +69,13 @@
  * it the Windows collector's log format wearing a neutral name. It now writes
  * FIXED-SIZE OPAQUE RECORDS whose size and kind the caller declares, so:
  *
- *   - libkofgrille records struct kofw_evt today,
+ *   - libkoforbit/grille records struct kofw_evt today,
  *   - a Linux collector records its own,
  *   - and when the neutral struct kof_evt in kofevt.h is implemented, the same
  *     code records that without being touched.
  *
- * It is also what lets this live under libkofeng without dragging the engine
- * into libkofgrille: stdio and stdint, and nothing else.
+ * It is also what lets this live in orbit without dragging the engine into
+ * libkoforbit/grille: stdio and stdint, and nothing else.
  */
 
 /* "KOFT" - and it is checked before anything else is believed. */

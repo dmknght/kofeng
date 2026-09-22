@@ -24,7 +24,7 @@
 #include <string.h>
 
 #include "chm_parse.h"
-#include "../rangelist.h"
+#include "../../../kofcore/rangelist.h"
 
 #define CHM_ITSF_MIN   0x60u     /* through the v3 content offset */
 #define CHM_ITSP_MIN   0x54u

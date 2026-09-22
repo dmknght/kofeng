@@ -6,7 +6,7 @@
  * view, and a parse that never fails - hostile or truncated input yields what was
  * recovered plus anomaly bits.
  *
- * The wrapper only. Nothing here decodes the stream: that is kofdecomp/inflate.c,
+ * The wrapper only. Nothing here decodes the stream: that is extractor/decomp/inflate.c,
  * reached by an unpacker through the host, and it is deliberately not reachable
  * from a collector. Identifying an object must not cost the decompression of it,
  * or every file in a scan pays a decoder to find out what it is.
@@ -17,7 +17,7 @@
 
 #include <kofmod/gzip.h>
 #include <kofmod/kofsig.h>
-#include "../../core/kofcore.h"
+#include "../../../kofcore/kofcore.h"
 
 /*
  * Returns non-zero if the object is gzip.

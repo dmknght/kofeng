@@ -6,7 +6,7 @@
  * attacker one prctl call and it is a standard trick.
  *
  * IT IS DETECTABLE BY CONSTRUCTION, and that is worth saying because it falls
- * out of a decision made for another reason. libkofantarc classifies kernel
+ * out of a decision made for another reason. libkoforbit/antarc classifies kernel
  * threads from PF_KTHREAD - field 9 of /proc/<pid>/stat, the kernel's own bit
  * - and never from the name, because a name was never trustworthy for
  * anything. So the disagreement between what a process CALLS itself and what

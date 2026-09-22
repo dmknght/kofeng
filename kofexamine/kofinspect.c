@@ -32,14 +32,14 @@
 #include <errno.h>
 
 #include "kofinspect.h"
-#include "../libkofeng/core/kofplatform.h"
-#include "../libkofeng/kofmatchers/kofmatch.h"
-#include "../libkofeng/kofscanners/scan.h"
+#include "../libkofeng/kofcore/kofplatform.h"
+#include "../libkofeng/detector/matchers/kofmatch.h"
+#include "../libkofeng/scanners/scan.h"
 #include <kofmod/script.h>
 /* KOF_PROC_OS_LIST: the platform a process record is from, which is its
  * subtype - see the note on that list. */
 #include <kofmod/proc.h>
-#include "../libkofeng/kofparsers/kofformat.h"
+#include "../libkofeng/analyzer/parsers/kofformat.h"
 
 /*
  * The parsers, by their internal headers.
@@ -49,9 +49,9 @@
  * wanted one. What changed is that there are now two consumers of it in this
  * tree rather than one, so the reach lives here once instead of in each.
  */
-#include "../libkofeng/kofparsers/binaries/elf_parse.h"
-#include "../libkofeng/kofparsers/binaries/pe_parse.h"
-#include "../libkofeng/kofparsers/events/amsi_parse.h"
+#include "../libkofeng/analyzer/parsers/binaries/elf_parse.h"
+#include "../libkofeng/analyzer/parsers/binaries/pe_parse.h"
+#include "../libkofeng/analyzer/parsers/events/amsi_parse.h"
 
 /* ---- the formats, and how to get a view of one ---------------------------- */
 
@@ -1508,7 +1508,7 @@ void kof_inspect_event_log(const struct kofevt_log_hdr *h,
 	/*
 	 * NAMED FOR THE COMPONENT, NOT THE LIBRARY.
 	 *
-	 * "Windows watcher" is what collected this; libkofgrille is the library
+	 * "Windows watcher" is what collected this; libkoforbit/grille is the library
 	 * it happens to be built from, and a reader of a log has no reason to
 	 * know that name. The two are separable on purpose - the collector
 	 * ships and versions on its own - so the log says which collector, and

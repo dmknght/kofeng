@@ -16,7 +16,7 @@
 #include <string.h>
 
 #include "rtf_parse.h"
-#include "../runlist.h"
+#include "../../../kofcore/runlist.h"
 
 /* ---- character classes, ASCII only ------------------------------------------- */
 

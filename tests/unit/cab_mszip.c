@@ -27,7 +27,7 @@
 #include <zlib.h>
 
 #include "../../libkofeng/kofeng.h"
-#include "../../libkofeng/core/kofmod/cab.h"
+#include "../../libkofeng/kofcore/kofmod/cab.h"
 
 static int failures;
 

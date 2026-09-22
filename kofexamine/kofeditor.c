@@ -33,9 +33,9 @@
 #include <kofmod/proc.h>
 
 #include "kofeditor.h"
-#include "../libkofeng/kofmatchers/hexprog.h"
-#include "../libkofeng/kofmatchers/kofmatch.h"
-#include "../libkofeng/core/kofplatform.h"
+#include "../libkofeng/detector/matchers/hexprog.h"
+#include "../libkofeng/detector/matchers/kofmatch.h"
+#include "../libkofeng/kofcore/kofplatform.h"
 
 
 
@@ -77,7 +77,7 @@ static const char *meta_user(void)
 	 * provenance.
 	 *
 	 * geteuid, not getuid, so the name is the account the tool is acting
-	 * as. See libkoforbit/kofpath/kofpath.h for the same argument where
+	 * as. See libkoforbit/path/kofpath.h for the same argument where
 	 * it does decide a security boundary.
 	 */
 #ifdef _WIN32
@@ -5871,7 +5871,7 @@ have_path:
 
 		fprintf(f, "\n/* What the sample above asks the system for, in "
 			"order. Read out of its\n * code by the sweep in "
-			"kofdisasm/flow.c - no bytes of it are kept. */\n");
+			"analyzer/disasm/flow.c - no bytes of it are kept. */\n");
 		fprintf(f, "static const struct kof_ovlf_chain ref_chain = {\n");
 		fprintf(f, "\t.n = %uu,\n\t.s = {\n", e->dr.chain.n);
 		for (ci = 0; ci < e->dr.chain.n &&
@@ -5879,7 +5879,7 @@ have_path:
 			const struct kof_ovlf_step *st = &e->dr.chain.s[ci];
 
 			/* The capability as a NUMBER with its word beside it:
-			 * enum kof_flow_cap lives in kofdisasm/flow.h, which
+			 * enum kof_flow_cap lives in analyzer/disasm/flow.h, which
 			 * is engine-side, and a rule is compiled against the
 			 * kofmod headers alone. */
 			fprintf(f, "\t\t{ %2uu, 0x%02xu, %uu },   /* %s%s */\n",

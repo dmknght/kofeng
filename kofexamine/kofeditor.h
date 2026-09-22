@@ -37,7 +37,7 @@
 #include <kofmod/kofplague.h>
 #include <kofmod/kofoverlord.h>
 #include <kofeng.h>
-#include "../libkofeng/kofoverlord/ovlflow.h"
+#include "../libkofeng/detector/overlord/ovlflow.h"
 #include "kofinspect.h"
 
 
@@ -415,7 +415,7 @@ static inline int grp_is_at(int rule) { return rule == 3; }
 /*
  * THE OBJECT'S CALL CHAIN - which capabilities its code asks the system for,
  * in order, and which of them were handed something an earlier one produced:
- * kof_ovl_chain. See kofoverlord/ovlflow.h.
+ * kof_ovl_chain. See detector/overlord/ovlflow.h.
  *
  * IT READS CODE AND NOT BYTES, which is what puts it beside the other three
  * rather than inside them. The block measure is exact and dies on a recompile;

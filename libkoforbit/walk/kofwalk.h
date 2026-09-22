@@ -273,8 +273,8 @@ struct kof_walk_api {
  * code - kofa_err_name or kofw_err_name will name it, and a caller that wants
  * to print one already knows which collector it linked.
  *
- * DECLARED HERE AND DEFINED PER PLATFORM: libkofantarc provides it on Linux,
- * libkofgrille on Windows, and a host links exactly one of them. That is the
+ * DECLARED HERE AND DEFINED PER PLATFORM: libkoforbit/antarc provides it on Linux,
+ * libkoforbit/grille on Windows, and a host links exactly one of them. That is the
  * whole of the platform decision - everything above this line is the same
  * code on both.
  */

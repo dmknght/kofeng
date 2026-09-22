@@ -13,7 +13,7 @@
 #define KOFENG_ENTRYNAME_H
 
 #include <stdint.h>
-#include "../core/kofcore.h"
+#include "kofcore.h"
 
 /*
  * Does this name escape the directory it will be extracted into?

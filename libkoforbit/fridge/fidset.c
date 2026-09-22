@@ -26,7 +26,7 @@
 #include <time.h>
 
 #include "fidset.h"
-#include "../../libkofeng/core/kofplatform.h"
+#include "../../libkofeng/kofcore/kofplatform.h"
 
 #ifndef _WIN32
 #include <fcntl.h>

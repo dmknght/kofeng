@@ -21,8 +21,8 @@
 #ifndef KOFFORMAT_H
 #define KOFFORMAT_H
 
-#include "../core/kofcore.h"
-#include "../core/kofmod/kofsig.h"
+#include "../../kofcore/kofcore.h"
+#include "../../kofcore/kofmod/kofsig.h"
 
 /*
  * One parser, as everything outside the parser needs to see it.

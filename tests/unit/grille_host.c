@@ -1,5 +1,5 @@
 /*
- * grille_host - the half of libkofgrille that has no Windows in it.
+ * grille_host - the half of libkoforbit/grille that has no Windows in it.
  *
  * WHY THIS FILE EXISTS AT ALL.
  *
@@ -21,13 +21,13 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../../libkofgrille/kofgrille.h"
-#include "../../libkofgrille/wevt_ring.h"
-#include "../../libkofgrille/wfilter.h"
-#include "../../libkofgrille/wtext.h"
-#include "../../libkoforbit/kofevt/kofevt.h"
-#include "../../libkoforbit/kofevt/kofevtfmt.h"
-#include "../../libkoforbit/kofevt/kofevtlog.h"
+#include "../../libkoforbit/grille/kofgrille.h"
+#include "../../libkoforbit/grille/wevt_ring.h"
+#include "../../libkoforbit/grille/wfilter.h"
+#include "../../libkoforbit/grille/wtext.h"
+#include "../../libkoforbit/evt/kofevt.h"
+#include "../../libkoforbit/evt/kofevtfmt.h"
+#include "../../libkoforbit/evt/kofevtlog.h"
 
 static int failures;
 
@@ -2342,7 +2342,7 @@ static void t_extent(void)
 
 int main(void)
 {
-	printf("grille_host: the ETW-free half of libkofgrille\n");
+	printf("grille_host: the ETW-free half of libkoforbit/grille\n");
 	t_layout();
 	t_type_names();
 	t_utf16();

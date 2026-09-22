@@ -39,7 +39,7 @@
 #define KOFENG_KOFHEUR_H
 
 #include <stdint.h>
-#include "../core/kofcore.h"
+#include "../../kofcore/kofcore.h"
 
 struct kof_obj_ctx;
 

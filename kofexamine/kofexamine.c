@@ -97,13 +97,13 @@
 #include <errno.h>
 
 #include <kofeng.h>
-#include "../libkofeng/core/kofplatform.h"
+#include "../libkofeng/kofcore/kofplatform.h"
 #include <kofcore.h>
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
 #include <kofmod/kofsym.h>
-#include "../kofparsers/binaries/elf_sym.h"
-#include "../kofparsers/binaries/pe_sym.h"
+#include "../libkofeng/analyzer/parsers/binaries/elf_sym.h"
+#include "../libkofeng/analyzer/parsers/binaries/pe_sym.h"
 #include <kofmod/pe.h>
 #include <kofmod/gzip.h>
 #include <kofmod/docole.h>
@@ -121,20 +121,20 @@
 #include <kofmod/reg.h>
 #include <kofmod/rtf.h>
 
-#include "../libkofeng/kofparsers/binaries/elf_parse.h"
-#include "../libkofeng/kofparsers/binaries/pe_parse.h"
-#include "../libkofeng/kofparsers/containers/gzip_parse.h"
-#include "../libkofeng/kofparsers/containers/docole_parse.h"
-#include "../libkofeng/kofparsers/containers/zip_parse.h"
-#include "../libkofeng/kofparsers/containers/tar_parse.h"
-#include "../libkofeng/kofparsers/containers/sevenzip_parse.h"
-#include "../libkofeng/kofparsers/containers/rar_parse.h"
-#include "../libkofeng/kofparsers/containers/xz_parse.h"
-#include "../libkofeng/kofparsers/containers/rtf_parse.h"
-#include "../libkofeng/kofparsers/containers/pdf_parse.h"
+#include "../libkofeng/analyzer/parsers/binaries/elf_parse.h"
+#include "../libkofeng/analyzer/parsers/binaries/pe_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/gzip_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/docole_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/zip_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/tar_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/sevenzip_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/rar_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/xz_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/rtf_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/pdf_parse.h"
 
 #include "kofinspect.h"
-#include "../libkofeng/kofmatchers/hexprog.h"
+#include "../libkofeng/detector/matchers/hexprog.h"
 
 /*
  * What one format offers a tool: how to recognise it, how to parse it, how big
@@ -507,7 +507,7 @@ static void print_elf(const void *view, const struct kof_obj_ctx *ctx,
  *
  * It used to call kof_elf_syms itself, which made it an ELF function by
  * construction. A PE has imports and exports in the same layout now - see
- * kofparsers/binaries/pe_sym.c - so the builder is the caller's business and
+ * analyzer/parsers/binaries/pe_sym.c - so the builder is the caller's business and
  * this prints whatever it is handed. One printer, one layout, two formats.
  */
 static void print_syms(const uint8_t *blk, uint32_t w)

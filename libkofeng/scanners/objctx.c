@@ -27,26 +27,26 @@
 #define _GNU_SOURCE
 
 #include <kofmod/kofsym.h>
-#include "../core/kofplatform.h"   /* kof_write_all - the spill file below */
-#include "../kofparsers/binaries/elf_sym.h"
-#include "../kofparsers/binaries/pe_sym.h"
-#include "../kofdisasm/xref.h"
-#include "../kofoverlord/ovlflow.h"
+#include "../kofcore/kofplatform.h"   /* kof_write_all - the spill file below */
+#include "../analyzer/parsers/binaries/elf_sym.h"
+#include "../analyzer/parsers/binaries/pe_sym.h"
+#include "../analyzer/disasm/xref.h"
+#include "../detector/overlord/ovlflow.h"
 #include "scan.h"
 #include <kofmod/elf.h>
-#include "../kofunpack/emu_unpack.h"
-#include "../kofunpack/elf_rebuild.h"
+#include "../extractor/unpack/emu_unpack.h"
+#include "../extractor/unpack/elf_rebuild.h"
 
-#include "../kofdecomp/ovba.h"
-#include "../kofdecomp/lzma.h"
-#include "../kofdecomp/bcj.h"
-#include "../kofdecomp/rar3.h"
-#include "../kofdecomp/rar5.h"
-#include "../kofdecomp/bcj2.h"
+#include "../extractor/decomp/ovba.h"
+#include "../extractor/decomp/lzma.h"
+#include "../extractor/decomp/bcj.h"
+#include "../extractor/decomp/rar3.h"
+#include "../extractor/decomp/rar5.h"
+#include "../extractor/decomp/bcj2.h"
 /* The script folding pass and the lexical table it is driven from - see
  * kof_scan_script_fold below. */
-#include "../kofparsers/scripts/script_norm.h"
-#include "../kofparsers/scripts/script_parse.h"
+#include "../analyzer/parsers/scripts/script_norm.h"
+#include "../analyzer/parsers/scripts/script_parse.h"
 /*
  * The one format header the scan path includes, and it is not a shortcut.
  *
@@ -3234,7 +3234,7 @@ struct kof_flow_set {
 
 /* How the decoder should be told to read this object's code. Anything that is
  * not one of the two architectures bddisasm has is refused rather than guessed
- * at - see kofdisasm/flow.h. */
+ * at - see analyzer/disasm/flow.h. */
 static int flow_mode(const struct kof_obj_ctx *ctx, unsigned *bits,
 		     unsigned *abi, uint32_t *mask)
 {

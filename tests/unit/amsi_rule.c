@@ -42,7 +42,7 @@
 #include <string.h>
 
 #include "../../libkofeng/kofeng.h"
-#include "../../libkofeng/kofparsers/events/amsi_parse.h"
+#include "../../libkofeng/analyzer/parsers/events/amsi_parse.h"
 
 #include <kofmod/kofsig.h>
 #include <kofmod/amsi.h>

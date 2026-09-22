@@ -18,7 +18,7 @@
  */
 
 #include "elf_parse.h"
-#include "../rangelist.h"
+#include "../../../kofcore/rangelist.h"
 
 #include <string.h>
 

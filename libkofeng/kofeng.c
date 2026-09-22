@@ -3,16 +3,16 @@
  *
  * Delegation and nothing else: validate what came in, own the lifetimes, translate
  * between the public types and the internal ones. The work is in kofdb (materialise
- * the database) and kofscanners (walk an object).
+ * the database) and scanners (walk an object).
  *
  * Worth being this thin. The public header is the promise; if the promise is kept by
  * a file small enough to read in one go, there is nowhere for it to be quietly broken.
  */
 
 #include "kofeng.h"
-#include "kofdb/kofdb.h"
-#include "kofmatchers/kofmultimatch.h"
-#include "kofscanners/scan.h"
+#include "databases/kofdb.h"
+#include "detector/matchers/kofmultimatch.h"
+#include "scanners/scan.h"
 
 kof_engine *kof_engine_open(const char *db_path)
 {

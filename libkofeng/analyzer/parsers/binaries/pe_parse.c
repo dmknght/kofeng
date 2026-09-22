@@ -20,7 +20,7 @@
 
 #include "pe_parse.h"
 #include "clr_parse.h"
-#include "../rangelist.h"
+#include "../../../kofcore/rangelist.h"
 
 /* Offsets within the structures, so the reads below read as the spec does. */
 #define DOS_LFANEW      0x3c

@@ -1,7 +1,7 @@
 /*
  * ovlflow.h - comparing two capability sequences, which is overlord's job.
  *
- * WHERE THE SPLIT IS. kofdisasm/flow.c reads code and produces nodes; it holds
+ * WHERE THE SPLIT IS. analyzer/disasm/flow.c reads code and produces nodes; it holds
  * no opinion about whether two programs are alike. Deciding that is similarity,
  * and similarity lives here beside the string and block dimensions - one place
  * that already knows how to compare, and already refuses to answer with a
@@ -43,7 +43,7 @@
 #include <stdint.h>
 
 #include <kofmod/kofoverlord.h>
-#include "../kofdisasm/flow.h"
+#include "../../analyzer/disasm/flow.h"
 
 /*
  * HOW MUCH A CAPABILITY IS WORTH, and every one of these is MEASURED.

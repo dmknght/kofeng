@@ -81,10 +81,10 @@ int main(void)
 #include <sys/wait.h>
 #include <sys/vfs.h>
 
-#include "../../libkofeng/core/kofplatform.h"
-#include "../../libkofeng/kofdb/kofdb.h"
-#include "../../libkofeng/kofdb/kofpackw.h"
-#include "../../libkofeng/kofscanners/scan.h"
+#include "../../libkofeng/kofcore/kofplatform.h"
+#include "../../libkofeng/databases/kofdb.h"
+#include "../../libkofeng/databases/kofpackw.h"
+#include "../../libkofeng/scanners/scan.h"
 #include "../../libkofeng/kofeng.h"
 
 static int failures;

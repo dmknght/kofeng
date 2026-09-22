@@ -21,7 +21,7 @@
 
 #include <kofmod/script.h>
 
-#include "../../core/kofcore.h"
+#include "../../../kofcore/kofcore.h"
 
 /*
  * The offset of the tag that opens PHP code, or (uint64_t)-1.

@@ -1,7 +1,7 @@
 /*
  * wfid.c - what Windows says about a file, as an identity the cache can key on.
  *
- * The Windows half of kof_fid_of, whose Linux half is libkofantarc/afid.c. One
+ * The Windows half of kof_fid_of, whose Linux half is libkoforbit/antarc/afid.c. One
  * name, two files, one compiled per host - the same arrangement kof_walk_open
  * has and for the same reason: the caller is the same scanner on both, and it
  * should not be reading an #ifdef to find out where it is.

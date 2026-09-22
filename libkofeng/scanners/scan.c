@@ -35,17 +35,17 @@
 
 #include "scan.h"
 #include "objtree.h"
-#include "../kofmatchers/kofmultimatch.h"
-#include "../kofheur/kofheur.h"
+#include "../detector/matchers/kofmultimatch.h"
+#include "../detector/heur/kofheur.h"
 /* The rule ABI: the phase ids and what a rule may ask the engine for. The
  * engine-side model next door is a different file with a similar name - see the
  * note at the top of kofmod/heur.h. */
-#include "../core/kofmod/heur.h"
-#include "../core/kofmod/kofsym.h"
-#include "../kofparsers/kofformat.h"
-#include "../kofdisasm/xref.h"
-#include "../kofoverlord/koflib.h"
-#include "../core/kofmod/elf.h"
+#include "../kofcore/kofmod/heur.h"
+#include "../kofcore/kofmod/kofsym.h"
+#include "../analyzer/parsers/kofformat.h"
+#include "../analyzer/disasm/xref.h"
+#include "../detector/overlord/koflib.h"
+#include "../kofcore/kofmod/elf.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,7 +56,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
-#include "../core/kofplatform.h"
+#include "../kofcore/kofplatform.h"
 
 struct kof_scanner *kof_scan_of(const struct kof_obj_ctx *ctx)
 {

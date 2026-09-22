@@ -24,7 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../../libkofeng/kofparsers/containers/reg_parse.h"
+#include "../../libkofeng/analyzer/parsers/containers/reg_parse.h"
 
 static int failures;
 

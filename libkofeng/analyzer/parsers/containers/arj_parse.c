@@ -23,7 +23,7 @@
 #include <string.h>
 
 #include "arj_parse.h"
-#include "../rangelist.h"
+#include "../../../kofcore/rangelist.h"
 
 #define ARJ_MAGIC0 0x60u
 #define ARJ_MAGIC1 0xeau

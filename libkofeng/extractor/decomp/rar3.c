@@ -28,7 +28,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#include "../core/kofcore.h"   /* kof_crc32, to name a filter by its code */
+#include "../../kofcore/kofcore.h"   /* kof_crc32, to name a filter by its code */
 
 /* Table sizes, from the format. */
 #define NC   299u                 /* literals and lengths */

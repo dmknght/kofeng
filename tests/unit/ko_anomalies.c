@@ -35,8 +35,8 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
 
-#include "../../libkofeng/core/kofplatform.h"
-#include "../../libkofeng/kofparsers/binaries/elf_parse.h"
+#include "../../libkofeng/kofcore/kofplatform.h"
+#include "../../libkofeng/analyzer/parsers/binaries/elf_parse.h"
 
 /* The three that carry the word "Truncated" in kofheur.c, plus the two the
  * emulator gate reads - all of which describe a file that was supposed to be
@@ -174,7 +174,7 @@ int main(int argc, char **argv)
 	 *
 	 * An anomaly firing on a .ko is not by itself wrong: an ET_REL really
 	 * has no load segment and no executable entry, and the parse is right
-	 * to say so. What was wrong was SCORING it - kofheur's weights come
+	 * to say so. What was wrong was SCORING it - heur's weights come
 	 * from a population of executables, and heur_object now declines an ELF
 	 * that is neither ET_EXEC nor ET_DYN for that reason.
 	 *

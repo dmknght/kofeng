@@ -16,7 +16,7 @@
 #include <string.h>
 
 #include "xz_parse.h"
-#include "../runlist.h"
+#include "../../../kofcore/runlist.h"
 
 static const uint8_t XZ_MAGIC[KOF_XZ_MAGIC_LEN] = {
 	0xfd, '7', 'z', 'X', 'Z', 0x00

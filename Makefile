@@ -113,7 +113,7 @@ CFLAGS  ?= -O2 -g
 LDFLAGS += -pthread
 CFLAGS  += -std=c11 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
            -Wpointer-arith -Wstrict-prototypes -Wmissing-prototypes \
-           -fno-common -Ilibkofeng/core
+           -fno-common -Ilibkofeng/kofcore
 
 # A second tier of warnings, probed rather than assumed.
 #
@@ -846,74 +846,74 @@ $(STAMP): ;
 # ---------------------------------------------------------------- the library
 
 LIB_SRC := libkofeng/kofeng.c \
-           libkofeng/kofdb/kofdb.c \
-           libkofeng/kofdb/kofpackw.c \
-           libkofeng/kofheur/kofheur.c \
-           libkofeng/kofmatchers/kofmatch.c \
-           libkofeng/kofmatchers/kofplague.c \
-           libkofeng/kofmatchers/kofmultimatch.c \
-           libkofeng/kofmatchers/hexcomp.c \
-           libkofeng/kofparsers/binaries/elf_parse.c \
-           libkofeng/kofparsers/binaries/elf_sym.c \
-           libkofeng/kofparsers/binaries/sym_any.c \
-           libkofeng/kofparsers/kofformat.c \
-           libkofeng/kofparsers/scripts/scantext.c \
-           libkofeng/kofparsers/scripts/markup_parse.c \
-           libkofeng/kofparsers/scripts/php_parse.c \
-           libkofeng/kofparsers/scripts/svrpage_parse.c \
-           libkofeng/kofparsers/scripts/cfm_parse.c \
-           libkofeng/kofparsers/scripts/script_parse.c \
-           libkofeng/kofparsers/scripts/script_norm.c \
-           libkofeng/kofparsers/events/amsi_parse.c \
-           libkofeng/kofparsers/processes/proc_parse.c \
-           libkofeng/kofdisasm/xref.c \
-           libkofeng/kofdisasm/flow.c \
-           libkofeng/kofparsers/binaries/pe_sym.c \
-           libkofeng/kofparsers/binaries/pe_parse.c \
-           libkofeng/kofparsers/binaries/clr_parse.c \
-           libkofeng/kofparsers/containers/gzip_parse.c \
-           libkofeng/kofparsers/containers/docole_parse.c \
-           libkofeng/kofparsers/containers/zip_parse.c \
-           libkofeng/kofparsers/containers/tar_parse.c \
-           libkofeng/kofparsers/containers/sevenzip_parse.c \
-           libkofeng/kofparsers/containers/rar_parse.c \
-           libkofeng/kofparsers/containers/xz_parse.c \
-           libkofeng/kofparsers/containers/bz2_parse.c \
-           libkofeng/kofparsers/containers/chm_parse.c \
-           libkofeng/kofparsers/containers/cab_parse.c \
-           libkofeng/kofparsers/containers/lha_parse.c \
-           libkofeng/kofparsers/containers/arj_parse.c \
-           libkofeng/kofparsers/containers/lnk_parse.c \
-           libkofeng/kofparsers/containers/reg_parse.c \
-           libkofeng/kofparsers/containers/rtf_parse.c \
-           libkofeng/kofparsers/containers/pdf_parse.c \
-           libkofeng/kofunpack/pe_rebuild.c \
-           libkofeng/kofunpack/pe_unmap.c \
-           libkofeng/kofunpack/emu_unpack.c \
-           libkofeng/kofunpack/elf_rebuild.c \
-           libkofeng/kofdecomp/decomp.c \
-           libkofeng/kofdecomp/inflate.c \
-           libkofeng/kofdecomp/textcode.c \
-           libkofeng/kofdecomp/lzw.c \
-           libkofeng/kofdecomp/bzip2.c \
-           libkofeng/kofdecomp/lzx.c \
-           libkofeng/kofdecomp/lzhuf.c \
-           libkofeng/kofdecomp/ovba.c \
-           libkofeng/kofdecomp/bcj.c \
-           libkofeng/kofdecomp/bcj2.c \
-           libkofeng/kofdecomp/ppmd.c \
-           libkofeng/kofdecomp/rar3.c \
-           libkofeng/kofdecomp/rar5.c \
-           libkofeng/kofdecomp/lzma.c \
-           libkofeng/kofdecomp/nrv2.c \
-           libkofeng/kofscanners/scan.c \
-           libkofeng/kofscanners/objtree.c \
-           libkofeng/kofscanners/objctx.c \
-           libkofeng/kofscanners/objsrc.c \
-           libkofeng/kofoverlord/koflib.c \
-           libkofeng/kofoverlord/kofoverlord.c \
-           libkofeng/kofoverlord/ovlflow.c \
-           libkofeng/core/kofhash.c
+           libkofeng/databases/kofdb.c \
+           libkofeng/databases/kofpackw.c \
+           libkofeng/detector/heur/kofheur.c \
+           libkofeng/detector/matchers/kofmatch.c \
+           libkofeng/detector/matchers/kofplague.c \
+           libkofeng/detector/matchers/kofmultimatch.c \
+           libkofeng/detector/matchers/hexcomp.c \
+           libkofeng/analyzer/parsers/binaries/elf_parse.c \
+           libkofeng/analyzer/parsers/binaries/elf_sym.c \
+           libkofeng/analyzer/parsers/binaries/sym_any.c \
+           libkofeng/analyzer/parsers/kofformat.c \
+           libkofeng/analyzer/parsers/scripts/scantext.c \
+           libkofeng/analyzer/parsers/scripts/markup_parse.c \
+           libkofeng/analyzer/parsers/scripts/php_parse.c \
+           libkofeng/analyzer/parsers/scripts/svrpage_parse.c \
+           libkofeng/analyzer/parsers/scripts/cfm_parse.c \
+           libkofeng/analyzer/parsers/scripts/script_parse.c \
+           libkofeng/analyzer/parsers/scripts/script_norm.c \
+           libkofeng/analyzer/parsers/events/amsi_parse.c \
+           libkofeng/analyzer/parsers/processes/proc_parse.c \
+           libkofeng/analyzer/disasm/xref.c \
+           libkofeng/analyzer/disasm/flow.c \
+           libkofeng/analyzer/parsers/binaries/pe_sym.c \
+           libkofeng/analyzer/parsers/binaries/pe_parse.c \
+           libkofeng/analyzer/parsers/binaries/clr_parse.c \
+           libkofeng/analyzer/parsers/containers/gzip_parse.c \
+           libkofeng/analyzer/parsers/containers/docole_parse.c \
+           libkofeng/analyzer/parsers/containers/zip_parse.c \
+           libkofeng/analyzer/parsers/containers/tar_parse.c \
+           libkofeng/analyzer/parsers/containers/sevenzip_parse.c \
+           libkofeng/analyzer/parsers/containers/rar_parse.c \
+           libkofeng/analyzer/parsers/containers/xz_parse.c \
+           libkofeng/analyzer/parsers/containers/bz2_parse.c \
+           libkofeng/analyzer/parsers/containers/chm_parse.c \
+           libkofeng/analyzer/parsers/containers/cab_parse.c \
+           libkofeng/analyzer/parsers/containers/lha_parse.c \
+           libkofeng/analyzer/parsers/containers/arj_parse.c \
+           libkofeng/analyzer/parsers/containers/lnk_parse.c \
+           libkofeng/analyzer/parsers/containers/reg_parse.c \
+           libkofeng/analyzer/parsers/containers/rtf_parse.c \
+           libkofeng/analyzer/parsers/containers/pdf_parse.c \
+           libkofeng/extractor/unpack/pe_rebuild.c \
+           libkofeng/extractor/unpack/pe_unmap.c \
+           libkofeng/extractor/unpack/emu_unpack.c \
+           libkofeng/extractor/unpack/elf_rebuild.c \
+           libkofeng/extractor/decomp/decomp.c \
+           libkofeng/extractor/decomp/inflate.c \
+           libkofeng/extractor/decomp/textcode.c \
+           libkofeng/extractor/decomp/lzw.c \
+           libkofeng/extractor/decomp/bzip2.c \
+           libkofeng/extractor/decomp/lzx.c \
+           libkofeng/extractor/decomp/lzhuf.c \
+           libkofeng/extractor/decomp/ovba.c \
+           libkofeng/extractor/decomp/bcj.c \
+           libkofeng/extractor/decomp/bcj2.c \
+           libkofeng/extractor/decomp/ppmd.c \
+           libkofeng/extractor/decomp/rar3.c \
+           libkofeng/extractor/decomp/rar5.c \
+           libkofeng/extractor/decomp/lzma.c \
+           libkofeng/extractor/decomp/nrv2.c \
+           libkofeng/scanners/scan.c \
+           libkofeng/scanners/objtree.c \
+           libkofeng/scanners/objctx.c \
+           libkofeng/scanners/objsrc.c \
+           libkofeng/detector/overlord/koflib.c \
+           libkofeng/detector/overlord/kofoverlord.c \
+           libkofeng/detector/overlord/ovlflow.c \
+           libkofeng/kofcore/kofhash.c
 
 LIB_OBJ := $(patsubst libkofeng/%.c,$(INT)/lib_%.o,$(LIB_SRC))
 LIB     := $(SDK)/lib/libkofeng.a
@@ -925,7 +925,7 @@ $(INT)/lib_%.o: libkofeng/%.c $(STAMP) | $(INT)
 # kofdisasm/ reads instructions, so it needs the decoder's headers. Only this
 # one directory does; the rest of the engine is kept away from them on purpose,
 # because a parser that can decode is a parser that will start to.
-$(INT)/lib_kofdisasm/%.o: libkofeng/kofdisasm/%.c $(STAMP) | $(INT)
+$(INT)/lib_analyzer/disasm/%.o: libkofeng/analyzer/disasm/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(EMU_INC) -c $< -o $@
 
@@ -1080,7 +1080,7 @@ $(SDK)/include/kofeng.h: libkofeng/kofeng.h
 	@$(call MKDIR,$(dir $@))
 	@$(call COPY,$<,$@)
 
-$(SDK)/include/kofmod/%.h: libkofeng/core/kofmod/%.h
+$(SDK)/include/kofmod/%.h: libkofeng/kofcore/kofmod/%.h
 	@$(call MKDIR,$(dir $@))
 	@$(call COPY,$<,$@)
 
@@ -1103,16 +1103,16 @@ sdk: $(LIB) $(SDK_HDR)
 # reached for one first.
 
 # The event-log format, linked into anything that reads one.
-KOFEVT_SRC := libkoforbit/kofevt/kofevt.c libkoforbit/kofevt/kofevtfmt.c \
-              libkoforbit/kofevt/kofevtlog.c
+KOFEVT_SRC := libkoforbit/evt/kofevt.c libkoforbit/evt/kofevtfmt.c \
+              libkoforbit/evt/kofevtlog.c
 
 # The verdict cache. Orbit, not the engine, for the reason koffridge.h gives:
 # what an answer is keyed on and how long it stays good are a host's policy.
-KOFRIDGE_SRC := libkoforbit/koffridge/koffridge.c \
-                libkoforbit/koffridge/fidset.c
+KOFRIDGE_SRC := libkoforbit/fridge/koffridge.c \
+                libkoforbit/fridge/fidset.c
 
 # The process record builder, shared by both collectors - see kofproc.h.
-KOFPROC_SRC := libkoforbit/kofproc/kofproc.c
+KOFPROC_SRC := libkoforbit/proc/kofproc.c
 
 #
 # THE LINUX COLLECTOR. Both halves: the snapshot walk over /proc and the
@@ -1120,25 +1120,25 @@ KOFPROC_SRC := libkoforbit/kofproc/kofproc.c
 # the way that one builds only for Windows - a collector is the one part of
 # this tree that cannot be platform-neutral, which is why everything it hands
 # over is.
-ANTARC_SRC := libkofantarc/aproc.c \
-              libkofantarc/apagemap.c \
-              libkofantarc/afan.c \
-              libkofantarc/apev.c \
-              libkofantarc/amon.c \
-              libkofantarc/afid.c
+ANTARC_SRC := libkoforbit/antarc/aproc.c \
+              libkoforbit/antarc/apagemap.c \
+              libkoforbit/antarc/afan.c \
+              libkoforbit/antarc/apev.c \
+              libkoforbit/antarc/amon.c \
+              libkoforbit/antarc/afid.c
 
 ifeq ($(NATIVE_OS),windows)
 ANTARC_INC :=
 else
-ANTARC_INC := -Ilibkofantarc -Ilibkoforbit/kofevt -Ilibkoforbit/kofmon
+ANTARC_INC := -Ilibkoforbit/antarc -Ilibkoforbit/evt -Ilibkoforbit/mon
 endif
 
 # The report. Orbit for the same reason the cache is: it hashes artefacts and
 # asks the engine what they are, so it depends on libkofeng - and libkofeng
 # must be able to ship without knowing that anything called a report exists.
-KOFREPORT_SRC := libkoforbit/kofreport/kofreport.c \
-                 libkoforbit/kofreport/kofrepart.c \
-                 libkoforbit/kofreport/kofrepfmt.c
+KOFREPORT_SRC := libkoforbit/report/kofreport.c \
+                 libkoforbit/report/kofrepart.c \
+                 libkoforbit/report/kofrepfmt.c
 
 # --------------------------------------------------------------- the scanner
 #
@@ -1162,7 +1162,7 @@ SCANNER_SRC := kofscanner/kofscanner.c
 #
 # THE WALK IS THE ONLY THING THAT DIFFERS, and it is one file each.
 #
-# libkofantarc/awalk.c and libkofgrille/wwalk.c both define kof_walk_open; a
+# libkoforbit/antarc/awalk.c and libkoforbit/grille/wwalk.c both define kof_walk_open; a
 # host compiles exactly one of them and kofscanner.c is #ifdef-free for it. The
 # collector sources come along because the walk calls them.
 #
@@ -1173,12 +1173,12 @@ ifeq ($(NATIVE_OS),windows)
 #
 # wfid.c is the Windows half of kof_fid_of, whose Linux half rides in
 # $(ANTARC_SRC) - one name, one definition per host, the way the walk already
-# works. Without it the scanner referenced a symbol only libkofantarc defined
+# works. Without it the scanner referenced a symbol only libkoforbit/antarc defined
 # and this build did not get as far as the link: kofscanner.c included afid.h,
 # which is not on the Windows include path at all.
-SCANNER_EXTRA = libkofgrille/wwalk.c libkofgrille/wdiff.c libkofgrille/wproc.c \
-                libkofgrille/wcmdline.c libkofgrille/wtext.c \
-                libkofgrille/wfid.c \
+SCANNER_EXTRA = libkoforbit/grille/wwalk.c libkoforbit/grille/wdiff.c libkoforbit/grille/wproc.c \
+                libkoforbit/grille/wcmdline.c libkoforbit/grille/wtext.c \
+                libkoforbit/grille/wfid.c \
                 $(KOFPROC_SRC) $(KOFRIDGE_SRC) $(KOFEVT_SRC)
 #
 # -Ilibkofeng IS IN THIS LIST AND NOT LEFT TO $(SDK)/include.
@@ -1188,10 +1188,10 @@ SCANNER_EXTRA = libkofgrille/wwalk.c libkofgrille/wdiff.c libkofgrille/wproc.c \
 # the headers copied into the SDK include directory. kofeng.h and kofmod/pe.h
 # are, which is why those two resolved and this one did not, and why the failure
 # read as a missing file rather than as a missing flag.
-SCANNER_INC   = -Ilibkofgrille -Ilibkofeng -Ilibkoforbit/kofevt \
-                -Ilibkoforbit/kofmon \
-                -Ilibkoforbit/kofproc -Ilibkoforbit/koffridge \
-                -Ilibkoforbit/kofwalk
+SCANNER_INC   = -Ilibkoforbit/grille -Ilibkofeng -Ilibkoforbit/evt \
+                -Ilibkoforbit/mon \
+                -Ilibkoforbit/proc -Ilibkoforbit/fridge \
+                -Ilibkoforbit/walk
 #
 # NAMED HERE, NOT INHERITED. wproc.c enumerates modules through psapi and reads
 # a token through advapi32, and this is the first rule outside the collector's
@@ -1202,11 +1202,11 @@ SCANNER_INC   = -Ilibkofgrille -Ilibkofeng -Ilibkoforbit/kofevt \
 # old rule for the last time that happened.
 SCANNER_LIBS  = -ladvapi32 -lpsapi
 else
-SCANNER_EXTRA = $(ANTARC_SRC) libkofantarc/awalk.c $(KOFPROC_SRC) \
+SCANNER_EXTRA = $(ANTARC_SRC) libkoforbit/antarc/awalk.c $(KOFPROC_SRC) \
                 $(KOFRIDGE_SRC) $(KOFEVT_SRC)
-SCANNER_INC   = -Ilibkofantarc -Ilibkoforbit/kofevt -Ilibkoforbit/kofmon \
-                -Ilibkoforbit/kofproc -Ilibkoforbit/koffridge \
-                -Ilibkoforbit/kofwalk
+SCANNER_INC   = -Ilibkoforbit/antarc -Ilibkoforbit/evt -Ilibkoforbit/mon \
+                -Ilibkoforbit/proc -Ilibkoforbit/fridge \
+                -Ilibkoforbit/walk
 SCANNER_LIBS  =
 endif
 
@@ -1244,23 +1244,23 @@ $(OUT)/bin/kofexamine$(EXE): $(EXAMINE_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
 # THE VIEWER NOW LINKS THE HOST'S COLLECTOR, which it did not before.
 #
 # It can open a running process - see proc_collect - and that needs the same
-# kof_walk_open the scanner uses: libkofantarc on Linux, libkofgrille on
+# kof_walk_open the scanner uses: libkoforbit/antarc on Linux, libkofgrille on
 # Windows. The walk is the only thing it takes from there, and it is the same
 # file kofscanner compiles, so the two cannot disagree about what a region is.
 ifeq ($(NATIVE_OS),windows)
-VIEWER_PROC := libkofgrille/wwalk.c libkofgrille/wdiff.c libkofgrille/wproc.c \
-               libkofgrille/wcmdline.c libkofgrille/wtext.c $(KOFPROC_SRC)
+VIEWER_PROC := libkoforbit/grille/wwalk.c libkoforbit/grille/wdiff.c libkoforbit/grille/wproc.c \
+               libkoforbit/grille/wcmdline.c libkoforbit/grille/wtext.c $(KOFPROC_SRC)
 # -Ilibkofeng for the same reason SCANNER_INC needs it: wwalk.c reaches
 # kofunpack/pe_unmap.h, which the SDK include directory does not carry.
-VIEWER_PROC_INC := -Ilibkofgrille -Ilibkofeng
+VIEWER_PROC_INC := -Ilibkoforbit/grille -Ilibkofeng
 VIEWER_PROC_LIB := -ladvapi32 -lpsapi
 else
-VIEWER_PROC := $(ANTARC_SRC) libkofantarc/awalk.c $(KOFPROC_SRC)
-VIEWER_PROC_INC := -Ilibkofantarc
+VIEWER_PROC := $(ANTARC_SRC) libkoforbit/antarc/awalk.c $(KOFPROC_SRC)
+VIEWER_PROC_INC := -Ilibkoforbit/antarc
 VIEWER_PROC_LIB :=
 endif
-VIEWER_PROC_INC += -Ilibkoforbit/kofwalk -Ilibkoforbit/kofproc \
-                   -Ilibkoforbit/kofmon
+VIEWER_PROC_INC += -Ilibkoforbit/walk -Ilibkoforbit/proc \
+                   -Ilibkoforbit/mon
 
 VIEWER_SRC := kofexamine/kofviewer.c kofexamine/kofview.c kofexamine/kofinspect.c kofexamine/kofeditor.c $(VIEWER_PROC)
 
@@ -1275,7 +1275,7 @@ VIEWER_SRC := kofexamine/kofviewer.c kofexamine/kofview.c kofexamine/kofinspect.
 $(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
                             $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include -Ilibkoforbit/kofevt $(EMU_INC) \
+	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include -Ilibkoforbit/evt $(EMU_INC) \
 	      $(VIEWER_PROC_INC) \
 	      $(VIEWER_SRC) $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS) \
 	      $(VIEWER_PROC_LIB)
@@ -1324,19 +1324,19 @@ $(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
 # KOF_HAVE_CHAN is what the client tests. Not _WIN32: that asked which OS this
 # is, and what the code meant was whether a backend is linked.
 ifeq ($(NATIVE_OS),windows)
-WATCHMAN_CHAN = -DKOF_HAVE_CHAN -Ilibkoforbit/kofchan \
-                libkoforbit/kofchan/chan_win.c $(WINLIB) $(WIN_LDLIBS)
+WATCHMAN_CHAN = -DKOF_HAVE_CHAN -Ilibkoforbit/chan \
+                libkoforbit/chan/chan_win.c $(WINLIB) $(WIN_LDLIBS)
 else
-WATCHMAN_CHAN = -DKOF_HAVE_CHAN -Ilibkoforbit/kofchan \
-                libkoforbit/kofchan/chan_posix.c -lrt
+WATCHMAN_CHAN = -DKOF_HAVE_CHAN -Ilibkoforbit/chan \
+                libkoforbit/chan/chan_posix.c -lrt
 endif
 
 $(OUT)/bin/kofwatchman$(EXE): kofwatcher/kofwatchman.c $(KOFEVT_SRC) \
                               $(KOFPROC_SRC) \
                               $(KOFRIDGE_SRC) $(LIB) $(SDK_HDR) $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofeng -Ilibkoforbit/kofevt \
-	      -Ilibkoforbit/kofproc -Ilibkoforbit/koffridge $< \
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofeng -Ilibkoforbit/evt \
+	      -Ilibkoforbit/proc -Ilibkoforbit/fridge $< \
 	      $(KOFEVT_SRC) $(KOFPROC_SRC) $(KOFRIDGE_SRC) $(LIB) -o $@ \
 	      $(LDFLAGS) $(WATCHMAN_CHAN)
 
@@ -1351,8 +1351,8 @@ kofwatchman: $(OUT)/bin/kofwatchman$(EXE)
 # what is mapped, scan it. `kofscanner --scan-procs` is now that same program
 # on both platforms, and the decisions kofmemscan held - which regions are
 # worth reading, how runs group back into allocations, when a mapped image has
-# to be un-mapped first - moved into libkofgrille/wwalk.c, beside the Linux
-# answers in libkofantarc/awalk.c. Two tools holding one set of decisions is
+# to be un-mapped first - moved into libkoforbit/grille/wwalk.c, beside the Linux
+# answers in libkoforbit/antarc/awalk.c. Two tools holding one set of decisions is
 # how the two drift apart.
 #
 # kofmontrace is built like this one and for the same reason - it links the
@@ -1427,25 +1427,42 @@ WIN_CFLAGS  := -std=c11 -O2 -g -fno-common \
                -Wpointer-arith -Wstrict-prototypes -Wmissing-prototypes \
                $(KOF_WARN_PORTABLE) $(KOF_WARN_GCC) -MMD -MP \
                -DKOFENG_BUILD=$(KOF_BUILD_STAMP)u
-WIN_LDFLAGS :=
+#
+# WINPTHREAD, AND IT IS NOT A FLAG THE CROSS BUILD CAN DO WITHOUT ANY MORE.
+#
+# This was empty, and natively $(LDFLAGS) carries -lwinpthread so the sensor
+# linked on Windows and not from here. What made the difference reachable was
+# libkoforbit/fridge/koffridge.c joining WIN_SRC: its sharded table takes a
+# pthread mutex per shard, so every tool linking $(WINLIB) now needs the
+# library that provides one - and the cross link had no way to get it.
+#
+# The cost was hidden because kofwatchtower.exe is not in `make all` on a
+# POSIX host; it is a target somebody asks for by name. So the claim beside
+# its rule - that the sensor "still cross-builds, which is what keeps every
+# line of libkofgrille type-checked on a host with no ETW" - had quietly
+# stopped being true, and the type-check it describes was not running.
+#
+# STATIC, exactly as the native side links it: -Bstatic around the name so the
+# sensor does not arrive on a machine needing a winpthread DLL beside it.
+WIN_LDFLAGS := -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
 endif
 
-WIN_SRC := libkofgrille/wevt_ring.c \
-           libkofgrille/wfilter.c \
-           libkofgrille/wcmdline.c \
-           libkofgrille/wproc.c \
-           libkofgrille/wtext.c \
-           libkofgrille/wevt_decode.c \
-           libkofgrille/wevt_etw.c
+WIN_SRC := libkoforbit/grille/wevt_ring.c \
+           libkoforbit/grille/wfilter.c \
+           libkoforbit/grille/wcmdline.c \
+           libkoforbit/grille/wproc.c \
+           libkoforbit/grille/wtext.c \
+           libkoforbit/grille/wevt_decode.c \
+           libkoforbit/grille/wevt_etw.c
 
 #
 # The log format is a component of its own under libkofeng, not part of the
-# Windows collector - see libkoforbit/kofevt/kofevt.h for why it is there and why
+# Windows collector - see libkoforbit/evt/kofevt.h for why it is there and why
 # it includes nothing from the engine. It is compiled into libkofgrille.a so a
 # tool links one archive, and the SAME source compiles natively for the host
 # tests, which is the point of it having no Windows in it.
-WIN_SRC += libkoforbit/kofevt/kofevt.c libkoforbit/kofevt/kofevtfmt.c \
-           libkoforbit/kofevt/kofevtlog.c
+WIN_SRC += libkoforbit/evt/kofevt.c libkoforbit/evt/kofevtfmt.c \
+           libkoforbit/evt/kofevtlog.c
 
 #
 # THE VERDICT CACHE, which now also holds the duplicate-event table.
@@ -1458,28 +1475,28 @@ WIN_SRC += libkoforbit/kofevt/kofevt.c libkoforbit/kofevt/kofevtfmt.c \
 #
 # The dedup half needs none of that: it is stdint and stdlib. The dependency
 # arrives with the half beside it, purely because the two now share a file.
-WIN_SRC += libkoforbit/koffridge/koffridge.c
+WIN_SRC += libkoforbit/fridge/koffridge.c
 
-WIN_OBJ := $(patsubst libkofgrille/%.c,$(INT)/win_%.o,\
-                      $(filter libkofgrille/%,$(WIN_SRC))) \
-           $(patsubst libkoforbit/kofevt/%.c,$(INT)/win_evt_%.o,\
-                      $(filter libkoforbit/kofevt/%,$(WIN_SRC))) \
-           $(patsubst libkoforbit/koffridge/%.c,$(INT)/win_frg_%.o,\
-                      $(filter libkoforbit/koffridge/%,$(WIN_SRC)))
+WIN_OBJ := $(patsubst libkoforbit/grille/%.c,$(INT)/win_%.o,\
+                      $(filter libkoforbit/grille/%,$(WIN_SRC))) \
+           $(patsubst libkoforbit/evt/%.c,$(INT)/win_evt_%.o,\
+                      $(filter libkoforbit/evt/%,$(WIN_SRC))) \
+           $(patsubst libkoforbit/fridge/%.c,$(INT)/win_frg_%.o,\
+                      $(filter libkoforbit/fridge/%,$(WIN_SRC)))
 
-$(INT)/win_evt_%.o: libkoforbit/kofevt/%.c $(STAMP) | $(INT)
+$(INT)/win_evt_%.o: libkoforbit/evt/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
-	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkoforbit/kofevt -c $< -o $@
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkoforbit/evt -c $< -o $@
 
-$(INT)/win_frg_%.o: libkoforbit/koffridge/%.c $(STAMP) | $(INT)
+$(INT)/win_frg_%.o: libkoforbit/fridge/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
-	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkoforbit/koffridge -c $< -o $@
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkoforbit/fridge -c $< -o $@
 WINLIB  := $(SDK)/lib/libkofgrille.a
 
-$(INT)/win_%.o: libkofgrille/%.c $(STAMP) | $(INT)
+$(INT)/win_%.o: libkoforbit/grille/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
-	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkoforbit/kofevt \
-	      -Ilibkoforbit/koffridge -c $< -o $@
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkoforbit/grille -Ilibkoforbit/evt \
+	      -Ilibkoforbit/fridge -c $< -o $@
 
 $(WINLIB): $(WIN_OBJ)
 	@$(call MKDIR,$(dir $@))
@@ -1506,15 +1523,15 @@ WIN_LDLIBS := -ltdh -ladvapi32 -lpsapi
 # every line of libkofgrille type-checked on a host with no ETW.
 
 # The channel is no longer part of the collector: it moved to
-# libkoforbit/kofchan, which is one contract with two backends. The sensor
+# libkoforbit/chan, which is one contract with two backends. The sensor
 # names the Windows one.
 $(OUT)/bin/kofwatchtower$(WIN_EXE): kofwatcher/kofwatchtower.c \
-                                    libkoforbit/kofchan/chan_win.c \
+                                    libkoforbit/chan/chan_win.c \
                                     $(WINLIB) $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkoforbit/kofevt \
-	      -Ilibkoforbit/kofchan -Ikofwatcher \
-	      kofwatcher/kofwatchtower.c libkoforbit/kofchan/chan_win.c \
+	$(WIN_CC) $(WIN_CFLAGS) $(DEPTO) -Ilibkoforbit/grille -Ilibkoforbit/evt \
+	      -Ilibkoforbit/chan -Ikofwatcher \
+	      kofwatcher/kofwatchtower.c libkoforbit/chan/chan_win.c \
 	      $(WINLIB) -o $@ $(WIN_LDFLAGS) $(WIN_LDLIBS)
 
 kofgrille: $(WINLIB)
@@ -1568,8 +1585,8 @@ tools: kofwatchtower kofmontrace
 $(OUT)/bin/kofmontrace$(WIN_EXE): kofwatcher/kofmontrace.c $(KOFREPORT_SRC) \
                                   $(LIB) $(WINLIB) $(SDK_HDR) $(STAMP)
 	@$(call MKDIR,$(dir $@))
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofeng -Ilibkofeng/core -Ilibkofgrille \
-	      -Ilibkoforbit/kofevt -Ilibkoforbit/kofreport -Ikofwatcher \
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofeng -Ilibkofeng/kofcore -Ilibkoforbit/grille \
+	      -Ilibkoforbit/evt -Ilibkoforbit/report -Ikofwatcher \
 	      kofwatcher/kofmontrace.c $(KOFREPORT_SRC) $(WINLIB) $(LIB) \
 	      -o $@ $(LDFLAGS) $(WIN_LDLIBS)
 
@@ -1619,8 +1636,9 @@ endif
 #
 # decomp and unp compile to the same pack kind and the engine does not tell them
 # apart - the split is for the people who maintain them. The decompression
-# ALGORITHMS are not here at all: they are host services in libkofeng/kofdecomp,
-# reached through the module ABI, for the reason kofsig.h gives at the inflate
+# ALGORITHMS are not here at all: they are host services in
+# libkofeng/extractor/decomp, reached through the module ABI, for the reason
+# kofsig.h gives at the inflate
 # entry. Same division Kaspersky shipped, where _nrv.c and _lzma.c live in the
 # unpacker kernel and the per-packer modules call into them.
 #
@@ -1728,7 +1746,7 @@ fixtures: | $(TEST)
 # The wildcard is right - a test added to tests/unit is a test that runs, with
 # nothing to remember to edit - and it was picking up two that cannot compile
 # here. antarc_fan drives fanotify and antarc_walk forks children and reads
-# /proc; both link libkofantarc, which is the LINUX collector. On Windows they
+# /proc; both link libkoforbit/antarc, which is the LINUX collector. On Windows they
 # are not failing tests, they are tests for another platform, and `make unit`
 # stopping on them is a gate that cannot pass rather than a finding.
 #
@@ -1772,12 +1790,27 @@ fixtures: | $(TEST)
 # object and the false positive it guards against is a Linux one.
 #
 # antarc_pev JOINS THE TWO ABOVE IT FOR THE SAME REASON, which is the ordinary
-# one: it is a test of libkofantarc, the LINUX collector. It includes
+# one: it is a test of libkoforbit/antarc, the LINUX collector. It includes
 # sys/wait.h and sys/uio.h and links aproc.c - none of which exist here - so it
 # is not a test that could be made portable, any more than the fanotify one
 # beside it is.
-UNIT_SKIP_WINDOWS := antarc_fan antarc_walk antarc_pev msf_xor ko_anomalies
-UNIT_SKIP_POSIX   := hostile_mem reg_event
+#
+# chan_ring drives chan_posix.c - shm_open, fork and a SIGSEGV it expects to
+# see. The Windows backend is the same contract over CreateFileMapping and
+# is a test of its own to write, not a define away.
+UNIT_SKIP_WINDOWS := antarc_fan antarc_walk antarc_pev msf_xor ko_anomalies \
+                     chan_ring
+#
+# thread_region IS THE FIRST ENTRY IN THE REVERSE LIST, and the paragraph above
+# that said the reverse list was empty was wrong rather than out of date. It
+# links wwalk.c, wproc.c and wcmdline.c - libkofgrille, the WINDOWS collector -
+# and its rule ends in -ladvapi32 -lpsapi. There is no Linux host it can link
+# on, so on this side it is a test for another platform exactly as antarc_fan
+# is on the other, and not a failing test.
+#
+# It went unnoticed because `make unit` aborted before reaching it: the fixture
+# race at the bottom of this file stopped the suite in the b's, and this is a t.
+UNIT_SKIP_POSIX   := hostile_mem reg_event thread_region
 
 ifeq ($(NATIVE_OS),windows)
 UNIT_SKIP := $(UNIT_SKIP_WINDOWS)
@@ -1860,16 +1893,16 @@ kofmontrace: $(OUT)/bin/kofmontrace$(EXE)
 # cannot land on one platform and miss the other.
 ifneq ($(NATIVE_OS),windows)
 
-POSIX_TOOL_INC = -Ilibkofantarc -Ilibkoforbit/kofevt -Ilibkoforbit/kofmon \
-                 -Ilibkoforbit/kofchan
+POSIX_TOOL_INC = -Ilibkoforbit/antarc -Ilibkoforbit/evt -Ilibkoforbit/mon \
+                 -Ilibkoforbit/chan
 
 $(OUT)/bin/kofwatchtower$(EXE): kofwatcher/kofwatchtower.c $(ANTARC_SRC) \
-                                libkoforbit/kofchan/chan_posix.c \
+                                libkoforbit/chan/chan_posix.c \
                                 $(KOFEVT_SRC) $(STAMP)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) $(POSIX_TOOL_INC) \
 	      kofwatcher/kofwatchtower.c $(ANTARC_SRC) \
-	      libkoforbit/kofchan/chan_posix.c $(KOFEVT_SRC) \
+	      libkoforbit/chan/chan_posix.c $(KOFEVT_SRC) \
 	      -o $@ $(LDFLAGS) -lrt
 
 # Links the ENGINE for the same reason the Windows recipe below does: the
@@ -1878,7 +1911,7 @@ $(OUT)/bin/kofmontrace$(EXE): kofwatcher/kofmontrace.c $(ANTARC_SRC) \
                               $(KOFREPORT_SRC) $(KOFEVT_SRC) $(LIB) $(STAMP)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) $(POSIX_TOOL_INC) -Ilibkofeng \
-	      -Ilibkofeng/core -Ilibkoforbit/kofreport -Ikofwatcher \
+	      -Ilibkofeng/kofcore -Ilibkoforbit/report -Ikofwatcher \
 	      kofwatcher/kofmontrace.c $(ANTARC_SRC) $(KOFREPORT_SRC) \
 	      $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS)
 
@@ -1912,14 +1945,14 @@ $(TEST)/unit_%$(EXE): tests/unit/%.c $(LIB) $(STAMP) | $(TEST)
 # because a test that compiles to an empty main on the other platform is a test
 # that LOOKS like it ran. A skipped one is visibly absent.
 $(TEST)/unit_hostile_mem$(EXE): tests/unit/hostile_mem.c \
-                                libkofgrille/wdiff.c libkofgrille/wproc.c \
-                                libkofgrille/wcmdline.c libkofgrille/wtext.c \
+                                libkoforbit/grille/wdiff.c libkoforbit/grille/wproc.c \
+                                libkoforbit/grille/wcmdline.c libkoforbit/grille/wtext.c \
                                 $(KOFEVT_SRC) $(LIB) $(STAMP) | $(TEST)
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng \
-	      -Ilibkoforbit/kofevt \
-	      tests/unit/hostile_mem.c libkofgrille/wdiff.c \
-	      libkofgrille/wproc.c libkofgrille/wcmdline.c \
-	      libkofgrille/wtext.c $(KOFEVT_SRC) $(LIB) -o $@ \
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkoforbit/grille -Ilibkofeng \
+	      -Ilibkoforbit/evt \
+	      tests/unit/hostile_mem.c libkoforbit/grille/wdiff.c \
+	      libkoforbit/grille/wproc.c libkoforbit/grille/wcmdline.c \
+	      libkoforbit/grille/wtext.c $(KOFEVT_SRC) $(LIB) -o $@ \
 	      $(LDFLAGS) -ladvapi32 -lpsapi
 
 #
@@ -1931,18 +1964,18 @@ $(TEST)/unit_hostile_mem$(EXE): tests/unit/hostile_mem.c \
 # the same sources the scanner links, minus the scanner.
 #
 $(TEST)/unit_thread_region$(EXE): tests/unit/thread_region.c \
-                                  libkofgrille/wwalk.c libkofgrille/wdiff.c \
-                                  libkofgrille/wproc.c \
-                                  libkofgrille/wcmdline.c \
-                                  libkofgrille/wtext.c \
+                                  libkoforbit/grille/wwalk.c libkoforbit/grille/wdiff.c \
+                                  libkoforbit/grille/wproc.c \
+                                  libkoforbit/grille/wcmdline.c \
+                                  libkoforbit/grille/wtext.c \
                                   $(KOFPROC_SRC) $(KOFEVT_SRC) $(LIB) \
                                   $(STAMP) | $(TEST)
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng \
-	      -Ilibkoforbit/kofevt -Ilibkoforbit/kofproc \
-	      -Ilibkoforbit/kofwalk \
-	      tests/unit/thread_region.c libkofgrille/wwalk.c \
-	      libkofgrille/wdiff.c libkofgrille/wproc.c \
-	      libkofgrille/wcmdline.c libkofgrille/wtext.c \
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkoforbit/grille -Ilibkofeng \
+	      -Ilibkoforbit/evt -Ilibkoforbit/proc \
+	      -Ilibkoforbit/walk \
+	      tests/unit/thread_region.c libkoforbit/grille/wwalk.c \
+	      libkoforbit/grille/wdiff.c libkoforbit/grille/wproc.c \
+	      libkoforbit/grille/wcmdline.c libkoforbit/grille/wtext.c \
 	      $(KOFPROC_SRC) $(KOFEVT_SRC) $(LIB) -o $@ \
 	      $(LDFLAGS) -ladvapi32 -lpsapi
 
@@ -1956,17 +1989,17 @@ $(TEST)/unit_thread_region$(EXE): tests/unit/thread_region.c \
 # record worth anything - a test that carried its own idea of the shape would
 # agree with itself forever and say nothing about what the provider sends.
 $(TEST)/unit_reg_event$(EXE): tests/unit/reg_event.c \
-                              libkofgrille/wevt_decode.c libkofgrille/wtext.c \
+                              libkoforbit/grille/wevt_decode.c libkoforbit/grille/wtext.c \
                               $(KOFEVT_SRC) $(LIB) $(STAMP) | $(TEST)
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkofeng \
-	      -Ilibkoforbit/kofevt \
-	      tests/unit/reg_event.c libkofgrille/wevt_decode.c \
-	      libkofgrille/wtext.c $(KOFEVT_SRC) $(LIB) -o $@ \
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkoforbit/grille -Ilibkofeng \
+	      -Ilibkoforbit/evt \
+	      tests/unit/reg_event.c libkoforbit/grille/wevt_decode.c \
+	      libkoforbit/grille/wtext.c $(KOFEVT_SRC) $(LIB) -o $@ \
 	      $(LDFLAGS) -ltdh -ladvapi32
 
 $(TEST)/unit_proc_rule$(EXE): tests/unit/proc_rule.c $(KOFPROC_SRC) $(LIB) \
                               $(SDK_HDR) $(STAMP) | $(TEST)
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkoforbit/kofproc -I$(SDK)/include \
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkoforbit/proc -I$(SDK)/include \
 	      tests/unit/proc_rule.c $(KOFPROC_SRC) $(LIB) -o $@ $(LDFLAGS)
 
 # The sanitized twin of the rule above. It exists because the generic
@@ -1976,7 +2009,7 @@ $(TEST)/unit_proc_rule$(EXE): tests/unit/proc_rule.c $(KOFPROC_SRC) $(LIB) \
 # as long as they have existed.
 $(TEST)/asan_proc_rule$(EXE): tests/unit/proc_rule.c $(KOFPROC_SRC) \
                               $(ASAN_LIB) $(SDK_HDR) $(STAMP) | $(TEST)
-	@$(CC) $(CFLAGS) $(ASAN_FLAGS) -Ilibkoforbit/kofproc \
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) -Ilibkoforbit/proc \
 	       -I$(SDK)/include tests/unit/proc_rule.c $(KOFPROC_SRC) \
 	       $(ASAN_LIB) -o $@ $(LDFLAGS)
 
@@ -1996,30 +2029,59 @@ $(TEST)/asan_out_clip$(EXE): tests/unit/out_clip.c kofexamine/kofview.c \
 	       kofexamine/kofview.c $(ASAN_LIB) -o $@ $(LDFLAGS)
 
 # The clean-file set, which is its own source beside the fridge - see fidset.h.
-$(TEST)/unit_fidset$(EXE): tests/unit/fidset.c libkoforbit/koffridge/fidset.c \
+$(TEST)/unit_fidset$(EXE): tests/unit/fidset.c libkoforbit/fridge/fidset.c \
                            $(STAMP) | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) tests/unit/fidset.c \
-	      libkoforbit/koffridge/fidset.c -o $@ $(LDFLAGS)
+	      libkoforbit/fridge/fidset.c -o $@ $(LDFLAGS)
 
-$(TEST)/asan_fidset$(EXE): tests/unit/fidset.c libkoforbit/koffridge/fidset.c \
+$(TEST)/asan_fidset$(EXE): tests/unit/fidset.c libkoforbit/fridge/fidset.c \
                            $(STAMP) | $(TEST)
 	@$(CC) $(CFLAGS) $(ASAN_FLAGS) tests/unit/fidset.c \
-	       libkoforbit/koffridge/fidset.c -o $@ $(LDFLAGS)
+	       libkoforbit/fridge/fidset.c -o $@ $(LDFLAGS)
 
-$(TEST)/unit_fridge$(EXE): tests/unit/fridge.c $(KOFRIDGE_SRC) $(LIB) $(STAMP) \
-                           | $(TEST)
-	$(CC) $(CFLAGS) $(DEPTO) tests/unit/fridge.c $(KOFRIDGE_SRC) $(LIB) \
-	      -o $@ $(LDFLAGS)
+# $(KOFEVT_SRC) IS NOT OPTIONAL HERE. koffridge_seen_evt takes a struct kof_evt
+# and asks kof_evt_object for the name to key on, so the cache does not link
+# without the event library - and this rule did not name it. The suite never
+# said so because it aborted earlier, on the fixture race the rule at the bottom
+# of this file now closes; with that gone, this was the next thing standing.
+$(TEST)/unit_fridge$(EXE): tests/unit/fridge.c $(KOFRIDGE_SRC) $(KOFEVT_SRC) \
+                           $(LIB) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) tests/unit/fridge.c $(KOFRIDGE_SRC) \
+	      $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS)
 
 # The sanitized twin of the rule above. It exists because the generic
 # $(TEST)/asan_% pattern links a test against the library and nothing else, so
 # every test that needs extra sources or an include path had no way to build
 # under ASAN - `make unit-asan` stopped at the first of them and had done for
 # as long as they have existed.
-$(TEST)/asan_fridge$(EXE): tests/unit/fridge.c $(KOFRIDGE_SRC) $(ASAN_LIB) \
-                           $(STAMP) | $(TEST)
+$(TEST)/asan_fridge$(EXE): tests/unit/fridge.c $(KOFRIDGE_SRC) $(KOFEVT_SRC) \
+                           $(ASAN_LIB) $(STAMP) | $(TEST)
 	@$(CC) $(CFLAGS) $(ASAN_FLAGS) tests/unit/fridge.c $(KOFRIDGE_SRC) \
-	       $(ASAN_LIB) -o $@ $(LDFLAGS)
+	       $(KOFEVT_SRC) $(ASAN_LIB) -o $@ $(LDFLAGS)
+
+#
+# THE CHANNEL, WITH BOTH ENDS IN ONE PROCESS.
+#
+# Its own rule because the generic one links $(LIB) and nothing else, and this
+# needs the POSIX backend, the event record it carries, and -lrt for shm_open.
+# It does NOT link $(LIB): kofchan.h includes kofevt.h and stops there - the
+# channel moves records and never asks what one means - so linking the engine
+# would hide a dependency creeping the other way.
+#
+# -lrt ON ITS OWN LINE'S WORTH OF EXPLANATION: shm_open and sem_open are in
+# librt on glibc older than 2.34 and in libc after it. Naming it is harmless on
+# the new ones and required on the old, which is the direction that fails.
+CHAN_TEST_SRC := libkoforbit/chan/chan_posix.c $(KOFEVT_SRC)
+
+$(TEST)/unit_chan_ring$(EXE): tests/unit/chan_ring.c $(CHAN_TEST_SRC) \
+                              $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkoforbit/chan -Ilibkoforbit/evt \
+	      tests/unit/chan_ring.c $(CHAN_TEST_SRC) -o $@ $(LDFLAGS) -lrt
+
+$(TEST)/asan_chan_ring$(EXE): tests/unit/chan_ring.c $(CHAN_TEST_SRC) \
+                              $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) -Ilibkoforbit/chan -Ilibkoforbit/evt \
+	       tests/unit/chan_ring.c $(CHAN_TEST_SRC) -o $@ $(LDFLAGS) -lrt
 
 #
 # The report, over synthetic records and NOT over a trace.
@@ -2041,21 +2103,21 @@ $(TEST)/unit_report_model$(EXE): tests/unit/report_model.c $(KOFREPORT_SRC) \
 # rmdir; none of those is declared under a bare -std=c11, and without them the
 # translation unit compiles them as implicit int - four errors naming three
 # files and saying nothing about the cause. The flag used to live here, with a
-# note saying anything that later built libkoforbit/kofreport on Linux would
+# note saying anything that later built libkoforbit/report on Linux would
 # need it too. Something did: the native kofmontrace. So the declaration moved
 # INTO the two sources that need it, where it cannot be left off a new recipe,
 # and is guarded there because those recipes also build sources that define it
 # themselves.
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkoforbit/kofreport \
-	      -Ilibkoforbit/kofevt -Ilibkofeng -Ilibkofeng/core \
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkoforbit/report \
+	      -Ilibkoforbit/evt -Ilibkofeng -Ilibkofeng/kofcore \
 	      tests/unit/report_model.c \
 	      $(KOFREPORT_SRC) $(KOFEVT_SRC) $(LIB) -o $@ $(LDFLAGS)
 
 # The sanitized twin - see the note on asan_fridge.
 $(TEST)/asan_report_model$(EXE): tests/unit/report_model.c $(KOFREPORT_SRC) \
                                  $(KOFEVT_SRC) $(ASAN_LIB) $(STAMP) | $(TEST)
-	@$(CC) $(CFLAGS) $(ASAN_FLAGS) -Ilibkoforbit/kofreport \
-	       -Ilibkoforbit/kofevt -Ilibkofeng -Ilibkofeng/core \
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) -Ilibkoforbit/report \
+	       -Ilibkoforbit/evt -Ilibkofeng -Ilibkofeng/kofcore \
 	       tests/unit/report_model.c \
 	       $(KOFREPORT_SRC) $(KOFEVT_SRC) $(ASAN_LIB) -o $@ $(LDFLAGS)
 
@@ -2076,27 +2138,27 @@ EDITOR_SRC := kofexamine/kofeditor.c kofexamine/kofinspect.c $(KOFEVT_SRC)
 # already caught one - kofw_evt_image() and kofw_evt_object() were in
 # wevt_decode.c, so wfilter.c could not link without the Windows half.
 # The channel is not here either, and no longer could be: it left the collector
-# for libkoforbit/kofchan, where the neutral contract has a Windows backend and
+# for libkoforbit/chan, where the neutral contract has a Windows backend and
 # a POSIX one. chan_posix.c is what this host can actually RUN, which the
 # Windows transport never was. This list is
 # exactly the files whose headers promise they call no OS API, and the promise
 # is worth what compiles it - a file added here that includes windows.h stops
 # the Linux build and names itself.
-GRILLE_HOST_SRC := libkofgrille/wevt_ring.c libkofgrille/wfilter.c \
-                   libkofgrille/wtext.c \
-                   libkoforbit/kofevt/kofevt.c \
-                   libkoforbit/kofevt/kofevtfmt.c \
-                   libkoforbit/kofevt/kofevtlog.c
+GRILLE_HOST_SRC := libkoforbit/grille/wevt_ring.c libkoforbit/grille/wfilter.c \
+                   libkoforbit/grille/wtext.c \
+                   libkoforbit/evt/kofevt.c \
+                   libkoforbit/evt/kofevtfmt.c \
+                   libkoforbit/evt/kofevtlog.c
 
 $(TEST)/unit_grille_host$(EXE): tests/unit/grille_host.c $(GRILLE_HOST_SRC) \
                                 $(STAMP) | $(TEST)
-	$(CC) $(CFLAGS) $(DEPTO) -Ilibkofgrille -Ilibkoforbit/kofevt $< \
+	$(CC) $(CFLAGS) $(DEPTO) -Ilibkoforbit/grille -Ilibkoforbit/evt $< \
 	      $(GRILLE_HOST_SRC) -o $@ $(LDFLAGS)
 
 $(TEST)/asan_grille_host$(EXE): tests/unit/grille_host.c $(GRILLE_HOST_SRC) \
                                 $(STAMP) | $(TEST)
-	$(CC) $(CFLAGS) $(ASAN_FLAGS) $(DEPTO) -Ilibkofgrille \
-	      -Ilibkoforbit/kofevt $< $(GRILLE_HOST_SRC) -o $@ \
+	$(CC) $(CFLAGS) $(ASAN_FLAGS) $(DEPTO) -Ilibkoforbit/grille \
+	      -Ilibkoforbit/evt $< $(GRILLE_HOST_SRC) -o $@ \
 	      $(LDFLAGS) $(ASAN_FLAGS)
 
 # The string codings, which are an API rather than a dialog - see kofinspect.h.
@@ -2205,7 +2267,18 @@ UNIT_RUN := $(addprefix run-,$(UNIT_BIN))
 # NOT SUPPRESSED AND NOT SKIPPED SILENTLY. A test that did not run is not a
 # test that passed, and the one thing worse than a suite that stops is a suite
 # that says ok about work it did not do.
-$(UNIT_RUN): run-%: %
+# ORDER-ONLY ON THE FIXTURES, AND IT HAS TO BE HERE RATHER THAN ON `unit`.
+#
+# `unit: fixtures test-sigs $(UNIT_RUN)` names all three as prerequisites, and
+# prerequisites of one target have NO order among themselves - so under -j a
+# run-% starts while mkfixtures is still writing build/test/fixtures. The test
+# then opens a file that is not there yet and reports the honest thing it sees:
+# "the .bz2 was not scanned at all". It passes when run again, alone, which is
+# the signature that made this look like flakiness rather than a missing edge.
+#
+# Order-only (|) and not ordinary: the fixtures are regenerated on every run, so
+# an ordinary prerequisite would make every test look out of date every time.
+$(UNIT_RUN): run-%: % | fixtures test-sigs
 	$(info == $(notdir $*))
 	@$(call EXEC,$*)
 
@@ -2240,8 +2313,8 @@ libkofeng/%.c: ;
 libkofeng/%.h: ;
 libkoforbit/%.c: ;
 libkoforbit/%.h: ;
-libkofgrille/%.c: ;
-libkofgrille/%.h: ;
+libkoforbit/grille/%.c: ;
+libkoforbit/grille/%.h: ;
 kofexamine/%.c: ;
 kofexamine/%.h: ;
 kofwatcher/%.c: ;
@@ -2257,7 +2330,7 @@ kofwatcher/%.h: ;
 # build/temp/lib_kofdb/kofdb.d, first build kofdb.d.o, which needs
 # kofdb.d.c. The empty source rules just above then tell make that file is
 # fine, so nothing stops it, and the compiler is handed a name no source ever
-# had - "no such file or directory: libkofeng/kofdb/kofdb.d.c", once per
+# had - "no such file or directory: libkofeng/databases/kofdb.d.c", once per
 # library, naming a file nobody wrote.
 #
 # Reached whenever such a .d exists at all, because the intermediate .o it
@@ -2369,7 +2442,7 @@ clean:
 # THE LINUX COLLECTOR'S OWN TESTS.
 #
 # They fork, write files in a scratch directory and read the events back, so
-# they need the collector's sources rather than the library - libkofantarc is
+# they need the collector's sources rather than the library - libkoforbit/antarc is
 # not in $(LIB), for the same reason libkofgrille is not: a collector belongs
 # to one platform and the engine belongs to neither.
 #
@@ -2411,7 +2484,7 @@ $(TEST)/asan_antarc_fan$(EXE): tests/unit/antarc_fan.c $(ANTARC_SRC) \
 
 # The /proc walk's own unit test. It forks children into known shapes - a
 # memfd exec, a socket on stdin, a deleted binary - and checks the walk reports
-# them, so it needs libkofantarc and nothing else.
+# them, so it needs libkoforbit/antarc and nothing else.
 $(TEST)/unit_antarc_walk$(EXE): tests/unit/antarc_walk.c $(ANTARC_SRC) \
                                 $(KOFEVT_SRC) $(STAMP) | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) $(ANTARC_INC) tests/unit/antarc_walk.c \

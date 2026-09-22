@@ -38,8 +38,8 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "../../libkofeng/kofparsers/containers/zip_parse.h"
-#include "../../libkofeng/kofparsers/containers/tar_parse.h"
+#include "../../libkofeng/analyzer/parsers/containers/zip_parse.h"
+#include "../../libkofeng/analyzer/parsers/containers/tar_parse.h"
 
 static int fails;
 

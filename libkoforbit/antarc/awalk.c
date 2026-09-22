@@ -1,5 +1,5 @@
 /*
- * awalk.c - libkofantarc's answer to libkoforbit/kofwalk/kofwalk.h.
+ * awalk.c - libkoforbit/antarc's answer to libkoforbit/walk/kofwalk.h.
  *
  * THE MEMORY SCAN'S LOGIC LIVES HERE, not in the scanner. A host asks "what is
  * running and what should I look at"; deciding that a file-backed mapping is
@@ -14,7 +14,7 @@
  *
  * The rule at the top of kofantarc.h is that this library collects and does
  * not judge: no kofeng.h, no scanning, no verdict. A RECORD LAYOUT is not a
- * judgement - filling one is the same thing libkofgrille's wtext.c does when
+ * judgement - filling one is the same thing libkoforbit/grille's wtext.c does when
  * it converts its own record into kof_evt, and for the same reason: the layout
  * is the meeting point, and a collector that could not fill it would need
  * somebody else to copy its fields one at a time.

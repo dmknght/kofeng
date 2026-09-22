@@ -27,7 +27,7 @@
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 #include <kofmod/kofsig.h>
-#include "../../libkofemu/kofemu.h"
+#include "../../../libkofemu/kofemu.h"
 
 /*
  * Why this object is worth emulating - and the answer is never "because it

@@ -23,8 +23,8 @@
 #define _GNU_SOURCE
 
 #include "kofmatch.h"
-#include "../kofdb/kofpack.h"   /* KOF_STR_* */
-#include "../core/kofplatform.h"
+#include "../../databases/kofpack.h"   /* KOF_STR_* */
+#include "../../kofcore/kofplatform.h"
 
 #include <stdlib.h>
 #include <string.h>

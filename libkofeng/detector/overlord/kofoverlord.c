@@ -8,8 +8,8 @@
 
 #include <kofmod/elf.h>
 #include <kofmod/kofplague.h>
-#include "../kofmatchers/kofplague.h"
-#include "../kofparsers/rangelist.h"
+#include "../matchers/kofplague.h"
+#include "../../kofcore/rangelist.h"
 
 #define PT_LOAD 1u
 

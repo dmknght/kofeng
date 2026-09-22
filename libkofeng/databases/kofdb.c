@@ -52,9 +52,9 @@
 #define _GNU_SOURCE
 
 #include "kofdb.h"
-#include "../kofmatchers/kofplague.h"
-#include "../kofmatchers/kofmultimatch.h"
-#include "../kofmatchers/hexprog.h"
+#include "../detector/matchers/kofplague.h"
+#include "../detector/matchers/kofmultimatch.h"
+#include "../detector/matchers/hexprog.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,7 +64,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
-#include "../core/kofplatform.h"
+#include "../kofcore/kofplatform.h"
 
 /* ---- validation ------------------------------------------------------------- */
 

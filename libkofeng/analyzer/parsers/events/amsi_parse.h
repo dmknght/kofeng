@@ -21,9 +21,9 @@
 #ifndef KOF_AMSI_PARSE_H
 #define KOF_AMSI_PARSE_H
 
-#include "../../core/kofcore.h"
-#include "../../core/kofmod/kofsig.h"
-#include "../../core/kofmod/amsi.h"
+#include "../../../kofcore/kofcore.h"
+#include "../../../kofcore/kofmod/kofsig.h"
+#include "../../../kofcore/kofmod/amsi.h"
 
 /*
  * What the parse worked out, which is only where the two regions are.

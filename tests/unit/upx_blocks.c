@@ -39,9 +39,9 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
-#include "../../libkofeng/core/kofplatform.h"
-#include "../../libkofeng/kofdecomp/nrv2.h"
-#include "../../libkofeng/kofdecomp/lzma.h"
+#include "../../libkofeng/kofcore/kofplatform.h"
+#include "../../libkofeng/extractor/decomp/nrv2.h"
+#include "../../libkofeng/extractor/decomp/lzma.h"
 
 static uint64_t blocks, matched;
 

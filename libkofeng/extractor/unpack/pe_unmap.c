@@ -3,7 +3,7 @@
  * pe_rebuild.c.
  *
  * The fields are read here rather than through the PE collector, to keep
- * kofunpack free of a dependency on kofparsers - the same property every other
+ * unpack free of a dependency on analyzer/parsers - the same property every other
  * file in this directory has. What is needed is six numbers and two tables, and
  * every one of them is read through the bounds-checking accessors, so a header
  * that lies produces a short file rather than a read outside the buffer.
@@ -37,7 +37,7 @@
  * one across two entries and appear on nothing this will meet; ABSOLUTE is the
  * padding a block uses to stay four-byte aligned and is meant to be skipped. */
 /* "this RVA has no file offset". A local sentinel rather than KOF_BROKEN,
- * which lives in the module ABI: nothing else in kofunpack includes that, and a
+ * which lives in the module ABI: nothing else in extractor/unpack includes that, and a
  * private helper does not need a public vocabulary to say "no". */
 #define NO_FILE_OFF UINT64_MAX
 

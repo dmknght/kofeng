@@ -49,8 +49,8 @@
 #include <dirent.h>
 
 #include "../../libkofeng/kofeng.h"
-#include "../../libkofeng/kofparsers/containers/chm_parse.h"
-#include "../../libkofeng/kofdecomp/lzx.h"
+#include "../../libkofeng/analyzer/parsers/containers/chm_parse.h"
+#include "../../libkofeng/extractor/decomp/lzx.h"
 
 static int failures;
 static int examined;

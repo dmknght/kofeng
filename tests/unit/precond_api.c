@@ -17,7 +17,7 @@
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 #include "../../libkofeng/kofeng.h"
-#include "../../libkofeng/kofdb/kofdb.h"
+#include "../../libkofeng/databases/kofdb.h"
 
 static int fails;
 

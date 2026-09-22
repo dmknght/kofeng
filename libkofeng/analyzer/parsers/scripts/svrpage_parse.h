@@ -27,7 +27,7 @@
 
 #include <kofmod/script.h>
 
-#include "../../core/kofcore.h"
+#include "../../../kofcore/kofcore.h"
 
 /*
  * WHICH OF THE THREE, decided by a SECOND marker or not at all.

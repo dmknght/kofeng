@@ -16,7 +16,7 @@
 
 #include <kofmod/sevenzip.h>
 #include <kofmod/kofsig.h>
-#include "../../core/kofcore.h"
+#include "../../../kofcore/kofcore.h"
 
 int kof_7z_parse(kof_buf file, struct kof_7z_info *info, struct kof_obj_ctx *ctx);
 

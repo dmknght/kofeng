@@ -93,7 +93,7 @@
  *
  * WHY IT MATTERS HERE. The Windows collector compiles this file, because the
  * duplicate table at the bottom of it is on the path of every record. Including
- * kofeng.h put the whole engine header into libkofgrille - and kofgrille.h's
+ * kofeng.h put the whole engine header into libkoforbit/grille - and kofgrille.h's
  * first paragraph says it never does that, because the collector collects and
  * does not judge. The rule survived for as long as the two halves were separate
  * files and was broken by merging them; this is what puts it back.

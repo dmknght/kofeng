@@ -24,7 +24,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
-#include "../../libkofeng/kofparsers/kofformat.h"
+#include "../../libkofeng/analyzer/parsers/kofformat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,19 +36,19 @@
 
 #include "partition_check.h"
 #include "entry_check.h"
-#include "../../libkofeng/kofparsers/binaries/elf_parse.h"
-#include "../../libkofeng/kofparsers/binaries/pe_parse.h"
-#include "../../libkofeng/kofparsers/containers/gzip_parse.h"
-#include "../../libkofeng/kofparsers/containers/docole_parse.h"
-#include "../../libkofeng/kofparsers/containers/zip_parse.h"
-#include "../../libkofeng/kofparsers/containers/tar_parse.h"
-#include "../../libkofeng/kofparsers/containers/sevenzip_parse.h"
-#include "../../libkofeng/kofparsers/containers/rar_parse.h"
-#include "../../libkofeng/kofparsers/containers/xz_parse.h"
-#include "../../libkofeng/kofparsers/containers/rtf_parse.h"
-#include "../../libkofeng/kofparsers/containers/pdf_parse.h"
-#include "../../libkofeng/kofparsers/containers/lnk_parse.h"
-#include "../../libkofeng/kofparsers/containers/reg_parse.h"
+#include "../../libkofeng/analyzer/parsers/binaries/elf_parse.h"
+#include "../../libkofeng/analyzer/parsers/binaries/pe_parse.h"
+#include "../../libkofeng/analyzer/parsers/containers/gzip_parse.h"
+#include "../../libkofeng/analyzer/parsers/containers/docole_parse.h"
+#include "../../libkofeng/analyzer/parsers/containers/zip_parse.h"
+#include "../../libkofeng/analyzer/parsers/containers/tar_parse.h"
+#include "../../libkofeng/analyzer/parsers/containers/sevenzip_parse.h"
+#include "../../libkofeng/analyzer/parsers/containers/rar_parse.h"
+#include "../../libkofeng/analyzer/parsers/containers/xz_parse.h"
+#include "../../libkofeng/analyzer/parsers/containers/rtf_parse.h"
+#include "../../libkofeng/analyzer/parsers/containers/pdf_parse.h"
+#include "../../libkofeng/analyzer/parsers/containers/lnk_parse.h"
+#include "../../libkofeng/analyzer/parsers/containers/reg_parse.h"
 
 /*
  * Big enough to reach the caps.

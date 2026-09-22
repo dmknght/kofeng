@@ -40,7 +40,7 @@
 
 #include <stdint.h>
 #include <kofmod/kofsig.h>
-#include "../core/kofcore.h"   /* kof_clip_len */
+#include "kofcore.h"   /* kof_clip_len */
 #include "rangelist.h"        /* kof_rlist, for answering a mask */
 
 /* One run of bytes and what claims it. */

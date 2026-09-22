@@ -60,7 +60,7 @@
 #include <string.h>
 
 #include "kofeng.h"
-#include "core/kofplatform.h"
+#include "kofcore/kofplatform.h"
 #include <kofmod/kofsig.h>   /* KOF_EVT_AMSI - the target a submission is */
 /* The record layout a KOF_EVT_PROC rule is written against, and the one
  * builder that writes it - see scan_proc_event. */

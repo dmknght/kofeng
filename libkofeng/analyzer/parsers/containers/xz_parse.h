@@ -15,7 +15,7 @@
 
 #include <kofmod/xz.h>
 #include <kofmod/kofsig.h>
-#include "../../core/kofcore.h"
+#include "../../../kofcore/kofcore.h"
 
 /*
  * Returns non-zero if the object is an xz stream.

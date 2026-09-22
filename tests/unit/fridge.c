@@ -34,7 +34,7 @@
  * for them itself.
  */
 #include "../../libkofeng/kofeng.h"
-#include "../../libkoforbit/koffridge/koffridge.h"
+#include "../../libkoforbit/fridge/koffridge.h"
 
 static int fails;
 

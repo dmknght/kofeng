@@ -17,7 +17,7 @@
 #include <kofmod/kofsig.h>
 /* For CLR_REGIONS, which PE_REGIONS below splices into its own list. */
 #include <kofmod/clr.h>
-#include "../../core/kofcore.h"
+#include "../../../kofcore/kofcore.h"
 
 /*
  * Returns non-zero if the object is PE at all - MZ and PE\0\0 both matched.

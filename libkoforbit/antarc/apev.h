@@ -119,7 +119,7 @@ struct kofa_pev;
  */
 struct kofa_pev *kofa_pev_open(const struct kofa_pev_option *opt, int *err);
 
-/* The collector as a sensor sees it - see libkoforbit/kofmon/kofmon.h. */
+/* The collector as a sensor sees it - see libkoforbit/mon/kofmon.h. */
 const struct kof_mon_api *kofa_pev_api(struct kofa_pev *);
 
 /*

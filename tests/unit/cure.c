@@ -32,7 +32,7 @@
 #include <sys/wait.h>
 
 #include "../../libkofeng/kofeng.h"
-#include "../../libkofeng/core/kofplatform.h"
+#include "../../libkofeng/kofcore/kofplatform.h"
 
 static int fails;
 

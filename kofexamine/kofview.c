@@ -18,7 +18,7 @@
  * draws should not have to pull in the engine to do it. */
 #include <kofmod/kofsig.h>
 #include "kofplat.h"
-#include "../libkofeng/core/kofplatform.h"
+#include "../libkofeng/kofcore/kofplatform.h"
 
 #include <stdarg.h>
 #include <stdio.h>

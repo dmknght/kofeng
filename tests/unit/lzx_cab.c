@@ -46,8 +46,8 @@
 #include <sys/stat.h>
 
 #include "../../libkofeng/kofeng.h"
-#include "../../libkofeng/kofparsers/containers/cab_parse.h"
-#include "../../libkofeng/kofdecomp/lzx.h"
+#include "../../libkofeng/analyzer/parsers/containers/cab_parse.h"
+#include "../../libkofeng/extractor/decomp/lzx.h"
 
 static int failures;
 static int cabinets;       /* cabinets with an LZX folder */

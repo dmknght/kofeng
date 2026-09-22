@@ -26,7 +26,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 
-#include "../core/kofplatform.h"
+#include "../kofcore/kofplatform.h"
 
 struct kof_objsrc {
 	const uint8_t *p;

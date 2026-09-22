@@ -23,13 +23,13 @@
 #define KOFENG_KOFINSPECT_H
 
 #include <stdint.h>
-#include "../libkofeng/core/kofcore.h"
+#include "../libkofeng/kofcore/kofcore.h"
 #include "../libkofeng/kofeng.h"
-#include "../libkofeng/kofdb/kofdb.h"
-#include "../libkofeng/kofparsers/kofformat.h"
-#include "../libkoforbit/kofevt/kofevt.h"
-#include "../libkoforbit/kofevt/kofevtfmt.h"
-#include "../libkoforbit/kofevt/kofevtlog.h"
+#include "../libkofeng/databases/kofdb.h"
+#include "../libkofeng/analyzer/parsers/kofformat.h"
+#include "../libkoforbit/evt/kofevt.h"
+#include "../libkoforbit/evt/kofevtfmt.h"
+#include "../libkoforbit/evt/kofevtlog.h"
 
 /* ---- what a format is ------------------------------------------------------
  *
@@ -38,7 +38,7 @@
  * called, what its anomaly bits mean - is one struct published by the engine,
  * because the engine is where the formats are. This header used to carry a
  * second table of the same shape; four test files carried a third, fourth and
- * fifth. See kofparsers/kofformat.h.
+ * fifth. See analyzer/parsers/kofformat.h.
  *
  * What stays out of that struct is rendering, and on purpose: the two front
  * ends in this tree render nothing alike - one prints lines, one paints panes -

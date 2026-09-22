@@ -6,7 +6,7 @@
 #include <string.h>
 
 #include "emu_unpack.h"
-#include "../kofeng.h"
+#include "../../kofeng.h"
 
 /* Where an ET_DYN object is placed, matching what a loader with ASLR off does.
  * The value matters only in that a stub reading its own addresses must find

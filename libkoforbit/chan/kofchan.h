@@ -1,7 +1,7 @@
 /*
  * kofchan.h - the channel from a sensor to whoever is deciding.
  *
- * IT MOVED HERE FROM libkofgrille, AND THE MOVE IS THE POINT.
+ * IT MOVED HERE FROM libkoforbit/grille, AND THE MOVE IS THE POINT.
  *
  * The CONTRACT is platform-neutral and always was: a ring of kof_evt over
  * shared memory, the data section read-only in the subscriber and the cursor

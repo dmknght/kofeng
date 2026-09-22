@@ -25,7 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/kofunpack/pe_rebuild.h"
+#include "../../libkofeng/extractor/unpack/pe_rebuild.h"
 
 static int failures;
 

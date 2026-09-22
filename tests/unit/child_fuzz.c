@@ -34,8 +34,8 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "../../libkofeng/core/kofplatform.h"
-#include "../../libkofeng/kofscanners/scan.h"
+#include "../../libkofeng/kofcore/kofplatform.h"
+#include "../../libkofeng/scanners/scan.h"
 
 static int failures;
 static char root[256];

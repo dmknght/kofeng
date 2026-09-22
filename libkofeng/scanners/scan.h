@@ -15,31 +15,31 @@
 #define KOFENG_SCAN_H
 
 #include "../kofeng.h"
-#include "../kofdb/kofdb.h"
-#include "../kofmatchers/kofmatch.h"
-#include "../kofmatchers/kofplague.h"
-#include "../kofoverlord/kofoverlord.h"
-#include "../kofparsers/binaries/elf_parse.h"
-#include "../kofparsers/binaries/pe_parse.h"
-#include "../kofunpack/pe_rebuild.h"
-#include "../kofparsers/containers/gzip_parse.h"
-#include "../kofparsers/containers/docole_parse.h"
-#include "../kofparsers/containers/zip_parse.h"
-#include "../kofparsers/containers/tar_parse.h"
-#include "../kofparsers/containers/sevenzip_parse.h"
-#include "../kofparsers/containers/rar_parse.h"
-#include "../kofparsers/containers/xz_parse.h"
-#include "../kofparsers/containers/rtf_parse.h"
-#include "../kofparsers/containers/pdf_parse.h"
+#include "../databases/kofdb.h"
+#include "../detector/matchers/kofmatch.h"
+#include "../detector/matchers/kofplague.h"
+#include "../detector/overlord/kofoverlord.h"
+#include "../analyzer/parsers/binaries/elf_parse.h"
+#include "../analyzer/parsers/binaries/pe_parse.h"
+#include "../extractor/unpack/pe_rebuild.h"
+#include "../analyzer/parsers/containers/gzip_parse.h"
+#include "../analyzer/parsers/containers/docole_parse.h"
+#include "../analyzer/parsers/containers/zip_parse.h"
+#include "../analyzer/parsers/containers/tar_parse.h"
+#include "../analyzer/parsers/containers/sevenzip_parse.h"
+#include "../analyzer/parsers/containers/rar_parse.h"
+#include "../analyzer/parsers/containers/xz_parse.h"
+#include "../analyzer/parsers/containers/rtf_parse.h"
+#include "../analyzer/parsers/containers/pdf_parse.h"
 #include "objsrc.h"
-#include "../kofdecomp/inflate.h"
-#include "../kofdecomp/textcode.h"
-#include "../kofdecomp/lzw.h"
-#include "../kofdecomp/bzip2.h"
-#include "../kofdecomp/lzx.h"
-#include "../kofdecomp/lzhuf.h"
-#include "../kofdecomp/nrv2.h"
-#include "../kofdecomp/lzma.h"
+#include "../extractor/decomp/inflate.h"
+#include "../extractor/decomp/textcode.h"
+#include "../extractor/decomp/lzw.h"
+#include "../extractor/decomp/bzip2.h"
+#include "../extractor/decomp/lzx.h"
+#include "../extractor/decomp/lzhuf.h"
+#include "../extractor/decomp/nrv2.h"
+#include "../extractor/decomp/lzma.h"
 
 /*
  * Everything mutable, one per thread.
@@ -48,7 +48,7 @@
  * 32MB presence table out of the per-file path: it belongs to the thread, is allocated
  * once, and is reused for every object.
  */
-struct kof_flow_set;   /* kofscanners/objctx.c - the swept call chains */
+struct kof_flow_set;   /* scanners/objctx.c - the swept call chains */
 
 struct kof_scanner {
 	const struct kof_engine *eng;

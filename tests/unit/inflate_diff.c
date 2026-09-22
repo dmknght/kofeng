@@ -34,7 +34,7 @@
 #include <string.h>
 #include <zlib.h>
 
-#include "../../libkofeng/kofdecomp/inflate.h"
+#include "../../libkofeng/extractor/decomp/inflate.h"
 
 static int failures;
 

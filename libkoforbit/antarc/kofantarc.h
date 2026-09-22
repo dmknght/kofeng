@@ -3,10 +3,10 @@
  *
  * THE NAME. Antarctica, because the penguin lives there. The pun names the
  * library; the `kofa_` prefix says which platform it collects from, and that
- * is what somebody reading a call site needs to know. Same bargain libkofgrille
+ * is what somebody reading a call site needs to know. Same bargain libkoforbit/grille
  * made with `kofw_`, for the same reason.
  *
- * This is a SIBLING of libkofgrille, not a port of it. The two answer the same
+ * This is a SIBLING of libkoforbit/grille, not a port of it. The two answer the same
  * two questions - what happened, and what is here - and answer them with
  * mechanisms that have nothing in common. Where a decision is the same it is
  * the same because the argument is the same, not because the code was copied;

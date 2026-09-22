@@ -22,7 +22,7 @@
 #include <string.h>
 
 #include "cab_parse.h"
-#include "../rangelist.h"
+#include "../../../kofcore/rangelist.h"
 
 #define CAB_HDR_MIN    36u      /* through iCabinet */
 #define CAB_FOLDER_LEN 8u

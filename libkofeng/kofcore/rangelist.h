@@ -23,7 +23,7 @@
 
 #include <stdint.h>
 #include <kofmod/kofsig.h>
-#include "../core/kofcore.h"   /* kof_clip_len */
+#include "kofcore.h"   /* kof_clip_len */
 
 /* A range list under construction, bounded by the caller's buffer. */
 struct kof_rlist {

@@ -18,7 +18,7 @@
 #include <string.h>
 
 #include "lha_parse.h"
-#include "../rangelist.h"
+#include "../../../kofcore/rangelist.h"
 
 #define LHA_METHOD_AT   2u
 #define LHA_METHOD_LEN  5u

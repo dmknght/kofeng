@@ -53,7 +53,7 @@
 #include <unistd.h>
 #endif
 
-#include "../../libkoforbit/kofreport/kofreport.h"
+#include "../../libkoforbit/report/kofreport.h"
 #include "../../libkofeng/kofeng.h"
 
 static int failures;

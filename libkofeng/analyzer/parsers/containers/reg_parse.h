@@ -9,7 +9,7 @@
 #include <kofmod/reg.h>
 #include <kofmod/kofsig.h>
 
-#include "../../core/kofcore.h"
+#include "../../../kofcore/kofcore.h"
 
 int kof_reg_parse(kof_buf file, struct kof_reg_info *info,
 		  struct kof_obj_ctx *ctx);

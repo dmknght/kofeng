@@ -22,7 +22,7 @@
 
 #include "kofeng.h"
 #include <kofmod/pe.h>
-#include "kofparsers/binaries/pe_parse.h"
+#include "analyzer/parsers/binaries/pe_parse.h"
 
 #include "wdiff.h"
 

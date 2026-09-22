@@ -22,7 +22,7 @@
  * among the things that only describe them is how a reader ends up expecting the
  * collectors to have side effects.
  *
- * The boundary with kofdecomp is the other one worth stating: kofdecomp turns
+ * The boundary with decomp is the other one worth stating: decomp turns
  * compressed bytes into bytes, and this turns a packer's output into something the
  * scanner can identify. Reversing a packer's branch-target filter will belong here
  * for the same reason.
@@ -45,7 +45,7 @@
 
 #include <stdint.h>
 
-#include "../core/kofcore.h"
+#include "../../kofcore/kofcore.h"
 
 /*
  * Rebuild `img` into a PE file.

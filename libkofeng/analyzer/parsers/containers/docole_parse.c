@@ -61,8 +61,8 @@
 
 #include <stddef.h>
 #include "docole_parse.h"
-#include "../../kofdecomp/ovba.h"
-#include "../runlist.h"
+#include "../../../extractor/decomp/ovba.h"
+#include "../../../kofcore/runlist.h"
 
 #include <string.h>
 

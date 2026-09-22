@@ -40,7 +40,7 @@
 
 #include <kofmod/script.h>
 
-#include "../../core/kofcore.h"
+#include "../../../kofcore/kofcore.h"
 
 /*
  * The offset of the first ColdFusion tag, or (uint64_t)-1.

@@ -26,10 +26,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/kofoverlord/koflib.h"
-#include "../../libkofeng/kofoverlord/kofoverlord.h"
-#include "../../libkofeng/kofparsers/binaries/elf_parse.h"
-#include "../../libkofeng/core/kofmod/elf.h"
+#include "../../libkofeng/detector/overlord/koflib.h"
+#include "../../libkofeng/detector/overlord/kofoverlord.h"
+#include "../../libkofeng/analyzer/parsers/binaries/elf_parse.h"
+#include "../../libkofeng/kofcore/kofmod/elf.h"
 
 static int fails;
 

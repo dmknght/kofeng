@@ -738,7 +738,7 @@ static int scf_find(const struct kof_obj_ctx *ctx, struct scf_hit *out,
 		 * not a payload however its bytes are distributed. The one
 		 * thing that could be lost is a loader that copies the blob
 		 * somewhere else before calling it, and that shape is not
-		 * visible to a sweep this cheap - see kofdisasm/xref.h, which
+		 * visible to a sweep this cheap - see analyzer/disasm/xref.h, which
 		 * says so.
 		 *
 		 * FIRST, because it is the cheapest and the most selective.

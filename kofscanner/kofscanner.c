@@ -37,21 +37,21 @@
 #include <time.h>
 
 #include "../libkofeng/kofeng.h"
-#include "../libkofeng/core/kofplatform.h"
+#include "../libkofeng/kofcore/kofplatform.h"
 /* kof_hash_bytes - the engine's one FNV, see kofcore.h. */
-#include "../libkofeng/core/kofcore.h"
+#include "../libkofeng/kofcore/kofcore.h"
 
 /*
  * SCANNING WHAT IS RUNNING, on the platform that has a collector for it.
  *
- * libkofantarc is the Linux collector and builds only there, the way
- * libkofgrille builds only for Windows. The scan itself is the same scan - see
+ * libkoforbit/antarc is the Linux collector and builds only there, the way
+ * libkoforbit/grille builds only for Windows. The scan itself is the same scan - see
  * scan_procs below - so what is guarded is the collector, not the idea.
  */
 /*
  * THE PROCESS WALK IS A CONTRACT, NOT A PLATFORM. kof_walk_open is declared
- * once and defined by whichever collector this host links - libkofantarc on
- * Linux, libkofgrille on Windows. Nothing in this file is #ifdef'd for it.
+ * once and defined by whichever collector this host links - libkoforbit/antarc on
+ * Linux, libkoforbit/grille on Windows. Nothing in this file is #ifdef'd for it.
  */
 #include "kofwalk.h"
 #include "kofproc.h"
@@ -868,9 +868,9 @@ static int heur_bad(const char *argv0, const char *v)
  * Deciding that a file-backed mapping is scanned as its FILE, that an
  * anonymous executable region is scanned as BYTES, and that a kernel mapping
  * is neither, are answers about an operating system's process table. They
- * belong to the collector that owns that table - libkofantarc on Linux,
- * libkofgrille on Windows - and this file asks for them through
- * libkoforbit/kofwalk/kofwalk.h. It was written the other way round first,
+ * belong to the collector that owns that table - libkoforbit/antarc on Linux,
+ * libkoforbit/grille on Windows - and this file asks for them through
+ * libkoforbit/walk/kofwalk.h. It was written the other way round first,
  * and the cost of that would have been making all three decisions a second
  * time, slightly differently, for the other platform.
  *

@@ -29,10 +29,10 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#include "../../libkofeng/core/kofcore.h"
-#include "../../libkofeng/kofmatchers/kofmatch.h"
-#include "../../libkofeng/kofmatchers/hexprog.h"
-#include "../../libkofeng/kofdb/kofpack.h"
+#include "../../libkofeng/kofcore/kofcore.h"
+#include "../../libkofeng/detector/matchers/kofmatch.h"
+#include "../../libkofeng/detector/matchers/hexprog.h"
+#include "../../libkofeng/databases/kofpack.h"
 
 static int failures;
 static const char *g_case = "?";

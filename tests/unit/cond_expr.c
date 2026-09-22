@@ -27,7 +27,7 @@
 #include "../../kofexamine/kofeditor.h"
 #include "../../kofexamine/kofinspect.h"
 #include <kofmod/pe.h>
-#include "../../libkofeng/kofparsers/binaries/pe_parse.h"
+#include "../../libkofeng/analyzer/parsers/binaries/pe_parse.h"
 
 static int fails;
 

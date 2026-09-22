@@ -3,7 +3,7 @@
  *
  * Two headers and nothing else: stdio and stdint, through kofevtlog.h. Not an
  * accident and not a minimalism exercise - it is what lets this file live under
- * libkofeng while libkofgrille includes it, without libkofgrille acquiring a
+ * libkofeng while libkoforbit/grille includes it, without libkoforbit/grille acquiring a
  * dependency on the engine. The moment something in here needs kofeng.h, this
  * directory has stopped being what it says it is.
  *
@@ -20,7 +20,7 @@
 #include <string.h>
 
 #include "kofevtlog.h"
-#include "../../libkofeng/core/kofplatform.h"
+#include "../../libkofeng/kofcore/kofplatform.h"
 
 _Static_assert(sizeof(struct kofevt_log_hdr) == KOFEVT_LOG_HDR_SIZE,
 	       "the log header is not KOFEVT_LOG_HDR_SIZE bytes");

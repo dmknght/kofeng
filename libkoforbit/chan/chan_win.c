@@ -1,5 +1,5 @@
 /*
- * wchan.c - see wchan.h.
+ * chan_win.c - see kofchan.h.
  */
 
 #include <errno.h>

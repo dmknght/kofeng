@@ -10,7 +10,7 @@
  * TWO PAGES BORN WRITABLE AND EXECUTABLE, ONE AFTER THE OTHER.
  *
  * Not a family and not a byte pattern: a shape read out of the code by the
- * sweep in kofdisasm/flow.c. What it says is that this program asks the system
+ * sweep in analyzer/disasm/flow.c. What it says is that this program asks the system
  * twice, close together, for memory it can write to and run at the same time.
  *
  * WHY THE W^X BIT IS THE WHOLE RULE. Every serious runtime that generates code

@@ -9,7 +9,7 @@
 #include <string.h>
 
 #include <kofmod/elf.h>
-#include "../kofparsers/rangelist.h"
+#include "../../kofcore/rangelist.h"
 
 /* ELF's own value; the parser keeps p_type verbatim. Defined here for the same
  * reason every other file that needs it defines it: there is no ELF constants

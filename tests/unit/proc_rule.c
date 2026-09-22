@@ -14,7 +14,7 @@
  *
  * SYNTHETIC AND NOT OVER A LIVE PROCESS, deliberately. The shapes here are the
  * ones measured on a real desktop and on a controlled reverse shell (see
- * libkofantarc/aproc.h), written down as numbers so the test runs on a host
+ * libkoforbit/antarc/aproc.h), written down as numbers so the test runs on a host
  * with no /proc, no sensor and nothing malicious on it - which is what a CI is.
  */
 
@@ -24,7 +24,7 @@
 #include "kofeng.h"
 #include "kofmod/proc.h"
 #include "kofproc.h"
-#include "../../libkofeng/kofparsers/processes/proc_parse.h"
+#include "../../libkofeng/analyzer/parsers/processes/proc_parse.h"
 
 static int failures;
 

@@ -35,11 +35,11 @@
 #include <string.h>
 #include <time.h>
 
-#include "../../libkofeng/core/kofplatform.h"
-#include "../../libkofeng/core/kofmod/kofsig.h"
-#include "../../libkofeng/kofdb/kofdb.h"
-#include "../../libkofeng/kofdb/kofpackw.h"
-#include "../../libkofeng/kofmatchers/kofmatch.h"
+#include "../../libkofeng/kofcore/kofplatform.h"
+#include "../../libkofeng/kofcore/kofmod/kofsig.h"
+#include "../../libkofeng/databases/kofdb.h"
+#include "../../libkofeng/databases/kofpackw.h"
+#include "../../libkofeng/detector/matchers/kofmatch.h"
 #include "../../libkofeng/kofeng.h"
 
 static int failures;

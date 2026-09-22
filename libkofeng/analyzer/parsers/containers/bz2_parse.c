@@ -10,7 +10,7 @@
 #include <string.h>
 
 #include "bz2_parse.h"
-#include "../rangelist.h"
+#include "../../../kofcore/rangelist.h"
 
 #define BZ2_HDR 4u          /* "BZh" and the level digit */
 #define BZ2_MARK 6u         /* either marker, right behind the header */

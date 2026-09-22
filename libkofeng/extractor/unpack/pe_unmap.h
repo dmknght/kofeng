@@ -52,7 +52,7 @@
 
 #include <stdint.h>
 
-#include "../core/kofcore.h"
+#include "../../kofcore/kofcore.h"
 
 /*
  * What the un-map did, for a caller that reports rather than only scans.

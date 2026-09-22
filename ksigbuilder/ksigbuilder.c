@@ -96,19 +96,19 @@
 #include <kofmod/heur.h>     /* the phases and want-bits a rule may declare */
 /* The region lists, one per format: rgn_names[] below is generated from them
  * rather than restating them. */
-#include "../libkofeng/core/kofplatform.h"
-#include "../libkofeng/kofparsers/binaries/elf_parse.h"
-#include "../libkofeng/kofparsers/binaries/pe_parse.h"
-#include "../libkofeng/kofparsers/containers/gzip_parse.h"
-#include "../libkofeng/kofparsers/containers/docole_parse.h"
-#include "../libkofeng/kofparsers/containers/zip_parse.h"
-#include "../libkofeng/kofparsers/containers/tar_parse.h"
-#include "../libkofeng/kofparsers/containers/sevenzip_parse.h"
-#include "../libkofeng/kofparsers/containers/rar_parse.h"
-#include "../libkofeng/kofparsers/containers/xz_parse.h"
-#include "../libkofeng/kofparsers/scripts/script_parse.h"
-#include "../libkofeng/kofparsers/containers/rtf_parse.h"
-#include "../libkofeng/kofparsers/containers/pdf_parse.h"
+#include "../libkofeng/kofcore/kofplatform.h"
+#include "../libkofeng/analyzer/parsers/binaries/elf_parse.h"
+#include "../libkofeng/analyzer/parsers/binaries/pe_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/gzip_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/docole_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/zip_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/tar_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/sevenzip_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/rar_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/xz_parse.h"
+#include "../libkofeng/analyzer/parsers/scripts/script_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/rtf_parse.h"
+#include "../libkofeng/analyzer/parsers/containers/pdf_parse.h"
 #include <kofmod/pe.h>       /* and the PE ones */
 #include <kofmod/gzip.h>     /* and the gzip ones */
 #include <kofmod/docole.h>   /* and the compound file ones */
@@ -121,10 +121,10 @@
 #include <kofmod/amsi.h>   /* an event's two regions */
 #include <kofmod/proc.h>   /* and a process record's */
 
-#include "../libkofeng/kofdb/kofpackw.h"
-#include "../libkofeng/kofdb/kofpack.h"
-#include "../libkofeng/kofmatchers/hexprog.h"
-#include "../libkofeng/core/kofcore.h"   /* kof_hash_bytes/kof_hash_step - FNV-1a,
+#include "../libkofeng/databases/kofpackw.h"
+#include "../libkofeng/databases/kofpack.h"
+#include "../libkofeng/detector/matchers/hexprog.h"
+#include "../libkofeng/kofcore/kofcore.h"   /* kof_hash_bytes/kof_hash_step - FNV-1a,
 					    reused for KOF_MALVAR_AUTO's suffix and
 					    for the whole-module duplicate check */
 

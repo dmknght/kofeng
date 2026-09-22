@@ -35,8 +35,8 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/script.h>
 
-#include "../../libkofeng/core/kofplatform.h"
-#include "../../libkofeng/kofparsers/scripts/script_parse.h"
+#include "../../libkofeng/kofcore/kofplatform.h"
+#include "../../libkofeng/analyzer/parsers/scripts/script_parse.h"
 
 static int fails;
 

@@ -26,8 +26,8 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "../../libkofeng/kofparsers/binaries/elf_parse.h"
-#include "../../libkofeng/kofunpack/emu_unpack.h"
+#include "../../libkofeng/analyzer/parsers/binaries/elf_parse.h"
+#include "../../libkofeng/extractor/unpack/emu_unpack.h"
 
 static int failures;
 

@@ -19,7 +19,7 @@
 
 #include <kofmod/script.h>
 #include <kofmod/kofsig.h>
-#include "../../core/kofcore.h"
+#include "../../../kofcore/kofcore.h"
 
 /*
  * Returns non-zero if these bytes are a script.

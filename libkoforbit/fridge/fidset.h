@@ -28,7 +28,7 @@
  * elsewhere.
  *
  * So the same holds here: THIS IS SOUND WHILE SOMETHING IS WATCHING. On Linux
- * that is libkofantarc's fanotify; on Windows libkofgrille. Without a watcher -
+ * that is libkoforbit/antarc's fanotify; on Windows libkoforbit/grille. Without a watcher -
  * a one-shot sweep of a machine somebody else has been on - a metadata key can
  * be made to lie, and the honest tool for that is --no-cache.
  *
@@ -58,7 +58,7 @@
 /*
  * WHAT THE PLATFORM SAYS ABOUT A FILE, normalised.
  *
- * Filled by the platform module - libkofantarc on Linux, libkofgrille on
+ * Filled by the platform module - libkoforbit/antarc on Linux, libkoforbit/grille on
  * Windows - and never here: this layer has no business knowing whether the
  * answer came from stat or from GetFileInformationByHandle, and a struct that
  * did would be a struct that cannot be filled on the other one. That is the
@@ -101,8 +101,8 @@ uint64_t kof_fid_key(const struct kof_fid *);
 /*
  * FILL `out` WITH THE IDENTITY OF THE FILE AT `path`. Non-zero on success.
  *
- * DECLARED HERE, DEFINED BY THE PLATFORM - libkofantarc/afid.c on Linux,
- * libkofgrille/wfid.c on Windows, one compiled per host. That is exactly the
+ * DECLARED HERE, DEFINED BY THE PLATFORM - libkoforbit/antarc/afid.c on Linux,
+ * libkoforbit/grille/wfid.c on Windows, one compiled per host. That is exactly the
  * arrangement kof_walk_open has, and it is here for the same reason: the caller
  * is the same scanner on both platforms and must not be reading an #ifdef to
  * find out where it is. Declaring is not implementing, so this layer still

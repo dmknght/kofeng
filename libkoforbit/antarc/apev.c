@@ -33,7 +33,7 @@
 /*
  * THE PROCESS TABLE, and it does three jobs that turned out to be one.
  *
- * libkofgrille keeps the same thing for the same reasons - see KOFW_PTAB_MAX
+ * libkoforbit/grille keeps the same thing for the same reasons - see KOFW_PTAB_MAX
  * in wfilter.h - and this is its Linux twin. What lives in it:
  *
  *   THE PARENT, FROM THE KERNEL RATHER THAN FROM /proc. A FORK record carries
@@ -743,7 +743,7 @@ static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 			/*
 			 * THE ACTOR OF A START IS WHOEVER LAUNCHED IT, not the
 			 * process that just came into being - see
-			 * kof_evt.actor_pid, and libkofgrille fills it from the
+			 * kof_evt.actor_pid, and libkoforbit/grille fills it from the
 			 * ETW raiser for the same reason.
 			 */
 			out->actor_pid = e->ppid;

@@ -21,8 +21,8 @@
 
 #include "kofpackw.h"
 #include "kofpack.h"
-#include "../kofmatchers/hexprog.h"
-#include "../core/kofcore.h"
+#include "../detector/matchers/hexprog.h"
+#include "../kofcore/kofcore.h"
 
 /* A growable byte buffer, alive only while building. */
 struct buf {

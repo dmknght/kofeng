@@ -19,7 +19,7 @@
 
 #include <kofmod/script.h>
 
-#include "../../core/kofcore.h"
+#include "../../../kofcore/kofcore.h"
 
 /* Case-insensitive compare of a fixed-length tag, for "<?PHP" and friends. */
 int kof_txt_tag_at(kof_buf f, uint64_t at, const char *tag, uint32_t len);

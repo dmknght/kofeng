@@ -18,7 +18,7 @@
 #include <string.h>
 
 #include "reg_parse.h"
-#include "../runlist.h"
+#include "../../../kofcore/runlist.h"
 
 static const char MAGIC5[] = "Windows Registry Editor Version 5.00";
 static const char MAGIC4[] = "REGEDIT4";

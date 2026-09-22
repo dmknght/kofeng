@@ -6,7 +6,7 @@
  * collector: it is the half that a Linux CI can run against a Windows log, and
  * the half where the bugs are.
  *
- * It moved out of libkofgrille for the reason the header gives - the enums are
+ * It moved out of libkoforbit/grille for the reason the header gives - the enums are
  * defined once or they rot - and the tables came with them, because a
  * classification split across two libraries is two classifications.
  */

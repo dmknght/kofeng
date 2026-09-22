@@ -46,7 +46,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include "kofgrille.h"
-#include "../libkofeng/core/kofplatform.h"
+#include "../libkofeng/kofcore/kofplatform.h"
 #else
 #include <signal.h>
 #include "kofantarc.h"
@@ -59,7 +59,7 @@
  * declared here for both. It used to be reached only from the _WIN32 branch,
  * which left the call on this side with no declaration at all - invisible
  * until something forced this file to be compiled again. */
-#include "../libkofeng/core/kofplatform.h"
+#include "../libkofeng/kofcore/kofplatform.h"
 #endif
 
 #include "kofevt.h"

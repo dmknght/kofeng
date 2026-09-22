@@ -28,7 +28,7 @@
 
 #include "kofrepint.h"
 /* kof_hash_step - the engine's one FNV, see kofcore.h. */
-#include "../../libkofeng/core/kofcore.h"
+#include "../../libkofeng/kofcore/kofcore.h"
 
 /* ---- the string arena ---------------------------------------------------- */
 

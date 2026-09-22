@@ -31,7 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/core/kofplatform.h"
+#include "../../libkofeng/kofcore/kofplatform.h"
 
 static int failures;
 

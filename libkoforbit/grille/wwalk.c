@@ -1,5 +1,5 @@
 /*
- * wwalk.c - libkofgrille's answer to libkoforbit/kofwalk/kofwalk.h.
+ * wwalk.c - libkoforbit/grille's answer to libkoforbit/walk/kofwalk.h.
  *
  * THE MEMORY SCAN'S LOGIC LIVES HERE, not in the scanner - the same division
  * awalk.c makes on Linux and for the same reason. A host asks "what is running
@@ -44,7 +44,7 @@
  * kofantarc.h's rule - collect, do not judge - holds for the archive, which is
  * cross-built with mingw and linked by kofwatchtower, a tool with no engine in
  * it. This file calls kof_pe_unmap, so it is compiled INTO the scanner instead,
- * exactly as libkofantarc/awalk.c is on Linux. Adding it to the archive would
+ * exactly as libkoforbit/antarc/awalk.c is on Linux. Adding it to the archive would
  * make every collector consumer link the engine.
  *
  *
@@ -75,7 +75,7 @@
 
 #include "kofeng.h"
 #include <kofmod/pe.h>
-#include "kofunpack/pe_unmap.h"
+#include "extractor/unpack/pe_unmap.h"
 
 #include "wproc.h"
 #include "wdiff.h"
@@ -538,7 +538,7 @@ static int w_next_proc(void *self, struct kof_proc_build *out)
 /* Read one span and hand it over. 0 when there was nothing readable in it. */
 /*
  * The word for a region, in this tree's region vocabulary - see
- * kof_walk_item.label, and a_label() in libkofantarc/awalk.c, which this
+ * kof_walk_item.label, and a_label() in libkoforbit/antarc/awalk.c, which this
  * deliberately mirrors.
  *
  * THE SAME WORDS ON BOTH PLATFORMS, and that is the whole point of writing it

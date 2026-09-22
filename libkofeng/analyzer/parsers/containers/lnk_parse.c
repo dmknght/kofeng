@@ -37,7 +37,7 @@
 #include <string.h>
 
 #include "lnk_parse.h"
-#include "../runlist.h"
+#include "../../../kofcore/runlist.h"
 
 #define LNK_HDR_SIZE  76u
 
