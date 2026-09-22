@@ -25825,8 +25825,28 @@ static int dframe_begin(struct out *o, struct dframe *f, const char *title,
 	out_glyph(o, G_H);
 	out_fmt(o, A_OFF A_BOLD " %s " A_OFF A_DIM, title ? title : "");
 	fill = f->w - 4 - (title ? (int)strlen(title) : 0) - 2;
+	/*
+	 * sizeof btn - 1, AND THE -1 IS THE WHOLE BUG THIS ONCE HAD.
+	 *
+	 * btn is "[ Close ]": nine columns on screen and ten bytes in the
+	 * array. Subtracting sizeof took one column too many out of the fill,
+	 * so the top rule came out one short and the box was a column narrower
+	 * at the top than at every row under it - visible as a notch by the
+	 * right corner.
+	 *
+	 * Only the Decode string dialog showed it, because it is the only
+	 * caller that asks for a close control; Go to and Find pass close 0 and
+	 * take the branch that was always right.
+	 *
+	 * The panel header at the other end of this file computes the same row
+	 * and gets it right - `(int)sizeof close - 1` - and the comment above
+	 * that one already names this exact failure: "a rule one short draws a
+	 * box narrower at the top than at every row below it, and the step is
+	 * visible." Two implementations of one rectangle, and the one with the
+	 * warning written on it was not the one with the bug.
+	 */
 	if (close)
-		fill -= (int)sizeof btn;
+		fill -= (int)sizeof btn - 1;
 	if (fill < 0)
 		fill = 0;
 	for (i = 0; i < fill; i++)
