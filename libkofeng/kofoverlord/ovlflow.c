@@ -290,18 +290,66 @@ uint32_t kof_ovlf_chain_mask(const struct kof_ovlf_chain *c)
  * libswscale answers yes to. So the flags a rule asked for are REQUIRED here,
  * by containment: a step may carry more than the reference asked, never less.
  *
- * THE GAP IS COUNTED IN NODES, which is the unit that junk code cannot move.
- * Inserting instructions between two capabilities changes the byte distance
- * and the instruction distance and leaves the node distance alone - measured,
- * six junk instructions moved the normalised gap from 11 to 16 and moved the
- * node sequence not at all. Bytes are what bases/signatures/meterp_00.c pins
- * and are the reason it misses variants.
  *
- * GREEDY FROM EVERY START, rather than a dynamic program: the reference is at
- * most two dozen steps and so is the region, so the exhaustive answer costs a
- * few hundred comparisons and needs no table, no gap prices and no explaining.
+ * ORDER IS ENFORCED ONLY WHERE A LINK DEMANDS IT.
+ *
+ * This was a total order and that was wrong. A compiler is free to open the
+ * socket before it maps the page or after; both are the same program, and a
+ * matcher that pins the order it happened to see pins an accident of layout.
+ * `socket, mmap, read` and `mmap, socket, read` are one shape.
+ *
+ * What is NOT free is a step that consumes what an earlier one produced: read
+ * cannot fill the mapping before mmap returned it. That constraint is already
+ * recorded - kof_ovlf_step.back - and it is the ONLY thing here that fixes an
+ * order. Everything else matches in any order.
+ *
+ * SO THE LINKS ARE THE SKELETON AND THE REST IS A SET. Which also says how
+ * much a chain is worth on each platform, and the measurement is not
+ * comforting: links were found in 13.6% of multi-node regions in /usr/bin and
+ * in NONE of 1501 PE regions, because Windows compilers spill the returned
+ * pointer to a stack slot that this sweep does not follow. On a PE, therefore,
+ * a chain today is a SET of capabilities with a span bound and no skeleton at
+ * all - which is the honest description of it, and the reason a PE chain rule
+ * should lean on the flags rather than on the sequence.
+ *
+ * THE GAP IS COUNTED IN NODES, which is the unit junk code cannot move.
+ * Inserting instructions changes the byte distance and the instruction
+ * distance and leaves the node distance alone - measured, six junk
+ * instructions moved the normalised gap from 11 to 16 and moved the node
+ * sequence not at all. Bytes are what bases/signatures/meterp_00.c pins and
+ * are the reason it misses variants. With the order gone the bound applies to
+ * the whole matched SPAN rather than to each consecutive pair, which is the
+ * same claim over a set instead of a sequence.
+ *
+ * GREEDY, AND SAID SO. A step takes the first node that satisfies it, which
+ * can strand a later step whose link needed that node. Both sides hold at most
+ * KOF_OVLF_CHAIN_MAX steps and links are sparse, so the exhaustive answer
+ * would differ rarely and cost a search; if a measured case ever turns up, it
+ * belongs here rather than in a threshold somewhere else.
  */
-#define KOF_OVLF_CHAIN_GAP 4u   /* nodes allowed between two steps */
+#define KOF_OVLF_CHAIN_GAP 4u   /* nodes allowed between two matched steps */
+
+/* Does this node satisfy this step - capability, the flags the rule asked for,
+ * and the link if it asked for one. `at` holds which node each earlier step
+ * took, so a link is checked against the node that actually matched. */
+static int step_fits(const struct kof_ovlf_step *st, uint32_t i,
+		     const struct kof_flow_node *v, uint32_t j,
+		     const uint8_t *at, const uint8_t *have)
+{
+	uint32_t q, src;
+
+	if (v[j].cap != st->cap || (v[j].flags & st->flags) != st->flags)
+		return 0;
+	if (!st->back)
+		return 1;
+	if (st->back > i || !have[i - st->back])
+		return 0;      /* the producer is not in this match */
+	src = at[i - st->back];
+	for (q = 0; q < KOF_FLOW_ARGS; q++)
+		if (v[j].from[q] && v[j].from[q] - 1u == src)
+			return 1;
+	return 0;
+}
 
 uint32_t kof_ovlf_chain_pct(const struct kof_ovlf_chain *ref,
 			    const struct kof_flow_node *v, uint32_t n)
@@ -310,44 +358,45 @@ uint32_t kof_ovlf_chain_pct(const struct kof_ovlf_chain *ref,
 
 	if (!ref || !ref->n || !v || !n)
 		return 0;
+	if (n > KOF_OVLF_CHAIN_MAX)
+		n = KOF_OVLF_CHAIN_MAX;
+
 	for (start = 0; start < n; start++) {
-		uint32_t i = 0, j = start, got = 0, prev = start;
+		uint8_t at[KOF_OVLF_CHAIN_MAX], have[KOF_OVLF_CHAIN_MAX];
+		uint32_t used = 0, got = 0, lo = n, hi = 0, i;
 
-		while (i < ref->n && i < KOF_OVLF_CHAIN_MAX && j < n) {
-			const struct kof_ovlf_step *st = &ref->s[i];
+		memset(have, 0, sizeof have);
+		/*
+		 * The reference's own order is a topological one - a link
+		 * always points backwards - so walking it in index order means
+		 * a producer is already placed when its consumer is tried.
+		 */
+		for (i = 0; i < ref->n && i < KOF_OVLF_CHAIN_MAX; i++) {
+			uint32_t j;
 
-			if (v[j].cap == st->cap &&
-			    (v[j].flags & st->flags) == st->flags) {
-				/* Too far apart to be one chain: the steps
-				 * are still there, the sequence is not. */
-				if (got && j - prev > KOF_OVLF_CHAIN_GAP + 1u)
-					break;
-				/*
-				 * AND THE LINK, when the reference asked for
-				 * one. "Its buffer came from two steps back"
-				 * is checked against where the sample's
-				 * argument actually came from, not merely
-				 * that it came from somewhere.
-				 */
-				if (st->back) {
-					uint32_t q, ok = 0;
-
-					for (q = 0; q < KOF_FLOW_ARGS; q++)
-						if (v[j].from[q] &&
-						    v[j].from[q] - 1u + st->back
-						    == j)
-							ok = 1;
-					if (!ok) {
-						j++;
-						continue;
-					}
-				}
-				prev = j;
+			for (j = start; j < n; j++) {
+				if (used & (1u << j))
+					continue;
+				if (!step_fits(&ref->s[i], i, v, j, at, have))
+					continue;
+				used |= 1u << j;
+				at[i] = (uint8_t)j;
+				have[i] = 1;
 				got++;
-				i++;
+				if (j < lo) lo = j;
+				if (j > hi) hi = j;
+				break;
 			}
-			j++;
 		}
+		/*
+		 * AND THE MATCH HAS TO BE ONE STRETCH OF CODE. Without this a
+		 * step matched at the top of a large region and another at the
+		 * bottom would read as a chain, and they are two unrelated
+		 * things that happen to be in one function.
+		 */
+		if (got > 1u && hi - lo + 1u - got >
+		    KOF_OVLF_CHAIN_GAP * (got - 1u))
+			continue;
 		if (got > best)
 			best = got;
 		if (best >= ref->n)

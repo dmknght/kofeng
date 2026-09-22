@@ -246,7 +246,15 @@ struct kof_ovlf_step {
 	 * file. Only the first argument carrying one is kept: a rule that
 	 * pinned all four would be pinning the calling convention.
 	 *
-	 * 0 means no link was seen, which is NOT the same as "there is none".
+	 * AND IT IS THE ONLY THING THAT FIXES AN ORDER. A compiler may open
+	 * the socket before it maps the page or after, and both are the same
+	 * program - so the match is order-free EXCEPT where a step consumes
+	 * what an earlier one produced, which no layout can reverse. See
+	 * kof_ovlf_chain_pct.
+	 *
+	 * 0 means no link was seen, which is NOT the same as "there is none":
+	 * the sweep loses a pointer spilled to the stack, and on a PE that is
+	 * nearly all of them.
 	 */
 	uint8_t back;
 };
