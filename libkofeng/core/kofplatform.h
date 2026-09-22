@@ -997,6 +997,41 @@ static inline FILE *kof_fopen_new(const char *path)
 }
 
 /*
+ * CREATE OR TRUNCATE, WITHOUT FOLLOWING A LINK, owned by this user alone.
+ *
+ * kof_fopen_new is for a name that must not already exist - a temporary about
+ * to be renamed over a target. This is for the other case: a file the caller
+ * legitimately rewrites, a log being (re)opened. It still refuses to follow a
+ * symlink, because a writer that follows one writes wherever the link points,
+ * and it still creates 0600 rather than whatever the umask happens to be -
+ * these files hold process names and command lines.
+ */
+static inline FILE *kof_fopen_trunc(const char *path)
+{
+	int fd;
+	FILE *fp;
+
+#ifdef _WIN32
+	fd = _open(path, _O_CREAT | _O_TRUNC | _O_WRONLY | _O_BINARY,
+		   _S_IREAD | _S_IWRITE);
+#else
+	fd = open(path, O_CREAT | O_TRUNC | O_WRONLY | O_NOFOLLOW, 0600);
+#endif
+	if (fd < 0)
+		return NULL;
+#ifdef _WIN32
+	fp = _fdopen(fd, "wb");
+	if (!fp)
+		_close(fd);
+#else
+	fp = fdopen(fd, "wb");
+	if (!fp)
+		close(fd);
+#endif
+	return fp;
+}
+
+/*
  * REPLACE `to` WITH `from`, atomically where the platform can.
  *
  * POSIX rename() already does this over an existing file, and doing it in one

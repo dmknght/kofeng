@@ -11,11 +11,16 @@
  * only way an event rule ever gets a regression test.
  */
 
+/* kofplatform.h, included below, calls memmem and lstat; both sit behind
+ * the GNU and POSIX feature macros. */
+#define _GNU_SOURCE
+
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "kofevtlog.h"
+#include "../../libkofeng/core/kofplatform.h"
 
 _Static_assert(sizeof(struct kofevt_log_hdr) == KOFEVT_LOG_HDR_SIZE,
 	       "the log header is not KOFEVT_LOG_HDR_SIZE bytes");
@@ -80,7 +85,13 @@ struct kofevt_log_w *kofevt_log_create(const char *path,
 	if (!w)
 		return NULL;
 
-	w->fp = fopen(path, "wb");
+	/*
+	 * A log is rewritten on purpose, so this truncates rather than
+	 * refusing an existing name - but it still will not follow a link and
+	 * still creates 0600. The records hold process names and command
+	 * lines; the umask is not the right authority on who reads those.
+	 */
+	w->fp = kof_fopen_trunc(path);
 	if (!w->fp) {
 		free(w);
 		return NULL;

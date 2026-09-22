@@ -533,7 +533,17 @@ static int collect_file(struct kof_report *r, const struct kof_report_stage *st,
 		f->bytes.why_not = KOF_FP_WHY_DENIED;
 		return -1;
 	}
-	out = fopen(store, "wb");
+	/*
+	 * CREATED, NOT OPENED, and that closes the gap the lstat above leaves.
+	 *
+	 * The lstat established the name was free; fopen then opened whatever
+	 * was at it, which is not the same thing - between the two calls the
+	 * name can be made a symlink and the copy below writes through it.
+	 * kof_fopen_new refuses any name that exists by the time it runs, so
+	 * the race is lost rather than won, and it creates 0600: evidence
+	 * taken off somebody's machine is not for everybody on it.
+	 */
+	out = kof_fopen_new(store);
 	if (!out) {
 		fclose(in);
 		f->bytes.why_not = KOF_FP_WHY_DENIED;
@@ -639,7 +649,9 @@ static void read_written(struct kof_report *r, struct kof_fingerprint *f,
 			snprintf(rel, sizeof rel, "evidence/%04u.bin",
 				 (unsigned)seq);
 			joinp(path, sizeof path, dir, rel);
-			out = fopen(path, "wb");
+			/* Sequence-numbered, so the name is predictable and
+			 * the same reasoning applies - see the store above. */
+			out = kof_fopen_new(path);
 			if (out) {
 				if (fwrite(buf, 1, (size_t)got, out) == got)
 					snprintf(f->bytes.stored,

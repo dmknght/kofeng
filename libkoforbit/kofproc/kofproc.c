@@ -17,7 +17,14 @@ static uint16_t put(char *buf, uint32_t cap, uint32_t *at, const char *s,
 	if (!s || !*s)
 		return 0;
 	n = (uint32_t)strlen(s) + 1u;
-	if (*at + n > cap || *at + n > 0xffffu) {
+	/*
+	 * SUBTRACTION, NOT ADDITION - see the same note in kofevt.c. `n` is
+	 * strlen of a string this process read out of /proc, and `*at + n` is
+	 * uint32 arithmetic that wraps. The two limits are separate because
+	 * they mean different things: the buffer, and the field that has to
+	 * hold the offset.
+	 */
+	if (*at > cap || cap - *at < n || *at > 0xffffu || 0xffffu - *at < n) {
 		/*
 		 * A STRING THAT DID NOT FIT FAILS THE WHOLE RECORD.
 		 *
@@ -53,7 +60,11 @@ static uint16_t put_n(char *buf, uint32_t cap, uint32_t *at, const char *s,
 {
 	if (!s || !len)
 		return 0;
-	if (*at + len + 1u > cap || *at + len + 1u > 0xffffu) {
+	/* As above, and with the NUL counted in the room rather than added to
+	 * the length. */
+	if (len >= 0xffffu ||
+	    *at > cap || cap - *at < len + 1u ||
+	    *at > 0xffffu || 0xffffu - *at < len + 1u) {
 		*overflow = 1;
 		return 0;
 	}

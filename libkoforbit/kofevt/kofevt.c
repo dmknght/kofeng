@@ -482,7 +482,15 @@ uint16_t kof_evt_text_put(struct kof_evt *e, const char *s)
 	if (!e || !s || !*s)
 		return KOF_TEXT_NONE;
 	n = strlen(s) + 1u;
-	if ((size_t)e->text_len + n > sizeof e->text) {
+	/*
+	 * CHECKED BY SUBTRACTION. "text_len + n > sizeof text" adds two
+	 * values, one of which is strlen of a caller's string: a length near
+	 * the top of size_t makes the sum wrap to something small, the test
+	 * passes, and the memcpy below is the overflow the line exists to
+	 * stop. Both operands here are already known to be in range.
+	 */
+	if (e->text_len >= sizeof e->text ||
+	    sizeof e->text - e->text_len < n) {
 		e->flags |= KOF_EF_TRUNCATED;
 		return KOF_TEXT_NONE;
 	}
