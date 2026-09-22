@@ -1237,6 +1237,26 @@ struct kof_plague_decl {
 	uint32_t    norm;          /* enum kof_plague_norm */
 	uint8_t     thr;           /* the percentage the rule will demand */
 	/*
+	 * WHICH CONDITION ASKED ABOUT IT, counted as draft_from_source counts
+	 * them: one per `if (` line, in file order. 0 when the reader saw the
+	 * call before any `if`.
+	 *
+	 * WHY IT IS HERE. The two readers parse the same file independently,
+	 * and this one used to recover a block's join but not which branch
+	 * used it - so a rule with more than one condition came back with its
+	 * block matchers built and wired into nothing, and the panel showed
+	 * one matcher under a rule that had two. Counting the same lines the
+	 * other reader counts is not a full reader over kof_scan, which is
+	 * still the right answer; it is the part of it that this costs
+	 * nothing.
+	 *
+	 * APPROXIMATE IN ONE NAMED WAY: draft_from_source also opens a
+	 * condition for a bare `{` grouping, which is not an `if` and is not
+	 * counted here. A rule that uses one puts its blocks one index out.
+	 * Nothing the editor generates is of that shape.
+	 */
+	uint8_t     cnd;
+	/*
 	 * How this block joins the one BEFORE it - 0 is or, 1 is and, which is
 	 * enum cnd_join's order. Not read for the first block, which has
 	 * nothing before it.

@@ -8205,6 +8205,9 @@ static int plg_load_rule(struct view *v, const char *path)
 	uint8_t chain_pct = 0;
 	int chain_level = LV_SUSPECT;
 	struct kof_plague_decl d[PLG_MAX_BLOCK];
+	/* Which condition each block matcher belongs to, by matcher index -
+	 * see kof_plague_decl.cnd. */
+	uint8_t blk_cnd[MAX_GROUP];
 	struct kof_verdict_decl verdict;
 	static uint32_t pool[PLG_MAX_BLOCK * KOF_PLAGUE_MAX_HASH];
 	const struct object *o = cur_obj(v);
@@ -8263,6 +8266,7 @@ static int plg_load_rule(struct view *v, const char *path)
 			memset(g, 0, sizeof *g);
 			g->kind = (uint8_t)GRP_KIND_SIM;
 			g->pct  = d[i].thr;
+			blk_cnd[v->ed.dr.n_grp] = d[i].cnd;
 			v->ed.dr.n_grp++;
 			grp_sim_add(&v->ed, v->ed.dr.n_grp - 1u, SIM_IT_BLOCK,
 				    v->ed.dr.n_blk);
@@ -8310,9 +8314,20 @@ static int plg_load_rule(struct view *v, const char *path)
 		 */
 		int fresh = !v->ed.dr.n_cnd;
 
-		if (v->ed.dr.n_cnd > 1)
-			goto blocks_done;
-
+		/*
+		 * SEVERAL CONDITIONS ARE NO LONGER A REASON TO GIVE UP.
+		 *
+		 * This used to bail out here, so a rule written as
+		 *
+		 *     if (kof_plague_score(blk) >= 40u) ...
+		 *     if (kof_find_str_all(rng, s0, s1)) ...
+		 *
+		 * came back with the block matcher built and wired into
+		 * nothing: the panel showed one matcher under a rule that
+		 * plainly had two. plague_from_source now records which `if`
+		 * asked about each block - see kof_plague_decl.cnd - so each
+		 * matcher goes into the branch that used it.
+		 */
 		if (fresh) {
 			cnd_add(&v->ed, 0);
 			/* or when any block alone concludes it, and when they
@@ -8323,14 +8338,19 @@ static int plg_load_rule(struct view *v, const char *path)
 				if (!d[g].join)
 					v->ed.dr.cnd[v->ed.dr.n_cnd - 1u].op = 1;
 		}
-		c = &v->ed.dr.cnd[0];
 		for (g = 0; g < v->ed.dr.n_grp; g++) {
 			size_t l;
+			uint32_t ci = blk_cnd[g];
 
 			if (v->ed.dr.grp[g].kind != GRP_KIND_SIM ||
 			    !grp_sim_has(&v->ed, g, SIM_IT_BLOCK,
 					 v->ed.dr.grp[g].sim[0].blk))
 				continue;
+			/* The branch the file put it in, or the only one there
+			 * is when the reader could not say. */
+			if (ci >= v->ed.dr.n_cnd)
+				ci = 0;
+			c = &v->ed.dr.cnd[ci];
 			if (cnd_uses(c, g))
 				continue;
 			/* The spelling the panel uses when it puts a matcher
@@ -8341,11 +8361,14 @@ static int plg_load_rule(struct view *v, const char *path)
 		}
 		/* And what it concludes, as the file said it - not as this
 		 * function would have guessed. An existing condition was read
-		 * from the same file and already has it. */
-		if (fresh) {
-			c->level = verdict.level;
-			c->var_kind = verdict.kind;
-			snprintf(c->variant, sizeof c->variant, "%s",
+		 * from the same file and already has it, and only the one this
+		 * function created needs telling. */
+		if (fresh && v->ed.dr.n_cnd) {
+			struct cond *c0 = &v->ed.dr.cnd[0];
+
+			c0->level = verdict.level;
+			c0->var_kind = verdict.kind;
+			snprintf(c0->variant, sizeof c0->variant, "%s",
 				 verdict.text);
 		}
 	}
@@ -8416,7 +8439,6 @@ static int plg_load_rule(struct view *v, const char *path)
 			plg_wire(v, v->ed.dr.n_grp - 1u, lv[k]);
 		}
 	}
-blocks_done:
 
 	/* The rule is in hand; the carve has not run against it yet. */
 	v->plg_segged = 0;

@@ -6313,6 +6313,9 @@ int plague_from_source(struct kof_editor *e, const char *path,
 	 */
 	unsigned pending = 0;   /* 1 blocks 2 shape 4 strings 8 block set
 				 * 16 call chain */
+	/* Conditions as the other reader counts them - see
+	 * kof_plague_decl.cnd. */
+	unsigned n_if = 0;
 	int in_shape = 0, in_strs = 0, in_blkv = 0, in_chain = 0;
 
 	if (!e || !path || !blk || !n_blk || !pool || !verdict)
@@ -6625,6 +6628,8 @@ int plague_from_source(struct kof_editor *e, const char *path,
 			}
 			continue;
 		}
+		if (strstr(line, "if (") || strstr(line, "if("))
+			n_if++;
 		if ((p = strstr(line, "kof_plague_score(")) != NULL) {
 			char w[48];
 			const char *ge = strstr(p, ">=");
@@ -6637,6 +6642,10 @@ int plague_from_source(struct kof_editor *e, const char *path,
 							strtoul(ge + 2, NULL, 10);
 					blk[i].join = (uint8_t)
 						(strstr(line, "||") ? 0 : 1);
+					/* And which branch asked - see
+					 * kof_plague_decl.cnd. */
+					blk[i].cnd = (uint8_t)(n_if ? n_if - 1u
+								    : 0u);
 					break;
 				}
 			pending |= 1u;
