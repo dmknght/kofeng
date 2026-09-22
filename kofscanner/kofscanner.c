@@ -134,7 +134,6 @@ struct fmap {
 };
 
 struct run {
-	int cure;           /* --cure: apply a repair, not just print it */
 	/* No object counter: the engine already keeps one, and a second copy is a
 	 * second thing that can disagree with it. */
 	uint64_t dropped;
@@ -512,14 +511,23 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	}
 
 	/*
-	 * AND THE REPAIR, WHEN A RULE DESCRIBED ONE.
+	 * AND THE REPAIR, WHICH IS NOT A SEPARATE DECISION.
 	 *
-	 * Printed always, applied only when asked. A scanner that repaired
-	 * what it found because it could is a scanner nobody can run twice:
-	 * the second run scans a file the first one rewrote, and whatever the
-	 * first got wrong is no longer recoverable. So the default is to say
-	 * what would be done, and --cure is the sentence the operator has to
-	 * type to have it done.
+	 * CURE IS WHAT DETECTION MEANS HERE, not a second thing an operator
+	 * opts into. A rule that carries a kof_cure has said what the damage
+	 * is and how to undo it; the engine ran that cure only because the
+	 * rule REPORTED - see the gate in scan.c, which needs rep_valid and
+	 * cure_have together - so by the time a repair exists, the question
+	 * "is this file infected" has already been answered yes by the rule
+	 * that also knows the answer to "what did it change".
+	 *
+	 * This used to sit behind --cure, on the reasoning that a scanner
+	 * which rewrites what it finds cannot be run twice. That reasoning
+	 * describes a scanner that GUESSES. This one does not: the repair is
+	 * two numbers a rule read out of the file being repaired, the host
+	 * refuses any request that does not fit the object, and the file is
+	 * still REPORTED as infected afterwards - the verdict is not softened
+	 * by having been acted on.
 	 *
 	 * ONLY AT THE TOP LEVEL. A repair is described against the OBJECT the
 	 * module saw, and for a child that is bytes the engine produced in
@@ -527,9 +535,10 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	 */
 	if (res->repair.n_fix && flen == strlen(name)) {
 		uint32_t q;
+		int done = repair_apply(name, &res->repair);
 
 		printf("%s%-*s%s %s\n", col(r, C_DIM), W_TAG,
-		       r->cure ? "  repairing" : "  repairable",
+		       done ? "  repaired" : "  NOT repaired",
 		       col(r, C_RST), name);
 		for (q = 0; q < res->repair.n_fix; q++)
 			printf("             %*s%llu bytes at %llu\n", 0, "",
@@ -538,7 +547,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		if (res->repair.truncate)
 			printf("             ends at %llu\n",
 			       (unsigned long long)res->repair.truncate);
-		if (r->cure && !repair_apply(name, &res->repair))
+		if (!done)
 			printf("             could not be written\n");
 	}
 
@@ -693,6 +702,14 @@ static void usage(const char *argv0)
 		"usage: %s --db <dir-or-blob> --scan-files <path> [options]\n"
 		"       %s --db <dir-or-blob> --scan-procs [options]\n"
 		"\n"
+		"AN INFECTED FILE IS REPAIRED WHERE A RULE KNOWS HOW. There is no\n"
+		"flag for it: a rule that carries a cure has said what the damage\n"
+		"is and how to undo it, and it ran only because that same rule\n"
+		"reported. The file is still reported as infected afterwards - the\n"
+		"verdict is not softened by having been acted on - and the repair\n"
+		"is printed byte for byte. NO BACKUP IS TAKEN: what to keep is\n"
+		"policy and a scanner is the wrong place to decide it.\n"
+		"\n"
 		"  --db            module database: a directory of them, or one blob\n"
 		"  --scan-files    file to scan, or directory to scan recursively\n"
 		"  --scan-procs    scan what is RUNNING instead of what is on the\n"
@@ -769,10 +786,6 @@ static void usage(const char *argv0)
 	    "                  concurrent add, and a cache that lost entries\n"
 	    "                  under workers would be slower the more it was\n"
 	    "                  given\n"
-		"  --cure          APPLY a repair a rule described, instead of\n"
-		"                  only printing it. Rewrites the file in place\n"
-		"                  and takes no backup: what to keep is policy\n"
-		"                  and a scanner is the wrong place to decide it\n"
 		"  --stats         report what the prefilter and the presence set earned\n"
 		"  --emu MODE      overrides what --heur chose: never interprets\n"
 	    "                  nothing, auto is what --heur 2 turns on, only\n"
@@ -1508,8 +1521,6 @@ int main(int argc, char **argv)
 				i++;
 			want_procs = 1;
 		}
-		else if (strcmp(argv[i], "--cure") == 0)
-			r.cure = 1;
 		else if (strcmp(argv[i], "--stats") == 0)
 			r.stats = 1;
 		else if (strcmp(argv[i], "-v") == 0)
