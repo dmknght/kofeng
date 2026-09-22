@@ -84,6 +84,57 @@ enum kof_script_type {
 	KOF_SCRIPT_TYPE_COUNT = 16
 };
 
+/*
+ * THE FAMILY A KIND BELONGS TO - ctx->subfamily.
+ *
+ * A script can be recognised down to a family and no further. "<% ... %>" is
+ * asp, aspx or jsp; a page carrying no directive does not say which, so its
+ * kind is KOF_SCRIPT_ANY - and a rule declaring one of the three would be
+ * wrong to claim it. But the family still rules out everything OUTSIDE it:
+ * whatever such a page is, it is not php, because php's tag is "<?php".
+ *
+ * That is the whole job of this axis. It never says which member; it says
+ * which family, so kof_module_precond can decline a module whose declared
+ * subtypes all sit somewhere else. See the note there.
+ *
+ * SVR holds the three server-page languages and nothing else. SHELL, PYTHON
+ * and the rest come from a shebang, which names the language outright, so they
+ * never need a family and carry NONE.
+ */
+#define KOF_SFAM_NONE 0u
+#define KOF_SFAM_PHP  1u
+#define KOF_SFAM_SVR  2u
+#define KOF_SFAM_CFM  3u
+#define KOF_SFAM_HTML 4u
+#define KOF_SFAM_COUNT 5u
+
+/*
+ * Which subtypes each family holds, as a mask over enum kof_script_type - the
+ * shape kof_module_precond compares a module's KOF_TARGET_SUBTYPE mask
+ * against. NONE holds everything, which is how "no constraint" is spelled.
+ */
+static inline uint32_t kof_script_fam_mask(uint8_t fam)
+{
+	switch (fam) {
+	case KOF_SFAM_PHP:  return 1u << KOF_SCRIPT_PHP;
+	case KOF_SFAM_SVR:  return (1u << KOF_SCRIPT_ASP) |
+				   (1u << KOF_SCRIPT_ASPX) |
+				   (1u << KOF_SCRIPT_JSP);
+	case KOF_SFAM_CFM:  return 1u << KOF_SCRIPT_CFM;
+	/*
+	 * HTML IS NOT CONSTRAINED, deliberately.
+	 *
+	 * A page of markup carries islands of whatever the author wrote, and
+	 * this build recognises three of them by construct alone - see
+	 * tagless_kind. "An .html whose island named no language" is not
+	 * evidence about what the island is NOT, which is the only thing this
+	 * axis is for. So it declines nothing until there is a measurement
+	 * saying what it could decline safely.
+	 */
+	default:            return 0xffffffffu;
+	}
+}
+
 /* The identifier a signature source writes, to its value - the direction
  * ksigbuilder needs, so it asks this header instead of keeping a copy. */
 static inline int kof_script_type_from_name(const char *s, uint32_t *out)

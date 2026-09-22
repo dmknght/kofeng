@@ -11,12 +11,36 @@ uint8_t kof_svr_kind(kof_buf f, uint64_t look)
 {
 	if (kof_txt_has(f, look, "<jsp:") ||
 	    kof_txt_has(f, look, "<%@ taglib") ||
+	    /*
+	     * JSP'S OWN PAGE DIRECTIVE, which has to be named BEFORE the ASP.NET
+	     * one below, because the two are spelled the same.
+	     *
+	     * kof_txt_has folds case - see kof_txt_tag_at - so "<%@ Page" matches
+	     * JSP's "<%@ page" as readily as ASP.NET's. What separates them is
+	     * the language they then declare, and only one of them says java.
+	     */
+	    kof_txt_has(f, look, "language=\"java\"") ||
 	    kof_txt_has(f, look, "java.lang") ||
 	    kof_txt_has(f, look, "java.io") ||
 	    kof_txt_has(f, look, "Runtime.getRuntime"))
 		return KOF_SCRIPT_JSP;
 	if (kof_txt_has(f, look, "runat=\"server\"") ||
 	    kof_txt_has(f, look, "<asp:") ||
+	    /*
+	     * "<%@ Page" WAS MISSING, and it is the first line of almost every
+	     * ASP.NET page there is - the note on the directive block below uses
+	     * `<%@ Page Language="C#" Debug="true" %>` as its own example.
+	     *
+	     * The ASP list underneath asks for "<%@ Language", which is classic
+	     * ASP's spelling; ASP.NET writes "<%@ Page Language=", and that
+	     * matches neither list. So a page opening with it came back
+	     * KOF_SCRIPT_ANY - and subtype 0 is never filtered, which is exactly
+	     * the failure the pct_closed note below describes. Found from a
+	     * report: tests/unit/word_modes.c carries the directive as a string
+	     * literal and was reported Script/Trojan:Weevely by a rule that
+	     * declares KOF_SCRIPT_PHP.
+	     */
+	    kof_txt_has(f, look, "<%@ Page") ||
 	    kof_txt_has(f, look, "<%@ Import") ||
 	    kof_txt_has(f, look, "System.Web"))
 		return KOF_SCRIPT_ASPX;

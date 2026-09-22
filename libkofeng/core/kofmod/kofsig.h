@@ -2348,7 +2348,20 @@ struct kof_obj_ctx {
 	 * Zero for a format with no such notion, which is every container.
 	 */
 	uint8_t  subtype;
-	uint8_t  reserved;
+	/*
+	 * WHICH FAMILY OF THAT FORMAT, when the subtype itself is not known.
+	 *
+	 * KOF_SUBFAM_NONE for every format that has no such notion, which is
+	 * all of them but KOF_FMT_SCRIPT. It exists because a script can be
+	 * recognised down to a family and no further: "<% ... %>" is asp, aspx
+	 * or jsp and a page carrying no directive does not say which, so the
+	 * subtype is 0 and the family is not. See kof_module_precond, which
+	 * declines a module whose declared subtypes all sit in some OTHER
+	 * family - the one thing the family is certain about.
+	 *
+	 * This was the `reserved` byte, so the layout is unchanged.
+	 */
+	uint8_t  subfamily;
 
 	uint64_t obj_size;
 	uint64_t entry_off;   /* KOF_NA if not applicable, KOF_BROKEN if unresolved */

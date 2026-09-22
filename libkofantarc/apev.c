@@ -217,6 +217,10 @@ static int read_exe(uint32_t pid, char *out, size_t cap)
 	char link[64];
 	ssize_t n;
 
+	/* `cap - 1u` goes to readlink - see the note in aproc.c's a_read_exe. */
+	if (!out || !cap)
+		return 0;
+
 	snprintf(link, sizeof link, "/proc/%u/exe", (unsigned)pid);
 	n = readlink(link, out, cap - 1u);
 	if (n <= 0)
@@ -267,16 +271,47 @@ static int read_cmdline(uint32_t pid, char *out, size_t cap)
  * kof_mon_api.pollfd. Neither of them wins the race outright: nothing reading
  * /proc can, and `whoami` exists for half a millisecond.
  */
+/*
+ * DOES THIS MESSAGE ACTUALLY CARRY A CONNECTOR RECORD.
+ *
+ * NLMSG_OK says the HEADER is there and that nlmsg_len fits what is left. It
+ * says nothing about the payload, and both walks below reach straight through
+ * it to cn->id.idx and then to ev->what - which sit 20 and 36 bytes past the
+ * header. A message shorter than that is read past its own end, and
+ * stream_next hands `ev` to a CALLER that reads the union out of it.
+ *
+ * The connector is the kernel and the kernel sends whole records; measured on
+ * this host, an unprivileged process cannot even reach this socket - a unicast
+ * to its portid comes back EPERM. So this is not a hole somebody walks
+ * through. It is the framing check the walk two functions down already does
+ * for the length residue (`while (p->have > 0)`) and this side did not do at
+ * all: a sensor that trusts one number from outside itself should say which
+ * one, and this one now trusts none.
+ */
+static int pev_msg_whole(const struct nlmsghdr *h)
+{
+	return h->nlmsg_len >= NLMSG_LENGTH(sizeof(struct cn_msg) +
+					    sizeof(struct proc_event));
+}
+
 static void prefetch(struct kofa_pev *p, const char *buf, ssize_t n)
 {
 	const struct nlmsghdr *h = (const struct nlmsghdr *)buf;
 
-	while (NLMSG_OK(h, (size_t)n)) {
+	/*
+	 * `n > 0` AS WELL AS NLMSG_OK, because NLMSG_NEXT subtracts the
+	 * ALIGNED length and the aligned length can exceed the real one by
+	 * three - so the residue goes negative, and (size_t)(-3) is not a
+	 * small number. stream_next's loop is written `while (p->have > 0)`
+	 * for exactly this; this one was not.
+	 */
+	while (n > 0 && NLMSG_OK(h, (size_t)n)) {
 		const struct cn_msg *cn = (const struct cn_msg *)NLMSG_DATA(h);
 		const struct proc_event *ev =
 			(const struct proc_event *)cn->data;
 
-		if (h->nlmsg_type == NLMSG_DONE &&
+		if (pev_msg_whole(h) &&
+		    h->nlmsg_type == NLMSG_DONE &&
 		    cn->id.idx == CN_IDX_PROC &&
 		    ev->what == PROC_EVENT_EXEC) {
 			uint32_t tgid = (uint32_t)ev->event_data.exec.process_tgid;
@@ -862,6 +897,11 @@ static const struct proc_event *stream_next(struct kofa_pev *p,
 				p->at   += step;
 				p->have -= (ssize_t)step;
 			}
+			/* `ev` is RETURNED, so a short message would be read
+			 * out of bounds by the caller and not by this file -
+			 * see pev_msg_whole. */
+			if (!pev_msg_whole(h))
+				continue;
 			if (h->nlmsg_type != NLMSG_DONE)
 				continue;
 			if (cn->id.idx != CN_IDX_PROC)

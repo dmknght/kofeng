@@ -291,7 +291,11 @@ static int looks_like_text(kof_buf f, uint64_t n)
  * a correct answer there. The family is what decides how the file is CARVED, so
  * carving on the kind would have left exactly those pages unsplit.
  */
-enum { FAM_NONE = 0, FAM_PHP, FAM_SVR, FAM_CFM, FAM_HTML };
+/* The public spelling - kofmod/script.h - so the value the parser computes and
+ * the value kof_module_precond reads are one set of numbers. */
+enum { FAM_NONE  = KOF_SFAM_NONE, FAM_PHP = KOF_SFAM_PHP,
+       FAM_SVR   = KOF_SFAM_SVR,  FAM_CFM = KOF_SFAM_CFM,
+       FAM_HTML  = KOF_SFAM_HTML };
 
 /*
  * THE THREE WINDOWS LANGUAGES WITH NO TAG AT ALL.
@@ -736,6 +740,7 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 		     struct kof_obj_ctx *ctx)
 {
 	uint64_t look, tag;
+	int obj_fam = FAM_NONE;
 
 	memset(info, 0, sizeof *info);
 	info->kind = KOF_SCRIPT_ANY;
@@ -808,6 +813,7 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 		int fam = FAM_NONE;
 
 		tag = find_tag(file, look, &kind, &tl, &hl, &fam);
+		obj_fam = fam;
 		if (tag != (uint64_t)-1 && info->from_shebang &&
 		    info->kind != KOF_SCRIPT_ANY && info->kind != kind &&
 		    file.n <= 0xffffffffu &&
@@ -914,6 +920,21 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 	ctx->obj_size = file.n;
 	ctx->format = KOF_FMT_SCRIPT;
 	ctx->subtype = info->kind;
+	/*
+	 * THE FAMILY TOO, AND NOT ONLY THE LANGUAGE.
+	 *
+	 * kof_svr_kind is allowed to answer KOF_SCRIPT_ANY - a page opening
+	 * with a bare "<%" and carrying no directive really is one of three
+	 * languages and we cannot say which. But `fam` IS known there, and it
+	 * says the one thing the kind cannot: whatever this page is, it is not
+	 * php, because php's tag is "<?php" and this one is not it.
+	 *
+	 * That was computed, used to decide the carving, and then dropped -
+	 * so a rule declaring KOF_SCRIPT_PHP ran on a server page, because
+	 * kof_module_precond saw subtype 0 and subtype 0 never declines.
+	 * Reported as Script/Trojan:Weevely on tests/unit/word_modes.c.
+	 */
+	ctx->subfamily = (uint8_t)obj_fam;
 	ctx->file_header = info;
 	ctx->resolve_scan = script_resolve_scan;
 	return 1;

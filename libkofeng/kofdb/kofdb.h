@@ -25,6 +25,7 @@
 
 #include <kofmod/kofsig.h>
 #include <kofmod/kofplague.h>
+#include <kofmod/script.h>   /* kof_script_fam_mask - the subfamily test below */
 #include "../core/kofcore.h"   /* kof_crc32, kof_round_up */
 #include "kofpack.h"       /* KOF_STR_MAX_LEN, KOF_BLOB_MAX_CODE */
 
@@ -286,6 +287,32 @@ static inline enum kof_precond kof_module_precond(const struct kof_module *m,
 	 */
 	if (m->subtype_mask && ctx->subtype != 0 &&
 	    (ctx->subtype >= 32 || !(m->subtype_mask & (1u << ctx->subtype))))
+		return KOF_PRECOND_SUBTYPE;
+	/*
+	 * AND THE FAMILY, WHICH IS WHAT SUBTYPE 0 STILL KNOWS.
+	 *
+	 * Everything above is about the LANGUAGE, and the paragraph above
+	 * explains why not knowing it must not decline. The family is a
+	 * different answer to a different question and it survives exactly the
+	 * case that defeats the kind: "<% ... %>" with no directive is asp,
+	 * aspx or jsp - we cannot say which, and we can say it is not php,
+	 * because php's tag is "<?php" and this is not it.
+	 *
+	 * So a module whose declared subtypes ALL sit in some other family is
+	 * declined. Within the family nothing changes: the one aspx rule and
+	 * the two jsp rules still see a bare server page, which is the whole
+	 * reason this is not spelled as "default the page to asp".
+	 *
+	 * Found from a report - a KOF_SCRIPT_PHP rule for Weevely reported
+	 * tests/unit/word_modes.c, which carries "<%@ Page Language=..." as a
+	 * string literal. The family had been computed by the parser, used to
+	 * carve the file, and then dropped before this test.
+	 *
+	 * KOF_SFAM_NONE and KOF_SFAM_HTML return an all-ones mask, so they
+	 * decline nothing and every format that has no family is untouched.
+	 */
+	if (m->subtype_mask && ctx->format == KOF_FMT_SCRIPT &&
+	    !(m->subtype_mask & kof_script_fam_mask(ctx->subfamily)))
 		return KOF_PRECOND_SUBTYPE;
 	return KOF_PRECOND_OK;
 }

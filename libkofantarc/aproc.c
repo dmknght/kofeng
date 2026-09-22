@@ -249,6 +249,16 @@ static void a_read_exe(uint32_t pid, char *buf, size_t cap, uint32_t *flags)
 	char path[64];
 	ssize_t n;
 
+	/*
+	 * `cap` IS USED AS `cap - 1`, so a zero has to be refused before the
+	 * subtraction and not after: it wraps to SIZE_MAX and the kernel is
+	 * then asked to fill that many bytes. No caller passes zero today -
+	 * every one passes a sizeof - and a_fmt_region two hundred lines up
+	 * already opens `if (!buf || !cap)`. This is the same guard on the
+	 * three that did not have it.
+	 */
+	if (!buf || !cap)
+		return;
 	buf[0] = '\0';
 	snprintf(path, sizeof path, "/proc/%u/exe", (unsigned)pid);
 
@@ -305,6 +315,9 @@ static size_t a_read_nul_list(uint32_t pid, const char *what, char *buf,
 	ssize_t got;
 	size_t i;
 
+	/* Same as a_read_exe: `cap - 1` goes to read(). */
+	if (!buf || !cap)
+		return 0;
 	buf[0] = '\0';
 	snprintf(path, sizeof path, "/proc/%u/%s", (unsigned)pid, what);
 	fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -1078,9 +1091,12 @@ static int a_parse_maps(char *line, struct kofa_region *r, char *pathbuf,
 	while (len && (p[len - 1] == '\n' || p[len - 1] == '\r'))
 		p[--len] = '\0';
 
-	if (!len)
+	if (!len || !pathbuf || !pathcap)
 		return 1;
 
+	/* `pathcap - 1` below: measured with pathcap 0, memcpy is called with
+	 * a size of -1 and ASan stops the process. Unreachable through today's
+	 * callers, which all pass a sizeof - guarded where the subtraction is. */
 	if (len >= pathcap)
 		len = pathcap - 1;
 	memcpy(pathbuf, p, len);

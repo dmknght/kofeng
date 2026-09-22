@@ -278,19 +278,55 @@ static int to_evt(struct kofa_fan *f,
 	if (!verb)
 		return 0;
 
+	/*
+	 * EVERY STEP INSIDE THE RECORD, and the record's own end is the only
+	 * number trusted here.
+	 *
+	 * This walk used to check that the info HEADER fitted and that h->len
+	 * was at least a header - and then follow h->len wherever it pointed.
+	 * Two things came out of the record unchecked after that:
+	 *
+	 *   fh   goes to open_by_handle_at, which copies handle_bytes from
+	 *        this address - so a handle_bytes past the record hands the
+	 *        kernel a length into memory that is not the event;
+	 *   name goes to snprintf("%s"), which reads until it finds a zero -
+	 *        so a name pointer past the record reads until one turns up.
+	 *
+	 * The bytes come from the kernel and a kernel sends whole records, so
+	 * this is not a hole somebody walks through. It is the same framing
+	 * discipline the OUTER walk already keeps with FAN_EVENT_OK, applied
+	 * to the nested one, and it costs three comparisons per info record.
+	 */
 	h = (const void *)((const char *)m + sizeof *m);
-	while ((const char *)h + sizeof *h <= end && h->len >= sizeof *h) {
+	while ((const char *)h + sizeof *h <= end && h->len >= sizeof *h &&
+	       (const char *)h + h->len <= end) {
+		const char *h_end = (const char *)h + h->len;
+
 		if (h->info_type == FAN_EVENT_INFO_TYPE_DFID_NAME ||
 		    h->info_type == FAN_EVENT_INFO_TYPE_DFID ||
 		    h->info_type == FAN_EVENT_INFO_TYPE_FID) {
 			const struct fanotify_event_info_fid *fi =
 				(const void *)h;
+			const char *hp = (const char *)fi->handle;
+			struct file_handle *cand = (struct file_handle *)
+						   (uintptr_t)(const void *)hp;
 
-			fh = (struct file_handle *)(uintptr_t)
-			     (const void *)fi->handle;
-			if (h->info_type == FAN_EVENT_INFO_TYPE_DFID_NAME)
-				name = (const char *)fh->f_handle +
-				       fh->handle_bytes;
+			/* The handle's own header, then the bytes it claims. */
+			if (hp + sizeof *cand > h_end)
+				break;
+			if ((uint64_t)cand->handle_bytes >
+			    (uint64_t)(h_end - (hp + sizeof *cand)))
+				break;
+			fh = cand;
+			if (h->info_type == FAN_EVENT_INFO_TYPE_DFID_NAME) {
+				const char *nm = (const char *)fh->f_handle +
+						 fh->handle_bytes;
+
+				/* And a name snprintf can stop reading. */
+				if (nm < h_end &&
+				    memchr(nm, '\0', (size_t)(h_end - nm)))
+					name = nm;
+			}
 		}
 		h = (const void *)((const char *)h + h->len);
 	}
