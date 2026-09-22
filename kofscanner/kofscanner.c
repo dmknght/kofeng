@@ -35,6 +35,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <signal.h>
 
 #include "../libkofeng/kofeng.h"
 #include "../libkofeng/kofcore/kofplatform.h"
@@ -149,6 +150,10 @@ struct run {
 	 * that arrives at the END of the scan and this is needed during
 	 * it. */
 	uint64_t cached_seen;
+	/* The tail of the path currently on the progress line. Kept so the
+	 * line can be painted again after a finding was printed over it -
+	 * see progress_restore. */
+	char     last[64];
 	int verbose;
 	int stats;
 	int color;               /* stdout is a terminal */
@@ -351,12 +356,66 @@ static void fmap_free(struct fmap *m)
  */
 #define PROGRESS_HZ 10.0
 
+/*
+ * CTRL-C STOPS THE SCAN; IT DOES NOT THROW AWAY WHAT THE SCAN FOUND.
+ *
+ * Without a handler the default action kills the process, and everything the
+ * sweep had already established - which files were infected, how many were
+ * cached, what was repaired - went with it. A person who interrupts a long
+ * scan is almost always interrupting it BECAUSE of something they saw, and
+ * answering that with nothing is the worst moment to have nothing to say.
+ *
+ * A flag and nothing else. The handler may not print, allocate or touch the
+ * run: the callback checks the flag and returns non-zero, which is the walk's
+ * own documented way to be abandoned - "Return non-zero to abandon the walk."
+ * So the scan unwinds through its ordinary path, the mappings are released,
+ * and main goes on to the summary it would have printed anyway.
+ *
+ * volatile sig_atomic_t because that is the only thing a handler may write.
+ */
+static volatile sig_atomic_t g_interrupted;
+
+static void on_interrupt(int sig)
+{
+	(void)sig;
+	g_interrupted = 1;
+}
+
 static double now_s(void)
 {
 	struct timespec t;
 
 	clock_gettime(CLOCK_MONOTONIC, &t);
 	return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
+}
+
+/*
+ * THE LINE ITSELF, from what the run already knows.
+ *
+ * Split out of progress_draw so that restoring the line after a finding was
+ * printed over it paints exactly what was there rather than an approximation
+ * of it - and so the two can never disagree about the format.
+ */
+static void progress_paint(struct run *r)
+{
+	/*
+	 * THE CACHED COUNT IS ON THE LINE, AND ONLY WHEN THERE IS ONE.
+	 *
+	 * Without it a sweep of a tree the cache already answers for reads
+	 * "1 object(s)" for minutes - true, and useless, because the number
+	 * that is moving is the one not shown. With it the reader can tell a
+	 * scan that is working from one that is skipping, which is the
+	 * difference between waiting and worrying.
+	 */
+	if (r->cached_seen)
+		fprintf(stderr, "\r\033[K  %llu object(s)  %llu cached  %s",
+			(unsigned long long)r->seen,
+			(unsigned long long)r->cached_seen, r->last);
+	else
+		fprintf(stderr, "\r\033[K  %llu object(s)  %s",
+			(unsigned long long)r->seen, r->last);
+	fflush(stderr);
+	r->drawn = 1;
 }
 
 static void progress_draw(struct run *r, const char *name)
@@ -390,24 +449,8 @@ static void progress_draw(struct run *r, const char *name)
 	n = strlen(tail);
 	if (n > 48)
 		tail += n - 48;
-	/*
-	 * THE CACHED COUNT IS ON THE LINE, AND ONLY WHEN THERE IS ONE.
-	 *
-	 * Without it a sweep of a tree the cache already answers for reads
-	 * "1 object(s)" for minutes - true, and useless, because the number
-	 * that is moving is the one not shown. With it the reader can tell a
-	 * scan that is working from one that is skipping, which is the
-	 * difference between waiting and worrying.
-	 */
-	if (r->cached_seen)
-		fprintf(stderr, "\r\033[K  %llu object(s)  %llu cached  %s",
-			(unsigned long long)r->seen,
-			(unsigned long long)r->cached_seen, tail);
-	else
-		fprintf(stderr, "\r\033[K  %llu object(s)  %s",
-			(unsigned long long)r->seen, tail);
-	fflush(stderr);
-	r->drawn = 1;
+	snprintf(r->last, sizeof r->last, "%s", tail);
+	progress_paint(r);
 }
 
 /* Take the line back before anything else writes, so a finding is never printed
@@ -419,6 +462,51 @@ static void progress_clear(struct run *r)
 		fflush(stderr);
 		r->drawn = 0;
 	}
+}
+
+/*
+ * PUT IT BACK AFTER SOMETHING WAS PRINTED OVER IT.
+ *
+ * progress_clear takes the line away so a finding can be written, and until
+ * now nothing brought it back: the next draw was the one at the top of the
+ * next object, and that one is rate limited to PROGRESS_HZ. On a scan where
+ * every file reports - a tree of infected files, which is exactly when a
+ * reader is watching - the line was erased on every object and redrawn on
+ * almost none, so it was simply never there. Reported as the repair line
+ * "erasing" the progress bar; any finding did it, the repair line just made
+ * it happen on every file.
+ *
+ * The rate limit is left alone rather than reset. This does not COUNT
+ * anything - seen is not touched - it only paints the line that already
+ * belongs on screen, so it cannot make the line move faster than the draws
+ * that do count.
+ */
+static void progress_restore(struct run *r)
+{
+	if (r->progress && !r->drawn && r->seen)
+		progress_paint(r);
+}
+
+/*
+ * ONE TAGGED LINE, WHICH IS EVERY LINE THIS TOOL PRINTS ABOUT AN OBJECT.
+ *
+ * A coloured tag in a fixed column, then the name. Six places wrote that
+ * printf, and they agreed - but taking the progress line back first was NOT
+ * in any of them: it was done once, at the top of on_object, under a condition
+ * that named the findings. The repair line prints later and from a different
+ * branch, so it was the one that could land on a progress line nobody had
+ * cleared.
+ *
+ * The clear belongs with the print because it is the same act: write over the
+ * line, having first taken it away. Kept apart, the next line added will be
+ * apart too, and the fault comes back under a different name.
+ */
+static void say(struct run *r, const char *colour, const char *tag,
+		const char *name)
+{
+	progress_clear(r);
+	printf("%s%-*s%s %s\n", col(r, colour), W_TAG, tag,
+	       col(r, C_RST), name);
 }
 
 /*
@@ -482,13 +570,21 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 
 	progress_draw(r, name);
 	/*
-	 * Take the progress line back only when a finding is about to land on it.
-	 * A clean object prints nothing during the scan now - its "OK" waits for
-	 * the per-file pass at the end - so clearing for it under -v would just
-	 * flicker the line the rate limit exists to keep still.
+	 * NO CLEAR HERE ANY MORE - say() does it.
+	 *
+	 * This used to take the progress line back for anything that was about
+	 * to print, and the condition had to name every branch below that
+	 * prints. It named the findings, the broken reason and the dropped
+	 * count; it did not name the repair, which prints from a branch added
+	 * later. So a repair could land on a progress line still on screen.
+	 *
+	 * A condition that has to be kept in step with the code under it is a
+	 * condition that will fall out of step. The clear now happens where the
+	 * printing happens, so there is nothing to keep in step.
+	 *
+	 * It also costs nothing when nothing prints: a clean object still
+	 * leaves the line alone, which is what the rate limit is protecting.
 	 */
-	if (res->n || (res->broken && (res->n == 0 || r->verbose)) || res->dropped)
-		progress_clear(r);
 
 	/* Each top-level FILE counted once, and a root object is the one whose
 	 * name carries no "//" - the separator the engine puts between a parent
@@ -521,8 +617,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	for (i = 0; i < res->n; i++) {
 		uint32_t lv = res->v[i].level;
 
-		printf("%s%-*s%s %s\n", col(r, level_col(lv)),
-		       W_TAG, res->v[i].name, col(r, C_RST), name);
+		say(r, level_col(lv), res->v[i].name, name);
 		/*
 		 * Ranked, not compared as numbers: KOF_LEVEL_HEUR is 2 and INFECT
 		 * is 1, so ">" on the values alone would let a heuristic outrank a
@@ -575,9 +670,8 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		 */
 		if (done)
 			r->repaired++;
-		printf("%s%-*s%s %s\n", col(r, done ? C_GRN : C_RED), W_TAG,
-		       done ? "  Repaired" : "  NOT repaired",
-		       col(r, C_RST), name);
+		say(r, done ? C_GRN : C_RED,
+		    done ? "  Repaired" : "  NOT repaired", name);
 		/*
 		 * AND THE BYTES ONLY UNDER -v.
 		 *
@@ -614,9 +708,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		if (res->broken < KOF_BROKEN_COUNT)
 			r->by_reason[res->broken]++;
 		if (res->n == 0 || r->verbose)
-			printf("%s%-*s%s %s\n", col(r, C_CYN), W_TAG,
-			       kof_broken_name(res->broken), col(r, C_RST),
-			       name);
+			say(r, C_CYN, kof_broken_name(res->broken), name);
 	}
 
 	/*
@@ -677,9 +769,29 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 
 		snprintf(tag, sizeof tag, "+%u finding(s) not reported",
 			 res->dropped);
-		printf("%s%-*s%s %s\n", col(r, C_DIM), W_TAG, tag,
-		       col(r, C_RST), name);
+		say(r, C_DIM, tag, name);
 		r->dropped += res->dropped;
+	}
+
+	/*
+	 * PUT THE PROGRESS LINE BACK, and stop here if the reader asked.
+	 *
+	 * The restore is a no-op unless something above cleared the line, so a
+	 * clean object pays a branch. See progress_restore for why the next
+	 * object's draw was not enough.
+	 */
+	progress_restore(r);
+	if (g_interrupted) {
+		progress_clear(r);
+		/*
+		 * Non-zero abandons the walk - kofeng.h's own words - so the
+		 * scan unwinds normally and main prints the summary for what
+		 * it managed to look at. Said once, here, because the walk is
+		 * about to stop and a reader who pressed the key wants to know
+		 * it was heard rather than that the tool died.
+		 */
+		fprintf(stderr, "interrupted - reporting what was scanned\n");
+		return 1;
 	}
 	return 0;
 }
@@ -1729,6 +1841,19 @@ int main(int argc, char **argv)
 	 * that separates those two without anybody having to answer it.
 	 */
 	r.progress = isatty(2) ? 1 : 0;
+	/*
+	 * INSTALLED BEFORE ANY WORK, and deliberately not with sigaction's
+	 * SA_RESTART left to chance: the handler sets a flag and returns, and
+	 * whether a read is restarted or fails with EINTR is not this tool's
+	 * business - the walk finds out through the callback on the next
+	 * object either way.
+	 */
+	signal(SIGINT, on_interrupt);
+#ifdef SIGTERM
+	/* A sweep is the kind of thing a service manager stops. Same answer:
+	 * report what was scanned rather than vanish. */
+	signal(SIGTERM, on_interrupt);
+#endif
 	/* Colour follows the same rule, asked of stdout because that is where the
 	 * findings go: a redirect or a pipe gets plain text, a terminal gets the
 	 * highlight. */
@@ -1976,8 +2101,7 @@ int main(int argc, char **argv)
 			const struct fent *e = &r.files.arr[fi];
 
 			if (e->level < 0 && !e->broken && e->examined)
-				printf("%s%-*s%s %s\n", col(&r, C_GRN), W_TAG,
-				       "OK", col(&r, C_RST), e->file);
+				say(&r, C_GRN, "OK", e->file);
 		}
 		/*
 		 * The unexamined ones, and NOT under -v only.
@@ -2012,9 +2136,8 @@ int main(int argc, char **argv)
 			const struct fent *e = &r.files.arr[fi];
 
 			if (e->level < 0 && !e->broken && !e->examined)
-				printf("%s%-*s%s %s\n", col(&r, C_DIM), W_TAG,
-				       "No module targets this format",
-				       col(&r, C_RST), e->file);
+				say(&r, C_DIM, "No module targets this format",
+				    e->file);
 		}
 	}
 
@@ -2248,6 +2371,20 @@ int main(int argc, char **argv)
 	 * been evaded rather than reassured. broken_objs counts the objects a limit
 	 * or a gap stopped, which is the per-object fact the exit turns on. */
 	if (rc < 0 || unreadable || broken_objs)
+		return 2;
+	/*
+	 * AND AN INTERRUPTED SWEEP IS THE SAME KIND OF ANSWER.
+	 *
+	 * The summary above is honest about what was looked at, but the exit
+	 * code is what a script reads, and 0 there means "clean". A run that
+	 * stopped at file 649 of 1056 has not established that the other 407
+	 * are anything - by the paragraph above, that is "could not finish"
+	 * and not "found nothing".
+	 *
+	 * Below the detection check on purpose: if the interrupted part had
+	 * already found something, the finding is still the answer.
+	 */
+	if (g_interrupted)
 		return 2;
 	return 0;
 }
