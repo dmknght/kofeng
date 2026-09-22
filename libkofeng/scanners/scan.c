@@ -1980,6 +1980,22 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	for (k = lo; k < hi; k++) {
 		const struct kof_module *m = &e->mods[ix ? ix[k] : k];
 
+		/*
+		 * BETWEEN MODULES, WHICH IS WHERE A SLOW OBJECT CAN BE LEFT.
+		 *
+		 * The callback is the host's other way out and it runs once
+		 * the object is finished; on a large shared object that is
+		 * hundreds of milliseconds after the host asked to stop. This
+		 * is the same question asked where the time is actually
+		 * spent - see should_stop in kofeng.h.
+		 *
+		 * Before prefilter rather than after: a module ruled out by
+		 * the prefilter costs almost nothing, so asking first is what
+		 * puts the check on the path that is slow.
+		 */
+		if (opt->should_stop && opt->should_stop(opt->stop_user))
+			break;
+
 		if (!prefilter(m, &ctx, present, &sc->st, out))
 			continue;
 
@@ -2701,6 +2717,14 @@ static void scan_one(struct walk *w, const char *path)
 	 * or no; the key, where it is kept and whether it can be trusted are
 	 * the caller's, for the reasons set out beside cache_seen in kofeng.h.
 	 */
+	if (w->opt->should_stop &&
+	    w->opt->should_stop(w->opt->stop_user)) {
+		/* Asked before the file is opened, so a host that has said
+		 * stop does not pay for one more mapping. The walk's own
+		 * abort flag carries it out of every enclosing loop. */
+		w->aborted = 1;
+		return;
+	}
 	if (w->opt->cache_seen &&
 	    w->opt->cache_seen(w->opt->cache_user, path)) {
 		w->sc->st.cached++;

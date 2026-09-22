@@ -1129,6 +1129,33 @@ struct kof_scan_option {
 	void (*cache_keep)(void *user, const char *path);
 	void (*cache_drop)(void *user, const char *path);
 	void  *cache_user;
+
+	/*
+	 * ASKED, OFTEN, WHETHER TO GIVE UP. Non-zero means stop.
+	 *
+	 * The callback already lets a host abandon a walk - "Return non-zero to
+	 * abandon the walk" - and for a directory of ordinary files that is
+	 * enough, because the callback runs once per object and an object is
+	 * quick. It is not enough for the object that is slow: a caller which
+	 * asked to stop waits for the CURRENT object to finish first, and
+	 * measured on /usr/lib that was 150 to 456 milliseconds, bounded by
+	 * whatever the largest shared object in the tree happens to cost.
+	 *
+	 * So this is asked INSIDE an object as well - between modules, and
+	 * between the children an unpacker produced - where the callback
+	 * cannot reach. The engine stops at the next one of those rather than
+	 * at the next object.
+	 *
+	 * IT MUST BE CHEAP AND IT MUST NOT BLOCK. It is called on a hot path
+	 * and may be called from several threads at once; reading a flag is
+	 * what it is for. It must not print, allocate or take a lock that the
+	 * caller's own callback also takes.
+	 *
+	 * NULL - the default - is never asked, and nothing changes for a host
+	 * that does not want this.
+	 */
+	int  (*should_stop)(void *user);
+	void  *stop_user;
 };
 
 /*

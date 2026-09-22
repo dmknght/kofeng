@@ -381,6 +381,23 @@ static void on_interrupt(int sig)
 	g_interrupted = 1;
 }
 
+/*
+ * THE ENGINE'S OWN WAY OUT, asked between modules and between files.
+ *
+ * The callback abandons the walk at the next OBJECT, which on a tree of
+ * ordinary files is immediate and on one large shared object is not: measured
+ * on /usr/lib, 150 to 456 ms between the key and the exit. This is the same
+ * answer given where the time is spent - see should_stop in kofeng.h.
+ *
+ * Reads one volatile flag and nothing else, which is what that contract asks
+ * for: it runs on a hot path and from every worker thread at once.
+ */
+static int scan_should_stop(void *user)
+{
+	(void)user;
+	return g_interrupted;
+}
+
 static double now_s(void)
 {
 	struct timespec t;
@@ -1616,6 +1633,9 @@ int main(int argc, char **argv)
 
 	memset(&r, 0, sizeof r);
 	memset(&opt, 0, sizeof opt);
+	/* Set once, for every scan this run makes - the file sweep and the
+	 * process sweep both. See scan_should_stop. */
+	opt.should_stop = scan_should_stop;
 	/* Scanning a named directory means scanning what is in it. The engine defaults
 	 * to not recursing so that a caller who says nothing gets less rather than a
 	 * surprise; a scanner is the caller that does want it. */
