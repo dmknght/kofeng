@@ -5228,10 +5228,37 @@ static int evt_meta_lines(const struct view *v)
 	return (nm + 1) / 2;
 }
 
-/* The box's first row. Its rule is the row above it. */
+/*
+ * The box's first row. Its rule is the row above it.
+ *
+ * CLAMPED TO THE PANEL, AND THAT IS A FIX RATHER THAN A GUARD.
+ *
+ * The layout asks for meta + warn + 1 + EVT_BOX_ROWS rows and then CAPS the
+ * answer - g_evt_rows is held to half the pane, and to the pane less three -
+ * while this was still adding the uncapped counts. Whenever the cap bit, the
+ * box was drawn that many rows below the panel it belongs to.
+ *
+ * Which rows those are is the part that made it visible: hex_bot() is
+ * decl_top() - 2, so a box two rows past the pane lands exactly on the draft
+ * panel's heading and the rows under it. The draft appeared to jump down the
+ * screen when an event was opened, because its top was being painted over.
+ *
+ * Reported as the signature panel moving; it never moved. The event box came
+ * to it.
+ *
+ * One place rather than two: draw_evt positions the box from here and
+ * evt_box_hit tests a click against it from here, so a clamp here keeps the
+ * two agreeing. They would not have to - the box could be clamped in the draw
+ * alone - and then a click would land on the row the box used to be on.
+ */
 static int evt_box_top(const struct view *v)
 {
-	return evt_top() + evt_meta_lines(v) + evt_warn_lines(v) + 1;
+	int want = evt_top() + evt_meta_lines(v) + evt_warn_lines(v) + 1;
+	int last = hex_bot() - EVT_BOX_ROWS + 1;   /* the lowest it still fits */
+
+	if (want > last)
+		want = last;
+	return want > evt_top() ? want : evt_top();
 }
 
 /* Where the box's text starts and how wide it is. */
@@ -10464,6 +10491,11 @@ static void cnd_seq(struct view *v)
 	}
 }
 
+/* Defined beside blk_row_shown, down with the rest of the block table's
+ * predicates; declared here because prow_build counts those rows and runs
+ * first. */
+static int blk_section_shown(struct view *v);
+
 enum prow_kind {
 	RW_OPT = 0, RW_RANGES, RW_STRHDR, RW_STR, RW_ADDM,
 	RW_MATCH, RW_MARKERS, RW_ADDC, RW_COND, RW_CMATCH,
@@ -10558,7 +10590,7 @@ static void prow_build(struct view *v)
 	 * them. A block table at the foot of the panel would have the matchers
 	 * referring upwards to something that had not been shown yet.
 	 */
-	if (v->ed.dr.n_blk) {
+	if (blk_section_shown(v)) {
 		prow_add(v, RW_BLKHDR, 0);
 		prow_add(v, RW_BLKCOL, 0);
 		for (i = 0; i < v->ed.dr.n_blk; i++)
@@ -11561,6 +11593,28 @@ static void draw_evt(struct out *o, struct view *v)
 		return;
 	objrow = evt_zones(v, meta, &nm, warn, &nw);
 
+	/*
+	 * EVERY ROW THE PANEL OWNS, BLANKED FIRST.
+	 *
+	 * The panel is given g_evt_rows rows out of the bottom of the hex pane
+	 * and then fills them from several independent pieces - a table whose
+	 * length is the record's, warnings the record may not have, a rule and
+	 * a box that only exist when the record has an object. Any piece that
+	 * does not run leaves its rows untouched, and what shows through is
+	 * whatever the pane drew there on the last frame: hex bytes when the
+	 * panel has just opened, the draft panel's own buttons when it has
+	 * just grown.
+	 *
+	 * Every one of those was a separate bug with a separate cause. Blanking
+	 * the rectangle once, here, answers all of them and any later piece
+	 * that forgets - which is the same argument draw_decl's trailing loop
+	 * already makes for the draft.
+	 */
+	for (k = 0; k < g_evt_rows; k++) {
+		out_at(o, evt_top() + k, col);
+		out_str(o, "\033[K");
+	}
+
 	/* The heading, and the same close control the other panel has - a
 	 * reader who has closed one knows where the other's is. */
 	out_at(o, head, col);
@@ -11587,7 +11641,34 @@ static void draw_evt(struct out *o, struct view *v)
 	 * side by side and the eye would have to zigzag to follow the offsets.
 	 */
 	half = (nm + 1) / 2;
-	for (k = 0; k < half; k++) {
+	/*
+	 * THE LAST ROW THE TABLE AND THE WARNINGS MAY USE.
+	 *
+	 * The box is clamped into the panel - see evt_box_top - and its rule
+	 * sits one row above it, so everything above stops two rows short of
+	 * the box. Without this the table simply carried on and drew THROUGH
+	 * the rule and the box, because the counts it walks are the record's
+	 * and take no notice of how many rows the panel was given.
+	 *
+	 * Rows past the bound are dropped rather than scrolled. A record with
+	 * more fields than a short terminal can show is a record to read on a
+	 * taller one; inventing a second scrollbar for the table would put two
+	 * of them in one panel, and the box already has the one that matters.
+	 */
+	{
+		/*
+		 * The rule and the box take the bottom of the panel when the
+		 * record has an object; when it has none, draw_evt returns
+		 * before either and the table may use every row.
+		 *
+		 * Reading evt_box_top() unconditionally is what broke it: with
+		 * no box the value is meaningless, and once it was clamped into
+		 * the panel it came out at the panel's own top - so the bound
+		 * was above the first row and the table drew nothing at all.
+		 */
+		int table_last = objrow >= 0 ? evt_box_top(v) - 2 : hex_bot();
+
+	for (k = 0; k < half && evt_top() + k <= table_last; k++) {
 		int c2;
 
 		row = evt_top() + k;
@@ -11631,7 +11712,7 @@ static void draw_evt(struct out *o, struct view *v)
 
 	/* The warnings, full width and flush left - they are about the record
 	 * as a whole and belong to neither zone. */
-	for (k = 0; k < nw; k++) {
+	for (k = 0; k < nw && evt_top() + half + k <= table_last; k++) {
 		char name[32], scratch[256];
 
 		row = evt_top() + half + k;
@@ -11642,6 +11723,7 @@ static void draw_evt(struct out *o, struct view *v)
 				g_cols - col - 6, scratch);
 		out_str(o, "\033[K");
 	}
+	}   /* table_last */
 
 	if (objrow < 0)
 		return;
@@ -13970,6 +14052,33 @@ static int blk_row_shown(const struct view *v, uint32_t i)
 }
 
 /*
+ * WHETHER THE BLOCK TABLE BELONGS ON THE PANEL AT ALL.
+ *
+ * A similarity block is a span of an EXECUTABLE'S own bytes - kofoverlord's
+ * question is "did the same builder produce these two programs", and a process
+ * record, an event or an archive entry is not a program. Drawn for them, the
+ * table offered a researcher rows they could tick and generate nothing from.
+ *
+ * ASKED OF THE SELECTED OBJECT, NEVER OF THE FILE. A Windows event log can
+ * carry an AMSI record and an AMSI record can carry a PE, so "this file is a
+ * log" is the wrong question - the right one is what the reader has selected,
+ * which is what cur_obj answers. The same log therefore shows the table on the
+ * PE inside it and not on the records around it.
+ *
+ * ONE PREDICATE, TWO CALLERS. prow_build counts the panel's rows and
+ * draw_decl_blocks draws them, and a row the draw emits and the count does not
+ * is a row that cannot be reached - see the note at the top of prow_build,
+ * which is the receipt for the last time those two disagreed.
+ */
+static int blk_section_shown(struct view *v)
+{
+	uint8_t fm = cur_obj(v)->ctx.format;
+
+	return v->ed.dr.n_blk &&
+	       (fm == KOF_FMT_ELF || fm == KOF_FMT_PE);
+}
+
+/*
  * WHICH MEASURE A ROW OF THE SIMILARITY TABLE IS - written once, because the
  * drawer, the fold predicate and the tick all have to agree about it and three
  * copies of a switch is three chances for one of them to drift.
@@ -15182,7 +15291,7 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 	 * neighbour. On a webshell draft that was exactly two rows - see the
 	 * check at the foot of draw_decl, which is what found it.
 	 */
-	if (!v->ed.dr.n_blk)
+	if (!blk_section_shown(v))
 		return r;
 	{
 		char cols[80], sum[48];
