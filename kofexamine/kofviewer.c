@@ -1153,12 +1153,13 @@ static void sim_item_name(const struct view *v,
 			  size_t cap);
 static uint32_t sim_chain_sweep(struct view *v, struct object *o,
 				struct kof_flow_node *out, uint32_t cap);
-static void sim_over_word(const struct view *v, uint32_t what, char *out,
+static void sim_made_word(const struct view *v, uint32_t what, char *out,
 			  size_t cap);
 static uint32_t sim_offer(struct view *v, uint32_t g,
 			  struct grp_sim_item *out, uint32_t cap);
 static void hit_sim_item_del(struct view *v, uint32_t pk);
 static void hit_sim_tick(struct view *v, uint32_t which);
+static void hit_sim_name(struct view *v, uint32_t which);
 static int  blk_row_shown(const struct view *v, uint32_t i);
 static int  sim_row_shown(const struct view *v, uint32_t i);
 static void hit_fold(struct view *v, uint32_t which);
@@ -2144,6 +2145,17 @@ struct view {
 	uint32_t    enc_voff, enc_hoff;
 	int         enc_txt_y, enc_txt_x, enc_txt_w, enc_txt_h;
 	int         prop_open;      /* the properties page is up */
+	/*
+	 * THE CALL CHAIN PAGE, opened by clicking the measure's NAME.
+	 *
+	 * The tick beside it says the rule is about the chain; the name says
+	 * "show me the chain". Two controls on one row because they are two
+	 * questions, and the second one had no answer at all before - the
+	 * table gave a count of capabilities and no way to see which.
+	 */
+	int         chain_open;
+	uint32_t    chain_off;
+	int         chain_y, chain_x0, chain_x1;
 	uint32_t    prop_off;       /* the first of its lines on screen */
 	int         prop_x0, prop_x1, prop_y;   /* its close control */
 	/*
@@ -14007,6 +14019,23 @@ static void sim_say_resolution(struct view *v, uint32_t what)
  * see sim_recarve, which takes it off the object the way the carve takes the
  * blocks - so the tick only says which of them the rule is about.
  */
+/*
+ * Show the chain rather than choose it - see view.chain_open.
+ *
+ * NOTHING IS COMPUTED HERE, which is the same contract hit_sim_tick keeps:
+ * sim_recarve has already taken the chain off whatever object is in front of
+ * the reader, so the page shows what a rule written now would carry. Sweeping
+ * again on a click would also mean a click could raise the draft's warning
+ * line, and looking at something must not put a fault on the panel.
+ */
+static void hit_sim_name(struct view *v, uint32_t which)
+{
+	if (sim_row_what(which) != SIM_IT_CHAIN)
+		return;
+	v->chain_off = 0;
+	v->chain_open = 1;
+}
+
 static void hit_sim_tick(struct view *v, uint32_t which)
 {
 	uint32_t what = sim_row_what(which);
@@ -14410,9 +14439,27 @@ static void sim_recarve(struct view *v)
 	struct kof_ovl_desc *d;
 	uint32_t i;
 
-	for (i = 0; i < 4u; i++)
+	for (i = 0; i < SIM_IT_COUNT; i++)
 		if (v->ed.dr.sim_use[i])
 			v->ed.dr.sim_kept[i] = 1;
+	/*
+	 * THE CHAIN IS TAKEN OFF THE OBJECT LIKE THE REST, and it was not:
+	 * until the row was ticked the draft held no chain, so the column that
+	 * promises what the measure is compared over read "0 capabilities" -
+	 * the very fault the note above this function describes, repeated for
+	 * the measure added last.
+	 *
+	 * Before the two returns below, because both of them are about ELF and
+	 * a chain is not - see SIM_IT_CHAIN.
+	 */
+	if (!v->ed.dr.sim_use[SIM_IT_CHAIN]) {
+		struct kof_flow_node tmp[KOF_OVLF_CHAIN_MAX];
+		uint32_t m = sim_chain_sweep(v, o, tmp, KOF_OVLF_CHAIN_MAX);
+
+		memset(&v->ed.dr.chain, 0, sizeof v->ed.dr.chain);
+		v->ed.dr.has_chain = m &&
+			kof_ovlf_chain_of(tmp, m, &v->ed.dr.chain);
+	}
 	if (!v->ed.dr.sim_use[SIM_IT_SHAPE]) {
 		memset(&v->ed.dr.shp, 0, sizeof v->ed.dr.shp);
 		v->ed.dr.has_shp = 0;
@@ -14863,7 +14910,7 @@ static void sim_size_word(unsigned long long n, char *out, size_t cap)
  * strings, and a vector that claimed two thousand blocks beside a table
  * showing thirty. They are named for what they actually are.
  */
-static void sim_over_word(const struct view *v, uint32_t what, char *out,
+static void sim_made_word(const struct view *v, uint32_t what, char *out,
 			  size_t cap)
 {
 	/* Ten digits, a space, a unit letter, "B" and the terminator is the
@@ -14880,10 +14927,38 @@ static void sim_over_word(const struct view *v, uint32_t what, char *out,
 		snprintf(out, cap, "%u printable run%s", v->ed.dr.n_str,
 			 v->ed.dr.n_str == 1u ? "" : "s");
 		break;
-	case SIM_IT_CHAIN:
-		snprintf(out, cap, "%u capabilit%s", v->ed.dr.chain.n,
-			 v->ed.dr.chain.n == 1u ? "y" : "ies");
+	case SIM_IT_CHAIN: {
+		/*
+		 * STEPS, AND HOW MANY OF THEM ARE TIED TO ANOTHER.
+		 *
+		 * "5 capabilities" was the wrong word twice over: it reads as
+		 * a count of DISTINCT capabilities when the same one may
+		 * appear three times, and it says nothing about the only
+		 * property that decides what this measure is worth. A chain
+		 * whose steps are linked is a SEQUENCE - each of those steps
+		 * consumed what an earlier one produced, and no rebuild can
+		 * reorder them. A chain with no links is a SET with a
+		 * distance bound, which is a far weaker claim and is what
+		 * every chain read from a PE is today.
+		 *
+		 * So the cell says both, and a reader can tell the two apart
+		 * without opening anything.
+		 */
+		uint32_t k, linked = 0;
+
+		for (k = 0; k < v->ed.dr.chain.n &&
+			    k < KOF_OVLF_CHAIN_MAX; k++)
+			linked += v->ed.dr.chain.s[k].back != 0;
+		if (v->ed.dr.chain.n == 1u)
+			snprintf(out, cap, "1 step");
+		else if (!linked)
+			snprintf(out, cap, "%u steps, none linked",
+				 v->ed.dr.chain.n);
+		else
+			snprintf(out, cap, "%u steps, %u linked",
+				 v->ed.dr.chain.n, linked);
 		break;
+	}
 	default:
 		snprintf(out, cap, "%u selected window%s", v->ed.dr.n_blkv,
 			 v->ed.dr.n_blkv == 1u ? "" : "s");
@@ -14931,16 +15006,21 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 		/*
 		 * THE PERCENTAGE LAST, where the block table already keeps its
 		 * score: it is the answer, and an answer belongs at the end of
-		 * the row rather than wedged between the name and the thing
-		 * the name is measured over.
+		 * the row rather than wedged between the name and what the
+		 * measure is made of.
+		 *
+		 * "OVER" WAS NOT A WORD FOR A COLUMN. It was short for "what
+		 * this is measured over", and standing alone above a cell
+		 * reading "460 printable runs" it said nothing at all - a
+		 * heading has to work without the sentence it was cut from.
 		 */
 		r = decl_table_head(o, v, r, " Similarity", v->sim_fold, 1u,
-				    " use  measure           over"
-				    "                  match", sum);
+				    " use  measure           made of"
+				    "               match", sum);
 	}
 
 	for (i = 0; i < SIM_ROWS; i++) {
-		char over[32], mt[8];
+		char made[32], mt[8];
 
 		/* On PE only the chain row is drawn - see above. */
 		if (n_row == 1u && i != SIM_CHAIN)
@@ -14957,7 +15037,7 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 		pct = i == SIM_BLOCKS ? v->sim_blk
 		    : i == SIM_STRING ? v->sim_str
 		    : i == SIM_SHAPE  ? v->sim_shape : v->sim_chain;
-		sim_over_word(v, what, over, sizeof over);
+		sim_made_word(v, what, made, sizeof made);
 		/*
 		 * A PERCENTAGE ONLY ONCE THERE IS SOMETHING TO COMPARE
 		 * AGAINST, and a dash until then - not a zero, and not the
@@ -14994,7 +15074,27 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 		out_str(o, " ");
 		out_fmt(o, " %s%-18s" A_OFF, on ? A_ID : A_DIM,
 			sim_it_word(what));
-		out_fmt(o, A_DIM "%-22s" A_OFF, over);
+		{
+			int c1 = 2 + (int)o->col_hint;
+
+			out_fmt(o, A_DIM "%-22s" A_OFF, made);
+			/*
+			 * AND THIS CELL IS A CONTROL, on the chain row only.
+			 *
+			 * The cell already says what the measure is compared
+			 * over; clicking it asks to see that thing, which is
+			 * the shortest distance between the question and the
+			 * answer. The NAME is not the control - a name is what
+			 * a row is, not a thing to open - and the other three
+			 * measures have nothing to open anyway: a shape, a set
+			 * of string hashes and a set of block hashes are
+			 * numbers with no text behind them. A chain is the one
+			 * measure made of words.
+			 */
+			if (what == SIM_IT_CHAIN)
+				hit_add(v, y, c1, (int)o->col_hint,
+					hit_sim_name, i);
+		}
 		out_fmt(o, "%s%5s" A_OFF,
 			!v->ed.dr.sim_kept[what] ? A_DIM
 			: pct >= 50u ? A_WARN : A_DIM, mt);
@@ -17910,6 +18010,8 @@ static void page_draw(struct out *o, struct view *v, struct page *p);
 
 
 static void draw_prop(struct out *o, struct view *v);
+/* The call chain page, on the same renderer - see chain_build. */
+static void draw_chain(struct out *o, struct view *v);
 /* Defined with the rest of the dialog selection layer, below - the properties
  * page draws before it and records into it. */
 static void dlg_rec_begin(struct view *v, int y0, int x0);
@@ -18301,6 +18403,8 @@ static void redraw(struct view *v)
 		if (v->sym_open)
 			draw_symbols(&o, v);
 	}
+	if (v->chain_open)
+		draw_chain(&o, v);
 	if (v->prop_open)
 		draw_prop(&o, v);
 	if (v->help_open)
@@ -22522,6 +22626,116 @@ static void page_draw(struct out *o, struct view *v, struct page *p)
 	out_clip_restore(o, cl);
 }
 
+/*
+ * WHAT THE CHAIN IN THE DRAFT ACTUALLY IS.
+ *
+ * The similarity row can only say how many capabilities it holds, which is the
+ * one thing about a chain that does not matter - "5 capabilities" describes a
+ * stager and a JIT equally. This says WHICH, in order, with the flags the rule
+ * will require and the links it will check, because those are what a chain
+ * rule is made of and a researcher about to tick one should be able to read it
+ * first.
+ *
+ * Built into the shared page renderer - see struct page - so it scrolls,
+ * selects and copies the way the properties page does without any of that
+ * being written again.
+ */
+#define CHAIN_MAX_LINE 64u
+static struct prop_line g_chain[CHAIN_MAX_LINE];
+static uint32_t         g_n_chain;
+
+static void chain_add(const char *fmt, ...)
+{
+	va_list ap;
+
+	if (g_n_chain >= CHAIN_MAX_LINE)
+		return;
+	va_start(ap, fmt);
+	vsnprintf(g_chain[g_n_chain].text, PROP_W, fmt, ap);
+	va_end(ap);
+	g_n_chain++;
+}
+
+static void chain_build(struct view *v)
+{
+	const struct kof_ovlf_chain *c = &v->ed.dr.chain;
+	uint32_t i;
+
+	g_n_chain = 0;
+	if (!v->ed.dr.has_chain || !c->n) {
+		chain_add(A_DIM "No chain was read from this object." A_OFF);
+		chain_add("%s", "");
+		/* The three reasons, because "none" on its own reads as a
+		 * fault in the tool. */
+		chain_add("The code asks the system for too little to name,");
+		chain_add("or it is packed and there is nothing to read yet,");
+		chain_add("or the architecture is not one the decoder has.");
+		return;
+	}
+	chain_add(A_BOLD "%-3s %-12s %-22s %s" A_OFF, "#", "capability",
+		  "flags", "fed by");
+	for (i = 0; i < c->n && i < KOF_OVLF_CHAIN_MAX; i++) {
+		const struct kof_ovlf_step *st = &c->s[i];
+		char fl[40];
+		char fed[24];
+
+		fl[0] = 0;
+		if (st->flags & KOF_FLOWF_WX)
+			strcat(fl, "W+X ");
+		if (st->flags & KOF_FLOWF_EXECUTED)
+			strcat(fl, "jumped-into ");
+		if (st->flags & KOF_FLOWF_LOOP)
+			strcat(fl, "in-loop ");
+		if (st->flags & KOF_FLOWF_VIA_REG)
+			strcat(fl, "via-register ");
+		if (!fl[0])
+			snprintf(fl, sizeof fl, A_DIM "-" A_OFF);
+		if (st->back)
+			snprintf(fed, sizeof fed, "step %u", i - st->back);
+		else
+			snprintf(fed, sizeof fed, A_DIM "-" A_OFF);
+		chain_add("%-3u %-12s %-22s %s", i, kof_flow_cap_name(st->cap),
+			  fl, fed);
+	}
+	chain_add("%s", "");
+	/*
+	 * AND WHAT THE MATCH WILL AND WILL NOT REQUIRE, because the table
+	 * above does not say it and the difference decides whether this chain
+	 * is worth a rule at all.
+	 */
+	chain_add(A_DIM "Order is required only where a step is fed by an"
+		  " earlier one." A_OFF);
+	chain_add(A_DIM "Everything else matches in any order, within four"
+		  " nodes." A_OFF);
+	{
+		uint32_t linked = 0;
+
+		for (i = 0; i < c->n && i < KOF_OVLF_CHAIN_MAX; i++)
+			linked += c->s[i].back != 0;
+		if (!linked)
+			chain_add(A_WARN "No links here: this chain is a set of"
+				  " capabilities, not a sequence." A_OFF);
+	}
+}
+
+static void draw_chain(struct out *o, struct view *v)
+{
+	struct page pg;
+
+	chain_build(v);
+	memset(&pg, 0, sizeof pg);
+	pg.title = "Call chain";
+	pg.line = g_chain;
+	pg.n = g_n_chain;
+	pg.off = &v->chain_off;
+	pg.close = 1;
+	pg.record = 1;
+	page_draw(o, v, &pg);
+	v->chain_y = pg.btn_y;
+	v->chain_x0 = pg.btn_x0;
+	v->chain_x1 = pg.btn_x1;
+}
+
 static void draw_prop(struct out *o, struct view *v)
 {
 	struct page pg;
@@ -24733,6 +24947,7 @@ static void sclip_name(struct sclip *c, const uint8_t *r, int nw,
 static void dlg_close(struct view *v)
 {
 	v->sym_open = 0;
+	v->chain_open = 0;
 	v->dlg_have = 0;
 	v->dlg_drag = 0;
 }
@@ -27329,7 +27544,7 @@ static void click(struct view *v, int rclick)
 	 * the symbol table already asked this layer. One recording, one
 	 * selection, one Ctrl+C.
 	 */
-	if (v->sym_open || v->prop_open) {
+	if (v->sym_open || v->prop_open || v->chain_open) {
 		int r, c;
 
 		if (dlg_at(v, g_my, g_mx, &r, &c)) {
@@ -28138,6 +28353,86 @@ static int handle_enc_key(struct view *v, int k)
 		v->edit = ED_ENC_IN;
 		return field_key(v, v->enc_in, sizeof v->enc_in, k, NULL);
 	}
+}
+
+/*
+ * A key while the call chain page is open.
+ *
+ * ITS OWN HANDLER AND NOT A BRANCH OF THE DASHBOARD'S, although they share a
+ * renderer: that one carries tables with their own windows, a wheel that has
+ * to decide between the table under the pointer and the page, and horizontal
+ * scroll for paths. None of that exists here, and folding this into it would
+ * mean teaching every one of those cases about a page that has none.
+ *
+ * Returns 1 when the key was taken, -1 when the page is not up.
+ */
+static int handle_chain_key(struct view *v, int k)
+{
+	int room = g_rows - 6;
+
+	if (!v->chain_open)
+		return -1;
+	if (room < 1)
+		room = 1;
+	switch (k) {
+	case K_UP:
+		if (v->chain_off)
+			v->chain_off--;
+		return 1;
+	case K_DOWN:
+		v->chain_off++;
+		return 1;
+	case K_WHEEL_UP:
+		v->chain_off = v->chain_off > 3u ? v->chain_off - 3u : 0u;
+		return 1;
+	case K_WHEEL_DOWN:
+		v->chain_off += 3u;
+		return 1;
+	case K_PGUP:
+		v->chain_off = v->chain_off > (uint32_t)room
+			       ? v->chain_off - (uint32_t)room : 0u;
+		return 1;
+	case K_PGDN:
+		v->chain_off += (uint32_t)room;
+		return 1;
+	case K_HOME:
+		v->chain_off = 0;
+		return 1;
+	case K_END:
+		/* Clamped where it is drawn, which is the only place that
+		 * knows how many lines there are. */
+		v->chain_off = 0xffffffu;
+		return 1;
+	case 0x03:                      /* Ctrl+C */
+		dlg_copy(v);
+		return 1;
+	case 27:
+	case '\r':
+	case '\n':
+	case 'q':
+		v->chain_open = 0;
+		dlg_close(v);
+		return 1;
+	case K_CLICK:
+	case K_RCLICK:
+		/* Only the close control closes it - see the note on the
+		 * dashboard's click, which is the same rule. */
+		if (g_my == v->chain_y && g_mx >= v->chain_x0 &&
+		    g_mx <= v->chain_x1) {
+			v->chain_open = 0;
+			dlg_close(v);
+			return 1;
+		}
+		return -1;
+	default:
+		/*
+		 * EVERYTHING ELSE FALLS THROUGH, the dashboard's rule and for
+		 * its reasons: a drag has to reach the selection layer, and a
+		 * mode that takes the keyboard must not take the mouse.
+		 */
+		break;
+	}
+	return -1;
 }
 
 /*
@@ -29232,6 +29527,12 @@ static int handle(struct view *v, int k)
 	}
 	{
 		int r = handle_symd_key(v, k);
+
+		if (r >= 0)
+			return r;
+	}
+	{
+		int r = handle_chain_key(v, k);
 
 		if (r >= 0)
 			return r;

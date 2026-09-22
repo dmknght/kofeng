@@ -2149,7 +2149,7 @@ uint32_t draft_hash(struct kof_editor *e)
 	}
 	/* Ticking a measure is an edit - see kof_draft.sim_use - so a draft
 	 * that reported itself unchanged after one would lose it silently. */
-	for (i = 0; i < 4u; i++)
+	for (i = 0; i < SIM_IT_COUNT; i++)
 		MIX(e->dr.sim_use[i]);
 	for (i = 0; i < e->dr.n_grp; i++) {
 		uint32_t k;
@@ -2662,7 +2662,7 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 		 * one step out: the tick chose it and no matcher asked
 		 * anything about it, so it would be written into the file and
 		 * never read. */
-		for (b = 0; b < 4u; b++)
+		for (b = 0; b < SIM_IT_COUNT; b++)
 			if (e->dr.sim_use[b] &&
 			    grp_sim_of(e, b, 0) >= MAX_GROUP) {
 				snprintf(why, sizeof why,

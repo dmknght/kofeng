@@ -430,6 +430,14 @@ static inline int grp_is_at(int rule) { return rule == 3; }
  */
 #define SIM_IT_CHAIN  4u
 
+/* How many whole-object measures there are, which is what sim_use and
+ * sim_kept are indexed by. Named because three separate loops were bounded by
+ * a literal 4 and adding the chain left every one of them one short - the tick
+ * was not hashed into the draft's change stamp, the validator never saw a
+ * ticked chain with no matcher, and sim_recarve never marked it carried, so
+ * its percentage stayed a dash for ever. */
+#define SIM_IT_COUNT  5u
+
 /* How many measures one similarity matcher can hold. Four kinds and, at most,
  * one block apiece for the blocks a draft carries; eight is past what any
  * measured rule has needed, and it is also how many items a list row can hold
@@ -704,8 +712,8 @@ struct kof_draft {
 	 * object compared with itself, which is a hundred and means nothing;
 	 * see plg_block.kept, where the score column answers the same way.
 	 */
-	uint8_t      sim_use[5];
-	uint8_t      sim_kept[5];
+	uint8_t      sim_use[SIM_IT_COUNT];
+	uint8_t      sim_kept[SIM_IT_COUNT];
 	char         sedit[DECL_HEXS_CAP];
 	uint32_t     sedit_off;
 	struct range rng[MAX_RANGE];
