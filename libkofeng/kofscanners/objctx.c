@@ -3275,6 +3275,22 @@ static void flow_set_offer(struct kof_flow_set *fs,
 	fs->len[worst] = (uint8_t)n;
 }
 
+/* Remember what a similarity measure answered, for the name - see
+ * kof_scanner.ovl_asked. The highest of them, because a rule may ask twice
+ * and the reader wants the measurement the verdict could have rested on. */
+static uint32_t ovl_note(const struct kof_obj_ctx *ctx, uint32_t pct)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (sc) {
+		if (sc->ovl_asked < 0)
+			sc->ovl_asked = 1;
+		if (pct > sc->ovl_pct)
+			sc->ovl_pct = pct;
+	}
+	return pct;
+}
+
 /*
  * WHAT A MEASURE COSTS IS WHAT GATES IT.
  *
@@ -3676,7 +3692,7 @@ static uint32_t c_ovl_chain(const struct kof_obj_ctx *ctx,
 		if (p > best)
 			best = p;
 	}
-	return best;
+	return ovl_note(ctx, best);
 }
 
 static uint32_t c_ovl_strings(const struct kof_obj_ctx *ctx,
@@ -3689,7 +3705,8 @@ static uint32_t c_ovl_strings(const struct kof_obj_ctx *ctx,
 	d = ovl_of(ctx);
 	if (!d || !d->n_str)
 		return 0;
-	return kof_ovl_strings_pct(d->str, d->n_str, ref, n_ref);
+	return ovl_note(ctx, kof_ovl_strings_pct(d->str, d->n_str, ref,
+							 n_ref));
 }
 
 /* The same question over block hashes - see c_ovl_strings, which builds the
@@ -3704,7 +3721,8 @@ static uint32_t c_ovl_blocks(const struct kof_obj_ctx *ctx,
 	d = ovl_of(ctx);
 	if (!d || !d->n_blk)
 		return 0;
-	return kof_ovl_blocks_pct(d->blk, d->n_blk, ref, n_ref);
+	return ovl_note(ctx, kof_ovl_blocks_pct(d->blk, d->n_blk, ref,
+							n_ref));
 }
 
 static const struct kof_content kof_detect_vtable = {

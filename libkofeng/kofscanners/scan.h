@@ -92,6 +92,22 @@ struct kof_scanner {
 	 */
 	uint32_t             heur_lvl;
 	/*
+	 * WHETHER A SIMILARITY MEASURE ANSWERED, and with what.
+	 *
+	 * The same pair of facts plague_asked and plague_hit are, for the
+	 * measures that carry a reference in the module's own rodata rather
+	 * than a declared block - kof_ovl_strings, kof_ovl_blocks,
+	 * kof_ovl_chain, kof_ovl_shape. A verdict reached through one of
+	 * those is named for it, exactly as a plague verdict is, so a reader
+	 * of the name knows what recognised the object.
+	 *
+	 * The HIGHEST answer, not the last: a rule may ask twice, and what
+	 * the reader wants is the measurement the verdict could have rested
+	 * on. -1 until something asks.
+	 */
+	int                  ovl_asked;
+	uint32_t             ovl_pct;
+	/*
 	 * THE HIGHEST PLAGUE SCORE THE MODULE BEING RUN HAS ASKED ABOUT.
 	 *
 	 * A similarity verdict is a MEASUREMENT, and the name it is reported

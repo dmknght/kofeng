@@ -821,12 +821,25 @@ static void finding_str(const struct kof_scanner *sc,
 	 * know either. The mark names the method, exactly as a heuristic's
 	 * does - see kof_finding_name.
 	 *
-	 * Only for a module that actually asked: sc->plague_asked is -1 until
-	 * kof_plague_score is called, so a rule that mixes a string with a
-	 * block still gets the number, and every rule that uses no block is
-	 * named as it always was.
+	 * ASKED IS NOT THE SAME AS ANSWERED, and reading it as though it were
+	 * was a bug with a name on it. sc->plague_asked only says
+	 * kof_plague_score was CALLED. A rule written as
+	 *
+	 *     if (kof_plague_score(blk) >= 50u) ...
+	 *     if (kof_find_str_all(rng, s0, s1)) ...
+	 *
+	 * calls it on every object, so a file that matched the STRING was
+	 * named "#<the block>!Plague?0" - a verdict announcing the method
+	 * that did not reach it, and a score of nought beside a detection.
+	 *
+	 * So the block has to have matched something. Not "reached the rule's
+	 * threshold", which the engine cannot know - the threshold is a
+	 * number in the module's own code - but at least one hash in common.
+	 * A rule whose block scored under its threshold while a string
+	 * carried the verdict still reports the block's number, and that is
+	 * the honest residue: the block did find something, just not enough.
 	 */
-	if (sc->plague_asked >= 0 && sc->n_plague_blk) {
+	if (sc->plague_asked >= 0 && sc->n_plague_blk && sc->plague_hit) {
 		char sv[16], shape[16];
 		/* The SET's containment - see kof_plague_counts - so a rule
 		 * made of two blocks reports how much of both is here rather
@@ -863,6 +876,30 @@ static void finding_str(const struct kof_scanner *sc,
 		kof_finding_name(f, fmtarch, maltype,
 				 (family && family[0]) ? family : "unknown",
 				 sv, shape);
+		return;
+	}
+	/*
+	 * AND THE SAME FOR A SIMILARITY MEASURE THAT CARRIES ITS OWN
+	 * REFERENCE - kof_ovl_strings, kof_ovl_blocks, kof_ovl_chain,
+	 * kof_ovl_shape.
+	 *
+	 * The mark goes BEHIND the variant, where every other method's does,
+	 * and not in front of it. It was a prefix on the variant for one
+	 * revision - "Ovl-3f2ka" - which put the method inside the field that
+	 * names the pattern, so the two could no longer be told apart by
+	 * anything reading the name. A variant is a variant; what recognised
+	 * it is the shape.
+	 *
+	 * ASKED AND ANSWERED, as above: a measure that returned nothing did
+	 * not reach this verdict and does not get to name it.
+	 */
+	if (sc->ovl_asked >= 0 && sc->ovl_pct) {
+		char shape[16];
+
+		snprintf(shape, sizeof shape, "Ovl?%u", sc->ovl_pct);
+		kof_finding_name(f, fmtarch, maltype,
+				 (family && family[0]) ? family : "unknown",
+				 variant ? variant : "unknown", shape);
 		return;
 	}
 	kof_finding_name(f, fmtarch, maltype,
@@ -1907,6 +1944,8 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * c_ovl_strings - so this costs a store.
 	 */
 	sc->ovl_ready = 0;
+	sc->ovl_asked = -1;
+	sc->ovl_pct = 0;
 	/* And the swept chains, for the same reason and at the same cost. */
 	sc->fchain_ready = 0;
 	/* What the two gated measures compare themselves against - see
