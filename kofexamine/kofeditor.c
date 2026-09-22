@@ -2606,12 +2606,14 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 	 * AND A RULE MADE OF A SHAPE OR A STRING SET DECLARES NEITHER.
 	 *
 	 * Same reasoning one step further out: what the demand is really about
-	 * is that the rule be written from SOMETHING, and there are now four
+	 * is that the rule be written from SOMETHING, and there are now five
 	 * things it can be written from. A shape rule reads no content at all
-	 * and is still a whole rule - that is the point of it.
+	 * and is still a whole rule - that is the point of it, and a chain
+	 * rule reads code without reading any of its bytes as bytes.
 	 */
 	if (!e->dr.n_decl && !draft_uses_blocks(e) && !draft_uses_sim(e, SIM_IT_SHAPE) &&
-	    !draft_uses_sim(e, SIM_IT_STRSET) && !draft_uses_sim(e, SIM_IT_BLKSET))
+	    !draft_uses_sim(e, SIM_IT_STRSET) && !draft_uses_sim(e, SIM_IT_BLKSET) &&
+	    !draft_uses_sim(e, SIM_IT_CHAIN))
 		return "Declare a string, tick a block, or add a matcher";
 	if (!e->dr.n_grp)
 		return "Add a matcher";
@@ -3450,6 +3452,7 @@ const char *sim_it_word(uint32_t what)
 	case SIM_IT_SHAPE:  return "file structure";
 	case SIM_IT_STRSET: return "string shape";
 	case SIM_IT_BLKSET: return "smart blocks";
+	case SIM_IT_CHAIN:  return "call chain";
 	default:            return "block";
 	}
 }
@@ -3721,6 +3724,15 @@ void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g)
 			case SIM_IT_STRSET:
 				fprintf(f, "kof_ovl_strings(ref_strings) "
 					">= %uu", q->pct);
+				break;
+			/*
+			 * AND THE CHAIN READS CODE WITHOUT READING ITS BYTES
+			 * AS BYTES - see kof_ovl_chain. The reference is the
+			 * module's own, like the two sets above it.
+			 */
+			case SIM_IT_CHAIN:
+				fprintf(f, "kof_ovl_chain(ref_chain) >= %uu",
+					q->pct);
 				break;
 			default:
 				fprintf(f, "kof_ovl_blocks(ref_blocks) >= %uu",
@@ -5845,6 +5857,37 @@ have_path:
 				bi + 1u == e->dr.n_blkv ? "\n};\n"
 				: bi % 4u == 3u ? ",\n" : ",");
 	}
+	/*
+	 * THE REFERENCE'S CALL CHAIN, if any matcher asks about it.
+	 *
+	 * One line per step and the capability spelled by name, because this
+	 * is the one reference in the file a reader can actually read: the
+	 * strings and the blocks are hashes and say nothing, and this says
+	 * what the sample's code does.
+	 */
+	if (draft_uses_sim(e, SIM_IT_CHAIN) && e->dr.chain.n) {
+		uint32_t ci;
+
+		fprintf(f, "\n/* What the sample above asks the system for, in "
+			"order. Read out of its\n * code by the sweep in "
+			"kofdisasm/flow.c - no bytes of it are kept. */\n");
+		fprintf(f, "static const struct kof_ovlf_chain ref_chain = {\n");
+		fprintf(f, "\t.n = %uu,\n\t.s = {\n", e->dr.chain.n);
+		for (ci = 0; ci < e->dr.chain.n &&
+			     ci < KOF_OVLF_CHAIN_MAX; ci++) {
+			const struct kof_ovlf_step *st = &e->dr.chain.s[ci];
+
+			/* The capability as a NUMBER with its word beside it:
+			 * enum kof_flow_cap lives in kofdisasm/flow.h, which
+			 * is engine-side, and a rule is compiled against the
+			 * kofmod headers alone. */
+			fprintf(f, "\t\t{ %2uu, 0x%02xu, %uu },   /* %s%s */\n",
+				st->cap, st->flags, st->back,
+				kof_flow_cap_name(st->cap),
+				st->back ? ", fed by an earlier step" : "");
+		}
+		fprintf(f, "\t}\n};\n");
+	}
 	fprintf(f, "\nvoid kof_scan(const struct kof_obj_ctx *ctx)\n{\n");
 	/*
 	 * A maximum size is a line in the body, not a declaration.
@@ -6242,7 +6285,8 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		       struct kof_verdict_decl *verdict,
 		       uint8_t *shp_pct, int *shp_level,
 		       uint8_t *str_pct, int *str_level,
-		       uint8_t *blkv_pct, int *blkv_level)
+		       uint8_t *blkv_pct, int *blkv_level,
+		       uint8_t *chain_pct, int *chain_level)
 {
 	FILE *f;
 	char line[1024];
@@ -6267,8 +6311,9 @@ int plague_from_source(struct kof_editor *e, const char *path,
 	 * the second - and the rule opened in the panel missing a matcher the
 	 * file plainly had.
 	 */
-	unsigned pending = 0;   /* 1 blocks 2 shape 4 strings 8 block set */
-	int in_shape = 0, in_strs = 0, in_blkv = 0;
+	unsigned pending = 0;   /* 1 blocks 2 shape 4 strings 8 block set
+				 * 16 call chain */
+	int in_shape = 0, in_strs = 0, in_blkv = 0, in_chain = 0;
 
 	if (!e || !path || !blk || !n_blk || !pool || !verdict)
 		return 0;
@@ -6284,6 +6329,12 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		*blkv_pct = 0;
 	if (blkv_level)
 		*blkv_level = LV_INFECT;
+	if (chain_pct)
+		*chain_pct = 0;
+	if (chain_level)
+		*chain_level = LV_SUSPECT;
+	e->dr.chain.n = 0;
+	e->dr.has_chain = 0;
 	e->dr.n_str = 0;
 	e->dr.n_blkv = 0;
 	memset(&e->dr.shp, 0, sizeof e->dr.shp);
@@ -6392,6 +6443,36 @@ int plague_from_source(struct kof_editor *e, const char *path,
 			e->dr.has_shp = 1;
 			continue;
 		}
+		/*
+		 * THE CHAIN, read back the way it was written: one step per
+		 * line, three numbers a line. See the emitter - the words in
+		 * the comments are for a reader and nothing parses them.
+		 */
+		if (strstr(line, "struct kof_ovlf_chain ref_chain")) {
+			in_chain = 1;
+			e->dr.has_chain = 1;
+			e->dr.chain.n = 0;
+			continue;
+		}
+		if (in_chain) {
+			const char *q = strchr(line, '{');
+
+			if (q && e->dr.chain.n < KOF_OVLF_CHAIN_MAX) {
+				struct kof_ovlf_step *st =
+					&e->dr.chain.s[e->dr.chain.n];
+				char *end;
+
+				st->cap = (uint8_t)strtoul(q + 1, &end, 0);
+				st->flags = end && *end == ',' ? (uint8_t)
+					strtoul(end + 1, &end, 0) : 0u;
+				st->back = end && *end == ',' ? (uint8_t)
+					strtoul(end + 1, NULL, 0) : 0u;
+				e->dr.chain.n++;
+			}
+			if (strchr(line, '}') && strchr(line, ';'))
+				in_chain = 0;
+			continue;
+		}
 		if (in_shape) {
 			const char *q;
 
@@ -6453,6 +6534,15 @@ int plague_from_source(struct kof_editor *e, const char *path,
 				in_blkv = 0;
 			continue;
 		}
+		if ((p = strstr(line, "kof_ovl_chain(")) != NULL) {
+			const char *ge = strstr(p, ">=");
+
+			if (chain_pct)
+				*chain_pct = ge
+					? (uint8_t)strtoul(ge + 2, NULL, 10)
+					: GRP_PCT_DEFAULT;
+			pending |= 16u;
+		}
 		if ((p = strstr(line, "kof_ovl_blocks(")) != NULL) {
 			const char *ge = strstr(p, ">=");
 
@@ -6513,6 +6603,10 @@ int plague_from_source(struct kof_editor *e, const char *path,
 			if (pending & 8u) {
 				if (blkv_level)
 					*blkv_level = lvl;
+			}
+			if (pending & 16u) {
+				if (chain_level)
+					*chain_level = lvl;
 			}
 			if (pending & ~1u) {
 				pending = 0;

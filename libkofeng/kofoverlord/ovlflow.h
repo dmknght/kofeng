@@ -42,6 +42,7 @@
 
 #include <stdint.h>
 
+#include <kofmod/kofoverlord.h>
 #include "../kofdisasm/flow.h"
 
 /*
@@ -128,5 +129,52 @@ struct kof_ovlf_hit {
 int kof_ovlf_align(const struct kof_flow_node *a, uint32_t na,
 		   const struct kof_flow_node *b, uint32_t nb,
 		   struct kof_ovlf_hit *out);
+
+/*
+ * THE STORED CHAIN - struct kof_ovlf_chain - LIVES IN kofmod/kofoverlord.h,
+ * beside kof_ovl_shape and for the same reason: a rule carries one, and a rule
+ * is compiled against the kofmod headers and nothing else.
+ */
+
+/*
+ * WHICH FLAGS ARE ABOUT THE PROGRAM, and which are about how well it was read.
+ *
+ * LOW8 says the selector resolved only in its low byte - that is a fact about
+ * the sweep's confidence, it moves when the code is re-encoded, and a rule
+ * that carried it would be a rule about the decoder. It is dropped. The rest
+ * are claims about what the code does and are kept.
+ */
+#define KOF_OVLF_FLAG_KEEP ((uint8_t)(KOF_FLOWF_LOOP | KOF_FLOWF_EXECUTED | \
+				      KOF_FLOWF_VIA_REG | KOF_FLOWF_WX))
+
+/*
+ * Pack a swept region into one. Returns 0 - and leaves the chain empty - when
+ * the region does not clear the same gate kof_ovlf_align uses, so a draft
+ * never stores a shape too thin to have meant anything.
+ */
+int kof_ovlf_chain_of(const struct kof_flow_node *v, uint32_t n,
+		      struct kof_ovlf_chain *out);
+
+/* The capability set, for the prefilter that decides whether a candidate is
+ * worth aligning at all. A candidate missing any of these bits cannot align
+ * against this chain, whatever else it has. */
+uint32_t kof_ovlf_chain_mask(const struct kof_ovlf_chain *c);
+
+/*
+ * HOW MUCH OF A STORED CHAIN THIS REGION CARRIES, as a percentage of the
+ * stored chain's length - the same shape of answer kof_ovl_shape_pct and
+ * kof_ovl_strings_pct give, so the table can put it in the same column.
+ *
+ * A HUNDRED MEANS EVERY STEP LINED UP, not that the two are the same program.
+ * What else lined up, and at what cost, is kof_ovlf_align's answer, and a
+ * rule that wants those reads them there.
+ */
+uint32_t kof_ovlf_chain_pct(const struct kof_ovlf_chain *ref,
+			    const struct kof_flow_node *v, uint32_t n);
+
+/* The stored chain as nodes again, so it can be aligned against a sample.
+ * Writes at most KOF_OVLF_CHAIN_MAX and returns how many. */
+uint32_t kof_ovlf_chain_nodes(const struct kof_ovlf_chain *c,
+			      struct kof_flow_node *out);
 
 #endif /* KOFENG_OVLFLOW_H */

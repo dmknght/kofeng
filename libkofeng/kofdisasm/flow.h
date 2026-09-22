@@ -129,6 +129,29 @@ const char *kof_flow_cap_name(uint8_t cap);
  * written, and what it is worth is measured beside the others.
  */
 #define KOF_FLOWF_VIA_REG  (1u << 3)
+/*
+ * THE PAGE IS WRITABLE AND EXECUTABLE AT THE SAME TIME.
+ *
+ * WHY THIS IS NOT THE SAME FACT AS ALLOC_EXEC, and keeping it separate is the
+ * difference between a rule and a false positive.
+ *
+ *     a JIT:     allocate READ|WRITE, emit into it, THEN flip it to
+ *                READ|EXEC. The page is never both at once - W^X, which
+ *                every serious runtime has followed for twenty years.
+ *
+ *     a loader:  allocate READ|WRITE|EXEC in one call, copy, jump. One call,
+ *                and the page is both for its whole life.
+ *
+ * Both reach this file as "allocated something executable", because the
+ * capability vocabulary deliberately does not name the API. That is right for
+ * telling mmap from VirtualAlloc and WRONG here: these two are different
+ * SHAPES, and normalising them together would put every JIT in the same bucket
+ * as every stager. So the shape is kept, as a bit on the node.
+ *
+ * POSIX spells it PROT_WRITE|PROT_EXEC; Windows spells it
+ * PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY.
+ */
+#define KOF_FLOWF_WX       (1u << 4)
 
 #define KOF_FLOW_ARGS 4u
 
@@ -435,6 +458,49 @@ uint32_t kof_flow_n_func(struct kof_flow *f);
 uint32_t kof_flow_n_node(struct kof_flow *f);
 const struct kof_flow_func *kof_flow_func_at(struct kof_flow *f, uint32_t i);
 const struct kof_flow_node *kof_flow_node_at(struct kof_flow *f, uint32_t i);
+
+/*
+ * THE CHAIN: what a call to this function DOES, with what it calls inlined
+ * where it calls it.
+ *
+ * WHY THE FUNCTION IS THE WRONG UNIT, measured rather than argued: of the 61
+ * alloc-exec nodes found in 1500 PE samples, 45 sit ALONE in their function -
+ * a region of exactly one node. A loader written as
+ *
+ *     main() { buf = setup(); fill(buf); run(buf); }
+ *
+ * is four capabilities and four functions, so at function granularity every
+ * one of them is a single point with nothing around it, and no amount of
+ * comparing points recovers the shape. The sequence only exists along the
+ * CALL PATH, so that is what gets compared.
+ *
+ * WHAT IS AND IS NOT DONE HERE:
+ *
+ *   A function is expanded ONCE per chain. A helper called from ten places
+ *   would otherwise multiply the chain by ten while saying nothing new, and
+ *   recursion would not terminate at all.
+ *
+ *   Order is the order of the CALL SITES, which is the order of the
+ *   addresses. That is the static order and not an execution order - a branch
+ *   may skip a call entirely, and kof_flow_relation is what answers whether
+ *   two of them can happen together.
+ *
+ *   Only DIRECT calls, plus the thread entries that KOF_FLOWF_* records.
+ *   A call through a function pointer is not an edge here, so a chain is a
+ *   lower bound on what the code does, never an upper one.
+ *
+ * `depth` is how many calls deep to follow; 0 is the function alone, which is
+ * what the old region was. `origin`, when given, receives the node index each
+ * entry was copied from, so kof_flow_relation still has something to answer
+ * about. Returns how many nodes were written.
+ *
+ * `from` is REWRITTEN to positions within the chain, and an argument whose
+ * producer did not make it into the chain becomes 0 - unknown, which is the
+ * honest answer and not a claim that there was none.
+ */
+uint32_t kof_flow_chain(struct kof_flow *f, uint32_t func, uint32_t depth,
+			struct kof_flow_node *out, uint32_t cap,
+			uint32_t *origin);
 
 /*
  * HOW CONCENTRATED THE CAPABILITIES ARE, per mille of the file's nodes held by

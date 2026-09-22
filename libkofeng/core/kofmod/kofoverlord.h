@@ -211,4 +211,54 @@ static inline uint32_t kof_ovl_shape_pct(const struct kof_elf_info *e,
  */
 #define kof_ovl_shape(ref) kof_ovl_shape_pct(kof_elf(ctx), &(ref), (ctx)->obj_size)
 
+/*
+ * A CALL CHAIN, AS SOMETHING A RULE CAN CARRY.
+ *
+ * What the code DOES: which capabilities it asks the system for, in order,
+ * which of them carry a program-level flag, and which took an argument an
+ * earlier one produced. See kofoverlord/ovlflow.h for how one is read out of
+ * code, and kof_ovl_chain in kofmod/kofsig.h for how a rule asks about one.
+ *
+ * NO ADDRESSES AND NO INDICES. kof_flow_node - the engine's working record -
+ * holds a virtual address, a function number and a step count, and none of
+ * those survives a rebuild or belongs in a signature. What survives is the
+ * shape, and a stored chain is exactly the shape.
+ *
+ * Fixed and small, because a rule's reference lands in the module's .rodata
+ * beside its strings and its block hashes, and a reference that needed an
+ * allocation would be one somebody has to remember to free.
+ */
+struct kof_ovlf_step {
+	uint8_t cap;    /* enum kof_flow_cap - kofdisasm/flow.h */
+	/*
+	 * The KOF_FLOWF_* bits that are about the PROGRAM: in a loop, the
+	 * value was later branched to, the import was called through a
+	 * register, the page is writable and executable at once. The bit that
+	 * says how confidently the selector was decoded is not one of them and
+	 * is never stored - that would be a rule about the decoder.
+	 */
+	uint8_t flags;
+	/*
+	 * THE LINK, as a distance and not an index.
+	 *
+	 * "Its buffer came from the step two before it" is the same claim in
+	 * every build; "its buffer came from node 674" is a fact about one
+	 * file. Only the first argument carrying one is kept: a rule that
+	 * pinned all four would be pinning the calling convention.
+	 *
+	 * 0 means no link was seen, which is NOT the same as "there is none".
+	 */
+	uint8_t back;
+};
+
+/* Long enough for every shape measured so far - the longest chain holding an
+ * alloc-exec in 1500 PE samples was 19 steps - and short enough that the
+ * alignment table stays a few hundred cells. */
+#define KOF_OVLF_CHAIN_MAX 24u
+
+struct kof_ovlf_chain {
+	struct kof_ovlf_step s[KOF_OVLF_CHAIN_MAX];
+	uint8_t n;
+};
+
 #endif /* KOFMOD_KOFOVERLORD_H */

@@ -1151,6 +1151,8 @@ static uint32_t sim_row_what(uint32_t i);
 static void sim_item_name(const struct view *v,
 			  const struct grp_sim_item *it, char *out,
 			  size_t cap);
+static uint32_t sim_chain_sweep(struct view *v, struct object *o,
+				struct kof_flow_node *out, uint32_t cap);
 static void sim_over_word(const struct view *v, uint32_t what, char *out,
 			  size_t cap);
 static uint32_t sim_offer(struct view *v, uint32_t g,
@@ -1178,7 +1180,8 @@ static void hit_optbtn(struct view *v, uint32_t arg);
 #define SIM_BLOCKS 0u
 #define SIM_STRING 1u
 #define SIM_SHAPE  2u
-#define SIM_ROWS   3u
+#define SIM_CHAIN  3u
+#define SIM_ROWS   4u
 
 
 struct view {
@@ -1230,7 +1233,7 @@ struct view {
 	 * another sample - which is the whole use of the column: it says how
 	 * alike the NEXT file is.
 	 */
-	uint32_t         sim_str, sim_shape, sim_blk;
+	uint32_t         sim_str, sim_shape, sim_blk, sim_chain;
 	/*
 	 * FOLDED TABLES.
 	 *
@@ -6633,11 +6636,24 @@ static void plg_sim_refresh(struct view *v)
 	struct object *o = cur_obj(v);
 	uint32_t i, n = 0, sum = 0;
 
-	v->sim_str = v->sim_shape = v->sim_blk = 0;
+	v->sim_str = v->sim_shape = v->sim_blk = v->sim_chain = 0;
 	if (!o || !o->buf.p)
 		return;
 
 	(void)i; (void)n; (void)sum;
+	/*
+	 * THE CHAIN FIRST, because it is the one measure that answers for a
+	 * format the three below cannot - see SIM_IT_CHAIN - so it must not
+	 * sit behind their ELF gate.
+	 */
+	if (v->ed.dr.has_chain) {
+		struct kof_flow_node tmp[KOF_OVLF_CHAIN_MAX];
+		uint32_t m = sim_chain_sweep(v, o, tmp, KOF_OVLF_CHAIN_MAX);
+
+		if (m)
+			v->sim_chain = kof_ovlf_chain_pct(&v->ed.dr.chain,
+							  tmp, m);
+	}
 	if (o->ctx.format != KOF_FMT_ELF || !o->info)
 		return;
 	if (v->ed.dr.has_shp)
@@ -8174,6 +8190,8 @@ static int plg_load_rule(struct view *v, const char *path)
 	uint8_t shp_pct = 0, str_pct = 0, blkv_pct = 0;
 	int shp_level = LV_SUSPECT, str_level = LV_INFECT;
 	int blkv_level = LV_INFECT;
+	uint8_t chain_pct = 0;
+	int chain_level = LV_SUSPECT;
 	struct kof_plague_decl d[PLG_MAX_BLOCK];
 	struct kof_verdict_decl verdict;
 	static uint32_t pool[PLG_MAX_BLOCK * KOF_PLAGUE_MAX_HASH];
@@ -8183,7 +8201,8 @@ static int plg_load_rule(struct view *v, const char *path)
 	if (!plague_from_source(&v->ed, path, d, PLG_MAX_BLOCK, &n, pool,
 				(uint32_t)(sizeof pool / sizeof pool[0]),
 				&verdict, &shp_pct, &shp_level,
-				&str_pct, &str_level, &blkv_pct, &blkv_level))
+				&str_pct, &str_level, &blkv_pct, &blkv_level,
+				&chain_pct, &chain_level))
 		return 0;
 
 	v->ed.dr.n_blk = 0;
@@ -8342,19 +8361,23 @@ static int plg_load_rule(struct view *v, const char *path)
 	 * panel shows what it recovered rather than guessing at the rest.
 	 */
 	{
-		static const uint8_t meas[3] = {
-			SIM_IT_BLKSET, SIM_IT_STRSET, SIM_IT_SHAPE
+		static const uint8_t meas[4] = {
+			SIM_IT_BLKSET, SIM_IT_STRSET, SIM_IT_SHAPE,
+			SIM_IT_CHAIN
 		};
-		uint8_t pct[3];
-		int lv[3];
-		uint32_t have[3], k;
+		uint8_t pct[4];
+		int lv[4];
+		uint32_t have[4], k;
 
 		pct[0] = blkv_pct; pct[1] = str_pct; pct[2] = shp_pct;
+		pct[3] = chain_pct;
 		lv[0]  = blkv_level; lv[1] = str_level; lv[2] = shp_level;
+		lv[3]  = chain_level;
 		have[0] = v->ed.dr.n_blkv;
 		have[1] = v->ed.dr.n_str;
 		have[2] = (uint32_t)(v->ed.dr.has_shp != 0);
-		for (k = 0; k < 3u; k++) {
+		have[3] = v->ed.dr.chain.n;
+		for (k = 0; k < 4u; k++) {
 			struct group *g;
 
 			if (!have[k] || !pct[k] || v->ed.dr.n_grp >= MAX_GROUP)
@@ -13900,7 +13923,8 @@ static uint32_t sim_row_what(uint32_t i)
 {
 	return i == SIM_BLOCKS ? SIM_IT_BLKSET
 	     : i == SIM_STRING ? SIM_IT_STRSET
-			       : SIM_IT_SHAPE;
+	     : i == SIM_SHAPE  ? SIM_IT_SHAPE
+			       : SIM_IT_CHAIN;
 }
 
 static int sim_row_shown(const struct view *v, uint32_t i)
@@ -14080,6 +14104,79 @@ static void plg_wire(struct view *v, uint32_t g, int level)
  * Zero with dr.warn set, which is what the panel shows. A block needs nothing
  * prepared - the carve already found it - so it answers yes.
  */
+/*
+ * SWEEP THIS OBJECT'S CODE AND HAND BACK THE WORTHIEST CHAIN IT HOLDS.
+ *
+ * The same walk the engine does at scan time - see kof_content.ovl_chain - so
+ * a chain generated here and a chain measured there are the same object read
+ * the same way. Worth is kof_ovlf_worth's answer, which is the gate the
+ * aligner applies, so a chain too thin to have meant anything is never
+ * offered.
+ *
+ * Returns how many nodes were written, 0 when there is no code this can read:
+ * a packed sample, an architecture the decoder does not have, or a format
+ * whose code regions nobody named.
+ */
+static uint32_t sim_chain_sweep(struct view *v, struct object *o,
+				struct kof_flow_node *out, uint32_t cap)
+{
+	unsigned bits, abi;
+	uint32_t mask, nr, i, best_n = 0, best_w = 0;
+	struct kof_flow *f;
+
+	if (!o || !o->buf.p || !o->buf.n || !v->ext2 || !out)
+		return 0;
+	if (o->ctx.arch == KOF_ARCH_X86_64)
+		bits = 64;
+	else if (o->ctx.arch == KOF_ARCH_X86)
+		bits = 32;
+	else
+		return 0;
+	if (o->ctx.format == KOF_FMT_PE) {
+		abi = KOF_FLOW_MS;
+		mask = KOF_SCAN_PE_CODE;
+	} else if (o->ctx.format == KOF_FMT_ELF) {
+		abi = KOF_FLOW_SYSV;
+		mask = KOF_SCAN_ELF_CODE;
+	} else {
+		return 0;
+	}
+	nr = kof_scan_resolve_range(&o->ctx, mask, v->ext2);
+	if (!nr)
+		return 0;
+	f = kof_flow_new();
+	if (!f)
+		return 0;
+	if (o->ctx.entry_off != KOF_NA && o->ctx.entry_off != KOF_BROKEN)
+		kof_flow_entry(f, o->ctx.entry_off);
+	for (i = 0; i < nr; i++) {
+		if (v->ext2[i].off < o->buf.n &&
+		    v->ext2[i].len <= o->buf.n - v->ext2[i].off)
+			kof_flow_add(f, o->buf.p + v->ext2[i].off,
+				     (uint32_t)v->ext2[i].len,
+				     v->ext2[i].off, bits, abi);
+	}
+	for (i = 0; i < kof_flow_n_func(f); i++) {
+		struct kof_flow_node tmp[KOF_OVLF_CHAIN_MAX];
+		uint32_t m = kof_flow_chain(f, i, 6u, tmp,
+					    cap < KOF_OVLF_CHAIN_MAX
+					    ? cap : KOF_OVLF_CHAIN_MAX, NULL);
+		uint32_t j, w = 0;
+
+		if (!kof_ovlf_worth(tmp, m))
+			continue;
+		for (j = 0; j < m; j++)
+			w += kof_ovlf_weight(tmp[j].cap);
+		if (w > best_w) {
+			best_w = w;
+			best_n = m;
+			memcpy(out, tmp, m * sizeof *tmp);
+		}
+	}
+	kof_flow_free(f);
+	return best_n;
+}
+
 static int sim_prepare(struct view *v, uint32_t what)
 {
 	struct object *o = cur_obj(v);
@@ -14088,6 +14185,26 @@ static int sim_prepare(struct view *v, uint32_t what)
 
 	if (what == SIM_IT_BLOCK)
 		return 1;
+	/*
+	 * THE CHAIN IS TAKEN FROM CODE AND NOT FROM AN ELF'S REGIONS, so it
+	 * answers before the ELF gate below and on PE as well - see
+	 * SIM_IT_CHAIN.
+	 */
+	if (what == SIM_IT_CHAIN) {
+		struct kof_flow_node tmp[KOF_OVLF_CHAIN_MAX];
+		uint32_t m = sim_chain_sweep(v, o, tmp, KOF_OVLF_CHAIN_MAX);
+
+		v->ed.dr.has_chain = m &&
+			kof_ovlf_chain_of(tmp, m, &v->ed.dr.chain);
+		if (!v->ed.dr.has_chain) {
+			snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
+				 "no chain worth naming: the code here asks "
+				 "the system for too little");
+			v->ed.dr.warn_bad = 1;
+			return 0;
+		}
+		return 1;
+	}
 	if (!o || !o->info || o->ctx.format != KOF_FMT_ELF) {
 		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
 			 "%s is taken from an ELF's regions; "
@@ -14763,6 +14880,10 @@ static void sim_over_word(const struct view *v, uint32_t what, char *out,
 		snprintf(out, cap, "%u printable run%s", v->ed.dr.n_str,
 			 v->ed.dr.n_str == 1u ? "" : "s");
 		break;
+	case SIM_IT_CHAIN:
+		snprintf(out, cap, "%u capabilit%s", v->ed.dr.chain.n,
+			 v->ed.dr.chain.n == 1u ? "y" : "ies");
+		break;
 	default:
 		snprintf(out, cap, "%u selected window%s", v->ed.dr.n_blkv,
 			 v->ed.dr.n_blkv == 1u ? "" : "s");
@@ -14775,15 +14896,29 @@ static int sim_have(const struct view *v, uint32_t what)
 {
 	return what == SIM_IT_SHAPE  ? v->ed.dr.has_shp != 0
 	     : what == SIM_IT_STRSET ? v->ed.dr.n_str != 0
+	     : what == SIM_IT_CHAIN  ? v->ed.dr.has_chain != 0
 				     : v->ed.dr.n_blkv != 0;
 }
 
 static int draw_decl_sim(struct out *o, struct view *v, int r)
 {
 	struct object *ob = cur_obj(v);
-	uint32_t i;
+	uint32_t i, n_row;
 
-	if (!ob || ob->ctx.format != KOF_FMT_ELF)
+	/*
+	 * THE TABLE OPENS ON PE TOO, and it did not before.
+	 *
+	 * The first three measures are ELF answers by construction - the shape
+	 * is read off the program headers, and both set measures depend on the
+	 * static-library subtraction, which is koflib's ELF answer. The chain
+	 * is not: a sweep of code needs no library and no program header. So
+	 * the gate moved from the table onto the ROWS, and a PE object is
+	 * offered the one measure that can answer for it rather than none.
+	 */
+	if (!ob)
+		return r;
+	n_row = ob->ctx.format == KOF_FMT_ELF ? SIM_ROWS : 1u;
+	if (ob->ctx.format != KOF_FMT_ELF && ob->ctx.format != KOF_FMT_PE)
 		return r;
 	{
 		char sum[48];
@@ -14791,7 +14926,8 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 
 		for (g = 0; g < SIM_ROWS; g++)
 			on += v->ed.dr.sim_use[sim_row_what(g)] != 0;
-		snprintf(sum, sizeof sum, " 3 measures, %u in use", on);
+		snprintf(sum, sizeof sum, " %u measure%s, %u in use", n_row,
+			 n_row == 1u ? "" : "s", on);
 		/*
 		 * THE PERCENTAGE LAST, where the block table already keeps its
 		 * score: it is the answer, and an answer belongs at the end of
@@ -14805,6 +14941,10 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 
 	for (i = 0; i < SIM_ROWS; i++) {
 		char over[32], mt[8];
+
+		/* On PE only the chain row is drawn - see above. */
+		if (n_row == 1u && i != SIM_CHAIN)
+			continue;
 		uint32_t what = sim_row_what(i), pct;
 		int on, y, c0;
 
@@ -14815,7 +14955,8 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 			continue;
 		}
 		pct = i == SIM_BLOCKS ? v->sim_blk
-		    : i == SIM_STRING ? v->sim_str : v->sim_shape;
+		    : i == SIM_STRING ? v->sim_str
+		    : i == SIM_SHAPE  ? v->sim_shape : v->sim_chain;
 		sim_over_word(v, what, over, sizeof over);
 		/*
 		 * A PERCENTAGE ONLY ONCE THERE IS SOMETHING TO COMPARE

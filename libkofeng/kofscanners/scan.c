@@ -153,6 +153,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc->lzx);
 	kof_plague_ctx_done(&sc->plague);
 	free(sc->ovl);
+	free(sc->fchain);
 	free(sc->lzh);
 	kof_xref_free(sc->use);
 	free(sc->sym);
@@ -1906,6 +1907,13 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * c_ovl_strings - so this costs a store.
 	 */
 	sc->ovl_ready = 0;
+	/* And the swept chains, for the same reason and at the same cost. */
+	sc->fchain_ready = 0;
+	/* What the two gated measures compare themselves against - see
+	 * kof_scanner.heur_lvl. Unstated is level 1, exactly as heur_object
+	 * reads it, so the two cannot drift. */
+	sc->heur_lvl = opt->heur_off ? 0u
+		     : (opt->heur_level ? opt->heur_level : 1u);
 
 	/*
 	 * ONLY THE MODULES THAT COULD TARGET THIS FORMAT - see kof_engine.mod_at.

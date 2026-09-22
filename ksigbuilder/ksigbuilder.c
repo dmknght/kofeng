@@ -404,6 +404,7 @@ static int  g_have_name;
  */
 static int      g_have_find;
 static char     g_find_sig[600];
+static const char *g_find_tag = "";
 /*
  * The same call RESOLVED to what it looks for - the pattern bytes of each
  * marker and the mask of each range, not the identifiers naming them. This is
@@ -1244,9 +1245,16 @@ static void capture_find_call(const char *at)
 	 * variants. A rule made only of a shape could not use AUTO otherwise,
 	 * while the panel that writes those rules offers it like any other.
 	 */
+	/*
+	 * AND kof_ovl_chain, which names its reference the same way - what is
+	 * hashed is the identifier, so two rules over two samples' chains
+	 * derive two variants. Left out when the measure was added and the
+	 * build refused every chain rule's AUTO until it was put back.
+	 */
 	static const char *kinds[] = { "kof_find_str_multi", "kof_find_str_all",
 					"kof_find_str_any", "kof_plague_score",
 					"kof_ovl_shape", "kof_ovl_strings", "kof_ovl_blocks",
+					"kof_ovl_chain",
 					NULL };
 	const char *best = NULL;
 	const char *best_kind = NULL;
@@ -1301,6 +1309,17 @@ static void capture_find_call(const char *at)
 
 	snprintf(g_find_sig, sizeof g_find_sig, "%s(%s)%s%s", best_kind, args,
 		 thresh[0] ? ">=" : "", thresh);
+	/*
+	 * AND WHAT KIND OF EVIDENCE NAMED IT, so the variant says so.
+	 *
+	 * "Trojan:SCLoader#3f2ka" and "Trojan:SCLoader#Ovl-3f2ka" cost the
+	 * same to carry and the second tells a reader, at the point where
+	 * they meet the name and nowhere else, that this detection came from
+	 * a similarity measure rather than from bytes that were found. The
+	 * hash is unchanged; the tag is in front of it.
+	 */
+	g_find_tag = !strncmp(best_kind, "kof_ovl_", 8u) ? "Ovl-"
+		   : !strcmp(best_kind, "kof_plague_score") ? "Plague-" : "";
 	g_find_hash = hash_resolved_call(best_kind, args, thresh);
 	g_have_find = 1;
 }
@@ -1420,7 +1439,13 @@ static int read_variant(const char *p, int line, char *out, size_t cap)
 					  "condition");
 				return 0;
 			}
-			auto_suffix(raw);
+			{
+				char sfx[6];
+
+				auto_suffix(sfx);
+				snprintf(raw, sizeof raw, "%s%s", g_find_tag,
+					 sfx);
+			}
 		} else {
 			fprintf(stderr, "%s:%d: error: \"%s\" is not a verdict "
 				"argument: want a quoted name, "
@@ -5634,6 +5659,7 @@ static void module_reset(void)
 	g_maltype = 0;
 	g_have_name = 0;
 	g_find_sig[0] = 0;
+	g_find_tag = "";
 	g_find_hash = 0;
 	g_heur_sig[0] = 0;
 	g_scan_mask_out = 0;

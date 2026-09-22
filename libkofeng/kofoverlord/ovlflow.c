@@ -209,3 +209,149 @@ int kof_ovlf_align(const struct kof_flow_node *a, uint32_t na,
 	}
 	return out->matched ? 1 : 0;
 }
+
+uint32_t kof_ovlf_chain_nodes(const struct kof_ovlf_chain *c,
+			      struct kof_flow_node *out)
+{
+	uint32_t i;
+
+	if (!c || !out)
+		return 0;
+	memset(out, 0, sizeof *out * (c->n > KOF_OVLF_CHAIN_MAX
+				      ? KOF_OVLF_CHAIN_MAX : c->n));
+	for (i = 0; i < c->n && i < KOF_OVLF_CHAIN_MAX; i++) {
+		out[i].cap = c->s[i].cap;
+		out[i].flags = c->s[i].flags;
+		out[i].step = i;
+		/* The link comes back as an index, which is what the aligner
+		 * and kof_flow_from_any read. */
+		if (c->s[i].back && c->s[i].back <= i)
+			out[i].from[0] = (uint16_t)(i - c->s[i].back + 1u);
+	}
+	return i;
+}
+
+int kof_ovlf_chain_of(const struct kof_flow_node *v, uint32_t n,
+		      struct kof_ovlf_chain *out)
+{
+	uint32_t i, j;
+
+	if (!out)
+		return 0;
+	memset(out, 0, sizeof *out);
+	if (!kof_ovlf_worth(v, n))
+		return 0;
+	if (n > KOF_OVLF_CHAIN_MAX)
+		n = KOF_OVLF_CHAIN_MAX;
+	for (i = 0; i < n; i++) {
+		out->s[i].cap = v[i].cap;
+		out->s[i].flags = (uint8_t)(v[i].flags & KOF_OVLF_FLAG_KEEP);
+		/*
+		 * The first argument that names an earlier node, turned into a
+		 * distance. A producer that fell outside the region keeps the
+		 * step unlinked rather than pointing at nothing.
+		 */
+		for (j = 0; j < KOF_FLOW_ARGS; j++) {
+			uint32_t src;
+
+			if (!v[i].from[j])
+				continue;
+			src = v[i].from[j] - 1u;
+			if (src < i && i - src < 256u) {
+				out->s[i].back = (uint8_t)(i - src);
+				break;
+			}
+		}
+	}
+	out->n = (uint8_t)n;
+	return 1;
+}
+
+uint32_t kof_ovlf_chain_mask(const struct kof_ovlf_chain *c)
+{
+	uint32_t i, m = 0;
+
+	if (!c)
+		return 0;
+	for (i = 0; i < c->n && i < KOF_OVLF_CHAIN_MAX; i++)
+		m |= 1u << c->s[i].cap;
+	return m;
+}
+
+/*
+ * HOW MUCH OF A STORED CHAIN A REGION CARRIES.
+ *
+ * NOT kof_ovlf_align, and the difference is the whole point.
+ *
+ * The aligner is SYMMETRIC - neither side is the rule - so it compares
+ * capabilities and nothing else; the flags only colour what it reports. A rule
+ * is not symmetric: "two allocations that are writable AND executable" is a
+ * different claim from "two allocations", and measured, the second is one that
+ * libswscale answers yes to. So the flags a rule asked for are REQUIRED here,
+ * by containment: a step may carry more than the reference asked, never less.
+ *
+ * THE GAP IS COUNTED IN NODES, which is the unit that junk code cannot move.
+ * Inserting instructions between two capabilities changes the byte distance
+ * and the instruction distance and leaves the node distance alone - measured,
+ * six junk instructions moved the normalised gap from 11 to 16 and moved the
+ * node sequence not at all. Bytes are what bases/signatures/meterp_00.c pins
+ * and are the reason it misses variants.
+ *
+ * GREEDY FROM EVERY START, rather than a dynamic program: the reference is at
+ * most two dozen steps and so is the region, so the exhaustive answer costs a
+ * few hundred comparisons and needs no table, no gap prices and no explaining.
+ */
+#define KOF_OVLF_CHAIN_GAP 4u   /* nodes allowed between two steps */
+
+uint32_t kof_ovlf_chain_pct(const struct kof_ovlf_chain *ref,
+			    const struct kof_flow_node *v, uint32_t n)
+{
+	uint32_t start, best = 0;
+
+	if (!ref || !ref->n || !v || !n)
+		return 0;
+	for (start = 0; start < n; start++) {
+		uint32_t i = 0, j = start, got = 0, prev = start;
+
+		while (i < ref->n && i < KOF_OVLF_CHAIN_MAX && j < n) {
+			const struct kof_ovlf_step *st = &ref->s[i];
+
+			if (v[j].cap == st->cap &&
+			    (v[j].flags & st->flags) == st->flags) {
+				/* Too far apart to be one chain: the steps
+				 * are still there, the sequence is not. */
+				if (got && j - prev > KOF_OVLF_CHAIN_GAP + 1u)
+					break;
+				/*
+				 * AND THE LINK, when the reference asked for
+				 * one. "Its buffer came from two steps back"
+				 * is checked against where the sample's
+				 * argument actually came from, not merely
+				 * that it came from somewhere.
+				 */
+				if (st->back) {
+					uint32_t q, ok = 0;
+
+					for (q = 0; q < KOF_FLOW_ARGS; q++)
+						if (v[j].from[q] &&
+						    v[j].from[q] - 1u + st->back
+						    == j)
+							ok = 1;
+					if (!ok) {
+						j++;
+						continue;
+					}
+				}
+				prev = j;
+				got++;
+				i++;
+			}
+			j++;
+		}
+		if (got > best)
+			best = got;
+		if (best >= ref->n)
+			break;
+	}
+	return best * 100u / ref->n;
+}

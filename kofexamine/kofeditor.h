@@ -37,6 +37,7 @@
 #include <kofmod/kofplague.h>
 #include <kofmod/kofoverlord.h>
 #include <kofeng.h>
+#include "../libkofeng/kofoverlord/ovlflow.h"
 #include "kofinspect.h"
 
 
@@ -411,6 +412,23 @@ static inline int grp_is_at(int rule) { return rule == 3; }
  * region is what a rebuild preserves and a coincidence does not.
  */
 #define SIM_IT_BLKSET 3u
+/*
+ * THE OBJECT'S CALL CHAIN - which capabilities its code asks the system for,
+ * in order, and which of them were handed something an earlier one produced:
+ * kof_ovl_chain. See kofoverlord/ovlflow.h.
+ *
+ * IT READS CODE AND NOT BYTES, which is what puts it beside the other three
+ * rather than inside them. The block measure is exact and dies on a recompile;
+ * the string set survives a recompile and dies on a packer that ships no
+ * strings; this survives both and dies when there is no code to read. They
+ * fail in different places, which is the only reason to carry more than one.
+ *
+ * AVAILABLE ON PE AS WELL AS ELF, unlike the three above - the shape measure
+ * is an ELF answer by construction and the two set measures depend on a
+ * library subtraction that is also an ELF answer. A sweep of code needs
+ * neither.
+ */
+#define SIM_IT_CHAIN  4u
 
 /* How many measures one similarity matcher can hold. Four kinds and, at most,
  * one block apiece for the blocks a draft carries; eight is past what any
@@ -661,6 +679,16 @@ struct kof_draft {
 	uint32_t     blkv[DRAFT_MAX_BLKV];
 	uint32_t     n_blkv;
 	/*
+	 * AND ITS CALL CHAIN - the worthiest one its code holds.
+	 *
+	 * ONE, like the shape and unlike the two sets: a chain is a sequence,
+	 * a second chain is a second sequence, and two sequences in one rule
+	 * are two claims that want two matchers. Which one is "worthiest" is
+	 * kof_ovlf_worth's answer, which is the same gate the aligner applies.
+	 */
+	struct kof_ovlf_chain chain;
+	int          has_chain;
+	/*
 	 * WHICH WHOLE-OBJECT MEASURES THE AUTHOR HAS CHOSEN, and which of them
 	 * are carried - indexed by SIM_IT_*, with the block slot unused
 	 * because a block's tick lives on the block.
@@ -676,8 +704,8 @@ struct kof_draft {
 	 * object compared with itself, which is a hundred and means nothing;
 	 * see plg_block.kept, where the score column answers the same way.
 	 */
-	uint8_t      sim_use[4];
-	uint8_t      sim_kept[4];
+	uint8_t      sim_use[5];
+	uint8_t      sim_kept[5];
 	char         sedit[DECL_HEXS_CAP];
 	uint32_t     sedit_off;
 	struct range rng[MAX_RANGE];
@@ -1295,7 +1323,8 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		       struct kof_verdict_decl *verdict,
 		       uint8_t *shp_pct, int *shp_level,
 		       uint8_t *str_pct, int *str_level,
-		       uint8_t *blkv_pct, int *blkv_level);
+		       uint8_t *blkv_pct, int *blkv_level,
+		       uint8_t *chain_pct, int *chain_level);
 
 
 /*

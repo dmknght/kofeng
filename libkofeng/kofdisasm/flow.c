@@ -555,8 +555,17 @@ static int is_page_prot(uint64_t v)
 	return base && (base & (base - 1u)) == 0;
 }
 
+/* Windows names the combinations instead of masking them, so the two that are
+ * writable and executable at once have to be named too. */
+static uint8_t ms_cap(uint64_t prot, uint8_t *flags)
+{
+	if ((prot & 0xc0u) && flags)
+		*flags |= KOF_FLOWF_WX;
+	return (prot & 0xf0u) ? KOF_CAP_ALLOC_EXEC : KOF_CAP_ALLOC;
+}
+
 static uint8_t prot_cap(const struct cmap *c, unsigned abi, unsigned bits,
-			int by_call)
+			int by_call, uint8_t *flags)
 {
 	uint64_t prot;
 	int low8;
@@ -593,8 +602,7 @@ static uint8_t prot_cap(const struct cmap *c, unsigned abi, unsigned bits,
 				if (!stack_arg(c, 3u, &prot, NULL) ||
 				    !is_page_prot(prot))
 					return KOF_CAP_ALLOC;
-			return (prot & 0xf0u) ? KOF_CAP_ALLOC_EXEC
-					      : KOF_CAP_ALLOC;
+			return ms_cap(prot, flags);
 		}
 		if (!stack_arg(c, 2u, &prot, NULL))
 			return KOF_CAP_ALLOC;
@@ -603,7 +611,7 @@ static uint8_t prot_cap(const struct cmap *c, unsigned abi, unsigned bits,
 			if (!const_of(c, R_R9, &prot, &low8) ||
 			    !is_page_prot(prot))
 				return KOF_CAP_ALLOC;
-		return (prot & 0xf0u) ? KOF_CAP_ALLOC_EXEC : KOF_CAP_ALLOC;
+		return ms_cap(prot, flags);
 	} else if (!const_of(c, R_RDX, &prot, &low8)) {
 		return KOF_CAP_ALLOC;    /* unknown - claim the weaker thing */
 	}
@@ -615,6 +623,8 @@ static uint8_t prot_cap(const struct cmap *c, unsigned abi, unsigned bits,
 	 * mask written for one reads the other as never executable, which is
 	 * the quietest possible way to lose the strongest term here.
 	 */
+	if ((prot & 6u) == 6u && flags)
+		*flags |= KOF_FLOWF_WX;
 	return (prot & 4u) ? KOF_CAP_ALLOC_EXEC : KOF_CAP_ALLOC;
 }
 
@@ -666,7 +676,14 @@ struct kof_flow {
 	 * because during the sweep the functions are not numbered yet - the
 	 * heads are still being discovered and are not in order.
 	 */
-	struct cedge { uint64_t from_va, to_va; } edge[KOF_FLOW_MAX_FUNC];
+	struct cedge {
+		uint64_t site;      /* the call instruction itself */
+		uint64_t to_va;     /* the head it goes to */
+		uint32_t site_step; /* where the call sits among the steps,
+				     * which is where the callee's nodes
+				     * belong when a chain inlines them */
+		uint16_t from_func, to_func;   /* filled in by finish() */
+	} edge[KOF_FLOW_MAX_FUNC];
 	uint32_t n_edge;
 
 	uint64_t entry;
@@ -712,11 +729,13 @@ int kof_flow_full(const struct kof_flow *f)
 	return f ? (int)f->full : 1;
 }
 
-static void add_edge(struct kof_flow *f, uint64_t from, uint64_t to)
+static void add_edge(struct kof_flow *f, uint64_t site, uint64_t to,
+		     uint32_t step)
 {
 	if (f->n_edge < KOF_FLOW_MAX_FUNC) {
-		f->edge[f->n_edge].from_va = from;
+		f->edge[f->n_edge].site = site;
 		f->edge[f->n_edge].to_va = to;
+		f->edge[f->n_edge].site_step = step;
 		f->n_edge++;
 	} else {
 		f->full = 1;
@@ -937,7 +956,7 @@ static uint32_t blk_of(const struct kof_flow *f, uint64_t va)
  * is what keeps it rare rather than a proof that it cannot happen.
  */
 static void thread_edge(struct kof_flow *f, const struct cmap *c, unsigned bits,
-			unsigned abi, int by_call, uint64_t va,
+			unsigned abi, int by_call, uint64_t va, uint32_t step,
 			uint64_t code_va, uint32_t code_n, uint8_t cap)
 {
 	const uint8_t *a;
@@ -958,7 +977,7 @@ static void thread_edge(struct kof_flow *f, const struct cmap *c, unsigned bits,
 			 * function to its own head says nothing. */
 			if (v > code_va && v < code_va + code_n) {
 				add_head(f, v);
-				add_edge(f, va, v);
+				add_edge(f, va, v, step);
 			}
 		}
 		return;
@@ -973,7 +992,7 @@ static void thread_edge(struct kof_flow *f, const struct cmap *c, unsigned bits,
 			continue;
 		if (c->v[r] > code_va && c->v[r] < code_va + code_n) {
 			add_head(f, c->v[r]);
-			add_edge(f, va, c->v[r]);
+			add_edge(f, va, c->v[r], step);
 		}
 	}
 }
@@ -986,6 +1005,9 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 	struct tset *t;
 	uint32_t at = 0, n = 0, step = 0, cur_blk = 0;
 	int in_push_run = 0;
+	/* What prot_cap learned about THIS instruction's protection word, and
+	 * nothing older: reset at the top of every iteration. */
+	uint8_t pflags = 0;
 	/*
 	 * WHICH ADDRESS EACH MAPPING CALL WAS ABOUT.
 	 *
@@ -1009,6 +1031,7 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 	 * rather than wrong in a new way. */
 
 	while (at < code_n && n < cap) {
+		pflags = 0;
 		INSTRUX ix;
 		uint32_t i, dst = NGPR;
 		uint64_t nr, va = code_va + at, next;
@@ -1083,7 +1106,7 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 				tgt = branch_target(&ix, next);
 				if (tgt >= code_va && tgt < code_va + code_n) {
 					add_head(f, tgt);
-					add_edge(f, va, tgt);
+					add_edge(f, va, tgt, step);
 				}
 				/*
 				 * AND IT MAY BE AN IMPORT. Asked of the
@@ -1118,7 +1141,7 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 					 * weaker answer stands.
 					 */
 					if (k == KOF_CAP_ALLOC)
-						k = prot_cap(&c, abi, bits, 1);
+						k = prot_cap(&c, abi, bits, 1, &pflags);
 					if (k != KOF_CAP_NONE) {
 						memset(&out[n], 0,
 						       sizeof out[n]);
@@ -1126,11 +1149,11 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 						out[n].step = step;
 						out[n].sel  = 0;
 						out[n].cap  = k;
+						out[n].flags = pflags;
 						arg_scan(&c, bits, abi, 1,
 							 &out[n]);
-						thread_edge(f, &c, bits, abi,
-							    1, va, code_va,
-							    code_n, k);
+						thread_edge(f, &c, bits, abi, 1, va, step,
+						    code_va, code_n, k);
 						n++;
 						/* The call returns in rax on
 						 * both ABIs, and that is the
@@ -1173,7 +1196,7 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 					 * made every VirtualProtect on
 					 * Windows an ordinary allocation. */
 					if (k == KOF_CAP_ALLOC)
-						k = prot_cap(&c, abi, bits, 1);
+						k = prot_cap(&c, abi, bits, 1, &pflags);
 					if ((k == KOF_CAP_ALLOC ||
 					     k == KOF_CAP_ALLOC_EXEC) &&
 					    n_mapped < 16u) {
@@ -1197,9 +1220,10 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 					out[n].va   = va;
 					out[n].step = step;
 					out[n].cap  = k;
+					out[n].flags = pflags;
 					arg_scan(&c, bits, abi, 1, &out[n]);
-					thread_edge(f, &c, bits, abi, 1, va,
-						    code_va, code_n, k);
+					thread_edge(f, &c, bits, abi, 1, va, step,
+					    code_va, code_n, k);
 					n++;
 					forget(&c, R_RAX);
 					c.src[R_RAX] = (uint16_t)n;
@@ -1423,13 +1447,13 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 								 (uint32_t)sub);
 					}
 					if (nr == 125 || nr == 192 || nr == 90)
-						k = prot_cap(&c, abi, bits, 0);
+						k = prot_cap(&c, abi, bits, 0, &pflags);
 				} else {
 					k = look(sys64, sizeof sys64 /
 						 sizeof sys64[0],
 						 (uint32_t)nr);
 					if (nr == 9 || nr == 10)
-						k = prot_cap(&c, abi, bits, 0);
+						k = prot_cap(&c, abi, bits, 0, &pflags);
 				}
 			}
 			if ((k == KOF_CAP_ALLOC || k == KOF_CAP_ALLOC_EXEC) &&
@@ -1451,9 +1475,10 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 				out[n].sel   = sel;
 				out[n].cap   = k;
 				arg_scan(&c, bits, abi, 0, &out[n]);
-				thread_edge(f, &c, bits, abi, 0, va, code_va,
-					    code_n, k);
-				out[n].flags = low8 ? KOF_FLOWF_LOW8 : 0;
+				thread_edge(f, &c, bits, abi, 0, va, step,
+						    code_va, code_n, k);
+				out[n].flags |= (uint8_t)((low8 ? KOF_FLOWF_LOW8
+							       : 0u) | pflags);
 				n++;
 			}
 			/*
@@ -1511,7 +1536,7 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 					uint8_t k3 = c.rcap[r];
 
 					if (k3 == KOF_CAP_ALLOC)
-						k3 = prot_cap(&c, abi, bits, 1);
+						k3 = prot_cap(&c, abi, bits, 1, &pflags);
 					if ((k3 == KOF_CAP_ALLOC ||
 					     k3 == KOF_CAP_ALLOC_EXEC) &&
 					    n_mapped < 16u) {
@@ -1534,11 +1559,12 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 					out[n].va    = va;
 					out[n].step  = step;
 					out[n].cap   = k3;
-					out[n].flags = KOF_FLOWF_VIA_REG;
+					out[n].flags = (uint8_t)
+						(KOF_FLOWF_VIA_REG | pflags);
 					arg_scan(&c, bits, abi, 1,
 						 &out[n]);
-					thread_edge(f, &c, bits, abi, 1, va,
-						    code_va, code_n, k3);
+					thread_edge(f, &c, bits, abi, 1, va, step,
+					    code_va, code_n, k3);
 					n++;
 					forget(&c, R_RAX);
 					c.src[R_RAX] = (uint16_t)n;
@@ -1735,6 +1761,16 @@ static int cmp_node(const void *a, const void *b)
 	return x->va < y->va ? -1 : (x->va > y->va ? 1 : 0);
 }
 
+static int cmp_edge(const void *a, const void *b)
+{
+	const struct cedge *x = (const struct cedge *)a;
+	const struct cedge *y = (const struct cedge *)b;
+
+	if (x->from_func != y->from_func)
+		return x->from_func < y->from_func ? -1 : 1;
+	return x->site < y->site ? -1 : (x->site > y->site ? 1 : 0);
+}
+
 static void finish(struct kof_flow *f)
 {
 	uint32_t i, k;
@@ -1781,16 +1817,22 @@ static void finish(struct kof_flow *f)
 	 * addresses afterwards.
 	 */
 	for (i = 0; i < f->n_edge; i++) {
-		uint32_t a = func_of(f, f->edge[i].from_va);
+		uint32_t a = func_of(f, f->edge[i].site);
 		uint32_t b = func_of(f, f->edge[i].to_va);
 
-		f->edge[i].from_va = a;
-		f->edge[i].to_va = b;
+		f->edge[i].from_func = (uint16_t)(a < f->n_func ? a
+						  : KOF_FLOW_MAX_FUNC - 1u);
+		f->edge[i].to_func = (uint16_t)(b < f->n_func ? b
+						: KOF_FLOW_MAX_FUNC - 1u);
 		if (a >= f->n_func || b >= f->n_func)
 			continue;
 		f->func[a].n_call++;
 		f->func[b].n_caller++;
 	}
+
+	/* Grouped by caller and in address order, which is the order a chain
+	 * walks them in. */
+	qsort(f->edge, f->n_edge, sizeof f->edge[0], cmp_edge);
 
 	/*
 	 * DISTANCE FROM THE ENTRY, by relaxation rather than by a queue: the
@@ -1812,8 +1854,8 @@ static void finish(struct kof_flow *f)
 			uint32_t moved = 0;
 
 			for (i = 0; i < f->n_edge; i++) {
-				uint32_t a = (uint32_t)f->edge[i].from_va;
-				uint32_t b = (uint32_t)f->edge[i].to_va;
+				uint32_t a = f->edge[i].from_func;
+				uint32_t b = f->edge[i].to_func;
 				uint32_t d;
 
 				if (a >= f->n_func || b >= f->n_func ||
@@ -1829,6 +1871,126 @@ static void finish(struct kof_flow *f)
 				break;
 		}
 	}
+}
+
+/* State carried down the walk, so the recursion stays a few words wide. */
+struct chain {
+	struct kof_flow *f;
+	struct kof_flow_node *out;
+	uint32_t *origin;
+	uint32_t cap, n;
+	uint32_t run;        /* normalised instructions walked so far */
+	uint8_t seen[KOF_FLOW_MAX_FUNC / 8u];
+};
+
+static int seen_take(struct chain *ch, uint32_t fi)
+{
+	uint32_t byte = fi >> 3, bit = 1u << (fi & 7u);
+
+	if (fi >= KOF_FLOW_MAX_FUNC || (ch->seen[byte] & bit))
+		return 0;
+	ch->seen[byte] |= (uint8_t)bit;
+	return 1;
+}
+
+static void chain_walk(struct chain *ch, uint32_t fi, uint32_t depth)
+{
+	const struct kof_flow_func *fn;
+	uint32_t j, e, prev;
+
+	if (fi >= ch->f->n_func || ch->n >= ch->cap || !seen_take(ch, fi))
+		return;
+	fn = &ch->f->func[fi];
+
+	/* Where this body's own step numbering starts, so the gaps INSIDE it
+	 * survive being placed after whatever came before. */
+	prev = fn->n ? ch->f->node[fn->first].step : 0u;
+
+	/* The edges of this function, already grouped and in address order. */
+	for (e = 0; e < ch->f->n_edge && ch->f->edge[e].from_func != fi; e++)
+		;
+
+	for (j = 0; j < fn->n && ch->n < ch->cap; j++) {
+		const struct kof_flow_node *nd = &ch->f->node[fn->first + j];
+
+		/* Everything called BEFORE this node belongs before it. */
+		while (depth && e < ch->f->n_edge &&
+		       ch->f->edge[e].from_func == fi &&
+		       ch->f->edge[e].site < nd->va) {
+			ch->run += ch->f->edge[e].site_step > prev
+				   ? ch->f->edge[e].site_step - prev : 0u;
+			prev = ch->f->edge[e].site_step;
+			chain_walk(ch, ch->f->edge[e].to_func, depth - 1u);
+			e++;
+		}
+		if (ch->n >= ch->cap)
+			return;
+		ch->run += nd->step > prev ? nd->step - prev : 0u;
+		prev = nd->step;
+		ch->out[ch->n] = *nd;
+		ch->out[ch->n].step = ch->run;
+		if (ch->origin)
+			ch->origin[ch->n] = fn->first + j;
+		ch->n++;
+	}
+	/* And whatever it calls after its last node. */
+	while (depth && e < ch->f->n_edge && ch->f->edge[e].from_func == fi &&
+	       ch->n < ch->cap) {
+		ch->run += ch->f->edge[e].site_step > prev
+			   ? ch->f->edge[e].site_step - prev : 0u;
+		prev = ch->f->edge[e].site_step;
+		chain_walk(ch, ch->f->edge[e].to_func, depth - 1u);
+		e++;
+	}
+}
+
+uint32_t kof_flow_chain(struct kof_flow *f, uint32_t func, uint32_t depth,
+			struct kof_flow_node *out, uint32_t cap,
+			uint32_t *origin)
+{
+	static uint32_t own[KOF_FLOW_ARGS * 64u];
+	struct chain ch;
+	uint32_t i, j, q;
+
+	if (!f || !out || !cap)
+		return 0;
+	finish(f);
+	if (func >= f->n_func)
+		return 0;
+
+	memset(&ch, 0, sizeof ch);
+	ch.f = f;
+	ch.out = out;
+	ch.origin = origin ? origin : (cap <= sizeof own / sizeof own[0]
+				       ? own : NULL);
+	ch.cap = cap;
+	chain_walk(&ch, func, depth);
+
+	/*
+	 * AND THE LINKS ARE REWRITTEN TO THE CHAIN'S OWN NUMBERING. Without
+	 * this a `from` still points at a node index in the whole file, which
+	 * means nothing to a comparison and everything to a bug.
+	 */
+	if (!ch.origin)
+		for (i = 0; i < ch.n; i++)
+			memset(out[i].from, 0, sizeof out[i].from);
+	else
+		for (i = 0; i < ch.n; i++)
+			for (q = 0; q < KOF_FLOW_ARGS; q++) {
+				uint32_t src;
+
+				if (!out[i].from[q])
+					continue;
+				src = out[i].from[q] - 1u;
+				out[i].from[q] = 0;
+				for (j = 0; j < ch.n; j++)
+					if (ch.origin[j] == src) {
+						out[i].from[q] =
+							(uint16_t)(j + 1u);
+						break;
+					}
+			}
+	return ch.n;
 }
 
 uint32_t kof_flow_n_func(struct kof_flow *f)

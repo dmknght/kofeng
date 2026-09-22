@@ -48,6 +48,8 @@
  * 32MB presence table out of the per-file path: it belongs to the thread, is allocated
  * once, and is reused for every object.
  */
+struct kof_flow_set;   /* kofscanners/objctx.c - the swept call chains */
+
 struct kof_scanner {
 	const struct kof_engine *eng;
 
@@ -70,7 +72,25 @@ struct kof_scanner {
 	 * a scanner that never meets an ELF should not hold one.
 	 */
 	struct kof_ovl_desc *ovl;
+	/*
+	 * AND THE OBJECT'S CALL CHAINS, swept once and shared by every rule
+	 * that asks - see kof_content.ovl_chain. A sweep costs a pass over the
+	 * code regions with a decoder, so the first ask pays for it and the
+	 * rest do not.
+	 */
+	struct kof_flow_set *fchain;
 	int                  ovl_ready;
+	int                  fchain_ready;
+	/*
+	 * THE HEURISTIC LEVEL THIS SCAN ASKED FOR, as kof_scan_option spells
+	 * it: 0 when heuristics are off, otherwise 1 and up.
+	 *
+	 * Kept here because the two most expensive similarity measures are
+	 * gated on it and the content hooks that answer them have no option
+	 * to read - see c_ovl_blocks and c_ovl_chain. Set once per object,
+	 * beside the two ready flags and for the same reason.
+	 */
+	uint32_t             heur_lvl;
 	/*
 	 * THE HIGHEST PLAGUE SCORE THE MODULE BEING RUN HAS ASKED ABOUT.
 	 *

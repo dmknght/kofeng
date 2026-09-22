@@ -1045,6 +1045,8 @@ struct kof_region_shape {
 	uint32_t reserved;
 };
 
+struct kof_ovlf_chain;   /* kofoverlord/ovlflow.h - see ovl_chain */
+
 struct kof_content {
 	uint8_t  (*rd8) (const struct kof_obj_ctx *, uint64_t off);
 	uint16_t (*rd16)(const struct kof_obj_ctx *, uint64_t off);
@@ -1537,6 +1539,29 @@ struct kof_content {
 	 */
 	uint32_t (*ovl_blocks)(const struct kof_obj_ctx *,
 			       const uint32_t *ref, uint32_t n_ref);
+
+	/*
+	 * HOW MUCH OF A REFERENCE'S CALL CHAIN THIS OBJECT CARRIES, 0..100.
+	 *
+	 * NOT BYTES AT ALL, which is why it sits beside the other two rather
+	 * than inside them. A block is a run of bytes and a string set is
+	 * content; this is what the code DOES - which capabilities it asks the
+	 * system for, in which order, and which of them were handed something
+	 * an earlier one produced. A variant recompiled for another target
+	 * shares none of the first two and all of this.
+	 *
+	 * THE REFERENCE IS THE MODULE'S OWN, like the string and block sets,
+	 * and for the same reason: it is a couple of dozen bytes of .rodata,
+	 * and an id would mean a section in the pack and a second place for
+	 * the two to disagree.
+	 *
+	 * ZERO WHEN THERE IS NO CODE THE SWEEP COULD READ - packed, ciphertext
+	 * or an architecture the decoder does not have. A rule cannot tell
+	 * that apart from "none of the chain is here" and must not try; it is
+	 * one fact about this object, exactly as with plague_score.
+	 */
+	uint32_t (*ovl_chain)(const struct kof_obj_ctx *,
+			      const struct kof_ovlf_chain *ref);
 };
 
 /*
@@ -2693,6 +2718,29 @@ void kof_unpack(const struct kof_obj_ctx *ctx);
 	 ? (ctx)->content->ovl_strings((ctx), (ref),                       \
 		(uint32_t)(sizeof (ref) / sizeof (ref)[0]))                \
 	 : 0u)
+
+/*
+ * HOW MUCH OF A REFERENCE'S CALL CHAIN THIS OBJECT CARRIES.
+ *
+ *     static const struct kof_ovlf_chain ref_chain = { ... };
+ *
+ *     if (kof_ovl_chain(ref_chain) >= 80u)
+ *             KOF_SCAN_SUSPECT(KOF_MALVAR_AUTO);
+ *
+ * The chain is the capabilities the reference's code asks the system for, in
+ * order, with the links between them - written out by the generator in
+ * kofviewer, never typed. See kofoverlord/ovlflow.h for what a step holds and
+ * why an address is not one of the things it holds.
+ *
+ * SUSPECT RATHER THAN INFECT is the generator's default, for the reason the
+ * shape measure gives: a chain says the code does the same SEQUENCE OF THINGS,
+ * and a JIT and a loader can agree on a great deal of that. What separates
+ * them is in the flags on the steps, and a rule that wants that separation
+ * asks for it there.
+ */
+#define kof_ovl_chain(ref)                                                 \
+	((ctx)->content->ovl_chain ? (ctx)->content->ovl_chain((ctx), &(ref)) \
+				   : 0u)
 
 /*
  * AT AN OFFSET THE MODULE WORKED OUT

@@ -248,6 +248,8 @@ static void mixed_rule(void)
 	uint8_t shp_pct = 0, str_pct = 0, blkv_pct = 0;
 	int shp_lv = 0, str_lv = 0, blkv_lv = 0;
 	uint32_t n = 0;
+	uint8_t chain_pct = 0;
+	int chain_lv = 0;
 	const char *path = write_tmp(src);
 
 	if (!path)
@@ -262,7 +264,8 @@ static void mixed_rule(void)
 	CK(plague_from_source(&e, path, d, 4, &n, pool,
 			      (uint32_t)(sizeof pool / sizeof pool[0]),
 			      &verdict, &shp_pct, &shp_lv, &str_pct, &str_lv,
-			      &blkv_pct, &blkv_lv) != 0);
+			      &blkv_pct, &blkv_lv, &chain_pct,
+			      &chain_lv) != 0);
 	CK(n == 1);
 	if (n) {
 		CK(d[0].id == 0xdded9322u);
