@@ -410,6 +410,34 @@ int main(int argc, char **argv)
 			memset(&seen, 0, sizeof seen);
 			kof_scan_path(sc, epath, &opt, on_object, NULL);
 			ok("and it no longer reports as infected", seen.n == 0);
+
+			/*
+			 * AND THROUGH A PATH WITH A DOUBLED SLASH.
+			 *
+			 * "//" is what the engine composes a CHILD name with,
+			 * so a filesystem path carrying one made the file
+			 * itself read as a child - and a child is never
+			 * repaired, because its offsets are into bytes the
+			 * engine produced in memory. Measured before the fix:
+			 * the same infected file reported "repairable"
+			 * through dir/x.elf and nothing at all through
+			 * dir//x.elf, so --cure silently did nothing. A shell
+			 * joining "$dir/" and "/name" writes one by accident.
+			 */
+			{
+				char dpath[512];
+
+				f = fopen(epath, "wb");
+				if (f) { fwrite(elf, 1, n, f); fclose(f); }
+				chmod(epath, 0700);
+				snprintf(dpath, sizeof dpath, "%s//host.elf",
+					 dir);
+				n_obj = 0;
+				memset(&seen, 0, sizeof seen);
+				kof_scan_path(sc, dpath, &opt, on_object, NULL);
+				ok("a doubled slash still reaches the repair",
+				   seen.n > 0 && seen.repair.n_fix == 2);
+			}
 			unlink(epath);
 		}
 	}

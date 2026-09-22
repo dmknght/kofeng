@@ -2746,6 +2746,52 @@ static void scan_one(struct walk *w, const char *path)
 		w->opt->cache_drop(w->opt->cache_user, path);
 }
 
+/*
+ * A PATH WITH "//" IN IT IS A PATH THIS NAMING CANNOT SPELL.
+ *
+ * "//" is the separator the engine composes child names with -
+ * "archive.zip//3:entry" - and kof_obj_toplevel_len finds the FIRST one to
+ * tell a file from what came out of it. A filesystem path may contain "//"
+ * too: a shell that writes "$dir/" followed by "/name" makes one, and so does
+ * any script joining two pieces that each carry a slash.
+ *
+ * The top level file was then read as a CHILD of a directory that does not
+ * exist, and that is not cosmetic. kofscanner decides three things by that
+ * test - how many FILES were scanned, which entry in its per-file table a
+ * finding belongs to, and whether a repair may be applied at all. Measured:
+ * the same infected file reported "repairable" through /dir/x.elf and said
+ * nothing at all through /dir//x.elf, so `--cure` silently did nothing for a
+ * path somebody typed with a doubled slash.
+ *
+ * The note on the trailing-slash strip below already knew about "//" at the
+ * end; this is the same hazard in the middle. Runs collapse to one, the
+ * leading pair included - Linux reads "//x" as "/x", and a name the engine
+ * cannot spell unambiguously is worse than the ordinary spelling.
+ *
+ * Returns the length written, or 0 when it would not fit.
+ */
+static size_t path_squash(const char *in, char *out, size_t cap)
+{
+	size_t i = 0, n = 0;
+
+	if (!in || !cap)
+		return 0;
+	while (in[i]) {
+		char c = in[i++];
+
+		if (c == '/' && n && out[n - 1] == '/')
+			continue;
+		if (n + 1u >= cap)
+			return 0;
+		out[n++] = c;
+	}
+	/* And the trailing one, which the callers used to strip by hand. */
+	while (n > 1u && out[n - 1u] == '/')
+		n--;
+	out[n] = 0;
+	return n;
+}
+
 static void read_dir(struct walk *w, const char *dir, uint32_t depth)
 {
 	size_t dir_len = strlen(dir);
@@ -3037,10 +3083,11 @@ int kof_scan_walk_mt(struct kof_scanner **scs, unsigned n_sc, const char *path,
 	}
 
 	{
-		size_t n = strlen(path);
-		while (n > 1 && path[n - 1] == '/')
-			n--;
-		push_dir(&prod, path, n, 0);
+		char sq[4096];
+		size_t n = path_squash(path, sq, sizeof sq);
+
+		if (n)
+			push_dir(&prod, sq, n, 0);
 	}
 	while (!prod.aborted && !prod.out_of_memory && prod.n > 0) {
 		struct pending p = prod.stack[--prod.n];
@@ -3096,7 +3143,14 @@ int kof_scan_walk(struct kof_scanner *sc, const char *path,
 		return KOF_ERR_OPEN;
 
 	if (!S_ISDIR(sb.st_mode)) {
-		scan_file(&w, path);
+		/* The single-file case needs it too: this name is what the
+		 * callback reports and what a repair is keyed on. */
+		char sq[4096];
+
+		if (path_squash(path, sq, sizeof sq))
+			scan_file(&w, sq);
+		else
+			scan_file(&w, path);
 		rc = w.objects ? (int)w.objects : KOF_ERR_OPEN;
 		free(w.path_buf);
 		return rc;
@@ -3106,11 +3160,13 @@ int kof_scan_walk(struct kof_scanner *sc, const char *path,
 		return KOF_ERR_OPEN;
 
 	{
-		/* A trailing slash would put "//" in every child path. */
-		size_t n = strlen(path);
-		while (n > 1 && path[n - 1] == '/')
-			n--;
-		if (!push_dir(&w, path, n, 0))
+		/* Both slashes: the trailing one would put "//" in every child
+		 * path, and an internal one makes the file itself unspellable
+		 * - see path_squash. */
+		char sq[4096];
+		size_t n = path_squash(path, sq, sizeof sq);
+
+		if (!n || !push_dir(&w, sq, n, 0))
 			goto done;
 	}
 
