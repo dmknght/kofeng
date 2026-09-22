@@ -101,8 +101,20 @@ int kof_ovlf_align(const struct kof_flow_node *a, uint32_t na,
 		   const struct kof_flow_node *b, uint32_t nb,
 		   struct kof_ovlf_hit *out)
 {
-	static int16_t h[AMAX + 1u][AMAX + 1u];
-	static uint8_t bt[AMAX + 1u][AMAX + 1u];
+	/*
+	 * NOT `static`, WHICH IS WHAT THEY WERE.
+	 *
+	 * The engine scans on N threads - see --jobs and unit_scan_mt - and a
+	 * static matrix is one matrix shared by all of them: two threads
+	 * aligning two different pairs would overwrite each other's cells and
+	 * both would come back with a score neither pair has. Nothing memory
+	 * unsafe, because the bounds are fixed, but a similarity answer that
+	 * depends on what another thread was doing is worse than no answer.
+	 *
+	 * 12.6 KB of frame, against -Wframe-larger-than=131072.
+	 */
+	int16_t h[AMAX + 1u][AMAX + 1u];
+	uint8_t bt[AMAX + 1u][AMAX + 1u];
 	uint32_t i, j, bi = 0, bj = 0;
 	int16_t best = 0;
 
@@ -273,8 +285,17 @@ uint32_t kof_ovlf_chain_mask(const struct kof_ovlf_chain *c)
 
 	if (!c)
 		return 0;
-	for (i = 0; i < c->n && i < KOF_OVLF_CHAIN_MAX; i++)
+	for (i = 0; i < c->n && i < KOF_OVLF_CHAIN_MAX; i++) {
+		/*
+		 * `cap` is one byte out of a stored chain, and a stored chain
+		 * arrives from a .ksig on disk. A shift by 32 or more is
+		 * UNDEFINED, not merely wrong - so the vocabulary's own bound
+		 * is checked here rather than assumed of the file.
+		 */
+		if (c->s[i].cap >= KOF_CAP_COUNT)
+			continue;
 		m |= 1u << c->s[i].cap;
+	}
 	return m;
 }
 

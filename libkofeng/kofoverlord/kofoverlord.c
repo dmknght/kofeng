@@ -257,10 +257,21 @@ static uint32_t pair_regions(const struct kof_ovl_desc *a,
 		uint8_t la[KOF_OVL_MAX_REGIONS], lb[KOF_OVL_MAX_REGIONS];
 		uint32_t na = 0, nb = 0, i, j, k;
 
-		for (i = 0; i < a->n_region; i++)
+		/*
+		 * n_region IS BOUNDED HERE TOO, not only where it is built.
+		 *
+		 * la[] and lb[] are KOF_OVL_MAX_REGIONS long and `na`/`nb`
+		 * count into them, so a desc whose n_region says more than the
+		 * region[] array holds would write past both. kof_ovl_build
+		 * caps it, and the module-side twin in kofmod/kofoverlord.h
+		 * writes `i < s->n_region && i < KOF_OVL_MAX_REGIONS` for
+		 * exactly this reason - this side was the one that trusted the
+		 * count.
+		 */
+		for (i = 0; i < a->n_region && i < KOF_OVL_MAX_REGIONS; i++)
 			if (a->region[i].x == want)
 				la[na++] = (uint8_t)i;
-		for (i = 0; i < b->n_region; i++)
+		for (i = 0; i < b->n_region && i < KOF_OVL_MAX_REGIONS; i++)
 			if (b->region[i].x == want)
 				lb[nb++] = (uint8_t)i;
 		/* descending by size - insertion, at most eight */
