@@ -659,20 +659,37 @@ static int filter_decide(struct kofw_ptab *t, const struct kofw_filter *f,
 	if (!f)
 		return 1;
 
-	if (f->types && !(f->types & (1u << e->type))) {
+	/*
+	 * EVERY ONE OF THESE SHIFTS IS BOUNDED FIRST.
+	 *
+	 * `type` is a uint16_t and the other two are bytes, all three taken
+	 * from a record this file did not build - a shift of 32 or more is
+	 * UNDEFINED, not merely a wrong bit. The decoder only ever writes
+	 * values from its own tables, so this is not a hole somebody walks
+	 * through; it is the same guard kofmod/kofoverlord.h already writes as
+	 * `if (g->type < 32u)` over a p_type out of an ELF header, applied to
+	 * the three places here that did not.
+	 *
+	 * A value too large to be a bit is treated as "not in the set", which
+	 * is what an unknown verb, location or provider is.
+	 */
+	if (f->types && (e->type >= 32u ||
+			 !(f->types & (1u << e->type)))) {
 		if (why)
 			*why = KOFW_REFUSE_TYPE;
 		return 0;
 	}
 
-	if (f->drop_loc && (f->drop_loc & (1u << e->obj_loc))) {
+	if (f->drop_loc && e->obj_loc < 32u &&
+	    (f->drop_loc & (1u << e->obj_loc))) {
 		if (why)
 			*why = KOFW_REFUSE_LOC;
 		return 0;
 	}
 
 	if (scoped &&
-	    !(f->scope_exempt_prov & (1u << e->provider))) {
+	    (e->provider >= 32u ||
+	     !(f->scope_exempt_prov & (1u << e->provider)))) {
 		/* Judged on the SUBJECT, which for a file or network event is
 		 * the process that acted. */
 		p = kofw_ptab_of(t, e->pid,

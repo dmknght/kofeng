@@ -410,14 +410,29 @@ static void progress_clear(struct run *r)
  */
 static int repair_apply(const char *path, const struct kof_repair *rp)
 {
-	FILE *f = fopen(path, "r+b");
+	/*
+	 * kof_fopen_rw AND kof_fseek64, NOT fopen AND fseek.
+	 *
+	 * The opener refuses to follow a link: this file was identified by
+	 * scanning THIS file, and if the name now points somewhere else the
+	 * answer is to fail rather than to repair whatever it points at.
+	 *
+	 * The seek is sixty-four bit. `fseek` takes a long, this offset is a
+	 * uint64, and on mingw-w64 a long is thirty-two bits - so the cast that
+	 * used to be here wrapped, and a wrapped offset does not fail, it puts
+	 * the sixteen bytes of a repair somewhere else in the user's file. The
+	 * scanner maps a top level file whole however large it is, and
+	 * kof_cure_patch bounds the offset by the OBJECT, so the offset really
+	 * can pass 4 GB.
+	 */
+	FILE *f = kof_fopen_rw(path);
 	uint32_t i;
 	int ok = 1;
 
 	if (!f)
 		return 0;
 	for (i = 0; i < rp->n_fix && ok; i++) {
-		if (fseek(f, (long)rp->fix[i].off, SEEK_SET) != 0 ||
+		if (!kof_fseek64(f, rp->fix[i].off) ||
 		    fwrite(rp->fix[i].b, 1, rp->fix[i].n, f) != rp->fix[i].n)
 			ok = 0;
 	}

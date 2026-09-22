@@ -4033,6 +4033,24 @@ static void log_window(struct view *v)
 			break;
 		if (off + len > v->map_len)
 			break;
+		/*
+		 * AND THAT THE RECORD IS ACTUALLY A struct kof_evt.
+		 *
+		 * The reads below reach into the mapping at FIXED offsets -
+		 * verb at 32, content_len further in - while the only thing
+		 * checked here was that the record fits the file. The log is
+		 * record-agnostic on purpose: kofevt_log_open takes head_size
+		 * from the file and asks only that it is non-zero, no larger
+		 * than the record and big enough to hold the length field. A
+		 * log declaring a head of two bytes is therefore accepted, and
+		 * a two-byte record at the end of the mapping would have had
+		 * its `verb` read thirty bytes past it.
+		 *
+		 * KOF_EVT_HEAD is the fixed part of the record, so one test
+		 * covers every field these loops name.
+		 */
+		if (len < KOF_EVT_HEAD)
+			break;
 
 		memcpy(&vb, (const uint8_t *)v->map + off +
 			    offsetof(struct kof_evt, verb), sizeof vb);
@@ -4089,7 +4107,7 @@ static void log_window(struct view *v)
 
 			if (!kofevt_log_extent(v->log, i + 1u, &coff, &clen))
 				break;
-			if (coff + clen > v->map_len)
+			if (coff + clen > v->map_len || clen < KOF_EVT_HEAD)
 				break;
 			memcpy(&cvb, (const uint8_t *)v->map + coff +
 				     offsetof(struct kof_evt, verb),

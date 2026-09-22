@@ -252,8 +252,27 @@ static int grant_uid(struct kof_chan_pub *p, uid_t uid, gid_t gid)
 
 	bare = p->n_wake[0] == '/' ? p->n_wake + 1 : p->n_wake;
 	snprintf(sem_path, sizeof sem_path, "/dev/shm/sem.%s", bare);
-	(void)chown(sem_path, uid, gid);
-	(void)chmod(sem_path, 0600);
+	/*
+	 * BEST EFFORT, AND CONSUMED RATHER THAN CAST AWAY.
+	 *
+	 * The semaphore's backing file is the one object here POSIX gives no
+	 * descriptor for, so its path is a guess at glibc's layout. On a libc
+	 * that puts it elsewhere these fail with ENOENT and the channel still
+	 * works, because the two objects that matter were handled by
+	 * descriptor above - which is why this is not checked.
+	 *
+	 * `(void)` DOES NOT SILENCE warn_unused_result. glibc marks chown
+	 * __wur under _FORTIFY_SOURCE, and a cast is not a use; the result has
+	 * to land somewhere. Reported from a host that builds with fortify on,
+	 * where this was a warning at both of the two places that do it.
+	 */
+	{
+		int sem_rc = chown(sem_path, uid, gid);
+
+		if (sem_rc == 0)
+			sem_rc = chmod(sem_path, 0600);
+		(void)sem_rc;
+	}
 
 	/*
 	 * PROVE IT RATHER THAN ASSUME IT. Everything above can report success
@@ -300,8 +319,14 @@ static int grant_group(struct kof_chan_pub *p, gid_t gid)
 	}
 	bare = p->n_wake[0] == '/' ? p->n_wake + 1 : p->n_wake;
 	snprintf(sem_path, sizeof sem_path, "/dev/shm/sem.%s", bare);
-	(void)chown(sem_path, (uid_t)-1, gid);
-	(void)chmod(sem_path, 0660);
+	/* Best effort, and consumed - see the note in the call above. */
+	{
+		int sem_rc = chown(sem_path, (uid_t)-1, gid);
+
+		if (sem_rc == 0)
+			sem_rc = chmod(sem_path, 0660);
+		(void)sem_rc;
+	}
 
 	if (fstat(p->fd_data, &sd) != 0 || fstat(p->fd_cur, &sc) != 0) {
 		if (!errno) errno = EPERM;

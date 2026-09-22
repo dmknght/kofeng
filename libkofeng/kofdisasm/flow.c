@@ -891,6 +891,35 @@ static void find_targets(struct tset *t, const uint8_t *code, uint32_t code_n,
 }
 
 /* Open a block at `va`, closing whatever was open. */
+/*
+ * THE RESOLVER'S ANSWER, BOUNDED - and this is the library's own ABI, not a
+ * file format.
+ *
+ * kof_flow_resolve_fn returns a uint8_t and the header says it is an
+ * enum kof_flow_cap; the type cannot say that, and nothing checked it. The
+ * value is stored in node.cap, and finish() then does
+ *
+ *     f->func[fi].mask |= 1u << f->node[k].cap;
+ *
+ * so a resolver answering 140 made that shift undefined. Found by fuzzing this
+ * library through its own API - the one resolver it has today is objctx's
+ * import lookup, which returns kof_flow_cap_of and is always in range, so
+ * reading the call sites never showed it.
+ *
+ * Out of vocabulary becomes KOF_CAP_NONE, which is what every target the
+ * resolver does not recognise already becomes - see the note on
+ * kof_flow_resolve_fn.
+ */
+static uint8_t resolve_cap(struct kof_flow *f, uint64_t target)
+{
+	uint8_t k;
+
+	if (!f || !f->resolve)
+		return (uint8_t)KOF_CAP_NONE;
+	k = f->resolve(target, f->resolve_user);
+	return k < (uint8_t)KOF_CAP_COUNT ? k : (uint8_t)KOF_CAP_NONE;
+}
+
 static uint32_t blk_open(struct kof_flow *f, uint64_t va)
 {
 	if (f->n_blk >= KOF_FLOW_MAX_BLOCK) {
@@ -1117,8 +1146,7 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 				 * thing is asked for.
 				 */
 				if (f->resolve && n < cap) {
-					uint8_t k = f->resolve(tgt,
-							f->resolve_user);
+					uint8_t k = resolve_cap(f, tgt);
 
 					/*
 					 * AND WHETHER THE MAPPING CAN BE
@@ -1187,7 +1215,7 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 
 					if (!slot)
 						continue;
-					k = f->resolve(slot, f->resolve_user);
+					k = resolve_cap(f, slot);
 					if (k == KOF_CAP_NONE || n >= cap)
 						continue;
 					/* And whether the mapping can be run
@@ -1299,7 +1327,7 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 			uint32_t d2 = gpr_of(&ix.Operands[0]);
 
 			if (slot && d2 < NGPR) {
-				uint8_t k2 = f->resolve(slot, f->resolve_user);
+				uint8_t k2 = resolve_cap(f, slot);
 
 				forget(&c, d2);
 				c.rcap[d2] = k2;

@@ -59,6 +59,12 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <io.h>
+/* _O_CREAT, _O_EXCL, _O_TRUNC, _O_RDWR, _O_BINARY - used by the openers below.
+ * This header compiled without it only because every translation unit that
+ * includes it happened to include <fcntl.h> first; a header that needs a
+ * constant should ask for it itself. */
+#include <fcntl.h>
+#include <sys/stat.h>     /* _S_IREAD, _S_IWRITE */
 
 #include <string.h>
 #include <locale.h>
@@ -860,10 +866,89 @@ static inline int kof_abs_path(const char *in, char *out, size_t cap)
  * truncate, Windows needs a handle and SetEndOfFile.
  */
 #ifdef _WIN32
+/*
+ * OPEN AN EXISTING FILE TO REPAIR IT, AND SEEK IN IT WITH 64 BITS.
+ *
+ * Two things the repair path needs and plain fopen/fseek do not give it.
+ *
+ * NOT FOLLOWING A LINK. The file was identified by scanning THAT file; if the
+ * name now points somewhere else, the thing to do is fail, not write into
+ * whatever it points at. On POSIX that is O_NOFOLLOW. Windows has reparse
+ * points rather than symlinks and _open cannot refuse them, so this side is
+ * the same open the rest of this header does and the guarantee is the ACL's -
+ * said here rather than implied, because the two platforms are not equal on
+ * this point.
+ *
+ * SIXTY-FOUR BIT OFFSETS. fseek takes a long, and on mingw-w64 a long is
+ * thirty-two bits: casting a uint64 offset to it is a wrap, and a wrapped
+ * offset does not fail - it seeks somewhere else and the sixteen bytes of a
+ * repair land in the middle of the user's file. An infected object larger than
+ * 4 GB is unusual and the scanner maps one whole, so the offset really can get
+ * there.
+ */
+/*
+ * REFUSE A REPARSE POINT, which is what O_NOFOLLOW means on this side.
+ *
+ * _open cannot say it, so the handle is taken with
+ * FILE_FLAG_OPEN_REPARSE_POINT - which opens the LINK rather than following it
+ * - and then the attributes are read back and a reparse point is refused
+ * outright. Opening the link and writing to it would be no better than
+ * following it; the POSIX side refuses, so this refuses.
+ *
+ * A JUNCTION IS THE REASON THIS IS NOT ONLY ABOUT SYMLINKS. A directory
+ * junction needs no privilege to create on any Windows since Vista, and a
+ * file symlink needs one only outside Developer Mode - so "an unprivileged
+ * process cannot plant one" is not true here the way it is on Linux.
+ */
+static inline HANDLE kof_win_open_nofollow(const char *path, DWORD access,
+					   DWORD disposition, DWORD share)
+{
+	BY_HANDLE_FILE_INFORMATION bi;
+	HANDLE h = CreateFileA(path, access, share, NULL, disposition,
+			       FILE_ATTRIBUTE_NORMAL |
+			       FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+
+	if (h == INVALID_HANDLE_VALUE)
+		return INVALID_HANDLE_VALUE;
+	if (GetFileInformationByHandle(h, &bi) &&
+	    (bi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+		CloseHandle(h);
+		return INVALID_HANDLE_VALUE;
+	}
+	return h;
+}
+
+static inline FILE *kof_fopen_rw(const char *path)
+{
+	HANDLE h = kof_win_open_nofollow(path, GENERIC_READ | GENERIC_WRITE,
+					 OPEN_EXISTING, 0);
+	int fd;
+	FILE *fp;
+
+	if (h == INVALID_HANDLE_VALUE)
+		return NULL;
+	fd = _open_osfhandle((intptr_t)h, _O_RDWR | _O_BINARY);
+	if (fd < 0) {
+		CloseHandle(h);
+		return NULL;
+	}
+	fp = _fdopen(fd, "r+b");
+	if (!fp)
+		_close(fd);        /* which closes the handle too */
+	return fp;
+}
+
+static inline int kof_fseek64(FILE *f, uint64_t off)
+{
+	return _fseeki64(f, (__int64)off, SEEK_SET) == 0;
+}
+
 static inline int kof_truncate_file(const char *path, uint64_t len)
 {
-	HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-			       FILE_ATTRIBUTE_NORMAL, NULL);
+	/* Through the same refusal kof_fopen_rw uses: this is the OTHER half of
+	 * a repair, and cutting a file the name merely points at is the same
+	 * mistake as writing into one. */
+	HANDLE h = kof_win_open_nofollow(path, GENERIC_WRITE, OPEN_EXISTING, 0);
 	LARGE_INTEGER li;
 	int ok;
 
@@ -875,9 +960,45 @@ static inline int kof_truncate_file(const char *path, uint64_t len)
 	return ok;
 }
 #else
+/* See the Windows side for why the repair path needs its own opener, its own
+ * seek and its own truncate. O_NOFOLLOW here is the real thing. */
+static inline FILE *kof_fopen_rw(const char *path)
+{
+	int fd = open(path, O_RDWR | O_NOFOLLOW);
+	FILE *fp;
+
+	if (fd < 0)
+		return NULL;
+	fp = fdopen(fd, "r+b");
+	if (!fp)
+		close(fd);
+	return fp;
+}
+
+static inline int kof_fseek64(FILE *f, uint64_t off)
+{
+	return fseeko(f, (off_t)off, SEEK_SET) == 0;
+}
+
 static inline int kof_truncate_file(const char *path, uint64_t len)
 {
-	return truncate(path, (off_t)len) == 0;
+	/*
+	 * ftruncate ON AN O_NOFOLLOW HANDLE, not truncate() ON A PATH.
+	 *
+	 * truncate(2) resolves the path and follows a symlink, so the opener
+	 * beside this one refusing to follow links bought nothing: a repair is
+	 * a patch AND a cut, and cutting the file a name merely points at is
+	 * the same mistake as writing into it. Caught by unit_cure, which
+	 * asserts both halves rather than the one that had been thought about.
+	 */
+	int fd = open(path, O_WRONLY | O_NOFOLLOW);
+	int ok;
+
+	if (fd < 0)
+		return 0;
+	ok = ftruncate(fd, (off_t)len) == 0;
+	close(fd);
+	return ok;
 }
 #endif
 
@@ -1012,8 +1133,25 @@ static inline FILE *kof_fopen_trunc(const char *path)
 	FILE *fp;
 
 #ifdef _WIN32
-	fd = _open(path, _O_CREAT | _O_TRUNC | _O_WRONLY | _O_BINARY,
-		   _S_IREAD | _S_IWRITE);
+	{
+		/* Created or truncated, and never through a link - see
+		 * kof_win_open_nofollow. OPEN_ALWAYS rather than CREATE_ALWAYS
+		 * so an existing reparse point is REFUSED instead of being
+		 * replaced; the truncation is done below, on a handle that has
+		 * already been shown to be a real file. */
+		HANDLE h = kof_win_open_nofollow(path, GENERIC_WRITE,
+						 OPEN_ALWAYS, 0);
+
+		if (h == INVALID_HANDLE_VALUE)
+			return NULL;
+		if (!SetEndOfFile(h)) {
+			CloseHandle(h);
+			return NULL;
+		}
+		fd = _open_osfhandle((intptr_t)h, _O_WRONLY | _O_BINARY);
+		if (fd < 0)
+			CloseHandle(h);
+	}
 #else
 	fd = open(path, O_CREAT | O_TRUNC | O_WRONLY | O_NOFOLLOW, 0600);
 #endif

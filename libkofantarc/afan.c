@@ -32,6 +32,13 @@ struct kofa_fan {
 
 	char     watch[AFAN_MAX_WATCH][256];
 	int      watch_fd[AFAN_MAX_WATCH];
+	/* Whether watch[i] names a FILE rather than a directory - the two are
+	 * different marks and the path is assembled differently for each. */
+	uint8_t  watch_is_file[AFAN_MAX_WATCH];
+	/* Named but not watched: too long for watch[], or the mark was
+	 * refused. Reported, because a watch nobody took is a question the
+	 * operator asked and did not get. */
+	uint32_t n_refused;
 	/*
 	 * AND THE KERNEL'S OWN NAME FOR EACH ONE, taken when it was marked.
 	 *
@@ -249,7 +256,19 @@ static const char *event_path(struct kofa_fan *f,
 		 */
 		if (hit >= f->n_watch && f->n_watch == 1u)
 			hit = 0;
-		if (hit < f->n_watch)
+		if (hit < f->n_watch && f->watch_is_file[hit])
+			/*
+			 * A FILE WATCH IS ALREADY THE WHOLE PATH.
+			 *
+			 * The name in the record is the file's own - the info
+			 * record carries the PARENT's handle and the entry's
+			 * name - so joining it to a watch that is itself the
+			 * file produced "/some/file.txt/file.txt". Measured the
+			 * first time --watch was pointed at a file.
+			 */
+			snprintf(f->path, sizeof f->path, "%s",
+				 f->watch[hit]);
+		else if (hit < f->n_watch)
 			snprintf(f->path, sizeof f->path, "%s/%s",
 				 f->watch[hit], name);
 		else
@@ -266,14 +285,28 @@ static const char *event_path(struct kofa_fan *f,
  * Returns 0 for an event this build does not file - a mask with no verb, or a
  * queue overflow, which is counted rather than reported as an event.
  */
-static int to_evt(struct kofa_fan *f,
+/*
+ * `raw` AND `m`, WHICH ARE THE SAME BYTES READ TWO WAYS.
+ *
+ * struct fanotify_event_metadata carries an __aligned_u64 and therefore wants
+ * 8 byte alignment, and the records in the read buffer do not all start on one:
+ * measured on this host, a FAN_REPORT_FID event comes back with event_len 76,
+ * so the record after it begins four bytes off. Casting the cursor to the
+ * struct was undefined there, which UBSan says out loud and a strict-alignment
+ * target would say with a fault.
+ *
+ * So the caller copies the fixed header into an aligned local and hands it
+ * over as `m`, while `raw` stays the address the record really has - the info
+ * records that follow it need only four byte alignment and are read in place.
+ */
+static int to_evt(struct kofa_fan *f, const char *raw,
 		  const struct fanotify_event_metadata *m,
 		  uint16_t verb, struct kof_evt *out)
 {
 	const char *name = NULL;
 	struct file_handle *fh = NULL;
 	const struct fanotify_event_info_header *h;
-	const char *end = (const char *)m + m->event_len;
+	const char *end = raw + m->event_len;
 
 	if (!verb)
 		return 0;
@@ -297,7 +330,7 @@ static int to_evt(struct kofa_fan *f,
 	 * discipline the OUTER walk already keeps with FAN_EVENT_OK, applied
 	 * to the nested one, and it costs three comparisons per info record.
 	 */
-	h = (const void *)((const char *)m + sizeof *m);
+	h = (const void *)(raw + sizeof *m);
 	while ((const char *)h + sizeof *h <= end && h->len >= sizeof *h &&
 	       (const char *)h + h->len <= end) {
 		const char *h_end = (const char *)h + h->len;
@@ -429,10 +462,20 @@ static int fan_next(void *self, struct kof_evt *out, uint32_t wait_ms)
 		 * walk step past the end of the last event.
 		 */
 		while (f->at && f->have > 0) {
-			const struct fanotify_event_metadata *m =
-				(const void *)f->at;
+			/*
+			 * COPIED, NOT POINTED AT - see the note on to_evt.
+			 * FAN_EVENT_OK dereferences the header too, so the
+			 * copy has to come first, and it needs its own length
+			 * check because that is what FAN_EVENT_OK would have
+			 * made.
+			 */
+			struct fanotify_event_metadata md;
+			const struct fanotify_event_metadata *m = &md;
 			uint16_t verb;
 
+			if (f->have < (ssize_t)sizeof md)
+				break;
+			memcpy(&md, f->at, sizeof md);
 			if (!FAN_EVENT_OK(m, f->have))
 				break;
 
@@ -478,7 +521,7 @@ static int fan_next(void *self, struct kof_evt *out, uint32_t wait_ms)
 				f->have -= m->event_len;
 				continue;
 			}
-			if (to_evt(f, m, verb, out)) {
+			if (to_evt(f, f->at, m, verb, out)) {
 				/*
 				 * COUNTED WHERE IT IS EMITTED, not where the
 				 * fanotify record was read.
@@ -581,6 +624,13 @@ static void fan_print_extra(void *self, FILE *out)
 		(unsigned long long)f->produced);
 	for (i = 0; i < f->n_watch; i++)
 		fprintf(out, "    %s\n", f->watch[i]);
+	/* Said out loud. A path the caller named and this did not take is a
+	 * watch they think they have - see watch_fits. */
+	if (f->n_refused)
+		fprintf(out,
+			"    %u path(s) NAMED BUT NOT WATCHED - too long for\n"
+			"      this build's 256 byte limit, or the mark was\n"
+			"      refused by the kernel\n", f->n_refused);
 	if (f->mode == KOFA_FAN_DEGRADED)
 		fprintf(out,
 			"  DEGRADED: no privilege, so dirent events only and\n"
@@ -603,11 +653,31 @@ static void fan_close_api(void *self)
 
 /* --------------------------------------------------------------- opening */
 
+/*
+ * A PATH THAT DOES NOT FIT IS REFUSED, NOT STORED SHORT.
+ *
+ * watch[] is 256 bytes a row and PATH_MAX is 4096, so an ordinary deep path
+ * does not fit - and snprintf would truncate it without a word. What is stored
+ * here is what gets REPORTED: for a directory watch the record is assembled as
+ * "<watch>/<name>", and for a file watch the watch IS the reported object. A
+ * truncated one therefore names a path the event never happened at, which is
+ * the failure the note in event_path is about - a missing path is a gap
+ * somebody can see, an invented one is a lie.
+ */
+static int watch_fits(const char *p)
+{
+	size_t n = 0;
+
+	while (p[n])
+		n++;
+	return n > 0 && n < 256u;   /* sizeof kofa_fan.watch[0] */
+}
+
 static int add_watch(struct kofa_fan *f, const char *dir, uint64_t mask)
 {
 	int fd;
 
-	if (f->n_watch >= AFAN_MAX_WATCH)
+	if (f->n_watch >= AFAN_MAX_WATCH || !watch_fits(dir))
 		return 0;
 	if (fanotify_mark(f->fd, FAN_MARK_ADD, mask, AT_FDCWD, dir) != 0)
 		return 0;
@@ -621,6 +691,44 @@ static int add_watch(struct kofa_fan *f, const char *dir, uint64_t mask)
 		f->watch_h[f->n_watch].h.handle_bytes = MAX_HANDLE_SZ;
 		f->watch_h_ok[f->n_watch] =
 			name_to_handle_at(AT_FDCWD, dir,
+					  &f->watch_h[f->n_watch].h,
+					  &mnt, 0) == 0;
+	}
+	f->n_watch++;
+	return 1;
+}
+
+/*
+ * A MARK ON ONE FILE, which is a different watch from a mark on its directory.
+ *
+ * add_watch above opens the path O_DIRECTORY, so it cannot take a file at all;
+ * and the mask it is given for a directory is the dirent set, which never
+ * carries a write. This takes the inode and asks for the writes - measured
+ * unprivileged on this kernel: the mark is accepted and another process's
+ * write arrives with FAN_MODIFY | FAN_CLOSE_WRITE.
+ *
+ * No descriptor is kept: watch_fd is the mount fd open_by_handle_at needs, and
+ * that is a FULL session's path. Here the handle taken below is what lets a
+ * record be recognised as this watch.
+ */
+static int add_watch_file(struct kofa_fan *f, const char *path)
+{
+	if (f->n_watch >= AFAN_MAX_WATCH || !watch_fits(path))
+		return 0;
+	if (fanotify_mark(f->fd, FAN_MARK_ADD,
+			  FAN_MODIFY | FAN_CLOSE_WRITE | FAN_ATTRIB,
+			  AT_FDCWD, path) != 0)
+		return 0;
+
+	snprintf(f->watch[f->n_watch], sizeof f->watch[0], "%s", path);
+	f->watch_fd[f->n_watch] = -1;
+	f->watch_is_file[f->n_watch] = 1;
+	{
+		int mnt = 0;
+
+		f->watch_h[f->n_watch].h.handle_bytes = MAX_HANDLE_SZ;
+		f->watch_h_ok[f->n_watch] =
+			name_to_handle_at(AT_FDCWD, path,
 					  &f->watch_h[f->n_watch].h,
 					  &mnt, 0) == 0;
 	}
@@ -689,7 +797,10 @@ struct kofa_fan *kofa_fan_open(const struct kofa_fan_option *opt, int *err)
 	 * refused the session is DEGRADED and says so rather than pretending
 	 * the directories it can watch are the same answer.
 	 */
-	if (!o.dirs &&
+	/* A caller that NAMED something wants that and not the whole machine -
+	 * the filesystem mark would answer a question nobody asked and would
+	 * need a privilege they may not have. */
+	if (!o.dirs && !o.files &&
 	    fanotify_mark(f->fd, FAN_MARK_ADD | FAN_MARK_FILESYSTEM,
 			  full_mask, AT_FDCWD, "/") == 0) {
 		f->mode = KOFA_FAN_FULL;
@@ -701,6 +812,11 @@ struct kofa_fan *kofa_fan_open(const struct kofa_fan_option *opt, int *err)
 		if (o.dirs) {
 			for (i = 0; o.dirs[i]; i++)
 				(void)add_watch(f, o.dirs[i], dirent_mask);
+		}
+		if (o.files) {
+			for (i = 0; o.files[i]; i++)
+				if (!add_watch_file(f, o.files[i]))
+					f->n_refused++;
 		}
 		if (!f->n_watch) {
 			/*

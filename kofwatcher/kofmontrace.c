@@ -573,6 +573,17 @@ struct tracer {
 	uint32_t root_pid;
 };
 
+/*
+ * THE FILES --watch NAMED, or NULL for "whatever this host will give".
+ *
+ * A file list, not a directory list, because the two are different marks and
+ * only the inode one reports a write - see kofa_fan_option.files. Static
+ * rather than threaded through every caller: there is one tracer per run and
+ * the list is read once, at open.
+ */
+static const char *g_watch[32];
+static unsigned    g_n_watch;
+
 static int tracer_open(struct tracer *t, unsigned providers, uint32_t ring)
 {
 	int err = 0;
@@ -617,6 +628,17 @@ static int tracer_open(struct tracer *t, unsigned providers, uint32_t ring)
 		 * degraded session, and the group test below is what scopes -
 		 * so the self-filter must not drop them first. */
 		fo.trace_self = 1;
+		/*
+		 * WHAT --watch NAMED. The list is NULL-terminated and the
+		 * array has a spare slot for that, so a full list is still a
+		 * valid one. Naming anything also stops the collector from
+		 * reaching for the whole-filesystem mark, which is a different
+		 * question and a privilege the operator may not have.
+		 */
+		if (g_n_watch) {
+			g_watch[g_n_watch] = NULL;
+			fo.files = g_watch;
+		}
 		t->fan = kofa_fan_open(&fo, &err);
 		if (!t->fan) {
 			fprintf(stderr, "kofmontrace: %s\n",
@@ -1214,6 +1236,17 @@ static void usage(void)
 	      "                  last thing a process did routinely arrives\n"
 	      "                  after its own ProcessStop.\n"
 	      "  --ring N        records in flight (default 65536, 640B each)\n"
+#ifndef _WIN32
+	      "  --watch PATH    watch THIS FILE, repeatable. A mark on a\n"
+	      "                  file reports writes to it; a mark on a\n"
+	      "                  directory reports only what appears and\n"
+	      "                  disappears in it, which is why this takes\n"
+	      "                  files and not directories.\n"
+	      "                  WITHOUT ROOT THE RECORD HAS NO ACTOR: the\n"
+	      "                  kernel names the writer only to a privileged\n"
+	      "                  listener, so unprivileged this says that the\n"
+	      "                  file changed and not who changed it.\n"
+#endif
 	      "  --log FILE      record every event this run KEPT into FILE, as\n"
 	      "                  fixed 640-byte records behind a header. The\n"
 	      "                  point is replay: a rule that cannot be run\n"
@@ -1465,6 +1498,12 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "--ring") && i + 1 < argc)
 			ring = (uint32_t)strtoul(argv[++i],
 							      NULL, 10);
+		else if (!strcmp(argv[i], "--watch") && i + 1 < argc) {
+			if (g_n_watch + 1u < sizeof g_watch / sizeof g_watch[0])
+				g_watch[g_n_watch++] = argv[++i];
+			else
+				i++;   /* said below, once, not per name */
+		}
 		else if (!strcmp(argv[i], "--raw"))
 			show_raw = 1;          /* the default; kept so an old
 						* command line still works */

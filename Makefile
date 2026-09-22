@@ -2135,10 +2135,21 @@ $(TEST)/unit_draft_source$(EXE): tests/unit/draft_source.c $(EDITOR_SRC) \
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $< $(EDITOR_SRC) $(LIB) \
 	      -o $@ $(LDFLAGS)
 
+# ASAN_CFLAGS AND ASAN_LDFLAGS DO NOT EXIST, and this recipe named both.
+#
+# An undefined make variable expands to nothing, so the command became
+# `$(CC) $(DEPTO) ...` - `-MF <file>` with no -MMD in front of it - and cc1
+# refused with "to generate dependencies you must specify either -M or -MM".
+# The target therefore never built, and because nothing depends on it the only
+# way to find out was to ask for it by name. It is the sanitised twin of the
+# editor's draft reader, so kofexamine had no ASan coverage at all.
+#
+# Spelled like its two siblings above and below: $(CFLAGS) $(ASAN_FLAGS), and
+# no $(DEPTO), because they carry no dep file either.
 $(TEST)/asan_draft_source$(EXE): tests/unit/draft_source.c $(EDITOR_SRC) \
                               $(ASAN_LIB) $(SDK_HDR) $(STAMP) | $(TEST)
-	$(CC) $(ASAN_CFLAGS) $(DEPTO) -I$(SDK)/include $< $(EDITOR_SRC) \
-	      $(ASAN_LIB) -o $@ $(ASAN_LDFLAGS)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) -I$(SDK)/include $< $(EDITOR_SRC) \
+	       $(ASAN_LIB) -o $@ $(LDFLAGS)
 
 $(TEST)/unit_cond_expr$(EXE): tests/unit/cond_expr.c $(EDITOR_SRC) $(LIB) \
                               $(SDK_HDR) $(STAMP) | $(TEST)

@@ -98,6 +98,31 @@ struct kofa_fan_option {
 	const char *const *dirs;
 
 	/*
+	 * SINGLE FILES TO WATCH, NULL-terminated, beside `dirs` rather than
+	 * instead of them.
+	 *
+	 * A DIRECTORY MARK AND AN INODE MARK ARE NOT THE SAME WATCH, which is
+	 * the whole reason this field exists. A mark on a directory reports
+	 * only dirent events about its children - measured above: writing a
+	 * file in a marked directory produced CREATE and nothing else. A mark
+	 * on the FILE reports what happens to that file, and FAN_MODIFY and
+	 * FAN_CLOSE_WRITE do arrive. Measured on this kernel as an ordinary
+	 * user:
+	 *
+	 *   fanotify_mark(FAN_MARK_ADD, FAN_MODIFY|FAN_CLOSE_WRITE, "/a/file")
+	 *        -> OK unprivileged, and a write by another process arrives
+	 *           with mask 0xa.
+	 *
+	 * WHAT IT STILL DOES NOT BUY IS THE ACTOR. The same measurement came
+	 * back pid=0: the kernel names the raiser only to a privileged
+	 * listener, whatever kind of mark it is. So this answers "that file
+	 * changed" and not "who changed it", and a caller deciding something
+	 * about an infected file needs to know which of those two it has -
+	 * kofa_fan_mode is how it asks.
+	 */
+	const char *const *files;
+
+	/*
 	 * REPORT THIS PROCESS'S OWN EVENTS. Off by default.
 	 *
 	 * A scanner reads files; reading them raises events; those events
