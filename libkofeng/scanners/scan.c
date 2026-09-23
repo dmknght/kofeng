@@ -2280,6 +2280,62 @@ static uint32_t norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	return KOF_SYM_HDRLEN + kept * KOF_SYM_RECLEN;
 }
 
+/*
+ * CODE IS A SEGMENT, AND THE INSTRUCTIONS ARE ONLY PART OF IT.
+ *
+ * KOF_SCAN_ELF_CODE is the loadable segment with PF_X, and a linker puts
+ * .rodata in there beside .text - so "CODE" holds every string literal the
+ * program has as well as its opcodes. Kept byte for byte, as the whole region
+ * was, those strings could not be rewritten: an IoT dropper's exploits are
+ * percent-encoded form bodies sitting in .rodata, the decode pass rewrote them
+ * and the restore put them straight back. Measured on one: the payload at
+ * offset 162554, every executable section ending at 134934.
+ *
+ * The reason for keeping CODE is about INSTRUCTIONS - "opcodes are what a hex
+ * rule is written against, byte for byte" - and it is still true of them. So
+ * what is kept is the executable SECTIONS, which is what that sentence was
+ * always about, and the rest of the segment is rewritten like any other data.
+ *
+ * ONLY WHERE THE FILE SAYS SO. A stripped object with no section table cannot
+ * tell its instructions from its strings, and guessing would move opcodes. It
+ * keeps the whole region, exactly as before.
+ */
+static void norm_keep_exec(uint8_t *keep, uint64_t n,
+			   const struct kof_elf_info *e,
+			   const struct kof_src_region *r, uint32_t nr)
+{
+	uint32_t i;
+
+	if (!e || !e->sec_count)
+		return;
+	/* Take the whole of CODE back... */
+	for (i = 0; i < nr; i++) {
+		uint64_t j, end;
+
+		if (r[i].mask != (uint32_t)KOF_SCAN_ELF_CODE)
+			continue;
+		if (r[i].off >= n)
+			continue;
+		end = r[i].len > n - r[i].off ? n : r[i].off + r[i].len;
+		for (j = r[i].off; j < end; j++)
+			keep[j >> 3] &= (uint8_t)~(1u << (j & 7u));
+	}
+	/* ...and give back only what is instructions. */
+	for (i = 0; i < e->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
+		const struct kof_elf_sec *c = &e->sec[i];
+		uint64_t j, end;
+
+		if (!(c->flags & 0x4u))         /* SHF_EXECINSTR */
+			continue;
+		if (!c->file_size || c->file_off >= n)
+			continue;
+		end = c->file_size > n - c->file_off ? n
+						     : c->file_off + c->file_size;
+		for (j = c->file_off; j < end; j++)
+			keep[j >> 3] |= (uint8_t)(1u << (j & 7u));
+	}
+}
+
 static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		      kof_buf buf)
 {
@@ -2438,8 +2494,13 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		free(drop);
 		return;
 	}
-	if (nr)
+	if (nr) {
 		norm_keep_bits(keep, buf.n, rgn, nr);
+		/* And CODE narrowed to the instructions in it - see
+		 * norm_keep_exec. */
+		if (ctx->format == KOF_FMT_ELF && ctx->file_header)
+			norm_keep_exec(keep, buf.n, kof_elf(ctx), rgn, nr);
+	}
 	if (lib->n) {
 		uint32_t a;
 

