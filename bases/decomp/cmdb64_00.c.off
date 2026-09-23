@@ -1,4 +1,33 @@
 /*
+ * cmdb64_00.c - DISABLED. Not built: ksigbuilder packs a directory and takes
+ * only *.c, so the suffix is what turns a module off. Put the ".c" back to
+ * build it again.
+ *
+ * WHAT REPLACED IT. kof_exe_unb64, in libkofeng/analyzer/normalize/
+ * executables.c. The finding logic there is this file's, carried over test for
+ * test - the anchor, the walk back over the pipe, the alphabet run, the `=`
+ * rule and the delimiter check. What differs is the result: the payload is
+ * decoded INTO THE NORMALISED VIEW at its own offset rather than handed back
+ * as a child object.
+ *
+ * WHY. "This object carries something written in a form the matcher cannot
+ * read" is the question the normaliser exists to answer, and executables.h had
+ * already named base64 as one of the two cases it covers. Answering it twice,
+ * in two layers, in two shapes, is the duplication the analysis steps were
+ * ordered to remove - see enum kof_analyze. A rewrite costs one pass; a child
+ * costs identification, a parse, a budget, a tree row and a full pass through
+ * every module, for what is usually a second shell command.
+ *
+ * WHAT IS LOST, because it is real: a payload that is itself an executable was
+ * PARSED as one here. In the view it is bytes and only patterns reach it. The
+ * note below says the common payload is a command rather than a binary, which
+ * is why this was judged worth it and not why it is free.
+ *
+ * ------------------------------------------------------------------------
+ *
+ * The original note follows, and all of its reasoning still applies to the
+ * code that replaced it.
+ *
  * cmdb64_00.c - the base64 payload of a shell command stored inside a binary.
  *
  * WHAT THIS IS FOR. A dropper does not need a script file. Mirai and everything
