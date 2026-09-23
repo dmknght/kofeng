@@ -115,6 +115,31 @@ static int hex_prog_valid(const uint8_t *p, uint32_t len)
 	 * mask scan below walked off the mapping. Establish "off <= len" first, then
 	 * subtract: the same rule kofcore.h states for every read of a file.
 	 */
+	/*
+	 * ALIGNED, AND THE BOUNDS ARE NOT ENOUGH ON THEIR OWN.
+	 *
+	 * The two tables are read as arrays of structs - `st[i].n_alts`,
+	 * `al[j].len` - and a struct read through a pointer that is not
+	 * aligned for it is undefined. The offsets come out of a FILE, so a
+	 * corrupted or hostile pack can put them anywhere, and every bound
+	 * below can hold while the address is still odd.
+	 *
+	 * NOT A BUG THAT WAS OBSERVED, AND THAT IS WORTH SAYING. The program's
+	 * own base is aligned where it really lives: dbpacker pads the string
+	 * pool to KOF_HEX_PROG_ALIGN before each program and every section is
+	 * laid out on KOF_PACK_SEC_ALIGN. A fuzzer that mutated 400,000
+	 * compiled programs and walked the 40,778 this function accepted found
+	 * no misaligned read once its own buffer was aligned the way the pack
+	 * is - the misalignment it first reported was the harness's byte
+	 * aligned array, not the loader.
+	 *
+	 * It is kept because the bounds below do not cover it: a corrupted pack
+	 * can leave the program's base aligned and still put a table at an odd
+	 * offset INSIDE it, and every test below would pass. It costs two
+	 * instructions and refuses nothing the compiler produces.
+	 */
+	if (h->steps_off % 4u || h->alts_off % 4u)
+		return 0;
 	if (h->steps_off < sizeof *h || h->steps_off > len ||
 	    h->n_steps > (len - h->steps_off) / sizeof *st)
 		return 0;
@@ -145,18 +170,46 @@ static int hex_prog_valid(const uint8_t *p, uint32_t len)
 
 			if (a->len == 0 || a->len > KOF_HEX_MAX_ALT_LEN)
 				return 0;
-			if (a->flags & ~(KOF_HEX_ALT_MASKED | KOF_HEX_ALT_NEG))
+			if (a->flags & ~(KOF_HEX_ALT_MASKED |
+					 KOF_HEX_ALT_NEG |
+					 KOF_HEX_ALT_CLASS))
 				return 0;
-			/* NEG implies MASKED: the negation array sits after
-			 * the mask array, and one without the other would have
-			 * the matcher read the masks as negations. */
-			if ((a->flags & KOF_HEX_ALT_NEG) &&
-			    !(a->flags & KOF_HEX_ALT_MASKED))
-				return 0;
-			if (a->flags & KOF_HEX_ALT_MASKED)
-				need += a->len;
-			if (a->flags & KOF_HEX_ALT_NEG)
-				need += a->len;
+			/*
+			 * A CLASS IS ONE BYTE AND A 32-BYTE TABLE, and nothing
+			 * else - see KOF_HEX_ALT_CLASS.
+			 *
+			 * Exclusive with the other two, because the bitmap
+			 * already decides the byte and a mask beside it would
+			 * be a second answer about the same position. Checked
+			 * here rather than trusted, for the reason this whole
+			 * function exists: the program came out of a file.
+			 *
+			 * The length is pinned to 1 as well. The matcher reads
+			 * one byte for a class however long `len` claims to be,
+			 * so a program claiming more would have the span
+			 * arithmetic above describe a match longer than what is
+			 * actually compared.
+			 */
+			if (a->flags & KOF_HEX_ALT_CLASS) {
+				if (a->flags & (KOF_HEX_ALT_MASKED |
+						KOF_HEX_ALT_NEG))
+					return 0;
+				if (a->len != 1u)
+					return 0;
+				need = 32u;
+			} else {
+				/* NEG implies MASKED: the negation array sits
+				 * after the mask array, and one without the
+				 * other would have the matcher read the masks
+				 * as negations. */
+				if ((a->flags & KOF_HEX_ALT_NEG) &&
+				    !(a->flags & KOF_HEX_ALT_MASKED))
+					return 0;
+				if (a->flags & KOF_HEX_ALT_MASKED)
+					need += a->len;
+				if (a->flags & KOF_HEX_ALT_NEG)
+					need += a->len;
+			}
 			if (a->data_off < h->data_off || a->data_off > len ||
 			    need > len - a->data_off)
 				return 0;
@@ -195,6 +248,17 @@ static int hex_prog_valid(const uint8_t *p, uint32_t len)
 		}
 	}
 	return 1;
+}
+
+/*
+ * Reachable by name from the pack fuzzer, which corrupts a compiled program and
+ * then walks whatever this accepts - see the note in that test. Nothing in the
+ * product calls it: the validator's one caller is a few hundred lines below.
+ */
+int kof_hex_prog_valid_for_test(const uint8_t *p, uint32_t len);
+int kof_hex_prog_valid_for_test(const uint8_t *p, uint32_t len)
+{
+	return hex_prog_valid(p, len);
 }
 
 /*

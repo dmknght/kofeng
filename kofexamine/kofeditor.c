@@ -4530,17 +4530,33 @@ no_head:
 					continue;
 				memcpy(d->bytes, text, d->len);
 				d->nbytes = d->len;
-				d->icase = strstr(line, "KOF_CASE_ICASE") != 0;
-				/* TOKEN first: it is the newer spelling and
-				 * neither string contains the other, so the
-				 * order is only about reading the specific
-				 * answer before the general one. */
-				d->fullword = strstr(line, "KOF_WORD_TOKEN")
-					    ? KOF_WORD_TOKEN
-					    : strstr(line, "KOF_WORD_FULLWORD")
-					    ? KOF_WORD_FULLWORD
-					    : KOF_WORD_SUBSTRING;
 			}
+			/*
+			 * THE OPTIONS, FOR EITHER KIND, and they used to be
+			 * read on the literal branch alone.
+			 *
+			 * A hex pattern could not carry them when this was
+			 * written. Now that it can, reading them on one branch
+			 * means a rule declaring an ICASE hex marker opens as
+			 * an exact-case one and Generate writes that back: the
+			 * option survives a build and does not survive being
+			 * looked at, which is the worse of the two.
+			 *
+			 * Only the option reading is shared. The bytes are not:
+			 * a hex declaration's text is a PATTERN and converting
+			 * it the way a literal is converted turns "??" into a
+			 * zero byte, which is a different pattern.
+			 */
+			d->icase = strstr(line, "KOF_CASE_ICASE") != 0;
+			/* TOKEN first: it is the newer spelling and neither
+			 * string contains the other, so the order is only
+			 * about reading the specific answer before the general
+			 * one. */
+			d->fullword = strstr(line, "KOF_WORD_TOKEN")
+				    ? KOF_WORD_TOKEN
+				    : strstr(line, "KOF_WORD_FULLWORD")
+				    ? KOF_WORD_FULLWORD
+				    : KOF_WORD_SUBSTRING;
 			d->obj = e->cur;
 			d->grp = 0;
 			snprintf(d->rgn, sizeof d->rgn, "-");
@@ -5768,7 +5784,27 @@ have_path:
 			else
 				for (j = 0; j < d->nbytes; j++)
 					fprintf(f, "%02X", d->bytes[j]);
-			fprintf(f, "\");\n");
+			/*
+			 * THE OPTIONS, AND ONLY WHEN THEY SAY SOMETHING.
+			 *
+			 * The short form means exact case, matching anywhere,
+			 * and that is what most hex patterns are - a byte
+			 * pattern has no case and no word to be part of.
+			 * Writing the defaults onto all of them would be noise
+			 * on the majority to serve the few, so the long form
+			 * appears exactly where a choice was made.
+			 */
+			if (d->icase || d->fullword)
+				fprintf(f, "\", %s, %s);\n",
+					d->icase ? "KOF_CASE_ICASE"
+						 : "KOF_CASE_EXACT",
+					d->fullword == KOF_WORD_TOKEN
+						? "KOF_WORD_TOKEN"
+						: d->fullword == KOF_WORD_FULLWORD
+						? "KOF_WORD_FULLWORD"
+						: "KOF_WORD_SUBSTRING");
+			else
+				fprintf(f, "\");\n");
 		} else {
 			fprintf(f, "KOF_DEFINE_STR%s(s%u, \"",
 				d->wide ? "_WIDE" : "", i);

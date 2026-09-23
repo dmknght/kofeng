@@ -363,6 +363,7 @@ enum decl_kind {
 	DECL_STR,
 	DECL_STRWIDE,
 	DECL_HEXSTR,
+	DECL_REGEX,
 	DECL_NAME,
 	DECL_PLAGUE
 };
@@ -376,6 +377,7 @@ static const struct macro macros[] = {
 	{ "KOF_TARGET_RANGE",  DECL_RANGE   },
 	{ "KOF_TARGET_NAME",   DECL_NAME    },
 	{ "KOF_DEFINE_HEXSTR", DECL_HEXSTR  },
+	{ "KOF_DEFINE_REGEX",  DECL_REGEX   },
 	/* BEFORE KOF_DEFINE_STR, which is a prefix of it - see the note on the
 	 * enum above. Tested the other way round, every wide declaration would
 	 * be read as a plain one and silently look for the unencoded bytes. */
@@ -463,6 +465,52 @@ static void heur_sig_add(const char *line)
  * split on commas at depth 1. Strings are skipped while balancing, since a pattern is
  * free to contain a comma or a parenthesis.
  */
+/*
+ * HOW MANY ARGUMENTS THE MACRO WAS GIVEN, without complaining about it.
+ *
+ * nth_arg reports "too few arguments" when what was asked for is not there,
+ * which is right when the argument is required and wrong when the point is to
+ * find out whether it was written. KOF_DEFINE_HEXSTR takes two forms - with
+ * and without its options - and telling them apart is a question, not a fault.
+ *
+ * The scan is nth_arg's, minus the reporting: string literals are skipped
+ * whole so a comma inside one is not an argument separator.
+ */
+static int arg_count(const char *p)
+{
+	const char *open = strchr(p, '(');
+	int depth = 0, n = 0;
+
+	if (!open)
+		return 0;
+	for (p = open; *p; p++) {
+		if (*p == '"') {
+			p++;
+			while (*p && *p != '"') {
+				if (*p == '\\' && p[1])
+					p++;
+				p++;
+			}
+			if (!*p)
+				return n;
+			continue;
+		}
+		if (*p == '(') {
+			if (++depth == 1)
+				n = 1;
+			continue;
+		}
+		if (*p == ')') {
+			if (--depth == 0)
+				break;
+			continue;
+		}
+		if (*p == ',' && depth == 1)
+			n++;
+	}
+	return n;
+}
+
 static const char *nth_arg(const char *p, int want, int line)
 {
 	const char *open = strchr(p, '(');
@@ -698,6 +746,62 @@ static int read_mask(const char *p, int line, struct rng *out)
  * later argument may contain quotes, and scanning for the first one is how a
  * pattern silently becomes the wrong bytes.
  */
+/*
+ * THE REGEX TEXT, WHICH IS A C STRING LITERAL AND HAS TO BE READ AS ONE.
+ *
+ * A hex pattern has no backslash in it, so read_hex_text below takes the source
+ * text between the quotes and hands it over as it stands. A regex does: "\." is
+ * how it says "a dot, not any byte", and in a C file that is written "\\.".
+ * Passed through raw, the compiler sees TWO characters - an escaped backslash
+ * and then a dot meaning any byte - so the pattern silently becomes "a
+ * backslash followed by anything", which matches nothing a reader expected.
+ *
+ * Only the two escapes that C forces are undone here - a backslash and a quote.
+ * Every other sequence is left exactly as written, because it belongs to the
+ * regex and not to C, and because a C source cannot contain any other backslash
+ * sequence anyway: "\." is not a C escape and the compiler that builds the
+ * module would refuse it first.
+ */
+static int read_regex_text(const char *p, int line, char *out, size_t cap)
+{
+	const char *q = nth_arg(p, 2, line);
+	size_t n = 0;
+
+	if (!q)
+		return 0;
+	while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')
+		q++;
+	if (*q != '"') {
+		err(line, "the pattern must be a quoted string");
+		return 0;
+	}
+	q++;
+	while (*q && *q != '"') {
+		char c = *q;
+
+		if (c == '\\' && (q[1] == '\\' || q[1] == '"')) {
+			c = q[1];
+			q++;
+		}
+		if (n + 1u >= cap) {
+			err(line, "the pattern is too long");
+			return 0;
+		}
+		out[n++] = c;
+		q++;
+	}
+	if (*q != '"') {
+		err(line, "unterminated pattern");
+		return 0;
+	}
+	out[n] = 0;
+	if (!n) {
+		err(line, "an empty pattern");
+		return 0;
+	}
+	return 1;
+}
+
 static int read_hex_text(const char *p, int line, char *out, size_t cap)
 {
 	const char *q;
@@ -2307,7 +2411,7 @@ static void scan_line(char *at, size_t line_len, int lineno)
 			return;
 		}
 
-		if (m->kind == DECL_HEXSTR) {
+		if (m->kind == DECL_HEXSTR || m->kind == DECL_REGEX) {
 			/*
 			 * The hex text is read the same way a literal is - argument
 			 * two and nowhere else - and then compiled. Case and word
@@ -2317,22 +2421,64 @@ static void scan_line(char *at, size_t line_len, int lineno)
 			char text[MAX_LITERAL];
 			struct kof_hex_stat st;
 
-			if (!read_hex_text(p, lineno, text, sizeof text))
+			if (m->kind == DECL_REGEX) {
+				if (!read_regex_text(p, lineno, text,
+						     sizeof text))
+					return;
+			} else if (!read_hex_text(p, lineno, text,
+						  sizeof text)) {
 				return;
-			o->len = kof_hex_compile(text, o->bytes, sizeof o->bytes,
-						 &st);
+			}
+			/*
+			 * TWO SYNTAXES, ONE PROGRAM - so the kind stored is
+			 * KOF_STR_HEX either way and nothing downstream has to
+			 * know which was written. See kof_regex_compile.
+			 */
+			o->len = m->kind == DECL_REGEX
+			       ? kof_regex_compile(text, o->bytes,
+						   sizeof o->bytes, &st)
+			       : kof_hex_compile(text, o->bytes,
+						 sizeof o->bytes, &st);
 			if (o->len == 0) {
 				err(lineno, kof_hex_error());
 				return;
 			}
 			o->kind = KOF_STR_HEX;
+			/*
+			 * THE OPTIONS, WHEN THEY WERE WRITTEN.
+			 *
+			 * Two forms are accepted: the bare one every existing
+			 * rule uses, and the one that names a case and a word
+			 * option the way a literal does. Two rather than one
+			 * because 45 declarations in bases/ and tests/ use the
+			 * short form and a flag day would have changed them all
+			 * in the same commit that taught the matcher a new
+			 * rule - two things to bisect instead of one.
+			 *
+			 * The defaults are what the short form has always
+			 * meant: bytes as written, matching anywhere.
+			 */
+			if (arg_count(p) >= 4) {
+				if (!read_enum(p, 3, lineno, "the case option",
+					       "KOF_CASE_EXACT",
+					       "KOF_CASE_ICASE", &o->icase))
+					return;
+				if (!read_enum3(p, 4, lineno, "the word option",
+						"KOF_WORD_SUBSTRING",
+						"KOF_WORD_FULLWORD",
+						"KOF_WORD_TOKEN",
+						&o->fullword))
+					return;
+			}
 			/* The anchor length is printed because it is the number a
 			 * researcher can act on and the one nothing else would
 			 * surface: below four the presence set cannot rule this
 			 * pattern out, so it is searched on every object of its
 			 * format, forever. */
-			printf("   hex %-22s %u step(s) %u alt(s) span %u..%u "
-			       "anchor %u%s\n", o->name, st.n_steps, st.n_alts,
+			printf("   %-3s %-22s %u step(s) %u alt(s) span %u..%u "
+			       "anchor %u%s\n",
+			       m->kind == DECL_REGEX ? "re" : "hex",
+			       o->name, st.n_steps, st.n_alts,
 			       st.min_span, st.max_span, st.anchor_len,
 			       st.anchor_len < 4 ? "  (too short for the presence "
 						   "set)" : "");
@@ -2437,7 +2583,13 @@ static void emit_str_record(FILE *out, const struct pat *p, int idx)
 	 * something goes wrong, which is what the sidecar is for.
 	 */
 	if (p->kind == KOF_STR_HEX) {
-		fprintf(out, "h\t%d\t%u\t", idx, p->len);
+		/* h <idx> <icase> <word> <len> <program in hex>. The two option
+		 * columns used to be absent, so a hex pattern's case and word
+		 * choices were read out of the source and dropped here - the
+		 * declaration compiled, the options were printed at build time,
+		 * and nothing downstream ever saw them. */
+		fprintf(out, "h\t%d\t%d\t%d\t%u\t", idx, p->icase,
+			p->fullword, p->len);
 		for (i = 0; i < p->len; i++)
 			fprintf(out, "%02x", p->bytes[i]);
 		fputc('\n', out);
@@ -5027,7 +5179,7 @@ static int strs_load(struct artefact *a)
 			bytes_len += len;
 		/* h <id> <len> <program as hex digits> */
 		} else if (p[0] == 'h' && p[1] == '\t') {
-			unsigned long len;
+			unsigned long len, hic = 0, hfw = 0;
 			char *end;
 			uint32_t k;
 
@@ -5035,6 +5187,16 @@ static int strs_load(struct artefact *a)
 			tab = strchr(p, '\t');       /* past the id column */
 			if (!tab)
 				continue;
+			p = tab + 1;
+			tab = strchr(p, '\t');       /* the case option */
+			if (!tab)
+				continue;
+			hic = strtoul(p, 0, 10);
+			p = tab + 1;
+			tab = strchr(p, '\t');       /* the word option */
+			if (!tab)
+				continue;
+			hfw = strtoul(p, 0, 10);
 			p = tab + 1;
 			tab = strchr(p, '\t');
 			if (!tab)
@@ -5093,7 +5255,10 @@ static int strs_load(struct artefact *a)
 			a->str[a->n_str].bytes = (const uint8_t *)(uintptr_t)bytes_len;
 			a->str[a->n_str].len   = (uint16_t)len;
 			a->str[a->n_str].kind  = KOF_STR_HEX;
-			a->str[a->n_str].flags = 0;
+			a->str[a->n_str].flags = (uint8_t)
+				((hic ? KOF_STR_ICASE : 0u) |
+				 (hfw == 1 ? KOF_STR_FULLWORD :
+				  hfw == 2 ? KOF_STR_TOKEN : 0u));
 			a->n_str++;
 			bytes_len += len;
 		}

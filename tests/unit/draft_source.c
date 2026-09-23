@@ -485,6 +485,61 @@ static void shipped_rules_are_all_modelled(void)
 	       "%d refused without one\n", read, cured, foreign);
 }
 
+/*
+ * A HEX MARKER'S OPTIONS SURVIVE BEING OPENED.
+ *
+ * They are newer than the reader: a hex pattern could not carry a case or a
+ * word option when draft_from_source was written, so the reader took them on
+ * the literal branch and nowhere else. A rule declaring an ICASE hex marker
+ * therefore opened as an exact-case one, and Generate wrote that back - the
+ * option survives a build and does not survive being looked at, which loses it
+ * silently and in the one direction nobody checks.
+ *
+ * Both spellings are read here, because the short form is what almost every
+ * hex marker in bases/ uses and it has to keep meaning exactly what it meant.
+ */
+static void hex_options_survive(void)
+{
+	static const char src[] =
+		"#include <kofmod/kofsig.h>\n"
+		"KOF_TARGET_FORMAT(KOF_FMT_ELF);\n"
+		"KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, \"Hexopt\");\n"
+		"KOF_TARGET_RANGE(scan_range_whole_file, KOF_SCAN_ALL);\n"
+		"KOF_DEFINE_HEXSTR(s0, \"63 6D 64\");\n"
+		"KOF_DEFINE_HEXSTR(s1, \"63 6D 64\", KOF_CASE_ICASE, "
+			"KOF_WORD_FULLWORD);\n"
+		"void kof_scan(const struct kof_obj_ctx *ctx)\n"
+		"{\n"
+		"\tif (kof_find_str_any(scan_range_whole_file, s0, s1))\n"
+		"\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n"
+		"}\n";
+	struct kof_editor e;
+	const char *path = write_tmp(src);
+
+	if (!path)
+		return;
+	lend(&e);
+	CK(draft_from_source(&e, path) != 0);
+	CK(e.dr.n_decl == 2);
+	if (e.dr.n_decl == 2) {
+		/* The short form is exact case, matching anywhere - and that
+		 * must not drift, because it is what bases/ is written in. */
+		CK(e.dr.decl[0].hex == 1);
+		CK(e.dr.decl[0].icase == 0);
+		CK(e.dr.decl[0].fullword == KOF_WORD_SUBSTRING);
+		/* And the long form keeps what it said. */
+		CK(e.dr.decl[1].hex == 1);
+		CK(e.dr.decl[1].icase == 1);
+		CK(e.dr.decl[1].fullword == KOF_WORD_FULLWORD);
+		/* The PATTERN text is kept verbatim either way: converting it
+		 * the way a literal is converted turns "??" into a zero byte,
+		 * which is a different pattern. */
+		EQ(e.dr.decl[1].hexs, "63 6D 64");
+	}
+	draft_clear(&e);
+	unlink(path);
+}
+
 int main(void)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -494,6 +549,7 @@ int main(void)
 	mixed_rule();
 	at_place_is_kept();
 	at_place_forms();
+	hex_options_survive();
 	shipped_rules_are_all_modelled();
 
 	if (fails) {

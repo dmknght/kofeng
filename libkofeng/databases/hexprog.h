@@ -184,6 +184,32 @@ struct kof_hex_step {
 #define KOF_HEX_ALT_MASKED 1u
 
 /*
+ * ONE BYTE FROM A SET OF 256, as a bitmap - what a regex character class needs
+ * and what neither a mask nor a list of alternatives can give it.
+ *
+ * A mask is bitwise and a class is a RANGE: [a-z] is 26 values with no common
+ * bit pattern, and writing it as alternatives costs 26 of the 8 a step may
+ * hold. So the alternative carries 32 bytes at data_off, one bit per possible
+ * value, and `len` is 1 - it matches exactly one input byte.
+ *
+ * NO SPELLING IN HEX SYNTAX, and that is not an omission. "[4-6]" already means
+ * a JUMP in the syntax this borrowed from YARA, so a class written the same way
+ * would be read as a gap by every pattern already in bases/. It is emitted by
+ * the regex front end, which has its own syntax and no such collision.
+ *
+ * NOT A CONCRETE BYTE, so it contributes nothing to the anchor - the same rule a
+ * mask and a negation follow, and for the same reason: there is no single value
+ * to search the object for. A pattern made only of classes therefore has no
+ * anchor, which is exactly the pattern that must be refused rather than searched
+ * for at every offset of every object.
+ *
+ * EXCLUSIVE WITH MASKED AND NEG. The bitmap already says which values match, so
+ * a second opinion about the same byte would be a second place for the two to
+ * disagree; the compiler folds a negated class by inverting the bitmap instead.
+ */
+#define KOF_HEX_ALT_CLASS  4u
+
+/*
  * A BYTE THAT IS ANYTHING BUT THIS - "!00", "!?0" - the "~" of YARA 4.3, spelt
  * with the character this tree prefers.
  *
@@ -230,6 +256,20 @@ struct kof_hex_stat {
 uint32_t    kof_hex_compile(const char *text, uint8_t *out, uint32_t cap,
 			    struct kof_hex_stat *stat);
 const char *kof_hex_error(void);
+
+/*
+ * The same program, written as a regex.
+ *
+ * A second syntax over one back end, so a regex inherits the forward-only walk,
+ * the anchor, the presence set and the case and word options without any of
+ * them being implemented twice. What it accepts and what it refuses - and why
+ * each refusal is a property of the program rather than a policy - is set out
+ * where it is defined.
+ *
+ * Reports through kof_hex_error like its sibling.
+ */
+uint32_t kof_regex_compile(const char *text, uint8_t *out, uint32_t cap,
+			   struct kof_hex_stat *stat);
 
 _Static_assert(sizeof(struct kof_hex_hdr)  == 48, "hex header changed size");
 _Static_assert(sizeof(struct kof_hex_step) == 8,  "hex step grew padding");

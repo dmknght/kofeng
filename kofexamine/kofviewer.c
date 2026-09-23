@@ -1876,6 +1876,7 @@ struct view {
 	uint32_t    n_rng_hs;
 	int         rga_c0, rga_c1; /* "[+ Add scan range]" at the row's end */
 	int         rgf_c0, rgf_c1; /* "Update string regions" - where they are */
+	int         adds_c0, adds_c1; /* "[+ str]" - see BTN_ADDSTR */
 	/* The target formats on their row: each name's columns, and the button
 	 * that adds one. Recorded where they are drawn, read where they are
 	 * clicked - the arrangement every other control here uses. */
@@ -9264,10 +9265,45 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 			}
 		if (!d)
 			return;
-		for (i = 0; i < d->n_hits; i++) {
-			snprintf(t, sizeof t, "0x%llx",
-				 (unsigned long long)d->hits[i]);
-			ch_add(c, t);
+		/*
+		 * EACH OCCURRENCE TWICE WHERE THAT MEANS SOMETHING: as the
+		 * offset it is, and as a step from the entry point.
+		 *
+		 * The offset is what was measured in THIS sample. The step from
+		 * the entry is what will still be true in the next one - an
+		 * infector's stub sits a fixed distance from the entry and at a
+		 * different file offset in every build it is in. Both rules in
+		 * bases/ that use this call are written the second way, and
+		 * until now the panel could only produce the first, so the form
+		 * that survives a rebuild had to be typed into the file by
+		 * hand afterwards.
+		 *
+		 * Offered only when the object HAS an entry point and the
+		 * occurrence is at or after it: "entry - 0x4000" is arithmetic
+		 * that happens to be true of one sample rather than a place
+		 * anything is anchored to, and offering it would dress a
+		 * coincidence up as a rule.
+		 */
+		{
+			uint64_t e = cur_obj(v) ? cur_obj(v)->ctx.entry_off
+						: KOF_NA;
+			int rel = e != KOF_NA && e != KOF_BROKEN;
+
+			for (i = 0; i < d->n_hits; i++) {
+				snprintf(t, sizeof t, "0x%llx",
+					 (unsigned long long)d->hits[i]);
+				ch_add(c, t);
+				if (!rel || d->hits[i] < e)
+					continue;
+				if (d->hits[i] == e)
+					snprintf(t, sizeof t, "entry");
+				else
+					snprintf(t, sizeof t,
+						 "entry + 0x%llx",
+						 (unsigned long long)
+						 (d->hits[i] - e));
+				ch_add(c, t);
+			}
 		}
 		/*
 		 * AND THEN THE ENGINE'S OWN PLACES, after the literal ones.
@@ -10616,19 +10652,46 @@ static void ch_take(struct view *v)
 				d = &v->ed.dr.decl[i];
 				break;
 			}
-		if (d && c->sel >= 0 && (uint32_t)c->sel < d->n_hits) {
-			q->at_off = (int64_t)d->hits[c->sel];
-			q->at_base = GRP_AT_ABS;
-		} else if (c->sel >= (int)(d ? d->n_hits : 0u)) {
-			/* Past the occurrences are the engine's own places -
-			 * see where this menu is built. The displacement from
-			 * the chosen base is kept, so picking "entry" on a
-			 * matcher already at entry+0x10 moves the base and not
-			 * the rule. */
-			int b = c->sel - (int)(d ? d->n_hits : 0u) + 1;
+		/*
+		 * THE ROWS ARE WALKED THE WAY THEY WERE BUILT, because an
+		 * occurrence may have contributed one row or two - see there.
+		 * Counting them again here is the only way the two can be kept
+		 * in step without storing a parallel table that would have to
+		 * be freed and invalidated.
+		 */
+		{
+			uint64_t e = cur_obj(v) ? cur_obj(v)->ctx.entry_off
+						: KOF_NA;
+			int rel = e != KOF_NA && e != KOF_BROKEN;
+			int row = 0;
+			uint32_t k;
 
-			if (b < GRP_AT_BASE_COUNT)
-				q->at_base = (uint8_t)b;
+			for (k = 0; d && k < d->n_hits; k++) {
+				if (row++ == c->sel) {
+					q->at_off = (int64_t)d->hits[k];
+					q->at_base = GRP_AT_ABS;
+					return;
+				}
+				if (!rel || d->hits[k] < e)
+					continue;
+				if (row++ == c->sel) {
+					q->at_off = (int64_t)(d->hits[k] - e);
+					q->at_base = GRP_AT_ENTRY;
+					return;
+				}
+			}
+			/*
+			 * Past every occurrence are the engine's own places.
+			 * The displacement is kept, so picking "entry" on a
+			 * matcher already at entry+0x10 moves the base and not
+			 * the rule.
+			 */
+			if (c->sel >= row) {
+				int b = c->sel - row + 1;
+
+				if (b < GRP_AT_BASE_COUNT)
+					q->at_base = (uint8_t)b;
+			}
 		}
 	} else if (c->what == CH_RULE) {
 		/*
@@ -10993,6 +11056,22 @@ static void prow_build(struct view *v)
  * and said in five words what its position says by itself.
  */
 #define BTN_UPDRGN "[r]"
+
+/*
+ * "[+ str]" - DECLARE A MARKER THAT IS NOT ON THE SCREEN.
+ *
+ * Every other way in starts from bytes the object already has: select a run in
+ * the hex pane, or pick text out of the event box. That covers the common case
+ * and misses the one a researcher reaches for next - writing a marker down
+ * because they know it belongs to the family, before they have a sample that
+ * shows it.
+ *
+ * On the Strings heading, beside [r], because both are about the table under
+ * them. The heading is drawn even when the table is EMPTY for this button's
+ * sake: with no declarations there was no heading, so the one control that can
+ * create the first declaration had nowhere to be.
+ */
+#define BTN_ADDSTR "[+ str]"
 /* " Strings     word      case         region" - the heading up to and
  * including the region title, so the button's column is measured from it
  * rather than counted by hand. */
@@ -12878,12 +12957,13 @@ static void hit_row_str(struct view *v, uint32_t i)
 		/* A click inside the open field is a click in a text box, not
 		 * a request to jump to the bytes. */
 		return;
-	} else if (!v->ed.dr.decl[i].hex &&
-		   g_mx >= v->str_wc[i][0] &&
+	} else if (g_mx >= v->str_wc[i][0] &&
 		   g_mx <= v->str_wc[i][0] + 8) {
+		/* No longer refused for a hex row - see where the columns are
+		 * drawn. The two options mean the same thing for either kind
+		 * and are applied by the same matcher. */
 		ch_open(v, CH_WORD, i, g_my, g_mx);
-	} else if (!v->ed.dr.decl[i].hex &&
-		   g_mx >= v->str_wc[i][0] + 10 &&
+	} else if (g_mx >= v->str_wc[i][0] + 10 &&
 		   g_mx <= v->str_wc[i][1]) {
 		ch_open(v, CH_CASE, i, g_my, g_mx);
 	} else if (g_mx >= v->str_by[i][0] &&
@@ -13029,8 +13109,37 @@ static void hit_row_markers(struct view *v, uint32_t g)
 static void hit_row_strhdr(struct view *v, uint32_t arg)
 {
 	(void)arg;
-	if (g_mx >= v->rgf_c0 && g_mx <= v->rgf_c1)
+	if (g_mx >= v->rgf_c0 && g_mx <= v->rgf_c1) {
 		draft_refresh(&v->ed);
+		return;
+	}
+	/*
+	 * A MARKER WRITTEN RATHER THAN FOUND - see BTN_ADDSTR.
+	 *
+	 * The declaration is created empty and opened for editing straight
+	 * away, because an empty marker is not a state worth leaving behind:
+	 * the reader pressed this to type something, and a row that appeared
+	 * with nothing in it and no caret would be a row they then have to
+	 * find a way into.
+	 *
+	 * `at` is KOF_BROKEN - the bytes are not in this object and may never
+	 * be. That is a state struct decl already has, for a marker carried
+	 * from another sample, and the table already draws it as "not here"
+	 * rather than as an error.
+	 */
+	if (v->adds_c0 >= 0 && g_mx >= v->adds_c0 && g_mx <= v->adds_c1 &&
+	    v->ed.dr.n_decl < MAX_DECL) {
+		struct decl *d = &v->ed.dr.decl[v->ed.dr.n_decl];
+
+		memset(d, 0, sizeof *d);
+		d->obj = v->ed.cur;
+		d->at = KOF_BROKEN;
+		d->fullword = KOF_WORD_SUBSTRING;
+		snprintf(d->rgn, sizeof d->rgn, "-");
+		v->ed.dr.sel_decl = v->ed.dr.n_decl;
+		v->ed.dr.n_decl++;
+		decl_edit_open(v, v->ed.dr.n_decl - 1u);
+	}
 }
 
 /*
@@ -13312,7 +13421,11 @@ static int draw_decl_strings(struct out *o, struct view *v, int r)
 		}
 		v->rgn_w = (int)(w > 18u ? 18u : w);
 	}
-	if (v->ed.dr.n_decl && PR_VIS(r)) {
+	/*
+	 * DRAWN EVEN WITH NOTHING IN IT - see BTN_ADDSTR. An empty table is
+	 * exactly when the button that fills it has to be reachable.
+	 */
+	if (PR_VIS(r)) {
 		char hdr[120];
 		uint32_t d2, off = 0;
 		int c0;
@@ -13370,12 +13483,27 @@ static int draw_decl_strings(struct out *o, struct view *v, int r)
 				 * stale columns left answering clicks. */
 				v->rgf_c0 = v->rgf_c1 = -1;
 			}
+			/* And the one that creates a marker - see BTN_ADDSTR.
+			 * After [r] because it is the rarer act, and on the
+			 * same row because both are about this table. */
+			if (bcol + w + 1 + (int)sizeof BTN_ADDSTR - 1 <= g_cols) {
+				out_at(o, PR(r), bcol + w + 1);
+				o->col_hint = 0;
+				c0 = o->col_base;
+				out_fmt(o, "\033[100;37m%s" A_OFF, BTN_ADDSTR);
+				v->adds_c0 = c0;
+				v->adds_c1 = o->col_base +
+					     (int)o->col_hint - 1;
+			} else {
+				v->adds_c0 = v->adds_c1 = -1;
+			}
 		}
 		hit_add(v, PR(r), 0, g_cols - 1, hit_row_strhdr, 0);
-	} else if (!v->ed.dr.n_decl) {
+	} else {
 		v->rgf_c0 = v->rgf_c1 = -1;
+		v->adds_c0 = v->adds_c1 = -1;
 	}
-	r += v->ed.dr.n_decl ? 1 : 0;
+	r += 1;
 	v->row_str = PR(r);
 	for (i = 0; i < v->ed.dr.n_decl; i++, r++) {
 		const struct decl *d = &v->ed.dr.decl[i];
@@ -13405,14 +13533,28 @@ static int draw_decl_strings(struct out *o, struct view *v, int r)
 			i == v->ed.dr.sel_decl ? A_SEL : A_DIM, i + 1u,
 			A_ID, d->hex ? "hex" : "str");
 		v->str_wc[i][0] = 1 + (int)o->col_hint;
-		if (d->hex)
-			out_fmt(o, A_DIM "%-21s" A_OFF, "");
-		else
-			out_fmt(o, A_WARN "%-9s %-11s" A_OFF,
-				d->fullword == KOF_WORD_TOKEN ? "token"
-				: d->fullword == KOF_WORD_FULLWORD
-				? "fullword" : "pattern",
-				d->icase ? "ignore-case" : "exact-case");
+		/*
+		 * A HEX PATTERN SHOWS ITS OPTIONS TOO, AND USED TO SHOW BLANK.
+		 *
+		 * It could carry none when this was written, so the two columns
+		 * were left empty and the click targets refused the row. Both
+		 * are real for it now: a hex marker that spells text is still a
+		 * word, and "is it a word on its own" is still worth asking.
+		 *
+		 * DIMMED WHERE NOTHING WAS CHOSEN, which is most hex rows. A
+		 * byte pattern has no case and no word to be part of, so
+		 * "pattern exact-case" on every shellcode row would be noise on
+		 * the many to serve the few - the same reason the generator
+		 * writes the short form for them. Dim says "this is the default
+		 * and it is here if you want it"; the normal colour says a
+		 * choice was made. The control is there either way.
+		 */
+		out_fmt(o, "%s%-9s %-11s" A_OFF,
+			(d->hex && !d->icase && !d->fullword) ? A_DIM : A_WARN,
+			d->fullword == KOF_WORD_TOKEN ? "token"
+			: d->fullword == KOF_WORD_FULLWORD
+			? "fullword" : "pattern",
+			d->icase ? "ignore-case" : "exact-case");
 		v->str_wc[i][1] = (int)o->col_hint;
 		/*
 		 * The declared range, or - when the bytes are somewhere else

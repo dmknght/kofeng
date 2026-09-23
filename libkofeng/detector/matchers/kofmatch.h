@@ -204,6 +204,19 @@ int kof_match_at(struct kof_match_ctx *, uint64_t off,
  */
 int kof_hex_walk(kof_buf d, uint64_t start, const uint8_t *prog);
 
+/*
+ * The same walk with the pattern's OPTIONS applied - ICASE folds concrete
+ * letter bytes, FULLWORD and TOKEN test the neighbours of the match.
+ *
+ * A caller that holds a descriptor must use this one. kof_hex_walk above is
+ * the bare question and answers as though the pattern carried no options, so
+ * asking it about a pattern that does have them reports a match the real
+ * matcher would refuse - and kofmultimatch writes its answers into the memo,
+ * where they are read as final.
+ */
+int kof_hex_walk_flags(kof_buf d, uint64_t start, const uint8_t *prog,
+		       uint8_t flags);
+
 /* Search a single ad-hoc range, for the same reason: the module computed it. */
 int kof_match_in(struct kof_match_ctx *, uint64_t off, uint64_t len,
 		 const uint8_t *bytes, uint16_t plen, uint8_t kind, uint8_t flags);

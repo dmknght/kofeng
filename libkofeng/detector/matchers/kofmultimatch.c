@@ -122,7 +122,20 @@ static int pat_at(const struct kof_match_ctx *m, const struct kof_multimatch_pat
 			 * is not entered rather than entered and refused. */
 			if (lim.n - start < p->min_span)
 				continue;
-			if (kof_hex_walk(lim, start, p->prog))
+			/*
+			 * WITH THE PATTERN'S OPTIONS, because this answer is
+			 * FINAL.
+			 *
+			 * What this function decides is written into the memo,
+			 * and kof_match_lookup reads the memo before doing
+			 * anything else - so a match reported here is never
+			 * re-checked by the slower path. The literal branch
+			 * below has always applied ICASE and the word rule;
+			 * the hex branch called the bare walk and did not, so
+			 * a hex pattern declared FULLWORD was answered "yes"
+			 * here and "no" by every other door into the matcher.
+			 */
+			if (kof_hex_walk_flags(lim, start, p->prog, p->flags))
 				return 1;
 		}
 		return 0;
@@ -278,12 +291,39 @@ static int collect_all(const struct kof_engine *e, uint8_t *seen,
 
 							q->b = hex_anchor(bytes, &alen);
 							q->len = (uint16_t)alen;
-							/* Case and word are a
-							 * literal's options; a walk
-							 * has no meaning for them,
-							 * so they are cleared
-							 * rather than carried. */
-							q->flags = 0;
+							/*
+							 * THE OPTIONS ARE
+							 * CARRIED, AND WERE
+							 * CLEARED.
+							 *
+							 * They used to mean
+							 * nothing to a hex
+							 * pattern, so this
+							 * dropped them. They
+							 * mean something now,
+							 * and dropping them
+							 * broke both halves of
+							 * this table: `fold` is
+							 * raised from these
+							 * flags, so a folded
+							 * anchor was searched
+							 * for case-exactly and
+							 * never found, and
+							 * pat_at hands them to
+							 * the walk, which then
+							 * applied no word rule.
+							 *
+							 * Measured: an ICASE hex
+							 * "cmd.exe" did not match
+							 * "CMD.EXE" even after
+							 * the walk and the gram
+							 * index had both been
+							 * taught the option -
+							 * this was the third
+							 * gate and the one that
+							 * still said no.
+							 */
+							q->flags = ent->flags;
 							q->is_hex = 1;
 							q->prog = bytes;
 							q->before_min = h->anchor_before_min;

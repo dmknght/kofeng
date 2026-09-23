@@ -39,7 +39,7 @@ KOF_DEFINE_STR(s2, "mettle_start", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
  *
  *     2F 6D 65 74 74 6C 65 2F 73 72 63 2F   =  /mettle/src/
  */
-KOF_DEFINE_HEXSTR(s3, "2F 6D 65 74 74 6C 65 2F 73 72 63 2F");
+KOF_DEFINE_HEXSTR(s3, "2F 6D 65 74 74 6C 65 2F 73 72 63 2F", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 
 void kof_scan(const struct kof_obj_ctx *ctx)
 {

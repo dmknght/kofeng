@@ -33,6 +33,16 @@ struct hx_alt {
 	uint32_t len;
 	int      masked;
 	int      negged;                     /* any "!" byte in this run */
+	/*
+	 * A 256-VALUE SET, and then `len` is 1 and b[] is the 32-byte bitmap.
+	 *
+	 * Emitted by the regex front end for a character class - see
+	 * KOF_HEX_ALT_CLASS. Exclusive with masked and negged, because the
+	 * bitmap already says which values match and a second opinion about
+	 * the same byte is a second place for two answers to disagree; a
+	 * negated class is folded by inverting the bitmap at parse time.
+	 */
+	int      klass;
 	uint8_t  b[KOF_HEX_MAX_ALT_LEN];
 	uint8_t  m[KOF_HEX_MAX_ALT_LEN];
 	uint8_t  n[KOF_HEX_MAX_ALT_LEN];     /* 1 where the byte is negated */
@@ -417,9 +427,21 @@ static uint32_t hex_pick_anchor(uint32_t *out_step, uint32_t *out_before_min,
 		lo += st->gap_min;
 		hi += st->gap_max;
 
-		if (st->n_alts == 1) {
+		if (st->n_alts == 1 && !st->alt[0].klass) {
 			const struct hx_alt *a = &st->alt[0];
 
+			/*
+			 * A CLASS IS NOT A KNOWN BYTE, and is refused above
+			 * rather than here.
+			 *
+			 * It names a set of values, so there is nothing for the
+			 * search to look for - the same reason a mask and a
+			 * negation are refused inside the loop. Tested on the
+			 * step because a class alt never fills m[], and this
+			 * array is static across compiles: read anyway it would
+			 * be answering with whatever the previous pattern left
+			 * there, which is a different wrong answer each time.
+			 */
 			for (j = 0; j < a->len; j++) {
 				/* A NEGATED BYTE IS NOT A KNOWN BYTE. Its mask
 				 * is 0xff and it names every value but one, so
@@ -493,7 +515,9 @@ static int hex_emit(uint8_t *img, uint32_t cap, struct kof_hex_stat *stat)
 
 		for (j = 0; j < st->n_alts; j++) {
 			const struct hx_alt *a = &st->alt[j];
-			data_len += a->len + (a->masked ? a->len : 0) +
+			data_len += a->klass
+				  ? 32u
+				  : a->len + (a->masked ? a->len : 0) +
 				    (a->negged ? a->len : 0);
 			if (a->len < lo) lo = a->len;
 			if (a->len > hi) hi = a->len;
@@ -556,10 +580,19 @@ static int hex_emit(uint8_t *img, uint32_t cap, struct kof_hex_stat *stat)
 
 				put_u16(ap + 0, a->len);
 				put_u16(ap + 2,
-					(a->masked ? KOF_HEX_ALT_MASKED : 0u) |
-					(a->negged ? KOF_HEX_ALT_NEG : 0u));
+					a->klass ? KOF_HEX_ALT_CLASS :
+					((a->masked ? KOF_HEX_ALT_MASKED : 0u) |
+					 (a->negged ? KOF_HEX_ALT_NEG : 0u)));
 				put_u32(ap + 4, data_off + wr);
 
+				if (a->klass) {
+					/* The whole bitmap, one bit per value.
+					 * `len` stays 1: it is still one input
+					 * byte that is being decided. */
+					memcpy(img + data_off + wr, a->b, 32u);
+					wr += 32u;
+					continue;
+				}
 				memcpy(img + data_off + wr, a->b, a->len);
 				wr += a->len;
 				if (a->masked) {
@@ -608,3 +641,474 @@ uint32_t kof_hex_compile(const char *text, uint8_t *out, uint32_t cap,
 	return stat->len;
 }
 
+
+/* ---- regex: a second syntax, the same program ---------------------------- */
+
+/*
+ * WHY THIS IS A FRONT END AND NOT AN ENGINE.
+ *
+ * A regex engine of the ordinary kind backtracks, and backtracking on bytes an
+ * attacker chose is how a scanner stops. This compiles to the program above
+ * instead, which is walked as a set of positions that only ever moves forward -
+ * so the cost of a match is bounded by the pattern and the object, and
+ * catastrophic backtracking is not slow here, it is UNREPRESENTABLE.
+ *
+ * Everything the user asked for falls out of that rather than being bolted on:
+ *
+ *   `*` and `+` are refused because the program has no unbounded repetition.
+ *   A pattern with no concrete run has no anchor, and hex_emit already refuses
+ *   one - so "a regex must have something the prefilter can key on" is a
+ *   property of the shared back end, not a rule this file has to remember.
+ *
+ * WHAT IS ACCEPTED, and every refusal names what to write instead:
+ *
+ *     abc          literal bytes; runs coalesce into one step
+ *     .            any byte - joins the run it is in, as a masked byte
+ *     [a-z] [^0-9] a class, its own step, a 256-bit set
+ *     (ab|cd)      alternatives, one step, up to KOF_HEX_MAX_ALTS of them
+ *     .{4,6}       a gap, which is the one variable-length thing there is
+ *     X{3}         three copies of X
+ *     \. \[ \\ \n \r \t \xNN
+ *
+ * WHAT IS REFUSED, and why each one is not an omission:
+ *
+ *     * +          unbounded. The whole point of the walk above is that it
+ *                  cannot be made to run long.
+ *     X{2,4}       a variable count of something that is not "any byte". The
+ *                  program expresses a variable run only as a GAP, and a gap
+ *                  does not know what it is skipping. `.{2,4}` is a gap and is
+ *                  accepted; `[a-z]{2,4}` is not expressible and is refused
+ *                  rather than silently narrowed to {2} or widened to a gap.
+ *     X?           optional. An alternative must have a length - see hex_emit -
+ *                  so "this or nothing" has nowhere to go.
+ *     backreferences, lookaround
+ *                  neither is a regular language and neither can be walked
+ *                  forward once.
+ */
+
+static const char *rx_p;          /* the cursor, so the recursive walk shares it */
+
+/*
+ * A GAP BELONGS TO THE STEP THAT FOLLOWS IT, so it is carried rather than
+ * placed.
+ *
+ * The program says "skip between min and max bytes, THEN match this step", and
+ * a regex says ".{4,6}" before whatever comes next - the same fact written the
+ * other way round. Holding it here until the next step opens is what makes the
+ * two agree, and it is also why a run of bytes cannot continue across one: the
+ * bytes after a gap are a new step by definition.
+ */
+static uint32_t rx_gap_lo, rx_gap_hi;
+static int      rx_gap_have;
+
+static int rx_fail(const char *why)
+{
+	snprintf(hex_msg, sizeof hex_msg, "%s", why);
+	return 0;
+}
+
+/* The current step, opened on demand: a run of bytes grows inside one. */
+static struct hx_step *rx_open(void)
+{
+	if (hx_n_steps >= KOF_HEX_MAX_STEPS) {
+		rx_fail("the pattern needs more steps than a program may hold; "
+			"shorten it or split it into two markers");
+		return NULL;
+	}
+	{
+		struct hx_step *st = &hx_step[hx_n_steps++];
+
+		memset(st, 0, sizeof *st);
+		st->n_alts = 1;
+		/* Whatever gap was read before this, spent here - see above. */
+		if (rx_gap_have) {
+			st->gap_min = rx_gap_lo;
+			st->gap_max = rx_gap_hi;
+			rx_gap_have = 0;
+		}
+		return st;
+	}
+}
+
+/* The step a literal run is being appended to, or a fresh one. A run may only
+ * continue while the step holds exactly one alternative and no class. */
+static struct hx_step *rx_run_step(struct hx_step *cur)
+{
+	/* A pending gap ends the run: the bytes after it are a new step, or the
+	 * gap would be skipped before bytes that were meant to precede it. */
+	if (!rx_gap_have && cur && cur->n_alts == 1 && !cur->alt[0].klass &&
+	    cur->alt[0].len < KOF_HEX_MAX_ALT_LEN)
+		return cur;
+	return rx_open();
+}
+
+static int rx_put_byte(struct hx_step **cur, uint8_t v, int any)
+{
+	struct hx_step *st = rx_run_step(*cur);
+	struct hx_alt *a;
+
+	if (!st)
+		return 0;
+	*cur = st;
+	a = &st->alt[0];
+	a->b[a->len] = any ? 0u : v;
+	a->m[a->len] = any ? 0u : 0xffu;
+	a->n[a->len] = 0u;
+	if (any)
+		a->masked = 1;
+	a->len++;
+	return 1;
+}
+
+/* \xNN and the handful of escapes that are worth having. A backslash before
+ * anything else is that character, which is how a pattern says "." or "[". */
+static int rx_escape(uint8_t *out)
+{
+	if (!*rx_p)
+		return rx_fail("a backslash at the end of the pattern");
+	switch (*rx_p) {
+	case 'n': rx_p++; *out = '\n'; return 1;
+	case 'r': rx_p++; *out = '\r'; return 1;
+	case 't': rx_p++; *out = '\t'; return 1;
+	case '0': rx_p++; *out = 0;    return 1;
+	case 'x': {
+		uint8_t h, l;
+
+		rx_p++;
+		if (!hex_digit(rx_p[0], &h) || !hex_digit(rx_p[1], &l))
+			return rx_fail("\\x must be followed by two hex digits");
+		rx_p += 2;
+		*out = (uint8_t)((h << 4) | l);
+		return 1;
+	}
+	default:
+		*out = (uint8_t)*rx_p++;
+		return 1;
+	}
+}
+
+/*
+ * [abc] [a-z] [^0-9] - into a 32-byte bitmap, negation folded by inverting.
+ *
+ * Fills the CALLER'S bitmap rather than opening a step, because a class may be
+ * counted: "[a-z]{3}" is three steps holding the same set, and parsing it once
+ * and copying it is the only reading that cannot drift between the copies.
+ */
+static int rx_class(uint8_t *bits)
+{
+	int neg = 0, n = 0;
+
+	memset(bits, 0, 32u);
+	if (*rx_p == '^') {
+		neg = 1;
+		rx_p++;
+	}
+	while (*rx_p && *rx_p != ']') {
+		uint8_t lo, hi;
+
+		if (*rx_p == '\\') {
+			rx_p++;
+			if (!rx_escape(&lo))
+				return 0;
+		} else {
+			lo = (uint8_t)*rx_p++;
+		}
+		hi = lo;
+		/* A "-" before the closing bracket is a literal dash, which is
+		 * how every other regex reads it. */
+		if (*rx_p == '-' && rx_p[1] && rx_p[1] != ']') {
+			rx_p++;
+			if (*rx_p == '\\') {
+				rx_p++;
+				if (!rx_escape(&hi))
+					return 0;
+			} else {
+				hi = (uint8_t)*rx_p++;
+			}
+			if (hi < lo)
+				return rx_fail("a class range runs backwards");
+		}
+		for (;;) {
+			bits[lo >> 3] |= (uint8_t)(1u << (lo & 7u));
+			n++;
+			if (lo == hi)
+				break;
+			lo++;
+		}
+	}
+	if (*rx_p != ']')
+		return rx_fail("a class was opened and not closed");
+	rx_p++;
+	if (!n)
+		return rx_fail("an empty class matches nothing");
+	if (neg) {
+		int i;
+
+		for (i = 0; i < 32; i++)
+			bits[i] = (uint8_t)~bits[i];
+	}
+	return 1;
+}
+
+/* One step holding one class, which is what a class compiles to. */
+static int rx_emit_class(struct hx_step **cur, const uint8_t *bits)
+{
+	struct hx_step *st = rx_open();
+
+	if (!st)
+		return 0;
+	st->alt[0].klass = 1;
+	st->alt[0].len = 1;
+	memcpy(st->alt[0].b, bits, 32u);
+	*cur = NULL;          /* a class ends the run it followed */
+	return 1;
+}
+
+/*
+ * A QUANTIFIER, which is where most of the refusing happens.
+ *
+ * `{n}` repeats; `.{m,n}` is a gap; everything else that varies is refused with
+ * a message saying what to write instead. A compiler that narrowed "{2,4}" to
+ * "{2}", or widened it to a gap that does not care what it skips, would be
+ * answering a question the author did not ask.
+ */
+static int rx_quant(uint32_t *lo, uint32_t *hi, int *have)
+{
+	uint32_t a = 0, b;
+
+	*have = 0;
+	if (*rx_p == '*' || *rx_p == '+')
+		return rx_fail("* and + are unbounded; write a count like {4} "
+			       "or a gap like .{0,16}");
+	if (*rx_p == '?')
+		return rx_fail("? is optional and an alternative must have a "
+			       "length; write both forms out, as (ab|a)");
+	if (*rx_p != '{')
+		return 1;
+	rx_p++;
+	if (*rx_p < '0' || *rx_p > '9')
+		return rx_fail("a count must begin with a digit");
+	while (*rx_p >= '0' && *rx_p <= '9') {
+		if (a > KOF_HEX_MAX_GAP_TOTAL)
+			return rx_fail("a count past what a program may hold");
+		a = a * 10u + (uint32_t)(*rx_p++ - '0');
+	}
+	b = a;
+	if (*rx_p == ',') {
+		rx_p++;
+		if (*rx_p == '}')
+			return rx_fail("an open-ended count is unbounded; give "
+				       "it an upper bound");
+		b = 0;
+		while (*rx_p >= '0' && *rx_p <= '9') {
+			if (b > KOF_HEX_MAX_GAP_TOTAL)
+				return rx_fail("a count past what a program "
+					       "may hold");
+			b = b * 10u + (uint32_t)(*rx_p++ - '0');
+		}
+		if (b < a)
+			return rx_fail("a count runs backwards");
+	}
+	if (*rx_p != '}')
+		return rx_fail("a count was opened and not closed");
+	rx_p++;
+	*lo = a;
+	*hi = b;
+	*have = 1;
+	return 1;
+}
+
+/*
+ * A GROUP: its alternatives become one step's alternatives.
+ *
+ * Alternatives of LITERAL RUNS only, because a step's alternative IS a run of
+ * bytes - it cannot itself hold a class, a gap or another group. The hex syntax
+ * states the same restriction ("a gap inside an alternative"); this is that
+ * rule reached by the other door.
+ */
+static int rx_group(struct hx_step **cur)
+{
+	struct hx_step *st = rx_open();
+	uint32_t k = 0;
+
+	if (!st)
+		return 0;
+	st->n_alts = 0;
+	for (;;) {
+		struct hx_alt *a;
+
+		if (k >= KOF_HEX_MAX_ALTS)
+			return rx_fail("more alternatives than a step may hold");
+		a = &st->alt[k];
+		memset(a, 0, sizeof *a);
+		while (*rx_p && *rx_p != '|' && *rx_p != ')') {
+			uint8_t v = 0;
+
+			if (a->len >= KOF_HEX_MAX_ALT_LEN)
+				return rx_fail("an alternative longer than a "
+					       "program may hold");
+			if (*rx_p == '.') {
+				rx_p++;
+				a->b[a->len] = 0;
+				a->m[a->len] = 0;
+				a->masked = 1;
+			} else if (*rx_p == '[' || *rx_p == '(' ||
+				   *rx_p == '{' || *rx_p == '*' ||
+				   *rx_p == '+' || *rx_p == '?') {
+				return rx_fail("an alternative holds bytes "
+					       "only - no class, group or "
+					       "count inside one");
+			} else {
+				if (*rx_p == '\\') {
+					rx_p++;
+					if (!rx_escape(&v))
+						return 0;
+				} else {
+					v = (uint8_t)*rx_p++;
+				}
+				a->b[a->len] = v;
+				a->m[a->len] = 0xffu;
+			}
+			a->n[a->len] = 0;
+			a->len++;
+		}
+		if (!a->len)
+			return rx_fail("an empty alternative matches nothing");
+		k++;
+		if (*rx_p == '|') {
+			rx_p++;
+			continue;
+		}
+		break;
+	}
+	if (*rx_p != ')')
+		return rx_fail("a group was opened and not closed");
+	rx_p++;
+	st->n_alts = k;
+	*cur = NULL;          /* a group ends the run it followed */
+	return 1;
+}
+
+/* The body: atoms, each optionally counted. */
+static int rx_body(void)
+{
+	struct hx_step *cur = NULL;
+
+	while (*rx_p) {
+		uint32_t lo = 0, hi = 0, times, t;
+		int have = 0, any = 0;
+		uint8_t v = 0, bits[32];
+		enum { A_BYTE, A_CLASS, A_GROUP } kind = A_BYTE;
+
+		if (*rx_p == '[') {
+			rx_p++;
+			if (!rx_class(bits))
+				return 0;
+			kind = A_CLASS;
+		} else if (*rx_p == '(') {
+			rx_p++;
+			if (!rx_group(&cur))
+				return 0;
+			kind = A_GROUP;
+		} else if (*rx_p == ')' || *rx_p == '|') {
+			return rx_fail("a ) or | outside a group");
+		} else if (*rx_p == '.') {
+			rx_p++;
+			any = 1;
+		} else if (*rx_p == '*' || *rx_p == '+' || *rx_p == '?' ||
+			   *rx_p == '{') {
+			return rx_fail("a count with nothing before it");
+		} else if (*rx_p == '\\') {
+			rx_p++;
+			if (!rx_escape(&v))
+				return 0;
+		} else {
+			v = (uint8_t)*rx_p++;
+		}
+
+		if (!rx_quant(&lo, &hi, &have))
+			return 0;
+
+		/*
+		 * A VARIABLE COUNT IS A GAP, AND ONLY "." CAN BE ONE.
+		 *
+		 * The program's one variable-length construct skips a number of
+		 * bytes without caring what they are, which is exactly what
+		 * ".{m,n}" means and exactly what "[a-z]{2,4}" does not. The
+		 * second is refused rather than approximated in either
+		 * direction.
+		 */
+		if (have && lo != hi) {
+			if (kind != A_BYTE || !any)
+				return rx_fail("a variable count applies only "
+					       "to '.', which is the gap this "
+					       "can express; give anything "
+					       "else an exact count");
+			if (rx_gap_have)
+				return rx_fail("two gaps in a row; write them "
+					       "as one");
+			rx_gap_lo = lo;
+			rx_gap_hi = hi;
+			rx_gap_have = 1;
+			cur = NULL;
+			continue;
+		}
+
+		times = have ? lo : 1u;
+		if (!times)
+			return rx_fail("a count of zero makes the atom "
+				       "optional, which cannot be expressed");
+		if (kind == A_GROUP && times != 1u)
+			return rx_fail("a counted group cannot be expressed; "
+				       "write the copies out");
+		for (t = 0; t < times; t++) {
+			if (kind == A_CLASS) {
+				if (!rx_emit_class(&cur, bits))
+					return 0;
+			} else if (kind == A_BYTE) {
+				if (!rx_put_byte(&cur, v, any))
+					return 0;
+			}
+		}
+	}
+	if (rx_gap_have)
+		return rx_fail("the pattern ends with a gap, which matches "
+			       "nothing; a trailing .{m,n} says only that the "
+			       "object is longer");
+	return 1;
+}
+
+/*
+ * kof_regex_compile - a regex, as the program the matcher already walks.
+ *
+ * Same output and same guarantees as kof_hex_compile, including the anchor: a
+ * pattern with no run of concrete bytes is refused by hex_emit, which is how
+ * "a regex must carry something the prefilter can key on" is enforced without
+ * this file having to remember it.
+ */
+uint32_t kof_regex_compile(const char *text, uint8_t *out, uint32_t cap,
+			   struct kof_hex_stat *stat)
+{
+	struct kof_hex_stat local;
+
+	hex_msg[0] = 0;
+	if (!stat)
+		stat = &local;
+	memset(stat, 0, sizeof *stat);
+	hx_n_steps = 0;
+	rx_gap_have = 0;
+	rx_p = text ? text : "";
+	if (!*rx_p) {
+		rx_fail("an empty pattern");
+		return 0;
+	}
+	if (!rx_body())
+		return 0;
+	if (!hx_n_steps) {
+		rx_fail("the pattern compiled to nothing");
+		return 0;
+	}
+	if (!hex_emit(out, cap, stat))
+		return 0;
+	return stat->len;
+}

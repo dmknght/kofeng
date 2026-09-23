@@ -3798,8 +3798,33 @@ enum kof_str_word {
  *   more parts than the caps allow   see hexprog.h; the bound is what keeps
  *                                    matching a hostile object affordable
  *
- * Case and word options do not apply. Folding case on a byte that may be a wildcard
- * means nothing, and a word boundary is a property of text.
+ * CASE AND WORD OPTIONS DO APPLY, and are written the way a literal writes them:
+ *
+ *     KOF_DEFINE_HEXSTR(name, "63 6D 64");                       as written
+ *     KOF_DEFINE_HEXSTR(name, "63 6D 64", KOF_CASE_ICASE,
+ *                       KOF_WORD_FULLWORD);
+ *
+ * Both forms are accepted and the short one means what it always meant - bytes
+ * as written, matching anywhere.
+ *
+ * ICASE FOLDS LETTERS AND ONLY LETTERS, and only where the byte is CONCRETE.
+ * 0x41 and 0x61 are the same letter; 0x01 and 0x21 differ by the same bit and
+ * are not a case pair of anything, so folding by arithmetic would make every
+ * pattern with bit 5 set mean twice what it says. A half-masked byte is a
+ * nibble and a nibble is not a letter, so "4?" does not fold either, and nor
+ * does a negated byte - "anything but this letter" folded would be "anything
+ * but either case", which is a broader claim than what was written.
+ *
+ * FULLWORD AND TOKEN TEST THE NEIGHBOURS OF THE MATCH, which for a hex pattern
+ * is not known until the walk has run: a gap or a group makes the span vary, so
+ * where the match ENDS is an answer the search produces rather than one it knows
+ * in advance. One start can match to several ends and the rule is satisfied by
+ * any of them, the same way a literal is satisfied by one occurrence.
+ *
+ * When they are worth reaching for: a byte pattern that spells text. A marker
+ * written as hex because it carries a wildcard in the middle is still a word,
+ * and "is it a word on its own" is still the question - it just could not be
+ * asked before.
  *
  * One thing worth knowing when writing them: the compiler searches for the longest
  * run of concrete bytes, and the presence set - which rules a pattern out for an
@@ -3813,7 +3838,55 @@ enum kof_str_word {
  * unless something fixed sits beside it - another reason to prefer ICASE on a
  * literal when the whole pattern is a word.
  */
-#define KOF_DEFINE_HEXSTR(name, hex)
+#define KOF_DEFINE_HEXSTR(name, ...)
+
+/*
+ * Declare a marker as a REGULAR EXPRESSION.
+ *
+ *     KOF_DEFINE_REGEX(get, "GET /[a-z]{4}\\.php");
+ *     KOF_DEFINE_REGEX(get, "GET /[a-z]{4}\\.php", KOF_CASE_ICASE,
+ *                      KOF_WORD_FULLWORD);
+ *
+ * Used with kof_find_str and its forms exactly like a literal or a hex pattern:
+ * the call site does not know which kind it named.
+ *
+ * IT COMPILES TO THE HEX PROGRAM, which is the whole design. The program is
+ * walked as a set of positions that only moves forward, so a match costs what
+ * the pattern and the object cost and nothing else - and the constructs that
+ * make an ordinary regex engine stoppable by a crafted input are not slow here,
+ * they are UNREPRESENTABLE. `*` and `+` are refused because there is nothing to
+ * compile them to.
+ *
+ * It also means a regex inherits, rather than reimplements, the anchor, the
+ * presence set, the case and word options and the bounds on how much work one
+ * pattern may cause.
+ *
+ * ACCEPTED:
+ *
+ *     abc          literal bytes; runs coalesce into one step
+ *     .            any byte
+ *     [a-z] [^0-9] a class - a 256-bit set, one step
+ *     (ab|cd)      alternatives of literal runs, one step
+ *     .{4,6}       a gap, the one variable-length thing the program has
+ *     X{3}         three copies of X
+ *     \. \[ \\ \n \r \t \xNN
+ *
+ * REFUSED AT BUILD TIME, each naming what to write instead:
+ *
+ *     * +          unbounded
+ *     X?           optional, and an alternative must have a length
+ *     [a-z]{2,4}   a variable count of something that is not "any byte"; a gap
+ *                  does not know what it skips, so this is refused rather than
+ *                  narrowed to {2} or widened to .{2,4}
+ *     (a(b|c))     a group inside a group
+ *     backreferences, lookaround
+ *
+ * AND A PATTERN WITH NO CONCRETE RUN IS REFUSED - "[a-z][0-9][a-z]" names no
+ * bytes to search for, so the presence set could never rule an object out and
+ * it would be walked at every offset of every object of its format. That
+ * refusal is the shared back end's, not a rule this declaration applies.
+ */
+#define KOF_DEFINE_REGEX(name, ...)
 
 /*
  * Report a finding and stop. The level is the macro, not a parameter - so a reader

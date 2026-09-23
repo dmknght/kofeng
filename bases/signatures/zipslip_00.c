@@ -20,7 +20,7 @@ KOF_TARGET_RANGE(scan_range_zipnames, KOF_SCAN_ZIP_NAMES);
  * attacker uses the other one against a checker that only knows about "/".
  */
 KOF_DEFINE_STR(path_on_nix, "../", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
-KOF_DEFINE_HEXSTR(path_on_ntwin, "2E 2E 5C");                    /* ..\ */
+KOF_DEFINE_HEXSTR(path_on_ntwin, "2E 2E 5C", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);                    /* ..\ */
 
 
 void kof_scan(const struct kof_obj_ctx *ctx)

@@ -471,9 +471,28 @@ static inline const char *grp_at_parse(const char *s, int *base, int64_t *off)
 		const char *e = grp_at_base_expr(i);
 		size_t n = strlen(e);
 		const char *f = strncmp(e, "ctx->", 5) ? e : e + 5;
+		const char *w = grp_at_base_word(i);
 
 		if (!strncmp(s, e, n)) { b = i; s += n; break; }
 		if (!strncmp(s, f, strlen(f))) { b = i; s += strlen(f); break; }
+		/*
+		 * AND THE SHORT NAME THE PANEL SHOWS - "entry".
+		 *
+		 * Read here so one syntax serves both directions: the row
+		 * prints "entry + 0x10" and the box the author types into
+		 * takes that back. Without it the field would show one
+		 * spelling and demand another, which is a control that
+		 * disagrees with its own label.
+		 *
+		 * Last of the three, because "entry" is a prefix of
+		 * "entry_off" and taking it first would leave "_off" behind
+		 * for the displacement reader to choke on.
+		 */
+		if (*w && !strncmp(s, w, strlen(w))) {
+			b = i;
+			s += strlen(w);
+			break;
+		}
 	}
 	while (*s == ' ' || *s == '\t')
 		s++;

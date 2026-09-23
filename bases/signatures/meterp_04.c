@@ -22,7 +22,7 @@ KOF_TARGET_ARCH(KOF_ARCH_X86_64);
 
 KOF_TARGET_RANGE(scan_range_code_data, KOF_SCAN_PE_CODE | KOF_SCAN_PE_DATA);
 
-KOF_DEFINE_HEXSTR(s0, "48 85 F6 75 ?? 41 FF E7");
+KOF_DEFINE_HEXSTR(s0, "48 85 F6 75 ?? 41 FF E7", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 
 void kof_scan(const struct kof_obj_ctx *ctx)
 {

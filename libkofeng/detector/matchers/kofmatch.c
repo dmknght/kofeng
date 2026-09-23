@@ -466,15 +466,59 @@ static int gram_may_contain(const struct kof_gram *g, const uint8_t *b,
  * The unmasked path is a memcmp the compiler vectorises and is the common case by a
  * wide margin; the masked path only runs for a pattern that actually has wildcards.
  */
+/*
+ * ONE BYTE, FOLDED OR NOT.
+ *
+ * ICASE on a hex pattern folds LETTERS AND NOTHING ELSE. 0x41 and 0x61 are the
+ * same letter and it is reasonable to want either; 0x01 and 0x21 differ by the
+ * same bit and are not a case pair of anything. Folding by arithmetic rather
+ * than by class would make every pattern with bit 5 set mean twice what it
+ * says.
+ */
+static int hex_eq(uint8_t got, uint8_t want, int icase)
+{
+	if (got == want)
+		return 1;
+	if (!icase)
+		return 0;
+	if ((uint8_t)(want | 32u) < 'a' || (uint8_t)(want | 32u) > 'z')
+		return 0;
+	return (uint8_t)(got | 32u) == (uint8_t)(want | 32u);
+}
+
 static int alt_at(kof_buf d, uint64_t at, const uint8_t *prog,
-		  const struct kof_hex_alt *a)
+		  const struct kof_hex_alt *a, int icase)
 {
 	const uint8_t *b = prog + a->data_off;
 
 	if (!kof_in_range(d, at, a->len))
 		return 0;
-	if (!(a->flags & KOF_HEX_ALT_MASKED))
-		return memcmp(d.p + at, b, a->len) == 0;
+	/*
+	 * A CLASS IS ONE BYTE AND A LOOKUP - see KOF_HEX_ALT_CLASS. Tested
+	 * before the mask, because the two are exclusive and this is the
+	 * cheaper question: one shift and one AND against a table the compiler
+	 * already built.
+	 *
+	 * ICASE does not apply. A class names the values it accepts, so
+	 * "either case" is something the class either contains or does not -
+	 * folding it here would silently widen a set the author wrote out.
+	 */
+	if (a->flags & KOF_HEX_ALT_CLASS) {
+		const uint8_t *set = prog + a->data_off;
+		uint8_t c = d.p[at];
+
+		return (set[c >> 3] & (uint8_t)(1u << (c & 7u))) != 0;
+	}
+	if (!(a->flags & KOF_HEX_ALT_MASKED)) {
+		uint16_t i;
+
+		if (!icase)
+			return memcmp(d.p + at, b, a->len) == 0;
+		for (i = 0; i < a->len; i++)
+			if (!hex_eq(d.p[at + i], b[i], 1))
+				return 0;
+		return 1;
+	}
 	{
 		const uint8_t *msk = b + a->len;
 		/* Only when the flag says so - see KOF_HEX_ALT_NEG. An
@@ -486,6 +530,23 @@ static int alt_at(kof_buf d, uint64_t at, const uint8_t *prog,
 		for (i = 0; i < a->len; i++) {
 			int differs = ((d.p[at + i] ^ b[i]) & msk[i]) != 0;
 
+			/*
+			 * AND THE FOLD, FOR WHOLE BYTES ONLY.
+			 *
+			 * A half-masked byte is a nibble, and a nibble is not a
+			 * letter - "4?" covers 0x40 to 0x4F, of which some are
+			 * letters and some are not, so there is no case pair to
+			 * fold. Applied where the mask is 0xFF and nowhere
+			 * else, which is exactly where the byte is concrete.
+			 *
+			 * Not applied to a negated byte either: "anything but
+			 * this letter" folded would be "anything but either
+			 * case", which is a different and much broader claim
+			 * than what was written.
+			 */
+			if (differs && icase && msk[i] == 0xffu &&
+			    !(neg && neg[i]) && hex_eq(d.p[at + i], b[i], 1))
+				differs = 0;
 			/* A plain byte matches when it does NOT differ, a
 			 * negated one when it does. One comparison either
 			 * way. */
@@ -508,7 +569,40 @@ static int alt_at(kof_buf d, uint64_t at, const uint8_t *prog,
  * The set is kept sorted so the dedup is a comparison against the last write, and
  * so a caller could ask where the match ended.
  */
-static int hex_walk(kof_buf d, uint64_t start, const uint8_t *prog)
+/*
+ * A hex pattern's WORD BOUNDARY, which needs the match's end and therefore
+ * lives in the walk.
+ *
+ * A literal knows its length before it searches; a hex pattern does not - a gap
+ * or a group makes the span vary, so where the match ENDS is only known once
+ * the walk has run. The final position set is exactly that set of ends, so the
+ * test belongs here and nowhere earlier.
+ *
+ * ANY END WILL DO. One pattern can match to several ends at one start, and the
+ * question a FULLWORD asks is whether the thing it found stands alone - so it
+ * is satisfied by one end that does, the same way a literal is satisfied by one
+ * occurrence.
+ */
+static int hex_bound_ok(kof_buf d, uint64_t start, const uint64_t *ends,
+			uint32_t n_ends, uint8_t flags)
+{
+	uint32_t k;
+
+	if (!(flags & KOF_STR_BOUNDED))
+		return 1;
+	/* The leading side is fixed: every match of this call begins at the
+	 * same offset, so it is asked once. */
+	if (start && kof_str_word_byte(d.p[start - 1u]))
+		return 0;
+	for (k = 0; k < n_ends; k++) {
+		if (ends[k] >= d.n || !kof_str_word_byte(d.p[ends[k]]))
+			return 1;
+	}
+	return 0;
+}
+
+static int hex_walk(kof_buf d, uint64_t start, const uint8_t *prog,
+		    uint8_t flags)
 {
 	const struct kof_hex_hdr *h = (const void *)prog;
 	const struct kof_hex_step *steps = (const void *)(prog + h->steps_off);
@@ -561,7 +655,8 @@ static int hex_walk(kof_buf d, uint64_t start, const uint8_t *prog)
 						&alts[st->alt_first + j];
 					uint64_t end, rel;
 
-					if (!alt_at(d, at, prog, a))
+					if (!alt_at(d, at, prog, a,
+						    (flags & KOF_STR_ICASE) != 0))
 						continue;
 					end = at + a->len;
 					rel = end - start;
@@ -592,7 +687,9 @@ reach_full:
 		memcpy(cur, next, n_next * sizeof cur[0]);
 		n_cur = n_next;
 	}
-	return 1;
+	/* `cur` now holds where the match ENDED, one entry per way it could -
+	 * which is what the word rule has to be asked about. */
+	return hex_bound_ok(d, start, cur, n_cur, flags);
 }
 
 /*
@@ -604,7 +701,7 @@ reach_full:
  * where the run actually appeared.
  */
 static int hex_search(struct kof_match_ctx *m, uint64_t off, uint64_t len,
-		      const uint8_t *prog, uint64_t *hit)
+		      const uint8_t *prog, uint8_t flags, uint64_t *hit)
 {
 	const struct kof_hex_hdr *h = (const void *)prog;
 	const struct kof_hex_step *steps = (const void *)(prog + h->steps_off);
@@ -642,7 +739,18 @@ static int hex_search(struct kof_match_ctx *m, uint64_t off, uint64_t len,
 	for (;;) {
 		uint64_t q, d;
 
-		if (!find_lit(m->data.p + base, len, run, h->anchor_len, 0, &at))
+		/*
+		 * AND THE ANCHOR IS SOUGHT WITH THE PATTERN'S CASE OPTION.
+		 *
+		 * This passed 0 - a case-exact search - which for an ICASE hex
+		 * pattern ruled out every candidate before the walk could fold
+		 * anything. The walk, the gram index and the multimatch table
+		 * were each taught the option in turn and the answer stayed no,
+		 * because the search that produces the candidates is the first
+		 * gate of the four and was the last one found.
+		 */
+		if (!find_lit(m->data.p + base, len, run, h->anchor_len,
+			      (flags & KOF_STR_ICASE) != 0, &at))
 			return 0;
 		q = base + at;
 
@@ -668,7 +776,7 @@ static int hex_search(struct kof_match_ctx *m, uint64_t off, uint64_t len,
 			 */
 			if (lim.n - start < h->min_span)
 				continue;
-			if (hex_walk(lim, start, prog)) {
+			if (hex_walk(lim, start, prog, flags)) {
 				if (hit)
 					*hit = start;
 				return 1;
@@ -684,7 +792,20 @@ static int hex_search(struct kof_match_ctx *m, uint64_t off, uint64_t len,
 
 int kof_hex_walk(kof_buf d, uint64_t start, const uint8_t *prog)
 {
-	return hex_walk(d, start, prog);
+	/*
+	 * No flags, because this entry point has no pattern descriptor to take
+	 * them from - it is handed a compiled program on its own. Its callers
+	 * ask "do these bytes match here", which is the unbounded, exact-case
+	 * question; anything that has a descriptor goes through match_at or
+	 * match_one and gets the flags with it.
+	 */
+	return hex_walk(d, start, prog, 0u);
+}
+
+int kof_hex_walk_flags(kof_buf d, uint64_t start, const uint8_t *prog,
+		       uint8_t flags)
+{
+	return hex_walk(d, start, prog, flags);
 }
 
 /* ---- searching ranges ----------------------------------------------------- */
@@ -718,11 +839,22 @@ static int match_one(struct kof_match_ctx *m, uint64_t base, uint64_t span,
 
 	while (span > from) {
 		if (kind == KOF_STR_HEX) {
-			if (!hex_search(m, base + from, span - from, bytes, &hit))
+			/*
+			 * THE WORD RULE APPLIES TO HEX TOO, AND USED NOT TO.
+			 *
+			 * It could not: the rule needs the match's end and a
+			 * hex pattern's span varies with its gaps and groups,
+			 * so nothing outside the walk knew where the match
+			 * stopped. hex_walk now asks it where it does know -
+			 * see hex_bound_ok - and this hands the flags down
+			 * instead of dropping them.
+			 */
+			if (!hex_search(m, base + from, span - from, bytes,
+					flags, &hit))
 				return 0;
 			if (at)
 				*at = hit;
-			return 1;      /* hex patterns carry no word option */
+			return 1;
 		}
 		if (!find_range(m, base + from, span - from, bytes, len,
 				(flags & KOF_STR_ICASE) != 0, &hit))
@@ -882,8 +1014,24 @@ static int gram_admits(const struct kof_gram *g, const uint8_t *bytes, uint16_t 
 
 		if (h->anchor_len < 4)
 			return 1;
+		/*
+		 * WITH THE PATTERN'S CASE OPTION, which this passed as 0.
+		 *
+		 * The anchor is the longest run of concrete bytes and the gram
+		 * index is asked whether the object holds it. Asked
+		 * case-sensitively for a pattern declared ICASE, the object was
+		 * ruled out before anything looked at it: a hex "63 6D 64" -
+		 * "cmd" - declared ICASE never saw a file containing "CMD",
+		 * because the prefilter answered no and the walk was never
+		 * entered.
+		 *
+		 * Measured the moment hex gained the option: a rule with both
+		 * an exact and a folded form of one marker matched
+		 * "xxx cmd.exe yyy" and did not match "xxx CMD.EXE yyy".
+		 */
 		return gram_may_contain(g, bytes + aa->data_off + h->anchor_in_alt,
-					(uint16_t)h->anchor_len, 0);
+					(uint16_t)h->anchor_len,
+					(flags & KOF_STR_ICASE) != 0);
 	}
 	return gram_may_contain(g, bytes, len, (flags & KOF_STR_ICASE) != 0);
 }
@@ -994,7 +1142,7 @@ int kof_match_at(struct kof_match_ctx *m, uint64_t off,
 		if (!kof_in_range(m->data, off, h->min_span))
 			return 0;
 		m->n_bytes_scanned += h->min_span;
-		return hex_walk(m->data, off, bytes);
+		return hex_walk(m->data, off, bytes, flags);
 	}
 
 	if (!kof_in_range(m->data, off, len))

@@ -23,7 +23,7 @@ KOF_TARGET_SUBTYPE(KOF_ELF_EXEC);
 
 KOF_TARGET_RANGE(scan_range_code, KOF_SCAN_ELF_CODE);
 
-KOF_DEFINE_HEXSTR(s0, "6a 10 5a 6a 2a 58 0f 05 [8-15] 57 6a 23 58 6a 00 6a 05 48 89 e7 48 31 f6 0f 05");
+KOF_DEFINE_HEXSTR(s0, "6a 10 5a 6a 2a 58 0f 05 [8-15] 57 6a 23 58 6a 00 6a 05 48 89 e7 48 31 f6 0f 05", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 
 void kof_scan(const struct kof_obj_ctx *ctx)
 {

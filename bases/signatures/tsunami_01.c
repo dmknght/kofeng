@@ -14,7 +14,7 @@ KOF_TARGET_NAME(KOF_MALTYPE_BOTNET, "Tsunami");
 
 KOF_TARGET_RANGE(scan_range_code, KOF_SCAN_ELF_CODE);
 
-KOF_DEFINE_HEXSTR(s0, "47 45 54 20 2F [4-7] 2E 74 73 75 6E 61 6D 69");
+KOF_DEFINE_HEXSTR(s0, "47 45 54 20 2F [4-7] 2E 74 73 75 6E 61 6D 69", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 KOF_DEFINE_STR(s1, "Tsunami successfully deployed", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 
 void kof_scan(const struct kof_obj_ctx *ctx)

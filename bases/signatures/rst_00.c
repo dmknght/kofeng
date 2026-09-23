@@ -74,7 +74,7 @@ KOF_TARGET_ARCH(KOF_ARCH_X86);
 KOF_TARGET_RANGE(r_code, KOF_SCAN_ELF_CODE);
 
 KOF_DEFINE_HEXSTR(s0, "b8 ?? ?? 04 08 60 e8 19 0a 00 00 61 ff e0 89 f6 "
-		      "55 89 e5 eb 03 58 eb 42");
+		      "55 89 e5 eb 03 58 eb 42", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
