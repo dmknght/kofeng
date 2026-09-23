@@ -2030,12 +2030,29 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * a document its streams - and normalising those would be a second
 	 * answer to a question already answered.
 	 *
-	 * NOTHING STOPS A VIEW OF A VIEW EXPLICITLY, because nothing has to:
-	 * the transform is IDEMPOTENT. After it, no zero run is eight long and
-	 * no UTF-16 run survives, so a second pass changes nothing, returns
-	 * zero and produces no child. The floor below would refuse it anyway,
-	 * and the scan tree's own depth budget is under both.
+	 * A VIEW IS NOT NORMALISED AGAIN, AND IT IS STOPPED HERE RATHER THAN
+	 * BY ARITHMETIC.
+	 *
+	 * This used to say that nothing had to stop it because the transform is
+	 * idempotent - no zero run survives eight long, no UTF-16 run survives
+	 * at all - so a second pass would change nothing and produce no child.
+	 * That reasoning was true of the transform and false of the OBJECT.
+	 *
+	 * Collapsing a zero run MOVES the bytes after it. Two stretches that
+	 * were far apart end up adjacent, and a run of hex characters long
+	 * enough to decode can exist in the view that existed nowhere in the
+	 * parent. The decode then reports a change, a view of the view is made,
+	 * and its own collapse creates the next one: measured on a 4.5 MB
+	 * miner, norm//norm//norm to the depth budget, every level carrying the
+	 * same detection.
+	 *
+	 * A DECLARED REGION TABLE IS WHAT A VIEW HAS AND NOTHING ELSE DOES, so
+	 * it is the test. It is also the honest one: the rule being enforced is
+	 * "this object is already a rendering of another", not "this looks like
+	 * something that has been through here".
 	 */
+	if (sc->n_cur_rgn)
+		return;
 	if (!ctx || (ctx->format != KOF_FMT_ELF && ctx->format != KOF_FMT_PE))
 		return;
 	if (buf.n < NORM_MIN_OBJ)
