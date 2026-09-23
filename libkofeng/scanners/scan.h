@@ -14,6 +14,7 @@
 #ifndef KOFENG_SCAN_H
 #define KOFENG_SCAN_H
 
+#include "objsrc.h"
 #include "../kofeng.h"
 #include "../databases/dbloader.h"
 #include "../detector/matchers/kofmatch.h"
@@ -49,6 +50,13 @@
  * once, and is reused for every object.
  */
 struct kof_flow_set;   /* scanners/objctx.c - the swept call chains */
+
+/*
+ * "This child is raw, and I mean it" - see pend_fmt below. Out of the range of
+ * enum kof_format on purpose: it is a declaration, not a format, and identify
+ * turns it back into KOF_FMT_UNKNOWN once it has skipped the sniff.
+ */
+#define KOF_FMT_DECLARED_RAW 0xffu
 
 struct kof_scanner {
 	const struct kof_engine *eng;
@@ -327,11 +335,69 @@ struct kof_scanner {
 	uint32_t pend_label_len;
 	/*
 	 * And what the next child IS, declared by whatever is about to produce
-	 * it. Consumed by kid_push exactly as the label is, and for the same
+	 * it.
+	 *
+	 * KOF_FMT_DECLARED_RAW IS HOW "RAW" IS SAID, because KOF_FMT_UNKNOWN
+	 * cannot say it. That constant is 0, and 0 is also what this field
+	 * holds when nobody declared anything - so "this child is a run of
+	 * bytes and must not be sniffed" and "no claim was made" were the same
+	 * value, and the first of the two was unsayable.
+	 *
+	 * It mattered for exactly one producer and it mattered a lot. The
+	 * normalised view of an ELF still begins \x7fELF, so with no way to
+	 * say otherwise it was sniffed back into an ELF, parsed against
+	 * headers that no longer describe it, and reported as a damaged one:
+	 * gawk's view came back ELF-other/Heur:Appended, which is a finding
+	 * about the normaliser.
+	 *
+	 * HOST SIDE ONLY. A module still says KOF_FMT_UNKNOWN to mean "I will
+	 * not name this one" - see c_child_format - and that reading is
+	 * unchanged. This value is out of the range of enum kof_format and no
+	 * module can produce it. Consumed by kid_push exactly as the label is, and for the same
 	 * reason: a claim that outlived its child would be attached to the next
 	 * one, which is the one way this could name the wrong object.
 	 */
 	uint8_t  pend_fmt;
+	/*
+	 * HOW MANY OF n_kids ARE VIEWS RATHER THAN PAYLOADS.
+	 *
+	 * "This object produced children" is read as "something came out of it,
+	 * so a rule that guessed at what it was has been answered by the thing
+	 * itself" - and on that reading every rule heuristic on the object is
+	 * withdrawn. See where out->v is filtered in scan.c.
+	 *
+	 * A normalised view breaks that reading. Nothing came out of the
+	 * object; the same object was written down again more plainly. Counting
+	 * it withdrew findings that were correct, and it did so on almost every
+	 * binary, because a view is made for any executable of 4 KB or more
+	 * with a long zero run in it. Measured as a silent detection loss: an
+	 * ELF of the exact shape Heur:Shellcode exists for reported it at 176
+	 * bytes and said nothing at 4216, with no difference between the two
+	 * but the view.
+	 *
+	 * Counted rather than flagged because a view is still a child in every
+	 * other respect - it is scanned, it is budgeted, it is freed - and only
+	 * this one question needs to tell them apart.
+	 */
+	uint32_t n_views;
+
+	/*
+	 * The declared region table of the object being scanned, if it has one.
+	 *
+	 * Held on the scanner because a resolver is reached through ctx and ctx
+	 * carries no room of its own - the same route every other host accessor
+	 * takes. Filled from the source at the top of scan_object and empty for
+	 * every object that was identified rather than declared.
+	 */
+	struct kof_src_region cur_rgn[KOF_SRC_MAX_REGIONS];
+	uint32_t              n_cur_rgn;
+	uint8_t               cur_rgn_fmt;
+
+	/* And what the NEXT child's regions are, spent by kid_push exactly as
+	 * pend_fmt is and cleared there whatever happens to the child. */
+	struct kof_src_region pend_rgn[KOF_SRC_MAX_REGIONS];
+	uint32_t              n_pend_rgn;
+	uint8_t               pend_rgn_fmt;
 	/* And what it is for, which is also its name when nothing named it. */
 	uint32_t pend_kind;
 	/* And which entry it is the content of, or KOF_ENTRY_NONE. */

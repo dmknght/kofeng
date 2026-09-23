@@ -576,6 +576,191 @@ static void b64_touches_only_its_own_run(void)
 	      "the rewrite is length preserving, so the tail cannot shift");
 }
 
+/* ------------------------------------------------------------------------
+ * PARENT OFFSETS CARRIED ONTO THE VIEW.
+ *
+ * kof_exe_norm_map replays the transform instead of reading the span map, so
+ * the one thing worth asserting is that the replay and the transform agree.
+ * Reading the two loops and deciding they match is exactly the check that
+ * fails silently later, when one of them is edited.
+ *
+ * The assertion is made against the OUTPUT BYTES rather than against the span
+ * table: for any parent offset that was copied through, the view byte at the
+ * mapped offset must be the same byte. That is the property a region table
+ * needs - a boundary has to land on the byte it named.
+ */
+static void map_agrees_with_the_transform(void)
+{
+	static uint8_t in[4096], out[4096];
+	uint64_t src[4096], dst[4096];
+	uint64_t i, n = sizeof in, m;
+	unsigned s = 12345u;
+	int bad = 0, checked = 0;
+
+	/* Text, zero runs of every length around the floor, and wide text -
+	 * so the replay meets all three of its branches. */
+	for (i = 0; i < n; i++) {
+		s = s * 1103515245u + 12345u;
+		in[i] = (uint8_t)('A' + (s >> 16) % 26u);
+	}
+	memset(in + 100, 0, 4);          /* below the floor: copied */
+	memset(in + 300, 0, 8);          /* exactly the floor: collapsed */
+	memset(in + 700, 0, 900);        /* well past it */
+	for (i = 0; i < 40; i++) {       /* a wide run */
+		in[2000 + 2 * i] = (uint8_t)('a' + i % 26u);
+		in[2001 + 2 * i] = 0;
+	}
+
+	m = kof_exe_norm(in, n, KOF_EXE_NORM_NULLRUN | KOF_EXE_NORM_UNWIDE,
+			 out, sizeof out, NULL, 0, NULL);
+	check(m > 0 && m < n, "map: the fixture actually shortens",
+	      "a test over a transform that did nothing proves nothing");
+	if (!m)
+		return;
+
+	for (i = 0; i < n; i++)
+		src[i] = i;
+	kof_exe_norm_map(in, n, KOF_EXE_NORM_NULLRUN | KOF_EXE_NORM_UNWIDE,
+			 src, dst, (uint32_t)n);
+
+	for (i = 0; i < n; i++) {
+		/* Only the bytes that were COPIED have a byte of their own in
+		 * the view. A byte inside a zero run or a wide run was folded
+		 * into something shorter and has no counterpart to compare. */
+		int in_zero = 0, j;
+
+		for (j = -7; j <= 0; j++) {
+			uint64_t a = (uint64_t)((int64_t)i + j);
+			uint64_t z = 0;
+
+			if ((int64_t)i + j < 0)
+				continue;
+			while (a + z < n && !in[a + z])
+				z++;
+			if (z >= 8u && a <= i && i < a + z)
+				in_zero = 1;
+		}
+		if (in_zero || (i >= 2000 && i < 2080))
+			continue;
+		checked++;
+		if (dst[i] >= m || out[dst[i]] != in[i])
+			bad++;
+	}
+	check(checked > 2000, "map: most of the object was actually checked",
+	      "a filter that skipped everything would pass by default");
+	check(!bad, "map: every copied byte lands on itself in the view",
+	      "the replay and the transform have diverged");
+
+	/* And the far end: an offset at or past the input maps to the view's
+	 * length, which is what a region ending at end-of-file needs. */
+	src[0] = n;
+	kof_exe_norm_map(in, n, KOF_EXE_NORM_NULLRUN | KOF_EXE_NORM_UNWIDE,
+			 src, dst, 1u);
+	check(dst[0] == m, "map: end of the parent is end of the view",
+	      "a region running to the last byte would be cut short");
+}
+
+/* ------------------------------------------------------------------------
+ * REGIONS THAT MUST NOT MOVE.
+ *
+ * The view keeps the header and the code byte for byte and rewrites the rest.
+ * Two things have to hold for that to be worth anything, and they are not the
+ * same thing: the kept bytes must still BE those bytes, and they must still be
+ * FINDABLE - a region table carried onto the view is a list of offsets, and an
+ * offset that is one byte out names the wrong thing.
+ */
+static void kept_regions_do_not_move(void)
+{
+	static uint8_t in[2048], out[2048];
+	uint8_t keep[2048 / 8];
+	uint64_t mark[4], mark_out[4];
+	uint64_t i, n = sizeof in, m;
+	int bad = 0;
+
+	memset(keep, 0, sizeof keep);
+	for (i = 0; i < n; i++)
+		in[i] = (uint8_t)('A' + i % 26u);
+
+	/* [0,64) is the header: it carries a zero run that WOULD collapse, and
+	 * the whole point is that it does not. [512,640) is code, likewise. */
+	memset(in + 8, 0, 16);
+	memset(in + 520, 0, 32);
+	/* And a zero run out in the data, which must collapse. */
+	memset(in + 1000, 0, 400);
+	for (i = 0; i < 64; i++)
+		keep[i >> 3] |= (uint8_t)(1u << (i & 7u));
+	for (i = 512; i < 640; i++)
+		keep[i >> 3] |= (uint8_t)(1u << (i & 7u));
+
+	mark[0] = 0; mark[1] = 64; mark[2] = 512; mark[3] = 640;
+	m = kof_exe_norm_masked(in, n, keep, KOF_EXE_NORM_NULLRUN, out,
+				sizeof out, mark, mark_out, 4u);
+
+	check(m > 0 && m < n, "masked: the object still shortens",
+	      "the data run has to collapse or nothing is being tested");
+	if (!m)
+		return;
+	/*
+	 * NOTHING BEFORE THE FIRST REWRITE MOVED, so the header is not only
+	 * intact, it is at offset 0 with its zeros still there. That is the
+	 * e_ident case: eight zeros at offset 8 that took e_machine with them.
+	 */
+	check(!memcmp(out, in, 64u), "masked: the header is byte for byte",
+	      "its zero run collapsed and everything after it shifted");
+	check(mark_out[0] == 0 && mark_out[1] == 64,
+	      "masked: and the header's boundaries are unmoved",
+	      "a region table over the view would name the wrong bytes");
+	/*
+	 * The code region is AFTER a kept header and BEFORE a collapsed data
+	 * run, so it must be byte for byte and still at 512. Its own zero run
+	 * is the test: kept means kept, not "kept unless it looks collapsible".
+	 */
+	check(mark_out[2] == 512 && mark_out[3] == 640,
+	      "masked: code is where the parent put it",
+	      "nothing before it was rewritten, so nothing may have moved it");
+	if (mark_out[2] + 128u <= m &&
+	    memcmp(out + mark_out[2], in + 512, 128u))
+		bad = 1;
+	check(!bad, "masked: and code is byte for byte",
+	      "a hex rule is written against these bytes exactly");
+
+	/* And the data run really did collapse - otherwise every check above
+	 * passes on a transform that did nothing. */
+	check(m == n - 400u + 2u, "masked: the data run collapsed to two zeros",
+	      "400 zeros became 2, and only those 398 bytes went");
+}
+
+/*
+ * A RUN MAY NOT STRADDLE INTO A KEPT REGION.
+ *
+ * Zeros that begin in data and continue into the header are one run to the eye
+ * and two to this transform. Collapsing the whole of it would move the header,
+ * which is the one thing keeping it is for.
+ */
+static void a_run_stops_at_the_boundary(void)
+{
+	static uint8_t in[512], out[512];
+	uint8_t keep[512 / 8];
+	uint64_t i, n = sizeof in, m;
+
+	memset(keep, 0, sizeof keep);
+	for (i = 0; i < n; i++)
+		in[i] = (uint8_t)('x');
+	/* 100 zeros running from 150 up to 250, with [200,300) kept. */
+	memset(in + 150, 0, 100);
+	for (i = 200; i < 300; i++)
+		keep[i >> 3] |= (uint8_t)(1u << (i & 7u));
+
+	m = kof_exe_norm_masked(in, n, keep, KOF_EXE_NORM_NULLRUN, out,
+				sizeof out, NULL, NULL, 0u);
+	/* Only [150,200) may collapse: 50 zeros to 2, so 48 bytes go. */
+	check(m == n - 48u, "masked: a run collapses only up to the boundary",
+	      "taking the kept half of it would move everything after");
+	check(!memcmp(out + m - (n - 300u) - 100u, in + 200, 100u),
+	      "masked: and the kept half is still all there",
+	      "the fifty zeros inside the kept region are kept zeros");
+}
+
 int main(void)
 {
 	printf("normalize exe:\n");
@@ -597,6 +782,10 @@ int main(void)
 	b64_reads_every_spelling();
 	b64_ignores_a_short_run();
 	b64_touches_only_its_own_run();
+
+	map_agrees_with_the_transform();
+	kept_regions_do_not_move();
+	a_run_stops_at_the_boundary();
 
 	if (fails) {
 		printf("\nnormalize exe: %d check(s) failed\n", fails);

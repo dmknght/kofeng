@@ -133,11 +133,25 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	uint32_t k;
 
 	(void)name; (void)bytes; (void)len; (void)user;
-	seen[0] = '\0';
+	/*
+	 * ACROSS EVERY OBJECT OF THE FILE, not just the last one.
+	 *
+	 * This cleared `seen` on entry, so each object overwrote the one
+	 * before and what survived was whatever came last. That held while a
+	 * file of this shape produced exactly one object. It stopped holding
+	 * when the normaliser began making a view of any binary with a long
+	 * zero run - the file reported Heur:Shellcode, the clean view came
+	 * after it, and the finding was erased by an object that had nothing
+	 * to say.
+	 *
+	 * The question this test asks is "did the ENGINE report it", and that
+	 * is a question about the file, so the answer accumulates. Clearing
+	 * belongs to the caller, before the scan, where it already is.
+	 */
 	if (!res)
 		return 0;
 	for (k = 0; k < res->n; k++)
-		if (res->v[k].level == KOF_LEVEL_HEUR) {
+		if (res->v[k].level == KOF_LEVEL_HEUR && !seen[0]) {
 			snprintf(seen, sizeof seen, "%s", res->v[k].name);
 			break;
 		}

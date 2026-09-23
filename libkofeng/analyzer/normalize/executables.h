@@ -183,9 +183,11 @@ struct kof_exe_norm_span {
  * fill, and a FULLWORD match that ends at the last character sees a zero beside
  * it, which is not a word byte and is the right answer.
  *
- * WHY COLLAPSING ZERO RUNS IS NOT HERE. It cannot be: removing bytes moves
- * every byte after them, and that is exactly what this exists not to do. The
- * 1-3% it saved was never the reason for any of this.
+ * WHY COLLAPSING ZERO RUNS IS NOT IN THIS FUNCTION. Removing bytes moves every
+ * byte after them, and this pass has to be usable on a buffer whose offsets
+ * still mean something - so the collapse is kof_exe_norm, run afterwards, and
+ * the caller decides whether it wants a shorter view or the parent's offsets.
+ * norm_emit wants both, in that order, and says why.
  *
  * Returns non-zero when something was rewritten, 0 when the object had no wide
  * text and the view would be a copy - and then no view should be made.
@@ -200,8 +202,12 @@ int kof_exe_unwide(const uint8_t *in, uint64_t n, uint8_t *out);
  * It is length preserving in exactly the way unwide is. Four encoded characters
  * carry three bytes, so a decoded run is always SHORTER than the run it came
  * from; the decoded bytes go at the run's own offset and the remainder is
- * zeroed. Nothing after the run moves, which is what keeps the view one to one
- * with the parent and the region table still true of it.
+ * zeroed. Nothing after the run moves.
+ *
+ * That is a property of THIS pass, not of the finished view: norm_emit runs
+ * kof_exe_norm after it and that one does move bytes. The reason to keep this
+ * pass 1:1 anyway is the same reason unwide is - it must be usable on its own,
+ * on a span, by a caller that still needs the parent's offsets.
  *
  *
  * WHERE THIS CAME FROM, AND WHY IT IS HERE RATHER THAN IN A MODULE.
@@ -243,6 +249,57 @@ int kof_exe_unwide(const uint8_t *in, uint64_t n, uint8_t *out);
  * already-decoded buffer finds nothing to do.
  */
 int kof_exe_unb64(uint8_t *p, uint64_t n);
+
+/*
+ * PARENT OFFSETS TO VIEW OFFSETS, for a sorted list of them, in one pass.
+ *
+ * What a caller needs to carry a REGION TABLE onto the view. A shortened view
+ * is not the executable its headers describe, so nothing can parse regions out
+ * of it - they have to be brought across from the parent, and bringing them
+ * across is this.
+ *
+ * `src` must be ascending; `dst` takes k answers. Both the transform and the
+ * ops must be the ones the view was made with, or the answers are about a
+ * different view. See the note above the definition for what an offset inside
+ * a collapsed run returns.
+ */
+void kof_exe_norm_map(const uint8_t *in, uint64_t n, uint32_t ops,
+		      const uint64_t *src, uint64_t *dst, uint32_t k);
+
+/*
+ * THE TRANSFORM WITH REGIONS THAT MUST NOT MOVE.
+ *
+ * `keep` is a bitmap over the input, one bit per byte, set where the byte must
+ * appear in the view unchanged and at no cost to anything after it. NULL means
+ * nothing is kept, which is kof_exe_norm's behaviour.
+ *
+ * WHAT IS KEPT AND WHY IT IS NOT A STYLE CHOICE:
+ *
+ *   HEADERS  Nothing else can be kept unless this is. An ELF's e_ident carries
+ *            eight zeros at offset 8 and collapsing them moved e_machine from
+ *            18 to 12 - the view came back with no architecture and a parse
+ *            that found children that are not there.
+ *
+ *   CODE     Opcodes are what a hex rule is written against, byte for byte,
+ *            and an instruction stream has no encoded text in it to reveal.
+ *            There is nothing to gain here and an offset to lose.
+ *
+ * and everything else - data, the sections the loader ignores, the unclaimed
+ * gaps, an overlay - is rewritten, because that is where the padding, the wide
+ * text and the encoded payloads are.
+ *
+ * Symbol regions need no mention: KOF_SCAN_SYM_* are extents over the canonical
+ * RECORDS, not over the file, so no byte of the input is ever theirs.
+ *
+ * `mark`/`mark_out` carry a sorted list of parent offsets through to their view
+ * positions in the same pass - see the note above the definition.
+ *
+ * Returns the view length, or 0 when nothing was rewritten.
+ */
+uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
+			     uint32_t ops, uint8_t *out, uint64_t cap,
+			     const uint64_t *mark, uint64_t *mark_out,
+			     uint32_t n_mark);
 
 uint64_t kof_exe_norm(const uint8_t *in, uint64_t n, uint32_t ops,
 		  uint8_t *out, uint64_t cap,

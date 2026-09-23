@@ -59,6 +59,12 @@ struct kof_objsrc {
 	 * because the calloc'd zero would mean entry 0. */
 	uint32_t           entry_of;
 	uint32_t           kind;
+
+	/* What the producer said this object's regions are - see the note in
+	 * objsrc.h. Empty for every source but a normalised view. */
+	struct kof_src_region rgn[KOF_SRC_MAX_REGIONS];
+	uint32_t              n_rgn;
+	uint8_t               rgn_fmt;   /* whose vocabulary rgn[].mask uses */
 };
 
 /*
@@ -110,6 +116,41 @@ void kof_src_declare_fmt(struct kof_objsrc *s, uint8_t fmt)
 {
 	if (s)
 		s->fmt = fmt;
+}
+
+uint8_t kof_src_region_fmt_of(const struct kof_objsrc *s)
+{
+	return s ? s->rgn_fmt : 0u;
+}
+
+void kof_src_declare_regions(struct kof_objsrc *s, uint8_t fmt,
+			     const struct kof_src_region *r, uint32_t n)
+{
+	uint32_t i;
+
+	if (!s || !r)
+		return;
+	if (n > KOF_SRC_MAX_REGIONS)
+		n = KOF_SRC_MAX_REGIONS;
+	/*
+	 * Copied rather than pointed at. The caller's table is a local in the
+	 * function that built the view, and the source outlives it by the whole
+	 * of the child's scan.
+	 */
+	for (i = 0; i < n; i++)
+		s->rgn[i] = r[i];
+	s->n_rgn = n;
+	s->rgn_fmt = fmt;
+}
+
+uint32_t kof_src_regions_of(const struct kof_objsrc *s,
+			    const struct kof_src_region **out)
+{
+	if (!s || !s->n_rgn)
+		return 0;
+	if (out)
+		*out = s->rgn;
+	return s->n_rgn;
 }
 
 void kof_src_declare_entry(struct kof_objsrc *s, uint32_t index)

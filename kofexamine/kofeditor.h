@@ -1013,6 +1013,26 @@ struct object {
 	 * rather than obj_label learning what a log is.
 	 */
 	char      label[64];
+	/*
+	 * REGIONS THE ENGINE DECLARED for this object, and the count.
+	 *
+	 * Almost always zero, and then the parser's own resolver answers as it
+	 * always has. Non-zero for a NORMALISED VIEW, which cannot be parsed
+	 * for them: it keeps its parent's header byte for byte, so identifying
+	 * it from its bytes yields an ELF or a PE whose offsets describe the
+	 * parent - before the padding was taken out. Drawn from those, a view's
+	 * data region begins at the parent's offset, runs into the kept code,
+	 * and shows padding the view no longer carries.
+	 *
+	 * See kof_result.region, which is where these come from and why the
+	 * engine has to be the one to say.
+	 */
+	struct kof_scan_region rgn[KOF_MAX_REGIONS];
+	uint32_t  n_rgn;
+	/* Which format's vocabulary rgn[].mask is written in - the PARENT's,
+	 * because that is where the bits were resolved. A bit cannot be named
+	 * without it: 1u << 5 is UNCLAIMED in an ELF and OVERLAY in a PE. */
+	uint8_t   rgn_fmt;
 	uint8_t  *own;              /* the copy, NULL for the mapped top level */
 	void     *mapped;           /* or a spill file, mapped instead of copied */
 	uint64_t  mapped_len;

@@ -678,6 +678,15 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 		kof_src_declare_fmt(kid, sc->pend_fmt);
 		sc->pend_fmt = 0;
 	}
+	/* The regions go the same way and are cleared the same way: a table
+	 * left pending would be worn by the next child, and its offsets are
+	 * offsets into different bytes. */
+	if (sc->n_pend_rgn) {
+		kof_src_declare_regions(kid, sc->pend_rgn_fmt, sc->pend_rgn,
+					sc->n_pend_rgn);
+		sc->n_pend_rgn = 0;
+		sc->pend_rgn_fmt = 0;
+	}
 	if (sc->kids_left == 0) {
 		/* Refused, and recorded: a container that yields more children than
 		 * the caller allows has not been fully examined, and saying so is
@@ -3840,6 +3849,7 @@ void kof_mod_unpack_mode(struct kof_obj_ctx *ctx, int on)
 	kof_scan_of(ctx)->pend_label[0] = 0;
 	kof_scan_of(ctx)->pend_label_len = 0;
 	kof_scan_of(ctx)->pend_fmt = 0;
+	kof_scan_of(ctx)->n_pend_rgn = 0;
 	kof_scan_of(ctx)->pend_kind = 0;
 	kof_scan_of(ctx)->pend_entry = KOF_ENTRY_NONE;
 	ctx->content = on ? &kof_unpack_vtable : &kof_detect_vtable;
@@ -3898,6 +3908,7 @@ void kof_scan_kids_reset(struct kof_scanner *sc)
 	for (i = 0; i < sc->n_kids; i++)
 		kof_src_unref(sc->kids[i]);
 	sc->n_kids = 0;
+	sc->n_views = 0;        /* counted out of n_kids - see scan.h */
 
 	/* Whatever a module emitted and never closed is not an object, and the
 	 * memory it was holding stops being resident. */

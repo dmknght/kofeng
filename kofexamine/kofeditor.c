@@ -4155,6 +4155,39 @@ static int src_negated(const char *line, const char *at)
 	return 0;
 }
 
+/*
+ * A BLANK LINE INSIDE A BLOCK COMMENT, which is not code and was counted as it.
+ *
+ * The comment skip below tests for an opener, a closer, and an asterisk with
+ * text after it. The paragraph breaks in these files are an asterisk with
+ * NOTHING after it, so they fell through to the body test, failed it, and were
+ * counted as logic the panel cannot model.
+ *
+ * What that cost: the editor refuses Save on a rule with unmodelled logic and
+ * says "Custom logic - Save As to derive a new rule from it". mirai_00.c is
+ * written entirely from the panel - one kof_find_str_any and one verdict - and
+ * it was refused, because its explanatory comment has one empty line in it. The
+ * refusal is right about rules that really do carry hand-written code; it was
+ * saying so about a comment.
+ *
+ * ONLY THE BARE ASTERISK, because a dereferencing assignment is a line of code
+ * that begins with one. A line holding nothing but blanks and a single `*` cannot be C - there
+ * is no statement of that shape - so this is exact rather than a guess about
+ * what the line probably was.
+ */
+static int comment_blank(const char *line)
+{
+	while (*line == ' ' || *line == '\t')
+		line++;
+	if (*line != '*')
+		return 0;
+	for (line++; *line; line++)
+		if (*line != ' ' && *line != '\t' && *line != '\r' &&
+		    *line != '\n')
+			return 0;
+	return 1;
+}
+
 int draft_from_source(struct kof_editor *e, const char *path)
 {
 	FILE *f = fopen(path, "r");
@@ -4345,7 +4378,7 @@ no_head:
 			continue;
 		}
 		if (strstr(line, "/*") || strstr(line, "*/") ||
-		    strstr(line, " * ")) {
+		    strstr(line, " * ") || comment_blank(line)) {
 			continue;               /* a block comment; skip it */
 		}
 

@@ -98,6 +98,45 @@ const char *kof_src_label_of(const struct kof_objsrc *);
  * format actually stated.
  */
 void    kof_src_declare_fmt(struct kof_objsrc *, uint8_t fmt);
+
+/*
+ * REGIONS THE PRODUCER NAMES, because nothing can work them out from the bytes.
+ *
+ * Every other object gets its regions from the parser that identified it. A
+ * NORMALISED VIEW cannot: it is the parent with stretches of padding taken out,
+ * so its own headers describe offsets that are no longer where they say. Parse
+ * it and the regions come back wrong; do not parse it and there are none, and a
+ * rule that names a region is filtered out before it runs - see the
+ * `m->scan_mask & present` gate in scan.c, which is the second of the two
+ * gates a rule has to pass.
+ *
+ * So the producer says. It knew the parent's regions and it knew what it did to
+ * each of them, which is exactly what is needed and is knowable nowhere else.
+ *
+ * Sixteen is past what either format yields: an ELF names five kinds of region
+ * and a PE seven, and a view carries one span per kind because that is how it
+ * was built - region by region, in file order.
+ */
+#define KOF_SRC_MAX_REGIONS 16u
+
+struct kof_src_region {
+	uint32_t mask;      /* the region bit, in the PARENT's vocabulary */
+	uint64_t off, len;  /* where it landed in this object */
+};
+
+/*
+ * `fmt` is the format whose REGION VOCABULARY the masks are written in, which
+ * is the parent's and not this object's. A region bit means nothing on its own:
+ * 1u << 3 is DATA in an ELF and DATA in a PE by coincidence, and 1u << 5 is
+ * UNCLAIMED in one and OVERLAY in the other. Whatever is to name these bits -
+ * a panel row, a rule being written against the view - has to be told which
+ * table to read them from.
+ */
+void     kof_src_declare_regions(struct kof_objsrc *, uint8_t fmt,
+				 const struct kof_src_region *, uint32_t n);
+uint8_t  kof_src_region_fmt_of(const struct kof_objsrc *);
+uint32_t kof_src_regions_of(const struct kof_objsrc *,
+			    const struct kof_src_region **out);
 uint8_t kof_src_fmt_of(const struct kof_objsrc *);
 
 /* Which entry of its parent this source is the content of, or

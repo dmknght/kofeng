@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <dirent.h>
 #include <unistd.h>
 
 #include "../../kofexamine/kofeditor.h"
@@ -398,6 +399,92 @@ static void at_place_forms(void)
 	CK(off == 2);
 }
 
+/*
+ * EVERY SHIPPED RULE, READ BACK, AND NONE OF THEM "CUSTOM LOGIC".
+ *
+ * The editor refuses Save on a rule whose body it could not model - it says
+ * "Custom logic - Save As to derive a new rule from it" - and that refusal is
+ * right when a rule really does carry hand-written code. It is a lie when the
+ * reader merely failed to recognise something it was supposed to.
+ *
+ * The difference is invisible from inside: a line the reader did not model is
+ * counted, not reported, so a reader that regressed looks exactly like a rule
+ * that got cleverer. The invariant that separates them is WHICH rules may be
+ * refused - a rule carrying kof_cure has a repair function written by hand, and
+ * the panel has no cure section to hold it, so that one is refused honestly.
+ * Every other rule in bases/ is written from the panel and must not be.
+ *
+ * It caught one: mirai_00.c is one kof_find_str_any and one verdict, and it was
+ * refused because the paragraph break in its explanatory comment - an asterisk
+ * with nothing after it - fell through the comment skip and was counted as
+ * logic. See comment_blank in kofeditor.c.
+ */
+/* Does the source contain this text - used to ask whether a rule writes its own
+ * repair, which is the one thing in bases/ the panel cannot hold. */
+static int src_has(const char *path, const char *what)
+{
+	char line[1024];
+	FILE *f = fopen(path, "r");
+	int hit = 0;
+
+	if (!f)
+		return 0;
+	while (!hit && fgets(line, sizeof line, f))
+		hit = strstr(line, what) != NULL;
+	fclose(f);
+	return hit;
+}
+
+static void shipped_rules_are_all_modelled(void)
+{
+	static const char *dirs[] = { "bases/signatures", "bases/heur" };
+	unsigned d;
+	int read = 0, foreign = 0, cured = 0;
+
+	for (d = 0; d < sizeof dirs / sizeof dirs[0]; d++) {
+		DIR *dp = opendir(dirs[d]);
+		struct dirent *de;
+
+		if (!dp)
+			continue;       /* run from elsewhere - nothing to say */
+		while ((de = readdir(dp))) {
+			char path[512];
+			size_t n = strlen(de->d_name);
+			struct kof_editor e;
+
+			if (n < 3u || strcmp(de->d_name + n - 2u, ".c"))
+				continue;
+			snprintf(path, sizeof path, "%s/%s", dirs[d],
+				 de->d_name);
+			g_foreign = g_foreign_w = 0;
+			lend(&e);
+			if (draft_from_source(&e, path)) {
+				int cures = src_has(path, "void kof_cure");
+
+				read++;
+				if (g_foreign_w && !cures) {
+					printf("  FAIL %s - %u unmodelled "
+					       "line(s), and it has no cure "
+					       "to explain them\n",
+					       path, g_foreign_w);
+					foreign++;
+				}
+				if (cures)
+					cured++;
+			}
+			draft_clear(&e);
+		}
+		closedir(dp);
+	}
+	if (!read) {
+		printf("  (bases/ not beside the test - nothing read)\n");
+		return;
+	}
+	CK(foreign == 0);
+	printf("  %d shipped rule(s) read, %d carry a hand-written cure, "
+	       "%d refused without one\n", read, cured, foreign);
+}
+
 int main(void)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -407,12 +494,13 @@ int main(void)
 	mixed_rule();
 	at_place_is_kept();
 	at_place_forms();
+	shipped_rules_are_all_modelled();
 
 	if (fails) {
 		printf("draft source: %d check(s) failed\n", fails);
 		return 1;
 	}
 	printf("draft source: two calls on one line, or, block index, "
-	       "mixed rule, at place - ok\n");
+	       "mixed rule, at place, shipped rules - ok\n");
 	return 0;
 }

@@ -396,3 +396,183 @@ int kof_exe_unb64(uint8_t *p, uint64_t n)
 	}
 	return changed;
 }
+
+/*
+ * WHERE A PARENT'S OFFSET LANDS IN THE VIEW.
+ *
+ * The inverse of kof_exe_norm_src_of, and it does not use the span map. The
+ * map answers one question at a time from a table that has a row per run - a
+ * binary with forty thousand zero runs needs forty thousand rows before the
+ * first question can be asked, and the caller here has about thirty questions.
+ *
+ * So the transform is replayed instead, once, against a SORTED list of the
+ * offsets somebody wants to know about. One pass, no table, and it is the same
+ * loop as kof_exe_norm above - which is the reason it sits directly beneath it
+ * and the reason a test pins the two together rather than trusting the reading.
+ *
+ * WHAT AN OFFSET INSIDE A COLLAPSED RUN MEANS. Most of such a run has no view
+ * byte to point at, so there is a choice to make and it is made the same way in
+ * both directions: an offset AT the run's first byte answers with the start of
+ * what the run became, and an offset anywhere after it answers with the position
+ * just past it.
+ *
+ * That is what a region table needs. A region beginning where the run begins
+ * keeps the two bytes the run collapsed to; a region lying WHOLLY inside the
+ * run comes back with a length of zero, which is the truthful answer - it was
+ * padding, the padding is gone, and there is nothing in the view for a rule to
+ * search. The resolver drops a region of zero length for that reason.
+ */
+void kof_exe_norm_map(const uint8_t *in, uint64_t n, uint32_t ops,
+		      const uint64_t *src, uint64_t *dst, uint32_t k)
+{
+	uint64_t i = 0, o = 0;
+	uint32_t q = 0;
+
+	if (!in || !src || !dst || !k)
+		return;
+	if (!n || !ops) {
+		for (; q < k; q++)
+			dst[q] = src[q];
+		return;
+	}
+	while (i < n && q < k) {
+		uint64_t step_in, step_out;
+
+		/* Every query this step passes is answered before the step is
+		 * taken, so a query landing inside a run gets the run's start. */
+		while (q < k && src[q] <= i) {
+			dst[q] = o;
+			q++;
+		}
+		if (q == k)
+			break;
+		if ((ops & KOF_EXE_NORM_UNWIDE) &&
+		    (step_out = wide_run(in, n, i)) >= KOF_EXE_NORM_WIDE_MIN) {
+			step_in = 2u * step_out;
+		} else if ((ops & KOF_EXE_NORM_NULLRUN) &&
+			   (step_in = zero_run(in, n, i)) >=
+			   KOF_EXE_NORM_NULL_MIN) {
+			step_out = 2u;
+		} else {
+			step_in = step_out = 1u;
+		}
+		i += step_in;
+		o += step_out;
+	}
+	/* Anything at or past the end of the input maps to the end of the
+	 * view. A region that runs to the last byte is the ordinary case and
+	 * its end offset is one past it. */
+	for (; q < k; q++)
+		dst[q] = o;
+}
+
+/*
+ * THE SAME TRANSFORM, BUT NOT EVERYWHERE.
+ *
+ * WHY A BITMAP AND NOT A LIST OF REGIONS. Regions OVERLAP. An ELF's header
+ * tables sit inside the first PT_LOAD, so HEADERS and DATA cover some of the
+ * same bytes, and a walk that took each region in turn would normalise those
+ * bytes as data and then copy them as headers, or the other way round
+ * depending on the order the resolver happened to return. A byte either may be
+ * rewritten or it may not, so that is what is recorded: one bit per byte, and
+ * KEEPING WINS. A byte claimed by both a kept region and a rewritten one is
+ * kept, because the reason to keep it has not gone away by being overlapped.
+ *
+ * WHAT A RUN MAY NOT DO IS STRADDLE. A zero run that begins in data and
+ * continues into the header is collapsed only as far as the header, because
+ * collapsing the rest would move the header - and the header is kept precisely
+ * so that nothing moves it. The run test therefore stops at the first kept
+ * byte rather than looking past it.
+ *
+ * `mark` is a sorted list of parent offsets whose view positions the caller
+ * wants back in `mark_out` - the region boundaries, so the view can carry a
+ * region table of its own. It is the same service kof_exe_norm_map performs
+ * for the unmasked transform, done here in the one pass that already exists
+ * rather than by replaying a second one that would have to be kept in step.
+ */
+static int keep_at(const uint8_t *keep, uint64_t i)
+{
+	return keep && (keep[i >> 3] & (uint8_t)(1u << (i & 7u)));
+}
+
+/*
+ * How far a run may reach before it meets a byte that must not move.
+ *
+ * CACHED BY THE CALLER, WHICH IS NOT AN OPTIMISATION BUT THE DIFFERENCE
+ * BETWEEN LINEAR AND QUADRATIC. This walks forward to the next kept byte, so
+ * asking it once per output byte scans the whole unkept stretch once per byte
+ * of that stretch. On a binary whose kept regions are a few hundred bytes near
+ * each end, that is the length of the file squared - measured as a scan that
+ * did not finish in ten minutes rather than as a slow one. The caller keeps the
+ * answer and asks again only once it has been used up, which makes the total
+ * walk linear because `i` never goes backwards.
+ */
+static uint64_t keep_bound(const uint8_t *keep, uint64_t n, uint64_t i)
+{
+	uint64_t e = i;
+
+	if (!keep)
+		return n;
+	while (e < n && !keep_at(keep, e))
+		e++;
+	return e;
+}
+
+uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
+			     uint32_t ops, uint8_t *out, uint64_t cap,
+			     const uint64_t *mark, uint64_t *mark_out,
+			     uint32_t n_mark)
+{
+	uint64_t i = 0, o = 0, lim = 0;
+	uint32_t q = 0;
+	int changed = 0;
+
+	if (!in || !out || !n || cap < n)
+		return 0;
+
+	while (i < n) {
+		uint64_t k;
+
+		while (q < n_mark && mark && mark_out && mark[q] <= i)
+			mark_out[q++] = o;
+
+		if (keep_at(keep, i)) {
+			out[o++] = in[i++];
+			continue;
+		}
+		/* Only when the last answer has been used up - see keep_bound. */
+		if (i >= lim)
+			lim = keep_bound(keep, n, i);
+
+		if ((ops & KOF_EXE_NORM_UNWIDE) &&
+		    (k = wide_run(in, lim, i)) >= KOF_EXE_NORM_WIDE_MIN) {
+			uint64_t j;
+
+			for (j = 0; j < k; j++)
+				out[o + j] = in[i + 2u * j];
+			i += 2u * k;
+			o += k;
+			changed = 1;
+			continue;
+		}
+		if ((ops & KOF_EXE_NORM_NULLRUN) &&
+		    (k = zero_run(in, lim, i)) >= KOF_EXE_NORM_NULL_MIN) {
+			/* Two, not one - the safety note in executables.h. */
+			out[o] = 0u;
+			out[o + 1u] = 0u;
+			i += k;
+			o += 2u;
+			changed = 1;
+			continue;
+		}
+		out[o++] = in[i++];
+	}
+	/* Boundaries at or past the end land at the end of the view, which is
+	 * what a region running to the last byte needs. */
+	while (q < n_mark && mark_out)
+		mark_out[q++] = o;
+
+	if (!changed)
+		return 0;
+	return o;
+}

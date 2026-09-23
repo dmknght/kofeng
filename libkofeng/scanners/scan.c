@@ -934,6 +934,38 @@ static void finding_str(const struct kof_scanner *sc,
  * scan. That is the same answer an unrecognised format gets, and it is the right
  * one: the object still gets scanned by every module whose target covers unknown.
  */
+/*
+ * THE RESOLVER FOR AN OBJECT WHOSE REGIONS WERE DECLARED.
+ *
+ * Same shape as every parser's: a mask in, the ranges that answer it out. The
+ * difference is only where the answer comes from - a table the producer filled
+ * rather than a walk over headers - and the callers cannot tell, which is the
+ * point. A rule naming scan_range_data on a normalised view gets the view's
+ * data, at the view's offsets, through the same call it always used.
+ */
+static uint32_t declared_resolve_scan(const struct kof_obj_ctx *ctx,
+				      uint32_t scan_mask, struct kof_range *out,
+				      uint32_t max_out)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	uint32_t i, n = 0;
+
+	if (!sc || !out || !max_out)
+		return 0;
+	for (i = 0; i < sc->n_cur_rgn && n < max_out; i++) {
+		if (!(sc->cur_rgn[i].mask & scan_mask))
+			continue;
+		/* An empty region is not a range. A parser would not return one
+		 * and a matcher asked to search it would search nothing. */
+		if (!sc->cur_rgn[i].len)
+			continue;
+		out[n].off = sc->cur_rgn[i].off;
+		out[n].len = sc->cur_rgn[i].len;
+		n++;
+	}
+	return n;
+}
+
 static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
 		     uint8_t as_format, const void *as_view, uint32_t as_view_len)
 {
@@ -960,6 +992,20 @@ static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ct
 	 * right, and a declaration that does not survive its own parser leaves
 	 * the object unidentified exactly as a failed sniff would.
 	 */
+	/*
+	 * DECLARED RAW, WHICH IS A CLAIM AND NOT A FORMAT.
+	 *
+	 * The caller is not saying "this is format 0", it is saying "do not ask
+	 * the bytes". The two differ for one producer that matters: a
+	 * normalised view still begins with its parent's magic and is no longer
+	 * that format, so a sniff gets the right answer to the wrong question.
+	 *
+	 * Left at KOF_FMT_UNKNOWN, with no parser run, which is what the object
+	 * now is - and every rule written for raw still searches it, because
+	 * raw is what those rules target.
+	 */
+	if (as_format == KOF_FMT_DECLARED_RAW)
+		return;
 	if (as_format) {
 		const struct kof_parser *p = kof_parser_of(as_format);
 
@@ -1882,11 +1928,88 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 #define NORM_MIN_OBJ   (4u << 10)   /* below this there is nothing to save */
 #define NORM_MIN_SAVE  16u          /* per cent, or it is not worth an object */
 
+/*
+ * THE PARENT'S REGIONS, GATHERED SO THE VIEW CAN CARRY THEM.
+ *
+ * One entry per extent rather than per region, because a region is a list: an
+ * ELF with three executable segments has three CODE extents and a view that
+ * named one of them would hide the other two.
+ *
+ * Bits 1 to 7, which covers both vocabularies - an ELF names five kinds and a
+ * PE seven, and both number from 1. Bit 0 is KOF_SCAN_ALL, which is the whole
+ * object and needs no carrying; the symbol bits are 30 and 31 and are extents
+ * over the canonical RECORDS, not over the file, so no byte of this buffer is
+ * ever theirs.
+ */
+#define NORM_RGN_BITS 7u
+
+static uint32_t norm_gather(struct kof_obj_ctx *ctx, struct kof_src_region *r,
+			    uint32_t cap)
+{
+	struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
+	uint32_t b, n = 0;
+
+	if (!ctx->resolve_scan)
+		return 0;
+	for (b = 1; b <= NORM_RGN_BITS && n < cap; b++) {
+		uint32_t mask = 1u << b, k, i;
+
+		k = ctx->resolve_scan(ctx, mask, ext, KOF_SCAN_MAX_EXTENTS);
+		for (i = 0; i < k && n < cap; i++) {
+			if (!ext[i].len)
+				continue;
+			r[n].mask = mask;
+			r[n].off = ext[i].off;
+			r[n].len = ext[i].len;
+			n++;
+		}
+	}
+	return n;
+}
+
+/*
+ * WHICH OF THEM MUST NOT MOVE, AS A BIT PER BYTE.
+ *
+ * HEADERS and CODE, and the two share their bit numbers across the formats -
+ * KOF_SCAN_ELF_HEADERS and KOF_SCAN_PE_HEADERS are both 1u << 1, CODE both
+ * 1u << 2 - so one test serves an ELF and a PE without asking which this is.
+ * That is a coincidence of two independent choices and not a rule, so it is
+ * checked here rather than relied on silently.
+ */
+#define NORM_KEEP_MASK ((1u << 1) | (1u << 2))
+
+static void norm_keep_bits(uint8_t *keep, uint64_t n,
+			   const struct kof_src_region *r, uint32_t nr)
+{
+	uint32_t i;
+
+	memset(keep, 0, (size_t)((n + 7u) / 8u));
+	for (i = 0; i < nr; i++) {
+		uint64_t j, e;
+
+		if (!(r[i].mask & NORM_KEEP_MASK))
+			continue;
+		if (r[i].off >= n)
+			continue;
+		e = r[i].off + r[i].len;
+		if (e > n)
+			e = n;
+		for (j = r[i].off; j < e; j++)
+			keep[j >> 3] |= (uint8_t)(1u << (j & 7u));
+	}
+}
+
 static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		      kof_buf buf)
 {
-	uint8_t *out;
+	uint8_t *out, *tmp, *keep;
 	uint64_t n, sent = 0;
+	int changed;
+	struct kof_src_region rgn[KOF_SRC_MAX_REGIONS];
+	uint64_t mark[2u * KOF_SRC_MAX_REGIONS];
+	uint64_t mark_out[2u * KOF_SRC_MAX_REGIONS];
+	uint32_t midx[2u * KOF_SRC_MAX_REGIONS];
+	uint32_t nr, n_mark = 0;
 
 	/*
 	 * PE AND ELF ONLY, AND ONLY WHAT WAS NOT ITSELF PRODUCED.
@@ -1907,48 +2030,165 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		return;
 
 	/*
-	 * A ONE-TO-ONE VIEW OF THE PARENT, NOT A BAG OF PIECES.
+	 * A VIEW, NOT A SECOND EXECUTABLE - AND THE ORDER OF THE THREE PASSES
+	 * IS DECIDED RATHER THAN INCIDENTAL.
 	 *
-	 * The first version cut the regions out, normalised each and joined
-	 * them back with the gaps between - which is the shape a script island
-	 * has, and it is the wrong shape here. An executable's view has to
-	 * REMAIN that executable: same length, same offsets, headers still
-	 * describing what is under them, regions still where the parse says.
+	 *   1  unwide    UTF-16 ASCII becomes ASCII. Length preserving: the
+	 *                vacated half of the run is zeroed.
+	 *   2  unb64     the payload of `... | base64 -d` becomes what it
+	 *                decodes to. Also length preserving, also zero filled.
+	 *   3  nullrun   every zero run of eight or more becomes TWO zeros.
+	 *                This one SHORTENS, and it is what makes the view a
+	 *                view rather than a copy.
 	 *
-	 * So the view is a copy with one rewrite applied in place. Everything
-	 * that is not wide text is the parent's byte at the parent's offset.
+	 * Narrow before decoding, because a payload stored as UTF-16 is not
+	 * base64 until it has been narrowed, and nothing decoded can turn into
+	 * wide text. Collapse LAST, because the two passes above each leave a
+	 * zero run behind them and collapsing first would leave those uncollapsed
+	 * - the fill from a 4 KB payload is a kilobyte of zeros that nothing
+	 * will ever match.
 	 *
-	 * Measured against the version that cut and joined: an ELF's e_ident
-	 * carries eight zeros at offset 8, the collapse took them to two, and
-	 * e_machine moved from 18 to 12 - so the view came back with no
-	 * architecture and a parse that found children that are not there.
+	 * TWO ZEROS AND NOT ONE, which is the whole safety argument and is set
+	 * out in executables.h: a literal pattern cannot contain a zero byte,
+	 * so collapsing to two never puts two non-zero bytes beside each other
+	 * that were not beside each other before. Collapsing to ONE would - and
+	 * a single zero also reads as the high half of a UTF-16 character that
+	 * is not there, which is the thing pass 1 exists to find.
 	 *
-	 * RESTRICTING IT TO ONE REGION IS A SUBRANGE OF THIS. Because nothing
-	 * moves, kof_exe_unwide can be pointed at any span of the copy and the
-	 * rest stays the parent's - the whole object is simply the span that
-	 * needs no decision.
+	 * THE PARENT IS STILL SCANNED, so nothing is traded away by this. The
+	 * view is an ADDITIONAL object, and a pattern that only matches the
+	 * original still matches the original.
 	 */
-	out = malloc((size_t)buf.n);
-	if (!out)
-		return;
 	/*
-	 * TWO REWRITES, BOTH IN PLACE AND BOTH LENGTH PRESERVING, and the view
-	 * is worth making if EITHER of them found something.
+	 * THE PARENT'S REGIONS FIRST, because they decide what may be rewritten
+	 * and they are also what the view will carry.
 	 *
-	 * unwide first because it writes the copy - unb64 works on what is
-	 * already in `out` - and because the order is not free: a payload that
-	 * was stored as UTF-16 is not base64 until it has been narrowed, while
-	 * nothing decoded can become wide text. So narrow, then decode.
-	 *
-	 * The `|` and not `||`: both passes must run. Short circuiting on a
-	 * file with wide text would skip the decode entirely, which is the
-	 * commoner of the two.
+	 * An object nothing could parse yields none. That is not a reason to
+	 * refuse: a view of it is still worth having, it simply has nothing to
+	 * keep and nothing to declare, and the transform runs over the whole of
+	 * it exactly as it did before regions were understood here.
 	 */
-	if (!(kof_exe_unwide(buf.p, buf.n, out) | kof_exe_unb64(out, buf.n))) {
+	nr = norm_gather(ctx, rgn, KOF_SRC_MAX_REGIONS);
+
+	out = malloc((size_t)buf.n);
+	tmp = malloc((size_t)buf.n);
+	keep = nr ? malloc((size_t)((buf.n + 7u) / 8u)) : NULL;
+	if (!out || !tmp || (nr && !keep)) {
 		free(out);
-		return;                 /* nothing to say - the view would be a copy */
+		free(tmp);
+		free(keep);
+		return;
 	}
-	n = buf.n;
+	if (nr)
+		norm_keep_bits(keep, buf.n, rgn, nr);
+
+	/*
+	 * THE DECODE PASS, THEN THE KEPT BYTES PUT BACK.
+	 *
+	 * kof_exe_unb64 rewrites in place and preserves length, so running it
+	 * over everything and then restoring what must not change is exact -
+	 * and it is far simpler than teaching the anchor walk about a bitmap.
+	 * A payload that straddles a kept boundary is decoded on the unkept
+	 * side and undone on the other, which is the same answer a masked walk
+	 * would give and costs nothing to arrive at.
+	 *
+	 * Before the collapse, because the collapse is what moves bytes and the
+	 * decode has to happen while offsets still mean what the bitmap says.
+	 */
+	memcpy(tmp, buf.p, (size_t)buf.n);
+	changed = kof_exe_unb64(tmp, buf.n);
+	if (nr && changed) {
+		uint64_t j;
+
+		for (j = 0; j < buf.n; j++)
+			if (keep[j >> 3] & (uint8_t)(1u << (j & 7u)))
+				tmp[j] = buf.p[j];
+	}
+
+	/*
+	 * AND THE COLLAPSE, WHICH IS THE ONLY PASS THAT MOVES ANYTHING - so it
+	 * is the only one that has to report where the boundaries went.
+	 *
+	 * The marks are every region's start and end, sorted, because the
+	 * walk that answers them runs forward once and regions overlap: an
+	 * ELF's header tables sit inside its first loadable segment, so the
+	 * starts and ends do not arrive in order by themselves.
+	 */
+	{
+		uint32_t a, b;
+
+		for (a = 0; a < nr; a++) {
+			mark[2u * a] = rgn[a].off;
+			mark[2u * a + 1u] = rgn[a].off + rgn[a].len;
+			midx[2u * a] = 2u * a;
+			midx[2u * a + 1u] = 2u * a + 1u;
+		}
+		n_mark = 2u * nr;
+		/* Insertion sort: at most 32 entries, and a qsort here would be
+		 * a comparator and a context pointer for a list this size. */
+		for (a = 1; a < n_mark; a++) {
+			uint64_t v = mark[a];
+			uint32_t vi = midx[a];
+
+			for (b = a; b > 0 && mark[b - 1u] > v; b--) {
+				mark[b] = mark[b - 1u];
+				midx[b] = midx[b - 1u];
+			}
+			mark[b] = v;
+			midx[b] = vi;
+		}
+	}
+
+	n = kof_exe_norm_masked(tmp, buf.n, keep,
+				KOF_EXE_NORM_NULLRUN | KOF_EXE_NORM_UNWIDE,
+				out, buf.n, mark, mark_out, n_mark);
+	if (!n) {
+		/* Nothing was collapsed or narrowed. The decode may still have
+		 * found something, and then the view is what it produced. */
+		if (!changed) {
+			free(out);
+			free(tmp);
+			free(keep);
+			return;         /* the view would be a copy */
+		}
+		memcpy(out, tmp, (size_t)buf.n);
+		n = buf.n;
+		for (n_mark = 0; n_mark < 2u * nr; n_mark++)
+			mark_out[n_mark] = mark[n_mark];
+	}
+	free(tmp);
+	tmp = NULL;
+
+	/*
+	 * THE REGIONS, IN THE VIEW'S OWN COORDINATES.
+	 *
+	 * Scattered back through the sort, so each region gets its own two
+	 * answers rather than whichever two happened to be next. A region whose
+	 * end no longer follows its start is dropped: that cannot happen from
+	 * this transform, and a region of negative length is the sort of thing
+	 * that should stop here rather than reach a matcher.
+	 */
+	{
+		uint32_t a;
+
+		for (a = 0; a < 2u * nr; a++)
+			mark[midx[a]] = mark_out[a];
+		for (a = 0; a < nr; a++) {
+			uint64_t o0 = mark[2u * a], o1 = mark[2u * a + 1u];
+
+			/*
+			 * Back into rgn[] rather than straight onto the
+			 * scanner: kof_mod_unpack_mode clears the pending
+			 * claims, and it has not run yet. Written there and
+			 * this table would be wiped before the child it
+			 * describes was ever made.
+			 */
+			rgn[a].off = o0;
+			rgn[a].len = o1 > o0 ? o1 - o0 : 0u;
+		}
+	}
+	free(keep);
+	keep = NULL;
 
 	/*
 	 * THE UNPACK VTABLE, BORROWED FOR THE LENGTH OF ONE CHILD.
@@ -1965,7 +2205,66 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * no second budget here and no path by which this can exceed the
 	 * ceiling the caller set.
 	 */
+	/*
+	 * A VIEW THAT WILL NOT FIT IS NOT PRODUCED AT ALL, and finding that out
+	 * HERE rather than from the sink is the whole of this test.
+	 *
+	 * c_emit closes what it is holding as a CHILD when the object cap is
+	 * reached and then refuses the rest. For a decompressor that is right:
+	 * the first 16 MB of an entry is a prefix of a real file and is worth
+	 * scanning. For a view it is not. A prefix of a view still carries the
+	 * parent's header, which describes a file three times its length, so
+	 * the object handed over is an executable whose sections run off the
+	 * end - and the structural heuristics say so.
+	 *
+	 * Measured, before this: /usr/bin/doxygen normalises to 25.4 MB against
+	 * a 16 MB cap, the sink closed the first 16 MB as a child, and it came
+	 * back ELF-other/Heur:Appended. doxygen has no overlay at all - its
+	 * section table ends exactly at end of file. The finding was entirely
+	 * this function's. /usr/bin/lto-dump was the same.
+	 *
+	 * Both ceilings are asked about, in the same terms c_emit uses, because
+	 * either of them produces the same half object.
+	 */
+	if (n > sc->obj_cap ||
+	    sc->resident > sc->resident_max ||
+	    n > sc->resident_max - sc->resident) {
+		free(out);
+		return;
+	}
 	kof_mod_unpack_mode(ctx, 1);
+	/*
+	 * DECLARED BEFORE THE FIRST BYTE, NOT AFTER THE LAST.
+	 *
+	 * kof_mod_unpack_mode clears the pending claims, so this cannot be said
+	 * any earlier - and it must not be said any later. c_child is what
+	 * spends them, and c_emit calls c_child by itself on any ceiling it
+	 * hits. A claim made after the emit loop is a claim made after the
+	 * child it was about has already been pushed.
+	 *
+	 * The test above means that should no longer happen. This is here so
+	 * that if it does, the object that goes out is still labelled and still
+	 * raw, rather than an unnamed ELF-looking blob.
+	 */
+	sc->pend_label_len = (uint32_t)snprintf(sc->pend_label,
+						sizeof sc->pend_label, "norm");
+	sc->pend_fmt = KOF_FMT_DECLARED_RAW;
+	{
+		uint32_t a;
+
+		for (a = 0; a < nr; a++)
+			sc->pend_rgn[a] = rgn[a];
+		sc->n_pend_rgn = nr;
+		/*
+		 * IN THE PARENT'S VOCABULARY, and that has to travel with the
+		 * table. These bits were resolved out of the parent, and a bit
+		 * alone says nothing: 1u << 5 is UNCLAIMED in an ELF and
+		 * OVERLAY in a PE. Without it the viewer had five region rows
+		 * it could not name and dropped every one - the view showed no
+		 * regions at all, which looked like the table never arrived.
+		 */
+		sc->pend_rgn_fmt = ctx->format;
+	}
 	while (sent < n) {
 		uint64_t take = n - sent;
 
@@ -1977,13 +2276,8 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	}
 	free(out);
 	if (sent == n) {
-		/* Named so a finding can say where it was really seen. */
-		sc->pend_label_len =
-			(uint32_t)snprintf(sc->pend_label,
-					   sizeof sc->pend_label, "norm");
 		/*
-		 * AND DECLARED RAW, WHICH IS WHAT IT NOW IS - EXCEPT THAT IT
-		 * CANNOT BE. See the note at the end of this function.
+		 * AND DECLARED RAW, WHICH IS WHAT IT NOW IS.
 		 *
 		 * Collapsing a zero run moves every byte after it, so the
 		 * view's headers describe a file that is no longer under them:
@@ -1998,31 +2292,28 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 * "ELF-other/Heur:Appended", which is a finding about the
 		 * normaliser rather than about gawk.
 		 *
-		 * KOF_FMT_UNKNOWN is the raw target - no new enum - so every
-		 * string and hex rule that asks for raw still searches it,
-		 * which is the whole reason the view exists, and nothing that
+		 * Raw is the right target and needs no new format - every
+		 * string and hex rule that asks for raw still searches the
+		 * view, which is the whole reason it exists, and nothing that
 		 * reasons about a header is offered one to reason about.
-		 */
-		sc->pend_fmt = KOF_FMT_UNKNOWN;
-		(void)ctx->content->child(ctx);
-		/*
-		 * THE LINE ABOVE DOES NOTHING, AND THAT IS THE OPEN PROBLEM.
 		 *
-		 * KOF_FMT_UNKNOWN is 0 and objctx.c's child builder reads the
-		 * pending format as `if (sc->pend_fmt)`, so "declared raw" and
-		 * "declared nothing" are the same value. The view is sniffed
-		 * from its own bytes instead, those bytes still begin \x7fELF,
-		 * and the structural heuristics read a normalised view as a
-		 * damaged executable: measured, gawk's view comes back
-		 * ELF-other/Heur:Appended, which is a finding about this
-		 * function rather than about gawk.
-		 *
-		 * It is left in rather than deleted because the intent is
-		 * right and the gap is one value wide. Closing it is a change
-		 * to the engine's child contract - a sentinel for "raw was
-		 * chosen", or a declared-bit beside the format - and that is
-		 * not a decision to take while wiring a caller.
+		 * SAID WITH KOF_FMT_DECLARED_RAW AND NOT WITH
+		 * KOF_FMT_UNKNOWN, which is the gap this used to fall into.
+		 * UNKNOWN is 0, the child builder reads the pending format as
+		 * `if (sc->pend_fmt)`, and so "declared raw" and "declared
+		 * nothing" were one value: the view was sniffed from its own
+		 * bytes, those bytes still begin \x7fELF, and it came back a
+		 * damaged executable. See the sentinel in scan.h.
 		 */
+		{
+			uint32_t k0 = sc->n_kids;
+			(void)ctx->content->child(ctx);
+			/* Counted only if it was actually taken: the child cap
+			 * can refuse it, and a view that was refused is not a
+			 * view that has to be discounted later. */
+			if (sc->n_kids > k0)
+				sc->n_views++;
+		}
 	}
 	kof_mod_unpack_mode(ctx, 0);
 }
@@ -2188,6 +2479,30 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	identify(sc, buf, &ctx,
 		 as_fmt ? as_fmt : (opt ? opt->as_format : 0u),
 		 opt ? opt->as_view : NULL, opt ? opt->as_view_len : 0u);
+
+	/*
+	 * A DECLARED REGION TABLE BEATS A PARSED ONE, and for an object that
+	 * has one there is no parsed one to beat.
+	 *
+	 * Installed after identify rather than inside it because identify's job
+	 * is to say WHAT the object is, and this says where its parts are -
+	 * which the producer knew and no reading of the bytes can recover. See
+	 * kof_src_declare_regions.
+	 */
+	if (sc->n_cur_rgn) {
+		uint32_t g;
+
+		ctx.resolve_scan = declared_resolve_scan;
+		/* And out to the caller, which has the same problem the engine
+		 * had: it cannot work these out from the bytes either. */
+		for (g = 0; g < sc->n_cur_rgn && g < KOF_MAX_REGIONS; g++) {
+			out->region[g].mask = sc->cur_rgn[g].mask;
+			out->region[g].off = sc->cur_rgn[g].off;
+			out->region[g].len = sc->cur_rgn[g].len;
+		}
+		out->n_region = g;
+		out->region_fmt = sc->cur_rgn_fmt;
+	}
 
 	present = regions_present(&ctx, sc->eng->scan_mask);
 	present |= sym_halves_present(&ctx, sc->eng->scan_mask);
@@ -2447,7 +2762,13 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * than per object: two rules may fire here and only one of them mean
 	 * it. See sc->heur_keep and the note in kofmod/heur.h.
 	 */
-	if (sc->n_kids > 0 && out->n > 0) {
+	/*
+	 * VIEWS DO NOT COUNT, because nothing came out of the object when one
+	 * was made - see kof_scanner.n_views. Subtracted rather than tested
+	 * separately so the question stays the one it always was: did this
+	 * object YIELD anything.
+	 */
+	if (sc->n_kids > sc->n_views && out->n > 0) {
 		uint32_t r, w = 0, keep = sc->heur_keep;
 
 		for (r = 0; r < out->n; r++)
@@ -2712,6 +3033,25 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 		res.entry_of = kof_src_entry_of(src);
 		res.entry_kind = kof_src_kind_of(src);
 		w->sc->cur_src = src;
+		/*
+		 * And the regions, if the producer named any - the one object
+		 * that does is a normalised view. Copied onto the scanner here
+		 * because a resolver is reached through ctx, and ctx is built
+		 * inside scan_object with nowhere to carry a table of its own.
+		 *
+		 * Cleared for every other object, unconditionally, because a
+		 * table left standing would describe the PREVIOUS object and
+		 * the ranges it names are ranges into different bytes.
+		 */
+		{
+			const struct kof_src_region *r = NULL;
+			uint32_t g, nr = kof_src_regions_of(src, &r);
+
+			for (g = 0; g < nr; g++)
+				w->sc->cur_rgn[g] = r[g];
+			w->sc->n_cur_rgn = nr;
+			w->sc->cur_rgn_fmt = kof_src_region_fmt_of(src);
+		}
 		kof_scan_kids_reset(w->sc);
 		scan_object(w->sc, kof_src_buf(src), w->opt, &res, pdepth,
 			    from_packer, inherit, kof_src_fmt_of(src));

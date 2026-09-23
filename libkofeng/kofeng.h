@@ -245,6 +245,10 @@ struct kof_repair {
 	uint64_t truncate;
 };
 
+/* The most declared regions one object reports - see kof_result.region. Matched
+ * to KOF_SRC_MAX_REGIONS, which is what a producer may declare. */
+#define KOF_MAX_REGIONS 16u
+
 struct kof_result {
 	struct kof_finding v[KOF_MAX_FINDINGS];
 	uint32_t n;
@@ -361,6 +365,33 @@ struct kof_result {
 	int32_t  heur_score;        /* centinats */
 	uint32_t heur_flags;        /* KOF_HEUR_FL(KOF_HEUR_F_*) */
 	uint64_t heur_anomalies;    /* the format's own anomaly word */
+
+	/*
+	 * REGIONS THE PRODUCER DECLARED, when nothing could parse them out.
+	 *
+	 * Empty for almost every object: a file is identified and its parser
+	 * says where its parts are. A NORMALISED VIEW is the exception, and it
+	 * is an exception a reader cannot recover on its own. The view keeps its
+	 * parent's header byte for byte, so anything that identifies it from its
+	 * bytes gets an ELF or a PE and believes the offsets in that header -
+	 * which describe the parent, before the padding came out. The regions it
+	 * computes are then off by however much was collapsed before them.
+	 *
+	 * Reported here so a host does not have to guess. kofviewer had exactly
+	 * that fault: it re-identified every object it was given, so a view's
+	 * data region was drawn at the parent's offsets, landed partly in kept
+	 * code, and showed the padding there as though the view still carried
+	 * it.
+	 */
+	struct kof_scan_region {
+		uint32_t mask;      /* the region bit, in the parent's vocabulary */
+		uint64_t off, len;  /* where it is in THIS object */
+	} region[KOF_MAX_REGIONS];
+	uint32_t n_region;
+	/* Which format's region vocabulary region[].mask is written in - the
+	 * PARENT's. A bit is meaningless without it: 1u << 5 is UNCLAIMED in an
+	 * ELF and OVERLAY in a PE. Zero when n_region is zero. */
+	uint8_t  region_fmt;
 };
 
 /*

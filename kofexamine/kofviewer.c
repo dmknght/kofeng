@@ -36,6 +36,7 @@
 
 #define _GNU_SOURCE
 
+#include <stddef.h>
 #include <stdio.h>
 #include <ctype.h>
 #include <stdarg.h>
@@ -2500,6 +2501,90 @@ struct view {
 	uint8_t     hex_forced;
 };
 
+/*
+ * REGIONS THE ENGINE DECLARED, answered the way a parser would answer them.
+ *
+ * Same shape as every resolver so that everything already written against
+ * ctx->resolve_scan - the region rows, the hex highlighting, the range submenu -
+ * works on a normalised view without knowing there is anything special about
+ * it. The table is on the object and the object is reached through ctx->priv,
+ * which is the field a host uses for exactly this and which nothing else in the
+ * viewer sets.
+ */
+/*
+ * THE REGION KINDS THIS OBJECT HAS, from whichever side knows.
+ *
+ * Normally the parser: a format declares which region bits it can answer and
+ * everything here walks that list. An object whose regions were DECLARED has no
+ * parser - see where the objects are identified - so the list has to come from
+ * the table itself, distinct bits in the order they were declared.
+ *
+ * Written as one call because there were two walks over fmt->regions and a
+ * third that asked whether a bit was in it, and a view that had regions but no
+ * parser drew nothing in all three: the panel came back empty for an object the
+ * engine had just described in full.
+ */
+static uint32_t obj_region_bits(const struct object *o, uint32_t *out,
+				uint32_t cap)
+{
+	uint32_t i, n = 0;
+
+	if (!o || !out || !cap)
+		return 0;
+	if (o->n_rgn) {
+		for (i = 0; i < o->n_rgn && n < cap; i++) {
+			uint32_t k;
+
+			for (k = 0; k < n; k++)
+				if (out[k] == o->rgn[i].mask)
+					break;
+			if (k == n)
+				out[n++] = o->rgn[i].mask;
+		}
+		return n;
+	}
+	if (!o->fmt || !o->fmt->regions)
+		return 0;
+	for (i = 0; i < o->fmt->n_regions && n < cap; i++)
+		out[n++] = o->fmt->regions[i];
+	return n;
+}
+
+static uint32_t declared_regions(const struct kof_obj_ctx *ctx,
+				 uint32_t scan_mask, struct kof_range *out,
+				 uint32_t max_out)
+{
+	/*
+	 * THE OBJECT IS FOUND FROM THE CONTEXT'S OWN ADDRESS, not from
+	 * ctx->priv.
+	 *
+	 * priv looks like the field for this and is not: kof_scan_of casts it
+	 * to a struct kof_scanner, so anything else stored there is a wrong
+	 * pointer waiting for the one caller that asks - and
+	 * kof_scan_resolve_range is such a caller, on the path it takes when a
+	 * region overflows the extent buffer.
+	 *
+	 * The context is a MEMBER of the object, so its address gives the
+	 * object back exactly, with nothing stored and nothing to keep in step.
+	 */
+	const struct object *o = ctx
+		? (const struct object *)((const char *)ctx
+					  - offsetof(struct object, ctx))
+		: NULL;
+	uint32_t i, n = 0;
+
+	if (!o || !out || !max_out)
+		return 0;
+	for (i = 0; i < o->n_rgn && n < max_out; i++) {
+		if (!(o->rgn[i].mask & scan_mask) || !o->rgn[i].len)
+			continue;
+		out[n].off = o->rgn[i].off;
+		out[n].len = o->rgn[i].len;
+		n++;
+	}
+	return n;
+}
+
 static struct object *cur_obj(struct view *v)
 {
 	return &v->obj[v->node[v->sel_node].obj];
@@ -2629,6 +2714,20 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	o->depth = kof_obj_depth(name);
 	o->entry_of = res ? res->entry_of : KOF_ENTRY_NONE;
 	o->entry_kind = res ? res->entry_kind : 0u;
+	/*
+	 * And the regions, when the engine declared them - see struct object.
+	 * Copied here rather than pointed at: `res` is the engine's own record
+	 * for one object and does not outlive this call.
+	 */
+	o->n_rgn = 0;
+	if (res && res->n_region) {
+		uint32_t g;
+
+		for (g = 0; g < res->n_region && g < KOF_MAX_REGIONS; g++)
+			o->rgn[g] = res->region[g];
+		o->n_rgn = g;
+		o->rgn_fmt = res->region_fmt;
+	}
 
 	/*
 	 * The top level is already mapped; anything else exists only inside
@@ -3487,12 +3586,32 @@ static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 		 * Object 0 of a process view is the only object this applies
 		 * to: everything else in the tree is a file or a region.
 		 */
-		if (i == 0 && v->proc_pid)
+		/*
+		 * AN OBJECT WHOSE REGIONS WERE DECLARED IS NOT SNIFFED, and
+		 * that is the same decision the engine makes about it.
+		 *
+		 * A normalised view keeps its parent's header byte for byte, so
+		 * a sniff succeeds and is wrong: the offsets in that header
+		 * describe the file before the padding came out. Identified, it
+		 * drew a data region at the parent's offset that ran into the
+		 * kept code and showed padding the view no longer holds.
+		 *
+		 * So it is shown as what the engine says it is - raw bytes with
+		 * a region table - and the table comes from the producer, which
+		 * is the only side that could know.
+		 */
+		if (o->n_rgn) {
+			memset(&o->ctx, 0, sizeof o->ctx);
+			o->fmt = NULL;
+			o->info = NULL;
+			o->ctx.resolve_scan = declared_regions;
+		} else if (i == 0 && v->proc_pid) {
 			o->fmt = kof_inspect_declare(o->buf, KOF_EVT_PROC,
 						     &o->ctx, &o->info);
-		else
+		} else {
 			o->fmt = kof_inspect_identify(o->buf, &o->ctx,
 						      &o->info);
+		}
 		if (!o->fmt)
 			o->ctx.obj_size = o->buf.n;
 
@@ -3726,18 +3845,53 @@ static void tree_add_piece(struct view *v, uint32_t depth, uint32_t obj,
  * What the tree has always done, and still the right shape for a region that is
  * one run - or several that a reader has no reason to step through separately.
  */
+/*
+ * WHAT TO CALL A REGION BIT ON THIS OBJECT.
+ *
+ * Its own parser, normally. An object with a DECLARED table has no parser and
+ * its bits are the PARENT's, so the parent's format is what names them - see
+ * struct object.rgn_fmt. Without this, region_row dereferenced a null parser
+ * the moment a normalised view was drawn.
+ */
+static const struct kof_parser *obj_region_vocab(const struct object *o)
+{
+	if (o->n_rgn)
+		return kof_parser_of(o->rgn_fmt);
+	return o->fmt;
+}
+
 static void region_row(struct view *v, const struct object *o, uint32_t i,
 		       uint32_t bit)
 {
-	const char *rn = o->fmt->region_name(bit);
+	const struct kof_parser *vp = obj_region_vocab(o);
+	const char *rn = vp && vp->region_name ? vp->region_name(bit) : NULL;
 	uint64_t total = 0;
 	uint32_t j, n;
 
 	if (!rn)
 		return;
-	n = kof_scan_resolve_range(&o->ctx, bit, v->ext);
+	/*
+	 * INTO ext2, NOT ext, AND THAT IS NOT A DETAIL.
+	 *
+	 * `ext` holds the SELECTED region's runs and is the hex pane's entire
+	 * sense of where it is - view_map and view_unmap read nothing else. A
+	 * tree row is about some OTHER region, and this is drawn every frame,
+	 * so resolving into `ext` left it holding whichever region happened to
+	 * be drawn last, with n_ext still counting the selected one.
+	 *
+	 * Everything that maps an offset then mapped through the wrong runs.
+	 * "Which plague block" is where it shows: it takes the byte the menu
+	 * was opened on, maps it, and looks for a block covering it - and with
+	 * the runs belonging to another region the answer was a byte no block
+	 * covers, so the item greyed itself out and the feature looked absent.
+	 *
+	 * ext2 exists for exactly this and says so where it is declared. This
+	 * row and the symbol rows below were the two places still borrowing the
+	 * pane's own buffer.
+	 */
+	n = kof_scan_resolve_range(&o->ctx, bit, v->ext2);
 	for (j = 0; j < n; j++)
-		total += v->ext[j].len;
+		total += v->ext2[j].len;
 	if (!total)
 		return;
 	/* kof_region_label and not the last underscore - see the note on it in
@@ -4505,7 +4659,9 @@ static void tree_build(struct view *v)
 		 * its row is picked, and until then buf.n is zero - which the
 		 * row would otherwise print as the image's size.
 		 */
-		if (!o->fmt || !v->ext)
+		/* A declared table is as good as a parser here: both say which
+		 * kinds of region this object has. See obj_region_bits. */
+		if ((!o->fmt && !o->n_rgn) || !v->ext2)
 			continue;
 		/*
 		 * A PAGE IS SHOWN AS IT IS LAID OUT: code, markup, code.
@@ -4582,8 +4738,11 @@ static void tree_build(struct view *v)
 				}
 			}
 		} else {
-			for (k = 0; k < o->fmt->n_regions; k++)
-				region_row(v, o, i, o->fmt->regions[k]);
+			uint32_t bits[KOF_MAX_REGIONS], nb;
+
+			nb = obj_region_bits(o, bits, KOF_MAX_REGIONS);
+			for (k = 0; k < nb; k++)
+				region_row(v, o, i, bits[k]);
 		}
 		/*
 		 * Last, and only when there is something in it.
@@ -4621,10 +4780,10 @@ static void tree_build(struct view *v)
 			for (h = 0; h < 2u; h++) {
 				uint64_t bytes = 0;
 
-				if (!v->ext)
+				if (!v->ext2)
 					break;
 				if (!sym_half(o, sym_row_mask(which[h]),
-					      v->ext, KOF_SCAN_MAX_EXTENTS,
+					      v->ext2, KOF_SCAN_MAX_EXTENTS,
 					      &bytes))
 					continue;
 				tree_add_sym(v, o->depth + 1u, i, bytes,
@@ -6421,6 +6580,7 @@ static void plg_segment(struct view *v)
 {
 	struct object *o = cur_obj(v);
 	const struct kof_parser *fp;
+	uint32_t bits[KOF_MAX_REGIONS], n_bits;
 	uint32_t ri, keep = 0, i;
 	uint32_t avg, min, max;
 	/* What each region is, how big it is, and how many of the table's rows
@@ -6452,7 +6612,24 @@ static void plg_segment(struct view *v)
 	v->plg_scored = 0;
 	if (!o || !o->buf.p || !o->buf.n || !v->ext2)
 		return;
-	fp = o->fmt;
+	/*
+	 * THE REGION VOCABULARY, NOT THE OBJECT'S PARSER, and here the two are
+	 * not the same thing.
+	 *
+	 * `fp` is used for one purpose in this function - naming a region bit,
+	 * to label a block and to ask whether that region is excluded from
+	 * hashing at all. A normalised view has no parser and its bits are the
+	 * parent's, so taking o->fmt gave NULL: every block came out labelled
+	 * "ALL", and kof_plague_region_excluded was never consulted, so the
+	 * regions that are deliberately not hashed were hashed.
+	 */
+	fp = obj_region_vocab(o);
+	/*
+	 * The region kinds, from the parser or from a declared table - see
+	 * obj_region_bits. Taken once here so the loop below asks about the
+	 * same list either way.
+	 */
+	n_bits = obj_region_bits(o, bits, KOF_MAX_REGIONS);
 	/* Where the library is, so no block is cut from it - see the note in
 	 * the carve loop. Empty for anything that is not an ELF, and for an ELF
 	 * this cannot place a library in, which is the same answer: cut
@@ -6488,10 +6665,10 @@ static void plg_segment(struct view *v)
 			uint32_t mask, cnt, q;
 			uint64_t bytes = 0;
 
-			if (fp && fp->regions && fp->n_regions) {
-				if (ri >= fp->n_regions)
+			if (n_bits) {
+				if (ri >= n_bits)
 					break;
-				mask = fp->regions[ri];
+				mask = bits[ri];
 			} else {
 				if (ri)
 					break;
@@ -14107,9 +14284,38 @@ static int blk_row_shown(const struct view *v, uint32_t i)
  * is a row that cannot be reached - see the note at the top of prow_build,
  * which is the receipt for the last time those two disagreed.
  */
+/*
+ * WHAT THIS OBJECT REPRESENTS, which is not always what it IS.
+ *
+ * An ordinary object is its own format. A NORMALISED VIEW is raw bytes - the
+ * engine declares it so, because its header describes a file that no longer
+ * exists at those offsets - but what it represents is the ELF or PE it was made
+ * from, and everything that asks "is this an executable" means that.
+ */
+static uint8_t obj_repr_fmt(const struct object *o)
+{
+	if (!o)
+		return 0;
+	return o->n_rgn ? o->rgn_fmt : o->ctx.format;
+}
+
 static int blk_section_shown(struct view *v)
 {
-	uint8_t fm = cur_obj(v)->ctx.format;
+	/*
+	 * THE VIEW COUNTS, and it is the object this panel is most use on.
+	 *
+	 * Blocks are cut per region by a rolling hash, so what they measure is
+	 * whatever the bytes of that region are - and in a view those bytes are
+	 * the region with its padding taken out and its wide text narrowed. Two
+	 * samples of one family that differ only in how much padding the linker
+	 * left produce different blocks in the file and the same blocks here.
+	 *
+	 * Asked through obj_repr_fmt because the view is declared raw. Reading
+	 * ctx.format directly, this said no to every view - the panel was drawn
+	 * for the file and vanished when the reader stepped onto its normalised
+	 * form, which is the one place the blocks are most comparable.
+	 */
+	uint8_t fm = obj_repr_fmt(cur_obj(v));
 
 	return v->ed.dr.n_blk &&
 	       (fm == KOF_FMT_ELF || fm == KOF_FMT_PE);
