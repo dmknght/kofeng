@@ -116,6 +116,30 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 	if (!e || !e->valid)
 		return;
+	/*
+	 * AND NOT WHEN THE OBJECT'S OWN TAIL COULD NOT BE CLAIMED.
+	 *
+	 * The whole premise is that an unclaimed run is where the HOST FILE
+	 * STOPPED - so whatever sits there came after it. That holds only while
+	 * the parse can say where the host stops, and the section table is what
+	 * says it: .symtab, .strtab, .comment and the debug sections are the
+	 * ELF's own bytes and they are claimed as NOLOAD from that table.
+	 *
+	 * With the table unreadable nothing claims them, and megabytes of the
+	 * file's own metadata read as an unclaimed run. Measured on one: an ELF
+	 * whose header puts its section table at 11153032 in a file of 8644262
+	 * - past the end - yielded a 4.2MB "carried file" that begins
+	 * "GCC: (Alpine 6.4.0)", which is its own .comment.
+	 *
+	 * The anomalies say exactly this, and they are the parse's own answer
+	 * rather than a second guess made here. A file with no section table at
+	 * all is the same case: a stripped binary's tail is claimed by nothing,
+	 * and an appended file cannot be told from what the linker left.
+	 */
+	if (e->anomalies & (KOF_ELF_ANOM_SHOFF_PAST_EOF |
+			    KOF_ELF_ANOM_SEC_PAST_EOF |
+			    KOF_ELF_ANOM_SECTAB_MISSING))
+		return;
 	if (!kof_region_shape(KOF_SCAN_ELF_UNCLAIMED, &u))
 		return;
 	if (u.widest < PAGE)
