@@ -201,6 +201,7 @@ struct blk {
 	char     name[64];
 	uint32_t mask;
 	uint32_t norm;
+	uint32_t side;                  /* enum kof_plague_side */
 	uint32_t hash[KOF_PLAGUE_MAX_HASH];
 	uint32_t n_hash;
 };
@@ -380,6 +381,17 @@ static const struct macro macros[] = {
 	 * be read as a plain one and silently look for the unencoded bytes. */
 	{ "KOF_DEFINE_STR_WIDE", DECL_STRWIDE },
 	{ "KOF_DEFINE_STR",    DECL_STR     },
+	/*
+	 * BEFORE KOF_PLAGUE_BLOCK, which is a prefix of it - the same trap
+	 * KOF_DEFINE_STR_WIDE sits in above, and the same consequence: read the
+	 * other way round, every library block would be packed as an ordinary
+	 * one, credited by author-code windows, and the separation it exists
+	 * for would be gone with nothing to show it.
+	 *
+	 * Declared the same way and packed the same way otherwise; the only
+	 * difference is the side it records - see enum kof_plague_side.
+	 */
+	{ "KOF_PLAGUE_BLOCK_LIB", DECL_PLAGUE },
 	{ "KOF_PLAGUE_BLOCK",  DECL_PLAGUE  },
 	{ NULL, DECL_RANGE }
 };
@@ -2248,6 +2260,11 @@ static void scan_line(char *at, size_t line_len, int lineno)
 		b = &blks[nblks];
 		memset(b, 0, sizeof *b);
 		b->line = lineno;
+		/* Which of the two spellings was matched is the whole of the
+		 * difference between them. */
+		b->side = strcmp(m->name, "KOF_PLAGUE_BLOCK_LIB") == 0
+			? (uint32_t)KOF_PLAGUE_SIDE_LIB
+			: (uint32_t)KOF_PLAGUE_SIDE_USER;
 		if (!read_ident(p, lineno, b->name, sizeof b->name))
 			return;
 		if (blk_name_taken(b->name)) {
@@ -2486,12 +2503,15 @@ static void emit_blk_id(FILE *out, const struct blk *b, int idx)
 	fprintf(out, "#define kof_blockid_%s %d\n\n", b->name, idx);
 }
 
-/* b <id> <mask> <norm> <n> <hashes in hex, no separator> */
+/* b <id> <mask> <norm> <side> <n> <hashes in hex, no separator> */
 static void emit_blk_record(FILE *out, const struct blk *b, int idx)
 {
 	uint32_t i;
 
-	fprintf(out, "b\t%d\t%u\t%u\t%u\t", idx, b->mask, b->norm, b->n_hash);
+	/* `side` sits before the count rather than after the hashes, so the
+	 * reader stays a fixed run of numeric fields followed by one blob. */
+	fprintf(out, "b\t%d\t%u\t%u\t%u\t%u\t", idx, b->mask, b->norm,
+		b->side, b->n_hash);
 	for (i = 0; i < b->n_hash; i++)
 		fprintf(out, "%08x", b->hash[i]);
 	fputc('\n', out);
@@ -4781,16 +4801,16 @@ static int strs_load(struct artefact *a)
 				rcap = nc;
 			}
 			a->rng[a->n_rng++] = (uint32_t)strtoul(tab + 1, 0, 10);
-		/* b <id> <mask> <norm> <n> <hashes, 8 hex digits each> */
+		/* b <id> <mask> <norm> <side> <n> <hashes, 8 hex each> */
 		} else if (p[0] == 'b' && p[1] == '\t') {
-			unsigned long v[3];
+			unsigned long v[4];
 			char *hex;
 			uint32_t k;
 			struct kof_plague_block *nb;
 			uint32_t *np;
 
 			p += 2;
-			for (k = 0; k < 3u; k++) {
+			for (k = 0; k < 4u; k++) {
 				tab = strchr(p, '\t');
 				if (!tab)
 					break;
@@ -4798,7 +4818,7 @@ static int strs_load(struct artefact *a)
 				v[k] = strtoul(p, 0, 10);
 				p = tab + 1;
 			}
-			if (k != 3u)
+			if (k != 4u)
 				continue;
 			tab = strchr(p, '\t');
 			if (!tab)
@@ -4828,6 +4848,7 @@ static int strs_load(struct artefact *a)
 				nb->n_hash = (uint32_t)n_hash;
 				nb->scan_mask = (uint32_t)v[1];
 				nb->norm = (uint8_t)v[2];
+				nb->side = (uint8_t)v[3];
 				for (k = 0; k < n_hash; k++) {
 					char one[9];
 

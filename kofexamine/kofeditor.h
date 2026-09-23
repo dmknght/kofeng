@@ -734,6 +734,16 @@ struct cond {
 struct plg_block {
 	uint64_t off, len;                 /* where it is in this object */
 	uint32_t mask;                     /* the region it was taken from */
+	/*
+	 * WHICH HALF OF THE OBJECT IT WAS CUT FROM - enum kof_plague_side.
+	 *
+	 * A block from the static library and a block from the author's own
+	 * code answer different questions, and the matcher will only let a
+	 * block be scored by windows from its own side. Recorded here so the
+	 * carve, the panel and the generated rule all say the same thing; see
+	 * the note on the enum.
+	 */
+	uint8_t  side;
 	uint32_t hash[KOF_PLAGUE_MAX_HASH];
 	uint32_t n_hash;
 	/*
@@ -1419,6 +1429,10 @@ struct kof_plague_decl {
 	 */
 	char        region_buf[48];
 	uint32_t    norm;          /* enum kof_plague_norm */
+	/* Which half of the object the block was cut from - see enum
+	 * kof_plague_side. It is the difference between KOF_PLAGUE_BLOCK and
+	 * KOF_PLAGUE_BLOCK_LIB in the source, and it decides who may score it. */
+	uint8_t     side;
 	uint8_t     thr;           /* the percentage the rule will demand */
 	/*
 	 * WHICH CONDITION ASKED ABOUT IT, counted as draft_from_source counts

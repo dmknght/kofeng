@@ -346,12 +346,45 @@ static inline int kof_plague_flat(const uint8_t *p, uint64_t at, uint32_t norm)
  * region hashed as differences; those are two questions about two places and
  * nothing is served by forcing them to agree.
  */
+/*
+ * WHICH HALF OF THE OBJECT A BLOCK WAS CUT FROM, and why that is part of the
+ * match rather than a note about it.
+ *
+ * A statically linked binary is two things in one file: what the author wrote,
+ * and what the linker pulled in. Measured in koflib.h, two CLEAN binaries reach
+ * a median string-set Jaccard of 0.25 and a 90th percentile of 0.99 purely
+ * through the second - so a similarity number that does not know which half it
+ * is measuring is measuring the toolchain and calling it identity.
+ *
+ * The first answer to that was to refuse the library outright: the matcher
+ * skipped every window inside a library span, so a block cut from libc could
+ * never be credited. That keeps the contamination out and throws away a real
+ * question with it - "do these two samples carry the SAME statically linked
+ * runtime" is a fact about a build, and for a family that ships one vendored
+ * copy of one library it is a strong one.
+ *
+ * So the two are counted separately instead. A block remembers which side it
+ * came from, a window knows which side it is in, and a block is credited only
+ * by windows from its own side. Neither number can contaminate the other,
+ * because they are never added together.
+ *
+ * USER IS ZERO ON PURPOSE. It is what the reserved bytes of every pack built
+ * before this held, and it is also what every object with no library at all
+ * resolves to - so nothing already written changes meaning, and a database
+ * that predates this reads exactly as it did.
+ */
+enum kof_plague_side {
+	KOF_PLAGUE_SIDE_USER = 0,   /* everything the static library is not */
+	KOF_PLAGUE_SIDE_LIB         /* inside a span kof_lib_find named */
+};
+
 struct kof_plague_block {
 	uint32_t first_hash;      /* into the pack's hash pool */
 	uint32_t n_hash;
 	uint32_t scan_mask;       /* which region this block was taken from */
 	uint8_t  norm;            /* enum kof_plague_norm */
-	uint8_t  reserved[3];
+	uint8_t  side;            /* enum kof_plague_side */
+	uint8_t  reserved[2];
 };
 
 #endif /* KOFENG_KOFPLAGUE_H */

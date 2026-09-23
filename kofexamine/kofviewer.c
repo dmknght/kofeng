@@ -6467,7 +6467,7 @@ static const char *plg_lit_at(const struct view *v, uint64_t rgn_off)
  */
 static int plg_mark(struct view *v, const uint8_t *base, uint64_t base_n,
 		    uint64_t lo, uint64_t hi, uint32_t mask, const char *rgn,
-		    const char *rgn_enum, uint32_t norm)
+		    const char *rgn_enum, uint32_t norm, uint8_t side)
 {
 	struct plg_block *b;
 	uint64_t len;
@@ -6480,6 +6480,9 @@ static int plg_mark(struct view *v, const uint8_t *base, uint64_t base_n,
 
 	b = &v->ed.dr.blk[v->ed.dr.n_blk];
 	memset(b, 0, sizeof *b);
+	/* Which half of the object this came from, carried with it from here to
+	 * the panel and into the generated rule - see enum kof_plague_side. */
+	b->side = side;
 	b->off = lo;
 	/* Filled below; the duplicate test needs the hashes first - see the
 	 * end of this function. */
@@ -6590,6 +6593,37 @@ static int plg_mark(struct view *v, const uint8_t *base, uint64_t base_n,
  * the bounds of a target that is no longer in use.
  */
 #define PLG_SEG_AVG   8192u          /* average block, as a power of two mask */
+
+/*
+ * HOW FAR THE SIDE STAYS THE SAME, starting at `pos` and stopping at `end`.
+ *
+ * Returns the length of the longest run from `pos` that is entirely inside one
+ * library span or entirely outside all of them, and says which through `side`.
+ * Walking an extent with this splits it exactly where it crosses a boundary,
+ * so each piece is carved on its own and no block ever straddles one.
+ *
+ * Linear in the number of spans, which kof_lib_find caps at sixteen.
+ */
+static uint64_t plg_side_run(const struct kof_lib_result *lib, uint64_t pos,
+			     uint64_t end, uint8_t *side)
+{
+	uint64_t next = end;
+	uint32_t i;
+
+	*side = KOF_PLAGUE_SIDE_USER;
+	for (i = 0; i < lib->n; i++) {
+		uint64_t a = lib->span[i].off;
+		uint64_t b = a + lib->span[i].len;
+
+		if (pos >= a && pos < b) {           /* inside this one */
+			*side = KOF_PLAGUE_SIDE_LIB;
+			return (b < end ? b : end) - pos;
+		}
+		if (a > pos && a < next)             /* the nearest ahead */
+			next = a;
+	}
+	return next - pos;
+}
 
 static void plg_segment(struct view *v)
 {
@@ -6782,39 +6816,45 @@ static void plg_segment(struct view *v)
 		 * the direction that costs a false positive; dropping the
 		 * region costs a block nobody should have been offered.
 		 */
-		if (lib.n) {
-			if (n + lib.n > KOF_SCAN_MAX_EXTENTS) {
-				n = 0;
-			} else {
-				struct kof_rlist rl;
-
-				/*
-				 * CUT HOLES, DO NOT MERGE.
-				 *
-				 * The scorer feeds each resolved extent on its
-				 * own, so a rolling hash never runs across the
-				 * join between two of them. Coalescing here
-				 * would carve blocks over exactly those joins -
-				 * hashes the matcher cannot produce, and a rule
-				 * that scores a hundred in the panel and zero
-				 * on the same file a moment later. Found that
-				 * way round.
-				 */
-				kof_rl_init(&rl, v->ext2, KOF_SCAN_MAX_EXTENTS);
-				rl.n = n;
-				kof_rl_subtract(&rl, lib.span, lib.n);
-				n = rl.n;
-			}
-		}
+		/*
+		 * THE LIBRARY IS NOT SUBTRACTED ANY MORE - IT IS CARVED AS
+		 * ITSELF.
+		 *
+		 * It used to be cut out and thrown away, because the matcher
+		 * refused to credit a window inside it and a block offered from
+		 * there could never score. The matcher no longer refuses: it
+		 * asks which SIDE a window is on and credits only blocks from
+		 * the same side, so a library block is scored against other
+		 * samples' libraries and an author-code block against their
+		 * author code. Neither can lift the other's number, which is
+		 * what subtracting was protecting against.
+		 *
+		 * So each extent is walked and split where it crosses a library
+		 * boundary, and each piece is carved with its own side. The
+		 * pieces are carved SEPARATELY, which preserves the rule the
+		 * subtraction was careful about: a rolling hash never runs
+		 * across a join, so no block spans two pieces.
+		 */
 		for (k = 0; k < n && v->ed.dr.n_blk < cap; k++) {
-			uint64_t off = v->ext2[k].off, len = v->ext2[k].len;
+			uint64_t eoff = v->ext2[k].off, elen = v->ext2[k].len;
+			uint64_t pos;
+
+			if (eoff >= o->buf.n)
+				continue;
+			if (elen > o->buf.n - eoff)
+				elen = o->buf.n - eoff;
+
+		for (pos = eoff; pos < eoff + elen &&
+		     v->ed.dr.n_blk < cap; ) {
+			uint64_t off = pos, len;
 			uint64_t at, cut;
 			uint32_t h = 0, drop = kof_plague_drop_weight(), w;
+			uint8_t  side;
 
-			if (off >= o->buf.n)
-				continue;
-			if (len > o->buf.n - off)
-				len = o->buf.n - off;
+			len = plg_side_run(&lib, pos, eoff + elen, &side);
+			pos += len;
+			if (!len)
+				break;
 			/*
 			 * A SHORT EXTENT IS STILL CARVED.
 			 *
@@ -6841,7 +6881,7 @@ static void plg_segment(struct view *v)
 				    at - cut >= max) {
 					plg_mark(v, o->buf.p, o->buf.n,
 						 off + cut, off + at, mask,
-						 lbl, rn, KOF_PLAGUE_RAW);
+						 lbl, rn, KOF_PLAGUE_RAW, side);
 					cut = at;
 					if (v->ed.dr.n_blk >= cap)
 						break;
@@ -6854,7 +6894,8 @@ static void plg_segment(struct view *v)
 			if (cut < len && v->ed.dr.n_blk < cap)
 				plg_mark(v, o->buf.p, o->buf.n, off + cut,
 					 off + len, mask, lbl, rn,
-					 KOF_PLAGUE_RAW);
+					 KOF_PLAGUE_RAW, side);
+		}
 		}
 	}
 }
@@ -6937,6 +6978,7 @@ static void plg_sim_refresh(struct view *v)
 
 static void plg_rescore(struct view *v)
 {
+	struct kof_lib_result slib;
 	struct kof_plague_block blk[PLG_MAX_BLOCK];
 	uint32_t pool[PLG_MAX_BLOCK * KOF_PLAGUE_MAX_HASH];
 	struct kof_plague_set *set;
@@ -6963,6 +7005,10 @@ static void plg_rescore(struct view *v)
 		blk[nb].n_hash = b->n_hash;
 		blk[nb].scan_mask = plg_mask(b);
 		blk[nb].norm = b->norm;
+		/* And the side, or a library block would be scored here by
+		 * author-code windows and read as a number the engine will
+		 * never reproduce - see enum kof_plague_side. */
+		blk[nb].side = b->side;
 		for (j = 0; j < b->n_hash; j++)
 			pool[np++] = b->hash[j];
 		nb++;
@@ -6978,6 +7024,25 @@ static void plg_rescore(struct view *v)
 		return;
 	}
 	kof_plague_begin(&ctx);
+	/*
+	 * AND THE OBJECT'S OWN LIBRARY SPANS, exactly as scan.c hands them over.
+	 *
+	 * Without them every window here is on the USER side, so a library
+	 * block scores zero in the panel and the author is shown a number the
+	 * engine will not reproduce - which is the one thing this whole
+	 * function exists to avoid. See the note above it.
+	 */
+	memset(&slib, 0, sizeof slib);
+	if (o->ctx.format == KOF_FMT_ELF && o->info)
+		kof_lib_find(o->buf, (const struct kof_elf_info *)o->info,
+			     &slib);
+	/*
+	 * AT FUNCTION SCOPE, because kof_plague_object keeps the POINTER and
+	 * not a copy - so the spans have to outlive every feed below. scan.c
+	 * says the same thing where it does this, and a block-scoped local here
+	 * would have been read after it died.
+	 */
+	kof_plague_object(&ctx, o->buf.p, slib.span, slib.n);
 
 	/*
 	 * ONE PASS PER REGION AND NORMALIZER, exactly as scan.c feeds it.
@@ -8468,6 +8533,10 @@ static int plg_load_rule(struct view *v, const char *path)
 		memset(b, 0, sizeof *b);
 		b->id     = d[i].id;
 		b->norm   = (uint8_t)d[i].norm;
+		/* And which half it was cut from, or a library block opened
+		 * from a file would come back as an author-code one and be
+		 * written out under the wrong macro - see enum kof_plague_side. */
+		b->side   = d[i].side;
 		b->kept   = 1;
 		b->picked = 1;
 		b->colour = (uint8_t)(v->ed.dr.n_blk % PLG_COLOURS);

@@ -396,7 +396,7 @@ uint32_t kof_plague_hash_span(const uint8_t *p, uint64_t n, uint32_t norm,
 
 /* Credit one hash to every block that holds it. */
 static void pl_credit(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm,
-		      uint32_t h)
+		      uint32_t h, uint32_t side)
 {
 	const struct kof_plague_set *s = c->set;
 	uint32_t lo = 0, hi = s->n_pair, mid;
@@ -422,6 +422,14 @@ static void pl_credit(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t nor
 		 */
 		if (blk->norm != norm ||
 		    (!c->any_region && !(blk->scan_mask & scan_mask)))
+			continue;
+		/*
+		 * AND THE SIDE, for the reason the two above are here: a block
+		 * cut from the static library and a block cut from the author's
+		 * own code are answers to different questions, and one must not
+		 * be able to score the other. See enum kof_plague_side.
+		 */
+		if (blk->side != side)
 			continue;
 		if (c->stamp[b] != c->gen) {
 			c->stamp[b] = c->gen;
@@ -496,19 +504,30 @@ void kof_plague_feed(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm
 			uint32_t k = mixed & s->bm_mask;
 
 			/*
-			 * The library is not hashed - see kof_plague_object.
-			 * Tested here and not before the loop because the answer
-			 * is per window, and tested after selection because that
-			 * is what makes it free.
+			 * WHICH SIDE THIS WINDOW IS ON - see enum
+			 * kof_plague_side. It used to be a refusal: a window
+			 * inside the library credited nothing at all. Now it
+			 * chooses which blocks it may credit, so the library is
+			 * still unable to score a rule written on author code
+			 * and has become able to score one written on itself.
+			 *
+			 * Per window, and after selection because that is what
+			 * makes it free: one object in a thousand windows gets
+			 * this far.
 			 */
-			if (c->n_lib && p >= c->obj_base &&
-			    pl_in_lib(c, (uint64_t)(p - c->obj_base) + at,
-				      KOF_PLAGUE_NG))
-				goto next;
+			uint32_t side = (c->n_lib && p >= c->obj_base &&
+					 pl_in_lib(c,
+						   (uint64_t)(p - c->obj_base) + at,
+						   KOF_PLAGUE_NG))
+				      ? (uint32_t)KOF_PLAGUE_SIDE_LIB
+				      : (uint32_t)KOF_PLAGUE_SIDE_USER;
+
 			if (s->bm[k >> 3] & (1u << (k & 7u)))
-				pl_credit(c, scan_mask, norm, mixed);
+				pl_credit(c, scan_mask, norm, mixed, side);
 		}
-next:
+		/* The `next:` label that was here is gone with the refusal it
+		 * existed for: a library window no longer skips the crediting
+		 * step, it credits a different set of blocks. */
 		if (at + KOF_PLAGUE_NG >= n)
 			break;
 		h -= kof_plague_byte_of(at) * drop;

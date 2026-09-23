@@ -3695,6 +3695,30 @@ enum kof_str_word {
 #define KOF_PLAGUE_BLOCK(name, scan_mask, norm, ...)
 
 /*
+ * The same declaration for a block cut from the STATIC LIBRARY.
+ *
+ *     KOF_PLAGUE_BLOCK_LIB(blk_9f22, KOF_SCAN_ELF_CODE, KOF_PLAGUE_RAW,
+ *                          0x1a2b3c4d, ...);
+ *
+ * A separate macro rather than a fourth argument, because the arguments after
+ * the normalizer are the hashes - there is nowhere to put a flag that does not
+ * move them. It also reads as what it is at the call site, which a trailing
+ * enum would not.
+ *
+ * WHAT IT CHANGES IS WHO MAY SCORE IT. A block declared this way is credited
+ * only by windows inside the target's own library spans, and an ordinary block
+ * only by windows outside them - see enum kof_plague_side. The two never add
+ * together, which is the whole point: "these samples share a vendored runtime"
+ * and "these samples share their author's code" are different claims, and a
+ * number that mixed them would be measuring the toolchain.
+ *
+ * kof_lib_find is what names the spans, and it finds none in 86% of stripped
+ * static builds - so on those every block is an ordinary one and this macro has
+ * nothing to describe.
+ */
+#define KOF_PLAGUE_BLOCK_LIB(name, scan_mask, norm, ...)
+
+/*
  * Declare a string the target holds as UTF-16LE.
  *
  *     KOF_DEFINE_STR_WIDE(iex, "IEX(New-Object", KOF_CASE_EXACT,

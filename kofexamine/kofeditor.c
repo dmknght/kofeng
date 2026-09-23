@@ -879,10 +879,15 @@ int src_read(const char *path, struct src_ent *out)
 		/* A block is named by the fold of its hashes - see generate -
 		 * so the name is all that has to be read to know which block
 		 * this is. */
-		if ((p = strstr(line, "KOF_PLAGUE_BLOCK(")) != NULL) {
+		/* Either spelling: a library block is still a block, and a
+		 * source index that counted only one of them would call two
+		 * different rules the same. */
+		if ((p = strstr(line, "KOF_PLAGUE_BLOCK_LIB(")) != NULL ||
+		    (p = strstr(line, "KOF_PLAGUE_BLOCK(")) != NULL) {
 			char w[48];
 
-			src_ident(p + 17, w, sizeof w);
+			src_ident(p + (strncmp(p + 16, "_LIB(", 5) ? 17 : 21),
+				  w, sizeof w);
 			if (w[0]) {
 				out->blk += (uint32_t)strtoul(
 					strncmp(w, "blk_", 4) ? w : w + 4,
@@ -5819,8 +5824,13 @@ have_path:
 			fprintf(f, "/* +0x%llx, %llu bytes, %u hash(es) */\n",
 				(unsigned long long)b->off,
 				(unsigned long long)b->len, b->n_hash);
-			fprintf(f, "KOF_PLAGUE_BLOCK(blk_%08x, %s, "
-				"KOF_PLAGUE_%s,\n", b->id,
+			/* The library half is a macro of its own - see
+			 * KOF_PLAGUE_BLOCK_LIB. The rest of the declaration is
+			 * identical, so only the name changes here. */
+			fprintf(f, "KOF_PLAGUE_BLOCK%s(blk_%08x, %s, "
+				"KOF_PLAGUE_%s,\n",
+				b->side == KOF_PLAGUE_SIDE_LIB ? "_LIB" : "",
+				b->id,
 				b->anywhere ? "KOF_SCAN_ALL"
 				: b->rgn_enum[0] ? b->rgn_enum : "KOF_SCAN_ALL",
 				b->norm == KOF_PLAGUE_XOR ? "XOR"
@@ -6444,7 +6454,17 @@ int plague_from_source(struct kof_editor *e, const char *path,
 					e->dr.fmt_mask |= 1u << fi;
 			continue;
 		}
-		if ((p = strstr(line, "KOF_PLAGUE_BLOCK(")) != NULL) {
+		/*
+		 * EITHER SPELLING, and which one is the block's side.
+		 *
+		 * "_LIB(" is tested first because "KOF_PLAGUE_BLOCK(" is not a
+		 * prefix of it - the parenthesis differs - but reading them in
+		 * one place keeps the two from drifting, and the offset past
+		 * the name differs by four.
+		 */
+		if ((p = strstr(line, "KOF_PLAGUE_BLOCK_LIB(")) != NULL ||
+		    (p = strstr(line, "KOF_PLAGUE_BLOCK(")) != NULL) {
+			int is_lib = strncmp(p + 16, "_LIB(", 5) == 0;
 			char w[48];
 			const char *q;
 
@@ -6452,8 +6472,10 @@ int plague_from_source(struct kof_editor *e, const char *path,
 				in_block = -1;
 				continue;
 			}
-			q = src_ident(p + 17, w, sizeof w);
+			q = src_ident(p + (is_lib ? 21 : 17), w, sizeof w);
 			memset(&blk[n], 0, sizeof blk[n]);
+			blk[n].side = is_lib ? (uint8_t)KOF_PLAGUE_SIDE_LIB
+					     : (uint8_t)KOF_PLAGUE_SIDE_USER;
 			snprintf(name[n], sizeof name[0], "%s", w);
 			blk[n].id = (uint32_t)strtoul(
 				strncmp(w, "blk_", 4) ? w : w + 4, NULL, 16);
