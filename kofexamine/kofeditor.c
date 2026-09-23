@@ -1995,7 +1995,12 @@ void grp_seed_at(struct kof_editor *e, uint32_t g)
 		if (e->dr.decl[i].grp & (1u << g)) {
 			uint64_t at = e->dr.decl[i].at;
 
-			e->dr.grp[g].at_off = at == KOF_BROKEN ? 0u : at;
+			/* An occurrence is a file offset, so it seeds the
+			 * literal base. Naming a base is the author's choice
+			 * and is made on the WHERE control. */
+			e->dr.grp[g].at_base = GRP_AT_ABS;
+			e->dr.grp[g].at_off = at == KOF_BROKEN
+					    ? 0 : (int64_t)at;
 			return;
 		}
 }
@@ -2032,6 +2037,10 @@ int grp_same_set(struct kof_editor *e, uint32_t a, uint32_t b)
 		return 0;
 	if (grp_is_at(e->dr.grp[a].rule)) {
 		if (e->dr.grp[a].at_off != e->dr.grp[b].at_off)
+			return 0;
+		/* And the base: "entry" and "0x0" print differently, mean
+		 * different things and must not fold into one call. */
+		if (e->dr.grp[a].at_base != e->dr.grp[b].at_base)
 			return 0;
 	} else if (grp_mask(e, a) != grp_mask(e, b)) {
 		return 0;
@@ -3321,15 +3330,18 @@ void emit_call_as(FILE *f, struct kof_editor *e, uint32_t g, int force_multi)
 	 *
 	 * kof_find_str_at(off, s) is the whole shape: no range identifier is
 	 * emitted, because the call names none, and exactly one marker goes in
-	 * - which draft_missing_of refuses to let be anything else. Written as
-	 * hex because that is how every other offset in this panel is read.
+	 * - which draft_missing_of refuses to let be anything else. The place
+	 * is written by grp_at_text, which is also what the panel shows, so
+	 * the preview and the file cannot say different things.
 	 *
 	 * force_multi cannot reach here: it exists to give a shared call a
 	 * count, and grp_shared already refuses an AT.
 	 */
 	if (grp_is_at(q->rule)) {
-		fprintf(f, "kof_find_str_at(0x%llx",
-			(unsigned long long)q->at_off);
+		char at[64];
+
+		grp_at_text(q->at_base, q->at_off, at, sizeof at, 1);
+		fprintf(f, "kof_find_str_at(%s", at);
 		for (i = 0; i < e->dr.n_decl; i++)
 			if (e->dr.decl[i].grp & (1u << g)) {
 				fprintf(f, ", s%u", i);
@@ -3570,8 +3582,8 @@ void grp_label(const struct kof_editor *e, uint32_t g, char *out, size_t cap)
 	if (e->dr.grp[g].kind == GRP_KIND_SIM)
 		snprintf(out, cap, "%u  find_similar", g + 1u);
 	else
-		snprintf(out, cap, "%u  find_%s", g + 1u,
-			 grp_rule_word(e->dr.grp[g].rule));
+		snprintf(out, cap, "%u  %s", g + 1u,
+			 grp_rule_label(e->dr.grp[g].rule));
 }
 
 /*
@@ -4729,15 +4741,20 @@ shc_done:
 			if (!q)
 				continue;
 			/*
-			 * THE FIRST ARGUMENT IS A NUMBER, NOT A RANGE, for this
-			 * one call - see group.at_off. Base 0 so the hex the
-			 * emitter writes and a decimal somebody typed both read.
+			 * THE FIRST ARGUMENT IS A PLACE, NOT A RANGE, for this
+			 * one call - see group.at_off and grp_at_parse, which
+			 * reads both a literal and an engine value such as
+			 * ctx->entry_off. It used to be a bare strtoull, and
+			 * both shipped AT rules are entry-relative, so both of
+			 * them imported as "offset 0".
 			 */
 			if (grp_is_at(rule)) {
-				char *end = NULL;
+				int base = GRP_AT_ABS;
+				int64_t off = 0;
 
-				g->at_off = (uint64_t)strtoull(q + 1, &end, 0);
-				q = end ? end : q + 1;
+				q = grp_at_parse(q + 1, &base, &off);
+				g->at_base = (uint8_t)base;
+				g->at_off = off;
 			} else {
 				q = src_ident(q + 1, id, sizeof id);
 				for (i = 0; i < n_rng; i++)

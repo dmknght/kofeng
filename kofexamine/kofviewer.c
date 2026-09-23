@@ -8976,10 +8976,42 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 				 (unsigned long long)d->hits[i]);
 			ch_add(c, t);
 		}
-		/* A marker whose bytes are not in this object has no offsets to
-		 * offer, and a list of nothing is a menu that looks broken. */
-		if (!c->n)
-			return;
+		/*
+		 * AND THEN THE ENGINE'S OWN PLACES, after the literal ones.
+		 *
+		 * An occurrence is where the bytes are in THIS sample. A base
+		 * is where they will be in the next one: an infector's stub is
+		 * a fixed step from the entry point and is at a different file
+		 * offset in every build it is in. Both rules in bases/ that
+		 * use this call are written the second way, and until now the
+		 * panel could not express what they say.
+		 *
+		 * Below the offsets because the offsets are the answer when
+		 * the author has no reason to think otherwise, and picking a
+		 * base is the deliberate act.
+		 *
+		 * The displacement is not asked for here. Choosing a base
+		 * keeps whatever step the matcher already had - see CH_ATOFF
+		 * in ch_apply - so "entry" on a matcher seeded from an
+		 * occurrence names the entry and the rule then reads
+		 * entry + that offset, which is wrong as often as it is right
+		 * and is visible in the row either way. Typing a step is the
+		 * part still to design.
+		 */
+		for (i = 1; i < GRP_AT_BASE_COUNT; i++) {
+			snprintf(t, sizeof t, "%s (engine)",
+				 grp_at_base_word((int)i));
+			ch_add(c, t);
+		}
+		/*
+		 * The list can no longer be empty, so the guard that was here
+		 * is gone: a marker whose bytes are not in this object offers
+		 * no occurrences, and used to close the menu on the author
+		 * with nothing said - but a base does not depend on the bytes
+		 * being found, so there is always something to choose. The
+		 * remaining early return above is a different case: a matcher
+		 * with no marker at all, which has nothing to place.
+		 */
 	} else if (what == CH_RULE) {
 		ch_add(c, "find_all");
 		ch_add(c, "find_any");
@@ -8987,7 +9019,7 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		/* Last, because it is the one that is not a search: it compares
 		 * at one offset, and it is the only rule that constrains the
 		 * matcher to a single marker. */
-		ch_add(c, "find_str_at (offset)");
+		ch_add(c, "find_at (one place)");
 		/*
 		 * AND find_similar - ALWAYS, because it covers four measures
 		 * and three of them are about the object itself.
@@ -9752,8 +9784,8 @@ static void at_warn_if_multi(struct view *v)
 	for (g = 0; g < v->ed.dr.n_grp; g++)
 		if (grp_is_at(v->ed.dr.grp[g].rule)) {
 			say_note(&v->ed,
-				 "find_str_at is one offset - it means a "
-				 "different place in each of %d formats",
+				 "find_at is one place - it means a "
+				 "different one in each of %d formats",
 				 n_fmt);
 			return;
 		}
@@ -10291,8 +10323,20 @@ static void ch_take(struct view *v)
 				d = &v->ed.dr.decl[i];
 				break;
 			}
-		if (d && c->sel >= 0 && (uint32_t)c->sel < d->n_hits)
-			q->at_off = d->hits[c->sel];
+		if (d && c->sel >= 0 && (uint32_t)c->sel < d->n_hits) {
+			q->at_off = (int64_t)d->hits[c->sel];
+			q->at_base = GRP_AT_ABS;
+		} else if (c->sel >= (int)(d ? d->n_hits : 0u)) {
+			/* Past the occurrences are the engine's own places -
+			 * see where this menu is built. The displacement from
+			 * the chosen base is kept, so picking "entry" on a
+			 * matcher already at entry+0x10 moves the base and not
+			 * the rule. */
+			int b = c->sel - (int)(d ? d->n_hits : 0u) + 1;
+
+			if (b < GRP_AT_BASE_COUNT)
+				q->at_base = (uint8_t)b;
+		}
 	} else if (c->what == CH_RULE) {
 		/*
 		 * Past the four search rules is find_similar - see where the
@@ -13425,14 +13469,7 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 		const struct group *q = &v->ed.dr.grp[g];
 		char rl[16];
 
-		if (q->rule == 1)
-			snprintf(rl, sizeof rl, "find_any");
-		else if (q->rule == 2)
-			snprintf(rl, sizeof rl, "find_multi");
-		else if (grp_is_at(q->rule))
-			snprintf(rl, sizeof rl, "find_str_at");
-		else
-			snprintf(rl, sizeof rl, "find_all");
+		snprintf(rl, sizeof rl, "%s", grp_rule_label(q->rule));
 
 		if (!PR_VIS(r)) {
 			/* Scrolled out: this matcher has no click targets this
@@ -13540,8 +13577,8 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 			 * row: the thing that says where this matcher looks.
 			 */
 			if (grp_is_at(q->rule))
-				snprintf(nm, sizeof nm, "0x%llx",
-					 (unsigned long long)q->at_off);
+				grp_at_text(q->at_base, q->at_off, nm,
+					    sizeof nm, 0);
 			else if (grp_has_range(&v->ed, g))
 				rng_name_of(cur_obj(v)->fmt, grp_mask(&v->ed, g), nm,
 					    sizeof nm);

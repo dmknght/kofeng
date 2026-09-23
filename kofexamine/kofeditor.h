@@ -32,6 +32,9 @@
 #define KOF_KOFEDITOR_H
 
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <kofmod/kofsig.h>
 #include <kofmod/kofsym.h>
 #include <kofmod/kofplague.h>
@@ -336,14 +339,171 @@ struct range {
 static inline const char *grp_rule_word(int rule)
 {
 	/*
-	 * "str_at" reads oddly here and is right at both ends: every consumer
-	 * spells it "find_" + this word, so the chooser row says find_str_at
-	 * and the emitted call is kof_find_str_at. The emitter special-cases
-	 * the ARGUMENTS - an offset and one marker, not a range and a list -
-	 * but not the name.
+	 * "str_at" reads oddly and is still what goes in the file: this word
+	 * is pasted after kof_find_str_ to make the call, so it is the ABI's
+	 * spelling and not a label. What the author is shown is
+	 * grp_rule_label, which says find_at.
 	 */
 	return rule == 1 ? "any" : rule == 2 ? "multi"
 	     : rule == 3 ? "str_at" : "all";
+}
+
+/*
+ * The same four rules, as the author is shown them.
+ *
+ * Separate from grp_rule_word because the two disagree on one row and only
+ * one: the AT rule emits kof_find_str_at and is shown as find_at. It reads
+ * better - the rule is about a PLACE, and the place is the whole of what
+ * distinguishes it - and the "str" in the middle is doubly wrong now that the
+ * place itself need not be a number: "find_str_at ctx->entry_off" says string
+ * twice and position once, for a row whose subject is the position.
+ *
+ * The emitted name is left alone because it is not ours to choose. It is a
+ * macro in kofsig.h with call sites in bases/ and in the test rules.
+ */
+static inline const char *grp_rule_label(int rule)
+{
+	return rule == 1 ? "find_any" : rule == 2 ? "find_multi"
+	     : rule == 3 ? "find_at" : "find_all";
+}
+
+/*
+ * WHERE AN AT MATCHER LOOKS: A BASE, AND A SIGNED STEP FROM IT.
+ *
+ * A file offset on its own could not say the thing rules actually say. Both
+ * shipped AT rules are written from the entry point -
+ *
+ *     kof_find_str_at(ctx->entry_off + 236u, s0)      bases/signatures/rst_01.c
+ *     kof_find_str_at(ctx->entry_off, s0)             bases/signatures/rst_00.c
+ *
+ * - because that is where the thing they match IS: an infector's stub sits at
+ * a fixed displacement from the entry point and at no fixed offset in the
+ * file. A literal would match one sample and no other build.
+ *
+ * So the field holds two parts. The base names something the engine works out
+ * per object, or nothing at all, and the displacement is added to it. ABS is
+ * the plain offset that was here before, spelled as a base of nothing, so the
+ * two cases are one shape with one parser and one printer.
+ *
+ * SIGNED, because a displacement backwards from the entry point is a thing
+ * somebody will write - the bytes just before an entry are as much a marker as
+ * the bytes at it - and a parser that cannot read "- 8" reads "8".
+ */
+enum grp_at_base {
+	GRP_AT_ABS = 0,     /* the displacement is the offset itself      */
+	GRP_AT_ENTRY,       /* ctx->entry_off                             */
+	GRP_AT_BASE_COUNT
+};
+
+/* The C text of a base, which is also what the importer looks for. */
+static inline const char *grp_at_base_expr(int base)
+{
+	return base == GRP_AT_ENTRY ? "ctx->entry_off" : "";
+}
+
+/* And what the author is shown, which has to be short: it sits in a row field
+ * beside the matcher, not on a line of its own. */
+static inline const char *grp_at_base_word(int base)
+{
+	return base == GRP_AT_ENTRY ? "entry" : "";
+}
+
+/*
+ * WRITING ONE OUT - the same text for the screen and for the file, differing
+ * only in how the base is spelled, so that what the author is shown cannot
+ * drift from what is generated. as_c picks the C spelling.
+ *
+ * The `u` suffix goes on the generated literal because the expression is added
+ * to a uint64_t; without it a bare constant is an int and the addition is done
+ * in whatever type the promotion lands on. The existing rules all write it.
+ */
+static inline void grp_at_text(int base, int64_t off, char *out, size_t cap,
+			       int as_c)
+{
+	const char *b = as_c ? grp_at_base_expr(base) : grp_at_base_word(base);
+	const char *u = as_c ? "u" : "";
+	unsigned long long mag = off < 0 ? (unsigned long long)-(off + 1) + 1ull
+					 : (unsigned long long)off;
+
+	if (!*b) {
+		snprintf(out, cap, "%s0x%llx%s", off < 0 ? "-" : "", mag, u);
+		return;
+	}
+	/* A base with nothing added is the base, not "entry + 0x0". It is the
+	 * commonest AT rule there is - see rst_00.c - and the zero is noise. */
+	if (!off)
+		snprintf(out, cap, "%s", b);
+	else
+		snprintf(out, cap, "%s %c 0x%llx%s", b, off < 0 ? '-' : '+',
+			 mag, u);
+}
+
+/*
+ * AND READING ONE BACK, which is where this started.
+ *
+ * The importer read the first argument of kof_find_str_at with strtoull and
+ * nothing else, so `ctx->entry_off + 236u` read as 0 - strtoull stops at the
+ * `c` and reports no digits. Both shipped AT rules are entry-relative, so
+ * opening either of them in the editor showed a matcher at offset 0, and
+ * saving it wrote that back: a rule that matched an infector's stub became a
+ * rule that compares at the start of the file. Nothing warned, because "0" is
+ * a valid offset and strtoull's failure is only visible in `end`.
+ *
+ * Returns where it stopped, so the caller goes on to the marker list.
+ */
+static inline const char *grp_at_parse(const char *s, int *base, int64_t *off)
+{
+	int b = GRP_AT_ABS;
+	int64_t v = 0;
+	char *end = NULL;
+	int i;
+
+	while (*s == ' ' || *s == '\t')
+		s++;
+	/*
+	 * The base first, and by its C text, because that is the only spelling
+	 * that can appear here: this reads generated source. `ctx->` is
+	 * optional so that a hand written rule that took the context by
+	 * another name, or wrote the field bare, is still understood rather
+	 * than silently read as zero - which is the whole fault being fixed.
+	 */
+	for (i = 1; i < GRP_AT_BASE_COUNT; i++) {
+		const char *e = grp_at_base_expr(i);
+		size_t n = strlen(e);
+		const char *f = strncmp(e, "ctx->", 5) ? e : e + 5;
+
+		if (!strncmp(s, e, n)) { b = i; s += n; break; }
+		if (!strncmp(s, f, strlen(f))) { b = i; s += strlen(f); break; }
+	}
+	while (*s == ' ' || *s == '\t')
+		s++;
+	if (b != GRP_AT_ABS) {
+		/* A displacement, if there is one. `+` and `-` only: anything
+		 * else is the end of the argument, and a base on its own is a
+		 * complete answer. */
+		int neg = *s == '-';
+
+		if (*s != '+' && *s != '-')
+			goto done;
+		s++;
+		v = (int64_t)strtoull(s, &end, 0);
+		if (end == s)
+			goto done;
+		s = end;
+		if (neg)
+			v = -v;
+	} else {
+		v = (int64_t)strtoull(s, &end, 0);
+		s = end && end != s ? end : s;
+	}
+	/* The `u` or `ul` the emitter writes is part of the number, not the
+	 * next thing. strtoull leaves it. */
+	while (*s == 'u' || *s == 'U' || *s == 'l' || *s == 'L')
+		s++;
+done:
+	*base = b;
+	*off = v;
+	return s;
 }
 
 /* Whether a matcher compares at one offset rather than searching a range. */
@@ -453,7 +613,10 @@ struct group {
 	int      rule;              /* 0 ALL, 1 ANY, 2 threshold, 3 AT */
 	uint32_t thresh;
 	/*
-	 * WHERE, for rule 3 - the offset kof_find_str_at compares at.
+	 * WHERE, for rule 3 - the place kof_find_str_at compares at.
+	 *
+	 * A base and a signed displacement from it, not a bare offset - see
+	 * enum grp_at_base for why the base has to be there.
 	 *
 	 * A matcher with this rule does not search: it is one comparison the
 	 * length of the pattern, at a place the author names. So it carries an
@@ -465,7 +628,8 @@ struct group {
 	 * looking at. Every other occurrence is on the marker too - decl.hits -
 	 * so the offset control offers those rather than asking for typing.
 	 */
-	uint64_t at_off;
+	int64_t  at_off;
+	uint8_t  at_base;           /* enum grp_at_base - what at_off is from */
 	char     note[512];         /* the author's note, emitted as a comment */
 	/* How far it is scrolled inside its own box, for the same reason the
 	 * module's comment has one: sliding the whole panel to read the end of
