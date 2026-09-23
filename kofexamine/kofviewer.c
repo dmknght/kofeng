@@ -803,8 +803,9 @@ enum ch_what {
 	CH_RULE,        /* find all / any / multi, for a new or existing group */
 	CH_SIM,         /* which measure a find_similar takes next */
 /* Rows past this one in a CH_RULE menu are the ticked blocks - see where it is
- * built. Four search rules come first. */
-#define CH_RULE_BLOCK0 4
+ * built. TWO search rules come first now: find_str, which is the three
+ * threshold spellings under one name, and find_at. */
+#define CH_RULE_BLOCK0 2
 	/*
 	 * WHICH OCCURRENCE an AT matcher compares at.
 	 *
@@ -9484,9 +9485,26 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		 * with no marker at all, which has nothing to place.
 		 */
 	} else if (what == CH_RULE) {
-		ch_add(c, "find_all");
-		ch_add(c, "find_any");
-		ch_add(c, "find_multi (>=N)");
+		/*
+		 * ONE ROW FOR THE THREE SEARCHES, because they are one question
+		 * asked with three thresholds.
+		 *
+		 * find_all is "every one of them", find_any is "at least one"
+		 * and find_multi is "at least N" - the same fold over the same
+		 * markers in the same range, differing only in the number. Three
+		 * rows made the reader choose a SPELLING before choosing the
+		 * number, and then offered the number separately with 1 and the
+		 * maximum missing from it, because those two had rows of their
+		 * own. So the kind is one row and the number is the whole
+		 * choice.
+		 *
+		 * WHAT IS GENERATED DOES NOT CHANGE - see grp_rule_of_thresh:
+		 * the number picks the call back, so a rule still comes out as
+		 * kof_find_str_all, _any or _multi, an old rule still reads
+		 * back, and the short-circuit that && and || give is still
+		 * there where it applies.
+		 */
+		ch_add(c, "find_str");
 		/* Last, because it is the one that is not a search: it compares
 		 * at one offset, and it is the only rule that constrains the
 		 * matcher to a single marker. */
@@ -10062,13 +10080,34 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		 * this shape exists to remove. So when another matcher asks the
 		 * same thing, 1 becomes a threshold like any other.
 		 */
-		uint32_t lo = (arg < v->ed.dr.n_grp && grp_shared(&v->ed, arg)) ? 1u : 2u;
-
-		/* The number, and only the number. How many there are to
-		 * choose from is not a choice - it is shown beside the field
-		 * and follows the markers as they are added. */
-		for (i = lo; i + 1u <= n; i++) {
-			snprintf(t, sizeof t, ">= %u", i);
+		/*
+		 * EVERY NUMBER, INCLUDING 1 AND THE MAXIMUM.
+		 *
+		 * They used to be left out because find_any and find_all had
+		 * rows of their own in the kind menu, and offering them here as
+		 * well would have been two ways to say one thing. The kind menu
+		 * is one row now - see where it is built - so this list is the
+		 * whole choice, and the two ends of it are the two spellings
+		 * that were taken away.
+		 *
+		 * THE TOP READS "==" BECAUSE IT MEANS SOMETHING ELSE. Every
+		 * other row is a floor that a bigger file can clear with room
+		 * to spare; the top one is "all of them", and it FOLLOWS the
+		 * marker list - add another marker and it still means all of
+		 * them, where ">= 4" would have been left behind. Writing it as
+		 * a number would hide that difference behind a value that
+		 * happens to be equal today.
+		 */
+		/* Up to AND INCLUDING n: the old bound stopped one short
+		 * because the top value was find_all's row, and that row is
+		 * gone. Left as it was, the list could never offer "all of
+		 * them" - and for a matcher with one marker it offered
+		 * nothing at all. */
+		for (i = 1u; i <= n; i++) {
+			if (i == n)
+				snprintf(t, sizeof t, "== %u", i);
+			else
+				snprintf(t, sizeof t, ">= %u", i);
 			ch_add(c, t);
 		}
 		if (!c->n)
@@ -10287,6 +10326,25 @@ static uint32_t rng_object_regions(struct view *v)
 
 
 /* What picking the highlighted item does. */
+/*
+ * WHICH RULE A ROW OF THE KIND MENU MEANS.
+ *
+ * The menu used to be the rule list itself - row 0 was find_all, row 1
+ * find_any, row 2 find_multi - so the row index WAS the value and two places
+ * wrote `q->rule = c->sel`. The three searches are one row now, and the number
+ * chooses between them afterwards, so the two are no longer the same thing and
+ * the mapping is stated once.
+ *
+ * A new find_str starts as "every one of them": it is the strictest reading,
+ * it is what a matcher with one marker in it means either way, and it FOLLOWS
+ * the markers - adding another tightens the rule rather than leaving a number
+ * behind. See grp_thresh_eff, which answers `count` for it.
+ */
+static int ch_rule_of_row(int row)
+{
+	return row == 1 ? 3 : 0;        /* find_at, else find_str */
+}
+
 static void ch_take(struct view *v)
 {
 	struct chooser *c = &v->ch;
@@ -10566,20 +10624,17 @@ static void ch_take(struct view *v)
 			return;
 		q = &v->ed.dr.grp[v->ed.dr.n_grp - 1u];
 		/*
-		 * find_similar is a KIND and not a search rule, so it is
-		 * taken the same way here as it is for an existing matcher -
-		 * see the branch below. This path used to write c->sel into
-		 * `rule` whatever it was, so choosing it on a NEW matcher
-		 * produced a find_all: a second place that decides what a
-		 * chooser row means, and it did not know about the fifth row.
+		 * find_similar is a KIND and not a search rule, so it is taken
+		 * the same way here as for an existing matcher - see the branch
+		 * below. Both paths ask ch_rule_of_row rather than writing
+		 * c->sel into `rule`: this one used to do that, and choosing
+		 * find_similar on a NEW matcher produced a find_all.
 		 */
 		if (c->sel >= CH_RULE_BLOCK0) {
 			grp_make_sim(&v->ed, v->ed.dr.n_grp - 1u);
 			return;
 		}
-		q->rule = c->sel;
-		if (c->sel == 2)
-			q->thresh = 2;
+		q->rule = ch_rule_of_row(c->sel);
 		/* Nothing in it yet, so there is no marker to seed from - the
 		 * offset arrives with the first one. See grp_seed_at. */
 		return;
@@ -10820,13 +10875,30 @@ static void ch_take(struct view *v)
 			break;
 		}
 	} else if (c->what == CH_THRESH) {
-		/* The same lower bound the list was built with - see
-		 * CH_THRESH there. Hard coding 2 here picked the wrong entry
-		 * the moment a shared call made the list start at 1. */
-		uint32_t lo = grp_shared(&v->ed, c->arg) ? 1u : 2u;
+		/* The list starts at 1 - see CH_THRESH where it is built. */
+		uint32_t want = (uint32_t)c->sel + 1u;
+		uint32_t n = grp_count(&v->ed, c->arg);
 
-		q->rule = 2;
-		q->thresh = (uint32_t)c->sel + lo;
+		/*
+		 * THE NUMBER CHOOSES THE CALL BACK.
+		 *
+		 * This is the whole of the merge: one row in the kind menu, and
+		 * the threshold decides which of the three the generator writes
+		 * - so a rule still comes out as kof_find_str_all, _any or
+		 * _multi, an old rule still reads back unchanged, and the
+		 * short-circuit && and || give is kept exactly where it applies.
+		 *
+		 * `all` is a SENTINEL and not the number n: it follows the
+		 * markers, so adding one keeps the rule meaning all of them.
+		 */
+		if (n && want >= n)
+			q->rule = 0;            /* == n  -> find_all */
+		else if (want <= 1u)
+			q->rule = 1;            /* >= 1  -> find_any */
+		else {
+			q->rule = 2;            /* >= N  -> find_multi */
+			q->thresh = want;
+		}
 	} else if (c->what == CH_ATOFF) {
 		const struct decl *d = NULL;
 		uint32_t i;
@@ -10878,10 +10950,8 @@ static void ch_take(struct view *v)
 			}
 		}
 	} else if (c->what == CH_RULE) {
-		/*
-		 * Past the four search rules is find_similar - see where the
-		 * menu is built.
-		 */
+		/* Past the two search rows is find_similar - see where the
+		 * menu is built. */
 		if (c->sel >= CH_RULE_BLOCK0) {
 			grp_make_sim(&v->ed, c->arg < MAX_GROUP ? c->arg
 					   : v->ed.dr.n_grp - 1u);
@@ -10893,9 +10963,7 @@ static void ch_take(struct view *v)
 		 * back. */
 		q->kind = (uint8_t)GRP_KIND_STR;
 		q->n_sim = 0;
-		q->rule = c->sel;
-		if (c->sel == 2 && q->thresh < 2u)
-			q->thresh = 2;
+		q->rule = ch_rule_of_row(c->sel);
 		/* Chosen now, from whatever marker the matcher already holds -
 		 * see grp_seed_at. Switching away and back does not lose it,
 		 * because it is only ever written here and by the offset menu. */
@@ -14136,7 +14204,11 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 		const struct group *q = &v->ed.dr.grp[g];
 		char rl[16];
 
-		snprintf(rl, sizeof rl, "%s", grp_rule_label(q->rule));
+		/* One name for the three searches - see where the kind menu is
+		 * built. What is GENERATED still follows the threshold. */
+		snprintf(rl, sizeof rl, "%s",
+			 (q->kind == GRP_KIND_STR && !grp_is_at(q->rule))
+			 ? "find_str" : grp_rule_label(q->rule));
 
 		if (!PR_VIS(r)) {
 			/* Scrolled out: this matcher has no click targets this
@@ -14289,13 +14361,30 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 			 * against, but not a thing to press.
 			 */
 			v->grp_th[g][0] = v->grp_th[g][1] = -1;
-			if (q->rule == 2) {
+			/*
+			 * EVERY SEARCH MATCHER HAS ONE NOW, because the three
+			 * of them are one row in the kind menu and the number
+			 * is what tells them apart - see where that menu is
+			 * built. It was drawn for find_multi alone, when
+			 * find_all and find_any said their threshold in their
+			 * own names.
+			 *
+			 * "==" at the top and ">=" below it, which is the
+			 * difference the author is choosing between: a floor a
+			 * bigger set can clear, or all of them however many
+			 * there are.
+			 */
+			if (q->kind == GRP_KIND_STR && !grp_is_at(q->rule)) {
+				uint32_t n = grp_count(&v->ed, g);
+				uint32_t th = grp_thresh_eff(&v->ed, g);
+
 				out_str(o, A_DIM "   Threshold: " A_OFF);
 				v->grp_th[g][0] = 1 + (int)o->col_hint;
-				out_fmt(o, "%s>= %u" A_OFF, A_ID, q->thresh);
+				out_fmt(o, "%s%s %u" A_OFF, A_ID,
+					(n && th >= n) ? "==" : ">=", th);
 				v->grp_th[g][1] = (int)o->col_hint;
 				out_fmt(o, A_DIM " of " A_OFF "%s%u" A_OFF,
-					A_SIZE, grp_count(&v->ed, g));
+					A_SIZE, n);
 			}
 			draw_grp_note(o, v, g);
 			out_at(o, PR(r), g_cols - 4);
