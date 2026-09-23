@@ -358,12 +358,18 @@ void kof_exe_norm_map(const uint8_t *in, uint64_t n, uint32_t ops,
  * `mark`/`mark_out` carry a sorted list of parent offsets through to their view
  * positions in the same pass - see the note above the definition.
  *
+ * `fired` takes the ops that actually did something, and a caller needs it
+ * because the two are not worth the same: de-widening REVEALS text a pattern
+ * could not match before, while collapsing zeros provably reveals nothing -
+ * see the safety note at the top of this file. Anything deciding whether a
+ * view is worth making at all has to tell them apart. NULL when it does not.
+ *
  * Returns the view length, or 0 when nothing was rewritten.
  */
 uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
 			     uint32_t ops, uint8_t *out, uint64_t cap,
 			     const uint64_t *mark, uint64_t *mark_out,
-			     uint32_t n_mark);
+			     uint32_t n_mark, uint32_t *fired);
 
 uint64_t kof_exe_norm(const uint8_t *in, uint64_t n, uint32_t ops,
 		  uint8_t *out, uint64_t cap,

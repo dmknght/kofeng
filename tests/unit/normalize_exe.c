@@ -694,7 +694,7 @@ static void kept_regions_do_not_move(void)
 
 	mark[0] = 0; mark[1] = 64; mark[2] = 512; mark[3] = 640;
 	m = kof_exe_norm_masked(in, n, keep, KOF_EXE_NORM_NULLRUN, out,
-				sizeof out, mark, mark_out, 4u);
+				sizeof out, mark, mark_out, 4u, NULL);
 
 	check(m > 0 && m < n, "masked: the object still shortens",
 	      "the data run has to collapse or nothing is being tested");
@@ -752,7 +752,7 @@ static void a_run_stops_at_the_boundary(void)
 		keep[i >> 3] |= (uint8_t)(1u << (i & 7u));
 
 	m = kof_exe_norm_masked(in, n, keep, KOF_EXE_NORM_NULLRUN, out,
-				sizeof out, NULL, NULL, 0u);
+				sizeof out, NULL, NULL, 0u, NULL);
 	/* Only [150,200) may collapse: 50 zeros to 2, so 48 bytes go. */
 	check(m == n - 48u, "masked: a run collapses only up to the boundary",
 	      "taking the kept half of it would move everything after");

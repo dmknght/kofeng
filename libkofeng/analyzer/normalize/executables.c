@@ -534,11 +534,14 @@ static uint64_t keep_bound(const uint8_t *keep, uint64_t n, uint64_t i)
 uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
 			     uint32_t ops, uint8_t *out, uint64_t cap,
 			     const uint64_t *mark, uint64_t *mark_out,
-			     uint32_t n_mark)
+			     uint32_t n_mark, uint32_t *fired)
 {
 	uint64_t i = 0, o = 0, lim = 0;
-	uint32_t q = 0;
+	uint32_t q = 0, did = 0;
 	int changed = 0;
+
+	if (fired)
+		*fired = 0;
 
 	if (!in || !out || !n || cap < n)
 		return 0;
@@ -566,6 +569,7 @@ uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
 			i += 2u * k;
 			o += k;
 			changed = 1;
+			did |= KOF_EXE_NORM_UNWIDE;
 			continue;
 		}
 		if ((ops & KOF_EXE_NORM_NULLRUN) &&
@@ -576,6 +580,7 @@ uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
 			i += k;
 			o += 2u;
 			changed = 1;
+			did |= KOF_EXE_NORM_NULLRUN;
 			continue;
 		}
 		out[o++] = in[i++];
@@ -585,6 +590,8 @@ uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
 	while (q < n_mark && mark_out)
 		mark_out[q++] = o;
 
+	if (fired)
+		*fired = did;
 	if (!changed)
 		return 0;
 	return o;

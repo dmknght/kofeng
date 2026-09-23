@@ -3600,12 +3600,7 @@ static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 		 * a region table - and the table comes from the producer, which
 		 * is the only side that could know.
 		 */
-		if (o->n_rgn) {
-			memset(&o->ctx, 0, sizeof o->ctx);
-			o->fmt = NULL;
-			o->info = NULL;
-			o->ctx.resolve_scan = declared_regions;
-		} else if (i == 0 && v->proc_pid) {
+		if (i == 0 && v->proc_pid) {
 			o->fmt = kof_inspect_declare(o->buf, KOF_EVT_PROC,
 						     &o->ctx, &o->info);
 		} else {
@@ -3614,6 +3609,26 @@ static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 		}
 		if (!o->fmt)
 			o->ctx.obj_size = o->buf.n;
+		/*
+		 * A DECLARED REGION TABLE BEATS THE PARSED ONE, and only the
+		 * table - the rest of the parse stands.
+		 *
+		 * This used to skip identify altogether for a view, on the
+		 * ground that a sniff succeeds and is wrong: the view keeps its
+		 * parent's header byte for byte, so the offsets in it describe
+		 * the file before the padding came out. The regions were the
+		 * part that mattered and they are now overridden here, so the
+		 * rest of the parse - what format it is, its class, its panels -
+		 * is worth having and the engine relies on the same thing: it
+		 * declares the view as its parent's format so rules written for
+		 * that format can reach it at all.
+		 *
+		 * Left unidentified, the viewer said "raw" about an object the
+		 * engine was scanning as an ELF, and the two screens disagreed
+		 * about one file.
+		 */
+		if (o->n_rgn)
+			o->ctx.resolve_scan = declared_regions;
 
 		/* Once, here, and never while drawing - see struct object. */
 		if (!o->sha256[0])
@@ -6684,7 +6699,9 @@ static void plg_segment(struct view *v)
 	 * this cannot place a library in, which is the same answer: cut
 	 * nothing. */
 	memset(&lib, 0, sizeof lib);
-	if (o->ctx.format == KOF_FMT_ELF && o->info)
+	/* Not on a view - its segment offsets are the parent's and are stale;
+	 * see the same test where the scoring set is built. */
+	if (!o->n_rgn && o->ctx.format == KOF_FMT_ELF && o->info)
 		kof_lib_find(o->buf, (const struct kof_elf_info *)o->info,
 			     &lib);
 
@@ -7033,7 +7050,22 @@ static void plg_rescore(struct view *v)
 	 * function exists to avoid. See the note above it.
 	 */
 	memset(&slib, 0, sizeof slib);
-	if (o->ctx.format == KOF_FMT_ELF && o->info)
+	/*
+	 * NOT ON A VIEW, and that is not caution - it is that the answer would
+	 * be wrong.
+	 *
+	 * kof_lib_find works from markers found INSIDE a loadable segment, and
+	 * a view's segment offsets come from its parent's headers, which
+	 * describe the file before the padding came out. On a view those
+	 * offsets are stale wherever something collapsed ahead of them, so the
+	 * spans would be drawn over the wrong bytes and blocks would be put on
+	 * the wrong side.
+	 *
+	 * With no spans every window is KOF_PLAGUE_SIDE_USER, which is the
+	 * honest answer for an object whose library cannot be located: the
+	 * library half is simply not described here.
+	 */
+	if (!o->n_rgn && o->ctx.format == KOF_FMT_ELF && o->info)
 		kof_lib_find(o->buf, (const struct kof_elf_info *)o->info,
 			     &slib);
 	/*
@@ -28033,6 +28065,37 @@ static void click(struct view *v, int rclick)
 	}
 	if (click_bar_menu(v))
 		return;
+	/*
+	 * THE SIGNATURE LIST IS A MODAL AND IS ASKED WITH THE OTHER MODALS.
+	 *
+	 * It used to be asked three hundred lines below, after the handlers for
+	 * the event heading, the disassembly heading and the DRAFT PANEL'S
+	 * RESIZE GRIP - and those are geometry tests with no notion of anything
+	 * being drawn over them.
+	 *
+	 * The grip is the one that bit. It is the whole row at hex_bot() + 1,
+	 * which is g_rows - g_decl_rows - 1, and the list occupies
+	 * g_rows - 1 - list_shown(v) up to g_rows - 2. So whenever the panel is
+	 * open and the list is taller than the panel, the grip's row falls
+	 * INSIDE the list - and clicking that row started a panel resize
+	 * instead of picking the signature drawn on it. From the reader's side
+	 * the click simply went to the thing behind the dialog.
+	 *
+	 * Here it cannot: a dialog that is on the screen gets the click before
+	 * anything it is covering, which is what help_open and bar_open above
+	 * already do and the rule this was missing from.
+	 *
+	 * THE RULE IS THE PLACEMENT, and there is deliberately no predicate for
+	 * it. A modal_up() helper was written and taken out again: once every
+	 * overlay is asked here, nothing below has a modal left to test for, so
+	 * the helper had no caller that changed an answer - and the one call
+	 * site that looked like it wanted it, the right-button guard above,
+	 * means something narrower. It asks which overlays use the RIGHT
+	 * button, not which are on screen, and widening it stopped right-click
+	 * reaching the help page's close button.
+	 */
+	if (click_list(v, ob))
+		return;
 	if (click_field(v))
 		return;
 	/*
@@ -28366,8 +28429,6 @@ static void click(struct view *v, int rclick)
 		return;
 	}
 
-	if (click_list(v, ob))
-		return;
 	if (g_decl_rows && g_my >= decl_top() && g_my < mark_row())
 		v->pane = 3;
 	/*

@@ -410,7 +410,19 @@ static void plague_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * `lib` lives for the rest of this call, which is exactly as long as the
 	 * feeds do.
 	 */
-	if (ctx->format == KOF_FMT_ELF && ctx->file_header) {
+	/*
+	 * AND NOT ON A NORMALISED VIEW, whose segment offsets are its parent's.
+	 *
+	 * The view is declared as its parent's format, so it parses - but its
+	 * headers describe the file before the padding came out, and
+	 * kof_lib_find works from markers found inside a loadable SEGMENT.
+	 * Given stale offsets it would name spans over the wrong bytes and put
+	 * blocks on the wrong side of enum kof_plague_side.
+	 *
+	 * An object with a declared region table is exactly the one that has
+	 * this problem, which is why that is the test.
+	 */
+	if (!sc->n_cur_rgn && ctx->format == KOF_FMT_ELF && ctx->file_header) {
 		kof_lib_find(b, kof_elf(ctx), &lib);
 		kof_plague_object(&sc->plague, b.p, lib.span, lib.n);
 	}
@@ -2009,7 +2021,7 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	uint64_t mark[2u * KOF_SRC_MAX_REGIONS];
 	uint64_t mark_out[2u * KOF_SRC_MAX_REGIONS];
 	uint32_t midx[2u * KOF_SRC_MAX_REGIONS];
-	uint32_t nr, n_mark = 0;
+	uint32_t nr, n_mark = 0, fired = 0;
 
 	/*
 	 * PE AND ELF ONLY, AND ONLY WHAT WAS NOT ITSELF PRODUCED.
@@ -2142,16 +2154,44 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 
 	n = kof_exe_norm_masked(tmp, buf.n, keep,
 				KOF_EXE_NORM_NULLRUN | KOF_EXE_NORM_UNWIDE,
-				out, buf.n, mark, mark_out, n_mark);
+				out, buf.n, mark, mark_out, n_mark, &fired);
+	/*
+	 * A VIEW IS MADE ONLY WHEN IT CAN SHOW SOMETHING THE PARENT CANNOT.
+	 *
+	 * `changed` is the decode passes; kof_exe_norm_masked reports whether
+	 * it narrowed wide text or collapsed a zero run, and those two are not
+	 * worth the same:
+	 *
+	 *   DE-WIDENING REVEALS. "41 00 42 00" becomes "AB", and an ASCII
+	 *   pattern that could not match the parent matches the view. Same for
+	 *   a decoded payload.
+	 *
+	 *   COLLAPSING ZEROS REVEALS NOTHING, and that is proved rather than
+	 *   assumed - see the safety note in executables.h. A literal cannot
+	 *   contain a zero byte, so a pattern matches a run of consecutive
+	 *   NON-ZERO bytes, and collapsing to two zeros never puts two
+	 *   non-zero bytes beside each other that were not beside each other
+	 *   before. No match is created. A view that only collapsed zeros
+	 *   therefore matches exactly what its parent matches, and scanning it
+	 *   is provably redundant work.
+	 *
+	 * It is still done on a view that IS made, because it makes that view
+	 * smaller and cheaper. It is just not a reason to make one.
+	 *
+	 * MEASURED, because the saving is most of the cost: of 846 ELF in
+	 * /usr/bin, 746 produce a view that only collapsed zeros - 88% of the
+	 * second scan, buying nothing. In a corpus of 243 Linux malware
+	 * samples it is 82 of them.
+	 */
+	if (!(fired & KOF_EXE_NORM_UNWIDE) && !changed) {
+		free(out);
+		free(tmp);
+		free(keep);
+		return;
+	}
 	if (!n) {
-		/* Nothing was collapsed or narrowed. The decode may still have
-		 * found something, and then the view is what it produced. */
-		if (!changed) {
-			free(out);
-			free(tmp);
-			free(keep);
-			return;         /* the view would be a copy */
-		}
+		/* Nothing moved: the decode found something but there was no
+		 * wide text and no zero run, so the view is the 1:1 rewrite. */
 		memcpy(out, tmp, (size_t)buf.n);
 		n = buf.n;
 		for (n_mark = 0; n_mark < 2u * nr; n_mark++)
@@ -2249,7 +2289,7 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 */
 	sc->pend_label_len = (uint32_t)snprintf(sc->pend_label,
 						sizeof sc->pend_label, "norm");
-	sc->pend_fmt = KOF_FMT_DECLARED_RAW;
+	sc->pend_fmt = nr ? ctx->format : (uint8_t)KOF_FMT_DECLARED_RAW;
 	{
 		uint32_t a;
 
@@ -2779,8 +2819,25 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 		out->n = w;
 	}
 
-	/* Last, because the unpack result is one of the facts. */
-	heur_object(sc, &ctx, opt, pdepth, out->broken == KOF_BROKEN_DAMAGED, out);
+	/*
+	 * Last, because the unpack result is one of the facts - and NOT FOR A
+	 * VIEW, whose structure is not its own.
+	 *
+	 * The scored model reads the parse: where the sections end against
+	 * where the file ends, whether a segment runs past it. A normalised
+	 * view keeps its parent's headers byte for byte and is SHORTER than
+	 * they describe, so every one of those questions has the wrong answer
+	 * about it - measured before this, an ordinary view came back
+	 * ELF-other/Heur:Appended, which is a finding about the normaliser.
+	 *
+	 * The RULE heuristics still run: those read bytes, and the bytes are
+	 * the point of having a view. Only the model that reasons about layout
+	 * is skipped, because the layout belongs to the parent and the parent
+	 * is scanned too.
+	 */
+	if (!sc->n_cur_rgn)
+		heur_object(sc, &ctx, opt, pdepth,
+			    out->broken == KOF_BROKEN_DAMAGED, out);
 }
 
 /*
