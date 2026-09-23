@@ -1991,6 +1991,7 @@ const char *kof_codec_name(uint32_t codec)
 	switch (codec) {
 	case KOF_CODEC_B64:     return "base64";
 	case KOF_CODEC_HEX:     return "hex";
+	case KOF_CODEC_URL:     return "url";
 	case KOF_CODEC_XOR:     return "xor";
 	case KOF_CODEC_ADD:     return "add";
 	case KOF_CODEC_CAESAR:  return "caesar";
@@ -2082,6 +2083,32 @@ static uint32_t codec_write(const uint8_t *p, uint32_t len, uint32_t codec,
 			out[w++] = (uint8_t)hexd[p[i] & 15u];
 		}
 		return w;
+	case KOF_CODEC_URL:
+		/*
+		 * RFC 3986's unreserved set stays and everything else is
+		 * escaped - `+` among it, so that a `+` a reader typed comes
+		 * back a `+` and not the space the reading pass turns one
+		 * into. Upper case digits, the form a URL is written in.
+		 */
+		for (i = 0; i < len; i++) {
+			uint8_t ch = p[i];
+
+			if ((ch >= 'A' && ch <= 'Z') ||
+			    (ch >= 'a' && ch <= 'z') ||
+			    (ch >= '0' && ch <= '9') ||
+			    ch == '-' || ch == '_' || ch == '.' || ch == '~') {
+				if (w + 1u > cap)
+					break;
+				out[w++] = ch;
+				continue;
+			}
+			if (w + 3u > cap)
+				break;
+			out[w++] = '%';
+			out[w++] = (uint8_t)hexd[ch >> 4];
+			out[w++] = (uint8_t)hexd[ch & 15u];
+		}
+		return w;
 	case KOF_CODEC_XOR:
 		for (i = 0; i < len && w < cap; i++)
 			out[w++] = (uint8_t)(p[i] ^ (uint8_t)key);
@@ -2160,6 +2187,34 @@ static uint32_t codec_read(const uint8_t *p, uint32_t len, uint32_t codec,
 			}
 		}
 		return have ? 0 : w;  /* an odd digit is not a byte string */
+	case KOF_CODEC_URL: {
+		uint32_t esc = 0;
+
+		for (i = 0; i < len && w < cap; i++) {
+			if (p[i] == '%') {
+				int hi, lo;
+
+				if (len - i < 3u)
+					return 0;
+				hi = codec_hexv(p[i + 1u]);
+				lo = codec_hexv(p[i + 2u]);
+				/* A `%` that is not an escape means the text
+				 * was never written this way - a printf
+				 * format, a literal per cent. */
+				if (hi < 0 || lo < 0)
+					return 0;
+				out[w++] = (uint8_t)((hi << 4) | lo);
+				i += 2u;
+				esc++;
+				continue;
+			}
+			out[w++] = p[i] == '+' ? (uint8_t)' ' : p[i];
+		}
+		/* Text carrying no escape at all is not encoded text, and
+		 * saying so is the answer hex gives to an odd digit rather
+		 * than an error. */
+		return esc ? w : 0;
+	}
 	case KOF_CODEC_XOR:
 		for (i = 0; i < len && w < cap; i++)
 			out[w++] = (uint8_t)(p[i] ^ (uint8_t)key);

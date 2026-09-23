@@ -635,6 +635,22 @@ void kof_touch_name(const struct kof_touch *t, char *out, size_t cap);
 enum kof_codec {
 	KOF_CODEC_B64 = 0,
 	KOF_CODEC_HEX,
+	/*
+	 * URL, AND IT IS `%XX` AND NOTHING ELSE.
+	 *
+	 * The same one form the norm view decodes - unpct_range in
+	 * normalize/executables.c - and for the same reason: an IoT dropper
+	 * carries its commands percent-encoded by the protocol rather than by
+	 * its author, so what is in the file is `wget+http%3A%2F%2F...` while
+	 * what a rule is written against is the plain text. A reader needs
+	 * both directions of exactly that, and neither of the other escape
+	 * conventions - \xNN, &#NN; - belongs here with it.
+	 *
+	 * `+` reads as a space, because the samples that need this are form
+	 * bodies. Writing escapes everything outside RFC 3986's unreserved
+	 * set, `+` among them, so the two passes stay inverses.
+	 */
+	KOF_CODEC_URL,
 	KOF_CODEC_XOR,          /* one byte, typed */
 	KOF_CODEC_ADD,          /* byte + n, typed - subsumes a byte rotate */
 	/*
@@ -684,6 +700,7 @@ uint32_t kof_codec_key(const char *text);
  * Which direction each one has is not the same question for all of them:
  *
  *   base64, hex   a real pair - bytes to text one way, text to bytes the other
+ *   url           a real pair too - `%XX` in, the byte out, and back again
  *   xor, reverse  their own inverse, so the same pass runs both ways
  *   add           decoding ADDS the key, so encoding subtracts it
  *   caesar        decoding shifts back, so encoding shifts forward
