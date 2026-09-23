@@ -2083,11 +2083,12 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		norm_keep_bits(keep, buf.n, rgn, nr);
 
 	/*
-	 * THE DECODE PASS, THEN THE KEPT BYTES PUT BACK.
+	 * THE DECODE PASSES, THEN THE KEPT BYTES PUT BACK.
 	 *
-	 * kof_exe_unb64 rewrites in place and preserves length, so running it
-	 * over everything and then restoring what must not change is exact -
-	 * and it is far simpler than teaching the anchor walk about a bitmap.
+	 * kof_exe_decode runs base64 and hex, layer by layer, rewriting in
+	 * place and preserving length - so running it over everything and then
+	 * restoring what must not change is exact, and it is far simpler than
+	 * teaching each anchor walk about a bitmap.
 	 * A payload that straddles a kept boundary is decoded on the unkept
 	 * side and undone on the other, which is the same answer a masked walk
 	 * would give and costs nothing to arrive at.
@@ -2096,7 +2097,7 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * decode has to happen while offsets still mean what the bitmap says.
 	 */
 	memcpy(tmp, buf.p, (size_t)buf.n);
-	changed = kof_exe_unb64(tmp, buf.n);
+	changed = kof_exe_decode(tmp, buf.n);
 	if (nr && changed) {
 		uint64_t j;
 

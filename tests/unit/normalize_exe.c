@@ -761,6 +761,172 @@ static void a_run_stops_at_the_boundary(void)
 	      "the fifty zeros inside the kept region are kept zeros");
 }
 
+/* ------------------------------------------------------------------------
+ * HEX TEXT.
+ *
+ * Mirai stores its commands, its hosts-file lines and its C2 addresses as
+ * uppercase hex, so the bytes are in the file and the thing is not. There is
+ * no anchor to key on - hex names no decoder the way `base64 -d` does - so
+ * what makes it safe is three tests, and each one is here because dropping it
+ * changed a measurement. See the note in executables.h.
+ */
+static uint64_t hex_case(uint8_t *buf, uint64_t cap, const char *plain)
+{
+	static const char *d = "0123456789ABCDEF";
+	uint64_t i, n = strlen(plain);
+
+	if (2u * n + 2u > cap)
+		return 0;
+	buf[0] = ' ';                   /* the delimiter a payload follows */
+	for (i = 0; i < n; i++) {
+		buf[1 + 2 * i]     = (uint8_t)d[(unsigned char)plain[i] >> 4];
+		buf[1 + 2 * i + 1] = (uint8_t)d[(unsigned char)plain[i] & 15];
+	}
+	buf[1 + 2 * n] = 0;
+	return 2u * n + 2u;
+}
+
+static void hex_decodes_a_command(void)
+{
+	static const char cmd[] = "iptables -A OUTPUT -d pastebin.com -j DROP";
+	uint8_t buf[256];
+	uint64_t n = hex_case(buf, sizeof buf, cmd);
+
+	check(kof_exe_unhex(buf, n) == 1, "hex: a hex command is decoded",
+	      "printable, delimited and past the floor");
+	check(memmem(buf, (size_t)n, cmd, strlen(cmd)) != NULL,
+	      "hex: and it reads as the command",
+	      "which is the whole point - the rule is written on what it does");
+	check(memmem(buf, (size_t)n, "697074", 6) == NULL,
+	      "hex: the encoded run is overwritten",
+	      "the decode is in place, so the source characters cannot remain");
+}
+
+static void hex_refuses_a_hash(void)
+{
+	/*
+	 * A SHA-256 in hex: sixty-four characters of exactly the right shape,
+	 * delimited, well past the floor - and it decodes to arbitrary bytes.
+	 * Build ids like this are in every binary, which is why "every decoded
+	 * byte is printable" is the test that carries this rule.
+	 */
+	static const char h[] =
+		" 67d172e2859767879636b8057b703aae0c02b25b67d172e2859767879636b805";
+	uint8_t buf[128], ref[128];
+	uint64_t n = strlen(h) + 1u;
+
+	memcpy(buf, h, (size_t)n);
+	memcpy(ref, buf, (size_t)n);
+	check(kof_exe_unhex(buf, n) == 0, "hex: a hash is not a payload",
+	      "it decodes to bytes no text could be");
+	check(!memcmp(buf, ref, (size_t)n), "hex: and it is left intact",
+	      "a refusal must not rewrite anything");
+}
+
+static void hex_needs_a_delimiter(void)
+{
+	/*
+	 * The shape that survived the printable test on clean binaries: a run
+	 * of "22" preceded by '!'. It decodes to a row of quotes, which IS
+	 * printable, so only the delimiter rule removes it - measured at four
+	 * occurrences across 835 ELF from /usr/bin, and none once this holds.
+	 */
+	static const char h[] = "!22222222222222222222222222222222";
+	uint8_t buf[64], ref[64];
+	uint64_t n = strlen(h) + 1u;
+
+	memcpy(buf, h, (size_t)n);
+	memcpy(ref, buf, (size_t)n);
+	check(kof_exe_unhex(buf, n) == 0, "hex: a run must be delimited",
+	      "a payload is an argument, and '!' does not introduce one");
+	check(!memcmp(buf, ref, (size_t)n), "hex: and that one is left intact",
+	      "this is the only rule that refuses it");
+}
+
+static void hex_ignores_a_short_run(void)
+{
+	uint8_t buf[64], ref[64];
+	uint64_t n = hex_case(buf, sizeof buf, "short");   /* 10 characters */
+
+	memcpy(ref, buf, (size_t)n);
+	check(kof_exe_unhex(buf, n) == 0, "hex: a short run is not a payload",
+	      "below the floor a run is as likely to be a number");
+	check(!memcmp(buf, ref, (size_t)n), "hex: and it is left intact",
+	      "so the matcher still reads the bytes really there");
+}
+
+static void hex_keeps_an_ip_with_no_letters(void)
+{
+	/*
+	 * EVERY C2 ADDRESS IN THE MEASURED SAMPLE LOOKS LIKE THIS, and an
+	 * earlier version of the rule would have dropped all of them: requiring
+	 * the decoded bytes to be mostly alphabetic loses 23 of 31 payloads,
+	 * because an address has no letter in it at all.
+	 */
+	static const char ip[] = "\n0.0.0.0 136.243.89.164";
+	uint8_t buf[128];
+	uint64_t n = hex_case(buf, sizeof buf, ip);
+
+	check(kof_exe_unhex(buf, n) == 1, "hex: an address decodes",
+	      "no letters in it, and it is the most valuable line in the file");
+	check(memmem(buf, (size_t)n, "136.243.89.164", 14) != NULL,
+	      "hex: and reads as the address",
+	      "an alphabetic test would have refused this");
+}
+
+/*
+ * A LAYER UNDER A LAYER, and the rescan that makes it cheap.
+ *
+ * What comes out of one decode can be encoded again. One pass finds the
+ * outermost and stops, so the driver runs rounds - and each round looks only
+ * at what the previous one wrote, because nothing else can hold a layer that
+ * has not been searched already.
+ */
+static void decode_follows_the_layers(void)
+{
+	static const char inner[] = "iptables -A OUTPUT -d pastebin.com -j DROP";
+	static const char *d = "0123456789ABCDEF";
+	uint8_t once[256], twice[600];
+	uint64_t n1 = hex_case(once, sizeof once, inner);
+	uint64_t i, n2;
+
+	/*
+	 * Hex the hex: the first decode yields hex text, and only a second
+	 * round turns that into the command.
+	 *
+	 * The inner run's OWN characters and nothing else - not its leading
+	 * space and not its terminator. Encoding the NUL puts a zero byte in
+	 * what the outer layer decodes to, and a zero byte is not printable,
+	 * so the outer run would be refused and the test would be measuring
+	 * the fixture.
+	 */
+	twice[0] = ' ';
+	for (i = 0; i + 2u < n1; i++) {
+		twice[1 + 2 * i]     = (uint8_t)d[once[i + 1u] >> 4];
+		twice[1 + 2 * i + 1] = (uint8_t)d[once[i + 1u] & 15];
+	}
+	n2 = 1u + 2u * (n1 - 2u);
+	twice[n2++] = 0;
+
+	check(kof_exe_unhex(twice, n2) == 1, "layers: one pass peels one",
+	      "and what it leaves is still encoded");
+	check(memmem(twice, (size_t)n2, inner, strlen(inner)) == NULL,
+	      "layers: so one pass is not enough",
+	      "the command is still two characters per byte");
+
+	/* And the driver, from the original, all the way down. */
+	twice[0] = ' ';
+	for (i = 0; i + 2u < n1; i++) {
+		twice[1 + 2 * i]     = (uint8_t)d[once[i + 1u] >> 4];
+		twice[1 + 2 * i + 1] = (uint8_t)d[once[i + 1u] & 15];
+	}
+	check(kof_exe_decode(twice, n2) == 1, "layers: the driver decodes",
+	      "it runs rounds until a round finds nothing");
+	check(memmem(twice, (size_t)n2, inner, strlen(inner)) != NULL,
+	      "layers: and reaches the command underneath",
+	      "two layers of hex, and the second round is what got it");
+}
+
 int main(void)
 {
 	printf("normalize exe:\n");
@@ -786,6 +952,13 @@ int main(void)
 	map_agrees_with_the_transform();
 	kept_regions_do_not_move();
 	a_run_stops_at_the_boundary();
+
+	hex_decodes_a_command();
+	hex_refuses_a_hash();
+	hex_needs_a_delimiter();
+	hex_ignores_a_short_run();
+	hex_keeps_an_ip_with_no_letters();
+	decode_follows_the_layers();
 
 	if (fails) {
 		printf("\nnormalize exe: %d check(s) failed\n", fails);

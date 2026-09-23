@@ -248,7 +248,71 @@ int kof_exe_unwide(const uint8_t *in, uint64_t n, uint8_t *out);
  * stops at once, and the run is below the minimum - so a second pass over an
  * already-decoded buffer finds nothing to do.
  */
+/* A stretch of the buffer a decode pass wrote. The layered driver uses these to
+ * look only where something changed - see kof_exe_decode. */
+struct kof_exe_span {
+	uint64_t off, len;
+};
+
 int kof_exe_unb64(uint8_t *p, uint64_t n);
+
+/*
+ * HEX TEXT SAID AS THE BYTES IT SPELLS, in place and length preserving in the
+ * same way kof_exe_unb64 is: two characters carry one byte, so the decode goes
+ * at the run's own offset and the rest of the run is zeroed.
+ *
+ * WHY THIS IS SAFE WITHOUT AN ANCHOR, WHICH BASE64 COULD NOT BE.
+ *
+ * The base64 module refused to hunt for base64-shaped runs because that
+ * alphabet is also the alphabet of identifiers. Hex is sixteen characters, and
+ * three further tests do the work an anchor would:
+ *
+ *   EVERY DECODED BYTE IS PRINTABLE. A hash, a build id or a long decimal
+ *   decodes to arbitrary bytes and is refused; a command decodes to a command.
+ *   DELIMITED. The run follows a NUL, a space, a quote or a bracket, the same
+ *   rule and for the same reason as a base64 payload: it is an argument.
+ *   TWENTY-FOUR CHARACTERS. Twelve bytes.
+ *
+ * MEASURED, because each of those numbers is a trade and none of them is
+ * obvious:
+ *
+ *     b086aa80... (Mirai)   31 of 31 runs decoded
+ *     835 ELF from /usr/bin  874 runs, 0 decoded
+ *
+ * At sixteen characters five clean files decoded; the four that survived the
+ * printable test at twenty-four were all "2222..." preceded by '!', and the
+ * delimiter rule is what removes them.
+ *
+ * WHAT IT DELIBERATELY DOES NOT CATCH: hex that spells SHELLCODE, or any other
+ * binary. Those decode to non-printable bytes and are refused by the first test
+ * above. Lifting it is not a matter of loosening the rule - a SHA-256 in hex is
+ * sixty-four characters of exactly that shape, and build ids are everywhere -
+ * so it needs a floor of its own, measured on its own, and it is not here.
+ *
+ * AND NOT AN ALPHABETIC TEST, which was tried. Requiring the decoded bytes to
+ * be mostly letters loses 23 of the 31 - every C2 address in the file, because
+ * "37.187.154.79" and "\n0.0.0.0 136.243.89.164" contain no letter at all.
+ */
+int kof_exe_unhex(uint8_t *p, uint64_t n);
+
+/*
+ * EVERY LAYER, not just the first, and each round looking only where the last
+ * one wrote.
+ *
+ * A payload is decoded into the object, and what comes out can be encoded
+ * again - base64 inside hex, hex inside base64, a second base64 inside the
+ * first. One pass finds the outermost layer and stops.
+ *
+ * SCANNING THE WHOLE OBJECT EACH ROUND IS THE OBVIOUS WAY AND IT IS WASTE. The
+ * only bytes that can hold a layer nobody has seen are the bytes the previous
+ * round produced - everything else was already searched and answered. So each
+ * pass records what it wrote, and the next round walks those stretches and
+ * nothing else. The first round is the whole object; every round after it is
+ * the size of what was decoded, which is a fraction of it.
+ *
+ * Returns non-zero if any layer was decoded.
+ */
+int kof_exe_decode(uint8_t *p, uint64_t n);
 
 /*
  * PARENT OFFSETS TO VIEW OFFSETS, for a sorted list of them, in one pass.

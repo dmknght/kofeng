@@ -277,7 +277,8 @@ static uint32_t b64_anchor_at(const uint8_t *p, uint64_t n, uint64_t i)
 	return 0;
 }
 
-int kof_exe_unb64(uint8_t *p, uint64_t n)
+static int unb64_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
+		       struct kof_exe_span *wrote, uint32_t cap, uint32_t *n_wrote)
 {
 	uint64_t i;
 	uint32_t made = 0;
@@ -285,8 +286,10 @@ int kof_exe_unb64(uint8_t *p, uint64_t n)
 
 	if (!p || !n)
 		return 0;
+	if (to > n)
+		to = n;
 
-	for (i = 0; i + 8u < n && made < B64_MAX_PAY; i++) {
+	for (i = from; i + 8u < to && made < B64_MAX_PAY; i++) {
 		uint64_t run_end, run_beg, j;
 		uint64_t out_n = 0;
 		uint32_t acc = 0, have = 0;
@@ -391,10 +394,20 @@ int kof_exe_unb64(uint8_t *p, uint64_t n)
 		 * file: a literal cannot contain one, so nothing matches across
 		 * it - and it is also what makes a second pass find nothing. */
 		memset(p + run_beg + out_n, 0, (size_t)(run_end - run_beg - out_n));
+		if (wrote && n_wrote && *n_wrote < cap) {
+			wrote[*n_wrote].off = run_beg;
+			wrote[*n_wrote].len = out_n;
+			(*n_wrote)++;
+		}
 		made++;
 		changed = 1;
 	}
 	return changed;
+}
+
+int kof_exe_unb64(uint8_t *p, uint64_t n)
+{
+	return unb64_range(p, n, 0, n, NULL, 0, NULL);
 }
 
 /*
@@ -575,4 +588,150 @@ uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
 	if (!changed)
 		return 0;
 	return o;
+}
+
+/* ---- hex text, and the layers under it ----------------------------------- */
+
+/* Twelve bytes. Below it a run is as likely to be a number as a payload - see
+ * the measurement in executables.h. */
+#define HEX_RUN_MIN   24u
+
+/* What one pass will rewrite, for the reason B64_MAX_PAY gives. */
+#define HEX_MAX_PAY   32u
+
+static int hex_val(uint8_t c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+/* What a decoded byte may be for the run to be text: printable ASCII, and the
+ * three whitespace characters a command or a hosts file carries. */
+static int hex_text(uint8_t c)
+{
+	return (c >= 0x20u && c < 0x7fu) || c == '\t' || c == '\n' || c == '\r';
+}
+
+/* A payload is an argument, so it follows one of these - the same rule the
+ * base64 walk applies, and the one that removes the only clean-file decodes
+ * the printable test let through. */
+static int hex_delim(uint8_t c)
+{
+	return c == 0 || c == ' ' || c == '\t' || c == '"' || c == '\'' ||
+	       c == '(' || c == '=' || c == '\n' || c == '\r' || c == ',' ||
+	       c == ';' || c == ':' || c == '>' || c == '|' || c == '{' ||
+	       c == '[';
+}
+
+static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
+		       struct kof_exe_span *wrote, uint32_t cap,
+		       uint32_t *n_wrote)
+{
+	uint64_t i;
+	uint32_t made = 0;
+	int changed = 0;
+
+	if (!p || !n)
+		return 0;
+	if (to > n)
+		to = n;
+
+	for (i = from; i < to && made < HEX_MAX_PAY; ) {
+		uint64_t beg, end, j, out_n = 0;
+		int text = 1;
+
+		if (hex_val(p[i]) < 0) {
+			i++;
+			continue;
+		}
+		beg = i;
+		while (i < to && hex_val(p[i]) >= 0)
+			i++;
+		end = i;
+		/* An odd tail is not part of the encoding: two characters make
+		 * one byte and a leftover one makes none. */
+		if ((end - beg) & 1u)
+			end--;
+		if (end - beg < HEX_RUN_MIN)
+			continue;
+		if (!hex_delim(beg ? p[beg - 1u] : 0))
+			continue;
+		/*
+		 * EVERY BYTE, NOT A SAMPLE OF THEM. A prefix test would accept
+		 * a hash whose first bytes happened to be printable, and the
+		 * whole value of this rule is that it refuses those.
+		 */
+		for (j = beg; j < end && text; j += 2u)
+			text = hex_text((uint8_t)((hex_val(p[j]) << 4)
+						  | hex_val(p[j + 1u])));
+		if (!text)
+			continue;
+		/* In place: the write trails the read by half, so it cannot
+		 * overtake what has not been read. */
+		for (j = beg; j < end; j += 2u)
+			p[beg + out_n++] = (uint8_t)((hex_val(p[j]) << 4)
+						     | hex_val(p[j + 1u]));
+		memset(p + beg + out_n, 0, (size_t)(end - beg - out_n));
+		if (wrote && n_wrote && *n_wrote < cap) {
+			wrote[*n_wrote].off = beg;
+			wrote[*n_wrote].len = out_n;
+			(*n_wrote)++;
+		}
+		made++;
+		changed = 1;
+	}
+	return changed;
+}
+
+int kof_exe_unhex(uint8_t *p, uint64_t n)
+{
+	return unhex_range(p, n, 0, n, NULL, 0, NULL);
+}
+
+/* How deep the layering is followed. Two is what real samples carry; four is
+ * past every one measured and is what stops a crafted file from turning one
+ * normalisation into a loop. */
+#define DEC_MAX_ROUND 4u
+
+/* How many decoded stretches are carried into the next round. A file with more
+ * than this has been answered enough. */
+#define DEC_MAX_SPAN  64u
+
+int kof_exe_decode(uint8_t *p, uint64_t n)
+{
+	struct kof_exe_span cur[DEC_MAX_SPAN], nxt[DEC_MAX_SPAN];
+	uint32_t n_cur = 1, n_nxt, r, k;
+	int changed = 0;
+
+	if (!p || !n)
+		return 0;
+	cur[0].off = 0;
+	cur[0].len = n;
+
+	for (r = 0; r < DEC_MAX_ROUND && n_cur; r++) {
+		n_nxt = 0;
+		for (k = 0; k < n_cur; k++) {
+			uint64_t a = cur[k].off;
+			uint64_t b = a + cur[k].len;
+
+			if (!cur[k].len)
+				continue;
+			/*
+			 * Base64 first, because its anchor is a decoder named
+			 * in the text and hex has no anchor at all - so where
+			 * both could read the same run, the one that was told
+			 * what it is reads it.
+			 */
+			changed |= unb64_range(p, n, a, b, nxt, DEC_MAX_SPAN,
+					       &n_nxt);
+			changed |= unhex_range(p, n, a, b, nxt, DEC_MAX_SPAN,
+					       &n_nxt);
+		}
+		for (k = 0; k < n_nxt; k++)
+			cur[k] = nxt[k];
+		n_cur = n_nxt;
+	}
+	return changed;
 }
