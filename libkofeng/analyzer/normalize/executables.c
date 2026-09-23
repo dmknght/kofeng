@@ -178,3 +178,221 @@ int kof_exe_norm_src_of(const struct kof_exe_norm_span *spans, uint32_t n_spans,
 	}
 	return 0;
 }
+
+int kof_exe_unwide(const uint8_t *in, uint64_t n, uint8_t *out)
+{
+	uint64_t i = 0;
+	int changed = 0;
+
+	if (!in || !out || !n)
+		return 0;
+	memcpy(out, in, (size_t)n);
+	while (i + 1u < n) {
+		uint64_t k = wide_run(in, n, i);
+
+		if (k < KOF_EXE_NORM_WIDE_MIN) {
+			i++;
+			continue;
+		}
+		{
+			uint64_t j;
+
+			for (j = 0; j < k; j++)
+				out[i + j] = in[i + 2u * j];
+			/* The vacated half of the run. Zeros, because a literal
+			 * cannot contain one, so nothing can match across it. */
+			memset(out + i + k, 0, (size_t)k);
+		}
+		i += 2u * k;
+		changed = 1;
+	}
+	return changed;
+}
+
+/*
+ * THE BASE64 PASS. See the note on kof_exe_unb64 in the header for why it is
+ * here at all; what follows is why each test is the test it is, and every one
+ * of those reasons was worked out in bases/decomp/cmdb64_00.c against real
+ * droppers rather than reasoned out here.
+ */
+
+/* How far back a separator run may reach between the payload and the decoder.
+ * "  |  " is five; longer than this is not a pipeline, it is two unrelated
+ * things that happen to be near each other. */
+#define B64_SEP_MAX   8u
+
+/* The longest payload walked back over. Past every measured dropper one-liner,
+ * and small enough that a hostile file cannot make the walk expensive by
+ * putting the anchor after a megabyte of printable bytes. */
+#define B64_PAY_MAX   8192u
+
+/* Below this a run is not a payload. Sixteen characters decode to twelve bytes,
+ * which is shorter than any second stage worth having and is about where
+ * ordinary words stop being mistakable for one. */
+#define B64_RUN_MIN   16u
+
+/* What one pass will rewrite. A command carries one payload; a file with more
+ * anchors than this is doing something other than dropping, and the cap is what
+ * stops a crafted file turning one normalisation into thousands of 8 KB walks. */
+#define B64_MAX_PAY   8u
+
+/* The alphabet, as comparisons. A table would be faster and this is not the hot
+ * path - it runs only where the anchor already matched. */
+static int b64_val(uint8_t c)
+{
+	if (c >= 'A' && c <= 'Z') return c - 'A';
+	if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+	if (c >= '0' && c <= '9') return c - '0' + 52;
+	if (c == '+') return 62;
+	if (c == '/') return 63;
+	return -1;
+}
+
+/* A character that may appear INSIDE a run: the alphabet, its padding, and the
+ * line breaks a wrapped payload carries. */
+static int b64_run_char(uint8_t c)
+{
+	return b64_val(c) >= 0 || c == '=' || c == '\n' || c == '\r';
+}
+
+/*
+ * IS THERE A DECODER AT `i`, and which spelling.
+ *
+ * Returns its length, or 0. `base64 -d` is a prefix of `base64 -di`, so the
+ * short form finds both; `--decode` and the macOS `-D` share no prefix with it
+ * and are tested separately. One search for "base64 -" covers all three, where
+ * the module declared three strings because its search was the database's.
+ */
+static uint32_t b64_anchor_at(const uint8_t *p, uint64_t n, uint64_t i)
+{
+	if (n - i < 9u)                 /* the shortest is "base64 -d" */
+		return 0;
+	if (memcmp(p + i, "base64 -", 8u))
+		return 0;
+	/* p[i + 7] is that '-'; what follows it decides the spelling. */
+	if (n - i >= 15u && !memcmp(p + i + 7u, "--decode", 8u))
+		return 15u;
+	if (p[i + 8u] == 'd' || p[i + 8u] == 'D')
+		return 9u;
+	return 0;
+}
+
+int kof_exe_unb64(uint8_t *p, uint64_t n)
+{
+	uint64_t i;
+	uint32_t made = 0;
+	int changed = 0;
+
+	if (!p || !n)
+		return 0;
+
+	for (i = 0; i + 8u < n && made < B64_MAX_PAY; i++) {
+		uint64_t run_end, run_beg, j;
+		uint64_t out_n = 0;
+		uint32_t acc = 0, have = 0;
+		uint8_t  before;
+		int      piped = 0;
+
+		if (!b64_anchor_at(p, n, i))
+			continue;
+
+		/*
+		 * BACK OVER THE PIPE, THEN BACK OVER THE PAYLOAD.
+		 *
+		 * In `echo <payload> | base64 -d` the payload is the run that
+		 * ENDS at the pipe. Nearest, not longest-in-the-string: a
+		 * longer run elsewhere in the same command is a different
+		 * question that happens to share the answer most of the time.
+		 */
+		run_end = i;
+		for (j = 0; j < B64_SEP_MAX && run_end > 0; j++) {
+			uint8_t c = p[run_end - 1u];
+
+			if (c == '|' || c == '<' || c == '>')
+				piped = 1;
+			else if (c != ' ' && c != '\t' && c != ')' &&
+				 c != '"' && c != '\'')
+				break;
+			run_end--;
+		}
+		/*
+		 * THE DECODER'S INPUT HAS TO COME FROM THE RUN, and a space
+		 * does not say that. `base64 -d` reads stdin, so something must
+		 * be piped or redirected into it; a bare space in front means
+		 * its input is a file argument and the bytes before it are just
+		 * the previous word. Without this,
+		 * "ThisIsALongIdentifierLikeString base64 -d" decoded to
+		 * twenty-three bytes of noise.
+		 *
+		 * The quotes are separators rather than terminators because
+		 * `echo "<payload>" | base64 -d` is the Mirai shape and the
+		 * closing quote sits between the payload and the pipe.
+		 */
+		if (!piped)
+			continue;
+
+		run_beg = run_end;
+		for (j = 0; j < B64_PAY_MAX && run_beg > 0; j++) {
+			if (!b64_run_char(p[run_beg - 1u]))
+				break;
+			run_beg--;
+		}
+		/*
+		 * PADDING ONLY EVER COMES LAST, so an `=` with a real
+		 * character after it is a SEPARATOR and the payload starts
+		 * after the last one. Without it `VAR=<payload> | base64 -d`
+		 * walks back through the `=` into the variable's name - which
+		 * is base64 characters too - and every group shifts.
+		 */
+		for (j = run_beg; j + 1u < run_end; j++)
+			if (p[j] == '=' && p[j + 1u] != '=')
+				run_beg = j + 1u;
+
+		if (run_end - run_beg < B64_RUN_MIN)
+			continue;
+		/*
+		 * AND THE RUN HAS TO BE DELIMITED. A run must not be a window
+		 * onto bytes belonging to something else - a symbol table, a
+		 * pointer, the tail of another string - and a payload is an
+		 * argument, so it follows a NUL, a space, a quote or a bracket.
+		 */
+		before = run_beg ? p[run_beg - 1u] : 0;
+		if (before != 0 && before != ' ' && before != '\t' &&
+		    before != '"' && before != '\'' && before != '(' &&
+		    before != '=' && before != '\n')
+			continue;
+
+		/*
+		 * DECODE IN PLACE. The write always trails the read - three
+		 * bytes out per four in - so the output cannot overtake what
+		 * has not been read yet, and no copy is needed.
+		 */
+		for (j = run_beg; j < run_end; j++) {
+			int v = b64_val(p[j]);
+
+			if (v < 0)
+				continue;       /* the padding and the newlines */
+			acc = (acc << 6) | (uint32_t)v;
+			have += 6u;
+			if (have >= 8u) {
+				have -= 8u;
+				p[run_beg + out_n++] = (uint8_t)(acc >> have);
+			}
+		}
+		/*
+		 * A run that decoded to nothing is left exactly as it was.
+		 * Zeroing it would remove bytes the matcher can still read for
+		 * no gain, and it is the one case where the rewrite would lose
+		 * rather than reveal.
+		 */
+		if (!out_n)
+			continue;
+		/* The vacated tail. Zeros, for the reason at the top of this
+		 * file: a literal cannot contain one, so nothing matches across
+		 * it - and it is also what makes a second pass find nothing. */
+		memset(p + run_beg + out_n, 0, (size_t)(run_end - run_beg - out_n));
+		made++;
+		changed = 1;
+	}
+	return changed;
+}

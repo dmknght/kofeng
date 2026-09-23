@@ -297,6 +297,107 @@ static void mixed_rule(void)
 	unlink(path);
 }
 
+/*
+ * WHERE AN AT MATCHER LOOKS, WHICH THE READER USED TO THROW AWAY.
+ *
+ * kof_find_str_at takes a place, and both AT rules in bases/ name it from the
+ * entry point rather than as a file offset - an infector's stub is a fixed
+ * step from the entry and is at a different offset in every build. The reader
+ * ran strtoull over "ctx->entry_off + 236u", which has no leading digits, so
+ * it produced 0 and reported nothing. The rule opened as "compare at offset
+ * 0" and Save wrote that back: a different rule, silently.
+ *
+ * Both halves are checked here, because either one alone still loses it - a
+ * reader that understands the text and a writer that cannot put it back is the
+ * same corruption one step later.
+ */
+static void at_place_is_kept(void)
+{
+	static const char src[] =
+		"#include <kofmod/kofsig.h>\n"
+		"KOF_TARGET_FORMAT(KOF_FMT_ELF);\n"
+		"KOF_TARGET_NAME(KOF_MALTYPE_VIRUS, \"Atplace\");\n"
+		"KOF_TARGET_RANGE(scan_range_whole_file, KOF_SCAN_ALL);\n"
+		"KOF_DEFINE_STR(s0, \"alpha\", KOF_CASE_EXACT, "
+			"KOF_WORD_SUBSTRING);\n"
+		"void kof_scan(const struct kof_obj_ctx *ctx)\n"
+		"{\n"
+		"\tif (kof_find_str_at(ctx->entry_off + 236u, s0))\n"
+		"\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n"
+		"}\n";
+	struct kof_editor e;
+	const char *path = write_tmp(src);
+	char txt[64];
+
+	if (!path)
+		return;
+	lend(&e);
+	CK(draft_from_source(&e, path) != 0);
+	CK(e.dr.n_grp == 1);
+	if (e.dr.n_grp) {
+		CK(e.dr.grp[0].rule == 3);
+		CK(e.dr.grp[0].at_base == GRP_AT_ENTRY);
+		CK(e.dr.grp[0].at_off == 236);
+		/* And back out as C, which is what Save writes. */
+		grp_at_text(e.dr.grp[0].at_base, e.dr.grp[0].at_off,
+			    txt, sizeof txt, 1);
+		EQ(txt, "ctx->entry_off + 0xecu");
+		/* And as the panel shows it, which has to be short and must
+		 * not be a file offset the author would read as one. */
+		grp_at_text(e.dr.grp[0].at_base, e.dr.grp[0].at_off,
+			    txt, sizeof txt, 0);
+		EQ(txt, "entry + 0xec");
+	}
+	draft_clear(&e);
+	unlink(path);
+}
+
+/*
+ * The three other shapes the first argument can take, read directly - a bare
+ * base, a literal, and a step backwards. The parser is what the importer uses
+ * and is the only thing that decides whether a shipped rule survives being
+ * opened, so each form is pinned rather than assumed from the one above.
+ */
+static void at_place_forms(void)
+{
+	int b;
+	int64_t off;
+	char txt[64];
+
+	/* A base on its own - rst_00.c, and the commonest form there is. */
+	grp_at_parse("ctx->entry_off, s0", &b, &off);
+	CK(b == GRP_AT_ENTRY);
+	CK(off == 0);
+	grp_at_text(b, off, txt, sizeof txt, 1);
+	EQ(txt, "ctx->entry_off");          /* not "+ 0x0" */
+
+	/* A plain number, which is what this field held before and still the
+	 * default: an occurrence picked off the marker is an offset. */
+	grp_at_parse("0x400, s0", &b, &off);
+	CK(b == GRP_AT_ABS);
+	CK(off == 0x400);
+
+	/* Decimal too, because somebody typing one is not an error - the old
+	 * reader took base 0 for this reason and that part was right. */
+	grp_at_parse("1024, s0", &b, &off);
+	CK(b == GRP_AT_ABS);
+	CK(off == 1024);
+
+	/* Backwards. The bytes before an entry are as much a marker as the
+	 * bytes at it, and an unsigned field could not say so. */
+	grp_at_parse("ctx->entry_off - 8u, s0", &b, &off);
+	CK(b == GRP_AT_ENTRY);
+	CK(off == -8);
+	grp_at_text(b, off, txt, sizeof txt, 0);
+	EQ(txt, "entry - 0x8");
+
+	/* Written without the context name, which a hand-edited rule may be.
+	 * Reading it as 0 is the fault being fixed, so it is tested. */
+	grp_at_parse("entry_off + 2, s0", &b, &off);
+	CK(b == GRP_AT_ENTRY);
+	CK(off == 2);
+}
+
 int main(void)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -304,11 +405,14 @@ int main(void)
 	two_calls_or();
 	src_sees_blocks();
 	mixed_rule();
+	at_place_is_kept();
+	at_place_forms();
 
 	if (fails) {
 		printf("draft source: %d check(s) failed\n", fails);
 		return 1;
 	}
-	printf("draft source: two calls on one line, or, block index, mixed rule - ok\n");
+	printf("draft source: two calls on one line, or, block index, "
+	       "mixed rule, at place - ok\n");
 	return 0;
 }

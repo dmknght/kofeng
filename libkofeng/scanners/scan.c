@@ -57,6 +57,7 @@
 #include <sys/stat.h>
 
 #include "../kofcore/kofplatform.h"
+#include "../analyzer/normalize/executables.h"
 
 struct kof_scanner *kof_scan_of(const struct kof_obj_ctx *ctx)
 {
@@ -1852,6 +1853,280 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	return want;
 }
 
+
+/*
+ * THE SAME EXECUTABLE, SAID PLAINLY, AS ONE CHILD.
+ *
+ * A UTF-16 marker is the same letters with a zero between each one, so an
+ * ASCII pattern does not match it; a long run of padding is bytes every rule
+ * is swept across for nothing. executables.h turns both into a shorter view
+ * that says the same thing, and this is where that view becomes an object.
+ *
+ * A CHILD, NEVER A REWRITE. The parent keeps every byte and every offset it
+ * had: cure_patch writes the file at an offset, kof_find_str_where hands a
+ * module an offset to read a layout from, and a module author has no way to
+ * know which view an offset came from. So the view gets its own object with
+ * its own offset space and its own name, which is what the scan tree is for.
+ *
+ * ONE CHILD AND NOT ONE PER REGION. The presence table is 32MB built per
+ * object, so N children cost N builds; one child costs one. The view is the
+ * whole object normalised rather than a bag of pieces, so the ranges inside it
+ * still mean what they meant.
+ *
+ * WHAT IT IS WORTH, measured before it was written: 2.6% of bytes on 293 ELF64
+ * from /usr/bin and 1.1% on 1129 PE. That is not the reason it is here - the
+ * reason is the wide marker and, later, the decoded payload - and the floor
+ * below exists so the 97% of objects with nothing to gain do not pay for a
+ * copy to find that out.
+ */
+#define NORM_MIN_OBJ   (4u << 10)   /* below this there is nothing to save */
+#define NORM_MIN_SAVE  16u          /* per cent, or it is not worth an object */
+
+static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+		      kof_buf buf)
+{
+	uint8_t *out;
+	uint64_t n, sent = 0;
+
+	/*
+	 * PE AND ELF ONLY, AND ONLY WHAT WAS NOT ITSELF PRODUCED.
+	 *
+	 * Other formats have their own openers - an archive yields its entries,
+	 * a document its streams - and normalising those would be a second
+	 * answer to a question already answered.
+	 *
+	 * NOTHING STOPS A VIEW OF A VIEW EXPLICITLY, because nothing has to:
+	 * the transform is IDEMPOTENT. After it, no zero run is eight long and
+	 * no UTF-16 run survives, so a second pass changes nothing, returns
+	 * zero and produces no child. The floor below would refuse it anyway,
+	 * and the scan tree's own depth budget is under both.
+	 */
+	if (!ctx || (ctx->format != KOF_FMT_ELF && ctx->format != KOF_FMT_PE))
+		return;
+	if (buf.n < NORM_MIN_OBJ)
+		return;
+
+	/*
+	 * A ONE-TO-ONE VIEW OF THE PARENT, NOT A BAG OF PIECES.
+	 *
+	 * The first version cut the regions out, normalised each and joined
+	 * them back with the gaps between - which is the shape a script island
+	 * has, and it is the wrong shape here. An executable's view has to
+	 * REMAIN that executable: same length, same offsets, headers still
+	 * describing what is under them, regions still where the parse says.
+	 *
+	 * So the view is a copy with one rewrite applied in place. Everything
+	 * that is not wide text is the parent's byte at the parent's offset.
+	 *
+	 * Measured against the version that cut and joined: an ELF's e_ident
+	 * carries eight zeros at offset 8, the collapse took them to two, and
+	 * e_machine moved from 18 to 12 - so the view came back with no
+	 * architecture and a parse that found children that are not there.
+	 *
+	 * RESTRICTING IT TO ONE REGION IS A SUBRANGE OF THIS. Because nothing
+	 * moves, kof_exe_unwide can be pointed at any span of the copy and the
+	 * rest stays the parent's - the whole object is simply the span that
+	 * needs no decision.
+	 */
+	out = malloc((size_t)buf.n);
+	if (!out)
+		return;
+	/*
+	 * TWO REWRITES, BOTH IN PLACE AND BOTH LENGTH PRESERVING, and the view
+	 * is worth making if EITHER of them found something.
+	 *
+	 * unwide first because it writes the copy - unb64 works on what is
+	 * already in `out` - and because the order is not free: a payload that
+	 * was stored as UTF-16 is not base64 until it has been narrowed, while
+	 * nothing decoded can become wide text. So narrow, then decode.
+	 *
+	 * The `|` and not `||`: both passes must run. Short circuiting on a
+	 * file with wide text would skip the decode entirely, which is the
+	 * commoner of the two.
+	 */
+	if (!(kof_exe_unwide(buf.p, buf.n, out) | kof_exe_unb64(out, buf.n))) {
+		free(out);
+		return;                 /* nothing to say - the view would be a copy */
+	}
+	n = buf.n;
+
+	/*
+	 * THE UNPACK VTABLE, BORROWED FOR THE LENGTH OF ONE CHILD.
+	 *
+	 * emit and child are NULL on the detect vtable - a detector may not
+	 * produce objects, which is the rule that keeps a signature from
+	 * inventing evidence - and by here the context is back in detect mode.
+	 * The host is not a detector, so it turns the producing half on, makes
+	 * the one child it came to make, and puts the context back exactly as
+	 * it found it.
+	 *
+	 * Through the module sink, so the view is charged, capped and spilled
+	 * by exactly the code that does that for a decompressed child. There is
+	 * no second budget here and no path by which this can exceed the
+	 * ceiling the caller set.
+	 */
+	kof_mod_unpack_mode(ctx, 1);
+	while (sent < n) {
+		uint64_t take = n - sent;
+
+		if (take > (1u << 20))
+			take = 1u << 20;
+		if (!ctx->content->emit(ctx, out + sent, (uint32_t)take))
+			break;                  /* a limit said no; keep what is */
+		sent += take;
+	}
+	free(out);
+	if (sent == n) {
+		/* Named so a finding can say where it was really seen. */
+		sc->pend_label_len =
+			(uint32_t)snprintf(sc->pend_label,
+					   sizeof sc->pend_label, "norm");
+		/*
+		 * AND DECLARED RAW, WHICH IS WHAT IT NOW IS - EXCEPT THAT IT
+		 * CANNOT BE. See the note at the end of this function.
+		 *
+		 * Collapsing a zero run moves every byte after it, so the
+		 * view's headers describe a file that is no longer under them:
+		 * section offsets point past their sections, the last program
+		 * header runs off the end. It is not an ELF any more and it is
+		 * not a PE - it is a run of bytes that happens to start with
+		 * one's magic.
+		 *
+		 * Left as its parent's format, the structural heuristics read
+		 * it as a broken executable and say so. Measured on the first
+		 * run of this: gawk's view came back
+		 * "ELF-other/Heur:Appended", which is a finding about the
+		 * normaliser rather than about gawk.
+		 *
+		 * KOF_FMT_UNKNOWN is the raw target - no new enum - so every
+		 * string and hex rule that asks for raw still searches it,
+		 * which is the whole reason the view exists, and nothing that
+		 * reasons about a header is offered one to reason about.
+		 */
+		sc->pend_fmt = KOF_FMT_UNKNOWN;
+		(void)ctx->content->child(ctx);
+		/*
+		 * THE LINE ABOVE DOES NOTHING, AND THAT IS THE OPEN PROBLEM.
+		 *
+		 * KOF_FMT_UNKNOWN is 0 and objctx.c's child builder reads the
+		 * pending format as `if (sc->pend_fmt)`, so "declared raw" and
+		 * "declared nothing" are the same value. The view is sniffed
+		 * from its own bytes instead, those bytes still begin \x7fELF,
+		 * and the structural heuristics read a normalised view as a
+		 * damaged executable: measured, gawk's view comes back
+		 * ELF-other/Heur:Appended, which is a finding about this
+		 * function rather than about gawk.
+		 *
+		 * It is left in rather than deleted because the intent is
+		 * right and the gap is one value wide. Closing it is a change
+		 * to the engine's child contract - a sentinel for "raw was
+		 * chosen", or a declared-bit beside the format - and that is
+		 * not a decision to take while wiring a caller.
+		 */
+	}
+	kof_mod_unpack_mode(ctx, 0);
+}
+
+/*
+ * OPENING AN OBJECT, IN ORDER.
+ *
+ * The steps of enum kof_analyze, each one a runner, tried from the top until
+ * one of them produces something. What comes out is a child, and a child comes
+ * back round to the top of this same list on its own pass - so the order below
+ * is not "what to do to this object", it is "what to try first", and the rest
+ * happens by recursion.
+ *
+ * WHY A TABLE AND NOT THE THREE CALLS IT REPLACES.
+ *
+ * The rule "stop at the first step that yields" was already here, written out
+ * by hand: unpack_object, then a kids0 comparison, then norm_emit under an if.
+ * Written that way it holds for exactly the two things that were wired up, and
+ * the next step added has to re-derive it - which is how norm_emit came to be
+ * called BEFORE unpacking in its first version, and gave a UPX stub a view of
+ * its own compressed payload. Here the rule is the loop, once, and a new step
+ * is a row.
+ *
+ * WHAT THE FIRST ROW IS HIDING, WHICH IS THE POINT OF THE first/last FIELDS.
+ *
+ * One runner covers four steps, because today a module cannot ask for anything
+ * finer: every module in bases/unp/ declares KOF_UNPACK_KIND(KOF_UNP_PACKER) -
+ * the packers, the AES decryptor, the five msf decoders and the payload carver,
+ * all the same word - and unpack_object walks them in database order. So the
+ * row says UNWRAP..CARVE and means it: those four are not ordered with respect
+ * to each other yet. When a module starts declaring its real step, this row
+ * splits into rows and the loop above it does not change.
+ *
+ * The last row is the host's own and has no modules: NORMZ is norm_emit.
+ */
+struct analyze_arg {
+	struct kof_scanner              *sc;
+	struct kof_obj_ctx              *ctx;
+	const struct kof_scan_option    *opt;
+	struct kof_result               *out;
+	kof_buf                          buf;
+	uint32_t                         pdepth;
+	uint32_t                         want;
+	const char                      *predict;
+};
+
+static void step_open(struct analyze_arg *a)
+{
+	a->out->broken = unpack_object(a->sc, a->ctx, a->opt, a->out,
+				       a->pdepth, a->want, a->predict);
+}
+
+static void step_normz(struct analyze_arg *a)
+{
+	norm_emit(a->sc, a->ctx, a->buf);
+}
+
+static const struct analyze_step {
+	enum kof_analyze  first;	/* the steps this runner serves, */
+	enum kof_analyze  last;		/* inclusive - see above	 */
+	void            (*run)(struct analyze_arg *);
+} analyze_steps[] = {
+	{ KOF_ANALYZE_UNWRAP, KOF_ANALYZE_CARVE, step_open  },
+	{ KOF_ANALYZE_NORMZ,  KOF_ANALYZE_NORMZ, step_normz }
+};
+
+static void analyze_object(struct analyze_arg *a)
+{
+	uint32_t i;
+
+	for (i = 0; i < sizeof analyze_steps / sizeof analyze_steps[0]; i++) {
+		uint32_t kids0 = a->sc->n_kids;
+
+		analyze_steps[i].run(a);
+		/*
+		 * PRODUCED SOMETHING, SO STOP.
+		 *
+		 * The object is a wrapper around the thing that just came out,
+		 * and the thing is what is worth looking at. Asking a later
+		 * step about the wrapper cannot help: normalising a compressed
+		 * or encrypted blob finds no zero runs and no text, because
+		 * there is none to find until it has been opened.
+		 *
+		 * n_kids is how the rest of this file already asks "was it
+		 * opened" - see family_opened in unpack_object, which compares
+		 * the same counter across the same call. A container yields
+		 * too, and stops the chain for the same reason: an archive's
+		 * bytes ARE its members, and each member is normalised as
+		 * itself when its own pass reaches this loop.
+		 */
+		if (a->sc->n_kids != kids0)
+			return;
+		/*
+		 * And between steps, because a step is the unit of work that
+		 * is worth interrupting: unpacking a large object is where the
+		 * time goes, and a cancel asked for during it should not then
+		 * pay for a normalisation nobody is waiting for.
+		 */
+		if (a->opt->should_stop && a->opt->should_stop(a->opt->stop_user))
+			return;
+	}
+}
+
+
 static void scan_object(struct kof_scanner *sc, kof_buf buf,
 			const struct kof_scan_option *opt, struct kof_result *out,
 			uint32_t pdepth, int from_packer,
@@ -2112,7 +2387,14 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	if (!predict)
 		predict = inherit_predict;
 
-	out->broken = unpack_object(sc, &ctx, opt, out, pdepth, want, predict);
+	{
+		struct analyze_arg a;
+
+		a.sc = sc; a.ctx = &ctx; a.opt = opt; a.out = out;
+		a.buf = buf; a.pdepth = pdepth; a.want = want;
+		a.predict = predict;
+		analyze_object(&a);
+	}
 	/*
 	 * After, so a script that was packed is normalised as the source it
 	 * turned out to be rather than as the wrapper - the unpacked child

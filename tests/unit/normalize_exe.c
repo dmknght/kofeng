@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 /*
  * norm_obj - the normalised view says the same thing, and says it shorter.
  *
@@ -404,6 +405,177 @@ static void the_map_covers_the_output(void)
 	free(in); free(out); free(sp);
 }
 
+/* ------------------------------------------------------------------------
+ * THE BASE64 PASS.
+ *
+ * It took over from bases/decomp/cmdb64_00.c, which was an unpacker with its
+ * own tests, so the cases below are the ones that module was measured on. Each
+ * is a shape a real dropper writes or a shape that broke an earlier version of
+ * the walk - none of them is here to cover a line.
+ */
+
+/* A payload, and the object it sits in. The NUL before it is what a C string in
+ * .rodata looks like; the delimiter check requires one of those. */
+static uint64_t b64_case(uint8_t *buf, uint64_t cap, const char *cmd)
+{
+	uint64_t n = (uint64_t)strlen(cmd) + 2u;
+
+	if (n > cap)
+		return 0;
+	buf[0] = 0;
+	memcpy(buf + 1, cmd, (size_t)(n - 2u));
+	buf[n - 1u] = 0;
+	return n;
+}
+
+static void b64_decodes_the_mirai_shape(void)
+{
+	/* "hello world, dropper" - twenty bytes, so twenty-eight encoded. */
+	static const char cmd[] =
+		"echo \"aGVsbG8gd29ybGQsIGRyb3BwZXI=\" | base64 -d | sh";
+	uint8_t buf[128];
+	uint64_t n = b64_case(buf, sizeof buf, cmd);
+
+	check(kof_exe_unb64(buf, n) == 1, "base64: the piped shape is decoded",
+	      "the anchor, the pipe and the run are all present");
+	check(memmem(buf, (size_t)n, "hello world, dropper", 20) != NULL,
+	      "base64: the decoded command is in the view",
+	      "which is the whole point - a rule on what it DOES can now match");
+	/* And the encoded form is gone from the view, which is how the length
+	 * is preserved: the vacated tail is zeros. */
+	check(memmem(buf, (size_t)n, "aGVsbG8", 7) == NULL,
+	      "base64: the encoded run is overwritten",
+	      "the decode is in place, so the source bytes cannot remain");
+	check(buf[n - 1u] == 0 && memmem(buf, (size_t)n, "base64 -d", 9) != NULL,
+	      "base64: nothing after the run moved",
+	      "the anchor is still at its own offset - the view stays 1:1");
+}
+
+static void b64_is_idempotent(void)
+{
+	static const char cmd[] =
+		"echo \"aGVsbG8gd29ybGQsIGRyb3BwZXI=\" | base64 -d | sh";
+	uint8_t buf[128];
+	uint64_t n = b64_case(buf, sizeof buf, cmd);
+
+	kof_exe_unb64(buf, n);
+	/*
+	 * norm_emit relies on this: a view of a view must change nothing, or
+	 * the scan tree grows a branch per depth. It holds because a decoded
+	 * run is strictly shorter than its source, so the byte before the
+	 * separator is one of the zeros - and the backward walk stops there.
+	 */
+	check(kof_exe_unb64(buf, n) == 0, "base64: a second pass finds nothing",
+	      "the zeroed tail stops the backward walk at once");
+}
+
+static void b64_needs_a_pipe(void)
+{
+	/*
+	 * The case that produced twenty-three bytes of noise before the pipe
+	 * test existed. An identifier is base64 characters too, and `base64 -d`
+	 * with a space in front of it reads its input from somewhere else.
+	 */
+	static const char cmd[] =
+		"ThisIsALongIdentifierLikeString base64 -d";
+	uint8_t buf[128], ref[128];
+	uint64_t n = b64_case(buf, sizeof buf, cmd);
+
+	memcpy(ref, buf, (size_t)n);
+	check(kof_exe_unb64(buf, n) == 0, "base64: a space is not a pipe",
+	      "nothing is piped into the decoder, so there is no payload");
+	check(!memcmp(buf, ref, (size_t)n), "base64: and the bytes are untouched",
+	      "a refusal must not rewrite anything");
+}
+
+static void b64_stops_at_an_inner_equals(void)
+{
+	/*
+	 * `VAR=<payload>` - the walk takes `=` as alphabet because a payload
+	 * ends in one, so without the rule it runs back through the equals and
+	 * into the variable's name, shifting every group.
+	 */
+	static const char cmd[] =
+		"VAR=aGVsbG8gd29ybGQsIGRyb3BwZXI= | base64 -d";
+	uint8_t buf[128];
+	uint64_t n = b64_case(buf, sizeof buf, cmd);
+
+	check(kof_exe_unb64(buf, n) == 1, "base64: VAR= is a separator",
+	      "padding comes last, so an inner = belongs to whatever wrote it");
+	check(memmem(buf, (size_t)n, "hello world, dropper", 20) != NULL,
+	      "base64: and the groups are not shifted",
+	      "starting one byte early decodes the whole payload to noise");
+	check(memmem(buf, (size_t)n, "VAR=", 4) != NULL,
+	      "base64: the name is left where it was",
+	      "it is not part of the payload and must not be consumed");
+}
+
+static void b64_reads_every_spelling(void)
+{
+	static const char *cmds[] = {
+		"echo \"aGVsbG8gd29ybGQsIGRyb3BwZXI=\" | base64 -d",
+		"echo \"aGVsbG8gd29ybGQsIGRyb3BwZXI=\" | base64 -di",
+		"echo \"aGVsbG8gd29ybGQsIGRyb3BwZXI=\" | base64 -D",
+		"echo \"aGVsbG8gd29ybGQsIGRyb3BwZXI=\" | base64 --decode"
+	};
+	uint8_t buf[128];
+	unsigned k;
+	int all = 1;
+
+	for (k = 0; k < sizeof cmds / sizeof cmds[0]; k++) {
+		uint64_t n = b64_case(buf, sizeof buf, cmds[k]);
+
+		if (kof_exe_unb64(buf, n) != 1 ||
+		    !memmem(buf, (size_t)n, "hello world, dropper", 20))
+			all = 0;
+	}
+	check(all, "base64: -d, -di, -D and --decode all anchor",
+	      "one search for \"base64 -\" has to classify all four");
+}
+
+static void b64_ignores_a_short_run(void)
+{
+	/* Twelve characters. Below the floor, because ordinary words are
+	 * base64 characters and a nine-byte payload is not a second stage. */
+	static const char cmd[] = "echo \"YWJjZGVmZ2g=\" | base64 -d";
+	uint8_t buf[128], ref[128];
+	uint64_t n = b64_case(buf, sizeof buf, cmd);
+
+	memcpy(ref, buf, (size_t)n);
+	check(kof_exe_unb64(buf, n) == 0, "base64: a short run is not a payload",
+	      "below the floor it is more likely a word than a stage");
+	check(!memcmp(buf, ref, (size_t)n), "base64: and it is left intact",
+	      "so the matcher still reads the bytes that are really there");
+}
+
+/*
+ * AND THE SAFETY PROPERTY THAT GOVERNS THIS WHOLE FILE, ASKED OF THE DECODE.
+ *
+ * The rest of these tests prove no zero-free match is LOST. The base64 pass
+ * cannot make that promise and is not meant to: it deliberately removes the
+ * encoded text, which is a match a pattern could have been written against.
+ * What it must not do is break the object around the run - so the claim here
+ * is the narrower one the view actually depends on: nothing outside the run
+ * changes, and the length does not move.
+ */
+static void b64_touches_only_its_own_run(void)
+{
+	static const char cmd[] =
+		"id; echo \"aGVsbG8gd29ybGQsIGRyb3BwZXI=\" | base64 -d | sh; uname -a";
+	uint8_t buf[192], ref[192];
+	uint64_t n = b64_case(buf, sizeof buf, cmd);
+	const char *tail = "| base64 -d | sh; uname -a";
+
+	memcpy(ref, buf, (size_t)n);
+	check(kof_exe_unb64(buf, n) == 1, "base64: the run inside a longer line",
+	      "the anchor is mid-command, which is where they really are");
+	check(!memcmp(buf, ref, 5u), "base64: the bytes before it are untouched",
+	      "\"id; e\" is outside the run and must survive it");
+	check(memmem(buf, (size_t)n, tail, strlen(tail)) != NULL,
+	      "base64: the bytes after it are untouched",
+	      "the rewrite is length preserving, so the tail cannot shift");
+}
+
 int main(void)
 {
 	printf("normalize exe:\n");
@@ -417,6 +589,14 @@ int main(void)
 	no_zero_free_match_is_ever_lost();
 	the_view_is_never_longer();
 	the_map_covers_the_output();
+
+	b64_decodes_the_mirai_shape();
+	b64_is_idempotent();
+	b64_needs_a_pipe();
+	b64_stops_at_an_inner_equals();
+	b64_reads_every_spelling();
+	b64_ignores_a_short_run();
+	b64_touches_only_its_own_run();
 
 	if (fails) {
 		printf("\nnormalize exe: %d check(s) failed\n", fails);

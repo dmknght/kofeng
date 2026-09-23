@@ -159,6 +159,91 @@ struct kof_exe_norm_span {
  * measurement says one to three percent of bytes move, so most objects come
  * back unchanged and must not have paid for a copy to find out.
  */
+/*
+ * THE SAME BYTES, THE SAME LENGTH, THE WIDE TEXT READ AS TEXT.
+ *
+ * Writes exactly `n` bytes. Every offset in the output is the same offset in
+ * the input, which is the property everything above this line does not have
+ * and which turns out to be the one that matters:
+ *
+ *   - the headers still describe the object, so the view parses as what it is
+ *     rather than as a damaged copy;
+ *   - the REGIONS still line up, so a rule that declared scan_range_data is
+ *     searching the bytes it meant;
+ *   - and cure_patch, kof_find_str_at and every module that reads a layout at
+ *     a displacement address the same byte in the view as in the original.
+ *
+ * WHAT IT DOES. A run of UTF-16LE ASCII is packed to the left and the rest of
+ * the run is filled with zeros:
+ *
+ *     41 00 42 00 43 00   ->   41 42 43 00 00 00
+ *
+ * The fill cannot invent a match. A literal pattern contains no zero byte - see
+ * the note above on ksigbuilder's six escapes - so nothing can match across the
+ * fill, and a FULLWORD match that ends at the last character sees a zero beside
+ * it, which is not a word byte and is the right answer.
+ *
+ * WHY COLLAPSING ZERO RUNS IS NOT HERE. It cannot be: removing bytes moves
+ * every byte after them, and that is exactly what this exists not to do. The
+ * 1-3% it saved was never the reason for any of this.
+ *
+ * Returns non-zero when something was rewritten, 0 when the object had no wide
+ * text and the view would be a copy - and then no view should be made.
+ */
+int kof_exe_unwide(const uint8_t *in, uint64_t n, uint8_t *out);
+
+/*
+ * THE OTHER HALF OF THE PROMISE AT THE TOP OF THIS FILE: a base64 payload said
+ * as what it decodes to, IN PLACE, on a buffer kof_exe_unwide has already
+ * written.
+ *
+ * It is length preserving in exactly the way unwide is. Four encoded characters
+ * carry three bytes, so a decoded run is always SHORTER than the run it came
+ * from; the decoded bytes go at the run's own offset and the remainder is
+ * zeroed. Nothing after the run moves, which is what keeps the view one to one
+ * with the parent and the region table still true of it.
+ *
+ *
+ * WHERE THIS CAME FROM, AND WHY IT IS HERE RATHER THAN IN A MODULE.
+ *
+ * bases/decomp/cmdb64_00.c did this as an unpacker: it found the payload of
+ *
+ *     echo <base64> | base64 -d | sh
+ *
+ * inside an ELF's .rodata and handed the decoded bytes back as a CHILD OBJECT.
+ * The finding logic below is that module's, unchanged - the anchor, the walk
+ * back over the pipe, the alphabet run, the `=` rule and the delimiter check
+ * are all its reasoning and all of it was measured against real droppers.
+ *
+ * What changes is what is done with the answer. A child is a whole object: it
+ * is identified, parsed, given its own budget, its own row in the tree and its
+ * own pass through every module. That is a great deal of machinery for what is
+ * usually a second shell command, and it is a second answer to the question
+ * this file exists to answer - "say this object plainly" - given in a different
+ * shape by a different layer.
+ *
+ * As a rewrite it costs one pass and no object, and the decoded command is
+ * matched by the ordinary rules at the ordinary place.
+ *
+ *
+ * WHAT IS GIVEN UP, SAID PLAINLY BECAUSE IT IS REAL.
+ *
+ * A payload that is itself an executable was PARSED as one when it was a child
+ * - it got an ELF header walk, its own regions and the modules that target ELF.
+ * Decoded into the middle of a view it is bytes, and only patterns find it. The
+ * module's own note says the common payload is a shell command rather than a
+ * binary, so this is the uncommon case, but it is a loss and not a wash.
+ *
+ *
+ * IDEMPOTENT, which norm_emit relies on.
+ *
+ * A decoded run is strictly shorter than its source, so at least one byte at
+ * the end of the run is left zero. The backward alphabet walk starts there,
+ * stops at once, and the run is below the minimum - so a second pass over an
+ * already-decoded buffer finds nothing to do.
+ */
+int kof_exe_unb64(uint8_t *p, uint64_t n);
+
 uint64_t kof_exe_norm(const uint8_t *in, uint64_t n, uint32_t ops,
 		  uint8_t *out, uint64_t cap,
 		  struct kof_exe_norm_span *spans, uint32_t span_cap,

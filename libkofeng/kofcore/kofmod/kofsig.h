@@ -2629,10 +2629,74 @@ void kof_unpack(const struct kof_obj_ctx *ctx);
 #define KOF_DEFINE_UNPACK void kof_unpack(const struct kof_obj_ctx *ctx)
 
 /*
+ * WHICH STEP OF THE ANALYSIS A MODULE BELONGS TO.
+ *
+ * THE ORDER IS THE POINT. An object is opened by steps, in this order, and the
+ * chain stops at the first step that produces something: what came out is the
+ * thing worth looking at, and it goes round again on its own.
+ *
+ *     KOF_ANALYZE_UNWRAP    bases/decomp/  zip, tar, gzip, 7z, rar, xz
+ *                           Reads a TABLE. The container says where its members
+ *                           are and the module goes and gets them.
+ *
+ *                           UNWRAP and not DECOMP, though the directory is
+ *                           called decomp: half of what lives there does not
+ *                           compress anything. tar only concatenates, and a zip
+ *                           entry can be stored. What every one of them does do
+ *                           is take a wrapper off something that was already
+ *                           whole inside it. Compression is the step below.
+ *
+ *     KOF_ANALYZE_UNPACK    bases/unp/     upx, midgetpack
+ *                           Decompresses an image that was compressed to stop
+ *                           it being read.
+ *
+ *     KOF_ANALYZE_DECRYPT   bases/unp/     ezuri, msf_xor, msf_sub, msf_dword,
+ *                                          msf_ctxkey, msf_evasion
+ *                           Undoes a cipher or an encoder. An msf encoder is a
+ *                           cipher with a short key and belongs here, not with
+ *                           the packers: nothing about it is compression.
+ *
+ *     KOF_ANALYZE_CARVE     bases/unp/     scpayload, and embedded files
+ *                           SEARCHES. Nothing declared where this content is -
+ *                           there is no table to read - so it is found by
+ *                           looking. That is the line between this and DECOMP.
+ *
+ *     KOF_ANALYZE_NORMZ     the host itself
+ *                           The same object said plainly - see norm_emit in
+ *                           scan.c. Last, because it is about the data INSIDE a
+ *                           file and everything above it is about getting the
+ *                           file's real data out in the first place.
+ *
+ * THE MEMBERS ARE VERBS, and that is deliberate: they name what the ANALYSER
+ * does, not what a module is. KOF_UNP_PACKER named the module and five
+ * different jobs ended up wearing it - UPX, an AES decryptor, three shellcode
+ * decoders and a payload finder - because it was the only label there was.
+ *
+ * NOT SPELLED KOF_HEUR_PHASE AND NOT CALLED ONE. That name is taken, by
+ * EXAMINE and VERDICT, which are about when a heuristic gets to speak. These
+ * are steps of opening an object and the two have nothing to do with each
+ * other.
+ */
+enum kof_analyze {
+	KOF_ANALYZE_UNWRAP = 0,
+	KOF_ANALYZE_UNPACK,
+	KOF_ANALYZE_DECRYPT,
+	KOF_ANALYZE_CARVE,
+	KOF_ANALYZE_NORMZ,
+	KOF_ANALYZE_COUNT
+};
+
+/*
  * WHAT SORT OF UNPACKER THIS IS.
  *
  *     KOF_UNPACK_KIND(KOF_UNP_PACKER);      - UPX, Ezuri: it hid a program
  *     KOF_UNPACK_KIND(KOF_UNP_CONTAINER);   - zip, tar, rar: it carried files
+ *
+ * BEING REPLACED BY enum kof_analyze ABOVE, and still the only spelling any
+ * module uses. The two values map onto the first two steps - CONTAINER to
+ * UNWRAP, PACKER to UNPACK - so nothing changes until a module is moved, and
+ * a module is moved when somebody has decided which step it is really in.
+ * ezuri and the msf decoders are the obvious first four.
  *
  * Required of every unpack module and meaningless on a detector.
  *
