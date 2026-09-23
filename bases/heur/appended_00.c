@@ -183,25 +183,6 @@ KOF_HEUR_WANT(KOF_ENG_OPEN_CARRIED | KOF_ENG_KEEP_ON_OPEN);
 
 KOF_DEFINE_HEUR
 {
-	/*
-	 * OFF, TEMPORARILY - IT REPORTS SOME OBJECTS IT SHOULD NOT.
-	 *
-	 * The rule looks for a run of unclaimed bytes past everything the
-	 * headers account for, which is what an appending infector leaves. The
-	 * false positives come from objects whose headers were never meant to
-	 * account for the bytes in hand - a derived view of a file rather than
-	 * the file - and there the unclaimed run is an artefact of the view.
-	 *
-	 * The whole rule is kept, and its measurements with it, because what it
-	 * looks for is real and the question is only WHEN to ask it. Turning it
-	 * back on is deleting these four lines.
-	 *
-	 * See also the Truncated rows in libkofeng/detector/heur/kofheur.c,
-	 * switched off at the same time for the same reason.
-	 */
-	(void)ctx;
-	return;
-
 	const struct kof_elf_info *e = kof_elf(ctx);
 	struct kof_region_shape u;
 	uint32_t h;

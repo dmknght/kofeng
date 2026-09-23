@@ -83,30 +83,9 @@ uint64_t kof_heur_anomalies(const struct kof_obj_ctx *ctx)
 static const struct kof_heur_anom_term default_anom[] = {
 	/* --- the file's own structure ----------------------------------- */
 	{ KOF_FMT_ELF, KOF_ELF_ANOM_SECTAB_MISSING,    CN(2.75), "Stripped"  },
-	/*
-	 * TRUNCATED IS OFF, TEMPORARILY, AND THE WEIGHTS ARE LEFT HERE.
-	 *
-	 * The three rows below were measured and are not wrong about what they
-	 * measure - a segment, a section table or a section that ends past the
-	 * end of the file. What they turned out to be wrong about is what that
-	 * MEANS: an object can be a legitimate view of a file rather than the
-	 * file, and then the headers describe something longer than the bytes
-	 * in hand and none of it is damage.
-	 *
-	 * Commented rather than deleted, and with the values intact, because
-	 * re-measuring a corpus to get 5.15 back would be the expensive half of
-	 * turning them on again. Restoring them is deleting this comment.
-	 *
-	 * NOTHING ELSE IN THE TABLE CHANGES. Stripped, Overlap, BadEntry and
-	 * NoLoad are separate facts with separate weights, and the model is a
-	 * sum - so removing three rows lowers the score of an object that had
-	 * them and leaves every other object's score exactly as it was.
-	 */
-#if 0
 	{ KOF_FMT_ELF, KOF_ELF_ANOM_SEG_PAST_EOF,      CN(5.15), "Truncated" },
 	{ KOF_FMT_ELF, KOF_ELF_ANOM_SHOFF_PAST_EOF,    CN(4.84), "Truncated" },
 	{ KOF_FMT_ELF, KOF_ELF_ANOM_SEC_PAST_EOF,      CN(4.50), "Truncated" },
-#endif
 	{ KOF_FMT_ELF, KOF_ELF_ANOM_SEG_OVERLAP,       CN(2.96), "Overlap"   },
 	{ KOF_FMT_ELF, KOF_ELF_ANOM_ENTRY_NOT_EXEC,    CN(2.63), "BadEntry"  },
 	{ KOF_FMT_ELF, KOF_ELF_ANOM_NO_LOAD_SEGMENT,   CN(1.35), "NoLoad"    }
