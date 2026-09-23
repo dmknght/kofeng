@@ -2074,9 +2074,12 @@ static void resolve_unpack_kind(void)
 		g_unp_kind = KOF_UNP_PACKER;
 	else if (names_ident(d->arg, "KOF_UNP_CONTAINER"))
 		g_unp_kind = KOF_UNP_CONTAINER;
+	else if (names_ident(d->arg, "KOF_UNP_CARVE"))
+		g_unp_kind = KOF_UNP_CARVE;
 	else
 		err(d->line, "KOF_UNPACK_KIND names no known kind; use "
-			     "KOF_UNP_PACKER or KOF_UNP_CONTAINER");
+			     "KOF_UNP_PACKER, KOF_UNP_CONTAINER or "
+			     "KOF_UNP_CARVE");
 }
 
 static void resolve_heur(void)

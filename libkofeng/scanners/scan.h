@@ -382,6 +382,19 @@ struct kof_scanner {
 	uint32_t n_views;
 
 	/*
+	 * And how many are CARVED - a payload found by searching, not a
+	 * rendering and not an unpacking.
+	 *
+	 * The analysis steps stop at the first one that produces a child,
+	 * because a child usually replaces its parent as the subject. A carve
+	 * does not: nothing declared that an ELF is carrying a file, so the
+	 * host is a whole program that happens to have something glued to it
+	 * and is still worth every later step. Counted out for the same reason
+	 * n_views is - see KOF_UNP_CARVE.
+	 */
+	uint32_t n_carved;
+
+	/*
 	 * The declared region table of the object being scanned, if it has one.
 	 *
 	 * Held on the scanner because a resolver is reached through ctx and ctx
@@ -392,12 +405,55 @@ struct kof_scanner {
 	struct kof_src_region cur_rgn[KOF_SRC_MAX_REGIONS];
 	uint32_t              n_cur_rgn;
 	uint8_t               cur_rgn_fmt;
+	/* Whether the object being scanned is a rendering - see
+	 * kof_src_declare_view. */
+	uint8_t               cur_is_view;
+
+	/*
+	 * WHICH BYTES OF THIS OBJECT ARE THE STATIC LIBRARY'S, WORKED OUT ONCE.
+	 *
+	 * At the top of scan_object, beside the parse that it needs and that
+	 * every reader of it would otherwise have to wait for anyway - so it is
+	 * a FACT ABOUT THE OBJECT, like its format or its regions, and not a
+	 * question each consumer asks for itself.
+	 *
+	 * It was the second kind. The normaliser worked it out to decide what
+	 * to leave out of the view, the block builder worked it out again to
+	 * decide which side of enum kof_plague_side each block was on, and
+	 * kofoverlord a third time - three walks of the same bytes, three
+	 * places for the answer to differ, and no way for a reader to see one
+	 * answer and know the others matched it.
+	 *
+	 * Empty for anything that is not an ELF, and for a VIEW, whose headers
+	 * describe the file its parent was: kof_lib_find reads segment offsets,
+	 * and on a view they point at bytes that have moved.
+	 */
+	struct kof_lib_all    cur_lib;
+	uint8_t               cur_lib_ok;
 
 	/* And what the NEXT child's regions are, spent by kid_push exactly as
 	 * pend_fmt is and cleared there whatever happens to the child. */
 	struct kof_src_region pend_rgn[KOF_SRC_MAX_REGIONS];
 	uint32_t              n_pend_rgn;
 	uint8_t               pend_rgn_fmt;
+	/* And whether the next child is one. Spent by kid_push like the rest. */
+	uint8_t               pend_view;
+
+	/*
+	 * AND THE SYMBOL RECORDS THE NEXT CHILD IS TO BE READ WITH.
+	 *
+	 * A rendering cannot build its own - its headers describe the file
+	 * before the transform - so the producer hands them over with the
+	 * bytes, exactly as it hands over the region table. Spent by kid_push
+	 * and cleared there whatever becomes of the child, so a block made for
+	 * one view can never be attached to the next.
+	 *
+	 * Heap, because KOF_SYM_MAX_BYTES is a quarter of a megabyte and this
+	 * is a scanner that runs one per thread; allocated the first time
+	 * anything renders and kept for the rest of the scan.
+	 */
+	uint8_t              *pend_syms;
+	uint32_t              n_pend_syms;
 	/* And what it is for, which is also its name when nothing named it. */
 	uint32_t pend_kind;
 	/* And which entry it is the content of, or KOF_ENTRY_NONE. */

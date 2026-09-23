@@ -110,6 +110,18 @@ enum opt_kind {
 
 
 
+/*
+ * The kinds a declaration can be - see struct decl.hex.
+ *
+ * DECL_RX is RESERVED AND NOT WIRED. The chooser that adds a declaration
+ * offers it, because that is the menu the panel is meant to have; nothing
+ * behind it exists yet - no front end in decl_compile, no macro in generate -
+ * and it is connected when that is written.
+ */
+#define DECL_STR 0
+#define DECL_HEX 1
+#define DECL_RX  2
+
 struct decl {
 	uint8_t *bytes;
 	/*
@@ -126,7 +138,15 @@ struct decl {
 	uint32_t nbytes;
 	uint32_t span_max;          /* len is the minimum; equal when fixed */
 	uint32_t len;
-	int      hex;               /* KOF_DEFINE_HEXSTR, else KOF_DEFINE_STR */
+	/*
+	 * WHICH OF THE THREE THIS IS - see DECL_STR, DECL_HEX, DECL_RX.
+	 *
+	 * It was a boolean, hex or not, and stayed one while there were two
+	 * kinds. Kept as `hex` with those two values unchanged, so every site
+	 * that asks "is this bytes or is it a pattern" still reads correctly
+	 * when a third is added.
+	 */
+	int      hex;
 	/*
 	 * The target holds this as UTF-16LE - KOF_DEFINE_STR_WIDE.
 	 *
@@ -1062,6 +1082,61 @@ struct object {
 	 * because that is where the bits were resolved. A bit cannot be named
 	 * without it: 1u << 5 is UNCLAIMED in an ELF and OVERLAY in a PE. */
 	uint8_t   rgn_fmt;
+	/*
+	 * Set when the engine handed the symbol records over with the object -
+	 * see kof_result.syms. sym_build must not overwrite them: the object is
+	 * a rendering whose own headers cannot produce a block, and building
+	 * from them yields none.
+	 */
+	uint8_t   sym_declared;
+
+	/*
+	 * WHAT kof_ovl_build MADE OF THIS OBJECT, KEPT.
+	 *
+	 * It reads every byte - the string set and the block vector are over
+	 * the whole thing - and the panel asked for it again every time the
+	 * selection came back to this object: measured at 226ms on a 15MB
+	 * view, paid on each return, and it faulted a spilled object into
+	 * memory in full to do it.
+	 *
+	 * The answer is a property of the OBJECT and of nothing else, so it is
+	 * kept with the object. On the heap and only once something asks, since
+	 * most objects are never selected; freed with the tree.
+	 */
+	uint64_t *ovl_str;
+	uint32_t  n_ovl_str;
+	uint32_t *ovl_blk;
+	uint32_t  n_ovl_blk;
+	uint8_t   ovl_done;
+
+	/*
+	 * AND THE BLOCKS THE CARVE CUT FROM IT, for the same reason and with
+	 * one condition.
+	 *
+	 * The carve hashes every region, so it reads the whole object too:
+	 * measured at 310ms on a 15MB view and 0.7s on a sample with three
+	 * objects, paid on every arrival at the object rather than once.
+	 *
+	 * KEPT ONLY WHEN NOTHING WAS TICKED, which is what makes it exact
+	 * rather than close. The cut positions do not depend on what the
+	 * author has ticked - the share-out deliberately counts the whole
+	 * table, see the note on it - but how many of the cuts FIT does, so a
+	 * list recorded with none ticked is the list a fresh carve produces
+	 * with none ticked, and nothing else is reused.
+	 */
+	struct plg_block *carve;
+	uint32_t          n_carve;
+	uint8_t           carve_done;
+
+	/*
+	 * AND THE CALL CHAIN, which reads the object's CODE to find it - see
+	 * sim_chain_sweep. A property of the object like the other two, and
+	 * re-derived on every arrival for the same reason they were.
+	 */
+	struct kof_ovlf_chain chain;
+	int                   has_chain;
+	uint8_t               chain_done;
+
 	uint8_t  *own;              /* the copy, NULL for the mapped top level */
 	void     *mapped;           /* or a spill file, mapped instead of copied */
 	uint64_t  mapped_len;
@@ -1104,11 +1179,17 @@ struct object {
 	int               emu_done;
 	/*
 	 * What the scanner's own gate makes of this object, when no module
-	 * claimed it: KOF_EMU_UNP_* . Computed once beside the parse rather
-	 * than while drawing - it reads every executable segment, and the
-	 * status line is repainted on every keystroke.
+	 * claimed it: KOF_EMU_UNP_* .
+	 *
+	 * ONCE, AND NOT UNTIL SOMETHING SHOWS IT - see obj_emu_why. It reads
+	 * every executable segment, so computing it beside the parse faulted a
+	 * spilled object in whole to fill one row; and computing it while
+	 * drawing would do that on every keystroke. `emu_why_done` separates
+	 * "not worked out yet" from "worked out, and the answer is zero",
+	 * which a single field cannot say.
 	 */
 	uint8_t           emu_why;
+	uint8_t           emu_why_done;
 	/*
 	 * SHA-256 OF THIS OBJECT'S BYTES, hex, or "" before it is computed.
 	 *
@@ -1289,6 +1370,11 @@ struct kof_editor {
 };
 
 void say_err(struct kof_editor *e, const char *fmt, ...);
+/* ---- what an object IS, worked out once - see the definitions ---- */
+void    obj_sha256(struct object *o);
+uint8_t obj_emu_why(const struct object *o);
+int     obj_ovl(struct object *o);
+
 void say_note(struct kof_editor *e, const char *fmt, ...);
 int meta_has_sample(struct kof_editor *e);
 int name_chars_ok(const char *s);

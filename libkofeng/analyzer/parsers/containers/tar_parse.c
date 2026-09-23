@@ -243,7 +243,7 @@ int kof_tar_parse(kof_buf file, struct kof_tar_info *t, struct kof_obj_ctx *ctx)
 	 * but a few hundred bytes of it.
 	 *
 	 * WHAT MAKES IT SAFE TO LEAVE THE TAIL DIRTY: nothing reads past the
-	 * count. Every consumer - this parser, kofexamine, bases/decomp - loops
+	 * count. Every consumer - this parser, kofexaminer, bases/decomp - loops
 	 * `i < t->n_entries`, and the runs go through kof_runs_* which bounds
 	 * on n_runs. Both counts are IN the header, so both start at zero here:
 	 * a parse that gives up early leaves the arrays untouched AND the counts

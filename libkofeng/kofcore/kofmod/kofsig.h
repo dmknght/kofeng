@@ -2093,7 +2093,7 @@ enum kof_entry_kind {
  *
  * Beside the enum it names, and it exists for the reason kof_format_name does:
  * every host that shows an entry needs this, and the alternative is each one
- * carrying its own table - which is how kofexamine and kofviewer came to
+ * carrying its own table - which is how kofexaminer and kofviewer came to
  * disagree about region labels.
  *
  * SHORT WORDS, because they go in a column beside a length. And UPPER CASE, so
@@ -2718,6 +2718,29 @@ enum kof_analyze {
  */
 #define KOF_UNP_CONTAINER 0
 #define KOF_UNP_PACKER    1
+/*
+ * FOUND BY LOOKING, NOT BY READING A TABLE - and the difference decides
+ * whether the object it came out of is still worth examining.
+ *
+ * A CONTAINER's members are declared: the archive says where they are and the
+ * module fetches them, so the container's own bytes are the table and nothing
+ * else. A PACKER's output IS the object, transformed. In both cases what came
+ * out is the thing worth looking at and the wrapper is not.
+ *
+ * A CARVE is neither. Nothing declared that an ELF has a file glued past its
+ * last segment - appended_00.c finds it by searching - so the host is not a
+ * wrapper around it. It is a complete program that happens to be carrying
+ * something, and it deserves the same examination it would have had if it were
+ * carrying nothing.
+ *
+ * THAT IS WHY IT IS A KIND AND NOT A COMMENT. The analysis steps stop at the
+ * first one that produces a child, on the reading that the child replaces its
+ * parent as the subject. For a carve that reading is wrong, and it cost a real
+ * one: an 8.6 MB ELF with 4.2 MB appended had the appendix extracted and then
+ * no normalised view of itself at all - the 4.4 MB of code and data that is the
+ * actual program, with a static library inside it, was never rendered.
+ */
+#define KOF_UNP_CARVE     2
 #define KOF_UNPACK_KIND(k)
 
 /*

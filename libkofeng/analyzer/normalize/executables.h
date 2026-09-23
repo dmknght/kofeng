@@ -98,6 +98,22 @@
  */
 #define KOF_EXE_NORM_NULLRUN (1u << 0)   /* long zero runs -> two zeros */
 #define KOF_EXE_NORM_UNWIDE  (1u << 1)   /* UTF-16LE ASCII runs -> ASCII */
+/*
+ * THE STATIC LIBRARY, REMOVED OUTRIGHT - reported through `fired`, never asked
+ * for through `ops`.
+ *
+ * The other two rewrite bytes; this one takes them away, and what to take is
+ * not something this file can work out - it is a list of spans the caller
+ * found with kof_lib_find. So the caller passes the spans and this reports
+ * that it used them.
+ *
+ * WHY IT IS WORTH A VIEW ON ITS OWN. Measured over 226 Linux malware samples,
+ * the static library is a mean 22% of CODE and more than half of it in 46 of
+ * them; two unrelated CLEAN binaries reach a string-set Jaccard of 0.99 through
+ * nothing but their shared libc. Those bytes are not the author's, they are the
+ * toolchain's, and a view without them is the object's own content.
+ */
+#define KOF_EXE_NORM_CUTLIB  (1u << 2)
 
 /*
  * THE FLOORS, AND BOTH ARE THE NUMBERS THE MEASUREMENT ABOVE WAS TAKEN WITH.
@@ -358,6 +374,13 @@ void kof_exe_norm_map(const uint8_t *in, uint64_t n, uint32_t ops,
  * `mark`/`mark_out` carry a sorted list of parent offsets through to their view
  * positions in the same pass - see the note above the definition.
  *
+ * `drop` is a second bitmap, and a byte in it is REMOVED - not rewritten, not
+ * kept. It is how the static library leaves the view. Dropping beats keeping
+ * where the two overlap, and they do overlap by design: the library lives in
+ * CODE, which is otherwise kept byte for byte. What survives of CODE is still
+ * byte for byte what it was; it has only moved, and the region table says
+ * where to. NULL when nothing is dropped.
+ *
  * `fired` takes the ops that actually did something, and a caller needs it
  * because the two are not worth the same: de-widening REVEALS text a pattern
  * could not match before, while collapsing zeros provably reveals nothing -
@@ -367,9 +390,10 @@ void kof_exe_norm_map(const uint8_t *in, uint64_t n, uint32_t ops,
  * Returns the view length, or 0 when nothing was rewritten.
  */
 uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
-			     uint32_t ops, uint8_t *out, uint64_t cap,
-			     const uint64_t *mark, uint64_t *mark_out,
-			     uint32_t n_mark, uint32_t *fired);
+			     const uint8_t *drop, uint32_t ops, uint8_t *out,
+			     uint64_t cap, const uint64_t *mark,
+			     uint64_t *mark_out, uint32_t n_mark,
+			     uint32_t *fired);
 
 uint64_t kof_exe_norm(const uint8_t *in, uint64_t n, uint32_t ops,
 		  uint8_t *out, uint64_t cap,

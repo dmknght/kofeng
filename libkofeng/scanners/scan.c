@@ -158,6 +158,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc->lzh);
 	kof_xref_free(sc->use);
 	free(sc->sym);
+	free(sc->pend_syms);
 	free(sc->sym_ext[0]);
 	free(sc->sym_ext[1]);
 	free(sc);
@@ -384,7 +385,6 @@ static void plague_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	};
 	struct kof_range *ext = sc->ext_gather;
 	const struct kof_parser *fp;
-	struct kof_lib_result lib;
 	kof_buf b;
 	size_t mi;
 
@@ -422,10 +422,18 @@ static void plague_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * An object with a declared region table is exactly the one that has
 	 * this problem, which is why that is the test.
 	 */
-	if (!sc->n_cur_rgn && ctx->format == KOF_FMT_ELF && ctx->file_header) {
-		kof_lib_find(b, kof_elf(ctx), &lib);
-		kof_plague_object(&sc->plague, b.p, lib.span, lib.n);
-	}
+	/*
+	 * INHERITED FROM THE PARSE - see kof_scanner.cur_lib and lib_facts.
+	 *
+	 * This used to call kof_lib_find for itself, with its own gate: not on
+	 * an object carrying a declared region table, because that is a view
+	 * and a view's segment offsets are its parent's. The gate moved into
+	 * lib_facts with the answer, where it is stated once and where the
+	 * normaliser reads the same one.
+	 */
+	if (sc->cur_lib_ok)
+		kof_plague_object(&sc->plague, b.p,
+				  sc->cur_lib.span, sc->cur_lib.n);
 
 	/*
 	 * WHAT AN UNPACKER PRODUCED IS FED WHOLE, WITHOUT THE REGION ANCHOR.
@@ -883,8 +891,13 @@ static void finding_str(const struct kof_scanner *sc,
 		 * the mark, where the rest of the engine already puts what a
 		 * verdict is BASED on.
 		 */
-		snprintf(sv, sizeof sv, "%08x",
-			 kof_plague_name_of(sc->plague_blk, sc->n_plague_blk));
+		/* The number first, then the name made from it - see
+		 * kof_finding.sim_pct. */
+		f->sim_pct = (uint8_t)pct;
+		f->sim_kind = (uint8_t)KOF_SIM_PLAGUE;
+		f->sim_of = kof_plague_name_of(sc->plague_blk,
+					       sc->n_plague_blk);
+		snprintf(sv, sizeof sv, "%08x", f->sim_of);
 		snprintf(shape, sizeof shape, "Plague?%u", pct);
 		kof_finding_name(f, fmtarch, maltype,
 				 (family && family[0]) ? family : "unknown",
@@ -909,6 +922,9 @@ static void finding_str(const struct kof_scanner *sc,
 	if (sc->ovl_asked >= 0 && sc->ovl_pct) {
 		char shape[16];
 
+		f->sim_pct = (uint8_t)(sc->ovl_pct > 100u ? 100u
+							  : sc->ovl_pct);
+		f->sim_kind = (uint8_t)KOF_SIM_OVERLORD;
 		snprintf(shape, sizeof shape, "Ovl?%u", sc->ovl_pct);
 		kof_finding_name(f, fmtarch, maltype,
 				 (family && family[0]) ? family : "unknown",
@@ -1321,6 +1337,30 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	if (!kof_objtree_may_open(opt))
 		return 0;
 
+	/*
+	 * A VIEW IS NOT OPENED, ONLY MATCHED.
+	 *
+	 * Everything openable in a normalised view was openable in the object
+	 * it was made from, and was opened there - the parent is scanned whole
+	 * and before this. Opening the view again produces the same content a
+	 * second time: measured on an ELF carrying 4.2 MB past its last
+	 * segment, which came out once as a child of the file and again as a
+	 * child of its view, the same bytes with the padding taken out.
+	 *
+	 * THE OBJECT SAYS SO ITSELF - see kof_src_declare_view. It was "has a
+	 * declared region table", which is a consequence of being a view and
+	 * not the fact: a view of an object whose regions could not be resolved
+	 * carries no table, and its parent's appendix came out twice.
+	 *
+	 * WHAT THIS GIVES UP, because it is not nothing. A decoded payload can
+	 * be a whole file that exists nowhere in the parent - base64 in, an ELF
+	 * out - and that file is then not parsed as one. Its BYTES are in the
+	 * view and every rule searches them, which is what the view is for; it
+	 * is the structure that is not recovered.
+	 */
+	if (sc->cur_is_view)
+		return 0;
+
 	kof_mod_unpack_mode(ctx, 1);
 
 	/*
@@ -1343,6 +1383,7 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 */
 	if (predict) {
 		uint32_t kids0 = sc->n_kids;
+		uint32_t carved0 = sc->n_carved;
 
 		for (i = 0; i < sc->eng->n_unp && !sc->broken; i++) {
 			const struct kof_module *m = &sc->eng->unp[i];
@@ -1352,10 +1393,32 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 				continue;
 			applies = 1;
 			sc->cur_mod = m;
-			m->fn(ctx);
+			{
+				uint32_t k0 = sc->n_kids;
+
+				m->fn(ctx);
+				/* What a carve produced does not make its host
+				 * a wrapper - see KOF_UNP_CARVE. */
+				if (m->unp_kind == KOF_UNP_CARVE &&
+				    sc->n_kids > k0)
+					sc->n_carved += sc->n_kids - k0;
+			}
 			sc->cur_mod = NULL;
 		}
-		family_opened = sc->n_kids > kids0;
+		/*
+		 * OPENED, AND A CARVE DID NOT OPEN ANYTHING - the same rule
+		 * analyze_object applies one level up, and for the same
+		 * reason: a carved child is a file that was glued on, so the
+		 * host is still an unopened object and the general pass below
+		 * is still owed to it. Counted as an opening, one family's
+		 * carver would stand in for every other unpacker in the
+		 * database.
+		 *
+		 * Both counters are the whole object's, so both marks are
+		 * this pass's - see the note on the same subtraction in
+		 * analyze_object.
+		 */
+		family_opened = sc->n_kids - kids0 > sc->n_carved - carved0;
 	}
 
 	/*
@@ -1381,7 +1444,13 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			break;          /* nothing left to spend on this tree */
 
 		sc->cur_mod = m;
-		m->fn(ctx);
+		{
+			uint32_t k0 = sc->n_kids;
+
+			m->fn(ctx);
+			if (m->unp_kind == KOF_UNP_CARVE && sc->n_kids > k0)
+				sc->n_carved += sc->n_kids - k0;
+		}
 		sc->cur_mod = NULL;
 	}
 	/*
@@ -1765,7 +1834,7 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * initialiser to write it in: every caller declares a
 	 * kof_scan_option on the stack and clears it, so a field whose
 	 * useful value is 1 arrives as 0. Reading 0 as "the level every rule
-	 * ran at before there was a choice" is what keeps kofexamine, the
+	 * ran at before there was a choice" is what keeps kofexaminer, the
 	 * unit tests and any embedder working unchanged - the alternative
 	 * silently disabled every heuristic for all of them.
 	 *
@@ -1979,6 +2048,7 @@ static uint32_t norm_gather(struct kof_obj_ctx *ctx, struct kof_src_region *r,
 	return n;
 }
 
+
 /*
  * WHICH OF THEM MUST NOT MOVE, AS A BIT PER BYTE.
  *
@@ -2011,10 +2081,174 @@ static void norm_keep_bits(uint8_t *keep, uint64_t n,
 	}
 }
 
+/*
+ * WHICH BYTES OF THIS OBJECT BELONG TO THE STATIC LIBRARY - ASKED ONCE, HERE.
+ *
+ * Beside the parse, because that is what it needs and because every consumer
+ * of the answer runs after it: the normaliser leaves these bytes out of the
+ * view, the block builder puts a block on the library side of enum
+ * kof_plague_side when it lands in one, and both used to work it out for
+ * themselves. See kof_scanner.cur_lib.
+ *
+ * TWO TIERS, AND THE SECOND IS GATED ON HOW THE OBJECT WAS LINKED.
+ *
+ * The marker span runs from a loadable segment's first library string to its
+ * last and takes everything between. In a STATIC build that is right - the
+ * library is laid down in one run and the strings bound it. In a DYNAMIC one
+ * there is no static library at all, so the strings it finds are the
+ * program's own and the span between them is the program: measured, an 8MB
+ * miner with a PT_INTERP yielded a 7MB "library" across its CODE.
+ *
+ * So the marker tier is asked only when nothing is going to be loaded in
+ * beside this file, and the symbol tier - which claims exactly what a symbol
+ * covers and nothing between symbols - is asked always.
+ */
+static int lib_is_static(const struct kof_elf_info *e)
+{
+	uint32_t i;
+
+	if (!e)
+		return 0;
+	for (i = 0; i < e->seg_count; i++)
+		if (e->seg[i].type == 3u)       /* PT_INTERP */
+			return 0;
+	return 1;
+}
+
+static void lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+		      kof_buf buf)
+{
+	sc->cur_lib.n = 0;
+	sc->cur_lib_ok = 0;
+	if (sc->cur_is_view)
+		return;
+	if (!ctx || ctx->format != KOF_FMT_ELF || !ctx->file_header)
+		return;
+	if (!buf.p || !buf.n)
+		return;
+	if (lib_is_static(kof_elf(ctx)))
+		kof_lib_find_all(buf, kof_elf(ctx), &sc->cur_lib);
+	else
+		kof_lib_find_syms(buf, kof_elf(ctx), &sc->cur_lib);
+	sc->cur_lib_ok = 1;
+}
+
+/*
+ * THE VIEW'S SYMBOLS: THE PARENT'S, WITHOUT THE TOOLCHAIN'S.
+ *
+ * WHY IT CANNOT BE BUILT FROM THE VIEW. A symbol block is read out of the
+ * object's own section table, and a view's headers describe the file before the
+ * padding came out: every offset in them is stale wherever something collapsed
+ * ahead of it. Measured on a uclibc bot - the file yields 677 records and its
+ * view yields none, so the view carried no SYM_EXP and no SYM_IMP at all.
+ *
+ * AND WHY IT IS WORTH CARRYING. Two unrelated static binaries export the same
+ * hundreds of libc names, so a symbol-set similarity between them measures the
+ * toolchain exactly as a string-set one does. The view exists to be the
+ * object's own content; its symbol half has to mean the same thing, or a
+ * question asked of SYM_EXP on a view is answered by uclibc.
+ *
+ * THE SAME CLASSIFICATION AND NOT A SECOND ONE. A record is dropped when the
+ * address it covers falls in the library spans lib_facts already worked out -
+ * see kof_lib_has_addr. Nothing here decides what the library is.
+ *
+ * `_start` GOES WITH IT, and the header's index of it is cleared rather than
+ * left pointing at whatever record now sits there: crt is the toolchain's, so
+ * the record is dropped, and an index into a table that has moved underneath it
+ * is worse than no index - kof_sym_start's callers read it as a place to begin.
+ */
+static uint32_t norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+			  uint8_t *out, uint32_t cap)
+{
+	const struct kof_elf_info *e;
+	const uint8_t *in;
+	uint32_t n_in = 0, total, i, kept = 0;
+	uint32_t start_at, start_new = KOF_SYM_NO_START;
+
+	if (!ctx->content || !ctx->content->syms || !sc->cur_lib_ok)
+		return 0;
+	if (ctx->format != KOF_FMT_ELF || !ctx->file_header)
+		return 0;
+	e = kof_elf(ctx);
+	in = ctx->content->syms(ctx, &n_in);
+	total = kof_sym_count(in, n_in);
+	if (!total || cap < KOF_SYM_HDRLEN)
+		return 0;
+
+	memcpy(out, in, KOF_SYM_HDRLEN);
+	/* Where the parent said `_start` was, so the copy can say where it
+	 * ended up - see the note below on why it is not simply cleared. */
+	start_at = (uint32_t)in[KOF_SYM_H_START] |
+		   ((uint32_t)in[KOF_SYM_H_START + 1] << 8);
+	for (i = 0; i < total; i++) {
+		const uint8_t *r = kof_sym_rec(in, n_in, i);
+		uint64_t va, sz;
+		uint32_t k;
+
+		if (!r)
+			continue;
+		va = 0;
+		sz = 0;
+		for (k = 0; k < 8u; k++) {
+			va |= (uint64_t)r[KOF_SYM_R_VALUE + k] << (8u * k);
+			sz |= (uint64_t)r[KOF_SYM_R_SIZE + k] << (8u * k);
+		}
+		if (kof_lib_has_addr(e, &sc->cur_lib, va, sz))
+			continue;
+		/*
+		 * AND NOTHING ELSE DECIDES THIS.
+		 *
+		 * A name test was here, dropping every `__CTOR_LIST__` and
+		 * `__EH_FRAME_BEGIN__` the toolchain plants, because a symbol
+		 * with no size covers no bytes and no span can reach it. It
+		 * was wrong for a reason worth writing down: the block
+		 * describes THE VIEW, and the view still contains those bytes.
+		 * A record dropped here that the cut did not drop says the
+		 * library was taken out where it was not - the symbol half and
+		 * the byte half would be describing two different files.
+		 *
+		 * So the only question asked of a record is the one the bytes
+		 * were asked: is what it covers inside what was cut. A symbol
+		 * covering nothing was cut from nothing, and stays.
+		 */
+		if (KOF_SYM_HDRLEN + (kept + 1u) * KOF_SYM_RECLEN > cap)
+			break;
+		/* After the room test, not before it: a record the cap stopped
+		 * short of is not at an index, so the header must not name one
+		 * for it. */
+		if (i == start_at)
+			start_new = kept;
+		memcpy(out + KOF_SYM_HDRLEN + (uint64_t)kept * KOF_SYM_RECLEN,
+		       r, KOF_SYM_RECLEN);
+		kept++;
+	}
+	if (!kept)
+		return 0;
+	out[KOF_SYM_H_COUNT + 0] = (uint8_t)kept;
+	out[KOF_SYM_H_COUNT + 1] = (uint8_t)(kept >> 8);
+	out[KOF_SYM_H_COUNT + 2] = (uint8_t)(kept >> 16);
+	out[KOF_SYM_H_COUNT + 3] = (uint8_t)(kept >> 24);
+	/*
+	 * AND WHERE `_start` ENDED UP, WHICH IS ALSO NOT A NEW FACT.
+	 *
+	 * The header carries the index of the `_start` record so a reader can
+	 * begin there. Filtering moves every index after the first drop, so
+	 * copying the parent's number would point at whichever record now sits
+	 * at it - a false statement rather than a missing one. This writes the
+	 * index the SAME record landed at, or NO_START when the cut took it;
+	 * both come out of what the loop above did, and nothing here decides
+	 * which records those are.
+	 */
+	out[KOF_SYM_H_START + 0] = (uint8_t)(start_new & 0xffu);
+	out[KOF_SYM_H_START + 1] = (uint8_t)((start_new >> 8) & 0xffu);
+	return KOF_SYM_HDRLEN + kept * KOF_SYM_RECLEN;
+}
+
 static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		      kof_buf buf)
 {
-	uint8_t *out, *tmp, *keep;
+	uint8_t *out, *tmp, *keep, *drop;
+	const struct kof_lib_all *lib;
 	uint64_t n, sent = 0;
 	int changed;
 	struct kof_src_region rgn[KOF_SRC_MAX_REGIONS];
@@ -2046,16 +2280,42 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * miner, norm//norm//norm to the depth budget, every level carrying the
 	 * same detection.
 	 *
-	 * A DECLARED REGION TABLE IS WHAT A VIEW HAS AND NOTHING ELSE DOES, so
-	 * it is the test. It is also the honest one: the rule being enforced is
-	 * "this object is already a rendering of another", not "this looks like
-	 * something that has been through here".
+	 * THE OBJECT SAYS SO ITSELF - see kof_src_declare_view - rather than
+	 * being recognised by a side effect. This was "has a declared region
+	 * table", which every view has EXCEPT one made from an object whose
+	 * regions could not be resolved, and that exception was a real one.
 	 */
-	if (sc->n_cur_rgn)
+	if (sc->cur_is_view)
 		return;
 	if (!ctx || (ctx->format != KOF_FMT_ELF && ctx->format != KOF_FMT_PE))
 		return;
 	if (buf.n < NORM_MIN_OBJ)
+		return;
+
+	/*
+	 * AND NOT AN OBJECT TOO LARGE TO HOLD TWICE, WHICH IS ASKED HERE AND
+	 * NOT AT THE END.
+	 *
+	 * The two working buffers below are the OBJECT'S size each - the
+	 * transform reads one and writes the other - and neither is charged to
+	 * the resident budget, because the sink only charges the view when it
+	 * is handed over and that is after all the work. The test at the end of
+	 * this function asks about the VIEW, which by then has already cost
+	 * twice the input to produce.
+	 *
+	 * Measured, and this is why it is here: an 800 MB ELF - a real binary
+	 * with zeros appended - took the scanner to 1.6 GB of peak RSS to build
+	 * a view that the ceiling at the end then refused. The file is mapped,
+	 * so its size is not the scanner's to choose; what the scanner chooses
+	 * is whether to copy it, and it cannot afford to copy this one twice.
+	 *
+	 * HALF THE HEADROOM, in the same terms the rest of the engine uses,
+	 * rather than a number of its own: resident_max is the ceiling the
+	 * caller set and two buffers is what this costs. An object over that is
+	 * left unnormalised - it is still parsed, still scanned, still carved.
+	 */
+	if (sc->resident > sc->resident_max ||
+	    buf.n > (sc->resident_max - sc->resident) / 2u)
 		return;
 
 	/*
@@ -2099,17 +2359,66 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 */
 	nr = norm_gather(ctx, rgn, KOF_SRC_MAX_REGIONS);
 
+	/*
+	 * AND THE STATIC LIBRARY, WHICH LEAVES THE VIEW ALTOGETHER.
+	 *
+	 * Those bytes are the toolchain's, not the author's: measured over 226
+	 * Linux malware samples the library is a mean 22% of CODE and past half
+	 * of it in 46, and two unrelated CLEAN binaries reach a string-set
+	 * Jaccard of 0.99 through nothing but a shared libc. A view of what the
+	 * object actually carries is a view without them.
+	 *
+	 * FOUND ON THE PARENT, WHERE THE PARSE IS TRUE. kof_lib_find works from
+	 * markers inside a loadable segment, so it needs segment offsets that
+	 * describe the bytes it is reading - which is the case here and is not
+	 * the case on a view, whose headers still describe the file before the
+	 * padding came out. That is why it is refused there and used here.
+	 */
+	/*
+	 * INHERITED, NOT WORKED OUT AGAIN - see kof_scanner.cur_lib. The gate
+	 * that used to be here, refusing the cut on a dynamically linked
+	 * object, moved with it: lib_facts asks the marker tier only of a
+	 * static build and the symbol tier of everything.
+	 */
+	lib = &sc->cur_lib;
+
 	out = malloc((size_t)buf.n);
 	tmp = malloc((size_t)buf.n);
 	keep = nr ? malloc((size_t)((buf.n + 7u) / 8u)) : NULL;
-	if (!out || !tmp || (nr && !keep)) {
+	drop = lib->n ? malloc((size_t)((buf.n + 7u) / 8u)) : NULL;
+	if (!out || !tmp || (nr && !keep) || (lib->n && !drop)) {
 		free(out);
 		free(tmp);
 		free(keep);
+		free(drop);
 		return;
 	}
 	if (nr)
 		norm_keep_bits(keep, buf.n, rgn, nr);
+	if (lib->n) {
+		uint32_t a;
+
+		memset(drop, 0, (size_t)((buf.n + 7u) / 8u));
+		for (a = 0; a < lib->n; a++) {
+			uint64_t j, e;
+
+			if (lib->span[a].off >= buf.n)
+				continue;
+			/*
+			 * Clipped by the room LEFT rather than by the sum:
+			 * off + len is the natural way to write this and it
+			 * wraps on a length the parse got wrong, landing below
+			 * off - where the loop runs zero times and the span
+			 * silently drops nothing at all. Subtraction cannot
+			 * wrap here, off being known smaller than buf.n.
+			 */
+			e = lib->span[a].len > buf.n - lib->span[a].off
+				  ? buf.n
+				  : lib->span[a].off + lib->span[a].len;
+			for (j = lib->span[a].off; j < e; j++)
+				drop[j >> 3] |= (uint8_t)(1u << (j & 7u));
+		}
+	}
 
 	/*
 	 * THE DECODE PASSES, THEN THE KEPT BYTES PUT BACK.
@@ -2133,6 +2442,25 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		for (j = 0; j < buf.n; j++)
 			if (keep[j >> 3] & (uint8_t)(1u << (j & 7u)))
 				tmp[j] = buf.p[j];
+		/*
+		 * AND THE ANSWER IS WHAT SURVIVED THE RESTORE, NOT WHAT THE
+		 * DECODE DID.
+		 *
+		 * `changed` decides below whether this view is worth making at
+		 * all, and a decode that happened entirely inside a KEPT region
+		 * has just been undone byte for byte - so the view it would
+		 * justify shows nothing the parent does not already show. It is
+		 * not a hypothetical: a run of hex digits long enough to decode
+		 * turns up inside an instruction stream by accident, and CODE
+		 * is kept whole. Measured over 459 malware objects, 35 of them
+		 * report a decode that the restore takes straight back out.
+		 *
+		 * Compared rather than tracked, because the restore loop cannot
+		 * tell a byte it put back from a byte the decode never touched,
+		 * and the comparison is one pass over an object that has
+		 * already had several.
+		 */
+		changed = memcmp(tmp, buf.p, (size_t)buf.n) != 0;
 	}
 
 	/*
@@ -2169,7 +2497,7 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		}
 	}
 
-	n = kof_exe_norm_masked(tmp, buf.n, keep,
+	n = kof_exe_norm_masked(tmp, buf.n, keep, drop,
 				KOF_EXE_NORM_NULLRUN | KOF_EXE_NORM_UNWIDE,
 				out, buf.n, mark, mark_out, n_mark, &fired);
 	/*
@@ -2200,22 +2528,59 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * second scan, buying nothing. In a corpus of 243 Linux malware
 	 * samples it is 82 of them.
 	 */
-	if (!(fired & KOF_EXE_NORM_UNWIDE) && !changed) {
+	/*
+	 * CUTTING THE LIBRARY IS A REASON ON ITS OWN, beside de-widening and
+	 * decoding. All three REVEAL: two make unreadable bytes readable, and
+	 * this one takes away bytes that belong to somebody else, so what is
+	 * left is the object's own content and a similarity measured over it
+	 * means something. Collapsing zeros is still not a reason - it is
+	 * proved to create no match that the parent does not already have.
+	 */
+	if (!(fired & (KOF_EXE_NORM_UNWIDE | KOF_EXE_NORM_CUTLIB)) && !changed) {
 		free(out);
 		free(tmp);
 		free(keep);
+		free(drop);
 		return;
 	}
-	if (!n) {
-		/* Nothing moved: the decode found something but there was no
-		 * wide text and no zero run, so the view is the 1:1 rewrite. */
+	/*
+	 * A LENGTH OF ZERO MEANS TWO DIFFERENT THINGS AND THEY ARE TOLD APART
+	 * BY `fired`, NOT BY THE LENGTH.
+	 *
+	 * kof_exe_norm_masked returns 0 when it rewrote nothing, and it also
+	 * returns 0 when it rewrote everything AWAY - an object whose every
+	 * byte was dropped as library has an empty view and a length to match.
+	 * `fired` is set for exactly the ops that did something, so it is the
+	 * one that separates them: nothing fired means nothing moved.
+	 *
+	 * The first case is the 1:1 rewrite - the decode found something but
+	 * there was no wide text, no zero run and nothing to cut, so the view
+	 * is tmp as it stands and the boundaries are where they were.
+	 *
+	 * The second is refused. An empty view has no bytes to scan and a
+	 * region table describing none of them, and handing one over would put
+	 * an object into the tree that says it is an executable and contains
+	 * nothing. It takes a library covering the whole object, header
+	 * included, which is not something kof_lib_find can currently produce -
+	 * the test is here so that the day it can, this says no rather than
+	 * building a copy of the parent and calling it a view.
+	 */
+	if (!fired) {
 		memcpy(out, tmp, (size_t)buf.n);
 		n = buf.n;
 		for (n_mark = 0; n_mark < 2u * nr; n_mark++)
 			mark_out[n_mark] = mark[n_mark];
+	} else if (!n) {
+		free(out);
+		free(tmp);
+		free(keep);
+		free(drop);
+		return;
 	}
 	free(tmp);
 	tmp = NULL;
+	free(drop);
+	drop = NULL;
 
 	/*
 	 * THE REGIONS, IN THE VIEW'S OWN COORDINATES.
@@ -2307,6 +2672,9 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	sc->pend_label_len = (uint32_t)snprintf(sc->pend_label,
 						sizeof sc->pend_label, "norm");
 	sc->pend_fmt = nr ? ctx->format : (uint8_t)KOF_FMT_DECLARED_RAW;
+	/* What this object IS, said rather than inferred - see
+	 * kof_src_declare_view. */
+	sc->pend_view = 1;
 	{
 		uint32_t a;
 
@@ -2323,6 +2691,16 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 */
 		sc->pend_rgn_fmt = ctx->format;
 	}
+	/*
+	 * AND THE SYMBOLS, HERE FOR THE REASON THE REGIONS ARE: this is after
+	 * kof_mod_unpack_mode cleared the pending claims and before c_child
+	 * spends them. See norm_syms.
+	 */
+	if (!sc->pend_syms)
+		sc->pend_syms = malloc(KOF_SYM_MAX_BYTES);
+	if (sc->pend_syms)
+		sc->n_pend_syms = norm_syms(sc, ctx, sc->pend_syms,
+					    KOF_SYM_MAX_BYTES);
 	while (sent < n) {
 		uint64_t take = n - sent;
 
@@ -2444,6 +2822,7 @@ static void analyze_object(struct analyze_arg *a)
 
 	for (i = 0; i < sizeof analyze_steps / sizeof analyze_steps[0]; i++) {
 		uint32_t kids0 = a->sc->n_kids;
+		uint32_t carved0 = a->sc->n_carved;
 
 		analyze_steps[i].run(a);
 		/*
@@ -2462,7 +2841,32 @@ static void analyze_object(struct analyze_arg *a)
 		 * bytes ARE its members, and each member is normalised as
 		 * itself when its own pass reaches this loop.
 		 */
-		if (a->sc->n_kids != kids0)
+		/*
+		 * A CARVED CHILD DOES NOT STOP THE CHAIN.
+		 *
+		 * The rule is "something came out of this, so the thing that
+		 * came out is the subject" - true of a container's member and
+		 * of an unpacked image, and false of a payload found by
+		 * searching. Nothing declared that an ELF is carrying a file,
+		 * so the host is a whole program that happens to have one glued
+		 * on, and it still deserves the steps below.
+		 *
+		 * Measured before this: an 8.6 MB ELF with 4.2 MB appended had
+		 * the appendix extracted and then no normalised view of itself
+		 * at all, so the 4.4 MB that is the actual program - with a
+		 * static library inside it to cut - was never rendered.
+		 */
+		/*
+		 * WHAT THIS STEP PRODUCED, not what the object has.
+		 *
+		 * Both counters run for the whole object while `kids0` is this
+		 * step's, so subtracting the total carved from the total kids
+		 * and comparing against a per-step mark mixes two scopes. An
+		 * earlier step's carve then reads as a shortfall in this one -
+		 * harmless only because NORMZ happens to be last, which is the
+		 * kind of accident that stops being true when a step is added.
+		 */
+		if (a->sc->n_kids - kids0 != a->sc->n_carved - carved0)
 			return;
 		/*
 		 * And between steps, because a step is the unit of work that
@@ -2537,6 +2941,9 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	identify(sc, buf, &ctx,
 		 as_fmt ? as_fmt : (opt ? opt->as_format : 0u),
 		 opt ? opt->as_view : NULL, opt ? opt->as_view_len : 0u);
+	/* And the one fact about it that three later steps would each have
+	 * worked out for themselves - see lib_facts. */
+	lib_facts(sc, &ctx, buf);
 
 	/*
 	 * A DECLARED REGION TABLE BEATS A PARSED ONE, and for an object that
@@ -2825,8 +3232,27 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * was made - see kof_scanner.n_views. Subtracted rather than tested
 	 * separately so the question stays the one it always was: did this
 	 * object YIELD anything.
+	 *
+	 * AND NEITHER DOES A CARVE, for the reason that decides the same
+	 * question in analyze_object and in the family pass: a carved child
+	 * was not declared by anything, so the host did not turn out to be a
+	 * wrapper around it. The drop above rests on "the finding belongs to
+	 * the child that came out" - true of a container's member and of an
+	 * unpacked image, and false of a file glued past the last segment. A
+	 * shape rule that says "this object is packed" is not answered by
+	 * finding something appended to it, and dropping it there deletes a
+	 * verdict about the host with nowhere for it to go: the carved child
+	 * is an ordinary file that no shape rule fires on.
+	 *
+	 * That is what KOF_ENG_KEEP_ON_OPEN was carrying on its own - see the
+	 * note in bases/heur/appended_00.c, where the bit was added because
+	 * three samples came back clean with the carried ELF extracted. The
+	 * bit is still right for what it says, and it is still honoured below;
+	 * it is simply no longer the only thing standing between a carve and
+	 * a deleted finding, which would have needed every future rule to
+	 * remember it.
 	 */
-	if (sc->n_kids > sc->n_views && out->n > 0) {
+	if (sc->n_kids > sc->n_views + sc->n_carved && out->n > 0) {
 		uint32_t r, w = 0, keep = sc->heur_keep;
 
 		for (r = 0; r < out->n; r++)
@@ -3126,6 +3552,7 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 				w->sc->cur_rgn[g] = r[g];
 			w->sc->n_cur_rgn = nr;
 			w->sc->cur_rgn_fmt = kof_src_region_fmt_of(src);
+			w->sc->cur_is_view = (uint8_t)kof_src_is_view(src);
 		}
 		kof_scan_kids_reset(w->sc);
 		scan_object(w->sc, kof_src_buf(src), w->opt, &res, pdepth,
@@ -3173,6 +3600,10 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 		{
 			kof_buf ob = kof_src_buf(src);
 
+			/* What the producer declared this object is to be read
+			 * with, passed on rather than rebuilt by the host -
+			 * see kof_result.syms. */
+			res.syms = kof_src_syms_of(src, &res.n_syms);
 			if (w->cb && name &&
 			    w->cb(name, ob.p, ob.n, &res, w->user) != 0)
 				w->aborted = 1;

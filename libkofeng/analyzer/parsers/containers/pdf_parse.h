@@ -35,7 +35,7 @@ const char *kof_pdf_anomaly_name(unsigned index);
  * leave no way to add a region to one and not the other.
  *
  * THE ORDER IS WHAT A READER SEES: structure, then content, then resources,
- * then the passengers, then what nothing claimed. kofexamine and kofviewer
+ * then the passengers, then what nothing claimed. kofexaminer and kofviewer
  * walk this to print a per-region byte count, so it reads top to bottom like
  * the document does.
  */

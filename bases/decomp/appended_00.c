@@ -76,7 +76,14 @@
  * what was observed and all that was observed. It also stops the heuristic's
  * depth accounting counting a packer layer for an installer.
  */
-KOF_UNPACK_KIND(KOF_UNP_CONTAINER);
+/*
+ * A CARVE AND NOT A CONTAINER. A container's members are declared - a zip says
+ * where its entries are - and an ELF declares nothing about a file glued past
+ * its last segment; this module finds it by searching. The kind is what tells
+ * the analysis steps that the host is still worth examining afterwards, which a
+ * container's host is not. See KOF_UNP_CARVE.
+ */
+KOF_UNPACK_KIND(KOF_UNP_CARVE);
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
 

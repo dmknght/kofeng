@@ -31,6 +31,9 @@
 /* KOF_PROC_OS_LIST: the platform a process record is from, which is its
  * subtype - see the note on that list. */
 #include <kofmod/proc.h>
+/* For the object facts below - see "what an object IS". */
+#include "../libkofeng/detector/overlord/kofoverlord.h"
+#include "../libkofeng/extractor/unpack/emu_unpack.h"
 
 #include "kofeditor.h"
 #include "../libkofeng/databases/hexprog.h"
@@ -1439,6 +1442,111 @@ void say_err(struct kof_editor *e, const char *fmt, ...)
 	e->dr.warn_bad = 1;
 }
 
+
+/* ---- what an object IS, worked out once ------------------------------------
+ *
+ * HERE RATHER THAN IN THE VIEWER, because these are facts about an object and
+ * not about a screen: a digest, the sets kof_ovl_build makes of it, what the
+ * emulator's gate said. The panel was working each of them out for itself, and
+ * more than once - kof_ovl_build ran twice per arrival at an object, once to
+ * seed the draft and once to score it - which is the duplication this file
+ * exists to stop for everything else the two tools share.
+ *
+ * Each is cached in the object, so it happens once however many times it is
+ * asked for, and each is asked for where it is USED rather than when an object
+ * is selected: they read every byte, and an object is spilled to a file and
+ * mapped precisely so that looking at twenty rows of it costs twenty rows.
+ */
+/*
+ * The digest, worked out the first time the pane that prints it is built.
+ *
+ * Not on touch: it reads every byte of the object - see the note in
+ * object_touch - and only the properties pane prints it, which the reader
+ * opens. Cached in the object, so a pane that stays open pays once.
+ */
+void obj_sha256(struct object *o)
+{
+	if (!o || !o->buf.p || !o->buf.n)
+		return;
+	if (!o->sha256[0])
+		kof_sha256_bytes(o->buf.p, o->buf.n, o->sha256);
+}
+
+/*
+ * WHAT THE GATE SAID, IF IT HAS BEEN ASKED - AND IT IS NOT ASKED BY LOOKING.
+ *
+ * Nothing about the emulator runs until the reader chooses Unpack with
+ * emulator. That is a rule about the tool and not an optimisation: the
+ * interpreter is the one thing here that executes what it is shown, and it
+ * runs when somebody asks for it and not because a row was selected.
+ *
+ * The GATE is not the emulator - it reads a byte histogram and decides whether
+ * emulating would be worth it - but it is about the emulator, it costs a walk
+ * of every executable segment, and it was running on touch: a spilled object
+ * faulted in whole to fill one status-line tag nobody had asked for. So it is
+ * asked where the choice is made - see emu_here - and this only reports what
+ * that left behind.
+ */
+uint8_t obj_emu_why(const struct object *o)
+{
+	return (o && o->emu_why_done) ? o->emu_why : 0u;
+}
+
+/*
+ * THE OBJECT'S OVERLORD VECTORS, BUILT ONCE - see object.ovl_str.
+ *
+ * Two callers wanted them and each built its own: sim_recarve, to seed a draft
+ * with the measures this object offers, and plg_sim_refresh, to score the
+ * draft against it. Both called kof_ovl_build over the whole object, so every
+ * arrival at an object read it twice - 231ms and 230ms of one 0.7s keypress.
+ * They ask this instead, and the second caller finds it already done.
+ *
+ * Returns zero when the object has none to give, or when there was no room to
+ * keep them; a caller that gets zero simply has no percentage to show, which
+ * is the same answer a failed build always gave.
+ */
+int obj_ovl(struct object *o)
+{
+	struct kof_ovl_desc *d;
+	uint32_t i, ns, nb;
+
+	if (!o || !o->info || o->ctx.format != KOF_FMT_ELF)
+		return 0;
+	if (o->ovl_done)
+		return o->ovl_str != NULL;
+	o->ovl_done = 1;
+	d = malloc(sizeof *d);
+	if (!d) {
+		o->ovl_done = 0;
+		return 0;
+	}
+	if (!kof_ovl_build(d, o->buf, (const struct kof_elf_info *)o->info)) {
+		free(d);
+		return 0;
+	}
+	ns = d->n_str < DRAFT_MAX_STR ? d->n_str : DRAFT_MAX_STR;
+	nb = d->n_blk < DRAFT_MAX_BLKV ? d->n_blk : DRAFT_MAX_BLKV;
+	o->ovl_str = malloc((ns ? ns : 1u) * sizeof *o->ovl_str);
+	o->ovl_blk = malloc((nb ? nb : 1u) * sizeof *o->ovl_blk);
+	if (!o->ovl_str || !o->ovl_blk) {
+		free(o->ovl_str);
+		free(o->ovl_blk);
+		o->ovl_str = NULL;
+		o->ovl_blk = NULL;
+		o->ovl_done = 0;        /* no room: asked again next time */
+		free(d);
+		return 0;
+	}
+	for (i = 0; i < ns; i++)
+		o->ovl_str[i] = d->str[i];
+	for (i = 0; i < nb; i++)
+		o->ovl_blk[i] = d->blk[i];
+	o->n_ovl_str = ns;
+	o->n_ovl_blk = nb;
+	free(d);
+	return 1;
+}
+
 void say_note(struct kof_editor *e, const char *fmt, ...)
 {
 	va_list ap;
@@ -2571,6 +2679,43 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 	 */
 	if ((*e->foreign) && !as_new)
 		return "Custom logic - Save As to derive a new rule from it";
+	/*
+	 * A RULE WHOSE BLOCKS THIS OBJECT DOES NOT PRODUCE IS NOT EDITED HERE,
+	 * AND THAT IS ABOUT THE RULE AND NOT ABOUT THE DRAFT.
+	 *
+	 * Opening a plague rule loads its blocks as CARRIED rows - hashes from
+	 * the file, offsets belonging to whatever sample it was cut from. The
+	 * panel then scores them against the object in front of it, and a
+	 * carried block that scores ZERO is one this object does not contain:
+	 * the rule was cut from another build, or from another carve of this
+	 * one. Either way the rows on screen describe bytes that are not here,
+	 * so every offset a reader clicks, every region a block claims and
+	 * every cut the panel would make next is about a file that is not open.
+	 * Writing that back produces a rule assembled from two objects.
+	 *
+	 * EVERY BLOCK, not some. A variant scores its blocks low and a rule is
+	 * meant to be checked against variants - that is the whole use of
+	 * opening one - so a rule with any block still reaching this object is
+	 * a rule about it. Nothing reaching it at all is the case this refuses.
+	 *
+	 * The SCORE is the engine's own - see plg_rescore, which runs the
+	 * matcher the generated module will run. Nothing here re-decides what
+	 * matching means.
+	 */
+	{
+		uint32_t carried = 0, scored = 0;
+
+		for (i = 0; i < e->dr.n_blk; i++) {
+			if (!e->dr.blk[i].kept)
+				continue;
+			carried++;
+			if (e->dr.blk[i].score)
+				scored++;
+		}
+		if (carried && carried == e->dr.n_blk && !scored)
+			return "These blocks are not in this object - open the "
+			       "file they were cut from";
+	}
 	if (!e->dr.family[0])
 		return "Name the family";
 	/*
@@ -6795,6 +6940,42 @@ int plague_from_source(struct kof_editor *e, const char *path,
 				memcpy(name[keep], name[i], sizeof name[0]);
 			}
 			keep++;
+		}
+		/*
+		 * AND A DROPPED BLOCK MAKES THIS DRAFT A PARTIAL VIEW OF THE
+		 * FILE, WHICH IS EXACTLY WHAT `foreign` MEANS.
+		 *
+		 * The file still declares the block and still tests it; what
+		 * this cannot do is hold it - so the panel comes back with one
+		 * matcher fewer than the rule has, and the `if` that named it
+		 * has nothing left to belong to. Silently, the reader saw a
+		 * rule whose remaining evidence was the file-structure measure
+		 * and concluded the rule was written on structure.
+		 *
+		 * Saying so through `foreign` rather than through a warning of
+		 * its own, because the consequence is the one `foreign` already
+		 * governs: Save would write back a rule with the block gone,
+		 * and Save As - deriving a new rule from the part that IS
+		 * modelled - is still a thing a researcher does on purpose.
+		 */
+		if (keep != n && e) {
+			if (e->foreign_w)
+				(*e->foreign_w)++;
+			/*
+			 * AND SAID, not only flagged.
+			 *
+			 * The flag governs saving; this governs understanding.
+			 * Without it the panel showed a rule with one block and
+			 * a file-structure measure, and the only reading
+			 * available was that the author had written it that way
+			 * - when what happened is that a block this build
+			 * cannot hold was left out. Naming the count is enough
+			 * to tell the two apart, and it is a fact rather than a
+			 * guess at which block it was.
+			 */
+			say_note(e, "%u block(s) in this rule are not in this "
+				 "build - the draft is part of the file",
+				 n - keep);
 		}
 		n = keep;
 	}

@@ -693,7 +693,7 @@ static void kept_regions_do_not_move(void)
 		keep[i >> 3] |= (uint8_t)(1u << (i & 7u));
 
 	mark[0] = 0; mark[1] = 64; mark[2] = 512; mark[3] = 640;
-	m = kof_exe_norm_masked(in, n, keep, KOF_EXE_NORM_NULLRUN, out,
+	m = kof_exe_norm_masked(in, n, keep, NULL, KOF_EXE_NORM_NULLRUN, out,
 				sizeof out, mark, mark_out, 4u, NULL);
 
 	check(m > 0 && m < n, "masked: the object still shortens",
@@ -751,7 +751,7 @@ static void a_run_stops_at_the_boundary(void)
 	for (i = 200; i < 300; i++)
 		keep[i >> 3] |= (uint8_t)(1u << (i & 7u));
 
-	m = kof_exe_norm_masked(in, n, keep, KOF_EXE_NORM_NULLRUN, out,
+	m = kof_exe_norm_masked(in, n, keep, NULL, KOF_EXE_NORM_NULLRUN, out,
 				sizeof out, NULL, NULL, 0u, NULL);
 	/* Only [150,200) may collapse: 50 zeros to 2, so 48 bytes go. */
 	check(m == n - 48u, "masked: a run collapses only up to the boundary",
@@ -759,6 +759,76 @@ static void a_run_stops_at_the_boundary(void)
 	check(!memcmp(out + m - (n - 300u) - 100u, in + 200, 100u),
 	      "masked: and the kept half is still all there",
 	      "the fifty zeros inside the kept region are kept zeros");
+}
+
+/*
+ * THE DROP BITMAP, WHICH IS HOW THE STATIC LIBRARY LEAVES THE VIEW.
+ *
+ * A dropped byte is not rewritten and not kept - it is gone, and what follows
+ * it moves down. That is the one thing the keep bitmap cannot express, and it
+ * is why there are two of them.
+ */
+static void a_dropped_span_leaves_the_view(void)
+{
+	static uint8_t in[512], out[512];
+	uint8_t drop[512 / 8];
+	uint64_t i, n = sizeof in, m;
+	uint32_t fired = 0;
+
+	memset(drop, 0, sizeof drop);
+	for (i = 0; i < n; i++)
+		in[i] = (uint8_t)('a' + (i & 7u));
+	/* [100,200) is somebody else's code. */
+	for (i = 100; i < 200; i++)
+		drop[i >> 3] |= (uint8_t)(1u << (i & 7u));
+
+	m = kof_exe_norm_masked(in, n, NULL, drop, KOF_EXE_NORM_NULLRUN, out,
+				sizeof out, NULL, NULL, 0u, &fired);
+	check(m == n - 100u, "masked: a dropped span is gone from the view",
+	      "not rewritten and not kept - removed, so the view is shorter");
+	check((fired & KOF_EXE_NORM_CUTLIB) != 0,
+	      "masked: and the cut is reported",
+	      "the caller decides whether a view is worth making from this");
+	check(!memcmp(out, in, 100u) && !memcmp(out + 100u, in + 200u, 312u),
+	      "masked: what survives is byte for byte, closed up",
+	      "the bytes did not change, they only moved");
+}
+
+/*
+ * AND A LENGTH OF ZERO IS NOT THE SAME AS NOTHING HAPPENING.
+ *
+ * kof_exe_norm_masked returns 0 for "nothing was rewritten" and also for a view
+ * that came out empty, and a caller that reads the length alone cannot tell
+ * them apart - it would take an object whose every byte was dropped for a copy
+ * of its parent. `fired` is what separates them, and this is the test that says
+ * so, because the scanner's normaliser branches on exactly this.
+ */
+static void an_empty_view_is_not_an_unchanged_one(void)
+{
+	static uint8_t in[256], out[256];
+	uint8_t drop[256 / 8];
+	uint64_t i, n = sizeof in, m;
+	uint32_t fired = 0;
+
+	for (i = 0; i < n; i++)
+		in[i] = (uint8_t)('z');
+	memset(drop, 0xff, sizeof drop);        /* all of it is the library */
+
+	m = kof_exe_norm_masked(in, n, NULL, drop, KOF_EXE_NORM_NULLRUN, out,
+				sizeof out, NULL, NULL, 0u, &fired);
+	check(m == 0, "masked: an object dropped in full has an empty view",
+	      "there is no byte left to write");
+	check(fired == KOF_EXE_NORM_CUTLIB,
+	      "masked: and it still reports the cut",
+	      "which is how a caller tells an empty view from an untouched one");
+
+	/* The other zero: nothing to do, so nothing fires. */
+	memset(drop, 0, sizeof drop);
+	fired = 0xffffffffu;
+	m = kof_exe_norm_masked(in, n, NULL, drop, KOF_EXE_NORM_NULLRUN, out,
+				sizeof out, NULL, NULL, 0u, &fired);
+	check(m == 0 && fired == 0, "masked: an untouched object fires nothing",
+	      "same length, and the difference is entirely in `fired`");
 }
 
 /* ------------------------------------------------------------------------
@@ -952,6 +1022,8 @@ int main(void)
 	map_agrees_with_the_transform();
 	kept_regions_do_not_move();
 	a_run_stops_at_the_boundary();
+	a_dropped_span_leaves_the_view();
+	an_empty_view_is_not_an_unchanged_one();
 
 	hex_decodes_a_command();
 	hex_refuses_a_hash();

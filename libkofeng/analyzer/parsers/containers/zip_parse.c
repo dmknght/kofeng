@@ -356,7 +356,7 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 	 * the file could not possibly fill.
 	 *
 	 * WHAT MAKES IT SAFE TO LEAVE THE TAIL DIRTY: nothing reads past the
-	 * count. Every consumer in the tree - this parser, kofexamine,
+	 * count. Every consumer in the tree - this parser, kofexaminer,
 	 * bases/decomp/zip.c - loops `i < z->n_entries`, and the runs go
 	 * through kof_runs_* which bounds on n_runs. Both counts are IN the
 	 * header, so both start at zero here; a parse that gives up early

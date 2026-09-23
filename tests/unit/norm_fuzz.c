@@ -57,6 +57,7 @@ int main(void)
 			if (src[k]  < src[k-1])  src[k]  = src[k-1];
 		}
 		kof_exe_norm_masked(tmp, n, rnd()%2 ? keep : NULL,
+				    rnd()%3 ? NULL : keep,
 				    KOF_EXE_NORM_NULLRUN | KOF_EXE_NORM_UNWIDE,
 				    out, n, mark, mark_out, 64u, NULL);
 		kof_exe_norm_map(tmp, n, KOF_EXE_NORM_NULLRUN, src, dst, 64u);

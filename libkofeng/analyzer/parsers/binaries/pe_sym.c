@@ -333,7 +333,7 @@ uint32_t kof_pe_syms(kof_buf file, const struct kof_pe_info *p,
 	 *
 	 * kofviewer splits the block into SYM_IMP and SYM_EXP by walking it and
 	 * sorting on the UNDEFINED flag, so the order here does not decide what
-	 * lands where. It decides what a reader sees in kofexamine, which
+	 * lands where. It decides what a reader sees in kofexaminer, which
 	 * prints the block in order - and a PE is read imports-first because
 	 * that is the half that says what the file DOES.
 	 */

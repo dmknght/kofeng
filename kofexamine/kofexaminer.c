@@ -448,6 +448,22 @@ static void put_type(const char *(*name)(uint32_t), uint32_t t, int width)
 
 static void print_syms(const uint8_t *blk, uint32_t w);
 
+/*
+ * THE SYMBOL RECORDS THE ENGINE HANDED OVER WITH A RECOVERED OBJECT, or NULL.
+ *
+ * Only a RENDERING carries any - see kof_result.syms. A normalised view's
+ * headers describe the file before the transform, so building a block from them
+ * reads whatever now lies at a stale offset and finds nothing: this tool
+ * printed "symbols none count=0" for a view whose parent has 994 records.
+ *
+ * File scope, beside g_parent_format, because the printer is reached through
+ * the format table and the result is not one of its arguments. Set for the
+ * length of one object and cleared with it, so the file's own symbols are never
+ * printed under a child's name.
+ */
+static const uint8_t *g_decl_syms;
+static uint32_t       g_decl_syms_n;
+
 static void print_elf(const void *view, const struct kof_obj_ctx *ctx,
 		      kof_buf buf)
 {
@@ -485,7 +501,11 @@ static void print_elf(const void *view, const struct kof_obj_ctx *ctx,
 		put_type(kof_inspect_shtype_name, e->sec[i].type, 0);
 		printf("\n");
 	}
-	{
+	if (g_decl_syms && g_decl_syms_n) {
+		/* What the producer said, because this object cannot say it
+		 * itself - see g_decl_syms. */
+		print_syms(g_decl_syms, g_decl_syms_n);
+	} else {
 		static uint8_t blk[KOF_SYM_MAX_BYTES];
 
 		print_syms(blk, kof_elf_syms(buf, e, blk, sizeof blk));
@@ -1630,7 +1650,7 @@ static int src_open(const char *dir)
 		return 0;
 	src_scan(dir, 1);
 	if (!g_n_src)
-		fprintf(stderr, "kofexamine: no signature sources under %s\n",
+		fprintf(stderr, "kofexaminer: no signature sources under %s\n",
 			dir);
 	return 1;
 }
@@ -1992,7 +2012,7 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 
 			if (!kof_dump_object(dir, buf, f, &ctx, &ds, why,
 					     sizeof why)) {
-				fprintf(stderr, "kofexamine: %s\n", why);
+				fprintf(stderr, "kofexaminer: %s\n", why);
 				rc = -1;
 				goto out;
 			}
@@ -2098,11 +2118,11 @@ static int examine(const char *path, int dump, struct kof_engine *eng)
 
 	fd = open(path, O_RDONLY);
 	if (fd < 0) {
-		fprintf(stderr, "kofexamine: cannot open %s\n", path);
+		fprintf(stderr, "kofexaminer: cannot open %s\n", path);
 		return 0;
 	}
 	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
-		fprintf(stderr, "kofexamine: %s is not a regular non-empty file\n",
+		fprintf(stderr, "kofexaminer: %s is not a regular non-empty file\n",
 			path);
 		close(fd);
 		return 0;
@@ -2110,11 +2130,11 @@ static int examine(const char *path, int dump, struct kof_engine *eng)
 	map = kof_map_file_ro(fd, (uint64_t)st.st_size);
 	close(fd);
 	if (!map) {
-		fprintf(stderr, "kofexamine: cannot map %s\n", path);
+		fprintf(stderr, "kofexaminer: cannot map %s\n", path);
 		return 0;
 	}
 	if (dump && !kof_dump_dir_for(path, dir, sizeof dir)) {
-		fprintf(stderr, "kofexamine: path too long to place a dump beside "
+		fprintf(stderr, "kofexaminer: path too long to place a dump beside "
 				"%s\n", path);
 		kof_unmap_file(map, (uint64_t)st.st_size);
 		return -1;
@@ -2369,14 +2389,19 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 
 		if (!kof_dump_child(u->dump_dir, tag, bytes, len, sub,
 				    sizeof sub, why, sizeof why)) {
-			fprintf(stderr, "kofexamine: %s\n", why);
+			fprintf(stderr, "kofexaminer: %s\n", why);
 			u->err = 1;
 			return 0;
 		}
 	}
 	printf("\n");
+	/* For the length of this object only - see g_decl_syms. */
+	g_decl_syms = res->syms;
+	g_decl_syms_n = res->n_syms;
 	if (examine_bytes(kof_buf_make(bytes, len), name, sub, u->touch) < 0)
 		u->err = 1;
+	g_decl_syms = NULL;
+	g_decl_syms_n = 0;
 	return 0;
 }
 
@@ -2414,7 +2439,7 @@ static int unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
 
 	sc = kof_scanner_new(eng);
 	if (!sc) {
-		fprintf(stderr, "kofexamine: out of memory\n");
+		fprintf(stderr, "kofexaminer: out of memory\n");
 		return 0;
 	}
 	kof_scanner_on_debug(sc, on_debug, &u);

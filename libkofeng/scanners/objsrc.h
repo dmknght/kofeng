@@ -132,9 +132,34 @@ struct kof_src_region {
  * a panel row, a rule being written against the view - has to be told which
  * table to read them from.
  */
+/*
+ * THIS OBJECT IS A RENDERING OF ANOTHER, not content that came out of one.
+ *
+ * A normalised view is the only thing that is. It matters because the two are
+ * treated differently in ways that cannot be worked out from the bytes: a view
+ * is not opened again and not normalised again, since everything openable in it
+ * was openable in its parent and was opened there.
+ *
+ * A FLAG AND NOT "HAS A DECLARED REGION TABLE", which is what this was first.
+ * A view of an object whose regions could not be resolved carries no table, so
+ * that test called it content - and the appendix of such a file came out twice,
+ * once from the file and once from its view.
+ */
+void     kof_src_declare_view(struct kof_objsrc *);
+int      kof_src_is_view(const struct kof_objsrc *);
+
 void     kof_src_declare_regions(struct kof_objsrc *, uint8_t fmt,
 				 const struct kof_src_region *, uint32_t n);
 uint8_t  kof_src_region_fmt_of(const struct kof_objsrc *);
+/*
+ * The symbol records a producer hands over with a rendering, because the
+ * rendering's own headers can no longer produce them - see the note on the
+ * definition. Declared before the child is pushed, read wherever the engine
+ * would otherwise build a block.
+ */
+void     kof_src_declare_syms(struct kof_objsrc *, const uint8_t *, uint32_t);
+const uint8_t *kof_src_syms_of(const struct kof_objsrc *, uint32_t *);
+
 uint32_t kof_src_regions_of(const struct kof_objsrc *,
 			    const struct kof_src_region **out);
 uint8_t kof_src_fmt_of(const struct kof_objsrc *);

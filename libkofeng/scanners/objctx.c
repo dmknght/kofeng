@@ -687,6 +687,14 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 		sc->n_pend_rgn = 0;
 		sc->pend_rgn_fmt = 0;
 	}
+	if (sc->pend_view) {
+		kof_src_declare_view(kid);
+		sc->pend_view = 0;
+	}
+	if (sc->n_pend_syms) {
+		kof_src_declare_syms(kid, sc->pend_syms, sc->n_pend_syms);
+		sc->n_pend_syms = 0;
+	}
 	if (sc->kids_left == 0) {
 		/* Refused, and recorded: a container that yields more children than
 		 * the caller allows has not been fully examined, and saying so is
@@ -2970,6 +2978,27 @@ static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
+	/*
+	 * WHAT THE PRODUCER DECLARED BEATS WHAT THE BYTES WOULD YIELD.
+	 *
+	 * Only a rendering carries one - see kof_src_declare_syms - and only
+	 * because its own headers cannot produce it: they describe the file
+	 * before the transform, so building from them reads whatever now lies
+	 * at a stale offset and finds nothing. Tested first and not as a
+	 * fallback, because "nothing" is exactly what the builder returns for
+	 * such an object, and a fallback would never be reached.
+	 */
+	{
+		uint32_t dn = 0;
+		const uint8_t *d = kof_src_syms_of(sc->cur_src, &dn);
+
+		if (d && dn) {
+			if (nbytes)
+				*nbytes = dn;
+			return kof_sym_count(d, dn) ? d : 0;
+		}
+	}
+
 	if (!sc->sym_done) {
 		sc->sym_done = 1;
 		sc->sym_n = 0;
@@ -3015,7 +3044,7 @@ static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
  *   case that must never be skipped.
  *
  *   AN EMPTY DATABASE, or a format value this build cannot place. Both are
- *   "no answer" rather than "no": kofexamine and kofviewer run with no
+ *   "no answer" rather than "no": kofexaminer and kofviewer run with no
  *   database at all, and a tool that then produced no children would be
  *   showing a document as though it carried nothing.
  */
@@ -3850,6 +3879,8 @@ void kof_mod_unpack_mode(struct kof_obj_ctx *ctx, int on)
 	kof_scan_of(ctx)->pend_label_len = 0;
 	kof_scan_of(ctx)->pend_fmt = 0;
 	kof_scan_of(ctx)->n_pend_rgn = 0;
+	kof_scan_of(ctx)->pend_view = 0;
+	kof_scan_of(ctx)->n_pend_syms = 0;
 	kof_scan_of(ctx)->pend_kind = 0;
 	kof_scan_of(ctx)->pend_entry = KOF_ENTRY_NONE;
 	ctx->content = on ? &kof_unpack_vtable : &kof_detect_vtable;
@@ -3909,6 +3940,7 @@ void kof_scan_kids_reset(struct kof_scanner *sc)
 		kof_src_unref(sc->kids[i]);
 	sc->n_kids = 0;
 	sc->n_views = 0;        /* counted out of n_kids - see scan.h */
+	sc->n_carved = 0;
 
 	/* Whatever a module emitted and never closed is not an object, and the
 	 * memory it was holding stops being resident. */

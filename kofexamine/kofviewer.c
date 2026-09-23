@@ -848,7 +848,8 @@ enum ch_what {
 	CH_CMATCH2,     /* what to do to one matcher a condition already names */
 	CH_CSWAP,       /* which other matcher to put in its place */
 	CH_SWITCH,      /* what to do about unsaved work before switching */
-	CH_LOGIC        /* how the next condition at this level attaches */
+	CH_LOGIC,       /* how the next condition at this level attaches */
+	CH_DECLKIND     /* string, hex or regex - what [+ String] adds */
 };
 
 /*
@@ -1222,6 +1223,9 @@ struct view {
 	uint32_t         plg_scored_obj;
 	uint32_t         plg_scored_n;
 	int              plg_scored;
+	/* The blocks came from the object's own cached carve, so their scores
+	 * are certainties and not measurements - see plg_segment. */
+	int              plg_scores_known;
 	/*
 	 * HOW ALIKE THE OBJECT IN FRONT OF THE PANEL IS TO THE DRAFT, by each
 	 * of the three measures, as a percentage.
@@ -2685,6 +2689,11 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	}
 
 	o = &v->obj[v->n_obj];
+	/* The slot may have held an object before - see the reset loop for what
+	 * one owns. */
+	free(o->ovl_str);
+	free(o->ovl_blk);
+	free(o->carve);
 	memset(o, 0, sizeof *o);
 	snprintf(o->name, sizeof o->name, "%s", name);
 	o->packer_ver = -1;
@@ -2720,6 +2729,23 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	 * Copied here rather than pointed at: `res` is the engine's own record
 	 * for one object and does not outlive this call.
 	 */
+	/*
+	 * THE SYMBOLS THE ENGINE HANDED OVER, copied for the same reason the
+	 * regions below are: `res` is the engine's record for one object and
+	 * does not outlive this call. Only a rendering carries any.
+	 */
+	o->sym_declared = 0;
+	if (res && res->syms && res->n_syms) {
+		free(o->sym);
+		o->sym = malloc(res->n_syms);
+		if (o->sym) {
+			memcpy(o->sym, res->syms, res->n_syms);
+			o->sym_n = res->n_syms;
+			o->sym_declared = 1;
+		} else {
+			o->sym_n = 0;
+		}
+	}
 	o->n_rgn = 0;
 	if (res && res->n_region) {
 		uint32_t g;
@@ -3436,6 +3462,10 @@ static uint32_t sym_half_recs(const struct object *o, uint32_t mask,
  */
 static void sym_build(struct object *o)
 {
+	/* The engine already said what this object's symbols are, because the
+	 * object cannot say it itself - see kof_result.syms. */
+	if (o->sym_declared)
+		return;
 	free(o->sym);
 	o->sym = NULL;
 	o->sym_n = 0;
@@ -3631,13 +3661,24 @@ static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 		if (o->n_rgn)
 			o->ctx.resolve_scan = declared_regions;
 
-		/* Once, here, and never while drawing - see struct object. */
-		if (!o->sha256[0])
-			kof_sha256_bytes(o->buf.p, o->buf.n, o->sha256);
-		if (o->fmt && o->info && o->ctx.format == KOF_FMT_ELF)
-			o->emu_why = (uint8_t)kof_emu_unp_gate(&o->ctx, o->info,
-							       o->buf.p,
-							       o->buf.n);
+		/*
+		 * THE DIGEST AND THE EMULATOR GATE ARE NOT COMPUTED HERE ANY
+		 * MORE, AND THAT IS THE WHOLE POINT OF SPILLING AN OBJECT.
+		 *
+		 * Both read every byte: the digest by definition, the gate by
+		 * walking the executable segments for their byte histogram. Run
+		 * on touch, they faulted a spilled object into memory in full -
+		 * a 16MB view read end to end to fill two lines of a properties
+		 * pane the reader may never open, when the hex pane beside it
+		 * shows twenty rows and needs twenty rows' worth of pages.
+		 * That undoes the reason a large child is written to a file and
+		 * mapped rather than copied; see the note on o->mapped.
+		 *
+		 * So each is worked out where it is SHOWN - obj_sha256 and
+		 * obj_emu_why below - and cached in the object exactly as
+		 * before, so it still happens once and still never happens
+		 * while drawing a row that does not ask for it.
+		 */
 		if (o->fmt && o->info &&
 		    (o->ctx.format == KOF_FMT_ELF ||
 		     o->ctx.format == KOF_FMT_PE))
@@ -4170,8 +4211,16 @@ static void log_window(struct view *v)
 	h = kofevt_log_header(v->log);
 
 	for (i = 0; i < v->n_obj; i++) {
-		/* Nothing here owns heap - the buffers are the mapping - so
-		 * clearing is enough and there is nothing to free. */
+		/*
+		 * The buffers are the mapping and are not this loop's, but the
+		 * kept answers ARE - see object.ovl_str, which is heap and is
+		 * kept so that returning to an object does not read it again.
+		 * The note that used to be here said nothing was owned, and it
+		 * stopped being true the moment anything was.
+		 */
+		free(v->obj[i].ovl_str);
+		free(v->obj[i].ovl_blk);
+		free(v->obj[i].carve);
 		memset(&v->obj[i], 0, sizeof v->obj[i]);
 	}
 	memset(v->pe_of, 0, sizeof v->pe_of);
@@ -6618,9 +6667,9 @@ static int plg_mark(struct view *v, const uint8_t *base, uint64_t base_n,
  * Walking an extent with this splits it exactly where it crosses a boundary,
  * so each piece is carved on its own and no block ever straddles one.
  *
- * Linear in the number of spans, which kof_lib_find caps at sixteen.
+ * Linear in the number of spans, which koflib caps - see KOF_LIB_MAX_SPANS_ALL.
  */
-static uint64_t plg_side_run(const struct kof_lib_result *lib, uint64_t pos,
+static uint64_t plg_side_run(const struct kof_lib_all *lib, uint64_t pos,
 			     uint64_t end, uint8_t *side)
 {
 	uint64_t next = end;
@@ -6641,6 +6690,48 @@ static uint64_t plg_side_run(const struct kof_lib_result *lib, uint64_t pos,
 	return next - pos;
 }
 
+/*
+ * THE SAME LIBRARY THE ENGINE WILL SEE - see lib_facts in the scanner.
+ *
+ * Not a convenience. The panel carves blocks and shows which side of enum
+ * kof_plague_side each one is on, and the engine decides that again when it
+ * scores the rule that comes out. If the two worked the library out
+ * differently, a block ticked here as the author's would be scored there as the
+ * library's and the rule would match nothing - with nothing on screen to say
+ * why.
+ *
+ * So the rule is stated once, in the same words: the marker tier only of a
+ * STATIC build, because on a dynamic one its span runs between strings that are
+ * the program's own, and the symbol tier of everything.
+ */
+static int obj_is_static(const struct kof_elf_info *e)
+{
+	uint32_t i;
+
+	if (!e)
+		return 0;
+	for (i = 0; i < e->seg_count; i++)
+		if (e->seg[i].type == 3u)       /* PT_INTERP */
+			return 0;
+	return 1;
+}
+
+static void obj_lib_find(const struct object *o, struct kof_lib_all *out)
+{
+	const struct kof_elf_info *e;
+
+	memset(out, 0, sizeof *out);
+	if (!o || !o->info || o->ctx.format != KOF_FMT_ELF)
+		return;
+	if (!o->buf.p || !o->buf.n)
+		return;
+	e = (const struct kof_elf_info *)o->info;
+	if (obj_is_static(e))
+		kof_lib_find_all(o->buf, e, out);
+	else
+		kof_lib_find_syms(o->buf, e, out);
+}
+
 static void plg_segment(struct view *v)
 {
 	struct object *o = cur_obj(v);
@@ -6653,7 +6744,7 @@ static void plg_segment(struct view *v)
 	uint32_t rgn_mask[PLG_MAX_REGION], quota[PLG_MAX_REGION];
 	uint64_t rgn_bytes[PLG_MAX_REGION];
 	uint32_t n_reg, budget, used, left, cap_acc = 0;
-	struct kof_lib_result lib;
+	struct kof_lib_all lib;
 
 	/*
 	 * TICKED BLOCKS ARE CARRIED, everything else is carved again.
@@ -6677,6 +6768,27 @@ static void plg_segment(struct view *v)
 	v->plg_scored = 0;
 	if (!o || !o->buf.p || !o->buf.n || !v->ext2)
 		return;
+	/*
+	 * WHAT THIS OBJECT'S CARVE PRODUCED LAST TIME - see object.carve. Only
+	 * when nothing is ticked, which is when the answer is identical.
+	 */
+	if (!keep && o->carve_done && o->carve) {
+		for (i = 0; i < o->n_carve && v->ed.dr.n_blk < PLG_MAX_BLOCK;
+		     i++)
+			v->ed.dr.blk[v->ed.dr.n_blk++] = o->carve[i];
+		/*
+		 * AND THEIR SCORES CAME WITH THEM, which is not a shortcut.
+		 * A block carved from this object scores a hundred on it BY
+		 * CONSTRUCTION - every hash came out of these bytes, see the
+		 * note on plg_block.score - so re-running the matcher over the
+		 * whole object would be measuring an arithmetic certainty.
+		 * Only ever taken when nothing is ticked, so every row here is
+		 * this object's own carve and there is nothing else in the
+		 * table to have a real number.
+		 */
+		v->plg_scores_known = 1;
+		return;
+	}
 	/*
 	 * THE REGION VOCABULARY, NOT THE OBJECT'S PARSER, and here the two are
 	 * not the same thing.
@@ -6702,9 +6814,8 @@ static void plg_segment(struct view *v)
 	memset(&lib, 0, sizeof lib);
 	/* Not on a view - its segment offsets are the parent's and are stale;
 	 * see the same test where the scoring set is built. */
-	if (!o->n_rgn && o->ctx.format == KOF_FMT_ELF && o->info)
-		kof_lib_find(o->buf, (const struct kof_elf_info *)o->info,
-			     &lib);
+	if (!o->n_rgn)
+		obj_lib_find(o, &lib);
 
 	/*
 	 * EVERY REGION GETS A SHARE OF THE TABLE, in proportion to its size.
@@ -6780,6 +6891,34 @@ static void plg_segment(struct view *v)
 		for (i = 0; i < n_reg && total; i++)
 			quota[i] += (uint32_t)
 				((uint64_t)left * rgn_bytes[i] / total);
+		/*
+		 * AND THE ROWS THE DIVISION DROPPED ON THE FLOOR.
+		 *
+		 * Each share is a truncating divide, so the shares sum to
+		 * somewhere between budget - (n_reg - 1) and budget, and the
+		 * shortfall is never handed to anybody: the per-region ceiling
+		 * below is the running sum of the shares, so a row nobody was
+		 * given is a row nobody may carve. With five regions that is up
+		 * to four of sixty-four - blocks the object was entitled to and
+		 * the table simply never held.
+		 *
+		 * To the largest region, because that is the one whose target
+		 * had to be coarsened to fit its share: giving the remainder to
+		 * a small region that already describes itself finely buys
+		 * nothing, and giving it to the coarsest one is exactly where a
+		 * finer cut is still wanted.
+		 */
+		{
+			uint32_t sum = 0, big = 0;
+
+			for (i = 0; i < n_reg; i++) {
+				sum += quota[i];
+				if (rgn_bytes[i] > rgn_bytes[big])
+					big = i;
+			}
+			if (n_reg && sum < budget)
+				quota[big] += budget - sum;
+		}
 	}
 
 	for (ri = 0; ri < n_reg && v->ed.dr.n_blk < PLG_MAX_BLOCK; ri++) {
@@ -6916,6 +7055,25 @@ static void plg_segment(struct view *v)
 		}
 		}
 	}
+	/*
+	 * AND KEPT, so arriving here again costs nothing - see object.carve.
+	 * Only the rows this carve produced: a ticked one is the draft's and
+	 * travels with it, not with the object.
+	 */
+	if (!keep && !o->carve_done) {
+		o->carve_done = 1;
+		if (v->ed.dr.n_blk) {
+			o->carve = malloc(v->ed.dr.n_blk * sizeof *o->carve);
+			if (o->carve) {
+				memcpy(o->carve, v->ed.dr.blk,
+				       v->ed.dr.n_blk * sizeof *o->carve);
+				o->n_carve = v->ed.dr.n_blk;
+			} else {
+				o->carve_done = 0;   /* no room: ask again */
+			}
+		}
+	}
+
 }
 
 /*
@@ -6942,6 +7100,7 @@ static void plg_segment(struct view *v)
  * generated rule will see, not an approximation of it. Zero where the draft
  * carries nothing to compare against, which is the state a fresh draft is in.
  */
+
 static void plg_sim_refresh(struct view *v)
 {
 	struct object *o = cur_obj(v);
@@ -6971,32 +7130,22 @@ static void plg_sim_refresh(struct view *v)
 		v->sim_shape = kof_ovl_shape_pct(
 			(const struct kof_elf_info *)o->info,
 			&v->ed.dr.shp, o->buf.n);
-	if (v->ed.dr.n_str || v->ed.dr.n_blkv) {
-		struct kof_ovl_desc *d = malloc(sizeof *d);
-
-		/* One build for both: the two sets come out of the same pass
-		 * over the same bytes - see kof_ovl_build. */
-		if (d) {
-			if (kof_ovl_build(d, o->buf,
-					  (const struct kof_elf_info *)o->info)) {
-				if (v->ed.dr.n_str)
-					v->sim_str = kof_ovl_strings_pct(
-						d->str, d->n_str,
-						v->ed.dr.str, v->ed.dr.n_str);
-				if (v->ed.dr.n_blkv)
-					v->sim_blk = kof_ovl_blocks_pct(
-						d->blk, d->n_blk,
-						v->ed.dr.blkv,
-						v->ed.dr.n_blkv);
-			}
-			free(d);
-		}
+	if ((v->ed.dr.n_str || v->ed.dr.n_blkv) && obj_ovl(o)) {
+		/* The object's own sets, built once - see obj_ovl. */
+		if (v->ed.dr.n_str)
+			v->sim_str = kof_ovl_strings_pct(
+				o->ovl_str, o->n_ovl_str,
+				v->ed.dr.str, v->ed.dr.n_str);
+		if (v->ed.dr.n_blkv)
+			v->sim_blk = kof_ovl_blocks_pct(
+				o->ovl_blk, o->n_ovl_blk,
+				v->ed.dr.blkv, v->ed.dr.n_blkv);
 	}
 }
 
 static void plg_rescore(struct view *v)
 {
-	struct kof_lib_result slib;
+	struct kof_lib_all slib;
 	struct kof_plague_block blk[PLG_MAX_BLOCK];
 	uint32_t pool[PLG_MAX_BLOCK * KOF_PLAGUE_MAX_HASH];
 	struct kof_plague_set *set;
@@ -7066,9 +7215,8 @@ static void plg_rescore(struct view *v)
 	 * honest answer for an object whose library cannot be located: the
 	 * library half is simply not described here.
 	 */
-	if (!o->n_rgn && o->ctx.format == KOF_FMT_ELF && o->info)
-		kof_lib_find(o->buf, (const struct kof_elf_info *)o->info,
-			     &slib);
+	if (!o->n_rgn)
+		obj_lib_find(o, &slib);
 	/*
 	 * AT FUNCTION SCOPE, because kof_plague_object keeps the POINTER and
 	 * not a copy - so the spans have to outlive every feed below. scan.c
@@ -9348,7 +9496,7 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		/* Last, because it is the one that is not a search: it compares
 		 * at one offset, and it is the only rule that constrains the
 		 * matcher to a single marker. */
-		ch_add(c, "find_at (one place)");
+		ch_add(c, "find_at (offset)");
 		/*
 		 * AND find_similar - ALWAYS, because it covers four measures
 		 * and three of them are about the object itself.
@@ -9871,6 +10019,16 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 				ch_add(c, pe_sub[i]);
 		if (!c->n)
 			return;
+	} else if (what == CH_DECLKIND) {
+		/*
+		 * WHAT THE ROW AT THE FOOT OF THE STRINGS TABLE ADDS.
+		 *
+		 * Plain text first because it is what a reader reaches for
+		 * most, then the two that are written as a pattern.
+		 */
+		ch_add(c, "String");
+		ch_add(c, "Hex");
+		ch_add(c, "Regex");
 	} else if (what == CH_WORD) {
 		/*
 		 * MOST SPECIFIC FIRST, and the order is not the enum's.
@@ -10113,8 +10271,8 @@ static void at_warn_if_multi(struct view *v)
 	for (g = 0; g < v->ed.dr.n_grp; g++)
 		if (grp_is_at(v->ed.dr.grp[g].rule)) {
 			say_note(&v->ed,
-				 "find_at is one place - it means a "
-				 "different one in each of %d formats",
+				 "find_at is one offset - it means a "
+				 "different place in each of %d formats",
 				 n_fmt);
 			return;
 		}
@@ -10350,6 +10508,38 @@ static void ch_take(struct view *v)
 						      : ob->ctx.subtype;
 			break;
 		}
+		return;
+	}
+	if (c->what == CH_DECLKIND) {
+		struct decl *d;
+
+		if (v->ed.dr.n_decl >= MAX_DECL)
+			return;
+		/*
+		 * NOT WIRED YET, AND SAID RATHER THAN DONE QUIETLY - see
+		 * DECL_RX. The row is offered because it is the menu this panel
+		 * is meant to have; what is behind it is written later.
+		 */
+		if (c->sel == 2) {
+			say_note(&v->ed, "Regex is not wired yet");
+			return;
+		}
+		/*
+		 * `at` is KOF_BROKEN - the bytes are not in this object and may
+		 * never be. That is a state struct decl already has, for a
+		 * marker carried from another sample, and the table draws it as
+		 * "not here" rather than as an error.
+		 */
+		d = &v->ed.dr.decl[v->ed.dr.n_decl];
+		memset(d, 0, sizeof *d);
+		d->obj = v->ed.cur;
+		d->at = KOF_BROKEN;
+		d->fullword = KOF_WORD_SUBSTRING;
+		d->hex = c->sel == 1 ? DECL_HEX : DECL_STR;
+		snprintf(d->rgn, sizeof d->rgn, "-");
+		v->ed.dr.sel_decl = v->ed.dr.n_decl;
+		v->ed.dr.n_decl++;
+		decl_edit_open(v, v->ed.dr.n_decl - 1u);
 		return;
 	}
 	if (c->what == CH_WORD || c->what == CH_CASE) {
@@ -10897,7 +11087,7 @@ static void cnd_seq(struct view *v)
 static int blk_section_shown(struct view *v);
 
 enum prow_kind {
-	RW_OPT = 0, RW_RANGES, RW_STRHDR, RW_STR, RW_ADDM,
+	RW_OPT = 0, RW_RANGES, RW_STRHDR, RW_STR, RW_ADDS, RW_ADDM,
 	RW_MATCH, RW_MARKERS, RW_ADDC, RW_COND, RW_CMATCH,
 	RW_MATHDR, RW_CNDHDR, RW_CJOIN,
 	/* The block table's heading, its column names and its rows - see
@@ -10977,11 +11167,22 @@ static void prow_build(struct view *v)
 	for (i = 0; i < (uint32_t)OPT_COUNT; i++)
 		if (v->ed.dr.opt_on[i])
 			prow_add(v, RW_OPT, i);
-	if (v->ed.dr.n_decl) {
-		prow_add(v, RW_STRHDR, 0);
-		for (i = 0; i < v->ed.dr.n_decl; i++)
-			prow_add(v, RW_STR, i);
-	}
+	/*
+	 * THE HEADING IS ALWAYS A ROW, BECAUSE IT IS ALWAYS DRAWN.
+	 *
+	 * draw_decl_strings paints it whether or not the table has anything in
+	 * it - an empty table is exactly when the button that fills it has to
+	 * be reachable, see BTN_ADDSTR - and this counted it only when there
+	 * was a string. So a draft with no declared strings, which is every
+	 * plague rule, painted one row more than the model held: "panel rows
+	 * 18, model 17", and every row below was one out, so the last of them
+	 * could not be scrolled to and a click landed on its neighbour. The
+	 * Conditions section is where a reader sees it, being last.
+	 */
+	prow_add(v, RW_STRHDR, 0);
+	for (i = 0; i < v->ed.dr.n_decl; i++)
+		prow_add(v, RW_STR, i);
+	prow_add(v, RW_ADDS, 0);
 	/*
 	 * THE BLOCKS THE ENGINE OFFERS, between the markers and the matchers.
 	 *
@@ -11005,12 +11206,30 @@ static void prow_build(struct view *v)
 	 * about how alike THIS file is by any of them, which is the one thing
 	 * a reader moving between samples needs to see.
 	 */
-	if (cur_obj(v) && cur_obj(v)->ctx.format == KOF_FMT_ELF) {
+	/*
+	 * THE SAME TWO TESTS draw_decl_sim MAKES, and in the same order.
+	 *
+	 * This asked for ELF and the drawer asks for ELF OR PE - a PE is
+	 * offered the one measure that can answer for it, the flow chain -
+	 * so on a PE the panel painted three rows the model had not counted.
+	 * Every row below them was then one out: the clamp stopped short of
+	 * the last, and a click landed on the row above what it pointed at.
+	 * Two conditions describing one table is the shape this whole check
+	 * exists to catch, and it caught it.
+	 */
+	if (cur_obj(v) && (cur_obj(v)->ctx.format == KOF_FMT_ELF ||
+			   cur_obj(v)->ctx.format == KOF_FMT_PE)) {
+		uint32_t n_row = cur_obj(v)->ctx.format == KOF_FMT_ELF
+			       ? (uint32_t)SIM_ROWS : 1u;
+
 		prow_add(v, RW_SIMHDR, 0);
 		prow_add(v, RW_SIMCOL, 0);
-		for (i = 0; i < SIM_ROWS; i++)
+		for (i = 0; i < SIM_ROWS; i++) {
+			if (n_row == 1u && i != SIM_CHAIN)
+				continue;
 			if (sim_row_shown(v, i))
 				prow_add(v, RW_SIM, i);
+		}
 	}
 	/*
 	 * THE ADD BUTTON AFTER THE THINGS IT ADDS TO, not before them.
@@ -11071,7 +11290,18 @@ static void prow_build(struct view *v)
  * sake: with no declarations there was no heading, so the one control that can
  * create the first declaration had nowhere to be.
  */
-#define BTN_ADDSTR "[+ str]"
+/*
+ * THE SAME WORD THE OTHER TWO USE, ON A ROW OF ITS OWN.
+ *
+ * It was "[+ str]" squeezed onto the heading row beside [r], and both things
+ * were wrong: the abbreviation matched nothing else in the panel, and the
+ * heading is TEXT - sec_bar has already written "size  bytes" across it, so a
+ * button positioned from the prefix landed on top of it and the reader saw
+ * "[+ str]ytes". The add row at the foot of a table is the shape the matchers
+ * and the conditions already have, it needs no column arithmetic, and there is
+ * nothing on it to collide with.
+ */
+#define BTN_ADDSTR "[+ String]"
 /* " Strings     word      case         region" - the heading up to and
  * including the region title, so the button's column is measured from it
  * rather than counted by hand. */
@@ -13127,19 +13357,26 @@ static void hit_row_strhdr(struct view *v, uint32_t arg)
 	 * from another sample, and the table already draws it as "not here"
 	 * rather than as an error.
 	 */
-	if (v->adds_c0 >= 0 && g_mx >= v->adds_c0 && g_mx <= v->adds_c1 &&
-	    v->ed.dr.n_decl < MAX_DECL) {
-		struct decl *d = &v->ed.dr.decl[v->ed.dr.n_decl];
+}
 
-		memset(d, 0, sizeof *d);
-		d->obj = v->ed.cur;
-		d->at = KOF_BROKEN;
-		d->fullword = KOF_WORD_SUBSTRING;
-		snprintf(d->rgn, sizeof d->rgn, "-");
-		v->ed.dr.sel_decl = v->ed.dr.n_decl;
-		v->ed.dr.n_decl++;
-		decl_edit_open(v, v->ed.dr.n_decl - 1u);
-	}
+/*
+ * THE ROW AT THE FOOT OF THE STRINGS TABLE - see BTN_ADDSTR.
+ *
+ * Its own handler because it is its own row now. It was a column range tested
+ * inside the HEADING's handler, which is where the button used to be drawn;
+ * moving the button and leaving the test behind would have left a heading that
+ * still created a marker when clicked near the middle.
+ */
+static void hit_row_addstr(struct view *v, uint32_t arg)
+{
+	(void)arg;
+	if (v->ed.dr.n_decl >= MAX_DECL)
+		return;
+	/* WHICH KIND, asked before anything is created - see CH_DECLKIND. The
+	 * three are not variations on one declaration: they are compiled by
+	 * different front ends and spelled in different fields. */
+	ch_open(v, CH_DECLKIND, 0, g_my, g_mx);
+	return;
 }
 
 /*
@@ -13483,25 +13720,10 @@ static int draw_decl_strings(struct out *o, struct view *v, int r)
 				 * stale columns left answering clicks. */
 				v->rgf_c0 = v->rgf_c1 = -1;
 			}
-			/* And the one that creates a marker - see BTN_ADDSTR.
-			 * After [r] because it is the rarer act, and on the
-			 * same row because both are about this table. */
-			if (bcol + w + 1 + (int)sizeof BTN_ADDSTR - 1 <= g_cols) {
-				out_at(o, PR(r), bcol + w + 1);
-				o->col_hint = 0;
-				c0 = o->col_base;
-				out_fmt(o, "\033[100;37m%s" A_OFF, BTN_ADDSTR);
-				v->adds_c0 = c0;
-				v->adds_c1 = o->col_base +
-					     (int)o->col_hint - 1;
-			} else {
-				v->adds_c0 = v->adds_c1 = -1;
-			}
 		}
 		hit_add(v, PR(r), 0, g_cols - 1, hit_row_strhdr, 0);
 	} else {
 		v->rgf_c0 = v->rgf_c1 = -1;
-		v->adds_c0 = v->adds_c1 = -1;
 	}
 	r += 1;
 	v->row_str = PR(r);
@@ -13705,6 +13927,22 @@ static int draw_decl_strings(struct out *o, struct view *v, int r)
 		out_str(o, A_BAD "[x]" A_OFF);
 		hit_add(v, PR(r), 0, g_cols - 1, hit_row_str, i);
 	}
+
+	/*
+	 * AND THE ROW THAT ADDS ONE, closing the table - the shape the matchers
+	 * and the conditions already have, and the reason it is not on the
+	 * heading any more is written beside BTN_ADDSTR.
+	 */
+	if (PR_VIS(r)) {
+		row_start(o, PR(r), 1);
+		v->adds_c0 = 2;
+		out_fmt(o, " " A_ID "%s" A_OFF, BTN_ADDSTR);
+		v->adds_c1 = (int)o->col_hint;
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_addstr, 0);
+	} else {
+		v->adds_c0 = v->adds_c1 = -1;
+	}
+	r++;
 
 	return r;
 }
@@ -14500,8 +14738,39 @@ static void hit_fold(struct view *v, uint32_t which)
 		v->blk_fold = !v->blk_fold;
 }
 
+/*
+ * IS THIS RULE ABOUT SOME OTHER OBJECT?
+ *
+ * Every block it carries scores zero here, so none of them was cut from what
+ * is on screen - see the same test in draft_missing_of, which refuses to write
+ * such a draft back. The panel refuses to CHANGE it for the matching reason:
+ * a block's row shows an offset, a region and a length belonging to the file
+ * it came from, and editing those against this object edits a rule about two
+ * files at once.
+ *
+ * The rule is still SHOWN, and still scored, because that is what opening one
+ * on a different sample is for.
+ */
+static int plg_foreign(const struct view *v)
+{
+	uint32_t i, carried = 0, scored = 0;
+
+	for (i = 0; i < v->ed.dr.n_blk; i++) {
+		if (!v->ed.dr.blk[i].kept)
+			continue;
+		carried++;
+		if (v->ed.dr.blk[i].score)
+			scored++;
+	}
+	return carried && carried == v->ed.dr.n_blk && !scored;
+}
+
 static void hit_plg_tick(struct view *v, uint32_t i)
 {
+	if (plg_foreign(v)) {
+		say_err(&v->ed, "These blocks are not in this object");
+		return;
+	}
 	if (i < v->ed.dr.n_blk)
 		blk_set_picked(&v->ed, i, !v->ed.dr.blk[i].picked);
 }
@@ -14949,10 +15218,9 @@ static int sim_prepare(struct view *v, uint32_t what)
 	 * cut; it does not offer it silently.
 	 */
 	if (what == SIM_IT_STRSET) {
-		struct kof_lib_result lib;
+		struct kof_lib_all lib;
 
-		kof_lib_find(o->buf, (const struct kof_elf_info *)o->info,
-			     &lib);
+		obj_lib_find(o, &lib);
 		if (!lib.n)
 			snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
 				 "%u strings - but no library was found to "
@@ -15106,12 +15374,24 @@ static void sim_recarve(struct view *v)
 	 * a chain is not - see SIM_IT_CHAIN.
 	 */
 	if (!v->ed.dr.sim_use[SIM_IT_CHAIN]) {
-		struct kof_flow_node tmp[KOF_OVLF_CHAIN_MAX];
-		uint32_t m = sim_chain_sweep(v, o, tmp, KOF_OVLF_CHAIN_MAX);
+		/* Once per object - see object.chain. */
+		if (o && !o->chain_done) {
+			struct kof_flow_node tmp[KOF_OVLF_CHAIN_MAX];
+			uint32_t m = sim_chain_sweep(v, o, tmp,
+						     KOF_OVLF_CHAIN_MAX);
 
-		memset(&v->ed.dr.chain, 0, sizeof v->ed.dr.chain);
-		v->ed.dr.has_chain = m &&
-			kof_ovlf_chain_of(tmp, m, &v->ed.dr.chain);
+			o->chain_done = 1;
+			memset(&o->chain, 0, sizeof o->chain);
+			o->has_chain = m &&
+				kof_ovlf_chain_of(tmp, m, &o->chain);
+		}
+		if (o) {
+			v->ed.dr.chain = o->chain;
+			v->ed.dr.has_chain = o->has_chain;
+		} else {
+			memset(&v->ed.dr.chain, 0, sizeof v->ed.dr.chain);
+			v->ed.dr.has_chain = 0;
+		}
 	}
 	if (!v->ed.dr.sim_use[SIM_IT_SHAPE]) {
 		memset(&v->ed.dr.shp, 0, sizeof v->ed.dr.shp);
@@ -15130,24 +15410,20 @@ static void sim_recarve(struct view *v)
 		return;
 	if (!o || !o->info || o->ctx.format != KOF_FMT_ELF)
 		return;
-	d = malloc(sizeof *d);
-	if (!d)
+	/* Built once and shared with plg_sim_refresh - see obj_ovl. */
+	(void)d;
+	if (!obj_ovl(o))
 		return;
-	if (kof_ovl_build(d, o->buf, (const struct kof_elf_info *)o->info)) {
-		if (!v->ed.dr.sim_use[SIM_IT_STRSET]) {
-			v->ed.dr.n_str = d->n_str < DRAFT_MAX_STR
-					 ? d->n_str : DRAFT_MAX_STR;
-			for (i = 0; i < v->ed.dr.n_str; i++)
-				v->ed.dr.str[i] = d->str[i];
-		}
-		if (!v->ed.dr.sim_use[SIM_IT_BLKSET]) {
-			v->ed.dr.n_blkv = d->n_blk < DRAFT_MAX_BLKV
-					  ? d->n_blk : DRAFT_MAX_BLKV;
-			for (i = 0; i < v->ed.dr.n_blkv; i++)
-				v->ed.dr.blkv[i] = d->blk[i];
-		}
+	if (!v->ed.dr.sim_use[SIM_IT_STRSET]) {
+		v->ed.dr.n_str = o->n_ovl_str;
+		for (i = 0; i < o->n_ovl_str; i++)
+			v->ed.dr.str[i] = o->ovl_str[i];
 	}
-	free(d);
+	if (!v->ed.dr.sim_use[SIM_IT_BLKSET]) {
+		v->ed.dr.n_blkv = o->n_ovl_blk;
+		for (i = 0; i < o->n_ovl_blk; i++)
+			v->ed.dr.blkv[i] = o->ovl_blk[i];
+	}
 }
 
 /*
@@ -15269,6 +15545,10 @@ static void hit_grp_pct(struct view *v, uint32_t g)
  */
 static void hit_plg_rgn(struct view *v, uint32_t i)
 {
+	if (plg_foreign(v)) {
+		say_err(&v->ed, "These blocks are not in this object");
+		return;
+	}
 	if (i >= v->ed.dr.n_blk)
 		return;
 	v->ed.dr.blk[i].anywhere = (uint8_t)!v->ed.dr.blk[i].anywhere;
@@ -15279,6 +15559,10 @@ static void hit_plg_rgn(struct view *v, uint32_t i)
  * number. Changing it re-hashes the block: the values depend on it. */
 static void hit_plg_norm(struct view *v, uint32_t i)
 {
+	if (plg_foreign(v)) {
+		say_err(&v->ed, "These blocks are not in this object");
+		return;
+	}
 	struct plg_block *b;
 	struct object *o;
 
@@ -15454,7 +15738,10 @@ static void plg_sync(struct view *v)
 	draft_seed_target(v);
 	if (!v->plg_scored || v->plg_scored_n != v->ed.dr.n_blk ||
 	    v->plg_scored_obj != v->node[v->sel_node].obj) {
-		plg_rescore(v);
+		/* Unless they arrived with the blocks - see plg_scores_known. */
+		if (!v->plg_scores_known)
+			plg_rescore(v);
+		v->plg_scores_known = 0;
 		plg_sim_refresh(v);
 		v->plg_scored = 1;
 		v->plg_scored_n = v->ed.dr.n_blk;
@@ -16106,6 +16393,8 @@ static void draw_decl(struct out *o, struct view *v)
  * that cannot be loaded is weaker, because every instance of it in the malware
  * corpus turned out to be a truncated file rather than a packed one.
  */
+
+
 static const char *emu_why_tag(uint8_t why)
 {
 	return why == KOF_EMU_UNP_WHY_DENSE  ? "Unknown packer"
@@ -16201,7 +16490,7 @@ static void draw_marker_line(struct out *o, struct view *v)
 		else
 			out_fmt(o, "%s%s" A_OFF, pcol, ob->packer);
 		out_str(o, A_DIM "  |  " A_OFF);
-	} else if (emu_why_tag(ob->emu_why)) {
+	} else if (emu_why_tag(obj_emu_why(ob))) {
 		/*
 		 * NO MODULE NAMED IT, AND IT STILL LOOKS PACKED.
 		 *
@@ -16211,8 +16500,9 @@ static void draw_marker_line(struct out *o, struct view *v)
 		 * next best answer in the same place rather than nowhere.
 		 */
 		out_fmt(o, "%s%s" A_OFF,
-			ob->emu_why == KOF_EMU_UNP_WHY_DENSE ? A_BAD : A_WARN,
-			emu_why_tag(ob->emu_why));
+			obj_emu_why(ob) == KOF_EMU_UNP_WHY_DENSE ? A_BAD
+								: A_WARN,
+			emu_why_tag(obj_emu_why(ob)));
 		out_str(o, A_DIM "  |  " A_OFF);
 	}
 
@@ -22567,6 +22857,17 @@ static void prop_event(struct view *v)
 static void prop_build(struct view *v)
 {
 	struct object *ob = cur_obj(v);
+
+	/*
+	 * THE DIGEST, HERE, BECAUSE THIS IS THE ONLY THING THAT PRINTS IT.
+	 *
+	 * It reads every byte of the object. Worked out when an object was
+	 * merely SELECTED, it faulted a spilled view into memory in full to
+	 * fill one row of a pane that may be closed - see the note in
+	 * object_touch. draw_prop reaches this only when the pane is open, and
+	 * the object caches it, so it is still computed once.
+	 */
+	obj_sha256(ob);
 	const char *base = kof_path_sep_last(ob->name);
 	uint32_t i, hit = 0;
 	uint64_t total = 0;
@@ -23503,6 +23804,21 @@ static void emu_here(struct view *v)
 	if (!sc) {
 		snprintf(v->act_msg, sizeof v->act_msg, "Out of memory");
 		return;
+	}
+	/*
+	 * AND THE GATE, HERE, BECAUSE THIS IS WHERE IT WAS ASKED FOR.
+	 *
+	 * It reads every executable segment to decide whether emulating is
+	 * worth it, and it used to run when an object was merely selected -
+	 * which faulted a spilled object in whole for a status-line tag, and
+	 * put the word "emu" on screen about a file nobody had asked to
+	 * emulate. Once per object; obj_emu_why only reports what this left.
+	 */
+	if (!o->emu_why_done && o->fmt && o->info &&
+	    o->ctx.format == KOF_FMT_ELF) {
+		o->emu_why_done = 1;
+		o->emu_why = (uint8_t)kof_emu_unp_gate(&o->ctx, o->info,
+						       o->buf.p, o->buf.n);
 	}
 	/*
 	 * SAID BEFORE IT STARTS, AND WRITTEN STRAIGHT TO THE STATUS ROW.
@@ -30690,6 +31006,10 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 	if (!v->n_obj) {
 		struct object *o = &v->obj[0];
 
+		/* See the reset loop for what an object owns. */
+		free(o->ovl_str);
+		free(o->ovl_blk);
+		free(o->carve);
 		memset(o, 0, sizeof *o);
 		snprintf(o->name, sizeof o->name, "%s", v->path);
 		o->buf = kof_buf_make(v->map, v->map_len);
@@ -31025,6 +31345,10 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 		 */
 		struct object *o = &v->obj[0];
 
+		/* See the reset loop for what an object owns. */
+		free(o->ovl_str);
+		free(o->ovl_blk);
+		free(o->carve);
 		memset(o, 0, sizeof *o);
 		snprintf(o->name, sizeof o->name, "%s", v->path);
 		o->buf = kof_buf_make(v->map, v->map_len);

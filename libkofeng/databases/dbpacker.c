@@ -379,10 +379,13 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 		 * per finding - see the comment on struct kof_pack_mod. Interned
 		 * into the same pool and the same dedup table a finding's variant
 		 * uses (dn), so two modules declaring the same family share the
-		 * bytes. Empty rather than skipped when a module declared none
-		 * (an unpack-kind module never does), so family_off is always a
-		 * real offset to a real string and the loader never has to treat
-		 * it as a special case.
+		 * bytes. Empty rather than skipped when a module declared none,
+		 * so family_off is always a real offset to a real string and the
+		 * loader never has to treat it as a special case.
+		 *
+		 * An UNPACK module may well declare one - the msf decoders do,
+		 * and the scanner's family pass reads exactly this field to run
+		 * a predicted family's unpackers in front of the rest.
 		 */
 		{
 			const char *fam = m->family ? m->family : "";

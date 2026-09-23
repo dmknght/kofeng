@@ -222,7 +222,7 @@ enum { KOF_STV_DEFAULT = 0, KOF_STV_INTERNAL = 1, KOF_STV_HIDDEN = 2,
 /* ---- reading a block ------------------------------------------------------
  *
  * THE CANONICAL READERS. Everything that reads a KSYM block goes through these
- * - the engine, kofexamine, kofviewer and any module - because the alternative
+ * - the engine, kofexaminer, kofviewer and any module - because the alternative
  * is what was there first: three private copies of the same four lines, which
  * is three places to get the bounds wrong and three to forget when the layout
  * moves. The layout HAS moved once already (see the note on version 2).

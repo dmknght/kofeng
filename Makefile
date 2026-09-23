@@ -785,6 +785,12 @@ all: sdk tools databases
 # DIRECTORY, found nothing to do for it and said so - from a clean tree it built
 # no binary and reported success. Phony makes the name mean the tool.
 #
+# THE EXAMINER IS SPELLED kofexaminer FOR THE SAME REASON, ONE STEP FURTHER: the
+# directory kofexamine/ holds the shared code that both it and the viewer are
+# built from, so a tool of the same name read as the library and the library
+# read as the tool. The tool is the examinER; what it is built from keeps the
+# directory's name.
+#
 # The recipe is what makes that visible. A target with prerequisites and no recipe
 # still prints "Nothing to be done" once its prerequisites are built, which is the
 # same sentence the broken version printed - so a working build and a build that
@@ -793,7 +799,7 @@ all: sdk tools databases
 kofscanner:  $(OUT)/bin/kofscanner$(EXE)
 	$(info $(SP)  $<)
 	@$(NOOP)
-kofexamine:  $(OUT)/bin/kofexamine$(EXE)
+kofexaminer:  $(OUT)/bin/kofexaminer$(EXE)
 	$(info $(SP)  $<)
 	@$(NOOP)
 ksigbuilder: $(OUT)/bin/ksigbuilder$(EXE)
@@ -803,14 +809,14 @@ kofviewer:   $(OUT)/bin/kofviewer$(EXE)
 	$(info $(SP)  $<)
 	@$(NOOP)
 
-tools: kofscanner kofexamine ksigbuilder kofviewer kofwatchman
+tools: kofscanner kofexaminer ksigbuilder kofviewer kofwatchman
 
 help:
 	$(info targets:)
 	$(info $(SP)  all           the SDK, all three tools and the databases  (default))
 	$(info $(SP)  sdk           libkofeng.a and the public headers)
 	$(info $(SP)  kofscanner    the scanner)
-	$(info $(SP)  kofexamine    the file examiner)
+	$(info $(SP)  kofexaminer   the file examiner)
 	$(info $(SP)  ksigbuilder   the database builder)
 	$(info $(SP)  kofviewer     the file examiner, navigable)
 	$(info $(SP)  kofwatchman   verdicts over a recorded event log)
@@ -1303,9 +1309,9 @@ $(OUT)/bin/kofscanner$(EXE): $(SCANNER_SRC) $(SCANNER_EXTRA) $(LIB) \
 # database what it already knows about an object. Separate because a second
 # consumer is coming - the viewer - and because the two halves reach for
 # different things: the printer wants the parse, this wants the engine.
-EXAMINE_SRC := kofexamine/kofexamine.c kofexamine/kofinspect.c kofexamine/kofeditor.c
+EXAMINE_SRC := kofexamine/kofexaminer.c kofexamine/kofinspect.c kofexamine/kofeditor.c
 
-$(OUT)/bin/kofexamine$(EXE): $(EXAMINE_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
+$(OUT)/bin/kofexaminer$(EXE): $(EXAMINE_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
                             $(STAMP)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(EXAMINE_SRC) $(KOFEVT_SRC) \
@@ -2284,7 +2290,7 @@ $(TEST)/unit_draft_source$(EXE): tests/unit/draft_source.c $(EDITOR_SRC) \
 # refused with "to generate dependencies you must specify either -M or -MM".
 # The target therefore never built, and because nothing depends on it the only
 # way to find out was to ask for it by name. It is the sanitised twin of the
-# editor's draft reader, so kofexamine had no ASan coverage at all.
+# editor's draft reader, so the examiner had no ASan coverage at all.
 #
 # Spelled like its two siblings above and below: $(CFLAGS) $(ASAN_FLAGS), and
 # no $(DEPTO), because they carry no dep file either.
@@ -2524,7 +2530,7 @@ clean:
 	@$(call RMRF,$(BUILD))
 
 .PHONY: all debug sdk sigs databases unit fixtures test-sigs clean \
-        kofscanner kofexamine ksigbuilder kofviewer kofgrille kofwatchtower kofwatchman \
+        kofscanner kofexaminer ksigbuilder kofviewer kofgrille kofwatchtower kofwatchman \
         kofmontrace tools help
 
 #

@@ -65,6 +65,15 @@ struct kof_objsrc {
 	struct kof_src_region rgn[KOF_SRC_MAX_REGIONS];
 	uint32_t              n_rgn;
 	uint8_t               rgn_fmt;   /* whose vocabulary rgn[].mask uses */
+	uint8_t               is_view;   /* a rendering - see kof_src_declare_view */
+
+	/*
+	 * THE SYMBOLS THIS OBJECT IS TO BE READ WITH, when its own bytes cannot
+	 * produce them - see kof_src_declare_syms. Owned, freed with the source.
+	 * NULL for everything the engine did not render.
+	 */
+	uint8_t              *syms;
+	uint32_t              n_syms;
 };
 
 /*
@@ -116,6 +125,17 @@ void kof_src_declare_fmt(struct kof_objsrc *s, uint8_t fmt)
 {
 	if (s)
 		s->fmt = fmt;
+}
+
+void kof_src_declare_view(struct kof_objsrc *s)
+{
+	if (s)
+		s->is_view = 1;
+}
+
+int kof_src_is_view(const struct kof_objsrc *s)
+{
+	return s && s->is_view;
 }
 
 uint8_t kof_src_region_fmt_of(const struct kof_objsrc *s)
@@ -376,6 +396,47 @@ struct kof_objsrc *kof_src_ref(struct kof_objsrc *s)
 	return s;
 }
 
+/*
+ * THE SYMBOL BLOCK A PRODUCER HANDS OVER WITH THE BYTES.
+ *
+ * WHY A RENDERING NEEDS ONE AT ALL. A symbol block is built from the object's
+ * own section table - .symtab's offset, .strtab's offset - and a normalised
+ * view's headers describe the file BEFORE the padding came out of it. Every
+ * offset in them is stale wherever something collapsed ahead of it, so the
+ * builder reads whatever now lies there and finds nothing: measured on a
+ * uclibc bot, the file yields 677 symbols and its view yields zero. The view
+ * had no SYM_EXP and no SYM_IMP at all, which is the half of the object a
+ * similarity question is most often about.
+ *
+ * SO THE PRODUCER SAYS, exactly as it already says what the regions are. The
+ * normaliser has the parent's block in front of it and knows which of its
+ * records are the toolchain's, so it hands over the records that are left.
+ *
+ * COPIED, because the caller's buffer is the scanner's working one and is
+ * rebuilt for the next object. Freed with the source.
+ */
+void kof_src_declare_syms(struct kof_objsrc *s, const uint8_t *b, uint32_t n)
+{
+	uint8_t *own;
+
+	if (!s || !b || !n)
+		return;
+	own = malloc(n);
+	if (!own)
+		return;         /* the view simply arrives without them */
+	memcpy(own, b, n);
+	free(s->syms);
+	s->syms = own;
+	s->n_syms = n;
+}
+
+const uint8_t *kof_src_syms_of(const struct kof_objsrc *s, uint32_t *n)
+{
+	if (n)
+		*n = s ? s->n_syms : 0u;
+	return s ? s->syms : NULL;
+}
+
 void kof_src_unref(struct kof_objsrc *s)
 {
 	while (s && --s->refs == 0) {
@@ -386,6 +447,7 @@ void kof_src_unref(struct kof_objsrc *s)
 
 		kof_unmap_file(s->map, s->map_len);
 		free(s->heap);
+		free(s->syms);
 		free(s);
 		/* After the free, not before: the account should reflect memory
 		 * that has already been handed back. */

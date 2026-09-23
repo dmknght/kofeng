@@ -515,10 +515,22 @@ void kof_plague_feed(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm
 			 * makes it free: one object in a thousand windows gets
 			 * this far.
 			 */
+			/*
+			 * NG BYTES RAW AND NG+1 DIFFERENCED, because that is
+			 * what the window actually READ - see kof_plague_byte,
+			 * which takes p[k] and p[k+1] for XOR and SUB. Asked
+			 * about NG either way, a window whose last differenced
+			 * byte was the library's first would have been called
+			 * the author's, and the rule this states is that ANY
+			 * overlap disqualifies.
+			 */
+			uint64_t wlen = norm == KOF_PLAGUE_RAW
+				      ? (uint64_t)KOF_PLAGUE_NG
+				      : (uint64_t)KOF_PLAGUE_NG + 1u;
 			uint32_t side = (c->n_lib && p >= c->obj_base &&
 					 pl_in_lib(c,
 						   (uint64_t)(p - c->obj_base) + at,
-						   KOF_PLAGUE_NG))
+						   wlen))
 				      ? (uint32_t)KOF_PLAGUE_SIDE_LIB
 				      : (uint32_t)KOF_PLAGUE_SIDE_USER;
 

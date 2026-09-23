@@ -194,6 +194,35 @@ struct kof_finding {
 	 * guesses the object is.
 	 */
 	struct kof_name_span target, maltype, family, variant, shape;
+
+	/*
+	 * WHAT A SIMILARITY VERDICT MEASURED, AS A NUMBER.
+	 *
+	 * The engine works this out and then writes it into the name -
+	 * "#20a2ecee!Plague?74" - and for a while that text was the only place
+	 * it existed. A host that wanted the number had to parse the name it
+	 * had just been handed, which is the thing the spans above exist to
+	 * stop; and a panel that wanted to show the engine's number instead
+	 * measured the object again for itself.
+	 *
+	 * So the number comes first and the name is crafted from it. `sim_pct`
+	 * is 0..100 and zero for every finding that is not a similarity one -
+	 * which is also what a similarity verdict that measured nothing would
+	 * be, and that verdict is never reported, so the two cannot be
+	 * confused. `sim_of` is the fold that names the SET it was measured
+	 * over, the same value the variant carries, so a host can tell which
+	 * blocks the number is about.
+	 */
+	uint8_t  sim_pct;
+	uint8_t  sim_kind;          /* enum kof_sim_kind */
+	uint32_t sim_of;
+};
+
+/* Which measure a finding's sim_pct came from. */
+enum kof_sim_kind {
+	KOF_SIM_NONE = 0,
+	KOF_SIM_PLAGUE,             /* the declared blocks - kof_plague_score */
+	KOF_SIM_OVERLORD            /* strings, blocks, shape or chain */
 };
 
 /* Non-zero when this finding is a heuristic's - the maltype word is "Heur",
@@ -367,6 +396,31 @@ struct kof_result {
 	uint64_t heur_anomalies;    /* the format's own anomaly word */
 
 	/*
+	 * THE SYMBOL RECORDS THIS OBJECT IS TO BE READ WITH, when its own bytes
+	 * cannot produce them.
+	 *
+	 * Only a RENDERING carries these. A normalised view's headers describe
+	 * the file before the transform, so every offset in them is stale
+	 * wherever something collapsed ahead of it and the builder finds
+	 * nothing: measured on a static bot, the file yields 677 records and
+	 * its view yields zero - no SYM_EXP and no SYM_IMP at all, which is the
+	 * half of an object a similarity question is most often about.
+	 *
+	 * So the producer hands them over, and the engine hands them on. A host
+	 * that builds its own block - kofviewer does - must prefer this one,
+	 * for the reason every other field here exists: a second answer
+	 * computed from what the host can see drifts from the engine's, and
+	 * both look authoritative.
+	 *
+	 * BORROWED FOR THE CALL. The bytes belong to the object and are valid
+	 * until the callback returns; a host that wants them afterwards copies
+	 * them, as it already copies the regions. NULL and 0 for everything the
+	 * engine did not render.
+	 */
+	const uint8_t *syms;
+	uint32_t n_syms;
+
+	/*
 	 * REGIONS THE PRODUCER DECLARED, when nothing could parse them out.
 	 *
 	 * Empty for almost every object: a file is identified and its parser
@@ -444,14 +498,14 @@ const char *kof_broken_name(uint32_t reason);
  *     -> "ELF-x64/Botnet:Mirai#Gen"
  *
  * The engine composes this for every finding, and three other things reproduce
- * it: kofexamine and kofviewer to show a marker row, and kofinspect to decide
+ * it: kofexaminer and kofviewer to show a marker row, and kofinspect to decide
  * WHICH module a scan result belongs to. That last one is not display - it is
  * one half of a string comparison whose other half the engine wrote - so a
  * spelling that drifts there does not look wrong, it silently stops matching.
  *
  * It drifted exactly that way: the family/variant separator moved from "-" to
  * "#" in the engine, kofinspect kept the "-", and every detected sample
- * reported "Hit 0, Skip 1" in the viewer and no verdict at all in kofexamine
+ * reported "Hit 0, Skip 1" in the viewer and no verdict at all in kofexaminer
  * while the scanner called the same file infected.
  *
  * `target` and `variant` may be NULL or empty and are left out when they are.
@@ -864,9 +918,9 @@ enum kof_emu_use {
  * The highest heuristic level this build knows.
  *
  * For a caller that means "everything" rather than a particular number -
- * kofexamine and kofviewer both do, because they look at one object somebody
+ * kofexaminer and kofviewer both do, because they look at one object somebody
  * is sitting in front of. Named so that adding a level moves this and not
- * every caller, which is what the comment in kofexamine has always said it
+ * every caller, which is what the comment in kofexaminer has always said it
  * wanted and could not have until levels existed.
  */
 #define KOF_HEUR_LEVEL_MAX 2u

@@ -532,9 +532,10 @@ static uint64_t keep_bound(const uint8_t *keep, uint64_t n, uint64_t i)
 }
 
 uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
-			     uint32_t ops, uint8_t *out, uint64_t cap,
-			     const uint64_t *mark, uint64_t *mark_out,
-			     uint32_t n_mark, uint32_t *fired)
+			     const uint8_t *drop, uint32_t ops, uint8_t *out,
+			     uint64_t cap, const uint64_t *mark,
+			     uint64_t *mark_out, uint32_t n_mark,
+			     uint32_t *fired)
 {
 	uint64_t i = 0, o = 0, lim = 0;
 	uint32_t q = 0, did = 0;
@@ -552,13 +553,39 @@ uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
 		while (q < n_mark && mark && mark_out && mark[q] <= i)
 			mark_out[q++] = o;
 
+		/*
+		 * DROPPED BEFORE ANYTHING ELSE, AND BEFORE KEPT.
+		 *
+		 * A dropped byte does not reach the view at all, so no rule
+		 * about how to rewrite it can apply - and the one region that
+		 * is otherwise kept whole, CODE, is exactly where the static
+		 * library lives. Tested first because "keep" means "do not
+		 * change this byte", not "do not remove it", and the caller
+		 * asking for both about one byte means the stronger one.
+		 */
+		if (keep_at(drop, i)) {
+			i++;
+			did |= KOF_EXE_NORM_CUTLIB;
+			changed = 1;
+			lim = 0;        /* the cached run bound is stale now */
+			continue;
+		}
 		if (keep_at(keep, i)) {
 			out[o++] = in[i++];
 			continue;
 		}
-		/* Only when the last answer has been used up - see keep_bound. */
-		if (i >= lim)
+		/* Only when the last answer has been used up - see keep_bound.
+		 * Bounded by the next DROPPED byte as well, for the reason a
+		 * run may not straddle a kept one: collapsing across a hole
+		 * would join two stretches that are not adjacent. */
+		if (i >= lim) {
+			uint64_t d;
+
 			lim = keep_bound(keep, n, i);
+			d = keep_bound(drop, n, i);
+			if (d < lim)
+				lim = d;
+		}
 
 		if ((ops & KOF_EXE_NORM_UNWIDE) &&
 		    (k = wide_run(in, lim, i)) >= KOF_EXE_NORM_WIDE_MIN) {
