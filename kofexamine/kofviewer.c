@@ -6389,15 +6389,30 @@ static int plg_kept_any(const struct view *v)
 /*
  * WHICH BLOCK COVERS THE BYTE THE MENU WAS OPENED ON.
  *
- * menu_off is a REGION offset - it is what the pane was showing - and a block
- * records where it was cut from in the FILE, so the two meet through view_map,
- * the same way plg_lit_at meets them through view_unmap going the other way.
+ * menu_off IS ALREADY A FILE OFFSET, and this used to map it again.
+ *
+ * Both places that set it - the hex pane's right click and the panel's
+ * selection - store view_map(...) of the row they were on, so the conversion
+ * from what the pane was showing to where it is in the file has already
+ * happened. A block records a file offset too, so the two are directly
+ * comparable and there is nothing left to convert.
+ *
+ * Mapping twice was invisible on the whole object, because a node covering all
+ * of it has ONE extent and view_map is then the identity. On a REGION it was
+ * not: the file offset went back through that region's runs and came out
+ * somewhere no block covers, so "Which plague block" greyed itself out - the
+ * item is offered only when there is an answer - and the feature looked as
+ * though it had never been wired up at all.
+ *
+ * plg_lit_at goes the other way, from a block's file offset to a place on the
+ * screen, and it still needs view_unmap. The two are not symmetric because
+ * only one of them starts from something the pane measured.
  *
  * n_blk when nothing covers it, which is most bytes of most objects.
  */
 static uint32_t plg_at_byte(const struct view *v)
 {
-	uint64_t fo = view_map(v, v->menu_off, 0);
+	uint64_t fo = v->menu_off;
 	uint32_t i;
 
 	if (fo == KOF_BROKEN)
