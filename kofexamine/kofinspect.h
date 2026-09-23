@@ -906,4 +906,24 @@ struct kof_plague_view {
 uint32_t kof_inspect_plague(const struct kof_scanner *sc,
 			    struct kof_plague_view *out, uint32_t max_out);
 
+/*
+ * THE REGIONS A PRODUCER DECLARED, filtered by mask - the shape resolve_scan
+ * returns.
+ *
+ * A normalised view cannot be asked what its regions are: its headers describe
+ * the file before the transform, so parsing it yields a table over bytes that
+ * have moved, and the one region that only exists there - the static library,
+ * moved to the end under SLIB_CODE and SLIB_DATA - is not in the headers at
+ * all. The engine hands the table over instead, and a tool has only to hold it
+ * and answer from it.
+ *
+ * HERE BECAUSE BOTH TOOLS NEED IT AND THE FILTERING IS THE SAME. They hold the
+ * table differently - the viewer keeps one per object, the examiner one per
+ * callback - so the binding stays with each, and this is the part that was
+ * being written twice.
+ */
+uint32_t kof_declared_regions(const struct kof_scan_region *rgn, uint32_t n_rgn,
+			      uint32_t scan_mask, struct kof_range *out,
+			      uint32_t max_out);
+
 #endif /* KOFENG_KOFINSPECT_H */

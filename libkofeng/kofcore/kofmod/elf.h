@@ -393,7 +393,30 @@ enum kof_scan_elf {
 	 * Note it grows when structure is damaged, not shrinks: zeroing e_shoff leaves
 	 * the .comment and .symtab bytes in place while removing what claimed them, so
 	 * they move from NOLOAD to here. */
-	KOF_SCAN_ELF_UNCLAIMED = 1u << 5
+	KOF_SCAN_ELF_UNCLAIMED = 1u << 5,
+	/*
+	 * WHERE THE STATIC LIBRARY WENT, IN A NORMALISED VIEW.
+	 *
+	 * The view exists to be the object's own content, so the toolchain's
+	 * bytes come out of it - and taken out and thrown away they become a
+	 * blindspot: nothing can look at them, no rule can be written about
+	 * them, and a reader comparing the view with the file cannot account
+	 * for the difference.
+	 *
+	 * So they are not thrown away. They are moved to the end of the view
+	 * and given a region of their own, named after the one they were cut
+	 * from: what came out of CODE is SLIB_CODE and what came out of DATA
+	 * is SLIB_DATA. The partition still holds - every byte of the view is
+	 * in exactly one region - and the thing the cut was for still holds
+	 * too, because a measure or a block anchored to CODE no longer reaches
+	 * them.
+	 *
+	 * ONLY EVER ON A VIEW. A file's own region table never carries these:
+	 * there the library bytes are still inside CODE and DATA, which is
+	 * where the loader put them.
+	 */
+	KOF_SCAN_ELF_SLIB_CODE = 1u << 6,
+	KOF_SCAN_ELF_SLIB_DATA = 1u << 7
 };
 
 #endif /* KOFENG_ELF_H */

@@ -2576,18 +2576,12 @@ static uint32_t declared_regions(const struct kof_obj_ctx *ctx,
 		? (const struct object *)((const char *)ctx
 					  - offsetof(struct object, ctx))
 		: NULL;
-	uint32_t i, n = 0;
 
-	if (!o || !out || !max_out)
+	if (!o)
 		return 0;
-	for (i = 0; i < o->n_rgn && n < max_out; i++) {
-		if (!(o->rgn[i].mask & scan_mask) || !o->rgn[i].len)
-			continue;
-		out[n].off = o->rgn[i].off;
-		out[n].len = o->rgn[i].len;
-		n++;
-	}
-	return n;
+	/* The filtering is shared with the examiner - see
+	 * kof_declared_regions. This function's own job is finding the table. */
+	return kof_declared_regions(o->rgn, o->n_rgn, scan_mask, out, max_out);
 }
 
 static struct object *cur_obj(struct view *v)

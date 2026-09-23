@@ -71,9 +71,11 @@ const char *kof_elf_anomaly_name(unsigned index);
 	X(KOF_SCAN_ELF_CODE)      \
 	X(KOF_SCAN_ELF_DATA)      \
 	X(KOF_SCAN_ELF_NOLOAD)    \
-	X(KOF_SCAN_ELF_UNCLAIMED)
+	X(KOF_SCAN_ELF_UNCLAIMED) \
+	X(KOF_SCAN_ELF_SLIB_CODE) \
+	X(KOF_SCAN_ELF_SLIB_DATA)
 
 extern const uint32_t kof_elf_region_bits[];
-#define KOF_ELF_REGION_COUNT 5u   /* asserted against the array in the .c */
+#define KOF_ELF_REGION_COUNT 7u   /* asserted against the array in the .c */
 
 #endif /* KOFENG_ELF_PARSE_H */

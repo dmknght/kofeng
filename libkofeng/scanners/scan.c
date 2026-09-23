@@ -2120,8 +2120,44 @@ static void lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 {
 	sc->cur_lib.n = 0;
 	sc->cur_lib_ok = 0;
-	if (sc->cur_is_view)
+	if (sc->cur_is_view) {
+		/*
+		 * A VIEW KNOWS WHERE ITS LIBRARY IS BECAUSE IT WAS TOLD.
+		 *
+		 * The bytes are in it - moved to the end under SLIB_CODE and
+		 * SLIB_DATA, see KOF_SCAN_ELF_SLIB_CODE - and nothing here can
+		 * work them out a second time: kof_lib_find reads segment
+		 * offsets, and a view's headers describe the file before the
+		 * transform. The declared table is the answer, and it came from
+		 * this same field one object ago.
+		 *
+		 * WITHOUT THIS THEY ARE THE AUTHOR'S. Every window is then
+		 * KOF_PLAGUE_SIDE_USER, so a block cut from somebody's own code
+		 * is credited by libc - which is the one thing the side
+		 * mechanism exists to stop. Measured when it was missing: ten
+		 * files dropped from infected to suspected, because a rule that
+		 * now scored 10 on library bytes reported before the rule that
+		 * actually recognised them.
+		 */
+		uint32_t i;
+
+		for (i = 0; i < sc->n_cur_rgn &&
+			    sc->cur_lib.n < KOF_LIB_MAX_SPANS_ALL; i++) {
+			if (!(sc->cur_rgn[i].mask &
+			      (KOF_SCAN_ELF_SLIB_CODE |
+			       KOF_SCAN_ELF_SLIB_DATA)))
+				continue;
+			if (!sc->cur_rgn[i].len)
+				continue;
+			sc->cur_lib.span[sc->cur_lib.n].off =
+				sc->cur_rgn[i].off;
+			sc->cur_lib.span[sc->cur_lib.n].len =
+				sc->cur_rgn[i].len;
+			sc->cur_lib.n++;
+		}
+		sc->cur_lib_ok = sc->cur_lib.n != 0;
 		return;
+	}
 	if (!ctx || ctx->format != KOF_FMT_ELF || !ctx->file_header)
 		return;
 	if (!buf.p || !buf.n)
@@ -2252,10 +2288,11 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	uint64_t n, sent = 0;
 	int changed;
 	struct kof_src_region rgn[KOF_SRC_MAX_REGIONS];
+	struct kof_src_region rgn0[KOF_SRC_MAX_REGIONS];
 	uint64_t mark[2u * KOF_SRC_MAX_REGIONS];
 	uint64_t mark_out[2u * KOF_SRC_MAX_REGIONS];
 	uint32_t midx[2u * KOF_SRC_MAX_REGIONS];
-	uint32_t nr, n_mark = 0, fired = 0;
+	uint32_t nr, n_rgn0, n_mark = 0, fired = 0;
 
 	/*
 	 * PE AND ELF ONLY, AND ONLY WHAT WAS NOT ITSELF PRODUCED.
@@ -2358,6 +2395,14 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * it exactly as it did before regions were understood here.
 	 */
 	nr = norm_gather(ctx, rgn, KOF_SRC_MAX_REGIONS);
+	/*
+	 * THE PARENT'S OWN COORDINATES, KEPT. `rgn` is rewritten into the
+	 * view's below, and the library spans are file offsets - so deciding
+	 * which region a span came out of has to be done against the table as
+	 * it was.
+	 */
+	memcpy(rgn0, rgn, nr * sizeof rgn[0]);
+	n_rgn0 = nr;
 
 	/*
 	 * AND THE STATIC LIBRARY, WHICH LEAVES THE VIEW ALTOGETHER.
@@ -2612,6 +2657,76 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	}
 	free(keep);
 	keep = NULL;
+
+	/*
+	 * AND THE LIBRARY BACK ON THE END, UNDER A NAME THAT SAYS WHAT IT IS.
+	 *
+	 * Cut and discarded, those bytes were a blindspot: nothing could look
+	 * at them, no rule could be written about them, and the difference
+	 * between the file and its view could not be accounted for. They are
+	 * moved instead - appended in file order and given a region of their
+	 * own, SLIB_CODE for what came out of CODE and SLIB_DATA for what came
+	 * out of DATA - see KOF_SCAN_ELF_SLIB_CODE.
+	 *
+	 * WHAT THE CUT WAS FOR STILL HOLDS. A block or a measure anchored to
+	 * CODE no longer reaches them, because they are not in CODE any more;
+	 * a similarity taken over the view's own regions is still over the
+	 * author's bytes alone. What changes is that the toolchain's half is
+	 * describable rather than gone.
+	 *
+	 * IT FITS, AND NOT BY LUCK. The body is the input less what was
+	 * dropped and less what the collapse took out; adding the dropped
+	 * bytes back gives the input less the collapse, which is at most the
+	 * input - and `out` is the input's size.
+	 *
+	 * IN FILE ORDER AND IN ONE RUN PER REGION, so each region is one
+	 * extent: the spans are already sorted, so walking them twice - once
+	 * for the code side, once for the data side - lays each down
+	 * contiguously.
+	 */
+	if (lib->n && n_rgn0 && n < buf.n) {
+		static const uint32_t pair[2][2] = {
+			{ (uint32_t)KOF_SCAN_ELF_CODE,
+			  (uint32_t)KOF_SCAN_ELF_SLIB_CODE },
+			{ (uint32_t)KOF_SCAN_ELF_DATA,
+			  (uint32_t)KOF_SCAN_ELF_SLIB_DATA }
+		};
+		uint32_t side, a, b;
+
+		for (side = 0; side < 2u && nr < KOF_SRC_MAX_REGIONS; side++) {
+			uint64_t begin = n;
+
+			for (a = 0; a < lib->n && n < buf.n; a++) {
+				uint64_t off = lib->span[a].off, e, j;
+				int mine = 0;
+
+				if (off >= buf.n)
+					continue;
+				e = lib->span[a].len > buf.n - off
+				  ? buf.n : off + lib->span[a].len;
+				/* Which of the parent's regions these bytes
+				 * came out of - the same table the view's own
+				 * regions were resolved from. */
+				for (b = 0; b < n_rgn0; b++)
+					if (rgn0[b].mask == pair[side][0] &&
+					    off >= rgn0[b].off &&
+					    off < rgn0[b].off + rgn0[b].len) {
+						mine = 1;
+						break;
+					}
+				if (!mine)
+					continue;
+				for (j = off; j < e && n < buf.n; j++)
+					out[n++] = buf.p[j];
+			}
+			if (n > begin) {
+				rgn[nr].mask = pair[side][1];
+				rgn[nr].off = begin;
+				rgn[nr].len = n - begin;
+				nr++;
+			}
+		}
+	}
 
 	/*
 	 * THE UNPACK VTABLE, BORROWED FOR THE LENGTH OF ONE CHILD.

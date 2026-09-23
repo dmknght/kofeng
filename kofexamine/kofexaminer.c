@@ -464,6 +464,29 @@ static void print_syms(const uint8_t *blk, uint32_t w);
 static const uint8_t *g_decl_syms;
 static uint32_t       g_decl_syms_n;
 
+/*
+ * AND THE REGIONS IT DECLARED, for the same reason and with the same lifetime.
+ *
+ * A normalised view's headers describe the file before the transform, so
+ * parsing it gives a table over bytes that have moved - and the static
+ * library, which the view carries at its end under SLIB_CODE and SLIB_DATA, is
+ * in no header at all. Dumped from the parse, the LAYOUT file said the view had
+ * five ordinary regions and nothing else; the engine's table says where the
+ * toolchain's half went.
+ */
+static struct kof_scan_region g_decl_rgn[KOF_MAX_REGIONS];
+static uint32_t               g_decl_rgn_n;
+
+static uint32_t declared_regions(const struct kof_obj_ctx *ctx,
+				 uint32_t scan_mask, struct kof_range *out,
+				 uint32_t max_out)
+{
+	(void)ctx;
+	/* The filtering is shared with the viewer - see kof_declared_regions. */
+	return kof_declared_regions(g_decl_rgn, g_decl_rgn_n, scan_mask, out,
+				    max_out);
+}
+
 static void print_elf(const void *view, const struct kof_obj_ctx *ctx,
 		      kof_buf buf)
 {
@@ -1915,6 +1938,13 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 		printf("%s%s%s\n", C_NAME, display, C_OFF);
 		f = kof_inspect_identify(buf, &ctx, &view);
 		g_parent_format = ctx.format;
+		/*
+		 * WHAT THE PRODUCER SAID THIS OBJECT'S REGIONS ARE beats what
+		 * its bytes can be parsed into - see g_decl_rgn. Installed
+		 * after the identify, which is what sets the parser's own.
+		 */
+		if (g_decl_rgn_n)
+			ctx.resolve_scan = declared_regions;
 		if (!f) {
 			printf("  format    %sunrecognised%s, %s%llu%s bytes\n",
 			       C_WARN, C_OFF, C_SIZE,
@@ -2398,10 +2428,16 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	/* For the length of this object only - see g_decl_syms. */
 	g_decl_syms = res->syms;
 	g_decl_syms_n = res->n_syms;
+	g_decl_rgn_n = res->n_region < KOF_MAX_REGIONS ? res->n_region
+						       : KOF_MAX_REGIONS;
+	if (g_decl_rgn_n)
+		memcpy(g_decl_rgn, res->region,
+		       g_decl_rgn_n * sizeof g_decl_rgn[0]);
 	if (examine_bytes(kof_buf_make(bytes, len), name, sub, u->touch) < 0)
 		u->err = 1;
 	g_decl_syms = NULL;
 	g_decl_syms_n = 0;
+	g_decl_rgn_n = 0;
 	return 0;
 }
 

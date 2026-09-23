@@ -1087,6 +1087,27 @@ struct layout_row {
 	const char *name;
 };
 
+uint32_t kof_declared_regions(const struct kof_scan_region *rgn, uint32_t n_rgn,
+			      uint32_t scan_mask, struct kof_range *out,
+			      uint32_t max_out)
+{
+	uint32_t i, n = 0;
+
+	if (!rgn || !out || !max_out)
+		return 0;
+	for (i = 0; i < n_rgn && n < max_out; i++) {
+		/* A row of no length says the region is not in this object,
+		 * which is the same answer as no row at all - see
+		 * declared_resolve_scan in the engine, which drops them too. */
+		if (!(rgn[i].mask & scan_mask) || !rgn[i].len)
+			continue;
+		out[n].off = rgn[i].off;
+		out[n].len = rgn[i].len;
+		n++;
+	}
+	return n;
+}
+
 static int dump_layout(const char *dir, const struct kof_parser *f,
 		       const struct kof_obj_ctx *ctx, char *err, uint32_t err_cap)
 {
