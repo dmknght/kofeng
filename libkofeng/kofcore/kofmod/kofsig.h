@@ -2921,6 +2921,68 @@ enum kof_analyze {
 				     (uint64_t)(off), (uint64_t)(len)))
 
 /*
+ * THE PLACES AN OFFSET CAN BE COUNTED FROM, NAMED.
+ *
+ * Nothing new is computed here. All three are already in the context above
+ * and a rule has always been able to write them, because the offset is an
+ * ordinary expression - that is the line the design rests on and it does not
+ * move. What was missing was a LIST OF NAMES for them, and the editor had
+ * invented its own: a host that spells the engine's facts in its own words is
+ * a second vocabulary to disagree with the first, which is the mistake
+ * kof_touch_name and the region accessors exist to prevent one level down.
+ *
+ * So the names live with the facts, and the tools read them.
+ *
+ * BOF IS NOT A FOURTH THING. It is the object's first byte, which is offset
+ * zero, which is what a plain number already meant - so its C spelling is
+ * nothing at all and a rule written against it is a bare literal, exactly as
+ * every such rule is written today. Naming it is what lets an author who has
+ * moved a matcher to the entry point move it back.
+ *
+ * BOF, NOT "FILE START", and the difference is not pedantry: an archive
+ * member, a carved payload and a normalised view are each an OBJECT with its
+ * own offset zero, and none of them starts where the file on disk does.
+ * Rules are written in object coordinates and this is the beginning of them.
+ *
+ * EOF IS ONE PAST THE LAST BYTE, so every offset counted from it is NEGATIVE.
+ * `eof - 8` is the last eight bytes; `eof` itself and anything above it is
+ * outside the object, which find_str_at answers with a no rather than a read.
+ *
+ * ENTRY CAN BE ABSENT. ctx->entry_off is KOF_NA for a format with no such
+ * notion and KOF_BROKEN when it could not be resolved, and arithmetic on
+ * either lands outside the object - so a rule anchored there simply does not
+ * fire on an object that has no entry point. That is the right answer and it
+ * is why the bound check is the host's.
+ */
+enum kof_anchor {
+	KOF_ANCHOR_BOF = 0,     /* the object's first byte, which is 0     */
+	KOF_ANCHOR_ENTRY,       /* ctx->entry_off                          */
+	KOF_ANCHOR_EOF,         /* ctx->obj_size - one past the last byte  */
+	KOF_ANCHOR_COUNT
+};
+
+/*
+ * THE C TEXT OF ONE, which is here and not in the tool that writes it.
+ *
+ * A generator emits this into a signature source and an importer reads it
+ * back out of one, so it is the spelling of an ABI field and not a label a
+ * panel chose. Empty for BOF - see above.
+ */
+static inline const char *kof_anchor_expr(int anchor)
+{
+	return anchor == KOF_ANCHOR_ENTRY ? "ctx->entry_off"
+	     : anchor == KOF_ANCHOR_EOF   ? "ctx->obj_size" : "";
+}
+
+/* And the short word a person picks it by, which has to fit in a table cell
+ * beside the matcher rather than on a line of its own. */
+static inline const char *kof_anchor_word(int anchor)
+{
+	return anchor == KOF_ANCHOR_ENTRY ? "entry"
+	     : anchor == KOF_ANCHOR_EOF   ? "eof" : "bof";
+}
+
+/*
  * READING SCALARS OUT OF THE OBJECT
  *
  *     if (kof_u16(0) == 0x5a4d) ...

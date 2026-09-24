@@ -9594,9 +9594,19 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		 * and is visible in the row either way. Typing a step is the
 		 * part still to design.
 		 */
-		for (i = 1; i < GRP_AT_BASE_COUNT; i++) {
+		/*
+		 * FROM ZERO, so bof is on the list.
+		 *
+		 * The loop started at one while base zero had no name, and
+		 * that left the menu one way: a matcher moved to the entry
+		 * point could not be moved back, because the only spelling of
+		 * "count from the start" was to retype the offset. bof is an
+		 * anchor like the other two now - see enum kof_anchor - and
+		 * the list says so.
+		 */
+		for (i = 0; i < KOF_ANCHOR_COUNT; i++) {
 			snprintf(t, sizeof t, "%s (engine)",
-				 grp_at_base_word((int)i));
+				 kof_anchor_word((int)i));
 			ch_add(c, t);
 		}
 		/*
@@ -11050,14 +11060,14 @@ static void ch_take(struct view *v)
 			for (k = 0; d && k < d->n_hits; k++) {
 				if (row++ == c->sel) {
 					q->at_off = (int64_t)d->hits[k];
-					q->at_base = GRP_AT_ABS;
+					q->at_anchor = KOF_ANCHOR_BOF;
 					return;
 				}
 				if (!rel || d->hits[k] < e)
 					continue;
 				if (row++ == c->sel) {
 					q->at_off = (int64_t)(d->hits[k] - e);
-					q->at_base = GRP_AT_ENTRY;
+					q->at_anchor = KOF_ANCHOR_ENTRY;
 					return;
 				}
 			}
@@ -11068,10 +11078,12 @@ static void ch_take(struct view *v)
 			 * the rule.
 			 */
 			if (c->sel >= row) {
-				int b = c->sel - row + 1;
+				/* Zero-based, because the list now starts at
+				 * bof - see where it is built. */
+				int b = c->sel - row;
 
-				if (b < GRP_AT_BASE_COUNT)
-					q->at_base = (uint8_t)b;
+				if (b >= 0 && b < KOF_ANCHOR_COUNT)
+					q->at_anchor = (uint8_t)b;
 			}
 		}
 	} else if (c->what == CH_RULE) {
@@ -14488,7 +14500,7 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 			 * row: the thing that says where this matcher looks.
 			 */
 			if (grp_is_at(q->rule))
-				grp_at_text(q->at_base, q->at_off, nm,
+				grp_at_text(q->at_anchor, q->at_off, nm,
 					    sizeof nm, 0);
 			else if (grp_has_range(&v->ed, g))
 				rng_name_of(cur_obj(v)->fmt, grp_mask(&v->ed, g), nm,

@@ -464,26 +464,16 @@ static inline void decl_attr_text(const struct decl *d, char *out, size_t cap)
  *
  * SIGNED, because a displacement backwards from the entry point is a thing
  * somebody will write - the bytes just before an entry are as much a marker as
- * the bytes at it - and a parser that cannot read "- 8" reads "8".
+ * the bytes at it - and a parser that cannot read "- 8" reads "8". It is also
+ * the only way to write an eof anchor, which counts backwards by definition.
+ *
+ * THE ANCHORS ARE THE ENGINE'S AND NOT THIS FILE'S - see enum kof_anchor in
+ * kofsig.h. There was a grp_at_base here with its own two names and its own
+ * two spellings, which is a host inventing words for the engine's facts: the
+ * offsets it named have always been ctx->entry_off and a bare literal, both
+ * of them ABI. What is left here is the COMPOSITION - an anchor with a step
+ * written out, and read back - because that is the editor's own problem.
  */
-enum grp_at_base {
-	GRP_AT_ABS = 0,     /* the displacement is the offset itself      */
-	GRP_AT_ENTRY,       /* ctx->entry_off                             */
-	GRP_AT_BASE_COUNT
-};
-
-/* The C text of a base, which is also what the importer looks for. */
-static inline const char *grp_at_base_expr(int base)
-{
-	return base == GRP_AT_ENTRY ? "ctx->entry_off" : "";
-}
-
-/* And what the author is shown, which has to be short: it sits in a row field
- * beside the matcher, not on a line of its own. */
-static inline const char *grp_at_base_word(int base)
-{
-	return base == GRP_AT_ENTRY ? "entry" : "";
-}
 
 /*
  * WRITING ONE OUT - the same text for the screen and for the file, differing
@@ -497,7 +487,7 @@ static inline const char *grp_at_base_word(int base)
 static inline void grp_at_text(int base, int64_t off, char *out, size_t cap,
 			       int as_c)
 {
-	const char *b = as_c ? grp_at_base_expr(base) : grp_at_base_word(base);
+	const char *b = as_c ? kof_anchor_expr(base) : kof_anchor_word(base);
 	const char *u = as_c ? "u" : "";
 	unsigned long long mag = off < 0 ? (unsigned long long)-(off + 1) + 1ull
 					 : (unsigned long long)off;
@@ -530,30 +520,37 @@ static inline void grp_at_text(int base, int64_t off, char *out, size_t cap,
  */
 static inline const char *grp_at_parse(const char *s, int *base, int64_t *off)
 {
-	int b = GRP_AT_ABS;
+	int b = KOF_ANCHOR_BOF;
 	int64_t v = 0;
 	char *end = NULL;
-	int i;
+	int i, named = 0;
 
 	while (*s == ' ' || *s == '\t')
 		s++;
 	/*
-	 * The base first, and by its C text, because that is the only spelling
-	 * that can appear here: this reads generated source. `ctx->` is
-	 * optional so that a hand written rule that took the context by
-	 * another name, or wrote the field bare, is still understood rather
-	 * than silently read as zero - which is the whole fault being fixed.
+	 * The anchor first, and by its C text, because that is the spelling
+	 * generated source carries. `ctx->` is optional so that a hand
+	 * written rule that took the context by another name, or wrote the
+	 * field bare, is still understood rather than silently read as zero -
+	 * which is the whole fault being fixed.
+	 *
+	 * FROM ZERO AND NOT FROM ONE. BOF has a word now - "bof" - which is
+	 * what the row prints for a plain offset, so the loop has to be able
+	 * to read it back. Its C text is empty and is skipped below, because
+	 * an empty prefix matches everything.
 	 */
-	for (i = 1; i < GRP_AT_BASE_COUNT; i++) {
-		const char *e = grp_at_base_expr(i);
+	for (i = 0; i < KOF_ANCHOR_COUNT; i++) {
+		const char *e = kof_anchor_expr(i);
 		size_t n = strlen(e);
 		const char *f = strncmp(e, "ctx->", 5) ? e : e + 5;
-		const char *w = grp_at_base_word(i);
+		const char *w = kof_anchor_word(i);
 
-		if (!strncmp(s, e, n)) { b = i; s += n; break; }
-		if (!strncmp(s, f, strlen(f))) { b = i; s += strlen(f); break; }
+		if (n && !strncmp(s, e, n)) { b = i; s += n; named = 1; break; }
+		if (n && !strncmp(s, f, strlen(f))) {
+			b = i; s += strlen(f); named = 1; break;
+		}
 		/*
-		 * AND THE SHORT NAME THE PANEL SHOWS - "entry".
+		 * AND THE SHORT NAME THE PANEL SHOWS - "entry", "eof", "bof".
 		 *
 		 * Read here so one syntax serves both directions: the row
 		 * prints "entry + 0x10" and the box the author types into
@@ -561,19 +558,28 @@ static inline const char *grp_at_parse(const char *s, int *base, int64_t *off)
 		 * spelling and demand another, which is a control that
 		 * disagrees with its own label.
 		 *
-		 * Last of the three, because "entry" is a prefix of
-		 * "entry_off" and taking it first would leave "_off" behind
-		 * for the displacement reader to choke on.
+		 * Last, because "entry" is a prefix of "entry_off" and taking
+		 * it first would leave "_off" behind for the displacement
+		 * reader to choke on.
 		 */
 		if (*w && !strncmp(s, w, strlen(w))) {
 			b = i;
 			s += strlen(w);
+			named = 1;
 			break;
 		}
 	}
 	while (*s == ' ' || *s == '\t')
 		s++;
-	if (b != GRP_AT_ABS) {
+	/*
+	 * WHETHER A NAME WAS CONSUMED, and not which anchor it was.
+	 *
+	 * This asked `b != KOF_ANCHOR_BOF`, which held while base zero had no
+	 * spelling. It has one now, so "bof + 0x10" and a bare "0x10" are
+	 * both BOF and they are read differently: after a name the step needs
+	 * its sign, without one the number IS the step.
+	 */
+	if (named) {
 		/* A displacement, if there is one. `+` and `-` only: anything
 		 * else is the end of the argument, and a base on its own is a
 		 * complete answer. */
@@ -712,7 +718,7 @@ struct group {
 	 * WHERE, for rule 3 - the place kof_find_str_at compares at.
 	 *
 	 * A base and a signed displacement from it, not a bare offset - see
-	 * enum grp_at_base for why the base has to be there.
+	 * enum kof_anchor in kofsig.h for why the anchor has to be there.
 	 *
 	 * A matcher with this rule does not search: it is one comparison the
 	 * length of the pattern, at a place the author names. So it carries an
@@ -725,7 +731,7 @@ struct group {
 	 * so the offset control offers those rather than asking for typing.
 	 */
 	int64_t  at_off;
-	uint8_t  at_base;           /* enum grp_at_base - what at_off is from */
+	uint8_t  at_anchor;         /* enum kof_anchor - what at_off is from */
 	char     note[512];         /* the author's note, emitted as a comment */
 	/* How far it is scrolled inside its own box, for the same reason the
 	 * module's comment has one: sliding the whole panel to read the end of

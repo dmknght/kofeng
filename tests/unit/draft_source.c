@@ -337,15 +337,15 @@ static void at_place_is_kept(void)
 	CK(e.dr.n_grp == 1);
 	if (e.dr.n_grp) {
 		CK(e.dr.grp[0].rule == 3);
-		CK(e.dr.grp[0].at_base == GRP_AT_ENTRY);
+		CK(e.dr.grp[0].at_anchor == KOF_ANCHOR_ENTRY);
 		CK(e.dr.grp[0].at_off == 236);
 		/* And back out as C, which is what Save writes. */
-		grp_at_text(e.dr.grp[0].at_base, e.dr.grp[0].at_off,
+		grp_at_text(e.dr.grp[0].at_anchor, e.dr.grp[0].at_off,
 			    txt, sizeof txt, 1);
 		EQ(txt, "ctx->entry_off + 0xecu");
 		/* And as the panel shows it, which has to be short and must
 		 * not be a file offset the author would read as one. */
-		grp_at_text(e.dr.grp[0].at_base, e.dr.grp[0].at_off,
+		grp_at_text(e.dr.grp[0].at_anchor, e.dr.grp[0].at_off,
 			    txt, sizeof txt, 0);
 		EQ(txt, "entry + 0xec");
 	}
@@ -367,7 +367,7 @@ static void at_place_forms(void)
 
 	/* A base on its own - rst_00.c, and the commonest form there is. */
 	grp_at_parse("ctx->entry_off, s0", &b, &off);
-	CK(b == GRP_AT_ENTRY);
+	CK(b == KOF_ANCHOR_ENTRY);
 	CK(off == 0);
 	grp_at_text(b, off, txt, sizeof txt, 1);
 	EQ(txt, "ctx->entry_off");          /* not "+ 0x0" */
@@ -375,19 +375,19 @@ static void at_place_forms(void)
 	/* A plain number, which is what this field held before and still the
 	 * default: an occurrence picked off the marker is an offset. */
 	grp_at_parse("0x400, s0", &b, &off);
-	CK(b == GRP_AT_ABS);
+	CK(b == KOF_ANCHOR_BOF);
 	CK(off == 0x400);
 
 	/* Decimal too, because somebody typing one is not an error - the old
 	 * reader took base 0 for this reason and that part was right. */
 	grp_at_parse("1024, s0", &b, &off);
-	CK(b == GRP_AT_ABS);
+	CK(b == KOF_ANCHOR_BOF);
 	CK(off == 1024);
 
 	/* Backwards. The bytes before an entry are as much a marker as the
 	 * bytes at it, and an unsigned field could not say so. */
 	grp_at_parse("ctx->entry_off - 8u, s0", &b, &off);
-	CK(b == GRP_AT_ENTRY);
+	CK(b == KOF_ANCHOR_ENTRY);
 	CK(off == -8);
 	grp_at_text(b, off, txt, sizeof txt, 0);
 	EQ(txt, "entry - 0x8");
@@ -395,8 +395,46 @@ static void at_place_forms(void)
 	/* Written without the context name, which a hand-edited rule may be.
 	 * Reading it as 0 is the fault being fixed, so it is tested. */
 	grp_at_parse("entry_off + 2, s0", &b, &off);
-	CK(b == GRP_AT_ENTRY);
+	CK(b == KOF_ANCHOR_ENTRY);
 	CK(off == 2);
+
+	/*
+	 * EOF, WHICH IS ONLY EVER COUNTED BACKWARDS - see enum kof_anchor.
+	 * ctx->obj_size is one past the last byte, so the last eight of them
+	 * are eof - 8 and nothing useful sits above it.
+	 */
+	grp_at_parse("ctx->obj_size - 0x40u, s0", &b, &off);
+	CK(b == KOF_ANCHOR_EOF);
+	CK(off == -0x40);
+	grp_at_text(b, off, txt, sizeof txt, 1);
+	EQ(txt, "ctx->obj_size - 0x40u");
+	grp_at_text(b, off, txt, sizeof txt, 0);
+	EQ(txt, "eof - 0x40");
+	/* And the field name on its own, as a hand written rule may spell it. */
+	grp_at_parse("obj_size - 4, s0", &b, &off);
+	CK(b == KOF_ANCHOR_EOF);
+	CK(off == -4);
+
+	/*
+	 * BOF WRITES A BARE LITERAL, AND THAT IS THE POINT.
+	 *
+	 * Naming base zero must not change one byte of a shipped signature:
+	 * every AT rule written from the start of the object is a plain
+	 * number today and stays one. The name exists for the panel, which is
+	 * the other direction below.
+	 */
+	grp_at_text(KOF_ANCHOR_BOF, 0x10, txt, sizeof txt, 1);
+	EQ(txt, "0x10u");
+	grp_at_text(KOF_ANCHOR_BOF, 0x10, txt, sizeof txt, 0);
+	EQ(txt, "bof + 0x10");
+	/* And read back from the panel's own spelling, which is what the box
+	 * an author types into hands over. */
+	grp_at_parse("bof + 0x10", &b, &off);
+	CK(b == KOF_ANCHOR_BOF);
+	CK(off == 0x10);
+	grp_at_parse("bof", &b, &off);
+	CK(b == KOF_ANCHOR_BOF);
+	CK(off == 0);
 }
 
 /*

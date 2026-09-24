@@ -2109,7 +2109,7 @@ void grp_seed_at(struct kof_editor *e, uint32_t g)
 			/* An occurrence is a file offset, so it seeds the
 			 * literal base. Naming a base is the author's choice
 			 * and is made on the WHERE control. */
-			e->dr.grp[g].at_base = GRP_AT_ABS;
+			e->dr.grp[g].at_anchor = KOF_ANCHOR_BOF;
 			e->dr.grp[g].at_off = at == KOF_BROKEN
 					    ? 0 : (int64_t)at;
 			return;
@@ -2151,7 +2151,7 @@ int grp_same_set(struct kof_editor *e, uint32_t a, uint32_t b)
 			return 0;
 		/* And the base: "entry" and "0x0" print differently, mean
 		 * different things and must not fold into one call. */
-		if (e->dr.grp[a].at_base != e->dr.grp[b].at_base)
+		if (e->dr.grp[a].at_anchor != e->dr.grp[b].at_anchor)
 			return 0;
 	} else if (grp_mask(e, a) != grp_mask(e, b)) {
 		return 0;
@@ -3488,7 +3488,7 @@ void emit_call_as(FILE *f, struct kof_editor *e, uint32_t g, int force_multi)
 	if (grp_is_at(q->rule)) {
 		char at[64];
 
-		grp_at_text(q->at_base, q->at_off, at, sizeof at, 1);
+		grp_at_text(q->at_anchor, q->at_off, at, sizeof at, 1);
 		fprintf(f, "kof_find_str_at(%s", at);
 		for (i = 0; i < e->dr.n_decl; i++)
 			if (e->dr.decl[i].grp & (1u << g)) {
@@ -4946,11 +4946,11 @@ shc_done:
 			 * them imported as "offset 0".
 			 */
 			if (grp_is_at(rule)) {
-				int base = GRP_AT_ABS;
+				int base = KOF_ANCHOR_BOF;
 				int64_t off = 0;
 
 				q = grp_at_parse(q + 1, &base, &off);
-				g->at_base = (uint8_t)base;
+				g->at_anchor = (uint8_t)base;
 				g->at_off = off;
 			} else {
 				q = src_ident(q + 1, id, sizeof id);
