@@ -388,6 +388,63 @@ static inline const char *grp_rule_label(int rule)
 }
 
 /*
+ * THE TWO ATTRIBUTES OF A MARKER, SPELLED ONCE.
+ *
+ * They were two columns in the viewer's string table, twenty-one characters
+ * wide between them, and what they held sat at its default on most rows. One
+ * column now carries both, so there are two spellings of one pair and they
+ * are here rather than in the panel that draws them: kofexaminer prints a
+ * declaration too, and a second set of words for the same fact is a second
+ * vocabulary to disagree with the first - the reason grp_rule_word is here
+ * and not in the chooser that shows it.
+ *
+ * THE CELL IS "<case>:<word>" - e:pattern, i:fword, e:token. Case first
+ * because it is one character and the eye reads the column as a pair with a
+ * fixed left edge; "fword" rather than "fullword" because the cell is nine
+ * characters wide at its widest and "i:fullword" is eleven.
+ *
+ * A REGEX HAS NEITHER. Both attributes are answered by the matcher that walks
+ * the pattern, and a regex carries its own case rule and its own boundaries
+ * inside the expression - so the cell says so with a dash and the panel makes
+ * it unclickable, rather than offering a menu that would write a field the
+ * matcher never reads.
+ */
+static inline const char *decl_word_word(int w)
+{
+	return w == KOF_WORD_TOKEN ? "token"
+	     : w == KOF_WORD_FULLWORD ? "fullword" : "pattern";
+}
+
+/* The same three, in the width the cell has. Only fullword differs. */
+static inline const char *decl_word_short(int w)
+{
+	return w == KOF_WORD_TOKEN ? "token"
+	     : w == KOF_WORD_FULLWORD ? "fword" : "pattern";
+}
+
+/* Non-zero when the marker has attributes at all - see the dash above. */
+static inline int decl_has_attr(const struct decl *d)
+{
+	return d->hex != DECL_RX;
+}
+
+/* Non-zero when both are at their default, which is what the panel dims. */
+static inline int decl_attr_default(const struct decl *d)
+{
+	return !d->icase && d->fullword == KOF_WORD_SUBSTRING;
+}
+
+static inline void decl_attr_text(const struct decl *d, char *out, size_t cap)
+{
+	if (!decl_has_attr(d)) {
+		snprintf(out, cap, "-");
+		return;
+	}
+	snprintf(out, cap, "%c:%s", d->icase ? 'i' : 'e',
+		 decl_word_short(d->fullword));
+}
+
+/*
  * WHERE AN AT MATCHER LOOKS: A BASE, AND A SIGNED STEP FROM IT.
  *
  * A file offset on its own could not say the thing rules actually say. Both

@@ -843,8 +843,27 @@ enum ch_what {
 	CH_OPT,         /* which optional declaration to add */
 	CH_ARCH,        /* enum kof_arch, all of it */
 	CH_SUBTYPE,     /* the format's subtypes, all of them */
-	CH_WORD,        /* fullword or substring */
-	CH_CASE,        /* case sensitive or not */
+	/*
+	 * EVERY ATTRIBUTE OF ONE MARKER, IN ONE LIST.
+	 *
+	 * It was CH_WORD and CH_CASE, two lists behind two columns, and the
+	 * two columns were twenty-one of them wide for a pair of facts that
+	 * sit at their default on most rows. One column now carries both -
+	 * see the attr column in draw_decl_strings - so one list has to
+	 * carry both too.
+	 *
+	 * THE LIST DOES NOT CLOSE WHEN A ROW IS TAKEN, and that is the whole
+	 * reason the merge is worth doing: the cell holds two INDEPENDENT
+	 * facts, so one visit has to be able to set both. A list that closed
+	 * on the first click would let a visit change half the cell, which is
+	 * what the two separate columns already did.
+	 *
+	 * The case row is a tick and the three word rows are one choice of
+	 * three, drawn as a tick box and a radio - because with the list
+	 * staying open the marker is the only thing left saying what a click
+	 * did. See ch_attr_build.
+	 */
+	CH_ATTR,
 	CH_CMATCH,      /* which matcher to put into a condition */
 	CH_CMATCH2,     /* what to do to one matcher a condition already names */
 	CH_CSWAP,       /* which other matcher to put in its place */
@@ -902,6 +921,27 @@ struct chooser {
 	 * appears to do nothing.
 	 */
 	uint8_t  sub[CH_ITEMS];
+	/*
+	 * A RULE OFF, AND NOT A ROW THAT CAN BE PICKED.
+	 *
+	 * The attribute list has two halves that mean different things - one
+	 * tick, and one choice of three - and nothing but a gap says where
+	 * one ends. A blank item would have been a row the cursor lands on
+	 * and a click carries out, so the separator is marked rather than
+	 * spelled: the draw paints a rule, the arrows step over it and a
+	 * click on it does nothing at all.
+	 */
+	uint8_t  sep[CH_ITEMS];
+	/*
+	 * THE EDIT IN PROGRESS, which is not the draft yet - see CH_ATTR.
+	 *
+	 * The attribute list is a form: its rows move these, its Apply row
+	 * writes them into the declaration, and every other way out leaves
+	 * the declaration alone. Held here rather than in the draft because a
+	 * draft written on each click is a draft edited four times by
+	 * somebody trying two combinations before choosing one.
+	 */
+	int      pend_word, pend_icase;
 };
 
 
@@ -9125,6 +9165,15 @@ static void ch_add_verb(struct chooser *c, const char *t, unsigned verb)
 	ch_add(c, t);
 }
 
+/* A rule between two halves of one list - see chooser.sep. The text is never
+ * drawn, so it only has to be something. */
+static void ch_add_sep(struct chooser *c)
+{
+	if (c->n < CH_ITEMS)
+		c->sep[c->n] = 1;
+	ch_add(c, "");
+}
+
 /* The same, for a row that OPENS A LIST rather than acting - drawn with the
  * menu bar's ">" marker. See chooser.sub. */
 static void ch_add_verb_sub(struct chooser *c, const char *t, unsigned verb)
@@ -9132,6 +9181,81 @@ static void ch_add_verb_sub(struct chooser *c, const char *t, unsigned verb)
 	if (c->n < CH_ITEMS)
 		c->sub[c->n] = 1;
 	ch_add_verb(c, t, verb);
+}
+
+/*
+ * THE ATTRIBUTE FORM'S ROWS, BY NAME.
+ *
+ * Fixed, because every row is always offered: unlike the range list, nothing
+ * here is ever declined, so the index IS the row and there is no verb to
+ * carry. The two rules and the Apply row are part of the numbering - a list
+ * that renumbered when a separator moved would be the same drift chooser.verb
+ * exists to prevent.
+ */
+enum {
+	CH_ATTR_ICASE = 0,
+	CH_ATTR_SEP1,
+	CH_ATTR_TOKEN,
+	CH_ATTR_FULLWORD,
+	CH_ATTR_PATTERN,
+	CH_ATTR_SEP2,
+	CH_ATTR_APPLY,
+	CH_ATTR_ROWS
+};
+
+/*
+ * Built from the PENDING edit and not from the declaration, which is what
+ * makes the tick and the dot move while the draft stays as it was.
+ *
+ * Rebuilt in place rather than reopened: the row, the column and the width
+ * are already right and every state of this list is the same width, so
+ * reopening would recompute the same placement and lose the cursor.
+ */
+static void ch_attr_items(struct chooser *c)
+{
+	char t[CH_W];
+
+	c->n = 0;
+	memset(c->sep, 0, sizeof c->sep);
+	memset(c->sub, 0, sizeof c->sub);
+	snprintf(t, sizeof t, "[%c] ignore case", c->pend_icase ? 'x' : ' ');
+	ch_add(c, t);
+	ch_add_sep(c);
+	/*
+	 * MOST SPECIFIC FIRST, and the order is not the enum's - a marker is
+	 * a whole token far more often than it is a fragment of one, and the
+	 * top row is where the eye starts. The row is named rather than
+	 * counted, so the order here and the meaning in ch_take cannot drift
+	 * the way a position table let them.
+	 */
+	{
+		/* The three, spelled by decl_word_word so this list and the
+		 * cell it edits cannot call the same value two things. The
+		 * order is this array and not the enum's. */
+		static const int word_of_row[] = {
+			KOF_WORD_TOKEN, KOF_WORD_FULLWORD, KOF_WORD_SUBSTRING
+		};
+		unsigned k;
+
+		for (k = 0; k < sizeof word_of_row / sizeof word_of_row[0];
+		     k++) {
+			snprintf(t, sizeof t, "(%c) %s",
+				 c->pend_word == word_of_row[k] ? 'o' : ' ',
+				 decl_word_word(word_of_row[k]));
+			ch_add(c, t);
+		}
+	}
+	ch_add_sep(c);
+	/*
+	 * APPLY IS THE ONLY WAY IN, and leaving is therefore the way out.
+	 *
+	 * The rows above move an edit that nothing has been told about yet,
+	 * so a list dismissed - Escape, q, a click anywhere else - leaves the
+	 * declaration exactly as it was. That is what lets somebody try two
+	 * combinations before choosing one, and it is why this row exists at
+	 * all rather than the list writing as it goes.
+	 */
+	ch_add(c, "Apply");
 }
 
 /*
@@ -10041,26 +10165,16 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		ch_add(c, "String");
 		ch_add(c, "Hex");
 		ch_add(c, "Regex");
-	} else if (what == CH_WORD) {
-		/*
-		 * MOST SPECIFIC FIRST, and the order is not the enum's.
-		 *
-		 * A list is read top down and the top row is where the eye
-		 * starts, so it holds the answer that is usually right - a
-		 * marker is a whole token far more often than it is a fragment
-		 * of one. The row index is therefore NOT the value; see the
-		 * table in ch_take, which is the only place the two meet.
-		 *
-		 * "pattern" rather than "substring" because that is what it is
-		 * from the author's side: bytes to be found wherever they sit,
-		 * with no claim about what surrounds them.
-		 */
-		ch_add(c, "token");
-		ch_add(c, "fullword");
-		ch_add(c, "pattern");
-	} else if (what == CH_CASE) {
-		ch_add(c, "exact-case");
-		ch_add(c, "ignore-case");
+	} else if (what == CH_ATTR) {
+		/* Seeded from the declaration, which is the last thing that
+		 * wrote it - so a list reopened after an Apply comes up on
+		 * what was applied. */
+		const struct decl *d = arg < v->ed.dr.n_decl
+				     ? &v->ed.dr.decl[arg] : NULL;
+
+		c->pend_icase = d ? d->icase != 0 : 0;
+		c->pend_word = d ? d->fullword : KOF_WORD_SUBSTRING;
+		ch_attr_items(c);
 	} else if (what == CH_THRESH) {
 		char t[CH_W];
 		uint32_t n = arg < v->ed.dr.n_grp ? grp_count(&v->ed, arg) : 0;
@@ -10594,26 +10708,37 @@ static void ch_take(struct view *v)
 		decl_edit_open(v, v->ed.dr.n_decl - 1u);
 		return;
 	}
-	if (c->what == CH_WORD || c->what == CH_CASE) {
-		if (c->arg >= v->ed.dr.n_decl)
-			return;
-		if (c->what == CH_WORD)
-			{
-				/* The list is ordered for reading, not by
-				 * value - see CH_WORD where it is built. */
-				static const int word_of_row[] = {
-					KOF_WORD_TOKEN, KOF_WORD_FULLWORD,
-					KOF_WORD_SUBSTRING
-				};
+	if (c->what == CH_ATTR) {
+		struct decl *d = c->arg < v->ed.dr.n_decl
+			       ? &v->ed.dr.decl[c->arg] : NULL;
 
-				if (c->sel >= 0 &&
-				    (size_t)c->sel < sizeof word_of_row /
-						     sizeof word_of_row[0])
-					v->ed.dr.decl[c->arg].fullword =
-						word_of_row[c->sel];
-			}
-		else
-			v->ed.dr.decl[c->arg].icase = c->sel;
+		if (!d)
+			return;
+		if (c->sel == CH_ATTR_APPLY) {
+			/* The one row that writes, and the list is already
+			 * closed - ch_take shut it on the way in. */
+			d->icase = c->pend_icase;
+			d->fullword = c->pend_word;
+			return;
+		}
+		switch (c->sel) {
+		case CH_ATTR_ICASE:    c->pend_icase = !c->pend_icase; break;
+		case CH_ATTR_TOKEN:    c->pend_word = KOF_WORD_TOKEN; break;
+		case CH_ATTR_FULLWORD: c->pend_word = KOF_WORD_FULLWORD; break;
+		case CH_ATTR_PATTERN:  c->pend_word = KOF_WORD_SUBSTRING; break;
+		default:               return;   /* a rule, or nothing */
+		}
+		/*
+		 * STILL OPEN, and on the row that was just pressed.
+		 *
+		 * The cell holds two independent facts, so one visit has to be
+		 * able to set both - a list that closed on the first press
+		 * would let a visit change half the cell, which is what the
+		 * two separate columns already did. ch_take closed it at the
+		 * top; this is the row saying it is not finished.
+		 */
+		ch_attr_items(c);
+		c->open = 1;
 		return;
 	}
 	if (c->what == CH_RULE && c->arg == MAX_GROUP) {
@@ -11045,6 +11170,22 @@ static void draw_one_chooser(struct out *o, const struct chooser *c, int live)
 		 * A chooser with sel == -1 highlights nothing. See ch_open.
 		 */
 		(void)live;
+		/*
+		 * A separator is painted in the list's own colour and never
+		 * in the cursor's, whatever c->sel happens to be: it is not a
+		 * row anything can be on. The dashes stop one short of each
+		 * edge so the rule reads as inside the box.
+		 */
+		if (c->sep[i]) {
+			int k, w = c->w - 2;
+
+			out_str(o, BAR_ON);
+			out_str(o, " ");
+			for (k = 0; k < w; k++)
+				out_str(o, "-");
+			out_str(o, " " A_OFF);
+			continue;
+		}
 		out_str(o, i == c->sel ? BAR_CUR : BAR_ON);
 		/* The ">" sits at the far edge, as the menu bar draws it. */
 		if (c->sub[i])
@@ -11367,7 +11508,16 @@ static void prow_build(struct view *v)
 /* " Strings     word      case         region" - the heading up to and
  * including the region title, so the button's column is measured from it
  * rather than counted by hand. */
-#define STR_HDR_PRE " Strings     word      case         region"
+/*
+ * ONE COLUMN FOR BOTH ATTRIBUTES - see decl_attr_text in kofeditor.h.
+ *
+ * It was "word" and "case", nine and eleven characters wide, and twenty-one
+ * columns of a row whose last field is the bytes somebody opened the file to
+ * read. The cell is at most "i:pattern", so the column is nine and the table
+ * gains eleven.
+ */
+#define STR_ATTR_W 9
+#define STR_HDR_PRE " Strings     attr       region"
 
 static void sec_bar(struct out *o, struct view *v, int row, const char *text)
 {
@@ -13249,15 +13399,16 @@ static void hit_row_str(struct view *v, uint32_t i)
 		/* A click inside the open field is a click in a text box, not
 		 * a request to jump to the bytes. */
 		return;
-	} else if (g_mx >= v->str_wc[i][0] &&
-		   g_mx <= v->str_wc[i][0] + 8) {
-		/* No longer refused for a hex row - see where the columns are
-		 * drawn. The two options mean the same thing for either kind
-		 * and are applied by the same matcher. */
-		ch_open(v, CH_WORD, i, g_my, g_mx);
-	} else if (g_mx >= v->str_wc[i][0] + 10 &&
+	} else if (v->str_wc[i][0] >= 0 &&
+		   g_mx >= v->str_wc[i][0] &&
 		   g_mx <= v->str_wc[i][1]) {
-		ch_open(v, CH_CASE, i, g_my, g_mx);
+		/*
+		 * ONE CELL, ONE LIST. It was two zones ten columns apart
+		 * behind two lists; both attributes are now in one cell and
+		 * in one form, and a regex records no zone at all - see where
+		 * the columns are drawn.
+		 */
+		ch_open(v, CH_ATTR, i, g_my, g_mx);
 	} else if (g_mx >= v->str_by[i][0] &&
 		   g_mx <= v->str_by[i][1]) {
 		/*
@@ -13833,12 +13984,33 @@ static int draw_decl_strings(struct out *o, struct view *v, int r)
 		 * and it is here if you want it"; the normal colour says a
 		 * choice was made. The control is there either way.
 		 */
-		out_fmt(o, "%s%-9s %-11s" A_OFF,
-			(d->hex && !d->icase && !d->fullword) ? A_DIM : A_WARN,
-			d->fullword == KOF_WORD_TOKEN ? "token"
-			: d->fullword == KOF_WORD_FULLWORD
-			? "fullword" : "pattern",
-			d->icase ? "ignore-case" : "exact-case");
+		{
+			char attr[16];
+
+			decl_attr_text(d, attr, sizeof attr);
+			/*
+			 * THE SAME ROWS DIM AS BEFORE THE TWO COLUMNS BECAME
+			 * ONE: a hex marker that chose neither attribute.
+			 * Dim says "this is the default and it is here if you
+			 * want it"; the normal colour says a choice was made.
+			 *
+			 * A regex is dim as well, for a different reason: its
+			 * cell is a dash because the fields do not apply to
+			 * it, and there is nothing there to light up.
+			 */
+			out_fmt(o, "%s%-*s" A_OFF,
+				(d->hex == DECL_HEX && decl_attr_default(d)) ||
+				!decl_has_attr(d) ? A_DIM : A_WARN,
+				STR_ATTR_W, attr);
+		}
+		/*
+		 * NO CLICK TARGET ON A REGEX ROW. The columns are recorded
+		 * only for a marker the list can say something about, so a
+		 * press lands on the row rather than opening a form onto two
+		 * fields the matcher never reads.
+		 */
+		if (!decl_has_attr(d))
+			v->str_wc[i][0] = -1;
 		v->str_wc[i][1] = (int)o->col_hint;
 		/*
 		 * The declared range, or - when the bytes are somewhere else
@@ -28809,6 +28981,11 @@ static void click(struct view *v, int rclick)
 
 		if (g_mx >= v->ch.col && g_mx < v->ch.col + v->ch.w &&
 		    k >= 0 && k < v->ch.n) {
+			/* On the rule between two halves: inside the list, so
+			 * it is not a dismiss, and not a row, so it is not a
+			 * pick either. */
+			if (v->ch.sep[k])
+				return;
 			v->ch.sel = k;
 			ch_take(v);
 			return;
@@ -29719,7 +29896,25 @@ static int handle_chooser_key(struct view *v, int k)
 		switch (nav) {
 		case KV_NAV_PREV:
 		case KV_NAV_NEXT:
-			v->ch.sel = kv_nav_step(v->ch.sel, v->ch.n, nav);
+			/*
+			 * OVER A SEPARATOR AND NOT ONTO IT. kv_nav_step stops
+			 * at the ends rather than wrapping, so a rule sitting
+			 * at the top or bottom would trap the cursor - the
+			 * loop gives up when a step changes nothing and the
+			 * selection is left where it was.
+			 */
+			{
+				int to = v->ch.sel, from;
+
+				do {
+					from = to;
+					to = kv_nav_step(to, v->ch.n, nav);
+				} while (to >= 0 && to < v->ch.n &&
+					 v->ch.sep[to] && to != from);
+				if (to >= 0 && to < v->ch.n && v->ch.sep[to])
+					to = v->ch.sel;
+				v->ch.sel = to;
+			}
 			break;
 		case KV_NAV_IN:
 			/*
