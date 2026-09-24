@@ -339,6 +339,17 @@ static void at_place_is_kept(void)
 		CK(e.dr.grp[0].rule == 3);
 		CK(e.dr.grp[0].at_anchor == KOF_ANCHOR_ENTRY);
 		CK(e.dr.grp[0].at_off == 236);
+		/*
+		 * AND THE STEP IS THE AUTHOR'S, NOT THE ENGINE'S.
+		 *
+		 * Nothing in the import located anything: the number was read
+		 * out of C text. So changing the anchor in the panel must
+		 * leave it alone - converting it would rewrite somebody's
+		 * shipped rule on the way in. See group.at_auto, which is set
+		 * only by grp_seed_at and only from an occurrence the engine
+		 * found in THIS object.
+		 */
+		CK(e.dr.grp[0].at_auto == 0);
 		/* And back out as C, which is what Save writes. */
 		grp_at_text(e.dr.grp[0].at_anchor, e.dr.grp[0].at_off,
 			    txt, sizeof txt, 1);
@@ -435,6 +446,53 @@ static void at_place_forms(void)
 	grp_at_parse("bof", &b, &off);
 	CK(b == KOF_ANCHOR_BOF);
 	CK(off == 0);
+
+	/*
+	 * THE SIGN BELONGS TO THE ANCHOR FOR TWO OF THE THREE.
+	 *
+	 * bof is the first byte and eof is one past the last, so a step back
+	 * from one and forward from the other are both outside the object -
+	 * a rule that can never fire. The panel offers no sign control there
+	 * and this is what corrects a value that arrived with the wrong one,
+	 * which is what happens when a step typed against `entry` is moved.
+	 */
+	{
+		struct group q;
+
+		memset(&q, 0, sizeof q);
+		q.at_anchor = KOF_ANCHOR_BOF;
+		q.at_off = -0x2ff;
+		grp_at_fix_sign(&q);
+		CK(q.at_off == 0x2ff);
+
+		q.at_anchor = KOF_ANCHOR_EOF;
+		q.at_off = 0x2ff;
+		grp_at_fix_sign(&q);
+		CK(q.at_off == -0x2ff);
+
+		/* Entry keeps whichever it was given, in both directions. */
+		q.at_anchor = KOF_ANCHOR_ENTRY;
+		q.at_off = -8;
+		grp_at_fix_sign(&q);
+		CK(q.at_off == -8);
+		q.at_off = 8;
+		grp_at_fix_sign(&q);
+		CK(q.at_off == 8);
+
+		CK(grp_at_sign_free(KOF_ANCHOR_ENTRY));
+		CK(!grp_at_sign_free(KOF_ANCHOR_BOF));
+		CK(!grp_at_sign_free(KOF_ANCHOR_EOF));
+	}
+
+	/*
+	 * AND THE DISPLAYED FORM ALWAYS CARRIES THE STEP, where the C does
+	 * not: on screen it is a field somebody types into, and a control
+	 * that disappears at zero is one they cannot get back.
+	 */
+	grp_at_text(KOF_ANCHOR_ENTRY, 0, txt, sizeof txt, 1);
+	EQ(txt, "ctx->entry_off");
+	grp_at_text(KOF_ANCHOR_ENTRY, 0, txt, sizeof txt, 0);
+	EQ(txt, "entry + 0x0");
 }
 
 /*

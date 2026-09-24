@@ -624,6 +624,9 @@ static int hex_last(void)
  * Above ED_STR's range, which is per declared string. */
 #define ED_GRP_PCT 700
 #define ED_STR    600
+/* One per matcher, for the step of an AT place - see grp_of. Above ED_GRP_PCT
+ * and tested as a band, like every other one. */
+#define ED_AT_OFF 800
 
 /* Every row the draft panel can ever hold, spelled from the limits rather than
  * counted once: the panel grew three kinds of row after this array was sized,
@@ -2406,6 +2409,21 @@ struct view {
 	 * a click routed by a remembered number goes to the wrong control. */
 	int         str_wc[MAX_DECL][2], str_by[MAX_DECL][2];
 	int         grp_rl[MAX_GROUP][2], grp_rg[MAX_GROUP][2];
+	/*
+	 * AN AT MATCHER'S PLACE IS THREE CONTROLS, NOT ONE.
+	 *
+	 * The anchor names where to count from and opens a list; the sign
+	 * says which way and is pressed; the step is typed. They were one
+	 * span that opened the list, so the only way to change the number was
+	 * to pick a different occurrence of the marker.
+	 *
+	 * -1 for a row that has none: a matcher that is not an AT, a row that
+	 * is scrolled out, and the sign of an anchor that has no choice of
+	 * one - see grp_at_sign_free.
+	 */
+	int         grp_sg[MAX_GROUP][2], grp_of[MAX_GROUP][2];
+	char        at_buf[24];     /* the step being typed, as written */
+	uint32_t    at_buf_off;
 	int         grp_th[MAX_GROUP][2];
 	int         cnd_kid[MAX_GROUP][2];
 	int         cnd_jn[MAX_GROUP][2], cnd_op[MAX_GROUP][2];
@@ -9522,102 +9540,35 @@ static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 	c->arg = arg;
 
 	if (what == CH_ATOFF) {
-		const struct decl *d = NULL;
-		char t[CH_W];
-
-		for (i = 0; i < v->ed.dr.n_decl; i++)
-			if (v->ed.dr.decl[i].grp & (1u << arg)) {
-				d = &v->ed.dr.decl[i];
-				break;
-			}
-		if (!d)
-			return;
 		/*
-		 * EACH OCCURRENCE TWICE WHERE THAT MEANS SOMETHING: as the
-		 * offset it is, and as a step from the entry point.
+		 * THE ANCHORS, AND NOTHING ELSE - see enum kof_anchor.
 		 *
-		 * The offset is what was measured in THIS sample. The step from
-		 * the entry is what will still be true in the next one - an
-		 * infector's stub sits a fixed distance from the entry and at a
-		 * different file offset in every build it is in. Both rules in
-		 * bases/ that use this call are written the second way, and
-		 * until now the panel could only produce the first, so the form
-		 * that survives a rebuild had to be typed into the file by
-		 * hand afterwards.
+		 * THIS LIST USED TO ANSWER TWO QUESTIONS AT ONCE. Above the
+		 * anchors it carried every occurrence of the matcher's marker
+		 * twice - as the offset it sits at, and as a step from the
+		 * entry point - so the same list held "0x4d78", "entry +
+		 * 0x3ee8" and "entry", which are two spellings of one place
+		 * followed by an anchor. WHICH OCCURRENCE and HOW TO EXPRESS
+		 * IT are different questions, and a control that asks both
+		 * has to be read twice to be understood.
 		 *
-		 * Offered only when the object HAS an entry point and the
-		 * occurrence is at or after it: "entry - 0x4000" is arithmetic
-		 * that happens to be true of one sample rather than a place
-		 * anything is anchored to, and offering it would dress a
-		 * coincidence up as a rule.
+		 * It made sense while the place was ONE span: the list was
+		 * the only way to change any part of it. The row now draws
+		 * three controls - the anchor, the sign, the step - and this
+		 * one is behind the anchor. So it offers anchors.
+		 *
+		 * The step is typed, and changing the anchor converts a step
+		 * the engine put there rather than keeping it - see
+		 * group.at_auto - which is what the entry-relative rows were
+		 * really for.
+		 *
+		 * NO GUARD ON THE MARKER. The old list was built out of a
+		 * marker's occurrences and had to return when there were
+		 * none; an anchor does not depend on the bytes being found,
+		 * so there is always something here to choose.
 		 */
-		{
-			uint64_t e = cur_obj(v) ? cur_obj(v)->ctx.entry_off
-						: KOF_NA;
-			int rel = e != KOF_NA && e != KOF_BROKEN;
-
-			for (i = 0; i < d->n_hits; i++) {
-				snprintf(t, sizeof t, "0x%llx",
-					 (unsigned long long)d->hits[i]);
-				ch_add(c, t);
-				if (!rel || d->hits[i] < e)
-					continue;
-				if (d->hits[i] == e)
-					snprintf(t, sizeof t, "entry");
-				else
-					snprintf(t, sizeof t,
-						 "entry + 0x%llx",
-						 (unsigned long long)
-						 (d->hits[i] - e));
-				ch_add(c, t);
-			}
-		}
-		/*
-		 * AND THEN THE ENGINE'S OWN PLACES, after the literal ones.
-		 *
-		 * An occurrence is where the bytes are in THIS sample. A base
-		 * is where they will be in the next one: an infector's stub is
-		 * a fixed step from the entry point and is at a different file
-		 * offset in every build it is in. Both rules in bases/ that
-		 * use this call are written the second way, and until now the
-		 * panel could not express what they say.
-		 *
-		 * Below the offsets because the offsets are the answer when
-		 * the author has no reason to think otherwise, and picking a
-		 * base is the deliberate act.
-		 *
-		 * The displacement is not asked for here. Choosing a base
-		 * keeps whatever step the matcher already had - see CH_ATOFF
-		 * in ch_apply - so "entry" on a matcher seeded from an
-		 * occurrence names the entry and the rule then reads
-		 * entry + that offset, which is wrong as often as it is right
-		 * and is visible in the row either way. Typing a step is the
-		 * part still to design.
-		 */
-		/*
-		 * FROM ZERO, so bof is on the list.
-		 *
-		 * The loop started at one while base zero had no name, and
-		 * that left the menu one way: a matcher moved to the entry
-		 * point could not be moved back, because the only spelling of
-		 * "count from the start" was to retype the offset. bof is an
-		 * anchor like the other two now - see enum kof_anchor - and
-		 * the list says so.
-		 */
-		for (i = 0; i < KOF_ANCHOR_COUNT; i++) {
-			snprintf(t, sizeof t, "%s (engine)",
-				 kof_anchor_word((int)i));
-			ch_add(c, t);
-		}
-		/*
-		 * The list can no longer be empty, so the guard that was here
-		 * is gone: a marker whose bytes are not in this object offers
-		 * no occurrences, and used to close the menu on the author
-		 * with nothing said - but a base does not depend on the bytes
-		 * being found, so there is always something to choose. The
-		 * remaining early return above is a different case: a matcher
-		 * with no marker at all, which has nothing to place.
-		 */
+		for (i = 0; i < KOF_ANCHOR_COUNT; i++)
+			ch_add(c, kof_anchor_word((int)i));
 	} else if (what == CH_RULE) {
 		/*
 		 * ONE ROW FOR THE THREE SEARCHES, because they are one question
@@ -10469,6 +10420,28 @@ static int ch_rule_of_row(int row)
 	return row == 1 ? 3 : 0;        /* find_at, else find_str */
 }
 
+/*
+ * WHAT AN ANCHOR IS WORTH IN THIS OBJECT, or that it is worth nothing.
+ *
+ * bof is zero by definition, eof is the object's size, and entry is whatever
+ * the parser resolved - which may be nothing at all, KOF_NA for a format with
+ * no such notion and KOF_BROKEN when it could not be worked out. Converting a
+ * place between anchors is arithmetic on these, so the absent case has to be
+ * an answer rather than a number: AT_NO_ANCHOR is returned and the caller
+ * refuses the move.
+ */
+#define AT_NO_ANCHOR INT64_MIN
+
+static int64_t at_anchor_val(uint8_t anchor, uint64_t entry, uint64_t size)
+{
+	if (anchor == KOF_ANCHOR_ENTRY)
+		return (entry == KOF_NA || entry == KOF_BROKEN)
+		     ? AT_NO_ANCHOR : (int64_t)entry;
+	if (anchor == KOF_ANCHOR_EOF)
+		return (int64_t)size;
+	return 0;                       /* bof */
+}
+
 static void ch_take(struct view *v)
 {
 	struct chooser *c = &v->ch;
@@ -11035,57 +11008,47 @@ static void ch_take(struct view *v)
 			q->thresh = want;
 		}
 	} else if (c->what == CH_ATOFF) {
-		const struct decl *d = NULL;
-		uint32_t i;
-
-		for (i = 0; i < v->ed.dr.n_decl; i++)
-			if (v->ed.dr.decl[i].grp & (1u << c->arg)) {
-				d = &v->ed.dr.decl[i];
-				break;
-			}
 		/*
-		 * THE ROWS ARE WALKED THE WAY THEY WERE BUILT, because an
-		 * occurrence may have contributed one row or two - see there.
-		 * Counting them again here is the only way the two can be kept
-		 * in step without storing a parallel table that would have to
-		 * be freed and invalidated.
+		 * ONE ROW PER ANCHOR, so the row IS the anchor - see where
+		 * the list is built. It used to walk the occurrence rows
+		 * first to work out how many of them there were, which is
+		 * what a list answering two questions costs its reader.
 		 */
-		{
-			uint64_t e = cur_obj(v) ? cur_obj(v)->ctx.entry_off
-						: KOF_NA;
-			int rel = e != KOF_NA && e != KOF_BROKEN;
-			int row = 0;
-			uint32_t k;
+		uint64_t entry = cur_obj(v) ? cur_obj(v)->ctx.entry_off
+					    : KOF_NA;
+		uint64_t size = cur_obj(v) ? cur_obj(v)->ctx.obj_size : 0;
+		int64_t base_old, base_new;
 
-			for (k = 0; d && k < d->n_hits; k++) {
-				if (row++ == c->sel) {
-					q->at_off = (int64_t)d->hits[k];
-					q->at_anchor = KOF_ANCHOR_BOF;
-					return;
-				}
-				if (!rel || d->hits[k] < e)
-					continue;
-				if (row++ == c->sel) {
-					q->at_off = (int64_t)(d->hits[k] - e);
-					q->at_anchor = KOF_ANCHOR_ENTRY;
-					return;
-				}
-			}
-			/*
-			 * Past every occurrence are the engine's own places.
-			 * The displacement is kept, so picking "entry" on a
-			 * matcher already at entry+0x10 moves the base and not
-			 * the rule.
-			 */
-			if (c->sel >= row) {
-				/* Zero-based, because the list now starts at
-				 * bof - see where it is built. */
-				int b = c->sel - row;
-
-				if (b >= 0 && b < KOF_ANCHOR_COUNT)
-					q->at_anchor = (uint8_t)b;
-			}
+		if (c->sel < 0 || c->sel >= KOF_ANCHOR_COUNT)
+			return;
+		base_old = at_anchor_val(q->at_anchor, entry, size);
+		base_new = at_anchor_val((uint8_t)c->sel, entry, size);
+		/*
+		 * AN ANCHOR THIS OBJECT DOES NOT HAVE CANNOT EXPRESS THE
+		 * PLACE, so the move is refused rather than carried out
+		 * against a sentinel. ctx->entry_off is KOF_NA for a format
+		 * with no entry point and KOF_BROKEN when it could not be
+		 * resolved.
+		 */
+		if (base_old == AT_NO_ANCHOR || base_new == AT_NO_ANCHOR) {
+			say_note(&v->ed,
+				 "This object has no %s to count from",
+				 kof_anchor_word(c->sel));
+			return;
 		}
+		/*
+		 * THE PLACE IS PRESERVED AND THE STEP FOLLOWS IT - but only
+		 * for a step the ENGINE put there. A number somebody typed is
+		 * a step from the anchor it was typed against, and converting
+		 * it would overrule what they wrote. See group.at_auto.
+		 */
+		if (q->at_auto)
+			q->at_off = base_old + q->at_off - base_new;
+		q->at_anchor = (uint8_t)c->sel;
+		/* And the sign belongs to the new anchor - see
+		 * grp_at_fix_sign. A no-op on the converted path; the
+		 * correction that matters on the other one. */
+		grp_at_fix_sign(q);
 	} else if (c->what == CH_RULE) {
 		/* Past the two search rows is find_similar - see where the
 		 * menu is built. */
@@ -11300,6 +11263,10 @@ static void cnd_seq(struct view *v)
  * predicates; declared here because prow_build counts those rows and runs
  * first. */
 static int blk_section_shown(struct view *v);
+
+/* Defined with the other field openers, far below; the matcher row's hit test
+ * runs first. */
+static void at_off_edit_open(struct view *v, uint32_t g);
 
 enum prow_kind {
 	RW_OPT = 0, RW_RANGES, RW_STRHDR, RW_STR, RW_ADDS, RW_ADDM,
@@ -13490,7 +13457,25 @@ static void hit_row_matcher(struct view *v, uint32_t g)
 	else if (g_mx >= v->grp_rl[g][0] &&
 		 g_mx <= v->grp_rl[g][1])
 		ch_open(v, CH_RULE, g, g_my, g_mx);
-	else if (g_mx >= v->grp_rg[g][0] &&
+	else if (v->grp_sg[g][0] >= 0 && g_mx >= v->grp_sg[g][0] &&
+		 g_mx <= v->grp_sg[g][1]) {
+		/*
+		 * THE OTHER WAY, AND THE NUMBER IS NOW THE AUTHOR'S.
+		 *
+		 * Flipping the sign names a different byte, so whatever the
+		 * engine had located is no longer what this holds - see
+		 * group.at_auto, which is what stops a later anchor change
+		 * from converting a step somebody chose.
+		 */
+		struct group *q = &v->ed.dr.grp[g];
+
+		q->at_off = -q->at_off;
+		q->at_auto = 0;
+		grp_at_fix_sign(q);
+	} else if (v->grp_of[g][0] >= 0 && g_mx >= v->grp_of[g][0] &&
+		   g_mx <= v->grp_of[g][1]) {
+		at_off_edit_open(v, g);
+	} else if (g_mx >= v->grp_rg[g][0] &&
 		 g_mx <= v->grp_rg[g][1])
 		/* The same half of the row, asking the
 		 * question that half asks for this
@@ -14399,6 +14384,8 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 			 * frame. See the same clearing on the string rows. */
 			v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
 			v->grp_rg[g][0] = v->grp_rg[g][1] = -1;
+			v->grp_sg[g][0] = v->grp_sg[g][1] = -1;
+			v->grp_of[g][0] = v->grp_of[g][1] = -1;
 			v->grp_th[g][0] = v->grp_th[g][1] = -1;
 			v->grp_nt[g][0] = v->grp_nt[g][1] = -1;
 		}
@@ -14458,6 +14445,8 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 			 * object, and a block carries the region it was cut
 			 * from. */
 			v->grp_rg[g][0] = v->grp_rg[g][1] = -1;
+			v->grp_sg[g][0] = v->grp_sg[g][1] = -1;
+			v->grp_of[g][0] = v->grp_of[g][1] = -1;
 			r++;
 			if (!PR_VIS(r)) {
 				glist_gone(v, g);
@@ -14500,8 +14489,7 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 			 * row: the thing that says where this matcher looks.
 			 */
 			if (grp_is_at(q->rule))
-				grp_at_text(q->at_anchor, q->at_off, nm,
-					    sizeof nm, 0);
+				nm[0] = 0;      /* drawn in parts, below */
 			else if (grp_has_range(&v->ed, g))
 				rng_name_of(cur_obj(v)->fmt, grp_mask(&v->ed, g), nm,
 					    sizeof nm);
@@ -14524,9 +14512,68 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 			v->grp_rl[g][1] = (int)o->col_hint;
 			out_str(o, grp_is_at(q->rule) ? A_DIM " at " A_OFF
 						      : A_DIM " in " A_OFF);
-			v->grp_rg[g][0] = 1 + (int)o->col_hint;
-			out_fmt(o, "%s%s" A_OFF, A_LOC, nm);
-			v->grp_rg[g][1] = (int)o->col_hint;
+			if (grp_is_at(q->rule)) {
+				/*
+				 * THE THREE PARTS, EACH ITS OWN CONTROL - see
+				 * view.grp_sg. Spelled with the same helpers
+				 * grp_at_text joins, so the row and the
+				 * generated line cannot disagree.
+				 */
+				char mag[24];
+				int freesign = grp_at_sign_free(q->at_anchor);
+
+				v->grp_rg[g][0] = 1 + (int)o->col_hint;
+				out_fmt(o, "%s%s" A_OFF, A_LOC,
+					kof_anchor_word(q->at_anchor));
+				v->grp_rg[g][1] = (int)o->col_hint;
+				out_str(o, " ");
+				v->grp_sg[g][0] = 1 + (int)o->col_hint;
+				/* Dim where it cannot be pressed, which is
+				 * the same thing the attribute cell says with
+				 * the same colour: this is fixed, not chosen. */
+				out_fmt(o, "%s%c" A_OFF, freesign ? A_ID : A_DIM,
+					grp_at_sign(q->at_off));
+				v->grp_sg[g][1] = (int)o->col_hint;
+				if (!freesign)
+					v->grp_sg[g][0] = v->grp_sg[g][1] = -1;
+				out_str(o, " ");
+				v->grp_of[g][0] = 1 + (int)o->col_hint;
+				if (v->edit == ED_AT_OFF + (int)g) {
+					/*
+					 * AS WIDE AS WHAT IS IN IT, and one
+					 * cell more to type into.
+					 *
+					 * A fixed twelve was sized for the
+					 * longest offset an object can have
+					 * and padded every shorter one out to
+					 * it, so editing "0x18" opened a box
+					 * with eight blank columns after it
+					 * and pushed the comment across the
+					 * row. The step is four or five
+					 * characters in almost every rule.
+					 */
+					int room = (int)strlen(v->at_buf) + 1;
+
+					if (room < 5)
+						room = 5;
+					out_str(o, A_SEL);
+					field_draw(o, v->at_buf, v->caret,
+						   &v->at_buf_off, room, 1,
+						   "0x...");
+					out_str(o, A_OFF);
+				} else {
+					snprintf(mag, sizeof mag, "0x%llx",
+						 grp_at_mag(q->at_off));
+					out_fmt(o, "%s%s" A_OFF, A_LOC, mag);
+				}
+				v->grp_of[g][1] = (int)o->col_hint;
+			} else {
+				v->grp_rg[g][0] = 1 + (int)o->col_hint;
+				out_fmt(o, "%s%s" A_OFF, A_LOC, nm);
+				v->grp_rg[g][1] = (int)o->col_hint;
+				v->grp_sg[g][0] = v->grp_sg[g][1] = -1;
+				v->grp_of[g][0] = v->grp_of[g][1] = -1;
+			}
 			/*
 			 * TWO THINGS, AND ONLY ONE OF THEM IS A CONTROL.
 			 *
@@ -15762,6 +15809,61 @@ static void hit_plg_light(struct view *v, uint32_t i)
 static int plg_digit(int c)
 {
 	return c >= '0' && c <= '9';
+}
+
+/*
+ * What the step box takes: hex digits and the prefix that says they are hex.
+ *
+ * A sign is not among them - the row has a control for that, and two ways to
+ * say which direction is two places for them to disagree.
+ */
+static int at_digit(int c)
+{
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+	       (c >= 'A' && c <= 'F') || c == 'x' || c == 'X';
+}
+
+/*
+ * Clicking the step of an AT place puts the caret in it.
+ *
+ * THE VALUE STAYS AND IS SELECTED, for the reason the threshold box gives
+ * below: a box that empties itself on the click reads as a control that lost
+ * the value rather than one offering to change it, and typing over a
+ * selection replaces it anyway.
+ *
+ * WRITTEN WITH ITS 0x, and that is the whole answer to "hex or decimal". The
+ * text is read back by strtoull with base 0 - the same rule the importer uses
+ * on generated C - so a prefix means hex and its absence means decimal, and
+ * there is no second syntax for the box to disagree with the file about. The
+ * prefix being there already is what makes the common case, a hex offset
+ * copied off the pane, need no thought.
+ */
+static void at_off_edit_open(struct view *v, uint32_t g)
+{
+	if (g >= v->ed.dr.n_grp || !grp_is_at(v->ed.dr.grp[g].rule))
+		return;
+	v->edit = ED_AT_OFF + (int)g;
+	snprintf(v->at_buf, sizeof v->at_buf, "0x%llx",
+		 grp_at_mag(v->ed.dr.grp[g].at_off));
+	v->at_buf_off = 0;
+	v->edit_prev = v->edit;
+	v->caret = (uint32_t)strlen(v->at_buf);
+	/*
+	 * THE DIGITS ARE SELECTED AND THE PREFIX IS NOT, which is the whole
+	 * of what makes "0x means hex" survive being typed into.
+	 *
+	 * Selecting all of it, as the threshold box does, meant the first key
+	 * replaced the "0x" as well - so clicking a box reading 0x7488 and
+	 * typing 2ff left "2ff", which strtoull with base 0 reads as decimal
+	 * and stops at the first f: the step became 2. The box said one thing
+	 * and the rule held another, with nothing to see.
+	 *
+	 * Typing over the digits alone gives 0x2ff. Deleting the prefix is
+	 * still possible and still means decimal, which is the rule; it is
+	 * now something somebody does on purpose rather than by starting to
+	 * type.
+	 */
+	fsel_set(v, v->caret > 2u ? 2u : 0u, v->caret);
 }
 
 /* Clicking the threshold puts the caret in it - see the note where it is
@@ -30167,6 +30269,39 @@ static int handle_chooser_key(struct view *v, int k)
 		 * and a threshold that only took effect afterwards would be a
 		 * number the reader could not see the effect of.
 		 */
+		/*
+		 * THE STEP OF AN AT PLACE, asked before the chain below for
+		 * the same reason the threshold is: that chain opens at 300
+		 * and would swallow every digit typed here.
+		 *
+		 * Committed on every key rather than on leaving the field,
+		 * which is what lets the row beside it stay true - and the
+		 * number is the author's from the first one, so at_auto goes
+		 * off and a later anchor change will not convert it.
+		 */
+		if (v->edit >= ED_AT_OFF &&
+		    v->edit < ED_AT_OFF + (int)MAX_GROUP) {
+			uint32_t gi = (uint32_t)(v->edit - ED_AT_OFF);
+			int r2 = field_key(v, v->at_buf, sizeof v->at_buf, k,
+					   at_digit);
+
+			if (gi < v->ed.dr.n_grp) {
+				struct group *q = &v->ed.dr.grp[gi];
+				unsigned long long got =
+					strtoull(v->at_buf, NULL, 0);
+
+				/* An empty box is a box nothing has been typed
+				 * into yet, not a step of zero. */
+				if (v->at_buf[0]) {
+					q->at_off = q->at_off < 0
+						  ? -(int64_t)got
+						  : (int64_t)got;
+					q->at_auto = 0;
+					grp_at_fix_sign(q);
+				}
+			}
+			return r2;
+		}
 		if (v->edit >= ED_GRP_PCT &&
 		    v->edit < ED_GRP_PCT + (int)MAX_GROUP) {
 			uint32_t bi = (uint32_t)(v->edit - ED_GRP_PCT);

@@ -484,24 +484,67 @@ static inline void decl_attr_text(const struct decl *d, char *out, size_t cap)
  * to a uint64_t; without it a bare constant is an int and the addition is done
  * in whatever type the promotion lands on. The existing rules all write it.
  */
+/*
+ * THE THREE PARTS A PLACE IS MADE OF, so that the row which makes each one
+ * clickable and the text that writes the whole thing out cannot spell them
+ * differently. The row draws these; grp_at_text below joins them.
+ */
+static inline char grp_at_sign(int64_t off) { return off < 0 ? '-' : '+'; }
+
+static inline unsigned long long grp_at_mag(int64_t off)
+{
+	/* Negated through unsigned so the most negative value has no special
+	 * case: -(INT64_MIN) is not representable as an int64_t. */
+	return off < 0 ? (unsigned long long)-(off + 1) + 1ull
+		       : (unsigned long long)off;
+}
+
+/*
+ * THE SIGN IS THE ANCHOR'S FOR TWO OF THE THREE, and is only a choice on one.
+ *
+ * bof is the object's first byte, so a step back from it is before the object.
+ * eof is one past its last, so a step forward from it is past the end. Both
+ * are outside whatever the object holds, which find_str_at answers with a no -
+ * a rule that can never fire, spelled in a way that looks deliberate.
+ *
+ * Only `entry` has both directions, and it really has both: the bytes just
+ * before an entry point are as much a marker as the bytes at it.
+ *
+ * So the sign is corrected rather than offered, and the row shows no control
+ * for it where there is no choice to make.
+ */
+/* Whether the row should draw a sign the author can press - see above. */
+static inline int grp_at_sign_free(int anchor)
+{
+	return anchor == KOF_ANCHOR_ENTRY;
+}
+
 static inline void grp_at_text(int base, int64_t off, char *out, size_t cap,
 			       int as_c)
 {
 	const char *b = as_c ? kof_anchor_expr(base) : kof_anchor_word(base);
 	const char *u = as_c ? "u" : "";
-	unsigned long long mag = off < 0 ? (unsigned long long)-(off + 1) + 1ull
-					 : (unsigned long long)off;
+	unsigned long long mag = grp_at_mag(off);
 
 	if (!*b) {
 		snprintf(out, cap, "%s0x%llx%s", off < 0 ? "-" : "", mag, u);
 		return;
 	}
-	/* A base with nothing added is the base, not "entry + 0x0". It is the
-	 * commonest AT rule there is - see rst_00.c - and the zero is noise. */
-	if (!off)
+	/*
+	 * A BASE WITH NOTHING ADDED IS THE BASE, IN C - "ctx->entry_off" and
+	 * not "ctx->entry_off + 0x0u". It is the commonest AT rule there is,
+	 * see rst_00.c, and the zero is noise in a file.
+	 *
+	 * ON SCREEN IT IS NOT NOISE, because the step is a control now: it is
+	 * typed into and its sign is pressed, and a field that disappears
+	 * when it reaches zero is a control an author cannot get back. So the
+	 * displayed form always carries it, which is what `as_c` is for -
+	 * one function, two audiences, no second spelling to drift.
+	 */
+	if (!off && as_c)
 		snprintf(out, cap, "%s", b);
 	else
-		snprintf(out, cap, "%s %c 0x%llx%s", b, off < 0 ? '-' : '+',
+		snprintf(out, cap, "%s %c 0x%llx%s", b, grp_at_sign(off),
 			 mag, u);
 }
 
@@ -732,6 +775,23 @@ struct group {
 	 */
 	int64_t  at_off;
 	uint8_t  at_anchor;         /* enum kof_anchor - what at_off is from */
+	/*
+	 * WHETHER THE ENGINE PUT THIS NUMBER THERE, which decides whether
+	 * changing the anchor may change the number.
+	 *
+	 * Set when the offset was seeded from an occurrence the engine
+	 * LOCATED IN THIS OBJECT - see grp_seed_at - and cleared the moment a
+	 * person types into the field. The two say different things with the
+	 * same digits: a located occurrence is a PLACE, so re-expressing it
+	 * from another anchor has to convert it; a typed number is a STEP
+	 * from whichever anchor it was typed against, and converting that
+	 * would be the tool overruling what was written.
+	 *
+	 * A marker whose bytes did not come out of this object - typed by
+	 * hand, or read back out of a signature source - has no located
+	 * occurrence behind it, so nothing it seeds is a place either.
+	 */
+	uint8_t  at_auto;
 	char     note[512];         /* the author's note, emitted as a comment */
 	/* How far it is scrolled inside its own box, for the same reason the
 	 * module's comment has one: sliding the whole panel to read the end of
@@ -772,6 +832,14 @@ struct group {
 	uint8_t  n_sim;
 	uint8_t  pct;               /* how much of each the rule demands */
 };
+
+static inline void grp_at_fix_sign(struct group *q)
+{
+	if (q->at_anchor == KOF_ANCHOR_BOF && q->at_off < 0)
+		q->at_off = -q->at_off;
+	else if (q->at_anchor == KOF_ANCHOR_EOF && q->at_off > 0)
+		q->at_off = -q->at_off;
+}
 
 /* What a block matcher demands until somebody says otherwise. A placeholder,
  * not a recommendation: how alike is alike enough is the one thing about a

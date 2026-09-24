@@ -2104,14 +2104,29 @@ void grp_seed_at(struct kof_editor *e, uint32_t g)
 
 	for (i = 0; i < e->dr.n_decl; i++)
 		if (e->dr.decl[i].grp & (1u << g)) {
-			uint64_t at = e->dr.decl[i].at;
+			const struct decl *d = &e->dr.decl[i];
 
 			/* An occurrence is a file offset, so it seeds the
 			 * literal base. Naming a base is the author's choice
 			 * and is made on the WHERE control. */
 			e->dr.grp[g].at_anchor = KOF_ANCHOR_BOF;
-			e->dr.grp[g].at_off = at == KOF_BROKEN
-					    ? 0 : (int64_t)at;
+			e->dr.grp[g].at_off = d->at == KOF_BROKEN
+					    ? 0 : (int64_t)d->at;
+			/*
+			 * AND WHETHER THAT NUMBER IS A PLACE - see
+			 * group.at_auto.
+			 *
+			 * Both halves are asked because both can fail. `at`
+			 * is KOF_BROKEN when the bytes are not in this object
+			 * at all, and the zero written above is then a
+			 * default rather than a location. `mask0` is the
+			 * region the bytes were SELECTED in and is zero for a
+			 * marker read out of a source file or typed into the
+			 * box - neither of which was located here, whatever
+			 * a later search may have turned up.
+			 */
+			e->dr.grp[g].at_auto =
+				(uint8_t)(d->at != KOF_BROKEN && d->mask0 != 0);
 			return;
 		}
 }
@@ -3479,8 +3494,12 @@ void emit_call_as(FILE *f, struct kof_editor *e, uint32_t g, int force_multi)
 	 * kof_find_str_at(off, s) is the whole shape: no range identifier is
 	 * emitted, because the call names none, and exactly one marker goes in
 	 * - which draft_missing_of refuses to let be anything else. The place
-	 * is written by grp_at_text, which is also what the panel shows, so
-	 * the preview and the file cannot say different things.
+	 * is written by grp_at_text, and the panel draws the same three parts
+	 * through the same helpers - the anchor's word, grp_at_sign and
+	 * grp_at_mag - so the row and the file cannot say different things
+	 * about one place. They differ in one thing only and deliberately: a
+	 * step of zero is left out here and shown there, because on screen it
+	 * is a control somebody types into. See grp_at_text.
 	 *
 	 * force_multi cannot reach here: it exists to give a shared call a
 	 * count, and grp_shared already refuses an AT.
