@@ -20,7 +20,10 @@
 #include <errno.h>
 #include <dirent.h>
 #include <sys/stat.h>
-#ifndef _WIN32
+#ifdef _WIN32
+/* For GetUserNameA - see meta_user. */
+#include <windows.h>
+#else
 #include <pwd.h>
 #include <unistd.h>
 #endif
@@ -54,57 +57,52 @@
 /*
  * WHO IS WRITING THIS SIGNATURE, for the researcher line in the generated file.
  *
- * The environment first on both platforms, because that is what a person can
- * set when the account name is not the name they publish under. Only when it
- * says nothing does this ask the system.
+ * THE ACCOUNT THE TOOL IS RUNNING AS, ASKED OF THE SYSTEM, AND NOTHING ELSE.
  *
- * The system half is where the platforms differ and the reason they are split
- * rather than papered over: getpwuid is the POSIX account database and has no
- * Windows equivalent worth emulating, while USERNAME is the variable Windows
- * itself sets for exactly this. Guarded at the include as well as at the use -
- * <pwd.h> and <unistd.h> do not exist on the Windows side at all, and a build
- * that stops at a missing header stops for the whole tool.
+ * It read $USER and $LOGNAME once, and on Windows $USERNAME. Every one of
+ * those describes whoever SET it - the parent process - and a parent can set
+ * it to anything, so a draft could be stamped with an author who never touched
+ * it. That is not a security boundary here, it is provenance, and provenance
+ * taken from a string somebody else chose is not provenance. Nothing in this
+ * tree takes behaviour from the environment; see the note on trace_on in
+ * libkoforbit/grille/wwalk.c for where that rule was written down.
+ *
+ * The two halves are split rather than papered over because the question has
+ * a different answer per platform and both are asked of the system: getpwuid
+ * is the POSIX account database, GetUserName is the name on the caller's own
+ * token. Guarded at the include as well as at the use - <pwd.h> and
+ * <unistd.h> do not exist on the Windows side at all, and a build that stops
+ * at a missing header stops for the whole tool.
+ *
+ * NO FALLBACK, AND THE EMPTY ANSWER IS THE HONEST ONE. A container with no
+ * passwd entry for the running uid has no name to give; saying so leaves the
+ * researcher line for a person to fill in, where a guess would have signed it
+ * for them.
+ *
+ * geteuid, not getuid, so the name is the account the tool is ACTING as. See
+ * libkoforbit/path/kofpath.h for the same argument where it does decide a
+ * security boundary.
  */
 static const char *meta_user(void)
 {
-	const char *u = NULL;
+	static char namebuf[256];
 
-	/*
-	 * THE PASSWORD DATABASE FIRST, AND THE ENVIRONMENT ONLY AFTER IT.
-	 *
-	 * It was the other way round. $USER describes whoever set it, which is
-	 * the parent process, and a parent can set it to anything - so a
-	 * signature draft could be stamped with an author who never touched
-	 * it. That is not a security boundary here, it is provenance, and
-	 * provenance taken from a string somebody else chose is not
-	 * provenance.
-	 *
-	 * geteuid, not getuid, so the name is the account the tool is acting
-	 * as. See libkoforbit/path/kofpath.h for the same argument where
-	 * it does decide a security boundary.
-	 */
 #ifdef _WIN32
-	u = getenv("USERNAME");
-#else
-	{
-		struct passwd pw, *res = NULL;
-		static char namebuf[256];
-		char buf[4096];
+	DWORD n = (DWORD)sizeof namebuf;
 
-		if (getpwuid_r(geteuid(), &pw, buf, sizeof buf, &res) == 0 &&
-		    res && pw.pw_name && pw.pw_name[0]) {
-			snprintf(namebuf, sizeof namebuf, "%s", pw.pw_name);
-			u = namebuf;
-		}
+	if (GetUserNameA(namebuf, &n) && namebuf[0])
+		return namebuf;
+#else
+	struct passwd pw, *res = NULL;
+	char buf[4096];
+
+	if (getpwuid_r(geteuid(), &pw, buf, sizeof buf, &res) == 0 &&
+	    res && pw.pw_name && pw.pw_name[0]) {
+		snprintf(namebuf, sizeof namebuf, "%s", pw.pw_name);
+		return namebuf;
 	}
-	/* Only when the database could not answer - a container with no
-	 * passwd entry for the running uid is the real case. */
-	if (!u || !u[0])
-		u = getenv("USER");
-	if (!u || !u[0])
-		u = getenv("LOGNAME");
 #endif
-	return u ? u : "";
+	return "";
 }
 
 /* Today, as the one date format that sorts and cannot be read two ways. */

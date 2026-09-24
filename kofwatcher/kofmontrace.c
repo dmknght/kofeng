@@ -1082,7 +1082,18 @@ static void tracer_filter(struct tracer *t, uint32_t root_pid, int no_scope,
 static int tracer_resolve(const char *name, char *out, size_t cap)
 {
 #ifdef _WIN32
-	return SearchPathA(NULL, name, ".exe", (DWORD)cap, out, NULL) != 0;
+	/*
+	 * SearchPath returns TWO different lengths and only one of them means
+	 * it wrote something: the characters PUT IN the buffer on success, and
+	 * the characters the buffer would have NEEDED - the NUL among them -
+	 * when it was too small. The second writes nothing. Reading non-zero
+	 * as success left `out` holding whatever it held before and the report
+	 * named a subject it had never opened, which is the failure this whole
+	 * function exists to prevent.
+	 */
+	DWORD n = SearchPathA(NULL, name, ".exe", (DWORD)cap, out, NULL);
+
+	return n != 0 && (size_t)n < cap;
 #else
 	const char *path, *p, *e;
 	size_t nlen = strlen(name);
@@ -1101,8 +1112,17 @@ static int tracer_resolve(const char *name, char *out, size_t cap)
 	path = getenv("PATH");
 	if (!path || !*path) {
 		static char def[1024];
+		size_t need = confstr(_CS_PATH, def, sizeof def);
 
-		if (confstr(_CS_PATH, def, sizeof def) == 0)
+		/*
+		 * confstr reports the size it NEEDED, not the size it wrote,
+		 * and a value longer than the buffer is truncated while still
+		 * returning non-zero. A truncated PATH is missing its last
+		 * directory, and the whole point here is to search the same
+		 * places the exec will - so a search that cannot be the same
+		 * one is refused rather than done differently.
+		 */
+		if (need == 0 || need > sizeof def)
 			return 0;
 		path = def;
 	}

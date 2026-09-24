@@ -1283,6 +1283,10 @@ SCANNER_INC   = -Ilibkoforbit/grille -Ilibkofeng -Ilibkoforbit/evt \
 # two symbols instead of the missing flag. See the note beside kofmemscan's
 # old rule for the last time that happened.
 SCANNER_LIBS  = -ladvapi32 -lpsapi
+# The examiner links no collector at all, and still needs advapi32: kofeditor
+# asks the caller's own token for the account name to sign a draft with (see
+# meta_user), which is where the environment variable it used to read went.
+EXAMINE_LIBS  = -ladvapi32
 else
 SCANNER_EXTRA = $(ANTARC_SRC) libkoforbit/antarc/awalk.c $(KOFPROC_SRC) \
                 $(KOFRIDGE_SRC) $(KOFEVT_SRC)
@@ -1290,6 +1294,7 @@ SCANNER_INC   = -Ilibkoforbit/antarc -Ilibkoforbit/evt -Ilibkoforbit/mon \
                 -Ilibkoforbit/proc -Ilibkoforbit/fridge \
                 -Ilibkoforbit/walk
 SCANNER_LIBS  =
+EXAMINE_LIBS  =
 endif
 
 $(OUT)/bin/kofscanner$(EXE): $(SCANNER_SRC) $(SCANNER_EXTRA) $(LIB) \
@@ -1315,7 +1320,7 @@ $(OUT)/bin/kofexaminer$(EXE): $(EXAMINE_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
                             $(STAMP)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $(EXAMINE_SRC) $(KOFEVT_SRC) \
-	      $(LIB) -o $@ $(LDFLAGS)
+	      $(LIB) -o $@ $(LDFLAGS) $(EXAMINE_LIBS)
 
 # The other front end onto the same layer. Two binaries from one directory, and
 # the directory is the toolchain rather than the tool: what they share is

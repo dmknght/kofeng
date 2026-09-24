@@ -2350,10 +2350,6 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	uint32_t midx[2u * KOF_SRC_MAX_REGIONS];
 	uint32_t nr, n_rgn0, n_mark = 0, fired = 0;
 
-	/* TEMPORARY MEASUREMENT GATE - REMOVE. */
-	if (getenv("KOF_NO_NORM"))
-		return;
-
 	/*
 	 * PE AND ELF ONLY, AND ONLY WHAT WAS NOT ITSELF PRODUCED.
 	 *

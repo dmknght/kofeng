@@ -2584,11 +2584,16 @@ int main(int argc, char **argv)
 		}
 	}
 
-	/* Auto unless said otherwise, and NO_COLOR wins over the terminal: this
-	 * output gets piped into grep and diffed against itself, and an escape
-	 * sequence in either is a bug rather than a preference. */
+	/* Auto unless said otherwise: this output gets piped into grep and
+	 * diffed against itself, and an escape sequence in either is a bug
+	 * rather than a preference - which is what the tty test answers.
+	 *
+	 * It also honoured $NO_COLOR, and that is gone. Nothing in this tree
+	 * takes behaviour from the environment (see trace_on in
+	 * libkoforbit/grille/wwalk.c), and the variable said nothing the tty
+	 * test and --no-colour did not already say between them. */
 	if (colour < 0)
-		colour = stdout_is_tty() && getenv("NO_COLOR") == NULL;
+		colour = stdout_is_tty();
 	colour_enable(colour);
 
 	if (sources && !src_open(sources)) {
