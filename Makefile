@@ -959,6 +959,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/detector/overlord/koflib.c \
            libkofeng/detector/overlord/kofoverlord.c \
            libkofeng/detector/overlord/ovlflow.c \
+           libkofeng/disinfect/pzero.c \
            libkofeng/kofcore/kofhash.c
 
 LIB_OBJ := $(patsubst libkofeng/%.c,$(INT)/lib_%.o,$(LIB_SRC))
@@ -1110,6 +1111,7 @@ $(LIB): $(LIB_OBJ) $(EMU_OBJ) $(VENDOR_OBJ)
 
 SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/kofsig.h \
+           $(SDK)/include/kofmod/kofcure.h \
            $(SDK)/include/kofmod/kofplague.h \
            $(SDK)/include/kofmod/kofoverlord.h \
            $(SDK)/include/kofmod/heur.h \

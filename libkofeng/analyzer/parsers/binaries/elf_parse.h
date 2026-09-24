@@ -18,6 +18,18 @@
 #include "../../../kofcore/kofcore.h"
 
 /*
+ * p_type of the segment that MAPS, which is the only kind an address can be
+ * resolved through.
+ *
+ * Here rather than in elf_parse.c because a second reader appeared: the
+ * disinfect stage turns a saved entry point back into a file offset and needs
+ * the same test the parser makes - see kof_pz_addr_to_off. The value is the
+ * ELF standard's; what must not be duplicated is the DECISION that this is
+ * the segment kind to walk.
+ */
+#define KOF_ELF_PT_LOAD 1u
+
+/*
  * Returns non-zero if the object is ELF at all (magic matched), zero otherwise.
  *
  * On a non-zero return, ctx->fmt points at info and ctx->format is

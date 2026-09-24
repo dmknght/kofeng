@@ -50,7 +50,8 @@
 #define ET_EXEC		2
 #define ET_DYN		3
 
-#define PT_LOAD		1
+/* The one spelling is in elf_parse.h - see the note there. */
+#define PT_LOAD		KOF_ELF_PT_LOAD
 #define SHT_NULL	0
 #define SHT_NOBITS	8
 #define SHT_STRTAB	3

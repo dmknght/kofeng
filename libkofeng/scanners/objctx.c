@@ -32,6 +32,7 @@
 #include "../analyzer/parsers/binaries/pe_sym.h"
 #include "../analyzer/disasm/xref.h"
 #include "../detector/overlord/ovlflow.h"
+#include "../disinfect/pzero.h"
 #include "scan.h"
 #include <kofmod/elf.h>
 #include "../extractor/unpack/emu_unpack.h"
@@ -3385,6 +3386,44 @@ static int c_cure_truncate(const struct kof_obj_ctx *ctx, uint64_t len)
 	return 1;
 }
 
+/*
+ * THE DISINFECT STAGE, REACHED FROM A RULE - see libkofeng/disinfect/pzero.h.
+ *
+ * Thin on purpose. The arithmetic is pzero's and the bounds are this file's,
+ * which is the same division cure_patch draws: a rule may name any offset it
+ * likes and the host is what decides whether the object has one.
+ */
+static uint64_t c_pz_clean_end(const struct kof_obj_ctx *ctx)
+{
+	return kof_pz_clean_end(ctx);
+}
+
+static int c_pz_is_code(const struct kof_obj_ctx *ctx, uint64_t off)
+{
+	return kof_pz_is_code(ctx, off);
+}
+
+static uint64_t c_pz_addr_to_off(const struct kof_obj_ctx *ctx, uint64_t addr)
+{
+	return kof_pz_addr_to_off(ctx, addr);
+}
+
+/*
+ * THE INPUT IS AN OFFSET AND NOT A POINTER, so the bytes being unmasked are
+ * bounded by this object the way every other read a rule makes is. A module
+ * hands over its own output buffer, which is its own stack.
+ */
+static uint32_t c_pz_unmask(const struct kof_obj_ctx *ctx, uint64_t off,
+			    uint32_t n, uint32_t mask, uint32_t key,
+			    uint8_t *out, uint32_t cap)
+{
+	kof_buf b = mc(ctx)->data;
+
+	if (!out || !n || off > b.n || b.n - off < n)
+		return 0;
+	return kof_pz_unmask(b.p + off, n, mask, key, out, cap);
+}
+
 /* See kof_content.cure_offer: the module located the damage and says so. */
 static void c_cure_offer(const struct kof_obj_ctx *ctx, uint64_t at)
 {
@@ -3840,7 +3879,8 @@ static const struct kof_content kof_detect_vtable = {
 	 * neighbours care about a format is asking a fair question. */
 	c_fmt_wanted, c_region_shape, c_region_entropy, c_entropy_at,
 	c_plague_score, c_ovl_strings, c_ovl_blocks, c_ovl_chain,
-	c_cure_offer, c_cure_patch, c_cure_truncate
+	c_cure_offer, c_cure_patch, c_cure_truncate,
+	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask
 };
 
 static const struct kof_content kof_unpack_vtable = {
@@ -3852,7 +3892,8 @@ static const struct kof_content kof_unpack_vtable = {
 	c_unpack_entry, c_syms, c_data_xref, c_fmt_wanted, c_region_shape,
 	c_region_entropy, c_entropy_at, c_plague_score, c_ovl_strings,
 	c_ovl_blocks, c_ovl_chain, c_cure_offer, c_cure_patch,
-	c_cure_truncate
+	c_cure_truncate,
+	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask
 };
 
 /*

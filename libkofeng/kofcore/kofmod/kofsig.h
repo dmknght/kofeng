@@ -1608,6 +1608,23 @@ struct kof_content {
 			  const uint8_t *bytes, uint32_t n);
 	int (*cure_truncate)(const struct kof_obj_ctx *, uint64_t len);
 
+	/*
+	 * THE DISINFECT STAGE'S ARITHMETIC, reached the way everything else
+	 * is - see libkofeng/disinfect/pzero.h for what each one answers and
+	 * kofcure.h for the spellings a rule writes.
+	 *
+	 * Through the vtable and not as inline code in the header, for the
+	 * same reason find_str_at is: a module is a freestanding blob that
+	 * links to nothing, so an implementation in the header is a copy per
+	 * module, and a copy per module is a version per module.
+	 */
+	uint64_t (*pz_clean_end)(const struct kof_obj_ctx *);
+	int      (*pz_is_code)(const struct kof_obj_ctx *, uint64_t off);
+	uint64_t (*pz_addr_to_off)(const struct kof_obj_ctx *, uint64_t addr);
+	uint32_t (*pz_unmask)(const struct kof_obj_ctx *, uint64_t off,
+			      uint32_t n, uint32_t mask, uint32_t key,
+			      uint8_t *out, uint32_t cap);
+
 };
 
 /*
@@ -4060,6 +4077,14 @@ enum kof_str_word {
 #define kof_cure_truncate(len)                                             \
 	((ctx)->content->cure_truncate                                     \
 	 ? (ctx)->content->cure_truncate((ctx), (uint64_t)(len)) : 0)
+
+/*
+ * AND THE REST OF THE CURE SURFACE, which is the arithmetic rather than the
+ * two requests. Included HERE, after struct kof_content, because every macro
+ * in it reaches through that - see the note at the top of kofcure.h, which
+ * this file has named since kof_scan was first written.
+ */
+#include "kofcure.h"
 
 /*
  * The other entry point a DETECTOR may export: how to undo what kof_scan
