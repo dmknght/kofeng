@@ -51,11 +51,11 @@
 /*
  * DOES THIS OFFSET HOLD INSTRUCTIONS.
  *
- * The test a restored entry point has to pass. A value read out of a virus
- * stub is only an entry if it lands where code lives; measured over 127 hosts
- * carrying one parasitic infector, the saved value equalled the host's own
- * .text address in 125 of them, so this is what separates a recovered entry
- * from a number that merely parsed.
+ * The test a restored entry point has to pass. A value read out of a stub is
+ * only an entry if it lands where code lives; measured over 127 files sharing
+ * one entry stub, the saved value equalled the host's own .text address in
+ * 125 of them, so this is what separates a recovered entry from a number that
+ * merely parsed.
  */
 #define kof_cure_is_code(off)                                              \
 	((ctx)->content->pz_is_code                                        \

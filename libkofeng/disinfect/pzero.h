@@ -75,12 +75,16 @@ uint64_t kof_pz_clean_end(const struct kof_obj_ctx *ctx);
 /*
  * DOES THIS PLACE HOLD INSTRUCTIONS, asked of the parse and not of the bytes.
  *
- * The check every entry-point restore needs and the one the shipped example
- * in kofcure.h leaves to the module: an entry recovered out of a virus stub
- * is only an entry if it lands where code lives. Measured on a corpus of 127
- * hosts carrying one parasitic infector, the value the stub had saved equalled
- * the host's own .text address in 125 of them - so this test separates a
- * recovered entry from a number that merely parsed.
+ * The check every entry-point restore needs: a value recovered out of a stub
+ * is only an entry point if it lands where code lives.
+ *
+ * Measured on 127 files sharing one entry stub, the address the stub had
+ * saved equalled the host's own .text in 125 of them - so the test separates
+ * a recovered entry from a number that merely parsed. Note what that measures
+ * and what it does not: those files share a stub, which says the same tool
+ * touched all of them. It does NOT say the tool replicated - a protector its
+ * author ran over a toolkit leaves the same trace as an infector, and the
+ * same restore puts both back.
  *
  * `off` is a file offset in this object, not an address.
  */

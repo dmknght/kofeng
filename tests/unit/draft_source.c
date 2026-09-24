@@ -512,47 +512,23 @@ static void mixed_join_one_line(void)
 }
 
 /*
- * AND THE SAME QUESTION ASKED OF THE FILE THAT FOUND IT.
+ * NO TEST HERE PINS THE CONTENT OF A SHIPPED RULE, and one did.
  *
- * bases/plague/billgates_00.c is the one shipped rule whose condition names
- * two blocks on one line, and it is where this was seen: its second matcher
- * opened at 50 - the default the declaration parser seeds - where the file
- * says 70. A synthetic source proves the reader; this proves the rule, and it
- * goes on proving it if somebody rewrites that line.
+ * The two-calls-on-one-line fault was found in bases/plague/billgates_00.c,
+ * so a test was written that read that file and asserted its two blocks and
+ * their thresholds. It passed, and then it failed - because the rule was
+ * re-cut, which is a thing that happens to rules and is nobody's mistake.
  *
- * Skipped rather than failed when the file is not there: the test runs from
- * the tree root and a tree without bases/ has nothing to say about it.
+ * A signature is the researcher's to change. A test that asserts what one
+ * SAYS turns every edit into a broken build and teaches people that the
+ * suite's failures are noise. What belongs here is what the READER does,
+ * proved against sources this file owns - which is what the two above do,
+ * with the shape that rule happened to have.
+ *
+ * shipped_rules_are_all_modelled below is the other half and is a different
+ * question: it asserts that every rule can be read at all, not what any of
+ * them holds.
  */
-static void billgates_thresholds(void)
-{
-	const char *path = "bases/plague/billgates_00.c";
-	struct kof_editor e;
-	struct kof_plague_decl d[8];
-	struct kof_verdict_decl verdict;
-	static uint32_t pool[8 * KOF_PLAGUE_MAX_HASH];
-	uint8_t shp_pct = 0, str_pct = 0, blkv_pct = 0, chain_pct = 0;
-	int shp_lv = 0, str_lv = 0, blkv_lv = 0, chain_lv = 0;
-	uint32_t n = 0, i;
-	FILE *f = fopen(path, "r");
-
-	if (!f)
-		return;
-	fclose(f);
-	lend(&e);
-	CK(plague_from_source(&e, path, d, 8, &n, pool,
-			      (uint32_t)(sizeof pool / sizeof pool[0]),
-			      &verdict, &shp_pct, &shp_lv, &str_pct, &str_lv,
-			      &blkv_pct, &blkv_lv, &chain_pct,
-			      &chain_lv) != 0);
-	CK(n == 2);
-	for (i = 0; i < n; i++) {
-		if (d[i].id == 0xacdbe9e5u)
-			CK(d[i].thr == 75);
-		else if (d[i].id == 0xb2f2f928u)
-			CK(d[i].thr == 70);
-	}
-	draft_clear(&e);
-}
 
 /*
  * WHAT A RULE RECORDS ABOUT THE SAMPLE IT WAS WRITTEN FROM.
@@ -881,7 +857,6 @@ int main(void)
 	mixed_rule();
 	two_scores_one_line();
 	mixed_join_one_line();
-	billgates_thresholds();
 	sample_line_of_a_view();
 	at_place_is_kept();
 	at_place_forms();
