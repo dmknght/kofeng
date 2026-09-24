@@ -2108,7 +2108,7 @@ static int examine_event_log(const char *path, int colour)
 	 * and is not an event, and the header holds only the record count. */
 	memset(verbs, 0, sizeof verbs);
 	for (i = 0; i < n; i++) {
-		if (!kofevt_log_read(r, &e))
+		if (!kofevt_log_read(r, &e, (uint32_t)sizeof e))
 			break;
 		if (e.verb == KOF_EVT_CONT)
 			continue;
@@ -2123,7 +2123,7 @@ static int examine_event_log(const char *path, int colour)
 
 	if (kofevt_log_seek(r, 0)) {
 		for (i = 0; i < n; i++) {
-			if (!kofevt_log_read(r, &e))
+			if (!kofevt_log_read(r, &e, (uint32_t)sizeof e))
 				break;
 			if (e.verb == KOF_EVT_CONT)
 				continue;

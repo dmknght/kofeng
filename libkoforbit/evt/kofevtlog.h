@@ -258,11 +258,27 @@ struct kofevt_log_r *kofevt_log_open(const char *path, uint32_t want_rec_size,
 /* The header, for a reader that wants to say what it is holding. */
 const struct kofevt_log_hdr *kofevt_log_header(const struct kofevt_log_r *);
 
-/* 1 and fills `out` with one record, 0 at the end. A short final record is the
+/*
+ * 1 and fills `out` with one record, 0 at the end. A short final record is the
  * end, not an error: a log of something that took the machine down is
  * truncated by definition, and refusing to read the 40 000 records before the
- * truncation would be losing the evidence to a technicality. */
-int kofevt_log_read(struct kofevt_log_r *, void *out);
+ * truncation would be losing the evidence to a technicality.
+ *
+ * `cap` IS THE SIZE OF `out`, AND IT IS NOT OPTIONAL.
+ *
+ * A record's size is written in the FILE - h.rec_size - and this writes that
+ * many bytes. The size check used to live at kofevt_log_open, in its
+ * `want_rec_size` argument, and that argument may be zero: a tool that only
+ * reports what a log claims to be has no record layout to match against. Two
+ * such tools then went on to read records into a fixed struct, and a log
+ * declaring a bigger record overflowed it - proven with a crafted 4 KB file
+ * against kofexaminer, which wrote 1024 bytes into a 640 byte stack buffer.
+ *
+ * The size travels with the buffer now, so the two cannot be told apart by
+ * anything the caller forgot to pass. A record larger than `cap` is refused
+ * the way any other self-contradicting record is: 0, and nothing written.
+ */
+int kofevt_log_read(struct kofevt_log_r *, void *out, uint32_t cap);
 
 /* ------------------------------------------------------- for a viewer */
 

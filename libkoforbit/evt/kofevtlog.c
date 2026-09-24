@@ -440,12 +440,19 @@ const struct kofevt_log_hdr *kofevt_log_header(const struct kofevt_log_r *r)
 	return r ? &r->h : NULL;
 }
 
-int kofevt_log_read(struct kofevt_log_r *r, void *out)
+int kofevt_log_read(struct kofevt_log_r *r, void *out, uint32_t cap)
 {
 	unsigned char *p = out;
 	uint16_t tl;
 
 	if (!r || !out)
+		return 0;
+	/*
+	 * THE FILE SAYS HOW BIG A RECORD IS AND THE CALLER SAYS HOW BIG ITS
+	 * BUFFER IS. Both, because neither alone is enough - see the note on
+	 * this function in the header, and the crafted log it came from.
+	 */
+	if (r->h.rec_size > cap)
 		return 0;
 
 	/*

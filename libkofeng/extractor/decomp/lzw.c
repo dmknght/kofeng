@@ -62,10 +62,21 @@ static uint8_t emit(struct kof_lzw *st, struct out *o, uint32_t code)
 {
 	uint32_t n = 0;
 
+	/*
+	 * ONE SLOT IS KEPT BACK, because the root is written after the loop.
+	 *
+	 * The guard read `n >= KOF_LZW_CODES`, which let the loop fill the
+	 * array to its last slot and then wrote the root one past it. It was
+	 * not reachable - prefix[i] is always less than i, every branch that
+	 * writes one writes a smaller value, so the chain strictly decreases
+	 * and the longest possible is 4095 down to 258 - but the guard exists
+	 * for the case where that reasoning is wrong, and a guard whose own
+	 * exit overflows is not a guard.
+	 */
 	while (code >= LZW_FIRST) {
 		st->rev[n++] = st->tail[code];
 		code = st->prefix[code];
-		if (n >= KOF_LZW_CODES)
+		if (n + 1u >= KOF_LZW_CODES)
 			break;          /* a cycle; the guard below is the bound */
 	}
 	st->rev[n++] = (uint8_t)code;

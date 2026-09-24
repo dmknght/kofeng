@@ -1265,7 +1265,7 @@ static void t_trace(void)
 	 * was killed, which is a different thing from an empty trace. */
 	eq_u64("trace n_records", h->n_records, 100);
 
-	while (kofevt_log_read(r, &e)) {
+	while (kofevt_log_read(r, &e, (uint32_t)sizeof e)) {
 		eq_u64("trace seq", e.seq, got);
 		eq_u64("trace pid", e.pid, 1000u + got);
 		eq_str("trace object", kofw_evt_object(&e),
@@ -1282,13 +1282,13 @@ static void t_trace(void)
 
 	if (!kofevt_log_seek(r, 42))
 		fail("trace", "could not seek to a record");
-	if (!kofevt_log_read(r, &e))
+	if (!kofevt_log_read(r, &e, (uint32_t)sizeof e))
 		fail("trace", "nothing at the record seeked to");
 	eq_u64("trace seek seq", e.seq, 42);
 	eq_u64("trace seek pid", e.pid, 1000u + 42u);
 
 	/* The last one, and one past it. */
-	if (!kofevt_log_seek(r, 99) || !kofevt_log_read(r, &e))
+	if (!kofevt_log_seek(r, 99) || !kofevt_log_read(r, &e, (uint32_t)sizeof e))
 		fail("trace", "could not reach the last record");
 	eq_u64("trace last seq", e.seq, 99);
 	if (kofevt_log_seek(r, 100))
@@ -1302,7 +1302,7 @@ static void t_trace(void)
 	 * to a short record after reading a long one and check the tail is
 	 * clear.
 	 */
-	if (kofevt_log_seek(r, 0) && kofevt_log_read(r, &e)) {
+	if (kofevt_log_seek(r, 0) && kofevt_log_read(r, &e, (uint32_t)sizeof e)) {
 		size_t k;
 		for (k = e.text_len; k < sizeof e.text; k++) {
 			if (e.text[k] != 0) {
@@ -2331,7 +2331,7 @@ static void t_extent(void)
 	/* Asking must not disturb a walk: read after an extent query and the
 	 * record that comes back is the one seeked to. */
 	if (kofevt_log_extent(r, 1, &off_b, &len_b) &&
-	    kofevt_log_read(r, &e))
+	    kofevt_log_read(r, &e, (uint32_t)sizeof e))
 		eq_u64("extent leaves position", e.pid, 2u);
 	else
 		fail("extent", "could not read after asking");

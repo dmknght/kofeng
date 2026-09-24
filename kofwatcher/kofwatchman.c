@@ -513,7 +513,7 @@ static int source_next(struct wm_source *s, struct kof_evt *out)
 		return kof_chan_next(s->chan, out, 200u) ? 1 : -1;
 #endif
 	if (s->log)
-		return kofevt_log_read(s->log, out) ? 1 : 0;
+		return kofevt_log_read(s->log, out, (uint32_t)sizeof *out) ? 1 : 0;
 	return 0;
 }
 
