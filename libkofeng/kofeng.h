@@ -129,6 +129,33 @@ static inline const char *kof_obj_leaf(const char *name)
 	return last;
 }
 
+/*
+ * WHAT THE ENGINE CALLED THIS OBJECT, out of its leaf.
+ *
+ * A produced object's leaf is "<index>:<label>" - "0:norm", "3:SCRIPT" - and
+ * the label is the engine's own word for what it made. Spelled here for the
+ * reason KOF_OBJ_SEP is: it is written in scan.c and read by the tools, and a
+ * tool that spells it itself is a second vocabulary for one fact.
+ *
+ * NULL when the leaf carries no label, which is every object the engine did
+ * not produce - a file, an archive member named after itself.
+ */
+static inline const char *kof_obj_label(const char *leaf)
+{
+	const char *p = leaf;
+
+	if (!leaf || !*leaf)
+		return NULL;
+	while (*p >= '0' && *p <= '9')
+		p++;
+	return (p != leaf && *p == ':' && p[1]) ? p + 1 : NULL;
+}
+
+/* The label a NORMALISED VIEW carries - see norm_emit in scan.c, which is
+ * what writes it. A view is not a sample: it is something the engine made out
+ * of one, so a tool that records where a rule came from names the parent. */
+#define KOF_OBJ_LABEL_NORM "norm"
+
 static inline uint32_t kof_obj_depth(const char *name)
 {
 	uint32_t n = 0;

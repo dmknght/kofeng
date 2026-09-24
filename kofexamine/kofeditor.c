@@ -1556,11 +1556,36 @@ void say_note(struct kof_editor *e, const char *fmt, ...)
 }
 
 /* Is this sample already in the rule's history. */
+/* Defined with draft_sample, which it shares its reasoning with. */
+static const struct object *draft_norm_parent(struct kof_editor *e);
+
 void meta_sample_line(struct kof_editor *e, char *out, size_t cap)
 {
 	const char *base = draft_sample(e);
 	const struct object *ob = &e->obj[e->cur];
+	const struct object *par = draft_norm_parent(e);
 
+	/*
+	 * A VIEW NAMES WHAT IT WAS MADE FROM, and carries that object's
+	 * digest rather than its own.
+	 *
+	 * The line said "0:norm" with no hash at all: the name of a thing
+	 * that exists only inside a scan, and nothing to identify the bytes
+	 * it came from. Whoever reads the rule later needs the sample and the
+	 * digest that says it is the same sample - see draft_norm_parent.
+	 */
+	if (par) {
+		const char *pn = kof_obj_leaf(par->name);
+
+		if (pn == par->name)
+			pn = kof_path_base(par->name);
+		if (par->sha256[0])
+			snprintf(out, cap, "normalized:%s  sha256:%s",
+				 pn, par->sha256);
+		else
+			snprintf(out, cap, "normalized:%s", pn);
+		return;
+	}
 	if (ob->sha256[0])
 		snprintf(out, cap, "%s  sha256:%s", base, ob->sha256);
 	else
@@ -2351,8 +2376,68 @@ uint32_t draft_hash(struct kof_editor *e)
  */
 const char *draft_sample(struct kof_editor *e)
 {
-	const char *n = (e->path && e->path[0]) ? e->path : (&e->obj[e->cur])->name;
-	return kof_path_base(n);
+	static char buf[256];
+	const char *n;
+
+	if (e->path && e->path[0])
+		return kof_path_base(e->path);
+	/*
+	 * FALLING BACK TO THE OBJECT'S NAME, CUT THE ENGINE'S WAY.
+	 *
+	 * This ran kof_path_base over the whole thing, which is a PATH cutter
+	 * pointed at an OBJECT name: "sample.bin//0:norm" has a '/' inside
+	 * its separator, so the last one leaves "0:norm" and the file - the
+	 * one thing this line exists to record - is gone. That is exactly the
+	 * mistake kof_obj_leaf's note describes, made from the other side.
+	 *
+	 * The top level segment IS the file; see kof_obj_toplevel_len.
+	 */
+	n = (&e->obj[e->cur])->name;
+	{
+		size_t k = kof_obj_toplevel_len(n);
+
+		if (k >= sizeof buf)
+			k = sizeof buf - 1u;
+		memcpy(buf, n, k);
+		buf[k] = 0;
+	}
+	return kof_path_base(buf);
+}
+
+/*
+ * THE OBJECT A VIEW WAS MADE OUT OF, or NULL when this is not a view.
+ *
+ * A normalised view is not a sample. The engine built it out of one - see
+ * norm_emit - and what somebody needs in order to reproduce a rule is the
+ * thing they can feed the engine, not the thing the engine produced on the
+ * way. So the line names the PARENT and says the rule was written against
+ * its normalised form.
+ *
+ * FOUND BY NAME, and the name is the engine's: a view's is its parent's plus
+ * the separator and the label kof_obj_label reads back. The parent is the
+ * object whose whole name is that prefix, which is a comparison rather than a
+ * guess - two objects cannot share a name at one depth.
+ */
+static const struct object *draft_norm_parent(struct kof_editor *e)
+{
+	const struct object *ob = &e->obj[e->cur];
+	const char *leaf = kof_obj_leaf(ob->name);
+	const char *lab = kof_obj_label(leaf);
+	size_t cut;
+	uint32_t i;
+
+	if (!lab || strcmp(lab, KOF_OBJ_LABEL_NORM) != 0)
+		return NULL;
+	if (leaf <= ob->name + KOF_OBJ_SEP_LEN)
+		return NULL;                    /* no parent in the name */
+	cut = (size_t)(leaf - ob->name) - KOF_OBJ_SEP_LEN;
+	for (i = 0; i < *e->n_obj; i++) {
+		const struct object *o = &e->obj[i];
+
+		if (strlen(o->name) == cut && !strncmp(o->name, ob->name, cut))
+			return o;
+	}
+	return NULL;
 }
 
 
@@ -6544,6 +6629,16 @@ int body_modelled(const char *line)
  * show the value without recomputing it. The hashes are read anyway, because
  * they are what the rule actually matches with.
  */
+/* Whether `what` occurs in [a, b) - the text between two calls on one line.
+ * Both point into one NUL terminated line, so a plain search bounded by the
+ * end is enough and no copy is needed. */
+static int seg_has(const char *a, const char *b, const char *what)
+{
+	const char *q = strstr(a, what);
+
+	return q != NULL && q < b;
+}
+
 static int plg_src_norm(const char *line)
 {
 	if (strstr(line, "KOF_PLAGUE_XOR"))
@@ -6567,6 +6662,8 @@ int plague_from_source(struct kof_editor *e, const char *path,
 	char name[MAX_DECL][48];
 	uint32_t n = 0, np = 0, i;
 	int in_block = -1;
+	int got_score;          /* this line held a score call - see below */
+	const char *seg;        /* where the operator for the next call starts */
 	/*
 	 * WHICH MATCHER THE VERDICT ON THE NEXT LINE BELONGS TO.
 	 *
@@ -6916,9 +7013,56 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		}
 		if (strstr(line, "if (") || strstr(line, "if("))
 			n_if++;
-		if ((p = strstr(line, "kof_plague_score(")) != NULL) {
+		/*
+		 * EVERY CALL ON THE LINE, NOT THE FIRST ONE.
+		 *
+		 * This ran strstr once and continued, so a condition that
+		 * asked about two blocks on one line -
+		 *
+		 *   if (kof_plague_score(a) >= 75u || kof_plague_score(b) >= 70u)
+		 *
+		 * - gave the first block its threshold and left the second at
+		 * the default the declaration parser writes, which is 50.
+		 * Reopening bases/plague/billgates_00.c showed its second
+		 * matcher at 50 where the file says 70, and saving wrote that
+		 * back: a rule quietly loosened by having been looked at.
+		 *
+		 * `>=` is searched FROM EACH CALL, so each one finds its own
+		 * comparison and not the line's first.
+		 */
+		p = line;
+		got_score = 0;
+		seg = line;
+		while ((p = strstr(p, "kof_plague_score(")) != NULL) {
 			char w[48];
 			const char *ge = strstr(p, ">=");
+			int is_or;
+
+			/*
+			 * THE OPERATOR IS A FACT ABOUT A PAIR, so it is read
+			 * from the text BETWEEN the previous call and this
+			 * one rather than from the whole line.
+			 *
+			 * One condition holds several matchers joined by
+			 * `||`, and one matcher holds several blocks joined
+			 * by `&&`, so the emitter writes both on one line:
+			 *
+			 *   if (score(a) >= 91u || (score(b) >= 82u &&
+			 *                           score(c) >= 82u))
+			 *
+			 * Asking the line gave every block the same answer -
+			 * `||` is somewhere on it, so all three read as "or"
+			 * - and the grouping was lost.
+			 *
+			 * The FIRST call on the line keeps the old question,
+			 * because what precedes it is not on this line at
+			 * all. See the note on kof_plague_decl.join: nothing
+			 * reads it for the first block.
+			 */
+			if (seg == line)
+				is_or = strstr(line, "||") != NULL;
+			else
+				is_or = seg_has(seg, p, "||");
 
 			src_ident(p + 17, w, sizeof w);
 			for (i = 0; i < n; i++)
@@ -6926,14 +7070,24 @@ int plague_from_source(struct kof_editor *e, const char *path,
 					if (ge)
 						blk[i].thr = (uint8_t)
 							strtoul(ge + 2, NULL, 10);
-					blk[i].join = (uint8_t)
-						(strstr(line, "||") ? 0 : 1);
+					blk[i].join = (uint8_t)(is_or ? 0 : 1);
 					/* And which branch asked - see
 					 * kof_plague_decl.cnd. */
 					blk[i].cnd = (uint8_t)(n_if ? n_if - 1u
 								    : 0u);
 					break;
 				}
+			got_score = 1;
+			p += 17;
+			seg = p;
+		}
+		/*
+		 * A LOCAL FLAG AND NOT `pending`, which outlives the line:
+		 * bit 0 stays set until a verdict clears it, so testing it
+		 * here would have skipped every later line that holds no call
+		 * at all.
+		 */
+		if (got_score) {
 			pending |= 1u;
 			continue;
 		}

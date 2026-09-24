@@ -365,6 +365,242 @@ static void at_place_is_kept(void)
 }
 
 /*
+ * TWO BLOCKS ASKED ABOUT ON ONE LINE, which is a shape bases/ actually holds.
+ *
+ * bases/plague/billgates_00.c is written
+ *
+ *   if (kof_plague_score(a) >= 75u || kof_plague_score(b) >= 70u)
+ *
+ * and the reader ran strstr once per line, so the first block got its
+ * threshold and the second kept the default the declaration parser writes -
+ * 50. Opening that rule showed its second matcher at 50 where the file says
+ * 70, and saving wrote the 50 back: a rule loosened by having been looked at,
+ * with nothing on screen to say so.
+ *
+ * Each call's `>=` is searched from the call, not from the start of the line,
+ * which is what keeps the two thresholds apart.
+ */
+static void two_scores_one_line(void)
+{
+	static const char src[] =
+		"#include <kofmod/kofsig.h>\n"
+		"#include <kofmod/kofplague.h>\n"
+		"KOF_TARGET_FORMAT(KOF_FMT_ELF);\n"
+		"KOF_TARGET_NAME(KOF_MALTYPE_BOTNET, \"Twin\");\n"
+		"KOF_PLAGUE_BLOCK(blk_aaaa1111, KOF_SCAN_CODE, "
+			"KOF_PLAGUE_RAW,\n"
+		"\t0x00001000u, 0x00001111u, 0x00001222u, 0x00001333u, 0x00001444u, 0x00001555u, 0x00001666u, 0x00001777u, 0x00001888u, 0x00001999u, 0x00001aaau, 0x00001bbbu, 0x00001cccu, 0x00001dddu, 0x00001eeeu, 0x00001fffu);\n"
+		"KOF_PLAGUE_BLOCK(blk_bbbb2222, KOF_SCAN_CODE, "
+			"KOF_PLAGUE_RAW,\n"
+		"\t0x00002000u, 0x00002111u, 0x00002222u, 0x00002333u, 0x00002444u, 0x00002555u, 0x00002666u, 0x00002777u, 0x00002888u, 0x00002999u, 0x00002aaau, 0x00002bbbu, 0x00002cccu, 0x00002dddu, 0x00002eeeu, 0x00002fffu);\n"
+		"KOF_PLAGUE_BLOCK(blk_cccc3333, KOF_SCAN_CODE, "
+			"KOF_PLAGUE_RAW,\n"
+		"\t0x00003000u, 0x00003111u, 0x00003222u, 0x00003333u, 0x00003444u, 0x00003555u, 0x00003666u, 0x00003777u, 0x00003888u, 0x00003999u, 0x00003aaau, 0x00003bbbu, 0x00003cccu, 0x00003dddu, 0x00003eeeu, 0x00003fffu);\n"
+		"KOF_PLAGUE_BLOCK(blk_dddd4444, KOF_SCAN_CODE, "
+			"KOF_PLAGUE_RAW,\n"
+		"\t0x00004000u, 0x00004111u, 0x00004222u, 0x00004333u, 0x00004444u, 0x00004555u, 0x00004666u, 0x00004777u, 0x00004888u, 0x00004999u, 0x00004aaau, 0x00004bbbu, 0x00004cccu, 0x00004dddu, 0x00004eeeu, 0x00004fffu);\n"
+		"void kof_scan(const struct kof_obj_ctx *ctx)\n"
+		"{\n"
+		"\tif (kof_plague_score(blk_aaaa1111) >= 91u || "
+		"kof_plague_score(blk_bbbb2222) >= 82u || "
+		"kof_plague_score(blk_cccc3333) >= 73u || "
+		"kof_plague_score(blk_dddd4444) >= 64u)\n"
+		"\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n"
+		"}\n";
+	struct kof_editor e;
+	struct kof_plague_decl d[8];
+	struct kof_verdict_decl verdict;
+	static uint32_t pool[8 * KOF_PLAGUE_MAX_HASH];
+	uint8_t shp_pct = 0, str_pct = 0, blkv_pct = 0, chain_pct = 0;
+	int shp_lv = 0, str_lv = 0, blkv_lv = 0, chain_lv = 0;
+	uint32_t n = 0;
+	const char *path = write_tmp(src);
+
+	if (!path)
+		return;
+	lend(&e);
+	CK(plague_from_source(&e, path, d, 8, &n, pool,
+			      (uint32_t)(sizeof pool / sizeof pool[0]),
+			      &verdict, &shp_pct, &shp_lv, &str_pct, &str_lv,
+			      &blkv_pct, &blkv_lv, &chain_pct,
+			      &chain_lv) != 0);
+	/*
+	 * FOUR AND NOT TWO, because one condition may name any number of
+	 * matchers and the reader must not stop at the second either. The
+	 * thresholds descend so that a value landing on the wrong block is a
+	 * failure rather than a coincidence, and none of them is 50 - the
+	 * default the declaration parser seeds - so a block the line failed
+	 * to reach is visible as that number.
+	 */
+	CK(n == 4);
+	if (n == 4) {
+		CK(d[0].id == 0xaaaa1111u);
+		CK(d[1].id == 0xbbbb2222u);
+		CK(d[2].id == 0xcccc3333u);
+		CK(d[3].id == 0xdddd4444u);
+		CK(d[0].thr == 91);
+		CK(d[1].thr == 82);
+		CK(d[2].thr == 73);
+		CK(d[3].thr == 64);
+	}
+	draft_clear(&e);
+	unlink(path);
+}
+
+/*
+ * AND THE OPERATOR BETWEEN THEM, WHICH IS PER PAIR AND NOT PER LINE.
+ *
+ * One condition may hold several matchers joined by `||`, and one matcher may
+ * hold several blocks joined by `&&` - the emitter writes exactly that:
+ *
+ *   if (score(a) >= 91u || (score(b) >= 82u && score(c) >= 82u))
+ *
+ * so a single line can carry both operators. `join` says how a block attaches
+ * to the one before it, which makes it a fact about a PAIR; reading it off
+ * the whole line gives every block the same answer and loses the grouping.
+ */
+static void mixed_join_one_line(void)
+{
+	static const char src[] =
+		"#include <kofmod/kofsig.h>\n"
+		"#include <kofmod/kofplague.h>\n"
+		"KOF_TARGET_FORMAT(KOF_FMT_ELF);\n"
+		"KOF_PLAGUE_BLOCK(blk_aaaa1111, KOF_SCAN_CODE, "
+			"KOF_PLAGUE_RAW,\n"
+		"\t0x00001000u, 0x00001111u, 0x00001222u, 0x00001333u, 0x00001444u, 0x00001555u, 0x00001666u, 0x00001777u, 0x00001888u, 0x00001999u, 0x00001aaau, 0x00001bbbu, 0x00001cccu, 0x00001dddu, 0x00001eeeu, 0x00001fffu);\n"
+		"KOF_PLAGUE_BLOCK(blk_bbbb2222, KOF_SCAN_CODE, "
+			"KOF_PLAGUE_RAW,\n"
+		"\t0x00002000u, 0x00002111u, 0x00002222u, 0x00002333u, 0x00002444u, 0x00002555u, 0x00002666u, 0x00002777u, 0x00002888u, 0x00002999u, 0x00002aaau, 0x00002bbbu, 0x00002cccu, 0x00002dddu, 0x00002eeeu, 0x00002fffu);\n"
+		"KOF_PLAGUE_BLOCK(blk_cccc3333, KOF_SCAN_CODE, "
+			"KOF_PLAGUE_RAW,\n"
+		"\t0x00003000u, 0x00003111u, 0x00003222u, 0x00003333u, 0x00003444u, 0x00003555u, 0x00003666u, 0x00003777u, 0x00003888u, 0x00003999u, 0x00003aaau, 0x00003bbbu, 0x00003cccu, 0x00003dddu, 0x00003eeeu, 0x00003fffu);\n"
+		"void kof_scan(const struct kof_obj_ctx *ctx)\n"
+		"{\n"
+		"\tif (kof_plague_score(blk_aaaa1111) >= 91u || "
+		"(kof_plague_score(blk_bbbb2222) >= 82u && "
+		"kof_plague_score(blk_cccc3333) >= 82u))\n"
+		"\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n"
+		"}\n";
+	struct kof_editor e;
+	struct kof_plague_decl d[8];
+	struct kof_verdict_decl verdict;
+	static uint32_t pool[8 * KOF_PLAGUE_MAX_HASH];
+	uint8_t shp_pct = 0, str_pct = 0, blkv_pct = 0, chain_pct = 0;
+	int shp_lv = 0, str_lv = 0, blkv_lv = 0, chain_lv = 0;
+	uint32_t n = 0;
+	const char *path = write_tmp(src);
+
+	if (!path)
+		return;
+	lend(&e);
+	CK(plague_from_source(&e, path, d, 8, &n, pool,
+			      (uint32_t)(sizeof pool / sizeof pool[0]),
+			      &verdict, &shp_pct, &shp_lv, &str_pct, &str_lv,
+			      &blkv_pct, &blkv_lv, &chain_pct,
+			      &chain_lv) != 0);
+	CK(n == 3);
+	if (n == 3) {
+		CK(d[0].thr == 91);
+		CK(d[1].thr == 82);
+		CK(d[2].thr == 82);
+		/* d[0].join is not read - nothing precedes it on this line. */
+		CK(d[1].join == 0);     /* or: a second matcher */
+		CK(d[2].join == 1);     /* and: a second block of the same one */
+	}
+	draft_clear(&e);
+	unlink(path);
+}
+
+/*
+ * AND THE SAME QUESTION ASKED OF THE FILE THAT FOUND IT.
+ *
+ * bases/plague/billgates_00.c is the one shipped rule whose condition names
+ * two blocks on one line, and it is where this was seen: its second matcher
+ * opened at 50 - the default the declaration parser seeds - where the file
+ * says 70. A synthetic source proves the reader; this proves the rule, and it
+ * goes on proving it if somebody rewrites that line.
+ *
+ * Skipped rather than failed when the file is not there: the test runs from
+ * the tree root and a tree without bases/ has nothing to say about it.
+ */
+static void billgates_thresholds(void)
+{
+	const char *path = "bases/plague/billgates_00.c";
+	struct kof_editor e;
+	struct kof_plague_decl d[8];
+	struct kof_verdict_decl verdict;
+	static uint32_t pool[8 * KOF_PLAGUE_MAX_HASH];
+	uint8_t shp_pct = 0, str_pct = 0, blkv_pct = 0, chain_pct = 0;
+	int shp_lv = 0, str_lv = 0, blkv_lv = 0, chain_lv = 0;
+	uint32_t n = 0, i;
+	FILE *f = fopen(path, "r");
+
+	if (!f)
+		return;
+	fclose(f);
+	lend(&e);
+	CK(plague_from_source(&e, path, d, 8, &n, pool,
+			      (uint32_t)(sizeof pool / sizeof pool[0]),
+			      &verdict, &shp_pct, &shp_lv, &str_pct, &str_lv,
+			      &blkv_pct, &blkv_lv, &chain_pct,
+			      &chain_lv) != 0);
+	CK(n == 2);
+	for (i = 0; i < n; i++) {
+		if (d[i].id == 0xacdbe9e5u)
+			CK(d[i].thr == 75);
+		else if (d[i].id == 0xb2f2f928u)
+			CK(d[i].thr == 70);
+	}
+	draft_clear(&e);
+}
+
+/*
+ * WHAT A RULE RECORDS ABOUT THE SAMPLE IT WAS WRITTEN FROM.
+ *
+ * A normalised view is not a sample: the engine made it out of one. The line
+ * said "0:norm" - the name of a thing that exists only inside a scan - and
+ * carried no digest at all, so a rule drafted against a view recorded nothing
+ * anybody could feed back to the engine.
+ *
+ * Two faults, and both are tested here: the object name was cut with a PATH
+ * cutter, which leaves the leaf and loses the file; and a view was named
+ * instead of the object it came from.
+ */
+static void sample_line_of_a_view(void)
+{
+	struct kof_editor e;
+	char line[128];
+
+	lend(&e);
+	/* The file, and the view the engine built out of it - named the way
+	 * the engine names them, with KOF_OBJ_SEP between. */
+	snprintf(g_obj[0].name, sizeof g_obj[0].name, "/tmp/deep/sample.bin");
+	snprintf(g_obj[0].sha256, sizeof g_obj[0].sha256, "%064d", 1);
+	snprintf(g_obj[1].name, sizeof g_obj[1].name,
+		 "/tmp/deep/sample.bin" KOF_OBJ_SEP "0:" KOF_OBJ_LABEL_NORM);
+	g_n_obj = 2;
+
+	/* On the file itself, nothing changes. */
+	e.cur = 0;
+	e.path = NULL;
+	meta_sample_line(&e, line, sizeof line);
+	EQ(line, "sample.bin  sha256:"
+		 "0000000000000000000000000000000000000000000000000000000000000001");
+
+	/* On the view: the parent is named and the parent's digest is the
+	 * one recorded, because the view has none of its own worth keeping. */
+	e.cur = 1;
+	meta_sample_line(&e, line, sizeof line);
+	EQ(line, "normalized:sample.bin  sha256:"
+		 "0000000000000000000000000000000000000000000000000000000000000001");
+
+	/* And the file's name survives being read off a child's name, which
+	 * is what a path cutter loses. */
+	CK(!strcmp(draft_sample(&e), "sample.bin"));
+	draft_clear(&e);
+}
+
+/*
  * The three other shapes the first argument can take, read directly - a bare
  * base, a literal, and a step backwards. The parser is what the importer uses
  * and is the only thing that decides whether a shipped rule survives being
@@ -643,6 +879,10 @@ int main(void)
 	two_calls_or();
 	src_sees_blocks();
 	mixed_rule();
+	two_scores_one_line();
+	mixed_join_one_line();
+	billgates_thresholds();
+	sample_line_of_a_view();
 	at_place_is_kept();
 	at_place_forms();
 	hex_options_survive();

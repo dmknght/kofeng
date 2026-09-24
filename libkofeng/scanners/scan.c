@@ -2845,8 +2845,11 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * that if it does, the object that goes out is still labelled and still
 	 * raw, rather than an unnamed ELF-looking blob.
 	 */
+	/* The word itself is in kofeng.h, because the tools read it back out
+	 * of the object's name - see kof_obj_label. */
 	sc->pend_label_len = (uint32_t)snprintf(sc->pend_label,
-						sizeof sc->pend_label, "norm");
+						sizeof sc->pend_label, "%s",
+						KOF_OBJ_LABEL_NORM);
 	sc->pend_fmt = nr ? ctx->format : (uint8_t)KOF_FMT_DECLARED_RAW;
 	/* What this object IS, said rather than inferred - see
 	 * kof_src_declare_view. */
