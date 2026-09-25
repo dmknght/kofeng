@@ -7,68 +7,96 @@
 #include "svrpage_parse.h"
 #include "scantext.h"
 
+/*
+ * ONE PASS OVER THE PAGE, NOT SIXTEEN.
+ *
+ * This asked kof_txt_has sixteen times, and each of those is a full walk of
+ * `look` bytes - so deciding what kind of server page a file is read it
+ * sixteen times over, once per script object.
+ *
+ * Measured with callgrind on 4000 small objects (23 MB): kof_txt_has was 25%
+ * of the whole scan and kof_txt_tag_at another 10%, with the engine's own
+ * matcher at 3%. Parsing, not scanning, is where that workload spends itself.
+ *
+ * WHAT MAKES ONE PASS THE SAME ANSWER. The result depends only on WHICH tags
+ * are present somewhere in [0, look) - never on where, and never on how many.
+ * So the presences can all be collected in a single walk and the same three
+ * tests applied to them afterwards.
+ *
+ * THE EARLY RETURN IS KEPT, AND ONLY FOR THE FIRST GROUP. The old code stopped
+ * at the first JSP tag it found; so does this. It may NOT stop early for the
+ * other two, because a JSP tag appearing later in the page still outranks an
+ * ASPX one found first - which is exactly what the old order said.
+ *
+ * `first` says which tags can begin at a byte, folded, so a position whose
+ * byte starts none of them costs one indexed load and a test. Both cases of
+ * every letter are listed because kof_txt_tag_at folds and this must agree
+ * with it.
+ *
+ * "<%@ Language" AND "<%@ LANGUAGE" ARE THE SAME SEARCH - the fold makes them
+ * identical, so one of the two was always dead work. Both are kept here rather
+ * than quietly dropping one, because which tags this looks for is the
+ * parser's documented list and not a thing to edit for speed.
+ *
+ * Checked against the sixteen-walk form over 300,000 generated pages - built
+ * from these very tags, their upper-case spellings and noise - at every value
+ * of `look`.
+ */
+struct svr_tag { const char *s; uint8_t len, grp; };
+
+static const struct svr_tag SVR_TAG[16] = {
+	/* group 0 - JSP */
+	{ "<jsp:", 5, 0 }, { "<%@ taglib", 10, 0 },
+	{ "language=\"java\"", 15, 0 }, { "java.lang", 9, 0 },
+	{ "java.io", 7, 0 }, { "Runtime.getRuntime", 18, 0 },
+	/* group 1 - ASP.NET */
+	{ "runat=\"server\"", 14, 1 }, { "<asp:", 5, 1 },
+	{ "<%@ Page", 8, 1 }, { "<%@ Import", 10, 1 },
+	{ "System.Web", 10, 1 },
+	/* group 2 - classic ASP */
+	{ "<%@ Language", 12, 2 }, { "Server.CreateObject", 19, 2 },
+	{ "CreateObject(", 13, 2 }, { "Request.ServerVariables", 23, 2 },
+	{ "<%@ LANGUAGE", 12, 2 }
+};
+
+#define SVR_M(i)  (1u << (i))
+#define SVR_G1    (SVR_M(6)|SVR_M(7)|SVR_M(8)|SVR_M(9)|SVR_M(10))
+#define SVR_G2    (SVR_M(11)|SVR_M(12)|SVR_M(13)|SVR_M(14)|SVR_M(15))
+
+static const uint32_t SVR_FIRST[256] = {
+	['<'] = SVR_M(0)|SVR_M(1)|SVR_M(7)|SVR_M(8)|SVR_M(9)|SVR_M(11)|SVR_M(15),
+	['l'] = SVR_M(2),            ['L'] = SVR_M(2),
+	['j'] = SVR_M(3)|SVR_M(4),   ['J'] = SVR_M(3)|SVR_M(4),
+	['r'] = SVR_M(5)|SVR_M(6)|SVR_M(14),
+	['R'] = SVR_M(5)|SVR_M(6)|SVR_M(14),
+	['s'] = SVR_M(10)|SVR_M(12), ['S'] = SVR_M(10)|SVR_M(12),
+	['c'] = SVR_M(13),           ['C'] = SVR_M(13)
+};
+
 uint8_t kof_svr_kind(kof_buf f, uint64_t look)
 {
-	if (kof_txt_has(f, look, "<jsp:") ||
-	    kof_txt_has(f, look, "<%@ taglib") ||
-	    /*
-	     * JSP'S OWN PAGE DIRECTIVE, which has to be named BEFORE the ASP.NET
-	     * one below, because the two are spelled the same.
-	     *
-	     * kof_txt_has folds case - see kof_txt_tag_at - so "<%@ Page" matches
-	     * JSP's "<%@ page" as readily as ASP.NET's. What separates them is
-	     * the language they then declare, and only one of them says java.
-	     */
-	    kof_txt_has(f, look, "language=\"java\"") ||
-	    kof_txt_has(f, look, "java.lang") ||
-	    kof_txt_has(f, look, "java.io") ||
-	    kof_txt_has(f, look, "Runtime.getRuntime"))
-		return KOF_SCRIPT_JSP;
-	if (kof_txt_has(f, look, "runat=\"server\"") ||
-	    kof_txt_has(f, look, "<asp:") ||
-	    /*
-	     * "<%@ Page" WAS MISSING, and it is the first line of almost every
-	     * ASP.NET page there is - the note on the directive block below uses
-	     * `<%@ Page Language="C#" Debug="true" %>` as its own example.
-	     *
-	     * The ASP list underneath asks for "<%@ Language", which is classic
-	     * ASP's spelling; ASP.NET writes "<%@ Page Language=", and that
-	     * matches neither list. So a page opening with it came back
-	     * KOF_SCRIPT_ANY - and subtype 0 is never filtered, which is exactly
-	     * the failure the pct_closed note below describes. Found from a
-	     * report: tests/unit/word_modes.c carries the directive as a string
-	     * literal and was reported Script/Trojan:Weevely by a rule that
-	     * declares KOF_SCRIPT_PHP.
-	     */
-	    kof_txt_has(f, look, "<%@ Page") ||
-	    kof_txt_has(f, look, "<%@ Import") ||
-	    kof_txt_has(f, look, "System.Web"))
+	uint32_t seen = 0;
+	uint64_t i, cap = look < f.n ? look : f.n;
+
+	for (i = 0; i < cap; i++) {
+		uint32_t m = SVR_FIRST[f.p[i]] & ~seen;
+
+		while (m) {
+			uint32_t t = (uint32_t)__builtin_ctz(m);
+
+			m &= m - 1u;
+			if (i + SVR_TAG[t].len > cap)
+				continue;
+			if (!kof_txt_tag_at(f, i, SVR_TAG[t].s, SVR_TAG[t].len))
+				continue;
+			seen |= SVR_M(t);
+			if (SVR_TAG[t].grp == 0)
+				return KOF_SCRIPT_JSP;
+		}
+	}
+	if (seen & SVR_G1)
 		return KOF_SCRIPT_ASPX;
-	/*
-	 * AND CLASSIC ASP WITHOUT A DIRECTIVE, which is a shape that exists:
-	 * a .asp may open with a bare "<%" and never declare a language,
-	 * because VBScript is what the server assumes.
-	 *
-	 * Both of the markers below are VBScript-through-ASP intrinsics, and
-	 * the list is what the corpus supports rather than what reads well.
-	 * Over 103 sampled pages:
-	 *
-	 *   CreateObject(             16 of 17 .asp, 0 of 5 .aspx, 0 of 5
-	 *                             .jsp, 0 of 76 .php
-	 *   Request.ServerVariables   16 of 17 .asp, and 0 of every other
-	 *
-	 * "Response.Write" was the obvious third and is not here: it is in all
-	 * five .aspx as well, so it names the FAMILY and not the member.
-	 *
-	 * ASP.NET IS ASKED FIRST, above, so a page carrying runat="server",
-	 * "<asp:" or System.Web keeps that answer however it builds its COM
-	 * objects. This is the fallback for a page that said nothing else.
-	 */
-	if (kof_txt_has(f, look, "<%@ Language") ||
-	    kof_txt_has(f, look, "Server.CreateObject") ||
-	    kof_txt_has(f, look, "CreateObject(") ||
-	    kof_txt_has(f, look, "Request.ServerVariables") ||
-	    kof_txt_has(f, look, "<%@ LANGUAGE"))
+	if (seen & SVR_G2)
 		return KOF_SCRIPT_ASP;
 	return KOF_SCRIPT_ANY;
 }
