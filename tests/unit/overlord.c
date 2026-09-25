@@ -88,10 +88,19 @@ static void fill(uint8_t *s1, uint32_t n1, uint8_t *s2, uint32_t n2, void *u)
 	put_strings(s1, half, h->user_seed, 40u);            /* the author's */
 	put_strings(s1 + half, n1 - half, h->lib_seed, 40u); /* the library's */
 	put_strings(s2, n2, h->user_seed ^ 0x5a5au, 20u);
-	if (h->markers) {
+	if (h->markers == 1) {
 		memcpy(s1 + half + 16,  "No such file or directory", 25);
 		memcpy(s1 + half + 200, "Permission denied", 17);
 		memcpy(s1 + half + 600, "Cannot allocate memory", 22);
+	} else if (h->markers == 2) {
+		/*
+		 * Three markers, but thrown to the ends of the region - the
+		 * shape a planted marker has and a library never does. See the
+		 * density rule in koflib.c.
+		 */
+		memcpy(s1 + 8,           "No such file or directory", 25);
+		memcpy(s1 + n1 / 2u,     "Permission denied", 17);
+		memcpy(s1 + n1 - 40u,    "Cannot allocate memory", 22);
 	} else {
 		/* exactly one marker: not a table, and must not cut */
 		memcpy(s1 + half + 200, "Permission denied", 17);
@@ -312,6 +321,44 @@ int main(void)
 	 * says so in the reference, and that a reference which never asked for
 	 * it is measured exactly as it was before.
 	 */
+	/*
+	 * A PLANTED MARKER IS NOT A LIBRARY.
+	 *
+	 * The span runs from the first marker to the last and takes everything
+	 * between, so three markers at the ends of a region bracket the whole
+	 * program and subtract it as somebody else's. Being wrong here is
+	 * silent in the worst way: the object simply stops having any content
+	 * to match, and a rule that would have named it reports nothing.
+	 */
+	printf("\nmarkers thrown to the ends of a region:\n");
+	{
+		struct kof_lib_result sp;
+
+		a = build_elf(&na, 62, 0, 0x1111u, 0x2222u, 2);
+		if (!a || !parse_of(a, na, &e1)) {
+			bad("the synthetic ELF did not parse");
+		} else {
+			kof_lib_find(kof_buf_make(a, na), &e1, &sp);
+			if (sp.n)
+				bad("three scattered markers cut a span - a "
+				    "planted marker was read as a library");
+			else
+				ok("scattered markers cut nothing");
+			free(a);
+		}
+		/* and the packed ones still do, which is the other half */
+		a = build_elf(&na, 62, 0, 0x1111u, 0x2222u, 1);
+		if (a && parse_of(a, na, &e1)) {
+			kof_lib_find(kof_buf_make(a, na), &e1, &sp);
+			if (!sp.n)
+				bad("packed markers stopped cutting - the "
+				    "density rule is too strict");
+			else
+				ok("packed markers still cut, as they must");
+			free(a);
+		}
+	}
+
 	printf("\nthe structure track, with and without the library:\n");
 	{
 		struct kof_lib_result slib;

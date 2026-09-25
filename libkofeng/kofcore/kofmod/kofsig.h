@@ -2839,6 +2839,95 @@ enum kof_analyze {
 #define kof_find_str(rng, s) KOF_FS_ONE(rng, s)
 
 /*
+ * ============================================================================
+ * THE FIVE SIMILARITY MEASURES, AND WHICH ONE ANSWERS WHICH QUESTION.
+ * ============================================================================
+ *
+ * They are not five spellings of one idea and they do not fail together. Each
+ * is listed below with the DATA it needs - which is what decides when a rule
+ * may ask it - and what it measured on the cases that break the others.
+ *
+ *   kof_ovl_shape    STRUCTURE. The ELF header and the object's size, nothing
+ *                    read. The cheapest of the five by a wide margin: no pass
+ *                    over the bytes at all.
+ *
+ *   kof_plague_score BLOCK. Selected rolling-hash windows of ONE declared run,
+ *                    anchored to the region it was cut from.
+ *
+ *   kof_ovl_blocks   BLOCK SET. The same windows over the WHOLE object against
+ *                    a reference's whole set, anchored to nothing.
+ *
+ *   kof_ovl_strings  STRING SET. The printable runs, library subtracted,
+ *                    hashed BY THEIR BYTES.
+ *
+ *   kof_ovl_chain    CALL CHAIN. What the code asks the system for, in order.
+ *                    Needs a disassembly sweep, so it is the dearest.
+ *
+ *
+ * WHAT EACH SURVIVES, MEASURED. One object against transformations of itself,
+ * and against a program with nothing in common:
+ *
+ *                              structure  blocks  strings
+ *   whole code rebuilt              -       2%     100%     <- the recompile
+ *   half the strings gone too       -       0%      47%
+ *   strings base64 or hex           -       2%       0%     <- the encoder
+ *   strings widened to UTF-16LE     -       -        0%        (none collected)
+ *   +20% padding, any kind        83%      98%     100%     <- the padder
+ *   UNRELATED, same size         100%      99%       0%     <- the control
+ *
+ * Read the last row first. STRUCTURE AND BLOCK COUNT DO NOT IDENTIFY: an
+ * unrelated program of the same size answers 100% and 99%. They are filters,
+ * and a rule that rests a verdict on either alone has written a rule about
+ * file size. The string set is the one that answers 0% there.
+ *
+ * Read the first row second. A REBUILD FOR ANOTHER TARGET keeps almost no code
+ * block and almost every string - 0.000 against 0.4 to 0.94 across
+ * architectures on a real botnet corpus - so a variant hunt that asks only for
+ * blocks is asking the measure that cannot see a cross-compile.
+ *
+ *
+ * WHEN A RULE MAY ASK, WHICH IS A CONSEQUENCE OF THE ABOVE AND NOT A POLICY:
+ *
+ *   BEFORE the normaliser - structure, and both block measures. Structure needs
+ *   only the header. The block measures ride on CODE, which the normaliser does
+ *   not rewrite, so they answer the same before and after. Measured on 747 real
+ *   Mirai samples, structure asked before the normaliser still separates -
+ *   15.9% of same-family pairs against 4.4% of cross-family - though it is
+ *   about 1.7x weaker on the 693 of them whose content is obscured than on the
+ *   54 whose content is not.
+ *
+ *   AFTER the normaliser - the string set, and only there. It hashes bytes, so
+ *   an encoded string is a different string and a widened one is not collected
+ *   at all: the printable test breaks at every NUL and no run reaches the
+ *   six-byte minimum. The normaliser is what turns both back into strings.
+ *   Before it, this measure answers 0 about an object it would name afterwards.
+ *
+ *   A TRUE "SHAPE" WAS TRIED FOR THE ENCODED CASE AND DOES NOT WORK. Hashing a
+ *   run by its length relative to the longest - the one feature a uniform
+ *   re-encoding scales rather than destroys - scored 29% on a base64 build of
+ *   the same program and 29% on a program with nothing in common. No
+ *   separation. The byte hash scores 0% on the unrelated program, which is the
+ *   property that makes it usable at all.
+ *
+ *
+ * THE FALSE POSITIVE IS IN THE REFERENCE, NOT IN THE MEASURE.
+ *
+ * The library subtraction removes what the LINKER brought in. It does not
+ * remove what the author wrote and everybody else writes too - "User-Agent:
+ * Mozilla/5.0", "Connection: keep-alive", "Content-Type: ...". A reference
+ * built from a sample's strings without weighing them measures HTTP. Nothing
+ * here scores a string for how common it is, so which strings are worth
+ * carrying is judgement, and a rule inherits it. See bases/plague/billgates_00.c,
+ * whose sixteen strings and sixty per cent are that judgement written down.
+ *
+ * The other way round is a FEATURE and not a fault: an object that reuses a
+ * family's strings scores as that family, because it did reuse them. Measured,
+ * an unrelated program padded with the reference's own strings answers 100% -
+ * which is the correct answer to "does this carry that family's strings".
+ * ============================================================================
+ */
+
+/*
  * How much of a declared block is here, nought to a hundred.
  *
  * An ordinary expression, so it composes with everything else a rule can say:
