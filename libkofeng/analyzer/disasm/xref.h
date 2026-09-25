@@ -117,8 +117,16 @@ int kof_xref_full(const struct kof_xref *u);
  * Anything a startup region calls DIRECTLY and nothing else calls is startup
  * too - which is how register_tm_clones and its siblings are found, since
  * nothing points at them from outside.
+ *
+ * ANSWERS WHETHER THERE WAS ROOM, because the table is small and fixed and a
+ * caller reading addresses OUT OF THE OBJECT has no other way to learn that it
+ * is full. An .init_array is a length the file declares, so "keep going until
+ * the section ends" is a loop an object chooses the length of - and past this
+ * table every turn of it records nothing. A caller that feeds a declared run
+ * stops on a zero; one feeding a handful of addresses it enumerated itself can
+ * ignore the answer.
  */
-void kof_xref_startup(struct kof_xref *u, uint64_t va);
+int kof_xref_startup(struct kof_xref *u, uint64_t va);
 
 void kof_xref_free(struct kof_xref *u);
 

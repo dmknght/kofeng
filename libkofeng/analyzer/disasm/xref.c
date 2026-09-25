@@ -573,10 +573,13 @@ int kof_xref_full(const struct kof_xref *u)
 	return u ? u->full : 0;
 }
 
-void kof_xref_startup(struct kof_xref *u, uint64_t va)
+int kof_xref_startup(struct kof_xref *u, uint64_t va)
 {
-	if (u && va && u->n_start < USE_RGN)
+	if (!u || u->n_start >= USE_RGN)
+		return 0;              /* no room: see the note in xref.h */
+	if (va)
 		u->start_at[u->n_start++] = va;
+	return 1;
 }
 
 void kof_xref_free(struct kof_xref *u)

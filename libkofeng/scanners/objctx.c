@@ -114,10 +114,33 @@ static uint32_t c_csum(const struct kof_obj_ctx *ctx, uint64_t off, uint32_t len
 	return kof_crc32(s.p, s.n);
 }
 
+/*
+ * A MODULE'S VERDICT, IN THE HOST'S VOCABULARY.
+ *
+ * The level crosses the module ABI like every other argument here, and it was
+ * the one that was stored without being read. There are four values; anything
+ * else reaches the result array as a number no host can place, and what a host
+ * does with one is not "show it oddly" - kof_level_rank answers 0 for an
+ * unknown level, the same as for nothing at all, so the finding is counted in
+ * no bucket, does not raise the file's verdict, and the file is reported
+ * CLEAN with a detection sitting in its result. A stale database, a build that
+ * renumbered, or a module that computed a level rather than naming one all
+ * arrive here.
+ *
+ * Clamped to the least specific value rather than dropped, which is exactly
+ * what c_incomplete does with a reason outside its own vocabulary and for the
+ * same reason: the module found SOMETHING, and the level is how sure it is,
+ * not whether it is there.
+ */
 static void c_report(const struct kof_obj_ctx *ctx, uint32_t level,
 		     uint32_t name_id)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (level != (uint32_t)KOF_LVL_INFECT &&
+	    level != (uint32_t)KOF_LVL_HEUR &&
+	    level != (uint32_t)KOF_LVL_ACT)
+		level = (uint32_t)KOF_LVL_SUSPECT;
 	sc->rep_level   = level;
 	sc->rep_name_id = name_id;
 	sc->rep_valid   = 1;
@@ -149,6 +172,10 @@ static const struct kof_str_ent *str_of(const struct kof_scanner *sc, uint32_t i
 static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes);
 static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 			    uint64_t size);
+/* Declared here for the same reason the two above are: the search below has a
+ * resource failure to report and the recorder is defined with the other
+ * scanner-state writers, further down. */
+static void scan_broken(struct kof_scanner *sc, uint32_t reason);
 
 /*
  * The extents of one half of the symbol block, LAST RECORD FIRST.
@@ -225,8 +252,14 @@ static int c_find_str_sym(const struct kof_obj_ctx *ctx, uint32_t mask,
 				sc->sym_ext[half] =
 					malloc(KOF_SCAN_MAX_EXTENTS *
 					       sizeof *sc->sym_ext[half]);
-				if (!sc->sym_ext[half])
+				if (!sc->sym_ext[half]) {
+					/* Not "the symbol is absent", which is
+					 * what a bare zero says and what a
+					 * rule would read it as. The block was
+					 * never searched. */
+					scan_broken(sc, KOF_BROKEN_LIMIT);
 					return 0;
+				}
 			}
 			sc->sym_ext_n[half] =
 				kof_sym_extents(sym, sym_n,
@@ -588,10 +621,58 @@ static void c_debug(const struct kof_obj_ctx *ctx, uint32_t name_id, uint64_t va
  */
 #define EMIT_MAX (1u << 20)
 
+/*
+ * EVERY PENDING DECLARATION, DROPPED.
+ *
+ * A producer names its next child before it makes it - the label, the kind,
+ * the entry index, the format, the region table, the symbol block - and each of
+ * those is a claim about ONE child. kid_push spends them as it attaches them,
+ * and clears them even when the child is then refused, because the whole
+ * failure mode here is a claim outliving the thing it was about and being worn
+ * by whatever comes next: a label from another entry, or worse a region table
+ * whose offsets are offsets into different bytes.
+ *
+ * Here rather than written out twice. kof_mod_unpack_mode already spelled the
+ * same list for the end of a module, and the two had already drifted - that
+ * copy leaves pend_rgn_fmt standing, which is harmless only for as long as
+ * nothing reads it without n_pend_rgn.
+ */
+static void pend_clear(struct kof_scanner *sc)
+{
+	sc->pend_label[0] = 0;
+	sc->pend_label_len = 0;
+	sc->pend_kind = 0;
+	sc->pend_entry = KOF_ENTRY_NONE;
+	sc->pend_fmt = 0;
+	sc->n_pend_rgn = 0;
+	sc->pend_rgn_fmt = 0;
+	sc->pend_view = 0;
+	sc->n_pend_syms = 0;
+}
+
 static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 {
-	if (!kid)
+	if (!kid) {
+		/*
+		 * NO CHILD, AND THE CLAIMS STILL HAVE TO GO.
+		 *
+		 * This returned without touching them, which is the one path
+		 * through this function that let a declaration survive. A
+		 * window whose range the object does not hold, or a heap
+		 * source that could not be allocated, left the label, the
+		 * entry index, the declared format and the region table
+		 * standing - and the NEXT child produced, a different entry
+		 * entirely, wore all of them.
+		 *
+		 * Not reported as a limit: a NULL arrives both from an
+		 * allocation that failed and from kof_src_window refusing a
+		 * range the object does not contain, and the second is an
+		 * ordinary answer. Whoever can tell the two apart reports;
+		 * see c_child, which can.
+		 */
+		pend_clear(sc);
 		return 0;
+	}
 	/*
 	 * The pending name belongs to this child and to no other. Consumed whatever
 	 * happens next - even if the child is then refused for a limit - because a
@@ -705,31 +786,44 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 		return 0;
 	}
 	if (sc->n_kids == sc->cap_kids) {
+		/*
+		 * THREE ARRAYS INDEXED BY ONE COUNTER, so they grow together
+		 * or not at all - and a growth that fails is a CHILD LOST,
+		 * which is the same thing the cap above refuses and has to be
+		 * said the same way.
+		 *
+		 * It was three blocks with a failure path each, and all three
+		 * dropped the child without a word: a container whose last
+		 * entry could not be recorded reported as fully examined. The
+		 * refusal one line up, for a child over the caller's cap, has
+		 * the note explaining why that is the difference between
+		 * "nothing else here" and "stopped looking" - these are the
+		 * same event and were silent.
+		 *
+		 * cap_kids is committed only once all three have grown. A
+		 * partial growth is safe to leave: the arrays are larger than
+		 * cap_kids claims, so the next call simply asks for the same
+		 * size again.
+		 */
 		uint32_t nc = sc->cap_kids ? sc->cap_kids * 2 : 8;
 		struct kof_objsrc **nv = realloc(sc->kids, nc * sizeof *nv);
-		uint8_t *np;
+		uint8_t *np = NULL;
+		const char **nf = NULL;
 
-		if (!nv) {
+		if (nv)
+			sc->kids = nv;
+		if (nv)
+			np = realloc(sc->kid_packer, nc * sizeof *np);
+		if (np)
+			sc->kid_packer = np;
+		if (np)
+			nf = realloc(sc->kid_family, nc * sizeof *nf);
+		if (!nf) {
+			scan_broken(sc, KOF_BROKEN_LIMIT);
 			kof_src_unref(kid);
 			return 0;
 		}
-		sc->kids = nv;
-		np = realloc(sc->kid_packer, nc * sizeof *np);
-		if (!np) {
-			kof_src_unref(kid);
-			return 0;
-		}
-		sc->kid_packer = np;
-		{
-			const char **nf = realloc(sc->kid_family,
-						  nc * sizeof *nf);
-
-			if (!nf) {
-				kof_src_unref(kid);
-				return 0;
-			}
-			sc->kid_family = nf;
-		}
+		sc->kid_family = nf;
 		sc->cap_kids = nc;
 	}
 	/*
@@ -783,6 +877,35 @@ static void scan_release(struct kof_scanner *sc, uint64_t produced)
 static void scan_release_cb(void *sc, uint64_t produced)
 {
 	scan_release(sc, produced);
+}
+
+/*
+ * The other two thirds of the residency account, which every allocating path
+ * below was spelling out for itself.
+ *
+ * There were nine copies of the charge and eight of the headroom question, and
+ * they had already drifted: one charge forgot the peak entirely, so the figure
+ * a caller reads back as "the most this scan ever held" was short by whatever
+ * the RAR filter's scratch was. That is the ordinary fate of an invariant
+ * written out by hand in nine places - it is not that any copy is hard, it is
+ * that nothing makes the ninth one match the other eight.
+ *
+ * scan_release is the third and already existed; it also SATURATES, which a
+ * bare `sc->resident -= n` does not, so routing the uncharges through it means
+ * a mispaired release cannot wrap the count to near 2^64 and refuse every
+ * allocation for the rest of the scan.
+ */
+static uint64_t scan_room(const struct kof_scanner *sc)
+{
+	return sc->resident < sc->resident_max
+	     ? sc->resident_max - sc->resident : 0;
+}
+
+static void scan_charge(struct kof_scanner *sc, uint64_t n)
+{
+	sc->resident += n;
+	if (sc->resident > sc->st.peak_resident)
+		sc->st.peak_resident = sc->resident;
 }
 
 /*
@@ -941,11 +1064,41 @@ static int c_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 	 * itself over a long scan is a limit nobody can predict.
 	 */
 	sc->budget -= n;
-	sc->resident += n;
-	if (sc->resident > sc->st.peak_resident)
-		sc->st.peak_resident = sc->resident;
+	scan_charge(sc, n);
 
 	return 1;
+}
+
+/*
+ * A whole buffer through c_emit, which takes a uint32 and refuses more than
+ * EMIT_MAX at a time.
+ *
+ * This loop was written out five times - after a buffered decode, after a text
+ * coding, after a BCJ2 folder, after a STORED join, and for an emulator image -
+ * and three of the five spelled the chunk as a bare `1u << 20` rather than as
+ * EMIT_MAX. They are the same number today; nothing made them stay that way,
+ * and a change to EMIT_MAX would have moved two of the five.
+ *
+ * Answers HOW MUCH the sink took, because that is what every caller went on to
+ * report: a short count is the sink refusing, which is a real and expected
+ * answer here - the budget, the object cap and the resident ceiling all arrive
+ * as one.
+ */
+static uint64_t emit_all(const struct kof_obj_ctx *ctx, const uint8_t *p,
+			 uint64_t n)
+{
+	uint64_t at = 0;
+
+	while (at < n) {
+		uint64_t chunk = n - at;
+
+		if (chunk > EMIT_MAX)
+			chunk = EMIT_MAX;
+		if (!c_emit(ctx, p + at, (uint32_t)chunk))
+			break;
+		at += chunk;
+	}
+	return at;
 }
 
 /*
@@ -1052,6 +1205,82 @@ static uint64_t expand_limit(uint64_t in_len, uint64_t declared)
 }
 
 /*
+ * WHICH OF A STREAMING DECODER'S NON-OK ANSWERS THIS CODING CALLS ORDINARY.
+ *
+ * They differ by format and the difference is real, so it is a parameter
+ * rather than one rule for all of them:
+ *
+ *   DEFLATE has an end-of-stream marker, so a truncated stream is a truncated
+ *   stream and is worth saying.
+ *   bzip2, LZW and RunLength end where their input does, so TRUNCATED is the
+ *   ordinary ending - though a bzip2 CHECKSUM failure is not, and that arrives
+ *   as its own status.
+ *   LHA, ARJ and LZX stop when the declared original size has been produced,
+ *   so STOPPED is theirs too.
+ */
+#define STREAM_STRICT   0u
+#define STREAM_PARTIAL  1u      /* ... and a stream that simply ran out */
+#define STREAM_FILLED   2u      /* ... and one that filled what was asked for */
+
+/*
+ * What one streaming decode is worth reporting.
+ *
+ * Eight callers wrote this out, each with its own spelling of which statuses
+ * to tolerate - which is the part that genuinely differs - and all eight with
+ * the SAME second clause, which is the part that does not. That clause is the
+ * one that matters and the one most easily left out: `left == 0` means the
+ * ratio clamp cut the stream, and without it a bomb's prefix is handed on as
+ * though it were the whole entry. It was right in all eight, and nothing was
+ * making it so.
+ */
+static void stream_note(struct kof_scanner *sc, enum kof_decomp_status st,
+			uint32_t ordinary, const struct expand_sink *snk)
+{
+	if (st != KOF_DEC_OK &&
+	    !(st == KOF_DEC_TRUNCATED && (ordinary & STREAM_PARTIAL)) &&
+	    !(st == KOF_DEC_STOPPED && (ordinary & STREAM_FILLED)))
+		scan_broken(sc, broken_of_status(st));
+	else if (snk->left == 0)
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+}
+
+/*
+ * RFC 1950's two byte header, STEPPED OVER WHEN IT IS REALLY THERE.
+ *
+ * zlib is DEFLATE with a header in front and an Adler-32 behind. The trailer
+ * needs nothing - inflate stops at its own end-of-stream marker and never
+ * reads it - so only the header has to go, and after it the bytes are exactly
+ * what the DEFLATE path already handles.
+ *
+ * CHECKED, NOT ASSUMED. CM must be 8, the window no larger than 32KB, the two
+ * bytes together a multiple of 31 - the check digit RFC 1950 carries for
+ * exactly this - and FDICT clear, because a preset dictionary names data this
+ * engine does not have and decoding without it produces confident garbage. A
+ * stream that fails is raw DEFLATE under a zlib name, which is what a producer
+ * that emitted RFC 1951 meant, so it is decoded from its FIRST byte. That is
+ * why a caller unsure which of the two it holds can name zlib and be right
+ * either way - and why the PDF module, whose /FlateDecode is either in
+ * practice, does exactly that.
+ *
+ * ONE COPY. It was written out twice, once over the object in c_unpack and
+ * once over an intermediate in c_unpack_chain, and a check digit repeated is a
+ * check digit that can be repeated wrong.
+ *
+ * Answers how many bytes to skip: 2 or 0.
+ */
+static uint64_t zlib_hdr_len(const uint8_t *p, uint64_t n)
+{
+	uint32_t cmf, flg;
+
+	if (n <= 2u)
+		return 0;
+	cmf = p[0];
+	flg = p[1];
+	return ((cmf & 0x0fu) == 8u && (cmf >> 4) <= 7u &&
+		((cmf << 8) + flg) % 31u == 0u && !(flg & 0x20u)) ? 2u : 0u;
+}
+
+/*
  * The methods unpack_buffered takes: everything whose whole output has to be
  * addressable at once. DEFLATE and HEXTEXT stream instead and are answered
  * before this is asked.
@@ -1062,9 +1291,28 @@ static uint64_t expand_limit(uint64_t in_len, uint64_t declared)
  */
 static int buffered_method(uint32_t method)
 {
+	/*
+	 * LZMA IS A RANGE AND NOT A FLOOR, which is what this said.
+	 *
+	 * The id carries lc, lp and pb, so the codings are KOF_UNP_LZMA
+	 * through KOF_UNP_LZMA + 224 - the same bound kof_unp_method_name
+	 * uses, and the same one lzma_props_of enforces one function away.
+	 * Written here as `>= KOF_UNP_LZMA` it swallowed everything above:
+	 * LZX is 320 and LZX_RESET is 352, and both answered yes.
+	 *
+	 * What that cost is the REASON. An LZX id handed to kof_unpack_at
+	 * reached unpack_buffered, took the LZMA arm, and was refused by
+	 * lzma_props_of as KOF_BROKEN_DAMAGED - so a perfectly sound archive
+	 * was reported as a damaged one because this build decodes LZX only
+	 * through the entry call. broken_of_status draws that distinction on
+	 * purpose: a coding the engine lacks is a gap in the engine, damage
+	 * is a statement about the file, and the two lead different places.
+	 * Bounded, the same id falls out as "a method this engine does not
+	 * have" and nothing is said about the file.
+	 */
 	return method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86 ||
 	       method == KOF_UNP_RAR3  || method == KOF_UNP_RAR5 ||
-	       method >= KOF_UNP_LZMA  ||
+	       (method >= KOF_UNP_LZMA && method <= KOF_UNP_LZMA + 224u) ||
 	       (method >= KOF_UNP_NRV2B_8 && method <= KOF_UNP_NRV2E_32);
 }
 
@@ -1146,8 +1394,7 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 	enum kof_decomp_status st;
 	int capped = 0;
 
-	room = sc->resident < sc->resident_max
-	     ? (sc->resident_max - sc->resident) / 2u : 0;
+	room = scan_room(sc) / 2u;
 	/*
 	 * WHICH CEILING IS BINDING, because they mean different things.
 	 *
@@ -1186,19 +1433,53 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 		}
 	}
 
+	/*
+	 * THE RATIO CLAMP, SETTLED BEFORE ANYTHING IS TAKEN.
+	 *
+	 * It used to sit below, inside each decoder's arm, and assign to `want`
+	 * AFTER the buffer had been allocated and charged at the larger size -
+	 * so the release at the bottom gave back the CLAMPED figure and the
+	 * difference stayed on the residency account for the rest of the scan.
+	 * A zip of entries declaring a 600x expansion leaks up to obj_cap minus
+	 * a megabyte each; a few hundred of them and the ceiling is exhausted by
+	 * memory nothing is holding, after which every later object in the run
+	 * produces nothing and is reported as having hit a limit. Precisely the
+	 * "limit that tightens itself over a long scan" c_emit warns about,
+	 * arrived at from the other end.
+	 *
+	 * Settling it here rather than repairing the release also means the
+	 * buffer is allocated at the size that will actually be decoded into,
+	 * instead of fifteen megabytes for a one megabyte decode.
+	 *
+	 * Only the codings whose arms applied it: the clamp reads a size the
+	 * CONTAINER declared, and LZMA and NRV2 arrive here from formats that
+	 * declare none - see expand_limit.
+	 */
+	if (method == KOF_UNP_RAR3 || method == KOF_UNP_RAR5 ||
+	    method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86) {
+		uint64_t lim = expand_limit(in_len, out_hint);
+
+		if (want > lim) {
+			want = lim;
+			capped = 1;
+			scan_capped(sc, KOF_BROKEN_LIMIT);
+		}
+	}
+
 	buf = malloc((size_t)want);
 	if (!buf) {
 		scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
 	/* Charged while it is alive, so a module that unpacks inside an object that
-	 * is itself produced cannot exceed the ceiling between the two of them. */
-	sc->resident += want;
-	if (sc->resident > sc->st.peak_resident)
-		sc->st.peak_resident = sc->resident;
+	 * is itself produced cannot exceed the ceiling between the two of them.
+	 *
+	 * `want` DOES NOT MOVE from here to the release at the bottom - the only
+	 * assignment to it below is the PE rebuild's, which releases and
+	 * recharges around itself. That is what makes the pair balance. */
+	scan_charge(sc, want);
 
 	if (method == KOF_UNP_RAR3 || method == KOF_UNP_RAR5) {
-		uint64_t lim = expand_limit(in_len, out_hint);
 		/*
 		 * Working room for the channel delta filter, which writes a
 		 * permutation of its input and so cannot work in place. Bounded by
@@ -1213,11 +1494,6 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 						     : KOF_RAR5_SCRATCH;
 		uint8_t *scratch;
 
-		if (want > lim) {
-			want = lim;
-			capped = 1;
-			scan_capped(sc, KOF_BROKEN_LIMIT);
-		}
 		/*
 		 * No larger than the output, because a filter cannot cover more of
 		 * the entry than the entry holds. The format's bound is four
@@ -1229,7 +1505,7 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 			sn = want;
 		scratch = malloc((size_t)sn);
 		if (scratch)
-			sc->resident += sn;
+			scan_charge(sc, sn);
 		if (method == KOF_UNP_RAR3)
 			st = kof_rar3_decode(in, in_len, buf, want, scratch,
 					     scratch ? sn : 0u, &produced);
@@ -1237,17 +1513,10 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 			st = kof_rar5_decode(in, in_len, buf, want, scratch,
 					     scratch ? sn : 0u, &produced);
 		if (scratch) {
-			sc->resident -= sn;
+			scan_release(sc, sn);
 			free(scratch);
 		}
 	} else if (method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86) {
-		uint64_t lim = expand_limit(in_len, out_hint);
-
-		if (want > lim) {
-			want = lim;
-			capped = 1;
-			scan_capped(sc, KOF_BROKEN_LIMIT);
-		}
 		st = kof_lzma2_decode(in, in_len, buf, want, &produced);
 		/*
 		 * The transform is undone here, over the whole decoded buffer,
@@ -1263,7 +1532,7 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 		unsigned lc, lp, pb;
 
 		if (!lzma_props_of(method, &lc, &lp, &pb)) {
-			sc->resident -= want;
+			scan_release(sc, want);
 			free(buf);
 			scan_broken(sc, KOF_BROKEN_DAMAGED);
 			return 0;
@@ -1332,7 +1601,7 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 
 		if (n)
 			memcpy(peek_out, buf, (size_t)n);
-		sc->resident -= want;
+		scan_release(sc, want);
 		free(buf);
 		return n;
 	}
@@ -1340,19 +1609,16 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 	if (form == KOF_FORM_PE_IMAGE && produced) {
 		uint8_t *rebuilt = NULL;
 		uint64_t rebuilt_len = 0;
-		uint64_t rebuild_cap = sc->resident < sc->resident_max
-				     ? sc->resident_max - sc->resident : 0;
+		uint64_t rebuild_cap = scan_room(sc);
 
 		if (kof_pe_rebuild(kof_buf_make(buf, produced), rebuild_cap, &rebuilt,
 				   &rebuilt_len)) {
-			sc->resident -= want;
+			scan_release(sc, want);
 			free(buf);
 			buf = rebuilt;
 			want = rebuilt_len;
 			produced = rebuilt_len;
-			sc->resident += want;
-			if (sc->resident > sc->st.peak_resident)
-				sc->st.peak_resident = sc->resident;
+			scan_charge(sc, want);
 		}
 		/* A buffer that could not be rebuilt is emitted as it is: an image
 		 * is still worth searching, and saying nothing about it would be
@@ -1361,17 +1627,9 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 
 	/* Whatever was decoded is real output and is worth scanning, whether or not
 	 * the stream ended cleanly - the same rule the gzip path follows. */
-	for (at = 0; at < produced; ) {
-		uint64_t n = produced - at;
+	at = emit_all(ctx, buf, produced);
 
-		if (n > EMIT_MAX)
-			n = EMIT_MAX;
-		if (!c_emit(ctx, buf + at, (uint32_t)n))
-			break;
-		at += n;
-	}
-
-	sc->resident -= want;
+	scan_release(sc, want);
 	free(buf);
 	/*
 	 * Everything emitted means the decode is what to report; a short emit means
@@ -1426,7 +1684,6 @@ static uint32_t c_unpack_peek(const struct kof_obj_ctx *ctx, uint32_t method,
 	return (uint32_t)unpack_buffered(sc, ctx, method, variant, bits,
 					 b.p + off, len, cap, KOF_FORM_RAW,
 					 (uint8_t *)out, cap);
-	return 0;      /* a method this engine does not peek into */
 }
 
 /*
@@ -1601,15 +1858,11 @@ static uint64_t unpack_textcode(const struct kof_obj_ctx *ctx, uint32_t method,
 		snk.ctx = ctx;
 		snk.left = expand_limit(len, 0);
 		st = kof_rle_decode(b.p + off, len, expand_sink_fn, &snk, &got);
-		if (st != KOF_DEC_OK && st != KOF_DEC_TRUNCATED)
-			scan_broken(sc, broken_of_status(st));
-		else if (snk.left == 0)
-			scan_broken(sc, KOF_BROKEN_LIMIT);
+		stream_note(sc, st, STREAM_PARTIAL, &snk);
 		return got;
 	}
 
-	room = sc->resident < sc->resident_max
-	     ? sc->resident_max - sc->resident : 0;
+	room = scan_room(sc);
 	if (len > room) {
 		scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
@@ -1619,9 +1872,7 @@ static uint64_t unpack_textcode(const struct kof_obj_ctx *ctx, uint32_t method,
 		scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
-	sc->resident += len;
-	if (sc->resident > sc->st.peak_resident)
-		sc->st.peak_resident = sc->resident;
+	scan_charge(sc, len);
 
 	st = method == KOF_UNP_ASCII85
 	   ? kof_a85_decode(b.p + off, len, buf, len, &got)
@@ -1635,19 +1886,9 @@ static uint64_t unpack_textcode(const struct kof_obj_ctx *ctx, uint32_t method,
 		 * damaged archive. */
 		scan_broken(sc, broken_of_status(st));
 	}
-	/* In pieces, because emit takes a 32-bit count and a decoded stream is
-	 * not bounded by one. */
-	for (at = 0; at < got; ) {
-		uint64_t n = got - at;
-
-		if (n > (1u << 20))
-			n = 1u << 20;
-		if (!c_emit(ctx, buf + at, (uint32_t)n))
-			break;
-		at += n;
-	}
+	at = emit_all(ctx, buf, got);
 	free(buf);
-	sc->resident -= len;
+	scan_release(sc, len);
 	return at;
 }
 
@@ -1678,39 +1919,14 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 
 	/*
 	 * ZLIB IS DEFLATE WITH TWO BYTES IN FRONT, so it is answered by moving
-	 * the window rather than by a second decoder.
-	 *
-	 * RFC 1950 wraps RFC 1951 in a two byte header and a four byte Adler-32.
-	 * The trailer needs nothing: inflate stops at its own end-of-stream
-	 * marker and never reads it. Only the header has to go, and after it the
-	 * bytes are exactly what the DEFLATE path below already handles - so
-	 * this translates the request and falls through instead of repeating
-	 * that block.
-	 *
-	 * THE HEADER IS CHECKED, NOT ASSUMED. CM must be 8, the window must be
-	 * no larger than 32KB, the two bytes together must be a multiple of 31 -
-	 * the check digit RFC 1950 carries for exactly this - and FDICT must be
-	 * clear, because a preset dictionary names data this engine does not
-	 * have and decoding without it produces confident garbage.
-	 *
-	 * A stream that fails the check is decoded from its FIRST byte as raw
-	 * DEFLATE, which is what a producer that emitted RFC 1951 under a zlib
-	 * name meant. That is why a caller unsure which of the two it holds can
-	 * name this method and be right either way - and why the PDF module,
-	 * whose /FlateDecode is either in practice, does exactly that.
+	 * the window rather than by a second decoder - see zlib_hdr_len, which
+	 * is where the header is checked.
 	 */
 	if (method == KOF_UNP_ZLIB) {
-		if (len > 2u) {
-			uint32_t cmf = b.p[off];
-			uint32_t flg = b.p[off + 1u];
+		uint64_t h = zlib_hdr_len(b.p + off, len);
 
-			if ((cmf & 0x0fu) == 8u && (cmf >> 4) <= 7u &&
-			    ((cmf << 8) + flg) % 31u == 0u &&
-			    !(flg & 0x20u)) {
-				off += 2u;
-				len -= 2u;
-			}
-		}
+		off += h;
+		len -= h;
 		method = KOF_UNP_DEFLATE;
 	}
 
@@ -1739,10 +1955,7 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 			e.left = expand_limit(len, out_hint);
 			st = kof_inflate(sc->inf, b.p + off, len, expand_sink_fn,
 					 &e, NULL, &produced);
-			if (st != KOF_DEC_OK)
-				scan_broken(sc, broken_of_status(st));
-			else if (e.left == 0)
-				scan_broken(sc, KOF_BROKEN_LIMIT);
+			stream_note(sc, st, STREAM_STRICT, &e);
 		}
 		return produced;
 	}
@@ -1773,10 +1986,7 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		 * gives: whatever decoded before the stream ran out is real
 		 * output and is the part worth scanning.
 		 */
-		if (st != KOF_DEC_OK && st != KOF_DEC_TRUNCATED)
-			scan_broken(sc, broken_of_status(st));
-		else if (snk.left == 0)
-			scan_broken(sc, KOF_BROKEN_LIMIT);
+		stream_note(sc, st, STREAM_PARTIAL, &snk);
 		return got;
 	}
 
@@ -1803,10 +2013,7 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		 * that went in, and reporting that as a clean decode would hand
 		 * a rule content the archive never held.
 		 */
-		if (st != KOF_DEC_OK && st != KOF_DEC_TRUNCATED)
-			scan_broken(sc, broken_of_status(st));
-		else if (snk.left == 0)
-			scan_broken(sc, KOF_BROKEN_LIMIT);
+		stream_note(sc, st, STREAM_PARTIAL, &snk);
 		return got;
 	}
 
@@ -1842,20 +2049,16 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		 * gives - and here it is also what a declared size larger than
 		 * the stream looks like, which is an archive's claim and not
 		 * this engine's failure. */
-		if (st != KOF_DEC_OK && st != KOF_DEC_TRUNCATED &&
-		    st != KOF_DEC_STOPPED)
-			scan_broken(sc, broken_of_status(st));
-		else if (snk.left == 0)
-			scan_broken(sc, KOF_BROKEN_LIMIT);
+		stream_note(sc, st, STREAM_PARTIAL | STREAM_FILLED, &snk);
 		return got;
 	}
 
 	if (!buffered_method(method))
-		return 0;
+		return 0;              /* a method this engine does not have */
 	if (!nrv2_of(method, &variant, &bits))
 		variant = bits = 0;
 	return unpack_buffered(sc, ctx, method, variant, bits, b.p + off, len,
-			       out_hint, form, NULL, 0);      /* a method this engine does not have */
+			       out_hint, form, NULL, 0);
 }
 
 /*
@@ -1937,24 +2140,40 @@ static uint64_t unpack_bcj2(struct kof_scanner *sc, const struct kof_obj_ctx *ct
 	charged = out_len;
 	for (i = 0; i < 3u; i++)
 		charged = kof_sat_add(charged, pk[i]->out_size);
-	if (charged > (sc->resident < sc->resident_max
-		       ? sc->resident_max - sc->resident : 0)) {
+	if (charged > scan_room(sc)) {
 		scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
-	sc->resident += charged;
-	if (sc->resident > sc->st.peak_resident)
-		sc->st.peak_resident = sc->resident;
+	scan_charge(sc, charged);
 
+	/*
+	 * A STREAM THAT IS EMPTY IS STILL A STREAM, AND STILL NEEDS A POINTER.
+	 *
+	 * BCJ2 cuts x86 into four: the code, the call targets, the jump
+	 * targets and the range coder. A folder whose code has E8 calls and no
+	 * E9 jumps has an EMPTY JUMP CHANNEL, which is an ordinary shape and
+	 * not a damaged one.
+	 *
+	 * This skipped the allocation for such a channel and left the pointer
+	 * NULL, and kof_bcj2_decode refuses any NULL pointer outright - it
+	 * bounds every read by the channel's LENGTH, so the pointer never
+	 * mattered, but the guard does not know that. The decode returned 0,
+	 * `produced != out_len` fired, and a sound archive was reported
+	 * KOF_BROKEN_DAMAGED with nothing extracted.
+	 *
+	 * One byte rather than none, because malloc(0) may itself answer NULL
+	 * and put us back where we started.
+	 */
 	for (i = 0; i < 3u; i++) {
-		if (pk[i]->out_size) {
-			buf[i] = malloc((size_t)pk[i]->out_size);
-			if (!buf[i])
-				goto done;
-			if (!decode_stream(pk[i], b.p + pk[i]->off, buf[i],
-					   pk[i]->out_size, &len[i]))
-				goto done;
-		}
+		uint64_t want = pk[i]->out_size ? pk[i]->out_size : 1u;
+
+		buf[i] = malloc((size_t)want);
+		if (!buf[i])
+			goto done;
+		if (pk[i]->out_size &&
+		    !decode_stream(pk[i], b.p + pk[i]->off, buf[i],
+				   pk[i]->out_size, &len[i]))
+			goto done;
 	}
 	out = malloc((size_t)out_len);
 	if (!out)
@@ -1966,26 +2185,12 @@ static uint64_t unpack_bcj2(struct kof_scanner *sc, const struct kof_obj_ctx *ct
 				   out, out_len);
 	if (produced != out_len)
 		scan_broken(sc, KOF_BROKEN_DAMAGED);
-	/* Emitted in bounded pieces: c_emit takes a uint32 length, and a folder can
-	 * decode to more than that. */
-	{
-		uint64_t at2 = 0;
-
-		while (at2 < produced) {
-			uint64_t chunk = produced - at2;
-
-			if (chunk > (1u << 20))
-				chunk = 1u << 20;
-			if (!c_emit(ctx, out + at2, (uint32_t)chunk))
-				break;
-			at2 += chunk;
-		}
-	}
+	emit_all(ctx, out, produced);
 done:
 	free(out);
 	for (i = 0; i < 3u; i++)
 		free(buf[i]);
-	sc->resident -= charged;
+	scan_release(sc, charged);
 	return produced;
 }
 
@@ -2080,7 +2285,6 @@ static uint64_t unpack_mszip(struct kof_scanner *sc,
 	struct kof_range *ext = sc->ext_gather;
 	struct mszip_out snk;
 	kof_buf b;
-	uint64_t total = 0;
 	uint32_t n, i;
 
 	if (!ctx->resolve_entry || !can_produce(sc))
@@ -2108,16 +2312,14 @@ static uint64_t unpack_mszip(struct kof_scanner *sc,
 		scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
-	sc->resident += KOF_INF_WINDOW;
-	if (sc->resident > sc->st.peak_resident)
-		sc->st.peak_resident = sc->resident;
+	scan_charge(sc, KOF_INF_WINDOW);
 
 	if (!sc->inf) {
 		sc->inf = malloc(sizeof *sc->inf);
 		if (!sc->inf) {
 			scan_broken(sc, KOF_BROKEN_LIMIT);
 			free(snk.hist);
-			sc->resident -= KOF_INF_WINDOW;
+			scan_release(sc, KOF_INF_WINDOW);
 			return 0;
 		}
 	}
@@ -2134,10 +2336,15 @@ static uint64_t unpack_mszip(struct kof_scanner *sc,
 			scan_broken(sc, KOF_BROKEN_DAMAGED);
 			break;
 		}
+		/*
+		 * `got` is what the FOLDER decoded; what this call answers is
+		 * what the FILE got, which is snk.emitted - the bytes in front
+		 * of the file belong to other files and are dropped. The two
+		 * were both accumulated and only the second was ever read.
+		 */
 		st = kof_inflate_seeded(sc->inf, snk.hist, snk.hist_len,
 					b.p + off + 2u, len - 2u,
 					mszip_sink_fn, &snk, NULL, &got);
-		total += got;
 		if (st != KOF_DEC_OK && st != KOF_DEC_STOPPED) {
 			scan_broken(sc, broken_of_status(st));
 			break;
@@ -2145,8 +2352,57 @@ static uint64_t unpack_mszip(struct kof_scanner *sc,
 	}
 
 	free(snk.hist);
-	sc->resident -= KOF_INF_WINDOW;
+	scan_release(sc, KOF_INF_WINDOW);
 	return snk.emitted;
+}
+
+/*
+ * THE PIECES OF ONE ENTRY, JOINED INTO A BUFFER THE DECODERS CAN READ.
+ *
+ * Every decoder here takes contiguous input, and an entry's bytes are a chain
+ * that is not consecutive 23.6% of the time, so the join is unavoidable. What
+ * WAS avoidable is having it twice: unpack_lzx and c_unpack_entry each carried
+ * the same seven steps - total the clipped extents, refuse when the ceiling has
+ * no room, allocate, charge, copy - and each had to get the clip right in two
+ * separate places, once for the size and once for the copy.
+ *
+ * Answers the buffer, CHARGED to the residency account, with *total set to its
+ * length; the caller frees it and releases *total. NULL means nothing to join,
+ * or no room for it - the reason is already recorded either way.
+ */
+static uint8_t *entry_join(struct kof_scanner *sc, kof_buf b,
+			   const struct kof_range *ext, uint32_t n,
+			   uint64_t *total)
+{
+	uint64_t want = 0, at = 0;
+	uint8_t *in;
+	uint32_t i;
+
+	*total = 0;
+	for (i = 0; i < n; i++)
+		want += kof_clip_len(b.n, ext[i].off, ext[i].len);
+	if (!want)
+		return NULL;
+	if (want > scan_room(sc)) {
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+		return NULL;
+	}
+	in = malloc((size_t)want);
+	if (!in) {
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+		return NULL;
+	}
+	scan_charge(sc, want);
+	for (i = 0; i < n; i++) {
+		uint64_t len = kof_clip_len(b.n, ext[i].off, ext[i].len);
+
+		if (!len)
+			continue;
+		memcpy(in + at, b.p + ext[i].off, (size_t)len);
+		at += len;
+	}
+	*total = at;
+	return in;
 }
 
 /*
@@ -2201,7 +2457,29 @@ static uint64_t unpack_lzx_reset(struct kof_scanner *sc,
 		}
 	}
 	snk.ctx = ctx;
-	snk.left = expand_limit(kof_clip_len(b.n, ext[0].off, ext[0].len), take);
+	/*
+	 * THE RATIO IS THE FILE'S, SO THE INPUT IN IT IS ALL THE RANGES.
+	 *
+	 * One sink serves every range - `take` is the whole file's length and
+	 * `left` is spent across all of them - so measuring the expansion
+	 * against the FIRST range alone divides the input by however many
+	 * reset intervals the file spans and multiplies the apparent ratio by
+	 * the same number. A file over eight intervals reads as expanding
+	 * eight times harder than it does, and an ordinary 5x one crosses a
+	 * bound set at 32 and is cut to a megabyte for no reason the file
+	 * gave.
+	 *
+	 * unpack_lzx, which is the same decode with the pieces joined instead
+	 * of restarted, already sums them - see its expand_limit(total, take).
+	 * These two answered differently about the same question.
+	 */
+	{
+		uint64_t in_all = 0;
+
+		for (i = 0; i < n; i++)
+			in_all += kof_clip_len(b.n, ext[i].off, ext[i].len);
+		snk.left = expand_limit(in_all, take);
+	}
 
 	for (i = 0; i < n && take; i++) {
 		uint64_t off = ext[i].off;
@@ -2236,11 +2514,7 @@ static uint64_t unpack_lzx_reset(struct kof_scanner *sc,
 		skip = 0;              /* only the first range holds the run-up */
 	}
 
-	if (st != KOF_DEC_OK && st != KOF_DEC_TRUNCATED &&
-	    st != KOF_DEC_STOPPED)
-		scan_broken(sc, broken_of_status(st));
-	else if (snk.left == 0)
-		scan_broken(sc, KOF_BROKEN_LIMIT);
+	stream_note(sc, st, STREAM_PARTIAL | STREAM_FILLED, &snk);
 	return got;
 }
 
@@ -2267,8 +2541,8 @@ static uint64_t unpack_lzx(struct kof_scanner *sc,
 	enum kof_decomp_status st;
 	kof_buf b;
 	uint8_t *in;
-	uint64_t total = 0, at = 0, skip, take, got = 0, room;
-	uint32_t n, i;
+	uint64_t total = 0, skip, take, got = 0;
+	uint32_t n;
 
 	if (!ctx->resolve_entry || !can_produce(sc))
 		return 0;
@@ -2281,17 +2555,6 @@ static uint64_t unpack_lzx(struct kof_scanner *sc,
 		return 0;
 
 	b = kof_src_buf(sc->cur_src);
-	for (i = 0; i < n; i++)
-		total += kof_clip_len(b.n, ext[i].off, ext[i].len);
-	if (!total)
-		return 0;
-
-	room = sc->resident < sc->resident_max
-	     ? sc->resident_max - sc->resident : 0;
-	if (total > room) {
-		scan_broken(sc, KOF_BROKEN_LIMIT);
-		return 0;
-	}
 	if (!sc->lzx) {
 		sc->lzx = malloc(sizeof *sc->lzx);
 		if (!sc->lzx) {
@@ -2299,36 +2562,18 @@ static uint64_t unpack_lzx(struct kof_scanner *sc,
 			return 0;
 		}
 	}
-	in = malloc((size_t)total);
-	if (!in) {
-		scan_broken(sc, KOF_BROKEN_LIMIT);
+	in = entry_join(sc, b, ext, n, &total);
+	if (!in)
 		return 0;
-	}
-	sc->resident += total;
-	if (sc->resident > sc->st.peak_resident)
-		sc->st.peak_resident = sc->resident;
-
-	for (i = 0; i < n; i++) {
-		uint64_t len = kof_clip_len(b.n, ext[i].off, ext[i].len);
-
-		if (!len)
-			continue;
-		memcpy(in + at, b.p + ext[i].off, (size_t)len);
-		at += len;
-	}
 
 	snk.ctx = ctx;
 	snk.left = expand_limit(total, take);
-	st = kof_lzx_decode(sc->lzx, window_bits, in, at, skip, take,
+	st = kof_lzx_decode(sc->lzx, window_bits, in, total, skip, take,
 			    expand_sink_fn, &snk, &got);
-	if (st != KOF_DEC_OK && st != KOF_DEC_TRUNCATED &&
-	    st != KOF_DEC_STOPPED)
-		scan_broken(sc, broken_of_status(st));
-	else if (snk.left == 0)
-		scan_broken(sc, KOF_BROKEN_LIMIT);
+	stream_note(sc, st, STREAM_PARTIAL | STREAM_FILLED, &snk);
 
 	free(in);
-	sc->resident -= total;
+	scan_release(sc, total);
 	return got;
 }
 
@@ -2339,11 +2584,10 @@ static uint64_t c_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 	struct kof_range *ext = sc->ext_gather;
 	kof_buf b;
 	uint8_t *in;
-	uint64_t total = 0, at = 0, produced = 0, room;
-	uint32_t n, i;
+	uint64_t total = 0, produced = 0;
+	uint32_t n;
 	enum kof_decomp_status st;
 
-	(void)out_hint;
 	if (!can_produce(sc))
 		return 0;
 	if (method == KOF_UNP_BCJ2)
@@ -2379,61 +2623,24 @@ static uint64_t c_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 
 	b = kof_src_buf(sc->cur_src);
 	n = ctx->resolve_entry(ctx, index, ext, KOF_SCAN_MAX_EXTENTS);
-	for (i = 0; i < n; i++)
-		total += kof_clip_len(b.n, ext[i].off, ext[i].len);
-	if (!total)
+	in = entry_join(sc, b, ext, n, &total);
+	if (!in)
 		return 0;
-
-	room = sc->resident < sc->resident_max
-	     ? sc->resident_max - sc->resident : 0;
-	if (total > room) {
-		scan_broken(sc, KOF_BROKEN_LIMIT);
-		return 0;
-	}
-	in = malloc((size_t)total);
-	if (!in) {
-		scan_broken(sc, KOF_BROKEN_LIMIT);
-		return 0;
-	}
-	sc->resident += total;
-	if (sc->resident > sc->st.peak_resident)
-		sc->st.peak_resident = sc->resident;
-
-	for (i = 0; i < n; i++) {
-		uint64_t len = kof_clip_len(b.n, ext[i].off, ext[i].len);
-
-		if (!len)
-			continue;
-		memcpy(in + at, b.p + ext[i].off, (size_t)len);
-		at += len;
-	}
 
 	if (method == KOF_UNP_STORED) {
-		/* The joined bytes ARE the object. Emitted in pieces because
-		 * c_emit takes a 32 bit count and a joined entry is not bounded
-		 * by one - the same loop unpack_buffered ends on. */
-		uint64_t off = 0;
-
+		/* The joined bytes ARE the object. */
 		st = KOF_DEC_OK;
-		while (off < at) {
-			uint64_t n2 = at - off;
-
-			if (n2 > (1u << 20))
-				n2 = 1u << 20;
-			if (!c_emit(ctx, in + off, (uint32_t)n2))
-				break;
-			off += n2;
-		}
-		produced = off;
+		produced = emit_all(ctx, in, total);
 	} else {
 		struct sink_carry carry = { ctx };
 
-		st = kof_ovba_decode(in, at, inflate_sink, &carry, &produced);
+		st = kof_ovba_decode(in, total, inflate_sink, &carry,
+				     &produced);
 	}
 	if (st != KOF_DEC_OK)
 		scan_broken(sc, broken_of_status(st));
 
-	sc->resident -= total;
+	scan_release(sc, total);
 	free(in);
 	return produced;
 }
@@ -2472,6 +2679,17 @@ static int c_child(const struct kof_obj_ctx *ctx)
 	 * child cap, or abandoned because the walk was aborted.
 	 */
 	if (!kid) {
+		/*
+		 * A WHOLE DECODED OBJECT, GONE, AND IT HAS TO SAY SO.
+		 *
+		 * Unlike kid_push's NULL - which is also how a window refuses
+		 * a range - there is no ordinary reason to be here: the bytes
+		 * were produced, they were charged, and the only thing that
+		 * failed is the constructor. Returning quietly meant a
+		 * container whose entry decoded perfectly and then could not
+		 * be wrapped was reported as having nothing in it.
+		 */
+		scan_broken(sc, KOF_BROKEN_LIMIT);
 		scan_release(sc, held);
 		return 0;
 	}
@@ -2617,6 +2835,20 @@ static uint64_t c_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 
 	off = e->off;
 	len = e->len;
+	/*
+	 * THE INTERMEDIATE IS CHARGED, SO EVERY WAY OUT HAS TO UNCHARGE IT.
+	 *
+	 * Three of the exits in this loop freed `mid` and left its charge
+	 * standing. They are only reachable from the SECOND step onwards -
+	 * on the first there is no intermediate yet - so it takes a chain of
+	 * three codings to reach them, which is a shape a container declares
+	 * freely and PDF writes in the wild. Each one leaks mid_cap bytes off
+	 * the residency ceiling for the rest of the file's tree, and once the
+	 * ceiling is gone every remaining entry of that file produces nothing
+	 * and the file is reported as having hit a limit it never reached.
+	 *
+	 * The three correct exits below the loop already pair the two calls.
+	 */
 	for (i = 0; i < last; i++) {
 		uint8_t *next;
 		uint64_t got, room;
@@ -2624,24 +2856,24 @@ static uint64_t c_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 		if (!bounded_by_input(e->coding[i])) {
 			c_incomplete(ctx, KOF_BROKEN_UNSUPPORTED);
 			free(mid);
+			scan_release(sc, mid_cap);
 			return 0;
 		}
-		room = sc->resident < sc->resident_max
-		     ? sc->resident_max - sc->resident : 0;
+		room = scan_room(sc);
 		if (len > room) {
 			scan_broken(sc, KOF_BROKEN_LIMIT);
 			free(mid);
+			scan_release(sc, mid_cap);
 			return 0;
 		}
 		next = malloc((size_t)len);
 		if (!next) {
 			scan_broken(sc, KOF_BROKEN_LIMIT);
 			free(mid);
+			scan_release(sc, mid_cap);
 			return 0;
 		}
-		sc->resident += len;
-		if (sc->resident > sc->st.peak_resident)
-			sc->st.peak_resident = sc->resident;
+		scan_charge(sc, len);
 
 		/*
 		 * From the previous intermediate when there is one, and from
@@ -2674,12 +2906,12 @@ static uint64_t c_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 		/* The old intermediate is finished with: released, and its
 		 * ALLOCATION uncharged rather than its length. */
 		free(mid);
-		sc->resident -= mid_cap;
+		scan_release(sc, mid_cap);
 		mid = NULL;
 		mid_cap = 0;
 		if (!got) {
 			free(next);
-			sc->resident -= len;
+			scan_release(sc, len);
 			c_incomplete(ctx, KOF_BROKEN_DAMAGED);
 			return 0;
 		}
@@ -2713,7 +2945,7 @@ static uint64_t c_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 	    e->coding[last] != KOF_UNP_DEFLATE) {
 		c_incomplete(ctx, KOF_BROKEN_UNSUPPORTED);
 		free(mid);
-		sc->resident -= mid_cap;
+		scan_release(sc, mid_cap);
 		return 0;
 	}
 	{
@@ -2722,23 +2954,18 @@ static uint64_t c_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 		const uint8_t *p = mid;
 		uint64_t n = len;
 
-		/* The zlib wrapper, tested the way c_unpack tests it: a stream
-		 * that fails the check is raw DEFLATE under a zlib name. */
-		if (e->coding[last] == KOF_UNP_ZLIB && n > 2u) {
-			uint32_t cmf = p[0], flg = p[1];
+		if (e->coding[last] == KOF_UNP_ZLIB) {
+			uint64_t h = zlib_hdr_len(p, n);
 
-			if ((cmf & 0x0fu) == 8u && (cmf >> 4) <= 7u &&
-			    ((cmf << 8) + flg) % 31u == 0u && !(flg & 0x20u)) {
-				p += 2;
-				n -= 2u;
-			}
+			p += h;
+			n -= h;
 		}
 		if (!sc->inf) {
 			sc->inf = malloc(sizeof *sc->inf);
 			if (!sc->inf) {
 				scan_broken(sc, KOF_BROKEN_LIMIT);
 				free(mid);
-				sc->resident -= mid_cap;
+				scan_release(sc, mid_cap);
 				return 0;
 			}
 		}
@@ -2747,13 +2974,10 @@ static uint64_t c_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 		produced = 0;
 		st = kof_inflate(sc->inf, p, n, expand_sink_fn, &snk, NULL,
 				 &produced);
-		if (st != KOF_DEC_OK)
-			scan_broken(sc, broken_of_status(st));
-		else if (snk.left == 0)
-			scan_broken(sc, KOF_BROKEN_LIMIT);
+		stream_note(sc, st, STREAM_STRICT, &snk);
 	}
 	free(mid);
-	sc->resident -= mid_cap;
+	scan_release(sc, mid_cap);
 	return produced;
 }
 
@@ -2871,12 +3095,40 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 			uint64_t biggest = 0;
 			kof_buf b = kof_src_buf(sc->cur_src);
 
+			/*
+			 * THE SIZE THAT IS THERE, not the size that is
+			 * claimed, and the two are a whole ELF header field
+			 * apart.
+			 *
+			 * sh_size is a 64-bit number the file writes and the
+			 * parser records without clamping - it only flags
+			 * SEC_PAST_EOF - so `biggest` taken from it is won by
+			 * whichever section lies hardest. That section then
+			 * owns pass 0 alone, is dropped there for holding no
+			 * bytes, and every real section falls to pass 1 in
+			 * TABLE ORDER - which is .init, .plt, .plt.got,
+			 * .plt.sec and then .text, exactly the order the two
+			 * passes exist to avoid. One wrong field turns the
+			 * ordering off and nothing says so.
+			 *
+			 * kof_clip_len is the engine's own answer to "how much
+			 * of this is really here" and is what the sweep below
+			 * takes its bytes from, so ordering on anything else
+			 * is ordering on a different number than the one being
+			 * spent.
+			 */
 			for (i = 0; i < e->sec_count &&
-				    i < KOF_ELF_MAX_SECTIONS; i++)
-				if (e->sec[i].type == 1u &&
-				    (e->sec[i].flags & 0x4u) &&
-				    e->sec[i].file_size > biggest)
-					biggest = e->sec[i].file_size;
+				    i < KOF_ELF_MAX_SECTIONS; i++) {
+				uint64_t have;
+
+				if (e->sec[i].type != 1u ||
+				    !(e->sec[i].flags & 0x4u))
+					continue;
+				have = kof_clip_len(b.n, e->sec[i].file_off,
+						    e->sec[i].file_size);
+				if (have > biggest)
+					biggest = have;
+			}
 
 			sc->use = kof_xref_new();
 			/*
@@ -2900,21 +3152,65 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 				    i < KOF_ELF_MAX_SECTIONS; i++) {
 				const struct kof_elf_sec *sec = &e->sec[i];
 				uint32_t w = ctx->arch == KOF_ARCH_X86 ? 4u : 8u;
-				uint64_t k;
+				uint64_t k, have;
 
 				if (sec->type == 1u && (sec->flags & 0x4u) &&
 				    kof_str_ne(sec->name, ".text"))
 					kof_xref_startup(sc->use, sec->mem_addr);
 				if (sec->type != 14u && sec->type != 15u)
 					continue;   /* INIT_ARRAY, FINI_ARRAY */
-				for (k = 0; k + w <= sec->file_size; k += w) {
-					uint64_t v = 0, q;
+				/*
+				 * THE LOOP'S LENGTH IS THE OBJECT'S, NOT THE
+				 * SECTION HEADER'S.
+				 *
+				 * sh_size is a 64-bit field the file chooses,
+				 * and running to it turned one forged section
+				 * header into a scan that never returns: a
+				 * .init_array declaring 0x7000000000000000
+				 * asks for 2^60 turns, each reading bytes the
+				 * object does not hold and recording a zero
+				 * that the map discards. Nothing faults, so
+				 * nothing reports - the scan simply stops
+				 * coming back, on a file that is otherwise an
+				 * ordinary binary.
+				 *
+				 * Clipped rather than refused, the way every
+				 * other length out of a header is handled
+				 * here: a truncated .init_array still names
+				 * the constructors it does hold.
+				 */
+				have = kof_clip_len(b.n, sec->file_off,
+						    sec->file_size);
+				/*
+				 * AND THE READS ARE THE BUFFER'S. Eight c_rd8
+				 * calls and eight shifts per entry, each one
+				 * re-deriving the match context and re-doing
+				 * the bounds arithmetic, where kof_rd_u64 is
+				 * the same check once - the accessor every
+				 * other reader in this engine uses.
+				 */
+				for (k = 0; k + w <= have; k += w) {
+					uint64_t v = 0;
+					uint32_t v32 = 0;
 
-					for (q = 0; q < w; q++)
-						v |= (uint64_t)c_rd8(ctx,
-							sec->file_off + k + q)
-						     << (8u * q);
-					kof_xref_startup(sc->use, v);
+					if (w == 8u) {
+						if (!kof_rd_u64(b, sec->file_off
+								+ k, 0, &v))
+							break;
+					} else {
+						if (!kof_rd_u32(b, sec->file_off
+								+ k, 0, &v32))
+							break;
+						v = v32;
+					}
+					/*
+					 * The table is 64 entries and an
+					 * .init_array can declare more than
+					 * the object has room for; past full,
+					 * every further turn records nothing.
+					 */
+					if (!kof_xref_startup(sc->use, v))
+						break;
 				}
 			}
 			/*
@@ -2939,19 +3235,23 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 				    i < e->sec_count && i < KOF_ELF_MAX_SECTIONS;
 			     i++) {
 				const struct kof_elf_sec *sec = &e->sec[i];
+				uint64_t have;
 				uint32_t n;
 				int big;
 
 				if (sec->type != 1u || !(sec->flags & 0x4u))
 					continue;       /* PROGBITS, executable */
-				big = sec->file_size >= biggest;
+				/* The same clip the ordering above used, so
+				 * what decides the pass and what is swept in
+				 * it are one number. */
+				have = kof_clip_len(b.n, sec->file_off,
+						    sec->file_size);
+				if (!have)
+					continue;
+				big = have >= biggest;
 				if ((pass == 0) != (big != 0))
 					continue;
-				if (!sec->file_size || sec->file_off >= b.n ||
-				    sec->file_size > b.n - sec->file_off)
-					continue;
-				n = sec->file_size < left
-				  ? (uint32_t)sec->file_size : left;
+				n = have < left ? (uint32_t)have : left;
 				kof_xref_add(sc->use, b.p + sec->file_off, n,
 						sec->mem_addr,
 						ctx->arch == KOF_ARCH_X86
@@ -2994,9 +3294,15 @@ static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 		const uint8_t *d = kof_src_syms_of(sc->cur_src, &dn);
 
 		if (d && dn) {
+			/* A header with no records answers NULL, and the count
+			 * goes with it: "nothing here, and here is how much of
+			 * it" is a pair no caller should have to reconcile,
+			 * and every other exit from this function pairs them. */
+			int any = kof_sym_count(d, dn) != 0;
+
 			if (nbytes)
-				*nbytes = dn;
-			return kof_sym_count(d, dn) ? d : 0;
+				*nbytes = any ? dn : 0u;
+			return any ? d : NULL;
 		}
 	}
 
@@ -3019,11 +3325,16 @@ static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 							   KOF_SYM_MAX_BYTES);
 		}
 	}
-	if (nbytes)
-		*nbytes = sc->sym_n;
 	/* A header with no records is not worth handing back: every reader
 	 * would have to test the count anyway, and NULL says it once. */
-	return kof_sym_count(sc->sym, sc->sym_n) ? sc->sym : 0;
+	if (!kof_sym_count(sc->sym, sc->sym_n)) {
+		if (nbytes)
+			*nbytes = 0;
+		return NULL;
+	}
+	if (nbytes)
+		*nbytes = sc->sym_n;
+	return sc->sym;
 }
 
 /*
@@ -3245,6 +3556,31 @@ static const struct kof_ovl_desc *ovl_of(const struct kof_obj_ctx *ctx)
 				sc->ovl->n_str = 0;
 				sc->ovl->n_blk = 0;
 			}
+		} else if (sc->ovl) {
+			/*
+			 * AND EMPTIED FOR AN OBJECT IT CANNOT DESCRIBE, which
+			 * is the half that was missing.
+			 *
+			 * The buffer is the scanner's and survives the object;
+			 * only the ready flag is cleared between them - see
+			 * the note beside that reset in scan.c, which says in
+			 * so many words that every kof_ovl_strings rule would
+			 * otherwise measure the wrong file. It achieved that
+			 * for an ELF, which rebuilds. For anything else this
+			 * returned WITHOUT REBUILDING and handed back the
+			 * previous ELF's strings and block hashes, so
+			 * a rule asking about a PE, a script or an archive
+			 * entry that happened to follow an ELF was answered
+			 * about the ELF - and ovl_note recorded the percentage
+			 * against the wrong object.
+			 *
+			 * Emptied rather than freed: the allocation is reused
+			 * for the next ELF, and an empty descriptor is the
+			 * same answer a describable object with nothing in it
+			 * gives, which is what the header promises.
+			 */
+			sc->ovl->n_str = 0;
+			sc->ovl->n_blk = 0;
 		}
 	}
 	return sc->ovl;
@@ -3301,10 +3637,14 @@ static void flow_set_offer(struct kof_flow_set *fs,
 {
 	uint32_t i, worst = 0, worst_w = 0xffffffffu;
 
-	if (!kof_ovlf_worth(v, n))
-		return;
+	/* Clamped BEFORE anything reads the array, not after: kof_ovlf_worth
+	 * walks all n of them, so the bound has to be in place first. It is
+	 * the caller's cap that keeps this honest today, which is the sort of
+	 * thing that stays true until a second caller appears. */
 	if (n > KOF_OVLF_CHAIN_MAX)
 		n = KOF_OVLF_CHAIN_MAX;
+	if (!kof_ovlf_worth(v, n))
+		return;
 	if (fs->n_chain < FLOW_SET_MAX) {
 		memcpy(fs->n[fs->n_chain], v, n * sizeof *v);
 		fs->len[fs->n_chain] = (uint8_t)n;
@@ -3521,6 +3861,22 @@ static void flow_imports_pe(kof_buf f, const struct kof_pe_info *p,
 			return;
 		if (!orig && !first)
 			return;
+		/*
+		 * NO FirstThunk, NO SLOT ADDRESSES.
+		 *
+		 * The names can come from either table and OriginalFirstThunk
+		 * is preferred, but the ADDRESS recorded is always
+		 * image_base + FirstThunk + t*w, because the slot a call goes
+		 * through is FirstThunk's. A descriptor naming only the other
+		 * one made that arithmetic image_base + 0 + t*w - addresses in
+		 * the DOS header - and every one of them was then recorded as
+		 * carrying the capability of an import. The sweep asks
+		 * imp_lookup about the target of each indirect call, so the
+		 * cost is a capability attributed to a call that reaches
+		 * nothing of the sort, on a shape a file chooses freely.
+		 */
+		if (!first)
+			continue;
 		tbl = kof_pe_rva_to_off(p, orig ? orig : first);
 		if (tbl == KOF_BROKEN)
 			continue;
@@ -3588,10 +3944,14 @@ static void flow_imports_elf(kof_buf f, const struct kof_elf_info *p,
 	relsz = elf64 ? 16u : 8u;    /* SHT_REL  - no addend  */
 	relasz = elf64 ? 24u : 12u;  /* SHT_RELA - with one   */
 
-	for (i = 0; i < p->sec_count; i++) {
+	for (i = 0; i < p->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
 		if (p->sec[i].type == 11u && !dsym) {      /* SHT_DYNSYM */
 			dsym = p->sec[i].file_off;
-			dsymn = p->sec[i].file_size / symsz;
+			/* How many records are THERE, so a symbol index is
+			 * checked against the table the object holds rather
+			 * than against the one it claims. */
+			dsymn = kof_clip_len(f.n, p->sec[i].file_off,
+					     p->sec[i].file_size) / symsz;
 		} else if (p->sec[i].type == 3u &&         /* SHT_STRTAB */
 			   !strcmp(p->sec[i].name, ".dynstr")) {
 			dstr = p->sec[i].file_off;
@@ -3613,14 +3973,23 @@ static void flow_imports_elf(kof_buf f, const struct kof_elf_info *p,
 	if (!dsym || !dstr)
 		return;
 
-	for (i = 0; i < p->sec_count; i++) {
-		uint64_t k, step;
+	for (i = 0; i < p->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
+		uint64_t k, step, have;
 		int rela = p->sec[i].type == 4u;   /* SHT_RELA */
 
 		if (!rela && p->sec[i].type != 9u)  /* SHT_REL */
 			continue;
 		step = rela ? relasz : relsz;
-		for (k = 0; k + step <= p->sec[i].file_size; k += step) {
+		/* Clipped for the reason the stub search below is: the loop
+		 * bound is otherwise a number the file declares. This one
+		 * breaks on the first refused read rather than continuing, so
+		 * it terminates either way - but a walk that runs to the
+		 * object and one that runs to a claim and then gives up on it
+		 * are not the same walk, and only the first can be read at a
+		 * glance as bounded. */
+		have = kof_clip_len(f.n, p->sec[i].file_off,
+				    p->sec[i].file_size);
+		for (k = 0; k + step <= have; k += step) {
 			uint64_t roff = 0, base = p->sec[i].file_off + k;
 			uint64_t info = 0;
 			uint32_t rt, si, so = 0, lo = 0;
@@ -3683,22 +4052,51 @@ static void flow_imports_elf(kof_buf f, const struct kof_elf_info *p,
 	 * needs no knowledge of the stub's SIZE, which differs between a lazy
 	 * PLT, a -z now one and an IBT build.
 	 */
-	for (i = 0; i < p->sec_count; i++) {
-		uint64_t o;
+	for (i = 0; i < p->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
+		/*
+		 * THE BYTES THE OBJECT HOLDS, and the walk is over THEM.
+		 *
+		 * sh_size is a 64-bit field the file writes and the parser
+		 * records unclamped, so running the search to it is running it
+		 * to a number the file chose: a section declaring 2^62 makes
+		 * this loop read past the end 2^62 times, each read refused
+		 * and each refusal a `continue`. Nothing faults and nothing is
+		 * reported - the sweep simply never ends.
+		 *
+		 * And having clipped it, the search is over the buffer rather
+		 * than through the accessor: this was three bounds-checked
+		 * calls PER BYTE of every executable section, which on an
+		 * ordinary ten-megabyte binary is thirty million of them to
+		 * find a few hundred stubs. memchr finds the only opcode that
+		 * can begin one.
+		 */
+		const uint8_t *code;
+		uint64_t o = 0, have;
 
-		if (!(p->sec[i].flags & 4u) || !p->sec[i].file_size)
+		if (!(p->sec[i].flags & 4u))
 			continue;                     /* SHF_EXECINSTR */
-		for (o = 0; o + 6u <= p->sec[i].file_size; o++) {
-			uint8_t b0 = 0, b1 = 0;
+		have = kof_clip_len(f.n, p->sec[i].file_off,
+				    p->sec[i].file_size);
+		if (have < 6u)
+			continue;
+		code = f.p + p->sec[i].file_off;
+		for (; o + 6u <= have; o++) {
+			uint8_t b1;
 			uint32_t d32 = 0;
 			uint64_t here, slot;
 			uint8_t k;
 
-			if (!kof_rd_u8(f, p->sec[i].file_off + o, &b0) ||
-			    b0 != 0xffu)
-				continue;
-			if (!kof_rd_u8(f, p->sec[i].file_off + o + 1u, &b1) ||
-			    (b1 != 0x25u && b1 != 0xa3u))
+			{
+				const uint8_t *hit = memchr(code + o, 0xff,
+							    (size_t)(have - 5u
+								     - o));
+
+				if (!hit)
+					break;
+				o = (uint64_t)(hit - code);
+			}
+			b1 = code[o + 1u];
+			if (b1 != 0x25u && b1 != 0xa3u)
 				continue;
 			if (b1 == 0xa3u && (elf64 || !gotplt))
 				continue;
@@ -3916,14 +4314,7 @@ void kof_mod_unpack_mode(struct kof_obj_ctx *ctx, int on)
 	/* A name set for a child that was never produced dies with the module that
 	 * set it. Otherwise it would be waiting for the next module's first child and
 	 * would label it with an entry from a different object. */
-	kof_scan_of(ctx)->pend_label[0] = 0;
-	kof_scan_of(ctx)->pend_label_len = 0;
-	kof_scan_of(ctx)->pend_fmt = 0;
-	kof_scan_of(ctx)->n_pend_rgn = 0;
-	kof_scan_of(ctx)->pend_view = 0;
-	kof_scan_of(ctx)->n_pend_syms = 0;
-	kof_scan_of(ctx)->pend_kind = 0;
-	kof_scan_of(ctx)->pend_entry = KOF_ENTRY_NONE;
+	pend_clear(kof_scan_of(ctx));
 	ctx->content = on ? &kof_unpack_vtable : &kof_detect_vtable;
 }
 
@@ -4050,7 +4441,13 @@ uint32_t kof_fact_id(const char *field)
 
 static uint64_t emu_insn(uint64_t obj_size)
 {
-	uint64_t n = obj_size * EMU_INSN_PER_BYTE;
+	/* Saturating, like the budget's own ratio a few functions up: the
+	 * operand is a file size and the product is not checked anywhere
+	 * after this. Wrapping would floor the budget instead of capping it,
+	 * which is a run that fails for a reason nobody could read off the
+	 * size. */
+	uint64_t n = obj_size > UINT64_MAX / EMU_INSN_PER_BYTE
+		   ? UINT64_MAX : obj_size * EMU_INSN_PER_BYTE;
 
 	if (n < EMU_INSN_MIN)
 		n = EMU_INSN_MIN;
@@ -4079,8 +4476,7 @@ static uint64_t emu_insn(uint64_t obj_size)
 
 static uint64_t emu_pages(const struct kof_scanner *sc)
 {
-	uint64_t room = sc->resident_max > sc->resident
-			? (sc->resident_max - sc->resident) / 2u : 0;
+	uint64_t room = scan_room(sc) / 2u;
 
 	if (room > EMU_PAGES_MAX)
 		room = EMU_PAGES_MAX;
@@ -4166,18 +4562,7 @@ static int emu_rd(void *user, uint64_t va, void *dst, uint32_t n)
  */
 static int emu_give(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n)
 {
-	uint64_t at;
-
-	for (at = 0; at < n; ) {
-		uint64_t chunk = n - at;
-
-		if (chunk > EMIT_MAX)
-			chunk = EMIT_MAX;
-		if (!c_emit(ctx, p + at, (uint32_t)chunk))
-			return 0;
-		at += chunk;
-	}
-	return 1;
+	return emit_all(ctx, p, n) == n;
 }
 
 /* ---- the two forms of a script ---------------------------------------------- */
@@ -4466,7 +4851,24 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 	 * the extents are capped, so the slack is a constant and cannot be
 	 * made to grow by a crafted file.
 	 */
-	cap = (uint32_t)b.n + 2u * KOF_SCRIPT_MAX_ISLAND + 2u;
+	/*
+	 * IN 64 BITS, BECAUSE THE SUM IS WHAT SIZES THE BUFFER.
+	 *
+	 * script_pass_open admits any object up to 0xffffffff, and adding the
+	 * slack to one near that wraps a uint32 to something small - a malloc
+	 * of a few hundred bytes for a pass whose bound is the input length,
+	 * which is a heap overflow rather than a short answer. The ceiling that
+	 * keeps it from arising today is obj_cap, and obj_cap is a caller's
+	 * option; a bound that holds only while nobody raises a setting is not
+	 * a bound.
+	 */
+	{
+		uint64_t need = b.n + 2ull * KOF_SCRIPT_MAX_ISLAND + 2ull;
+
+		if (need > 0xffffffffu)
+			return 0;
+		cap = (uint32_t)need;
+	}
 	out = malloc((size_t)cap);
 	if (!out)
 		return 0;
@@ -4729,10 +5131,29 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 					     &built_hi))
 				continue;
 		}
-		if (emu_novel(ctx, file, flen) && emu_give(ctx, file, flen))
+		/*
+		 * `built` MEANS A CHILD WAS PRODUCED, not that a header was
+		 * found.
+		 *
+		 * It is what `any` starts from, and `any` is what decides
+		 * whether the written-memory fallback runs at all. Set here
+		 * unconditionally, a rebuild whose image emu_novel then
+		 * recognised as the stub's own copy of itself produced NOTHING
+		 * and still turned the fallback off - so a stub that maps a
+		 * copy of its own file, decrypts its payload into ordinary
+		 * written memory and never calls mprotect on it came back with
+		 * no children at all, and the reason was the copy.
+		 *
+		 * built_lo/built_hi are still set either way, and must be:
+		 * they keep the snapshot loop below from handing those same
+		 * bytes over raw. That is a different question from whether
+		 * anything was produced.
+		 */
+		if (emu_novel(ctx, file, flen) && emu_give(ctx, file, flen)) {
 			c_child(ctx);
+			built = 1;
+		}
 		free(file);
-		built = 1;
 		break;                  /* one program per run is what a stub
 					 * produces; a second header found in
 					 * its data is not a second program */
