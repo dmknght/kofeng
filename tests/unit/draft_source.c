@@ -932,6 +932,7 @@ static void block_note_is_not_a_matcher_note(void)
 	CK(e.dr.n_grp >= 1);
 	if (e.dr.n_grp)
 		EQ(e.dr.grp[0].note, "");
+	draft_clear(&e);
 	unlink(path);
 }
 
