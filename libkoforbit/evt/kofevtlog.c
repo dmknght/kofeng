@@ -473,6 +473,37 @@ int kofevt_log_read(struct kofevt_log_r *r, void *out, uint32_t cap)
 	memset(p + r->h.head_size, 0, r->h.rec_size - r->h.head_size);
 	if (tl && fread(p + r->h.head_size, tl, 1, r->fp) != 1)
 		return 0;
+
+	/*
+	 * AND THE ARENA ENDS IN A NUL, WHICHEVER RECORD THIS IS.
+	 *
+	 * The offsets in a record - off_image, off_object, off_cmdline - are
+	 * bounds-checked against the arena's SIZE by whoever reads them, and
+	 * that is only half of what a C string needs. The other half is a
+	 * terminator, and nothing above supplies one: the check two lines up
+	 * permits `tl == rec_size - head_size`, which fills the arena
+	 * completely, so the memset zeroes nothing and a reader that does
+	 * strlen on a valid offset runs off the end of the record.
+	 *
+	 * A RECORD A COLLECTOR BUILT CANNOT BE IN THAT STATE - every writer
+	 * here appends strlen+1 and so the last byte it wrote is a NUL - which
+	 * is exactly why this has to be the READER'S guarantee and not the
+	 * writer's. A log is a file: it can be truncated, corrupted on disk, or
+	 * written by something else entirely, and this parser must hold on its
+	 * own rather than on how the bytes were produced.
+	 *
+	 * IT COSTS A WELL-FORMED RECORD NOTHING. The byte is already zero in
+	 * every case but the full arena, and in that one case a well-formed
+	 * record's last byte IS the NUL its last string ended with - so this
+	 * stores a zero over a zero. Only a malformed record loses a byte, and
+	 * losing its last byte is the point.
+	 *
+	 * Guarded, because head_size == rec_size is a legal shape and there is
+	 * no arena to terminate then - the last byte belongs to the head, and
+	 * zeroing it would corrupt a field.
+	 */
+	if (r->h.rec_size > r->h.head_size)
+		p[r->h.rec_size - 1u] = '\0';
 	return 1;
 }
 

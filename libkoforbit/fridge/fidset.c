@@ -421,7 +421,6 @@ int kof_fidset_load(struct kof_fidset *s, const char *path)
 		s->key = s->fence + n_fence;
 		s->n_key = h.n;
 		s->st.mapped = h.n;
-	s->st.made   = h.made;
 		s->st.made   = h.made;
 		/*
 		 * AN EMPTY SET IS NOT A LOADED ONE. Answering 0 while holding a

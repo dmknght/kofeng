@@ -1072,7 +1072,21 @@ static void hash2(const void *p, uint32_t n, uint64_t *a, uint64_t *b)
 		h1 ^= s[i];
 		h1 *= 1099511628211ull;         /* ...and a different prime */
 		h2 ^= s[i];
-		h2 *= 0x100000001b3ull ^ 0x2545f4914f6cdd1dull;
+		/*
+		 * A DIFFERENT, AND ODD, MULTIPLIER.
+		 *
+		 * This was `0x100000001b3 ^ 0x2545f4914f6cdd1d`, meant to be
+		 * "a different prime" - but that XOR evaluates to
+		 * 0x2545f5914f6cdcae, which is EVEN. A multiplicative hash with
+		 * an even multiplier is not invertible mod 2^64: every multiply
+		 * clears one more low bit, so h2's low bits collapse to zero as
+		 * the input grows. That guts the whole reason for a second
+		 * hash - a false "already seen" is supposed to need both h and
+		 * h2 to collide, and an h2 whose low bits are constant collides
+		 * far more often than 64 bits would. A known-good odd constant
+		 * restores it.
+		 */
+		h2 *= 0x880355f21e6d1965ull;
 	}
 
 	/*

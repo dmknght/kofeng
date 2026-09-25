@@ -1952,6 +1952,80 @@ static void check_extents(const struct kof_evt *e, const char *what)
 	}
 }
 
+/*
+ * A RECORD THAT FILLS ITS ARENA AND TERMINATES NOTHING.
+ *
+ * The offsets in a record are bounds-checked against the arena's SIZE, and a C
+ * string needs a terminator as well. The record shape permits
+ * `text_len == sizeof text`, which fills the arena completely - so a reader
+ * that does strlen on a perfectly valid offset runs off the end of the record.
+ *
+ * NO COLLECTOR CAN PRODUCE THIS, which is exactly why it is tested here rather
+ * than left to the writer: every writer in this tree appends strlen+1, so the
+ * last byte it wrote is a NUL. A LOG IS A FILE - truncated, corrupted on disk,
+ * or written by something else entirely - and the parser has to hold on its
+ * own evidence rather than on how the bytes were produced.
+ *
+ * The record below is hand-built and handed to the real writer, which is what a
+ * foreign log looks like from the reading side. Measured before the reader
+ * terminated the arena: ASan, "READ of size 541" past a 640-byte record.
+ */
+static void t_trace_unterminated(void)
+{
+	const char *path = "grille_host_nul.tmp";
+	struct kofevt_log_info li;
+	struct kofevt_log_w *w;
+	struct kofevt_log_r *r;
+	struct kof_evt e, got;
+	const char *why = "";
+	size_t n;
+
+	memset(&li, 0, sizeof li);
+	li.rec_size  = (uint32_t)sizeof(struct kof_evt);
+	li.head_size = (uint16_t)KOF_EVT_HEAD;
+	li.len_off   = (uint16_t)offsetof(struct kof_evt, text_len);
+	li.rec_kind  = KOFEVT_REC_KOF;
+
+	memset(&e, 0, sizeof e);
+	e.verb        = KOF_EVT_FILE_NEW;
+	e.off_image   = KOF_TEXT_NONE;
+	e.off_cmdline = KOF_TEXT_NONE;
+	e.off_data    = KOF_TEXT_NONE;
+	e.off_object  = 0;
+	memset(e.text, 'A', sizeof e.text);
+	e.text_len    = (uint16_t)sizeof e.text;
+
+	w = kofevt_log_create(path, &li);
+	if (!w) {
+		fail("unterminated", "could not write the log");
+		return;
+	}
+	if (kofevt_log_write(w, &e) != 0)
+		fail("unterminated", "the writer refused the record");
+	(void)kofevt_log_close(w);
+
+	r = kofevt_log_open(path, (uint32_t)sizeof(struct kof_evt),
+			    KOFEVT_REC_KOF, &why);
+	if (!r) {
+		fail("unterminated", why);
+		remove(path);
+		return;
+	}
+	if (!kofevt_log_read(r, &got, (uint32_t)sizeof got))
+		fail("unterminated", "the record did not read back");
+	kofevt_log_free(r);
+	remove(path);
+
+	/* The arena ends in a NUL whatever the file said, so this strlen - the
+	 * one every consumer of an object path does - stops inside it. */
+	if (got.text[sizeof got.text - 1u] != '\0')
+		fail("unterminated", "the arena was left without a terminator");
+
+	n = strlen(kof_evt_object(&got));
+	if (n >= sizeof got.text)
+		fail("unterminated", "the object ran past the arena");
+}
+
 static void t_browse(void)
 {
 	struct kof_evt e;
@@ -2360,6 +2434,7 @@ int main(void)
 	t_addr();
 	t_convert();
 	t_trace();
+	t_trace_unterminated();
 	t_browse();
 	t_extent();
 
