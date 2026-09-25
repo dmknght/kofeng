@@ -448,32 +448,38 @@ const char *kof_ovl_track_name(uint32_t track)
 }
 
 /*
- * CONTAINMENT OVER A SORTED SET, TWICE, BECAUSE THE ELEMENT WIDTH DIFFERS.
+ * CONTAINMENT OVER TWO SORTED SETS, ONCE.
  *
- * These two are the same eleven lines with uint64_t in one and uint32_t in the
- * other - a string hash is sixty four bits and a block hash is thirty two, and
- * C has no way to say "this merge, for that type" without a macro that expands
- * to a function body. That trade was weighed and refused: the duplication is
- * eleven lines that no fix will ever apply to only one of them, and the macro
- * would cost every reader of either.
+ * The string set is sixty-four bit hashes and the block set is thirty-two, so
+ * these were the same eleven lines written twice with one word changed. They
+ * are one function now, and `wide` is a constant at both call sites - so the
+ * compiler still emits two specialised loops and the merge is the same
+ * instructions it was, with one place to change if the answer ever should.
  *
- * WHAT THEY MUST AGREE ON is the denominator. Containment, not Jaccard: how
- * much of the REFERENCE is here, so a variant that added a string or grew a
- * function is still the same program - see kof_ovl_strings_pct in the header
- * for why Jaccard asks the wrong question. If one of these is ever changed the
- * other is the other half of the same decision.
+ * CONTAINMENT AND NOT JACCARD, which is the part both callers must agree on:
+ * how much of the REFERENCE is here, so a variant that added a string or grew
+ * a function is still the same program. See kof_ovl_strings_pct in the header
+ * for why the other question is the wrong one.
+ *
+ * Both sides are sorted and deduplicated at build time - see kof_ovl_build -
+ * so this is a merge and not a set membership test.
  */
-uint32_t kof_ovl_strings_pct(const uint64_t *obj, uint32_t n_obj,
-			     const uint64_t *ref, uint32_t n_ref)
+static inline uint32_t contain_pct(const void *obj, uint32_t n_obj,
+				   const void *ref, uint32_t n_ref, int wide)
 {
+	const uint64_t *o8 = obj, *r8 = ref;
+	const uint32_t *o4 = obj, *r4 = ref;
 	uint32_t i = 0, j = 0, in = 0;
 
 	if (!obj || !ref || !n_obj || !n_ref)
 		return 0;
 	while (i < n_obj && j < n_ref) {
-		if (obj[i] == ref[j]) {
+		uint64_t a = wide ? o8[i] : o4[i];
+		uint64_t b = wide ? r8[j] : r4[j];
+
+		if (a == b) {
 			in++; i++; j++;
-		} else if (obj[i] < ref[j]) {
+		} else if (a < b) {
 			i++;
 		} else {
 			j++;
@@ -482,21 +488,14 @@ uint32_t kof_ovl_strings_pct(const uint64_t *obj, uint32_t n_obj,
 	return (uint32_t)(((uint64_t)in * 100u) / n_ref);
 }
 
+uint32_t kof_ovl_strings_pct(const uint64_t *obj, uint32_t n_obj,
+			     const uint64_t *ref, uint32_t n_ref)
+{
+	return contain_pct(obj, n_obj, ref, n_ref, 1);
+}
+
 uint32_t kof_ovl_blocks_pct(const uint32_t *obj, uint32_t n_obj,
 			    const uint32_t *ref, uint32_t n_ref)
 {
-	uint32_t i = 0, j = 0, in = 0;
-
-	if (!obj || !ref || !n_obj || !n_ref)
-		return 0;
-	while (i < n_obj && j < n_ref) {
-		if (obj[i] == ref[j]) {
-			in++; i++; j++;
-		} else if (obj[i] < ref[j]) {
-			i++;
-		} else {
-			j++;
-		}
-	}
-	return (uint32_t)(((uint64_t)in * 100u) / n_ref);
+	return contain_pct(obj, n_obj, ref, n_ref, 0);
 }
