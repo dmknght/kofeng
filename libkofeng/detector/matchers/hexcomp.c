@@ -15,6 +15,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <kofcore.h>
 
 #include "../../databases/hexprog.h"
 
@@ -87,12 +88,16 @@ static int hex_err(const char *fmt, ...)
 	return 0;
 }
 
+/* The digit itself is kof_hex_val; this is the flag-and-out-pointer shape the
+ * two callers below are written against, kept so they read as they did. */
 static int hex_digit(char c, uint8_t *out)
 {
-	if (c >= '0' && c <= '9') { *out = (uint8_t)(c - '0');      return 1; }
-	if (c >= 'a' && c <= 'f') { *out = (uint8_t)(c - 'a' + 10); return 1; }
-	if (c >= 'A' && c <= 'F') { *out = (uint8_t)(c - 'A' + 10); return 1; }
-	return 0;
+	int v = kof_hex_val((uint8_t)c);
+
+	if (v < 0)
+		return 0;
+	*out = (uint8_t)v;
+	return 1;
 }
 
 /*

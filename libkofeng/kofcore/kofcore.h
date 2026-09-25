@@ -309,6 +309,79 @@ static inline uint32_t kof_crc32(const void *data, uint64_t len)
  * every caller already has it and the alternative was a second wrapper that only
  * called strlen.
  */
+/*
+ * ONE HEX DIGIT, OR -1.
+ *
+ * There were SEVEN of these: two spelled hexval, one hexdig, one codec_hexv,
+ * one hex_digit returning a flag and writing through a pointer, one table
+ * driven hex_val, and a handful of open-coded (c | 0x20) - 'a' + 10 that had
+ * each made their own decision about what to accept. Byte for byte the same
+ * answer from most of them, which is the kind of duplication that survives
+ * because nothing ever disagrees - until one of them is fixed.
+ *
+ * THE TABLE AND NOT THE THREE RANGE TESTS, for the reason the normaliser
+ * measured before this moved here: unhex_range's outer loop asks this once per
+ * byte of every file scanned, binary is essentially random with respect to "is
+ * this a hex digit", so the branch predictor loses on most bytes and the cost
+ * is the mispredict rather than the comparison. Measured with callgrind over
+ * 120 system binaries (109 MB), that loop was 7.82% of the whole scan - 1.03
+ * billion instructions - before the table.
+ *
+ * STORED AS value+1 SO THAT ZERO MEANS "NOT HEX", which is what lets the table
+ * be written with designated initialisers: every byte nobody names stays 0,
+ * rather than 256 hand-written entries that would eventually disagree with the
+ * function they replace.
+ *
+ * Its own copy per translation unit, on the same trade kof_crc32 above takes
+ * and for the same reason - 256 bytes against a call and no constant folding.
+ */
+static inline int kof_hex_val(uint8_t c)
+{
+	static const uint8_t v1[256] = {
+		['0'] =  1, ['1'] =  2, ['2'] =  3, ['3'] =  4, ['4'] =  5,
+		['5'] =  6, ['6'] =  7, ['7'] =  8, ['8'] =  9, ['9'] = 10,
+		['a'] = 11, ['b'] = 12, ['c'] = 13, ['d'] = 14, ['e'] = 15,
+		['f'] = 16,
+		['A'] = 11, ['B'] = 12, ['C'] = 13, ['D'] = 14, ['E'] = 15,
+		['F'] = 16
+	};
+
+	return (int)v1[c] - 1;
+}
+
+/*
+ * ONE BASE64 DIGIT, OR -1. The standard alphabet only - no URL-safe '-' and
+ * '_', because the two decoders this replaces did not take them either and
+ * widening the alphabet here would quietly change what both of them accept.
+ *
+ * A table for the same reason kof_hex_val above is one: the normaliser asks it
+ * of every byte of every object while it is looking for a run, and the five
+ * range tests it replaces are five unpredictable branches on binary input.
+ * Same value+1 trick, so the entries nobody names stay zero.
+ */
+static inline int kof_b64_val(uint8_t c)
+{
+	static const uint8_t v1[256] = {
+		['A'] =  1, ['B'] =  2, ['C'] =  3, ['D'] =  4, ['E'] =  5,
+		['F'] =  6, ['G'] =  7, ['H'] =  8, ['I'] =  9, ['J'] = 10,
+		['K'] = 11, ['L'] = 12, ['M'] = 13, ['N'] = 14, ['O'] = 15,
+		['P'] = 16, ['Q'] = 17, ['R'] = 18, ['S'] = 19, ['T'] = 20,
+		['U'] = 21, ['V'] = 22, ['W'] = 23, ['X'] = 24, ['Y'] = 25,
+		['Z'] = 26,
+		['a'] = 27, ['b'] = 28, ['c'] = 29, ['d'] = 30, ['e'] = 31,
+		['f'] = 32, ['g'] = 33, ['h'] = 34, ['i'] = 35, ['j'] = 36,
+		['k'] = 37, ['l'] = 38, ['m'] = 39, ['n'] = 40, ['o'] = 41,
+		['p'] = 42, ['q'] = 43, ['r'] = 44, ['s'] = 45, ['t'] = 46,
+		['u'] = 47, ['v'] = 48, ['w'] = 49, ['x'] = 50, ['y'] = 51,
+		['z'] = 52,
+		['0'] = 53, ['1'] = 54, ['2'] = 55, ['3'] = 56, ['4'] = 57,
+		['5'] = 58, ['6'] = 59, ['7'] = 60, ['8'] = 61, ['9'] = 62,
+		['+'] = 63, ['/'] = 64
+	};
+
+	return (int)v1[c] - 1;
+}
+
 static inline char *kof_strdup_n(const char *s, uint64_t n)
 {
 	char *p = malloc((size_t)n + 1);

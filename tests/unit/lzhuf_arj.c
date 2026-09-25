@@ -34,6 +34,7 @@
 #include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/analyzer/parsers/containers/arj_parse.h"
 #include "../../libkofeng/extractor/decomp/lzhuf.h"
+#include "outsink.h"
 
 static int failures;
 static int checked;
@@ -72,23 +73,6 @@ static uint32_t crc32_of(const uint8_t *p, uint64_t n)
 
 /* ---- the sink ---------------------------------------------------------------- */
 
-struct out {
-	uint8_t *dst;
-	uint64_t cap, n;
-};
-
-static int out_sink(void *user, const uint8_t *p, uint32_t n)
-{
-	struct out *o = user;
-
-	if (o->n < o->cap) {
-		uint64_t room = o->cap - o->n;
-
-		memcpy(o->dst + o->n, p, (size_t)(n < room ? n : room));
-	}
-	o->n += n;
-	return 1;
-}
 
 static uint8_t *slurp(const char *path, size_t *len)
 {

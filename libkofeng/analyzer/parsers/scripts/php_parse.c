@@ -227,34 +227,6 @@ static uint64_t php_close(kof_buf f, uint64_t i)
  * not form it. Every rule with a whole-object range still searches it, which is
  * most of them. The same shell on a line of its own is a block and is BODY.
  */
-static int php_block(kof_buf f, uint64_t open, uint64_t end)
-{
-	uint64_t j;
-
-	/* Spans a line break: a block, whatever is around it. */
-	for (j = open; j < end && j < f.n; j++)
-		if (f.p[j] == '\n')
-			return 1;
-	/* Otherwise it has to own its line at both ends. */
-	for (j = open; j > 0; j--) {
-		uint8_t c = f.p[j - 1u];
-
-		if (c == '\n')
-			break;
-		if (c != ' ' && c != '\t' && c != '\r')
-			return 0;
-	}
-	for (j = end; j < f.n; j++) {
-		uint8_t c = f.p[j];
-
-		if (c == '\n')
-			break;
-		if (c != ' ' && c != '\t' && c != '\r')
-			return 0;
-	}
-	return 1;
-}
-
 /*
  * The walk. Over the WHOLE object and not just the sniff window: where a page's
  * code is is not a property of the first sixty-four kilobytes, and a shell at
@@ -304,7 +276,7 @@ void kof_php_islands(kof_buf f, uint64_t from, struct kof_script_info *info)
 		 * walk still steps past it, or the next pass would find the
 		 * same opener again.
 		 */
-		if (php_block(f, open, close + 2u) &&
+		if (kof_script_is_block(f, open, close + 2u) &&
 		    !kof_isl_add(info, open, close + 2u - open))
 			break;
 		i = close + 2u;

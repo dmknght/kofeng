@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "../../libkofeng/analyzer/parsers/containers/chm_parse.h"
+#include "chmgen.h"
 
 static int failures;
 
@@ -90,34 +91,7 @@ static void wr64(uint8_t *p, uint64_t v)
 }
 
 /* An ENCINT: seven bits a byte, most significant group first. */
-static uint32_t enc(uint8_t *p, uint64_t v)
-{
-	uint8_t tmp[5];
-	uint32_t n = 0, i;
 
-	do {
-		tmp[n++] = (uint8_t)(v & 0x7fu);
-		v >>= 7;
-	} while (v && n < 5u);
-	for (i = 0; i < n; i++)
-		p[i] = (uint8_t)(tmp[n - 1u - i] | (i + 1u < n ? 0x80u : 0u));
-	return n;
-}
-
-static uint32_t put_entry(uint8_t *p, const char *name, uint64_t sect,
-			  uint64_t off, uint64_t len)
-{
-	uint32_t n = 0;
-	size_t nl = strlen(name);
-
-	n += enc(p + n, nl);
-	memcpy(p + n, name, nl);
-	n += (uint32_t)nl;
-	n += enc(p + n, sect);
-	n += enc(p + n, off);
-	n += enc(p + n, len);
-	return n;
-}
 
 /*
  * A CHM holding three entries: one ordinary file in the uncompressed section,

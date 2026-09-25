@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "cab_parse.h"
+#include "cname.h"
 #include "../../../kofcore/rangelist.h"
 
 #define CAB_HDR_MIN    36u      /* through iCabinet */
@@ -242,40 +243,6 @@ static uint32_t cab_cut(kof_buf f, struct kof_cab_info *c,
 
 /* A NUL terminated string in the object, as a length - or 0 when it is not
  * terminated inside `cap` bytes, which is the only answer a walk can act on. */
-static uint32_t cab_strlen(kof_buf f, uint64_t at, uint32_t cap)
-{
-	uint32_t i;
-
-	for (i = 0; i < cap; i++) {
-		uint8_t b;
-
-		if (!kof_rd_u8(f, at + i, &b))
-			return 0;
-		if (!b)
-			return i + 1u;    /* including the terminator */
-	}
-	return 0;
-}
-
-/* The same question tar and chm ask of their own names, and the answer is a
- * FACT recorded rather than a refusal: nothing here extracts a cabinet, so the
- * interest is in what the file was built to do. */
-static int cab_traversal(kof_buf f, uint64_t at, uint32_t len)
-{
-	uint32_t i;
-
-	for (i = 0; i + 1u < len; i++) {
-		uint8_t a, b;
-
-		if (!kof_rd_u8(f, at + i, &a) || !kof_rd_u8(f, at + i + 1u, &b))
-			return 0;
-		if (a == '.' && b == '.')
-			return 1;
-		if (i == 0 && (a == '\\' || a == '/' || b == ':'))
-			return 1;
-	}
-	return 0;
-}
 
 /*
  * WHERE AN OFFSET INSIDE AN UNCOMPRESSED FOLDER LANDS IN THE OBJECT.
@@ -404,7 +371,7 @@ int kof_cab_parse(kof_buf file, struct kof_cab_info *c, struct kof_obj_ctx *ctx)
 
 			if (!want)
 				continue;
-			n = cab_strlen(file, at, KOF_CAB_MAX_NAME);
+			n = kof_cname_len(file, at, KOF_CAB_MAX_NAME);
 			if (!n) {
 				c->anomalies |= KOF_CAB_ANOM_TRUNCATED;
 				goto done;
@@ -483,14 +450,14 @@ int kof_cab_parse(kof_buf file, struct kof_cab_info *c, struct kof_obj_ctx *ctx)
 		kof_rd_u32(file, at + 4u, 0, &foff);
 		kof_rd_u16(file, at + 8u, 0, &ifold);
 		name_at = at + 16u;
-		nlen = cab_strlen(file, name_at, KOF_CAB_MAX_NAME);
+		nlen = kof_cname_len(file, name_at, KOF_CAB_MAX_NAME);
 		if (!nlen) {
 			c->anomalies |= KOF_CAB_ANOM_TRUNCATED;
 			break;
 		}
 		at = name_at + nlen;
 
-		if (cab_traversal(file, name_at, nlen - 1u))
+		if (kof_cname_traversal(file, name_at, nlen - 1u))
 			c->anomalies |= KOF_CAB_ANOM_TRAVERSAL;
 
 		/*

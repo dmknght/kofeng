@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "../../libkofeng/kofeng.h"
+#include "slurp.h"
 
 static int failures;
 
@@ -66,34 +67,6 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	return 0;
 }
 
-static uint8_t *slurp(const char *path, size_t *len)
-{
-	FILE *f = fopen(path, "rb");
-	uint8_t *p;
-	long n;
-
-	*len = 0;
-	if (!f)
-		return NULL;
-	if (fseek(f, 0, SEEK_END) != 0 || (n = ftell(f)) < 0) {
-		fclose(f);
-		return NULL;
-	}
-	rewind(f);
-	p = malloc((size_t)n + 1u);
-	if (!p) {
-		fclose(f);
-		return NULL;
-	}
-	if (n && fread(p, 1u, (size_t)n, f) != (size_t)n) {
-		free(p);
-		fclose(f);
-		return NULL;
-	}
-	fclose(f);
-	*len = (size_t)n;
-	return p;
-}
 
 int main(void)
 {

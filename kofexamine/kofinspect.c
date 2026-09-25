@@ -1941,17 +1941,6 @@ void kof_inspect_event_verbs(const uint64_t *count, uint32_t keep,
 
 /* ---- a PDF text string on one line - see kofinspect.h ---------------------- */
 
-static int hexdig(uint8_t c)
-{
-	if (c >= '0' && c <= '9')
-		return c - '0';
-	if (c >= 'a' && c <= 'f')
-		return c - 'a' + 10;
-	if (c >= 'A' && c <= 'F')
-		return c - 'A' + 10;
-	return -1;
-}
-
 uint32_t kof_pdf_text(const uint8_t *p, uint64_t n, int hex,
 		      char *out, uint32_t cap)
 {
@@ -1977,7 +1966,7 @@ uint32_t kof_pdf_text(const uint8_t *p, uint64_t n, int hex,
 		int hi = -1;
 
 		for (i = 0; i < n && have < sizeof buf; i++) {
-			int v = hexdig(p[i]);
+			int v = kof_hex_val(p[i]);
 
 			if (v < 0)
 				continue;              /* whitespace, mostly */
@@ -2054,24 +2043,6 @@ int kof_codec_keyed(uint32_t codec)
 	       codec == KOF_CODEC_CAESAR;
 }
 
-static int codec_b64v(uint8_t c)
-{
-	if (c >= 'A' && c <= 'Z') return c - 'A';
-	if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-	if (c >= '0' && c <= '9') return c - '0' + 52;
-	if (c == '+') return 62;
-	if (c == '/') return 63;
-	return -1;
-}
-
-static int codec_hexv(uint8_t c)
-{
-	if (c >= '0' && c <= '9') return c - '0';
-	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-	return -1;
-}
-
 uint32_t kof_codec_key(const char *text)
 {
 	uint32_t k = 0;
@@ -2081,7 +2052,7 @@ uint32_t kof_codec_key(const char *text)
 	if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
 		text += 2;
 	for (; *text; text++) {
-		int d = codec_hexv((uint8_t)*text);
+		int d = kof_hex_val((uint8_t)*text);
 
 		if (d < 0)
 			return k;
@@ -2197,7 +2168,7 @@ static uint32_t codec_read(const uint8_t *p, uint32_t len, uint32_t codec,
 	switch (codec) {
 	case KOF_CODEC_B64:
 		for (i = 0; i < len && w < cap; i++) {
-			int v = codec_b64v(p[i]);
+			int v = kof_b64_val(p[i]);
 
 			/* Padding, and the wrapping a 76-column encoder puts
 			 * in - both belong to the text and neither is data. */
@@ -2218,7 +2189,7 @@ static uint32_t codec_read(const uint8_t *p, uint32_t len, uint32_t codec,
 		return w;
 	case KOF_CODEC_HEX:
 		for (i = 0; i < len && w < cap; i++) {
-			int v = codec_hexv(p[i]);
+			int v = kof_hex_val(p[i]);
 
 			if (v < 0) {
 				if (p[i] == ' ' || p[i] == '\n' ||
@@ -2244,8 +2215,8 @@ static uint32_t codec_read(const uint8_t *p, uint32_t len, uint32_t codec,
 
 				if (len - i < 3u)
 					return 0;
-				hi = codec_hexv(p[i + 1u]);
-				lo = codec_hexv(p[i + 2u]);
+				hi = kof_hex_val(p[i + 1u]);
+				lo = kof_hex_val(p[i + 2u]);
 				/* A `%` that is not an escape means the text
 				 * was never written this way - a printf
 				 * format, a literal per cent. */
@@ -2362,7 +2333,7 @@ void kof_hex_respace(const char *in, char *out, size_t cap)
 	const char *p;
 
 	for (p = in; *p; p++)
-		if (codec_hexv((uint8_t)*p) < 0 && *p != ' ' && *p != '\t') {
+		if (kof_hex_val((uint8_t)*p) < 0 && *p != ' ' && *p != '\t') {
 			snprintf(out, cap, "%s", in);
 			return;
 		}

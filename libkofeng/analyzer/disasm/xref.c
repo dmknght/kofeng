@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "bddisasm.h"
+#include "gpr.h"
 
 /*
  * HOW MANY ADDRESSES ONE SWEEP MAY REMEMBER.
@@ -60,7 +61,6 @@
  * Sixteen because that is the general purpose file; anything wider than a GPR
  * is not going to be a call target.
  */
-#define NGPR 16u
 
 /*
  * A FEW STACK SLOTS, because an unoptimised build puts the address in one.
@@ -176,13 +176,6 @@ static void note(struct kof_xref *u, uint64_t va, uint32_t f, uint32_t rgn)
 }
 
 /* The GPR an operand names, or NGPR when it names none. */
-static uint32_t gpr_of(const ND_OPERAND *op)
-{
-	if (op->Type != ND_OP_REG || op->Info.Register.Type != ND_REG_GPR)
-		return NGPR;
-	return op->Info.Register.Reg < NGPR ? op->Info.Register.Reg : NGPR;
-}
-
 
 /*
  * The stack slot a memory operand names, or NSLOT when it names none this

@@ -37,6 +37,22 @@ int kof_txt_has(kof_buf f, uint64_t look, const char *t);
 int kof_isl_add(struct kof_script_info *info, uint64_t off, uint64_t len);
 
 /*
+ * IS THE ISLAND AT [open, end) A BLOCK RATHER THAN AN INSERTION?
+ *
+ * The distinction a template makes and a scanner has to make with it. A tag
+ * that SPANS A LINE BREAK is code whatever surrounds it. A tag that fits on one
+ * line is code only when it OWNS that line - nothing but blanks before it and
+ * nothing but blanks after - because "<?= $name ?>" in the middle of a sentence
+ * is a value being printed, not a program, and treating it as an island cuts
+ * the sentence into three.
+ *
+ * php_parse.c and svrpage_parse.c had the same twenty lines under two names.
+ * The rule is the same because the question is: PHP, ASP and JSP all inherited
+ * it from the same idea of a template.
+ */
+int kof_script_is_block(kof_buf f, uint64_t open, uint64_t end);
+
+/*
  * Close the list against the end of the object.
  *
  * The partition stays exact without doing anything to the extents: the

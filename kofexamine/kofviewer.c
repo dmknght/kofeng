@@ -8687,7 +8687,6 @@ static int cmatch_ok(struct view *v, uint32_t c, uint32_t m)
  * refused. This is a viewer: a file it cannot fully account for should be shown
  * as nearly as it can be, and the build is where a bad escape is an error.
  */
-static int hexval(char c);
 
 
 
@@ -20003,18 +20002,6 @@ static void view_show(struct view *v, uint64_t file_off, int narrow)
 
 /* ---- search --------------------------------------------------------------- */
 
-/* One hex digit, or -1. */
-static int hexval(char c)
-{
-	if (c >= '0' && c <= '9')
-		return c - '0';
-	if (c >= 'a' && c <= 'f')
-		return c - 'a' + 10;
-	if (c >= 'A' && c <= 'F')
-		return c - 'A' + 10;
-	return -1;
-}
-
 /*
  * The pattern as bytes.
  *
@@ -20038,13 +20025,13 @@ static uint32_t find_bytes(const struct view *v, uint8_t *out, uint32_t cap)
 
 		while (*p == ' ' || *p == '\t')
 			p++;
-		hi = hexval(*p);
+		hi = kof_hex_val((uint8_t)(*p));
 		if (hi < 0)
 			break;
 		p++;
 		while (*p == ' ' || *p == '\t')
 			p++;
-		lo = hexval(*p);
+		lo = kof_hex_val((uint8_t)(*p));
 		if (lo < 0)
 			break;
 		p++;

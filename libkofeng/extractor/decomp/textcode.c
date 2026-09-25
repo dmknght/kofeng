@@ -2,6 +2,8 @@
  * textcode.c - see textcode.h.
  */
 
+#include <kofcore.h>
+
 #include "textcode.h"
 
 /* One flush's worth for the streaming coding. Small on purpose: the receiver
@@ -82,17 +84,6 @@ enum kof_decomp_status kof_a85_decode(const uint8_t *in, uint64_t n,
 
 /* A hex digit's value, or -1. Written out rather than reached for isxdigit,
  * which is locale-sensitive and takes an int. */
-static int hexval(uint8_t c)
-{
-	if (c >= '0' && c <= '9')
-		return c - '0';
-	if (c >= 'a' && c <= 'f')
-		return c - 'a' + 10;
-	if (c >= 'A' && c <= 'F')
-		return c - 'A' + 10;
-	return -1;
-}
-
 enum kof_decomp_status kof_ahx_decode(const uint8_t *in, uint64_t n,
 				      uint8_t *out, uint64_t cap,
 				      uint64_t *produced)
@@ -110,7 +101,7 @@ enum kof_decomp_status kof_ahx_decode(const uint8_t *in, uint64_t n,
 			continue;
 		if (c == '>')
 			break;
-		v = hexval(c);
+		v = kof_hex_val(c);
 		if (v < 0) {
 			*produced = w;
 			return KOF_DEC_CORRUPT;

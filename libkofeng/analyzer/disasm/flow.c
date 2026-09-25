@@ -6,8 +6,8 @@
 #include <string.h>
 
 #include "bddisasm.h"
+#include "gpr.h"
 
-#define NGPR 16u
 
 /*
  * WHAT A SYSCALL NUMBER MEANS, per ABI.
@@ -266,13 +266,6 @@ struct cmap {
 	uint16_t ssrc[NSLOT];
 	uint8_t  depth;
 };
-
-static uint32_t gpr_of(const ND_OPERAND *op)
-{
-	if (op->Type != ND_OP_REG || op->Info.Register.Type != ND_REG_GPR)
-		return NGPR;
-	return op->Info.Register.Reg < NGPR ? op->Info.Register.Reg : NGPR;
-}
 
 static void set_const(struct cmap *c, uint32_t r, uint64_t val, uint8_t size)
 {

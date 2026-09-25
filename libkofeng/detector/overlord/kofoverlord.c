@@ -447,6 +447,22 @@ const char *kof_ovl_track_name(uint32_t track)
 	}
 }
 
+/*
+ * CONTAINMENT OVER A SORTED SET, TWICE, BECAUSE THE ELEMENT WIDTH DIFFERS.
+ *
+ * These two are the same eleven lines with uint64_t in one and uint32_t in the
+ * other - a string hash is sixty four bits and a block hash is thirty two, and
+ * C has no way to say "this merge, for that type" without a macro that expands
+ * to a function body. That trade was weighed and refused: the duplication is
+ * eleven lines that no fix will ever apply to only one of them, and the macro
+ * would cost every reader of either.
+ *
+ * WHAT THEY MUST AGREE ON is the denominator. Containment, not Jaccard: how
+ * much of the REFERENCE is here, so a variant that added a string or grew a
+ * function is still the same program - see kof_ovl_strings_pct in the header
+ * for why Jaccard asks the wrong question. If one of these is ever changed the
+ * other is the other half of the same decision.
+ */
 uint32_t kof_ovl_strings_pct(const uint64_t *obj, uint32_t n_obj,
 			     const uint64_t *ref, uint32_t n_ref)
 {

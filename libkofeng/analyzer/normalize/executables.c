@@ -10,6 +10,7 @@
  */
 
 #include <string.h>
+#include <kofcore.h>
 
 #include "executables.h"
 
@@ -238,21 +239,11 @@ int kof_exe_unwide(const uint8_t *in, uint64_t n, uint8_t *out)
 
 /* The alphabet, as comparisons. A table would be faster and this is not the hot
  * path - it runs only where the anchor already matched. */
-static int b64_val(uint8_t c)
-{
-	if (c >= 'A' && c <= 'Z') return c - 'A';
-	if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-	if (c >= '0' && c <= '9') return c - '0' + 52;
-	if (c == '+') return 62;
-	if (c == '/') return 63;
-	return -1;
-}
-
 /* A character that may appear INSIDE a run: the alphabet, its padding, and the
  * line breaks a wrapped payload carries. */
 static int b64_run_char(uint8_t c)
 {
-	return b64_val(c) >= 0 || c == '=' || c == '\n' || c == '\r';
+	return kof_b64_val(c) >= 0 || c == '=' || c == '\n' || c == '\r';
 }
 
 /*
@@ -397,7 +388,7 @@ static int unb64_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		 * has not been read yet, and no copy is needed.
 		 */
 		for (j = run_beg; j < run_end; j++) {
-			int v = b64_val(p[j]);
+			int v = kof_b64_val(p[j]);
 
 			if (v < 0)
 				continue;       /* the padding and the newlines */
@@ -725,37 +716,8 @@ uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
 /* What one pass will rewrite, for the reason B64_MAX_PAY gives. */
 #define HEX_MAX_PAY   32u
 
-/*
- * A TABLE, BECAUSE THIS IS ASKED ABOUT EVERY BYTE OF EVERY EXECUTABLE.
- *
- * unhex_range's outer loop is `if (hex_val(p[i]) < 0) { i++; continue; }` over
- * the whole object - see the scan below - so this runs once per byte of every
- * file scanned, and the three range tests were three unpredictable branches
- * each time. Binary is essentially random with respect to "is this a hex
- * digit", so the branch predictor loses on most bytes and the cost is the
- * mispredict rather than the comparison.
- *
- * Measured with callgrind over 120 system binaries (109 MB): unhex_range was
- * 7.82% of the whole scan, 1.03 billion instructions.
- *
- * STORED AS value+1 SO THAT ZERO MEANS "NOT HEX". That is what lets the table
- * be written with designated initialisers - every byte nobody names stays 0 -
- * instead of 256 hand-written entries, which is the form that would eventually
- * disagree with the function it replaces.
- */
-static const uint8_t HEX_V1[256] = {
-	['0'] =  1, ['1'] =  2, ['2'] =  3, ['3'] =  4, ['4'] =  5,
-	['5'] =  6, ['6'] =  7, ['7'] =  8, ['8'] =  9, ['9'] = 10,
-	['a'] = 11, ['b'] = 12, ['c'] = 13, ['d'] = 14, ['e'] = 15,
-	['f'] = 16,
-	['A'] = 11, ['B'] = 12, ['C'] = 13, ['D'] = 14, ['E'] = 15,
-	['F'] = 16
-};
-
-static int hex_val(uint8_t c)
-{
-	return (int)HEX_V1[c] - 1;
-}
+/* The hex digit itself is kof_hex_val in kofcore.h, where the measurement
+ * that made it a table is recorded - this loop is what made it. */
 
 /* What a decoded byte may be for the run to be text: printable ASCII, and the
  * three whitespace characters a command or a hosts file carries. */
@@ -792,12 +754,12 @@ static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		uint64_t beg, end, j, out_n = 0;
 		int text = 1;
 
-		if (hex_val(p[i]) < 0) {
+		if (kof_hex_val(p[i]) < 0) {
 			i++;
 			continue;
 		}
 		beg = i;
-		while (i < to && hex_val(p[i]) >= 0)
+		while (i < to && kof_hex_val(p[i]) >= 0)
 			i++;
 		end = i;
 		/* An odd tail is not part of the encoding: two characters make
@@ -814,15 +776,15 @@ static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		 * whole value of this rule is that it refuses those.
 		 */
 		for (j = beg; j < end && text; j += 2u)
-			text = hex_text((uint8_t)((hex_val(p[j]) << 4)
-						  | hex_val(p[j + 1u])));
+			text = hex_text((uint8_t)((kof_hex_val(p[j]) << 4)
+						  | kof_hex_val(p[j + 1u])));
 		if (!text)
 			continue;
 		/* In place: the write trails the read by half, so it cannot
 		 * overtake what has not been read. */
 		for (j = beg; j < end; j += 2u)
-			p[beg + out_n++] = (uint8_t)((hex_val(p[j]) << 4)
-						     | hex_val(p[j + 1u]));
+			p[beg + out_n++] = (uint8_t)((kof_hex_val(p[j]) << 4)
+						     | kof_hex_val(p[j + 1u]));
 		memset(p + beg + out_n, 0, (size_t)(end - beg - out_n));
 		if (wrote && n_wrote && *n_wrote < cap) {
 			wrote[*n_wrote].off = beg;
@@ -973,11 +935,11 @@ static int unpct_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 			if (p[j] != '%')
 				continue;
 			if (j + 2u >= end ||
-			    hex_val(p[j + 1u]) < 0 || hex_val(p[j + 2u]) < 0)
+			    kof_hex_val(p[j + 1u]) < 0 || kof_hex_val(p[j + 2u]) < 0)
 				continue;
 			esc++;
-			text = hex_text((uint8_t)((hex_val(p[j + 1u]) << 4) |
-						  hex_val(p[j + 2u])));
+			text = hex_text((uint8_t)((kof_hex_val(p[j + 1u]) << 4) |
+						  kof_hex_val(p[j + 2u])));
 			j += 2u;
 		}
 		if (!text || esc < PCT_MIN)
@@ -989,11 +951,11 @@ static int unpct_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		 */
 		for (j = beg; j < end; j++) {
 			if (p[j] == '%' && j + 2u < end &&
-			    hex_val(p[j + 1u]) >= 0 &&
-			    hex_val(p[j + 2u]) >= 0) {
+			    kof_hex_val(p[j + 1u]) >= 0 &&
+			    kof_hex_val(p[j + 2u]) >= 0) {
 				p[beg + out_n++] =
-					(uint8_t)((hex_val(p[j + 1u]) << 4) |
-						  hex_val(p[j + 2u]));
+					(uint8_t)((kof_hex_val(p[j + 1u]) << 4) |
+						  kof_hex_val(p[j + 2u]));
 				j += 2u;
 				continue;
 			}

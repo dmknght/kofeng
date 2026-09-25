@@ -51,6 +51,7 @@
 #include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/analyzer/parsers/containers/chm_parse.h"
 #include "../../libkofeng/extractor/decomp/lzx.h"
+#include "slurp.h"
 
 static int failures;
 static int examined;
@@ -115,34 +116,6 @@ static int out_sink(void *user, const uint8_t *p, uint32_t n)
 	return 1;
 }
 
-static uint8_t *slurp(const char *path, size_t *len)
-{
-	FILE *f = fopen(path, "rb");
-	uint8_t *p;
-	long n;
-
-	*len = 0;
-	if (!f)
-		return NULL;
-	if (fseek(f, 0, SEEK_END) != 0 || (n = ftell(f)) <= 0) {
-		fclose(f);
-		return NULL;
-	}
-	rewind(f);
-	p = malloc((size_t)n);
-	if (!p) {
-		fclose(f);
-		return NULL;
-	}
-	if (fread(p, 1u, (size_t)n, f) != (size_t)n) {
-		free(p);
-		fclose(f);
-		return NULL;
-	}
-	fclose(f);
-	*len = (size_t)n;
-	return p;
-}
 
 static uint32_t rd32(const uint8_t *p)
 {

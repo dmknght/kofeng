@@ -14,6 +14,8 @@
 
 #include "rar5.h"
 
+#include "rarcommon.h"
+
 #include <string.h>
 
 /* Table sizes, from the format. Larger than RAR3's in every case, and the slot
@@ -115,32 +117,9 @@ struct huff {
 
 static void huff_build(struct huff *d, const uint8_t *bits, uint32_t size)
 {
-	uint32_t count[16], tmp[16], i;
-	uint32_t n = 0, m;
-
-	memset(count, 0, sizeof count);
-	memset(d->num, 0, sizeof d->num);
-	for (i = 0; i < size; i++)
-		count[bits[i] & 0x0fu]++;
-	count[0] = 0;
-
-	tmp[0] = d->pos[0] = d->len[0] = 0;
-	for (i = 1; i < 16u; i++) {
-		n = 2u * (n + count[i]);
-		m = n << (15u - i);
-		if (m > 0xffffu)
-			m = 0xffffu;
-		d->len[i] = m;
-		tmp[i] = d->pos[i] = d->pos[i - 1u] + count[i - 1u];
-	}
-	for (i = 0; i < size; i++)
-		if (bits[i] & 0x0fu) {
-			uint32_t l = bits[i] & 0x0fu;
-
-			if (tmp[l] < TABLE_SIZE)
-				d->num[tmp[l]++] = (uint16_t)i;
-		}
-	d->max = size;
+	/* TABLE_SIZE is this format's, not the other's - see rarcommon.h. */
+	kof_rar_huff_build(d->len, d->pos, d->num, TABLE_SIZE, &d->max,
+			   bits, size);
 }
 
 static uint32_t huff_decode(struct br *b, const struct huff *d)
@@ -276,25 +255,6 @@ static void filt_arm(uint8_t *d, uint32_t n, uint32_t file_off)
  * read in channel-major order and written interleaved, so no byte can be written
  * before the byte it displaces has been read.
  */
-static int filt_delta(uint8_t *d, uint32_t n, uint32_t chan,
-		      uint8_t *scratch, uint64_t scratch_len)
-{
-	uint32_t ch, src = 0;
-
-	if (chan == 0u || n == 0u || (uint64_t)n > scratch_len)
-		return 0;
-	memcpy(scratch, d, n);
-	for (ch = 0; ch < chan; ch++) {
-		uint8_t prev = 0;
-		uint32_t at;
-
-		for (at = ch; at < n; at += chan) {
-			prev = (uint8_t)(prev - scratch[src++]);
-			d[at] = prev;
-		}
-	}
-	return 1;
-}
 
 /* ---- the decoder -------------------------------------------------------------- */
 
@@ -329,13 +289,6 @@ struct blk {
 	int tables;           /* tables are present */
 };
 
-static void push_dist(struct rar5 *s, uint32_t d)
-{
-	s->old_dist[3] = s->old_dist[2];
-	s->old_dist[2] = s->old_dist[1];
-	s->old_dist[1] = s->old_dist[0];
-	s->old_dist[0] = d;
-}
 
 /*
  * A back reference, bounded by what has been produced.
@@ -560,7 +513,7 @@ static void apply_filters(struct rar5 *s)
 			filt_arm(s->out + u->start, u->len, (uint32_t)u->start);
 			break;
 		default:
-			if (!filt_delta(s->out + u->start, u->len, u->channels,
+			if (!kof_rar_filt_delta(s->out + u->start, u->len, u->channels,
 					s->scratch, s->scratch_len))
 				s->gave_up = 1;
 			break;
@@ -671,7 +624,7 @@ enum kof_decomp_status kof_rar5_decode(const uint8_t *in, uint64_t in_len,
 						len++;
 				}
 			}
-			push_dist(&s, dist);
+			kof_rar_push_dist(s.old_dist, dist);
 			s.last_len = len;
 			if (!copy_string(&s, len, dist))
 				goto corrupt;

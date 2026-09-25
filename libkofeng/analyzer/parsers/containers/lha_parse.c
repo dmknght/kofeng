@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "lha_parse.h"
+#include "cname.h"
 #include "../../../kofcore/rangelist.h"
 
 #define LHA_METHOD_AT   2u
@@ -136,22 +137,6 @@ static int lha_checksum_ok(kof_buf f, uint64_t at, uint32_t hdr_size,
 	return (uint8_t)sum == want;
 }
 
-static int lha_traversal(kof_buf f, uint64_t at, uint32_t len)
-{
-	uint32_t i;
-
-	for (i = 0; i + 1u < len; i++) {
-		uint8_t a, b;
-
-		if (!kof_rd_u8(f, at + i, &a) || !kof_rd_u8(f, at + i + 1u, &b))
-			return 0;
-		if (a == '.' && b == '.')
-			return 1;
-		if (i == 0 && (a == '\\' || a == '/' || b == ':'))
-			return 1;
-	}
-	return 0;
-}
 
 /* ---- the parse ---------------------------------------------------------------- */
 
@@ -280,7 +265,7 @@ int kof_lha_parse(kof_buf file, struct kof_lha_info *l, struct kof_obj_ctx *ctx)
 			if (!l->names_off)
 				l->names_off = name_at;
 			l->names_len = name_at + name_len - l->names_off;
-			if (lha_traversal(file, name_at, name_len))
+			if (kof_cname_traversal(file, name_at, name_len))
 				l->anomalies |= KOF_LHA_ANOM_TRAVERSAL;
 		}
 		l->data_len = body + csize - l->data_off;

@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "arj_parse.h"
+#include "cname.h"
 #include "../../../kofcore/rangelist.h"
 
 #define ARJ_MAGIC0 0x60u
@@ -91,37 +92,7 @@ static uint32_t arj_entries(const struct kof_obj_ctx *ctx,
 
 /* ---- helpers ------------------------------------------------------------------ */
 
-static uint32_t arj_strlen(kof_buf f, uint64_t at, uint32_t cap)
-{
-	uint32_t i;
 
-	for (i = 0; i < cap; i++) {
-		uint8_t b;
-
-		if (!kof_rd_u8(f, at + i, &b))
-			return 0;
-		if (!b)
-			return i + 1u;      /* including the terminator */
-	}
-	return 0;
-}
-
-static int arj_traversal(kof_buf f, uint64_t at, uint32_t len)
-{
-	uint32_t i;
-
-	for (i = 0; i + 1u < len; i++) {
-		uint8_t a, b;
-
-		if (!kof_rd_u8(f, at + i, &a) || !kof_rd_u8(f, at + i + 1u, &b))
-			return 0;
-		if (a == '.' && b == '.')
-			return 1;
-		if (i == 0 && (a == '\\' || a == '/' || b == ':'))
-			return 1;
-	}
-	return 0;
-}
 
 /*
  * Past the extended headers that follow a basic one.
@@ -245,12 +216,12 @@ int kof_arj_parse(kof_buf file, struct kof_arj_info *a, struct kof_obj_ctx *ctx)
 		 * basic header - so both are bounded by it and not by the
 		 * object. */
 		name_at = base + first_size;
-		name_len = arj_strlen(file, name_at, basic - first_size);
+		name_len = kof_cname_len(file, name_at, basic - first_size);
 		if (!name_len) {
 			a->anomalies |= KOF_ARJ_ANOM_BAD_HEADER;
 			break;
 		}
-		cmt_len = arj_strlen(file, name_at + name_len,
+		cmt_len = kof_cname_len(file, name_at + name_len,
 				     basic - first_size - name_len);
 
 		at = base + basic + 4u;       /* past the basic header's CRC */
@@ -287,7 +258,7 @@ int kof_arj_parse(kof_buf file, struct kof_arj_info *a, struct kof_obj_ctx *ctx)
 			a->names_off = name_at;
 		a->names_len = name_at + name_len + cmt_len - a->names_off;
 		a->data_len = at > a->data_off ? at - a->data_off : 0;
-		if (arj_traversal(file, name_at, name_len - 1u))
+		if (kof_cname_traversal(file, name_at, name_len - 1u))
 			a->anomalies |= KOF_ARJ_ANOM_TRAVERSAL;
 
 		/* File type 3 is a directory and 2 is a volume label: neither

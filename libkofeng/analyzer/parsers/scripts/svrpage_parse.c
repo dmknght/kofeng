@@ -300,32 +300,6 @@ uint64_t kof_svr_find_tag(kof_buf f, uint64_t look, uint32_t *taglen,
  * An element island is never glue: <script runat="server"> is how a page
  * carries a whole program, and it is already only the code between the tags.
  */
-static int svr_block(kof_buf f, uint64_t open, uint64_t end)
-{
-	uint64_t j;
-
-	for (j = open; j < end && j < f.n; j++)
-		if (f.p[j] == '\n')
-			return 1;
-	for (j = open; j > 0; j--) {
-		uint8_t c = f.p[j - 1u];
-
-		if (c == '\n')
-			break;
-		if (c != ' ' && c != '\t' && c != '\r')
-			return 0;
-	}
-	for (j = end; j < f.n; j++) {
-		uint8_t c = f.p[j];
-
-		if (c == '\n')
-			break;
-		if (c != ' ' && c != '\t' && c != '\r')
-			return 0;
-	}
-	return 1;
-}
-
 void kof_svr_islands(kof_buf f, uint64_t from, struct kof_script_info *info)
 {
 	uint64_t i = from;
@@ -359,7 +333,7 @@ void kof_svr_islands(kof_buf f, uint64_t from, struct kof_script_info *info)
 				break;
 			}
 			if (!kof_txt_tag_at(f, open, "<%--", 4u) &&
-			    svr_block(f, open, close + 2u) &&
+			    kof_script_is_block(f, open, close + 2u) &&
 			    !kof_isl_add(info, open, close + 2u - open))
 				break;
 			next = close + 2u;

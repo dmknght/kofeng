@@ -186,3 +186,32 @@ void kof_isl_join_ws(kof_buf f, uint64_t from, struct kof_script_info *info)
 	}
 	info->n_island = keep;
 }
+
+int kof_script_is_block(kof_buf f, uint64_t open, uint64_t end)
+{
+	uint64_t j;
+
+	/* Spans a line break: a block, whatever is around it. */
+	for (j = open; j < end && j < f.n; j++)
+		if (f.p[j] == '\n')
+			return 1;
+	/* Otherwise it has to own its line at both ends. */
+	for (j = open; j > 0; j--) {
+		uint8_t c = f.p[j - 1u];
+
+		if (c == '\n')
+			break;
+		if (c != ' ' && c != '\t' && c != '\r')
+			return 0;
+	}
+	for (j = end; j < f.n; j++) {
+		uint8_t c = f.p[j];
+
+		if (c == '\n')
+			break;
+		if (c != ' ' && c != '\t' && c != '\r')
+			return 0;
+	}
+	return 1;
+}
+
