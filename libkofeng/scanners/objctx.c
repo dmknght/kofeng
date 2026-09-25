@@ -3563,7 +3563,6 @@ static const struct kof_ovl_desc *ovl_of(const struct kof_obj_ctx *ctx)
 							  : 0u)) {
 				/* Nothing describable: leave it built and
 				 * empty rather than rebuilding on every ask. */
-				sc->ovl->n_str = 0;
 				sc->ovl->n_blk = 0;
 			}
 		} else if (sc->ovl) {
@@ -3574,7 +3573,7 @@ static const struct kof_ovl_desc *ovl_of(const struct kof_obj_ctx *ctx)
 			 * The buffer is the scanner's and survives the object;
 			 * only the ready flag is cleared between them - see
 			 * the note beside that reset in scan.c, which says in
-			 * so many words that every kof_ovl_strings rule would
+			 * so many words that every kof_ovl_blocks rule would
 			 * otherwise measure the wrong file. It achieved that
 			 * for an ELF, which rebuilds. For anything else this
 			 * returned WITHOUT REBUILDING and handed back the
@@ -3589,7 +3588,6 @@ static const struct kof_ovl_desc *ovl_of(const struct kof_obj_ctx *ctx)
 			 * same answer a describable object with nothing in it
 			 * gives, which is what the header promises.
 			 */
-			sc->ovl->n_str = 0;
 			sc->ovl->n_blk = 0;
 		}
 	}
@@ -4247,22 +4245,7 @@ static uint32_t c_ovl_chain(const struct kof_obj_ctx *ctx,
 	return ovl_note(ctx, best);
 }
 
-static uint32_t c_ovl_strings(const struct kof_obj_ctx *ctx,
-			      const uint64_t *ref, uint32_t n_ref)
-{
-	const struct kof_ovl_desc *d;
-
-	if (!ref || !n_ref)
-		return 0;
-	d = ovl_of(ctx);
-	if (!d || !d->n_str)
-		return 0;
-	return ovl_note(ctx, kof_ovl_strings_pct(d->str, d->n_str, ref,
-							 n_ref));
-}
-
-/* The same question over block hashes - see c_ovl_strings, which builds the
- * descriptor both of them read. */
+/* Containment over the object's block set, against a reference's own. */
 static uint32_t c_ovl_blocks(const struct kof_obj_ctx *ctx,
 			     const uint32_t *ref, uint32_t n_ref)
 {
@@ -4311,7 +4294,7 @@ static const struct kof_content kof_detect_vtable = {
 	 * not about who is asking, and a rule that wants to know whether its
 	 * neighbours care about a format is asking a fair question. */
 	c_fmt_wanted, c_region_shape, c_region_entropy, c_entropy_at,
-	c_plague_score, c_ovl_strings, c_ovl_blocks, c_ovl_chain, c_ovl_shape,
+	c_plague_score, c_ovl_blocks, c_ovl_chain, c_ovl_shape,
 	c_cure_offer, c_cure_patch, c_cure_truncate,
 	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask
 };
@@ -4323,7 +4306,7 @@ static const struct kof_content kof_unpack_vtable = {
 	c_unpack_chain, c_find_str_where,
 	c_gather, c_name_next, c_incomplete,
 	c_unpack_entry, c_syms, c_data_xref, c_fmt_wanted, c_region_shape,
-	c_region_entropy, c_entropy_at, c_plague_score, c_ovl_strings,
+	c_region_entropy, c_entropy_at, c_plague_score,
 	c_ovl_blocks, c_ovl_chain, c_ovl_shape, c_cure_offer, c_cure_patch,
 	c_cure_truncate,
 	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask

@@ -1225,10 +1225,9 @@ static void hit_optbtn(struct view *v, uint32_t arg);
 /* The three measures the similarity table lists, in the order it lists them:
  * most of the object read first. */
 #define SIM_BLOCKS 0u
-#define SIM_STRING 1u
-#define SIM_SHAPE  2u
-#define SIM_CHAIN  3u
-#define SIM_ROWS   4u
+#define SIM_SHAPE  1u
+#define SIM_CHAIN  2u
+#define SIM_ROWS   3u
 
 
 struct view {
@@ -1283,7 +1282,7 @@ struct view {
 	 * another sample - which is the whole use of the column: it says how
 	 * alike the NEXT file is.
 	 */
-	uint32_t         sim_str, sim_shape, sim_blk, sim_chain;
+	uint32_t         sim_shape, sim_blk, sim_chain;
 	/*
 	 * FOLDED TABLES.
 	 *
@@ -2744,7 +2743,6 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	o = &v->obj[v->n_obj];
 	/* The slot may have held an object before - see the reset loop for what
 	 * one owns. */
-	free(o->ovl_str);
 	free(o->ovl_blk);
 	free(o->carve);
 	memset(o, 0, sizeof *o);
@@ -4266,12 +4264,11 @@ static void log_window(struct view *v)
 	for (i = 0; i < v->n_obj; i++) {
 		/*
 		 * The buffers are the mapping and are not this loop's, but the
-		 * kept answers ARE - see object.ovl_str, which is heap and is
+		 * kept answers ARE - see object.ovl_blk, which is heap and is
 		 * kept so that returning to an object does not read it again.
 		 * The note that used to be here said nothing was owned, and it
 		 * stopped being true the moment anything was.
 		 */
-		free(v->obj[i].ovl_str);
 		free(v->obj[i].ovl_blk);
 		free(v->obj[i].carve);
 		memset(&v->obj[i], 0, sizeof v->obj[i]);
@@ -7146,7 +7143,7 @@ static void plg_sim_refresh(struct view *v)
 	struct object *o = cur_obj(v);
 	uint32_t i, n = 0, sum = 0;
 
-	v->sim_str = v->sim_shape = v->sim_blk = v->sim_chain = 0;
+	v->sim_shape = v->sim_blk = v->sim_chain = 0;
 	if (!o || !o->buf.p)
 		return;
 
@@ -7170,17 +7167,11 @@ static void plg_sim_refresh(struct view *v)
 		v->sim_shape = kof_ovl_shape_pct(
 			(const struct kof_elf_info *)o->info,
 			&v->ed.dr.shp, o->buf.n);
-	if ((v->ed.dr.n_str || v->ed.dr.n_blkv) && obj_ovl(o)) {
-		/* The object's own sets, built once - see obj_ovl. */
-		if (v->ed.dr.n_str)
-			v->sim_str = kof_ovl_strings_pct(
-				o->ovl_str, o->n_ovl_str,
-				v->ed.dr.str, v->ed.dr.n_str);
-		if (v->ed.dr.n_blkv)
-			v->sim_blk = kof_ovl_blocks_pct(
-				o->ovl_blk, o->n_ovl_blk,
-				v->ed.dr.blkv, v->ed.dr.n_blkv);
-	}
+	if (v->ed.dr.n_blkv && obj_ovl(o))
+		/* The object's own set, built once - see obj_ovl. */
+		v->sim_blk = kof_ovl_blocks_pct(o->ovl_blk, o->n_ovl_blk,
+						v->ed.dr.blkv,
+						v->ed.dr.n_blkv);
 }
 
 static void plg_rescore(struct view *v)
@@ -8925,23 +8916,19 @@ static int plg_load_rule(struct view *v, const char *path)
 	 * panel shows what it recovered rather than guessing at the rest.
 	 */
 	{
-		static const uint8_t meas[4] = {
-			SIM_IT_BLKSET, SIM_IT_STRSET, SIM_IT_SHAPE,
-			SIM_IT_CHAIN
+		static const uint8_t meas[3] = {
+			SIM_IT_BLKSET, SIM_IT_SHAPE, SIM_IT_CHAIN
 		};
-		uint8_t pct[4];
-		int lv[4];
-		uint32_t have[4], k;
+		uint8_t pct[3];
+		int lv[3];
+		uint32_t have[3], k;
 
-		pct[0] = blkv_pct; pct[1] = str_pct; pct[2] = shp_pct;
-		pct[3] = chain_pct;
-		lv[0]  = blkv_level; lv[1] = str_level; lv[2] = shp_level;
-		lv[3]  = chain_level;
+		pct[0] = blkv_pct; pct[1] = shp_pct; pct[2] = chain_pct;
+		lv[0]  = blkv_level; lv[1] = shp_level; lv[2] = chain_level;
 		have[0] = v->ed.dr.n_blkv;
-		have[1] = v->ed.dr.n_str;
-		have[2] = (uint32_t)(v->ed.dr.has_shp != 0);
-		have[3] = v->ed.dr.chain.n;
-		for (k = 0; k < 4u; k++) {
+		have[1] = (uint32_t)(v->ed.dr.has_shp != 0);
+		have[2] = v->ed.dr.chain.n;
+		for (k = 0; k < 3u; k++) {
 			struct group *g;
 
 			if (!have[k] || !pct[k] || v->ed.dr.n_grp >= MAX_GROUP)
@@ -15156,7 +15143,6 @@ static int blk_section_shown(struct view *v)
 static uint32_t sim_row_what(uint32_t i)
 {
 	return i == SIM_BLOCKS ? SIM_IT_BLKSET
-	     : i == SIM_STRING ? SIM_IT_STRSET
 	     : i == SIM_SHAPE  ? SIM_IT_SHAPE
 			       : SIM_IT_CHAIN;
 }
@@ -15211,9 +15197,7 @@ static void sim_say_resolution(struct view *v, uint32_t what)
 {
 	uint32_t n;
 
-	if (what == SIM_IT_STRSET)
-		n = v->ed.dr.n_str;
-	else if (what == SIM_IT_BLKSET)
+	if (what == SIM_IT_BLKSET)
 		n = v->ed.dr.n_blkv;
 	else
 		return;             /* the shape's dimensions are fixed */
@@ -15222,7 +15206,7 @@ static void sim_say_resolution(struct view *v, uint32_t what)
 	snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
 		 "%s: %u %s - one is worth %u%% of the score, so it has no "
 		 "finer answer than that", sim_it_word(what), n,
-		 what == SIM_IT_STRSET ? "runs" : "windows", 100u / n);
+		 "windows", 100u / n);
 	/* Not a fault: a small set is a fact about the object, and the author
 	 * may know it is the right one. */
 	v->ed.dr.warn_bad = 0;
@@ -15511,25 +15495,17 @@ static int sim_prepare(struct view *v, uint32_t what)
 	obj_lib_find(o, &dlib);
 	if (!kof_ovl_build(d, o->buf, (const struct kof_elf_info *)o->info,
 			   dlib.span, dlib.n) ||
-	    (what == SIM_IT_STRSET ? !d->n_str : !d->n_blk)) {
+	    !d->n_blk) {
 		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
-			 "no %s left after the library cut",
-			 what == SIM_IT_STRSET ? "strings" : "blocks");
+			 "no blocks left after the library cut");
 		v->ed.dr.warn_bad = 1;
 		free(d);
 		return 0;
 	}
-	if (what == SIM_IT_STRSET) {
-		v->ed.dr.n_str = d->n_str < DRAFT_MAX_STR ? d->n_str
-							  : DRAFT_MAX_STR;
-		for (i = 0; i < v->ed.dr.n_str; i++)
-			v->ed.dr.str[i] = d->str[i];
-	} else {
-		v->ed.dr.n_blkv = d->n_blk < DRAFT_MAX_BLKV ? d->n_blk
-							    : DRAFT_MAX_BLKV;
-		for (i = 0; i < v->ed.dr.n_blkv; i++)
-			v->ed.dr.blkv[i] = d->blk[i];
-	}
+	v->ed.dr.n_blkv = d->n_blk < DRAFT_MAX_BLKV ? d->n_blk
+						    : DRAFT_MAX_BLKV;
+	for (i = 0; i < v->ed.dr.n_blkv; i++)
+		v->ed.dr.blkv[i] = d->blk[i];
 	free(d);
 	/*
 	 * SAY SO WHEN THE CUT FOUND NOTHING. Measured, the marker tier reaches
@@ -15538,16 +15514,6 @@ static int sim_prepare(struct view *v, uint32_t what)
 	 * offers it anyway, because the researcher may know better than the
 	 * cut; it does not offer it silently.
 	 */
-	if (what == SIM_IT_STRSET) {
-		struct kof_lib_all lib;
-
-		obj_lib_find(o, &lib);
-		if (!lib.n)
-			snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
-				 "%u strings - but no library was found to "
-				 "cut, so some of them are libc",
-				 v->ed.dr.n_str);
-	}
 	return 1;
 }
 
@@ -15622,9 +15588,7 @@ static void sim_item_name(const struct view *v,
 static uint32_t sim_offer(struct view *v, uint32_t g,
 			  struct grp_sim_item *out, uint32_t cap)
 {
-	static const uint8_t whole[3] = {
-		SIM_IT_BLKSET, SIM_IT_STRSET, SIM_IT_SHAPE
-	};
+	static const uint8_t whole[2] = { SIM_IT_BLKSET, SIM_IT_SHAPE };
 	const struct object *ob = cur_obj(v);
 	uint32_t n = 0, i;
 
@@ -15644,7 +15608,7 @@ static uint32_t sim_offer(struct view *v, uint32_t g,
 	}
 	if (!ob || ob->ctx.format != KOF_FMT_ELF)
 		return n;
-	for (i = 0; i < 3u; i++) {
+	for (i = 0; i < 2u; i++) {
 		if (!v->ed.dr.sim_use[whole[i]] ||
 		    grp_sim_has(&v->ed, g, whole[i], 0))
 			continue;
@@ -15727,11 +15691,9 @@ static void sim_recarve(struct view *v)
 			v->ed.dr.has_shp = v->ed.dr.shp.n_region != 0;
 		}
 	}
-	if (!v->ed.dr.sim_use[SIM_IT_STRSET])
-		v->ed.dr.n_str = 0;
 	if (!v->ed.dr.sim_use[SIM_IT_BLKSET])
 		v->ed.dr.n_blkv = 0;
-	if (v->ed.dr.sim_use[SIM_IT_STRSET] && v->ed.dr.sim_use[SIM_IT_BLKSET])
+	if (v->ed.dr.sim_use[SIM_IT_BLKSET])
 		return;
 	if (!o || !o->info || o->ctx.format != KOF_FMT_ELF)
 		return;
@@ -15739,11 +15701,6 @@ static void sim_recarve(struct view *v)
 	(void)d;
 	if (!obj_ovl(o))
 		return;
-	if (!v->ed.dr.sim_use[SIM_IT_STRSET]) {
-		v->ed.dr.n_str = o->n_ovl_str;
-		for (i = 0; i < o->n_ovl_str; i++)
-			v->ed.dr.str[i] = o->ovl_str[i];
-	}
 	if (!v->ed.dr.sim_use[SIM_IT_BLKSET]) {
 		v->ed.dr.n_blkv = o->n_ovl_blk;
 		for (i = 0; i < o->n_ovl_blk; i++)
@@ -16138,7 +16095,7 @@ static void plg_sync(struct view *v)
  * in front of the reader, which is the question that decides between them.
  *
  * THE PERCENTAGE IS THE ONE THE RULE WILL SEE. Each is the same call the
- * generated module makes - kof_plague_score, kof_ovl_strings, kof_ovl_shape -
+ * generated module makes - kof_plague_score, kof_ovl_blocks, kof_ovl_shape -
  * so a row reading 64 is not an estimate of what the rule will do. It reads 100
  * on the sample the draft was built from, and means something the moment the
  * reader opens the next one.
@@ -16243,10 +16200,6 @@ static void sim_made_word(const struct view *v, uint32_t what, char *out,
 		snprintf(out, cap, "%u region%s, %s", v->ed.dr.shp.n_region,
 			 v->ed.dr.shp.n_region == 1u ? "" : "s", sz);
 		break;
-	case SIM_IT_STRSET:
-		snprintf(out, cap, "%u printable run%s", v->ed.dr.n_str,
-			 v->ed.dr.n_str == 1u ? "" : "s");
-		break;
 	case SIM_IT_CHAIN: {
 		/*
 		 * STEPS, AND HOW MANY OF THEM ARE TIED TO ANOTHER.
@@ -16289,10 +16242,9 @@ static void sim_made_word(const struct view *v, uint32_t what, char *out,
 /* Is there a description of this measure in the draft at all. */
 static int sim_have(const struct view *v, uint32_t what)
 {
-	return what == SIM_IT_SHAPE  ? v->ed.dr.has_shp != 0
-	     : what == SIM_IT_STRSET ? v->ed.dr.n_str != 0
-	     : what == SIM_IT_CHAIN  ? v->ed.dr.has_chain != 0
-				     : v->ed.dr.n_blkv != 0;
+	return what == SIM_IT_SHAPE ? v->ed.dr.has_shp != 0
+	     : what == SIM_IT_CHAIN ? v->ed.dr.has_chain != 0
+				    : v->ed.dr.n_blkv != 0;
 }
 
 static int draw_decl_sim(struct out *o, struct view *v, int r)
@@ -16355,7 +16307,6 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 			continue;
 		}
 		pct = i == SIM_BLOCKS ? v->sim_blk
-		    : i == SIM_STRING ? v->sim_str
 		    : i == SIM_SHAPE  ? v->sim_shape : v->sim_chain;
 		sim_made_word(v, what, made, sizeof made);
 		/*
@@ -31456,8 +31407,7 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 		struct object *o = &v->obj[0];
 
 		/* See the reset loop for what an object owns. */
-		free(o->ovl_str);
-		free(o->ovl_blk);
+			free(o->ovl_blk);
 		free(o->carve);
 		memset(o, 0, sizeof *o);
 		snprintf(o->name, sizeof o->name, "%s", v->path);
@@ -31524,7 +31474,7 @@ static void file_close(struct view *v)
 	 * are the mapping - so there is nothing else to undo", which is the
 	 * same sentence log_window's reset loop already corrected about itself:
 	 * "it stopped being true the moment anything was." The loop below grew
-	 * the frees for touch, finding, info, sym and own; ovl_str, ovl_blk and
+	 * the frees for touch, finding, info, sym and own; ovl_blk and
 	 * carve were never added to it, and they are heap the object keeps so
 	 * that coming back to a row does not re-read it.
 	 *
@@ -31563,8 +31513,7 @@ static void file_close(struct view *v)
 		free(o->info);
 		free(o->sym);
 		free(o->own);
-		free(o->ovl_str);
-		free(o->ovl_blk);
+			free(o->ovl_blk);
 		free(o->carve);
 		if (o->mapped)
 			kof_unmap_file(o->mapped, o->mapped_len);
@@ -31828,8 +31777,7 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 		struct object *o = &v->obj[0];
 
 		/* See the reset loop for what an object owns. */
-		free(o->ovl_str);
-		free(o->ovl_blk);
+			free(o->ovl_blk);
 		free(o->carve);
 		memset(o, 0, sizeof *o);
 		snprintf(o->name, sizeof o->name, "%s", v->path);

@@ -27,7 +27,7 @@
  *               that must be asked of a NORMALISED object, because a run is
  *               hashed by its bytes: measured, a base64 or hex re-encoding of
  *               the same program scores 0 and a widened one is not collected
- *               at all. See kof_ovl_strings in kofmod/kofsig.h.
+ *               at all. See kof_ovl_blocks in kofmod/kofsig.h.
  *
  * They overlap but neither contains the other: across independent collections,
  * 41 objects were caught only by strings and 9 only by structure. So the
@@ -81,15 +81,6 @@ struct kof_elf_info;
 #define KOF_OVL_MAX_REGIONS 8u
 
 /*
- * Strings one descriptor keeps, across all its regions.
- *
- * Four thousand against a measured median of 74 for a botnet sample and 128 for
- * a clean one, with a 75th percentile of 327. Generous, and fixed, so building
- * a descriptor needs no allocation.
- */
-#define KOF_OVL_MAX_STRINGS 4096u
-
-/*
  * Block hashes one descriptor keeps.
  *
  * The same selected-window hashes plague cuts its blocks from - see
@@ -102,13 +93,8 @@ struct kof_elf_info;
  */
 #define KOF_OVL_MAX_BLOCKS 8192u
 
-/* The shortest printable run that counts as a string. Six, as measured. */
-#define KOF_OVL_MIN_STRING 6u
-
 struct kof_ovl_region {
 	uint64_t fsz;        /* the region's bytes on disk, before subtraction */
-	uint32_t str_off;    /* slice of the descriptor's string pool          */
-	uint32_t str_n;
 	uint8_t  x;          /* executable: what the pairing keys on           */
 	uint8_t  pad[3];
 };
@@ -128,8 +114,6 @@ struct kof_ovl_desc {
 	uint8_t  truncated;       /* a cap stopped the build                    */
 	uint8_t  pad[2];
 	struct kof_ovl_region region[KOF_OVL_MAX_REGIONS];
-	uint32_t n_str;
-	uint64_t str[KOF_OVL_MAX_STRINGS];   /* sorted, deduplicated, per region */
 	uint32_t n_blk;
 	uint32_t blk[KOF_OVL_MAX_BLOCKS];    /* sorted, deduplicated             */
 };
@@ -139,7 +123,6 @@ enum kof_ovl_dim {
 	KOF_OVL_D_SIZE    = 1u << 0,
 	KOF_OVL_D_PTYPE   = 1u << 1,
 	KOF_OVL_D_REGSIZE = 1u << 2,
-	KOF_OVL_D_STRINGS = 1u << 3,
 	KOF_OVL_D_ANOM    = 1u << 4
 };
 
@@ -159,11 +142,6 @@ struct kof_ovl_vec {
 	uint16_t reg_size;     /* the WORST paired region, not the mean: one
 				* region that does not fit means a different
 				* program, however well the others agree      */
-	uint16_t str_mean;     /* mean over paired regions - measured to beat
-				* the max, because agreement in every region
-				* is what a rebuild preserves and a
-				* coincidence does not                        */
-	uint16_t str_max;
 	uint16_t anom_jac;
 	uint16_t applied;      /* enum kof_ovl_dim bits that had an answer     */
 	uint8_t  cls_match;    /* class and endianness together                */
@@ -272,27 +250,12 @@ void kof_ovl_compare(const struct kof_ovl_desc *a, const struct kof_ovl_desc *b,
  */
 enum kof_ovl_track {
 	KOF_OVL_NONE      = 0,
-	KOF_OVL_STRINGS   = 1u << 0,   /* content matched: a mutation           */
 	KOF_OVL_STRUCTURE = 1u << 1,   /* shape matched, content need not       */
 	KOF_OVL_ANCHOR    = 1u << 2    /* shared header damage plus shape       */
 };
 
 uint32_t kof_ovl_verdict(const struct kof_ovl_vec *v);
 
-/*
- * HOW MUCH OF A REFERENCE'S STRING SET THIS OBJECT HOLDS, nought to a hundred.
- *
- * Containment and not Jaccard: a rule names a reference's strings and asks how
- * many of them are here, the same measurement kof_plague_score already makes of
- * a block. Jaccard would also punish the object for strings the reference never
- * had, which is the wrong question - a variant that ADDED a string is still the
- * same program.
- *
- * Both sides sorted, so this is a merge. `ref` is the module's own array, in
- * its .rodata, and is not written to.
- */
-uint32_t kof_ovl_strings_pct(const uint64_t *obj, uint32_t n_obj,
-			     const uint64_t *ref, uint32_t n_ref);
 
 /*
  * THE SAME MEASUREMENT OVER BLOCK HASHES.

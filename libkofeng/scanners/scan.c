@@ -935,8 +935,7 @@ static void finding_str(const struct kof_scanner *sc,
 	}
 	/*
 	 * AND THE SAME FOR A SIMILARITY MEASURE THAT CARRIES ITS OWN
-	 * REFERENCE - kof_ovl_strings, kof_ovl_blocks, kof_ovl_chain,
-	 * kof_ovl_shape.
+	 * REFERENCE - kof_ovl_blocks, kof_ovl_chain, kof_ovl_shape.
 	 *
 	 * The mark goes BEHIND the variant, where every other method's does,
 	 * and not in front of it. It was a prefix on the variant for one
@@ -3313,13 +3312,13 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 */
 	kof_plague_begin(&sc->plague);
 	/*
-	 * THIS OBJECT'S STRING SET IS NOT THE LAST ONE'S.
+	 * THIS OBJECT'S DESCRIPTOR IS NOT THE LAST ONE'S.
 	 *
 	 * Here and not inside plague_feed, which returns early when no pack
 	 * carried a block: a database with no plague rules would then have left
-	 * the previous object's set in place, and every kof_ovl_strings rule
-	 * would have measured the wrong file. Built on the first ask - see
-	 * c_ovl_strings - so this costs a store.
+	 * the previous object's descriptor in place, and every kof_ovl_blocks
+	 * rule would have measured the wrong file. Built on the first ask - see
+	 * ovl_of - so this costs a store.
 	 */
 	sc->ovl_ready = 0;
 	sc->cure_have = 0;

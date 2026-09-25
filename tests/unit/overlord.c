@@ -223,8 +223,14 @@ int main(void)
 	ovl_build_of(d1, a, na, &e1);
 	ovl_build_of(d2, b, nb, &e2);
 	kof_ovl_compare(d1, d2, &v);
-	if (kof_ovl_verdict(&v) & KOF_OVL_STRINGS)
-		bad("a shared library alone made the strings track fire");
+	/*
+	 * MEASURED ON THE BLOCKS, which is what the cut is for now that the
+	 * string track is gone: two objects that share only their library must
+	 * not share the content the library was taken out of.
+	 */
+	if (kof_ovl_blocks_pct(d1->blk, d1->n_blk, d2->blk, d2->n_blk) >= 50u)
+		bad("a shared library alone matched on blocks - the cut is "
+		    "not taking it out");
 	else
 		ok("a shared library alone does not match");
 	free(a); free(b);
@@ -236,12 +242,13 @@ int main(void)
 	ovl_build_of(d1, a, na, &e1);
 	ovl_build_of(d2, b, nb, &e2);
 	kof_ovl_compare(d1, d2, &v);
-	if (!(v.applied & KOF_OVL_D_STRINGS))
-		bad("the strings dimension did not apply where both have content");
-	else if (!(kof_ovl_verdict(&v) & KOF_OVL_STRINGS))
-		bad("a shared author half did not match");
+	/* The author's half is shared, so its blocks must be - and this is the
+	 * other side of the check above: the cut must not take so much that
+	 * two objects with the same content stop agreeing. */
+	if (kof_ovl_blocks_pct(d1->blk, d1->n_blk, d2->blk, d2->n_blk) < 50u)
+		bad("a shared author half did not match on blocks");
 	else
-		ok("a shared author half matches (strings track)");
+		ok("a shared author half matches (blocks)");
 	free(a); free(b);
 
 	printf("\nshape without content - the encrypted-payload track:\n");
@@ -255,10 +262,10 @@ int main(void)
 		bad("identical shape did not fire the structure track");
 	else
 		ok("identical shape matches with no content in common");
-	if (kof_ovl_verdict(&v) & KOF_OVL_STRINGS)
-		bad("unrelated content fired the strings track");
+	if (kof_ovl_blocks_pct(d1->blk, d1->n_blk, d2->blk, d2->n_blk) >= 50u)
+		bad("unrelated content matched on blocks");
 	else
-		ok("and the strings track correctly stays quiet");
+		ok("and the content measure correctly stays quiet");
 	free(a); free(b);
 
 	printf("\na different size is a different program:\n");
@@ -290,7 +297,10 @@ int main(void)
 		d2->region[1] = t;
 	}
 	kof_ovl_compare(d1, d2, &v);
-	if (v.str_mean < 900)
+	/* On the region-size dimension now: pairing is by executability and
+	 * size rank, so listing the same regions in the other order must land
+	 * on the same pairs. */
+	if (v.reg_size < 900)
 		bad("swapping the region order changed the answer");
 	else
 		ok("the same object with its regions listed in the other order "

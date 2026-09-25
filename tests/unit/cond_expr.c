@@ -508,7 +508,7 @@ static void block_indices(void)
 	CK(grp_sim_add(&E, 0, SIM_IT_SHAPE, 0) && E.dr.grp[0].n_sim == 2);
 	CK(grp_sim_add(&E, 0, SIM_IT_SHAPE, 7) && E.dr.grp[0].n_sim == 2);
 	CK(grp_sim_of(&E, SIM_IT_SHAPE, 0) == 0);
-	CK(grp_sim_of(&E, SIM_IT_STRSET, 0) == MAX_GROUP);
+	CK(grp_sim_of(&E, SIM_IT_BLKSET, 0) == MAX_GROUP);
 	CK(draft_uses_sim(&E, SIM_IT_SHAPE));
 	CK(!draft_uses_sim(&E, SIM_IT_BLKSET));
 	/* Taking one out closes the gap rather than leaving a hole for the

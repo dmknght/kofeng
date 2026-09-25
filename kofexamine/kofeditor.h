@@ -698,45 +698,6 @@ static inline int grp_is_at(int rule) { return rule == 3; }
  */
 #define SIM_IT_SHAPE  1u
 /*
- * THE OBJECT'S STRING SET, which is content without being a place:
- * kof_ovl_strings. A block scores a RUN and moves when anything before it
- * changes; a set has no order to disturb. Measured across architectures, two
- * builds of one botnet share 0.000 of their code blocks and 0.4 to 0.94 of
- * their strings - so this is the measure that survives a recompile for another
- * target, and the block is the one that is exact.
- *
- * SIMILARITY AND NOT SHAPE, which is what this was called. The run is hashed
- * BY ITS BYTES, so two strings are the same string when they say the same
- * thing and not when they are built the same way. The distinction is not
- * pedantry - it is the whole of when this measure works:
- *
- *   same strings, whole code rebuilt    strings 100%, blocks   2%
- *   half the strings gone with it       strings  47%, blocks   0%
- *   strings base64-encoded              strings   0%, blocks   2%
- *   strings hex-encoded                 strings   0%, blocks   2%
- *   strings widened to UTF-16LE         strings   0%, nothing collected
- *
- * A TRUE SHAPE WAS TRIED AND DOES NOT WORK. Hashing a run's length as a
- * fraction of the longest, which is the one feature a uniform re-encoding
- * scales rather than destroys, scored 29% on a base64 build of the same
- * program - and 29% on a program with nothing in common. It cannot tell them
- * apart. Adding a character-class profile made it worse. The byte hash scores
- * 0% on the unrelated program, which is the property that makes it usable.
- *
- * SO IT BELONGS AFTER THE NORMALISER AND NOWHERE ELSE. Encoded strings are
- * invisible to it and widened ones are not even collected - printable() breaks
- * at every NUL, so no run reaches the six-byte minimum. The normaliser is what
- * turns both back into strings; before it, this measure answers 0 about an
- * object it would recognise afterwards.
- *
- * AND THE TICK LIST IS WHERE THE FALSE POSITIVES ARE DECIDED. The library cut
- * removes the linker's strings, not the common ones the author wrote: a
- * sample full of User-Agent headers and HTTP verbs offers a reference that
- * matches every program that speaks HTTP. Nothing here scores a string for how
- * common it is, so picking them is judgement and the rule inherits it.
- */
-#define SIM_IT_STRSET 2u
-/*
  * THE BLOCK VECTOR - how alike the object is across the reference's WHOLE set
  * of selected windows, not how much of any one named run is here:
  * kof_ovl_blocks. Its own set, built by kof_ovl_build with the library cut
@@ -745,6 +706,22 @@ static inline int grp_is_at(int rule) { return rule == 3; }
  * Measured: agreement across the set beat the best single block - 83.0%
  * against 81.8% at the same zero false positives - because agreement in every
  * region is what a rebuild preserves and a coincidence does not.
+ */
+/*
+ * 2 IS NOT USED AND IS NOT A MISTAKE.
+ *
+ * It was the string set - kof_ovl_strings - which measured which of a
+ * reference's printable runs an object still held. It is gone: the runs are
+ * hashed by their BYTES, so any encoding of the strings answers zero, and the
+ * measure was therefore only ever correct on an object the normaliser had
+ * already been through. Surveyed over real samples it was also the least
+ * stable of the four across that transform - 62.8% of a parent's set survived
+ * into its own normalised view on malware, 45.0% on clean objects - and on
+ * large statically linked binaries it scored unrelated programs alike, because
+ * what it was mostly comparing was printable byte sequences inside machine
+ * code (12.11% of cross-family Go pairs reached 80%).
+ *
+ * The gap is left so that the ids of the measures that remain do not move.
  */
 #define SIM_IT_BLKSET 3u
 /*
@@ -878,7 +855,6 @@ static inline void grp_at_fix_sign(struct group *q)
 
 /* How many of a reference's strings a draft keeps. Measured: the median sample
  * yields 74 and three in four are under 327. */
-#define DRAFT_MAX_STR 1024u
 
 /* And how many block hashes. Larger because a window is selected far more often
  * than a printable run of six is found. */
@@ -1049,8 +1025,6 @@ struct kof_draft {
 	 * a three-quarters of samples reach, and a draft that is copied about
 	 * should not carry an allocation somebody has to remember to free.
 	 */
-	uint64_t     str[DRAFT_MAX_STR];
-	uint32_t     n_str;
 	/*
 	 * AND ITS BLOCK HASHES, from the same bytes and the same cut.
 	 *
@@ -1264,8 +1238,6 @@ struct object {
 	 * kept with the object. On the heap and only once something asks, since
 	 * most objects are never selected; freed with the tree.
 	 */
-	uint64_t *ovl_str;
-	uint32_t  n_ovl_str;
 	uint32_t *ovl_blk;
 	uint32_t  n_ovl_blk;
 	uint8_t   ovl_done;

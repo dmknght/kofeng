@@ -1491,7 +1491,7 @@ uint8_t obj_emu_why(const struct object *o)
 }
 
 /*
- * THE OBJECT'S OVERLORD VECTORS, BUILT ONCE - see object.ovl_str.
+ * THE OBJECT'S OVERLORD VECTOR, BUILT ONCE - see object.ovl_blk.
  *
  * Two callers wanted them and each built its own: sim_recarve, to seed a draft
  * with the measures this object offers, and plg_sim_refresh, to score the
@@ -1507,12 +1507,12 @@ int obj_ovl(struct object *o)
 {
 	struct kof_ovl_desc *d;
 	struct kof_lib_all   olib;
-	uint32_t i, ns, nb;
+	uint32_t i, nb;
 
 	if (!o || !o->info || o->ctx.format != KOF_FMT_ELF)
 		return 0;
 	if (o->ovl_done)
-		return o->ovl_str != NULL;
+		return o->ovl_blk != NULL;
 	o->ovl_done = 1;
 	d = malloc(sizeof *d);
 	if (!d) {
@@ -1527,24 +1527,16 @@ int obj_ovl(struct object *o)
 		free(d);
 		return 0;
 	}
-	ns = d->n_str < DRAFT_MAX_STR ? d->n_str : DRAFT_MAX_STR;
 	nb = d->n_blk < DRAFT_MAX_BLKV ? d->n_blk : DRAFT_MAX_BLKV;
-	o->ovl_str = malloc((ns ? ns : 1u) * sizeof *o->ovl_str);
 	o->ovl_blk = malloc((nb ? nb : 1u) * sizeof *o->ovl_blk);
-	if (!o->ovl_str || !o->ovl_blk) {
-		free(o->ovl_str);
-		free(o->ovl_blk);
-		o->ovl_str = NULL;
+	if (!o->ovl_blk) {
 		o->ovl_blk = NULL;
 		o->ovl_done = 0;        /* no room: asked again next time */
 		free(d);
 		return 0;
 	}
-	for (i = 0; i < ns; i++)
-		o->ovl_str[i] = d->str[i];
 	for (i = 0; i < nb; i++)
 		o->ovl_blk[i] = d->blk[i];
-	o->n_ovl_str = ns;
 	o->n_ovl_blk = nb;
 	free(d);
 	return 1;
@@ -2354,8 +2346,6 @@ uint32_t draft_hash(struct kof_editor *e)
 				 * changes about it is that description. */
 				MIX((uint32_t)e->dr.shp.fsize);
 				MIX(e->dr.shp.n_region);
-			} else if (it->what == SIM_IT_STRSET) {
-				MIX(e->dr.n_str);
 			} else {
 				MIX(e->dr.n_blkv);
 			}
@@ -2875,7 +2865,7 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 	 * rule reads code without reading any of its bytes as bytes.
 	 */
 	if (!e->dr.n_decl && !draft_uses_blocks(e) && !draft_uses_sim(e, SIM_IT_SHAPE) &&
-	    !draft_uses_sim(e, SIM_IT_STRSET) && !draft_uses_sim(e, SIM_IT_BLKSET) &&
+	    !draft_uses_sim(e, SIM_IT_BLKSET) &&
 	    !draft_uses_sim(e, SIM_IT_CHAIN))
 		return "Declare a string, tick a block, or add a matcher";
 	if (!e->dr.n_grp)
@@ -3711,7 +3701,6 @@ uint32_t sim_pct_default(uint32_t what)
 	 */
 	switch (what) {
 	case SIM_IT_SHAPE:  return 70u;
-	case SIM_IT_STRSET: return 50u;
 	default:            return GRP_PCT_DEFAULT;
 	}
 }
@@ -3720,7 +3709,6 @@ const char *sim_it_word(uint32_t what)
 {
 	switch (what) {
 	case SIM_IT_SHAPE:  return "file structure";
-	case SIM_IT_STRSET: return "string similarity";
 	case SIM_IT_BLKSET: return "smart blocks";
 	case SIM_IT_CHAIN:  return "call chain";
 	default:            return "block";
@@ -3985,15 +3973,6 @@ void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g)
 			case SIM_IT_SHAPE:
 				fprintf(f, "kof_ovl_shape(ref_shape) >= %uu",
 					q->pct);
-				break;
-			/*
-			 * THE SET IT IS ABOUT IS THE HOST'S TO BUILD - see
-			 * kof_ovl_strings. The module carries only the
-			 * reference's half.
-			 */
-			case SIM_IT_STRSET:
-				fprintf(f, "kof_ovl_strings(ref_strings) "
-					">= %uu", q->pct);
 				break;
 			/*
 			 * AND THE CHAIN READS CODE WITHOUT READING ITS BYTES
@@ -5529,7 +5508,7 @@ void generate(struct kof_editor *e, int as_new)
 	 * button, but it asks the same question the button asked.
 	 */
 	if ((!e->dr.n_decl && !draft_uses_blocks(e) && !draft_uses_sim(e, SIM_IT_SHAPE) &&
-	     !draft_uses_sim(e, SIM_IT_STRSET) && !draft_uses_sim(e, SIM_IT_BLKSET)) ||
+	     !draft_uses_sim(e, SIM_IT_BLKSET)) ||
 	    !e->dr.family[0])
 		return;
 
@@ -6189,26 +6168,6 @@ have_path:
 		fprintf(f, " }\n};\n");
 	}
 	/*
-	 * THE REFERENCE'S STRINGS, if any matcher asks about them.
-	 *
-	 * Sorted, because the host merges the two sets rather than searching
-	 * one - see kof_ovl_strings_pct. They are hashes and not the text: what
-	 * is compared is which strings, never what they said, and a rule that
-	 * carried the text would carry the sample's secrets into the database.
-	 */
-	if (draft_uses_sim(e, SIM_IT_STRSET) && e->dr.n_str) {
-		uint32_t si;
-
-		fprintf(f, "\n/* The author's strings of the sample above, "
-			"after its static library was cut. */\n");
-		fprintf(f, "static const uint64_t ref_strings[] = {\n");
-		for (si = 0; si < e->dr.n_str; si++)
-			fprintf(f, "%s0x%016llxull%s", si % 3u ? " " : "\t",
-				(unsigned long long)e->dr.str[si],
-				si + 1u == e->dr.n_str ? "\n};\n"
-				: si % 3u == 2u ? ",\n" : ",");
-	}
-	/*
 	 * THE REFERENCE'S BLOCK HASHES, if any matcher asks about them.
 	 *
 	 * Sorted, like the strings and for the same reason - the host merges
@@ -6712,7 +6671,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 	/* Conditions as the other reader counts them - see
 	 * kof_plague_decl.cnd. */
 	unsigned n_if = 0;
-	int in_shape = 0, in_strs = 0, in_blkv = 0, in_chain = 0;
+	int in_shape = 0, in_blkv = 0, in_chain = 0;
 
 	if (!e || !path || !blk || !n_blk || !pool || !verdict)
 		return 0;
@@ -6734,7 +6693,6 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		*chain_level = LV_SUSPECT;
 	e->dr.chain.n = 0;
 	e->dr.has_chain = 0;
-	e->dr.n_str = 0;
 	e->dr.n_blkv = 0;
 	memset(&e->dr.shp, 0, sizeof e->dr.shp);
 	e->dr.has_shp = 0;
@@ -6969,31 +6927,6 @@ int plague_from_source(struct kof_editor *e, const char *path,
 					: GRP_PCT_DEFAULT;
 			pending |= 8u;
 		}
-		if (strstr(line, "uint64_t ref_strings[]")) {
-			in_strs = 1;
-			continue;
-		}
-		if (in_strs) {
-			const char *q = line;
-
-			while ((q = strstr(q, "0x")) != NULL) {
-				if (e->dr.n_str < DRAFT_MAX_STR)
-					e->dr.str[e->dr.n_str++] =
-						strtoull(q, NULL, 16);
-				q += 2;
-			}
-			if (strchr(line, '}'))
-				in_strs = 0;
-			continue;
-		}
-		if ((p = strstr(line, "kof_ovl_strings(")) != NULL) {
-			const char *ge = strstr(p, ">=");
-
-			if (str_pct)
-				*str_pct = ge ? (uint8_t)strtoul(ge + 2, NULL, 10)
-					      : 50u;
-			pending |= 4u;
-		}
 		if ((p = strstr(line, "kof_ovl_shape(")) != NULL) {
 			const char *ge = strstr(p, ">=");
 
@@ -7184,6 +7117,5 @@ int plague_from_source(struct kof_editor *e, const char *path,
 	*n_blk = n;
 	/* A rule may be all shape and no block, which is still a rule this
 	 * panel wrote and must be able to open. */
-	return n != 0 || e->dr.has_shp || e->dr.n_str != 0 ||
-	       e->dr.n_blkv != 0;
+	return n != 0 || e->dr.has_shp || e->dr.n_blkv != 0;
 }

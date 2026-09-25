@@ -72,7 +72,7 @@ struct kof_scanner {
 	 */
 	struct kof_plague_ctx plague;
 	/*
-	 * THIS OBJECT'S OWN STRING SET, for kof_ovl_strings.
+	 * THIS OBJECT'S OWN OVERLORD DESCRIPTOR, for kof_ovl_blocks.
 	 *
 	 * Built once per object in the same prepass the plague feed runs in,
 	 * and only when some loaded module could ask - see ovl_wanted. A
@@ -144,8 +144,8 @@ struct kof_scanner {
 	 *
 	 * The same pair of facts plague_asked and plague_hit are, for the
 	 * measures that carry a reference in the module's own rodata rather
-	 * than a declared block - kof_ovl_strings, kof_ovl_blocks,
-	 * kof_ovl_chain, kof_ovl_shape. A verdict reached through one of
+	 * than a declared block - kof_ovl_blocks, kof_ovl_chain,
+	 * kof_ovl_shape. A verdict reached through one of
 	 * those is named for it, exactly as a plague verdict is, so a reader
 	 * of the name knows what recognised the object.
 	 *

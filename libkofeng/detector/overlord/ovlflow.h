@@ -163,7 +163,7 @@ uint32_t kof_ovlf_chain_mask(const struct kof_ovlf_chain *c);
 /*
  * HOW MUCH OF A STORED CHAIN THIS REGION CARRIES, as a percentage of the
  * stored chain's length - the same shape of answer kof_ovl_shape_pct and
- * kof_ovl_strings_pct give, so the table can put it in the same column.
+ * kof_ovl_blocks_pct gives, so the table can put it in the same column.
  *
  * A HUNDRED MEANS EVERY STEP LINED UP, not that the two are the same program.
  * What else lined up, and at what cost, is kof_ovlf_align's answer, and a

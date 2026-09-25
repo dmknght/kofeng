@@ -1511,24 +1511,7 @@ struct kof_content {
 	 */
 	uint32_t (*plague_score)(const struct kof_obj_ctx *, uint32_t block_id);
 
-	/*
-	 * HOW MUCH OF A REFERENCE'S STRING SET THIS OBJECT HOLDS, 0..100.
-	 *
-	 * The set is the module's own array - see kof_ovl_strings in
-	 * kofmod/kofoverlord.h - because it is a few hundred 64-bit values and
-	 * a module's .rodata is where the rest of its constants already live.
-	 * A pointer and not an id for the same reason kof_emit takes one: the
-	 * data is the module's, and giving it an id would mean a section in the
-	 * pack, a declaration for the build to learn, and a second place for
-	 * the two to disagree.
-	 *
-	 * THE OBJECT'S OWN SET IS BUILT ONCE, before any module runs, and this
-	 * is a merge over two sorted arrays - so a rule may ask about several
-	 * references, and several rules may ask, for one pass over the bytes.
-	 */
-	uint32_t (*ovl_strings)(const struct kof_obj_ctx *,
-				const uint64_t *ref, uint32_t n_ref);
-
+	
 	/*
 	 * THE SAME QUESTION OVER BLOCK HASHES - see kof_ovl_blocks.
 	 *
@@ -1545,8 +1528,8 @@ struct kof_content {
 	 * HOW MUCH OF A REFERENCE'S CALL CHAIN THIS OBJECT CARRIES, 0..100.
 	 *
 	 * NOT BYTES AT ALL, which is why it sits beside the other two rather
-	 * than inside them. A block is a run of bytes and a string set is
-	 * content; this is what the code DOES - which capabilities it asks the
+	 * than inside them. A block is a run of bytes; this is what the code
+	 * DOES - which capabilities it asks the
 	 * system for, in which order, and which of them were handed something
 	 * an earlier one produced. A variant recompiled for another target
 	 * shares none of the first two and all of this.
@@ -2857,9 +2840,6 @@ enum kof_analyze {
  *   kof_ovl_blocks   BLOCK SET. The same windows over the WHOLE object against
  *                    a reference's whole set, anchored to nothing.
  *
- *   kof_ovl_strings  STRING SET. The printable runs, library subtracted,
- *                    hashed BY THEIR BYTES.
- *
  *   kof_ovl_chain    CALL CHAIN. What the code asks the system for, in order.
  *                    Needs a disassembly sweep, so it is the dearest.
  *
@@ -2867,23 +2847,16 @@ enum kof_analyze {
  * WHAT EACH SURVIVES, MEASURED. One object against transformations of itself,
  * and against a program with nothing in common:
  *
- *                              structure  blocks  strings
- *   whole code rebuilt              -       2%     100%     <- the recompile
- *   half the strings gone too       -       0%      47%
- *   strings base64 or hex           -       2%       0%     <- the encoder
- *   strings widened to UTF-16LE     -       -        0%        (none collected)
- *   +20% padding, any kind        83%      98%     100%     <- the padder
- *   UNRELATED, same size         100%      99%       0%     <- the control
+ *                              structure  blocks
+ *   whole code rebuilt              -       2%      <- the recompile
+ *   +20% padding, any kind        83%      98%      <- the padder
+ *   UNRELATED, same size         100%      99%      <- the control
  *
- * Read the last row first. STRUCTURE AND BLOCK COUNT DO NOT IDENTIFY: an
- * unrelated program of the same size answers 100% and 99%. They are filters,
- * and a rule that rests a verdict on either alone has written a rule about
- * file size. The string set is the one that answers 0% there.
- *
- * Read the first row second. A REBUILD FOR ANOTHER TARGET keeps almost no code
- * block and almost every string - 0.000 against 0.4 to 0.94 across
- * architectures on a real botnet corpus - so a variant hunt that asks only for
- * blocks is asking the measure that cannot see a cross-compile.
+ * Read the last row first. NEITHER OF THESE IDENTIFIES ON ITS OWN: an
+ * unrelated program of the same size answers 100% and 99%. Structure is a
+ * filter, and a rule that rests a verdict on it alone has written a rule about
+ * file size. The block set is what carries identity, and a chain is what
+ * survives the recompile that takes the blocks away.
  *
  *
  * WHEN A RULE MAY ASK, WHICH IS A CONSEQUENCE OF THE ABOVE AND NOT A POLICY:
@@ -2896,34 +2869,24 @@ enum kof_analyze {
  *   about 1.7x weaker on the 693 of them whose content is obscured than on the
  *   54 whose content is not.
  *
- *   AFTER the normaliser - the string set, and only there. It hashes bytes, so
- *   an encoded string is a different string and a widened one is not collected
- *   at all: the printable test breaks at every NUL and no run reaches the
- *   six-byte minimum. The normaliser is what turns both back into strings.
- *   Before it, this measure answers 0 about an object it would name afterwards.
+ *   AFTER the normaliser - anything whose reference was cut from a normalised
+ *   view. The transform rewrites bytes inside the code regions too, through
+ *   the library cut and the zero-run collapse, so a block set built on one
+ *   form is not the set built on the other: measured over 693 real parent and
+ *   view pairs, 71.1% of a parent's blocks survive into its own view on
+ *   malware and 93.4% on clean objects. Ask a measure on the form its
+ *   reference was written from.
  *
- *   A TRUE "SHAPE" WAS TRIED FOR THE ENCODED CASE AND DOES NOT WORK. Hashing a
- *   run by its length relative to the longest - the one feature a uniform
- *   re-encoding scales rather than destroys - scored 29% on a base64 build of
- *   the same program and 29% on a program with nothing in common. No
- *   separation. The byte hash scores 0% on the unrelated program, which is the
- *   property that makes it usable at all.
+ * A MEASURE IS FOR A KIND OF DATA, NOT FOR EVERY OBJECT.
  *
+ * The string set that used to sit here was removed for exactly this reason. It
+ * hashed printable runs by their bytes, so any encoding of the strings answered
+ * zero; and on a large statically linked binary most of what it collected was
+ * not strings at all but printable byte sequences inside machine code, which
+ * unrelated programs share. Measured at a threshold of 80, cross-family pairs
+ * reached it in 12.11% of Go ELF samples and 7.70% of C++ ones against 2.36%
+ * of plain C. A rule written on it measured the toolchain.
  *
- * THE FALSE POSITIVE IS IN THE REFERENCE, NOT IN THE MEASURE.
- *
- * The library subtraction removes what the LINKER brought in. It does not
- * remove what the author wrote and everybody else writes too - "User-Agent:
- * Mozilla/5.0", "Connection: keep-alive", "Content-Type: ...". A reference
- * built from a sample's strings without weighing them measures HTTP. Nothing
- * here scores a string for how common it is, so which strings are worth
- * carrying is judgement, and a rule inherits it. See bases/plague/billgates_00.c,
- * whose sixteen strings and sixty per cent are that judgement written down.
- *
- * The other way round is a FEATURE and not a fault: an object that reuses a
- * family's strings scores as that family, because it did reuse them. Measured,
- * an unrelated program padded with the reference's own strings answers 100% -
- * which is the correct answer to "does this carry that family's strings".
  * ============================================================================
  */
 
@@ -2941,70 +2904,6 @@ enum kof_analyze {
 #define kof_plague_score(blk)                                              \
 	((ctx)->content->plague_score((ctx), KOF_PASTE(kof_blockid_, blk)))
 
-/*
- * HOW MUCH OF A REFERENCE'S STRINGS THIS OBJECT HAS.
- *
- *     static const uint64_t ref_strings[] = { 0x..., 0x..., };
- *
- *     if (kof_ovl_strings(ref_strings) >= 50u)
- *             KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
- *
- * The strings are the printable runs of the reference's loadable regions AFTER
- * its static library was subtracted, hashed and sorted - so what is compared is
- * what its author wrote, not what the linker brought in. The generator in
- * kofviewer writes them out; nobody types them.
- *
- * LAYOUT-FREE, which is the whole reason this exists beside the block matcher.
- * A block is a run of bytes and moves when anything before it changes; a set of
- * strings does not. Measured across architectures, two builds of one botnet
- * share 0.000 of their code blocks and 0.4 to 0.94 of their strings.
- *
- * LAYOUT-FREE IS NOT ENCODING-FREE, and the difference decides where this may
- * be asked. A run is hashed BY ITS BYTES, so it is the same string when it says
- * the same thing. Measured on one object against re-encodings of itself:
- *
- *     same strings, whole code rebuilt    strings 100%, blocks   2%
- *     half the strings gone with it       strings  47%, blocks   0%
- *     strings base64-encoded              strings   0%, blocks   2%
- *     strings hex-encoded                 strings   0%, blocks   2%
- *     strings widened to UTF-16LE         strings   0%, none collected
- *
- * The first two rows are why this measure exists; the last three are its
- * limit. A widened string is not merely missed, it is never collected at all -
- * the printable test breaks at every NUL, so no run reaches the six-byte
- * minimum.
- *
- * SO A RULE ASKS THIS OF A NORMALISED OBJECT. The normaliser is what turns a
- * widened or encoded string back into a string; before it, this answers 0
- * about an object it would recognise afterwards. The block measures have no
- * such preference - they ride on code, which the normaliser does not touch -
- * so they are the ones worth asking early.
- *
- * AND IT IS NOT A SHAPE, although it was once described as one. Hashing a run
- * by its LENGTH relative to the longest - the one feature a uniform
- * re-encoding scales rather than destroys - scored 29% on a base64 build of
- * the same program and 29% on a program with nothing in common, which is no
- * separation at all. The byte hash scores 0% on the unrelated program.
- *
- * WHAT KEEPS THIS HONEST IS THE REFERENCE, AND NOTHING ELSE CHECKS IT.
- *
- * The library subtraction removes what the LINKER brought in. It does not
- * remove what the author wrote and everybody else writes too: a botnet's
- * "User-Agent: Mozilla/5.0 ...", "Connection: keep-alive", "Content-Type:
- * ..." are the author's bytes by every test this engine applies, and they are
- * also in the browser, the updater and the package manager. A reference built
- * from a sample's strings without weighing them measures HTTP, and the
- * threshold that looked safe on a malware corpus is then a threshold on how
- * much HTTP a clean object speaks.
- *
- * There is no commonality filter here and no clean-corpus check in the
- * generator: which strings are worth carrying is the researcher's judgement,
- * and the false-positive rate of a rule is a property of that judgement rather
- * than of this measure. The working reference in bases/plague/billgates_00.c
- * says as much in its own words - sixteen strings and sixty per cent, chosen
- * so that what crosses the generations is what is compared. A rule that takes
- * every string it found has not made that choice; it has skipped it.
- */
 /*
  * HOW MUCH OF A REFERENCE'S BLOCK SET THIS OBJECT HAS.
  *
@@ -3025,12 +2924,6 @@ enum kof_analyze {
 #define kof_ovl_blocks(ref)                                                \
 	((ctx)->content->ovl_blocks                                        \
 	 ? (ctx)->content->ovl_blocks((ctx), (ref),                        \
-		(uint32_t)(sizeof (ref) / sizeof (ref)[0]))                \
-	 : 0u)
-
-#define kof_ovl_strings(ref)                                               \
-	((ctx)->content->ovl_strings                                       \
-	 ? (ctx)->content->ovl_strings((ctx), (ref),                       \
 		(uint32_t)(sizeof (ref) / sizeof (ref)[0]))                \
 	 : 0u)
 

@@ -33,20 +33,6 @@
 /* FNV-1a, 64 bit. A string is kept as its hash: the sets are compared and
  * never read back, and sixty-four bits over a few hundred strings makes a
  * collision a thing that does not happen in practice. */
-static uint64_t str_hash(const uint8_t *p, uint64_t n)
-{
-	uint64_t h = 1469598103934665603ull;
-	uint64_t i;
-
-	for (i = 0; i < n; i++) {
-		h ^= p[i];
-		h *= 1099511628211ull;
-	}
-	return h;
-}
-
-static int printable(uint8_t c) { return c >= 0x20u && c < 0x7fu; }
-
 static void sort_u32(uint32_t *v, uint32_t n)
 {
 	uint32_t i, j;
@@ -70,29 +56,6 @@ static uint32_t dedup_u32(uint32_t *v, uint32_t n)
 	return w;
 }
 
-static void sort_u64(uint64_t *v, uint32_t n)
-{
-	uint32_t i, j;
-
-	for (i = 1; i < n; i++) {
-		uint64_t k = v[i];
-
-		for (j = i; j && v[j - 1] > k; j--)
-			v[j] = v[j - 1];
-		v[j] = k;
-	}
-}
-
-static uint32_t dedup_u64(uint64_t *v, uint32_t n)
-{
-	uint32_t i, w = 0;
-
-	for (i = 0; i < n; i++)
-		if (!w || v[w - 1] != v[i])
-			v[w++] = v[i];
-	return w;
-}
-
 /* Per-mille, saturating, and never dividing by zero. */
 static uint16_t permille(uint64_t a, uint64_t b)
 {
@@ -103,60 +66,6 @@ static uint16_t permille(uint64_t a, uint64_t b)
 	lo = a < b ? a : b;
 	hi = a < b ? b : a;
 	return (uint16_t)((lo * 1000u) / hi);
-}
-
-/* Jaccard of two SORTED slices, per mille. Sorted at build time so this is a
- * merge and not a set: a descriptor is compared many times and sorting once is
- * the difference between a linear pass and a hash table per comparison. */
-static uint16_t jaccard(const uint64_t *a, uint32_t na,
-			const uint64_t *b, uint32_t nb)
-{
-	uint32_t i = 0, j = 0, inter = 0, uni;
-
-	if (!na || !nb)
-		return 0;
-	while (i < na && j < nb) {
-		if (a[i] == b[j]) {
-			inter++; i++; j++;
-		} else if (a[i] < b[j]) {
-			i++;
-		} else {
-			j++;
-		}
-	}
-	uni = na + nb - inter;
-	return (uint16_t)(uni ? ((uint64_t)inter * 1000u) / uni : 0u);
-}
-
-/*
- * Collect the printable runs of one span into the pool.
- *
- * The span is already the part of the region the library does not own - see
- * kof_ovl_build - so everything found here is the author's, which is what makes
- * a later match evidence of identity rather than of a shared build.
- */
-static void collect(struct kof_ovl_desc *d, const uint8_t *p, uint64_t n)
-{
-	uint64_t i = 0;
-
-	while (i < n) {
-		uint64_t s;
-
-		if (!printable(p[i])) {
-			i++;
-			continue;
-		}
-		s = i;
-		while (i < n && printable(p[i]))
-			i++;
-		if (i - s < KOF_OVL_MIN_STRING)
-			continue;
-		if (d->n_str >= KOF_OVL_MAX_STRINGS) {
-			d->truncated = 1;
-			return;
-		}
-		d->str[d->n_str++] = str_hash(p + s, i - s);
-	}
 }
 
 int kof_ovl_build(struct kof_ovl_desc *d, kof_buf file,
@@ -211,22 +120,13 @@ int kof_ovl_build(struct kof_ovl_desc *d, kof_buf file,
 			kof_rl_subtract(&kl, lib_span, lib_n);
 		kof_rl_normalise(&kl);
 
-		r->str_off = d->n_str;
-		for (k = 0; k < kl.n; k++) {
-			collect(d, file.p + keep[k].off, keep[k].len);
-			/* And the block hashes of the same bytes - one pass
-			 * each, over the same span the library is already out
-			 * of. */
+		/* The block hashes of the span the library is already out of. */
+		for (k = 0; k < kl.n; k++)
 			if (d->n_blk < KOF_OVL_MAX_BLOCKS)
 				d->n_blk += kof_plague_hash_span(
 					file.p + keep[k].off, keep[k].len,
 					KOF_PLAGUE_RAW, d->blk + d->n_blk,
 					KOF_OVL_MAX_BLOCKS - d->n_blk);
-		}
-		sort_u64(d->str + r->str_off, d->n_str - r->str_off);
-		d->n_str = r->str_off +
-			   dedup_u64(d->str + r->str_off, d->n_str - r->str_off);
-		r->str_n = d->n_str - r->str_off;
 		d->n_region++;
 	}
 	sort_u32(d->blk, d->n_blk);
@@ -312,7 +212,7 @@ void kof_ovl_compare(const struct kof_ovl_desc *a, const struct kof_ovl_desc *b,
 		     struct kof_ovl_vec *v)
 {
 	uint8_t ia[KOF_OVL_MAX_REGIONS], ib[KOF_OVL_MAX_REGIONS];
-	uint32_t n, i, str_sum = 0, str_cnt = 0;
+	uint32_t n, i;
 	uint16_t worst = 1000;
 
 	if (!v)
@@ -358,28 +258,10 @@ void kof_ovl_compare(const struct kof_ovl_desc *a, const struct kof_ovl_desc *b,
 
 		if (s < worst)
 			worst = s;
-		/*
-		 * A region with no strings on either side did not fail to
-		 * match; there was nothing to match, and averaging a zero in
-		 * would punish a pair that agrees everywhere it can.
-		 */
-		if (ra->str_n || rb->str_n) {
-			uint16_t j = jaccard(a->str + ra->str_off, ra->str_n,
-					     b->str + rb->str_off, rb->str_n);
-
-			str_sum += j;
-			str_cnt++;
-			if (j > v->str_max)
-				v->str_max = j;
-		}
 	}
 	if (n) {
 		v->reg_size = worst;
 		v->applied |= KOF_OVL_D_REGSIZE;
-	}
-	if (str_cnt) {
-		v->str_mean = (uint16_t)(str_sum / str_cnt);
-		v->applied |= KOF_OVL_D_STRINGS;
 	}
 }
 
@@ -400,15 +282,6 @@ uint32_t kof_ovl_verdict(const struct kof_ovl_vec *v)
 
 	if (!v || !v->cls_match || !v->etype_match)
 		return KOF_OVL_NONE;
-
-	/*
-	 * STRINGS. Content, after the library was taken out. The threshold is
-	 * low because what it is over is small and entirely the author's: 0.20
-	 * of what a program wrote is a great deal of a program, while 0.20 of a
-	 * file that still had its libc in it would be the libc.
-	 */
-	if ((v->applied & KOF_OVL_D_STRINGS) && v->str_mean >= 200)
-		track |= KOF_OVL_STRINGS;
 
 	/*
 	 * STRUCTURE. No content at all, which is what lets it answer when the
@@ -440,7 +313,6 @@ uint32_t kof_ovl_verdict(const struct kof_ovl_vec *v)
 const char *kof_ovl_track_name(uint32_t track)
 {
 	switch (track) {
-	case KOF_OVL_STRINGS:   return "strings";
 	case KOF_OVL_STRUCTURE: return "structure";
 	case KOF_OVL_ANCHOR:    return "anchor";
 	default:                return track ? "mixed" : "none";
@@ -458,7 +330,7 @@ const char *kof_ovl_track_name(uint32_t track)
  *
  * CONTAINMENT AND NOT JACCARD, which is the part both callers must agree on:
  * how much of the REFERENCE is here, so a variant that added a string or grew
- * a function is still the same program. See kof_ovl_strings_pct in the header
+ * a function is still the same program. See kof_ovl_blocks_pct in the header
  * for why the other question is the wrong one.
  *
  * Both sides are sorted and deduplicated at build time - see kof_ovl_build -
@@ -486,12 +358,6 @@ static inline uint32_t contain_pct(const void *obj, uint32_t n_obj,
 		}
 	}
 	return (uint32_t)(((uint64_t)in * 100u) / n_ref);
-}
-
-uint32_t kof_ovl_strings_pct(const uint64_t *obj, uint32_t n_obj,
-			     const uint64_t *ref, uint32_t n_ref)
-{
-	return contain_pct(obj, n_obj, ref, n_ref, 1);
 }
 
 uint32_t kof_ovl_blocks_pct(const uint32_t *obj, uint32_t n_obj,
