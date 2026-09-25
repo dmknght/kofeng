@@ -542,8 +542,39 @@ void kof_plague_feed(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm
 		 * step, it credits a different set of blocks. */
 		if (at + KOF_PLAGUE_NG >= n)
 			break;
-		h -= kof_plague_byte_of(at) * drop;
-		h = h * KOF_PLAGUE_BASE + kof_plague_byte_of(at + KOF_PLAGUE_NG);
+		/*
+		 * THE NORMALIZER IS DECIDED ONCE PER WINDOW, NOT TWICE.
+		 *
+		 * kof_plague_byte is a two-branch chain on `norm`, and the two
+		 * calls below run it for every byte of every region fed - so
+		 * the rolling update asked a question that cannot change for
+		 * the whole walk, four times a window.
+		 *
+		 * GCC does not lift it: loop unswitching is an -O3 pass and
+		 * this tree builds at -O2, so the invariant test stays inside
+		 * the loop however obvious it is. Lifted by hand, it becomes
+		 * one branch the predictor gets right every time, and the two
+		 * accessors become plain loads.
+		 *
+		 * The three arms are kof_plague_byte's three cases, spelled the
+		 * same way and in the same order - see kofplague.h, which is
+		 * still the one definition of what a normalizer presents.
+		 */
+		if (norm == KOF_PLAGUE_RAW) {
+			h -= (uint32_t)p[at] * drop;
+			h = h * KOF_PLAGUE_BASE +
+			    (uint32_t)p[at + KOF_PLAGUE_NG];
+		} else if (norm == KOF_PLAGUE_XOR) {
+			h -= (uint32_t)(uint8_t)(p[at] ^ p[at + 1u]) * drop;
+			h = h * KOF_PLAGUE_BASE +
+			    (uint32_t)(uint8_t)(p[at + KOF_PLAGUE_NG] ^
+						p[at + KOF_PLAGUE_NG + 1u]);
+		} else {
+			h -= (uint32_t)(uint8_t)(p[at + 1u] - p[at]) * drop;
+			h = h * KOF_PLAGUE_BASE +
+			    (uint32_t)(uint8_t)(p[at + KOF_PLAGUE_NG + 1u] -
+						p[at + KOF_PLAGUE_NG]);
+		}
 	}
 #undef kof_plague_byte_of
 }
