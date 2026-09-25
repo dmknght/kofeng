@@ -1046,6 +1046,7 @@ struct kof_region_shape {
 };
 
 struct kof_ovlf_chain;   /* detector/overlord/ovlflow.h - see ovl_chain */
+struct kof_ovl_shape;    /* kofmod/kofoverlord.h      - see ovl_shape */
 
 struct kof_content {
 	uint8_t  (*rd8) (const struct kof_obj_ctx *, uint64_t off);
@@ -1562,6 +1563,22 @@ struct kof_content {
 	 */
 	uint32_t (*ovl_chain)(const struct kof_obj_ctx *,
 			      const struct kof_ovlf_chain *ref);
+
+	/*
+	 * THE STRUCTURE TRACK, WITH THE LIBRARY THE ENGINE ALREADY FOUND.
+	 *
+	 * A shape comparison is arithmetic over the ELF header and needs
+	 * nothing from the host - kof_ovl_shape_pct does it inline, and that
+	 * is still what runs when this is absent. What the host has and the
+	 * rule does not is WHERE THE STATIC LIBRARY IS, which a reference may
+	 * ask to have taken out of both sides. See kof_ovl_shape.lib_cut for
+	 * why that is the reference's declaration and not the engine's choice.
+	 *
+	 * Last in this struct, so a module built against the older shape of it
+	 * finds every field it knew where it left it.
+	 */
+	uint32_t (*ovl_shape)(const struct kof_obj_ctx *,
+			      const struct kof_ovl_shape *ref);
 
 	/*
 	 * THE MODULE CAN UNDO WHAT IT FOUND, AND HERE IS WHERE THE DAMAGE
@@ -2852,6 +2869,52 @@ enum kof_analyze {
  * A block is a run of bytes and moves when anything before it changes; a set of
  * strings does not. Measured across architectures, two builds of one botnet
  * share 0.000 of their code blocks and 0.4 to 0.94 of their strings.
+ *
+ * LAYOUT-FREE IS NOT ENCODING-FREE, and the difference decides where this may
+ * be asked. A run is hashed BY ITS BYTES, so it is the same string when it says
+ * the same thing. Measured on one object against re-encodings of itself:
+ *
+ *     same strings, whole code rebuilt    strings 100%, blocks   2%
+ *     half the strings gone with it       strings  47%, blocks   0%
+ *     strings base64-encoded              strings   0%, blocks   2%
+ *     strings hex-encoded                 strings   0%, blocks   2%
+ *     strings widened to UTF-16LE         strings   0%, none collected
+ *
+ * The first two rows are why this measure exists; the last three are its
+ * limit. A widened string is not merely missed, it is never collected at all -
+ * the printable test breaks at every NUL, so no run reaches the six-byte
+ * minimum.
+ *
+ * SO A RULE ASKS THIS OF A NORMALISED OBJECT. The normaliser is what turns a
+ * widened or encoded string back into a string; before it, this answers 0
+ * about an object it would recognise afterwards. The block measures have no
+ * such preference - they ride on code, which the normaliser does not touch -
+ * so they are the ones worth asking early.
+ *
+ * AND IT IS NOT A SHAPE, although it was once described as one. Hashing a run
+ * by its LENGTH relative to the longest - the one feature a uniform
+ * re-encoding scales rather than destroys - scored 29% on a base64 build of
+ * the same program and 29% on a program with nothing in common, which is no
+ * separation at all. The byte hash scores 0% on the unrelated program.
+ *
+ * WHAT KEEPS THIS HONEST IS THE REFERENCE, AND NOTHING ELSE CHECKS IT.
+ *
+ * The library subtraction removes what the LINKER brought in. It does not
+ * remove what the author wrote and everybody else writes too: a botnet's
+ * "User-Agent: Mozilla/5.0 ...", "Connection: keep-alive", "Content-Type:
+ * ..." are the author's bytes by every test this engine applies, and they are
+ * also in the browser, the updater and the package manager. A reference built
+ * from a sample's strings without weighing them measures HTTP, and the
+ * threshold that looked safe on a malware corpus is then a threshold on how
+ * much HTTP a clean object speaks.
+ *
+ * There is no commonality filter here and no clean-corpus check in the
+ * generator: which strings are worth carrying is the researcher's judgement,
+ * and the false-positive rate of a rule is a property of that judgement rather
+ * than of this measure. The working reference in bases/plague/billgates_00.c
+ * says as much in its own words - sixteen strings and sixty per cent, chosen
+ * so that what crosses the generations is what is compared. A rule that takes
+ * every string it found has not made that choice; it has skipped it.
  */
 /*
  * HOW MUCH OF A REFERENCE'S BLOCK SET THIS OBJECT HAS.

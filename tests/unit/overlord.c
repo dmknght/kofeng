@@ -154,6 +154,19 @@ static int parse_of(uint8_t *b, uint64_t n, struct kof_elf_info *e)
 	return kof_elf_parse(kof_buf_make(b, n), e, &ctx);
 }
 
+/*
+ * Build a descriptor the way the engine does: the library spans are the
+ * caller's to establish, and they are THIS object's - see kof_ovl_build.
+ */
+static int ovl_build_of(struct kof_ovl_desc *d, uint8_t *p, uint64_t n,
+			const struct kof_elf_info *e)
+{
+	struct kof_lib_result l;
+
+	kof_lib_find(kof_buf_make(p, n), e, &l);
+	return kof_ovl_build(d, kof_buf_make(p, n), e, l.span, l.n);
+}
+
 int main(void)
 {
 	struct kof_elf_info e1, e2;
@@ -198,8 +211,8 @@ int main(void)
 	a = build_elf(&na, 62, 0, 0x1111u, 0x9999u, 1);
 	b = build_elf(&nb, 62, 0, 0x7777u, 0x9999u, 1);
 	parse_of(a, na, &e1); parse_of(b, nb, &e2);
-	kof_ovl_build(d1, kof_buf_make(a, na), &e1);
-	kof_ovl_build(d2, kof_buf_make(b, nb), &e2);
+	ovl_build_of(d1, a, na, &e1);
+	ovl_build_of(d2, b, nb, &e2);
 	kof_ovl_compare(d1, d2, &v);
 	if (kof_ovl_verdict(&v) & KOF_OVL_STRINGS)
 		bad("a shared library alone made the strings track fire");
@@ -211,8 +224,8 @@ int main(void)
 	a = build_elf(&na, 62, 0, 0x1234u, 0x1111u, 1);
 	b = build_elf(&nb, 62, 0, 0x1234u, 0x8888u, 1);
 	parse_of(a, na, &e1); parse_of(b, nb, &e2);
-	kof_ovl_build(d1, kof_buf_make(a, na), &e1);
-	kof_ovl_build(d2, kof_buf_make(b, nb), &e2);
+	ovl_build_of(d1, a, na, &e1);
+	ovl_build_of(d2, b, nb, &e2);
 	kof_ovl_compare(d1, d2, &v);
 	if (!(v.applied & KOF_OVL_D_STRINGS))
 		bad("the strings dimension did not apply where both have content");
@@ -226,8 +239,8 @@ int main(void)
 	a = build_elf(&na, 62, 0, 0x0101u, 0x0202u, 0);
 	b = build_elf(&nb, 62, 0, 0xf0f0u, 0x0f0fu, 0);
 	parse_of(a, na, &e1); parse_of(b, nb, &e2);
-	kof_ovl_build(d1, kof_buf_make(a, na), &e1);
-	kof_ovl_build(d2, kof_buf_make(b, nb), &e2);
+	ovl_build_of(d1, a, na, &e1);
+	ovl_build_of(d2, b, nb, &e2);
 	kof_ovl_compare(d1, d2, &v);
 	if (!(kof_ovl_verdict(&v) & KOF_OVL_STRUCTURE))
 		bad("identical shape did not fire the structure track");
@@ -242,7 +255,7 @@ int main(void)
 	printf("\na different size is a different program:\n");
 	a = build_elf(&na, 62, 0, 0x0101u, 0x0202u, 0);
 	parse_of(a, na, &e1);
-	kof_ovl_build(d1, kof_buf_make(a, na), &e1);
+	ovl_build_of(d1, a, na, &e1);
 	/* halve the file on the descriptor's own terms */
 	d2 = memcpy(d2, d1, sizeof *d1);
 	d2->fsize = d1->fsize / 4u;
@@ -257,7 +270,7 @@ int main(void)
 	printf("\nregions pair by what they are:\n");
 	a = build_elf(&na, 62, 0, 0x2468u, 0x1357u, 0);
 	parse_of(a, na, &e1);
-	kof_ovl_build(d1, kof_buf_make(a, na), &e1);
+	ovl_build_of(d1, a, na, &e1);
 	memcpy(d2, d1, sizeof *d1);
 	/* swap the two regions in the copy: an index pairing would now compare
 	 * the executable region against the writable one and agree with nothing */
@@ -279,8 +292,8 @@ int main(void)
 	a = build_elf(&na, 62, 0, 0x1234u, 0x1111u, 0);
 	b = build_elf(&nb, 40, 0, 0x1234u, 0x1111u, 0);
 	parse_of(a, na, &e1); parse_of(b, nb, &e2);
-	kof_ovl_build(d1, kof_buf_make(a, na), &e1);
-	kof_ovl_build(d2, kof_buf_make(b, nb), &e2);
+	ovl_build_of(d1, a, na, &e1);
+	ovl_build_of(d2, b, nb, &e2);
 	kof_ovl_compare(d1, d2, &v);
 	if (v.same_arch)
 		bad("two machines were called the same architecture");
@@ -289,12 +302,68 @@ int main(void)
 	free(a); free(b);
 	free(d1); free(d2);
 
+	/*
+	 * THE STRUCTURE TRACK WITH THE LIBRARY OUT.
+	 *
+	 * Being wrong here is silent in the usual way: the cut either happens
+	 * on both sides or on neither, and a reference that disagrees with the
+	 * object about which it is compares two different quantities and simply
+	 * scores low. So the test is that the cut CHANGES the numbers, that it
+	 * says so in the reference, and that a reference which never asked for
+	 * it is measured exactly as it was before.
+	 */
+	printf("\nthe structure track, with and without the library:\n");
+	{
+		struct kof_lib_result slib;
+		struct kof_ovl_shape raw, cut;
+
+		a = build_elf(&na, 62, 0, 0x1111u, 0x2222u, 1);
+		if (!a || !parse_of(a, na, &e1)) {
+			bad("the synthetic ELF did not parse");
+		} else {
+			kof_lib_find(kof_buf_make(a, na), &e1, &slib);
+			kof_ovl_shape_of(&e1, na, &raw);
+			kof_ovl_shape_of_cut(&e1, na, slib.span, slib.n, &cut);
+
+			if (raw.lib_cut)
+				bad("an uncut shape claimed the library was out");
+			else
+				ok("an uncut shape says so");
+			if (!cut.lib_cut)
+				bad("a cut shape did not record that it was cut");
+			else
+				ok("a cut shape records it");
+			if (!slib.n)
+				bad("the markers produced no span to cut");
+			else if (cut.region_fsz[0] >= raw.region_fsz[0])
+				bad("the cut did not take anything out of the "
+				    "region the library is in");
+			else
+				ok("the library's bytes are out of the region");
+			if (cut.fsize >= raw.fsize)
+				bad("the cut did not shrink the file size");
+			else
+				ok("the file size is the author's bytes");
+			/* Same object, same question: an uncut reference must
+			 * answer exactly what it always did. */
+			if (kof_ovl_shape_cmp(&raw, &raw) != 100u)
+				bad("an object did not match its own uncut shape");
+			else
+				ok("an uncut reference is measured as before");
+			if (kof_ovl_shape_cmp(&cut, &cut) != 100u)
+				bad("an object did not match its own cut shape");
+			else
+				ok("a cut reference matches a cut object");
+			free(a);
+		}
+	}
+
 	if (fails) {
 		printf("overlord: %d check(s) failed\n", fails);
 		return 1;
 	}
 	printf("overlord: marker span, one marker is not a table, library-only vs "
 	       "author-only, structure without content, size, region pairing, "
-	       "machine - ok\n");
+	       "machine, the library cut in a shape - ok\n");
 	return 0;
 }

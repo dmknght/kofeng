@@ -160,9 +160,9 @@ static void collect(struct kof_ovl_desc *d, const uint8_t *p, uint64_t n)
 }
 
 int kof_ovl_build(struct kof_ovl_desc *d, kof_buf file,
-		  const struct kof_elf_info *e)
+		  const struct kof_elf_info *e,
+		  const struct kof_range *lib_span, uint32_t lib_n)
 {
-	struct kof_lib_result lib;
 	uint32_t si;
 
 	if (!d)
@@ -177,8 +177,6 @@ int kof_ovl_build(struct kof_ovl_desc *d, kof_buf file,
 	d->etype     = e->e_type;
 	d->machine   = e->e_machine;
 	d->anomalies = e->anomalies & OVL_DAMAGE;
-
-	kof_lib_find(file, e, &lib);
 
 	for (si = 0; si < e->seg_count && si < KOF_ELF_MAX_SEGMENTS; si++) {
 		const struct kof_elf_seg *g = &e->seg[si];
@@ -209,8 +207,8 @@ int kof_ovl_build(struct kof_ovl_desc *d, kof_buf file,
 		/* The region, minus whatever the library owns of it. */
 		kof_rl_init(&kl, keep, (uint32_t)(sizeof keep / sizeof keep[0]));
 		kof_rl_add(&kl, file.n, g->file_off, len);
-		if (lib.n)
-			kof_rl_subtract(&kl, lib.span, lib.n);
+		if (lib_n)
+			kof_rl_subtract(&kl, lib_span, lib_n);
 		kof_rl_normalise(&kl);
 
 		r->str_off = d->n_str;

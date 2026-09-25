@@ -1319,6 +1319,58 @@ struct kof_engine *kof_db_load_tables(const char *path)
 			e->mod_by_target = NULL;
 		}
 		free(fill);
+
+		/*
+		 * AND WITHIN EACH FORMAT, THE CHEAP QUESTIONS FIRST.
+		 *
+		 * The scan loop stops at the first module that reports, so the
+		 * order inside a bucket decides what a verdict costs. A module
+		 * is sorted by THE KIND OF DATA IT ASKS FOR, which is the one
+		 * thing the loader knows without running it:
+		 *
+		 *   0  neither markers nor blocks - it reads what the parse
+		 *      already established, so it needs no pass over the bytes
+		 *   1  blocks - it needs the similarity feed
+		 *   2  markers - it needs the multi-pattern sweep, the most
+		 *      expensive of the three
+		 *
+		 * Paired with the deferred passes in the scanner (see
+		 * need_multi and need_plague there), this is what makes a
+		 * structural verdict cost no sweep at all: the module that
+		 * answers first is the one that asked for least.
+		 *
+		 * STABLE WITHIN A TIER, so two modules that ask for the same
+		 * data keep the order the database gave them and a rebuild of
+		 * the same packs cannot reshuffle which of them reports.
+		 *
+		 * Best effort: without the scratch the index is simply left in
+		 * database order, which is what it was before this existed.
+		 */
+		if (e->mod_by_target && total) {
+			uint32_t *tmp = calloc(total, sizeof *tmp);
+
+			if (tmp) {
+				for (b = 0; b < KOF_TARGET_COUNT; b++) {
+					uint32_t lo = e->mod_at[b];
+					uint32_t hi = e->mod_at[b + 1u];
+					uint32_t n = 0, t, k;
+
+					for (t = 0; t < 3u; t++)
+						for (k = lo; k < hi; k++) {
+							const struct kof_module *md =
+								&e->mods[e->mod_by_target[k]];
+							uint32_t tier = md->n_str ? 2u
+								      : (md->n_block ? 1u : 0u);
+
+							if (tier == t)
+								tmp[n++] = e->mod_by_target[k];
+						}
+					for (k = 0; k < n; k++)
+						e->mod_by_target[lo + k] = tmp[k];
+				}
+				free(tmp);
+			}
+		}
 	}
 
 	/* Written once, then executable. */

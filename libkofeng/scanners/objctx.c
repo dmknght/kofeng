@@ -3548,9 +3548,19 @@ static const struct kof_ovl_desc *ovl_of(const struct kof_obj_ctx *ctx)
 		if (ctx->format == KOF_FMT_ELF && ctx->file_header) {
 			if (!sc->ovl)
 				sc->ovl = malloc(sizeof *sc->ovl);
+			/*
+			 * THE SPANS THE SCANNER ESTABLISHED, not a search of
+			 * our own - see kof_ovl_build. cur_lib_ok is false
+			 * exactly when nothing could be established, and zero
+			 * spans is the honest argument for that case.
+			 */
 			if (sc->ovl &&
 			    !kof_ovl_build(sc->ovl, mc(ctx)->data,
-					   kof_elf(ctx))) {
+					   kof_elf(ctx),
+					   sc->cur_lib_ok ? sc->cur_lib.span
+							  : NULL,
+					   sc->cur_lib_ok ? sc->cur_lib.n
+							  : 0u)) {
 				/* Nothing describable: leave it built and
 				 * empty rather than rebuilding on every ask. */
 				sc->ovl->n_str = 0;
@@ -4267,6 +4277,31 @@ static uint32_t c_ovl_blocks(const struct kof_obj_ctx *ctx,
 							n_ref));
 }
 
+/*
+ * THE STRUCTURE TRACK, with the library out of both sides when the reference
+ * asked for it - see kof_ovl_shape.lib_cut.
+ *
+ * The spans are the ones the scanner already established for this object, so
+ * this is not a fourth walk of the same bytes - see kof_scanner.cur_lib. A
+ * reference that did not ask gets exactly the arithmetic the inline does,
+ * which is what keeps every reference written before the cut existed meaning
+ * what it meant.
+ */
+static uint32_t c_ovl_shape(const struct kof_obj_ctx *ctx,
+			    const struct kof_ovl_shape *ref)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	struct kof_ovl_shape cur;
+
+	if (!ref || !kof_elf(ctx))
+		return 0;
+	if (!ref->lib_cut || !sc || !sc->cur_lib_ok)
+		return kof_ovl_shape_pct(kof_elf(ctx), ref, ctx->obj_size);
+	kof_ovl_shape_of_cut(kof_elf(ctx), ctx->obj_size,
+			     sc->cur_lib.span, sc->cur_lib.n, &cur);
+	return kof_ovl_shape_cmp(&cur, ref);
+}
+
 static const struct kof_content kof_detect_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -4276,7 +4311,7 @@ static const struct kof_content kof_detect_vtable = {
 	 * not about who is asking, and a rule that wants to know whether its
 	 * neighbours care about a format is asking a fair question. */
 	c_fmt_wanted, c_region_shape, c_region_entropy, c_entropy_at,
-	c_plague_score, c_ovl_strings, c_ovl_blocks, c_ovl_chain,
+	c_plague_score, c_ovl_strings, c_ovl_blocks, c_ovl_chain, c_ovl_shape,
 	c_cure_offer, c_cure_patch, c_cure_truncate,
 	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask
 };
@@ -4289,7 +4324,7 @@ static const struct kof_content kof_unpack_vtable = {
 	c_gather, c_name_next, c_incomplete,
 	c_unpack_entry, c_syms, c_data_xref, c_fmt_wanted, c_region_shape,
 	c_region_entropy, c_entropy_at, c_plague_score, c_ovl_strings,
-	c_ovl_blocks, c_ovl_chain, c_cure_offer, c_cure_patch,
+	c_ovl_blocks, c_ovl_chain, c_ovl_shape, c_cure_offer, c_cure_patch,
 	c_cure_truncate,
 	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask
 };

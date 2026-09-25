@@ -23,7 +23,11 @@
  *
  *   STRINGS     the printable runs of each region, after the static library is
  *               subtracted. 84.3% at zero false positives on the same corpora.
- *               This is the track that recognises a mutation.
+ *               This is the track that recognises a mutation - and the one
+ *               that must be asked of a NORMALISED object, because a run is
+ *               hashed by its bytes: measured, a base64 or hex re-encoding of
+ *               the same program scores 0 and a widened one is not collected
+ *               at all. See kof_ovl_strings in kofmod/kofsig.h.
  *
  * They overlap but neither contains the other: across independent collections,
  * 41 objects were caught only by strings and 9 only by structure. So the
@@ -171,11 +175,89 @@ struct kof_ovl_vec {
 };
 
 /*
+ * THE SAME, MINUS THE BYTES THE STATIC LIBRARY OWNS.
+ *
+ * `lib` is file-offset spans, as koflib.h produces them, and they are clamped
+ * against each region rather than summed blindly: a span that overlaps two
+ * regions belongs partly to each, and one that overlaps none belongs to
+ * neither. Overlapping spans would over-subtract, so a region never goes below
+ * zero and the file never goes below the sum of what is left.
+ *
+ * The caller establishes the spans - see koflib.h on which tier an object needs
+ * - because this header is a rule's, and a rule has no file to search.
+ */
+static inline void kof_ovl_shape_of_cut(const struct kof_elf_info *e,
+					uint64_t file_size,
+					const struct kof_range *lib,
+					uint32_t lib_n,
+					struct kof_ovl_shape *s)
+{
+	uint64_t seg_off[KOF_OVL_MAX_REGIONS];
+	uint32_t i, k, n = 0;
+
+	if (!s)
+		return;
+	kof_ovl_shape_of(e, file_size, s);
+	s->lib_cut = 1;
+	if (!lib_n || !e)
+		return;
+	/* Where each kept region began, in the same order shape_of kept them. */
+	for (i = 0; i < e->seg_count && i < KOF_ELF_MAX_SEGMENTS &&
+		    n < s->n_region; i++) {
+		const struct kof_elf_seg *g = &e->seg[i];
+
+		if (g->type != KOF_OVL_PT_LOAD || !g->file_size)
+			continue;
+		if (g->file_off >= file_size)
+			continue;
+		seg_off[n++] = g->file_off;
+	}
+	for (i = 0; i < n && i < KOF_OVL_MAX_REGIONS; i++) {
+		uint64_t beg = seg_off[i], end = beg + s->region_fsz[i];
+		uint64_t cut = 0;
+
+		for (k = 0; k < lib_n; k++) {
+			uint64_t lb = lib[k].off, le = lb + lib[k].len;
+			uint64_t a = lb > beg ? lb : beg;
+			uint64_t b = le < end ? le : end;
+
+			if (b > a)
+				cut += b - a;
+		}
+		if (cut > s->region_fsz[i])
+			cut = s->region_fsz[i];
+		s->region_fsz[i] -= cut;
+		s->fsize = s->fsize > cut ? s->fsize - cut : 0;
+	}
+}
+
+/*
  * Build a descriptor. Returns 0 when the object is not one this can describe -
  * not ELF, no loadable region - and the descriptor is zeroed and safe to read.
+ *
+ * THE LIBRARY SPANS COME FROM THE CALLER, and this is the third and last place
+ * that used to work them out for itself.
+ *
+ * It called kof_lib_find here. That is correct for an object whose headers
+ * describe its own bytes and WRONG for the one case the scanner most often
+ * hands over: a NORMALISED VIEW, whose header is the file its parent was, so
+ * the segment offsets the search walks point at bytes that have moved. The
+ * scanner already knows the answer for both - see kof_scanner.cur_lib and
+ * lib_facts, which reads a view's declared SLIB_CODE and SLIB_DATA regions
+ * rather than searching it - and the normaliser and the block builder were
+ * both moved onto that answer already. This is the walk they left behind.
+ *
+ * Measured before the change: of 1092 descriptors built over 5248 real ELF
+ * samples, 391 were built on a view - so better than a third of them subtracted
+ * a span derived from the wrong offsets.
+ *
+ * `lib_n` of zero means CUT NOTHING, and a caller that has not established the
+ * spans must pass zero rather than a guess: "no library was found" and "there
+ * is no library" are the same argument here and a wrong span is not.
  */
 int kof_ovl_build(struct kof_ovl_desc *d, kof_buf file,
-		  const struct kof_elf_info *e);
+		  const struct kof_elf_info *e,
+		  const struct kof_range *lib_span, uint32_t lib_n);
 
 /* Compare two descriptors. Symmetric; neither argument is privileged. */
 void kof_ovl_compare(const struct kof_ovl_desc *a, const struct kof_ovl_desc *b,

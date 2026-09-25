@@ -6757,17 +6757,6 @@ static uint64_t plg_side_run(const struct kof_lib_all *lib, uint64_t pos,
  * STATIC build, because on a dynamic one its span runs between strings that are
  * the program's own, and the symbol tier of everything.
  */
-static int obj_is_static(const struct kof_elf_info *e)
-{
-	uint32_t i;
-
-	if (!e)
-		return 0;
-	for (i = 0; i < e->seg_count; i++)
-		if (e->seg[i].type == 3u)       /* PT_INTERP */
-			return 0;
-	return 1;
-}
 
 static void obj_lib_find(const struct object *o, struct kof_lib_all *out)
 {
@@ -6779,10 +6768,8 @@ static void obj_lib_find(const struct object *o, struct kof_lib_all *out)
 	if (!o->buf.p || !o->buf.n)
 		return;
 	e = (const struct kof_elf_info *)o->info;
-	if (obj_is_static(e))
-		kof_lib_find_all(o->buf, e, out);
-	else
-		kof_lib_find_syms(o->buf, e, out);
+	/* One place picks the tier - see kof_lib_find_object. */
+	kof_lib_find_object(o->buf, e, out);
 }
 
 static void plg_segment(struct view *v)
@@ -15446,6 +15433,7 @@ static int sim_prepare(struct view *v, uint32_t what)
 {
 	struct object *o = cur_obj(v);
 	struct kof_ovl_desc *d;
+	struct kof_lib_all   dlib;
 	uint32_t i;
 
 	if (what == SIM_IT_BLOCK)
@@ -15483,8 +15471,22 @@ static int sim_prepare(struct view *v, uint32_t what)
 	 * kofmod/kofoverlord.h.
 	 */
 	if (what == SIM_IT_SHAPE) {
-		kof_ovl_shape_of((const struct kof_elf_info *)o->info, o->buf.n,
-				 &v->ed.dr.shp);
+		/*
+		 * WITH THE LIBRARY OUT - see kof_ovl_shape.lib_cut. A shape is
+		 * region sizes, and on a static build most of a region can be
+		 * somebody else's libc: two builds of one program that linked
+		 * different amounts of it disagree by that difference, and the
+		 * comparison takes the worst region, so the difference becomes
+		 * the answer. The cut is recorded in the reference, so a rule
+		 * written from this file is measured the same way it was
+		 * written.
+		 */
+		struct kof_lib_all slib;
+
+		obj_lib_find(o, &slib);
+		kof_ovl_shape_of_cut((const struct kof_elf_info *)o->info,
+				     o->buf.n, slib.span, slib.n,
+				     &v->ed.dr.shp);
 		v->ed.dr.has_shp = v->ed.dr.shp.n_region != 0;
 		if (!v->ed.dr.has_shp) {
 			snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
@@ -15496,14 +15498,20 @@ static int sim_prepare(struct view *v, uint32_t what)
 		return 1;
 	}
 	/*
-	 * THE LIBRARY IS ALREADY OUT of both sets. kof_ovl_build subtracts it -
-	 * see koflib.h - so what lands in the draft is what the author wrote
-	 * and not what the linker did.
+	 * THE LIBRARY IS ALREADY OUT of both sets. kof_ovl_build subtracts the
+	 * spans it is handed - see koflib.h - so what lands in the draft is
+	 * what the author wrote and not what the linker did.
+	 *
+	 * Found HERE and handed over, because the search needs an object whose
+	 * headers describe its own bytes and only this side knows that - see
+	 * the note on kof_ovl_build.
 	 */
 	d = malloc(sizeof *d);
 	if (!d)
 		return 0;
-	if (!kof_ovl_build(d, o->buf, (const struct kof_elf_info *)o->info) ||
+	obj_lib_find(o, &dlib);
+	if (!kof_ovl_build(d, o->buf, (const struct kof_elf_info *)o->info,
+			   dlib.span, dlib.n) ||
 	    (what == SIM_IT_STRSET ? !d->n_str : !d->n_blk)) {
 		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
 			 "no %s left after the library cut",
@@ -15711,8 +15719,12 @@ static void sim_recarve(struct view *v)
 		memset(&v->ed.dr.shp, 0, sizeof v->ed.dr.shp);
 		v->ed.dr.has_shp = 0;
 		if (o && o->info && o->ctx.format == KOF_FMT_ELF) {
-			kof_ovl_shape_of((const struct kof_elf_info *)o->info,
-					 o->buf.n, &v->ed.dr.shp);
+			struct kof_lib_all slib;
+
+			obj_lib_find(o, &slib);
+			kof_ovl_shape_of_cut(
+				(const struct kof_elf_info *)o->info,
+				o->buf.n, slib.span, slib.n, &v->ed.dr.shp);
 			v->ed.dr.has_shp = v->ed.dr.shp.n_region != 0;
 		}
 	}

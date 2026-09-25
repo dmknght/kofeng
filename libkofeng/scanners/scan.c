@@ -375,7 +375,7 @@ static int prefilter(const struct kof_module *m, const struct kof_obj_ctx *ctx,
  * to make it one is to have counted already. A rule may then ask about the same
  * block in any order and as often as it likes for nothing.
  */
-static void plague_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+static void plague_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			   uint32_t present, int from_packer)
 {
 	static const uint32_t all_masks[] = {
@@ -391,7 +391,8 @@ static void plague_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	if (!sc->eng->plague || !sc->plague.set)
 		return;
 	fp = kof_parser_of(ctx->format);
-	kof_plague_begin(&sc->plague);
+	/* The generation bump that used to be here is in scan_object now, where
+	 * it runs for every object rather than only for the ones that feed. */
 	b = kof_src_buf(sc->cur_src);
 	if (!b.p)
 		return;
@@ -661,6 +662,34 @@ static void multi_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			kof_multimatch_fold(e->multi, &sc->m, u, bits,
 					    sc->found, e->n_masks);
 	}
+}
+
+/*
+ * THE TWO BATCHED PASSES, ON FIRST ASK.
+ *
+ * Both were called unconditionally at the top of scan_object. They are called
+ * from the three module loops now - detectors, heuristics and unpackers - by
+ * the first module in each that declares it needs one. See the note on
+ * kof_scanner.multi_ready for what that buys and why a declaration is the
+ * right test.
+ *
+ * Idempotent and cheap to ask twice: the flag is the whole guard, so a loop
+ * can call it per module without thinking about which module came first.
+ */
+static void need_multi(struct kof_scanner *sc, struct kof_obj_ctx *ctx)
+{
+	if (sc->multi_ready)
+		return;
+	sc->multi_ready = 1;
+	multi_prepass(sc, ctx, sc->cur_present);
+}
+
+static void need_plague(struct kof_scanner *sc, struct kof_obj_ctx *ctx)
+{
+	if (sc->plague_ready)
+		return;
+	sc->plague_ready = 1;
+	plague_feed(sc, ctx, sc->cur_present, sc->cur_from_packer);
 }
 
 /* ---- naming a finding ------------------------------------------------------ */
@@ -1392,6 +1421,10 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			    !unp_is_family(sc, m, predict))
 				continue;
 			applies = 1;
+			if (m->n_str)
+				need_multi(sc, ctx);
+			if (m->n_block)
+				need_plague(sc, ctx);
 			sc->cur_mod = m;
 			{
 				uint32_t k0 = sc->n_kids;
@@ -1443,6 +1476,10 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		if (sc->broken)
 			break;          /* nothing left to spend on this tree */
 
+		if (m->n_str)
+			need_multi(sc, ctx);
+		if (m->n_block)
+			need_plague(sc, ctx);
 		sc->cur_mod = m;
 		{
 			uint32_t k0 = sc->n_kids;
@@ -1865,6 +1902,13 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		if (!prefilter(m, ctx, present, &sc->st, out))
 			continue;
 
+		/* Same as the detector loop: a rule that declared markers or
+		 * blocks is what makes the pass worth running. */
+		if (m->n_str)
+			need_multi(sc, ctx);
+		if (m->n_block)
+			need_plague(sc, ctx);
+
 		sc->rep_valid = 0;
 		/* Nothing asked yet - see scan.h. Reset beside rep_valid
 		 * because it is the same kind of thing: what THIS module
@@ -2158,17 +2202,6 @@ static void norm_keep_bits(uint8_t *keep, uint64_t n,
  * beside this file, and the symbol tier - which claims exactly what a symbol
  * covers and nothing between symbols - is asked always.
  */
-static int lib_is_static(const struct kof_elf_info *e)
-{
-	uint32_t i;
-
-	if (!e)
-		return 0;
-	for (i = 0; i < e->seg_count; i++)
-		if (e->seg[i].type == 3u)       /* PT_INTERP */
-			return 0;
-	return 1;
-}
 
 static void lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		      kof_buf buf)
@@ -2217,10 +2250,9 @@ static void lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		return;
 	if (!buf.p || !buf.n)
 		return;
-	if (lib_is_static(kof_elf(ctx)))
-		kof_lib_find_all(buf, kof_elf(ctx), &sc->cur_lib);
-	else
-		kof_lib_find_syms(buf, kof_elf(ctx), &sc->cur_lib);
+	/* Which tier the object needs is the object's question, answered in one
+	 * place - see kof_lib_find_object. */
+	kof_lib_find_object(buf, kof_elf(ctx), &sc->cur_lib);
 	sc->cur_lib_ok = 1;
 }
 
@@ -3025,6 +3057,25 @@ struct analyze_arg {
 	uint32_t                         pdepth;
 	uint32_t                         want;
 	const char                      *predict;
+	/*
+	 * HOW MANY OF out->v A DETECTOR PUT THERE, counted before the
+	 * heuristics ran.
+	 *
+	 * Not out->n, and the difference is the whole reason this field exists.
+	 * By the time this struct is filled the rule heuristics have appended
+	 * their own findings, and a rule heuristic is not a verdict that the
+	 * object has been identified - it is usually the opposite, "I could not
+	 * identify this", which is exactly the object whose remaining steps
+	 * matter most. Stopping on one measured six samples where the parent
+	 * said Heur:Truncated and the payload one layer down said Botnet:Mirai:
+	 * the chain would have ended on the weaker of the two statements and
+	 * deleted the stronger.
+	 *
+	 * Whether a heuristic MAY stop the chain is a question for the rule
+	 * that wrote it rather than for the engine - see enum kof_eng_want,
+	 * which has no word for it yet. Until it does, only a detector counts.
+	 */
+	uint32_t                         det_n;
 };
 
 static void step_open(struct analyze_arg *a)
@@ -3054,6 +3105,35 @@ static void analyze_object(struct analyze_arg *a)
 	for (i = 0; i < sizeof analyze_steps / sizeof analyze_steps[0]; i++) {
 		uint32_t kids0 = a->sc->n_kids;
 		uint32_t carved0 = a->sc->n_carved;
+
+		/*
+		 * AND A DETECTION STOPS THE CHAIN, for the same reason a
+		 * produced child does: the question the later steps exist to
+		 * answer has been answered.
+		 *
+		 * ANALYSIS IS NOT SKIPPED - IT IS ENDED. The step that had not
+		 * run yet is the one that does not run; everything up to and
+		 * including the step that led here still ran, and the verdict
+		 * still rests on a parse rather than on a guess about one. That
+		 * is the difference between this and asking the detectors first
+		 * and the analysers never.
+		 *
+		 * WHAT IT COSTS, MEASURED. Over 5248 real ELF samples, 1341 of
+		 * which were detected: 1092 files carry a detector's verdict on
+		 * a parent, and stopping there loses a differently-named
+		 * descendant in 6 of them - 6 objects out of 3023. Four of the
+		 * six are the same family under a second signature id; two name
+		 * another family. Every one of the six is a NORMALISED VIEW and
+		 * not an unpacked payload, which is the weakest thing the chain
+		 * produces: a view is a rendering of bytes already searched, and
+		 * 852 of the 858 views that reported were repeating a name their
+		 * parent had already been given.
+		 *
+		 * ONLY WITH all_matches OFF. A caller that asked for every
+		 * finding has said that the first one is not the answer.
+		 */
+		if (a->det_n && !a->opt->all_matches)
+			return;
 
 		analyze_steps[i].run(a);
 		/*
@@ -3107,6 +3187,7 @@ static void analyze_object(struct analyze_arg *a)
 		 */
 		if (a->opt->should_stop && a->opt->should_stop(a->opt->stop_user))
 			return;
+
 	}
 }
 
@@ -3117,7 +3198,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 			const char *inherit_predict, uint8_t as_fmt)
 {
 	struct kof_obj_ctx ctx;
-	uint32_t present, want;
+	uint32_t present, want, det_n;
 	const char *predict = NULL;
 
 	out->from_packer = (uint8_t)(from_packer != 0);
@@ -3205,25 +3286,36 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	sc->st.objects++;
 	sc->st.object_bytes += buf.n;
 
-	/* Before any module: one pass per region worth one, filling the memo the
-	 * modules' own calls are about to read. */
-	multi_prepass(sc, &ctx, present);
+	/*
+	 * NOT HERE ANY MORE - the first module that declares a marker asks for
+	 * it, and one that ends the object without declaring any never does.
+	 * See kof_scanner.multi_ready for why, and need_multi for how.
+	 */
+	sc->multi_ready  = 0;
+	sc->plague_ready = 0;
+	sc->cur_present  = present;
+	sc->cur_from_packer = (uint8_t)(from_packer != 0);
 
 	/*
 	 * And the same for similarity: every block any loaded rule declared is
-	 * counted here, once, so a module's kof_plague_score is a division.
+	 * counted once, so a module's kof_plague_score is a division - but on
+	 * the first ask rather than here, for the reason above.
 	 *
-	 * Gated twice on purpose. The set is NULL unless some pack carried a
-	 * block, so a database without plague rules never reaches this. And
-	 * within it, a region is fed only for the normalizers some block of
-	 * that region actually asked for - a pack whose blocks all hash raw
-	 * bytes pays one pass, not three.
+	 * Gated twice on purpose, and both gates still apply inside the feed.
+	 * The set is NULL unless some pack carried a block, so a database
+	 * without plague rules never reaches this. And within it, a region is
+	 * fed only for the normalizers some block of that region actually asked
+	 * for - a pack whose blocks all hash raw bytes pays one pass, not three.
+	 *
+	 * THE GENERATION BUMP IS NOT DEFERRED WITH THE FEED. It is O(1) - see
+	 * kof_plague_begin - and it is what makes "this object fed nothing" read
+	 * as nothing rather than as whatever the last object fed.
 	 */
-	plague_prepass(sc, &ctx, present, from_packer);
+	kof_plague_begin(&sc->plague);
 	/*
 	 * THIS OBJECT'S STRING SET IS NOT THE LAST ONE'S.
 	 *
-	 * Here and not inside plague_prepass, which returns early when no pack
+	 * Here and not inside plague_feed, which returns early when no pack
 	 * carried a block: a database with no plague rules would then have left
 	 * the previous object's set in place, and every kof_ovl_strings rule
 	 * would have measured the wrong file. Built on the first ask - see
@@ -3284,6 +3376,13 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 
 		if (!prefilter(m, &ctx, present, &sc->st, out))
 			continue;
+
+		/* What this module declared it reads, produced now that a
+		 * module needing it has actually survived the prefilter. */
+		if (m->n_str)
+			need_multi(sc, &ctx);
+		if (m->n_block)
+			need_plague(sc, &ctx);
 
 		sc->rep_valid = 0;
 		/* Nothing asked yet - see scan.h. Reset beside rep_valid
@@ -3371,6 +3470,14 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	}
 	}
 
+	/*
+	 * WHAT THE DETECTORS ALONE FOUND, taken here because this is the last
+	 * moment at which it is still true: heur_run appends below, and once it
+	 * has, nothing downstream can tell a rule's guess from a detection. See
+	 * analyze_arg.det_n for what reads it and why the distinction matters.
+	 */
+	det_n = out->n;
+
 	/* Before the next kof_match_begin clears them. */
 	sc->st.searches       += sc->m.n_calls;
 	sc->st.bytes_searched += sc->m.n_bytes_scanned;
@@ -3404,6 +3511,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 		a.sc = sc; a.ctx = &ctx; a.opt = opt; a.out = out;
 		a.buf = buf; a.pdepth = pdepth; a.want = want;
 		a.predict = predict;
+		a.det_n = det_n;
 		analyze_object(&a);
 	}
 	/*

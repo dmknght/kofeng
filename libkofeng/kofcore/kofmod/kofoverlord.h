@@ -68,6 +68,27 @@ struct kof_ovl_shape {
 	uint8_t  end;         /* KOF_ELFDATA_*   */
 	uint8_t  n_region;
 	uint8_t  region_x[KOF_OVL_MAX_REGIONS];   /* executable? */
+	/*
+	 * WHETHER THESE NUMBERS HAVE THE STATIC LIBRARY TAKEN OUT.
+	 *
+	 * A shape is region sizes, and on a static build the library is part of
+	 * every one of them. Measured over 5248 real ELF samples, 5055 of which
+	 * are static: the library is 7.2% of loadable bytes on average and 20%
+	 * or more in 474 of them. Two builds of one program that linked
+	 * different amounts of libc then disagree about their region sizes by
+	 * the libc delta - and the comparison takes the WORST region, so that
+	 * delta is the answer rather than a contribution to it.
+	 *
+	 * DECLARED BY THE REFERENCE AND NOT DECIDED BY THE ENGINE, because a
+	 * reference is data somebody already wrote down: one generated before
+	 * this existed holds library-inclusive numbers, and measuring the
+	 * object with the library out would compare two different quantities.
+	 * Zero is that case and it is what a designated initialiser leaves
+	 * behind, so every reference written so far keeps the meaning it had.
+	 *
+	 * The generator sets it. See kof_ovl_shape_of_cut.
+	 */
+	uint8_t  lib_cut;
 };
 
 /* ELF's own value for a loadable segment. */
@@ -136,16 +157,20 @@ static inline void kof_ovl_shape_of(const struct kof_elf_info *e,
  * either side has no loadable region, which is the same answer as "nothing
  * agreed" and is one a rule must not try to tell apart.
  */
-static inline uint32_t kof_ovl_shape_pct(const struct kof_elf_info *e,
-					 const struct kof_ovl_shape *s,
-					 uint64_t file_size)
+/*
+ * Compare two shapes already built. Split out of kof_ovl_shape_pct so the
+ * engine can hand over an object shape it built with the library taken out -
+ * see kof_ovl_shape_of_cut - without a second spelling of the comparison.
+ */
+static inline uint32_t kof_ovl_shape_cmp(const struct kof_ovl_shape *cur_in,
+					 const struct kof_ovl_shape *s)
 {
 	struct kof_ovl_shape cur;
 	uint32_t worst, i, j, pass, paired = 0;
 
-	if (!e || !s || !s->n_region)
+	if (!cur_in || !s || !s->n_region)
 		return 0;
-	kof_ovl_shape_of(e, file_size, &cur);
+	cur = *cur_in;
 	if (!cur.n_region || cur.n_region != s->n_region)
 		return 0;
 	if (cur.cls != s->cls || cur.end != s->end || cur.etype != s->etype)
@@ -198,6 +223,18 @@ static inline uint32_t kof_ovl_shape_pct(const struct kof_elf_info *e,
 	return worst > 100u ? 100u : worst;
 }
 
+static inline uint32_t kof_ovl_shape_pct(const struct kof_elf_info *e,
+					 const struct kof_ovl_shape *s,
+					 uint64_t file_size)
+{
+	struct kof_ovl_shape cur;
+
+	if (!e)
+		return 0;
+	kof_ovl_shape_of(e, file_size, &cur);
+	return kof_ovl_shape_cmp(&cur, s);
+}
+
 /*
  * The rule-facing spelling, so a module reads like the plague one beside it:
  *
@@ -209,7 +246,16 @@ static inline uint32_t kof_ovl_shape_pct(const struct kof_elf_info *e,
  * that it is the same family. A Mirai-derived builder that produced a coinminer
  * is a true shape match and a false family name.
  */
-#define kof_ovl_shape(ref) kof_ovl_shape_pct(kof_elf(ctx), &(ref), (ctx)->obj_size)
+/*
+ * THE HOST ANSWERS IT WHEN IT CAN, because only the host knows where the static
+ * library is - see kof_ovl_shape.lib_cut. The inline is the fallback and is
+ * what a reference that did not ask for the cut gets either way, so the two
+ * paths agree on every reference written before the cut existed.
+ */
+#define kof_ovl_shape(ref)                                                 \
+	((ctx)->content->ovl_shape                                         \
+	 ? (ctx)->content->ovl_shape((ctx), &(ref))                        \
+	 : kof_ovl_shape_pct(kof_elf(ctx), &(ref), (ctx)->obj_size))
 
 /*
  * A CALL CHAIN, AS SOMETHING A RULE CAN CARRY.

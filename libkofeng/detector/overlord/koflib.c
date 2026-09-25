@@ -693,6 +693,33 @@ void kof_lib_find_all(kof_buf file, const struct kof_elf_info *e,
 	lib_find_tiered(file, e, out, 1);
 }
 
+/* PT_INTERP is 3. A file the loader has to fill in is not a static build. */
+static int lib_object_is_static(const struct kof_elf_info *e)
+{
+	uint32_t i;
+
+	if (!e)
+		return 0;
+	for (i = 0; i < e->seg_count; i++)
+		if (e->seg[i].type == 3u)
+			return 0;
+	return 1;
+}
+
+void kof_lib_find_object(kof_buf file, const struct kof_elf_info *e,
+			 struct kof_lib_all *out)
+{
+	if (!out)
+		return;
+	memset(out, 0, sizeof *out);
+	if (!e || !file.p || !file.n)
+		return;
+	if (lib_object_is_static(e))
+		kof_lib_find_all(file, e, out);
+	else
+		kof_lib_find_syms(file, e, out);
+}
+
 void kof_lib_find_syms(kof_buf file, const struct kof_elf_info *e,
 		       struct kof_lib_all *out)
 {

@@ -116,6 +116,25 @@ void kof_lib_find_syms(kof_buf file, const struct kof_elf_info *e,
 		       struct kof_lib_all *out);
 
 /*
+ * THE CHOICE BETWEEN THE TWO ABOVE, MADE ONCE.
+ *
+ * Which tier is right is a property of the OBJECT and not of the caller: the
+ * marker span runs from a segment's first library string to its last, which is
+ * one run in a static build and, in a dynamic one, a seven-megabyte "library"
+ * across a program's own code - the failure kof_lib_find_syms exists for. So
+ * the test is PT_INTERP and the answer follows from it.
+ *
+ * It was written out three times - the scanner, the viewer and the draft
+ * builder each had their own copy of the same loop over the same segment type -
+ * which is three places for a fourth tier, or a fix to the test, to be applied
+ * twice and forgotten once. Callers that want the object's library spans ask
+ * here; the two entry points above remain for a caller that has already decided,
+ * which is what the reference generator and the tests are.
+ */
+void kof_lib_find_object(kof_buf file, const struct kof_elf_info *e,
+			 struct kof_lib_all *out);
+
+/*
  * Whether the [va, va+size) a SYMBOL covers falls in what was found.
  *
  * For a caller holding symbols rather than file offsets, so that translating an

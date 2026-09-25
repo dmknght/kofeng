@@ -1506,6 +1506,7 @@ uint8_t obj_emu_why(const struct object *o)
 int obj_ovl(struct object *o)
 {
 	struct kof_ovl_desc *d;
+	struct kof_lib_all   olib;
 	uint32_t i, ns, nb;
 
 	if (!o || !o->info || o->ctx.format != KOF_FMT_ELF)
@@ -1518,7 +1519,11 @@ int obj_ovl(struct object *o)
 		o->ovl_done = 0;
 		return 0;
 	}
-	if (!kof_ovl_build(d, o->buf, (const struct kof_elf_info *)o->info)) {
+	/* The spans this object's library owns, established here and handed
+	 * over rather than searched for inside - see kof_ovl_build. */
+	kof_lib_find_object(o->buf, (const struct kof_elf_info *)o->info, &olib);
+	if (!kof_ovl_build(d, o->buf, (const struct kof_elf_info *)o->info,
+			   olib.span, olib.n)) {
 		free(d);
 		return 0;
 	}
@@ -3715,7 +3720,7 @@ const char *sim_it_word(uint32_t what)
 {
 	switch (what) {
 	case SIM_IT_SHAPE:  return "file structure";
-	case SIM_IT_STRSET: return "string shape";
+	case SIM_IT_STRSET: return "string similarity";
 	case SIM_IT_BLKSET: return "smart blocks";
 	case SIM_IT_CHAIN:  return "call chain";
 	default:            return "block";
@@ -6169,6 +6174,11 @@ have_path:
 		fprintf(f, "\t.cls      = %uu,\n", sh->cls);
 		fprintf(f, "\t.end      = %uu,\n", sh->end);
 		fprintf(f, "\t.n_region = %uu,\n", sh->n_region);
+		/* What these numbers ARE, written down beside them - see
+		 * kof_ovl_shape.lib_cut. Without it the engine would compare a
+		 * library-free reference against a library-inclusive object. */
+		if (sh->lib_cut)
+			fprintf(f, "\t.lib_cut  = 1u,\n");
 		fprintf(f, "\t.region_fsz = {");
 		for (ri = 0; ri < sh->n_region && ri < KOF_OVL_MAX_REGIONS; ri++)
 			fprintf(f, "%s %lluull", ri ? "," : "",
@@ -6894,6 +6904,12 @@ int plague_from_source(struct kof_editor *e, const char *path,
 					strtoul(strchr(q, '=') + 1, NULL, 0);
 			else if ((q = strstr(line, ".n_region")) != NULL)
 				e->dr.shp.n_region = (uint8_t)
+					strtoul(strchr(q, '=') + 1, NULL, 0);
+			/* Read back, so reopening a draft does not quietly turn
+			 * a library-free reference into a library-inclusive
+			 * one - see kof_ovl_shape.lib_cut. */
+			else if ((q = strstr(line, ".lib_cut")) != NULL)
+				e->dr.shp.lib_cut = (uint8_t)
 					strtoul(strchr(q, '=') + 1, NULL, 0);
 			else if ((q = strstr(line, ".region_fsz")) != NULL) {
 				const char *r = strchr(q, '{');

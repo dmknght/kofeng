@@ -704,6 +704,36 @@ static inline int grp_is_at(int rule) { return rule == 3; }
  * builds of one botnet share 0.000 of their code blocks and 0.4 to 0.94 of
  * their strings - so this is the measure that survives a recompile for another
  * target, and the block is the one that is exact.
+ *
+ * SIMILARITY AND NOT SHAPE, which is what this was called. The run is hashed
+ * BY ITS BYTES, so two strings are the same string when they say the same
+ * thing and not when they are built the same way. The distinction is not
+ * pedantry - it is the whole of when this measure works:
+ *
+ *   same strings, whole code rebuilt    strings 100%, blocks   2%
+ *   half the strings gone with it       strings  47%, blocks   0%
+ *   strings base64-encoded              strings   0%, blocks   2%
+ *   strings hex-encoded                 strings   0%, blocks   2%
+ *   strings widened to UTF-16LE         strings   0%, nothing collected
+ *
+ * A TRUE SHAPE WAS TRIED AND DOES NOT WORK. Hashing a run's length as a
+ * fraction of the longest, which is the one feature a uniform re-encoding
+ * scales rather than destroys, scored 29% on a base64 build of the same
+ * program - and 29% on a program with nothing in common. It cannot tell them
+ * apart. Adding a character-class profile made it worse. The byte hash scores
+ * 0% on the unrelated program, which is the property that makes it usable.
+ *
+ * SO IT BELONGS AFTER THE NORMALISER AND NOWHERE ELSE. Encoded strings are
+ * invisible to it and widened ones are not even collected - printable() breaks
+ * at every NUL, so no run reaches the six-byte minimum. The normaliser is what
+ * turns both back into strings; before it, this measure answers 0 about an
+ * object it would recognise afterwards.
+ *
+ * AND THE TICK LIST IS WHERE THE FALSE POSITIVES ARE DECIDED. The library cut
+ * removes the linker's strings, not the common ones the author wrote: a
+ * sample full of User-Agent headers and HTTP verbs offers a reference that
+ * matches every program that speaks HTTP. Nothing here scores a string for how
+ * common it is, so picking them is judgement and the rule inherits it.
  */
 #define SIM_IT_STRSET 2u
 /*

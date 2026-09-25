@@ -89,6 +89,46 @@ struct kof_scanner {
 	struct kof_flow_set *fchain;
 	int                  ovl_ready;
 	int                  fchain_ready;
+
+	/*
+	 * AND THE TWO BATCHED PASSES, ON THE SAME TERMS AS THE TWO ABOVE.
+	 *
+	 * The multi-pattern sweep and the similarity feed used to run at the
+	 * top of scan_object for every object, before the first module was
+	 * asked anything. That is the right cost when the modules that need
+	 * them are going to run - and the wrong one the moment anything can
+	 * end the scan of an object early, because the most expensive work was
+	 * already done by then and no verdict could ever avoid it.
+	 *
+	 * So they are demand-driven now, like the overlord descriptor and the
+	 * call chains: the first module that DECLARES markers pays for the
+	 * sweep, the first that declares blocks pays for the feed, and an
+	 * object whose verdict came from a module declaring neither pays for
+	 * neither. Measured on 5248 real ELF samples, 167 objects reached the
+	 * end of the module loop with no marker-carrying detector surviving the
+	 * prefilter at all: 25 MB swept for nobody.
+	 *
+	 * WHAT A MODULE DECLARES IS THE TEST, not what it does, because that is
+	 * the thing the loader knows without running anything - see
+	 * kof_module.n_str and n_block. A module with no markers has nothing to
+	 * look up: the sweep sizes its own tables from exactly this count (see
+	 * multi_prepass), so a module that could search without declaring would
+	 * already be mis-sized today.
+	 *
+	 * Reset per object beside every other per-object fact. kof_plague_begin
+	 * is NOT deferred with the feed - it is a generation bump, O(1), and
+	 * leaving it eager is what keeps a block from reading the last object's
+	 * answer when this object never fed anything.
+	 */
+	int                  multi_ready;
+	int                  plague_ready;
+	/* What regions this object has, worked out once in scan_object and kept
+	 * because the deferred passes above need it at a point where only the
+	 * scanner is still in scope. */
+	uint32_t             cur_present;
+	/* And whether this object came out of a packer, which the feed reads
+	 * for the same reason and cannot recover on its own. */
+	uint8_t              cur_from_packer;
 	/*
 	 * THE HEURISTIC LEVEL THIS SCAN ASKED FOR, as kof_scan_option spells
 	 * it: 0 when heuristics are off, otherwise 1 and up.
