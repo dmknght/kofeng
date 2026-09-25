@@ -1057,10 +1057,31 @@ static int dump_fail(char *err, uint32_t cap, const char *what, const char *at)
 	return 0;
 }
 
+/*
+ * EVERY FILE A DUMP WRITES IS OPENED THROUGH kof_fopen_trunc, AND NOT fopen.
+ *
+ * The dump directory's name is derived from the sample's own - see
+ * kof_dump_dir_for - so every path under it is predictable by whoever put the
+ * sample there, and a sample is routinely examined where it was found: an
+ * extracted archive, a shared drop directory, somebody else's tree. fopen(,"wb")
+ * follows a symlink and takes its mode from the umask, so a planted
+ * "_sample_dump/01.KOF_SCAN_ELF_CODE" pointing elsewhere makes the dumper write
+ * the sample's bytes through it.
+ *
+ * kof_fopen_trunc is O_CREAT|O_TRUNC|O_NOFOLLOW at 0600 - the same create-or-
+ * truncate this had, refusing the link, and not readable by the rest of the
+ * machine. It is what kofevt_log_create already uses, for a file that is also
+ * rewritten on purpose; kof_fopen_new is the wrong one here, because re-dumping
+ * a sample must overwrite the last dump rather than fail.
+ *
+ * On Windows the LAYOUT file below loses its CRLF translation with the mode
+ * change, which is the whole cost: it is written LF-only, like every other text
+ * this toolset emits.
+ */
 static int dump_write(const char *path, const void *bytes, uint64_t len,
 		      char *err, uint32_t err_cap)
 {
-	FILE *f = fopen(path, "wb");
+	FILE *f = kof_fopen_trunc(path);
 
 	if (!f)
 		return dump_fail(err, err_cap, "cannot write", path);
@@ -1138,7 +1159,7 @@ static int dump_layout(const char *dir, const struct kof_parser *f,
 
 	if ((size_t)snprintf(path, sizeof path, "%s/LAYOUT", dir) >= sizeof path)
 		return dump_fail(err, err_cap, "path too long under", dir);
-	out = fopen(path, "w");
+	out = kof_fopen_trunc(path);   /* see dump_write */
 	if (!out)
 		return dump_fail(err, err_cap, "cannot write", path);
 	fprintf(out, "%-12s %-12s %s\n", "offset", "length", "region");
@@ -1171,16 +1192,43 @@ static int dump_region(const char *dir, uint32_t rank, const char *region,
 	if ((size_t)snprintf(name, sizeof name, "%s/%02u.%s", dir, rank, region)
 	    >= sizeof name)
 		return dump_fail(err, err_cap, "path too long under", dir);
-	f = fopen(name, "wb");
+	f = kof_fopen_trunc(name);     /* see dump_write */
 	if (!f)
 		return dump_fail(err, err_cap, "cannot write", name);
 	for (i = 0; i < n; i++) {
-		if (fwrite(buf.p + ext[i].off, 1, (size_t)ext[i].len, f)
-		    != (size_t)ext[i].len) {
+		/*
+		 * CLIPPED TO THE OBJECT, because an extent is not a promise.
+		 *
+		 * resolve_scan is a FUNCTION POINTER, and the thing behind it
+		 * is not always a format parser that bounded its own answer.
+		 * kof_declared_regions is one of the producers - it copies the
+		 * off/len an unpacked child DECLARED, and it is handed no
+		 * object size to check them against - so an extent arriving
+		 * here can run past the bytes it claims to describe.
+		 *
+		 * Unclipped, this fwrite reads whatever follows the object in
+		 * memory and writes it into a file on disk: a crash on the good
+		 * day, and somebody else's heap in the dump on the bad one.
+		 *
+		 * This is the engine's own rule and not a new one. match_ranges
+		 * clips every extent before searching it and says why: "an
+		 * extent is produced by a format collector and describes the
+		 * object it was parsed from, so it should already fit - but the
+		 * two ad-hoc entry points do not trust that either."
+		 * kof_inspect_region_entropy, in this file, clips for the same
+		 * reason. This was the one reader that took the length on
+		 * trust.
+		 */
+		uint64_t len = kof_clip_len(buf.n, ext[i].off, ext[i].len);
+
+		if (!len)
+			continue;
+		if (fwrite(buf.p + ext[i].off, 1, (size_t)len, f)
+		    != (size_t)len) {
 			fclose(f);
 			return dump_fail(err, err_cap, "short write to", name);
 		}
-		*out_len += ext[i].len;
+		*out_len += len;
 	}
 	if (fclose(f) != 0)
 		return dump_fail(err, err_cap, "cannot write", name);

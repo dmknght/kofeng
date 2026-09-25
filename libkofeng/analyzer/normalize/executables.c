@@ -296,6 +296,32 @@ static int unb64_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		uint8_t  before;
 		int      piped = 0;
 
+		/*
+		 * SKIP TO THE NEXT 'b' RATHER THAN ASK AT EVERY BYTE.
+		 *
+		 * b64_anchor_at begins with memcmp(p + i, "base64 -", 8), so a
+		 * position whose byte is not 'b' cannot match - and this loop
+		 * was asking it once per byte of every executable scanned.
+		 * Measured with callgrind over 120 system binaries (109 MB):
+		 * unb64_range was 728 million instructions, almost all of it
+		 * this test failing on its first byte.
+		 *
+		 * memchr is the same question asked of a whole cache line at a
+		 * time - glibc's is SIMD - and 'b' is about one byte in 256 of
+		 * binary, so one scan replaces a couple of hundred memcmps.
+		 * Nothing is skipped that could have matched: every position
+		 * passed over holds a byte that is not 'b'.
+		 */
+		if (p[i] != 'b') {
+			const uint8_t *hit = memchr(p + i, 'b',
+						    (size_t)(to - i));
+
+			if (!hit)
+				break;
+			i = (uint64_t)(hit - p);
+			if (i + 8u >= to)
+				break;
+		}
 		if (!b64_anchor_at(p, n, i))
 			continue;
 
@@ -540,6 +566,28 @@ uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
 	uint64_t i = 0, o = 0, lim = 0;
 	uint32_t q = 0, did = 0;
 	int changed = 0;
+	/*
+	 * THE NEXT BOUNDARY, HELD IN A REGISTER.
+	 *
+	 * The test for it runs once per byte of every executable scanned, and
+	 * it was four: `q < n_mark`, `mark`, `mark_out`, and a LOAD of
+	 * mark[q]. Two of those are loop-invariant - whether the caller asked
+	 * for boundaries at all does not change while the walk runs - and the
+	 * load was re-reading a value that only moves when a boundary is
+	 * passed, which is at most n_mark times in the whole walk.
+	 *
+	 * Measured with callgrind over 120 system binaries (109 MB): that one
+	 * line was 470 million instructions, 3.87% of the entire scan and the
+	 * single most expensive line in the engine.
+	 *
+	 * So the invariants are decided once and the next boundary is kept
+	 * here: the per-byte question becomes `i >= next_mark`, one compare
+	 * against a register. KOF_NO_MARK is past any offset an object can
+	 * have, so the test is simply false once the last boundary is passed.
+	 */
+	const uint64_t *mk = (mark && mark_out) ? mark : NULL;
+	uint32_t nm = mk ? n_mark : 0u;
+	uint64_t next_mark;
 
 	if (fired)
 		*fired = 0;
@@ -547,11 +595,55 @@ uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
 	if (!in || !out || !n || cap < n)
 		return 0;
 
+	next_mark = q < nm ? mk[q] : ~(uint64_t)0;
+
 	while (i < n) {
 		uint64_t k;
 
-		while (q < n_mark && mark && mark_out && mark[q] <= i)
+		while (i >= next_mark) {
 			mark_out[q++] = o;
+			next_mark = q < nm ? mk[q] : ~(uint64_t)0;
+		}
+
+		/*
+		 * A RUN THAT IS ENTIRELY KEPT COPIES WHOLE.
+		 *
+		 * The map says CODE is kept, and CODE is not a scattering of
+		 * bytes - it is megabytes in one piece, so the keep map over it
+		 * is a long row of 0xff. Every one of those bytes reached the
+		 * same place by the same road: keep_at says kept, so copy one
+		 * byte and go round again. That made keep_at the most expensive
+		 * line left in this function - 891 million instructions, 43% of
+		 * it, measured over 120 system binaries - to decide something
+		 * eight bytes at a time already knew.
+		 *
+		 * So whole 0xff bytes of the map are counted first and the run
+		 * they cover is one memcpy. The conditions are what make it the
+		 * SAME answer: `drop` must be absent, because a dropped byte is
+		 * removed rather than copied and this copies; the run stops at
+		 * the next boundary, so mark_out still records the offset that
+		 * boundary actually landed on; and it starts on a map byte so
+		 * that 0xff means all eight.
+		 *
+		 * `o <= i` throughout - every branch writes at most what it
+		 * consumes - so out has room for the copy by the cap test at
+		 * the top.
+		 */
+		if (keep && !drop && (i & 7u) == 0u) {
+			uint64_t run = 0, left = n - i;
+
+			while (run + 8u <= left &&
+			       keep[(i + run) >> 3] == 0xffu)
+				run += 8u;
+			if (next_mark - i < run)
+				run = next_mark - i;
+			if (run) {
+				memcpy(out + o, in + i, (size_t)run);
+				o += run;
+				i += run;
+				continue;
+			}
+		}
 
 		/*
 		 * DROPPED BEFORE ANYTHING ELSE, AND BEFORE KEPT.
@@ -633,12 +725,36 @@ uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
 /* What one pass will rewrite, for the reason B64_MAX_PAY gives. */
 #define HEX_MAX_PAY   32u
 
+/*
+ * A TABLE, BECAUSE THIS IS ASKED ABOUT EVERY BYTE OF EVERY EXECUTABLE.
+ *
+ * unhex_range's outer loop is `if (hex_val(p[i]) < 0) { i++; continue; }` over
+ * the whole object - see the scan below - so this runs once per byte of every
+ * file scanned, and the three range tests were three unpredictable branches
+ * each time. Binary is essentially random with respect to "is this a hex
+ * digit", so the branch predictor loses on most bytes and the cost is the
+ * mispredict rather than the comparison.
+ *
+ * Measured with callgrind over 120 system binaries (109 MB): unhex_range was
+ * 7.82% of the whole scan, 1.03 billion instructions.
+ *
+ * STORED AS value+1 SO THAT ZERO MEANS "NOT HEX". That is what lets the table
+ * be written with designated initialisers - every byte nobody names stays 0 -
+ * instead of 256 hand-written entries, which is the form that would eventually
+ * disagree with the function it replaces.
+ */
+static const uint8_t HEX_V1[256] = {
+	['0'] =  1, ['1'] =  2, ['2'] =  3, ['3'] =  4, ['4'] =  5,
+	['5'] =  6, ['6'] =  7, ['7'] =  8, ['8'] =  9, ['9'] = 10,
+	['a'] = 11, ['b'] = 12, ['c'] = 13, ['d'] = 14, ['e'] = 15,
+	['f'] = 16,
+	['A'] = 11, ['B'] = 12, ['C'] = 13, ['D'] = 14, ['E'] = 15,
+	['F'] = 16
+};
+
 static int hex_val(uint8_t c)
 {
-	if (c >= '0' && c <= '9') return c - '0';
-	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-	return -1;
+	return (int)HEX_V1[c] - 1;
 }
 
 /* What a decoded byte may be for the run to be text: printable ASCII, and the
@@ -776,15 +892,48 @@ int kof_exe_unhex(uint8_t *p, uint64_t n)
 
 /* What may sit between the escapes and still be one run: the characters a URL
  * or a form body is made of. Anything else ends it. */
+/*
+ * A TABLE, FOR THE SAME REASON hex_val HAS ONE, AND THIS ONE COST FOUR TIMES
+ * AS MUCH.
+ *
+ * unpct_range's outer loop is `if (!pct_body(p[i])) { i++; continue; }` over
+ * every byte of every executable, and the test it ran there was TWENTY-SEVEN
+ * comparisons - three ranges and twenty-four punctuation characters - almost
+ * all of which fail on binary. That is a chain of unpredictable branches per
+ * byte to answer a question about a single byte's value.
+ *
+ * Measured with callgrind over 120 system binaries (109 MB): kof_exe_decode,
+ * which is where this inlines, was 1.148 billion instructions - 13.9 per cent
+ * of the whole scan - and does nothing itself but call the three range
+ * readers.
+ *
+ * The set is 85 of the 256 byte values. Written out in full rather than as
+ * ranges, because a range designator is a GNU extension and this tree builds
+ * with a strict -std=c11; the table was generated from the function it
+ * replaces and checked against it on all 256 inputs.
+ */
+static const uint8_t PCT_BODY[256] = {
+	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+	0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,
+	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,
+	0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	1,1,1,1,1,1,1,1,1,1,1,0,0,0,1,0,
+	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+};
+
 static int pct_body(uint8_t c)
 {
-	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
-	       (c >= 'A' && c <= 'Z') ||
-	       c == '%' || c == '+' || c == '-' || c == '_' || c == '.' ||
-	       c == '~' || c == '/' || c == ':' || c == '&' || c == '=' ||
-	       c == '?' || c == '#' || c == ',' || c == ';' || c == '*' ||
-	       c == '!' || c == '(' || c == ')' || c == '\'' || c == '@' ||
-	       c == '$' || c == '[' || c == ']';
+	return PCT_BODY[c];
 }
 
 static int unpct_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,

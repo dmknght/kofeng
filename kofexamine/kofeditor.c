@@ -5721,7 +5721,22 @@ void generate(struct kof_editor *e, int as_new)
 have_path:
 		;
 	}
-	f = fopen(path, "w");
+	/*
+	 * THE stat ABOVE SAID THE NAME WAS FREE; THIS IS WHAT OPENS IT.
+	 *
+	 * Those are not the same statement. Between the probe that picked
+	 * "<family>_07.c" and the open, the name can be made a symlink, and
+	 * fopen(,"w") follows one - so the draft is written wherever the link
+	 * points. kofrepart.c says the same of its own lstat-then-fopen and
+	 * closes it the same way: the race is LOST rather than won.
+	 *
+	 * The mode is the umask's, not 0600 - see kof_fopen_trunc_mode. This
+	 * file is a .c to be built and committed, and an owner-only source
+	 * file is a build failure waiting for the next account in the tree.
+	 * Truncating, not refusing, because re-saving a draft over its own
+	 * previous file is the ordinary case here.
+	 */
+	f = kof_fopen_trunc_mode(path, 0666);
 	if (!f) {
 		say_err(e, "Cannot write %.60s - %s", path, strerror(errno));
 		return;

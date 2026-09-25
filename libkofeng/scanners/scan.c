@@ -2060,6 +2060,62 @@ static uint32_t norm_gather(struct kof_obj_ctx *ctx, struct kof_src_region *r,
  */
 #define NORM_KEEP_MASK ((1u << 1) | (1u << 2))
 
+/*
+ * A RANGE OF BITS AT A TIME, NOT A BIT AT A TIME.
+ *
+ * All four of these maps are filled the same way - a contiguous span of an
+ * object marked kept, given back or dropped - and all four were written
+ * `for (j = from; j < to; j++) map[j >> 3] |= 1u << (j & 7u)`. That is a
+ * shift, a mask and a read-modify-write of the same byte eight times over,
+ * for a span that is usually an entire CODE region: megabytes.
+ *
+ * Measured with callgrind over 120 system binaries (109 MB), before this:
+ * the clear inside norm_keep_exec alone was 390 million instructions, 3.49%
+ * of the whole scan, and norm_emit's self cost - almost all of it these
+ * loops - was 1.39 billion, 12.4%.
+ *
+ * The whole bytes in the middle are one memset; only the two partial bytes at
+ * the ends need the mask. Verified against the bit-at-a-time form over every
+ * from/to pair in a 200-bit map, against two different starting contents.
+ */
+static void bits_set(uint8_t *b, uint64_t from, uint64_t to)
+{
+	uint64_t fb, tb;
+
+	if (!b || from >= to)
+		return;
+	fb = from >> 3;
+	tb = (to - 1u) >> 3;
+	if (fb == tb) {
+		b[fb] |= (uint8_t)((0xffu << (from & 7u)) &
+				   (0xffu >> (7u - ((to - 1u) & 7u))));
+		return;
+	}
+	b[fb] |= (uint8_t)(0xffu << (from & 7u));
+	if (tb > fb + 1u)
+		memset(b + fb + 1u, 0xff, (size_t)(tb - fb - 1u));
+	b[tb] |= (uint8_t)(0xffu >> (7u - ((to - 1u) & 7u)));
+}
+
+static void bits_clr(uint8_t *b, uint64_t from, uint64_t to)
+{
+	uint64_t fb, tb;
+
+	if (!b || from >= to)
+		return;
+	fb = from >> 3;
+	tb = (to - 1u) >> 3;
+	if (fb == tb) {
+		b[fb] &= (uint8_t)~((0xffu << (from & 7u)) &
+				    (0xffu >> (7u - ((to - 1u) & 7u))));
+		return;
+	}
+	b[fb] &= (uint8_t)~(0xffu << (from & 7u));
+	if (tb > fb + 1u)
+		memset(b + fb + 1u, 0x00, (size_t)(tb - fb - 1u));
+	b[tb] &= (uint8_t)~(0xffu >> (7u - ((to - 1u) & 7u)));
+}
+
 static void norm_keep_bits(uint8_t *keep, uint64_t n,
 			   const struct kof_src_region *r, uint32_t nr)
 {
@@ -2067,7 +2123,7 @@ static void norm_keep_bits(uint8_t *keep, uint64_t n,
 
 	memset(keep, 0, (size_t)((n + 7u) / 8u));
 	for (i = 0; i < nr; i++) {
-		uint64_t j, e;
+		uint64_t e;
 
 		if (!(r[i].mask & NORM_KEEP_MASK))
 			continue;
@@ -2076,8 +2132,7 @@ static void norm_keep_bits(uint8_t *keep, uint64_t n,
 		e = r[i].off + r[i].len;
 		if (e > n)
 			e = n;
-		for (j = r[i].off; j < e; j++)
-			keep[j >> 3] |= (uint8_t)(1u << (j & 7u));
+		bits_set(keep, r[i].off, e);
 	}
 }
 
@@ -2310,20 +2365,19 @@ static void norm_keep_exec(uint8_t *keep, uint64_t n,
 		return;
 	/* Take the whole of CODE back... */
 	for (i = 0; i < nr; i++) {
-		uint64_t j, end;
+		uint64_t end;
 
 		if (r[i].mask != (uint32_t)KOF_SCAN_ELF_CODE)
 			continue;
 		if (r[i].off >= n)
 			continue;
 		end = r[i].len > n - r[i].off ? n : r[i].off + r[i].len;
-		for (j = r[i].off; j < end; j++)
-			keep[j >> 3] &= (uint8_t)~(1u << (j & 7u));
+		bits_clr(keep, r[i].off, end);
 	}
 	/* ...and give back only what is instructions. */
 	for (i = 0; i < e->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
 		const struct kof_elf_sec *c = &e->sec[i];
-		uint64_t j, end;
+		uint64_t end;
 
 		if (!(c->flags & 0x4u))         /* SHF_EXECINSTR */
 			continue;
@@ -2331,8 +2385,7 @@ static void norm_keep_exec(uint8_t *keep, uint64_t n,
 			continue;
 		end = c->file_size > n - c->file_off ? n
 						     : c->file_off + c->file_size;
-		for (j = c->file_off; j < end; j++)
-			keep[j >> 3] |= (uint8_t)(1u << (j & 7u));
+		bits_set(keep, c->file_off, end);
 	}
 }
 
@@ -2506,7 +2559,7 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 
 		memset(drop, 0, (size_t)((buf.n + 7u) / 8u));
 		for (a = 0; a < lib->n; a++) {
-			uint64_t j, e;
+			uint64_t e;
 
 			if (lib->span[a].off >= buf.n)
 				continue;
@@ -2521,8 +2574,7 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			e = lib->span[a].len > buf.n - lib->span[a].off
 				  ? buf.n
 				  : lib->span[a].off + lib->span[a].len;
-			for (j = lib->span[a].off; j < e; j++)
-				drop[j >> 3] |= (uint8_t)(1u << (j & 7u));
+			bits_set(drop, lib->span[a].off, e);
 		}
 	}
 

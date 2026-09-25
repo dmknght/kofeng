@@ -1203,12 +1203,30 @@ static inline FILE *kof_fopen_new(const char *path)
  * and it still creates 0600 rather than whatever the umask happens to be -
  * these files hold process names and command lines.
  */
-static inline FILE *kof_fopen_trunc(const char *path)
+/*
+ * THE SAME, WITH THE CALLER SAYING WHO THE FILE IS FOR.
+ *
+ * kof_fopen_trunc's 0600 is right for what it was written for - a log of
+ * process names and command lines, evidence copied off somebody's machine -
+ * and wrong for a file that is SOURCE. A signature draft is a .c the analyst
+ * will build, commit and share; handing it back owner-only turns a security
+ * fix into a build failure for the next account that touches the tree.
+ *
+ * So the refusal to follow a link - which is the part that matters, and which
+ * no caller should have to opt out of - is kept, and only the mode is the
+ * caller's. Pass 0600 for evidence, 0666 for a file the umask should decide.
+ *
+ * WINDOWS IGNORES `mode`, and that is not an omission: there is no mode to
+ * set. kof_win_open_nofollow creates the file with the ACL it inherits from
+ * its directory, which is the platform's own answer to the same question.
+ */
+static inline FILE *kof_fopen_trunc_mode(const char *path, int mode)
 {
 	int fd;
 	FILE *fp;
 
 #ifdef _WIN32
+	(void)mode;
 	{
 		/* Created or truncated, and never through a link - see
 		 * kof_win_open_nofollow. OPEN_ALWAYS rather than CREATE_ALWAYS
@@ -1229,7 +1247,8 @@ static inline FILE *kof_fopen_trunc(const char *path)
 			CloseHandle(h);
 	}
 #else
-	fd = open(path, O_CREAT | O_TRUNC | O_WRONLY | O_NOFOLLOW, 0600);
+	fd = open(path, O_CREAT | O_TRUNC | O_WRONLY | O_NOFOLLOW,
+		  (mode_t)mode);
 #endif
 	if (fd < 0)
 		return NULL;
@@ -1243,6 +1262,11 @@ static inline FILE *kof_fopen_trunc(const char *path)
 		close(fd);
 #endif
 	return fp;
+}
+
+static inline FILE *kof_fopen_trunc(const char *path)
+{
+	return kof_fopen_trunc_mode(path, 0600);
 }
 
 /*

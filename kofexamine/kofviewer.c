@@ -18127,8 +18127,22 @@ static const char *g_clip_via;
 
 static void copy_take(const char *bytes, size_t n)
 {
-	g_clip_n = n < sizeof g_clip ? n : sizeof g_clip;
+	/*
+	 * ONE BYTE SHORT OF THE BUFFER, AND TERMINATED.
+	 *
+	 * This filled g_clip to the last byte and wrote no NUL, so a full
+	 * clipboard was a char array with no end. Both readers today take the
+	 * pointer AND g_clip_n - see paste_src - so nothing runs off it; the
+	 * next one to reach for %s or strlen would, and it would look like a
+	 * clipboard bug rather than a read past a static.
+	 *
+	 * Every other clamp on this path already spells it this way
+	 * (sizeof - 1, then terminate). The cost is one byte of a 8192-byte
+	 * clipboard, which is not a paste anybody notices.
+	 */
+	g_clip_n = n < sizeof g_clip - 1u ? n : sizeof g_clip - 1u;
 	memcpy(g_clip, bytes, g_clip_n);
+	g_clip[g_clip_n] = '\0';
 }
 
 /*
@@ -23999,18 +24013,29 @@ static void chain_build(struct view *v)
 		  "flags", "fed by");
 	for (i = 0; i < c->n && i < KOF_OVLF_CHAIN_MAX; i++) {
 		const struct kof_ovlf_step *st = &c->s[i];
-		char fl[40];
+		/*
+		 * BOUNDED, BECAUSE THE BUFFER ONLY JUST FITS.
+		 *
+		 * This was four strcat calls into fl[40]. All four labels set
+		 * is 37 bytes and a NUL, so it fits TODAY - by two bytes, with
+		 * nothing checking and nothing to fail if it stopped fitting.
+		 * A fifth capability, or one word lengthened, overflows a
+		 * static-sized stack buffer silently.
+		 *
+		 * One snprintf says the same thing and cannot: an empty label
+		 * contributes "" and a buffer that ran out truncates. The
+		 * "no flags at all" case still reads off fl[0], which is now
+		 * the empty string snprintf left rather than one strcat never
+		 * wrote to.
+		 */
+		char fl[64];
 		char fed[24];
 
-		fl[0] = 0;
-		if (st->flags & KOF_FLOWF_WX)
-			strcat(fl, "W+X ");
-		if (st->flags & KOF_FLOWF_EXECUTED)
-			strcat(fl, "jumped-into ");
-		if (st->flags & KOF_FLOWF_LOOP)
-			strcat(fl, "in-loop ");
-		if (st->flags & KOF_FLOWF_VIA_REG)
-			strcat(fl, "via-register ");
+		snprintf(fl, sizeof fl, "%s%s%s%s",
+			 (st->flags & KOF_FLOWF_WX)       ? "W+X " : "",
+			 (st->flags & KOF_FLOWF_EXECUTED) ? "jumped-into " : "",
+			 (st->flags & KOF_FLOWF_LOOP)     ? "in-loop " : "",
+			 (st->flags & KOF_FLOWF_VIA_REG)  ? "via-register " : "");
 		if (!fl[0])
 			snprintf(fl, sizeof fl, A_DIM "-" A_OFF);
 		if (st->back)
@@ -31490,9 +31515,38 @@ static void file_close(struct view *v)
 	 * re-execing - and became a leak per file the moment it did not.
 	 */
 	draft_wipe(v);
-	/* The log's reader goes with the file, and so do the two buffers that
-	 * gather a submission out of it. The objects themselves own no heap -
-	 * their bytes are the mapping - so there is nothing else to undo. */
+	/*
+	 * The log's reader goes with the file, and so do the two buffers that
+	 * gather a submission out of it.
+	 *
+	 * AN OBJECT DOES OWN HEAP, and this said it did not.
+	 *
+	 * The note here read "the objects themselves own no heap - their bytes
+	 * are the mapping - so there is nothing else to undo", which is the
+	 * same sentence log_window's reset loop already corrected about itself:
+	 * "it stopped being true the moment anything was." The loop below grew
+	 * the frees for touch, finding, info, sym and own; ovl_str, ovl_blk and
+	 * carve were never added to it, and they are heap the object keeps so
+	 * that coming back to a row does not re-read it.
+	 *
+	 * WHAT THAT LEAKED, and it needs two files to see. The invariant every
+	 * other path keeps is that a slot at or past n_obj holds nothing:
+	 * on_object clears the slot it is about to fill, and log_window clears
+	 * the whole of the OLD n_obj before setting the new one. This broke it
+	 * by dropping n_obj to zero with those three pointers still in the
+	 * slots - so opening a large file and then a smaller one left every
+	 * slot the smaller one does not reach holding the larger one's overlay
+	 * strings, blocks and carvings, unreachable and never freed. It repeats
+	 * per file, which for a viewer somebody leaves open all day is the kind
+	 * of leak that only shows up as "it got slow".
+	 *
+	 * THE memset IS WHAT MAKES THE EXTRA FREES SAFE. Every reuse path -
+	 * on_object, and both "no objects, so the file is the object" branches
+	 * - frees these three before it claims a slot. Freeing them here and
+	 * leaving the pointers behind would turn this fix into a double free;
+	 * zeroing the slot makes those frees no-ops, and clears the dangling
+	 * finding/sym/own the loop was already leaving in the struct.
+	 */
 	if (v->log) {
 		kofevt_log_free(v->log);
 		v->log = NULL;
@@ -31510,8 +31564,12 @@ static void file_close(struct view *v)
 		free(o->info);
 		free(o->sym);
 		free(o->own);
+		free(o->ovl_str);
+		free(o->ovl_blk);
+		free(o->carve);
 		if (o->mapped)
 			kof_unmap_file(o->mapped, o->mapped_len);
+		memset(o, 0, sizeof *o);
 	}
 	v->n_obj = 0;
 	/*

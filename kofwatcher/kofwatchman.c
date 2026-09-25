@@ -432,10 +432,20 @@ static int already_scanned(const char *path)
  * costs no file handle, and a burst naming one path is the common case - but
  * nothing is skipped on its say-so alone any more.
  */
+/*
+ * `have_id` IS AN OUTPUT BECAUSE THE CALLER HAS A SECOND FILTER AND ONLY ONE
+ * OF THE TWO MAY DECIDE.
+ *
+ * "Scan it" comes back for two very different reasons - the cache says this
+ * exact file is not known clean, or no identity could be established at all -
+ * and the path list above is right for the second and WRONG for the first.
+ * Saying which is what lets the caller put them in that order.
+ */
 static int scan_needed(struct koffridge *fr, const char *path,
-		       struct kof_fid *id)
+		       struct kof_fid *id, int *have_id)
 {
-	if (!fr || !kof_fid_of(path, id)) {
+	*have_id = kof_fid_of(path, id);
+	if (!fr || !*have_id) {
 		/*
 		 * No identity, so no caching - koffridge.h says a key that
 		 * could not be established must not be invented. Scanned every
@@ -587,17 +597,19 @@ int main(int argc, char **argv)
 		}
 	}
 	/*
-	 * NO --log MEANS THE LIVE SENSOR, which is the ordinary way to run
-	 * this and is the one not built yet.
-	 *
-	 * It reports that rather than falling back to something else: a
-	 * real-time protection tool that silently analysed a stale file
-	 * instead of the running machine would be worse than one that does
-	 * nothing, because it would look like it was working.
-	 */
-	/*
-	 * NO --log MEANS THE LIVE SENSOR, which is the ordinary way to run
+	 * NO --replay MEANS THE LIVE SENSOR, which is the ordinary way to run
 	 * this: watchman is the client, kofwatchtower is the server.
+	 *
+	 * A channel that cannot be opened is REPORTED rather than fallen back
+	 * from. A real-time tool that quietly read a stale recording instead
+	 * of the running machine would be worse than one that does nothing,
+	 * because it would look like it was working.
+	 *
+	 * (Two copies of this note stood here, and the first still said the
+	 * live half was "the one not built yet" - which the second one, added
+	 * when it was built, contradicts. Both also called the flag --log;
+	 * it is --replay, and has been since the argument loop above was
+	 * written.)
 	 */
 	if (!replay_path) {
 #ifdef KOF_HAVE_CHAN
@@ -899,17 +911,51 @@ int main(int argc, char **argv)
 				skipped++;
 			continue;
 		}
-		if (already_scanned(obj))
-			continue;
-
 		{
 			struct kof_fid id;
 			uint64_t before;
+			int have_id;
 
-			if (!scan_needed(fridge, obj, &id)) {
+			/*
+			 * THE IDENTITY DECIDES; THE PATH LIST ONLY DECIDES
+			 * WHERE THERE IS NO IDENTITY.
+			 *
+			 * already_scanned USED TO RUN FIRST, and that put the
+			 * exact hole back that the cache below was added to
+			 * close. scan_needed's own note says it: "a file
+			 * written once, scanned clean, and then OVERWRITTEN is
+			 * never looked at again - which is a dropper's whole
+			 * sequence", and then "nothing is skipped on its
+			 * say-so alone any more". The second sentence was not
+			 * true. The path list sat in front, so the second
+			 * event naming a path returned early and the cache -
+			 * the half that keys on size, birth and last-write and
+			 * therefore NOTICES the overwrite - was never asked.
+			 *
+			 * Measured on a synthesised log of two events naming
+			 * one path: "read 2 event(s), scanned 1 file(s),
+			 * cached 0". Zero, from a run with a cache in it, is
+			 * the cache never being consulted.
+			 *
+			 * It was an unfinished change rather than a decision -
+			 * the path list is from the first realtime model and
+			 * the cache landed six days later with the note above,
+			 * and this call site was not moved with it.
+			 *
+			 * IT IS KEPT, BELOW, FOR WHAT IT IS STILL RIGHT ABOUT.
+			 * When kof_fid_of fails there is nothing to key on -
+			 * the file is gone, or was never a regular file - so
+			 * the cache cannot answer and a burst of deletes
+			 * naming one path would be one failed open each. That
+			 * is the case the cheap filter was for, and it is the
+			 * only one it is sound for.
+			 */
+			if (!scan_needed(fridge, obj, &id, &have_id)) {
 				cached++;
 				continue;
 			}
+			if (!have_id && already_scanned(obj))
+				continue;
 
 			hits.e = &e;
 			before = hits.n;

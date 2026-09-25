@@ -1987,8 +1987,22 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 			n = ctx.resolve_scan
 			  ? ctx.resolve_scan(&ctx, f->regions[i], ext,
 					     KOF_SCAN_MAX_EXTENTS) : 0;
+			/*
+			 * CLIPPED, so this number and the entropy beside it
+			 * are measured over the same bytes.
+			 *
+			 * kof_inspect_region_entropy clips each extent to the
+			 * object before counting, and dump_region now writes
+			 * the clipped length - so a raw sum here was the one
+			 * figure on the line derived from a length nothing had
+			 * checked. An extent is not a promise: resolve_scan
+			 * may be kof_declared_regions, which copies what a
+			 * child DECLARED and is handed no size to check it
+			 * against.
+			 */
 			for (k = 0; k < n; k++)
-				len += ext[k].len;
+				len += kof_clip_len(buf.n, ext[k].off,
+						    ext[k].len);
 			total += len;
 			/*
 			 * The size, then how random those bytes are - the one
