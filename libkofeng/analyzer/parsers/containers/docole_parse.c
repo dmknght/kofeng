@@ -115,7 +115,29 @@ static const uint8_t CFB_SIG[8] = {
 struct ole {
 	kof_buf f;
 	struct kof_docole_info *o;
-	uint64_t steps, step_max;
+	/*
+	 * TWO BUDGETS, BECAUSE THE TWO WALKS STEP OVER DIFFERENT THINGS.
+	 *
+	 * There was one, sized from the file over 32 - which is twice the
+	 * number of 64 byte MINI sectors the file could hold, and the note
+	 * where it was set says so: a mini sector is the smallest thing a step
+	 * covers, so that is the granularity the bound was reasoned about.
+	 *
+	 * The FAT walk does not step over mini sectors. It steps over ordinary
+	 * ones, which are 512 bytes and often 4096, so the same counter let a
+	 * looping FAT chain run eight to sixty-four times further than there
+	 * are sectors in the file to visit. Measured on the hostile-fields
+	 * corpus, a compound file whose every FAT entry reads 1 took 0.54 ms
+	 * against a 0.002 ms clean parse - 273 times, where the limit that
+	 * exists to catch exactly this is 200.
+	 *
+	 * So each walk is charged to a counter sized in ITS OWN sectors. An
+	 * honest file visits each of its sectors about once and neither bound
+	 * is near; a loop runs out the one it is looping in, and does it after
+	 * a number of steps that has something to do with the file.
+	 */
+	uint64_t steps, step_max;             /* mini sectors */
+	uint64_t fat_steps, fat_step_max;     /* ordinary sectors */
 	struct kof_runs runs;
 };
 
@@ -124,8 +146,8 @@ static uint64_t sec_off(const struct kof_docole_info *o, uint32_t sec)
 	return ((uint64_t)sec + 1u) * o->sector_size;
 }
 
-/* One more sector step, or zero when the parse has taken more than the file can
- * honestly need. Reaching it means a chain loops; nothing else can. */
+/* One more MINI sector step, or zero when the parse has taken more than the
+ * file can honestly need. Reaching it means a chain loops; nothing else can. */
 static int step(struct ole *s)
 {
 	if (s->steps >= s->step_max) {
@@ -133,6 +155,18 @@ static int step(struct ole *s)
 		return 0;
 	}
 	s->steps++;
+	return 1;
+}
+
+/* The same for a step over an ORDINARY sector - see struct ole on why the two
+ * are counted apart. */
+static int step_fat(struct ole *s)
+{
+	if (s->fat_steps >= s->fat_step_max) {
+		s->o->anomalies |= KOF_DOCOLE_ANOM_FAT_CYCLE;
+		return 0;
+	}
+	s->fat_steps++;
 	return 1;
 }
 
@@ -349,7 +383,7 @@ static void claim_fat_chain(struct ole *s, uint32_t start, uint64_t size,
 	uint32_t sec = start;
 	uint64_t left = size;
 
-	while (left && sec <= SEC_MAXREG && step(s)) {
+	while (left && sec <= SEC_MAXREG && step_fat(s)) {
 		uint64_t n = left < o->sector_size ? left : o->sector_size;
 
 		add_run(s, sec_off(o, sec), n, cls);
@@ -397,7 +431,7 @@ static uint32_t collect_chain(struct ole *s, uint32_t start, uint32_t *out,
 {
 	uint32_t sec = start, n = 0;
 
-	while (sec <= SEC_MAXREG && n < max && step(s)) {
+	while (sec <= SEC_MAXREG && n < max && step_fat(s)) {
 		if (claim_cls < KOF_DOCOLE_CLS_COUNT)
 			add_run(s, sec_off(s->o, sec), s->o->sector_size, claim_cls);
 		out[n++] = sec;
@@ -1019,14 +1053,21 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	kof_runs_init(&s.runs, (struct kof_run *)o->run, KOF_DOCOLE_MAX_EXTENTS,
 		      KOF_DOCOLE_CLS_COUNT);
 	/*
-	 * How many sector steps an honest file can need.
+	 * How many sector steps an honest file can need - one bound per
+	 * granularity, see struct ole.
 	 *
-	 * Every walk here reads each sector a small number of times, and the
-	 * smallest thing a step covers is a 64 byte mini sector - so the whole parse
-	 * is bounded by a constant times the file's length over 64. A third of that
-	 * is generous for a real document and is reached only by a loop.
+	 * MINI: the smallest thing a step covers is a 64 byte mini sector, so
+	 * the mini walk is bounded by a constant times the file's length over
+	 * 64. Twice that is generous for a real document and is reached only
+	 * by a loop. Unchanged.
+	 *
+	 * FAT: an ordinary sector is 512 bytes and may be 4096, and the count
+	 * is not known until the header is read - so this is set again below,
+	 * from the real sector size. Until then a file cannot have walked
+	 * anything, and the floor is what the DIFAT walk needs to get started.
 	 */
 	s.step_max = file.n / 32u + 4096u;
+	s.fat_step_max = 1024u;   /* until the sector size is known, below */
 
 	/*
 	 * The header, claimed before anything in it is believed.
@@ -1064,6 +1105,22 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 		goto done;
 	}
 	o->sector_size = 1u << ss;
+	/*
+	 * AND NOW THE FAT BUDGET CAN BE THE RIGHT ONE, because the sector size
+	 * is what it is counted in - see struct ole. Twice the number of
+	 * sectors the file could hold: an honest chain visits each of its own
+	 * once, and a file's chains together cover its sectors once.
+	 *
+	 * Raised and never lowered. The floor set before the header was read
+	 * is what the DIFAT walk has already been spending, and taking it back
+	 * would end a walk that has not misbehaved.
+	 */
+	{
+		uint64_t want = file.n / o->sector_size * 2u + 1024u;
+
+		if (want > s.fat_step_max)
+			s.fat_step_max = want;
+	}
 	if ((o->major == 3 && ss != 9) || (o->major == 4 && ss != 12))
 		o->anomalies |= KOF_DOCOLE_ANOM_BAD_HEADER;
 
@@ -1104,7 +1161,7 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	}
 
 	per = o->sector_size / 4u;
-	while (dif_start <= SEC_MAXREG && o->n_dif < KOF_DOCOLE_MAX_FAT && step(&s)) {
+	while (dif_start <= SEC_MAXREG && o->n_dif < KOF_DOCOLE_MAX_FAT && step_fat(&s)) {
 		uint64_t base = sec_off(o, dif_start);
 		uint32_t v;
 
@@ -1144,6 +1201,33 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	o->n_dirsec = collect_chain(&s, dir_start, o->dirsec, max_dirsec,
 				    KOF_DOCOLE_CLS_DIRECTORY);
 	o->dir_count = o->n_dirsec * per;
+	/*
+	 * AND NO MORE ENTRIES THAN THE FILE COULD HOLD.
+	 *
+	 * collect_chain follows the FAT and records a sector number per step.
+	 * It has no visited set - this parser will not spend memory
+	 * proportional to the file, see the note at the top - so a chain that
+	 * loops hands back the SAME sector as many times as the cap allows.
+	 * n_dirsec is then 512 for a file with one directory sector, every
+	 * index below 512*per resolves through dir_ent_off to a real offset
+	 * inside that one sector, and the walk reads and decodes a name for
+	 * each of them.
+	 *
+	 * Measured before this, on the hostile-fields corpus: a 1536 byte
+	 * compound file whose FAT entries all read 1 reported 2048 directory
+	 * entries and spent 96% of its parse in the recovery walk, decoding
+	 * 2049 names out of a file with room for twelve. Against a clean parse
+	 * that is the 273x this corpus exists to catch.
+	 *
+	 * A directory entry is 128 bytes and they are stored in the file, so
+	 * the file's own length is an exact ceiling and costs one division.
+	 * It binds only when the chain has lied: an honest directory's sectors
+	 * are distinct, so their entries already fit.
+	 */
+	if ((uint64_t)o->dir_count > file.n / DIR_ENT_LEN) {
+		o->dir_count = (uint32_t)(file.n / DIR_ENT_LEN);
+		o->anomalies |= KOF_DOCOLE_ANOM_DIR_OVERFLOW;
+	}
 	if (o->n_dirsec == max_dirsec)
 		o->anomalies |= KOF_DOCOLE_ANOM_DIR_OVERFLOW;
 	if (o->dir_count == 0) {
