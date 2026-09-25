@@ -19828,7 +19828,8 @@ static uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off)
 	return best;
 }
 
-static void view_show(struct view *v, uint64_t file_off, int narrow);
+static void view_show(struct view *v, uint32_t obj, uint64_t file_off,
+		      int narrow);
 
 /*
  * Jump to where a DECLARATION sits, whichever space that is in.
@@ -19848,8 +19849,20 @@ static void view_show_in(struct view *v, uint32_t obj, uint8_t sym,
 	uint64_t r, row;
 	uint32_t k;
 
+	/*
+	 * AND `obj` IS PASSED ON, because the caller is not always standing in
+	 * the object it names.
+	 *
+	 * This used to drop it here and let view_show resolve the offset in
+	 * whatever row was selected. A marker declared against the PARENT,
+	 * clicked while the reader was inside the :norm view, was then placed
+	 * at the same number in the view - a real address holding real bytes,
+	 * and none of them the marker's. That is the same address-space
+	 * confusion the symbol half below exists to avoid, arriving by object
+	 * rather than by space.
+	 */
 	if (!sym) {
-		view_show(v, off, narrow);
+		view_show(v, obj, off, narrow);
 		return;
 	}
 	for (k = 0; k < v->n_node; k++)
@@ -19857,11 +19870,7 @@ static void view_show_in(struct view *v, uint32_t obj, uint8_t sym,
 			break;
 	if (k >= v->n_node)
 		return;                 /* this object has no such half */
-	if (k != v->sel_node) {
-		v->node[v->sel_node].at = v->rgn_at;
-		v->sel_node = k;
-		view_select(v);
-	}
+	goto_node(v, k);
 	/* The row has extents now, so a block offset places in it the same way
 	 * a file offset places in a region. */
 	r = view_unmap(v, off);
@@ -19878,11 +19887,12 @@ static void view_show_decl(struct view *v, const struct decl *d, uint64_t off)
 	view_show_in(v, d->obj, sym_which_of(d->sym), off, 1);
 }
 
-static void view_show(struct view *v, uint64_t file_off, int narrow)
+static void view_show(struct view *v, uint32_t obj, uint64_t file_off,
+		      int narrow)
 {
 	uint64_t per = (uint64_t)(v->per > 0 ? v->per : 16);
 	uint64_t r, row;
-	uint32_t best = node_at(v, v->node[v->sel_node].obj, file_off);
+	uint32_t best = node_at(v, obj, file_off);
 
 	/*
 	 * THE TREE MOVES TO THE ROW THAT HOLDS THE OFFSET, ALWAYS - not only
@@ -19935,13 +19945,23 @@ static void view_show(struct view *v, uint64_t file_off, int narrow)
 	 * tree moves, because the alternative is a hit that cannot be looked
 	 * at.
 	 */
-	if (!narrow && view_unmap(v, file_off) != KOF_BROKEN)
+	/*
+	 * Staying put is only an option while the row the reader chose is in
+	 * the object being asked about; otherwise "where they already are" is
+	 * the wrong file.
+	 */
+	if (!narrow && v->node[v->sel_node].obj == obj &&
+	    view_unmap(v, file_off) != KOF_BROKEN)
 		best = v->sel_node;
-	if (best < v->n_node && best != v->sel_node) {
-		v->node[v->sel_node].at = v->rgn_at;
-		v->sel_node = best;
-		view_select(v);
-	}
+	/*
+	 * Through goto_node, which is the one place that knows what moving
+	 * between rows costs. Open-coded here, it saved the old row's place
+	 * and selected the new one and did NOT rebuild the marker list when
+	 * the move crossed into another object - so the panel kept listing the
+	 * previous object's markers beside the new object's bytes.
+	 */
+	if (best < v->n_node)
+		goto_node(v, best);
 	r = view_unmap(v, file_off);
 	if (r == KOF_BROKEN)
 		return;

@@ -3501,6 +3501,12 @@ static uint32_t c_plague_score(const struct kof_obj_ctx *ctx, uint32_t block_id)
 		 * and in any order - see the note above - and counting a block
 		 * twice would weight it twice.
 		 */
+		/* The best any one block reached, which is what the verdict
+		 * reports - see kof_scanner.plague_best. Before the
+		 * already-counted return below, because a block asked about
+		 * twice scores the same twice and this is a maximum. */
+		if (pct > sc->plague_best)
+			sc->plague_best = pct;
 		id = kof_plague_block_id(sc->eng->plague, b);
 		for (i = 0; i < sc->n_plague_blk; i++)
 			if (sc->plague_blk[i] == id)

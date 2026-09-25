@@ -232,6 +232,39 @@ struct kof_scanner {
 	uint32_t plague_hit;
 	uint32_t plague_tot;
 	/*
+	 * AND THE BEST ANY ONE OF THEM SCORED, which is what the verdict
+	 * reports.
+	 *
+	 * `hit` and `tot` summed over the set answer "how much of A and B is
+	 * here", and that is the rule's question only when the rule demanded
+	 * both. A rule that accepts EITHER asks about both blocks all the same
+	 * - two conditions written as separate statements do not short-circuit,
+	 * and even one `||` evaluates its right side whenever its left is false
+	 * - so the sum described a pair the rule had never required together.
+	 *
+	 * Measured on
+	 * HEUR-Backdoor.Linux.Mirai.b-020fd6b946c52e68ea21a1533d6ed5f9f3b50fc1d19eef0c1fd6e8c18802505b:
+	 * 26 of one block's 30 hashes and 26 of another's 128, over a rule
+	 * demanding 80 of either. It reported "Plague?32" - a number belonging
+	 * to neither block, and below the threshold the branch that fired had
+	 * just cleared.
+	 *
+	 * WHICH OPERATOR IT WAS CANNOT BE SEEN FROM HERE. It lives in the
+	 * module's compiled condition and all that reaches the engine is the
+	 * call. So the number reported is the best single block's containment,
+	 * which is the one statement that is true either way: for "either of
+	 * these" it is the block that carried the verdict, and for "both of
+	 * these" it is the strongest part of a rule whose every part cleared
+	 * its own threshold. It is never a figure no block has and never below
+	 * what the rule demanded.
+	 *
+	 * THE NAME IS STILL THE SET'S - see kof_plague_name_of. What a rule is
+	 * made of and how much of it is here are two different questions, and
+	 * naming after the best block alone made two rules sharing that block
+	 * report the same thing.
+	 */
+	uint32_t plague_best;
+	/*
 	 * One parsed view per format, allocated the first time an object of that
 	 * format is seen and kept for the life of the scanner.
 	 *

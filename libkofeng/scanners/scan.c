@@ -891,12 +891,9 @@ static void finding_str(const struct kof_scanner *sc,
 	 */
 	if (sc->plague_asked >= 0 && sc->n_plague_blk && sc->plague_hit) {
 		char sv[16], shape[16];
-		/* The SET's containment - see kof_plague_counts - so a rule
-		 * made of two blocks reports how much of both is here rather
-		 * than how much of its better half. */
-		unsigned pct = sc->plague_tot
-			     ? (unsigned)(sc->plague_hit * 100u / sc->plague_tot)
-			     : 0u;
+		/* The best single block's containment - see
+		 * kof_scanner.plague_best for why it is not the set's. */
+		unsigned pct = sc->plague_best;
 
 		if (pct > 100u)
 			pct = 100u;
@@ -1916,6 +1913,7 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		sc->n_plague_blk = 0;
 		sc->plague_hit = 0;
 		sc->plague_tot = 0;
+		sc->plague_best = 0;
 		sc->cur_mod   = m;
 		m->fn(ctx);
 		sc->cur_mod   = NULL;
@@ -3391,6 +3389,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 		sc->n_plague_blk = 0;
 		sc->plague_hit = 0;
 		sc->plague_tot = 0;
+		sc->plague_best = 0;
 		sc->cur_mod   = m;
 		sc->cure_have = 0;
 		sc->cure_at   = 0;

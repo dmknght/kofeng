@@ -2298,12 +2298,41 @@ uint32_t draft_hash(struct kof_editor *e)
 	 * runs on arrival. A dirty draft refuses to switch file, so opening a
 	 * second sample needed a Discard first.
 	 */
-	for (i = 0; i < e->dr.n_blk && e->dr.blk; i++) {
-		if (!e->dr.blk[i].picked)
-			continue;
-		MIX(e->dr.blk[i].id);
-		MIX(e->dr.blk[i].norm);
-		MIX(e->dr.blk[i].anywhere);
+	/*
+	 * AND AS A SET, NOT AS A LIST.
+	 *
+	 * The order of this array is not the draft's. plg_order sorts it by
+	 * where each block sits IN THE OBJECT IN FRONT OF THE READER, and a
+	 * block the current file does not hold has no offset and sorts behind
+	 * the ones it does - so arriving at another sample permutes the ticked
+	 * blocks without changing one thing about the rule. Folded in order,
+	 * that permutation is a different hash: the draft read as edited, and
+	 * an edited draft refuses to step to the next file, so a rule holding a
+	 * block the open file lacks could not be carried to another sample
+	 * without discarding it first.
+	 *
+	 * The same fault the two notes below describe - a position mistaken for
+	 * a fact - one level up, in the loop rather than in what it mixes. Each
+	 * block is hashed on its own and the results are ADDED, so the set is
+	 * what the answer depends on and the order is not.
+	 */
+	{
+		uint32_t acc = 0;
+
+		for (i = 0; i < e->dr.n_blk && e->dr.blk; i++) {
+			uint32_t b = 2166136261u;
+
+			if (!e->dr.blk[i].picked)
+				continue;
+			b = kof_hash_step(b, (uint8_t)e->dr.blk[i].id);
+			b = kof_hash_step(b, (uint8_t)e->dr.blk[i].norm);
+			b = kof_hash_step(b, (uint8_t)e->dr.blk[i].anywhere);
+			acc += b;
+		}
+		MIX(acc);
+		MIX(acc >> 8);
+		MIX(acc >> 16);
+		MIX(acc >> 24);
 	}
 	/* Ticking a measure is an edit - see kof_draft.sim_use - so a draft
 	 * that reported itself unchanged after one would lose it silently. */
@@ -4617,6 +4646,27 @@ no_head:
 		    strstr(line, " * ") || comment_blank(line)) {
 			continue;               /* a block comment; skip it */
 		}
+		/*
+		 * A DECLARATION IS NOT A MATCHER'S NOTE, and a comment above
+		 * one does not become one.
+		 *
+		 * `pend` is the last single-line comment seen and it is spent
+		 * by the next matcher built, however far below it that is.
+		 * generate writes the block's own description above its
+		 * KOF_PLAGUE_BLOCK - "+0xd245, 13305 bytes, 128 hash(es)" -
+		 * and nothing cleared it, so opening a plague rule gave its
+		 * first matcher that line as a comment and the next Save wrote
+		 * it into kof_scan as "matcher 1: +0xd245, 13305 bytes, 128
+		 * hash(es)". The panel showed it in the comment box, which is
+		 * where it was seen.
+		 *
+		 * A note only ever belongs to the branch immediately below it,
+		 * so anything that declares something in between ends it.
+		 */
+		if (strstr(line, "KOF_PLAGUE_BLOCK") ||
+		    strstr(line, "KOF_DEFINE_STR") ||
+		    strstr(line, "KOF_TARGET_"))
+			pend[0] = 0;
 
 		if ((p = strstr(line, "KOF_TARGET_NAME(")) != NULL) {
 			char w[48];

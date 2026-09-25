@@ -848,6 +848,93 @@ static void hex_options_survive(void)
 	unlink(path);
 }
 
+/*
+ * THE TICKED BLOCKS ARE A SET, so the order they sit in cannot be an edit.
+ *
+ * plg_order sorts the block table by where each block lies in the object the
+ * reader has open, and a block the open file does not hold has no offset and
+ * sorts behind the ones it does. So stepping to another sample permutes the
+ * ticked blocks with nothing about the rule changed - and draft_hash folded
+ * them in array order, so the draft came back "edited", and an edited draft
+ * refuses to step to the next file. A rule holding a block the open file lacks
+ * could not be carried to a second sample without discarding it first.
+ */
+static void block_order_is_not_an_edit(void)
+{
+	static struct plg_block pool[4];
+	struct kof_editor e;
+	uint32_t a, b;
+
+	lend(&e);
+	memset(pool, 0, sizeof pool);
+	e.dr.blk = pool;
+	e.dr.n_blk = 3;
+
+	pool[0].id = 0xdded9322u; pool[0].norm = 0; pool[0].picked = 1;
+	pool[1].id = 0x6fad1193u; pool[1].norm = 1; pool[1].picked = 1;
+	/* Unticked: the engine's offer about this object, not part of the
+	 * draft - and so not part of the answer either way. */
+	pool[2].id = 0x11112222u; pool[2].norm = 0; pool[2].picked = 0;
+
+	a = draft_hash(&e);
+	{
+		struct plg_block t = pool[0];
+
+		pool[0] = pool[1];
+		pool[1] = t;
+	}
+	b = draft_hash(&e);
+	CK(a == b);
+
+	/* And it is still a hash of WHICH blocks: changing one must move it. */
+	pool[0].id ^= 0xffu;
+	CK(draft_hash(&e) != a);
+}
+
+/*
+ * A BLOCK'S OWN DESCRIPTION IS NOT THE NEXT MATCHER'S COMMENT.
+ *
+ * generate writes "+0xd245, 13305 bytes, 128 hash(es)" above the block it
+ * describes. The reader kept the last comment it saw until a matcher spent it,
+ * so opening a plague rule handed that line to the first matcher as its note -
+ * the panel showed it in the comment box, and the next Save wrote it into
+ * kof_scan as "matcher 1: +0xd245, ...".
+ */
+static void block_note_is_not_a_matcher_note(void)
+{
+	static const char src[] =
+		"#include <kofmod/kofsig.h>\n"
+		"#include <kofmod/kofplague.h>\n"
+		"KOF_TARGET_FORMAT(KOF_FMT_ELF);\n"
+		"KOF_TARGET_NAME(KOF_MALTYPE_BOTNET, \"Notey\");\n"
+		"KOF_TARGET_RANGE(scan_range_whole_file, KOF_SCAN_ALL);\n"
+		"KOF_DEFINE_STR(s0, \"alpha\", KOF_CASE_EXACT, "
+			"KOF_WORD_SUBSTRING);\n"
+		"/* +0xd245, 13305 bytes, 128 hash(es) */\n"
+		"KOF_PLAGUE_BLOCK(blk_dded9322, KOF_SCAN_CODE, "
+			"KOF_PLAGUE_RAW,\n"
+		"\t0x00001000u, 0x00001111u, 0x00001222u, 0x00001333u, 0x00001444u, 0x00001555u, 0x00001666u, 0x00001777u, 0x00001888u, 0x00001999u, 0x00001aaau, 0x00001bbbu, 0x00001cccu, 0x00001dddu, 0x00001eeeu, 0x00001fffu);\n"
+		"void kof_scan(const struct kof_obj_ctx *ctx)\n"
+		"{\n"
+		"\tif (kof_find_str_any(scan_range_whole_file, s0))\n"
+		"\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n"
+		"}\n";
+	static struct plg_block pool[8];
+	struct kof_editor e;
+	const char *path = write_tmp(src);
+
+	if (!path)
+		return;
+	lend(&e);
+	memset(pool, 0, sizeof pool);
+	e.dr.blk = pool;
+	CK(draft_from_source(&e, path) != 0);
+	CK(e.dr.n_grp >= 1);
+	if (e.dr.n_grp)
+		EQ(e.dr.grp[0].note, "");
+	unlink(path);
+}
+
 int main(void)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -862,12 +949,14 @@ int main(void)
 	at_place_forms();
 	hex_options_survive();
 	shipped_rules_are_all_modelled();
+	block_order_is_not_an_edit();
+	block_note_is_not_a_matcher_note();
 
 	if (fails) {
 		printf("draft source: %d check(s) failed\n", fails);
 		return 1;
 	}
 	printf("draft source: two calls on one line, or, block index, "
-	       "mixed rule, at place, shipped rules - ok\n");
+	       "mixed rule, at place, shipped rules, block order, block note - ok\n");
 	return 0;
 }
