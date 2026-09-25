@@ -136,7 +136,26 @@
  * A pack is a build artefact next to the engine that reads it. Nothing here
  * converts an old one; a refusal costs a rebuild and nothing else.
  */
-#define KOF_PACK_MAJOR 1u
+/*
+ * 2 - THE MODULE ABI UNDER IT MOVED IN A DIRECTION A MINOR CANNOT DESCRIBE.
+ *
+ * The rule stated below is that this number moves when the LAYOUT moves and
+ * not when the engine grows a capability. A capability is exactly what did not
+ * happen here: a vtable slot was REMOVED - see KOFSIG_ABI_MIN - so a module in
+ * any pack built before this calls the wrong function through the wrong
+ * prototype. The pack's own abi_version field would refuse such a pack on its
+ * own, and this moves with it so that the refusal an operator SEES names the
+ * file rather than one record inside it.
+ *
+ * MAJOR AND NOT MINOR, because minor means "refused if higher" - a 1.1 engine
+ * correctly refusing a 1.2 pack - and what is wanted here is the other
+ * direction too: a 2.0 engine must refuse a 1.x pack, which only `major`,
+ * compared with `!=`, delivers.
+ *
+ * Nothing converts an old pack. A refusal costs a rebuild and nothing else,
+ * which is the same sentence the note below ends on and is still true.
+ */
+#define KOF_PACK_MAJOR 2u
 /*
  * THESE TWO NUMBERS DESCRIBE THE FILE, NOT THE ENGINE, and the distinction is
  * worth stating because it was got wrong once already.
@@ -162,22 +181,21 @@
  * - and not something a file-wide refusal can answer.
  */
 /*
- * 1 - the code section is no longer page aligned in the file.
+ * 0 - THE MINOR RESTARTS WITH THE MAJOR, and the layout it counted is the
+ * layout 2.0 starts from.
  *
- * A layout move by the rule above: KOF_PACK_CODE_ALIGN went from 4096 to
- * KOF_PACK_SEC_ALIGN, so the code section starts where the sections before it
- * ended rather than on the next page. Nothing about a module or a record
- * changed; where the section sits did, and that is exactly what this number is
- * for.
+ * 1.1 was "the code section is no longer page aligned in the file" -
+ * KOF_PACK_CODE_ALIGN went from 4096 to KOF_PACK_SEC_ALIGN, so the code
+ * section starts where the sections before it ended rather than on the next
+ * page, and the shipped set went from 123,196 bytes to 49,148. That alignment
+ * is what 2.0 inherits; the number describing it starts again because the
+ * major it qualified is gone.
  *
- * A 1.0 pack still loads: its code section is 4096-aligned, which is also
- * 64-aligned, so the validator accepts it unchanged. A 1.1 pack is refused by a
- * 1.0 engine, which is the correct direction and what "refused if higher"
- * buys.
- *
- * Measured on the shipped set: 123,196 bytes of database became 49,148.
+ * Nothing is lost by the reset. A 1.x pack is refused on `major` before this
+ * is ever compared, so no 2.0 reader can meet a 1.1 file and mistake it for a
+ * 2.1 one.
  */
-#define KOF_PACK_MINOR 1u
+#define KOF_PACK_MINOR 0u
 
 /*
  * WHEN, as YYYYMMDDHH in UTC - 2026090514 for 14:00 on the 5th.

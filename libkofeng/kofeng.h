@@ -729,17 +729,34 @@ int         kof_engine_multimatch(const kof_engine *, uint64_t *bytes,
  * that is itself the bug being reported.
  */
 /*
+ * 3.0 - DETECTION STOPPED BEING ONE PASS AND STARTED BEING A LADDER.
+ *
+ * A major for the same reason 2.0 was one: the shape of the scan changed, and
+ * an operator quoting a number should see it move.
+ *
+ * WHAT CHANGED. The two batched passes - the multi-pattern sweep and the
+ * similarity feed - ran before the first module was asked anything. They are
+ * demand driven now: the first module that DECLARES a marker pays for the
+ * sweep, the first that declares a block pays for the feed, and the module
+ * index is ordered so that the modules asking for least come first. Paired
+ * with it, a detector's verdict ends the analysis chain rather than being
+ * collected beside the rest of it. Worst case is unchanged - nothing is
+ * skipped that would have run - and the happy case stopped paying for work
+ * its answer made unnecessary. Measured over 5248 real ELF samples: 18734 ms
+ * to 16005 ms, with the same 1341 files detected and byte-identical output on
+ * 954 system binaries.
+ *
+ * AND ONE MEASURE IS GONE. The string set - kof_ovl_strings - was removed from
+ * the engine, the generator and the signature base. That is a module ABI break
+ * and is gated there, by KOFSIG_ABI_MIN; this number does not gate it and does
+ * not pretend to.
+ *
  * 2.0 - THE SCAN STOPPED BEING ONE SEARCH PER MARKER.
  *
- * A major rather than a minor because the thing an operator quotes in a bug
- * report should change when the scan's shape does, and this one changed: a
- * region is now read once for every marker declared against it, by a routine
- * the build chooses from the marker set. Nothing about the artefacts moved -
- * a pack still says its own layout and module ABI, and those are still what
- * the loader refuses on - so this gates nothing, exactly as the note above
- * says it must not.
+ * A region is read once for every marker declared against it, by a routine the
+ * build chooses from the marker set. Nothing about the artefacts moved.
  */
-#define KOFENG_MAJOR 2u
+#define KOFENG_MAJOR 3u
 /*
  * 1 - the database loader and writer changed together.
  *
@@ -817,9 +834,24 @@ int         kof_engine_multimatch(const kof_engine *, uint64_t *bytes,
  * THE DATABASE FORMAT DID NOT MOVE HERE EITHER, and for the same reason: a bit
  * in heur_want, bits in the scan mask that no format used, values in the
  * subtype mask, and fields appended to view structs that only grow at the end.
- * KOF_PACK_MINOR stays at 1. A rebuild is needed; a refusal is not.
+ * KOF_PACK_MINOR stayed at 1 through all of it. A rebuild is needed; a refusal
+ * is not.
  */
-#define KOFENG_MINOR 3u
+/*
+ * 0 - THE MINOR RESTARTS WITH THE MAJOR.
+ *
+ * Nothing has been added on top of 3.0 yet. The three notes above describe
+ * what 2.1, 2.2 and 2.3 were and are kept because a number an operator quoted
+ * a year ago should still mean something when it is looked up.
+ *
+ * UNLIKE 2.x, THIS MAJOR DID MOVE THE ARTEFACTS, and both of them: the pack
+ * layout to 2.0 - see KOF_PACK_MAJOR - and the module ABI to 3, floor and
+ * ceiling together, because a vtable slot was removed rather than added. A
+ * database built before this is refused rather than read, which is the first
+ * time that has been true of an engine bump here and is the reason to say it
+ * twice.
+ */
+#define KOFENG_MINOR 0u
 
 /* The Makefile passes the real stamp; this only keeps a stray compilation
  * building, the same way KOF_PACK_BUILD does. */

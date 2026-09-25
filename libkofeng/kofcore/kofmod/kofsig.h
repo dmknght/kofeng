@@ -34,12 +34,19 @@
  *
  * TWO NUMBERS, BECAUSE THE TWO BREAK IN OPPOSITE DIRECTIONS.
  *
- * The vtable is append only: slots are never removed, reordered, or given new
- * meaning. So an OLD module in a NEW host is safe by construction - every slot
- * it knows is still where it was - and only the other direction is a hazard: a
- * module built against a newer header calls a slot past the end of the host's
- * table, which is a wild call out of a file. KOFSIG_ABI_VERSION is the ceiling
- * that refuses it.
+ * The vtable is append only WHILE IT GROWS: slots are not reordered or given
+ * new meaning, so an OLD module in a NEW host is safe by construction - every
+ * slot it knows is still where it was - and only the other direction is a
+ * hazard: a module built against a newer header calls a slot past the end of
+ * the host's table, which is a wild call out of a file. KOFSIG_ABI_VERSION is
+ * the ceiling that refuses it.
+ *
+ * A SLOT CAN ALSO BE TAKEN AWAY, and that breaks the invariant in the same
+ * direction a view struct does rather than in the ceiling's direction. Every
+ * slot after the hole moves up one, so an old module calls its neighbour: the
+ * wrong function, through the wrong prototype, with no crash and no refusal.
+ * That is the floor's business, not the ceiling's - see KOFSIG_ABI_MIN - and
+ * it is why removing a measure is a floor bump and not merely a rebuild.
  *
  * A VIEW STRUCT IS NOT APPEND ONLY, and that is why a ceiling alone was not
  * enough. When kof_zip_info's entry array became a pointer, every offset after
@@ -53,11 +60,32 @@
  * when only the vtable grows - so an engine update still reads databases built
  * before it, which is the property the ceiling alone was protecting.
  *
- * BUMPING: add a vtable slot -> raise VERSION only. Move, resize or retype any
- * field of any kof_*_info -> raise both.
+ * BUMPING: add a vtable slot -> raise VERSION only. Remove one, or move,
+ * resize or retype any field of any kof_*_info -> raise both.
  */
-#define KOFSIG_ABI_VERSION 2
-#define KOFSIG_ABI_MIN     2
+/*
+ * 3 - THE STRING MEASURE WAS TAKEN OUT, AND WITH IT A VTABLE SLOT.
+ *
+ * `ovl_strings` sat between plague_score and ovl_blocks and is gone, so every
+ * slot after it moved up one; `ovl_shape` was appended at the end in the same
+ * change. Both halves of this number move because the first of those is the
+ * removal the note above describes, and a module built against ABI 2 would
+ * call ovl_blocks where it meant ovl_strings.
+ *
+ * The view structs moved too, which would have been reason enough on its own:
+ * struct kof_ovl_desc lost its string pool, struct kof_ovl_region lost the
+ * slice that indexed it, struct kof_ovl_vec lost the two string dimensions,
+ * and struct kof_ovl_shape gained lib_cut.
+ *
+ * WHY THE MEASURE WENT is recorded where a researcher will look for it - see
+ * the note beside SIM_IT_BLKSET in kofexamine/kofeditor.h, which carries the
+ * measurements: it hashed printable runs by their bytes, so any encoding of
+ * the strings answered zero, and on a large statically linked binary most of
+ * what it collected was not strings at all but printable byte sequences inside
+ * machine code that unrelated programs share.
+ */
+#define KOFSIG_ABI_VERSION 3
+#define KOFSIG_ABI_MIN     3
 
 /*
  * How strongly a finding is asserted.
