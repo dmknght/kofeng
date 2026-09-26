@@ -109,6 +109,31 @@ enum kof_script_type {
 #define KOF_SFAM_COUNT 5u
 
 /*
+ * THE FAMILY'S OWN WORD, so a reader can see the axis that declined a rule.
+ *
+ * kof_module_precond turns a family into a verdict about every module on the
+ * object, and until this existed there was no way to print the input to that
+ * verdict: a tool showed "Script any Shell" - format, ARCHITECTURE and
+ * language - and a shell rule declined on it with "targets another kind of
+ * this format", with nothing on screen disagreeing. The arch of a script is
+ * KOF_ARCH_ANY for every script there is, so that column said nothing and the
+ * one fact the reader needed was not there at all.
+ *
+ * NULL for NONE, which is how a caller spells "there is no family to show"
+ * without a second test.
+ */
+static inline const char *kof_script_fam_name(uint8_t fam)
+{
+	switch (fam) {
+	case KOF_SFAM_PHP:  return "php";
+	case KOF_SFAM_SVR:  return "server-page";
+	case KOF_SFAM_CFM:  return "cfml";
+	case KOF_SFAM_HTML: return "markup";
+	default:            return 0;
+	}
+}
+
+/*
  * Which subtypes each family holds, as a mask over enum kof_script_type - the
  * shape kof_module_precond compares a module's KOF_TARGET_SUBTYPE mask
  * against. NONE holds everything, which is how "no constraint" is spelled.

@@ -23120,9 +23120,27 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 			 (unsigned long long)ob->buf.n);
 		prop_add(A_DIM "  %-11s " A_OFF A_ID "%s%s%s" A_OFF,
 			 "format", fmt, sub ? " " : "", sub ? sub : "");
-		if (ob->fmt)
+		/*
+		 * THE FAMILY FOR A SCRIPT, WHERE THE ARCHITECTURE GOES FOR
+		 * everything else.
+		 *
+		 * Every script is KOF_ARCH_ANY, so this row said "any" on all
+		 * of them. What a reader of a script needs here is the family,
+		 * because kof_module_precond declines a module whose declared
+		 * subtypes all sit in another one - and with only the language
+		 * on screen, a shell script that reads as a php page looks
+		 * identical to one that does not, while only the second runs
+		 * shell rules.
+		 */
+		if (ob->fmt && ob->ctx.format == KOF_FMT_SCRIPT) {
+			const char *fa = kof_script_fam_name(ob->ctx.subfamily);
+
+			prop_add(A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF,
+				 "family", fa ? fa : "any");
+		} else if (ob->fmt) {
 			prop_add(A_DIM "  %-11s " A_OFF A_ID "%s" A_OFF,
 				 "arch", kof_arch_name(ob->ctx.arch));
+		}
 		prop_toolchain(ob);
 	} else {
 		/* Bytes and nothing else. The format and the architecture are

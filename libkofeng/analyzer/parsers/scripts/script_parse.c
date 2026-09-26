@@ -1083,7 +1083,6 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 		int guessed = 0;
 
 		tag = find_tag(file, look, &kind, &tl, &hl, &fam, &guessed);
-		obj_fam = fam;
 		/*
 		 * A SHEBANG OUTRANKS A GUESS, always. The test below asks
 		 * whether a DECLARED tag sits in code, which is the right
@@ -1129,6 +1128,35 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 					(uint32_t)file.n, (uint32_t)tag))
 			tag = (uint64_t)-1;
 		if (tag != (uint64_t)-1) {
+			/*
+			 * THE FAMILY BELONGS TO A TAG THAT WAS ACCEPTED, and
+			 * it used to be taken the moment one was FOUND.
+			 *
+			 * `obj_fam = fam` sat directly under find_tag, above
+			 * every test that can throw the tag away. So a tag
+			 * this file then refused - an inference beaten by a
+			 * shebang, a tag naming no language, a "<?php" the
+			 * shell lexer says is not code - left its family
+			 * behind anyway, and ctx->subfamily carried it out.
+			 *
+			 * kof_module_precond declines a module whose declared
+			 * subtypes all sit in another family, and that test is
+			 * right: a page opening with a bare "<%" is not php,
+			 * whatever else it is. Fed a family from a REJECTED
+			 * tag it does the opposite of its job. A shell dropper
+			 * carrying a base64 PHP payload decodes to text whose
+			 * quoting no longer balances, so "<?php" turns up at
+			 * what reads as shell top level: the tag was refused
+			 * and the subtype stayed KOF_SCRIPT_SHELL - the engine
+			 * had the language right - while the family went to
+			 * php and every shell rule was declined on the object
+			 * that finally held the evidence.
+			 *
+			 * Set here, where the tag has survived everything that
+			 * could reject it, so the family and the kind are two
+			 * answers from ONE decision rather than two decisions.
+			 */
+			obj_fam = fam;
 			info->kind = kind;
 			if (!info->tag_len) {
 				info->tag_off = (uint32_t)tag;

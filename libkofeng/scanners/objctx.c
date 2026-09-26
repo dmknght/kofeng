@@ -5097,6 +5097,27 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 		n = 0;
 	if (n) {
 		c_child_kind(ctx, KOF_ENT_NORMALIZED);
+		/*
+		 * AND IT IS STILL THE SAME LANGUAGE, said rather than left to
+		 * be re-read - see kof_src_declare_lang.
+		 *
+		 * This view is the object reformatted and decoded; it is not a
+		 * different file and cannot be a different language. The
+		 * decode is what makes saying so necessary: it rewrites the
+		 * view's own text, and a payload that a shell script carries
+		 * base64-encoded inside a quoted string arrives as PHP source
+		 * with its quoting no longer balanced. Re-read, the view then
+		 * opens with "<?php" at what looks like shell top level and is
+		 * typed PHP - so KOF_TARGET_SUBTYPE(KOF_SCRIPT_SHELL) declines
+		 * on the one object that finally holds the evidence, and 625
+		 * Backdoor.Shell.Agent samples in this corpus stopped being
+		 * detected the moment this view replaced the one norm_emit
+		 * used to make. norm_emit declares the language for exactly
+		 * this reason; so does this.
+		 */
+		sc->pend_subtype = ctx->subtype;
+		sc->pend_subfam  = ctx->subfamily;
+		sc->pend_lang    = 1;
 		if (emu_give(ctx, out, n))
 			c_child(ctx);
 		else

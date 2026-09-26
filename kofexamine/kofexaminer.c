@@ -1973,13 +1973,38 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 		 * means REL for an ELF and DLL for a PE, and which one it is is
 		 * exactly what the reader is here to find out.
 		 */
-		printf("  format    %s %s%s%s%s%s  %s%llu%s bytes\n",
-		       kof_format_name(ctx.format),
-		       C_ID, kof_arch_name(ctx.arch),
-		       kof_inspect_subtype_name(ctx.format, ctx.subtype) ? " " : "",
-		       kof_inspect_subtype_name(ctx.format, ctx.subtype)
-		       ? kof_inspect_subtype_name(ctx.format, ctx.subtype) : "",
-		       C_OFF, C_SIZE, (unsigned long long)buf.n, C_OFF);
+		/*
+		 * AND FOR A SCRIPT, THE FAMILY WHERE THE ARCHITECTURE WOULD BE.
+		 *
+		 * Every script is KOF_ARCH_ANY, so that column printed "any"
+		 * on every one of them and carried no information. The family
+		 * does: kof_module_precond declines a module whose declared
+		 * subtypes all sit in another one, and a reader looking at
+		 * "targets another kind of this format" had nothing on screen
+		 * to explain it - the language shown agreed with the rule, and
+		 * the axis that actually declined it was not displayed at all.
+		 * A php page and a shell script that mentions "<?php" both
+		 * read "Script any Shell" and only one of them runs shell
+		 * rules.
+		 *
+		 * A script with no family still prints "any", which is what it
+		 * means here too: nothing declines.
+		 */
+		{
+			const char *ax = ctx.format == KOF_FMT_SCRIPT
+				? kof_script_fam_name(ctx.subfamily)
+				: kof_arch_name(ctx.arch);
+
+			if (!ax)
+				ax = "any";
+			printf("  format    %s %s%s%s%s%s  %s%llu%s bytes\n",
+			       kof_format_name(ctx.format),
+			       C_ID, ax,
+			       kof_inspect_subtype_name(ctx.format, ctx.subtype) ? " " : "",
+			       kof_inspect_subtype_name(ctx.format, ctx.subtype)
+			       ? kof_inspect_subtype_name(ctx.format, ctx.subtype) : "",
+			       C_OFF, C_SIZE, (unsigned long long)buf.n, C_OFF);
+		}
 		print_view(ctx.format, view, &ctx, buf);
 
 		/* Regions last: they are the summary the rest explains, and with
