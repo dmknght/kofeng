@@ -177,20 +177,6 @@ static void marker_span(const uint8_t *p, uint64_t n, uint64_t base,
 	 * nothing before and cuts nothing now; what changed is only the case
 	 * where a real table shares a segment with a distant stray.
 	 */
-	if (n_hit >= 3u && hits <= LIB_MAX_HITS) {
-		uint32_t a, i;
-
-		hit_sort(hit, n_hit);
-		a = 0;
-		for (i = 1; i < n_hit; i++) {
-			if (hit[i].at - hit[i - 1].at <= LIB_SPAN_PER_MARKER)
-				continue;
-			cluster_emit(hit, a, i, base, l, obj);
-			a = i;
-		}
-		cluster_emit(hit, a, n_hit, base, l, obj);
-		return;
-	}
 	/*
 	 * AND THE MARKERS HAVE TO BE PACKED, not merely present.
 	 *
@@ -218,15 +204,55 @@ static void marker_span(const uint8_t *p, uint64_t n, uint64_t base,
 	 * SPELLED AS BYTES PER MARKER, which is the same rule read the way it
 	 * is enforced: at most five kilobytes of span for each marker found. A
 	 * library whose strings are five kilobytes apart is not a library.
-	 *
-	 * REFUSED ENTIRELY RATHER THAN TRIMMED. "These bytes are the library"
-	 * and "some of these bytes are" are different claims, and this function
-	 * can only make the first - see the note at the top of koflib.h on why
-	 * finding nothing is the honest answer when nothing can be found.
 	 */
-	if (hi - lo > (uint64_t)hits * LIB_SPAN_PER_MARKER)
+	if (hi - lo <= (uint64_t)hits * LIB_SPAN_PER_MARKER) {
+		kof_rl_add(l, obj, base + lo, hi - lo);
 		return;
-	kof_rl_add(l, obj, base + lo, hi - lo);
+	}
+	/*
+	 * THE SPAN FAILED AS ONE. TRY IT AS RUNS - AND ONLY THEN.
+	 *
+	 * Everything above judges a single span from the segment's FIRST marker
+	 * to its LAST, which makes one stray hit a veto: measured on
+	 * HEUR-Trojan.Linux.Agent.vn (MIPS, 279 KB, static), the errno table
+	 * sits in 585 bytes at 0x3f937 and a lone `__libc_` lies at 0x178a, so
+	 * the span asked about was 249 KB, needed fifty hits and had four.
+	 * Nothing was cut and the whole of uclibc stayed in CODE.
+	 *
+	 * So the hits are clustered - a gap wider than one marker's allowance
+	 * starts a new run - and each run is judged by the same rule, where it
+	 * means something.
+	 *
+	 * STRICTLY AFTER THE WHOLE-SPAN TEST, WHICH IS NOT AN ORDERING
+	 * PREFERENCE. Clustering FIRST was tried and measured: it cuts a span
+	 * into pieces and drops the gaps between them, so over 6311 corpus ELFs
+	 * 154 objects gained a cut, 422 cut LESS, and the library bytes removed
+	 * fell from 95.1 MB to 67.6 MB. Leaving library code in is the loud
+	 * failure - see the note at the top of koflib.h - so a change that
+	 * trades 27 MB of it for 154 objects is the wrong way round. Reached
+	 * only when the whole span was refused, this can add and cannot
+	 * subtract, and the same 6311 objects then measure: 154 gained a cut,
+	 * none lost one, none cut less, 95.1 MB -> 95.4 MB removed, and 2178
+	 * clean /usr binaries unchanged to the byte.
+	 *
+	 * IT DOES NOT WEAKEN THE SCATTERED-MARKER TEST. Twelve copies of
+	 * "GLIBC_2.2.5" spread over 150 KB become twelve runs of one hit each,
+	 * and a run of one never reaches the three-hit floor. That input cut
+	 * nothing before and cuts nothing now.
+	 */
+	if (n_hit >= 3u && hits <= LIB_MAX_HITS) {
+		uint32_t a, i;
+
+		hit_sort(hit, n_hit);
+		a = 0;
+		for (i = 1; i < n_hit; i++) {
+			if (hit[i].at - hit[i - 1].at <= LIB_SPAN_PER_MARKER)
+				continue;
+			cluster_emit(hit, a, i, base, l, obj);
+			a = i;
+		}
+		cluster_emit(hit, a, n_hit, base, l, obj);
+	}
 }
 
 /* ---- the symbol tier -------------------------------------------------------
