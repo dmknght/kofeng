@@ -73,6 +73,9 @@
 #define EM_PPC		20
 #define EM_PPC64	21
 #define EM_ARM		40
+#define EM_ARC_COMPACT	93
+#define EM_ARC_COMPACT2	195
+#define EM_ARC		45
 #define EM_X86_64	62
 #define EM_AARCH64	183
 #define EM_RISCV	243
@@ -116,6 +119,17 @@ static uint8_t arch_from_machine(uint16_t m, int is64)
 	case EM_MIPS:    return is64 ? KOF_ARCH_MIPS64  : KOF_ARCH_MIPS;
 	case EM_PPC:     return KOF_ARCH_PPC;
 	case EM_PPC64:   return KOF_ARCH_PPC64;
+	/*
+	 * ARC IS THREE MACHINE NUMBERS FOR ONE ARCHITECTURE. 45 is the
+	 * original, 93 is ARCompact and 195 is ARCv2; a toolchain picks one and
+	 * a rule written about "arc" means whichever it was built with. They
+	 * are not different targets to anything that reads this - a precondition
+	 * on architecture is about which instruction set the bytes are, and all
+	 * three are ARC.
+	 */
+	case EM_ARC:
+	case EM_ARC_COMPACT:
+	case EM_ARC_COMPACT2: return KOF_ARCH_ARC;
 	default:         return KOF_ARCH_OTHER;
 	}
 }

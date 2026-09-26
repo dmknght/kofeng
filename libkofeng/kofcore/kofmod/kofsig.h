@@ -542,7 +542,10 @@ _Static_assert(KOF_TARGET_LIST_MAX >= 8u,
 	X(KOF_ARCH_PPC64,   7,  "p64")                                       \
 	X(KOF_ARCH_MIPS64,  8,  "m64")                                       \
 	X(KOF_ARCH_PPC,     9,  "p32")                                       \
-	X(KOF_ARCH_RISCV32, 10, "r32")
+	X(KOF_ARCH_RISCV32, 10, "r32")                                       \
+	X(KOF_ARCH_ARC,     11, "arc")   /* Synopsys ARC - an IoT botnet
+					  * target, and a whole tier of them
+					  * read as "other" without it */
 
 enum kof_arch {
 #define KOF_ARCH_X_ENUM(name, val, word) name = val,
@@ -553,7 +556,7 @@ enum kof_arch {
 
 /* How many the list names, which is not the largest value: OTHER is outside it
  * on purpose. A mask has one bit per member, so this is also its width. */
-#define KOF_ARCH_COUNT 11u
+#define KOF_ARCH_COUNT 12u
 
 /* strcmp, spelled out: this header is included by rule sources that get no
  * libc, and one identifier comparison does not justify the dependency. */
