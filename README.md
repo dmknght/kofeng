@@ -52,14 +52,30 @@ map to it.
 
 | | |
 |---|---|
+| [Scan pipeline](../../wiki/Scan-pipeline) | what happens to one object, and what work is avoided |
 | [String matching engine](../../wiki/String-matching-engine) | one sweep per region for all of its markers; how the routine is chosen |
-| [Parsers and formats](../../wiki/Parsers-and-formats) | ELF, PE, and the containers |
+| [Parsers and formats](../../wiki/Parsers-and-formats) | ELF, PE, the containers, and how a script is identified |
 | [Scan objects](../../wiki/Scan-objects) | a file is one object; an archive is many |
+| [Normalisation](../../wiki/Normalisation) | decoding base64, hex and percent so a rule can be written against what the program means |
 | [Unpackers](../../wiki/Unpackers) · [Decompressors](../../wiki/Decompressors) | getting to the bytes that matter |
 | [Emulator](../../wiki/Emulator) · [recovered objects](../../wiki/Emulator-recovered-objects) | when static unpacking is not enough |
 | [Disassembly and xref](../../wiki/Disassembly-and-xref) | which code refers to which data |
 | [Symbols and region search](../../wiki/Symbols-and-region-search) | searching something other than raw bytes |
 | [Database format](../../wiki/Database-format) · [Building a database](../../wiki/Building-a-database) | what a `.ksig` is and how one is made |
+| [Caching](../../wiki/Caching) | the clean-file set, what a key is, and when it can lie |
+
+## Similarity, for rules that must survive a rebuild
+
+| | |
+|---|---|
+| [Plague signatures](../../wiki/Plague-signatures) | how much of one declared block of code is present, as a percentage |
+| [Overlord signatures](../../wiki/Overlord-signatures) | is this the same program as that one — shape, string set, call chain |
+
+## Beyond files
+
+| | |
+|---|---|
+| [Real-time collection](../../wiki/Real-time-collection) | `libkoforbit` — fanotify, the process connector, and the `/proc` snapshot |
 
 ## Tools
 
@@ -69,6 +85,9 @@ map to it.
 | `kofexamine` | what the engine sees in one object: regions, markers, what each module made of it |
 | `kofviewer` | a terminal UI over the same facts, and where signatures are drafted |
 | `ksigbuilder` | pack compiled modules into a database; `--module` compiles one |
+| `kofwatchtower` | print what the machine is doing, and what it cost to find out |
+| `kofwatchman` | the half that decides: those records against a database |
+| `kofmontrace` | run a program and show only what it did |
 
 [Command-line reference](../../wiki/Command-line-reference) ·
 [Reading results](../../wiki/Reading-results) ·

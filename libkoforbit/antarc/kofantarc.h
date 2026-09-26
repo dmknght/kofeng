@@ -18,23 +18,43 @@
  * meet only where a caller decides to hand one to the other.
  *
  *
- * WHAT THIS FILE IS FOR, since the interesting half is next door.
+ * WHAT THIS FILE IS FOR, since the interesting parts are next door.
  *
- * The errors and the version, shared by both halves. aproc.h includes this so
- * that a caller who already handles kofa_err_name for one does not have to
- * learn a second set of numbers for the other. The event-stream API will land
- * here when the fanotify collector does; it is deliberately not sketched in
- * advance, because the first version of the Windows one taught that the shape
- * of a collector is decided by what the stream actually looks like, and nobody
- * knows that until they have watched it.
+ * The errors and the version, shared by every collector here. Each of them
+ * includes this, so a caller who already handles kofa_err_name for one does not
+ * have to learn a second set of numbers for the next.
+ *
+ * The stream APIs are in the files that own them - afan.h and apev.h - rather
+ * than sketched here, because the first version of the Windows one taught that
+ * the shape of a collector is decided by what the stream actually looks like.
+ *
+ *
+ * THE THREE COLLECTORS, and they do not substitute for one another.
+ *
+ *   aproc.h   what is HERE - every process at this instant, its address space,
+ *             and the bytes in any of it. The half a stream cannot supply,
+ *             because a stream cannot see backwards.
+ *   afan.h    what the FILESYSTEM did, from fanotify. Notify only: no
+ *             FAN_CLASS_CONTENT and no FAN_*_PERM. Two modes, and it says
+ *             which one it got - see enum kofa_fan_mode.
+ *   apev.h    what RAN, from the netlink process connector. A dropper that
+ *             writes a file and executes it produces one record in afan and
+ *             one here, and only the pair says what happened.
+ *
+ * amon.h puts all three behind one kof_mon_api, because knowing that two of
+ * them report one event twice is knowledge about ANTARC'S OWN collectors.
  *
  *
  * WHAT IS NOT BUILT YET, said plainly.
  *
- * No event stream: no fanotify, no process events, no detection of any kind.
- * This build is the SNAPSHOT half only - see aproc.h. When the stream arrives
- * it is notify-only; blocking (FAN_*_PERM) is a separate design with a failure
- * mode that hangs the whole machine, and it is not being smuggled in early.
+ * Blocking. FAN_*_PERM is a separate design with a failure mode that hangs the
+ * whole machine - a decision loop that dies or falls behind makes every open()
+ * on the system wait - and it is not being smuggled in early.
+ *
+ * (This paragraph read "no event stream: no fanotify, no process events, no
+ * detection of any kind" for as long as that was true, and for a while after
+ * it stopped being. A header that describes a library it no longer matches is
+ * worse than one that says nothing, because it is believed.)
  */
 
 #ifndef KOFANTARC_H
