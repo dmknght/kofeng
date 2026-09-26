@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <unistd.h>
 #include <time.h>
 #include <signal.h>
@@ -989,6 +990,42 @@ static void usage(const char *argv0)
  * Written as a number rather than as --no-heur so that the command lines and
  * scripts that already say --heur 0 or --heur 1 keep working.
  */
+/*
+ * A NUMBER, OR THE RUN DOES NOT START.
+ *
+ * `strtoul` answers 0 for a string it could not read at all, and every limit
+ * this tool takes reads 0 as "no limit" or "the default" - so a mistyped
+ * `--max-depth 1O` (letter O) does not narrow the scan, it REMOVES the bound
+ * the operator just asked for, and nothing is printed. The mistake is
+ * invisible at the one moment it matters.
+ *
+ * `--heur` and `--jobs` already refuse rather than clamp, for the reason
+ * written beside them. This is the same rule for the rest of them, in one
+ * place: the whole argument must be digits, it must be inside the range, and
+ * anything else stops the run.
+ */
+static int num_arg(const char *argv0, const char *opt, const char *v,
+		   unsigned long long lo, unsigned long long hi,
+		   unsigned long long *out)
+{
+	char *end;
+	unsigned long long n;
+
+	if (!v || !*v) {
+		fprintf(stderr, "%s: %s needs a number\n", argv0, opt);
+		return 0;
+	}
+	errno = 0;
+	n = strtoull(v, &end, 10);
+	if (*end || errno == ERANGE || n < lo || n > hi) {
+		fprintf(stderr, "%s: %s takes %llu to %llu, not '%s'\n",
+			argv0, opt, lo, hi, v);
+		return 0;
+	}
+	*out = n;
+	return 1;
+}
+
 static int heur_arg(const char *v, struct kof_scan_option *opt)
 {
 	char *end;
@@ -1646,11 +1683,22 @@ int main(int argc, char **argv)
 			db = argv[++i];
 		else if (strcmp(argv[i], "--scan-files") == 0 && i + 1 < argc)
 			target = argv[++i];
-		else if (strcmp(argv[i], "--max-depth") == 0 && i + 1 < argc)
-			opt.max_depth = (uint32_t)strtoul(argv[++i], NULL, 10);
-		else if (strcmp(argv[i], "--object-depth") == 0 && i + 1 < argc)
-			opt.max_object_depth =
-				(uint32_t)strtoul(argv[++i], NULL, 10);
+		else if (strcmp(argv[i], "--max-depth") == 0 && i + 1 < argc) {
+			unsigned long long v;
+
+			if (!num_arg(argv[0], "--max-depth", argv[++i],
+				     1, 0xffffffffull, &v))
+				return 2;
+			opt.max_depth = (uint32_t)v;
+		}
+		else if (strcmp(argv[i], "--object-depth") == 0 && i + 1 < argc) {
+			unsigned long long v;
+
+			if (!num_arg(argv[0], "--object-depth", argv[++i],
+				     1, 0xffffffffull, &v))
+				return 2;
+			opt.max_object_depth = (uint32_t)v;
+		}
 		else if (strcmp(argv[i], "--follow-links") == 0)
 			opt.follow_symlinks = 1;
 		else if (strcmp(argv[i], "--all-matches") == 0)
@@ -1693,16 +1741,34 @@ int main(int argc, char **argv)
 				return 2;
 			}
 		}
-		else if (strcmp(argv[i], "--max-produced") == 0 && i + 1 < argc)
-			opt.max_produced_bytes = strtoull(argv[++i], NULL, 10);
+		else if (strcmp(argv[i], "--max-produced") == 0 && i + 1 < argc) {
+			unsigned long long v;
+
+			if (!num_arg(argv[0], "--max-produced", argv[++i],
+				     1, ~0ull, &v))
+				return 2;
+			opt.max_produced_bytes = v;
+		}
 		/* The memory ceiling, exposed because it is the limit that decides
 		 * how much of a container is examined and because a decoder that
 		 * cannot stream is sized from what is left under it - neither is
 		 * reachable from outside without being able to set it. */
-		else if (strcmp(argv[i], "--max-resident") == 0 && i + 1 < argc)
-			opt.max_resident_bytes = strtoull(argv[++i], NULL, 10);
-		else if (strcmp(argv[i], "--max-object") == 0 && i + 1 < argc)
-			opt.max_object_bytes = strtoull(argv[++i], NULL, 10);
+		else if (strcmp(argv[i], "--max-resident") == 0 && i + 1 < argc) {
+			unsigned long long v;
+
+			if (!num_arg(argv[0], "--max-resident", argv[++i],
+				     1, ~0ull, &v))
+				return 2;
+			opt.max_resident_bytes = v;
+		}
+		else if (strcmp(argv[i], "--max-object") == 0 && i + 1 < argc) {
+			unsigned long long v;
+
+			if (!num_arg(argv[0], "--max-object", argv[++i],
+				     1, ~0ull, &v))
+				return 2;
+			opt.max_object_bytes = v;
+		}
 		else if (strcmp(argv[i], "--jobs") == 0 && i + 1 < argc) {
 			unsigned long v = strtoul(argv[++i], NULL, 10);
 
@@ -1731,11 +1797,25 @@ int main(int argc, char **argv)
 		 * process is interesting. See kof_walk_option.
 		 */
 		else if (strcmp(argv[i], "--pid") == 0 && i + 1 < argc) {
-			if (n_pids < (uint32_t)(sizeof pids / sizeof pids[0]))
-				pids[n_pids++] =
-					(uint32_t)strtoul(argv[++i], NULL, 10);
-			else
-				i++;
+			unsigned long long v;
+
+			/*
+			 * REFUSED, NOT DROPPED. The 65th --pid used to be
+			 * consumed and thrown away: a caller that named a
+			 * process got a run which never opened it and said
+			 * nothing, which is the failure this tool counts
+			 * `cached` and `unreadable` to avoid everywhere else.
+			 */
+			if (n_pids >= (uint32_t)(sizeof pids / sizeof pids[0])) {
+				fprintf(stderr, "%s: --pid may be given at "
+					"most %u times\n", argv[0],
+					(unsigned)(sizeof pids / sizeof pids[0]));
+				return 2;
+			}
+			if (!num_arg(argv[0], "--pid", argv[++i],
+				     1, 0xffffffffull, &v))
+				return 2;
+			pids[n_pids++] = (uint32_t)v;
 			want_procs = 1;
 		}
 		else if (strcmp(argv[i], "--stats") == 0)
@@ -1829,9 +1909,8 @@ int main(int argc, char **argv)
 	 */
 	if (jobs > 1) {
 		unsigned k;
+		uint64_t resident_all = opt.max_resident_bytes;
 
-		if (opt.max_resident_bytes)
-			opt.max_resident_bytes /= jobs;
 		scs = calloc(jobs, sizeof *scs);
 		if (scs) {
 			scs[0] = sc;
@@ -1852,6 +1931,16 @@ int main(int argc, char **argv)
 		} else {
 			jobs = made;
 		}
+		/*
+		 * SHARED OUT AMONG THE THREADS THERE ARE, not among the ones
+		 * that were asked for. The division used to happen before the
+		 * scanners were made, so a run that wanted eight and got three
+		 * gave each of the three an eighth of the budget and left five
+		 * eighths of it unusable - the scan then met a limit it had
+		 * been configured not to have.
+		 */
+		if (resident_all)
+			opt.max_resident_bytes = resident_all / jobs;
 	}
 
 	/*

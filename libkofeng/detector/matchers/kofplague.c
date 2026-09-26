@@ -346,6 +346,58 @@ static int pl_in_lib(const struct kof_plague_ctx *c, uint64_t off, uint64_t len)
  *
  * Returns how many were written, never more than max_out.
  */
+/*
+ * ASCENDING, IN PLACE, AND NOT AN INSERTION SORT.
+ *
+ * What the caller wants out of this is a sorted, de-duplicated list, and any
+ * correct sort produces the same one - so the choice is only about what it
+ * costs. An insertion sort was here, and the values being sorted are hashes:
+ * they arrive in no order at all, which is the input that makes it quadratic
+ * rather than the nearly-sorted one that makes it fast.
+ *
+ * The array is up to KOF_PLAGUE_SPAN_MAX entries. At the cap that is 268
+ * million moves against 229 thousand comparisons for an n log n sort, and the
+ * span this runs over is a whole region of a file - kofviewer carves one every
+ * time a researcher moves the selection.
+ *
+ * HEAPSORT, WHICH IS THE ONE THAT FITS. `tmp` is already 64 KB of frame and
+ * the build refuses a frame past 128 KB, so a merge or a radix pass has
+ * nowhere to put its second buffer; heapsort needs none, recurses nowhere, and
+ * has no input that degrades it.
+ */
+static void pl_sift(uint32_t *a, uint32_t root, uint32_t n)
+{
+	for (;;) {
+		uint32_t c = 2u * root + 1u, big = root, t;
+
+		if (c < n && a[c] > a[big])
+			big = c;
+		if (c + 1u < n && a[c + 1u] > a[big])
+			big = c + 1u;
+		if (big == root)
+			return;
+		t = a[root]; a[root] = a[big]; a[big] = t;
+		root = big;
+	}
+}
+
+static void pl_sort(uint32_t *a, uint32_t n)
+{
+	uint32_t i;
+
+	if (n < 2u)
+		return;
+	for (i = n / 2u; i-- > 0u; )
+		pl_sift(a, i, n);
+	for (i = n; i-- > 1u; ) {
+		uint32_t t = a[0];
+
+		a[0] = a[i];
+		a[i] = t;
+		pl_sift(a, 0, i);
+	}
+}
+
 uint32_t kof_plague_hash_span(const uint8_t *p, uint64_t n, uint32_t norm,
 			      uint32_t *out, uint32_t max_out)
 {
@@ -381,12 +433,7 @@ uint32_t kof_plague_hash_span(const uint8_t *p, uint64_t n, uint32_t norm,
 		h = h * KOF_PLAGUE_BASE + PB(at + KOF_PLAGUE_NG);
 	}
 #undef PB
-	for (i = 1; i < nt; i++) {
-		uint32_t vv = tmp[i], j = i;
-
-		while (j && tmp[j - 1u] > vv) { tmp[j] = tmp[j - 1u]; j--; }
-		tmp[j] = vv;
-	}
+	pl_sort(tmp, nt);
 	for (i = 0; i < nt && got < max_out; i++)
 		if (!i || tmp[i] != tmp[i - 1u])
 			out[got++] = tmp[i];
@@ -524,18 +571,42 @@ void kof_plague_feed(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm
 			 * the author's, and the rule this states is that ANY
 			 * overlap disqualifies.
 			 */
-			uint64_t wlen = norm == KOF_PLAGUE_RAW
-				      ? (uint64_t)KOF_PLAGUE_NG
-				      : (uint64_t)KOF_PLAGUE_NG + 1u;
-			uint32_t side = (c->n_lib && p >= c->obj_base &&
-					 pl_in_lib(c,
-						   (uint64_t)(p - c->obj_base) + at,
-						   wlen))
-				      ? (uint32_t)KOF_PLAGUE_SIDE_LIB
-				      : (uint32_t)KOF_PLAGUE_SIDE_USER;
+			/*
+			 * THE BITMAP FIRST, AND THE SIDE ONLY IF IT PASSES.
+			 *
+			 * Both values below are read by pl_credit and by
+			 * nothing else, so computing them before the index
+			 * test is work thrown away for every window the index
+			 * does not hold - which is nearly all of them. The cost
+			 * model at the top of kofplague.h says exactly that:
+			 * "most windows are not selected at all, and of those
+			 * that are, most are in no rule; both are rejected
+			 * without touching the index."
+			 *
+			 * pl_in_lib walks the library spans, and the symbol
+			 * tier produces one per library function - up to
+			 * KOF_LIB_MAX_SPANS_ALL of them. Paid per selected
+			 * window on a three-megabyte object that is ninety
+			 * thousand walks of a list answering nothing the
+			 * verdict uses.
+			 *
+			 * The answer is identical either way: the index test
+			 * reads nothing these compute, and they read nothing
+			 * the index test changes.
+			 */
+			if (s->bm[k >> 3] & (1u << (k & 7u))) {
+				uint64_t wlen = norm == KOF_PLAGUE_RAW
+					      ? (uint64_t)KOF_PLAGUE_NG
+					      : (uint64_t)KOF_PLAGUE_NG + 1u;
+				uint32_t side = (c->n_lib && p >= c->obj_base &&
+						 pl_in_lib(c,
+							   (uint64_t)(p - c->obj_base) + at,
+							   wlen))
+					      ? (uint32_t)KOF_PLAGUE_SIDE_LIB
+					      : (uint32_t)KOF_PLAGUE_SIDE_USER;
 
-			if (s->bm[k >> 3] & (1u << (k & 7u)))
 				pl_credit(c, scan_mask, norm, mixed, side);
+			}
 		}
 		/* The `next:` label that was here is gone with the refusal it
 		 * existed for: a library window no longer skips the crediting
