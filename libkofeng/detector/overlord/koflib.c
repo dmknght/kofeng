@@ -65,9 +65,60 @@ static const char *const markers[] = {
 /* How much span one marker may account for - see the measurement below. */
 #define LIB_SPAN_PER_MARKER 5120u
 
+/*
+ * How many marker hits one segment's walk records before it stops clustering
+ * them and falls back to the single span from the first to the last.
+ *
+ * The fallback is the conservative direction: it is the rule this function had
+ * before clusters existed, and it refuses more than it accepts. A segment with
+ * more hits than this is a large static build whose strings are dense anyway,
+ * which is the case the global rule already handled.
+ */
+#define LIB_MAX_HITS 256u
+
+struct lib_hit { uint64_t at; uint32_t len; };
+
+/* Ordered by position, which is what clustering needs and what the per-marker
+ * scan above does not produce: each marker is searched over the whole segment
+ * before the next one starts. Insertion sort, because the array is small and
+ * very nearly sorted in the common case - one marker's hits arrive in order. */
+static void hit_sort(struct lib_hit *h, uint32_t n)
+{
+	uint32_t i, j;
+
+	for (i = 1; i < n; i++) {
+		struct lib_hit v = h[i];
+
+		for (j = i; j && h[j - 1].at > v.at; j--)
+			h[j] = h[j - 1];
+		h[j] = v;
+	}
+}
+
+/* One run of markers that are close enough to be the same table. */
+static void cluster_emit(const struct lib_hit *h, uint32_t a, uint32_t b,
+			 uint64_t base, struct kof_rlist *l, uint64_t obj)
+{
+	uint64_t lo = h[a].at, hi = 0;
+	uint32_t i, hits = b - a;
+
+	if (hits < 3u)
+		return;
+	for (i = a; i < b; i++)
+		if (h[i].at + h[i].len > hi)
+			hi = h[i].at + h[i].len;
+	if (hi <= lo)
+		return;
+	if (hi - lo > (uint64_t)hits * LIB_SPAN_PER_MARKER)
+		return;
+	kof_rl_add(l, obj, base + lo, hi - lo);
+}
+
 static void marker_span(const uint8_t *p, uint64_t n, uint64_t base,
 			struct kof_rlist *l, uint64_t obj)
 {
+	struct lib_hit hit[LIB_MAX_HITS];
+	uint32_t n_hit = 0;
 	uint64_t lo = (uint64_t)-1, hi = 0;
 	uint32_t k, hits = 0;
 
@@ -91,6 +142,11 @@ static void marker_span(const uint8_t *p, uint64_t n, uint64_t base,
 					lo = at;
 				if (at + mlen > hi)
 					hi = at + mlen;
+				if (n_hit < LIB_MAX_HITS) {
+					hit[n_hit].at = at;
+					hit[n_hit].len = (uint32_t)mlen;
+					n_hit++;
+				}
 				hits++;
 			}
 			left = n - (uint64_t)(f - p) - 1;
@@ -99,6 +155,42 @@ static void marker_span(const uint8_t *p, uint64_t n, uint64_t base,
 	}
 	if (hits < 3 || hi <= lo)
 		return;
+	/*
+	 * ONE TABLE PER RUN OF MARKERS, AND NOT ONE SPAN PER SEGMENT.
+	 *
+	 * Everything below is about density, and it used to be asked of a
+	 * single span from the segment's FIRST marker to its LAST. That makes
+	 * one stray hit a veto over the whole segment: measured on
+	 * HEUR-Trojan.Linux.Agent.vn (MIPS, 279 KB, static), the errno table
+	 * sits in 585 bytes at 0x3f937 and one `__libc_` lies at 0x178a, so the
+	 * span asked about was 249 KB and needed fifty hits to pass. It had
+	 * four. Nothing was cut, and the whole of uclibc stayed in CODE.
+	 *
+	 * The markers are clustered instead: a gap wider than one marker's
+	 * allowance starts a new run, and each run is judged on its own. That
+	 * is the SAME rule - "a library whose strings are five kilobytes apart
+	 * is not one library" - asked where it means something.
+	 *
+	 * IT DOES NOT WEAKEN THE SCATTERED-MARKER TEST. Twelve copies of
+	 * "GLIBC_2.2.5" spread over 150 KB become twelve runs of one hit each,
+	 * and a run of one never reaches the three-hit floor. That input cut
+	 * nothing before and cuts nothing now; what changed is only the case
+	 * where a real table shares a segment with a distant stray.
+	 */
+	if (n_hit >= 3u && hits <= LIB_MAX_HITS) {
+		uint32_t a, i;
+
+		hit_sort(hit, n_hit);
+		a = 0;
+		for (i = 1; i < n_hit; i++) {
+			if (hit[i].at - hit[i - 1].at <= LIB_SPAN_PER_MARKER)
+				continue;
+			cluster_emit(hit, a, i, base, l, obj);
+			a = i;
+		}
+		cluster_emit(hit, a, n_hit, base, l, obj);
+		return;
+	}
 	/*
 	 * AND THE MARKERS HAVE TO BE PACKED, not merely present.
 	 *
