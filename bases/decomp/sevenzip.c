@@ -36,7 +36,7 @@ KOF_TARGET_FORMAT(KOF_FMT_7Z);
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_7z_info *z = kof_7z(ctx);
-	uint32_t i, opened = 0, unreached = 0, method;
+	uint32_t i, opened = 0, unreached = 0, unsized = 0, method;
 
 	if (!z->valid)
 		return;
@@ -53,9 +53,34 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		 * The list is already readable where it lies. A window costs nothing
 		 * and puts the names in front of every module that searches text.
 		 */
+		/*
+		 * AND THEN THE CONTENT, which this used to return before
+		 * reaching.
+		 *
+		 * The window above is the file LIST, handed over so the names
+		 * are searchable text - that part is the design and the note
+		 * above says why. What it is not is the archive: the folder
+		 * loop past this switch is where the members are decoded, and
+		 * the coded-header case breaks into it. This case returned.
+		 *
+		 * So every 7z whose header is stored plain - which is most of
+		 * them, a header is only coded when it is large - handed over
+		 * its name list and nothing else. Measured against bsdtar on
+		 * five from the corpus: each produced one child of 114 to 190
+		 * bytes, all of it header, and the member bsdtar reads (132 MB
+		 * in one of them) was never extracted at all.
+		 *
+		 * NOT CLOSED WITH kof_child(), unlike the coded case below it.
+		 * A window is not a sink: c_window pushes the child as it is
+		 * called, where kof_emit and kof_unpack_at accumulate into one
+		 * that kof_child() closes. Calling it here finds nothing
+		 * pending, answers zero, and this read that as the host
+		 * refusing - every plain-header archive then reported "Limit
+		 * reached" over an archive it had read fine.
+		 */
 		if (z->next_hdr_size &&
 		    kof_child_window(z->next_hdr_off, z->next_hdr_size))
-			return;
+			break;
 		KOF_UNP_BROKEN(KOF_UNP_DAMAGED);
 
 	case KOF_7Z_HDR_CODED:
@@ -125,8 +150,24 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			kof_debug("SevenZip.folder_filter", fo->filter);
 		kof_debug("SevenZip.folder_unpack", fo->unpack_size);
 
-		if (!fo->pack_size || !fo->unpack_size)
+		/*
+		 * A FOLDER WITH NO SIZES IS A READ THAT FAILED, NOT A FOLDER
+		 * WITH NOTHING IN IT.
+		 *
+		 * This used to `continue` and say nothing, so an archive whose
+		 * packed sizes the parse never picked up reported `folders 5,
+		 * opened 0` with no reason attached and came back clean - the
+		 * same silence the kSize bug in the parser hid behind, and it
+		 * would have hidden the next one too. A folder is only ever
+		 * declared because the header listed one; if this cannot say
+		 * where its bytes are, the content was not looked at and the
+		 * verdict has to say so.
+		 */
+		if (!fo->pack_size || !fo->unpack_size) {
+			kof_debug("SevenZip.folder_unsized", i);
+			unsized++;
 			continue;
+		}
 		if (fo->coder != KOF_7Z_CODER_LZMA2 &&
 		    fo->filter != KOF_7Z_CODER_BCJ2) {
 			unreached++;
@@ -193,4 +234,11 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		kof_unp_broken(KOF_UNP_UNSUPPORTED);
 	else if (z->n_folders == 0)
 		kof_unp_broken(KOF_UNP_UNSUPPORTED);
+	/*
+	 * Last, and a different word: an unsized folder is not a coder this
+	 * build lacks - a later build does not fix it - it is a header this
+	 * did not read. DAMAGED is the one an operator acts on differently.
+	 */
+	else if (unsized)
+		kof_unp_broken(KOF_UNP_DAMAGED);
 }

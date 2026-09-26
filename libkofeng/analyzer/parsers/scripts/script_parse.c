@@ -569,6 +569,112 @@ static const uint32_t TL_FIRST[256] = {
 #define TL_G1 0x00c00000u   /* KOF_SCRIPT_JS */
 #define TL_G2 0x1f000000u   /* KOF_SCRIPT_VBS */
 
+/*
+ * ENTRIES 8..13 ARE THE OPERATORS POSIX `test` ALSO SPELLS - AND ONLY THOSE.
+ *
+ * "-eq", "-ne", "-lt", "-gt", "-le", "-ge" are PowerShell's comparisons and
+ * they are equally `[ "$n" -lt 10 ]`, which is every shell script ever
+ * written. One of them decided the language outright, and kof_script_norm then
+ * rewrote a `#!/bin/sh` file under PowerShell's whitespace rule, where space
+ * between tokens means nothing: `case "$ARCH" in` became `case"$ARCH"in`.
+ * script_norm.h names that exact trap at the top of the file - "ls -la" and
+ * "ls-la" are different commands.
+ *
+ * DEMANDING TWO OF THEM WAS TRIED HERE AND IS WRONG. tests/unit/script_tagless.c
+ * pins a real shape that has exactly one: a PowerShell file that defines
+ * functions, calls no cmdlet, and is recognised by "-eq" alone. Two of the
+ * shipped scripts are that shape, and the test says so.
+ *
+ * SO IT IS RESOLVED IN TWO PLACES INSTEAD, neither of them a count.
+ *
+ *   WHERE THE FILE SAYS. A shebang is the author writing the language down,
+ *   and find_tag now reports whether its answer was a DECLARATION or an
+ *   inference, so an inference cannot overrule one.
+ *   WHERE THE SYNTAX SAYS. With no shebang, shell_test_operator asks whether
+ *   the operator is an argument to `[` or `test`, which is the only way shell
+ *   spells it and never how PowerShell does.
+ */
+/*
+ * SIX, NOT FOURTEEN, AND THE DIFFERENCE IS EVIDENCE THROWN AWAY.
+ *
+ * This mask started as every space-initial entry - 8 through 21, the whole of
+ * TL_FIRST[' '] - which swept in "-match", "-notmatch", "-like", "-notlike",
+ * "-contains", "-replace", "-join" and "-split". POSIX `test` spells none of
+ * those: there is no shell in which `[ "$a" -replace "$b" ]` means anything,
+ * so there was never a collision to resolve for them, and suppressing them
+ * threw away eight unambiguous PowerShell tells to answer a question about
+ * six. A file whose only PowerShell evidence was `-match` inside brackets
+ * came back unrecognised instead of PowerShell.
+ *
+ * The six below are the real overlap and the only ones shell_test_operator
+ * has anything to say about.
+ */
+#define TL_GSH 0x00003f00u  /* entries 8..13: shared with POSIX test */
+
+/*
+ * IS THIS ONE OF `test`'S OPERATORS RATHER THAN POWERSHELL'S?
+ *
+ * The six comparisons at entries 8..13 belong to both languages, and the
+ * shebang settles it wherever there is one - see find_tag's `guessed`. Where
+ * there is none, this is what separates them, and it is one local look rather
+ * than a parser:
+ *
+ *   IN SHELL THE OPERATOR IS AN ARGUMENT TO A COMMAND. `[ "$n" -lt 10 ]` and
+ *   `test "$n" -lt 10` are the only two ways to write it, and both put a `[`
+ *   or the word `test` at the start of the command. So the bytes before the
+ *   operator, back to the nearest thing that begins a command, are searched
+ *   for exactly those two.
+ *   IN POWERSHELL THERE IS NO SUCH WORD. `if ($a -eq $null)` opens with `(`,
+ *   and `$a -eq $b` opens with a variable; neither reaches a `[` that is not
+ *   a type literal, and a type literal is `[string]` - closed before the
+ *   operator, so it is not what this finds.
+ *
+ * BOUNDED AT 64 BYTES, which is longer than any `[ ... -lt` that means
+ * anything and short enough that this cannot become a scan. Stops at a newline
+ * or a `;` because those end a command, so a `[` on the line above is not this
+ * command's.
+ */
+#define SH_TEST_LOOK 64u
+
+static int shell_test_operator(kof_buf f, uint64_t at)
+{
+	uint64_t i = at, stop = at > SH_TEST_LOOK ? at - SH_TEST_LOOK : 0;
+
+	while (i > stop) {
+		uint8_t c = f.p[--i];
+
+		if (c == '\n' || c == ';' || c == '&' || c == '|')
+			return 0;              /* a previous command's */
+		/*
+		 * A SPACE AFTER IT, BECAUSE SHELL'S `[` IS A COMMAND AND
+		 * POWERSHELL'S IS NOT.
+		 *
+		 * `[ "$n" -lt 10 ]` is the command named `[`, so a separator
+		 * follows it the way one follows any command. `[int]$a -eq 5`
+		 * is a type literal and the name runs straight on from the
+		 * bracket. Without this test that cast read as a shell test and
+		 * a PowerShell file with no cmdlet in it came back
+		 * unrecognised - measured on `if ([int]$a -eq 5) { $b = 1 }`.
+		 *
+		 * `[[` is bash's own, and it is the same rule one character
+		 * along.
+		 */
+		if (c == '[' && i + 1u < f.n &&
+		    (f.p[i + 1] == ' ' || f.p[i + 1] == '[' ||
+		     f.p[i + 1] == '\t'))
+			return 1;
+		/* `test` as a word: the four letters with a space after them
+		 * and nothing but a delimiter before. */
+		if (c == 't' && i + 5u <= f.n &&
+		    f.p[i + 1] == 'e' && f.p[i + 2] == 's' &&
+		    f.p[i + 3] == 't' && f.p[i + 4] == ' ' &&
+		    (i == 0 || f.p[i - 1] == ' ' || f.p[i - 1] == '\n' ||
+		     f.p[i - 1] == ';' || f.p[i - 1] == '\t'))
+			return 1;
+	}
+	return 0;
+}
+
 static uint8_t tagless_kind(kof_buf f, uint64_t look)
 {
 	uint32_t seen = 0;
@@ -584,6 +690,14 @@ static uint8_t tagless_kind(kof_buf f, uint64_t look)
 			if (i + TL_TAG[t].len > cap)
 				continue;
 			if (!kof_txt_tag_at(f, i, TL_TAG[t].s, TL_TAG[t].len))
+				continue;
+			/*
+			 * A `test` operator is not evidence of PowerShell -
+			 * see shell_test_operator. Not recorded in `seen`
+			 * either: it said nothing, so it must not count
+			 * towards anything later.
+			 */
+			if (((1u << t) & TL_GSH) && shell_test_operator(f, i))
 				continue;
 			seen |= 1u << t;
 			if (TL_TAG[t].grp == 0)
@@ -605,7 +719,8 @@ static uint8_t tagless_kind(kof_buf f, uint64_t look)
 }
 
 static uint64_t find_tag(kof_buf f, uint64_t look, uint8_t *kind,
-			 uint32_t *taglen, uint32_t *headlen, int *fam)
+			 uint32_t *taglen, uint32_t *headlen, int *fam,
+			 int *guessed)
 {
 	uint64_t php, svr;
 	uint32_t pl = 0, sl = 0, sh = 0;
@@ -692,10 +807,82 @@ static uint64_t find_tag(kof_buf f, uint64_t look, uint8_t *kind,
 		uint8_t k = tagless_kind(f, look);
 
 		if (k != KOF_SCRIPT_ANY) {
-			*kind = k; *taglen = 0u; return 0;
+			/*
+			 * AND THIS ONE IS AN INFERENCE, NOT A DECLARATION.
+			 *
+			 * Everything above found something the file SAYS -
+			 * "<?php", "<%", "<cf", "<script>", "@echo off". This
+			 * read scattered keywords and concluded. Both arrive
+			 * here the same way, so the caller could not tell them
+			 * apart, and a guess was allowed to overrule a shebang
+			 * - which is the author writing the language down.
+			 */
+			*kind = k; *taglen = 0u;
+			if (guessed)
+				*guessed = 1;
+			return 0;
 		}
 	}
 	return (uint64_t)-1;
+}
+
+/* Defined below, beside the tables they read - declared here because the
+ * sniff runs before the parse and both ask this same question. */
+static uint32_t shebang_word(kof_buf f, uint64_t line_end, uint64_t lead,
+			     char *out, uint32_t cap);
+static uint8_t kind_of_interp(const char *w);
+
+/*
+ * DOES LINE ONE NAME AN INTERPRETER, AND WHICH.
+ *
+ * Two spellings, and the second is a typo that ships.
+ *
+ *     #!/usr/bin/perl     the shebang
+ *     #/usr/bin/perl      the same line with the bang left out
+ *
+ * The second is not valid to a kernel - nothing execs it - and the file runs
+ * anyway, because it is run as `perl file` or sourced, and the author never
+ * found out. Two samples in the corpora are written that way and both came
+ * back `unrecognised`: not mistyped as some other language, but not claimed as
+ * a script at all, so no parse, no regions and no normalised view.
+ *
+ * THE MISSING BANG IS NOT FORGIVEN BLINDLY. For the real shebang the
+ * interpreter may be anything - `#!/usr/bin/awk` names a language this engine
+ * has no subtype for, and the file is still a script. For the typo the word
+ * has to be one the table KNOWS, because `#` begins a comment in every
+ * language here and `#/` with no known interpreter behind it is a comment
+ * about a path. Measured over /usr/bin, /usr/lib, /usr/share and /etc: no file
+ * begins `#/` at all. Over the three corpora: three do, all three name an
+ * interpreter, and the two that begin `#/*` - C sources - are refused by this
+ * exact test.
+ *
+ * A SPACE IS NOT ACCEPTED EITHER. `# /usr/bin/perl` is a comment with a path
+ * in it, and the shape that ships has no space. Requiring the slash to touch
+ * the `#` is what keeps this from reading prose.
+ */
+static int shebang_line(kof_buf f, uint64_t look, uint64_t *line_end,
+			uint8_t *kind)
+{
+	char word[64];
+	uint64_t e = 0, lead;
+
+	if (f.n < 3u || f.p[0] != '#')
+		return 0;
+	if (f.p[1] == '!')
+		lead = 2u;
+	else if (f.p[1] == '/')
+		lead = 1u;
+	else
+		return 0;
+
+	while (e < look && f.p[e] != '\n')
+		e++;
+	*line_end = e;
+	*kind = KOF_SCRIPT_ANY;
+	if (shebang_word(f, e, lead, word, (uint32_t)sizeof word))
+		*kind = kind_of_interp(word);
+	/* The typo has to earn it; the real thing does not. */
+	return lead == 2u || *kind != KOF_SCRIPT_ANY;
 }
 
 int kof_script_sniff(kof_buf file)
@@ -710,19 +897,19 @@ int kof_script_sniff(kof_buf file)
 	 * A "#!" ONLY AT OFFSET ZERO. That is where the kernel looks, so it is
 	 * the only place it means anything; "#!" further in is a comment.
 	 */
-	if (file.p[0] == '#' && file.p[1] == '!') {
-		uint64_t e = 0;
+	{
+		uint64_t e;
+		uint8_t k;
 
-		while (e < look && file.p[e] != '\n')
-			e++;
-		return looks_like_text(file, e);
+		if (shebang_line(file, look, &e, &k))
+			return looks_like_text(file, e);
 	}
 
 	{
 		uint8_t kind = KOF_SCRIPT_ANY;
 		uint32_t tl = 0, hl = 0;
 		int fam = FAM_NONE;
-		uint64_t tag = find_tag(file, look, &kind, &tl, &hl, &fam);
+		uint64_t tag = find_tag(file, look, &kind, &tl, &hl, &fam, NULL);
 
 		if (tag != (uint64_t)-1)
 			return looks_like_text(file, tag + tl);
@@ -743,10 +930,10 @@ int kof_script_sniff(kof_buf file)
  * interpreter, so a reader that stopped at the first word would answer "env"
  * for a large share of real scripts.
  */
-static uint32_t shebang_word(kof_buf f, uint64_t line_end, char *out,
-			     uint32_t cap)
+static uint32_t shebang_word(kof_buf f, uint64_t line_end, uint64_t lead,
+			     char *out, uint32_t cap)
 {
-	uint64_t i = 2u, start, end;
+	uint64_t i = lead, start, end;
 	uint32_t n = 0;
 	int taken_env = 0;
 
@@ -832,19 +1019,17 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 		return 0;
 	look = file.n < SCRIPT_LOOK ? file.n : SCRIPT_LOOK;
 
-	if (file.p[0] == '#' && file.p[1] == '!') {
-		char word[64];
-		uint64_t e = 0;
+	{
+		uint64_t e;
+		uint8_t k;
 
-		while (e < look && file.p[e] != '\n')
-			e++;
-		if (shebang_word(file, e, word, (uint32_t)sizeof word)) {
-			info->kind = kind_of_interp(word);
+		if (shebang_line(file, look, &e, &k)) {
+			info->kind = k;
 			info->from_shebang = 1;
+			info->tag_off = 0;
+			info->tag_len = (uint32_t)e;
+			info->head_len = (uint32_t)e;
 		}
-		info->tag_off = 0;
-		info->tag_len = (uint32_t)e;
-		info->head_len = (uint32_t)e;
 	}
 
 	/*
@@ -895,8 +1080,48 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 		uint32_t tl = 0, hl = 0;
 		int fam = FAM_NONE;
 
-		tag = find_tag(file, look, &kind, &tl, &hl, &fam);
+		int guessed = 0;
+
+		tag = find_tag(file, look, &kind, &tl, &hl, &fam, &guessed);
 		obj_fam = fam;
+		/*
+		 * A SHEBANG OUTRANKS A GUESS, always. The test below asks
+		 * whether a DECLARED tag sits in code, which is the right
+		 * question for "<?php" inside a shell wrapper - a real polyglot.
+		 * It is the wrong question for an inference: scattered keywords
+		 * are in code by construction, so the check passed and the
+		 * guess won.
+		 *
+		 * AND IT OUTRANKS A TAG THAT NAMES NOTHING, for the same
+		 * reason one more step along.
+		 *
+		 * kof_svr_find_tag is allowed to answer KOF_SCRIPT_ANY: a page
+		 * that opens with a bare "<%" really is one of three languages
+		 * and there is no way to say which. That is an honest answer
+		 * about a page and it is not a claim about a file that already
+		 * said what it is. Taken as one, it OVERWROTE the shebang's
+		 * kind with "cannot tell":
+		 *
+		 *     gzexe_scp - "#!/bin/sh", then 42 KB of gzip - holds the
+		 *     two bytes "<%" by accident 13063 bytes in, where every
+		 *     byte is compressed data. The tag was accepted, the file
+		 *     stopped being Script/Shell, and 42 KB of deflate output
+		 *     was carved into markup islands. Six of the seven files
+		 *     in these corpora whose shebang the engine did not honour
+		 *     are that shape; truncated before the accident, the same
+		 *     file reads Shell.
+		 *
+		 * A bare "<%" cannot beat "#!/bin/sh" even when it IS code:
+		 * the second test below asks whether the tag sits in code and
+		 * binary garbage passes it, because nothing in it is a shell
+		 * string or a shell comment. So the answer is not a better
+		 * code test, it is that a tag naming no language has nothing
+		 * to say to a file whose language is written on line one.
+		 */
+		if (tag != (uint64_t)-1 && info->from_shebang &&
+		    info->kind != KOF_SCRIPT_ANY &&
+		    (guessed || kind == KOF_SCRIPT_ANY))
+			tag = (uint64_t)-1;
 		if (tag != (uint64_t)-1 && info->from_shebang &&
 		    info->kind != KOF_SCRIPT_ANY && info->kind != kind &&
 		    file.n <= 0xffffffffu &&

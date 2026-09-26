@@ -369,7 +369,7 @@ static void one(uint64_t r)
 int main(int argc, char **argv)
 {
 	static const char *corpora[] = {
-		"/mnt/games/virus_share/VirusShare_Linux_20160715",
+		"/mnt/games/virus_share/Bazaar.2026.08",
 		"tests/UPX_FILES"
 	};
 	uint64_t rounds = 20000, r;

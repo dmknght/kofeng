@@ -889,7 +889,8 @@ static void finding_str(const struct kof_scanner *sc,
 	 * carried the verdict still reports the block's number, and that is
 	 * the honest residue: the block did find something, just not enough.
 	 */
-	if (sc->plague_asked >= 0 && sc->n_plague_blk && sc->plague_hit) {
+	if (sc->plague_asked >= 0 && sc->n_plague_blk && sc->plague_hit &&
+	    !sc->str_hit) {
 		char sv[16], shape[16];
 		/* The best single block's containment - see
 		 * kof_scanner.plague_best for why it is not the set's. */
@@ -1914,6 +1915,7 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		sc->plague_hit = 0;
 		sc->plague_tot = 0;
 		sc->plague_best = 0;
+		sc->str_hit = 0;
 		sc->cur_mod   = m;
 		m->fn(ctx);
 		sc->cur_mod   = NULL;
@@ -2100,29 +2102,6 @@ static uint32_t norm_gather(struct kof_obj_ctx *ctx, struct kof_src_region *r,
  * checked here rather than relied on silently.
  */
 #define NORM_KEEP_MASK ((1u << 1) | (1u << 2))
-
-/*
- * AND WHAT A SCRIPT KEEPS, WHICH IS NOTHING.
- *
- * REGION BITS COLLIDE ACROSS FORMATS ON PURPOSE - 1u << 2 is CODE in an ELF and
- * BODY in a script - so a mask written in one format's vocabulary means
- * something else in another's. NORM_KEEP_MASK is the ELF and PE reading: do not
- * rewrite the header a parse addresses structurally, and do not rewrite
- * instruction bytes, because a decode landing in either says something the
- * object never said.
- *
- * A SCRIPT HAS NEITHER. Its body is text, and rewriting text into what it
- * decodes to is the entire job - "say this object plainly". Read with the ELF
- * mask, a script keeps its whole body, every decode is restored byte for byte,
- * and `changed` comes back zero: the view is never made and the pass can only
- * ever be a waste of a memcpy. That is what the gate above used to prevent by
- * refusing scripts outright.
- *
- * The shebang is not kept either. It is eleven bytes of ASCII that no decode
- * can match - a run needs sixteen alphabet characters and a delimiter - so
- * keeping it would protect nothing and only cost the bitmap.
- */
-#define NORM_KEEP_SCRIPT 0u
 
 /*
  * A RANGE OF BITS AT A TIME, NOT A BIT AT A TIME.
@@ -2486,9 +2465,40 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 */
 	if (sc->cur_is_view)
 		return;
+	/*
+	 * AND NOT A FORM SOMEBODY ELSE ALREADY MADE.
+	 *
+	 * THE TWO NORMALISERS WERE BLIND TO EACH OTHER. This one marks what it
+	 * produces with kof_src_declare_view; the script pass in objctx.c marks
+	 * its own with KOF_ENT_NORMALIZED, and each guard tested only its own
+	 * mark. So each ran on the other's output and one shell script came
+	 * back with four views - 1.norm, 2.NORMALIZED, then 3.NORMALIZED of the
+	 * first and 4.norm of the second, each a walk over an object already in
+	 * the tree to arrive at bytes already in the tree.
+	 *
+	 * "A FORM OF A FORM IS THE FORM", as the other guard puts it. Both of
+	 * them now say so about both marks.
+	 */
+	if (sc->cur_src &&
+	    kof_src_kind_of(sc->cur_src) == KOF_ENT_NORMALIZED)
+		return;
+	/*
+	 * AND NOT A SCRIPT, BECAUSE A SCRIPT HAS ITS OWN NORMALISER.
+	 *
+	 * This was widened to KOF_FMT_SCRIPT so that a shell or php file got
+	 * its base64 and hex spans decoded, which was the right thing to want
+	 * and the wrong place to get it: c_script_unpack already produces a
+	 * normalised view of every script, so the object then had TWO - a
+	 * `:norm` with the decode and no reformatting, and a `.NORMALIZED`
+	 * with the reformatting and no decode. Neither was the object said
+	 * plainly and the tree carried both.
+	 *
+	 * One object, one normaliser, chosen by format. The decode moved to
+	 * where the script's own pass ends - see kof_exe_decode's call in
+	 * c_script_unpack - so the single view now carries both halves.
+	 */
 	if (!ctx || (ctx->format != KOF_FMT_ELF &&
-		     ctx->format != KOF_FMT_PE &&
-		     ctx->format != KOF_FMT_SCRIPT))
+		     ctx->format != KOF_FMT_PE))
 		return;
 	if (buf.n < NORM_MIN_OBJ)
 		return;
@@ -2603,9 +2613,7 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		return;
 	}
 	if (nr) {
-		norm_keep_bits(keep, buf.n, rgn, nr,
-			       ctx->format == KOF_FMT_SCRIPT
-				       ? NORM_KEEP_SCRIPT : NORM_KEEP_MASK);
+		norm_keep_bits(keep, buf.n, rgn, nr, NORM_KEEP_MASK);
 		/* And CODE narrowed to the instructions in it - see
 		 * norm_keep_exec. */
 		if (ctx->format == KOF_FMT_ELF && ctx->file_header)
@@ -3451,6 +3459,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 		sc->plague_hit = 0;
 		sc->plague_tot = 0;
 		sc->plague_best = 0;
+		sc->str_hit = 0;
 		sc->cur_mod   = m;
 		sc->cure_have = 0;
 		sc->cure_at   = 0;

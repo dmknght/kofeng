@@ -232,6 +232,40 @@ struct kof_scanner {
 	uint32_t plague_hit;
 	uint32_t plague_tot;
 	/*
+	 * AND WHETHER A DECLARED STRING OF THIS MODULE WAS FOUND, which is
+	 * what says the plague residue is not the explanation.
+	 *
+	 * plague_asked plus plague_hit answer "was a block asked about, and
+	 * did it find anything". They do not answer "is that what recognised
+	 * the object", and the name claims exactly that - see the contract on
+	 * the similarity fields below: a reader of the name knows what
+	 * recognised it.
+	 *
+	 * A RULE HAS SEVERAL MATCHERS AND THEY ARE NOT ONE EXPRESSION:
+	 *
+	 *     if (kof_find_str_multi(code, s0..s6) >= 2 ||
+	 *         kof_plague_score(blk) >= 70u)   KOF_SCAN_INFECT(...);
+	 *     if (kof_find_str_any(sym_exp, s7..s13))  KOF_SCAN_INFECT(...);
+	 *
+	 * `||` short-circuits when its LEFT side is true, so a string that
+	 * carries the first matcher keeps kof_plague_score from ever running
+	 * and plague_asked stays -1. What it does not cover is the first
+	 * matcher failing BOTH ways and the SECOND one firing: the block was
+	 * scored, found 17 per cent of itself - far under the 70 the rule
+	 * wanted, and under any threshold a rule would use - and a Gafgyt
+	 * sample recognised by an exported symbol came back named
+	 * "#51f88b7c!Plague?17". The number was real and the sentence it
+	 * formed was false.
+	 *
+	 * SO: a string of this module matched, and the name belongs to the
+	 * string. It costs a combined rule nothing that it had - all three
+	 * mixed rules shipped are `string || plague`, where a matching string
+	 * means the plague call never happened.
+	 *
+	 * Reset per module beside the plague fields and for the same reason.
+	 */
+	int str_hit;
+	/*
 	 * AND THE BEST ANY ONE OF THEM SCORED, which is what the verdict
 	 * reports.
 	 *

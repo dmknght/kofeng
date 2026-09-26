@@ -103,6 +103,34 @@ int main(void)
 	expect("psh by an operator",
 	       "function F($a)\r\n{\r\n  if($a -eq $null) { return }\r\n}\r\n",
 	       1, KOF_SCRIPT_PSH);
+	/*
+	 * AND AN OPERATOR POSIX `test` DOES NOT HAVE, INSIDE BRACKETS.
+	 *
+	 * shell_test_operator exists because `[ "$n" -lt 10 ]` is shell, not
+	 * PowerShell. It was applied to every space-initial operator in the
+	 * table, including eight - "-match", "-like", "-replace", "-join",
+	 * "-split", "-contains", "-notmatch", "-notlike" - that no shell
+	 * spells at all. Bracketed, they were discarded as shell evidence and
+	 * the file came back unrecognised. Only the six `test` really shares
+	 * are ambiguous; this pins the other direction.
+	 */
+	/*
+	 * AND A TAG THAT NAMES NO LANGUAGE UNNAMES NOTHING.
+	 *
+	 * A bare "<%" opens a page in one of three languages and
+	 * kof_svr_find_tag says so by answering KOF_SCRIPT_ANY. Accepted over
+	 * a shebang, that answer replaced "Shell" with "cannot tell" - which
+	 * is how six gzexe wrappers in the corpora, "#!/bin/sh" followed by
+	 * tens of kilobytes of gzip that happens to contain the two bytes,
+	 * stopped being shell scripts. The bytes are not in a string or a
+	 * comment, so no code test rescues this; the shebang has to win.
+	 */
+	expect("a nameless tag cannot unname a shebang",
+	       "#!/bin/sh\necho hi\n<% foo %>\necho bye\n",
+	       1, KOF_SCRIPT_SHELL);
+	expect("psh by an operator no shell has",
+	       "$x = @($list)\r\nif ([string]$x -match 'abc') { $y = 1 }\r\n",
+	       1, KOF_SCRIPT_PSH);
 	expect("psh by an encoded switch",
 	       "powershell -EncodedCommand SQBFAFgA\r\n",
 	       1, KOF_SCRIPT_PSH);
@@ -135,7 +163,39 @@ int main(void)
 	       "<?php echo 1; ?><html><script>alert(1)</script></html>",
 	       1, KOF_SCRIPT_PHP);
 
+	/*
+	 * ---- line one, when the bang was left out ----
+	 *
+	 * `#/usr/bin/perl` execs nowhere and the file still runs, because it
+	 * is run as `perl file`. Two samples in the corpora are written that
+	 * way and neither was claimed as a script at all.
+	 */
+	expect("a shebang missing its bang",
+	       "#/usr/bin/perl\nuse Socket;\nmy $x = 1;\nprint $x;\n",
+	       1, KOF_SCRIPT_PERL);
+	/*
+	 * AND THE REAL THING NEEDS NO KNOWN INTERPRETER. `#!/usr/bin/awk` is a
+	 * script in a language with no subtype here; it is claimed, and its
+	 * kind is honestly "cannot say".
+	 */
+	expect("a shebang naming no known kind",
+	       "#!/usr/bin/awk -f\nBEGIN { x = 1 }\n{ print $1 }\n",
+	       1, KOF_SCRIPT_ANY);
+
 	/* ---- refused, and these are the measured false claims ---- */
+	/*
+	 * `#` OPENS A COMMENT IN EVERY LANGUAGE HERE, so the missing-bang form
+	 * is only read when the word behind it is an interpreter the table
+	 * knows - and only when the slash touches the `#`. A C source opening
+	 * `#/*` and a comment with a path in it are both this shape and
+	 * neither is a script.
+	 */
+	expect("a C source opening a comment",
+	       "#/*\n * a comment\n */\nint main(void){return 0;}\n",
+	       0, KOF_SCRIPT_ANY);
+	expect("a comment that mentions a path",
+	       "# /usr/bin/perl is needed\nsome prose here\nmore of it\n",
+	       0, KOF_SCRIPT_ANY);
 
 	/*
 	 * A PAGE **ABOUT** SCRIPT IS NOT ONE. An opening tag with no closing

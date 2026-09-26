@@ -26,9 +26,98 @@
 /* The bound appended_00.c argues for: alignment padding cannot reach a page. */
 #define PAGE 4096u
 
-/* And its entropy floor: two bits, which padding never reaches. Same number
- * and same reason - see the measurement below. */
-#define MIN_EIGHTHS (8u * 2u)
+/*
+ * ---- and what the bytes say they are ------------------------------------
+ *
+ * SIZE AND ENTROPY CANNOT ANSWER THE QUESTION THIS MODULE HAS TO ASK.
+ *
+ * A page floor removes slack and an entropy floor removes filler, and both
+ * were added here for exactly those cases. Neither says whether the overlay is
+ * a FILE, and that is the only thing that makes it worth an object of its own.
+ * Measured over 7909 PE samples in this corpus, 4060 overlays cleared both
+ * floors - 51 per cent of every PE scanned - and the largest of them are
+ * megabytes of opaque bytes: the sample this was reported on carries 12.5 MB
+ * beginning b5 38 80 3d, which is nothing, and got a whole object, an
+ * identification, a budget and a pass through every module for it.
+ *
+ * A WINDOW IS NOT A DISCOVERY. The child is the parent's own bytes under a
+ * second name - no copy, no decode, nothing produced. It is worth making only
+ * when a DIFFERENT reader will take it: a zip's members get extracted, a
+ * carried PE gets parsed. When nothing will, the bytes are already reachable
+ * where they are, as KOF_SCAN_PE_OVERLAY of the parent, and a rule written
+ * against that region matches them today.
+ *
+ * SO THE TEST IS "DOES SOMETHING CLAIM IT", asked of the leading bytes. The
+ * same 4060 break down as:
+ *
+ *     zlib                         3571     a compressed stream, opened below
+ *     Rar, Zip, PE, Gzip            107     a container, handed over
+ *     nothing at all                 382     left where it is
+ *
+ * A TABLE HERE IS A FLOOR AND NOT A SECOND IDENTIFIER. The engine's own
+ * identification runs on the child after this and is the authority on what it
+ * is; this only decides whether to offer one. A format missing from the list
+ * is an overlay left in its parent - a miss, which the region still covers -
+ * and never a wrong answer. That asymmetry is why a short list is safe here
+ * and would not be safe anywhere that has to be complete.
+ */
+static int magic_at(const struct kof_obj_ctx *ctx, uint64_t at,
+		    const char *m, uint32_t n)
+{
+	uint32_t i;
+
+	for (i = 0; i < n; i++)
+		if ((uint8_t)kof_u8(at + i) != (uint8_t)m[i])
+			return 0;
+	return 1;
+}
+
+static int names_a_container(const struct kof_obj_ctx *ctx, uint64_t at)
+{
+	return magic_at(ctx, at, "MZ", 2)               ||  /* PE, and DOS   */
+	       magic_at(ctx, at, "\x7f" "ELF", 4)        ||
+	       magic_at(ctx, at, "PK\x03\x04", 4)        ||  /* zip           */
+	       magic_at(ctx, at, "PK\x05\x06", 4)        ||  /* empty zip     */
+	       magic_at(ctx, at, "Rar!", 4)             ||
+	       magic_at(ctx, at, "7z\xbc\xaf\x27\x1c", 6) ||
+	       magic_at(ctx, at, "MSCF", 4)             ||  /* cab           */
+	       magic_at(ctx, at, "\x1f\x8b", 2)          ||  /* gzip          */
+	       magic_at(ctx, at, "\xfd" "7zXZ", 6)       ||
+	       magic_at(ctx, at, "BZh", 3)              ||
+	       magic_at(ctx, at, "\xd0\xcf\x11\xe0", 4)  ||  /* ole           */
+	       magic_at(ctx, at, "ITSF", 4)             ||  /* chm           */
+	       magic_at(ctx, at, "%PDF", 4)             ||
+	       magic_at(ctx, at, "{\\rt", 4)             ||  /* rtf           */
+	       /* NSIS writes its own header past the last section, and the
+		* four bytes before the name are the flag word. */
+	       magic_at(ctx, at + 4u, "\xef\xbe\xad\xde" "Nullsoft", 12);
+}
+
+/*
+ * A ZLIB STREAM IS NOT A FILE AND IS STILL WORTH OPENING - so it is opened
+ * here rather than handed over.
+ *
+ * It is 88 per cent of everything past the last section in this corpus. A
+ * window over it identifies as `unrecognised`, because raw zlib has no format
+ * row in this engine; what then reads it is bases/decomp/zlibraw.c, running on
+ * that child. So the tree held the compressed megabytes as one object and the
+ * bytes they decode to as a second one beneath it, and the first of the two
+ * said nothing the parent's own overlay region did not already say. One sample
+ * reported this way carried 10.9 MB under 291 bytes of content.
+ *
+ * Decompressed straight out of the parent, there is one child and it is the
+ * content. The two-byte header test is RFC 1950's own - the same one
+ * zlibraw.c applies, and the reason that module and this one do not share a
+ * line is that they are anchored differently: it reads an object that IS a
+ * stream, this reads a stream that sits at a known offset inside one.
+ */
+static int zlib_header(const struct kof_obj_ctx *ctx, uint64_t at)
+{
+	uint32_t cmf = kof_u8(at), flg = kof_u8(at + 1u);
+
+	return (cmf & 0x0fu) == 8u && (cmf >> 4) <= 7u &&
+	       !(flg & 0x20u) && ((cmf << 8) | flg) % 31u == 0;
+}
 
 /*
  * A CARVE AND NOT A CONTAINER, which is what this said and what cost two
@@ -64,40 +153,36 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		return;
 
 	/*
-	 * AND BIG ENOUGH TO BE A FILE.
+	 * A PAGE FIRST, AND IT IS NOW ONLY AN ARITHMETIC GUARD.
 	 *
-	 * The bound appended_00.c argues for, for the same reason: alignment
-	 * padding cannot reach a page, and what is left past the last section
-	 * of an ordinary build is padding. Measured over 400 PE samples from
-	 * the corpus: 47 carry an overlay and 20 of those are under a page -
-	 * 43% of the children this module produced were a few hundred bytes of
-	 * slack given a row in the tree, an identification, a budget and a pass
-	 * through every module.
-	 *
-	 * A page is a floor and not a judgement: what sits above it is still
-	 * sniffed, parsed and scanned as whatever it turns out to be.
+	 * What it was doing - removing the alignment slack an ordinary build
+	 * leaves - the test below does better, because slack has no magic.
+	 * It stays because everything after it reads up to sixteen bytes and
+	 * a floor is cheaper than four bounds checks.
 	 */
 	if (pe->overlay_len < PAGE)
 		return;
 
 	/*
-	 * AND NOT PADDING, WHICH IS WHAT MOST OVERLAYS ARE.
-	 *
-	 * The floor above answers size and says nothing about content, and
-	 * content is where this module was wrong. Measured over 300 PE samples
-	 * from the corpus: 24 overlays reached a child and the engine could
-	 * name three of them - a carried DLL, a ZIP and an EXE, which are
-	 * exactly what this module exists to find. The other 21 it could name
-	 * nothing about, and the two largest were 9 MB of zeroes and 327 KB of
-	 * one byte repeated: whole objects, identified, given a budget and a
-	 * pass through every module, for a run of filler that the parent
-	 * already shows as KOF_SCAN_PE_OVERLAY.
-	 *
-	 * The same floor appended_00.c uses against the same mistake. It does
-	 * not separate a packed payload from encrypted noise - nothing cheap
-	 * does - but it removes the case that is certainly not a file.
+	 * THE COMPRESSED CASE FIRST, because it is most of them and because
+	 * what it produces is content rather than a second view of the parent.
+	 * Past the two header bytes; DEFLATE says where it ends.
 	 */
-	if (kof_entropy_at(pe->overlay_off, pe->overlay_len) < MIN_EIGHTHS)
+	if (zlib_header(ctx, pe->overlay_off)) {
+		if (!kof_unpack_deflate(pe->overlay_off + 2u,
+					pe->overlay_len - 2u))
+			return;
+		if (!kof_child())
+			KOF_UNP_BROKEN(KOF_UNP_LIMIT);
+		return;
+	}
+
+	/*
+	 * AND OTHERWISE ONLY WHAT SOMETHING WILL READ. An overlay that names
+	 * no format stays in its parent, where KOF_SCAN_PE_OVERLAY already
+	 * reaches it - see the note above names_a_container.
+	 */
+	if (!names_a_container(ctx, pe->overlay_off))
 		return;
 
 	/*
@@ -106,5 +191,6 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * declared extent runs past the end yields a shorter child rather than a
 	 * read past the mapping - the same rule every other byte accessor follows.
 	 */
-	kof_child_window(pe->overlay_off, pe->overlay_len);
+	if (!kof_child_window(pe->overlay_off, pe->overlay_len))
+		KOF_UNP_BROKEN(KOF_UNP_LIMIT);
 }

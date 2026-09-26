@@ -737,6 +737,83 @@ static int hex_delim(uint8_t c)
 	       c == '[';
 }
 
+/*
+ * ---- the short runs, and the only thing that makes them readable ----------
+ *
+ * HEX_RUN_MIN IS TWELVE BYTES BECAUSE A BARE RUN HAS NOTHING ELSE GOING FOR
+ * IT. `hex_delim` asks only what character precedes the run, and a space or a
+ * comma precedes most things; under twelve bytes the printable test is doing
+ * all the work on its own and it is not enough on its own.
+ *
+ * A QUOTED LITERAL IS A DIFFERENT SHAPE. Where the run is the ENTIRE body of
+ * a string literal - quote, hex, matching quote, nothing else between - the
+ * delimiter is not a guess. The author wrote a string and the string is hex,
+ * which is what an obfuscator does and is not what a length or a hash looks
+ * like:
+ *
+ *     $Array = [
+ *             '7068705f756e616d65',      php_uname
+ *             '70687076657273696f6e',    phpversion
+ *             '6368646972',              chdir
+ *
+ * Measured on the file this was written for - a PHP web shell whose whole API
+ * surface is a table of these - the existing pass decoded 3 of 47 entries.
+ * The 44 it left are 10 to 22 characters long, and every one of them names a
+ * function a rule would be written against.
+ *
+ * AND STILL NOT ON ONE LITERAL. A single quoted hex constant is a magic
+ * number as often as it is a payload, so one is never enough: the run is
+ * recorded and decoded only once HEXQ_MIN of them have been seen in the same
+ * range. What is being recognised is a file that SPELLS ITS STRINGS IN HEX,
+ * which is a property of the file and cannot be read off one literal.
+ *
+ * WHAT THE PRINTABLE TEST ALREADY REFUSES, so that this does not have to: a
+ * decoded byte must be text, and for every byte of an eight-character literal
+ * to land in 0x20..0x7e its leading nibble must be 2 through 7 each time -
+ * roughly one random literal in fifty, and one in half a million at nine
+ * bytes. A SHA-1, an MD5, a GUID and a colour all fail it outright.
+ *
+ * NO EXTRA PASS OVER THE BYTES. The walk below already visits every run; a
+ * short quoted one is put aside rather than scanned for a second time, and
+ * the deferred decode touches only what was put aside.
+ */
+#define HEXQ_RUN_MIN  8u    /* four bytes, and only inside quotes */
+#define HEXQ_MIN      4u    /* literals a range must hold before any decodes */
+#define HEXQ_MAX     64u    /* how many one range will put aside */
+
+/*
+ * A QUOTED DECIMAL NUMBER IS ALSO ALL HEX DIGITS, and that is the one false
+ * positive the three tests above do not catch.
+ *
+ * `0`..`9` are hex digits, so "2147483648" satisfies every one of them: it is
+ * the whole body of a literal, it is even, and it decodes to `!GH6H`, which is
+ * printable. For a decimal string the printable test is nearly free to pass -
+ * it needs only each even-indexed digit in 2..7, about one ten-digit number in
+ * thirteen - and a document full of quoted integers supplies the count as well.
+ * Measured over /usr/bin, /usr/lib and /usr/share, the four files this rule
+ * would have rewritten are exactly that shape: a GObject introspection file of
+ * quoted flag values, a font table, and a Cython source of quoted digit runs.
+ *
+ * SO THE COUNT IS OF LITERALS THAT CONTAIN A HEX LETTER. Text spelled in hex
+ * reaches for `a`..`f` constantly - `e` is 0x65, `o` is 0x6f, `_` is 0x5f -
+ * and a decimal number never contains one at all. The same four files then
+ * qualify zero literals between them.
+ *
+ * THE TEST IS ON THE COUNT AND NOT ON EACH LITERAL, which matters: "chdir" is
+ * 6368646972 and carries no letter either. It is decoded because the TABLE it
+ * sits in proved itself, which is the whole shape of this rule - the evidence
+ * is a property of the file, not of one string.
+ */
+static int hex_letter(const uint8_t *p, uint64_t beg, uint64_t end)
+{
+	uint64_t j;
+
+	for (j = beg; j < end; j++)
+		if (kof_hex_val(p[j]) > 9)
+			return 1;
+	return 0;
+}
+
 static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		       struct kof_exe_span *wrote, uint32_t cap,
 		       uint32_t *n_wrote)
@@ -744,6 +821,8 @@ static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 	uint64_t i;
 	uint32_t made = 0;
 	int changed = 0;
+	struct { uint64_t beg, end; } pend[HEXQ_MAX];
+	uint32_t n_pend = 0, n_lett = 0;
 
 	if (!p || !n)
 		return 0;
@@ -752,7 +831,7 @@ static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 
 	for (i = from; i < to && made < HEX_MAX_PAY; ) {
 		uint64_t beg, end, j, out_n = 0;
-		int text = 1;
+		int text = 1, even;
 
 		if (kof_hex_val(p[i]) < 0) {
 			i++;
@@ -764,10 +843,35 @@ static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		end = i;
 		/* An odd tail is not part of the encoding: two characters make
 		 * one byte and a leftover one makes none. */
-		if ((end - beg) & 1u)
+		even = ((end - beg) & 1u) == 0;
+		if (!even)
 			end--;
-		if (end - beg < HEX_RUN_MIN)
+		if (end - beg < HEX_RUN_MIN) {
+			/*
+			 * Too short to stand on its own - but a quoted literal
+			 * does not have to. An ODD one cannot be one: the
+			 * closing quote would not sit where `end` is, so the
+			 * run is not the whole body of anything.
+			 */
+			if (!even || end - beg < HEXQ_RUN_MIN ||
+			    n_pend >= HEXQ_MAX || beg == 0 || end >= n)
+				continue;
+			if ((p[beg - 1u] != '\'' && p[beg - 1u] != '"') ||
+			    p[end] != p[beg - 1u])
+				continue;
+			for (j = beg; j < end && text; j += 2u)
+				text = hex_text((uint8_t)
+						((kof_hex_val(p[j]) << 4)
+						 | kof_hex_val(p[j + 1u])));
+			if (!text)
+				continue;
+			pend[n_pend].beg = beg;
+			pend[n_pend].end = end;
+			n_pend++;
+			if (hex_letter(p, beg, end))
+				n_lett++;
 			continue;
+		}
 		if (!hex_delim(beg ? p[beg - 1u] : 0))
 			continue;
 		/*
@@ -793,6 +897,33 @@ static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		}
 		made++;
 		changed = 1;
+	}
+	/*
+	 * AND THE QUOTED ONES, NOW THAT THERE IS A COUNT TO JUDGE THEM BY.
+	 * Under the floor they stay exactly as the author wrote them - see
+	 * HEXQ_MIN for why one of these proves nothing, and hex_letter for
+	 * why the count is of the ones that cannot be decimal numbers.
+	 */
+	if (n_lett >= HEXQ_MIN) {
+		uint32_t k;
+
+		for (k = 0; k < n_pend; k++) {
+			uint64_t beg = pend[k].beg, end = pend[k].end;
+			uint64_t j, out_n = 0;
+
+			for (j = beg; j < end; j += 2u)
+				p[beg + out_n++] =
+					(uint8_t)((kof_hex_val(p[j]) << 4)
+						  | kof_hex_val(p[j + 1u]));
+			memset(p + beg + out_n, 0,
+			       (size_t)(end - beg - out_n));
+			if (wrote && n_wrote && *n_wrote < cap) {
+				wrote[*n_wrote].off = beg;
+				wrote[*n_wrote].len = out_n;
+				(*n_wrote)++;
+			}
+			changed = 1;
+		}
 	}
 	return changed;
 }
@@ -934,6 +1065,26 @@ static int unpct_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		for (j = beg; j < end && text; j++) {
 			if (p[j] != '%')
 				continue;
+			/*
+			 * `%%` IS A FORMAT STRING, NOT AN ENCODING.
+			 *
+			 * An encoder spells a literal percent `%25`; it never
+			 * emits two in a row. A shell that is about to print
+			 * an encoded payload does, because printf eats one:
+			 *
+			 *     printf '%%7B%%22f%%22:%%22x%%22%%7D' | ...
+			 *
+			 * Read as escapes, the second `%` of each pair opens
+			 * one and the first is left behind, so the run decodes
+			 * to `%{%"f%"` - neither the bytes that are in the file
+			 * nor the ones the shell would print. Both readings
+			 * would be wrong to write down, so the run is refused
+			 * and stays as the author wrote it.
+			 */
+			if (j + 1u < end && p[j + 1u] == '%') {
+				text = 0;
+				break;
+			}
 			if (j + 2u >= end ||
 			    kof_hex_val(p[j + 1u]) < 0 || kof_hex_val(p[j + 2u]) < 0)
 				continue;

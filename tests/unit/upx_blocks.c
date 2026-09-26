@@ -206,15 +206,36 @@ static void one_file(const char *path, const uint8_t *f, uint64_t n)
 	}
 }
 
+/*
+ * HOW MANY FILES A CORPUS WALK WILL OPEN BEFORE IT HAS SEEN ENOUGH.
+ *
+ * The default corpus below used to be a path that no longer exists, so this
+ * test quietly did nothing - "no sample corpus found". Pointed at a real one
+ * it opens every file in it, and the real one is 23138 files and 66GB: six
+ * minutes for `make unit`, which is how a suite stops being run.
+ *
+ * A cap and not a smaller corpus, because what this test needs is UPX files
+ * and where they sit in a directory is nobody's choice. Passing a path on the
+ * command line overrides both the corpus and this - a full sweep is still one
+ * argument away, it is simply not what a unit run pays for.
+ */
+#define CORPUS_MAX 4000u
+
+static int walk_capped = 1;
+
 static void walk(const char *dir)
 {
 	DIR *d = opendir(dir);
 	struct dirent *de;
 	char path[4096];
+	unsigned seen = 0;
 
 	if (!d)
 		return;
 	while ((de = readdir(d)) != NULL) {
+		if (walk_capped && seen >= CORPUS_MAX)
+			break;
+		seen++;
 		struct stat st;
 		void *map;
 		int fd;
@@ -245,15 +266,17 @@ static void walk(const char *dir)
 int main(int argc, char **argv)
 {
 	static const char *defaults[] = {
-		"/mnt/games/virus_share/VirusShare_Linux_20160715",
+		"/mnt/games/virus_share/Bazaar.2026.08",
 		"tests/UPX_FILES"
 	};
 	int i;
 
-	if (argc > 1)
+	if (argc > 1) {
+		/* Asked for by name: sweep all of it. */
+		walk_capped = 0;
 		for (i = 1; i < argc; i++)
 			walk(argv[i]);
-	else
+	} else
 		for (i = 0; i < (int)(sizeof defaults / sizeof defaults[0]); i++)
 			walk(defaults[i]);
 

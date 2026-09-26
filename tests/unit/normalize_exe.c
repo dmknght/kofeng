@@ -1055,6 +1055,193 @@ static void pct_leaves_a_stray_escape(void)
 	      "a guess that changed the object would be worse than a miss");
 }
 
+/*
+ * AND A DOUBLED PERCENT IS A FORMAT STRING.
+ *
+ * A shell that prints an encoded payload writes every `%` twice, because
+ * printf eats one of them. Read as escapes, the second of each pair opens one
+ * and the first is left behind - `%%7B%%22` becomes `%{%"`, which is neither
+ * what is in the file nor what the shell would print. An encoder never emits
+ * two in a row (a literal percent is `%25`), so the pair is the tell, and a
+ * run carrying one is left as the author wrote it.
+ */
+static void pct_refuses_a_doubled_percent(void)
+{
+	static const char in[] =
+		" printf '%%7B%%22f%%22:%%22x%%22%%2C%%22g%%22%%7D'";
+	uint8_t buf[128];
+	uint64_t n = sizeof in - 1u;
+
+	memcpy(buf, in, (size_t)n);
+	check(kof_exe_decode(buf, n) == 0,
+	      "pct: a doubled percent is not a payload",
+	      "printf spells a literal percent that way");
+	check(!memcmp(buf, in, (size_t)n),
+	      "pct: and the format string is untouched",
+	      "half-decoding it would write down a third thing");
+	check(memmem(buf, (size_t)n, "%{%\"", 4) == NULL,
+	      "pct: the half-decoded shape is not produced",
+	      "which is what the run decoded to before");
+}
+
+/*
+ * ---- a table of quoted hex literals, which is how a web shell spells its
+ *      own API ----------------------------------------------------------
+ *
+ * Each of these is under HEX_RUN_MIN, so the bare-run rule leaves every one of
+ * them. What makes them readable is that the run is the WHOLE body of a string
+ * literal and that there are several - see HEXQ_MIN. Both halves are asserted
+ * here, and so is each thing that must keep them out.
+ */
+static void hex_decodes_a_quoted_table(void)
+{
+	static const char in[] =
+		"$a = ['7068705f756e616d65','6368646972',"
+		"'676574637764','756e6c696e6b','6d6b646972','636f7079'];";
+	uint8_t buf[256];
+	uint64_t n = sizeof in - 1u;
+
+	memcpy(buf, in, (size_t)n);
+	check(kof_exe_decode(buf, n) == 1,
+	      "hex: a table of quoted literals decodes",
+	      "five of them, each the whole body of a string");
+	check(memmem(buf, (size_t)n, "php_uname", 9) != NULL,
+	      "hex: and the shortest are in it",
+	      "eighteen characters, well under the bare-run floor");
+	check(memmem(buf, (size_t)n, "chdir", 5) != NULL &&
+	      memmem(buf, (size_t)n, "mkdir", 5) != NULL,
+	      "hex: including the ten-character ones",
+	      "five bytes is a function name a rule is written against");
+	/* Four of these carry a hex letter and two do not; the two came along
+	 * because the table did - see hex_letter. */
+	check(memmem(buf, (size_t)n, "getcwd", 6) != NULL,
+	      "hex: and the all-digit members too",
+	      "676574637764 has no letter and is still decoded");
+}
+
+/*
+ * AND ONE OF THEM IS A MAGIC NUMBER.
+ *
+ * A lone quoted hex constant is as likely to be a length, a mask or an id as
+ * a payload, and nothing about one literal can tell those apart. The floor is
+ * a COUNT for that reason, and this is the side of it that must not move.
+ */
+static void hex_leaves_a_lone_quoted_literal(void)
+{
+	static const char in[] = "if ($x == '41424344') { return 1; }";
+	uint8_t buf[128];
+	uint64_t n = sizeof in - 1u;
+
+	memcpy(buf, in, (size_t)n);
+	check(kof_exe_decode(buf, n) == 0,
+	      "hex: one quoted literal is not a table",
+	      "under HEXQ_MIN, so nothing is rewritten");
+	check(!memcmp(buf, in, (size_t)n),
+	      "hex: and its bytes are untouched",
+	      "a guess that changed the object would be worse than a miss");
+}
+
+/*
+ * A TABLE OF HASHES IS NOT A TABLE OF STRINGS, and the printable test is what
+ * says so - before any counting, on every byte. These five are quoted, are
+ * plenty numerous, and decode to bytes no text holds.
+ */
+static void hex_refuses_a_quoted_hash_table(void)
+{
+	static const char in[] =
+		"$h = ['deadbeefcafe1234','0011223344556677',"
+		"'8899aabbccddeeff','1234567890abcdef','fedcba0987654321'];";
+	uint8_t buf[256];
+	uint64_t n = sizeof in - 1u;
+
+	memcpy(buf, in, (size_t)n);
+	check(kof_exe_decode(buf, n) == 0,
+	      "hex: quoted hashes are still hashes",
+	      "every byte must be text and none of these is");
+	check(!memcmp(buf, in, (size_t)n),
+	      "hex: and the table is untouched",
+	      "counting cannot rescue what the byte test refused");
+}
+
+/*
+ * A DOCUMENT OF QUOTED INTEGERS IS NOT A TABLE OF STRINGS.
+ *
+ * `0`..`9` are hex digits, so a decimal number in quotes passes the quoting
+ * test, the even test and - often enough - the printable one: "2147483648"
+ * decodes to `!GH6H`. These are the flag values out of a GObject
+ * introspection file, which is one of the four files on this machine the rule
+ * rewrote before the count was narrowed to literals carrying a hex letter.
+ */
+static void hex_refuses_a_table_of_decimals(void)
+{
+	static const char in[] =
+		"<f v=\"2147483648\"/><f v=\"2147483649\"/>"
+		"<f v=\"2147483650\"/><f v=\"2147483651\"/>"
+		"<f v=\"2147483652\"/><f v=\"33554432\"/>";
+	uint8_t buf[256];
+	uint64_t n = sizeof in - 1u;
+
+	memcpy(buf, in, (size_t)n);
+	check(kof_exe_decode(buf, n) == 0,
+	      "hex: quoted decimals are numbers",
+	      "no decimal carries a hex letter, so none counts");
+	check(!memcmp(buf, in, (size_t)n),
+	      "hex: and the document is untouched",
+	      "a scanner that rewrote these would rewrite every config file");
+}
+
+/*
+ * AND A LETTERLESS MEMBER OF A REAL TABLE IS STILL DECODED.
+ *
+ * The letter test is on the COUNT, not on each literal: "chdir" is 6368646972
+ * and carries no letter. It decodes because the table around it proved itself.
+ */
+static void hex_decodes_a_letterless_member(void)
+{
+	static const char in[] =
+		"$a = ['7068705f756e616d65','70687076657273696f6e',"
+		"'707265675f73706c6974','636f7079','6368646972'];";
+	uint8_t buf[256];
+	uint64_t n = sizeof in - 1u;
+
+	memcpy(buf, in, (size_t)n);
+	check(kof_exe_decode(buf, n) == 1,
+	      "hex: four lettered literals carry the table",
+	      "the count is the file's property, not one string's");
+	check(memmem(buf, (size_t)n, "chdir", 5) != NULL,
+	      "hex: and the letterless one comes with it",
+	      "6368646972 is all digits and is still a function name");
+}
+
+/*
+ * THE QUOTES HAVE TO BE THE RUN'S OWN. Unquoted, a short run is back to having
+ * nothing but hex_delim behind it, which is the case HEX_RUN_MIN exists for.
+ * An unmatched pair is not a literal either.
+ */
+static void hex_needs_the_quotes_to_close(void)
+{
+	static const char bare[] =
+		"a 7068705f756e616d65 b 6368646972 c 676574637764 "
+		"d 756e6c696e6b e 6d6b646972";
+	static const char odd[] =
+		"$a = [\"7068705f756e616d65','6368646972\","
+		"'676574637764\",\"756e6c696e6b','6d6b646972\"];";
+	uint8_t buf[256];
+	uint64_t n;
+
+	n = sizeof bare - 1u;
+	memcpy(buf, bare, (size_t)n);
+	check(kof_exe_decode(buf, n) == 0 && !memcmp(buf, bare, (size_t)n),
+	      "hex: unquoted short runs are left alone",
+	      "a space in front is not a declaration");
+
+	n = sizeof odd - 1u;
+	memcpy(buf, odd, (size_t)n);
+	check(kof_exe_decode(buf, n) == 0 && !memcmp(buf, odd, (size_t)n),
+	      "hex: a quote must close with its own kind",
+	      "otherwise the run is not the whole body of a string");
+}
+
 int main(void)
 {
 	printf("normalize exe:\n");
@@ -1086,6 +1273,13 @@ int main(void)
 	hex_decodes_a_command();
 	pct_decodes_a_form_body();
 	pct_leaves_a_stray_escape();
+	pct_refuses_a_doubled_percent();
+	hex_decodes_a_quoted_table();
+	hex_leaves_a_lone_quoted_literal();
+	hex_refuses_a_quoted_hash_table();
+	hex_refuses_a_table_of_decimals();
+	hex_decodes_a_letterless_member();
+	hex_needs_the_quotes_to_close();
 	hex_refuses_a_hash();
 	hex_needs_a_delimiter();
 	hex_ignores_a_short_run();

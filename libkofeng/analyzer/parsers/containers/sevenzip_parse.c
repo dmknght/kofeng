@@ -43,6 +43,8 @@
 #include "../../../extractor/decomp/lzma.h"
 
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 static const uint8_t SEVENZ_SIG[6] = { 0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c };
 
@@ -578,7 +580,8 @@ static int one_folder(kof_buf h, uint64_t *at, struct kof_7z_info *z,
 static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 {
 	uint64_t at = 0, pack_pos = 0, n_pack = 0, n_folders = 0, i, n_out = 0;
-	struct sz_walk w;
+	/* Zeroed here rather than midway - see the note where the wipe was. */
+	struct sz_walk w = { 0 };
 	uint32_t steps = 0;
 	uint8_t id = 0;
 	int ok;
@@ -650,7 +653,23 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 		z->anomalies |= KOF_7Z_ANOM_FOLDERS_FULL;
 		n_folders = KOF_7Z_MAX_FOLDERS;
 	}
-	memset(&w, 0, sizeof w);
+	/*
+	 * THE WIPE USED TO BE HERE AND IT ERASED THE PACK SIZES.
+	 *
+	 * kPackInfo is read at the top of this function and its kSize list goes
+	 * straight into w.psize[]. This memset then ran - after that list was
+	 * read and before the loop below that hands each folder its own entry -
+	 * so every folder came out with pack_size 0, the unpacker's
+	 * `if (!fo->pack_size) continue` skipped all of them, and no 7z archive
+	 * yielded any content at all. Measured against bsdtar: five archives
+	 * from the corpus, five children of 114 to 190 bytes, all of it the
+	 * name list, and a 132 MB member never extracted.
+	 *
+	 * `w` is cleared where it is declared instead, which is before anything
+	 * writes to it; the two 0xff fills stay here because they are defaults
+	 * for the per-folder tables the loop below fills, and nothing has
+	 * touched those yet.
+	 */
 	memset(w.role, 0xff, sizeof w.role);
 	memset(w.pcod, 0xff, sizeof w.pcod);
 	at++;                                   /* external */
@@ -759,6 +778,32 @@ static void content_probe(kof_buf f, struct kof_7z_info *z)
 	uint64_t produced = 0;
 	enum kof_decomp_status st;
 
+	/*
+	 * A PLAIN HEADER NEEDS NO DECODE AND WAS THEREFORE NEVER READ.
+	 *
+	 * This function existed to decode a CODED header, and the folder walk
+	 * happened to live inside it - so an archive whose header is stored
+	 * uncompressed, which is most of them because 7z only codes a header
+	 * once it is large, came out of the parse with n_folders == 0. The
+	 * unpacker's folder loop then had nothing to iterate and the archive
+	 * yielded its name list and no content at all.
+	 *
+	 * Measured against bsdtar on five from the corpus: every one reported
+	 * success with a child of 114 to 190 bytes - all of it header - while
+	 * bsdtar read the member, 132 MB of it in one case.
+	 *
+	 * The table is already in the file at next_hdr_off. The base is the
+	 * same 32 bytes the coded path passes: a pack position is relative to
+	 * the end of the signature header whichever way the table arrived.
+	 */
+	if (z->header_kind == KOF_7Z_HDR_PLAIN) {
+		if (z->next_hdr_size &&
+		    kof_in_range(f, z->next_hdr_off, z->next_hdr_size))
+			folders_walk(kof_buf_make(f.p + z->next_hdr_off,
+						  z->next_hdr_size),
+				     z, KOF_7Z_SIG_LEN);
+		return;
+	}
 	if (z->header_kind != KOF_7Z_HDR_CODED ||
 	    z->hdr_coder != KOF_7Z_CODER_LZMA || !z->hdr_pack_size)
 		return;

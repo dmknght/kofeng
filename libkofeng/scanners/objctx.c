@@ -33,6 +33,7 @@
 #include "../analyzer/disasm/xref.h"
 #include "../detector/overlord/ovlflow.h"
 #include "../disinfect/pzero.h"
+#include "../analyzer/normalize/executables.h"
 #include "scan.h"
 #include <kofmod/elf.h>
 #include "../extractor/unpack/emu_unpack.h"
@@ -278,6 +279,21 @@ static int c_find_str_sym(const struct kof_obj_ctx *ctx, uint32_t mask,
 	return 0;
 }
 
+/*
+ * A DECLARED STRING WAS FOUND IN THIS OBJECT - see kof_scanner.str_hit.
+ *
+ * Recorded at the four hooks that answer a marker search rather than at the
+ * one that looks the fastest, because a rule reaches them by different names -
+ * kof_find_str, _at, _in, _where - and a fact recorded at some of them is a
+ * fact that is wrong the first time a rule uses another.
+ */
+static int str_found(struct kof_scanner *sc, int r)
+{
+	if (r && sc)
+		sc->str_hit = 1;
+	return r;
+}
+
 static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 		      uint32_t range_id)
 {
@@ -343,28 +359,31 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 				sc->eng->rng_uid[m->rng_base + range_id];
 			found = kof_match_memo_get(&sc->m, sslot);
 			if (found >= 0)
-				return found;
+				return str_found(sc, found);
 		}
 		found = c_find_str_sym(ctx, mask, bytes, e);
 		if (sslot != KOF_MEMO_NONE)
 			kof_match_memo_put(&sc->m, sslot, found);
 		if (found)
-			return 1;
+			return str_found(sc, 1);
 		mask &= ~KOF_SCAN_SYM;
 		if (!mask)
 			return 0;
 		n = kof_scan_resolve_range(ctx, mask, ext);
-		return kof_match_lookup(&sc->m, KOF_MEMO_NONE, ext, n, bytes,
-					e->len, e->kind, e->flags,
-					&sc->st.gram_answers);
+		return str_found(sc,
+				 kof_match_lookup(&sc->m, KOF_MEMO_NONE, ext,
+						  n, bytes, e->len, e->kind,
+						  e->flags,
+						  &sc->st.gram_answers));
 	}
 
 	uid = sc->eng->packs[m->pack_id].uid_base + e->uid;
 	slot = uid * sc->eng->n_masks + sc->eng->rng_uid[m->rng_base + range_id];
 
 	n = kof_scan_resolve_range(ctx, mask, ext);
-	return kof_match_lookup(&sc->m, slot, ext, n, bytes, e->len,
-				e->kind, e->flags, &sc->st.gram_answers);
+	return str_found(sc, kof_match_lookup(&sc->m, slot, ext, n, bytes,
+					      e->len, e->kind, e->flags,
+					      &sc->st.gram_answers));
 }
 
 /*
@@ -389,8 +408,8 @@ static int c_find_str_at(const struct kof_obj_ctx *ctx, uint32_t str_id,
 
 	if (!e)
 		return 0;
-	return kof_match_at(&sc->m, off, bytes, e->len,
-			    e->kind, e->flags);
+	return str_found(sc, kof_match_at(&sc->m, off, bytes, e->len,
+					  e->kind, e->flags));
 }
 
 static int c_find_str_in(const struct kof_obj_ctx *ctx, uint32_t str_id,
@@ -402,8 +421,8 @@ static int c_find_str_in(const struct kof_obj_ctx *ctx, uint32_t str_id,
 
 	if (!e)
 		return 0;
-	return kof_match_in(&sc->m, off, len, bytes, e->len,
-			    e->kind, e->flags);
+	return str_found(sc, kof_match_in(&sc->m, off, len, bytes, e->len,
+					  e->kind, e->flags));
 }
 
 /*
@@ -421,8 +440,14 @@ static uint64_t c_find_str_where(const struct kof_obj_ctx *ctx, uint32_t str_id,
 
 	if (!e)
 		return KOF_BROKEN;
-	return kof_match_where(&sc->m, off, len, bytes, e->len, e->kind,
-			       e->flags);
+	{
+		uint64_t at = kof_match_where(&sc->m, off, len, bytes, e->len,
+					      e->kind, e->flags);
+
+		/* Answering WHERE is answering WHETHER - see str_found. */
+		str_found(sc, at != KOF_BROKEN);
+		return at;
+	}
 }
 
 /*
@@ -4626,6 +4651,11 @@ static int script_pass_open(const struct kof_obj_ctx *ctx,
 	 */
 	if (kof_src_kind_of(sc->cur_src) == KOF_ENT_NORMALIZED)
 		return 0;
+	/* And the other normaliser's mark, for the reason norm_emit's copy of
+	 * this note gives: the two were blind to each other and each ran on
+	 * what the other produced. */
+	if (kof_src_is_view(sc->cur_src))
+		return 0;
 	si = (const struct kof_script_info *)ctx->file_header;
 	*plx = kof_lex_for(si->kind);
 	if (!*plx)
@@ -4871,6 +4901,7 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 	uint8_t *out = NULL, *tmp = NULL;
 	kof_buf b;
 	uint32_t n = 0, raw = 0, cap;
+	int decoded = 0;
 
 	if (!script_pass_open(ctx, &sc, &lx, &b))
 		return 0;
@@ -5001,6 +5032,9 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 		 * tag included, because it copied them.
 		 */
 		c_child_kind(ctx, KOF_ENT_NORMALIZED);
+		/* Said plainly, like the formed view below - see the call
+		 * there for why the decode belongs to this pass. */
+		kof_exe_decode(out, n);
 		if (!script_head_emit(ctx) || !emu_give(ctx, out, n))
 			n = 0;
 		else
@@ -5028,8 +5062,38 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 	 * The folded form above is not held to this. It is not a reformatting
 	 * of the file, it is a different program.
 	 */
+	/*
+	 * AND WHAT THE BYTES SAY, NOT ONLY HOW THEY ARE SPACED.
+	 *
+	 * "Say this object plainly" is two halves. Removing the indentation,
+	 * the comments and the line breaks is the half this pass was written
+	 * for; the other half is the base64, hex and percent spans a script
+	 * spells its strings in, and a view that reformats
+	 * '7068705f756e616d65' without reading it has not said anything
+	 * plainly at all.
+	 *
+	 * IT USED TO BE A SECOND VIEW. norm_emit was widened to scripts to get
+	 * this, and every script then carried two normalised children, each
+	 * holding one of the two halves - see the note at norm_emit's format
+	 * gate. The decode is here instead, where the script's own view is
+	 * produced, so there is one view and it is whole.
+	 *
+	 * ON THE PRODUCED BUFFER, NOT ON THE FILE: kof_exe_decode rewrites in
+	 * place, and `out` is this pass's own copy.
+	 */
+	decoded = n ? kof_exe_decode(out, n) : 0;
+	/*
+	 * A DECODE IS A DIFFERENCE TOO, and the size test cannot see it.
+	 *
+	 * The floor below asks whether reformatting removed enough to be worth
+	 * a node. kof_exe_decode is LENGTH PRESERVING - it zero-fills what it
+	 * vacates - so a tightly written file that is nothing but hex literals
+	 * comes out the same length and would have been thrown away with its
+	 * decode in it. What that floor is really asking is "does this view
+	 * say anything the parent did not", and a decode always does.
+	 */
 	raw = (uint32_t)b.n;
-	if (n < 32u || raw < n || raw - n < 16u)
+	if (n < 32u || raw < n || (!decoded && raw - n < 16u))
 		n = 0;
 	if (n) {
 		c_child_kind(ctx, KOF_ENT_NORMALIZED);

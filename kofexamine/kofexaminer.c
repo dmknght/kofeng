@@ -2412,6 +2412,29 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	 * database has a marker here" while the scanner reported the child
 	 * infected. Truthful about the parent and useless about the sample.
 	 */
+	/*
+	 * WHAT THE ENGINE SAID ABOUT THIS OBJECT, BEFORE EITHER PATH LOOKS AT
+	 * IT.
+	 *
+	 * These used to be set further down, past the branch below - so the
+	 * --markers path, which returns there, examined every recovered object
+	 * WITHOUT the regions, the symbols or the language the engine had just
+	 * handed over. That is the one path --markers exists for: a packed
+	 * sample's markers are all in the child. The pane then re-read the
+	 * bytes and answered about them instead, which for a normalised view is
+	 * a different object - see kof_result.region and .lang_known.
+	 */
+	g_decl_syms = res->syms;
+	g_decl_syms_n = res->n_syms;
+	g_decl_lang = res->lang_known;
+	g_decl_subtype = res->subtype;
+	g_decl_subfam = res->subfamily;
+	g_decl_rgn_n = res->n_region < KOF_MAX_REGIONS ? res->n_region
+						       : KOF_MAX_REGIONS;
+	if (g_decl_rgn_n)
+		memcpy(g_decl_rgn, res->region,
+		       g_decl_rgn_n * sizeof g_decl_rgn[0]);
+
 	if (!u->dump_dir) {
 		if (u->touch) {
 			printf("\n");
@@ -2419,6 +2442,10 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 					  u->touch) < 0)
 				u->err = 1;
 		}
+		g_decl_syms = NULL;
+		g_decl_syms_n = 0;
+		g_decl_rgn_n = 0;
+		g_decl_lang = 0;
 		return 0;
 	}
 	/*
@@ -2446,25 +2473,6 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 		}
 	}
 	printf("\n");
-	/* For the length of this object only - see g_decl_syms. */
-	g_decl_syms = res->syms;
-	g_decl_syms_n = res->n_syms;
-	/* The language the engine scanned this object AS - see
-	 * kof_result.lang_known. Taken rather than re-read for the same reason
-	 * the regions are: a normalised view's bytes answer about themselves,
-	 * and this pane must not contradict the verdict printed above it. */
-	g_decl_lang = res->lang_known;
-	if (getenv("KOF_LANG_DBG"))
-		fprintf(stderr, "[lang] %s: known=%u subtype=%u subfam=%u\n",
-			name ? name : "?", res->lang_known, res->subtype,
-			res->subfamily);
-	g_decl_subtype = res->subtype;
-	g_decl_subfam = res->subfamily;
-	g_decl_rgn_n = res->n_region < KOF_MAX_REGIONS ? res->n_region
-						       : KOF_MAX_REGIONS;
-	if (g_decl_rgn_n)
-		memcpy(g_decl_rgn, res->region,
-		       g_decl_rgn_n * sizeof g_decl_rgn[0]);
 	if (examine_bytes(kof_buf_make(bytes, len), name, sub, u->touch) < 0)
 		u->err = 1;
 	g_decl_syms = NULL;

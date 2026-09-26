@@ -2806,6 +2806,21 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		o->n_rgn = g;
 		o->rgn_fmt = res->region_fmt;
 	}
+	/*
+	 * AND THE LANGUAGE THE ENGINE SCANNED IT AS - see
+	 * kof_result.lang_known.
+	 *
+	 * Outside the region block on purpose: a view can be declared a
+	 * language without carrying a region table, and the panel must not
+	 * contradict the verdict either way. Applied to the context after
+	 * identify, below, for the same reason the region table is.
+	 */
+	o->lang_known = 0;
+	if (res && res->lang_known) {
+		o->lang_known = 1;
+		o->subtype = res->subtype;
+		o->subfamily = res->subfamily;
+	}
 
 	/*
 	 * The top level is already mapped; anything else exists only inside
@@ -3711,6 +3726,12 @@ static void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 		 */
 		if (o->n_rgn)
 			o->ctx.resolve_scan = declared_regions;
+		/* The engine's reading of what language this is beats a reading
+		 * of the bytes - see struct object.lang_known. */
+		if (o->lang_known) {
+			o->ctx.subtype = o->subtype;
+			o->ctx.subfamily = o->subfamily;
+		}
 
 		/*
 		 * THE DIGEST AND THE EMULATOR GATE ARE NOT COMPUTED HERE ANY
@@ -9526,6 +9547,21 @@ static int opt_offerable(struct view *v, int k)
 	return 1;                       /* the two sizes always apply */
 }
 
+/*
+ * `row` IS THE CONTROL'S OWN ROW - g_my, and nothing arithmetic on it.
+ *
+ * The list is placed at row + 1, under the control, for the reasons written
+ * where that is done. It did not always open downwards, and while it opened
+ * UPWARDS five callers subtracted 2 or 3 to push it clear of the rows above
+ * them. Those subtractions outlived the change and then pointed the wrong way:
+ * a similarity matcher is two rows, so [+ Similarity] on its second row opened
+ * its list at g_my - 2, one row ABOVE the matcher's own heading - the list was
+ * drawn over the title of the thing it was adding to.
+ *
+ * Twenty-two callers pass g_my and five did not, two of them beside a sibling
+ * in the same function that does. So the rule is here, in one place: hand this
+ * the row that was clicked, and let it decide where the list goes.
+ */
 static void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 {
 	struct chooser *c = &v->ch;
@@ -13487,8 +13523,7 @@ static void hit_row_matcher(struct view *v, uint32_t g)
 	else if (v->grp_th[g][0] > 0 &&
 		 g_mx >= v->grp_th[g][0] &&
 		 g_mx <= v->grp_th[g][1])
-		ch_open(v, CH_THRESH, g, g_my - 2,
-			g_mx);
+		ch_open(v, CH_THRESH, g, g_my, g_mx);
 	else if (v->grp_nt[g][0] > 0 &&
 		 g_mx >= v->grp_nt[g][0] &&
 		 g_mx <= v->grp_nt[g][1])
@@ -13511,7 +13546,7 @@ static void hit_row_markers(struct view *v, uint32_t g)
 	if (v->p_c0[g][0] > 0 && g_mx >= v->p_c0[g][0] &&
 	    g_mx <= v->p_c0[g][1]) {
 		ch_open(v, v->ed.dr.grp[g].kind == GRP_KIND_SIM
-			   ? CH_SIM : CH_MARKER, g, g_my - 3, g_mx);
+			   ? CH_SIM : CH_MARKER, g, g_my, g_mx);
 		return;
 	}
 	/*
@@ -25900,7 +25935,7 @@ static void cnd_id_click(struct view *v, uint32_t g)
 			continue;
 		if (g_mx >= v->cnd_ids[g][m][0] &&
 		    g_mx <= v->cnd_ids[g][m][1]) {
-			ch_open(v, CH_CMATCH2, CH_PAIR(g, m), g_my - 3, g_mx);
+			ch_open(v, CH_CMATCH2, CH_PAIR(g, m), g_my, g_mx);
 			return;
 		}
 	}
@@ -28607,7 +28642,7 @@ static void hit_row_cond(struct view *v, uint32_t g)
 		 */
 		if (v->cnd_jn[ci][0] > 0 && g_mx >= v->cnd_jn[ci][0] &&
 		    g_mx <= v->cnd_jn[ci][1])
-			ch_open(v, CH_LOGIC, ci, g_my - 2, g_mx);
+			ch_open(v, CH_LOGIC, ci, g_my, g_mx);
 		return;
 	}
 	if (v->cseq_kind[g] == CS_ADD) {
@@ -28625,7 +28660,7 @@ static void hit_row_cond(struct view *v, uint32_t g)
 		}
 		if (v->cnd_mt[ci][0] > 0 && g_mx >= v->cnd_mt[ci][0] &&
 		    g_mx <= v->cnd_mt[ci][1])
-			ch_open(v, CH_CMATCH, ci, g_my - 3, g_mx);
+			ch_open(v, CH_CMATCH, ci, g_my, g_mx);
 		else if (v->cnd_op[ci][0] > 0 && g_mx >= v->cnd_op[ci][0] &&
 			 g_mx <= v->cnd_op[ci][1])
 			cnd_set_op(&v->ed, ci, !v->ed.dr.cnd[ci].op);

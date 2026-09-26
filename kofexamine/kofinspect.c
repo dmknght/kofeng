@@ -1326,6 +1326,21 @@ int kof_dump_child(const char *dir, const char *tag,
 
 	if (err && err_cap)
 		err[0] = 0;
+	/*
+	 * THE DIRECTORY IS THIS FUNCTION'S TO MAKE, and it used to be somebody
+	 * else's. kof_dump_object creates it, so a child landed beside regions
+	 * that had already been written and nobody noticed the dependency -
+	 * until an object with a child and NO REGIONS came along. A file whose
+	 * format nothing parses has no regions to dump, kof_dump_object is
+	 * never called for it, and every child it produced failed to write
+	 * with "cannot write": the one object whose child is the only way to
+	 * see what it holds is the one that could not be dumped.
+	 *
+	 * Same idiom and same tolerance of EEXIST as the other creator, so the
+	 * two can run in either order or both.
+	 */
+	if (kof_mkdir(dir, 0777) != 0 && errno != EEXIST)
+		return dump_fail(err, err_cap, "cannot create", dir);
 	if ((size_t)snprintf(path, sizeof path, "%s/unpacked.%s", dir, tag)
 	    >= sizeof path)
 		return dump_fail(err, err_cap, "path too long under", dir);

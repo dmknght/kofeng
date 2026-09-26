@@ -1236,6 +1236,20 @@ struct object {
 	 * without it: 1u << 5 is UNCLAIMED in an ELF and OVERLAY in a PE. */
 	uint8_t   rgn_fmt;
 	/*
+	 * THE LANGUAGE THE ENGINE SCANNED THIS OBJECT AS, when it declared one
+	 * - see kof_result.lang_known.
+	 *
+	 * Kept for the same reason rgn[] is: a normalised view's own bytes
+	 * answer about themselves, and a decode can change the answer outright.
+	 * A shell dropper whose base64 payload decodes to PHP reads back as
+	 * PHP, and the panel then declined every rule written for the language
+	 * the object actually is - beside a verdict saying one of them had
+	 * fired.
+	 */
+	uint8_t   lang_known;
+	uint8_t   subtype;
+	uint8_t   subfamily;
+	/*
 	 * Set when the engine handed the symbol records over with the object -
 	 * see kof_result.syms. sym_build must not overwrite them: the object is
 	 * a rendering whose own headers cannot produce a block, and building

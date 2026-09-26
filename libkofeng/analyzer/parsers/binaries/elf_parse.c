@@ -76,6 +76,15 @@
 #define EM_ARC_COMPACT	93
 #define EM_ARC_COMPACT2	195
 #define EM_ARC		45
+#define EM_SPARC	2
+#define EM_68K		4
+#define EM_SPARC32PLUS	18
+#define EM_SH		42
+#define EM_SPARCV9	43
+#define EM_OPENRISC	92
+#define EM_XTENSA	94
+#define EM_CRIS		113
+#define EM_MICROBLAZE	189
 #define EM_X86_64	62
 #define EM_AARCH64	183
 #define EM_RISCV	243
@@ -130,6 +139,23 @@ static uint8_t arch_from_machine(uint16_t m, int is64)
 	case EM_ARC:
 	case EM_ARC_COMPACT:
 	case EM_ARC_COMPACT2: return KOF_ARCH_ARC;
+	/*
+	 * The rest of the cross-compile set a botnet makefile ships. See
+	 * KOF_ARCH_LIST for the counts these were chosen from and for the
+	 * three that were deliberately left reporting OTHER.
+	 */
+	case EM_SH:      return KOF_ARCH_SH;
+	case EM_68K:     return KOF_ARCH_M68K;
+	/* v8plus is 32-bit SPARC with v9 instructions available; the object
+	 * is still a 32-bit one and every existing pair in this switch is
+	 * split by width. */
+	case EM_SPARC:
+	case EM_SPARC32PLUS: return KOF_ARCH_SPARC;
+	case EM_SPARCV9: return KOF_ARCH_SPARC64;
+	case EM_MICROBLAZE: return KOF_ARCH_MICROBLAZE;
+	case EM_XTENSA:  return KOF_ARCH_XTENSA;
+	case EM_CRIS:    return KOF_ARCH_CRIS;
+	case EM_OPENRISC: return KOF_ARCH_OR1K;
 	default:         return KOF_ARCH_OTHER;
 	}
 }
