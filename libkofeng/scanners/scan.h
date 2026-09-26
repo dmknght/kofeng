@@ -431,6 +431,11 @@ struct kof_scanner {
 	 * one, which is the one way this could name the wrong object.
 	 */
 	uint8_t  pend_fmt;
+	/* And the language that goes with it - see kof_src_declare_lang. Spent
+	 * by c_child beside pend_fmt and cleared there the same way. */
+	uint8_t  pend_subtype;
+	uint8_t  pend_subfam;
+	uint8_t  pend_lang;
 	/*
 	 * HOW MANY OF n_kids ARE VIEWS RATHER THAN PAYLOADS.
 	 *
@@ -481,6 +486,11 @@ struct kof_scanner {
 	/* Whether the object being scanned is a rendering - see
 	 * kof_src_declare_view. */
 	uint8_t               cur_is_view;
+	/* The language this object's producer declared, carried the same way
+	 * cur_rgn is - see kof_src_declare_lang. */
+	uint8_t               cur_subtype;
+	uint8_t               cur_subfam;
+	uint8_t               cur_lang;
 
 	/*
 	 * WHICH BYTES OF THIS OBJECT ARE THE STATIC LIBRARY'S, WORKED OUT ONCE.

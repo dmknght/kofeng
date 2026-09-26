@@ -55,6 +55,27 @@ struct kof_objsrc {
 	 * only: it decides which modules are even offered the object. */
 	uint8_t            fmt;
 
+	/*
+	 * AND WHICH LANGUAGE, when the producer knew it and the bytes no longer
+	 * say so.
+	 *
+	 * A NORMALISED SCRIPT IS THE CASE THIS EXISTS FOR. The view is declared
+	 * as its parent's FORMAT already, for the reason kof_src_declare_fmt
+	 * gives - a sniff of a view answers about the parent's magic. The
+	 * language needs the same treatment and did not get it, and the effect
+	 * was worse than being unidentified: decoding a shell dropper's base64
+	 * puts "<?php" into the view, the script parser reads the view's family
+	 * as PHP, and kof_module_precond then declines every SHELL rule on it.
+	 * The pass that produced the evidence blocked the rules written to read
+	 * it.
+	 *
+	 * Zero means the producer said nothing and the parse decides, which is
+	 * every other child.
+	 */
+	uint8_t            subtype;
+	uint8_t            subfamily;
+	uint8_t            lang_set;
+
 	/* KOF_ENTRY_NONE unless a producer said otherwise - set in src_new,
 	 * because the calloc'd zero would mean entry 0. */
 	uint32_t           entry_of;
@@ -125,6 +146,28 @@ void kof_src_declare_fmt(struct kof_objsrc *s, uint8_t fmt)
 {
 	if (s)
 		s->fmt = fmt;
+}
+
+void kof_src_declare_lang(struct kof_objsrc *s, uint8_t subtype,
+			  uint8_t subfamily)
+{
+	if (!s)
+		return;
+	s->subtype = subtype;
+	s->subfamily = subfamily;
+	s->lang_set = 1;
+}
+
+int kof_src_lang_of(const struct kof_objsrc *s, uint8_t *subtype,
+		    uint8_t *subfamily)
+{
+	if (!s || !s->lang_set)
+		return 0;
+	if (subtype)
+		*subtype = s->subtype;
+	if (subfamily)
+		*subfamily = s->subfamily;
+	return 1;
 }
 
 void kof_src_declare_view(struct kof_objsrc *s)

@@ -644,6 +644,8 @@ static void pend_clear(struct kof_scanner *sc)
 	sc->pend_kind = 0;
 	sc->pend_entry = KOF_ENTRY_NONE;
 	sc->pend_fmt = 0;
+	sc->pend_lang = 0;
+	sc->pend_subtype = sc->pend_subfam = 0;
 	sc->n_pend_rgn = 0;
 	sc->pend_rgn_fmt = 0;
 	sc->pend_view = 0;
@@ -756,6 +758,11 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 	/* The declared format goes the same way and is cleared the same way,
 	 * even on a refusal - a claim left pending would be worn by the next
 	 * child, which is a claim about the wrong bytes. */
+	if (sc->pend_lang) {
+		kof_src_declare_lang(kid, sc->pend_subtype, sc->pend_subfam);
+		sc->pend_lang = 0;
+		sc->pend_subtype = sc->pend_subfam = 0;
+	}
 	if (sc->pend_fmt) {
 		kof_src_declare_fmt(kid, sc->pend_fmt);
 		sc->pend_fmt = 0;

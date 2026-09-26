@@ -1073,6 +1073,24 @@ struct kof_draft {
 	int          warn_bad;
 	int         opt_on[OPT_COUNT];
 	uint64_t    opt_val[OPT_COUNT];
+	/*
+	 * WHICH OF THOSE THE ENGINE FILLED IN, rather than the reader.
+	 *
+	 * draft_seed_target copies the object's own subtype into OPT_SUBTYPE so
+	 * a drafted rule targets what is in front of the reader, and plg_sync
+	 * calls it on ARRIVAL at an object - before anything has been drafted
+	 * at all. The options are hashed, so that copy made an empty draft read
+	 * as edited the moment a file was opened, and an edited draft refuses
+	 * to step to the next file: opening a PowerShell script and pressing
+	 * for the next one answered "Finish or undo the draft first" with
+	 * nothing in the panel.
+	 *
+	 * The same rule the block table follows - see the note on picked in
+	 * draft_hash. What the engine observed about the object is its offer;
+	 * what the reader chose is the draft. A value set here is skipped by
+	 * the hash until the reader sets it themselves, which clears the flag.
+	 */
+	int         opt_auto[OPT_COUNT];
 	char        family[64];
 	uint32_t    maltype;
 	/*

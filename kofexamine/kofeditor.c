@@ -2249,9 +2249,25 @@ uint32_t draft_hash(struct kof_editor *e)
 	for (i = 0; i < e->dr.n_rng_add; i++)
 		MIX(e->dr.rng_add[i]);
 	for (i = 0; i < (uint32_t)OPT_COUNT; i++) {
-		MIX(e->dr.opt_on[i]);
-		MIX(e->dr.opt_val[i]);
-		MIX(e->dr.opt_val[i] >> 32);
+		/*
+		 * AN OPTION THE ENGINE FILLED IN READS AS ABSENT - see
+		 * kof_draft.opt_auto.
+		 *
+		 * NEUTRALISED RATHER THAN SKIPPED, and the difference is the
+		 * whole bug this was written to fix. The fold is over a
+		 * SEQUENCE of steps, so leaving three of them out moves the
+		 * hash exactly as changing their values would: the first
+		 * attempt wrote `continue` here and an empty draft still came
+		 * back edited, because the option had gone from "off, hashed"
+		 * to "not hashed at all". Zero, fed in the same three steps,
+		 * is what "the reader has set nothing" already hashed to.
+		 */
+		int on = e->dr.opt_auto[i] ? 0 : e->dr.opt_on[i];
+		uint64_t val = e->dr.opt_auto[i] ? 0u : e->dr.opt_val[i];
+
+		MIX(on);
+		MIX(val);
+		MIX(val >> 32);
 	}
 	for (i = 0; i < e->dr.n_decl; i++) {
 		const struct decl *d = &e->dr.decl[i];
@@ -6450,6 +6466,7 @@ void draft_clear(struct kof_editor *e)
 	memset(e->dr.cnd, 0, sizeof e->dr.cnd);
 	memset(e->dr.opt_on, 0, sizeof e->dr.opt_on);
 	memset(e->dr.opt_val, 0, sizeof e->dr.opt_val);
+	memset(e->dr.opt_auto, 0, sizeof e->dr.opt_auto);
 	e->dr.n_decl = e->dr.n_grp = e->dr.n_cnd = 0;
 	/*
 	 * THE TICKS GO WITH THE MATCHERS THAT USED THEM.

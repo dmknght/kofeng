@@ -475,6 +475,8 @@ static uint32_t       g_decl_syms_n;
  * toolchain's half went.
  */
 static struct kof_scan_region g_decl_rgn[KOF_MAX_REGIONS];
+/* What the engine said this object's language is - see kof_result.lang_known. */
+static uint8_t                g_decl_lang, g_decl_subtype, g_decl_subfam;
 static uint32_t               g_decl_rgn_n;
 
 static uint32_t declared_regions(const struct kof_obj_ctx *ctx,
@@ -1937,6 +1939,11 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 	{
 		printf("%s%s%s\n", C_NAME, display, C_OFF);
 		f = kof_inspect_identify(buf, &ctx, &view);
+		/* And the engine's answer beats this one - see g_decl_lang. */
+		if (g_decl_lang) {
+			ctx.subtype = g_decl_subtype;
+			ctx.subfamily = g_decl_subfam;
+		}
 		g_parent_format = ctx.format;
 		/*
 		 * WHAT THE PRODUCER SAID THIS OBJECT'S REGIONS ARE beats what
@@ -2442,6 +2449,17 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	/* For the length of this object only - see g_decl_syms. */
 	g_decl_syms = res->syms;
 	g_decl_syms_n = res->n_syms;
+	/* The language the engine scanned this object AS - see
+	 * kof_result.lang_known. Taken rather than re-read for the same reason
+	 * the regions are: a normalised view's bytes answer about themselves,
+	 * and this pane must not contradict the verdict printed above it. */
+	g_decl_lang = res->lang_known;
+	if (getenv("KOF_LANG_DBG"))
+		fprintf(stderr, "[lang] %s: known=%u subtype=%u subfam=%u\n",
+			name ? name : "?", res->lang_known, res->subtype,
+			res->subfamily);
+	g_decl_subtype = res->subtype;
+	g_decl_subfam = res->subfamily;
 	g_decl_rgn_n = res->n_region < KOF_MAX_REGIONS ? res->n_region
 						       : KOF_MAX_REGIONS;
 	if (g_decl_rgn_n)
@@ -2452,6 +2470,7 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	g_decl_syms = NULL;
 	g_decl_syms_n = 0;
 	g_decl_rgn_n = 0;
+	g_decl_lang = 0;
 	return 0;
 }
 

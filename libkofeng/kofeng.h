@@ -473,6 +473,28 @@ struct kof_result {
 	 * PARENT's. A bit is meaningless without it: 1u << 5 is UNCLAIMED in an
 	 * ELF and OVERLAY in a PE. Zero when n_region is zero. */
 	uint8_t  region_fmt;
+
+	/*
+	 * WHAT LANGUAGE THIS OBJECT IS, when a reading of its bytes would say
+	 * something else.
+	 *
+	 * The same problem region[] is here for, one field along. A normalised
+	 * script is declared its parent's format, and its LANGUAGE is the
+	 * parent's too - but the decode rewrites the view's own text, so a host
+	 * that identifies the bytes it was handed can come back with a
+	 * different answer: a shell dropper whose payload decodes to PHP reads
+	 * as PHP. The engine scans it as the shell script it is a view of, and
+	 * a host that re-sniffs then contradicts the verdict it was given -
+	 * kofexaminer printed "skipped: targets another kind of this format"
+	 * beside a rule the engine had just fired.
+	 *
+	 * `subtype` is the format's own vocabulary, as ctx->subtype carries it;
+	 * `subfamily` is the script family. Both are meaningful only when
+	 * `lang_known` is set, which is when the producer declared them.
+	 */
+	uint8_t  subtype;
+	uint8_t  subfamily;
+	uint8_t  lang_known;
 };
 
 /*

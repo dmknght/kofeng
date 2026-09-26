@@ -936,6 +936,41 @@ static void block_note_is_not_a_matcher_note(void)
 	unlink(path);
 }
 
+/*
+ * WHAT THE ENGINE FILLED IN IS NOT AN EDIT.
+ *
+ * draft_seed_target copies the object's own subtype into OPT_SUBTYPE so a
+ * drafted rule targets what the reader is looking at, and plg_sync calls it on
+ * ARRIVAL at an object - before anything has been drafted. The options are
+ * hashed, so that copy made an empty draft read as edited the moment a file
+ * was opened, and an edited draft refuses to step to the next file: opening a
+ * PowerShell script and asking for the next one answered "Finish or undo the
+ * draft first" with nothing in the panel.
+ *
+ * The second half of this test is the fix's own trap. Skipping an auto option
+ * instead of neutralising it moves the hash just as much, because the fold is
+ * over a sequence of steps and three of them had gone missing.
+ */
+static void seeded_target_is_not_an_edit(void)
+{
+	struct kof_editor e;
+	uint32_t empty;
+
+	lend(&e);
+	empty = draft_hash(&e);
+
+	/* What draft_seed_target does on arrival at a PowerShell script. */
+	e.dr.opt_on[OPT_SUBTYPE]   = 1;
+	e.dr.opt_val[OPT_SUBTYPE]  = 7;
+	e.dr.opt_auto[OPT_SUBTYPE] = 1;
+	CK(draft_hash(&e) == empty);
+	CK(!draft_edited(&e) || e.dr.saved_hash != empty);
+
+	/* And what the reader choosing it from the menu does. */
+	e.dr.opt_auto[OPT_SUBTYPE] = 0;
+	CK(draft_hash(&e) != empty);
+}
+
 int main(void)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -952,6 +987,7 @@ int main(void)
 	shipped_rules_are_all_modelled();
 	block_order_is_not_an_edit();
 	block_note_is_not_a_matcher_note();
+	seeded_target_is_not_an_edit();
 
 	if (fails) {
 		printf("draft source: %d check(s) failed\n", fails);

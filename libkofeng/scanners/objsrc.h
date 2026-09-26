@@ -99,6 +99,13 @@ const char *kof_src_label_of(const struct kof_objsrc *);
  */
 void    kof_src_declare_fmt(struct kof_objsrc *, uint8_t fmt);
 
+/* The language a producer knew and the bytes no longer say - see the fields it
+ * sets. Returns 0 from kof_src_lang_of when nothing was declared. */
+void    kof_src_declare_lang(struct kof_objsrc *, uint8_t subtype,
+			     uint8_t subfamily);
+int     kof_src_lang_of(const struct kof_objsrc *, uint8_t *subtype,
+			uint8_t *subfamily);
+
 /*
  * REGIONS THE PRODUCER NAMES, because nothing can work them out from the bytes.
  *

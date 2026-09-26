@@ -2102,6 +2102,29 @@ static uint32_t norm_gather(struct kof_obj_ctx *ctx, struct kof_src_region *r,
 #define NORM_KEEP_MASK ((1u << 1) | (1u << 2))
 
 /*
+ * AND WHAT A SCRIPT KEEPS, WHICH IS NOTHING.
+ *
+ * REGION BITS COLLIDE ACROSS FORMATS ON PURPOSE - 1u << 2 is CODE in an ELF and
+ * BODY in a script - so a mask written in one format's vocabulary means
+ * something else in another's. NORM_KEEP_MASK is the ELF and PE reading: do not
+ * rewrite the header a parse addresses structurally, and do not rewrite
+ * instruction bytes, because a decode landing in either says something the
+ * object never said.
+ *
+ * A SCRIPT HAS NEITHER. Its body is text, and rewriting text into what it
+ * decodes to is the entire job - "say this object plainly". Read with the ELF
+ * mask, a script keeps its whole body, every decode is restored byte for byte,
+ * and `changed` comes back zero: the view is never made and the pass can only
+ * ever be a waste of a memcpy. That is what the gate above used to prevent by
+ * refusing scripts outright.
+ *
+ * The shebang is not kept either. It is eleven bytes of ASCII that no decode
+ * can match - a run needs sixteen alphabet characters and a delimiter - so
+ * keeping it would protect nothing and only cost the bitmap.
+ */
+#define NORM_KEEP_SCRIPT 0u
+
+/*
  * A RANGE OF BITS AT A TIME, NOT A BIT AT A TIME.
  *
  * All four of these maps are filled the same way - a contiguous span of an
@@ -2158,7 +2181,8 @@ static void bits_clr(uint8_t *b, uint64_t from, uint64_t to)
 }
 
 static void norm_keep_bits(uint8_t *keep, uint64_t n,
-			   const struct kof_src_region *r, uint32_t nr)
+			   const struct kof_src_region *r, uint32_t nr,
+			   uint32_t keep_mask)
 {
 	uint32_t i;
 
@@ -2166,7 +2190,7 @@ static void norm_keep_bits(uint8_t *keep, uint64_t n,
 	for (i = 0; i < nr; i++) {
 		uint64_t e;
 
-		if (!(r[i].mask & NORM_KEEP_MASK))
+		if (!(r[i].mask & keep_mask))
 			continue;
 		if (r[i].off >= n)
 			continue;
@@ -2462,7 +2486,9 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 */
 	if (sc->cur_is_view)
 		return;
-	if (!ctx || (ctx->format != KOF_FMT_ELF && ctx->format != KOF_FMT_PE))
+	if (!ctx || (ctx->format != KOF_FMT_ELF &&
+		     ctx->format != KOF_FMT_PE &&
+		     ctx->format != KOF_FMT_SCRIPT))
 		return;
 	if (buf.n < NORM_MIN_OBJ)
 		return;
@@ -2577,7 +2603,9 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		return;
 	}
 	if (nr) {
-		norm_keep_bits(keep, buf.n, rgn, nr);
+		norm_keep_bits(keep, buf.n, rgn, nr,
+			       ctx->format == KOF_FMT_SCRIPT
+				       ? NORM_KEEP_SCRIPT : NORM_KEEP_MASK);
 		/* And CODE narrowed to the instructions in it - see
 		 * norm_keep_exec. */
 		if (ctx->format == KOF_FMT_ELF && ctx->file_header)
@@ -2932,6 +2960,19 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 						sizeof sc->pend_label, "%s",
 						KOF_OBJ_LABEL_NORM);
 	sc->pend_fmt = nr ? ctx->format : (uint8_t)KOF_FMT_DECLARED_RAW;
+	/*
+	 * AND THE LANGUAGE WITH IT, for a view that is declared a format at
+	 * all. The decode rewrites the view's own text, so a re-read of it can
+	 * come back a different language than the object it is a view OF - a
+	 * shell dropper whose payload decodes to PHP reads as PHP, and every
+	 * shell rule is then declined on the one object that finally holds the
+	 * evidence. See kof_src_declare_lang.
+	 */
+	if (nr) {
+		sc->pend_subtype = ctx->subtype;
+		sc->pend_subfam  = ctx->subfamily;
+		sc->pend_lang    = 1;
+	}
 	/* What this object IS, said rather than inferred - see
 	 * kof_src_declare_view. */
 	sc->pend_view = 1;
@@ -3250,6 +3291,26 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	identify(sc, buf, &ctx,
 		 as_fmt ? as_fmt : (opt ? opt->as_format : 0u),
 		 opt ? opt->as_view : NULL, opt ? opt->as_view_len : 0u);
+	/*
+	 * AND THE LANGUAGE THE PRODUCER DECLARED BEATS THE ONE READ BACK.
+	 *
+	 * Same reason the format is declared: a view is a view OF something,
+	 * and a re-read of it answers about the bytes rather than about what
+	 * they are a view of. For a normalised script the two disagree the
+	 * moment the decode succeeds - the payload's own "<?php" makes the
+	 * view read as PHP - and kof_module_precond then declines every rule
+	 * written for the language the object actually is. See
+	 * kof_src_declare_lang.
+	 */
+	if (sc->cur_lang) {
+		ctx.subtype = sc->cur_subtype;
+		ctx.subfamily = sc->cur_subfam;
+		/* And out to the caller, which has the same problem the engine
+		 * had: reading the bytes gives the wrong answer. */
+		out->subtype = sc->cur_subtype;
+		out->subfamily = sc->cur_subfam;
+		out->lang_known = 1;
+	}
 	/* And the one fact about it that three later steps would each have
 	 * worked out for themselves - see lib_facts. */
 	lib_facts(sc, &ctx, buf);
@@ -3891,6 +3952,9 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 			w->sc->cur_rgn_fmt = kof_src_region_fmt_of(src);
 			w->sc->cur_is_view = (uint8_t)kof_src_is_view(src);
 		}
+		w->sc->cur_lang = (uint8_t)kof_src_lang_of(src,
+						&w->sc->cur_subtype,
+						&w->sc->cur_subfam);
 		kof_scan_kids_reset(w->sc);
 		scan_object(w->sc, kof_src_buf(src), w->opt, &res, pdepth,
 			    from_packer, inherit, kof_src_fmt_of(src));

@@ -225,7 +225,7 @@ int kof_exe_unwide(const uint8_t *in, uint64_t n, uint8_t *out)
 /* The longest payload walked back over. Past every measured dropper one-liner,
  * and small enough that a hostile file cannot make the walk expensive by
  * putting the anchor after a megabyte of printable bytes. */
-#define B64_PAY_MAX   8192u
+#define B64_PAY_MAX   65536u
 
 /* Below this a run is not a payload. Sixteen characters decode to twelve bytes,
  * which is shorter than any second stage worth having and is about where

@@ -7618,8 +7618,28 @@ static int hit_kind(struct view *v, uint64_t off)
 		/* Same space only - see touch_at_off. */
 		if (sym_which_of(st->sym) != v->node[v->sel_node].sym)
 			continue;
-		if (off >= st->at && off < st->at + st->span_at)
+		if (off >= st->at && off < st->at + st->span_at) {
+			/*
+			 * A MODULE RULED OUT BY ITS PRECONDITION HAS NO
+			 * REGIONS TO BE OUTSIDE OF.
+			 *
+			 * kof_touch_object sets in_rgn to zero for one, and
+			 * says why in its own note: the module never had its
+			 * regions looked at, so "inside them" is not a
+			 * comparison that was made and answering yes would
+			 * invent one. Answering NO here invented the opposite.
+			 * The pane painted every marker of a skipped module in
+			 * the colour that means "found, but not where this
+			 * module searches" - on a script, whose normalised
+			 * view often has no format and therefore no regions at
+			 * all, that reads as a region complaint about a file
+			 * that has no regions. The row above the pane already
+			 * says the real reason: "targets another format".
+			 */
+			if (t->kind == KOF_TOUCH_INELIGIBLE)
+				return 1;
 			return st->in_rgn ? 1 : 2;
+		}
 	}
 	return 0;
 }
@@ -8302,6 +8322,9 @@ static void draft_seed_target(struct view *v)
 	    !v->ed.dr.opt_on[OPT_SUBTYPE]) {
 		v->ed.dr.opt_on[OPT_SUBTYPE] = 1;
 		v->ed.dr.opt_val[OPT_SUBTYPE] = fo->ctx.subtype;
+		/* The engine's reading, not the reader's - see
+		 * kof_draft.opt_auto. */
+		v->ed.dr.opt_auto[OPT_SUBTYPE] = 1;
 	}
 }
 
@@ -10624,6 +10647,9 @@ static void ch_take(struct view *v)
 			if (seen++ != c->sel)
 				continue;
 			v->ed.dr.opt_on[k] = 1;
+			/* Chosen from the menu, so it is the draft's from
+			 * here on - see kof_draft.opt_auto. */
+			v->ed.dr.opt_auto[k] = 0;
 			v->ed.dr.opt_val[k] = k == OPT_SIZE_MIN ? ob->buf.n :
 					k == OPT_SIZE_MAX ? ob->buf.n * 2u :
 					k == OPT_ARCH ? ob->ctx.arch
