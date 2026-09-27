@@ -670,6 +670,50 @@ uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
 				lim = d;
 		}
 
+		/*
+		 * NEITHER TRANSFORM CAN START WHERE TWO NON-ZERO BYTES SIT, so
+		 * the stretch between zeros is copied whole.
+		 *
+		 * Both rules below need a zero byte to begin at all -
+		 * zero_run reads p[i], and wide_char is `hi == 0`, so
+		 * wide_run reads p[i+1]. A position whose own byte and whose
+		 * successor are both non-zero can only fall through to the
+		 * verbatim copy at the bottom, and the two scans above it are
+		 * asking a question whose answer is already known.
+		 *
+		 * MEASURED, because that fall-through is where this function
+		 * spends its time. Callgrind over 300 corpus files: zero_run's
+		 * loop 2.52 billion instructions, wide_char 2.07, wide_run's
+		 * loop 1.74, the two calls 1.30 - 7.6 billion, 13.2% of the
+		 * whole scan, to discover that a byte is ordinary. The region
+		 * this runs over is everything NORM_KEEP_MASK does not keep,
+		 * which is DATA and every byte of CODE that is not an
+		 * instruction.
+		 *
+		 * WHERE IT STOPS. `z` is the next zero at or after i+1, so
+		 * every position from i to z-2 has a non-zero byte and a
+		 * non-zero successor; z-1 does not, because its successor is
+		 * the zero. So the run ends at z-1 and the loop resumes there
+		 * with nothing skipped. It is bounded by `lim` like the scans
+		 * it replaces, and by `next_mark` like the kept-run copy
+		 * above, so a mark inside it is still recorded at the offset
+		 * it lands on.
+		 */
+		if (i + 1u < lim && in[i] != 0u && in[i + 1u] != 0u) {
+			const uint8_t *z = memchr(in + i + 1u, 0,
+						  (size_t)(lim - i - 1u));
+			uint64_t stop = z ? (uint64_t)(z - in) - 1u : lim;
+
+			if (next_mark < stop)
+				stop = next_mark;
+			if (stop > i) {
+				memcpy(out + o, in + i, (size_t)(stop - i));
+				o += stop - i;
+				i = stop;
+				continue;
+			}
+		}
+
 		if ((ops & KOF_EXE_NORM_UNWIDE) &&
 		    (k = wide_run(in, lim, i)) >= KOF_EXE_NORM_WIDE_MIN) {
 			uint64_t j;
@@ -833,9 +877,39 @@ static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		uint64_t beg, end, j, out_n = 0;
 		int text = 1, even;
 
+		/*
+		 * SKIPPING BY THE SHORTEST RUN THAT COULD BE USED.
+		 *
+		 * Every run this function goes on to read is at least
+		 * HEXQ_RUN_MIN long - the bare-run path wants HEX_RUN_MIN and
+		 * the quoted one wants HEXQ_RUN_MIN, and anything shorter is
+		 * `continue`d below without being looked at again. So a run of
+		 * that length starting anywhere in [i, i + MIN - 1] must cover
+		 * the byte at i + MIN - 1, and if THAT byte is not a hex digit
+		 * there is no such run to find: the whole window can be
+		 * stepped over in one go.
+		 *
+		 * Hex digits are 22 of the 256 byte values, so eight in a row
+		 * is rare in anything that is not hex - the probe almost always
+		 * fails and the scan advances eight bytes instead of one.
+		 *
+		 * THE WALK BACK IS BOUNDED BY `base`, and it has to be: the
+		 * probe lands in the middle of a run, so its start must be
+		 * found, and p[base] is known NOT to be a hex digit, which
+		 * makes base+1 the earliest the run can begin. That is also
+		 * what keeps the scan from ever moving backwards over bytes it
+		 * has already passed.
+		 */
 		if (kof_hex_val(p[i]) < 0) {
-			i++;
-			continue;
+			uint64_t base = i, probe = i + (HEXQ_RUN_MIN - 1u);
+
+			while (probe < to && kof_hex_val(p[probe]) < 0)
+				probe += HEXQ_RUN_MIN;
+			if (probe >= to)
+				break;
+			i = probe;
+			while (i > base && kof_hex_val(p[i - 1u]) >= 0)
+				i--;
 		}
 		beg = i;
 		while (i < to && kof_hex_val(p[i]) >= 0)
@@ -1047,9 +1121,34 @@ static int unpct_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		uint32_t esc = 0;
 		int text = 1;
 
+		/*
+		 * SKIPPING BY PCT_RUN_MIN, the same argument the hex pass
+		 * makes: the floor below discards every run shorter than it,
+		 * so a run worth finding that begins anywhere in
+		 * [i, i + PCT_RUN_MIN - 1] must cover the byte at the far end
+		 * of that window. If that byte is not body, no such run is
+		 * there and the window is stepped over whole.
+		 *
+		 * The set PCT_BODY holds is wider than the hex alphabet - 85
+		 * of 256 - so the probe fails less often than the hex one and
+		 * the saving is smaller. It is still eight table reads
+		 * replaced by one wherever it fails.
+		 *
+		 * Bounded by `base` for the reason written at the hex pass:
+		 * p[base] is not body, so base+1 is the earliest the run can
+		 * start, and the scan cannot walk back over what it has
+		 * already read.
+		 */
 		if (!pct_body(p[i])) {
-			i++;
-			continue;
+			uint64_t base = i, probe = i + (PCT_RUN_MIN - 1u);
+
+			while (probe < to && !pct_body(p[probe]))
+				probe += PCT_RUN_MIN;
+			if (probe >= to)
+				break;
+			i = probe;
+			while (i > base && pct_body(p[i - 1u]))
+				i--;
 		}
 		beg = i;
 		while (i < to && pct_body(p[i]))

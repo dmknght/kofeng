@@ -122,13 +122,27 @@ AR      ?= ar
 # "draft_from_source, kofeditor.c:4478" - so -g moves to SAN_CFLAGS and
 # ASAN_FLAGS rather than disappearing. It is `?=`, so a developer who wants it
 # back for a release build says CFLAGS='-O2 -g' and gets it.
+#
+# AND EVERY += BELOW IS `override`, WHICH IS WHAT MAKES THAT SENTENCE TRUE.
+#
+# A variable set on the command line beats the makefile, and GNU make applies
+# that to `+=` as well: a plain `CFLAGS += -Ilibkofeng/kofcore` after a
+# command-line `CFLAGS='-O2 -g'` appends nothing at all. So the very build the
+# comment above offers was the one that did not work - `make CFLAGS='-O2 -g'`
+# died on `fatal error: kofmod/kofsig.h: No such file or directory`, because
+# the include path this file adds had been dropped.
+#
+# `override` restores the intent: the developer's value is kept and the flags
+# the tree cannot compile without are still appended to it. It is on every
+# CFLAGS += in this file for that reason, not on the first one only - one
+# missed line puts the hole back.
 CFLAGS  ?= -O2
 # The parallel walk in scan.c is pthreads. On this glibc the symbols are in libc
 # and the link succeeds without it - measured, the flag changes the scan's speed
 # by nothing either way - so it is here for the platforms where the link needs
 # it rather than for anything it does on this one.
 LDFLAGS += -pthread
-CFLAGS  += -std=c11 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
+override CFLAGS  += -std=c11 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
            -Wpointer-arith -Wstrict-prototypes -Wmissing-prototypes \
            -fno-common -Ilibkofeng/kofcore
 
@@ -423,7 +437,7 @@ export TEMP := $(TMP)
 # untidy: a build whose normal output is warnings is a build where the warning
 # that matters goes past unread. LDFLAGS is on every link command in this file,
 # so nothing about the resulting binaries changes.
-CFLAGS      += -pthread
+override CFLAGS += -pthread
 LDFLAGS     += -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
 # By default every signature blob this engine loads is x86_64 machine code on
 # every host - deliberate, see ksigbuilder, since a database has to be
@@ -549,7 +563,7 @@ KOF_X86_SYSROOT ?= C:/msys64/mingw64
 KOF_CROSS_FLAGS += -target x86_64-w64-windows-gnu --sysroot=$(KOF_X86_SYSROOT) -fuse-ld=lld
 endif
 endif
-CFLAGS += $(KOF_CROSS_FLAGS)
+override CFLAGS += $(KOF_CROSS_FLAGS)
 else
 NATIVE_OS   := $(shell uname -s 2>/dev/null)
 EXE         :=
@@ -724,14 +738,14 @@ KOF_WARN_PENDING := -Wno-missing-format-attribute -Wno-format-nonliteral
 # after, so they win over whatever enabled them.
 KOF_WARN_EXTRA := $(call kof_probe_each,$(KOF_WARN_PORTABLE) $(KOF_WARN_GCC)) \
                   $(call kof_probe_each,$(KOF_WARN_PENDING))
-CFLAGS  += $(KOF_WARN_EXTRA)
+override CFLAGS  += $(KOF_WARN_EXTRA)
 
 # Header dependencies, emitted as a side effect of every compile and included
 # below. Without them a header edit rebuilds nothing: the object files are newer
 # than the .c that did not change, so make has nothing to do and the tests run
 # against the previous header. That is not a theoretical failure - a deliberately
 # broken _Static_assert in a header was compiled away to a passing build here.
-CFLAGS  += -MMD -MP
+override CFLAGS  += -MMD -MP
 
 # Where the dependency files go.
 #
@@ -753,7 +767,7 @@ LDFLAGS ?=
 ifeq ($(SAN),1)
 SAN_CFLAGS := -fsanitize=address,undefined -fno-sanitize-recover=all \
               -fno-omit-frame-pointer -g
-CFLAGS  += $(SAN_CFLAGS)
+override CFLAGS  += $(SAN_CFLAGS)
 LDFLAGS += -fsanitize=address,undefined -fno-sanitize-recover=all
 endif
 
@@ -763,7 +777,7 @@ endif
 # link, and a build system should refuse that by construction rather than at
 # the link step.
 ifeq ($(SAN),thread)
-CFLAGS  += -fsanitize=thread -fno-omit-frame-pointer
+override CFLAGS  += -fsanitize=thread -fno-omit-frame-pointer
 LDFLAGS += -fsanitize=thread
 endif
 
@@ -872,7 +886,7 @@ $(BUILD) $(OUT) $(INT) $(TEST):
 KOF_DEBUG_CFLAGS :=
 ifeq ($(DEBUG),1)
 KOF_DEBUG_CFLAGS  := -g
-CFLAGS += $(KOF_DEBUG_CFLAGS)
+override CFLAGS += $(KOF_DEBUG_CFLAGS)
 endif
 
 FLAGSIG := $(CC) $(CFLAGS) $(LDFLAGS)
@@ -1009,8 +1023,8 @@ KOF_BUILD_STAMP := $(shell $(NOW_UTC))
 # the same make run; the names stay apart because the two things they describe
 # can be shipped separately - an engine binary and a database built a week later
 # are the ordinary case, and then the numbers differ on their own.
-CFLAGS += -DKOF_PACK_BUILD=$(KOF_BUILD_STAMP)u
-CFLAGS += -DKOFENG_BUILD=$(KOF_BUILD_STAMP)u
+override CFLAGS += -DKOF_PACK_BUILD=$(KOF_BUILD_STAMP)u
+override CFLAGS += -DKOFENG_BUILD=$(KOF_BUILD_STAMP)u
 
 #
 # A CLANG-ONLY WARNING IN VENDORED CODE, SILENCED FOR VENDORED CODE ONLY.
