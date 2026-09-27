@@ -335,6 +335,80 @@ static inline uint32_t kof_crc32(const void *data, uint64_t len)
  * Its own copy per translation unit, on the same trade kof_crc32 above takes
  * and for the same reason - 256 bytes against a call and no constant folding.
  */
+/*
+ * ASCII LOWER CASE WITHOUT A COMPARE OR A BRANCH.
+ *
+ * `ge` carries bit 7 once the byte reaches 'A', `gt` once it passes 'Z', and
+ * `~c` drops anything with the high bit already set - so only the upper-case
+ * letters keep bit 7, and shifted down two it is the 0x20 that lowers them.
+ * The same arithmetic swar_lower does four bytes at a time in the matcher.
+ *
+ * HERE RATHER THAN IN EACH CALLER, because a bit formula copied into two files
+ * is two things to get subtly wrong. Checked against
+ * `(c >= 'A' && c <= 'Z') ? c + 32 : c` on all 256 inputs.
+ */
+static inline uint8_t kof_lower_byte(uint8_t c)
+{
+	uint32_t x  = (uint32_t)c & 0x7fu;
+	uint32_t ge = x + 0x3fu;
+	uint32_t gt = x + 0x25u;
+
+	return (uint8_t)(c | ((ge & ~gt & ~(uint32_t)c & 0x80u) >> 2));
+}
+
+/*
+ * THE REST OF THE BYTE CLASSES, AND THEY LIVE HERE FOR THE SAME REASON
+ * kof_lower_byte DOES.
+ *
+ * A parser that spells "is this printable" as `c >= 0x20 && c < 0x7f` is
+ * writing two comparisons and a branch where one unsigned compare does: the
+ * subtraction wraps for everything below the range, so the upper bound checks
+ * both ends. Spelled out at each call site it was also eleven separate copies
+ * of the digit test and a dozen of the letter test, which is a dozen places to
+ * get an edge wrong and no single place to make it faster.
+ *
+ * These are the classes the parsers and the normaliser actually ask for.
+ * Anything needing a different set builds it from these rather than open-coding
+ * another range.
+ */
+static inline int kof_is_print(uint8_t c)
+{
+	return (uint8_t)(c - 0x20u) < 0x5fu;
+}
+
+static inline int kof_is_digit(uint8_t c)
+{
+	return (uint8_t)(c - '0') < 10u;
+}
+
+/*
+ * `c | 0x20` AND NOT kof_lower_byte, WHICH IS THE OPPOSITE CHOICE TO THE ONE
+ * NEXT DOOR AND IS MEASURED.
+ *
+ * Setting bit 5 maps 'A'..'Z' onto 'a'..'z' and leaves 'a'..'z' alone, and the
+ * only bytes it can land inside that range are those two - so as a TEST it is
+ * exact, in three instructions against the seven the arithmetic fold costs.
+ *
+ * The instruction counts are static and real; the SCAN-WIDE difference between
+ * the two spellings is not. Built on kof_lower_byte the whole scan measured
+ * 15,083,375,967 Ir and this form measures 15,083,226,403 - 0.001%, which is
+ * nothing. An earlier note here blamed a 1.24% regression on the fold; that
+ * was wrong, the regression is elsewhere, and the cheaper form is kept only
+ * because it is the simpler code.
+ *
+ * It is not a fold. `c | 0x20` turns '@' into '`' and '[' into '{', which is
+ * why kof_lower_byte exists and why this cannot be used in its place.
+ */
+static inline int kof_is_alpha(uint8_t c)
+{
+	return (uint8_t)((c | 0x20u) - 'a') < 26u;
+}
+
+static inline int kof_is_alnum(uint8_t c)
+{
+	return kof_is_alpha(c) || kof_is_digit(c);
+}
+
 static inline int kof_hex_val(uint8_t c)
 {
 	static const uint8_t v1[256] = {

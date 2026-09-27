@@ -72,9 +72,8 @@ static int mk_tag(kof_buf f, uint64_t at, uint64_t end, int *close,
 	while (i < end && n + 1u < cap) {
 		uint8_t c = f.p[i];
 
-		if (c >= 'A' && c <= 'Z')
-			c = (uint8_t)(c + 32);
-		if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')))
+		c = kof_lower_byte(c);
+		if (!kof_is_alnum(c))
 			break;
 		name[n++] = (char)c;
 		i++;
@@ -318,9 +317,7 @@ void kof_html_islands(kof_buf f, uint64_t from, struct kof_script_info *info)
 		gt = mk_tag_end(f, at + 7u);
 		if (gt >= f.n)
 			break;
-		for (k = gt + 1u; k + 8u <= f.n; k++)
-			if (kof_txt_tag_at(f, k, "</script", 8u))
-				break;
+		k = kof_txt_find(f, gt + 1u, f.n, "</script", 8u);
 		/*
 		 * AN UNCLOSED <script> RUNS TO THE END, and that is what the
 		 * host does with it too - an html parser closes an open
@@ -328,7 +325,7 @@ void kof_html_islands(kof_buf f, uint64_t from, struct kof_script_info *info)
 		 * code of a truncated or hand-written document in MARKUP,
 		 * which is the one place a rule scoped to code will not look.
 		 */
-		if (k + 8u > f.n)
+		if (k == KOF_TXT_NONE)
 			k = f.n;
 		if (k > gt + 1u && !kof_isl_add(info, gt + 1u, k - (gt + 1u)))
 			break;

@@ -140,7 +140,7 @@ static int one_rec(kof_buf file, const struct kof_elf_info *e, int be, int is64,
 		/* Printable only: the field is compared against text in a rule,
 		 * and a control byte from a hostile string table would end the
 		 * pattern early or, worse, match one. */
-		rec[KOF_SYM_R_NAME + i] = (c >= 0x20u && c < 0x7fu) ? c : '?';
+		rec[KOF_SYM_R_NAME + i] = kof_is_print(c) ? c : '?';
 	}
 	return 1;
 }

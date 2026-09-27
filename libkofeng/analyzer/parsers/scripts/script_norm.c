@@ -12,6 +12,7 @@
 
 #include <string.h>
 
+#include "../../../kofcore/kofcore.h"
 #include "script_norm.h"
 
 /* ---- the table ------------------------------------------------------------ */
@@ -253,8 +254,7 @@ static int is_ws(uint8_t c)
 
 static int is_word(uint8_t c)
 {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-	       (c >= '0' && c <= '9') || c == '_';
+	return kof_is_alnum(c) || c == '_';
 }
 
 static int at_text(const uint8_t *p, uint32_t n, uint32_t i, const char *t)
@@ -331,8 +331,7 @@ static int ml_opens_at(const struct kof_lex *lx, const uint8_t *p, uint32_t n,
 	/* The label may be quoted, which is what turns off interpolation. */
 	if (j < n && (p[j] == '"' || p[j] == '\''))
 		j++;
-	return j < n && ((p[j] >= 'a' && p[j] <= 'z') ||
-			 (p[j] >= 'A' && p[j] <= 'Z') || p[j] == '_');
+	return j < n && (kof_is_alpha(p[j]) || p[j] == '_');
 }
 
 /*
@@ -470,8 +469,14 @@ int kof_lex_is_code_at(const struct kof_lex *lx, const uint8_t *p, uint32_t n,
 		}
 		cl = line_cmt_at(lx, p, n, i);
 		if (cl) {
-			while (i < at && p[i] != '\n')
-				i++;
+			/* Skip the rest of the comment line in one step - the
+			 * same stopping point the byte loop reached: the first
+			 * '\n' at or after i, or `at`. The for above holds
+			 * i < at, so the length is never zero. */
+			const uint8_t *e = memchr(p + i, '\n',
+						  (size_t)(at - i));
+
+			i = e ? (uint32_t)(e - p) : at;
 			continue;
 		}
 		if (lx->blk_open && at_text(p, n, i, lx->blk_open)) {
@@ -523,10 +528,21 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 		int resumed = st == ST_SQ || st == ST_DQ;
 		int tail = 0;
 
-		/* Where this line ends, newline excluded. */
-		le = ls;
-		while (le < n && in[le] != '\n')
-			le++;
+		/*
+		 * Where this line ends, newline excluded.
+		 *
+		 * memchr rather than a byte loop: this runs once per LINE of
+		 * every script object normalised, and a line of minified
+		 * javascript or a base64 blob is thousands of bytes long. The
+		 * answer is the same - the first '\n' at or after ls, or n
+		 * when the last line is unterminated.
+		 */
+		{
+			const uint8_t *e = memchr(in + ls, '\n',
+						  (size_t)(n - ls));
+
+			le = e ? (uint32_t)(e - in) : n;
+		}
 
 		/*
 		 * A STRING THAT IS STILL OPEN OWNS THE LINE, and this is the
@@ -994,8 +1010,7 @@ static int arena_put_self(struct folder *f, uint32_t off, uint32_t n)
 
 static int is_name_byte(uint8_t c)
 {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-	       (c >= '0' && c <= '9') || c == '_';
+	return kof_is_alnum(c) || c == '_';
 }
 
 static void skip_ws(const struct folder *f, uint32_t *i)

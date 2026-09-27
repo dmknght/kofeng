@@ -29,6 +29,32 @@ int kof_txt_tag_at(kof_buf f, uint64_t at, const char *tag, uint32_t len);
 int kof_txt_has(kof_buf f, uint64_t look, const char *t);
 
 /*
+ * WHERE IS IT - the same search, for the callers that need the position.
+ *
+ * Every language here closes something: "</script", "--->", "</cfscript>",
+ * "%>". Each of them was written as `for (k = ...; ...; k++) if
+ * (kof_txt_tag_at(f, k, ...)) break;`, which is a naive O(n*m) substring
+ * search spelled out at the call site - a call and a case fold per byte of the
+ * body to discover that byte zero is not '<'. That is exactly what kof_txt_has
+ * was rewritten to stop doing, and the fix did not reach these because they
+ * want the offset rather than a yes.
+ *
+ * Same guarantee as kof_txt_has: every position stepped over holds a byte that
+ * folds to neither spelling of the tag's first character, which is precisely
+ * kof_txt_tag_at's first comparison. Nothing that could have matched is
+ * skipped.
+ *
+ * Searches positions p with from <= p and p + len <= min(to, f.n). Answers the
+ * first such p, or KOF_TXT_NONE when there is none - a sentinel rather than
+ * `to`, because three of the four callers pass a `to` they also use as a
+ * fallback value and the two meanings must not be the same number.
+ */
+#define KOF_TXT_NONE ((uint64_t)-1)
+
+uint64_t kof_txt_find(kof_buf f, uint64_t from, uint64_t to,
+		      const char *tag, uint32_t len);
+
+/*
  * Record one code island, in file order.
  *
  * Answers 0 when the table is full, which is a caller's signal to stop rather

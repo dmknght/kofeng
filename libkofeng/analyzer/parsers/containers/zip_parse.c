@@ -139,10 +139,8 @@ static int name_is(kof_buf f, uint64_t off, uint32_t len, const char *lit)
 	for (i = 0; i < len; i++) {
 		uint8_t a = f.p[off + i], b = (uint8_t)lit[i];
 
-		if (a >= 'A' && a <= 'Z')
-			a = (uint8_t)(a + 32);
-		if (b >= 'A' && b <= 'Z')
-			b = (uint8_t)(b + 32);
+		a = kof_lower_byte(a);
+		b = kof_lower_byte(b);
 		if (a != b)
 			return 0;
 	}

@@ -14672,7 +14672,13 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 			glist_begin(&L, o, v, PR(r), g, "Markers",
 				    v->grp_it[g], GRP_SIM_MAX);
 			for (i = 0; i < v->ed.dr.n_decl; i++) {
-				char num[8];
+				/* Ten digits and a terminator: what %u can
+				 * actually produce. At eight the compiler was
+				 * right that a large index would be printed
+				 * short - snprintf would not overflow, it would
+				 * quietly label a marker with the wrong
+				 * number. */
+				char num[11];
 
 				if (!(v->ed.dr.decl[i].grp & (1u << g)))
 					continue;

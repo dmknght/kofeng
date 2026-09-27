@@ -296,6 +296,22 @@ enum kof_multimatch_kind {
 #define KOF_MULTIMATCH_BITS_MAX   22u
 
 /*
+ * THE SWEEP KEYS ON `>> (32 - bits)`, AND A SHIFT OF 32 IS NOT ZERO - IT IS
+ * UNDEFINED.
+ *
+ * On x86 the shift count is taken modulo 32, so `x >> 32` yields x and every
+ * key becomes the whole hash: one bucket, every marker on one chain, correct
+ * answers at a crawl. Nothing warns, no test fails, and the only symptom is a
+ * scan that got slower. That is the failure mode this guards against - bits is
+ * floored at BITS_MIN by bits_for and can only reach here through it, so the
+ * guarantee lives in these two constants and nowhere else.
+ */
+_Static_assert(KOF_MULTIMATCH_BITS_MIN >= 1u &&
+	       KOF_MULTIMATCH_BITS_MAX <= 31u &&
+	       KOF_MULTIMATCH_BITS_MIN <= KOF_MULTIMATCH_BITS_MAX,
+	       "gram key shift 32 - bits must stay inside 1..31");
+
+/*
  * WHEN THE WALK STOPS BEING CHEAPER THAN THE SEARCH.
  *
  * Below this a chain is a handful of entries and walking it beats a binary

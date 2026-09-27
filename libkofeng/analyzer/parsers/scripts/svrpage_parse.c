@@ -230,10 +230,8 @@ static uint64_t svr_element(kof_buf f, uint64_t i, uint64_t *body, uint64_t *end
 		 */
 		if (gt >= f.n || !need)
 			continue;
-		for (k = gt + 1u; k + 8u <= f.n; k++)
-			if (kof_txt_tag_at(f, k, "</script", 8u))
-				break;
-		if (k + 8u > f.n)
+		k = kof_txt_find(f, gt + 1u, f.n, "</script", 8u);
+		if (k == KOF_TXT_NONE)
 			continue;
 		*body = gt + 1u;
 		*end = k;

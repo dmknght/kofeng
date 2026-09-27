@@ -15,6 +15,7 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "../../../kofcore/kofcore.h"
 #include "rtf_parse.h"
 #include "../../../kofcore/runlist.h"
 
@@ -22,17 +23,17 @@
 
 static int is_alpha(uint8_t c)
 {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+	return kof_is_alpha(c);
 }
 
 static int is_digit(uint8_t c)
 {
-	return c >= '0' && c <= '9';
+	return kof_is_digit(c);
 }
 
 static int is_hex(uint8_t c)
 {
-	return is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+	return kof_hex_val(c) >= 0;
 }
 
 static int is_space(uint8_t c)

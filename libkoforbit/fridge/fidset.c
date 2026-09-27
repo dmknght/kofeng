@@ -141,9 +141,27 @@ struct kof_fidset {
 	 * WHAT THIS RUN TOOK OUT - see kof_fidset_drop.
 	 *
 	 * A plain array walked linearly, and no table over it, because of what
-	 * is in it: one entry per file a scan actually found something in. A
-	 * sweep that fills this has bigger news than its cache. The empty case
-	 * is what every lookup pays, and that is one test of n_drop.
+	 * is in it: one entry per file a scan actually found something in AND
+	 * THE SET ALREADY HELD AS CLEAN. kof_fidset_drop refuses a key the set
+	 * does not have, and three things keep that set small: the cache is
+	 * discarded outright when db_stamp or eng_stamp moves, kof_fid covers
+	 * size, born and written so an edited file is a different key, and the
+	 * same engine over the same bytes reaches the same verdict. A sweep
+	 * that fills this has bigger news than its cache. The empty case is
+	 * what every lookup pays, and that is one test of n_drop.
+	 *
+	 * WHAT IT WOULD COST IF THAT STOPPED BEING TRUE, measured here rather
+	 * than left as an assumption, because the linear walk runs on EVERY
+	 * lookup and the growth is quadratic in a way nothing would report:
+	 *
+	 *     n_drop        0     100    1000    4850   20000
+	 *     lookups/s  386M     30M    4.4M   0.97M   0.23M
+	 *     slowdown      -   12.7x     88x    399x   1662x
+	 *
+	 * So if a future change lets the cache outlive a database it no longer
+	 * matches, or lets a verdict differ over identical bytes, this array is
+	 * where the scan quietly stops being a scan. It wants a table over it
+	 * at that point, not a bigger realloc.
 	 */
 	uint64_t *drop;
 	uint64_t  n_drop, cap_drop;

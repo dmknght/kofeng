@@ -56,6 +56,27 @@
 #define ALIGN_SIZE     (1u << ALIGN_BITS)
 #define END_POS_MODEL_INDEX 14u
 #define FULL_DISTANCES (1u << (END_POS_MODEL_INDEX >> 1))
+
+/*
+ * THE TWO BOUNDS THAT KEEP THE PROBABILITY INDICES INSIDE THE ARRAY, said to
+ * the compiler rather than to the reader.
+ *
+ * MAX_PB_STATES is written as 16 and the comment next to it is the only thing
+ * tying it to KOF_LZMA_MAX_PB. Raise that constant to 5 and `pos_state` reaches
+ * 31 while every `state * MAX_PB_STATES + pos_state` still strides by 16: the
+ * index runs off the end of a heap array, on attacker-supplied header bytes,
+ * and nothing in this file would say so.
+ *
+ * MAX_LC is load-bearing in a quieter way. The literal context is
+ * `out[at - 1] >> (8u - lc)`, and `8u - lc` is UNSIGNED - at lc of 9 it is not
+ * -1 but 4294967295, a shift wider than the type, which is undefined and on
+ * x86 becomes a shift by 31. The byte would still be in range by luck; the
+ * next person to widen the literal slot would not be so lucky.
+ */
+_Static_assert(MAX_PB_STATES == (1u << KOF_LZMA_MAX_PB),
+	       "MAX_PB_STATES must be 1 << KOF_LZMA_MAX_PB");
+_Static_assert(KOF_LZMA_MAX_LC <= 8u,
+	       "literal context uses 8 - lc as an unsigned shift count");
 #define MATCH_MIN_LEN   2u
 
 /*

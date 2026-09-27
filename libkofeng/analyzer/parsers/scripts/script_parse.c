@@ -31,6 +31,7 @@
 
 #include <string.h>
 
+#include "../../../kofcore/kofcore.h"
 #include "script_parse.h"
 #include "script_norm.h"
 #include "scantext.h"
@@ -360,29 +361,32 @@ enum { FAM_NONE  = KOF_SFAM_NONE, FAM_PHP = KOF_SFAM_PHP,
  */
 static int mk_has_script(kof_buf f, uint64_t look)
 {
-	uint64_t i;
+	uint64_t i, gt, k;
+	const uint8_t *e;
 
-	for (i = 0; i + 7u <= look; i++) {
-		uint64_t gt, k;
-
-		if (!kof_txt_tag_at(f, i, "<script", 7u))
-			continue;
-		for (gt = i + 7u; gt < f.n && f.p[gt] != '>'; gt++)
-			;
-		if (gt >= f.n)
-			return 0;
-		for (k = gt + 1u; k + 8u <= f.n; k++)
-			if (kof_txt_tag_at(f, k, "</script", 8u))
-				return 1;
+	/*
+	 * The old form walked every position of `look` asking kof_txt_tag_at
+	 * whether "<script" started there, then - having found one - walked
+	 * every position again for the closing tag. Two naive searches, and it
+	 * only ever looks at the FIRST opening tag, so the outer walk was
+	 * finding one position and paying for the whole buffer to do it.
+	 */
+	i = kof_txt_find(f, 0, look, "<script", 7u);
+	if (i == KOF_TXT_NONE)
 		return 0;
-	}
-	return 0;
+
+	e = memchr(f.p + i + 7u, '>', (size_t)(f.n - (i + 7u)));
+	if (!e)
+		return 0;
+	gt = (uint64_t)(e - f.p);
+
+	k = kof_txt_find(f, gt + 1u, f.n, "</script", 8u);
+	return k != KOF_TXT_NONE;
 }
 
 static int psh_ident(uint8_t c)
 {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-	       (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
+	return kof_is_alnum(c) || c == '_' || c == '.' || c == '-';
 }
 
 static int psh_cmdlet(kof_buf f, uint64_t look)
@@ -853,8 +857,8 @@ static uint8_t kind_of_interp(const char *w);
  * language here and `#/` with no known interpreter behind it is a comment
  * about a path. Measured over /usr/bin, /usr/lib, /usr/share and /etc: no file
  * begins `#/` at all. Over the three corpora: three do, all three name an
- * interpreter, and the two that begin `#/*` - C sources - are refused by this
- * exact test.
+ * interpreter, and the two whose second and third bytes open a C comment are
+ * refused by this exact test.
  *
  * A SPACE IS NOT ACCEPTED EITHER. `# /usr/bin/perl` is a comment with a path
  * in it, and the shape that ships has no space. Requiring the slash to touch
@@ -875,8 +879,15 @@ static int shebang_line(kof_buf f, uint64_t look, uint64_t *line_end,
 	else
 		return 0;
 
-	while (e < look && f.p[e] != '\n')
-		e++;
+	{
+		/* The first newline at or after e, or `look` - what the byte
+		 * loop answered, found a cache line at a time. */
+		const uint8_t *q = (e < look) ? memchr(f.p + e, '\n',
+						       (size_t)(look - e))
+					      : NULL;
+
+		e = q ? (uint64_t)(q - f.p) : look;
+	}
 	*line_end = e;
 	*kind = KOF_SCRIPT_ANY;
 	if (shebang_word(f, e, lead, word, (uint32_t)sizeof word))

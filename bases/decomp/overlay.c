@@ -61,15 +61,18 @@
  * and never a wrong answer. That asymmetry is why a short list is safe here
  * and would not be safe anywhere that has to be complete.
  */
+/*
+ * kof_memeq AND NOT A LOOP OF kof_u8.
+ *
+ * Every kof_u8 is a call through the host's content vtable - the module cannot
+ * touch the mapping itself - so a four-byte magic read a byte at a time is
+ * four calls where the host can answer with one memcmp. This runs for every
+ * overlay that clears the page floor, once per candidate magic.
+ */
 static int magic_at(const struct kof_obj_ctx *ctx, uint64_t at,
 		    const char *m, uint32_t n)
 {
-	uint32_t i;
-
-	for (i = 0; i < n; i++)
-		if ((uint8_t)kof_u8(at + i) != (uint8_t)m[i])
-			return 0;
-	return 1;
+	return kof_memeq(at, m, n);
 }
 
 static int names_a_container(const struct kof_obj_ctx *ctx, uint64_t at)
@@ -82,6 +85,10 @@ static int names_a_container(const struct kof_obj_ctx *ctx, uint64_t at)
 	       magic_at(ctx, at, "7z\xbc\xaf\x27\x1c", 6) ||
 	       magic_at(ctx, at, "MSCF", 4)             ||  /* cab           */
 	       magic_at(ctx, at, "\x1f\x8b", 2)          ||  /* gzip          */
+	       /* Six bytes against a five-character literal, and that is
+		* right: XZ's magic is FD 37 7A 58 5A 00 and the last of them
+		* is the terminator the literal already carries. In bounds,
+		* and not an off-by-one to tidy away. */
 	       magic_at(ctx, at, "\xfd" "7zXZ", 6)       ||
 	       magic_at(ctx, at, "BZh", 3)              ||
 	       magic_at(ctx, at, "\xd0\xcf\x11\xe0", 4)  ||  /* ole           */

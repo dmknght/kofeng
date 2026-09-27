@@ -4,6 +4,7 @@
 
 #include <string.h>
 
+#include "../../../kofcore/kofcore.h"
 #include "php_parse.h"
 #include "scantext.h"
 
@@ -141,9 +142,7 @@ static uint64_t php_skip_heredoc(kof_buf f, uint64_t i)
 	if (j < f.n && (f.p[j] == '"' || f.p[j] == '\''))
 		j++;
 	while (j < f.n && n < sizeof label &&
-	       ((f.p[j] >= 'a' && f.p[j] <= 'z') ||
-		(f.p[j] >= 'A' && f.p[j] <= 'Z') ||
-		(f.p[j] >= '0' && f.p[j] <= '9') || f.p[j] == '_'))
+	       (kof_is_alnum(f.p[j]) || f.p[j] == '_'))
 		label[n++] = f.p[j++];
 	if (!n)
 		return i + 3u;          /* not a heredoc after all */

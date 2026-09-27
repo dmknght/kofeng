@@ -315,7 +315,7 @@ static uint32_t entry_name(struct ole *s, uint64_t eoff, char *out, uint32_t cap
 			break;
 		if (ch == 0)
 			break;
-		if (ch >= 'A' && ch <= 'Z')
+		if ((uint16_t)(ch - 'A') < 26u)
 			ch = (uint16_t)(ch + ('a' - 'A'));
 		out[n++] = ch < 0x80u ? (char)ch : '?';
 	}
@@ -477,6 +477,24 @@ static void push(struct ole *s, uint32_t *sp, uint32_t idx, uint32_t cls,
 {
 	if (idx > SEC_MAXREG || idx >= s->o->dir_count)
 		return;
+	/*
+	 * AND INSIDE THE TWO ARRAYS THIS INDEX IS ABOUT TO REACH, said here
+	 * rather than inferred three hundred lines away.
+	 *
+	 * dir_count cannot exceed KOF_DOCOLE_MAX_DIR today: max_dirsec is
+	 * MAX_DIR / per and dir_count is n_dirsec * per, so the floor division
+	 * caps the product. That is correct and it is also invisible - the
+	 * arrays it protects are o->seen, which is MAX_DIR BITS and not bytes,
+	 * and the entry table. Change the sector sizes this parser accepts, or
+	 * how the cap is spread over the chain, and the first symptom is
+	 * seen_test_set writing past a 64-word array with an index a file
+	 * chose. One compare on a path that runs a few thousand times per
+	 * document buys the invariant outright.
+	 */
+	if (idx >= KOF_DOCOLE_MAX_DIR) {
+		s->o->anomalies |= KOF_DOCOLE_ANOM_DIR_OVERFLOW;
+		return;
+	}
 	if (*sp >= KOF_DOCOLE_MAX_DIR) {
 		s->o->anomalies |= KOF_DOCOLE_ANOM_DIR_OVERFLOW;
 		return;
@@ -722,9 +740,9 @@ static int name_eq(struct ole *s, const struct kof_docole_entry *e,
 
 		if (!kof_rd_u16(s->f, e->name_off + i * 2u, 0, &ch))
 			return 0;
-		if (ch >= 'A' && ch <= 'Z')
+		if ((uint16_t)(ch - 'A') < 26u)
 			ch = (uint16_t)(ch + ('a' - 'A'));
-		if (w >= 'A' && w <= 'Z')
+		if ((uint16_t)(w - 'A') < 26u)
 			w = (uint16_t)(w + ('a' - 'A'));
 		if (ch != w)
 			return 0;

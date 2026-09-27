@@ -22,6 +22,7 @@
  * kofplatform.h for what it is and why the Windows side of it does not need this. */
 #define _GNU_SOURCE
 
+#include "../../kofcore/kofcore.h"
 #include "kofmatch.h"
 #include "../../databases/dbcore.h"   /* KOF_STR_* */
 #include "../../kofcore/kofplatform.h"
@@ -179,9 +180,10 @@ static void gram_late(struct kof_match_ctx *m)
 	m->n_bytes_indexed = gram_build(m->gram_use, m->data);
 }
 
+/* One byte of what swar_lower does to four - see kof_lower_byte. */
 static uint8_t fold(uint8_t c)
 {
-	return (c >= 'A' && c <= 'Z') ? (uint8_t)(c + 32) : c;
+	return kof_lower_byte(c);
 }
 
 /*
@@ -232,7 +234,7 @@ static int find_lit(const uint8_t *hay, uint64_t hlen,
 
 		for (i = 0; i < nlen; i++) {
 			uint8_t c = needle[i];
-			if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+			if (!kof_is_alpha(c)) {
 				anchor = i;
 				has_anchor = 1;
 				break;
@@ -435,7 +437,7 @@ static int gram_may_contain(const struct kof_gram *g, const uint8_t *b,
 		uint8_t c = b[i];
 		base[i] = c;
 		letter[i] = 0;
-		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+		if (kof_is_alpha(c)) {
 			letter[i] = 1;
 			nl++;
 			base[i] = (uint8_t)(c | 0x20);

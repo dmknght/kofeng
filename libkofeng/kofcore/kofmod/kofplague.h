@@ -132,12 +132,46 @@ static inline uint32_t kof_plague_drop_weight(void)
 	return w;
 }
 
+/*
+ * THE MIX IN TWO HALVES, BECAUSE THE SELECTOR CANNOT SEE THE SECOND ONE.
+ *
+ * kof_plague_mix is `h *= MIX; h ^= h >> 15`, and the rolling walk runs it on
+ * EVERY BYTE of every region fed - then throws the answer away for the
+ * thirty-one windows in thirty-two that the selector rejects.
+ *
+ * The xor-shift is provably invisible to that test. `x >> 15` takes bit i of
+ * the result from bit i + 15 of x, so for i >= 17 it takes it from a bit that
+ * does not exist and the result is zero: THE TOP 17 BITS OF `x >> 15` ARE
+ * ALWAYS ZERO. The selector reads the top SEL_BITS, and 32 - SEL_BITS is 27,
+ * which is inside that zero range - so those bits of `x ^ (x >> 15)` are
+ * exactly those bits of `x`, and the selection is decided by the multiply
+ * alone.
+ *
+ * So the multiply is done per byte, the test is made on it, and the xor-shift
+ * is paid only where the value is going to be used. The answer is bit for bit
+ * what it always was; the static assert below is what keeps it that way if
+ * SEL_BITS ever moves.
+ */
+_Static_assert(32u - KOF_PLAGUE_SEL_BITS >= 17u,
+	       "the selector must read only bits that x >> 15 leaves zero, "
+	       "or kof_plague_selects_pre stops agreeing with the full mix");
+
+/* The half the selector needs. */
+static inline uint32_t kof_plague_premix(uint32_t h)
+{
+	return h * KOF_PLAGUE_MIX;
+}
+
+/* And the half only a kept window needs. */
+static inline uint32_t kof_plague_mix_from(uint32_t pre)
+{
+	return pre ^ (pre >> 15);
+}
+
 /* Mix a window value into the form that is stored and selected on. */
 static inline uint32_t kof_plague_mix(uint32_t h)
 {
-	h *= KOF_PLAGUE_MIX;
-	h ^= h >> 15;
-	return h;
+	return kof_plague_mix_from(kof_plague_premix(h));
 }
 
 /* Is this window one of the ones kept? Tested on the MIXED value, for the
@@ -145,6 +179,13 @@ static inline uint32_t kof_plague_mix(uint32_t h)
 static inline int kof_plague_selects(uint32_t mixed)
 {
 	return (mixed >> (32u - KOF_PLAGUE_SEL_BITS)) == 0u;
+}
+
+/* The same question asked of the premixed value - see the note above for why
+ * the two cannot disagree. */
+static inline int kof_plague_selects_pre(uint32_t pre)
+{
+	return (pre >> (32u - KOF_PLAGUE_SEL_BITS)) == 0u;
 }
 
 /*

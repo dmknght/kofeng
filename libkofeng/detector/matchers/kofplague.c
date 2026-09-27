@@ -54,6 +54,17 @@ struct pl_pair {
 #define PL_BS(b, sl)  (((b) << 8) | (sl))
 #define PL_BLOCK(bs)  ((bs) >> 8)
 #define PL_SLOT(bs)   ((bs) & 0xffu)
+
+/*
+ * "Room to spare" above is the whole safety argument, so it is made to the
+ * compiler too. A slot of 256 does not overflow - it sets bit 8, PL_BLOCK
+ * reads that as part of the block number, and the pair is filed against the
+ * block next door. No crash and no bounds violation: just two blocks whose
+ * coverage is quietly wrong. Both entry points already refuse n_hash above the
+ * cap (dbloader.c and pl_build below), so this pins the constant they check.
+ */
+_Static_assert(KOF_PLAGUE_MAX_HASH <= 256u,
+	       "PL_BS packs the slot into 8 bits below the block number");
 /* What the packing costs: a set may hold this many blocks and no more. Checked
  * where a set is built, so an oversized pack is refused rather than indexed
  * into the wrong block. */
@@ -422,11 +433,15 @@ uint32_t kof_plague_hash_span(const uint8_t *p, uint64_t n, uint32_t norm,
 	for (i = 0; i < KOF_PLAGUE_NG; i++)
 		h = h * KOF_PLAGUE_BASE + PB(i);
 	for (at = 0;; at++) {
-		uint32_t m = kof_plague_mix(h);
+		/* The multiply decides selection on its own - see
+		 * kof_plague_premix. The xor-shift is paid only by the one
+		 * window in 2^SEL_BITS that is going to be stored. */
+		uint32_t pre = kof_plague_premix(h);
 
-		if (kof_plague_selects(m) && !kof_plague_flat(p, at, norm) &&
+		if (kof_plague_selects_pre(pre) &&
+		    !kof_plague_flat(p, at, norm) &&
 		    nt < KOF_PLAGUE_SPAN_MAX)
-			tmp[nt++] = m;
+			tmp[nt++] = kof_plague_mix_from(pre);
 		if (at + KOF_PLAGUE_NG >= n)
 			break;
 		h -= PB(at) * drop;
@@ -544,10 +559,16 @@ void kof_plague_feed(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm
 		h = h * KOF_PLAGUE_BASE + kof_plague_byte_of(i);
 
 	for (at = 0;; at++) {
-		uint32_t mixed = kof_plague_mix(h);
+		/* The multiply decides selection on its own - see
+		 * kof_plague_premix. This is the hottest loop in the matcher
+		 * and the xor-shift was being run on every byte of every
+		 * region to produce a value that thirty-one windows in
+		 * thirty-two never read. */
+		uint32_t pre = kof_plague_premix(h);
 
-		if (kof_plague_selects(mixed) &&
+		if (kof_plague_selects_pre(pre) &&
 		    !kof_plague_flat(p, at, norm)) {
+			uint32_t mixed = kof_plague_mix_from(pre);
 			uint32_t k = mixed & s->bm_mask;
 
 			/*

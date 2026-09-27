@@ -54,6 +54,26 @@ static uint32_t key_gram(const uint8_t *p, uint32_t bits, int fold)
 	return (v * 2654435761u) >> (32 - bits);
 }
 
+/*
+ * THE SAME KEY WITH BOTH LOOP-INVARIANTS ALREADY DECIDED.
+ *
+ * `shift` rather than `bits` keeps the subtraction out of the body, and the
+ * case rule is which function was called rather than a flag tested inside it:
+ * `if (fold)` measured 384 million instructions, 2.4% of the scan, re-asking
+ * per byte what the table settled once - on a branch in the innermost loop in
+ * the engine. That is the same bargain sweep_rekey already makes with its own
+ * copy, and both are checked against brute force in the harness.
+ */
+static inline uint32_t key_exact(const uint8_t *p, uint32_t shift)
+{
+	return (load32(p) * 2654435761u) >> shift;
+}
+
+static inline uint32_t key_fold(const uint8_t *p, uint32_t shift)
+{
+	return (swar_lower(load32(p)) * 2654435761u) >> shift;
+}
+
 static uint32_t key_block(const uint8_t *p, uint32_t bits, int fold)
 {
 	uint32_t v = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
@@ -63,9 +83,10 @@ static uint32_t key_block(const uint8_t *p, uint32_t bits, int fold)
 	return (v * 2654435761u) >> (32 - bits);
 }
 
+/* One byte of what swar_lower does to four - see kof_lower_byte. */
 static uint8_t fold_byte(uint8_t c)
 {
-	return (c >= 'A' && c <= 'Z') ? (uint8_t)(c + 32) : c;
+	return kof_lower_byte(c);
 }
 
 /* ---- verification --------------------------------------------------------- */
@@ -1049,34 +1070,59 @@ static void sweep_gram(const struct kof_multimatch *t,
 {
 	uint64_t i, end = base + span;
 	const int fold = t->fold;
+	/*
+	 * THE TABLE READ INTO REGISTERS ONCE, and it is not style.
+	 *
+	 * `found` is a uint32_t *, and so are t->head, t->ids, t->next and
+	 * t->idx. A compiler that cannot prove they do not overlap must assume
+	 * `found[slot] |= bitmask` wrote through one of them, and re-load every
+	 * field on the next iteration - once per byte of every region swept.
+	 * Copied to locals, nothing in the body writes to them and they stay in
+	 * registers. The table is immutable for the whole sweep, which is what
+	 * makes the copy correct.
+	 */
+	const uint32_t  shift = 32u - t->bits;
+	const uint8_t  *seen = t->seen;
+	const uint32_t *head = t->head;
+	const uint32_t *nxt  = t->next;
+	const uint32_t *ids  = t->ids;
+	const uint32_t *idx  = t->idx;
+	const uint16_t *tag  = t->tag;
+	const uint8_t  *dp   = m->data.p;
 	uint16_t nb;
 
 	if (span < KOF_MULTIMATCH_KEY)
 		return;
-	for (i = base; i + KOF_MULTIMATCH_KEY <= end; i++) {
-		uint32_t b = key_gram(m->data.p + i, t->bits, fold);
-		uint32_t k;
 
-		if (!((t->seen[b >> 3] >> (b & 7)) & 1))
-			continue;
-		/* The byte past the key, once, for every entry on the chain.
-		 * Only when it is inside the extent: at the very end there is
-		 * no such byte and pat_at's bounds test is the right answer. */
-		nb = (i + KOF_MULTIMATCH_KEY < end)
-		     ? (fold ? fold_byte(m->data.p[i + KOF_MULTIMATCH_KEY])
-			     : m->data.p[i + KOF_MULTIMATCH_KEY])
-		     : (uint16_t)KOF_MULTIMATCH_NOTAG;
-		for (k = t->head[b]; k; k = t->next[k]) {
-			uint32_t slot = t->idx[t->ids[k]];
-
-			if (t->tag[k] != KOF_MULTIMATCH_NOTAG &&
-			    nb != KOF_MULTIMATCH_NOTAG && t->tag[k] != nb)
-				continue;
-			if ((found[slot] & bitmask) == 0 &&
-			    pat_at(m, &pat[slot], i, base, span))
-				found[slot] |= bitmask;
-		}
+#define KOF_SWEEP_BODY(KEYFN)                                                \
+	for (i = base; i + KOF_MULTIMATCH_KEY <= end; i++) {                 \
+		uint32_t b = KEYFN(dp + i, shift);                           \
+		uint32_t k;                                                  \
+                                                                             \
+		if (!((seen[b >> 3] >> (b & 7)) & 1))                        \
+			continue;                                            \
+		nb = (i + KOF_MULTIMATCH_KEY < end)                          \
+		     ? (fold ? fold_byte(dp[i + KOF_MULTIMATCH_KEY])          \
+			     : dp[i + KOF_MULTIMATCH_KEY])                   \
+		     : (uint16_t)KOF_MULTIMATCH_NOTAG;                       \
+		for (k = head[b]; k; k = nxt[k]) {                           \
+			uint32_t slot = idx[ids[k]];                         \
+			uint16_t tg = tag[k];                                \
+                                                                             \
+			if (tg != KOF_MULTIMATCH_NOTAG &&                    \
+			    nb != KOF_MULTIMATCH_NOTAG && tg != nb)          \
+				continue;                                    \
+			if ((found[slot] & bitmask) == 0 &&                  \
+			    pat_at(m, &pat[slot], i, base, span))            \
+				found[slot] |= bitmask;                      \
+		}                                                            \
 	}
+
+	if (fold)
+		KOF_SWEEP_BODY(key_fold)
+	else
+		KOF_SWEEP_BODY(key_exact)
+#undef KOF_SWEEP_BODY
 }
 
 /*
@@ -1094,38 +1140,59 @@ static void sweep_rekey(const struct kof_multimatch *t,
 {
 	uint64_t i, end = base + span;
 	const int fold = t->fold;
+	/*
+	 * THE TABLE READ INTO REGISTERS ONCE, and it is not style.
+	 *
+	 * `found` is a uint32_t *, and so are t->head, t->ids, t->next and
+	 * t->idx. A compiler that cannot prove they do not overlap must assume
+	 * `found[slot] |= bitmask` wrote through one of them, and re-load every
+	 * field on the next iteration - once per byte of every region swept.
+	 * Copied to locals, nothing in the body writes to them and they stay in
+	 * registers. The table is immutable for the whole sweep, which is what
+	 * makes the copy correct.
+	 */
+	const uint32_t  shift = 32u - t->bits;
+	const uint8_t  *seen = t->seen;
+	const uint32_t *head = t->head;
+	const uint32_t *nxt  = t->next;
+	const uint32_t *ids  = t->ids;
+	const uint32_t *idx  = t->idx;
+	const uint16_t *tag  = t->tag;
+	const uint8_t  *dp   = m->data.p;
 	uint16_t nb;
 
 	if (span < KOF_MULTIMATCH_KEY)
 		return;
-	for (i = base; i + KOF_MULTIMATCH_KEY <= end; i++) {
-		uint32_t b = key_gram(m->data.p + i, t->bits, fold);
-		uint32_t k;
 
-		if (!((t->seen[b >> 3] >> (b & 7)) & 1))
-			continue;
-		/* The byte past the key, once, for every entry on the chain.
-		 * Only when it is inside the extent: at the very end there is
-		 * no such byte and pat_at's bounds test is the right answer. */
-		nb = (i + KOF_MULTIMATCH_KEY < end)
-		     ? (fold ? fold_byte(m->data.p[i + KOF_MULTIMATCH_KEY])
-			     : m->data.p[i + KOF_MULTIMATCH_KEY])
-		     : (uint16_t)KOF_MULTIMATCH_NOTAG;
-		for (k = t->head[b]; k; k = t->next[k]) {
-			uint32_t slot = t->idx[t->ids[k]];
-
-			if (t->tag[k] != KOF_MULTIMATCH_NOTAG &&
-			    nb != KOF_MULTIMATCH_NOTAG && t->tag[k] != nb)
-				continue;
-			/* The hit is on the KEY; the marker begins koff bytes
-			 * before it. */
-			if (i < t->koff[k])
-				continue;
-			if ((found[slot] & bitmask) == 0 &&
-			    pat_at(m, &pat[slot], i - t->koff[k], base, span))
-				found[slot] |= bitmask;
-		}
+#define KOF_SWEEP_BODY(KEYFN)                                                \
+	for (i = base; i + KOF_MULTIMATCH_KEY <= end; i++) {                 \
+		uint32_t b = KEYFN(dp + i, shift);                           \
+		uint32_t k;                                                  \
+                                                                             \
+		if (!((seen[b >> 3] >> (b & 7)) & 1))                        \
+			continue;                                            \
+		nb = (i + KOF_MULTIMATCH_KEY < end)                          \
+		     ? (fold ? fold_byte(dp[i + KOF_MULTIMATCH_KEY])          \
+			     : dp[i + KOF_MULTIMATCH_KEY])                   \
+		     : (uint16_t)KOF_MULTIMATCH_NOTAG;                       \
+		for (k = head[b]; k; k = nxt[k]) {                           \
+			uint32_t slot = idx[ids[k]];                         \
+			uint16_t tg = tag[k];                                \
+                                                                             \
+			if (tg != KOF_MULTIMATCH_NOTAG &&                    \
+			    nb != KOF_MULTIMATCH_NOTAG && tg != nb)          \
+				continue;                                    \
+			if ((found[slot] & bitmask) == 0 &&                  \
+			    pat_at(m, &pat[slot], i, base, span))            \
+				found[slot] |= bitmask;                      \
+		}                                                            \
 	}
+
+	if (fold)
+		KOF_SWEEP_BODY(key_fold)
+	else
+		KOF_SWEEP_BODY(key_exact)
+#undef KOF_SWEEP_BODY
 }
 
 static void sweep_wm(const struct kof_multimatch *t,

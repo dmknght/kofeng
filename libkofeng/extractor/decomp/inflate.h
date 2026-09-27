@@ -58,6 +58,51 @@ typedef int (*kof_inflate_sink)(void *user, const uint8_t *p, uint32_t n);
  * the overwhelming majority of a dynamic one in a single indexed read. Ten would
  * add a kilobyte per table to catch the tail; measured, it was not worth it.
  */
+/*
+ * THE BIT BUFFER IS THE HOST'S NATURAL WORD, AND NOT A FIXED 64.
+ *
+ * need() used to take one byte per round of a while loop, and every symbol
+ * asks for bits several times in a row, so the refill was most of what the
+ * decoder did. Filling several bytes with one shift is the fix - but only up
+ * to the width the machine actually has.
+ *
+ * A 64-bit buffer on a 32-bit host is CORRECT and SLOWER: the compiler
+ * synthesises every shift and or from pairs of 32-bit instructions, and this
+ * is the hottest loop in the decoder, so the change would pay for itself in
+ * the wrong direction. So the width follows the host - 4 bytes a refill on
+ * 64-bit, 2 on 32-bit - which is the same choice zlib makes and for the same
+ * reason.
+ *
+ * KOF_INF_BITS can be defined by the build to force either width. That is
+ * what lets the 32-bit path be exercised by the test suite on a 64-bit
+ * machine: the arithmetic is the same whatever the register width, so forcing
+ * it covers the logic, and an actual -m32 build covers the code the compiler
+ * generates for it.
+ */
+#if !defined(KOF_INF_BITS)
+#  if UINTPTR_MAX > 0xffffffffu
+#    define KOF_INF_BITS 64
+#  else
+#    define KOF_INF_BITS 32
+#  endif
+#endif
+
+#if KOF_INF_BITS == 64
+typedef uint64_t kof_inf_word;
+#define KOF_INF_FILL_BYTES 4u
+#elif KOF_INF_BITS == 32
+typedef uint32_t kof_inf_word;
+#define KOF_INF_FILL_BYTES 2u
+#else
+#error "KOF_INF_BITS must be 32 or 64"
+#endif
+
+#define KOF_INF_FILL_BITS (KOF_INF_FILL_BYTES * 8u)
+
+/* A refill must never shift past the top of the word. */
+_Static_assert(KOF_INF_FILL_BITS * 2u <= KOF_INF_BITS,
+	       "a refill plus a full buffer must still fit the bit buffer");
+
 #define KOF_HUFF_FAST_BITS 9u
 #define KOF_HUFF_FAST_SIZE (1u << KOF_HUFF_FAST_BITS)
 
@@ -109,7 +154,8 @@ struct kof_inflate {
 
 	const uint8_t *in;
 	uint64_t in_len, in_pos;
-	uint32_t bitbuf, bitcnt;
+	kof_inf_word bitbuf;
+	uint32_t bitcnt;
 
 	uint64_t produced;
 

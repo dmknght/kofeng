@@ -162,7 +162,29 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * Step over leading zeroes, up to the bound above. Zero and not "not a
 	 * magic byte": padding is zero by definition, and testing for anything
 	 * else would be the format guessing this module exists to avoid.
+	 *
+	 * A BLOCK AT A TIME FIRST, because kof_u8 is a call through the host's
+	 * content vtable - the module cannot touch the mapping - and SKIP_MAX
+	 * is a page. An ELF whose appended run opens with 4096 zeroes paid 4096
+	 * indirect calls to walk past padding. kof_memeq asks the same question
+	 * of 64 bytes in one call, which the host answers with a memcmp.
+	 *
+	 * The two loops answer identically: the block loop advances only over
+	 * 64 bytes that are ALL zero and only while the whole block stays
+	 * inside both bounds, so it never steps anywhere the byte loop below
+	 * would have stopped. Whatever it leaves - a partial block, or the
+	 * first non-zero byte - the byte loop finishes exactly as before.
 	 */
+	{
+		static const uint8_t zeros[64] = { 0 };
+
+		while (skipped + 64u <= SKIP_MAX && len > PAGE + 64u &&
+		       kof_memeq(off, zeros, 64)) {
+			off += 64u;
+			len -= 64u;
+			skipped += 64u;
+		}
+	}
 	while (skipped < SKIP_MAX && len > PAGE && kof_u8(off) == 0) {
 		off++;
 		len--;

@@ -254,8 +254,25 @@ uint32_t kof_entropy_hist(const uint32_t hist[256], uint64_t total)
 		 * fraction survives the integer log.
 		 */
 		scaled = (n << 8) / c;
-		while (scaled >> (lg + 1u))
-			lg++;
+		/*
+		 * floor(log2(scaled)) IN ONE INSTRUCTION, and the loop it
+		 * replaces had a shift this one cannot have.
+		 *
+		 * `while (scaled >> (lg + 1u)) lg++;` walks one bit per round -
+		 * up to forty rounds for each of 256 buckets, every time a
+		 * region's entropy is taken. It also steps lg up to 63 and then
+		 * evaluates `scaled >> 64`, which is undefined: on x86 the count
+		 * is taken modulo 64, so the test reads `scaled >> 0`, stays
+		 * non-zero, and the loop runs away. `scaled` is (n << 8) / c
+		 * with c <= n, so it is at least 256 and would need a 36-petabyte
+		 * buffer to reach bit 63 - unreachable, but unreachable by
+		 * arithmetic nobody restates when they change the caller.
+		 *
+		 * clzll is undefined at zero, which is the one input it must
+		 * never see; the `if (!c)` above and c <= n together mean it
+		 * cannot, and the test below says so rather than trusting it.
+		 */
+		lg = scaled ? 63u - (unsigned)__builtin_clzll(scaled) : 0u;
 		base = (uint64_t)1 << lg;
 		frac = ((scaled - base) << 3) / base;
 		acc += c * (((uint64_t)lg << 3) + frac - (8u << 3));
