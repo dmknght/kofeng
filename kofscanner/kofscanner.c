@@ -128,6 +128,15 @@ struct fent {
 	 * the '#' to find the same word again.
 	 */
 	char     kind[48];
+	/*
+	 * Whether -v has already printed this file's line.
+	 *
+	 * The verdict is streamed as each file finishes rather than listed at
+	 * the end, so the flag is what stops the sweep at exit from saying it
+	 * twice - and what lets that sweep still catch anything streaming did
+	 * not reach.
+	 */
+	int      said;
 };
 
 struct fmap {
@@ -191,6 +200,29 @@ struct run {
 	uint32_t    last_broken;
 	uint32_t    last_findings;
 	char        last_name[224];
+
+	/*
+	 * THE FILE -v IS STILL WAITING ON, so a clean one is reported when it
+	 * finishes instead of when the whole scan does.
+	 *
+	 * Findings print the moment they are found; clean files used to be
+	 * listed only at exit. On a tree where most files are clean that is a
+	 * long silence between the last finding and the summary - on 4698
+	 * files here, twenty seconds of a scanner that looks stopped. It is
+	 * also the wrong shape for a pipe, where a reader wants the answer for
+	 * a file when that file is done.
+	 *
+	 * WHY A SINGLE NAME IS ENOUGH, AND ONLY AT --jobs 1. The callback is
+	 * serialised, and with one thread the walk finishes a file's whole
+	 * object tree before it starts the next - so a name different from
+	 * this one means the previous file is complete. With more threads the
+	 * objects of two files interleave (see the note on fmap) and a name
+	 * change proves nothing, so streaming is off and the sweep at exit
+	 * does the work it always did.
+	 */
+	char        cur_file[512];
+	size_t      cur_len;
+	int         stream_v;        /* -v may report as it goes */
 
 	/*
 	 * The progress line: how many objects have gone by, when it was last
@@ -316,6 +348,9 @@ static struct fent *fmap_get(struct fmap *m, const char *file, size_t flen)
 		e->examined = 0;
 		e->name[0] = 0;
 		e->kind[0] = 0;
+		/* The array is realloc'd, never zeroed, so every field is set
+		 * here or it is whatever the allocator left behind. */
+		e->said = 0;
 		m->idx[slot] = (uint32_t)(m->n + 1u);
 		m->n++;
 		return e;
@@ -450,19 +485,38 @@ static void progress_draw(struct run *r, const char *name)
 		return;
 	r->drawn_at = now;
 
-	/* The last two path components: a full path wraps and a bare basename
-	 * does not say which subtree the scan is in, which is the one thing
-	 * somebody watching wants to know. */
-	tail = name;
+	/*
+	 * The last two path components, THEN whatever object of the file this
+	 * is: a full path wraps and a bare basename does not say which subtree
+	 * the scan is in, which is the one thing somebody watching wants.
+	 *
+	 * THE SEARCH STOPS AT THE FILE, and that is the whole of the fix. An
+	 * object is named "<file>//<n>", so scanning the WHOLE name for
+	 * slashes finds the two that spell "//" and cuts between them: while
+	 * unpacking one sample this line read
+	 *
+	 *     4850 object(s)  /0
+	 *
+	 * where it should have read "new_Mirai/Mozi.m.48//0". The name was
+	 * there and the progress line threw it away, so a scan working
+	 * through a container looked like a scan stuck on nothing.
+	 *
+	 * kof_obj_toplevel_len is the same split the rest of this file uses to
+	 * key a verdict by its file - see fmap.
+	 */
 	{
-		const char *p1 = NULL, *p2 = NULL, *c;
+		size_t flen = kof_obj_toplevel_len(name);
+		const char *p1 = NULL, *p2 = NULL;
+		size_t i;
 
-		for (c = name; *c; c++)
-			if (*c == '/') { p2 = p1; p1 = c; }
+		for (i = 0; i < flen; i++)
+			if (name[i] == '/') { p2 = p1; p1 = name + i; }
 		if (p2)
 			tail = p2 + 1;
 		else if (p1)
 			tail = p1 + 1;
+		else
+			tail = name;
 	}
 	n = strlen(tail);
 	if (n > 48)
@@ -525,6 +579,44 @@ static void say(struct run *r, const char *colour, const char *tag,
 	progress_clear(r);
 	printf("%s%-*s%s %s\n", col(r, colour), W_TAG, tag,
 	       col(r, C_RST), name);
+}
+
+/*
+ * Report one finished file under -v, once.
+ *
+ * Only the clean verdict is streamed here: a finding has already printed in
+ * full where it was found, and an unexamined file is reported unconditionally
+ * by the sweep at exit - see the note there for why "OK" would be a lie.
+ */
+static void v_say_file(struct run *r, const char *file, size_t flen)
+{
+	struct fent *e;
+
+	if (!r->verbose || !flen)
+		return;
+	e = fmap_get(&r->files, file, flen);
+	if (!e || e->said)
+		return;
+	if (e->level < 0 && !e->broken && e->examined) {
+		e->said = 1;
+		say(r, C_GRN, "OK", e->file);
+	}
+}
+
+/* The file the callback was on has ended: report it, and remember the new one. */
+static void v_file_turn(struct run *r, const char *name, size_t flen)
+{
+	if (!r->stream_v)
+		return;
+	if (r->cur_len &&
+	    (flen != r->cur_len || memcmp(name, r->cur_file, flen) != 0))
+		v_say_file(r, r->cur_file, r->cur_len);
+	if (flen && flen < sizeof r->cur_file &&
+	    (flen != r->cur_len || memcmp(name, r->cur_file, flen) != 0)) {
+		memcpy(r->cur_file, name, flen);
+		r->cur_file[flen] = '\0';
+		r->cur_len = flen;
+	}
 }
 
 /*
@@ -781,6 +873,10 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 				e->examined = 1;
 		}
 	}
+
+	/* This object's verdict is in the file's entry now, so a change of file
+	 * means the previous one is finished - see run.cur_file. */
+	v_file_turn(r, name, flen);
 
 	if (res->dropped) {
 		char tag[48];
@@ -1879,6 +1975,12 @@ int main(int argc, char **argv)
 			       (double)mmb / 1048576.0, mmc);
 	}
 
+	/*
+	 * -v reports each file as it finishes, and that is only sound on one
+	 * thread - see run.cur_file.
+	 */
+	r.stream_v = (jobs == 1);
+
 	sc = kof_scanner_new(eng);
 	if (!sc) {
 		fprintf(stderr, "%s: out of memory\n", argv[0]);
@@ -2206,11 +2308,24 @@ int main(int argc, char **argv)
 	if (r.verbose) {
 		size_t fi;
 
-		for (fi = 0; fi < r.files.n; fi++) {
-			const struct fent *e = &r.files.arr[fi];
+		/* The file the walk ended on has no successor to trigger it. */
+		if (r.stream_v && r.cur_len)
+			v_say_file(&r, r.cur_file, r.cur_len);
 
-			if (e->level < 0 && !e->broken && e->examined)
+		/*
+		 * Whatever streaming did not reach: every file under --jobs
+		 * above 1, and any file the walk revisited. `said` is what
+		 * keeps the two from printing the same line twice.
+		 */
+		for (fi = 0; fi < r.files.n; fi++) {
+			struct fent *e = &r.files.arr[fi];
+
+			if (e->said)
+				continue;
+			if (e->level < 0 && !e->broken && e->examined) {
+				e->said = 1;
 				say(&r, C_GRN, "OK", e->file);
+			}
 		}
 		/*
 		 * The unexamined ones, and NOT under -v only.

@@ -1338,6 +1338,22 @@ static uint64_t zlib_hdr_len(const uint8_t *p, uint64_t n)
 }
 
 /*
+ * The MPRESS bases sit above the plain one and carry the same three parameters,
+ * so the arithmetic is shared and only the base differs. Answers 0, 32 or 64:
+ * the width of the call filter to undo afterwards, and 0 for "none".
+ */
+static unsigned lzma_cto_bits(uint32_t method)
+{
+	if (method >= KOF_UNP_LZMA_MPRESS64 &&
+	    method <= KOF_UNP_LZMA_MPRESS64 + 224u)
+		return 64u;
+	if (method >= KOF_UNP_LZMA_MPRESS32 &&
+	    method <= KOF_UNP_LZMA_MPRESS32 + 224u)
+		return 32u;
+	return 0u;
+}
+
+/*
  * The methods unpack_buffered takes: everything whose whole output has to be
  * addressable at once. DEFLATE and HEXTEXT stream instead and are answered
  * before this is asked.
@@ -1370,6 +1386,7 @@ static int buffered_method(uint32_t method)
 	return method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86 ||
 	       method == KOF_UNP_RAR3  || method == KOF_UNP_RAR5 ||
 	       (method >= KOF_UNP_LZMA && method <= KOF_UNP_LZMA + 224u) ||
+	       lzma_cto_bits(method) != 0u ||
 	       (method >= KOF_UNP_NRV2B_8 && method <= KOF_UNP_NRV2E_32);
 }
 
@@ -1398,11 +1415,16 @@ static int nrv2_of(uint32_t method, int *variant, int *bits)
  */
 static int lzma_props_of(uint32_t method, unsigned *lc, unsigned *lp, unsigned *pb)
 {
-	uint32_t v;
+	uint32_t v, base = KOF_UNP_LZMA;
+	unsigned bits = lzma_cto_bits(method);
 
-	if (method < KOF_UNP_LZMA)
+	if (bits == 64u)
+		base = KOF_UNP_LZMA_MPRESS64;
+	else if (bits == 32u)
+		base = KOF_UNP_LZMA_MPRESS32;
+	if (method < base)
 		return 0;
-	v = method - KOF_UNP_LZMA;
+	v = method - base;
 	if (v > 224u)
 		return 0;
 	*lc = v % 9u;
@@ -1586,7 +1608,7 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 		if (method == KOF_UNP_LZMA2_BCJ_X86 && produced)
 			kof_bcj_x86_decode(buf, produced, 0);
 	} else if (method >= KOF_UNP_LZMA) {
-		unsigned lc, lp, pb;
+		unsigned lc, lp, pb, cto = lzma_cto_bits(method);
 
 		if (!lzma_props_of(method, &lc, &lp, &pb)) {
 			scan_release(sc, want);
@@ -1595,6 +1617,21 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 			return 0;
 		}
 		st = kof_lzma_decode(lc, lp, pb, in, in_len, buf, want, &produced);
+		/*
+		 * Undone here for the reason the BCJ call above is: the
+		 * transform rewrites addresses relative to a position in the
+		 * output, so it needs the whole output and this is where the
+		 * whole output is.
+		 *
+		 * ON A SHORT DECODE TOO, and deliberately. A stream that
+		 * stopped early still yields a real prefix - kof_lzma_decode's
+		 * contract says so - and the filter's bound is a length rather
+		 * than a structure, so it converts what arrived and leaves the
+		 * rest. The alternative is handing back a prefix whose calls
+		 * are all wrong, which is the state this exists to end.
+		 */
+		if (cto && produced)
+			kof_mpress_cto_decode(buf, produced, cto);
 	} else {
 		st = kof_nrv2_decode(variant, bits, in, in_len, buf, want,
 				     &produced);

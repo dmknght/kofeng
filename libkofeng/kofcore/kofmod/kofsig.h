@@ -2006,8 +2006,45 @@ enum kof_unp_method {
 	 * Use KOF_UNP_LZMA_PROPS to build one. The packing is the specification's
 	 * own: lc + 9*lp + 45*pb, which fits 0..224 above the base.
 	 */
-	KOF_UNP_LZMA = 64
+	KOF_UNP_LZMA = 64,
+
+	/*
+	 * LZMA WITH MPRESS'S CALL TARGET CONVERSION UNDONE AFTERWARDS.
+	 *
+	 * The same arrangement KOF_UNP_LZMA2_BCJ_X86 uses and for the same
+	 * reason: the transform rewrites addresses that are relative to a
+	 * position in the OUTPUT, so it can only run once the whole output is
+	 * in hand, and the host is what has it. A module names the coding and
+	 * the filter together because they are not separable - a caller that
+	 * could ask for one without the other would be able to ask for the
+	 * wrong pair.
+	 *
+	 * TWO BASES, NOT ONE WITH A FLAG, BECAUSE THE FILTERS DIFFER. MPRESS's
+	 * 32 bit stub converts only E8 and E9; its 64 bit stub also converts
+	 * FF15/FF17 and 8D05, which are rip-relative and do not exist on i386.
+	 * Undoing the wide rule on a 32 bit image rewrites four bytes after
+	 * every 0x8D that the packer left alone, so the pair is chosen by the
+	 * image's width and the id has to carry it.
+	 *
+	 * Each base carries lc + 9*lp + 45*pb above it, exactly as
+	 * KOF_UNP_LZMA does - so each occupies 224, and 384..608 and 640..864
+	 * are what they take. Above KOF_UNP_LZX_RESET_BASE's 32 for the reason
+	 * the note there gives: an id range that overlaps another is a bug
+	 * nothing catches until two codings answer to one number.
+	 */
+	KOF_UNP_LZMA_MPRESS32 = 384,
+	KOF_UNP_LZMA_MPRESS64 = 640
 };
+
+/*
+ * Build one. `bits` is the image's width, 32 or 64, and nothing else is
+ * defined - the host refuses an id it cannot place, which is what a wrong
+ * width would produce.
+ */
+#define KOF_UNP_LZMA_MPRESS_PROPS(lc, lp, pb, bits)                         \
+	((uint32_t)((bits) == 64u ? KOF_UNP_LZMA_MPRESS64                   \
+				  : KOF_UNP_LZMA_MPRESS32) +                \
+	 (uint32_t)(lc) + 9u * (uint32_t)(lp) + 45u * (uint32_t)(pb))
 
 /*
  * What the LZMA specification allows for each parameter.
@@ -2209,6 +2246,9 @@ static inline const char *kof_unp_method_name(uint32_t m)
 		return "lzx";
 	if (m >= KOF_UNP_LZMA && m <= KOF_UNP_LZMA + 224u)
 		return "lzma";
+	if ((m >= KOF_UNP_LZMA_MPRESS32 && m <= KOF_UNP_LZMA_MPRESS32 + 224u) ||
+	    (m >= KOF_UNP_LZMA_MPRESS64 && m <= KOF_UNP_LZMA_MPRESS64 + 224u))
+		return "lzma+mpress";
 	if (m >= KOF_UNP_NRV2B_8 && m <= KOF_UNP_NRV2B_32)
 		return "nrv2b";
 	if (m >= KOF_UNP_NRV2D_8 && m <= KOF_UNP_NRV2D_32)

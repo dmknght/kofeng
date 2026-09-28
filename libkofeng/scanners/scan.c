@@ -2091,6 +2091,18 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
  * copy to find that out.
  */
 #define NORM_MIN_OBJ   (4u << 10)   /* below this there is nothing to save */
+/*
+ * The executable region, in the one bit ELF and PE agree on: KOF_SCAN_ELF_CODE
+ * and KOF_SCAN_PE_CODE are both 1u << 2. Written as the bit rather than as
+ * either name because norm_emit serves both formats and naming one of them
+ * would read as though the other were an oversight.
+ */
+#define NORM_CODE_MASK     (1u << 2)
+/* 7.5 bits per byte, which is DENSE_EIGHTHS in emu_unpack.c and is measured
+ * there. Not shared through a header: the two are the same number for the same
+ * reason rather than one derived from the other, and a later measurement may
+ * move one without moving the other. */
+#define NORM_DENSE_EIGHTHS 60u
 #define NORM_MIN_SAVE  16u          /* per cent, or it is not worth an object */
 
 /*
