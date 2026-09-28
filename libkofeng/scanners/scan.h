@@ -752,6 +752,16 @@ struct kof_scanner {
 	uint32_t *live;
 	uint32_t *found;
 	/*
+	 * WHICH MASKS A SWEEP CAN ANSWER FOR, THIS OBJECT.
+	 *
+	 * multi_prepass used to hand the answer to every marker under every
+	 * answerable mask - see uid_slot in kofmultimatch.h for the measurement
+	 * that made that untenable at scale. It now records only WHICH masks
+	 * are answerable, and kof_multimatch_answer reads `found` when one is
+	 * asked about. One byte per mask, cleared per object.
+	 */
+	uint8_t  *mask_ok;
+	/*
 	 * THE TWO HALVES' EXTENTS, BUILT AT MOST ONCE PER OBJECT.
 	 *
 	 * Which records are imports and which are exports is a property of the

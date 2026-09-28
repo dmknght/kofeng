@@ -86,6 +86,33 @@ struct kof_db_pack {
 	 */
 	uint32_t uid_base;
 	uint32_t n_uid;
+
+	/*
+	 * THE STRING SECTION, RESOLVED ONCE.
+	 *
+	 * kof_db_str re-read the header, re-derived both section offsets and
+	 * re-checked every one of them against the map length on every call -
+	 * and it is called once per marker a module asks about. With 200 000
+	 * rules loaded that came to 561,467,262 instructions, 10.1% of the
+	 * scan, computing the same two pointers.
+	 *
+	 * These are the bounds as they were when the pack was validated. What
+	 * still comes out of the mapping - a descriptor's own off and len - is
+	 * still checked at every call, because that is per-string and cannot
+	 * be hoisted.
+	 *
+	 * (kof_db_str used to re-read the section offsets partly to cope with
+	 * another process rewriting the file underneath a MAP_PRIVATE mapping.
+	 * That is a different problem at a different scale and self-defence is
+	 * where it belongs, not in a function called nine million times.)
+	 *
+	 * desc is NULL when the section did not validate; kof_db_str then
+	 * refuses, which is what it did before for the same packs.
+	 */
+	const struct kof_str_ent *desc;   /* STR_DESC, or NULL */
+	uint32_t                  n_desc; /* entries in it */
+	const uint8_t            *pool;   /* STR_POOL */
+	uint64_t                  pool_len;
 };
 
 /*
@@ -366,6 +393,34 @@ struct kof_engine {
 	 */
 	uint32_t            *mod_by_target;
 	uint32_t             mod_at[KOF_TARGET_COUNT + 1u];
+
+	/*
+	 * HOW MANY MARKERS EACH REGION COULD HAVE LIVE, PER FORMAT - decided
+	 * once here instead of recounted for every object.
+	 *
+	 * multi_prepass needs one thing from the module list: whether a region
+	 * has at least KOF_MULTIMATCH_MIN_LIVE markers behind it, which is the
+	 * only question kof_multimatch_pick asks. It used to answer that by
+	 * walking every module in the database, per object. At 200 000 modules
+	 * that walk measured 4,158,329,009 instructions - 15.4% of the scan and
+	 * the largest single item in the profile - to compare a total against
+	 * eight.
+	 *
+	 * The total does not depend on the object's BYTES, only on its format,
+	 * so it is summed at load and read at scan.
+	 *
+	 * AN UPPER BOUND, AND THAT IS SAFE HERE. The per-object walk also
+	 * dropped modules on size, arch and subtype; this does not, so a region
+	 * can be swept that the exact count would have left alone. That changes
+	 * how the answer is REACHED and never what it is: a sweep writes into
+	 * `found`, and a module still only reads it through kof_match_lookup,
+	 * which applies the module's own preconditions. A rule scoped away from
+	 * this object cannot be reported by a sweep that ran anyway.
+	 *
+	 * NULL when it could not be allocated, and multi_prepass then walks the
+	 * modules as it always did - slower and identical.
+	 */
+	uint32_t            *live_cap;   /* [KOF_TARGET_COUNT][KOF_MULTIMATCH_BITS] */
 
 	struct kof_module   *unp;
 	uint32_t             n_unp;

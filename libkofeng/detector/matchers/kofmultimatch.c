@@ -972,7 +972,7 @@ struct kof_multimatch_set *kof_multimatch_build(const struct kof_engine *e)
 
 	/* uid -> slot in the shared array, so a region's list can be indices. */
 	for (i = 0; i < e->n_uid; i++)
-		uid_slot[i] = 0xffffffffu;
+		uid_slot[i] = KOF_MULTIMATCH_NO_SLOT;
 	for (i = 0; i < set->n_pat; i++)
 		uid_slot[set->pat[i].uid] = i;
 
@@ -1024,7 +1024,9 @@ struct kof_multimatch_set *kof_multimatch_build(const struct kof_engine *e)
 		set->bytes += t->bytes;
 	}
 	free(seen);
-	free(uid_slot);
+	/* Kept, not freed: kof_multimatch_answer reads it - see uid_slot. */
+	set->uid_slot = uid_slot;
+	set->n_uid = e->n_uid;
 	return set;
 fail:
 	free(seen);
@@ -1042,6 +1044,7 @@ void kof_multimatch_free(struct kof_multimatch_set *set)
 	for (b = 0; b < KOF_MULTIMATCH_BITS; b++)
 		tab_free(&set->tab[b]);
 	free(set->mask_bits);
+	free(set->uid_slot);
 	free(set->pat);
 	free(set);
 }
@@ -1263,6 +1266,29 @@ uint64_t kof_multimatch_sweep(const struct kof_multimatch_set *set, uint32_t bit
 			sweep_gram(t, set->pat, m, off, len, bitmask, found);
 	}
 	return walked;
+}
+
+int kof_multimatch_answer(const struct kof_multimatch_set *set, uint32_t uid,
+			  uint32_t mask_uid, const uint32_t *found)
+{
+	uint32_t slot, bits;
+
+	if (!set || !set->uid_slot || !found || uid >= set->n_uid ||
+	    mask_uid >= set->n_masks)
+		return -1;
+	slot = set->uid_slot[uid];
+	if (slot == KOF_MULTIMATCH_NO_SLOT || slot >= set->n_pat)
+		return -1;
+	bits = set->mask_bits[mask_uid];
+	if (!bits)
+		return -1;
+	/*
+	 * The same test kof_multimatch_fold wrote out: a marker reachable from
+	 * any region this mask names counts as found. The caller has already
+	 * established that every region of the mask that the object HAS was
+	 * swept, which is what makes an absent bit mean absent.
+	 */
+	return (found[slot] & bits) != 0;
 }
 
 uint64_t kof_multimatch_fold(const struct kof_multimatch_set *set,

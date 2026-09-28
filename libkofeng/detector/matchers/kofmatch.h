@@ -20,6 +20,17 @@
 #include "../../kofcore/kofcore.h"
 #include "../../databases/hexprog.h"
 
+/*
+ * HOW MANY DISTINCT RANGES ONE OBJECT IS ASKED ABOUT.
+ *
+ * A rule can only name a range it can describe - the object, a region, a run
+ * some parse reported - and there are few of those. Eight covers the shipping
+ * base with room to spare and is one cache line's worth of keys; a miss costs
+ * exactly what every call used to cost, so being wrong here is slow and never
+ * incorrect.
+ */
+#define KOF_ENT_MEMO 8u
+
 struct kof_match_ctx {
 	kof_buf data;
 
@@ -91,6 +102,39 @@ struct kof_match_ctx {
 	uint16_t         memo_gen;
 
 
+
+	/*
+	 * ENTROPY ALREADY ANSWERED FOR THIS OBJECT, and why it is remembered
+	 * rather than computed up front.
+	 *
+	 * kof_entropy_at builds a 256-bucket histogram over the range and then
+	 * a logarithm per bucket, so asking twice costs twice. Rules ask about
+	 * the SAME few ranges - the whole object, one region, the unclaimed run
+	 * - because those are the ranges a rule can name, so nearly every
+	 * repeat is an exact repeat.
+	 *
+	 * MEASURED, with 2000 heuristics loaded over the 300-file subset:
+	 * kof_entropy_eighths and kof_entropy_hist together came to
+	 * 3,334,213,008 instructions, against 3,235,910 with the shipping base.
+	 * A thousandfold, and it is the whole of why that configuration is 24.8%
+	 * slower - the same answer recomputed once per rule per object.
+	 *
+	 * LAZY AND NOT PRECOMPUTED AT PARSE. Building it for every region of
+	 * every object is a pass over bytes nobody asked about: the shipping
+	 * base calls kof_entropy_at from exactly two modules, so that pass
+	 * would be ~300 million instructions spent to save three million. This
+	 * costs nothing until something asks, and nothing twice after that.
+	 *
+	 * Cleared by kof_match_begin's memset along with everything else, which
+	 * is what keeps it correct when the object - or the normalised view of
+	 * it - changes.
+	 */
+	struct kof_ent_memo {
+		uint64_t off, len;
+		uint32_t val;
+		uint8_t  live;
+	} ent[KOF_ENT_MEMO];
+	uint8_t ent_next;               /* round robin; see kof_entropy_memo */
 
 	/* Counters, for measuring whether the memo is worth its complexity. */
 	uint64_t n_calls;

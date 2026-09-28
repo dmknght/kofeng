@@ -6331,12 +6331,23 @@ static int job_wait(struct tree_job *j)
 }
 
 /*
- * The list the walk collects. Bounded rather than grown: a signature tree is
- * hand written, the shipping one is 84 sources, and a cap that is two orders
- * above it costs 8 MB of BSS in a build tool and removes an allocator from the
- * path.
+ * The list the walk collects. GROWN, AND IT USED TO BE CAPPED AT 4096.
+ *
+ * The cap was argued from the shipping tree being 84 sources, and as a number
+ * that is still true. What made it wrong was the code around it:
+ *
+ *     if (n_srcs < TREE_MAX_SRC)
+ *             snprintf(srcs[n_srcs++], ...);
+ *
+ * Over the cap a source was DROPPED IN SILENCE. No message, no non-zero exit,
+ * a database that builds cleanly and is missing rules - and a scan that then
+ * misses detections with nothing anywhere saying why. Found by building a
+ * 6181-source tree: 4096 modules loaded, 2085 discarded, and the corpus went
+ * from 72 detections to 61 with a build log that reported no problem at all.
+ *
+ * A build tool may refuse work it cannot do. It may not pretend to have done
+ * it. The list is grown instead, so there is no cap to be over.
  */
-#define TREE_MAX_SRC  4096u
 #define TREE_SRC_MAX  4200u
 
 /*
@@ -6455,14 +6466,39 @@ static int tree_build(char **argv, char (*srcs)[TREE_SRC_MAX], uint32_t n,
 	return 1;
 }
 
+/*
+ * One more source on the list, growing it when it is full.
+ *
+ * Doubling from 256: a hand-written tree never reallocates more than a few
+ * times, and a generated one of two hundred thousand does it eighteen. Answers
+ * 0 only when the machine is out of memory, which the caller reports rather
+ * than skipping the source - see the note on TREE_SRC_MAX.
+ */
+static int tree_src_add(char (**srcs)[TREE_SRC_MAX], uint32_t *n, uint32_t *cap,
+			const char *path)
+{
+	if (*n == *cap) {
+		uint32_t want = *cap ? *cap * 2u : 256u;
+		char (*nv)[TREE_SRC_MAX] = realloc(*srcs,
+						   (size_t)want * TREE_SRC_MAX);
+
+		if (!nv)
+			return 0;
+		*srcs = nv;
+		*cap = want;
+	}
+	snprintf((*srcs)[(*n)++], TREE_SRC_MAX, "%s", path);
+	return 1;
+}
+
 static int tree_main(int argc, char **argv)
 {
 	const char *base = argc > 2 ? argv[2] : NULL;
 	const char *artefacts = argc > 3 ? argv[3] : NULL;
 	const char *db = argc > 4 ? argv[4] : NULL;
 	char abs_base[4096];
-	static char srcs[TREE_MAX_SRC][TREE_SRC_MAX];
-	uint32_t n_srcs = 0, jobs = 1;
+	char (*srcs)[TREE_SRC_MAX] = NULL;
+	uint32_t n_srcs = 0, n_cap = 0, jobs = 1;
 	DIR *d;
 	struct dirent *e;
 	int built = 0;
@@ -6525,9 +6561,13 @@ static int tree_main(int argc, char **argv)
 			continue;
 		snprintf(path, sizeof path, "%s/%s", base, e->d_name);
 		if (is_c_source(e->d_name)) {
-			if (n_srcs < TREE_MAX_SRC)
-				snprintf(srcs[n_srcs++], TREE_SRC_MAX, "%s",
-					 path);
+			if (!tree_src_add(&srcs, &n_srcs, &n_cap, path)) {
+				fprintf(stderr, "ksigbuilder: out of memory "
+					"collecting sources\n");
+				closedir(d);
+				free(srcs);
+				return 1;
+			}
 			continue;
 		}
 		/* One level down, which is where the kind directories are. */
@@ -6545,9 +6585,15 @@ static int tree_main(int argc, char **argv)
 					continue;
 				snprintf(sub, sizeof sub, "%s/%s", path,
 					 se->d_name);
-				if (n_srcs < TREE_MAX_SRC)
-					snprintf(srcs[n_srcs++], TREE_SRC_MAX,
-						 "%s", sub);
+				if (!tree_src_add(&srcs, &n_srcs, &n_cap,
+						  sub)) {
+					fprintf(stderr, "ksigbuilder: out of "
+						"memory collecting sources\n");
+					closedir(sd);
+					closedir(d);
+					free(srcs);
+					return 1;
+				}
 			}
 			closedir(sd);
 		}
@@ -6555,9 +6601,13 @@ static int tree_main(int argc, char **argv)
 	closedir(d);
 	qsort(srcs, n_srcs, TREE_SRC_MAX, tree_src_cmp);
 
-	if (!tree_build(argv, srcs, n_srcs, artefacts, jobs, &built))
+	if (!tree_build(argv, srcs, n_srcs, artefacts, jobs, &built)) {
+		free(srcs);
 		return 1;
+	}
 
+	free(srcs);
+	srcs = NULL;
 	if (!built) {
 		fprintf(stderr, "ksigbuilder: no sources in %s\n", base);
 		return 2;

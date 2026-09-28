@@ -60,6 +60,7 @@
  */
 #include <kofmod/sevenzip.h>
 
+#include "../detector/matchers/kofmultimatch.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -378,7 +379,31 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 	}
 
 	uid = sc->eng->packs[m->pack_id].uid_base + e->uid;
-	slot = uid * sc->eng->n_masks + sc->eng->rng_uid[m->rng_base + range_id];
+	{
+		uint32_t mask_uid = sc->eng->rng_uid[m->rng_base + range_id];
+
+		slot = uid * sc->eng->n_masks + mask_uid;
+
+		/*
+		 * A SWEEP MAY ALREADY KNOW, and asking it is cheaper than
+		 * having been told.
+		 *
+		 * multi_prepass records which masks a sweep can answer for;
+		 * the answer itself stays in sc->found until this asks. See
+		 * uid_slot in kofmultimatch.h for what distributing it instead
+		 * cost at scale.
+		 */
+		if (sc->mask_ok && mask_uid < sc->eng->n_masks &&
+		    sc->mask_ok[mask_uid]) {
+			int a = kof_multimatch_answer(sc->eng->multi, uid,
+						      mask_uid, sc->found);
+
+			if (a >= 0) {
+				sc->st.multi_answers++;
+				return str_found(sc, a);
+			}
+		}
+	}
 
 	n = kof_scan_resolve_range(ctx, mask, ext);
 	return str_found(sc, kof_match_lookup(&sc->m, slot, ext, n, bytes,
@@ -3469,6 +3494,17 @@ static uint32_t c_region_entropy(const struct kof_obj_ctx *ctx, uint32_t mask)
 	if (!n)
 		return 0;
 
+	/*
+	 * Same memo as c_entropy_at, keyed on the MASK with a length no real
+	 * range can have. A region entropy costs a pass over every extent the
+	 * mask resolves to, so asking twice is the same waste and the same fix.
+	 */
+	for (i = 0; i < KOF_ENT_MEMO; i++)
+		if (mc(ctx)->ent[i].live &&
+		    mc(ctx)->ent[i].off == (uint64_t)mask &&
+		    mc(ctx)->ent[i].len == (uint64_t)-1)
+			return mc(ctx)->ent[i].val;
+
 	memset(hist, 0, sizeof hist);
 	for (i = 0; i < n; i++) {
 		kof_buf s2 = kof_slice(b, ext[i].off, ext[i].len);
@@ -3478,17 +3514,56 @@ static uint32_t c_region_entropy(const struct kof_obj_ctx *ctx, uint32_t mask)
 			hist[s2.p[k]]++;
 		total += s2.n;
 	}
-	return kof_entropy_hist(hist, total);
+	{
+		struct kof_match_ctx *m = mc(ctx);
+		uint32_t v = kof_entropy_hist(hist, total);
+		uint32_t slot = m->ent_next;
+
+		m->ent[slot].off  = (uint64_t)mask;
+		m->ent[slot].len  = (uint64_t)-1;
+		m->ent[slot].val  = v;
+		m->ent[slot].live = 1;
+		m->ent_next = (uint8_t)((slot + 1u) % KOF_ENT_MEMO);
+		return v;
+	}
 }
 
 /* The extent form. See `entropy_at` in kofsig.h for why it is not the same
  * question as c_region_entropy. */
+/*
+ * THE SAME RANGE IS ASKED ABOUT ONCE PER RULE, AND ANSWERED ONCE.
+ *
+ * See struct kof_ent_memo for the measurement. The key is the range as the
+ * caller named it, not the clipped slice: two callers naming the same range
+ * get the same answer, and a caller naming a range that clips to the same
+ * bytes is rare enough not to be worth a second key.
+ *
+ * Round robin rather than LRU: the table is eight entries, the miss cost is
+ * exactly the old cost, and a replacement policy that needs its own bookkeeping
+ * would spend on every hit what it saves on rare misses.
+ */
 static uint32_t c_entropy_at(const struct kof_obj_ctx *ctx, uint64_t off,
 			     uint64_t len)
 {
-	kof_buf s = kof_slice(mc(ctx)->data, off, len);
+	struct kof_match_ctx *m = mc(ctx);
+	kof_buf s;
+	uint32_t i, v;
 
-	return kof_entropy_eighths(s.p, s.n);
+	for (i = 0; i < KOF_ENT_MEMO; i++)
+		if (m->ent[i].live && m->ent[i].off == off &&
+		    m->ent[i].len == len)
+			return m->ent[i].val;
+
+	s = kof_slice(m->data, off, len);
+	v = kof_entropy_eighths(s.p, s.n);
+
+	i = m->ent_next;
+	m->ent[i].off  = off;
+	m->ent[i].len  = len;
+	m->ent[i].val  = v;
+	m->ent[i].live = 1;
+	m->ent_next = (uint8_t)((i + 1u) % KOF_ENT_MEMO);
+	return v;
 }
 
 /*

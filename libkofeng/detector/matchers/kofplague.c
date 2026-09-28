@@ -82,10 +82,93 @@ struct kof_plague_set {
 	uint32_t  bm_bits;          /* the table is 1 << bm_bits bits */
 	uint32_t  bm_mask;
 
+	/*
+	 * WHAT EVERY BLOCK FOLDS TO, AND WHICH NORMALIZERS EXIST - both fixed
+	 * the moment the set is built, and both were being recomputed per
+	 * object.
+	 *
+	 * kof_plague_block_id folds a block's whole hash list, which is up to
+	 * KOF_PLAGUE_MAX_HASH of them, and objctx.c calls it every time a
+	 * module asks about a block - to compare against a list of ids already
+	 * counted. kof_plague_set_norms walks every block in the set, and
+	 * scan.c calls it once per object per mask.
+	 *
+	 * Neither answer depends on the object. Measured with 200 000 plague
+	 * blocks over the small target: block_id 14,007,787,059 instructions
+	 * (36.4% of the scan) and set_norms 2,131,669,108 (5.5%), both spent
+	 * recomputing constants.
+	 *
+	 * norm_bit[b] is the union of normalizers over blocks whose scan_mask
+	 * names region b, and norm_all over every block - so set_norms becomes
+	 * an OR across at most 32 entries instead of a walk of the set.
+	 *
+	 * NULL on allocation failure, and both functions then compute as they
+	 * always did.
+	 */
+	uint32_t *block_id;         /* [n_block]; 0 means "not precomputed" */
+	uint32_t  norm_bit[32];
+	uint32_t  norm_all;
+	uint8_t   norm_ready;
+
 	uint64_t bytes;
 };
 
 /* ---- building ---------------------------------------------------------- */
+
+/*
+ * SORTING THE PAIRS BY HASH, IN FOUR LINEAR PASSES RATHER THAN n log n.
+ *
+ * The key is a uint32 and there are one per declared hash in the whole
+ * database, so at scale this is the single most expensive thing a load does:
+ * measured with 200 000 plague blocks (25.6 million pairs), qsort and pl_cmp
+ * together came to 12.7 billion instructions - 56% of everything the run did.
+ * A least-significant-digit radix sort touches each pair four times and
+ * compares nothing.
+ *
+ * IDENTICAL OUTPUT, not merely sorted. pl_cmp breaks ties by `bs` so that a
+ * set built twice indexes identically, and a radix sort gives that for free:
+ * the pairs are appended in (block, slot) order, so `bs` ascends in the input,
+ * and an LSD radix is STABLE - equal hashes keep the order they arrived in,
+ * which is ascending bs. Every pass must be stable for that to hold, which is
+ * why the counts are turned into offsets and the pairs copied forward.
+ *
+ * Answers 0 when the scratch cannot be allocated; the caller then sorts the
+ * way it always did.
+ */
+static int pl_radix(struct pl_pair *a, uint32_t n)
+{
+	struct pl_pair *tmp;
+	uint32_t pass;
+
+	if (n < 2u)
+		return 1;
+	tmp = malloc((size_t)n * sizeof *tmp);
+	if (!tmp)
+		return 0;
+
+	for (pass = 0; pass < 4u; pass++) {
+		uint32_t count[257];
+		uint32_t i, sh = pass * 8u;
+
+		memset(count, 0, sizeof count);
+		for (i = 0; i < n; i++)
+			count[((a[i].hash >> sh) & 0xffu) + 1u]++;
+		/* A pass whose digit is the same everywhere would only copy the
+		 * array onto itself. */
+		for (i = 0; i < 256u; i++)
+			if (count[i + 1u] == n)
+				break;
+		if (i < 256u)
+			continue;
+		for (i = 0; i < 256u; i++)
+			count[i + 1u] += count[i];
+		for (i = 0; i < n; i++)
+			tmp[count[(a[i].hash >> sh) & 0xffu]++] = a[i];
+		memcpy(a, tmp, (size_t)n * sizeof *a);
+	}
+	free(tmp);
+	return 1;
+}
 
 static int pl_cmp(const void *a, const void *b)
 {
@@ -159,7 +242,8 @@ struct kof_plague_set *kof_plague_build(const struct kof_plague_block *blocks,
 			s->n_pair++;
 		}
 	if (s->n_pair)
-		qsort(s->pair, s->n_pair, sizeof *s->pair, pl_cmp);
+		if (!pl_radix(s->pair, s->n_pair))
+			qsort(s->pair, s->n_pair, sizeof *s->pair, pl_cmp);
 
 	s->bm_bits = pl_bm_bits(s->n_pair);
 	s->bm_mask = (1u << s->bm_bits) - 1u;
@@ -176,6 +260,28 @@ struct kof_plague_set *kof_plague_build(const struct kof_plague_block *blocks,
 	}
 	s->bytes = (uint64_t)s->n_pair * sizeof *s->pair +
 		   ((uint64_t)1 << (s->bm_bits - 3u)) + sizeof *s;
+
+	/* The two constants - see block_id and norm_bit in the struct. */
+	s->block_id = calloc(s->n_block ? s->n_block : 1u,
+			     sizeof *s->block_id);
+	if (s->block_id) {
+		for (i = 0; i < s->n_block; i++) {
+			uint32_t nh = 0;
+			const uint32_t *h = kof_plague_block_hashes(s, i, &nh);
+
+			s->block_id[i] = h ? kof_plague_fold(h, nh) : 0u;
+		}
+		s->bytes += (uint64_t)s->n_block * sizeof *s->block_id;
+	}
+	for (i = 0; i < s->n_block; i++) {
+		uint32_t bit, m = 1u << s->block[i].norm;
+
+		s->norm_all |= m;
+		for (bit = 0; bit < 32u; bit++)
+			if (s->block[i].scan_mask & (1u << bit))
+				s->norm_bit[bit] |= m;
+	}
+	s->norm_ready = 1;
 	return s;
 }
 
@@ -185,6 +291,7 @@ void kof_plague_set_free(struct kof_plague_set *s)
 		return;
 	free(s->pair);
 	free(s->bm);
+	free(s->block_id);
 	free(s);
 }
 
@@ -222,8 +329,13 @@ const uint32_t *kof_plague_block_hashes(const struct kof_plague_set *s,
 uint32_t kof_plague_block_id(const struct kof_plague_set *s, uint32_t block)
 {
 	uint32_t nh = 0;
-	const uint32_t *h = kof_plague_block_hashes(s, block, &nh);
+	const uint32_t *h;
 
+	/* Folded once when the set was built - see block_id. */
+	if (s && s->block_id && block < s->n_block)
+		return s->block_id[block];
+
+	h = kof_plague_block_hashes(s, block, &nh);
 	return h ? kof_plague_fold(h, nh) : 0u;
 }
 
@@ -233,6 +345,15 @@ uint32_t kof_plague_set_norms(const struct kof_plague_set *s, uint32_t scan_mask
 
 	if (!s)
 		return 0;
+	/* Unioned per region when the set was built - see norm_bit. */
+	if (s->norm_ready) {
+		if (!scan_mask)
+			return s->norm_all;
+		for (i = 0; i < 32u; i++)
+			if (scan_mask & (1u << i))
+				m |= s->norm_bit[i];
+		return m;
+	}
 	for (i = 0; i < s->n_block; i++)
 		if (!scan_mask || (s->block[i].scan_mask & scan_mask))
 			m |= 1u << s->block[i].norm;

@@ -1,3 +1,4 @@
+#define _GNU_SOURCE   /* kof_memmem's POSIX branch calls the real memmem */
 /*
  * emu_unpack.c - see emu_unpack.h.
  */
@@ -5,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../../kofcore/kofplatform.h"   /* kof_memmem */
 #include "emu_unpack.h"
 #include "../../kofeng.h"
 
@@ -140,13 +142,20 @@ static int loader_imports_exec(const uint8_t *file, uint64_t n)
 	for (w = 0; w < sizeof want / sizeof want[0]; w++) {
 		uint64_t m = strlen(want[w]) + 1;   /* include the NUL: a symbol
 						     * name, not a random hit */
-		uint64_t i;
 
 		if (m > n)
 			continue;
-		for (i = 0; i + m <= n; i++)
-			if (!memcmp(file + i, want[w], m))
-				return 1;
+		/*
+		 * kof_memmem AND NOT A COMPARE PER POSITION.
+		 *
+		 * This walked every offset of the object and ran a memcmp at
+		 * each - a naive O(n*m) substring search over a whole file,
+		 * twice. The host already has the right tool: memmem, which is
+		 * Two-Way inside glibc and vectorised, and on Windows the KMP
+		 * fallback in kofplatform.h. Same answer, same bound, one call.
+		 */
+		if (kof_memmem(file, (size_t)n, want[w], (size_t)m))
+			return 1;
 	}
 	return 0;
 }

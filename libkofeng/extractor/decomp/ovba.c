@@ -15,6 +15,7 @@
  * the output stays plausible while being wrong.
  */
 
+#include <string.h>
 #include "ovba.h"
 
 /* ---- the chunk header --------------------------------------------------------- */
@@ -116,10 +117,24 @@ enum kof_decomp_status kof_ovba_decode(const uint8_t *in, uint64_t in_len, kof_o
 			 * file that disagrees with itself gets its own answer used
 			 * consistently rather than a mixture of the two.
 			 */
-			uint32_t k = 0;
+			/*
+			 * A straight copy, so it is one - the loop it replaces
+			 * moved 4096 bytes one at a time.
+			 *
+			 * `end > q` and not a bare subtraction. The loop
+			 * tested `q < end` every round, so it copied nothing
+			 * when the chunk header was the last thing in the
+			 * input; written as `end - q` that case underflows a
+			 * uint64 and asks memcpy for 4096 bytes from past the
+			 * end. Same answer as the loop in every case, which is
+			 * the only thing that makes this a replacement.
+			 */
+			uint64_t left = end > q ? end - q : 0;
+			uint32_t k = left < KOF_OVBA_CHUNK
+				   ? (uint32_t)left : KOF_OVBA_CHUNK;
 
-			while (q < end && k < KOF_OVBA_CHUNK)
-				o.buf[k++] = in[q++];
+			memcpy(o.buf, in + q, k);
+			q += k;
 			o.n = k;
 			if (!flush(&o, sink, user, produced))
 				return KOF_DEC_STOPPED;

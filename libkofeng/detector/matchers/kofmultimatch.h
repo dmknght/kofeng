@@ -292,6 +292,9 @@ enum kof_multimatch_kind {
  * range on purpose: any real value would be a marker this could wrongly skip. */
 #define KOF_MULTIMATCH_NOTAG      0x1ffu
 
+/* No table holds this uid - see uid_slot. */
+#define KOF_MULTIMATCH_NO_SLOT    0xffffffffu
+
 #define KOF_MULTIMATCH_BITS_MIN   12u
 #define KOF_MULTIMATCH_BITS_MAX   22u
 
@@ -486,6 +489,33 @@ struct kof_multimatch_set {
 	uint32_t             *mask_bits;
 	uint32_t              n_masks;
 
+	/*
+	 * WHICH PATTERN A UID IS, so a sweep's result can be READ rather than
+	 * copied out to everyone in advance.
+	 *
+	 * kof_multimatch_fold walks every pattern of every swept region and
+	 * writes a memo cell for each - present AND absent - so that a module
+	 * asking later never has to search. That is the right trade at a small
+	 * base and the wrong one at a large one, because the writing scales
+	 * with the DATABASE while the asking scales with the modules that
+	 * actually run. Measured over the small target:
+	 *
+	 *                     144 rules      200 000 rules
+	 *     cells written      37,126         67,637,126
+	 *     searches              902                902
+	 *
+	 * Sixty-seven million cells for nine hundred searches, and the search
+	 * count did not move. kof_multimatch_fold and kof_match_memo_put were
+	 * 2.3 billion instructions, 24.8% of that scan.
+	 *
+	 * So the answer is left in `found` and looked up on demand:
+	 * uid_slot[uid] is the pattern's index there, or NO_SLOT when no table
+	 * holds it - in which case the caller searches, exactly as it does for
+	 * any marker a sweep does not cover.
+	 */
+	uint32_t             *uid_slot;   /* [n_uid]; KOF_MULTIMATCH_NO_SLOT */
+	uint32_t              n_uid;
+
 	size_t                bytes;
 };
 
@@ -534,6 +564,14 @@ uint64_t kof_multimatch_sweep(const struct kof_multimatch_set *, uint32_t bit,
  *
  * Returns how many cells were written.
  */
+/*
+ * What a sweep already established about one marker under one mask, or -1 when
+ * it established nothing. See uid_slot for why this replaces writing the
+ * answer to every marker in advance.
+ */
+int kof_multimatch_answer(const struct kof_multimatch_set *set, uint32_t uid,
+			  uint32_t mask_uid, const uint32_t *found);
+
 uint64_t kof_multimatch_fold(const struct kof_multimatch_set *,
 			     struct kof_match_ctx *, uint32_t mask_uid,
 			     uint32_t mask_bits, const uint32_t *found,

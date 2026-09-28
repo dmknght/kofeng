@@ -53,6 +53,7 @@
 
 #include "dbloader.h"
 #include "hexprog.h"
+#include "../detector/matchers/kofmultimatch.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -826,35 +827,24 @@ const struct kof_str_ent *kof_db_str(const struct kof_engine *e,
 				     const struct kof_module *m, uint32_t id,
 				     const uint8_t **bytes)
 {
-	const struct kof_pack_hdr *h;
+	const struct kof_db_pack *p;
 	const struct kof_str_ent *d;
-	const uint8_t *base;
-	uint64_t maplen, desc_off, pool_off, pool_len;
 
 	if (!m || id >= m->n_str || m->pack_id >= e->n_packs)
 		return NULL;
-	base = e->packs[m->pack_id].map;
-	maplen = e->packs[m->pack_id].len;
-	if (!base)
+	p = &e->packs[m->pack_id];
+	/* Section bounds resolved when the pack was loaded - see
+	 * kof_db_pack.desc for why that is both cheaper and safer. */
+	if (!p->desc || !p->pool)
 		return NULL;
-	h = (const void *)base;
-
-	if ((uint64_t)m->str_base + m->n_str > h->n_str)
-		return NULL;
-	desc_off = h->sec[KOF_SEC_STR_DESC].off;
-	pool_off = h->sec[KOF_SEC_STR_POOL].off;
-	pool_len = h->sec[KOF_SEC_STR_POOL].len;
-	if (desc_off > maplen ||
-	    (uint64_t)h->n_str * sizeof *d > maplen - desc_off)
-		return NULL;
-	if (pool_off > maplen || pool_len > maplen - pool_off)
+	if ((uint64_t)m->str_base + m->n_str > p->n_desc)
 		return NULL;
 
-	d = (const struct kof_str_ent *)(const void *)(base + desc_off) +
-	    m->str_base + id;
-	if ((uint64_t)d->off + d->len > pool_len)
+	d = p->desc + m->str_base + id;
+	/* Still read out of the mapping, so still checked. */
+	if ((uint64_t)d->off + d->len > p->pool_len)
 		return NULL;
-	*bytes = base + pool_off + d->off;
+	*bytes = p->pool + d->off;
 	return d;
 }
 
@@ -1193,6 +1183,36 @@ struct kof_engine *kof_db_load_tables(const char *path)
 			mp[i2].uid_base = e->n_uid;
 			mp[i2].n_uid = hi;
 			e->n_uid += hi;
+
+			/*
+			 * And the string section as two pointers - see
+			 * kof_db_pack.desc. Every bound checked here once,
+			 * against the length this mapping had when it was
+			 * validated.
+			 */
+			{
+				uint64_t maplen = mp[i2].len;
+				uint64_t doff = ph->sec[KOF_SEC_STR_DESC].off;
+				uint64_t poff = ph->sec[KOF_SEC_STR_POOL].off;
+				uint64_t plen = ph->sec[KOF_SEC_STR_POOL].len;
+				const uint8_t *b = (const uint8_t *)ph;
+
+				mp[i2].desc = NULL;
+				mp[i2].n_desc = 0;
+				mp[i2].pool = NULL;
+				mp[i2].pool_len = 0;
+				if (doff <= maplen &&
+				    (uint64_t)ph->n_str *
+					    sizeof(struct kof_str_ent) <=
+					    maplen - doff &&
+				    poff <= maplen && plen <= maplen - poff) {
+					mp[i2].desc = (const struct kof_str_ent *)
+						(const void *)(b + doff);
+					mp[i2].n_desc = ph->n_str;
+					mp[i2].pool = b + poff;
+					mp[i2].pool_len = plen;
+				}
+			}
 		}
 
 		e->rng_uid = calloc(e->n_rng ? e->n_rng : 1, sizeof *e->rng_uid);
@@ -1373,6 +1393,112 @@ struct kof_engine *kof_db_load_tables(const char *path)
 		}
 	}
 
+	/*
+	 * AND HOW MANY MARKERS EACH REGION COULD HAVE, PER FORMAT - see
+	 * live_cap. Summed here because it cannot change once the module list
+	 * is final, and multi_prepass was recomputing it for every object.
+	 *
+	 * All three arrays, because all three run against an object and share
+	 * its memo - the same reason multi_prepass walks all three.
+	 */
+	{
+		const struct kof_module *arr[3];
+		uint32_t cnt[3], ai, mi, t, r, b;
+
+		arr[0] = e->mods; cnt[0] = e->n_mods;
+		arr[1] = e->unp;  cnt[1] = e->n_unp;
+		arr[2] = e->heur; cnt[2] = e->n_heur;
+
+		e->live_cap = calloc((size_t)KOF_TARGET_COUNT *
+				     KOF_MULTIMATCH_BITS, sizeof *e->live_cap);
+		if (e->live_cap) {
+			for (ai = 0; ai < 3u; ai++)
+				for (mi = 0; mi < cnt[ai]; mi++) {
+					const struct kof_module *m =
+						&arr[ai][mi];
+					uint32_t bits = 0;
+
+					if (!m->n_str)
+						continue;
+					for (r = 0; r < m->n_rng; r++) {
+						if (m->rng_base + r >= e->n_rng)
+							break;
+						bits |= e->rng_tab[m->rng_base + r];
+					}
+					/*
+					 * ONLY THE BITS THIS TABLE HAS ROOM
+					 * FOR. A scan mask may name regions
+					 * past KOF_MULTIMATCH_BITS - the symbol
+					 * halves are the case - and the loop
+					 * this replaced dropped them by only
+					 * ever counting b below that bound.
+					 * Iterating the set bits instead has to
+					 * say so, or a high bit indexes off the
+					 * end of live_cap.
+					 */
+					bits &= (KOF_MULTIMATCH_BITS >= 32u)
+						? 0xffffffffu
+						: ((1u << KOF_MULTIMATCH_BITS) - 1u);
+					if (!bits)
+						continue;
+					/*
+					 * THE TARGETS IT NAMES, NOT ALL OF
+					 * THEM - and the bits that are set,
+					 * not all thirty.
+					 *
+					 * Written as two full sweeps this is
+					 * n_mods * KOF_TARGET_COUNT *
+					 * KOF_MULTIMATCH_BITS, which at 200 000
+					 * modules is 174 million rounds to add
+					 * a handful of numbers. A module names
+					 * one target and one or two regions;
+					 * walking what it declared is the same
+					 * sum in a fraction of the steps.
+					 *
+					 * n_target of zero still means "every
+					 * format", so that case keeps the full
+					 * walk - see kof_module_targets.
+					 */
+					if (m->n_target) {
+						uint8_t ti;
+
+						for (ti = 0; ti < m->n_target &&
+						     ti < KOF_TARGET_LIST_MAX;
+						     ti++) {
+							uint32_t tv =
+								m->target[ti];
+							uint32_t rest = bits;
+
+							if (tv >= KOF_TARGET_COUNT)
+								continue;
+							while (rest) {
+								b = (uint32_t)
+								  __builtin_ctz(rest);
+								rest &= rest - 1u;
+								e->live_cap[tv *
+								  KOF_MULTIMATCH_BITS
+								  + b] += m->n_str;
+							}
+						}
+					} else {
+						for (t = 0; t < KOF_TARGET_COUNT;
+						     t++) {
+							uint32_t rest = bits;
+
+							while (rest) {
+								b = (uint32_t)
+								  __builtin_ctz(rest);
+								rest &= rest - 1u;
+								e->live_cap[t *
+								  KOF_MULTIMATCH_BITS
+								  + b] += m->n_str;
+							}
+						}
+					}
+				}
+		}
+	}
+
 	/* Written once, then executable. */
 	if (kof_mprotect_rx(e->code, e->code_cap) != 0) {
 		fprintf(stderr, "dbloader: cannot make the code executable\n");
@@ -1434,6 +1560,7 @@ void kof_db_free_tables(struct kof_engine *e)
 		return;
 	free(e->mods);
 	free(e->mod_by_target);
+	free(e->live_cap);
 	free(e->unp);
 	free(e->heur);
 	free(e->rng_tab);

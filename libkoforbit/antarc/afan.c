@@ -18,6 +18,9 @@
 /* How many watch paths a session keeps. A sensor watching more than this is
  * really asking for a filesystem mark, which is one entry. */
 #define AFAN_MAX_WATCH 32u
+/* Distinct directories one read()'s worth of events touches. Four covers
+ * a build tree; a miss costs exactly what every event used to cost. */
+#define AFAN_DCACHE 4u
 
 /* One read of the fanotify fd. Events are small - 64 bytes for a dirent event
  * with a name - so this drains a burst in one syscall without being a page a
@@ -64,6 +67,46 @@ struct kofa_fan {
 	} watch_h[AFAN_MAX_WATCH];
 	uint8_t  watch_h_ok[AFAN_MAX_WATCH];
 	uint32_t n_watch;
+
+	/*
+	 * DIRECTORY HANDLES ALREADY RESOLVED, FOR THIS READ ONLY.
+	 *
+	 * Resolving one costs three syscalls - open_by_handle_at, readlink on
+	 * /proc/self/fd, close - and event_path does it for EVERY event. The
+	 * handle is the parent directory's, so a build writing a thousand
+	 * files into one directory asks the kernel the same question a
+	 * thousand times and gets the same answer.
+	 *
+	 * CLEARED AFTER EVERY read(), AND THAT IS THE CORRECTNESS ARGUMENT.
+	 * A file handle names an INODE, not a path: rename the directory and
+	 * the handle is unchanged while the path is not. A cache that outlived
+	 * the buffer would report the old path for events under the new one -
+	 * and a scanner acting on a wrong path is worse than one paying for
+	 * three syscalls. Bounded to one buffer, the window is the time it
+	 * takes to walk records the kernel has already queued, and every event
+	 * in that window was queued before any rename that follows it.
+	 *
+	 * Small and linear: a buffer's events come from a handful of
+	 * directories, so a short walk beats hashing a variable-length key.
+	 */
+	struct {
+		struct {
+			struct file_handle h;
+			unsigned char      space[MAX_HANDLE_SZ];
+		} key;
+		char    dir[768];
+		uint8_t live;
+	} dcache[AFAN_DCACHE];
+	uint8_t dcache_next;          /* round robin; `live` says what is valid */
+	/*
+	 * WHAT THE CACHE IS WORTH, SAID IN THE ONLY UNIT THAT MATTERS HERE.
+	 *
+	 * Three syscalls per resolve, and callgrind cannot see one of them -
+	 * it counts instructions, and the cost of open_by_handle_at is almost
+	 * entirely in the kernel. So the collector counts its own.
+	 */
+	uint64_t resolves;            /* handles actually taken to the kernel */
+	uint64_t resolve_hits;        /* answered from dcache instead */
 
 	/*
 	 * The current read buffer and where the walk is inside it, so one
@@ -189,6 +232,57 @@ static uint16_t verb_take(uint64_t *mask)
  * the only answer. Both paths end in the same buffer and the caller cannot
  * tell which produced it, which is the point.
  */
+/*
+ * Two handles naming the same object. Type as well as bytes: the kernel uses
+ * it to say which filesystem's encoding these bytes are in, and two encodings
+ * may produce the same bytes for different objects.
+ */
+static int fh_same(const struct file_handle *a, const struct file_handle *b)
+{
+	return a->handle_bytes == b->handle_bytes &&
+	       a->handle_type == b->handle_type &&
+	       memcmp(a->f_handle, b->f_handle, a->handle_bytes) == 0;
+}
+
+/* What this handle resolved to earlier in THIS read, or NULL. */
+static const char *dcache_get(struct kofa_fan *f, const struct file_handle *fh)
+{
+	uint32_t i;
+
+	for (i = 0; i < AFAN_DCACHE; i++)
+		if (f->dcache[i].live && fh_same(&f->dcache[i].key.h, fh))
+			return f->dcache[i].dir;
+	return NULL;
+}
+
+/*
+ * Remember it. Round robin once full, and refused outright for a handle too
+ * large to copy - the cache is an optimisation and must never be the thing
+ * that overflows.
+ */
+static void dcache_put(struct kofa_fan *f, const struct file_handle *fh,
+		       const char *dir)
+{
+	uint32_t slot;
+	size_t n;
+
+	if (fh->handle_bytes > MAX_HANDLE_SZ)
+		return;
+	n = strlen(dir);
+	if (n >= sizeof f->dcache[0].dir)
+		return;
+
+	slot = f->dcache_next;
+	f->dcache_next = (uint8_t)((slot + 1u) % AFAN_DCACHE);
+
+	f->dcache[slot].key.h.handle_bytes = fh->handle_bytes;
+	f->dcache[slot].key.h.handle_type = fh->handle_type;
+	memcpy(f->dcache[slot].key.h.f_handle, fh->f_handle,
+	       fh->handle_bytes);
+	memcpy(f->dcache[slot].dir, dir, n + 1u);
+	f->dcache[slot].live = 1;
+}
+
 static const char *event_path(struct kofa_fan *f,
 			      const struct fanotify_event_metadata *m,
 			      const char *name, struct file_handle *fh,
@@ -197,8 +291,22 @@ static const char *event_path(struct kofa_fan *f,
 	f->path[0] = '\0';
 
 	if (fh && mount_fd >= 0) {
-		int dfd = open_by_handle_at(mount_fd, fh, O_PATH | O_NOFOLLOW);
+		/* Resolved already in this read? See kofa_fan.dcache. */
+		const char *hit = dcache_get(f, fh);
+		int dfd;
 
+		if (hit) {
+			f->resolve_hits++;
+			if (name && *name)
+				snprintf(f->path, sizeof f->path, "%s/%s",
+					 hit, name);
+			else
+				snprintf(f->path, sizeof f->path, "%s", hit);
+			return f->path;
+		}
+
+		f->resolves++;
+		dfd = open_by_handle_at(mount_fd, fh, O_PATH | O_NOFOLLOW);
 		if (dfd >= 0) {
 			char link[64];
 			char dir[768];
@@ -209,6 +317,7 @@ static const char *event_path(struct kofa_fan *f,
 			close(dfd);
 			if (n > 0) {
 				dir[n] = '\0';
+				dcache_put(f, fh, dir);
 				if (name && *name)
 					snprintf(f->path, sizeof f->path,
 						 "%s/%s", dir, name);
@@ -587,6 +696,23 @@ static int fan_next(void *self, struct kof_evt *out, uint32_t wait_ms)
 				ssize_t n = read(f->fd, f->rb.buf, sizeof f->rb.buf);
 
 				if (n > 0) {
+					uint32_t d;
+
+					/*
+					 * A NEW BUFFER IS A NEW WORLD - see
+					 * kofa_fan.dcache. Every resolved path
+					 * is forgotten here, so a directory
+					 * renamed between two reads cannot be
+					 * reported under the name it used to
+					 * have. This is the whole of what keeps
+					 * the cache honest; without it the
+					 * saving would be bought with wrong
+					 * paths.
+					 */
+					for (d = 0; d < AFAN_DCACHE; d++)
+						f->dcache[d].live = 0;
+					f->dcache_next = 0;
+
 					f->have = n;
 					f->at = f->rb.buf;
 					continue;
@@ -622,6 +748,13 @@ static void fan_print_extra(void *self, FILE *out)
 	fprintf(out, "    %llu kernel record(s) -> %llu event(s)\n",
 		(unsigned long long)f->records,
 		(unsigned long long)f->produced);
+	if (f->resolves || f->resolve_hits)
+		fprintf(out,
+			"    %llu handle(s) resolved, %llu answered from cache"
+			" (%llu syscall(s) saved)\n",
+			(unsigned long long)f->resolves,
+			(unsigned long long)f->resolve_hits,
+			(unsigned long long)f->resolve_hits * 3u);
 	for (i = 0; i < f->n_watch; i++)
 		fprintf(out, "    %s\n", f->watch[i]);
 	/* Said out loud. A path the caller named and this did not take is a

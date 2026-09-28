@@ -36,7 +36,20 @@
  * The bit buffer is 32 bits and n is never more than 16, so a refill can always
  * make room for a whole byte without losing anything already in it.
  */
-static int need(struct kof_inflate *s, uint32_t n)
+/*
+ * THE REFILL IS OUT OF LINE AND THE TEST THAT USUALLY ANSWERS IT IS NOT.
+ *
+ * Widening the refill made need() big enough that gcc stopped inlining it, and
+ * that cost more than the refill saved: measured over the 300-file subset,
+ * decode and block_codes fell by 74.7 million instructions while a newly
+ * out-of-line `need` added 139.3 million - a net LOSS of 64.5 million, from a
+ * change that made the decoder itself faster.
+ *
+ * Most calls do not refill at all: the buffer already holds the bits, and the
+ * whole of need() is then one compare. That part stays inline; everything that
+ * touches the input is behind a call that is only made when it is needed.
+ */
+static int refill(struct kof_inflate *s, uint32_t n)
 {
 	while (s->bitcnt < n) {
 		/*
@@ -76,6 +89,11 @@ static int need(struct kof_inflate *s, uint32_t n)
 		s->bitcnt += 8;
 	}
 	return 1;
+}
+
+static inline int need(struct kof_inflate *s, uint32_t n)
+{
+	return s->bitcnt >= n ? 1 : refill(s, n);
 }
 
 /* Take n bits, least significant first, as RFC 1951 packs them. Caller has

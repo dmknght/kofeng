@@ -112,8 +112,11 @@ struct kof_scanner *kof_scan_new(const struct kof_engine *eng)
 	 * A failure here is not fatal: the prepass needs both and simply does
 	 * not run without them. */
 	sc->live = calloc(KOF_MULTIMATCH_BITS, sizeof *sc->live);
-	if (eng->multi && eng->multi->n_pat)
+	if (eng->multi && eng->multi->n_pat) {
 		sc->found = calloc(eng->multi->n_pat, sizeof *sc->found);
+		sc->mask_ok = calloc(eng->n_masks ? eng->n_masks : 1u,
+				     sizeof *sc->mask_ok);
+	}
 	return sc;
 
 fail:
@@ -131,8 +134,10 @@ void kof_scan_free(struct kof_scanner *sc)
 	kof_match_state_free(&sc->msym);
 	free(sc->live);
 	free(sc->found);
+	free(sc->mask_ok);
 	sc->live = NULL;
 	sc->found = NULL;
+	sc->mask_ok = NULL;
 	kof_scan_kids_reset(sc);
 	free(sc->kids);
 	free(sc->kid_packer);
@@ -557,6 +562,25 @@ static void multi_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 
 	memset(sc->live, 0, KOF_MULTIMATCH_BITS * sizeof *sc->live);
 	memset(sc->found, 0, (size_t)e->multi->n_pat * sizeof *sc->found);
+	if (sc->mask_ok)
+		memset(sc->mask_ok, 0, (size_t)e->n_masks * sizeof *sc->mask_ok);
+
+	/*
+	 * THE TOTALS ARE ALREADY KNOWN - see kof_engine.live_cap.
+	 *
+	 * They depend on the format and not on the bytes, so they were summed
+	 * when the database was loaded. This is what the walk below used to
+	 * compute per object: with 200 000 modules it was 4.16 billion
+	 * instructions, 15.4% of the scan, to compare totals against eight.
+	 */
+	if (e->live_cap && ctx->format < KOF_TARGET_COUNT) {
+		const uint32_t *row = e->live_cap +
+				      (size_t)ctx->format * KOF_MULTIMATCH_BITS;
+
+		for (b = 0; b < KOF_MULTIMATCH_BITS; b++)
+			sc->live[b] = row[b];
+		goto counted;
+	}
 
 	arrays[0] = e->mods; counts[0] = e->n_mods;
 	arrays[1] = e->unp;  counts[1] = e->n_unp;
@@ -591,6 +615,7 @@ static void multi_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 					sc->live[b] += m->n_str;
 		}
 	}
+counted:;
 
 	/*
 	 * ONE PASS PER REGION, NOT PER MASK.
@@ -658,9 +683,25 @@ static void multi_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			continue;
 		if ((bits & KOF_SCAN_ALL) && !(swept & KOF_SCAN_ALL))
 			continue;
-		sc->st.multi_answers +=
-			kof_multimatch_fold(e->multi, &sc->m, u, bits,
-					    sc->found, e->n_masks);
+		/*
+		 * RECORDED, NOT DISTRIBUTED. The mask is answerable; which
+		 * markers are present stays in `found` until something asks -
+		 * see uid_slot in kofmultimatch.h.
+		 *
+		 * THE OLD WAY IS STILL THE FALLBACK. Reading the answer needs
+		 * uid_slot, and that is an allocation the loader is allowed to
+		 * fail. Without it kof_multimatch_answer says "I do not know"
+		 * for every marker and each one becomes a search - correct, and
+		 * far slower than the sweep it wasted. So when the map is
+		 * missing this hands the answers out exactly as it always did.
+		 */
+		if (sc->mask_ok && e->multi->uid_slot) {
+			sc->mask_ok[u] = 1;
+		} else {
+			sc->st.multi_answers +=
+				kof_multimatch_fold(e->multi, &sc->m, u, bits,
+						    sc->found, e->n_masks);
+		}
 	}
 }
 
