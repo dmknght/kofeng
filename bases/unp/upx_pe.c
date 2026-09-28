@@ -9,23 +9,52 @@
  *
  * Measured on 400 UPX packed PE samples drawn from two collections: 389 carry a
  * coding this engine implements, and all 389 decode to exactly the length the
- * file declares, from exactly one place - the start of the section the entry
- * point is in. Not "usually" and not "with a fallback": one rule, no exceptions
- * in the sample, which is why this module has no candidate offsets in it.
+ * file declares, from exactly one place - immediately after the PackHeader. Not
+ * "usually" and not "with a fallback": one rule, no exceptions in the sample,
+ * which is why this module has no candidate offsets in it.
+ *
+ * That sentence used to name a different place - the start of the section the
+ * entry point is in - and the two are the same number for most of the samples.
+ * Where they are not is set out under WHERE THE STREAM IS, along with what
+ * believing the weaker of the two cost.
  *
  *
  * WHERE THE STREAM IS, AND WHY NOT BY NAME
  *
- * The compressed data begins at the raw offset of the section holding the entry
- * point. Every one of those sections is called UPX1, and this does not look at the
- * name - a section name is a string whoever built the file chose, and pe.h says so
- * where it explains why CODE means IMAGE_SCN_MEM_EXECUTE and never ".text". The
- * entry point is what the loader acts on, so it is the fact rather than the label.
+ * The compressed data begins IMMEDIATELY AFTER THE PACKHEADER, wherever that is.
+ * The section holding the entry point is how the PackHeader is found - every one
+ * of those sections is called UPX1, and this does not look at the name, because a
+ * section name is a string whoever built the file chose and pe.h says so where it
+ * explains why CODE means IMAGE_SCN_MEM_EXECUTE and never ".text". The entry point
+ * is what the loader acts on, so it is the fact rather than the label.
  *
  * Checked both ways over the samples: by name resolved 389, by entry point 388 of
  * a larger set that includes files with no UPX1 name at all. The difference is
  * noise; the reason to prefer the entry point is that renaming a section is free
  * and moving the entry point is not.
+ *
+ * THIS SAID "AT THE RAW OFFSET OF THAT SECTION", WHICH WAS TRUE OF EVERY SAMPLE
+ * IT WAS MEASURED ON AND IS NOT A RULE.
+ *
+ * Over 31 UPX packed PEs in another collection the PackHeader sits 32 bytes
+ * before the section in 20 of them - so it ENDS exactly where the section begins,
+ * and "the section's offset" and "after the PackHeader" are the same number. In
+ * three it sits five bytes INSIDE the section, behind a version string:
+ *
+ *     0x200  "3.96\0"
+ *     0x205  "UPX!" + 32 bytes of PackHeader
+ *     0x225  the LZMA stream
+ *
+ * Those three were not unpacked at all. The search was bounded above by the
+ * section's offset, so a header five bytes past it was never found, this module
+ * declined, and the emulator then spent its whole instruction ceiling on each -
+ * 22.4, 22.3 and 22.2 seconds for three files that decode in milliseconds.
+ *
+ * One rule covers both arrangements, because it is the arrangement UPX actually
+ * writes: the stream follows the header. Verified by decoding - all three of the
+ * missed files and lolMiner.exe, which is one of the twenty the old rule already
+ * handled, each produce exactly the length their PackHeader declares. The twenty
+ * cannot change behaviour, since for them ph + PH_LEN IS the section's offset.
  *
  *
  * WHAT THIS DOES NOT DO
@@ -41,8 +70,15 @@
  * question for measurement - how many children fail to identify - not for
  * assumption.
  *
- * It does not handle LZMA: 4 of 400 here. Those report incomplete rather than
- * clean, which is the whole point of saying so.
+ * IT DOES HANDLE LZMA, and this said it did not - written when it was true and
+ * left standing after upx_lzma_method was added below. Method 14 is 4 of the
+ * 400 samples and it is also what all three of the files described above use,
+ * so a reader checking whether this module could have unpacked them would have
+ * been told by the documentation that it could not.
+ *
+ * What it does not handle is a coding this engine has no decoder for at all.
+ * Those report incomplete rather than clean, which is the whole point of
+ * saying so.
  */
 
 #include <kofmod/kofsig.h>
@@ -66,6 +102,19 @@ KOF_DEFINE_STR(upx_magic, "UPX!", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
  * the rest are checksums and a filter this does not yet reverse.
  */
 #define PH_LEN        32u
+/*
+ * How far PAST the section's start to keep looking, which is the whole of what
+ * changed. Five bytes is what the version string costs in the samples that put
+ * the header inside the section; 64 leaves room for a longer one and is still
+ * nothing next to the bound it replaces - the alternative to a bound is reading
+ * the entire file on every PE that is not packed at all, which is the cost the
+ * note below measures at 1334MB.
+ *
+ * Widening only the UPPER bound cannot change what is found in a file that
+ * already worked: the search returns the FIRST occurrence, and every byte it
+ * used to cover it still covers, in the same order.
+ */
+#define PH_LOOK       64u
 #define PH_VERSION     4u
 #define PH_FORMAT      5u
 #define PH_METHOD      6u
@@ -136,14 +185,14 @@ static uint32_t upx_lzma_method(unsigned first_byte)
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_pe_info *pe = kof_pe(ctx);
-	uint64_t ph, stream, got;
+	uint64_t ph, sec_off, stream, got;
 	uint32_t u_len, c_len, decoder;
 
 	if (!pe->valid || pe->entry_sec >= pe->sec_count)
 		return;
 
-	stream = pe->sec[pe->entry_sec].file_off;
-	if (!stream)
+	sec_off = pe->sec[pe->entry_sec].file_off;
+	if (!sec_off)
 		return;                 /* a section with no bytes in the file */
 
 	/*
@@ -162,9 +211,15 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * the marker, 557 have it there; the 7 that do not are files whose only
 	 * occurrence is inside data, and they were not unpackable through it anyway.
 	 */
-	ph = kof_find_str_where(0, stream, upx_magic);
+	ph = kof_find_str_where(0, sec_off + PH_LOOK, upx_magic);
 	if (ph == KOF_BROKEN || !kof_in_obj(ph, PH_LEN))
 		return;
+	/*
+	 * AND THE STREAM IS WHAT FOLLOWS IT. See the note above for the two
+	 * arrangements this covers and for why they are one rule rather than a
+	 * rule and an exception.
+	 */
+	stream = ph + PH_LEN;
 
 	decoder = method_of(kof_u8(ph + PH_METHOD));
 	u_len   = kof_u32(ph + PH_U_LEN);

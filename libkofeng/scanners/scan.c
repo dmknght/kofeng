@@ -2581,6 +2581,42 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	if (sc->resident > sc->resident_max ||
 	    buf.n > (sc->resident_max - sc->resident) / 2u)
 		return;
+	/*
+	 * AND NOT AN OBJECT WHOSE CODE IS STILL COMPRESSED.
+	 *
+	 * The loop in analyze_object already stops this step when the unpack
+	 * step PRODUCED something, and says why: "normalising a compressed or
+	 * encrypted blob finds no zero runs and no text, because there is none
+	 * to find until it has been opened". That reasoning is about the BYTES
+	 * and the guard is about the outcome, so it misses the case where the
+	 * bytes are exactly that and nothing opened them - a packer no module
+	 * here handles. Then the object is compressed, nothing said so, and the
+	 * two full-size buffers below get built over it to find the nothing the
+	 * comment predicts.
+	 *
+	 * Measured on an MPRESS packed PE before a module for it existed: 2.7 MB
+	 * of LZMA stream, normalised to no effect, at two copies of the object.
+	 *
+	 * THE SAME 7.5 BITS PER BYTE THE EMULATOR'S GATE USES, and for the same
+	 * reason it uses it - see DENSE_EIGHTHS in emu_unpack.c, where over 2678
+	 * clean PEs the executable sections fall almost entirely between 6.0 and
+	 * 7.0 bits and exactly one file clears 7.5. Compiled code is not this
+	 * dense, and the transform has nothing to do to bytes that are.
+	 *
+	 * CODE AND NOT THE WHOLE OBJECT. A program with a compressed resource
+	 * or an appended archive is still a program, and its code is still
+	 * worth rendering; what is being asked is whether the EXECUTABLE bytes
+	 * have been replaced by a stream. KOF_SCAN_ELF_CODE and KOF_SCAN_PE_CODE
+	 * are the same bit, which is what lets one test serve both formats here.
+	 *
+	 * THE ANSWER IS MEMOISED - c_region_entropy keeps the last few masks it
+	 * was asked about - so on an object the emulator's gate or a rule has
+	 * already asked about, this costs a lookup rather than a pass.
+	 */
+	if (ctx->content && ctx->content->region_entropy &&
+	    ctx->content->region_entropy(ctx, NORM_CODE_MASK) >=
+	    NORM_DENSE_EIGHTHS)
+		return;
 
 	/*
 	 * A VIEW, NOT A SECOND EXECUTABLE - AND THE ORDER OF THE THREE PASSES
